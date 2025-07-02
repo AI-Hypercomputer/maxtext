@@ -46,20 +46,22 @@ COMBINE = "combine"
 
 
 def random_routing(rng_key, gate_logits, num_experts_per_tok):
-  """
-  Performs random routing of tokens to experts.
+  """Performs random routing of tokens to experts.
 
   Args:
     rng_key: A JAX PRNGKey for randomness.
     gate_logits: A JAX array of shape (batch_size, sequence_length, num_experts)
-                 representing the logits for each expert.
+      representing the logits for each expert.
     num_experts_per_tok: The number of experts to select for each token.
 
   Returns:
     A tuple containing:
-      - top_k_indices: JAX array of shape (batch_size, sequence_length, num_experts_per_tok)
-                       representing the indices of the selected experts for each token.
-      - top_k_weights: JAX array of shape (batch_size, sequence_length, num_experts_per_tok)
+      - top_k_indices: JAX array of shape (batch_size, sequence_length,
+      num_experts_per_tok)
+                       representing the indices of the selected experts for each
+                       token.
+      - top_k_weights: JAX array of shape (batch_size, sequence_length,
+      num_experts_per_tok)
                        representing the weights for the selected experts.
   """
   bs, seq_len, num_experts = gate_logits.shape
@@ -81,9 +83,9 @@ class GateLogit(nn.Module):
     dtype: the dtype of the computation (default: float32).
     kernel_init: initializer function for the weight matrix.
     kernel_axes: tuple with axes to apply kernel function.
-    use_bias: whether to add learnable bias in gate logit scores.
-      When enabled, this bias aids expert load balancing (like in DeepSeek V3),
-      and is not part of the loss calculation.
+    use_bias: whether to add learnable bias in gate logit scores. When enabled,
+      this bias aids expert load balancing (like in DeepSeek V3), and is not
+      part of the loss calculation.
     score_func: scoring function for output normalization before applying bias.
     quant: quantization config, defaults to None implying no quantization.
     matmul_precision: precision for JAX functions.
@@ -202,7 +204,7 @@ class RoutedMoE(nn.Module):
     return self.mesh.shape["context_autoregressive"]
 
   def generate_kernels(self, num_experts, emb_dim, mlp_dim):
-    """generates kernels"""
+    """generates kernels."""
 
     kernel_in_axis = np.arange(1)
     kernel_out_axis = np.arange(1, 2)
@@ -279,9 +281,8 @@ class RoutedMoE(nn.Module):
     return top_k_weights, top_k_indices
 
   def deepseek_scale_weights(self, weights):
-    """Scales weights according to DeepSeek's v3 reference implementation.
-    https://github.com/deepseek-ai/DeepSeek-V3/blob/2f7b80eecebf3d1c84da5a0d465f6639ea175012/inference/model.py#L592-L594
-    """
+    """Scales weights according to DeepSeek's v3 reference implementation."""
+    # https://github.com/deepseek-ai/DeepSeek-V3/blob/2f7b80eecebf3d1c84da5a0d465f6639ea175012/inference/model.py#L592-L594.
     if self.config.routed_score_func == "sigmoid":
       weights /= weights.sum(-1, keepdims=True)
     weights *= self.config.routed_scaling_factor
@@ -290,20 +291,23 @@ class RoutedMoE(nn.Module):
   def deepseek_routing(self, gate_logits, pre_bias_logits):
     """DeepSeek routing logit.
 
-    When the configuration specifies a number of routing groups (n_routing_groups is not -1),
-    it involves two-stage selection process:
+    When the configuration specifies a number of routing groups
+    (n_routing_groups is not -1), it involves two-stage selection process:
 
     1) Group Scoring: Experts are partitioned into n_routing_groups.
-    Within each group, the logits of the top-2 scoring experts are summed to create an aggregate score for the group.
-    2) The top-K (topk_routing_group) groups are identified based on their aggregate scores.
-    The final set of selected experts is chosen only from within these top-K groups.
+    Within each group, the logits of the top-2 scoring experts are summed to
+    create an aggregate score for the group.
+    2) The top-K (topk_routing_group) groups are identified based on their
+    aggregate scores.
+    The final set of selected experts is chosen only from within these top-K
+    groups.
 
-    If the configuration does not specify routing groups (n_routing_groups is -1),
-    using a standard top-k routing mechanism.
+    If the configuration does not specify routing groups (n_routing_groups is
+    -1), using a standard top-k routing mechanism.
 
-    The selection uses post_bias logits, but the return weigths are based on pre_bias logits.
+    The selection uses post_bias logits, but the return weigths are based on
+    pre_bias logits.
     """
-    # Reshape
     batch_size, seq_len = gate_logits.shape[0], gate_logits.shape[1]
     n = batch_size * seq_len
     gate_logits_flat = jnp.reshape(gate_logits, (n, self.num_experts))
@@ -878,7 +882,7 @@ class RoutedMoE(nn.Module):
     return cp, sub_seq
 
   def generate_masks_subgroup(self, top_k_indices, softmax_probs):
-    """subgroup mask generation for inference only."""
+    """Subgroup mask generation for inference only."""
     # calculate
     # expert_capacity = (tokens_per_batch / num_experts) * capacity_factor
     batch_size, seq_len, _ = top_k_indices.shape
@@ -971,7 +975,7 @@ class RoutedMoE(nn.Module):
     return dispatch_mask, combine_mask
 
   def generate_masks(self, top_k_indices, softmax_probs):
-    """generate masks."""
+    """Generate masks."""
     # calculate
     # expert_capacity = (tokens_per_batch / num_experts) * capacity_factor
     batch_size, seq_len, _ = top_k_indices.shape
@@ -1044,7 +1048,7 @@ class RoutedMoE(nn.Module):
     return dispatch_mask, combine_mask
 
   # See Switch Transformer (https://arxiv.org/abs/2101.03961) for more details.
-  def load_balance_loss(self, top_k_indices, logits):
+  def load_balance_loss(self, top_k_indices, logits) -> ctypes.Array:
     """Compute the load balance loss."""
     expert_mask = jax.nn.one_hot(top_k_indices, num_classes=self.num_experts, dtype=jnp.int32)
     summed_expert_mask = jnp.sum(expert_mask, axis=2)
@@ -1055,7 +1059,10 @@ class RoutedMoE(nn.Module):
     loss = jnp.mean(density * density_prob) * (self.num_experts**2) * self.config.load_balance_loss_weight
     return loss
 
-  def get_einsum(self, rhs_mesh_axes: Tuple[Optional[str], ...] = (), einsum_name=None):
+  def get_einsum(
+      self, rhs_mesh_axes: Tuple[Optional[str], ...] = (),
+      einsum_name: str | None = None,
+  ):
     """Get the Einstein summation."""
 
     # the check is to prevent aqteinsum as einsum op for dispatch and combine
@@ -1081,7 +1088,9 @@ class RoutedMoE(nn.Module):
       einsum_op = jnp.einsum
     return einsum_op
 
-  def maybe_all_gather_kernel_weight_in_expert_parallelism(self, kernel, kernel_axes):
+  def maybe_all_gather_kernel_weight_in_expert_parallelism(
+      self, kernel: ctypes.Array, kernel_axes: Tuple[Optional[str], ...]
+  ):
     """All-gather kernel weight in expert parallelism if needed."""
     if self.get_expert_parallelism_size() > 1:
       # This will trigger all-gather using weight_dtype
@@ -1100,7 +1109,7 @@ class RoutedMoE(nn.Module):
       w0_kernel,
       w1_kernel,
       wo_kernel,
-  ):
+  ) -> tuple[ctypes.Array, Optional[ctypes.Array]]:
     """Dense matrix multiplication."""
     # gate_logits: batch, length, expert
     gate_logits = nn.with_logical_constraint(gate_logits, ("activation_batch", "activation_length", None))
@@ -1376,7 +1385,7 @@ class RoutedMoE(nn.Module):
     return w0_kernel, w1_kernel, wo_kernel
 
   @nn.compact
-  def __call__(self, inputs):
+  def __call__(self, inputs: ctypes.Array) -> tuple[ctypes.Array, Optional[ctypes.Array]]:
     cfg = self.config
     inputs = inputs.astype(cfg.dtype)
     gate_logits, pre_bias_logits = GateLogit(
@@ -1431,7 +1440,7 @@ class RoutedAndSharedMoE(nn.Module):
   quant: Optional[quantizations.AqtQuantization] = None
 
   @nn.compact
-  def __call__(self, inputs):
+  def __call__(self, inputs: ctypes.Array) -> ctypes.Array:
     cfg = self.config
     # NOTE: the naming mismatch here is to ensure reverse compatibility with
     # existing checkpoints. The `name` represents the weight name in
