@@ -203,7 +203,26 @@ class Fp8Quantization(Quantization):
     return nn.Fp8DirectDotGeneralOp
 
   def einsum(self, dtype: DType = jnp.float32):
-    return nn.Fp8Einsum(dtype=dtype)
+    return _Fp8EinsumWrapper(dtype=dtype)
+
+
+class _Fp8EinsumWrapper(nn.Module):
+  """Wrapper for nn.Fp8Einsum to handle computation dtype."""
+
+  dtype: DType
+
+  @nn.compact
+  def __call__(self, eqn, lhs, rhs, **kwargs):
+    # nn.Fp8Einsum determines compute dtype from rhs.
+    # We cast rhs to the desired computation dtype.
+    # nn.Fp8Einsum will then cast lhs to the same dtype.
+    rhs = rhs.astype(self.dtype)
+    return nn.Fp8Einsum(name='fp8_einsum') (
+        eqn,
+        lhs,
+        rhs,
+        **kwargs
+    )
 
 
 class Fp8Einsum(nn.Module):
