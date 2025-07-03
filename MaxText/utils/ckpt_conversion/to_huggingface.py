@@ -54,9 +54,9 @@ Key Parameters (to be set in the config file or as command-line overrides):
                This must match the training configuration of the checkpoint.
 
 Environment Variables:
-  HF_AUTH_TOKEN: (Required) A Hugging Face authentication token. This is needed
+  HF_AUTH_TOKEN: (Required) A HuggingFace authentication token. This is needed
                  to download the correct tokenizer configuration and to upload
-                 the converted model to the Hugging Face Hub if `base_output_directory`
+                 the converted model to the HuggingFace Hub if `base_output_directory`
                  is a Hub repo ID (e.g., "hf://my-user/my-model").
 
 Example Usage:
@@ -105,7 +105,7 @@ def main(argv: Sequence[str]) -> None:
   loaded_params_from_engine = engine.load_params(rng_load_params)
 
   if not config.base_output_directory:
-    output_directory = f"{os.getcwd()}/hf_output"
+    output_directory = f"tmp/{config.run_name}"
   else:
     output_directory = config.base_output_directory
 
