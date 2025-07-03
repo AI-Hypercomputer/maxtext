@@ -136,7 +136,7 @@ def rotary_embedding_as_linen(
     embedding_dims: int = 0,
     cast_as_fprop_dtype: bool = True,
     fprop_dtype: DType = jnp.bfloat16,
-    name: str | None = None
+    name: str | None = None,
 ):
   """Initializes the RotaryEmbedding module and returns it as a Linen module.
 
@@ -151,14 +151,14 @@ def rotary_embedding_as_linen(
     name: Name of the Linen module.
   """
   return nnx.bridge.to_linen(
-    RotaryEmbedding,
-    min_timescale=min_timescale,
-    max_timescale=max_timescale,
-    embedding_dims=embedding_dims,
-    cast_as_fprop_dtype=cast_as_fprop_dtype,
-    fprop_dtype=fprop_dtype,
-    metadata_fn=variable_to_logically_partitioned,
-    name=name
+      RotaryEmbedding,
+      min_timescale=min_timescale,
+      max_timescale=max_timescale,
+      embedding_dims=embedding_dims,
+      cast_as_fprop_dtype=cast_as_fprop_dtype,
+      fprop_dtype=fprop_dtype,
+      metadata_fn=variable_to_logically_partitioned,
+      name=name,
   )
 
 
@@ -253,7 +253,7 @@ def llama_rotary_embedding_as_linen(
     cast_as_fprop_dtype: bool = True,
     fprop_dtype: DType = jnp.bfloat16,
     use_scale: bool = True,
-    name: str | None = None
+    name: str | None = None,
 ):
   """Initializes the LLaMARotaryEmbedding module and returns it as a Linen module.
 
@@ -269,15 +269,15 @@ def llama_rotary_embedding_as_linen(
     name: Name of the Linen module.
   """
   return nnx.bridge.to_linen(
-    LLaMARotaryEmbedding,
-    min_timescale=min_timescale,
-    max_timescale=max_timescale,
-    embedding_dims=embedding_dims,
-    cast_as_fprop_dtype=cast_as_fprop_dtype,
-    fprop_dtype=fprop_dtype,
-    use_scale=use_scale,
-    metadata_fn=variable_to_logically_partitioned,
-    name=name
+      LLaMARotaryEmbedding,
+      min_timescale=min_timescale,
+      max_timescale=max_timescale,
+      embedding_dims=embedding_dims,
+      cast_as_fprop_dtype=cast_as_fprop_dtype,
+      fprop_dtype=fprop_dtype,
+      use_scale=use_scale,
+      metadata_fn=variable_to_logically_partitioned,
+      name=name,
   )
 
 
@@ -480,6 +480,7 @@ class YarnRotaryEmbedding(nnx.Module):
     fprop_dtype: The forward pass dtype.
     rngs: rng keys passed in by nnx.bridge.to_linen.
   """
+
   def __init__(
       self,
       embedding_dims: int,
@@ -614,11 +615,7 @@ class YarnRotaryEmbedding(nnx.Module):
     return output
 
 
-def positional_embedding_as_linen(
-    *,
-    embedding_dims: int,
-    max_wavelength: int = _MAX_WAVELENGTH
-):
+def positional_embedding_as_linen(*, embedding_dims: int, max_wavelength: int = _MAX_WAVELENGTH):
   """Initializes the PositionalEmbedding module and returns it as a Linen module.
 
   Args:
@@ -626,11 +623,11 @@ def positional_embedding_as_linen(
     max_wavelength: The maximum wavelength for the sinusoidal positional embeddings.
   """
   return nnx.bridge.to_linen(
-    PositionalEmbedding,
-    embedding_dims=embedding_dims,
-    max_wavelength=max_wavelength,
-    metadata_fn=variable_to_logically_partitioned
-)
+      PositionalEmbedding,
+      embedding_dims=embedding_dims,
+      max_wavelength=max_wavelength,
+      metadata_fn=variable_to_logically_partitioned,
+  )
 
 
 @dataclasses.dataclass(repr=False)
@@ -646,7 +643,7 @@ class PositionalEmbedding(nnx.Module):
   embedding_dims: int
   max_wavelength: int = _MAX_WAVELENGTH
 
-  rngs: nnx.Rngs = None # Not used in PositionalEmbedding but passed in by nnx.bridge.to_linen
+  rngs: nnx.Rngs = None  # Not used in PositionalEmbedding but passed in by nnx.bridge.to_linen
 
   def __call__(
       self,  # pytype: disable=signature-mismatch  # overriding-parameter-count-checks
@@ -737,7 +734,6 @@ class LlamaVisionRotaryEmbedding(nnx.Module):
   # Not used in LlamaVisionRotaryEmbedding but passed in by nnx.bridge.to_linen.
   # TODO: Remove when bridge no longer needed
   rngs: nnx.Rngs = None
-
 
   @property
   def freqs_cis(self):
