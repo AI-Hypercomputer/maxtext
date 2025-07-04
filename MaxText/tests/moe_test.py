@@ -11,21 +11,18 @@
 #  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
-""" Mixture of Experts (MoE) tests. """
+"""Mixture of Experts (MoE) tests."""
 
 import os.path
-import unittest
 from typing import Tuple
+import unittest
 
-import pytest
-
+from absl import app
+import flax.linen as nn
+from flax.linen import partitioning as nn_partitioning
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
-
-import flax.linen as nn
-from flax.linen import partitioning as nn_partitioning
-
 from MaxText import maxtext_utils
 from MaxText import pyconfig
 from MaxText.common_types import Config, DType
@@ -67,42 +64,38 @@ class TokenDroppingTest(unittest.TestCase):
   def test_generate_masks(self):
     # expert_capacity = (tokens_per_batch / num_experts) * capacity_factor
     # expert_capacity_in_batch = (4 * 2 / 8) * 2 = 2
-    top_k_indices = jnp.array(
+    top_k_indices = jnp.array([
+        [[0, 5], [0, 4], [1, 0], [3, 5]],
+        [[1, 2], [4, 1], [5, 0], [7, 1]],
+        [[6, 2], [2, 3], [4, 2], [1, 2]],
+        [[4, 1], [0, 7], [5, 0], [4, 7]],
+    ])
+    softmax_probs = jnp.array([
         [
-            [[0, 5], [0, 4], [1, 0], [3, 5]],
-            [[1, 2], [4, 1], [5, 0], [7, 1]],
-            [[6, 2], [2, 3], [4, 2], [1, 2]],
-            [[4, 1], [0, 7], [5, 0], [4, 7]],
-        ]
-    )
-    softmax_probs = jnp.array(
+            [0.20, 0, 0, 0, 0, 0.80, 0, 0],
+            [0.68, 0, 0, 0, 0.32, 0, 0, 0],
+            [0.22, 0.78, 0, 0, 0, 0, 0, 0],
+            [0, 0, 0, 0.32, 0, 0.68, 0, 0],
+        ],
         [
-            [
-                [0.20, 0, 0, 0, 0, 0.80, 0, 0],
-                [0.68, 0, 0, 0, 0.32, 0, 0, 0],
-                [0.22, 0.78, 0, 0, 0, 0, 0, 0],
-                [0, 0, 0, 0.32, 0, 0.68, 0, 0],
-            ],
-            [
-                [0, 0.26, 0.74, 0, 0, 0, 0, 0],
-                [0, 0.79, 0, 0, 0.21, 0, 0, 0],
-                [0.89, 0, 0, 0, 0, 0.11, 0, 0],
-                [0, 0.11, 0, 0, 0, 0, 0, 0.89],
-            ],
-            [
-                [0, 0, 0.26, 0, 0, 0, 0.74, 0],
-                [0, 0, 0.88, 0.12, 0, 0, 0, 0],
-                [0, 0, 0.17, 0, 0.83, 0, 0, 0],
-                [0, 0.35, 0.65, 0, 0, 0, 0, 0],
-            ],
-            [
-                [0, 0.47, 0, 0, 0.53, 0, 0, 0],
-                [0.36, 0, 0, 0, 0, 0, 0, 0.64],
-                [0.15, 0, 0, 0, 0, 0.85, 0, 0],
-                [0, 0, 0, 0, 0.18, 0, 0, 0.82],
-            ],
-        ]
-    )
+            [0, 0.26, 0.74, 0, 0, 0, 0, 0],
+            [0, 0.79, 0, 0, 0.21, 0, 0, 0],
+            [0.89, 0, 0, 0, 0, 0.11, 0, 0],
+            [0, 0.11, 0, 0, 0, 0, 0, 0.89],
+        ],
+        [
+            [0, 0, 0.26, 0, 0, 0, 0.74, 0],
+            [0, 0, 0.88, 0.12, 0, 0, 0, 0],
+            [0, 0, 0.17, 0, 0.83, 0, 0, 0],
+            [0, 0.35, 0.65, 0, 0, 0, 0, 0],
+        ],
+        [
+            [0, 0.47, 0, 0, 0.53, 0, 0, 0],
+            [0.36, 0, 0, 0, 0, 0, 0, 0.64],
+            [0.15, 0, 0, 0, 0, 0.85, 0, 0],
+            [0, 0, 0, 0, 0.18, 0, 0, 0.82],
+        ],
+    ])
 
     # As expert_capacity_in_batch=2, so updated softmax_probs become (4 tokens were dropped):
     # softmax_probs = jnp.array([[[0.20, 0, 0, 0, 0, 0.80, 0, 0],
@@ -126,37 +119,187 @@ class TokenDroppingTest(unittest.TestCase):
     expected_combine_mask = jnp.array(
         [
             [
-                [[0.2, 0], [0, 0], [0, 0], [0, 0], [0, 0], [0.8, 0], [0, 0], [0, 0]],
-                [[0, 0.68], [0, 0], [0, 0], [0, 0], [0.32, 0], [0, 0], [0, 0], [0, 0]],
-                [[0, 0], [0.78, 0], [0, 0], [0, 0], [0, 0], [0, 0], [0, 0], [0, 0]],
-                [[0, 0], [0, 0], [0, 0], [0.32, 0], [0, 0], [0, 0.68], [0, 0], [0, 0]],
+                [
+                    [0.2, 0],
+                    [0, 0],
+                    [0, 0],
+                    [0, 0],
+                    [0, 0],
+                    [0.8, 0],
+                    [0, 0],
+                    [0, 0],
+                ],
+                [
+                    [0, 0.68],
+                    [0, 0],
+                    [0, 0],
+                    [0, 0],
+                    [0.32, 0],
+                    [0, 0],
+                    [0, 0],
+                    [0, 0],
+                ],
+                [
+                    [0, 0],
+                    [0.78, 0],
+                    [0, 0],
+                    [0, 0],
+                    [0, 0],
+                    [0, 0],
+                    [0, 0],
+                    [0, 0],
+                ],
+                [
+                    [0, 0],
+                    [0, 0],
+                    [0, 0],
+                    [0.32, 0],
+                    [0, 0],
+                    [0, 0.68],
+                    [0, 0],
+                    [0, 0],
+                ],
             ],
             [
-                [[0, 0], [0.26, 0], [0.74, 0], [0, 0], [0, 0], [0, 0], [0, 0], [0, 0]],
-                [[0, 0], [0, 0.79], [0, 0], [0, 0], [0.21, 0], [0, 0], [0, 0], [0, 0]],
-                [[0.89, 0], [0, 0], [0, 0], [0, 0], [0, 0], [0.11, 0], [0, 0], [0, 0]],
-                [[0, 0], [0, 0], [0, 0], [0, 0], [0, 0], [0, 0], [0, 0], [0.89, 0]],
+                [
+                    [0, 0],
+                    [0.26, 0],
+                    [0.74, 0],
+                    [0, 0],
+                    [0, 0],
+                    [0, 0],
+                    [0, 0],
+                    [0, 0],
+                ],
+                [
+                    [0, 0],
+                    [0, 0.79],
+                    [0, 0],
+                    [0, 0],
+                    [0.21, 0],
+                    [0, 0],
+                    [0, 0],
+                    [0, 0],
+                ],
+                [
+                    [0.89, 0],
+                    [0, 0],
+                    [0, 0],
+                    [0, 0],
+                    [0, 0],
+                    [0.11, 0],
+                    [0, 0],
+                    [0, 0],
+                ],
+                [
+                    [0, 0],
+                    [0, 0],
+                    [0, 0],
+                    [0, 0],
+                    [0, 0],
+                    [0, 0],
+                    [0, 0],
+                    [0.89, 0],
+                ],
             ],
             [
-                [[0, 0], [0, 0], [0.26, 0], [0, 0], [0, 0], [0, 0], [0.74, 0], [0, 0]],
-                [[0, 0], [0, 0], [0, 0.88], [0.12, 0], [0, 0], [0, 0], [0, 0], [0, 0]],
-                [[0, 0], [0, 0], [0, 0], [0, 0], [0.83, 0], [0, 0], [0, 0], [0, 0]],
-                [[0, 0], [0.35, 0], [0, 0], [0, 0], [0, 0], [0, 0], [0, 0], [0, 0]],
+                [
+                    [0, 0],
+                    [0, 0],
+                    [0.26, 0],
+                    [0, 0],
+                    [0, 0],
+                    [0, 0],
+                    [0.74, 0],
+                    [0, 0],
+                ],
+                [
+                    [0, 0],
+                    [0, 0],
+                    [0, 0.88],
+                    [0.12, 0],
+                    [0, 0],
+                    [0, 0],
+                    [0, 0],
+                    [0, 0],
+                ],
+                [
+                    [0, 0],
+                    [0, 0],
+                    [0, 0],
+                    [0, 0],
+                    [0.83, 0],
+                    [0, 0],
+                    [0, 0],
+                    [0, 0],
+                ],
+                [
+                    [0, 0],
+                    [0.35, 0],
+                    [0, 0],
+                    [0, 0],
+                    [0, 0],
+                    [0, 0],
+                    [0, 0],
+                    [0, 0],
+                ],
             ],
             [
-                [[0, 0], [0.47, 0], [0, 0], [0, 0], [0.53, 0], [0, 0], [0, 0], [0, 0]],
-                [[0.36, 0], [0, 0], [0, 0], [0, 0], [0, 0], [0, 0], [0, 0], [0.64, 0]],
-                [[0, 0.15], [0, 0], [0, 0], [0, 0], [0, 0], [0.85, 0], [0, 0], [0, 0]],
-                [[0, 0], [0, 0], [0, 0], [0, 0], [0, 0.18], [0, 0], [0, 0], [0, 0.82]],
+                [
+                    [0, 0],
+                    [0.47, 0],
+                    [0, 0],
+                    [0, 0],
+                    [0.53, 0],
+                    [0, 0],
+                    [0, 0],
+                    [0, 0],
+                ],
+                [
+                    [0.36, 0],
+                    [0, 0],
+                    [0, 0],
+                    [0, 0],
+                    [0, 0],
+                    [0, 0],
+                    [0, 0],
+                    [0.64, 0],
+                ],
+                [
+                    [0, 0.15],
+                    [0, 0],
+                    [0, 0],
+                    [0, 0],
+                    [0, 0],
+                    [0.85, 0],
+                    [0, 0],
+                    [0, 0],
+                ],
+                [
+                    [0, 0],
+                    [0, 0],
+                    [0, 0],
+                    [0, 0],
+                    [0, 0.18],
+                    [0, 0],
+                    [0, 0],
+                    [0, 0.82],
+                ],
             ],
         ],
         dtype=jnp.float32,
     )
     expected_dispatch_mask = expected_combine_mask.astype(bool)
-    actual_dispatch_mask, actual_combine_mask = self.model.generate_masks(top_k_indices, softmax_probs)
+    actual_dispatch_mask, actual_combine_mask = self.model.generate_masks(
+        top_k_indices, softmax_probs
+    )
 
     self.assertTrue((expected_dispatch_mask == actual_dispatch_mask).all())
-    self.assertTrue(jax.numpy.allclose(expected_combine_mask, actual_combine_mask, rtol=1e-02, atol=1e-02))
+    self.assertTrue(
+        jax.numpy.allclose(
+            expected_combine_mask, actual_combine_mask, rtol=1e-02, atol=1e-02
+        )
+    )
 
 
 class DeepSeekRoutingTest(unittest.TestCase):
@@ -193,14 +336,44 @@ class DeepSeekRoutingTest(unittest.TestCase):
 
   def test_deepseek_routing(self):
     # shape as [batch, sequence, num_experts] = [1,2,16]
-    gate_logits = jnp.array(
+    gate_logits = jnp.array([[
         [
-            [
-                [0.20, 0.10, 0.05, 0.10, 0.10, 0.60, 0.30, 0.10, 0.80, 0.01, 0.01, 0.01, 0.05, 0.80, 0.20, 0.10],
-                [0.68, 0.20, 0.06, 0.03, 0.32, 0.10, 0.05, 0.02, 0.65, 0.20, 0.04, 0.01, 0.32, 0.10, 0.05, 0.02],
-            ]
-        ]
-    )
+            0.20,
+            0.10,
+            0.05,
+            0.10,
+            0.10,
+            0.60,
+            0.30,
+            0.10,
+            0.80,
+            0.01,
+            0.01,
+            0.01,
+            0.05,
+            0.80,
+            0.20,
+            0.10,
+        ],
+        [
+            0.68,
+            0.20,
+            0.06,
+            0.03,
+            0.32,
+            0.10,
+            0.05,
+            0.02,
+            0.65,
+            0.20,
+            0.04,
+            0.01,
+            0.32,
+            0.10,
+            0.05,
+            0.02,
+        ],
+    ]])
     pre_bias_logits = gate_logits - 0.5
 
     # 4 groups of 1st token:
@@ -217,19 +390,37 @@ class DeepSeekRoutingTest(unittest.TestCase):
     #
     # From selected groups to choice top4 for each token
     expected_top_k_indices = jnp.array([[[13, 5, 6, 14], [0, 8, 1, 9]]])
-    expected_top_k_weights = jnp.take_along_axis(pre_bias_logits, expected_top_k_indices, axis=-1)
-    actual_top_k_weights, actual_top_k_indices = self.model.deepseek_routing(gate_logits, pre_bias_logits)
-    self.assertTrue(
-        jax.numpy.allclose(expected_top_k_indices, actual_top_k_indices, rtol=1e-05, atol=1e-05, equal_nan=False)
+    expected_top_k_weights = jnp.take_along_axis(
+        pre_bias_logits, expected_top_k_indices, axis=-1
+    )
+    actual_top_k_weights, actual_top_k_indices = self.model.deepseek_routing(
+        gate_logits, pre_bias_logits
     )
     self.assertTrue(
-        jax.numpy.allclose(expected_top_k_weights, actual_top_k_weights, rtol=1e-05, atol=1e-05, equal_nan=False)
+        jax.numpy.allclose(
+            expected_top_k_indices,
+            actual_top_k_indices,
+            rtol=1e-05,
+            atol=1e-05,
+            equal_nan=False,
+        )
+    )
+    self.assertTrue(
+        jax.numpy.allclose(
+            expected_top_k_weights,
+            actual_top_k_weights,
+            rtol=1e-05,
+            atol=1e-05,
+            equal_nan=False,
+        )
     )
 
 
 class MoeLoopBlock(nn.Module):
   """Reference implementation from https://github.com/mistralai/mistral-inference.
-  This is not included anymore in our repo, due to a limitation of for-loop implementation in sharding.
+
+  This is not included anymore in our repo, due to a limitation of for-loop
+  implementation in sharding.
   """
 
   config: Config
@@ -251,13 +442,21 @@ class MoeLoopBlock(nn.Module):
         name="gate",
     )(inputs)[0]
 
-    weights, selected_experts = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
-    weights = jax.nn.softmax(weights.astype(jnp.float32), axis=-1).astype(self.weight_dtype)
+    weights, selected_experts = jax.lax.top_k(
+        gate_logits, self.num_experts_per_tok
+    )
+    weights = jax.nn.softmax(weights.astype(jnp.float32), axis=-1).astype(
+        self.weight_dtype
+    )
     mlp_lnx = jnp.zeros_like(inputs)
-    mlp_lnx = nn.with_logical_constraint(mlp_lnx, ("activation_batch", "activation_length", "activation_embed"))
+    mlp_lnx = nn.with_logical_constraint(
+        mlp_lnx, ("activation_batch", "activation_length", "activation_embed")
+    )
 
     for k in range(self.num_experts):
-      weights_exp = jnp.sum(jnp.multiply(selected_experts == k, weights), axis=-1)
+      weights_exp = jnp.sum(
+          jnp.multiply(selected_experts == k, weights), axis=-1
+      )
       mlp_lnx_exp = linears.MlpBlock(
           intermediate_dim=self.config.mlp_dim,
           activations=["silu", "linear"],
@@ -268,7 +467,10 @@ class MoeLoopBlock(nn.Module):
           config=self.config,
       )(inputs, deterministic=deterministic)
 
-      mlp_lnx_exp = nn.with_logical_constraint(mlp_lnx_exp, ("activation_batch", "activation_length", "activation_embed"))
+      mlp_lnx_exp = nn.with_logical_constraint(
+          mlp_lnx_exp,
+          ("activation_batch", "activation_length", "activation_embed"),
+      )
       mlp_lnx_exp = weights_exp[:, :, None] * mlp_lnx_exp
       mlp_lnx += mlp_lnx_exp
 
@@ -289,7 +491,15 @@ class RoutedMoeTest(unittest.TestCase):
         dtype=cfg.dtype,
     )
     variables = model.init(
-        rng, jax.random.normal(rng, (int(cfg.per_device_batch_size), cfg.max_target_length, cfg.base_emb_dim))
+        rng,
+        jax.random.normal(
+            rng,
+            (
+                int(cfg.per_device_batch_size),
+                cfg.max_target_length,
+                cfg.base_emb_dim,
+            ),
+        ),
     )
 
     output = jax.jit(model.apply)(variables, hidden_states)  # pylint: disable=not-callable
@@ -333,13 +543,19 @@ class RoutedMoeTest(unittest.TestCase):
     wi_1 = jnp.concatenate(exp_wi_1, axis=0, dtype=cfg.weight_dtype)
     wo = jnp.concatenate(exp_wo, axis=0, dtype=cfg.weight_dtype)
 
-    moe_variables = {"params": {"gate": {"kernel": kernel}, "wi_0": wi_0, "wi_1": wi_1, "wo": wo}}
+    moe_variables = {
+        "params": {
+            "gate": {"kernel": kernel},
+            "wi_0": wi_0,
+            "wi_1": wi_1,
+            "wo": wo,
+        }
+    }
 
     output = jax.jit(model.apply)(moe_variables, hidden_states)  # pylint: disable=not-callable
     return output
 
-  @pytest.mark.tpu_only
-  def test_megablox(self):
+  def test_megablox_tpu_only(self):
     cfg = pyconfig.initialize(
         [None, os.path.join(PKG_DIR, "configs", "base.yml")],
         run_name="moe_block_megablox_test",
@@ -356,18 +572,31 @@ class RoutedMoeTest(unittest.TestCase):
     device_count = jax.device_count()
     hidden_states = jax.random.uniform(
         rng_hidden_states,
-        (int(cfg.per_device_batch_size) * device_count, cfg.max_target_length, cfg.base_emb_dim),
+        (
+            int(cfg.per_device_batch_size) * device_count,
+            cfg.max_target_length,
+            cfg.base_emb_dim,
+        ),
         dtype=cfg.dtype,
     )
 
     devices_array = maxtext_utils.create_device_mesh(cfg)
     mesh = Mesh(devices_array, cfg.mesh_axes)
-    variables, expected_output = self.get_expected_output(rng_model, hidden_states, cfg)
+    variables, expected_output = self.get_expected_output(
+        rng_model, hidden_states, cfg
+    )
     actual_output, _ = self.get_moe_output(variables, hidden_states, cfg, mesh)
-    self.assertTrue(jax.numpy.allclose(expected_output, actual_output, rtol=1e-02, atol=1e-02, equal_nan=False))
+    self.assertTrue(
+        jax.numpy.allclose(
+            expected_output,
+            actual_output,
+            rtol=1e-02,
+            atol=1e-02,
+            equal_nan=False,
+        )
+    )
 
-  @pytest.mark.tpu_only
-  def test_ragged_dot(self):
+  def test_ragged_dot_tpu_only(self):
     cfg = pyconfig.initialize(
         [None, os.path.join(PKG_DIR, "configs", "base.yml")],
         run_name="moe_block_ragged_dot_test",
@@ -384,18 +613,31 @@ class RoutedMoeTest(unittest.TestCase):
     device_count = jax.device_count()
     hidden_states = jax.random.uniform(
         rng_hidden_states,
-        (int(cfg.per_device_batch_size) * device_count, cfg.max_target_length, cfg.base_emb_dim),
+        (
+            int(cfg.per_device_batch_size) * device_count,
+            cfg.max_target_length,
+            cfg.base_emb_dim,
+        ),
         dtype=cfg.dtype,
     )
 
     devices_array = maxtext_utils.create_device_mesh(cfg)
     mesh = Mesh(devices_array, cfg.mesh_axes)
-    variables, expected_output = self.get_expected_output(rng_model, hidden_states, cfg)
+    variables, expected_output = self.get_expected_output(
+        rng_model, hidden_states, cfg
+    )
     actual_output, _ = self.get_moe_output(variables, hidden_states, cfg, mesh)
-    self.assertTrue(jax.numpy.allclose(expected_output, actual_output, rtol=1e-02, atol=1e-02, equal_nan=False))
+    self.assertTrue(
+        jax.numpy.allclose(
+            expected_output,
+            actual_output,
+            rtol=1e-02,
+            atol=1e-02,
+            equal_nan=False,
+        )
+    )
 
-  @pytest.mark.tpu_only
-  def test_dense(self):
+  def test_dense_tpu_only(self):
     cfg = pyconfig.initialize(
         [None, os.path.join(PKG_DIR, "configs", "base.yml")],
         run_name="moe_block_dense_test",
@@ -412,18 +654,31 @@ class RoutedMoeTest(unittest.TestCase):
     device_count = jax.device_count()
     hidden_states = jax.random.uniform(
         rng_hidden_states,
-        (int(cfg.per_device_batch_size) * device_count, cfg.max_target_length, cfg.base_emb_dim),
+        (
+            int(cfg.per_device_batch_size) * device_count,
+            cfg.max_target_length,
+            cfg.base_emb_dim,
+        ),
         dtype=cfg.dtype,
     )
 
     devices_array = maxtext_utils.create_device_mesh(cfg)
     mesh = Mesh(devices_array, cfg.mesh_axes)
-    variables, expected_output = self.get_expected_output(rng_model, hidden_states, cfg)
+    variables, expected_output = self.get_expected_output(
+        rng_model, hidden_states, cfg
+    )
     actual_output, _ = self.get_moe_output(variables, hidden_states, cfg, mesh)
-    self.assertTrue(jax.numpy.allclose(expected_output, actual_output, rtol=1e-05, atol=1e-05, equal_nan=False))
+    self.assertTrue(
+        jax.numpy.allclose(
+            expected_output,
+            actual_output,
+            rtol=1e-05,
+            atol=1e-05,
+            equal_nan=False,
+        )
+    )
 
-  @pytest.mark.tpu_only
-  def test_megablox_expert_parallelism(self):
+  def test_megablox_expert_parallelism_tpu_only(self):
     cfg = pyconfig.initialize(
         [None, os.path.join(PKG_DIR, "configs", "base.yml")],
         run_name="moe_block_megablox_ep_test",
@@ -441,19 +696,34 @@ class RoutedMoeTest(unittest.TestCase):
     device_count = jax.device_count()
     hidden_states = jax.random.uniform(
         rng_hidden_states,
-        (int(cfg.per_device_batch_size) * device_count, cfg.max_target_length, cfg.base_emb_dim),
+        (
+            int(cfg.per_device_batch_size) * device_count,
+            cfg.max_target_length,
+            cfg.base_emb_dim,
+        ),
         dtype=cfg.dtype,
     )
 
     devices_array = maxtext_utils.create_device_mesh(cfg)
     mesh = Mesh(devices_array, cfg.mesh_axes)
     with nn_partitioning.axis_rules(cfg.logical_axis_rules):
-      variables, expected_output = self.get_expected_output(rng_model, hidden_states, cfg)
-      actual_output, _ = self.get_moe_output(variables, hidden_states, cfg, mesh)
-      self.assertTrue(jax.numpy.allclose(expected_output, actual_output, rtol=1e-02, atol=1e-02, equal_nan=False))
+      variables, expected_output = self.get_expected_output(
+          rng_model, hidden_states, cfg
+      )
+      actual_output, _ = self.get_moe_output(
+          variables, hidden_states, cfg, mesh
+      )
+      self.assertTrue(
+          jax.numpy.allclose(
+              expected_output,
+              actual_output,
+              rtol=1e-02,
+              atol=1e-02,
+              equal_nan=False,
+          )
+      )
 
-  @pytest.mark.tpu_only
-  def test_megablox_context_parallelism(self):
+  def test_megablox_context_parallelism_tpu_only(self):
     cfg = pyconfig.initialize(
         [None, os.path.join(PKG_DIR, "configs", "base.yml")],
         run_name="moe_block_megablox_cp_test",
@@ -471,16 +741,32 @@ class RoutedMoeTest(unittest.TestCase):
     device_count = jax.device_count()
     hidden_states = jax.random.uniform(
         rng_hidden_states,
-        (int(cfg.per_device_batch_size) * device_count, cfg.max_target_length, cfg.base_emb_dim),
+        (
+            int(cfg.per_device_batch_size) * device_count,
+            cfg.max_target_length,
+            cfg.base_emb_dim,
+        ),
         dtype=cfg.dtype,
     )
 
     devices_array = maxtext_utils.create_device_mesh(cfg)
     mesh = Mesh(devices_array, cfg.mesh_axes)
     with nn_partitioning.axis_rules(cfg.logical_axis_rules):
-      variables, expected_output = self.get_expected_output(rng_model, hidden_states, cfg)
-      actual_output, _ = self.get_moe_output(variables, hidden_states, cfg, mesh)
-      self.assertTrue(jax.numpy.allclose(expected_output, actual_output, rtol=1e-02, atol=1e-02, equal_nan=False))
+      variables, expected_output = self.get_expected_output(
+          rng_model, hidden_states, cfg
+      )
+      actual_output, _ = self.get_moe_output(
+          variables, hidden_states, cfg, mesh
+      )
+      self.assertTrue(
+          jax.numpy.allclose(
+              expected_output,
+              actual_output,
+              rtol=1e-02,
+              atol=1e-02,
+              equal_nan=False,
+          )
+      )
 
   def test_random_routing(self):
     bs, seq_len, num_experts, num_experts_per_tok = 12, 1024, 8, 2
@@ -489,7 +775,9 @@ class RoutedMoeTest(unittest.TestCase):
     gate_logits = jax.random.normal(logits_key, (bs, seq_len, num_experts))
 
     rng, run_key = jax.random.split(rng)
-    _, top_k_indices = moe.random_routing(run_key, gate_logits, num_experts_per_tok)
+    _, top_k_indices = moe.random_routing(
+        run_key, gate_logits, num_experts_per_tok
+    )
 
     flat_indices = top_k_indices.flatten()
     counts = jnp.bincount(flat_indices, length=num_experts)
@@ -512,13 +800,20 @@ class RoutedMoeTest(unittest.TestCase):
     global_group_sizes = jnp.arange(num_experts)
     total_assignments = jnp.sum(global_group_sizes)
 
-    original_inputs = jnp.arange(total_assignments * 5, dtype=jnp.int32).reshape(total_assignments, 5)
+    original_inputs = jnp.arange(
+        total_assignments * 5, dtype=jnp.int32
+    ).reshape(total_assignments, 5)
 
     # Calculate the cumulative sum of global group sizes to determine shard input slices
     global_group_sizes_cumsum = jnp.cumsum(global_group_sizes)
 
-    shard_start_indices = jnp.concatenate([jnp.array([0]), global_group_sizes_cumsum[:-experts_per_shard:experts_per_shard]])
-    shard_end_indices = global_group_sizes_cumsum[experts_per_shard - 1 :: experts_per_shard]
+    shard_start_indices = jnp.concatenate([
+        jnp.array([0]),
+        global_group_sizes_cumsum[:-experts_per_shard:experts_per_shard],
+    ])
+    shard_end_indices = global_group_sizes_cumsum[
+        experts_per_shard - 1 :: experts_per_shard
+    ]
 
     #               *****Expected outputs****
     # Shard 0: tokens for global experts 0, 1 (0+1=1 tokens)
@@ -550,12 +845,20 @@ class RoutedMoeTest(unittest.TestCase):
 
       # Get the global group sizes relevant to this shard's experts
       global_group_sizes_for_shard = global_group_sizes[
-          shard_index * experts_per_shard : (shard_index + 1) * experts_per_shard
+          shard_index
+          * experts_per_shard : (shard_index + 1)
+          * experts_per_shard
       ]
 
       # Get the actual local_permute outputs.
-      sorted_inputs, sorted_indices, local_group_size, sorted_experts_ids = moe.RoutedMoE.local_permute(
-          inputs_shard, global_group_sizes[None, :], experts_per_shard, shard_index, is_offset=False
+      sorted_inputs, sorted_indices, local_group_size, sorted_experts_ids = (
+          moe.RoutedMoE.local_permute(
+              inputs_shard,
+              global_group_sizes[None, :],
+              experts_per_shard,
+              shard_index,
+              is_offset=False,
+          )
       )
 
       # Calculate expected outputs for the current shard
@@ -566,15 +869,22 @@ class RoutedMoeTest(unittest.TestCase):
       expected_sorted_indices = jnp.arange(shard_total_tokens)
       # Local expert IDs: repeat local expert index (0, 1, ...) by its count
       expected_sorted_experts_ids = jnp.repeat(
-          jnp.arange(experts_per_shard), expected_local_group_size, total_repeat_length=shard_total_tokens
+          jnp.arange(experts_per_shard),
+          expected_local_group_size,
+          total_repeat_length=int(shard_total_tokens),
       )
 
-      self.assertTrue(jnp.array_equal(sorted_inputs, expected_sorted_inputs), f"Shard {shard_index}: sorted_inputs mismatch")
       self.assertTrue(
-          jnp.array_equal(sorted_indices, expected_sorted_indices), f"Shard {shard_index}: sorted_indices mismatch"
+          jnp.array_equal(sorted_inputs, expected_sorted_inputs),
+          f"Shard {shard_index}: sorted_inputs mismatch",
       )
       self.assertTrue(
-          jnp.array_equal(local_group_size, expected_local_group_size), f"Shard {shard_index}: local_group_size mismatch"
+          jnp.array_equal(sorted_indices, expected_sorted_indices),
+          f"Shard {shard_index}: sorted_indices mismatch",
+      )
+      self.assertTrue(
+          jnp.array_equal(local_group_size, expected_local_group_size),
+          f"Shard {shard_index}: local_group_size mismatch",
       )
       self.assertTrue(
           jnp.array_equal(sorted_experts_ids, expected_sorted_experts_ids),
@@ -593,23 +903,40 @@ class RoutedMoeTest(unittest.TestCase):
     for global_expert_counts in [simple_group_sizes, manual_global_group_sizes]:
       for shard_id in range(expert_groups):
         # Unpermuted data. shape: (sum(global_expert_counts), 5)
-        x = jnp.tile(jnp.arange(1, jnp.sum(global_expert_counts) + 1).reshape(-1, 1), (1, 5))
+        x = jnp.tile(
+            jnp.arange(1, jnp.sum(global_expert_counts) + 1).reshape(-1, 1),
+            (1, 5),
+        )
 
         # The number of expert IDs assigned to each expert shard.
-        local_group_sizes = jnp.sum(jnp.reshape(global_expert_counts, (expert_groups, experts_per_group)), axis=-1)
+        local_group_sizes = jnp.sum(
+            jnp.reshape(
+                global_expert_counts, (expert_groups, experts_per_group)
+            ),
+            axis=-1,
+        )
 
         # Expert assignments corresponding to each entry of x.
         # NOTE: It is assumed that x is sorted in order of expert ID (because it is previously
         # passed through permute()), so expert_assignments just repeats the expert ID using counts from
         # global_expert_counts.
-        expert_assignments = jnp.repeat(jnp.arange(0, num_experts), repeats=global_expert_counts)
+        expert_assignments = jnp.repeat(
+            jnp.arange(0, num_experts), repeats=global_expert_counts
+        )
 
         # Offset for the start of each shard (aka expert group). Offset for shard i is the sum
         # of the number of tokens assigned to all shards (local_group_size) before i.
-        input_offsets = jnp.concatenate((jnp.array([0]), jnp.cumsum(local_group_sizes)[:-1]))
+        input_offsets = jnp.concatenate(
+            (jnp.array([0]), jnp.cumsum(local_group_sizes)[:-1])
+        )
 
         # Actual results of local_permute().
-        permuted_x, local_sorted_indices, local_expert_counts, local_expert_assignments = moe.RoutedMoE.local_permute(
+        (
+            permuted_x,
+            local_sorted_indices,
+            local_expert_counts,
+            local_expert_assignments,
+        ) = moe.RoutedMoE.local_permute(
             x,
             global_expert_counts[None, :],
             experts_per_group,
@@ -621,25 +948,43 @@ class RoutedMoeTest(unittest.TestCase):
         # permuted_x should be equivalent to slicing x at the input offset for that shard.
         assert jnp.all(
             permuted_x[: local_group_sizes[shard_id]]
-            == x[input_offsets[shard_id] : input_offsets[shard_id] + local_group_sizes[shard_id]]
-        ), f"Local permuted rows do not match their unpermuted original rows for shard_id={shard_id}"
+            == x[
+                input_offsets[shard_id] : input_offsets[shard_id]
+                + local_group_sizes[shard_id]
+            ]
+        ), (
+            "Local permuted rows do not match their unpermuted original rows"
+            f" for shard_id={shard_id}"
+        )
 
         # local_sorted_indices should match the indices of the slice from x corresponding to this shard.
         # That can be computed by taking all of the indices between the input_offset for the current shard
         # until the last index belonging to the current shard (i.e. input_offset[shard_id] + local_group_sizes[shard_id]).
         assert jnp.all(
             local_sorted_indices[: local_group_sizes[shard_id]]
-            == jnp.arange(input_offsets[shard_id], input_offsets[shard_id] + local_group_sizes[shard_id])
+            == jnp.arange(
+                input_offsets[shard_id],
+                input_offsets[shard_id] + local_group_sizes[shard_id],
+            )
         ), (
-            "Local permuted row indices do not match their respective unpermuted indices in the "
-            f"original inputs for shard_id={shard_id}!"
+            "Local permuted row indices do not match their respective"
+            " unpermuted indices in the original inputs for"
+            f" shard_id={shard_id}!"
         )
 
         # local_expert_counts should correspond to slicing experts_per_group values from global_expert_counts
         # for the shard_id.
         assert jnp.all(
-            local_expert_counts == global_expert_counts[shard_id * experts_per_group : (shard_id + 1) * experts_per_group]
-        ), "Local permuted group sizes do not match the respective unpermuted expert bincounts for shard_id={shard_id}."
+            local_expert_counts
+            == global_expert_counts[
+                shard_id
+                * experts_per_group : (shard_id + 1)
+                * experts_per_group
+            ]
+        ), (
+            "Local permuted group sizes do not match the respective unpermuted"
+            " expert bincounts for shard_id={shard_id}."
+        )
 
         # local_expert_assignments should correspond to taking a slice out of expert_assignments.
         # The slice size is shard i's size (local_group_sizes[i]]) and the slice should start
@@ -647,30 +992,42 @@ class RoutedMoeTest(unittest.TestCase):
         assert jnp.all(
             local_expert_assignments[: local_group_sizes[shard_id]]
             == jnp.mod(
-                expert_assignments[input_offsets[shard_id] : input_offsets[shard_id] + local_group_sizes[shard_id]],
+                expert_assignments[
+                    input_offsets[shard_id] : input_offsets[shard_id]
+                    + local_group_sizes[shard_id]
+                ],
                 experts_per_group,
             )
         ), (
-            "Local permuted expert assignments to not match the expected unpermuted expert assignments "
-            f"for shard_id={shard_id}."
+            "Local permuted expert assignments to not match the expected"
+            f" unpermuted expert assignments for shard_id={shard_id}."
         )
 
   def test_get_all_to_all_params_sharded_batch(self):
     num_expert_parallelism_sharded = 4
 
     # all_group_sizes[i, j] = num inputs batch_shard i sends to expert_shard j
-    all_group_sizes_sharded = jnp.array([[1, 2, 0, 3], [4, 0, 1, 2], [0, 3, 2, 1], [2, 1, 4, 0]], dtype=jnp.int32)
+    all_group_sizes_sharded = jnp.array(
+        [[1, 2, 0, 3], [4, 0, 1, 2], [0, 3, 2, 1], [2, 1, 4, 0]],
+        dtype=jnp.int32,
+    )
 
     # The offset for the current batch shard (row) to send inputs to a particular expert
     # shard (column), will be the cumulative number of tokens sent to all previous experts.
     # Example: batch shard 1
     # all_group_sizes_sharded[1] = [4, 0, 1, 2]:
     # input_offsets = [0, 4, 4+0, 4+0+1] = [0, 4, 4, 5]
-    expected_input_offsets_sharded = jnp.array([[0, 1, 3, 3], [0, 4, 4, 5], [0, 0, 3, 5], [0, 2, 3, 7]], dtype=jnp.int32)
+    expected_input_offsets_sharded = jnp.array(
+        [[0, 1, 3, 3], [0, 4, 4, 5], [0, 0, 3, 5], [0, 2, 3, 7]],
+        dtype=jnp.int32,
+    )
 
     # The number of tokens that the current batch shard (row) sends to each expert shard (columns)
     # is recorded in all_group_sizes_sharded[row].
-    expected_send_sizes_sharded = jnp.array([[1, 2, 0, 3], [4, 0, 1, 2], [0, 3, 2, 1], [2, 1, 4, 0]], dtype=jnp.int32)
+    expected_send_sizes_sharded = jnp.array(
+        [[1, 2, 0, 3], [4, 0, 1, 2], [0, 3, 2, 1], [2, 1, 4, 0]],
+        dtype=jnp.int32,
+    )
 
     # The offset at which each expert shard (column) will receive the current batch shard's (row)
     # input is the cumulative number of tokens received by all previous batch shards (rows)
@@ -679,13 +1036,19 @@ class RoutedMoeTest(unittest.TestCase):
     # (batch shard 1) output_offsets = [0+1, 0+2, 0+0, 0+3])
     # (batch shard 2) output_offsets = [0+1+4, 0+2+0, 0+0+1, 0+3+2])
     # ...
-    expected_output_offsets_sharded = jnp.array([[0, 0, 0, 0], [1, 2, 0, 3], [5, 2, 1, 5], [5, 5, 3, 6]], dtype=jnp.int32)
+    expected_output_offsets_sharded = jnp.array(
+        [[0, 0, 0, 0], [1, 2, 0, 3], [5, 2, 1, 5], [5, 5, 3, 6]],
+        dtype=jnp.int32,
+    )
 
     # The number of inputs a particular expert shard (col) receives from all of the batch_shards (rows).
     # Example: expert shard 1
     # Receives 2 from batch_shard 0, 0 from batch_shard 1, 3 from batch_shard 2, 1 from batch_shard 3
     # Which is the same as all_group_sizes_sharded[:, 1].
-    expected_recv_sizes_sharded = jnp.array([[1, 4, 0, 2], [2, 0, 3, 1], [0, 1, 2, 4], [3, 2, 1, 0]], dtype=jnp.int32)
+    expected_recv_sizes_sharded = jnp.array(
+        [[1, 4, 0, 2], [2, 0, 3, 1], [0, 1, 2, 4], [3, 2, 1, 0]],
+        dtype=jnp.int32,
+    )
 
     for expert_shard_id in range(num_expert_parallelism_sharded):
       exp_in_off = expected_input_offsets_sharded[expert_shard_id]
@@ -694,19 +1057,26 @@ class RoutedMoeTest(unittest.TestCase):
       exp_recv_sz = expected_recv_sizes_sharded[expert_shard_id]
 
       in_off, send_sz, out_off, recv_sz = moe.RoutedMoE.get_all_to_all_params(
-          all_group_sizes_sharded, expert_shard_id, num_expert_parallelism_sharded, is_batch_sharded=True
+          all_group_sizes_sharded,
+          expert_shard_id,
+          num_expert_parallelism_sharded,
+          is_batch_sharded=True,
       )
       self.assertTrue(
-          jnp.array_equal(in_off, exp_in_off), f"Sharded Batch: Input offsets mismatch for shard {expert_shard_id}"
+          jnp.array_equal(in_off, exp_in_off),
+          f"Sharded Batch: Input offsets mismatch for shard {expert_shard_id}",
       )
       self.assertTrue(
-          jnp.array_equal(send_sz, exp_send_sz), f"Sharded Batch: Send sizes mismatch for shard {expert_shard_id}"
+          jnp.array_equal(send_sz, exp_send_sz),
+          f"Sharded Batch: Send sizes mismatch for shard {expert_shard_id}",
       )
       self.assertTrue(
-          jnp.array_equal(out_off, exp_out_off), f"Sharded Batch: Output offsets mismatch for shard {expert_shard_id}"
+          jnp.array_equal(out_off, exp_out_off),
+          f"Sharded Batch: Output offsets mismatch for shard {expert_shard_id}",
       )
       self.assertTrue(
-          jnp.array_equal(recv_sz, exp_recv_sz), f"Sharded Batch: Receive sizes mismatch for shard {expert_shard_id}"
+          jnp.array_equal(recv_sz, exp_recv_sz),
+          f"Sharded Batch: Receive sizes mismatch for shard {expert_shard_id}",
       )
 
   def test_get_all_to_all_params_unsharded_batch(self):
@@ -717,12 +1087,15 @@ class RoutedMoeTest(unittest.TestCase):
     group_sizes_unsharded = jnp.array([6, 7, 6, 7], dtype=jnp.int32)
 
     # Each expert shard will send their data starting at index 0.
-    expected_input_offsets_unsharded_template = jnp.array([0, 0, 0, 0], dtype=jnp.int32)
+    expected_input_offsets_unsharded_template = jnp.array(
+        [0, 0, 0, 0], dtype=jnp.int32
+    )
 
     # Each expert shard will send the amount of data they are responsible for
     # (indicated by group_sizes_unsharded).
     expected_send_sizes_unsharded_per_shard = jnp.array(
-        [[6, 6, 6, 6], [7, 7, 7, 7], [6, 6, 6, 6], [7, 7, 7, 7]], dtype=jnp.int32
+        [[6, 6, 6, 6], [7, 7, 7, 7], [6, 6, 6, 6], [7, 7, 7, 7]],
+        dtype=jnp.int32,
     )
 
     # When the batches are fully replicated (unsharded) then each batch will receive expert i's
@@ -732,12 +1105,15 @@ class RoutedMoeTest(unittest.TestCase):
     # (batch shard 2) output_offsets = [0+6+7, 0+6+7, 0+6+7, 0+6+7])
     # Which is just the cumulative sum of 0 and group_sizes_unsharded.
     expected_output_offsets_unsharded_per_shard = jnp.array(
-        [[0, 0, 0, 0], [6, 6, 6, 6], [13, 13, 13, 13], [19, 19, 19, 19]], dtype=jnp.int32
+        [[0, 0, 0, 0], [6, 6, 6, 6], [13, 13, 13, 13], [19, 19, 19, 19]],
+        dtype=jnp.int32,
     )
 
     # Each (replicated) batch shard will the amount of data from each expert specified by
     # group_sizes_unsharded.
-    expected_recv_sizes_unsharded_template = jnp.array([6, 7, 6, 7], dtype=jnp.int32)
+    expected_recv_sizes_unsharded_template = jnp.array(
+        [6, 7, 6, 7], dtype=jnp.int32
+    )
 
     for expert_shard_id in range(num_expert_parallelism_unsharded):
       exp_in_off = expected_input_offsets_unsharded_template
@@ -746,21 +1122,34 @@ class RoutedMoeTest(unittest.TestCase):
       exp_recv_sz = expected_recv_sizes_unsharded_template
 
       in_off, send_sz, out_off, recv_sz = moe.RoutedMoE.get_all_to_all_params(
-          group_sizes_unsharded, expert_shard_id, num_expert_parallelism_unsharded, is_batch_sharded=False
+          group_sizes_unsharded,
+          expert_shard_id,
+          num_expert_parallelism_unsharded,
+          is_batch_sharded=False,
       )
       self.assertTrue(
-          jnp.array_equal(in_off, exp_in_off), f"Unsharded Batch: Input offsets mismatch for shard {expert_shard_id}"
+          jnp.array_equal(in_off, exp_in_off),
+          "Unsharded Batch: Input offsets mismatch for shard"
+          f" {expert_shard_id}",
       )
       self.assertTrue(
-          jnp.array_equal(send_sz, exp_send_sz), f"Unsharded Batch: Send sizes mismatch for shard {expert_shard_id}"
+          jnp.array_equal(send_sz, exp_send_sz),
+          f"Unsharded Batch: Send sizes mismatch for shard {expert_shard_id}",
       )
       self.assertTrue(
-          jnp.array_equal(out_off, exp_out_off), f"Unsharded Batch: Output offsets mismatch for shard {expert_shard_id}"
+          jnp.array_equal(out_off, exp_out_off),
+          "Unsharded Batch: Output offsets mismatch for shard"
+          f" {expert_shard_id}",
       )
       self.assertTrue(
-          jnp.array_equal(recv_sz, exp_recv_sz), f"Unsharded Batch: Receive sizes mismatch for shard {expert_shard_id}"
+          jnp.array_equal(recv_sz, exp_recv_sz),
+          "Unsharded Batch: Receive sizes mismatch for shard"
+          f" {expert_shard_id}",
       )
 
-
-if __name__ == "__main__":
+  
+def main(argv):  # pylint: disable=unused-argument
   unittest.main()
+
+if __name__ == '__main__':
+  app.run(main)
