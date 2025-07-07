@@ -334,6 +334,16 @@ class TrainTests(unittest.TestCase):
     ]
     train_main(cudnn_flash_jax)
 
+  @pytest.mark.integration_test
+  @pytest.mark.tpu_only
+  def test_tpu_base_model_ag_once(self):
+    train_main(TrainTests.CONFIGS["base"] + ["model_fsdp_ag_once=True"])
+
+  @pytest.mark.integration_test
+  @pytest.mark.gpu_only
+  def test_gpu_synthetic_model_ag_once(self):
+    train_main(TrainTests.CONFIGS["synthetic"] + ["model_fsdp_ag_once=True"])
+
 
 if __name__ == "__main__":
   absltest.main()
