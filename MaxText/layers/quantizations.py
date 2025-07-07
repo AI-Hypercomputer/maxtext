@@ -203,7 +203,26 @@ class Fp8Quantization(Quantization):
     return nn.Fp8DirectDotGeneralOp
 
   def einsum(self, dtype: DType = jnp.float32):
-    return Fp8Einsum(dtype=dtype)
+    return _Fp8EinsumWrapper(dtype=dtype)
+
+
+class _Fp8EinsumWrapper(nn.Module):
+  """Wrapper for nn.Fp8Einsum to handle computation dtype."""
+
+  dtype: DType
+
+  @nn.compact
+  def __call__(self, eqn, lhs, rhs, **kwargs):
+    # nn.Fp8Einsum determines compute dtype from rhs.
+    # We cast rhs to the desired computation dtype.
+    # nn.Fp8Einsum will then cast lhs to the same dtype.
+    rhs = rhs.astype(self.dtype)
+    return nn.Fp8Einsum(name='fp8_einsum') (
+        eqn,
+        lhs,
+        rhs,
+        **kwargs
+    )
 
 
 class Fp8Einsum(nn.Module):
@@ -302,6 +321,143 @@ def _get_int8_quant_config(config):
   )
 
 
+@dataclass(frozen=True)
+class ConstantBoundConfig:
+  fwd_lhs_bound: float | None = None
+  fwd_rhs_bound: float | None = None
+  dlhs_lhs_bound: float | None = None
+  dlhs_rhs_bound: float | None = None
+  drhs_lhs_bound: float | None = None
+  drhs_rhs_bound: float | None = None
+
+
+def _build_const_scale_config(
+    aqt_dg: aqt_config.DotGeneral,
+    cst_bound_config: ConstantBoundConfig,
+) -> aqt_config.DotGeneral:
+  """Build a constant scale config for AQT dot general.
+
+  Args:
+    aqt_dg: The AQT dot general config.
+    cst_bound_config: The constant bound config.
+
+  Returns:
+    The AQT dot general config with constant scale config.
+  """
+  if cst_bound_config.fwd_lhs_bound is not None:
+    aqt_dg.fwd.dg_quantizer.lhs.calibration = functools.partial(
+        calibration.ConstantCalibration, bound=cst_bound_config.fwd_lhs_bound
+    )
+  if cst_bound_config.fwd_rhs_bound is not None:
+    aqt_dg.fwd.dg_quantizer.rhs.calibration = functools.partial(
+        calibration.ConstantCalibration, bound=cst_bound_config.fwd_rhs_bound
+    )
+  if cst_bound_config.dlhs_lhs_bound:
+    aqt_dg.dlhs.dg_quantizer.lhs.calibration = functools.partial(
+        calibration.ConstantCalibration, bound=cst_bound_config.dlhs_lhs_bound
+    )
+
+  if cst_bound_config.dlhs_rhs_bound is not None:
+    aqt_dg.dlhs.dg_quantizer.rhs.calibration = functools.partial(
+        calibration.ConstantCalibration, bound=cst_bound_config.dlhs_rhs_bound
+    )
+
+  if cst_bound_config.drhs_lhs_bound is not None:
+    aqt_dg.drhs.dg_quantizer.lhs.calibration = functools.partial(
+        calibration.ConstantCalibration, bound=cst_bound_config.drhs_lhs_bound
+    )
+
+  if cst_bound_config.drhs_rhs_bound is not None:
+    aqt_dg.drhs.dg_quantizer.rhs.calibration = functools.partial(
+        calibration.ConstantCalibration, bound=cst_bound_config.drhs_rhs_bound
+    )
+
+  return aqt_dg
+
+@dataclass
+class PerTensorScales:
+  fwd_lhs: bool = False
+  fwd_rhs: bool = False
+  dlhs_lhs: bool = False
+  dlhs_rhs: bool = False
+  drhs_lhs: bool = False
+  drhs_rhs: bool = False
+
+def _build_per_tensor_config(
+    aqt_dg: aqt_config.DotGeneral, per_tensor_scales: PerTensorScales,
+) -> aqt_config.DotGeneral:
+  """Build a per tensor config for AQT dot general.
+
+  Args:
+    aqt_dg: The AQT dot general config.
+    per_tensor_scales: The per tensor scales config.
+
+  Returns:
+    The AQT dot general config with per tensor config.
+  """
+  if per_tensor_scales.fwd_lhs:
+    aqt_dg.fwd.dg_quantizer.lhs.calib_shared_axes = "per_tensor"
+  if per_tensor_scales.fwd_rhs:
+    aqt_dg.fwd.dg_quantizer.rhs.calib_shared_axes = "per_tensor"
+  if per_tensor_scales.dlhs_lhs:
+    aqt_dg.dlhs.dg_quantizer.lhs.calib_shared_axes = "per_tensor"
+  if per_tensor_scales.dlhs_rhs:
+    aqt_dg.dlhs.dg_quantizer.rhs.calib_shared_axes = "per_tensor"
+  if per_tensor_scales.drhs_lhs:
+    aqt_dg.drhs.dg_quantizer.lhs.calib_shared_axes = "per_tensor"
+  if per_tensor_scales.drhs_rhs:
+    aqt_dg.drhs.dg_quantizer.rhs.calib_shared_axes = "per_tensor"
+  return aqt_dg
+
+
+# fp8 training recipe of dynmaic scaling with configurable constant_bound_config for static scaling option
+def _get_aqt_fp8_default_config(config):
+  """Get aqt for 8-bit floating point quantization configuration."""
+  aqt_dg = aqt_config.config_v4(
+      fwd_bits="e4m3",
+      dlhs_bits="e5m2",
+      drhs_bits="e5m2",
+      use_dummy_static_bound=False,
+      fwd_accumulator_dtype=jnp.bfloat16,
+      dlhs_accumulator_dtype=jnp.bfloat16,
+      drhs_accumulator_dtype=jnp.bfloat16,
+      dlhs_use_fwd_quant=False,
+      drhs_use_fwd_quant=False,
+  )
+  constant_bound_config = None
+
+  if len(config.constant_bound_config) == 6:
+    fwd_lhs_bound, fwd_rhs_bound, dlhs_lhs_bound, dlhs_rhs_bound, drhs_lhs_bound, drhs_rhs_bound = (
+        config.constant_bound_config
+    )
+    constant_bound_config = ConstantBoundConfig(
+        fwd_lhs_bound=fwd_lhs_bound,
+        fwd_rhs_bound=fwd_rhs_bound,
+        dlhs_lhs_bound=dlhs_lhs_bound,
+        dlhs_rhs_bound=dlhs_rhs_bound,
+        drhs_lhs_bound=drhs_lhs_bound,
+        drhs_rhs_bound=drhs_rhs_bound,
+    )
+    aqt_dg = _build_const_scale_config(aqt_dg, constant_bound_config)
+
+  aqt_config.set_stochastic_rounding(
+      aqt_dg,
+      vjp_lhs_stochastic_rounding=False,
+      vjp_rhs_stochastic_rounding=False,
+      implementation="jax.uniform",
+  )
+
+  per_tensor_scales = PerTensorScales(
+      fwd_lhs=True,
+      fwd_rhs=True,
+      dlhs_lhs=True,
+      dlhs_rhs=True,
+      drhs_lhs=True,
+      drhs_rhs=True,
+  )
+  return _build_per_tensor_config(aqt_dg, per_tensor_scales)
+
+
 def _get_aqt_fp8_quant_config(config):
   """get aqt for 8-bit floating point quantization configuration"""
   cfg = aqt_config.config_v4(fwd_bits="e4m3", dlhs_bits=None, drhs_bits=None, fwd_accumulator_dtype=jnp.bfloat16)
@@ -362,6 +518,9 @@ def _get_quant_config(config):
     return "nanoo_fp8"
   if config.quantization == "aqt_fp8":
     return _get_aqt_fp8_quant_config(config)
+  if config.quantization == "aqt_fp8_full":
+    return _get_aqt_fp8_default_config(config)
+
   raise ValueError(f"Invalid value configured for quantization {config.quantization}.")
 
 
