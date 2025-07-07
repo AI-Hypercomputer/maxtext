@@ -43,7 +43,9 @@ rm -rf /var/lib/apt/lists/*
 EOF
 
 # We need to pin specific versions of setuptools, see b/402501203 for more.
-python3 -m pip install setuptools==65.5.0 wheel==0.45.1
+#python3 -m pip install setuptools==65.5.0 wheel==0.45.1
+
+python3 -m pip install setuptools --upgrade
 
 # Set environment variables
 for ARGUMENT in "$@"; do
@@ -95,7 +97,8 @@ cd "$run_name_folder_path" && python3 -m pip install --upgrade pip
 if [[ "$MODE" == "pinned" ]]; then
     python3 -m pip install --no-cache-dir -U -r requirements.txt -c constraints_gpu.txt
 else
-    python3 -m pip install --no-cache-dir -U -r requirements.txt
+    python3 -m pip install --no-cache-dir -U -r pinned_requirements.txt
+    #python3 -m pip install --no-cache-dir -U -r requirements.txt
 fi
 
 # Uninstall existing jax, jaxlib and  libtpu-nightly
