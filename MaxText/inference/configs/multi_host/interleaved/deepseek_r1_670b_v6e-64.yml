@@ -1,0 +1,61 @@
+base_config: "inference_jetstream.yml"
+
+# tensor = 8, autoregressive=2
+# per_device_batch_size=6
+# weight bf16, kv cache bf16
+
+model_name: "deepseek3-671b"
+tokenizer_type: "huggingface"
+tokenizer_path: "deepseek-ai/DeepSeek-R1"
+allow_split_physical_axes: True
+kv_quant_axis: 'dkv'
+enable_single_controller: True
+megablox: False
+sparse_matmul: False
+capacity_factor: -1
+attention: 'dot_product'
+async_checkpointing: False
+scan_layers: False
+weight_dtype: "bfloat16"
+
+logical_axis_rules: [
+                      ['activation_batch', []],
+                      ['activation_batch_no_exp', []],
+                      ['activation_embed_and_logits_batch', []],
+                      ['activation_heads', ['tensor', 'expert']],
+                      ['activation_kv_heads', ['tensor', 'expert']],
+                      ['activation_length', []],
+                      ['activation_norm_length', []],
+                      ['activation_embed', ['tensor']],
+                      ['activation_mlp', []],
+                      ['activation_kv', []],
+                      ['activation_prefill_kv_batch', ['data', 'expert']],
+                      ['activation_kv_batch', ['data']],
+                      ['activation_kv_head_dim', []],
+                      ['activation_vocab', ['tensor']],
+                      ['activation_exp','expert'],
+                      ['mlp', ['tensor', 'autoregressive']],
+                      ['vocab', ['tensor', 'autoregressive', 'expert']],
+                      ['heads', ['expert', 'autoregressive']],
+                      ['q_heads', ['expert', 'autoregressive']],
+                      ['kv_heads', ['expert', 'autoregressive']],
+                      ['embed', []],
+                      ['embed_no_exp', []],
+                      ['q_lora', []],
+                      ['kv_lora', []],
+                      ['norm', ['tensor']],
+                      ['layers', 'stage'],
+                      ['kv', []],
+                      ['kv_head_dim', []],
+                      ['cache_batch_prefill', []],
+                      ['cache_batch', []],
+                      ['cache_heads', ['autoregressive', 'tensor,expert']],
+                      ['cache_kv', []],
+                      ['cache_sequence', []],
+                      ['cache_scale_heads', ['autoregressive', 'tensor,expert']],
+                      ['exp', 'expert'],
+                      ['paged_kv_heads', []],
+                      ['num_pages', ['tensor', 'expert']],
+                      ['tokens_per_page', []],
+                      ['paged_kv_head_dim_size', []]
+                    ]
