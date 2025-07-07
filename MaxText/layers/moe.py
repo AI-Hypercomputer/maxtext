@@ -15,35 +15,26 @@
 
 """MoE related Layers."""
 
+import enum
 import functools
-from typing import Iterable, Tuple, Union, Optional
-from enum import Enum, auto
 import math
+from typing import Iterable, Optional, Tuple, Union
 
-import numpy as np
-
-from jax import lax
-from jax.ad_checkpoint import checkpoint_name
-from jax.experimental import shard_map
-from jax.sharding import Mesh
-import jax
-import jax.numpy as jnp
-
+from aqt.jax.v2 import aqt_tensor as aqt
 import flax.linen as nn
-
-from aqt.jax.v2 import aqt_tensor
-from aqt.jax.v2.aqt_tensor import QTensor
-
+import jax
+from jax import ad_checkpoint as adc
+from jax.experimental import shard_map
+import jax.numpy as jnp
+from MaxText import common_types as ctypes
 from MaxText import max_logging
 from MaxText import max_utils
-from MaxText.common_types import DType, Array, Config, DecoderBlockType
 from MaxText.kernels import megablox as mblx
+from MaxText.layers import attentions
 from MaxText.layers import initializers
 from MaxText.layers import linears
 from MaxText.layers import quantizations
-from MaxText.layers.attentions import NdInitializer, nd_dense_init
-from MaxText.layers.initializers import default_bias_init
-from MaxText.layers.quantizations import AqtQuantization as Quant
+import numpy as np
 
 
 DISPATCH = "dispatch"
@@ -97,17 +88,21 @@ class GateLogit(nn.Module):
   features: Union[Iterable[int], int]
   model_name: str
   axis: Union[Iterable[int], int] = -1
-  weight_dtype: DType = jnp.float32
-  dtype: DType = jnp.float32
-  kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "truncated_normal")
+  weight_dtype: ctypes.DType = jnp.float32
+  dtype: ctypes.DType = jnp.float32
+  kernel_init: attentions.NdInitializer = attentions.nd_dense_init(
+      1.0, "fan_in", "truncated_normal"
+  )
   kernel_axes: Tuple[Optional[str], ...] = ()
   use_bias: bool = False
   score_func: str = ""
-  quant: Optional[Quant] = None
+  quant: Optional[quantizations.AqtQuantization] = None
   matmul_precision: str = "default"
 
   @nn.compact
-  def __call__(self, inputs: Array) -> Tuple[Array, Optional[Array]]:
+  def __call__(
+      self, inputs: ctypes.Array
+  ) -> Tuple[ctypes.Array, Optional[ctypes.Array]]:
 
     features = linears._canonicalize_tuple(self.features)
     axis = linears._canonicalize_tuple(self.axis)
@@ -151,7 +146,9 @@ class GateLogit(nn.Module):
       )
       bias = self.param(
           "bias",
-          nn.with_logical_partitioning(default_bias_init, bias_axes),
+          nn.with_logical_partitioning(
+              initializers.default_bias_init, bias_axes
+          ),
           bias_shape,
           self.weight_dtype,
       )
@@ -175,16 +172,16 @@ class RoutedMoE(nn.Module):
     quant: Optional quantization config, no quantization if None.
   """
 
-  config: Config
+  config: ctypes.Config
   num_experts: int
   num_experts_per_tok: int
-  mesh: Mesh
-  kernel_init: NdInitializer
+  mesh: jax.sharding.Mesh
+  kernel_init: attentions.NdInitializer
   kernel_axes: Tuple[Optional[str], ...]
   intermediate_dim: int = 2048
-  weight_dtype: DType = jnp.float32
-  dtype: DType = jnp.float32
-  quant: Optional[Quant] = None
+  weight_dtype: ctypes.DType = jnp.float32
+  dtype: ctypes.DType = jnp.float32
+  quant: Optional[quantizations.AqtQuantization] = None
 
   # The first axes is expert
   wi_kernel_axes = ("exp", "embed_no_exp", "mlp")
@@ -204,7 +201,7 @@ class RoutedMoE(nn.Module):
 
     kernel_in_axis = np.arange(1)
     kernel_out_axis = np.arange(1, 2)
-    kernel_init = nd_dense_init(1.0, "fan_in", "truncated_normal")
+    kernel_init = attentions.nd_dense_init(1.0, "fan_in", "truncated_normal")
 
     if quantizations.in_serve_mode(self.quant):
       # During aqt convert state we delete kernel weight from params to save memory.
@@ -265,10 +262,12 @@ class RoutedMoE(nn.Module):
     else:
       top_k_weights, top_k_indices = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
 
-    if self.config.decoder_block == DecoderBlockType.DEEPSEEK:
+    if self.config.decoder_block == ctypes.DecoderBlockType.DEEPSEEK:
       top_k_weights = self.deepseek_scale_weights(top_k_weights)
-    elif self.config.decoder_block != DecoderBlockType.LLAMA4:
-      top_k_weights = jax.nn.softmax(top_k_weights.astype(jnp.float32), axis=-1).astype(self.dtype)
+    elif self.config.decoder_block != ctypes.DecoderBlockType.LLAMA4:
+      top_k_weights = jax.nn.softmax(
+          top_k_weights.astype(jnp.float32), axis=-1
+      ).astype(self.dtype)
     return top_k_weights, top_k_indices
 
   def deepseek_scale_weights(self, weights):
@@ -342,7 +341,7 @@ class RoutedMoE(nn.Module):
     inputs_2d = jnp.reshape(inputs, (bsz_times_seq_len, inputs_shape[2]))
     weights, selected_experts = self.get_topk(gate_logits, pre_bias_logits)
 
-    if self.config.decoder_block == DecoderBlockType.LLAMA4:
+    if self.config.decoder_block == ctypes.DecoderBlockType.LLAMA4:
       # weights will be of shape (batch_size, seq_len, num_experts_per_tok)
       router_scores = jax.nn.sigmoid(weights.astype(jnp.float32))  # weights are top_k_weights here
       # Squeeze router_scores to (batch_size * seq_len, num_experts_per_tok)
@@ -369,8 +368,8 @@ class RoutedMoE(nn.Module):
         (reshaped_weights.shape[0], self.num_experts_per_tok, -1),
     )
     with jax.named_scope("weight_sum"):
-      matmul_precision = lax.Precision(self.config.matmul_precision)
-      if self.config.decoder_block == DecoderBlockType.LLAMA4:
+      matmul_precision = jax.lax.Precision(self.config.matmul_precision)
+      if self.config.decoder_block == ctypes.DecoderBlockType.LLAMA4:
         # For Llama4, combine using weights of 1 for selected experts
         reshaped_weights = jnp.ones_like(reshaped_weights)
       output = jnp.einsum(
@@ -454,11 +453,11 @@ class RoutedMoE(nn.Module):
   def get_all_to_all_params(all_shards_group_sizes, shard_id, num_expert_parallelism, is_batch_sharded=True):
     """Generates input offsets, send sizes, output offsets, and receive sizes used for ragged_all_to_all."""
 
-    class TransformStrategy(Enum):
-      INPUT_OFFSET = auto()
-      SEND_SIZE = auto()
-      OUTPUT_OFFSET = auto()
-      RECV_SIZE = auto()
+    class TransformStrategy(enum.Enum):
+      INPUT_OFFSET = enum.auto()
+      SEND_SIZE = enum.auto()
+      OUTPUT_OFFSET = enum.auto()
+      RECV_SIZE = enum.auto()
 
     def transform_array(input_array, shard_id, strategy, is_batch_sharded):
       """This function transforms the input array based on the specified strategy,
@@ -551,7 +550,7 @@ class RoutedMoE(nn.Module):
         )
       else:
         rhs_inputs = kernel
-        if isinstance(kernel, QTensor):
+        if isinstance(kernel, aqt.QTensor):
           if kernel.bias or kernel.sparsity_mask or len(kernel.scale) > 1:
             raise ValueError("Unsupported usecase for ragged_dot with quantized kernel.")
           rhs_inputs = kernel.qvalue
@@ -561,7 +560,7 @@ class RoutedMoE(nn.Module):
             group_sizes=group_sizes,
             preferred_element_type=jnp.bfloat16,
         )
-        if isinstance(kernel, QTensor):
+        if isinstance(kernel, aqt.QTensor):
           # Multiply outputs by the kernely scale
           scales = jnp.take(kernel.scale[0].squeeze(), indices=expert_assignments, axis=0)
           if hs_shape[0] % PAD_LENGTH:
@@ -599,12 +598,18 @@ class RoutedMoE(nn.Module):
     w0_pspec = nn.logical_to_mesh_axes(("exp", None, "mlp"))
     w1_pspec = nn.logical_to_mesh_axes(("exp", None, "mlp"))
     wo_pspec = nn.logical_to_mesh_axes(("exp", "mlp", None))
-    if isinstance(w0_kernel, QTensor):
-      w0_pspec = aqt_tensor.partition_spec(w0_pspec, (1,), w0_kernel.dtype, use_bias=False)
-    if isinstance(w1_kernel, QTensor):
-      w1_pspec = aqt_tensor.partition_spec(w1_pspec, (1,), w1_kernel.dtype, use_bias=False)
-    if isinstance(wo_kernel, QTensor):
-      wo_pspec = aqt_tensor.partition_spec(wo_pspec, (1,), wo_kernel.dtype, use_bias=False)
+    if isinstance(w0_kernel, aqt.QTensor):
+      w0_pspec = aqt.partition_spec(
+          w0_pspec, (1,), w0_kernel.dtype, use_bias=False
+      )
+    if isinstance(w1_kernel, aqt.QTensor):
+      w1_pspec = aqt.partition_spec(
+          w1_pspec, (1,), w1_kernel.dtype, use_bias=False
+      )
+    if isinstance(wo_kernel, aqt.QTensor):
+      wo_pspec = aqt.partition_spec(
+          wo_pspec, (1,), wo_kernel.dtype, use_bias=False
+      )
 
     @functools.partial(
         shard_map.shard_map,
@@ -626,7 +631,7 @@ class RoutedMoE(nn.Module):
         reshaped_group_sizes = jnp.sum(group_sizes.reshape(-1, local_expert_size), axis=1)
         global_group_sizes = group_sizes
         if is_batch_sharded_by_expert:
-          all_shards_group_sizes = lax.all_gather(reshaped_group_sizes, axis_name=batch_axis)
+          all_shards_group_sizes = jax.lax.all_gather(reshaped_group_sizes, axis_name=batch_axis)
           input_offsets, send_sizes, output_offsets, recv_sizes = RoutedMoE.get_all_to_all_params(
               all_shards_group_sizes, expert_shard_id, num_expert_parallelism
           )
@@ -651,9 +656,16 @@ class RoutedMoE(nn.Module):
               recv_sizes,
               axis_name=expert_axis_name,
           )
-          global_group_sizes = lax.all_gather(group_sizes, axis_name=expert_axis_name)
-          x, local_sorted_indices, group_sizes, selected_experts = RoutedMoE.local_permute(
-              x, global_group_sizes, local_expert_size, shard_index=expert_shard_id
+          global_group_sizes = jax.lax.all_gather(
+              group_sizes, axis_name=expert_axis_name
+          )
+          x, local_sorted_indices, group_sizes, selected_experts = (
+              RoutedMoE.local_permute(
+                  x,
+                  global_group_sizes,
+                  local_expert_size,
+                  shard_index=expert_shard_id,
+              )
           )
         else:
           x, local_sorted_indices, group_sizes, selected_experts = RoutedMoE.local_permute(
@@ -666,14 +678,16 @@ class RoutedMoE(nn.Module):
           )
 
       layer_w0 = gmm(x, w0, group_sizes, selected_experts)
-      layer_w0 = checkpoint_name(layer_w0, "mlpwi_0")
+      layer_w0 = adc.checkpoint_name(layer_w0, "mlpwi_0")
       layer_w1 = gmm(x, w1, group_sizes, selected_experts)
-      layer_w1 = checkpoint_name(layer_w1, "mlpwi_1")
+      layer_w1 = adc.checkpoint_name(layer_w1, "mlpwi_1")
       # pylint: disable=protected-access
       layer_act = linears._convert_to_activation_function(self.config.mlp_activations[0])(layer_w0)
       intermediate_layer = jnp.multiply(layer_act, layer_w1)
-      intermediate_output = gmm(intermediate_layer, wo, group_sizes, selected_experts)
-      intermediate_output = checkpoint_name(intermediate_output, "mlpwo")
+      intermediate_output = gmm(
+          intermediate_layer, wo, group_sizes, selected_experts
+      )
+      intermediate_output = adc.checkpoint_name(intermediate_output, "mlpwo")
 
       if self.get_tensor_parallelism_size() > 1:
         intermediate_output = jax.lax.psum_scatter(intermediate_output, "tensor", scatter_dimension=1, tiled=True)
@@ -787,9 +801,12 @@ class RoutedMoE(nn.Module):
         ((batch_size, cp, sub_seq, self.num_experts_per_tok, self.num_experts)),
     )
     expert_token_count = nn.with_logical_constraint(
-        expert_token_count, ("activation_batch", "activation_length", None, None, None)
+        expert_token_count,
+        ("activation_batch", "activation_length", None, None, None),
     )
-    trunc_expert_mask = expert_mask * jnp.less_equal(expert_token_count, expert_capacity_per_batch)
+    trunc_expert_mask = expert_mask * jnp.less_equal(
+        expert_token_count, expert_capacity_per_batch
+    )
     combined_expert_mask = jnp.sum(trunc_expert_mask, axis=3)
 
     # reshape & update weights
@@ -935,13 +952,15 @@ class RoutedMoE(nn.Module):
       # pre_bias_logits is None for non-DeepSeek v3 models
       pre_bias_logits = nn.with_logical_constraint(pre_bias_logits, ("activation_batch", "activation_length", None))
     top_k_weights, top_k_indices = self.get_topk(gate_logits, pre_bias_logits)
-    is_llama4_decoder_layer = self.config.decoder_block == DecoderBlockType.LLAMA4
+    is_llama4_decoder_layer = (
+        self.config.decoder_block == ctypes.DecoderBlockType.LLAMA4
+    )
     if is_llama4_decoder_layer:
       router_scores = jax.nn.sigmoid(top_k_weights.astype(jnp.float32)).astype(jnp.bfloat16)
       inputs = inputs * router_scores
     else:
       weights = self.reshape_and_update_weights(top_k_weights, top_k_indices)
-    matmul_precision = lax.Precision(self.config.matmul_precision)
+    matmul_precision = jax.lax.Precision(self.config.matmul_precision)
 
     if self.config.model_call_mode != "inference":
       softmax_probs = jax.nn.softmax(gate_logits.astype(jnp.float32), axis=-1).astype(self.dtype)
@@ -1020,7 +1039,7 @@ class RoutedMoE(nn.Module):
             layer_w0,
             mlp_axis,
         )
-        layer_w0 = checkpoint_name(layer_w0, "mlpwi_0")
+        layer_w0 = adc.checkpoint_name(layer_w0, "mlpwi_0")
       with jax.named_scope("wi_1"):
         w1_kernel_axes = ("exp", None, "mlp")
         w1_kernel = self.maybe_all_gather_kernel_weight_in_expert_parallelism(w1_kernel, w1_kernel_axes)
@@ -1033,7 +1052,7 @@ class RoutedMoE(nn.Module):
             layer_w1,
             mlp_axis,
         )
-        layer_w1 = checkpoint_name(layer_w1, "mlpwi_1")
+        layer_w1 = adc.checkpoint_name(layer_w1, "mlpwi_1")
       # pylint: disable=protected-access
       layer_w0_act = linears._convert_to_activation_function(self.config.mlp_activations[0])(layer_w0)
       layer_multiply = jnp.multiply(layer_w0_act, layer_w1).astype(self.dtype)
@@ -1050,7 +1069,7 @@ class RoutedMoE(nn.Module):
               intermediate_layer,
               ("activation_exp", "activation_batch_no_exp", None, "activation_embed"),
           )
-        intermediate_layer = checkpoint_name(intermediate_layer, "mlpwo")
+        intermediate_layer = adc.checkpoint_name(intermediate_layer, "mlpwo")
       with jax.named_scope("combine"):
         # Matmul & element wise operation
         output = self.get_einsum(rhs_mesh_axes=mask_axes, einsum_name=COMBINE)(
@@ -1070,14 +1089,14 @@ class RoutedMoE(nn.Module):
         )
         if self.config.activations_in_float32:
           layer_w0 = layer_w0.astype(jnp.float32)
-        layer_w0 = checkpoint_name(layer_w0, "mlpwi_0")
+        layer_w0 = adc.checkpoint_name(layer_w0, "mlpwi_0")
       with jax.named_scope("wi_1"):
         layer_w1 = self.get_einsum(rhs_mesh_axes=self.wi_kernel_axes)(
             "BSM,EMH -> BSEH", inputs, w1_kernel, precision=matmul_precision
         )
         if self.config.activations_in_float32:
           layer_w1 = layer_w1.astype(jnp.float32)
-        layer_w1 = checkpoint_name(layer_w1, "mlpwi_1")
+        layer_w1 = adc.checkpoint_name(layer_w1, "mlpwi_1")
       # pylint: disable=protected-access
       layer_w0_act = linears._convert_to_activation_function(self.config.mlp_activations[0])(layer_w0)
       layer_multiply = jnp.multiply(layer_w0_act, layer_w1).astype(self.dtype)
@@ -1087,7 +1106,7 @@ class RoutedMoE(nn.Module):
         )
         if self.config.activations_in_float32:
           intermediate_layer = intermediate_layer.astype(jnp.float32)
-        intermediate_layer = checkpoint_name(intermediate_layer, "mlpwo")
+        intermediate_layer = adc.checkpoint_name(intermediate_layer, "mlpwo")
       with jax.named_scope("w_sum"):
         if is_llama4_decoder_layer:
           weights = self.reshape_and_update_weights(jnp.ones_like(top_k_weights), top_k_indices)
@@ -1099,12 +1118,21 @@ class RoutedMoE(nn.Module):
       return output, None
 
   def retrieve_quantized_weight(
-      self, inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel
-  ) -> tuple[QTensor, QTensor, QTensor]:
-    """retrieve quantized weight"""
-    # This is called only during tracing. This is to invoke creation of quantized tensor inside AqtEinsum.
-    # After jit, this will become no-op and will not affect performance.
-    _ = self.dense_matmul(inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel)
+      self,
+      inputs,
+      gate_logits,
+      pre_bias_logits,
+      w0_kernel,
+      w1_kernel,
+      wo_kernel,
+  ) -> tuple[aqt.QTensor, aqt.QTensor, aqt.QTensor]:
+    """Retrieve quantized weights."""
+    # This is called only during tracing. This is to invoke creation of
+    # quantized tensor inside AqtEinsum.  After jit, this will become no-op and
+    # will not affect performance.
+    _ = self.dense_matmul(
+        inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel
+    )
 
     w0_kernel = self.variables["aqt"]["AqtEinsum_0"]["AqtDotGeneral_0"]["qrhs"]["frozen"]
     w1_kernel = self.variables["aqt"]["AqtEinsum_1"]["AqtDotGeneral_0"]["qrhs"]["frozen"]
@@ -1157,13 +1185,13 @@ class RoutedAndSharedMoE(nn.Module):
     quant: Optional quantization config, no quantization if None.
   """
 
-  config: Config
-  mesh: Mesh
-  kernel_init: NdInitializer
+  config: ctypes.Config
+  mesh: jax.sharding.Mesh
+  kernel_init: attentions.NdInitializer
   kernel_axes: Tuple[Optional[str], ...]
-  weight_dtype: DType = jnp.float32
-  dtype: DType = jnp.float32
-  quant: Optional[Quant] = None
+  weight_dtype: ctypes.DType = jnp.float32
+  dtype: ctypes.DType = jnp.float32
+  quant: Optional[quantizations.AqtQuantization] = None
 
   @nn.compact
   def __call__(self, inputs):
