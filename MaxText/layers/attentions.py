@@ -46,11 +46,15 @@ from MaxText.inference import paged_attention
 from MaxText.inference.kvcache import KVQuant, KVTensor
 from MaxText.kernels.ragged_attention import ragged_gqa
 from MaxText.kernels.ragged_attention import ragged_mha
-from MaxText.layers import embeddings
-from MaxText.layers.embeddings import YarnRotaryEmbedding, rotary_embedding_as_linen
+from MaxText.layers.embeddings import (
+    llama_rotary_embedding_as_linen,
+    llama_vision_rotary_embedding_as_linen,
+    rotary_embedding_as_linen,
+    yarn_rotary_embedding_as_linen,
+)
 from MaxText.layers.initializers import nd_dense_init, NdInitializer
 from MaxText.layers.linears import dense_general
-from MaxText.layers.normalizations import RMSNorm
+from MaxText.layers.normalizations import rms_norm
 from MaxText.layers.quantizations import AqtQuantization as Quant
 
 # pylint: disable=line-too-long, g-doc-args, g-doc-return-or-yield, bad-continuation, g-inconsistent-quotes
@@ -1596,7 +1600,7 @@ class Attention(nn.Module):
     rope_type = self.config.rope_type.lower()
     rope_use_scale = self.config.rope_use_scale
     if self.is_vision:
-      rotary_embedding = embeddings.LlamaVisionRotaryEmbedding(
+      rotary_embedding = llama_vision_rotary_embedding_as_linen(
           image_size=self.config.image_size_for_vit,
           patch_size=self.config.patch_size_for_vit,
           hidden_size=self.config.hidden_size_for_vit,
@@ -1604,15 +1608,16 @@ class Attention(nn.Module):
           rope_theta=self.config.rope_theta_for_vit,
       )
     elif self.config.model_name.startswith("llama3.1") or rope_type.startswith("llama3.1"):
-      rotary_embedding = embeddings.llama_rotary_embedding_as_linen(
+      rotary_embedding = llama_rotary_embedding_as_linen(
           min_timescale=self.config.rope_min_timescale,
           max_timescale=self.config.rope_max_timescale,
           embedding_dims=rope_embedding_dims,
           fprop_dtype=self.dtype,
+          name=name,
           use_scale=rope_use_scale,
       )
     elif rope_type.startswith("yarn"):
-      rotary_embedding = YarnRotaryEmbedding(
+      rotary_embedding = yarn_rotary_embedding_as_linen(
           max_position_embeddings=self.config.max_position_embeddings,
           original_max_position_embeddings=self.config.original_max_position_embeddings,
           beta_fast=self.config.beta_fast,
@@ -1633,6 +1638,7 @@ class Attention(nn.Module):
           max_timescale=max_timescale,
           embedding_dims=rope_embedding_dims,
           fprop_dtype=self.dtype,
+          name=name,
       )
     inputs = rotary_embedding(inputs, inputs_positions)
     return inputs
@@ -1712,7 +1718,8 @@ class Attention(nn.Module):
     is_llama4_decoder_block = self.config.decoder_block == DecoderBlockType.LLAMA4
     # NOTE: llama 4 does L2 normalization after RoPE
     if self.use_qk_norm and not is_llama4_decoder_block:
-      query = RMSNorm(
+      query = rms_norm(
+          num_features=query.shape[-1],
           dtype=self.config.dtype,
           weight_dtype=self.config.weight_dtype,
           name="query_norm",
@@ -1720,7 +1727,8 @@ class Attention(nn.Module):
           kernel_axes=("norm",),
       )(query)
 
-      key = RMSNorm(
+      key = rms_norm(
+          num_features=key.shape[-1],
           dtype=self.config.dtype,
           weight_dtype=self.config.weight_dtype,
           name="key_norm",
@@ -1853,7 +1861,8 @@ class MLA(Attention):
           quant=self.quant,
           matmul_precision=self.config.matmul_precision,
       )
-      self.q_norm = RMSNorm(
+      self.q_norm = rms_norm(
+          num_features=self.q_lora_rank,
           dtype=self.config.dtype,
           weight_dtype=self.config.weight_dtype,
           name="q_norm",
@@ -1886,7 +1895,8 @@ class MLA(Attention):
         quant=self.quant,
         matmul_precision=self.config.matmul_precision,
     )
-    self.kv_norm = RMSNorm(
+    self.kv_norm = rms_norm(
+        num_features=self.kv_lora_rank,
         dtype=self.config.dtype,
         weight_dtype=self.config.weight_dtype,
         name="kv_norm",

@@ -41,7 +41,6 @@ from collections.abc import Sequence
 import datetime
 import logging
 import os
-import sys
 import time
 
 from absl import app
@@ -74,7 +73,6 @@ from MaxText.data_loader import DataLoader
 from MaxText.input_pipeline.input_pipeline_interface import create_data_iterator
 from MaxText.metric_logger import MetricLogger
 from MaxText.train import get_first_step
-from MaxText.train import save_checkpoint
 from MaxText.train import setup_train_loop
 from MaxText.train import train_step
 from MaxText.train import validate_train_config
@@ -153,22 +151,7 @@ def elastic_handler(
       state = state.replace(**snapshot_jax_arrays)
       state = state.replace(step=state.step.at[None].set(step))
 
-      (
-          functional_train,
-          in_shard_train,
-          out_shard_train,
-          static_argnums_train,
-          donate_argnums_train,
-      ) = maxtext_utils.get_functional_train_with_signature(train_step, mesh, state_mesh_shardings, model, config)
-
-      p_train_step = jax.jit(
-          functional_train,
-          in_shardings=in_shard_train,
-          out_shardings=out_shard_train,
-          static_argnums=static_argnums_train,
-          donate_argnums=donate_argnums_train,
-      )
-
+      p_train_step, _ = train_utils.jit_train_and_eval_step(config, model, mesh, state, state_mesh_shardings, train_step)
       example_batch = None
       metric_logger = MetricLogger(config=config, learning_rate_schedule=learning_rate_schedule)
 
@@ -202,22 +185,12 @@ def train_loop(config, elastic_manager, recorder, state=None):
       state,
   ) = setup_train_loop(config, recorder)
 
-  # pylint: disable=line-too-long
-  (
-      functional_train,
-      in_shard_train,
-      out_shard_train,
-      static_argnums_train,
-      donate_argnums_train,
-  ) = maxtext_utils.get_functional_train_with_signature(train_step, mesh, state_mesh_shardings, model, config)
-
-  p_train_step = jax.jit(
-      functional_train,
-      in_shardings=in_shard_train,
-      out_shardings=out_shard_train,
-      static_argnums=static_argnums_train,
-      donate_argnums=donate_argnums_train,
-  )
+  p_train_step, _ = train_utils.jit_train_and_eval_step(config, model, mesh, state, state_mesh_shardings, train_step)
+  with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+    shaped_batch = maxtext_utils.get_shaped_batch(config)
+    compiled = p_train_step.lower(state, shaped_batch, init_rng).compile()
+    compiled_stats = compiled.memory_analysis()
+    max_utils.print_compiled_memory_stats(compiled_stats)
 
   start_step = get_first_step(state)  # this is the start_step for training
   prof = profiler.Profiler(config, offset_step=start_step)
@@ -257,15 +230,7 @@ def train_loop(config, elastic_manager, recorder, state=None):
           with maybe_record_goodput(recorder, GoodputEvent.STEP, step):
             state, metrics = p_train_step(state, example_batch, nextrng)
 
-        if checkpoint_manager is not None:
-          state_to_save = state
-          if save_checkpoint(checkpoint_manager, int(step), state_to_save, config.dataset_type, data_iterator, config):
-            checkpointing.print_save_message(step, config.async_checkpointing)
-
-          # Upon preemption, exit when and only when all ongoing saves are complete.
-          if checkpoint_manager.reached_preemption(step):
-            checkpoint_manager.wait_until_finished()
-            sys.exit()
+        checkpointing.maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator, step)
 
         prof.maybe_deactivate_profiler(step, state)
 
@@ -341,38 +306,8 @@ def train_loop(config, elastic_manager, recorder, state=None):
     except exceptions.StopTraining as error:
       max_logging.log(f"Training stopped: {str(error)}")
 
-  if checkpoint_manager is not None:
-    if ((int(state.step) - 1) % config.checkpoint_period != 0) and (int(state.step) != 0):
-      try:
-        state_to_save = state
-        if save_checkpoint(
-            checkpoint_manager,
-            int(state.step) - 1,
-            state_to_save,
-            config.dataset_type,
-            data_iterator,
-            config,
-            force=True,
-        ):
-          checkpointing.print_save_message(int(state.step) - 1, config.async_checkpointing)
-      except Exception:  # pylint: disable=broad-except
-        max_logging.log(f"Checkpoint is already saved for step {int(state.step)-1}.")
-
-    checkpoint_manager.wait_until_finished()
+  checkpointing.maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator)
   metric_logger.cleanup()
-
-  if example_batch:
-    with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-      # pytype: disable=attribute-error
-      compiled = p_train_step.lower(state, example_batch, nextrng).compile()
-      compiled_stats = compiled.memory_analysis()
-      if compiled_stats is not None:
-        max_logging.log(
-            f"Output size: {compiled_stats.output_size_in_bytes}, "
-            f"temp size: {compiled_stats.temp_size_in_bytes}, "
-            f"argument size: {compiled_stats.argument_size_in_bytes}, "
-            f"host temp size: {compiled_stats.host_temp_size_in_bytes}, in bytes."
-        )
 
   return state
 

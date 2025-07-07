@@ -16,7 +16,6 @@
 
 import datetime
 import os
-import sys
 from typing import Sequence
 
 from absl import app
@@ -32,16 +31,16 @@ from flax.linen import partitioning as nn_partitioning
 from MaxText import checkpointing
 from MaxText import exceptions
 from MaxText import max_utils
-from MaxText import maxtext_utils
 from MaxText import max_logging
+from MaxText import maxtext_utils
 from MaxText import profiler
 from MaxText import pyconfig
+from MaxText import train_utils
 from MaxText.data_loader import DataLoader
 from MaxText.metric_logger import MetricLogger
 from MaxText.train import (
     eval_step,
     get_first_step,
-    save_checkpoint,
     setup_train_loop,
     train_step,
     validate_train_config,
@@ -71,57 +70,18 @@ def train_loop(config, recorder, state=None):
       state,
   ) = setup_train_loop(config, recorder)
 
-  # pylint: disable=line-too-long
-  (
-      functional_train,
-      in_shard_train,
-      out_shard_train,
-      static_argnums_train,
-      donate_argnums_train,
-  ) = maxtext_utils.get_functional_train_with_signature(train_step, mesh, state_mesh_shardings, model, config)
+  p_train_step, p_eval_step = train_utils.jit_train_and_eval_step(
+      config, model, mesh, state, state_mesh_shardings, train_step, eval_step, eval_data_iterator
+  )
 
-  if eval_data_iterator:
-    # pylint: disable=line-too-long
-    (
-        functional_eval,
-        in_shard_eval,
-        out_shard_eval,
-        static_argnums_eval,
-        donate_argnums_eval,
-    ) = maxtext_utils.get_functional_eval_with_signature(eval_step, mesh, state_mesh_shardings, model, config)
-
-  # Define the compilation of functional_train, either by loading the compiled version or wrapping a new one in a jit
-  if config.compiled_trainstep_file != "":
-    print("Loading the compiled function...", flush=True)
-    # Need to pass train signature and state to determine i/o shapes of train_state for now.
-    p_train_step = maxtext_utils.load_compiled(config, functional_train, state)
-    # TODO: p_eval_step is not yet supported in load_compiled
-    p_eval_step = None
-    print("Loaded compiled function!", flush=True)
-  else:
-    p_train_step = jax.jit(
-        functional_train,
-        in_shardings=in_shard_train,
-        out_shardings=out_shard_train,
-        static_argnums=static_argnums_train,
-        donate_argnums=donate_argnums_train,
-    )
-
-    p_eval_step = None
-    if eval_data_iterator:
-      p_eval_step = jax.jit(
-          functional_eval,
-          in_shardings=in_shard_eval,
-          out_shardings=out_shard_eval,
-          static_argnums=static_argnums_eval,
-          donate_argnums=donate_argnums_eval,
-      )
+  with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+    shaped_batch = maxtext_utils.get_shaped_batch(config)
+    compiled = p_train_step.lower(state, shaped_batch, init_rng).compile()
+    compiled_stats = compiled.memory_analysis()
+    max_utils.print_compiled_memory_stats(compiled_stats)
 
   start_step = get_first_step(state)  # this is the start_step for training
   prof = profiler.Profiler(config, offset_step=start_step)
-
-  example_batch = None
-
   data_loader = DataLoader(config, mesh, data_iterator, recorder)
   metric_logger = MetricLogger(config=config, learning_rate_schedule=learning_rate_schedule)
 
@@ -141,14 +101,7 @@ def train_loop(config, recorder, state=None):
           with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
             state, metrics = p_train_step(state, example_batch, nextrng)
 
-      if checkpoint_manager is not None:
-        if save_checkpoint(checkpoint_manager, int(step), state, config.dataset_type, data_iterator, config):
-          checkpointing.print_save_message(step, config.async_checkpointing)
-
-        # Upon preemption, exit when and only when all ongoing saves are complete.
-        if checkpoint_manager.reached_preemption(step):
-          checkpoint_manager.wait_until_finished()
-          sys.exit()
+      checkpointing.maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator, step)
 
       if config.dump_hlo and step == start_step:
         jax.block_until_ready(state)  # Ensure compilation has finished.
@@ -186,33 +139,13 @@ def train_loop(config, recorder, state=None):
 
       step_time_delta = datetime.datetime.now() - step_start_time
       metric_logger.record_train_metrics(metrics, step, step_time_delta)
+
+    checkpointing.maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator)
   except exceptions.StopTraining as e:
     max_logging.log(f"Training stopped: {str(e)}")
+  finally:
+    metric_logger.cleanup()
 
-  if checkpoint_manager is not None:
-    if ((int(state.step) - 1) % config.checkpoint_period != 0) and (int(state.step) != 0):
-      try:
-        if save_checkpoint(
-            checkpoint_manager, int(state.step) - 1, state, config.dataset_type, data_iterator, config, force=True
-        ):
-          checkpointing.print_save_message(int(state.step) - 1, config.async_checkpointing)
-      except Exception:  # pylint: disable=broad-except
-        max_logging.log(f"Checkpoint already saved for step {int(state.step)-1}.")
-
-    checkpoint_manager.wait_until_finished()
-  metric_logger.cleanup()
-
-  if example_batch:
-    with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-      compiled = p_train_step.lower(state, example_batch, nextrng).compile()
-      compiled_stats = compiled.memory_analysis()
-      if compiled_stats is not None:
-        max_logging.log(
-            f"Output size: {compiled_stats.output_size_in_bytes}, "
-            f"temp size: {compiled_stats.temp_size_in_bytes}, "
-            f"argument size: {compiled_stats.argument_size_in_bytes}, "
-            f"host temp size: {compiled_stats.host_temp_size_in_bytes}, in bytes."
-        )
   return state
 
 

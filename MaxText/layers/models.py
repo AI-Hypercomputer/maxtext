@@ -36,8 +36,8 @@ from MaxText.layers import pipeline
 from MaxText import maxtext_utils
 from MaxText import multimodal_utils
 from MaxText.layers.attentions import Attention
-from MaxText.layers.normalizations import RMSNorm
-from MaxText.layers.embeddings import PositionalEmbedding, Embed
+from MaxText.layers.normalizations import rms_norm
+from MaxText.layers.embeddings import positional_embedding_as_linen, Embed
 from MaxText.layers.quantizations import AqtQuantization as Quant
 
 
@@ -71,7 +71,8 @@ class DecoderLayer(nn.Module):
     inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_length", "activation_embed"))
     inputs = checkpoint_name(inputs, "decoder_layer_input")
     # inputs: embedded inputs to the decoder with shape [batch, length, emb_dim]
-    lnx = RMSNorm(
+    lnx = rms_norm(
+        num_features=inputs.shape[-1],
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
         name="pre_self_attention_norm",
@@ -200,7 +201,7 @@ class Decoder(nn.Module):
   def setup(self):
     """Initialize decoder layer."""
     self.decoder_layer = self.get_decoder_layers()
-    self.norm_layer = self.get_norm_layer()
+    self.norm_layer = self.get_norm_layer(num_features=self.config.emb_dim)
     if self.config.using_pipeline_parallelism:
       pipeline_stage_module = self.get_pipeline_stage_module(self.decoder_layer)
       remat_policy = self.get_remat_policy()
@@ -347,6 +348,10 @@ class Decoder(nn.Module):
       from MaxText.layers import gpt3  # pylint: disable=import-outside-toplevel
 
       return [gpt3.Gpt3DecoderLayer]
+    elif self.config.decoder_block == DecoderBlockType.QWEN3:
+      from MaxText.layers import qwen3  # pylint: disable=import-outside-toplevel
+
+      return [qwen3.Qwen3DecoderLayer]
     elif self.config.decoder_block == DecoderBlockType.SIMPLE:
       from MaxText.layers import simple_layer  # pylint: disable=import-outside-toplevel
 
@@ -365,7 +370,7 @@ class Decoder(nn.Module):
     else:
       raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block.value=}")
 
-  def get_norm_layer(self):
+  def get_norm_layer(self, num_features: int):
     """get normalization layer (return type inherits from nn.Module)"""
     if self.config.decoder_block in (
         DecoderBlockType.DEFAULT,
@@ -376,11 +381,12 @@ class Decoder(nn.Module):
         DecoderBlockType.GEMMA,
         DecoderBlockType.GEMMA2,
         DecoderBlockType.GEMMA3,
+        DecoderBlockType.QWEN3,
         DecoderBlockType.SIMPLE,
         DecoderBlockType.SIMPLE_MLP,
         DecoderBlockType.LLAMA4,
     ):
-      return RMSNorm
+      return functools.partial(rms_norm, num_features=num_features)
     elif self.config.decoder_block == DecoderBlockType.GPT3:
       from MaxText.layers import gpt3  # pylint: disable=import-outside-toplevel
 
@@ -484,7 +490,7 @@ class Decoder(nn.Module):
     y = y.astype(cfg.dtype)
 
     if cfg.use_untrainable_positional_embedding:
-      y = PositionalEmbedding(cfg.base_emb_dim)(y, decoder_positions)
+      y = positional_embedding_as_linen(embedding_dims=cfg.base_emb_dim)(y, decoder_positions)
 
     if cfg.trainable_position_size > 0:
       y += Embed(
@@ -648,7 +654,9 @@ class Decoder(nn.Module):
                 slot=slot,
                 **layer_call_kwargs,
             )
-    y = self.get_norm_layer()(
+
+    assert isinstance(y, jax.Array)
+    y = self.get_norm_layer(num_features=y.shape[-1])(
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
         name="decoder_norm",
@@ -811,4 +819,3 @@ class Transformer(nn.Module):
         image_embeddings=image_embeddings,
     )
     return logits
-  

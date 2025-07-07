@@ -190,6 +190,7 @@ def validate_keys(keys):
   if keys["num_experts"] > 1:
     validate_sparse_matmul_parallelism(keys)
     validate_deepseek_moe(keys)
+    assert (keys["decoder_block"] != "qwen3"), "Qwen3 MoE mode has not been tested, please set num_experts to 1."
 
   if keys["use_multimodal"]:
     validate_multimodal_model_name(keys["model_name"])
@@ -289,6 +290,7 @@ def validate_model_name(s: str) -> bool:
       "deepseek2-16b",
       "deepseek2-236b",
       "deepseek3-671b",
+      "deepseek3-test",
       "gemma-7b",
       "gemma-2b",
       "gemma2-2b",
@@ -297,6 +299,9 @@ def validate_model_name(s: str) -> bool:
       "gemma3-4b",
       "gemma3-12b",
       "gemma3-27b",
+      "qwen3-0.6b",
+      "qwen3-4b",
+      "qwen3-8b",
       "gpt3-175b",
       "gpt3-22b",
       "gpt3-6b",

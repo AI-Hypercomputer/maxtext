@@ -48,6 +48,9 @@ HF_IDS = {
     "gemma3-4b": "google/gemma-3-4b-it",  # hf multi-modal should also support the pure-text
     "gemma3-12b": "google/gemma-3-12b",
     "gemma3-27b": "google/gemma-3-27b",
+    "qwen3-0.6b": "Qwen/Qwen3-0.6B",
+    "qwen3-4b": "Qwen/Qwen3-4B",
+    "qwen3-8b": "Qwen/Qwen3-8B",
 }
 
 
@@ -280,6 +283,8 @@ def save_safetensor_file(
   if jax.process_index() == 0:
     state_dict = {k: v for k, v in state_dict.items() if v is not None}
     local_path = os.path.join(local_dir_to_save_to, file_name)
+    if "model.safetensors" in state_dict and isinstance(state_dict["model.safetensors"], dict):
+        state_dict = state_dict["model.safetensors"]
     numpy_save_file(state_dict, local_path, metadata={"format": "pt"})
     max_logging.log(f"   Saved {file_name} to {local_path}")
 
@@ -451,6 +456,7 @@ def save_model_files(
 
     # Save .safetensors files (sharding can be outside process guard if weights are replicated)
     # The actual file saving within save_weight_files is guarded.
+    # Unwrap nested dict if needed
     shards, index = shard_checkpoint(weight_arrays)
     save_weight_files(shards, index, current_save_path, output_dir, parallel_threads, remove_local_copy)
 
