@@ -586,36 +586,18 @@ class Decoder(nn.Module):
               model_mode,
           )
         elif cfg.decoder_block == DecoderBlockType.GEMMA3:
-          from MaxText.layers import gemma3  # pylint: disable=import-outside-toplevel
-          attention_pattern_length = len(gemma3.GEMMA3_ATTENTION_PATTERN)
-          scan_length = cfg.num_decoder_layers // attention_pattern_length
-          layer_call_kwargs = {"bidirectional_mask": bidirectional_mask}
-          layer_kwargs = {"num_of_layers": attention_pattern_length}
-
-          RemattedBlockLayer = RemattedBlockLayers[0]
-          y, _ = self.scan_decoder_layers(cfg, RemattedBlockLayer, scan_length, "layers", mesh, **layer_kwargs)(
+          y = self._apply_gemma3_scanned_blocks(
               y,
               decoder_segment_ids,
               decoder_positions,
               deterministic,
               model_mode,
-              **layer_call_kwargs,
+              bidirectional_mask,
+              previous_chunk,
+              page_state,
+              slot,
+              RemattedBlockLayers[0],  # Pass the scannable block class
           )
-          num_remaining_layers = cfg.num_decoder_layers % attention_pattern_length
-          if num_remaining_layers > 0:
-            layer_kwargs = {"num_of_layers": num_remaining_layers}
-            layer = RemattedBlockLayer(config=cfg, mesh=mesh, quant=self.quant, **layer_kwargs)
-            y = layer(
-                y,
-                decoder_segment_ids,
-                decoder_positions,
-                deterministic,
-                model_mode,
-                previous_chunk=previous_chunk,
-                page_state=page_state,
-                slot=slot,
-                **layer_call_kwargs,
-            )
         else:
           layer_call_kwargs = {}
           layer_kwargs = {}
@@ -732,6 +714,65 @@ class Decoder(nn.Module):
     if self.config.cast_logits_to_fp32:
       logits = logits.astype(jnp.float32)
     return logits
+
+  def _apply_gemma3_scanned_blocks(
+      self,
+      y,
+      decoder_segment_ids,
+      decoder_positions,
+      deterministic,
+      model_mode,
+      bidirectional_mask,
+      previous_chunk,
+      page_state,
+      slot,
+      RemattedBlockLayer,
+  ):
+    """Applies Gemma3 scanned decoder blocks, handling main scan and remainders."""
+    from MaxText.layers import gemma3  # pylint: disable=import-outside-toplevel
+
+    cfg = self.config
+    mesh = self.mesh
+
+    # Define the repeating pattern length and calculate how many full blocks to scan
+    attention_pattern_length = len(gemma3.GEMMA3_ATTENTION_PATTERN)
+    scan_length = cfg.num_decoder_layers // attention_pattern_length
+
+    layer_call_kwargs = {"bidirectional_mask": bidirectional_mask}
+    layer_kwargs = {"num_of_layers": attention_pattern_length}
+
+    # Apply the main scan over the full blocks
+    if scan_length > 0:
+      scanned_layers_output, _ = self.scan_decoder_layers(
+          cfg, RemattedBlockLayer, scan_length, "layers", mesh, **layer_kwargs
+      )(
+          y,
+          decoder_segment_ids,
+          decoder_positions,
+          deterministic,
+          model_mode,
+          **layer_call_kwargs,
+      )
+      y = scanned_layers_output
+
+    # Apply any remaining layers that did not fit into a full scanned block
+    num_remaining_layers = cfg.num_decoder_layers % attention_pattern_length
+    if num_remaining_layers > 0:
+      # We name the remainder block with a 'remainder' suffix to avoid parameter name collisions
+      rem_layer_kwargs = {"num_of_layers": num_remaining_layers}
+      layer = RemattedBlockLayer(config=cfg, mesh=mesh, quant=self.quant, name="layers_remainder", **rem_layer_kwargs)
+      y = layer(
+          y,
+          decoder_segment_ids,
+          decoder_positions,
+          deterministic,
+          model_mode,
+          previous_chunk=previous_chunk,
+          page_state=page_state,
+          slot=slot,
+          **layer_call_kwargs,
+      )
+    return y
 
 
 class VisionEncoder(nn.Module):
