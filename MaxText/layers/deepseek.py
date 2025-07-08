@@ -35,6 +35,7 @@ from MaxText.layers import moe
 from MaxText.layers import quantizations
 from MaxText.layers.quantizations import AqtQuantization as Quant
 from MaxText.inference import page_manager
+from MaxText.common_types import MODEL_MODE_PREFILL
 
 # -----------------------------------------
 # The Decoder Layer for DeepSeek v3
@@ -50,9 +51,10 @@ def self_attention_with_norm(
     decoder_positions,
     deterministic,
     model_mode,
-    previous_chunk = None,
+    previous_chunk=None,
     page_state: Optional[page_manager.PageState] = None,
-    slot: Optional[int] = None):
+    slot: Optional[int] = None,
+):
   """self-attention with normalization"""
   # Normalization
   lnx_rms = models.rms_norm(
@@ -64,7 +66,12 @@ def self_attention_with_norm(
       epsilon=cfg.normalization_layer_epsilon,
   )
   lnx = lnx_rms(inputs)
-  lnx = nn.with_logical_constraint(lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
+  if model_mode == MODEL_MODE_PREFILL:
+    logical_axis_names = ("activation_batch", "prefill_activation_norm_length", "activation_embed")
+  else:
+    logical_axis_names = ("activation_batch", "activation_norm_length", "activation_embed")
+
+  lnx = nn.with_logical_constraint(lnx, logical_axis_names)
 
   attention_layer = attentions.MLA(
       config=cfg,
@@ -104,9 +111,7 @@ def self_attention_with_norm(
       slot=slot,
   )
 
-  attention_lnx = nn.with_logical_constraint(
-      attention_lnx, ("activation_batch", "activation_norm_length", "activation_embed")
-  )
+  attention_lnx = nn.with_logical_constraint(attention_lnx, logical_axis_names)
   intermediate_inputs = inputs + attention_lnx
 
   # Normalization
@@ -118,9 +123,7 @@ def self_attention_with_norm(
       kernel_axes=("norm",),
       epsilon=cfg.normalization_layer_epsilon,
   )(intermediate_inputs)
-  hidden_states = nn.with_logical_constraint(
-      hidden_states, ("activation_batch", "activation_norm_length", "activation_embed")
-  )
+  hidden_states = nn.with_logical_constraint(hidden_states, logical_axis_names)
   return hidden_states, intermediate_inputs
 
 
@@ -156,12 +159,16 @@ class DeepSeekDenseLayer(nn.Module):
       decoder_positions,
       deterministic,
       model_mode,
-      previous_chunk = None,
+      previous_chunk=None,
       page_state: Optional[page_manager.PageState] = None,
       slot: Optional[int] = None,
   ):
     cfg = self.config
-    inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
+    if model_mode == MODEL_MODE_PREFILL:
+      logical_axis_names = ("activation_batch", "prefill_activation_norm_length", "activation_embed")
+    else:
+      logical_axis_names = ("activation_batch", "activation_norm_length", "activation_embed")
+    inputs = nn.with_logical_constraint(inputs, logical_axis_names)
     inputs = checkpoint_name(inputs, "decoder_layer_input")
 
     hidden_states, intermediate_inputs = self_attention_with_norm(
@@ -187,13 +194,13 @@ class DeepSeekDenseLayer(nn.Module):
         config=cfg,
         quant=self.quant,
     )(hidden_states, deterministic=deterministic)
-    mlp_lnx = nn.with_logical_constraint(mlp_lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
+    mlp_lnx = nn.with_logical_constraint(mlp_lnx, logical_axis_names)
 
     layer_output = mlp_lnx + intermediate_inputs
     layer_output = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(layer_output, deterministic=deterministic)
     layer_output = nn.with_logical_constraint(
         layer_output,
-        ("activation_batch", "activation_norm_length", "activation_embed"),
+        logical_axis_names,
     )
     return post_process(cfg, layer_output, self.sow)
 
@@ -216,12 +223,16 @@ class DeepSeekMoELayer(nn.Module):
       decoder_positions,
       deterministic,
       model_mode,
-      previous_chunk = None,
+      previous_chunk=None,
       page_state: Optional[page_manager.PageState] = None,
       slot: Optional[int] = None,
   ):
     cfg = self.config
-    inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
+    if model_mode == MODEL_MODE_PREFILL:
+      logical_axis_names = ("activation_batch", "prefill_activation_norm_length", "activation_embed")
+    else:
+      logical_axis_names = ("activation_batch", "activation_norm_length", "activation_embed")
+    inputs = nn.with_logical_constraint(inputs, logical_axis_names)
     inputs = checkpoint_name(inputs, "decoder_layer_input")
 
     hidden_states, intermediate_inputs = self_attention_with_norm(
@@ -251,12 +262,12 @@ class DeepSeekMoELayer(nn.Module):
         weight_dtype=cfg.weight_dtype,
         quant=self.quant,
     )(hidden_states)
-    mlp_lnx = nn.with_logical_constraint(mlp_lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
+    mlp_lnx = nn.with_logical_constraint(mlp_lnx, logical_axis_names)
 
     layer_output = mlp_lnx + intermediate_inputs
     layer_output = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(layer_output, deterministic=deterministic)
     layer_output = nn.with_logical_constraint(
         layer_output,
-        ("activation_batch", "activation_norm_length", "activation_embed"),
+        logical_axis_names,
     )
     return post_process(cfg, layer_output, self.sow)
