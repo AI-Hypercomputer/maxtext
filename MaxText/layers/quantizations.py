@@ -519,7 +519,12 @@ def _get_quant_config(config):
   if config.quantization == "aqt_fp8":
     return _get_aqt_fp8_quant_config(config)
   if config.quantization == "aqt_fp8_full":
+    # breakpoint()
     return _get_aqt_fp8_default_config(config)
+  if config.quantization == "aqt_mp_config":
+    with open(config.quant_cfg_path, "rt", encoding="utf8") as config_file:
+      config = json.load(config_file)
+    return _get_mixed_precision_quant_config(config)
 
   raise ValueError(f"Invalid value configured for quantization {config.quantization}.")
 

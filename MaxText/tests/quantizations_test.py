@@ -22,6 +22,7 @@ import pytest
 
 import numpy as np
 
+import jax
 from jax import numpy as jnp
 from jax import random, lax
 
@@ -32,6 +33,8 @@ from aqt.jax.v2 import aqt_tensor
 from MaxText.globals import PKG_DIR
 from MaxText import pyconfig
 from MaxText.layers import quantizations
+from MaxText.kernels.megablox.gmm import gmm
+
 
 _QUERY_REGEX = ".*/query"
 _VALUE_REGEX = ".*/value"
@@ -225,6 +228,55 @@ class QuantizationTest(unittest.TestCase):
     }
     result = quantizations.remove_quantized_params(_params, _aqt_vars)
     self.assertEqual(_expected, result)
+    
+@pytest.mark.parametrize(
+    "group_sizes,k,n,tiling",
+    [
+        # m = sum(group_sizes) must be divisible by tm (first element of tiling)
+        ([3, 5], 6, 4, (8, 4, 4)),   # m = 8, tm = 8  → OK
+    ],
+)
+def test_gmm_kernel(group_sizes, k, n, tiling):
+  """
+  Smoke-test + correctness check for the grouped matrix-multiply kernel.
+
+  For each group i, gmm should compute
+      lhs[start_i:end_i, :]  @  rhs[i]
+  and stitch the results back together along rows.
+  """
+  group_sizes = jnp.array(group_sizes, dtype=jnp.int32)
+  m = int(group_sizes.sum())
+
+  key = jax.random.key(0)
+  key, k1, k2 = jax.random.split(key, 3)
+
+  lhs = jax.random.normal(k1, (m, k), dtype=jnp.float32)
+  rhs = jax.random.normal(k2, (group_sizes.size, k, n), dtype=jnp.float32)
+
+  # ---- run the Pallas kernel ------------------------------------------------
+  out = gmm(
+      lhs,
+      rhs,
+      group_sizes,
+      tiling=tiling,      # small tiles so the shapes above work
+      interpret=True,     # avoids device-specific compilation in CI
+      lhs_quantize_dtype=jnp.int8,
+      rhs_quantize_dtype=jnp.int8,
+  ).block_until_ready()
+
+  # ---- naive reference ------------------------------------------------------
+  ref_blocks = []
+  start = 0
+  for gid, size in enumerate(group_sizes):
+      end = start + int(size)
+      ref_blocks.append(lhs[start:end] @ rhs[gid])
+      start = end
+  ref_out = jnp.concatenate(ref_blocks, axis=0)
+
+  # ---- checks ---------------------------------------------------------------
+  assert out.shape == (m, n)
+  assert jnp.allclose(out, ref_out, rtol=1e-1, atol=1e-1), "GMM output mismatch"
+
 
 
 if __name__ == "__main__":
