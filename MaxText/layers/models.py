@@ -586,6 +586,7 @@ class Decoder(nn.Module):
               model_mode,
           )
         elif cfg.decoder_block == DecoderBlockType.GEMMA3:
+          from MaxText.layers import gemma3  # pylint: disable=import-outside-toplevel
           attention_pattern_length = len(gemma3.GEMMA3_ATTENTION_PATTERN)
           scan_length = cfg.num_decoder_layers // attention_pattern_length
           layer_call_kwargs = {
@@ -594,7 +595,7 @@ class Decoder(nn.Module):
           }
 
           RemattedBlockLayer = RemattedBlockLayers[0]
-          y, _ = self.scan_decoder_layers(cfg, RemattedBlockLayer, scan_length, "layers", mesh, **layer_kwargs)(
+          y, _ = self.scan_decoder_layers(cfg, RemattedBlockLayer, scan_length, "layers", mesh, **layer_call_kwargs)(
               y,
               decoder_segment_ids,
               decoder_positions,
