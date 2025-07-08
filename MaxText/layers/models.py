@@ -589,13 +589,11 @@ class Decoder(nn.Module):
           from MaxText.layers import gemma3  # pylint: disable=import-outside-toplevel
           attention_pattern_length = len(gemma3.GEMMA3_ATTENTION_PATTERN)
           scan_length = cfg.num_decoder_layers // attention_pattern_length
-          layer_call_kwargs = {
-            "bidirectional_mask": bidirectional_mask, 
-            "num_of_layers": attention_pattern_length
-          }
+          layer_call_kwargs = {"bidirectional_mask": bidirectional_mask}
+          layer_kwargs = {"num_of_layers": attention_pattern_length}
 
           RemattedBlockLayer = RemattedBlockLayers[0]
-          y, _ = self.scan_decoder_layers(cfg, RemattedBlockLayer, scan_length, "layers", mesh, **layer_call_kwargs)(
+          y, _ = self.scan_decoder_layers(cfg, RemattedBlockLayer, scan_length, "layers", mesh, **layer_kwargs)(
               y,
               decoder_segment_ids,
               decoder_positions,
@@ -605,10 +603,7 @@ class Decoder(nn.Module):
           )
           num_remaining_layers = cfg.num_decoder_layers % attention_pattern_length
           if num_remaining_layers > 0:
-            layer_call_kwargs = {
-              "bidirectional_mask": bidirectional_mask, 
-              "num_of_layers": num_remaining_layers
-            }
+            layer_kwargs = {"num_of_layers": num_remaining_layers}
             layer = RemattedBlockLayer(config=cfg, mesh=mesh, quant=self.quant, **layer_kwargs)
             y = layer(
                 y,
