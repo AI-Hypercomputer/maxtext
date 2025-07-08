@@ -152,7 +152,7 @@ def main(argv: Sequence[str]) -> None:
 
   # Print system information after building the compile topology to avoid
   # prematurely initializing the backend.
-  max_utils.print_system_information()
+  # max_utils.print_system_information()
 
   # Get shaped inputs
   shaped_train_args, shaped_train_kwargs, state_mesh_shardings, model = get_shaped_inputs(topology_mesh, config)
@@ -198,6 +198,9 @@ def main(argv: Sequence[str]) -> None:
         delete_local_after=config.dump_hlo_delete_local_after,
         all_host_upload=config.dump_hlo_upload_all,
     )
+
+  if jax.distributed.is_initialized():
+    jax.distributed.shutdown()
 
 
 if __name__ == "__main__":
