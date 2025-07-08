@@ -181,13 +181,8 @@ class MaxEngine(engine_api.Engine):
       if x.format == l:
         return x
       # Somehow this can be None sometimes.
-      dll = (l.layout if jax.__version_info__ >= (0, 6, 3) else
-             l.device_local_layout) if isinstance(l, Format) else l
-      f = (
-          jax.jit(self._identity, out_shardings=Format(dll, s))
-          .lower(x)
-          .compile(compiler_options=xla_flags)
-      )
+      dll = (l.layout if jax.__version_info__ >= (0, 6, 3) else l.device_local_layout) if isinstance(l, Format) else l
+      f = jax.jit(self._identity, out_shardings=Format(dll, s)).lower(x).compile(compiler_options=xla_flags)
       y = f(x)
       # Achieves donation of the input argument, but allows for different memory
       # layouts and shapes.
@@ -593,6 +588,7 @@ class MaxEngine(engine_api.Engine):
   def prefill_multisampling(
       self,  # pytype: disable=signature-mismatch
       *,
+      # pylint: disable=arguments-differ
       params: Params,
       padded_tokens: jax.Array,
       true_length: int,

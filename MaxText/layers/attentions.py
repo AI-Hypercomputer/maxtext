@@ -293,38 +293,38 @@ def attention_op_as_linen(
   Initializes the AttentionOp module and returns it as a Linen module.
   """
   return nnx.bridge.to_linen(
-    AttentionOp,
-    config=config,
-    mesh=mesh,
-    attention_kernel=attention_kernel,
-    max_target_length=max_target_length,
-    num_query_heads=num_query_heads,
-    num_kv_heads=num_kv_heads,
-    float32_qk_product=float32_qk_product,
-    max_prefill_predict_length=max_prefill_predict_length,
-    float32_logits=float32_logits,
-    flash_axis_names_kv=flash_axis_names_kv,
-    flash_axis_names_q=flash_axis_names_q,
-    flash_axis_names_splash_kernel=flash_axis_names_splash_kernel,
-    prefill_cache_logical_axis_names=prefill_cache_logical_axis_names,
-    cache_logical_axis_names=cache_logical_axis_names,
-    cache_scale_logical_axis_names=cache_scale_logical_axis_names,
-    ragged_qkv_axis_names=ragged_qkv_axis_names,
-    ragged_lengths_names=ragged_lengths_names,
-    compute_axis_order=compute_axis_order,
-    key_axis_order=key_axis_order,
-    reshape_q=reshape_q,
-    dropout_rate=dropout_rate,
-    dtype=dtype,
-    quant=quant,
-    kv_quant=kv_quant,
-    attention_type=attention_type,
-    attn_logits_soft_cap=attn_logits_soft_cap,
-    sliding_window_size=sliding_window_size,
-    chunk_attn_window_size=chunk_attn_window_size,
-    use_ragged_attention=use_ragged_attention,
-    ragged_block_size=ragged_block_size,
-    metadata_fn=variable_to_logically_partitioned,
+      AttentionOp,
+      config=config,
+      mesh=mesh,
+      attention_kernel=attention_kernel,
+      max_target_length=max_target_length,
+      num_query_heads=num_query_heads,
+      num_kv_heads=num_kv_heads,
+      float32_qk_product=float32_qk_product,
+      max_prefill_predict_length=max_prefill_predict_length,
+      float32_logits=float32_logits,
+      flash_axis_names_kv=flash_axis_names_kv,
+      flash_axis_names_q=flash_axis_names_q,
+      flash_axis_names_splash_kernel=flash_axis_names_splash_kernel,
+      prefill_cache_logical_axis_names=prefill_cache_logical_axis_names,
+      cache_logical_axis_names=cache_logical_axis_names,
+      cache_scale_logical_axis_names=cache_scale_logical_axis_names,
+      ragged_qkv_axis_names=ragged_qkv_axis_names,
+      ragged_lengths_names=ragged_lengths_names,
+      compute_axis_order=compute_axis_order,
+      key_axis_order=key_axis_order,
+      reshape_q=reshape_q,
+      dropout_rate=dropout_rate,
+      dtype=dtype,
+      quant=quant,
+      kv_quant=kv_quant,
+      attention_type=attention_type,
+      attn_logits_soft_cap=attn_logits_soft_cap,
+      sliding_window_size=sliding_window_size,
+      chunk_attn_window_size=chunk_attn_window_size,
+      use_ragged_attention=use_ragged_attention,
+      ragged_block_size=ragged_block_size,
+      metadata_fn=variable_to_logically_partitioned,
   )
 
 
@@ -364,7 +364,7 @@ class AttentionOp(nnx.Module):
   use_ragged_attention: bool = False
   ragged_block_size: int = 256
 
-  rngs: nnx.Rngs = None # Not used in AttentionOp but passed in by nnx.bridge.to_linen
+  rngs: nnx.Rngs = None  # Not used in AttentionOp but passed in by nnx.bridge.to_linen
 
   def check_attention_inputs(self, query: Array, key: Array | KVTensor, value: Array | KVTensor) -> None:
     """Check attention inputs."""
@@ -1311,8 +1311,9 @@ class L2Norm(nnx.Module):
   Args:
     eps: float, epsilon used for numerical stability (default value should be ok for most cases).
   """
+
   eps: float = 1e-6
-  rngs: nnx.Rngs = None # Not used in L2Norm but passed in by nnx.bridge.to_linen
+  rngs: nnx.Rngs = None  # Not used in L2Norm but passed in by nnx.bridge.to_linen
 
   def __call__(self, x):
     return x * jax.lax.rsqrt(jnp.mean(x**2, axis=-1, keepdims=True) + self.eps)
@@ -2088,7 +2089,7 @@ class MLA(Attention):
       unnormalized_out, _, exp_sum = self.ds_paged_attention_op(
           query, key, value, decoder_segment_ids, model_mode, previous_chunk, slot=slot, page_state=page_state
       )
-      unnormalized_out = unnormalized_out[..., :self.v_head_dim]
+      unnormalized_out = unnormalized_out[..., : self.v_head_dim]
       out = unnormalized_out / (exp_sum + 1e-9) if exp_sum is not None else unnormalized_out
     else:
       out = self.attention_op(query, key, value, decoder_segment_ids, model_mode, cached_values)

@@ -390,9 +390,7 @@ class Decoder(nn.Module):
     elif self.config.decoder_block == DecoderBlockType.GPT3:
       from MaxText.layers import gpt3  # pylint: disable=import-outside-toplevel
 
-      return functools.partial(
-        gpt3.gpt3_layer_norm, num_features=num_features, reductions_in_fp32=False, use_bias=True
-      )
+      return functools.partial(gpt3.gpt3_layer_norm, num_features=num_features, reductions_in_fp32=False, use_bias=True)
     else:
       raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block.value=}")
 
@@ -820,6 +818,7 @@ class Transformer(nn.Module):
     )
     return logits
 
+
 class ZeroOneTransformer(nn.Module):
   """
   A wrapper for the base Transformer model designed to implement the Zero-1
@@ -848,7 +847,7 @@ class ZeroOneTransformer(nn.Module):
       decoder_input_tokens: jnp.ndarray,
       decoder_positions: jnp.ndarray,
       decoder_segment_ids=None,
-      encoder_images: Optional[jnp.ndarray]=None,
+      encoder_images: Optional[jnp.ndarray] = None,
       enable_dropout=True,
       model_mode=MODEL_MODE_TRAIN,
       previous_chunk=None,

@@ -284,7 +284,7 @@ def save_safetensor_file(
     state_dict = {k: v for k, v in state_dict.items() if v is not None}
     local_path = os.path.join(local_dir_to_save_to, file_name)
     if "model.safetensors" in state_dict and isinstance(state_dict["model.safetensors"], dict):
-        state_dict = state_dict["model.safetensors"]
+      state_dict = state_dict["model.safetensors"]
     numpy_save_file(state_dict, local_path, metadata={"format": "pt"})
     max_logging.log(f"   Saved {file_name} to {local_path}")
 

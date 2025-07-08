@@ -148,7 +148,9 @@ def QWEN3_HF_WEIGHTS_TO_SHAPE_MAPPING(config):
   num_hidden_layers = config["num_hidden_layers"]
   num_attention_heads = config["num_attention_heads"]
   num_key_value_heads = config["num_key_value_heads"]
-  head_dim = config.get("head_dim", config["hidden_size"] // config["num_attention_heads"]) # head_dim might not always be present
+  head_dim = config.get(
+      "head_dim", config["hidden_size"] // config["num_attention_heads"]
+  )  # head_dim might not always be present
 
   mapping = {
       "model.embed_tokens.weight": [config["vocab_size"], hidden_size],
@@ -178,33 +180,41 @@ def QWEN3_HF_WEIGHTS_TO_SHAPE_MAPPING(config):
       # MoE MLP layers
       moe_ffn_intermediate_size = config.get("moe_intermediate_size")
       if moe_ffn_intermediate_size is None:
-          # moe_intermediate_size refers to the intermediate size of the routed expert
-          # For Qwen MoE, moe_intermediate_size is distinct from intermediate_size (for dense layers)
-          # Fall back to intermediate_size
-          moe_ffn_intermediate_size = config.get("intermediate_size")
-          if moe_ffn_intermediate_size is None:
-              raise ValueError("MoE model detected (num_experts > 1) but 'moe_intermediate_size' or 'intermediate_size' not found in config.")
+        # moe_intermediate_size refers to the intermediate size of the routed expert
+        # For Qwen MoE, moe_intermediate_size is distinct from intermediate_size (for dense layers)
+        # Fall back to intermediate_size
+        moe_ffn_intermediate_size = config.get("intermediate_size")
+        if moe_ffn_intermediate_size is None:
+          raise ValueError(
+              "MoE model detected (num_experts > 1) but 'moe_intermediate_size' or 'intermediate_size' not found in config."
+          )
 
-      layer_mapping.update({
-          f"{layer_prefix}.mlp.gate.weight": [num_experts, hidden_size],
-      })
+      layer_mapping.update(
+          {
+              f"{layer_prefix}.mlp.gate.weight": [num_experts, hidden_size],
+          }
+      )
       for expert_j in range(num_experts):
         expert_prefix = f"{layer_prefix}.mlp.experts.{expert_j}"
-        layer_mapping.update({
-            f"{expert_prefix}.gate_proj.weight": [moe_ffn_intermediate_size, hidden_size],
-            f"{expert_prefix}.up_proj.weight": [moe_ffn_intermediate_size, hidden_size],
-            f"{expert_prefix}.down_proj.weight": [hidden_size, moe_ffn_intermediate_size],
-        })
+        layer_mapping.update(
+            {
+                f"{expert_prefix}.gate_proj.weight": [moe_ffn_intermediate_size, hidden_size],
+                f"{expert_prefix}.up_proj.weight": [moe_ffn_intermediate_size, hidden_size],
+                f"{expert_prefix}.down_proj.weight": [hidden_size, moe_ffn_intermediate_size],
+            }
+        )
     else:
       # Dense MLP layers
       dense_ffn_intermediate_size = config.get("intermediate_size")
       if dense_ffn_intermediate_size is None:
-          raise ValueError("'intermediate_size' not found in config for a dense MLP.")
-      layer_mapping.update({
-          f"{layer_prefix}.mlp.gate_proj.weight": [dense_ffn_intermediate_size, hidden_size],
-          f"{layer_prefix}.mlp.up_proj.weight": [dense_ffn_intermediate_size, hidden_size],
-          f"{layer_prefix}.mlp.down_proj.weight": [hidden_size, dense_ffn_intermediate_size],
-      })
+        raise ValueError("'intermediate_size' not found in config for a dense MLP.")
+      layer_mapping.update(
+          {
+              f"{layer_prefix}.mlp.gate_proj.weight": [dense_ffn_intermediate_size, hidden_size],
+              f"{layer_prefix}.mlp.up_proj.weight": [dense_ffn_intermediate_size, hidden_size],
+              f"{layer_prefix}.mlp.down_proj.weight": [hidden_size, dense_ffn_intermediate_size],
+          }
+      )
     mapping.update(layer_mapping)
   return mapping
 
