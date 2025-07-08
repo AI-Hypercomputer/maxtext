@@ -21,9 +21,9 @@ limitations under the License.
 # See github.com/google/maxtext/issues/20 for more
 
 import datetime
-import os
 import time
-from MaxText.utils.goodput_utils import GoodputEvent, create_goodput_recorder, maybe_monitor_goodput, maybe_record_goodput
+from MaxText.utils.goodput_utils import GoodputEvent, maybe_record_goodput
+from MaxText import checkpointing
 import ray
 import asyncio
 import random as py_rand
@@ -31,36 +31,20 @@ import functools
 
 from typing import Sequence
 from absl import app
-import jax
 
-import max_utils
 import max_logging
-import pyconfig
-import tensorflow as tf
 import ray_cluster
 
-from vertex_tensorboard import VertexTensorboardManager
-# Placeholder: internal
-
-
 from cloud_tpu_diagnostics import diagnostic
-from cloud_tpu_diagnostics.configuration import debug_configuration
-from cloud_tpu_diagnostics.configuration import diagnostic_configuration
-from cloud_tpu_diagnostics.configuration import stack_trace_configuration
 
-from ml_goodput_measurement import monitoring
 import orbax.checkpoint as ocp
 
 from train import (
-  validate_train_config,
+  initialize,
   train_loop
 )
-# pylint: disable=too-many-positional-arguments
 
-
-# -----------------------------------------------------------------------------
-# Top-level Functions
-# -----------------------------------------------------------------------------
+ORIGINAL_CHECKPOINTER = checkpointing.maybe_save_checkpoint
 
 @ray.remote
 class MaxtextTrainer(ray_cluster.ResilientWorker):
@@ -68,35 +52,19 @@ class MaxtextTrainer(ray_cluster.ResilientWorker):
     super().__init__(process_id, physical_node_id, physical_node_ip)
 
   def initialize(self, coordinator_addr, num_processes, **kwargs):
-    jax.config.update("jax_default_prng_impl", "unsafe_rbg")
-    tf.config.set_visible_devices([], "GPU")
-    os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
     super().initialize(coordinator_addr, num_processes)
+    maxtext_args = kwargs['maxtext_args']
+    self.config, self.recorder, self.diagnostic_config = initialize(maxtext_args)
     ocp.multihost.initialize_runtime_to_distributed_ids()
     ocp.multihost.initialize_distributed_to_device_ids()
-    maxtext_args = kwargs['maxtext_args']
-    if "xla_tpu_spmd_rng_bit_generator_unsafe" not in os.environ.get("LIBTPU_INIT_ARGS", ""):
-      os.environ["LIBTPU_INIT_ARGS"] = os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
-    self.config = pyconfig.initialize(maxtext_args)
-    max_utils.print_system_information()
-    validate_train_config(self.config)
-    os.environ["TFDS_DATA_DIR"] = self.config.dataset_path
-    self.vertex_tensorboard_manager = VertexTensorboardManager()
-    if self.config.use_vertex_tensorboard or os.environ.get("UPLOAD_DATA_TO_TENSORBOARD"):
-      self.vertex_tensorboard_manager.configure_vertex_tensorboard(self.config)
-
-    maybe_monitor_goodput(self.config)
-    self.recorder = create_goodput_recorder(self.config)
-      
-    debug_config = debug_configuration.DebugConfig(
-      stack_trace_config=stack_trace_configuration.StackTraceConfig(
-          collect_stack_trace=self.config.collect_stack_trace,
-          stack_trace_to_cloud=self.config.stack_trace_to_cloud,
-          stack_trace_interval_seconds=self.config.stack_trace_interval_seconds,
-      )
-    )
-    self.diagnostic_config = diagnostic_configuration.DiagnosticConfig(debug_config)
-  
+    original_checkpointer = ORIGINAL_CHECKPOINTER
+    failure_fn = functools.partial(self._fail, failure_timer_start=datetime.datetime.now())
+    def patched_checkpointer(*args, **kwargs):
+      original_checkpointer(*args, **kwargs)
+      self.heartbeat()
+      failure_fn()
+    checkpointing.maybe_save_checkpoint = patched_checkpointer
+    
   def _fail(self, failure_timer_start):
     if (datetime.datetime.now() - failure_timer_start).total_seconds() >= self.config.failure_sim_time:
       if py_rand.random() >= (1 - self.config.hang_prob):
@@ -112,14 +80,10 @@ class MaxtextTrainer(ray_cluster.ResilientWorker):
           # Cause a seg fault, no graceful exception propagation
           eval((lambda:0).__code__.replace(co_consts=()))
 
-  def _train_loop(self, recorder, state=None):
-    failure_fn = functools.partial(self._fail, failure_timer_start=datetime.datetime.now())
-    train_loop(self.config, recorder, state=state, heartbeat_fn=self.heartbeat, failure_fn=failure_fn)
-
   def run(self):
     with diagnostic.diagnose(self.diagnostic_config):
       with maybe_record_goodput(self.recorder, GoodputEvent.JOB):
-        self._train_loop(self.recorder)
+        train_loop(self.config, self.recorder, state=None)
 
 def main(argv: Sequence[str]) -> None:
   ray.init(address='auto', logging_level=0)

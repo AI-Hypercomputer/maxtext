@@ -549,7 +549,7 @@ def setup_train_loop(config, recorder):
   )
 
 
-def train_loop(config, recorder, state=None, heartbeat_fn=None, failure_fn=None):
+def train_loop(config, recorder, state=None):
   """Main Training loop."""
   (
       init_rng,
@@ -602,9 +602,6 @@ def train_loop(config, recorder, state=None, heartbeat_fn=None, failure_fn=None)
 
       state_to_save = state if not config.use_dpo else _split_dpo_state(state)[0]
       checkpointing.maybe_save_checkpoint(checkpoint_manager, state_to_save, config, data_iterator, step)
-
-      if heartbeat_fn is not None:
-        heartbeat_fn()
         
       if config.dump_hlo and step == (config.dump_step if config.dump_step >= 0 else start_step):
         jax.block_until_ready(state)  # Ensure compilation has finished.
@@ -642,8 +639,6 @@ def train_loop(config, recorder, state=None, heartbeat_fn=None, failure_fn=None)
 
       step_time_delta = datetime.datetime.now() - step_start_time
       metric_logger.record_train_metrics(metrics, step, step_time_delta)
-      if failure_fn is not None:
-        failure_fn()
 
     state_to_save = state if not config.use_dpo else _split_dpo_state(state)[0]
     checkpointing.maybe_save_checkpoint(checkpoint_manager, state_to_save, config, data_iterator)
