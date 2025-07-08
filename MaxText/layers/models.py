@@ -37,7 +37,7 @@ from MaxText import maxtext_utils
 from MaxText import multimodal_utils
 from MaxText.layers.attentions import Attention
 from MaxText.layers.normalizations import rms_norm
-from MaxText.layers.embeddings import positional_embedding_as_linen, Embed
+from MaxText.layers.embeddings import attend_on_embedding, embed_as_linen, positional_embedding_as_linen
 from MaxText.layers.quantizations import AqtQuantization as Quant
 from MaxText.maxtext_utils import all_gather_over_fsdp
 
@@ -67,8 +67,16 @@ class DecoderLayer(nn.Module):
   ):
     cfg = self.config
     mesh = self.mesh
+    if model_mode == MODEL_MODE_PREFILL:
+      logical_axis_names = ("activation_batch", "prefill_activation_length", "activation_embed")
+    else:
+      logical_axis_names = ("activation_batch", "activation_length", "activation_embed")
 
-    inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_length", "activation_embed"))
+    if model_mode == MODEL_MODE_PREFILL:
+      inputs = nn.with_logical_constraint(inputs, logical_axis_names)
+    else:
+      inputs = nn.with_logical_constraint(inputs, logical_axis_names)
+
     inputs = checkpoint_name(inputs, "decoder_layer_input")
     # inputs: embedded inputs to the decoder with shape [batch, length, emb_dim]
     lnx = rms_norm(
@@ -79,7 +87,10 @@ class DecoderLayer(nn.Module):
         epsilon=cfg.normalization_layer_epsilon,
         kernel_axes=("norm",),
     )(inputs)
-    lnx = nn.with_logical_constraint(lnx, ("activation_batch", "activation_length", "activation_embed"))
+    if model_mode == MODEL_MODE_PREFILL:
+      lnx = nn.with_logical_constraint(lnx, logical_axis_names)
+    else:
+      lnx = nn.with_logical_constraint(lnx, logical_axis_names)
 
     attention_layer = Attention(
         config=self.config,
@@ -113,7 +124,10 @@ class DecoderLayer(nn.Module):
         model_mode=model_mode,
     )
 
-    attention_lnx = nn.with_logical_constraint(attention_lnx, ("activation_batch", "activation_length", "activation_embed"))
+    if model_mode == MODEL_MODE_PREFILL:
+      attention_lnx = nn.with_logical_constraint(attention_lnx, logical_axis_names)
+    else:
+      attention_lnx = nn.with_logical_constraint(attention_lnx, logical_axis_names)
 
     # MLP block.
     mlp_lnx = linears.MlpBlock(
@@ -123,10 +137,14 @@ class DecoderLayer(nn.Module):
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
         name="mlp",
+        model_mode=model_mode,
         config=cfg,
         quant=self.quant,
     )(lnx, deterministic=deterministic)
-    mlp_lnx = nn.with_logical_constraint(mlp_lnx, ("activation_batch", "activation_length", "activation_embed"))
+    if model_mode == MODEL_MODE_PREFILL:
+      mlp_lnx = nn.with_logical_constraint(mlp_lnx, logical_axis_names)
+    else:
+      mlp_lnx = nn.with_logical_constraint(mlp_lnx, logical_axis_names)
 
     next_layer_addition = mlp_lnx + attention_lnx
 
@@ -135,10 +153,16 @@ class DecoderLayer(nn.Module):
     )
 
     layer_output = next_layer_addition_dropped_out + inputs
-    layer_output = nn.with_logical_constraint(
-        layer_output,
-        ("activation_batch", "activation_length", "activation_embed"),
-    )
+    if model_mode == MODEL_MODE_PREFILL:
+      layer_output = nn.with_logical_constraint(
+          layer_output,
+          logical_axis_names,
+      )
+    else:
+      layer_output = nn.with_logical_constraint(
+          layer_output,
+          logical_axis_names,
+      )
 
     if cfg.record_internal_nn_metrics:
       self.sow("intermediates", "activation_mean", jnp.mean(layer_output))
@@ -474,7 +498,7 @@ class Decoder(nn.Module):
     assert decoder_input_tokens.ndim == 2  # [batch, len]
 
     # [batch, length] -> [batch, length, emb_dim]
-    y = self.shared_embedding(decoder_input_tokens.astype("int32"))
+    y = self.shared_embedding(decoder_input_tokens.astype("int32"), model_mode=model_mode)
 
     # Merge the image embeddings with the text embeddings for multimodal models
     if image_embeddings is not None and cfg.use_multimodal:
@@ -495,14 +519,14 @@ class Decoder(nn.Module):
       y = positional_embedding_as_linen(embedding_dims=cfg.base_emb_dim)(y, decoder_positions)
 
     if cfg.trainable_position_size > 0:
-      y += Embed(
+      y += embed_as_linen(
           num_embeddings=cfg.trainable_position_size,
-          features=cfg.emb_dim,
+          num_features=cfg.emb_dim,
           dtype=cfg.dtype,
           embedding_init=nn.initializers.normal(stddev=1.0),
           name="position_embedder",
           config=cfg,
-      )(decoder_positions)
+      )(decoder_positions, model_mode=model_mode)
 
     policy = self.get_remat_policy()
     RemattedBlockLayers = self.set_remat_policy(self.decoder_layer, policy)
@@ -671,7 +695,12 @@ class Decoder(nn.Module):
     # [batch, length, emb_dim] -> [batch, length, vocab_size]
     if cfg.logits_via_embedding:
       # Use the transpose of embedding matrix for logit transform.
-      logits = self.shared_embedding.attend(y)
+      embedding_table = self.shared_embedding.variables["params"]["embedding"]
+      if type(embedding_table) == nn.spmd.LogicallyPartitioned:
+        embedding_table = embedding_table.unbox()
+      attend_dtype = jnp.float32 if cfg.logits_dot_in_fp32 else cfg.dtype
+      logits = attend_on_embedding(y, embedding_table, attend_dtype, self.config)
+
       if self.config.normalize_embedding_logits:
         # Correctly normalize pre-softmax logits for this shared case.
         logits = logits / jnp.sqrt(y.shape[-1])
@@ -756,9 +785,9 @@ class Transformer(nn.Module):
 
     cfg = self.config
     mesh = self.mesh
-    self.shared_embedding = Embed(
+    self.shared_embedding = embed_as_linen(
         num_embeddings=cfg.vocab_size,
-        features=cfg.emb_dim,
+        num_features=cfg.emb_dim,
         dtype=cfg.dtype,
         attend_dtype=jnp.float32 if cfg.logits_dot_in_fp32 else cfg.dtype,  # for logit training stability
         embedding_init=nn.initializers.normal(stddev=1.0),

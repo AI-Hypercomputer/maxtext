@@ -52,6 +52,7 @@ def str2bool(v: str) -> bool:
     raise ValueError(f"Invalid value '{v}'!")
 
 
+@jax.jit
 def log_prob_of_chosen_token(logits, chosen_index):
   """
   logits: unnormalized logits, shape [batch, seq, vocab]
