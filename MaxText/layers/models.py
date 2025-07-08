@@ -39,7 +39,7 @@ from MaxText.layers.attentions import Attention
 from MaxText.layers.normalizations import rms_norm
 from MaxText.layers.embeddings import positional_embedding_as_linen, Embed
 from MaxText.layers.quantizations import AqtQuantization as Quant
-
+from MaxText.maxtext_utils import all_gather_over_fsdp
 
 # ------------------------------------------------------------------------------
 # The network: Decoder & Transformer Definitions
@@ -390,7 +390,9 @@ class Decoder(nn.Module):
     elif self.config.decoder_block == DecoderBlockType.GPT3:
       from MaxText.layers import gpt3  # pylint: disable=import-outside-toplevel
 
-      return functools.partial(gpt3.Gpt3LayerNorm, reductions_in_fp32=False, use_bias=True)
+      return functools.partial(
+        gpt3.gpt3_layer_norm, num_features=num_features, reductions_in_fp32=False, use_bias=True
+      )
     else:
       raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block.value=}")
 
@@ -681,9 +683,7 @@ class Decoder(nn.Module):
           inputs_shape=y.shape,
           out_features_shape=cfg.vocab_size,
           weight_dtype=cfg.weight_dtype,
-          dtype=jnp.float32
-          if cfg.logits_dot_in_fp32
-          else cfg.dtype,  # for logit training stability
+          dtype=jnp.float32 if cfg.logits_dot_in_fp32 else cfg.dtype,  # for logit training stability
           kernel_axes=("embed", "vocab"),
           name="logits_dense",
           matmul_precision=self.config.matmul_precision,
@@ -819,3 +819,72 @@ class Transformer(nn.Module):
         image_embeddings=image_embeddings,
     )
     return logits
+
+class ZeroOneTransformer(nn.Module):
+  """
+  A wrapper for the base Transformer model designed to implement the Zero-1
+  FSDP optimization.
+
+  The goal of this optimization is to reduce communication overhead. In the standard
+  FSDP implementation, an all-gather operation on the model weights is performed twice
+  for each gradient accumulation microbatch (once for the forward pass, once for the backward pass).
+  This class changes that behavior. When enabled, it performs the all-gather operation
+  only *once* per full gradient accumulation step. It gathers the full weights into
+  memory, runs all the microbatch forward and backward passes, and then releases the
+  full weights. This trades higher peak memory usage for significantly reduced
+  network communication, which can improve training speed if sufficient memory is
+  available.
+  """
+
+  config: Config
+  mesh: Mesh
+  quant: Quant
+
+  def setup(self):
+    self.model = Transformer(self.config, self.mesh, self.quant)
+
+  def __call__(
+      self,
+      decoder_input_tokens: jnp.ndarray,
+      decoder_positions: jnp.ndarray,
+      decoder_segment_ids=None,
+      encoder_images: Optional[jnp.ndarray]=None,
+      enable_dropout=True,
+      model_mode=MODEL_MODE_TRAIN,
+      previous_chunk=None,
+      true_length: Optional[int] = None,
+      slot: Optional[int] = None,
+      page_state: Optional[page_manager.PageState] = None,
+      partition_spec=None,
+  ):
+    if self.is_initializing():
+      return self.model(
+          decoder_input_tokens,
+          decoder_positions,
+          decoder_segment_ids,
+          encoder_images,
+          enable_dropout,
+          model_mode,
+          previous_chunk,
+          true_length,
+          slot,
+          page_state,
+      )
+    all_model_weights = all_gather_over_fsdp(
+        self.model.variables, partition_spec, mesh=self.mesh, logical_axis_rules=self.config.logical_axis_rules
+    )
+
+    return self.model.apply(
+        all_model_weights,
+        decoder_input_tokens,
+        decoder_positions,
+        decoder_segment_ids,
+        encoder_images,
+        enable_dropout,
+        model_mode,
+        previous_chunk,
+        true_length,
+        slot,
+        page_state,
+        mutable=False,
+    )
