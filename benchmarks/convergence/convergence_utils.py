@@ -77,7 +77,7 @@ def setup_dataset(model: MaxTextModel, params: DatasetHParams):
 
 def setup_convergence_configs(model, params: ConvHParams, num_devices: int, global_batch_size: int):
     gbs = global_batch_size
-    total_steps = params.total_tokens_to_train / gbs
+    total_steps = params.total_tokens_to_train * params.training_scaleing_factor/ gbs
 
     warmup_steps = math.ceil(params.warmup_samples / gbs - 1e-6)
     decay_end_step = math.ceil(params.decay_end_samples / gbs - 1e-6)
