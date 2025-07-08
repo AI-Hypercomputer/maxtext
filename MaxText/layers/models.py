@@ -343,7 +343,10 @@ class Decoder(nn.Module):
     elif self.config.decoder_block == DecoderBlockType.GEMMA3:
       from MaxText.layers import gemma3  # pylint: disable=import-outside-toplevel
 
-      return [gemma3.Gemma3DecoderLayer]
+      if self.config.scan_layers:
+        return [gemma3.Gemma3ScannableBlock]
+      else:
+        return [gemma3.Gemma3DecoderLayer]
     elif self.config.decoder_block == DecoderBlockType.GPT3:
       from MaxText.layers import gpt3  # pylint: disable=import-outside-toplevel
 
@@ -582,12 +585,45 @@ class Decoder(nn.Module):
               deterministic,
               model_mode,
           )
+        elif cfg.decoder_block == DecoderBlockType.GEMMA3:
+          attention_pattern_length = len(gemma3.GEMMA3_ATTENTION_PATTERN)
+          scan_length = cfg.num_decoder_layers // attention_pattern_length
+          layer_call_kwargs = {
+            "bidirectional_mask": bidirectional_mask, 
+            "num_of_layers": attention_pattern_length
+          }
+
+          RemattedBlockLayer = RemattedBlockLayers[0]
+          y, _ = self.scan_decoder_layers(cfg, RemattedBlockLayer, scan_length, "layers", mesh, **layer_kwargs)(
+              y,
+              decoder_segment_ids,
+              decoder_positions,
+              deterministic,
+              model_mode,
+              **layer_call_kwargs,
+          )
+          num_remaining_layers = cfg.num_decoder_layers % attention_pattern_length
+          if num_remaining_layers > 0:
+            layer_call_kwargs = {
+              "bidirectional_mask": bidirectional_mask, 
+              "num_of_layers": num_remaining_layers
+            }
+            layer = RemattedBlockLayer(config=cfg, mesh=mesh, quant=self.quant, **layer_kwargs)
+            y = layer(
+                y,
+                decoder_segment_ids,
+                decoder_positions,
+                deterministic,
+                model_mode,
+                previous_chunk=previous_chunk,
+                page_state=page_state,
+                slot=slot,
+                **layer_call_kwargs,
+            )
         else:
           layer_call_kwargs = {}
           layer_kwargs = {}
-          if cfg.decoder_block == DecoderBlockType.GEMMA3:
-            layer_call_kwargs = {"bidirectional_mask": bidirectional_mask}
-          elif cfg.decoder_block == DecoderBlockType.LLAMA4:
+          if cfg.decoder_block == DecoderBlockType.LLAMA4:
             layer_kwargs = {
                 "nope_layer_interval": self.config.nope_layer_interval,
                 "interleave_moe_layer_step": self.config.interleave_moe_layer_step,
@@ -818,6 +854,7 @@ class Transformer(nn.Module):
     )
     return logits
 
+
 class ZeroOneTransformer(nn.Module):
   """
   A wrapper for the base Transformer model designed to implement the Zero-1
@@ -846,7 +883,7 @@ class ZeroOneTransformer(nn.Module):
       decoder_input_tokens: jnp.ndarray,
       decoder_positions: jnp.ndarray,
       decoder_segment_ids=None,
-      encoder_images: Optional[jnp.ndarray]=None,
+      encoder_images: Optional[jnp.ndarray] = None,
       enable_dropout=True,
       model_mode=MODEL_MODE_TRAIN,
       previous_chunk=None,
