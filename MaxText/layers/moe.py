@@ -25,6 +25,7 @@ import flax.linen as nn
 import jax
 from jax import ad_checkpoint as adc
 from jax.experimental import shard_map
+from jax.experimental import xla_metadata
 import jax.numpy as jnp
 from MaxText import common_types as ctypes
 from MaxText import max_logging
@@ -35,6 +36,9 @@ from MaxText.layers import initializers
 from MaxText.layers import linears
 from MaxText.layers import quantizations
 import numpy as np
+
+
+set_xla_metadata = xla_metadata.set_xla_metadata
 
 
 DISPATCH = "dispatch"
@@ -672,18 +676,19 @@ class RoutedMoE(nn.Module):
         lhs_quantize_dtype = quant_dg.fwd.dg_quantizer.lhs.numerics.get_dtype()
         rhs_quantize_dtype = quant_dg.fwd.dg_quantizer.rhs.numerics.get_dtype()
 
+      m, k, n = inputs.shape[0], inputs.shape[1], kernel.shape[2]
+      tiling = (
+          min(tile_size[0], m),
+          min(tile_size[1], k),
+          min(tile_size[2], n),
+      )
       if self.config.megablox:
-        m, k, n = inputs.shape[0], inputs.shape[1], kernel.shape[2]
         output = mblx.gmm(
             lhs=inputs,
             rhs=kernel,
             group_sizes=group_sizes,
             preferred_element_type=jnp.bfloat16,
-            tiling=(
-                min(tile_size[0], m),
-                min(tile_size[1], k),
-                min(tile_size[2], n),
-            ),
+            tiling=tiling,
             lhs_quantize_dtype=lhs_quantize_dtype,
             rhs_quantize_dtype=rhs_quantize_dtype,
         )
@@ -695,12 +700,15 @@ class RoutedMoE(nn.Module):
                 "Unsupported usecase for ragged_dot with quantized kernel."
             )
           rhs_inputs = kernel.qvalue
-        output = jax.lax.ragged_dot(
-            lhs=inputs,
-            rhs=rhs_inputs,
-            group_sizes=group_sizes,
-            preferred_element_type=jnp.bfloat16,
-        )
+        with set_xla_metadata(
+            ragged_dot_tiling=",".join([str(t) for t in tiling])
+        ):
+          output = jax.lax.ragged_dot(
+              lhs=inputs,
+              rhs=rhs_inputs,
+              group_sizes=group_sizes,
+              preferred_element_type=jnp.bfloat16,
+          )
         if isinstance(kernel, aqt.QTensor):
           # Multiply outputs by the kernely scale
           scales = jnp.take(
