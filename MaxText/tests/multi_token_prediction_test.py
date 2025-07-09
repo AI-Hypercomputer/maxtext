@@ -23,7 +23,7 @@ from jax.sharding import Mesh
 from MaxText import max_logging, pyconfig
 from MaxText import maxtext_utils
 from MaxText.globals import PKG_DIR
-from MaxText.layers import models
+from MaxText.layers.decoders import DecoderLayer
 from MaxText.layers import multi_token_prediction  # The class under test
 
 TEST_LAYER_NUM = 1
@@ -44,7 +44,7 @@ class MultiTokenPredictionLayerTest(unittest.TestCase):
 
     # Instantiate the Layer
     self.mtp_layer = multi_token_prediction.MultiTokenPredictionLayer(
-        config=self.cfg, mesh=self.mesh, layer_number=TEST_LAYER_NUM, transformer_layer_module=models.DecoderLayer
+        config=self.cfg, mesh=self.mesh, layer_number=TEST_LAYER_NUM, transformer_layer_module=DecoderLayer
     )
 
     # Dimensions directly from the config object

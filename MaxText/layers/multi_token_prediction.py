@@ -25,8 +25,8 @@ from flax import linen as nn
 
 from MaxText.common_types import Config, MODEL_MODE_TRAIN
 from MaxText.layers.attentions import dense_general
-from MaxText.layers.models import DecoderLayer
 from MaxText.layers.normalizations import rms_norm
+from MaxText.layers.decoders import DecoderLayer
 
 
 class MultiTokenPredictionLayer(nn.Module):
