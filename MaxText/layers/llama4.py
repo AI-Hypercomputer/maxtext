@@ -284,7 +284,7 @@ class Llama4MultiModalProjector(nn.Module):
     cfg = self.config
     self.linear = linears.dense_general(
         in_features_shape=cfg.vision_output_dim_for_vit,
-        out_features_shape=cfg.emb_dim,
+        out_features_shape=cfg.hidden_size_for_vit,
         dtype=cfg.dtype_mm,
         name="vit_multi_modal_projector",
         use_bias=False,
@@ -295,10 +295,10 @@ class Llama4MultiModalProjector(nn.Module):
     """Project image features to text hidden dimension.
 
     Args:
-      image_features: Input tensor of shape [batch_size*num_patches*(pixel_shuffle_ratio**2), vision_output_dim]
+      image_features: Input tensor of shape [batch_size, num_patches, (pixel_shuffle_ratio**2), vision_output_dim]
 
     Returns:
-      Tensor of shape [batch_size*num_patches*(pixel_shuffle_ratio**2), emb_dim]
+      Tensor of shape [batch_size, num_patches, (pixel_shuffle_ratio**2), vision_hidden_size]
     """
     b, t, c, d = image_features.shape
     image_features = image_features.reshape(b * t, c, d)
