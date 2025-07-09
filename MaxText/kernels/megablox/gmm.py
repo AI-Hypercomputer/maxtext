@@ -30,8 +30,8 @@ import jax.numpy as jnp
 
 # from aqt.jax.v2 import pallas as aqt_pl
 # from aqt.jax.v2.aqt_tensor import QTensor
+from qwix.core.dot_general import dot_general as qwix_dot_general
 from qwix.core.qarray import QArray
-import qwix
 from qwix.core.qarray import HowToQuantize, quantize
 
 from MaxText.kernels.megablox import common, qwix_pallas
@@ -335,17 +335,17 @@ def load_qarray(qa: QArray) -> QArray:
     ],
 )
 def gmm(
-    lhs: jnp.ndarray,
-    rhs: jnp.ndarray | QArray,
-    group_sizes: jnp.ndarray,
-    preferred_element_type: jnp.dtype = jnp.float32,
-    tiling: tuple[int, int, int] | LutFn | None = (128, 128, 128),
-    group_offset: jnp.ndarray | None = None,
-    existing_out: jnp.ndarray | None = None,
-    transpose_rhs: bool = False,
-    interpret: bool = False,
-    lhs_quantize_dtype: Literal[jnp.int4, jnp.int8] | None = None,
-    rhs_quantize_dtype: Literal[jnp.int4, jnp.int8] | None = None,
+  lhs: jnp.ndarray,
+  rhs: jnp.ndarray | QArray,
+  group_sizes: jnp.ndarray,
+  preferred_element_type: jnp.dtype = jnp.float32,
+  tiling: tuple[int, int, int] | LutFn | None = (128, 128, 128),
+  group_offset: jnp.ndarray | None = None,
+  existing_out: jnp.ndarray | None = None,
+  transpose_rhs: bool = False,
+  interpret: bool = False,
+  lhs_quantize_dtype: Literal[jnp.int4, jnp.int8] | None = None,
+  rhs_quantize_dtype: Literal[jnp.int4, jnp.int8] | None = None,
 ) -> jnp.ndarray:
   """Compute lhs[sizes[i-1]:sizes[i], :] @ rhs for each group 'i'.
 
@@ -376,7 +376,7 @@ def gmm(
     # If weight is alreeady quantized check precision.
     if rhs_quantize_dtype != rhs.qvalue.dtype:
       raise ValueError(
-          f"{rhs_quantize_dtype=} and already given quantized {rhs.qvalue.dtype=} does not have the same precision"
+        f"{rhs_quantize_dtype=} and already given quantized {rhs.qvalue.dtype=} does not have the same precision"
       )
 
   if existing_out is not None:
@@ -414,12 +414,12 @@ def gmm(
 
   # Create the metadata we need for computation.
   group_metadata, num_active_tiles = make_group_metadata(  # pylint: disable=unbalanced-tuple-unpacking
-      group_sizes=group_sizes,
-      m=m,
-      tm=tm,
-      start_group=group_offset[0],
-      num_nonzero_groups=rhs.shape[0],
-      visit_empty_groups=False,
+    group_sizes=group_sizes,
+    m=m,
+    tm=tm,
+    start_group=group_offset[0],
+    num_nonzero_groups=rhs.shape[0],
+    visit_empty_groups=False,
   )
 
   # We need to know contracting axis when we quantized lhs and rhs
@@ -510,7 +510,7 @@ def gmm(
       is_quantized = lhs_quantize_dtype or rhs_quantize_dtype
       # aqt_pl.dot_general did not handle accumulation dtype well
       # when both lhs and rhs are not quantized. A workaround is to use lax.dot_general
-      dot_general = qwix.core.dot_general if is_quantized else jax.lax.dot_general
+      dot_general = qwix_dot_general if is_quantized else jax.lax.dot_general
       acc_scratch[...] += dot_general(
           loaded_lhs,
           loaded_rhs,
@@ -590,15 +590,15 @@ def gmm(
       kernel,
       out_shape=jax.ShapeDtypeStruct((m, n), preferred_element_type),
       grid_spec=pltpu.PrefetchScalarGridSpec(
-          num_scalar_prefetch=2,
-          in_specs=[
-              lhs_block_spec,
-              rhs_block_spec,
-              in_out_block_spec,
-          ],
-          out_specs=out_block_spec,
-          grid=(tiles_n, num_active_tiles, tiles_k),
-          scratch_shapes=[pltpu.VMEM((tm, tn), jnp.float32)],
+        num_scalar_prefetch=2,
+        in_specs=[
+          lhs_block_spec,
+          rhs_block_spec,
+          in_out_block_spec,
+        ],
+        out_specs=out_block_spec,
+        grid=(tiles_n, num_active_tiles, tiles_k),
+        scratch_shapes=[pltpu.VMEM((tm, tn), jnp.float32)],
       ),
       input_output_aliases=input_output_aliases,
       compiler_params=pltpu.TPUCompilerParams(dimension_semantics=("parallel", "arbitrary", "arbitrary")),
@@ -611,13 +611,12 @@ def gmm(
   # inside kernel, e.g., if block_shape is (None, tn, tk) then a tensor of
   # shape (tn, tk) will be feteched inside kernel instead of (1, tn, tk).
   # Therefore, we need to add one to rhs_contracting_axis.
-  rhs_contracting_axis = map(lambda x: x + 1, rhs_contracting_axis)
-
+  # rhs_contracting_axis = list(map(lambda x: x + 1, rhs_contracting_axis))
   if lhs_quantize_dtype is not None:
     how = HowToQuantize(
       qtype=lhs_quantize_dtype,
       channelwise_axes=(),
-      tiled_axes={lhs_contracting_axis[0]: 1},
+      tiled_axes=dict(),
       batch_axes=(),
       scale_transpose=None,
       calibration_method="absmax",
@@ -628,7 +627,7 @@ def gmm(
     how = HowToQuantize(
       qtype=rhs_quantize_dtype,
       channelwise_axes=(),
-      tiled_axes={rhs_contracting_axis[0]: 1},
+      tiled_axes=dict(),
       batch_axes=(),
       scale_transpose=None,
       calibration_method="absmax",
@@ -636,18 +635,18 @@ def gmm(
     rhs = quantize(rhs, how)
 
   out = call_gmm(
-      group_metadata,
-      group_offset,
-      lhs,
-      rhs,
-      existing_out,
+    group_metadata,
+    group_offset,
+    lhs,
+    rhs,
+    existing_out,
   )
   if existing_out is None and num_current_groups < num_total_groups:
     out = _zero_uninitialized_memory(
-        out,
-        start_group=group_offset[0],
-        num_nonzero_groups=rhs.shape[0],
-        group_metadata=group_metadata,
+      out,
+      start_group=group_offset[0],
+      num_nonzero_groups=rhs.shape[0],
+      group_metadata=group_metadata,
     )
   return out
 

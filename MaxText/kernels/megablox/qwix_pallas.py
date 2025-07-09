@@ -23,6 +23,10 @@ ArgAndBlockSpec = collections.namedtuple('ArgAndBlockSpec', 'arg block_spec')
 # Helper predicates
 # -----------------------------------------------------------------------------#
 _is_qarray              = lambda x: isinstance(x, QArray)
+_is_blockspec          = lambda x: isinstance(x, pl.BlockSpec)
+_is_pallas_leaf = lambda x: (
+    isinstance(x, (QArray, pl.BlockSpec, TransposedQArray))
+)
 _is_transposed_qarray   = lambda x: isinstance(x, TransposedQArray)
 _is_arg_and_block_spec  = lambda x: isinstance(x, ArgAndBlockSpec)
 
@@ -78,45 +82,53 @@ def pallas_call(
 
   # If the caller passed a GridSpec, use the in_specs stored inside it.
   if grid_spec is not None:
-    if jax.__version_info__ >= (0, 4, 31):
-      in_specs = grid_spec.in_specs
-    else:  # Pre-0.4.31 kept trees flat.
-      in_specs = tree_util.tree_unflatten(grid_spec.in_specs_tree,
-                                          grid_spec.in_specs)
+    in_specs = grid_spec.in_specs
 
   @jax.jit
   def wrapped(*args):
-
     # ---------------------------------------------#
     # Prefetch scalars (special TPU grid spec)
     # ---------------------------------------------#
     prefetch_args = ()
     if isinstance(grid_spec, pltpu.PrefetchScalarGridSpec):
       prefetch_args, args = (
-          args[: grid_spec.num_scalar_prefetch],
-          args[grid_spec.num_scalar_prefetch :],
+        args[:grid_spec.num_scalar_prefetch],
+        args[grid_spec.num_scalar_prefetch:],
       )
 
     # ---------------------------------------------#
     # 1) Flatten args & specs, keeping QArray leaves
     # ---------------------------------------------#
-    flat_args,  args_treedef  = tree_util.tree_flatten(args, is_leaf=_is_qarray)
-    flat_specs, specs_treedef = tree_util.tree_flatten(in_specs)
+    flat_args, args_treedef = tree_util.tree_flatten(args, is_leaf=_is_pallas_leaf)
+    flat_specs, specs_treedef = tree_util.tree_flatten(in_specs, is_leaf=_is_pallas_leaf)
 
     # ---------------------------------------------#
     # 2) Build per-arg BlockSpecs for QArrays
     # ---------------------------------------------#
-    flat_specs = tree_util.tree_map(
-        _make_qarray_blockspec, flat_args, flat_specs, is_leaf=_is_qarray
-    )
+    def _qarray_to_blockspec(arg_qarr: QArray, proto_spec: pl.BlockSpec) -> QArray:
+      """Return a QArray-shaped tree of BlockSpecs that matches *arg_qarr*."""
+      leaf = proto_spec
+      return QArray(
+          qvalue = leaf,
+          scale = leaf if arg_qarr.scale      is not None else None,
+          zero_point = leaf if arg_qarr.zero_point is not None else None,
+          qtype = arg_qarr.qtype,
+      )
+
+    flat_specs = [
+      _qarray_to_blockspec(arg, spec) if isinstance(arg, QArray) else spec
+      for arg, spec in zip(flat_args, flat_specs)
+    ]
+
 
     # ---------------------------------------------#
     # 3) (Optional) transpose for better memory access
     # ---------------------------------------------#
     flat_pairs = tree_util.tree_map(
-        _transpose_tensor_for_memory_saving,
-        flat_args,
-        flat_specs,
+      _transpose_tensor_for_memory_saving,
+      flat_args,
+      flat_specs,
+      is_leaf=_is_pallas_leaf,
     )
 
     flat_args  = tree_util.tree_map(lambda x: x.arg,
@@ -143,15 +155,10 @@ def pallas_call(
           is_leaf=_is_transposed_qarray,
       )
       return f(*k_args)
-
-    # If caller handed us a GridSpec, make sure its in_specs field is current
+ 
     if grid_spec is not None:
-      if jax.__version_info__ >= (0, 4, 31):
-        grid_spec.in_specs = kernel_specs
-      else:
-        flat, tree = tree_util.tree_flatten(kernel_specs)
-        grid_spec.in_specs, grid_spec.in_specs_tree = tuple(flat), tree
-
+      grid_spec.in_specs = kernel_specs
+      
     # ---------------------------------------------#
     # 6) Call Pallas
     # ---------------------------------------------#
@@ -164,7 +171,5 @@ def pallas_call(
     )
 
     return compiled(*prefetch_args, *args)
-
-  # end wrapped
 
   return wrapped
