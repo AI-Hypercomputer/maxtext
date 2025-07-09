@@ -570,7 +570,7 @@ class Decoder(nn.Module):
         if remaining_layers > 0:
           logical_axis_rules_pp_as_dp = maxtext_utils.logical_axis_rules_pp_act_as_dp(self.config.logical_axis_rules)
           with self.mesh, nn.partitioning.axis_rules(logical_axis_rules_pp_as_dp):
-            y, _ = self.scan_decoder_layers(cfg, RemattedBlockLayers[0], remaining_layers, "layers", mesh)(
+            y, _ = self.scan_decoder_layers(cfg, RemattedBlockLayers[0], remaining_layers, "layers_outside_pipeline", mesh)(
                 y,
                 decoder_segment_ids,
                 decoder_positions,
