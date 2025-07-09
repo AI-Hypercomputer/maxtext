@@ -80,13 +80,13 @@ after which log out and log back in to the machine.
     ```
 
     #### Build Maxtext Docker Image with JAX AI Images (Preview)
-    We're excited to announce the preview of building Maxtext Docker images using the JAX AI Training Images, available for both TPUs and GPUs. This provides a more reliable and consistent build envir[...]
+    We're excited to announce the preview of building Maxtext Docker images using the JAX AI Training Images, available for both TPUs and GPUs. This provides a more reliable and consistent build environment.
 
     ###### What is JAX AI Images?
-    JAX AI Images provides a consistent environment for Maxtext by bundling JAX with core packages like `orbax`, `flax`, and `optax`, along with Google Cloud utilities and other essential tools. These[...]
+    JAX AI Images provides a consistent environment for Maxtext by bundling JAX with core packages like `orbax`, `flax`, and `optax`, along with Google Cloud utilities and other essential tools. These libraries are tested to ensure compatibility, providing a stable foundation for building and running Maxtext and eliminating potential conflicts due to incompatible package versions.
 
     ###### How to Use It
-    Use the `docker_build_dependency_image.sh` script to build your Maxtext Docker image with JAX AI Images. Set MODE to `stable_stack` and specify the desired `BASEIMAGE`. The `DEVICE` variable deter[...]
+    Use the `docker_build_dependency_image.sh` script to build your Maxtext Docker image with JAX AI Images. Set MODE to `stable_stack` and specify the desired `BASEIMAGE`. The `DEVICE` variable determines whether to build for TPUs or GPUs.
 
     ###### For TPUs:
     
@@ -132,7 +132,7 @@ after which log out and log back in to the machine.
       --workload ${USER}-first-job \
       --tpu-type=v5litepod-256 \
       --num-slices=1  \
-      --command "python3 -m MaxText.train MaxText/configs/base.yml run_name=${USER}-first-job base_output_directory=${BASE_OUTPUT_DIR} dataset_path=${DATASET_PATH} steps=100 per_device_batch_size=1"
+      --command "python3 -m MaxText.train MaxText/configs/base.yml base_output_directory=${BASE_OUTPUT_DIR} base_output_directory=${BASE_OUTPUT_DIR} dataset_path=${DATASET_PATH} steps=100 per_device_batch_size=1"
       ```
 
       __Using [xpk github repo](https://github.com/google/xpk.git)__
@@ -147,5 +147,5 @@ after which log out and log back in to the machine.
       --workload ${USER}-first-job \
       --tpu-type=v5litepod-256 \
       --num-slices=1  \
-      --command "python3 -m MaxText.train MaxText/configs/base.yml run_name=${USER}-first-job base_output_directory=${BASE_OUTPUT_DIR} dataset_path=${DATASET_PATH} steps=100 per_device_batch_size=1"
+      --command "python3 -m MaxText.train MaxText/configs/base.yml base_output_directory=${BASE_OUTPUT_DIR} base_output_directory=${BASE_OUTPUT_DIR} dataset_path=${DATASET_PATH} steps=100 per_device_batch_size=1"
       ```
