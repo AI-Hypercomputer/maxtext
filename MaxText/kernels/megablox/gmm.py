@@ -18,7 +18,7 @@
 
 from collections.abc import Callable
 from functools import partial
-from typing import Any, Optional, Literal
+from typing import Any, Optional, Literal, Union, Sequence
 import dataclasses
 import functools
 
@@ -28,10 +28,13 @@ from jax.experimental.pallas import tpu as pltpu
 import jax
 import jax.numpy as jnp
 
-from aqt.jax.v2 import pallas as aqt_pl
-from aqt.jax.v2.aqt_tensor import QTensor
+# from aqt.jax.v2 import pallas as aqt_pl
+# from aqt.jax.v2.aqt_tensor import QTensor
+from qwix.core.qarray import QArray
+import qwix
+from qwix.core.qarray import HowToQuantize, quantize
 
-from MaxText.kernels.megablox import common
+from MaxText.kernels.megablox import common, qwix_pallas
 
 
 def _validate_args(
@@ -291,6 +294,35 @@ def _zero_uninitialized_memory(
 LutFn = Callable[[int, int, int], Optional[tuple[int, int, int]]]
 
 
+def _materialize(buf: Union[jnp.ndarray, Sequence[jnp.ndarray]]):
+  """
+  Convert either a single buffer or a list/tuple of buffers
+  to DeviceArrays by indexing with [...]
+  """
+  if buf is None:
+    return None
+  if isinstance(buf, (list, tuple)):
+    return [b[...] for b in buf]
+  return buf[...]
+
+
+def load_qarray(qa: QArray) -> QArray:
+  """
+  Materialise a `QArray` whose internal buffers are still
+  `jax.experimental.pallas.MemoryRef`s into a `QArray`
+  whose `qvalue`, `scale`, and `zero_point` fields are
+  regular `jax.Array`s.
+
+  """
+
+  return dataclasses.replace(
+    qa,
+    qvalue=_materialize(qa.qvalue),
+    scale=_materialize(qa.scale),
+    zero_point=_materialize(qa.zero_point),
+  )
+
+
 @functools.partial(
     jax.jit,
     static_argnames=[
@@ -304,7 +336,7 @@ LutFn = Callable[[int, int, int], Optional[tuple[int, int, int]]]
 )
 def gmm(
     lhs: jnp.ndarray,
-    rhs: jnp.ndarray | QTensor,
+    rhs: jnp.ndarray | QArray,
     group_sizes: jnp.ndarray,
     preferred_element_type: jnp.dtype = jnp.float32,
     tiling: tuple[int, int, int] | LutFn | None = (128, 128, 128),
@@ -337,10 +369,10 @@ def gmm(
     A 2d, jnp.ndarray with shape [m, n].
   """
 
-  if rhs_quantize_dtype is None and isinstance(rhs, QTensor):
+  if rhs_quantize_dtype is None and isinstance(rhs, QArray):
     raise ValueError("rhs_quantize_dtype is None, but quantized rhs is given.")
 
-  if rhs_quantize_dtype is not None and isinstance(rhs, QTensor):
+  if rhs_quantize_dtype is not None and isinstance(rhs, QArray):
     # If weight is alreeady quantized check precision.
     if rhs_quantize_dtype != rhs.qvalue.dtype:
       raise ValueError(
@@ -400,8 +432,8 @@ def gmm(
   def kernel(
       group_metadata,
       group_offset,
-      lhs: jax.Array | QTensor,
-      rhs: jax.Array | QTensor,
+      lhs: jax.Array | QArray,
+      rhs: jax.Array | QArray,
       existing_out,
       out,
       acc_scratch,
@@ -456,7 +488,7 @@ def gmm(
         mask_k_rem_lhs = lambda x: x
         mask_k_rem_rhs = lambda x: x
 
-      if isinstance(lhs, QTensor):
+      if isinstance(lhs, QArray):
         # loaded_lhs = aqt_pl.load_qtensor(lhs)
         # Let qx: QTensor, qx = quant(x, 8 , ...)
         # qx.dequant() == qx.qvalue * qx.scale ~= x
@@ -464,25 +496,25 @@ def gmm(
         # to zero.
         qvalue = mask_k_rem_lhs(lhs.qvalue[...])
         loaded_lhs = dataclasses.replace(lhs, qvalue=qvalue)
-        loaded_lhs = aqt_pl.load_qtensor(loaded_lhs)
+        loaded_lhs = load_qarray(loaded_lhs)
       else:
         loaded_lhs = mask_k_rem_lhs(lhs[...]).astype(input_dtype)
 
-      if isinstance(rhs, QTensor):
+      if isinstance(rhs, QArray):
         qvalue = mask_k_rem_rhs(rhs.qvalue[...])
         loaded_rhs = dataclasses.replace(rhs, qvalue=qvalue)
-        loaded_rhs = aqt_pl.load_qtensor(loaded_rhs)
+        loaded_rhs = load_qarray(loaded_rhs)
       else:
         loaded_rhs = mask_k_rem_rhs(rhs[...]).astype(input_dtype)
 
       is_quantized = lhs_quantize_dtype or rhs_quantize_dtype
       # aqt_pl.dot_general did not handle accumulation dtype well
       # when both lhs and rhs are not quantized. A workaround is to use lax.dot_general
-      dot_general = aqt_pl.dot_general if is_quantized else jax.lax.dot_general
+      dot_general = qwix.core.dot_general if is_quantized else jax.lax.dot_general
       acc_scratch[...] += dot_general(
           loaded_lhs,
           loaded_rhs,
-          preferred_element_type=jnp.float32,
+          # preferred_element_type=jnp.float32,
           dimension_numbers=dot_general_dims,
       )
       if is_last_k_tile:
@@ -540,7 +572,7 @@ def gmm(
     rhs_block_spec = pl.BlockSpec((None, tk, tn), rhs_transform_indices)
 
   lhs_bytes = lhs.size * lhs.itemsize
-  if isinstance(rhs, QTensor):
+  if isinstance(rhs, QArray):
     rhs_bytes = (k * n) * rhs.qvalue.itemsize  # ignore scale factor as its size marginal.
   else:
     rhs_bytes = (k * n) * rhs.itemsize  # We don't read all of rhs
@@ -551,7 +583,7 @@ def gmm(
   flops = 2 * m * k * n
   cost_estimate = pl.CostEstimate(flops=flops, bytes_accessed=bytes_accessed, transcendentals=0)
   if lhs_quantize_dtype is not None or rhs_quantize_dtype is not None:
-    pallas_call_fn = aqt_pl.pallas_call
+    pallas_call_fn = qwix_pallas.pallas_call
   else:
     pallas_call_fn = pl.pallas_call
   call_gmm = pallas_call_fn(
@@ -582,12 +614,26 @@ def gmm(
   rhs_contracting_axis = map(lambda x: x + 1, rhs_contracting_axis)
 
   if lhs_quantize_dtype is not None:
-    lhs_quantize_bits = 4 if lhs_quantize_dtype == jnp.int4 else 8
-    lhs = aqt_pl.quant(lhs, lhs_quantize_bits, lhs_contracting_axis)
+    how = HowToQuantize(
+      qtype=lhs_quantize_dtype,
+      channelwise_axes=(),
+      tiled_axes={lhs_contracting_axis[0]: 1},
+      batch_axes=(),
+      scale_transpose=None,
+      calibration_method="absmax",
+    )
+    lhs = quantize(lhs, how)
 
-  if not isinstance(rhs, QTensor) and rhs_quantize_dtype is not None:
-    rhs_quantize_bits = 4 if rhs_quantize_dtype == jnp.int4 else 8
-    rhs = aqt_pl.quant(rhs, rhs_quantize_bits, list(rhs_contracting_axis))
+  if not isinstance(rhs, QArray) and rhs_quantize_dtype is not None:
+    how = HowToQuantize(
+      qtype=rhs_quantize_dtype,
+      channelwise_axes=(),
+      tiled_axes={rhs_contracting_axis[0]: 1},
+      batch_axes=(),
+      scale_transpose=None,
+      calibration_method="absmax",
+    )
+    rhs = quantize(rhs, how)
 
   out = call_gmm(
       group_metadata,
