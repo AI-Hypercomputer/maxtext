@@ -190,7 +190,7 @@ def validate_keys(keys):
   if keys["num_experts"] > 1:
     validate_sparse_matmul_parallelism(keys)
     validate_deepseek_moe(keys)
-    assert (keys["decoder_block"] != "qwen3"), "Qwen3 MoE mode has not been tested, please set num_experts to 1."
+    assert keys["decoder_block"] != "qwen3", "Qwen3 MoE mode has not been tested, please set num_experts to 1."
 
   if keys["use_multimodal"]:
     validate_multimodal_model_name(keys["model_name"])
@@ -207,9 +207,9 @@ def validate_tokenizer(keys):
 
 def validate_constant_bound(keys):
   if keys["constant_bound_config"] == "":
-    keys["constant_bound_config"]=[]
+    keys["constant_bound_config"] = []
   else:
-    value_list = keys["constant_bound_config"].split(',')
+    value_list = keys["constant_bound_config"].split(",")
     keys["constant_bound_config"] = list(map(float, value_list))
   assert (
       len(keys["constant_bound_config"]) == 0 or len(keys["constant_bound_config"]) == 6
@@ -940,10 +940,12 @@ def validate_sparse_matmul_parallelism(raw_keys):
     raise ValueError(
         f"The expert dimension {raw_keys['num_experts']} is not divisible by expert parallelism setting {expert_parallelism}."
     )
-  if using_pipeline_parallelism(raw_keys) and raw_keys["pipeline_parallel_layers"] is True and raw_keys["model_fsdp_ag_once"] is True:
-    raise ValueError(
-        "You should use the pipeline_fsdp_ag_once = True and leave model_fsdp_ag_once = False."
-    )
+  if (
+      using_pipeline_parallelism(raw_keys)
+      and raw_keys["pipeline_parallel_layers"] is True
+      and raw_keys["model_fsdp_ag_once"] is True
+  ):
+    raise ValueError("You should use the pipeline_fsdp_ag_once = True and leave model_fsdp_ag_once = False.")
 
 
 def create_new_logical_axis_rules(old_logical_axis_rules, new_logical_axis_rules):

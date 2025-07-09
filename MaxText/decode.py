@@ -140,12 +140,12 @@ def main(argv: Sequence[str]) -> None:
   for i in range(_NUM_STREAMS):
     with jax.profiler.StepTraceAnnotation("prefill", stream=i):
       prefill_result, first_token = engine.prefill(
-        params=params,
-        padded_tokens=tokens,
-        images=processor_output.pixel_values,
-        true_length=true_length,
-        rng=rng_prefill,
-        slot=i,
+          params=params,
+          padded_tokens=tokens,
+          images=processor_output.pixel_values,
+          true_length=true_length,
+          rng=rng_prefill,
+          slot=i,
       )
     prefill_result_list.append(prefill_result)
     first_token_list.append(first_token)
@@ -187,6 +187,7 @@ def main(argv: Sequence[str]) -> None:
     prof.deactivate(blocking_object=output)
 
   prof.post_process()
+
 
 def _validate_config(config):
   assert config.load_full_state_path == "", (

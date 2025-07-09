@@ -536,62 +536,102 @@ def QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING(config, scan_layers=False):
 
   if scan_layers:
     # Common Attention and Norms for both Dense and MoE
-    mapping.update({
-        "params-decoder-layers-pre_self_attention_layer_norm-scale": [f"model.layers.{i}.input_layernorm.weight" for i in range(n_layers)],
-        "params-decoder-layers-self_attention-query-kernel": [f"model.layers.{i}.self_attn.q_proj.weight" for i in range(n_layers)],
-        "params-decoder-layers-self_attention-key-kernel": [f"model.layers.{i}.self_attn.k_proj.weight" for i in range(n_layers)],
-        "params-decoder-layers-self_attention-value-kernel": [f"model.layers.{i}.self_attn.v_proj.weight" for i in range(n_layers)],
-        "params-decoder-layers-self_attention-out-kernel": [f"model.layers.{i}.self_attn.o_proj.weight" for i in range(n_layers)],
-        "params-decoder-layers-self_attention-query_norm-scale": [f"model.layers.{i}.self_attn.q_norm.weight" for i in range(n_layers)],
-        "params-decoder-layers-self_attention-key_norm-scale": [f"model.layers.{i}.self_attn.k_norm.weight" for i in range(n_layers)],
-        "params-decoder-layers-post_self_attention_layer_norm-scale": [f"model.layers.{i}.post_attention_layernorm.weight" for i in range(n_layers)],
-    })
+    mapping.update(
+        {
+            "params-decoder-layers-pre_self_attention_layer_norm-scale": [
+                f"model.layers.{i}.input_layernorm.weight" for i in range(n_layers)
+            ],
+            "params-decoder-layers-self_attention-query-kernel": [
+                f"model.layers.{i}.self_attn.q_proj.weight" for i in range(n_layers)
+            ],
+            "params-decoder-layers-self_attention-key-kernel": [
+                f"model.layers.{i}.self_attn.k_proj.weight" for i in range(n_layers)
+            ],
+            "params-decoder-layers-self_attention-value-kernel": [
+                f"model.layers.{i}.self_attn.v_proj.weight" for i in range(n_layers)
+            ],
+            "params-decoder-layers-self_attention-out-kernel": [
+                f"model.layers.{i}.self_attn.o_proj.weight" for i in range(n_layers)
+            ],
+            "params-decoder-layers-self_attention-query_norm-scale": [
+                f"model.layers.{i}.self_attn.q_norm.weight" for i in range(n_layers)
+            ],
+            "params-decoder-layers-self_attention-key_norm-scale": [
+                f"model.layers.{i}.self_attn.k_norm.weight" for i in range(n_layers)
+            ],
+            "params-decoder-layers-post_self_attention_layer_norm-scale": [
+                f"model.layers.{i}.post_attention_layernorm.weight" for i in range(n_layers)
+            ],
+        }
+    )
 
     if num_experts > 1:
       # MoE MLP layers
-      mapping.update({
-          "params-decoder-layers-moe_block-gate-kernel": [f"model.layers.{i}.mlp.gate.weight" for i in range(n_layers)],
-          # NOTE: The conversion script needs to handle unstacking on both layer and expert axes.
-          "params-decoder-layers-moe_block-wi_0-kernel": [[f"model.layers.{i}.mlp.experts.{j}.gate_proj.weight" for j in range(num_experts)] for i in range(n_layers)],
-          "params-decoder-layers-moe_block-wi_1-kernel": [[f"model.layers.{i}.mlp.experts.{j}.up_proj.weight" for j in range(num_experts)] for i in range(n_layers)],
-          "params-decoder-layers-moe_block-wo-kernel": [[f"model.layers.{i}.mlp.experts.{j}.down_proj.weight" for j in range(num_experts)] for i in range(n_layers)],
-      })
+      mapping.update(
+          {
+              "params-decoder-layers-moe_block-gate-kernel": [f"model.layers.{i}.mlp.gate.weight" for i in range(n_layers)],
+              # NOTE: The conversion script needs to handle unstacking on both layer and expert axes.
+              "params-decoder-layers-moe_block-wi_0-kernel": [
+                  [f"model.layers.{i}.mlp.experts.{j}.gate_proj.weight" for j in range(num_experts)] for i in range(n_layers)
+              ],
+              "params-decoder-layers-moe_block-wi_1-kernel": [
+                  [f"model.layers.{i}.mlp.experts.{j}.up_proj.weight" for j in range(num_experts)] for i in range(n_layers)
+              ],
+              "params-decoder-layers-moe_block-wo-kernel": [
+                  [f"model.layers.{i}.mlp.experts.{j}.down_proj.weight" for j in range(num_experts)] for i in range(n_layers)
+              ],
+          }
+      )
     else:
       # Dense MLP layers
-      mapping.update({
-          "params-decoder-layers-mlp-wi_0-kernel": [f"model.layers.{i}.mlp.gate_proj.weight" for i in range(n_layers)],
-          "params-decoder-layers-mlp-wi_1-kernel": [f"model.layers.{i}.mlp.up_proj.weight" for i in range(n_layers)],
-          "params-decoder-layers-mlp-wo-kernel": [f"model.layers.{i}.mlp.down_proj.weight" for i in range(n_layers)],
-      })
+      mapping.update(
+          {
+              "params-decoder-layers-mlp-wi_0-kernel": [f"model.layers.{i}.mlp.gate_proj.weight" for i in range(n_layers)],
+              "params-decoder-layers-mlp-wi_1-kernel": [f"model.layers.{i}.mlp.up_proj.weight" for i in range(n_layers)],
+              "params-decoder-layers-mlp-wo-kernel": [f"model.layers.{i}.mlp.down_proj.weight" for i in range(n_layers)],
+          }
+      )
   else:  # not scan_layers
     for i in range(n_layers):
       # Common Attention and Norms
-      mapping.update({
-          f"params-decoder-layers_{i}-pre_self_attention_layer_norm-scale": f"model.layers.{i}.input_layernorm.weight",
-          f"params-decoder-layers_{i}-self_attention-query-kernel": f"model.layers.{i}.self_attn.q_proj.weight",
-          f"params-decoder-layers_{i}-self_attention-key-kernel": f"model.layers.{i}.self_attn.k_proj.weight",
-          f"params-decoder-layers_{i}-self_attention-value-kernel": f"model.layers.{i}.self_attn.v_proj.weight",
-          f"params-decoder-layers_{i}-self_attention-out-kernel": f"model.layers.{i}.self_attn.o_proj.weight",
-          f"params-decoder-layers_{i}-self_attention-query_norm-scale": f"model.layers.{i}.self_attn.q_norm.weight",
-          f"params-decoder-layers_{i}-self_attention-key_norm-scale": f"model.layers.{i}.self_attn.k_norm.weight",
-          f"params-decoder-layers_{i}-post_self_attention_layer_norm-scale": f"model.layers.{i}.post_attention_layernorm.weight",
-      })
+      mapping.update(
+          {
+              f"params-decoder-layers_{i}-pre_self_attention_layer_norm-scale": f"model.layers.{i}.input_layernorm.weight",
+              f"params-decoder-layers_{i}-self_attention-query-kernel": f"model.layers.{i}.self_attn.q_proj.weight",
+              f"params-decoder-layers_{i}-self_attention-key-kernel": f"model.layers.{i}.self_attn.k_proj.weight",
+              f"params-decoder-layers_{i}-self_attention-value-kernel": f"model.layers.{i}.self_attn.v_proj.weight",
+              f"params-decoder-layers_{i}-self_attention-out-kernel": f"model.layers.{i}.self_attn.o_proj.weight",
+              f"params-decoder-layers_{i}-self_attention-query_norm-scale": f"model.layers.{i}.self_attn.q_norm.weight",
+              f"params-decoder-layers_{i}-self_attention-key_norm-scale": f"model.layers.{i}.self_attn.k_norm.weight",
+              f"params-decoder-layers_{i}-post_self_attention_layer_norm-scale": f"model.layers.{i}.post_attention_layernorm.weight",
+          }
+      )
       if num_experts > 1:
         # MoE MLP layers
         # NOTE: The conversion script needs to handle splitting the expert tensor along axis 0.
-        mapping.update({
-            f"params-decoder-layers_{i}-moe_block-gate-kernel": f"model.layers.{i}.mlp.gate.weight",
-            f"params-decoder-layers_{i}-moe_block-wi_0-kernel": [f"model.layers.{i}.mlp.experts.{j}.gate_proj.weight" for j in range(num_experts)],
-            f"params-decoder-layers_{i}-moe_block-wi_1-kernel": [f"model.layers.{i}.mlp.experts.{j}.up_proj.weight" for j in range(num_experts)],
-            f"params-decoder-layers_{i}-moe_block-wo-kernel": [f"model.layers.{i}.mlp.experts.{j}.down_proj.weight" for j in range(num_experts)],
-        })
+        mapping.update(
+            {
+                f"params-decoder-layers_{i}-moe_block-gate-kernel": f"model.layers.{i}.mlp.gate.weight",
+                f"params-decoder-layers_{i}-moe_block-wi_0-kernel": [
+                    f"model.layers.{i}.mlp.experts.{j}.gate_proj.weight" for j in range(num_experts)
+                ],
+                f"params-decoder-layers_{i}-moe_block-wi_1-kernel": [
+                    f"model.layers.{i}.mlp.experts.{j}.up_proj.weight" for j in range(num_experts)
+                ],
+                f"params-decoder-layers_{i}-moe_block-wo-kernel": [
+                    f"model.layers.{i}.mlp.experts.{j}.down_proj.weight" for j in range(num_experts)
+                ],
+            }
+        )
       else:
         # Dense MLP layers
-        mapping.update({
-            f"params-decoder-layers_{i}-mlp-wi_0-kernel": f"model.layers.{i}.mlp.gate_proj.weight",
-            f"params-decoder-layers_{i}-mlp-wi_1-kernel": f"model.layers.{i}.mlp.up_proj.weight",
-            f"params-decoder-layers_{i}-mlp-wo-kernel": f"model.layers.{i}.mlp.down_proj.weight",
-        })
+        mapping.update(
+            {
+                f"params-decoder-layers_{i}-mlp-wi_0-kernel": f"model.layers.{i}.mlp.gate_proj.weight",
+                f"params-decoder-layers_{i}-mlp-wi_1-kernel": f"model.layers.{i}.mlp.up_proj.weight",
+                f"params-decoder-layers_{i}-mlp-wo-kernel": f"model.layers.{i}.mlp.down_proj.weight",
+            }
+        )
 
   return mapping
 
@@ -659,7 +699,6 @@ def QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, scan_layers=False, saving_to_hf=Fa
         for key in moe_kernel_hooks:
           mapping[f"params-decoder-layers_{i}-{key}"] = reshape_kernel
   return mapping
-
 
 
 PARAM_MAPPING = {

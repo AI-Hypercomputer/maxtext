@@ -595,6 +595,7 @@ class MaxEngine(engine_api.Engine):
   def prefill_multisampling(
       self,  # pytype: disable=signature-mismatch
       *,
+      # pylint: disable=arguments-differ
       params: Params,
       padded_tokens: jax.Array,
       true_length: int,

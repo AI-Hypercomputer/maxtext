@@ -30,6 +30,7 @@ from jax.sharding import PartitionSpec as P
 from MaxText import multihost_dataloading
 from MaxText import pyconfig
 
+
 class SyntheticDataIterator:
   """Creates a synthetic data iterator for performance testing work"""
 

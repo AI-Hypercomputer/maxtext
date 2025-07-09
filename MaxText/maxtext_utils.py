@@ -911,14 +911,8 @@ def create_device_mesh(config, devices=None):
   """Creates a device mesh with each slice in its own data parallel group. If there is only one slice, uses two replicas"""
   if devices is None:
     devices = jax.devices()
-  if (
-      config.subslice_shape
-      and config.enable_single_controller
-      and config.num_slices == 1
-  ):
-    max_logging.log(
-        f"Trying to create a subslice with shape: {config.subslice_shape}"
-    )
+  if config.subslice_shape and config.enable_single_controller and config.num_slices == 1:
+    max_logging.log(f"Trying to create a subslice with shape: {config.subslice_shape}")
     subslice_shape = tuple(int(x) for x in config.subslice_shape.split(","))
     device_coords = [device.coords for device in devices]
     device_coords_np = np.array(device_coords)
@@ -1096,6 +1090,7 @@ def get_formatted_sharding_annotations(params, mesh=None):
   # Join all the collected lines into a single string, separated by newlines.
   return "\n".join(annotation_lines)
 
+
 def get_physical_spec_no_fsdp(full_logical, mesh, logical_axis_rules):
   """
   Generates a physical sharding spec for fully replicated weights.
@@ -1119,7 +1114,6 @@ def get_physical_spec_no_fsdp(full_logical, mesh, logical_axis_rules):
     layout where parameters are fully gathered (replicated) across the 'fsdp'
     mesh axis.
   """
-
 
   def remove_fsdp_sharding(sharding_tree):
     """Recursively traverses the sharding tree to remove fsdp axes."""

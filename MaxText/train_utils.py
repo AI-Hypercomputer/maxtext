@@ -24,11 +24,13 @@ from MaxText import optimizers
 from MaxText import checkpointing
 from MaxText import maxtext_utils
 
+
 def get_transformer_model(config, mesh, quant):
   if config.model_fsdp_ag_once:
     return models.ZeroOneTransformer(config, mesh, quant=quant)
   else:
     return models.Transformer(config, mesh, quant=quant)
+
 
 def create_model(config, mesh):
   """Instantiates and returns the model object, sharded across the mesh."""
@@ -36,6 +38,7 @@ def create_model(config, mesh):
   quant = quantizations.configure_quantization(config)
   model = get_transformer_model(config, mesh, quant)
   return model
+
 
 def create_training_tools(config, model, mesh):
   """Creates the init_rng, optimizer, learning rate schedule, and checkpoint manager."""
