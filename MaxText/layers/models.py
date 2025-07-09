@@ -37,7 +37,7 @@ from MaxText import maxtext_utils
 from MaxText import multimodal_utils
 from MaxText.layers.attentions import Attention
 from MaxText.layers.normalizations import rms_norm
-from MaxText.layers.embeddings import positional_embedding_as_linen, Embed
+from MaxText.layers.embeddings import attend_on_embedding, embed_as_linen, positional_embedding_as_linen
 from MaxText.layers.quantizations import AqtQuantization as Quant
 from MaxText.maxtext_utils import all_gather_over_fsdp
 
@@ -517,9 +517,9 @@ class Decoder(nn.Module):
       y = positional_embedding_as_linen(embedding_dims=cfg.base_emb_dim)(y, decoder_positions)
 
     if cfg.trainable_position_size > 0:
-      y += Embed(
+      y += embed_as_linen(
           num_embeddings=cfg.trainable_position_size,
-          features=cfg.emb_dim,
+          num_features=cfg.emb_dim,
           dtype=cfg.dtype,
           embedding_init=nn.initializers.normal(stddev=1.0),
           name="position_embedder",
@@ -693,7 +693,12 @@ class Decoder(nn.Module):
     # [batch, length, emb_dim] -> [batch, length, vocab_size]
     if cfg.logits_via_embedding:
       # Use the transpose of embedding matrix for logit transform.
-      logits = self.shared_embedding.attend(y)
+      embedding_table = self.shared_embedding.variables["params"]["embedding"]
+      if isinstance(embedding_table, nn.spmd.LogicallyPartitioned):
+        embedding_table = embedding_table.unbox()
+      attend_dtype = jnp.float32 if cfg.logits_dot_in_fp32 else cfg.dtype
+      logits = attend_on_embedding(y, embedding_table, attend_dtype, self.config)
+
       if self.config.normalize_embedding_logits:
         # Correctly normalize pre-softmax logits for this shared case.
         logits = logits / jnp.sqrt(y.shape[-1])
@@ -778,9 +783,9 @@ class Transformer(nn.Module):
 
     cfg = self.config
     mesh = self.mesh
-    self.shared_embedding = Embed(
+    self.shared_embedding = embed_as_linen(
         num_embeddings=cfg.vocab_size,
-        features=cfg.emb_dim,
+        num_features=cfg.emb_dim,
         dtype=cfg.dtype,
         attend_dtype=jnp.float32 if cfg.logits_dot_in_fp32 else cfg.dtype,  # for logit training stability
         embedding_init=nn.initializers.normal(stddev=1.0),
