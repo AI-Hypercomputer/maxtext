@@ -30,7 +30,8 @@ from flax import linen as nn
 from MaxText.layers import attentions
 from MaxText.layers import initializers
 from MaxText.layers import linears
-from MaxText.layers import models
+from MaxText.common_types import Config
+from MaxText.layers.normalizations import rms_norm
 from MaxText.layers import moe
 from MaxText.layers import quantizations
 from MaxText.layers.quantizations import AqtQuantization as Quant
@@ -57,7 +58,7 @@ def self_attention_with_norm(
 ):
   """self-attention with normalization"""
   # Normalization
-  lnx_rms = models.rms_norm(
+  lnx_rms = rms_norm(
       num_features=inputs.shape[-1],
       dtype=cfg.dtype,
       weight_dtype=cfg.weight_dtype,
@@ -115,7 +116,7 @@ def self_attention_with_norm(
   intermediate_inputs = inputs + attention_lnx
 
   # Normalization
-  hidden_states = models.rms_norm(
+  hidden_states = rms_norm(
       num_features=intermediate_inputs.shape[-1],
       dtype=cfg.dtype,
       weight_dtype=cfg.weight_dtype,
@@ -147,7 +148,7 @@ def post_process(cfg, layer_output, sow):
 class DeepSeekDenseLayer(nn.Module):
   """DeepSeek-style dense layer with Multi-Head Latent Attention."""
 
-  config: models.Config
+  config: Config
   mesh: Mesh
   quant: Optional[Quant] = None
 
@@ -211,7 +212,7 @@ class DeepSeekMoELayer(nn.Module):
   Uses a bias in routing instead of load balancing loss.
   """
 
-  config: models.Config
+  config: Config
   mesh: Mesh
   quant: Optional[Quant] = None
 
