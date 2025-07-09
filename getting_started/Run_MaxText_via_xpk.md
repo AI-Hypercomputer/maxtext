@@ -132,7 +132,7 @@ after which log out and log back in to the machine.
       --workload ${USER}-first-job \
       --tpu-type=v5litepod-256 \
       --num-slices=1  \
-      --command "python3 -m MaxText.train MaxText/configs/base.yml base_output_directory=${BASE_OUTPUT_DIR} dataset_path=${DATASET_PATH} steps=100 per_device_batch_size=1"
+      --command "python3 -m MaxText.train MaxText/configs/base.yml run_name=${USER}-first-job base_output_directory=${BASE_OUTPUT_DIR} dataset_path=${DATASET_PATH} steps=100 per_device_batch_size=1"
       ```
 
       __Using [xpk github repo](https://github.com/google/xpk.git)__
@@ -147,5 +147,5 @@ after which log out and log back in to the machine.
       --workload ${USER}-first-job \
       --tpu-type=v5litepod-256 \
       --num-slices=1  \
-      --command "python3 -m MaxText.train MaxText/configs/base.yml base_output_directory=${BASE_OUTPUT_DIR} dataset_path=${DATASET_PATH} steps=100 per_device_batch_size=1"
+      --command "python3 -m MaxText.train MaxText/configs/base.yml run_name=${USER}-first-job base_output_directory=${BASE_OUTPUT_DIR} dataset_path=${DATASET_PATH} steps=100 per_device_batch_size=1"
       ```
