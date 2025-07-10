@@ -26,6 +26,7 @@ import jax
 import unittest
 import jax.numpy as jnp
 from jax.sharding import Mesh
+from jax.experimental import mesh_utils
 from MaxText.globals import PKG_DIR
 from MaxText import pyconfig
 from MaxText import maxtext_utils
@@ -154,6 +155,7 @@ class Llama4UnfoldConvolutionTest(unittest.TestCase):
     image_size = 336
     patch_size = 14
     hidden_size = 1408
+    matmul_precision = "float32"
 
     # Create random input tensor
     inputs_pt = torch.randn(batch_size, num_channels, image_size, image_size)
@@ -200,6 +202,7 @@ class Llama4UnfoldConvolutionTest(unittest.TestCase):
         self.num_channels_for_vit = 3
         self.patch_size_for_vit = patch_size
         self.per_device_batch_size = batch_size
+        self.matmul_precision = matmul_precision
 
     # Initialize JAX model
     jax_model = llama4.Llama4UnfoldConvolution(JaxConfig())
@@ -247,6 +250,7 @@ class Llama4VisionPixelShuffleMLPTest(unittest.TestCase):
     projector_output_dim = 4096
     pixel_shuffle_ratio = 0.5
     projector_dropout = 0.0
+    matmul_precision = "float32"
 
     def pixel_shuffle(input_tensor, shuffle_ratio):
       # input_tensor: [batch_size, num_patches, channels]
@@ -330,6 +334,7 @@ class Llama4VisionPixelShuffleMLPTest(unittest.TestCase):
         self.projector_input_dim_for_vit = projector_input_dim
         self.projector_output_dim_for_vit = projector_output_dim
         self.pixel_shuffle_ratio_for_vit = pixel_shuffle_ratio
+        self.matmul_precision = matmul_precision
 
     # Initialize JAX model
     jax_model = llama4.Llama4VisionPixelShuffleMLP(JaxConfig())
@@ -349,7 +354,9 @@ class Llama4VisionPixelShuffleMLPTest(unittest.TestCase):
 
 
 class Llama4MultiModalProjectorTest(unittest.TestCase):
-  """Test for the Llama4 Multi Modal Projector implementation."""
+  """Test for the Llama4 Multi Modal Projector implementation.
+  # Test parameters follows config https://huggingface.co/meta-llama/Llama-4-Scout-17B-16E-Instruct/blob/main/config.json
+  """
 
   def __copy_weights(self, pt_model, params):
     """Copy weights from PyTorch model to JAX model.
@@ -372,6 +379,11 @@ class Llama4MultiModalProjectorTest(unittest.TestCase):
     pixel_shuffle_ratio = 0.5
     vision_output_dim = 4096
     hidden_size = 5120
+    dtype_mm = jnp.float32
+    matmul_precision = "float32"
+    mesh_shape_1d = (len(jax.devices()),)
+    mesh_axes = ["data"]
+    mesh = Mesh(mesh_utils.create_device_mesh(mesh_shape_1d), mesh_axes)
 
     # PyTorch implementation
     class VisionConfig:
@@ -407,7 +419,8 @@ class Llama4MultiModalProjectorTest(unittest.TestCase):
 
     # Create random input tensor
     # Shape: [batch_size*num_patches*(pixel_shuffle_ratio**2), vision_output_dim]
-    inputs_pt = torch.randn(batch_size * num_patches * int(pixel_shuffle_ratio**2), vision_output_dim)
+    inputs = torch.randn(batch_size, num_patches, int(pixel_shuffle_ratio**2), vision_output_dim)
+    inputs_pt = inputs.reshape(batch_size * num_patches * int(pixel_shuffle_ratio**2), vision_output_dim)
 
     # Initialize PyTorch model
     pt_model = Llama4MultiModalProjector(Config())
@@ -418,18 +431,21 @@ class Llama4MultiModalProjectorTest(unittest.TestCase):
     class JaxConfig:
 
       def __init__(self):
-        self.emb_dim = hidden_size
-        self.dtype_mm = jnp.float32
+        self.dtype_mm = dtype_mm
+        self.matmul_precision = matmul_precision
+        self.vision_output_dim_for_vit = vision_output_dim
+        self.hidden_size_for_vit = hidden_size
 
     # Initialize JAX model
-    jax_model = llama4.Llama4MultiModalProjector(JaxConfig())
-    params = jax_model.init(jax.random.PRNGKey(0), to_jax(inputs_pt))
+    jax_model = llama4.Llama4MultiModalProjector(JaxConfig(), mesh)
+    params = jax_model.init(jax.random.PRNGKey(0), to_jax(inputs))
 
     # Copy weights from PyTorch to JAX
     pt_params = self.__copy_weights(pt_model, params)
 
     # Run JAX forward pass with updated params
-    jax_output = jax_model.apply(pt_params, to_jax(inputs_pt))
+    jax_output = jax_model.apply(pt_params, to_jax(inputs))
+    jax_output = jax_output.reshape(batch_size * num_patches * int(pixel_shuffle_ratio**2), hidden_size)
 
     # Compare shapes
     self.assertEqual(pt_output.shape, jax_output.shape)
