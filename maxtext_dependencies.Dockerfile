@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:experimental
 # Use Python 3.10 as the base image
-FROM python:3.10-slim-bullseye
+FROM python:3.12-slim-bullseye
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y curl gnupg
