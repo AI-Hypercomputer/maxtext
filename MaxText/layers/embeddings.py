@@ -862,7 +862,7 @@ class LlamaVisionRotaryEmbedding(nnx.Module):
     inputs_complex = inputs_reshaped[..., 0] + 1j * inputs_reshaped[..., 1]
 
     # Reshape freqs_ci for broadcasting
-    freqs_ci = self.freqs_ci[jnp.newaxis, :, :, :]
+    freqs_ci = self.freqs_cis[jnp.newaxis, :, :, :]
 
     # Apply rotary transformation
     rotated = inputs_complex * freqs_ci
