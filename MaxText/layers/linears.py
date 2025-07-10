@@ -172,12 +172,12 @@ class DenseGeneral(nnx.Module):
       kernel_shape = self.in_features_shape + self.out_features_shape
       kernel = jnp.zeros(kernel_shape, dtype=self.dtype)
     else:
-      kernel = jnp.asarray(self.kernel[...], self.dtype)
-
-    # Move logit_dense kernel to device if parameter offloading is enabled
-    if self.parameter_memory_host_offload:
-      max_logging.log("linear.py: Moving parameter logits_dense kernel to device")
-      kernel = jax.device_put(kernel, jax._src.sharding_impls.TransferToMemoryKind("device"))
+      kernel = self.kernel[...]
+      # Move logit_dense kernel to device if parameter offloading is enabled
+      if self.parameter_memory_host_offload:
+        max_logging.log("linear.py: Moving parameter logits_dense kernel to device")
+        kernel = jax.device_put(kernel, jax._src.sharding_impls.TransferToMemoryKind("device"))
+      kernel = jnp.asarray(kernel, self.dtype)
 
     contract_ind = tuple(range(0, len(self.axis)))
     output = _compute_dot_general(
