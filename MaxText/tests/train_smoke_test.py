@@ -21,12 +21,15 @@ import unittest
 from absl.testing import absltest
 
 from MaxText.train import main as train_main
-from MaxText.globals import PKG_DIR
+from MaxText.globals import PKG_DIR, has_gpu, has_tpu
+
+only_cpu = has_gpu() or has_tpu()
 
 
 class Train(unittest.TestCase):
   """Smoke test G3 only"""
 
+  @unittest.skipIf(only_cpu, "Only interpret mode is supported on CPU backend")
   def test_tiny_config(self):
     test_tmpdir = os.environ.get("TEST_TMPDIR")  # pylint: disable=unused-variable
     train_main(

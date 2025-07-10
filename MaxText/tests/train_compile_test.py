@@ -23,7 +23,9 @@ from tempfile import gettempdir
 import pytest
 
 from MaxText.train_compile import main as train_compile_main
-from MaxText.globals import PKG_DIR
+from MaxText.globals import PKG_DIR, has_tpu
+
+tpu_present = has_tpu()
 
 
 class TrainCompile(unittest.TestCase):
@@ -124,7 +126,8 @@ class TrainCompile(unittest.TestCase):
         )
     )
 
-  @pytest.mark.cpu_only
+  @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_sequence_parallelism(self):
     temp_dir = gettempdir()
     compiled_trainstep_file = os.path.join(temp_dir, "test_compiled.pickle")
