@@ -229,6 +229,7 @@ class Gemma3ScannableBlock(nn.Module):
       slot=None,
       page_state=None,
       previous_chunk=None,
+      bidirectional_mask=None,
   ):
 
     cfg = self.config
@@ -255,6 +256,7 @@ class Gemma3ScannableBlock(nn.Module):
           previous_chunk=previous_chunk,
           page_state=page_state,
           slot=slot,
+          bidirectional_mask=None,
       )
       if cfg.scan_layers:
         y = y[0]
