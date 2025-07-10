@@ -23,7 +23,7 @@ from absl.testing import absltest
 from MaxText.train import main as train_main
 from MaxText.globals import PKG_DIR, has_gpu, has_tpu
 
-only_cpu = has_gpu() or has_tpu()
+cpu_only = not has_gpu() and not has_tpu()
 
 
 class Train(unittest.TestCase):

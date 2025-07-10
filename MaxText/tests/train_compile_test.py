@@ -23,10 +23,10 @@ from tempfile import gettempdir
 import pytest
 
 from MaxText.train_compile import main as train_compile_main
-from MaxText.globals import PKG_DIR, has_tpu
+from MaxText.globals import PKG_DIR, has_tpu, has_gpu
 
 tpu_present = has_tpu()
-
+cpu_only = not has_gpu() and not has_tpu()
 
 class TrainCompile(unittest.TestCase):
   """Tests for the Ahead of Time Compilation functionality, train_compile.py"""

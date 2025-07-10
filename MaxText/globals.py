@@ -71,4 +71,10 @@ def get_devices(
     return devices
 
 
-__all__ = ["DEFAULT_OCDBT_TARGET_DATA_FILE_SIZE", "EPS", "PKG_DIR", "device_presence", "get_devices"]
+__all__ = [
+    "DEFAULT_OCDBT_TARGET_DATA_FILE_SIZE",
+    "EPS",
+    "PKG_DIR",
+    "device_presence",
+    "get_devices",
+]
