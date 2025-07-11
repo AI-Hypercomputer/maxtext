@@ -25,6 +25,7 @@ from MaxText.train import main as train_main
 
 cpu_only = not has_gpu() and not has_tpu()
 
+
 class Train(unittest.TestCase):
   """Smoke test for MoE using ragged_dot in G3 only."""
 

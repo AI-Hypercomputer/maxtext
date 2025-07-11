@@ -41,6 +41,7 @@ from MaxText.layers.attentions import Attention, MLA, ChunkedCausalMask
 
 _, gpu_present, tpu_present = device_presence()
 
+
 class BidirectionalBlockMaskTest(unittest.TestCase):
   """Test for make_bidirectional_block_mask."""
 
@@ -285,8 +286,7 @@ class AttentionTest(unittest.TestCase):
     config = pyconfig.initialize(
         [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
         **self.config_arguments,
-        **{} if tpu_present else {"mesh_axes": ["data"],
-                                  "scan_layers": False}
+        **{} if tpu_present else {"mesh_axes": ["data"], "scan_layers": False},
     )
     self.cfg = config
 
@@ -296,10 +296,13 @@ class AttentionTest(unittest.TestCase):
         ici_context_parallelism=4,  # use context parallelism of 4
         context_parallel_load_balance=False,  # set load_balancing to False such that
         # there's no need for reordering the input/output
-        **{} if tpu_present else {"mesh_axes": ["data"],
-                                  "scan_layers": False,
-                                  "ici_fsdp_parallelism":-1,
-                                  #"ici_parallelism": -1
+        **{}
+        if tpu_present
+        else {
+            "mesh_axes": ["data"],
+            "scan_layers": False,
+            "ici_fsdp_parallelism": -1,
+            # "ici_parallelism": -1
         },
     )
 
@@ -307,9 +310,9 @@ class AttentionTest(unittest.TestCase):
     self.rng = jax.random.PRNGKey(0)
 
     if tpu_present:  # and not gpu_present:
-        devices_array = maxtext_utils.create_device_mesh(self.cfg)
+      devices_array = maxtext_utils.create_device_mesh(self.cfg)
     else:
-        devices_array = np.asarray(get_devices(), dtype=object)
+      devices_array = np.asarray(get_devices(), dtype=object)
     mesh_axes = self.cfg.mesh_axes
     self.mesh = Mesh(devices_array, mesh_axes)
     devices_array_cp = maxtext_utils.create_device_mesh(self.cfg_cp)  # for context parallelism
@@ -1038,7 +1041,7 @@ class MLATest(parameterized.TestCase):
         max_prefill_predict_length=16,
         attention_type=attentions.AttentionType.MLA.value,
         rope_type=rope_type,
-        **{} if tpu_present else {"mesh_axes": ["data"]}
+        **{} if tpu_present else {"mesh_axes": ["data"]},
     )
     rng = jax.random.PRNGKey(0)
 
