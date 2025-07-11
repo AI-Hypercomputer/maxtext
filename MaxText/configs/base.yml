@@ -414,7 +414,9 @@ expansion_factor_real_data: -1 # if -1 then all hosts will load real data, else 
 eval_per_device_batch_size: 0.0
 max_corpus_chars: 10_000_000
 train_data_columns: ['text'] # for DPO dataset containing "chosen" and "rejected"
+train_image_column: 'image'
 eval_data_columns: ['text'] # for DPO dataset containing "chosen" and "rejected"
+eval_image_column: 'image'
 packing: True
 num_epoch: 1  # only grain and tfds pipeline supports num_epoch > 1
 
@@ -737,7 +739,7 @@ dtype_mm: "float32"  # Data type for multimodal model's vision encoder
 remat_policy_for_vit: "minimal"  # Remat policy for multimodal model's vision encoder. Check `remat_policy` for options.
 image_size_for_vit: 896 # Default for Gemma3, and should be overwritten by model's config
 image_path: "" # Local image path used for decoding
-
+image_placeholder: "<|image|>"
 
 ### llama4 multi modal configs
 hidden_size_for_vit: 1408 
