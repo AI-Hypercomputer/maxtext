@@ -37,6 +37,7 @@ from MaxText.layers import linears
 from MaxText.layers import quantizations
 import numpy as np
 
+import math
 
 set_xla_metadata = xla_metadata.set_xla_metadata
 
@@ -71,6 +72,46 @@ def random_routing(rng_key, gate_logits, num_experts_per_tok):
   top_k_weights = jnp.take_along_axis(gate_logits, top_k_indices, axis=-1)
   return top_k_weights, top_k_indices
 
+def apply_grouped_subtraction(input_array, subtraction_value_per_group, elements_per_group):
+  """
+  Applies a subtraction to groups of elements in an array and returns
+  both the remaining values and the amounts processed (subtracted).
+
+  Example :
+    input_array = [0, 3, 0, 0, 2, 4, 1, 0], subtraction_value_per_group=2, group_size=2.
+    Expected remaining_result = [0, 1, 0, 0, 0, 4, 0, 0]
+    Expected processing_result = [0, 2, 0, 0, 2, 0, 1, 0]
+
+  Args:
+      input_array: The 1D JAX array to process.
+      subtraction_value_per_group: The total amount to attempt to subtract
+                                   from each group.
+      elements_per_group: The number of elements in each group. Must be > 0.
+  Returns:
+      A tuple containing:
+      - remaining_result: Array with values after subtraction.
+      - processing_result: Array showing how much was subtracted.
+  """
+
+  if not elements_per_group > 0:
+    raise ValueError("group_size must be greater than 0.")
+
+  initial_carry = (jnp.array(0, dtype=input_array.dtype), jnp.array(0, dtype=jnp.int32))
+  subtraction_value = jnp.array(subtraction_value_per_group, dtype=input_array.dtype)
+
+  def scan_body(carry, current_values):
+    budget_left_for_group, elements_processed_count = carry
+    current_budget = jnp.where(elements_processed_count == 0, subtraction_value, budget_left_for_group)
+
+    actual_subtraction = jnp.minimum(current_values, current_budget)
+    new_value = current_values - actual_subtraction
+    updated_budget_for_group = current_budget - actual_subtraction
+    next_elements_processed_count = (elements_processed_count + 1) % elements_per_group
+    next_carry = (updated_budget_for_group, next_elements_processed_count)
+    return next_carry, (new_value, actual_subtraction)
+
+  _, (remaining_result, processing_result) = jax.lax.scan(scan_body, initial_carry, input_array)
+  return remaining_result, processing_result
 
 class GateLogit(nn.Module):
   """A layer used to compute gate logits, allowing to return the pre bias values for DeepSeek routing.
@@ -668,6 +709,38 @@ class RoutedMoE(nn.Module):
         output = output[: hs_shape[0]]
       return output
 
+    def generate_input_offset(process_array, off_sets=None):
+      # Index of input array for the send
+      shard_id = jax.lax.axis_index("expert")
+      local_array = process_array[shard_id]
+      output = jnp.concatenate((jnp.array([0]), jnp.cumsum(local_array)[:-1]))
+      if off_sets is not None:
+        shift = jnp.cumsum(off_sets[shard_id])
+        output += shift
+      return output
+
+    def generate_send_size(process_array):
+      # Size of input array for the send
+      shard_id = jax.lax.axis_index("expert")
+      return process_array[shard_id]
+
+    def generate_output_offset(process_array, off_sets=None):
+      # Received index in the target output
+      shard_id = jax.lax.axis_index("expert")
+      zero_row = jnp.zeros((1,) + process_array.shape[1:], dtype=process_array.dtype)
+      array_with_zeros = jnp.concatenate((zero_row, process_array), axis=0)
+      cumulated_array = jnp.cumsum(array_with_zeros, axis=0, dtype=process_array.dtype)
+      output = cumulated_array[shard_id]
+      if off_sets is not None:
+        shift = jnp.cumsum(off_sets, axis=0)
+        output += shift[shard_id]
+      return output
+
+    def generate_receive_size(process_array):
+      # Received size in the traget output
+      shard_id = jax.lax.axis_index("expert")
+      return process_array[:, shard_id]   
+
     # Currently, we support data, tensor, and expert parallelism with Megablox.
     # We all gather the input activations over tensor parallelism to follow
     # https://parsa.epfl.ch/course-info/cs723/papers/Megatron.pdf.
@@ -728,36 +801,69 @@ class RoutedMoE(nn.Module):
     def wrapper(x, logits, pre_bias_logits, w0, w1, wo):
       batch_size, sequence_length, _ = x.shape
       x, sorted_selected_experts, weights, group_sizes, selected_experts = self.permute(x, logits, pre_bias_logits)
+
+      def gmm_block(x, block_group_sizes, selected_experts):
+        layer_w0 = gmm(x, w0, block_group_sizes, selected_experts)
+        layer_w0 = adc.checkpoint_name(layer_w0, "mlpwi_0")
+        layer_w1 = gmm(x, w1, block_group_sizes, selected_experts)
+        layer_w1 = adc.checkpoint_name(layer_w1, "mlpwi_1")
+        layer_act = linears._convert_to_activation_function(self.config.mlp_activations[0])(layer_w0)
+        intermediate_layer = jnp.multiply(layer_act, layer_w1)
+        intermediate_output = gmm(intermediate_layer, wo, block_group_sizes, selected_experts)
+        intermediate_output = adc.checkpoint_name(intermediate_output, "mlpwo")
+        return intermediate_output
+
       expert_axis_name = "expert"
       expert_shard_id = jax.lax.axis_index(expert_axis_name)
       num_expert_parallelism = self.get_expert_parallelism_size()
       if num_expert_parallelism > 1:
-        batch_axis = "expert" if is_batch_sharded_by_expert else "data"
         # get group sizes for all shards
         local_expert_size = self.config.num_experts // num_expert_parallelism
-        reshaped_group_sizes = jnp.sum(group_sizes.reshape(-1, local_expert_size), axis=1)
-        global_group_sizes = group_sizes
-        if is_batch_sharded_by_expert:
-          all_shards_group_sizes = jax.lax.all_gather(reshaped_group_sizes, axis_name=batch_axis)
-          input_offsets, send_sizes, output_offsets, recv_sizes = RoutedMoE.get_all_to_all_params(
-              all_shards_group_sizes,
-              expert_shard_id,
-              num_expert_parallelism,
-          )
-          # TODO(ranran): For better performance, we could update output buffer
-          # to a smaller size to replace self.get_expert_parallelism_size() for
-          # efficiency, or we could apply capacity_factor for excessive experts.
-          # Note: Reducing buffer increase the risk of token dropping under
-          # unbalanced distribution.
-          buffer_size = int(
-              num_expert_parallelism
-              * self.config.per_device_batch_size
-              * self.config.max_target_length
-              * self.config.num_experts_per_tok
-          )
-          output_shape = jnp.zeros((buffer_size, self.config.emb_dim), dtype=x.dtype)
 
-          x = jax.lax.ragged_all_to_all(
+        # set output buffer size based on ra2a_buffer_ratio
+        custom_buffer_size = int(
+            self.config.ra2a_buffer_ratio
+            * self.config.per_device_batch_size
+            * self.config.max_target_length
+            * self.config.num_experts_per_tok
+        )
+        assert custom_buffer_size >= num_expert_parallelism
+        assert self.config.ra2a_buffer_ratio <= num_expert_parallelism
+        local_buffer_size = custom_buffer_size // num_expert_parallelism
+        buffer_size = local_buffer_size * num_expert_parallelism
+
+        # max_group_size = jnp.max(all_shards_group_sizes)
+        # num_iterations = (max_group_size + local_buffer_size - 1) // local_buffer_size
+        max_logging.log(f"custom_buffer_size is set at {custom_buffer_size}")
+        max_logging.log(f"local_buffer_size is set at {local_buffer_size}")
+        max_logging.log(f"The buffer size of ragged_all_to_all is set at {buffer_size}")
+
+        def iterate_gmm_calls(i, carry):
+          # processed_group_sizes: have been processed
+          # current_group_sizes: all rest group sizes for this iteration
+          # process_group_sizes: group sizes for this iteration to be processed
+          # rest_group_sizes: all rest group sizes for next iteration
+          previous_output, x, current_group_sizes, processed_group_sizes, iter, num_iter = carry
+          rest_group_sizes, process_group_sizes = apply_grouped_subtraction(
+              current_group_sizes, local_buffer_size, local_expert_size
+          )
+          reshaped_processed_group_sizes = jnp.sum(processed_group_sizes.reshape(-1, local_expert_size), axis=1)
+          all_processed_group_sizes = jax.lax.all_gather(reshaped_processed_group_sizes, axis_name=expert_axis_name)
+          reshaped_process_group_sizes = jnp.sum(process_group_sizes.reshape(-1, local_expert_size), axis=1)
+          all_process_group_sizes = jax.lax.all_gather(reshaped_process_group_sizes, axis_name=expert_axis_name)
+          reshaped_rest_group_sizes = jnp.sum(rest_group_sizes.reshape(-1, local_expert_size), axis=1)
+          all_rest_group_sizes = jax.lax.all_gather(reshaped_rest_group_sizes, axis_name=expert_axis_name)
+
+          # calculate offsets and sizes for ragged_all_to_all operation
+          original_inputs_first_dim = batch_size * sequence_length * self.config.num_experts_per_tok
+          offsets_group_sizes = all_process_group_sizes + all_rest_group_sizes
+          input_offsets = generate_input_offset(offsets_group_sizes, all_processed_group_sizes)
+          send_sizes = generate_send_size(all_process_group_sizes)
+          output_offsets = generate_output_offset(all_process_group_sizes)
+          recv_sizes = generate_receive_size(all_process_group_sizes)
+
+          output_shape = jnp.zeros((buffer_size, self.config.emb_dim), dtype=x.dtype)
+          new_x = jax.lax.ragged_all_to_all(
               x,
               output_shape,
               input_offsets,
@@ -766,59 +872,25 @@ class RoutedMoE(nn.Module):
               recv_sizes,
               axis_name=expert_axis_name,
           )
-          global_group_sizes = jax.lax.all_gather(group_sizes, axis_name=expert_axis_name)
-          x, local_sorted_indices, group_sizes, selected_experts = RoutedMoE.local_permute(
-              x,
-              global_group_sizes,
-              local_expert_size,
-              shard_index=expert_shard_id,
-          )
-        else:
-          x, local_sorted_indices, group_sizes, selected_experts = RoutedMoE.local_permute(
-              x,
-              global_group_sizes[None, :],
-              local_expert_size,
-              shard_index=expert_shard_id,
-              is_offset=True,
-              global_sorted_experts=selected_experts,
+          global_group_sizes = jax.lax.all_gather(process_group_sizes, axis_name=expert_axis_name)
+          permute_x, local_sorted_indices, block_group_sizes, selected_experts = RoutedMoE.local_permute(
+              new_x, global_group_sizes, local_expert_size, expert_shard_id,
           )
 
-      layer_w0 = gmm(x, w0, group_sizes, selected_experts)
-      layer_w0 = adc.checkpoint_name(layer_w0, "mlpwi_0")
-      layer_w1 = gmm(x, w1, group_sizes, selected_experts)
-      layer_w1 = adc.checkpoint_name(layer_w1, "mlpwi_1")
-      # pylint: disable=protected-access
-      layer_act = linears._convert_to_activation_function(self.config.mlp_activations[0])(layer_w0)
-      intermediate_layer = jnp.multiply(layer_act, layer_w1)
-      intermediate_output = gmm(intermediate_layer, wo, group_sizes, selected_experts)
-      intermediate_output = adc.checkpoint_name(intermediate_output, "mlpwo")
+          gmm_output = gmm_block(permute_x, block_group_sizes, selected_experts)
+          # TODO: check if we need jax.lax.psum_scatter for TP sharding
+          # if self.get_tensor_parallelism_size() > 1:
+          #   gmm_output = jax.lax.psum_scatter(gmm_output, "tensor", scatter_dimension=1, tiled=True)
 
-      if self.get_tensor_parallelism_size() > 1:
-        intermediate_output = jax.lax.psum_scatter(intermediate_output, "tensor", scatter_dimension=1, tiled=True)
-
-      if num_expert_parallelism > 1:
-        original_inputs_first_dim = batch_size * sequence_length * self.config.num_experts_per_tok
-        if sorted_selected_experts.shape[0] != original_inputs_first_dim:
-          raise ValueError("original_inputs_first_dim does not match the original tensor" " shape!")
-        output_shape = jnp.zeros(
-            (
-                original_inputs_first_dim,
-                self.config.emb_dim // self.get_tensor_parallelism_size(),
-            ),
-            dtype=intermediate_output.dtype,
-        )
-        if is_batch_sharded_by_expert:
           # locally unpermute back to the original order
-          local_output = jnp.take(
-              intermediate_output,
-              indices=jnp.argsort(local_sorted_indices),  # pylint: disable=undefined-variable
-              axis=0,
-          )
-          input_offsets, send_sizes, output_offsets, recv_sizes = RoutedMoE.get_all_to_all_params(
-              jnp.transpose(all_shards_group_sizes),  # pylint: disable=undefined-variable
-              expert_shard_id,
-              num_expert_parallelism,
-          )
+          local_output = jnp.take(gmm_output, indices=jnp.argsort(local_sorted_indices), axis=0)
+          output_shape = jnp.zeros((original_inputs_first_dim, self.config.emb_dim), dtype=local_output.dtype)
+
+          input_offsets = generate_input_offset(jnp.transpose(all_process_group_sizes))
+          send_sizes = generate_send_size(jnp.transpose(all_process_group_sizes))
+          output_offsets = generate_output_offset(jnp.transpose(offsets_group_sizes), jnp.transpose(all_processed_group_sizes))
+          recv_sizes = generate_receive_size(jnp.transpose(all_process_group_sizes))
+
           intermediate_output = jax.lax.ragged_all_to_all(
               local_output,
               output_shape,
@@ -828,35 +900,34 @@ class RoutedMoE(nn.Module):
               recv_sizes,
               axis_name=expert_axis_name,
           )
-        else:
-          # If bach is replicated across EP shards then each shard should send
-          # 0..local_shard_size data to the other shards and receive the
-          # local_shard data from all of the other shards using
-          # ragged_all_to_all.
-          input_offsets, send_sizes, output_offsets, recv_sizes = RoutedMoE.get_all_to_all_params(
-              reshaped_group_sizes,  # pylint: disable=undefined-variable
-              expert_shard_id,
-              num_expert_parallelism,
-              is_batch_sharded=False,
-          )
-          intermediate_output = jax.lax.ragged_all_to_all(
+          
+          processed_group_sizes = processed_group_sizes + process_group_sizes
+          intermediate_output = previous_output + intermediate_output
+
+          iter = iter + 1
+          return (
               intermediate_output,
-              output_shape,
-              input_offsets,
-              send_sizes,
-              output_offsets,
-              recv_sizes,
-              axis_name=expert_axis_name,
+              x,
+              rest_group_sizes,
+              processed_group_sizes,
+              iter,
+              num_iter,
           )
+
+        init_output = jnp.zeros(
+            (batch_size * sequence_length * self.config.num_experts_per_tok, self.config.emb_dim), dtype=x.dtype
+        )
+        processed_group_sizes = jnp.zeros_like(group_sizes)
+        num_iter = num_expert_parallelism * math.ceil(1 / self.config.ra2a_buffer_ratio)
+        intermediate_output, _, _, _, _, _ = jax.lax.fori_loop(0, num_iter, iterate_gmm_calls, (init_output, x, group_sizes, processed_group_sizes, 0, num_iter))
+      else:
+        intermediate_output = gmm_block(x, group_sizes)
+        if self.get_tensor_parallelism_size() > 1:
+          intermediate_output = jax.lax.psum_scatter(intermediate_output, "tensor", scatter_dimension=1, tiled=True)
 
       output = self.unpermute(
-          intermediate_output,
-          sorted_selected_experts,
-          weights,
-          batch_size=batch_size,
-          sequence_length=sequence_length,
+          intermediate_output, sorted_selected_experts, weights, batch_size=batch_size, sequence_length=sequence_length
       )
-
       return output, None
 
     return wrapper(inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel)
