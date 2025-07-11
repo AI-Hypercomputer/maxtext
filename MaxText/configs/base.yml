@@ -462,6 +462,8 @@ colocated_python_data_input: False  # experimental feature, under testing
 steps: 150_001 # If set to -1 then will inherit value from learning_rate_schedule_steps
 log_period: 100 # Flushes Tensorboard
 
+shardy: True # Whether or not to use the shardy XLA backend (true for shardy, false GSPMD) GSPMD will be deprecated in the future.
+
 jax_distributed_initialization_timeout: 300 # This is the default timeout in https://github.com/jax-ml/jax/blob/main/jax/_src/distributed.py
 # Note there are two separate initializations - the jax coordination service (aka jax.distributed.initialize) and the backend (e.g. PjRT), the timeout above refers
 # only to the jax coordination service.
