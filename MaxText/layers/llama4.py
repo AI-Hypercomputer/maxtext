@@ -283,7 +283,7 @@ class Llama4MultiModalProjector(nn.Module):
     cfg = self.config
     self.linear = linears.dense_general(
         in_features_shape=cfg.vision_output_dim_for_vit,
-        out_features_shape=cfg.hidden_size_for_vit,
+        out_features_shape=cfg.base_emb_dim,
         dtype=cfg.dtype_mm,
         name="vit_multi_modal_projector",
         use_bias=False,

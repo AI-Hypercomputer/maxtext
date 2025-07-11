@@ -70,8 +70,12 @@ def create_training_tools(config, model, mesh):
     use_zarr3 = config.checkpoint_storage_use_zarr3
     if config.enable_single_controller:
       use_ocdbt, use_zarr3 = False, False
+
+    checkpoint_dir = ""
+    if config.enable_checkpointing:
+      checkpoint_dir = config.checkpoint_dir
     checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
-        config.checkpoint_dir,
+        checkpoint_dir,
         config.enable_checkpointing,
         config.async_checkpointing,
         config.checkpoint_period,

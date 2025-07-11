@@ -13,12 +13,12 @@
 #  limitations under the License.
 
 
-"""MoE related Layers."""
+"""MoE-related layers."""
 
 import enum
 import functools
 import math
-from typing import Iterable, Optional, Tuple, Union
+from typing import Optional, Tuple
 
 from aqt.jax.v2 import aqt_tensor as aqt
 import flax.linen as nn
@@ -45,53 +45,99 @@ DISPATCH = "dispatch"
 COMBINE = "combine"
 
 
-def random_routing(rng_key, gate_logits, num_experts_per_tok):
-  """
-  Performs random routing of tokens to experts.
+def random_routing(
+    rng_key: jax.Array,
+    gate_logits: jax.Array,
+    num_experts_per_tok: int,
+) -> tuple[jax.Array, jax.Array]:
+  """Performs random routing of tokens to experts.
 
   Args:
-    rng_key: A JAX PRNGKey for randomness.
-    gate_logits: A JAX array of shape (batch_size, sequence_length, num_experts)
-                 representing the logits for each expert.
+    rng_key: PRNGKey for randomnly selecting experts.
+    gate_logits: Array of shape `(batch, seq, num_experts)` representing the
+      logits for each expert.
     num_experts_per_tok: The number of experts to select for each token.
 
   Returns:
-    A tuple containing:
-      - top_k_indices: JAX array of shape (batch_size, sequence_length, num_experts_per_tok)
-                       representing the indices of the selected experts for each token.
-      - top_k_weights: JAX array of shape (batch_size, sequence_length, num_experts_per_tok)
-                       representing the weights for the selected experts.
+    top_k_weights: Array of shape `(batch, seq, num_experts_per_tok)`.
+    top_k_indices: Array of shape `(batch, seq, num_experts_per_tok)`.
   """
-  bs, seq_len, num_experts = gate_logits.shape
-  indices = jnp.arange(num_experts).repeat(bs * seq_len)
-  selected_num = bs * seq_len * num_experts_per_tok
-  top_k_indices = jax.random.choice(rng_key, indices, shape=(selected_num,)).reshape(bs, seq_len, num_experts_per_tok)
+  num_tokens = math.prod(gate_logits.shape[:-1])
+  num_experts = gate_logits.shape[-1]
+  indices = jnp.arange(num_experts).repeat(num_tokens)
+  selected_num = num_tokens * num_experts_per_tok
+  top_k_indices = jnp.reshape(
+      jax.random.choice(rng_key, indices, shape=(selected_num,)),
+      gate_logits.shape[:-1] + (num_experts_per_tok,),
+  )
   top_k_weights = jnp.take_along_axis(gate_logits, top_k_indices, axis=-1)
   return top_k_weights, top_k_indices
 
 
+def _maybe_make_param_in_module(
+    module: nn.Module,
+    name: str,
+    kernel_init: attentions.NdInitializer,
+    kernel_axes: Tuple[str, ...],
+    kernel_shape: tuple[int, ...],
+    kernel_in_axis: tuple[int, ...],
+    kernel_out_axis: tuple[int, ...],
+) -> jax.Array:
+  """Creates parameter `name` in `module` unless in quantized serve mode.
+
+  Args:
+    module: The module to create the parameter in.
+    name: The name of the parameter.
+    kernel_init: The initializer function for the parameter.
+    kernel_axes: The axes of the parameter.
+    kernel_shape: The shape of the parameter.
+    kernel_in_axis: The axes of the parameter that are inputs.
+    kernel_out_axis: The axes of the parameter that are outputs.
+
+  Returns:
+    The parameter as a JAX array.
+
+    If `module.quant == True`, then we instead return a placeholder array of
+    zeros. This is done to save memory by storing the weight tensors from the
+    'aqt' collection instead of from `params`.
+  """
+  if quantizations.in_serve_mode(module.quant):
+    return jnp.zeros(kernel_shape)
+  else:
+    return jnp.asarray(
+        module.param(
+            name,
+            nn.with_logical_partitioning(kernel_init, kernel_axes),
+            kernel_shape,
+            module.weight_dtype,
+            kernel_in_axis,
+            kernel_out_axis,
+        )
+    )
+
+
 class GateLogit(nn.Module):
-  """A layer used to compute gate logits, allowing to return the pre bias values for DeepSeek routing.
+  """Computes gate logits with pre-bias values neeeded for DeepSeek routing.
 
   Attributes:
-    features: tuple with numbers of output features.
-    model_name: which model to run.
-    axis: tuple with axes to apply the transformation on.
+    features: the number of output features.
+    model_name: the model to run.
+    axis: axis to apply the transformation on.
     weight_dtype: the dtype of the weights (default: float32).
     dtype: the dtype of the computation (default: float32).
     kernel_init: initializer function for the weight matrix.
     kernel_axes: tuple with axes to apply kernel function.
-    use_bias: whether to add learnable bias in gate logit scores.
-      When enabled, this bias aids expert load balancing (like in DeepSeek V3),
-      and is not part of the loss calculation.
+    use_bias: whether to add learnable bias in gate logit scores. When enabled,
+      this bias aids expert load balancing (like in DeepSeek V3), and is not
+      part of the loss calculation.
     score_func: scoring function for output normalization before applying bias.
     quant: quantization config, defaults to None implying no quantization.
     matmul_precision: precision for JAX functions.
   """
 
-  features: Union[Iterable[int], int]
+  features: int
   model_name: str
-  axis: Union[Iterable[int], int] = -1
+  axis: int = -1
   weight_dtype: ctypes.DType = jnp.float32
   dtype: ctypes.DType = jnp.float32
   kernel_init: attentions.NdInitializer = attentions.nd_dense_init(1.0, "fan_in", "truncated_normal")
@@ -113,31 +159,25 @@ class GateLogit(nn.Module):
     kernel_shape = tuple(inputs.shape[ax] for ax in axis) + features
     kernel_in_axis = np.arange(len(axis))
     kernel_out_axis = np.arange(len(axis), len(axis) + len(features))
-    if quantizations.in_serve_mode(self.quant):
-      # During aqt convert state we delete kernel weight from `params` to save
-      # memory and instead retrieve them from the tensors stored in the 'aqt'
-      # collection.
-      kernel = jnp.zeros(kernel_shape)
-    else:
-      kernel = self.param(
-          "kernel",
-          nn.with_logical_partitioning(self.kernel_init, self.kernel_axes),
-          kernel_shape,
-          self.weight_dtype,
-          kernel_in_axis,
-          kernel_out_axis,
-      )
-    kernel = jnp.asarray(kernel, self.dtype)
 
-    contract_ind = tuple(range(0, len(axis)))
+    kernel = _maybe_make_param_in_module(
+        module=self,
+        name="kernel",
+        kernel_init=self.kernel_init,
+        kernel_axes=self.kernel_axes,
+        kernel_shape=kernel_shape,
+        kernel_in_axis=kernel_in_axis,
+        kernel_out_axis=kernel_out_axis,
+    )
+
     output = linears._compute_dot_general(
-        inputs,
-        kernel,
-        self.kernel_axes,
-        axis,
-        contract_ind,
-        self.matmul_precision,
-        self.quant,
+        inputs=inputs,
+        kernel=kernel,
+        kernel_axes=self.kernel_axes,
+        axis=axis,
+        contract_ind=tuple(range(0, len(axis))),
+        matmul_precision=self.matmul_precision,
+        quant=self.quant,
     )
     pre_bias_logits = None
 
@@ -166,12 +206,13 @@ class RoutedMoE(nn.Module):
   """Implements a routed MoE block.
 
   Attributes:
-    num_experts: Number of experts.
-    num_experts_per_tok: Number of experts for each token.
-    mesh: Mesh, device mesh.
+    config: Configuration for the MoE block.
+    num_experts: Total number of experts.
+    num_experts_per_tok: Number of routed experts per token.
+    mesh: Device mesh.
     kernel_init: Kernel function, passed to the dense layers.
     kernel_axes: Tuple with axes to apply kernel function.
-    intermediate_dim: Intermediate dimension of MoE.
+    intermediate_dim: Size of the intermediate/hidden expert dimension.
     weight_dtype: Type for the weights.
     dtype: Type for the dense layer.
     quant: Optional quantization config, no quantization if None.
@@ -192,80 +233,94 @@ class RoutedMoE(nn.Module):
   wi_kernel_axes = ("exp", "embed_no_exp", "mlp")
   wo_kernel_axes = ("exp", "mlp", "embed_no_exp")
 
-  def get_expert_parallelism_size(self):
+  def is_ds3(self):
+    return self.config.model_name.startswith("deepseek3")
+
+  def matmul_precision(self):
+    return jax.lax.Precision(self.config.matmul_precision)
+
+  def get_expert_parallelism_size(self) -> int:
     return self.mesh.shape["expert"]
 
-  def get_tensor_parallelism_size(self):
+  def get_tensor_parallelism_size(self) -> int:
     return self.mesh.shape["tensor"]
 
-  def get_context_autoregressive_parallelism_size(self):
+  def get_context_autoregressive_parallelism_size(self) -> int:
     return self.mesh.shape["context_autoregressive"]
 
-  def generate_kernels(self, num_experts, emb_dim, mlp_dim):
-    """generates kernels"""
+  def is_batch_sharded_by_expert(self) -> bool:
+    """Returns `True` if `activation_batch` contains the `expert` axis."""
+    rules = dict(self.config.logical_axis_rules)
+    return "activation_batch" in rules and "expert" in rules["activation_batch"]
+
+  def generate_kernels(
+      self, num_experts: int, emb_dim: int, mlp_dim: int
+  ) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """Generates the params for the weights in the MoE block.
+
+    Args:
+      num_experts: The number of experts.
+      emb_dim: The embedding dimension.
+      mlp_dim: The MLP dimension.
+
+    Returns:
+      `wi_0`: Array of shape `(num_experts, emb_dim, mlp_dim)`.
+      `wi_1`: Array of shape `(num_experts, emb_dim, mlp_dim)`.
+      `wo`: Array of shape `(num_experts, mlp_dim, emb_dim)`.
+    """
 
     kernel_in_axis = np.arange(1)
     kernel_out_axis = np.arange(1, 2)
     kernel_init = attentions.nd_dense_init(1.0, "fan_in", "truncated_normal")
 
-    if quantizations.in_serve_mode(self.quant):
-      # During aqt convert state we delete kernel weight from params to save
-      # memory. Instead they are retrieved from the tensors stored in the 'aqt'
-      # collection.
-      w0_kernel = jnp.zeros((num_experts, emb_dim, mlp_dim))
-    else:
-      w0_kernel = self.param(
-          "wi_0",
-          nn.with_logical_partitioning(kernel_init, self.wi_kernel_axes),
-          (num_experts, emb_dim, mlp_dim),
-          self.weight_dtype,
-          kernel_in_axis,
-          kernel_out_axis,
-      )
+    maybe_make_param = functools.partial(
+        _maybe_make_param_in_module,
+        module=self,
+        kernel_init=kernel_init,
+        kernel_in_axis=kernel_in_axis,
+        kernel_out_axis=kernel_out_axis,
+    )
 
-    w0_kernel = jnp.asarray(w0_kernel, self.dtype)
+    w0_kernel = maybe_make_param(
+        name="wi_0",
+        kernel_axes=self.wi_kernel_axes,
+        kernel_shape=(num_experts, emb_dim, mlp_dim),
+    )
 
-    if quantizations.in_serve_mode(self.quant):
-      # During aqt convert state we delete kernel weight from params to save
-      # memory. Instead they are retrieved from the tensors stored in the 'aqt'
-      # collection.
-      w1_kernel = jnp.zeros((num_experts, emb_dim, mlp_dim))
-    else:
-      w1_kernel = self.param(
-          "wi_1",
-          nn.with_logical_partitioning(kernel_init, self.wi_kernel_axes),
-          (num_experts, emb_dim, mlp_dim),
-          self.weight_dtype,
-          kernel_in_axis,
-          kernel_out_axis,
-      )
-    w1_kernel = jnp.asarray(w1_kernel, self.dtype)
+    w1_kernel = maybe_make_param(
+        name="wi_1",
+        kernel_axes=self.wi_kernel_axes,
+        kernel_shape=(num_experts, emb_dim, mlp_dim),
+    )
 
-    if quantizations.in_serve_mode(self.quant):
-      # During aqt convert state we delete kernel weight from params to save
-      # memory. Instead they are retrieved from the tensors stored in the 'aqt'
-      # collection.
-      wo_kernel = jnp.zeros((num_experts, mlp_dim, emb_dim))
-    else:
-      wo_kernel = self.param(
-          "wo",
-          nn.with_logical_partitioning(kernel_init, self.wo_kernel_axes),
-          (num_experts, mlp_dim, emb_dim),
-          self.weight_dtype,
-          kernel_in_axis,
-          kernel_out_axis,
-      )
-    wo_kernel = jnp.asarray(wo_kernel, self.dtype)
+    wo_kernel = maybe_make_param(
+        name="wo",
+        kernel_axes=self.wo_kernel_axes,
+        kernel_shape=(num_experts, mlp_dim, emb_dim),
+    )
     return w0_kernel, w1_kernel, wo_kernel
 
-  def get_topk(self, gate_logits, pre_bias_logits):
-    """get topk."""
-    # shape of top_k_weights & top_k_indices:
-    # (batch, sequence, num_experts_per_tok).
+  def get_topk(
+      self, gate_logits: jax.Array, pre_bias_logits: jax.Array
+  ) -> tuple[jax.Array, jax.Array]:
+    """Returns the per-token top-k expert weights and indices.
+
+    Args:
+      gate_logits: Array of shape `(..., num_experts)`.
+      pre_bias_logits: Array of shape `(..., num_experts)`.
+
+    Returns:
+      - top_k_weights: `(..., num_experts_per_tok)` array of weights for experts
+        selected for each token.
+      - top_k_indices: `(..., num_experts_per_tok)` array of indices identifying
+        the selected experts for each token.
+    """
     if self.config.use_random_routing:
-      rng = self.make_rng("random_routing")
-      top_k_weights, top_k_indices = random_routing(rng, gate_logits, self.num_experts_per_tok)
-      return top_k_weights, top_k_indices
+      return random_routing(
+          rng_key=self.make_rng("random_routing"),
+          gate_logits=gate_logits,
+          num_experts_per_tok=self.num_experts_per_tok,
+      )
 
     if self.config.model_name.startswith("deepseek3"):
       top_k_weights, top_k_indices = self.deepseek_routing(gate_logits, pre_bias_logits)
@@ -275,73 +330,102 @@ class RoutedMoE(nn.Module):
     if self.config.decoder_block == ctypes.DecoderBlockType.DEEPSEEK:
       top_k_weights = self.deepseek_scale_weights(top_k_weights)
     elif self.config.decoder_block != ctypes.DecoderBlockType.LLAMA4:
-      top_k_weights = jax.nn.softmax(top_k_weights.astype(jnp.float32), axis=-1).astype(self.dtype)
+      top_k_weights = jnp.astype(
+          jax.nn.softmax(jnp.astype(top_k_weights, jnp.float32), axis=-1),
+          self.dtype,
+      )
+
     return top_k_weights, top_k_indices
 
-  def deepseek_scale_weights(self, weights):
+  def deepseek_scale_weights(self, weights: jax.Array) -> jax.Array:
     """Scales weights according to DeepSeek's v3 reference implementation.
+
+    Reference:
     https://github.com/deepseek-ai/DeepSeek-V3/blob/2f7b80eecebf3d1c84da5a0d465f6639ea175012/inference/model.py#L592-L594
+
+    Args:
+      weights: Array of weights.
+
+    Returns:
+      Array of scaled weights.
     """
     if self.config.routed_score_func == "sigmoid":
       weights /= weights.sum(-1, keepdims=True)
     weights *= self.config.routed_scaling_factor
     return weights
 
-  def deepseek_routing(self, gate_logits, pre_bias_logits):
+  def _expert_group_mask(self, gate_logits: jax.Array) -> jax.Array:
+    """Returns a mask that selects only the top-k groups of experts.
+
+    Groups of experts are selected based on the sum of the top-2 expert scores
+    for each group.
+
+    Args:
+      gate_logits: Array of shape `(batch, seq, num_experts)`.
+
+    Returns:
+      Array of shape `(batch, seq, num_experts)` that is 1 for experts in the
+      top-k groups and 0 elsewhere.
+    """
+    # Find top groups based on each group's top-2 expert scores, where
+    # `scores_grouped.shape =
+    # (batch * seq, n_routing_groups, experts_per_group)`.
+    scores_grouped = jnp.reshape(
+        gate_logits,
+        gate_logits.shape[:-1] + (self.config.n_routing_groups, -1),
+    )
+    top2_in_group_vals, _ = jax.lax.top_k(scores_grouped, k=2)
+    group_scores = jnp.sum(jnp.astype(top2_in_group_vals, jnp.float32), axis=-1)
+    _, group_idx = jax.lax.top_k(group_scores, k=self.config.topk_routing_group)
+
+    # Mask selected groups so that only those experts are considered.
+    group_mask = jax.nn.one_hot(
+        group_idx, num_classes=self.config.n_routing_groups, dtype=jnp.float32
+    )
+    group_mask = jnp.sum(group_mask, axis=-2)
+
+    # Apply masks and get top-k indices.
+    score_mask_expanded = jnp.broadcast_to(
+        group_mask[..., None],
+        group_mask.shape + (self.num_experts // self.config.n_routing_groups,),
+    )
+    return jnp.reshape(
+        score_mask_expanded,
+        score_mask_expanded.shape[:-2] + (self.num_experts,),
+    )
+
+  def deepseek_routing(
+      self, gate_logits: jax.Array, pre_bias_logits: jax.Array
+  ) -> tuple[jax.Array, jax.Array]:
     """DeepSeek routing logit.
 
-    When the configuration specifies a number of routing groups (n_routing_groups is not -1),
-    it involves two-stage selection process:
+    If the configuration does not specify routing groups (`n_routing_groups` is
+    -1), we use a standard top-k routing mechanism. Otherwise, we force all
+    selected experts to be from the a subset of the highest rated expert groups.
 
-    1) Group Scoring: Experts are partitioned into n_routing_groups.
-    Within each group, the logits of the top-2 scoring experts are summed to create an aggregate score for the group.
-    2) The top-K (topk_routing_group) groups are identified based on their aggregate scores.
-    The final set of selected experts is chosen only from within these top-K groups.
+    The selection process uses post_bias logits, while the return weigths use
+    pre_bias logits.
 
-    If the configuration does not specify routing groups (n_routing_groups is -1),
-    using a standard top-k routing mechanism.
+    Args:
+      gate_logits: Array of shape `(..., num_experts)`.
+      pre_bias_logits: Array of shape `(..., num_experts)`.
 
-    The selection uses post_bias logits, but the return weigths are based on pre_bias logits.
+    Returns:
+      - top_k_weights: `(..., num_experts_per_tok)` array of weight values for
+        each selected expert.
+      - top_k_indices: `(..., num_experts_per_tok)` array of indices
+        identifying the selected experts for each token.
     """
-    # Reshape
-    batch_size, seq_len = gate_logits.shape[0], gate_logits.shape[1]
-    n = batch_size * seq_len
-    gate_logits_flat = jnp.reshape(gate_logits, (n, self.num_experts))
-    pre_bias_logits_flat = jnp.reshape(pre_bias_logits, (n, self.num_experts))
-
-    if self.config.n_routing_groups != -1:
-      # Enable device-limited routing.
-      experts_per_group = self.num_experts // self.config.n_routing_groups
-      scores_grouped = jnp.reshape(gate_logits_flat, (n, self.config.n_routing_groups, experts_per_group))
-
-      # For group selection we sum the top2 values from each group.
-      top2_in_group_vals, _ = jax.lax.top_k(scores_grouped, k=2)
-      group_scores = jnp.sum(top2_in_group_vals.astype(jnp.float32), axis=-1)
-      group_idx = jax.lax.top_k(group_scores, k=self.config.topk_routing_group)[1]
-
-      # Create masks for selected groups
-      group_mask = jax.nn.one_hot(group_idx, num_classes=self.config.n_routing_groups, dtype=jnp.float32)
-      group_mask = jnp.sum(group_mask, axis=1)
-
-      # Apply masks and get topk indices
-      score_mask_grouped = jnp.expand_dims(group_mask, axis=-1)
-      score_mask_expanded = jnp.broadcast_to(
-          score_mask_grouped,
-          (n, self.config.n_routing_groups, experts_per_group),
-      )
-      score_mask = jnp.reshape(score_mask_expanded, (n, self.num_experts))
-      negative_infinity = -jax.numpy.inf
-      masked_scores = jnp.where(score_mask > 0, gate_logits_flat, negative_infinity)
-      top_k_indices = jax.lax.top_k(masked_scores, k=self.num_experts_per_tok)[1]
-    else:
-      top_k_indices = jax.lax.top_k(gate_logits_flat, k=self.num_experts_per_tok)[1]
-
-    # Get topk weights from pre bias logits
-    top_k_weights = jnp.take_along_axis(pre_bias_logits_flat, top_k_indices, axis=-1)
-
-    # Reshape
-    top_k_indices = jnp.reshape(top_k_indices, (batch_size, seq_len, self.num_experts_per_tok))
-    top_k_weights = jnp.reshape(top_k_weights, (batch_size, seq_len, self.num_experts_per_tok))
+    expert_mask = (
+        1
+        if self.config.n_routing_groups == -1
+        else self._expert_group_mask(gate_logits)
+    )
+    _, top_k_indices = jax.lax.top_k(
+        jnp.where(expert_mask > 0, gate_logits, -jnp.inf),
+        k=self.num_experts_per_tok,
+    )
+    top_k_weights = jnp.take_along_axis(pre_bias_logits, top_k_indices, axis=-1)
     return top_k_weights, top_k_indices
 
   def permute(self, inputs, gate_logits, pre_bias_logits):
@@ -420,9 +504,8 @@ class RoutedMoE(nn.Module):
     """Permutes tokens locally within an expert shard.
 
     This function prepares the input tokens for processing by the experts
-    located
-    on the current shard. It groups the tokens by their assigned local expert
-    index (0 to local_expert_size - 1).
+    located on the current shard. It groups the tokens by their assigned local
+    expert index (0 to local_expert_size - 1).
 
     Args:
       inputs: The input data (tokens) assigned to the experts on this shard.
@@ -432,20 +515,21 @@ class RoutedMoE(nn.Module):
       local_expert_size: The number of experts handled by the current shard.
       shard_index: The index of the current expert shard (0 to
         num_expert_parallelism - 1).
-      is_offset: If True, assumes `inputs` are pre-sorted by global expert ID
+      is_offset: If `True`, assumes `inputs` are pre-sorted by global expert ID
         and selects the slice relevant to this shard's assigned experts. If
-        False, assumes that `inputs` corresponding to the shard's experts start
-        from the beginning of the tensor but need to be permuted by expert ID.
+        `False`, assumes that `inputs` corresponding to the shard's experts
+        start from the beginning of the tensor but need to be permuted by expert
+        ID.
       global_sorted_experts: Global expert IDs for the `inputs` used when
-        `is_offset` is True. Shape `[total_tokens_for_this_shard]`.
+        `is_offset` is `True`. Shape `[total_tokens_for_this_shard]`.
 
     Returns:
       A tuple containing:
-        sorted_inputs: Input data permuted local expert ID.
-        sorted_indices: Indices used to permute the inputs.
-        local_group_size: Number of tokens assigned to each local expert on this
+      - sorted_inputs: Input data permuted local expert ID.
+      - sorted_indices: Indices used to permute the inputs.
+      - local_group_size: Number of tokens assigned to each local expert on this
           shard.
-        sorted_experts_ids: expert ID corrsponding to each token of the permuted
+      - sorted_experts_ids: expert ID corrsponding to each token of the permuted
         inputs.
     """
 
@@ -453,8 +537,8 @@ class RoutedMoE(nn.Module):
     # all_shard_local_sizes.shape: [expert_shard, local_expert_size]
     all_shard_local_sizes = jax.lax.dynamic_slice_in_dim(
         global_group_sizes,
-        shard_index * local_expert_size,
-        local_expert_size,
+        start_index=shard_index * local_expert_size,
+        slice_size=local_expert_size,
         axis=1,
     )
     local_sizes = all_shard_local_sizes.reshape(-1)
@@ -466,8 +550,8 @@ class RoutedMoE(nn.Module):
 
     # In this case, the data that needs to be processed by the local shard
     # does not start from row 0 but actually starts at
-    # (jnp.concatenate((jnp.array([0]),
-    #  jnp.cumsum(local_group_sizes[:-1]))[shard_id]).
+    # `(jnp.concatenate((jnp.array([0]),
+    #   jnp.cumsum(local_group_sizes[:-1]))[shard_id])`.
     # This happens if batches (`inputs`) are replicated across expert shards and
     # pre-sorted by global Expert ID (via permute()).
     if is_offset:
@@ -556,7 +640,7 @@ class RoutedMoE(nn.Module):
           # Received size in the traget output
           return input_array
         else:
-          raise ValueError(f"Unknown tranform array strategy: {strategy}")
+          raise ValueError(f"Unknown transform array strategy: {strategy}")
 
     input_offsets = transform_array(
         all_shards_group_sizes,
@@ -876,7 +960,7 @@ class RoutedMoE(nn.Module):
     return cp, sub_seq
 
   def generate_masks_subgroup(self, top_k_indices, softmax_probs):
-    """subgroup mask generation for inference only."""
+    """Subgroup mask generation for inference only."""
     # calculate
     # expert_capacity = (tokens_per_batch / num_experts) * capacity_factor
     batch_size, seq_len, _ = top_k_indices.shape
@@ -969,7 +1053,7 @@ class RoutedMoE(nn.Module):
     return dispatch_mask, combine_mask
 
   def generate_masks(self, top_k_indices, softmax_probs):
-    """generate masks."""
+    """Generate masks."""
     # calculate
     # expert_capacity = (tokens_per_batch / num_experts) * capacity_factor
     batch_size, seq_len, _ = top_k_indices.shape
@@ -1042,7 +1126,7 @@ class RoutedMoE(nn.Module):
     return dispatch_mask, combine_mask
 
   # See Switch Transformer (https://arxiv.org/abs/2101.03961) for more details.
-  def load_balance_loss(self, top_k_indices, logits):
+  def load_balance_loss(self, top_k_indices, logits) -> ctypes.Array:
     """Compute the load balance loss."""
     expert_mask = jax.nn.one_hot(top_k_indices, num_classes=self.num_experts, dtype=jnp.int32)
     summed_expert_mask = jnp.sum(expert_mask, axis=2)
@@ -1053,7 +1137,11 @@ class RoutedMoE(nn.Module):
     loss = jnp.mean(density * density_prob) * (self.num_experts**2) * self.config.load_balance_loss_weight
     return loss
 
-  def get_einsum(self, rhs_mesh_axes: Tuple[Optional[str], ...] = (), einsum_name=None):
+  def get_einsum(
+      self,
+      rhs_mesh_axes: Tuple[Optional[str], ...] = (),
+      einsum_name: str | None = None,
+  ):
     """Get the Einstein summation."""
 
     # the check is to prevent aqteinsum as einsum op for dispatch and combine
@@ -1079,7 +1167,9 @@ class RoutedMoE(nn.Module):
       einsum_op = jnp.einsum
     return einsum_op
 
-  def maybe_all_gather_kernel_weight_in_expert_parallelism(self, kernel, kernel_axes):
+  def maybe_all_gather_kernel_weight_in_expert_parallelism(
+      self, kernel: ctypes.Array, kernel_axes: Tuple[Optional[str], ...]
+  ):
     """All-gather kernel weight in expert parallelism if needed."""
     if self.get_expert_parallelism_size() > 1:
       # This will trigger all-gather using weight_dtype
@@ -1098,21 +1188,23 @@ class RoutedMoE(nn.Module):
       w0_kernel,
       w1_kernel,
       wo_kernel,
-  ):
+  ) -> tuple[ctypes.Array, Optional[ctypes.Array]]:
     """Dense matrix multiplication."""
     # gate_logits: batch, length, expert
     gate_logits = nn.with_logical_constraint(gate_logits, ("activation_batch", "activation_length", None))
     if self.config.model_name.startswith("deepseek3"):
-      # pre_bias_logits is None for non-DeepSeek v3 models
-      pre_bias_logits = nn.with_logical_constraint(pre_bias_logits, ("activation_batch", "activation_length", None))
+      # pre_bias_logits is `None` for non-DeepSeek v3 models.
+      pre_bias_logits = nn.with_logical_constraint(
+          pre_bias_logits, ("activation_batch", "activation_length", None)
+      )
     top_k_weights, top_k_indices = self.get_topk(gate_logits, pre_bias_logits)
-    is_llama4_decoder_layer = self.config.decoder_block == ctypes.DecoderBlockType.LLAMA4
-    if is_llama4_decoder_layer:
-      router_scores = jax.nn.sigmoid(top_k_weights.astype(jnp.float32)).astype(jnp.bfloat16)
+    if self.config.decoder_block == ctypes.DecoderBlockType.LLAMA4:
+      router_scores = jnp.astype(
+          jax.nn.sigmoid(jnp.astype(top_k_weights, jnp.float32)), jnp.bfloat16
+      )
       inputs = inputs * router_scores
     else:
       weights = self.reshape_and_update_weights(top_k_weights, top_k_indices)
-    matmul_precision = jax.lax.Precision(self.config.matmul_precision)
 
     if self.config.model_call_mode != "inference":
       softmax_probs = jax.nn.softmax(gate_logits.astype(jnp.float32), axis=-1).astype(self.dtype)
@@ -1222,8 +1314,13 @@ class RoutedMoE(nn.Module):
 
       with jax.named_scope("dispatch"):
         # only cp during prefill
-        dispatch = self.get_einsum(rhs_mesh_axes=mask_axes, einsum_name=DISPATCH)(
-            dispatch_eimsum, inputs, dispatch_mask, precision=matmul_precision
+        dispatch = self.get_einsum(
+            rhs_mesh_axes=mask_axes, einsum_name=DISPATCH
+        )(
+            dispatch_eimsum,
+            inputs,
+            dispatch_mask,
+            precision=self.matmul_precision(),
         )
         if cp > 1:
           dispatch = nn.with_logical_constraint(
@@ -1244,7 +1341,10 @@ class RoutedMoE(nn.Module):
         w0_kernel_axes = ("exp", None, "mlp")
         w0_kernel = self.maybe_all_gather_kernel_weight_in_expert_parallelism(w0_kernel, w0_kernel_axes)
         layer_w0 = self.get_einsum(rhs_mesh_axes=w0_kernel_axes)(
-            mlp_up_einsum, dispatch, w0_kernel, precision=matmul_precision
+            mlp_up_einsum,
+            dispatch,
+            w0_kernel,
+            precision=self.matmul_precision(),
         )
 
         if self.config.activations_in_float32:
@@ -1258,7 +1358,10 @@ class RoutedMoE(nn.Module):
         w1_kernel_axes = ("exp", None, "mlp")
         w1_kernel = self.maybe_all_gather_kernel_weight_in_expert_parallelism(w1_kernel, w1_kernel_axes)
         layer_w1 = self.get_einsum(rhs_mesh_axes=w1_kernel_axes)(
-            mlp_up_einsum, dispatch, w1_kernel, precision=matmul_precision
+            mlp_up_einsum,
+            dispatch,
+            w1_kernel,
+            precision=self.matmul_precision(),
         )
         if self.config.activations_in_float32:
           layer_w1 = layer_w1.astype(jnp.float32)
@@ -1277,7 +1380,7 @@ class RoutedMoE(nn.Module):
             mlp_down_einsum,
             layer_multiply,
             wo_kernel,
-            precision=matmul_precision,
+            precision=self.matmul_precision(),
         )
         if self.config.activations_in_float32:
           intermediate_layer = intermediate_layer.astype(jnp.float32)
@@ -1298,7 +1401,7 @@ class RoutedMoE(nn.Module):
             output_einsum,
             intermediate_layer,
             combine_mask,
-            precision=matmul_precision,
+            precision=self.matmul_precision(),
         )
         if output.ndim == 4:
           output = jnp.reshape(
@@ -1314,14 +1417,20 @@ class RoutedMoE(nn.Module):
       inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_length", "activation_embed"))
       with jax.named_scope("wi_0"):
         layer_w0 = self.get_einsum(rhs_mesh_axes=self.wi_kernel_axes)(
-            "BSM,EMH -> BSEH", inputs, w0_kernel, precision=matmul_precision
+            "BSM,EMH -> BSEH",
+            inputs,
+            w0_kernel,
+            precision=self.matmul_precision(),
         )
         if self.config.activations_in_float32:
           layer_w0 = layer_w0.astype(jnp.float32)
         layer_w0 = adc.checkpoint_name(layer_w0, "mlpwi_0")
       with jax.named_scope("wi_1"):
         layer_w1 = self.get_einsum(rhs_mesh_axes=self.wi_kernel_axes)(
-            "BSM,EMH -> BSEH", inputs, w1_kernel, precision=matmul_precision
+            "BSM,EMH -> BSEH",
+            inputs,
+            w1_kernel,
+            precision=self.matmul_precision(),
         )
         if self.config.activations_in_float32:
           layer_w1 = layer_w1.astype(jnp.float32)
@@ -1334,14 +1443,16 @@ class RoutedMoE(nn.Module):
             "BSEH,EHM -> BSEM",
             layer_multiply,
             wo_kernel,
-            precision=matmul_precision,
+            precision=self.matmul_precision(),
         )
         if self.config.activations_in_float32:
           intermediate_layer = intermediate_layer.astype(jnp.float32)
         intermediate_layer = adc.checkpoint_name(intermediate_layer, "mlpwo")
       with jax.named_scope("w_sum"):
-        if is_llama4_decoder_layer:
-          weights = self.reshape_and_update_weights(jnp.ones_like(top_k_weights), top_k_indices)
+        if self.config.decoder_block == ctypes.DecoderBlockType.LLAMA4:
+          weights = self.reshape_and_update_weights(
+              jnp.ones_like(top_k_weights), top_k_indices
+          )
         output = jnp.einsum(
             "BSEM,BSE -> BSM",
             intermediate_layer,
@@ -1374,7 +1485,9 @@ class RoutedMoE(nn.Module):
     return w0_kernel, w1_kernel, wo_kernel
 
   @nn.compact
-  def __call__(self, inputs):
+  def __call__(
+      self, inputs: ctypes.Array
+  ) -> tuple[ctypes.Array, Optional[ctypes.Array]]:
     cfg = self.config
     inputs = inputs.astype(cfg.dtype)
     gate_logits, pre_bias_logits = GateLogit(
@@ -1429,7 +1542,7 @@ class RoutedAndSharedMoE(nn.Module):
   quant: Optional[quantizations.AqtQuantization] = None
 
   @nn.compact
-  def __call__(self, inputs):
+  def __call__(self, inputs: ctypes.Array) -> ctypes.Array:
     cfg = self.config
     # NOTE: the naming mismatch here is to ensure reverse compatibility with
     # existing checkpoints. The `name` represents the weight name in
