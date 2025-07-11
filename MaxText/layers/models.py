@@ -743,7 +743,7 @@ class Decoder(nn.Module):
 
     # Apply the main scan over the full blocks
     if scan_length > 0:
-      scanned_layers_output, _ = self.scan_decoder_layers(
+      y, _ = self.scan_decoder_layers(
           cfg, RemattedBlockLayer, scan_length, "layers", mesh, **layer_kwargs
       )(
           y,
@@ -753,7 +753,6 @@ class Decoder(nn.Module):
           model_mode,
           **layer_call_kwargs,
       )
-      y = scanned_layers_output
 
     # Apply any remaining layers that did not fit into a full scanned block
     num_remaining_layers = cfg.num_decoder_layers % attention_pattern_length
@@ -761,7 +760,7 @@ class Decoder(nn.Module):
       # We name the remainder block with a 'remainder' suffix to avoid parameter name collisions
       rem_layer_kwargs = {"num_of_layers": num_remaining_layers}
       layer = RemattedBlockLayer(config=cfg, mesh=mesh, quant=self.quant, name="layers_remainder", **rem_layer_kwargs)
-      y = layer(
+      y, _ = layer(
           y,
           decoder_segment_ids,
           decoder_positions,
