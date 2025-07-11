@@ -119,6 +119,106 @@ def GEMMA3TEXT_HF_WEIGHTS_TO_SHAPE_MAPPING(config):
   return mapping
 
 
+def QWEN3_HF_WEIGHTS_TO_SHAPE_MAPPING(config):
+  """Returns mapping between HuggingFace Qwen3 weights path and the HuggingFace weights shape.
+
+  To check this mapping, dump the huggingface model shapes:
+    import torch
+    from transformers import AutoTokenizer, AutoModelForCausalLM
+    model_name = "Qwen/Qwen3-0.6B"
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    model = AutoModelForCausalLM.from_pretrained(
+      model_name,
+      torch_dtype="auto",
+    )
+    for name, val in model.named_parameters():
+      print(name, val.shape)
+
+  Args:
+      config (dict): Model configuration dictionary (from HF Qwen3TextConfig.to_dict())
+                     Expected keys: https://huggingface.co/Qwen/Qwen3-0.6B/blob/main/config.json
+
+  Returns:
+      dict: A mapping where:
+          - Keys are HuggingFace model parameter paths
+          - Values are parameter shape as a List
+  """
+  hidden_size = config["hidden_size"]
+  num_hidden_layers = config["num_hidden_layers"]
+  num_attention_heads = config["num_attention_heads"]
+  num_key_value_heads = config["num_key_value_heads"]
+  head_dim = config.get(
+      "head_dim", config["hidden_size"] // config["num_attention_heads"]
+  )  # head_dim might not always be present
+
+  mapping = {
+      "model.embed_tokens.weight": [config["vocab_size"], hidden_size],
+      "model.norm.weight": [hidden_size],
+      "lm_head.weight": [config["vocab_size"], hidden_size],
+  }
+
+  # Determine if the model is MoE based on config keys
+  num_experts = config.get("num_experts", 0)
+
+  for layer_idx in range(num_hidden_layers):
+    layer_prefix = f"model.layers.{layer_idx}"
+    layer_mapping = {
+        f"{layer_prefix}.input_layernorm.weight": [hidden_size],
+        f"{layer_prefix}.post_attention_layernorm.weight": [hidden_size],
+        # Attention projections
+        f"{layer_prefix}.self_attn.q_proj.weight": [num_attention_heads * head_dim, hidden_size],
+        f"{layer_prefix}.self_attn.k_proj.weight": [num_key_value_heads * head_dim, hidden_size],
+        f"{layer_prefix}.self_attn.v_proj.weight": [num_key_value_heads * head_dim, hidden_size],
+        f"{layer_prefix}.self_attn.o_proj.weight": [hidden_size, num_attention_heads * head_dim],
+        # QK Norm weights (applied per head to the head_dim dimension)
+        f"{layer_prefix}.self_attn.q_norm.weight": [head_dim],
+        f"{layer_prefix}.self_attn.k_norm.weight": [head_dim],
+    }
+
+    if num_experts > 1:
+      # MoE MLP layers
+      moe_ffn_intermediate_size = config.get("moe_intermediate_size")
+      if moe_ffn_intermediate_size is None:
+        # moe_intermediate_size refers to the intermediate size of the routed expert
+        # For Qwen MoE, moe_intermediate_size is distinct from intermediate_size (for dense layers)
+        # Fall back to intermediate_size
+        moe_ffn_intermediate_size = config.get("intermediate_size")
+        if moe_ffn_intermediate_size is None:
+          raise ValueError(
+              "MoE model detected (num_experts > 1) but 'moe_intermediate_size' or 'intermediate_size' not found in config."
+          )
+
+      layer_mapping.update(
+          {
+              f"{layer_prefix}.mlp.gate.weight": [num_experts, hidden_size],
+          }
+      )
+      for expert_j in range(num_experts):
+        expert_prefix = f"{layer_prefix}.mlp.experts.{expert_j}"
+        layer_mapping.update(
+            {
+                f"{expert_prefix}.gate_proj.weight": [moe_ffn_intermediate_size, hidden_size],
+                f"{expert_prefix}.up_proj.weight": [moe_ffn_intermediate_size, hidden_size],
+                f"{expert_prefix}.down_proj.weight": [hidden_size, moe_ffn_intermediate_size],
+            }
+        )
+    else:
+      # Dense MLP layers
+      dense_ffn_intermediate_size = config.get("intermediate_size")
+      if dense_ffn_intermediate_size is None:
+        raise ValueError("'intermediate_size' not found in config for a dense MLP.")
+      layer_mapping.update(
+          {
+              f"{layer_prefix}.mlp.gate_proj.weight": [dense_ffn_intermediate_size, hidden_size],
+              f"{layer_prefix}.mlp.up_proj.weight": [dense_ffn_intermediate_size, hidden_size],
+              f"{layer_prefix}.mlp.down_proj.weight": [hidden_size, dense_ffn_intermediate_size],
+          }
+      )
+    mapping.update(layer_mapping)
+  return mapping
+
+
 SHAPE_MAPPING = {
     "gemma2-2b": GEMMA2_HF_WEIGHTS_TO_SHAPE_MAPPING,
     "gemma2-9b": GEMMA2_HF_WEIGHTS_TO_SHAPE_MAPPING,
@@ -126,4 +226,7 @@ SHAPE_MAPPING = {
     "gemma3-4b": GEMMA3TEXT_HF_WEIGHTS_TO_SHAPE_MAPPING,
     "gemma3-12b": GEMMA3TEXT_HF_WEIGHTS_TO_SHAPE_MAPPING,
     "gemma3-27b": GEMMA3TEXT_HF_WEIGHTS_TO_SHAPE_MAPPING,
+    "qwen3-0.6b": QWEN3_HF_WEIGHTS_TO_SHAPE_MAPPING,
+    "qwen3-4b": QWEN3_HF_WEIGHTS_TO_SHAPE_MAPPING,
+    "qwen3-8b": QWEN3_HF_WEIGHTS_TO_SHAPE_MAPPING,
 }

@@ -31,13 +31,12 @@ from MaxText.common_types import Config, Array
 from MaxText.inference import page_manager
 from MaxText.layers import initializers
 from MaxText.layers import linears
-from MaxText.layers import models
 from MaxText.layers import moe
 from MaxText.layers import quantizations
 from MaxText.layers import attentions
 from MaxText.layers.attentions import AttentionType
 from MaxText.layers.quantizations import AqtQuantization as Quant
-from MaxText.layers.normalizations import RMSNorm
+from MaxText.layers.normalizations import rms_norm
 
 
 Attention = attentions.Attention
@@ -58,15 +57,15 @@ class Llama4UnfoldConvolution(nn.Module):
 
   def setup(self):
     """
-      Initialize Llama4UnfoldConvolution
+    Initialize Llama4UnfoldConvolution
     """
     cfg = self.config
     # Linear projection layer using dense_general.
     # patches sent to dense_general with shape:
     # [batch_size, num_patches, num_channels * patch_size * patch_size]
     self.linear = linears.dense_general(
-        in_features=(cfg.num_channels_for_vit * cfg.patch_size_for_vit * cfg.patch_size_for_vit),
-        features=cfg.hidden_size_for_vit,
+        in_features_shape=(cfg.num_channels_for_vit * cfg.patch_size_for_vit * cfg.patch_size_for_vit),
+        out_features_shape=cfg.hidden_size_for_vit,
         dtype=cfg.dtype_mm,
         name="vit_unfold_linear",
         use_bias=False,
@@ -148,16 +147,16 @@ class Llama4VisionMLP(nn.Module):
   def setup(self):
     cfg = self.config
     self.fc1 = linears.dense_general(
-        in_features=cfg.hidden_size_for_vit,
-        features=cfg.intermediate_size_for_vit,
+        in_features_shape=cfg.hidden_size_for_vit,
+        out_features_shape=cfg.intermediate_size_for_vit,
         dtype=cfg.dtype_mm,
         name="vit_encoder_layer_mlp_fc1",
         use_bias=True,
         matmul_precision=cfg.matmul_precision,
     )
     self.fc2 = linears.dense_general(
-        in_features=cfg.intermediate_size_for_vit,
-        features=cfg.hidden_size_for_vit,
+        in_features_shape=cfg.intermediate_size_for_vit,
+        out_features_shape=cfg.hidden_size_for_vit,
         dtype=cfg.dtype_mm,
         name="vit_encoder_layer_mlp_fc2",
         use_bias=True,
@@ -190,20 +189,20 @@ class Llama4VisionMLP2(nn.Module):
 
   def setup(self):
     """
-      Initialize Llama4VisionMLP2
+    Initialize Llama4VisionMLP2
     """
     cfg = self.config
     self.fc1 = linears.dense_general(
-        in_features=cfg.intermediate_size_for_vit,
-        features=cfg.projector_input_dim_for_vit,
+        in_features_shape=cfg.intermediate_size_for_vit,
+        out_features_shape=cfg.projector_input_dim_for_vit,
         dtype=cfg.dtype_mm,
         name="vit_pixel_shuffle_mlp_fc1",
         use_bias=False,
         matmul_precision=cfg.matmul_precision,
     )
     self.fc2 = linears.dense_general(
-        in_features=cfg.projector_input_dim_for_vit,
-        features=cfg.projector_output_dim_for_vit,
+        in_features_shape=cfg.projector_input_dim_for_vit,
+        out_features_shape=cfg.projector_output_dim_for_vit,
         dtype=cfg.dtype_mm,
         name="vit_pixel_shuffle_mlp_fc2",
         use_bias=False,
@@ -278,12 +277,13 @@ class Llama4MultiModalProjector(nn.Module):
   """
 
   config: Config
+  mesh: Mesh
 
   def setup(self):
     cfg = self.config
     self.linear = linears.dense_general(
-        in_features=cfg.vision_output_dim_for_vit,
-        features=cfg.emb_dim,
+        in_features_shape=cfg.vision_output_dim_for_vit,
+        out_features_shape=cfg.base_emb_dim,
         dtype=cfg.dtype_mm,
         name="vit_multi_modal_projector",
         use_bias=False,
@@ -294,12 +294,16 @@ class Llama4MultiModalProjector(nn.Module):
     """Project image features to text hidden dimension.
 
     Args:
-      image_features: Input tensor of shape [batch_size*num_patches*(pixel_shuffle_ratio**2), vision_output_dim]
+      image_features: Input tensor of shape [batch_size, num_patches, (pixel_shuffle_ratio**2), vision_output_dim]
 
     Returns:
-      Tensor of shape [batch_size*num_patches*(pixel_shuffle_ratio**2), emb_dim]
+      Tensor of shape [batch_size, num_patches, (pixel_shuffle_ratio**2), vision_hidden_size]
     """
+    b, t, c, d = image_features.shape
+    image_features = image_features.reshape(b * t, c, d)
     hidden_states = self.linear(image_features)
+    _, c, d = hidden_states.shape
+    hidden_states = hidden_states.reshape(b, t, c, d)
     return hidden_states
 
 
@@ -348,14 +352,14 @@ class Llama4DecoderLayer(nn.Module):
   """Transformer decoder layer for Llama4.
 
   Attributes:
-    config: models.Config, MaxText model config
+    config: Config, MaxText model config
     mesh: Mesh, JAX device mesh (used for sharding)
     quant: Optional[Quant], quantization config
     is_nope_layer: bool, whether to use RoPE or not on this layer
     is_moe_layer: bool, whether this layer operates as a MoE layer
   """
 
-  config: models.Config
+  config: Config
   mesh: Mesh
   quant: Optional[Quant] = None
   is_nope_layer: bool = False
@@ -380,7 +384,8 @@ class Llama4DecoderLayer(nn.Module):
 
     inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
     inputs = checkpoint_name(inputs, "decoder_layer_input")
-    lnx_rms = RMSNorm(
+    lnx_rms = rms_norm(
+        num_features=inputs.shape[-1],
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
         name="pre_self_attention_layer_norm",
@@ -446,7 +451,8 @@ class Llama4DecoderLayer(nn.Module):
     intermediate_inputs = inputs + attention_lnx
 
     # Fully Connected
-    hidden_states = models.RMSNorm(
+    hidden_states = rms_norm(
+        num_features=intermediate_inputs.shape[-1],
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
         name="post_self_attention_layer_norm",
@@ -518,7 +524,7 @@ class Llama4ScannableBlock(nn.Module):
   A repeatable block given nope_layer_interval and interleave_moe_layer_step
 
   Attributes:
-    config: models.Config, MaxText model config
+    config: Config, MaxText model config
     mesh: Mesh, JAX device mesh (used for sharding)
     quant: Optional[Quant], quantization config
     nope_layer_interval: int, the interval at which layers should use NoPE.
@@ -526,7 +532,7 @@ class Llama4ScannableBlock(nn.Module):
   """
   '''
 
-  config: models.Config
+  config: Config
   mesh: Mesh
   quant: Optional[Quant] = None
   nope_layer_interval: int = 1
@@ -691,5 +697,83 @@ class Llama4VisionEncoder(nn.Module):
           hidden_states=hidden_states,
           deterministic=deterministic,
       )
+
+    return hidden_states
+
+
+class Llama4VisionModel(nn.Module):
+  """Llama4 vision model for processing image inputs.
+
+  This model extracts patches from input image tiles and processes them
+  through Llama4VisionEncoder and other vision-specific layers.
+
+  Attributes:
+    config: Config containing model parameters
+    mesh: Mesh, JAX device mesh (used for sharding)
+  """
+
+  config: Config
+  mesh: Mesh
+
+  def setup(self):
+    self.scale = self.config.hidden_size_for_vit**-0.5
+    self.num_patches = (self.config.tile_size_for_vit // self.config.patch_size_for_vit) ** 2 + 1
+    self.class_embedding = self.param(
+        "class_embedding",
+        nn.initializers.normal(stddev=self.scale, dtype=self.config.dtype_mm),
+        (self.config.hidden_size_for_vit,),
+    )
+    self.positional_embedding_vlm = self.param(
+        "positional_embedding_vlm",
+        nn.initializers.normal(stddev=self.scale, dtype=self.config.dtype_mm),
+        (self.num_patches, self.config.hidden_size_for_vit),
+    )
+
+  @nn.compact
+  def __call__(
+      self,
+      pixel_values: Array,
+      output_attentions: Optional[bool] = None,
+      output_hidden_states: Optional[bool] = None,
+      return_dict: Optional[bool] = None,
+      deterministic: Optional[bool] = False,
+  ) -> Array:
+    """Forward pass of the Llama4 vision model.
+
+    Args:
+      inputs: Input tensor of shape [batch_size, num_tiles, num_channels_for_vit, tile_size_for_vit, tile_size_for_vit]
+      deterministic: Whether to use deterministic mode (disables dropout)
+
+    Returns:
+      Final hidden states from the vision encoder of shape [batch_size, num_tiles, num_patches, vision_output_dim_for_vit]
+    """
+    cfg = self.config
+    mesh = self.mesh
+
+    b, t, c, h, w = pixel_values.shape
+    pixel_values = jnp.reshape(pixel_values, [b * t, c, h, w])
+
+    # Unfold convolution to extract patches
+    hidden_states = Llama4UnfoldConvolution(config=cfg)(pixel_values)
+
+    # Add class embedding to the beginning of the sequence
+    class_embedding_expanded = jnp.expand_dims(jnp.expand_dims(self.class_embedding, axis=0), axis=0)
+    class_embedding = jnp.broadcast_to(class_embedding_expanded, (hidden_states.shape[0], 1, cfg.hidden_size_for_vit))
+    hidden_states = jnp.concatenate([class_embedding, hidden_states], axis=1)
+
+    # Add positional embedding
+    hidden_states += self.positional_embedding_vlm
+
+    # Transformation layers
+    hidden_states = nn.LayerNorm(name="layernorm_pre")(hidden_states)
+    hidden_states = Llama4VisionEncoder(config=cfg, mesh=mesh)(hidden_states)
+    hidden_states = nn.LayerNorm(name="layernorm_post")(hidden_states)
+    hidden_states = hidden_states[:, :-1, :]
+
+    hidden_states = Llama4VisionPixelShuffleMLP(config=cfg)(hidden_states)
+
+    # Reshape hidden states
+    _, patch_num, patch_dim = hidden_states.shape
+    hidden_states = jnp.reshape(hidden_states, [b, t, patch_num, patch_dim])
 
     return hidden_states

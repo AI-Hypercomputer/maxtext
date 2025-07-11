@@ -726,6 +726,27 @@ def print_cpu_ram_stats(label: str):
     max_logging.log(f"\tRAM stats unavailable, error: {ex}")
 
 
+def print_compiled_memory_stats(compiled_stats):
+  """Prints a summary of the compiled memory statistics."""
+  if compiled_stats is None:
+    return
+
+  def bytes_to_gb(num_bytes):
+    return num_bytes / (1024**3)
+
+  output_gb = bytes_to_gb(compiled_stats.output_size_in_bytes)
+  temp_gb = bytes_to_gb(compiled_stats.temp_size_in_bytes)
+  argument_gb = bytes_to_gb(compiled_stats.argument_size_in_bytes)
+  alias_gb = bytes_to_gb(compiled_stats.alias_size_in_bytes)
+  host_temp_gb = bytes_to_gb(compiled_stats.host_temp_size_in_bytes)
+  total_gb = output_gb + temp_gb + argument_gb - alias_gb
+
+  max_logging.log(
+      f"Total memory size: {total_gb:.1f} GB, Output size: {output_gb:.1f} GB, Temp size: {temp_gb:.1f} GB, "
+      f"Argument size: {argument_gb:.1f} GB, Host temp size: {host_temp_gb:.1f} GB."
+  )
+
+
 def print_system_information():
   """Print system information of the current environment.
   Note that this will initialize the JAX backend."""

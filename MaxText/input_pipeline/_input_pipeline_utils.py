@@ -94,8 +94,8 @@ def is_conversational(features, data_columns):
   """
   for column in data_columns:
     messages = features[column]
-    if isinstance(messages, list):
-      if isinstance(messages[0], dict) and "role" in messages[0] and "content" in messages[0]:
+    if isinstance(messages, datasets.Sequence):
+      if isinstance(messages.feature, dict) and "role" in messages.feature and "content" in messages.feature:
         return True
 
   return False

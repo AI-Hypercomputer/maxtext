@@ -95,9 +95,8 @@ class RoPETest(unittest.TestCase):
 
     position = jnp.arange(seq_len, dtype=jnp.float32)[jnp.newaxis, :]
     rope = embeddings.RotaryEmbedding(min_timescale=1, max_timescale=10_000, embedding_dims=dim_per_head)
-    variables = rope.init(jax.random.PRNGKey(0), x_q, position)
-    query_proj = rope.apply(variables, permute_to_match_maxtext_rope(x_q), position)
-    key_proj = rope.apply(variables, permute_to_match_maxtext_rope(x_k), position)
+    query_proj = rope(permute_to_match_maxtext_rope(x_q), position)
+    key_proj = rope(permute_to_match_maxtext_rope(x_k), position)
 
     # Compare results
     self.assertTrue(jnp.allclose(permute_to_match_maxtext_rope(llama_output[0]), query_proj, rtol=1e-01, atol=1e-04))
@@ -113,14 +112,13 @@ class RoPETest(unittest.TestCase):
 
     # Calculate RoPE embeddings and then scale
     rope = embeddings.RotaryEmbedding(min_timescale=1, max_timescale=10_000, embedding_dims=dim_per_head)
-    variables = rope.init(jax.random.PRNGKey(0), x_q, position)
-    query_proj_1 = rope.apply(variables, x_q, position=position)
+    query_proj_1 = rope(x_q, position=position)
 
     query_proj_1 = query_proj_1 * (dim_per_head**-0.5)
 
     # scale first and then apply RoPE
     query_proj_2 = x_q * (dim_per_head**-0.5)
-    query_proj_2 = rope.apply(variables, query_proj_2, position=position)
+    query_proj_2 = rope(query_proj_2, position=position)
 
     self.assertTrue(jax.numpy.allclose(query_proj_2, query_proj_1, rtol=1e-01, atol=1e-04, equal_nan=False))
 
@@ -134,15 +132,13 @@ class RoPETest(unittest.TestCase):
     llama_rope_scaled = embeddings.LLaMARotaryEmbedding(
         min_timescale=1, max_timescale=10000, embedding_dims=dim_per_head, use_scale=True
     )
-    variables = llama_rope_scaled.init(jax.random.PRNGKey(0), x_q, position)
-    query_proj_scaled = llama_rope_scaled.apply(variables, x_q, position)
+    query_proj_scaled = llama_rope_scaled(x_q, position)
 
     # Test LLaMARotaryEmbedding without scaling
     llama_rope_no_scale = embeddings.LLaMARotaryEmbedding(
         min_timescale=1, max_timescale=10000, embedding_dims=dim_per_head, use_scale=False
     )
-    variables_no_scale = llama_rope_no_scale.init(jax.random.PRNGKey(0), x_q, position)
-    query_proj_no_scale = llama_rope_no_scale.apply(variables_no_scale, x_q, position)
+    query_proj_no_scale = llama_rope_no_scale(x_q, position)
 
     # Check that the outputs are different
     self.assertFalse(jnp.allclose(query_proj_scaled, query_proj_no_scale, rtol=1e-03, atol=1e-02))
@@ -159,8 +155,7 @@ class RoPETest(unittest.TestCase):
     llama_rope = embeddings.LLaMARotaryEmbedding(
         min_timescale=min_timescale, max_timescale=max_timescale, embedding_dims=dim_per_head, use_scale=False
     )
-    variables = llama_rope.init(jax.random.PRNGKey(0), x_q, position)
-    query_proj = llama_rope.apply(variables, x_q, position)
+    query_proj = llama_rope(x_q, position)
 
     # Manual computation of the single rotation
     inputs_shifted_left = jnp.concatenate([x_q[..., 1:], x_q[..., :1]], axis=-1)

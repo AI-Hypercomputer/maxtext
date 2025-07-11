@@ -140,12 +140,12 @@ def main(argv: Sequence[str]) -> None:
   for i in range(_NUM_STREAMS):
     with jax.profiler.StepTraceAnnotation("prefill", stream=i):
       prefill_result, first_token = engine.prefill(
-        params=params,
-        padded_tokens=tokens,
-        images=processor_output.pixel_values,
-        true_length=true_length,
-        rng=rng_prefill,
-        slot=i,
+          params=params,
+          padded_tokens=tokens,
+          images=processor_output.pixel_values,
+          true_length=true_length,
+          rng=rng_prefill,
+          slot=i,
       )
     prefill_result_list.append(prefill_result)
     first_token_list.append(first_token)
@@ -157,12 +157,19 @@ def main(argv: Sequence[str]) -> None:
     decode_state = engine.insert(prefill_result_list[i], decode_state, slot=i)
 
   # Generate
+  prof_deactivated = False
   steps = range(config.max_prefill_predict_length, config.max_target_length)
   sampled_tokens_list.append(_batch_first_result_token(first_token_list, batch_size))
   for i in steps:
     rng, rng_generate = jax.random.split(rng)
     with jax.profiler.StepTraceAnnotation("generate", step=i):
       decode_state, sampled_tokens = engine.generate(params, decode_state, rng=rng_generate)
+
+    # Automatically deactivate profiler after profiler_steps steps
+    if i > config.max_prefill_predict_length + config.profiler_steps:
+      prof.deactivate(blocking_object=sampled_tokens)
+      prof_deactivated = True
+
     sampled_tokens_list.append(sampled_tokens)
 
   # Get results
@@ -176,7 +183,11 @@ def main(argv: Sequence[str]) -> None:
   ), f"generated text mismatch {output=}, {config.autoregressive_decode_assert=}"
 
   # Deactivate profiler
-  prof.deactivate()
+  if not prof_deactivated:
+    prof.deactivate(blocking_object=output)
+
+  prof.post_process()
+
 
 def _validate_config(config):
   assert config.load_full_state_path == "", (

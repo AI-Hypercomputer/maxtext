@@ -10,45 +10,29 @@ DATE=$(date +%Y-%m-%d)
 HF_CHECKPOINT_GCS_PATH="gs://maxtext-model-checkpoints/HuggingFace/gemma2-2b/${DATE}" # (optional)GCS path for HF model
 MAXTEXT_CHECKPOINT_DIR="gs://maxtext-model-checkpoints/gemma2-2b-it/2025-02-20-18-01/unscanned/checkpoints/0/items"
 LOCAL_HF_CHECKPOINT_DIR="/tmp/hf_gemma2-2b_output" # HF requires a local dir
-GOLDEN_MODEL_ID="google/gemma-2-2b-it"
-
-CONVERT_MODULE="MaxText.utils.ckpt_conversion.to_huggingface"
-CONVERT_ARGS=(
-    "MaxText/configs/base.yml"
-    "model_name=gemma2-2b"
-    "tokenizer_path=assets/tokenizer.gemma"
-    "load_parameters_path=${MAXTEXT_CHECKPOINT_DIR}"
-    "per_device_batch_size=1"
-    "max_prefill_predict_length=8"
-    "max_target_length=16"
-    "steps=1"
-    "async_checkpointing=false"
-    "scan_layers=false"
-    "prompt='I love to'"
-    "attention='dot_product'"
-    "base_output_directory=${HF_CHECKPOINT_GCS_PATH}"
-)
-
-VERIFY_MODULE="MaxText.tests.hf_ckpt_conversion_check"
-
-VERIFY_ARGS=(
-    "golden_model_id=${GOLDEN_MODEL_ID}"
-    "hf_checkpoint_path=${LOCAL_HF_CHECKPOINT_DIR}" # Updated to local path
-)
+TOKENIZER_PATH="assets/tokenizer.gemma"
+MODEL_NAME="gemma2-2b"
+PER_DEVICE_BATCH_SIZE=1
+SCAN_LAYERS=false
 
 
 # --- Step 1: Run the Hugging Face Conversion ---
 echo "Starting Hugging Face model conversion for gemma2-2b..."
-cd "$MAXTEXT_PROJECT_DIR"
 
-# Construct the command
-CONVERT_CMD=("python3" -m "$CONVERT_MODULE")
-for arg in "${CONVERT_ARGS[@]}"; do
-    CONVERT_CMD+=("$arg")
-done
-
-# Execute the command
-"${CONVERT_CMD[@]}"
+python3 -m "MaxText.utils.ckpt_conversion.to_huggingface" \
+    "MaxText/configs/base.yml" \
+    model_name="${MODEL_NAME}" \
+    tokenizer_path="assets/tokenizer.gemma" \
+    load_parameters_path="${MAXTEXT_CHECKPOINT_DIR}" \
+    per_device_batch_size=${PER_DEVICE_BATCH_SIZE} \
+    max_prefill_predict_length=8 \
+    max_target_length=16 \
+    steps=1 \
+    async_checkpointing=false \
+    scan_layers=${SCAN_LAYERS} \
+    prompt="'I love to'" \
+    attention="'dot_product'" \
+    base_output_directory="${HF_CHECKPOINT_GCS_PATH}"
 
 echo "Hugging Face model conversion finished."
 
@@ -62,16 +46,21 @@ echo "Downloading HF checkpoints from ${HF_CHECKPOINT_GCS_PATH} to ${LOCAL_HF_CH
 gsutil -m cp -r "${HF_CHECKPOINT_GCS_PATH}/*" "${LOCAL_HF_CHECKPOINT_DIR}/"
 echo "Download complete."
 
-# Construct the command
-VERIFY_CMD=("python3" -m "$VERIFY_MODULE")
-if [ ${#VERIFY_ARGS[@]} -ne 0 ]; then
-    for arg in "${VERIFY_ARGS[@]}"; do
-        VERIFY_CMD+=("$arg")
-    done
-fi
-
-# Execute the command
-"${VERIFY_CMD[@]}"
+python3 -m "MaxText.tests.forward_pass_logit_checker" \
+    "MaxText/configs/base.yml" \
+    tokenizer_path=${TOKENIZER_PATH} \
+    load_parameters_path="${MAXTEXT_CHECKPOINT_DIR}"\
+    run_name=forward_pass_test_${MODEL_NAME}\
+    per_device_batch_size=${PER_DEVICE_BATCH_SIZE} \
+    model_name=${MODEL_NAME} \
+    max_prefill_predict_length=4 \
+    max_target_length=4 \
+    dataset_type=synthetic \
+    scan_layers=${SCAN_LAYERS} \
+    attention=dot_product \
+    --max_kl_div=0.015 \
+    --run_hf_model=True \
+    --hf_model_path=${LOCAL_HF_CHECKPOINT_DIR} \
 
 # Optional: Clean up the local checkpoint directory
 echo "Cleaning up local HF checkpoint directory: ${LOCAL_HF_CHECKPOINT_DIR}"

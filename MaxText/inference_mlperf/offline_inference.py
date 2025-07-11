@@ -91,8 +91,8 @@ class PrefillHelper:
       self,
       max_length: int,
       params: Params,
-      params_layout: layout.Layout,
-      decode_state_layout: layout.Layout,
+      params_layout: layout.Format,
+      decode_state_layout: layout.Format,
       decode_state_shape: jax.ShapeDtypeStruct,
   ) -> None:
     """Ahead-of-Time compile"""

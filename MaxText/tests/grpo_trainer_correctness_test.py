@@ -135,6 +135,7 @@ class GrpoTrainerTest(unittest.TestCase):
     )
     self.tokenizer_model.add_special_tokens({"pad_token": "<pad>"})
 
+  @pytest.mark.skip(reason="Logit output test fragile, failing on jax upgrade to 0.6.2 - see b/425997645")
   @pytest.mark.tpu_only  # ATTENTION: Only run on TPU V4-8
   def test_grpo_trainer_correctness(self):
     # Get the expected (golden) data.

@@ -125,38 +125,34 @@ jobs:
       container_resource_option: "--shm-size 2g --runtime=nvidia --gpus all --privileged"
 
   clean_up:
-    if: ${{ always() }}  # always execute, regardless of previous jobs or steps.
+    if: ${{ always() }}
     needs: [cpu_unit_tests, gpu_unit_tests, gpu_integration_tests, tpu_unit_tests, tpu_integration_tests]
     name: "Clean up"
     runs-on: ["self-hosted"]
     permissions:
       contents: read
-      issues: write  # for failed-build-issue
+      issues: write
     steps:
     - name: Authenticate gcloud
-      continue-on-error: true
       run: |
           # configure registries as root and as runner
-          sudo gcloud auth configure-docker --quiet
           gcloud auth configure-docker --quiet
-          sudo gcloud auth configure-docker us-docker.pkg.dev --quiet
           gcloud auth configure-docker us-docker.pkg.dev --quiet
-    - name: Delete GPU image
-      run: gcloud container images delete gcr.io/tpu-prod-env-multipod/maxtext_${{ github.run_id }}:gpu --force-delete-tags --quiet
-    - name: Delete TPU image
-      run: gcloud container images delete gcr.io/tpu-prod-env-multipod/maxtext_${{ github.run_id }}:tpu --force-delete-tags --quiet
+    - name: Delete the tpu image
+      run: gcloud container images delete "gcr.io/tpu-prod-env-multipod/maxtext_${{ github.run_id }}:tpu" --force-delete-tags --quiet
+    - name: Delete the gpu image
+      run: gcloud container images delete "gcr.io/tpu-prod-env-multipod/maxtext_${{ github.run_id }}:gpu" --force-delete-tags --quiet
 
-  notify:
-    if: ${{ always() }}
+  notify_failure:
     name: Notify failed build # creates an issue or modifies last open existing issue for failed build
     needs: [cpu_unit_tests, gpu_unit_tests, gpu_integration_tests, tpu_unit_tests, tpu_integration_tests]
+    if: ${{ always() }}
     runs-on: ubuntu-latest
+    permissions:
+      issues: write
     steps:
     - name: Check whether one of the jobs failed
-      if: ${{ failure() && github.event.pull_request == null }}
+      if: ${{ contains(needs.*.result, 'failure') && github.event.pull_request == null }}
       uses: jayqi/failed-build-issue-action@1a893bbf43ef1c2a8705e2b115cd4f0fe3c5649b  # v1.2.0
       with:
         github-token: ${{ secrets.GITHUB_TOKEN }}
-    - name: Log message if dependent job succeeded
-      if: ${{ ! (failure() && github.event.pull_request == null) }}
-      run: echo "Conditions for creating/updating issue not met. Skipping."

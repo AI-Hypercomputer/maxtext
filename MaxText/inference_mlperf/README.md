@@ -61,7 +61,7 @@ mv 09292024_mixtral_15k_mintoken2_v1.pkl mixtral-processed-data.pkl
 ### Install Maxtext
 ```
 cd ~
-git clone git@github.com:google/maxtext.git
+git clone https://github.com/AI-Hypercomputer/maxtext.git
 cd maxtext
 bash setup.sh
 python3 -m pip install -r MaxText/inference_mlperf/requirements.txt

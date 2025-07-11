@@ -18,9 +18,11 @@ limitations under the License.
 # pylint: disable=missing-module-docstring, bare-except, consider-using-generator, missing-function-docstring
 from collections import OrderedDict
 from typing import Any, Union
+from math import prod
 import math
 import os
 import sys
+import datetime
 
 import jax
 from jax.experimental.compilation_cache import compilation_cache
@@ -188,6 +190,7 @@ def validate_keys(keys):
   if keys["num_experts"] > 1:
     validate_sparse_matmul_parallelism(keys)
     validate_deepseek_moe(keys)
+    assert keys["decoder_block"] != "qwen3", "Qwen3 MoE mode has not been tested, please set num_experts to 1."
 
   if keys["use_multimodal"]:
     validate_multimodal_model_name(keys["model_name"])
@@ -200,6 +203,17 @@ def validate_tokenizer(keys):
   assert keys[
       "tokenizer_path"
   ], "Please provide tokenizer_path. Even if using pre-tokenized data, tokenizer is required to process special tokens."
+
+
+def validate_constant_bound(keys):
+  if keys["constant_bound_config"] == "":
+    keys["constant_bound_config"] = []
+  else:
+    value_list = keys["constant_bound_config"].split(",")
+    keys["constant_bound_config"] = list(map(float, value_list))
+  assert (
+      len(keys["constant_bound_config"]) == 0 or len(keys["constant_bound_config"]) == 6
+  ), "Please specify competete constant bound or none"
 
 
 def validate_data_input(keys):
@@ -287,6 +301,7 @@ def validate_model_name(s: str) -> bool:
       "deepseek2-16b",
       "deepseek2-236b",
       "deepseek3-671b",
+      "deepseek3-test",
       "gemma-7b",
       "gemma-2b",
       "gemma2-2b",
@@ -295,6 +310,9 @@ def validate_model_name(s: str) -> bool:
       "gemma3-4b",
       "gemma3-12b",
       "gemma3-27b",
+      "qwen3-0.6b",
+      "qwen3-4b",
+      "qwen3-8b",
       "gpt3-175b",
       "gpt3-22b",
       "gpt3-6b",
@@ -507,6 +525,10 @@ class _HyperParameters:
     """Transformations between the config data and configs used at runtime"""
     if raw_keys["run_name"] == "":
       raw_keys["run_name"] = os.environ.get("JOBSET_NAME")  # using XPK default
+      if raw_keys["run_name"] == "":
+        now = datetime.datetime.now()
+        timestamp = now.strftime("%Y-%m-%d-%H-%M")
+        raw_keys["run_name"] = f'{raw_keys["model_name"]}_{timestamp}'
     run_name = raw_keys["run_name"]
     base_output_directory = raw_keys["base_output_directory"]
     if run_name:
@@ -589,6 +611,7 @@ class _HyperParameters:
     validate_keys(raw_keys)
     validate_tokenizer(raw_keys)
     validate_data_input(raw_keys)
+    validate_constant_bound(raw_keys)
 
     raw_keys["decoder_block"] = DecoderBlockType(raw_keys["decoder_block"])
 
@@ -917,6 +940,12 @@ def validate_sparse_matmul_parallelism(raw_keys):
     raise ValueError(
         f"The expert dimension {raw_keys['num_experts']} is not divisible by expert parallelism setting {expert_parallelism}."
     )
+  if (
+      using_pipeline_parallelism(raw_keys)
+      and raw_keys["pipeline_parallel_layers"] is True
+      and raw_keys["model_fsdp_ag_once"] is True
+  ):
+    raise ValueError("You should use the pipeline_fsdp_ag_once = True and leave model_fsdp_ag_once = False.")
 
 
 def create_new_logical_axis_rules(old_logical_axis_rules, new_logical_axis_rules):
@@ -1014,6 +1043,9 @@ def get_num_target_devices(raw_keys):
     compile_topology = accelerator_to_spec_map.get_system_characteristics(raw_keys["compile_topology"])
     devices_per_slice = compile_topology.devices_per_slice
     return int(devices_per_slice * raw_keys["compile_topology_num_slices"])
+  elif raw_keys.get("subslice_shape") and raw_keys.get("enable_single_controller"):
+    subslice_shape = tuple(int(x) for x in raw_keys["subslice_shape"].split(","))
+    return prod(subslice_shape)
   else:
     return len(jax.devices())
 

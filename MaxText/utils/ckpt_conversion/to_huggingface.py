@@ -36,7 +36,44 @@ from MaxText.utils.ckpt_conversion.utils.shape_mapping import SHAPE_MAPPING
 from MaxText.utils.ckpt_conversion.utils.hf_model_configs import HF_MODEL_CONFIGS
 from MaxText.utils.ckpt_conversion.utils.utils import (process_leaf_param, save_model_files, HF_IDS)
 
-"""Convert MaxText unscanned ckpt into HF format"""
+"""Converts a MaxText checkpoint to a HuggingFace-compatible model checkpoint.
+
+It is invoked using MaxText's pyconfig, which means you provide a base config
+file and can override parameters on the command line.
+
+Key Parameters (to be set in the config file or as command-line overrides):
+  model_name: (Required) The name of the model to convert (e.g., "gemma2-2b").
+              Must be a key in `MaxText.utils.ckpt_conversion.utils.utils.HF_IDS`.
+  load_parameters_path: (Required) Path to the MaxText checkpoint directory
+                        containing the parameter-only checkpoint.
+  base_output_directory: (Optional) The directory where the converted HuggingFace
+                         checkpoint will be saved. Can be a local path, a GCS
+                         path (gs://...), or a HuggingFace Hub repo ID (hf://...).
+                         Defaults to "./mt_output/".
+  scan_layers: (bool) Whether the MaxText model was trained with scanned layers.
+               This must match the training configuration of the checkpoint.
+
+Environment Variables:
+  HF_AUTH_TOKEN: (Required) A HuggingFace authentication token. This is needed
+                 to download the correct tokenizer configuration and to upload
+                 the converted model to the HuggingFace Hub if `base_output_directory`
+                 is a Hub repo ID (e.g., "hf://my-user/my-model").
+
+Example Usage:
+  To convert a gemma2-2b MaxText checkpoint and save it to a local directory:
+
+  export HF_AUTH_TOKEN="hf_YOUR_TOKEN"
+  python MaxText/utils/ckpt_conversion/to_huggingface.py \\
+    MaxText/configs/base.yml \\
+    model_name="gemma2-2b" \\
+    load_parameters_path="/path/to/your/maxtext/checkpoint/" \\
+    base_output_directory="/path/to/your/output/directory" \\
+    scan_layers=False
+
+  Note: Other parameters in base.yml (like per_device_batch_size, max_target_length, etc.)
+  are used to initialize the model structure and should be consistent with the
+  checkpoint being converted, but often don't need to be changed from their defaults.
+"""
 
 
 def _get_model_mappings(model_name: str, scan_layers: bool, config_dict: dict):  # Changed config to config_dict
@@ -49,10 +86,6 @@ def _get_model_mappings(model_name: str, scan_layers: bool, config_dict: dict): 
       "shape_mapping": SHAPE_MAPPING[model_name](config_dict),
       "hook_fn_mapping": HOOK_FNS[model_name](config_dict, scan_layers, saving_to_hf=True),
   }
-
-
-# Read Hugging Face token from environment variable
-hf_token = os.environ.get("HF_AUTH_TOKEN")
 
 
 def main(argv: Sequence[str]) -> None:
@@ -72,21 +105,21 @@ def main(argv: Sequence[str]) -> None:
   loaded_params_from_engine = engine.load_params(rng_load_params)
 
   if not config.base_output_directory:
-    output_directory = os.path.expanduser("~/.hf_output/")
+    output_directory = f"tmp/{config.run_name}"
   else:
     output_directory = config.base_output_directory
 
   # 1. Get HuggingFace Model Configuration
   model_key = config.model_name
-  if model_key not in HF_MODEL_CONFIGS:
-    raise ValueError(f"HF configuration not found for model key: {model_key}")
+  if model_key not in HF_IDS:
+    raise ValueError(f"Unsupported model name: {config.model_name}. Supported models are: {list(HF_IDS.keys())}")
   hf_config_obj = HF_MODEL_CONFIGS[model_key]
 
   # 2. Load Tokenizer
   if model_key not in HF_IDS:
     raise ValueError(f"HF Tokenizer ID not found for model key: {model_key}")
   hf_tokenizer_id = HF_IDS[model_key]
-  tokenizer = AutoTokenizer.from_pretrained(hf_tokenizer_id, token=hf_token)
+  tokenizer = AutoTokenizer.from_pretrained(hf_tokenizer_id)
 
   # 3. Get parameter mappings
   mappings = _get_model_mappings(model_key, config.scan_layers, hf_config_obj.to_dict())
