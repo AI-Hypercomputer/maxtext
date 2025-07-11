@@ -354,64 +354,78 @@ class RoutedMoE(nn.Module):
     weights *= self.config.routed_scaling_factor
     return weights
 
-  def deepseek_routing(self, gate_logits, pre_bias_logits):
+  def _expert_group_mask(self, gate_logits: jax.Array) -> jax.Array:
+    """Returns a mask that selects only the top-k groups of experts.
+
+    Groups of experts are selected based on the sum of the top-2 expert scores
+    for each group.
+
+    Args:
+      gate_logits: Array of shape `(batch, seq, num_experts)`.
+
+    Returns:
+      Array of shape `(batch, seq, num_experts)` that is 1 for experts in the
+      top-k groups and 0 elsewhere.
+    """
+    # Find top groups based on each group's top-2 expert scores, where
+    # `scores_grouped.shape =
+    # (batch * seq, n_routing_groups, experts_per_group)`.
+    scores_grouped = jnp.reshape(
+        gate_logits,
+        gate_logits.shape[:-1] + (self.config.n_routing_groups, -1),
+    )
+    top2_in_group_vals, _ = jax.lax.top_k(scores_grouped, k=2)
+    group_scores = jnp.sum(jnp.astype(top2_in_group_vals, jnp.float32), axis=-1)
+    _, group_idx = jax.lax.top_k(group_scores, k=self.config.topk_routing_group)
+
+    # Mask selected groups so that only those experts are considered.
+    group_mask = jax.nn.one_hot(
+        group_idx, num_classes=self.config.n_routing_groups, dtype=jnp.float32
+    )
+    group_mask = jnp.sum(group_mask, axis=-2)
+
+    # Apply masks and get top-k indices.
+    score_mask_expanded = jnp.broadcast_to(
+        group_mask[..., None],
+        group_mask.shape + (self.num_experts // self.config.n_routing_groups,),
+    )
+    return jnp.reshape(
+        score_mask_expanded,
+        score_mask_expanded.shape[:-2] + (self.num_experts,),
+    )
+
+  def deepseek_routing(
+      self, gate_logits: jax.Array, pre_bias_logits: jax.Array
+  ) -> tuple[jax.Array, jax.Array]:
     """DeepSeek routing logit.
 
-    When the configuration specifies a number of routing groups
-    (n_routing_groups is not -1), it involves two-stage selection process:
+    If the configuration does not specify routing groups (`n_routing_groups` is
+    -1), we use a standard top-k routing mechanism. Otherwise, we force all
+    selected experts to be from the a subset of the highest rated expert groups.
 
-    1) Group Scoring: Experts are partitioned into n_routing_groups.
-    Within each group, the logits of the top-2 scoring experts are summed to
-    create an aggregate score for the group.
-    2) The top-K (topk_routing_group) groups are identified based on their
-    aggregate scores.
-    The final set of selected experts is chosen only from within these top-K
-    groups.
-
-    If the configuration does not specify routing groups (n_routing_groups is
-    -1), using a standard top-k routing mechanism.
-
-    The selection uses post_bias logits, but the return weigths are based on
+    The selection process uses post_bias logits, while the return weigths use
     pre_bias logits.
+
+    Args:
+      gate_logits: Array of shape `(..., num_experts)`.
+      pre_bias_logits: Array of shape `(..., num_experts)`.
+
+    Returns:
+      - top_k_weights: `(..., num_experts_per_tok)` array of weight values for
+        each selected expert.
+      - top_k_indices: `(..., num_experts_per_tok)` array of indices
+        identifying the selected experts for each token.
     """
-    batch_size, seq_len = gate_logits.shape[0], gate_logits.shape[1]
-    n = batch_size * seq_len
-    gate_logits_flat = jnp.reshape(gate_logits, (n, self.num_experts))
-    pre_bias_logits_flat = jnp.reshape(pre_bias_logits, (n, self.num_experts))
-
-    if self.config.n_routing_groups != -1:
-      # Enable device-limited routing.
-      experts_per_group = self.num_experts // self.config.n_routing_groups
-      scores_grouped = jnp.reshape(gate_logits_flat, (n, self.config.n_routing_groups, experts_per_group))
-
-      # For group selection we sum the top2 values from each group.
-      top2_in_group_vals, _ = jax.lax.top_k(scores_grouped, k=2)
-      group_scores = jnp.sum(top2_in_group_vals.astype(jnp.float32), axis=-1)
-      group_idx = jax.lax.top_k(group_scores, k=self.config.topk_routing_group)[1]
-
-      # Create masks for selected groups
-      group_mask = jax.nn.one_hot(group_idx, num_classes=self.config.n_routing_groups, dtype=jnp.float32)
-      group_mask = jnp.sum(group_mask, axis=1)
-
-      # Apply masks and get topk indices
-      score_mask_grouped = jnp.expand_dims(group_mask, axis=-1)
-      score_mask_expanded = jnp.broadcast_to(
-          score_mask_grouped,
-          (n, self.config.n_routing_groups, experts_per_group),
-      )
-      score_mask = jnp.reshape(score_mask_expanded, (n, self.num_experts))
-      negative_infinity = -jax.numpy.inf
-      masked_scores = jnp.where(score_mask > 0, gate_logits_flat, negative_infinity)
-      top_k_indices = jax.lax.top_k(masked_scores, k=self.num_experts_per_tok)[1]
-    else:
-      top_k_indices = jax.lax.top_k(gate_logits_flat, k=self.num_experts_per_tok)[1]
-
-    # Get topk weights from pre bias logits
-    top_k_weights = jnp.take_along_axis(pre_bias_logits_flat, top_k_indices, axis=-1)
-
-    # Reshape
-    top_k_indices = jnp.reshape(top_k_indices, (batch_size, seq_len, self.num_experts_per_tok))
-    top_k_weights = jnp.reshape(top_k_weights, (batch_size, seq_len, self.num_experts_per_tok))
+    expert_mask = (
+        1
+        if self.config.n_routing_groups == -1
+        else self._expert_group_mask(gate_logits)
+    )
+    _, top_k_indices = jax.lax.top_k(
+        jnp.where(expert_mask > 0, gate_logits, -jnp.inf),
+        k=self.num_experts_per_tok,
+    )
+    top_k_weights = jnp.take_along_axis(pre_bias_logits, top_k_indices, axis=-1)
     return top_k_weights, top_k_indices
 
   def permute(self, inputs, gate_logits, pre_bias_logits):
@@ -1126,7 +1140,8 @@ class RoutedMoE(nn.Module):
     return loss
 
   def get_einsum(
-      self, rhs_mesh_axes: Tuple[Optional[str], ...] = (),
+      self,
+      rhs_mesh_axes: Tuple[Optional[str], ...] = (),
       einsum_name: str | None = None,
   ):
     """Get the Einstein summation."""
@@ -1472,7 +1487,9 @@ class RoutedMoE(nn.Module):
     return w0_kernel, w1_kernel, wo_kernel
 
   @nn.compact
-  def __call__(self, inputs: ctypes.Array) -> tuple[ctypes.Array, Optional[ctypes.Array]]:
+  def __call__(
+      self, inputs: ctypes.Array
+  ) -> tuple[ctypes.Array, Optional[ctypes.Array]]:
     cfg = self.config
     inputs = inputs.astype(cfg.dtype)
     gate_logits, pre_bias_logits = GateLogit(
