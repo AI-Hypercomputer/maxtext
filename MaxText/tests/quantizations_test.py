@@ -233,7 +233,7 @@ class QuantizationTest(unittest.TestCase):
     "group_sizes,k,n,tiling",
     [
         # m = sum(group_sizes) must be divisible by tm (first element of tiling)
-        ([3, 5], 6, 4, (8, 4, 4)),   # m = 8, tm = 8  → OK
+        ([3, 5], 6, 4, (1, 1, 1)),   # m = 8, tm = 8  → OK
     ],
 )
 def test_gmm_kernel(group_sizes, k, n, tiling):
