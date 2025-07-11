@@ -1460,7 +1460,7 @@ class Attention(nn.Module):
     # When paged attention is enabled, paged attention op is used for all model modes except TRAIN,
     # which uses default attention op.
     if self.config.attention == "paged":
-      self.paged_attention_op = paged_attention.PagedAttentionOp(
+      self.paged_attention_op = paged_attention.paged_attention_op_as_linen(
           mesh=self.mesh,
           num_pages=self.config.pagedattn_num_pages,
           tokens_per_page=self.config.pagedattn_tokens_per_page,
@@ -1942,7 +1942,7 @@ class MLA(Attention):
       if self.config.pagedattn_head_dim_alignment > 0:
         alignment = self.config.pagedattn_head_dim_alignment
         head_dim = (head_dim + alignment - 1) // alignment * alignment
-      self.ds_paged_attention_op = paged_attention.PagedAttentionOp(
+      self.ds_paged_attention_op = paged_attention.paged_attention_op_as_linen(
           mesh=self.mesh,
           num_pages=self.config.pagedattn_num_pages,
           tokens_per_page=self.config.pagedattn_tokens_per_page,
