@@ -209,11 +209,12 @@ def train_loop(config, elastic_manager, recorder, state=None):
   # Write train config params, num model params, and XLA flags to tensorboard
   metric_logger.write_setup_info_to_tensorboard(state.params)
 
+  last_step_completion = datetime.datetime.now()
+
   # Using while loop instead of a for loop because with elasticity
   # the step is restored back to the latest snapshot when a slice is lost
   while step < config.steps:
     try:
-      step_start_time = datetime.datetime.now()
       prof.maybe_activate_profiler(step, state)
 
       max_logging.log(f"{step=} {elastic_manager.elastic_down_event_count=} {elastic_manager.good_slice_count=}")
@@ -225,6 +226,9 @@ def train_loop(config, elastic_manager, recorder, state=None):
           with maybe_record_goodput(recorder, GoodputEvent.STEP, step):
             state, metrics = p_train_step(state, example_batch, nextrng)
 
+        step_time_delta = datetime.datetime.now() - last_step_completion
+        last_step_completion = datetime.datetime.now()
+
         checkpointing.maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator, step)
 
         prof.maybe_deactivate_profiler(step, state)
@@ -232,10 +236,7 @@ def train_loop(config, elastic_manager, recorder, state=None):
       if step == start_step:
         max_utils.print_mem_stats("After params initialized")
 
-      jax.block_until_ready(state)  # ensure training step is completed
-
-      step_time_delta = datetime.datetime.now() - step_start_time
-      metric_logger.record_train_metrics(metrics, step, step_time_delta)
+      metric_logger.buffer_and_write_train_metrics(metrics, step, step_time_delta)
 
       elastic_manager.maybe_snapshot(
           step=step,
@@ -304,7 +305,7 @@ def train_loop(config, elastic_manager, recorder, state=None):
       max_logging.log(f"Training stopped: {str(error)}")
 
   checkpointing.maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator)
-  metric_logger.cleanup()
+  metric_logger.flush_metrics_and_cleanup()
 
   return state
 
