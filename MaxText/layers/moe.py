@@ -645,9 +645,7 @@ class RoutedMoE(nn.Module):
           if kernel.bias or kernel.sparsity_mask or len(kernel.scale) > 1:
             raise ValueError("Unsupported usecase for ragged_dot with quantized kernel.")
           rhs_inputs = kernel.qvalue
-        with set_xla_metadata(
-            ragged_dot_tiling=",".join([str(t) for t in tiling])
-        ):
+        with set_xla_metadata(ragged_dot_tiling=",".join([str(t) for t in tiling])):
           output = jax.lax.ragged_dot(
               lhs=inputs,
               rhs=rhs_inputs,
@@ -1060,7 +1058,8 @@ class RoutedMoE(nn.Module):
     return loss
 
   def get_einsum(
-      self, rhs_mesh_axes: Tuple[Optional[str], ...] = (),
+      self,
+      rhs_mesh_axes: Tuple[Optional[str], ...] = (),
       einsum_name: str | None = None,
   ):
     """Get the Einstein summation."""
