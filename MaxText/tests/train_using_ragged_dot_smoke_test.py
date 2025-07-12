@@ -20,16 +20,16 @@ from tempfile import gettempdir
 
 from absl.testing import absltest
 
-from MaxText.globals import PKG_DIR, has_gpu, has_tpu
+from MaxText.globals import PKG_DIR, is_cpu_only
 from MaxText.train import main as train_main
 
-cpu_only = not has_gpu() and not has_tpu()
+cpu_only = is_cpu_only()
 
 
 class Train(unittest.TestCase):
   """Smoke test for MoE using ragged_dot in G3 only."""
 
-  @unittest.skipIf(only_cpu, "Only interpret mode is supported on CPU backend")
+  @unittest.skipIf(cpu_only, "Only interpret mode is supported on CPU backend")
   def test_tiny_config(self):
     test_tmpdir = os.environ.get("TEST_TMPDIR", gettempdir())
     outputs_dir = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", test_tmpdir)

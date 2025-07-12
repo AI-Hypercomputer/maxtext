@@ -156,6 +156,7 @@ class MaxEngineTest(unittest.TestCase):
     self.assertEqual(result_token.data.shape[1], 3)
 
   @pytest.mark.skip(reason="Can only pass on CPU.")
+  @unittest.skip("Can only pass on CPU.")
   def test_chunked_prefill(self):
     """Test identical result between chunked prefill with single and multiple chunked.
 

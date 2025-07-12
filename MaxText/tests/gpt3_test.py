@@ -28,7 +28,7 @@ import jax
 
 from MaxText import maxtext_utils
 from MaxText import pyconfig
-from MaxText.globals import PKG_DIR
+from MaxText.globals import PKG_DIR, tpu_present
 from MaxText.layers import models
 from MaxText.layers import quantizations
 
@@ -84,6 +84,7 @@ class GPT3(unittest.TestCase):
 
   @pytest.mark.skip(reason="Numerical differences large on jax>0.5.0")
   @pytest.mark.tpu_only
+  @unittest.skip("Numerical differences large on jax>0.5.0")
   def test_logits_numerically(self):
     # ground truth values are calculated from paxml after loading above model_vars
     # note we expect all xents are the same except the padding one since:

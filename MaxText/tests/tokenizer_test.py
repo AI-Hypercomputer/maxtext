@@ -20,7 +20,7 @@ limitations under the License.
 import numpy as np
 from MaxText import train_tokenizer
 from MaxText.input_pipeline import _input_pipeline_utils
-from MaxText.globals import PKG_DIR
+from MaxText.globals import PKG_DIR, tpu_present
 
 import unittest
 import pytest
@@ -66,11 +66,13 @@ class TokenizerTest(unittest.TestCase):
 
   @pytest.mark.skip(reason="mohitkhatwani@ will fix this")
   @pytest.mark.tpu_only
+  @unittest.skip("mohitkhatwani@ will fix this")
   def test_tokenize(self):
     text = "This is a test"
     self.assertTrue(np.array_equal(self.source_tokenizer.encode(text).numpy(), self.test_tokenizer.encode(text).numpy()))
 
   @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_detokenize(self):
     tokens = [66, 12, 10, 698]
     self.assertEqual(np.asarray(self.source_tokenizer.decode(tokens)), np.asarray(self.test_tokenizer.decode(tokens)))
@@ -97,12 +99,14 @@ class TikTokenTest(unittest.TestCase):
     cls.dataset = train_ds_builder.as_dataset(split="train", read_config=read_config, shuffle_files=True)
 
   @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_tokenize(self):
     text = "This is a test"
     tokens = [2028, 374, 264, 1296]
     self.assertTrue(np.array_equal(self.source_tokenizer.encode(text), tokens))
 
   @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_detokenize(self):
     tokens = [2028, 374, 264, 1296]
     text = "This is a test"
@@ -128,6 +132,7 @@ class HFTokenizerTest(unittest.TestCase):
     )
 
   @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_tokenize(self):
     text = "This is a test"
     self.assertTrue(np.array_equal(self.hf_tokenizer.encode(text), self.sp_tokenizer.encode(text)))

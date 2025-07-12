@@ -29,7 +29,7 @@ from flax.linen import partitioning as nn_partitioning
 from MaxText import maxtext_utils
 from MaxText import pyconfig
 from MaxText.common_types import Config, DType
-from MaxText.globals import PKG_DIR
+from MaxText.globals import PKG_DIR, tpu_present
 from MaxText.layers import linears
 from MaxText.layers import moe
 from MaxText.layers.initializers import NdInitializer, nd_dense_init
@@ -339,6 +339,7 @@ class RoutedMoeTest(unittest.TestCase):
     return output
 
   @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_megablox(self):
     cfg = pyconfig.initialize(
         [None, os.path.join(PKG_DIR, "configs", "base.yml")],
@@ -367,6 +368,7 @@ class RoutedMoeTest(unittest.TestCase):
     self.assertTrue(jax.numpy.allclose(expected_output, actual_output, rtol=1e-02, atol=1e-02, equal_nan=False))
 
   @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_ragged_dot(self):
     cfg = pyconfig.initialize(
         [None, os.path.join(PKG_DIR, "configs", "base.yml")],
@@ -395,6 +397,7 @@ class RoutedMoeTest(unittest.TestCase):
     self.assertTrue(jax.numpy.allclose(expected_output, actual_output, rtol=1e-02, atol=1e-02, equal_nan=False))
 
   @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_dense(self):
     cfg = pyconfig.initialize(
         [None, os.path.join(PKG_DIR, "configs", "base.yml")],
@@ -423,6 +426,7 @@ class RoutedMoeTest(unittest.TestCase):
     self.assertTrue(jax.numpy.allclose(expected_output, actual_output, rtol=1e-05, atol=1e-05, equal_nan=False))
 
   @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_megablox_expert_parallelism(self):
     cfg = pyconfig.initialize(
         [None, os.path.join(PKG_DIR, "configs", "base.yml")],
@@ -453,6 +457,7 @@ class RoutedMoeTest(unittest.TestCase):
       self.assertTrue(jax.numpy.allclose(expected_output, actual_output, rtol=1e-02, atol=1e-02, equal_nan=False))
 
   @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_megablox_context_parallelism(self):
     cfg = pyconfig.initialize(
         [None, os.path.join(PKG_DIR, "configs", "base.yml")],

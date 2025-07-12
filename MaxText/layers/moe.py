@@ -253,9 +253,7 @@ class RoutedMoE(nn.Module):
     rules = dict(self.config.logical_axis_rules)
     return "activation_batch" in rules and "expert" in rules["activation_batch"]
 
-  def generate_kernels(
-      self, num_experts: int, emb_dim: int, mlp_dim: int
-  ) -> tuple[jax.Array, jax.Array, jax.Array]:
+  def generate_kernels(self, num_experts: int, emb_dim: int, mlp_dim: int) -> tuple[jax.Array, jax.Array, jax.Array]:
     """Generates the params for the weights in the MoE block.
 
     Args:
@@ -300,9 +298,7 @@ class RoutedMoE(nn.Module):
     )
     return w0_kernel, w1_kernel, wo_kernel
 
-  def get_topk(
-      self, gate_logits: jax.Array, pre_bias_logits: jax.Array
-  ) -> tuple[jax.Array, jax.Array]:
+  def get_topk(self, gate_logits: jax.Array, pre_bias_logits: jax.Array) -> tuple[jax.Array, jax.Array]:
     """Returns the per-token top-k expert weights and indices.
 
     Args:
@@ -379,9 +375,7 @@ class RoutedMoE(nn.Module):
     _, group_idx = jax.lax.top_k(group_scores, k=self.config.topk_routing_group)
 
     # Mask selected groups so that only those experts are considered.
-    group_mask = jax.nn.one_hot(
-        group_idx, num_classes=self.config.n_routing_groups, dtype=jnp.float32
-    )
+    group_mask = jax.nn.one_hot(group_idx, num_classes=self.config.n_routing_groups, dtype=jnp.float32)
     group_mask = jnp.sum(group_mask, axis=-2)
 
     # Apply masks and get top-k indices.
@@ -394,9 +388,7 @@ class RoutedMoE(nn.Module):
         score_mask_expanded.shape[:-2] + (self.num_experts,),
     )
 
-  def deepseek_routing(
-      self, gate_logits: jax.Array, pre_bias_logits: jax.Array
-  ) -> tuple[jax.Array, jax.Array]:
+  def deepseek_routing(self, gate_logits: jax.Array, pre_bias_logits: jax.Array) -> tuple[jax.Array, jax.Array]:
     """DeepSeek routing logit.
 
     If the configuration does not specify routing groups (`n_routing_groups` is
@@ -416,11 +408,7 @@ class RoutedMoE(nn.Module):
       - top_k_indices: `(..., num_experts_per_tok)` array of indices
         identifying the selected experts for each token.
     """
-    expert_mask = (
-        1
-        if self.config.n_routing_groups == -1
-        else self._expert_group_mask(gate_logits)
-    )
+    expert_mask = 1 if self.config.n_routing_groups == -1 else self._expert_group_mask(gate_logits)
     _, top_k_indices = jax.lax.top_k(
         jnp.where(expert_mask > 0, gate_logits, -jnp.inf),
         k=self.num_experts_per_tok,
@@ -1194,14 +1182,10 @@ class RoutedMoE(nn.Module):
     gate_logits = nn.with_logical_constraint(gate_logits, ("activation_batch", "activation_length", None))
     if self.config.model_name.startswith("deepseek3"):
       # pre_bias_logits is `None` for non-DeepSeek v3 models.
-      pre_bias_logits = nn.with_logical_constraint(
-          pre_bias_logits, ("activation_batch", "activation_length", None)
-      )
+      pre_bias_logits = nn.with_logical_constraint(pre_bias_logits, ("activation_batch", "activation_length", None))
     top_k_weights, top_k_indices = self.get_topk(gate_logits, pre_bias_logits)
     if self.config.decoder_block == ctypes.DecoderBlockType.LLAMA4:
-      router_scores = jnp.astype(
-          jax.nn.sigmoid(jnp.astype(top_k_weights, jnp.float32)), jnp.bfloat16
-      )
+      router_scores = jnp.astype(jax.nn.sigmoid(jnp.astype(top_k_weights, jnp.float32)), jnp.bfloat16)
       inputs = inputs * router_scores
     else:
       weights = self.reshape_and_update_weights(top_k_weights, top_k_indices)
@@ -1314,9 +1298,7 @@ class RoutedMoE(nn.Module):
 
       with jax.named_scope("dispatch"):
         # only cp during prefill
-        dispatch = self.get_einsum(
-            rhs_mesh_axes=mask_axes, einsum_name=DISPATCH
-        )(
+        dispatch = self.get_einsum(rhs_mesh_axes=mask_axes, einsum_name=DISPATCH)(
             dispatch_eimsum,
             inputs,
             dispatch_mask,
@@ -1450,9 +1432,7 @@ class RoutedMoE(nn.Module):
         intermediate_layer = adc.checkpoint_name(intermediate_layer, "mlpwo")
       with jax.named_scope("w_sum"):
         if self.config.decoder_block == ctypes.DecoderBlockType.LLAMA4:
-          weights = self.reshape_and_update_weights(
-              jnp.ones_like(top_k_weights), top_k_indices
-          )
+          weights = self.reshape_and_update_weights(jnp.ones_like(top_k_weights), top_k_indices)
         output = jnp.einsum(
             "BSEM,BSE -> BSM",
             intermediate_layer,
@@ -1485,9 +1465,7 @@ class RoutedMoE(nn.Module):
     return w0_kernel, w1_kernel, wo_kernel
 
   @nn.compact
-  def __call__(
-      self, inputs: ctypes.Array
-  ) -> tuple[ctypes.Array, Optional[ctypes.Array]]:
+  def __call__(self, inputs: ctypes.Array) -> tuple[ctypes.Array, Optional[ctypes.Array]]:
     cfg = self.config
     inputs = inputs.astype(cfg.dtype)
     gate_logits, pre_bias_logits = GateLogit(

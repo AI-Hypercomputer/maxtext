@@ -14,6 +14,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
+from MaxText.globals import tpu_present
+
 """ Tests for kernels. """
 
 import unittest
@@ -41,6 +43,7 @@ class RaggedAttentionTest(unittest.TestCase):
   dtype = jnp.float32
 
   @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_ragged_mqa(self):
     key = jax.random.key(0)
     k1, k2, k3 = jax.random.split(key, 3)
@@ -62,6 +65,7 @@ class RaggedAttentionTest(unittest.TestCase):
     )
 
   @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_ragged_mha(self):
     key = jax.random.key(0)
     k1, k2, k3 = jax.random.split(key, 3)
@@ -88,6 +92,7 @@ class RaggedAttentionTest(unittest.TestCase):
     )
 
   @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_ragged_gqa(self):
     key = jax.random.key(0)
     k1, k2, k3 = jax.random.split(key, 3)

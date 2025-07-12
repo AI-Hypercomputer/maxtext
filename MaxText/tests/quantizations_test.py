@@ -29,7 +29,7 @@ from flax import linen as nn
 
 from aqt.jax.v2 import aqt_tensor
 
-from MaxText.globals import PKG_DIR
+from MaxText.globals import PKG_DIR, tpu_present
 from MaxText import pyconfig
 from MaxText.layers import quantizations
 
@@ -106,6 +106,7 @@ class QuantizationTest(unittest.TestCase):
       self.assertNotEqual(quant, None)
 
   @pytest.mark.tpu_only  # b/421002974
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_aqt_quantization(self):
     # Without quantization
     inputs, res_einsum, res_dg = _apply()

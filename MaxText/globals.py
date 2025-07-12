@@ -55,6 +55,10 @@ def has_tpu() -> bool:
   return any(device.platform == "tpu" for device in get_devices())
 
 
+def is_cpu_only() -> bool:
+  return not gpu_present and not tpu_present or os.environ.get("CPU_ONLY_TEST") == 1
+
+
 def get_devices(backend: None | Literal["cpu", "gpu", "tpu"] = None, force_refresh=False) -> list[xla_client.Device]:
   global devices
   if not devices or force_refresh:
@@ -62,10 +66,17 @@ def get_devices(backend: None | Literal["cpu", "gpu", "tpu"] = None, force_refre
   return devices
 
 
+device_presence.run_before = False
+if not device_presence.run_before:
+  cpu_present, gpu_present, tpu_present = device_presence()
+
 __all__ = [
     "DEFAULT_OCDBT_TARGET_DATA_FILE_SIZE",
     "EPS",
     "PKG_DIR",
     "device_presence",
     "get_devices",
+    "gpu_present",
+    "is_cpu_only",
+    "tpu_present",
 ]
