@@ -56,11 +56,11 @@ class ShardingTests(unittest.TestCase):
     # Expected FLOPs
     # Total FLOPs = 2 * M * K * F
     expected_t_flops = (2.0 * M * K * F) / peak_flops_val
-    assert abs(result["t_flops"] - expected_t_flops) < TOLERANCE
+    self.assertLess(abs(result["t_flops"] - expected_t_flops), TOLERANCE)
 
     # Expected comms
     expected_t_comms = 0.0
-    assert abs(result["t_comms"] - expected_t_comms) < TOLERANCE
+    self.assertLess(abs(result["t_comms"] - expected_t_comms), TOLERANCE)
 
     # Expected Memory per TPU
     # Activations
@@ -71,7 +71,7 @@ class ShardingTests(unittest.TestCase):
     expected_mem_output = M * F * max(activation_size_bytes_val, weight_size_bytes_val)
     # Total
     expected_memory_per_TPU = expected_mem_activations + expected_mem_weights + expected_mem_output
-    assert abs(result["memory_per_TPU_bytes"] - expected_memory_per_TPU) < TOLERANCE
+    self.assertLess(abs(result["memory_per_TPU_bytes"] - expected_memory_per_TPU), TOLERANCE)
 
   def test_output_feature_parallelism_sF(self):
     """
@@ -98,15 +98,13 @@ class ShardingTests(unittest.TestCase):
 
     # Expected FLOPs
     expected_t_flops = (2.0 * M * K * (F / sF)) / peak_flops_val
-    assert (
-        abs(result["t_flops"] - expected_t_flops) < TOLERANCE
-    ), f"FLOPs mismatch: got {result['t_flops']}, expected {expected_t_flops}"
+    self.assertLess(
+        abs(result["t_flops"] - expected_t_flops), TOLERANCE
+    )
 
     # Expeted comms
     expected_t_comms = 0.0
-    assert (
-        abs(result["t_comms"] - expected_t_comms) < TOLERANCE
-    ), f"Comms mismatch: got {result['t_comms']}, expected {expected_t_comms}"
+    self.assertLess(abs(result["t_comms"] - expected_t_comms), TOLERANCE)
 
     # Expected Memory per TPU
     # Activations
@@ -117,9 +115,9 @@ class ShardingTests(unittest.TestCase):
     expected_mem_output = M * (F / sF) * max(activation_size_bytes_val, weight_size_bytes_val)
     # Total
     expected_memory_per_TPU = expected_mem_activations + expected_mem_weights + expected_mem_output
-    assert (
-        abs(result["memory_per_TPU_bytes"] - expected_memory_per_TPU) < TOLERANCE
-    ), f"Memory mismatch: got {result['memory_per_TPU_bytes']}, expected {expected_memory_per_TPU}"
+    self.assertLess(
+        abs(result["memory_per_TPU_bytes"] - expected_memory_per_TPU), TOLERANCE
+    )
 
   def test_data_parallelism_sD(self):
     """
@@ -146,11 +144,11 @@ class ShardingTests(unittest.TestCase):
 
     # Expected FLOPs:
     expected_t_flops = (2.0 * M * K * F) / (peak_flops_val * sD)
-    assert abs(result["t_flops"] - expected_t_flops) < TOLERANCE
+    self.assertLess(abs(result["t_flops"] - expected_t_flops), TOLERANCE)
 
     # Expected comms
     expected_t_comms = 0.0
-    assert abs(result["t_comms"] - expected_t_comms) < TOLERANCE
+    self.assertLess(abs(result["t_comms"] - expected_t_comms), TOLERANCE)
 
     # Expected Memory per TPU
     # Activations
@@ -161,7 +159,7 @@ class ShardingTests(unittest.TestCase):
     expected_mem_output = (M / sD) * F * max(activation_size_bytes_val, weight_size_bytes_val)
     # Total
     expected_memory_per_TPU = expected_mem_activations + expected_mem_weights + expected_mem_output
-    assert abs(result["memory_per_TPU_bytes"] - expected_memory_per_TPU) < TOLERANCE
+    self.assertLess(abs(result["memory_per_TPU_bytes"] - expected_memory_per_TPU), TOLERANCE)
 
   def test_fsdp_activation_sharding_sK(self):
     """
@@ -189,14 +187,14 @@ class ShardingTests(unittest.TestCase):
 
     # Expected FLOPs
     expected_t_flops = (2.0 * M * K * F) / peak_flops_val
-    assert abs(result["t_flops"] - expected_t_flops) < TOLERANCE
+    self.assertLess(abs(result["t_flops"] - expected_t_flops), TOLERANCE)
 
     # Expected comms
     # per TPU
     comm_data_size = (M * K / sK) * activation_size_bytes_val
     # t_comms
     expected_t_comms = latency_bound_comms(comm_data_size / ici_bandwidth_val, ici_latency_val) * (sK - 1)
-    assert abs(result["t_comms"] - expected_t_comms) < TOLERANCE
+    self.assertLess(abs(result["t_comms"] - expected_t_comms), TOLERANCE)
 
     # Expected Memory per TPU
     # Activations
@@ -207,7 +205,7 @@ class ShardingTests(unittest.TestCase):
     expected_mem_output = M * F * max(activation_size_bytes_val, weight_size_bytes_val)
     # Total
     expected_memory_per_TPU = expected_mem_activations + expected_mem_weights + expected_mem_output
-    assert abs(result["memory_per_TPU_bytes"] - expected_memory_per_TPU) < TOLERANCE
+    self.assertLess(abs(result["memory_per_TPU_bytes"] - expected_memory_per_TPU), TOLERANCE)
 
   def test_fsdp_weight_sharding_sW(self):
     """
@@ -235,14 +233,14 @@ class ShardingTests(unittest.TestCase):
 
     # Expected FLOPs
     expected_t_flops = (2.0 * M * K * F) / peak_flops_val
-    assert abs(result["t_flops"] - expected_t_flops) < TOLERANCE
+    self.assertLess(abs(result["t_flops"] - expected_t_flops), TOLERANCE)
 
     # Expected comms
     # per TPU
     comm_data_size = (K * F / sW) * weight_size_bytes_val
     # t_comms
     expected_t_comms = latency_bound_comms(comm_data_size / ici_bandwidth_val, ici_latency_val) * (sW - 1)
-    assert abs(result["t_comms"] - expected_t_comms) < TOLERANCE
+    self.assertLess(abs(result["t_comms"] - expected_t_comms), TOLERANCE)
 
     # Expected Memory per TPU
     # Activations
@@ -253,7 +251,7 @@ class ShardingTests(unittest.TestCase):
     expected_mem_output = M * F * max(activation_size_bytes_val, weight_size_bytes_val)
     # Total
     expected_memory_per_TPU = expected_mem_activations + expected_mem_weights + expected_mem_output
-    assert abs(result["memory_per_TPU_bytes"] - expected_memory_per_TPU) < TOLERANCE
+    self.assertLess(abs(result["memory_per_TPU_bytes"] - expected_memory_per_TPU), TOLERANCE)
 
   def test_tensor_parallel_sK_sW(self):
     """
@@ -282,14 +280,14 @@ class ShardingTests(unittest.TestCase):
 
     # Expected FLOPs
     expected_t_flops = (2.0 * M * (K / (sK * sW)) * F) / peak_flops_val
-    assert abs(result["t_flops"] - expected_t_flops) < TOLERANCE
+    self.assertLess(abs(result["t_flops"] - expected_t_flops), TOLERANCE)
 
     # Expected comms
     # per TPU
     local_output_bytes = M * F * max(activation_size_bytes_val, weight_size_bytes_val)
     # t_comms
     expected_t_comms = latency_bound_comms(local_output_bytes / ici_bandwidth_val, ici_latency_val) * (sK - 1)
-    assert abs(result["t_comms"] - expected_t_comms) < TOLERANCE
+    self.assertLess(abs(result["t_comms"] - expected_t_comms), TOLERANCE)
 
     # Expected Memory per TPU
     # Activations
@@ -300,7 +298,7 @@ class ShardingTests(unittest.TestCase):
     expected_mem_output = M * F * max(activation_size_bytes_val, weight_size_bytes_val)
     # Total
     expected_memory_per_TPU = expected_mem_activations + expected_mem_weights + expected_mem_output
-    assert abs(result["memory_per_TPU_bytes"] - expected_memory_per_TPU) < TOLERANCE
+    self.assertLess(abs(result["memory_per_TPU_bytes"] - expected_memory_per_TPU), TOLERANCE)
 
   def test_output_feature_parallelism_sF_with_all_gather_F(self):
     """
@@ -330,18 +328,18 @@ class ShardingTests(unittest.TestCase):
 
     # Expected FLOPs
     expected_t_flops = (2.0 * M * K * (F / sF)) / peak_flops_val
-    assert (
-        abs(result["t_flops"] - expected_t_flops) < TOLERANCE
-    ), f"FLOPs mismatch: got {result['t_flops']}, expected {expected_t_flops}"
+    self.assertLess(
+        abs(result["t_flops"] - expected_t_flops), TOLERANCE
+    )
 
     # Expected comms
     # per TPU
     local_output_bytes_for_gather = M * (F / sF) * max(activation_size_bytes_val, weight_size_bytes_val)
     # t_comms
     expected_t_comms = latency_bound_comms(local_output_bytes_for_gather / ici_bandwidth_val, ici_latency_val) * (sF - 1)
-    assert (
-        abs(result["t_comms"] - expected_t_comms) < TOLERANCE
-    ), f"Comms mismatch: got {result['t_comms']}, expected {expected_t_comms}"
+    self.assertLess(
+        abs(result["t_comms"] - expected_t_comms), TOLERANCE
+    )
 
     # Expected Memory per TPU:
     # Activations
@@ -352,9 +350,9 @@ class ShardingTests(unittest.TestCase):
     expected_mem_output_gathered = M * F * max(activation_size_bytes_val, weight_size_bytes_val)
     # Total
     expected_memory_per_TPU = expected_mem_activations + expected_mem_weights + expected_mem_output_gathered
-    assert (
-        abs(result["memory_per_TPU_bytes"] - expected_memory_per_TPU) < TOLERANCE
-    ), f"Memory mismatch: got {result['memory_per_TPU_bytes']}, expected {expected_memory_per_TPU}"
+    self.assertLess(
+        abs(result["memory_per_TPU_bytes"] - expected_memory_per_TPU), TOLERANCE
+    )
 
   def test_expert_parallelism_sE(self):
     """
@@ -383,14 +381,14 @@ class ShardingTests(unittest.TestCase):
 
     # Expected FLOPs
     expected_t_flops = (2.0 * M * K * F * G_val) / (peak_flops_val * sE)
-    assert abs(result["t_flops"] - expected_t_flops) < TOLERANCE
+    self.assertLess(abs(result["t_flops"] - expected_t_flops), TOLERANCE)
 
     # Expected comms
     # per TPU
     local_output_bytes = M * (G_val / sE) * F * max(activation_size_bytes_val, weight_size_bytes_val)
     # t_comms
     expected_t_comms = latency_bound_comms(local_output_bytes / ici_bandwidth_val, ici_latency_val) * (sE - 1) / 4
-    assert abs(result["t_comms"] - expected_t_comms) < TOLERANCE
+    self.assertLess(abs(result["t_comms"] - expected_t_comms), TOLERANCE)
 
     # Expected Memory per TPU
     # Activations
@@ -401,7 +399,7 @@ class ShardingTests(unittest.TestCase):
     expected_mem_output = M * (G_val / sE) * F * max(activation_size_bytes_val, weight_size_bytes_val)
     # Total
     expected_memory_per_TPU = expected_mem_activations + expected_mem_weights + expected_mem_output
-    assert abs(result["memory_per_TPU_bytes"] - expected_memory_per_TPU) < TOLERANCE
+    self.assertLess(abs(result["memory_per_TPU_bytes"] - expected_memory_per_TPU), TOLERANCE)
 
   def test_mixed_sharding_sD_sK_sW(self):
     """
@@ -430,14 +428,14 @@ class ShardingTests(unittest.TestCase):
 
     # Expected FLOPs
     expected_t_flops = (2.0 * (M / sD) * (K / (sK * sW)) * F) / peak_flops_val
-    assert abs(result["t_flops"] - expected_t_flops) < TOLERANCE
+    self.assertLess(abs(result["t_flops"] - expected_t_flops), TOLERANCE)
 
     # Expected comms
     # per TPU
     local_output_bytes = (M / sD) * F * max(activation_size_bytes_val, weight_size_bytes_val)
     # t_comms
     expected_t_comms = latency_bound_comms(local_output_bytes / ici_bandwidth_val, ici_latency_val) * (sK - 1)
-    assert abs(result["t_comms"] - expected_t_comms) < TOLERANCE
+    self.assertLess(abs(result["t_comms"] - expected_t_comms), TOLERANCE)
 
     # Expected Memory per TPU
     # Activations
@@ -448,7 +446,7 @@ class ShardingTests(unittest.TestCase):
     expected_mem_output = (M / sD) * F * max(activation_size_bytes_val, weight_size_bytes_val)
     # Total
     expected_memory_per_TPU = expected_mem_activations + expected_mem_weights + expected_mem_output
-    assert abs(result["memory_per_TPU_bytes"] - expected_memory_per_TPU) < TOLERANCE
+    self.assertLess(abs(result["memory_per_TPU_bytes"] - expected_memory_per_TPU), TOLERANCE)
 
   def test_additional_all_gather_axes_D(self):
     """
@@ -477,14 +475,14 @@ class ShardingTests(unittest.TestCase):
 
     # Expected FLOPs
     expected_t_flops = (2.0 * M * K * F) / (peak_flops_val * sD)
-    assert abs(result["t_flops"] - expected_t_flops) < TOLERANCE
+    self.assertLess(abs(result["t_flops"] - expected_t_flops), TOLERANCE)
 
     # Expected comms
     # per TPU
     local_output_bytes_base = (M / sD) * F * max(activation_size_bytes_val, weight_size_bytes_val)
     # t_comms
     expected_t_comms = latency_bound_comms(local_output_bytes_base / ici_bandwidth_val, ici_latency_val) * (sD - 1)
-    assert abs(result["t_comms"] - expected_t_comms) < TOLERANCE
+    self.assertLess(abs(result["t_comms"] - expected_t_comms), TOLERANCE)
 
     # Expected Memory per TPU
     # Activations
@@ -495,4 +493,4 @@ class ShardingTests(unittest.TestCase):
     expected_mem_output = M * F * max(activation_size_bytes_val, weight_size_bytes_val)
     # Total
     expected_memory_per_TPU = expected_mem_activations + expected_mem_weights + expected_mem_output
-    assert abs(result["memory_per_TPU_bytes"] - expected_memory_per_TPU) < TOLERANCE
+    self.assertLess(abs(result["memory_per_TPU_bytes"] - expected_memory_per_TPU), TOLERANCE)
