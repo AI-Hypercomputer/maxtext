@@ -98,9 +98,7 @@ class ShardingTests(unittest.TestCase):
 
     # Expected FLOPs
     expected_t_flops = (2.0 * M * K * (F / sF)) / peak_flops_val
-    self.assertLess(
-        abs(result["t_flops"] - expected_t_flops), TOLERANCE
-    )
+    self.assertLess(abs(result["t_flops"] - expected_t_flops), TOLERANCE)
 
     # Expeted comms
     expected_t_comms = 0.0
@@ -115,9 +113,7 @@ class ShardingTests(unittest.TestCase):
     expected_mem_output = M * (F / sF) * max(activation_size_bytes_val, weight_size_bytes_val)
     # Total
     expected_memory_per_TPU = expected_mem_activations + expected_mem_weights + expected_mem_output
-    self.assertLess(
-        abs(result["memory_per_TPU_bytes"] - expected_memory_per_TPU), TOLERANCE
-    )
+    self.assertLess(abs(result["memory_per_TPU_bytes"] - expected_memory_per_TPU), TOLERANCE)
 
   def test_data_parallelism_sD(self):
     """
@@ -328,18 +324,14 @@ class ShardingTests(unittest.TestCase):
 
     # Expected FLOPs
     expected_t_flops = (2.0 * M * K * (F / sF)) / peak_flops_val
-    self.assertLess(
-        abs(result["t_flops"] - expected_t_flops), TOLERANCE
-    )
+    self.assertLess(abs(result["t_flops"] - expected_t_flops), TOLERANCE)
 
     # Expected comms
     # per TPU
     local_output_bytes_for_gather = M * (F / sF) * max(activation_size_bytes_val, weight_size_bytes_val)
     # t_comms
     expected_t_comms = latency_bound_comms(local_output_bytes_for_gather / ici_bandwidth_val, ici_latency_val) * (sF - 1)
-    self.assertLess(
-        abs(result["t_comms"] - expected_t_comms), TOLERANCE
-    )
+    self.assertLess(abs(result["t_comms"] - expected_t_comms), TOLERANCE)
 
     # Expected Memory per TPU:
     # Activations
@@ -350,9 +342,7 @@ class ShardingTests(unittest.TestCase):
     expected_mem_output_gathered = M * F * max(activation_size_bytes_val, weight_size_bytes_val)
     # Total
     expected_memory_per_TPU = expected_mem_activations + expected_mem_weights + expected_mem_output_gathered
-    self.assertLess(
-        abs(result["memory_per_TPU_bytes"] - expected_memory_per_TPU), TOLERANCE
-    )
+    self.assertLess(abs(result["memory_per_TPU_bytes"] - expected_memory_per_TPU), TOLERANCE)
 
   def test_expert_parallelism_sE(self):
     """
