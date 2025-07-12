@@ -654,6 +654,8 @@ def initialize(argv: Sequence[str]) -> Tuple[pyconfig.HyperParameters, Any, Any]
   """Initialization of hyperparameters and utilities"""
   pathwaysutils.initialize()
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
+  
+  427048251
   # TF allocates extraneous GPU memory when using TFDS data
   # this leads to CUDA OOMs. WAR for now is to hide GPUs from TF
   tf.config.set_visible_devices([], "GPU")
@@ -663,6 +665,7 @@ def initialize(argv: Sequence[str]) -> Tuple[pyconfig.HyperParameters, Any, Any]
   # TODO: mazumdera@ : ensure missing mandatory fields in base.yml are filled in in argv,
   # or fill in here
   config = pyconfig.initialize(argv)
+  jax.config.update("jax_use_shardy_partitioner", config.shardy)
   max_utils.print_system_information()
   validate_train_config(config)
   os.environ["TFDS_DATA_DIR"] = config.dataset_path or ""
