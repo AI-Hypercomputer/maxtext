@@ -57,6 +57,7 @@ class MetricLogger:
     self.performance_metric_queue = self.get_performance_metric_queue(config)
     self.learning_rate_schedule = learning_rate_schedule
     self.cumulative_eval_metrics = {"scalar": defaultdict(float)}
+    self.buffered_train_metrics = None
 
   def write_metrics(self, metrics, step, is_training=True):
     """Entry point for all metrics writing in Train's Main."""
@@ -153,8 +154,22 @@ class MetricLogger:
         gcp_workload_monitor.start_performance_reporting_thread(performance_metric_queue)
     return performance_metric_queue
 
+  def buffer_and_write_train_metrics(self, metrics, step, step_time_delta):
+    """
+    Buffers metrics for the current training step and simultaneously writes the training metrics
+    for the previous step to GCS and/or TensorBoard. This buffering strategy allows for back-to-back
+    execution of training steps, by overlapping data loading for step n with the execution of step n−1.
+    This significantly boosts training efficiency.
+    """
+    if self.buffered_train_metrics is not None:
+      (step_to_write, metrics_to_write) = self.buffered_train_metrics
+      self.write_metrics(metrics_to_write, step_to_write)
+
+    self.record_train_metrics(metrics, step, step_time_delta)
+    self.buffered_train_metrics = (step, metrics)
+
   def record_train_metrics(self, metrics, step, step_time_delta):
-    """Records training metrics and writes the metrics to GCS and/or to TensorBoard."""
+    """Records training metrics for the current step."""
     metrics["scalar"].update({"perf/step_time_seconds": step_time_delta.total_seconds()})
     metrics["scalar"].update({"perf/per_device_tflops": self.metadata["per_device_tflops"]})
     metrics["scalar"].update(
@@ -167,8 +182,6 @@ class MetricLogger:
     metrics["scalar"].update({"learning/current_learning_rate": self.learning_rate_schedule(step)})
     if self.performance_metric_queue:
       self.performance_metric_queue.put(step_time_delta.total_seconds())
-
-    self.write_metrics(metrics, step)
 
   def record_eval_metrics(self, step, metrics=None, eval_step_count=None):
     """Records eval metrics and writes the metrics to GCS and/or to TensorBoard."""
@@ -200,11 +213,15 @@ class MetricLogger:
 
       self.write_metrics(self.cumulative_eval_metrics, step, is_training=False)
 
-  def cleanup(self):
+  def flush_metrics_and_cleanup(self):
     """
-    This is a terminal operation. Once called, the logger instance should
-    not be used to add or write more metrics as the underlying writer
-    objects (e.g., TensorBoard SummaryWriter) will be closed.
+    This is a terminal operation that uploads any buffered metrics to GCS
+    and/or TensorBoard before closing the writer objects. Once called, the
+    logger instance should not be used to add or write more metrics as the
+    underlying writer objects (e.g., TensorBoard SummaryWriter) will be closed.
     """
+    if self.buffered_train_metrics is not None:
+      (step_to_write, metrics_to_write) = self.buffered_train_metrics
+      self.write_metrics(metrics_to_write, step_to_write)
 
     max_utils.close_summary_writer(self.writer)

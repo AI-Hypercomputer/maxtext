@@ -100,7 +100,7 @@ def main(argv: Sequence[str]) -> None:
   prefill_length = config.max_prefill_predict_length
   processor_output = multimodal_utils.PreprocessorOutput()
   if config.use_multimodal:
-    text = multimodal_utils.reformat_prompt(text, config.model_name)
+    text = multimodal_utils.reformat_prompt(text, image_placeholder=config.image_placeholder, model_name=config.model_name)
     # TODO(hengtaoguo): Support multiple images as input.
     images = multimodal_utils.load_image_from_path(config.image_path)
     processor_output = multimodal_utils.pre_process_image(images, model_name=config.model_name)

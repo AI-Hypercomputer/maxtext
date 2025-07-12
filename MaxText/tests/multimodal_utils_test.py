@@ -103,14 +103,14 @@ class TestLlama4ImageProcessing(unittest.TestCase):
     self.assertEqual(padded_image.shape, (672, 672, self.NUM_IMAGE_CHANNELS))
     self.assertTrue(jnp.all(padded_image == 0))
 
-  def test_split_to_tiles_jax(self):
+  def test_split_to_tiles(self):
     image = jnp.ones((672, 672, self.NUM_IMAGE_CHANNELS))
     best_resolution = (672, 672)
     ratio_h, ratio_w = (
         best_resolution[0] // self.LLAMA4_TILE_SIZE,
         best_resolution[1] // self.LLAMA4_TILE_SIZE,
     )
-    image_tiles = multimodal_utils.split_to_tiles_jax(image, ratio_h, ratio_w)
+    image_tiles = multimodal_utils.split_to_tiles(image, ratio_h, ratio_w)
     self.assertEqual(
         image_tiles.shape, (ratio_h * ratio_w, self.NUM_IMAGE_CHANNELS, self.LLAMA4_TILE_SIZE, self.LLAMA4_TILE_SIZE)
     )

@@ -732,8 +732,8 @@ def train_loop(config, config_inference, recorder, state=None):
   metric_logger.write_setup_info_to_tensorboard(state.params)
 
   try:
+    last_step_completion = datetime.datetime.now()
     for step in np.arange(start_step, config.steps):
-      step_start_time = datetime.datetime.now()
       prof.maybe_activate_profiler(step, state)
 
       with jax.profiler.StepTraceAnnotation("train", step_num=step):
@@ -747,6 +747,9 @@ def train_loop(config, config_inference, recorder, state=None):
           # TODO: ensure this partitioning is correct
           with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
             state, metrics = p_train_step(state, example_batch, rng)
+
+      step_time_delta = datetime.datetime.now() - last_step_completion
+      last_step_completion = datetime.datetime.now()
 
       state_to_save = _split_grpo_state(state)[0]
       checkpointing.maybe_save_checkpoint(checkpoint_manager, state_to_save, config, data_iterator, step)
@@ -783,17 +786,14 @@ def train_loop(config, config_inference, recorder, state=None):
       if step == start_step:
         max_utils.print_mem_stats("After params initialized")
 
-      jax.block_until_ready(state)  # ensure training step is completed
-
-      step_time_delta = datetime.datetime.now() - step_start_time
-      metric_logger.record_train_metrics(metrics, step, step_time_delta)
+      metric_logger.buffer_and_write_train_metrics(metrics, step, step_time_delta)
 
     state_to_save = _split_grpo_state(state)[0]
     checkpointing.maybe_save_final_checkpoint(checkpoint_manager, state_to_save, config, data_iterator)
   except exceptions.StopTraining as e:
     max_logging.log(f"Training stopped: {str(e)}")
   finally:
-    metric_logger.cleanup()
+    metric_logger.flush_metrics_and_cleanup()
 
   return state
 
