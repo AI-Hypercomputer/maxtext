@@ -119,7 +119,10 @@ class WorkloadConfig:
     if self.device_type is None:
       raise ValueError("device_type is None and generate_metrics_and_upload_to_big_query is enabled. "
                        "Device_type is required for uploading run results to BigQuery")
-    if self.device_type.startswith("v6e") or self.device_type.startswith("v5e") or self.device_type.startswith("v5litepod"):
+    if "tpu" in self.device_type:
+        self.num_devices_per_slice = 32
+        self.topology = "4x8"
+    elif self.device_type.startswith("v6e") or self.device_type.startswith("v5e") or self.device_type.startswith("v5litepod"):
       size = int(self.device_type.split("-")[-1])
       if size == 256:
         self.num_devices_per_slice = 256
