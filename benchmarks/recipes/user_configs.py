@@ -16,35 +16,57 @@ limitations under the License.
 """Define user specific configurations for recipes here."""
 
 import os
-
+import maxtext_trillium_model_configs as model_configs
+import maxtext_v5e_model_configs as v5e_model_configs
 import maxtext_xpk_runner as mxr
 from xpk_configs import XpkClusterConfig
 
+# Cluster and XPK Path Configuration
+# Define the target cluster and the path to the xpk tool.
 cluster_config = XpkClusterConfig(
-    cluster_name="test-v5e-32-cluster",
-    project="cloud-tpu-cluster",
-    zone="us-south1-a",
+    cluster_name="pw-scale-test-v5e-32",
+    project="cloud-tpu-multipod-dev",
+    zone="us-south1",
     device_type="v5litepod-32",
 )
-xpk_path = "~/xpk"
+xpk_path = "xpk"
 
-user = os.environ["USER"]
+# User and GCS Path Configurations
+user = os.environ.get("USER", "default_user")
+project = cluster_config.project
 region = "-".join(cluster_config.zone.split("-")[:-1])
-proxy_image = (
-    f"us-docker.pkg.dev/path/to/{user}/proxy_server"
-)
-server_image = (
-    f"us-docker.pkg.dev/path/to/{user}/server"
-)
-colocated_python_image = f"gcr.io/{cluster_config.project}/path/to/{user}/colocated_python_sidecar"
-runner = f"gcr.io/{cluster_config.project}/{user}_maxtext_latest:latest"
-base_output_directory = f"gs://{user}-{region}/{user}"
-headless = True
+base_output_directory = f"gs://{user}-{project}-{region}"
+
+# Docker Image Configurations
+# Specify the container images for the pathways job.
+proxy_image = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/ksadi/unsanitized_proxy_server:latest"
+server_image = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/ksadi/unsanitized_server:latest"
+colocated_python_image = "gcr.io/cloud-tpu-multipod-dev/ksadi_sidecar_maxtext_custom_jax_server:latest"
+runner_image = "gcr.io/cloud-tpu-multipod-dev/sujinesh_maxtext_latest"
+
+# Pathways Configuration
+# This object bundles all the image settings for the runner.
 pathways_config = mxr.PathwaysConfig(
     server_image=server_image,
     proxy_server_image=proxy_image,
-    runner_image=runner,
+    runner_image=runner_image,
     colocated_python_sidecar_image=colocated_python_image,
-    headless=headless,
 )
-headless_workload_name = f"{user[:3]}-headless"
+
+# Model and Slice Configurations
+# Define the list of models and slice configurations to run.
+list_of_models = [
+    # model_configs.default_basic_1,
+    v5e_model_configs.llama3_1_8b_8192_v5e_32,
+]
+num_slices_list = [1]
+
+# Default Workload Configurations
+# These parameters are used in the WorkloadConfig and can be easily tuned here.
+workload_config_defaults = {
+    "max_restarts": 0,
+    "libtpu_type": None,
+    "libtpu_nightly_version": "",
+    "base_docker_image": "",
+    "num_steps": 10,
+}

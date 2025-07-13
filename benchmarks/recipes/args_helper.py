@@ -42,7 +42,7 @@ def _handle_delete(
   delete_command = (
       f"python3 {xpk_path}/xpk.py workload delete "
       f"--project={cluster_config.project} --cluster={cluster_config.cluster_name}"
-      f" --filter-by-job={first_three_chars} --zone={cluster_config.zone}"
+      f" --filter-by-job={first_three_chars} --zone={cluster_config.zone} --force"
   )
   print(
       f"Deleting workloads starting with: {first_three_chars} using command:"
