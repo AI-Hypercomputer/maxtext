@@ -11,8 +11,9 @@ flax==0.11.0
 grain==0.2.10
 grpcio==1.72.0rc1
 huggingface_hub==0.33.0
-jax==0.6.0
-jaxlib==0.6.0 # Manually adding to ensure consistency in future
+jax==0.6.2
+jaxlib==0.6.2
+orbax-checkpoint @ git+https://github.com/google/orbax.git@test_782430938#subdirectory=checkpoint
 jaxtyping==0.3.2
 jetstream==0.1.0
 jsonlines==4.0.0
@@ -25,7 +26,6 @@ nltk==3.9.1
 numpy==2.3.1
 omegaconf==2.3.0
 optax==0.2.5
-orbax==0.11.20
 pandas==2.3.0
 pathwaysutils@git+https://github.com/AI-Hypercomputer/pathways-utils.git@d6fffd3f9bd5e06c323f5bade04b40fa741c728f
 Pillow==11.2.1
