@@ -643,7 +643,7 @@ def generate_xpk_workload_cmd(
         f'--docker-image={pw_config.runner_image}'
     )
   else:
-    docker_image_flag = f'--base-docker-image="{wl_config.base_docker_image}"'
+    docker_image_flag = "--docker-image=gcr.io/tpu-prod-env-multipod/mattdavidow-shardy"
 
   upload_metrics_to_bq_cmd = ""
   if wl_config.generate_metrics_and_upload_to_big_query and not is_pathways_headless_enabled:
@@ -795,13 +795,21 @@ def main() -> int:
       device_type='v6e-256',
   )
 
+  v6e_cluster_config_lcs = XpkClusterConfig(
+    cluster_name='bodaborg-v6e-256-lcscld-c',
+    project='tpu-prod-env-one-vm',
+    zone='southamerica-west1-a',
+    device_type='v6e-256',
+  )
+
+
   xpk_workload_cmds = []
   xpk_workload_names = []
 
   list_of_models = [
     # model_configs.llama2_70b_4096_sc,
     # model_configs.default_128
-    model_configs.llama3_1_70b_131072,
+    model_configs.llama3_1_405b_8192_fsdp_dcn,
   ]
 
   # Loop possibilities:
@@ -825,11 +833,11 @@ def main() -> int:
     # Run workloads on the below clusters
     for cluster_config in [
       # v5e_cluster_config,
-      v6e_cluster_config,
+      v6e_cluster_config_lcs,
       # another_config,
     ]:
       # Run workloads in the following slice configurations
-      for num_slices in [1,]:
+      for num_slices in [2,]:
         # Use the libtpu dependencies from:
         for libtpu_type in [
             # LibTpuType.CUSTOM
