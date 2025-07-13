@@ -3,7 +3,9 @@
 datasets
 flax==0.10.6
 grain[parquet]>=0.2.6
-orbax-checkpoint>=0.11.20
+jax==0.6.2
+jaxlib==0.6.2
+orbax-checkpoint @ git+https://github.com/google/orbax.git@test_782430938#subdirectory=checkpoint
 pylint
 pytest
 pyink
