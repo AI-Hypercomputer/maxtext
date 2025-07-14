@@ -814,3 +814,12 @@ def _merge_mm_embeddings_inner(text_embeddings, vision_embeddings, mask):
   merged = merged.at[0].set(first_pos)
 
   return merged
+
+
+def get_image_placeholder(model_name):
+  if model_name in ["gemma3-4b", "gemma3-12b", "gemma3-27b"]:
+    return GEMMA_IMAGE_PLACEHOLDER_IN_PROMPT
+  elif model_name in ["llama4-17b-16e", "llama4-17b-128e"]:
+    return LLAMA4_IMAGE_PLACEHOLDER_IN_PROMPT
+  else:
+    raise ValueError(f"Model {model_name} does not support multimodal inference.")
