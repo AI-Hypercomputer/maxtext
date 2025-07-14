@@ -36,6 +36,10 @@ import tensorflow as tf
 import jax
 import jax.numpy as jnp
 
+from functools import partial
+from jax.experimental.shard_map import shard_map
+from jax.sharding import PartitionSpec as P
+
 from flax import linen as nn
 from flax.linen import partitioning as nn_partitioning
 
@@ -311,7 +315,7 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
   return loss, aux
 
 
-def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
+def train_step(model, config, mesh, state_mesh_shardings, state, data, dropout_rng):
   """
 
   Args:
@@ -334,6 +338,25 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
     _loss_fn = dpo_loss_fn
 
   if config.gradient_accumulation_steps > 1:
+    def resolve_axis_name(axis_name):
+      if isinstance(axis_name, str):
+        for key,value in config.logical_axis_rules:
+          if key == axis_name:
+            return tuple(value)
+      return axis_name
+    # sharded gradient addition
+    @partial(shard_map, mesh=mesh, in_specs=(P(resolve_axis_name('gradient')),
+                                              P(resolve_axis_name('gradient'))), 
+                                              out_specs=P(resolve_axis_name('gradient')))
+    def add_grads(grad1, grad2):
+      return jax.tree_util.tree_map(lambda x, y: x + y, grad1, grad2)
+    
+    # sharded gradient reduction (across 'dp' axis)
+    @partial(shard_map, mesh=mesh, in_specs=(P(resolve_axis_name('gradient')),), out_specs=P(resolve_axis_name('gradient')))
+    def reduce_grads(grads):
+      return jax.tree_util.tree_map(lambda x: jax.lax.psum(x, axis_name=resolve_axis_name('gradient')), grads)
+    
+
 
     def accumulate_gradient(acc_grad_and_loss, data):
       grad_func = jax.value_and_grad(_loss_fn, argnums=4, has_aux=True)
@@ -342,9 +365,9 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
       )
       acc_grad_and_loss["loss"] += aux["total_loss"]
       acc_grad_and_loss["moe_lb_loss"] += aux["moe_lb_loss"]
-      acc_grad_and_loss["grad"] = jax.tree_util.tree_map(
-          lambda x, y: x * aux["total_weights"] + y, cur_batch_gradient, acc_grad_and_loss["grad"]
-      )
+      # scale and add with shard_map
+      scaled_grad = jax.tree_util.tree_map(lambda x: x * aux["total_weights"], cur_batch_gradient)
+      acc_grad_and_loss["grad"] = add_grads(acc_grad_and_loss["grad"], scaled_grad)
       acc_grad_and_loss["total_weights"] += aux["total_weights"]
       return acc_grad_and_loss, aux
 
@@ -366,6 +389,7 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
         + grad_and_loss["moe_lb_loss"] / config.gradient_accumulation_steps
     )
     raw_grads = jax.tree_util.tree_map(lambda arr: arr / grad_and_loss["total_weights"], grad_and_loss["grad"])
+    raw_grads = reduce_grads(raw_grads)
     aux = jax.tree.map(lambda x: jnp.sum(x, axis=0), aux)  # pytype: disable=module-attr
   else:
     if config.optimizer_memory_host_offload:
