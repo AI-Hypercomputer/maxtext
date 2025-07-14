@@ -26,7 +26,6 @@ from jax.sharding import Mesh
 import jax.numpy as jnp
 
 from flax import linen as nn
-from flax import nnx
 
 from MaxText.layers import attentions
 from MaxText.layers import initializers
@@ -75,7 +74,6 @@ def self_attention_with_norm(
 
   lnx = nn.with_logical_constraint(lnx, logical_axis_names)
 
-  #TODO: update the attention type to use nnx Attention
   attention_layer = attentions.MLA(
       config=cfg,
       num_query_heads=cfg.num_query_heads,
@@ -147,14 +145,14 @@ def post_process(cfg, layer_output, sow):
     return layer_output
 
 
-class DeepSeekDenseLayer(nnx.Module):
+class DeepSeekDenseLayer(nn.Module):
   """DeepSeek-style dense layer with Multi-Head Latent Attention."""
 
-  def __init__(self,config: Config, mesh: Mesh, quant: Optional[Quant] = None):
-    self.config = config
-    self.mesh = mesh
-    self.quant = quant
+  config: Config
+  mesh: Mesh
+  quant: Optional[Quant] = None
 
+  @nn.compact
   def __call__(
       self,
       inputs,
@@ -208,31 +206,18 @@ class DeepSeekDenseLayer(nnx.Module):
     )
     return post_process(cfg, layer_output, self.sow)
 
-def deepseek_dense_layer(
-    config: Config,
-    mesh: Mesh,
-    quant: Optional[Quant] = None,
-):
-  """Factory function to create a DeepSeekDenseLayer."""
-  return nnx.bridge.to_linen(
-    DeepSeekDenseLayer,
-    config=config,
-    mesh=mesh,
-    quant=quant,
-  )
 
-class DeepSeekMoELayer(nnx.Module):
+class DeepSeekMoELayer(nn.Module):
   """DeepSeek-style MoE layer with Multi-Head Latent Attention.
   Supports dropless and dropping base on configs.
   Uses a bias in routing instead of load balancing loss.
   """
 
-  def __init__(self, config: Config, mesh: Mesh, quant: Optional[Quant] = None):
-    super().__init__()
-    self.config = config
-    self.mesh = mesh
-    self.quant = quant
+  config: Config
+  mesh: Mesh
+  quant: Optional[Quant] = None
 
+  @nn.compact
   def __call__(
       self,
       inputs,
@@ -288,19 +273,3 @@ class DeepSeekMoELayer(nnx.Module):
         logical_axis_names,
     )
     return post_process(cfg, layer_output, self.sow)
-
-def deepseek_moe_layer(
-    config: Config,
-    mesh: Mesh,
-    quant: Optional[Quant] = None,
-    name: Optional[str] = None,
-):
-  """Factory function to create a DeepSeekMoELayer."""
-  return nnx.bridge.to_linen(
-    DeepSeekMoELayer,
-    config=config,
-    mesh=mesh,
-    quant=quant,
-    name=name,
-    metadata_fn=initializers.variable_to_logically_partitioned,
-  )

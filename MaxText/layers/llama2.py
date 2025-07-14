@@ -26,7 +26,7 @@ from jax.sharding import Mesh
 # from jax.experimental.pallas.ops.tpu import flash_attention
 
 from flax import linen as nn
-from flax import nnx
+
 from MaxText.inference import page_manager
 from MaxText.common_types import Config
 from MaxText.layers.linears import mlp_block
@@ -42,15 +42,14 @@ from MaxText.common_types import MODEL_MODE_PREFILL
 # -----------------------------------------
 
 
-class LlamaDecoderLayer(nnx.Module):
+class LlamaDecoderLayer(nn.Module):
   """Transformer decoder layer that attends to the encoder."""
 
-  def __init__(self,config: Config, mesh: Mesh, quant: Optional[Quant] = None):
-    self.config = config
-    self.mesh = mesh
-    self.quant = quant
+  config: Config
+  mesh: Mesh
+  quant: Optional[Quant] = None
 
-
+  @nn.compact
   def __call__(
       self,
       inputs,
@@ -85,7 +84,6 @@ class LlamaDecoderLayer(nnx.Module):
     lnx = nn.with_logical_constraint(lnx, activation_axis_names)
 
     # Self-attention block
-    #TODO: update the attention type to use nnx Attention
     attention_layer = Attention(
         config=cfg,
         num_query_heads=cfg.num_query_heads,
@@ -171,18 +169,3 @@ class LlamaDecoderLayer(nnx.Module):
       return layer_output, None
     else:
       return layer_output
-
-def llama_decoder(
-  config: Config,
-  mesh: Mesh,
-  quant: Optional[Quant] = None,
-  name: Optional[str] = None,
-)-> nn.Module:
-  return nnx.bridge.to_linen(
-      LlamaDecoderLayer,
-      config=config,
-      mesh=mesh,
-      quant=quant,
-      name=name,
-      metadata_fn=initializers.variable_to_logically_partitioned,
-  )
