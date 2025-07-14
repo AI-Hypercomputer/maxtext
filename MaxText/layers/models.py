@@ -40,6 +40,7 @@ from MaxText.layers.normalizations import RMSNorm
 from MaxText.layers.embeddings import PositionalEmbedding, Embed
 from MaxText.layers.quantizations import AqtQuantization as Quant
 
+from flax import nnx
 
 # ------------------------------------------------------------------------------
 # The network: Decoder & Transformer Definitions
@@ -811,4 +812,78 @@ class Transformer(nn.Module):
         image_embeddings=image_embeddings,
     )
     return logits
+
+# Dummy placeholders for actual model components
+class DummyEmbed(nnx.Module):
+    def __init__(self, *args, **kwargs):
+        pass
+    def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
+        # Simply pass through
+        return x
+
+class DummyVisionEncoder(nnx.Module):
+    def __init__(self, *args, **kwargs):
+        pass
+    def __call__(self, x: jnp.ndarray, deterministic: bool = True) -> jnp.ndarray:
+        # Mock encoding: return zeros of same shape
+        return jnp.zeros_like(x)
+
+class DummyDecoder(nnx.Module):
+    def __init__(self, *args, **kwargs):
+        pass
+    def __call__(
+        self,
+        decoder_input_tokens: jnp.ndarray,
+        decoder_positions: jnp.ndarray,
+        image_embeddings: Optional[jnp.ndarray] = None,
+        **kwargs
+    ) -> jnp.ndarray:
+        # Return mock logits: zeros with shape [batch, seq_len, vocab_size]
+        batch, seq_len = decoder_input_tokens.shape
+        vocab_size = getattr(kwargs.get('config', {}), 'vocab_size', 1)
+        return jnp.zeros((batch, seq_len, vocab_size))
+
+class TransformerNNX(nnx.Module):
+    """Mocked Transformer using dummy NNX components."""
+
+    def __init__(
+        self,
+        config,
+        mesh: Mesh,
+        rngs: nnx.Rngs,
+    ):
+        # Store config and mesh
+        self.config = config
+        self.mesh = mesh
+        # Shared (mock) token embedding
+        self.shared_embedding = DummyEmbed()
+        # Optional (mock) vision encoder
+        self.vision_encoder = (
+            DummyVisionEncoder() if getattr(config, 'use_multimodal', False) else None
+        )
+        # Mock decoder
+        self.decoder = DummyDecoder()
+
+    def __call__(
+        self,
+        decoder_input_tokens: jnp.ndarray,
+        decoder_positions: jnp.ndarray,
+        encoder_images: Optional[jnp.ndarray] = None,
+        enable_dropout: bool = True,
+        **kwargs
+    ) -> jnp.ndarray:
+        # Embed tokens (mock)
+        x = self.shared_embedding(decoder_input_tokens)
+        # Encode images if provided (mock)
+        image_embeds = None
+        if self.vision_encoder and encoder_images is not None:
+            image_embeds = self.vision_encoder(encoder_images, deterministic=not enable_dropout)
+        # Decode to logits (mock)
+        logits = self.decoder(
+            decoder_input_tokens=x,
+            decoder_positions=decoder_positions,
+            image_embeddings=image_embeds,
+            **kwargs
+        )
+        return logits
   

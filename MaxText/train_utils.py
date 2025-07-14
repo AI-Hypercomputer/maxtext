@@ -23,13 +23,16 @@ from MaxText.layers import models
 from MaxText import optimizers
 from MaxText import checkpointing
 from MaxText import maxtext_utils
+from flax import nnx
 
 
 def create_model(config, mesh):
   """Instantiates and returns the model object, sharded across the mesh."""
   # Model definition
   quant = quantizations.configure_quantization(config)
-  model = models.Transformer(config, mesh, quant=quant)
+  # model = models.Transformer(config, mesh, quant=quant)
+  init_rng = rngs = nnx.Rngs(random_key=jax.random.PRNGKey(config.init_weights_seed))
+  model = models.TransformerNNX(config, mesh, rngs=init_rng)
   return model
 
 
