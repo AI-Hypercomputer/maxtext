@@ -39,14 +39,31 @@ from MaxText.layers.attentions import Attention
 from MaxText.layers.normalizations import rms_norm
 from MaxText.layers.embeddings import attend_on_embedding, embed_as_linen, positional_embedding_as_linen
 from MaxText.layers.quantizations import AqtQuantization as Quant
+from MaxText.layers import (
+    deepseek,
+    gemma,
+    gemma2,
+    gemma3,
+    gpt3,
+    llama2,
+    llama4,
+    mistral,
+    mixtral,
+    qwen3,
+    simple_layer,
+)
 
 # ------------------------------------------------------------------------------
-# The network: Decoder & Transformer Definitions
+# The network: Decoder Definitions
 # ------------------------------------------------------------------------------
 
 
 class DecoderLayer(nn.Module):
-  """Transformer decoder layer that attends to the encoder."""
+  """
+  Transformer decoder layer that attends to the encoder.
+  This is the core, reusable building block for both the main model's
+  decoder stack and the auxiliary MTP layers.
+  """
 
   config: Config
   mesh: Mesh
@@ -304,6 +321,44 @@ class Decoder(nn.Module):
         policy = None
     return policy
 
+  def get_decoder_layers(self):
+    """Retrieves a list of decoder layer classes based on the `decoder_block` config.
+
+    Returns:
+        A list containing one or more `nn.Module` classes for the decoder.
+    """
+    match self.config.decoder_block:
+      case DecoderBlockType.DEFAULT:
+        return [DecoderLayer]
+      case DecoderBlockType.LLAMA2:
+        return [llama2.LlamaDecoderLayer]
+      case DecoderBlockType.MISTRAL:
+        # TODO(ranran): update to Mistral with sliding window attention
+        return [mistral.MistralDecoderLayer]
+      case DecoderBlockType.MIXTRAL:
+        return [mixtral.MixtralDecoderLayer]
+      case DecoderBlockType.DEEPSEEK:
+        return [deepseek.DeepSeekDenseLayer, deepseek.DeepSeekMoELayer]
+      case DecoderBlockType.GEMMA:
+        return [gemma.GemmaDecoderLayer]
+      case DecoderBlockType.GEMMA2:
+        return [gemma2.Gemma2DecoderLayer]
+      case DecoderBlockType.GEMMA3:
+        return [gemma3.Gemma3DecoderLayer]
+      case DecoderBlockType.GPT3:
+        return [gpt3.Gpt3DecoderLayer]
+      case DecoderBlockType.QWEN3:
+        return [qwen3.Qwen3DecoderLayer]
+      case DecoderBlockType.SIMPLE:
+        return [simple_layer.SimpleDecoderLayer]
+      case DecoderBlockType.SIMPLE_MLP:
+        return [simple_layer.SimpleMlpDecoderLayer]
+      case DecoderBlockType.LLAMA4:
+        return [llama4.Llama4ScannableBlock] if self.config.scan_layers else [llama4.Llama4DecoderLayer]
+      case _:
+        # Default case to handle any unknown decoder block types.
+        raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block.value=}")
+
   def set_remat_policy(self, block_layers, policy):
     """Set remat policy"""
     RemattedBlockLayers = []
@@ -334,65 +389,6 @@ class Decoder(nn.Module):
       RemattedBlockLayers.append(layer)
     return RemattedBlockLayers
 
-  def get_decoder_layers(self):
-    """Get decoder layers, one of `DecoderBlockType` discriminants or a direct `nn.Module` inheritor"""
-    if self.config.decoder_block == DecoderBlockType.DEFAULT:
-      return [DecoderLayer]
-    elif self.config.decoder_block == DecoderBlockType.LLAMA2:
-      from MaxText.layers import llama2  # pylint: disable=import-outside-toplevel
-
-      return [llama2.LlamaDecoderLayer]
-    elif self.config.decoder_block == DecoderBlockType.MISTRAL:
-      # TODO(ranran): update to Mistral with sliding window attention
-      from MaxText.layers import mistral  # pylint: disable=import-outside-toplevel
-
-      return [mistral.MistralDecoderLayer]
-    elif self.config.decoder_block == DecoderBlockType.MIXTRAL:
-      from MaxText.layers import mixtral  # pylint: disable=import-outside-toplevel
-
-      return [mixtral.MixtralDecoderLayer]
-    elif self.config.decoder_block == DecoderBlockType.DEEPSEEK:
-      from MaxText.layers import deepseek  # pylint: disable=import-outside-toplevel
-
-      return [deepseek.DeepSeekDenseLayer, deepseek.DeepSeekMoELayer]
-    elif self.config.decoder_block == DecoderBlockType.GEMMA:
-      from MaxText.layers import gemma  # pylint: disable=import-outside-toplevel
-
-      return [gemma.GemmaDecoderLayer]
-    elif self.config.decoder_block == DecoderBlockType.GEMMA2:
-      from MaxText.layers import gemma2  # pylint: disable=import-outside-toplevel
-
-      return [gemma2.Gemma2DecoderLayer]
-    elif self.config.decoder_block == DecoderBlockType.GEMMA3:
-      from MaxText.layers import gemma3  # pylint: disable=import-outside-toplevel
-
-      return [gemma3.Gemma3DecoderLayer]
-    elif self.config.decoder_block == DecoderBlockType.GPT3:
-      from MaxText.layers import gpt3  # pylint: disable=import-outside-toplevel
-
-      return [gpt3.Gpt3DecoderLayer]
-    elif self.config.decoder_block == DecoderBlockType.QWEN3:
-      from MaxText.layers import qwen3  # pylint: disable=import-outside-toplevel
-
-      return [qwen3.Qwen3DecoderLayer]
-    elif self.config.decoder_block == DecoderBlockType.SIMPLE:
-      from MaxText.layers import simple_layer  # pylint: disable=import-outside-toplevel
-
-      return [simple_layer.SimpleDecoderLayer]
-    elif self.config.decoder_block == DecoderBlockType.SIMPLE_MLP:
-      from MaxText.layers import simple_layer  # pylint: disable=import-outside-toplevel
-
-      return [simple_layer.SimpleMlpDecoderLayer]
-    elif self.config.decoder_block == DecoderBlockType.LLAMA4:
-      from MaxText.layers import llama4  # pylint: disable=import-outside-toplevel
-
-      if self.config.scan_layers:
-        return [llama4.Llama4ScannableBlock]
-      else:
-        return [llama4.Llama4DecoderLayer]
-    else:
-      raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block.value=}")
-
   def get_norm_layer(self, num_features: int):
     """get normalization layer (return type inherits from nn.Module)"""
     if self.config.decoder_block in (
@@ -411,8 +407,6 @@ class Decoder(nn.Module):
     ):
       return functools.partial(rms_norm, num_features=num_features)
     elif self.config.decoder_block == DecoderBlockType.GPT3:
-      from MaxText.layers import gpt3  # pylint: disable=import-outside-toplevel
-
       return functools.partial(gpt3.gpt3_layer_norm, num_features=num_features, reductions_in_fp32=False, use_bias=True)
     else:
       raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block.value=}")
@@ -477,24 +471,18 @@ class Decoder(nn.Module):
     return stage_module
 
   @nn.compact
-  def __call__(
+  def _apply_embedding(
       self,
       decoder_input_tokens,
       decoder_positions,
-      decoder_segment_ids=None,
-      deterministic=False,
-      model_mode=MODEL_MODE_TRAIN,
-      previous_chunk=None,
-      slot: Optional[int] = None,
-      page_state: Optional[page_manager.PageState] = None,
-      bidirectional_mask: Optional[Any] = None,
-      image_embeddings: Optional[jnp.ndarray] = None,
+      deterministic,
+      model_mode,
+      image_embeddings=None,
+      bidirectional_mask=None,
   ):
+    """Applies token and positional embeddings to the input tokens."""
     cfg = self.config
-    mesh = self.mesh
-    assert decoder_input_tokens.ndim == 2  # [batch, len]
 
-    # [batch, length] -> [batch, length, emb_dim]
     y = self.shared_embedding(decoder_input_tokens.astype("int32"), model_mode=model_mode)
 
     # Merge the image embeddings with the text embeddings for multimodal models
@@ -524,6 +512,85 @@ class Decoder(nn.Module):
           name="position_embedder",
           config=cfg,
       )(decoder_positions, model_mode=model_mode)
+    return y
+
+  @nn.compact
+  def _apply_output_head(self, y, deterministic, model_mode):
+    """Applies final normalization and projects hidden states to logits."""
+
+    cfg = self.config
+    y = self.get_norm_layer(num_features=y.shape[-1])(
+        dtype=cfg.dtype,
+        weight_dtype=cfg.weight_dtype,
+        name="decoder_norm",
+        epsilon=cfg.normalization_layer_epsilon,
+        kernel_axes=("norm",),
+        parameter_memory_host_offload=cfg.parameter_memory_host_offload,
+    )(y)
+    y = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(y, deterministic=deterministic)
+
+    # [batch, length, emb_dim] -> [batch, length, vocab_size]
+    if cfg.logits_via_embedding:
+      # Use the transpose of embedding matrix for logit transform.
+      embedding_table = self.shared_embedding.variables["params"]["embedding"]
+      if isinstance(embedding_table, nn.spmd.LogicallyPartitioned):
+        embedding_table = embedding_table.unbox()
+      attend_dtype = jnp.float32 if cfg.logits_dot_in_fp32 else cfg.dtype
+      logits = attend_on_embedding(y, embedding_table, attend_dtype, self.config)
+
+      if self.config.normalize_embedding_logits:
+        # Correctly normalize pre-softmax logits for this shared case.
+        logits = logits / jnp.sqrt(y.shape[-1])
+      if cfg.final_logits_soft_cap:
+        logits = logits / cfg.final_logits_soft_cap
+        logits = jnp.tanh(logits) * cfg.final_logits_soft_cap
+    else:
+      logits = linears.dense_general(
+          inputs_shape=y.shape,
+          out_features_shape=cfg.vocab_size,
+          weight_dtype=cfg.weight_dtype,
+          dtype=jnp.float32 if cfg.logits_dot_in_fp32 else cfg.dtype,  # for logit training stability
+          kernel_axes=("embed", "vocab"),
+          name="logits_dense",
+          matmul_precision=self.config.matmul_precision,
+          parameter_memory_host_offload=cfg.parameter_memory_host_offload,
+      )(
+          y
+      )  # We do not quantize the logits matmul.
+    if model_mode in (MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE):
+      logits = nn.with_logical_constraint(logits, (None, None, "activation_vocab"))
+    else:
+      logits = nn.with_logical_constraint(
+          logits, ("activation_embed_and_logits_batch", "activation_length", "activation_vocab")
+      )
+
+    if self.config.cast_logits_to_fp32:
+      logits = logits.astype(jnp.float32)
+
+    return logits
+
+  @nn.compact
+  def __call__(
+      self,
+      decoder_input_tokens,
+      decoder_positions,
+      decoder_segment_ids=None,
+      deterministic=False,
+      model_mode=MODEL_MODE_TRAIN,
+      previous_chunk=None,
+      slot: Optional[int] = None,
+      page_state: Optional[page_manager.PageState] = None,
+      bidirectional_mask: Optional[Any] = None,
+      image_embeddings: Optional[jnp.ndarray] = None,
+  ):
+    cfg = self.config
+    mesh = self.mesh
+    assert decoder_input_tokens.ndim == 2  # [batch, len]
+
+    # [batch, length] -> [batch, length, emb_dim]
+    y = self._apply_embedding(
+        decoder_input_tokens, decoder_positions, deterministic, model_mode, image_embeddings, bidirectional_mask
+    )
 
     policy = self.get_remat_policy()
     RemattedBlockLayers = self.set_remat_policy(self.decoder_layer, policy)
@@ -654,13 +721,10 @@ class Decoder(nn.Module):
             layer_kwargs = {}
             layer_call_kwargs = {}
             if cfg.decoder_block == DecoderBlockType.GEMMA3:
-              from MaxText.layers import gemma3  # pylint: disable=import-outside-toplevel
               # Gemma3 uses both global and sliding window attention depending on the layer index.
               layer_kwargs = {"attention_type": gemma3.get_attention_type(layer_id=lyr)}
               layer_call_kwargs = {"bidirectional_mask": bidirectional_mask}
             if cfg.decoder_block == DecoderBlockType.LLAMA4:
-              from MaxText.layers import llama4  # pylint: disable=import-outside-toplevel
-
               layer_kwargs = {
                   "is_nope_layer": llama4.determine_is_nope_layer(lyr, self.config.nope_layer_interval),
                   "is_moe_layer": llama4.determine_is_moe_layer(lyr, self.config.interleave_moe_layer_step),
@@ -679,52 +743,12 @@ class Decoder(nn.Module):
             )
 
     assert isinstance(y, jax.Array)
-    y = self.get_norm_layer(num_features=y.shape[-1])(
-        dtype=cfg.dtype,
-        weight_dtype=cfg.weight_dtype,
-        name="decoder_norm",
-        epsilon=cfg.normalization_layer_epsilon,
-        kernel_axes=("norm",),
-        parameter_memory_host_offload=cfg.parameter_memory_host_offload,
-    )(y)
-    y = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(y, deterministic=deterministic)
 
-    # [batch, length, emb_dim] -> [batch, length, vocab_size]
-    if cfg.logits_via_embedding:
-      # Use the transpose of embedding matrix for logit transform.
-      embedding_table = self.shared_embedding.variables["params"]["embedding"]
-      if isinstance(embedding_table, nn.spmd.LogicallyPartitioned):
-        embedding_table = embedding_table.unbox()
-      attend_dtype = jnp.float32 if cfg.logits_dot_in_fp32 else cfg.dtype
-      logits = attend_on_embedding(y, embedding_table, attend_dtype, self.config)
+    # After the final transformer layer, `y` holds the raw, un-normalized hidden state.
+    hidden_state = y
 
-      if self.config.normalize_embedding_logits:
-        # Correctly normalize pre-softmax logits for this shared case.
-        logits = logits / jnp.sqrt(y.shape[-1])
-      if cfg.final_logits_soft_cap:
-        logits = logits / cfg.final_logits_soft_cap
-        logits = jnp.tanh(logits) * cfg.final_logits_soft_cap
-    else:
-      logits = linears.dense_general(
-          inputs_shape=y.shape,
-          out_features_shape=cfg.vocab_size,
-          weight_dtype=cfg.weight_dtype,
-          dtype=jnp.float32 if cfg.logits_dot_in_fp32 else cfg.dtype,  # for logit training stability
-          kernel_axes=("embed", "vocab"),
-          name="logits_dense",
-          matmul_precision=self.config.matmul_precision,
-          parameter_memory_host_offload=cfg.parameter_memory_host_offload,
-      )(
-          y
-      )  # We do not quantize the logits matmul.
+    logits = self._apply_output_head(hidden_state, deterministic, model_mode)
 
-    if model_mode in (MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE):
-      logits = nn.with_logical_constraint(logits, (None, None, "activation_vocab"))
-    else:
-      logits = nn.with_logical_constraint(
-          logits, ("activation_embed_and_logits_batch", "activation_length", "activation_vocab")
-      )
-
-    if self.config.cast_logits_to_fp32:
-      logits = logits.astype(jnp.float32)
-    return logits
+    # The API of the Decoder is now a tuple, providing both the main output
+    # and the raw hidden state needed for auxiliary tasks.
+    return logits, hidden_state

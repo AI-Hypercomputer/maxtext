@@ -75,21 +75,39 @@ class MetricLogger:
 
   def log_metrics(self, metrics, step, is_training):
     """Logs metrics via max_logging."""
+
     if is_training:
-      max_logging.log(
+      loss = metrics['scalar']['learning/loss']
+      log_message = (
           f"completed step: {step}, seconds: {metrics['scalar']['perf/step_time_seconds']:.3f}, "
           f"TFLOP/s/device: {metrics['scalar']['perf/per_device_tflops_per_sec']:.3f}, "
           f"Tokens/s/device: {metrics['scalar']['perf/per_device_tokens_per_sec']:.3f}, "
           f"total_weights: {metrics['scalar']['learning/total_weights']}, "
-          f"loss: {metrics['scalar']['learning/loss']:.3f}"
+          f"loss: {loss:.3f}"
       )
+
+      if self.config.mtp_num_layers > 0:
+        mtp_loss = metrics["scalar"].get("learning/mtp_loss", 0.0)
+        main_model_loss = loss - mtp_loss
+        log_message += f", main_model_loss: {main_model_loss:.3f}, mtp_loss: {mtp_loss:.3f}"
+
+      max_logging.log(log_message)
+
     else:
-      max_logging.log(
+      log_message = (
           f"eval metrics after step: {step},"
           f" loss={self.cumulative_eval_metrics['scalar']['eval/avg_loss']:.3f},"
           f" total_weights={self.cumulative_eval_metrics['scalar']['eval/total_weights']},"
           f" step_time_seconds={self.cumulative_eval_metrics['scalar']['eval/step_time_seconds']:.3f}"
       )
+
+      if self.config.mtp_num_layers > 0:
+        log_message += (
+            f", avg_mtp_loss={self.cumulative_eval_metrics['scalar']['eval/avg_mtp_loss']:.3f},"
+            f" avg_mtp_acceptance_rate={self.cumulative_eval_metrics['scalar']['eval/avg_mtp_acceptance_rate_percent']:.2f}%"
+        )
+
+      max_logging.log(log_message)
 
   def write_metrics_locally(self, metrics, step):
     """Writes metrics locally for testing."""
@@ -193,6 +211,10 @@ class MetricLogger:
       self.cumulative_eval_metrics["scalar"]["eval/moe_lb_loss"] += float(
           metrics["scalar"].get("evaluation/moe_lb_loss", 0.0)
       )
+      self.cumulative_eval_metrics["scalar"]["eval/mtp_loss"] += float(metrics["scalar"].get("evaluation/mtp_loss", 0.0))
+      self.cumulative_eval_metrics["scalar"]["eval/mtp_acceptance_rate_percent"] += float(
+          metrics["scalar"].get("evaluation/mtp_acceptance_rate_percent", 0.0)
+      )
       if self.config.use_dpo:
         self.cumulative_eval_metrics["scalar"]["eval/dpo_reward_accuracy"] += float(
             metrics["scalar"].get("evaluation/dpo_reward_accuracy", 0.0)
@@ -205,6 +227,12 @@ class MetricLogger:
       self.cumulative_eval_metrics["scalar"]["eval/avg_loss"] = eval_loss
       self.cumulative_eval_metrics["scalar"]["eval/avg_moe_lb_loss"] = (
           self.cumulative_eval_metrics["scalar"]["eval/moe_lb_loss"] / eval_step_count
+      )
+      self.cumulative_eval_metrics["scalar"]["eval/avg_mtp_loss"] = (
+          self.cumulative_eval_metrics["scalar"]["eval/mtp_loss"] / eval_step_count
+      )
+      self.cumulative_eval_metrics["scalar"]["eval/avg_mtp_acceptance_rate_percent"] = (
+          self.cumulative_eval_metrics["scalar"]["eval/mtp_acceptance_rate_percent"] / eval_step_count
       )
       if self.config.use_dpo:
         self.cumulative_eval_metrics["scalar"]["eval/dpo_reward_accuracy"] = (

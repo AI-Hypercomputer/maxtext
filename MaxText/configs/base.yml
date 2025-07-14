@@ -135,6 +135,18 @@ cast_logits_to_fp32: True # whether to cast the logits to fp32. The higher preci
 float32_qk_product: False # in dot_product attention, whether to cast to fp32 the inputs to qk product
 float32_logits: False # in dot_product attention, whether to cast to fp32 the inputs to softmax
 
+# Multi-Token Prediction Configs
+# The number of auxiliary prediction layers to use for MTP.
+# Set to 0 to disable the feature.
+mtp_num_layers: 0
+# The scaling factor (lambda) for the MTP auxiliary loss. The final loss is:
+# main_loss + mtp_loss_scaling_factor * avg_mtp_loss
+mtp_loss_scaling_factor: 0.1
+# Specifies which MTP layer (1-indexed) is used to calculate metrics like the
+# acceptance rate during evaluation. For example, a value of `1` targets the
+# first auxiliary prediction head. Set to 0 to disable this specific evaluation
+mtp_eval_target_module: 0
+
 # mixture of experts (moe)
 num_experts: 1
 num_experts_per_tok: 1
