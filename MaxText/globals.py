@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-import os.path
+import os.path 
 
 PKG_DIR = os.path.dirname(os.path.abspath(__file__))  # MaxText directory path
 EPS = 1e-8  # Epsilon to calculate loss
