@@ -31,13 +31,12 @@ from MaxText.common_types import Config, Array
 from MaxText.inference import page_manager
 from MaxText.layers import initializers
 from MaxText.layers import linears
-from MaxText.layers import models
 from MaxText.layers import moe
 from MaxText.layers import quantizations
 from MaxText.layers import attentions
 from MaxText.layers.attentions import AttentionType
 from MaxText.layers.quantizations import AqtQuantization as Quant
-from MaxText.layers.normalizations import RMSNorm
+from MaxText.layers.normalizations import rms_norm
 
 
 Attention = attentions.Attention
@@ -284,7 +283,7 @@ class Llama4MultiModalProjector(nn.Module):
     cfg = self.config
     self.linear = linears.dense_general(
         in_features_shape=cfg.vision_output_dim_for_vit,
-        out_features_shape=cfg.emb_dim,
+        out_features_shape=cfg.base_emb_dim,
         dtype=cfg.dtype_mm,
         name="vit_multi_modal_projector",
         use_bias=False,
@@ -295,10 +294,10 @@ class Llama4MultiModalProjector(nn.Module):
     """Project image features to text hidden dimension.
 
     Args:
-      image_features: Input tensor of shape [batch_size*num_patches*(pixel_shuffle_ratio**2), vision_output_dim]
+      image_features: Input tensor of shape [batch_size, num_patches, (pixel_shuffle_ratio**2), vision_output_dim]
 
     Returns:
-      Tensor of shape [batch_size*num_patches*(pixel_shuffle_ratio**2), emb_dim]
+      Tensor of shape [batch_size, num_patches, (pixel_shuffle_ratio**2), vision_hidden_size]
     """
     b, t, c, d = image_features.shape
     image_features = image_features.reshape(b * t, c, d)
@@ -353,14 +352,14 @@ class Llama4DecoderLayer(nn.Module):
   """Transformer decoder layer for Llama4.
 
   Attributes:
-    config: models.Config, MaxText model config
+    config: Config, MaxText model config
     mesh: Mesh, JAX device mesh (used for sharding)
     quant: Optional[Quant], quantization config
     is_nope_layer: bool, whether to use RoPE or not on this layer
     is_moe_layer: bool, whether this layer operates as a MoE layer
   """
 
-  config: models.Config
+  config: Config
   mesh: Mesh
   quant: Optional[Quant] = None
   is_nope_layer: bool = False
@@ -385,7 +384,8 @@ class Llama4DecoderLayer(nn.Module):
 
     inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
     inputs = checkpoint_name(inputs, "decoder_layer_input")
-    lnx_rms = RMSNorm(
+    lnx_rms = rms_norm(
+        num_features=inputs.shape[-1],
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
         name="pre_self_attention_layer_norm",
@@ -451,7 +451,8 @@ class Llama4DecoderLayer(nn.Module):
     intermediate_inputs = inputs + attention_lnx
 
     # Fully Connected
-    hidden_states = models.RMSNorm(
+    hidden_states = rms_norm(
+        num_features=intermediate_inputs.shape[-1],
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
         name="post_self_attention_layer_norm",
@@ -523,7 +524,7 @@ class Llama4ScannableBlock(nn.Module):
   A repeatable block given nope_layer_interval and interleave_moe_layer_step
 
   Attributes:
-    config: models.Config, MaxText model config
+    config: Config, MaxText model config
     mesh: Mesh, JAX device mesh (used for sharding)
     quant: Optional[Quant], quantization config
     nope_layer_interval: int, the interval at which layers should use NoPE.
@@ -531,7 +532,7 @@ class Llama4ScannableBlock(nn.Module):
   """
   '''
 
-  config: models.Config
+  config: Config
   mesh: Mesh
   quant: Optional[Quant] = None
   nope_layer_interval: int = 1

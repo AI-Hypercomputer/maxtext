@@ -32,6 +32,7 @@ AxisIdxes = tuple[int, ...]
 
 BATCH = "activation_batch"
 LENGTH = "activation_length"
+PREFILL_LENGTH = "prefill_activation_length"
 Q_LENGTH = "activation_q_length"
 KV_LENGTH = "activation_kv_length"
 EMBED = "activation_embed"
@@ -77,6 +78,7 @@ class DecoderBlockType(enum.Enum):
   GEMMA = "gemma"
   GEMMA2 = "gemma2"
   GEMMA3 = "gemma3"
+  QWEN3 = "qwen3"
   GPT3 = "gpt3"
   SIMPLE = "simple"
   SIMPLE_MLP = "simple_mlp"

@@ -51,7 +51,9 @@ docker tag ${LOCAL_IMAGE_NAME} gcr.io/$PROJECT/${dependency_image_name}:${image_
 docker push gcr.io/$PROJECT/${dependency_image_name}:${image_date}
 
 # Download other test assets from GCS into MaxText/test_assets
-gcloud storage cp gs://maxtext-test-assets/* MaxText/test_assets
+if ! gcloud storage cp gs://maxtext-test-assets/* MaxText/test_assets; then
+  echo "WARNING: Failed to download test assets from GCS. These files are only used for end-to-end tests; you may not have access to the bucket."
+fi
 
 # Build then upload "dependencies + code" image
 docker build --build-arg BASEIMAGE=${LOCAL_IMAGE_NAME} -f ./maxtext_runner.Dockerfile -t ${LOCAL_IMAGE_NAME}_runner .

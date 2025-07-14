@@ -60,11 +60,10 @@ def get_input_data_sharding(config, mesh):
   return nn.logical_to_mesh_sharding(P(*config.input_data_sharding_logical_axes), mesh, config.logical_axis_rules)
 
 
-def get_functional_train_with_signature(train_step, mesh, state_mesh_shardings, model, config):
+def get_functional_train_with_signature(train_step, data_sharding, state_mesh_shardings, model, config):
   """Get the shardings (both state and data) for `train_step`."""
-  functional_train = get_functional_train_step(train_step, model, config, state_mesh_shardings)
+  functional_train = functools.partial(train_step, model, config, state_mesh_shardings)
   functional_train.__name__ = "train_step"
-  data_sharding = get_input_data_sharding(config, mesh)
   in_shardings = (state_mesh_shardings, data_sharding, None)  # State, batch, rng
   out_shardings = (state_mesh_shardings, None)  # State, metrics
   static_argnums = ()  # We partial out the static argnums of model and config
@@ -72,24 +71,15 @@ def get_functional_train_with_signature(train_step, mesh, state_mesh_shardings, 
   return functional_train, in_shardings, out_shardings, static_argnums, donate_argnums
 
 
-def get_functional_train_step(train_step, model, config, state_mesh_shardings):
-  return functools.partial(train_step, model, config, state_mesh_shardings)
-
-
-def get_functional_eval_with_signature(eval_step, mesh, state_mesh_shardings, model, config):
-  """Get the shardings (both state and data) for eval_step"""
-  functional_eval = get_functional_eval_step(eval_step, model, config)
+def get_functional_eval_with_signature(eval_step, data_sharding, state_mesh_shardings, model, config):
+  """Get the shardings (both state and data) for `eval_step`."""
+  functional_eval = functools.partial(eval_step, model, config)
   functional_eval.__name__ = "eval_step"
-  data_sharding = get_input_data_sharding(config, mesh)
   in_shardings = (state_mesh_shardings, data_sharding, None)  # State, batch, rng
   out_shardings = None  # metrics
   static_argnums = ()  # We partial out the static argnums of model, config
   donate_argnums = ()  # state will be kept instead of being donated in eval_step
   return functional_eval, in_shardings, out_shardings, static_argnums, donate_argnums
-
-
-def get_functional_eval_step(eval_step, model, config):
-  return functools.partial(eval_step, model, config)
 
 
 def get_shaped_batch(config):
@@ -103,6 +93,9 @@ def get_shaped_batch(config):
   shaped_batch["targets"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
   shaped_batch["targets_position"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
   shaped_batch["targets_segmentation"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
+  if config.use_multimodal:
+    image_shape = get_dummy_image_shape_for_init(config)
+    shaped_batch["images"] = jax.ShapeDtypeStruct(image_shape, jnp.int32)
   return shaped_batch
 
 
@@ -921,6 +914,22 @@ def create_device_mesh(config, devices=None):
   """Creates a device mesh with each slice in its own data parallel group. If there is only one slice, uses two replicas"""
   if devices is None:
     devices = jax.devices()
+  if config.subslice_shape and config.enable_single_controller and config.num_slices == 1:
+    max_logging.log(f"Trying to create a subslice with shape: {config.subslice_shape}")
+    subslice_shape = tuple(int(x) for x in config.subslice_shape.split(","))
+    device_coords = [device.coords for device in devices]
+    device_coords_np = np.array(device_coords)
+
+    # Find the minimum coordinates to start the subslice
+    min_coords = device_coords_np.min(axis=0)
+
+    subslice_devices = []
+    for device in devices:
+      coords = device.coords
+      if all(min_coords[i] <= coords[i] < min_coords[i] + subslice_shape[i] for i in range(len(subslice_shape))):
+        subslice_devices.append(device)
+    devices = subslice_devices
+
   num_devices = len(devices)
   num_slices = 1 if config.inference_benchmark_test else config.num_slices
   num_devices_per_slice = num_devices // num_slices
@@ -1083,3 +1092,90 @@ def get_formatted_sharding_annotations(params, mesh=None):
     annotation_lines.append(f" - Param: {param_name_str}\n" f"   Shape: {shape_str}\n" f"   Sharding: {sharding_desc}")
   # Join all the collected lines into a single string, separated by newlines.
   return "\n".join(annotation_lines)
+
+
+def get_physical_spec_no_fsdp(full_logical, mesh, logical_axis_rules):
+  """
+  Generates a physical sharding spec for fully replicated weights.
+
+  This function computes a target sharding layout where model parameters are fully
+  replicated across the 'fsdp' mesh axis. It starts with the original logical
+  sharding and removes any rules that shard along the 'fsdp' or
+  'fsdp_transpose' axes.
+
+  Replacing a sharding axis with `None` in a PartitionSpec instructs JAX to
+  replicate the array data along that physical mesh dimension. The resulting
+  specification is used as a target layout for an all-gather operation.
+
+  Args:
+    full_logical: A PyTree of logical PartitionSpecs for the model parameters.
+    mesh: The JAX device mesh.
+    logical_axis_rules: Rules for converting logical axes to physical mesh axes.
+
+  Returns:
+    A PyTree of physical `jax.sharding.NamedSharding` objects that describe a
+    layout where parameters are fully gathered (replicated) across the 'fsdp'
+    mesh axis.
+  """
+
+  def remove_fsdp_sharding(sharding_tree):
+    """Recursively traverses the sharding tree to remove fsdp axes."""
+
+    def _remove_fsdp_from_partition_spec(named_sharding):
+      """Removes 'fsdp' and 'fsdp_transpose' from a PartitionSpec."""
+      if isinstance(named_sharding, jax.sharding.NamedSharding):
+        new_spec = []
+        # Iterate through each axis in the original PartitionSpec.
+        for axis in named_sharding.spec:
+          if axis is None:
+            new_spec.append(None)
+          elif isinstance(axis, str):
+            # If the axis is 'fsdp', replace it with None to signify replication.
+            if axis not in ("fsdp", "fsdp_transpose"):
+              new_spec.append(axis)
+            else:
+              new_spec.append(None)
+          elif isinstance(axis, (list, tuple)):
+            # If the axis is a collection, filter out 'fsdp'.
+            new_axis = [a for a in axis if a not in ("fsdp", "fsdp_transpose")]
+            new_spec.append(tuple(new_axis))
+          else:
+            raise ValueError(f"Unsupported_axis_type: {type(axis)}")
+          # Return a new sharding object with the modified spec.
+        return jax.sharding.NamedSharding(named_sharding.mesh, jax.sharding.PartitionSpec(*new_spec))
+      return named_sharding
+
+    return jax.tree.map(_remove_fsdp_from_partition_spec, sharding_tree)
+
+  # Convert the high-level logical spec to a physical one using default rules.
+  physical = nn.logical_to_mesh_sharding(full_logical, mesh=mesh, rules=logical_axis_rules)
+  # Apply the function to remove the FSDP sharding, defining our target layout.
+  physical_no_fsdp = remove_fsdp_sharding(physical)
+  return physical_no_fsdp
+
+
+def all_gather_over_fsdp(variables, sharding_info, mesh, logical_axis_rules):
+  """Performs an all-gather on FSDP-sharded variables via a sharding constraint.
+  This function triggers an all-gather operation on the model's parameters.
+  It does so by applying a sharding constraint that specifies a fully
+  replicated layout.
+
+  The JAX compiler satisfies this constraint by automatically inserting the
+  necessary `all-gather` collective communication operations into the
+  computation graph, effectively gathering the sharded weights.
+
+  Args:
+    variables: The PyTree of model parameters, currently sharded across devices.
+    sharding_info: The logical partition spec of the currently sharded `variables`.
+    mesh: The JAX device mesh.
+    logical_axis_rules: Rules for converting logical axes to physical mesh axes.
+
+  Returns:
+    The model's variables with the all-gather operation applied, resulting
+    in the weights being fully replicated on all devices in the 'fsdp' mesh.
+  """
+  # Get the target physical layout (weights fully replicated).
+  physical_constraint_no_fsdp = get_physical_spec_no_fsdp(sharding_info, mesh, logical_axis_rules)
+  # Apply the constraint to the model's current variables. This tells JAX to
+  # gather the weights into this layout.
+  return jax.lax.with_sharding_constraint(variables, physical_constraint_no_fsdp)

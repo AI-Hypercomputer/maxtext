@@ -84,6 +84,8 @@ dtype: "bfloat16"
 # 'fp8' for 8-bit floating-point GeMMs on NVIDIA GPUs.
 # 'nanoo_fp8' for 8-bit floating-point GeMMs on AMD MI300/MI325 GPUs.
 quantization: ""
+# Used to configure constant_bound_config in aqt lib for static scaling, e.g. constant_bound_config='0.5, 0.5, 0.5, 0.5, 0.5, 0.5'
+constant_bound_config: ""
 # Choose one of default, high, and highest.
 # https://kolonist26-jax-kr.readthedocs.io/en/latest/jax.lax.html#jax.lax.Precision
 matmul_precision: "default"
@@ -132,6 +134,18 @@ logits_dot_in_fp32: False  # whether to use fp32 in logits_dense or shared_embed
 cast_logits_to_fp32: True # whether to cast the logits to fp32. The higher precision is generally beneficial, but it can vary slightly.
 float32_qk_product: False # in dot_product attention, whether to cast to fp32 the inputs to qk product
 float32_logits: False # in dot_product attention, whether to cast to fp32 the inputs to softmax
+
+# Multi-Token Prediction Configs
+# The number of auxiliary prediction layers to use for MTP.
+# Set to 0 to disable the feature.
+mtp_num_layers: 0
+# The scaling factor (lambda) for the MTP auxiliary loss. The final loss is:
+# main_loss + mtp_loss_scaling_factor * avg_mtp_loss
+mtp_loss_scaling_factor: 0.1
+# Specifies which MTP layer (1-indexed) is used to calculate metrics like the
+# acceptance rate during evaluation. For example, a value of `1` targets the
+# first auxiliary prediction head. Set to 0 to disable this specific evaluation
+mtp_eval_target_module: 0
 
 # mixture of experts (moe)
 num_experts: 1
@@ -186,6 +200,9 @@ pipeline_delay_activation_forwarding: False # This delays the activation forward
 # the communication and compute in each iteration are now independent. However this comes at the cost of doubling the pipeline bubble,
 # and you must set the number of microbatches to at least 2 * num_stages (the minimum 2 * num_stages is set by default with this delay).
 
+model_fsdp_ag_once: False # This controls whether the Zero-1 optimization is active.
+# This is a memory/time tradeoff - True: This is Zero-1 Sharding. Use ZeroOneTransformer to gather weights once per gradient step. 
+# False: This is Zero-3 Sharing. Use the standard Transformer, which gathers for each microbatch's fwd/bwd pass.
 pipeline_fsdp_ag_once: False # If set to true then all gather all of the weights over FSDP before the first pipeline iteration.
 # This is a memory/time tradeoff - we now have to store the FSDP gathered weights and gradients (typically in bf16), as opposed
 # to only one stage's worth, however we only execute one all-gather and reduce across per repeat, as opposed
@@ -292,8 +309,10 @@ logical_axis_rules: [
                       ['activation_heads', ['tensor', 'tensor_transpose', 'sequence','tensor_sequence','autoregressive']],
                       ['activation_kv_heads', ['tensor', 'tensor_transpose', 'sequence','tensor_sequence']],
                       ['activation_length', ['sequence', 'context']],
+                      ['prefill_activation_length', ['sequence', 'context']],
                       ['activation_length', ['context']],
                       ['activation_norm_length', ['tensor_sequence', 'context', 'sequence']],
+                      ['prefill_activation_norm_length', ['tensor_sequence', 'context', 'sequence']],
                       ['activation_q_length', ['context']],
                       ['activation_kv_length', []],
                       ['activation_embed', ['tensor', 'tensor_transpose']],
@@ -407,7 +426,9 @@ expansion_factor_real_data: -1 # if -1 then all hosts will load real data, else 
 eval_per_device_batch_size: 0.0
 max_corpus_chars: 10_000_000
 train_data_columns: ['text'] # for DPO dataset containing "chosen" and "rejected"
+train_image_column: 'image'
 eval_data_columns: ['text'] # for DPO dataset containing "chosen" and "rejected"
+eval_image_column: 'image'
 packing: True
 num_epoch: 1  # only grain and tfds pipeline supports num_epoch > 1
 
@@ -730,7 +751,7 @@ dtype_mm: "float32"  # Data type for multimodal model's vision encoder
 remat_policy_for_vit: "minimal"  # Remat policy for multimodal model's vision encoder. Check `remat_policy` for options.
 image_size_for_vit: 896 # Default for Gemma3, and should be overwritten by model's config
 image_path: "" # Local image path used for decoding
-
+image_placeholder: "<|image|>"
 
 ### llama4 multi modal configs
 hidden_size_for_vit: 1408 
@@ -746,3 +767,7 @@ rope_theta_for_vit: 10000
 vision_output_dim_for_vit: 4096
 pixel_shuffle_ratio_for_vit: 0.5
 projector_dropout_for_vit: 0.0
+
+# Subslice shape in the form of "x,y,z" when using pathways (single controller). 
+# Example: "8,8" to use a 8x8 subgrid (64 chips) of a full pod (16x16) of trillium.
+subslice_shape: ""

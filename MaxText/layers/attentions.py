@@ -39,18 +39,22 @@ from flax import nnx
 from flax.linen import partitioning
 
 from MaxText import max_utils
-from MaxText.common_types import DecoderBlockType, DEFAULT_MASK_VALUE, BATCH, HEAD, KV_LENGTH, D_KV, CACHE_BATCH_PREFILL, CACHE_SEQUENCE, AxisNames, CACHE_BATCH, CACHE_HEADS, CACHE_SCALE_BATCH, CACHE_KV, CACHE_SCALE_SEQUENCE, CACHE_SCALE_HEADS, CACHE_SCALE_KV, AxisIdxes, LENGTH, DType, Config, Array, Q_LENGTH, DECODE_LENGTH, DECODE_BATCH, PREFILL_KV_BATCH, KV_HEAD, KV_HEAD_DIM, KV_BATCH, EMBED, MODEL_MODE_AUTOREGRESSIVE, DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_TRAIN, MODEL_MODE_PREFILL
+from MaxText.common_types import DecoderBlockType, DEFAULT_MASK_VALUE, BATCH, HEAD, KV_LENGTH, PREFILL_LENGTH, D_KV, CACHE_BATCH_PREFILL, CACHE_SEQUENCE, AxisNames, CACHE_BATCH, CACHE_HEADS, CACHE_SCALE_BATCH, CACHE_KV, CACHE_SCALE_SEQUENCE, CACHE_SCALE_HEADS, CACHE_SCALE_KV, AxisIdxes, LENGTH, DType, Config, Array, Q_LENGTH, DECODE_LENGTH, DECODE_BATCH, PREFILL_KV_BATCH, KV_HEAD, KV_HEAD_DIM, KV_BATCH, EMBED, MODEL_MODE_AUTOREGRESSIVE, DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_TRAIN, MODEL_MODE_PREFILL
 from MaxText.inference import kvcache
 from MaxText.inference import page_manager
 from MaxText.inference import paged_attention
 from MaxText.inference.kvcache import KVQuant, KVTensor
 from MaxText.kernels.ragged_attention import ragged_gqa
 from MaxText.kernels.ragged_attention import ragged_mha
-from MaxText.layers import embeddings
-from MaxText.layers.embeddings import YarnRotaryEmbedding, RotaryEmbedding
+from MaxText.layers.embeddings import (
+    llama_rotary_embedding_as_linen,
+    llama_vision_rotary_embedding_as_linen,
+    rotary_embedding_as_linen,
+    yarn_rotary_embedding_as_linen,
+)
 from MaxText.layers.initializers import nd_dense_init, NdInitializer
 from MaxText.layers.linears import dense_general
-from MaxText.layers.normalizations import RMSNorm
+from MaxText.layers.normalizations import rms_norm
 from MaxText.layers.quantizations import AqtQuantization as Quant
 
 # pylint: disable=line-too-long, g-doc-args, g-doc-return-or-yield, bad-continuation, g-inconsistent-quotes
@@ -289,37 +293,38 @@ def attention_op_as_linen(
   Initializes the AttentionOp module and returns it as a Linen module.
   """
   return nnx.bridge.to_linen(
-    AttentionOp,
-    config=config,
-    mesh=mesh,
-    attention_kernel=attention_kernel,
-    max_target_length=max_target_length,
-    num_query_heads=num_query_heads,
-    num_kv_heads=num_kv_heads,
-    float32_qk_product=float32_qk_product,
-    max_prefill_predict_length=max_prefill_predict_length,
-    float32_logits=float32_logits,
-    flash_axis_names_kv=flash_axis_names_kv,
-    flash_axis_names_q=flash_axis_names_q,
-    flash_axis_names_splash_kernel=flash_axis_names_splash_kernel,
-    prefill_cache_logical_axis_names=prefill_cache_logical_axis_names,
-    cache_logical_axis_names=cache_logical_axis_names,
-    cache_scale_logical_axis_names=cache_scale_logical_axis_names,
-    ragged_qkv_axis_names=ragged_qkv_axis_names,
-    ragged_lengths_names=ragged_lengths_names,
-    compute_axis_order=compute_axis_order,
-    key_axis_order=key_axis_order,
-    reshape_q=reshape_q,
-    dropout_rate=dropout_rate,
-    dtype=dtype,
-    quant=quant,
-    kv_quant=kv_quant,
-    attention_type=attention_type,
-    attn_logits_soft_cap=attn_logits_soft_cap,
-    sliding_window_size=sliding_window_size,
-    chunk_attn_window_size=chunk_attn_window_size,
-    use_ragged_attention=use_ragged_attention,
-    ragged_block_size=ragged_block_size,
+      AttentionOp,
+      config=config,
+      mesh=mesh,
+      attention_kernel=attention_kernel,
+      max_target_length=max_target_length,
+      num_query_heads=num_query_heads,
+      num_kv_heads=num_kv_heads,
+      float32_qk_product=float32_qk_product,
+      max_prefill_predict_length=max_prefill_predict_length,
+      float32_logits=float32_logits,
+      flash_axis_names_kv=flash_axis_names_kv,
+      flash_axis_names_q=flash_axis_names_q,
+      flash_axis_names_splash_kernel=flash_axis_names_splash_kernel,
+      prefill_cache_logical_axis_names=prefill_cache_logical_axis_names,
+      cache_logical_axis_names=cache_logical_axis_names,
+      cache_scale_logical_axis_names=cache_scale_logical_axis_names,
+      ragged_qkv_axis_names=ragged_qkv_axis_names,
+      ragged_lengths_names=ragged_lengths_names,
+      compute_axis_order=compute_axis_order,
+      key_axis_order=key_axis_order,
+      reshape_q=reshape_q,
+      dropout_rate=dropout_rate,
+      dtype=dtype,
+      quant=quant,
+      kv_quant=kv_quant,
+      attention_type=attention_type,
+      attn_logits_soft_cap=attn_logits_soft_cap,
+      sliding_window_size=sliding_window_size,
+      chunk_attn_window_size=chunk_attn_window_size,
+      use_ragged_attention=use_ragged_attention,
+      ragged_block_size=ragged_block_size,
+      metadata_fn=variable_to_logically_partitioned,
   )
 
 
@@ -359,7 +364,7 @@ class AttentionOp(nnx.Module):
   use_ragged_attention: bool = False
   ragged_block_size: int = 256
 
-  rngs: nnx.Rngs = None # Not used in AttentionOp but passed in by nnx.bridge.to_linen
+  rngs: nnx.Rngs = None  # Not used in AttentionOp but passed in by nnx.bridge.to_linen
 
   def check_attention_inputs(self, query: Array, key: Array | KVTensor, value: Array | KVTensor) -> None:
     """Check attention inputs."""
@@ -1062,7 +1067,7 @@ class AttentionOp(nnx.Module):
 
     # special sharding for decode
     q_seq_len = query.shape[1]
-    prefill_qkv_sharding = (BATCH, LENGTH, HEAD, D_KV)
+    prefill_qkv_sharding = (BATCH, PREFILL_LENGTH, HEAD, D_KV)
     decode_qkv_sharding = (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV)
     if self.is_partition_in_decode(q_seq_len):
       query = partitioning.with_sharding_constraint(query, decode_qkv_sharding)
@@ -1087,7 +1092,7 @@ class AttentionOp(nnx.Module):
     if self.is_partition_in_decode(q_seq_len):
       attn_weights = partitioning.with_sharding_constraint(attn_weights, (KV_LENGTH, HEAD, None, None, None))
     elif model_mode == MODEL_MODE_PREFILL:
-      attn_weights = partitioning.with_sharding_constraint(attn_weights, (BATCH, HEAD, None, LENGTH, KV_LENGTH))
+      attn_weights = partitioning.with_sharding_constraint(attn_weights, (BATCH, HEAD, None, PREFILL_LENGTH, KV_LENGTH))
 
     if self.attn_logits_soft_cap:
       attn_weights = jnp.tanh(attn_weights / self.attn_logits_soft_cap)
@@ -1100,7 +1105,7 @@ class AttentionOp(nnx.Module):
     if self.is_partition_in_decode(q_seq_len):
       attn_mask = partitioning.with_sharding_constraint(attn_mask, (KV_LENGTH, HEAD, None, None, None))
     elif model_mode == MODEL_MODE_PREFILL:
-      attn_mask = partitioning.with_sharding_constraint(attn_mask, (BATCH, HEAD, None, LENGTH, KV_LENGTH))
+      attn_mask = partitioning.with_sharding_constraint(attn_mask, (BATCH, HEAD, None, PREFILL_LENGTH, KV_LENGTH))
     if attn_mask is not None:
       attn_weights = apply_mask_to_logits(attn_weights, attn_mask)
     return self.compute_local_attention(attn_weights, value, q_seq_len, model_mode)
@@ -1306,8 +1311,9 @@ class L2Norm(nnx.Module):
   Args:
     eps: float, epsilon used for numerical stability (default value should be ok for most cases).
   """
+
   eps: float = 1e-6
-  rngs: nnx.Rngs = None # Not used in L2Norm but passed in by nnx.bridge.to_linen
+  rngs: nnx.Rngs = None  # Not used in L2Norm but passed in by nnx.bridge.to_linen
 
   def __call__(self, x):
     return x * jax.lax.rsqrt(jnp.mean(x**2, axis=-1, keepdims=True) + self.eps)
@@ -1320,7 +1326,17 @@ def l2_norm_as_linen(self, eps: float = 1e-6):
   Args:
     eps: float, epsilon used for numerical stability (default value should be ok for most cases).
   """
-  return nnx.bridge.to_linen(L2Norm, eps)
+  return nnx.bridge.to_linen(L2Norm, eps=eps, metadata_fn=variable_to_logically_partitioned)
+
+
+def variable_to_logically_partitioned(variable: nnx.VariableState):
+  metadata = variable.get_metadata()
+  return nn.LogicallyPartitioned(  # type: ignore[wrong-keyword-args]
+      variable.value,
+      variable.sharding,
+      mesh=metadata.get("mesh"),
+      rules=metadata.get("rules"),
+  )
 
 
 class Attention(nn.Module):
@@ -1395,15 +1411,17 @@ class Attention(nn.Module):
   # Shard the query activation as the same as the key and value.
   # TODO: Find a better sharding axis name.
   # TODO: Further break down the Training and Inference axes for the q, k, v.
-  prefill_query_axis_names: AxisNames = (PREFILL_KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM)
-  prefill_key_axis_names: AxisNames = (PREFILL_KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM)
-  prefill_value_axis_names: AxisNames = (PREFILL_KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM)
+  prefill_query_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, KV_HEAD, KV_HEAD_DIM)
+  prefill_key_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, KV_HEAD, KV_HEAD_DIM)
+  prefill_value_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, KV_HEAD, KV_HEAD_DIM)
   query_axis_names: AxisNames = (KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM)
   input_axis_names: AxisNames = (BATCH, LENGTH, EMBED)
+  prefill_input_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, EMBED)
   decode_input_axis_names: AxisNames = (DECODE_BATCH, DECODE_LENGTH, EMBED)
   key_axis_names: AxisNames = (KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM)
   value_axis_names: AxisNames = (KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM)
   out_axis_names: AxisNames = (BATCH, LENGTH, HEAD, D_KV)
+  prefill_out_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, HEAD, D_KV)
   decode_out_axis_names = (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV)
 
   prefill_cache_axis_order: AxisIdxes = (1, 2, 0, 3)
@@ -1585,7 +1603,7 @@ class Attention(nn.Module):
     rope_type = self.config.rope_type.lower()
     rope_use_scale = self.config.rope_use_scale
     if self.is_vision:
-      rotary_embedding = embeddings.LlamaVisionRotaryEmbedding(
+      rotary_embedding = llama_vision_rotary_embedding_as_linen(
           image_size=self.config.image_size_for_vit,
           patch_size=self.config.patch_size_for_vit,
           hidden_size=self.config.hidden_size_for_vit,
@@ -1593,7 +1611,7 @@ class Attention(nn.Module):
           rope_theta=self.config.rope_theta_for_vit,
       )
     elif self.config.model_name.startswith("llama3.1") or rope_type.startswith("llama3.1"):
-      rotary_embedding = embeddings.LLaMARotaryEmbedding(
+      rotary_embedding = llama_rotary_embedding_as_linen(
           min_timescale=self.config.rope_min_timescale,
           max_timescale=self.config.rope_max_timescale,
           embedding_dims=rope_embedding_dims,
@@ -1602,7 +1620,7 @@ class Attention(nn.Module):
           use_scale=rope_use_scale,
       )
     elif rope_type.startswith("yarn"):
-      rotary_embedding = YarnRotaryEmbedding(
+      rotary_embedding = yarn_rotary_embedding_as_linen(
           max_position_embeddings=self.config.max_position_embeddings,
           original_max_position_embeddings=self.config.original_max_position_embeddings,
           beta_fast=self.config.beta_fast,
@@ -1618,7 +1636,7 @@ class Attention(nn.Module):
       # For local attention use local_rope_max_timescale if it's is positive
       if self.attention_type == AttentionType.LOCAL_SLIDING and self.config.local_rope_max_timescale > 0:
         max_timescale = self.config.local_rope_max_timescale
-      rotary_embedding = RotaryEmbedding(
+      rotary_embedding = rotary_embedding_as_linen(
           min_timescale=self.config.rope_min_timescale,
           max_timescale=max_timescale,
           embedding_dims=rope_embedding_dims,
@@ -1685,7 +1703,10 @@ class Attention(nn.Module):
     Returns:
       output of shape `[batch, length, q_features]`.
     """
-    if model_mode in (MODEL_MODE_PREFILL, MODEL_MODE_TRAIN):
+    if model_mode == MODEL_MODE_PREFILL:
+      inputs_q = nn.with_logical_constraint(inputs_q, self.prefill_input_axis_names)
+      inputs_kv = nn.with_logical_constraint(inputs_kv, self.prefill_input_axis_names)
+    elif model_mode == MODEL_MODE_TRAIN:
       inputs_q = nn.with_logical_constraint(inputs_q, self.input_axis_names)
       inputs_kv = nn.with_logical_constraint(inputs_kv, self.input_axis_names)
     else:
@@ -1703,7 +1724,8 @@ class Attention(nn.Module):
     is_llama4_decoder_block = self.config.decoder_block == DecoderBlockType.LLAMA4
     # NOTE: llama 4 does L2 normalization after RoPE
     if self.use_qk_norm and not is_llama4_decoder_block:
-      query = RMSNorm(
+      query = rms_norm(
+          num_features=query.shape[-1],
           dtype=self.config.dtype,
           weight_dtype=self.config.weight_dtype,
           name="query_norm",
@@ -1711,7 +1733,8 @@ class Attention(nn.Module):
           kernel_axes=("norm",),
       )(query)
 
-      key = RMSNorm(
+      key = rms_norm(
+          num_features=key.shape[-1],
           dtype=self.config.dtype,
           weight_dtype=self.config.weight_dtype,
           name="key_norm",
@@ -1775,7 +1798,9 @@ class Attention(nn.Module):
           query, key, value, decoder_segment_ids, model_mode, cached_values, previous_chunk, bidirectional_mask
       )
 
-    if model_mode in (MODEL_MODE_PREFILL, MODEL_MODE_TRAIN):
+    if model_mode == MODEL_MODE_PREFILL:
+      out = nn.with_logical_constraint(out, self.prefill_out_axis_names)
+    elif model_mode == MODEL_MODE_TRAIN:
       out = nn.with_logical_constraint(out, self.out_axis_names)
     else:
       out = nn.with_logical_constraint(out, self.decode_out_axis_names)
@@ -1844,7 +1869,8 @@ class MLA(Attention):
           quant=self.quant,
           matmul_precision=self.config.matmul_precision,
       )
-      self.q_norm = RMSNorm(
+      self.q_norm = rms_norm(
+          num_features=self.q_lora_rank,
           dtype=self.config.dtype,
           weight_dtype=self.config.weight_dtype,
           name="q_norm",
@@ -1877,7 +1903,8 @@ class MLA(Attention):
         quant=self.quant,
         matmul_precision=self.config.matmul_precision,
     )
-    self.kv_norm = RMSNorm(
+    self.kv_norm = rms_norm(
+        num_features=self.kv_lora_rank,
         dtype=self.config.dtype,
         weight_dtype=self.config.weight_dtype,
         name="kv_norm",
@@ -2053,8 +2080,12 @@ class MLA(Attention):
       A tensor of shape [batch, length, embed_dim] containing the
       MLA-attended outputs.
     """
-    inputs_q = nn.with_logical_constraint(inputs_q, self.input_axis_names)
-    inputs_kv = nn.with_logical_constraint(inputs_kv, self.input_axis_names)
+    if model_mode == MODEL_MODE_PREFILL:
+      inputs_q = nn.with_logical_constraint(inputs_q, self.prefill_input_axis_names)
+      inputs_kv = nn.with_logical_constraint(inputs_kv, self.prefill_input_axis_names)
+    else:
+      inputs_q = nn.with_logical_constraint(inputs_q, self.input_axis_names)
+      inputs_kv = nn.with_logical_constraint(inputs_kv, self.input_axis_names)
 
     query = self.mla_query_projection(inputs_q, inputs_positions, model_mode)
     key, value, cached_values = self.mla_kv_projection(
@@ -2069,7 +2100,7 @@ class MLA(Attention):
       unnormalized_out, _, exp_sum = self.ds_paged_attention_op(
           query, key, value, decoder_segment_ids, model_mode, previous_chunk, slot=slot, page_state=page_state
       )
-      unnormalized_out = unnormalized_out[..., :self.v_head_dim]
+      unnormalized_out = unnormalized_out[..., : self.v_head_dim]
       out = unnormalized_out / (exp_sum + 1e-9) if exp_sum is not None else unnormalized_out
     else:
       out = self.attention_op(query, key, value, decoder_segment_ids, model_mode, cached_values)

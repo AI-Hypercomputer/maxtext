@@ -109,6 +109,54 @@ gemma2_27b_config = transformers.Gemma2Config(
     query_pre_attn_scalar=144,
 )
 
+qwen3_0_6b_config = transformers.Qwen3Config(
+    vocab_size=151936,
+    hidden_size=1024,
+    intermediate_size=3072,
+    num_hidden_layers=28,
+    num_attention_heads=16,
+    num_key_value_heads=8,
+    head_dim=128,
+    hidden_act="silu",
+    max_position_embeddings=40960,
+    rms_norm_eps=1.0e-6,
+    rope_theta=1000000.0,
+    tie_word_embeddings=True,
+    torch_dtype="bfloat16",
+)
+
+qwen3_4b_config = transformers.Qwen3Config(
+    vocab_size=151936,
+    hidden_size=2560,
+    intermediate_size=9728,
+    num_hidden_layers=36,
+    num_attention_heads=32,
+    num_key_value_heads=8,
+    head_dim=128,
+    hidden_act="silu",
+    max_position_embeddings=40960,
+    rms_norm_eps=1.0e-6,
+    rope_theta=1000000.0,
+    tie_word_embeddings=True,
+    torch_dtype="bfloat16",
+)
+
+qwen3_8b_config = transformers.Qwen3Config(
+    vocab_size=151936,
+    hidden_size=4096,
+    intermediate_size=12288,
+    num_hidden_layers=36,
+    num_attention_heads=32,
+    num_key_value_heads=8,
+    head_dim=128,
+    hidden_act="silu",
+    max_position_embeddings=40960,
+    rms_norm_eps=1.0e-6,
+    rope_theta=1000000.0,
+    tie_word_embeddings=False,
+    torch_dtype="bfloat16",
+)
+
 
 HF_MODEL_CONFIGS = {
     "gemma2-2b": gemma2_2b_config,
@@ -117,4 +165,7 @@ HF_MODEL_CONFIGS = {
     "gemma3-4b": gemma3text_4b_config,
     "gemma3-12b": gemma3text_12b_config,
     "gemma3-27b": gemma3text_27b_config,
+    "qwen3-0.6b": qwen3_0_6b_config,
+    "qwen3-4b": qwen3_4b_config,
+    "qwen3-8b": qwen3_8b_config,
 }

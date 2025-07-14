@@ -27,6 +27,7 @@ from jax.ad_checkpoint import checkpoint_name
 from jax.sharding import Mesh
 
 from flax import linen as nn
+from flax import nnx
 
 from MaxText import max_logging
 from MaxText.common_types import Config, DType, AxisNames, BATCH, LENGTH, EMBED, HEAD, D_KV, Array, MODEL_MODE_TRAIN
@@ -43,19 +44,43 @@ from MaxText.layers.quantizations import AqtQuantization as Quant
 # -----------------------------------------
 
 
-class Gpt3LayerNorm(nn.Module):
+class Gpt3LayerNorm(nnx.Module):
   """GPT3 Layer normalization operating on the last axis of the input data."""
 
-  epsilon: float = 1e-6
-  dtype: Any = jnp.float32
-  weight_dtype: Any = jnp.float32
-  kernel_axes: Tuple[Optional[str], ...] = ()
-  scale_init: Initializer = nn.initializers.zeros
-  use_bias: bool = True
-  reductions_in_fp32: bool = False
-  parameter_memory_host_offload: bool = False
+  def __init__(
+      self,
+      num_features: int,
+      epsilon: float = 1e-6,
+      dtype: Any = jnp.float32,
+      weight_dtype: Any = jnp.float32,
+      kernel_axes: Tuple[Optional[str], ...] = (),
+      scale_init: Initializer = nn.initializers.zeros,
+      use_bias: bool = True,
+      reductions_in_fp32: bool = False,
+      parameter_memory_host_offload: bool = False,
+      *,
+      rngs: nnx.Rngs,
+  ):
+    self.epsilon = epsilon
+    self.dtype = dtype
+    self.weight_dtype = weight_dtype
+    self.kernel_axes = kernel_axes
+    self.scale_init = scale_init
+    self.use_bias = use_bias
+    self.reductions_in_fp32 = reductions_in_fp32
+    self.parameter_memory_host_offload = parameter_memory_host_offload
 
-  @nn.compact
+    self.scale = nnx.Param(
+        self.scale_init(rngs.params(), (num_features,), self.weight_dtype),
+        sharding=self.kernel_axes,
+    )
+    if self.use_bias:
+      self.bias = nnx.Param(
+          initializers.default_bias_init(rngs.params(), (num_features,), self.weight_dtype), sharding=self.kernel_axes
+      )
+    else:
+      self.bias = None
+
   def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
     """Applies layer normalization on the input."""
     if self.reductions_in_fp32:
@@ -66,10 +91,7 @@ class Gpt3LayerNorm(nn.Module):
     if self.reductions_in_fp32:
       normed_inputs = normed_inputs.astype(self.dtype)
 
-    features = x.shape[-1]
-    scale = self.param(
-        "scale", nn.with_logical_partitioning(self.scale_init, self.kernel_axes), (features,), self.weight_dtype
-    )
+    scale = self.scale.value
     # Move scale to device if parameter offloading is enabled
     if self.parameter_memory_host_offload:
       max_logging.log("gpt3.py: Moving scale parameter to device")
@@ -78,16 +100,56 @@ class Gpt3LayerNorm(nn.Module):
     scale = jnp.asarray(scale, self.dtype)
     output = normed_inputs * (scale + 1)
 
-    if self.use_bias:
-      bias = self.param(
-          "bias",
-          nn.with_logical_partitioning(initializers.default_bias_init, self.kernel_axes),
-          (features,),
-          self.weight_dtype,
-      )
+    if self.bias is not None:
+      bias = self.bias.value
       bias = jnp.asarray(bias, self.dtype)
       output += bias
     return output
+
+
+def gpt3_layer_norm(
+    *,
+    num_features: int,
+    epsilon: float = 1e-6,
+    dtype: Any = jnp.float32,
+    weight_dtype: Any = jnp.float32,
+    kernel_axes: Tuple[Optional[str], ...] = (),
+    scale_init: Initializer = nn.initializers.zeros,
+    use_bias: bool = True,
+    reductions_in_fp32: bool = False,
+    parameter_memory_host_offload: bool = False,
+    name: Optional[str] = None,
+):
+  """Initializes the gpt3_layer_norm module.
+
+  Args:
+    num_features: the number of features.
+    epsilon: the epsilon for the layer norm.
+    dtype: the dtype of the computation (default: float32).
+    weight_dtype: the dtype of the weights (default: float32).
+    kernel_axes: logical axes for partitioning the kernel.
+    scale_init: initializer for the scale.
+    use_bias: whether to add bias in linear transformation.
+    reductions_in_fp32: whether to do reductions in fp32.
+    parameter_memory_host_offload: Determines whether to offload params to host
+    name: name passed to the ToLinen Module
+  """
+
+  module = nnx.bridge.to_linen(
+      Gpt3LayerNorm,
+      num_features=num_features,
+      epsilon=epsilon,
+      dtype=dtype,
+      weight_dtype=weight_dtype,
+      kernel_axes=kernel_axes,
+      scale_init=scale_init,
+      use_bias=use_bias,
+      reductions_in_fp32=reductions_in_fp32,
+      parameter_memory_host_offload=parameter_memory_host_offload,
+      name=name,
+      metadata_fn=initializers.variable_to_logically_partitioned,
+  )
+  return module
 
 
 # -----------------------------------------
@@ -276,15 +338,15 @@ class Gpt3DecoderLayer(nn.Module):
 
     inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
     inputs = checkpoint_name(inputs, "decoder_layer_input")
-    lnx_layer_norm = Gpt3LayerNorm(
+    lnx = gpt3_layer_norm(
+        num_features=inputs.shape[-1],
         dtype=cfg.dtype,
         name="pre_self_attention_norm",
         kernel_axes=("norm",),
         epsilon=cfg.normalization_layer_epsilon,
         reductions_in_fp32=False,
         use_bias=True,
-    )
-    lnx = lnx_layer_norm(inputs)
+    )(inputs)
 
     lnx = nn.with_logical_constraint(lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
 

@@ -13,18 +13,20 @@
 # limitations under the License.
 
 """This is a simple script for MMLU benchmark for a trained checkpoint.
+Dataset: https://huggingface.co/datasets/lighteval/mmlu
 
 To get optimal performance the prompt template needs to be adjusted (e.g. CoT or 5-shot prompt) per model.
 
 
 To run the MMLU benchmark:
-python3 -m MaxText.benchmarks.mmlu.mmlu_eval MaxText/configs/base.yml \
+# Default is zero-shot prompting
+python3 -m benchmarks.mmlu.mmlu_eval MaxText/configs/base.yml \
   tokenizer_path=assets/tokenizer_llama3.tiktoken \
   load_parameters_path=check_point_path model_name=llama3.1-8b \
-  max_prefill_predict_length=1024 max_target_length=2048 ici_tensor_parallelism=4  per_device_batch_size=1
+  max_prefill_predict_length=1024 max_target_length=2048 ici_tensor_parallelism=4 per_device_batch_size=1
 
 # Example of using the prompt_template flag for Chain-of-Thought (CoT) prompting:
-python3 -m MaxText.benchmarks.mmlu.mmlu_eval MaxText/configs/base.yml \
+python3 -m benchmarks.mmlu.mmlu_eval MaxText/configs/base.yml \
   tokenizer_path=assets/tokenizer_llama3.tiktoken \
   load_parameters_path=check_point_path model_name=llama3.1-8b \
   max_prefill_predict_length=1024 max_target_length=2048 ici_tensor_parallelism=4 per_device_batch_size=1 \
@@ -32,7 +34,7 @@ python3 -m MaxText.benchmarks.mmlu.mmlu_eval MaxText/configs/base.yml \
   {choices}\nAnswer: Let's think step by step."
 
 # Example of using the prompt_template flag for 5-shot prompting (replace with actual examples):
-python3 -m MaxText.benchmarks.mmlu.mmlu_eval MaxText/configs/base.yml \
+python3 -m benchmarks.mmlu.mmlu_eval MaxText/configs/base.yml \
   tokenizer_path=assets/tokenizer_llama3.tiktoken \
   load_parameters_path=check_point_path model_name=llama3.1-8b \
   max_prefill_predict_length=1024 max_target_length=2048 ici_tensor_parallelism=4 per_device_batch_size=1 \
@@ -49,8 +51,8 @@ import datasets
 
 import jax
 
-from mmlu_categories import categories
-from mmlu_categories import subcategories
+from benchmarks.mmlu.mmlu_categories import categories
+from benchmarks.mmlu.mmlu_categories import subcategories
 
 from tqdm import tqdm
 
@@ -159,6 +161,12 @@ def main(config):
     # Convert the label index to the corresponding letter
     correct_answer = chr(65 + label)
 
+    # Log answer
+    max_logging.log(
+        f"{total_count + 1} | {prompt}\n[Model output] {output}\n"
+        f"[Correct answer] {correct_answer}, Matching: {predicted_answer == correct_answer}"
+    )
+
     # Update accuracy for overall and per-subject
     if predicted_answer == correct_answer:
       correct_count += 1
@@ -167,7 +175,7 @@ def main(config):
     subject_total[subject] += 1
 
     if idx % 50 == 0:
-      max_logging.log(f" Accuracy: {correct_count / total_count:.4f}")
+      max_logging.log(f" Accuracy: {correct_count / total_count:.4f} | Processed: {total_count}/{len(mmlu_test_ds)}")
 
   # Final accuracy
   if total_count > 0:
