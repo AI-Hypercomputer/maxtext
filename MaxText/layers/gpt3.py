@@ -33,9 +33,10 @@ from MaxText import max_logging
 from MaxText.common_types import Config, DType, AxisNames, BATCH, LENGTH, EMBED, HEAD, D_KV, Array, MODEL_MODE_TRAIN
 from MaxText.layers import initializers
 from MaxText.layers import linears
+from MaxText.layers import models
 from MaxText.layers import quantizations
 from MaxText.layers.attentions import KVQuant, attention_op_as_linen, dense_general
-from MaxText.layers.initializers import Initializer, NdInitializer, nd_dense_init, variable_to_logically_partitioned
+from MaxText.layers.initializers import Initializer, NdInitializer, nd_dense_init
 from MaxText.layers.quantizations import AqtQuantization as Quant
 
 # -----------------------------------------
@@ -313,19 +314,14 @@ class Gpt3MultiHeadAttention(nn.Module):
 # -----------------------------------------
 
 
-class Gpt3DecoderLayer(nnx.Module):
+class Gpt3DecoderLayer(nn.Module):
   """Transformer decoder layer that attends to the encoder."""
-  
-  def __init__(
-      self,
-      config: Config,
-      mesh: Mesh,
-      quant: Optional[Quant] = None,
-  ):
-    self.config = config
-    self.mesh = mesh
-    self.quant = quant
-  
+
+  config: models.Config
+  mesh: Mesh
+  quant: Optional[Quant] = None
+
+  @nn.compact
   def __call__(
       self,
       inputs,
@@ -388,7 +384,6 @@ class Gpt3DecoderLayer(nnx.Module):
     attention_lnx += inputs
 
     # MLP block.
-    # TODO: integrate with PR#1726
     mlp_lnx = linears.MlpBlock(
         intermediate_dim=cfg.mlp_dim,
         activations=cfg.mlp_activations,
@@ -425,20 +420,3 @@ class Gpt3DecoderLayer(nnx.Module):
       return layer_output, None
     else:
       return layer_output
-
-
-def gpt3_decoder_layer(
-    config: Config,
-    mesh: Mesh,
-    quant: Optional[Quant] = None,
-    name: Optional[str] = None,
-)-> nn.Module:
-  """Creates a Gpt3DecoderLayer Linen module."""
-  return nnx.bridge.to_linen(
-      Gpt3DecoderLayer,
-      config=config,
-      mesh=mesh,
-      quant=quant,
-      name=name,
-      metadata_fn=variable_to_logically_partitioned
-  )

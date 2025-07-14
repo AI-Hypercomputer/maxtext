@@ -26,15 +26,13 @@ from jax.sharding import Mesh
 import jax.numpy as jnp
 
 from flax import linen as nn
-from flax import nnx
 
-from MaxText.common_types import Config
 from MaxText.layers import linears
+from MaxText.layers import models
 from MaxText.layers import quantizations
 from MaxText.layers.attentions import Attention
 from MaxText.layers.quantizations import AqtQuantization as Quant
 from MaxText.layers.normalizations import rms_norm
-from MaxText.layers import initializers
 
 
 # -----------------------------------------
@@ -42,14 +40,14 @@ from MaxText.layers import initializers
 # -----------------------------------------
 
 
-class MistralDecoderLayer(nnx.Module):
+class MistralDecoderLayer(nn.Module):
   """Transformer decoder layer that attends to the encoder."""
 
-  def __init__(self, config: Config, mesh: Mesh, quant: Optional[Quant] = None):
-    self.config = config
-    self.mesh = mesh
-    self.quant = quant
+  config: models.Config
+  mesh: Mesh
+  quant: Optional[Quant] = None
 
+  @nn.compact
   def __call__(
       self,
       inputs,
@@ -79,7 +77,6 @@ class MistralDecoderLayer(nnx.Module):
     lnx = nn.with_logical_constraint(lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
 
     # Self-attention block
-    #TODO: update the attention type to use nnx Attention
     attention_layer = Attention(
         config=cfg,
         num_query_heads=cfg.num_query_heads,
@@ -130,7 +127,6 @@ class MistralDecoderLayer(nnx.Module):
         hidden_states, ("activation_batch", "activation_norm_length", "activation_embed")
     )
 
-    # TODO: integrate with PR#1726
     mlp_lnx = linears.MlpBlock(
         intermediate_dim=cfg.mlp_dim,
         activations=cfg.mlp_activations,
@@ -164,18 +160,3 @@ class MistralDecoderLayer(nnx.Module):
       return layer_output, None
     else:
       return layer_output
-
-def mistral_decoder_layer(
-    config: Config,
-    mesh: Mesh,
-    quant: Optional[Quant] = None,
-    name: Optional[str] = None,
-)-> nn.Module:
-    return nnx.bridge.to_linen(
-        MistralDecoderLayer,
-        config=config,
-        mesh=mesh,
-        quant=quant,
-        name=name,
-        metadata_fn=initializers.variable_to_logically_partitioned,
-    )

@@ -22,14 +22,12 @@ import jax.debug
 import jax.numpy as jnp
 
 from flax import linen as nn
-from flax import nnx
 
 from MaxText.common_types import Config
 from MaxText.layers import attentions
 from MaxText.layers import quantizations
 from MaxText.layers.attentions import AttentionType, Attention
 from MaxText.layers.linears import MlpBlock
-from MaxText.layers import initializers
 from MaxText.layers.normalizations import rms_norm
 from MaxText.layers.quantizations import AqtQuantization as Quant
 
@@ -344,16 +342,15 @@ class Gemma3VisionEncoderLayer(nn.Module):
 
 
 # Gemma3 Decoder Layer
-class Gemma3DecoderLayer(nnx.Module):
+class Gemma3DecoderLayer(nn.Module):
   """Transformer decoder layer that attends to the encoder."""
- 
-  def __init__(self, config: Config, mesh: Mesh, quant: Optional[Quant] = None, attention_type: AttentionType = AttentionType.LOCAL_SLIDING):
-    """Initializes the Gemma3DecoderLayer module."""
-    self.config = config
-    self.mesh = mesh
-    self.quant = quant
-    self.attention_type = attention_type
 
+  config: Config
+  mesh: Mesh
+  quant: Optional[Quant] = None
+  attention_type: AttentionType = AttentionType.LOCAL_SLIDING
+
+  @nn.compact
   def __call__(
       self,
       inputs,
@@ -368,12 +365,11 @@ class Gemma3DecoderLayer(nnx.Module):
   ):
     cfg = self.config
     mesh = self.mesh
-    num_features = inputs.shape[-1]
     inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
     inputs = checkpoint_name(inputs, "decoder_layer_input")
     # inputs: embedded inputs to the decoder with shape [batch, length, emb_dim]
     lnx = rms_norm(
-        num_features=num_features,
+        num_features=inputs.shape[-1],
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
         name="pre_self_attention_norm",
@@ -383,7 +379,6 @@ class Gemma3DecoderLayer(nnx.Module):
     lnx = nn.with_logical_constraint(lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
     query_pre_attn_scalar = get_query_pre_attn_scalar(cfg)
 
-    #TODO: update the attention type to use nnx Attention
     attention_layer = Attention(
         config=cfg,
         num_query_heads=cfg.num_query_heads,
@@ -441,7 +436,6 @@ class Gemma3DecoderLayer(nnx.Module):
     )(attention_lnx)
 
     # MLP block.
-    # TODO: integrate with PR#1726
     mlp_lnx = MlpBlock(
         intermediate_dim=cfg.mlp_dim,
         activations=cfg.mlp_activations,
@@ -487,21 +481,3 @@ class Gemma3DecoderLayer(nnx.Module):
       return layer_output, None
     else:
       return layer_output
-
-def gemma3_decoder_layer(
-    config: Config,
-    mesh: Mesh,
-    quant: Optional[Quant] = None,
-    attention_type: AttentionType = AttentionType.LOCAL_SLIDING,
-    name: Optional[str] = None,
-)-> nn.Module:
-  """Creates a Gemma3DecoderLayer Linen module."""
-  return nnx.bridge.to_linen(
-      Gemma3DecoderLayer,
-      config=config,
-      mesh=mesh,
-      quant=quant,
-      attention_type=attention_type,
-      name=name,
-      metadata_fn=initializers.variable_to_logically_partitioned,
-  )

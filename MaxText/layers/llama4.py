@@ -26,7 +26,6 @@ from jax.ad_checkpoint import checkpoint_name
 from jax.sharding import Mesh
 
 from flax import linen as nn
-from flax import nnx
 
 from MaxText.common_types import Config, Array
 from MaxText.inference import page_manager
@@ -349,7 +348,7 @@ def determine_is_moe_layer(layer_id: int, interleave_moe_layer_step: int) -> boo
 # -----------------------------------------
 
 
-class Llama4DecoderLayer(nnx.Module):
+class Llama4DecoderLayer(nn.Module):
   """Transformer decoder layer for Llama4.
 
   Attributes:
@@ -359,19 +358,12 @@ class Llama4DecoderLayer(nnx.Module):
     is_nope_layer: bool, whether to use RoPE or not on this layer
     is_moe_layer: bool, whether this layer operates as a MoE layer
   """
-  def __init__(
-      self,   
-      config: Config,  
-      mesh: Mesh,
-      quant: Optional[Quant] = None,
-      is_nope_layer: bool = False,
-      is_moe_layer: bool = False,
-  ):
-    self.config = config
-    self.mesh = mesh
-    self.quant = quant
-    self.is_nope_layer = is_nope_layer
-    self.is_moe_layer = is_moe_layer
+
+  config: Config
+  mesh: Mesh
+  quant: Optional[Quant] = None
+  is_nope_layer: bool = False
+  is_moe_layer: bool = False
 
   @nn.compact
   def __call__(
@@ -408,7 +400,6 @@ class Llama4DecoderLayer(nnx.Module):
     query_pre_attn_scalar = cfg.head_dim**-0.5
 
     # Self-attention block
-    #TODO: update the attention type to use nnx Attention
     attention_layer = Attention(
         config=cfg,
         num_query_heads=cfg.num_query_heads,
@@ -488,7 +479,6 @@ class Llama4DecoderLayer(nnx.Module):
           quant=self.quant,
       )(hidden_states)
     else:
-      # TODO: integrate with PR#1726
       mlp_lnx = linears.MlpBlock(
           intermediate_dim=cfg.mlp_dim,
           activations=cfg.mlp_activations,
@@ -529,27 +519,7 @@ class Llama4DecoderLayer(nnx.Module):
       return layer_output
 
 
-def llama4_decoder_layer(
-    config: Config,
-    mesh: Mesh,
-    quant: Optional[Quant] = None,    
-    is_nope_layer: bool = False,
-    is_moe_layer: bool = False,
-    name: Optional[str] = None,
-) -> nn.Module:
-  """Creates a Llama4DecoderLayer Linen module."""
-  return nnx.bridge.to_linen(
-      Llama4DecoderLayer,
-      config=config,
-      mesh=mesh,
-      quant=quant,
-      is_nope_layer=is_nope_layer,
-      is_moe_layer=is_moe_layer,
-      name=name,
-      metadata_fn=initializers.variable_to_logically_partitioned,
-  )
-
-class Llama4ScannableBlock(nnx.Module):
+class Llama4ScannableBlock(nn.Module):
   '''
   A repeatable block given nope_layer_interval and interleave_moe_layer_step
 
@@ -561,22 +531,14 @@ class Llama4ScannableBlock(nnx.Module):
     interleave_moe_layer_step: int, the interval or stride for placing MoE layers.
   """
   '''
-  
-  def __init__(
-      self,
-      config: Config,
-      mesh: Mesh,
-      quant: Optional[Quant] = None,
-      nope_layer_interval: int = 1,
-      interleave_moe_layer_step: int = 1,
-  ):
-    self.config = config
-    self.mesh = mesh
-    self.quant = quant
-    # Initialize nope_layer_interval and interleave_moe_layer_step
-    self.nope_layer_interval = nope_layer_interval
-    self.interleave_moe_layer_step = interleave_moe_layer_step
 
+  config: Config
+  mesh: Mesh
+  quant: Optional[Quant] = None
+  nope_layer_interval: int = 1
+  interleave_moe_layer_step: int = 1
+
+  @nn.compact
   def __call__(
       self,
       inputs,
@@ -623,24 +585,6 @@ class Llama4ScannableBlock(nnx.Module):
     else:
       return y
 
-def llama4_scannable_block(
-    config: Config,
-    mesh: Mesh,
-    quant: Optional[Quant] = None,
-    nope_layer_interval: int = 1,
-    interleave_moe_layer_step: int = 1,
-    name: Optional[str] = None,
-)-> nn.Module:
-  return nnx.bridge.to_linen(
-      Llama4ScannableBlock,
-      config=config,
-      mesh=mesh,
-      quant=quant,
-      nope_layer_interval=nope_layer_interval,
-      interleave_moe_layer_step=interleave_moe_layer_step,
-      name=name,
-      metadata_fn=initializers.variable_to_logically_partitioned,
-  )
 
 class Llama4VisionEncoderLayer(nn.Module):
   """Transformer encoder layer for Llama4 vision model."""
