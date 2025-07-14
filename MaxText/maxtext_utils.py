@@ -60,9 +60,9 @@ def get_input_data_sharding(config, mesh):
   return nn.logical_to_mesh_sharding(P(*config.input_data_sharding_logical_axes), mesh, config.logical_axis_rules)
 
 
-def get_functional_train_with_signature(train_step, data_sharding, state_mesh_shardings, model, config):
+def get_functional_train_with_signature(train_step, data_sharding, mesh, state_mesh_shardings, model, config):
   """Get the shardings (both state and data) for `train_step`."""
-  functional_train = functools.partial(train_step, model, config, state_mesh_shardings)
+  functional_train = functools.partial(train_step, model, config, mesh, state_mesh_shardings)
   functional_train.__name__ = "train_step"
   in_shardings = (state_mesh_shardings, data_sharding, None)  # State, batch, rng
   out_shardings = (state_mesh_shardings, None)  # State, metrics
