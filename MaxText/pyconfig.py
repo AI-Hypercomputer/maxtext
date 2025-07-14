@@ -163,6 +163,15 @@ def validate_keys(keys):
   validate_prefill_and_target_lengths(keys["max_prefill_predict_length"], keys["max_target_length"])
   validate_rope_type(keys["rope_type"])
 
+  if keys["mtp_eval_target_module"] < 0:
+    raise ValueError("mtp_eval_target_module cannot be negative. Set to 0 to disable evaluation.")
+
+  if keys["mtp_num_layers"] > 0 and keys["model_call_mode"] == "inference":
+    raise ValueError(
+        "Multi-Token Prediction (MTP) is enabled (mtp_num_layers > 0), but it is not supported in inference mode. "
+        "Please disable MTP by setting mtp_num_layers=0 for inference."
+    )
+
   assert (keys["load_parameters_path"] == "" and keys["load_full_state_path"] == "") or keys[
       "enable_checkpointing"
   ], "You must set enable_checkpointing to load a checkpoint"
