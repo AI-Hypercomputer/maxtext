@@ -13,6 +13,7 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 """
+import sys
 
 """ Common Max Utils needed by multiple modules.
 All the functions include MaxText modules, such as Pyconfig, should be moved to MaxText utils file."""
@@ -916,3 +917,22 @@ def reorder_mask_load_balancing(tensor, cp_size: int, seq_dim: int):
 
   # Reshape back to original dimensions
   return reordered.reshape(ori_tensor_shape)
+
+def gcs_bucket_accessible(bucket_name="maxtext-dataset"):
+  if bucket_name in gcs_bucket_accessible.accessible:
+    return gcs_bucket_accessible.accessible[bucket_name]
+  try:
+    exit_code = subprocess.call(["gsutil", "ubla", "get", f"gs://{bucket_name}/"],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    gcs_bucket_accessible.accessible[bucket_name] = True if exit_code == os.R_OK else False
+    return gcs_bucket_accessible.accessible[bucket_name]
+  except subprocess.CalledProcessError:
+    gcs_bucket_accessible.accessible[bucket_name] = False
+    return False
+  except FileNotFoundError:
+    print("Error: 'gsutil' command not found. Please ensure Google Cloud SDK is installed and in your PATH.",
+          file=sys.stderr)
+    gcs_bucket_accessible.accessible[bucket_name] = False
+    return False
+
+gcs_bucket_accessible.accessible = {}

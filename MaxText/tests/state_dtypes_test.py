@@ -13,6 +13,7 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 """
+import numpy as np
 
 """ Test that all weights are expected dtype (default float32) """
 import unittest
@@ -27,7 +28,7 @@ from MaxText import optimizers
 from MaxText.layers import models
 from MaxText.layers import quantizations
 from MaxText import maxtext_utils
-from MaxText.globals import PKG_DIR
+from MaxText.globals import PKG_DIR, tpu_present
 
 Transformer = models.Transformer
 
@@ -42,6 +43,8 @@ class StateDtypes(unittest.TestCase):
     config = pyconfig.initialize(argv)
     quant = quantizations.configure_quantization(config)
     devices_array = maxtext_utils.create_device_mesh(config)
+    if not tpu_present:
+      devices_array = np.array(devices_array).reshape((1,) * len(config.mesh_axes))
     mesh = Mesh(devices_array, config.mesh_axes)
     model = Transformer(config, mesh, quant=quant)
     learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
