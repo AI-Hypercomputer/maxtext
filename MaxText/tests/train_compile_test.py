@@ -572,14 +572,34 @@ class TrainCompile(unittest.TestCase):
             "compile_topology_num_slices=8",
             "use_iota_embed=true",
             "model_name=deepseek3-671b",
-            "megablox=False", # dropless not yet supported (b/418313093)
-            "sparse_matmul=False", 
+            "megablox=False",  # dropless not yet supported (b/418313093)
+            "sparse_matmul=False",
             "capacity_factor=1",
             "per_device_batch_size=1",
             "max_target_length=2048",
             "pipeline_parallel_layers=56",
             "ici_expert_parallelism=16",
-            "dcn_pipeline_parallelism=8"
+            "dcn_pipeline_parallelism=8",
+        )
+    )
+
+  @pytest.mark.cpu_only
+  def test_pipeline_subset(self):
+    compiled_trainstep_file = "/tmp/test_pipeline_subset.pickle"
+    train_compile_main(
+        (
+            None,
+            os.path.join(PKG_DIR, "configs", "base.yml"),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v6e-256",
+            "compile_topology_num_slices=8",
+            "use_iota_embed=true",
+            "per_device_batch_size=1",
+            "max_target_length=2048",
+            "pipeline_parallel_layers=56",
+            "base_num_decoder_layers=61", # Remainder of 5 will fail when sharded incorrectly.
+            "ici_expert_parallelism=16",
+            "dcn_pipeline_parallelism=8",
         )
     )
 

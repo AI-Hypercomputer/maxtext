@@ -42,7 +42,6 @@ from MaxText import optimizers
 from MaxText import pyconfig
 from MaxText.common_types import DecoderBlockType
 from MaxText.layers import models, quantizations
-from MaxText.train import save_checkpoint
 from MaxText.utils import gcs_utils
 from MaxText.utils import lora_utils
 
@@ -152,7 +151,7 @@ def _save_decode_checkpoint(config, state, checkpoint_manager):
       None, jax.tree_util.tree_map(lambda x: x.astype(jax.numpy.bfloat16), state.params)
   )
   if checkpoint_manager is not None:
-    if save_checkpoint(checkpoint_manager, 0, decode_state):
+    if checkpointing.save_checkpoint(checkpoint_manager, 0, decode_state):
       max_logging.log(f"saved an decode checkpoint at {config.checkpoint_dir}")
   checkpoint_manager.wait_until_finished()
 

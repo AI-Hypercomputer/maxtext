@@ -86,6 +86,23 @@ class PagedAttentionOp(nn.Module):
     value_pages_var.value = nn.with_logical_constraint(value_pages_var.value, self.kv_pages_axis_names)
     return key_pages_var, value_pages_var
 
+  def pad_qkv(self, *qkv):
+    """Pad input to kv_head_dim_size"""
+
+    def pad_to_kv_head_dim_size(x):
+      if x.shape[-1] != self.kv_head_dim_size:
+        return jnp.pad(
+            x,
+            ((0, 0), (0, 0), (0, 0), (0, self.kv_head_dim_size - x.shape[-1])),
+            mode="constant",
+            constant_values=0.0,
+        )
+      else:
+        return x
+
+    # Align Q, K, V to the same head dim. This is required by the kernel.
+    return tuple(pad_to_kv_head_dim_size(x) for x in qkv)
+
   def paged_dot_product_attention_with_max_and_sum(self, query, key, value):
     """paged dot product attention with max & sum"""
     b, t, n, d = query.shape
@@ -237,6 +254,7 @@ class PagedAttentionOp(nn.Module):
               are None for autoregressive mode (handled by paged_attention kernel)
     """
     key_pages_var, value_pages_var = self.init_or_get_kv_pages(model_mode)
+    query, key, value = self.pad_qkv(query, key, value)
 
     # update kv pages and call page attention kernel
     if model_mode == MODEL_MODE_PREFILL:

@@ -16,43 +16,34 @@ limitations under the License.
 
 """Create an Orbax CheckpointManager with specified (Async or not) Checkpointer."""
 
+import time
 from typing import Any, Optional, Union
 
 from absl import flags
-
 from etils import epath
-
-import grain.python as grain
-
-import numpy as np
-
-import jax
-
 from flax.training import train_state
-
+import grain.python as grain
+import jax
+import numpy as np
 import orbax.checkpoint as ocp
 import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_checkpoint_manager
 import orbax.checkpoint.experimental.emergency.replicator_checkpoint_manager as emergency_replicator_checkpoint_manager
 
+from MaxText import exceptions
 from MaxText import max_logging
+from MaxText.globals import DEFAULT_OCDBT_TARGET_DATA_FILE_SIZE
 from MaxText.multihost_dataloading import MultiHostDataLoadIterator
 
 # pylint: disable=too-many-positional-arguments
 
 CheckpointManager = ocp.CheckpointManager
 CheckpointManagerOptions = ocp.CheckpointManagerOptions
+Composite = ocp.args.Composite
 PyTreeCheckpointHandler = ocp.PyTreeCheckpointHandler
+EmergencyCheckpointManager = emergency_checkpoint_manager.CheckpointManager
 LocalCheckpointOptions = emergency_checkpoint_manager.LocalCheckpointOptions
 PersistentCheckpointOptions = emergency_checkpoint_manager.PersistentCheckpointOptions
-
-# Starting from Orbax 0.11.7, these must be refactored like commit ff1c3e8.
-# See b/401509894 for more details.
-try:
-  abstract_logger = ocp.logging.abstract_logger  # pytype: disable=module-attr
-  cloud_logger = ocp.logging.cloud_logger  # pytype: disable=module-attr
-except AttributeError:
-  abstract_logger = None  # pytype: disable=attribute-error
-  cloud_logger = None  # pytype: disable=attribute-error
+EmergencyReplicatorCheckpointManager = emergency_replicator_checkpoint_manager.ReplicatorCheckpointManager
 
 
 def create_orbax_checkpoint_manager(
@@ -69,8 +60,8 @@ def create_orbax_checkpoint_manager(
   if not enable_checkpointing:
     max_logging.log("Checkpointing disabled, not creating checkpoint manager.")
     return None
+
   max_logging.log(f"Creating checkpoint manager with ocdbt={use_ocdbt} and zarr3={use_zarr3}")
-  p = epath.Path(checkpoint_dir)
 
   if dataset_type == "grain":
     item_names = ("items", "iter")
@@ -78,11 +69,12 @@ def create_orbax_checkpoint_manager(
     item_names = ("items",)
 
   # local storage checkpoint needs parent directory created
+  p = epath.Path(checkpoint_dir)
   p.mkdir(exist_ok=True, parents=True)
   # we need to use ocdbt and zarr3 to control max file size in the checkpoint
   # omitting `iter` uses default handler for `iter`
   item_handlers = {"items": PyTreeCheckpointHandler(use_ocdbt=use_ocdbt, use_zarr3=use_zarr3)}
-  mngr = CheckpointManager(
+  manager = CheckpointManager(
       p,
       item_names=item_names,
       item_handlers=item_handlers,
@@ -93,8 +85,9 @@ def create_orbax_checkpoint_manager(
       ),
       logger=orbax_logger,
   )
+
   max_logging.log("Checkpoint manager created!")
-  return mngr
+  return manager
 
 
 def create_orbax_emergency_checkpoint_manager(
@@ -112,7 +105,7 @@ def create_orbax_emergency_checkpoint_manager(
 
   # Only create directories if running on GPUs as the previous
   # directory structure might be assumed by TPUs
-  if global_mesh.devices.flatten()[0].platform == 'gpu':
+  if global_mesh.devices.flatten()[0].platform == "gpu":
     # pylint: disable=protected-access
     local_checkpoint_dir = f"{local_checkpoint_dir}/{jax._src.distributed.global_state.process_id}"
     local_p = epath.Path(local_checkpoint_dir)
@@ -120,16 +113,15 @@ def create_orbax_emergency_checkpoint_manager(
     local_p.mkdir(exist_ok=True, parents=True)
     persistent_p.mkdir(exist_ok=True, parents=True)
 
-  options = emergency_checkpoint_manager.CheckpointManagerOptions(
-      local=LocalCheckpointOptions(save_interval_steps=local_save_interval_steps),
-      persistent=PersistentCheckpointOptions(save_interval_steps=persistent_save_interval_steps),
-  )
-  manager = emergency_checkpoint_manager.CheckpointManager(
+  manager = EmergencyCheckpointManager(
       local_checkpoint_dir,
       epath.Path(persistent_checkpoint_dir),
       global_mesh=global_mesh,
       abstract_state=abstract_state,
-      options=options,
+      options=emergency_checkpoint_manager.CheckpointManagerOptions(
+          local=LocalCheckpointOptions(save_interval_steps=local_save_interval_steps),
+          persistent=PersistentCheckpointOptions(save_interval_steps=persistent_save_interval_steps),
+      ),
       logger=orbax_logger,
   )
 
@@ -146,12 +138,11 @@ def create_orbax_emergency_replicator_checkpoint_manager(
   flags.FLAGS.experimental_orbax_use_distributed_process_id = True
   max_logging.log("Creating emergency replicator checkpoint manager...")
 
-  options = emergency_replicator_checkpoint_manager.ReplicatorCheckpointManagerOptions(
-      save_interval_steps=save_interval_steps,
-  )
-  manager = emergency_replicator_checkpoint_manager.ReplicatorCheckpointManager(
+  manager = EmergencyReplicatorCheckpointManager(
       epath.Path(local_checkpoint_dir),
-      options,
+      options=emergency_replicator_checkpoint_manager.ReplicatorCheckpointManagerOptions(
+          save_interval_steps=save_interval_steps,
+      ),
       global_mesh=global_mesh,
   )
 
@@ -180,7 +171,7 @@ def process_replicator_error_file(error_file: str) -> bool:
     max_logging.log(f"replicator_error_handler: file found: {error_file}.")
     read_replicator_error_file(error_file)
     cleanup_replicator_error_file(error_file)
-    return error_file_path_exists
+
   return error_file_path_exists
 
 
@@ -300,56 +291,21 @@ def load_state_if_possible(
         )
         ocp.type_handlers.register_type_handler(jax.Array, array_handler, override=True)
 
-      restore_args = jax.tree_util.tree_map(
-          map_to_pspec,
-          abstract_unboxed_pre_state,
-      )
+      restore_args = jax.tree_util.tree_map(map_to_pspec, abstract_unboxed_pre_state)
+      checkpoint_args = ocp.args.PyTreeRestore(item=abstract_unboxed_pre_state, restore_args=restore_args)
 
-      if isinstance(
-          checkpoint_manager,
-          (
-              emergency_checkpoint_manager.CheckpointManager,
-              emergency_replicator_checkpoint_manager.ReplicatorCheckpointManager,
-          ),
-      ):
-        return (
-            checkpoint_manager.restore(
-                step,
-                args=ocp.args.PyTreeRestore(item=abstract_unboxed_pre_state, restore_args=restore_args),
-            ),
-            None,
-        )
-      if (
-          dataset_type == "grain"
-          and data_iterator is not None
-          and (checkpoint_manager.directory / str(step) / "iter").exists()
-      ):
-        return (
-            checkpoint_manager.restore(
-                step,
-                args=ocp.args.Composite(
-                    items=ocp.args.PyTreeRestore(
-                        item=abstract_unboxed_pre_state,
-                        restore_args=restore_args,
-                    ),
-                    iter=grain.PyGrainCheckpointRestore(data_iterator.local_iterator),
-                ),
-            ),
-            None,
-        )
-      else:
-        return (
-            checkpoint_manager.restore(
-                step,
-                args=ocp.args.Composite(
-                    items=ocp.args.PyTreeRestore(
-                        item=abstract_unboxed_pre_state,
-                        restore_args=restore_args,
-                    )
-                ),
-            ),
-            None,
-        )
+      match (checkpoint_manager, dataset_type, data_iterator):
+        case (checkpoint_manager, _) if isinstance(
+            checkpoint_manager, (EmergencyCheckpointManager, EmergencyReplicatorCheckpointManager)
+        ):
+          return (checkpoint_manager.restore(step, args=checkpoint_args), None)
+        case (checkpoint_manager, dataset_type, data_iterator) if dataset_type == "grain" and data_iterator and (
+            checkpoint_manager.directory / str(step) / "iter"
+        ).exists():
+          grain_iter = grain.PyGrainCheckpointRestore(data_iterator.local_iterator)
+          return (checkpoint_manager.restore(step, args=Composite(items=checkpoint_args, iter=grain_iter)), None)
+        case _:
+          return (checkpoint_manager.restore(step, args=Composite(items=checkpoint_args)), None)
 
   if load_parameters_from_path != "":
     restored_params = load_params_from_path(
@@ -363,10 +319,8 @@ def load_state_if_possible(
   elif load_full_state_from_path != "":
     max_logging.log(f"restoring full state from {load_full_state_from_path=}")
     p = epath.Path(load_full_state_from_path)
-    ckptr = ocp.StandardCheckpointer()
-    restored = ckptr.restore(p, abstract_unboxed_pre_state)
+    restored = ocp.StandardCheckpointer().restore(p, abstract_unboxed_pre_state)
     return {"items": restored}, None
-
   else:
     max_logging.log("No existing checkpoints found, not restoring checkpoint.")
     return None, None
@@ -383,12 +337,10 @@ def setup_checkpoint_logger(config) -> Any | None:  # pytype: disable=attribute-
   max_logging.log("Setting up checkpoint logger...")
   if config.enable_checkpoint_cloud_logger:
     logger_name = f"goodput_{config.run_name}"
-    options = cloud_logger.CloudLoggerOptions(
-        job_name=config.run_name, logger_name=logger_name
-    )  # pytype: disable=attribute-error
-    orbax_cloud_logger = cloud_logger.CloudLogger(options=options)  # pytype: disable=attribute-error
+    orbax_cloud_logger = ocp.logging.CloudLogger(
+        options=ocp.logging.CloudLoggerOptions(job_name=config.run_name, logger_name=logger_name)
+    )
     max_logging.log("Successfully set up checkpoint cloud logger.")
-    return orbax_cloud_logger
 
   return orbax_cloud_logger
 
@@ -399,7 +351,6 @@ def load_params_from_path(
   """Load decode params from checkpoint at specified path."""
   assert load_parameters_from_path, "load_parameters_from_path is not defined."
   max_logging.log(f"restoring params from {load_parameters_from_path}")
-  ckpt = epath.Path(load_parameters_from_path)
 
   # *_concurrent_gb should be set for large models, the default is 96.
   max_logging.log(f"Creating checkpoint manager with ocdbt={use_ocdbt} and zarr3={use_zarr3}")
@@ -418,7 +369,10 @@ def load_params_from_path(
   # (which itself may be a dictionary containing a key named 'params').
   restore_args = ocp.checkpoint_utils.construct_restore_args(abstract_unboxed_params)
   restored = ckptr.restore(
-      ckpt, item={"params": abstract_unboxed_params}, transforms={}, restore_args={"params": restore_args}
+      epath.Path(load_parameters_from_path),
+      item={"params": abstract_unboxed_params},
+      transforms={},
+      restore_args={"params": restore_args},
   )
   return restored["params"]
 
@@ -430,3 +384,76 @@ def save_params_to_path(checkpoint_dir, params, use_ocdbt=True, use_zarr3=True):
   orbax_checkpointer = ocp.PyTreeCheckpointer(use_ocdbt=use_ocdbt, use_zarr3=use_zarr3)
   orbax_checkpointer.save(checkpoint_dir, {"params": params}, force=True)
   print(f"Quantized params checkpoint saved at: {checkpoint_dir}")
+
+
+def maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator, step=None):
+  """Save checkpoint if checkpointing is enabled."""
+  if checkpoint_manager is None:
+    return
+
+  # Determine the effective step for saving a checkpoint.
+  # If 'step' is not provided, this call is for a potential final checkpoint
+  # and use the last completed step from the state.
+  actual_step = (int(state.step) - 1) if step is None else int(step)
+
+  # Determine if a checkpoint save should be forced, overriding the usual `config.checkpoint_period` logic.
+  # This occurs if this function was called:
+  # without an explicit 'step' (implying it's a checkpoint save for final step),
+  # AND the 'actual_step' is a valid step,
+  # AND it's not a step that would normally trigger a checkpoint save.
+  force_ckpt_save = step is None and actual_step != -1 and (actual_step % config.checkpoint_period != 0)
+
+  try:
+    checkpoint_saved = save_checkpoint(checkpoint_manager, actual_step, state, config, data_iterator, force_ckpt_save)
+    if checkpoint_saved:
+      print_save_message(actual_step, config.async_checkpointing)
+  except Exception as e:
+    raise exceptions.StopTraining(f"Checkpointing failed. {str(e)}") from e
+
+  # Wait for any pending checkpoint save to finish during preemption or final step save
+  if force_ckpt_save or checkpoint_manager.reached_preemption(actual_step):
+    checkpoint_manager.wait_until_finished()
+
+  # Raise exception upon preemption
+  if checkpoint_manager.reached_preemption(actual_step):
+    raise exceptions.StopTraining("Job is preempted.")
+
+
+def save_checkpoint(checkpoint_manager, step, state, config=None, data_iterator=None, force=False):
+  """Wrapper for saving checkpoint."""
+  if config and config.enable_checkpointing:
+    if (
+        force
+        or (step % config.checkpoint_period == 0)
+        or (config.enable_emergency_checkpoint and step % config.local_checkpoint_period == 0)
+    ):
+      blocking_until_ready_start = time.time()
+      max_logging.log(f"Waiting for step {step} to finish before checkpoint...")
+      # We block here on the step finishing so that our checkpointing metrics
+      # measure only checkpointing time, not training time.
+      jax.block_until_ready(state)
+      max_logging.log(
+          f"Waited {time.time() - blocking_until_ready_start} seconds for step "
+          f"{step} to finish before starting checkpointing."
+      )
+
+  # specify chunk_byte_size to force orbax to control maximum file size in checkpoint
+  chunk_byte_size = config.checkpoint_storage_target_data_file_size_bytes if config else DEFAULT_OCDBT_TARGET_DATA_FILE_SIZE
+
+  checkpoint_args = ocp.args.PyTreeSave(
+      item=state,
+      save_args=jax.tree.map(lambda _: ocp.SaveArgs(chunk_byte_size=chunk_byte_size), state),
+      ocdbt_target_data_file_size=chunk_byte_size,
+  )
+
+  match (checkpoint_manager, config):
+    case (checkpoint_manager, _) if isinstance(
+        checkpoint_manager, (EmergencyCheckpointManager, EmergencyReplicatorCheckpointManager)
+    ):
+      replicator_error_handler(config)
+      return checkpoint_manager.save(step, args=Composite(state=checkpoint_args), force=force)
+    case (_, config) if config and config.dataset_type == "grain":
+      grain_iter = grain.PyGrainCheckpointSave(data_iterator.local_iterator)
+      return checkpoint_manager.save(step, args=Composite(items=checkpoint_args, iter=grain_iter), force=force)
+    case _:
+      return checkpoint_manager.save(step, args=Composite(items=checkpoint_args), force=force)

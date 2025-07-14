@@ -84,6 +84,8 @@ dtype: "bfloat16"
 # 'fp8' for 8-bit floating-point GeMMs on NVIDIA GPUs.
 # 'nanoo_fp8' for 8-bit floating-point GeMMs on AMD MI300/MI325 GPUs.
 quantization: ""
+# Used to configure constant_bound_config in aqt lib for static scaling, e.g. constant_bound_config='0.5, 0.5, 0.5, 0.5, 0.5, 0.5'
+constant_bound_config: ""
 # Choose one of default, high, and highest.
 # https://kolonist26-jax-kr.readthedocs.io/en/latest/jax.lax.html#jax.lax.Precision
 matmul_precision: "default"
@@ -186,6 +188,9 @@ pipeline_delay_activation_forwarding: False # This delays the activation forward
 # the communication and compute in each iteration are now independent. However this comes at the cost of doubling the pipeline bubble,
 # and you must set the number of microbatches to at least 2 * num_stages (the minimum 2 * num_stages is set by default with this delay).
 
+model_fsdp_ag_once: False # This controls whether the Zero-1 optimization is active.
+# This is a memory/time tradeoff - True: This is Zero-1 Sharding. Use ZeroOneTransformer to gather weights once per gradient step. 
+# False: This is Zero-3 Sharing. Use the standard Transformer, which gathers for each microbatch's fwd/bwd pass.
 pipeline_fsdp_ag_once: False # If set to true then all gather all of the weights over FSDP before the first pipeline iteration.
 # This is a memory/time tradeoff - we now have to store the FSDP gathered weights and gradients (typically in bf16), as opposed
 # to only one stage's worth, however we only execute one all-gather and reduce across per repeat, as opposed
@@ -298,6 +303,8 @@ logical_axis_rules: [
                       ['activation_norm_length', ['tensor_sequence', 'context', 'sequence']],
                       ['activation_q_length', ['context', 'expert']],
                       ['activation_q_length_no_exp', ['context']],
+                      ['prefill_activation_length', ['sequence', 'context']],
+                      ['prefill_activation_norm_length', ['tensor_sequence', 'context', 'sequence']],
                       ['activation_kv_length', []],
                       ['activation_embed', ['tensor', 'tensor_transpose']],
                       ['activation_mlp', ['tensor', 'tensor_transpose', 'tensor_sequence']],
@@ -416,7 +423,9 @@ expansion_factor_real_data: -1 # if -1 then all hosts will load real data, else 
 eval_per_device_batch_size: 0.0
 max_corpus_chars: 10_000_000
 train_data_columns: ['text'] # for DPO dataset containing "chosen" and "rejected"
+train_image_column: 'image'
 eval_data_columns: ['text'] # for DPO dataset containing "chosen" and "rejected"
+eval_image_column: 'image'
 packing: True
 num_epoch: 1  # only grain and tfds pipeline supports num_epoch > 1
 
@@ -447,6 +456,11 @@ hf_eval_split: ''
 hf_eval_files: ''
 hf_access_token: ''
 # for Grain input pipeline (dataset_type=grain)
+# Path to grain data files. Can be a single pattern or multiple patterns with weights.
+# For multiple patterns, use semicolon (;) to separate and colon (:) to specify weights.
+# Example: "path/to/data1.array_record*:0.3;path/to/data2.array_record*:0.7"
+# Note: When using multiple files (separated by ';'), only ArrayRecord format is supported.
+# For more details, see https://github.com/google/maxtext/blob/main/getting_started/Data_Input_Pipeline.md#grain-input-pipeline
 grain_train_files: ''
 grain_eval_files: ''
 grain_file_type: 'arrayrecord' # arrayrecord or parquet
@@ -696,6 +710,9 @@ pagedattn_num_pages: 64  # total number of pages to allocate
 pagedattn_tokens_per_page: 32  # number of tokens each page can hold
 pagedattn_pages_per_compute_block: 4  # number of pages processed together in pallas kernels
 pagedattn_max_pages_per_group: -1  # defaults to number of pages needed to reach max_target_length
+# Alignment of head_dim to the nearest multiple of this value, set to 0 to disable alignment. On
+# TPUs, the head_dim is padded to the nearest multiple of 128.
+pagedattn_head_dim_alignment: 128
 
 
 # Chunked Prefill Parameters
@@ -731,13 +748,14 @@ dtype_mm: "float32"  # Data type for multimodal model's vision encoder
 remat_policy_for_vit: "minimal"  # Remat policy for multimodal model's vision encoder. Check `remat_policy` for options.
 image_size_for_vit: 896 # Default for Gemma3, and should be overwritten by model's config
 image_path: "" # Local image path used for decoding
-
+image_placeholder: "<|image|>"
 
 ### llama4 multi modal configs
 hidden_size_for_vit: 1408
 intermediate_size_for_vit: 5632
 num_attention_heads_for_vit: 16
 num_channels_for_vit: 3
+tile_size_for_vit: 336
 patch_size_for_vit: 14
 num_hidden_layers_for_vit: 34
 projector_input_dim_for_vit: 4096
@@ -746,3 +764,7 @@ rope_theta_for_vit: 10000
 vision_output_dim_for_vit: 4096
 pixel_shuffle_ratio_for_vit: 0.5
 projector_dropout_for_vit: 0.0
+
+# Subslice shape in the form of "x,y,z" when using pathways (single controller). 
+# Example: "8,8" to use a 8x8 subgrid (64 chips) of a full pod (16x16) of trillium.
+subslice_shape: ""

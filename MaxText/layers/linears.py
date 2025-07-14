@@ -29,10 +29,10 @@ from flax import nnx
 import flax.linen as nn
 
 from MaxText import max_logging
-from MaxText.common_types import DecoderBlockType, DType, Array, Config
+from MaxText.common_types import MODEL_MODE_PREFILL, DecoderBlockType, DType, Array, Config
 from MaxText.layers import quantizations
-from MaxText.layers.normalizations import RMSNorm
-from MaxText.layers.initializers import NdInitializer, nd_dense_init, default_bias_init
+from MaxText.layers.normalizations import rms_norm
+from MaxText.layers.initializers import NdInitializer, nd_dense_init, default_bias_init, variable_to_logically_partitioned
 from MaxText.layers.quantizations import AqtQuantization as Quant
 
 
@@ -79,14 +79,12 @@ class DenseGeneral(nnx.Module):
 
   def __init__(
       self,
-      in_features: Union[Iterable[int], int],
-      out_features: Union[Iterable[int], int],
+      in_features_shape: Union[Iterable[int], int],
+      out_features_shape: Union[Iterable[int], int],
       axis: Union[Iterable[int], int] = -1,
       weight_dtype: DType = jnp.float32,
       dtype: DType = jnp.float32,
-      kernel_init: NdInitializer = nd_dense_init(
-          1.0, "fan_in", "truncated_normal"
-      ),
+      kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "truncated_normal"),
       kernel_axes: Tuple[Optional[str], ...] = (),
       quant: Optional[Quant] = None,
       use_bias: bool = False,
@@ -98,9 +96,9 @@ class DenseGeneral(nnx.Module):
     """Initializes the DenseGeneral module.
 
     Args:
-      features: tuple with numbers of output features.
-      in_features: tuple with numbers of input features for axes specified in
+      in_features_shape: tuple with numbers of input features for axes specified in
         'axis'.
+      out_features_shape: tuple with numbers of output features.
       axis: tuple with axes to apply the transformation on.
       weight_dtype: the dtype of the weights (default: float32).
       dtype: the dtype of the computation (default: float32).
@@ -112,8 +110,8 @@ class DenseGeneral(nnx.Module):
       parameter_memory_host_offload: Determines whether to offload params to host
       rngs: RNG state for initialization in nnx.
     """
-    self.in_features = _canonicalize_tuple(in_features)
-    self.out_features = _canonicalize_tuple(out_features)
+    self.in_features_shape = _canonicalize_tuple(in_features_shape)
+    self.out_features_shape = _canonicalize_tuple(out_features_shape)
     self.axis = _canonicalize_tuple(axis)
     self.weight_dtype = weight_dtype
     self.dtype = dtype
@@ -125,26 +123,25 @@ class DenseGeneral(nnx.Module):
     self.parameter_memory_host_offload = parameter_memory_host_offload
 
     # Parameter initialization
-    kernel_shape = self.in_features + self.out_features
+    kernel_shape = self.in_features_shape + self.out_features_shape
     kernel_in_axis = np.arange(len(self.axis))
-    kernel_out_axis = np.arange(
-        len(self.axis), len(self.axis) + len(self.out_features)
-    )
+    kernel_out_axis = np.arange(len(self.axis), len(self.axis) + len(self.out_features_shape))
 
-    self.kernel = nnx.Param(
-        self.kernel_init(
-            rngs.params(),
-            kernel_shape,
-            self.weight_dtype,
-            kernel_in_axis,
-            kernel_out_axis,
-        ),
-        sharding=self.kernel_axes,
-    )
+    if not quantizations.in_serve_mode(self.quant):
+      self.kernel = nnx.Param(
+          self.kernel_init(
+              rngs.params(),
+              kernel_shape,
+              self.weight_dtype,
+              kernel_in_axis,
+              kernel_out_axis,
+          ),
+          sharding=self.kernel_axes,
+      )
 
     if self.use_bias:
-      bias_axes = self.kernel_axes[-len(self.out_features) :]
-      bias_shape = kernel_shape[-len(self.out_features) :]
+      bias_axes = self.kernel_axes[-len(self.out_features_shape) :]
+      bias_shape = kernel_shape[-len(self.out_features_shape) :]
       self.bias = nnx.Param(
           default_bias_init(rngs.params(), bias_shape, self.weight_dtype),
           sharding=bias_axes,
@@ -165,22 +162,22 @@ class DenseGeneral(nnx.Module):
     norm_axis = _normalize_axes(self.axis, inputs.ndim)
 
     for i, ax in enumerate(norm_axis):
-      if inputs.shape[ax] != self.in_features[i]:
+      if inputs.shape[ax] != self.in_features_shape[i]:
         raise ValueError(
             f"Input dimension {inputs.shape[ax]} at axis {ax} "
-            f"does not match expected input feature size {self.in_features[i]}"
+            f"does not match expected input feature size {self.in_features_shape[i]}"
         )
 
     if quantizations.in_serve_mode(self.quant):
-      kernel_shape = self.in_features + self.out_features
+      kernel_shape = self.in_features_shape + self.out_features_shape
       kernel = jnp.zeros(kernel_shape, dtype=self.dtype)
     else:
-      kernel = jnp.asarray(self.kernel[...], self.dtype)
-
-    # Move logit_dense kernel to device if parameter offloading is enabled
-    if self.parameter_memory_host_offload:
-      max_logging.log("linear.py: Moving parameter logits_dense kernel to device")
-      kernel = jax.device_put(kernel, jax._src.sharding_impls.TransferToMemoryKind("device"))
+      kernel = self.kernel[...]
+      # Move logit_dense kernel to device if parameter offloading is enabled
+      if self.parameter_memory_host_offload:
+        max_logging.log("linear.py: Moving parameter logits_dense kernel to device")
+        kernel = jax.device_put(kernel, jax._src.sharding_impls.TransferToMemoryKind("device"))
+      kernel = jnp.asarray(kernel, self.dtype)
 
     contract_ind = tuple(range(0, len(self.axis)))
     output = _compute_dot_general(
@@ -199,27 +196,15 @@ class DenseGeneral(nnx.Module):
     return output
 
 
-def variable_to_logically_partitioned(variable: nnx.VariableState):
-  metadata = variable.get_metadata()
-  return nn.LogicallyPartitioned(  # type: ignore[wrong-keyword-args]
-      variable.value,
-      variable.sharding,
-      mesh=metadata.get("mesh"),
-      rules=metadata.get("rules"),
-  )
-
-
 def dense_general(
     *,
     inputs_shape: tuple[int, ...] | None = None,
-    in_features: tuple[int, ...] | int | None = None,
-    features: Union[Iterable[int], int],
+    in_features_shape: tuple[int, ...] | int | None = None,
+    out_features_shape: Union[Iterable[int], int],
     axis: Union[Iterable[int], int] = -1,
     weight_dtype: DType = jnp.float32,
     dtype: DType = jnp.float32,
-    kernel_init: NdInitializer = nd_dense_init(
-        1.0, "fan_in", "truncated_normal"
-    ),
+    kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "truncated_normal"),
     kernel_axes: Tuple[Optional[str], ...] = (),
     quant: Optional[Quant] = None,
     use_bias: bool = False,
@@ -231,9 +216,9 @@ def dense_general(
 
   Args:
     inputs_shape: tuple with the shape of the inputs
-    in_features: tuple with numbers of input features for axes specified in
+    in_features_shape: tuple with numbers of input features for axes specified in
       'axis'.
-    features: tuple with numbers of output features.
+    out_features_shape: tuple with numbers of output features.
     axis: tuple with axes to apply the transformation on.
     weight_dtype: the dtype of the weights (default: float32).
     dtype: the dtype of the computation (default: float32).
@@ -245,22 +230,18 @@ def dense_general(
     parameter_memory_host_offload: Determines whether to offload params to host
     name: name passed to the ToLinen Module
   """
-  if not (inputs_shape is not None) ^ (in_features is not None):
-    raise ValueError(
-        "Exactly one of inputs_shape or in_features must be specified."
-    )
+  if not (inputs_shape is not None) ^ (in_features_shape is not None):
+    raise ValueError("Exactly one of inputs_shape or in_features must be specified.")
 
   if inputs_shape is not None:
     axis = _canonicalize_tuple(axis)
-    in_features = tuple(
-        inputs_shape[ax] for ax in _normalize_axes(axis, len(inputs_shape))
-    )
+    in_features_shape = tuple(inputs_shape[ax] for ax in _normalize_axes(axis, len(inputs_shape)))
   else:
-    assert in_features is not None
+    assert in_features_shape is not None
   module = nnx.bridge.to_linen(
       DenseGeneral,
-      in_features=in_features,
-      out_features=features,
+      in_features_shape=in_features_shape,
+      out_features_shape=out_features_shape,
       axis=axis,
       weight_dtype=weight_dtype,
       dtype=dtype,
@@ -303,8 +284,9 @@ class MlpBlock(nn.Module):
   use_bias: bool = False
   use_pre_norm: bool = False
   quant: Optional[Quant] = None
+  model_mode: Optional[str] = None
 
-  def get_norm_layer(self):
+  def get_norm_layer(self, num_features: int):
     """get normalization layer."""
     if self.config.decoder_block in (
         DecoderBlockType.DEFAULT,
@@ -315,11 +297,13 @@ class MlpBlock(nn.Module):
         DecoderBlockType.DEEPSEEK,
         DecoderBlockType.LLAMA4,
     ):
-      return RMSNorm
+      return functools.partial(rms_norm, num_features=num_features)
     elif self.config.decoder_block == DecoderBlockType.GPT3:
       from MaxText.layers import gpt3  # pylint: disable=import-outside-toplevel
 
-      return functools.partial(gpt3.Gpt3LayerNorm, reductions_in_fp32=False, use_bias=self.use_bias)
+      return functools.partial(
+          gpt3.gpt3_layer_norm, num_features=num_features, reductions_in_fp32=False, use_bias=self.use_bias
+      )
     else:
       raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block.value=}")
 
@@ -329,7 +313,7 @@ class MlpBlock(nn.Module):
     cfg = self.config
 
     if self.use_pre_norm:
-      inputs = self.get_norm_layer()(
+      inputs = self.get_norm_layer(num_features=inputs.shape[-1])(
           name="mlp_layer_norm",
           dtype=cfg.dtype,
           weight_dtype=cfg.weight_dtype,
@@ -343,7 +327,7 @@ class MlpBlock(nn.Module):
     if cfg.fused_mlp:
       x = dense_general(
           inputs_shape=inputs.shape,
-          features=(len(self.activations), self.intermediate_dim),
+          out_features_shape=(len(self.activations), self.intermediate_dim),
           dtype=self.dtype,
           weight_dtype=self.weight_dtype,
           kernel_init=self.kernel_init,
@@ -362,7 +346,7 @@ class MlpBlock(nn.Module):
         dense_name = "wi" if len(self.activations) == 1 else f"wi_{idx}"
         x = dense_general(
             inputs_shape=inputs.shape,
-            features=self.intermediate_dim,
+            out_features_shape=self.intermediate_dim,
             dtype=self.dtype,
             weight_dtype=self.weight_dtype,
             kernel_init=self.kernel_init,
@@ -384,10 +368,15 @@ class MlpBlock(nn.Module):
     x = nn.Dropout(rate=self.intermediate_dropout_rate, broadcast_dims=(-2,))(
         x, deterministic=deterministic
     )  # Broadcast along length.
-    x = nn.with_logical_constraint(x, ("activation_batch", "activation_length", "activation_mlp"))
+
+    if self.model_mode == MODEL_MODE_PREFILL:
+      x = nn.with_logical_constraint(x, ("activation_batch", "prefill_activation_length", "activation_mlp"))
+    else:
+      x = nn.with_logical_constraint(x, ("activation_batch", "activation_length", "activation_mlp"))
+
     output = dense_general(
         inputs_shape=x.shape,
-        features=inputs.shape[-1],
+        out_features_shape=inputs.shape[-1],
         dtype=self.dtype,
         weight_dtype=self.weight_dtype,
         kernel_init=self.kernel_init,
@@ -400,4 +389,3 @@ class MlpBlock(nn.Module):
 
     output = checkpoint_name(output, "mlpwo")
     return output
-  
