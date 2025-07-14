@@ -1800,3 +1800,81 @@ custom_moe_700b = _add_to_model_dictionary(
         ),
     ),
 )
+gemma3_27b_32768 = _add_to_model_dictionary(
+  trillium_model_dict,
+  MaxTextModel(
+    model_name="gemma3-27b-32768",
+    model_type="gemma3-27b",
+    tuning_params={
+        "per_device_batch_size": 0.125,
+        "ici_fsdp_parallelism": -1,
+        "ici_context_parallelism": 16,
+        "allow_split_physical_axes": True,
+        # "optimizer_memory_host_offload": True, @Anisha: commenting out for now
+        "remat_policy": "custom",
+        # "out_proj": "remat",
+        # "query_proj": "remat",
+        # "key_proj": "remat",
+        # "value_proj": "remat",
+        "decoder_layer_input": "offload",
+        "out_proj": "offload",
+        "query_proj": "offload",
+        "key_proj": "offload",
+        "value_proj": "offload",
+        "max_target_length": 32768,
+        "attention": "flash",
+        # "gcs_metrics": True, #Anisha: does this have an impact?
+        "use_iota_embed": True,
+        "dataset_path": "gs://max-datasets-rogue",
+        "dataset_type": "synthetic",
+        # "reuse_example_batch": 1, #Anisha: commenting out for now
+        "enable_checkpointing": False,
+        "profiler": "xplane",
+        "skip_first_n_steps_for_profiler": 10,
+        "profiler_steps": 5,
+        "tokenizer_path": os.path.join("assets", "tokenizer.gemma3"),
+        "sa_block_q": 512,
+        "sa_block_kv": 512,
+        "sa_block_kv_compute": 512,
+        "sa_block_q_dkv": 512,
+        "sa_block_kv_dkv": 512,
+        "sa_block_kv_dkv_compute": 512,
+        "sa_block_q_dq": 512,
+        "sa_block_kv_dq": 512,
+        "sa_use_fused_bwd_kernel": True, #Anisha: adding this
+        "packing": False,
+        "steps": 20,
+    },
+    # Anisha: matching the flags to the ones used in the llama3.1-70B model
+    xla_flags=(xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+        + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
+        + xla_flags_library.DATA_PARALLEL_OVERLAP
+        + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_RS_AG_AR
+        + xla_flags_library.HOST_OFFLOAD_FLAGS
+        
+    ),
+    pathways_xla_flag_options={
+        xla_flags_library.REMOVE: [
+            "--2a886c8_chip_config_name=megachip_tccontrol"
+        ],
+        xla_flags_library.ADD_SERVER: (
+            xla_flags_library.ENHANCED_LAUNCH_BARRIER
+        ),
+        xla_flags_library.ADD_PROXY: (
+            xla_flags_library.ENHANCED_LAUNCH_BARRIER
+        ),
+        xla_flags_library.ADD_WORKER: (
+            xla_flags_library.ENHANCED_LAUNCH_BARRIER
+        ),
+    },
+#     xla_flags=(
+#         xla_flags_library.CUSTOM_VMEM_LIMIT_FLAG(vmem_limit=122880)
+#         + xla_flags_library.REDUCE_SCATTER_FUSION
+#         + xla_flags_library.CF_FOR_ALL_GATHER
+#         + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
+#         + xla_flags_library.HOST_OFFLOAD_FLAGS
+#     ),
+#   )
+
+  )
+)
