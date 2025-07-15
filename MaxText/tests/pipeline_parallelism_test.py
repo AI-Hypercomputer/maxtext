@@ -28,7 +28,7 @@ from flax import linen as nn
 from MaxText import maxtext_utils
 from MaxText import pyconfig
 from MaxText.common_types import MODEL_MODE_TRAIN
-from MaxText.globals import PKG_DIR, tpu_present
+from MaxText.globals import PKG_DIR, tpu_present, gpu_present
 from MaxText.layers import pipeline
 from MaxText.layers import simple_layer
 from MaxText.train import main as train_main
@@ -373,6 +373,7 @@ class PipelineParallelismTest(unittest.TestCase):
     )
 
   @pytest.mark.integration_test
+  @unittest.skipIf(not tpu_present and not gpu_present, "TPU|GPU only test")
   def test_full_train_fp8(self):
     # Run a full train.py call with fp8 quantization, which adds extra
     # variable collections that need to be handled
@@ -405,6 +406,7 @@ class PipelineParallelismTest(unittest.TestCase):
     )
 
   @pytest.mark.integration_test
+  @unittest.skipIf(not tpu_present and not gpu_present, "TPU|GPU only test")
   def test_full_train_nanoo_fp8(self):
     # Run a full train.py call with NANOO fp8 quantization, which adds extra
     # variable collections that need to be handled
