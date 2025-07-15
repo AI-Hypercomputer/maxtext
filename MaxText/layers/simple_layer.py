@@ -18,7 +18,6 @@ from typing import Optional
 from jax import numpy as jnp
 from jax.sharding import Mesh
 
-from flax import linen as nn
 from flax import nnx
 from MaxText.layers import initializers
 from MaxText.common_types import Config
