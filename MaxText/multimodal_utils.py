@@ -85,10 +85,10 @@ class PreprocessorOutput:
 
 def resize_image(image, model_name):
   image_sizes = {
-      "gemma3": (GEMMA_DEFAULT_IMAGE_SIZE, GEMMA_DEFAULT_IMAGE_SIZE),
-      "llama4": (LLAMA4_TILE_SIZE, LLAMA4_TILE_SIZE),
+    "gemma3": (GEMMA_DEFAULT_IMAGE_SIZE, GEMMA_DEFAULT_IMAGE_SIZE),
+    "llama4": (LLAMA4_TILE_SIZE, LLAMA4_TILE_SIZE),
   }
-  target_size = image_sizes[model_name.split("-")[0]]
+  target_size = image_sizes[model_name.split('-')[0]]
   if target_size:
     image = image.resize(target_size)
   return image
@@ -419,7 +419,7 @@ def reformat_prompt(prompt, image_placeholder, model_name):
     return formatted_prompt
   elif model_name in ["llama4-17b-16e", "llama4-17b-128e"]:
     if image_placeholder in prompt:
-      prompt = prompt.replace(image_placeholder, LLAMA4_IMAGE_PLACEHOLDER_IN_PROMPT)
+      prompt =prompt.replace(image_placeholder, LLAMA4_IMAGE_PLACEHOLDER_IN_PROMPT)
     if not LLAMA4_IMAGE_PLACEHOLDER_IN_PROMPT in prompt:
       prompt = LLAMA4_IMAGE_PLACEHOLDER_IN_PROMPT + prompt
     formatted_prompt = (

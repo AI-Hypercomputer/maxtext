@@ -50,3 +50,6 @@ jobs:
     - name: Analysing the code with pyink in pedagogical_examples/
       run: |
         pyink pedagogical_examples --check --diff --color --pyink-indentation=2 --line-length=125
+
+
+

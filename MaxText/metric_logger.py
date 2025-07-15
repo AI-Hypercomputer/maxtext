@@ -77,7 +77,7 @@ class MetricLogger:
     """Logs metrics via max_logging."""
 
     if is_training:
-      loss = metrics["scalar"]["learning/loss"]
+      loss = metrics['scalar']['learning/loss']
       log_message = (
           f"completed step: {step}, seconds: {metrics['scalar']['perf/step_time_seconds']:.3f}, "
           f"TFLOP/s/device: {metrics['scalar']['perf/per_device_tflops_per_sec']:.3f}, "

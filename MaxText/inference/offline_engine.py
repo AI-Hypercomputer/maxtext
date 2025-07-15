@@ -924,16 +924,14 @@ class OfflineEngine:
     """Create data parallelism meshes for each Inference worker."""
     ici_parallelism = max_utils.fill_unspecified_mesh_axes(config.ici_parallelism.copy(), len(devices), "ICI")
     if jax.device_count() == 1:
-      mesh_shape = (1,) * len(config.mesh_axes)
-      devices_array = np.array(devices).reshape(mesh_shape)
-      mesh = Mesh(devices_array, config.mesh_axes)
-      return mesh
-    devices_array = mesh_utils.create_device_mesh(
+      devices_array = np.array(devices).reshape((1,) * len(config.mesh_axes))
+    else:
+      devices_array = mesh_utils.create_device_mesh(
         ici_parallelism,
         devices,
         contiguous_submeshes=False,
         allow_split_physical_axes=config.allow_split_physical_axes or False,
-    )
+      )
     mesh = Mesh(devices_array.reshape(ici_parallelism), config.mesh_axes)
     return mesh
 
