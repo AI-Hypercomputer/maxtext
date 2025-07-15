@@ -672,12 +672,21 @@ class Decoder(nn.Module):
               deterministic,
               model_mode,
           )
+        elif cfg.decoder_block == DecoderBlockType.GEMMA3:
+          y = self._apply_gemma3_scanned_blocks(
+              y,
+              decoder_segment_ids,
+              decoder_positions,
+              deterministic,
+              model_mode,
+              bidirectional_mask,
+              previous_chunk,
+              page_state,
+              slot,
+          )
         else:
-          layer_call_kwargs = {}
           layer_kwargs = {}
-          if cfg.decoder_block == DecoderBlockType.GEMMA3:
-            layer_call_kwargs = {"bidirectional_mask": bidirectional_mask}
-          elif cfg.decoder_block == DecoderBlockType.LLAMA4:
+          if cfg.decoder_block == DecoderBlockType.LLAMA4:
             layer_kwargs = {
                 "nope_layer_interval": self.config.nope_layer_interval,
                 "interleave_moe_layer_step": self.config.interleave_moe_layer_step,
@@ -690,7 +699,6 @@ class Decoder(nn.Module):
               decoder_positions,
               deterministic,
               model_mode,
-              **layer_call_kwargs,
           )
       else:
         if cfg.decoder_block == DecoderBlockType.DEEPSEEK:
@@ -752,3 +760,60 @@ class Decoder(nn.Module):
     # The API of the Decoder is now a tuple, providing both the main output
     # and the raw hidden state needed for auxiliary tasks.
     return logits, hidden_state
+
+  def _apply_gemma3_scanned_blocks(
+      self,
+      y,
+      decoder_segment_ids,
+      decoder_positions,
+      deterministic,
+      model_mode,
+      bidirectional_mask,
+      previous_chunk,
+      page_state,
+      slot,
+  ):
+    """Applies Gemma3 scanned decoder blocks, handling main scan and remainders."""
+
+    cfg = self.config
+    mesh = self.mesh
+
+    # Define the repeating pattern length and calculate how many full blocks to scan
+    attention_pattern_length = len(gemma3.GEMMA3_ATTENTION_PATTERN)
+    scan_length = cfg.num_decoder_layers // attention_pattern_length
+
+    policy = self.get_remat_policy()
+    RemattedGemma3Block = self.set_remat_policy([gemma3.Gemma3ScannableBlock], policy)[0]
+
+    layer_call_kwargs = {"bidirectional_mask": bidirectional_mask}
+    layer_kwargs = {"num_of_layers": attention_pattern_length}
+
+    # Apply the main scan over the full blocks
+    if scan_length > 0:
+      y, _ = self.scan_decoder_layers(cfg, RemattedGemma3Block, scan_length, "layers", mesh, **layer_kwargs)(
+          y,
+          decoder_segment_ids,
+          decoder_positions,
+          deterministic,
+          model_mode,
+          **layer_call_kwargs,
+      )
+
+    # Apply any remaining layers that did not fit into a full scanned block
+    num_remaining_layers = cfg.num_decoder_layers % attention_pattern_length
+    if num_remaining_layers > 0:
+      # We name the remainder block with a 'remainder' suffix to avoid parameter name collisions
+      rem_layer_kwargs = {"num_of_layers": num_remaining_layers}
+      layer = RemattedGemma3Block(config=cfg, mesh=mesh, quant=self.quant, name="layers_remainder", **rem_layer_kwargs)
+      y, _ = layer(
+          y,
+          decoder_segment_ids,
+          decoder_positions,
+          deterministic,
+          model_mode,
+          previous_chunk=previous_chunk,
+          page_state=page_state,
+          slot=slot,
+          **layer_call_kwargs,
+      )
+    return y
