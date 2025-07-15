@@ -22,8 +22,9 @@ import jax
 import jax.numpy as jnp
 
 from aqt.jax.v2 import aqt_tensor
+from aqt.jax.v2.numerics import fp8_numerics
 
-from MaxText.kernels.megablox import gmm as backend
+from maxtext.kernels.megablox import gmm as backend
 
 gmm = jax.custom_vjp(
     backend.gmm,
@@ -41,8 +42,8 @@ def _gmm_fwd(
     existing_out: jnp.ndarray | None = None,
     transpose_rhs: bool = False,
     interpret: bool = False,
-    lhs_quantize_dtype: Literal[jnp.int4, jnp.int8] | None = None,
-    rhs_quantize_dtype: Literal[jnp.int4, jnp.int8] | None = None,
+    lhs_quantize_dtype: Literal[jnp.int4, jnp.int8] | fp8_numerics.FP8Dtype | None = None,
+    rhs_quantize_dtype: Literal[jnp.int4, jnp.int8] | fp8_numerics.FP8Dtype | None = None,
 ) -> tuple[
     jnp.ndarray,
     tuple[
@@ -64,8 +65,8 @@ def _gmm_fwd(
       existing_out,
       transpose_rhs=transpose_rhs,
       interpret=interpret,
-      lhs_quantize_dtype=lhs_quantize_dtype,
-      rhs_quantize_dtype=rhs_quantize_dtype,
+      lhs_quantize_dtype='e4m3',
+      rhs_quantize_dtype='e4m3',
   )
   return out, (lhs, rhs, group_sizes, group_offset, rhs.shape[0])
 
@@ -75,8 +76,8 @@ def _gmm_bwd(
     tiling: tuple[int, int, int],
     transpose_rhs: bool,
     interpret: bool,
-    lhs_quantize_dtype: Literal[jnp.int4, jnp.int8] | None,
-    rhs_quantize_dtype: Literal[jnp.int4, jnp.int8] | None,
+    lhs_quantize_dtype: Literal[jnp.int4, jnp.int8] | fp8_numerics.FP8Dtype | None,
+    rhs_quantize_dtype: Literal[jnp.int4, jnp.int8] | fp8_numerics.FP8Dtype | None,
     residual: tuple[
         jnp.ndarray,
         jnp.ndarray | aqt_tensor.QTensor,
@@ -98,11 +99,13 @@ def _gmm_bwd(
       group_offset,
       transpose_rhs=not transpose_rhs,
       interpret=interpret,
-      lhs_quantize_dtype=lhs_quantize_dtype,
-      rhs_quantize_dtype=rhs_quantize_dtype,
+      lhs_quantize_dtype='e5m2',
+      rhs_quantize_dtype='e5m2',
   )
   grad_rhs = backend.tgmm(
-      lhs.swapaxes(0, 1), grad, group_sizes, rhs.dtype, tiling, group_offset, num_actual_groups, interpret=interpret
+      lhs.swapaxes(0, 1), grad, group_sizes, rhs.dtype, tiling, group_offset, num_actual_groups, interpret=interpret,
+      lhs_quantize_dtype='e5m2',
+      rhs_quantize_dtype='e5m2',
   )
 
   # NOTE: If the rhs transposition is fused into the forward pass we need to

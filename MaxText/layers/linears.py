@@ -25,15 +25,15 @@ import jax.numpy as jnp
 from jax import lax
 from jax.ad_checkpoint import checkpoint_name
 
-from flax import nnx
 import flax.linen as nn
 
-from MaxText import max_logging
-from MaxText.common_types import MODEL_MODE_PREFILL, DecoderBlockType, DType, Array, Config
-from MaxText.layers import quantizations
-from MaxText.layers.normalizations import rms_norm
-from MaxText.layers.initializers import NdInitializer, nd_dense_init, default_bias_init, variable_to_logically_partitioned
-from MaxText.layers.quantizations import AqtQuantization as Quant
+from maxtext import max_logging
+from maxtext.common_types import DecoderBlockType, DType, Array, Config
+from maxtext.layers import quantizations
+from maxtext.layers.normalizations import RMSNorm
+from maxtext.layers.initializers import NdInitializer, nd_dense_init, default_bias_init
+from maxtext.layers.quantizations import AqtQuantization as Quant
+from jax.experimental.xla_metadata import set_xla_metadata
 
 
 def _convert_to_activation_function(fn_or_string: Union[str, Callable[..., Any]]) -> Callable[..., Any]:
@@ -70,85 +70,37 @@ def _compute_dot_general(inputs, kernel, kernel_axes, axis, contract_ind, matmul
   if quant:
     dot_general_cls = quant.dot_general_cls(mesh_axes=kernel_axes)
     dot_general = dot_general_cls()
-    return dot_general(inputs, kernel, ((axis, contract_ind), ((), ())), precision=None)
+    with jax.named_scope('dot_with_quantized_allreduce'):
+      with set_xla_metadata(_xla_tpu_quantize_allreduce=True, _xla_tpu_quantize_allreduce_dtype="F8E4M3FN", _xla_tpu_quantize_allreduce_stage="every_stage"):
+       return dot_general(inputs, kernel, ((axis, contract_ind), ((), ())), precision=None)
   return dot_general(inputs, kernel, ((axis, contract_ind), ((), ())), precision=matmul_precision)
 
 
-class DenseGeneral(nnx.Module):
-  """A linear transformation with flexible axes."""
+class DenseGeneral(nn.Module):
+  """A linear transformation with flexible axes.
 
-  def __init__(
-      self,
-      in_features_shape: Union[Iterable[int], int],
-      out_features_shape: Union[Iterable[int], int],
-      axis: Union[Iterable[int], int] = -1,
-      weight_dtype: DType = jnp.float32,
-      dtype: DType = jnp.float32,
-      kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "truncated_normal"),
-      kernel_axes: Tuple[Optional[str], ...] = (),
-      quant: Optional[Quant] = None,
-      use_bias: bool = False,
-      matmul_precision: str = "default",
-      parameter_memory_host_offload: bool = False,
-      *,  # Following arguments are keyword-only
-      rngs: nnx.Rngs,
-  ):
-    """Initializes the DenseGeneral module.
+  Attributes:
+    features: tuple with numbers of output features.
+    axis: tuple with axes to apply the transformation on.
+    weight_dtype: the dtype of the weights (default: float32).
+    dtype: the dtype of the computation (default: float32).
+    kernel_init: initializer function for the weight matrix.
+    use_bias: whether to add bias in linear transformation.
+    quant: quantization config, defaults to None implying no quantization.
+  """
 
-    Args:
-      in_features_shape: tuple with numbers of input features for axes specified in
-        'axis'.
-      out_features_shape: tuple with numbers of output features.
-      axis: tuple with axes to apply the transformation on.
-      weight_dtype: the dtype of the weights (default: float32).
-      dtype: the dtype of the computation (default: float32).
-      kernel_init: initializer function for the weight matrix.
-      kernel_axes: logical axes for partitioning the kernel.
-      quant: quantization config, defaults to None implying no quantization.
-      use_bias: whether to add bias in linear transformation.
-      matmul_precision: Precision for matrix multiplication.
-      parameter_memory_host_offload: Determines whether to offload params to host
-      rngs: RNG state for initialization in nnx.
-    """
-    self.in_features_shape = _canonicalize_tuple(in_features_shape)
-    self.out_features_shape = _canonicalize_tuple(out_features_shape)
-    self.axis = _canonicalize_tuple(axis)
-    self.weight_dtype = weight_dtype
-    self.dtype = dtype
-    self.kernel_init = kernel_init
-    self.kernel_axes = kernel_axes
-    self.quant = quant
-    self.use_bias = use_bias
-    self.matmul_precision = matmul_precision
-    self.parameter_memory_host_offload = parameter_memory_host_offload
+  features: Union[Iterable[int], int]
+  axis: Union[Iterable[int], int] = -1
+  weight_dtype: DType = jnp.float32
+  dtype: DType = jnp.float32
+  kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "truncated_normal")
+  kernel_axes: Tuple[Optional[str], ...] = ()
+  quant: Optional[Quant] = None
+  use_bias: bool = False
+  matmul_precision: str = "default"
+  parameter_memory_host_offload: bool = False
 
-    # Parameter initialization
-    kernel_shape = self.in_features_shape + self.out_features_shape
-    kernel_in_axis = np.arange(len(self.axis))
-    kernel_out_axis = np.arange(len(self.axis), len(self.axis) + len(self.out_features_shape))
-
-    if not quantizations.in_serve_mode(self.quant):
-      self.kernel = nnx.Param(
-          self.kernel_init(
-              rngs.params(),
-              kernel_shape,
-              self.weight_dtype,
-              kernel_in_axis,
-              kernel_out_axis,
-          ),
-          sharding=self.kernel_axes,
-      )
-
-    if self.use_bias:
-      bias_axes = self.kernel_axes[-len(self.out_features_shape) :]
-      bias_shape = kernel_shape[-len(self.out_features_shape) :]
-      self.bias = nnx.Param(
-          default_bias_init(rngs.params(), bias_shape, self.weight_dtype),
-          sharding=bias_axes,
-      )
-    else:
-      self.bias = None
-
+  @nn.compact
   def __call__(self, inputs: Array) -> Array:
     """Applies a linear transformation to the inputs along multiple dimensions.
 
@@ -158,103 +110,51 @@ class DenseGeneral(nnx.Module):
     Returns:
       The transformed input.
     """
+
+    features = _canonicalize_tuple(self.features)
+    axis = _canonicalize_tuple(self.axis)
+
     inputs = jnp.asarray(inputs, self.dtype)
-    norm_axis = _normalize_axes(self.axis, inputs.ndim)
+    axis = _normalize_axes(axis, inputs.ndim)
 
-    for i, ax in enumerate(norm_axis):
-      if inputs.shape[ax] != self.in_features_shape[i]:
-        raise ValueError(
-            f"Input dimension {inputs.shape[ax]} at axis {ax} "
-            f"does not match expected input feature size {self.in_features_shape[i]}"
-        )
-
+    kernel_shape = tuple(inputs.shape[ax] for ax in axis) + features
+    kernel_in_axis = np.arange(len(axis))
+    kernel_out_axis = np.arange(len(axis), len(axis) + len(features))
     if quantizations.in_serve_mode(self.quant):
-      kernel_shape = self.in_features_shape + self.out_features_shape
-      kernel = jnp.zeros(kernel_shape, dtype=self.dtype)
+      # During aqt convert state we delete kernel weight from params to save memory.
+      # Instead they are retrieved from the tensors stored in the 'aqt' collection.
+      kernel = jnp.zeros(kernel_shape)
     else:
-      kernel = self.kernel[...]
-      # Move logit_dense kernel to device if parameter offloading is enabled
-      if self.parameter_memory_host_offload:
-        max_logging.log("linear.py: Moving parameter logits_dense kernel to device")
-        kernel = jax.device_put(kernel, jax._src.sharding_impls.TransferToMemoryKind("device"))
-      kernel = jnp.asarray(kernel, self.dtype)
+      kernel = self.param(
+          "kernel",
+          nn.with_logical_partitioning(self.kernel_init, self.kernel_axes),
+          kernel_shape,
+          self.weight_dtype,
+          kernel_in_axis,
+          kernel_out_axis,
+      )
+    # Move logit_dense kernel to device if parameter offloading is enabled
+    if self.parameter_memory_host_offload:
+      max_logging.log("linear.py: Moving parameter logits_dense kernel to device")
+      kernel = jax.device_put(kernel, jax._src.sharding_impls.TransferToMemoryKind("device"))
+    kernel = jnp.asarray(kernel, self.dtype)
+    contract_ind = tuple(range(0, len(axis)))
+    output = _compute_dot_general(inputs, kernel, self.kernel_axes, axis, contract_ind, self.matmul_precision, self.quant)
 
-    contract_ind = tuple(range(0, len(self.axis)))
-    output = _compute_dot_general(
-        inputs,
-        kernel,
-        self.kernel_axes,
-        norm_axis,
-        contract_ind,
-        self.matmul_precision,
-        self.quant,
-    )
-
-    if self.bias is not None:
-      bias = jnp.asarray(self.bias[...], self.dtype)
+    if self.use_bias:
+      bias_axes, bias_shape = (
+          self.kernel_axes[-len(features) :],
+          kernel_shape[-len(features) :],
+      )
+      bias = self.param(
+          "bias",
+          nn.with_logical_partitioning(default_bias_init, bias_axes),
+          bias_shape,
+          self.weight_dtype,
+      )
+      bias = jnp.asarray(bias, self.dtype)
       output += bias
     return output
-
-
-def dense_general(
-    *,
-    inputs_shape: tuple[int, ...] | None = None,
-    in_features_shape: tuple[int, ...] | int | None = None,
-    out_features_shape: Union[Iterable[int], int],
-    axis: Union[Iterable[int], int] = -1,
-    weight_dtype: DType = jnp.float32,
-    dtype: DType = jnp.float32,
-    kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "truncated_normal"),
-    kernel_axes: Tuple[Optional[str], ...] = (),
-    quant: Optional[Quant] = None,
-    use_bias: bool = False,
-    matmul_precision: str = "default",
-    parameter_memory_host_offload: bool = False,
-    name: Optional[str] = None,
-):
-  """Initializes the dense_general module.
-
-  Args:
-    inputs_shape: tuple with the shape of the inputs
-    in_features_shape: tuple with numbers of input features for axes specified in
-      'axis'.
-    out_features_shape: tuple with numbers of output features.
-    axis: tuple with axes to apply the transformation on.
-    weight_dtype: the dtype of the weights (default: float32).
-    dtype: the dtype of the computation (default: float32).
-    kernel_init: initializer function for the weight matrix.
-    kernel_axes: logical axes for partitioning the kernel.
-    quant: quantization config, defaults to None implying no quantization.
-    use_bias: whether to add bias in linear transformation.
-    matmul_precision: Precision for matrix multiplication.
-    parameter_memory_host_offload: Determines whether to offload params to host
-    name: name passed to the ToLinen Module
-  """
-  if not (inputs_shape is not None) ^ (in_features_shape is not None):
-    raise ValueError("Exactly one of inputs_shape or in_features must be specified.")
-
-  if inputs_shape is not None:
-    axis = _canonicalize_tuple(axis)
-    in_features_shape = tuple(inputs_shape[ax] for ax in _normalize_axes(axis, len(inputs_shape)))
-  else:
-    assert in_features_shape is not None
-  module = nnx.bridge.to_linen(
-      DenseGeneral,
-      in_features_shape=in_features_shape,
-      out_features_shape=out_features_shape,
-      axis=axis,
-      weight_dtype=weight_dtype,
-      dtype=dtype,
-      kernel_init=kernel_init,
-      kernel_axes=kernel_axes,
-      quant=quant,
-      use_bias=use_bias,
-      matmul_precision=matmul_precision,
-      parameter_memory_host_offload=parameter_memory_host_offload,
-      name=name,
-      metadata_fn=variable_to_logically_partitioned,
-  )
-  return module
 
 
 class MlpBlock(nn.Module):
@@ -284,9 +184,8 @@ class MlpBlock(nn.Module):
   use_bias: bool = False
   use_pre_norm: bool = False
   quant: Optional[Quant] = None
-  model_mode: Optional[str] = None
 
-  def get_norm_layer(self, num_features: int):
+  def get_norm_layer(self):
     """get normalization layer."""
     if self.config.decoder_block in (
         DecoderBlockType.DEFAULT,
@@ -297,13 +196,11 @@ class MlpBlock(nn.Module):
         DecoderBlockType.DEEPSEEK,
         DecoderBlockType.LLAMA4,
     ):
-      return functools.partial(rms_norm, num_features=num_features)
+      return RMSNorm
     elif self.config.decoder_block == DecoderBlockType.GPT3:
-      from MaxText.layers import gpt3  # pylint: disable=import-outside-toplevel
+      from maxtext.layers import gpt3  # pylint: disable=import-outside-toplevel
 
-      return functools.partial(
-          gpt3.gpt3_layer_norm, num_features=num_features, reductions_in_fp32=False, use_bias=self.use_bias
-      )
+      return functools.partial(gpt3.Gpt3LayerNorm, reductions_in_fp32=False, use_bias=self.use_bias)
     else:
       raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block.value=}")
 
@@ -313,7 +210,7 @@ class MlpBlock(nn.Module):
     cfg = self.config
 
     if self.use_pre_norm:
-      inputs = self.get_norm_layer(num_features=inputs.shape[-1])(
+      inputs = self.get_norm_layer()(
           name="mlp_layer_norm",
           dtype=cfg.dtype,
           weight_dtype=cfg.weight_dtype,
@@ -325,9 +222,8 @@ class MlpBlock(nn.Module):
     # e.g. ('relu',) or ('gelu', 'linear') for gated-gelu.
     activations = []
     if cfg.fused_mlp:
-      x = dense_general(
-          inputs_shape=inputs.shape,
-          out_features_shape=(len(self.activations), self.intermediate_dim),
+      x = DenseGeneral(
+          (len(self.activations), self.intermediate_dim),
           dtype=self.dtype,
           weight_dtype=self.weight_dtype,
           kernel_init=self.kernel_init,
@@ -344,9 +240,8 @@ class MlpBlock(nn.Module):
     else:
       for idx, act_fn in enumerate(self.activations):
         dense_name = "wi" if len(self.activations) == 1 else f"wi_{idx}"
-        x = dense_general(
-            inputs_shape=inputs.shape,
-            out_features_shape=self.intermediate_dim,
+        x = DenseGeneral(
+            self.intermediate_dim,
             dtype=self.dtype,
             weight_dtype=self.weight_dtype,
             kernel_init=self.kernel_init,
@@ -368,15 +263,9 @@ class MlpBlock(nn.Module):
     x = nn.Dropout(rate=self.intermediate_dropout_rate, broadcast_dims=(-2,))(
         x, deterministic=deterministic
     )  # Broadcast along length.
-
-    if self.model_mode == MODEL_MODE_PREFILL:
-      x = nn.with_logical_constraint(x, ("activation_batch", "prefill_activation_length", "activation_mlp"))
-    else:
-      x = nn.with_logical_constraint(x, ("activation_batch", "activation_length", "activation_mlp"))
-
-    output = dense_general(
-        inputs_shape=x.shape,
-        out_features_shape=inputs.shape[-1],
+    x = nn.with_logical_constraint(x, ("activation_batch", "activation_length", "activation_mlp"))
+    output = DenseGeneral(
+        inputs.shape[-1],
         dtype=self.dtype,
         weight_dtype=self.weight_dtype,
         kernel_init=self.kernel_init,

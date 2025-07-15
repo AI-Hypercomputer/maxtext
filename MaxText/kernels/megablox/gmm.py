@@ -29,9 +29,10 @@ import jax
 import jax.numpy as jnp
 
 from aqt.jax.v2 import pallas as aqt_pl
+from aqt.jax.v2.numerics import fp8_numerics
 from aqt.jax.v2.aqt_tensor import QTensor
 
-from MaxText.kernels.megablox import common
+from maxtext.kernels.megablox import common
 
 
 def _validate_args(
@@ -312,8 +313,8 @@ def gmm(
     existing_out: jnp.ndarray | None = None,
     transpose_rhs: bool = False,
     interpret: bool = False,
-    lhs_quantize_dtype: Literal[jnp.int4, jnp.int8] | None = None,
-    rhs_quantize_dtype: Literal[jnp.int4, jnp.int8] | None = None,
+    lhs_quantize_dtype: Literal[jnp.int4, jnp.int8] | fp8_numerics.FP8Dtype | None = None,
+    rhs_quantize_dtype: Literal[jnp.int4, jnp.int8] | fp8_numerics.FP8Dtype | None = None,
 ) -> jnp.ndarray:
   """Compute lhs[sizes[i-1]:sizes[i], :] @ rhs for each group 'i'.
 
@@ -582,12 +583,22 @@ def gmm(
   rhs_contracting_axis = map(lambda x: x + 1, rhs_contracting_axis)
 
   if lhs_quantize_dtype is not None:
-    lhs_quantize_bits = 4 if lhs_quantize_dtype == jnp.int4 else 8
-    lhs = aqt_pl.quant(lhs, lhs_quantize_bits, lhs_contracting_axis)
+    if lhs_quantize_dtype == jnp.int4:
+      lhs_quantize_bits = 4
+    elif lhs_quantize_dtype == jnp.int8:
+      lhs_quantize_bits = 8
+    else:
+      lhs_quantize_bits = lhs_quantize_dtype
+    lhs = aqt_pl.quant(lhs, lhs_quantize_bits, use_dummy_static_bound=True)
 
   if not isinstance(rhs, QTensor) and rhs_quantize_dtype is not None:
-    rhs_quantize_bits = 4 if rhs_quantize_dtype == jnp.int4 else 8
-    rhs = aqt_pl.quant(rhs, rhs_quantize_bits, list(rhs_contracting_axis))
+    if rhs_quantize_dtype == jnp.int4:
+      rhs_quantize_bits = 4
+    elif rhs_quantize_dtype == jnp.int8:
+      rhs_quantize_bits = 8
+    else:
+      rhs_quantize_bits = rhs_quantize_dtype
+    rhs = aqt_pl.quant(rhs, rhs_quantize_bits, use_dummy_static_bound=True)
 
   out = call_gmm(
       group_metadata,
@@ -613,11 +624,13 @@ def gmm(
         "tiling",
         "num_actual_groups",
         "interpret",
+        "lhs_quantize_dtype",
+        "rhs_quantize_dtype",
     ],
 )
 def tgmm(
     lhs: jnp.ndarray,
-    rhs: jnp.ndarray,
+    rhs: jnp.ndarray | QTensor,
     group_sizes: jnp.ndarray,
     preferred_element_type: jnp.dtype = jnp.float32,
     tiling: tuple[int, int, int] | LutFn | None = (128, 128, 128),
@@ -625,6 +638,8 @@ def tgmm(
     num_actual_groups: int | None = None,
     existing_out: jnp.ndarray | None = None,
     interpret: bool = False,
+    lhs_quantize_dtype: Literal[jnp.int4, jnp.int8] | fp8_numerics.FP8Dtype | None = None,
+    rhs_quantize_dtype: Literal[jnp.int4, jnp.int8] | fp8_numerics.FP8Dtype | None = None,
 ) -> jnp.ndarray:
   """Compute lhs[:, sizes[i-1]:sizes[i]] @ rhs[sizes[i-1]:sizes[i], :].
 
@@ -720,23 +735,45 @@ def tgmm(
           tm=tm,
           tn=tk,
       )
+      if isinstance(lhs, QTensor):
+        qvalue = lax.select(
+            lhs_mask[...],
+            lhs.qvalue[...].astype(jnp.float32),
+            jnp.zeros_like(lhs, jnp.float32),
+        ).swapaxes(0, 1)
+        loaded_lhs = dataclasses.replace(lhs, qvalue=qvalue)
+        loaded_lhs = aqt_pl.load_qtensor(loaded_lhs)
+      else:
+        loaded_lhs = lhs[...]
+        loaded_lhs = lax.select(
+            lhs_mask[...],
+            loaded_lhs.astype(jnp.float32),
+            jnp.zeros_like(lhs, jnp.float32),
+        ).swapaxes(0, 1)
 
-      loaded_lhs = lhs[...]
-      loaded_rhs = rhs[...]
-      loaded_lhs = lax.select(
-          lhs_mask[...],
-          loaded_lhs.astype(jnp.float32),
-          jnp.zeros_like(lhs, jnp.float32),
-      ).swapaxes(0, 1)
-      loaded_rhs = lax.select(
-          rhs_mask[...],
-          loaded_rhs.astype(jnp.float32),
-          jnp.zeros_like(rhs, jnp.float32),
-      )
+      if isinstance(rhs, QTensor):
+        qvalue = lax.select(
+            rhs_mask[...],
+            rhs.qvalue[...].astype(jnp.float32),
+            jnp.zeros_like(lhs, jnp.float32),
+        )
+        loaded_rhs = dataclasses.replace(rhs, qvalue=qvalue)
+        loaded_rhs = aqt_pl.load_qtensor(loaded_rhs)
+      else:
+        loaded_rhs = rhs[...]
+        loaded_rhs = lax.select(
+            rhs_mask[...],
+            loaded_rhs.astype(jnp.float32),
+            jnp.zeros_like(rhs, jnp.float32),
+        )
 
-      acc_scratch[...] += lax.dot(
-          loaded_lhs.astype(input_dtype),
-          loaded_rhs.astype(input_dtype),
+      is_quantized = lhs_quantize_dtype or rhs_quantize_dtype
+      # when both lhs and rhs are not quantized. A workaround is to use lax.dot_general
+      dot_general = aqt_pl.dot_general if is_quantized else jax.lax.dot_general
+      acc_scratch[...] += dot_general(
+          loaded_lhs,
+          loaded_rhs,
+          (((lhs.ndim - 1,), (0,)), ((), ())),
           preferred_element_type=jnp.float32,
       )
 
@@ -795,7 +832,11 @@ def tgmm(
   flops = 2 * m * k * n
   cost_estimate = pl.CostEstimate(flops=flops, bytes_accessed=bytes_accessed, transcendentals=0)
   lhs = lhs.swapaxes(0, 1)
-  call_gmm = pl.pallas_call(
+  if lhs_quantize_dtype is not None or rhs_quantize_dtype is not None:
+    pallas_call_fn = aqt_pl.pallas_call
+  else:
+    pallas_call_fn = pl.pallas_call
+  call_gmm = pallas_call_fn(
       kernel,
       out_shape=jax.ShapeDtypeStruct((num_actual_groups, k, n), preferred_element_type),
       grid_spec=pltpu.PrefetchScalarGridSpec(
@@ -814,6 +855,31 @@ def tgmm(
       interpret=interpret,
       cost_estimate=cost_estimate,
   )
+
+  lhs_contracting_axis, rhs_contracting_axis = (lhs.ndim - 1,), (0,)
+  # Since block_spec.block_shape of rhs is None, the first axis is reduced
+  # inside kernel, e.g., if block_shape is (None, tn, tk) then a tensor of
+  # shape (tn, tk) will be feteched inside kernel instead of (1, tn, tk).
+  # Therefore, we need to add one to rhs_contracting_axis.
+  # rhs_contracting_axis = map(lambda x: x + 1, rhs_contracting_axis)
+
+  if lhs_quantize_dtype is not None:
+    if lhs_quantize_dtype == jnp.int4:
+      lhs_quantize_bits = 4
+    elif lhs_quantize_dtype == jnp.int8:
+      lhs_quantize_bits = 8
+    else:
+      lhs_quantize_bits = lhs_quantize_dtype
+    lhs = aqt_pl.quant(lhs, lhs_quantize_bits, use_dummy_static_bound=True)
+
+  if not isinstance(rhs, QTensor) and rhs_quantize_dtype is not None:
+    if rhs_quantize_dtype == jnp.int4:
+      rhs_quantize_bits = 4
+    elif rhs_quantize_dtype == jnp.int8:
+      rhs_quantize_bits = 8
+    else:
+      rhs_quantize_bits = rhs_quantize_dtype
+    rhs = aqt_pl.quant(rhs, rhs_quantize_bits, use_dummy_static_bound=True)
 
   out = call_gmm(
       group_metadata,
