@@ -1,6 +1,7 @@
 absl_py==2.2.2
 aqt==25.2.7
 benchmark_db_writer==1.0.0.dev20250610
+benchmark_db_writer.egg==info
 cloud_accelerator_diagnostics==0.1.1
 cloud_tpu_diagnostics==0.1.5
 datasets==3.6.0
