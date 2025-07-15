@@ -368,7 +368,10 @@ class RoutedMoeTest(unittest.TestCase):
         dtype=cfg.dtype,
     )
 
-    devices_array = maxtext_utils.create_device_mesh(cfg)
+    if device_count == 1:
+      devices_array = np.array(get_devices()).reshape((1,) * len(cfg.mesh_axes))
+    else:
+      devices_array = maxtext_utils.create_device_mesh(cfg)
     mesh = Mesh(devices_array, cfg.mesh_axes)
     variables, expected_output = self.get_expected_output(rng_model, hidden_states, cfg)
     actual_output, _ = self.get_moe_output(variables, hidden_states, cfg, mesh)

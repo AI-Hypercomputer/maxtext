@@ -61,8 +61,6 @@ from MaxText import max_utils
 from MaxText import max_logging
 from MaxText.maxengine import MaxEngine
 from MaxText.prefill_packing import PrefillProcessor, BatchedPrefillProcessor
-from MaxText.globals import tpu_present
-from MaxText.tests.attention_test import gpu_present
 
 
 try:

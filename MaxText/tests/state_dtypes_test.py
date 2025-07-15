@@ -29,7 +29,7 @@ from MaxText import optimizers
 from MaxText.layers import models
 from MaxText.layers import quantizations
 from MaxText import maxtext_utils
-from MaxText.globals import PKG_DIR, tpu_present
+from MaxText.globals import PKG_DIR
 
 Transformer = models.Transformer
 
