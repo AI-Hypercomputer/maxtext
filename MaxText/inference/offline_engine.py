@@ -792,7 +792,7 @@ class OfflineEngine:
     # Create meshes
     if not self.mesh:
       devices_array = jax.devices()
-      if not tpu_present:
+      if jax.device_count() == 1:
         devices_array = np.array(devices_array).reshape((1,) * len(config.mesh_axes))
       self.mesh = OfflineEngine.create_mesh(devices_array, self.config)
 
@@ -925,11 +925,11 @@ class OfflineEngine:
   def create_mesh(devices, config):
     """Create data parallelism meshes for each Inference worker."""
     ici_parallelism = max_utils.fill_unspecified_mesh_axes(config.ici_parallelism.copy(), len(devices), "ICI")
-    if len(devices) == 1 or not gpu_present and not tpu_present:
-        mesh_shape = (1,) * len(config.mesh_axes)
-        devices_array = np.array(devices).reshape(mesh_shape)
-        mesh = Mesh(devices_array, config.mesh_axes)
-        return mesh
+    if jax.device_count() == 1:
+      mesh_shape = (1,) * len(config.mesh_axes)
+      devices_array = np.array(devices).reshape(mesh_shape)
+      mesh = Mesh(devices_array, config.mesh_axes)
+      return mesh
     devices_array = mesh_utils.create_device_mesh(
         ici_parallelism,
         devices,

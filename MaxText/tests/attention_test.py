@@ -309,10 +309,10 @@ class AttentionTest(unittest.TestCase):
     self.cfg_cp = config_cp
     self.rng = jax.random.PRNGKey(0)
 
-    if tpu_present:  # and not gpu_present:
-      devices_array = maxtext_utils.create_device_mesh(self.cfg)
-    else:
+    if jax.device_count() == 1:
       devices_array = np.asarray(get_devices(), dtype=object)
+    else:
+      devices_array = maxtext_utils.create_device_mesh(self.cfg)
     mesh_axes = self.cfg.mesh_axes
     self.mesh = Mesh(devices_array, mesh_axes)
     devices_array_cp = maxtext_utils.create_device_mesh(self.cfg_cp)  # for context parallelism

@@ -28,7 +28,7 @@ import jax
 
 from MaxText import maxtext_utils
 from MaxText import pyconfig
-from MaxText.globals import PKG_DIR, tpu_present
+from MaxText.globals import PKG_DIR
 from MaxText.layers import models
 from MaxText.layers import quantizations
 

@@ -14,8 +14,6 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-from MaxText.globals import tpu_present
-
 """ Tests for kernels. """
 
 import unittest
@@ -27,6 +25,7 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 
+from MaxText.globals import tpu_present
 from MaxText.kernels.ragged_attention import ragged_mqa, reference_mqa, ragged_mha, reference_mha, ragged_gqa, reference_gqa
 
 

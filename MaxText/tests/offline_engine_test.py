@@ -38,24 +38,24 @@ class OfflineEngineTest(unittest.TestCase):
     super().setUp()
     self.cfg = self.init_pyconfig()
     if jax.device_count() == 1:
-        # Store the original function to use for multi-device cases if needed,
-        # though this test class focuses on single-device scenarios.
-        self.original_fill_fn = max_utils.fill_unspecified_mesh_axes
+      # Store the original function to use for multi-device cases if needed,
+      # though this test class focuses on single-device scenarios.
+      self.original_fill_fn = max_utils.fill_unspecified_mesh_axes
 
-        def patched_fill_unspecified_mesh_axes(axis_ratings, num_devices, ici_or_dcn_str):
-            # For a single device, the mesh shape must still match the number of mesh *axes* (12).
-            # The library code incorrectly calculates a shape of just `[1]`.
-            # We force it to be a 12-element list of 1s.
-            if num_devices == 1:
-                return [1] * len(self.cfg.mesh_axes)
-            # For multiple devices, the original logic is correct.
-            return self.original_fill_fn(axis_ratings, num_devices, ici_or_dcn_str)
+      def patched_fill_unspecified_mesh_axes(axis_ratings, num_devices, ici_or_dcn_str):
+        # For a single device, the mesh shape must still match the number of mesh *axes* (12).
+        # The library code incorrectly calculates a shape of just `[1]`.
+        # We force it to be a 12-element list of 1s.
+        if num_devices == 1:
+          return [1] * len(self.cfg.mesh_axes)
+        # For multiple devices, the original logic is correct.
+        return self.original_fill_fn(axis_ratings, num_devices, ici_or_dcn_str)
 
-        # Patch the function at its source location for the duration of these tests.
-        self.patcher = patch('MaxText.max_utils.fill_unspecified_mesh_axes', patched_fill_unspecified_mesh_axes)
-        self.patcher.start()
-        # Ensure the patch is stopped cleanly after the test class finishes.
-        self.addCleanup(self.patcher.stop)
+      # Patch the function at its source location for the duration of these tests.
+      self.patcher = patch("MaxText.max_utils.fill_unspecified_mesh_axes", patched_fill_unspecified_mesh_axes)
+      self.patcher.start()
+      # Ensure the patch is stopped cleanly after the test class finishes.
+      self.addCleanup(self.patcher.stop)
 
   def init_pyconfig(self, **kwargs):
     """Initialize MaxText pyconfig."""

@@ -27,14 +27,16 @@ from MaxText.utils.goodput_utils import create_goodput_recorder, maybe_monitor_g
 
 
 def has_bad_google_cred() -> bool:
-    try:
-        google.auth.default()
-        has_bad_google_cred.bad_google_cred = False
-    except google.auth.exceptions.DefaultCredentialsError:
-        has_bad_google_cred.bad_google_cred = True
-    return has_bad_google_cred.bad_google_cred
+  try:
+    google.auth.default()
+    has_bad_google_cred.bad_google_cred = False
+  except google.auth.exceptions.DefaultCredentialsError:
+    has_bad_google_cred.bad_google_cred = True
+  return has_bad_google_cred.bad_google_cred
+
 
 has_bad_google_cred.bad_google_cred = False
+
 
 class GoodputUtilsTest(unittest.TestCase):
   """Tests for Goodput monitoring and recording."""

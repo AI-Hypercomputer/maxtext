@@ -23,7 +23,7 @@ from tempfile import gettempdir
 import pytest
 
 from MaxText.train_compile import main as train_compile_main
-from MaxText.globals import PKG_DIR, tpu_present, is_cpu_only, gpu_present
+from MaxText.globals import PKG_DIR, tpu_present, is_cpu_only
 
 cpu_only = is_cpu_only()
 

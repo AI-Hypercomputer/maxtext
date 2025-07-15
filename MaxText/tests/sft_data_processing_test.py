@@ -95,7 +95,7 @@ class SFTDataProcessingTest(unittest.TestCase):
   def setUpClass(cls):
     super().setUpClass()
     if not gcs_bucket_accessible():
-        return
+      return
     exit_code = subprocess.call(
         [
             "gsutil",

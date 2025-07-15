@@ -31,6 +31,12 @@ cpu_present, gpu_present, tpu_present = cast(tuple[None | bool, None | bool, Non
 def device_presence(
     force_refresh=False,
 ) -> tuple[None | bool, None | bool, None | bool]:
+  """Check whether a device is present.
+  Args:
+      force_refresh (bool, optional): If True, force a refresh of the device list
+  Returns:
+      tuple[Optional[bool],Optional[bool],Optional[bool]] of (cpu_present, gpu_present, tpu_present)
+  """
   global cpu_present, gpu_present, tpu_present
   if cpu_present is None or gpu_present is None or tpu_present is None or force_refresh:
     for device in get_devices():

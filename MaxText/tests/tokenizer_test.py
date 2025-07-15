@@ -13,21 +13,23 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 """
-from MaxText.max_utils import gcs_bucket_accessible
 
-""" Tests for tokenizer
-"""
+""" Tests for tokenizer """
+
+import os
+import subprocess
+import unittest
 
 import numpy as np
-from MaxText import train_tokenizer
-from MaxText.input_pipeline import _input_pipeline_utils
-from MaxText.globals import PKG_DIR, tpu_present
 
-import unittest
 import pytest
+
 import tensorflow_datasets as tfds
-import subprocess
-import os
+
+from MaxText import train_tokenizer
+from MaxText.globals import PKG_DIR, tpu_present
+from MaxText.input_pipeline import _input_pipeline_utils
+from MaxText.max_utils import gcs_bucket_accessible
 
 
 class TokenizerTest(unittest.TestCase):
@@ -76,7 +78,10 @@ class TokenizerTest(unittest.TestCase):
     self.assertTrue(np.array_equal(self.source_tokenizer.encode(text).numpy(), self.test_tokenizer.encode(text).numpy()))
 
   @pytest.mark.tpu_only
-  @unittest.skipIf(not tpu_present or not gcs_bucket_accessible("maxtext-dataset"), "TPU only test" if not tpu_present else "gs://maxtext-dataset bucket not accessible")
+  @unittest.skipIf(
+      not tpu_present or not gcs_bucket_accessible("maxtext-dataset"),
+      "TPU only test" if not tpu_present else "gs://maxtext-dataset bucket not accessible",
+  )
   def test_detokenize(self):
     tokens = [66, 12, 10, 698]
     self.assertEqual(np.asarray(self.source_tokenizer.decode(tokens)), np.asarray(self.test_tokenizer.decode(tokens)))
@@ -105,14 +110,20 @@ class TikTokenTest(unittest.TestCase):
     cls.dataset = train_ds_builder.as_dataset(split="train", read_config=read_config, shuffle_files=True)
 
   @pytest.mark.tpu_only
-  @unittest.skipIf(not tpu_present or not gcs_bucket_accessible("maxtext-dataset"), "TPU only test" if not tpu_present else "gs://maxtext-dataset bucket not accessible")
+  @unittest.skipIf(
+      not tpu_present or not gcs_bucket_accessible("maxtext-dataset"),
+      "TPU only test" if not tpu_present else "gs://maxtext-dataset bucket not accessible",
+  )
   def test_tokenize(self):
     text = "This is a test"
     tokens = [2028, 374, 264, 1296]
     self.assertTrue(np.array_equal(self.source_tokenizer.encode(text), tokens))
 
   @pytest.mark.tpu_only
-  @unittest.skipIf(not tpu_present or not gcs_bucket_accessible("maxtext-dataset"), "TPU only test" if not tpu_present else "gs://maxtext-dataset bucket not accessible")
+  @unittest.skipIf(
+      not tpu_present or not gcs_bucket_accessible("maxtext-dataset"),
+      "TPU only test" if not tpu_present else "gs://maxtext-dataset bucket not accessible",
+  )
   def test_detokenize(self):
     tokens = [2028, 374, 264, 1296]
     text = "This is a test"
@@ -140,7 +151,10 @@ class HFTokenizerTest(unittest.TestCase):
     )
 
   @pytest.mark.tpu_only
-  @unittest.skipIf(not tpu_present or not gcs_bucket_accessible("maxtext-gemma"), "TPU only test" if not tpu_present else "gs://maxtext-gemma bucket not accessible")
+  @unittest.skipIf(
+      not tpu_present or not gcs_bucket_accessible("maxtext-gemma"),
+      "TPU only test" if not tpu_present else "gs://maxtext-gemma bucket not accessible",
+  )
   def test_tokenize(self):
     text = "This is a test"
     self.assertTrue(np.array_equal(self.hf_tokenizer.encode(text), self.sp_tokenizer.encode(text)))

@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-     https://www.apache.org/licenses/LICENSE-2.0
+	 https://www.apache.org/licenses/LICENSE-2.0
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -66,7 +66,7 @@ class TfdsDataProcessingTest(unittest.TestCase):
     )
     self.read_config.add_tfds_id = True
     if not gcs_bucket_accessible("max-experiments"):
-        return
+      return
     self.train_ds = self._get_datasets()
     self.train_iter = _tfds_data_processing.make_tfds_train_iterator(self.config, self.mesh, self.process_indices)
     self.eval_iter = _tfds_data_processing.make_tfds_eval_iterator(self.config, self.mesh, self.process_indices)

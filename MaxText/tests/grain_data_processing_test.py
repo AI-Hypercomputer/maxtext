@@ -32,21 +32,23 @@ from MaxText.globals import PKG_DIR
 
 skipGcsFuseTests = False
 
+
 def skipping_gcs_fuse() -> bool:
-    global skipGcsFuseTests
-    if skipGcsFuseTests:
-        return skipGcsFuseTests
-    elif which("gcsfuse") is None or which("fusermount") is None:
-        skipGcsFuseTests = True
+  global skipGcsFuseTests
+  if skipGcsFuseTests:
     return skipGcsFuseTests
+  elif which("gcsfuse") is None or which("fusermount") is None:
+    skipGcsFuseTests = True
+  return skipGcsFuseTests
 
 
 class GrainArrayRecordProcessingTest(unittest.TestCase):
+
   @classmethod
   def setUpClass(cls):
     super().setUpClass()
     if not skipping_gcs_fuse():
-        mount_gcsfuse()
+      mount_gcsfuse()
 
   def setUp(self):
     super().setUp()
@@ -74,7 +76,7 @@ class GrainArrayRecordProcessingTest(unittest.TestCase):
         self.mesh,
     )
     if skipping_gcs_fuse():
-        return
+      return
     self.train_iter = _grain_data_processing.make_grain_train_iterator(self.config, self.mesh, self.process_indices)
 
   @unittest.skipIf(skipping_gcs_fuse(), "Skipping GCS Fuse required tests")
@@ -163,7 +165,7 @@ class GrainParquetProcessingTest(unittest.TestCase):
   def setUpClass(cls):
     super().setUpClass()
     if not skipping_gcs_fuse():
-        mount_gcsfuse()
+      mount_gcsfuse()
 
   def setUp(self):
     super().setUp()
@@ -193,7 +195,7 @@ class GrainParquetProcessingTest(unittest.TestCase):
         self.mesh,
     )
     if not skipping_gcs_fuse():
-        self.train_iter = _grain_data_processing.make_grain_train_iterator(self.config, self.mesh, self.process_indices)
+      self.train_iter = _grain_data_processing.make_grain_train_iterator(self.config, self.mesh, self.process_indices)
 
   @unittest.skipIf(skipping_gcs_fuse(), "Skipping GCS Fuse required tests")
   def test_train_ds(self):

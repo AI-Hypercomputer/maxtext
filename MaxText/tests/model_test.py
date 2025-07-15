@@ -19,6 +19,7 @@ import sys
 import unittest
 import os.path
 
+import numpy as np
 import pytest
 
 import jax
@@ -28,7 +29,7 @@ from jax.sharding import Mesh
 from MaxText import maxtext_utils
 from MaxText import pyconfig
 from MaxText.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_TRAIN, MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE
-from MaxText.globals import PKG_DIR, tpu_present
+from MaxText.globals import PKG_DIR, tpu_present, get_devices
 from MaxText.layers import models
 from MaxText.layers import quantizations
 
@@ -80,7 +81,10 @@ class TestModel(unittest.TestCase):
     Does not perform any actual flops.
     """
     new_config = self.init_pyconfig(cast_logits_to_fp32=cast_logits_to_fp32, logits_dot_in_fp32=False)
-    devices_array = maxtext_utils.create_device_mesh(new_config)
+    if jax.device_count() == 1:
+      devices_array = np.array(get_devices()).reshape((1,) * len(new_config.mesh_axes))
+    else:
+      devices_array = maxtext_utils.create_device_mesh(new_config)
     mesh = Mesh(devices_array, new_config.mesh_axes)
     model = models.Transformer(config=new_config, mesh=mesh, quant=None)
 

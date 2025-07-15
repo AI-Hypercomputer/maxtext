@@ -17,6 +17,7 @@ import os.path
 import unittest
 from typing import Tuple
 
+import numpy as np
 import pytest
 
 import jax
@@ -29,7 +30,7 @@ from flax.linen import partitioning as nn_partitioning
 from MaxText import maxtext_utils
 from MaxText import pyconfig
 from MaxText.common_types import Config, DType
-from MaxText.globals import PKG_DIR, tpu_present
+from MaxText.globals import PKG_DIR, tpu_present, get_devices
 from MaxText.layers import linears
 from MaxText.layers import moe
 from MaxText.layers.initializers import NdInitializer, nd_dense_init
@@ -52,7 +53,10 @@ class TokenDroppingTest(unittest.TestCase):
         capacity_factor=2,
     )
     self.rng = jax.random.PRNGKey(42)
-    devices_array = maxtext_utils.create_device_mesh(self.cfg)
+    if jax.device_count() == 1:
+      devices_array = np.array(get_devices()).reshape((1,) * len(self.cfg.mesh_axes))
+    else:
+      devices_array = maxtext_utils.create_device_mesh(config=self.cfg)
     self.model = moe.RoutedMoE(
         name="MoeBlock",
         config=self.cfg,
@@ -179,7 +183,10 @@ class DeepSeekRoutingTest(unittest.TestCase):
         sparse_matmul=True,
     )
     self.rng = jax.random.PRNGKey(42)
-    devices_array = maxtext_utils.create_device_mesh(self.cfg)
+    if jax.device_count() == 1:
+      devices_array = np.array(get_devices()).reshape((1,) * len(self.cfg.mesh_axes))
+    else:
+      devices_array = maxtext_utils.create_device_mesh(self.cfg)
     self.model = moe.RoutedMoE(
         name="MoeBlock",
         config=self.cfg,

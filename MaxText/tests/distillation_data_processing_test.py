@@ -60,6 +60,7 @@ MESSAGES_DATA = [
     ],
 ]
 
+
 def add_arguments_to_parser(parser):
   parser.add_argument("--data-columns", nargs="+", required=True, help="Columns names that contain relevant data.")
   parser.add_argument("--use-chat-template", action="store_true", help="Enable tokenizer to apply a chat template.")
@@ -76,7 +77,7 @@ class DistillationDataProcessingTest(unittest.TestCase):
   def setUpClass(cls):
     super().setUpClass()
     if not gcs_bucket_accessible():
-        return
+      return
     exit_code = subprocess.check_output(
         [
             "gsutil",
@@ -95,7 +96,7 @@ class DistillationDataProcessingTest(unittest.TestCase):
     self.parser = add_arguments_to_parser(self.parser)
     llama2_chat_tokenizer_dir = os.path.join(os.path.dirname(PKG_DIR), "assets", "llama2-chat-tokenizer")
     if not os.path.isdir(llama2_chat_tokenizer_dir):
-        return
+      return
     self.tokenizer = transformers.AutoTokenizer.from_pretrained(llama2_chat_tokenizer_dir)
 
   @unittest.skipIf(not gcs_bucket_accessible(), "gs://maxtext-dataset bucket not accessible")
