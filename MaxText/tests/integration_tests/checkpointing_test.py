@@ -30,8 +30,10 @@ from datetime import datetime
 import json
 from math import isclose
 import os.path
+
 import pytest
-from MaxText.globals import PKG_DIR
+
+from MaxText.globals import PKG_DIR, tpu_present, gpu_present
 from MaxText.train import main as train_main
 
 
@@ -118,11 +120,13 @@ def run_checkpointing(hardware, attention_type):
 
 @pytest.mark.integration_test
 @pytest.mark.tpu_only
+@pytest.mark.skipif(not tpu_present, reason="TPU only test")
 def test_autoselected_attention():
   run_checkpointing("tpu", "autoselected")
 
 
 @pytest.mark.integration_test
 @pytest.mark.gpu_only
+@pytest.mark.skipif(not gpu_present, reason="GPU only test")
 def test_with_dot_product():
   run_checkpointing("gpu", "dot_product")

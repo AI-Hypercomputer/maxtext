@@ -110,9 +110,11 @@ class AotHloIdenticalTest(unittest.TestCase):
 
   # TODO (mattdavidow)
   @pytest.mark.skip(reason="Issue w/ kernels_test. Error: The TPU is already in use by process...")
+  @unittest.skip("Issue w/ kernels_test. Error: The TPU is already in use by process...")
   def test_default_hlo_match(self):
     self.assert_compile_and_real_match_hlo("default_run", None)
 
   @pytest.mark.skip(reason="Issue w/ kernels_test. Error: The TPU is already in use by process...")
+  @unittest.skip("Issue w/ kernels_test. Error: The TPU is already in use by process...")
   def test_int8_hlo_match(self):
     self.assert_compile_and_real_match_hlo("int8", "quantization=int8")

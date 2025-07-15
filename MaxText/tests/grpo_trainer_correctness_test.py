@@ -50,7 +50,7 @@ from MaxText import maxtext_utils
 from MaxText import pyconfig
 from MaxText.common_types import Array
 from MaxText.experimental.rl.grpo_trainer import compute_log_probs, grpo_loss_fn, _merge_grpo_state, generate_completions
-from MaxText.globals import PKG_DIR
+from MaxText.globals import PKG_DIR, tpu_present
 from MaxText.layers import models
 from MaxText.layers import quantizations
 
@@ -137,6 +137,7 @@ class GrpoTrainerTest(unittest.TestCase):
 
   @pytest.mark.skip(reason="Logit output test fragile, failing on jax upgrade to 0.6.2 - see b/425997645")
   @pytest.mark.tpu_only  # ATTENTION: Only run on TPU V4-8
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_grpo_trainer_correctness(self):
     # Get the expected (golden) data.
     golden_data = get_golden_data(self.config)

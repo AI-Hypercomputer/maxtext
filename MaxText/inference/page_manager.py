@@ -484,11 +484,11 @@ class PageManager:
       )
     # Check > 1 due to potential page 0 workaround
     if self.num_pages <= 1:
-      raise ValueError("`pagedattn_num_pages` must be greater than 1.")
+      raise ValueError("`num_pages` must be greater than 1.")
     if self.tokens_per_page <= 0:
-      raise ValueError("`pagedattn_tokens_per_page` must be positive.")
+      raise ValueError("`tokens_per_page` must be positive.")
     if self.max_page_groups <= 0:
-      raise ValueError("`pagedattn_max_page_groups` must be positive.")
+      raise ValueError("`max_page_groups` must be positive.")
 
   def update_prefill_pages(self, page_state: PageState, page_group_id: int, true_length: int) -> PageState:
     """Reserves pages for a specific page group during prefill (global state).
