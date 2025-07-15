@@ -31,6 +31,7 @@ Key supported features:
 * Models: Llama 2, Llama 3, Llama 4, Mistral and Mixtral family, Gemma, Gemma 2, Gemma 3, and DeepSeek family
 
 ## Announcements
+* [July 11, 2025] Multi-Token Prediction (MTP) training is now supported! This feature adds an auxiliary loss based on predicting multiple future tokens, inspired by the [DeepSeek-V3 paper](https://arxiv.org/html/2412.19437v1), to enhance training efficiency.
 * [June 25, 2025] DeepSeek R1-0528 variant is now supported!
 * [April 24, 2025] Llama 4 Maverick models are now supported!
 * [April 14, 2025] Llama 4 Scout models are now supported. Context length is currently limited to 8k and we have many ideas for optimization but we're working on both these things.  Note that models are text-only for now, but we're working on full multi-modal support!
