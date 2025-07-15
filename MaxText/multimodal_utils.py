@@ -316,7 +316,7 @@ def split_to_tiles(images: np.ndarray, num_tiles_height: int, num_tiles_width: i
 def pre_process_gemma3_image(image):
   """Performs a bi-linear resize (with anti-aliasing) and normalizes the image."""
   target_size = (GEMMA_DEFAULT_IMAGE_SIZE, GEMMA_DEFAULT_IMAGE_SIZE)
-  pil_img = Image.fromarray(image)
+  pil_img = Image.fromarray(np.array(image))
   resample_method = Image.Resampling.BILINEAR
   # Use a higher quality downsampling filter to approximate antialias=True
   if pil_img.size[0] > target_size[0] or pil_img.size[1] > target_size[1]:
@@ -369,7 +369,7 @@ def pre_process_llama4_image(image):
 
   # If more than one tile, add a global tile by resizing the image to the tile size
   if ratio_h * ratio_w > 1:
-    pil_img = Image.fromarray(image)
+    pil_img = Image.fromarray(np.array(image))
     resample_method = Image.Resampling.BILINEAR
     # Use a higher quality downsampling filter to approximate antialias=True
     if pil_img.size[0] > LLAMA4_TILE_SIZE or pil_img.size[1] > LLAMA4_TILE_SIZE:
