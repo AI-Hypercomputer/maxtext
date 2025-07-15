@@ -38,9 +38,7 @@ def tpu_generation() -> int:
   my_tpu_kind = tpu_kind()
   if version := _TPU_KIND_PATTERN.match(my_tpu_kind):
     return int(version[1])
-  raise NotImplementedError(
-      f"Only TPU devices are supported: Invalid device_kind: '{my_tpu_kind}'"
-  )
+  raise NotImplementedError(f"Only TPU devices are supported: Invalid device_kind: '{my_tpu_kind}'")
 
 
 def supports_bfloat16_matmul() -> bool:
