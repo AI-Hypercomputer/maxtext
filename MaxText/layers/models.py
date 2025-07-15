@@ -61,7 +61,6 @@ class Transformer(nnx.Module):
     self.mtp_block = None
     
     # If MTP is enabled via config, set up the MTP block.
-    # TODO: Hackme, use normal getter to retrieve initializing status
     if self.config.mtp_num_layers > 0:
       # Get the list of layer blueprints for the current model.
       layer_types = self.decoder.get_decoder_layers()
