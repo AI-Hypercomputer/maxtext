@@ -21,14 +21,15 @@ from typing import Optional
 import jax.numpy as jnp
 from jax.sharding import Mesh
 
-from flax import linen as nn
+from flax import nnx
+from flax.nnx import bridge as bridge_nnx
 
 from MaxText.common_types import DecoderBlockType, Config, MODEL_MODE_TRAIN, MODEL_MODE_AUTOREGRESSIVE, DECODING_ACTIVE_SEQUENCE_INDICATOR
 from MaxText.inference import page_manager
 from MaxText import multimodal_utils
-from MaxText.layers.decoders import Decoder
-from MaxText.layers.embeddings import embed_as_linen
-from MaxText.layers.encoders import VisionEncoder
+from MaxText.layers.decoders import Decoder #TODO: update Decoder to use nnx
+from MaxText.layers.embeddings import Embed
+from MaxText.layers.encoders import VisionEncoder #TODO: update VisionEncoder to use nnx
 from MaxText.layers.quantizations import AqtQuantization as Quant
 from MaxText.layers.multi_token_prediction import MultiTokenPredictionBlock
 from MaxText.maxtext_utils import all_gather_over_fsdp
@@ -38,33 +39,29 @@ from MaxText.maxtext_utils import all_gather_over_fsdp
 # ------------------------------------------------------------------------------
 
 
-class Transformer(nn.Module):
+class Transformer(nnx.Module):
   """An autoregressive transformer model."""
-
-  # Make new attributes required, so that all Transformer dependencies (train, decode, compile, etc) will error instead
-  #   of silently use defaults.
-  # pylint: disable=attribute-defined-outside-init
-  config: Config
-  mesh: Mesh
-  quant: Quant
-
-  def setup(self):
+      
+  def __init__(self, config: Config, mesh: Mesh, quant: Quant)->None:
     """Initialize shared_embedding & decoder layers."""
-
-    cfg = self.config
-    mesh = self.mesh
-    self.shared_embedding = embed_as_linen(
-        num_embeddings=cfg.vocab_size,
-        num_features=cfg.emb_dim,
-        dtype=cfg.dtype,
-        attend_dtype=jnp.float32 if cfg.logits_dot_in_fp32 else cfg.dtype,  # for logit training stability
-        embedding_init=nn.initializers.normal(stddev=1.0),
+    self.config = config
+    self.mesh = mesh
+    self.quant = quant
+    self.shared_embedding = Embed(
+        num_embeddings=self.config.vocab_size,
+        num_features=self.config.emb_dim,
+        dtype=self.config.dtype,
+        attend_dtype=jnp.float32 if self.config.logits_dot_in_fp32 else self.config.dtype,  # for logit training stability
+        embedding_init=nnx.initializers.normal(stddev=1.0),
         name="token_embedder",
-        config=cfg,
+        config=self.config,
     )
-    self.vision_encoder = VisionEncoder(config=cfg, mesh=mesh) if cfg.use_multimodal else None
-    self.decoder = Decoder(config=cfg, shared_embedding=self.shared_embedding, mesh=mesh, quant=self.quant)
+    self.vision_encoder = VisionEncoder(config=self.config, mesh=self.mesh) if self.config.use_multimodal else None
+    self.decoder = Decoder(config=self.config, shared_embedding=self.shared_embedding, mesh=self.mesh, quant=self.quant)
+    self.mtp_block = None
+    
     # If MTP is enabled via config, set up the MTP block.
+    # TODO: Hackme, use normal getter to retrieve initializing status
     if self.config.mtp_num_layers > 0:
       # Get the list of layer blueprints for the current model.
       layer_types = self.decoder.get_decoder_layers()
@@ -131,7 +128,9 @@ class Transformer(nn.Module):
     # dummy target tensors. This allows Flax to trace the MTPBlock and create
     # all its necessary parameters, without requiring the main training pipeline
     # to be aware of this initialization detail.
-    if self.is_initializing() and self.config.mtp_num_layers > 0:
+    # TODO: Hackme, use normal getter to retrieve initializing status
+    if (self._object__state.initializing or bridge_nnx.current_module().is_initializing()) \
+      and self.config.mtp_num_layers > 0:
       if decoder_target_tokens is None:
         dummy_shape = decoder_input_tokens.shape
         decoder_target_tokens = jnp.ones(dummy_shape, dtype=jnp.int32)
@@ -161,7 +160,7 @@ class Transformer(nn.Module):
     return logits
 
 
-class ZeroOneTransformer(nn.Module):
+class ZeroOneTransformer(nnx.Module):
   """
   A wrapper for the base Transformer model designed to implement the Zero-1
   FSDP optimization.
@@ -176,14 +175,17 @@ class ZeroOneTransformer(nn.Module):
   network communication, which can improve training speed if sufficient memory is
   available.
   """
+  def __init__(
+      self,
+      config: Config,
+      mesh: Mesh,
+      quant: Quant,
+  )-> None:
+    self.config = config
+    self.mesh = mesh
+    self.quant = quant
 
-  config: Config
-  mesh: Mesh
-  quant: Quant
-
-  def setup(self):
-    self.model = Transformer(self.config, self.mesh, self.quant)
-
+    self.model = Transformer(config=self.config, mesh=self.mesh, quant=self.quant)
   def __call__(
       self,
       decoder_input_tokens: jnp.ndarray,
@@ -195,30 +197,36 @@ class ZeroOneTransformer(nn.Module):
       previous_chunk=None,
       true_length: Optional[int] = None,
       slot: Optional[int] = None,
-      page_state: Optional[page_manager.PageState] = None,
       partition_spec=None,
+      page_state: Optional[page_manager.PageState] = None,
       decoder_target_tokens: Optional[jnp.ndarray] = None,
       decoder_target_mask: Optional[jnp.ndarray] = None,
   ):
-    if self.is_initializing():
+    
+    # TODO: Hackme, use normal getter to retrieve initializing status
+    if self._object__state.initializing or bridge_nnx.current_module().is_initializing():
       return self.model(
-          decoder_input_tokens,
-          decoder_positions,
-          decoder_segment_ids,
-          encoder_images,
-          enable_dropout,
-          model_mode,
-          previous_chunk,
-          true_length,
-          slot,
-          page_state,
-      )
-    all_model_weights = all_gather_over_fsdp(
-        self.model.variables, partition_spec, mesh=self.mesh, logical_axis_rules=self.config.logical_axis_rules
+        decoder_input_tokens=decoder_input_tokens,
+        decoder_positions=decoder_positions,
+        decoder_segment_ids=decoder_segment_ids,
+        encoder_images=encoder_images,
+        enable_dropout=enable_dropout,
+        model_mode=model_mode,
+        previous_chunk=previous_chunk,
+        true_length=true_length,
+        slot=slot,
+        page_state=page_state,
     )
 
-    return self.model.apply(
-        all_model_weights,
+    # Otherwise, gather weights once
+    all_weights = all_gather_over_fsdp(
+        nnx.state(self.model), partition_spec, 
+        mesh=self.mesh,
+        logical_axis_rules=self.config.logical_axis_rules)
+    
+    nnx.update(self.model, all_weights)
+    
+    return self.model(
         decoder_input_tokens=decoder_input_tokens,
         decoder_positions=decoder_positions,
         decoder_segment_ids=decoder_segment_ids,

@@ -22,16 +22,17 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
 
-from flax import linen as nn
+from flax import nnx
 
 from MaxText.common_types import Config, MODEL_MODE_TRAIN
-from MaxText.layers.attentions import dense_general
-from MaxText.layers.normalizations import rms_norm
+from MaxText.layers.linears import DenseGeneral,_normalize_axes,_canonicalize_tuple
+from MaxText.layers.normalizations import RMSNorm
 from MaxText.layers.decoders import Decoder, DecoderLayer
 from MaxText import max_utils
 from MaxText import maxtext_utils
 
 from MaxText.globals import EPS
+from typing import Iterable, Union
 
 
 def roll_and_mask(x: jnp.ndarray, shift: int = -1) -> jnp.ndarray:
@@ -55,7 +56,7 @@ def roll_and_mask(x: jnp.ndarray, shift: int = -1) -> jnp.ndarray:
   return jnp.roll(x, shift, axis=1).at[:, shift:, ...].set(0)
 
 
-class MultiTokenPredictionLayer(nn.Module):
+class MultiTokenPredictionLayer(nnx.Module):
   """
   Implements Multi-Token Prediction (MTP) step:
       1. Normalization of previous hidden state and target token embedding.
@@ -72,12 +73,16 @@ class MultiTokenPredictionLayer(nn.Module):
       processed hidden state from its internal transformer block.
   """
 
-  config: Config
-  mesh: Mesh
-  layer_number: int
-  transformer_layer_module: Type[DecoderLayer] = DecoderLayer
+  def __init__(self, config: Config, mesh: Mesh, layer_number: int, 
+        transformer_layer_module: Type[DecoderLayer]= DecoderLayer,
+        axis: Union[Iterable[int], int] = -1,
+    )->None:
+    self.config = config
+    self.mesh = mesh
+    self.transformer_layer_module = transformer_layer_module
+    self.layer_number = layer_number
+    self.axis = axis
 
-  @nn.compact
   def __call__(
       self,
       prev_hidden_state: jnp.ndarray,
@@ -114,7 +119,7 @@ class MultiTokenPredictionLayer(nn.Module):
     k = self.layer_number
 
     # --- 1. Normalize Hidden State and Embedding ---
-    embedding_norm_layer = rms_norm(
+    embedding_norm_layer = RMSNorm(
         num_features=target_token_embedding.shape[-1],
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
@@ -124,7 +129,7 @@ class MultiTokenPredictionLayer(nn.Module):
     )
     embedding_norm = embedding_norm_layer(target_token_embedding)
 
-    hidden_state_norm_layer = rms_norm(
+    hidden_state_norm_layer = RMSNorm(
         num_features=prev_hidden_state.shape[-1],
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
@@ -140,15 +145,19 @@ class MultiTokenPredictionLayer(nn.Module):
     concatenated_features = jnp.concatenate([embedding_norm, hidden_state_norm], axis=-1)
 
     # --- 3. Project Concatenated Features ---
+    inputs_shape = concatenated_features.shape
+    in_features_shape = tuple(inputs_shape[ax] for ax in _normalize_axes(_canonicalize_tuple(self.axis), len(inputs_shape)))
+    
     # Projects from 2*H back down to H
-    projection_layer = dense_general(
-        inputs_shape=concatenated_features.shape,
+    projection_layer = DenseGeneral(
+        inputs_shape=in_features_shape,
         out_features_shape=cfg.base_emb_dim,
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
         use_bias=False,
         kernel_axes=("concat_embed", "embed"),
         name=f"mtp_{k}_projection",
+        axis=self.axis
     )
     # Shape: [B, S, H]
     projected_features = projection_layer(concatenated_features)
@@ -174,15 +183,15 @@ class MultiTokenPredictionLayer(nn.Module):
     return next_hidden_state
 
 
-class MultiTokenPredictionBlock(nn.Module):
+class MultiTokenPredictionBlock(nnx.Module):
   """Orchestrates the MTP process by running a sequence of MTP layers."""
+  
+  def __init__(self, config: Config, mesh: Mesh, transformer_layer_module: Type[DecoderLayer], decoder: Decoder)->None:
+    self.config = config
+    self.mesh = mesh
+    self.transformer_layer_module = transformer_layer_module
+    self.decoder = decoder
 
-  config: Config
-  mesh: Mesh
-  transformer_layer_module: Type[DecoderLayer]
-  decoder: Decoder
-
-  @nn.compact
   def __call__(
       self,
       main_hidden_state,
