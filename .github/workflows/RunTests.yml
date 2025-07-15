@@ -50,8 +50,8 @@ jobs:
       device_type: tpu
       device_name: v4-8
       cloud_runner: linux-x86-n2-16-buildkit
-      build_mode: jax_ai_image
-      base_image: us-docker.pkg.dev/tpu-prod-env-multipod/jax-stable-stack/candidate/tpu:latest
+      build_mode: stable
+      #base_image: us-docker.pkg.dev/tpu-prod-env-multipod/jax-stable-stack/candidate/tpu:latest
 
   gpu_image:
     needs: prelim
