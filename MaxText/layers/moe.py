@@ -1148,7 +1148,6 @@ class RoutedMoE(nn.Module):
             top_k_indices, weights  # pylint: disable=undefined-variable,possibly-used-before-assignment
         )
         mask_axes = ("activation_batch", "activation_norm_length", None, None)
-        input_axis = ("activation_batch", "activation_norm_length", "activation_embed")
         dispatch_axis = (
             "activation_exp",
             "activation_batch_no_exp",

@@ -60,9 +60,6 @@ from MaxText.layers.quantizations import AqtQuantization as Quant
 # pylint: disable=line-too-long, g-doc-args, g-doc-return-or-yield, bad-continuation, g-inconsistent-quotes
 # pytype: disable=attribute-error
 
-from jax.experimental.shard import reshard, auto_axes, explicit_axes
-from jax.sharding import AxisType
-
 
 def debug_sharding(array, prefix=""):
   global_shape = array.shape
@@ -1751,8 +1748,6 @@ class Attention(nn.Module):
     Returns:
       output of shape `[batch, length, q_features]`.
     """
-    # if self.config.ici_context_parallelism > 1 and self.config.ici_expert_parallelism > 1:
-    #   is_batch_shard_by_expert = True
     is_batch_shard_by_expert = self.config.is_batch_shard_by_expert
 
     # DEBUGGING DEFINITION BEGIN #
@@ -1796,6 +1791,8 @@ class Attention(nn.Module):
 
     prefix = f"\nuse_nn_constraint={use_nn_constraint}, context={self.config.ici_context_parallelism}, expert={self.config.ici_expert_parallelism}, is_batch_shard_by_expert={is_batch_shard_by_expert}\n\n"
     debug_sharding(inputs_q, prefix + "inputs_q\n")
+    if not self.config.fused_qkv:
+      debug_sharding(inputs_kv, "inputs_kv\n")
 
     # apply projection.
     if self.config.fused_qkv:

@@ -38,7 +38,6 @@ from MaxText.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_
 from MaxText.globals import PKG_DIR
 from MaxText.layers import attentions
 from MaxText.layers.attentions import Attention, MLA, ChunkedCausalMask
-from jax.sharding import Mesh, PartitionSpec, NamedSharding
 
 
 class BidirectionalBlockMaskTest(unittest.TestCase):
@@ -288,49 +287,21 @@ class AttentionTest(unittest.TestCase):
     )
     self.cfg = config
 
-    # config_cp = pyconfig.initialize(
-    #     [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
-    #     **self.config_arguments,
-    #     ici_context_parallelism=4,  # use context parallelism of 4
-    #     context_parallel_load_balance=False,  # set load_balancing to False such that
-    #     # there's no need for reordering the input/output
-    # )
-
-    # self.cfg_cp = config_cp
-
-    # config_ep1 = pyconfig.initialize(
-    #     [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
-    #     **self.config_arguments,
-    #     ici_context_parallelism=2,
-    #     ici_expert_parallelism=2,
-    #     is_batch_shard_by_expert=True,
-    # )
-    # self.cfg_ep1 = config_ep1
-
-    config_ep2 = pyconfig.initialize(
+    config_cp = pyconfig.initialize(
         [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
         **self.config_arguments,
-        ici_context_parallelism=2,
-        ici_expert_parallelism=2,
-        is_batch_shard_by_expert=False,
+        ici_context_parallelism=4,  # use context parallelism of 4
+        context_parallel_load_balance=False,  # set load_balancing to False such that
+        # there's no need for reordering the input/output
     )
-    self.cfg_ep2 = config_ep2
-    #jax.debug.print("{}", self.cfg_ep2.logical_axis_rules)
 
+    self.cfg_cp = config_cp
     self.rng = jax.random.PRNGKey(0)
 
     devices_array = maxtext_utils.create_device_mesh(self.cfg)
     self.mesh = Mesh(devices_array, self.cfg.mesh_axes)
-
-    # devices_array_cp = maxtext_utils.create_device_mesh(self.cfg_cp)  # for context parallelism
-    # self.mesh_cp = Mesh(devices_array_cp, self.cfg_cp.mesh_axes)  # for context parallelism
-
-    # devices_array_ep1 = maxtext_utils.create_device_mesh(self.cfg_ep1)
-    # self.mesh_ep1 = Mesh(devices_array_ep1, self.cfg_ep1.mesh_axes)
-
-    devices_array_ep2 = maxtext_utils.create_device_mesh(self.cfg_ep2)
-    self.mesh_ep2 = Mesh(devices_array_ep2, self.cfg_ep2.mesh_axes)
-
+    devices_array_cp = maxtext_utils.create_device_mesh(self.cfg_cp)  # for context parallelism
+    self.mesh_cp = Mesh(devices_array_cp, self.cfg_cp.mesh_axes)  # for context parallelism
     self.global_batch_size = self.cfg.global_batch_size_to_train_on
     self.num_kv_heads = self.cfg.num_kv_heads
     self.num_query_heads = self.cfg.num_query_heads
@@ -521,192 +492,29 @@ class AttentionTest(unittest.TestCase):
 
     lnx, decoder_segment_ids, decoder_positions = self.get_data(self.dtype)
 
-    # attention_as_mha_generic = Attention(
-    #     config=self.cfg,
-    #     num_query_heads=self.num_query_heads,
-    #     num_kv_heads=num_kv_heads,
-    #     head_dim=self.head_dim,
-    #     max_target_length=self.max_target_length,
-    #     max_prefill_predict_length=self.cfg.max_prefill_predict_length,
-    #     mesh=self.mesh,
-    #     attention_kernel="dot_product",
-    #     dtype=self.dtype,
-    #     dropout_rate=self.cfg.dropout_rate,
-    #     name="self_attention",
-    # )
-
-    # attention_as_mha_generic_variable = attention_as_mha_generic.init(
-    #     {"params": self.rng, "aqt": self.rng},
-    #     jnp.ones((self.global_batch_size, self.max_target_length, self.embed_dim)),
-    #     jnp.ones((self.global_batch_size, self.max_target_length, self.embed_dim)),
-    #     jnp.ones((self.global_batch_size, self.max_target_length)),
-    # )
-
-    # mha_generic_output = attention_as_mha_generic.apply(
-    #     attention_as_mha_generic_variable,
-    #     lnx,
-    #     lnx,
-    #     decoder_segment_ids=decoder_positions,
-    #     inputs_positions=decoder_segment_ids,
-    #     deterministic=True,
-    #     model_mode=MODEL_MODE_TRAIN,
-    #     rngs={"aqt": self.rng},
-    # )
-
-    # attention_as_mha_flash = Attention(
-    #     config=self.cfg,
-    #     num_query_heads=self.num_query_heads,
-    #     num_kv_heads=num_kv_heads,
-    #     head_dim=self.head_dim,
-    #     max_target_length=self.max_target_length,
-    #     max_prefill_predict_length=self.cfg.max_prefill_predict_length,
-    #     mesh=self.mesh,
-    #     attention_kernel="flash",
-    #     dtype=self.dtype,
-    #     dropout_rate=self.cfg.dropout_rate,
-    #     name="self_attention",
-    # )
-
-    # attention_as_mha_flash_variable = attention_as_mha_flash.init(
-    #     {"params": self.rng, "aqt": self.rng},
-    #     jnp.ones((self.global_batch_size, self.max_target_length, self.embed_dim)),
-    #     jnp.ones((self.global_batch_size, self.max_target_length, self.embed_dim)),
-    #     jnp.ones((self.global_batch_size, self.max_target_length)),
-    # )
-
-    # mha_generic_flash_output = attention_as_mha_flash.apply(
-    #     attention_as_mha_flash_variable,
-    #     lnx,
-    #     lnx,
-    #     decoder_segment_ids=decoder_positions,
-    #     inputs_positions=decoder_segment_ids,
-    #     deterministic=True,
-    #     model_mode=MODEL_MODE_TRAIN,
-    #     rngs={"aqt": self.rng},
-    # )
-
-    # self.assertTrue(
-    #     jax.numpy.allclose(mha_generic_output, mha_generic_flash_output, rtol=1e-01, atol=1e-01, equal_nan=False)
-    # )
-
-    # # Test with Context Parallelism
-    # attention_as_mha_flash_cp = Attention(
-    #     config=self.cfg_cp,  # we pass the context parallelism in the config
-    #     num_query_heads=self.cfg_cp.num_query_heads,
-    #     num_kv_heads=num_kv_heads,
-    #     head_dim=self.cfg_cp.head_dim,
-    #     max_target_length=self.cfg_cp.max_target_length,
-    #     max_prefill_predict_length=self.cfg_cp.max_prefill_predict_length,
-    #     mesh=self.mesh_cp,
-    #     attention_kernel="flash",
-    #     dtype=self.dtype,
-    #     dropout_rate=self.cfg_cp.dropout_rate,
-    #     name="self_attention_cp",
-    # )
-    # attention_as_mha_flash_cp_variable = attention_as_mha_flash_cp.init(
-    #     {"params": self.rng, "aqt": self.rng},
-    #     jnp.ones((self.global_batch_size, self.max_target_length, self.embed_dim)),
-    #     jnp.ones((self.global_batch_size, self.max_target_length, self.embed_dim)),
-    #     jnp.ones((self.global_batch_size, self.max_target_length)),
-    # )
-
-    # mha_generic_flash_cp_output = attention_as_mha_flash_cp.apply(
-    #     attention_as_mha_flash_cp_variable,
-    #     lnx,
-    #     lnx,
-    #     decoder_segment_ids=decoder_positions,
-    #     inputs_positions=decoder_segment_ids,
-    #     deterministic=True,
-    #     model_mode=MODEL_MODE_TRAIN,
-    #     rngs={"aqt": self.rng},
-    # )
-
-    # # Assert that the logits generated by the generic flash and flash attention+context parallelism are close
-    # self.assertTrue(
-    #     jax.numpy.allclose(mha_generic_flash_output, mha_generic_flash_cp_output, rtol=1e-01, atol=1e-01, equal_nan=False),
-    #     msg="Logits from generic flash and flash attention+context parallelism are not close.",
-    # )
-
-    # # Assert that the logits generated by the generic dot product and flash attention+context parallelism are close
-    # self.assertTrue(
-    #     jax.numpy.allclose(mha_generic_output, mha_generic_flash_cp_output, rtol=1e-01, atol=1e-01, equal_nan=False),
-    #     msg="Logits from generic dot product and flash attention+context parallelism are not close.",
-    # )
-
-    # # Test with EP1
-    # attention_as_mha_flash_ep1 = Attention(
-    #     config=self.cfg_ep1,  # we pass the context parallelism in the config
-    #     num_query_heads=self.cfg_ep1.num_query_heads,
-    #     num_kv_heads=num_kv_heads,
-    #     head_dim=self.cfg_ep1.head_dim,
-    #     max_target_length=self.cfg_ep1.max_target_length,
-    #     max_prefill_predict_length=self.cfg_ep1.max_prefill_predict_length,
-    #     mesh=self.mesh_ep1,
-    #     attention_kernel="flash",
-    #     dtype=self.dtype,
-    #     dropout_rate=self.cfg_ep1.dropout_rate,
-    #     name="self_attention_ep1",
-    # )
-    # attention_as_mha_flash_ep1_variable = attention_as_mha_flash_ep1.init(
-    #     {"params": self.rng, "aqt": self.rng},
-    #     jnp.ones((self.global_batch_size, self.max_target_length, self.embed_dim)),
-    #     jnp.ones((self.global_batch_size, self.max_target_length, self.embed_dim)),
-    #     jnp.ones((self.global_batch_size, self.max_target_length)),
-    # )
-
-    # mha_generic_flash_ep1_output = attention_as_mha_flash_ep1.apply(
-    #     attention_as_mha_flash_ep1_variable,
-    #     lnx,
-    #     lnx,
-    #     decoder_segment_ids=decoder_positions,
-    #     inputs_positions=decoder_segment_ids,
-    #     deterministic=True,
-    #     model_mode=MODEL_MODE_TRAIN,
-    #     rngs={"aqt": self.rng},
-    # )
-
-    # jax.debug.print("global {shape}", shape=mha_generic_flash_ep1_output.shape)
-    # jax.debug.print("local {shape}", shape=mha_generic_flash_ep1_output.addressable_shards[0].data.shape)
-
-    # # Assert that the logits generated by the generic flash and flash attention+context parallelism are close
-    # self.assertTrue(
-    #     jax.numpy.allclose(mha_generic_flash_output, mha_generic_flash_ep1_output, rtol=1e-01, atol=1e-01, equal_nan=False),
-    #     msg="Logits from generic flash and flash attention+context parallelism are not close.",
-    # )
-
-    # # Assert that the logits generated by the generic dot product and flash attention+context parallelism are close
-    # self.assertTrue(
-    #     jax.numpy.allclose(mha_generic_output, mha_generic_flash_ep1_output, rtol=1e-01, atol=1e-01, equal_nan=False),
-    #     msg="Logits from generic dot product and flash attention+context parallelism are not close.",
-    # )
-
-    # Test with EP2
-    attention_as_mha_flash_ep2 = Attention(
-        config=self.cfg_ep2,  # we pass the context parallelism in the config
-        num_query_heads=self.cfg_ep2.num_query_heads,
+    attention_as_mha_generic = Attention(
+        config=self.cfg,
+        num_query_heads=self.num_query_heads,
         num_kv_heads=num_kv_heads,
-        head_dim=self.cfg_ep2.head_dim,
-        max_target_length=self.cfg_ep2.max_target_length,
-        max_prefill_predict_length=self.cfg_ep2.max_prefill_predict_length,
-        mesh=self.mesh_ep2,
-        attention_kernel="flash",
+        head_dim=self.head_dim,
+        max_target_length=self.max_target_length,
+        max_prefill_predict_length=self.cfg.max_prefill_predict_length,
+        mesh=self.mesh,
+        attention_kernel="dot_product",
         dtype=self.dtype,
-        dropout_rate=self.cfg_ep2.dropout_rate,
-        name="self_attention_ep2",
+        dropout_rate=self.cfg.dropout_rate,
+        name="self_attention",
     )
-    attention_as_mha_flash_ep2_variable = attention_as_mha_flash_ep2.init(
+
+    attention_as_mha_generic_variable = attention_as_mha_generic.init(
         {"params": self.rng, "aqt": self.rng},
         jnp.ones((self.global_batch_size, self.max_target_length, self.embed_dim)),
         jnp.ones((self.global_batch_size, self.max_target_length, self.embed_dim)),
         jnp.ones((self.global_batch_size, self.max_target_length)),
     )
 
-    # lnx, _, _ = self.get_data(self.dtype)
-    # jax.debug.print("Sharding of lnx input BEFORE apply: {s}", s=lnx.sharding)
-
-
-    mha_generic_flash_ep2_output = attention_as_mha_flash_ep2.apply(
-        attention_as_mha_flash_ep2_variable,
+    mha_generic_output = attention_as_mha_generic.apply(
+        attention_as_mha_generic_variable,
         lnx,
         lnx,
         decoder_segment_ids=decoder_positions,
@@ -716,33 +524,85 @@ class AttentionTest(unittest.TestCase):
         rngs={"aqt": self.rng},
     )
 
-    print(f"Number of available devices: {len(jax.devices())}")
-    print(f"global_batch_size: {self.global_batch_size}")
-    print(f"max_target_length: {self.max_target_length}")
-
-    # mha_generic_flash_ep2_output, inputs_q, query, out = mha_generic_flash_ep2_output
-    # print(inputs_q.addressable_shards[0].data.shape)
-    # print(query.addressable_shards[0].data.shape)
-    # print(out.addressable_shards[0].data.shape)
-
-    jax.debug.print("global {shape}", shape=mha_generic_flash_ep2_output.shape)
-    jax.debug.print(
-        "Length {length}, local {shape}",
-        length=len(mha_generic_flash_ep2_output.addressable_shards),
-        shape=mha_generic_flash_ep2_output.addressable_shards[0].data.shape,
+    attention_as_mha_flash = Attention(
+        config=self.cfg,
+        num_query_heads=self.num_query_heads,
+        num_kv_heads=num_kv_heads,
+        head_dim=self.head_dim,
+        max_target_length=self.max_target_length,
+        max_prefill_predict_length=self.cfg.max_prefill_predict_length,
+        mesh=self.mesh,
+        attention_kernel="flash",
+        dtype=self.dtype,
+        dropout_rate=self.cfg.dropout_rate,
+        name="self_attention",
     )
 
-    # # Assert that the logits generated by the generic flash and flash attention+context parallelism are close
-    # self.assertTrue(
-    #     jax.numpy.allclose(mha_generic_flash_output, mha_generic_flash_ep2_output, rtol=1e-01, atol=1e-01, equal_nan=False),
-    #     msg="Logits from generic flash and flash attention+context parallelism are not close.",
-    # )
+    attention_as_mha_flash_variable = attention_as_mha_flash.init(
+        {"params": self.rng, "aqt": self.rng},
+        jnp.ones((self.global_batch_size, self.max_target_length, self.embed_dim)),
+        jnp.ones((self.global_batch_size, self.max_target_length, self.embed_dim)),
+        jnp.ones((self.global_batch_size, self.max_target_length)),
+    )
 
-    # # Assert that the logits generated by the generic dot product and flash attention+context parallelism are close
-    # self.assertTrue(
-    #     jax.numpy.allclose(mha_generic_output, mha_generic_flash_ep2_output, rtol=1e-01, atol=1e-01, equal_nan=False),
-    #     msg="Logits from generic dot product and flash attention+context parallelism are not close.",
-    # )
+    mha_generic_flash_output = attention_as_mha_flash.apply(
+        attention_as_mha_flash_variable,
+        lnx,
+        lnx,
+        decoder_segment_ids=decoder_positions,
+        inputs_positions=decoder_segment_ids,
+        deterministic=True,
+        model_mode=MODEL_MODE_TRAIN,
+        rngs={"aqt": self.rng},
+    )
+
+    self.assertTrue(
+        jax.numpy.allclose(mha_generic_output, mha_generic_flash_output, rtol=1e-01, atol=1e-01, equal_nan=False)
+    )
+
+    # Test with Context Parallelism
+    attention_as_mha_flash_cp = Attention(
+        config=self.cfg_cp,  # we pass the context parallelism in the config
+        num_query_heads=self.cfg_cp.num_query_heads,
+        num_kv_heads=num_kv_heads,
+        head_dim=self.cfg_cp.head_dim,
+        max_target_length=self.cfg_cp.max_target_length,
+        max_prefill_predict_length=self.cfg_cp.max_prefill_predict_length,
+        mesh=self.mesh_cp,
+        attention_kernel="flash",
+        dtype=self.dtype,
+        dropout_rate=self.cfg_cp.dropout_rate,
+        name="self_attention_cp",
+    )
+    attention_as_mha_flash_cp_variable = attention_as_mha_flash_cp.init(
+        {"params": self.rng, "aqt": self.rng},
+        jnp.ones((self.global_batch_size, self.max_target_length, self.embed_dim)),
+        jnp.ones((self.global_batch_size, self.max_target_length, self.embed_dim)),
+        jnp.ones((self.global_batch_size, self.max_target_length)),
+    )
+
+    mha_generic_flash_cp_output = attention_as_mha_flash_cp.apply(
+        attention_as_mha_flash_cp_variable,
+        lnx,
+        lnx,
+        decoder_segment_ids=decoder_positions,
+        inputs_positions=decoder_segment_ids,
+        deterministic=True,
+        model_mode=MODEL_MODE_TRAIN,
+        rngs={"aqt": self.rng},
+    )
+
+    # Assert that the logits generated by the generic flash and flash attention+context parallelism are close
+    self.assertTrue(
+        jax.numpy.allclose(mha_generic_flash_output, mha_generic_flash_cp_output, rtol=1e-01, atol=1e-01, equal_nan=False),
+        msg="Logits from generic flash and flash attention+context parallelism are not close.",
+    )
+
+    # Assert that the logits generated by the generic dot product and flash attention+context parallelism are close
+    self.assertTrue(
+        jax.numpy.allclose(mha_generic_output, mha_generic_flash_cp_output, rtol=1e-01, atol=1e-01, equal_nan=False),
+        msg="Logits from generic dot product and flash attention+context parallelism are not close.",
+    )
 
   @pytest.mark.tpu_only
   def test_dot_product_cache_axis_order(self):
@@ -1118,7 +978,7 @@ class AttentionTest(unittest.TestCase):
     )
 
     # Attention with sliding window of size max_target_length
-    # This should be equivalent to global attention.
+    # This should be equivalent to global attension.
     sliding_attn = Attention(
         config=self.cfg,
         num_query_heads=self.num_query_heads,

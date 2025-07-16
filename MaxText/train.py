@@ -64,10 +64,6 @@ from MaxText.utils.goodput_utils import (
     maybe_record_goodput,
 )
 from MaxText.vertex_tensorboard import VertexTensorboardManager
-
-from jax.sharding import PartitionSpec as P, AxisType, set_mesh, get_abstract_mesh
-from jax.experimental.shard import reshard, auto_axes, explicit_axes
-
 # Placeholder: internal
 
 import MaxText as mt
