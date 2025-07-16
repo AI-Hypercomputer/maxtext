@@ -328,6 +328,7 @@ def validate_model_name(s: str) -> bool:
       "qwen3-0.6b",
       "qwen3-4b",
       "qwen3-8b",
+      "qwen3-14b",
       "gpt3-175b",
       "gpt3-22b",
       "gpt3-6b",
