@@ -1476,7 +1476,8 @@ class RoutedAndSharedMoE(nn.Module):
         quant=self.quant,
     )(inputs)
 
-    shared_experts = linears.MlpBlock(
+    shared_experts = linears.mlp_block(
+        in_features=inputs.shape[-1],
         intermediate_dim=cfg.shared_experts * cfg.moe_mlp_dim,
         activations=cfg.mlp_activations,
         intermediate_dropout_rate=cfg.dropout_rate,
