@@ -43,7 +43,7 @@ rm -rf /var/lib/apt/lists/*
 EOF
 
 # We need to pin specific versions of setuptools, see b/402501203 for more.
-python3 -m pip install setuptools==65.5.0 wheel==0.45.1
+python3 -m pip install setuptools==65.5.0 wheel==0.45.1 --use-deprecated=legacy-resolver
 
 # Set environment variables
 for ARGUMENT in "$@"; do
@@ -76,7 +76,7 @@ if [[ $DEVICE == "tpu" ]]; then
             # Install custom libtpu
             echo "Installing libtpu.so from $LIBTPU_GCS_PATH to $libtpu_path"
             # Install required dependency
-            python3 -m pip install -U crcmod
+            python3 -m pip install -U crcmod --use-deprecated=legacy-resolver
             # Copy libtpu.so from GCS path
             gsutil cp "$LIBTPU_GCS_PATH" "$libtpu_path"
             exit 0
@@ -91,11 +91,11 @@ fi
 run_name_folder_path=$(pwd)
 
 # Install dependencies from requirements.txt
-cd "$run_name_folder_path" && python3 -m pip install --upgrade pip
+cd "$run_name_folder_path" && python3 -m pip install --upgrade pip --use-deprecated=legacy-resolver
 if [[ "$MODE" == "pinned" ]]; then
-    python3 -m pip install --no-cache-dir -U -r requirements.txt -c constraints_gpu.txt
+    python3 -m pip install --no-cache-dir -U -r requirements.txt -c constraints_gpu.txt --use-deprecated=legacy-resolver
 else
-    python3 -m pip install --no-cache-dir -U -r requirements.txt
+    python3 -m pip install --no-cache-dir -U -r requirements.txt --use-deprecated=legacy-resolver
 fi
 
 # Uninstall existing jax, jaxlib and  libtpu-nightly
@@ -114,8 +114,8 @@ if [[ "$MODE" == "pinned" ]]; then
     exit 1
   fi
   echo "Installing Jax and Transformer Engine."
-  python3 -m pip install "jax[cuda12]" -c constraints_gpu.txt
-  python3 -m pip install transformer-engine[jax]==1.13.0
+  python3 -m pip install "jax[cuda12]" -c constraints_gpu.txt --use-deprecated=legacy-resolver
+  python3 -m pip install transformer-engine[jax]==1.13.0 --use-deprecated=legacy-resolver
 
 elif [[ "$MODE" == "stable" || ! -v MODE ]]; then
 # Stable mode
@@ -123,17 +123,17 @@ elif [[ "$MODE" == "stable" || ! -v MODE ]]; then
         echo "Installing stable jax, jaxlib for tpu"
         if [[ -n "$JAX_VERSION" ]]; then
             echo "Installing stable jax, jaxlib, libtpu version ${JAX_VERSION}"
-            python3 -m pip install jax[tpu]==${JAX_VERSION} -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
+            python3 -m pip install jax[tpu]==${JAX_VERSION} -f https://storage.googleapis.com/jax-releases/libtpu_releases.html --use-deprecated=legacy-resolver
         else
             echo "Installing stable jax, jaxlib, libtpu for tpu"
-            python3 -m pip install 'jax[tpu]>0.4' -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
+            python3 -m pip install 'jax[tpu]>0.4' -f https://storage.googleapis.com/jax-releases/libtpu_releases.html --use-deprecated=legacy-resolver
         fi
 
         if [[ -n "$LIBTPU_GCS_PATH" ]]; then
             # Install custom libtpu
             echo "Installing libtpu.so from $LIBTPU_GCS_PATH to $libtpu_path"
             # Install required dependency
-            python3 -m pip install -U crcmod
+            python3 -m pip install -U crcmod --use-deprecated=legacy-resolver
             # Copy libtpu.so from GCS path
             gsutil cp "$LIBTPU_GCS_PATH" "$libtpu_path"
         fi
@@ -141,7 +141,7 @@ elif [[ "$MODE" == "stable" || ! -v MODE ]]; then
             # Install custom libtpu
             echo "Installing libtpu.so from $LIBTPU_GCS_PATH to $libtpu_path"
             # Install required dependency
-            python3 -m pip install -U crcmod
+            python3 -m pip install -U crcmod --use-deprecated=legacy-resolver
             # Copy libtpu.so from GCS path
             gsutil cp "$LIBTPU_GCS_PATH" "$libtpu_path"
         fi
@@ -149,10 +149,10 @@ elif [[ "$MODE" == "stable" || ! -v MODE ]]; then
         echo "Installing stable jax, jaxlib for NVIDIA gpu"
         if [[ -n "$JAX_VERSION" ]]; then
             echo "Installing stable jax, jaxlib ${JAX_VERSION}"
-            python3 -m pip install -U "jax[cuda12]==${JAX_VERSION}"
+            python3 -m pip install -U "jax[cuda12]==${JAX_VERSION}" --use-deprecated=legacy-resolver
         else
             echo "Installing stable jax, jaxlib, libtpu for NVIDIA gpu"
-            python3 -m pip install "jax[cuda12]"
+            python3 -m pip install "jax[cuda12]" --use-deprecated=legacy-resolver
         fi
     fi
 elif [[ $MODE == "nightly" ]]; then
@@ -161,35 +161,35 @@ elif [[ $MODE == "nightly" ]]; then
         # Install jax-nightly
         if [[ -n "$JAX_VERSION" ]]; then
             echo "Installing jax-nightly, jaxlib-nightly ${JAX_VERSION}"
-            python3 -m pip install -U --pre jax==${JAX_VERSION} jaxlib==${JAX_VERSION} jax-cuda12-plugin[with-cuda] jax-cuda12-pjrt -i https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/
+            python3 -m pip install -U --pre jax==${JAX_VERSION} jaxlib==${JAX_VERSION} jax-cuda12-plugin[with-cuda] jax-cuda12-pjrt -i https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/ --use-deprecated=legacy-resolver
         else
             echo "Installing latest jax-nightly, jaxlib-nightly"
-            python3 -m pip install -U --pre jax jaxlib jax-cuda12-plugin[with-cuda] jax-cuda12-pjrt -i https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/
+            python3 -m pip install -U --pre jax jaxlib jax-cuda12-plugin[with-cuda] jax-cuda12-pjrt -i https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/ --use-deprecated=legacy-resolver
         fi
     elif [[ $DEVICE == "tpu" ]]; then
         echo "Installing jax-nightly, jaxlib-nightly"
         # Install jax-nightly
-        python3 -m pip install --pre -U jax -i https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/
+        python3 -m pip install --pre -U jax -i https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/ --use-deprecated=legacy-resolver
         # Install jaxlib-nightly
-        python3 -m pip install --pre -U jaxlib -i https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/
+        python3 -m pip install --pre -U jaxlib -i https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/ --use-deprecated=legacy-resolver
 
         if [[ -n "$LIBTPU_GCS_PATH" ]]; then
             # Install custom libtpu
             echo "Installing libtpu.so from $LIBTPU_GCS_PATH to $libtpu_path"
             # Install required dependency
-            python3 -m pip install -U crcmod
+            python3 -m pip install -U crcmod --use-deprecated=legacy-resolver
             # Copy libtpu.so from GCS path
             gsutil cp "$LIBTPU_GCS_PATH" "$libtpu_path"
         else
             # Install libtpu-nightly
             echo "Installing libtpu-nightly"
-            python3 -m pip install -U --pre libtpu -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
+            python3 -m pip install -U --pre libtpu -f https://storage.googleapis.com/jax-releases/libtpu_releases.html --use-deprecated=legacy-resolver
         fi
         echo "Installing nightly tensorboard plugin profile"
-        python3 -m pip install tbp-nightly --upgrade
+        python3 -m pip install tbp-nightly --upgrade --use-deprecated=legacy-resolver
     fi
     echo "Installing nightly tensorboard plugin profile"
-    python3 -m pip install tbp-nightly --upgrade
+    python3 -m pip install tbp-nightly --upgrade --use-deprecated=legacy-resolver
 else
     echo -e "\n\nError: You can only set MODE to [stable,nightly,libtpu-only].\n\n"
     exit 1
