@@ -185,7 +185,8 @@ class DeepSeekDenseLayer(nn.Module):
         page_state,
         slot,
     )
-    mlp_lnx = linears.MlpBlock(
+    mlp_lnx = linears.mlp_block(
+        in_features=hidden_states.shape[-1],
         intermediate_dim=cfg.mlp_dim,
         activations=cfg.mlp_activations,
         intermediate_dropout_rate=cfg.dropout_rate,
