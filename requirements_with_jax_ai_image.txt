@@ -1,6 +1,7 @@
 # Requirements for Building the MaxText Docker Image
 # These requirements are additional to the dependencies present in the JAX AI base image.
 datasets
+drjax>=0.1.3
 flax>=0.10.6
 grain[parquet]>=0.2.6
 orbax-checkpoint>=0.10.3
@@ -23,3 +24,4 @@ pathwaysutils==0.1.1
 google-api-python-client
 omegaconf
 jaxtyping
+
