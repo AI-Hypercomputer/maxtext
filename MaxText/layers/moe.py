@@ -758,16 +758,21 @@ class RoutedMoE(nn.Module):
               expert_shard_id,
               num_expert_parallelism,
           )
-          # TODO(ranran): For better performance, we could update output buffer
-          # to a smaller size to replace self.get_expert_parallelism_size() for
-          # efficiency, or we could apply capacity_factor for excessive experts.
-          # Note: Reducing buffer increase the risk of token dropping under
-          # unbalanced distribution.
+
+          # TODO(ranran): For better performance, we could update output buffer to a smaller
+          # size to replace self.get_expert_parallelism_size() for efficiency,
+          # Or we could apply capacity_factor for excessive experts.
+          # Note: Reducing buffer increase the risk of token dropping under unbalanced distribution.
+
+          # In the worst case, all of the global input data is assigned to each expert in the current shard.
+          # This would result in num_expert_shards * input_size * experts_per_shard assignments. However, if
+          # experts_per_shard > num_experts_per_tok we cannot assign more than num_experts_per_tok to all of the inputs.
+          max_local_experts_per_tok = min(local_expert_size, self.config.num_experts_per_tok)
           buffer_size = int(
               num_expert_parallelism
               * self.config.per_device_batch_size
               * self.config.max_target_length
-              * self.config.num_experts_per_tok
+              * max_local_experts_per_tok
           )
           output_shape = jnp.zeros((buffer_size, self.config.emb_dim), dtype=x.dtype)
 
