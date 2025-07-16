@@ -207,6 +207,13 @@ class MaxEngine(engine_api.Engine):
     generate_executable, self.param_layouts, _, self.decode_state_layouts = self._compile_generate_and_get_layouts(
         self.abstract_params, self.decode_state_shapes, rng_shape, xla_flags
     )
+
+    self.decode_state_layouts = jax.tree.map(
+        lambda x: x.unbox() if isinstance(x, nn.LogicallyPartitioned) else x,
+        self.decode_state_layouts,
+        is_leaf=lambda x: isinstance(x, nn.LogicallyPartitioned)
+    )
+
     return (
         generate_executable,
         self._iterated_layout(params, self.param_layouts),
