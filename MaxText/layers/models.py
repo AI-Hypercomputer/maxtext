@@ -136,6 +136,7 @@ class Transformer(nn.Module):
         dummy_shape = decoder_input_tokens.shape
         decoder_target_tokens = jnp.ones(dummy_shape, dtype=jnp.int32)
         decoder_target_mask = jnp.ones(dummy_shape, dtype=jnp.int32)
+        decoder_segment_ids = jnp.ones(dummy_shape, dtype=jnp.int32)
 
     # The Multi-Token Prediction (MTP) block functions as a "side-car" to the main
     # model, active only during training. It computes an auxiliary loss based on

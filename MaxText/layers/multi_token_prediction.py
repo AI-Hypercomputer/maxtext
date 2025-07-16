@@ -137,7 +137,7 @@ class MultiTokenPredictionLayer(nn.Module):
 
     # --- 2. Concatenate Normalized Representations ---
     # Shape: [B, S, 2*H]
-    concatenated_features = jnp.concatenate([hidden_state_norm, embedding_norm], axis=-1)
+    concatenated_features = jnp.concatenate([embedding_norm, hidden_state_norm], axis=-1)
 
     # --- 3. Project Concatenated Features ---
     # Projects from 2*H back down to H
@@ -146,6 +146,7 @@ class MultiTokenPredictionLayer(nn.Module):
         out_features_shape=cfg.base_emb_dim,
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
+        use_bias=False,
         kernel_axes=("concat_embed", "embed"),
         name=f"mtp_{k}_projection",
     )
@@ -225,7 +226,7 @@ class MultiTokenPredictionBlock(nn.Module):
       )
 
       next_mtp_hidden_state = mtp_layer(
-          mtp_hidden_state, target_token_embedding, rolled_position_id, decoder_segment_ids, deterministic, model_mode
+          mtp_hidden_state, target_token_embedding, position_ids, decoder_segment_ids, deterministic, model_mode
       )
 
       # Project to logits using the shared embedding transpose
