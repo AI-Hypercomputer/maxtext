@@ -40,7 +40,7 @@ tiktoken>=0.9.0
 transformers>=4.52.4
 transformer-engine[jax]>=2.1.0
 jsonlines>=4.0.0
-pathwaysutils>=0.1.1
+pathwaysutils@git+https://github.com/AI-Hypercomputer/pathways-utils.git
 omegaconf>=2.3.0
 # All source links must be pinned to a hash to guarantee reproducibility
 mlperf-logging @ https://github.com/mlcommons/logging/archive/44b4810e65e8c0a7d9e4e207c60e51d9458a3fb8.zip
