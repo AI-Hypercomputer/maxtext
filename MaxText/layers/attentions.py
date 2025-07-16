@@ -271,8 +271,11 @@ def attention_op_as_linen(
     max_prefill_predict_length: int = -1,
     float32_logits: bool = False,
     flash_axis_names_kv: AxisNames = (BATCH, HEAD, KV_LENGTH, D_KV),
-    flash_axis_names_q: AxisNames = (BATCH, HEAD, LENGTH, D_KV),
+    flash_axis_names_q: AxisNames = (BATCH, HEAD, LENGTH_NO_EXP, D_KV),
+    flash_axis_names_kv_ep: AxisNames = (BATCH_NO_EXP, HEAD, KV_LENGTH, D_KV),
+    flash_axis_names_q_ep: AxisNames = (BATCH_NO_EXP, HEAD, LENGTH, D_KV),
     flash_axis_names_splash_kernel: AxisNames = (HEAD, LENGTH),
+    flash_axis_names_splash_kernel_no_ep: AxisNames = (HEAD, LENGTH_NO_EXP),
     prefill_cache_logical_axis_names: AxisNames = (CACHE_BATCH_PREFILL, CACHE_SEQUENCE, CACHE_HEADS, CACHE_KV),
     cache_logical_axis_names: AxisNames = (CACHE_BATCH, CACHE_SEQUENCE, CACHE_HEADS, CACHE_KV),
     cache_scale_logical_axis_names: AxisNames = (CACHE_SCALE_BATCH, CACHE_SCALE_SEQUENCE, CACHE_SCALE_HEADS, CACHE_SCALE_KV),
@@ -308,7 +311,10 @@ def attention_op_as_linen(
       float32_logits=float32_logits,
       flash_axis_names_kv=flash_axis_names_kv,
       flash_axis_names_q=flash_axis_names_q,
+      flash_axis_names_kv_ep=flash_axis_names_kv_ep,
+      flash_axis_names_q_ep=flash_axis_names_q_ep,
       flash_axis_names_splash_kernel=flash_axis_names_splash_kernel,
+      flash_axis_names_splash_kernel_no_ep=flash_axis_names_splash_kernel_no_ep,
       prefill_cache_logical_axis_names=prefill_cache_logical_axis_names,
       cache_logical_axis_names=cache_logical_axis_names,
       cache_scale_logical_axis_names=cache_scale_logical_axis_names,
@@ -717,8 +723,8 @@ class AttentionOp(nnx.Module):
     if self.config.is_batch_shard_by_expert:
       cp_size = self.mesh.shape["context"]
     else:
-      cp_size = 0 if self.mesh.shape["context"] == 1 else self.mesh.shape["context"]
-      cp_size += self.mesh.shape["expert"]
+      cp_size = self.mesh.shape["context"] * self.mesh.shape["expert"]
+
     load_balanced_context_parallel = self.config.context_parallel_load_balance
 
     # Transpose to ('batch', 'heads', 'length', 'kv')
