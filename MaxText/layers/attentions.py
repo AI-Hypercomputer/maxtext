@@ -64,6 +64,18 @@ from jax.experimental.shard import reshard, auto_axes, explicit_axes
 from jax.sharding import AxisType
 
 
+def debug_sharding(array, prefix=""):
+  global_shape = array.shape
+  jax.debug.inspect_array_sharding(
+      array,
+      callback=lambda sharding_obj: print(
+          prefix + f"\tGlobal Shape: {global_shape}\n"
+          f"\tLocal Shape: {sharding_obj.shard_shape(global_shape)}\n"
+          f"\tSharding Object: {sharding_obj}\n"
+      ),
+  )
+
+
 class AttentionType(enum.Enum):
   GLOBAL = "global"  # default, with causality
   LOCAL_SLIDING = "local_sliding"
@@ -1746,17 +1758,6 @@ class Attention(nn.Module):
     # DEBUGGING DEFINITION BEGIN #
     assert model_mode == MODEL_MODE_TRAIN
 
-    def debug_sharding(array, prefix=""):
-      global_shape = array.shape
-      jax.debug.inspect_array_sharding(
-          array,
-          callback=lambda sharding_obj: print(
-              prefix + f"\tGlobal Shape: {global_shape}\n"
-              f"\tLocal Shape: {sharding_obj.shard_shape(global_shape)}\n"
-              f"\tSharding Object: {sharding_obj}\n"
-          ),
-      )
-
     def debug_axis():
       jax.debug.print(
           "nn.logical_to_mesh_axes(self.input_axis_names): {x}", x=nn.logical_to_mesh_axes(self.input_axis_names)
@@ -2080,10 +2081,13 @@ class MLA(Attention):
     # Query projection is scaled by self.softmax_scale to be consistent MaxText implementation.
     # DeepSeek v3 was doing it in attention score computation.
     query = jnp.concatenate([q_nope, q_pe], axis=-1) * self.softmax_scale
+
     if model_mode == MODEL_MODE_PREFILL:
       query = nn.with_logical_constraint(query, self.prefill_query_axis_names)
-    else:
+    elif self.config.is_batch_shard_by_expert:
       query = nn.with_logical_constraint(query, self.query_axis_names)
+    else:
+      query = nn.with_logical_constraint(query, self.ep_query_axis_names)
     return query
 
   def mla_get_key_value(self, low_rank_main, key_rope, model_mode):
@@ -2099,9 +2103,12 @@ class MLA(Attention):
     if model_mode == MODEL_MODE_PREFILL:
       key = nn.with_logical_constraint(key, self.prefill_key_axis_names)
       value = nn.with_logical_constraint(value, self.prefill_value_axis_names)
-    else:
+    elif self.config.is_batch_shard_by_expert:
       key = nn.with_logical_constraint(key, self.key_axis_names)
       value = nn.with_logical_constraint(value, self.value_axis_names)
+    else:
+      key = nn.with_logical_constraint(key, self.ep_key_axis_names)
+      value = nn.with_logical_constraint(value, self.ep_value_axis_names)
     return key, value
 
   def update_mla_kv_caches(self, low_rank_main, key_rope, decoder_segment_ids, model_mode, previous_chunk=None):
@@ -2187,12 +2194,31 @@ class MLA(Attention):
       A tensor of shape [batch, length, embed_dim] containing the
       MLA-attended outputs.
     """
+    is_batch_shard_by_expert = self.config.is_batch_shard_by_expert
+    use_nn_constraint = self.config.use_nn_constraint
+
+    def apply_logical_sharding(array, logical_axis_name, use_nn_constraint=True):
+      if use_nn_constraint:
+        return nn.with_logical_constraint(array, logical_axis_name)
+      pspec = nn.logical_to_mesh_axes(logical_axis_name)
+      named_sharding = jax.sharding.NamedSharding(self.mesh, pspec)
+      return lax.with_sharding_constraint(array, named_sharding)
+
     if model_mode == MODEL_MODE_PREFILL:
       inputs_q = nn.with_logical_constraint(inputs_q, self.prefill_input_axis_names)
       inputs_kv = nn.with_logical_constraint(inputs_kv, self.prefill_input_axis_names)
-    else:
-      inputs_q = nn.with_logical_constraint(inputs_q, self.input_axis_names)
+    elif is_batch_shard_by_expert:
+      # inputs_q = nn.with_logical_constraint(inputs_q, self.input_axis_names)
+      inputs_q = apply_logical_sharding(inputs_q, self.input_axis_names, use_nn_constraint)
       inputs_kv = nn.with_logical_constraint(inputs_kv, self.input_axis_names)
+    else:
+      # inputs_q = nn.with_logical_constraint(inputs_q, self.ep_input_axis_names)
+      inputs_q = apply_logical_sharding(inputs_q, self.ep_input_axis_names, use_nn_constraint)
+      inputs_kv = nn.with_logical_constraint(inputs_kv, self.ep_input_axis_names)
+
+    prefix = f"\nuse_nn_constraint={use_nn_constraint} (inputs_q), context={self.config.ici_context_parallelism}, expert={self.config.ici_expert_parallelism}, is_batch_shard_by_expert={is_batch_shard_by_expert}\n\n"
+    debug_sharding(inputs_q, prefix + "MLA inputs_q\n")
+    debug_sharding(inputs_kv, "MLA inputs_kv\n")
 
     query = self.mla_query_projection(inputs_q, inputs_positions, model_mode)
     key, value, cached_values = self.mla_kv_projection(
@@ -2203,6 +2229,10 @@ class MLA(Attention):
     key = checkpoint_name(key, "key_proj")
     value = checkpoint_name(value, "value_proj")
 
+    debug_sharding(query, "MLA query\n")
+    debug_sharding(key, "MLA key\n")
+    debug_sharding(value, "MLA value\n")
+
     if self.config.attention == "paged" and model_mode != MODEL_MODE_TRAIN:
       unnormalized_out, _, exp_sum = self.ds_paged_attention_op(
           query, key, value, decoder_segment_ids, model_mode, previous_chunk, slot=slot, page_state=page_state
@@ -2211,7 +2241,14 @@ class MLA(Attention):
       out = unnormalized_out / (exp_sum + 1e-9) if exp_sum is not None else unnormalized_out
     else:
       out = self.attention_op(query, key, value, decoder_segment_ids, model_mode, cached_values)
-    out = nn.with_logical_constraint(out, self.out_axis_names)
+
+    if is_batch_shard_by_expert:
+      out = nn.with_logical_constraint(out, self.out_axis_names)
+    else:
+      out = nn.with_logical_constraint(out, self.ep_out_axis_names)
+
+    debug_sharding(out, "MLA out\n")
+
     out = self.out_projection(inputs_q.shape[-1], out)
     return out
 
