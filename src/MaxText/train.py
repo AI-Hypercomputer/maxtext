@@ -43,6 +43,7 @@ from cloud_tpu_diagnostics.configuration import diagnostic_configuration
 from cloud_tpu_diagnostics.configuration import stack_trace_configuration
 
 from MaxText import checkpointing
+from MaxText import diloco
 from MaxText import exceptions
 from MaxText import max_logging
 from MaxText import max_utils
