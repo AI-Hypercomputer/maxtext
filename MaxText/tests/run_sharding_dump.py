@@ -24,8 +24,8 @@ import subprocess
 from absl import app
 
 
-def run_single_test(model_name: str, topology: str, num_slice: str) -> None:
-  """Run test for one specific model, topology and slice."""
+def run_single_dump(model_name: str, topology: str, num_slice: str) -> None:
+  """Generate sharding json file for one specific model, topology and slice."""
   subprocess.run(
       [
           "python",
@@ -41,12 +41,12 @@ def run_single_test(model_name: str, topology: str, num_slice: str) -> None:
 
 
 def main(argv: Sequence[str]) -> None:
-  """Run all tests for every combination of model, topology and slices."""
+  """Generate sharding json files for every combination of model, topology and slices."""
   for model_name, topology, num_slice in TEST_CASES:
     json_path = f"sharding_info/{model_name}/{topology}/slice_{num_slice}/named_shardings.json"
     if os.path.exists(json_path):
       continue
-    run_single_test(model_name, topology, num_slice)
+    run_single_dump(model_name, topology, num_slice)
 
 
 if __name__ == "__main__":
