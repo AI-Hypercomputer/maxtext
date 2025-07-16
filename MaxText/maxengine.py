@@ -863,7 +863,7 @@ class MaxEngine(engine_api.Engine):
         rng=rng,
     )
 
-    return new_state, result
+    return max_utils.unbox_logicallypartioned(new_state), result
 
   @functools.partial(jax.jit, static_argnums=(0,), donate_argnums=(2,))
   def _generate_jit(
