@@ -41,7 +41,7 @@ python3 -m benchmarks.mmlu.mmlu_eval MaxText/configs/base.yml \
   prompt_template='Example 1:\nQuestion: What is the capital of France?\nChoices:\nA. London\nB. Paris\nC. Rome\nD. Berlin\nAnswer: B\n\nExample 2:\nQuestion: What is the highest mountain in the world?\nChoices:\nA. K2\nB. Kangchenjunga\nC. Mount Everest\nD. Lhotse\nAnswer: C\n\nExample 3:\nQuestion: What is the chemical symbol for water?\nChoices:\nA. H2O\nB. CO2\nC. O2\nD. NaCl\nAnswer: A\n\nExample 4:\nQuestion: Who painted the Mona Lisa?\nChoices:\nA. Michelangelo\nB. Leonardo da Vinci\nC. Raphael\nD. Donatello\nAnswer: B\n\nExample 5:\nQuestion: Which planet is known as the Red Planet?\nChoices:\nA. Venus\nB. Mars\nC. Jupiter\nD. Saturn\nAnswer: B\n\nThe following are multiple choice questions (with answers) about {subject}.\n\n{question}\n{choices}\nAnswer:'   # pylint: disable=line-too-long
 """
 
-import collections
+import argparse
 import re
 import sys
 
@@ -54,8 +54,6 @@ from typing import List, Optional
 import jax
 
 from dataclasses import dataclass
-from benchmarks.mmlu.mmlu_categories import categories
-from benchmarks.mmlu.mmlu_categories import subcategories
 
 from tqdm import tqdm
 
@@ -246,6 +244,14 @@ def validate_config(config):
 
 
 if __name__ == "__main__":
+  # parser = argparse.ArgumentParser()
+  # parser.add_argument("--resize-image", type=int, default=None, required=False, help="Resize the input image to this size (square) before feeding into the model. If not set, use the model default.")
+  # args = parser.parse_args()
+  parser = argparse.ArgumentParser()
+  parser.add_argument("--resize-image", type=int, default=None, required=False, help="Resize the input image to this size (square) before feeding into the model. If not set, use the model default.")
+  custom_args, remaining_argv = parser.parse_known_args()
+  sys.argv = [sys.argv[0]] + remaining_argv
+
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
   flags.FLAGS(sys.argv)
   cfg = pyconfig.initialize(sys.argv)
