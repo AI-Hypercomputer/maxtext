@@ -85,10 +85,10 @@ class PreprocessorOutput:
 
 def resize_image(image, model_name):
   image_sizes = {
-    "gemma3": (GEMMA_DEFAULT_IMAGE_SIZE, GEMMA_DEFAULT_IMAGE_SIZE),
-    "llama4": (LLAMA4_TILE_SIZE, LLAMA4_TILE_SIZE),
+      "gemma3": (GEMMA_DEFAULT_IMAGE_SIZE, GEMMA_DEFAULT_IMAGE_SIZE),
+      "llama4": (LLAMA4_TILE_SIZE, LLAMA4_TILE_SIZE),
   }
-  target_size = image_sizes[model_name.split('-')[0]]
+  target_size = image_sizes[model_name.split("-")[0]]
   if target_size:
     image = image.resize(target_size)
   return image
@@ -316,13 +316,13 @@ def split_to_tiles(images: np.ndarray, num_tiles_height: int, num_tiles_width: i
 def pre_process_gemma3_image(image):
   """Performs a bi-linear resize (with anti-aliasing) and normalizes the image."""
   target_size = (GEMMA_DEFAULT_IMAGE_SIZE, GEMMA_DEFAULT_IMAGE_SIZE)
-  pil_img = Image.fromarray(image)
+  pil_img = Image.fromarray(np.array(image))
   resample_method = Image.Resampling.BILINEAR
   # Use a higher quality downsampling filter to approximate antialias=True
   if pil_img.size[0] > target_size[0] or pil_img.size[1] > target_size[1]:
     resample_method = Image.Resampling.LANCZOS
   resized_pil_img = pil_img.resize(target_size, resample=resample_method)
-  image = np.array(resized_pil_img)
+  image = np.array(resized_pil_img).astype(np.float32)
   image = _normalize_images(image, mean=GEMMA_IMAGE_MEAN, std=GEMMA_IMAGE_STD)
   image = np.clip(image, -1, 1)
   processor_output = PreprocessorOutput(
@@ -369,7 +369,7 @@ def pre_process_llama4_image(image):
 
   # If more than one tile, add a global tile by resizing the image to the tile size
   if ratio_h * ratio_w > 1:
-    pil_img = Image.fromarray(image)
+    pil_img = Image.fromarray(np.array(image))
     resample_method = Image.Resampling.BILINEAR
     # Use a higher quality downsampling filter to approximate antialias=True
     if pil_img.size[0] > LLAMA4_TILE_SIZE or pil_img.size[1] > LLAMA4_TILE_SIZE:
@@ -419,7 +419,7 @@ def reformat_prompt(prompt, image_placeholder, model_name):
     return formatted_prompt
   elif model_name in ["llama4-17b-16e", "llama4-17b-128e"]:
     if image_placeholder in prompt:
-      prompt =prompt.replace(image_placeholder, LLAMA4_IMAGE_PLACEHOLDER_IN_PROMPT)
+      prompt = prompt.replace(image_placeholder, LLAMA4_IMAGE_PLACEHOLDER_IN_PROMPT)
     if not LLAMA4_IMAGE_PLACEHOLDER_IN_PROMPT in prompt:
       prompt = LLAMA4_IMAGE_PLACEHOLDER_IN_PROMPT + prompt
     formatted_prompt = (
@@ -848,3 +848,12 @@ def _merge_mm_embeddings_inner(text_embeddings, vision_embeddings, mask):
   merged = merged.at[0].set(first_pos)
 
   return merged
+
+
+def get_image_placeholder(model_name):
+  if model_name in ["gemma3-4b", "gemma3-12b", "gemma3-27b"]:
+    return GEMMA_IMAGE_PLACEHOLDER_IN_PROMPT
+  elif model_name in ["llama4-17b-16e", "llama4-17b-128e"]:
+    return LLAMA4_IMAGE_PLACEHOLDER_IN_PROMPT
+  else:
+    raise ValueError(f"Model {model_name} does not support multimodal inference.")
