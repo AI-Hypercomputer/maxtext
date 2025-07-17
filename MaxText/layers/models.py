@@ -16,26 +16,32 @@
 # pylint: disable=arguments-differ
 # pylint: disable=no-name-in-module
 
-from typing import Optional
+from typing import Any, Optional
 
 import jax.numpy as jnp
 from jax.sharding import Mesh
 
-from flax import linen as nn
 
 from MaxText.common_types import DecoderBlockType, Config, MODEL_MODE_TRAIN, MODEL_MODE_AUTOREGRESSIVE, DECODING_ACTIVE_SEQUENCE_INDICATOR
 from MaxText.inference import page_manager
 from MaxText import multimodal_utils
 from MaxText.layers.decoders import Decoder
-from MaxText.layers.embeddings import embed_as_linen
+from MaxText.layers.embeddings import Embed, embed_as_linen
 from MaxText.layers.encoders import VisionEncoder
+from MaxText.layers import llama2
 from MaxText.layers.quantizations import AqtQuantization as Quant
 from MaxText.layers.multi_token_prediction import MultiTokenPredictionBlock
 from MaxText.maxtext_utils import all_gather_over_fsdp
 
+from flax import linen as nn
+from flax import nnx
+
+from MaxText.layers import linears
+import jax
+from MaxText.common_types import Config, MODEL_MODE_TRAIN, MODEL_MODE_AUTOREGRESSIVE
+
 # ------------------------------------------------------------------------------
 # The network: Transformer Definitions
-# ------------------------------------------------------------------------------
 
 
 class Transformer(nn.Module):
@@ -158,6 +164,145 @@ class Transformer(nn.Module):
       )
 
     return logits
+
+Array = jax.Array
+
+class LlamaTransformerNNX(nnx.Module):
+    """Llama Transformer in NNX."""
+
+    def __init__(
+        self,
+        config: Config,
+        mesh: Mesh,
+        rngs: nnx.Rngs,
+        enable_dropout: bool = False,
+    ):
+        super().__init__()
+        self.enable_dropout = enable_dropout
+        self.config = config
+        self.mesh = mesh
+
+        # ------------------------------------------------------------------
+        # Build submodules
+        # ------------------------------------------------------------------
+       
+        self.token_embedder = Embed(
+            num_embeddings=config.vocab_size,
+            num_features=config.emb_dim,
+            config=config,
+            rngs=rngs,
+        )
+        self.mlp = linears.MlpBlock(
+            config=config,
+            in_features=config.emb_dim,
+            intermediate_dim=config.mlp_dim,
+            activations=config.mlp_activations,
+            intermediate_dropout_rate=config.dropout_rate,
+            dtype=config.dtype,
+            weight_dtype=config.weight_dtype,
+            rngs=rngs,
+        )
+
+     # ------------------------------------------------------------------ #
+    # Mask utility
+    # ------------------------------------------------------------------ #
+    def _make_causal_mask(self, length: int) -> Array:
+        # [L, L] lower-triangular True
+        return jnp.tril(jnp.ones((length, length), dtype=bool))
+
+    def _make_padding_mask(self, input_tokens: Array) -> Array:
+        # Assume pad_id in cfg (else treat all valid)
+        if getattr(self.config, "pad_id", None) is None:
+            return jnp.ones_like(input_tokens, dtype=bool)
+        return (input_tokens != self.config.pad_id) #TODO: Anisha: config.pad_id doesn't exist in the config
+    
+    def forward_train(
+        self,
+        decoder_input_tokens: Array,     # [B, L]
+        decoder_positions: Array,        # [B, L]
+        decoder_segment_ids: Optional[Array] = None,
+        *,
+        attention_mask: Optional[Array] = None,  # optional explicit mask
+    ) -> Array:
+        """Full-sequence causal forward; returns logits [B, L, vocab]."""
+
+        B, L = decoder_input_tokens.shape
+
+        # Embedding
+        x = self.token_embedder(decoder_input_tokens)  # [B, L, H]
+        x = self.mlp(x)  # [B, L, H]
+        return x
+  
+    # ------------------------------------------------------------------ #
+    # AUTOREGRESSIVE decode forward (paged KV, streaming)
+    # ------------------------------------------------------------------ #
+    def forward_decode(
+        self,
+        last_tokens: Array,      # [B, S] new tokens (S usually 1)
+        positions: Array,        # [B, S] absolute positions
+        *,
+        page_state: Any,
+        slot: Optional[int],
+        true_length: Optional[int],
+        previous_chunk: Optional[Any],
+    ) -> Array:
+        """Autoregressive decode step (or chunk decode).
+
+        Delegates cache mgmt to each decoder layer (expected in your NNX port).
+        Returns logits for the new tokens [B, S, vocab].
+        """
+        x = self.token_embedder(last_tokens)
+        x = self.mlp(x)  # [B, L, H]
+        return x
+
+    # ------------------------------------------------------------------ #
+    # Generic __call__ (internal) – dispatch by mode if needed
+    # ------------------------------------------------------------------ #
+    def __call__(
+        self,
+        decoder_input_tokens: Array,
+        decoder_positions: Array,
+        decoder_segment_ids=None,
+        *,
+        enable_dropout: Optional[bool] = None,
+        model_mode: int = MODEL_MODE_TRAIN,
+        attention_mask: Optional[Array] = None,
+        page_state=None,
+        slot=None,
+        true_length=None,
+        previous_chunk=None,
+    ):
+        """Unified entry point similar to legacy MaxText.
+
+        Provided for backward compat — but Tunix wrapper will call forward_* directly.
+        """
+        if enable_dropout is not None:
+            old = self.enable_dropout
+            self.enable_dropout = enable_dropout
+        try:
+            if model_mode == MODEL_MODE_TRAIN:
+                return self.forward_train(
+                    decoder_input_tokens,
+                    decoder_positions,
+                    decoder_segment_ids,
+                    attention_mask=attention_mask,
+                )
+            elif model_mode == MODEL_MODE_AUTOREGRESSIVE:
+                return self.forward_decode(
+                    decoder_input_tokens,
+                    decoder_positions,
+                    page_state=page_state,
+                    slot=slot,
+                    true_length=true_length,
+                    previous_chunk=previous_chunk,
+                )
+            else:
+                raise ValueError(f"Unknown model_mode: {model_mode}")
+        finally:
+            if enable_dropout is not None:
+                self.enable_dropout = old
+# ------------------------------------------------------------------------------
+
 
 
 class ZeroOneTransformer(nn.Module):
