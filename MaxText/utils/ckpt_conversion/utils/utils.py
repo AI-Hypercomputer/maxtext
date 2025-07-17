@@ -200,9 +200,6 @@ def save_config_file(
           os.path.join(output_dir_final, file_name),
           remove_local_file_after_upload=remove_local_copy_after_upload,
       )
-      if remove_local_copy_after_upload:
-        os.remove(actual_local_file_path)
-        max_logging.log(f"   Removed local copy: {actual_local_file_path}")
     elif output_dir_final.startswith("hf://"):
       max_logging.log(f"  Serializing {file_name} to memory for Hugging Face Hub upload...")
       json_string = config.to_json_string()
@@ -292,13 +289,8 @@ def save_safetensor_file(
       state_dict = state_dict["model.safetensors"]
 
     if output_dir_final.startswith("gs://"):
-      local_path = os.path.join(local_dir_to_save_to, file_name)
-      numpy_save_file(state_dict, local_path, metadata={"format": "pt"})
       cloud_path = os.path.join(output_dir_final, file_name)
-      upload_file_to_gcs(local_path, cloud_path, remove_local_file_after_upload=remove_local_copy_after_upload)
-      if remove_local_copy_after_upload:
-        os.remove(local_path)
-        max_logging.log(f"   Removed local copy: {local_path}")
+      upload_state_dict_to_gcs(state_dict=state_dict, gs_bucket_path=cloud_path)
     elif output_dir_final.startswith("hf://"):
       max_logging.log(f"  Serializing {file_name} to memory for Hugging Face Hub upload...")
       serialized_content = save_flax_to_bytes(state_dict, metadata={"format": "pt"})
@@ -340,9 +332,6 @@ def save_index_file(
             os.path.join(output_dir_final, file_name),
             remove_local_file_after_upload=remove_local_copy_after_upload,
         )
-      if remove_local_copy_after_upload:
-        os.remove(local_path)
-        max_logging.log(f"   Removed local copy: {local_path}")
     elif output_dir_final.startswith("hf://"):
       max_logging.log(f"   Serialized {file_name} to memory for Hugging Face Hub upload.")
       json_bytes = json.dumps(index, indent=2).encode("utf-8")
@@ -463,9 +452,6 @@ def save_model_files(
               os.path.join(output_dir, file_name),
               remove_local_file_after_upload=remove_local_copy,
           )
-          if remove_local_copy:
-            os.remove(local_file_path)
-            max_logging.log(f"   Removed local copy: {local_file_path}")
       elif output_dir.startswith("hf://") and repo_id:
         api = HfApi()
         for local_file_path in files_to_upload:
@@ -494,6 +480,32 @@ def save_model_files(
 
   if jax.process_index() == 0:
     max_logging.log(f"✅ Model and tokenizer (if provided) successfully processed for {output_dir}")
+
+def upload_state_dict_to_gcs(state_dict: dict, gs_bucket_path: str):
+  """Uploads a state_dict from memory to Google Cloud Storage.
+
+  Args:
+      state_dict: A PyTorch model's state_dict.
+      gs_bucket_path: GCS destination (e.g., "gs://my-bucket/models/model.pt").
+  """
+  # Standardize bucket path format
+  gs_bucket_path = gs_bucket_path.removeprefix("gs://")
+  bucket_name, *blob_path_parts = gs_bucket_path.split("/")
+  blob_name = "/".join(blob_path_parts)
+
+  # 1. Serialize the state_dict to an in-memory byte buffer
+  buffer = io.BytesIO()
+  np.savez(buffer, **state_dict)
+  buffer.seek(0) # Rewind the buffer to the beginning
+
+  # 2. Upload the bytes to GCS
+  storage_client = Client()
+  bucket = storage_client.bucket(bucket_name)
+  blob = bucket.blob(blob_name)
+
+  print(f"-> Uploading in-memory state_dict to {gs_bucket_path}...")
+  blob.upload_from_file(buffer, content_type='application/octet-stream', timeout=600)
+  print(f"✅ Uploaded to {bucket.name}/{blob_name}")
 
 
 def upload_file_to_gcs(local_file: str, gs_bucket_path: str, remove_local_file_after_upload=False):
