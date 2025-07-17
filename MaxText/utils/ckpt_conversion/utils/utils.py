@@ -17,6 +17,7 @@
 import contextlib
 import time
 import os
+import io
 import jax
 import jax.numpy as jnp
 import jax.tree_util
@@ -27,6 +28,7 @@ from jax.experimental import multihost_utils
 from typing import Optional, List, Dict, Tuple, Callable, Any
 from google.cloud.storage import Client, transfer_manager
 from safetensors.numpy import save_file as numpy_save_file
+from safetensors.flax import save as save_flax_to_bytes
 from huggingface_hub import HfApi, repo_exists
 from transformers.models.auto.modeling_auto import MODEL_FOR_CAUSAL_LM_MAPPING_NAMES
 from concurrent.futures import ThreadPoolExecutor
@@ -189,29 +191,32 @@ def save_config_file(
 ):
   """Saves the model configuration file(config.json)."""
   if jax.process_index() == 0:
-    actual_local_file_path = os.path.join(local_path_to_save_to, file_name)
     config.architectures = [MODEL_FOR_CAUSAL_LM_MAPPING_NAMES[config.model_type]]
-    config.to_json_file(actual_local_file_path)
-    max_logging.log(f"   Saved {file_name} to {actual_local_file_path}")
-
     if output_dir_final.startswith("gs://"):
+      actual_local_file_path = os.path.join(local_path_to_save_to, file_name)
+      config.to_json_file(actual_local_file_path)
       upload_file_to_gcs(
           actual_local_file_path,
           os.path.join(output_dir_final, file_name),
           remove_local_file_after_upload=remove_local_copy_after_upload,
       )
-    elif output_dir_final.startswith("hf://"):
-      repo_id = output_dir_final.lstrip("hf://")
-      api = HfApi()
-      api.upload_file(
-          path_or_fileobj=actual_local_file_path,
-          path_in_repo=file_name,
-          repo_id=repo_id,
-          repo_type="model",
-      )
       if remove_local_copy_after_upload:
         os.remove(actual_local_file_path)
         max_logging.log(f"   Removed local copy: {actual_local_file_path}")
+    elif output_dir_final.startswith("hf://"):
+      max_logging.log(f"  Serializing {file_name} to memory for Hugging Face Hub upload...")
+      json_string = config.to_json_string()
+      json_bytes = json_string.encode("utf-8")
+      repo_id = output_dir_final.lstrip("hf://")
+      api = HfApi()
+      with io.BytesIO(json_bytes) as f:
+        api.upload_file(
+            path_or_fileobj=f,
+            path_in_repo=file_name,
+            repo_id=repo_id,
+            repo_type="model",
+        )
+      max_logging.log(f"  Successfully uploaded {file_name} to HF repo: {repo_id}")
 
 
 def shard_checkpoint(
@@ -278,27 +283,36 @@ def save_safetensor_file(
     local_dir_to_save_to: str,
     output_dir_final: str,
     file_name: str,
-    remove_local_copy_after_upload: bool = False,
+    remove_local_copy_after_upload: bool = True,
 ):
   """Saves a single safetensor file."""
   if jax.process_index() == 0:
     state_dict = {k: v for k, v in state_dict.items() if v is not None}
-    local_path = os.path.join(local_dir_to_save_to, file_name)
     if "model.safetensors" in state_dict and isinstance(state_dict["model.safetensors"], dict):
       state_dict = state_dict["model.safetensors"]
-    numpy_save_file(state_dict, local_path, metadata={"format": "pt"})
-    max_logging.log(f"   Saved {file_name} to {local_path}")
 
     if output_dir_final.startswith("gs://"):
+      local_path = os.path.join(local_dir_to_save_to, file_name)
+      numpy_save_file(state_dict, local_path, metadata={"format": "pt"})
       cloud_path = os.path.join(output_dir_final, file_name)
       upload_file_to_gcs(local_path, cloud_path, remove_local_file_after_upload=remove_local_copy_after_upload)
-    elif output_dir_final.startswith("hf://"):
-      repo_id = output_dir_final.lstrip("hf://")
-      api = HfApi()
-      api.upload_file(path_or_fileobj=local_path, path_in_repo=file_name, repo_id=repo_id, repo_type="model")
       if remove_local_copy_after_upload:
         os.remove(local_path)
         max_logging.log(f"   Removed local copy: {local_path}")
+    elif output_dir_final.startswith("hf://"):
+      max_logging.log(f"  Serializing {file_name} to memory for Hugging Face Hub upload...")
+      serialized_content = save_flax_to_bytes(state_dict, metadata={"format": "pt"})
+      # Upload in-memory; skip local storage
+      repo_id = output_dir_final.lstrip("hf://")
+      api = HfApi()
+      with io.BytesIO(serialized_content) as f:
+        api.upload_file(
+            path_or_fileobj=f,
+            path_in_repo=file_name,
+            repo_id=repo_id,
+            repo_type="model",
+        )
+      max_logging.log(f"  Successfully uploaded {file_name} to HF repo: {repo_id}")
 
 
 def save_index_file(
@@ -316,23 +330,32 @@ def save_index_file(
     max_logging.log(f"   Saved {file_name} to {local_path}")
 
     if output_dir_final.startswith("gs://"):
-      upload_file_to_gcs(
-          local_path,
-          os.path.join(output_dir_final, file_name),
-          remove_local_file_after_upload=remove_local_copy_after_upload,
-      )
-    elif output_dir_final.startswith("hf://"):
-      repo_id = output_dir_final.lstrip("hf://")
-      api = HfApi()
-      api.upload_file(
-          path_or_fileobj=local_path,
-          path_in_repo=file_name,
-          repo_id=repo_id,
-          repo_type="model",
-      )
+      local_path = os.path.join(local_dir_to_save_to, file_name)
+      with open(local_path, "w") as f:
+        json.dump(index, f, indent=2)
+      max_logging.log(f"   Saved {file_name} to {local_path}")
+      if output_dir_final.startswith("gs://"):
+        upload_file_to_gcs(
+            local_path,
+            os.path.join(output_dir_final, file_name),
+            remove_local_file_after_upload=remove_local_copy_after_upload,
+        )
       if remove_local_copy_after_upload:
         os.remove(local_path)
         max_logging.log(f"   Removed local copy: {local_path}")
+    elif output_dir_final.startswith("hf://"):
+      max_logging.log(f"   Serialized {file_name} to memory for Hugging Face Hub upload.")
+      json_bytes = json.dumps(index, indent=2).encode("utf-8")
+      repo_id = output_dir_final.lstrip("hf://")
+      api = HfApi()
+      with io.BytesIO(json_bytes) as f:
+        api.upload_file(
+            path_or_fileobj=f,
+            path_in_repo=file_name,
+            repo_id=repo_id,
+            repo_type="model",
+        )
+      max_logging.log(f"   Successfully uploaded {file_name} to HF repo: {repo_id}")
 
 
 def save_weight_files(
@@ -400,6 +423,7 @@ def save_model_files(
     weight_arrays: Dict,
     config,  # HF config object
     tokenizer: Optional[Any],  # transformers.PreTrainedTokenizerBase
+    processor,
     output_dir: str,
     parallel_threads=8,
 ):
@@ -417,40 +441,47 @@ def save_model_files(
     remove_local_copy = is_temp_path
 
     if jax.process_index() == 0:
-      # Save tokenizer files
-      if tokenizer is not None:
-        max_logging.log(f"   Saving tokenizer files to {current_save_path}...")
-        # save_pretrained returns a tuple of saved file names (full paths)
+      files_to_upload = []
+      if processor is not None:
+        max_logging.log(f"    Saving image processor files to {current_save_path}...")
+        saved_image_processor_files = processor.save_pretrained(current_save_path)
+        max_logging.log(f"    Processor files saved locally: {saved_image_processor_files}")
+      elif tokenizer is not None:
+        max_logging.log(f"    Saving tokenizer files to {current_save_path}...")
         saved_tokenizer_files = tokenizer.save_pretrained(current_save_path)
-        max_logging.log(f" Tokenizer files saved locally: {saved_tokenizer_files}")
+        max_logging.log(f"    Tokenizer files saved locally: {saved_tokenizer_files}")
+      files_to_upload = [os.path.join(current_save_path, f) for f in os.listdir(current_save_path)]
 
-        if output_dir.startswith("gs://"):
-          for local_file_path in saved_tokenizer_files:
-            if not os.path.exists(local_file_path):
-              max_logging.log(f"   Warning: Tokenizer file {local_file_path} not found locally. Skipping upload to GCS.")
-              continue
-            file_name = os.path.basename(local_file_path)
-            upload_file_to_gcs(
-                local_file_path,
-                os.path.join(output_dir, file_name),
-                remove_local_file_after_upload=remove_local_copy,
-            )
-        elif output_dir.startswith("hf://") and repo_id:
-          api = HfApi()
-          for local_file_path in saved_tokenizer_files:
-            if not os.path.exists(local_file_path):
-              max_logging.log(f"   Warning: Tokenizer file {local_file_path} not found locally. Skipping upload to HF Hub.")
-              continue
-            file_name = os.path.basename(local_file_path)
-            api.upload_file(
-                path_or_fileobj=local_file_path,
-                path_in_repo=file_name,
-                repo_id=repo_id,
-                repo_type="model",
-            )
-            if remove_local_copy:
-              os.remove(local_file_path)
-              max_logging.log(f"   Removed local copy: {local_file_path}")
+      if output_dir.startswith("gs://"):
+        for local_file_path in files_to_upload:
+          if not os.path.exists(local_file_path):
+            max_logging.log(f"   Warning: Tokenizer file {local_file_path} not found locally. Skipping upload to GCS.")
+            continue
+          file_name = os.path.basename(local_file_path)
+          upload_file_to_gcs(
+              local_file_path,
+              os.path.join(output_dir, file_name),
+              remove_local_file_after_upload=remove_local_copy,
+          )
+          if remove_local_copy:
+            os.remove(local_file_path)
+            max_logging.log(f"   Removed local copy: {local_file_path}")
+      elif output_dir.startswith("hf://") and repo_id:
+        api = HfApi()
+        for local_file_path in files_to_upload:
+          if not os.path.exists(local_file_path):
+            max_logging.log(f"   Warning: Tokenizer file {local_file_path} not found locally. Skipping upload to HF Hub.")
+            continue
+          file_name = os.path.basename(local_file_path)
+          api.upload_file(
+              path_or_fileobj=local_file_path,
+              path_in_repo=file_name,
+              repo_id=repo_id,
+              repo_type="model",
+          )
+          if remove_local_copy:
+            os.remove(local_file_path)
+            max_logging.log(f"   Removed local copy: {local_file_path}")
 
       # Save config.json
       save_config_file(config, current_save_path, output_dir, SAFE_TENSORS_CONFIG_FILE, remove_local_copy)

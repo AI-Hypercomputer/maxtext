@@ -19,7 +19,7 @@ import os
 from typing import Sequence, Dict, Any
 import jax.numpy as jnp
 import numpy as np
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, AutoProcessor
 from absl import app
 import flax
 
@@ -74,6 +74,7 @@ Example Usage:
   are used to initialize the model structure and should be consistent with the
   checkpoint being converted, but often don't need to be changed from their defaults.
 """
+jax.config.update("jax_platform_name", "cpu")
 
 
 def _get_model_mappings(model_name: str, scan_layers: bool, config_dict: dict):  # Changed config to config_dict
@@ -121,6 +122,9 @@ def main(argv: Sequence[str]) -> None:
   hf_tokenizer_id = HF_IDS[model_key]
   tokenizer = AutoTokenizer.from_pretrained(hf_tokenizer_id)
 
+  # For multi-modal case:
+  processor = AutoProcessor.from_pretrained(hf_tokenizer_id) if config.use_multimodal else None
+
   # 3. Get parameter mappings
   mappings = _get_model_mappings(model_key, config.scan_layers, hf_config_obj.to_dict())
   param_map = mappings["param_mapping"]
@@ -155,6 +159,7 @@ def main(argv: Sequence[str]) -> None:
       weight_arrays=transformed_hf_weights,
       config=hf_config_obj,
       tokenizer=tokenizer,
+      processor=processor,
       output_dir=output_directory,
   )
   max_logging.log(f"✅ MaxText model successfully saved in HuggingFace format at {output_directory}")
