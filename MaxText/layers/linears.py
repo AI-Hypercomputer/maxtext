@@ -288,7 +288,6 @@ def dense_general(
       parameter_memory_host_offload=parameter_memory_host_offload,
       name=name,
       metadata_fn=variable_to_logically_partitioned,
-      abstract_init=False,
   )
   return module
 
@@ -493,6 +492,5 @@ def mlp_block(
       model_mode=model_mode,
       name=name,
       metadata_fn=variable_to_logically_partitioned,
-      abstract_init=False,
   )
   return module
