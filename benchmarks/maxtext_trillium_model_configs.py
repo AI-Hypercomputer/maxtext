@@ -756,7 +756,7 @@ llama3_1_405b_8192_fsdp_dcn = _add_to_model_dictionary(
             "dcn_pipeline_parallelism": 4,
             "pipeline_parallel_layers": 124,
             "num_layers_per_pipeline_stage": 1,
-            "num_pipeline_microbatches": 64,
+            "num_pipeline_microbatches": 16,
             "allow_split_physical_axes": True,
             "custom_mesh": "hybrid_ring_64x4",
             "remat_policy": "custom",
