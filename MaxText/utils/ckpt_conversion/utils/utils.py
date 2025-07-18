@@ -192,15 +192,7 @@ def save_config_file(
   """Saves the model configuration file(config.json)."""
   if jax.process_index() == 0:
     config.architectures = [MODEL_FOR_CAUSAL_LM_MAPPING_NAMES[config.model_type]]
-    if output_dir_final.startswith("gs://"):
-      actual_local_file_path = os.path.join(local_path_to_save_to, file_name)
-      config.to_json_file(actual_local_file_path)
-      upload_file_to_gcs(
-          actual_local_file_path,
-          os.path.join(output_dir_final, file_name),
-          remove_local_file_after_upload=remove_local_copy_after_upload,
-      )
-    elif output_dir_final.startswith("hf://"):
+    if output_dir_final.startswith("hf://"):
       max_logging.log(f"  Serializing {file_name} to memory for Hugging Face Hub upload...")
       json_string = config.to_json_string()
       json_bytes = json_string.encode("utf-8")
@@ -214,6 +206,18 @@ def save_config_file(
             repo_type="model",
         )
       max_logging.log(f"  Successfully uploaded {file_name} to HF repo: {repo_id}")
+    else:
+      # local storage
+      actual_local_file_path = os.path.join(local_path_to_save_to, file_name)
+      config.to_json_file(actual_local_file_path)
+      max_logging.log(f"   Saved {file_name} to {actual_local_file_path}")
+      # upload
+      if output_dir_final.startswith("gs://"):
+        upload_file_to_gcs(
+            actual_local_file_path,
+            os.path.join(output_dir_final, file_name),
+            remove_local_file_after_upload=remove_local_copy_after_upload,
+        )
 
 
 def shard_checkpoint(
@@ -280,9 +284,8 @@ def save_safetensor_file(
     local_dir_to_save_to: str,
     output_dir_final: str,
     file_name: str,
-    remove_local_copy_after_upload: bool = True,
 ):
-  """Saves a single safetensor file."""
+  """Saves a single safetensor file, from memory to remote when uploading"""
   if jax.process_index() == 0:
     state_dict = {k: v for k, v in state_dict.items() if v is not None}
     if "model.safetensors" in state_dict and isinstance(state_dict["model.safetensors"], dict):
@@ -305,6 +308,12 @@ def save_safetensor_file(
             repo_type="model",
         )
       max_logging.log(f"  Successfully uploaded {file_name} to HF repo: {repo_id}")
+    else:
+      # local storage
+      local_path = os.path.join(local_dir_to_save_to, file_name)
+      numpy_save_file(state_dict, local_path, metadata={"format": "pt"})
+      max_logging.log(f"   Saved {file_name} to {local_path}")
+
 
 
 def save_index_file(
@@ -317,22 +326,8 @@ def save_index_file(
   """Saves the model index json file (model.safetensors.index.json)."""
   if jax.process_index() == 0:
     local_path = os.path.join(local_dir_to_save_to, file_name)
-    with open(local_path, "w") as f:
-      json.dump(index, f)
-    max_logging.log(f"   Saved {file_name} to {local_path}")
 
-    if output_dir_final.startswith("gs://"):
-      local_path = os.path.join(local_dir_to_save_to, file_name)
-      with open(local_path, "w") as f:
-        json.dump(index, f, indent=2)
-      max_logging.log(f"   Saved {file_name} to {local_path}")
-      if output_dir_final.startswith("gs://"):
-        upload_file_to_gcs(
-            local_path,
-            os.path.join(output_dir_final, file_name),
-            remove_local_file_after_upload=remove_local_copy_after_upload,
-        )
-    elif output_dir_final.startswith("hf://"):
+    if output_dir_final.startswith("hf://"):
       max_logging.log(f"   Serialized {file_name} to memory for Hugging Face Hub upload.")
       json_bytes = json.dumps(index, indent=2).encode("utf-8")
       repo_id = output_dir_final.lstrip("hf://")
@@ -345,6 +340,17 @@ def save_index_file(
             repo_type="model",
         )
       max_logging.log(f"   Successfully uploaded {file_name} to HF repo: {repo_id}")
+    else:
+      with open(local_path, "w") as f:
+        json.dump(index, f, indent=2)
+      max_logging.log(f"   Saved {file_name} to {local_path}")
+      if output_dir_final.startswith("gs://"):
+        upload_file_to_gcs(
+            local_path,
+            os.path.join(output_dir_final, file_name),
+            remove_local_file_after_upload=remove_local_copy_after_upload,
+        )
+        max_logging.log(f"   Successfully uploaded {file_name} to GCS: {output_dir_final}")
 
 
 def save_weight_files(
@@ -363,7 +369,7 @@ def save_weight_files(
   if index is None:
     # 'shards' is actually the single state_dict here
     save_safetensor_file(
-        shards, local_dir_to_save_to, output_dir_final, SAFE_TENSORS_WEIGHTS_FILE, remove_local_copy_after_upload
+        shards, local_dir_to_save_to, output_dir_final, SAFE_TENSORS_WEIGHTS_FILE
     )
   else:
     # Save sharded weights in parallel
@@ -376,7 +382,6 @@ def save_weight_files(
               local_dir_to_save_to,
               output_dir_final,
               shard_name,
-              remove_local_copy_after_upload,
           )
           for shard_name, shard_dict in shard_items
       ]
@@ -416,7 +421,11 @@ def save_model_files(
     output_dir: str,
     parallel_threads=8,
 ):
-  """Saves model files (config and weights) to the specified directory."""
+  """
+  Saves model files (config and weights) to the specified directory.
+  When uploading to GCS/HF hub, 
+          *.safetensors are uploaded from memory to remote, no local storage is used to save disk usage
+  """
 
   if output_dir.startswith("hf://"):
     create_huggingface_hub_repo_if_not_exist(repo_id=output_dir.lstrip("hf://"), repo_type="model")
