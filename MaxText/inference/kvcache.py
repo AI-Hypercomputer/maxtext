@@ -21,7 +21,6 @@ import jax.numpy as jnp
 
 from flax import linen as nn
 
-from aqt.jax.v2 import aqt_tensor
 from aqt.jax.v2 import config as aqt_config
 from aqt.jax.v2.aqt_tensor import QTensor as KVTensor
 from aqt.jax.v2.flax import aqt_flax
@@ -88,7 +87,6 @@ class KVQuant:
 
   def einsum_fn_with_rhs_qtensor(
       self,
-      kv: Array | aqt_tensor.QTensor,
       rhs_dequant_mode=None,
       rhs_calibration_mode=None,
       lhs_dequant_mode=None,
@@ -97,45 +95,43 @@ class KVQuant:
     """einsum function where QTensor is the right-hand-side"""
     # Assumes kv is already quantized.
     einsum = jnp.einsum
-    if isinstance(kv, aqt_tensor.QTensor):
-      if kv.qvalue.dtype != jnp.float8_e4m3fn:
-        num_bits = 4 if kv.qvalue.dtype == jnp.int4 else 8
-        kv_cfg = aqt_config.dot_general_make(
-            lhs_bits=None,
-            rhs_bits=num_bits,
-            bwd_bits=None,
-            use_fwd_quant=False,
-        )
-      else:
-        kv_cfg = aqt_config.config_fwd_fp8()
-
-      if rhs_dequant_mode:
-        aqt_config.set_fwd_dequant_mode(kv_cfg, rhs_dequant_mode=rhs_dequant_mode)
-      if rhs_calibration_mode:
-        aqt_config.set_fwd_calibration_mode(
-            kv_cfg,
-            rhs_calibration_mode=rhs_calibration_mode,
-        )
-      if lhs_dequant_mode:
-        aqt_config.set_fwd_dequant_mode(kv_cfg, lhs_dequant_mode=lhs_dequant_mode)
-      if lhs_calibration_mode:
-        aqt_config.set_fwd_calibration_mode(
-            kv_cfg,
-            lhs_calibration_mode=lhs_calibration_mode,
-        )
-      einsum = aqt_flax.AqtEinsum(
-          rhs_quant_mode=aqt_flax.QuantMode.TRAIN,
-          lhs_freeze_mode=aqt_flax.FreezerMode.NONE,
-          rhs_freeze_mode=aqt_flax.FreezerMode.NONE,
-          cfg=kv_cfg,
+    if self.dtype != jnp.float8_e4m3fn:
+      num_bits = 4 if self.dtype == jnp.int4 else 8
+      kv_cfg = aqt_config.dot_general_make(
+          lhs_bits=None,
+          rhs_bits=num_bits,
+          bwd_bits=None,
+          use_fwd_quant=False,
       )
+    else:
+      kv_cfg = aqt_config.config_fwd_fp8()
+
+    if rhs_dequant_mode:
+      aqt_config.set_fwd_dequant_mode(kv_cfg, rhs_dequant_mode=rhs_dequant_mode)
+    if rhs_calibration_mode:
+      aqt_config.set_fwd_calibration_mode(
+          kv_cfg,
+          rhs_calibration_mode=rhs_calibration_mode,
+      )
+    if lhs_dequant_mode:
+      aqt_config.set_fwd_dequant_mode(kv_cfg, lhs_dequant_mode=lhs_dequant_mode)
+    if lhs_calibration_mode:
+      aqt_config.set_fwd_calibration_mode(
+          kv_cfg,
+          lhs_calibration_mode=lhs_calibration_mode,
+      )
+    einsum = aqt_flax.AqtEinsum(
+        rhs_quant_mode=aqt_flax.QuantMode.TRAIN,
+        lhs_freeze_mode=aqt_flax.FreezerMode.NONE,
+        rhs_freeze_mode=aqt_flax.FreezerMode.NONE,
+        cfg=kv_cfg,
+    )
     return einsum
 
-  def einsum_fn_with_rhs_qtensor_and_dequant(self, value):
+  def einsum_fn_with_rhs_qtensor_and_dequant(self):
     """Get einstein summation for different dequant modes."""
     if self.dtype == jnp.float8_e4m3fn:
       return self.einsum_fn_with_rhs_qtensor(
-          value,
           lhs_dequant_mode=aqt_config.DequantMode.THIS_INPUT,
           lhs_calibration_mode=aqt_config.CalibrationMode.REMAINING_AXIS,
           rhs_dequant_mode=aqt_config.DequantMode.OTHER_INPUT,
@@ -143,7 +139,6 @@ class KVQuant:
       )
     else:
       return self.einsum_fn_with_rhs_qtensor(
-          value,
           rhs_dequant_mode=aqt_config.DequantMode.OTHER_INPUT,
           rhs_calibration_mode=aqt_config.CalibrationMode.REMAINING_AXIS,
       )
