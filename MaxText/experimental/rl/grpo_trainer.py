@@ -639,6 +639,7 @@ def train_loop(config, config_inference, recorder, state=None):
   generation_thread.start()
 
   try:
+    last_step_completion = datetime.datetime.now()
     for step in np.arange(start_step, config.steps):
       prof.maybe_activate_profiler(step, state)
 

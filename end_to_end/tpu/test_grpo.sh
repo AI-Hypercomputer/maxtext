@@ -41,7 +41,7 @@ profiler=xplane skip_first_n_steps_for_profiler=5 profiler_steps=2"
 TRAINING_ARGS="run_name=${RUN_NAME} scan_layers=true \
 ici_fsdp_transpose_parallelism=16 \
 inference_replicas=${NUM_SAMPLERS} inference_devices_per_replica=${DEVICES_PER_SAMPLER} \
-inference_rollouts=5 \
+inference_rollouts=1 \
 per_device_batch_size=${TRAINING_PER_DEVICE_BATCH_SIZE} num_generations=${NUM_GENERATIONS} steps=${STEPS}"
 
 INFERENCE_ARGS="run_name=grpo scan_layers=false \
