@@ -18,54 +18,61 @@ from typing import Optional
 from jax import numpy as jnp
 from jax.sharding import Mesh
 
-from flax import linen as nn
-
+from flax import nnx
+from MaxText.layers import initializers
 from MaxText.common_types import Config
 from MaxText.layers import quantizations
-
+from typing import Any
 # pytype: disable=attribute-error
 
 
-class SimpleDecoderLayer(nn.Module):
+class SimpleDecoderLayer(nnx.Module):
   """Decoder layer consisting of a single [embed, embed] weight matrix."""
 
-  config: Config
-  mesh: Mesh
-  quant: Optional[quantizations.AqtQuantization] = None
-
-  def setup(self):
-    self.weight_mat = self.param(
-        "weights",
-        nn.with_logical_partitioning(nn.initializers.lecun_normal(), ("embed", "mlp")),
-        (self.config.emb_dim, self.config.emb_dim),
+  def __init__(self, config: Config, mesh: Mesh, quant: Optional[quantizations.AqtQuantization] = None,*
+               rngs: nnx.Rngs,
+               weight_dtype: Any = jnp.float32,):
+    self.config = config
+    self.mesh = mesh
+    self.quant = quant
+    self.weight_dtype = weight_dtype
+    self.weight_mat = nnx.Param(
+      nnx.initializers.lecun_normal()(rngs.params(),(self.config.emb_dim, self.config.emb_dim,),self.weight_dtype),
+      sharding=("embed", "mlp",),
     )
+
 
   def __call__(
       self, inputs: jnp.ndarray, positions, segmentation, deterministic, model_mode, previous_chunk=None, page_state=None
   ):
     if self.config.scan_layers:
       return inputs @ self.weight_mat.astype(inputs.dtype), None
-    else:
-      return inputs @ self.weight_mat.astype(inputs.dtype)
+    return inputs @ self.weight_mat.astype(inputs.dtype)
 
 
-class SimpleMlpDecoderLayer(nn.Module):
+class SimpleMlpDecoderLayer(nnx.Module):
   """Decoder layer consisting of [embed,mlp] followed by an [mlp,embed] matmul."""
 
   config: Config
   mesh: Mesh
   quant: Optional[quantizations.AqtQuantization] = None
 
-  def setup(self):
-    self.ff_1 = self.param(
-        "ff_1",
-        nn.with_logical_partitioning(nn.initializers.lecun_normal(), ("embed", "mlp")),
-        (self.config.emb_dim, self.config.mlp_dim),
+  def __init__(self, config: Config, mesh: Mesh, 
+               quant: Optional[quantizations.AqtQuantization] = None,
+               *
+               rngs: nnx.Rngs,
+               weight_dtype: Any = jnp.float32,):
+    self.config = config
+    self.mesh = mesh
+    self.quant = quant
+    self.weight_dtype = weight_dtype
+    self.ff_1 = nnx.Param(
+      nnx.initializers.lecun_normal()(rngs.params(),(self.config.emb_dim, self.config.emb_dim,),self.weight_dtype),
+      sharding=("embed", "mlp",),
     )
-    self.ff_2 = self.param(
-        "ff_2",
-        nn.with_logical_partitioning(nn.initializers.lecun_normal(), ("mlp", "embed")),
-        (self.config.mlp_dim, self.config.emb_dim),
+    self.ff_2 = nnx.Param(
+      nnx.initializers.lecun_normal()(rngs.params(),(self.config.emb_dim, self.config.emb_dim,),self.weight_dtype),
+      sharding=("embed", "mlp",),
     )
 
   def __call__(
