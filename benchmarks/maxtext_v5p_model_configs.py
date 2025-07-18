@@ -55,6 +55,7 @@ deepseek_v3_ep_256_v5p_512 = _add_to_model_dictionary(
             "dtype": "bfloat16",
             "opt_type": "adam_pax",
             "attention": "flash",
+            "shardy": False,
         },
         xla_flags=(
             xla_flags_library.MOE_VMEM_LIMIT_FLAG
