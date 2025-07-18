@@ -53,7 +53,7 @@ from MaxText.layers.embeddings import (
     rotary_embedding_as_linen,
     yarn_rotary_embedding_as_linen,
 )
-from MaxText.layers.initializers import nd_dense_init, NdInitializer
+from MaxText.layers.initializers import nd_dense_init, NdInitializer, variable_to_logically_partitioned
 from MaxText.layers.linears import dense_general
 from MaxText.layers.normalizations import rms_norm
 from MaxText.layers.quantizations import AqtQuantization as Quant
@@ -325,47 +325,93 @@ def attention_op_as_linen(
       chunk_attn_window_size=chunk_attn_window_size,
       use_ragged_attention=use_ragged_attention,
       ragged_block_size=ragged_block_size,
-      metadata_fn=variable_to_logically_partitioned,
+      metadata_fn=variable_to_logically_partitioned),
   )
 
 
-@dataclasses.dataclass(repr=False)
+
 class AttentionOp(nnx.Module):
   """Attention operation"""
 
-  config: Config
-  mesh: Mesh
-  attention_kernel: str
-  max_target_length: int
-  num_query_heads: int
-  num_kv_heads: int
-  float32_qk_product: bool = False
-  max_prefill_predict_length: int = -1
-  float32_logits: bool = False
-  flash_axis_names_kv: AxisNames = (BATCH, HEAD, KV_LENGTH, D_KV)
-  flash_axis_names_q: AxisNames = (BATCH, HEAD, LENGTH, D_KV)
-  flash_axis_names_splash_kernel: AxisNames = (HEAD, LENGTH)
-  prefill_cache_logical_axis_names: AxisNames = (CACHE_BATCH_PREFILL, CACHE_SEQUENCE, CACHE_HEADS, CACHE_KV)
-  cache_logical_axis_names: AxisNames = (CACHE_BATCH, CACHE_SEQUENCE, CACHE_HEADS, CACHE_KV)
-  cache_scale_logical_axis_names: AxisNames = (CACHE_SCALE_BATCH, CACHE_SCALE_SEQUENCE, CACHE_SCALE_HEADS, CACHE_SCALE_KV)
-  ragged_qkv_axis_names: AxisNames = (CACHE_BATCH, CACHE_HEADS, CACHE_SEQUENCE, CACHE_KV)
-  ragged_lengths_names: AxisNames = (CACHE_BATCH,)
-  compute_axis_order: AxisIdxes = (0, 1, 2, 3)
-  key_axis_order: AxisIdxes = (2, 0, 1, 3)
+  def __init__(
+      self,
+      config: Config,
+      mesh: Mesh,
+      attention_kernel: str,
+      max_target_length: int,
+      num_query_heads: int,
+      num_kv_heads: int,
+      float32_qk_product: bool = False,
+      max_prefill_predict_length: int = -1,
+      float32_logits: bool = False,
+      flash_axis_names_kv: AxisNames = (BATCH, HEAD, KV_LENGTH, D_KV),
+      flash_axis_names_q: AxisNames = (BATCH, HEAD, LENGTH, D_KV),
+      flash_axis_names_splash_kernel: AxisNames = (HEAD, LENGTH),
+      prefill_cache_logical_axis_names: AxisNames = (CACHE_BATCH_PREFILL, CACHE_SEQUENCE, CACHE_HEADS, CACHE_KV),
+      cache_logical_axis_names: AxisNames = (CACHE_BATCH, CACHE_SEQUENCE, CACHE_HEADS, CACHE_KV),
+      cache_scale_logical_axis_names: AxisNames = (
+          CACHE_SCALE_BATCH,
+          CACHE_SCALE_SEQUENCE,
+          CACHE_SCALE_HEADS,
+          CACHE_SCALE_KV,
+      ),
+      ragged_qkv_axis_names: AxisNames = (CACHE_BATCH, CACHE_HEADS, CACHE_SEQUENCE, CACHE_KV),
+      ragged_lengths_names: AxisNames = (CACHE_BATCH,),
+      compute_axis_order: AxisIdxes = (0, 1, 2, 3),
+      key_axis_order: AxisIdxes = (2, 0, 1, 3),
+      reshape_q: bool = False,
+      dropout_rate: float = 0.0,
+      dtype: DType = jnp.float32,
+      quant: Optional[Quant] = None,
+      kv_quant: Optional[KVQuant] = None,
+      attention_type: AttentionType = AttentionType.GLOBAL,  # Default to global attention
+      attn_logits_soft_cap: float | None = None,
+      sliding_window_size: int | None = None,
+      chunk_attn_window_size: int | None = None,
+      use_ragged_attention: bool = False,
+      ragged_block_size: int = 256,
+      rngs: nnx.Rngs | None = None,
+  ):
+    self.config = config
+    self.mesh = mesh
+    self.attention_kernel = attention_kernel
+    self.max_target_length = max_target_length
+    self.num_query_heads = num_query_heads
+    self.num_kv_heads = num_kv_heads
+    self.float32_qk_product = float32_qk_product
+    self.max_prefill_predict_length = max_prefill_predict_length
+    self.float32_logits = float32_logits
+    self.flash_axis_names_kv = flash_axis_names_kv
+    self.flash_axis_names_q = flash_axis_names_q
+    self.flash_axis_names_splash_kernel = flash_axis_names_splash_kernel
+    self.prefill_cache_logical_axis_names = prefill_cache_logical_axis_names
+    self.cache_logical_axis_names = cache_logical_axis_names
+    self.cache_scale_logical_axis_names = cache_scale_logical_axis_names
+    self.ragged_qkv_axis_names = ragged_qkv_axis_names
+    self.ragged_lengths_names = ragged_lengths_names
+    self.compute_axis_order = compute_axis_order
+    self.key_axis_order = key_axis_order
+    self.reshape_q = reshape_q
+    self.dropout_rate = dropout_rate
+    self.dtype = dtype
+    self.quant = quant
+    self.kv_quant = kv_quant
+    self.attention_type = attention_type
+    self.attn_logits_soft_cap = attn_logits_soft_cap
+    self.sliding_window_size = sliding_window_size
+    self.chunk_attn_window_size = chunk_attn_window_size
+    self.use_ragged_attention = use_ragged_attention
+    self.ragged_block_size = ragged_block_size
 
-  reshape_q: bool = False
-  dropout_rate: float = 0.0
-  dtype: DType = jnp.float32
-  quant: Optional[Quant] = None
-  kv_quant: Optional[KVQuant] = None
-  attention_type: AttentionType = AttentionType.GLOBAL  # Default to global attention
-  attn_logits_soft_cap: float | None = None
-  sliding_window_size: int | None = None
-  chunk_attn_window_size: int | None = None
-  use_ragged_attention: bool = False
-  ragged_block_size: int = 256
+    # qk_product
+    if self.kv_quant:
+      self.AqtEinsum_0 = self.kv_quant.einsum_fn_with_rhs_qtensor()
+    einsum = jnp.einsum
 
-  rngs: nnx.Rngs = None  # Not used in AttentionOp but passed in by nnx.bridge.to_linen
+    if self.kv_quant:
+      self.einsum = self.kv_quant.einsum_fn_with_rhs_qtensor()
+    else:
+      self.einsum = jnp.einsum
 
   def check_attention_inputs(self, query: Array, key: Array | KVTensor, value: Array | KVTensor) -> None:
     """Check attention inputs."""
@@ -1328,16 +1374,6 @@ def l2_norm_as_linen(self, eps: float = 1e-6):
     eps: float, epsilon used for numerical stability (default value should be ok for most cases).
   """
   return nnx_wrappers.to_linen(L2Norm, eps=eps, metadata_fn=variable_to_logically_partitioned)
-
-
-def variable_to_logically_partitioned(variable: nnx.VariableState):
-  metadata = variable.get_metadata()
-  return nn.LogicallyPartitioned(  # type: ignore[wrong-keyword-args]
-      variable.value,
-      variable.sharding,
-      mesh=metadata.get("mesh"),
-      rules=metadata.get("rules"),
-  )
 
 
 class Attention(nn.Module):
