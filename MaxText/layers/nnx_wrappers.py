@@ -24,7 +24,6 @@ from flax.core import FrozenDict
 from flax.core import meta
 from flax.nnx import graph
 from flax.nnx import variablelib
-from flax.nnx.bridge import variables as bv
 from flax.nnx.bridge import module as bdg_module
 from flax.nnx.module import Module
 from flax.nnx.object import Object
@@ -33,10 +32,6 @@ import jax
 from jax import tree_util as jtu
 
 M = tp.TypeVar("M", bound=Module)
-
-# -----------------------------------------------------------------------
-# variable helpers
-# -----------------------------------------------------------------------
 
 
 def is_vanilla_variable(vs: variablelib.VariableState) -> bool:
@@ -124,21 +119,17 @@ def nnx_attrs_to_linen_vars(nnx_attrs: dict) -> dict:
   """Convert a dict of NNX variables (or variable states) to Linen-style variables."""
   linen_structured = {}
   for kp, v in nnx.traversals.flatten_mapping(nnx_attrs).items():
-    if isinstance(v, variablelib.VariableState):
-      col_name = variablelib.variable_name_from_type(v.type)
-      v = to_linen_var(v)
-    elif isinstance(v, variablelib.Variable):
+    if isinstance(v, variablelib.Variable):
       col_name = variablelib.variable_name_from_type(type(v))
       v = to_linen_var(v.to_state())
+    elif isinstance(v, variablelib.VariableState):
+      col_name = variablelib.variable_name_from_type(v.type)
+      v = to_linen_var(v)
     else:
       raise ValueError(f"Cannot infer collection name from value: {v}")
     linen_structured[(col_name, *kp)] = v
   variables = nnx.traversals.unflatten_mapping(linen_structured)
   return variables
-
-
-# -----------------------------------------------------------------------
-# -----------------------------------------------------------------------
 
 
 def _set_initializing(module: Module, initializing: bool):
@@ -357,9 +348,6 @@ class ToLinen(linen.Module):
       NNX module.
     skip_rng: True if this NNX module doesn't need `rngs` arg during
       initialization (not common).
-    abstract_init: if True (default) the NNX module will be initialized under
-      `nnx.eval_shape`, useful to minimize memory consumption, else it will be
-      initialized normally.
 
   Returns:
     A stateful NNX module that behaves the same as the wrapped Linen module.
@@ -369,8 +357,7 @@ class ToLinen(linen.Module):
   args: tp.Sequence = ()
   kwargs: tp.Mapping[str, tp.Any] = FrozenDict({})
   skip_rng: bool = False
-  abstract_init: bool = True
-  metadata_fn: tp.Callable[[variablelib.VariableState], tp.Any] | None = bv.to_linen_var
+  metadata_fn: tp.Callable[[variablelib.VariableState], tp.Any] | None = to_linen_var
 
   @linen.compact
   def __call__(
@@ -396,12 +383,13 @@ class ToLinen(linen.Module):
       out = method_fn(module, *args, **kwargs)
       return out
 
-    # create state
+    # create the nnx module
+    module = self.nnx_class(*self.args, **_module_kwargs())
+    # update nnx module from linen variables
     def maybe_unbox(x):
       if isinstance(x, meta.AxisMetadata):
         return x.unbox()
       return x
-
     states = jtu.tree_map(
       maybe_unbox,
       list(self.variables.values()),
@@ -409,23 +397,7 @@ class ToLinen(linen.Module):
     )
     if not states:
       states = ({},)
-
-    # update module state
-    if self.abstract_init:
-      module = nnx.eval_shape(lambda: self.nnx_class(*self.args, **_module_kwargs()))
-    else:
-      module = self.nnx_class(*self.args, **_module_kwargs())
     nnx.update(module, *states)
-    # update rngs
-    for _, rngs_obj in graph.iter_graph(module):
-      if isinstance(rngs_obj, Rngs):
-        # clear rngs streams
-        for stream_name in list(rngs_obj):
-          delattr(rngs_obj, stream_name)
-        # add rngs streams
-        new_rngs = Rngs(**linen_rngs_dict(self, add_default=maybe_add_default))
-        for stream_name, rngs_stream in new_rngs.items():
-          setattr(rngs_obj, stream_name, rngs_stream)
 
     method_fn = _get_module_method(module, nnx_method)
     out = method_fn(module, *args, **kwargs)
@@ -483,10 +455,9 @@ def to_linen(
   *args,
   metadata_fn: (
     tp.Callable[[variablelib.VariableState], tp.Any] | None
-  ) = bv.to_linen_var,
+  ) = to_linen_var,
   name: str | None = None,
   skip_rng: bool = False,
-  abstract_init: bool = True,
   **kwargs,
 ):
   """Shortcut of `nnx.bridge.ToLinen` if user is not changing any of its default fields."""
@@ -496,6 +467,5 @@ def to_linen(
     kwargs=FrozenDict(kwargs),
     metadata_fn=metadata_fn,
     skip_rng=skip_rng,
-    abstract_init=abstract_init,
     name=name,
   )
