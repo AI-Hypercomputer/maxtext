@@ -60,6 +60,13 @@ from MaxText.layers.quantizations import AqtQuantization as Quant
 # pylint: disable=line-too-long, g-doc-args, g-doc-return-or-yield, bad-continuation, g-inconsistent-quotes
 # pytype: disable=attribute-error
 
+# debug
+from flax.linen.spmd import RulesFallback, _global_mesh_defined
+from jax.interpreters import pxla
+from flax.core.spmd import (
+    get_logical_axis_rules,
+)
+
 
 def debug_sharding(array, prefix=""):
   global_shape = array.shape
@@ -1755,12 +1762,18 @@ class Attention(nn.Module):
 
     def debug_axis():
       jax.debug.print(
-          "nn.logical_to_mesh_axes(self.input_axis_names): {x}", x=nn.logical_to_mesh_axes(self.input_axis_names)
+          "\nnn.logical_to_mesh_axes(self.input_axis_names): {x}", x=nn.logical_to_mesh_axes(self.input_axis_names)
       )
       jax.debug.print(
           "nn.logical_to_mesh_axes(self.ep_input_axis_names): {x}", x=nn.logical_to_mesh_axes(self.ep_input_axis_names)
       )
       jax.debug.print("is_batch_shard_by_expert: {x}", x=is_batch_shard_by_expert)
+      jax.debug.print("_global_mesh_defined: {x}", x=_global_mesh_defined())
+      jax.debug.print("pxla.thread_resources.env.physical_mesh: {x}", x=pxla.thread_resources.env.physical_mesh)
+      jax.debug.print("self.mesh: {x}", x=self.mesh)
+      # jax.debug.print("get_logical_axis_rules: {x}", x=get_logical_axis_rules())
+
+    # debug_axis()
 
     # DEBUGGING DEFINITION END #
 
@@ -1769,9 +1782,11 @@ class Attention(nn.Module):
     def apply_logical_sharding(array, logical_axis_name, use_nn_constraint=True):
       if use_nn_constraint:
         return nn.with_logical_constraint(array, logical_axis_name)
-      pspec = nn.logical_to_mesh_axes(logical_axis_name)
-      named_sharding = jax.sharding.NamedSharding(self.mesh, pspec)
-      return lax.with_sharding_constraint(array, named_sharding)
+      else:
+        return nn.with_logical_constraint(array, logical_axis_name, mesh=self.mesh)
+      # pspec = nn.logical_to_mesh_axes(logical_axis_name)
+      # named_sharding = jax.sharding.NamedSharding(self.mesh, pspec)
+      # return lax.with_sharding_constraint(array, named_sharding)
 
     if model_mode == MODEL_MODE_PREFILL:
       inputs_q = nn.with_logical_constraint(inputs_q, self.prefill_input_axis_names)
@@ -1789,7 +1804,7 @@ class Attention(nn.Module):
       inputs_q = nn.with_logical_constraint(inputs_q, self.decode_input_axis_names)
       inputs_kv = nn.with_logical_constraint(inputs_kv, self.decode_input_axis_names)
 
-    prefix = f"\nuse_nn_constraint={use_nn_constraint}, context={self.config.ici_context_parallelism}, expert={self.config.ici_expert_parallelism}, is_batch_shard_by_expert={is_batch_shard_by_expert}\n\n"
+    prefix = f"\n_global_mesh_defined: {_global_mesh_defined()}, use_nn_constraint={use_nn_constraint}, context={self.config.ici_context_parallelism}, expert={self.config.ici_expert_parallelism}, is_batch_shard_by_expert={is_batch_shard_by_expert}\n\n"
     debug_sharding(inputs_q, prefix + "inputs_q\n")
     if not self.config.fused_qkv:
       debug_sharding(inputs_kv, "inputs_kv\n")
@@ -1858,19 +1873,19 @@ class Attention(nn.Module):
       value = nn.with_logical_constraint(value, (DECODE_BATCH, DECODE_LENGTH, KV_HEAD, D_KV))
     # model_mode == MODEL_MODE_TRAIN
     elif is_batch_shard_by_expert:
-      # query = nn.with_logical_constraint(query, self.query_axis_names)
-      # key = nn.with_logical_constraint(key, self.key_axis_names)
-      # value = nn.with_logical_constraint(value, self.value_axis_names)
-      query = apply_logical_sharding(query, self.query_axis_names, use_nn_constraint)
-      key = apply_logical_sharding(key, self.key_axis_names, use_nn_constraint)
-      value = apply_logical_sharding(value, self.value_axis_names, use_nn_constraint)
+      query = nn.with_logical_constraint(query, self.query_axis_names)
+      key = nn.with_logical_constraint(key, self.key_axis_names)
+      value = nn.with_logical_constraint(value, self.value_axis_names)
+      # query = apply_logical_sharding(query, self.query_axis_names, use_nn_constraint)
+      # key = apply_logical_sharding(key, self.key_axis_names, use_nn_constraint)
+      # value = apply_logical_sharding(value, self.value_axis_names, use_nn_constraint)
     else:
-      # query = nn.with_logical_constraint(query, self.ep_query_axis_names)
-      # key = nn.with_logical_constraint(key, self.ep_key_axis_names)
-      # value = nn.with_logical_constraint(value, self.ep_value_axis_names)
-      query = apply_logical_sharding(query, self.ep_query_axis_names, use_nn_constraint)
-      key = apply_logical_sharding(key, self.ep_key_axis_names, use_nn_constraint)
-      value = apply_logical_sharding(value, self.ep_value_axis_names, use_nn_constraint)
+      query = nn.with_logical_constraint(query, self.ep_query_axis_names)
+      key = nn.with_logical_constraint(key, self.ep_key_axis_names)
+      value = nn.with_logical_constraint(value, self.ep_value_axis_names)
+      # query = apply_logical_sharding(query, self.ep_query_axis_names, use_nn_constraint)
+      # key = apply_logical_sharding(key, self.ep_key_axis_names, use_nn_constraint)
+      # value = apply_logical_sharding(value, self.ep_value_axis_names, use_nn_constraint)
 
     query = checkpoint_name(query, "query_proj")
     key = checkpoint_name(key, "key_proj")
@@ -1899,11 +1914,11 @@ class Attention(nn.Module):
       out = nn.with_logical_constraint(out, self.prefill_out_axis_names)
     elif model_mode == MODEL_MODE_TRAIN:
       if is_batch_shard_by_expert:
-        # out = nn.with_logical_constraint(out, self.out_axis_names)
-        out = apply_logical_sharding(out, self.out_axis_names, use_nn_constraint)
+        out = nn.with_logical_constraint(out, self.out_axis_names)
+        # out = apply_logical_sharding(out, self.out_axis_names, use_nn_constraint)
       else:
-        # out = nn.with_logical_constraint(out, self.ep_out_axis_names)
-        out = apply_logical_sharding(out, self.ep_out_axis_names, use_nn_constraint)
+        out = nn.with_logical_constraint(out, self.ep_out_axis_names)
+        # out = apply_logical_sharding(out, self.ep_out_axis_names, use_nn_constraint)
     else:
       out = nn.with_logical_constraint(out, self.decode_out_axis_names)
 
@@ -2197,9 +2212,10 @@ class MLA(Attention):
     def apply_logical_sharding(array, logical_axis_name, use_nn_constraint=True):
       if use_nn_constraint:
         return nn.with_logical_constraint(array, logical_axis_name)
-      pspec = nn.logical_to_mesh_axes(logical_axis_name)
-      named_sharding = jax.sharding.NamedSharding(self.mesh, pspec)
-      return lax.with_sharding_constraint(array, named_sharding)
+      return nn.with_logical_constraint(array, logical_axis_name, mesh=self.mesh)
+      # pspec = nn.logical_to_mesh_axes(logical_axis_name)
+      # named_sharding = jax.sharding.NamedSharding(self.mesh, pspec)
+      # return lax.with_sharding_constraint(array, named_sharding)
 
     if model_mode == MODEL_MODE_PREFILL:
       inputs_q = nn.with_logical_constraint(inputs_q, self.prefill_input_axis_names)
