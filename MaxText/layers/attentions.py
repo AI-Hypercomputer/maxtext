@@ -1434,7 +1434,7 @@ class Attention(nn.Module):
   is_vision: bool = False
 
   def setup(self):
-    """init with attention_op and possibly paged_attention_op"""
+    """Init with attention_op and possibly paged_attention_op."""
     self.attention_op = attention_op_as_linen(
         config=self.config,
         mesh=self.mesh,
@@ -1649,19 +1649,31 @@ class Attention(nn.Module):
 
   def update_kv_caches(self, key, value, decoder_segment_ids, model_mode, previous_chunk):
     """Updates the KV caches for prefill and autoregressive modes."""
-    prefill_kv_cache, ar_kv_cache = kvcache.KVCache(
-        self.max_prefill_predict_length,
-        self.max_target_length,
-        self.dtype,
+    batch, key_seq_len, key_heads, key_head_size = key.shape
+    batch, value_seq_len, value_heads, value_head_size = value.shape
+
+    prefill_kv_cache, ar_kv_cache = kvcache.kv_cache_as_linen(
+        max_prefill_length=self.max_prefill_predict_length,
+        max_target_length=self.max_target_length,
+        batch=batch,
+        key_seq_len=key_seq_len,
+        value_seq_len=value_seq_len,
+        key_heads=key_heads,
+        value_heads=value_heads,
+        key_head_size=key_head_size,
+        value_head_size=value_head_size,
+        dtype=self.dtype,
         kv_quant=self.kv_quant,
         prefill_cache_axis_order=self.prefill_cache_axis_order,
         ar_cache_axis_order=self.ar_cache_axis_order,
         use_chunked_prefill=self.config.use_chunked_prefill,
+        model_mode=model_mode,
+        name="KVCache_0",
     )(
-        key,
-        value,
-        decoder_segment_ids,
-        model_mode,
+        key=key,
+        value=value,
+        decoder_segment_ids=decoder_segment_ids,
+        model_mode=model_mode,
         use_ragged_attention=self.use_ragged_attention,
         previous_chunk=previous_chunk,
     )
@@ -2000,19 +2012,29 @@ class MLA(Attention):
 
   def update_mla_kv_caches(self, low_rank_main, key_rope, decoder_segment_ids, model_mode, previous_chunk=None):
     """Updates the MlaKvCache in prefill and autoregressive modes."""
-    prefill_mla_cache, ar_mla_cache = kvcache.MlaKVCache(
-        self.max_prefill_predict_length,
-        self.max_target_length,
-        self.dtype,
+    batch, key_seq_len, key_head_size = low_rank_main.shape
+    batch, value_seq_len, _, value_head_size = key_rope.shape
+
+    prefill_mla_cache, ar_mla_cache = kvcache.mla_kv_cache_as_linen(
+        max_prefill_length=self.max_prefill_predict_length,
+        max_target_length=self.max_target_length,
+        batch=batch,
+        key_seq_len=key_seq_len,
+        value_seq_len=value_seq_len,
+        key_head_size=key_head_size,
+        value_head_size=value_head_size,
+        dtype=self.dtype,
         kv_quant=self.kv_quant,
         prefill_cache_axis_order=self.prefill_cache_axis_order,
         ar_cache_axis_order=self.ar_cache_axis_order,
+        model_mode=model_mode,
         use_chunked_prefill=self.config.use_chunked_prefill,
+        name="MlaKVCache_0",
     )(
-        low_rank_main,
-        key_rope,
-        decoder_segment_ids,
-        model_mode,
+        key_latent=low_rank_main,
+        key_rope=key_rope,
+        decoder_segment_ids=decoder_segment_ids,
+        model_mode=model_mode,
         use_ragged_attention=self.use_ragged_attention,
         previous_chunk=previous_chunk,
     )

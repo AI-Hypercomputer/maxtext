@@ -24,6 +24,8 @@ import sys
 from absl import app
 from collections.abc import MutableMapping
 
+from flax import linen as nn
+
 from MaxText import max_utils
 from MaxText import maxengine
 from MaxText import maxtext_utils
@@ -155,6 +157,12 @@ def ar_benchmark_loop(config, engine_generate, params, decode_state, iters, prof
   for _ in range(iters):
     rng, rng_generate = jax.random.split(rng)
     decode_state, _ = engine_generate(params, decode_state, rng_generate)
+    decode_state = jax.tree.map(
+        lambda x: x.unbox() if isinstance(x, nn.LogicallyPartitioned) else x,
+        decode_state,
+        is_leaf=lambda x: isinstance(x, nn.LogicallyPartitioned)
+    )
+
   jax.block_until_ready(decode_state)
   end = datetime.datetime.now()
   prof.deactivate()
@@ -167,6 +175,11 @@ def ar_benchmark(config, engine_generate, params, decode_state, global_batch_siz
   for _ in range(_WARMUP_ITERS):
     rng, rng_generate = jax.random.split(rng)
     decode_state, _ = engine_generate(params, decode_state, rng_generate)
+    decode_state = jax.tree.map(
+        lambda x: x.unbox() if isinstance(x, nn.LogicallyPartitioned) else x,
+        decode_state,
+        is_leaf=lambda x: isinstance(x, nn.LogicallyPartitioned)
+    )
   jax.block_until_ready(decode_state)
 
   time_in_s, decode_state = ar_benchmark_loop(
