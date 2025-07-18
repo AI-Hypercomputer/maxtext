@@ -14,40 +14,20 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-from flax import linen as nn
-import jax.numpy as jnp
-from jax.ad_checkpoint import checkpoint_name
-
-from MaxText import common_types
-from MaxText.layers import normalizations
-from MaxText.layers import attentions
-from MaxText.layers import initializers
-from MaxText.layers import embeddings
-from MaxText.layers import linears
-from MaxText.layers import quantizations
-
 from typing import Optional
 
-Embed = embeddings.Embed
-RMSNorm = normalizations.RMSNorm
-NdInitializer = initializers.NdInitializer
-Attention = attentions.Attention
-MlpBlock = linears.MlpBlock
-Config = common_types.Config
-AxisNames = common_types.AxisNames
-Mesh = common_types.Mesh
-ScanIn = common_types.ScanIn
-DType = common_types.DType
-Array = common_types.Array
-BATCH = common_types.BATCH
-LENGTH = common_types.LENGTH
-HEAD = common_types.HEAD
-D_KV = common_types.D_KV
+from jax.ad_checkpoint import checkpoint_name
+from jax.sharding import Mesh
+import jax.numpy as jnp
 
+from flax import linen as nn
 
-nd_dense_init = initializers.nd_dense_init
-Quant = quantizations.AqtQuantization
-KVQuant = quantizations.KVQuant
+from MaxText.common_types import Config
+from MaxText.layers import quantizations
+from MaxText.layers.attentions import Attention
+from MaxText.layers.linears import mlp_block
+from MaxText.layers.normalizations import rms_norm
+from MaxText.layers.quantizations import AqtQuantization as Quant
 
 
 # Decoder and Model definitions
@@ -76,9 +56,13 @@ class GemmaDecoderLayer(nn.Module):
     inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
     inputs = checkpoint_name(inputs, "decoder_layer_input")
     # inputs: embedded inputs to the decoder with shape [batch, length, emb_dim]
-    lnx = RMSNorm(dtype=cfg.dtype, weight_dtype=cfg.weight_dtype, name="pre_self_attention_norm", kernel_axes=("norm",))(
-        inputs
-    )
+    lnx = rms_norm(
+        num_features=inputs.shape[-1],
+        dtype=cfg.dtype,
+        weight_dtype=cfg.weight_dtype,
+        name="pre_self_attention_norm",
+        kernel_axes=("norm",),
+    )(inputs)
 
     lnx = nn.with_logical_constraint(lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
 
@@ -117,12 +101,17 @@ class GemmaDecoderLayer(nn.Module):
     )
     attention_lnx += inputs
     residual = attention_lnx
-    attn_output = RMSNorm(dtype=cfg.dtype, weight_dtype=cfg.weight_dtype, name="pre_ffw_norm", kernel_axes=("norm",))(
-        attention_lnx
-    )
+    attn_output = rms_norm(
+        num_features=attention_lnx.shape[-1],
+        dtype=cfg.dtype,
+        weight_dtype=cfg.weight_dtype,
+        name="pre_ffw_norm",
+        kernel_axes=("norm",),
+    )(attention_lnx)
 
     # MLP block.
-    mlp_lnx = MlpBlock(
+    mlp_lnx = mlp_block(
+        in_features=attn_output.shape[-1],
         intermediate_dim=cfg.mlp_dim,
         activations=cfg.mlp_activations,
         intermediate_dropout_rate=cfg.dropout_rate,

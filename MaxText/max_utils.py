@@ -14,30 +14,37 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-""" Common Max Utils needed by multiple modules"""
-""" All the functions include MaxText modules, such as Pyconfig, should be moved to MaxText utils file."""
-import numpy as np
-import jax
-import jax.numpy as jnp
-from jax.experimental import mesh_utils
-from MaxText import max_logging
+""" Common Max Utils needed by multiple modules.
+All the functions include MaxText modules, such as Pyconfig, should be moved to MaxText utils file."""
+
 import functools
 import time
 import os
-import psutil
 import socket
 import subprocess
-from etils import epath
-from collections.abc import Sequence
 import collections
+from collections.abc import Sequence
 from typing import Any, Tuple
 from functools import partial
 
-import orbax.checkpoint as ocp
+import numpy as np
 
+import jax
+import jax.numpy as jnp
+from jax.experimental import mesh_utils
 
 import flax
+
+import psutil
+
+from etils import epath
+
+import orbax.checkpoint as ocp
+
 from tensorboardX import writer
+
+from MaxText import max_logging
+
 
 HYBRID_RING_64X4 = "hybrid_ring_64x4"
 HYBRID_RING_32X8 = "hybrid_ring_32x8"
@@ -75,7 +82,7 @@ def calculate_num_params_from_pytree(params):
 
 
 def calculate_total_params_per_chip(params):
-  """Calculate total paramsper chip."""
+  """Calculate total params per chip."""
 
   def calculate_leaf_params_per_chip(arr):
     shard = arr.addressable_shards[0]
@@ -109,7 +116,7 @@ def close_summary_writer(summary_writer):
 
 
 def add_text_to_summary_writer(key, value, summary_writer):
-  """Writes given key-value pair to tensorboard as text/summary"""
+  """Writes given key-value pair to tensorboard as text/summary."""
   if jax.process_index() == 0:
     summary_writer.add_text(key, value)
 
@@ -125,6 +132,12 @@ def maybe_initialize_jax_distributed_system(raw_keys):
   if raw_keys["skip_jax_distributed_system"]:
     max_logging.log("Skipping jax distributed system due to skip_jax_distributed_system=True flag.")
     return
+  if raw_keys["enable_single_controller"]:
+    max_logging.log("Skipping jax distributed system since its not needed for single controller.")
+    return
+  if jax.distributed.is_initialized():
+    max_logging.log("Jax distributed system is already initialized.")
+    return
   if raw_keys["inference_benchmark_test"]:
     # Disable initialization for inference benmark test.
     return
@@ -139,17 +152,20 @@ def maybe_initialize_jax_distributed_system(raw_keys):
     max_logging.log("Attempting to initialize the jax distributed system for CPU backend...")
     initialize_jax_for_cpu(raw_keys)
     max_logging.log("Jax distributed system initialized on CPUs!")
-  elif (
-      raw_keys["enable_checkpointing"]
-      and raw_keys["async_checkpointing"]
-      and raw_keys["compile_topology_num_slices"] == -1
-      and not raw_keys["enable_single_controller"]
-  ) or raw_keys["hardware"] == "gpu_multiprocess":
+  elif (raw_keys["enable_checkpointing"] and raw_keys["compile_topology_num_slices"] == -1) or raw_keys[
+      "hardware"
+  ] == "gpu_multiprocess":
     max_logging.log("Attempting to initialize the jax distributed system...")
     if not raw_keys["enable_emergency_checkpoint"]:
       jax.distributed.initialize(initialization_timeout=raw_keys["jax_distributed_initialization_timeout"])
     else:
-      initialize_jax_for_tpu_with_emergency_checkpointing(raw_keys)
+      if raw_keys["hardware"] == "gpu_multiprocess":
+        max_logging.log("Initializing jax distribtued to support local checkpointing with GPUs...")
+        jax.distributed.initialize(initialization_timeout=raw_keys["jax_distributed_initialization_timeout"])
+        ocp.multihost.initialize_runtime_to_distributed_ids()
+        ocp.multihost.initialize_distributed_to_device_ids()
+      else:
+        initialize_jax_for_tpu_with_emergency_checkpointing(raw_keys)
     max_logging.log("Jax distributed system initialized!")
 
 
@@ -710,6 +726,27 @@ def print_cpu_ram_stats(label: str):
     max_logging.log(f"\tRAM stats unavailable, error: {ex}")
 
 
+def print_compiled_memory_stats(compiled_stats):
+  """Prints a summary of the compiled memory statistics."""
+  if compiled_stats is None:
+    return
+
+  def bytes_to_gb(num_bytes):
+    return num_bytes / (1024**3)
+
+  output_gb = bytes_to_gb(compiled_stats.output_size_in_bytes)
+  temp_gb = bytes_to_gb(compiled_stats.temp_size_in_bytes)
+  argument_gb = bytes_to_gb(compiled_stats.argument_size_in_bytes)
+  alias_gb = bytes_to_gb(compiled_stats.alias_size_in_bytes)
+  host_temp_gb = bytes_to_gb(compiled_stats.host_temp_size_in_bytes)
+  total_gb = output_gb + temp_gb + argument_gb - alias_gb
+
+  max_logging.log(
+      f"Total memory size: {total_gb:.1f} GB, Output size: {output_gb:.1f} GB, Temp size: {temp_gb:.1f} GB, "
+      f"Argument size: {argument_gb:.1f} GB, Host temp size: {host_temp_gb:.1f} GB."
+  )
+
+
 def print_system_information():
   """Print system information of the current environment.
   Note that this will initialize the JAX backend."""
@@ -817,9 +854,19 @@ def reorder_causal_load_balanced(batch, cp_size):
   }
 
 
+def shard_reorder_causal_load_balanced(batch, cp_size):
+  """Shard the output of the reordered sequence."""
+  reordered = reorder_causal_load_balanced(batch, cp_size)
+  for _, v in batch.items():
+    if isinstance(v, jax.Array):
+      reordered = jax.lax.with_sharding_constraint(reordered, v.sharding)
+      break
+  return reordered
+
+
 def get_reorder_callable(cp_size):
   """Creates a callable that can be used with map() to reorder batches."""
-  return functools.partial(reorder_causal_load_balanced, cp_size=cp_size)
+  return functools.partial(shard_reorder_causal_load_balanced, cp_size=cp_size)
 
 
 @staticmethod
@@ -869,3 +916,90 @@ def reorder_mask_load_balancing(tensor, cp_size: int, seq_dim: int):
 
   # Reshape back to original dimensions
   return reordered.reshape(ori_tensor_shape)
+
+
+def parse_custom_args(argv):
+  """ Load multiple YAML config files from command line arguments.
+  """
+  configs = []
+  current_argv = []
+  python_script = argv[0]
+  for arg in argv[1:]:
+    if arg.endswith((".yaml", ".yml")):
+      if current_argv:
+        configs.append(current_argv)
+      current_argv = [python_script, arg]
+    else:
+      current_argv.append(arg)
+  if current_argv:
+    configs.append(current_argv)
+  return configs
+
+
+def unscan_train_state_params(params, sharding, mesh, scan_axis, layer_groups):
+  """
+  Unrolls scanned parameter groups into per-layer entries.
+
+  Args:
+    train_state: training state with scanned `params`
+    mesh: the mesh to use for sharding output
+    scan_axis: axis along which scanning was applied (usually 0)
+    layer_groups: list of tuples like:
+      [("dense_layers", 4), ("moe_layers", 12)]
+  """
+  decoder = params["params"]["decoder"]
+  sharding = sharding["params"]["decoder"]
+
+  for layer_name, num_layers in layer_groups:
+    scanned_layers = decoder[layer_name]
+
+    def strip_axis(pspec):
+      return jax.sharding.PartitionSpec(*(pspec[:scan_axis] + pspec[scan_axis+1:]))
+
+    old_spec = jax.tree_util.tree_map(lambda x: x.spec, sharding[layer_name])
+    new_spec = jax.tree_util.tree_map(strip_axis, old_spec)
+    new_sharding = jax.tree_util.tree_map(lambda ps: jax.sharding.NamedSharding(mesh, ps), new_spec)
+
+    def slice_layer(arr, i):
+      return jax.tree_util.tree_map(lambda x: jnp.take(x, i, axis=scan_axis), arr)
+    p_slice_layer = jax.jit(slice_layer, out_shardings=new_sharding)
+
+    for i in range(num_layers):
+      per_layer = p_slice_layer(scanned_layers, i)
+      decoder[f"{layer_name}_{i}"] = per_layer
+
+    del decoder[layer_name]  # Free memory
+
+def rescan_train_state_params(params, source_shardings, scan_axis, layer_groups):
+  """
+  Reconstruct scanned layers from per-layer entries using minimal HBM.
+  
+  Args:
+    train_state: training state with unrolled {layer_name}_{i} entries
+    scan_axis: axis to scan over
+    layer_groups: list of (layer_name, num_layers)
+    mesh: jax.sharding.Mesh for out_shardings
+  """
+  decoder = params["params"]["decoder"]
+  sharding = source_shardings["params"]["decoder"]
+
+  for layer_name, num_layers in layer_groups:
+
+    def stack_layers(*layers):
+      return jax.tree_util.tree_map(lambda *xs: jnp.stack(xs, axis=scan_axis), *layers)
+
+    # Create a wrapper that allows pjit + donation
+    compiled_stack = jax.jit(
+      stack_layers,
+      out_shardings=sharding[layer_name],
+      # donate_argnums=tuple(range(num_layers)),
+    )
+
+    # Collect per-layer entries for stacking
+    layer_list = [decoder.pop(f"{layer_name}_{i}") for i in range(num_layers)]
+
+    # Stack them with donation
+    scanned = compiled_stack(*layer_list)
+
+    # Store result and clear temporary memory
+    decoder[layer_name] = scanned

@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-"""Stub for logging utilities. Right now just meant to avoid raw prints"""
+"""Stub for logging utilities. Right now just meant to avoid raw prints."""
 
 
 def log(user_str):

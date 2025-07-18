@@ -118,19 +118,21 @@ def filter_dataset(config, dataset, tokenizer):
     prompt = data["prompt"][0]
     actual_completion = data["completion"][0]
 
-    max_output_tokens = min(config.max_output_length, len(tokenizer.encode(actual_completion)))
+    max_output_length = config.max_target_length - config.max_prefill_length
+    max_output_tokens = min(max_output_length, len(tokenizer.encode(actual_completion)))
     if config.use_chat_template:
       message = [{"role": "user", "content": prompt}]
       prompt_token_ids = tokenizer.apply_chat_template(message, add_generation_prompt=True, tokenize=True)
     else:
       prompt_token_ids = tokenizer.encode(prompt)
 
-    # Filter out long prompt sequences
-    if len(prompt_token_ids) + max_output_tokens > config.max_target_length:
+    # Filter out prompt sequences that are longer than max_prefill_length
+    if len(prompt_token_ids) > config.max_prefill_length:
       continue
 
     request = InputRequest(prompt, prompt_token_ids, actual_completion, max_output_tokens)
     filtered_dataset.append(request)
   if len(filtered_dataset) < len(dataset):
+    max_logging.log("Some prompts are longer than `max-prefill-length` and will be filtered out.")
     max_logging.log(f"Filtering reduced dataset batch from {len(dataset)} to {len(filtered_dataset)} samples.")
   return filtered_dataset

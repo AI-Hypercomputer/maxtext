@@ -16,10 +16,9 @@
 import enum
 from typing import Any, Sequence
 
-from flax.linen import partitioning
-import jax
-import jax.numpy as jnp
 import numpy as np
+
+import jax.numpy as jnp
 
 Config = Any
 
@@ -28,14 +27,12 @@ PRNGKey = jnp.ndarray
 DType = jnp.dtype
 Shape = Sequence[int]
 
-Mesh = jax.sharding.Mesh
-ScanIn = partitioning.ScanIn
-
 AxisNames = tuple[str, ...]
 AxisIdxes = tuple[int, ...]
 
 BATCH = "activation_batch"
 LENGTH = "activation_length"
+PREFILL_LENGTH = "prefill_activation_length"
 Q_LENGTH = "activation_q_length"
 KV_LENGTH = "activation_kv_length"
 EMBED = "activation_embed"
@@ -71,6 +68,8 @@ DEFAULT_MASK_VALUE = -0.7 * float(np.finfo(np.dtype("float32")).max)
 
 
 class DecoderBlockType(enum.Enum):
+  """Decoder block types."""
+
   DEFAULT = "default"
   LLAMA2 = "llama2"
   MISTRAL = "mistral"
@@ -79,6 +78,7 @@ class DecoderBlockType(enum.Enum):
   GEMMA = "gemma"
   GEMMA2 = "gemma2"
   GEMMA3 = "gemma3"
+  QWEN3 = "qwen3"
   GPT3 = "gpt3"
   SIMPLE = "simple"
   SIMPLE_MLP = "simple_mlp"

@@ -15,24 +15,26 @@ limitations under the License.
 """
 
 # pylint: disable=bare-except, consider-using-generator
-"""Utils that are only interesting to MaxText. """
+""" Utils that are only interesting to MaxText. """
 
 from typing import Optional
-
 import functools
 import pickle
 
-from flax.training import train_state
 from flax import linen as nn
 from flax.linen import partitioning as nn_partitioning
+from flax.training import train_state
 
 import numpy as np
 
+from collections.abc import Iterable
+from jax.experimental import mesh_utils
+from jax.experimental.serialize_executable import deserialize_and_load
+from jax.sharding import PartitionSpec as P
+
 import jax
 import jax.numpy as jnp
-from jax.experimental import mesh_utils
-from jax.sharding import PartitionSpec as P
-from jax.experimental.serialize_executable import deserialize_and_load
+import jax.tree_util as jtu
 
 import optax
 
@@ -40,25 +42,28 @@ import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_c
 import orbax.checkpoint.experimental.emergency.replicator_checkpoint_manager as emergency_replicator_checkpoint_manager
 
 from MaxText import checkpointing
-from MaxText import common_types
-from MaxText.inference.page_manager import PageState
 from MaxText import max_logging
 from MaxText import max_utils
-from MaxText.common_types import DecoderBlockType
+from MaxText.common_types import DecoderBlockType, MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE
+from MaxText.inference.page_manager import PageState
 
 OVERWRITE_WITH_GRADIENT = "_overwrite_with_gradient"
 
 # Multimodal constants
 NUM_IMAGES_PER_SEQUENCE = 1
 NUM_IMAGE_CHANNELS = 3
+NUM_TILES_PER_IMAGE = 5  # Fake number of tiles for llama4, init purpose
 
 
-def get_functional_train_with_signature(train_step, mesh, state_mesh_shardings, model, config):
-  """Get the shardings (both state and data) for train_step"""
-  functional_train = get_functional_train_step(train_step, model, config, state_mesh_shardings)
+def get_input_data_sharding(config, mesh):
+  """Get the input data sharding for the model"""
+  return nn.logical_to_mesh_sharding(P(*config.input_data_sharding_logical_axes), mesh, config.logical_axis_rules)
+
+
+def get_functional_train_with_signature(train_step, data_sharding, state_mesh_shardings, model, config):
+  """Get the shardings (both state and data) for `train_step`."""
+  functional_train = functools.partial(train_step, model, config, state_mesh_shardings)
   functional_train.__name__ = "train_step"
-  data_pspec = P(*config.data_sharding)
-  data_sharding = jax.tree_util.tree_map(lambda p: jax.sharding.NamedSharding(mesh, p), data_pspec)
   in_shardings = (state_mesh_shardings, data_sharding, None)  # State, batch, rng
   out_shardings = (state_mesh_shardings, None)  # State, metrics
   static_argnums = ()  # We partial out the static argnums of model and config
@@ -66,25 +71,15 @@ def get_functional_train_with_signature(train_step, mesh, state_mesh_shardings, 
   return functional_train, in_shardings, out_shardings, static_argnums, donate_argnums
 
 
-def get_functional_train_step(train_step, model, config, state_mesh_shardings):
-  return functools.partial(train_step, model, config, state_mesh_shardings)
-
-
-def get_functional_eval_with_signature(eval_step, mesh, state_mesh_shardings, model, config):
-  """Get the shardings (both state and data) for eval_step"""
-  functional_eval = get_functional_eval_step(eval_step, model, config)
+def get_functional_eval_with_signature(eval_step, data_sharding, state_mesh_shardings, model, config):
+  """Get the shardings (both state and data) for `eval_step`."""
+  functional_eval = functools.partial(eval_step, model, config)
   functional_eval.__name__ = "eval_step"
-  data_pspec = P(*config.data_sharding)
-  data_sharding = jax.tree_util.tree_map(lambda p: jax.sharding.NamedSharding(mesh, p), data_pspec)
   in_shardings = (state_mesh_shardings, data_sharding, None)  # State, batch, rng
   out_shardings = None  # metrics
   static_argnums = ()  # We partial out the static argnums of model, config
   donate_argnums = ()  # state will be kept instead of being donated in eval_step
   return functional_eval, in_shardings, out_shardings, static_argnums, donate_argnums
-
-
-def get_functional_eval_step(eval_step, model, config):
-  return functools.partial(eval_step, model, config)
 
 
 def get_shaped_batch(config):
@@ -98,7 +93,32 @@ def get_shaped_batch(config):
   shaped_batch["targets"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
   shaped_batch["targets_position"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
   shaped_batch["targets_segmentation"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
+  if config.use_multimodal:
+    image_shape = get_dummy_image_shape_for_init(config)
+    shaped_batch["images"] = jax.ShapeDtypeStruct(image_shape, jnp.int32)
   return shaped_batch
+
+
+def get_dummy_image_shape_for_init(config):
+  """Return the shape of the dummy image for specific model's initialization."""
+  image_shape = ()
+  if config.model_name.startswith("gemma3"):
+    image_shape = (
+        config.micro_batch_size_to_train_on,
+        NUM_IMAGES_PER_SEQUENCE,
+        config.image_size_for_vit,
+        config.image_size_for_vit,
+        NUM_IMAGE_CHANNELS,
+    )
+  elif config.model_name.startswith("llama4"):
+    image_shape = (
+        config.micro_batch_size_to_train_on,
+        NUM_TILES_PER_IMAGE,
+        NUM_IMAGE_CHANNELS,
+        config.tile_size_for_vit,
+        config.tile_size_for_vit,
+    )
+  return image_shape
 
 
 def load_compiled(config, partial_train, state):
@@ -236,7 +256,7 @@ def calculate_tflops_training_per_device(config, log=True):
   # MLP flops
   if config.num_experts > 1:
     # calculation based on dropless implementation
-    if config.decoder_block == DecoderBlockType.DEEPSEEK or config.decoder_block == DecoderBlockType.LLAMA4:
+    if config.decoder_block in (DecoderBlockType.DEEPSEEK, DecoderBlockType.LLAMA4):
       total_ffn_flops = calculate_routed_and_shared_ffn_tflops_per_device(config)
     else:
       gate_flops = 2 * config.per_device_batch_size * config.max_target_length * config.emb_dim * config.num_experts
@@ -278,7 +298,7 @@ def calculate_tflops_training_per_device(config, log=True):
     attention_tflops, learnable_weight_tflops = calculate_gemma2_tflops_training_per_device(
         config, total_ffn_flops, qkv_flops, projection_flops, embedding_flops
     )
-  elif config.decoder_block == DecoderBlockType.DEEPSEEK or config.decoder_block == DecoderBlockType.LLAMA4:
+  elif config.decoder_block in (DecoderBlockType.DEEPSEEK, DecoderBlockType.LLAMA4):
     learnable_weight_tflops = (
         (total_ffn_flops + (qkv_flops + projection_flops) * config.num_decoder_layers + embedding_flops) * 3 / 10**12
     )
@@ -342,25 +362,51 @@ def calculate_prefill_tflops_per_device(num_model_parameters, prefill_length, co
   return total_tflops, learnable_weight_tflops, causal_attention_tflops
 
 
-def assert_params_sufficiently_sharded(params, mesh, tolerance):
-  """Checks whether most params are sharded across sharding axis.
+def get_mesh_axes_used_by_tensor_spec(tensor_sharding_spec):
+  """
+  Extracts the set of mesh axis names that a tensor's PartitionSpec uses.
 
-  This function determines whether the majority of parameters  are distributed
-  across a specified sharding axes with an acceptable tolerance. It compares the
-  current distribution to a scenario where all parameters are fully sharded
-  across the 'fsdp', 'fsdp_transpose', 'sequence', and 'tensor' axes.
+  This function inspects a tensor's sharding specification (PartitionSpec) and
+  identifies which mesh axes are actively used for sharding. If a tensor is not
+  sharded (i.e., fully replicated), the resulting set will be empty.
 
   Args:
-    params: params of the model state
-    mesh: mesh constructed from config
-    tolerance: float between 0.0 and 1.0 representing the allowed percentage of
-    non-sharded parameters.
+    tensor_sharding_spec: The PartitionSpec of a tensor, which defines how it's partitioned across the mesh.
+    It can be None or contain strings and iterables representing the mesh axes.
+    all_mesh_axis_names: A collection of all available mesh axis names in the current device mesh.
+
   Returns:
-    bool: True if the majority of parameters are sufficiently sharded
+    A set of strings, where each string is a mesh axis name used by the
+    tensor's sharding spec. Returns an empty set for unsharded tensors.
   """
-  total_num_params = max_utils.calculate_num_params_from_pytree(params)
-  product_num_devices_for_weight_sharding = 1
-  for axis in [
+  # Flatten the sharding spec, as it can contain nested iterables (e.g., ('data', 'mdl')).
+  tensor_sharding_spec = sum(
+      [
+          [axis] if isinstance(axis, str) else list(axis) if isinstance(axis, Iterable) else []
+          for axis in tensor_sharding_spec
+      ],
+      [],
+  )
+  return tensor_sharding_spec
+
+
+def _get_nontrival_mesh_axes(mesh):
+  """
+  Returns mesh axes from config that are valid and have more than one shard.
+
+  This function identifies which of the predefined potential sharding axes are
+  actually present in the current device mesh and are configured with a size
+  greater than one (i.e., are actually sharded).
+
+  Args:
+    mesh: The device mesh object, which contains information about the mesh topology, including axis names and their sizes.
+
+  Returns:
+    A set of strings, where each string is a mesh axis name that is both
+    pre-configured as a target for sharding and has more than one shard in the mesh.
+  """
+
+  target_sharding_axes_config = [
       "fsdp",
       "fsdp_transpose",
       "sequence",
@@ -371,18 +417,156 @@ def assert_params_sufficiently_sharded(params, mesh, tolerance):
       "tensor_sequence",
       "stage",
       "expert",
-  ]:
-    product_num_devices_for_weight_sharding *= mesh.shape[axis]
-  total_num_params_per_chip = max_utils.calculate_total_params_per_chip(params)
-  perfectly_sharded_params_per_chip = total_num_params / product_num_devices_for_weight_sharding
-  assert total_num_params_per_chip >= perfectly_sharded_params_per_chip, (
-      "Number of parameters per chip must not be less than in the ideal sharded "
-      "scenario across `fsdp`, `fsdp_transpose`, `context`, `sequence`, `tensor`, `tensor_transpose`, `tensor_sequence`, `stage`, `expert` axes."
-  )
-  unsharded_param_perc = total_num_params_per_chip / perfectly_sharded_params_per_chip - 1
-  assert unsharded_param_perc < tolerance, (
-      f"Number of unsharded parameters exceeds tolerance {tolerance * 100}% "
-      f"of total parameters with a value of {unsharded_param_perc * 100}%."
+  ]
+
+  # Filter the target axes to find those that exist in the current mesh
+  # and have a size greater than 1, meaning they are actually used for sharding.
+  return {axis for axis in target_sharding_axes_config if axis in mesh.axis_names and mesh.shape[axis] > 1}
+
+
+def _analyze_sharding(params, mesh, valid_target_mesh_axes):
+  """
+  Analyzes parameters to find which are unsharded on any valid mesh axis.
+
+  This function iterates through all parameters in a model, checking their
+  sharding specifications. It identifies parameters that are not sharded along any
+  of the provided valid target axes (i.e., they are fully replicated across these axes).
+
+  Args:
+    params: A PyTree of model parameters.
+    mesh: The device mesh object.
+    valid_target_mesh_axes: A set of mesh axis names that are considered valid targets for sharding.
+
+  Returns:
+    A tuple containing:
+      - unsharded_params_total_size (int): The total size (number of elements) of all parameters found to be
+        unsharded on the target axes.
+      - problematic_tensors_details (list): A list of dictionaries, where each
+        dictionary contains details about a tensor that is not sharded on any of the target axes.
+  """
+  unsharded_params_total_size = 0  # Initialize a counter for the size of unsharded parameters.
+  problematic_tensors_details = []  # Initialize a list to store details of problematic tensors.
+
+  # Get a flattened list of all parameters (leaves) in the PyTree, along with their paths.
+  all_params_leaves = jtu.tree_leaves_with_path(params)
+
+  for path, p_leaf in all_params_leaves:  # Iterate over each parameter leaf
+    param_name_str = jtu.keystr(path)  # Convert the tree path to a readable string
+
+    # Check that sharding and spec exist and are valid
+    sharding = getattr(p_leaf, "sharding", None)
+    spec = getattr(sharding, "spec", None)
+    assert sharding is not None and spec is not None and isinstance(spec, P), (
+        f"Parameter '{param_name_str}' is missing a valid '.sharding.spec'."
+        "Expected 'p_leaf.sharding.spec' to be a non-null 'partitionspec'."
+    )
+
+    current_sharding_spec = p_leaf.sharding.spec  # Extract the current tensor's sharding spec
+    # Identify axes used for sharding
+    mesh_axes_used = get_mesh_axes_used_by_tensor_spec(current_sharding_spec)
+    # Check if the parameter is sharded on all the valid target axes.
+    is_sharded_on_all_target_axis = all(axis in mesh_axes_used for axis in valid_target_mesh_axes)
+
+    # If the parameter is not sharded on all of the target axes, it's considered "problematic."
+    if not is_sharded_on_all_target_axis:
+      unsharded_params_total_size += p_leaf.size  # Add to total unsharded parameter size
+      unsharded_axes = set(valid_target_mesh_axes) - set(mesh_axes_used)
+      # Add detailed info to list of problematic tensors
+      problematic_tensors_details.append(
+          {
+              "name": param_name_str,  # Tensor name
+              "size": p_leaf.size,  # tensor size
+              "shape": p_leaf.shape,  # tensor shape
+              "spec": str(current_sharding_spec),  # Tensor sharding spec as string
+              "available_axes": sorted(list(valid_target_mesh_axes)),  # Axes that could be used for sharding
+              "unsharded_axes": sorted(list(unsharded_axes)),  # Unsharded axes
+          }
+      )
+  # Return the total size of unsharded parameters and the list of problematic tensors.
+  return unsharded_params_total_size, problematic_tensors_details  # Return results
+
+
+def _raise_if_unsharded_exceeds_tolerance(unsharded_size, total_size, tolerance, problematic_tensors_details):
+  """
+  Raises an AssertionError if the percentage of unsharded parameters exceeds the given tolerance.
+
+  This function calculates the proportion of model parameters that are unsharded
+  and compares it against a specified tolerance. If the tolerance is exceeded,
+  it constructs and raises a detailed error message.
+
+  Args:
+    unsharded_size: The total size of parameters not sharded on target axes.
+    total_size: The total size of all parameters in the model.
+    tolerance: A float (e.g., 0.05 for 5%) representing the maximum allowed percentage of unsharded parameters.
+    problematic_tensors_details: A list of details about the unsharded tensors,
+    used to generate an informative error message.
+
+  Raises:
+    AssertionError: If the percentage of unsharded parameters is greater than the tolerance.
+  """
+  if total_size <= 0:
+    raise ValueError("Total size must be greater than zero.")
+
+  # Calculate the percentage of unsharded parameters.
+  unsharded_param_perc = unsharded_size / total_size
+
+  # If the percentage is over the tolerance, prepare and raise an error.
+  if unsharded_param_perc > tolerance:
+    # Sort the problematic tensors by size to show the largest ones first.
+    problematic_tensors_details.sort(key=lambda x: x["size"], reverse=True)
+
+    # Begin constructing the error message.
+    error_msg_lines = [
+        f"Unsharded parameter percentage ({unsharded_param_perc:.2%})" f"exceeds tolerance ({tolerance:.2%})."
+    ]
+    # Add a header explaining the issue.
+    error_msg_lines.append(
+        "The following large tensors are replicated (unsharded) but could be sharded on at "
+        "least one of the available axes:"
+    )
+    # Add details for the top 5 largest problematic tensors.
+    for detail in problematic_tensors_details[:5]:  # Show top 5 largest problematic tensors
+      error_msg_lines.append(
+          f" - Name: {detail['name']}(Size: {detail['size']}, Shape: {detail['spec']}, Spec: {detail['spec']}) "
+          f" is unsharded on axis: {detail['unsharded_axes']}"
+          f" could be sharded on: {detail['available_axes']}"
+      )
+
+    # Raise the assertion error with the combined, formatted message.
+    raise AssertionError("\n".join(error_msg_lines))
+
+
+def assert_params_sufficiently_sharded(params, mesh, tolerance):
+  """
+  Asserts that the total size of replicated parameters is within a given tolerance.
+
+  This is the main function that orchestrates the sharding analysis. It determines
+  the total number of parameters, identifies valid sharding axes, analyzes the
+  sharding of all parameters, and then raises an error if the amount of
+  unsharded parameters exceeds the specified tolerance.
+
+  Args:
+    params: A PyTree of model parameters.
+    mesh: The device mesh object.
+    tolerance: A float representing the maximum allowed percentage of unsharded parameters.
+  """
+  # Calculate the total size of all parameters in the model.
+  total_num_params = max_utils.calculate_bytes_from_pytree(params)
+
+  # Get the set of nontrival mesh axes that can be used for sharding.
+  valid_target_mesh_axes = _get_nontrival_mesh_axes(mesh)
+  # If there are no valid axes to shard along, there's nothing to check, so we can exit.
+  if not valid_target_mesh_axes:
+    return  # Exit early
+
+  # Analyze the parameters to find the total size of unsharded parameters
+  # and get details on which tensors are problematic.
+  unsharded_params_total_size, problematic_tensors_details = _analyze_sharding(params, mesh, valid_target_mesh_axes)
+
+  # Check if the amount of unsharded parameters is within the tolerance and
+  # raise an exception if it is not.
+  _raise_if_unsharded_exceeds_tolerance(
+      unsharded_params_total_size, total_num_params, tolerance, problematic_tensors_details
   )
 
 
@@ -431,7 +615,7 @@ def get_nested_value(dictionary, nested_key, default=None):
   return current_level
 
 
-def init_decode_state(apply_fn, params):
+def init_decode_state(apply_fn, params) -> train_state.TrainState:
   """Init train state with null opt state for decode."""
   state = train_state.TrainState(step=0, apply_fn=apply_fn, params=params, tx=None, opt_state={})  # type: ignore
   return state
@@ -452,18 +636,12 @@ def init_initial_state(model, tx, config, is_training, key):
   Args: model, tx, config, is_training, key
   """
   input_shape = (config.micro_batch_size_to_train_on, config.max_target_length)
-  image_shape = (
-      config.micro_batch_size_to_train_on,
-      NUM_IMAGES_PER_SEQUENCE,
-      config.image_size_for_vit,
-      config.image_size_for_vit,
-      NUM_IMAGE_CHANNELS,
-  )
+  image_shape = get_dummy_image_shape_for_init(config)
   model_vars = model.init(
       {"params": key, "dropout": key, "aqt": key},
       np.ones(input_shape, dtype=jnp.int32),
       np.ones(input_shape, dtype=jnp.int32),
-      encoder_images=np.ones(image_shape, dtype=jnp.int32),
+      encoder_images=np.ones(image_shape, dtype=jnp.int32) if config.use_multimodal else None,
   )
   if is_training:
     return init_training_state(model.apply, model_vars, tx)
@@ -611,8 +789,16 @@ def get_abstract_state(model, tx, config, rng, mesh, is_training=True):
   state_mesh_shardings = nn.logical_to_mesh_sharding(state_logical_annotations, mesh, config.logical_axis_rules)
   if is_training and config.optimizer_memory_host_offload:
     opt_state = jax.tree_util.tree_map(lambda x: x.with_memory_kind(kind="pinned_host"), state_mesh_shardings.opt_state)
-    params = jax.tree_util.tree_map(lambda x: x.with_memory_kind(kind="pinned_host"), state_mesh_shardings.params)
-    state_mesh_shardings = state_mesh_shardings.replace(opt_state=opt_state, params=params)
+    state_mesh_shardings = state_mesh_shardings.replace(opt_state=opt_state)
+  if is_training and config.parameter_memory_host_offload:
+    assert config.param_scan_axis == 0, "You must set the scan axis 0 to enable parameter offloading."
+
+    def move(path, x):
+      max_logging.log(f"max_utils.py: Moving {path} to host")
+      return x.with_memory_kind(kind="pinned_host")
+
+    params = jax.tree_util.tree_map_with_path(move, state_mesh_shardings.params)
+    state_mesh_shardings = state_mesh_shardings.replace(params=params)
 
   abstract_sharded_state = jax.jit(init_state_partial, in_shardings=None, out_shardings=state_mesh_shardings).eval_shape()
 
@@ -635,20 +821,14 @@ def get_prefill_kv_cache_annotations(model, config, rng, mesh, page_state: Optio
         config.global_batch_size_to_load,
         config.max_prefill_predict_length,
     )
-    image_shape = (
-        config.global_batch_size_to_load,
-        NUM_IMAGES_PER_SEQUENCE,
-        config.image_size_for_vit,
-        config.image_size_for_vit,
-        NUM_IMAGE_CHANNELS,
-    )
+    image_shape = get_dummy_image_shape_for_init(config)
 
     model_vars = model.init(
         {"params": rng, "dropout": rng, "aqt": rng},
         jnp.ones(input_shape),
         jnp.ones(input_shape),
         encoder_images=jnp.ones(image_shape) if config.use_multimodal else None,
-        model_mode=common_types.MODEL_MODE_PREFILL,
+        model_mode=MODEL_MODE_PREFILL,
         slot=0,
         page_state=page_state,
     )
@@ -671,20 +851,14 @@ def get_kv_cache_annotations(model, config, rng, mesh, page_state: Optional[Page
         config.global_batch_size_to_load,
         1,
     )
-    image_shape = (
-        config.global_batch_size_to_load,
-        NUM_IMAGES_PER_SEQUENCE,
-        config.image_size_for_vit,
-        config.image_size_for_vit,
-        NUM_IMAGE_CHANNELS,
-    )
+    image_shape = get_dummy_image_shape_for_init(config)
 
     model_vars = model.init(
         {"params": rng, "dropout": rng, "aqt": rng},
         jnp.ones(input_shape),
         jnp.ones(input_shape),
         encoder_images=jnp.ones(image_shape) if config.use_multimodal else None,
-        model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
+        model_mode=MODEL_MODE_AUTOREGRESSIVE,
         slot=0,
         page_state=page_state,
     )
@@ -700,11 +874,17 @@ def get_kv_cache_annotations(model, config, rng, mesh, page_state: Optional[Page
 
 
 def save_quantized_checkpoint_if_configured(config, params):
+  """Save quantized checkpoint if configured"""
   assert config.quantization, "quantization must be configured"
   if config.save_quantized_params_path:
-    checkpointing.save_params_to_path(config.save_quantized_params_path, params, config.checkpoint_storage_use_ocdbt, config.checkpoint_storage_use_zarr3)
+    checkpointing.save_params_to_path(
+        checkpoint_dir=config.save_quantized_params_path,
+        params=params,
+        use_ocdbt=config.checkpoint_storage_use_ocdbt,
+        use_zarr3=config.checkpoint_storage_use_zarr3,
+    )
   else:
-    "Skipping saving quantized checkpoint as save_quantized_params_path is null."
+    max_logging.log("Skipping saving quantized checkpoint as save_quantized_params_path is null.")
 
 
 def add_config_to_summary_writer(config, summary_writer):
@@ -736,6 +916,22 @@ def create_device_mesh(config, devices=None):
   """Creates a device mesh with each slice in its own data parallel group. If there is only one slice, uses two replicas"""
   if devices is None:
     devices = jax.devices()
+  if config.subslice_shape and config.enable_single_controller and config.num_slices == 1:
+    max_logging.log(f"Trying to create a subslice with shape: {config.subslice_shape}")
+    subslice_shape = tuple(int(x) for x in config.subslice_shape.split(","))
+    device_coords = [device.coords for device in devices]
+    device_coords_np = np.array(device_coords)
+
+    # Find the minimum coordinates to start the subslice
+    min_coords = device_coords_np.min(axis=0)
+
+    subslice_devices = []
+    for device in devices:
+      coords = device.coords
+      if all(min_coords[i] <= coords[i] < min_coords[i] + subslice_shape[i] for i in range(len(subslice_shape))):
+        subslice_devices.append(device)
+    devices = subslice_devices
+
   num_devices = len(devices)
   num_slices = 1 if config.inference_benchmark_test else config.num_slices
   num_devices_per_slice = num_devices // num_slices
@@ -834,3 +1030,154 @@ def create_learning_rate_schedule(config):
     boundaries.append(warmup_steps + cos_steps + constant_zero_steps)
 
   return optax.join_schedules(pieces, boundaries)
+
+
+def get_formatted_sharding_annotations(params, mesh=None):
+  """
+  Generates a readable string report of sharding annotations for all parameters.
+
+  This function iterates through a PyTree of model parameters and inspects the
+  sharding information attached to each parameter (leaf). It creates a
+  human-readable summary that is useful for debugging sharding configurations.
+
+  Args:
+    params: The PyTree of model parameters to inspect.
+    mesh: (Optional) The device mesh. If provided, its axis names and shape
+          are included in the report for additional context.
+
+  Returns:
+    A single string containing the formatted report of sharding annotations
+    for every parameter, with each entry on a new line.
+  """
+  # Initialize a list to hold the lines of the report, starting with a title.
+  annotation_lines = ["Comprehensice Weight Sharding Annotations:"]
+
+  # If a mesh object is provided, add its details to the report header.
+  if mesh:
+    annotation_lines.append(f"Mesh axes: {mesh.axis_names}, Mesh shape: {mesh.shape}")
+    annotation_lines.append("-" * 30)
+
+  # Get a flattened list of all parameters (leaves) and their corresponding paths in the PyTree.
+  all_params_leaves = jtu.tree_leaves_with_path(params)
+
+  # Loop through each parameter leaf in the flattened list.
+  for path, p_leaf in all_params_leaves:
+    # Convert the parameter's path (a sequence of keys) into a readable string name.
+    param_name_str = jtu.keystr(path)
+    # Get the shape of the parameter as a string.
+    shape_str = str(p_leaf.shape)
+    # Set a default description for sharding, in case none is found.
+    sharding_desc = "N/A"
+
+    # Check if the parameter leaf has a 'sharding' attribute.
+    if hasattr(p_leaf, "sharding"):
+      # Case 1: Standard JAX sharding with a PartitionSpec.
+      if hasattr(p_leaf.sharding, "spec") and p_leaf.sharding.spec is not None:
+        # The spec is a tuple (PartitionSpec), format it for readability.
+        spec_parts = []
+        for item in p_leaf.sharding.spec:
+          # Represent None as "Replicated" to make it explicit.
+          spec_parts.append(str(item) if item is not None else "Relicated")
+        sharding_desc = f"PartitionSpec({', '.join(spec_parts)})"
+      # Case 2: The parameter is explicitly marked as fully replicated.
+      elif hasattr(p_leaf.sharding, "spec") and p_leaf.sharding.spec is None:
+        sharding_desc = "Fully Replicated (spec is None)"
+      # Case 3: A generic fallback if a sharding object exists but has no recognized spec attribute.
+      else:
+        # Print the string representation of the sharding object itself.
+        sharding_desc = str(p_leaf.sharding)
+    # Case 4: The parameter has no .sharding attribute at all.
+    else:
+      sharding_desc = "No .sharding attribute found"
+
+    # Append the formatted details for the current parameter to our list of lines.
+    annotation_lines.append(f" - Param: {param_name_str}\n" f"   Shape: {shape_str}\n" f"   Sharding: {sharding_desc}")
+  # Join all the collected lines into a single string, separated by newlines.
+  return "\n".join(annotation_lines)
+
+
+def get_physical_spec_no_fsdp(full_logical, mesh, logical_axis_rules):
+  """
+  Generates a physical sharding spec for fully replicated weights.
+
+  This function computes a target sharding layout where model parameters are fully
+  replicated across the 'fsdp' mesh axis. It starts with the original logical
+  sharding and removes any rules that shard along the 'fsdp' or
+  'fsdp_transpose' axes.
+
+  Replacing a sharding axis with `None` in a PartitionSpec instructs JAX to
+  replicate the array data along that physical mesh dimension. The resulting
+  specification is used as a target layout for an all-gather operation.
+
+  Args:
+    full_logical: A PyTree of logical PartitionSpecs for the model parameters.
+    mesh: The JAX device mesh.
+    logical_axis_rules: Rules for converting logical axes to physical mesh axes.
+
+  Returns:
+    A PyTree of physical `jax.sharding.NamedSharding` objects that describe a
+    layout where parameters are fully gathered (replicated) across the 'fsdp'
+    mesh axis.
+  """
+
+  def remove_fsdp_sharding(sharding_tree):
+    """Recursively traverses the sharding tree to remove fsdp axes."""
+
+    def _remove_fsdp_from_partition_spec(named_sharding):
+      """Removes 'fsdp' and 'fsdp_transpose' from a PartitionSpec."""
+      if isinstance(named_sharding, jax.sharding.NamedSharding):
+        new_spec = []
+        # Iterate through each axis in the original PartitionSpec.
+        for axis in named_sharding.spec:
+          if axis is None:
+            new_spec.append(None)
+          elif isinstance(axis, str):
+            # If the axis is 'fsdp', replace it with None to signify replication.
+            if axis not in ("fsdp", "fsdp_transpose"):
+              new_spec.append(axis)
+            else:
+              new_spec.append(None)
+          elif isinstance(axis, (list, tuple)):
+            # If the axis is a collection, filter out 'fsdp'.
+            new_axis = [a for a in axis if a not in ("fsdp", "fsdp_transpose")]
+            new_spec.append(tuple(new_axis))
+          else:
+            raise ValueError(f"Unsupported_axis_type: {type(axis)}")
+          # Return a new sharding object with the modified spec.
+        return jax.sharding.NamedSharding(named_sharding.mesh, jax.sharding.PartitionSpec(*new_spec))
+      return named_sharding
+
+    return jax.tree.map(_remove_fsdp_from_partition_spec, sharding_tree)
+
+  # Convert the high-level logical spec to a physical one using default rules.
+  physical = nn.logical_to_mesh_sharding(full_logical, mesh=mesh, rules=logical_axis_rules)
+  # Apply the function to remove the FSDP sharding, defining our target layout.
+  physical_no_fsdp = remove_fsdp_sharding(physical)
+  return physical_no_fsdp
+
+
+def all_gather_over_fsdp(variables, sharding_info, mesh, logical_axis_rules):
+  """Performs an all-gather on FSDP-sharded variables via a sharding constraint.
+  This function triggers an all-gather operation on the model's parameters.
+  It does so by applying a sharding constraint that specifies a fully
+  replicated layout.
+
+  The JAX compiler satisfies this constraint by automatically inserting the
+  necessary `all-gather` collective communication operations into the
+  computation graph, effectively gathering the sharded weights.
+
+  Args:
+    variables: The PyTree of model parameters, currently sharded across devices.
+    sharding_info: The logical partition spec of the currently sharded `variables`.
+    mesh: The JAX device mesh.
+    logical_axis_rules: Rules for converting logical axes to physical mesh axes.
+
+  Returns:
+    The model's variables with the all-gather operation applied, resulting
+    in the weights being fully replicated on all devices in the 'fsdp' mesh.
+  """
+  # Get the target physical layout (weights fully replicated).
+  physical_constraint_no_fsdp = get_physical_spec_no_fsdp(sharding_info, mesh, logical_axis_rules)
+  # Apply the constraint to the model's current variables. This tells JAX to
+  # gather the weights into this layout.
+  return jax.lax.with_sharding_constraint(variables, physical_constraint_no_fsdp)

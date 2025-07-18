@@ -14,14 +14,17 @@
 
 """Runs a server with maxtext."""
 
-import jax
 import os
 import sys
-import pathwaysutils  # pylint: disable=unused-import
-from MaxText import pyconfig
 
-from MaxText import maxengine_config
+import pathwaysutils  # pylint: disable=unused-import
+
 from jetstream.core import server_lib, config_lib
+
+import jax
+
+from MaxText import pyconfig
+from MaxText import maxengine_config
 
 # _PORT = flags.DEFINE_integer('port', 9000, 'port to listen on')
 # _THREADS = flags.DEFINE_integer(

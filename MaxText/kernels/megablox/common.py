@@ -29,14 +29,18 @@ def tpu_kind() -> str:
   return jax.devices()[0].device_kind
 
 
-_TPU_KIND_PATTERN = re.compile(r"TPU v(\d+)")
+# Ex: VPU v5; TPU v5 lite; TPU7x
+_TPU_KIND_PATTERN = re.compile(r"TPU(?: v)?(\d+)")
 
 
 def tpu_generation() -> int:
   """Generation number of the currently attached TPU."""
-  if version := _TPU_KIND_PATTERN.match(tpu_kind()):
+  my_tpu_kind = tpu_kind()
+  if version := _TPU_KIND_PATTERN.match(my_tpu_kind):
     return int(version[1])
-  raise NotImplementedError("only TPU devices are supported")
+  raise NotImplementedError(
+      f"Only TPU devices are supported: Invalid device_kind: '{my_tpu_kind}'"
+  )
 
 
 def supports_bfloat16_matmul() -> bool:

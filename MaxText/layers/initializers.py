@@ -16,14 +16,13 @@
 
 from typing import Callable, Tuple, Union
 
-from flax import linen as nn
 import jax
-from MaxText import common_types
 
-Array = common_types.Array
-DType = common_types.DType
-PRNGKey = common_types.PRNGKey
-Shape = common_types.Shape
+from flax import linen as nn
+from flax import nnx
+from aqt.jax.v2 import aqt_tensor
+
+from MaxText.common_types import Array, DType, Shape, PRNGKey
 
 Initializer = Callable[[PRNGKey, Shape, DType], Array]
 InitializerAxis = Union[int, Tuple[int, ...]]
@@ -42,3 +41,19 @@ def nd_dense_init(scale, mode, distribution):
     return fn(key, shape, dtype)
 
   return init_fn
+
+
+def variable_to_logically_partitioned(variable: nnx.VariableState):
+  if isinstance(variable.value, aqt_tensor.QTensor):
+    return variable.value
+
+  if variable.type.__name__ == "_overwrite_with_gradient":
+    return variable.value
+
+  metadata = variable.get_metadata()
+  return nn.LogicallyPartitioned(  # type: ignore[wrong-keyword-args]
+      variable.value,
+      variable.sharding,  # type: ignore[arg-type]
+      mesh=metadata.get("mesh"),
+      rules=metadata.get("rules"),
+  )

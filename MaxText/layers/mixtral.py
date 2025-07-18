@@ -22,29 +22,19 @@ limitations under the License.
 from typing import Optional
 
 from jax.ad_checkpoint import checkpoint_name
+from jax.sharding import Mesh
 import jax.numpy as jnp
 
 from flax import linen as nn
 
-from MaxText.layers import quantizations
-from MaxText.layers import moe
 from MaxText.layers import initializers
-from MaxText.layers import attentions
-from MaxText.layers import embeddings
-from MaxText.layers import normalizations
 from MaxText.layers import models
-from MaxText import common_types
+from MaxText.layers import moe
+from MaxText.layers import quantizations
+from MaxText.layers.attentions import Attention
+from MaxText.layers.quantizations import AqtQuantization as Quant
+from MaxText.layers.normalizations import rms_norm
 
-Array = common_types.Array
-Config = common_types.Config
-DType = common_types.DType
-Mesh = common_types.Mesh
-ScanIn = common_types.ScanIn
-
-Embed = embeddings.Embed
-Attention = attentions.Attention
-RMSNorm = normalizations.RMSNorm
-Quant = quantizations.AqtQuantization
 
 # -----------------------------------------
 # The Decoder Layer for Mixtral
@@ -75,7 +65,8 @@ class MixtralDecoderLayer(nn.Module):
 
     inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
     inputs = checkpoint_name(inputs, "decoder_layer_input")
-    lnx_rms = models.RMSNorm(
+    lnx_rms = rms_norm(
+        num_features=inputs.shape[-1],
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
         name="pre_self_attention_layer_norm",
@@ -125,7 +116,8 @@ class MixtralDecoderLayer(nn.Module):
     intermediate_inputs = inputs + attention_lnx
 
     # Fully Connected
-    hidden_states = models.RMSNorm(
+    hidden_states = rms_norm(
+        num_features=intermediate_inputs.shape[-1],
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
         name="post_self_attention_layer_norm",

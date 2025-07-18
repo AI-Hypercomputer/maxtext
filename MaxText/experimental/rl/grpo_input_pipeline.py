@@ -14,15 +14,19 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
+import functools
+from collections.abc import Iterable
+
+import numpy as np
+
 import jax
 from jax.sharding import Mesh
 
-import numpy as np
-import functools
 import datasets
+
 import transformers
+
 import grain.python as grain
-from collections.abc import Iterable
 
 from MaxText.input_pipeline import input_pipeline_interface
 from MaxText.input_pipeline import _input_pipeline_utils
@@ -183,5 +187,5 @@ def create_data_iterator(config, mesh):
   )
   if config.eval_interval > 0:
     raise ValueError("GRPO input pipeline is not supported for eval data")
-  train_iterator_fn = functools.partial(make_hf_train_iterator, config, mesh, process_indices_train)
-  return input_pipeline_interface.make_mixed_iterator(config, mesh, process_indices_train, [], train_iterator_fn, None)
+  train_iterator = input_pipeline_interface.create_process_specific_iterator(config, mesh, process_indices_train, make_hf_train_iterator)
+  return train_iterator

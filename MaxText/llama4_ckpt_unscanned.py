@@ -27,7 +27,7 @@ For example: `llama4-17b-16e.00.pth`
 If using a HF checkpoint, the base model checkpoints should be in the format `model-{idx}-of-{total}.safetensors`
 For example: `model-00020-of-00055.safetensors`.
 
-This script requires a large memory VM (a CPU instance with at least 500GB of memory for Scout and at least 1TB for Maverick).
+This script requires a large memory VM (a CPU instance with >= 500GB of memory for Scout and >= 1TB for Maverick).
 
 NOTE @jacobplatin: eventually, we'll want to merge this into the regular `llama_or_mistral` script
 since the logic is effectively the same.
@@ -52,7 +52,7 @@ from tqdm import tqdm
 
 from MaxText import max_logging
 from MaxText.inference_utils import str2bool
-from MaxText.llama_or_mistral_ckpt import save_weights_to_checkpoint, permute_to_match_maxtext_rope, MODEL_PARAMS_DICT
+from MaxText.llama_or_mistral_ckpt import save_weights_to_checkpoint, MODEL_PARAMS_DICT
 
 SIMULATED_CPU_DEVICES_COUNT = 16
 
@@ -121,6 +121,7 @@ def _pytorch_to_maxtext_mapping(layer_idx: int = -1, expert_idx: int = -1, model
     base_mapping[f"layers.{layer_idx}.feed_forward.experts.moe_w_swiglu_eD_F"] = base_mapping.pop(
         f"layers.{layer_idx}.feed_forward.experts.{expert_idx}.w3.weight"
     )
+  return base_mapping
 
 
 def _hf_to_maxtext_mapping(layer_idx: int = -1) -> dict:
@@ -181,6 +182,16 @@ class _NamespaceMapper:
     return self.collection[new_key]
 
 
+def _pt_to_np(pt_weight, cast_dtype=None, transpose=False):
+  if cast_dtype:
+    np_weight = pt_weight.to(torch.float32).numpy().astype(cast_dtype)
+  else:
+    np_weight = pt_weight.to(torch.float32).numpy()
+  if transpose:
+    np_weight = np_weight.transpose()
+  return np_weight
+
+
 def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, model_params: dict, mem_info: psutil.Process):
   """Convert a Huggingface Checkpoint to a dictionary of Numpy arrays representing the weights.
 
@@ -193,6 +204,10 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
   Returns:
     jax_weights (dict): Dictionary containing the converted weights.
   """
+  num_hidden_layers_for_vit = model_params.get("num_layers_vit", 0)
+  num_attention_heads_for_vit = model_params.get("num_att_head_vit", 0)
+  hidden_size_for_vit = model_params.get("hidden_size_vit", 0)
+  head_dim_for_vit = hidden_size_for_vit // num_attention_heads_for_vit if num_attention_heads_for_vit > 0 else 0
   base_num_decoder_layers = model_params["num_layers"]
   base_num_query_heads = model_params["num_heads"]
   head_dim = model_params["dims_per_head"]
@@ -214,9 +229,8 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
       for key in f.keys():
         parts = key.split(".")
         layer = int(parts[3]) if "layers" in key else 0
-        # TODO: update when mutli-modality support is added
         if "vision" in key or "multi_modal_projector" in key:
-          print("WARNING: skipping vision or multi-modal key: ", key)
+          chkpt_vars[key] = f.get_tensor(key)
         else:
           mapped_key = _hf_to_maxtext_mapping(layer)[key]
           chkpt_vars[mapped_key] = f.get_tensor(key)
@@ -229,21 +243,153 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
           "logits_dense": {"kernel": None},
       },
       "token_embedder": {"embedding": None},
+      "vision_encoder": {
+          "Llama4VisionModel_0": {
+              "Llama4VisionEncoder_0": {},
+              "class_embedding": None,
+              "positional_embedding_vlm": None,
+              "Llama4UnfoldConvolution_0": {"vit_unfold_linear": {"kernel": None}},
+              "layernorm_pre": {},
+              "layernorm_post": {},
+              "Llama4VisionPixelShuffleMLP_0": {},
+          },
+          "Llama4MultiModalProjector_0": {"vit_multi_modal_projector": {"kernel": None}},
+      },
   }
 
+  # vision model ###########################################
+  max_logging.log("Processing vision model")
+  jax_weights["vision_encoder"]["Llama4VisionModel_0"]["class_embedding"] = _pt_to_np(
+      chkpt_vars["vision_model.class_embedding"], cast_dtype=CAST_DTYPE
+  )
+  jax_weights["vision_encoder"]["Llama4VisionModel_0"]["positional_embedding_vlm"] = _pt_to_np(
+      chkpt_vars["vision_model.positional_embedding_vlm"], cast_dtype=CAST_DTYPE
+  )
+  jax_weights["vision_encoder"]["Llama4VisionModel_0"]["Llama4UnfoldConvolution_0"]["vit_unfold_linear"]["kernel"] = (
+      _pt_to_np(chkpt_vars["vision_model.patch_embedding.linear.weight"], cast_dtype=CAST_DTYPE, transpose=True)
+  )
+  jax_weights["vision_encoder"]["Llama4VisionModel_0"]["layernorm_pre"].update(
+      {
+          "scale": _pt_to_np(chkpt_vars["vision_model.layernorm_pre.weight"], cast_dtype=CAST_DTYPE),
+          "bias": _pt_to_np(chkpt_vars["vision_model.layernorm_pre.bias"], cast_dtype=CAST_DTYPE),
+      }
+  )
+  jax_weights["vision_encoder"]["Llama4VisionModel_0"]["layernorm_post"].update(
+      {
+          "scale": _pt_to_np(chkpt_vars["vision_model.layernorm_post.weight"], cast_dtype=CAST_DTYPE),
+          "bias": _pt_to_np(chkpt_vars["vision_model.layernorm_post.bias"], cast_dtype=CAST_DTYPE),
+      }
+  )
+
+  # vision encoder ###########################################
+  max_logging.log("Processing vision encoder")
+  for layer_idx in tqdm(range(num_hidden_layers_for_vit), desc="layers", leave=False):
+    layer_name = f"layers_{layer_idx}"
+    wq = _pt_to_np(
+        chkpt_vars[f"vision_model.model.layers.{layer_idx}.self_attn.q_proj.weight"], cast_dtype=CAST_DTYPE, transpose=True
+    )
+    wk = _pt_to_np(
+        chkpt_vars[f"vision_model.model.layers.{layer_idx}.self_attn.k_proj.weight"], cast_dtype=CAST_DTYPE, transpose=True
+    )
+    wv = _pt_to_np(
+        chkpt_vars[f"vision_model.model.layers.{layer_idx}.self_attn.v_proj.weight"], cast_dtype=CAST_DTYPE, transpose=True
+    )
+    wo = _pt_to_np(
+        chkpt_vars[f"vision_model.model.layers.{layer_idx}.self_attn.o_proj.weight"], cast_dtype=CAST_DTYPE, transpose=True
+    )
+    bq = _pt_to_np(chkpt_vars[f"vision_model.model.layers.{layer_idx}.self_attn.q_proj.bias"], cast_dtype=CAST_DTYPE)
+    bk = _pt_to_np(chkpt_vars[f"vision_model.model.layers.{layer_idx}.self_attn.k_proj.bias"], cast_dtype=CAST_DTYPE)
+    bv = _pt_to_np(chkpt_vars[f"vision_model.model.layers.{layer_idx}.self_attn.v_proj.bias"], cast_dtype=CAST_DTYPE)
+    bo = _pt_to_np(chkpt_vars[f"vision_model.model.layers.{layer_idx}.self_attn.o_proj.bias"], cast_dtype=CAST_DTYPE)
+
+    wq = np.reshape(wq, [hidden_size_for_vit, num_attention_heads_for_vit, head_dim_for_vit])
+    wk = np.reshape(wk, [hidden_size_for_vit, num_attention_heads_for_vit, head_dim_for_vit])
+    wv = np.reshape(wv, [hidden_size_for_vit, num_attention_heads_for_vit, head_dim_for_vit])
+    wo = np.reshape(wo, [num_attention_heads_for_vit, head_dim_for_vit, hidden_size_for_vit])
+    bq = np.reshape(bq, [num_attention_heads_for_vit, head_dim_for_vit])
+    bk = np.reshape(bk, [num_attention_heads_for_vit, head_dim_for_vit])
+    bv = np.reshape(bv, [num_attention_heads_for_vit, head_dim_for_vit])
+
+    self_attention_vision = {
+        "query": {"kernel": wq, "bias": bq},
+        "key": {"kernel": wk, "bias": bk},
+        "value": {"kernel": wv, "bias": bv},
+        "out": {"kernel": wo, "bias": bo},
+    }
+
+    fc1_w = _pt_to_np(
+        chkpt_vars[f"vision_model.model.layers.{layer_idx}.mlp.fc1.weight"], cast_dtype=CAST_DTYPE, transpose=True
+    )
+    fc2_w = _pt_to_np(
+        chkpt_vars[f"vision_model.model.layers.{layer_idx}.mlp.fc2.weight"], cast_dtype=CAST_DTYPE, transpose=True
+    )
+    fc1_b = _pt_to_np(chkpt_vars[f"vision_model.model.layers.{layer_idx}.mlp.fc1.bias"], cast_dtype=CAST_DTYPE)
+    fc2_b = _pt_to_np(chkpt_vars[f"vision_model.model.layers.{layer_idx}.mlp.fc2.bias"], cast_dtype=CAST_DTYPE)
+
+    vision_mlp = {
+        "vit_encoder_layer_mlp_fc1": {"kernel": fc1_w, "bias": fc1_b},
+        "vit_encoder_layer_mlp_fc2": {"kernel": fc2_w, "bias": fc2_b},
+    }
+
+    jax_weights["vision_encoder"]["Llama4VisionModel_0"]["Llama4VisionEncoder_0"].update(
+        {
+            layer_name: {
+                "self_attention_vision": self_attention_vision,
+                "Llama4VisionMLP_0": vision_mlp,
+                "input_layer_norm": {
+                    "scale": _pt_to_np(
+                        chkpt_vars[f"vision_model.model.layers.{layer_idx}.input_layernorm.weight"], cast_dtype=CAST_DTYPE
+                    ),
+                    "bias": _pt_to_np(
+                        chkpt_vars[f"vision_model.model.layers.{layer_idx}.input_layernorm.bias"], cast_dtype=CAST_DTYPE
+                    ),
+                },
+                "post_attention_layer_norm": {
+                    "scale": _pt_to_np(
+                        chkpt_vars[f"vision_model.model.layers.{layer_idx}.post_attention_layernorm.weight"],
+                        cast_dtype=CAST_DTYPE,
+                    ),
+                    "bias": _pt_to_np(
+                        chkpt_vars[f"vision_model.model.layers.{layer_idx}.post_attention_layernorm.bias"],
+                        cast_dtype=CAST_DTYPE,
+                    ),
+                },
+            }
+        }
+    )
+
+  # pixel shuffle mlp ###########################################
+  max_logging.log("Processing pixel shuffle mlp")
+  adaptor_fc1 = _pt_to_np(chkpt_vars["vision_model.vision_adapter.mlp.fc1.weight"], cast_dtype=CAST_DTYPE, transpose=True)
+  adaptor_fc2 = _pt_to_np(chkpt_vars["vision_model.vision_adapter.mlp.fc2.weight"], cast_dtype=CAST_DTYPE, transpose=True)
+  jax_weights["vision_encoder"]["Llama4VisionModel_0"]["Llama4VisionPixelShuffleMLP_0"].update(
+      {
+          "pixel_shuffle_mlp": {
+              "vit_pixel_shuffle_mlp_fc1": {"kernel": adaptor_fc1},
+              "vit_pixel_shuffle_mlp_fc2": {"kernel": adaptor_fc2},
+          },
+      }
+  )
+  # multimodal projector ###########################################
+  max_logging.log("Processing multimodal projector")
+  jax_weights["vision_encoder"]["Llama4MultiModalProjector_0"]["vit_multi_modal_projector"]["kernel"] = _pt_to_np(
+      chkpt_vars["multi_modal_projector.linear_1.weight"], cast_dtype=CAST_DTYPE, transpose=True
+  )
+
+  # language model ###########################################
+  max_logging.log("Processing language model")
   # decoder norm scale ###########################################
   max_logging.log("Processing decoder norm scale")
-  decoder_norm_scale = chkpt_vars["norm.weight"].to(torch.float32).numpy().astype(CAST_DTYPE)
-  jax_weights["decoder"]["decoder_norm"]["scale"] = decoder_norm_scale
+  jax_weights["decoder"]["decoder_norm"]["scale"] = _pt_to_np(chkpt_vars["norm.weight"], cast_dtype=CAST_DTYPE)
 
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
 
   # logits dense #################################################
   max_logging.log("Processing logits dense")
 
-  jax_weights["decoder"]["logits_dense"]["kernel"] = (
-      chkpt_vars["output.weight"].to(torch.float32).numpy().astype(CAST_DTYPE).transpose()[:, :vocab_size]
-  )
+  jax_weights["decoder"]["logits_dense"]["kernel"] = _pt_to_np(
+      chkpt_vars["output.weight"], cast_dtype=CAST_DTYPE, transpose=True
+  )[:, :vocab_size]
 
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
 
@@ -251,19 +397,16 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
   max_logging.log("Processing token embeddings")
 
   if model_size[:6] in ["llama3", "llama4"]:
-    jax_weights["token_embedder"]["embedding"] = (
-        chkpt_vars["tok_embeddings.weight"].to(torch.float32).numpy().astype(CAST_DTYPE)
-    )
+    jax_weights["token_embedder"]["embedding"] = _pt_to_np(chkpt_vars["tok_embeddings.weight"], cast_dtype=CAST_DTYPE)
   else:
-    jax_weights["token_embedder"]["embedding"] = (
-        chkpt_vars["tok_embeddings.weight"].to(torch.float32).numpy().astype(CAST_DTYPE)[:vocab_size, :]
-    )
+    jax_weights["token_embedder"]["embedding"] = _pt_to_np(chkpt_vars["tok_embeddings.weight"], cast_dtype=CAST_DTYPE)[
+        :vocab_size, :
+    ]
 
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
 
   # self attention ###############################################
   max_logging.log("Processing self attention")
-  has_printed_warning = False
   for layer_idx in tqdm(range(base_num_decoder_layers), desc="layers", leave=False):
     layer_name = f"layers_{layer_idx}"
     jax_weights["decoder"].update(
@@ -305,9 +448,9 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
       jax_weights["decoder"][layer_name]["Llama4MoEBlock_0"] = moe_dict
 
     self_attention = jax_weights["decoder"][layer_name]["self_attention"]
-    wq = chkpt_vars[f"layers.{layer_idx}.attention.wq.weight"].to(torch.float32).numpy().astype(CAST_DTYPE).transpose()
-    wk = chkpt_vars[f"layers.{layer_idx}.attention.wk.weight"].to(torch.float32).numpy().astype(CAST_DTYPE).transpose()
-    wv = chkpt_vars[f"layers.{layer_idx}.attention.wv.weight"].to(torch.float32).numpy().astype(CAST_DTYPE).transpose()
+    wq = _pt_to_np(chkpt_vars[f"layers.{layer_idx}.attention.wq.weight"], cast_dtype=CAST_DTYPE, transpose=True)
+    wk = _pt_to_np(chkpt_vars[f"layers.{layer_idx}.attention.wk.weight"], cast_dtype=CAST_DTYPE, transpose=True)
+    wv = _pt_to_np(chkpt_vars[f"layers.{layer_idx}.attention.wv.weight"], cast_dtype=CAST_DTYPE, transpose=True)
 
     wq = np.reshape(wq, [base_num_query_heads * head_dim, base_num_query_heads, head_dim])
     wk = np.reshape(wk, [base_num_query_heads * head_dim, base_num_kv_heads, head_dim])
@@ -316,9 +459,9 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
     # NOTE: this is where the RoPE permutation would occur, but we do not need to do this for the
     # PyTorch models.
 
-    w_post = chkpt_vars[f"layers.{layer_idx}.attention.wo.weight"].to(torch.float32).numpy().astype(CAST_DTYPE).transpose()
+    w_post = _pt_to_np(chkpt_vars[f"layers.{layer_idx}.attention.wo.weight"], cast_dtype=CAST_DTYPE, transpose=True)
 
-    w_post = w_post = np.reshape(w_post, [base_num_query_heads, head_dim, base_num_query_heads * head_dim])
+    w_post = np.reshape(w_post, [base_num_query_heads, head_dim, base_num_query_heads * head_dim])
 
     # scale the query weights
     # NOTE: the np.sqrt here will silently cast to float64, so we add a manual cast to ensure the CAST_DTYPE is respected
@@ -339,12 +482,8 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
   for layer_idx in tqdm(range(base_num_decoder_layers), desc="layers", leave=False):
     is_dense_layer = (layer_idx + 1) % interleave_moe_layer != 0
     layer_name = f"layers_{layer_idx}"
-    pre_self_attention_layernorm = (
-        chkpt_vars[f"layers.{layer_idx}.attention_norm.weight"].type(torch.float32).numpy().astype(CAST_DTYPE)
-    )
-    post_self_attention_layernorm = (
-        chkpt_vars[f"layers.{layer_idx}.ffn_norm.weight"].type(torch.float32).numpy().astype(CAST_DTYPE)
-    )
+    pre_self_attention_layernorm = _pt_to_np(chkpt_vars[f"layers.{layer_idx}.attention_norm.weight"], cast_dtype=CAST_DTYPE)
+    post_self_attention_layernorm = _pt_to_np(chkpt_vars[f"layers.{layer_idx}.ffn_norm.weight"], cast_dtype=CAST_DTYPE)
     jax_weights["decoder"][layer_name]["pre_self_attention_layer_norm"]["scale"] = pre_self_attention_layernorm
     jax_weights["decoder"][layer_name]["post_self_attention_layer_norm"]["scale"] = post_self_attention_layernorm
 
@@ -357,15 +496,9 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
     is_dense_layer = (layer_idx + 1) % interleave_moe_layer != 0
     # NOTE: llama4 alternates between dense (MLP) and sparse (MoE) layers, hence the dual logic here
     if is_dense_layer:
-      wi_0 = (
-          chkpt_vars[f"layers.{layer_idx}.feed_forward.w3.weight"].type(torch.float32).numpy().astype(CAST_DTYPE).transpose()
-      )
-      wi_1 = (
-          chkpt_vars[f"layers.{layer_idx}.feed_forward.w1.weight"].type(torch.float32).numpy().astype(CAST_DTYPE).transpose()
-      )
-      wo = (
-          chkpt_vars[f"layers.{layer_idx}.feed_forward.w2.weight"].type(torch.float32).numpy().astype(CAST_DTYPE).transpose()
-      )
+      wi_0 = _pt_to_np(chkpt_vars[f"layers.{layer_idx}.feed_forward.w3.weight"], cast_dtype=CAST_DTYPE, transpose=True)
+      wi_1 = _pt_to_np(chkpt_vars[f"layers.{layer_idx}.feed_forward.w1.weight"], cast_dtype=CAST_DTYPE, transpose=True)
+      wo = _pt_to_np(chkpt_vars[f"layers.{layer_idx}.feed_forward.w2.weight"], cast_dtype=CAST_DTYPE, transpose=True)
       jax_weights["decoder"][layer_name]["mlp"]["wi_0"]["kernel"] = wi_0
       jax_weights["decoder"][layer_name]["mlp"]["wi_1"]["kernel"] = wi_1
       jax_weights["decoder"][layer_name]["mlp"]["wo"]["kernel"] = wo
@@ -381,41 +514,29 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
       jax_weights["decoder"][layer_name]["Llama4MoEBlock_0"]["MoeBlock_0"]["gate"]["kernel"] = gate
 
       # routed experts
-      wi_0_1 = (
-          chkpt_vars[f"layers.{layer_idx}.feed_forward.experts.gate_up_proj"].type(torch.float32).numpy().astype(CAST_DTYPE)
-      )
+      wi_0_1 = _pt_to_np(chkpt_vars[f"layers.{layer_idx}.feed_forward.experts.gate_up_proj"], cast_dtype=CAST_DTYPE)
       # pylint: disable=unbalanced-tuple-unpacking
       wi_0, wi_1 = np.split(wi_0_1, 2, axis=-1)
       del wi_0_1
 
-      wo = chkpt_vars[f"layers.{layer_idx}.feed_forward.experts.down_proj"].type(torch.float32).numpy().astype(CAST_DTYPE)
+      wo = _pt_to_np(chkpt_vars[f"layers.{layer_idx}.feed_forward.experts.down_proj"], cast_dtype=CAST_DTYPE)
       jax_weights["decoder"][layer_name]["Llama4MoEBlock_0"]["MoeBlock_0"]["wi_0"] = wi_0
       jax_weights["decoder"][layer_name]["Llama4MoEBlock_0"]["MoeBlock_0"]["wi_1"] = wi_1
       jax_weights["decoder"][layer_name]["Llama4MoEBlock_0"]["MoeBlock_0"]["wo"] = wo
 
       # shared experts
-      wi_0 = (
-          chkpt_vars[f"layers.{layer_idx}.feed_forward.shared_experts.gate_proj.weight"]
-          .type(torch.float32)
-          .numpy()
-          .astype(CAST_DTYPE)
-          .transpose()
+      wi_0 = _pt_to_np(
+          chkpt_vars[f"layers.{layer_idx}.feed_forward.shared_experts.gate_proj.weight"],
+          cast_dtype=CAST_DTYPE,
+          transpose=True,
       )
-
-      wi_1 = (
-          chkpt_vars[f"layers.{layer_idx}.feed_forward.shared_experts.up_proj.weight"]
-          .type(torch.float32)
-          .numpy()
-          .astype(CAST_DTYPE)
-          .transpose()
+      wi_1 = _pt_to_np(
+          chkpt_vars[f"layers.{layer_idx}.feed_forward.shared_experts.up_proj.weight"], cast_dtype=CAST_DTYPE, transpose=True
       )
-
-      wo = (
-          chkpt_vars[f"layers.{layer_idx}.feed_forward.shared_experts.down_proj.weight"]
-          .type(torch.float32)
-          .numpy()
-          .astype(CAST_DTYPE)
-          .transpose()
+      wo = _pt_to_np(
+          chkpt_vars[f"layers.{layer_idx}.feed_forward.shared_experts.down_proj.weight"],
+          cast_dtype=CAST_DTYPE,
+          transpose=True,
       )
 
       jax_weights["decoder"][layer_name]["Llama4MoEBlock_0"]["shared_experts"]["wi_0"]["kernel"] = wi_0
@@ -480,7 +601,7 @@ def _convert_pytorch_to_jax_weights(base_model_path: str, model_size: str, model
 
   # decoder norm scale ###########################################
   max_logging.log("Processing decoder norm scale")
-  decoder_norm_scale = chkpt_vars[0]["norm.weight"].type(torch.float32).numpy().astype(CAST_DTYPE)
+  decoder_norm_scale = _pt_to_np(chkpt_vars[0]["norm.weight"], cast_dtype=CAST_DTYPE)
   jax_weights["decoder"]["decoder_norm"]["scale"] = decoder_norm_scale
 
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
@@ -488,7 +609,7 @@ def _convert_pytorch_to_jax_weights(base_model_path: str, model_size: str, model
   # logits dense #################################################
   max_logging.log("Processing logits dense")
   logits_dense = np.concatenate(
-      [var["output.weight"].type(torch.float32).numpy().astype(CAST_DTYPE) for var in chkpt_vars], axis=0
+      [_pt_to_np(var["output.weight"], cast_dtype=CAST_DTYPE) for var in chkpt_vars], axis=0
   ).transpose()[:, :vocab_size]
   jax_weights["decoder"]["logits_dense"]["kernel"] = logits_dense
 
@@ -498,11 +619,11 @@ def _convert_pytorch_to_jax_weights(base_model_path: str, model_size: str, model
   max_logging.log("Processing token embeddings")
   if model_size[:6] in ["llama3", "llama4"]:
     token_embedder = np.concatenate(
-        [var["tok_embeddings.weight"].type(torch.float32).numpy().astype(CAST_DTYPE) for var in chkpt_vars], axis=0
+        [_pt_to_np(var["tok_embeddings.weight"], cast_dtype=CAST_DTYPE) for var in chkpt_vars], axis=0
     )
   else:
     token_embedder = np.concatenate(
-        [var["tok_embeddings.weight"].type(torch.float32).numpy().astype(CAST_DTYPE) for var in chkpt_vars], axis=1
+        [_pt_to_np(var["tok_embeddings.weight"], cast_dtype=CAST_DTYPE) for var in chkpt_vars], axis=1
     )[:vocab_size, :]
   jax_weights["token_embedder"]["embedding"] = token_embedder
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
@@ -512,7 +633,6 @@ def _convert_pytorch_to_jax_weights(base_model_path: str, model_size: str, model
 
   # llama3.1-405b kv weight is replicated within every two files.
   wkv_step = 1 if model_size != "llama3.1-405b" else 2
-  has_printed_warning = False
 
   for layer_idx in tqdm(range(base_num_decoder_layers), desc="layers", leave=False):
     layer_name = f"layers_{layer_idx}"
@@ -572,7 +692,7 @@ def _convert_pytorch_to_jax_weights(base_model_path: str, model_size: str, model
       # NOTE: it's VERY important that the qkv splitting happens first and then the concatenation.
       # Concatenating the qkv weights first and then splitting will result in incorrect weights!
       for i in range(num_chkpt_parts):
-        wqkv = chkpt_vars[i][f"layers.{layer_idx}.attention.wqkv.weight"].type(torch.float32).numpy()
+        wqkv = _pt_to_np(chkpt_vars[i][f"layers.{layer_idx}.attention.wqkv.weight"])
         local_d = head_dim // num_chkpt_parts
         local_hidden_size = hidden_size // num_chkpt_parts
         local_kv_hidden_size = kv_hidden_size // num_chkpt_parts
@@ -586,22 +706,19 @@ def _convert_pytorch_to_jax_weights(base_model_path: str, model_size: str, model
 
     else:
       wq = np.concatenate(
-          [
-              var[f"layers.{layer_idx}.attention.wq.weight"].type(torch.float32).numpy().astype(CAST_DTYPE)
-              for var in chkpt_vars
-          ],
+          [_pt_to_np(var[f"layers.{layer_idx}.attention.wq.weight"], cast_dtype=CAST_DTYPE) for var in chkpt_vars],
           axis=0,
       )
       wk = np.concatenate(
           [
-              var[f"layers.{layer_idx}.attention.wk.weight"].type(torch.float32).numpy().astype(CAST_DTYPE)
+              _pt_to_np(var[f"layers.{layer_idx}.attention.wk.weight"], cast_dtype=CAST_DTYPE)
               for var in chkpt_vars[::wkv_step]
           ],
           axis=0,
       )
       wv = np.concatenate(
           [
-              var[f"layers.{layer_idx}.attention.wv.weight"].type(torch.float32).numpy().astype(CAST_DTYPE)
+              _pt_to_np(var[f"layers.{layer_idx}.attention.wv.weight"], cast_dtype=CAST_DTYPE)
               for var in chkpt_vars[::wkv_step]
           ],
           axis=0,
@@ -621,10 +738,7 @@ def _convert_pytorch_to_jax_weights(base_model_path: str, model_size: str, model
     # This will be of size [hidden_size, hidden_size], but the first dimmension is sharded, so I believe
     # we want to tranpose this and then reshape to head_dim * base_num_query_heads on the first dim
     w_post = np.concatenate(
-        [
-            var[f"layers.{layer_idx}.attention.wo.weight"].type(torch.float32).numpy().astype(CAST_DTYPE)
-            for var in chkpt_vars
-        ],
+        [_pt_to_np(var[f"layers.{layer_idx}.attention.wo.weight"], cast_dtype=CAST_DTYPE) for var in chkpt_vars],
         axis=1,
     ).transpose()
 
@@ -653,9 +767,7 @@ def _convert_pytorch_to_jax_weights(base_model_path: str, model_size: str, model
         if is_llama4_model
         else f"layers.{layer_idx}.attention_norm.weight"
     )
-    pre_self_attention_layernorm = (
-        chkpt_vars[0][pre_self_attention_layernorm_name].type(torch.float32).numpy().astype(CAST_DTYPE)
-    )
+    pre_self_attention_layernorm = _pt_to_np(chkpt_vars[0][pre_self_attention_layernorm_name], cast_dtype=CAST_DTYPE)
     if is_llama4_model:
       post_self_attention_layernorm_name = (
           f"layers.{layer_idx}.feed_forward.mlp.layer_norm_weight"
@@ -664,9 +776,7 @@ def _convert_pytorch_to_jax_weights(base_model_path: str, model_size: str, model
       )
     else:
       post_self_attention_layernorm_name = f"layers.{layer_idx}.ffn_norm.weight"
-    post_self_attention_layernorm = (
-        chkpt_vars[0][post_self_attention_layernorm_name].type(torch.float32).numpy().astype(CAST_DTYPE)
-    )
+    post_self_attention_layernorm = _pt_to_np(chkpt_vars[0][post_self_attention_layernorm_name], cast_dtype=CAST_DTYPE)
     jax_weights["decoder"][layer_name]["pre_self_attention_layer_norm"]["scale"] = pre_self_attention_layernorm
     jax_weights["decoder"][layer_name]["post_self_attention_layer_norm"]["scale"] = post_self_attention_layernorm
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
@@ -683,9 +793,7 @@ def _convert_pytorch_to_jax_weights(base_model_path: str, model_size: str, model
       # NOTE: it's very important that we do the splitting first and then concat!
       for var in chkpt_vars:
         # pylint: disable=unbalanced-tuple-unpacking
-        wi_0_chunk, wi_1_chunk = np.split(
-            var[f"layers.{layer_idx}.feed_forward.mlp.fc1_weight"].type(torch.float32).numpy(), 2, axis=0
-        )
+        wi_0_chunk, wi_1_chunk = np.split(_pt_to_np(var[f"layers.{layer_idx}.feed_forward.mlp.fc1_weight"]), 2, axis=0)
         wi_0.append(wi_0_chunk)
         wi_1.append(wi_1_chunk)
 
@@ -699,10 +807,7 @@ def _convert_pytorch_to_jax_weights(base_model_path: str, model_size: str, model
       ).transpose()
 
       wo = np.concatenate(
-          [
-              var[f"layers.{layer_idx}.feed_forward.mlp.fc2_weight"].type(torch.float32).numpy().astype(CAST_DTYPE)
-              for var in chkpt_vars
-          ],
+          [_pt_to_np(var[f"layers.{layer_idx}.feed_forward.mlp.fc2_weight"], cast_dtype=CAST_DTYPE) for var in chkpt_vars],
           axis=1,
       ).transpose()
 
@@ -710,41 +815,34 @@ def _convert_pytorch_to_jax_weights(base_model_path: str, model_size: str, model
       jax_weights["decoder"][layer_name]["mlp"]["wi_1"]["kernel"] = wi_1
       jax_weights["decoder"][layer_name]["mlp"]["wo"]["kernel"] = wo
     else:
-      gate = chkpt_vars[0][f"layers.{layer_idx}.feed_forward.router_DE"].type(torch.float32).numpy().astype(CAST_DTYPE)
+      gate = _pt_to_np(chkpt_vars[0][f"layers.{layer_idx}.feed_forward.router_DE"], cast_dtype=CAST_DTYPE)
       jax_weights["decoder"][layer_name]["Llama4MoEBlock_0"]["MoeBlock_0"]["gate"]["kernel"] = gate
       base_emb_dim = model_params["base_emb_dim"]
 
       wi_0 = np.concatenate(
           [
-              var[f"layers.{layer_idx}.feed_forward.experts.moe_w_in_eD_F"]
-              .type(torch.float32)
-              .numpy()
-              .astype(CAST_DTYPE)
-              .reshape(num_experts, base_emb_dim, -1)
+              _pt_to_np(var[f"layers.{layer_idx}.feed_forward.experts.moe_w_in_eD_F"], cast_dtype=CAST_DTYPE).reshape(
+                  num_experts, base_emb_dim, -1
+              )
               for var in chkpt_vars
           ],
           axis=2,
       )
       # NOTE: should probably update this to be more rigorous, but this should be fine for now
-      f_dim = wi_0.shape[-1]
       wi_1 = np.concatenate(
           [
-              var[f"layers.{layer_idx}.feed_forward.experts.moe_w_swiglu_eD_F"]
-              .type(torch.float32)
-              .numpy()
-              .reshape(num_experts, base_emb_dim, -1)
-              .astype(CAST_DTYPE)
+              _pt_to_np(var[f"layers.{layer_idx}.feed_forward.experts.moe_w_swiglu_eD_F"], cast_dtype=CAST_DTYPE).reshape(
+                  num_experts, base_emb_dim, -1
+              )
               for var in chkpt_vars
           ],
           axis=2,
       )
       wo = np.concatenate(
           [
-              var[f"layers.{layer_idx}.feed_forward.experts.moe_w_out_eF_D"]
-              .type(torch.float32)
-              .numpy()
-              .astype(CAST_DTYPE)
-              .reshape(num_experts, -1, base_emb_dim)
+              _pt_to_np(var[f"layers.{layer_idx}.feed_forward.experts.moe_w_out_eF_D"], cast_dtype=CAST_DTYPE).reshape(
+                  num_experts, -1, base_emb_dim
+              )
               for var in chkpt_vars
           ],
           axis=1,
@@ -758,21 +856,21 @@ def _convert_pytorch_to_jax_weights(base_model_path: str, model_size: str, model
       # shared experts
       wi_0 = np.concatenate(
           [
-              var[f"layers.{layer_idx}.feed_forward.w_in_shared_FD.weight"].type(torch.float32).numpy().astype(CAST_DTYPE)
+              _pt_to_np(var[f"layers.{layer_idx}.feed_forward.w_in_shared_FD.weight"], cast_dtype=CAST_DTYPE)
               for var in chkpt_vars
           ],
           axis=0,
       ).transpose()
       wi_1 = np.concatenate(
           [
-              var[f"layers.{layer_idx}.feed_forward.w_swiglu_FD.weight"].type(torch.float32).numpy().astype(CAST_DTYPE)
+              _pt_to_np(var[f"layers.{layer_idx}.feed_forward.w_swiglu_FD.weight"], cast_dtype=CAST_DTYPE)
               for var in chkpt_vars
           ],
           axis=0,
       ).transpose()
       wo = np.concatenate(
           [
-              var[f"layers.{layer_idx}.feed_forward.w_out_shared_DF.weight"].type(torch.float32).numpy().astype(CAST_DTYPE)
+              _pt_to_np(var[f"layers.{layer_idx}.feed_forward.w_out_shared_DF.weight"], cast_dtype=CAST_DTYPE)
               for var in chkpt_vars
           ],
           axis=1,

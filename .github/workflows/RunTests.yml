@@ -49,7 +49,8 @@ jobs:
     with:
       device_type: tpu
       device_name: v4-8
-      build_mode: stable_stack
+      cloud_runner: linux-x86-n2-16-buildkit
+      build_mode: jax_ai_image
       base_image: us-docker.pkg.dev/tpu-prod-env-multipod/jax-stable-stack/candidate/tpu:latest
 
   gpu_image:
@@ -58,8 +59,22 @@ jobs:
     with:
       device_type: gpu
       device_name: a100-40gb-4
-      build_mode: stable_stack
+      cloud_runner: linux-x86-n2-16-buildkit
+      build_mode: jax_ai_image
       base_image: us-docker.pkg.dev/tpu-prod-env-multipod/jax-stable-stack/candidate/gpu:latest
+
+  cpu_unit_tests:
+    needs: tpu_image
+    uses: ./.github/workflows/run_tests_internal.yml
+    with:
+      device_type: cpu
+      device_name: X64
+      cloud_runner: linux-x86-n2-16
+      image_type: tpu
+      pytest_marker: 'cpu_only'
+      xla_python_client_mem_fraction: 0.75
+      tf_force_gpu_allow_growth: false
+      container_resource_option: "--privileged"
 
   tpu_unit_tests:
     needs: tpu_image
@@ -67,8 +82,8 @@ jobs:
     with:
       device_type: tpu
       device_name: v4-8
-      pytest_marker: 'not gpu_only and not integration_test'
-      test_directory: 'tests'
+      cloud_runner: linux-x86-ct4p-240-4tpu
+      pytest_marker: 'not cpu_only and not gpu_only and not integration_test'
       xla_python_client_mem_fraction: 0.75
       tf_force_gpu_allow_growth: false
       container_resource_option: "--privileged"
@@ -79,8 +94,8 @@ jobs:
     with:
       device_type: tpu
       device_name: v4-8
-      pytest_marker: 'not gpu_only and integration_test'
-      test_directory: 'tests/integration_tests'
+      cloud_runner: linux-x86-ct4p-240-4tpu
+      pytest_marker: 'not cpu_only and not gpu_only and integration_test'
       xla_python_client_mem_fraction: 0.75
       tf_force_gpu_allow_growth: false
       container_resource_option: "--privileged"
@@ -91,8 +106,8 @@ jobs:
     with:
       device_type: gpu
       device_name: a100-40gb-4
-      pytest_marker: 'not tpu_only and not integration_test'
-      test_directory: 'tests'
+      cloud_runner: linux-x86-a2-48-a100-4gpu
+      pytest_marker: 'not cpu_only and not tpu_only and not integration_test'
       xla_python_client_mem_fraction: 0.65
       tf_force_gpu_allow_growth: true
       container_resource_option: "--shm-size 2g --runtime=nvidia --gpus all --privileged"
@@ -103,44 +118,41 @@ jobs:
     with:
       device_type: gpu
       device_name: a100-40gb-4
-      pytest_marker: 'not tpu_only and integration_test'
-      test_directory: 'tests/integration_tests'
+      cloud_runner: linux-x86-a2-48-a100-4gpu
+      pytest_marker: 'not cpu_only and not tpu_only and integration_test'
       xla_python_client_mem_fraction: 0.65
       tf_force_gpu_allow_growth: true
       container_resource_option: "--shm-size 2g --runtime=nvidia --gpus all --privileged"
 
   clean_up:
-    if: ${{ always() }}  # always execute, regardless of previous jobs or steps.
-    needs: [gpu_unit_tests, gpu_integration_tests, tpu_unit_tests, tpu_integration_tests]
+    if: ${{ always() }}
+    needs: [cpu_unit_tests, gpu_unit_tests, gpu_integration_tests, tpu_unit_tests, tpu_integration_tests]
     name: "Clean up"
     runs-on: ["self-hosted"]
     permissions:
       contents: read
-      issues: write  # for failed-build-issue
+      issues: write
     steps:
     - name: Authenticate gcloud
-      continue-on-error: true
       run: |
           # configure registries as root and as runner
-          sudo gcloud auth configure-docker --quiet
           gcloud auth configure-docker --quiet
-          sudo gcloud auth configure-docker us-docker.pkg.dev --quiet
           gcloud auth configure-docker us-docker.pkg.dev --quiet
-    - name: Delete GPU image
-      run: gcloud container images delete gcr.io/tpu-prod-env-multipod/maxtext_${{ github.run_id }}:gpu --force-delete-tags --quiet
-    - name: Delete TPU image
-      run: gcloud container images delete gcr.io/tpu-prod-env-multipod/maxtext_${{ github.run_id }}:tpu --force-delete-tags --quiet
+    - name: Delete the tpu image
+      run: gcloud container images delete "gcr.io/tpu-prod-env-multipod/maxtext_${{ github.run_id }}:tpu" --force-delete-tags --quiet
+    - name: Delete the gpu image
+      run: gcloud container images delete "gcr.io/tpu-prod-env-multipod/maxtext_${{ github.run_id }}:gpu" --force-delete-tags --quiet
 
-  notify:
+  notify_failure:
     name: Notify failed build # creates an issue or modifies last open existing issue for failed build
-    needs: [gpu_unit_tests, gpu_integration_tests, tpu_unit_tests, tpu_integration_tests]
-    runs-on: ["self-hosted"]
+    needs: [cpu_unit_tests, gpu_unit_tests, gpu_integration_tests, tpu_unit_tests, tpu_integration_tests]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
     steps:
     - name: Check whether one of the jobs failed
-      if: ${{ failure() && github.event.pull_request == null }}
+      if: ${{ contains(needs.*.result, 'failure') && github.event.pull_request == null }}
       uses: jayqi/failed-build-issue-action@1a893bbf43ef1c2a8705e2b115cd4f0fe3c5649b  # v1.2.0
       with:
         github-token: ${{ secrets.GITHUB_TOKEN }}
-    - name: Log message if dependent job succeeded
-      if: ${{ ! (failure() && github.event.pull_request == null) }}
-      run: echo "Conditions for creating/updating issue not met. Skipping."

@@ -17,24 +17,25 @@ limitations under the License.
 # pytype: skip-file
 # pylint: disable=missing-module-docstring, bare-except, consider-using-generator, missing-function-docstring
 from collections import OrderedDict
+from typing import Any, Union
+from math import prod
 import math
 import os
 import sys
-
-from typing import Any, Union
+import datetime
 
 import jax
-import omegaconf
 from jax.experimental.compilation_cache import compilation_cache
+
+import omegaconf
 
 from MaxText import accelerator_to_spec_map
 from MaxText import max_logging
 from MaxText import max_utils
-from MaxText.layers.attentions import AttentionType
 from MaxText.common_types import DecoderBlockType
+from MaxText.layers.attentions import AttentionType
 from MaxText.utils import gcs_utils
 
-OmegaConf = omegaconf.OmegaConf
 
 # pylint: disable=line-too-long
 
@@ -74,7 +75,7 @@ def validate_kv_quant_axis(s: str, quantize_kvcache: bool) -> None:
 
 
 def validate_attention_kernel(s: str) -> None:
-  valid_attention_kernels = ("autoselected", "dot_product", "flash", "cudnn_flash_te", "paged")
+  valid_attention_kernels = ("autoselected", "dot_product", "flash", "cudnn_flash_te", "cudnn_flash_jax", "paged")
   if s not in valid_attention_kernels:  # currently supported attention
     raise ValueError("Invalid attention kernel was passed. Valid options ", valid_attention_kernels)
 
@@ -162,6 +163,15 @@ def validate_keys(keys):
   validate_prefill_and_target_lengths(keys["max_prefill_predict_length"], keys["max_target_length"])
   validate_rope_type(keys["rope_type"])
 
+  if keys["mtp_eval_target_module"] < 0:
+    raise ValueError("mtp_eval_target_module cannot be negative. Set to 0 to disable evaluation.")
+
+  if keys["mtp_num_layers"] > 0 and keys["model_call_mode"] == "inference":
+    raise ValueError(
+        "Multi-Token Prediction (MTP) is enabled (mtp_num_layers > 0), but it is not supported in inference mode. "
+        "Please disable MTP by setting mtp_num_layers=0 for inference."
+    )
+
   assert (keys["load_parameters_path"] == "" and keys["load_full_state_path"] == "") or keys[
       "enable_checkpointing"
   ], "You must set enable_checkpointing to load a checkpoint"
@@ -189,9 +199,16 @@ def validate_keys(keys):
   if keys["num_experts"] > 1:
     validate_sparse_matmul_parallelism(keys)
     validate_deepseek_moe(keys)
+    assert keys["decoder_block"] != "qwen3", "Qwen3 MoE mode has not been tested, please set num_experts to 1."
 
   if keys["use_multimodal"]:
     validate_multimodal_model_name(keys["model_name"])
+    if keys["use_sft"]:
+      assert keys[
+          "sft_train_on_completion_only"
+      ], "In multimodal SFT (use_multimodal=True, use_sft=True), sft_train_on_completion_only must be set to True"
+      # TODO(aireenmei, hengtaoguo): support packing
+      assert not keys["packing"], "In multimodal SFT (use_multimodal=True, use_sft=True), packing is not supported yet"
 
   if keys["decoder_block"] == "llama4":
     validate_llama4_config(keys)
@@ -205,9 +222,9 @@ def validate_tokenizer(keys):
 
 def validate_constant_bound(keys):
   if keys["constant_bound_config"] == "":
-    keys["constant_bound_config"]=[]
+    keys["constant_bound_config"] = []
   else:
-    value_list = keys["constant_bound_config"].split(',')
+    value_list = keys["constant_bound_config"].split(",")
     keys["constant_bound_config"] = list(map(float, value_list))
   assert (
       len(keys["constant_bound_config"]) == 0 or len(keys["constant_bound_config"]) == 6
@@ -273,8 +290,6 @@ def validate_llama4_config(keys: dict):
     raise ValueError("Llama4 decoder has not been tested with capacity_factor >= 0 -- please set that value to -1 for now!")
   if keys["num_experts_per_tok"] > 1:
     raise ValueError("Only top-1 routing is supported for Llama4 for now!")
-  if keys["scan_layers"]:
-    raise ValueError("Only unscanned layer is supported for Llama4, and please set scan_layers=False for now!")
   if keys["base_num_decoder_layers"] % keys["interleave_moe_layer_step"] != 0:
     raise ValueError(
         f"The number of decoder layers ({keys['base_num_decoder_layers']}) must be divisible by interleave moe layer step ({keys['interleave_moe_layer_step']})"
@@ -301,6 +316,7 @@ def validate_model_name(s: str) -> bool:
       "deepseek2-16b",
       "deepseek2-236b",
       "deepseek3-671b",
+      "deepseek3-test",
       "gemma-7b",
       "gemma-2b",
       "gemma2-2b",
@@ -309,6 +325,10 @@ def validate_model_name(s: str) -> bool:
       "gemma3-4b",
       "gemma3-12b",
       "gemma3-27b",
+      "qwen3-0.6b",
+      "qwen3-4b",
+      "qwen3-8b",
+      "qwen3-14b",
       "gpt3-175b",
       "gpt3-22b",
       "gpt3-6b",
@@ -325,6 +345,8 @@ def validate_multimodal_model_name(s: str) -> bool:
       "gemma3-4b",
       "gemma3-12b",
       "gemma3-27b",
+      "llama4-17b-16e",
+      "llama4-17b-128e",
   )
   if s not in valid_model_names:
     raise ValueError(
@@ -388,14 +410,14 @@ class _HyperParameters:
           raise ValueError(f"We received env `{environment_var}` but it isn't all uppercase.")
 
   def _update_from_env_and_command_line(self, raw_keys, raw_data_from_yaml, argv, **kwargs) -> list[str]:
-    """Update model config from environment and command line using OmegaConf overrides."""
-    # Use OmegaConf.from_cli to capture CLI arguments.
-    cli_cfg = OmegaConf.from_cli(argv[2:])
+    """Update model config from environment and command line using omegaconf.OmegaConf overrides."""
+    # Use omegaconf.OmegaConf.from_cli to capture CLI arguments.
+    cli_cfg = omegaconf.OmegaConf.from_cli(argv[2:])
     # Also create a configuration from any extra keyword arguments.
-    kwargs_cfg = OmegaConf.create(kwargs)
+    kwargs_cfg = omegaconf.OmegaConf.create(kwargs)
     # Merge command-line and keyword arguments.
-    cmdline_cfg = OmegaConf.merge(cli_cfg, kwargs_cfg)
-    raw_data_from_cmd_line = OmegaConf.to_container(cmdline_cfg, resolve=True)
+    cmdline_cfg = omegaconf.OmegaConf.merge(cli_cfg, kwargs_cfg)
+    raw_data_from_cmd_line = omegaconf.OmegaConf.to_container(cmdline_cfg, resolve=True)
 
     updated_keys = []
 
@@ -440,9 +462,9 @@ class _HyperParameters:
     return updated_keys
 
   def _load_config(self, config_name: str) -> dict[str, Any]:
-    """Loads the YAML config from a file using OmegaConf, and resolves inheritance."""
-    base_cfg = OmegaConf.load(config_name)
-    raw_data_from_yaml = OmegaConf.to_container(base_cfg, resolve=True)
+    """Loads the YAML config from a file using omegaconf.OmegaConf, and resolves inheritance."""
+    base_cfg = omegaconf.OmegaConf.load(config_name)
+    raw_data_from_yaml = omegaconf.OmegaConf.to_container(base_cfg, resolve=True)
 
     # Load data from parent config. Note that inheritance has override
     # semantics, and the path is relative to the current config.
@@ -472,9 +494,10 @@ class _HyperParameters:
     raw_keys = OrderedDict()
     keys_from_env_and_command_line = self._update_from_env_and_command_line(raw_keys, raw_data_from_yaml, argv, **kwargs)
     max_logging.log(f"Updating keys from env and command line: {keys_from_env_and_command_line}")
-    keys_from_model = _HyperParameters.update_model_vars(argv[1], raw_keys, config_name)
+    keys_from_model = _HyperParameters.update_model_vars(argv[1], raw_keys, config_name, keys_from_env_and_command_line)
     max_logging.log(f"Updating keys from model: {keys_from_model}")
-    validate_no_keys_overwritten_twice(keys_from_env_and_command_line, keys_from_model)
+    if not raw_keys["override_model_config"]:
+      validate_no_keys_overwritten_twice(keys_from_env_and_command_line, keys_from_model)
 
     # This must be invoked before initializing the backend
     raw_keys = validate_and_set_hlo_dump_defaults(raw_keys)
@@ -518,6 +541,10 @@ class _HyperParameters:
     """Transformations between the config data and configs used at runtime"""
     if raw_keys["run_name"] == "":
       raw_keys["run_name"] = os.environ.get("JOBSET_NAME")  # using XPK default
+      if raw_keys["run_name"] == "":
+        now = datetime.datetime.now()
+        timestamp = now.strftime("%Y-%m-%d-%H-%M")
+        raw_keys["run_name"] = f'{raw_keys["model_name"]}_{timestamp}'
     run_name = raw_keys["run_name"]
     base_output_directory = raw_keys["base_output_directory"]
     if run_name:
@@ -640,7 +667,7 @@ class _HyperParameters:
     raw_keys["eval_interval"] = math.ceil(377487360 / max_target_length / global_batch_size_to_train_on)
 
   @staticmethod
-  def update_model_vars(base_config_path, raw_keys, config_name: str):
+  def update_model_vars(base_config_path, raw_keys, config_name: str, keys_from_env_and_command_line):
     """Update model config variables"""
     validate_model_name(raw_keys["model_name"])
     max_logging.log(f"Running Model: {raw_keys['model_name']}")
@@ -654,9 +681,11 @@ class _HyperParameters:
       if not os.path.isfile(file_path):
         dir_path = os.path.dirname(os.path.realpath(__file__))
         file_path = os.path.join(dir_path, "configs", "models", f"{model_name}.yml")
-      # Use OmegaConf to load the model-specific configuration.
-      model_vars = OmegaConf.load(file_path)
-      model_vars = OmegaConf.to_container(model_vars, resolve=True)
+      # Use omegaconf.OmegaConf to load the model-specific configuration.
+      model_vars = omegaconf.OmegaConf.load(file_path)
+      model_vars = omegaconf.OmegaConf.to_container(model_vars, resolve=True)
+      if raw_keys["override_model_config"]:
+        model_vars = {key: value for key, value in model_vars.items() if key not in keys_from_env_and_command_line}
       updated_keys = list(model_vars.keys())
       raw_keys = validate_and_update_keys(raw_keys, model_vars, config_name)
     return updated_keys
@@ -839,11 +868,21 @@ def set_and_validate_pipeline_config(raw_keys):
     raw_keys = pipeline_first_axis(raw_keys)
     num_stages = int(raw_keys["ici_pipeline_parallelism"] * raw_keys["dcn_pipeline_parallelism"])
     if raw_keys["pipeline_parallel_layers"] == -1:
-      raw_keys["pipeline_parallel_layers"] = raw_keys["num_decoder_layers"]
+      if raw_keys["decoder_block"] == "deepseek":
+        moe_layers = raw_keys["num_decoder_layers"] - raw_keys["first_num_dense_layers"]
+        raw_keys["pipeline_parallel_layers"] = moe_layers
+      else:
+        raw_keys["pipeline_parallel_layers"] = raw_keys["num_decoder_layers"]
     else:
-      assert (
-          raw_keys["pipeline_parallel_layers"] <= raw_keys["num_decoder_layers"]
-      ), f"You can only pipeline a subset of the decoder layers, but you requested to pipeline {raw_keys['pipeline_parallel_layers']} with pipeline_parallel_layers and there are only {raw_keys['num_decoder_layers']} decoder layers."
+      if raw_keys["decoder_block"] == "deepseek":
+        moe_layers = raw_keys["num_decoder_layers"] - raw_keys["first_num_dense_layers"]
+        assert (
+            raw_keys["pipeline_parallel_layers"] <= moe_layers
+        ), f"You can only pipeline a subset of the moe decoder layers for deepseek, but you requested to pipeline {raw_keys['pipeline_parallel_layers']} with pipeline_parallel_layers and there are only {moe_layers} decoder layers."
+      else:
+        assert (
+            raw_keys["pipeline_parallel_layers"] <= raw_keys["num_decoder_layers"]
+        ), f"You can only pipeline a subset of the decoder layers, but you requested to pipeline {raw_keys['pipeline_parallel_layers']} with pipeline_parallel_layers and there are only {raw_keys['num_decoder_layers']} decoder layers."
     assert (
         raw_keys["scan_layers"] or raw_keys["pipeline_parallel_layers"] == raw_keys["num_decoder_layers"]
     ), "Currently we only support scan_layers=True when pipelining a subset of layers."
@@ -884,8 +923,6 @@ def set_and_validate_pipeline_config(raw_keys):
 
 
 def validate_deepseek_moe(raw_keys):
-  if raw_keys["decoder_block"] == "deepseek" and using_pipeline_parallelism(raw_keys):
-    raise ValueError("Currently we do not support DeepSeek MoE with pipeline parallelism.")
   if raw_keys["n_routing_groups"] != -1:
     if raw_keys["topk_routing_group"] == -1:
       raise ValueError(f'config topk_routing_group: {raw_keys["topk_routing_group"]} is not defined')
@@ -919,6 +956,12 @@ def validate_sparse_matmul_parallelism(raw_keys):
     raise ValueError(
         f"The expert dimension {raw_keys['num_experts']} is not divisible by expert parallelism setting {expert_parallelism}."
     )
+  if (
+      using_pipeline_parallelism(raw_keys)
+      and raw_keys["pipeline_parallel_layers"] is True
+      and raw_keys["model_fsdp_ag_once"] is True
+  ):
+    raise ValueError("You should use the pipeline_fsdp_ag_once = True and leave model_fsdp_ag_once = False.")
 
 
 def create_new_logical_axis_rules(old_logical_axis_rules, new_logical_axis_rules):
@@ -1016,6 +1059,9 @@ def get_num_target_devices(raw_keys):
     compile_topology = accelerator_to_spec_map.get_system_characteristics(raw_keys["compile_topology"])
     devices_per_slice = compile_topology.devices_per_slice
     return int(devices_per_slice * raw_keys["compile_topology_num_slices"])
+  elif raw_keys.get("subslice_shape") and raw_keys.get("enable_single_controller"):
+    subslice_shape = tuple(int(x) for x in raw_keys["subslice_shape"].split(","))
+    return prod(subslice_shape)
   else:
     return len(jax.devices())
 
