@@ -17,21 +17,29 @@ limitations under the License.
 """ Tests for the quantizations """
 import unittest
 import os.path
+import sys
 
 import pytest
 
 import numpy as np
 
+import jax
 from jax import numpy as jnp
 from jax import random, lax
+from jax.sharding import Mesh
 
 from flax import linen as nn
 
 from aqt.jax.v2 import aqt_tensor
+from aqt.jax.v2.flax import aqt_flax
 
 from MaxText.globals import PKG_DIR
 from MaxText import pyconfig
 from MaxText.layers import quantizations
+from MaxText import maxtext_utils
+from MaxText import max_utils
+from MaxText.layers import models
+from MaxText.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR
 
 _QUERY_REGEX = ".*/query"
 _VALUE_REGEX = ".*/value"
@@ -225,6 +233,91 @@ class QuantizationTest(unittest.TestCase):
     }
     result = quantizations.remove_quantized_params(_params, _aqt_vars)
     self.assertEqual(_expected, result)
+    
+    
+class FP8QuantizationTest(unittest.TestCase):
+  def setUp(self):
+    super().setUp()
+    self.cfg = pyconfig.initialize(
+      [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
+      per_device_batch_size=1.0,
+      run_name="test",
+      enable_checkpointing=False,
+      base_num_decoder_layers=2,
+      attention="dot_product",
+      max_target_length=16,
+      base_emb_dim=256,
+      base_num_query_heads=2,
+      base_num_kv_heads=2,
+      max_prefill_predict_length=4,
+    )
+    self.rtol = 5e-1
+    self.atol = 5e-1
+    self.rng = jax.random.PRNGKey(42)
+    devices_array = maxtext_utils.create_device_mesh(self.cfg)
+    self.mesh = Mesh(devices_array, self.cfg.mesh_axes)
+    
+  def get_data(self):
+    """Get data."""
+    s = (self.cfg.global_batch_size_to_train_on, self.cfg.max_target_length)
+    ids = jax.random.randint(self.rng, s, 0, self.cfg.vocab_size)
+
+    decoder_segment_ids = jax.numpy.zeros(s) + DECODING_ACTIVE_SEQUENCE_INDICATOR
+    decoder_positions = jnp.stack(
+        [jnp.arange(self.cfg.max_target_length, dtype=jnp.int32) for _ in range(self.cfg.global_batch_size_to_train_on)]
+    )
+
+    return ids, decoder_segment_ids, decoder_positions
+  
+    
+  def test_fp8_default_config(self):
+    quant = _configure_quantization(quant_str="aqt_fp8_full", mode_str="train")
+    
+    quant_model = models.Transformer(config=self.cfg, mesh=self.mesh, quant=quant)
+    model = models.Transformer(config=self.cfg, mesh=self.mesh, quant=None)
+
+    ids, decoder_segment_ids, decoder_positions = self.get_data()
+
+    variables = model.init(
+      {"params": self.rng, "aqt": self.rng}, ids, decoder_positions, decoder_segment_ids, enable_dropout=False
+    )
+    quant_variables = quant_model.init(
+      {"params": self.rng, "aqt": self.rng}, ids, decoder_positions, decoder_segment_ids, enable_dropout=False
+    )
+    
+    logits = model.apply({"params": variables['params']}, ids, decoder_positions, decoder_segment_ids, enable_dropout=False, rngs={"params": self.rng})
+    quant_logits = quant_model.apply({"params": quant_variables['params']}, ids, decoder_positions, decoder_segment_ids, enable_dropout=False, rngs={"params": self.rng})
+    
+    self.assertTrue(
+      jax.numpy.allclose(
+        logits,
+        quant_logits,
+        rtol=self.rtol,
+        atol=self.atol,
+        equal_nan=False,
+      )
+    )
+    
+    def combined_loss(params_base, params_quant, inputs):
+      logits_base = model.apply({"params": params_base}, *inputs, enable_dropout=False, rngs={"params": self.rng})
+      logits_quant = quant_model.apply({"params": params_quant}, *inputs, enable_dropout=False, rngs={"params": self.rng})
+      loss_b = jnp.mean((logits_base)**2)
+      loss_q = jnp.mean((logits_quant)**2)
+      return (loss_b + loss_q) / 2
+
+    # Compute gradients w.r.t. both models
+    grads_base, grads_quant = jax.grad(combined_loss, argnums=(0,1))(variables["params"], quant_variables["params"], (ids, decoder_positions, decoder_segment_ids))
+
+    def pytree_allclose(a, b, *, rtol, atol):
+      """Return True if every pair of leaves is all-close."""
+      leaves_a, leaves_b = jax.tree_util.tree_leaves(a), jax.tree_util.tree_leaves(b)
+      return all(
+        jnp.allclose(x, y, rtol=rtol, atol=atol, equal_nan=False)
+        for x, y in zip(leaves_a, leaves_b)
+      )
+
+    self.assertTrue(pytree_allclose(grads_base, grads_quant, rtol=self.rtol, atol=self.atol)) 
+
 
 
 if __name__ == "__main__":
