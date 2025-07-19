@@ -569,7 +569,7 @@ def gmm(
           scratch_shapes=[pltpu.VMEM((tm, tn), jnp.float32)],
       ),
       input_output_aliases=input_output_aliases,
-      compiler_params=pltpu.TPUCompilerParams(dimension_semantics=("parallel", "arbitrary", "arbitrary")),
+      compiler_params=pltpu.CompilerParams(dimension_semantics=("parallel", "arbitrary", "arbitrary")),
       interpret=interpret,
       cost_estimate=cost_estimate,
   )
@@ -810,7 +810,7 @@ def tgmm(
           scratch_shapes=[pltpu.VMEM((tk, tn), jnp.float32)],
       ),
       input_output_aliases=input_output_aliases,
-      compiler_params=pltpu.TPUCompilerParams(dimension_semantics=("parallel", "arbitrary", "arbitrary")),
+      compiler_params=pltpu.CompilerParams(dimension_semantics=("parallel", "arbitrary", "arbitrary")),
       interpret=interpret,
       cost_estimate=cost_estimate,
   )
