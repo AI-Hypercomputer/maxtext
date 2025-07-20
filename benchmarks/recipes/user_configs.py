@@ -30,12 +30,8 @@ xpk_path = "~/xpk"
 
 user = os.environ["USER"]
 region = "-".join(cluster_config.zone.split("-")[:-1])
-proxy_image = (
-    f"us-docker.pkg.dev/path/to/{user}/proxy_server"
-)
-server_image = (
-    f"us-docker.pkg.dev/path/to/{user}/server"
-)
+proxy_image = f"us-docker.pkg.dev/path/to/{user}/proxy_server"
+server_image = f"us-docker.pkg.dev/path/to/{user}/server"
 colocated_python_image = f"gcr.io/{cluster_config.project}/path/to/{user}/colocated_python_sidecar"
 runner = f"gcr.io/{cluster_config.project}/{user}_maxtext_latest:latest"
 base_output_directory = f"gs://{user}-{region}/{user}"

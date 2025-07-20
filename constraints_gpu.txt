@@ -6,7 +6,7 @@ annotated-types==0.7.0
 anyio==4.6.2.post1
 aqtp==0.8.2
 array_record==0.5.1
-astroid==3.3.5
+asteroid==3.3.5
 astunparse==1.6.3
 async-timeout==4.0.3
 attrs==24.2.0

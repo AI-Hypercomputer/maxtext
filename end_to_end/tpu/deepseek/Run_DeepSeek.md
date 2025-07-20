@@ -150,14 +150,14 @@ python3 -m MaxText.scratch_code.generate_hf_golden_logits \
     --prompts='I love to,Today is a,What is the'
 ```
 
-You should be able to see logs like bellow:
+You should be able to see logs like below:
 
 ```
 ...
 File is stored locally at golden_DeepSeek-V2-Lite.jsonl.
 ```
 
-Run command bellow to compare logits between HuggingFace and MaxText.
+Run command below to compare logits between HuggingFace and MaxText.
 
 ```sh
 python3 -m MaxText.tests.forward_pass_logit_checker \

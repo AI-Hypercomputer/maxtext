@@ -313,9 +313,7 @@ class RoutedMoE(nn.Module):
     _, group_idx = jax.lax.top_k(group_scores, k=self.config.topk_routing_group)
 
     # Mask selected groups so that only those experts are considered.
-    group_mask = jax.nn.one_hot(
-        group_idx, num_classes=self.config.n_routing_groups, dtype=jnp.float32
-    )
+    group_mask = jax.nn.one_hot(group_idx, num_classes=self.config.n_routing_groups, dtype=jnp.float32)
     group_mask = jnp.sum(group_mask, axis=-2)
 
     # Apply masks and get top-k indices.
@@ -328,16 +326,14 @@ class RoutedMoE(nn.Module):
         score_mask_expanded.shape[:-2] + (self.num_experts,),
     )
 
-  def deepseek_routing(
-      self, gate_logits: jax.Array, pre_bias_logits: jax.Array
-  ) -> tuple[jax.Array, jax.Array]:
+  def deepseek_routing(self, gate_logits: jax.Array, pre_bias_logits: jax.Array) -> tuple[jax.Array, jax.Array]:
     """DeepSeek routing logit.
 
     If the configuration does not specify routing groups (`n_routing_groups` is
     -1), we use a standard top-k routing mechanism. Otherwise, we force all
     selected experts to be from the a subset of the highest rated expert groups.
 
-    The selection process uses post_bias logits, while the return weigths use
+    The selection process uses post_bias logits, while the return weights use
     pre_bias logits.
 
     Args:
@@ -350,11 +346,7 @@ class RoutedMoE(nn.Module):
       - top_k_indices: `(..., num_experts_per_tok)` array of indices
         identifying the selected experts for each token.
     """
-    expert_mask = (
-        1
-        if self.config.n_routing_groups == -1
-        else self._expert_group_mask(gate_logits)
-    )
+    expert_mask = 1 if self.config.n_routing_groups == -1 else self._expert_group_mask(gate_logits)
     _, top_k_indices = jax.lax.top_k(
         jnp.where(expert_mask > 0, gate_logits, -jnp.inf),
         k=self.num_experts_per_tok,
@@ -463,7 +455,7 @@ class RoutedMoE(nn.Module):
         sorted_indices: Indices used to permute the inputs.
         local_group_size: Number of tokens assigned to each local expert on this
           shard.
-        sorted_experts_ids: expert ID corrsponding to each token of the permuted
+        sorted_experts_ids: expert ID corresponding to each token of the permuted
         inputs.
     """
 
@@ -546,10 +538,10 @@ class RoutedMoE(nn.Module):
           cumulated_array = jnp.cumsum(array_with_zeros, axis=0, dtype=input_array.dtype)
           return cumulated_array[shard_id]
         elif strategy == TransformStrategy.RECV_SIZE:
-          # Received size in the traget output
+          # Received size in the target output
           return input_array[:, shard_id]
         else:
-          raise ValueError(f"Unknown tranform array strategy: {strategy}")
+          raise ValueError(f"Unknown transform array strategy: {strategy}")
 
       # If the batch is unsharded then we send the same data slice to all other
       # shards. We also assume each shard will have the local processed inputs
@@ -571,10 +563,10 @@ class RoutedMoE(nn.Module):
         # The amount that each shard receives from all other shards is
         # equivalent to the group sizes (aka input_array).
         elif strategy == TransformStrategy.RECV_SIZE:
-          # Received size in the traget output
+          # Received size in the target output
           return input_array
         else:
-          raise ValueError(f"Unknown tranform array strategy: {strategy}")
+          raise ValueError(f"Unknown transform array strategy: {strategy}")
 
     input_offsets = transform_array(
         all_shards_group_sizes,
@@ -659,9 +651,7 @@ class RoutedMoE(nn.Module):
           if kernel.bias or kernel.sparsity_mask or len(kernel.scale) > 1:
             raise ValueError("Unsupported usecase for ragged_dot with quantized kernel.")
           rhs_inputs = kernel.qvalue
-        with set_xla_metadata(
-            ragged_dot_tiling=",".join([str(t) for t in tiling])
-        ):
+        with set_xla_metadata(ragged_dot_tiling=",".join([str(t) for t in tiling])):
           output = jax.lax.ragged_dot(
               lhs=inputs,
               rhs=rhs_inputs,
@@ -1400,9 +1390,7 @@ class RoutedMoE(nn.Module):
     return w0_kernel, w1_kernel, wo_kernel
 
   @nn.compact
-  def __call__(
-      self, inputs: ctypes.Array
-  ) -> tuple[ctypes.Array, Optional[ctypes.Array]]:
+  def __call__(self, inputs: ctypes.Array) -> tuple[ctypes.Array, Optional[ctypes.Array]]:
     cfg = self.config
     inputs = inputs.astype(cfg.dtype)
     gate_logits, pre_bias_logits = GateLogit(

@@ -377,7 +377,7 @@ def initialize_self_attention_lora_kernels(
     reshape_b: bool = False,
     shape_b: bool = None,
 ):
-  """Helper function to intialize LoRA kernels for given target module.
+  """Helper function to initialize LoRA kernels for given target module.
 
   Args:
     self_attention_lora (dict): Intermediate dictionary to store LoRA kernels.

@@ -53,7 +53,7 @@ def calculate_matmul_resources(
 
   Args:
       activations_shape: Shape of the activations tensor (M, K).
-      weights_shape: Shape of the weights tensor (G, K, F).
+      weights_shape: Shape of the weights tensor (G, K, F) or (K_w, F).
                      G is the number of groups if this is a GMM (e.g in MoE layer).
       sD: Number of data parallel shards (sD). Must be >= 1.
       sK: Sharding factor for the activation embedding dimension.
@@ -77,9 +77,10 @@ def calculate_matmul_resources(
   M, K_act = activations_shape[0], activations_shape[-1]
   # Intermediate activation shape
   I = np.prod(np.array(activations_shape[1:-1]))
-  if len(weights_shape) == 3:
+  weights_shape_len = len(weights_shape)
+  if weights_shape_len == 3:
     G, K_w, F = weights_shape
-  elif len(weights_shape) == 2:
+  elif weights_shape_len == 2:
     K_w, F = weights_shape
     G = 1
   else:
@@ -104,11 +105,13 @@ def calculate_matmul_resources(
     # implying an average or approximation if not perfectly divisible.
     if M % sD != 0:
       print(
-          f"Warning: Activations M dimension ({M}) is not perfectly divisible by sharding amount {sD}. Results are approximate."
+          f"Warning: Activations M dimension ({M}) is not perfectly divisible by sharding amount {sD}."
+          f" Results are approximate."
       )
     if K_act % sK != 0:
       print(
-          f"Warning: Common K dimension ({K_act}) is not perfectly divisible by sharding amount {sK}. Results are approximate."
+          f"Warning: Common K dimension ({K_act}) is not perfectly divisible by sharding amount {sK}."
+          f" Results are approximate."
       )
     if K_w % sW != 0:
       print(
@@ -263,7 +266,7 @@ def plot_sharding_scheme_comparison(
     label = scheme.get("label", "Unknown Scheme")
     shard_settings = scheme.get("shard_settings")
 
-    print(f"\n--- Scheme: {label} ---")
+    print("\n--- Scheme: {label} ---")
     try:
       # Clear previous warnings for divisibility for cleaner output per iteration
       import warnings

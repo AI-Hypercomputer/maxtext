@@ -12,9 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
-# Dictionary mapping each subject to its respective subcategories.
-# Subcategories represent more specific topics which are later grouped into broader categories.
+"""
+Dictionary mapping each subject to its respective subcategories.
+Subcategories represent more specific topics which are later grouped into broader categories.
+"""
 
 subcategories = {
     # STEM Subjects

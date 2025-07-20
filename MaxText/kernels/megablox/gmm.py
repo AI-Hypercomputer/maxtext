@@ -341,7 +341,7 @@ def gmm(
     raise ValueError("rhs_quantize_dtype is None, but quantized rhs is given.")
 
   if rhs_quantize_dtype is not None and isinstance(rhs, QTensor):
-    # If weight is alreeady quantized check precision.
+    # If weight is already quantized check precision.
     if rhs_quantize_dtype != rhs.qvalue.dtype:
       raise ValueError(
           f"{rhs_quantize_dtype=} and already given quantized {rhs.qvalue.dtype=} does not have the same precision"

@@ -44,9 +44,7 @@ DEVICE_TYPE = "v6e-256"
 # Other parameters (MUST BE SET BY USER)
 XPK_PATH = "../xpk"  # We're running this script from the maxtext directory
 USER = os.environ["USER"]
-BASE_OUTPUT_DIRECTORY = (
-    f"gs://{USER}-{PROJECT}-{COUNTRY}/disruption_management/"
-)
+BASE_OUTPUT_DIRECTORY = f"gs://{USER}-{PROJECT}-{COUNTRY}/disruption_management/"
 MAX_RESTARTS = 0
 NUM_SLICES = 2
 BENCHMARK_STEPS = 101
@@ -85,11 +83,11 @@ def construct_workload_config_with_disruptions(
       pathways_config=pathways_config,
       xpk_path=XPK_PATH,
       num_steps=BENCHMARK_STEPS,
-      disruption_configs=construct_disruption_configs()
+      disruption_configs=construct_disruption_configs(),
   )
 
 
-def main() -> None:
+def main():
   """Main function to run the suspend/resume disruption test."""
 
   # Cluster Configuration
@@ -101,12 +99,10 @@ def main() -> None:
   )
 
   # Handle command line arguments using args_helper
-  should_continue = helper.handle_cmd_args(
-      cluster_config, helper.DELETE, xpk_path=XPK_PATH
-  )
+  should_continue = helper.handle_cmd_args(cluster_config, helper.DELETE, xpk_path=XPK_PATH)
 
   if not should_continue:
-    return 0
+    return
 
   # Model Configuration - Using a simple default model for testing
   model = v5e_model_configs.llama3_1_8b_8192
@@ -115,7 +111,6 @@ def main() -> None:
       server_image=SERVER_IMAGE,
       proxy_server_image=PROXY_IMAGE,
       runner_image=RUNNER,
-
       # User can add additional flags here.
       server_flags="--enable_metrics_collection=false",
       proxy_flags="--enable_metrics_collection=false",
@@ -124,9 +119,7 @@ def main() -> None:
 
   # Pathways Workload Configuration with Disruption
   workload_configs = []
-  pathways_workload_config = construct_workload_config_with_disruptions(
-      cluster_config, model, pathways_config
-  )
+  pathways_workload_config = construct_workload_config_with_disruptions(cluster_config, model, pathways_config)
   workload_configs.append(pathways_workload_config)
 
   # Run the benchmark and use the returned disruption manager.
@@ -138,11 +131,8 @@ def main() -> None:
   # Wait for disruptions to complete
   disruption_manager.start_disruptions_and_wait_for_completion()
 
-  print(
-      "Suspend/Resume disruptions completed. Please check logs for results."
-  )
+  print("Suspend/Resume disruptions completed. Please check logs for results.")
 
 
 if __name__ == "__main__":
   main()
-
