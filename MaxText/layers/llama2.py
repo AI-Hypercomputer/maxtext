@@ -28,8 +28,8 @@ from jax.sharding import Mesh
 from flax import linen as nn
 
 from MaxText.inference import page_manager
-from MaxText.layers import linears
 from MaxText.common_types import Config
+from MaxText.layers.linears import mlp_block
 from MaxText.layers import quantizations
 from MaxText.layers.attentions import Attention
 from MaxText.layers.quantizations import AqtQuantization as Quant
@@ -136,7 +136,8 @@ class LlamaDecoderLayer(nn.Module):
     hidden_states = nn.with_logical_constraint(hidden_states, activation_axis_names)
 
     # MLP block.
-    mlp_lnx = linears.MlpBlock(
+    mlp_lnx = mlp_block(
+        in_features=hidden_states.shape[-1],
         intermediate_dim=cfg.mlp_dim,
         activations=cfg.mlp_activations,
         intermediate_dropout_rate=cfg.dropout_rate,

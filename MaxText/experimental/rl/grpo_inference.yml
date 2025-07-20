@@ -1,0 +1,24 @@
+base_config: "rl.yml"
+
+use_grpo: True
+train_data_columns: 'prompt'
+
+attention: 'dot_product'
+
+max_prefill_predict_length: 512
+max_target_length: 1024
+
+dataset_type: hf # we currently only support Huggingface input pipeline with GRPO.
+
+num_generations: 4
+grpo_beta: 0.04
+inference_rollouts: 1
+
+decode_sampling_strategy: "weighted"
+decode_sampling_temperature: 0.9
+async_checkpointing: false
+
+return_log_prob: True
+
+add_bos: False
+add_eos: False

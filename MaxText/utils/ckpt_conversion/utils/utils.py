@@ -51,6 +51,7 @@ HF_IDS = {
     "qwen3-0.6b": "Qwen/Qwen3-0.6B",
     "qwen3-4b": "Qwen/Qwen3-4B",
     "qwen3-8b": "Qwen/Qwen3-8B",
+    "qwen3-14b": "Qwen/Qwen3-14B",
 }
 
 

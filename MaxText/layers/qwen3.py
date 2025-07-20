@@ -121,7 +121,8 @@ class Qwen3DecoderLayer(nn.Module):
 
     # MLP block
     if cfg.num_experts is None or cfg.num_experts <= 1:  # Dense MLP
-      mlp_output = linears.MlpBlock(
+      mlp_output = linears.mlp_block(
+          in_features=mlp_input.shape[-1],
           intermediate_dim=cfg.mlp_dim,
           activations=cfg.mlp_activations,
           intermediate_dropout_rate=cfg.dropout_rate,

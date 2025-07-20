@@ -22,6 +22,7 @@ from jax import lax
 import jax
 import jax.numpy as jnp
 from MaxText import max_logging
+from MaxText.layers import nnx_wrappers
 from MaxText.layers.initializers import Initializer, variable_to_logically_partitioned
 
 
@@ -78,7 +79,7 @@ def rms_norm(
     parameter_memory_host_offload: bool = False,
 ):
   """Creates a RMSNorm module."""
-  module = nnx.bridge.to_linen(
+  module = nnx_wrappers.to_linen(
       RMSNorm,
       num_features=num_features,
       epsilon=epsilon,

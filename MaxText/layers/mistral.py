@@ -27,7 +27,7 @@ import jax.numpy as jnp
 
 from flax import linen as nn
 
-from MaxText.layers import linears
+from MaxText.layers.linears import mlp_block
 from MaxText.layers import models
 from MaxText.layers import quantizations
 from MaxText.layers.attentions import Attention
@@ -127,7 +127,8 @@ class MistralDecoderLayer(nn.Module):
         hidden_states, ("activation_batch", "activation_norm_length", "activation_embed")
     )
 
-    mlp_lnx = linears.MlpBlock(
+    mlp_lnx = mlp_block(
+        in_features=hidden_states.shape[-1],
         intermediate_dim=cfg.mlp_dim,
         activations=cfg.mlp_activations,
         intermediate_dropout_rate=cfg.dropout_rate,

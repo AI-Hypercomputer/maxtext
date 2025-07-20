@@ -31,6 +31,7 @@ Key supported features:
 * Models: Llama 2, Llama 3, Llama 4, Mistral and Mixtral family, Gemma, Gemma 2, Gemma 3, and DeepSeek family
 
 ## Announcements
+* [July 16, 2025] We will be restructuring the MaxText repository for improved organization and clarity. Please review the [proposed structure](RESTRUCTURE.md) and provide feedback.
 * [July 11, 2025] Multi-Token Prediction (MTP) training is now supported! This feature adds an auxiliary loss based on predicting multiple future tokens, inspired by the [DeepSeek-V3 paper](https://arxiv.org/html/2412.19437v1), to enhance training efficiency.
 * [June 25, 2025] DeepSeek R1-0528 variant is now supported!
 * [April 24, 2025] Llama 4 Maverick models are now supported!
