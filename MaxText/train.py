@@ -45,6 +45,7 @@ from cloud_tpu_diagnostics.configuration import diagnostic_configuration
 from cloud_tpu_diagnostics.configuration import stack_trace_configuration
 
 from MaxText import checkpointing
+from MaxText import diloco
 from MaxText import exceptions
 from MaxText import max_logging
 from MaxText import max_utils
@@ -545,7 +546,12 @@ def setup_train_loop(config, recorder, devices=None):
 
     if not config.using_pipeline_parallelism:
       # The vocab tensor(s) of shape [vocab, embed] (and transpose) are not sharded by stage
-      maxtext_utils.assert_params_sufficiently_sharded(state.params, mesh, config.sharding_tolerance)
+      if isinstance(state, diloco.DiLoCoTrainState):
+        # TODO: assert that the inner state is sufficiently sharded within the DiLoCo replicas.
+        # maxtext_utils.assert_params_sufficiently_sharded(state.inner_state.params, mesh, config.sharding_tolerance)
+        maxtext_utils.assert_params_sufficiently_sharded(state.outer_params, mesh, config.sharding_tolerance)
+      else:
+        maxtext_utils.assert_params_sufficiently_sharded(state.params, mesh, config.sharding_tolerance)
 
     if config.use_dpo:
       abstract_state, _, _ = maxtext_utils.get_abstract_state(model, tx, config, init_rng, mesh, is_training=True)
