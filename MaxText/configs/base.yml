@@ -129,7 +129,7 @@ head_dim: 128
 mlp_activations: ["silu", "linear"]
 dropout_rate: 0.0
 logits_via_embedding: False
-normalize_embedding_logits: True  # whether to normlize pre-softmax logits if logits_via_embedding is true
+normalize_embedding_logits: True  # whether to normalize pre-softmax logits if logits_via_embedding is true
 logits_dot_in_fp32: False  # whether to use fp32 in logits_dense or shared_embedding dot product for stability
 cast_logits_to_fp32: True # whether to cast the logits to fp32. The higher precision is generally beneficial, but it can vary slightly.
 float32_qk_product: False # in dot_product attention, whether to cast to fp32 the inputs to qk product
@@ -727,7 +727,7 @@ enable_prefix_caching: False
 prefix_caching_hbm_byte: 10_000_000_000 # 10 GB
 prefix_caching_dram_byte: 100_000_000_000 # 100 GB
 
-# This is a temporary flag that will removed soon after the fix lands in TE
+# This is a temporary flag that will be removed soon after the fix lands in TE
 enable_padding_causal_mask: True
 
 # Llama4-specific
