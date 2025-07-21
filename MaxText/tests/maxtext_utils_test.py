@@ -391,7 +391,7 @@ class TestAssertParamsSufficientlySharded(unittest.TestCase):
 
 class TestAssert_Formatted_sharding_annotations(unittest.TestCase):
   """
-  Test suite for sharding assertion formating functions.
+  Test suite for sharding assertion formatting functions.
   """
 
   def setUp(self):
