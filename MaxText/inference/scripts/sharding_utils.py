@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Tuple
+from typing import Tuple, Iterable
 import matplotlib.pyplot as plt
 import pprint
 import numpy as np
@@ -23,8 +23,8 @@ def latency_bound_comms(comm: float, latency=1e-6):
 
 
 def calculate_matmul_resources(
-    activations_shape: Tuple[int],
-    weights_shape: Tuple[int],
+    activations_shape: Tuple[int, ...],
+    weights_shape: Tuple[int, ...],
     ici_bandwidth: float,
     peak_flops: float,
     sD: int = 1,
@@ -35,7 +35,7 @@ def calculate_matmul_resources(
     activation_size_bytes: int = 2,
     weight_size_bytes: int = 2,
     ici_latency: float = 1e-6,
-    all_gather_axes: Tuple[int] = [],
+    all_gather_axes: Iterable[str] = iter(()),
     debug=True,
 ) -> dict[str, float]:
   """
@@ -63,7 +63,7 @@ def calculate_matmul_resources(
       activation_size_bytes: Size of a single element in bytes for the activations.
       weight_size_bytes: Size of a single element in bytes for the weights.
       ici_latency: The latency overhead of communicating between TPUs.
-      all_gather_axes: Optional additional output axes that need to be all-gathered (e.g. "M", "F").
+      all_gather_axes: Optional additional output axes that need to be all-gathered (e.g. `("M", "F")`).
       debug: Whether to print intermediate resource calculations.
 
   Returns:
@@ -79,14 +79,14 @@ def calculate_matmul_resources(
   I = np.prod(np.array(activations_shape[1:-1]))
   weights_shape_len = len(weights_shape)
   if weights_shape_len == 3:
-    G, K_w, F = weights_shape
+    G, K_w, F = weights_shape  # pytype: disable=bad-unpacking
   elif weights_shape_len == 2:
-    K_w, F = weights_shape
+    K_w, F = weights_shape  # pytype: disable=bad-unpacking
     G = 1
   else:
     raise ValueError(f"weights_shape={weights_shape} is not supported!.")
 
-  def _gather_dim_to_shard():
+  def _gather_dim_to_shard() -> dict[str, int]:
     # # Used to map all-gather arguments to the respective shardings.
     return {"D": sD, "K": sK, "W": sW, "F": sF, "E": sE}
 
@@ -178,7 +178,7 @@ def calculate_matmul_resources(
   if debug:
     print(f"Output memory (GB): {local_output_bytes/1e9}")
 
-  gathered_output_bytes = local_output_bytes * np.prod([gather_dim_to_shard[axis] for axis in all_gather_axes])
+  gathered_output_bytes = np.multiply(local_output_bytes, np.prod([gather_dim_to_shard[axis] for axis in all_gather_axes]))
   if debug:
     print(f"Output memory (GB) after additional axes gathers: {gathered_output_bytes/1e9}")
   memory_per_TPU_bytes = mem_activations_bytes + mem_weights_bytes + gathered_output_bytes

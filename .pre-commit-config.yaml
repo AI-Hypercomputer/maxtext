@@ -32,12 +32,11 @@ repos:
           - "--ignore-patterns='.pytype,.*pyi$'"
           - '.'
 
-#  - repo: https://github.com/google/pytype
-#    rev: 2024.10.11
-#    hooks:
-#      - id: pytype
-#        args:
-#          - '--jobs=auto'
-          # - '--keep-going'
-#          - '--disable import-error,late-directive,wrong-arg-types,module-attr,unsupported-operands'
-#          - 'MaxText/'
+  - repo: https://github.com/google/pytype
+    rev: 2024.10.11
+    hooks:
+      - id: pytype
+        args:
+          - '--jobs=auto'
+          - '--keep-going'
+          - 'MaxText/'

@@ -11,6 +11,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
+from typing import Optional
+
 """
 Convert weights from a Llama or Mistral HuggingFace or PyTorch model to a MaxText one.
 
@@ -367,15 +369,15 @@ def permute_to_match_maxtext_rope(arr):
 # pylint: disable=too-many-positional-arguments
 def initialize_self_attention_lora_kernels(
     self_attention_lora: dict,
-    lora_chkpt_vars: dict,
+    lora_chkpt_vars: _NamespaceMapper,
     key_prefix: str,
     stack_shape: tuple,
     module_name: str,
     layer_idx: int,
     reshape_a: bool = False,
-    shape_a: bool = None,
+    shape_a: Optional[list[int]] = None,
     reshape_b: bool = False,
-    shape_b: bool = None,
+    shape_b: Optional[list[int]] = None,
 ):
   """Helper function to initialize LoRA kernels for given target module.
 
@@ -386,10 +388,10 @@ def initialize_self_attention_lora_kernels(
     stack_shape (tuple): Shape of the stack of layers.
     module_name (str): Name of the target module.
     layer_idx (int): Index of the current layer.
-    reshape_a (bool, optional): Flag to reshape lora_A. Defaults to False.
-    shape_a (tuple, optional): Shape to reshape lora_A. Defaults to None.
-    reshape_b (bool, optional): Flag to reshape lora_B. Defaults to False.
-    shape_b (tuple, optional): Shape to reshape lora_B. Defaults to None.
+    reshape_a (bool): Flag to reshape lora_A. Defaults to False.
+    shape_a (list[int], optional): Shape to reshape lora_A. Defaults to None.
+    reshape_b (bool): Flag to reshape lora_B. Defaults to False.
+    shape_b (list[int], optional): Shape to reshape lora_B. Defaults to None.
   """
 
   lora_A = lora_chkpt_vars[f"{key_prefix}.lora_A.weights"].type(torch.float32).numpy().astype(CAST_DTYPE).transpose()
@@ -488,10 +490,10 @@ def convert_lora_weights_to_jax_weights(lora_config: dict, model_size: str):
             lora_chkpt_vars=lora_chkpt_vars,
             key_prefix=f"layers.{layer_idx}.attention.wq",
             stack_shape=stack_shape,
+            module_name="query",
+            layer_idx=layer_idx,
             reshape_b=True,
             shape_b=[lora_rank, base_num_query_heads, head_dim],
-            layer_idx=layer_idx,
-            module_name="query",
         )
 
       if "k_proj" in target_module:
@@ -500,10 +502,10 @@ def convert_lora_weights_to_jax_weights(lora_config: dict, model_size: str):
             lora_chkpt_vars=lora_chkpt_vars,
             key_prefix=f"layers.{layer_idx}.attention.wk",
             stack_shape=stack_shape,
+            module_name="key",
+            layer_idx=layer_idx,
             reshape_b=True,
             shape_b=[lora_rank, base_num_query_heads, head_dim],
-            layer_idx=layer_idx,
-            module_name="key",
         )
 
       if "v_proj" in target_module:
@@ -512,10 +514,10 @@ def convert_lora_weights_to_jax_weights(lora_config: dict, model_size: str):
             lora_chkpt_vars=lora_chkpt_vars,
             key_prefix=f"layers.{layer_idx}.attention.wv",
             stack_shape=stack_shape,
+            module_name="value",
+            layer_idx=layer_idx,
             reshape_b=True,
             shape_b=[lora_rank, base_num_query_heads, head_dim],
-            layer_idx=layer_idx,
-            module_name="value",
         )
 
       if "o_proj" in target_module:
@@ -767,10 +769,10 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
       self_attention["value"]["kernel"] = np.zeros(stack_shape + wv.shape, dtype=CAST_DTYPE)
       self_attention["out"]["kernel"] = np.zeros(stack_shape + w_post.shape, dtype=CAST_DTYPE)
 
-    self_attention["query"]["kernel"][block_layer_idx, ...] = wq  # pylint: disable=E1137
-    self_attention["key"]["kernel"][block_layer_idx, ...] = wk  # pylint: disable=E1137
-    self_attention["value"]["kernel"][block_layer_idx, ...] = wv  # pylint: disable=E1137
-    self_attention["out"]["kernel"][block_layer_idx, ...] = w_post  # pylint: disable=E1137
+    self_attention["query"]["kernel"][block_layer_idx, ...] = wq  # pylint: disable=E1137 # pytype: disable=unsupported-operands
+    self_attention["key"]["kernel"][block_layer_idx, ...] = wk  # pylint: disable=E1137 # pytype: disable=unsupported-operands
+    self_attention["value"]["kernel"][block_layer_idx, ...] = wv  # pylint: disable=E1137 # pytype: disable=unsupported-operands
+    self_attention["out"]["kernel"][block_layer_idx, ...] = w_post  # pylint: disable=E1137 # pytype: disable=unsupported-operands
 
   self_attention_list = (
       [jax_weights["decoder"]["layers"]["self_attention"]]

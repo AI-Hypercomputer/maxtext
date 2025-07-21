@@ -64,7 +64,7 @@ def _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info)
         layer = int(parts[2]) if "layers" in key else 0
         if key.endswith("_scale_inv"):
           raise ValueError("fp8 checkpoint is not supported.")
-        if ds_ckpt.is_key_ending_allowed(key, ds_ckpt.MTP_KEYS_SUFFIX):
+        if ds_ckpt.is_key_allowed(key, ds_ckpt.MTP_KEYS_TO_SKIP):
           mapped_key = ds_ckpt.hf_to_maxtext_mapping(layer, num_experts, first_num_dense_layers, base_num_decoder_layers)[
               key
           ]
