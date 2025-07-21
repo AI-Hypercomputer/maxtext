@@ -683,6 +683,8 @@ allow_split_physical_axes: False
 # Apply transformations to the mesh to optimize for TPU v6e
 optimize_mesh_for_tpu_v6e: False
 
+shardy: True # Whether to use shardy XLA backend (default in Jax starting 0.7.0), or GSPMD (to be fully deprecated ~2026)
+
 use_ragged_attention: False
 ragged_block_size: 256
 

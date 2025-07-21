@@ -330,6 +330,7 @@ class TrainTests(unittest.TestCase):
         "enable_goodput_recording=False",
         "attention=cudnn_flash_jax",
         "packing=False",
+        "shardy=False", # The cudnn kernel is not compatible with shardy, see (b/425746362).
         rf"tokenizer_path={os.path.join(os.path.dirname(PKG_DIR), 'assets', 'tokenizer.llama2')}",
     ]
     train_main(cudnn_flash_jax)
@@ -338,6 +339,10 @@ class TrainTests(unittest.TestCase):
   @pytest.mark.tpu_only
   def test_tpu_base_model_ag_once(self):
     train_main(TrainTests.CONFIGS["base"] + ["model_fsdp_ag_once=True"])
+
+  @pytest.mark.integration_test
+  def test_base_model_shardy_false(self):
+    train_main(TrainTests.CONFIGS["base"] + ["shardy=False"])
 
   @pytest.mark.integration_test
   @pytest.mark.gpu_only
