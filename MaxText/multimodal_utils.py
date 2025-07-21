@@ -402,7 +402,7 @@ def pre_process_image(image, model_name):
   """
   if model_name in ["gemma3-4b", "gemma3-12b", "gemma3-27b"]:
     return pre_process_gemma3_image(image)
-  elif model_name in ["llama4-17b-16e", "llama4-70b-16e"]:
+  elif model_name in ["llama4-17b-16e", "llama4-17b-128e"]:
     return pre_process_llama4_image(image)
   else:
     raise ValueError(f"Model {model_name} does not support multimodal inference.")

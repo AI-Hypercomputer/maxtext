@@ -412,7 +412,7 @@ class Decoder(nn.Module):
     else:
       raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block.value=}")
 
-  def scan_decoder_layers(self, cfg, decoder_layer, length, metdata_axis_name, mesh, **kwargs):
+  def scan_decoder_layers(self, cfg, decoder_layer, length, metdata_axis_name, mesh, in_axes_len=4, **kwargs):
     """scan decoder layers, calls `flax.linen.transforms.scan`"""
     initializing = self.is_mutable_collection("params")
     params_spec = cfg.param_scan_axis if initializing else ScanIn(cfg.param_scan_axis)
@@ -430,12 +430,7 @@ class Decoder(nn.Module):
             "params": True,
             "dropout": cfg.enable_dropout,
         },
-        in_axes=(
-            nn.broadcast,
-            nn.broadcast,
-            nn.broadcast,
-            nn.broadcast,
-        ),
+        in_axes=(nn.broadcast,) * in_axes_len,
         length=length,
         metadata_params={nn.PARTITION_NAME: metdata_axis_name},
     )
@@ -686,21 +681,32 @@ class Decoder(nn.Module):
               slot,
           )
         else:
-          layer_kwargs = {}
+          RemattedBlockLayer = RemattedBlockLayers[0]
+          scan_length = int(cfg.num_decoder_layers / cfg.inhomogeneous_layer_cycle_interval)
+          # scan does not support kwargs in layer call, bidirectional_mask need to be passed as positional arg
           if cfg.decoder_block == DecoderBlockType.LLAMA4:
             layer_kwargs = {
                 "nope_layer_interval": self.config.nope_layer_interval,
                 "interleave_moe_layer_step": self.config.interleave_moe_layer_step,
             }
-          RemattedBlockLayer = RemattedBlockLayers[0]
-          scan_length = int(cfg.num_decoder_layers / cfg.inhomogeneous_layer_cycle_interval)
-          y, _ = self.scan_decoder_layers(cfg, RemattedBlockLayer, scan_length, "layers", mesh, **layer_kwargs)(
-              y,
-              decoder_segment_ids,
-              decoder_positions,
-              deterministic,
-              model_mode,
-          )
+            y, _ = self.scan_decoder_layers(
+                cfg, RemattedBlockLayer, scan_length, "layers", mesh, in_axes_len=5, **layer_kwargs
+            )(
+                y,
+                decoder_segment_ids,
+                decoder_positions,
+                deterministic,
+                model_mode,
+                bidirectional_mask,
+            )
+          else:
+            y, _ = self.scan_decoder_layers(cfg, RemattedBlockLayer, scan_length, "layers", mesh)(
+                y,
+                decoder_segment_ids,
+                decoder_positions,
+                deterministic,
+                model_mode,
+            )
       else:
         if cfg.decoder_block == DecoderBlockType.DEEPSEEK:
           assert len(RemattedBlockLayers) == 2, "Unscanned layers must have a length of 2 using deepseek."
@@ -738,6 +744,7 @@ class Decoder(nn.Module):
                   "is_nope_layer": llama4.determine_is_nope_layer(lyr, self.config.nope_layer_interval),
                   "is_moe_layer": llama4.determine_is_moe_layer(lyr, self.config.interleave_moe_layer_step),
               }
+              layer_call_kwargs = {"bidirectional_mask": bidirectional_mask}
             layer = RemattedBlockLayer(config=cfg, mesh=mesh, name=f"layers_{lyr}", quant=self.quant, **layer_kwargs)
             y = layer(
                 y,
