@@ -14,14 +14,14 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-"""Compare sharding of Linen model with NNX model"""
+"""Compare expected sharding of models with actual sharding of models."""
 
 
-from MaxText.tests.sharding_dump import named_shardings_to_json, load_named_sharding_json, TEST_CASES
 from MaxText.train_compile import get_shaped_inputs, get_topology_mesh, validate_config
+from MaxText.tests.sharding_dump import named_shardings_to_json, load_named_sharding_json, TEST_CASES
 from MaxText import pyconfig
-import os
 import pytest
+import os
 
 
 def compare_named_sharding_jsons(json1: dict, model1_name: str, json2: dict, model2_name: str) -> bool:
@@ -62,11 +62,7 @@ def compare_named_sharding_jsons(json1: dict, model1_name: str, json2: dict, mod
       print(f"  spec1: {spec1}")
       print(f"  spec2: {spec2}")
 
-  return (
-      not only_in_1
-      and not only_in_2
-      and all(json1[k] == json2[k] for k in shared_keys)
-  )
+  return not only_in_1 and not only_in_2 and all(json1[k] == json2[k] for k in shared_keys)
 
 
 @pytest.mark.parametrize("model_name, topology, num_slice", TEST_CASES)
@@ -92,4 +88,4 @@ def test_sharding_dump_for_model(model_name: str, topology: str, num_slice: str)
   json = named_shardings_to_json(state_mesh_shardings)
   expected_json = load_named_sharding_json(json_path)
 
-  assert compare_named_sharding_jsons(expected_json, f"linen_{model_name}", json, f"nnx_{model_name}"), True
+  assert compare_named_sharding_jsons(expected_json, f"expected_{model_name}", json, f"actual_{model_name}"), True
