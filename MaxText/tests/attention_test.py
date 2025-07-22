@@ -386,27 +386,6 @@ class AttentionTest(unittest.TestCase):
     num_kv_heads = self.num_kv_heads
     lnx, decoder_segment_ids, decoder_positions = self.get_data(self.dtype)
 
-    # attention_as_mha_generic = Attention(
-    #     config=self.cfg,
-    #     num_query_heads=self.num_query_heads,
-    #     num_kv_heads=num_kv_heads,
-    #     head_dim=self.head_dim,
-    #     max_target_length=self.max_target_length,
-    #     max_prefill_predict_length=self.cfg.max_prefill_predict_length,
-    #     mesh=self.mesh,
-    #     attention_kernel="dot_product",
-    #     dtype=self.dtype,
-    #     dropout_rate=self.cfg.dropout_rate,
-    #     name="self_attention",
-    # )
-
-    # attention_as_mha_generic_variable = attention_as_mha_generic.init(
-    #     {"params": self.rng, "aqt": self.rng},
-    #     jnp.ones((self.global_batch_size, self.max_target_length, self.embed_dim)),
-    #     jnp.ones((self.global_batch_size, self.max_target_length, self.embed_dim)),
-    #     jnp.ones((self.global_batch_size, self.max_target_length)),
-    # )
-
     mha_generic_output = self._attention_as_mha_generic.apply(
         self._attention_as_mha_generic_variable,
         lnx,
