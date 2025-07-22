@@ -38,6 +38,9 @@ from MaxText.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_
 from MaxText.globals import PKG_DIR
 from MaxText.layers import attentions
 from MaxText.layers.attentions import Attention, MLA, ChunkedCausalMask
+from flax.linen import partitioning as nn_partitioning
+from MaxText import max_utils
+from MaxText.max_utils import reorder_sequence
 
 
 class BidirectionalBlockMaskTest(unittest.TestCase):
@@ -348,6 +351,119 @@ class AttentionTest(unittest.TestCase):
     )
 
     return lnx, decoder_segment_ids, decoder_positions
+
+  @pytest.mark.tpu_only
+  def test_ep_shard(self):
+    """Test equivalence between dot_product and TPU accelerated"""
+    num_kv_heads = self.num_kv_heads
+
+    lnx, decoder_segment_ids, decoder_positions = self.get_data(self.dtype)
+
+    # attention_as_mha_generic = Attention(
+    #     config=self.cfg,
+    #     num_query_heads=self.num_query_heads,
+    #     num_kv_heads=num_kv_heads,
+    #     head_dim=self.head_dim,
+    #     max_target_length=self.max_target_length,
+    #     max_prefill_predict_length=self.cfg.max_prefill_predict_length,
+    #     mesh=self.mesh,
+    #     attention_kernel="dot_product",
+    #     dtype=self.dtype,
+    #     dropout_rate=self.cfg.dropout_rate,
+    #     name="self_attention",
+    # )
+
+    # attention_as_mha_generic_variable = attention_as_mha_generic.init(
+    #     {"params": self.rng, "aqt": self.rng},
+    #     jnp.ones((self.global_batch_size, self.max_target_length, self.embed_dim)),
+    #     jnp.ones((self.global_batch_size, self.max_target_length, self.embed_dim)),
+    #     jnp.ones((self.global_batch_size, self.max_target_length)),
+    # )
+
+    mha_generic_output = self._attention_as_mha_generic.apply(
+        self._attention_as_mha_generic_variable,
+        lnx,
+        lnx,
+        decoder_segment_ids=decoder_positions,
+        inputs_positions=decoder_segment_ids,
+        deterministic=True,
+        model_mode=MODEL_MODE_TRAIN,
+        rngs={"aqt": self.rng},
+    )
+
+    # Test with Expert Parallelism
+
+    config_ep = pyconfig.initialize(
+        [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
+        **self.config_arguments,
+        ici_context_parallelism=2,
+        context_parallel_load_balance=False,
+        ici_expert_parallelism=2,
+        is_batch_shard_by_expert=False,
+        use_nn_constraint=True,
+    )
+    self.cfg_ep = config_ep
+    devices_array_ep = maxtext_utils.create_device_mesh(self.cfg_ep)
+    self.mesh_ep = Mesh(devices_array_ep, self.cfg_ep.mesh_axes)
+
+    attention_as_mha_flash_ep = Attention(
+        config=self.cfg_ep,  # we pass the context parallelism in the config
+        num_query_heads=self.cfg_ep.num_query_heads,
+        num_kv_heads=num_kv_heads,
+        head_dim=self.cfg_ep.head_dim,
+        max_target_length=self.cfg_ep.max_target_length,
+        max_prefill_predict_length=self.cfg_ep.max_prefill_predict_length,
+        mesh=self.mesh_ep,
+        attention_kernel="flash",
+        dtype=self.dtype,
+        dropout_rate=self.cfg_ep.dropout_rate,
+        name="self_attention_ep",
+    )
+    attention_as_mha_flash_ep_variable = attention_as_mha_flash_ep.init(
+        {"params": self.rng, "aqt": self.rng},
+        jnp.ones((self.global_batch_size, self.max_target_length, self.embed_dim)),
+        jnp.ones((self.global_batch_size, self.max_target_length, self.embed_dim)),
+        jnp.ones((self.global_batch_size, self.max_target_length)),
+    )
+
+    # TODO(shuningjin): need test `context_parallel_load_balance=True`
+    context_parallel_size = self.cfg_ep.ici_context_parallelism
+    if not self.cfg_ep.is_batch_shard_by_expert:
+      context_parallel_size = context_parallel_size * self.cfg_ep.ici_expert_parallelism
+    if context_parallel_size > 1 and self.cfg_ep.context_parallel_load_balance:
+      lnx = reorder_sequence(lnx, cp_size=context_parallel_size, seq_dim=1, to_contiguous=False)
+      decoder_positions = reorder_sequence(decoder_positions, cp_size=context_parallel_size, seq_dim=1, to_contiguous=False)
+      decoder_segment_ids = reorder_sequence(
+          decoder_segment_ids, cp_size=context_parallel_size, seq_dim=1, to_contiguous=False
+      )
+      # batch = {"inputs": lnx, "inputs_segmentation": decoder_segment_ids, "inputs_position": decoder_positions}
+      # with self.mesh_ep:
+      #   reorder_fn = max_utils.get_reorder_callable(context_parallel_size)
+      #   reordered_batch = reorder_fn(batch)
+      # jax.debug.print("batch {x}", x=batch)
+      # jax.debug.print("reorder_batch {x}", x=reordered_batch)
+      # # Unpack the reordered tensors
+      # lnx = reordered_batch["inputs"]
+      # decoder_segment_ids = reordered_batch["inputs_segmentation"]
+      # decoder_positions = reordered_batch["inputs_position"]
+
+    with self.mesh_ep, nn_partitioning.axis_rules(self.cfg_ep.logical_axis_rules):
+      mha_generic_flash_ep_output = attention_as_mha_flash_ep.apply(
+          attention_as_mha_flash_ep_variable,
+          lnx,
+          lnx,
+          decoder_segment_ids=decoder_positions,
+          inputs_positions=decoder_segment_ids,
+          deterministic=True,
+          model_mode=MODEL_MODE_TRAIN,
+          rngs={"aqt": self.rng},
+      )
+
+    # Assert that the logits generated by the generic dot product and flash attention+context parallelism are close
+    self.assertTrue(
+        jax.numpy.allclose(mha_generic_output, mha_generic_flash_ep_output, rtol=1e-01, atol=1e-01, equal_nan=False),
+        msg="Logits from generic dot product and flash attention+context parallelism are not close.",
+    )
 
   def get_structured_data(self, dtype):
     """get structured data"""
