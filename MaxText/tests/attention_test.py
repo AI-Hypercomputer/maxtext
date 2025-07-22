@@ -38,6 +38,8 @@ from MaxText.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_
 from MaxText.globals import PKG_DIR
 from MaxText.layers import attentions
 from MaxText.layers.attentions import Attention, MLA, ChunkedCausalMask
+from MaxText import max_utils
+from flax.linen import partitioning as nn_partitioning
 
 
 class BidirectionalBlockMaskTest(unittest.TestCase):
@@ -366,6 +368,128 @@ class AttentionTest(unittest.TestCase):
     )
 
     return lnx, decoder_segment_ids, decoder_positions
+
+  # @parameterized.named_parameters(
+  #     {"testcase_name": "RoPE_Yarn_Autoregression", "rope_type": "yarn"},
+  #     {"testcase_name": "Default_Autoregression", "rope_type": "default"},
+  # )
+  @pytest.mark.tpu_only
+  def test_cp_shard_with_load_balance(self):
+    self.test_cp_shard_helper(load_balance=True)
+
+  @pytest.mark.tpu_only
+  def test_cp_shard_without_load_balance(self):
+    self.test_cp_shard_helper(load_balance=False)
+
+  def test_cp_shard_helper(self, load_balance: bool = False):
+    """Test equivalence between dot_product and TPU accelerated"""
+    num_kv_heads = self.num_kv_heads
+    lnx, decoder_segment_ids, decoder_positions = self.get_data(self.dtype)
+
+    # attention_as_mha_generic = Attention(
+    #     config=self.cfg,
+    #     num_query_heads=self.num_query_heads,
+    #     num_kv_heads=num_kv_heads,
+    #     head_dim=self.head_dim,
+    #     max_target_length=self.max_target_length,
+    #     max_prefill_predict_length=self.cfg.max_prefill_predict_length,
+    #     mesh=self.mesh,
+    #     attention_kernel="dot_product",
+    #     dtype=self.dtype,
+    #     dropout_rate=self.cfg.dropout_rate,
+    #     name="self_attention",
+    # )
+
+    # attention_as_mha_generic_variable = attention_as_mha_generic.init(
+    #     {"params": self.rng, "aqt": self.rng},
+    #     jnp.ones((self.global_batch_size, self.max_target_length, self.embed_dim)),
+    #     jnp.ones((self.global_batch_size, self.max_target_length, self.embed_dim)),
+    #     jnp.ones((self.global_batch_size, self.max_target_length)),
+    # )
+
+    mha_generic_output = self._attention_as_mha_generic.apply(
+        self._attention_as_mha_generic_variable,
+        lnx,
+        lnx,
+        decoder_segment_ids=decoder_positions,
+        inputs_positions=decoder_segment_ids,
+        deterministic=True,
+        model_mode=MODEL_MODE_TRAIN,
+        rngs={"aqt": self.rng},
+    )
+
+    # Test with Context Parallelism
+
+    config_cp = pyconfig.initialize(
+        [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
+        **self.config_arguments,
+        ici_context_parallelism=4,
+        context_parallel_load_balance=load_balance,
+    )
+    self.cfg_cp = config_cp
+    devices_array_cp = maxtext_utils.create_device_mesh(self.cfg_cp)
+    self.mesh_cp = Mesh(devices_array_cp, self.cfg_cp.mesh_axes)
+
+    attention_as_mha_flash_cp = Attention(
+        config=self.cfg_cp,  # we pass the context parallelism in the config
+        num_query_heads=self.cfg_cp.num_query_heads,
+        num_kv_heads=num_kv_heads,
+        head_dim=self.cfg_cp.head_dim,
+        max_target_length=self.cfg_cp.max_target_length,
+        max_prefill_predict_length=self.cfg_cp.max_prefill_predict_length,
+        mesh=self.mesh_cp,
+        attention_kernel="flash",
+        dtype=self.dtype,
+        dropout_rate=self.cfg_cp.dropout_rate,
+        name="self_attention_cp",
+    )
+    attention_as_mha_flash_cp_variable = attention_as_mha_flash_cp.init(
+        {"params": self.rng, "aqt": self.rng},
+        jnp.ones((self.global_batch_size, self.max_target_length, self.embed_dim)),
+        jnp.ones((self.global_batch_size, self.max_target_length, self.embed_dim)),
+        jnp.ones((self.global_batch_size, self.max_target_length)),
+    )
+
+    #### if load balance, need pre-shuffle
+    # https://github.com/AI-Hypercomputer/maxtext/blob/2adc3bab1cea2e5a335b9e4c053c868155da2089/MaxText/train.py#L526-L540
+    context_parallel_size = self.cfg_cp.ici_context_parallelism
+    if context_parallel_size > 1 and self.cfg_cp.context_parallel_load_balance:
+      batch = {"inputs": lnx, "inputs_segmentation": decoder_segment_ids, "inputs_position": decoder_positions}
+      with self.mesh_cp:
+        reorder_fn = max_utils.get_reorder_callable(context_parallel_size)
+        reordered_batch = reorder_fn(batch)
+      lnx = reordered_batch["inputs"]
+      decoder_segment_ids = reordered_batch["inputs_segmentation"]
+      decoder_positions = reordered_batch["inputs_position"]
+      jax.debug.print("batch {x}", x=batch)
+      jax.debug.print("reordered_batch {x}", x=reordered_batch)
+      # lnx = max_utils.reorder_sequence(lnx, cp_size=context_parallel_size, seq_dim=1, to_contiguous=False)
+      # decoder_positions = max_utils.reorder_sequence(decoder_positions, cp_size=context_parallel_size, seq_dim=1, to_contiguous=False)
+      # decoder_segment_ids = max_utils.reorder_sequence(
+      #     decoder_segment_ids, cp_size=context_parallel_size, seq_dim=1, to_contiguous=False
+      # )
+    ####
+
+    with self.mesh_cp, nn_partitioning.axis_rules(self.cfg_cp.logical_axis_rules):
+      mha_generic_flash_cp_output = attention_as_mha_flash_cp.apply(
+          attention_as_mha_flash_cp_variable,
+          lnx,
+          lnx,
+          decoder_segment_ids=decoder_positions,
+          inputs_positions=decoder_segment_ids,
+          deterministic=True,
+          model_mode=MODEL_MODE_TRAIN,
+          rngs={"aqt": self.rng},
+      )
+
+    # jax.debug.print("mha_generic_output {x}", x=mha_generic_output)
+    # jax.debug.print("mha_generic_flash_cp_output {x}", x=mha_generic_flash_cp_output)
+
+    # Assert that the logits generated by the generic dot product and flash attention+context parallelism are close
+    self.assertTrue(
+        jax.numpy.allclose(mha_generic_output, mha_generic_flash_cp_output, rtol=1e-01, atol=1e-01, equal_nan=False),
+        msg="Logits from generic dot product and flash context parallelism are not close.",
+    )
 
   @pytest.mark.tpu_only
   def test_autoregression(self):

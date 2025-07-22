@@ -57,9 +57,22 @@ from MaxText.layers.initializers import nd_dense_init, NdInitializer
 from MaxText.layers.linears import dense_general
 from MaxText.layers.normalizations import rms_norm
 from MaxText.layers.quantizations import AqtQuantization as Quant
+from flax.linen.spmd import _global_mesh_defined
 
 # pylint: disable=line-too-long, g-doc-args, g-doc-return-or-yield, bad-continuation, g-inconsistent-quotes
 # pytype: disable=attribute-error
+
+
+def debug_sharding(array, prefix=""):
+  global_shape = array.shape
+  jax.debug.inspect_array_sharding(
+      array,
+      callback=lambda sharding_obj: print(
+          prefix + f"\tGlobal Shape: {global_shape}\n"
+          f"\tLocal Shape: {sharding_obj.shard_shape(global_shape)}\n"
+          f"\tSharding Object: {sharding_obj}\n"
+      ),
+  )
 
 
 class AttentionType(enum.Enum):
@@ -880,7 +893,7 @@ class AttentionOp(nnx.Module):
               decoder_segment_ids_q, decoder_segment_ids_unpermuted
           )
         else:
-          decoder_segment_ids_tuple = splash_attention_kernel.SegmentIds(decoder_segment_ids_q, decoder_segment_ids_q)
+          decoder_segment_ids_tuple = splash_attention_kernel.SegmentIds(decoder_segment_ids_q, decoder_segment_ids_kv)
       else:
         decoder_segment_ids_tuple = None
       attention_output = jax.vmap(splash_kernel)(query, key, value, segment_ids=decoder_segment_ids_tuple)
@@ -1714,6 +1727,9 @@ class Attention(nn.Module):
       inputs_q = nn.with_logical_constraint(inputs_q, self.decode_input_axis_names)
       inputs_kv = nn.with_logical_constraint(inputs_kv, self.decode_input_axis_names)
 
+    prefix = f"\n_global_mesh_defined: {_global_mesh_defined()}, context={self.config.ici_context_parallelism}, context_parallel_load_balance={self.config.context_parallel_load_balance}\n\n"
+    debug_sharding(inputs_q, prefix + "inputs_q\n")
+
     # apply projection.
     if self.config.fused_qkv:
       query, key, value = self.qkv_projection(inputs_q, proj_name="qkv_proj")
@@ -1784,6 +1800,10 @@ class Attention(nn.Module):
     key = checkpoint_name(key, "key_proj")
     value = checkpoint_name(value, "value_proj")
 
+    debug_sharding(query, "query\n")
+    debug_sharding(key, "key\n")
+    debug_sharding(value, "value\n")
+
     assert not self.config.quantize_kvcache or self.kv_quant
 
     if self.config.attention == "paged" and model_mode != MODEL_MODE_TRAIN:
@@ -1805,6 +1825,9 @@ class Attention(nn.Module):
       out = nn.with_logical_constraint(out, self.out_axis_names)
     else:
       out = nn.with_logical_constraint(out, self.decode_out_axis_names)
+
+    debug_sharding(out, "out\n")
+
     out = self.out_projection(inputs_q.shape[-1], out)
     out = checkpoint_name(out, "out_proj")
     return out
