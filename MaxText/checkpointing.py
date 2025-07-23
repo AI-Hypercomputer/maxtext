@@ -295,15 +295,22 @@ def load_state_if_possible(
       checkpoint_args = ocp.args.PyTreeRestore(item=abstract_unboxed_pre_state, restore_args=restore_args)
 
       match (checkpoint_manager, dataset_type, data_iterator):
-        case (checkpoint_manager, _) if isinstance(
+        # Case 1: Matches if 'checkpoint_manager' is an instance of either EmergencyCheckpointManager
+        # or EmergencyReplicatorCheckpointManager. The '_' indicates that 'dataset_type' and
+        # 'data_iterator' can be any value and aren't used in this pattern.
+        case (checkpoint_manager, _, _) if isinstance(
             checkpoint_manager, (EmergencyCheckpointManager, EmergencyReplicatorCheckpointManager)
         ):
-          return (checkpoint_manager.restore(step, args=checkpoint_args), None)
+          return (checkpoint_manager.restore(step, args=Composite(state=checkpoint_args)), None)
+        # Case 2: Matches if dataset type is "grain" and a specific checkpoint file exits for the iterator
+        # exists within the checkpoint manager's directory for the given step.
         case (checkpoint_manager, dataset_type, data_iterator) if dataset_type == "grain" and data_iterator and (
             checkpoint_manager.directory / str(step) / "iter"
         ).exists():
           grain_iter = grain.PyGrainCheckpointRestore(data_iterator.local_iterator)
           return (checkpoint_manager.restore(step, args=Composite(items=checkpoint_args, iter=grain_iter)), None)
+        # Case 3: Default/Fallback case.
+        # This case acts as a wildcard ('_') and matches if none of the preceding cases were met.
         case _:
           return (checkpoint_manager.restore(step, args=Composite(items=checkpoint_args)), None)
 
