@@ -59,6 +59,10 @@ class MetricLogger:
     self.cumulative_eval_metrics = {"scalar": defaultdict(float)}
     self.buffered_train_metrics = None
 
+  def reset_eval_metrics(self):
+    """Resets the cumulative metrics dictionary for a new evaluation run."""
+    self.cumulative_eval_metrics = {"scalar": defaultdict(float)}
+
   def write_metrics(self, metrics, step, is_training=True):
     """Entry point for all metrics writing in Train's Main."""
     if metrics:
@@ -77,7 +81,7 @@ class MetricLogger:
     """Logs metrics via max_logging."""
 
     if is_training:
-      loss = metrics['scalar']['learning/loss']
+      loss = metrics["scalar"]["learning/loss"]
       log_message = (
           f"completed step: {step}, seconds: {metrics['scalar']['perf/step_time_seconds']:.3f}, "
           f"TFLOP/s/device: {metrics['scalar']['perf/per_device_tflops_per_sec']:.3f}, "
