@@ -100,7 +100,7 @@ deepseek_v3_fsdp_v5p_512_nocapp  = _add_to_model_dictionary(
         model_type="deepseek3-671b",
         tuning_params={
             "per_device_batch_size": 4,
-            "max_target_length": 8192,
+            "max_target_length": 4096,
             "ici_fsdp_parallelism": -1,
             "ici_expert_parallelism": 1,
             "remat_policy": "custom",
@@ -123,6 +123,7 @@ deepseek_v3_fsdp_v5p_512_nocapp  = _add_to_model_dictionary(
             "scan_layers": True, 
             "dtype": "bfloat16",
             "opt_type": "adamw",
+            "mu_dtype": "bfloat16",
             "attention": "flash",
         },
         xla_flags=(
