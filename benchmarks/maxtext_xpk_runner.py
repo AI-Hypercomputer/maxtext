@@ -643,7 +643,7 @@ def generate_xpk_workload_cmd(
         f'--docker-image={pw_config.runner_image}'
     )
   else:
-    docker_image_flag = f'--docker-image="{wl_config.base_docker_image}"'
+    docker_image_flag = f'--base-docker-image="{wl_config.base_docker_image}"'
 
   upload_metrics_to_bq_cmd = ""
   if wl_config.generate_metrics_and_upload_to_big_query and not is_pathways_headless_enabled:

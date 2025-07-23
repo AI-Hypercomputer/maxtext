@@ -20,6 +20,35 @@ import os.path
 from benchmarks import xla_flags_library
 from benchmarks.benchmark_utils import MaxTextModel, _add_to_model_dictionary
 
+DS_FLAGS = (
+    " --xla_tpu_enable_async_collective_fusion_fuse_all_gather=true"
+    " --xla_tpu_megacore_fusion_allow_ags=false"
+    " --xla_enable_async_collective_permute=true"
+    " --xla_tpu_enable_ag_backward_pipelining=true"
+    " --xla_tpu_enable_data_parallel_all_reduce_opt=true"
+    " --xla_tpu_data_parallel_opt_different_sized_ops=true"
+    " --xla_tpu_enable_async_collective_fusion=true"
+    " --xla_tpu_enable_async_collective_fusion_multiple_steps=true"
+    " --xla_tpu_overlap_compute_collective_tc=true"
+    " --xla_enable_async_all_gather=true"
+    " --xla_tpu_scoped_vmem_limit_kib=81920"
+    " --xla_tpu_enable_async_all_to_all=true"
+    " --xla_tpu_enable_all_experimental_scheduler_features=true"
+    " --xla_tpu_enable_scheduler_memory_pressure_tracking=true"
+    " --xla_tpu_host_transfer_overlap_limit=24"
+    " --xla_tpu_aggressive_opt_barrier_removal=ENABLED"
+    " --xla_lhs_prioritize_async_depth_over_stall=ENABLED"
+    " --xla_tpu_enable_ag_backward_pipelining=true"
+    " --xla_should_allow_loop_variant_parameter_in_chain=ENABLED"
+    " --xla_should_add_loop_invariant_op_in_chain=ENABLED"
+    " --xla_max_concurrent_host_send_recv=100"
+    " --xla_tpu_scheduler_percent_shared_memory_limit=100"
+    " --xla_latency_hiding_scheduler_rerun=2"
+    " --xla_tpu_use_minor_sharding_for_major_trivial_input=true"
+    " --xla_tpu_relayout_group_size_threshold_for_reduce_scatter=1"
+    " --xla_tpu_assign_all_reduce_scatter_layout=true"
+    " --xla_tpu_enable_async_ragged_all_to_all=true"
+)
 
 v5p_model_dict = {}
 
@@ -60,6 +89,44 @@ deepseek_v3_ep_256_v5p_512 = _add_to_model_dictionary(
             xla_flags_library.MOE_VMEM_LIMIT_FLAG
             + xla_flags_library.CF_FOR_ALL_GATHER
             + xla_flags_library.DATA_PARALLEL_OVERLAP
+        ),
+    ),
+)
+
+deepseek_v3_fsdp_v5p_512_nocapp  = _add_to_model_dictionary(
+    v5p_model_dict,
+    MaxTextModel(
+        model_name="deepseek_v3_fsdp_v5p_512_nocapp",
+        model_type="deepseek3-671b",
+        tuning_params={
+            "per_device_batch_size": 4,
+            "max_target_length": 8192,
+            "ici_fsdp_parallelism": -1,
+            "ici_expert_parallelism": 1,
+            "remat_policy": "custom",
+            "decoder_layer_input": "offload",
+            "gcs_metrics": True,
+            "use_iota_embed": True,
+            "dataset_path": "gs://max-datasets-rogue",
+            "dataset_type": "synthetic",
+            "reuse_example_batch": 1,
+            "enable_checkpointing": False,
+            "skip_first_n_steps_for_profiler": 5,
+            "profiler_steps": 5,
+            "profiler": "xplane",
+            "sa_block_q": 2048,
+            "sa_block_q_dkv": 2048,
+            "sa_block_q_dq": 2048,
+            "megablox": True,
+            "sparse_matmul": True,
+            "use_random_routing": False,
+            "scan_layers": True, 
+            "dtype": "bfloat16",
+            "opt_type": "adamw",
+            "attention": "flash",
+        },
+        xla_flags=(
+            DS_FLAGS
         ),
     ),
 )
