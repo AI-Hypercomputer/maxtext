@@ -238,221 +238,221 @@ def _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info)
       "token_embedder": {"embedding": None},
   }
 
-  # decoder norm scale ###########################################
-  max_logging.log("Processing decoder norm scale")
-  jax_weights["decoder"]["decoder_norm"]["scale"] = chkpt_vars["decoder_norm.scale"].to(torch.float16).numpy()
-  logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
+  # # decoder norm scale ###########################################
+  # max_logging.log("Processing decoder norm scale")
+  # jax_weights["decoder"]["decoder_norm"]["scale"] = chkpt_vars["decoder_norm.scale"].to(torch.float16).numpy()
+  # logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
 
-  # logits dense #################################################
-  max_logging.log("Processing logits dense")
-  jax_weights["decoder"]["logits_dense"]["kernel"] = chkpt_vars["logits_dense.kernel"].to(torch.float16).numpy().transpose()
-  logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
+  # # logits dense #################################################
+  # max_logging.log("Processing logits dense")
+  # jax_weights["decoder"]["logits_dense"]["kernel"] = chkpt_vars["logits_dense.kernel"].to(torch.float16).numpy().transpose()
+  # logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
 
-  # token embedding ##############################################
-  max_logging.log("Processing token embeddings")
-  jax_weights["token_embedder"]["embedding"] = chkpt_vars["token_embedder.embedding"].to(torch.float16).numpy()
-  logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
+  # # token embedding ##############################################
+  # max_logging.log("Processing token embeddings")
+  # jax_weights["token_embedder"]["embedding"] = chkpt_vars["token_embedder.embedding"].to(torch.float16).numpy()
+  # logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
 
-  layers = {
-      "dense_layers": first_num_dense_layers,
-      "moe_layers": base_num_decoder_layers - first_num_dense_layers,
-  }
-  # self attention and normalization ###############################################
-  max_logging.log("Processing self attention and normalization in dense layer")
-  for layer_key, layer_value in layers.items():
-    for layer_idx in tqdm(range(layer_value), desc=layer_key, leave=False):
-      layer_name = f"{layer_key}_{layer_idx}"
-      if layer_key == "dense_layers":
-        jax_weights["decoder"].update(
-            {
-                layer_name: {
-                    "mlp": {
-                        "wi_0": {"kernel": None},
-                        "wi_1": {"kernel": None},
-                        "wo": {"kernel": None},
-                    },
-                    "self_attention": {
-                        "kv_norm": {"scale": None},
-                        "wkv_a": {"kernel": None},
-                        "wkv_b": {"kernel": None},
-                        "out": {"kernel": None},
-                    },
-                    "pre_self_attention_layer_norm": {"scale": None},
-                    "post_self_attention_layer_norm": {"scale": None},
-                },
-            }
-        )
-      else:
-        jax_weights["decoder"].update(
-            {
-                layer_name: {
-                    "DeepSeekMoeBlock_0": {
-                        "MoeBlock_0": {
-                            "wi_0": None,
-                            "wi_1": None,
-                            "wo": None,
-                            "gate": {"kernel": None},
-                        },
-                        "shared_experts": {
-                            "wi_0": {"kernel": None},
-                            "wi_1": {"kernel": None},
-                            "wo": {"kernel": None},
-                        },
-                    },
-                    "self_attention": {
-                        "kv_norm": {"scale": None},
-                        "wkv_a": {"kernel": None},
-                        "wkv_b": {"kernel": None},
-                        "out": {"kernel": None},
-                    },
-                    "pre_self_attention_layer_norm": {"scale": None},
-                    "post_self_attention_layer_norm": {"scale": None},
-                },
-            }
-        )
-      self_attention = jax_weights["decoder"][layer_name]["self_attention"]
-      pre_self_attention_layer_norm = jax_weights["decoder"][layer_name]["pre_self_attention_layer_norm"]
-      post_self_attention_layer_norm = jax_weights["decoder"][layer_name]["post_self_attention_layer_norm"]
+  # layers = {
+  #     "dense_layers": first_num_dense_layers,
+  #     "moe_layers": base_num_decoder_layers - first_num_dense_layers,
+  # }
+  # # self attention and normalization ###############################################
+  # max_logging.log("Processing self attention and normalization in dense layer")
+  # for layer_key, layer_value in layers.items():
+  #   for layer_idx in tqdm(range(layer_value), desc=layer_key, leave=False):
+  #     layer_name = f"{layer_key}_{layer_idx}"
+  #     if layer_key == "dense_layers":
+  #       jax_weights["decoder"].update(
+  #           {
+  #               layer_name: {
+  #                   "mlp": {
+  #                       "wi_0": {"kernel": None},
+  #                       "wi_1": {"kernel": None},
+  #                       "wo": {"kernel": None},
+  #                   },
+  #                   "self_attention": {
+  #                       "kv_norm": {"scale": None},
+  #                       "wkv_a": {"kernel": None},
+  #                       "wkv_b": {"kernel": None},
+  #                       "out": {"kernel": None},
+  #                   },
+  #                   "pre_self_attention_layer_norm": {"scale": None},
+  #                   "post_self_attention_layer_norm": {"scale": None},
+  #               },
+  #           }
+  #       )
+  #     else:
+  #       jax_weights["decoder"].update(
+  #           {
+  #               layer_name: {
+  #                   "DeepSeekMoeBlock_0": {
+  #                       "MoeBlock_0": {
+  #                           "wi_0": None,
+  #                           "wi_1": None,
+  #                           "wo": None,
+  #                           "gate": {"kernel": None},
+  #                       },
+  #                       "shared_experts": {
+  #                           "wi_0": {"kernel": None},
+  #                           "wi_1": {"kernel": None},
+  #                           "wo": {"kernel": None},
+  #                       },
+  #                   },
+  #                   "self_attention": {
+  #                       "kv_norm": {"scale": None},
+  #                       "wkv_a": {"kernel": None},
+  #                       "wkv_b": {"kernel": None},
+  #                       "out": {"kernel": None},
+  #                   },
+  #                   "pre_self_attention_layer_norm": {"scale": None},
+  #                   "post_self_attention_layer_norm": {"scale": None},
+  #               },
+  #           }
+  #       )
+  #     self_attention = jax_weights["decoder"][layer_name]["self_attention"]
+  #     pre_self_attention_layer_norm = jax_weights["decoder"][layer_name]["pre_self_attention_layer_norm"]
+  #     post_self_attention_layer_norm = jax_weights["decoder"][layer_name]["post_self_attention_layer_norm"]
 
-      pre_self_attention = (
-          chkpt_vars[f"{layer_key}.{layer_idx}.pre_self_attention_layer_norm.scale"].to(torch.float16).numpy()
-      )
-      post_self_attention = (
-          chkpt_vars[f"{layer_key}.{layer_idx}.post_self_attention_layer_norm.scale"].to(torch.float16).numpy()
-      )
-      kv_norm = chkpt_vars[f"{layer_key}.{layer_idx}.self_attention.kv_norm.scale"].to(torch.float16).numpy().transpose()
-      wkv_a = chkpt_vars[f"{layer_key}.{layer_idx}.self_attention.wkv_a.kernel"].to(torch.float16).numpy().transpose()
-      wkv_b = chkpt_vars[f"{layer_key}.{layer_idx}.self_attention.wkv_b.kernel"].to(torch.float16).numpy().transpose()
-      out = chkpt_vars[f"{layer_key}.{layer_idx}.self_attention.out.kernel"].to(torch.float16).numpy().transpose()
-      if q_lora_rank != 0:
-        q_norm = chkpt_vars[f"{layer_key}.{layer_idx}.self_attention.q_norm.scale"].to(torch.float16).numpy()
-        wq_a = chkpt_vars[f"{layer_key}.{layer_idx}.self_attention.wq_a.kernel"].to(torch.float16).numpy().transpose()
-        wq_b = chkpt_vars[f"{layer_key}.{layer_idx}.self_attention.wq_b.kernel"].to(torch.float16).numpy().transpose()
-      else:
-        query = chkpt_vars[f"{layer_key}.{layer_idx}.self_attention.query.kernel"].to(torch.float16).numpy().transpose()
+  #     pre_self_attention = (
+  #         chkpt_vars[f"{layer_key}.{layer_idx}.pre_self_attention_layer_norm.scale"].to(torch.float16).numpy()
+  #     )
+  #     post_self_attention = (
+  #         chkpt_vars[f"{layer_key}.{layer_idx}.post_self_attention_layer_norm.scale"].to(torch.float16).numpy()
+  #     )
+  #     kv_norm = chkpt_vars[f"{layer_key}.{layer_idx}.self_attention.kv_norm.scale"].to(torch.float16).numpy().transpose()
+  #     wkv_a = chkpt_vars[f"{layer_key}.{layer_idx}.self_attention.wkv_a.kernel"].to(torch.float16).numpy().transpose()
+  #     wkv_b = chkpt_vars[f"{layer_key}.{layer_idx}.self_attention.wkv_b.kernel"].to(torch.float16).numpy().transpose()
+  #     out = chkpt_vars[f"{layer_key}.{layer_idx}.self_attention.out.kernel"].to(torch.float16).numpy().transpose()
+  #     if q_lora_rank != 0:
+  #       q_norm = chkpt_vars[f"{layer_key}.{layer_idx}.self_attention.q_norm.scale"].to(torch.float16).numpy()
+  #       wq_a = chkpt_vars[f"{layer_key}.{layer_idx}.self_attention.wq_a.kernel"].to(torch.float16).numpy().transpose()
+  #       wq_b = chkpt_vars[f"{layer_key}.{layer_idx}.self_attention.wq_b.kernel"].to(torch.float16).numpy().transpose()
+  #     else:
+  #       query = chkpt_vars[f"{layer_key}.{layer_idx}.self_attention.query.kernel"].to(torch.float16).numpy().transpose()
 
-      # reshape to match maxtext
-      wkv_b = np.reshape(wkv_b, [kv_lora_rank, base_num_query_heads, (qk_nope_head_dim + v_head_dim)])
-      out = np.reshape(out, [base_num_query_heads, v_head_dim, base_emb_dim])
-      if q_lora_rank != 0:
-        wq_b = np.reshape(wq_b, [q_lora_rank, base_num_query_heads, (qk_nope_head_dim + qk_rope_head_dim)])
-      else:
-        query = np.reshape(query, [base_emb_dim, base_num_query_heads, (qk_nope_head_dim + qk_rope_head_dim)])
+  #     # reshape to match maxtext
+  #     wkv_b = np.reshape(wkv_b, [kv_lora_rank, base_num_query_heads, (qk_nope_head_dim + v_head_dim)])
+  #     out = np.reshape(out, [base_num_query_heads, v_head_dim, base_emb_dim])
+  #     if q_lora_rank != 0:
+  #       wq_b = np.reshape(wq_b, [q_lora_rank, base_num_query_heads, (qk_nope_head_dim + qk_rope_head_dim)])
+  #     else:
+  #       query = np.reshape(query, [base_emb_dim, base_num_query_heads, (qk_nope_head_dim + qk_rope_head_dim)])
 
-      if q_lora_rank != 0:
-        self_attention.update(
-            {
-                "q_norm": {"scale": None},
-                "wq_a": {"kernel": None},
-                "wq_b": {"kernel": None},
-            }
-        )
-      else:
-        self_attention.update({"query": {"kernel": None}})
+  #     if q_lora_rank != 0:
+  #       self_attention.update(
+  #           {
+  #               "q_norm": {"scale": None},
+  #               "wq_a": {"kernel": None},
+  #               "wq_b": {"kernel": None},
+  #           }
+  #       )
+  #     else:
+  #       self_attention.update({"query": {"kernel": None}})
 
-      self_attention["kv_norm"]["scale"] = kv_norm
-      self_attention["wkv_a"]["kernel"] = wkv_a
-      self_attention["wkv_b"]["kernel"] = wkv_b
-      self_attention["out"]["kernel"] = out
-      pre_self_attention_layer_norm["scale"] = pre_self_attention
-      post_self_attention_layer_norm["scale"] = post_self_attention
-      if q_lora_rank != 0:
-        self_attention["q_norm"]["scale"] = q_norm
-        self_attention["wq_a"]["kernel"] = wq_a
-        self_attention["wq_b"]["kernel"] = wq_b
-      else:
-        self_attention["query"]["kernel"] = query
+  #     self_attention["kv_norm"]["scale"] = kv_norm
+  #     self_attention["wkv_a"]["kernel"] = wkv_a
+  #     self_attention["wkv_b"]["kernel"] = wkv_b
+  #     self_attention["out"]["kernel"] = out
+  #     pre_self_attention_layer_norm["scale"] = pre_self_attention
+  #     post_self_attention_layer_norm["scale"] = post_self_attention
+  #     if q_lora_rank != 0:
+  #       self_attention["q_norm"]["scale"] = q_norm
+  #       self_attention["wq_a"]["kernel"] = wq_a
+  #       self_attention["wq_b"]["kernel"] = wq_b
+  #     else:
+  #       self_attention["query"]["kernel"] = query
 
-      jax_weights["decoder"][layer_name]["self_attention"] = self_attention
-      jax_weights["decoder"][layer_name]["pre_self_attention_layer_norm"] = pre_self_attention_layer_norm
-      jax_weights["decoder"][layer_name]["post_self_attention_layer_norm"] = post_self_attention_layer_norm
+  #     jax_weights["decoder"][layer_name]["self_attention"] = self_attention
+  #     jax_weights["decoder"][layer_name]["pre_self_attention_layer_norm"] = pre_self_attention_layer_norm
+  #     jax_weights["decoder"][layer_name]["post_self_attention_layer_norm"] = post_self_attention_layer_norm
 
-  # layer weights ################################################
-  max_logging.log("Processing layer weights")
-  for layer_key, layer_value in layers.items():
-    for layer_idx in tqdm(range(layer_value), desc=layer_key, leave=False):
-      if layer_key == "dense_layers":
-        layer_name = f"{layer_key}_{layer_idx}"
-        mlp = jax_weights["decoder"][layer_name]["mlp"]
-        wi_0 = chkpt_vars[f"{layer_key}.{layer_idx}.mlp.wi_0.kernel"].to(torch.float16).numpy().transpose()
-        wi_1 = chkpt_vars[f"{layer_key}.{layer_idx}.mlp.wi_1.kernel"].to(torch.float16).numpy().transpose()
-        wo = chkpt_vars[f"{layer_key}.{layer_idx}.mlp.wo.kernel"].to(torch.float16).numpy().transpose()
-        mlp["wi_0"]["kernel"] = wi_0
-        mlp["wi_1"]["kernel"] = wi_1
-        mlp["wo"]["kernel"] = wo
-        jax_weights["decoder"][layer_name]["mlp"] = mlp
-      else:
-        layer_name = f"{layer_key}_{layer_idx}"
-        moe = jax_weights["decoder"][layer_name]["DeepSeekMoeBlock_0"]
-        if q_lora_rank != 0:
-          gate_bias = (
-              chkpt_vars[f"{layer_key}.{layer_idx}.DeepSeekMoeBlock_0.MoeBlock_0.gate.bias"]
-              .to(torch.float16)
-              .numpy()
-              .transpose()
-          )
-        gate = (
-            chkpt_vars[f"{layer_key}.{layer_idx}.DeepSeekMoeBlock_0.MoeBlock_0.gate.kernel"]
-            .to(torch.float16)
-            .numpy()
-            .transpose()
-        )
-        shared_wi_0 = (
-            chkpt_vars[f"{layer_key}.{layer_idx}.DeepSeekMoeBlock_0.shared_experts.wi_0.kernel"]
-            .to(torch.float16)
-            .numpy()
-            .transpose()
-        )
-        shared_wi_1 = (
-            chkpt_vars[f"{layer_key}.{layer_idx}.DeepSeekMoeBlock_0.shared_experts.wi_1.kernel"]
-            .to(torch.float16)
-            .numpy()
-            .transpose()
-        )
-        shared_wo = (
-            chkpt_vars[f"{layer_key}.{layer_idx}.DeepSeekMoeBlock_0.shared_experts.wo.kernel"]
-            .to(torch.float16)
-            .numpy()
-            .transpose()
-        )
+  # # layer weights ################################################
+  # max_logging.log("Processing layer weights")
+  # for layer_key, layer_value in layers.items():
+  #   for layer_idx in tqdm(range(layer_value), desc=layer_key, leave=False):
+  #     if layer_key == "dense_layers":
+  #       layer_name = f"{layer_key}_{layer_idx}"
+  #       mlp = jax_weights["decoder"][layer_name]["mlp"]
+  #       wi_0 = chkpt_vars[f"{layer_key}.{layer_idx}.mlp.wi_0.kernel"].to(torch.float16).numpy().transpose()
+  #       wi_1 = chkpt_vars[f"{layer_key}.{layer_idx}.mlp.wi_1.kernel"].to(torch.float16).numpy().transpose()
+  #       wo = chkpt_vars[f"{layer_key}.{layer_idx}.mlp.wo.kernel"].to(torch.float16).numpy().transpose()
+  #       mlp["wi_0"]["kernel"] = wi_0
+  #       mlp["wi_1"]["kernel"] = wi_1
+  #       mlp["wo"]["kernel"] = wo
+  #       jax_weights["decoder"][layer_name]["mlp"] = mlp
+  #     else:
+  #       layer_name = f"{layer_key}_{layer_idx}"
+  #       moe = jax_weights["decoder"][layer_name]["DeepSeekMoeBlock_0"]
+  #       if q_lora_rank != 0:
+  #         gate_bias = (
+  #             chkpt_vars[f"{layer_key}.{layer_idx}.DeepSeekMoeBlock_0.MoeBlock_0.gate.bias"]
+  #             .to(torch.float16)
+  #             .numpy()
+  #             .transpose()
+  #         )
+  #       gate = (
+  #           chkpt_vars[f"{layer_key}.{layer_idx}.DeepSeekMoeBlock_0.MoeBlock_0.gate.kernel"]
+  #           .to(torch.float16)
+  #           .numpy()
+  #           .transpose()
+  #       )
+  #       shared_wi_0 = (
+  #           chkpt_vars[f"{layer_key}.{layer_idx}.DeepSeekMoeBlock_0.shared_experts.wi_0.kernel"]
+  #           .to(torch.float16)
+  #           .numpy()
+  #           .transpose()
+  #       )
+  #       shared_wi_1 = (
+  #           chkpt_vars[f"{layer_key}.{layer_idx}.DeepSeekMoeBlock_0.shared_experts.wi_1.kernel"]
+  #           .to(torch.float16)
+  #           .numpy()
+  #           .transpose()
+  #       )
+  #       shared_wo = (
+  #           chkpt_vars[f"{layer_key}.{layer_idx}.DeepSeekMoeBlock_0.shared_experts.wo.kernel"]
+  #           .to(torch.float16)
+  #           .numpy()
+  #           .transpose()
+  #       )
 
-        if q_lora_rank != 0:
-          moe["MoeBlock_0"]["gate"]["bias"] = gate_bias
-        moe["MoeBlock_0"]["gate"]["kernel"] = gate
-        moe["shared_experts"]["wi_0"]["kernel"] = shared_wi_0
-        moe["shared_experts"]["wi_1"]["kernel"] = shared_wi_1
-        moe["shared_experts"]["wo"]["kernel"] = shared_wo
+  #       if q_lora_rank != 0:
+  #         moe["MoeBlock_0"]["gate"]["bias"] = gate_bias
+  #       moe["MoeBlock_0"]["gate"]["kernel"] = gate
+  #       moe["shared_experts"]["wi_0"]["kernel"] = shared_wi_0
+  #       moe["shared_experts"]["wi_1"]["kernel"] = shared_wi_1
+  #       moe["shared_experts"]["wo"]["kernel"] = shared_wo
 
-        for k in tqdm(range(num_experts), desc="experts", leave=False):
-          wi_0 = (
-              chkpt_vars[f"{layer_key}.{layer_idx}.DeepSeekMoeBlock_0.MoeBlock_0.{k}.wi_0"]
-              .to(torch.float16)
-              .numpy()
-              .transpose()
-          )
-          wi_1 = (
-              chkpt_vars[f"{layer_key}.{layer_idx}.DeepSeekMoeBlock_0.MoeBlock_0.{k}.wi_1"]
-              .to(torch.float16)
-              .numpy()
-              .transpose()
-          )
-          wo = (
-              chkpt_vars[f"{layer_key}.{layer_idx}.DeepSeekMoeBlock_0.MoeBlock_0.{k}.wo"]
-              .to(torch.float16)
-              .numpy()
-              .transpose()
-          )
+  #       for k in tqdm(range(num_experts), desc="experts", leave=False):
+  #         wi_0 = (
+  #             chkpt_vars[f"{layer_key}.{layer_idx}.DeepSeekMoeBlock_0.MoeBlock_0.{k}.wi_0"]
+  #             .to(torch.float16)
+  #             .numpy()
+  #             .transpose()
+  #         )
+  #         wi_1 = (
+  #             chkpt_vars[f"{layer_key}.{layer_idx}.DeepSeekMoeBlock_0.MoeBlock_0.{k}.wi_1"]
+  #             .to(torch.float16)
+  #             .numpy()
+  #             .transpose()
+  #         )
+  #         wo = (
+  #             chkpt_vars[f"{layer_key}.{layer_idx}.DeepSeekMoeBlock_0.MoeBlock_0.{k}.wo"]
+  #             .to(torch.float16)
+  #             .numpy()
+  #             .transpose()
+  #         )
 
-          if moe["MoeBlock_0"]["wi_0"] is None:
-            stack_shape = (num_experts,)
-            moe["MoeBlock_0"]["wi_0"] = np.zeros(stack_shape + wi_0.shape, dtype=np.float16)
-            moe["MoeBlock_0"]["wi_1"] = np.zeros(stack_shape + wi_1.shape, dtype=np.float16)
-            moe["MoeBlock_0"]["wo"] = np.zeros(stack_shape + wo.shape, dtype=np.float16)
-          moe["MoeBlock_0"]["wi_0"][k, ...] = wi_0
-          moe["MoeBlock_0"]["wi_1"][k, ...] = wi_1
-          moe["MoeBlock_0"]["wo"][k, ...] = wo
+  #         if moe["MoeBlock_0"]["wi_0"] is None:
+  #           stack_shape = (num_experts,)
+  #           moe["MoeBlock_0"]["wi_0"] = np.zeros(stack_shape + wi_0.shape, dtype=np.float16)
+  #           moe["MoeBlock_0"]["wi_1"] = np.zeros(stack_shape + wi_1.shape, dtype=np.float16)
+  #           moe["MoeBlock_0"]["wo"] = np.zeros(stack_shape + wo.shape, dtype=np.float16)
+  #         moe["MoeBlock_0"]["wi_0"][k, ...] = wi_0
+  #         moe["MoeBlock_0"]["wi_1"][k, ...] = wi_1
+  #         moe["MoeBlock_0"]["wo"][k, ...] = wo
 
-        jax_weights["decoder"][layer_name]["DeepSeekMoeBlock_0"] = moe
+  #       jax_weights["decoder"][layer_name]["DeepSeekMoeBlock_0"] = moe
 
   # ### START OF CORRECTED MTP BLOCK ###
   max_logging.log("Processing MTP block")

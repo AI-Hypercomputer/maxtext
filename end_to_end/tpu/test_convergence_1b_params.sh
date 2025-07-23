@@ -59,7 +59,7 @@ TRAIN_CMD="python3 -m MaxText.train MaxText/configs/base.yml \
         max_target_length=2048 global_parameter_scale=1 \
         metrics_file=metrics.txt base_output_directory=$OUTPUT_PATH \
         dataset_path=$DATASET_PATH dataset_type=$DATASET_TYPE log_period=150 \
-        remat_policy=minimal enable_data_shuffling=false mtp_num_layers=$MTP_NUM_LAYERS"
+        remat_policy=minimal enable_data_shuffling=false scan_layers=False mtp_num_layers=$MTP_NUM_LAYERS"
 TRAIN_CMD+=$CMD_DATA
 
 # Train
