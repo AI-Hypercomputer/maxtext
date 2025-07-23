@@ -512,7 +512,7 @@ def generate_completions(
     thread_example_batch = worker_data_loader.load_next_batch()
     # Trim data for inference processing
     thread_example_batch_trimmed = jax.tree_util.tree_map(lambda arr: arr[:int(worker_config_inference.per_device_batch_size * worker_config_train.inference_replicas * worker_config_train.inference_devices_per_replica)], thread_example_batch)
-    processed_batch = grpo_utils.generate_offline_completions(worker_config_inference, worker_tokenizer_model, worker_inference_engine, thread_example_batch_trimmed)          
+    processed_batch = grpo_utils.generate_offline_completions(worker_config_inference, worker_tokenizer_model, worker_inference_engine, thread_example_batch_trimmed)
     processed_batch = jax.device_put(processed_batch, worker_input_data_shardings)
   with worker_data_buffer_lock:
     if not worker_data_buffer:
@@ -639,6 +639,7 @@ def train_loop(config, config_inference, recorder, state=None):
   generation_thread.start()
 
   try:
+    last_step_completion = datetime.datetime.now()
     for step in np.arange(start_step, config.steps):
       prof.maybe_activate_profiler(step, state)
 
@@ -669,6 +670,7 @@ def train_loop(config, config_inference, recorder, state=None):
               continue
           time.sleep(0.1)
         train_rng, rng = random.split(init_rng)
+        example_batch = jax.device_put(example_batch, data_sharding)
         with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
           state, metrics = p_train_step(state, example_batch, train_rng)
       with jax.profiler.StepTraceAnnotation("transfer data", step_num=step):
@@ -714,10 +716,9 @@ def train_loop(config, config_inference, recorder, state=None):
       if step == start_step:
         max_utils.print_mem_stats("After params initialized")
 
-      metric_logger.buffer_and_write_train_metrics(metrics, step, step_time_delta)
-
-    state_to_save = _split_grpo_state(state)[0]
-    checkpointing.maybe_save_checkpoint(checkpoint_manager, state_to_save, config, data_iterator)
+      metric_logger.buffer_and_write_train_metrics(metrics, step, step_time_delta)      
+      state_to_save = _split_grpo_state(state)[0]
+      checkpointing.maybe_save_checkpoint(checkpoint_manager, state_to_save, config, data_iterator)
   except exceptions.StopTraining as e:
     max_logging.log(f"Training stopped: {str(e)}")
   finally:
@@ -744,6 +745,10 @@ def main(argv: Sequence[str]) -> None:
   config = pyconfig.initialize(configs_argv[0])
   if not config.use_grpo:
     raise ValueError("Please set the value of use_grpo to True")
+  if config.inference_rollouts < 1 or config.inference_rollouts > config.steps:
+    raise ValueError(
+        f"Please set the value of inference_rollouts to be less than {config.steps} or greater than 1. Current value: {config.inference_rollouts}"
+    )
   if config.decode_sampling_strategy == "greedy" or config.decode_sampling_temperature == 0.0:
     raise ValueError(
         "Please set decode_sampling_strategy as 'weighted' and decode_sampling_temperature as a positive number"
