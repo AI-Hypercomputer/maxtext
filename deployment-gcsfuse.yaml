@@ -1,0 +1,259 @@
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: bernardhan-gcs-checkpoint-pv
+spec:
+  accessModes:
+  - ReadWriteMany
+  capacity:
+    storage: 64Gi
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: gcsfuse-sc # dummy storage class
+  claimRef:
+    name: bernardhan-gcs-checkpoint-claim
+    # Running in the "default" namespace so you can submit to the local queue
+    # created in the default namespace.
+    namespace: default
+  mountOptions:
+  - logging:severity:info
+  # - client-protocol=http
+  - enable-atomic-rename-object:true # enable move object
+  - write:enable-streaming-writes:true # streaming writes improve performance
+  # Enable metadata cache but disable negative stat cache since this causes files created on one
+  # node to fail to be found on different nodes. Using the metadata cache in this configuration
+  # results in about 10-20% as many metadata qps compared to not using it.
+  - metadata-cache:ttl-secs:-1
+  - metadata-cache:stat-cache-max-size-mb:-1
+  - metadata-cache:type-cache-max-size-mb:-1
+  # b/393009385 - metadata-cache:negative-ttl-secs must be set to 0 for checkpointing in Orbax.
+  - metadata-cache:negative-ttl-secs:0
+  - file-cache:max-size-mb:-1
+  - file-cache:cache-file-for-range-read:true
+  - file-cache:enable-parallel-downloads:true
+  csi:
+    driver: gcsfuse.csi.storage.gke.io
+    volumeHandle: tess-checkpointing-hns
+    volumeAttributes:
+      # For GCSFuse, enable metrics in the workload.
+      # https://github.com/GoogleCloudPlatform/gcs-fuse-csi-driver/blob/metrics/docs/metrics.md#enable-metrics-in-your-workload.
+      enableMetrics: "false"
+      skipCSIBucketAccessCheck: "true"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: bernardhan-gcs-checkpoint-claim
+  namespace: default
+spec:
+  accessModes:
+  - ReadWriteMany
+  resources:
+    requests:
+      storage: 64Gi
+  volumeName: bernardhan-gcs-checkpoint-pv
+  storageClassName: gcsfuse-sc # dummy storage class
+---
+# Use Static provisioning to define a PV for Cloud Storage buckets.
+# https://cloud.google.com/kubernetes-engine/docs/how-to/persistent-volumes/cloud-storage-fuse-csi-driver#provision-static.
+apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+metadata:
+  # Modify this name to distinguish your workload from others.
+  # Make sure to modify all occurrences of the name in this file.
+  generateName: checkpoint-gcs-direct-
+  # labels:
+  #   kueue.x-k8s.io/queue-name: multislice-queue  # Name of the LocalQueue
+  #   xpk.google.com/workload: checkpoint-gcs-direct
+  annotations:
+    alpha.jobset.sigs.k8s.io/exclusive-topology: cloud.google.com/gke-nodepool # 1:1 job replica to node pool assignment
+spec:
+  failurePolicy:
+    maxRestarts: 0
+  replicatedJobs:
+    - name: slice-job
+      replicas: 1
+      template:
+        spec:
+          # Modify the following two values if you intend to run the workload in smaller scale.
+          parallelism: 512    # Equal to the number of VMs per slice
+          completions: 512    # Same as the above.
+          backoffLimit: 0   # When any pod fails, the job is failed
+          template:
+            metadata:
+              labels:
+                xpk.google.com/workload: checkpoint-gcs-direct
+              annotations:
+                gke-gcsfuse/volumes: "true"
+            spec:
+              schedulerName: default-scheduler
+              restartPolicy: Never
+              affinity:
+                nodeAffinity:
+                  requiredDuringSchedulingIgnoredDuringExecution:
+                    nodeSelectorTerms:
+                    - matchExpressions:
+                      - key: cloud.google.com/gke-nodepool
+                        operator: NotIn
+                        values:
+                        - default-pool
+
+              # For GCSFuse: to make sure that the pods are running on nodes with L-SSDs.
+              # For other storage solutions that do not need L-SSDs, please remove this line.
+              nodeSelector:
+                cloud.google.com/gke-ephemeral-storage-local-ssd: "true"
+
+              priorityClassName: high
+              hostNetwork: true
+              dnsPolicy: ClusterFirstWithHostNet
+              terminationGracePeriodSeconds: 30
+              containers:
+              - name: jax-cpu
+                image: gcr.io/gcs-tess/bernardhan_distributed_maxtext_checkpointing_benchmark_strict_is_true
+
+                env:
+                - name: REPLICATED_JOB_NAME
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.annotations['jobset.sigs.k8s.io/replicatedjob-name']
+                - name: JOB_INDEX
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.annotations['jobset.sigs.k8s.io/job-index']
+                - name: JOB_COMPLETION_INDEX
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.annotations['batch.kubernetes.io/job-completion-index']
+                - name: JOBSET_NAME
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.annotations['jobset.sigs.k8s.io/jobset-name']
+                # Modify the following two values too, if you intend to run the workload in smaller scale.
+                - name: PROCESSES_IN_JOB
+                  value: "512"
+                - name: JAX_PROCESS_COUNT
+                  value: "512"
+                - name: JAX_COORDINATOR_ADDRESS
+                  value: "$(JOBSET_NAME)-$(REPLICATED_JOB_NAME)-0-0.$(JOBSET_NAME)"
+                - name: MY_NODE_NAME
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: spec.nodeName
+                - name: MY_POD_NAME
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.name
+                - name: MY_POD_IP
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: status.podIP
+                - name: MY_NODE_IP
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: status.hostIP
+
+                ports:
+                - containerPort: 8471
+                - containerPort: 8080
+                - containerPort: 1234
+                securityContext:
+                  privileged: true
+                command:
+                - bash
+                - -c
+                - |
+                  # Stop the script on errors, expanding undefined variables, or pipe errors.
+                  set -euo pipefail
+
+                  # Higher open file limit is needed to avoid errors when running with many nodes
+                  ulimit -n 65536
+
+                  #
+                  # Modify the following values for the checkpoint workload.
+                  #
+
+                  # Change this to capture the storage system you are using (e.g. HdML, or PStore).
+                  # In the BQ metrics, the full run name will be
+                  #     "${RUN_NAME_PREFIX}-${JOBSET_NAME}-${RUN_NUMBER}"
+                  # where the run number is set in the for loop below.
+                  # For more details on the RUN_NAME and its implications, see the workload section
+                  # in the README.md file in this directory.
+                  RUN_NAME_PREFIX=GCS
+
+                  # RUNS is the number of times to run the benchmark. The run number will be
+                  # added to the end of the RUN_NAME.
+                  RUNS=1
+
+                  benchmark_run_flags=(
+                    # PARAMETERS is the number of parameters in the model (in billions).
+                    PARAMETERS=512
+
+                    # STEPS is the number of steps to run.
+                    STEPS=200
+
+                    # CHECKPOINT_PERIOD is the number of steps between each checkpoint.
+                    #   Roughly ((STEPS - 1) // CHECKPOINT_PERIOD + 1) checkpoint restores and writes
+                    #   will be performed per run.
+                    #   The total number of checkpoint restores and writes will be roughly
+                    #   RUNS * ((STEPS - 1) // CHECKPOINT_PERIOD + 1).
+                    CHECKPOINT_PERIOD=50
+
+                    # PER_STEP_INTERVAL is the minimum time each step should take. Note that it cannot
+                    # be 300 seconds or more because the barriers will timeout.
+                    PER_STEP_INTERVAL=0.0
+
+                    # OUTPUT_PATH is the path to write the checkpoints to. Make sure it is the path
+                    #   mounted with your storage solution.
+                    OUTPUT_PATH="/mnt/gcsfuse/test-output/checkpointing-ckpt/"
+
+                    # GCS_METRICS_BUCKET is the GCS bucket to write metrics to.
+                    GCS_METRICS_BUCKET="distributed-checkpointing-metrics"
+
+                    # The target per checkpoint size that Orbax is writing with. The unit is in bytes.
+                    # Therefore, 200000000 for 200 MB. If -1, the default Orbax checkpoint size
+                    # is used, which is around 2GB.
+                    # This translates to the Orbax parameter at
+                    # https://source.corp.google.com/piper///depot/google3/third_party/py/orbax/checkpoint/pytree_checkpoint_handler.py;l=1001?q=%20ocdbt_target_data_file_size%20f:orbax
+                    OCDBT_TARGET_DATA_FILE_SIZE=-1
+
+                    # Specifies the maximum number of checkpoints to keep and older checkpoints are removed.
+                    # This translates to the Orbax parameter at
+                    # https://source.corp.google.com/piper///depot/google3/third_party/py/orbax/checkpoint/checkpoint_manager.py;l=158?q=%20max_to_keep%20f:orbax.
+                    MAX_CKPTS_TO_KEEP=-1
+
+                    # Whether to enable background deletion for the older checkpoints.
+                    # Suggest this to be True to avoid checkpoint deletion being factored into the write time.
+                    ENABLE_BACKGROUND_DELETE=True
+
+                    # At the end of the workload, the maximum time the workload will wait for any lingering
+                    # old checkpoints to be deleted. Default to be 30 mins.
+                    FINAL_CKPTS_DELETION_TIMEOUT_IN_S=1800
+
+                    export M_ICI_DATA_PARALLELISM=2
+                    ENABLE_SINGLE_REPLICA_CKPT_RESTORING=True
+
+                    # Do not change, common values for all runs.
+                    EXECUTABLE=standalone_checkpointer
+                    HARDWARE=cpu
+                    PLATFORM=gke
+                  )
+
+                  for i in $(seq 1 $RUNS); do
+                    echo XPK Start: $(date)
+                    _sigterm() ( kill -SIGTERM $! 2>/dev/null;); trap _sigterm SIGTERM;
+                    (bash MaxText/configs/v5e/bernardhan_create_ckpt.sh RUN_NAME="${RUN_NAME_PREFIX}-${JOBSET_NAME}-${i}" "${benchmark_run_flags[@]}") &
+                    PID=$!; while kill -0 $PID 2>/dev/null; do sleep 5; done
+                    wait $PID
+                    EXIT_CODE=$?
+                    echo XPK End: $(date); echo EXIT_CODE=$EXIT_CODE;
+                  done
+                volumeMounts:
+                # For other storage solutions, please modify the mount path and modify the PATH variables.
+                - mountPath: /mnt/gcsfuse
+                  name: gcs-pvc
+              volumes:
+              - emptyDir:
+                  medium: Memory
+                name: dshm-2
+              - name: gcs-pvc
+                persistentVolumeClaim:
+                  claimName: bernardhan-gcs-checkpoint-claim

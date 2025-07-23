@@ -319,7 +319,10 @@ def load_state_if_possible(
   elif load_full_state_from_path != "":
     max_logging.log(f"restoring full state from {load_full_state_from_path=}")
     p = epath.Path(load_full_state_from_path)
-    restored = ocp.StandardCheckpointer().restore(p, abstract_unboxed_pre_state)
+    # Need to specify strict=False to solve the error of 
+    # "ValueError: Requested shape: (32000, 8192) is not compatible with the stored shape: (32000, 16384)."
+    # This is observed from using the standalone_checkpointer to create the checkpoint before restoring.
+    restored = ocp.StandardCheckpointer().restore(p, abstract_unboxed_pre_state, strict=True)
     return {"items": restored}, None
   else:
     max_logging.log("No existing checkpoints found, not restoring checkpoint.")

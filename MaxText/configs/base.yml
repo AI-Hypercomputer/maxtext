@@ -771,3 +771,18 @@ projector_dropout_for_vit: 0.0
 # Subslice shape in the form of "x,y,z" when using pathways (single controller). 
 # Example: "8,8" to use a 8x8 subgrid (64 chips) of a full pod (16x16) of trillium.
 subslice_shape: ""
+
+# Attributes needed for the MaxText checkpointing loop using standalone_checkpointer.
+gcs_metrics_bucket: distributed-checkpointing-metrics
+# The simulated interval of a step.
+per_step_interval: 0.0
+# Specifies the maximum number of checkpoints to keep and older checkpoints are removed.
+# This translates to the Orbax parameter at 
+# https://source.corp.google.com/piper///depot/google3/third_party/py/orbax/checkpoint/checkpoint_manager.py;l=158?q=%20max_to_keep%20f:orbax.
+max_ckpts_to_keep: -1
+# Whether to enable background deletion for the older checkpoints.
+# Suggest this to be True to avoid checkpoint deletion being factored into the write time.
+enable_background_delete: True
+# At the end of the workload, the maximum time the workload will wait for any lingering
+# old checkpoints to be deleted. Default to be 20 hrs.
+final_ckpts_deletion_timeout_in_s: 72000
