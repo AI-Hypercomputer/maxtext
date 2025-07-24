@@ -16,6 +16,22 @@
 
 
 def GEMMA3_HF_WEIGHTS_TO_SHAPE_MAPPING(config):
+  """Generates a shape mapping for Hugging Face Gemma3 parameters.
+
+  This function computes the expected shapes for all parameters in a Hugging
+  Face Gemma3 model, including both the text and vision components. The shapes
+  are derived from the provided model configuration.
+
+  Args:
+    config (dict): The Hugging Face model configuration dictionary. It must
+      contain 'text_config' and 'vision_config' sub-dictionaries with all
+      necessary architectural details (e.g., hidden_size, num_layers).
+
+  Returns:
+    dict: A dictionary where keys are Hugging Face parameter names (e.g.,
+    'model.language_model.embed_tokens.weight') and values are lists of
+    integers representing the tensor's shape.
+  """
   shapes = {}
 
   # Config-derived dimensions

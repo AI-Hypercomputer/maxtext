@@ -48,7 +48,6 @@ from typing import Sequence
 
 import numpy as np
 import jax
-import jax.numpy as jnp
 from absl import app
 from flax.training import train_state
 from transformers import AutoConfig, AutoModelForCausalLM
@@ -124,7 +123,7 @@ def main(argv: Sequence[str]) -> None:
   # Get parameter mappings and hooks
   # example of param mapping (gemma2, maxtext:huggingface):
   # "params-decoder-layers_{maxtext_layer_idx}-pre_self_attention_norm_global-scale":
-  #                                                                    f"model.layers.{global_layer_idx}.input_layernorm.weight",
+  #   f"model.layers.{global_layer_idx}.input_layernorm.weight",
 
   model_key = config.model_name
   param_map_mt_to_hf = PARAM_MAPPING[model_key](hf_config_obj.to_dict(), config.scan_layers)
