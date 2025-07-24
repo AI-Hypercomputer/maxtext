@@ -764,7 +764,7 @@ class AttentionOp(nnx.Module):
         v_layout=splash_attention_kernel.QKVLayout[global_v_layout],
     )
 
-    mask_shape = (self.config.max_target_length, self.config.max_target_length)
+    mask_shape = (query.shape[2], key.shape[2])  # (q_seq_len, kv_seq_len)
     if self.attention_type == AttentionType.FULL:
       mask = splash_attention_mask.FullMask(mask_shape)
     else:
