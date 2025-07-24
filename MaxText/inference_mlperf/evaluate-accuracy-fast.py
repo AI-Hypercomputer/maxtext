@@ -42,13 +42,13 @@ def split_data(preds: List[str], refs: List[str], num_chunks: int) -> List[Tuple
 
 
 def compute_rouge_chunk(chunk: Tuple[List[str], List[str]], metric) -> Dict:
-  """Compute ROGUE scores for a chunk of data"""
+  """Compute ROUGE scores for a chunk of data"""
   preds, refs = chunk
   return metric.compute(predictions=preds, references=refs, use_stemmer=True, use_aggregator=False)
 
 
 def aggregate_rouge_scores(chunk_results: List[Dict]) -> Dict:
-  """Aggregate ROGUE scores from chunks"""
+  """Aggregate ROUGE scores from chunks"""
   # Concatenate all scores
   all_scores = {}
   for scores in chunk_results:
@@ -143,7 +143,7 @@ def main():
   else:
     raise ValueError("Either --checkpoint-path or --tokenizer-path must be provided")
 
-  metric = evaluate.load("rogue")
+  metric = evaluate.load("rouge")
   nltk.download("punkt", quiet=True)
 
   print(f"Getting groundtruth from {args.dataset_file}")
@@ -179,8 +179,8 @@ def main():
     processed_pairs = list(tqdm.tqdm(pool.starmap(postprocess_text, zip(all_preds, target_required)), total=len(all_preds)))
   preds, refs = zip(*processed_pairs)
 
-  # Split data into chunks for parallel ROGUE computation
-  print("Computing ROGUE scores...")
+  # Split data into chunks for parallel ROUGE computation
+  print("Computing ROUGE scores...")
   data_chunks = split_data(preds, refs, num_workers)
   with Pool(num_workers) as pool:
     chunk_results = list(
