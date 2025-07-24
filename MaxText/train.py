@@ -563,6 +563,9 @@ def setup_train_loop(config, recorder, devices=None):
             step=0,
             use_ocdbt=config.checkpoint_storage_use_ocdbt,
             use_zarr3=config.checkpoint_storage_use_zarr3,
+            enable_orbax_v1=config.enable_orbax_v1,
+            checkpoint_conversion_fn=config.checkpoint_conversion_fn,
+            checkpoint_context=config.checkpoint_context,
         )
       except FileNotFoundError:
         step0_restored = None
