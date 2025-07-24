@@ -39,7 +39,7 @@ from flax import nnx
 from flax.linen import partitioning
 
 from MaxText import max_utils
-from MaxText.common_types import DecoderBlockType, LENGTH_NO_EXP, BATCH_NO_EXP, DEFAULT_MASK_VALUE, BATCH, HEAD, KV_LENGTH, PREFILL_LENGTH, D_KV, CACHE_BATCH_PREFILL, CACHE_SEQUENCE, AxisNames, CACHE_BATCH, CACHE_HEADS, CACHE_SCALE_BATCH, CACHE_KV, CACHE_SCALE_SEQUENCE, CACHE_SCALE_HEADS, CACHE_SCALE_KV, AxisIdxes, LENGTH, DType, Config, Array, Q_LENGTH, Q_LENGTH_NO_EXP, DECODE_LENGTH, DECODE_BATCH, PREFILL_KV_BATCH, KV_HEAD, KV_HEAD_DIM, KV_BATCH, EMBED, MODEL_MODE_AUTOREGRESSIVE, DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_TRAIN, MODEL_MODE_PREFILL
+from MaxText.common_types import DecoderBlockType, DEFAULT_MASK_VALUE, BATCH, BATCH_NO_EXP, HEAD, KV_LENGTH, PREFILL_LENGTH, D_KV, CACHE_BATCH_PREFILL, CACHE_SEQUENCE, AxisNames, CACHE_BATCH, CACHE_HEADS, CACHE_SCALE_BATCH, CACHE_KV, CACHE_SCALE_SEQUENCE, CACHE_SCALE_HEADS, CACHE_SCALE_KV, AxisIdxes, LENGTH, LENGTH_NO_EXP, DType, Config, Array, Q_LENGTH, Q_LENGTH_NO_EXP, DECODE_LENGTH, DECODE_BATCH, PREFILL_KV_BATCH, KV_HEAD, KV_HEAD_DIM, KV_BATCH, KV_BATCH_NO_EXP, EMBED, MODEL_MODE_AUTOREGRESSIVE, DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_TRAIN, MODEL_MODE_PREFILL
 from MaxText.inference import kvcache
 from MaxText.inference import page_manager
 from MaxText.inference import paged_attention
@@ -60,14 +60,11 @@ from MaxText.layers.quantizations import AqtQuantization as Quant
 # pylint: disable=line-too-long, g-doc-args, g-doc-return-or-yield, bad-continuation, g-inconsistent-quotes
 # pytype: disable=attribute-error
 
-# debug
-from flax.linen.spmd import RulesFallback, _global_mesh_defined
-from jax.interpreters import pxla
-from flax.core.spmd import (
-    get_logical_axis_rules,
-)
+# TODO(shuningjin): remove
+from flax.linen.spmd import _global_mesh_defined
 
 
+# TODO(shuningjin): remove
 def debug_sharding(array, prefix=""):
   global_shape = array.shape
   jax.debug.inspect_array_sharding(
@@ -286,12 +283,12 @@ def attention_op_as_linen(
     float32_qk_product: bool = False,
     max_prefill_predict_length: int = -1,
     float32_logits: bool = False,
-    flash_axis_names_kv: AxisNames = (BATCH, HEAD, KV_LENGTH, D_KV),
     flash_axis_names_q: AxisNames = (BATCH, HEAD, LENGTH_NO_EXP, D_KV),
-    flash_axis_names_kv_ep: AxisNames = (BATCH_NO_EXP, HEAD, KV_LENGTH, D_KV),
     flash_axis_names_q_ep: AxisNames = (BATCH_NO_EXP, HEAD, LENGTH, D_KV),
-    flash_axis_names_splash_kernel: AxisNames = (HEAD, LENGTH),
-    flash_axis_names_splash_kernel_no_ep: AxisNames = (HEAD, LENGTH_NO_EXP),
+    flash_axis_names_kv: AxisNames = (BATCH, HEAD, KV_LENGTH, D_KV),
+    flash_axis_names_kv_ep: AxisNames = (BATCH_NO_EXP, HEAD, KV_LENGTH, D_KV),
+    flash_axis_names_splash_kernel: AxisNames = (HEAD, LENGTH_NO_EXP),
+    flash_axis_names_splash_kernel_ep: AxisNames = (HEAD, LENGTH),
     prefill_cache_logical_axis_names: AxisNames = (CACHE_BATCH_PREFILL, CACHE_SEQUENCE, CACHE_HEADS, CACHE_KV),
     cache_logical_axis_names: AxisNames = (CACHE_BATCH, CACHE_SEQUENCE, CACHE_HEADS, CACHE_KV),
     cache_scale_logical_axis_names: AxisNames = (CACHE_SCALE_BATCH, CACHE_SCALE_SEQUENCE, CACHE_SCALE_HEADS, CACHE_SCALE_KV),
@@ -325,12 +322,12 @@ def attention_op_as_linen(
       float32_qk_product=float32_qk_product,
       max_prefill_predict_length=max_prefill_predict_length,
       float32_logits=float32_logits,
-      flash_axis_names_kv=flash_axis_names_kv,
       flash_axis_names_q=flash_axis_names_q,
-      flash_axis_names_kv_ep=flash_axis_names_kv_ep,
       flash_axis_names_q_ep=flash_axis_names_q_ep,
+      flash_axis_names_kv=flash_axis_names_kv,
+      flash_axis_names_kv_ep=flash_axis_names_kv_ep,
       flash_axis_names_splash_kernel=flash_axis_names_splash_kernel,
-      flash_axis_names_splash_kernel_no_ep=flash_axis_names_splash_kernel_no_ep,
+      flash_axis_names_splash_kernel_ep=flash_axis_names_splash_kernel_ep,
       prefill_cache_logical_axis_names=prefill_cache_logical_axis_names,
       cache_logical_axis_names=cache_logical_axis_names,
       cache_scale_logical_axis_names=cache_scale_logical_axis_names,
@@ -366,12 +363,12 @@ class AttentionOp(nnx.Module):
   float32_qk_product: bool = False
   max_prefill_predict_length: int = -1
   float32_logits: bool = False
-  flash_axis_names_kv: AxisNames = (BATCH, HEAD, KV_LENGTH, D_KV)
   flash_axis_names_q: AxisNames = (BATCH, HEAD, LENGTH_NO_EXP, D_KV)
-  flash_axis_names_kv_ep: AxisNames = (BATCH_NO_EXP, HEAD, KV_LENGTH, D_KV)
   flash_axis_names_q_ep: AxisNames = (BATCH_NO_EXP, HEAD, LENGTH, D_KV)
-  flash_axis_names_splash_kernel: AxisNames = (HEAD, LENGTH)
-  flash_axis_names_splash_kernel_no_ep: AxisNames = (HEAD, LENGTH_NO_EXP)
+  flash_axis_names_kv: AxisNames = (BATCH, HEAD, KV_LENGTH, D_KV)
+  flash_axis_names_kv_ep: AxisNames = (BATCH_NO_EXP, HEAD, KV_LENGTH, D_KV)
+  flash_axis_names_splash_kernel: AxisNames = (HEAD, LENGTH_NO_EXP)
+  flash_axis_names_splash_kernel_ep: AxisNames = (HEAD, LENGTH)
   prefill_cache_logical_axis_names: AxisNames = (CACHE_BATCH_PREFILL, CACHE_SEQUENCE, CACHE_HEADS, CACHE_KV)
   cache_logical_axis_names: AxisNames = (CACHE_BATCH, CACHE_SEQUENCE, CACHE_HEADS, CACHE_KV)
   cache_scale_logical_axis_names: AxisNames = (CACHE_SCALE_BATCH, CACHE_SCALE_SEQUENCE, CACHE_SCALE_HEADS, CACHE_SCALE_KV)
@@ -736,10 +733,9 @@ class AttentionOp(nnx.Module):
   ) -> Array:
     """TPU Flash Attention."""
 
-    if self.config.is_batch_shard_by_expert:
-      cp_size = self.mesh.shape["context"]
-    else:
-      cp_size = self.mesh.shape["context"] * self.mesh.shape["expert"]
+    cp_size = self.mesh.shape["context"]
+    if self.config.expert_shard_attention_option == "context":
+      cp_size = cp_size * self.mesh.shape["expert"]
 
     load_balanced_context_parallel = self.config.context_parallel_load_balance
 
@@ -750,19 +746,21 @@ class AttentionOp(nnx.Module):
     segment_axis_names_q = None
     segment_axis_names_kv = None
     if decoder_segment_ids is not None:
-      segment_axis_names_q = nn.logical_to_mesh_axes((BATCH, Q_LENGTH_NO_EXP))
-      segment_axis_names_kv = nn.logical_to_mesh_axes((BATCH, KV_LENGTH))
-      if not self.config.is_batch_shard_by_expert:
+      if self.config.expert_shard_attention_option == "context":
         segment_axis_names_q = nn.logical_to_mesh_axes((BATCH_NO_EXP, Q_LENGTH))
         segment_axis_names_kv = nn.logical_to_mesh_axes((BATCH_NO_EXP, KV_LENGTH))
+      else:
+        segment_axis_names_q = nn.logical_to_mesh_axes((BATCH, Q_LENGTH_NO_EXP))
+        segment_axis_names_kv = nn.logical_to_mesh_axes((BATCH, KV_LENGTH))
 
-    axis_names_splash_kernel = nn.logical_to_mesh_axes(self.flash_axis_names_splash_kernel_no_ep)
-    axis_names_q = nn.logical_to_mesh_axes(self.flash_axis_names_q)
-    axis_names_kv = nn.logical_to_mesh_axes(self.flash_axis_names_kv)
-    if not self.config.is_batch_shard_by_expert:
+    if self.config.expert_shard_attention_option == "context":
+      axis_names_splash_kernel = nn.logical_to_mesh_axes(self.flash_axis_names_splash_kernel_ep)
       axis_names_q = nn.logical_to_mesh_axes(self.flash_axis_names_q_ep)
       axis_names_kv = nn.logical_to_mesh_axes(self.flash_axis_names_kv_ep)
+    else:
       axis_names_splash_kernel = nn.logical_to_mesh_axes(self.flash_axis_names_splash_kernel)
+      axis_names_q = nn.logical_to_mesh_axes(self.flash_axis_names_q)
+      axis_names_kv = nn.logical_to_mesh_axes(self.flash_axis_names_kv)
 
     global global_block_q, global_block_kv, global_block_kv_compute, global_block_q_dkv, global_block_kv_dkv
     global global_block_kv_dkv_compute, global_block_q_dq, global_block_kv_dq, global_use_fused_bwd_kernel
@@ -1454,25 +1452,21 @@ class Attention(nn.Module):
   prefill_query_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, KV_HEAD, KV_HEAD_DIM)
   prefill_key_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, KV_HEAD, KV_HEAD_DIM)
   prefill_value_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, KV_HEAD, KV_HEAD_DIM)
-  # query_axis_names: AxisNames = (KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM)
-  # key_axis_names: AxisNames = (KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM)
-  # value_axis_names: AxisNames = (KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM)
-  query_axis_names: AxisNames = ("activation_kv_batch", "activation_length_no_exp", KV_HEAD, KV_HEAD_DIM)
-  key_axis_names: AxisNames = ("activation_kv_batch", "activation_length_no_exp", KV_HEAD, KV_HEAD_DIM)
-  value_axis_names: AxisNames = ("activation_kv_batch", "activation_length_no_exp", KV_HEAD, KV_HEAD_DIM)
-  ep_query_axis_names: AxisNames = ("activation_kv_batch_no_exp", "activation_length", KV_HEAD, KV_HEAD_DIM)
-  ep_key_axis_names: AxisNames = ("activation_kv_batch_no_exp", "activation_length", KV_HEAD, KV_HEAD_DIM)
-  ep_value_axis_names: AxisNames = ("activation_kv_batch_no_exp", "activation_length", KV_HEAD, KV_HEAD_DIM)
 
-  # input_axis_names: AxisNames = (BATCH, LENGTH, EMBED)
-  input_axis_names: AxisNames = ("activation_batch", "activation_length_no_exp", EMBED)
-  ep_input_axis_names: AxisNames = ("activation_batch_no_exp", "activation_length", EMBED)
+  query_axis_names: AxisNames = (KV_BATCH, LENGTH_NO_EXP, KV_HEAD, KV_HEAD_DIM)
+  key_axis_names: AxisNames = (KV_BATCH, LENGTH_NO_EXP, KV_HEAD, KV_HEAD_DIM)
+  value_axis_names: AxisNames = (KV_BATCH, LENGTH_NO_EXP, KV_HEAD, KV_HEAD_DIM)
+  ep_query_axis_names: AxisNames = (KV_BATCH_NO_EXP, LENGTH, KV_HEAD, KV_HEAD_DIM)
+  ep_key_axis_names: AxisNames = (KV_BATCH_NO_EXP, LENGTH, KV_HEAD, KV_HEAD_DIM)
+  ep_value_axis_names: AxisNames = (KV_BATCH_NO_EXP, LENGTH, KV_HEAD, KV_HEAD_DIM)
+
+  input_axis_names: AxisNames = (BATCH, LENGTH_NO_EXP, EMBED)
+  ep_input_axis_names: AxisNames = (BATCH_NO_EXP, LENGTH, EMBED)
   prefill_input_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, EMBED)
   decode_input_axis_names: AxisNames = (DECODE_BATCH, DECODE_LENGTH, EMBED)
 
-  # out_axis_names: AxisNames = (BATCH, LENGTH, HEAD, D_KV)
-  out_axis_names: AxisNames = ("activation_batch", "activation_length_no_exp", HEAD, D_KV)
-  ep_out_axis_names: AxisNames = ("activation_batch_no_exp", "activation_length", HEAD, D_KV)
+  out_axis_names: AxisNames = (BATCH, LENGTH_NO_EXP, HEAD, D_KV)
+  ep_out_axis_names: AxisNames = (BATCH_NO_EXP, LENGTH, HEAD, D_KV)
   prefill_out_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, HEAD, D_KV)
   decode_out_axis_names = (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV)
 
@@ -1755,56 +1749,21 @@ class Attention(nn.Module):
     Returns:
       output of shape `[batch, length, q_features]`.
     """
-    is_batch_shard_by_expert = self.config.is_batch_shard_by_expert
-
-    # DEBUGGING DEFINITION BEGIN #
-    assert model_mode == MODEL_MODE_TRAIN
-
-    def debug_axis():
-      jax.debug.print(
-          "\nnn.logical_to_mesh_axes(self.input_axis_names): {x}", x=nn.logical_to_mesh_axes(self.input_axis_names)
-      )
-      jax.debug.print(
-          "nn.logical_to_mesh_axes(self.ep_input_axis_names): {x}", x=nn.logical_to_mesh_axes(self.ep_input_axis_names)
-      )
-      jax.debug.print("is_batch_shard_by_expert: {x}", x=is_batch_shard_by_expert)
-      jax.debug.print("_global_mesh_defined: {x}", x=_global_mesh_defined())
-      jax.debug.print("pxla.thread_resources.env.physical_mesh: {x}", x=pxla.thread_resources.env.physical_mesh)
-      jax.debug.print("self.mesh: {x}", x=self.mesh)
-      # jax.debug.print("get_logical_axis_rules: {x}", x=get_logical_axis_rules())
-
-    # debug_axis()
-
-    # DEBUGGING DEFINITION END #
-
-    use_nn_constraint = self.config.use_nn_constraint
-
-    def apply_logical_sharding(array, logical_axis_name, use_nn_constraint=True):
-      if use_nn_constraint:
-        return nn.with_logical_constraint(array, logical_axis_name)
-      else:
-        return nn.with_logical_constraint(array, logical_axis_name, mesh=self.mesh)
-      # pspec = nn.logical_to_mesh_axes(logical_axis_name)
-      # named_sharding = jax.sharding.NamedSharding(self.mesh, pspec)
-      # return lax.with_sharding_constraint(array, named_sharding)
-
     if model_mode == MODEL_MODE_PREFILL:
       inputs_q = nn.with_logical_constraint(inputs_q, self.prefill_input_axis_names)
       inputs_kv = nn.with_logical_constraint(inputs_kv, self.prefill_input_axis_names)
+    elif model_mode == MODEL_MODE_TRAIN and self.config.expert_shard_attention_option == "context":
+      inputs_q = nn.with_logical_constraint(inputs_q, self.ep_input_axis_names)
+      inputs_kv = nn.with_logical_constraint(inputs_kv, self.ep_input_axis_names)
     elif model_mode == MODEL_MODE_TRAIN:
-      if is_batch_shard_by_expert:
-        # inputs_q = nn.with_logical_constraint(inputs_q, self.input_axis_names)
-        inputs_q = apply_logical_sharding(inputs_q, self.input_axis_names, use_nn_constraint)
-        inputs_kv = nn.with_logical_constraint(inputs_kv, self.input_axis_names)
-      else:
-        # inputs_q = nn.with_logical_constraint(inputs_q, self.ep_input_axis_names)
-        inputs_q = apply_logical_sharding(inputs_q, self.ep_input_axis_names, use_nn_constraint)
-        inputs_kv = nn.with_logical_constraint(inputs_kv, self.ep_input_axis_names)
+      inputs_q = nn.with_logical_constraint(inputs_q, self.input_axis_names)
+      inputs_kv = nn.with_logical_constraint(inputs_kv, self.input_axis_names)
     else:
       inputs_q = nn.with_logical_constraint(inputs_q, self.decode_input_axis_names)
       inputs_kv = nn.with_logical_constraint(inputs_kv, self.decode_input_axis_names)
 
-    prefix = f"\n_global_mesh_defined: {_global_mesh_defined()}, use_nn_constraint={use_nn_constraint}, context={self.config.ici_context_parallelism}, expert={self.config.ici_expert_parallelism}, is_batch_shard_by_expert={is_batch_shard_by_expert}\n\n"
+    # TODO(shuningjin): remove
+    prefix = f"\n_global_mesh_defined: {_global_mesh_defined()}, context={self.config.ici_context_parallelism}, expert={self.config.ici_expert_parallelism}, expert_shard_attention_option={self.config.expert_shard_attention_option}\n\n"
     debug_sharding(inputs_q, prefix + "inputs_q\n")
     if not self.config.fused_qkv:
       debug_sharding(inputs_kv, "inputs_kv\n")
@@ -1871,26 +1830,20 @@ class Attention(nn.Module):
       query = nn.with_logical_constraint(query, (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV))
       key = nn.with_logical_constraint(key, (DECODE_BATCH, DECODE_LENGTH, KV_HEAD, D_KV))
       value = nn.with_logical_constraint(value, (DECODE_BATCH, DECODE_LENGTH, KV_HEAD, D_KV))
-    # model_mode == MODEL_MODE_TRAIN
-    elif is_batch_shard_by_expert:
-      query = nn.with_logical_constraint(query, self.query_axis_names)
-      key = nn.with_logical_constraint(key, self.key_axis_names)
-      value = nn.with_logical_constraint(value, self.value_axis_names)
-      # query = apply_logical_sharding(query, self.query_axis_names, use_nn_constraint)
-      # key = apply_logical_sharding(key, self.key_axis_names, use_nn_constraint)
-      # value = apply_logical_sharding(value, self.value_axis_names, use_nn_constraint)
-    else:
+    elif model_mode == MODEL_MODE_TRAIN and self.config.expert_shard_attention_option == "context":
       query = nn.with_logical_constraint(query, self.ep_query_axis_names)
       key = nn.with_logical_constraint(key, self.ep_key_axis_names)
       value = nn.with_logical_constraint(value, self.ep_value_axis_names)
-      # query = apply_logical_sharding(query, self.ep_query_axis_names, use_nn_constraint)
-      # key = apply_logical_sharding(key, self.ep_key_axis_names, use_nn_constraint)
-      # value = apply_logical_sharding(value, self.ep_value_axis_names, use_nn_constraint)
+    else:
+      query = nn.with_logical_constraint(query, self.query_axis_names)
+      key = nn.with_logical_constraint(key, self.key_axis_names)
+      value = nn.with_logical_constraint(value, self.value_axis_names)
 
     query = checkpoint_name(query, "query_proj")
     key = checkpoint_name(key, "key_proj")
     value = checkpoint_name(value, "value_proj")
 
+    # TODO(shuningjin): remove
     debug_sharding(query, "query\n")
     debug_sharding(key, "key\n")
     debug_sharding(value, "value\n")
@@ -1912,16 +1865,14 @@ class Attention(nn.Module):
 
     if model_mode == MODEL_MODE_PREFILL:
       out = nn.with_logical_constraint(out, self.prefill_out_axis_names)
+    elif model_mode == MODEL_MODE_TRAIN and self.config.expert_shard_attention_option == "context":
+      out = nn.with_logical_constraint(out, self.ep_out_axis_names)
     elif model_mode == MODEL_MODE_TRAIN:
-      if is_batch_shard_by_expert:
-        out = nn.with_logical_constraint(out, self.out_axis_names)
-        # out = apply_logical_sharding(out, self.out_axis_names, use_nn_constraint)
-      else:
-        out = nn.with_logical_constraint(out, self.ep_out_axis_names)
-        # out = apply_logical_sharding(out, self.ep_out_axis_names, use_nn_constraint)
+      out = nn.with_logical_constraint(out, self.out_axis_names)
     else:
       out = nn.with_logical_constraint(out, self.decode_out_axis_names)
 
+    # TODO(shuningjin): remove
     debug_sharding(out, "out\n")
 
     out = self.out_projection(inputs_q.shape[-1], out)
@@ -2096,10 +2047,10 @@ class MLA(Attention):
 
     if model_mode == MODEL_MODE_PREFILL:
       query = nn.with_logical_constraint(query, self.prefill_query_axis_names)
-    elif self.config.is_batch_shard_by_expert:
-      query = nn.with_logical_constraint(query, self.query_axis_names)
-    else:
+    elif model_mode == MODEL_MODE_TRAIN and self.config.expert_shard_attention_option == "context":
       query = nn.with_logical_constraint(query, self.ep_query_axis_names)
+    else:
+      query = nn.with_logical_constraint(query, self.query_axis_names)
     return query
 
   def mla_get_key_value(self, low_rank_main, key_rope, model_mode):
@@ -2115,12 +2066,12 @@ class MLA(Attention):
     if model_mode == MODEL_MODE_PREFILL:
       key = nn.with_logical_constraint(key, self.prefill_key_axis_names)
       value = nn.with_logical_constraint(value, self.prefill_value_axis_names)
-    elif self.config.is_batch_shard_by_expert:
-      key = nn.with_logical_constraint(key, self.key_axis_names)
-      value = nn.with_logical_constraint(value, self.value_axis_names)
-    else:
+    elif model_mode == MODEL_MODE_TRAIN and self.config.expert_shard_attention_option == "context":
       key = nn.with_logical_constraint(key, self.ep_key_axis_names)
       value = nn.with_logical_constraint(value, self.ep_value_axis_names)
+    else:
+      key = nn.with_logical_constraint(key, self.key_axis_names)
+      value = nn.with_logical_constraint(value, self.value_axis_names)
     return key, value
 
   def update_mla_kv_caches(self, low_rank_main, key_rope, decoder_segment_ids, model_mode, previous_chunk=None):
@@ -2206,30 +2157,18 @@ class MLA(Attention):
       A tensor of shape [batch, length, embed_dim] containing the
       MLA-attended outputs.
     """
-    is_batch_shard_by_expert = self.config.is_batch_shard_by_expert
-    use_nn_constraint = self.config.use_nn_constraint
-
-    def apply_logical_sharding(array, logical_axis_name, use_nn_constraint=True):
-      if use_nn_constraint:
-        return nn.with_logical_constraint(array, logical_axis_name)
-      return nn.with_logical_constraint(array, logical_axis_name, mesh=self.mesh)
-      # pspec = nn.logical_to_mesh_axes(logical_axis_name)
-      # named_sharding = jax.sharding.NamedSharding(self.mesh, pspec)
-      # return lax.with_sharding_constraint(array, named_sharding)
-
     if model_mode == MODEL_MODE_PREFILL:
       inputs_q = nn.with_logical_constraint(inputs_q, self.prefill_input_axis_names)
       inputs_kv = nn.with_logical_constraint(inputs_kv, self.prefill_input_axis_names)
-    elif is_batch_shard_by_expert:
-      # inputs_q = nn.with_logical_constraint(inputs_q, self.input_axis_names)
-      inputs_q = apply_logical_sharding(inputs_q, self.input_axis_names, use_nn_constraint)
-      inputs_kv = nn.with_logical_constraint(inputs_kv, self.input_axis_names)
-    else:
-      # inputs_q = nn.with_logical_constraint(inputs_q, self.ep_input_axis_names)
-      inputs_q = apply_logical_sharding(inputs_q, self.ep_input_axis_names, use_nn_constraint)
+    elif model_mode == MODEL_MODE_TRAIN and self.config.expert_shard_attention_option == "context":
+      inputs_q = nn.with_logical_constraint(inputs_q, self.ep_input_axis_names)
       inputs_kv = nn.with_logical_constraint(inputs_kv, self.ep_input_axis_names)
+    else:
+      inputs_q = nn.with_logical_constraint(inputs_q, self.input_axis_names)
+      inputs_kv = nn.with_logical_constraint(inputs_kv, self.input_axis_names)
 
-    prefix = f"\nuse_nn_constraint={use_nn_constraint} (inputs_q), context={self.config.ici_context_parallelism}, expert={self.config.ici_expert_parallelism}, is_batch_shard_by_expert={is_batch_shard_by_expert}\n\n"
+    # TODO(shuningjin): remove
+    prefix = f"\n_global_mesh_defined: {_global_mesh_defined()}, context={self.config.ici_context_parallelism}, expert={self.config.ici_expert_parallelism}, expert_shard_attention_option={self.config.expert_shard_attention_option}\n\n"
     debug_sharding(inputs_q, prefix + "MLA inputs_q\n")
     debug_sharding(inputs_kv, "MLA inputs_kv\n")
 
@@ -2242,6 +2181,7 @@ class MLA(Attention):
     key = checkpoint_name(key, "key_proj")
     value = checkpoint_name(value, "value_proj")
 
+    # TODO(shuningjin): remove
     debug_sharding(query, "MLA query\n")
     debug_sharding(key, "MLA key\n")
     debug_sharding(value, "MLA value\n")
@@ -2255,11 +2195,12 @@ class MLA(Attention):
     else:
       out = self.attention_op(query, key, value, decoder_segment_ids, model_mode, cached_values)
 
-    if is_batch_shard_by_expert:
-      out = nn.with_logical_constraint(out, self.out_axis_names)
-    else:
+    if model_mode == MODEL_MODE_TRAIN and self.config.expert_shard_attention_option == "context":
       out = nn.with_logical_constraint(out, self.ep_out_axis_names)
+    else:
+      out = nn.with_logical_constraint(out, self.out_axis_names)
 
+    # TODO(shuningjin): remove
     debug_sharding(out, "MLA out\n")
 
     out = self.out_projection(inputs_q.shape[-1], out)

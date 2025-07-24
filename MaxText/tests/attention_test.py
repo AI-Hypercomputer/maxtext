@@ -354,9 +354,65 @@ class AttentionTest(unittest.TestCase):
 
   @pytest.mark.tpu_only
   def test_ep_shard(self):
+    self.test_ep_shard_helper(
+        ici_context_parallelism=2,
+        context_parallel_load_balance=False,
+        ici_expert_parallelism=2,
+        expert_shard_attention_option="context",
+    )
+    self.test_ep_shard_helper(
+        ici_context_parallelism=2,
+        context_parallel_load_balance=False,
+        ici_expert_parallelism=2,
+        expert_shard_attention_option="fsdp",
+    )
+    self.test_ep_shard_helper(
+        ici_context_parallelism=1,
+        context_parallel_load_balance=False,
+        ici_expert_parallelism=4,
+        expert_shard_attention_option="context",
+    )
+    self.test_ep_shard_helper(
+        ici_context_parallelism=1,
+        context_parallel_load_balance=False,
+        ici_expert_parallelism=4,
+        expert_shard_attention_option="fsdp",
+    )
+
+    self.test_ep_shard_helper(
+        ici_context_parallelism=2,
+        context_parallel_load_balance=True,
+        ici_expert_parallelism=2,
+        expert_shard_attention_option="context",
+    )
+    self.test_ep_shard_helper(
+        ici_context_parallelism=2,
+        context_parallel_load_balance=True,
+        ici_expert_parallelism=2,
+        expert_shard_attention_option="fsdp",
+    )
+    self.test_ep_shard_helper(
+        ici_context_parallelism=1,
+        context_parallel_load_balance=True,
+        ici_expert_parallelism=4,
+        expert_shard_attention_option="context",
+    )
+    self.test_ep_shard_helper(
+        ici_context_parallelism=1,
+        context_parallel_load_balance=True,
+        ici_expert_parallelism=4,
+        expert_shard_attention_option="fsdp",
+    )
+
+  def test_ep_shard_helper(
+      self,
+      ici_context_parallelism=2,
+      context_parallel_load_balance=False,
+      ici_expert_parallelism=2,
+      expert_shard_attention_option="context",
+  ):
     """Test equivalence between dot_product and TPU accelerated"""
     num_kv_heads = self.num_kv_heads
-
     lnx, decoder_segment_ids, decoder_positions = self.get_data(self.dtype)
 
     # attention_as_mha_generic = Attention(
@@ -391,32 +447,29 @@ class AttentionTest(unittest.TestCase):
         rngs={"aqt": self.rng},
     )
 
-    # Test with Expert Parallelism
-
-    config_ep = pyconfig.initialize(
+    # Test expert parallelism as context parallelism
+    cfg_ep = pyconfig.initialize(
         [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
         **self.config_arguments,
-        ici_context_parallelism=2,
-        context_parallel_load_balance=False,
-        ici_expert_parallelism=2,
-        is_batch_shard_by_expert=False,
-        use_nn_constraint=True,
+        ici_context_parallelism=ici_context_parallelism,
+        context_parallel_load_balance=context_parallel_load_balance,
+        ici_expert_parallelism=ici_expert_parallelism,
+        expert_shard_attention_option=expert_shard_attention_option,
     )
-    self.cfg_ep = config_ep
-    devices_array_ep = maxtext_utils.create_device_mesh(self.cfg_ep)
-    self.mesh_ep = Mesh(devices_array_ep, self.cfg_ep.mesh_axes)
+    devices_array_ep = maxtext_utils.create_device_mesh(cfg_ep)
+    mesh_ep = Mesh(devices_array_ep, cfg_ep.mesh_axes)
 
     attention_as_mha_flash_ep = Attention(
-        config=self.cfg_ep,  # we pass the context parallelism in the config
-        num_query_heads=self.cfg_ep.num_query_heads,
+        config=cfg_ep,
+        num_query_heads=cfg_ep.num_query_heads,
         num_kv_heads=num_kv_heads,
-        head_dim=self.cfg_ep.head_dim,
-        max_target_length=self.cfg_ep.max_target_length,
-        max_prefill_predict_length=self.cfg_ep.max_prefill_predict_length,
-        mesh=self.mesh_ep,
+        head_dim=cfg_ep.head_dim,
+        max_target_length=cfg_ep.max_target_length,
+        max_prefill_predict_length=cfg_ep.max_prefill_predict_length,
+        mesh=mesh_ep,
         attention_kernel="flash",
         dtype=self.dtype,
-        dropout_rate=self.cfg_ep.dropout_rate,
+        dropout_rate=cfg_ep.dropout_rate,
         name="self_attention_ep",
     )
     attention_as_mha_flash_ep_variable = attention_as_mha_flash_ep.init(
@@ -426,28 +479,23 @@ class AttentionTest(unittest.TestCase):
         jnp.ones((self.global_batch_size, self.max_target_length)),
     )
 
-    # TODO(shuningjin): need test `context_parallel_load_balance=True`
-    context_parallel_size = self.cfg_ep.ici_context_parallelism
-    if not self.cfg_ep.is_batch_shard_by_expert:
-      context_parallel_size = context_parallel_size * self.cfg_ep.ici_expert_parallelism
-    if context_parallel_size > 1 and self.cfg_ep.context_parallel_load_balance:
-      lnx = reorder_sequence(lnx, cp_size=context_parallel_size, seq_dim=1, to_contiguous=False)
-      decoder_positions = reorder_sequence(decoder_positions, cp_size=context_parallel_size, seq_dim=1, to_contiguous=False)
-      decoder_segment_ids = reorder_sequence(
-          decoder_segment_ids, cp_size=context_parallel_size, seq_dim=1, to_contiguous=False
-      )
-      # batch = {"inputs": lnx, "inputs_segmentation": decoder_segment_ids, "inputs_position": decoder_positions}
-      # with self.mesh_ep:
-      #   reorder_fn = max_utils.get_reorder_callable(context_parallel_size)
-      #   reordered_batch = reorder_fn(batch)
-      # jax.debug.print("batch {x}", x=batch)
-      # jax.debug.print("reorder_batch {x}", x=reordered_batch)
-      # # Unpack the reordered tensors
-      # lnx = reordered_batch["inputs"]
-      # decoder_segment_ids = reordered_batch["inputs_segmentation"]
-      # decoder_positions = reordered_batch["inputs_position"]
+    # if load balanced cp, need shuffle and shard along seq dim
+    context_parallel_size = cfg_ep.ici_context_parallelism
+    if cfg_ep.expert_shard_attention_option == "context":
+      context_parallel_size = context_parallel_size * cfg_ep.ici_expert_parallelism
+    if context_parallel_size > 1 and cfg_ep.context_parallel_load_balance:
+      batch = {"inputs": lnx, "inputs_segmentation": decoder_segment_ids, "inputs_position": decoder_positions}
+      with mesh_ep:
+        reorder_fn = max_utils.get_reorder_callable(context_parallel_size)
+        reordered_batch = reorder_fn(batch)
+      lnx = reordered_batch["inputs"]
+      decoder_segment_ids = reordered_batch["inputs_segmentation"]
+      decoder_positions = reordered_batch["inputs_position"]
+      # TODO(shuningjin): remove
+      jax.debug.print("batch {x}", x=batch)
+      jax.debug.print("reordered_batch {x}", x=reordered_batch)
 
-    with self.mesh_ep, nn_partitioning.axis_rules(self.cfg_ep.logical_axis_rules):
+    with mesh_ep, nn_partitioning.axis_rules(cfg_ep.logical_axis_rules):
       mha_generic_flash_ep_output = attention_as_mha_flash_ep.apply(
           attention_as_mha_flash_ep_variable,
           lnx,
@@ -459,10 +507,16 @@ class AttentionTest(unittest.TestCase):
           rngs={"aqt": self.rng},
       )
 
-    # Assert that the logits generated by the generic dot product and flash attention+context parallelism are close
+    # if load balanced cp, need de-shuffle and gather along seq dim for output
+    if context_parallel_size > 1 and cfg_ep.context_parallel_load_balance:
+      mha_generic_flash_ep_output = max_utils.reorder_sequence(
+          tensor=mha_generic_flash_ep_output, cp_size=context_parallel_size, seq_dim=1, to_contiguous=True
+      )
+
+    # Assert that the logits generated by the generic dot product and flash attention+expert as context parallelism are close
     self.assertTrue(
         jax.numpy.allclose(mha_generic_output, mha_generic_flash_ep_output, rtol=1e-01, atol=1e-01, equal_nan=False),
-        msg="Logits from generic dot product and flash attention+context parallelism are not close.",
+        msg="Logits from generic dot product and flash attention+expert as context parallelism are not close.",
     )
 
   def get_structured_data(self, dtype):

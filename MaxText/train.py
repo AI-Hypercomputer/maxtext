@@ -486,8 +486,7 @@ def setup_train_loop(config, recorder, devices=None):
   with maybe_record_goodput(recorder, GoodputEvent.TRAINING_PREPARATION):
     data_iterator, eval_data_iterator = create_data_iterator(config, mesh)
     context_parallel_size = mesh.shape["context"]
-    # TODO(shuningjin): double check this line
-    if not config.is_batch_shard_by_expert:
+    if config.expert_shard_attention_option == "context":
       context_parallel_size = context_parallel_size * mesh.shape["expert"]
     # Check if context parallelism is being used with sequence packing
     if context_parallel_size > 1 and config.packing and config.dataset_type != "synthetic":

@@ -143,6 +143,14 @@ def validate_prefill_and_target_lengths(max_prefill_length: int, max_target_leng
     )
 
 
+def validate_expert_shard_attention_option(expert_shard_attention_option: str) -> None:
+  valid_expert_shard_attention_option = ("fsdp", "context")
+  if expert_shard_attention_option not in valid_expert_shard_attention_option:
+    raise ValueError(
+        f"Invalid expert_shard_attention_option was passed. Got: {expert_shard_attention_option}. Valid options: {valid_expert_shard_attention_option}"
+    )
+
+
 def validate_rope_type(rope_type: str) -> None:
   valid_rope_types = ("default", "yarn", "llama3.1")
   if rope_type not in valid_rope_types:
@@ -162,6 +170,7 @@ def validate_keys(keys):
   validate_model_call_mode(keys["model_call_mode"])
   validate_prefill_and_target_lengths(keys["max_prefill_predict_length"], keys["max_target_length"])
   validate_rope_type(keys["rope_type"])
+  validate_expert_shard_attention_option(keys["expert_shard_attention_option"])
 
   assert (keys["load_parameters_path"] == "" and keys["load_full_state_path"] == "") or keys[
       "enable_checkpointing"
