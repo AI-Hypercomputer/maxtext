@@ -412,7 +412,7 @@ class Decoder(nn.Module):
     else:
       raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block.value=}")
 
-  def scan_decoder_layers(self, cfg, decoder_layer, length, metdata_axis_name, mesh, **kwargs):
+  def scan_decoder_layers(self, cfg, decoder_layer, length, metadata_axis_name, mesh, **kwargs):
     """scan decoder layers, calls `flax.linen.transforms.scan`"""
     initializing = self.is_mutable_collection("params")
     params_spec = cfg.param_scan_axis if initializing else ScanIn(cfg.param_scan_axis)
@@ -437,9 +437,9 @@ class Decoder(nn.Module):
             nn.broadcast,
         ),
         length=length,
-        metadata_params={nn.PARTITION_NAME: metdata_axis_name},
+        metadata_params={nn.PARTITION_NAME: metadata_axis_name},
     )
-    return scan_fn(config=cfg, mesh=mesh, name=metdata_axis_name, quant=self.quant, **kwargs)
+    return scan_fn(config=cfg, mesh=mesh, name=metadata_axis_name, quant=self.quant, **kwargs)
 
   def get_pipeline_stage_module(self, decoder_blocks):
     """get pipeline stage module"""

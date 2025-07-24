@@ -122,7 +122,7 @@ def apply_mask_to_logits(logits: Array, mask: Array):
 class ChunkedCausalMask(splash_attention_mask._ComputableMask):  # pylint: disable=protected-access
   """Lazy chunked causal mask.
 
-  Attention is causal within each chunk (0, K), (K, 2K), (2K, 3K), ... tokens attend to each other but not accross chunks.
+  Attention is causal within each chunk (0, K), (K, 2K), (2K, 3K), ... tokens attend to each other but not across chunks.
   Llama4 models use interleaved chunk attention along with global attention.
 
   This mask class inherits from splash_attention_mask._ComputableMask and is designed to be used with Splash Attention.
