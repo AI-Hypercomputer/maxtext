@@ -143,18 +143,18 @@ def validate_prefill_and_target_lengths(max_prefill_length: int, max_target_leng
     )
 
 
+def validate_rope_type(rope_type: str) -> None:
+  valid_rope_types = ("default", "yarn", "llama3.1")
+  if rope_type not in valid_rope_types:
+    raise ValueError(f"Invalid RoPE type was passed. Got: {rope_type}. Valid options: {valid_rope_types}")
+
+
 def validate_expert_shard_attention_option(expert_shard_attention_option: str) -> None:
   valid_expert_shard_attention_option = ("fsdp", "context")
   if expert_shard_attention_option not in valid_expert_shard_attention_option:
     raise ValueError(
         f"Invalid expert_shard_attention_option was passed. Got: {expert_shard_attention_option}. Valid options: {valid_expert_shard_attention_option}"
     )
-
-
-def validate_rope_type(rope_type: str) -> None:
-  valid_rope_types = ("default", "yarn", "llama3.1")
-  if rope_type not in valid_rope_types:
-    raise ValueError(f"Invalid RoPE type was passed. Got: {rope_type}. Valid options: {valid_rope_types}")
 
 
 def validate_keys(keys):
@@ -973,15 +973,15 @@ def validate_sparse_matmul_parallelism(raw_keys):
   ):
     raise ValueError("You should use the pipeline_fsdp_ag_once = True and leave model_fsdp_ag_once = False.")
 
+
 def validate_ragged_dot(raw_keys):
   if raw_keys["sparse_matmul"] and not raw_keys["megablox"]:
     config_flag = "jax_ragged_dot_use_ragged_dot_instruction"
     try:
       jax.config.update(config_flag, True)
     except AttributeError:
-      max_logging.log(
-          f"JAX config {config_flag} not found, possibly due to old JAX version."
-      )
+      max_logging.log(f"JAX config {config_flag} not found, possibly due to old JAX version.")
+
 
 def create_new_logical_axis_rules(old_logical_axis_rules, new_logical_axis_rules):
   new_logical_axis = set()
