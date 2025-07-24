@@ -353,7 +353,7 @@ class OfflineInference:
           self.params,
           self.decode_state,
           slot,
-          row.id,
+          int(row.id),
           row.tokens,
           row.true_length,
           self.max_prefill_length,
