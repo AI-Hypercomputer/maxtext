@@ -9,7 +9,7 @@ repos:
         args:
           - '-w'
           - '--skip="*.txt,pylintrc,.*,assets/*"'
-          - '-L ND,nd,sems,TE'
+          - '-L ND,nd,sems,TE,ROUGE,rouge'
           - '.'
         additional_dependencies:
           - tomli
