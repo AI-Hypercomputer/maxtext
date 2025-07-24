@@ -209,7 +209,7 @@ class DeepSeekRoutingTest(unittest.TestCase):
     #  [0.80, 0.01, 0.01, 0.01] - sum top2 = 0.81
     #  [0.05, 0.80, 0.20, 0.10] - sum top2 = 1.0 (selected group) - index from 12 to 15
     #
-    # 4 groups of 2st token
+    # 4 groups of 2nd token
     #  [0.68, 0.20, 0.06, 0.03] - sum top2 = 0.88 (selected group) - index from 0 to 3
     #  [0.32, 0.10, 0.05, 0.02] - sum top2 = 0.42
     #  [0.65, 0.20, 0.04, 0.01] - sum top2 = 0.85 (selected group) - index from 8 to 11

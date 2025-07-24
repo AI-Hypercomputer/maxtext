@@ -33,9 +33,7 @@ class DisruptionManager:
 
   def __init__(self) -> None:
     """Initializes the DisruptionManager."""
-    self.threads_to_monitor: defaultdict[str, List[threading.Thread]] = (
-        defaultdict(list)
-    )
+    self.threads_to_monitor: defaultdict[str, List[threading.Thread]] = defaultdict(list)
 
   def add_workload(
       self,
@@ -63,10 +61,7 @@ class DisruptionManager:
           daemon=True,
       )
       self.threads_to_monitor[workload_name].append(thread)
-    print(
-        f"Added {len(disruption_configs)} disruption configs for workload:"
-        f" {workload_name}"
-    )
+    print(f"Added {len(disruption_configs)} disruption configs for workload:" f" {workload_name}")
 
   def remove_workload(self, workload_name: str) -> None:
     """Removes a workload from the disruption manager.
@@ -116,21 +111,15 @@ class DisruptionManager:
     step_pod_regex = f"{workload_name}{disruption_config.step_pod_regex}"
 
     # Create Monitor based on trigger type
-    monitor: Monitor = create_monitor(
-        workload_name, disruption_config, step_pod_regex
-    )
-    disruption_handler: DisruptionHandler = create_disruption_handler(
-        disruption_config
-    )
+    monitor: Monitor = create_monitor(workload_name, disruption_config, step_pod_regex)
+    disruption_handler: DisruptionHandler = create_disruption_handler(disruption_config)
 
     if monitor.monitor_and_detect_trigger():
       print(
           f"🔥🔥🔥 Trigger detected for workload: {workload_name}, triggering"
           f" {disruption_config.disruption_method} 🔥🔥🔥"
       )
-      disruption_handler.trigger_disruption(
-          workload_name, cluster_config, disruption_config, target_pod_regex
-      )
+      disruption_handler.trigger_disruption(workload_name, cluster_config, disruption_config, target_pod_regex)
     else:
       print(f"Monitoring for workload: {workload_name} exited without trigger.")
 

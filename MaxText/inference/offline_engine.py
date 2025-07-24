@@ -45,7 +45,7 @@ import traceback
 import functools
 import dataclasses
 from enum import Enum
-from typing import Any, List, Tuple, Callable, Optional, Dict, Union
+from typing import Any, List, Tuple, Callable, Optional, Dict, Union, Hashable
 from collections import defaultdict
 import time
 
@@ -182,7 +182,7 @@ class PrefillHelper:
   @functools.partial(jax.jit, static_argnums=(0), donate_argnames=("decode_state",))
   def _jitted_single_prefill(
       self, params, tokens, slot, true_length, decode_state, rng
-  ) -> Tuple[jax.Array, jax.Array, DecodeState, jax.Array]:
+  ) -> Tuple[jax.Array, DecodeState, jax.Array]:
     """Prefill a single input."""
     # pylint: disable=protected-access
     first_token, decode_state = self._processor._process(
@@ -309,6 +309,13 @@ class InferenceWorker:
 
   """
 
+  empty_decode_slots: List[int] = []
+  slot_to_id: Dict[int, Optional[int]] = {}
+  completion_tokens_by_id: Dict[Hashable, List[TokenOutput]] = {}
+  decode_state: Optional[DecodeState] = None
+  prompt_logprobs_by_id: Dict[Hashable, List[np.ndarray]] = {}
+  true_lengths: Dict[Hashable, int] = {}
+
   def __init__(
       self,
       config: MaxTextConfig,
@@ -364,12 +371,12 @@ class InferenceWorker:
     # Inference state (initialized later)
     self.running = False
     self.generated_token_backlog = queue.Queue()
-    self.empty_decode_slots: List[int] = []
-    self.slot_to_id: Dict[int, int] = {}
-    self.decode_state: DecodeState = None
-    self.completion_tokens_by_id: Dict[any, List[TokenOutput]] = {}
-    self.prompt_logprobs_by_id: Dict[any, List[np.ndarray]] = {}
-    self.true_lengths: Dict[any, int] = {}
+    self.empty_decode_slots = []
+    self.slot_to_id = {}
+    self.decode_state = None
+    self.completion_tokens_by_id = {}
+    self.prompt_logprobs_by_id = {}
+    self.true_lengths = {}
     # Model components (initialized later)
     self.engine = None
     self.decode_batch_size = None
@@ -464,7 +471,7 @@ class InferenceWorker:
     self.running = True
     self.true_lengths = {input.id: input.true_length for input in data}
 
-    max_logging.log("Continous batching started")
+    max_logging.log("Continuous batching started")
 
     self._run_continous_batching(data)
 
@@ -502,7 +509,7 @@ class InferenceWorker:
           model_params=self.params,
           decode_state=self.decode_state,
           decode_slot=slot,
-          input_id=row.id,
+          input_id=int(row.id),
           input_tokens_padded=row.tokens,
           input_true_length=row.true_length,
           prefill_done=self.prefill_done,
@@ -544,7 +551,7 @@ class InferenceWorker:
         prompt_logprobs = self.prompt_logprobs_by_id[input_id].flatten()
         completion_outputs.append(
             CompletionOutput(
-                index=input_id,
+                index=int(input_id),
                 prompt_length=prompt_length,
                 token_ids=np.concatenate(
                     (
@@ -562,7 +569,7 @@ class InferenceWorker:
         )
     return completion_outputs
 
-  def prefill_done(self, prefill_result: List[PrefillResult], prompt_ids: List[any], decode_state: DecodeState):
+  def prefill_done(self, prefill_result: List[PrefillResult], prompt_ids: List, decode_state: DecodeState):
     """Callback function called when prefill completes.
     This function adds the prefill tokens to the detokenization queue,
     which manages the token emission and decode slot evictions.
@@ -685,7 +692,7 @@ class InferenceWorker:
       prompt_id,
       result_token: int,
       log_prob: float,
-      prompt_logp: np.ndarray = None,
+      prompt_logp: Optional[np.ndarray] = None,
   ):
     """Adds the token to the results for the specified prompt ID and
     determines if generation should terminate.
@@ -711,7 +718,7 @@ class InferenceWorker:
     index = len(self.completion_tokens_by_id[prompt_id])
     if prompt_logp is not None:
       self.prompt_logprobs_by_id[prompt_id] = prompt_logp
-    self.completion_tokens_by_id[prompt_id].append(TokenOutput(result_token, log_prob))
+    self.completion_tokens_by_id[prompt_id].append(TokenOutput(np.asarray(result_token), np.asarray(log_prob)))
     return (result_token in self.eos_ids) or (index + 1 == self.max_decode_length)
 
 
@@ -725,7 +732,7 @@ class OfflineEngine:
       enable_batch_prefill: bool = False,
       min_decode_steps: int = 10,
       tokenizer: Any = None,
-      eos_ids: List[int] = None,
+      eos_ids: Optional[List[int]] = None,
       prefill_lengths: Union[List[int], str] = "auto",
       batch_prefill_max_batch_size: int = 16,
       mesh: Mesh = None,
@@ -860,7 +867,7 @@ class OfflineEngine:
           "When you provide JAX/numpy arrays to Offline Engine, "
           "make sure that the arrays are not padded with padding tokens."
       )
-      data = [InputData(id=i, tokens=array, true_length=len(array)) for i, array in enumerate(data)]
+      data = [InputData(id=str(i), tokens=array, true_length=len(array)) for i, array in enumerate(data)]
 
     # Make sure all data id is unique
     if len(data) != len({item.id for item in data}):
