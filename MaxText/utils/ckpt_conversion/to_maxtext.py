@@ -64,6 +64,8 @@ from MaxText.checkpointing import save_checkpoint
 from MaxText.utils.ckpt_conversion.utils.param_mapping import HOOK_FNS, PARAM_MAPPING
 from MaxText.utils.ckpt_conversion.utils.utils import apply_hook_fns, HF_IDS
 
+jax.config.update("jax_platform_name", "cpu")
+
 
 def main(argv: Sequence[str]) -> None:
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
