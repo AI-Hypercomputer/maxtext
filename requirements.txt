@@ -15,7 +15,7 @@ google-api-core
 google-api-python-client
 grain[parquet]>=0.2.6
 huggingface_hub
-flax>=0.10.6
+flax==0.10.6
 jaxtyping
 ml-collections
 ml-goodput-measurement==0.0.10
@@ -39,5 +39,5 @@ transformers
 mlperf-logging@git+https://github.com/mlperf/logging.git
 google-jetstream@git+https://github.com/AI-Hypercomputer/JetStream.git
 jsonlines
-pathwaysutils==0.1.1
+pathwaysutils@git+https://github.com/AI-Hypercomputer/pathways-utils.git
 omegaconf

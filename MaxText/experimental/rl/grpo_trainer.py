@@ -23,10 +23,12 @@ updating policy gradients based on reward functions
 
 
 import datetime
+import time
 import os
 import functools
+import threading
+
 from typing import Sequence
-from collections.abc import Callable
 
 from absl import app
 
@@ -37,6 +39,7 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 from jax import random
+import numpy as np
 
 from flax.linen import partitioning as nn_partitioning
 from flax import struct
@@ -53,21 +56,36 @@ from MaxText import checkpointing
 from MaxText import exceptions
 from MaxText import max_logging
 from MaxText import max_utils
-from MaxText import maxengine
 from MaxText import maxtext_utils
 from MaxText import train_utils
 from MaxText import profiler
 from MaxText import pyconfig
-from MaxText.common_types import Array
+
+
+from MaxText.inference import offline_engine
+
+from MaxText.metric_logger import MetricLogger
+
+from MaxText.vertex_tensorboard import VertexTensorboardManager
+
 from MaxText.data_loader import DataLoader
 from MaxText.experimental.rl import grpo_input_pipeline
+from MaxText.experimental.rl import grpo_utils
+from MaxText.layers import models
+
+
 from MaxText.globals import EPS
 from MaxText.layers import models
 from MaxText.metric_logger import MetricLogger
+
+import transformers
+
 from MaxText.train import (
     validate_train_config,
     get_first_step,
 )
+
+
 from MaxText.utils.goodput_utils import (
     GoodputEvent,
     create_goodput_recorder,
@@ -76,10 +94,11 @@ from MaxText.utils.goodput_utils import (
 )
 from MaxText.vertex_tensorboard import VertexTensorboardManager
 
+
 # pylint: disable=too-many-positional-arguments
 
 Transformer = models.Transformer
-
+EPS = 1e-8
 
 # -----------------------------------------------------------------------------
 # GRPO
@@ -116,14 +135,28 @@ def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_
 
     1. Compute the per-token log-probabilities for the full sequence (prompt + completion) both with
          the current model (policy) and the reference model.
-    2. Compute a per-token KL divergence:
-         kl = exp(ref_logp - policy_logp) - (ref_logp - policy_logp) - 1.
-    3. Compute a scalar reward for each generated completion via reward_fn.
-    4. Group the rewards (each prompt yields “G = num_generations” completions), compute the mean and std,
+    2. Compute a scalar reward for each generated completion via reward_fn.
+    3. Group the rewards (each prompt yields “G = num_generations” completions), compute the mean and std,
        and then compute a normalized advantage.
-    5. Compute a per-token loss that is given by
-         - [exp(policy_logp - stop_gradient(policy_logp)) * advantage - beta * kl]
-       (the jax.lax.stop_gradient ensures that only the advantage contributes to gradients).
+    4. Compute a per-token loss that is given by
+        - [min(exp(policy_logp - old_logp), clip(exp(policy_logp - old_logp), 1-e, 1+e)) * advantage - beta * kl
+        Where:
+        - `policy_logp`: The log probability of the current policy's output.
+        - `old_logp`: The log probability of the behavior policy's output
+          (i.e., the policy used to generate the samples).
+        - For on-policy training, `old_logp` is a stop-gradient of the current `policy_logp`,
+          ensuring that only the advantage term contributes to the gradients. This is because
+          the samples are generated using the current policy.
+        - For off-policy training, `old_logp` is obtained directly from the
+          `data["completions_logprobs"]`, which stores the log probabilities
+          from the behavior policy that generated the samples.
+        - `advantage`: The advantage, representing how much better a given
+          action is compared to the average action.
+        - `beta`: A hyperparameter that controls the strength of the KL divergence penalty.
+        - `kl_divergence`: The Kullback-Leibler divergence between the current
+          policy and the behavior policy.
+    5. Compute a per-token KL divergence:
+         kl = exp(ref_logp - policy_logp) - (ref_logp - policy_logp) - 1.
     6. Restrict the loss calculations to the generated completion tokens.
     7. Finally the loss is the average (over examples) of the mean per-token loss - where only tokens before the
        first eos (according to tokenizer.eos_id) are taken into account.
@@ -155,7 +188,7 @@ def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_
   # compute_log_probs returns logits.
   # We compute the log-probabilities for the entire generated sequence, then shift as usual.
   rng1, rng_fwd = random.split(dropout_rng)
-  token_logps_policy, intermediate_outputs = compute_log_probs(
+  token_logps_policy, intermediate_outputs = grpo_utils.compute_log_probs(
       model,
       params,
       prompt_with_completions,
@@ -167,7 +200,49 @@ def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_
       rngs={"dropout": rng1, "params": rng_fwd},
   )  # [BxG,S-1,E]
 
-  token_logps_ref, _ = compute_log_probs(
+
+  completion_target_segmentation = data["ar_completions_segmentation"][..., 1:]  # [BxG,S-1]
+  # Because of the shifting, token_logps have shape [BxG, S-1]. So, we create a mask for the valid tokens
+  # Create a mask to clear out the last token position in the ar_completions
+  # and to make sure loss is computed on non-padding tokens
+  valid_seq_mask = completion_target_segmentation != 0  # [BxG, S-1]
+
+  
+  # --- (2) Compute a scalar reward for each generated completion via reward_fn.
+  rewards = grpo_utils.dummy_reward_len(valid_seq_mask)
+  rewards = jnp.array(rewards)  # shape [BxG]
+
+  # --- (3) Group rewards and compute normalized advantage.
+  G = config.num_generations
+  rewards_grouped = rewards.reshape(-1, G)  # shape [B, G]
+  group_mean = jnp.mean(rewards_grouped, axis=1)  # shape [B]
+  group_std = jnp.std(rewards_grouped, axis=1)  # shape [B]
+  repeated_group_mean = jnp.repeat(group_mean, G)  # shape [BxG]
+  repeated_group_std = jnp.repeat(group_std, G)  # shape [BxG]
+  advantages = (rewards - repeated_group_mean) / (repeated_group_std + EPS)  # shape [BxG]
+
+  # --- (4) Compute per-token loss.
+  # Make sure to expand advantage along the token dimension.
+  advantages_exp = advantages[:, None]  # shape [BxG, 1]
+
+  # We calculate the policy difference with old_per_token_logps for off-policy training,
+  # else, for on-policy training old_per_token_logps = stop_gradient(token_logps_policy)
+  if data["completions_logprobs"] is None: # off-policy
+    old_per_token_logps = jax.lax.stop_gradient(token_logps_policy)
+  else: # on-policy
+    old_per_token_logps = data["completions_logprobs"]
+  
+  policy_diff = token_logps_policy - old_per_token_logps
+  coef_1 = jnp.exp(policy_diff)
+  coef_2 = jnp.clip(coef_1, 1 - config.grpo_epsilon, 1 + config.grpo_epsilon)
+  loss_tokens = -jnp.minimum(
+      coef_1 * advantages_exp,
+      coef_2 * advantages_exp,
+  )
+  
+  # --- (5) Compute per-token KL divergence for each token in the generated completion, if beta != 0.
+  if config.grpo_beta != 0.0:
+    token_logps_ref, _ = grpo_utils.compute_log_probs(
       model,
       {"params": reference_params},
       prompt_with_completions,
@@ -177,46 +252,18 @@ def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_
       config,
       is_train=False,
       rngs={"dropout": rng1, "params": rng_fwd},
-  )  # [BxG,S-1,E]
+    )  # [BxG,S-1,E]
 
-  completion_target_segmentation = data["ar_completions_segmentation"][..., 1:]  # [BxG,S-1]
-  # Because of the shifting, token_logps have shape [BxG, S-1]. So, we create a mask for the valid tokens
-  # Create a mask to clear out the last token position in the ar_completions
-  # and to make sure loss is computed on non-padding tokens
-  valid_seq_mask = completion_target_segmentation != 0  # [BxG, S-1]
+    token_diff_logps_ref_policy = token_logps_ref - token_logps_policy
 
-  # --- (2) Compute per-token KL divergence for each token in the generated completion.
-  token_diff_logps_ref_policy = token_logps_ref - token_logps_policy
-
-  per_token_kl = jnp.exp(token_diff_logps_ref_policy) - (token_diff_logps_ref_policy) - 1
-  # loss is computed on non-padding tokens
-  per_token_kl = per_token_kl * valid_seq_mask
-
-  # --- (3) Compute a scalar reward for each generated completion via reward_fn.
-  rewards = dummy_reward_len(valid_seq_mask)
-  rewards = jnp.array(rewards)  # shape [BxG]
-
-  # --- (4) Group rewards and compute normalized advantage.
-  G = config.num_generations
-  rewards_grouped = rewards.reshape(-1, G)  # shape [B, G]
-  group_mean = jnp.mean(rewards_grouped, axis=1)  # shape [B]
-  group_std = jnp.std(rewards_grouped, axis=1)  # shape [B]
-  repeated_group_mean = jnp.repeat(group_mean, G)  # shape [BxG]
-  repeated_group_std = jnp.repeat(group_std, G)  # shape [BxG]
-  advantages = (rewards - repeated_group_mean) / (repeated_group_std + EPS)  # shape [BxG]
-
-  # --- (5) Compute per-token loss.
-  # We follow the TRL GRPO loss:
-  #   loss_token = - [ exp(policy_logp - stop_gradient(policy_logp)) * advantage - beta * kl ]
-  # Make sure to expand advantage along the token dimension.
-  advantages_exp = advantages[:, None]  # shape [BxG, 1]
-
-  policy_diff = token_logps_policy - jax.lax.stop_gradient(token_logps_policy)
-  loss_tokens = -(jnp.exp(policy_diff) * advantages_exp - config.grpo_beta * per_token_kl)
+    per_token_kl = jnp.exp(token_diff_logps_ref_policy) - (token_diff_logps_ref_policy) - 1
+    # loss is computed on non-padding tokens
+    per_token_kl = per_token_kl * valid_seq_mask
+    loss_tokens += config.grpo_beta * per_token_kl
 
   # --- (6) Restrict the loss calculations to the generated completion tokens.
   # Average over tokens per generated completion.
-  loss_per_example = jnp.sum(loss_tokens * valid_seq_mask, axis=1) / (jnp.sum(valid_seq_mask, axis=1) + EPS)
+  loss_per_example = jnp.sum(loss_tokens * valid_seq_mask, axis=1) / jnp.clip(jnp.sum(valid_seq_mask, axis=1), min=1)
 
   # --- (7) Finally the loss is the average (over examples) of the mean per-token loss
   loss = jnp.mean(loss_per_example)
@@ -230,7 +277,10 @@ def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_
     loss += moe_lb_loss
 
   # Compute auxiliary metrics.
-  avg_kl = jnp.mean((per_token_kl * valid_seq_mask) / (jnp.sum(valid_seq_mask, axis=1, keepdims=True) + EPS))
+  if config.grpo_beta != 0.0:
+    avg_kl = jnp.mean((per_token_kl * valid_seq_mask) / jnp.clip(jnp.sum(valid_seq_mask, axis=1, keepdims=True), min=1))
+  else:
+    avg_kl = None
   avg_reward = jnp.mean(rewards)
   avg_advantage = jnp.mean(advantages)
   avg_completion_length = jnp.mean(jnp.sum(data["ar_completions_segmentation"] != 0, axis=1))
@@ -248,245 +298,9 @@ def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_
   return loss, aux
 
 
-# --- GRPO Helpers ---
-
-
-def prefill(engine, params, prompts, true_length, num_generations, decode_state, rng):
-  """
-  Args:
-    engine: The generation engine instance responsible for managing decoding and inference.
-    params: Model parameters used for generating logits during inference.
-    decode_state: Current decoding state, which maintains token positions, masks, and cached states.
-    data: Input batch containing prompt tokens, segementation and position.
-    num_generations: Number of completions to generate per prompt (G in many RLHF-style pipelines).
-    rng: JAX PRNG key for controlling stochastic behavior (e.g., sampling, dropout).
-
-  Returns:
-    decode_state: Updated decode state after prefill, including new cached key/value pairs.
-    prefill_slots: A structure containing token positions and model states needed for next-stage decoding.
-  """
-  """
-  JIT-compatible version of prefill using a single lax.scan over the repeated batch.
-  """
-  # Repeat each prompt `num_generations` times
-  repeated_prompts = jnp.repeat(prompts, num_generations, axis=0)
-  repeated_true_length = jnp.repeat(true_length, num_generations, axis=0)
-
-  def _scan_prefill_step(carry, inputs):
-    decode_state, rng, slot = carry
-    tokens, true_len = inputs
-    rng, rng_prefill = jax.random.split(rng)
-    prefill_result, _ = engine.prefill(params=params, padded_tokens=tokens, true_length=true_len, rng=rng_prefill)
-    decode_state = engine.insert(prefill_result, decode_state, slot)
-    return (decode_state, rng, slot + 1), None
-
-  (decode_state, _, _), _ = jax.lax.scan(
-      _scan_prefill_step, init=(decode_state, rng, 0), xs=(repeated_prompts, repeated_true_length)
-  )
-
-  return decode_state
-
-
-def generate(engine, params, num_decode_steps, decode_state, rng):
-  """
-  Args:
-    engine: The generation engine instance used to run autoregressive decoding.
-    params: Model parameters used to compute logits during token generation.
-    decode_state: The current decode state containing cached attention key/value pairs and positions.
-    num_decode_steps: Number of decoding steps to perform (i.e., target length - prefill length).
-    rng: JAX PRNG key used for sampling, top-k/top-p filtering, or any stochastic decoding behavior.
-
-  Returns:
-    completions: Generated sequences (e.g., token IDs) of shape [num_prompts * num_generations, num_decode_steps].
-  """
-
-  def _scan_generate_step(carry, _):
-    rng, decode_state = carry
-    rng, rng_generate = jax.random.split(rng)
-    decode_state, result_tokens = engine.generate(params, decode_state, rng=rng_generate)
-    return (rng, decode_state), result_tokens.data[:, 0]
-
-  (_, all_tokens) = jax.lax.scan(_scan_generate_step, init=(rng, decode_state), xs=None, length=num_decode_steps)
-  return jnp.transpose(all_tokens, (1, 0))
-
-
-def concatenate_prompt_with_completions(config, tokenizer_model, prompts, true_length, completions):
-  """
-  Args:
-    config: Configuration object containing generation settings such as max sequence length or EOS token ID.
-    tokenizer_model: Tokenizer used to decode or manipulate tokens (e.g., identifying special tokens like EOS).
-    data: Input batch containing prompt tokens, segementation and position.
-    completions: Generated token sequences to be appended to the corresponding prompts.
-
-  Returns:
-    prompt_completions: Concatenated sequences of prompt + generated completions for each sample.
-    eos_positions: Indices indicating the position of the first EOS token in each concatenated sequence.
-  """
-
-  def _concat_and_find_eos(prompt, true_len, completion):
-    total_len = prompt.shape[0] + completion.shape[0]
-    prompt_mask = jnp.arange(prompt.shape[0]) < true_len
-    trimmed_prompt = jnp.where(prompt_mask, prompt, 0)
-
-    # Initialize with padded prompt
-    full_seq = jnp.zeros((total_len,), dtype=prompt.dtype)
-    full_seq = full_seq.at[: prompt.shape[0]].set(trimmed_prompt)
-
-    # Dynamically insert completion at true_len position
-    full_seq = jax.lax.dynamic_update_slice(full_seq, completion, (true_len,))
-
-    # Find EOS index
-    eos_mask = full_seq == tokenizer_model.eos_token_id
-    eos_indices = jnp.where(eos_mask, jnp.arange(total_len), total_len)
-    eos_index = jnp.min(eos_indices)
-
-    return full_seq, eos_index
-
-  batched_concat_and_eos = jax.vmap(_concat_and_find_eos, in_axes=(0, 0, 0))
-  prompts = jnp.repeat(prompts, config.num_generations, axis=0)
-  true_length = jnp.repeat(true_length, config.num_generations, axis=0)
-  prompt_completions, eos_positions = batched_concat_and_eos(prompts, true_length, completions)
-  return prompt_completions, eos_positions
-
-
-def generate_completions(config, tokenizer_model, engine, data, params, rng):
-  """
-  Autoregressively generates completions for a batch of prompts.
-
-  Args:
-    prompts: Array of shape [B, S] containing token ids.
-    config: Configuration containing:
-         - num_generations: number of completions to generate per prompt.
-         - max_completion_length: maximum number of tokens to generate.
-         - temperature: sampling temperature.
-    rng: JAX PRNGKeys.
-    tokenizer_model: Tokenizer for generate
-
-  Returns:
-    A jnp.array of shape [B x num_generations, S] where S = length_of_prompt + max_completion_length.
-  """
-  # decimate proportion of data when per_device_batch_size<1
-  for k, v in data.items():
-    assert v.ndim in (1, 2), f"Invalid {v.shape=} found for key={k}"
-    if v.ndim == 2:
-      data[k] = v[: config.micro_batch_size_to_train_on, :]
-    else:
-      data[k] = v[: config.micro_batch_size_to_train_on]
-
-  rng, rng_init_decode = jax.random.split(rng)
-  decode_state = engine.init_decode_state(rng_init_decode)
-
-  prompts, true_length = data[f"{config.train_data_columns}"], data[f"{config.train_data_columns}_true_length"]
-  rng, rng_prefill = jax.random.split(rng)
-  decode_state = jax.jit(
-      functools.partial(prefill, engine, params, prompts, true_length, config.num_generations), donate_argnums=(0,)
-  )(decode_state, rng_prefill)
-
-  rng, rng_generate = jax.random.split(rng)
-  completions = jax.jit(
-      functools.partial(generate, engine, params, config.max_target_length - config.max_prefill_predict_length)
-  )(decode_state, rng_generate)
-
-  data[f"{config.train_data_columns}_completions"], eos_positions = concatenate_prompt_with_completions(
-      config, tokenizer_model, prompts, true_length, completions
-  )
-
-  data[f"{config.train_data_columns}_completions_segmentation"] = (
-      jnp.arange(data[f"{config.train_data_columns}_completions"].shape[1])[None, :] < eos_positions[:, None]
-  ).astype(jnp.int32)
-  data[f"{config.train_data_columns}_completions_position"] = jnp.where(
-      data[f"{config.train_data_columns}_completions_segmentation"],
-      jnp.arange(data[f"{config.train_data_columns}_completions"].shape[1]),
-      0,
-  )
-  true_length = jnp.repeat(true_length, config.num_generations, axis=0)
-  completion_mask = data[f"{config.train_data_columns}_completions_position"] >= true_length[:, None] - 1
-  data["ar_completions_segmentation"] = data[
-      f"{config.train_data_columns}_completions_segmentation"
-  ] * completion_mask.astype(jnp.int32)
-  return data
-
-
-def dummy_reward_len(valid_seq_mask):
-  # adding a 1 because valid_seq_mask is actually one less than the number of valid tokens
-  reward = -abs(20 - (1 + jnp.sum(valid_seq_mask, axis=-1)))  # [BxG]
-  return reward
-
-
-def jaccard_reward_fn(tokens1, tokens2, vocab_size):
-  """
-  A simple Jaccard similarity for now
-  # TODO: Include more reward functions
-  """
-
-  # Convert token id arrays to one-hot representations.
-  # The result has shape (..., seq_length, vocab_size).
-  tokens1_onehot = jax.nn.one_hot(tokens1, vocab_size, dtype=bool)
-  tokens2_onehot = jax.nn.one_hot(tokens2, vocab_size, dtype=bool)
-
-  # Reduce along the sequence dimension (axis=-2) to obtain a boolean presence vector
-  # for each token id in the vocabulary. This effectively converts each row to a set.
-  a_set = jnp.any(tokens1_onehot, axis=-2)
-  b_set = jnp.any(tokens2_onehot, axis=-2)
-
-  # Compute the intersection and union along the vocabulary dimension (axis=-1).
-  intersection = jnp.sum(jnp.logical_and(a_set, b_set), axis=-1)
-  union = jnp.sum(jnp.logical_or(a_set, b_set), axis=-1)
-
-  # Avoid division by zero: if union is 0 (e.g. both rows are empty), return 1.0.
-  return jnp.where(union == 0, 1.0, intersection / union)
-
-
-def compute_log_probs(
-    model, params, inputs, inputs_position, inputs_segmentation, completion_segmentation, config, is_train=False, rngs=None
-):
-  """
-  Given a sequence of tokens (shape [B, L]), this helper calls model.apply (with dropout enabled
-  if is_train) to obtain logits and then computes per-token log-probabilities.
-
-  Note: We assume that tokens have been already appropriately padded.
-  """
-  if not is_train:
-    params = jax.lax.stop_gradient(params)
-  logits, intermediate_outputs = model.apply(
-      params,
-      inputs,
-      inputs_position,
-      decoder_segment_ids=inputs_segmentation,
-      enable_dropout=(config.enable_dropout if is_train else False),
-      rngs=rngs,
-      mutable="intermediates",
-  )  # [B, S, E] - [batch, sequence, embedding/vocab]
-  logits = logits / config.decode_sampling_temperature
-  # Remove last time step since there is no target for the final position.
-  targets = inputs[:, 1:]
-  # Shift left using dynamic slice (skip first column)
-  shifted_completion_segmentation = jax.lax.dynamic_slice(
-      completion_segmentation, (0, 1), (completion_segmentation.shape[0], completion_segmentation.shape[1] - 1)
-  )
-  # Pad with 0 at the end to maintain the original shape
-  shifted_completion_segmentation = jnp.pad(
-      shifted_completion_segmentation, ((0, 0), (0, 1)), mode="constant", constant_values=0
-  )
-
-  mask = shifted_completion_segmentation[..., None]
-  mask = jnp.broadcast_to(mask, logits.shape)
-
-  masked_logits = jnp.where(mask, logits, -jnp.inf)
-  log_probs = jax.nn.log_softmax(masked_logits, axis=-1)
-  log_probs = jnp.where(mask, log_probs, -0.0)
-  log_probs = log_probs[:, :-1, :]
-  # Gather the log probabilities corresponding to each target token.
-  token_log_probs = jnp.take_along_axis(log_probs, targets[..., None], axis=-1)[..., 0]
-  token_log_probs = token_log_probs * shifted_completion_segmentation[:, :-1]
-
-  return token_log_probs, intermediate_outputs
-
-
 # -----------------------------------------------------------------------------
 # Trainer and top level training functions
 # -----------------------------------------------------------------------------
-
 
 def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
   """
@@ -576,6 +390,7 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
       "learning/avg_reward_std": aux.avg_reward_std,
       "learning/avg_advantage": aux.avg_advantage,
       "learning/avg_kl": aux.avg_kl,
+      "learning/completion_length": aux.completion_length,
       "learning/moe_lb_loss": moe_lb_loss,
       "learning/total_weights": total_weights,
   }
@@ -621,13 +436,14 @@ def eval_step(model, config, state, data, dropout_rng):
   return metrics
 
 
-def setup_train_loop(config, recorder):
+def setup_train_loop(config, config_inference, recorder):
   """Set up prerequisites for the training loop -
       checkpoint_manager, PRNG keys, Mesh, Model and optimizer.
       Set up data iterator and tokenizer, initialize the model.
 
   Args:
     config
+    config_inference
     recorder
 
   Returns:
@@ -642,46 +458,95 @@ def setup_train_loop(config, recorder):
     state: the initialized train state
   """
   with maybe_record_goodput(recorder, GoodputEvent.TPU_INIT):
-    model = mt.from_pretrained(config)
+    max_logging.log(f"Training mesh used for the workload")
+    num_inference_devices = config.inference_devices_per_replica * config.inference_replicas
+    training_devices = jax.devices()[num_inference_devices:]
+    model = mt.from_pretrained(config, devices = training_devices)
     mesh = model.mesh
+    max_logging.log(f"Inference mesh used for the workload")
+    inference_devices = jax.devices()[:num_inference_devices]
+    inference_model = mt.from_pretrained(config_inference, devices=inference_devices)
+    inference_mesh = inference_model.mesh
     init_rng, checkpoint_manager, learning_rate_schedule, tx = train_utils.create_training_tools(config, model, mesh)
 
   with maybe_record_goodput(recorder, GoodputEvent.TRAINING_PREPARATION):
-    data_iterator, eval_data_iterator = grpo_input_pipeline.create_data_iterator(config, mesh)
+    data_iterator = grpo_input_pipeline.create_data_iterator(config_inference, inference_mesh)
     state, _, state_mesh_shardings, data_iterator = maxtext_utils.setup_training_state(
         model, data_iterator, tx, config, init_rng, mesh, checkpoint_manager
     )
 
-    if not config.using_pipeline_parallelism:
-      # The vocab tensor(s) of shape [vocab, embed] (and transpose) are not sharded by stage
-      maxtext_utils.assert_params_sufficiently_sharded(state.params, mesh, config.sharding_tolerance)
+  # create inference_state_mesh_shardings from inference_mesh
+  inference_state_mesh_shardings = maxtext_utils.get_abstract_state(inference_model, tx, config_inference, init_rng, inference_mesh, is_training=False)[2]
+  if not config.using_pipeline_parallelism:
+    # The vocab tensor(s) of shape [vocab, embed] (and transpose) are not sharded by stage
+    maxtext_utils.assert_params_sufficiently_sharded(state.params, mesh, config.sharding_tolerance)
 
   return (
       init_rng,
       checkpoint_manager,
       state_mesh_shardings,
+      inference_state_mesh_shardings,
       model,
+      inference_model,
       mesh,
+      inference_mesh,
       learning_rate_schedule,
       data_iterator,
-      eval_data_iterator,
+      None, # GRPO does not support eval_dataset
       state,
   )
 
 
+def generate_completions(
+  worker_data_loader,
+  worker_inference_engine,
+  worker_tokenizer_model,
+  worker_config_inference,
+  worker_config_train,
+  worker_data_buffer,
+  worker_data_buffer_lock,
+  worker_input_data_shardings,
+  engine_lock,
+):
+  with engine_lock:
+    thread_example_batch = worker_data_loader.load_next_batch()
+    # Trim data for inference processing
+    thread_example_batch_trimmed = jax.tree_util.tree_map(lambda arr: arr[:int(worker_config_inference.per_device_batch_size * worker_config_train.inference_replicas * worker_config_train.inference_devices_per_replica)], thread_example_batch)
+    processed_batch = grpo_utils.generate_offline_completions(worker_config_inference, worker_tokenizer_model, worker_inference_engine, thread_example_batch_trimmed)          
+    processed_batch = jax.device_put(processed_batch, worker_input_data_shardings)
+  with worker_data_buffer_lock:
+    if not worker_data_buffer:
+      worker_data_buffer.append(processed_batch)
+    else:
+      worker_data_buffer[0] = jax.tree_util.tree_map(
+        lambda a, b: np.concatenate([a, b], axis=0),
+        worker_data_buffer[0],
+        processed_batch
+      )
+
 def train_loop(config, config_inference, recorder, state=None):
-  """Main Training loop."""
+  """Main Training loop.
+  Args:
+    config:
+    state:
+    ckpt_path:
+  Returns:
+  """
+
   (
       init_rng,
       checkpoint_manager,
       state_mesh_shardings,
+      inference_state_mesh_shardings,
       model,
+      inference_model,
       mesh,
+      inference_mesh,
       learning_rate_schedule,
       data_iterator,
       eval_data_iterator,
       state,
-  ) = setup_train_loop(config, recorder)
+  ) = setup_train_loop(config, config_inference, recorder)
   tokenizer_model = transformers.AutoTokenizer.from_pretrained(
       config.tokenizer_path,
       add_bos_token=config.add_bos,
@@ -696,63 +561,126 @@ def train_loop(config, config_inference, recorder, state=None):
     state = _merge_grpo_state(state, reference_params)
   state_mesh_shardings = _merge_grpo_state(state_mesh_shardings, state_mesh_shardings.params["params"])
 
-  # Initializing maxengine and everything related from decode.py
-  # TODO: Creating an engine here but might have two model compilation, need to initialize engine while passing model object
-  engine = maxengine.MaxEngine(config_inference)
-  init_rng, rng_load_params = jax.random.split(init_rng)
-  # TODO: loading parameters from GCS here, need to pass in the same params to engine which already loaded
-  _ = engine.load_params(rng_load_params)
-
   p_train_step, p_eval_step = train_utils.jit_train_and_eval_step(
       config, model, mesh, state, state_mesh_shardings, train_step, eval_step, eval_data_iterator
   )
 
-  with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-    shaped_batch = maxtext_utils.get_shaped_batch(config)
-    compiled = p_train_step.lower(state, shaped_batch, init_rng).compile()
-    compiled_stats = compiled.memory_analysis()
-    max_utils.print_compiled_memory_stats(compiled_stats)
-
   data_sharding = maxtext_utils.get_input_data_sharding(config, mesh)
-
-  param_sharding = state_mesh_shardings.params
-  p_generate_completions: Callable[[dict, dict, Array], Array] = jax.jit(
-      functools.partial(generate_completions, config, tokenizer_model, engine),
-      in_shardings=(data_sharding, param_sharding, None),
-      out_shardings=data_sharding,
-      donate_argnums=(0,),
+  
+  inference_engine = offline_engine.OfflineEngine(
+    config = config_inference,
+    mesh = inference_mesh,
   )
+  data_buffer = []
+  data_buffer_lock = threading.Lock()
 
   start_step = get_first_step(state)  # this is the start_step for training
   prof = profiler.Profiler(config, offset_step=start_step)
-  data_loader = DataLoader(config, mesh, data_iterator, recorder)
+  data_loader = DataLoader(config_inference, inference_mesh, data_iterator, recorder)
   metric_logger = MetricLogger(config=config, learning_rate_schedule=learning_rate_schedule)
 
   # Write train config params, num model params, and XLA flags to tensorboard
-  metric_logger.write_setup_info_to_tensorboard(state.params)
+  metric_logger.write_setup_info_to_tensorboard(state.params['params'])
+
+  def generation_worker_fn(
+    worker_inference_engine,
+    worker_tokenizer_model,
+    worker_config_inference,
+    worker_config_train,
+    worker_data_buffer,
+    worker_data_buffer_lock,
+    worker_input_data_shardings,
+    engine_lock,
+    stop_event
+  ):
+    while not stop_event.is_set():
+      try:
+        with jax.profiler.StepTraceAnnotation("inference"):
+          generate_completions(
+            data_loader,
+            worker_inference_engine,
+            worker_tokenizer_model,
+            worker_config_inference,
+            worker_config_train,
+            worker_data_buffer,
+            worker_data_buffer_lock,
+            worker_input_data_shardings,
+            engine_lock,
+          )
+      except StopIteration:
+        max_logging.log("Data iterator exhausted in generation worker. Stopping.")
+        break
+      except Exception as e: # pylint: disable=broad-except
+        max_logging.log(f"Error in generation worker: {e}")
+        break
+    max_logging.log("Generation worker thread finished.")
+
+  stop_event = threading.Event()
+  inference_engine_lock = threading.Lock()
+  
+  max_logging.log(f"Inference Rollout")
+  generate_completions(data_loader, inference_engine, tokenizer_model, config_inference, config, data_buffer, data_buffer_lock, data_sharding, inference_engine_lock)
+  
+  generation_thread = threading.Thread(
+      target=generation_worker_fn,
+      args=(
+          inference_engine, # Shared inference engine
+          tokenizer_model,
+          config_inference,
+          config, # Main config for load_next_batch
+          data_buffer,
+          data_buffer_lock,
+          data_sharding, # Sharding for the data put into the buffer
+          inference_engine_lock,
+          stop_event,
+      ),
+      daemon=True # So it exits when the main thread exits
+  )
+  generation_thread.start()
 
   try:
-    last_step_completion = datetime.datetime.now()
     for step in np.arange(start_step, config.steps):
       prof.maybe_activate_profiler(step, state)
 
       with jax.profiler.StepTraceAnnotation("train", step_num=step):
-        example_batch = data_loader.load_next_batch()
-        # pylint: disable=not-callable
-        rng = jax.jit(jax.random.fold_in)(init_rng, step)
-        with maybe_record_goodput(recorder, GoodputEvent.STEP, step):
-          rng, rng_gen = random.split(rng)
-          example_batch = p_generate_completions(example_batch, state.params, rng_gen)
-
-          # TODO: ensure this partitioning is correct
-          with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-            state, metrics = p_train_step(state, example_batch, rng)
+        while True:
+          with data_buffer_lock:
+            if not data_buffer and not generation_thread.is_alive():
+              max_logging.log("Generation worker is not alive and data buffer is empty. Exiting.")
+              break
+            if data_buffer:
+              example_batch = data_buffer[0]
+              required_batch_size = int(config.per_device_batch_size * config.num_generations * mesh.size)
+              if example_batch[config.train_data_columns].shape[0] >= required_batch_size:
+                example_batch = jax.tree_util.tree_map(
+                  lambda arr: arr[:required_batch_size],
+                  data_buffer[0]
+                )
+                data_buffer[0] = jax.tree_util.tree_map(
+                  lambda arr: arr[required_batch_size:],
+                  data_buffer[0]
+                )
+                break
+              else:
+                time.sleep(0.1)
+                continue
+            else:
+              time.sleep(0.1)
+              continue
+          time.sleep(0.1)
+        train_rng, rng = random.split(init_rng)
+        with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+          state, metrics = p_train_step(state, example_batch, train_rng)
+      with jax.profiler.StepTraceAnnotation("transfer data", step_num=step):
+        if step != 0 and step % config.inference_rollouts == 0:
+          grpo_utils.pathways_reshard(config_inference, inference_engine, {'params':state.params['params']}, {'params': state_mesh_shardings.params['params']}, mesh, inference_state_mesh_shardings)
 
       step_time_delta = datetime.datetime.now() - last_step_completion
       last_step_completion = datetime.datetime.now()
 
       state_to_save = _split_grpo_state(state)[0]
       checkpointing.maybe_save_checkpoint(checkpoint_manager, state_to_save, config, data_iterator, step)
+
 
       if config.dump_hlo and step == start_step:
         jax.block_until_ready(state)  # Ensure compilation has finished.
@@ -789,11 +717,17 @@ def train_loop(config, config_inference, recorder, state=None):
       metric_logger.buffer_and_write_train_metrics(metrics, step, step_time_delta)
 
     state_to_save = _split_grpo_state(state)[0]
-    checkpointing.maybe_save_final_checkpoint(checkpoint_manager, state_to_save, config, data_iterator)
+    checkpointing.maybe_save_checkpoint(checkpoint_manager, state_to_save, config, data_iterator)
   except exceptions.StopTraining as e:
     max_logging.log(f"Training stopped: {str(e)}")
   finally:
     metric_logger.flush_metrics_and_cleanup()
+    max_logging.log("Training loop finished or exited. Signaling generation worker to stop.")
+    stop_event.set()
+    # Wait for the generation thread to finish
+    generation_thread.join(timeout=60.0) # Increased timeout
+    if generation_thread.is_alive():
+        max_logging.log("Warning: Generation worker did not stop in time after loop completion.")
 
   return state
 
@@ -806,17 +740,22 @@ def main(argv: Sequence[str]) -> None:
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
   if "xla_tpu_spmd_rng_bit_generator_unsafe" not in os.environ.get("LIBTPU_INIT_ARGS", ""):
     os.environ["LIBTPU_INIT_ARGS"] = os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
-  config = pyconfig.initialize(argv)
+  configs_argv = max_utils.parse_custom_args(argv)
+  config = pyconfig.initialize(configs_argv[0])
   if not config.use_grpo:
     raise ValueError("Please set the value of use_grpo to True")
   if config.decode_sampling_strategy == "greedy" or config.decode_sampling_temperature == 0.0:
     raise ValueError(
         "Please set decode_sampling_strategy as 'weighted' and decode_sampling_temperature as a positive number"
     )
+  if config.inference_devices_per_replica * config.inference_replicas >= jax.device_count():
+    raise ValueError(f"Invalid value chosen for {config.inference_devices_per_replica=} and {config.inference_replicas=} with {jax.device_count()} devices")
   config_inference = pyconfig.initialize(
-      list(argv)
-      + ["ici_tensor_parallelism=4", "per_device_batch_size=" + str(config.per_device_batch_size * config.num_generations)]
+      configs_argv[1]
   )
+  if config.per_device_batch_size < 1.0 or config_inference.per_device_batch_size < 1.0:
+    raise ValueError("GRPO does not support setting per_device_batch_size < 1.0")
+  jax.config.update("jax_use_shardy_partitioner", config.shardy)
   max_utils.print_system_information()
   validate_train_config(config)
   os.environ["TFDS_DATA_DIR"] = config.dataset_path

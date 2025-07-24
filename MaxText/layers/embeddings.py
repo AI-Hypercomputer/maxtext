@@ -27,6 +27,7 @@ from flax import nnx
 
 from MaxText import max_logging
 from MaxText.common_types import MODEL_MODE_PREFILL, MODEL_MODE_TRAIN, Array, Config, DType
+from MaxText.layers import nnx_wrappers
 from MaxText.layers.initializers import Initializer, default_embed_init, variable_to_logically_partitioned
 
 _MAX_WAVELENGTH = 10_000
@@ -71,7 +72,7 @@ def embed_as_linen(
   Returns:
     A Linen module that wraps the NNX `Embed` module.
   """
-  return nnx.bridge.to_linen(
+  return nnx_wrappers.to_linen(
       Embed,
       num_embeddings=num_embeddings,
       num_features=num_features,
@@ -219,7 +220,7 @@ def rotary_embedding_as_linen(
     fprop_dtype: The dtype of the output.
     name: Name of the Linen module.
   """
-  return nnx.bridge.to_linen(
+  return nnx_wrappers.to_linen(
       RotaryEmbedding,
       min_timescale=min_timescale,
       max_timescale=max_timescale,
@@ -337,7 +338,7 @@ def llama_rotary_embedding_as_linen(
     use_scale: Whether to apply LLaMA3.1 scaling factor.
     name: Name of the Linen module.
   """
-  return nnx.bridge.to_linen(
+  return nnx_wrappers.to_linen(
       LLaMARotaryEmbedding,
       min_timescale=min_timescale,
       max_timescale=max_timescale,
@@ -514,7 +515,7 @@ def yarn_rotary_embedding_as_linen(
     fprop_dtype: The forward pass dtype.
     name: The name of the module.
   """
-  return nnx.bridge.to_linen(
+  return nnx_wrappers.to_linen(
       YarnRotaryEmbedding,
       embedding_dims=embedding_dims,
       max_position_embeddings=max_position_embeddings,
@@ -691,7 +692,7 @@ def positional_embedding_as_linen(*, embedding_dims: int, max_wavelength: int = 
     embedding_dims: The dimension of the embeddings.
     max_wavelength: The maximum wavelength for the sinusoidal positional embeddings.
   """
-  return nnx.bridge.to_linen(
+  return nnx_wrappers.to_linen(
       PositionalEmbedding,
       embedding_dims=embedding_dims,
       max_wavelength=max_wavelength,
@@ -756,7 +757,7 @@ def llama_vision_rotary_embedding_as_linen(
     fprop_dtype: The dtype of the output.
     name: The name of the Linen module.
   """
-  return nnx.bridge.to_linen(
+  return nnx_wrappers.to_linen(
       LlamaVisionRotaryEmbedding,
       image_size=image_size,
       patch_size=patch_size,

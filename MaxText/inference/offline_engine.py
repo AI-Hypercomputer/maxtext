@@ -61,11 +61,7 @@ from MaxText import max_utils
 from MaxText.prefill_packing import PrefillProcessor, BatchedPrefillProcessor
 from MaxText import max_logging
 
-
-try:
-  from MaxText.experimental.rl import pathwaysutils_reshard
-except ImportError:
-  pass
+import pathwaysutils
 
 DecodeState = Any
 Params = Any
@@ -444,7 +440,7 @@ class InferenceWorker:
           jax.transfer_guard_device_to_host("disallow_explicit"),
           jax.transfer_guard_host_to_device("disallow_explicit"),
       ):
-        self.params = pathwaysutils_reshard.reshard(params, destination_sharding, cache_resharding_plans=True)
+        self.params = pathwaysutils.experimental.reshard.reshard(params, destination_sharding, cache_resharding_plans=True)
     else:
       self.params = jax.device_put(params, destination_sharding)
 

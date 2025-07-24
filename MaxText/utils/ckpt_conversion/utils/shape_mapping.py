@@ -15,6 +15,128 @@
  """
 
 
+def GEMMA3_HF_WEIGHTS_TO_SHAPE_MAPPING(config):
+  shapes = {}
+
+  # Config-derived dimensions
+  text_config = config["text_config"]
+  vision_config = config["vision_config"]
+
+  lm_hidden_size = text_config["hidden_size"]
+  lm_intermediate_size = text_config["intermediate_size"]
+  lm_num_layers = text_config["num_hidden_layers"]
+  lm_q_heads = text_config["num_attention_heads"]
+  lm_kv_heads = text_config["num_key_value_heads"]
+  lm_head_dim = text_config["head_dim"]
+  lm_q_dim = lm_q_heads * lm_head_dim
+  lm_kv_dim = lm_kv_heads * lm_head_dim
+
+  vision_hidden_size = vision_config["hidden_size"]
+  vision_intermediate_size = vision_config["intermediate_size"]
+  vision_num_layers = vision_config["num_hidden_layers"]
+  vision_patch_size = vision_config["patch_size"]
+  vision_num_channels = vision_config["num_channels"]
+  vision_image_size = vision_config["image_size"]
+  vision_num_positions = (vision_image_size / vision_patch_size) ** 2
+
+  vocab_size = text_config["vocab_size"]
+
+  # Vision Tower embeddings
+  shapes["model.vision_tower.vision_model.embeddings.patch_embedding.weight"] = [
+      vision_hidden_size,
+      vision_num_channels,
+      vision_patch_size,
+      vision_patch_size,
+  ]
+  shapes["model.vision_tower.vision_model.embeddings.patch_embedding.bias"] = [vision_hidden_size]
+  shapes["model.vision_tower.vision_model.embeddings.position_embedding.weight"] = [
+      vision_num_positions,
+      vision_hidden_size,
+  ]
+
+  # Vision Encoder layers
+  for i in range(vision_num_layers):
+    # LayerNorm 1
+    shapes[f"model.vision_tower.vision_model.encoder.layers.{i}.layer_norm1.weight"] = [vision_hidden_size]
+    shapes[f"model.vision_tower.vision_model.encoder.layers.{i}.layer_norm1.bias"] = [vision_hidden_size]
+    # Attention
+    shapes[f"model.vision_tower.vision_model.encoder.layers.{i}.self_attn.q_proj.weight"] = [
+        vision_hidden_size,
+        vision_hidden_size,
+    ]
+    shapes[f"model.vision_tower.vision_model.encoder.layers.{i}.self_attn.q_proj.bias"] = [vision_hidden_size]
+    shapes[f"model.vision_tower.vision_model.encoder.layers.{i}.self_attn.k_proj.weight"] = [
+        vision_hidden_size,
+        vision_hidden_size,
+    ]
+    shapes[f"model.vision_tower.vision_model.encoder.layers.{i}.self_attn.k_proj.bias"] = [vision_hidden_size]
+    shapes[f"model.vision_tower.vision_model.encoder.layers.{i}.self_attn.v_proj.weight"] = [
+        vision_hidden_size,
+        vision_hidden_size,
+    ]
+    shapes[f"model.vision_tower.vision_model.encoder.layers.{i}.self_attn.v_proj.bias"] = [vision_hidden_size]
+    shapes[f"model.vision_tower.vision_model.encoder.layers.{i}.self_attn.out_proj.weight"] = [
+        vision_hidden_size,
+        vision_hidden_size,
+    ]
+    shapes[f"model.vision_tower.vision_model.encoder.layers.{i}.self_attn.out_proj.bias"] = [vision_hidden_size]
+    # MLP
+    shapes[f"model.vision_tower.vision_model.encoder.layers.{i}.layer_norm2.weight"] = [vision_hidden_size]
+    shapes[f"model.vision_tower.vision_model.encoder.layers.{i}.layer_norm2.bias"] = [vision_hidden_size]
+    shapes[f"model.vision_tower.vision_model.encoder.layers.{i}.mlp.fc1.weight"] = [
+        vision_intermediate_size,
+        vision_hidden_size,
+    ]
+    shapes[f"model.vision_tower.vision_model.encoder.layers.{i}.mlp.fc1.bias"] = [vision_intermediate_size]
+    shapes[f"model.vision_tower.vision_model.encoder.layers.{i}.mlp.fc2.weight"] = [
+        vision_hidden_size,
+        vision_intermediate_size,
+    ]
+    shapes[f"model.vision_tower.vision_model.encoder.layers.{i}.mlp.fc2.bias"] = [vision_hidden_size]
+
+  # Vision post-norm
+  shapes["model.vision_tower.vision_model.post_layernorm.weight"] = [vision_hidden_size]
+  shapes["model.vision_tower.vision_model.post_layernorm.bias"] = [vision_hidden_size]
+
+  # Multi-Modal Projector
+  shapes["model.multi_modal_projector.mm_input_projection_weight"] = [vision_hidden_size, lm_hidden_size]
+  shapes["model.multi_modal_projector.mm_soft_emb_norm.weight"] = [vision_hidden_size]
+
+  # Language Model embeddings
+  shapes["model.language_model.embed_tokens.weight"] = [vocab_size, lm_hidden_size]
+
+  # Language Model layers
+  for i in range(lm_num_layers):
+    # Self-Attn
+    shapes[f"model.language_model.layers.{i}.self_attn.q_proj.weight"] = [lm_q_dim, lm_hidden_size]
+    shapes[f"model.language_model.layers.{i}.self_attn.q_proj.bias"] = [lm_q_dim]
+    shapes[f"model.language_model.layers.{i}.self_attn.k_proj.weight"] = [lm_kv_dim, lm_hidden_size]
+    shapes[f"model.language_model.layers.{i}.self_attn.k_proj.bias"] = [lm_kv_dim]
+    shapes[f"model.language_model.layers.{i}.self_attn.v_proj.weight"] = [lm_kv_dim, lm_hidden_size]
+    shapes[f"model.language_model.layers.{i}.self_attn.v_proj.bias"] = [lm_kv_dim]
+    shapes[f"model.language_model.layers.{i}.self_attn.o_proj.weight"] = [lm_hidden_size, lm_q_dim]
+    shapes[f"model.language_model.layers.{i}.self_attn.o_proj.bias"] = [lm_hidden_size]
+    # Norms
+    shapes[f"model.language_model.layers.{i}.self_attn.q_norm.weight"] = [lm_head_dim]
+    shapes[f"model.language_model.layers.{i}.self_attn.k_norm.weight"] = [lm_head_dim]
+    shapes[f"model.language_model.layers.{i}.input_layernorm.weight"] = [lm_hidden_size]
+    shapes[f"model.language_model.layers.{i}.post_attention_layernorm.weight"] = [lm_hidden_size]
+    shapes[f"model.language_model.layers.{i}.pre_feedforward_layernorm.weight"] = [lm_hidden_size]
+    shapes[f"model.language_model.layers.{i}.post_feedforward_layernorm.weight"] = [lm_hidden_size]
+    # MLP
+    shapes[f"model.language_model.layers.{i}.mlp.gate_proj.weight"] = [lm_intermediate_size, lm_hidden_size]
+    shapes[f"model.language_model.layers.{i}.mlp.gate_proj.bias"] = [lm_intermediate_size]
+    shapes[f"model.language_model.layers.{i}.mlp.up_proj.weight"] = [lm_intermediate_size, lm_hidden_size]
+    shapes[f"model.language_model.layers.{i}.mlp.up_proj.bias"] = [lm_intermediate_size]
+    shapes[f"model.language_model.layers.{i}.mlp.down_proj.weight"] = [lm_hidden_size, lm_intermediate_size]
+    shapes[f"model.language_model.layers.{i}.mlp.down_proj.bias"] = [lm_hidden_size]
+
+  # Final norm & LM head
+  shapes["model.language_model.norm.weight"] = [lm_hidden_size]
+  shapes["lm_head.weight"] = [vocab_size, lm_hidden_size]
+  return shapes
+
+
 def GEMMA2_HF_WEIGHTS_TO_SHAPE_MAPPING(config):
   """Returns mapping between HuggingFace weights path and weights shape.
 
@@ -67,55 +189,6 @@ def GEMMA2_HF_WEIGHTS_TO_SHAPE_MAPPING(config):
         ],
     }
     mapping = {**mapping, **layer_mapping}
-  return mapping
-
-
-def GEMMA3TEXT_HF_WEIGHTS_TO_SHAPE_MAPPING(config):
-  """Returns mapping between HuggingFace Gemma3Text weights path and weights shape.
-
-  Args:
-      config (dict): Model configuration dictionary (from HF Gemma3TextConfig.to_dict())
-
-  Returns:
-      dict: A mapping where:
-          - Keys are HuggingFace model parameter paths
-          - Values are parameter shape as a List
-  """
-  head_dim = config["head_dim"]
-
-  mapping = {
-      "model.embed_tokens.weight": [config["vocab_size"], config["hidden_size"]],
-      "model.norm.weight": [config["hidden_size"]],
-  }
-  for layer_idx in range(config["num_hidden_layers"]):
-    layer_mapping = {
-        f"model.layers.{layer_idx}.input_layernorm.weight": [config["hidden_size"]],
-        f"model.layers.{layer_idx}.self_attn.q_proj.weight": [
-            config["num_attention_heads"] * head_dim,
-            config["hidden_size"],
-        ],
-        f"model.layers.{layer_idx}.self_attn.k_proj.weight": [
-            config["num_key_value_heads"] * head_dim,
-            config["hidden_size"],
-        ],
-        f"model.layers.{layer_idx}.self_attn.v_proj.weight": [
-            config["num_key_value_heads"] * head_dim,
-            config["hidden_size"],
-        ],
-        f"model.layers.{layer_idx}.self_attn.o_proj.weight": [
-            config["hidden_size"],
-            config["num_attention_heads"] * head_dim,
-        ],
-        f"model.layers.{layer_idx}.self_attn.q_norm.weight": [head_dim],
-        f"model.layers.{layer_idx}.self_attn.k_norm.weight": [head_dim],
-        f"model.layers.{layer_idx}.post_attention_layernorm.weight": [config["hidden_size"]],
-        f"model.layers.{layer_idx}.pre_feedforward_layernorm.weight": [config["hidden_size"]],
-        f"model.layers.{layer_idx}.mlp.gate_proj.weight": [config["intermediate_size"], config["hidden_size"]],
-        f"model.layers.{layer_idx}.mlp.up_proj.weight": [config["intermediate_size"], config["hidden_size"]],
-        f"model.layers.{layer_idx}.mlp.down_proj.weight": [config["hidden_size"], config["intermediate_size"]],
-        f"model.layers.{layer_idx}.post_feedforward_layernorm.weight": [config["hidden_size"]],
-    }
-    mapping.update(layer_mapping)
   return mapping
 
 
@@ -223,10 +296,11 @@ SHAPE_MAPPING = {
     "gemma2-2b": GEMMA2_HF_WEIGHTS_TO_SHAPE_MAPPING,
     "gemma2-9b": GEMMA2_HF_WEIGHTS_TO_SHAPE_MAPPING,
     "gemma2-27b": GEMMA2_HF_WEIGHTS_TO_SHAPE_MAPPING,
-    "gemma3-4b": GEMMA3TEXT_HF_WEIGHTS_TO_SHAPE_MAPPING,
-    "gemma3-12b": GEMMA3TEXT_HF_WEIGHTS_TO_SHAPE_MAPPING,
-    "gemma3-27b": GEMMA3TEXT_HF_WEIGHTS_TO_SHAPE_MAPPING,
+    "gemma3-4b": GEMMA3_HF_WEIGHTS_TO_SHAPE_MAPPING,
+    "gemma3-12b": GEMMA3_HF_WEIGHTS_TO_SHAPE_MAPPING,
+    "gemma3-27b": GEMMA3_HF_WEIGHTS_TO_SHAPE_MAPPING,
     "qwen3-0.6b": QWEN3_HF_WEIGHTS_TO_SHAPE_MAPPING,
     "qwen3-4b": QWEN3_HF_WEIGHTS_TO_SHAPE_MAPPING,
     "qwen3-8b": QWEN3_HF_WEIGHTS_TO_SHAPE_MAPPING,
+    "qwen3-14b": QWEN3_HF_WEIGHTS_TO_SHAPE_MAPPING,
 }

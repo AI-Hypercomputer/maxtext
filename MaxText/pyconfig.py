@@ -172,6 +172,15 @@ def validate_keys(keys):
   validate_rope_type(keys["rope_type"])
   validate_expert_shard_attention_option(keys["expert_shard_attention_option"])
 
+  if keys["mtp_eval_target_module"] < 0:
+    raise ValueError("mtp_eval_target_module cannot be negative. Set to 0 to disable evaluation.")
+
+  if keys["mtp_num_layers"] > 0 and keys["model_call_mode"] == "inference":
+    raise ValueError(
+        "Multi-Token Prediction (MTP) is enabled (mtp_num_layers > 0), but it is not supported in inference mode. "
+        "Please disable MTP by setting mtp_num_layers=0 for inference."
+    )
+
   assert (keys["load_parameters_path"] == "" and keys["load_full_state_path"] == "") or keys[
       "enable_checkpointing"
   ], "You must set enable_checkpointing to load a checkpoint"
@@ -198,6 +207,7 @@ def validate_keys(keys):
   validate_multiple_slices(keys)
   if keys["num_experts"] > 1:
     validate_sparse_matmul_parallelism(keys)
+    validate_ragged_dot(keys)
     validate_deepseek_moe(keys)
     assert keys["decoder_block"] != "qwen3", "Qwen3 MoE mode has not been tested, please set num_experts to 1."
 
@@ -328,6 +338,7 @@ def validate_model_name(s: str) -> bool:
       "qwen3-0.6b",
       "qwen3-4b",
       "qwen3-8b",
+      "qwen3-14b",
       "gpt3-175b",
       "gpt3-22b",
       "gpt3-6b",
@@ -962,6 +973,15 @@ def validate_sparse_matmul_parallelism(raw_keys):
   ):
     raise ValueError("You should use the pipeline_fsdp_ag_once = True and leave model_fsdp_ag_once = False.")
 
+def validate_ragged_dot(raw_keys):
+  if raw_keys["sparse_matmul"] and not raw_keys["megablox"]:
+    config_flag = "jax_ragged_dot_use_ragged_dot_instruction"
+    try:
+      jax.config.update(config_flag, True)
+    except AttributeError:
+      max_logging.log(
+          f"JAX config {config_flag} not found, possibly due to old JAX version."
+      )
 
 def create_new_logical_axis_rules(old_logical_axis_rules, new_logical_axis_rules):
   new_logical_axis = set()

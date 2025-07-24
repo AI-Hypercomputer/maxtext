@@ -60,9 +60,11 @@ from MaxText import maxtext_utils
 from MaxText import pyconfig
 from MaxText import optimizers
 from MaxText.layers import models, quantizations
-from MaxText.train import save_checkpoint
+from MaxText.checkpointing import save_checkpoint
 from MaxText.utils.ckpt_conversion.utils.param_mapping import HOOK_FNS, PARAM_MAPPING
 from MaxText.utils.ckpt_conversion.utils.utils import apply_hook_fns, HF_IDS
+
+jax.config.update("jax_platform_name", "cpu")
 
 
 def main(argv: Sequence[str]) -> None:
