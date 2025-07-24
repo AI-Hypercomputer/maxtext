@@ -77,7 +77,7 @@ def reformat_prompt(example, column, image_placeholder, model_name):
 
 def reformat_response(example, column, model_name):
   """reformat response for multimodal SFT"""
-  example[column] = multimodal_utils.reformat_response(example[column], model_name)
+  example[column] = multimodal_utils.reformat_response(example[column][0], model_name)
   return example
 
 
