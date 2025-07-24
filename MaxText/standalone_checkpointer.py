@@ -172,18 +172,10 @@ def checkpoint_loop(config, state=None):
     if checkpoint_manager is not None:
       start_time = datetime.datetime.now()
       try:
-        with nn_partitioning.axis_rules(config.logical_axis_rules):
-          state, _ = checkpointing.load_state_if_possible(
-              checkpoint_manager,
-              None,
-              config.load_parameters_path,
-              config.load_full_state_path,
-              config.checkpoint_storage_concurrent_gb,
-              unboxed_abstract_state,
-              enable_single_replica_ckpt_restoring=config.enable_single_replica_ckpt_restoring,
-              use_ocdbt=config.checkpoint_storage_use_ocdbt,
-              use_zarr3=config.checkpoint_storage_use_zarr3,
-          )
+        state = checkpoint_manager.restore(
+              step,
+              args=ocp.Composite(items=ocp.PyTreeRestore(item=unboxed_abstract_state)),
+            )
         if state:
           state = state["items"]
       except FileNotFoundError:

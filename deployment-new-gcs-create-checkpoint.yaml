@@ -20,8 +20,8 @@ spec:
       template:
         spec:
           # Modify the following two values if you intend to run the workload in smaller scale.
-          parallelism: 512    # Equal to the number of VMs per slice
-          completions: 512    # Same as the above.
+          parallelism: 256    # Equal to the number of VMs per slice
+          completions: 256    # Same as the above.
           backoffLimit: 0   # When any pod fails, the job is failed
           template:
             metadata:
@@ -51,7 +51,7 @@ spec:
               terminationGracePeriodSeconds: 30
               containers:
               - name: jax-cpu
-                image: gcr.io/gcs-tess/bernardhan_distributed_maxtext_checkpointing_benchmark_strict_is_true
+                image: gcr.io/gcs-tess/bernardhan_distributed_maxtext_checkpointing_benchmark_strict_is_true_broadcast
 
                 env:
                 - name: REPLICATED_JOB_NAME
@@ -72,9 +72,9 @@ spec:
                       fieldPath: metadata.annotations['jobset.sigs.k8s.io/jobset-name']
                 # Modify the following two values too, if you intend to run the workload in smaller scale.
                 - name: PROCESSES_IN_JOB
-                  value: "512"
+                  value: "256"
                 - name: JAX_PROCESS_COUNT
-                  value: "512"
+                  value: "256"
                 - name: JAX_COORDINATOR_ADDRESS
                   value: "$(JOBSET_NAME)-$(REPLICATED_JOB_NAME)-0-0.$(JOBSET_NAME)"
                 - name: MY_NODE_NAME
@@ -128,17 +128,17 @@ spec:
 
                   benchmark_run_flags=(
                     # PARAMETERS is the number of parameters in the model (in billions).
-                    PARAMETERS=256
+                    PARAMETERS=128
 
                     # STEPS is the number of steps to run.
-                    STEPS=200
+                    STEPS=5
 
                     # CHECKPOINT_PERIOD is the number of steps between each checkpoint.
                     #   Roughly ((STEPS - 1) // CHECKPOINT_PERIOD + 1) checkpoint restores and writes
                     #   will be performed per run.
                     #   The total number of checkpoint restores and writes will be roughly
                     #   RUNS * ((STEPS - 1) // CHECKPOINT_PERIOD + 1).
-                    CHECKPOINT_PERIOD=50
+                    CHECKPOINT_PERIOD=1
 
                     # PER_STEP_INTERVAL is the minimum time each step should take. Note that it cannot
                     # be 300 seconds or more because the barriers will timeout.

@@ -287,7 +287,7 @@ def load_state_if_possible(
       if enable_single_replica_ckpt_restoring:
         array_handler = ocp.type_handlers.SingleReplicaArrayHandler(
             replica_axis_index=0,
-            broadcast_memory_limit_bytes=1024 * 1024 * 1000,  # 1000 MB limit
+            broadcast_memory_limit_bytes=1024 * 1024 * 3000,  # 3000 MB limit
         )
         ocp.type_handlers.register_type_handler(jax.Array, array_handler, override=True)
 
