@@ -656,6 +656,10 @@ def train_loop(config, recorder, state=None):
 
       if config.eval_interval > 0 and step > start_step and (step + 1) % config.eval_interval == 0:
         assert eval_data_iterator
+
+        # Explicitly reset the eval counters before starting the eval loop
+        metric_logger.reset_eval_metrics()
+
         eval_step_count = 0
         # pylint: disable=not-callable
         for eval_batch in eval_data_iterator:
@@ -701,6 +705,7 @@ def initialize(argv: Sequence[str]) -> Tuple[pyconfig.HyperParameters, Any, Any]
   # TODO: mazumdera@ : ensure missing mandatory fields in base.yml are filled in in argv,
   # or fill in here
   config = pyconfig.initialize(argv)
+  jax.config.update("jax_use_shardy_partitioner", config.shardy)
   max_utils.print_system_information()
   validate_train_config(config)
   os.environ["TFDS_DATA_DIR"] = config.dataset_path or ""

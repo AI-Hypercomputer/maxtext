@@ -88,6 +88,7 @@ def main(argv: Sequence[str]) -> None:
 
   config = pyconfig.initialize(argv)
   _validate_config(config)
+  jax.config.update("jax_use_shardy_partitioner", config.shardy)
   max_utils.print_system_information()
 
   engine = maxengine.MaxEngine(config)

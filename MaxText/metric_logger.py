@@ -59,6 +59,10 @@ class MetricLogger:
     self.cumulative_eval_metrics = {"scalar": defaultdict(float)}
     self.buffered_train_metrics = None
 
+  def reset_eval_metrics(self):
+    """Resets the cumulative metrics dictionary for a new evaluation run."""
+    self.cumulative_eval_metrics = {"scalar": defaultdict(float)}
+
   def write_metrics(self, metrics, step, is_training=True):
     """Entry point for all metrics writing in Train's Main."""
     if metrics:

@@ -198,6 +198,7 @@ def validate_keys(keys):
   validate_multiple_slices(keys)
   if keys["num_experts"] > 1:
     validate_sparse_matmul_parallelism(keys)
+    validate_ragged_dot(keys)
     validate_deepseek_moe(keys)
     assert keys["decoder_block"] != "qwen3", "Qwen3 MoE mode has not been tested, please set num_experts to 1."
 
@@ -963,6 +964,15 @@ def validate_sparse_matmul_parallelism(raw_keys):
   ):
     raise ValueError("You should use the pipeline_fsdp_ag_once = True and leave model_fsdp_ag_once = False.")
 
+def validate_ragged_dot(raw_keys):
+  if raw_keys["sparse_matmul"] and not raw_keys["megablox"]:
+    config_flag = "jax_ragged_dot_use_ragged_dot_instruction"
+    try:
+      jax.config.update(config_flag, True)
+    except AttributeError:
+      max_logging.log(
+          f"JAX config {config_flag} not found, possibly due to old JAX version."
+      )
 
 def create_new_logical_axis_rules(old_logical_axis_rules, new_logical_axis_rules):
   new_logical_axis = set()
