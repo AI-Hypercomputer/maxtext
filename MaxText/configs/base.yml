@@ -110,6 +110,7 @@ save_quantized_params_path: ""
 # when left as is, corresponds to training
 # accepted values are "inference"
 model_call_mode: ""
+qwix: False # Whether to use qwix for quantization. If set to True, the model will be quantized using qwix.
 
 # Shard the range finding operation for quantization. By default this is set to number of slices.
 quantization_local_shard_count: -1
