@@ -79,7 +79,6 @@ class MetricLogger:
 
   def log_metrics(self, metrics, step, is_training):
     """Logs metrics via max_logging."""
-
     if is_training:
       loss = metrics["scalar"]["learning/loss"]
       log_message = (
@@ -95,23 +94,20 @@ class MetricLogger:
         main_model_loss = loss - mtp_loss
         log_message += f", main_model_loss: {main_model_loss:.3f}, mtp_loss: {mtp_loss:.3f}"
 
-      max_logging.log(log_message)
-
     else:
       log_message = (
           f"eval metrics after step: {step},"
-          f" loss={self.cumulative_eval_metrics['scalar']['eval/avg_loss']:.3f},"
-          f" total_weights={self.cumulative_eval_metrics['scalar']['eval/total_weights']},"
-          f" step_time_seconds={self.cumulative_eval_metrics['scalar']['eval/step_time_seconds']:.3f}"
+          f" loss={metrics['scalar']['eval/avg_loss']:.3f},"
+          f" total_weights={metrics['scalar']['eval/total_weights']}"
       )
 
       if self.config.mtp_num_layers > 0:
         log_message += (
-            f", avg_mtp_loss={self.cumulative_eval_metrics['scalar']['eval/avg_mtp_loss']:.3f},"
-            f" avg_mtp_acceptance_rate={self.cumulative_eval_metrics['scalar']['eval/avg_mtp_acceptance_rate_percent']:.2f}%"
+            f", avg_mtp_loss={metrics['scalar']['eval/avg_mtp_loss']:.3f},"
+            f" avg_mtp_acceptance_rate={metrics['scalar']['eval/avg_mtp_acceptance_rate_percent']:.2f}%"
         )
 
-      max_logging.log(log_message)
+    max_logging.log(log_message)
 
   def write_metrics_locally(self, metrics, step):
     """Writes metrics locally for testing."""
