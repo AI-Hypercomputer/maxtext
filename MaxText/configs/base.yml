@@ -751,9 +751,10 @@ use_multimodal: False
 freeze_vision_encoder_params: True
 dtype_mm: "float32"  # Data type for multimodal model's vision encoder
 remat_policy_for_vit: "minimal"  # Remat policy for multimodal model's vision encoder. Check `remat_policy` for options.
-image_size_for_vit: 896 # Default for Gemma3, and should be overwritten by model's config
+image_size_for_vit: 896 # Default for Gemma3 model initialization, and should be overwritten by model's config
 image_path: "" # Local image path used for decoding
 image_placeholder: "<|image|>"
+image_resize: -1 # Resize image to this size, -1 means no resize. Helps simplify llama4 multimodal decoding w.r.t no tiling needed
 
 ### llama4 multi modal configs
 hidden_size_for_vit: 1408 
