@@ -658,10 +658,10 @@ def generate_xpk_workload_cmd(
   all_xpk_storage = ""
   if wl_config.xpk_storage:
     all_xpk_storage = " ".join(f"--storage={storage_test}" for storage_test in wl_config.xpk_storage)
-  
-  hlo_dump = "" 
+
+  hlo_dump = ""
   if wl_config.hlo_dump:
-    # HLO dump gets saved in a subdirectory called "hlo_dump" of the base output directory. 
+    # HLO dump gets saved in a subdirectory called "hlo_dump" of the base output directory.
     hlo_dump = f'--debug-dump-gcs={wl_config.base_output_directory}/{wl_config.run_name}/hlo_dump'
 
   return (
@@ -755,7 +755,7 @@ def xpk_benchmark_runner(
       # If the workload fails to start, remove it from the disruption manager.
       # No-op if disruption manager does not contain the workload name.
       disruption_manager.remove_workload(xpk_workload_name)
-      print('Unable to run xpk workload: {xpk_workload_name}')
+      print(f"Unable to run xpk workload: {xpk_workload_name}")
 
   return disruption_manager
 
@@ -864,7 +864,7 @@ def main() -> int:
   for xpk_workload_name, xpk_workload_cmd in zip(xpk_workload_names, xpk_workload_cmds):
     return_code = run_command_with_updates(xpk_workload_cmd, xpk_workload_name)
     if return_code != 0:
-      print('Unable to run xpk workload: {xpk_workload_name}')
+      print(f"Unable to run xpk workload: {xpk_workload_name}")
 
   # Support Batch workloads one day. Note that this doesn't show the xpk logs per workload.
   # They are saved to file instead.
