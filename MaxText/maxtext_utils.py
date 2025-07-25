@@ -989,7 +989,11 @@ def create_device_mesh(config, devices=None):
   multi_slice_env = num_slices > 1
 
   # Find possible unspecified parallelisms
-  ici_parallelism = max_utils.fill_unspecified_mesh_axes(config.ici_parallelism.copy(), num_devices_per_slice, "ICI")
+  ici_parallelism = max_utils.fill_unspecified_mesh_axes(
+      [-1] if all(device.device_kind == "cpu" for device in devices) else config.ici_parallelism.copy(),
+      num_devices_per_slice,
+      "ICI",
+  )
 
   allow_split_physical_axes = config.allow_split_physical_axes if config.allow_split_physical_axes else False
 

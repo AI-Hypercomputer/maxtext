@@ -1,5 +1,5 @@
 """
-Copyright 2025 Google LLC
+Copyright 2024–2025 Google LLC
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
@@ -68,7 +68,7 @@ class AotHloIdenticalTest(unittest.TestCase):
 
   def find_HLO_files(self, compile_dump_dir, real_dump_dir):
     """
-    Find the HLO file with pattern 
+    Find the HLO file with pattern
     xxx.jit_train_step.xxx.after_optimizations_after_buffer_assignment.txt
     """
     pattern = re.compile(r"^.*\.jit_train_step\..*\.after_optimizations_after_buffer_assignment\.txt$")
@@ -164,7 +164,7 @@ class AotHloIdenticalTest(unittest.TestCase):
   @pytest.mark.tpu_only
   def test_llama2_7b_hlo_match(self):
     self.assert_compile_and_real_match_hlo(
-      "llama2-7b", 
+      "llama2-7b",
       "model_name=llama2-7b",
       "per_device_batch_size=1",
     )

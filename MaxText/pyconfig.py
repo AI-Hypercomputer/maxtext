@@ -1126,6 +1126,9 @@ class HyperParameters:
   def get_keys(self):
     return self._config.keys
 
+  def to_dict(self):
+    return {attr: object.__getattribute__(self, "_config").keys[attr] for attr in self._config.keys}
+
 
 def initialize(argv, **kwargs):
   _config = _HyperParameters(argv, **kwargs)

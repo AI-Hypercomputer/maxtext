@@ -25,6 +25,7 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 
+from MaxText.globals import tpu_present
 from MaxText.kernels.ragged_attention import ragged_mqa, reference_mqa, ragged_mha, reference_mha, ragged_gqa, reference_gqa
 
 
@@ -41,6 +42,7 @@ class RaggedAttentionTest(unittest.TestCase):
   dtype = jnp.float32
 
   @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_ragged_mqa(self):
     key = jax.random.key(0)
     k1, k2, k3 = jax.random.split(key, 3)
@@ -62,6 +64,7 @@ class RaggedAttentionTest(unittest.TestCase):
     )
 
   @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_ragged_mha(self):
     key = jax.random.key(0)
     k1, k2, k3 = jax.random.split(key, 3)
@@ -88,6 +91,7 @@ class RaggedAttentionTest(unittest.TestCase):
     )
 
   @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_ragged_gqa(self):
     key = jax.random.key(0)
     k1, k2, k3 = jax.random.split(key, 3)

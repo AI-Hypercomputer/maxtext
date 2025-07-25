@@ -56,10 +56,11 @@ from jax.sharding import PartitionSpec
 from jax.experimental import mesh_utils
 
 from jetstream.engine import engine_api
-from MaxText.maxengine import MaxEngine
+
 from MaxText import max_utils
-from MaxText.prefill_packing import PrefillProcessor, BatchedPrefillProcessor
 from MaxText import max_logging
+from MaxText.maxengine import MaxEngine
+from MaxText.prefill_packing import PrefillProcessor, BatchedPrefillProcessor
 
 import pathwaysutils
 
@@ -784,7 +785,10 @@ class OfflineEngine:
 
     # Create meshes
     if not self.mesh:
-      self.mesh = OfflineEngine.create_mesh(jax.devices(), self.config)
+      devices_array = jax.devices()
+      if jax.device_count() == 1:
+        devices_array = np.array(devices_array).reshape((1,) * len(config.mesh_axes))
+      self.mesh = OfflineEngine.create_mesh(devices_array, self.config)
 
     self.worker = InferenceWorker(
         config=self.config,
@@ -915,12 +919,15 @@ class OfflineEngine:
   def create_mesh(devices, config):
     """Create data parallelism meshes for each Inference worker."""
     ici_parallelism = max_utils.fill_unspecified_mesh_axes(config.ici_parallelism.copy(), len(devices), "ICI")
-    devices_array = mesh_utils.create_device_mesh(
+    if jax.device_count() == 1:
+      devices_array = np.array(devices).reshape((1,) * len(config.mesh_axes))
+    else:
+      devices_array = mesh_utils.create_device_mesh(
         ici_parallelism,
         devices,
         contiguous_submeshes=False,
         allow_split_physical_axes=config.allow_split_physical_axes or False,
-    )
+      )
     mesh = Mesh(devices_array.reshape(ici_parallelism), config.mesh_axes)
     return mesh
 

@@ -22,6 +22,7 @@ import time
 import os
 import socket
 import subprocess
+import sys
 import collections
 from collections.abc import Sequence
 from typing import Any, Tuple
@@ -973,7 +974,7 @@ def unscan_train_state_params(params, sharding, mesh, scan_axis, layer_groups):
 def rescan_train_state_params(params, source_shardings, scan_axis, layer_groups):
   """
   Reconstruct scanned layers from per-layer entries using minimal HBM.
-  
+
   Args:
     train_state: training state with unrolled {layer_name}_{i} entries
     scan_axis: axis to scan over
@@ -1003,3 +1004,34 @@ def rescan_train_state_params(params, source_shardings, scan_axis, layer_groups)
 
     # Store result and clear temporary memory
     decoder[layer_name] = scanned
+
+
+def gcs_bucket_accessible(bucket_name="maxtext-dataset"):
+  """
+  Check whether a Google Cloud Storage bucket is accessible.
+
+  Args:
+    bucket_name: Bucket name.
+  Returns:
+    Boolean of whether the bucket is accessible.
+  """
+  if bucket_name in gcs_bucket_accessible.accessible:
+    return gcs_bucket_accessible.accessible[bucket_name]
+  try:
+    exit_code = subprocess.call(
+        ["gsutil", "ubla", "get", f"gs://{bucket_name}/"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+    )
+    gcs_bucket_accessible.accessible[bucket_name] = exit_code == os.R_OK
+    return gcs_bucket_accessible.accessible[bucket_name]
+  except subprocess.CalledProcessError:
+    gcs_bucket_accessible.accessible[bucket_name] = False
+    return False
+  except FileNotFoundError:
+    print(
+        "Error: 'gsutil' command not found. Please ensure Google Cloud SDK is installed and in your PATH.", file=sys.stderr
+    )
+    gcs_bucket_accessible.accessible[bucket_name] = False
+    return False
+
+
+gcs_bucket_accessible.accessible = {}
