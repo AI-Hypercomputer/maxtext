@@ -26,6 +26,8 @@ from aqt.jax.v2.flax import aqt_flax
 from aqt.jax.v2 import tiled_dot_general
 from aqt.jax.v2 import calibration
 
+import qwix
+
 import jax
 import jax.numpy as jnp
 from jax.tree_util import tree_flatten_with_path, tree_unflatten
@@ -545,6 +547,8 @@ def get_quant_mode(quant_mode_str: str = "train"):
 
 def configure_quantization(config: Config, quant_mode_str: str = "train"):
   """Configure quantization based on user config and quant mode."""
+  if config.qwix:
+    return None
   quant_cfg = _get_quant_config(config)
   if quant_cfg:
     if quant_cfg == "fp8":
@@ -606,3 +610,24 @@ def remove_quantized_params(params, aqt_vars):
 
 def configure_kv_quant(config):
   return None if not config.quantize_kvcache else KVQuant(config)
+
+
+def get_int8_config(config):
+  rules = [
+      qwix.QuantizationRule(
+        module_path='.*',  # Apply to all modules
+        weight_qtype='int8',  # 8-bit weights (equivalent to fwd_bits=8)
+        act_qtype='int8',     # 8-bit activations        
+      )
+    ]
+
+  return rules
+
+
+def get_rules(config):
+  """Get quantization rules based on the config."""
+  if config.quantization == "int8":
+    return get_int8_config(config)
+  return None
+
+
