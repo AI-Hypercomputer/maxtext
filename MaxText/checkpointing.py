@@ -24,26 +24,61 @@ from etils import epath
 from flax.training import train_state
 import grain.python as grain
 import jax
-import numpy as np
-import orbax.checkpoint as ocp
-import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_checkpoint_manager
-import orbax.checkpoint.experimental.emergency.replicator_checkpoint_manager as emergency_replicator_checkpoint_manager
-
 from MaxText import exceptions
 from MaxText import max_logging
 from MaxText.globals import DEFAULT_OCDBT_TARGET_DATA_FILE_SIZE
 from MaxText.multihost_dataloading import MultiHostDataLoadIterator
-
+import numpy as np
+import orbax.checkpoint as ocp
+from orbax.checkpoint import v1 as ocp_v1
+import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_checkpoint_manager
+import orbax.checkpoint.experimental.emergency.replicator_checkpoint_manager as emergency_replicator_checkpoint_manager
 # pylint: disable=too-many-positional-arguments
 
 CheckpointManager = ocp.CheckpointManager
 CheckpointManagerOptions = ocp.CheckpointManagerOptions
 Composite = ocp.args.Composite
+options_lib = ocp_v1.options
 PyTreeCheckpointHandler = ocp.PyTreeCheckpointHandler
 EmergencyCheckpointManager = emergency_checkpoint_manager.CheckpointManager
 LocalCheckpointOptions = emergency_checkpoint_manager.LocalCheckpointOptions
 PersistentCheckpointOptions = emergency_checkpoint_manager.PersistentCheckpointOptions
 EmergencyReplicatorCheckpointManager = emergency_replicator_checkpoint_manager.ReplicatorCheckpointManager
+
+
+def _load_full_state_from_path(
+    path,
+    abstract_unboxed_pre_state,
+    enable_orbax_v1,
+    checkpoint_conversion_fn,
+    checkpoint_context=options_lib.CheckpointLayout.ORBAX,
+):
+  """Load full state from checkpoint at specified path.
+
+  Args:
+    path: path to checkpoint
+    abstract_unboxed_pre_state: an abstract state that Orbax matches type
+      against.
+    enable_orbax_v1: whether to use orbax v1 or the previously supported v0.
+    checkpoint_conversion_fn: user-provided function to convert checkpoint to
+      maxtext-supported state.
+    checkpoint_context: Optional Orbax context to use for loading.
+
+  Returns:
+    The loaded state.
+  """
+  if enable_orbax_v1:
+    if ocp_v1.is_orbax_checkpoint(path):
+      state = ocp_v1.load_pytree(path, abstract_unboxed_pre_state)
+    else:
+      with checkpoint_context:
+        pre_transformed_state = ocp_v1.load_pytree(path)
+      state = checkpoint_conversion_fn(pre_transformed_state)
+      # TODO(zachmeyers): Add call to place on devices, after sharding logic
+      # is implemented on Orbax side.
+    return state
+  else:
+    return None
 
 
 def create_orbax_checkpoint_manager(
@@ -237,21 +272,27 @@ def load_state_if_possible(
     step: int = -1,  # -1 means latest
     use_ocdbt=True,
     use_zarr3=True,
+    enable_orbax_v1=False,
+    checkpoint_conversion_fn=None,
+    checkpoint_context=None,
 ):
   """Loads TrainState as possible from the inputs.
 
   Args:
     checkpoint_manager: if the checkpoint_manager has a valid checkpoint, return
       that TrainState. This enables a full reload of a run in progress.
-    load_parameters_from_path: if there is no checkpoint in the checkpoint manager,
-      load parameters from a parameter only checkpoint at this path.
-    load_full_state_from_path: if there is no checkpoint in the checkpoint manager,
-      load full state from a full state checkpoint at this path.
+    load_parameters_from_path: if there is no checkpoint in the checkpoint
+      manager, load parameters from a parameter only checkpoint at this path.
+    load_full_state_from_path: if there is no checkpoint in the checkpoint
+      manager, load full state from a full state checkpoint at this path.
     abstract_unboxed_pre_state: an unboxed, abstract TrainState that Orbax
       matches type against.
     enable_single_replica_ckpt_restoring: bool flag for restoring checkpoitn
       with SingleReplicaArrayHandler
     checkpoint_storage_concurrent_gb: concurrent GB for checkpoint byte I/O.
+    enable_orbax_v1: bool flag for enabling Orbax v1.
+    checkpoint_conversion_fn: function for converting checkpoint to Orbax v1.
+    checkpoint_context: Optional checkpoint context to use for loading.
 
   Returns:
     A tuple of (train_state, train_state_params) where full_train_state captures
@@ -295,22 +336,16 @@ def load_state_if_possible(
       checkpoint_args = ocp.args.PyTreeRestore(item=abstract_unboxed_pre_state, restore_args=restore_args)
 
       match (checkpoint_manager, dataset_type, data_iterator):
-        # Case 1: Matches if 'checkpoint_manager' is an instance of either EmergencyCheckpointManager
-        # or EmergencyReplicatorCheckpointManager. The '_' indicates that 'dataset_type' and
-        # 'data_iterator' can be any value and aren't used in this pattern.
-        case (checkpoint_manager, _, _) if isinstance(
-            checkpoint_manager, (EmergencyCheckpointManager, EmergencyReplicatorCheckpointManager)
+        case (checkpoint_manager, _) if isinstance(
+            checkpoint_manager,
+            (EmergencyCheckpointManager, EmergencyReplicatorCheckpointManager),
         ):
-          return (checkpoint_manager.restore(step, args=Composite(state=checkpoint_args)).state, None)
-        # Case 2: Matches if dataset type is "grain" and a specific checkpoint file exits for the iterator
-        # exists within the checkpoint manager's directory for the given step.
+          return (checkpoint_manager.restore(step, args=checkpoint_args), None)
         case (checkpoint_manager, dataset_type, data_iterator) if dataset_type == "grain" and data_iterator and (
             checkpoint_manager.directory / str(step) / "iter"
         ).exists():
           grain_iter = grain.PyGrainCheckpointRestore(data_iterator.local_iterator)
           return (checkpoint_manager.restore(step, args=Composite(items=checkpoint_args, iter=grain_iter)), None)
-        # Case 3: Default/Fallback case.
-        # This case acts as a wildcard ('_') and matches if none of the preceding cases were met.
         case _:
           return (checkpoint_manager.restore(step, args=Composite(items=checkpoint_args)), None)
 
@@ -324,10 +359,17 @@ def load_state_if_possible(
     )
     return None, restored_params
   elif load_full_state_from_path != "":
-    max_logging.log(f"restoring full state from {load_full_state_from_path=}")
-    p = epath.Path(load_full_state_from_path)
-    restored = ocp.StandardCheckpointer().restore(p, abstract_unboxed_pre_state)
-    return {"items": restored}, None
+    max_logging.log(
+        f"Loading full state from path: {load_full_state_from_path}"
+    )
+    restored_state = _load_full_state_from_path(
+        path=load_full_state_from_path,
+        abstract_unboxed_pre_state=abstract_unboxed_pre_state,
+        enable_orbax_v1=enable_orbax_v1,
+        checkpoint_conversion_fn=checkpoint_conversion_fn,
+        checkpoint_context=checkpoint_context,
+    )
+    return {"items": restored_state}, None
   else:
     max_logging.log("No existing checkpoints found, not restoring checkpoint.")
     return None, None
