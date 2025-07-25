@@ -17,15 +17,15 @@ limitations under the License.
 """ Common Max Utils needed by multiple modules.
 All the functions include MaxText modules, such as Pyconfig, should be moved to MaxText utils file."""
 
+from collections.abc import Sequence
+from functools import partial
+from typing import Any, Tuple
+import collections
 import functools
-import time
 import os
 import socket
 import subprocess
-import collections
-from collections.abc import Sequence
-from typing import Any, Tuple
-from functools import partial
+import time
 
 import numpy as np
 
@@ -973,7 +973,7 @@ def unscan_train_state_params(params, sharding, mesh, scan_axis, layer_groups):
 def rescan_train_state_params(params, source_shardings, scan_axis, layer_groups):
   """
   Reconstruct scanned layers from per-layer entries using minimal HBM.
-  
+
   Args:
     train_state: training state with unrolled {layer_name}_{i} entries
     scan_axis: axis to scan over
