@@ -333,7 +333,7 @@ class RoutedMoE(nn.Module):
     -1), we use a standard top-k routing mechanism. Otherwise, we force all
     selected experts to be from the a subset of the highest rated expert groups.
 
-    The selection process uses post_bias logits, while the return weigths use
+    The selection process uses post_bias logits, while the return weights use
     pre_bias logits.
 
     Args:
@@ -455,7 +455,7 @@ class RoutedMoE(nn.Module):
         sorted_indices: Indices used to permute the inputs.
         local_group_size: Number of tokens assigned to each local expert on this
           shard.
-        sorted_experts_ids: expert ID corrsponding to each token of the permuted
+        sorted_experts_ids: expert ID corresponding to each token of the permuted
         inputs.
     """
 
@@ -538,10 +538,10 @@ class RoutedMoE(nn.Module):
           cumulated_array = jnp.cumsum(array_with_zeros, axis=0, dtype=input_array.dtype)
           return cumulated_array[shard_id]
         elif strategy == TransformStrategy.RECV_SIZE:
-          # Received size in the traget output
+          # Received size in the target output
           return input_array[:, shard_id]
         else:
-          raise ValueError(f"Unknown tranform array strategy: {strategy}")
+          raise ValueError(f"Unknown transform array strategy: {strategy}")
 
       # If the batch is unsharded then we send the same data slice to all other
       # shards. We also assume each shard will have the local processed inputs
@@ -563,10 +563,10 @@ class RoutedMoE(nn.Module):
         # The amount that each shard receives from all other shards is
         # equivalent to the group sizes (aka input_array).
         elif strategy == TransformStrategy.RECV_SIZE:
-          # Received size in the traget output
+          # Received size in the target output
           return input_array
         else:
-          raise ValueError(f"Unknown tranform array strategy: {strategy}")
+          raise ValueError(f"Unknown transform array strategy: {strategy}")
 
     input_offsets = transform_array(
         all_shards_group_sizes,

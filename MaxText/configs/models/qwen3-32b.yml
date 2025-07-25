@@ -1,4 +1,4 @@
-# Copyright 2024 Google LLC
+# Copyright 2025 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,19 +12,26 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-base_config: "base.yml"
-# The model_name guarantees we will use the correct model from
-# configs/models/llama3-70b.yml, see update_model_vars in pyconfig.py for details.
-model_name: "llama3-70b"
+# model config for qwen3-32b
 
-run_name: "gpu_train_test"
-hardware: "gpu"
-steps: 30
-per_device_batch_size: 4
-max_target_length: 8192
-attention: "cudnn_flash_te"
-remat_policy: "full"
-use_iota_embed: True
-dataset_type: "synthetic"
-reuse_example_batch: 1
-enable_checkpointing: False
+base_emb_dim: 5120
+base_num_query_heads: 64
+base_num_kv_heads: 8
+base_mlp_dim: 25600
+base_num_decoder_layers: 64
+head_dim: 128
+mlp_activations: ["silu", "linear"] # "hidden_act": "silu" implies SwiGLU
+vocab_size: 151936
+
+decoder_block: "qwen3"
+
+normalization_layer_epsilon: 1.0e-6
+rope_max_timescale: 1000000
+
+use_qk_norm: True
+
+logits_via_embedding: False # different from 0.6 and 4B variants, "tie_word_embeddings": false
+normalize_embedding_logits: False
+
+tokenizer_type: "huggingface"
+
