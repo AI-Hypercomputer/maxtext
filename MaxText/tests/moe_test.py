@@ -33,6 +33,7 @@ from MaxText.globals import PKG_DIR
 from MaxText.layers.linears import mlp_block
 from MaxText.layers import moe
 from MaxText.layers.initializers import NdInitializer, nd_dense_init
+from MaxText.layers.quantizations import Fp8Quantization
 
 
 class TokenDroppingTest(unittest.TestCase):
@@ -158,6 +159,40 @@ class TokenDroppingTest(unittest.TestCase):
     self.assertTrue((expected_dispatch_mask == actual_dispatch_mask).all())
     self.assertTrue(jax.numpy.allclose(expected_combine_mask, actual_combine_mask, rtol=1e-02, atol=1e-02))
 
+class MlpBlockTest(unittest.TestCase):
+
+  def setUp(self):
+    super().setUp()
+    self.config = pyconfig.initialize(
+        [None, os.path.join(PKG_DIR, "configs", "base.yml")],
+        run_name="token_dropping_test",
+        enable_checkpointing=False,
+        model_name="mixtral-8x7b",
+        dtype="bfloat16",
+        megablox=False,
+        sparse_matmul=False,
+        max_target_length=80,
+        per_device_batch_size=1,
+        capacity_factor=2,
+    )
+    self.rng = jax.random.PRNGKey(42)
+    quant = Fp8Quantization()
+    self.model = mlp_block(
+        config=self.config,
+        in_features=2,
+        intermediate_dim=2,
+        activations=["silu", "linear"],
+        intermediate_dropout_rate=0.0,
+        dtype=jnp.bfloat16,
+        weight_dtype=jnp.bfloat16,
+        name="mlp",
+        quant=quant,
+        use_bias=True
+    )
+
+  def test_init(self):
+    x = jnp.array([1.0, 2.0])
+    self.model.init({"params": self.rng, "dropout": self.rng}, x)
 
 class DeepSeekRoutingTest(unittest.TestCase):
 
