@@ -90,10 +90,6 @@ def simple_decoder_layer(
 class SimpleMlpDecoderLayer(nnx.Module):
   """Decoder layer consisting of [embed,mlp] followed by an [mlp,embed] matmul."""
 
-  config: Config
-  mesh: Mesh
-  quant: Optional[quantizations.AqtQuantization] = None
-
   def __init__(self, config: Config, mesh: Mesh, 
                *,
                quant: Optional[quantizations.AqtQuantization] = None,
