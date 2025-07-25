@@ -9,6 +9,7 @@ MaxText/layers/pipeline.py @gobbleturk @richjames0
 MaxText/layers/moe.py @RissyRan @michelle-yooh @gagika @richjames0
 MaxText/layers/multi_token_prediction.py @parambole @RissyRan @gagika @richjames0
 MaxText/elastic_train.py @lukebaumann @shauryagup @RoshaniN
+MaxText/layers/quantization.py @khatwanimohit @jshin1394 @liudangyi @richjames0
 
 # Inference
 MaxText/tests/inference @vipannalla @mitalisi @gpolovets1 @mailvijayasingh @jrplatin @patemotter @lumosis @richjames0
