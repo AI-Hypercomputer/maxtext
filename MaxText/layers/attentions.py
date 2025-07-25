@@ -900,10 +900,24 @@ class AttentionOp(nnx.Module):
         cp_size,
         load_balanced_context_parallel,
     ):
+      # TODO(shuningjin): remove
+      debug_sharding(query, f"flash query\naxis_names_q: {nn.logical_to_mesh_axes(axis_names_q)}\n")
+      debug_sharding(key, f"flash key\naxis_names_kv: {nn.logical_to_mesh_axes(axis_names_kv)}\n")
+      debug_sharding(value, f"flash value\naxis_names_kv: {nn.logical_to_mesh_axes(axis_names_kv)}\n")
+      if decoder_segment_ids_q is not None:
+        debug_sharding(
+            decoder_segment_ids_q,
+            f"flash decoder_segment_ids_q\nsegment_axis_names_q {nn.logical_to_mesh_axes(segment_axis_names_q)}\n",
+        )
+        debug_sharding(
+            decoder_segment_ids_kv,
+            f"flash decoder_segment_ids_kv\nsegment_axis_names_kv {nn.logical_to_mesh_axes(segment_axis_names_kv)}\n",
+        )
+
       # If load_balanced_context_parallel is enabled, reorder the key and value tensors
       # to ensure that they are contiguous in memory.
       # This is necessary for the splash attention kernel to work correctly because it expects
-      # the K and V  to be contiguous. Note that K and V are not sharded over the sequence aka context axis
+      # the K and V to be contiguous. Note that K and V are not sharded over the sequence aka context axis
       # This was we get the unsharded unpermuted key and value tensors
       if cp_size > 1 and load_balanced_context_parallel:
         key = max_utils.reorder_sequence(tensor=key, cp_size=cp_size, seq_dim=2, to_contiguous=True)
@@ -924,6 +938,8 @@ class AttentionOp(nnx.Module):
         decoder_segment_ids_tuple = None
       attention_output = jax.vmap(splash_kernel)(query, key, value, segment_ids=decoder_segment_ids_tuple)
 
+      # TODO(shuningjin): remove
+      debug_sharding(attention_output, f"flash attention_output\naxis_names_q: {nn.logical_to_mesh_axes(axis_names_q)}\n")
       return attention_output
 
     x = wrap_flash_attention(
