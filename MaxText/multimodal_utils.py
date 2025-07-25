@@ -107,7 +107,7 @@ def load_image_from_path(image_path):
   try:
     image = Image.open(image_path).convert("RGB")
     image.load()  # Load image data to catch errors early
-    return jnp.asarray(np.array(image))
+    return np.asarray(image)
 
   except (IOError, OSError) as e:
     raise IOError(f"Error loading image from {image_path}") from e
@@ -322,7 +322,7 @@ def pre_process_gemma3_image(image):
   if pil_img.size[0] > target_size[0] or pil_img.size[1] > target_size[1]:
     resample_method = Image.Resampling.LANCZOS
   resized_pil_img = pil_img.resize(target_size, resample=resample_method)
-  image = np.array(resized_pil_img)
+  image = np.asarray(resized_pil_img, dtype=np.float32)
   image = _normalize_images(image, mean=GEMMA_IMAGE_MEAN, std=GEMMA_IMAGE_STD)
   image = np.clip(image, -1, 1)
   processor_output = PreprocessorOutput(
@@ -402,7 +402,7 @@ def pre_process_image(image, model_name):
   """
   if model_name in ["gemma3-4b", "gemma3-12b", "gemma3-27b"]:
     return pre_process_gemma3_image(image)
-  elif model_name in ["llama4-17b-16e", "llama4-70b-16e"]:
+  elif model_name in ["llama4-17b-16e", "llama4-17b-128e"]:
     return pre_process_llama4_image(image)
   else:
     raise ValueError(f"Model {model_name} does not support multimodal inference.")
