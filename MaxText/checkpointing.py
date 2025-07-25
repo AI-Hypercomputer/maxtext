@@ -52,7 +52,7 @@ def _load_full_state_from_path(
     abstract_unboxed_pre_state,
     enable_orbax_v1,
     checkpoint_conversion_fn,
-    #checkpoint_context=options_lib.CheckpointLayout.ORBAX,
+    checkpoint_context=None,
 ):
   """Load full state from checkpoint at specified path.
 
