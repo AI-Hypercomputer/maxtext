@@ -377,7 +377,7 @@ def _get_aqt_fp8_quant_config(config):
       fwd_bits="e4m3",
       dlhs_bits="e5m2",
       drhs_bits="e5m2",
-      use_dummy_static_bound=False,
+      use_dummy_static_bound=True,
       fwd_accumulator_dtype=jnp.bfloat16,
       dlhs_accumulator_dtype=jnp.bfloat16,
       drhs_accumulator_dtype=jnp.bfloat16,
@@ -399,8 +399,6 @@ def _get_aqt_fp8_quant_config(config):
   )
   # return _build_per_tensor_config(aqt_dg)
   return aqt_dg
-
-
 
 
 def _dot_general_make(quant_cfg):

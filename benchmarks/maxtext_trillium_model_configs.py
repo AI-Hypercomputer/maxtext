@@ -1481,7 +1481,7 @@ mixtral_8x7b_dropped = _add_to_model_dictionary(
         model_name="mixtral_8x7b_dropped",
         model_type="mixtral-8x7b",
         tuning_params={
-            "per_device_batch_size": 12,
+            "per_device_batch_size": 2,
             "ici_fsdp_parallelism": -1,
             "max_target_length": 4096,
             "remat_policy": "custom",
@@ -1505,6 +1505,7 @@ mixtral_8x7b_dropped = _add_to_model_dictionary(
             "sparse_matmul": False,
             "capacity_factor": 1.25,
             "tokenizer_path": "assets/tokenizer.mistral-v1",
+            "quantization": "aqt_fp8",
         },
         xla_flags=(
             xla_flags_library.MOE_VMEM_LIMIT_FLAG
