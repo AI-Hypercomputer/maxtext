@@ -38,7 +38,7 @@ class TrainTests(unittest.TestCase):
           "enable_goodput_recording=False",
           rf"tokenizer_path={os.path.join(os.path.dirname(PKG_DIR), 'assets', 'tokenizer.llama2')}",
       ],
-      "synthetic": [  # tests base config with synthtic dataset
+      "synthetic": [  # tests base config with synthetic dataset
           None,
           os.path.join(PKG_DIR, "configs", "base.yml"),
           "base_output_directory=gs://runner-maxtext-logs",
