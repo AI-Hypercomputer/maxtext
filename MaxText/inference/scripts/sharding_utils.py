@@ -12,19 +12,46 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Tuple
-import matplotlib.pyplot as plt
+"""Utilities for sharding analysis.
+
+This script provides functions to model and compare the performance of different
+sharding strategies for large-scale matrix multiplications, common in transformer
+models. It includes a function to calculate estimated FLOPs, communication
+overhead, and memory footprint for a given sharding configuration, and another
+function to plot these metrics across various user-defined sharding schemes.
+This helps in understanding the trade-offs between data parallelism, tensor
+parallelism, and expert parallelism.
+"""
+
+from typing import Tuple, Iterable
 import pprint
+import warnings
+
+import matplotlib.pyplot as plt
+
 import numpy as np
 
 
-def latency_bound_comms(comm: float, latency=1e-6):
+def latency_bound_comms(comm: float, latency=1e-6) -> float:
+  """Calculates latency-bound communication time.
+
+  In distributed systems, even very small data transfers incur a minimum
+  latency. This function models that by ensuring the communication time is
+  at least a certain minimum latency.
+
+  Args:
+    comm: The calculated communication time based on bandwidth.
+    latency: The minimum latency for a communication operation.
+
+  Returns:
+    The communication time, lower-bounded by the latency.
+  """
   return max(comm, latency)
 
 
 def calculate_matmul_resources(
-    activations_shape: Tuple[int],
-    weights_shape: Tuple[int],
+    activations_shape: Tuple[int, ...],
+    weights_shape: Tuple[int, ...],
     ici_bandwidth: float,
     peak_flops: float,
     sD: int = 1,
@@ -35,57 +62,70 @@ def calculate_matmul_resources(
     activation_size_bytes: int = 2,
     weight_size_bytes: int = 2,
     ici_latency: float = 1e-6,
-    all_gather_axes: Tuple[int] = [],
+    all_gather_axes: Iterable[str] = iter(()),
     debug=True,
 ) -> dict[str, float]:
-  """
-  Calculates estimated FLOPs, communication volume, and memory for a distributed matrix multiplication.
+  """Calculates resources for a distributed matrix multiplication.
+
+  This function estimates the FLOPs, communication volume, and memory for a
+  distributed matrix multiplication (A @ W) based on a given sharding strategy.
 
   The multiplication is A @ W.
-  A (activations) has shape (M, K).
+  A (activations) has shape (M, ..., K).
   W (weights) has shape (G, K, F).
 
   Sharding strategy assumed:
-  - Data Parallelism: `sD` shards the M dim of A.
-  - Embedding Parallelism: `sK` shards on the embedding dim of A.
-  - Tensor Parallelism for W dim: `sK` shards the W dimension of W.
-  - Tensor Parallelism for F dim: `sF` shards the second weight dim of W.
+  - Data Parallelism (sD): Shards the 'M' dimension of A.
+  - FSDP-style on Activations (sK): Shards the 'K' dimension of A.
+  - FSDP-style on Weights (sW): Shards the 'K' dimension of W.
+  - Tensor Parallelism (sF): Shards the 'F' dimension of W.
+  - Expert Parallelism (sE): Shards the 'G' dimension of W (experts).
 
   Args:
-      activations_shape: Shape of the activations tensor (M, K).
-      weights_shape: Shape of the weights tensor (G, K, F).
-                     G is the number of groups if this is a GMM (e.g in MoE layer).
-      sD: Number of data parallel shards (sD). Must be >= 1.
-      sK: Sharding factor for the activation embedding dimension.
-      sW: Sharding factor for the first weight dimension.
-      sF: Sharding factor for the second weight dimension.
-      sE: Sharding factor to split up expert weights.
-      activation_size_bytes: Size of a single element in bytes for the activations.
-      weight_size_bytes: Size of a single element in bytes for the weights.
-      ici_latency: The latency overhead of communicating between TPUs.
-      all_gather_axes: Optional additional output axes that need to be all-gathered (e.g. "M", "F").
-      debug: Whether to print intermediate resource calculations.
+    activations_shape: Shape of the activations tensor (M, ..., K).
+    weights_shape: Shape of the weights tensor, either (G, K, F) for MoE layers
+      or (K, F) for standard layers. G is the number of experts.
+    ici_bandwidth: Inter-chip-interconnect bandwidth in bytes/sec.
+    peak_flops: Peak FLOPs per second for a single device.
+    sD: Number of data parallel shards. Must be >= 1.
+    sK: Sharding factor for the activation 'K' dimension.
+    sW: Sharding factor for the weight 'K' dimension.
+    sF: Sharding factor for the weight 'F' dimension.
+    sE: Sharding factor for the expert 'G' dimension.
+    activation_size_bytes: Size of a single element in the activations tensor
+      in bytes.
+    weight_size_bytes: Size of a single element in the weights tensor in bytes.
+    ici_latency: The latency overhead of a single communication operation.
+    all_gather_axes: An iterable of dimension names (e.g., "D", "F") that
+      require an all-gather operation on the output tensor.
+    debug: If True, prints intermediate resource calculations.
 
   Returns:
-      A dictionary with keys:
-          "t_flops": Estimated FLOPs latency.
-          "t_comms": Estimated communication latency.
-          "memory": Estimated memory footprint per device for storing
-                                   local shards of activations, weights, and output (bytes).
+    A dictionary containing the estimated resource usage:
+      - "t_flops": Estimated time for computation in seconds.
+      - "t_comms": Estimated time for communication in seconds.
+      - "memory_per_TPU_bytes": Estimated memory footprint per device in bytes,
+        including local shards of activations, weights, and output.
+
+  Raises:
+    ValueError: If sharding parameters are invalid (e.g., < 1, or
+      conflicting sharding strategies are used) or if tensor shapes are
+      incompatible.
   """
 
   M, K_act = activations_shape[0], activations_shape[-1]
   # Intermediate activation shape
   I = np.prod(np.array(activations_shape[1:-1]))
-  if len(weights_shape) == 3:
-    G, K_w, F = weights_shape
-  elif len(weights_shape) == 2:
-    K_w, F = weights_shape
+  weights_shape_len = len(weights_shape)
+  if weights_shape_len == 3:
+    G, K_w, F = weights_shape  # pytype: disable=bad-unpacking
+  elif weights_shape_len == 2:
+    K_w, F = weights_shape  # pytype: disable=bad-unpacking
     G = 1
   else:
     raise ValueError(f"weights_shape={weights_shape} is not supported!.")
 
-  def _gather_dim_to_shard():
+  def _gather_dim_to_shard() -> dict[str, int]:
     # # Used to map all-gather arguments to the respective shardings.
     return {"D": sD, "K": sK, "W": sW, "F": sF, "E": sE}
 
@@ -104,11 +144,13 @@ def calculate_matmul_resources(
     # implying an average or approximation if not perfectly divisible.
     if M % sD != 0:
       print(
-          f"Warning: Activations M dimension ({M}) is not perfectly divisible by sharding amount {sD}. Results are approximate."
+          f"Warning: Activations M dimension ({M}) is not perfectly divisible by sharding amount {sD}."
+          f" Results are approximate."
       )
     if K_act % sK != 0:
       print(
-          f"Warning: Common K dimension ({K_act}) is not perfectly divisible by sharding amount {sK}. Results are approximate."
+          f"Warning: Common K dimension ({K_act}) is not perfectly divisible by sharding amount {sK}."
+          f" Results are approximate."
       )
     if K_w % sW != 0:
       print(
@@ -175,7 +217,7 @@ def calculate_matmul_resources(
   if debug:
     print(f"Output memory (GB): {local_output_bytes/1e9}")
 
-  gathered_output_bytes = local_output_bytes * np.prod([gather_dim_to_shard[axis] for axis in all_gather_axes])
+  gathered_output_bytes = np.multiply(local_output_bytes, np.prod([gather_dim_to_shard[axis] for axis in all_gather_axes]))
   if debug:
     print(f"Output memory (GB) after additional axes gathers: {gathered_output_bytes/1e9}")
   memory_per_TPU_bytes = mem_activations_bytes + mem_weights_bytes + gathered_output_bytes
@@ -231,29 +273,37 @@ def plot_sharding_scheme_comparison(
     weights_shape,
     sharding_schemes: list[dict],
 ):
-  """
-  Generates plots comparing different sharding schemes:
-  1. Communication latency vs. FLOPs latency
-  2. Communication latency / memory per device
-  3. Memory & Communication Latency
+  """Plots a comparison of different sharding schemes.
+
+  This function takes a list of sharding schemes, calculates the resource
+  requirements for each using a provided calculation function, and then
+  generates a series of plots to visually compare them.
+
+  The generated plots are:
+  1. Grouped bar chart of T_flops vs. T_comms for each scheme.
+  2. Bar chart of the T_flops / T_comms ratio (roofline).
+  3. Bar chart of memory per TPU, with communication time annotated.
 
   Args:
-      activations_shape: Shape of the activations tensor (M, K).
-      weights_shape: Shape of the weights tensor (G, K, F).
-      sharding_schemes: A list of dictionaries. Each dictionary must contain:
-          - "label": A string label for the scheme (e.g., "DP=8").
-          - "shard_settings": A dictionary with sharding parameters used for calc_resource_func().
-          E.g:
-          [
-              {
-                  "label": "DP=8", # Pure Data Parallelism
-                  "shard_settings": {
-                      "sD": 8,
-                      "all_gather_axes": ("D",)
-                  }
-              },
-          ]
-      element_size_bytes: Size of a single element in bytes.
+    calc_resource_func: A function that calculates resource usage, expected to
+      have a signature compatible with `calculate_matmul_resources`.
+    activations_shape: Shape of the activations tensor (e.g., (M, K)).
+    weights_shape: Shape of the weights tensor (e.g., (G, K, F)).
+    sharding_schemes: A list of dictionaries, where each dictionary defines a
+      sharding scheme to be evaluated. Each dictionary must contain:
+        - "label" (str): A descriptive label for the plot (e.g., "DP=8").
+        - "shard_settings" (dict): A dictionary of keyword arguments to be
+          passed to `calc_resource_func`.
+      Example:
+        [
+            {
+                "label": "DP=8", # Pure Data Parallelism
+                "shard_settings": {
+                    "sD": 8,
+                    "all_gather_axes": ("D",)
+                }
+            },
+        ]
   """
   results = []
   valid_schemes_labels = []
@@ -266,21 +316,19 @@ def plot_sharding_scheme_comparison(
     print(f"\n--- Scheme: {label} ---")
     try:
       # Clear previous warnings for divisibility for cleaner output per iteration
-      import warnings
-
-      with warnings.catch_warnings(record=True) as caught_warnings:
+      with warnings.catch_warnings(record=True) as _:
         warnings.simplefilter("always")  # Catch all warnings
 
         # Call the resource calculation function
         res = calc_resource_func(activations_shape, weights_shape, **shard_settings)
-        print(f"Workload stats:\n")
+        print("Workload stats:\n")
         pprint.PrettyPrinter(indent=4).pprint(res)
 
       results.append(res)
       valid_schemes_labels.append(label)
     except ValueError as e:
       print(f"Error calculating resources for scheme '{label}': {e}. Skipping.")
-    except Exception as e:
+    except (AttributeError, TypeError, KeyError, ZeroDivisionError) as e:
       print(f"An unexpected error occurred for scheme '{label}': {e}. Skipping.")
 
   if not results:
@@ -420,7 +468,7 @@ def plot_sharding_scheme_comparison(
         va="bottom",  # Vertical alignment (anchor at bottom of text, so text is above y)
         fontsize=8,
         rotation=0,
-        bbox=dict(facecolor="white", alpha=0.6, pad=2, boxstyle="round,pad=0.3"),  # Added bbox
+        bbox={'facecolor': "white", 'alpha': 0.6, 'pad': 2, 'boxstyle': "round,pad=0.3"},  # Added bbox
     )
 
   if mem_list.size > 0:
