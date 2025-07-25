@@ -47,6 +47,39 @@ LocalCheckpointOptions = emergency_checkpoint_manager.LocalCheckpointOptions
 PersistentCheckpointOptions = emergency_checkpoint_manager.PersistentCheckpointOptions
 EmergencyReplicatorCheckpointManager = emergency_replicator_checkpoint_manager.ReplicatorCheckpointManager
 
+def _load_full_state_from_path(
+    path,
+    abstract_unboxed_pre_state,
+    enable_orbax_v1,
+    checkpoint_conversion_fn,
+    #checkpoint_context=options_lib.CheckpointLayout.ORBAX,
+):
+  """Load full state from checkpoint at specified path.
+
+  Args:
+    path: path to checkpoint
+    abstract_unboxed_pre_state: an abstract state that Orbax matches type
+      against.
+    enable_orbax_v1: whether to use orbax v1 or the previously supported v0.
+    checkpoint_conversion_fn: user-provided function to convert checkpoint to
+      maxtext-supported state.
+    checkpoint_context: Optional Orbax context to use for loading.
+
+  Returns:
+    The loaded state.
+  """
+  if enable_orbax_v1:
+    if ocp_v1.is_orbax_checkpoint(path):
+      state = ocp_v1.load_pytree(path, abstract_unboxed_pre_state)
+    else:
+      with checkpoint_context:
+        pre_transformed_state = ocp_v1.load_pytree(path)
+      state = checkpoint_conversion_fn(pre_transformed_state)
+      # TODO(zachmeyers): Add call to place on devices, after sharding logic
+      # is implemented on Orbax side.
+    return state
+  else:
+    return None
 
 def create_orbax_checkpoint_manager(
     checkpoint_dir: str,
