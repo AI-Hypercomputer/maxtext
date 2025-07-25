@@ -61,22 +61,6 @@ from MaxText.layers.quantizations import AqtQuantization as Quant
 # pylint: disable=line-too-long, g-doc-args, g-doc-return-or-yield, bad-continuation, g-inconsistent-quotes
 # pytype: disable=attribute-error
 
-# TODO(shuningjin): remove
-from flax.linen.spmd import _global_mesh_defined
-
-
-# TODO(shuningjin): remove
-def debug_sharding(array, prefix=""):
-  global_shape = array.shape
-  jax.debug.inspect_array_sharding(
-      array,
-      callback=lambda sharding_obj: print(
-          prefix + f"\tGlobal Shape: {global_shape}\n"
-          f"\tLocal Shape: {sharding_obj.shard_shape(global_shape)}\n"
-          f"\tSharding Object: {sharding_obj}\n"
-      ),
-  )
-
 
 class AttentionType(enum.Enum):
   GLOBAL = "global"  # default, with causality
@@ -900,20 +884,6 @@ class AttentionOp(nnx.Module):
         cp_size,
         load_balanced_context_parallel,
     ):
-      # TODO(shuningjin): remove
-      debug_sharding(query, f"flash query\naxis_names_q: {nn.logical_to_mesh_axes(axis_names_q)}\n")
-      debug_sharding(key, f"flash key\naxis_names_kv: {nn.logical_to_mesh_axes(axis_names_kv)}\n")
-      debug_sharding(value, f"flash value\naxis_names_kv: {nn.logical_to_mesh_axes(axis_names_kv)}\n")
-      if decoder_segment_ids_q is not None:
-        debug_sharding(
-            decoder_segment_ids_q,
-            f"flash decoder_segment_ids_q\nsegment_axis_names_q {nn.logical_to_mesh_axes(segment_axis_names_q)}\n",
-        )
-        debug_sharding(
-            decoder_segment_ids_kv,
-            f"flash decoder_segment_ids_kv\nsegment_axis_names_kv {nn.logical_to_mesh_axes(segment_axis_names_kv)}\n",
-        )
-
       # If load_balanced_context_parallel is enabled, reorder the key and value tensors
       # to ensure that they are contiguous in memory.
       # This is necessary for the splash attention kernel to work correctly because it expects
@@ -938,8 +908,6 @@ class AttentionOp(nnx.Module):
         decoder_segment_ids_tuple = None
       attention_output = jax.vmap(splash_kernel)(query, key, value, segment_ids=decoder_segment_ids_tuple)
 
-      # TODO(shuningjin): remove
-      debug_sharding(attention_output, f"flash attention_output\naxis_names_q: {nn.logical_to_mesh_axes(axis_names_q)}\n")
       return attention_output
 
     x = wrap_flash_attention(
@@ -1809,12 +1777,6 @@ class Attention(nn.Module):
       inputs_q = nn.with_logical_constraint(inputs_q, self.decode_input_axis_names)
       inputs_kv = nn.with_logical_constraint(inputs_kv, self.decode_input_axis_names)
 
-    # TODO(shuningjin): remove
-    prefix = f"\n_global_mesh_defined: {_global_mesh_defined()}, context={self.config.ici_context_parallelism}, expert={self.config.ici_expert_parallelism}, expert_shard_attention_option={self.config.expert_shard_attention_option}\n\n"
-    debug_sharding(inputs_q, prefix + "inputs_q\n")
-    if not self.config.fused_qkv:
-      debug_sharding(inputs_kv, "inputs_kv\n")
-
     # apply projection.
     if self.config.fused_qkv:
       query, key, value = self.qkv_projection(inputs_q, proj_name="qkv_proj")
@@ -1890,11 +1852,6 @@ class Attention(nn.Module):
     key = checkpoint_name(key, "key_proj")
     value = checkpoint_name(value, "value_proj")
 
-    # TODO(shuningjin): remove
-    debug_sharding(query, "query\n")
-    debug_sharding(key, "key\n")
-    debug_sharding(value, "value\n")
-
     assert not self.config.quantize_kvcache or self.kv_quant
 
     if self.config.attention == "paged" and model_mode != MODEL_MODE_TRAIN:
@@ -1918,9 +1875,6 @@ class Attention(nn.Module):
       out = nn.with_logical_constraint(out, self.out_axis_names)
     else:
       out = nn.with_logical_constraint(out, self.decode_out_axis_names)
-
-    # TODO(shuningjin): remove
-    debug_sharding(out, "out\n")
 
     out = self.out_projection(inputs_q.shape[-1], out)
     out = checkpoint_name(out, "out_proj")
@@ -2244,11 +2198,6 @@ class MLA(Attention):
       inputs_q = nn.with_logical_constraint(inputs_q, self.input_axis_names)
       inputs_kv = nn.with_logical_constraint(inputs_kv, self.input_axis_names)
 
-    # TODO(shuningjin): remove
-    prefix = f"\n_global_mesh_defined: {_global_mesh_defined()}, context={self.config.ici_context_parallelism}, expert={self.config.ici_expert_parallelism}, expert_shard_attention_option={self.config.expert_shard_attention_option}\n\n"
-    debug_sharding(inputs_q, prefix + "MLA inputs_q\n")
-    debug_sharding(inputs_kv, "MLA inputs_kv\n")
-
     query = self.mla_query_projection(inputs_q, inputs_positions, model_mode)
     key, value, cached_values = self.mla_kv_projection(
         inputs_kv, inputs_positions, decoder_segment_ids, model_mode, previous_chunk
@@ -2257,11 +2206,6 @@ class MLA(Attention):
     query = checkpoint_name(query, "query_proj")
     key = checkpoint_name(key, "key_proj")
     value = checkpoint_name(value, "value_proj")
-
-    # TODO(shuningjin): remove
-    debug_sharding(query, "MLA query\n")
-    debug_sharding(key, "MLA key\n")
-    debug_sharding(value, "MLA value\n")
 
     if self.config.attention == "paged" and model_mode != MODEL_MODE_TRAIN:
       unnormalized_out, _, exp_sum = self.ds_paged_attention_op(
@@ -2276,9 +2220,6 @@ class MLA(Attention):
       out = nn.with_logical_constraint(out, self.ep_out_axis_names)
     else:
       out = nn.with_logical_constraint(out, self.out_axis_names)
-
-    # TODO(shuningjin): remove
-    debug_sharding(out, "MLA out\n")
 
     out = self.out_projection(inputs_q.shape[-1], out)
     return out

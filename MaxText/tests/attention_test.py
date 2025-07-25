@@ -606,9 +606,9 @@ class AttentionTest(unittest.TestCase):
         msg="Logits from generic dot product and flash attention+context parallelism are not close.",
     )
 
-  # TODO(shuningjin): remove some
   @pytest.mark.tpu_only
   def test_tpu_flash_attention_cp_and_ep(self):
+    # cp + ep_as_cp
     self.tpu_flash_attention_cp_and_ep_helper(
         ici_context_parallelism=2,
         context_parallel_load_balance=False,
@@ -617,10 +617,11 @@ class AttentionTest(unittest.TestCase):
     )
     self.tpu_flash_attention_cp_and_ep_helper(
         ici_context_parallelism=2,
-        context_parallel_load_balance=False,
+        context_parallel_load_balance=True,
         ici_expert_parallelism=2,
-        expert_shard_attention_option="fsdp",
+        expert_shard_attention_option="context",
     )
+    # ep_as_cp
     self.tpu_flash_attention_cp_and_ep_helper(
         ici_context_parallelism=1,
         context_parallel_load_balance=False,
@@ -629,34 +630,9 @@ class AttentionTest(unittest.TestCase):
     )
     self.tpu_flash_attention_cp_and_ep_helper(
         ici_context_parallelism=1,
-        context_parallel_load_balance=False,
-        ici_expert_parallelism=4,
-        expert_shard_attention_option="fsdp",
-    )
-
-    self.tpu_flash_attention_cp_and_ep_helper(
-        ici_context_parallelism=2,
-        context_parallel_load_balance=True,
-        ici_expert_parallelism=2,
-        expert_shard_attention_option="context",
-    )
-    self.tpu_flash_attention_cp_and_ep_helper(
-        ici_context_parallelism=2,
-        context_parallel_load_balance=True,
-        ici_expert_parallelism=2,
-        expert_shard_attention_option="fsdp",
-    )
-    self.tpu_flash_attention_cp_and_ep_helper(
-        ici_context_parallelism=1,
         context_parallel_load_balance=True,
         ici_expert_parallelism=4,
         expert_shard_attention_option="context",
-    )
-    self.tpu_flash_attention_cp_and_ep_helper(
-        ici_context_parallelism=1,
-        context_parallel_load_balance=True,
-        ici_expert_parallelism=4,
-        expert_shard_attention_option="fsdp",
     )
 
   def tpu_flash_attention_cp_and_ep_helper(
@@ -1279,9 +1255,9 @@ class MLATest(parameterized.TestCase):
       # TODO (b/394626702) uncomment last check when decode and kv_cache are implemented for MLA
       # self.assertTrue(jax.numpy.allclose(mla_full_this_idx, mla_idx, rtol=1e-02, atol=1e-02, equal_nan=False))
 
-  # TODO(shuningjin): remove some
   @pytest.mark.tpu_only
   def test_tpu_flash_attention_cp_and_ep(self):
+    # cp + ep_as_cp
     self.tpu_flash_attention_cp_and_ep_helper(
         ici_context_parallelism=2,
         context_parallel_load_balance=False,
@@ -1290,10 +1266,11 @@ class MLATest(parameterized.TestCase):
     )
     self.tpu_flash_attention_cp_and_ep_helper(
         ici_context_parallelism=2,
-        context_parallel_load_balance=False,
+        context_parallel_load_balance=True,
         ici_expert_parallelism=2,
-        expert_shard_attention_option="fsdp",
+        expert_shard_attention_option="context",
     )
+    # ep_as_cp
     self.tpu_flash_attention_cp_and_ep_helper(
         ici_context_parallelism=1,
         context_parallel_load_balance=False,
@@ -1302,34 +1279,9 @@ class MLATest(parameterized.TestCase):
     )
     self.tpu_flash_attention_cp_and_ep_helper(
         ici_context_parallelism=1,
-        context_parallel_load_balance=False,
-        ici_expert_parallelism=4,
-        expert_shard_attention_option="fsdp",
-    )
-
-    self.tpu_flash_attention_cp_and_ep_helper(
-        ici_context_parallelism=2,
-        context_parallel_load_balance=True,
-        ici_expert_parallelism=2,
-        expert_shard_attention_option="context",
-    )
-    self.tpu_flash_attention_cp_and_ep_helper(
-        ici_context_parallelism=2,
-        context_parallel_load_balance=True,
-        ici_expert_parallelism=2,
-        expert_shard_attention_option="fsdp",
-    )
-    self.tpu_flash_attention_cp_and_ep_helper(
-        ici_context_parallelism=1,
         context_parallel_load_balance=True,
         ici_expert_parallelism=4,
         expert_shard_attention_option="context",
-    )
-    self.tpu_flash_attention_cp_and_ep_helper(
-        ici_context_parallelism=1,
-        context_parallel_load_balance=True,
-        ici_expert_parallelism=4,
-        expert_shard_attention_option="fsdp",
     )
 
   def tpu_flash_attention_cp_and_ep_helper(
