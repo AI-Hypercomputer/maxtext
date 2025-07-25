@@ -42,7 +42,7 @@ class Standalone_DL_CKPT(unittest.TestCase):
     random_run_name = self._get_random_test_name("standalone_dataloader")
     sdl_main(
         (
-            None,
+            "",
             os.path.join(PKG_DIR, "configs", "base.yml"),
             f"run_name={random_run_name}",
             "base_output_directory=gs://runner-maxtext-logs",
@@ -61,7 +61,7 @@ class Standalone_DL_CKPT(unittest.TestCase):
     # checkpoint at 50
     sckpt_main(
         (
-            None,
+            "",
             os.path.join(PKG_DIR, "configs", "base.yml"),
             f"run_name={random_run_name}",
             "base_output_directory=gs://runner-maxtext-logs",
@@ -82,7 +82,7 @@ class Standalone_DL_CKPT(unittest.TestCase):
     # restore at 50 and checkpoint at 100
     sckpt_main(
         (
-            None,
+            "",
             os.path.join(PKG_DIR, "configs", "base.yml"),
             f"run_name={random_run_name}",
             "base_output_directory=gs://runner-maxtext-logs",

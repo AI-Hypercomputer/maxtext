@@ -15,26 +15,33 @@
  """
 
 import contextlib
-import time
-import os
 import io
+import json
+import os
+import tempfile
+import time
+from concurrent.futures import ThreadPoolExecutor
+from typing import Optional, List, Dict, Tuple, Any, Callable
+
+from jax.experimental import multihost_utils
 import jax
 import jax.numpy as jnp
 import jax.tree_util
+
 from jaxtyping import Array
+
 import numpy as np
-import json
-from jax.experimental import multihost_utils
-from typing import Optional, List, Dict, Tuple, Callable, Any
+
 from google.cloud.storage import Client, transfer_manager
+
 from safetensors.numpy import save_file as numpy_save_file
 from safetensors.flax import save as save_flax_to_bytes
+
 from huggingface_hub import HfApi, repo_exists
+
 from transformers.models.auto.modeling_auto import MODEL_FOR_CAUSAL_LM_MAPPING_NAMES
-from concurrent.futures import ThreadPoolExecutor
 
-from MaxText import max_logging
-
+from MaxText import max_logging, pyconfig
 
 SAFE_TENSORS_CONFIG_FILE = "config.json"
 SAFE_TENSORS_WEIGHTS_FILE = "model.safetensors"
@@ -54,7 +61,6 @@ HF_IDS = {
     "qwen3-4b": "Qwen/Qwen3-4B",
     "qwen3-8b": "Qwen/Qwen3-8B",
     "qwen3-14b": "Qwen/Qwen3-14B",
-    "qwen3-32b": "Qwen/Qwen3-32B",
 }
 
 
@@ -62,7 +68,7 @@ def _get_local_directory(output_dir: str) -> str:
   """Determines the local directory for saving files."""
   if output_dir.startswith("gs://") or output_dir.startswith("hf://"):
     # Fallback to a generic temp directory name if used directly
-    local_dir = os.path.join(os.path.expanduser("~/.cache/maxtext_hf_conversion_temp"), "temp_files")
+    local_dir = os.path.join(os.path.expanduser("~"), ".cache", "maxtext_hf_conversion_temp", "temp_files")
   else:
     local_dir = output_dir
   os.makedirs(local_dir, exist_ok=True)
@@ -70,13 +76,13 @@ def _get_local_directory(output_dir: str) -> str:
 
 
 def process_leaf_param(
-    path_tuple: Any,
+    path_tuple: Tuple[jax.tree_util.PathEntry, ...],
     leaf_value: jax.Array,
     param_map_local: Dict[str, Any],
     shape_map_local: Dict[str, Any],
-    hook_fn_map_local: Dict[str, Any],
-    current_config: Any,
-) -> list[tuple[str, np.ndarray]]:
+    hook_fn_map_local: Dict[str, Callable],
+    current_config: pyconfig.HyperParameters,
+) -> List[Tuple[str, jnp.ndarray]]:
   """Processes a single leaf from the MaxText parameter tree."""
   # Construct maxtext_param_key from path_tuple
   key_parts = []
@@ -125,13 +131,15 @@ def process_leaf_param(
   else:  # Stacked MaxText weight
     if not (leaf_value.ndim > 0 and leaf_value.shape[current_config.param_scan_axis] == len(hf_target_paths)):
       max_logging.log(
-          f"Warning: Mismatch for stacked layer {maxtext_param_key}. MaxText shape {leaf_value.shape}, expected {len(hf_target_paths)} slices on axis {current_config.param_scan_axis}. Skipping."
+          f"Warning: Mismatch for stacked layer {maxtext_param_key}. MaxText shape {leaf_value.shape}, expected "
+          f"{len(hf_target_paths)} slices on axis {current_config.param_scan_axis}. Skipping."
       )
       return []
     for i, hf_path in enumerate(hf_target_paths):
       if hf_path not in shape_map_local:
         max_logging.log(
-            f"Warning: HF path '{hf_path}' for slice {i} of MaxText key '{maxtext_param_key}' not found in shape_map. Skipping slice."
+            f"Warning: HF path '{hf_path}' for slice {i} of MaxText key '{maxtext_param_key}' not found in shape_map. "
+            f"Skipping slice."
         )
         continue
       current_slice_target_hf_shape = shape_map_local[hf_path]
@@ -316,7 +324,6 @@ def save_safetensor_file(
       max_logging.log(f"   Saved {file_name} to {local_path}")
 
 
-
 def save_index_file(
     index: dict,
     local_dir_to_save_to: str,
@@ -342,7 +349,7 @@ def save_index_file(
         )
       max_logging.log(f"   Successfully uploaded {file_name} to HF repo: {repo_id}")
     else:
-      with open(local_path, "w") as f:
+      with open(local_path, "wt", encoding="utf8") as f:
         json.dump(index, f, indent=2)
       max_logging.log(f"   Saved {file_name} to {local_path}")
       if output_dir_final.startswith("gs://"):
@@ -369,9 +376,7 @@ def save_weight_files(
   """
   if index is None:
     # 'shards' is actually the single state_dict here
-    save_safetensor_file(
-        shards, local_dir_to_save_to, output_dir_final, SAFE_TENSORS_WEIGHTS_FILE
-    )
+    save_safetensor_file(shards, local_dir_to_save_to, output_dir_final, SAFE_TENSORS_WEIGHTS_FILE)
   else:
     # Save sharded weights in parallel
     with ThreadPoolExecutor(max_workers=parallel_threads) as executor:
@@ -402,8 +407,6 @@ def get_local_save_path_manager(output_dir: str):
   Yields:
       tuple: (path_to_use_for_saving: str, is_temporary: bool)
   """
-  import tempfile  # Local import to keep it contained
-
   if output_dir.startswith("gs://") or output_dir.startswith("hf://"):
     with tempfile.TemporaryDirectory(prefix="maxtext_hf_save_") as temp_dir:
       max_logging.log(f"   Using temporary local staging directory: {temp_dir}")
@@ -424,7 +427,7 @@ def save_model_files(
 ):
   """
   Saves model files (config and weights) to the specified directory.
-  When uploading to GCS/HF hub, 
+  When uploading to GCS/HF hub,
           *.safetensors are uploaded from memory to remote, no local storage is used to save disk usage
   """
 
@@ -491,6 +494,7 @@ def save_model_files(
   if jax.process_index() == 0:
     max_logging.log(f"✅ Model and tokenizer (if provided) successfully processed for {output_dir}")
 
+
 def upload_state_dict_to_gcs(state_dict: dict, gs_bucket_path: str):
   """Uploads a state_dict from memory to Google Cloud Storage.
 
@@ -506,7 +510,7 @@ def upload_state_dict_to_gcs(state_dict: dict, gs_bucket_path: str):
   # 1. Serialize the state_dict to an in-memory byte buffer
   buffer = io.BytesIO()
   np.savez(buffer, **state_dict)
-  buffer.seek(0) # Rewind the buffer to the beginning
+  buffer.seek(0)  # Rewind the buffer to the beginning
 
   # 2. Upload the bytes to GCS
   storage_client = Client()
@@ -514,7 +518,7 @@ def upload_state_dict_to_gcs(state_dict: dict, gs_bucket_path: str):
   blob = bucket.blob(blob_name)
 
   print(f"-> Uploading in-memory state_dict to {gs_bucket_path}...")
-  blob.upload_from_file(buffer, content_type='application/octet-stream', timeout=600)
+  blob.upload_from_file(buffer, content_type="application/octet-stream", timeout=600)
   print(f"✅ Uploaded to {bucket.name}/{blob_name}")
 
 
@@ -558,10 +562,10 @@ def upload_folder_to_gcs(local_folder: str, gs_bucket_path: str, num_workers: in
   # Standardize bucket path format
   gs_bucket_path = gs_bucket_path.removeprefix("gs://")
   bucket_name = gs_bucket_path.split("/")[0]
-  # Ensure destination ends with "/"
   destination_dir = gs_bucket_path[len(bucket_name) :]
   if destination_dir.startswith("/"):
     destination_dir = destination_dir[1:]
+  # Ensure destination ends with "/"
   if destination_dir != "" and not destination_dir.endswith("/"):
     destination_dir += "/"
 

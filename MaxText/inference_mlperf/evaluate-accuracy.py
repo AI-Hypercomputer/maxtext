@@ -58,7 +58,7 @@ def postprocess_text(preds, targets):
 def main():
 
   args = get_args()
-  metric = evaluate.load("rouge")
+  metric = evaluate.load("rogue")
   nltk.download("punkt")
 
   if args.checkpoint_path:
