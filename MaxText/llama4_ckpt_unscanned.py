@@ -735,8 +735,8 @@ def _convert_pytorch_to_jax_weights(base_model_path: str, model_size: str, model
     # NOTE: this is where the RoPE permutation would occur, but we do not need to do this for the
     # PyTorch models.
 
-    # This will be of size [hidden_size, hidden_size], but the first dimmension is sharded, so I believe
-    # we want to tranpose this and then reshape to head_dim * base_num_query_heads on the first dim
+    # This will be of size [hidden_size, hidden_size], but the first dimension is sharded, so I believe
+    # we want to transpose this and then reshape to head_dim * base_num_query_heads on the first dim
     w_post = np.concatenate(
         [_pt_to_np(var[f"layers.{layer_idx}.attention.wo.weight"], cast_dtype=CAST_DTYPE) for var in chkpt_vars],
         axis=1,

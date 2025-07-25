@@ -965,15 +965,15 @@ def validate_sparse_matmul_parallelism(raw_keys):
   ):
     raise ValueError("You should use the pipeline_fsdp_ag_once = True and leave model_fsdp_ag_once = False.")
 
+
 def validate_ragged_dot(raw_keys):
   if raw_keys["sparse_matmul"] and not raw_keys["megablox"]:
     config_flag = "jax_ragged_dot_use_ragged_dot_instruction"
     try:
       jax.config.update(config_flag, True)
     except AttributeError:
-      max_logging.log(
-          f"JAX config {config_flag} not found, possibly due to old JAX version."
-      )
+      max_logging.log(f"JAX config {config_flag} not found, possibly due to old JAX version.")
+
 
 def create_new_logical_axis_rules(old_logical_axis_rules, new_logical_axis_rules):
   new_logical_axis = set()
