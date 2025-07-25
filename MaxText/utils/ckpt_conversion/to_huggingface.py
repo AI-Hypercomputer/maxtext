@@ -2,7 +2,6 @@
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
-# you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
 #     http://www.apache.org/licenses/LICENSE-2.0
@@ -12,29 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-import time
-import jax
-import os
-from typing import Sequence, Dict, Any
-import jax.numpy as jnp
-import numpy as np
-from transformers import AutoTokenizer, AutoProcessor
-from absl import app
-import flax
-
-from MaxText import max_utils
-from MaxText import maxengine
-from MaxText import pyconfig
-from MaxText import max_logging
-
-from MaxText.utils.ckpt_conversion.utils.param_mapping import (
-    HOOK_FNS,
-    PARAM_MAPPING,
-)
-from MaxText.utils.ckpt_conversion.utils.shape_mapping import SHAPE_MAPPING
-from MaxText.utils.ckpt_conversion.utils.hf_model_configs import HF_MODEL_CONFIGS
-from MaxText.utils.ckpt_conversion.utils.utils import (process_leaf_param, save_model_files, HF_IDS)
 
 """Converts a MaxText checkpoint to a HuggingFace-compatible model checkpoint.
 
@@ -63,33 +39,78 @@ Example Usage:
   To convert a gemma2-2b MaxText checkpoint and save it to a local directory:
 
   export HF_AUTH_TOKEN="hf_YOUR_TOKEN"
-  python MaxText/utils/ckpt_conversion/to_huggingface.py \\
-    MaxText/configs/base.yml \\
-    model_name="gemma2-2b" \\
-    load_parameters_path="/path/to/your/maxtext/checkpoint/" \\
-    base_output_directory="/path/to/your/output/directory" \\
+  python MaxText/utils/ckpt_conversion/to_huggingface.py \
+    MaxText/configs/base.yml \
+    model_name="gemma2-2b" \
+    load_parameters_path="/path/to/your/maxtext/checkpoint/" \
+    base_output_directory="/path/to/your/output/directory" \
     scan_layers=False
 
   Note: Other parameters in base.yml (like per_device_batch_size, max_target_length, etc.)
   are used to initialize the model structure and should be consistent with the
   checkpoint being converted, but often don't need to be changed from their defaults.
 """
+
+import jax
+import os
+from typing import Sequence, Dict, Any
+
+from transformers import AutoTokenizer, AutoProcessor
+
+from absl import app
+
+from MaxText import max_utils
+from MaxText import maxengine
+from MaxText import pyconfig
+from MaxText import max_logging
+from MaxText.utils.ckpt_conversion.utils.param_mapping import (
+    HOOK_FNS,
+    PARAM_MAPPING,
+)
+from MaxText.utils.ckpt_conversion.utils.shape_mapping import SHAPE_MAPPING
+from MaxText.utils.ckpt_conversion.utils.hf_model_configs import HF_MODEL_CONFIGS
+from MaxText.utils.ckpt_conversion.utils.utils import (process_leaf_param, save_model_files, HF_IDS)
+
+
 jax.config.update("jax_platform_name", "cpu")
 
 
-def _get_model_mappings(model_name: str, scan_layers: bool, config_dict: dict):  # Changed config to config_dict
-  """Retrieves parameter, shape, and hook function mappings for the model."""
+def _get_model_mappings(model_name: str, scan_layers: bool, config_dict: dict):
+  """Retrieves parameter, shape, and hook function mappings for the model.
+
+  Args:
+    model_name: The name of the model (e.g., "gemma2-2b").
+    scan_layers: Boolean indicating if the model was trained with scanned layers.
+    config_dict: The Hugging Face model configuration dictionary.
+
+  Returns:
+    A dictionary containing the parameter mapping, shape mapping, and hook
+    function mapping required for the conversion.
+
+  Raises:
+    ValueError: If mappings for the specified `model_name` are not found.
+  """
   if model_name not in PARAM_MAPPING or model_name not in SHAPE_MAPPING or model_name not in HOOK_FNS:
     raise ValueError(f"Mappings not found for model: {model_name}. Available PARAM_MAPPING keys: {PARAM_MAPPING.keys()}")
 
   return {
-      "param_mapping": PARAM_MAPPING[model_name](config_dict, scan_layers),
-      "shape_mapping": SHAPE_MAPPING[model_name](config_dict),
-      "hook_fn_mapping": HOOK_FNS[model_name](config_dict, scan_layers, saving_to_hf=True),
+      "param_mapping": PARAM_MAPPING[model_name],
+      "shape_mapping": SHAPE_MAPPING[model_name],
+      "hook_fn_mapping": HOOK_FNS[model_name],
   }
 
 
 def main(argv: Sequence[str]) -> None:
+  """Main function to convert a MaxText checkpoint to HuggingFace format.
+
+  This function orchestrates the entire conversion process. It loads the
+  MaxText checkpoint, transforms the parameter keys and weights according to
+  pre-defined mappings, and saves the resulting model, configuration, and
+  tokenizer in a format compatible with the Hugging Face ecosystem.
+
+  Args:
+    argv: Command-line arguments, which are parsed by `pyconfig`.
+  """
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
 
