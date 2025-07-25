@@ -43,8 +43,10 @@ class SimpleDecoderLayer(nnx.Module):
 
   def __init__(self, config: Config, mesh: Mesh,* , quant: Optional[quantizations.AqtQuantization] = None,
                rngs: Optional[nnx.Rngs] = None,
-               weight_dtype: Any = jnp.float32,**kwargs,
+               weight_dtype: Any = jnp.float32,
+               **kwargs:Any
                )->None:
+
     self.config = config
     self.mesh = mesh
     self.quant = quant
@@ -66,10 +68,12 @@ class SimpleDecoderLayer(nnx.Module):
 
 
 def simple_decoder_layer(
+   *,
    config: Config, 
    mesh: Mesh,
    name: Optional[str] = None,
    quant: Optional[Quant] = None,
+   **kwargs:Any,
 ):
   """Creates a SimpleDecoderLayer module."""
   module = nnx_wrappers.to_linen(
@@ -78,6 +82,7 @@ def simple_decoder_layer(
       mesh=mesh,
       name=name,
       quant=quant,
+      **kwargs,
       metadata_fn=variable_to_logically_partitioned,
   )
   return module
@@ -94,8 +99,9 @@ class SimpleMlpDecoderLayer(nnx.Module):
                quant: Optional[quantizations.AqtQuantization] = None,
                rngs: Optional[nnx.Rngs] = None,
                weight_dtype: Any = jnp.float32,
-               **kwargs,
+               **kwargs: Any,
                )->None:
+
     self.config = config
     self.mesh = mesh
     self.quant = quant
@@ -132,12 +138,12 @@ class SimpleMlpDecoderLayer(nnx.Module):
 
 
 def simple_mlp_decoder_layer(
+   *,
    config: Config, 
    mesh: Mesh,
    name: Optional[str] = None,
    quant: Optional[Quant] = None,
-   **kwargs: Any,
-   
+   **kwargs:Any,
 ):
   """Creates a SimpleMlpDecoderLayer module."""
   module = nnx_wrappers.to_linen(
