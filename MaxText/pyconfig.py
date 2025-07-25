@@ -149,6 +149,14 @@ def validate_rope_type(rope_type: str) -> None:
     raise ValueError(f"Invalid RoPE type was passed. Got: {rope_type}. Valid options: {valid_rope_types}")
 
 
+def validate_expert_shard_attention_option(expert_shard_attention_option: str) -> None:
+  valid_expert_shard_attention_option = ("fsdp", "context")
+  if expert_shard_attention_option not in valid_expert_shard_attention_option:
+    raise ValueError(
+        f"Invalid expert_shard_attention_option was passed. Got: {expert_shard_attention_option}. Valid options: {valid_expert_shard_attention_option}"
+    )
+
+
 def validate_keys(keys):
   validate_attention_kernel(keys["attention"])
   validate_attention_type(keys["attention_type"])
@@ -162,6 +170,7 @@ def validate_keys(keys):
   validate_model_call_mode(keys["model_call_mode"])
   validate_prefill_and_target_lengths(keys["max_prefill_predict_length"], keys["max_target_length"])
   validate_rope_type(keys["rope_type"])
+  validate_expert_shard_attention_option(keys["expert_shard_attention_option"])
 
   if keys["mtp_eval_target_module"] < 0:
     raise ValueError("mtp_eval_target_module cannot be negative. Set to 0 to disable evaluation.")
@@ -965,15 +974,15 @@ def validate_sparse_matmul_parallelism(raw_keys):
   ):
     raise ValueError("You should use the pipeline_fsdp_ag_once = True and leave model_fsdp_ag_once = False.")
 
+
 def validate_ragged_dot(raw_keys):
   if raw_keys["sparse_matmul"] and not raw_keys["megablox"]:
     config_flag = "jax_ragged_dot_use_ragged_dot_instruction"
     try:
       jax.config.update(config_flag, True)
     except AttributeError:
-      max_logging.log(
-          f"JAX config {config_flag} not found, possibly due to old JAX version."
-      )
+      max_logging.log(f"JAX config {config_flag} not found, possibly due to old JAX version.")
+
 
 def create_new_logical_axis_rules(old_logical_axis_rules, new_logical_axis_rules):
   new_logical_axis = set()

@@ -347,7 +347,7 @@ $$BE_x \times E_xM = BM_x$$
 
 Shard expert feed forward computation (both weights and activations) by expert!
 
-The feedforward layer is the only one that has experts - for this layer we shard the weights and the activations on the experts dimensions by `EP`. For attention operations (including projections) the `EP` dimension acts like `FSDP`. This is a choice by MaxText, we may implement more options in the future where instead `EP` could act like `DP` or `CP/SP` as well.
+The feedforward layer is the only one that has experts - for this layer we shard the weights and the activations on the experts dimensions by `EP`. For attention operations (including projections) the `EP` dimension acts like `FSDP`. This is the default choice by MaxText. There is an option for `EP` to act like `CP` in training. We may implement more options in the future where instead `EP` could act like `DP` or `SP` as well.
 
 When using dropless strategies you may want to ensure that the shards are balanced. The balance can be improved by using less `EP` so that each shard is averaged over more experts. For instance imagine a scenario where expert 1 gets 10x more tokens routed to it than the rest. If `EP = # experts = 64`  than we will get terrible performance waiting for this one expert to finish its computation which is 3x slower. However if we set `EP = 1/4 * # experts` than the EP rank with expert 1 will have 4 experts, so we will have `3 + 1 + 1 + 1 = 6` compute to do compared to the average of `1 + 1 + 1 + 1 = 4`, a ratio of `6/4 = 1.5x` slower, which is a huge improvement over the `3x` slower.
 

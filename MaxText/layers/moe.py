@@ -313,9 +313,7 @@ class RoutedMoE(nn.Module):
     _, group_idx = jax.lax.top_k(group_scores, k=self.config.topk_routing_group)
 
     # Mask selected groups so that only those experts are considered.
-    group_mask = jax.nn.one_hot(
-        group_idx, num_classes=self.config.n_routing_groups, dtype=jnp.float32
-    )
+    group_mask = jax.nn.one_hot(group_idx, num_classes=self.config.n_routing_groups, dtype=jnp.float32)
     group_mask = jnp.sum(group_mask, axis=-2)
 
     # Apply masks and get top-k indices.
@@ -328,9 +326,7 @@ class RoutedMoE(nn.Module):
         score_mask_expanded.shape[:-2] + (self.num_experts,),
     )
 
-  def deepseek_routing(
-      self, gate_logits: jax.Array, pre_bias_logits: jax.Array
-  ) -> tuple[jax.Array, jax.Array]:
+  def deepseek_routing(self, gate_logits: jax.Array, pre_bias_logits: jax.Array) -> tuple[jax.Array, jax.Array]:
     """DeepSeek routing logit.
 
     If the configuration does not specify routing groups (`n_routing_groups` is
@@ -350,11 +346,7 @@ class RoutedMoE(nn.Module):
       - top_k_indices: `(..., num_experts_per_tok)` array of indices
         identifying the selected experts for each token.
     """
-    expert_mask = (
-        1
-        if self.config.n_routing_groups == -1
-        else self._expert_group_mask(gate_logits)
-    )
+    expert_mask = 1 if self.config.n_routing_groups == -1 else self._expert_group_mask(gate_logits)
     _, top_k_indices = jax.lax.top_k(
         jnp.where(expert_mask > 0, gate_logits, -jnp.inf),
         k=self.num_experts_per_tok,
@@ -659,9 +651,7 @@ class RoutedMoE(nn.Module):
           if kernel.bias or kernel.sparsity_mask or len(kernel.scale) > 1:
             raise ValueError("Unsupported usecase for ragged_dot with quantized kernel.")
           rhs_inputs = kernel.qvalue
-        with set_xla_metadata(
-            ragged_dot_tiling=",".join([str(t) for t in tiling])
-        ):
+        with set_xla_metadata(ragged_dot_tiling=",".join([str(t) for t in tiling])):
           output = jax.lax.ragged_dot(
               lhs=inputs,
               rhs=rhs_inputs,
@@ -708,10 +698,10 @@ class RoutedMoE(nn.Module):
     else:
       batch_logical_axis = "activation_batch_no_exp"
 
-    input_partition_pspec = nn.logical_to_mesh_axes((batch_logical_axis, "activation_length", None))
-    gate_logits_pspec = nn.logical_to_mesh_axes((batch_logical_axis, "activation_length", None))
+    input_partition_pspec = nn.logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", None))
+    gate_logits_pspec = nn.logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", None))
     if self.config.model_name.startswith("deepseek3"):
-      pre_bias_logits_pspec = nn.logical_to_mesh_axes((batch_logical_axis, "activation_length", None))
+      pre_bias_logits_pspec = nn.logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", None))
     else:
       # pre_bias_logits is None for non-DeepSeek v3 models
       pre_bias_logits_pspec = None
@@ -736,7 +726,7 @@ class RoutedMoE(nn.Module):
             w1_pspec,
             wo_pspec,
         ),
-        out_specs=(nn.logical_to_mesh_axes((batch_logical_axis, "activation_length", "activation_embed"))),
+        out_specs=(nn.logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", "activation_embed"))),
         check_rep=False,
     )
     def wrapper(x, logits, pre_bias_logits, w0, w1, wo):
@@ -949,7 +939,7 @@ class RoutedMoE(nn.Module):
     )
     expert_token_count = nn.with_logical_constraint(
         expert_token_count,
-        ("activation_batch", "activation_length", None, None, None),
+        ("activation_batch", "activation_norm_length", None, None, None),
     )
     trunc_expert_mask = expert_mask * jnp.less_equal(expert_token_count, expert_capacity_per_batch)
     combined_expert_mask = jnp.sum(trunc_expert_mask, axis=3)
@@ -1037,7 +1027,7 @@ class RoutedMoE(nn.Module):
     )
     expert_token_count = nn.with_logical_constraint(
         expert_token_count,
-        ("activation_batch", "activation_length", None, None),
+        ("activation_batch", "activation_norm_length", None, None),
     )
     trunc_expert_mask = expert_mask * jnp.less_equal(expert_token_count, expert_capacity_per_batch)
     combined_expert_mask = jnp.sum(trunc_expert_mask, axis=2)
@@ -1132,10 +1122,10 @@ class RoutedMoE(nn.Module):
   ) -> tuple[ctypes.Array, Optional[ctypes.Array]]:
     """Dense matrix multiplication."""
     # gate_logits: batch, length, expert
-    gate_logits = nn.with_logical_constraint(gate_logits, ("activation_batch", "activation_length", None))
+    gate_logits = nn.with_logical_constraint(gate_logits, ("activation_batch", "activation_norm_length", None))
     if self.config.model_name.startswith("deepseek3"):
       # pre_bias_logits is None for non-DeepSeek v3 models
-      pre_bias_logits = nn.with_logical_constraint(pre_bias_logits, ("activation_batch", "activation_length", None))
+      pre_bias_logits = nn.with_logical_constraint(pre_bias_logits, ("activation_batch", "activation_norm_length", None))
     top_k_weights, top_k_indices = self.get_topk(gate_logits, pre_bias_logits)
     is_llama4_decoder_layer = self.config.decoder_block == ctypes.DecoderBlockType.LLAMA4
     if is_llama4_decoder_layer:
@@ -1162,7 +1152,7 @@ class RoutedMoE(nn.Module):
         dispatch_mask, combine_mask = self.generate_masks(
             top_k_indices, weights  # pylint: disable=undefined-variable,possibly-used-before-assignment
         )
-        mask_axes = ("activation_batch", "activation_length", None, None)
+        mask_axes = ("activation_batch", "activation_norm_length", None, None)
         dispatch_axis = (
             "activation_exp",
             "activation_batch_no_exp",
@@ -1186,14 +1176,14 @@ class RoutedMoE(nn.Module):
         dispatch_mask, combine_mask = self.generate_masks_subgroup(top_k_indices, softmax_probs)
         if self.get_context_autoregressive_parallelism_size() > 0 and cp == 1:
           mask_axes = (
-              "activation_length",
+              "activation_norm_length",
               "activation_batch",
               None,
               None,
               None,
           )
           input_axis = (
-              "activation_length",
+              "activation_norm_length",
               "activation_batch",
               None,
               "activation_embed",
@@ -1215,14 +1205,14 @@ class RoutedMoE(nn.Module):
         else:
           mask_axes = (
               "activation_batch",
-              "activation_length",
+              "activation_norm_length",
               None,
               None,
               None,
           )
           input_axis = (
               "activation_batch",
-              "activation_length",
+              "activation_norm_length",
               None,
               "activation_embed",
           )
@@ -1262,7 +1252,7 @@ class RoutedMoE(nn.Module):
               (
                   None,
                   "activation_batch_no_exp",
-                  "activation_length",
+                  "activation_norm_length",
                   None,
                   "activation_embed",
               ),
@@ -1342,7 +1332,7 @@ class RoutedMoE(nn.Module):
           )
       return output, loss
     else:
-      inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_length", "activation_embed"))
+      inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
       with jax.named_scope("wi_0"):
         layer_w0 = self.get_einsum(rhs_mesh_axes=self.wi_kernel_axes)(
             "BSM,EMH -> BSEH", inputs, w0_kernel, precision=matmul_precision
@@ -1405,9 +1395,7 @@ class RoutedMoE(nn.Module):
     return w0_kernel, w1_kernel, wo_kernel
 
   @nn.compact
-  def __call__(
-      self, inputs: ctypes.Array
-  ) -> tuple[ctypes.Array, Optional[ctypes.Array]]:
+  def __call__(self, inputs: ctypes.Array) -> tuple[ctypes.Array, Optional[ctypes.Array]]:
     cfg = self.config
     inputs = inputs.astype(cfg.dtype)
     gate_logits, pre_bias_logits = GateLogit(
