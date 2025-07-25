@@ -374,6 +374,7 @@ class Llama4DecoderLayer(nn.Module):
       decoder_positions,
       deterministic,
       model_mode,
+      bidirectional_mask=None,
       slot: Optional[int] = None,
       page_state: Optional[page_manager.PageState] = None,
       previous_chunk=None,
@@ -444,6 +445,7 @@ class Llama4DecoderLayer(nn.Module):
         slot=slot,
         page_state=page_state,
         previous_chunk=previous_chunk,
+        bidirectional_mask=bidirectional_mask,
     )
 
     attention_lnx = nn.with_logical_constraint(
@@ -548,6 +550,7 @@ class Llama4ScannableBlock(nn.Module):
       decoder_positions,
       deterministic,
       model_mode,
+      bidirectional_mask=None,
       slot: Optional[int] = None,
       page_state: Optional[page_manager.PageState] = None,
       previous_chunk=None,
@@ -579,6 +582,7 @@ class Llama4ScannableBlock(nn.Module):
           previous_chunk=previous_chunk,
           page_state=page_state,
           slot=slot,
+          bidirectional_mask=bidirectional_mask,
       )
       if cfg.scan_layers:
         y = y[0]
