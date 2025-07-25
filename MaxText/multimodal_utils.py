@@ -84,12 +84,14 @@ class PreprocessorOutput:
 
 
 def resize_image(image, model_name):
+  """resize image if needed"""
   image_sizes = {
-    "gemma3": (GEMMA_DEFAULT_IMAGE_SIZE, GEMMA_DEFAULT_IMAGE_SIZE),
-    "llama4": (LLAMA4_TILE_SIZE, LLAMA4_TILE_SIZE),
+      #resize for vanilla llama4 support, will be removed once size support is added to multimodal llama4
+      "llama4": (LLAMA4_TILE_SIZE, LLAMA4_TILE_SIZE),
   }
-  target_size = image_sizes[model_name.split('-')[0]]
-  if target_size:
+  model_prefix = model_name.split("-")[0]
+  if model_prefix in image_sizes:
+    target_size = image_sizes[model_prefix]
     image = image.resize(target_size)
   return image
 
@@ -419,7 +421,7 @@ def reformat_prompt(prompt, image_placeholder, model_name):
     return formatted_prompt
   elif model_name in ["llama4-17b-16e", "llama4-17b-128e"]:
     if image_placeholder in prompt:
-      prompt =prompt.replace(image_placeholder, LLAMA4_IMAGE_PLACEHOLDER_IN_PROMPT)
+      prompt = prompt.replace(image_placeholder, LLAMA4_IMAGE_PLACEHOLDER_IN_PROMPT)
     if not LLAMA4_IMAGE_PLACEHOLDER_IN_PROMPT in prompt:
       prompt = LLAMA4_IMAGE_PLACEHOLDER_IN_PROMPT + prompt
     formatted_prompt = (
@@ -434,6 +436,9 @@ def reformat_response(response, model_name):
   """Reformat response for different models."""
   if model_name in ["llama4-17b-16e", "llama4-17b-128e"]:
     formatted_response = f"{response}<|eot|>"
+    return formatted_response
+  elif model_name in ["gemma3-4b", "gemma3-12b", "gemma3-27b"]:
+    formatted_response = f"{response}<end_of_turn>"
     return formatted_response
   else:
     return response
@@ -589,7 +594,7 @@ def get_num_tokens_for_this_image(this_aspect_ratio, num_patches_per_chunk):
 
 
 def add_extra_tokens_for_images_gemma3(
-    tokens: np.ndarray | jnp.ndarray,
+    tokens: np.ndarray | List,
     *,
     max_num_images: int = 1,
 ):  # -> Int['B L+(max_num_images * (num_tokens_per_image + 3))']:
@@ -628,7 +633,8 @@ def add_extra_tokens_for_images_gemma3(
       GEMMA_END_IMAGE_TOKEN,
       GEMMA_NEW_LINE_TOKEN,
   ]
-
+  if not isinstance(tokens, np.ndarray):
+    tokens = np.asarray(tokens)
   return insert_sequence(
       at=GEMMA_BEGIN_IMAGE_TOKEN,
       sequence=mm_tokens,
@@ -638,106 +644,92 @@ def add_extra_tokens_for_images_gemma3(
 
 
 def insert_sequence(
-    tokens: np.ndarray | jnp.ndarray,
+    tokens: np.ndarray,
     *,
     at: int,
     sequence: List[int],
     max_num_images: int,
-) -> np.ndarray | jnp.ndarray:
-  """Insert a sequence of tokens at a given position."""
-  tokens_dim = len(tokens.shape)
-  if tokens_dim == 1:
+) -> np.ndarray:
+  """
+  Inserts a sequence of tokens at all occurrences of a specific token `at`.
+  This function is fully vectorized and operates on a batch of token sequences.
+
+  Args:
+      tokens: A 1D or 2D array of input tokens.
+      at: The token ID to find and replace with the sequence.
+      sequence: The list of new token IDs to insert.
+      max_num_images: The maximum number of times `at` can appear.
+
+  Returns:
+      The modified token array with the sequences inserted.
+  """
+  # Ensure input is a 2D array (batch)
+  original_dim = tokens.ndim
+  if original_dim == 1:
     tokens = tokens[None, :]
-  _, length = tokens.shape
 
-  mm_tokens = jnp.array(sequence, dtype=jnp.int32)
+  batch_size, length = tokens.shape
+  mm_tokens_to_insert = np.array(sequence)
 
-  # `-1` because `<start_of_image>` is already present in the input tokens.
-  offset_by = len(mm_tokens) - 1
-
-  # Maximum length, if all images are present.
+  # Net number of tokens added for each image placeholder.
+  # It's -1 because the original '<begin_image>' token is replaced.
+  offset_by = len(mm_tokens_to_insert) - 1
   length_with_mm = length + max_num_images * offset_by
 
+  # Create a boolean mask where the image trigger token `at` is present.
   mm_start = tokens == at
 
-  # Get the text tokens correctly placed at their final position.
-  # The `<start_of_image>` are removed and expanded to leave space for the MM
-  # tokens.
-  # tokens = [..., x, <start_of_image>, y, ...]
-  # new_text_tokens = [..., x, 0, 0, 0, ..., 0, 0, 0, y, ...]
-  new_text_tokens = _get_new_text_tokens(
-      mm_start=mm_start,
-      text_tokens=tokens,
-      offset_by=offset_by,
-      length_with_mm=length_with_mm,
-  )
+  # 1. Create a new buffer for the final merged tokens.
+  # This buffer will hold the text tokens in their new, shifted positions.
+  new_tokens = np.zeros((batch_size, length_with_mm), dtype=np.int64)
 
-  # Get the mm tokens placeholders, correctly placed at their final position.
-  # new_mm_tokens = [
-  #     ..., 0, 0, \n\n, <start_of_image>, ..., <end_of_image>, \n\n, 0, 0, ...
-  # ]
-  new_mm_tokens = _get_new_mm_tokens(
-      mm_start=mm_start,
-      mm_tokens_to_insert=mm_tokens,
-      max_num_images=max_num_images,
-      offset_by=offset_by,
-      length_with_mm=length_with_mm,
-  )
+  # Calculate the new, shifted positions for all original text tokens.
+  new_text_pos = _get_new_text_positions(offset_on=mm_start, offset_by=offset_by)
 
-  # Merge the text and MM tokens.
-  new_tokens = new_text_tokens + new_mm_tokens
-  if tokens_dim < len(new_tokens.shape):
-    new_tokens = jnp.squeeze(new_tokens)
+  # Place the original tokens into their new positions.
+  # `np.put_along_axis` is the NumPy equivalent of the JAX scatter operation.
+  np.put_along_axis(new_tokens, new_text_pos, tokens, axis=1)
+
+  # Zero out the placeholder for the `<begin_image>` token at its new position, which we will
+  # overwrite with the full image sequence next.
+  # We find where `mm_start` is True and use the corresponding new positions
+  # to index `new_tokens` and set those locations to 0.
+  batch_indices_to_zero, _ = np.where(mm_start)
+  new_pos_to_zero = new_text_pos[mm_start]
+  if batch_indices_to_zero.size > 0:
+    new_tokens[batch_indices_to_zero, new_pos_to_zero] = 0
+
+  # 2. Now, insert the actual image token sequences.
+  # Find the row and column indices of all image trigger tokens.
+  batch_indices, seq_indices = np.nonzero(mm_start)
+
+  if batch_indices.size > 0:
+    # Calculate the index of each image within its sequence (0th, 1st, etc.).
+    intra_batch_img_idx = np.cumsum(mm_start, axis=1)[mm_start] - 1
+
+    # Calculate the final start position for each new image sequence,
+    # accounting for shifts from previous images in the same row.
+    final_img_start_pos = seq_indices + intra_batch_img_idx * offset_by
+
+    # Create the full index grid for placing all new tokens.
+    # This uses broadcasting to add the start position of each image sequence
+    # to a range of offsets [0, 1, ..., N] for the tokens within the sequence.
+    indices_to_insert = final_img_start_pos[:, None] + np.arange(len(mm_tokens_to_insert))
+
+    # Use the calculated indices to place the new tokens.
+    # We use `batch_indices` to specify the row and `indices_to_insert` for columns.
+    new_tokens[batch_indices[:, None], indices_to_insert] = mm_tokens_to_insert
+
+  if original_dim == 1:
+    new_tokens = np.squeeze(new_tokens)
   return new_tokens
 
 
-def _get_new_text_tokens(
+def _get_new_text_positions(
     *,
-    mm_start: np.ndarray | jnp.ndarray,
-    text_tokens: np.ndarray | jnp.ndarray,
+    offset_on: np.ndarray,
     offset_by: int,
-    length_with_mm: int,
-) -> np.ndarray | jnp.ndarray:
-  """Get new text tokens."""
-  # Jax vmap does not support positional arguments, so need the
-  # _get_new_text_tokens_inner indirection.
-  return jax.vmap(_get_new_text_tokens_inner, in_axes=(0, 0, None, None))(mm_start, text_tokens, offset_by, length_with_mm)
-
-
-def _get_new_text_tokens_inner(
-    mm_start: np.ndarray | jnp.ndarray,
-    text_tokens: np.ndarray | jnp.ndarray,
-    offset_by: int,
-    length_with_mm: int,
-) -> np.ndarray | jnp.ndarray:
-  """`_get_new_text_tokens_positions` without batch dimension."""
-
-  # Empty buffer in which text and MM tokens will be inserted.
-  tokens_with_mm = jnp.zeros((length_with_mm,), dtype=jnp.int32)
-
-  # Shift the original tokens, so that the new soft tokens can be inserted.
-  new_text_tokens_pos = _get_new_text_tokens_positions(
-      offset_on=mm_start,
-      offset_by=offset_by,
-  )
-
-  tokens_with_mm = tokens_with_mm.at[new_text_tokens_pos].set(text_tokens)
-
-  # Remove the `<start_of_image>` tokens (will be added afterwards when
-  # merging with `_get_new_mm_tokens`).
-  first_mm_pos = tokens_with_mm[0]
-  new_start_mm_pos = new_text_tokens_pos * mm_start
-  tokens_with_mm = tokens_with_mm.at[new_start_mm_pos].set(0)
-  tokens_with_mm = tokens_with_mm.at[0].set(first_mm_pos)
-
-  return tokens_with_mm
-
-
-def _get_new_text_tokens_positions(
-    *,
-    offset_on: np.ndarray | jnp.ndarray,
-    offset_by: int,
-) -> np.ndarray | jnp.ndarray:
+) -> np.ndarray:
   """Create the positions of the new tokens.
 
   Input: `[x, x, x, offset_on, x, x, offset_on, x]`
@@ -750,67 +742,12 @@ def _get_new_text_tokens_positions(
   Returns:
     The new positions of the tokens.
   """
-  offset = jnp.cumsum(offset_on, axis=-1) * offset_by
-  new_positions = jnp.arange(offset_on.shape[-1]) + offset
+  offset = np.cumsum(offset_on, axis=-1) * offset_by
+  new_positions = np.arange(offset_on.shape[-1]) + offset
   # Do not shift the `<start_of_image>` token, it will be overwritten by the MM
   # tokens.
   new_positions -= offset_by * offset_on
   return new_positions
-
-
-def _get_new_mm_tokens(
-    *,
-    mm_start: np.ndarray | jnp.ndarray,
-    mm_tokens_to_insert: np.ndarray | jnp.ndarray,
-    max_num_images: int,
-    offset_by: int,
-    length_with_mm: int,
-) -> np.ndarray | jnp.ndarray:
-  """batch dimension inclusive new mm_tokens"""
-  # Jax vmap does not support positional argiments, so need the
-  # _get_new_mm_tokens_inner indirection.
-  return jax.vmap(_get_new_mm_tokens_inner, in_axes=(0, None, None, None, None))(
-      mm_start, mm_tokens_to_insert, max_num_images, offset_by, length_with_mm
-  )
-
-
-def _get_new_mm_tokens_inner(
-    mm_start: np.ndarray | jnp.ndarray,
-    mm_tokens_to_insert: np.ndarray | jnp.ndarray,
-    max_num_images: int,
-    offset_by: int,
-    length_with_mm: int,
-) -> np.ndarray | jnp.ndarray:
-  """`_get_new_mm_tokens` without batch dimension."""
-  # Empty buffer row, which will be merged with the final tokens.
-  row = jnp.zeros((length_with_mm,), dtype=jnp.int32)
-
-  ones = jnp.ones((len(mm_tokens_to_insert),), dtype=jnp.int32)
-
-  (offset,) = jnp.nonzero(mm_start, size=max_num_images)
-
-  # Because not all elements in the batch do have the same number of images
-  # we need to mask out the `offset == 0` values.
-  # This means that `<start_of_images>` can never be the first token, but this
-  # should never happen in practice as sequences should start by `<bos>`
-  mask = offset != 0
-  mask = jnp.einsum("...x,y->xy", mask, ones)
-
-  # After the mask is created, offset each individual images
-  offset += jnp.arange(len(offset)) * offset_by
-
-  new_positions = jnp.einsum("x,y->xy", offset, ones)
-  new_positions += jnp.arange(len(mm_tokens_to_insert))
-
-  new_positions = new_positions * mask
-
-  # Because not all elements in the batch do have the same number of images
-  # we need to mask out the `offset == 0` values.
-  # This means that `<start_of_images>` can never be the first token, but this
-  # should never happen in practice as sequences should start by `<bos>`
-  row = row.at[new_positions].set(mm_tokens_to_insert)
-  row = row.at[0].set(0)
-  return row
 
 
 def merge_mm_embeddings(
