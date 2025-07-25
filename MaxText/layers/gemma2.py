@@ -21,10 +21,12 @@ from jax.sharding import Mesh
 import jax.numpy as jnp
 
 from flax import linen as nn
+from flax import nnx
 
 from MaxText.common_types import MODEL_MODE_PREFILL, Config
 from MaxText.layers import attentions
 from MaxText.layers import quantizations
+from MaxText.layers import initializers
 from MaxText.layers.attentions import Attention
 from MaxText.layers.linears import mlp_block
 from MaxText.layers.normalizations import rms_norm
@@ -32,14 +34,14 @@ from MaxText.layers.quantizations import AqtQuantization as Quant
 
 
 # Decoder and Model definitions
-class Gemma2DecoderLayer(nn.Module):
+class Gemma2DecoderLayer(nnx.Module):
   """Transformer decoder layer that attends to the encoder."""
 
-  config: Config
-  mesh: Mesh
-  quant: Optional[Quant] = None
+  def __init__(self, config: Config, mesh: Mesh, quant: Optional[Quant] = None):
+    self.config = config
+    self.mesh = mesh
+    self.quant = quant
 
-  @nn.compact
   def __call__(
       self,
       inputs,
@@ -60,9 +62,10 @@ class Gemma2DecoderLayer(nn.Module):
 
     inputs = nn.with_logical_constraint(inputs, activation_axis_names)
     inputs = checkpoint_name(inputs, "decoder_layer_input")
+    num_features = inputs.shape[-1]
     # inputs: embedded inputs to the decoder with shape [batch, length, emb_dim]
     lnx = rms_norm(
-        num_features=inputs.shape[-1],
+        num_features=num_features,
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
         name="pre_self_attention_norm_local",
@@ -70,6 +73,7 @@ class Gemma2DecoderLayer(nn.Module):
     )(inputs)
     lnx = nn.with_logical_constraint(lnx, activation_axis_names)
 
+    #TODO: update the attention type to use nnx Attention
     attention_layer = Attention(
         config=cfg,
         num_query_heads=cfg.num_query_heads,
@@ -261,3 +265,19 @@ class Gemma2DecoderLayer(nn.Module):
       return layer_output, None
     else:
       return layer_output
+
+def gemma2_decoder_layer(
+    config: Config,
+    mesh: Mesh,
+    quant: Optional[Quant] = None,
+    name: Optional[str] = None,
+)-> nn.Module:
+  """Creates a Gemma3DecoderLayer Linen module."""
+  return nnx.bridge.to_linen(
+      Gemma2DecoderLayer,
+      config=config,
+      mesh=mesh,
+      quant=quant,
+      name=name,
+      metadata_fn=initializers.variable_to_logically_partitioned,
+  )
