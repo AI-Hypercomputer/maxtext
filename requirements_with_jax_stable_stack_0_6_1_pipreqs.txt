@@ -37,7 +37,7 @@ PyYAML==6.0.2
 Requests==2.32.4
 safetensors==0.5.3
 sentencepiece==0.2.0
-setuptools==80.9.0
+setuptools
 tabulate==0.9.0
 tensorboard_plugin_profile==2.13.0
 tensorboardX==2.6.2.2
