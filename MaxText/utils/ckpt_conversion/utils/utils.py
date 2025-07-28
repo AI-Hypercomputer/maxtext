@@ -16,17 +16,17 @@
 
 import contextlib
 import io
-import json
 import os
 import tempfile
 import time
+import json
 from concurrent.futures import ThreadPoolExecutor
-from typing import Optional, List, Dict, Tuple, Any, Callable
+from typing import Optional, List, Dict, Tuple, Any
+
+import jax
+import jax.tree_util
 
 from jax.experimental import multihost_utils
-import jax
-import jax.numpy as jnp
-import jax.tree_util
 
 from jaxtyping import Array
 

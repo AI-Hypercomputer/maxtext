@@ -75,7 +75,7 @@ from MaxText.utils.ckpt_conversion.utils.utils import (process_leaf_param, save_
 jax.config.update("jax_platform_name", "cpu")
 
 
-def _get_model_mappings(model_name: str, scan_layers: bool, config_dict: Dict[str, Any]) -> Dict[str, Any]:
+def _get_model_mappings(model_name: str, scan_layers: bool, config_dict: dict):
   """Retrieves parameter, shape, and hook function mappings for the model.
 
   Args:
