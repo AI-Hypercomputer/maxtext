@@ -35,9 +35,6 @@ class MaxTextModel:
 
 
 # Run this for new definitions that should be part of the library.
-def _add_to_model_dictionary(
-    model_dictionary: dict[str, MaxTextModel], maxtext_model: MaxTextModel
-) -> MaxTextModel:
-  print(maxtext_model.model_name.replace("-", "_"))
+def _add_to_model_dictionary(model_dictionary: dict[str, MaxTextModel], maxtext_model: MaxTextModel) -> MaxTextModel:
   model_dictionary[maxtext_model.model_name.replace("-", "_")] = maxtext_model
   return maxtext_model
