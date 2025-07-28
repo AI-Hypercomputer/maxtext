@@ -524,7 +524,7 @@ class Llama4VisionAttention(nn.Module):
       attention_mask: Optional[torch.Tensor] = None,
       past_key_value: Optional[torch.Tensor] = None,
       **kwargs,
-  ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+  ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
     input_shape = hidden_states.shape[:-1]
     hidden_shape = (*input_shape, -1, self.head_dim)
 

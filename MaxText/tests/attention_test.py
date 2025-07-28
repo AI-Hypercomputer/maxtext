@@ -978,7 +978,7 @@ class AttentionTest(unittest.TestCase):
     )
 
     # Attention with sliding window of size max_target_length
-    # This should be equivalent to global attension.
+    # This should be equivalent to global attention.
     sliding_attn = Attention(
         config=self.cfg,
         num_query_heads=self.num_query_heads,
