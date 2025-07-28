@@ -38,6 +38,5 @@ class MaxTextModel:
 def _add_to_model_dictionary(
     model_dictionary: dict[str, MaxTextModel], maxtext_model: MaxTextModel
 ) -> MaxTextModel:
-  print(maxtext_model.model_name.replace("-", "_"))
   model_dictionary[maxtext_model.model_name.replace("-", "_")] = maxtext_model
   return maxtext_model
