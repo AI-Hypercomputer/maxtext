@@ -53,7 +53,7 @@ Example Usage:
 
 import jax
 import os
-from typing import Sequence, Dict, Any
+from typing import Sequence, Any
 
 from transformers import AutoTokenizer, AutoProcessor
 

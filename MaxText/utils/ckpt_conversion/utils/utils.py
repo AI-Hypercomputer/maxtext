@@ -21,12 +21,12 @@ import tempfile
 import time
 import json
 from concurrent.futures import ThreadPoolExecutor
-from typing import Optional, List, Dict, Tuple, Any
+from typing import Optional, List, Dict, Tuple, Any, Callable
 
 import jax
 import jax.tree_util
-
 from jax.experimental import multihost_utils
+from jax import numpy as jnp
 
 from jaxtyping import Array
 

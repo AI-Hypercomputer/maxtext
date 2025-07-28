@@ -614,8 +614,19 @@ def generate_completions(
   with engine_lock:
     thread_example_batch = worker_data_loader.load_next_batch()
     # Trim data for inference processing
-    thread_example_batch_trimmed = jax.tree_util.tree_map(lambda arr: arr[:int(worker_config_inference.per_device_batch_size * worker_config_train.inference_replicas * worker_config_train.inference_devices_per_replica)], thread_example_batch)
-    processed_batch = grpo_utils.generate_offline_completions(worker_config_inference, worker_tokenizer_model, worker_inference_engine, thread_example_batch_trimmed)
+    thread_example_batch_trimmed = jax.tree_util.tree_map(
+        lambda arr: arr[
+            : int(
+                worker_config_inference.per_device_batch_size
+                * worker_config_train.inference_replicas
+                * worker_config_train.inference_devices_per_replica
+            )
+        ],
+        thread_example_batch,
+    )
+    processed_batch = grpo_utils.generate_offline_completions(
+        worker_config_inference, worker_tokenizer_model, worker_inference_engine, thread_example_batch_trimmed
+    )
     processed_batch = jax.device_put(processed_batch, worker_input_data_shardings)
   with worker_data_buffer_lock:
     if not worker_data_buffer:
@@ -899,7 +910,8 @@ def main(argv: Sequence[str]) -> None:
     raise ValueError("Please set the value of use_grpo to True")
   if config.inference_rollouts < 1 or config.inference_rollouts > config.steps:
     raise ValueError(
-        f"Please set the value of inference_rollouts to be less than {config.steps} or greater than 1. Current value: {config.inference_rollouts}"
+        f"Please set the value of inference_rollouts to be less than {config.steps} or greater than 1. "
+        f"Current value: {config.inference_rollouts}"
     )
   if config.decode_sampling_strategy == "greedy" or config.decode_sampling_temperature == 0.0:
     raise ValueError(
