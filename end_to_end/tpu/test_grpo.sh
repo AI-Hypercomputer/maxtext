@@ -23,9 +23,9 @@ JAX_BACKEND_TARGET=grpc://127.0.0.1:29000
 ENABLE_PATHWAYS_PERSISTENCE='1'
 HF_TOKEN=${HF_TOKEN}
 
-MAX_PREFILL_LENGTH=512
-MAX_TARGET_LENGTH=1024
-NUM_GENERATIONS=4
+MAX_PREFILL_LENGTH=128
+MAX_TARGET_LENGTH=256
+NUM_GENERATIONS=2
 
 
 COMMON_ARGS="model_name=${MODEL} base_output_directory=${BASE_OUTPUT_DIRECTORY} \
@@ -36,10 +36,9 @@ dataset_type=hf hf_path='trl-lib/tldr' \
 enable_single_controller=true \
 dtype=bfloat16 weight_dtype=bfloat16 \
 allow_split_physical_axes=true enable_goodput_recording=false monitor_goodput=false \
-profiler=xplane skip_first_n_steps_for_profiler=5 profiler_steps=2"
+profiler=xplane skip_first_n_steps_for_profiler=10 profiler_steps=5"
 
 TRAINING_ARGS="run_name=${RUN_NAME} scan_layers=true \
-ici_fsdp_transpose_parallelism=16 \
 inference_replicas=${NUM_SAMPLERS} inference_devices_per_replica=${DEVICES_PER_SAMPLER} \
 inference_rollouts=5 \
 per_device_batch_size=${TRAINING_PER_DEVICE_BATCH_SIZE} num_generations=${NUM_GENERATIONS} steps=${STEPS}"
