@@ -502,29 +502,29 @@ def to_linen(
 
 # TODO: find better implementation
 def to_linen_class(nnx_class, *args, **kwargs):
-    class WrappedModule(linen.Module):
-        config: Any
-        mesh: Any
-        name: str
-        quant: Any = None
-        extra_kwargs: Optional[dict] = None
+  class WrappedModule(linen.Module):
+    config: Any
+    mesh: Any
+    name: str
+    quant: Any = None
+    extra_kwargs: Optional[dict] = None
 
-        @linen.compact
-        def __call__(self, broadcast_in, c, *xs):
-            full_kwargs = FrozenDict({
-                **kwargs,
-                **(self.extra_kwargs or {}),
+    @linen.compact
+    def __call__(self, broadcast_in, c, *xs):
+        full_kwargs = FrozenDict({
+            **kwargs,
+            **(self.extra_kwargs or {}),
+        })
+        return ToLinen(
+            nnx_class,
+            args=args,
+            kwargs=FrozenDict({
+                'config': self.config,
+                'mesh': self.mesh,
+                'name': self.name,
+                'quant': self.quant,
+                **full_kwargs,
             })
-            return ToLinen(
-                nnx_class,
-                args=args,
-                kwargs=FrozenDict({
-                    'config': self.config,
-                    'mesh': self.mesh,
-                    'name': self.name,
-                    'quant': self.quant,
-                    **full_kwargs,
-                })
-            )(broadcast_in, c, *xs)
+        )(broadcast_in, c, *xs)
 
-    return WrappedModule
+  return WrappedModule
