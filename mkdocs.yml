@@ -33,11 +33,6 @@ plugins:
   - mkdocstrings:
       handlers:
         python:
-          # This command adds the project's root directory to Python's path.
-          # It is the most direct way to make your 'MaxText' package importable.
-          setup_commands:
-            - import sys
-            - sys.path.insert(0, '.')
           options:
             docstring_style: google
             show_if_no_docstring: false
