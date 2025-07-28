@@ -24,3 +24,4 @@ tensorflow-datasets
 tensorflow-text>=2.17.0
 tiktoken
 transformers
+tunix@git+https://github.com/google/tunix.git
