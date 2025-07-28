@@ -29,4 +29,4 @@ Key supported features:
 * Training and Inference
 * Models: Llama 2, Llama 3, Llama 4, Mistral and Mixtral family, Gemma, Gemma 2, Gemma 3, and DeepSeek family
 
-Navigate to the [API Reference](api.md) to see the API documentation.
+Navigate to the [API Reference](https://maxtext.github.io/maxtext/reference/) to see the API documentation.
