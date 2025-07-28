@@ -58,9 +58,7 @@ class AotHloIdenticalTest(unittest.TestCase):
         "TPU v6": ("v6e", num_devices),
     }
 
-    prefix, topology_devices = next(
-        (v for k, v in device_info.items() if k in device_kind), (None, None)
-    )
+    prefix, topology_devices = next((v for k, v in device_info.items() if k in device_kind), (None, None))
     if prefix is None:
       raise ValueError(f"Unsupported TPU device kind for AOT test: {device_kind}")
 
@@ -68,7 +66,7 @@ class AotHloIdenticalTest(unittest.TestCase):
 
   def find_HLO_files(self, compile_dump_dir, real_dump_dir):
     """
-    Find the HLO file with pattern 
+    Find the HLO file with pattern
     xxx.jit_train_step.xxx.after_optimizations_after_buffer_assignment.txt
     """
     pattern = re.compile(r"^.*\.jit_train_step\..*\.after_optimizations_after_buffer_assignment\.txt$")
@@ -164,7 +162,7 @@ class AotHloIdenticalTest(unittest.TestCase):
   @pytest.mark.tpu_only
   def test_llama2_7b_hlo_match(self):
     self.assert_compile_and_real_match_hlo(
-      "llama2-7b", 
-      "model_name=llama2-7b",
-      "per_device_batch_size=1",
+        "llama2-7b",
+        "model_name=llama2-7b",
+        "per_device_batch_size=1",
     )
