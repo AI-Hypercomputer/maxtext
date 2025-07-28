@@ -200,6 +200,7 @@ toolz==1.0.0
 tqdm==4.66.5
 transformer-engine==1.13.0+e5edd6c
 transformers==4.46.0
+tunix@git+https://github.com/google/tunix.git
 typeguard==2.13.3
 typing_extensions==4.12.2
 tzdata==2024.2
