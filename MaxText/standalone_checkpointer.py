@@ -174,7 +174,7 @@ def checkpoint_loop(config, state=None):
       try:
         state = checkpoint_manager.restore(
               step,
-              args=ocp.Composite(items=ocp.PyTreeRestore(item=unboxed_abstract_state)),
+              args=ocp.args.Composite(items=ocp.args.PyTreeRestore(item=unboxed_abstract_state)),
             )
         if state:
           state = state["items"]
