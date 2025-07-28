@@ -14,7 +14,6 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-import functools
 from collections.abc import Iterable
 
 import numpy as np
@@ -187,5 +186,7 @@ def create_data_iterator(config, mesh):
   )
   if config.eval_interval > 0:
     raise ValueError("GRPO input pipeline is not supported for eval data")
-  train_iterator = input_pipeline_interface.create_process_specific_iterator(config, mesh, process_indices_train, make_hf_train_iterator)
+  train_iterator = input_pipeline_interface.create_process_specific_iterator(
+      config, mesh, process_indices_train, make_hf_train_iterator
+  )
   return train_iterator

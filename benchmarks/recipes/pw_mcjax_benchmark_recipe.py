@@ -44,9 +44,7 @@ DEVICE_TYPE = "v6e-256"
 # Other parameters (MUST BE SET BY USER)
 XPK_PATH = os.path.join("~", "xpk")  # We're running this script from the maxtext directory
 USER = os.environ["USER"]
-BASE_OUTPUT_DIRECTORY = (
-    f"gs://{USER}-{PROJECT}-{COUNTRY}/pw_mcjax_benchmarking/"
-)
+BASE_OUTPUT_DIRECTORY = f"gs://{USER}-{PROJECT}-{COUNTRY}/pw_mcjax_benchmarking/"
 
 BENCHMARK_STEPS = 20
 
@@ -61,9 +59,7 @@ def main() -> int:
   )
 
   # Handle command line arguments using args_helper
-  should_continue = helper.handle_cmd_args(
-      cluster_config, helper.DELETE, xpk_path=XPK_PATH
-  )
+  should_continue = helper.handle_cmd_args(cluster_config, helper.DELETE, xpk_path=XPK_PATH)
 
   if not should_continue:
     return 0
@@ -80,21 +76,18 @@ def main() -> int:
           # model_configs.llama3_1_70b_8192,
           # model_configs.llama3_1_405b_8192_fsdp_dcn,
           # model_configs.llama2_70b_4096_real_data_long_run,
-      ]
+      ],
   }
   pathways_config = mxr.PathwaysConfig(
       server_image=SERVER_IMAGE,
       proxy_server_image=PROXY_IMAGE,
       runner_image=RUNNER,
-
       # User can add additional flags here.
       server_flags="",
       proxy_flags="",
       worker_flags="",
   )
-  num_slices_list = [
-      2
-  ]
+  num_slices_list = [2]
 
   xpk_workload_cmds = []
   xpk_workload_names = []
@@ -118,8 +111,7 @@ def main() -> int:
               model=model,
               num_slices=num_slices,
               device_type=cluster_config.device_type,
-              base_output_directory=BASE_OUTPUT_DIRECTORY
-              + f"{infra}_{num_slices}_slice_{DEVICE_TYPE}_{model.model_name}/",
+              base_output_directory=BASE_OUTPUT_DIRECTORY + f"{infra}_{num_slices}_slice_{DEVICE_TYPE}_{model.model_name}/",
               max_restarts=0,
               libtpu_type=None,
               libtpu_nightly_version="",
@@ -129,9 +121,7 @@ def main() -> int:
               num_steps=BENCHMARK_STEPS,
               priority="low",
           )
-          command, name = mxr.generate_xpk_workload_cmd(
-              cluster_config=cluster_config, wl_config=wl_config
-          )
+          command, name = mxr.generate_xpk_workload_cmd(cluster_config=cluster_config, wl_config=wl_config)
 
           print(f"Name of the workload is: {name} \n")
           xpk_workload_names.append(name)
@@ -139,16 +129,14 @@ def main() -> int:
           print(f"XPK command to be used is: {command} \n")
           xpk_workload_cmds.append(command)
 
-  for xpk_workload_name, xpk_workload_cmd in zip(
-      xpk_workload_names, xpk_workload_cmds
-  ):
+  return_code = 0
+  for xpk_workload_name, xpk_workload_cmd in zip(xpk_workload_names, xpk_workload_cmds):
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{timestamp}] Running workload: {xpk_workload_name} with command: {xpk_workload_cmd}")
-    return_code = mxr.run_command_with_updates(
-        xpk_workload_cmd, xpk_workload_name
-    )
+    return_code = mxr.run_command_with_updates(xpk_workload_cmd, xpk_workload_name)
     if return_code != 0:
       print(f"Unable to run xpk workload: {xpk_workload_name}")
+  return return_code
 
 
 if __name__ == "__main__":

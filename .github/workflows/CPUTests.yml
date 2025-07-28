@@ -32,8 +32,7 @@ jobs:
         python3 -m pip install --upgrade pip
         python3 -m pip install pylint pyink pytype==2024.2.27
     - name: Typecheck the code with pytype
-      run: |
-        pytype --jobs auto --disable 'import-error,late-directive,wrong-arg-types,module-attr,unsupported-operands' MaxText/ || true
+      run: pytype --jobs=auto MaxText/
     - name: Analysing the code with pylint in Maxtext/
       run: |
          pylint --verbose --msg-template='[{abspath}] {msg_id}:{line:3d},{column}: {obj}: {msg}' --disable R0401,R0917,W0201,W0613 MaxText/ && \
@@ -50,6 +49,3 @@ jobs:
     - name: Analysing the code with pyink in pedagogical_examples/
       run: |
         pyink pedagogical_examples --check --diff --color --pyink-indentation=2 --line-length=125
-
-
-

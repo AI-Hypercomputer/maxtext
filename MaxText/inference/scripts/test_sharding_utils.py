@@ -12,8 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from MaxText.inference.scripts.sharding_utils import *
 import unittest
+
+from MaxText.inference.scripts.sharding_utils import calculate_matmul_resources, latency_bound_comms
 
 # Common test parameters
 M, K, F = 64, 128, 256
@@ -102,7 +103,7 @@ class ShardingTests(unittest.TestCase):
         abs(result["t_flops"] - expected_t_flops) < TOLERANCE
     ), f"FLOPs mismatch: got {result['t_flops']}, expected {expected_t_flops}"
 
-    # Expeted comms
+    # Expected comms
     expected_t_comms = 0.0
     assert (
         abs(result["t_comms"] - expected_t_comms) < TOLERANCE
