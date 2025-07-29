@@ -17,7 +17,7 @@
 from functools import partial
 import typing as tp
 from typing import Any, Optional
-
+import dataclasses
 from flax import linen
 from flax import nnx
 from flax.core import FrozenDict
@@ -501,30 +501,71 @@ def to_linen(
   )
 
 # TODO: find better implementation
-def to_linen_class(nnx_class, *args, **kwargs):
+def to_linen_class(nnx_class, *args,
+    metadata_fn: (
+      tp.Callable[[variablelib.VariableState], tp.Any] | None
+    ) = bv.to_linen_var,
+     **kwargs
+  ):
+  """Shortcut to wrap `nnx.bridge.ToLinen` and return its class instead of its object"""
+
   class WrappedModule(linen.Module):
-    config: Any
-    mesh: Any
-    name: str
-    quant: Any = None
+    """
+    A wrapper module for converting a NNX class to a Linen-compatible Flax module.
+
+    Attributes:
+        extra_kwargs (Optional[dict], optional): Additional keyword arguments to pass to the underlying `nnx_class`.
+        config (Any): Configuration object used by the module.
+        mesh (Any): Mesh information for parallelism or device mapping.
+        name (str): Name of the module instance.
+        quant (Any, optional): Quantization configuration, if used.
+    """
+
     extra_kwargs: Optional[dict] = None
 
+    # TODO: hackme
+    # Optional fields with default None, no need to be passed always
+    config: tp.Any | None = dataclasses.field(default=None)
+    mesh: tp.Any | None = dataclasses.field(default=None)
+    quant: tp.Any | None = dataclasses.field(default=None)
+    optional_fields : list[str] = dataclasses.field(default_factory=lambda: ["config","mesh","quant"])
+
+
     @linen.compact
-    def __call__(self, broadcast_in, c, *xs):
-        full_kwargs = FrozenDict({
-            **kwargs,
-            **(self.extra_kwargs or {}),
-        })
-        return ToLinen(
-            nnx_class,
-            args=args,
-            kwargs=FrozenDict({
-                'config': self.config,
-                'mesh': self.mesh,
-                'name': self.name,
-                'quant': self.quant,
-                **full_kwargs,
-            })
-        )(broadcast_in, c, *xs)
+    def __call__(self, *call_args, **call_kwargs):
+      """
+      Applies the wrapped `nnx_class` with provided inputs and configuration.
+
+      Args:
+          broadcast_in: The broadcast input tensor or structure.
+          c: Context or auxiliary input (usage depends on the model).
+          *call_args: Additional positional inputs passed to the wrapped module.
+          *call_kwargs: Additional keyword inputs passed to the wrapped module.
+
+      Returns:
+          Output from the wrapped `nnx_class` after applying it to the inputs.
+      """
+      full_kwargs = {
+          **kwargs,
+          **(self.extra_kwargs or {}),
+      }
+
+      # Include optional fields if set
+      # TODO: hackme
+      for optional_key in self.optional_fields:
+          value = getattr(self, optional_key)
+          if value is not None:
+              full_kwargs[optional_key] = value
+
+      full_kwargs = FrozenDict(full_kwargs)
+
+      module = ToLinen(
+          nnx_class,
+          args=args,
+          kwargs=full_kwargs,
+          metadata_fn=metadata_fn,
+      )(*call_args, **call_kwargs)
+
+      return module
 
   return WrappedModule
