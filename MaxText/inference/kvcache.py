@@ -298,7 +298,7 @@ class KVCache(nnx.Module):
     self.max_prefill_length = max_prefill_length
     self.max_target_length = max_target_length
     self.batch = batch
-    self.val_seq_len = key_seq_len
+    self.key_seq_len = key_seq_len
     self.value_seq_len = value_seq_len
     self.key_heads = key_heads
     self.value_heads = value_heads
