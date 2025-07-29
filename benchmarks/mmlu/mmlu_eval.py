@@ -63,11 +63,8 @@ from MaxText import maxengine
 
 ASCII_UPPERCASE_A = ord("A")  # ASCII value for uppercase 'A'
 
-DEFAULT_PROMPT_TEMPLATE = """The following are multiple choice questions (with answers) about {subject}.
-
-{question}
-{choices}
-Answer:"""
+DEFAULT_PROMPT_TEMPLATE = """The following are multiple choice questions (with answers) about {subject}.\n\n{question}\n
+  {choices}\nAnswer: Let's think step by step."""
 
 
 _PROMPT_TEMPLATE = flags.DEFINE_string(
@@ -110,6 +107,9 @@ def main(config):
 
   mmlu_test_ds = datasets.load_dataset("lighteval/mmlu", "all", split="test")
   for idx, example in enumerate(tqdm(mmlu_test_ds, desc="Evaluating MMLU dataset")):
+    if idx >= 100:
+      break
+    
     subject = example["subject"]
     question = example["question"]
     choices = example["choices"]
