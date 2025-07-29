@@ -62,6 +62,13 @@ checkpoint_storage_use_zarr3: True
 # larger models requires higher concurrent GB for I/O
 # default concurrent gb for PytreeCheckpointHandler is 96GB
 checkpoint_storage_concurrent_gb: 96
+
+# Bool flag for enabling Orbax v1.
+enable_orbax_v1: False
+# Function for processing loaded checkpoint dict into a format MaxText can understand. (for other formats, i.e. SafeTensors)
+checkpoint_conversion_fn: None
+# Optional checkpoint context to use for loading. Options: "orbax", "safetensors"
+source_checkpoint_layout: "orbax"
 ############################### END CHECKPOINTING ##################################
 
 
