@@ -75,6 +75,7 @@ def l2norm_pytree(x):
 
 
 def calculate_num_params_from_pytree(params):
+  breakpoint()
   params_sizes = jax.tree_util.tree_map(jax.numpy.size, params)
   total_parameters = jax.tree_util.tree_reduce(lambda x, y: x + y, params_sizes)
   assert total_parameters >= 0

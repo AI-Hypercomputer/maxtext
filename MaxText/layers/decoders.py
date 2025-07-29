@@ -246,9 +246,14 @@ class Decoder(nn.Module):
     if self.config.using_pipeline_parallelism:
       pipeline_stage_module = self.get_pipeline_stage_module(self.decoder_layer)
       remat_policy = self.get_remat_policy()
-      self.pipeline_module = pipeline.Pipeline(
+      self.pipeline_module_rawr = pipeline.Pipeline(
           config=self.config, mesh=self.mesh, layers=pipeline_stage_module, remat_policy=remat_policy
       )
+      pipeline_stage_module_2 = self.get_pipeline_stage_module(self.decoder_layer)
+      self.pipeline_module_2 = pipeline.Pipeline(
+           config=self.config, mesh=self.mesh, layers=pipeline_stage_module_2, remat_policy=remat_policy
+      )
+
 
   def get_remat_policy(self):
     """Get remat policy"""
@@ -604,7 +609,7 @@ class Decoder(nn.Module):
     )
     if cfg.using_pipeline_parallelism:
       if cfg.pipeline_fsdp_ag_once:
-        partition_spec = self.pipeline_module.get_weight_sharding(
+        partition_spec = self.pipeline_module_rawr.get_weight_sharding(
             y, decoder_segment_ids, decoder_positions, deterministic, model_mode
         )
       else:
@@ -637,7 +642,10 @@ class Decoder(nn.Module):
             )(y, *broadcast_args)
         y = self.pipeline_module(y, *broadcast_args, partition_spec=partition_spec)
       else:  # Not DeepSeek
-        y = self.pipeline_module(y, *broadcast_args, partition_spec=partition_spec)
+        y = self.pipeline_module_rawr(y, *broadcast_args, partition_spec=partition_spec)
+        y = self.pipeline_module_2(y, *broadcast_args, partition_spec=partition_spec)
+        # for _ in range(10):
+        #   y = self.pipeline_module(y, *broadcast_args, partition_spec=partition_spec)
         remaining_layers = self.config.num_decoder_layers - self.config.pipeline_parallel_layers
         if remaining_layers > 0:
           logical_axis_rules_pp_as_dp = maxtext_utils.logical_axis_rules_pp_act_as_dp(self.config.logical_axis_rules)
