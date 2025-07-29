@@ -1,4 +1,5 @@
-# Get started with MaxText
+(first-run)=
+# Getting Started: First Run
 
 This topic provides a basic introduction to get your MaxText workload up and running on single host and multihost environments using Cloud TPUs or NVIDIA GPUs. To help you get familiar with MaxText, we recommend starting with a single host first and then moving to multihost.
 
@@ -31,7 +32,7 @@ python3 -m MaxText.train MaxText/configs/base.yml \
   dataset_type=synthetic \
   steps=10
 ```
-Optional: If you want to try training on a Hugging Face dataset, see [Data Input Pipeline](https://github.com/google/maxtext/blob/main/getting_started/Data_Input_Pipeline.md) for data input options.
+Optional: If you want to try training on a Hugging Face dataset, see [Data Input Pipeline](data-input-pipeline) for data input options.
 
 5. To demonstrate model output, run the following command:
 ```
@@ -70,9 +71,9 @@ Failed to execute XLA Runtime executable: run time error: custom call 'xla.gpu.a
 ## Multihost development
 There are three patterns for running MaxText with more than one host.
 
-1. Recommended: Google Kubernetes Engine (GKE) [Running Maxtext with XPK](Run_MaxText_via_xpk.md) - Quick experimentation and production support.
-2. Google Compute Engine (GCE) [Running Maxtext with Multihost Jobs](Run_MaxText_via_multihost_job.md) - Long running production jobs with queued resources.
-3. Google Compute Engine (GCE) [Running Maxtext with Multihost Runner](Run_MaxText_via_multihost_runner.md) -  Fast experiments via multiple ssh connections.
+1. Recommended: Google Kubernetes Engine (GKE) [Running Maxtext with XPK](run-xpk) - Quick experimentation and production support.
+2. Google Compute Engine (GCE) [Running Maxtext with Multihost Jobs](run-multihost-job) - Long running production jobs with queued resources.
+3. Google Compute Engine (GCE) [Running Maxtext with Multihost Runner](run-multihost-runner) - Fast experiments via multiple ssh connections.
 
 ## Next steps: Preflight optimizations
 
