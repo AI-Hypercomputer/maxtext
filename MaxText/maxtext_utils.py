@@ -319,7 +319,7 @@ def calculate_vision_encoder_tflops(config):
     num_patches = (image_size // patch_size) ** 2
     seq_len = num_patches + 1  # +1 for class token
 
-    # Patch embedding (unfold + linear)
+    # Llama4UnfoldConvolution patch embedding (unfold + linear)
     patch_embed_flops = 2 * batch_size * num_images * num_patches * patch_size * patch_size * num_channels * hidden_size
 
     # Vision encoder layers
