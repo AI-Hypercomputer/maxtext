@@ -24,6 +24,8 @@ from MaxText import optimizers
 from MaxText import checkpointing
 from MaxText import maxtext_utils
 
+import qwix
+
 
 def get_transformer_model(config, mesh, quant):
   if config.model_fsdp_ag_once:
@@ -37,6 +39,11 @@ def create_model(config, mesh):
   # Model definition
   quant = quantizations.configure_quantization(config)
   model = get_transformer_model(config, mesh, quant)
+  if config.qwix:
+    assert quant is None, "Using Qwix, quantizations.configure_quantization should return None."
+    quantization_rules = quantizations.get_rules(config)
+    if quantization_rules:
+      model = qwix.quantize_model(model, qwix.QtProvider(quantization_rules))
   return model
 
 

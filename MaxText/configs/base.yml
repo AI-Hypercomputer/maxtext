@@ -110,7 +110,9 @@ save_quantized_params_path: ""
 # when left as is, corresponds to training
 # accepted values are "inference"
 model_call_mode: ""
-
+qwix: False # Whether to use qwix for quantization. If set to True, the model will be quantized using qwix.
+# Quantization calibration method used for weights and activations. Supported methods can be found in https://github.com/google/qwix/blob/dc2a0770351c740e5ab3cce7c0efe9f7beacce9e/qwix/qconfig.py#L70-L80
+quantization_calibration_method: "absmax"
 # Shard the range finding operation for quantization. By default this is set to number of slices.
 quantization_local_shard_count: -1
 
