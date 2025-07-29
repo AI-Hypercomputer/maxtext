@@ -53,7 +53,7 @@ Example Usage:
 
 import jax
 import os
-from typing import Sequence, Dict, Any
+from typing import Sequence, Any
 
 from transformers import AutoTokenizer, AutoProcessor
 
@@ -148,12 +148,12 @@ def main(argv: Sequence[str]) -> None:
 
   # 3. Get parameter mappings
   mappings = _get_model_mappings(model_key, config.scan_layers, hf_config_obj.to_dict())
-  param_map = mappings["param_mapping"]
-  shape_map = mappings["shape_mapping"]  # HF target shapes
+  param_map: dict[str, Any] = mappings["param_mapping"]
+  shape_map: dict[str, Any] = mappings["shape_mapping"]  # HF target shapes
   hook_fn_map = mappings["hook_fn_mapping"]
 
   # 4. Transform Weights
-  transformed_hf_weights: Dict[str, Any] = {}
+  # transformed_hf_weights: dict[str, Any] = {}
 
   # MaxText `engine.load_params()` returns `state.params` (a FrozenDict).
   # The actual weights are typically under `state.params['params']`.

@@ -231,6 +231,7 @@ def make_tfds_train_iterator(
     global_shape = (config.global_batch_size_to_load, config.max_target_length)
     return multihost_dataloading.RemoteIterator(get_ds_fn, preprocessing_fn, global_mesh, global_shape)
 
+
 def make_tfds_eval_iterator(
     config: ml_collections.ConfigDict,
     global_mesh,
