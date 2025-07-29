@@ -64,6 +64,9 @@ MODEL_MODE_PREFILL = "prefill"
 MODEL_MODE_TRAIN = "train"
 MODEL_MODE_INSERT = "insert"
 
+# expert_shard_attention_option
+EP_AS_CONTEXT = "context"
+
 DECODING_ACTIVE_SEQUENCE_INDICATOR = 1
 
 # A large negative mask value is used for masking to ensure that the

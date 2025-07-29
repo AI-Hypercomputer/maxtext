@@ -553,40 +553,42 @@ class AttentionTest(unittest.TestCase):
 
   @pytest.mark.tpu_only
   def test_tpu_flash_attention_cp_and_ep(self):
-    # cp
-    self.tpu_flash_attention_cp_and_ep_helper(
-        ici_context_parallelism=4,  # use context parallelism of 4
-        context_parallel_load_balance=False,  # set load_balancing to False such that
-        # there's no need for reordering the input/output
-        ici_expert_parallelism=1,
-        expert_shard_attention_option="fsdp",
-    )
+    # cp, load_balance=false
     self.tpu_flash_attention_cp_and_ep_helper(
         ici_context_parallelism=4,
-        context_parallel_load_balance=True,  # need reordering the input/output
+        context_parallel_load_balance=False,
         ici_expert_parallelism=1,
         expert_shard_attention_option="fsdp",
     )
-    # cp + ep_as_cp
+    # cp, load_balance=true
+    self.tpu_flash_attention_cp_and_ep_helper(
+        ici_context_parallelism=4,
+        context_parallel_load_balance=True,
+        ici_expert_parallelism=1,
+        expert_shard_attention_option="fsdp",
+    )
+    # cp + ep->cp, load_balance=false
     self.tpu_flash_attention_cp_and_ep_helper(
         ici_context_parallelism=2,
         context_parallel_load_balance=False,
         ici_expert_parallelism=2,
-        expert_shard_attention_option="context",  # use expert for context parallelism
+        expert_shard_attention_option="context",
     )
+    # cp + ep->cp, load_balance=true
     self.tpu_flash_attention_cp_and_ep_helper(
         ici_context_parallelism=2,
         context_parallel_load_balance=True,
         ici_expert_parallelism=2,
         expert_shard_attention_option="context",
     )
-    # ep_as_cp
+    # ep->cp, load_balance=false
     self.tpu_flash_attention_cp_and_ep_helper(
         ici_context_parallelism=1,
         context_parallel_load_balance=False,
         ici_expert_parallelism=4,
         expert_shard_attention_option="context",
     )
+    # ep->cp, load_balance=true
     self.tpu_flash_attention_cp_and_ep_helper(
         ici_context_parallelism=1,
         context_parallel_load_balance=True,
@@ -599,7 +601,7 @@ class AttentionTest(unittest.TestCase):
       ici_context_parallelism=1,
       context_parallel_load_balance=True,
       ici_expert_parallelism=1,
-      expert_shard_attention_option="fsdp",
+      expert_shard_attention_option="context",
   ):
     """Test equivalence between dot_product and flash attention + context/expert parallelism"""
     num_kv_heads = self.num_kv_heads
@@ -624,10 +626,10 @@ class AttentionTest(unittest.TestCase):
         ici_expert_parallelism=ici_expert_parallelism,
         expert_shard_attention_option=expert_shard_attention_option,
     )
-    devices_array_cp = maxtext_utils.create_device_mesh(cfg_cp)  # for context parallelism
-    mesh_cp = Mesh(devices_array_cp, cfg_cp.mesh_axes)  # for context parallelism
+    devices_array_cp = maxtext_utils.create_device_mesh(cfg_cp)
+    mesh_cp = Mesh(devices_array_cp, cfg_cp.mesh_axes)
     attention_as_mha_flash_cp = Attention(
-        config=cfg_cp,  # we pass the context parallelism in the config
+        config=cfg_cp,
         num_query_heads=cfg_cp.num_query_heads,
         num_kv_heads=num_kv_heads,
         head_dim=cfg_cp.head_dim,
@@ -1219,39 +1221,42 @@ class MLATest(parameterized.TestCase):
 
   @pytest.mark.tpu_only
   def test_tpu_flash_attention_cp_and_ep(self):
-    # cp
+    # cp, load_balance=false
     self.tpu_flash_attention_cp_and_ep_helper(
         ici_context_parallelism=4,
         context_parallel_load_balance=False,
         ici_expert_parallelism=1,
         expert_shard_attention_option="fsdp",
     )
+    # cp, load_balance=true
     self.tpu_flash_attention_cp_and_ep_helper(
         ici_context_parallelism=4,
         context_parallel_load_balance=True,
         ici_expert_parallelism=1,
         expert_shard_attention_option="fsdp",
     )
-    # cp + ep_as_cp
+    # cp + ep->cp, load_balance=false
     self.tpu_flash_attention_cp_and_ep_helper(
         ici_context_parallelism=2,
         context_parallel_load_balance=False,
         ici_expert_parallelism=2,
         expert_shard_attention_option="context",
     )
+    # cp + ep->cp, load_balance=true
     self.tpu_flash_attention_cp_and_ep_helper(
         ici_context_parallelism=2,
         context_parallel_load_balance=True,
         ici_expert_parallelism=2,
         expert_shard_attention_option="context",
     )
-    # ep_as_cp
+    # ep->cp, load_balance=false
     self.tpu_flash_attention_cp_and_ep_helper(
         ici_context_parallelism=1,
         context_parallel_load_balance=False,
         ici_expert_parallelism=4,
         expert_shard_attention_option="context",
     )
+    # ep->cp, load_balance=true
     self.tpu_flash_attention_cp_and_ep_helper(
         ici_context_parallelism=1,
         context_parallel_load_balance=True,
@@ -1264,7 +1269,7 @@ class MLATest(parameterized.TestCase):
       ici_context_parallelism=1,
       context_parallel_load_balance=True,
       ici_expert_parallelism=1,
-      expert_shard_attention_option="fsdp",
+      expert_shard_attention_option="context",
   ):
     """Test equivalence between dot_product and flash attention + context/expert parallelism"""
 

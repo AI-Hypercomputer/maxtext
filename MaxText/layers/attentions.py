@@ -39,7 +39,7 @@ from flax import nnx
 from flax.linen import partitioning
 
 from MaxText import max_utils
-from MaxText.common_types import DecoderBlockType, DEFAULT_MASK_VALUE, BATCH, BATCH_NO_EXP, HEAD, KV_LENGTH, PREFILL_LENGTH, D_KV, CACHE_BATCH_PREFILL, CACHE_SEQUENCE, AxisNames, CACHE_BATCH, CACHE_HEADS, CACHE_SCALE_BATCH, CACHE_KV, CACHE_SCALE_SEQUENCE, CACHE_SCALE_HEADS, CACHE_SCALE_KV, AxisIdxes, LENGTH, LENGTH_NO_EXP, DType, Config, Array, Q_LENGTH, Q_LENGTH_NO_EXP, DECODE_LENGTH, DECODE_BATCH, PREFILL_KV_BATCH, KV_HEAD, KV_HEAD_DIM, KV_BATCH, KV_BATCH_NO_EXP, EMBED, MODEL_MODE_AUTOREGRESSIVE, DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_TRAIN, MODEL_MODE_PREFILL
+from MaxText.common_types import DecoderBlockType, DEFAULT_MASK_VALUE, BATCH, BATCH_NO_EXP, HEAD, KV_LENGTH, PREFILL_LENGTH, D_KV, CACHE_BATCH_PREFILL, CACHE_SEQUENCE, AxisNames, CACHE_BATCH, CACHE_HEADS, CACHE_SCALE_BATCH, CACHE_KV, CACHE_SCALE_SEQUENCE, CACHE_SCALE_HEADS, CACHE_SCALE_KV, AxisIdxes, LENGTH, LENGTH_NO_EXP, DType, Config, Array, Q_LENGTH, Q_LENGTH_NO_EXP, DECODE_LENGTH, DECODE_BATCH, PREFILL_KV_BATCH, KV_HEAD, KV_HEAD_DIM, KV_BATCH, KV_BATCH_NO_EXP, EMBED, MODEL_MODE_AUTOREGRESSIVE, DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_TRAIN, MODEL_MODE_PREFILL, EP_AS_CONTEXT
 from MaxText.inference import kvcache
 from MaxText.inference import page_manager
 from MaxText.inference import paged_attention
@@ -719,7 +719,7 @@ class AttentionOp(nnx.Module):
     """TPU Flash Attention."""
 
     cp_size = self.mesh.shape["context"]
-    if self.config.expert_shard_attention_option == "context":
+    if self.config.expert_shard_attention_option == EP_AS_CONTEXT:
       cp_size = cp_size * self.mesh.shape["expert"]
 
     load_balanced_context_parallel = self.config.context_parallel_load_balance
@@ -731,14 +731,14 @@ class AttentionOp(nnx.Module):
     segment_axis_names_q = None
     segment_axis_names_kv = None
     if decoder_segment_ids is not None:
-      if self.config.expert_shard_attention_option == "context":
+      if self.config.expert_shard_attention_option == EP_AS_CONTEXT:
         segment_axis_names_q = nn.logical_to_mesh_axes((BATCH_NO_EXP, Q_LENGTH))
         segment_axis_names_kv = nn.logical_to_mesh_axes((BATCH_NO_EXP, KV_LENGTH))
       else:
         segment_axis_names_q = nn.logical_to_mesh_axes((BATCH, Q_LENGTH_NO_EXP))
         segment_axis_names_kv = nn.logical_to_mesh_axes((BATCH, KV_LENGTH))
 
-    if self.config.expert_shard_attention_option == "context":
+    if self.config.expert_shard_attention_option == EP_AS_CONTEXT:
       axis_names_splash_kernel = nn.logical_to_mesh_axes(self.flash_axis_names_splash_kernel_ep)
       axis_names_q = nn.logical_to_mesh_axes(self.flash_axis_names_q_ep)
       axis_names_kv = nn.logical_to_mesh_axes(self.flash_axis_names_kv_ep)
@@ -1767,7 +1767,7 @@ class Attention(nn.Module):
     if model_mode == MODEL_MODE_PREFILL:
       inputs_q = nn.with_logical_constraint(inputs_q, self.prefill_input_axis_names)
       inputs_kv = nn.with_logical_constraint(inputs_kv, self.prefill_input_axis_names)
-    elif model_mode == MODEL_MODE_TRAIN and self.config.expert_shard_attention_option == "context":
+    elif model_mode == MODEL_MODE_TRAIN and self.config.expert_shard_attention_option == EP_AS_CONTEXT:
       inputs_q = nn.with_logical_constraint(inputs_q, self.ep_input_axis_names)
       inputs_kv = nn.with_logical_constraint(inputs_kv, self.ep_input_axis_names)
     elif model_mode == MODEL_MODE_TRAIN:
@@ -1839,7 +1839,7 @@ class Attention(nn.Module):
       query = nn.with_logical_constraint(query, (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV))
       key = nn.with_logical_constraint(key, (DECODE_BATCH, DECODE_LENGTH, KV_HEAD, D_KV))
       value = nn.with_logical_constraint(value, (DECODE_BATCH, DECODE_LENGTH, KV_HEAD, D_KV))
-    elif model_mode == MODEL_MODE_TRAIN and self.config.expert_shard_attention_option == "context":
+    elif model_mode == MODEL_MODE_TRAIN and self.config.expert_shard_attention_option == EP_AS_CONTEXT:
       query = nn.with_logical_constraint(query, self.ep_query_axis_names)
       key = nn.with_logical_constraint(key, self.ep_key_axis_names)
       value = nn.with_logical_constraint(value, self.ep_value_axis_names)
@@ -1869,7 +1869,7 @@ class Attention(nn.Module):
 
     if model_mode == MODEL_MODE_PREFILL:
       out = nn.with_logical_constraint(out, self.prefill_out_axis_names)
-    elif model_mode == MODEL_MODE_TRAIN and self.config.expert_shard_attention_option == "context":
+    elif model_mode == MODEL_MODE_TRAIN and self.config.expert_shard_attention_option == EP_AS_CONTEXT:
       out = nn.with_logical_constraint(out, self.ep_out_axis_names)
     elif model_mode == MODEL_MODE_TRAIN:
       out = nn.with_logical_constraint(out, self.out_axis_names)
@@ -2048,7 +2048,7 @@ class MLA(Attention):
 
     if model_mode == MODEL_MODE_PREFILL:
       query = nn.with_logical_constraint(query, self.prefill_query_axis_names)
-    elif model_mode == MODEL_MODE_TRAIN and self.config.expert_shard_attention_option == "context":
+    elif model_mode == MODEL_MODE_TRAIN and self.config.expert_shard_attention_option == EP_AS_CONTEXT:
       query = nn.with_logical_constraint(query, self.ep_query_axis_names)
     else:
       query = nn.with_logical_constraint(query, self.query_axis_names)
@@ -2067,7 +2067,7 @@ class MLA(Attention):
     if model_mode == MODEL_MODE_PREFILL:
       key = nn.with_logical_constraint(key, self.prefill_key_axis_names)
       value = nn.with_logical_constraint(value, self.prefill_value_axis_names)
-    elif model_mode == MODEL_MODE_TRAIN and self.config.expert_shard_attention_option == "context":
+    elif model_mode == MODEL_MODE_TRAIN and self.config.expert_shard_attention_option == EP_AS_CONTEXT:
       key = nn.with_logical_constraint(key, self.ep_key_axis_names)
       value = nn.with_logical_constraint(value, self.ep_value_axis_names)
     else:
@@ -2191,7 +2191,7 @@ class MLA(Attention):
     if model_mode == MODEL_MODE_PREFILL:
       inputs_q = nn.with_logical_constraint(inputs_q, self.prefill_input_axis_names)
       inputs_kv = nn.with_logical_constraint(inputs_kv, self.prefill_input_axis_names)
-    elif model_mode == MODEL_MODE_TRAIN and self.config.expert_shard_attention_option == "context":
+    elif model_mode == MODEL_MODE_TRAIN and self.config.expert_shard_attention_option == EP_AS_CONTEXT:
       inputs_q = nn.with_logical_constraint(inputs_q, self.ep_input_axis_names)
       inputs_kv = nn.with_logical_constraint(inputs_kv, self.ep_input_axis_names)
     else:
@@ -2216,7 +2216,7 @@ class MLA(Attention):
     else:
       out = self.attention_op(query, key, value, decoder_segment_ids, model_mode, cached_values)
 
-    if model_mode == MODEL_MODE_TRAIN and self.config.expert_shard_attention_option == "context":
+    if model_mode == MODEL_MODE_TRAIN and self.config.expert_shard_attention_option == EP_AS_CONTEXT:
       out = nn.with_logical_constraint(out, self.ep_out_axis_names)
     else:
       out = nn.with_logical_constraint(out, self.out_axis_names)

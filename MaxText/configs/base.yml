@@ -160,6 +160,11 @@ tile_batch_seq: 512
 tile_activation_dim: 1024
 tile_weight_dim: 1024
 
+# How to use expert parallelism for attention sharding
+# "fsdp" (ep acts as fsdp parallelism)
+# "context" (ep acts as context parallelism, training only)
+expert_shard_attention_option: "fsdp"
+
 # deepseek moe
 base_moe_mlp_dim: 7168 # intermediate dimension at MoE layer (use base_mlp_dim if not DeepSeek style)
 first_num_dense_layers: 0 # number of initial dense layers in the model
@@ -407,10 +412,6 @@ ici_autoregressive_parallelism: 1
 ici_pipeline_parallelism: 1
 ici_expert_parallelism: 1
 
-# How to use ici_expert_pallelism for attention sharding
-# "fsdp" (ep acts as fsdp parallelism)
-# "context" (ep acts as context parallelism, training only)
-expert_shard_attention_option: "fsdp"
 
 # The number of TPU slices is automatically determined, you should not set this explicitly. For ahead of time compilation,
 # you should set compile_toplogy_num_slices, which will in turn set this value. For non-TPU environments this is set to 1.
