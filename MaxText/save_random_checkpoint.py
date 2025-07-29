@@ -25,6 +25,7 @@ from MaxText import max_logging
 from typing import Sequence
 from absl import app
 
+from flax.training import train_state
 
 def main(argv: Sequence[str]) -> None:
   # Initialize config
@@ -48,10 +49,13 @@ def main(argv: Sequence[str]) -> None:
   save_interval_steps = 1 
 
   # Create checkpoint manager and save
+  state = train_state.TrainState(
+      step=0, apply_fn=None, params={"params": params['params']}, tx=None, opt_state={}  # type: ignore
+  )
   checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
       output_path, enable_checkpointing, async_checkpointing, save_interval_steps
   )
-  checkpointing.save_checkpoint(checkpoint_manager, 0, params)
+  checkpointing.save_checkpoint(checkpoint_manager, 0, state)
   max_logging.log(f"Saved random-initialized checkpoint to {output_path}/0")
 
 
