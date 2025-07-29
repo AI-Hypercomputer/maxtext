@@ -47,6 +47,23 @@ def get_optimizer(config, learning_rate_schedule):
     )
   elif config.opt_type == "sgd":
     return optax.sgd(learning_rate_schedule)
+  elif config.opt_type == "muon":
+    return optax.contrib.muon(
+        learning_rate_schedule,  # learning_rate: base.ScalarOrSchedule,
+        # ns_coeffs: tuple[float, float, float] | tuple[tuple[float, float, float], ...] = (3.4445, -4.775, 2.0315),
+        # ns_steps: int = 5,
+        # beta: float = 0.95,
+        # eps: float = 1e-08,
+        # weight_decay: float = 0.0,
+        # weight_decay_mask: Any | Callable[[base.Params], Any] | None = None,
+        mu_dtype=config.mu_dtype,  # mu_dtype: chex.ArrayDType | None = None, *,
+        # nesterov: bool = True,
+        # adaptive: bool = False,
+        adam_eps_root=config.adam_eps_root,  # adam_eps_root: float = 0.0,
+        adam_b1=config.adam_b1,  # adam_b1: float = 0.9,
+        adam_b2=config.adam_b2,  # adam_b2: float = 0.999,
+        adam_weight_decay=config.adam_weight_decay,  # adam_weight_decay: float = 0.0
+    )
   else:
     raise ValueError(f"{config.opt_type=} is not a supported.")
 

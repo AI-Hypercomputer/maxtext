@@ -728,6 +728,7 @@ def create_parallelisms_list(raw_keys):
 
 
 def set_mu_dtype(raw_keys):
+  # TODO(shuningjin): double check
   # Default mu_dtype to weight_dtype if unset
   if raw_keys["mu_dtype"]:
     assert raw_keys["opt_type"] != "adam_pax", "opt_type adam_pax doesn't support explicitly setting mu_dtype"
@@ -940,7 +941,9 @@ def validate_deepseek_moe(raw_keys):
 
 def validate_sparse_matmul_parallelism(raw_keys):
   if raw_keys["sparse_matmul"] and (using_sequence_parallelism(raw_keys) or using_pipeline_parallelism(raw_keys)):
-    raise ValueError("Currently we only support Megablox and Ragged dot with data, tensor, tensor_transpose, and expert parallelism.")
+    raise ValueError(
+        "Currently we only support Megablox and Ragged dot with data, tensor, tensor_transpose, and expert parallelism."
+    )
   tensor_parallelism = (
       raw_keys["ici_tensor_parallelism"]
       * raw_keys["dcn_tensor_parallelism"]
@@ -965,15 +968,15 @@ def validate_sparse_matmul_parallelism(raw_keys):
   ):
     raise ValueError("You should use the pipeline_fsdp_ag_once = True and leave model_fsdp_ag_once = False.")
 
+
 def validate_ragged_dot(raw_keys):
   if raw_keys["sparse_matmul"] and not raw_keys["megablox"]:
     config_flag = "jax_ragged_dot_use_ragged_dot_instruction"
     try:
       jax.config.update(config_flag, True)
     except AttributeError:
-      max_logging.log(
-          f"JAX config {config_flag} not found, possibly due to old JAX version."
-      )
+      max_logging.log(f"JAX config {config_flag} not found, possibly due to old JAX version.")
+
 
 def create_new_logical_axis_rules(old_logical_axis_rules, new_logical_axis_rules):
   new_logical_axis = set()
