@@ -20,6 +20,7 @@ limitations under the License.
 import math
 from typing import Optional
 
+import jax
 import jax.numpy as jnp
 from jax import lax
 from jax.ad_checkpoint import checkpoint_name
@@ -86,7 +87,7 @@ class Llama4UnfoldConvolution(nn.Module):
     # Extract patches using conv_general_dilated_patches
     batch_size, num_channels, img, _ = inputs.shape
     num_patches = (img // cfg.patch_size_for_vit) ** 2
-
+    jax.debug.print(f"Input shape: {inputs.shape}")
     # Extract patches using conv_general_dilated_patches
     patches = lax.conv_general_dilated_patches(
         inputs,
