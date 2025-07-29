@@ -79,7 +79,7 @@ class VisionEncoderEmbeddingTest(unittest.TestCase):
     # Load and preprocess the image
     images = multimodal_utils.load_image_from_path(config.image_path)
     images = multimodal_utils.pre_process_image(images, model_name=config.model_name)
-    input_images = images[jnp.newaxis, jnp.newaxis, ...]
+    input_images = images[jnp.newaxis, jnp.newaxis, ...]  # pytype: disable=unsupported-operands
 
     # Initialize only the vision encoder part and extract the corresponding params
     vision_encoder_model = models.VisionEncoder(config)
@@ -89,7 +89,7 @@ class VisionEncoderEmbeddingTest(unittest.TestCase):
     def apply_vision_encoder_fn(params, images_input):
       return vision_encoder_model.apply({"params": params}, images_input)
 
-    jitted_apply_vision_encoder_fn: Callable[[VariableDict, tuple[...]], np.ndarray] = jax.jit(apply_vision_encoder_fn)
+    jitted_apply_vision_encoder_fn: Callable[[VariableDict, tuple[dict, ...]], np.ndarray] = jax.jit(apply_vision_encoder_fn)
     image_embeddings = jitted_apply_vision_encoder_fn(vision_encoder_params, input_images)  # pylint: disable=not-callable
 
     # Load golden image embeddings generated from HuggingFace Gemma3-4b

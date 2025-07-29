@@ -200,6 +200,9 @@ class RoutedMoE(nn.Module):
   def get_tensor_parallelism_size(self):
     return self.mesh.shape["tensor"]
 
+  def get_tensor_transpose_parallelism_size(self):
+    return self.mesh.shape["tensor_transpose"]
+
   def get_context_autoregressive_parallelism_size(self):
     return self.mesh.shape["context_autoregressive"]
 
@@ -698,16 +701,20 @@ class RoutedMoE(nn.Module):
     else:
       batch_logical_axis = "activation_batch_no_exp"
 
-    input_partition_pspec = nn.logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", None))
+    if self.get_tensor_transpose_parallelism_size() > 1:
+      input_partition_pspec = nn.logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", "activation_embed"))
+    else:
+      input_partition_pspec = nn.logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", None))
+
     gate_logits_pspec = nn.logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", None))
     if self.config.model_name.startswith("deepseek3"):
       pre_bias_logits_pspec = nn.logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", None))
     else:
       # pre_bias_logits is None for non-DeepSeek v3 models
       pre_bias_logits_pspec = None
-    w0_pspec = nn.logical_to_mesh_axes(("exp", None, "mlp"))
-    w1_pspec = nn.logical_to_mesh_axes(("exp", None, "mlp"))
-    wo_pspec = nn.logical_to_mesh_axes(("exp", "mlp", None))
+    w0_pspec = nn.logical_to_mesh_axes(("exp", "embed_tensor_transpose", "mlp"))
+    w1_pspec = nn.logical_to_mesh_axes(("exp", "embed_tensor_transpose", "mlp"))
+    wo_pspec = nn.logical_to_mesh_axes(("exp", "mlp", "embed_tensor_transpose"))
     if isinstance(w0_kernel, aqt.QTensor):
       w0_pspec = aqt.partition_spec(w0_pspec, (1,), w0_kernel.dtype, use_bias=False)
     if isinstance(w1_kernel, aqt.QTensor):
@@ -793,8 +800,12 @@ class RoutedMoE(nn.Module):
           )
 
       layer_w0 = gmm(x, w0, group_sizes, selected_experts)
+      if self.get_tensor_transpose_parallelism_size() > 1:
+        layer_w0 = jax.lax.psum(layer_w0, "tensor_transpose")
       layer_w0 = adc.checkpoint_name(layer_w0, "mlpwi_0")
       layer_w1 = gmm(x, w1, group_sizes, selected_experts)
+      if self.get_tensor_transpose_parallelism_size() > 1:
+        layer_w1 = jax.lax.psum(layer_w1, "tensor_transpose")
       layer_w1 = adc.checkpoint_name(layer_w1, "mlpwi_1")
       # pylint: disable=protected-access
       layer_act = linears._convert_to_activation_function(self.config.mlp_activations[0])(layer_w0)
@@ -1480,5 +1491,7 @@ class RoutedAndSharedMoE(nn.Module):
         config=cfg,
         quant=self.quant,
     )(inputs)
+    logical_axis_names = ("activation_batch", "activation_norm_length", "activation_embed")
+    shared_experts = nn.with_logical_constraint(shared_experts, logical_axis_names)
 
     return routed_experts + shared_experts

@@ -2,7 +2,6 @@
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
-# you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
 #     http://www.apache.org/licenses/LICENSE-2.0
@@ -13,18 +12,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import torch
-import numpy as np
-import jax
-import jax.numpy as jnp
-from jax.experimental import multihost_utils
-import torch.nn.functional as F
-from tabulate import tabulate
-from typing import Optional
-
 """
 Utility functions to support the HF checkpoint conversion and verification process in test_hf.py.
 """
+
+from typing import Optional
+
+import numpy as np
+
+import jax
+import jax.numpy as jnp
+from jax.experimental import multihost_utils
+
+import torch.nn.functional as F
+import torch
+
+from tabulate import tabulate
 
 
 def convert_jax_weight_to_torch(weight: "jax.Array", dtype: Optional[str] = None) -> torch.Tensor:
@@ -85,10 +88,8 @@ def check_arrays_match(arrayA, arrayB, atol=0.01, rtol=1e-5):
         # Get the actual mismatched values using the indices
         mismatched_A_samples = arrayA[mismatch_indices].flatten()[:actual_limit]
         mismatched_B_samples = arrayB[mismatch_indices].flatten()[:actual_limit]
-        for i in range(len(mismatched_A_samples)):
-          print(
-              f"  A: {mismatched_A_samples[i].item():.6f}, B: {mismatched_B_samples[i].item():.6f}, Diff: {(mismatched_A_samples[i]-mismatched_B_samples[i]).item():.6f}"
-          )
+        for (sample_a, sample_b) in zip(mismatched_A_samples, mismatched_B_samples):
+          print(f"  A: {sample_a.item():.6f}, B: {sample_b.item():.6f}, Diff: {(sample_a - sample_b).item():.6f}")
       return False
 
   # If both are still jax arrays

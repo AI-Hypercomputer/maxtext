@@ -257,7 +257,7 @@ class Gemma3ScannableBlock(nn.Module):
           previous_chunk=previous_chunk,
           page_state=page_state,
           slot=slot,
-          bidirectional_mask=None,
+          bidirectional_mask=bidirectional_mask,
       )
       if cfg.scan_layers:
         y = y[0]

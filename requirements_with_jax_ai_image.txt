@@ -3,7 +3,7 @@
 datasets
 flax==0.10.6
 grain[parquet]>=0.2.6
-orbax-checkpoint>=0.10.3
+orbax-checkpoint>=0.11.20
 pylint
 pytest
 pyink
@@ -19,7 +19,7 @@ transformers
 mlperf-logging@git+https://github.com/mlperf/logging.git
 google-jetstream@git+https://github.com/AI-Hypercomputer/JetStream.git
 jsonlines
-pathwaysutils==0.1.1
+pathwaysutils@git+https://github.com/AI-Hypercomputer/pathways-utils.git
 google-api-python-client
 omegaconf
 jaxtyping

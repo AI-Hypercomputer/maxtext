@@ -150,9 +150,7 @@ class GrpoTrainerTest(unittest.TestCase):
     # Get the expected (golden) data.
     golden_data = get_golden_data(self.config)
     # Initialize the model and related objects.
-    maxtext_model, state, reference_params, rng, _, _ = setup_maxtext_model(
-        self.config, self.mesh
-    )
+    maxtext_model, state, reference_params, rng, _, _ = setup_maxtext_model(self.config, self.mesh)
     # Prepare inputs for the model.
     input_ids, input_segmentation, input_position, completion_segmentation = prepare_maxtext_inputs(
         self.config.prompt, self.tokenizer_model
