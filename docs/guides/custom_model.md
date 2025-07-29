@@ -1,21 +1,12 @@
 # How to customize your model configs on TPU
 
-## Table of Contents
-- [Introduction](#introduction)
-- [Step 1. Identify Initial Configs](#step-1-identify-initial-configs)
-- [Step 2. Consider TPU Best Practices](#step-2-consider-tpu-best-practices)
-- [Step 3. Choose Efficient Sharding Strategies Using Roofline Analysis](roofline-sharding)
-- [Step 4. Analyze Experiments](#step-4-analyze-experiments)
-- [Example of dense model](#example-of-dense-model)
-- [Example of MoE model](#example-of-moe-model)
-
 ## Introduction
 
 This document provides a guide to optimize and customize your LLM model configurations for higher performance (i.e. MFU) on Cloud TPU. Note that this document focuses exclusively on performance tuning. The analysis of model quality and convergence behavior is outside of scope.
 
 ## Step 1. Identify Initial Configs
 
-To begin, identify your model's size, review open-source model configs, and establish the initial configurations for each block. You can use our [reference calculator](https://docs.google.com/spreadsheets/d/e/2PACX-1vRjwRtX0g6ktlbXQl_da1f8Kg7ofBAYh1hAJEQKfoVT-6sM7u_C8TiO3WcsThomJIF0Fy1yPGbmfl8m/pub?output=xlsx) to estimate parameters and FLOPs for dense, Mixtral-like Mixture of Experts (MoE), and DeepSeek-like MoE models to help you estimate the parameter count and FLOPs.
+To begin, identify your model's size, review open-source model configs, and establish the initial configurations for each block. You can use our [reference calculator (not available)](https://docs.google.com/spreadsheets/d/e/2PACX-1vRjwRtX0g6ktlbXQl_da1f8Kg7ofBAYh1hAJEQKfoVT-6sM7u_C8TiO3WcsThomJIF0Fy1yPGbmfl8m/pub?output=xlsx) to estimate parameters and FLOPs for dense, Mixtral-like Mixture of Experts (MoE), and DeepSeek-like MoE models to help you estimate the parameter count and FLOPs.
 
 Based on resources like [Language Modeling from Scratch](https://github.com/stanford-cs336/spring2025-lectures/blob/e9cb2488fdb53ea37f0e38924ec3a1701925cef3/nonexecutable/2025%20Lecture%203%20-%20architecture.pdf), we observe common architectural ratios for dense models, as shown below:
 
@@ -136,7 +127,7 @@ To use TP=16, we need M > 80k (ideally larger, 100k+). We have used this in a cu
 
 With your configs, begin experimenting to evaluate the model's performance. We strongly recommend capturing a profile by following these [instructions](https://docs.jax.dev/en/latest/profiling.html#). If you are using MaxText, this can be done by simply setting `profiler=xplane` in your configuration.
 
-After generating the profile, use a tool, like [xprof](https://github.com/openxla/xprof), [xprofiler](https://github.com/AI-Hypercomputer/cloud-diagnostics-xprof), or [tensorboard](https://github.com/tensorflow/tensorboard) to analyze the results. These examples ([Profile TPU Programs](https://jax-ml.github.io/scaling-book/profiling/), [ML Workload Diagnostics](https://docs.google.com/presentation/d/1RV_wiamshnK-gus17PXEfn1wEBCThp1TwRBUGqO1L2Q/edit?slide=id.g29f3f75064e_0_0&resourcekey=0-AKu9jLL4jjWWfWzQA58GFQ#slide=id.g29f3f75064e_0_0)) can serve as your guide. A key principle for maximizing training throughput is to ensure you are fully utilizing the available HBM. Once you achieve satisfactory performance, you can proceed with full training runs. Continue to analyze your model and refine your configurations as needed.
+After generating the profile, use a tool, like [xprof](https://github.com/openxla/xprof), [xprofiler](https://github.com/AI-Hypercomputer/cloud-diagnostics-xprof), or [tensorboard](https://github.com/tensorflow/tensorboard) to analyze the results. These examples ([Profile TPU Programs](https://jax-ml.github.io/scaling-book/profiling/), [ML Workload Diagnostics (not available)](https://docs.google.com/presentation/d/1RV_wiamshnK-gus17PXEfn1wEBCThp1TwRBUGqO1L2Q/edit?slide=id.g29f3f75064e_0_0&resourcekey=0-AKu9jLL4jjWWfWzQA58GFQ#slide=id.g29f3f75064e_0_0)) can serve as your guide. A key principle for maximizing training throughput is to ensure you are fully utilizing the available HBM. Once you achieve satisfactory performance, you can proceed with full training runs. Continue to analyze your model and refine your configurations as needed.
 
 ## Example of dense model
 
