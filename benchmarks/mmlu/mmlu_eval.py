@@ -63,8 +63,11 @@ from MaxText import maxengine
 
 ASCII_UPPERCASE_A = ord("A")  # ASCII value for uppercase 'A'
 
-DEFAULT_PROMPT_TEMPLATE = """The following are multiple choice questions (with answers) about {subject}.\n\n{question}\n
-  {choices}\nAnswer: Let's think step by step."""
+DEFAULT_PROMPT_TEMPLATE = """The following are multiple choice questions (with answers) about {subject}.
+
+{question}
+{choices}
+Answer:"""
 
 
 _PROMPT_TEMPLATE = flags.DEFINE_string(
