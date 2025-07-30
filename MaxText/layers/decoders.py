@@ -780,54 +780,71 @@ class Decoder(nn.Module):
       page_state,
       slot,
   ):
-    """Applies Gemma3 scanned decoder blocks, handling main scan and remainders."""
-
+    """Applies Gemma3 scanned decoder layers using a single scan over Gemma3DecoderLayer."""
     cfg = self.config
     mesh = self.mesh
 
-    # Define the repeating pattern length and calculate how many full blocks to scan
-    attention_pattern_length = len(gemma3.GEMMA3_ATTENTION_PATTERN)
-    scan_length = cfg.num_decoder_layers // attention_pattern_length
-
+    # Get the rematted version of the base decoder layer
     policy = self.get_remat_policy()
-    RemattedGemma3Block = self.set_remat_policy([gemma3.Gemma3ScannableBlock], policy)[0]
+    RemattedGemma3DecoderLayer = self.set_remat_policy([gemma3.Gemma3DecoderLayer], policy)[0]
 
-    layer_call_kwargs = {"bidirectional_mask": bidirectional_mask}
-    layer_kwargs = {"num_of_layers": attention_pattern_length}
+    # Define a new module to act as the body for the nn.scan operation.
+    # This wrapper handles the dynamic `attention_type` for each layer.
+    class ScannedLayer(nn.Module):
+      config: Config
+      mesh: Mesh
+      quant: Optional[Quant]
 
-    # Apply the main scan over the full blocks
-    if scan_length > 0:
-      broadcast_args = (
-          decoder_segment_ids,
-          decoder_positions,
-          deterministic,
-          model_mode,
-      )
-      y, _ = self.scan_decoder_layers(
-          cfg,
-          RemattedGemma3Block,
-          scan_length,
-          "layers",
-          mesh,
-          in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
-          **layer_kwargs,
-      )(y, *broadcast_args, **layer_call_kwargs)
+      @nn.compact
+      def __call__(self, carry, layer_idx):
+        # 'carry' is the activations tensor (y) from the previous layer.
+        # 'layer_idx' is the integer index of the current layer in the scan.
+        y = carry
 
-    # Apply any remaining layers that did not fit into a full scanned block
-    num_remaining_layers = cfg.num_decoder_layers % attention_pattern_length
-    if num_remaining_layers > 0:
-      # We name the remainder block with a 'remainder' suffix to avoid parameter name collisions
-      rem_layer_kwargs = {"num_of_layers": num_remaining_layers}
-      layer = RemattedGemma3Block(config=cfg, mesh=mesh, quant=self.quant, name="layers_remainder", **rem_layer_kwargs)
-      y, _ = layer(
-          y,
-          decoder_segment_ids,
-          decoder_positions,
-          deterministic,
-          model_mode,
-          previous_chunk=previous_chunk,
-          page_state=page_state,
-          slot=slot,
-          **layer_call_kwargs,
-      )
+        # Determine the attention type based on the current layer index.
+        attention_type = gemma3.get_attention_type(layer_idx)
+
+        # Instantiate the actual Gemma3 decoder layer.
+        # The name must be consistent across scan iterations for Flax to correctly
+        # manage and stack the parameters of each layer.
+        layer = RemattedGemma3DecoderLayer(
+            config=self.config, mesh=self.mesh, quant=self.quant, name="gemma3_decoder_layer", attention_type=attention_type
+        )
+
+        # Apply the decoder layer.
+        output, _ = layer(
+            y,
+            decoder_segment_ids=decoder_segment_ids,
+            decoder_positions=decoder_positions,
+            deterministic=deterministic,
+            model_mode=model_mode,
+            previous_chunk=previous_chunk,
+            page_state=page_state,
+            slot=slot,
+            bidirectional_mask=bidirectional_mask,
+        )
+        # The scan body must return the new carry and an optional output for each step.
+        return output, None
+
+    # We need to scan over the layer indices to pass them to our ScanBody.
+    layer_indices = jnp.arange(cfg.num_decoder_layers)
+    # The `in_axes` tuple specifies how each argument to the scan body's __call__ is handled.
+    # `0` means the corresponding argument is an array that should be scanned over.
+    # `nn.broadcast` means the argument is passed to every iteration without modification.
+    # The first argument 'y' (the carry) is handled automatically by scan.
+    scan_in_axes = (0,)  # for layer_indices
+
+    # Use the custom `scan_decoder_layers` helper to perform the scan.
+    # Note: `scan_decoder_layers` passes broadcast_args implicitly. We just need to handle `layer_indices`.
+    y, _ = self.scan_decoder_layers(
+        cfg=cfg,
+        decoder_layer=ScannedLayer,
+        length=cfg.num_decoder_layers,
+        metadata_axis_name="layers",
+        mesh=mesh,
+        in_axes_tuple=scan_in_axes,
+    )(
+        y, layer_indices
+    )  # Pass the initial carry `y` and the `layer_indices` to scan over.
+
     return y
