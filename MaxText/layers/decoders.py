@@ -245,13 +245,15 @@ class Decoder(nn.Module):
     self.norm_layer = self.get_norm_layer(num_features=self.config.emb_dim)
     if self.config.using_pipeline_parallelism:
       remat_policy = self.get_remat_policy()
-      self.pipeline_modules = []
-      for _ in range(self.config.pipeline_parallel_layers):
+      pipeline_modules_list = list((None for _ in range(self.config.num_successive_pipelines)))
+      for i in range(self.config.num_successive_pipelines):
         pipeline_stage_module = self.get_pipeline_stage_module(self.decoder_layer)
         pipeline_module = pipeline.Pipeline(
           config=self.config, mesh=self.mesh, layers=pipeline_stage_module, remat_policy=remat_policy
         )
-        self.pipeline_modules.append(pipeline_module)
+        pipeline_modules_list[i] = pipeline_module
+      self.pipeline_modules = tuple(pipeline_modules_list)
+
   def get_remat_policy(self):
     """Get remat policy"""
     policy = None
@@ -606,7 +608,7 @@ class Decoder(nn.Module):
     )
     if cfg.using_pipeline_parallelism:
       if cfg.pipeline_fsdp_ag_once:
-        partition_spec = self.pipeline_module_rawr.get_weight_sharding(
+        partition_spec = self.pipeline_modules[0].get_weight_sharding(
             y, decoder_segment_ids, decoder_positions, deterministic, model_mode
         )
       else:
@@ -639,8 +641,9 @@ class Decoder(nn.Module):
             )(y, *broadcast_args)
         y = self.pipeline_module(y, *broadcast_args, partition_spec=partition_spec)
       else:  # Not DeepSeek
-        y = self.pipeline_module_rawr(y, *broadcast_args, partition_spec=partition_spec)
-        y = self.pipeline_module_2(y, *broadcast_args, partition_spec=partition_spec)
+        y = run_successive_pipelines(self.pipeline_modules, y, *broadcast_args, partition_spec=partition_spec)
+        # y = self.pipeline_module_rawr(y, *broadcast_args, partition_spec=partition_spec)
+        # y = self.pipeline_module_2(y, *broadcast_args, partition_spec=partition_spec)
         # for _ in range(10):
         #   y = self.pipeline_module(y, *broadcast_args, partition_spec=partition_spec)
         remaining_layers = self.config.num_decoder_layers - self.config.pipeline_parallel_layers
@@ -836,3 +839,9 @@ class Decoder(nn.Module):
           **layer_call_kwargs,
       )
     return y
+
+def run_successive_pipelines(pipeline_modules, y, *broadcast_args, partition_spec=None):
+  for pipeline_module in pipeline_modules:
+    y = pipeline_module(y, *broadcast_args, partition_spec=partition_spec)
+  return y
+  
