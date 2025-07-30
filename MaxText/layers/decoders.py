@@ -244,17 +244,14 @@ class Decoder(nn.Module):
     self.decoder_layer = self.get_decoder_layers()
     self.norm_layer = self.get_norm_layer(num_features=self.config.emb_dim)
     if self.config.using_pipeline_parallelism:
-      pipeline_stage_module = self.get_pipeline_stage_module(self.decoder_layer)
       remat_policy = self.get_remat_policy()
-      self.pipeline_module_rawr = pipeline.Pipeline(
+      self.pipeline_modules = []
+      for _ in range(self.config.pipeline_parallel_layers):
+        pipeline_stage_module = self.get_pipeline_stage_module(self.decoder_layer)
+        pipeline_module = pipeline.Pipeline(
           config=self.config, mesh=self.mesh, layers=pipeline_stage_module, remat_policy=remat_policy
-      )
-      pipeline_stage_module_2 = self.get_pipeline_stage_module(self.decoder_layer)
-      self.pipeline_module_2 = pipeline.Pipeline(
-           config=self.config, mesh=self.mesh, layers=pipeline_stage_module_2, remat_policy=remat_policy
-      )
-
-
+        )
+        self.pipeline_modules.append(pipeline_module)
   def get_remat_policy(self):
     """Get remat policy"""
     policy = None
