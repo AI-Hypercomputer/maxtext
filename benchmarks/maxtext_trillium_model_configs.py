@@ -804,7 +804,7 @@ llama3_1_405b_8192_pure_fsdp_ici = _add_to_model_dictionary(
     xla_flags=(
         xla_flags_library.DENSE_VMEM_LIMIT_FLAG
         + xla_flags_library.CF_FOR_ALL_GATHER
-        + xla_flags_library.HOST_OFFLOAD_FLAGS
+        + xla_flags_library.HOST_OFFLOAD_FLAGS #rawr
     ),
   )
 )
