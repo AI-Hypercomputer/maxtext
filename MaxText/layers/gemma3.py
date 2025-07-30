@@ -78,6 +78,7 @@ class Gemma3DecoderLayer(nn.Module):
       page_state=None,
       slot=None,
       bidirectional_mask=None,
+      is_local_attention=False,
   ):
     cfg = self.config
     mesh = self.mesh
@@ -127,6 +128,7 @@ class Gemma3DecoderLayer(nn.Module):
         deterministic=deterministic,
         model_mode=model_mode,
         bidirectional_mask=bidirectional_mask,
+        is_local_attention=is_local_attention,
     )
     if cfg.use_post_attn_norm:
       attention_lnx = rms_norm(
@@ -201,7 +203,18 @@ class Gemma3DecoderLayer(nn.Module):
 
 
 class Gemma3ScannableBlock(nn.Module):
-  """A repeatable block of Gemma3 decoder layers."""
+  """A repeatable block of Gemma3 decoder layers.
+
+    This block applies multiple decoder layers sequentially, using the attention
+    pattern defined by GEMMA3_ATTENTION_PATTERN. It's designed to be
+    used with `nn.scan` for efficient compilation.
+
+  Attributes:
+    config: Config, MaxText model config
+    mesh: Mesh, JAX device mesh (used for sharding)
+    quant: Optional[Quant], quantization config
+    num_of_layers: int, number of decoder layers in the block
+  """
 
   config: Config
   mesh: Mesh
@@ -221,26 +234,23 @@ class Gemma3ScannableBlock(nn.Module):
       previous_chunk=None,
       bidirectional_mask=None,
   ):
+
     cfg = self.config
     mesh = self.mesh
 
     inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
     inputs = checkpoint_name(inputs, "decoder_layer_input")
-
-    attention_types = [get_attention_type(i) for i in range(self.num_of_layers)]
-
-    def scan_body(carry, attention_type):
-      y = carry
-      # The layer name can be made unique if needed by other means,
-      # or by recognizing that scan will handle parameter differentiation.
+    y = inputs
+    for layer_id in range(self.num_of_layers):
+      attention_type = get_attention_type(layer_id)
       layer = Gemma3DecoderLayer(
           config=cfg,
           mesh=mesh,
-          name="scanned_layer",
+          name=f"layers_{layer_id}",
           quant=self.quant,
           attention_type=attention_type,
       )
-      y, _ = layer(
+      y = layer(
           y,
           decoder_segment_ids,
           decoder_positions,
@@ -251,18 +261,12 @@ class Gemma3ScannableBlock(nn.Module):
           slot=slot,
           bidirectional_mask=bidirectional_mask,
       )
+      if cfg.scan_layers:
+        y = y[0]
+    if cfg.scan_layers:
       return y, None
-
-    # Use nn.scan, feeding in the pre-calculated attention types
-    scanned_layers = nn.scan(
-        scan_body,
-        variable_axes={"params": 0},
-        split_rngs={"params": True, "dropout": True},
-        length=self.num_of_layers,
-    )
-    y, _ = scanned_layers(inputs, jnp.array(attention_types))
-
-    return y
+    else:
+      return y
 
 
 def _posemb_sincos_2d(

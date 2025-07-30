@@ -35,6 +35,7 @@ from MaxText.layers import quantizations
 from MaxText.layers import pipeline
 from MaxText import maxtext_utils
 from MaxText import multimodal_utils
+from MaxText.layers import attentions
 from MaxText.layers.attentions import Attention
 from MaxText.layers.normalizations import rms_norm
 from MaxText.layers.embeddings import attend_on_embedding, embed_as_linen, positional_embedding_as_linen
@@ -780,71 +781,55 @@ class Decoder(nn.Module):
       page_state,
       slot,
   ):
-    """Applies Gemma3 scanned decoder layers using a single scan over Gemma3DecoderLayer."""
+    """Applies Gemma3 scanned decoder layers, passing a runtime boolean for attention type."""
     cfg = self.config
     mesh = self.mesh
 
-    # Get the rematted version of the base decoder layer
     policy = self.get_remat_policy()
     RemattedGemma3DecoderLayer = self.set_remat_policy([gemma3.Gemma3DecoderLayer], policy)[0]
 
-    # Define a new module to act as the body for the nn.scan operation.
-    # This wrapper handles the dynamic `attention_type` for each layer.
+    is_local_layer_arr = jnp.array(
+        [gemma3.get_attention_type(i) == attentions.AttentionType.LOCAL_SLIDING for i in range(cfg.num_decoder_layers)]
+    )
+
     class ScannedLayer(nn.Module):
       config: Config
       mesh: Mesh
       quant: Optional[Quant]
 
-      @nn.compact
-      def __call__(self, carry, layer_idx):
-        # 'carry' is the activations tensor (y) from the previous layer.
-        # 'layer_idx' is the integer index of the current layer in the scan.
-        y = carry
-
-        # Determine the attention type based on the current layer index.
-        attention_type = gemma3.get_attention_type(layer_idx)
-
-        # Instantiate the actual Gemma3 decoder layer.
-        # The name must be consistent across scan iterations for Flax to correctly
-        # manage and stack the parameters of each layer.
-        layer = RemattedGemma3DecoderLayer(
-            config=self.config, mesh=self.mesh, quant=self.quant, name="gemma3_decoder_layer", attention_type=attention_type
+      def setup(self):
+        # Instantiate a single, unified decoder layer
+        self.decoder_layer = RemattedGemma3DecoderLayer(
+            config=self.config, mesh=self.mesh, quant=self.quant, name="gemma3_decoder_layer"
         )
 
-        # Apply the decoder layer.
-        output, _ = layer(
+      @nn.compact
+      def __call__(self, carry, is_local_for_this_layer):
+        y = carry
+
+        output, _ = self.decoder_layer(
             y,
-            decoder_segment_ids=decoder_segment_ids,
-            decoder_positions=decoder_positions,
-            deterministic=deterministic,
-            model_mode=model_mode,
+            decoder_segment_ids,
+            decoder_positions,
+            deterministic,
+            model_mode,
             previous_chunk=previous_chunk,
             page_state=page_state,
             slot=slot,
             bidirectional_mask=bidirectional_mask,
+            is_local_attention=is_local_for_this_layer,
         )
-        # The scan body must return the new carry and an optional output for each step.
+
         return output, None
 
-    # We need to scan over the layer indices to pass them to our ScanBody.
-    layer_indices = jnp.arange(cfg.num_decoder_layers)
-    # The `in_axes` tuple specifies how each argument to the scan body's __call__ is handled.
-    # `0` means the corresponding argument is an array that should be scanned over.
-    # `nn.broadcast` means the argument is passed to every iteration without modification.
-    # The first argument 'y' (the carry) is handled automatically by scan.
-    scan_in_axes = (0,)  # for layer_indices
-
-    # Use the custom `scan_decoder_layers` helper to perform the scan.
-    # Note: `scan_decoder_layers` passes broadcast_args implicitly. We just need to handle `layer_indices`.
-    y, _ = self.scan_decoder_layers(
+    scanned_fn = self.scan_decoder_layers(
         cfg=cfg,
         decoder_layer=ScannedLayer,
         length=cfg.num_decoder_layers,
         metadata_axis_name="layers",
         mesh=mesh,
-        in_axes_tuple=scan_in_axes,
-    )(
-        y, layer_indices
-    )  # Pass the initial carry `y` and the `layer_indices` to scan over.
+        in_axes_tuple=(0,),
+    )
+    y, _ = scanned_fn(y, is_local_layer_arr)
 
     return y

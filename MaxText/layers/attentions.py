@@ -526,6 +526,7 @@ class AttentionOp(nnx.Module):
       use_ragged_attention: bool = False,
       previous_chunk: Any = None,
       bidirectional_mask: Any = None,
+      is_local_attention=False,
   ):
     """Apply attention"""
     self.check_attention_inputs(query, key, value)
@@ -565,7 +566,11 @@ class AttentionOp(nnx.Module):
               """Decode not supported with flash attention.
                               Use `dot_product` instead."""
           )
-        return self.tpu_flash_attention(query, key, value, decoder_segment_ids, self.attn_logits_soft_cap), None, None
+        return (
+            self.tpu_flash_attention(query, key, value, decoder_segment_ids, self.attn_logits_soft_cap, is_local_attention),
+            None,
+            None,
+        )
       else:
         if model_mode == MODEL_MODE_AUTOREGRESSIVE:
           # fallback to dot_product as pallas gpu flash attention doesn't support decode stage
@@ -706,8 +711,11 @@ class AttentionOp(nnx.Module):
       value: Array,
       decoder_segment_ids: Array | None,
       attn_logits_soft_cap: float | None = None,
+      is_local_attention: bool = False,
   ) -> Array:
     """TPU Flash Attention."""
+
+    # jax.debug.print("is_local_attention: {x}", x=is_local_attention)
 
     cp_size = self.mesh.shape["context"]
     load_balanced_context_parallel = self.config.context_parallel_load_balance
@@ -721,6 +729,7 @@ class AttentionOp(nnx.Module):
     if decoder_segment_ids is not None:
       segment_axis_names_q = nn.logical_to_mesh_axes((BATCH, Q_LENGTH))
       segment_axis_names_kv = nn.logical_to_mesh_axes((BATCH, KV_LENGTH))
+
     axis_names_splash_kernel = nn.logical_to_mesh_axes(self.flash_axis_names_splash_kernel)
     axis_names_q = nn.logical_to_mesh_axes(self.flash_axis_names_q)
     axis_names_kv = nn.logical_to_mesh_axes(self.flash_axis_names_kv)
@@ -764,78 +773,45 @@ class AttentionOp(nnx.Module):
         v_layout=splash_attention_kernel.QKVLayout[global_v_layout],
     )
 
-    mask_shape = (query.shape[2], key.shape[2])  # (q_seq_len, kv_seq_len)
-    if self.attention_type == AttentionType.FULL:
-      mask = splash_attention_mask.FullMask(mask_shape)
-    else:
-      mask = splash_attention_mask.CausalMask(shape=mask_shape)
+    mask_shape = (query.shape[2], key.shape[2])
 
-    # Create LoadBalancedCausalMask if cp and load_balancing
-    if cp_size > 1 and load_balanced_context_parallel:
-      mask = LoadBalancedCausalMask(shape=mask_shape, cp_size=cp_size)
-
-    # TODO: figure out local_sliding attention + load_balancing, default is global
-    # Apply local masking if local sliding attention is enabled.
-    if self.attention_type == AttentionType.LOCAL_SLIDING:
-      if self.sliding_window_size is None:
-        raise ValueError("Sliding_window_size must be set if Local Sliding attention type")
-      mask &= splash_attention_mask.LocalMask(
-          shape=(query.shape[2], key.shape[2]),
-          window_size=(self.sliding_window_size, self.sliding_window_size),
-          offset=0,
-      )
-      # Apply local masking if local sliding attention is enabled.
-      if self.attention_type == AttentionType.LOCAL_SLIDING:
-        if self.sliding_window_size is None:
-          raise ValueError("Sliding_window_size must be set for Local Sliding attention type")
-        mask &= splash_attention_mask.LocalMask(
-            shape=(query.shape[2], key.shape[2]),
-            window_size=(self.sliding_window_size, self.sliding_window_size),
-            offset=0,
-        )
-      elif self.attention_type == AttentionType.CHUNK:
-        if self.chunk_attn_window_size is None:
-          raise ValueError("chunk_attn_window_size must be set for chunk attention type")
-
-        mask &= ChunkedCausalMask(shape=(query.shape[2], key.shape[2]), chunk_size=self.chunk_attn_window_size)
-
-    # Create multi-head mask
-    multi_head_mask = splash_attention_mask.MultiHeadMask(masks=(mask,) * query.shape[1])
-
-    # Create the splash attention kernel object separately, jit it for performance
-    @partial(
-        jax.jit,
-        static_argnames=[
-            "multi_head_mask",
-            "shard_head_size",
-        ],
-    )
-    def wrap_splash_kernel(multi_head_mask, shard_head_size=1):
-      splash_kernel = splash_attention_kernel.make_splash_mha(
+    @partial(jax.jit, static_argnames=["multi_head_mask", "shard_head_size"])
+    def make_kernel(multi_head_mask, shard_head_size=1):
+      return splash_attention_kernel.make_splash_mha(
           mask=multi_head_mask,
-          head_shards=shard_head_size,  # the size of the axis if sharding over heads
-          q_seq_shards=cp_size,  # axis for sequence sharding
+          head_shards=shard_head_size,
+          q_seq_shards=cp_size,
           block_sizes=block_sizes,
           attn_logits_soft_cap=attn_logits_soft_cap,
       )
-      return splash_kernel
 
-    logical_axis_rules_head = np.array(
-        [self.mesh.shape[physical_axes] for physical_axes in dict(self.config.logical_axis_rules)[HEAD]]
-    )
-    shard_head_size = np.prod(logical_axis_rules_head)
-    splash_kernel = wrap_splash_kernel(multi_head_mask, int(shard_head_size))
+    # Kernel for GLOBAL attention
+    if cp_size > 1 and load_balanced_context_parallel:
+      global_base_mask = LoadBalancedCausalMask(shape=mask_shape, cp_size=cp_size)
+    else:
+      global_base_mask = splash_attention_mask.CausalMask(shape=mask_shape)
+    global_multi_head_mask = splash_attention_mask.MultiHeadMask(masks=(global_base_mask,) * query.shape[1])
+
+    logical_axis_rules_head = np.array([self.mesh.shape[p] for p in dict(self.config.logical_axis_rules).get(HEAD, [])])
+    shard_head_size = int(np.prod(logical_axis_rules_head)) if logical_axis_rules_head.size > 0 else 1
+
+    global_splash_kernel = make_kernel(global_multi_head_mask, shard_head_size)
+
+    # Kernel for LOCAL attention
+    if self.sliding_window_size is None:
+      if is_local_attention:
+        raise ValueError("sliding_window_size must be set to use local attention")
+      local_base_mask = global_base_mask
+    else:
+      local_base_mask = global_base_mask & splash_attention_mask.LocalMask(
+          shape=mask_shape, window_size=(self.sliding_window_size, self.sliding_window_size), offset=0
+      )
+    local_multi_head_mask = splash_attention_mask.MultiHeadMask(masks=(local_base_mask,) * query.shape[1])
+    local_splash_kernel = make_kernel(local_multi_head_mask, shard_head_size)
+
     named_sharding = jax.sharding.NamedSharding(self.mesh, axis_names_splash_kernel)
-    segment_axis_names_splash_kernel = splash_kernel.manual_sharding_spec(named_sharding)
+    segment_axis_names_splash_kernel = global_splash_kernel.manual_sharding_spec(named_sharding)
 
-    # Now call the function wrap_flash_attention which does the actual computation.
-    # The splash kernel is passed as a parameter to the function. Since we have the shard map
-    # decorating the wrap_flash_attention function, the data will be correctly sharded
-    # meaning q will be sharded over sequence aka context length but K and V will be duplicated
-    # The shardings are specified in the in_specs and out_specs of the shard_map decorator:
-    # 'segment_axis_names_q' maps to ['activation_q_length', ['context']] meaning that q is sharded over the context axis
-    #  'segment_axis_names_kv' maps to ['activation_kv_length', []] meaning that K and V are not sharded
-    # splash_kernel is sharded over (HEAD, LENGTH)
     @functools.partial(
         shard_map,
         mesh=self.mesh,
@@ -858,42 +834,48 @@ class AttentionOp(nnx.Module):
         value,
         decoder_segment_ids_q,
         decoder_segment_ids_kv,
-        splash_kernel,
-        cp_size,
-        load_balanced_context_parallel,
+        global_kernel,
+        local_kernel,
+        is_local,
     ):
-      # If load_balanced_context_parallel is enabled, reorder the key and value tensors
-      # to ensure that they are contiguous in memory.
-      # This is necessary for the splash attention kernel to work correctly because it expects
-      # the K and V  to be contiguous. Note that K and V are not sharded over the sequence aka context axis
-      # This was we get the unsharded unpermuted key and value tensors
-      if cp_size > 1 and load_balanced_context_parallel:
-        key = max_utils.reorder_sequence(tensor=key, cp_size=cp_size, seq_dim=2, to_contiguous=True)
-        value = max_utils.reorder_sequence(tensor=value, cp_size=cp_size, seq_dim=2, to_contiguous=True)
-        decoder_segment_ids_unpermuted = max_utils.reorder_sequence(
-            tensor=decoder_segment_ids_kv, cp_size=cp_size, seq_dim=1, to_contiguous=True
-        )
-
       if decoder_segment_ids_q is not None:
         if cp_size > 1 and load_balanced_context_parallel:
+          decoder_segment_ids_unpermuted = max_utils.reorder_sequence(
+              tensor=decoder_segment_ids_kv, cp_size=cp_size, seq_dim=1, to_contiguous=True
+          )
           decoder_segment_ids_tuple = splash_attention_kernel.SegmentIds(
               decoder_segment_ids_q, decoder_segment_ids_unpermuted
           )
         else:
-          # if cp=1, decoder_segment_ids_q is the same as decoder_segment_ids_kv
           decoder_segment_ids_tuple = splash_attention_kernel.SegmentIds(decoder_segment_ids_q, decoder_segment_ids_kv)
       else:
         decoder_segment_ids_tuple = None
-      attention_output = jax.vmap(splash_kernel)(query, key, value, segment_ids=decoder_segment_ids_tuple)
 
+      def run_local_kernel(q, k, v, seg_ids):
+        return jax.vmap(local_kernel)(q, k, v, segment_ids=seg_ids)
+
+      def run_global_kernel(q, k, v, seg_ids):
+        return jax.vmap(global_kernel)(q, k, v, segment_ids=seg_ids)
+
+      kernel_args = (query, key, value, decoder_segment_ids_tuple)
+
+      attention_output = jax.lax.cond(
+          is_local, lambda args: run_local_kernel(*args), lambda args: run_global_kernel(*args), kernel_args
+      )
       return attention_output
 
     x = wrap_flash_attention(
-        query, key, value, decoder_segment_ids, decoder_segment_ids, splash_kernel, cp_size, load_balanced_context_parallel
+        query,
+        key,
+        value,
+        decoder_segment_ids,
+        decoder_segment_ids,
+        global_splash_kernel,
+        local_splash_kernel,
+        is_local_attention,
     )
 
     x = jnp.transpose(x, axes=(0, 2, 1, 3))
-
     return x
 
   def cudnn_flash_attention(
@@ -1251,6 +1233,7 @@ class AttentionOp(nnx.Module):
       bidirectional_mask=None,
       slot: Optional[int] = None,
       page_state: Optional[page_manager.PageState] = None,
+      is_local_attention=False,
   ):
     if cached_values is None:
       prefill_kv_cache, ar_kv_cache = None, None
@@ -1270,6 +1253,7 @@ class AttentionOp(nnx.Module):
         use_ragged_attention=self.use_ragged_attention,
         previous_chunk=previous_chunk,
         bidirectional_mask=bidirectional_mask,
+        is_local_attention=is_local_attention,
     )
 
     # Return the "prefill" cache if it actually the combined prefill+ar kv cache
@@ -1711,6 +1695,7 @@ class Attention(nn.Module):
       slot: Optional[int] = None,
       page_state: Optional[page_manager.PageState] = None,
       bidirectional_mask: Any = None,
+      is_local_attention=False,
   ):
     """Applies Attention on the input data.
 
@@ -1826,7 +1811,15 @@ class Attention(nn.Module):
       if model_mode != MODEL_MODE_TRAIN:
         cached_values = self.update_kv_caches(key, value, decoder_segment_ids, model_mode, previous_chunk)
       out = self.attention_op(
-          query, key, value, decoder_segment_ids, model_mode, cached_values, previous_chunk, bidirectional_mask
+          query,
+          key,
+          value,
+          decoder_segment_ids,
+          model_mode,
+          cached_values,
+          previous_chunk,
+          bidirectional_mask,
+          is_local_attention=is_local_attention,
       )
 
     if model_mode == MODEL_MODE_PREFILL:
