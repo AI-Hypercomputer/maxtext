@@ -45,7 +45,7 @@ load_full_state_path: ""
 # problems with the checkpointer we recommend trying the synchronous one.
 enable_checkpointing: True
 async_checkpointing: True
-checkpoint_period: 10_000
+checkpoint_period: 20
 # enables one replica to read the ckpt then broadcast to the rest
 enable_single_replica_ckpt_restoring: False
 
@@ -574,14 +574,17 @@ eval_steps: -1  # run this number of steps for eval, recommend setting this to p
 target_eval_loss: 0.  # early stop once reaching target eval_loss
 
 # Goodput parameters
-enable_goodput_recording: False
-monitor_goodput: False
+enable_goodput_recording: True
+enable_goodput_monitoring: True
 goodput_upload_interval_seconds: 30
 enable_pathways_goodput: False
 monitor_step_time_deviation: True
 step_deviation_interval_seconds: 30
 enable_gcp_goodput_metrics: True
 enable_gcp_step_deviation_metrics: True
+# Rolling Window Goodput parameters
+enable_rolling_window_goodput_monitoring: True
+rolling_window_size: [86400, 259200, 432000] # 1d, 3d, 5d
 
 # GCP workload monitoring
 report_heartbeat_metric_for_gcp_monitoring: False

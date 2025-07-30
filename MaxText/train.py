@@ -73,6 +73,7 @@ from MaxText.utils.goodput_utils import (
     GoodputEvent,
     create_goodput_recorder,
     maybe_monitor_goodput,
+    maybe_monitor_rolling_window_goodput,
     maybe_record_goodput,
 )
 from MaxText.vertex_tensorboard import VertexTensorboardManager
@@ -989,8 +990,7 @@ def main(argv: Sequence[str]) -> None:
   if config.use_vertex_tensorboard or os.environ.get("UPLOAD_DATA_TO_TENSORBOARD"):
     vertex_tensorboard_manager.configure_vertex_tensorboard(config)
 
-  # Goodput configurations
-  maybe_monitor_goodput(config)
+  # Create the Goodput recorder
   recorder = create_goodput_recorder(config)
 
   # Stack traces configurations
@@ -1003,9 +1003,12 @@ def main(argv: Sequence[str]) -> None:
   )
   diagnostic_config = diagnostic_configuration.DiagnosticConfig(debug_config)
 
-  with diagnostic.diagnose(diagnostic_config):
-    with maybe_record_goodput(recorder, GoodputEvent.JOB):
-      train_loop(config, recorder)
+  # maybe_monitor_goodput(config),
+  # with maybe_monitor_goodput(config), maybe_monitor_rolling_window_goodput(config):
+  with maybe_monitor_goodput(config), maybe_monitor_rolling_window_goodput(config):
+    with diagnostic.diagnose(diagnostic_config):
+      with maybe_record_goodput(recorder, GoodputEvent.JOB):
+        train_loop(config, recorder)
 
 
 if __name__ == "__main__":
