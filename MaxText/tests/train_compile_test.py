@@ -38,7 +38,7 @@ class TrainCompile(unittest.TestCase):
     compiled_trainstep_file = os.path.join(temp_dir, "test_compiled_v4.pickle")
     train_compile_main(
         (
-            None,
+            "",
             os.path.join(PKG_DIR, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v4-8",
@@ -56,7 +56,7 @@ class TrainCompile(unittest.TestCase):
     compiled_trainstep_file = os.path.join(temp_dir, "test_compiled_v5e.pickle")
     train_compile_main(
         (
-            None,
+            "",
             os.path.join(PKG_DIR, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5e-16",
@@ -76,7 +76,7 @@ class TrainCompile(unittest.TestCase):
     compiled_trainstep_file = os.path.join(temp_dir, "test_compiled_v5e_offload.pickle")
     train_compile_main(
         (
-            None,
+            "",
             os.path.join(PKG_DIR, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5e-256",
@@ -100,7 +100,7 @@ class TrainCompile(unittest.TestCase):
     compiled_trainstep_file = os.path.join(temp_dir, "test_compiled_v5p_two_slices.pickle")
     train_compile_main(
         (
-            None,
+            "",
             os.path.join(PKG_DIR, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5p-8",
@@ -120,7 +120,7 @@ class TrainCompile(unittest.TestCase):
     compiled_trainstep_file = os.path.join(temp_dir, "test_compiled_v6e.pickle")
     train_compile_main(
         (
-            None,
+            "",
             os.path.join(PKG_DIR, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v6e-16",
@@ -138,7 +138,7 @@ class TrainCompile(unittest.TestCase):
     compiled_trainstep_file = os.path.join(temp_dir, "test_compiled.pickle")
     train_compile_main(
         (
-            None,
+            "",
             os.path.join(PKG_DIR, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5e-256",
@@ -158,7 +158,7 @@ class TrainCompile(unittest.TestCase):
     compiled_trainstep_file = os.path.join(temp_dir, "test_remat_save_dot_except_mlpwi.pickle")
     train_compile_main(
         (
-            None,
+            "",
             os.path.join(PKG_DIR, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5e-256",
@@ -182,7 +182,7 @@ class TrainCompile(unittest.TestCase):
     compiled_trainstep_file = os.path.join(temp_dir, "test_remat_save_dot_except_mlp.pickle")
     train_compile_main(
         (
-            None,
+            "",
             os.path.join(PKG_DIR, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5e-256",
@@ -206,7 +206,7 @@ class TrainCompile(unittest.TestCase):
     compiled_trainstep_file = os.path.join(temp_dir, "test_remat_save_qkv_proj.pickle")
     train_compile_main(
         (
-            None,
+            "",
             os.path.join(PKG_DIR, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5e-256",
@@ -230,7 +230,7 @@ class TrainCompile(unittest.TestCase):
     compiled_trainstep_file = os.path.join(temp_dir, "test_remat_full.pickle")
     train_compile_main(
         (
-            None,
+            "",
             os.path.join(PKG_DIR, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5e-256",
@@ -254,7 +254,7 @@ class TrainCompile(unittest.TestCase):
     compiled_trainstep_file = os.path.join(temp_dir, "test_custom_64x4_mesh.pickle")
     train_compile_main(
         (
-            None,
+            "",
             os.path.join(PKG_DIR, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v6e-256",
@@ -278,7 +278,7 @@ class TrainCompile(unittest.TestCase):
     compiled_trainstep_file = os.path.join(temp_dir, "test_llama3_1_70b_opt_offload.pickle")
     train_compile_main(
         (
-            None,
+            "",
             os.path.join(PKG_DIR, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v6e-256",
@@ -298,7 +298,7 @@ class TrainCompile(unittest.TestCase):
     compiled_trainstep_file = os.path.join(temp_dir, "test_custom_32x8_mesh.pickle")
     train_compile_main(
         (
-            None,
+            "",
             os.path.join(PKG_DIR, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v6e-256",
@@ -324,7 +324,7 @@ class TrainCompile(unittest.TestCase):
     compiled_trainstep_file = os.path.join(temp_dir, "test_moe_dropping_bf16.pickle")
     train_compile_main(
         (
-            None,
+            "",
             os.path.join(PKG_DIR, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v6e-256",
@@ -348,7 +348,7 @@ class TrainCompile(unittest.TestCase):
     compiled_trainstep_file = os.path.join(temp_dir, "test_moe_dropping_int8.pickle")
     train_compile_main(
         (
-            None,
+            "",
             os.path.join(PKG_DIR, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5p-128",
@@ -373,7 +373,7 @@ class TrainCompile(unittest.TestCase):
     compiled_trainstep_file = os.path.join(temp_dir, "test_moe_megablox_bf16.pickle")
     train_compile_main(
         (
-            None,
+            "",
             os.path.join(PKG_DIR, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v6e-256",
@@ -396,7 +396,7 @@ class TrainCompile(unittest.TestCase):
     compiled_trainstep_file = os.path.join(temp_dir, "test_moe_ragged_dot_bf16.pickle")
     train_compile_main(
         (
-            None,
+            "",
             os.path.join(PKG_DIR, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v6e-256",
@@ -419,7 +419,7 @@ class TrainCompile(unittest.TestCase):
     compiled_trainstep_file = os.path.join(temp_dir, "test_moe_dense_bf16.pickle")
     train_compile_main(
         (
-            None,
+            "",
             os.path.join(PKG_DIR, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v6e-256",
@@ -443,7 +443,7 @@ class TrainCompile(unittest.TestCase):
     compiled_trainstep_file = os.path.join(temp_dir, "test_moe_dense_int8.pickle")
     train_compile_main(
         (
-            None,
+            "",
             os.path.join(PKG_DIR, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5p-128",
@@ -467,7 +467,7 @@ class TrainCompile(unittest.TestCase):
     compiled_trainstep_file = os.path.join(temp_dir, "test_moe_pp_bf16.pickle")
     train_compile_main(
         (
-            None,
+            "",
             os.path.join(PKG_DIR, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v6e-256",
@@ -492,7 +492,7 @@ class TrainCompile(unittest.TestCase):
     compiled_trainstep_file = os.path.join(temp_dir, "test_moe_deepseek_scanned_bf16.pickle")
     train_compile_main(
         (
-            None,
+            "",
             os.path.join(PKG_DIR, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5p-256",
@@ -518,7 +518,7 @@ class TrainCompile(unittest.TestCase):
     compiled_trainstep_file = os.path.join(temp_dir, "test_moe_deepseek_unscanned_bf16.pickle")
     train_compile_main(
         (
-            None,
+            "",
             os.path.join(PKG_DIR, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5p-256",
@@ -542,7 +542,7 @@ class TrainCompile(unittest.TestCase):
     compiled_trainstep_file = "/tmp/test_moe_deepseek_with_device_limit.pickle"
     train_compile_main(
         (
-            None,
+            "",
             os.path.join(PKG_DIR, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5p-256",
@@ -567,7 +567,7 @@ class TrainCompile(unittest.TestCase):
     compiled_trainstep_file = "/tmp/test_moe_deepseek_without_device_limit.pickle"
     train_compile_main(
         (
-            None,
+            "",
             os.path.join(PKG_DIR, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5p-256",
@@ -592,7 +592,7 @@ class TrainCompile(unittest.TestCase):
     compiled_trainstep_file = "/tmp/test_moe_deepseek_pipeline_subset.pickle"
     train_compile_main(
         (
-            None,
+            "",
             os.path.join(PKG_DIR, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v6e-256",
@@ -616,7 +616,7 @@ class TrainCompile(unittest.TestCase):
     compiled_trainstep_file = "/tmp/test_pipeline_subset.pickle"
     train_compile_main(
         (
-            None,
+            "",
             os.path.join(PKG_DIR, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v6e-256",
@@ -637,7 +637,7 @@ class TrainCompile(unittest.TestCase):
     compiled_trainstep_file = "/tmp/test_moe_llama4_17b_16e.pickle"
     train_compile_main(
         (
-            None,
+            "",
             os.path.join(PKG_DIR, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5p-256",
@@ -659,7 +659,7 @@ class TrainCompile(unittest.TestCase):
     compiled_trainstep_file = "/tmp/test_gpt3_6b"
     train_compile_main(
         (
-            None,
+            "",
             os.path.join(PKG_DIR, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5p-256",

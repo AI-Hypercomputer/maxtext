@@ -54,7 +54,7 @@ class DataLoader:
         if "StopIteration" in str(e):
           raise exceptions.StopTraining("You may have run out of training data.")
         else:
-          raise exceptions.StopTraining("`load_next_batch()` failed.")
+          raise exceptions.StopTraining(f"`load_next_batch()` failed ({e}).")
     return self.last_batch
 
   def check_example_batch(self):

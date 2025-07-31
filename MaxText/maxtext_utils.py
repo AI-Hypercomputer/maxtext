@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-# pylint: disable=bare-except, consider-using-generator
+# pylint: disable=line-too-long, disable=bare-except, consider-using-generator
 """ Utils that are only interesting to MaxText. """
 
 from typing import Optional
@@ -158,7 +158,7 @@ def calculate_gemma2_tflops_training_per_device(config, total_ffn_flops, qkv_flo
   Calculate training TFLOP for Gemma2 as in Gemma2 we combine [local_attention, global_attention] into one decoder
   layer and we use sliding window attention in local_attention
   """
-  attention_flops = (
+  noncausal_attention_flops = (
       # global attention
       4 * config.per_device_batch_size * config.max_target_length**2 * config.num_query_heads * config.head_dim
       +
@@ -170,7 +170,8 @@ def calculate_gemma2_tflops_training_per_device(config, total_ffn_flops, qkv_flo
       * config.num_query_heads
       * config.head_dim
   )
-  attention_tflops = attention_flops * config.num_decoder_layers * 3 / 10**12
+  causal_attention_flops = noncausal_attention_flops / 2
+  attention_tflops = causal_attention_flops * config.num_decoder_layers * 3 / 10**12
 
   # multiply num_decoder_layers by 2 because we combine [local_attention, global_attention] into one decoder layer
   learnable_weight_tflops = (
@@ -178,6 +179,91 @@ def calculate_gemma2_tflops_training_per_device(config, total_ffn_flops, qkv_flo
   )
 
   return attention_tflops, learnable_weight_tflops
+
+
+def calculate_gemma3_tflops_training_per_device(config, total_ffn_flops, qkv_flops, projection_flops, embedding_flops):
+  """
+  Calculate training TFLOPs for Gemma3, which has an alternating pattern of
+  5 local attention layers and 1 global attention layer.
+  """
+  num_layers = config.num_decoder_layers
+
+  num_global_layers = num_layers // 6
+  num_local_layers = num_layers - num_global_layers
+
+  # FLOPs for a single global attention layer (full attention)
+  # Formula: 4 * batch_size * seq_len^2 * num_heads * head_dim
+  global_attention_flops_per_layer = (
+      4 * config.per_device_batch_size * config.max_target_length**2 * config.num_query_heads * config.head_dim
+  )
+
+  # FLOPs for a single local attention layer (sliding window)
+  # Formula: 4 * batch_size * seq_len * window_size * num_heads * head_dim
+  local_attention_flops_per_layer = (
+      4
+      * config.per_device_batch_size
+      * config.max_target_length
+      * min(config.sliding_window_size, config.max_target_length)
+      * config.num_query_heads
+      * config.head_dim
+  )
+
+  # Total attention FLOPs = (num_global_layers * FLOPs_per_global) + (num_local_layers * FLOPs_per_local)
+  noncausal_attention_flops = (
+      num_global_layers * global_attention_flops_per_layer + num_local_layers * local_attention_flops_per_layer
+  )
+  causal_attention_flops = noncausal_attention_flops / 2
+
+  # Convert to TFLOPs and multiply by 3 for fwd/bwd pass
+  attention_tflops = causal_attention_flops * 3 / 10**12
+
+  # Learnable weights (FFN, QKV, Projections) are present in every layer.
+  learnable_weight_tflops = ((total_ffn_flops + qkv_flops + projection_flops) * num_layers + embedding_flops) * 3 / 10**12
+
+  return attention_tflops, learnable_weight_tflops
+
+
+def _calculate_chunked_attention_flops_per_layer(config, seq_len, chunk_size):
+  """Calculates the non-causal FLOPs for a single layer of chunked attention."""
+  num_chunks = seq_len // chunk_size
+  rem_chunk_size = seq_len % chunk_size
+  # The complexity of chunked attention is the sum of squares of chunk lengths.
+  chunked_complexity = (num_chunks * chunk_size**2) + (rem_chunk_size**2)
+  # The formula for non-causal attention FLOPs is 4 * B * complexity * H * D,
+  # where B=batch_size, H=num_heads, D=head_dim.
+  return 4 * config.per_device_batch_size * chunked_complexity * config.num_query_heads * config.head_dim
+
+
+def calculate_llama4_attention_tflops(config):
+  """
+  Calculates attention-only training TFLOPs for Llama4's specific architecture,
+  which has an alternating pattern of global and chunked attention layers.
+  """
+  num_layers = config.num_decoder_layers
+  seq_len = config.max_target_length
+  chunk_size = config.chunk_attn_window_size
+
+  # Determine number of global vs. chunked layers based on the NoPE interval.
+  # A "NoPE" layer uses global attention.
+  num_global_layers = num_layers // config.nope_layer_interval
+  num_chunked_layers = num_layers - num_global_layers
+
+  # FLOPs for a single global attention layer (full attention, non-causal)
+  global_attention_flops_per_layer = 4 * config.per_device_batch_size * seq_len**2 * config.num_query_heads * config.head_dim
+
+  # FLOPs for a single chunked attention layer (non-causal)
+  chunked_attention_flops_per_layer = _calculate_chunked_attention_flops_per_layer(config, seq_len, chunk_size)
+
+  # Total non-causal attention FLOPs is the sum of all global and all chunked layers
+  noncausal_attention_flops = (num_global_layers * global_attention_flops_per_layer) + (
+      num_chunked_layers * chunked_attention_flops_per_layer
+  )
+
+  # Apply causal mask and convert to TFLOPs (multiply by 3 for fwd/bwd pass)
+  causal_attention_flops = noncausal_attention_flops / 2
+  attention_tflops = causal_attention_flops * 3 / 10**12
+
+  return attention_tflops
 
 
 def calculate_mla_tflops_per_device(config):
@@ -268,7 +354,7 @@ def calculate_tflops_training_per_device(config, log=True):
 
   # Attention flops
   if config.attention_type == "mla":
-    qkv_flops, attention_flops, projection_flops = calculate_mla_tflops_per_device(config)
+    qkv_flops, noncausal_attention_flops, projection_flops = calculate_mla_tflops_per_device(config)
   else:
     qkv_flops = (
         2
@@ -278,7 +364,7 @@ def calculate_tflops_training_per_device(config, log=True):
         * (config.num_query_heads + 2 * config.num_kv_heads)
         * config.head_dim
     )
-    attention_flops = (
+    noncausal_attention_flops = (
         4 * config.per_device_batch_size * config.max_target_length**2 * config.num_query_heads * config.head_dim
     )
     projection_flops = (
@@ -290,6 +376,12 @@ def calculate_tflops_training_per_device(config, log=True):
         * config.head_dim
     )
 
+  # Divide attantion flops by 2 due to causal mask
+  # References:
+  # NVIDIA/Megatron-LM (2025 March): https://github.com/NVIDIA/Megatron-LM/blob/250b79415dcc4b660521273c87f15334c804eeae/megatron/training/training.py#L361-L362
+  # NVIDIA/NeMo (2025 April): https://github.com/NVIDIA/NeMo/blob/ba4d6d116463de512ff0cfc14641aa6cf4577a42/nemo/utils/flops_formulas.py#L259-L272
+  causal_attention_flops = noncausal_attention_flops / 2
+
   # Embedding flops
   embedding_flops = 2 * config.per_device_batch_size * config.max_target_length * config.emb_dim * config.vocab_size
 
@@ -298,18 +390,28 @@ def calculate_tflops_training_per_device(config, log=True):
     attention_tflops, learnable_weight_tflops = calculate_gemma2_tflops_training_per_device(
         config, total_ffn_flops, qkv_flops, projection_flops, embedding_flops
     )
-  elif config.decoder_block in (DecoderBlockType.DEEPSEEK, DecoderBlockType.LLAMA4):
+  elif config.decoder_block == DecoderBlockType.GEMMA3:
+    attention_tflops, learnable_weight_tflops = calculate_gemma3_tflops_training_per_device(
+        config, total_ffn_flops, qkv_flops, projection_flops, embedding_flops
+    )
+  elif config.decoder_block == DecoderBlockType.LLAMA4:
+    # Use the new helper to calculate attention TFLOPs correctly.
+    attention_tflops = calculate_llama4_attention_tflops(config)
+    # The learnable weight calculation remains the same as it correctly handles Llama4's MoE structure.
     learnable_weight_tflops = (
         (total_ffn_flops + (qkv_flops + projection_flops) * config.num_decoder_layers + embedding_flops) * 3 / 10**12
     )
-    attention_tflops = attention_flops * config.num_decoder_layers * 3 / 10**12
+  elif config.decoder_block == DecoderBlockType.DEEPSEEK:
+    learnable_weight_tflops = (
+        (total_ffn_flops + (qkv_flops + projection_flops) * config.num_decoder_layers + embedding_flops) * 3 / 10**12
+    )
+    attention_tflops = causal_attention_flops * config.num_decoder_layers * 3 / 10**12
   else:
     # multiply by 3 for both feed forward and back propagation flops
     learnable_weight_tflops = (
         ((total_ffn_flops + qkv_flops + projection_flops) * config.num_decoder_layers + embedding_flops) * 3 / 10**12
     )
-    # megatron tflops calculation does not account for causality in attention
-    attention_tflops = attention_flops * config.num_decoder_layers * 3 / 10**12
+    attention_tflops = causal_attention_flops * config.num_decoder_layers * 3 / 10**12
 
   learnable_weight_tflops = learnable_weight_tflops * config.gradient_accumulation_steps
   attention_tflops = attention_tflops * config.gradient_accumulation_steps
@@ -338,7 +440,7 @@ def calculate_tflops_training_per_device(config, log=True):
 def calculate_prefill_tflops_per_device(num_model_parameters, prefill_length, config, log=True):
   """Calculate training TFLOP"""
   learnable_weight_tflops = 2 * num_model_parameters * prefill_length / jax.device_count() / 1e12
-  noncasual_attention_flops = (
+  noncausal_attention_flops = (
       4
       * config.num_query_heads
       * config.num_decoder_layers
@@ -347,7 +449,7 @@ def calculate_prefill_tflops_per_device(num_model_parameters, prefill_length, co
       / jax.device_count()
       / 1e12
   )
-  causal_attention_tflops = noncasual_attention_flops / 2  # due to causality in attention
+  causal_attention_tflops = noncausal_attention_flops / 2  # due to causality in attention
   total_tflops = learnable_weight_tflops + causal_attention_tflops
 
   if log:
@@ -743,6 +845,9 @@ def setup_initial_state(
         config.dataset_type,
         use_ocdbt=config.checkpoint_storage_use_ocdbt,
         use_zarr3=config.checkpoint_storage_use_zarr3,
+        enable_orbax_v1=config.enable_orbax_v1,
+        checkpoint_conversion_fn=config.checkpoint_conversion_fn,
+        source_checkpoint_layout=config.source_checkpoint_layout,
     )
 
     if restored:
@@ -1079,7 +1184,7 @@ def get_formatted_sharding_annotations(params, mesh=None):
         spec_parts = []
         for item in p_leaf.sharding.spec:
           # Represent None as "Replicated" to make it explicit.
-          spec_parts.append(str(item) if item is not None else "Relicated")
+          spec_parts.append(str(item) if item is not None else "Replicated")
         sharding_desc = f"PartitionSpec({', '.join(spec_parts)})"
       # Case 2: The parameter is explicitly marked as fully replicated.
       elif hasattr(p_leaf.sharding, "spec") and p_leaf.sharding.spec is None:

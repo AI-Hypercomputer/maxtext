@@ -62,6 +62,13 @@ checkpoint_storage_use_zarr3: True
 # larger models requires higher concurrent GB for I/O
 # default concurrent gb for PytreeCheckpointHandler is 96GB
 checkpoint_storage_concurrent_gb: 96
+
+# Bool flag for enabling Orbax v1.
+enable_orbax_v1: False
+# Function for processing loaded checkpoint dict into a format MaxText can understand. (for other formats, i.e. SafeTensors)
+checkpoint_conversion_fn: None
+# Optional checkpoint context to use for loading. Options: "orbax", "safetensors"
+source_checkpoint_layout: "orbax"
 ############################### END CHECKPOINTING ##################################
 
 
@@ -129,7 +136,7 @@ head_dim: 128
 mlp_activations: ["silu", "linear"]
 dropout_rate: 0.0
 logits_via_embedding: False
-normalize_embedding_logits: True  # whether to normlize pre-softmax logits if logits_via_embedding is true
+normalize_embedding_logits: True  # whether to normalize pre-softmax logits if logits_via_embedding is true
 logits_dot_in_fp32: False  # whether to use fp32 in logits_dense or shared_embedding dot product for stability
 cast_logits_to_fp32: True # whether to cast the logits to fp32. The higher precision is generally beneficial, but it can vary slightly.
 float32_qk_product: False # in dot_product attention, whether to cast to fp32 the inputs to qk product
@@ -342,6 +349,7 @@ logical_axis_rules: [
                       ['embed_no_exp', ['fsdp', 'sequence', 'tensor_transpose', 'context']],
                       ['embed_no_exp', ['fsdp', 'fsdp_transpose', 'sequence', 'context']],
                       ['embed_no_exp', ['fsdp', 'sequence', 'context']],
+                      ['embed_tensor_transpose', ['tensor_transpose']],           
                       ['q_lora', ['fsdp', 'fsdp_transpose', 'sequence', 'context', 'tensor_transpose', 'expert']],
                       ['q_lora', ['fsdp', 'sequence', 'context', 'tensor_transpose', 'expert']],
                       ['q_lora', ['fsdp', 'fsdp_transpose', 'sequence', 'context', 'expert']],
@@ -683,6 +691,8 @@ allow_split_physical_axes: False
 # Apply transformations to the mesh to optimize for TPU v6e
 optimize_mesh_for_tpu_v6e: False
 
+shardy: True # Whether to use shardy XLA backend (default in Jax starting 0.7.0), or GSPMD (to be fully deprecated ~2026)
+
 use_ragged_attention: False
 ragged_block_size: 256
 
@@ -727,7 +737,7 @@ enable_prefix_caching: False
 prefix_caching_hbm_byte: 10_000_000_000 # 10 GB
 prefix_caching_dram_byte: 100_000_000_000 # 100 GB
 
-# This is a temporary flag that will removed soon after the fix lands in TE
+# This is a temporary flag that will be removed soon after the fix lands in TE
 enable_padding_causal_mask: True
 
 # Llama4-specific

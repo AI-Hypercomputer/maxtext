@@ -370,6 +370,7 @@ def main(argv: Sequence[str]) -> None:
   elastic_manager = elastic_initialize(jax.devices())
 
   config = pyconfig.initialize(argv)
+  jax.config.update("jax_use_shardy_partitioner", config.shardy)
   max_utils.print_system_information()
   validate_train_config(config)
   os.environ["TFDS_DATA_DIR"] = config.dataset_path or ""
