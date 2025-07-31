@@ -550,6 +550,16 @@ def _make_call_method(
         return module
 
     return __call__
+  
+def get_reserved_linen_fields() -> set[str]:
+    """Returns a set of field names that are already defined in flax.linen.Module."""
+    # Inspect linen.Module and its parents
+    reserved = set()
+    for cls in linen.Module.__mro__:
+        reserved.update(vars(cls).keys())
+    # Also exclude common dunder and internal fields
+    reserved = {name for name in reserved if not name.startswith("__")}
+    return reserved
 
 def to_linen_class(
     nnx_class: type[M],
@@ -560,11 +570,11 @@ def to_linen_class(
     """Dynamically wraps an NNX module class into a Flax Linen module class."""
 
     constructor_fields = extract_constructor_fields(nnx_class)
-
     dataclass_fields = []
+    reserved_fields = get_reserved_linen_fields()
 
     for name, (annotation, default) in constructor_fields.items():
-        if name in static_kwargs:
+        if name in static_kwargs or name in reserved_fields:
             continue  # static kwarg overrides field
         if default is dataclasses.MISSING:
             dataclass_fields.append((name, annotation))
