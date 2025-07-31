@@ -363,6 +363,7 @@ class TrainTests(unittest.TestCase):
     train_main(TrainTests.CONFIGS["base"] + ["model_fsdp_ag_once=True"])
 
   @pytest.mark.integration_test
+  @unittest.skipIf(not tpu_present or not gpu_present, "TPU|GPU only test")
   def test_base_model_shardy_false(self):
     train_main(TrainTests.CONFIGS["base"] + ["shardy=False"])
 
