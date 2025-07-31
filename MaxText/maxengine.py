@@ -527,6 +527,7 @@ class MaxEngine(engine_api.Engine):
         "generated_tokens": generated_tokens,
         "tokens": first_generated_token,
         "prompt_logp": prompt_logp,
+        "token_logp": token_logp,         # First sampled token logp is also needed
     }, result
 
   # Public non-JIT prefill method that updates page state
@@ -939,6 +940,7 @@ class MaxEngine(engine_api.Engine):
         "next_pos": next_pos,
         "generated_tokens": generated_tokens,
         "tokens": new_token,
+        "token_logp": token_logp,
     }, result
 
   @functools.partial(
