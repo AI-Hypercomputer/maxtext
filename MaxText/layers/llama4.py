@@ -96,15 +96,18 @@ class Llama4UnfoldConvolution(nn.Module):
         padding="VALID",
         dimension_numbers=("NCHW", "HWIO", "NCHW"),
     )
+    jax.debug.print(f"patches shape: {patches.shape}")
 
     # reshape patches to [batch_size, num_patches, num_channels * patch_size * patch_size]
     patches = patches.reshape(batch_size, num_channels * cfg.patch_size_for_vit * cfg.patch_size_for_vit, num_patches)
     # After transpose, patches shape:
     # [batch_size, num_patches, num_channels * patch_size * patch_size]
     patches = patches.transpose(0, 2, 1)
+    jax.debug.print(f"reshape shape: {patches.shape}")
 
     # Project patches to hidden dimension using dense_general
     hidden_states = self.linear(patches)
+    jax.debug.print(f"hidden_states shape: {hidden_states.shape}")
 
     return hidden_states
 
