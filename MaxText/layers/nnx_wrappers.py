@@ -15,7 +15,6 @@
 """NNX <> Linen interoperability."""
 
 from functools import partial
-import typing as tp
 import dataclasses
 import inspect
 import typing as tp
