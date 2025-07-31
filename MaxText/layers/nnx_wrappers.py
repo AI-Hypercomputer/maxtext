@@ -16,8 +16,12 @@
 
 from functools import partial
 import typing as tp
-from typing import Any, Optional
 import dataclasses
+import inspect
+import typing as tp
+from typing import Any
+from dataclasses import field, make_dataclass
+
 from flax import linen
 from flax import nnx
 from flax.core import FrozenDict
@@ -500,72 +504,83 @@ def to_linen(
     name=name,
   )
 
-# TODO: find better implementation
-def to_linen_class(nnx_class, *args,
-    metadata_fn: (
-      tp.Callable[[variablelib.VariableState], tp.Any] | None
-    ) = bv.to_linen_var,
-     **kwargs
-  ):
-  """Shortcut to wrap `nnx.bridge.ToLinen` and return its class instead of its object"""
+def extract_constructor_fields(nnx_class: type[M]) -> dict[str, tuple[tp.Any, tp.Any]]:
+    """Extract constructor parameters and annotations from an NNX class."""
+    sig = inspect.signature(nnx_class.__init__)
+    fields = {}
+    for name, param in sig.parameters.items():
+        # Skip *args and **kwargs
+        if name == "self" or param.kind in (param.VAR_POSITIONAL, param.VAR_KEYWORD):
+            continue 
+        annotation = param.annotation if param.annotation is not inspect._empty else tp.Any
+        default = param.default if param.default is not inspect._empty else dataclasses.MISSING
+        fields[name] = (annotation, default)
+    return fields
 
-  class WrappedModule(linen.Module):
-    """
-    A wrapper module for converting a NNX class to a Linen-compatible Flax module.
-
-    Attributes:
-        extra_kwargs (Optional[dict], optional): Additional keyword arguments to pass to the underlying `nnx_class`.
-        config (Any): Configuration object used by the module.
-        mesh (Any): Mesh information for parallelism or device mapping.
-        name (str): Name of the module instance.
-        quant (Any, optional): Quantization configuration, if used.
-    """
-
-    extra_kwargs: Optional[dict] = None
-
-    # TODO: hackme
-    # Optional fields with default None, no need to be passed always
-    config: tp.Any | None = dataclasses.field(default=None)
-    mesh: tp.Any | None = dataclasses.field(default=None)
-    quant: tp.Any | None = dataclasses.field(default=None)
-    optional_fields : list[str] = dataclasses.field(default_factory=lambda: ["config","mesh","quant"])
-
-
+def _make_call_method(
+    nnx_class: type[M],
+    args: tuple[tp.Any, ...],
+    static_kwargs: dict[str, tp.Any],
+    metadata_fn: tp.Callable[[variablelib.VariableState], tp.Any] | None
+):
     @linen.compact
     def __call__(self, *call_args, **call_kwargs):
-      """
-      Applies the wrapped `nnx_class` with provided inputs and configuration.
+        # Merge static and instance kwargs
+        full_kwargs = {
+            **static_kwargs,
+            **(self.extra_kwargs or {}),
+        }
 
-      Args:
-          broadcast_in: The broadcast input tensor or structure.
-          c: Context or auxiliary input (usage depends on the model).
-          *call_args: Additional positional inputs passed to the wrapped module.
-          *call_kwargs: Additional keyword inputs passed to the wrapped module.
+        for field_ in dataclasses.fields(self):
+            if field_.name == "extra_kwargs":
+                continue
+            value = getattr(self, field_.name)
+            if value is not None:
+                full_kwargs[field_.name] = value
 
-      Returns:
-          Output from the wrapped `nnx_class` after applying it to the inputs.
-      """
-      full_kwargs = {
-          **kwargs,
-          **(self.extra_kwargs or {}),
-      }
+        full_kwargs = FrozenDict(full_kwargs)
 
-      # Include optional fields if set
-      # TODO: hackme
-      for optional_key in self.optional_fields:
-          value = getattr(self, optional_key)
-          if value is not None:
-              full_kwargs[optional_key] = value
+        module = ToLinen(
+            nnx_class,
+            args=args,
+            kwargs=full_kwargs,
+            metadata_fn=metadata_fn,
+        )(*call_args, **call_kwargs)
 
-      full_kwargs = FrozenDict(full_kwargs)
+        return module
 
-      module = ToLinen(
-          nnx_class,
-          args=args,
-          kwargs=full_kwargs,
-          metadata_fn=metadata_fn,
-      )(*call_args, **call_kwargs)
+    return __call__
 
-      return module
+def to_linen_class(
+    nnx_class: type[M],
+    *args: tp.Any,
+    metadata_fn: tp.Callable[[variablelib.VariableState], tp.Any] | None = None,
+    **static_kwargs: tp.Any,
+) -> type[linen.Module]:
+    """Dynamically wraps an NNX module class into a Flax Linen module class."""
 
-  return WrappedModule
+    constructor_fields = extract_constructor_fields(nnx_class)
+
+    dataclass_fields = []
+
+    for name, (annotation, default) in constructor_fields.items():
+        if name in static_kwargs:
+            continue  # static kwarg overrides field
+        if default is dataclasses.MISSING:
+            dataclass_fields.append((name, annotation))
+        else:
+            dataclass_fields.append((name, annotation, field(default=default)))
+
+    dataclass_fields.append(("extra_kwargs", tp.Optional[dict], field(default=None)))
+
+    WrappedModule = make_dataclass(
+        cls_name=f"Wrapped{nnx_class.__name__}",
+        fields=dataclass_fields,
+        bases=(linen.Module,),
+        namespace={
+            "__call__": _make_call_method(nnx_class, args, static_kwargs, metadata_fn),
+        },
+        frozen=False
+    )
+
+    return WrappedModule
