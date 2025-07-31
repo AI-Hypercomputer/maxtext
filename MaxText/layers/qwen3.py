@@ -137,7 +137,7 @@ class Qwen3DecoderLayer(nn.Module):
           quant=self.quant,
       )(mlp_input, deterministic=deterministic)
     else:  # Mixture of Experts MLP -- not supported / tested in MaxText
-      mlp_output, _ = moe.RoutedMoE(
+      mlp_output, _ = moe.get_routed_moe(
           config=cfg,
           num_experts=cfg.num_experts,
           num_experts_per_tok=cfg.num_experts_per_tok,
