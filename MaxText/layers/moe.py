@@ -22,6 +22,7 @@ from typing import Iterable, Optional, Tuple, Union
 
 from aqt.jax.v2 import aqt_tensor as aqt
 import flax.linen as nn
+from flax import nnx
 import jax
 from jax import ad_checkpoint as adc
 from jax.experimental import shard_map
@@ -36,6 +37,8 @@ from MaxText.layers import initializers
 from MaxText.layers import linears
 from MaxText.layers import quantizations
 import numpy as np
+from MaxText.layers import nnx_wrappers
+from MaxText.layers.initializers import NdInitializer, nd_dense_init, default_bias_init
 
 
 set_xla_metadata = xla_metadata.set_xla_metadata
@@ -72,7 +75,7 @@ def random_routing(rng_key, gate_logits, num_experts_per_tok):
   return top_k_weights, top_k_indices
 
 
-class GateLogit(nn.Module):
+class GateLogit(nnx.Module):
   """A layer used to compute gate logits, allowing to return the pre bias values for DeepSeek routing.
 
   Attributes:
@@ -91,55 +94,101 @@ class GateLogit(nn.Module):
     matmul_precision: precision for JAX functions.
   """
 
-  features: Union[Iterable[int], int]
-  model_name: str
-  axis: Union[Iterable[int], int] = -1
-  weight_dtype: ctypes.DType = jnp.float32
-  dtype: ctypes.DType = jnp.float32
-  kernel_init: attentions.NdInitializer = attentions.nd_dense_init(1.0, "fan_in", "truncated_normal")
-  kernel_axes: Tuple[Optional[str], ...] = ()
-  use_bias: bool = False
-  score_func: str = ""
-  quant: Optional[quantizations.AqtQuantization] = None
-  matmul_precision: str = "default"
+  def __init__(
+      self,
+      in_features_shape: Union[Iterable[int], int],
+      out_features_shape: Union[Iterable[int], int],
+      model_name: str,
+      axis: Union[Iterable[int], int] = -1,
+      weight_dtype: ctypes.DType = jnp.float32,
+      dtype: ctypes.DType = jnp.float32,
+      kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "truncated_normal"),
+      kernel_axes: Tuple[Optional[str], ...] = (),
+      use_bias: bool = False,
+      score_func: str = "",
+      quant: Optional[quantizations.AqtQuantization] = None,
+      matmul_precision: str = "default",
+      *,
+      rngs: nnx.Rngs,
+  ):
+    self.in_features_shape = linears._canonicalize_tuple(in_features_shape)
+    self.out_features_shape = linears._canonicalize_tuple(out_features_shape)
+    self.model_name = model_name
+    self.axis = linears._canonicalize_tuple(axis)
+    self.weight_dtype = weight_dtype
+    self.dtype = dtype
+    self.kernel_init = kernel_init
+    self.kernel_axes = kernel_axes
+    self.use_bias = use_bias
+    self.score_func = score_func
+    self.quant = quant
+    self.matmul_precision = matmul_precision
 
-  @nn.compact
-  def __call__(self, inputs: ctypes.Array) -> Tuple[ctypes.Array, Optional[ctypes.Array]]:
+    # Parameter initialization
+    kernel_shape = self.in_features_shape + self.out_features_shape
+    kernel_in_axis = np.arange(len(self.axis))
+    kernel_out_axis = np.arange(len(self.axis), len(self.axis) + len(self.out_features_shape))
 
-    features = linears._canonicalize_tuple(self.features)
-    axis = linears._canonicalize_tuple(self.axis)
+    if not quantizations.in_serve_mode(self.quant):
+      self.kernel = nnx.Param(
+          self.kernel_init(
+              rngs.params(),
+              kernel_shape,
+              self.weight_dtype,
+              kernel_in_axis,
+              kernel_out_axis,
+          ),
+          sharding=self.kernel_axes,
+      )
+
+    if self.use_bias:
+      bias_axes = self.kernel_axes[-len(self.out_features_shape) :]
+      bias_shape = kernel_shape[-len(self.out_features_shape) :]
+      self.bias = nnx.Param(
+          default_bias_init(rngs.params(), bias_shape, self.weight_dtype),
+          sharding=bias_axes,
+      )
+    else:
+      self.bias = None
+
+    if quant:
+      dot_general_cls = quant.dot_general_cls(mesh_axes=kernel_axes)
+      dot_general_linen = dot_general_cls()
+      quant_dot_general = nnx_wrappers.ToNNX(dot_general_linen, rngs=rngs)
+      self._quant_dot_general_name = f"{type(dot_general_linen).__name__}_0"
+      setattr(self, self._quant_dot_general_name, quant_dot_general)
+      dummy_inputs = jnp.zeros((1, *self.in_features_shape), dtype=self.dtype)
+      self(dummy_inputs, _initializing=True)
+    else:
+      self._quant_dot_general_name = None
+
+  @property
+  def quant_dot_general(self) -> nnx_wrappers.ToNNX | None:
+    if self._quant_dot_general_name is None:
+      return None
+    return getattr(self, self._quant_dot_general_name)
+
+  def __call__(self, inputs: ctypes.Array, _initializing: bool = False) -> Tuple[ctypes.Array, Optional[ctypes.Array]]:
 
     inputs = jnp.asarray(inputs, self.dtype)
-    axis = linears._normalize_axes(axis, inputs.ndim)
+    norm_axis = linears._normalize_axes(self.axis, inputs.ndim)
 
-    kernel_shape = tuple(inputs.shape[ax] for ax in axis) + features
-    kernel_in_axis = np.arange(len(axis))
-    kernel_out_axis = np.arange(len(axis), len(axis) + len(features))
     if quantizations.in_serve_mode(self.quant):
-      # During aqt convert state we delete kernel weight from `params` to save
-      # memory and instead retrieve them from the tensors stored in the 'aqt'
-      # collection.
-      kernel = jnp.zeros(kernel_shape)
+      kernel_shape = self.in_features_shape + self.out_features_shape
+      kernel = jnp.zeros(kernel_shape, dtype=self.dtype)
     else:
-      kernel = self.param(
-          "kernel",
-          nn.with_logical_partitioning(self.kernel_init, self.kernel_axes),
-          kernel_shape,
-          self.weight_dtype,
-          kernel_in_axis,
-          kernel_out_axis,
-      )
+      kernel = self.kernel[...]
     kernel = jnp.asarray(kernel, self.dtype)
 
-    contract_ind = tuple(range(0, len(axis)))
-    output = linears._compute_dot_general(
+    contract_ind = tuple(range(0, len(norm_axis)))
+    output = linears._compute_dot_general_nnx(
         inputs,
         kernel,
-        self.kernel_axes,
-        axis,
+        norm_axis,
         contract_ind,
         self.matmul_precision,
         self.quant,
+        _initializing,
     )
     pre_bias_logits = None
 
@@ -149,19 +198,49 @@ class GateLogit(nn.Module):
         pre_bias_logits = output
 
     if self.use_bias:
-      bias_axes, bias_shape = (
-          self.kernel_axes[-len(features) :],
-          kernel_shape[-len(features) :],
-      )
-      bias = self.param(
-          "bias",
-          nn.with_logical_partitioning(initializers.default_bias_init, bias_axes),
-          bias_shape,
-          self.weight_dtype,
-      )
-      bias = jnp.asarray(bias, self.dtype)
+      bias = jnp.asarray(self.bias[...], self.dtype)
       output += bias
     return output, pre_bias_logits
+
+
+def gate_logit_module(
+    inputs_shape: tuple[int, ...],
+    out_features_shape: Union[Iterable[int], int],
+    model_name: str,
+    axis: Union[Iterable[int], int] = -1,
+    weight_dtype: ctypes.DType = jnp.float32,
+    dtype: ctypes.DType = jnp.float32,
+    kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "truncated_normal"),
+    kernel_axes: Tuple[Optional[str], ...] = (),
+    use_bias: bool = False,
+    score_func: str = "",
+    quant: Optional[quantizations.AqtQuantization] = None,
+    matmul_precision: str = "default",
+    name: Optional[str] = None,
+):
+  """Creates a GateLogits module."""
+
+  axis = linears._canonicalize_tuple(axis)
+  in_features_shape = tuple(inputs_shape[ax] for ax in linears._normalize_axes(axis, len(inputs_shape)))
+
+  module = nnx_wrappers.to_linen(
+      GateLogit,
+      in_features_shape=in_features_shape,
+      out_features_shape=out_features_shape,
+      model_name=model_name,
+      axis=axis,
+      weight_dtype=weight_dtype,
+      dtype=dtype,
+      kernel_init=kernel_init,
+      kernel_axes=kernel_axes,
+      use_bias=use_bias,
+      score_func=score_func,
+      quant=quant,
+      matmul_precision=matmul_precision,
+      name=name,
+      abstract_init=False,
+  )
+  return module
 
 
 class RoutedMoE(nn.Module):
@@ -316,9 +395,7 @@ class RoutedMoE(nn.Module):
     _, group_idx = jax.lax.top_k(group_scores, k=self.config.topk_routing_group)
 
     # Mask selected groups so that only those experts are considered.
-    group_mask = jax.nn.one_hot(
-        group_idx, num_classes=self.config.n_routing_groups, dtype=jnp.float32
-    )
+    group_mask = jax.nn.one_hot(group_idx, num_classes=self.config.n_routing_groups, dtype=jnp.float32)
     group_mask = jnp.sum(group_mask, axis=-2)
 
     # Apply masks and get top-k indices.
@@ -331,9 +408,7 @@ class RoutedMoE(nn.Module):
         score_mask_expanded.shape[:-2] + (self.num_experts,),
     )
 
-  def deepseek_routing(
-      self, gate_logits: jax.Array, pre_bias_logits: jax.Array
-  ) -> tuple[jax.Array, jax.Array]:
+  def deepseek_routing(self, gate_logits: jax.Array, pre_bias_logits: jax.Array) -> tuple[jax.Array, jax.Array]:
     """DeepSeek routing logit.
 
     If the configuration does not specify routing groups (`n_routing_groups` is
@@ -353,11 +428,7 @@ class RoutedMoE(nn.Module):
       - top_k_indices: `(..., num_experts_per_tok)` array of indices
         identifying the selected experts for each token.
     """
-    expert_mask = (
-        1
-        if self.config.n_routing_groups == -1
-        else self._expert_group_mask(gate_logits)
-    )
+    expert_mask = 1 if self.config.n_routing_groups == -1 else self._expert_group_mask(gate_logits)
     _, top_k_indices = jax.lax.top_k(
         jnp.where(expert_mask > 0, gate_logits, -jnp.inf),
         k=self.num_experts_per_tok,
@@ -662,9 +733,7 @@ class RoutedMoE(nn.Module):
           if kernel.bias or kernel.sparsity_mask or len(kernel.scale) > 1:
             raise ValueError("Unsupported usecase for ragged_dot with quantized kernel.")
           rhs_inputs = kernel.qvalue
-        with set_xla_metadata(
-            ragged_dot_tiling=",".join([str(t) for t in tiling])
-        ):
+        with set_xla_metadata(ragged_dot_tiling=",".join([str(t) for t in tiling])):
           output = jax.lax.ragged_dot(
               lhs=inputs,
               rhs=rhs_inputs,
@@ -1416,13 +1485,12 @@ class RoutedMoE(nn.Module):
     return w0_kernel, w1_kernel, wo_kernel
 
   @nn.compact
-  def __call__(
-      self, inputs: ctypes.Array
-  ) -> tuple[ctypes.Array, Optional[ctypes.Array]]:
+  def __call__(self, inputs: ctypes.Array) -> tuple[ctypes.Array, Optional[ctypes.Array]]:
     cfg = self.config
     inputs = inputs.astype(cfg.dtype)
-    gate_logits, pre_bias_logits = GateLogit(
-        self.num_experts,
+    gate_logits, pre_bias_logits = gate_logit_module(
+        inputs_shape=inputs.shape,
+        out_features_shape=self.num_experts,
         model_name=cfg.model_name,
         dtype=self.dtype,
         weight_dtype=self.weight_dtype,
