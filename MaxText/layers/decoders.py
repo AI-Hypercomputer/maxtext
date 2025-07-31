@@ -25,6 +25,7 @@ from jax.ad_checkpoint import checkpoint_name
 from jax.sharding import Mesh
 
 from flax import linen as nn
+from flax import nnx
 from flax.linen.partitioning import ScanIn
 
 from MaxText.common_types import DecoderBlockType, Config, MODEL_MODE_TRAIN, MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE
@@ -235,7 +236,6 @@ class Decoder(nn.Module):
   """A stack of decoder layers as a part of an encoder-decoder architecture."""
 
   config: Config
-  shared_embedding: nn.Module
   mesh: Mesh
   quant: Optional[Quant] = None
 
@@ -474,6 +474,7 @@ class Decoder(nn.Module):
   @nn.compact
   def _apply_embedding(
       self,
+      shared_embedding: nn.Module | nnx.Module,
       decoder_input_tokens,
       decoder_positions,
       deterministic,
@@ -484,7 +485,7 @@ class Decoder(nn.Module):
     """Applies token and positional embeddings to the input tokens."""
     cfg = self.config
 
-    y = self.shared_embedding(decoder_input_tokens.astype("int32"), model_mode=model_mode)
+    y = shared_embedding(decoder_input_tokens.astype("int32"), model_mode=model_mode)
 
     # Merge the image embeddings with the text embeddings for multimodal models
     if image_embeddings is not None and cfg.use_multimodal:
@@ -516,7 +517,7 @@ class Decoder(nn.Module):
     return y
 
   @nn.compact
-  def _apply_output_head(self, y, deterministic, model_mode):
+  def _apply_output_head(self, shared_embedding: nn.Module | nnx.Module, y, deterministic, model_mode):
     """Applies final normalization and projects hidden states to logits."""
 
     cfg = self.config
@@ -533,7 +534,10 @@ class Decoder(nn.Module):
     # [batch, length, emb_dim] -> [batch, length, vocab_size]
     if cfg.logits_via_embedding:
       # Use the transpose of embedding matrix for logit transform.
-      embedding_table = self.shared_embedding.variables["params"]["embedding"]
+      if isinstance(shared_embedding, nnx.Module):
+        embedding_table = shared_embedding.embedding.value
+      else:
+        embedding_table = shared_embedding.variables["params"]["embedding"]
       if isinstance(embedding_table, nn.spmd.LogicallyPartitioned):
         embedding_table = embedding_table.unbox()
       attend_dtype = jnp.float32 if cfg.logits_dot_in_fp32 else cfg.dtype
@@ -573,6 +577,7 @@ class Decoder(nn.Module):
   @nn.compact
   def __call__(
       self,
+      shared_embedding: nn.Module | nnx.Module,
       decoder_input_tokens,
       decoder_positions,
       decoder_segment_ids=None,
@@ -590,7 +595,7 @@ class Decoder(nn.Module):
 
     # [batch, length] -> [batch, length, emb_dim]
     y = self._apply_embedding(
-        decoder_input_tokens, decoder_positions, deterministic, model_mode, image_embeddings, bidirectional_mask
+        shared_embedding, decoder_input_tokens, decoder_positions, deterministic, model_mode, image_embeddings, bidirectional_mask
     )
 
     policy = self.get_remat_policy()
@@ -762,7 +767,7 @@ class Decoder(nn.Module):
     # After the final transformer layer, `y` holds the raw, un-normalized hidden state.
     hidden_state = y
 
-    logits = self._apply_output_head(hidden_state, deterministic, model_mode)
+    logits = self._apply_output_head(shared_embedding, hidden_state, deterministic, model_mode)
 
     # The API of the Decoder is now a tuple, providing both the main output
     # and the raw hidden state needed for auxiliary tasks.

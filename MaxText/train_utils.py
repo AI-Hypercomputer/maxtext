@@ -16,7 +16,7 @@ limitations under the License.
 
 # pylint: disable=bare-except, consider-using-generator
 """ Utils that are only interesting for training in MaxText. """
-
+from flax import nnx
 import jax
 from MaxText.layers import quantizations
 from MaxText.layers import models
@@ -25,18 +25,24 @@ from MaxText import checkpointing
 from MaxText import maxtext_utils
 
 
-def get_transformer_model(config, mesh, quant):
+def get_transformer_model(config, mesh, quant, rngs: nnx.Rngs | None = None):
   if config.model_fsdp_ag_once:
-    return models.ZeroOneTransformer(config, mesh, quant=quant)
+    if rngs is not None:
+      raise NotImplementedError
+    else:
+      return models.ZeroOneTransformer(config, mesh, quant=quant)
   else:
-    return models.Transformer(config, mesh, quant=quant)
+    if rngs is not None:
+      return models.TransformerNNX(config, mesh, quant=quant, rngs=rngs)
+    else:
+      return models.Transformer(config, mesh, quant=quant)
 
 
-def create_model(config, mesh):
+def create_model(config, mesh, rngs: nnx.Rngs | None = None):
   """Instantiates and returns the model object, sharded across the mesh."""
   # Model definition
   quant = quantizations.configure_quantization(config)
-  model = get_transformer_model(config, mesh, quant)
+  model = get_transformer_model(config, mesh, quant, rngs=rngs)
   return model
 
 

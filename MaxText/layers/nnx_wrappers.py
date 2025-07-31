@@ -14,6 +14,7 @@
 
 """NNX <> Linen interoperability."""
 
+import dataclasses
 from functools import partial
 import typing as tp
 from typing import Any
@@ -217,7 +218,7 @@ class ToNNX(Module):
   def __getattr__(self, name: str):
     if hasattr(super(), name):
       return super().__getattribute__(name)
-    maybe_method = getattr(self.to_nnx__module.__class__, name, None)
+    maybe_method = getattr(type(self.to_nnx__module), name, None)
     if callable(maybe_method):
       method = partial(self.__call__, method=maybe_method)
       method.__self__ = self
@@ -279,13 +280,7 @@ class ToNNX(Module):
     # Split out the updates if `mutable` is passed into the Flax module
     if updates:
       nnx_attrs = linen_vars_to_nnx_attrs(updates)
-      for attr_name, value in nnx_attrs.items():
-        if hasattr(self, attr_name) and isinstance(value, dict):
-          original_value = getattr(self, attr_name)
-          new_values = _recursive_merge(original_value, value)
-          setattr(self, attr_name, new_values)
-        else:
-          setattr(self, attr_name, value)
+      nnx.update(self, nnx_attrs)
 
     return out
 
