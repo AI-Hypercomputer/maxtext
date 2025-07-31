@@ -1,0 +1,13 @@
+base_config: "MaxText/configs/base.yml"
+args:
+  model_name: "qwen3-4b"
+  load_parameters_path: "gs://maxtext-qwen/qwen3/4b/unscanned/2025-08-04-21-31/0/items"
+  tokenizer_path: "Qwen/Qwen3-4B"
+  per_device_batch_size: 4
+  ici_tensor_parallelism: 4
+  max_prefill_predict_length: 16384
+  max_target_length: 32768
+  scan_layers: false
+  attention: "dot_product"
+  return_log_prob: True
+  async_checkpointing: false

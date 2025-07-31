@@ -1,0 +1,14 @@
+base_config: "MaxText/configs/base.yml"
+args:
+  model_name: "mixtral-8x7b"
+  load_parameters_path: "gs://ml-auto-solutions/output/sparsity_diffusion_devx/maxtext/chained_tests_mixtral-8x7b_stable-2025-08-15-01-00-23//unscanned_ckpt/checkpoints/0/items"
+  tokenizer_path: "mistralai/Mixtral-8x7B-Instruct-v0.1"
+  tokenizer_type: "huggingface"
+  per_device_batch_size: 4
+  ici_tensor_parallelism: 4
+  max_prefill_predict_length: 4096
+  max_target_length: 8192
+  scan_layers: false
+  attention: "dot_product"
+  return_log_prob: True
+  async_checkpointing: false
