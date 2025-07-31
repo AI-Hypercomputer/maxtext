@@ -57,14 +57,17 @@ class SimpleDecoderLayer(nnx.Module):
     self.quant = quant
     self.weight_dtype = weight_dtype
     self.rngs = rngs if rngs is not None else kwargs.get("rngs", nnx.Rngs(0))
+ 
+    init_fn = nnx.with_partitioning(
+        nnx.initializers.lecun_normal(),
+        sharding=("embed", "mlp"),
+        mesh=self.mesh
+      )
+
     self.weight_mat = nnx.Param(
-        nnx.initializers.lecun_normal()(self.rngs.params(), (
-            self.config.emb_dim,
-            self.config.emb_dim,
-        ), self.weight_dtype),
-        sharding=(
-            "embed",
-            "mlp",
+        init_fn(
+          self.rngs.params(), 
+          (self.config.emb_dim, self.config.emb_dim), self.weight_dtype
         ),
     )
 
@@ -86,7 +89,7 @@ class SimpleDecoderLayer(nnx.Module):
 def simple_decoder_layer_class():
   """Creates a SimpleDecoderLayer class."""
   return nnx_wrappers.to_linen_class(
-      SimpleMlpDecoderLayer,
+      SimpleDecoderLayer,
       metadata_fn=variable_to_logically_partitioned,
   )
 
@@ -101,7 +104,7 @@ def simple_decoder_layer(
 ):
   """Creates a SimpleDecoderLayer object."""
   return nnx_wrappers.to_linen(
-      SimpleMlpDecoderLayer,
+      SimpleDecoderLayer,
       config=config,
       mesh=mesh,
       name=name,
@@ -130,24 +133,30 @@ class SimpleMlpDecoderLayer(nnx.Module):
     self.quant = quant
     self.weight_dtype = weight_dtype
     self.rngs = rngs if rngs is not None else kwargs.get("rngs", nnx.Rngs(0))
+    
+    init_ff1_fn = nnx.with_partitioning(
+        nnx.initializers.lecun_normal(),
+        sharding=("embed", "mlp"),
+        mesh=self.mesh
+      )
+
     self.ff_1 = nnx.Param(
-        nnx.initializers.lecun_normal()(self.rngs.params(), (
-            self.config.emb_dim,
-            self.config.emb_dim,
-        ), self.weight_dtype),
-        sharding=(
-            "embed",
-            "mlp",
+        init_ff1_fn(
+          self.rngs.params(), 
+          (self.config.emb_dim, self.config.mlp_dim), self.weight_dtype
         ),
     )
+
+    init_ff2_fn = nnx.with_partitioning(
+      nnx.initializers.lecun_normal(),
+      sharding=("mlp","embed"),
+      mesh=self.mesh
+    )
+
     self.ff_2 = nnx.Param(
-        nnx.initializers.lecun_normal()(self.rngs.params(), (
-            self.config.emb_dim,
-            self.config.emb_dim,
-        ), self.weight_dtype),
-        sharding=(
-            "embed",
-            "mlp",
+        init_ff2_fn(
+          self.rngs.params(), 
+          (self.config.mlp_dim, self.config.emb_dim), self.weight_dtype
         ),
     )
 
