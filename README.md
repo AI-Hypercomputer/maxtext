@@ -31,6 +31,7 @@ Key supported features:
 * Models: Llama 2, Llama 3, Llama 4, Mistral and Mixtral family, Gemma, Gemma 2, Gemma 3, and DeepSeek family
 
 ## Announcements
+* [July 27, 2025] We have updated our TFLOPS/s calculation to account for causal attention, dividing the attention flops in half in this [PR](https://github.com/AI-Hypercomputer/maxtext/pull/1988). Also we account for sliding window and chunked attention reduced attention flops in [PR](https://github.com/AI-Hypercomputer/maxtext/pull/2009) and [PR](https://github.com/AI-Hypercomputer/maxtext/pull/2030). These changes especially impact large sequence configs, since attention flops grow quadratically with sequence length, as explained in this [ReadMe](https://github.com/AI-Hypercomputer/maxtext/blob/main/getting_started/Performance_Metrics.md)
 * [July 16, 2025] We will be restructuring the MaxText repository for improved organization and clarity. Please review the [proposed structure](RESTRUCTURE.md) and provide feedback.
 * [July 11, 2025] Multi-Token Prediction (MTP) training is now supported! This feature adds an auxiliary loss based on predicting multiple future tokens, inspired by the [DeepSeek-V3 paper](https://arxiv.org/html/2412.19437v1), to enhance training efficiency.
 * [June 25, 2025] DeepSeek R1-0528 variant is now supported!
