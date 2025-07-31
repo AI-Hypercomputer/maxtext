@@ -1,4 +1,4 @@
-ARG JAX_AI_IMAGE_BASEIMAGE
+ARG JAX_AI_IMAGE_BASEIMAGE=us-docker.pkg.dev/cloud-tpu-images/jax-ai-image/tpu:latest
 
 # JAX AI Base Image
 FROM $JAX_AI_IMAGE_BASEIMAGE
