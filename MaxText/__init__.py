@@ -56,7 +56,7 @@ def from_pretrained(
     devices: Sequence[jax.Device] | None = None,
     *,
     rngs: nnx.Rngs | None = None,
-) -> Transformer | TransformerNNX:
+) -> Transformer | TransformerNNX | models.ZeroOneTransformer:
   """Load a pretrained MaxText model from checkpoint.
 
   This function loads a model from a checkpoint.

@@ -25,6 +25,7 @@ import sys
 import datetime
 
 import jax
+from jax.tree_util import register_pytree_node_class
 from jax.experimental.compilation_cache import compilation_cache
 
 import omegaconf
@@ -1106,7 +1107,7 @@ def using_sequence_parallelism(raw_keys) -> bool:
 def using_expert_parallelism(raw_keys) -> bool:
   return int(raw_keys["ici_expert_parallelism"]) > 1 or int(raw_keys["dcn_expert_parallelism"]) > 1
 
-
+@register_pytree_node_class
 class HyperParameters:
   """Wrapper class to expose the configuration in a read-only manner."""
 
@@ -1122,6 +1123,13 @@ class HyperParameters:
 
   def __setattr__(self, attr, value):
     raise ValueError("Reinitialization of config is not allowed")
+  
+  def tree_flatten(self):
+    return (), self
+  
+  @classmethod
+  def tree_unflatten(cls, aux_data, children):
+    return aux_data
 
   def get_keys(self):
     return self._config.keys
