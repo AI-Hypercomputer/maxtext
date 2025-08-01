@@ -187,7 +187,7 @@ class GateLogit(nnx.Module):
         norm_axis,
         contract_ind,
         self.matmul_precision,
-        self.quant,
+        self.quant_dot_general,
         _initializing,
     )
     pre_bias_logits = None
