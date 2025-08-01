@@ -87,7 +87,11 @@ class TestModel(unittest.TestCase):
     ids, decoder_segment_ids, decoder_positions = self.get_data()
 
     transformer_vars = model.init(
-        {"params": self.rng, "aqt": self.rng}, ids, decoder_positions, decoder_segment_ids, enable_dropout=False
+        {"params": self.rng, "aqt": self.rng, "dropout": self.rng},
+        ids,
+        decoder_positions,
+        decoder_segment_ids,
+        enable_dropout=False,
     )
 
     logits = jax.eval_shape(
@@ -126,11 +130,19 @@ class TestModel(unittest.TestCase):
     ids, decoder_segment_ids, decoder_positions = self.get_data()
 
     train_transformer_vars = train_model.init(
-        {"params": self.rng, "aqt": self.rng}, ids, decoder_positions, decoder_segment_ids, enable_dropout=False
+        {"params": self.rng, "aqt": self.rng, "dropout": self.rng},
+        ids,
+        decoder_positions,
+        decoder_segment_ids,
+        enable_dropout=False,
     )
 
     prefill_transformer_vars = prefill_model.init(
-        {"params": self.rng, "aqt": self.rng}, ids, decoder_positions, decoder_segment_ids, enable_dropout=False
+        {"params": self.rng, "aqt": self.rng, "dropout": self.rng},
+        ids,
+        decoder_positions,
+        decoder_segment_ids,
+        enable_dropout=False,
     )
 
     full_train_logits = train_model.apply(

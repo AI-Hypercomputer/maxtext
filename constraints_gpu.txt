@@ -46,7 +46,7 @@ exceptiongroup==1.2.2
 fastapi==0.115.3
 filelock==3.16.1
 flatbuffers==24.3.25
-flax==0.10.6
+flax==0.11.0
 frozenlist==1.5.0
 fsspec==2024.9.0
 gast==0.6.0
