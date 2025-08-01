@@ -25,17 +25,12 @@ from MaxText import max_logging
 from typing import Any, Optional
 # pytype: disable=attribute-error
 
-def set_attrs_from_kwargs(obj,
-                          kwargs,
-                          *,
-                          skip_if_exists: bool = True,
-                          warn_on_skip: bool = False):
+
+def set_attrs_from_kwargs(obj, kwargs, *, skip_if_exists: bool = True, warn_on_skip: bool = False):
   for key, value in kwargs.items():
     if skip_if_exists and hasattr(obj, key):
       if warn_on_skip:
-        max_logging.log(
-            f"Skip overriding existing attribute {key} with value {value} in {obj.__class__.__name__}"
-        )
+        max_logging.log(f"Skip overriding existing attribute {key} with value {value} in {obj.__class__.__name__}")
       continue
     setattr(obj, key, value)
 
@@ -43,44 +38,32 @@ def set_attrs_from_kwargs(obj,
 class SimpleDecoderLayer(nnx.Module):
   """Decoder layer consisting of a single [embed, embed] weight matrix."""
 
-  def __init__(self,
-               *,
-               config: Config,
-               mesh: Mesh,
-               quant: Optional[quantizations.AqtQuantization] = None,
-               rngs: Optional[nnx.Rngs] = None,
-               weight_dtype: Any = jnp.float32,
-               **kwargs: Any) -> None:
+  def __init__(
+      self,
+      *,
+      config: Config,
+      mesh: Mesh,
+      quant: Optional[quantizations.AqtQuantization] = None,
+      rngs: Optional[nnx.Rngs] = None,
+      weight_dtype: Any = jnp.float32,
+      **kwargs: Any
+  ) -> None:
 
     self.config = config
     self.mesh = mesh
     self.quant = quant
     self.weight_dtype = weight_dtype
     self.rngs = rngs if rngs is not None else kwargs.get("rngs", nnx.Rngs(0))
- 
-    init_fn = nnx.with_partitioning(
-        nnx.initializers.lecun_normal(),
-        sharding=("embed", "mlp"),
-        mesh=self.mesh
-      )
 
-    self.weight_mat = nnx.Param(
-        init_fn(
-          self.rngs.params(), 
-          (self.config.emb_dim, self.config.emb_dim), self.weight_dtype
-        ),
-    )
+    init_fn = nnx.with_partitioning(nnx.initializers.lecun_normal(), sharding=("embed", "mlp"), mesh=self.mesh)
+
+    self.weight_mat = nnx.Param(init_fn(self.rngs.params(), (self.config.emb_dim, self.config.emb_dim), self.weight_dtype), )
 
     set_attrs_from_kwargs(self, kwargs, skip_if_exists=True, warn_on_skip=True)
 
-  def __call__(self,
-               inputs: jnp.ndarray,
-               positions,
-               segmentation,
-               deterministic,
-               model_mode,
-               previous_chunk=None,
-               page_state=None):
+  def __call__(
+      self, inputs: jnp.ndarray, positions, segmentation, deterministic, model_mode, previous_chunk=None, page_state=None
+  ):
     if self.config.scan_layers:
       return inputs @ self.weight_mat.astype(inputs.dtype), None
     return inputs @ self.weight_mat.astype(inputs.dtype)
@@ -133,32 +116,14 @@ class SimpleMlpDecoderLayer(nnx.Module):
     self.quant = quant
     self.weight_dtype = weight_dtype
     self.rngs = rngs if rngs is not None else kwargs.get("rngs", nnx.Rngs(0))
-    
-    init_ff1_fn = nnx.with_partitioning(
-        nnx.initializers.lecun_normal(),
-        sharding=("embed", "mlp"),
-        mesh=self.mesh
-      )
 
-    self.ff_1 = nnx.Param(
-        init_ff1_fn(
-          self.rngs.params(), 
-          (self.config.emb_dim, self.config.mlp_dim), self.weight_dtype
-        ),
-    )
+    init_ff1_fn = nnx.with_partitioning(nnx.initializers.lecun_normal(), sharding=("embed", "mlp"), mesh=self.mesh)
 
-    init_ff2_fn = nnx.with_partitioning(
-      nnx.initializers.lecun_normal(),
-      sharding=("mlp","embed"),
-      mesh=self.mesh
-    )
+    self.ff_1 = nnx.Param(init_ff1_fn(self.rngs.params(), (self.config.emb_dim, self.config.mlp_dim), self.weight_dtype), )
 
-    self.ff_2 = nnx.Param(
-        init_ff2_fn(
-          self.rngs.params(), 
-          (self.config.mlp_dim, self.config.emb_dim), self.weight_dtype
-        ),
-    )
+    init_ff2_fn = nnx.with_partitioning(nnx.initializers.lecun_normal(), sharding=("mlp", "embed"), mesh=self.mesh)
+
+    self.ff_2 = nnx.Param(init_ff2_fn(self.rngs.params(), (self.config.mlp_dim, self.config.emb_dim), self.weight_dtype), )
 
     set_attrs_from_kwargs(self, kwargs, skip_if_exists=True, warn_on_skip=True)
 
