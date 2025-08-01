@@ -13,7 +13,7 @@
 #  limitations under the License.
 
 
-"""MoE related Layers."""
+"""MoE related NNX Layers."""
 
 import enum
 import functools
@@ -201,47 +201,6 @@ class GateLogit(nnx.Module):
       bias = jnp.asarray(self.bias[...], self.dtype)
       output += bias
     return output, pre_bias_logits
-
-
-def gate_logit_module(
-    inputs_shape: tuple[int, ...],
-    out_features_shape: Union[Iterable[int], int],
-    model_name: str,
-    axis: Union[Iterable[int], int] = -1,
-    weight_dtype: ctypes.DType = jnp.float32,
-    dtype: ctypes.DType = jnp.float32,
-    kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "truncated_normal"),
-    kernel_axes: Tuple[Optional[str], ...] = (),
-    use_bias: bool = False,
-    score_func: str = "",
-    quant: Optional[quantizations.AqtQuantization] = None,
-    matmul_precision: str = "default",
-    name: Optional[str] = None,
-):
-  """Creates a GateLogits module."""
-
-  axis = linears._canonicalize_tuple(axis)
-  in_features_shape = tuple(inputs_shape[ax] for ax in linears._normalize_axes(axis, len(inputs_shape)))
-
-  module = nnx_wrappers.to_linen(
-      GateLogit,
-      in_features_shape=in_features_shape,
-      out_features_shape=out_features_shape,
-      model_name=model_name,
-      axis=axis,
-      weight_dtype=weight_dtype,
-      dtype=dtype,
-      kernel_init=kernel_init,
-      kernel_axes=kernel_axes,
-      use_bias=use_bias,
-      score_func=score_func,
-      quant=quant,
-      matmul_precision=matmul_precision,
-      name=name,
-      metadata_fn=variable_to_logically_partitioned,
-      abstract_init=False,
-  )
-  return module
 
 
 class RoutedMoE(nn.Module):

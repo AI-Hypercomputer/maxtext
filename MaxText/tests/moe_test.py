@@ -32,7 +32,7 @@ from MaxText import pyconfig
 from MaxText.common_types import Config, DType
 from MaxText.globals import PKG_DIR
 from MaxText.layers.linears import mlp_block
-from MaxText.layers import moe
+from MaxText.layers import moe, moe_linen
 from MaxText.layers.initializers import NdInitializer, nd_dense_init, variable_to_logically_partitioned
 from MaxText.layers.quantizations import Fp8Quantization
 from MaxText.layers import nnx_wrappers
@@ -292,7 +292,7 @@ class MoeLoopBlock(nnx.Module):
     self.kernel_axes = kernel_axes
     self.weight_dtype = weight_dtype
     self.dtype = dtype
-    self.gate = moe.gate_logit_module(
+    self.gate = moe_linen.gate_logit_module(
         inputs_shape=self.inputs_shape,
         out_features_shape=self.num_experts,
         model_name=self.config.model_name,
