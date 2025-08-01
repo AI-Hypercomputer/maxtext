@@ -19,7 +19,6 @@ import dataclasses
 import inspect
 import typing as tp
 from typing import Any
-from dataclasses import field, make_dataclass
 
 from flax import linen
 from flax import nnx
@@ -578,11 +577,11 @@ def to_linen_class(
         if default is dataclasses.MISSING:
             dataclass_fields.append((name, annotation))
         else:
-            dataclass_fields.append((name, annotation, field(default=default)))
+            dataclass_fields.append((name, annotation, dataclasses.field(default=default)))
 
-    dataclass_fields.append(("extra_kwargs", tp.Optional[dict], field(default=None)))
+    dataclass_fields.append(("extra_kwargs", tp.Optional[dict], dataclasses.field(default=None)))
 
-    WrappedModule = make_dataclass(
+    WrappedModule = dataclasses.make_dataclass(
         cls_name=f"Wrapped{nnx_class.__name__}",
         fields=dataclass_fields,
         bases=(linen.Module,),
@@ -593,3 +592,5 @@ def to_linen_class(
     )
 
     return WrappedModule
+
+
