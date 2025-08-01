@@ -51,12 +51,12 @@ def _convert_to_activation_function(fn_or_string: Union[str, Callable[..., Any]]
     )
 
 
-def _normalize_axes(axes: Iterable[int], ndim: int) -> Tuple[int, ...]:
+def normalize_axes(axes: Iterable[int], ndim: int) -> Tuple[int, ...]:
   # A tuple by convention. len(axes_tuple) then also gives the rank efficiently.
   return tuple(ax if ax >= 0 else ndim + ax for ax in axes)
 
 
-def _canonicalize_tuple(x):
+def canonicalize_tuple(x):
   if isinstance(x, Iterable):
     return tuple(x)
   else:
@@ -109,7 +109,7 @@ class DenseGeneral(nnx.Module):
       matmul_precision: str = "default",
       parameter_memory_host_offload: bool = False,
       *,  # Following arguments are keyword-only
-      rngs: nnx.Rngs,
+      rngs: nnx.Rngs = None,
   ):
     """Initializes the DenseGeneral module.
 
@@ -128,9 +128,9 @@ class DenseGeneral(nnx.Module):
       parameter_memory_host_offload: Determines whether to offload params to host
       rngs: RNG state for initialization in nnx.
     """
-    self.in_features_shape = _canonicalize_tuple(in_features_shape)
-    self.out_features_shape = _canonicalize_tuple(out_features_shape)
-    self.axis = _canonicalize_tuple(axis)
+    self.in_features_shape = canonicalize_tuple(in_features_shape)
+    self.out_features_shape = canonicalize_tuple(out_features_shape)
+    self.axis = canonicalize_tuple(axis)
     self.weight_dtype = weight_dtype
     self.dtype = dtype
     self.kernel_init = kernel_init
@@ -194,7 +194,7 @@ class DenseGeneral(nnx.Module):
       The transformed input.
     """
     inputs = jnp.asarray(inputs, self.dtype)
-    norm_axis = _normalize_axes(self.axis, inputs.ndim)
+    norm_axis = normalize_axes(self.axis, inputs.ndim)
 
     for i, ax in enumerate(norm_axis):
       if inputs.shape[ax] != self.in_features_shape[i]:
@@ -269,8 +269,8 @@ def dense_general(
     raise ValueError("Exactly one of inputs_shape or in_features must be specified.")
 
   if inputs_shape is not None:
-    axis = _canonicalize_tuple(axis)
-    in_features_shape = tuple(inputs_shape[ax] for ax in _normalize_axes(axis, len(inputs_shape)))
+    axis = canonicalize_tuple(axis)
+    in_features_shape = tuple(inputs_shape[ax] for ax in normalize_axes(axis, len(inputs_shape)))
   else:
     assert in_features_shape is not None
   module = nnx_wrappers.to_linen(
