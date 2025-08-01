@@ -36,6 +36,7 @@ from MaxText import pyconfig
 from MaxText.layers import quantizations
 from MaxText import maxtext_utils
 from MaxText import train_utils
+from MaxText.kernels.megablox.gmm import gmm
 from MaxText.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR
 
 _QUERY_REGEX = ".*/query"
@@ -279,8 +280,7 @@ class QuantTest(unittest.TestCase):
     return all(jnp.abs(y - x).mean() / jnp.abs(x).mean() < tolerance for x, y in zip(leaves_a, leaves_b))
 
   def quantization_config(self, quant):
-    """ Run forward pass and backward pass for quantized model and compare with base model.
-    """
+    """Run forward pass and backward pass for quantized model and compare with base model."""
     cfg = self.init_pyconfig(quantization=quant)
     model = train_utils.create_model(self.cfg, self.mesh)
     qt_model = train_utils.create_model(cfg, self.mesh)
@@ -337,6 +337,56 @@ class QuantTest(unittest.TestCase):
   @pytest.mark.tpu_only
   def test_fp8_full_quantization(self):
     self.quantization_config("fp8_full")
+
+
+@pytest.mark.parametrize(
+    "group_sizes,k,n,tiling,dtype",
+    [
+        # m = sum(group_sizes) must be divisible by tm (first element of tiling)
+        ([3, 5], 6, 4, (1, 1, 1), jnp.int8),  # m = 8, tm = 8
+        ([3, 5], 6, 4, (1, 1, 1), None),  # m = 8, tm = 8
+    ],
+)
+@pytest.mark.tpu_only
+def test_gmm_kernel(group_sizes, k, n, tiling, dtype):
+  """
+  Smoke-test + correctness check for the grouped matrix-multiply kernel.
+  For each group i, gmm should compute
+      lhs[start_i:end_i, :]  @  rhs[i]
+  and stitch the results back together along rows.
+  """
+  group_sizes = jnp.array(group_sizes, dtype=jnp.int32)
+  m = int(group_sizes.sum())
+
+  key = jax.random.key(0)
+  key, k1, k2 = jax.random.split(key, 3)
+
+  lhs = jax.random.normal(k1, (m, k), dtype=jnp.float32)
+  rhs = jax.random.normal(k2, (group_sizes.size, k, n), dtype=jnp.float32)
+
+  # ---- run the Pallas kernel ------------------------------------------------
+  out = gmm(
+      lhs,
+      rhs,
+      group_sizes,
+      tiling=tiling,  # small tiles so the shapes above work
+      interpret=True,  # avoids device-specific compilation in CI
+      lhs_quantize_dtype=dtype,
+      rhs_quantize_dtype=dtype,
+  ).block_until_ready()
+
+  # ---- naive reference ------------------------------------------------------
+  ref_blocks = []
+  start = 0
+  for gid, size in enumerate(group_sizes):
+    end = start + int(size)
+    ref_blocks.append(lhs[start:end] @ rhs[gid])
+    start = end
+  ref_out = jnp.concatenate(ref_blocks, axis=0)
+
+  # ---- checks ---------------------------------------------------------------
+  assert out.shape == (m, n)
+  assert jnp.allclose(out, ref_out, rtol=1e-1, atol=1e-1), "GMM output mismatch"
 
 
 if __name__ == "__main__":
