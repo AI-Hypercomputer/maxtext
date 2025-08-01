@@ -224,7 +224,8 @@ class SequentialBlockDecoderLayers(nn.Module):
           page_state=page_state,
       )
       if self.config.scan_layers:
-        inputs = inputs[0]  #  When scan_layers is True the decoder layers return (outputs, None).
+        # When scan_layers is True the decoder layers return (outputs, None).
+        inputs = inputs[0]
     if self.config.scan_layers:
       return inputs, None  # pytype: disable=bad-return-type
     else:
@@ -345,7 +346,7 @@ class Decoder(nn.Module):
       case DecoderBlockType.GEMMA2:
         return [gemma2.Gemma2DecoderLayer]
       case DecoderBlockType.GEMMA3:
-        return [gemma3.Gemma3DecoderLayer]
+        return [gemma3.gemma3_decoder_layer_class()]
       case DecoderBlockType.GPT3:
         return [gpt3.Gpt3DecoderLayer]
       case DecoderBlockType.QWEN3:
@@ -385,7 +386,8 @@ class Decoder(nn.Module):
           block_layer,
           prevent_cse=not self.config.scan_layers,
           policy=policy,
-          static_argnums=(4, 5),  # Deterministic and model mode are static arguments.
+          # Deterministic and model mode are static arguments.
+          static_argnums=(4, 5),
       )
       RemattedBlockLayers.append(layer)
     return RemattedBlockLayers
@@ -550,7 +552,8 @@ class Decoder(nn.Module):
           inputs_shape=y.shape,
           out_features_shape=cfg.vocab_size,
           weight_dtype=cfg.weight_dtype,
-          dtype=jnp.float32 if cfg.logits_dot_in_fp32 else cfg.dtype,  # for logit training stability
+          # for logit training stability
+          dtype=jnp.float32 if cfg.logits_dot_in_fp32 else cfg.dtype,
           kernel_axes=("embed", "vocab"),
           name="logits_dense",
           matmul_precision=self.config.matmul_precision,
@@ -608,7 +611,8 @@ class Decoder(nn.Module):
             y, decoder_segment_ids, decoder_positions, deterministic, model_mode
         )
       else:
-        partition_spec = None  # This partition spec is only used for the fsdp_ag_once feature.
+        # This partition spec is only used for the fsdp_ag_once feature.
+        partition_spec = None
       if cfg.decoder_block == DecoderBlockType.DEEPSEEK:
         assert len(RemattedBlockLayers) == 2, "Scanned layers must have a length of 2 using deepseek."
         dense_layer = RemattedBlockLayers[0]
@@ -660,6 +664,7 @@ class Decoder(nn.Module):
               "slot": slot,
           }
           dense_layer = RemattedBlockLayers[0]
+
           dense_layer.__call__ = functools.partial(dense_layer.__call__, **layer_call_kwargs)
           y, _ = self.scan_decoder_layers(
               cfg,
@@ -743,6 +748,7 @@ class Decoder(nn.Module):
                   "is_nope_layer": llama4.determine_is_nope_layer(lyr, self.config.nope_layer_interval),
                   "is_moe_layer": llama4.determine_is_moe_layer(lyr, self.config.interleave_moe_layer_step),
               }
+
               layer_call_kwargs = {"bidirectional_mask": bidirectional_mask}
             layer = RemattedBlockLayer(config=cfg, mesh=mesh, name=f"layers_{lyr}", quant=self.quant, **layer_kwargs)
             y = layer(
@@ -790,7 +796,7 @@ class Decoder(nn.Module):
     scan_length = cfg.num_decoder_layers // attention_pattern_length
 
     policy = self.get_remat_policy()
-    RemattedGemma3Block = self.set_remat_policy([gemma3.Gemma3ScannableBlock], policy)[0]
+    RemattedGemma3Block = self.set_remat_policy([gemma3.gemma3_scannable_block_class()], policy)[0]
 
     layer_call_kwargs = {"bidirectional_mask": bidirectional_mask}
     layer_kwargs = {"num_of_layers": attention_pattern_length}
