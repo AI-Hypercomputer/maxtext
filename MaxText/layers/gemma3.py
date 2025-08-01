@@ -257,7 +257,7 @@ class Gemma3ScannableBlock(nn.Module):
           previous_chunk=previous_chunk,
           page_state=page_state,
           slot=slot,
-          bidirectional_mask=None,
+          bidirectional_mask=bidirectional_mask,
       )
       if cfg.scan_layers:
         y = y[0]
@@ -360,6 +360,7 @@ class Encoder(nn.Module):
   @nn.compact
   def __call__(self, x: jax.Array, deterministic: bool = True) -> jax.Array:
     if self.scan:
+      # TODO(aireenmei, hengtaoguo): fix this branch to enable scan support for vision encoder
       block = nn.remat(
           Encoder1DBlock,
           prevent_cse=False,
@@ -514,6 +515,9 @@ class Gemma3VisionEncoderLayer(nn.Module):
       jnp.array for image embeddings, shaped [B, N, P, D], e.g. [4, 1, 256, 2560]
     """
     cfg = self.config
+    # currrently only supports N=1, the inputs shape is [B, H, W, C]
+    if len(inputs.shape) == 4:
+      inputs = inputs[:, None, :]
     b, n, h, w, c = inputs.shape
     x = jnp.reshape(inputs, [b * n, h, w, c])
     # Gemma3 uses conv2d with stride 14 and kernel size 14 to extract patches.
@@ -538,7 +542,7 @@ class Gemma3VisionEncoderLayer(nn.Module):
         mlp_dim=self.mlp_dim,
         num_heads=self.num_heads,
         dropout=self.dropout,
-        scan=cfg.scan_layers,
+        scan=False,  # TODO(aireenmei, hengtaoguo): support scan in vision encoder
         remat_policy=cfg.remat_policy_for_vit,
         dtype_mm=cfg.dtype_mm,
         name="Transformer",

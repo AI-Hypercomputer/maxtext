@@ -59,6 +59,10 @@ class MetricLogger:
     self.cumulative_eval_metrics = {"scalar": defaultdict(float)}
     self.buffered_train_metrics = None
 
+  def reset_eval_metrics(self):
+    """Resets the cumulative metrics dictionary for a new evaluation run."""
+    self.cumulative_eval_metrics = {"scalar": defaultdict(float)}
+
   def write_metrics(self, metrics, step, is_training=True):
     """Entry point for all metrics writing in Train's Main."""
     if metrics:
@@ -75,9 +79,8 @@ class MetricLogger:
 
   def log_metrics(self, metrics, step, is_training):
     """Logs metrics via max_logging."""
-
     if is_training:
-      loss = metrics['scalar']['learning/loss']
+      loss = metrics["scalar"]["learning/loss"]
       log_message = (
           f"completed step: {step}, seconds: {metrics['scalar']['perf/step_time_seconds']:.3f}, "
           f"TFLOP/s/device: {metrics['scalar']['perf/per_device_tflops_per_sec']:.3f}, "
@@ -91,23 +94,20 @@ class MetricLogger:
         main_model_loss = loss - mtp_loss
         log_message += f", main_model_loss: {main_model_loss:.3f}, mtp_loss: {mtp_loss:.3f}"
 
-      max_logging.log(log_message)
-
     else:
       log_message = (
           f"eval metrics after step: {step},"
-          f" loss={self.cumulative_eval_metrics['scalar']['eval/avg_loss']:.3f},"
-          f" total_weights={self.cumulative_eval_metrics['scalar']['eval/total_weights']},"
-          f" step_time_seconds={self.cumulative_eval_metrics['scalar']['eval/step_time_seconds']:.3f}"
+          f" loss={metrics['scalar']['eval/avg_loss']:.3f},"
+          f" total_weights={metrics['scalar']['eval/total_weights']}"
       )
 
       if self.config.mtp_num_layers > 0:
         log_message += (
-            f", avg_mtp_loss={self.cumulative_eval_metrics['scalar']['eval/avg_mtp_loss']:.3f},"
-            f" avg_mtp_acceptance_rate={self.cumulative_eval_metrics['scalar']['eval/avg_mtp_acceptance_rate_percent']:.2f}%"
+            f", avg_mtp_loss={metrics['scalar']['eval/avg_mtp_loss']:.3f},"
+            f" avg_mtp_acceptance_rate={metrics['scalar']['eval/avg_mtp_acceptance_rate_percent']:.2f}%"
         )
 
-      max_logging.log(log_message)
+    max_logging.log(log_message)
 
   def write_metrics_locally(self, metrics, step):
     """Writes metrics locally for testing."""

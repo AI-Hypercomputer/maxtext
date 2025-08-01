@@ -200,6 +200,9 @@ class RoutedMoE(nn.Module):
   def get_tensor_parallelism_size(self):
     return self.mesh.shape["tensor"]
 
+  def get_tensor_transpose_parallelism_size(self):
+    return self.mesh.shape["tensor_transpose"]
+
   def get_context_autoregressive_parallelism_size(self):
     return self.mesh.shape["context_autoregressive"]
 
@@ -337,7 +340,7 @@ class RoutedMoE(nn.Module):
     -1), we use a standard top-k routing mechanism. Otherwise, we force all
     selected experts to be from the a subset of the highest rated expert groups.
 
-    The selection process uses post_bias logits, while the return weigths use
+    The selection process uses post_bias logits, while the return weights use
     pre_bias logits.
 
     Args:
@@ -463,7 +466,7 @@ class RoutedMoE(nn.Module):
         sorted_indices: Indices used to permute the inputs.
         local_group_size: Number of tokens assigned to each local expert on this
           shard.
-        sorted_experts_ids: expert ID corrsponding to each token of the permuted
+        sorted_experts_ids: expert ID corresponding to each token of the permuted
         inputs.
     """
 
@@ -546,10 +549,10 @@ class RoutedMoE(nn.Module):
           cumulated_array = jnp.cumsum(array_with_zeros, axis=0, dtype=input_array.dtype)
           return cumulated_array[shard_id]
         elif strategy == TransformStrategy.RECV_SIZE:
-          # Received size in the traget output
+          # Received size in the target output
           return input_array[:, shard_id]
         else:
-          raise ValueError(f"Unknown tranform array strategy: {strategy}")
+          raise ValueError(f"Unknown transform array strategy: {strategy}")
 
       # If the batch is unsharded then we send the same data slice to all other
       # shards. We also assume each shard will have the local processed inputs
@@ -571,10 +574,10 @@ class RoutedMoE(nn.Module):
         # The amount that each shard receives from all other shards is
         # equivalent to the group sizes (aka input_array).
         elif strategy == TransformStrategy.RECV_SIZE:
-          # Received size in the traget output
+          # Received size in the target output
           return input_array
         else:
-          raise ValueError(f"Unknown tranform array strategy: {strategy}")
+          raise ValueError(f"Unknown transform array strategy: {strategy}")
 
     input_offsets = transform_array(
         all_shards_group_sizes,
@@ -708,16 +711,20 @@ class RoutedMoE(nn.Module):
     else:
       batch_logical_axis = "activation_batch_no_exp"
 
-    input_partition_pspec = nn.logical_to_mesh_axes((batch_logical_axis, "activation_length", None))
+    if self.get_tensor_transpose_parallelism_size() > 1:
+      input_partition_pspec = nn.logical_to_mesh_axes((batch_logical_axis, "activation_length", "activation_embed"))
+    else:
+      input_partition_pspec = nn.logical_to_mesh_axes((batch_logical_axis, "activation_length", None))
+
     gate_logits_pspec = nn.logical_to_mesh_axes((batch_logical_axis, "activation_length", None))
     if self.config.model_name.startswith("deepseek3"):
       pre_bias_logits_pspec = nn.logical_to_mesh_axes((batch_logical_axis, "activation_length", None))
     else:
       # pre_bias_logits is None for non-DeepSeek v3 models
       pre_bias_logits_pspec = None
-    w0_pspec = nn.logical_to_mesh_axes(("exp", None, "mlp"))
-    w1_pspec = nn.logical_to_mesh_axes(("exp", None, "mlp"))
-    wo_pspec = nn.logical_to_mesh_axes(("exp", "mlp", None))
+    w0_pspec = nn.logical_to_mesh_axes(("exp", "embed_tensor_transpose", "mlp"))
+    w1_pspec = nn.logical_to_mesh_axes(("exp", "embed_tensor_transpose", "mlp"))
+    wo_pspec = nn.logical_to_mesh_axes(("exp", "mlp", "embed_tensor_transpose"))
     if isinstance(w0_kernel, aqt.QTensor):
       w0_pspec = aqt.partition_spec(w0_pspec, (1,), w0_kernel.dtype, use_bias=False)
     if isinstance(w1_kernel, aqt.QTensor):
@@ -758,16 +765,21 @@ class RoutedMoE(nn.Module):
               expert_shard_id,
               num_expert_parallelism,
           )
-          # TODO(ranran): For better performance, we could update output buffer
-          # to a smaller size to replace self.get_expert_parallelism_size() for
-          # efficiency, or we could apply capacity_factor for excessive experts.
-          # Note: Reducing buffer increase the risk of token dropping under
-          # unbalanced distribution.
+
+          # TODO(ranran): For better performance, we could update output buffer to a smaller
+          # size to replace self.get_expert_parallelism_size() for efficiency,
+          # Or we could apply capacity_factor for excessive experts.
+          # Note: Reducing buffer increase the risk of token dropping under unbalanced distribution.
+
+          # In the worst case, all of the global input data is assigned to each expert in the current shard.
+          # This would result in num_expert_shards * input_size * experts_per_shard assignments. However, if
+          # experts_per_shard > num_experts_per_tok we cannot assign more than num_experts_per_tok to all of the inputs.
+          max_local_experts_per_tok = min(local_expert_size, self.config.num_experts_per_tok)
           buffer_size = int(
               num_expert_parallelism
               * self.config.per_device_batch_size
               * self.config.max_target_length
-              * self.config.num_experts_per_tok
+              * max_local_experts_per_tok
           )
           output_shape = jnp.zeros((buffer_size, self.config.emb_dim), dtype=x.dtype)
 
@@ -798,8 +810,12 @@ class RoutedMoE(nn.Module):
           )
 
       layer_w0 = gmm(x, w0, group_sizes, selected_experts)
+      if self.get_tensor_transpose_parallelism_size() > 1:
+        layer_w0 = jax.lax.psum(layer_w0, "tensor_transpose")
       layer_w0 = adc.checkpoint_name(layer_w0, "mlpwi_0")
       layer_w1 = gmm(x, w1, group_sizes, selected_experts)
+      if self.get_tensor_transpose_parallelism_size() > 1:
+        layer_w1 = jax.lax.psum(layer_w1, "tensor_transpose")
       layer_w1 = adc.checkpoint_name(layer_w1, "mlpwi_1")
       # pylint: disable=protected-access
       layer_act = linears._convert_to_activation_function(self.config.mlp_activations[0])(layer_w0)
@@ -1487,5 +1503,7 @@ class RoutedAndSharedMoE(nn.Module):
         config=cfg,
         quant=self.quant,
     )(inputs)
+    logical_axis_names = ("activation_batch", "activation_length", "activation_embed")
+    shared_experts = nn.with_logical_constraint(shared_experts, logical_axis_names)
 
     return routed_experts + shared_experts

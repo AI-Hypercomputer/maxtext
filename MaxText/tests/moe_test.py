@@ -33,6 +33,7 @@ from MaxText.globals import PKG_DIR
 from MaxText.layers.linears import mlp_block
 from MaxText.layers import moe
 from MaxText.layers.initializers import NdInitializer, nd_dense_init
+from MaxText.layers.quantizations import Fp8Quantization
 
 
 class TokenDroppingTest(unittest.TestCase):
@@ -158,6 +159,40 @@ class TokenDroppingTest(unittest.TestCase):
     self.assertTrue((expected_dispatch_mask == actual_dispatch_mask).all())
     self.assertTrue(jax.numpy.allclose(expected_combine_mask, actual_combine_mask, rtol=1e-02, atol=1e-02))
 
+class MlpBlockTest(unittest.TestCase):
+
+  def setUp(self):
+    super().setUp()
+    self.config = pyconfig.initialize(
+        [None, os.path.join(PKG_DIR, "configs", "base.yml")],
+        run_name="token_dropping_test",
+        enable_checkpointing=False,
+        model_name="mixtral-8x7b",
+        dtype="bfloat16",
+        megablox=False,
+        sparse_matmul=False,
+        max_target_length=80,
+        per_device_batch_size=1,
+        capacity_factor=2,
+    )
+    self.rng = jax.random.PRNGKey(42)
+    quant = Fp8Quantization()
+    self.model = mlp_block(
+        config=self.config,
+        in_features=2,
+        intermediate_dim=2,
+        activations=["silu", "linear"],
+        intermediate_dropout_rate=0.0,
+        dtype=jnp.bfloat16,
+        weight_dtype=jnp.bfloat16,
+        name="mlp",
+        quant=quant,
+        use_bias=True
+    )
+
+  def test_init(self):
+    x = jnp.array([1.0, 2.0])
+    self.model.init({"params": self.rng, "dropout": self.rng}, x)
 
 class DeepSeekRoutingTest(unittest.TestCase):
 
@@ -209,7 +244,7 @@ class DeepSeekRoutingTest(unittest.TestCase):
     #  [0.80, 0.01, 0.01, 0.01] - sum top2 = 0.81
     #  [0.05, 0.80, 0.20, 0.10] - sum top2 = 1.0 (selected group) - index from 12 to 15
     #
-    # 4 groups of 2st token
+    # 4 groups of 2nd token
     #  [0.68, 0.20, 0.06, 0.03] - sum top2 = 0.88 (selected group) - index from 0 to 3
     #  [0.32, 0.10, 0.05, 0.02] - sum top2 = 0.42
     #  [0.65, 0.20, 0.04, 0.01] - sum top2 = 0.85 (selected group) - index from 8 to 11
@@ -452,6 +487,51 @@ class RoutedMoeTest(unittest.TestCase):
       variables, expected_output = self.get_expected_output(rng_model, hidden_states, cfg)
       actual_output, _ = self.get_moe_output(variables, hidden_states, cfg, mesh)
       self.assertTrue(jax.numpy.allclose(expected_output, actual_output, rtol=1e-02, atol=1e-02, equal_nan=False))
+
+  @pytest.mark.tpu_only
+  def test_megablox_tp_transpose_parallelism(self):
+    cfg = pyconfig.initialize(
+        [None, os.path.join(PKG_DIR, "configs", "base.yml")],
+        run_name="moe_block_megablox_tp_transpose_test",
+        enable_checkpointing=False,
+        model_name="mixtral-8x7b",
+        dtype="bfloat16",
+        megablox=True,
+        sparse_matmul=True,
+        per_device_batch_size=1,
+        ici_tensor_transpose_parallelism=4,
+        max_target_length=128,
+    )
+
+    cfg2 = pyconfig.initialize(
+        [None, os.path.join(PKG_DIR, "configs", "base.yml")],
+        run_name="moe_block_megablox_tp_test",
+        enable_checkpointing=False,
+        model_name="mixtral-8x7b",
+        dtype="bfloat16",
+        megablox=True,
+        sparse_matmul=True,
+        per_device_batch_size=1,
+        ici_tensor_parallelism=4,
+        max_target_length=128,
+    )
+
+    rng = jax.random.PRNGKey(2345)
+    rng_model, rng_hidden_states = jax.random.split(rng)
+    device_count = jax.device_count()
+    hidden_states = jax.random.uniform(
+        rng_hidden_states,
+        (int(cfg.per_device_batch_size) * device_count, cfg.max_target_length, cfg.base_emb_dim),
+        dtype=cfg.dtype,
+    )
+
+    devices_array = maxtext_utils.create_device_mesh(cfg)
+    mesh = Mesh(devices_array, cfg.mesh_axes)
+    with nn_partitioning.axis_rules(cfg.logical_axis_rules):
+      variables, _ = self.get_expected_output(rng_model, hidden_states, cfg)
+      tp_transpose_output, _ = self.get_moe_output(variables, hidden_states, cfg, mesh)
+      tp_output, _ = self.get_moe_output(variables, hidden_states, cfg2, mesh)
+      self.assertTrue(jax.numpy.allclose(tp_output, tp_transpose_output, rtol=1e-05, atol=1e-05, equal_nan=False))
 
   @pytest.mark.tpu_only
   def test_megablox_context_parallelism(self):

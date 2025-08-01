@@ -25,9 +25,9 @@ nltk==3.9.1
 numpy==2.3.1
 omegaconf==2.3.0
 optax==0.2.5
-orbax==0.1.9
+orbax==0.11.20
 pandas==2.3.0
-pathwaysutils==0.1.1
+pathwaysutils@git+https://github.com/AI-Hypercomputer/pathways-utils.git@d6fffd3f9bd5e06c323f5bade04b40fa741c728f
 Pillow==11.2.1
 protobuf==6.31.1
 psutil==7.0.0
