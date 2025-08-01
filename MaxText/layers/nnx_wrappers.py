@@ -24,9 +24,9 @@ from flax.core import FrozenDict
 from flax.core import meta
 from flax.nnx import graph
 from flax.nnx import variablelib
+from flax.nnx import Object
 from flax.nnx.bridge import module as bdg_module
 from flax.nnx.module import Module
-from flax.nnx.object import Object
 from flax.nnx.rnglib import Rngs
 import jax
 from jax import tree_util as jtu
