@@ -17,7 +17,7 @@
 import contextlib
 import dataclasses
 import enum
-from typing import Any, Union
+from typing import Any, Callable, Union
 from absl import logging
 from flax import nnx
 import jax
@@ -30,6 +30,9 @@ from tunix.rl.inference import inference_worker
 from tunix.rl.rollout import base_rollout
 from tunix.rl.rollout import vanilla_rollout
 from tunix.sft import peft_trainer
+
+import functools
+from flax import linen as nn
 
 ModelOrPath = Union[nnx.Module, str]
 
@@ -94,22 +97,33 @@ class RLCluster:
       reward: ModelOrPath | None = None,
       tokenizer: Any | None,
       cluster_config: ClusterConfig,
+      model_config: Any | None = None,
+      load_model_function: Callable[[Any, ModelOrPath, Mesh], nnx.Module]
+      | None = None,
   ):
     self.cluster_config = cluster_config
     r2m = cluster_config.role_to_mesh
-    self.train_actor = self._load_model(actor, r2m[Role.ACTOR])
+    print(f"Cluster config: {cluster_config}")
+    print(f"Role to mesh mapping: {r2m}")
+    _load_model_fn = (
+        functools.partial(load_model_function, model_config)
+        if load_model_function is not None
+        else self._load_model
+    )
+    self.train_actor = _load_model_fn(actor, r2m[Role.ACTOR])
     if self.cluster_config.rollout_engine == "vanilla":
       # vLLM has it's own model loading logic. Only load for vanilla rollout.
-      self.rollout_actor = self._load_model(actor, r2m[Role.ROLLOUT])
-    self.critic = self._load_model(critic, r2m[Role.CRITIC]) if critic else None
+      self.rollout_actor = _load_model_fn(actor, r2m[Role.ROLLOUT])
+    self.critic = _load_model_fn(critic, r2m[Role.CRITIC]) if critic else None
     self.reference = (
-        self._load_model(reference, r2m[Role.REFERENCE]) if reference else None
+        _load_model_fn(reference, r2m[Role.REFERENCE]) if reference else None
     )
-    self.reward = self._load_model(reward, r2m[Role.REWARD]) if reward else None
+    self.reward = _load_model_fn(reward, r2m[Role.REWARD]) if reward else None
     self.tokenizer = tokenizer
     self._init_cluster()
 
   def _load_model(self, model_or_path: ModelOrPath, mesh: Mesh) -> nnx.Module:
+    #TODO(mazumdera): should we call this maybe_reshard_model?
     """Loads model with given mesh.
 
     If input is already an NNX model, check if the model is sharded on the
@@ -122,28 +136,33 @@ class RLCluster:
     Returns:
       The model loaded on the given mesh.
     """
-    if isinstance(model_or_path, nnx.Module):
-      model_mesh = utils.get_pytree_mesh_info(nnx.state(model_or_path))
-      if not mesh.empty and model_mesh != mesh:
-        logging.warning("Resharding model from %s to %s", model_mesh, mesh)
-        graph, state = nnx.split(model_or_path)
-        dst_shardings = jax.tree_util.tree_map(
-            lambda x: jax.sharding.NamedSharding(
-                mesh,
-                x,
-            ),
-            nnx.get_partition_spec(state),
-        )
-        model_or_path = nnx.merge(
-            graph,
-            reshard.reshard_pytree(
-                state,
-                dst_shardings,
-            ),
-        )
-      return model_or_path
-    else:
-      raise NotImplementedError("Loading from path is not supported yet.")
+    try:
+      if isinstance(model_or_path, nnx.Module):
+        model_mesh = utils.get_pytree_mesh_info(nnx.state(model_or_path))
+        if not mesh.empty and model_mesh != mesh:
+          logging.warning("Resharding model from %s to %s", model_mesh, mesh)
+          graph, state = nnx.split(model_or_path)
+          dst_shardings = nn.logical_to_mesh_sharding(
+              nnx.get_partition_spec(state),
+              mesh,
+          )
+          model_or_path = nnx.merge(
+              graph,
+              reshard.reshard_pytree(
+                  state,
+                  dst_shardings,
+              ),
+          )
+        return model_or_path
+      else:
+        raise NotImplementedError("Loading from path is not supported yet.")
+    except Exception as e:
+      logging.exception(
+          "Something went wrong while loading model %s on mesh %s.",
+          model_or_path,
+          mesh,
+      )
+      raise
 
   def _init_cluster(self):
     """Initializes the RL cluster."""
