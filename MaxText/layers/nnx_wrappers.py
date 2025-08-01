@@ -16,7 +16,6 @@
 
 import dataclasses
 import inspect
-from dataclasses import field, make_dataclass
 from functools import partial
 import typing as tp
 from typing import Any, Optional
@@ -236,9 +235,11 @@ class ToNNX(Module):
     if "params" not in _rngs and "default" in _rngs:
       _rngs["params"] = _rngs.pop("default")
     if self._object__state.initializing:
-      out, updates = self.to_nnx__module.init_with_output(_rngs, *args, method=method, **kwargs)
+      out, updates = self.to_nnx__module.init_with_output(
+          _rngs, *args, method=method, **kwargs)
     else:
-      nnx_attrs = {k: v for k, v in vars(self).items() if not k.startswith("to_nnx__") and not k.startswith("_object__")}
+      nnx_attrs = {k: v for k, v in vars(self).items() if not k.startswith(
+          "to_nnx__") and not k.startswith("_object__")}
       variables = nnx_attrs_to_linen_vars(nnx_attrs)
 
       # Get `mutable` from top level bridge.Module context if any
@@ -251,7 +252,8 @@ class ToNNX(Module):
           )
         kwargs["mutable"] = mutable
 
-      out = self.to_nnx__module.apply(variables, *args, rngs=_rngs, method=method, **kwargs)
+      out = self.to_nnx__module.apply(
+          variables, *args, rngs=_rngs, method=method, **kwargs)
 
       # Split out the updates if `mutable` is passed into the Flax module
       if kwargs.get("mutable", False) is not False:
@@ -276,7 +278,8 @@ class ToNNX(Module):
 def linen_rngs_dict(linen_module: linen.Module, add_default: bool = False):
   """Given a module, split out one of its every active RNG key collections."""
   assert linen_module.scope is not None, "linen_rngs_dict() must be called inside a Linen module."
-  rngs: dict[str, tp.Any] = {name: linen_module.make_rng(name) for name in linen_module.scope.rngs.keys()}
+  rngs: dict[str, tp.Any] = {name: linen_module.make_rng(
+      name) for name in linen_module.scope.rngs.keys()}
   if add_default and "default" not in rngs:
     rngs["default"] = 0
   return rngs
@@ -292,7 +295,8 @@ def _get_module_method(module, method: tp.Callable[..., Any] | str | None):
     method = getattr(type(module), attribute_name)
     if not callable(method):
       class_name = type(module).__name__
-      raise TypeError(f"'{class_name}.{attribute_name}' must be a callable, got {type(method)}.")
+      raise TypeError(
+          f"'{class_name}.{attribute_name}' must be a callable, got {type(method)}.")
   if not callable(method):
     class_name = type(module).__name__
     raise TypeError(f"'{method}' must be a callable, got {type(method)}.")
@@ -343,7 +347,8 @@ class ToLinen(linen.Module):
   args: tp.Sequence = ()
   kwargs: tp.Mapping[str, tp.Any] = FrozenDict({})
   skip_rng: bool = False
-  metadata_fn: tp.Callable[[variablelib.VariableState], tp.Any] | None = to_linen_var
+  metadata_fn: tp.Callable[[variablelib.VariableState],
+                           tp.Any] | None = to_linen_var
 
   @linen.compact
   def __call__(self, *args, nnx_method: tp.Callable[..., Any] | str | None = None, **kwargs):
@@ -352,7 +357,8 @@ class ToLinen(linen.Module):
 
     def _module_kwargs():
       if not self.skip_rng:
-        module_kwargs["rngs"] = nnx.Rngs(**linen_rngs_dict(self, add_default=maybe_add_default))
+        module_kwargs["rngs"] = nnx.Rngs(
+            **linen_rngs_dict(self, add_default=maybe_add_default))
       return module_kwargs
 
     # init codepath
@@ -407,7 +413,8 @@ class ToLinen(linen.Module):
     # group state by collection
     for path, leaf in nnx.to_flat_state(state):
       type_ = leaf.type if isinstance(leaf, nnx.VariableState) else type(leaf)
-      collection = variablelib.variable_name_from_type(type_, allow_register=True)
+      collection = variablelib.variable_name_from_type(
+          type_, allow_register=True)
       if collection not in collection_flat_state:
         collection_flat_state[collection] = []
       collection_flat_state[collection].append((path, leaf))
@@ -497,7 +504,8 @@ def get_reserved_linen_fields() -> set[str]:
 def to_linen_class(
     nnx_class: type[M],
     *args: tp.Any,
-    metadata_fn: tp.Callable[[variablelib.VariableState], tp.Any] | None = None,
+    metadata_fn: tp.Callable[[
+        variablelib.VariableState], tp.Any] | None = None,
     **static_kwargs: tp.Any,
 ) -> type[linen.Module]:
   """Dynamically wraps an NNX module class into a Flax Linen module class."""
@@ -512,11 +520,13 @@ def to_linen_class(
     if default is dataclasses.MISSING:
       dataclass_fields.append((name, annotation))
     else:
-      dataclass_fields.append((name, annotation, field(default=default)))
+      dataclass_fields.append(
+          (name, annotation, dataclasses.field(default=default)))
 
-  dataclass_fields.append(("extra_kwargs", tp.Optional[dict], field(default=None)))
+  dataclass_fields.append(
+      ("extra_kwargs", tp.Optional[dict], dataclasses.field(default=None)))
 
-  WrappedModule = make_dataclass(
+  WrappedModule = dataclasses.make_dataclass(
       cls_name=f"Wrapped{nnx_class.__name__}",
       fields=dataclass_fields,
       bases=(linen.Module,),
@@ -532,7 +542,8 @@ def to_linen_class(
 def to_linen(
     nnx_class: tp.Callable[..., Module],
     *args,
-    metadata_fn: tp.Callable[[variablelib.VariableState], tp.Any] | None = to_linen_var,
+    metadata_fn: tp.Callable[[variablelib.VariableState],
+                             tp.Any] | None = to_linen_var,
     name: str | None = None,
     skip_rng: bool = False,
     abstract_init: bool = True,
