@@ -38,7 +38,7 @@ from MaxText.layers import linears
 from MaxText.layers import quantizations
 import numpy as np
 from MaxText.layers import nnx_wrappers
-from MaxText.layers.initializers import NdInitializer, nd_dense_init, default_bias_init
+from MaxText.layers.initializers import NdInitializer, nd_dense_init, default_bias_init, variable_to_logically_partitioned
 
 
 set_xla_metadata = xla_metadata.set_xla_metadata
@@ -238,6 +238,7 @@ def gate_logit_module(
       quant=quant,
       matmul_precision=matmul_precision,
       name=name,
+      metadata_fn=variable_to_logically_partitioned,
       abstract_init=False,
   )
   return module

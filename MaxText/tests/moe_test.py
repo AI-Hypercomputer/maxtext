@@ -33,8 +33,9 @@ from MaxText.common_types import Config, DType
 from MaxText.globals import PKG_DIR
 from MaxText.layers.linears import mlp_block
 from MaxText.layers import moe
-from MaxText.layers.initializers import NdInitializer, nd_dense_init
+from MaxText.layers.initializers import NdInitializer, nd_dense_init, variable_to_logically_partitioned
 from MaxText.layers.quantizations import Fp8Quantization
+from MaxText.layers import nnx_wrappers
 
 
 class TokenDroppingTest(unittest.TestCase):
@@ -167,7 +168,7 @@ class MlpBlockTest(unittest.TestCase):
     super().setUp()
     self.config = pyconfig.initialize(
         [None, os.path.join(PKG_DIR, "configs", "base.yml")],
-        run_name="token_dropping_test",
+        run_name="mlp_block_test",
         enable_checkpointing=False,
         model_name="mixtral-8x7b",
         dtype="bfloat16",
@@ -283,10 +284,10 @@ class MoeLoopBlock(nnx.Module):
       weight_dtype: DType = jnp.float32,
       dtype: DType = jnp.bfloat16,
   ):
-    self.config=config
-    self.inputs_shape=inputs_shape
-    self.num_experts=num_experts
-    self.num_experts_per_tok=num_experts_per_tok
+    self.config = config
+    self.inputs_shape = inputs_shape
+    self.num_experts = num_experts
+    self.num_experts_per_tok = num_experts_per_tok
     self.kernel_init = kernel_init
     self.kernel_axes = kernel_axes
     self.weight_dtype = weight_dtype
@@ -331,12 +332,37 @@ class MoeLoopBlock(nnx.Module):
     return mlp_lnx
 
 
+def moe_loop_module(
+    config: Config,
+    inputs_shape: tuple[int, ...],
+    num_experts: int,
+    num_experts_per_tok: int,
+    kernel_init: NdInitializer,
+    kernel_axes: Tuple[str, ...],
+    weight_dtype: DType = jnp.float32,
+    dtype: DType = jnp.bfloat16,
+):
+  module = nnx_wrappers.to_linen(
+      MoeLoopBlock,
+      config=config,
+      inputs_shape=inputs_shape,
+      num_experts=num_experts,
+      num_experts_per_tok=num_experts_per_tok,
+      kernel_init=kernel_init,
+      kernel_axes=kernel_axes,
+      weight_dtype=weight_dtype,
+      dtype=dtype,
+      metadata_fn=variable_to_logically_partitioned,
+  )
+  return module
+
+
 class RoutedMoeTest(unittest.TestCase):
   """Routed Mixture of Experts test."""
 
   def get_expected_output(self, rng, hidden_states, cfg):
     """Retrieve expected output from Routed Mixture of Experts."""
-    model = MoeLoopBlock(
+    model = moe_loop_module(
         config=cfg,
         inputs_shape=hidden_states.shape,
         num_experts=cfg.num_experts,
@@ -344,11 +370,18 @@ class RoutedMoeTest(unittest.TestCase):
         kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
         kernel_axes=("embed", "mlp"),
         dtype=cfg.dtype,
-        rngs=rng,
+        weight_dtype=cfg.weight_dtype,
     )
 
-    variables = nnx.state(model)
-    output = jax.jit(model)(hidden_states)  # pylint: disable=not-callable
+    # output, variables = model.init_with_output(jax.random.key(0), hidden_states)
+    # variables = nnx.state(model)
+    # output = jax.jit(model)(hidden_states)  # pylint: disable=not-callable
+
+    variables = model.init(
+        rng, jax.random.normal(rng, (int(cfg.per_device_batch_size), cfg.max_target_length, cfg.base_emb_dim))
+    )
+
+    output = jax.jit(model.apply)(variables, hidden_states)  # pylint: disable=not-callable
     return variables, output
 
   def get_moe_output(self, variables, hidden_states, cfg, mesh):
