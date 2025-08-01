@@ -29,10 +29,7 @@ export DATASET_PATH=gs://maxtext-dataset
 export SCANNED_CHECKPOINT=${BASE_OUTPUT_PATH}/${MODEL_VARIATION}/scanned_ckpt/0/items
 
 # `UNSCANNED_CHECKPOINT` refers to run decoding
-# export UNSCANNED_CKPT_PATH=${BASE_OUTPUT_PATH}/unscanned_ckpt/checkpoints/0/items
-# TODO: investigate issue of latest generated unscanned checkpoints
-# Hard-code an old checkpoint for now.
-export UNSCANNED_CKPT_PATH=gs://ml-auto-solutions/output/sparsity_diffusion_devx/maxtext/chained_tests_mixtral-8x7b_nightly-2024-11-15-01-06-09/unscanned_ckpt/checkpoints/0/items
+export UNSCANNED_CKPT_PATH=${BASE_OUTPUT_PATH}/unscanned_ckpt/checkpoints/0/items
 
 # Run decoding with converted ckpt - matmul implementation
 # TODO(ranran): add decoding test for megablox implementation
