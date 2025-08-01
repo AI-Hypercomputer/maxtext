@@ -255,6 +255,11 @@ class QuantTest(unittest.TestCase):
         "per_device_batch_size": 1,
         "use_qwix_quantization": True,
         "skip_jax_distributed_system": True,
+        "base_emb_dim": 1024,
+        "base_num_query_heads": 8,
+        "base_num_kv_heads": 8,
+        "base_mlp_dim": 4096,
+        "base_num_decoder_layers": 12,
     } | kwargs
     config = pyconfig.initialize(
         [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
@@ -279,8 +284,7 @@ class QuantTest(unittest.TestCase):
     return all(jnp.abs(y - x).mean() / jnp.abs(x).mean() < tolerance for x, y in zip(leaves_a, leaves_b))
 
   def quantization_config(self, quant):
-    """ Run forward pass and backward pass for quantized model and compare with base model.
-    """
+    """Run forward pass and backward pass for quantized model and compare with base model."""
     cfg = self.init_pyconfig(quantization=quant)
     model = train_utils.create_model(self.cfg, self.mesh)
     qt_model = train_utils.create_model(cfg, self.mesh)
@@ -337,6 +341,14 @@ class QuantTest(unittest.TestCase):
   @pytest.mark.tpu_only
   def test_fp8_full_quantization(self):
     self.quantization_config("fp8_full")
+
+  @pytest.mark.gpu_only
+  def test_fp8_gpu_quantization(self):
+    self.quantization_config("fp8_gpu")
+
+  @pytest.mark.gpu_only
+  def test_fp8_nanoo_quantization(self):
+    self.quantization_config("fp8_nanoo")
 
 
 if __name__ == "__main__":

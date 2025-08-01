@@ -612,35 +612,83 @@ def configure_kv_quant(config):
   return None if not config.quantize_kvcache else KVQuant(config)
 
 
+class NvidaFp8Provider(qwix.QtProvider):
+  """Wraps nn.Fp8DirectDotGeneralOp with Qwix's provider interface."""
+
+  def dot_general(self, *args, **kwargs):
+    # Here we only check if the rule is None or not.
+    rule, op_id = self._get_current_rule_and_op_id("dot_general")
+    if rule is None:
+      return jax.lax.dot_general(*args, **kwargs)
+    return nn.Fp8DirectDotGeneralOp(name=op_id)(*args, **kwargs)
+
+  def einsum(self, *args, **kwargs):
+    rule, op_id = self._get_current_rule_and_op_id("einsum")
+    if rule is None:
+      return jnp.einsum(*args, **kwargs)
+    return nn.Fp8Einsum(name=op_id)(*args, **kwargs)
+
+
+class NANOOFp8Provider(qwix.QtProvider):
+
+  def dot_general(self, *args, **kwargs):
+    # Here we only check if the rule is None or not.
+    rule, op_id = self._get_current_rule_and_op_id("dot_general")
+    if rule is None:
+      return jax.lax.dot_general(*args, **kwargs)
+    return nn.NANOOFp8DotGeneralOp(name=op_id)(*args, **kwargs)
+
+
 def get_basic_config(config, dtype):
   rules = [
       qwix.QtRule(
-        module_path='decoder/.*layers.*',  # Apply to all modules
-        weight_qtype=dtype,
-        act_qtype=dtype,
-        bwd_weight_grad_tile_size = 1 / config.quantization_local_shard_count
+          module_path="decoder/.*layers.*",  # Apply to all modules
+          weight_qtype=dtype,
+          act_qtype=dtype,
+          bwd_weight_grad_tile_size=1 / config.quantization_local_shard_count,
       )
-    ]
+  ]
+  return rules
+
+
+def get_config(config, dtype):
+  """Config rules which avoid quantizing self-attention when using dot-product attention."""
+  rules = [
+      qwix.QtRule(
+          # qk_einsum and av_einsum in dot-product attention are not quantized.
+          module_path="decoder/.*layers.*/self_attention/.+",
+          op_names=("einsum",),
+          weight_qtype=None,
+          act_qtype=None,
+      ),
+      qwix.QtRule(
+          # Quantize other projections, minus embedding.
+          module_path="decoder/.*layers.*",
+          weight_qtype=dtype,
+          act_qtype=dtype,
+          bwd_weight_grad_tile_size=1 / config.quantization_local_shard_count,
+      ),
+  ]
   return rules
 
 
 def get_fp8_config(config):
-  """ fp8 config rules with per-tensor calibration.
-  """
+  """fp8 config rules with per-tensor calibration."""
   rules = [
       qwix.QtRule(
-        module_path='decoder/.*layers.*',  # Apply to all modules
-        weight_qtype=jnp.float8_e4m3fn,
-        act_qtype=jnp.float8_e4m3fn,
-        bwd_qtype=jnp.float8_e5m2,
-        bwd_use_original_residuals=True,
-        disable_channelwise_axes=True, # per_tensor calibration
-        weight_calibration_method = config.quantization_calibration_method,
-        act_calibration_method = config.quantization_calibration_method,
-        bwd_calibration_method = config.quantization_calibration_method,
+          module_path="decoder/.*layers.*",  # Apply to all modules
+          weight_qtype=jnp.float8_e4m3fn,
+          act_qtype=jnp.float8_e4m3fn,
+          bwd_qtype=jnp.float8_e5m2,
+          bwd_use_original_residuals=True,
+          disable_channelwise_axes=True,  # per_tensor calibration
+          weight_calibration_method=config.quantization_calibration_method,
+          act_calibration_method=config.quantization_calibration_method,
+          bwd_calibration_method=config.quantization_calibration_method,
       )
-    ]
+  ]
   return rules
+
 
 def get_qt_provider(config):
   """Get quantization rules based on the config."""
@@ -651,6 +699,10 @@ def get_qt_provider(config):
       return qwix.QtProvider(get_basic_config(config, jnp.float8_e4m3fn))
     case "fp8_full":
       return qwix.QtProvider(get_fp8_config(config))
+    case "fp8_gpu":
+      return NvidaFp8Provider(get_config(config, jnp.float8_e4m3fn))
+    case "fp8_nanoo":
+      return NANOOFp8Provider(get_config(config, jnp.float8_e4m3fn))
   return None
 
 
