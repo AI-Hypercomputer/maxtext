@@ -28,6 +28,7 @@ import jax.numpy as jnp
 from jax.sharding import Mesh
 from jax.experimental import mesh_utils
 from MaxText.globals import PKG_DIR
+from MaxText.common_types import MODEL_MODE_TRAIN
 from MaxText import pyconfig
 from MaxText import maxtext_utils
 from MaxText.layers import attentions, embeddings, llama4
@@ -639,13 +640,16 @@ class Llama4VisionAttentionTest(unittest.TestCase):
     freqs_ci = freqs_ci_model.forward()
     attn_output_pt, _ = model_pt(hidden_states_pt, freqs_ci=freqs_ci)
 
-    attention_layer = Attention(
+    lnx = to_jax(hidden_states_pt)
+    attention_layer = attentions.attention_as_linen(
         config=self.cfg,
         num_query_heads=self.cfg.num_attention_heads_for_vit,
         num_kv_heads=self.cfg.num_attention_heads_for_vit,
         head_dim=self.cfg.hidden_size_for_vit // self.cfg.num_attention_heads_for_vit,
         max_target_length=self.seq_len_for_vit,
         attention_kernel="dot_product",  # TODO aireenmei: support flash attention
+        inputs_q=lnx,
+        inputs_kv=lnx,
         mesh=self.mesh,
         dropout_rate=0,
         name="self_attention_vision",
@@ -655,9 +659,9 @@ class Llama4VisionAttentionTest(unittest.TestCase):
         is_vision=True,
         use_qk_norm=False,
         query_pre_attn_scalar=1 / math.sqrt(self.cfg.hidden_size_for_vit // self.cfg.num_attention_heads_for_vit),
+        model_mode=MODEL_MODE_TRAIN,
     )
 
-    lnx = to_jax(hidden_states_pt)
     key = jax.random.PRNGKey(0)
     attention_layer_params = attention_layer.init(
         key,
