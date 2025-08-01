@@ -18,6 +18,8 @@
 name: Build Images
 
 on:
+  # DO NOT SUBMIT THIS LINE
+  pull_request:
   schedule:
     # Run the job daily at 12AM UTC
     - cron: '0 0 * * *'
@@ -73,6 +75,8 @@ jobs:
           - image_name: maxtext_stable_stack_candidate
             dockerfile: ./maxtext_jax_ai_image.Dockerfile
             base_image: us-docker.pkg.dev/tpu-prod-env-multipod/jax-stable-stack/candidate/tpu:latest
+          - image_name: maxtext_no_pip
+            dockerfile: ./maxtext_no_pip.Dockerfile
 
     # Setup for GKE runners per b/412986220#comment82 and b/412986220#comment90
     steps:
@@ -138,6 +142,8 @@ jobs:
           - image_name: maxtext_stable_stack_candidate_gpu
             dockerfile: ./maxtext_jax_ai_image.Dockerfile
             base_image: us-docker.pkg.dev/tpu-prod-env-multipod/jax-stable-stack/candidate/gpu:latest
+          - image_name: maxtext_no_pip
+            dockerfile: ./maxtext_no_pip.Dockerfile
 
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
