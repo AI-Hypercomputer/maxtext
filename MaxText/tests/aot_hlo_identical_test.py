@@ -156,10 +156,12 @@ class AotHloIdenticalTest(unittest.TestCase):
     self.assert_compile_and_real_match_hlo("default_run")
 
   @pytest.mark.tpu_only
+  @pytest.mark.scheduled_only
   def test_int8_hlo_match(self):
     self.assert_compile_and_real_match_hlo("int8", "quantization=int8")
 
   @pytest.mark.tpu_only
+  @pytest.mark.scheduled_only
   def test_llama2_7b_hlo_match(self):
     self.assert_compile_and_real_match_hlo(
         "llama2-7b",
