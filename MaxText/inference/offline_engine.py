@@ -923,10 +923,10 @@ class OfflineEngine:
       devices_array = np.array(devices).reshape((1,) * len(config.mesh_axes))
     else:
       devices_array = mesh_utils.create_device_mesh(
-        ici_parallelism,
-        devices,
-        contiguous_submeshes=False,
-        allow_split_physical_axes=config.allow_split_physical_axes or False,
+          ici_parallelism,
+          devices,
+          contiguous_submeshes=False,
+          allow_split_physical_axes=config.allow_split_physical_axes or False,
       )
     mesh = Mesh(devices_array.reshape(ici_parallelism), config.mesh_axes)
     return mesh

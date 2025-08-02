@@ -920,8 +920,7 @@ def reorder_mask_load_balancing(tensor, cp_size: int, seq_dim: int):
 
 
 def parse_custom_args(argv):
-  """ Load multiple YAML config files from command line arguments.
-  """
+  """Load multiple YAML config files from command line arguments."""
   configs = []
   current_argv = []
   python_script = argv[0]
@@ -955,7 +954,7 @@ def unscan_train_state_params(params, sharding, mesh, scan_axis, layer_groups):
     scanned_layers = decoder[layer_name]
 
     def strip_axis(pspec):
-      return jax.sharding.PartitionSpec(*(pspec[:scan_axis] + pspec[scan_axis+1:]))
+      return jax.sharding.PartitionSpec(*(pspec[:scan_axis] + pspec[scan_axis + 1 :]))
 
     old_spec = jax.tree_util.tree_map(lambda x: x.spec, sharding[layer_name])
     new_spec = jax.tree_util.tree_map(strip_axis, old_spec)
@@ -963,6 +962,7 @@ def unscan_train_state_params(params, sharding, mesh, scan_axis, layer_groups):
 
     def slice_layer(arr, i):
       return jax.tree_util.tree_map(lambda x: jnp.take(x, i, axis=scan_axis), arr)
+
     p_slice_layer = jax.jit(slice_layer, out_shardings=new_sharding)
 
     for i in range(num_layers):
@@ -970,6 +970,7 @@ def unscan_train_state_params(params, sharding, mesh, scan_axis, layer_groups):
       decoder[f"{layer_name}_{i}"] = per_layer
 
     del decoder[layer_name]  # Free memory
+
 
 def rescan_train_state_params(params, source_shardings, scan_axis, layer_groups):
   """
@@ -991,9 +992,9 @@ def rescan_train_state_params(params, source_shardings, scan_axis, layer_groups)
 
     # Create a wrapper that allows pjit + donation
     compiled_stack = jax.jit(
-      stack_layers,
-      out_shardings=sharding[layer_name],
-      # donate_argnums=tuple(range(num_layers)),
+        stack_layers,
+        out_shardings=sharding[layer_name],
+        # donate_argnums=tuple(range(num_layers)),
     )
 
     # Collect per-layer entries for stacking
