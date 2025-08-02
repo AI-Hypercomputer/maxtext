@@ -26,8 +26,6 @@ from aqt.jax.v2.flax import aqt_flax
 from aqt.jax.v2 import tiled_dot_general
 from aqt.jax.v2 import calibration
 
-import qwix
-
 import jax
 import jax.numpy as jnp
 from jax.tree_util import tree_flatten_with_path, tree_unflatten
@@ -548,6 +546,7 @@ def get_quant_mode(quant_mode_str: str = "train"):
 def configure_quantization(config: Config, quant_mode_str: str = "train"):
   """Configure quantization based on user config and quant mode."""
   if config.use_qwix_quantization:
+    import qwix
     return None
   quant_cfg = _get_quant_config(config)
   if quant_cfg:
@@ -657,6 +656,7 @@ def get_qt_provider(config):
 def maybe_quantize_model(model, config):
   """Quantize the model if quantization is enabled."""
   if config.use_qwix_quantization:
+    import qwix
     quantization_provider = get_qt_provider(config)
     if quantization_provider:
       model = qwix.quantize_model(model, quantization_provider)
