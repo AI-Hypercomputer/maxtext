@@ -44,12 +44,161 @@ import orbax.checkpoint as ocp
 from tensorboardX import writer
 
 from MaxText import max_logging
+from MaxText.common_types import DecoderBlockType
 
 
 HYBRID_RING_64X4 = "hybrid_ring_64x4"
 HYBRID_RING_32X8 = "hybrid_ring_32x8"
 
 # pylint: disable=too-many-positional-arguments
+
+
+def calculate_active_training_param_size(config):
+  """
+  Calculates the (active) training parameter count with given config
+  """
+  DecoderTypeToFunction = {
+    DecoderBlockType.LLAMA2: calculate_dense_param_size,
+    DecoderBlockType.LLAMA4: calculate_deepseek_param_size,
+    DecoderBlockType.QWEN3: calculate_dense_param_size,
+    DecoderBlockType.GPT3: calculate_dense_param_size,
+    DecoderBlockType.MISTRAL: calculate_dense_param_size,
+    DecoderBlockType.GEMMA2: calculate_gemma2_param_size,
+    DecoderBlockType.GEMMA3: calculate_dense_param_size,
+    DecoderBlockType.DEEPSEEK: calculate_deepseek_param_size,
+    DecoderBlockType.MIXTRAL: calculate_mixtral_param_size,
+  }
+  if config.decoder_block not in DecoderTypeToFunction:
+    raise ValueError(f"The decoder block {config.decoder_block} is not supported.")
+  return DecoderTypeToFunction[config.decoder_block](config)
+
+
+def calculate_dense_param_size(config):
+  """
+  Calculates the parameter count for dense models, e.g. llama2/3, gpt.
+  """
+  # Configuration parameters
+  N = config.base_num_decoder_layers
+  V = config.vocab_size
+  D_emb = config.base_emb_dim
+  D_mlp = config.base_mlp_dim
+  D_head = config.head_dim
+  H_q = config.base_num_query_heads
+  H_kv = config.base_num_kv_heads
+  mlp_activations_len = len(config.mlp_activations)
+
+  ffn_param = N * D_emb * D_mlp * (mlp_activations_len + 1)
+  qkv_param = N * D_emb * (H_q + 2 * H_kv) * D_head
+  norm_param = N * D_emb * 2 + D_emb
+  output_param = N * D_emb * H_q * D_head
+  embd_param = D_emb * V
+  # Double embedding layer size if they are untied
+  if not config.logits_via_embedding:
+    embd_param *= 2
+
+  return ffn_param + qkv_param + norm_param + output_param + embd_param
+
+
+def calculate_gemma2_param_size(config):
+  """
+  Calculates the parameter count for Gemma2 models.
+  """
+  # Configuration parameters
+  N = config.base_num_decoder_layers
+  V = config.vocab_size
+  D_emb = config.base_emb_dim
+  D_mlp = config.base_mlp_dim
+  D_head = config.head_dim
+  H_q = config.base_num_query_heads
+  H_kv = config.base_num_kv_heads
+  mlp_activations_len = len(config.mlp_activations)
+
+  ffn_param = N * D_emb * D_mlp * (mlp_activations_len + 1)
+  qkv_param = N * D_emb * (H_q + 2 * H_kv) * D_head
+  norm_param = N * D_emb * 2 + D_emb
+  output_param = N * D_emb * H_q * D_head
+  embd_param = D_emb * V
+  # Double embedding layer size if they are untied
+  if not config.logits_via_embedding:
+    embd_param *= 2
+
+  return 2 * (ffn_param + qkv_param + norm_param + output_param) + embd_param
+
+
+def calculate_mixtral_param_size(config):
+  """
+  Calculate the active parameter count for a Mixtral-style model.
+  """
+  # Configuration parameters
+  N = config.base_num_decoder_layers
+  V = config.vocab_size
+  D_emb = config.base_emb_dim
+  D_mlp = config.base_mlp_dim
+  D_head = config.head_dim
+  H_q = config.base_num_query_heads
+  H_kv = config.base_num_kv_heads
+  E = config.num_experts
+  E_per_tok = config.num_experts_per_tok
+  mlp_activations_len = len(config.mlp_activations)
+
+  moe_param = N * (D_emb * E + D_emb * D_mlp * E_per_tok * (mlp_activations_len + 1))
+  qkv_param = N * D_emb * (H_q + 2 * H_kv) * D_head
+  norm_param = N * D_emb * 2 + D_emb
+  output_param = N * D_emb * H_q * D_head
+  embd_param = D_emb * V
+  # Double embedding layer size if they are untied
+  if not config.logits_via_embedding:
+    embd_param *= 2
+
+  return moe_param + qkv_param + norm_param + output_param + embd_param
+
+
+def calculate_deepseek_param_size(config):
+  """
+  Calculates the active parameter count for a DeepSeek-style model.
+  """
+  # Configuration parameters
+  N = config.base_num_decoder_layers
+  V = config.vocab_size
+  D_emb = config.base_emb_dim
+  mlp_activations_len = len(config.mlp_activations)
+  num_dense_layers = config.first_num_dense_layers
+  num_moe_layers = N - num_dense_layers
+  E = config.num_experts
+  shared_experts = config.shared_experts
+  E_per_tok = config.num_experts_per_tok
+  D_mlp_dense = config.base_mlp_dim
+  D_mlp_moe = config.base_moe_mlp_dim
+  qk_nope_hd = config.qk_nope_head_dim
+  qk_rope_hd = config.qk_rope_head_dim
+  v_hd = config.v_head_dim
+  H_q = config.base_num_query_heads
+  kv_lora_rank = config.kv_lora_rank
+  q_lora_rank = config.q_lora_rank
+
+  dense_ffn_param = num_dense_layers * D_emb * D_mlp_dense * (mlp_activations_len + 1)
+  moe_ffn_param = num_moe_layers * (
+    D_emb * E + D_emb * D_mlp_moe * (mlp_activations_len + 1) * (shared_experts + E_per_tok)
+  )
+
+  if q_lora_rank == 0:
+    q_param = N * D_emb * H_q * (qk_nope_hd + qk_rope_hd)
+  else:
+    q_param = N * (D_emb * q_lora_rank + q_lora_rank * H_q * (qk_nope_hd + qk_rope_hd))
+
+  kv_param = N * (D_emb * (kv_lora_rank + qk_rope_hd) + kv_lora_rank * H_q * (qk_nope_hd + v_hd))
+  output_param = N * D_emb * H_q * v_hd
+  embd_param = D_emb * V
+  # norm_param includes pre/post-attention, kv_norm, and final norms.
+  norm_param = N * (2 * D_emb + D_emb) + D_emb
+  # q_norm is conditional on q_lora_rank > 0.
+  if q_lora_rank > 0:
+    norm_param += N * D_emb
+  # Double embedding layer size if they are untied
+  if not config.logits_via_embedding:
+    embd_param *= 2
+
+  return dense_ffn_param + moe_ffn_param + q_param + kv_param + output_param + embd_param + norm_param
 
 
 def with_memory_kind(t, memory_kind):
