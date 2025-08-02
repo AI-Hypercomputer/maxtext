@@ -189,9 +189,13 @@ class TransformerNNX(nnx.Module):
 
     decoder_linen = Decoder(config=cfg, mesh=mesh, quant=self.quant)
     self.decoder = nnx_wrappers.ToNNX(decoder_linen, rngs=rngs)
+    # for multi device training
+    devices_in_data_fsdp = self.mesh.shape["data"] * self.mesh.shape["fsdp"]
+
     self.decoder.lazy_init(
       shared_embedding=self.token_embedder,
-      decoder_input_tokens=jnp.ones((1, 1), dtype=jnp.int32),
+      # decoder_input_tokens=jnp.ones((1, 1), dtype=jnp.int32),
+      decoder_input_tokens=jnp.ones((devices_in_data_fsdp, cfg.max_target_length), dtype=jnp.int32), #
       decoder_positions=jnp.ones((1, 1), dtype=jnp.int32),
       decoder_segment_ids=None,
       deterministic=True,
