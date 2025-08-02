@@ -3,7 +3,7 @@ jaxlib>=0.4.30
 orbax-checkpoint>=0.11.20
 absl-py
 array-record
-aqtp
+aqtp>=0.9.0
 cloud-accelerator-diagnostics
 cloud-tpu-diagnostics
 datasets
