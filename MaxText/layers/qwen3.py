@@ -74,7 +74,7 @@ class Qwen3DecoderLayer(nn.Module):
     lnx = nn.with_logical_constraint(lnx, ("activation_batch", "activation_length", "activation_embed"))
 
     # Self-attention block
-    attention_layer = attentions.Attention(
+    attention_layer = attentions.attention_as_linen(
         config=cfg,
         num_query_heads=cfg.num_query_heads,
         num_kv_heads=cfg.num_kv_heads,
@@ -82,6 +82,8 @@ class Qwen3DecoderLayer(nn.Module):
         max_target_length=cfg.max_target_length,
         max_prefill_predict_length=cfg.max_prefill_predict_length,
         attention_kernel=cfg.attention,
+        inputs_q=lnx,
+        inputs_kv=lnx,
         mesh=mesh,
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
@@ -91,6 +93,7 @@ class Qwen3DecoderLayer(nn.Module):
         kv_quant=quantizations.configure_kv_quant(cfg),
         use_qk_norm=cfg.use_qk_norm,
         query_pre_attn_scalar=(cfg.head_dim**-0.5),  # Qwen3 specific scaling
+        model_mode=model_mode,
     )
 
     attention_output = attention_layer(

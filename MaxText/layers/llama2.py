@@ -31,7 +31,7 @@ from MaxText.inference import page_manager
 from MaxText.common_types import Config
 from MaxText.layers.linears import mlp_block
 from MaxText.layers import quantizations
-from MaxText.layers.attentions import Attention
+from MaxText.layers.attentions import attention_as_linen
 from MaxText.layers.quantizations import AqtQuantization as Quant
 from MaxText.layers.normalizations import rms_norm
 from MaxText.common_types import MODEL_MODE_PREFILL
@@ -84,7 +84,7 @@ class LlamaDecoderLayer(nn.Module):
     lnx = nn.with_logical_constraint(lnx, activation_axis_names)
 
     # Self-attention block
-    attention_layer = Attention(
+    attention_layer = attention_as_linen(
         config=cfg,
         num_query_heads=cfg.num_query_heads,
         num_kv_heads=cfg.num_kv_heads,
@@ -92,6 +92,8 @@ class LlamaDecoderLayer(nn.Module):
         max_target_length=cfg.max_target_length,
         max_prefill_predict_length=cfg.max_prefill_predict_length,
         attention_kernel=cfg.attention,
+        inputs_q=lnx,
+        inputs_kv=lnx,
         mesh=mesh,
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
@@ -107,6 +109,7 @@ class LlamaDecoderLayer(nn.Module):
         reshape_q=cfg.reshape_q,
         use_ragged_attention=cfg.use_ragged_attention,
         ragged_block_size=cfg.ragged_block_size,
+        model_mode=model_mode,
     )
 
     attention_lnx = attention_layer(
