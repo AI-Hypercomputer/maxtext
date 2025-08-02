@@ -49,6 +49,10 @@ class TestPageManager(unittest.TestCase):
         pagedattn_max_pages_per_group=self.max_pages_per_group,
     )
     self.config = config
+
+    if jax.device_count() == 1:
+      self.config.get_keys()["global_batch_size_to_load"] = 8
+
     self.max_page_groups = self.config.global_batch_size_to_load
 
     print("Note: Running PageManager tests locally without a JAX mesh.")

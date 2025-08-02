@@ -28,7 +28,7 @@ from flax import linen as nn
 from MaxText import maxtext_utils
 from MaxText import pyconfig
 from MaxText.common_types import MODEL_MODE_TRAIN
-from MaxText.globals import PKG_DIR
+from MaxText.globals import PKG_DIR, tpu_present, gpu_present
 from MaxText.layers import pipeline
 from MaxText.layers import simple_layer
 from MaxText.train import main as train_main
@@ -157,6 +157,7 @@ class PipelineParallelismTest(unittest.TestCase):
     )
 
   @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_circular_minimum_microbatches_same_output_and_grad(self):
     # 4 stages, 8 layers (2 repeats, 1 layer per stage), 4 microbatches
     config = pyconfig.initialize(
@@ -174,6 +175,7 @@ class PipelineParallelismTest(unittest.TestCase):
     self.assert_pipeline_same_output_and_grad(config)
 
   @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_circular_extra_microbatches_same_output_and_grad(self):
     # 4 stages, 8 layers (2 repeats, 1 layer per stage), 8 microbatches
     config = pyconfig.initialize(
@@ -191,6 +193,7 @@ class PipelineParallelismTest(unittest.TestCase):
     self.assert_pipeline_same_output_and_grad(config)
 
   @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_circular_deepseek_megablox_same_output_and_grad(self):
     # 4 stages, 8 layers (2 repeats, 1 layer per stage), 8 microbatches
     config = pyconfig.initialize(
@@ -214,6 +217,7 @@ class PipelineParallelismTest(unittest.TestCase):
     self.assert_pipeline_same_output_and_grad(config, single_pipeline_stage_class=deepseek.DeepSeekMoELayer)
 
   @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_circular_ag_once(self):
     # 2 stages, 8 microbatches, all gather once
     config = pyconfig.initialize(
@@ -232,6 +236,7 @@ class PipelineParallelismTest(unittest.TestCase):
     self.assert_pipeline_same_output_and_grad(config)
 
   @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_non_circular_same_output_and_grad(self):
     # 4 stages, 4 layers (no circular repeats, 1 layer per stage), 4 microbatches
     config = pyconfig.initialize(
@@ -249,6 +254,7 @@ class PipelineParallelismTest(unittest.TestCase):
 
   @pytest.mark.integration_test
   @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_full_train_circular(self):
     # Run a full train.py call with 4 stages, 32 layers (2 layers per stage, 4 circular repeats), 8 microbatches
     train_main(
@@ -280,6 +286,7 @@ class PipelineParallelismTest(unittest.TestCase):
     )
 
   @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_delay_activation_forwarding_same_output_and_grad(self):
     # 4 stages, delayed activation forwarding, 8 layers (2 repeats, 1 layer per stage), 8 microbatches
     config = pyconfig.initialize(
@@ -299,6 +306,7 @@ class PipelineParallelismTest(unittest.TestCase):
 
   @pytest.mark.integration_test
   @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_full_train_non_circular(self):
     # Run a full train.py call with 4 stages, 32 layers (8 layers per stage), 8 microbatches
     train_main(
@@ -331,6 +339,7 @@ class PipelineParallelismTest(unittest.TestCase):
 
   @pytest.mark.integration_test
   @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_subset_layers(self):
     # Run a full train.py call with 4 stages, 16 layers - 8 in pipeline, 8 ran outside of pipeline
     train_main(
@@ -364,6 +373,7 @@ class PipelineParallelismTest(unittest.TestCase):
     )
 
   @pytest.mark.integration_test
+  @unittest.skipIf(not tpu_present and not gpu_present, "TPU|GPU only test")
   def test_full_train_fp8(self):
     # Run a full train.py call with fp8 quantization, which adds extra
     # variable collections that need to be handled
@@ -396,6 +406,7 @@ class PipelineParallelismTest(unittest.TestCase):
     )
 
   @pytest.mark.integration_test
+  @unittest.skipIf(not tpu_present and not gpu_present, "TPU|GPU only test")
   def test_full_train_nanoo_fp8(self):
     # Run a full train.py call with NANOO fp8 quantization, which adds extra
     # variable collections that need to be handled

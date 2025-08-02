@@ -21,6 +21,7 @@ import os.path
 import uuid
 import warnings
 
+import numpy as np
 from jax.experimental.layout import Format
 from jax.sharding import PartitionSpec as P
 import jax
@@ -108,7 +109,10 @@ class MaxEngine(engine_api.Engine):
     self.config = config
 
     # Mesh definition
-    devices_array = maxtext_utils.create_device_mesh(config=config, devices=devices)
+    if jax.device_count() == 1:
+      devices_array = np.array(devices).reshape((1,) * len(config.mesh_axes))
+    else:
+      devices_array = maxtext_utils.create_device_mesh(config=config, devices=devices)
     self._mesh = jax.sharding.Mesh(devices_array, config.mesh_axes)
 
     # Model and Optimizer definition

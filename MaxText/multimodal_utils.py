@@ -86,7 +86,7 @@ class PreprocessorOutput:
 def resize_image(image, model_name):
   """resize image if needed"""
   image_sizes = {
-      #resize for vanilla llama4 support, will be removed once size support is added to multimodal llama4
+      # resize for vanilla llama4 support, will be removed once size support is added to multimodal llama4
       "llama4": (LLAMA4_TILE_SIZE, LLAMA4_TILE_SIZE),
   }
   model_prefix = model_name.split("-")[0]

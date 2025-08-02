@@ -6,7 +6,7 @@ array-record
 aqtp
 cloud-accelerator-diagnostics
 cloud-tpu-diagnostics
-datasets
+datasets>=4.0.0
 gcsfs
 google-cloud-aiplatform==1.61.0
 google-cloud-storage

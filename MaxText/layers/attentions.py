@@ -328,6 +328,7 @@ def attention_op_as_linen(
       metadata_fn=variable_to_logically_partitioned,
   )
 
+
 class AttentionOp(nnx.Module):
   """Attention operation"""
 
@@ -432,28 +433,26 @@ class AttentionOp(nnx.Module):
 
       # Prefill AqtEinsum instances
       self.AqtEinsum_0 = maybe_create_nnx(
-          self.kv_quant.einsum_fn_with_rhs_qtensor(),
-          "btkgd,bskd->bkgts", dummy_query_prefill, dummy_key_prefill
+          self.kv_quant.einsum_fn_with_rhs_qtensor(), "btkgd,bskd->bkgts", dummy_query_prefill, dummy_key_prefill
       )
       self.AqtEinsum_1 = maybe_create_nnx(
           self.kv_quant.einsum_fn_with_rhs_qtensor_and_dequant(),
-          "bkgts,bskd->btkgd", dummy_attn_weights_prefill, dummy_value_prefill
+          "bkgts,bskd->btkgd",
+          dummy_attn_weights_prefill,
+          dummy_value_prefill,
       )
       # Autoregressive AqtEinsum instances
       self.AqtEinsum_2 = maybe_create_nnx(
-          self.kv_quant.einsum_fn_with_rhs_qtensor(),
-          "btkgd,bskd->bkgts", dummy_query_ar, dummy_key_ar
+          self.kv_quant.einsum_fn_with_rhs_qtensor(), "btkgd,bskd->bkgts", dummy_query_ar, dummy_key_ar
       )
       self.AqtEinsum_3 = maybe_create_nnx(
-          self.kv_quant.einsum_fn_with_rhs_qtensor_and_dequant(),
-          "bkgts,bskd->btkgd", dummy_attn_weights_ar, dummy_value_ar
+          self.kv_quant.einsum_fn_with_rhs_qtensor_and_dequant(), "bkgts,bskd->btkgd", dummy_attn_weights_ar, dummy_value_ar
       )
     else:
       self.AqtEinsum_0 = jnp.einsum
       self.AqtEinsum_1 = jnp.einsum
       self.AqtEinsum_2 = jnp.einsum
       self.AqtEinsum_3 = jnp.einsum
-
 
   def check_attention_inputs(self, query: Array, key: Array | KVTensor, value: Array | KVTensor) -> None:
     """Check attention inputs."""
@@ -676,7 +675,7 @@ class AttentionOp(nnx.Module):
               model_mode,
               bidirectional_mask=bidirectional_mask,
               qk_product_einsum=qk_product_einsum,
-              wv_product_einsum=wv_product_einsum
+              wv_product_einsum=wv_product_einsum,
           )
         else:
           head_axis = -2
@@ -1106,7 +1105,12 @@ class AttentionOp(nnx.Module):
     return output, lse
 
   def compute_local_attention(
-      self, attn_weights: Array, value: Array | KVTensor, q_seq_len: int, model_mode: str, wv_product_einsum: Callable[..., Array]
+      self,
+      attn_weights: Array,
+      value: Array | KVTensor,
+      q_seq_len: int,
+      model_mode: str,
+      wv_product_einsum: Callable[..., Array],
   ) -> tuple[Array, Array, Array]:
     """Computes the attention of a local subset of the kv cache.
     Local attention results will need to be combined with any other local attentions and normalized
@@ -1165,7 +1169,7 @@ class AttentionOp(nnx.Module):
       bidirectional_mask: Any = None,
       *,
       qk_product_einsum: Callable[..., Array],
-      wv_product_einsum: Callable[..., Array]
+      wv_product_einsum: Callable[..., Array],
   ):
     """Apply Attention."""
     validate_compute_axis_order(self.compute_axis_order)
@@ -1261,9 +1265,7 @@ class AttentionOp(nnx.Module):
       raise NotImplementedError(self.compute_axis_order)
     return result
 
-  def wv_product(
-      self, attn_weights: Array, value: Array | KVTensor, model_mode: str, einsum: Callable[..., Array]
-  ) -> Array:
+  def wv_product(self, attn_weights: Array, value: Array | KVTensor, model_mode: str, einsum: Callable[..., Array]) -> Array:
     """weighted value product.
 
     Args:
@@ -1369,17 +1371,17 @@ class AttentionOp(nnx.Module):
       key, value, decoder_segment_ids = prefill_kv_cache
 
     prefill_unnormalized_output, prefill_exponentials_max, prefill_exponentials_sum = self.apply_attention(
-      query=query,
-      key=key,
-      value=value,
-      decoder_segment_ids=decoder_segment_ids,
-      lengths=None,
-      model_mode=model_mode,
-      use_ragged_attention=self.use_ragged_attention,
-      previous_chunk=previous_chunk,
-      bidirectional_mask=bidirectional_mask,
-      qk_product_einsum=self.AqtEinsum_0,
-      wv_product_einsum=self.AqtEinsum_1,
+        query=query,
+        key=key,
+        value=value,
+        decoder_segment_ids=decoder_segment_ids,
+        lengths=None,
+        model_mode=model_mode,
+        use_ragged_attention=self.use_ragged_attention,
+        previous_chunk=previous_chunk,
+        bidirectional_mask=bidirectional_mask,
+        qk_product_einsum=self.AqtEinsum_0,
+        wv_product_einsum=self.AqtEinsum_1,
     )
 
     # Return the "prefill" cache if it actually the combined prefill+ar kv cache
