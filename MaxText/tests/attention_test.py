@@ -33,11 +33,14 @@ import jax.numpy as jnp
 from flax.core import freeze
 
 from MaxText import maxtext_utils
-from MaxText import pyconfig
 from MaxText.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_PREFILL, MODEL_MODE_TRAIN
-from MaxText.globals import PKG_DIR
+from MaxText.configs import types_j
+from MaxText.globals import PKG_DIR, has_tpu, has_gpu, get_devices
 from MaxText.layers import attentions
 from MaxText.layers.attentions import Attention, MLA, ChunkedCausalMask
+
+tpu_present = has_tpu()
+cpu_only = not tpu_present and not has_gpu()
 
 
 class BidirectionalBlockMaskTest(unittest.TestCase):
@@ -281,13 +284,13 @@ class AttentionTest(unittest.TestCase):
 
   def setUp(self):
     super().setUp()
-    config = pyconfig.initialize(
+    config = types_j.initialize(
         [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
         **self.config_arguments,
     )
     self.cfg = config
 
-    config_cp = pyconfig.initialize(
+    config_cp = types_j.initialize(
         [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
         **self.config_arguments,
         ici_context_parallelism=4,  # use context parallelism of 4
@@ -298,9 +301,13 @@ class AttentionTest(unittest.TestCase):
     self.cfg_cp = config_cp
     self.rng = jax.random.PRNGKey(0)
 
-    devices_array = maxtext_utils.create_device_mesh(self.cfg)
+    if cpu_only:
+        self.cfg_cp.mesh_axes = self.cfg.mesh_axes = ["data"]
+        self.cfg_cp.scan_layers = self.cfg.scan_layers = False
+
+    devices_array = maxtext_utils.create_device_mesh_with_maxtextconfig(self.cfg)
     self.mesh = Mesh(devices_array, self.cfg.mesh_axes)
-    devices_array_cp = maxtext_utils.create_device_mesh(self.cfg_cp)  # for context parallelism
+    devices_array_cp = maxtext_utils.create_device_mesh_with_maxtextconfig(self.cfg_cp)  # for context parallelism
     self.mesh_cp = Mesh(devices_array_cp, self.cfg_cp.mesh_axes)  # for context parallelism
     self.global_batch_size = self.cfg.global_batch_size_to_train_on
     self.num_kv_heads = self.cfg.num_kv_heads
@@ -630,7 +637,7 @@ class AttentionTest(unittest.TestCase):
 
     rtol, atol = 1e-02, 1e-02
 
-    config = pyconfig.initialize(
+    config = types_j.initialize(
         [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
         per_device_batch_size=1.0,
         run_name="test",
@@ -730,7 +737,7 @@ class AttentionTest(unittest.TestCase):
 
     rtol, atol = 1e-02, 1e-02
 
-    config = pyconfig.initialize(
+    config = types_j.initialize(
         [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
         per_device_batch_size=1.0,
         run_name="test",
@@ -1019,7 +1026,7 @@ class MLATest(parameterized.TestCase):
 
   def init_mla(self, rope_type):
     """Helper function to initialize MLA with different model names."""
-    cfg = pyconfig.initialize(
+    cfg: types_j.MaxTextConfig = types_j.initialize(
         [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
         per_device_batch_size=1.0,
         run_name="test",
@@ -1031,12 +1038,12 @@ class MLATest(parameterized.TestCase):
     )
     rng = jax.random.PRNGKey(0)
 
-    devices_array = maxtext_utils.create_device_mesh(cfg)
+    devices_array = maxtext_utils.create_device_mesh_with_maxtextconfig(cfg)
     mesh = Mesh(devices_array, cfg.mesh_axes)
 
-    global_batch_size = cfg.global_batch_size_to_train_on
-    num_kv_heads = cfg.num_kv_heads
-    num_query_heads = cfg.num_query_heads
+    global_batch_size = cfg.per_device_batch_size
+    num_kv_heads = cfg.base_num_kv_heads
+    num_query_heads = cfg.base_num_query_heads
     max_target_length = cfg.max_target_length
     max_prefill_predict_length = cfg.max_prefill_predict_length
     head_dim = cfg.head_dim
@@ -1093,7 +1100,7 @@ class MLATest(parameterized.TestCase):
     lnx = jax.random.normal(
         rng,
         shape=(
-            cfg.global_batch_size_to_train_on,
+            cfg.per_device_batch_size,
             cfg.max_target_length,
             cfg.base_emb_dim,
         ),
