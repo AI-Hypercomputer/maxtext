@@ -203,8 +203,6 @@ def get_data(golden_data, golden_data_index, config):
       [np.arange(config.max_target_length, dtype=np.int32) for _ in range(config.global_batch_size_to_train_on)]
   )
 
-  max_logging.log(f"ids={ids}, decoder_segment_ids = {decoder_segment_ids}, decoder_positions= {decoder_positions}")
-
   return ids, decoder_segment_ids, decoder_positions, logits, seq_len
 
 
@@ -249,6 +247,9 @@ def main(config, test_args):  # pylint: disable=W0621
         )
 
       full_train_logits = jax.experimental.multihost_utils.process_allgather(full_train_logits)
+      # if full_train_logits shape is [num_hosts, batch_size, seq_len, vocab_size]
+      if full_train_logits.ndim == 4:
+        full_train_logits = jnp.reshape(full_train_logits, (-1, config.max_target_length, config.vocab_size))
       # Slice to original sequence length
       full_train_logits = full_train_logits[:, :seq_len, :]
 

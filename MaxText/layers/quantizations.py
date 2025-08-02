@@ -26,6 +26,8 @@ from aqt.jax.v2.flax import aqt_flax
 from aqt.jax.v2 import tiled_dot_general
 from aqt.jax.v2 import calibration
 
+import qwix
+
 import jax
 import jax.numpy as jnp
 from jax.tree_util import tree_flatten_with_path, tree_unflatten
@@ -545,6 +547,8 @@ def get_quant_mode(quant_mode_str: str = "train"):
 
 def configure_quantization(config: Config, quant_mode_str: str = "train"):
   """Configure quantization based on user config and quant mode."""
+  if config.use_qwix_quantization:
+    return None
   quant_cfg = _get_quant_config(config)
   if quant_cfg:
     if quant_cfg == "fp8":
@@ -606,3 +610,54 @@ def remove_quantized_params(params, aqt_vars):
 
 def configure_kv_quant(config):
   return None if not config.quantize_kvcache else KVQuant(config)
+
+
+def get_basic_config(config, dtype):
+  rules = [
+      qwix.QtRule(
+        module_path='decoder/.*layers.*',  # Apply to all modules
+        weight_qtype=dtype,
+        act_qtype=dtype,
+        bwd_weight_grad_tile_size = 1 / config.quantization_local_shard_count
+      )
+    ]
+  return rules
+
+
+def get_fp8_config(config):
+  """ fp8 config rules with per-tensor calibration.
+  """
+  rules = [
+      qwix.QtRule(
+        module_path='decoder/.*layers.*',  # Apply to all modules
+        weight_qtype=jnp.float8_e4m3fn,
+        act_qtype=jnp.float8_e4m3fn,
+        bwd_qtype=jnp.float8_e5m2,
+        bwd_use_original_residuals=True,
+        disable_channelwise_axes=True, # per_tensor calibration
+        weight_calibration_method = config.quantization_calibration_method,
+        act_calibration_method = config.quantization_calibration_method,
+        bwd_calibration_method = config.quantization_calibration_method,
+      )
+    ]
+  return rules
+
+def get_qt_provider(config):
+  """Get quantization rules based on the config."""
+  match config.quantization:
+    case "int8":
+      return qwix.QtProvider(get_basic_config(config, jnp.int8))
+    case "fp8":
+      return qwix.QtProvider(get_basic_config(config, jnp.float8_e4m3fn))
+    case "fp8_full":
+      return qwix.QtProvider(get_fp8_config(config))
+  return None
+
+
+def maybe_quantize_model(model, config):
+  """Quantize the model if quantization is enabled."""
+  if config.use_qwix_quantization:
+    quantization_provider = get_qt_provider(config)
+    if quantization_provider:
+      model = qwix.quantize_model(model, quantization_provider)
+  return model

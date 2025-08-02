@@ -28,6 +28,7 @@ pyink
 pre-commit
 pytype
 pillow>=11.1.0
+qwix@git+https://github.com/google/qwix.git
 sentencepiece==0.2.0
 tensorflow-text>=2.13.0
 tensorflow>=2.13.0

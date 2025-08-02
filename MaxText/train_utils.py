@@ -37,6 +37,7 @@ def create_model(config, mesh):
   # Model definition
   quant = quantizations.configure_quantization(config)
   model = get_transformer_model(config, mesh, quant)
+  model = quantizations.maybe_quantize_model(model, config)
   return model
 
 
