@@ -602,6 +602,10 @@ class Pipeline(nn.Module):
     physical_constraint_no_fsdp = self.get_physical_spec_no_fsdp(sharding_info)
     return jax.lax.with_sharding_constraint(self.layers.variables, physical_constraint_no_fsdp)
 
+  def shard_over_fsdp(self, pytree, sharding_info):
+    physical_constraint_no_fsdp = self.get_physical_spec_no_fsdp(sharding_info)
+    return nn.with_logical_constraint(pytree, physical_constraint_no_fsdp)
+
   @nn.compact
   def __call__(
       self,
@@ -783,5 +787,8 @@ class Pipeline(nn.Module):
     final_output = jnp.reshape(
         final_output, (self.config.micro_batch_size_to_train_on, self.config.max_target_length, self.config.emb_dim)
     )
+    if self.config.num_successive_pipelines > 1 and self.config.pipeline_fsdp_ag_once:
+      all_pipeline_weights = nn.with_logical_constraint(all_pipeline_weights, partition_spec)
+
 
     return final_output
