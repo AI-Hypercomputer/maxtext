@@ -14,9 +14,11 @@
 
 """NNX <> Linen interoperability."""
 
+import dataclasses
+import inspect
 from functools import partial
 import typing as tp
-from typing import Any
+from typing import Any, Optional
 
 from flax import linen
 from flax import nnx
@@ -470,3 +472,101 @@ def to_linen(
     skip_rng=skip_rng,
     name=name,
   )
+
+
+def extract_constructor_fields(nnx_class: type[M]) -> dict[str, tuple[tp.Any, tp.Any]]:
+  """Extract constructor parameters and annotations from an NNX class."""
+  sig = inspect.signature(nnx_class.__init__)
+  fields = {}
+  for name, param in sig.parameters.items():
+    # Skip *args and **kwargs
+    if name == "self" or param.kind in (param.VAR_POSITIONAL, param.VAR_KEYWORD):
+      continue
+    annotation = param.annotation if param.annotation is not inspect._empty else tp.Any
+    default = param.default if param.default is not inspect._empty else dataclasses.MISSING
+    fields[name] = (annotation, default)
+  return fields
+
+
+def _make_call_method(
+    nnx_class: type[M],
+    args: tuple[tp.Any, ...],
+    static_kwargs: dict[str, tp.Any],
+    metadata_fn: tp.Callable[[variablelib.VariableState], tp.Any] | None,
+):
+  @linen.compact
+  def __call__(self, *call_args, **call_kwargs):
+    # Merge static and instance kwargs
+    full_kwargs = {
+        **static_kwargs,
+        **(self.extra_kwargs or {}),
+    }
+
+    for field_ in dataclasses.fields(self):
+      if field_.name == "extra_kwargs":
+        continue
+      value = getattr(self, field_.name)
+      if value is not None:
+        full_kwargs[field_.name] = value
+
+    full_kwargs = FrozenDict(full_kwargs)
+
+    module = ToLinen(
+        nnx_class,
+        args=args,
+        kwargs=full_kwargs,
+        metadata_fn=metadata_fn,
+    )(*call_args, **call_kwargs)
+
+    return module
+
+  return __call__
+
+
+def get_reserved_linen_fields() -> set[str]:
+  """Returns a set of field names that are already defined in flax.linen.Module."""
+  # Inspect linen.Module and its parents
+  reserved = set()
+  for cls in linen.Module.__mro__:
+    reserved.update(vars(cls).keys())
+  # Also exclude common dunder and internal fields
+  reserved = {name for name in reserved if not name.startswith("__")}
+  return reserved
+
+
+def to_linen_class(
+    nnx_class: type[M],
+    *args: tp.Any,
+    metadata_fn: tp.Callable[[
+        variablelib.VariableState], tp.Any] | None = None,
+    **static_kwargs: tp.Any,
+) -> type[linen.Module]:
+  """Dynamically wraps an NNX module class into a Flax Linen module class."""
+
+  constructor_fields = extract_constructor_fields(nnx_class)
+  dataclass_fields = []
+  reserved_fields = get_reserved_linen_fields()
+
+  for name, (annotation, default) in constructor_fields.items():
+    if name in static_kwargs or name in reserved_fields:
+      continue  # static kwarg overrides field
+    if default is dataclasses.MISSING:
+      dataclass_fields.append((name, annotation))
+    else:
+      dataclass_fields.append(
+          (name, annotation, dataclasses.field(default=default)))
+
+  dataclass_fields.append(
+      ("extra_kwargs", tp.Optional[dict], dataclasses.field(default=None)))
+
+  WrappedModule = dataclasses.make_dataclass(
+      cls_name=f"Wrapped{nnx_class.__name__}",
+      fields=dataclass_fields,
+      bases=(linen.Module,),
+      namespace={
+          "__call__": _make_call_method(nnx_class, args, static_kwargs, metadata_fn),
+      },
+      frozen=False,
+  )
+
+  return WrappedModule

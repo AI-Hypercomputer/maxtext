@@ -157,7 +157,7 @@ def gpt3_layer_norm(
 # -----------------------------------------
 
 
-class Gpt3MultiHeadAttention(nn.Module):
+class Gpt3MultiHeadAttention(nnx.Module):
   """Multi-head attention in gpt3.
 
   Attributes:
@@ -166,7 +166,7 @@ class Gpt3MultiHeadAttention(nn.Module):
     head_dim: dimension of each head.
     max_target_length: maximum length of output
     max_prefill_predict_length: size of the maximum prefill
-    mesh: device mesh
+    self.mesh: device self.mesh
     dtype: the dtype of the computation.
     dropout_rate: dropout rate
     kernel_init: initializer for the kernel of the Dense layers.
@@ -179,29 +179,54 @@ class Gpt3MultiHeadAttention(nn.Module):
     use_bias: whether to add bias in linear transformation.
   """
 
-  config: Config
-  num_heads: int
-  head_dim: int
-  max_target_length: int
-  max_prefill_predict_length: int
-  mesh: Mesh
-  attention_kernel: str
-  dtype: DType = jnp.float32
-  weight_dtype: DType = jnp.float32
-  dropout_rate: float = 0.0
-  kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "normal")
-  float32_qk_product: bool = False  # computes logits in float32 for stability.
-  float32_logits: bool = True  # cast logits in float32 for stability.
-  fused_qkv: bool = True
-  quant: Optional[Quant] = None
-  kv_quant: Optional[KVQuant] = None
-  use_bias: bool = True
-
-  input_axis_names: AxisNames = (BATCH, LENGTH, EMBED)
-  query_axis_names: AxisNames = (BATCH, LENGTH, HEAD, D_KV)
-  key_axis_names: AxisNames = (BATCH, LENGTH, HEAD, D_KV)
-  value_axis_names: AxisNames = (BATCH, LENGTH, HEAD, D_KV)
-  out_axis_names: AxisNames = (BATCH, LENGTH, HEAD, D_KV)
+  def __init__(
+    self,
+    config: Config,
+    num_heads: int,
+    head_dim: int,
+    max_target_length: int,
+    max_prefill_predict_length: int,
+    mesh: Mesh,
+    attention_kernel: str,
+    dtype: DType = jnp.float32,
+    weight_dtype: DType = jnp.float32,
+    dropout_rate: float = 0.0,
+    kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "normal"),
+    float32_qk_product: bool = False,  # computes logits in float32 for stability.
+    float32_logits: bool = True,  # cast logits in float32 for stability.
+    fused_qkv: bool = True,
+    quant: Optional[Quant] = None,
+    kv_quant: Optional[KVQuant] = None,
+    use_bias: bool = True,
+    input_axis_names: AxisNames = (BATCH, LENGTH, EMBED),
+    query_axis_names: AxisNames = (BATCH, LENGTH, HEAD, D_KV),
+    key_axis_names: AxisNames = (BATCH, LENGTH, HEAD, D_KV),
+    value_axis_names: AxisNames = (BATCH, LENGTH, HEAD, D_KV),
+    out_axis_names: AxisNames = (BATCH, LENGTH, HEAD, D_KV),
+    **kwargs: Any
+  ):
+    self.config = config
+    self.num_heads = num_heads
+    self.head_dim = head_dim
+    self.max_target_length = max_target_length
+    self.max_prefill_predict_length = max_prefill_predict_length
+    self.mesh = mesh
+    self.attention_kernel = attention_kernel
+    self.dtype = dtype
+    self.weight_dtype = weight_dtype
+    self.dropout_rate = dropout_rate
+    self.kernel_init = kernel_init
+    self.float32_qk_product = float32_qk_product
+    self.float32_logits = float32_logits
+    self.fused_qkv = fused_qkv
+    self.quant = quant
+    self.kv_quant = kv_quant
+    self.use_bias = use_bias
+    self.input_axis_names = input_axis_names
+    self.query_axis_names = query_axis_names
+    self.key_axis_names = key_axis_names
+    self.value_axis_names = value_axis_names
+    self.out_axis_names = out_axis_names
 
   def qkv_projection(self, inputs: Array, proj_name: str):
     """Fused QKV projection"""
@@ -257,7 +282,6 @@ class Gpt3MultiHeadAttention(nn.Module):
     )(out)
     return out_proj
 
-  @nn.compact
   def __call__(
       self,
       inputs_q: Array,
@@ -314,14 +338,19 @@ class Gpt3MultiHeadAttention(nn.Module):
 # -----------------------------------------
 
 
-class Gpt3DecoderLayer(nn.Module):
+class Gpt3DecoderLayer(nnx.Module):
   """Transformer decoder layer that attends to the encoder."""
+  def __init__(
+      self,
+      config: models.Config,
+      mesh: Mesh,
+      quant: Optional[Quant] = None,
+      **kwargs: Any
+  ):
+    self.config = config
+    self.mesh = mesh
+    self.quant = quant
 
-  config: models.Config
-  mesh: Mesh
-  quant: Optional[Quant] = None
-
-  @nn.compact
   def __call__(
       self,
       inputs,
@@ -333,17 +362,14 @@ class Gpt3DecoderLayer(nn.Module):
       page_state=None,
       slot=None,
   ):
-    cfg = self.config
-    mesh = self.mesh
-
     inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
     inputs = checkpoint_name(inputs, "decoder_layer_input")
     lnx = gpt3_layer_norm(
         num_features=inputs.shape[-1],
-        dtype=cfg.dtype,
+        dtype=self.config.dtype,
         name="pre_self_attention_norm",
         kernel_axes=("norm",),
-        epsilon=cfg.normalization_layer_epsilon,
+        epsilon=self.config.normalization_layer_epsilon,
         reductions_in_fp32=False,
         use_bias=True,
     )(inputs)
@@ -352,26 +378,26 @@ class Gpt3DecoderLayer(nn.Module):
 
     # Self-attention block
     assert (
-        cfg.num_query_heads == cfg.num_kv_heads
-    ), f"{cfg.num_query_heads=} should be the same as {cfg.num_kv_heads=} in gpt3"
+        self.config.num_query_heads == self.config.num_kv_heads
+    ), f"{self.config.num_query_heads=} should be the same as {self.config.num_kv_heads=} in gpt3"
     attention_layer = Gpt3MultiHeadAttention(
-        config=cfg,
-        num_heads=cfg.num_query_heads,
-        dtype=cfg.dtype,
-        weight_dtype=cfg.weight_dtype,
-        head_dim=cfg.head_dim,
-        max_target_length=cfg.max_target_length,
-        max_prefill_predict_length=cfg.max_prefill_predict_length,
-        attention_kernel=cfg.attention,
-        mesh=mesh,
-        dropout_rate=cfg.dropout_rate,
+        config=self.config,
+        num_heads=self.config.num_query_heads,
+        dtype=self.config.dtype,
+        weight_dtype=self.config.weight_dtype,
+        head_dim=self.config.head_dim,
+        max_target_length=self.config.max_target_length,
+        max_prefill_predict_length=self.config.max_prefill_predict_length,
+        attention_kernel=self.config.attention,
+        mesh=self.mesh,
+        dropout_rate=self.config.dropout_rate,
         name="self_attention",
-        float32_qk_product=cfg.float32_qk_product,
-        float32_logits=cfg.float32_logits,
-        fused_qkv=cfg.fused_qkv,
+        float32_qk_product=self.config.float32_qk_product,
+        float32_logits=self.config.float32_logits,
+        fused_qkv=self.config.fused_qkv,
         use_bias=True,
         quant=self.quant,
-        kv_quant=quantizations.configure_kv_quant(cfg),
+        kv_quant=quantizations.configure_kv_quant(self.config),
     )
 
     attention_lnx = attention_layer(
@@ -386,29 +412,29 @@ class Gpt3DecoderLayer(nn.Module):
     # MLP block.
     mlp_lnx = mlp_block(
         in_features=attention_lnx.shape[-1],
-        intermediate_dim=cfg.mlp_dim,
-        activations=cfg.mlp_activations,
-        intermediate_dropout_rate=cfg.dropout_rate,
-        dtype=cfg.dtype,
-        weight_dtype=cfg.weight_dtype,
+        intermediate_dim=self.config.mlp_dim,
+        activations=self.config.mlp_activations,
+        intermediate_dropout_rate=self.config.dropout_rate,
+        dtype=self.config.dtype,
+        weight_dtype=self.config.weight_dtype,
         name="mlp",
         use_bias=True,
         use_pre_norm=True,
-        config=cfg,
+        config=self.config,
         quant=self.quant,
     )(attention_lnx, deterministic=deterministic)
     mlp_lnx = nn.with_logical_constraint(mlp_lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
 
     layer_output = attention_lnx + mlp_lnx
 
-    layer_output = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(layer_output, deterministic=deterministic)
+    layer_output = nn.Dropout(rate=self.config.dropout_rate, broadcast_dims=(-2,))(layer_output, deterministic=deterministic)
 
     layer_output = nn.with_logical_constraint(
         layer_output,
         ("activation_batch", "activation_norm_length", "activation_embed"),
     )
 
-    if cfg.record_internal_nn_metrics:
+    if self.config.record_internal_nn_metrics:
       self.sow("intermediates", "activation_mean", jnp.mean(layer_output))
       self.sow("intermediates", "activation_stdev", jnp.std(layer_output))
       self.sow(
@@ -417,7 +443,14 @@ class Gpt3DecoderLayer(nn.Module):
           jnp.sum(layer_output == 0) / jnp.size(layer_output),
       )
 
-    if cfg.scan_layers:
+    if self.config.scan_layers:
       return layer_output, None
     else:
       return layer_output
+
+def gpt3_decoder_layer_class() -> nn.Module:
+  """Creates a Gemma3DecoderLayer Linen module."""
+  return nnx_wrappers.to_linen_class(
+      Gpt3DecoderLayer,
+      metadata_fn=initializers.variable_to_logically_partitioned,
+  )
