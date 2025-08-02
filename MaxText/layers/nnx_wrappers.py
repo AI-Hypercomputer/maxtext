@@ -26,7 +26,7 @@ from flax.nnx import graph
 from flax.nnx import variablelib
 from flax.nnx.bridge import module as bdg_module
 from flax.nnx.module import Module
-from flax.nnx.object import Object
+from flax.nnx.pytreelib import Pytree
 from flax.nnx.rnglib import Rngs
 import jax
 from jax import tree_util as jtu
@@ -134,8 +134,8 @@ def nnx_attrs_to_linen_vars(nnx_attrs: dict) -> dict:
 
 def _set_initializing(module: Module, initializing: bool):
   for _, value in graph.iter_graph(module):
-    if isinstance(value, Object):
-      value._object__state._initializing = initializing # pylint: disable=protected-access
+    if isinstance(value, Pytree):
+      value._pytree__state._initializing = initializing # pylint: disable=protected-access
 
 
 def lazy_init(fn: Module | tp.Callable[..., tp.Any], *args, **kwargs):
@@ -234,7 +234,7 @@ class ToNNX(Module):
     # rename default to params
     if "params" not in _rngs and "default" in _rngs:
       _rngs["params"] = _rngs.pop("default")
-    if self._object__state.initializing:
+    if self._pytree__state.initializing:
       out, updates = self.to_nnx__module.init_with_output(
         _rngs, *args, method=method, **kwargs
       )
@@ -242,7 +242,7 @@ class ToNNX(Module):
       nnx_attrs = {
         k: v
         for k, v in vars(self).items()
-        if not k.startswith("to_nnx__") and not k.startswith("_object__")
+        if not k.startswith("to_nnx__") and not k.startswith("_pytree__")
       }
       variables = nnx_attrs_to_linen_vars(nnx_attrs)
 
