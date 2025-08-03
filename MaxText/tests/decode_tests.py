@@ -26,6 +26,7 @@ from absl.testing import absltest
 from MaxText.decode import main as decode_main
 from MaxText.globals import PKG_DIR
 
+os.environ['PYTHONFAULTHANDLER'] = "1"
 
 class DecodeTests(unittest.TestCase):
   """Tests decode with various configs."""
