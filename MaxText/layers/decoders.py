@@ -248,9 +248,24 @@ class Decoder(nn.Module):
       pipeline_modules_list = list((None for _ in range(self.config.num_successive_pipelines)))
       for i in range(self.config.num_successive_pipelines):
         pipeline_stage_module = self.get_pipeline_stage_module(self.decoder_layer)
+        # remat_pipeline = nn.remat(
+        #   pipeline.Pipeline,
+        #   prevent_cse=not self.config.scan_layers,
+        #   policy=remat_policy,
+        #   static_argnums=(0,1, 2, 3, 4),  # The initial args are all static
+        # )
+        # pipeline_module = remat_pipeline(
+        #   config=self.config, mesh=self.mesh, layers=pipeline_stage_module, remat_policy=remat_policy
+        # )
         pipeline_module = pipeline.Pipeline(
           config=self.config, mesh=self.mesh, layers=pipeline_stage_module, remat_policy=remat_policy
         )
+      #   pipeline_module = nn.remat(
+      #     pipeline_module,
+      #     prevent_cse=not self.config.scan_layers,
+      #     policy=remat_policy,
+      #     static_argnums=(4, 5),  # Deterministic and model mode are static arguments.
+      # )
         pipeline_modules_list[i] = pipeline_module
       self.pipeline_modules = tuple(pipeline_modules_list)
 

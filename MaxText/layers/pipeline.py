@@ -790,7 +790,6 @@ class Pipeline(nn.Module):
     if self.config.num_successive_pipelines > 1 and self.config.pipeline_fsdp_ag_once:
       all_pipeline_weights = nn.with_logical_constraint(all_pipeline_weights, partition_spec)
 
-    del all_pipeline_weights
 
 
     return final_output
