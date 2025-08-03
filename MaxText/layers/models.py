@@ -108,6 +108,9 @@ class Transformer(nn.Module):
     image_embeddings = None
     if self.config.use_multimodal and encoder_images is not None:
       image_embeddings = self.vision_encoder(input_images=encoder_images, deterministic=not enable_dropout)
+      import jax
+      jax.debug.print(f"image_embeddings shape: {image_embeddings.shape}")
+      jax.debug.print(f"decoder_input_tokens shape: {decoder_input_tokens.shape}")
 
       if self.config.decoder_block == DecoderBlockType.GEMMA3:
         bidirectional_mask = decoder_input_tokens == multimodal_utils.GEMMA_TOKEN_PLACEHOLDER
