@@ -371,12 +371,6 @@ def calculate_gemma3_vision_layers_tflops_per_device(config):
   learnable_weight_tflops = dtype_factor * learnable_weight_flops / 1e12
   total_attn_tflops = dtype_factor * total_attn_flops / 1e12
 
-  print(
-      "Gemma3 Vision layers per train step:\n",
-      f"Total TFLOPs: {total_tflops:.2f} \n",
-      f"split as {100 * learnable_weight_tflops/total_tflops:.2f}% learnable weight flops",
-      f"and {100 * total_attn_tflops/total_tflops:.2f}% attention flops",
-  )
   return total_tflops, learnable_weight_tflops, total_attn_tflops
 
 
@@ -464,12 +458,6 @@ def calculate_llama4_vision_layers_tflops_per_device(config):
   learnable_weight_tflops = dtype_factor * learnable_weight_flops / 1e12
   total_attn_tflops = dtype_factor * total_attn_flops / 1e12
 
-  print(
-      "Vision layers per train step:\n",
-      f"Total TFLOPs: {total_tflops:.2f} \n",
-      f"split as {100 * learnable_weight_tflops/total_tflops:.2f}% learnable weight flops",
-      f"and {100 * total_attn_tflops/total_tflops:.2f}% attention flops",
-  )
   return total_tflops, learnable_weight_tflops, total_attn_tflops
 
 
@@ -484,7 +472,8 @@ def calculate_vision_encoder_tflops(config):
         calculate_llama4_vision_layers_tflops_per_device(config)
     )
   else:
-    max_logging.log(f"Vision encoder TFLOPs calculation not implemented for model {config.model_name}")
+    max_logging.log(f"Vision encoder TFLOPs calculation not implemented for model {config.model_name}, counting as 0 for now.")
+    mm_total_tflops = mm_learnable_weight_tflops = mm_causal_attention_tflops = 0
 
   return mm_total_tflops, mm_learnable_weight_tflops, mm_causal_attention_tflops
 
@@ -573,6 +562,13 @@ def calculate_tflops_training_per_device(config, log=True):
 
   if config.use_multimodal:
     mm_total_tflops, mm_learnable_weight_tflops, mm_attention_tflops = calculate_vision_encoder_tflops(config)
+    if log:
+      print(
+          f"{config.model_name} vision layers per train step:\n",
+          f"Total TFLOPs: {mm_total_tflops:.2f} \n",
+          f"split as {100 * mm_learnable_weight_tflops/mm_total_tflops:.2f}% learnable weight flops",
+          f"and {100 * mm_attention_tflops/mm_total_tflops:.2f}% attention flops",
+      )
     total_tflops += mm_total_tflops
     learnable_weight_tflops += mm_learnable_weight_tflops
     attention_tflops += mm_attention_tflops
