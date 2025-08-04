@@ -295,6 +295,7 @@ def get_dense_moe_layers(config):
 
 
 def calculate_gemma3_vision_layers_tflops_per_device(config):
+  
   return 0, 0, 0
 
 

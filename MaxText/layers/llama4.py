@@ -87,7 +87,6 @@ class Llama4UnfoldConvolution(nn.Module):
     # Extract patches using conv_general_dilated_patches
     batch_size, num_channels, img, _ = inputs.shape
     num_patches = (img // cfg.patch_size_for_vit) ** 2
-    jax.debug.print(f"Input shape: {inputs.shape}")
     # Extract patches using conv_general_dilated_patches
     patches = lax.conv_general_dilated_patches(
         inputs,
@@ -96,18 +95,15 @@ class Llama4UnfoldConvolution(nn.Module):
         padding="VALID",
         dimension_numbers=("NCHW", "HWIO", "NCHW"),
     )
-    jax.debug.print(f"patches shape: {patches.shape}")
 
     # reshape patches to [batch_size, num_patches, num_channels * patch_size * patch_size]
     patches = patches.reshape(batch_size, num_channels * cfg.patch_size_for_vit * cfg.patch_size_for_vit, num_patches)
     # After transpose, patches shape:
     # [batch_size, num_patches, num_channels * patch_size * patch_size]
     patches = patches.transpose(0, 2, 1)
-    jax.debug.print(f"reshape shape: {patches.shape}")
 
     # Project patches to hidden dimension using dense_general
     hidden_states = self.linear(patches)
-    jax.debug.print(f"hidden_states shape: {hidden_states.shape}")
 
     return hidden_states
 
@@ -175,14 +171,9 @@ class Llama4VisionMLP(nn.Module):
       hidden_states: Input tensor
       deterministic: If True, disables dropout during inference
     """
-    jax.debug.print(f"Llama4VisionMLP input shape: {hidden_states.shape}")
     hidden_states = self.fc1(hidden_states)
     hidden_states = nn.gelu(hidden_states, approximate=False)
-    jax.debug.print(f"fc1 hidden_states shape: {hidden_states.shape}")
-
     hidden_states = self.fc2(hidden_states)
-    jax.debug.print(f"fc2 hidden_states shape: {hidden_states.shape}")
-
     return hidden_states
 
 
@@ -309,9 +300,7 @@ class Llama4MultiModalProjector(nn.Module):
     """
     b, t, c, d = image_features.shape
     image_features = image_features.reshape(b * t, c, d)
-    jax.debug.print(f"before projector linear shape: {image_features.shape}")
     hidden_states = self.linear(image_features)
-    jax.debug.print(f"after projector linear shape: {hidden_states.shape}")
     _, c, d = hidden_states.shape
     hidden_states = hidden_states.reshape(b, t, c, d)
     return hidden_states
@@ -770,7 +759,6 @@ class Llama4VisionModel(nn.Module):
 
     # Unfold convolution to extract patches
     hidden_states = Llama4UnfoldConvolution(config=cfg)(pixel_values)
-    jax.debug.print(f"Llama4UnfoldConvolution shape: {hidden_states.shape}")
 
     # Add class embedding to the beginning of the sequence
     class_embedding_expanded = jnp.expand_dims(jnp.expand_dims(self.class_embedding, axis=0), axis=0)
@@ -783,12 +771,10 @@ class Llama4VisionModel(nn.Module):
     # Transformation layers
     hidden_states = nn.LayerNorm(name="layernorm_pre")(hidden_states)
     hidden_states = Llama4VisionEncoder(config=cfg, mesh=mesh)(hidden_states)
-    jax.debug.print(f"Llama4VisionEncoder shape: {hidden_states.shape}")
     hidden_states = nn.LayerNorm(name="layernorm_post")(hidden_states)
     hidden_states = hidden_states[:, :-1, :]
 
     hidden_states = Llama4VisionPixelShuffleMLP(config=cfg)(hidden_states)
-    jax.debug.print(f"Llama4VisionPixelShuffleMLP shape: {hidden_states.shape}")
 
     # Reshape hidden states
     _, patch_num, patch_dim = hidden_states.shape
