@@ -452,18 +452,18 @@ def calculate_llama4_vision_layers_tflops_per_device(config):
 def calculate_vision_encoder_tflops(config):
   """Calculate vision encoder TFLOPs per prefill step per device."""
   if config.model_name.startswith("gemma3"):
-    mm_total_tflops, mm_learnable_weight_tflops, mm_causal_attention_tflops = (
+    mm_total_tflops, mm_learnable_weight_tflops, mm_attention_tflops = (
         calculate_gemma3_vision_layers_tflops_per_device(config)
     )
   elif config.model_name.startswith("llama4"):
-    mm_total_tflops, mm_learnable_weight_tflops, mm_causal_attention_tflops = (
+    mm_total_tflops, mm_learnable_weight_tflops, mm_attention_tflops = (
         calculate_llama4_vision_layers_tflops_per_device(config)
     )
   else:
     max_logging.log(f"Vision encoder TFLOPs calculation not implemented for model {config.model_name}, counting as 0 for now.")
-    mm_total_tflops = mm_learnable_weight_tflops = mm_causal_attention_tflops = 0
+    mm_total_tflops = mm_learnable_weight_tflops = mm_attention_tflops = 0
 
-  return mm_total_tflops, mm_learnable_weight_tflops, mm_causal_attention_tflops
+  return mm_total_tflops, mm_learnable_weight_tflops, mm_attention_tflops
 
 
 def calculate_tflops_training_per_device(config, log=True):
@@ -549,6 +549,7 @@ def calculate_tflops_training_per_device(config, log=True):
   total_tflops = learnable_weight_tflops + attention_tflops + reference_model_tflops
 
   if config.use_multimodal:
+    # Add vision layers TFLOPs for multimodal models
     mm_total_tflops, mm_learnable_weight_tflops, mm_attention_tflops = calculate_vision_encoder_tflops(config)
     if log:
       print(
