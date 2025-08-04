@@ -117,9 +117,7 @@ save_quantized_params_path: ""
 # when left as is, corresponds to training
 # accepted values are "inference"
 model_call_mode: ""
-use_qwix_quantization: False # Whether to use qwix for quantization. If set to True, the model will be quantized using qwix.
-# Quantization calibration method used for weights and activations. Supported methods can be found in https://github.com/google/qwix/blob/dc2a0770351c740e5ab3cce7c0efe9f7beacce9e/qwix/qconfig.py#L70-L80
-quantization_calibration_method: "absmax"
+
 # Shard the range finding operation for quantization. By default this is set to number of slices.
 quantization_local_shard_count: -1
 
@@ -209,7 +207,7 @@ pipeline_delay_activation_forwarding: False # This delays the activation forward
 # the communication and compute in each iteration are now independent. However this comes at the cost of doubling the pipeline bubble,
 # and you must set the number of microbatches to at least 2 * num_stages (the minimum 2 * num_stages is set by default with this delay).
 
-model_fsdp_ag_once: False # This controls whether the Zero-1 optimization is active.
+model_fsdp_ag_once: True # This controls whether the Zero-1 optimization is active.
 # This is a memory/time tradeoff - True: This is Zero-1 Sharding. Use ZeroOneTransformer to gather weights once per gradient step. 
 # False: This is Zero-3 Sharing. Use the standard Transformer, which gathers for each microbatch's fwd/bwd pass.
 pipeline_fsdp_ag_once: False # If set to true then all gather all of the weights over FSDP before the first pipeline iteration.
@@ -251,9 +249,10 @@ value_proj: 'remat'
 qkv_proj: 'remat'
 out_proj: 'remat'
 
+optimizer_zero1: True
 optimizer_memory_host_offload: False
 parameter_memory_host_offload: False
-scan_layers: True # We recommend setting this to false when using pipeline parallelism, instead scanning the PP iterations.
+scan_layers: False # We recommend setting this to false when using pipeline parallelism, instead scanning the PP iterations.
 param_scan_axis: 1
 
 # The attention parameter dictates the specific algorithm/methodology used to compute the attention scores
@@ -431,7 +430,7 @@ add_bos: True
 add_eos: True
 
 # Dataset
-per_device_batch_size: 12.0
+per_device_batch_size: 1.0
 expansion_factor_real_data: -1 # if -1 then all hosts will load real data, else total_hosts//expansion_factor_real_data will pull data from GCS.
 eval_per_device_batch_size: 0.0
 max_corpus_chars: 10_000_000
@@ -554,7 +553,7 @@ gradient_clipping_threshold: 1.0
 
 # Instead of updating the weights every step, you may effectively use a larger
 # batch by accumulating the gradient over a set of steps.
-gradient_accumulation_steps: 1
+gradient_accumulation_steps: 5
 
 opt_type: "adamw"  # one of "adamw", "adam_pax" or "sgd"
 

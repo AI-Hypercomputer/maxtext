@@ -13,6 +13,7 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 """
+import sys
 
 """
 Save a Cross Ahead of Time Compiled (XAOT) version of train.py's train step
@@ -96,14 +97,14 @@ def get_shaped_inputs(topology_mesh, config):
   shaped_rng = jax.ShapeDtypeStruct(example_rng.shape, example_rng.dtype)
 
   # Shaped state
-  abstract_state, _, state_mesh_shardings = maxtext_utils.get_abstract_state(model, tx, config, example_rng, topology_mesh)
+  abstract_state, _, state_mesh_shardings,params_shardings = maxtext_utils.get_abstract_state(model, tx, config, example_rng, topology_mesh)
 
   # Shaped batch
   shaped_batch = maxtext_utils.get_shaped_batch(config)
 
   shaped_train_args = (abstract_state, shaped_batch, shaped_rng)
   shaped_train_kwargs = {}
-  return shaped_train_args, shaped_train_kwargs, state_mesh_shardings, model
+  return shaped_train_args, shaped_train_kwargs, state_mesh_shardings, model,params_shardings
 
 
 def jit_and_compile(
@@ -155,14 +156,14 @@ def main(argv: Sequence[str]) -> None:
   max_utils.print_system_information()
 
   # Get shaped inputs
-  shaped_train_args, shaped_train_kwargs, state_mesh_shardings, model = get_shaped_inputs(topology_mesh, config)
+  shaped_train_args, shaped_train_kwargs, state_mesh_shardings, model,params_shardings = get_shaped_inputs(topology_mesh, config)
 
   # Get data sharding
   data_sharding = maxtext_utils.get_input_data_sharding(config, topology_mesh)
 
   # Get function to compile and shardings
   func_to_compile, in_shard, out_shard, static_argnums, donate_argnums = maxtext_utils.get_functional_train_with_signature(
-      train.train_step, data_sharding, state_mesh_shardings, model, config
+      train.train_step, data_sharding, state_mesh_shardings, model, config,params_shardings
   )
 
   # Compile
