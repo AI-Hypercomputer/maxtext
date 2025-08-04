@@ -95,7 +95,7 @@ class Gpt3LayerNorm(nnx.Module):
     # Move scale to device if parameter offloading is enabled
     if self.parameter_memory_host_offload:
       max_logging.log("gpt3.py: Moving scale parameter to device")
-      scale = jax.device_put(scale, jax._src.sharding_impls.TransferToMemoryKind("device"))
+      scale = jax.device_put(scale, jax.memory.Space.Device)
 
     scale = jnp.asarray(scale, self.dtype)
     output = normed_inputs * (scale + 1)

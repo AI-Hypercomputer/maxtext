@@ -211,7 +211,7 @@ class DenseGeneral(nnx.Module):
       # Move logit_dense kernel to device if parameter offloading is enabled
       if self.parameter_memory_host_offload:
         max_logging.log("linear.py: Moving parameter logits_dense kernel to device")
-        kernel = jax.device_put(kernel, jax._src.sharding_impls.TransferToMemoryKind("device"))
+        kernel = jax.device_put(kernel, jax.memory.Space.Device)
       kernel = jnp.asarray(kernel, self.dtype)
 
     contract_ind = tuple(range(0, len(self.axis)))

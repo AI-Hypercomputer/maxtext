@@ -37,8 +37,7 @@ def _maybe_move_embedding_to_device(embedding_table: Array, config: Config) -> A
   """Moves embedding table to device if parameter offloading is enabled."""
   if config.parameter_memory_host_offload:
     max_logging.log("embeddings.py: Moving embedding parameter to device")
-    # pylint: disable=protected-access
-    return jax.device_put(embedding_table, jax._src.sharding_impls.TransferToMemoryKind("device"))
+    return jax.device_put(embedding_table, jax.memory.Space.Device)
   return embedding_table
 
 

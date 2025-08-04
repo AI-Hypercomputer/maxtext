@@ -372,7 +372,7 @@ class Decoder(nn.Module):
           def map_fn(path, value):
             max_logging.log(f"models.py: Moving parameter {path} to device")
             return jax.device_put(
-                value, jax._src.sharding_impls.TransferToMemoryKind("device")  # pylint: disable=protected-access
+                value, jax.memory.Space.Device
             )
 
           return jax.tree_util.tree_map_with_path(map_fn, variables)
