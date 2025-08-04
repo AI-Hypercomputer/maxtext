@@ -299,89 +299,114 @@ def calculate_gemma3_vision_layers_tflops_per_device(config):
 
 
 def calculate_llama4_vision_layers_tflops_per_device(config):
-    """
-    Estimate TFLOPs for Llama4 vision encoder (ViT-style).
-    Returns:
-        total_tflops: Total TFLOPs (fwd+bwd)
-        learnable_weight_tflops: TFLOPs from learnable weights (patch embedding, MLP, projections)
-        causal_attention_tflops: TFLOPs from attention (with causal mask, fwd+bwd)
-    """
-    # Config values
-    B = config.per_device_batch_size
-    C = config.num_channels_for_vit
-    H = W = config.tile_size_for_vit
-    patch_size = config.patch_size_for_vit
-    hidden_dim = config.hidden_size_for_vit
-    intermediate_dim = config.intermediate_size_for_vit
-    num_layers = config.num_hidden_layers_for_vit
-    num_heads = config.num_attention_heads_for_vit
-    pixel_shuffle_tokens = 144
-    pixel_shuffle_dim = 4096
-    projector_output_dim = config.projector_output_dim_for_vit  # 5120
-    base_emb_dim = config.base_emb_dim
+  """
+  Estimate TFLOPs for Llama4 vision encoder (ViT-style).
+  Returns:
+      total_tflops: Total TFLOPs (fwd+bwd)
+      learnable_weight_tflops: TFLOPs from learnable weights (patch embedding, MLP, projections)
+      causal_attention_tflops: TFLOPs from attention (with causal mask, fwd+bwd)
+  """
+  # Config values
+  B = config.per_device_batch_size
+  C = config.num_channels_for_vit
+  H = W = config.tile_size_for_vit
+  patch_size = config.patch_size_for_vit
+  hidden_dim = config.hidden_size_for_vit
+  intermediate_dim = config.intermediate_size_for_vit
+  num_layers = config.num_hidden_layers_for_vit
+  pixel_shuffle_fc1_out_dim = config.projector_input_dim_for_vit  # 4096
+  pixel_shuffle_fc2_out_dim = config.projector_output_dim_for_vit  # 4096
+  base_emb_dim = config.base_emb_dim
+  pixel_shuffle_ratio = config.pixel_shuffle_ratio_for_vit  # 0.5
+  num_patches = (H // patch_size) * (W // patch_size)  # 24*24 = 576
+  pixel_shuffle_tokens = num_patches * pixel_shuffle_ratio**2  # 144
+  
+  # 1. Llama4UnfoldConvolution (flops by linear projection)
+  # lax.conv_general_dilated_patches extracts patches through reshaping/indexing without flops
+  # Each patch: C * patch_size * patch_size -> hidden_dim
+  patch_embed_flops = 2 * B * num_patches * (C * patch_size * patch_size) * hidden_dim
 
-    # 1. Patch embedding (flops by linear projection)
-    # lax.conv_general_dilated_patches extracts patches through reshaping/indexing without flops
-    # Each patch: C * patch_size * patch_size -> hidden_dim
-    num_patches = (H // patch_size) * (W // patch_size)  # 24*24 = 576
-    patch_embed_flops = 2 * B * num_patches * (C * patch_size * patch_size) * hidden_dim
+  # 2. Llama4VisionEncoder: num_layers * (input_layer_norm + attention + post_attention_layer_norm + fc1 + gelu + fc2)
+  seq_len = num_patches + 1  # +1 for class token, so 577
+  layernorm_flops_per_layer = 2 * (8 * B * seq_len * hidden_dim)  # Two layernorms per Llama4VisionEncoderLayer
+  qkv_flops_per_layer = 3 * (2 * B * seq_len * hidden_dim * hidden_dim)  # Q, K, V projections
+  attn_flops_per_layer = 4 * B * seq_len * seq_len * hidden_dim  # Attention scores and weighted sum
+  visionmlp_flops_per_layer = 2 * (2 * B * seq_len * hidden_dim * intermediate_dim)  # Two fc layers
+  gelu_flops_per_layer = 12 * B * seq_len * intermediate_dim  # GELU activation
+  residual_flops_per_layer = 2 * (B * seq_len * hidden_dim)  # Two residual additions
+  total_attn_flops = attn_flops_per_layer * num_layers
+  vision_encoder_flops = (
+      layernorm_flops_per_layer
+      + qkv_flops_per_layer
+      + visionmlp_flops_per_layer
+      + gelu_flops_per_layer
+      + residual_flops_per_layer
+  ) * num_layers
 
-    # 2. Vision encoder layers (ViT)
-    seq_len = num_patches + 1  # +1 for class token, so 577
-    # Attention FLOPs per layer: 4 * B * seq_len^2 * hidden_dim
-    attn_flops_per_layer = 4 * B * seq_len * seq_len * hidden_dim
-    # MLP FLOPs per layer: 4 * B * seq_len * hidden_dim * intermediate_dim (2 matmuls)
-    mlp_flops_per_layer = 4 * B * seq_len * hidden_dim * intermediate_dim
-    total_attn_flops = attn_flops_per_layer * num_layers
-    total_mlp_flops = mlp_flops_per_layer * num_layers
+  # 3. Llama4VisionPixelShuffleMLP: two matmuls, with GELU and dropout in between
+  # (B, 144, 5632) -> (B, 144, 4096) -> (B, 144, 4096)
+  pixel_shuffle_fc1_flops = 2 * B * pixel_shuffle_tokens * intermediate_dim * pixel_shuffle_fc1_out_dim
+  pixel_shuffle_fc2_flops = 2 * B * pixel_shuffle_tokens * pixel_shuffle_fc1_out_dim * pixel_shuffle_fc2_out_dim
+  pixel_shuffle_gelu_flops = 2 * (12 * B * pixel_shuffle_tokens * pixel_shuffle_fc1_out_dim)
+  pixel_shuffle_dropout_flops = 2 * B * pixel_shuffle_tokens * pixel_shuffle_fc1_out_dim
+  pixel_shuffle_total_flops = pixel_shuffle_fc1_flops + pixel_shuffle_fc2_flops + pixel_shuffle_gelu_flops + pixel_shuffle_dropout_flops
 
-    # 3. Pixel shuffle MLP: two matmuls, with GELU and dropout in between
-    # First: (B, 144, 4096) <- (B, 144, hidden_dim) x (hidden_dim, 4096)
-    pixel_shuffle_mlp1_flops = 2 * B * pixel_shuffle_tokens * hidden_dim * pixel_shuffle_dim
-    # Second: (B, 144, 5120) <- (B, 144, 4096) x (4096, 5120)
-    pixel_shuffle_mlp2_flops = 2 * B * pixel_shuffle_tokens * pixel_shuffle_dim * projector_output_dim
+  # 4. Llama4MultiModalProjector: (B, 144, 5120) x (5120, base_emb_dim)
+  projector_flops = 2 * B * pixel_shuffle_tokens * pixel_shuffle_fc1_out_dim * base_emb_dim
 
-    # 4. Projector: (B, 144, 5120) x (5120, base_emb_dim)
-    projector_flops = 2 * B * pixel_shuffle_tokens * projector_output_dim * base_emb_dim
+  # 5. Other minor ops inside Llama4VisionModel (layernorms and residuals)
+  pre_post_layernorm_flops = 2 * (8 * B * seq_len * hidden_dim)  # Two layernorms outside the encoder
+  position_embedding_flops = B * num_patches * hidden_dim  # Adding position embeddings
+  other_ops_flops = pre_post_layernorm_flops + position_embedding_flops
 
-    # Learnable weights: all matmuls above
-    learnable_weight_flops = (
-        patch_embed_flops
-        + total_mlp_flops
-        + pixel_shuffle_mlp1_flops
-        + pixel_shuffle_mlp2_flops
-        + projector_flops
-    )
+  # Learnable weights: all matmuls above
+  learnable_weight_flops = (
+      patch_embed_flops
+      + vision_encoder_flops
+      + pixel_shuffle_total_flops
+      + projector_flops
+      + other_ops_flops
+  )
 
-    # Attention FLOPs (ViT uses full attention, not causal)
-    causal_attention_flops = total_attn_flops
+  # Total FLOPs (fwd)
+  total_flops = learnable_weight_flops + total_attn_flops
 
-    # Total FLOPs (fwd + bwd + grads)
-    total_flops = (learnable_weight_flops + causal_attention_flops) * 3
+  if config.freeze_vision_encoder_params:
+    total_flops += 2 * projector_flops  # only projector is learnable
+    learnable_weight_flops += 2 * projector_flops
+  else:
+    total_flops *= 3  # multiply by 3 for fwd + bwd + optimizer
 
-    # Convert to TFLOPs
-    total_tflops = total_flops / 1e12
-    learnable_weight_tflops = learnable_weight_flops * 3 / 1e12
-    causal_attention_tflops = causal_attention_flops * 3 / 1e12
+  dtype_factor = 2 if config.dtype == 'bfloat16' else 1  # bfloat16 has half the flops of float32
 
-    return total_tflops, learnable_weight_tflops, causal_attention_tflops
+  # Convert to TFLOPs
+  total_tflops = dtype_factor * total_flops / 1e12
+  learnable_weight_tflops = dtype_factor * learnable_weight_flops / 1e12
+  total_attn_tflops = dtype_factor * total_attn_flops / 1e12
+  
+  print(
+      "Vision layers per train step:\n",
+      f"Total TFLOPs: {total_tflops:.2f} \n",
+      f"split as {100 * learnable_weight_tflops/total_tflops:.2f}% learnable weight flops",
+      f"and {100 * total_attn_tflops/total_tflops:.2f}% attention flops",
+  )
+  return total_tflops, learnable_weight_tflops, total_attn_tflops
 
 
 def calculate_vision_encoder_tflops(config):
   """Calculate vision encoder TFLOPs per prefill step per device."""
   if config.model_name.startswith("gemma3"):
-    mm_total_tflops, mm_learnable_weight_tflops, mm_causal_attention_tflops = calculate_gemma3_vision_layers_tflops_per_device(
-        config
+    mm_total_tflops, mm_learnable_weight_tflops, mm_causal_attention_tflops = (
+        calculate_gemma3_vision_layers_tflops_per_device(config)
     )
   elif config.model_name.startswith("llama4"):
-    mm_total_tflops, mm_learnable_weight_tflops, mm_causal_attention_tflops = calculate_llama4_vision_layers_tflops_per_device(
-        config
+    mm_total_tflops, mm_learnable_weight_tflops, mm_causal_attention_tflops = (
+        calculate_llama4_vision_layers_tflops_per_device(config)
     )
   else:
     max_logging.log(f"Vision encoder TFLOPs calculation not implemented for model {config.model_name}")
 
   return mm_total_tflops, mm_learnable_weight_tflops, mm_causal_attention_tflops
-  
 
 
 def calculate_tflops_training_per_device(config, log=True):
@@ -467,15 +492,10 @@ def calculate_tflops_training_per_device(config, log=True):
   total_tflops = learnable_weight_tflops + attention_tflops + reference_model_tflops
 
   if config.use_multimodal:
-    mm_total_tflops, mm_learnable_weight_tflops, mm_causal_attention_tflops = calculate_vision_encoder_tflops(config)
-    print(
-        "Vision encoder TFLOPs per prefill step per device: \n",
-        f"\tTotal TFLOPs: {mm_total_tflops:.2f} \n",
-        f"\t\tLearnable weight TFLOPs: {mm_learnable_weight_tflops:.2f} "
-        f"({100 * mm_learnable_weight_tflops/mm_total_tflops:.2f})% of Total\n",
-        f"\t\tCausal attention TFLOPs: {mm_causal_attention_tflops:.2f} "
-        f"({100 * mm_causal_attention_tflops/mm_total_tflops:.2f})% of Total",
-    )
+    mm_total_tflops, mm_learnable_weight_tflops, mm_attention_tflops = calculate_vision_encoder_tflops(config)
+    total_tflops += mm_total_tflops
+    learnable_weight_tflops += mm_learnable_weight_tflops
+    attention_tflops += mm_attention_tflops
 
   if log:
     print(

@@ -762,7 +762,7 @@ num_attention_heads_for_vit: 16
 num_channels_for_vit: 3
 tile_size_for_vit: 336
 patch_size_for_vit: 14
-num_hidden_layers_for_vit: 1
+num_hidden_layers_for_vit: 34
 projector_input_dim_for_vit: 4096
 projector_output_dim_for_vit: 4096
 rope_theta_for_vit: 10000
