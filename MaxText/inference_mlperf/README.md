@@ -7,7 +7,7 @@ Follow these [instructions](https://cloud.google.com/tpu/docs/v5e-inference#tpu-
 
 ### Setup a virtual env
 ```
-sudo apt install python3.10-venv
+sudo apt install python3.12-venv
 python3 -m venv .env
 source .env/bin/activate
 ```
@@ -25,7 +25,7 @@ If you run into an issue like the following:
 
 ```
 ImportError: venv/lib/libstdc++.so.6: version `GLIBCXX_3.4.30'
-not found (required by venv/lib/python3.10/site-packages/lperf_loadgen.cpython-310-x86_64-linux-gnu.so)
+not found (required by venv/lib/python3.12/site-packages/lperf_loadgen.cpython-310-x86_64-linux-gnu.so)
 ```
 
 Please try running `conda install -c conda-forge gcc_linux-64 gxx_linux-64 libstdcxx-ng` if you using Conda or `sudo apt install build-essential` if you are using Venv and then reinstalling `loadgen`
