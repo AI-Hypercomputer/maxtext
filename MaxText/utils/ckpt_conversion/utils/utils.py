@@ -61,6 +61,7 @@ HF_IDS = {
     "qwen3-4b": "Qwen/Qwen3-4B",
     "qwen3-8b": "Qwen/Qwen3-8B",
     "qwen3-14b": "Qwen/Qwen3-14B",
+    "qwen3-32b": "Qwen/Qwen3-32B",
 }
 
 
@@ -324,7 +325,6 @@ def save_safetensor_file(
       max_logging.log(f"   Saved {file_name} to {local_path}")
 
 
-
 def save_index_file(
     index: dict,
     local_dir_to_save_to: str,
@@ -377,9 +377,7 @@ def save_weight_files(
   """
   if index is None:
     # 'shards' is actually the single state_dict here
-    save_safetensor_file(
-        shards, local_dir_to_save_to, output_dir_final, SAFE_TENSORS_WEIGHTS_FILE
-    )
+    save_safetensor_file(shards, local_dir_to_save_to, output_dir_final, SAFE_TENSORS_WEIGHTS_FILE)
   else:
     # Save sharded weights in parallel
     with ThreadPoolExecutor(max_workers=parallel_threads) as executor:
@@ -430,7 +428,7 @@ def save_model_files(
 ):
   """
   Saves model files (config and weights) to the specified directory.
-  When uploading to GCS/HF hub, 
+  When uploading to GCS/HF hub,
           *.safetensors are uploaded from memory to remote, no local storage is used to save disk usage
   """
 
@@ -497,6 +495,7 @@ def save_model_files(
   if jax.process_index() == 0:
     max_logging.log(f"✅ Model and tokenizer (if provided) successfully processed for {output_dir}")
 
+
 def upload_state_dict_to_gcs(state_dict: dict, gs_bucket_path: str):
   """Uploads a state_dict from memory to Google Cloud Storage.
 
@@ -512,7 +511,7 @@ def upload_state_dict_to_gcs(state_dict: dict, gs_bucket_path: str):
   # 1. Serialize the state_dict to an in-memory byte buffer
   buffer = io.BytesIO()
   np.savez(buffer, **state_dict)
-  buffer.seek(0) # Rewind the buffer to the beginning
+  buffer.seek(0)  # Rewind the buffer to the beginning
 
   # 2. Upload the bytes to GCS
   storage_client = Client()
@@ -520,7 +519,7 @@ def upload_state_dict_to_gcs(state_dict: dict, gs_bucket_path: str):
   blob = bucket.blob(blob_name)
 
   print(f"-> Uploading in-memory state_dict to {gs_bucket_path}...")
-  blob.upload_from_file(buffer, content_type='application/octet-stream', timeout=600)
+  blob.upload_from_file(buffer, content_type="application/octet-stream", timeout=600)
   print(f"✅ Uploaded to {bucket.name}/{blob_name}")
 
 
