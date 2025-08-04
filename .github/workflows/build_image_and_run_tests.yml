@@ -18,8 +18,7 @@
 name: Tests
 
 on:
-  # DO NOT SUBMIT THIS CHANGE
-  # pull_request:
+  pull_request:
   workflow_dispatch:
   schedule:
     # Run the job every 4 hours
@@ -46,7 +45,7 @@ jobs:
 
   tpu_image:
     needs: prelim
-    uses: ./.github/workflows/build_upload_internal.yml
+    uses: ./.github/workflows/build_docker_image_with_pip.yml
     with:
       device_type: tpu
       device_name: v4-8
@@ -56,7 +55,7 @@ jobs:
 
   gpu_image:
     needs: prelim
-    uses: ./.github/workflows/build_upload_internal.yml
+    uses: ./.github/workflows/build_docker_image_with_pip.yml
     with:
       device_type: gpu
       device_name: a100-40gb-4
@@ -66,9 +65,9 @@ jobs:
 
   cpu_unit_tests:
     needs: tpu_image
-    uses: ./.github/workflows/run_tests_internal.yml
+    uses: ./.github/workflows/run_unit_tests.yml
     with:
-      device_type: cpu
+      device_type: tpu # TODO(kanglan): Add cpu flag to seed-env
       device_name: X64
       cloud_runner: linux-x86-n2-16
       image_type: tpu
@@ -80,7 +79,7 @@ jobs:
 
   tpu_unit_tests:
     needs: tpu_image
-    uses: ./.github/workflows/run_tests_internal.yml
+    uses: ./.github/workflows/run_unit_tests.yml
     with:
       device_type: tpu
       device_name: v4-8
@@ -93,7 +92,7 @@ jobs:
 
   tpu_integration_tests:
     needs: tpu_image
-    uses: ./.github/workflows/run_tests_internal.yml
+    uses: ./.github/workflows/run_unit_tests.yml
     with:
       device_type: tpu
       device_name: v4-8
@@ -106,7 +105,7 @@ jobs:
 
   gpu_unit_tests:
     needs: gpu_image
-    uses: ./.github/workflows/run_tests_internal.yml
+    uses: ./.github/workflows/run_unit_tests.yml
     with:
       device_type: gpu
       device_name: a100-40gb-4
@@ -119,7 +118,7 @@ jobs:
 
   gpu_integration_tests:
     needs: gpu_image
-    uses: ./.github/workflows/run_tests_internal.yml
+    uses: ./.github/workflows/run_unit_tests.yml
     with:
       device_type: gpu
       device_name: a100-40gb-4
@@ -145,9 +144,9 @@ jobs:
           gcloud auth configure-docker --quiet
           gcloud auth configure-docker us-docker.pkg.dev --quiet
     - name: Delete the tpu image
-      run: gcloud container images delete "gcr.io/tpu-prod-env-multipod/maxtext_${{ github.run_id }}:tpu" --force-delete-tags --quiet
+      run: gcloud container images delete "gcr.io/tpu-prod-env-multipod/maxtext_with_pip_${{ github.run_id }}:tpu" --force-delete-tags --quiet
     - name: Delete the gpu image
-      run: gcloud container images delete "gcr.io/tpu-prod-env-multipod/maxtext_${{ github.run_id }}:gpu" --force-delete-tags --quiet
+      run: gcloud container images delete "gcr.io/tpu-prod-env-multipod/maxtext_with_pip_${{ github.run_id }}:gpu" --force-delete-tags --quiet
 
   notify_failure:
     name: Notify failed build # creates an issue or modifies last open existing issue for failed build
