@@ -82,7 +82,7 @@ class TestModel(unittest.TestCase):
     new_config = self.init_pyconfig(cast_logits_to_fp32=cast_logits_to_fp32, logits_dot_in_fp32=False)
     devices_array = maxtext_utils.create_device_mesh(new_config)
     mesh = Mesh(devices_array, new_config.mesh_axes)
-    model = models.Transformer(config=new_config, mesh=mesh, quant=None)
+    model = models.transformer_as_linen(config=new_config, mesh=mesh, quant=None)
 
     ids, decoder_segment_ids, decoder_positions = self.get_data()
 
@@ -120,7 +120,7 @@ class TestModel(unittest.TestCase):
     devices_array = maxtext_utils.create_device_mesh(self.cfg)
     mesh = Mesh(devices_array, self.cfg.mesh_axes)
     quant = quantizations.configure_quantization(self.cfg)
-    model = models.Transformer(config=self.cfg, mesh=mesh, quant=quant)
+    model = models.transformer_as_linen(config=self.cfg, mesh=mesh, quant=quant)
 
     ids, decoder_segment_ids, decoder_positions = self.get_data()
 

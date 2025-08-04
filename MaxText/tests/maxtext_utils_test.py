@@ -43,7 +43,7 @@ from MaxText.layers import models
 from MaxText.layers import quantizations
 from MaxText.maxtext_utils import assert_params_sufficiently_sharded, get_formatted_sharding_annotations
 
-Transformer = models.Transformer
+Transformer = models.transformer_as_linen
 
 
 class TestGradientClipping(unittest.TestCase):

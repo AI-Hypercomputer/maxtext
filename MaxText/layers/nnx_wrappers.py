@@ -194,10 +194,11 @@ class ToNNX(Module):
   ):
     self.to_nnx__module = module
 
+    self.to_nnx__rngs: Rngs | None
     if isinstance(rngs, jax.Array):
       self.to_nnx__rngs = Rngs(params=rngs)
     elif isinstance(rngs, nnx.Rngs):
-      self.to_nnx__rngs = rngs.fork() if hasattr(rngs, "fork") else nnx.clone(rngs)
+      self.to_nnx__rngs = rngs.fork() if hasattr(type(rngs), "fork") else nnx.clone(rngs)  # type: ignore
     else:
       self.to_nnx__rngs = rngs
 
@@ -208,7 +209,7 @@ class ToNNX(Module):
   def __getattr__(self, name: str):
     if hasattr(super(), name):
       return super().__getattribute__(name)
-    maybe_method = getattr(self.to_nnx__module.__class__, name, None)
+    maybe_method = getattr(type(self.to_nnx__module), name, None)
     if callable(maybe_method):
       method = partial(self.__call__, method=maybe_method)
       method.__self__ = self
@@ -272,6 +273,10 @@ class ToNNX(Module):
     # Split out the updates if `mutable` is passed into the Flax module
     if updates:
       nnx_attrs = linen_vars_to_nnx_attrs(updates)
+      # nnx.update(self, nnx_attrs)
+      # TODO(cgarciae): ideally we just do an update but currently dictionaries don't allow
+      # insertion of new keys, we need to enable this in NNX to simplify the code bellow
+      # to the simple nnx.update(self, nnx_attrs) above.
       for attr_name, value in nnx_attrs.items():
         if hasattr(self, attr_name) and isinstance(value, dict):
           original_value = getattr(self, attr_name)
@@ -390,10 +395,9 @@ class ToLinen(linen.Module):
   def __call__(
     self, *args, nnx_method: tp.Callable[..., Any] | str | None = None, **kwargs
   ):
-    module_kwargs = dict(self.kwargs)
-    maybe_add_default = not self.is_initializing()
-
     def _module_kwargs():
+      maybe_add_default = not self.is_initializing()
+      module_kwargs = dict(self.kwargs)
       if not self.skip_rng:
         module_kwargs["rngs"] = nnx.Rngs(
           **linen_rngs_dict(self, add_default=maybe_add_default)
@@ -436,6 +440,8 @@ class ToLinen(linen.Module):
   def __getattr__(self, name: str):
     if hasattr(super(), name):
       return super().__getattribute__(name)
+    if name in self.kwargs:
+      return self.kwargs[name]
     maybe_method = getattr(self.nnx_class, name, None)
     if callable(maybe_method):
       method = partial(self.__call__, nnx_method=maybe_method)
@@ -478,6 +484,7 @@ class ToLinen(linen.Module):
         for k, v in collection_state.items():
           self.put_variable(collection, k, v)
 
+TL = tp.TypeVar("TL", bound=ToLinen)
 
 def to_linen(
   nnx_class: tp.Callable[..., Module],
@@ -488,10 +495,11 @@ def to_linen(
   name: str | None = None,
   skip_rng: bool = False,
   abstract_init: bool = True,
+  to_linen_base_type: type[TL] = ToLinen,
   **kwargs,
-):
+) -> ToLinen:
   """Shortcut of `nnx.bridge.ToLinen` if user is not changing any of its default fields."""
-  return ToLinen(
+  return to_linen_base_type(
     nnx_class,
     args=args,
     kwargs=FrozenDict(kwargs),
