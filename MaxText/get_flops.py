@@ -23,6 +23,7 @@ import os
 from typing import Sequence
 from absl import app
 
+
 def main(argv: Sequence[str]):
   """
   Calculates and prints TFLOPs using command
@@ -33,6 +34,7 @@ def main(argv: Sequence[str]):
   config = pyconfig.initialize(pyconfig_argv)
   tflops, _, _ = calculate_tflops_training_per_device(config, log=False)
   print(f"Total TFLOPs per device per step: {tflops}")
+
 
 if __name__ == "__main__":
   app.run(main)
