@@ -349,27 +349,21 @@ def calculate_gemma3_vision_layers_tflops_per_device(config):
 
   # 5. VisionEmbedder
   rms_norm_flops = 4 * B * seq_len_after_pooling * hidden_dim  # One RMSNorm
-  input_projection_flops = 2 * B * hidden_dim * embed_dim  # One linear projection
+  input_projection_flops = 2 * B * seq_len_after_pooling * hidden_dim * embed_dim  # One linear projection
   vision_embedder_flops = rms_norm_flops + input_projection_flops
 
-  # Learnable weights: patch embedding + encoder + position embedding
+  # Learnable weights summation
   learnable_weight_flops = patch_embed_flops + position_embedding_flops + encoder_flops + pooling_flops + vision_embedder_flops
 
-  # Total FLOPs (fwd)
-  total_flops = learnable_weight_flops + total_attn_flops
-
   if config.freeze_vision_encoder_params:
-    total_flops += 2 * vision_embedder_flops  # only projector is learnable
-    learnable_weight_flops += 2 * vision_embedder_flops
+    learnable_weight_flops += 2 * vision_embedder_flops  # only projector is learnable, add fwd+optimizer
   else:
-    total_flops *= 3  # multiply by 3 for fwd + bwd + optimizer
-
-  dtype_factor = 2 if config.dtype == "bfloat16" else 1  # bfloat16 has half the flops of float32
+    learnable_weight_flops *= 3    # multiply by 3 for fwd + bwd + optimizer
 
   # Convert to TFLOPs
-  total_tflops = dtype_factor * total_flops / 1e12
-  learnable_weight_tflops = dtype_factor * learnable_weight_flops / 1e12
-  total_attn_tflops = dtype_factor * total_attn_flops / 1e12
+  learnable_weight_tflops = learnable_weight_flops / 1e12
+  total_attn_tflops = total_attn_flops / 1e12
+  total_tflops = learnable_weight_tflops + total_attn_tflops
 
   return total_tflops, learnable_weight_tflops, total_attn_tflops
 
@@ -442,21 +436,15 @@ def calculate_llama4_vision_layers_tflops_per_device(config):
       patch_embed_flops + vision_encoder_flops + pixel_shuffle_total_flops + projector_flops + other_ops_flops
   )
 
-  # Total FLOPs (fwd)
-  total_flops = learnable_weight_flops + total_attn_flops
-
   if config.freeze_vision_encoder_params:
-    total_flops += 2 * projector_flops  # only projector is learnable
-    learnable_weight_flops += 2 * projector_flops
+    learnable_weight_flops += 2 * projector_flops  # only projector is learnable, add fwd+optimizer
   else:
-    total_flops *= 3  # multiply by 3 for fwd + bwd + optimizer
-
-  dtype_factor = 2 if config.dtype == "bfloat16" else 1  # bfloat16 has half the flops of float32
+    learnable_weight_flops *= 3    # multiply by 3 for fwd + bwd + optimizer
 
   # Convert to TFLOPs
-  total_tflops = dtype_factor * total_flops / 1e12
-  learnable_weight_tflops = dtype_factor * learnable_weight_flops / 1e12
-  total_attn_tflops = dtype_factor * total_attn_flops / 1e12
+  learnable_weight_tflops = learnable_weight_flops / 1e12
+  total_attn_tflops = total_attn_flops / 1e12
+  total_tflops = learnable_weight_tflops + total_attn_tflops
 
   return total_tflops, learnable_weight_tflops, total_attn_tflops
 
