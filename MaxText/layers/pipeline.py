@@ -731,6 +731,7 @@ class Pipeline(nn.Module):
       )
     else:
       all_pipeline_weights = self.layers.variables
+    all_pipeline_weights = jax.ad_checkpoint.checkpoint_name(all_pipeline_weights, 'gather_again_plox')
 
     def run_iteration_scannable(model, loop_state, xs):
       # flax transforms like nn.scan and nn.remat can only be applied to nn.module classes or nn.module instances, so we
