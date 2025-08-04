@@ -314,6 +314,31 @@ def _get_module_method(module, method: tp.Callable[..., Any] | str | None):
   return method
 
 
+def _enable_linen_module_paths(module: Module):
+  """Ensure that linen module_path is correct when in NNX."""
+  def wrap(call_fn, name: str):
+    def wrapped(*args, **kwargs):
+      if not linen.module._context.module_stack:  # pylint: disable=W0212
+        return call_fn(*args, **kwargs)
+      nn_module = linen.module._context.module_stack[-1]  # pylint: disable=W0212
+      old_path = nn_module.path
+      # We modify the path of the current nn module in place. This is a litte
+      # bit hacky but should be good as a temporary solution.
+      nn_module.scope.path += (name,)
+      try:
+        return call_fn(*args, **kwargs)
+      finally:
+        nn_module.scope.path = old_path
+    return wrapped
+
+  for path, node in nnx.iter_graph(module):
+    # Only enable it on non-root nnx modules.
+    if path and isinstance(node, nnx.Module):
+      node.__class__ = type(node.__class__.__name__, (node.__class__,), {
+        '__call__': wrap(node.__class__.__call__, str(path[-1])),
+      })
+
+
 class ToLinen(linen.Module):
   """A wrapper to turn any NNX module into a Linen module.
 
@@ -376,6 +401,7 @@ class ToLinen(linen.Module):
     # init codepath
     if self.is_initializing():
       module = self.nnx_class(*self.args, **_module_kwargs())
+      _enable_linen_module_paths(module)
       # TODO: add lazy_init here in case there's an `ToNNX` submodule under `module`.
       # update linen variables before call module to save initial state
       self._update_variables(module)
@@ -385,6 +411,7 @@ class ToLinen(linen.Module):
 
     # create the nnx module
     module = self.nnx_class(*self.args, **_module_kwargs())
+    _enable_linen_module_paths(module)
     # update nnx module from linen variables
     def maybe_unbox(x):
       if isinstance(x, meta.AxisMetadata):
