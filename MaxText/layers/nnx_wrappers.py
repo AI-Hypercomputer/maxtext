@@ -458,7 +458,6 @@ def to_linen(
   ) = to_linen_var,
   name: str | None = None,
   skip_rng: bool = False,
-  abstract_init: bool = True,
   **kwargs,
 ):
   """Shortcut of `nnx.bridge.ToLinen` if user is not changing any of its default fields."""
