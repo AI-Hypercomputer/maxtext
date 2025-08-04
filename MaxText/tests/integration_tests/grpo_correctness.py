@@ -64,7 +64,7 @@ class GRPOTest(unittest.TestCase):
     self.rng = jax.random.PRNGKey(42)
     devices_array = maxtext_utils.create_device_mesh(self.cfg)
     mesh = Mesh(devices_array, self.cfg.mesh_axes)
-    self.model = models.Transformer(config=self.cfg, mesh=mesh, quant=None, model_mode=MODEL_MODE_TRAIN)
+    self.model = models.transformer_as_linen(config=self.cfg, mesh=mesh, quant=None)
     self.state, _ = maxtext_utils.setup_decode_state(self.model, self.cfg, self.rng, mesh, None)
     self.tokenizer_model = transformers.AutoTokenizer.from_pretrained(
         "meta-llama/Llama-3.1-8B",

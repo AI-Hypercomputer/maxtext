@@ -183,6 +183,7 @@ class MultiTokenPredictionBlock(nn.Module):
   @nn.compact
   def __call__(
       self,
+      shared_embedding,
       main_hidden_state,
       input_ids,
       target_ids,
@@ -212,7 +213,13 @@ class MultiTokenPredictionBlock(nn.Module):
       rolled_position_id = roll_and_mask(rolled_position_id)
 
       # Embed the k-th future input tokens using the shared embedding module
-      target_token_embedding = self.decoder._apply_embedding(rolled_input_ids, rolled_position_id, deterministic, model_mode)
+      target_token_embedding = self.decoder._apply_embedding(
+        shared_embedding,
+        rolled_input_ids,
+        rolled_position_id,
+        deterministic,
+        model_mode
+      )
 
       # Instantiate and apply the MTP layer for this step
       mtp_layer = MultiTokenPredictionLayer(
@@ -228,7 +235,7 @@ class MultiTokenPredictionBlock(nn.Module):
       )
 
       # Project to logits using the shared embedding transpose
-      mtp_logits = self.decoder._apply_output_head(next_mtp_hidden_state, deterministic, model_mode)
+      mtp_logits = self.decoder._apply_output_head(shared_embedding, next_mtp_hidden_state, deterministic, model_mode)
 
       # Calculate cross-entropy loss for this specific layer's prediction
       mtp_xent, _ = max_utils.cross_entropy_with_logits(mtp_logits, jax.nn.one_hot(rolled_target_ids, cfg.vocab_size), 0.0)

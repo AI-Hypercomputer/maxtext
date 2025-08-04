@@ -14,7 +14,7 @@
 
 # pylint: disable=bare-except, consider-using-generator
 """ Utils that are only interesting for training in MaxText. """
-
+from flax import nnx
 import jax
 from MaxText.common_types import MODEL_MODE_TRAIN
 from MaxText.layers import quantizations
@@ -24,18 +24,25 @@ from MaxText import checkpointing
 from MaxText import maxtext_utils
 
 
-def get_transformer_model(config, mesh, quant):
+def get_transformer_model(config, mesh, quant, rngs: nnx.Rngs | None = None):
+  """Returns the transformer model based on the configuration."""
   if config.model_fsdp_ag_once:
-    return models.ZeroOneTransformer(config, mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
+    if rngs is not None:
+      raise NotImplementedError
+    else:
+      return models.ZeroOneTransformer(config, mesh, quant=quant)
   else:
-    return models.Transformer(config, mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
+    if rngs is not None:
+      return models.Transformer(config, mesh, quant=quant, rngs=rngs)
+    else:
+      return models.transformer_as_linen(config, mesh, quant=quant)
 
 
-def create_model(config, mesh):
+def create_model(config, mesh, rngs: nnx.Rngs | None = None):
   """Instantiates and returns the model object, sharded across the mesh."""
   # Model definition
   quant = quantizations.configure_quantization(config)
-  model = get_transformer_model(config, mesh, quant)
+  model = get_transformer_model(config, mesh, quant, rngs=rngs)
   model = quantizations.maybe_quantize_model(model, config)
   return model
 

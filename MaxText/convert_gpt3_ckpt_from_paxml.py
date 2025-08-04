@@ -58,7 +58,7 @@ from MaxText import pyconfig
 from MaxText.common_types import MODEL_MODE_TRAIN
 from MaxText.globals import PKG_DIR
 from MaxText.layers import quantizations
-from MaxText.layers.models import Transformer
+from MaxText.layers.models import transformer_as_linen
 
 
 def fmt_size(num_bytes: int) -> str:
@@ -91,7 +91,7 @@ def convert(paxml_ckpt_path, maxtext_model_name, base_output_directory, run_name
   mesh = Mesh(devices_array, cfg.mesh_axes)
 
   quant = quantizations.configure_quantization(cfg)
-  model = Transformer(cfg, mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
+  model = transformer_as_linen(cfg, mesh, quant=quant)
   learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(cfg)
   tx = optimizers.get_optimizer(cfg, learning_rate_schedule)
 

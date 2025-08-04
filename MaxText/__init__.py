@@ -23,21 +23,39 @@ __description__ = (
 # maxtext/__init__.py
 
 from collections.abc import Sequence
+from typing import overload
 
+from flax import nnx
+from layers import nnx_wrappers
 from MaxText import maxtext_utils
 from MaxText import train_utils
 from MaxText import pyconfig
 from MaxText.layers import models
+from MaxText import checkpointing as checkpointing  # pylint: disable=useless-import-alias
 import jax
 from jax.sharding import Mesh
 
 Transformer = models.Transformer
+transformer_as_linen = models.transformer_as_linen
 
-
+@overload
 def from_pretrained(
     config: pyconfig.HyperParameters,
     devices: Sequence[jax.Device] | None = None,
-) -> Transformer:
+) -> nnx_wrappers.ToLinen: ...
+@overload
+def from_pretrained(
+    config: pyconfig.HyperParameters,
+    devices: Sequence[jax.Device] | None = None,
+    *,
+    rngs: nnx.Rngs,
+) -> Transformer: ...
+def from_pretrained(
+    config: pyconfig.HyperParameters,
+    devices: Sequence[jax.Device] | None = None,
+    *,
+    rngs: nnx.Rngs | None = None,
+) -> nnx_wrappers.ToLinen | Transformer:
   """Load a pretrained MaxText model from checkpoint.
 
   This function loads a model from a checkpoint.
@@ -53,7 +71,7 @@ def from_pretrained(
   """
   devices_array = maxtext_utils.create_device_mesh(config, devices)
   mesh = Mesh(devices_array, config.mesh_axes)
-  model = train_utils.create_model(config, mesh)
+  model = train_utils.create_model(config, mesh, rngs=rngs)
 
   # Return only the model
   return model

@@ -113,7 +113,7 @@ class MaxEngine(engine_api.Engine):
 
     # Model and Optimizer definition
     quant = quantizations.configure_quantization(config)
-    self.model = models.Transformer(config, mesh=self._mesh, quant=quant, model_mode=MODEL_MODE_PREFILL)
+    self.model = models.transformer_as_linen(config, mesh=self._mesh, quant=quant)
     self.replicated_sharding = jax.sharding.NamedSharding(self._mesh, P(None))
 
     self.abstract_params = None

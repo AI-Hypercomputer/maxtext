@@ -70,7 +70,7 @@ class GPT3(unittest.TestCase):
     devices_array = maxtext_utils.create_device_mesh(self.cfg)
     mesh = Mesh(devices_array, self.cfg.mesh_axes)
     quant = quantizations.configure_quantization(self.cfg)
-    self.model = models.Transformer(config=self.cfg, mesh=mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
+    self.model = models.transformer_as_linen(config=self.cfg, mesh=mesh, quant=quant)
     self.example_batch = {
         "inputs": jnp.array([[11, 12, 13, 14, 15]], dtype=jnp.int32),
         "inputs_position": jnp.array([[0, 1, 2, 3, 4]], dtype=jnp.int32),

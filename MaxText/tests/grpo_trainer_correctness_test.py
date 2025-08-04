@@ -70,7 +70,7 @@ def setup_maxtext_model(config, mesh):
   init_rng = jax.random.PRNGKey(config.init_weights_seed)
   quant = quantizations.configure_quantization(config)
 
-  maxtext_model = models.Transformer(config=config, mesh=mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
+  maxtext_model = models.transformer_as_linen(config=config, mesh=mesh, quant=quant)
   state, state_mesh_annotations = maxtext_utils.setup_decode_state(maxtext_model, config, init_rng, mesh, None)
   state_mesh_shardings = nn.logical_to_mesh_sharding(state_mesh_annotations, mesh, config.logical_axis_rules)
   data_sharding = jax.NamedSharding(mesh, jax.sharding.PartitionSpec(None))
