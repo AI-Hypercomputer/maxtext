@@ -26,7 +26,7 @@ from flax import linen as nn
 from MaxText.common_types import Config
 from MaxText.layers import attentions
 from MaxText.layers import quantizations
-from MaxText.layers.attentions import AttentionType, Attention
+from MaxText.layers.attentions import AttentionType, attention_as_linen
 from MaxText.layers.linears import mlp_block
 from MaxText.layers.normalizations import rms_norm
 from MaxText.layers.quantizations import AqtQuantization as Quant
@@ -95,7 +95,7 @@ class Gemma3DecoderLayer(nn.Module):
     lnx = nn.with_logical_constraint(lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
     query_pre_attn_scalar = get_query_pre_attn_scalar(cfg)
 
-    attention_layer = Attention(
+    attention_layer = attention_as_linen(
         config=cfg,
         num_query_heads=cfg.num_query_heads,
         num_kv_heads=cfg.num_kv_heads,
@@ -103,6 +103,8 @@ class Gemma3DecoderLayer(nn.Module):
         max_target_length=cfg.max_target_length,
         max_prefill_predict_length=cfg.max_prefill_predict_length,
         attention_kernel=cfg.attention,
+        inputs_q=lnx,
+        inputs_kv=lnx,
         mesh=mesh,
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
@@ -117,6 +119,7 @@ class Gemma3DecoderLayer(nn.Module):
         attn_logits_soft_cap=cfg.attn_logits_soft_cap,
         use_qk_norm=True,  # Gemma 3 models use query, key normalizations
         query_pre_attn_scalar=query_pre_attn_scalar,
+        model_mode=model_mode,
     )
 
     attention_lnx = attention_layer(

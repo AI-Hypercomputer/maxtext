@@ -74,7 +74,7 @@ def self_attention_with_norm(
 
   lnx = nn.with_logical_constraint(lnx, logical_axis_names)
 
-  attention_layer = attentions.MLA(
+  attention_layer = attentions.mla_as_linen(
       config=cfg,
       num_query_heads=cfg.num_query_heads,
       num_kv_heads=cfg.num_kv_heads,
@@ -82,6 +82,8 @@ def self_attention_with_norm(
       max_target_length=cfg.max_target_length,
       max_prefill_predict_length=cfg.max_prefill_predict_length,
       attention_kernel=cfg.attention,
+      inputs_q=lnx,
+      inputs_kv=lnx,
       mesh=mesh,
       dtype=cfg.dtype,
       weight_dtype=cfg.weight_dtype,
@@ -98,6 +100,7 @@ def self_attention_with_norm(
       original_max_position_embeddings=cfg.original_max_position_embeddings,
       mscale=cfg.mscale,
       rope_factor=cfg.rope_factor,
+      model_mode=model_mode,
   )
 
   attention_lnx = attention_layer(
