@@ -324,22 +324,21 @@ def calculate_gemma3_vision_layers_tflops_per_device(config):
   position_embedding_flops = B * seq_len * hidden_dim
 
   # 3. gemma3.Encoder: num_layers * gemma3.Encoder1DBlock
-  layernorm_flops_per_layer = 2 * (8 * B * seq_len * hidden_dim) # Two layernorms per Encoder1DBlock
+  layernorm_flops_per_layer = 2 * (8 * B * seq_len * hidden_dim) # two layernorms per Encoder1DBlock
   qkv_flops_per_layer = 3 * (2 * B * seq_len * hidden_dim * hidden_dim)
   attn_flops_per_layer = 4 * B * seq_len * seq_len * hidden_dim
-  dropout_flops_per_layer = 2 * B * seq_len * hidden_dim  # Two dropout calls per Encoder1DBlock
-  mlp_dense_flops_per_layer = 2 * (2 * B * seq_len * hidden_dim * intermediate_dim) # Two fc layers in MlpBlockViT
-  mlp_dropout_flops_per_layer = 2 * B * seq_len * intermediate_dim  # One dropout call in mlp
-  mlp_gelu_flops_per_layer = 12 * B * seq_len * intermediate_dim  # One GELU activation
-  mlp_flops_per_layer = mlp_dense_flops_per_layer + mlp_dropout_flops_per_layer + mlp_gelu_flops_per_layer
-  residual_flops_per_layer = 2 * (B * seq_len * hidden_dim)  # Two residual additions
+  projection_flops_per_layer = 2 * B * seq_len * hidden_dim * hidden_dim  # projection after attention multiplication
+  mlp_flops_per_layer = 2 * (2 * B * seq_len * hidden_dim * intermediate_dim)  # two fc layers
+  mlp_gelu_flops_per_layer = 12 * B * seq_len * intermediate_dim  # gelu activation, 12 is approximation factor
+  residual_flops_per_layer = 2 * (B * seq_len * hidden_dim)  # two residual additions
 
   total_attn_flops = attn_flops_per_layer * num_layers
   encoder_flops = (
       layernorm_flops_per_layer
       + qkv_flops_per_layer
-      + dropout_flops_per_layer
+      + projection_flops_per_layer
       + mlp_flops_per_layer
+      + mlp_gelu_flops_per_layer
       + residual_flops_per_layer
   ) * num_layers
 
@@ -396,31 +395,32 @@ def calculate_llama4_vision_layers_tflops_per_device(config):
   # Each patch: C * patch_size * patch_size -> hidden_dim
   patch_embed_flops = 2 * B * num_patches * (C * patch_size * patch_size) * hidden_dim
 
-  # 2. Llama4VisionEncoder: num_layers * (input_layer_norm + attention + post_attention_layer_norm + fc1 + gelu + fc2)
+  # 2. Llama4VisionEncoder: num_layers * (input_layer_norm + attention + post_attention_layer_norm + fc1 + fc2)
   seq_len = num_patches + 1  # +1 for class token, so 577
   layernorm_flops_per_layer = 2 * (8 * B * seq_len * hidden_dim)  # Two layernorms per Llama4VisionEncoderLayer
   qkv_flops_per_layer = 3 * (2 * B * seq_len * hidden_dim * hidden_dim)  # Q, K, V projections
   attn_flops_per_layer = 4 * B * seq_len * seq_len * hidden_dim  # Attention scores and weighted sum
-  visionmlp_flops_per_layer = 2 * (2 * B * seq_len * hidden_dim * intermediate_dim)  # Two fc layers
-  gelu_flops_per_layer = 12 * B * seq_len * intermediate_dim  # GELU activation
+  projection_flops_per_layer = 2 * B * seq_len * hidden_dim * hidden_dim  # projection after attention multiplication
+  mlp_flops_per_layer = 2 * (2 * B * seq_len * hidden_dim * intermediate_dim)  # two fc layers
+  mlp_gelu_flops_per_layer = 12 * B * seq_len * intermediate_dim  # gelu activation
   residual_flops_per_layer = 2 * (B * seq_len * hidden_dim)  # Two residual additions
   total_attn_flops = attn_flops_per_layer * num_layers
   vision_encoder_flops = (
       layernorm_flops_per_layer
       + qkv_flops_per_layer
-      + visionmlp_flops_per_layer
-      + gelu_flops_per_layer
+      + projection_flops_per_layer
+      + mlp_flops_per_layer
+      + mlp_gelu_flops_per_layer
       + residual_flops_per_layer
   ) * num_layers
 
-  # 3. Llama4VisionPixelShuffleMLP: two matmuls, with GELU and dropout in between
+  # 3. Llama4VisionPixelShuffleMLP: two matmuls, with GELU in between. Size changed so gelu should be counted separately
   # (B, 144, 5632) -> (B, 144, 4096) -> (B, 144, 4096)
   pixel_shuffle_fc1_flops = 2 * B * pixel_shuffle_tokens * intermediate_dim * pixel_shuffle_fc1_out_dim
   pixel_shuffle_fc2_flops = 2 * B * pixel_shuffle_tokens * pixel_shuffle_fc1_out_dim * pixel_shuffle_fc2_out_dim
-  pixel_shuffle_gelu_flops = 2 * (12 * B * pixel_shuffle_tokens * pixel_shuffle_fc1_out_dim)
-  pixel_shuffle_dropout_flops = 2 * B * pixel_shuffle_tokens * pixel_shuffle_fc1_out_dim # One dropout
+  pixel_shuffle_gelu_flops = 2 * (12 * B * pixel_shuffle_tokens * pixel_shuffle_fc1_out_dim)  # two gelu activations
   pixel_shuffle_total_flops = (
-      pixel_shuffle_fc1_flops + pixel_shuffle_fc2_flops + pixel_shuffle_gelu_flops + pixel_shuffle_dropout_flops
+      pixel_shuffle_fc1_flops + pixel_shuffle_fc2_flops + pixel_shuffle_gelu_flops
   )
 
   # 4. Llama4MultiModalProjector: (B, 144, 5120) x (5120, base_emb_dim)
