@@ -67,7 +67,7 @@ from MaxText.utils.ckpt_conversion.utils.param_mapping import (
     HOOK_FNS,
     PARAM_MAPPING,
 )
-from projects.maxtext.MaxText.utils.ckpt_conversion.utils.hf_shape import SHAPE_MAPPING
+from MaxText.utils.ckpt_conversion.utils.hf_shape import SHAPE_MAPPING
 from MaxText.utils.ckpt_conversion.utils.hf_model_configs import HF_MODEL_CONFIGS
 from MaxText.utils.ckpt_conversion.utils.utils import (process_leaf_param, save_model_files, HF_IDS)
 
