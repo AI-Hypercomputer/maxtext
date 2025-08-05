@@ -23,6 +23,34 @@ from MaxText.layers import models
 from MaxText import optimizers
 from MaxText import checkpointing
 from MaxText import maxtext_utils
+from MaxText import max_logging
+
+
+def validate_train_config(config):
+  """Validates the configuration is set correctly for 'train.py'."""
+
+  assert config.run_name, "Erroring out, need a real run_name"
+  if config.dataset_path and not config.dataset_path.startswith("gs://"):
+    max_logging.log("WARNING: 'dataset_path' might be pointing your local file system")
+  if not config.base_output_directory.startswith("gs://"):
+    max_logging.log("WARNING: 'base_output_directory' might be pointing your local file system")
+  assert config.steps > 0, "You must set steps or learning_rate_schedule_steps to a positive integer."
+
+  if config.quantization in ("fp8", "nanoo_fp8"):
+    # pylint: disable=line-too-long
+    assert config.gradient_accumulation_steps == 1, (
+        "fp8 can't be used with gradient_accumulation_steps right now. Please use other quantization or set "
+        "gradient_accumulation_steps to 1"
+    )
+
+  # Check if GPU Flash Attention is being used with sequence packing
+  if config.attention == "cudnn_flash_te" and config.packing and config.dataset_type != "synthetic":
+    raise ValueError(
+        "cudnn_flash_te only supports BSHD format. The THD (seq packing) support is going to be available in "
+        "Transformer Engine 2.0 release. "
+        "Please disable sequence packing (set packing=False) or use a different attention mechanism. "
+        "With synthetic data, the format is not important as packing is not applied."
+    )
 
 
 def get_transformer_model(config, mesh, quant):

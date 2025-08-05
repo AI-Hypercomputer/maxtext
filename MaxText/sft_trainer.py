@@ -43,8 +43,8 @@ from MaxText.train import (
     get_first_step,
     setup_train_loop,
     train_step,
-    validate_train_config,
 )
+from MaxText.train_utils import validate_train_config
 from MaxText.utils.goodput_utils import (
     GoodputEvent,
     create_goodput_recorder,

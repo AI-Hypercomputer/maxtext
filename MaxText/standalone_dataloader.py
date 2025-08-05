@@ -29,7 +29,8 @@ import jax
 from MaxText import max_logging
 from MaxText import pyconfig
 from MaxText.data_loader import DataLoader
-from MaxText.train import validate_train_config, get_first_step, setup_train_loop
+from MaxText.train import get_first_step, setup_train_loop
+from MaxText.train_utils import validate_train_config
 
 
 def data_load_loop(config, state=None):
