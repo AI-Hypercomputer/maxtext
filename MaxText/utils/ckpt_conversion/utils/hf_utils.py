@@ -88,7 +88,7 @@ def check_arrays_match(arrayA, arrayB, atol=0.01, rtol=1e-5):
         # Get the actual mismatched values using the indices
         mismatched_A_samples = arrayA[mismatch_indices].flatten()[:actual_limit]
         mismatched_B_samples = arrayB[mismatch_indices].flatten()[:actual_limit]
-        for (sample_a, sample_b) in zip(mismatched_A_samples, mismatched_B_samples):
+        for sample_a, sample_b in zip(mismatched_A_samples, mismatched_B_samples):
           print(f"  A: {sample_a.item():.6f}, B: {sample_b.item():.6f}, Diff: {(sample_a - sample_b).item():.6f}")
       return False
 
