@@ -603,18 +603,14 @@ class Pipeline(nn.Module):
     return jax.lax.with_sharding_constraint(self.layers.variables, physical_constraint_no_fsdp)
 
   @nn.compact
-  # add import for partial
-
-  
-
   def __call__(
       self,
       inputs: jnp.ndarray,
       segment_ids: jnp.ndarray,
       positions: jnp.ndarray,
       deterministic: bool,
-      model_mode=MODEL_MODE_TRAIN,
-      partition_spec=None,  # Pytree of sharding specifications of the weights (aka self.layers.variables)
+      model_mode,
+      partition_spec,  # Pytree of sharding specifications of the weights (aka self.layers.variables)
   ) -> jnp.ndarray:
     """The main method that maps the series of decoder layer inputs to final layer outputs.
     Has the same signature of a single decoder layer, and expects the same shapes, e.g. the inputs should have shape
@@ -731,6 +727,10 @@ class Pipeline(nn.Module):
       )
     else:
       all_pipeline_weights = self.layers.variables
+
+    # pytree checkpoint name all_pipeline_weights using jax.tree.map
+    all_pipeline_weights = jax.tree.map(lambda x: jax.ad_checkpoint.checkpoint_name(x, "all_gather_me_again"), all_pipeline_weights)
+    
 
     def run_iteration_scannable(model, loop_state, xs):
       # flax transforms like nn.scan and nn.remat can only be applied to nn.module classes or nn.module instances, so we

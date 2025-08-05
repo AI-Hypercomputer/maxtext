@@ -256,8 +256,7 @@ class Decoder(nn.Module):
               pipeline.Pipeline,
               prevent_cse=not self.config.scan_layers,
               policy=remat_policy,
-              static_argnums=(4, 5),  # Deterministic and model mode are static arguments.
-              static_argnames=("partition_spec",)
+              static_argnums=(4, 5, 6),  # Deterministic and model mode are static arguments.
           )
         else:
           rematted_pipeline = pipeline.Pipeline
@@ -626,7 +625,7 @@ class Decoder(nn.Module):
     if cfg.using_pipeline_parallelism:
       if cfg.pipeline_fsdp_ag_once:
         partition_spec = self.pipeline_modules[0].get_weight_sharding(
-            y, decoder_segment_ids, decoder_positions, deterministic, model_mode
+            y, decoder_segment_ids, decoder_positions, deterministic, model_mode, None
         )
       else:
         partition_spec = None  # This partition spec is only used for the fsdp_ag_once feature.
@@ -656,13 +655,9 @@ class Decoder(nn.Module):
                 mesh,
                 in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
             )(y, *broadcast_args)
-        y = self.pipeline_module(y, *broadcast_args, partition_spec=partition_spec)
+        y = self.pipeline_module(y, *broadcast_args, partition_spec)
       else:  # Not DeepSeek
-        y = run_successive_pipelines(self.pipeline_modules, y, *broadcast_args, partition_spec=partition_spec)
-        # y = self.pipeline_module_rawr(y, *broadcast_args, partition_spec=partition_spec)
-        # y = self.pipeline_module_2(y, *broadcast_args, partition_spec=partition_spec)
-        # for _ in range(10):
-        #   y = self.pipeline_module(y, *broadcast_args, partition_spec=partition_spec)
+        y = run_successive_pipelines(self.pipeline_modules, y, *broadcast_args, partition_spec)
         remaining_layers = self.config.num_decoder_layers - self.config.pipeline_parallel_layers
         if remaining_layers > 0:
           logical_axis_rules_pp_as_dp = maxtext_utils.logical_axis_rules_pp_act_as_dp(self.config.logical_axis_rules)
@@ -859,6 +854,7 @@ class Decoder(nn.Module):
 
 def run_successive_pipelines(pipeline_modules, y, *broadcast_args, partition_spec=None):
   for pipeline_module in pipeline_modules:
-    y = pipeline_module(y, *broadcast_args, partition_spec=partition_spec)
+    #breakpoint()
+    y = pipeline_module(y, *broadcast_args)
   return y
   
