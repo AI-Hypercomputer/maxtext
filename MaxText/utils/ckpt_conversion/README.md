@@ -18,6 +18,7 @@ python -m MaxText.utils.ckpt_conversion.to_maxtext MaxText/configs/base.yml \
     model_name=<model-name> \
     base_output_directory=<gcs-path-to-save-checkpoint> \
     hf_access_token=<your-hf-token> \
+    use_multimodal=false \
     scan_layers=false
 ```
 
@@ -25,6 +26,7 @@ python -m MaxText.utils.ckpt_conversion.to_maxtext MaxText/configs/base.yml \
 
   * `model_name`: The model identifier, which should be defined in `MaxText/utils/utils.py`.
   * `scan_layers`: Decides if the output checkpoint is scanned(scan_layers=true) or unscanned(scan_layers=false)
+  * `use_multimodal`: Decides if multimodality is used, important for gemma3
   * `base_output_directory`: The path where the converted Orbax checkpoint will be stored, it can GCS or local. If unset, the default output directory is `Maxtext/tmp`
 
 \*\**It only converts the official version of HF model. You can refer the supported official version in HF_IDS in `MaxText/utils/ckpt_conversion/utils/utils.py`*
@@ -44,6 +46,7 @@ python -m MaxText.utils.ckpt_conversion.to_huggingface MaxText/configs/base.yml 
     load_parameters_path=<path-to-maxtext-checkpoint> \
     base_output_directory=<path-to-save-converted-checkpoint> \
     scan_layers=false \
+    use_multimodal=false \
     hf_access_token=<your-hf-token> \
 ```
 
@@ -52,6 +55,7 @@ python -m MaxText.utils.ckpt_conversion.to_huggingface MaxText/configs/base.yml 
   * `load_parameters_path`: The path to the source MaxText Orbax checkpoint (e.g., `gs://your-bucket/maxtext-checkpoint/0/items`).
   * `model_name`: The corresponding model name in the MaxText configuration (e.g., `qwen3-4b`).
   * `scan_layers`: Decides if the output checkpoint is scanned(scan_layers=true) or unscanned(scan_layers=false)
+  * `use_multimodal`: Decides if multimodality is used, important for gemma3
   * `base_output_directory`: The path where the converted Orbax checkpoint will be stored, it can GCS, Hugging Face Hub or local. If unset, the default output directory is `Maxtext/tmp`
 
 
@@ -67,6 +71,7 @@ python3 -m MaxText.tests.forward_pass_logit_checker MaxText/configs/base.yml \
     load_parameters_path=<path-to-maxtext-checkpoint> \
     model_name=<MODEL_NAME> \
     scan_layers=false \
+    use_multimodal=false \
     --run_hf_model=True \
     --hf_model_path=<path-to-HF-checkpoint> \
     --max_kl_div=0.015 \
@@ -77,6 +82,7 @@ python3 -m MaxText.tests.forward_pass_logit_checker MaxText/configs/base.yml \
   * `load_parameters_path`: The path to the source MaxText Orbax checkpoint (e.g., `gs://your-bucket/maxtext-checkpoint/0/items`).
   * `model_name`: The corresponding model name in the MaxText configuration (e.g., `qwen3-4b`).
   * `scan_layers`: Decides if the output checkpoint is scanned(scan_layers=true) or unscanned(scan_layers=false).
+  * `use_multimodal`: Decides if multimodality is used.
   * `--run_hf_model`: Decides if loading hf model from the hf_model_path. If unset, it will compare the maxtext logits with pre-saved golden logits. 
   * `--hf_model_path`: The path to the Hugging Face checkpoint.
   * `--max_kl_div`: Max KL divergence tolerance during comparisons.
