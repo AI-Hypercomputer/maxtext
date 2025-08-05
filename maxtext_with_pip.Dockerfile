@@ -67,6 +67,9 @@ RUN python -m uv pip uninstall seed-env
 
 RUN python -m uv pip list
 RUN python -m uv pip install generated_env/dist/*.whl --resolution=lowest
+RUN if [ "$DEVICE" = "gpu" ]; then \
+      python -m pip install git+https://github.com/NVIDIA/TransformerEngine.git@9d031f; \
+    fi
 RUN python -m uv pip list
 
 # Run the script to generate the manifest file

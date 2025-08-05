@@ -59,7 +59,7 @@ jobs:
         with:
           push: true
           context: .
-          file: ./maxtext_no_pip.Dockerfile
+          file: ./maxtext_with_pip.Dockerfile
           tags: gcr.io/tpu-prod-env-multipod/maxtext_with_pip_${{ github.run_id }}:${{ inputs.device_type }}
           provenance: false
           build-args: |
