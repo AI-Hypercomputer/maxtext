@@ -718,10 +718,7 @@ class AttentionOp(nnx.Module):
   ) -> Array:
     """TPU Flash Attention."""
 
-    cp_size = self.mesh.shape["context"]
-    if self.config.expert_shard_attention_option == EP_AS_CONTEXT:
-      cp_size = cp_size * self.mesh.shape["expert"]
-
+    cp_size = self.config.context_parallel_size
     load_balanced_context_parallel = self.config.context_parallel_load_balance
 
     # Transpose to ('batch', 'heads', 'length', 'kv')

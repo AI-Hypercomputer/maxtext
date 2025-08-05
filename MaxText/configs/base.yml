@@ -160,7 +160,7 @@ tile_batch_seq: 512
 tile_activation_dim: 1024
 tile_weight_dim: 1024
 
-# How to use expert parallelism for attention sharding
+# How the expert axis is used to shard attention weights and activations
 # "fsdp" (ep acts as fsdp parallelism)
 # "context" (ep acts as context parallelism, training only)
 expert_shard_attention_option: "fsdp"

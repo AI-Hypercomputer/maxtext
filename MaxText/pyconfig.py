@@ -615,6 +615,7 @@ class _HyperParameters:
 
     raw_keys["num_slices"] = max_utils.get_num_slices(raw_keys)
     raw_keys["quantization_local_shard_count"] = get_quantization_local_shard_count(raw_keys)
+    raw_keys["context_parallel_size"] = get_context_parallel_size(raw_keys)
     raw_keys = create_parallelisms_list(raw_keys)
     raw_keys = set_and_validate_pipeline_config(raw_keys)
 
@@ -949,7 +950,9 @@ def validate_deepseek_moe(raw_keys):
 
 def validate_sparse_matmul_parallelism(raw_keys):
   if raw_keys["sparse_matmul"] and (using_sequence_parallelism(raw_keys) or using_pipeline_parallelism(raw_keys)):
-    raise ValueError("Currently we only support Megablox and Ragged dot with data, tensor, tensor_transpose, and expert parallelism.")
+    raise ValueError(
+        "Currently we only support Megablox and Ragged dot with data, tensor, tensor_transpose, and expert parallelism."
+    )
   tensor_parallelism = (
       raw_keys["ici_tensor_parallelism"]
       * raw_keys["dcn_tensor_parallelism"]
@@ -1091,6 +1094,14 @@ def get_quantization_local_shard_count(raw_keys):
     return raw_keys["num_slices"]
   else:
     return raw_keys["quantization_local_shard_count"]
+
+
+def get_context_parallel_size(raw_keys):
+  cp_size = raw_keys["ici_context_parallelism"] * raw_keys["dcn_context_parallelism"]
+  # ep acts as cp in attention
+  if raw_keys["expert_shard_attention_option"] == "context":
+    cp_size = cp_size * raw_keys["ici_expert_parallelism"] * raw_keys["dcn_expert_parallelism"]
+  return cp_size
 
 
 def using_pipeline_parallelism(raw_keys) -> bool:

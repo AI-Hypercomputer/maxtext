@@ -259,7 +259,7 @@ class ChunkedCausalMaskTest(unittest.TestCase):
       attentions._generate_chunk_attention_mask(mask_shape=(4, 4), chunk_size=0)
 
 
-class AttentionTest(unittest.TestCase):
+class AttentionTest(parameterized.TestCase):
   """Test for the Attention"""
 
   # Note: if you are changing these configs, please make sure to change the configs in
@@ -551,57 +551,53 @@ class AttentionTest(unittest.TestCase):
         jax.numpy.allclose(mha_generic_output, mha_generic_flash_output, rtol=1e-01, atol=1e-01, equal_nan=False)
     )
 
+  @parameterized.named_parameters(
+      {
+          "testcase_name": "cp_no_load_balance",
+          "ici_context_parallelism": 4,
+          "context_parallel_load_balance": False,
+          "ici_expert_parallelism": 1,
+          "expert_shard_attention_option": "fsdp",
+      },
+      {
+          "testcase_name": "cp_with_load_balance",
+          "ici_context_parallelism": 4,
+          "context_parallel_load_balance": True,
+          "ici_expert_parallelism": 1,
+          "expert_shard_attention_option": "fsdp",
+      },
+      {
+          "testcase_name": "cp_ep_no_load_balance",
+          "ici_context_parallelism": 2,
+          "context_parallel_load_balance": False,
+          "ici_expert_parallelism": 2,
+          "expert_shard_attention_option": "context",
+      },
+      {
+          "testcase_name": "cp_ep_with_load_balance",
+          "ici_context_parallelism": 2,
+          "context_parallel_load_balance": True,
+          "ici_expert_parallelism": 2,
+          "expert_shard_attention_option": "context",
+      },
+      {
+          "testcase_name": "ep_no_load_balance",
+          "ici_context_parallelism": 1,
+          "context_parallel_load_balance": False,
+          "ici_expert_parallelism": 4,
+          "expert_shard_attention_option": "context",
+      },
+      {
+          "testcase_name": "ep_with_load_balance",
+          "ici_context_parallelism": 1,
+          "context_parallel_load_balance": True,
+          "ici_expert_parallelism": 4,
+          "expert_shard_attention_option": "context",
+      },
+  )
   @pytest.mark.tpu_only
-  def test_tpu_flash_attention_cp_and_ep(self):
-    # cp, load_balance=false
-    self.tpu_flash_attention_cp_and_ep_helper(
-        ici_context_parallelism=4,
-        context_parallel_load_balance=False,
-        ici_expert_parallelism=1,
-        expert_shard_attention_option="fsdp",
-    )
-    # cp, load_balance=true
-    self.tpu_flash_attention_cp_and_ep_helper(
-        ici_context_parallelism=4,
-        context_parallel_load_balance=True,
-        ici_expert_parallelism=1,
-        expert_shard_attention_option="fsdp",
-    )
-    # cp + ep->cp, load_balance=false
-    self.tpu_flash_attention_cp_and_ep_helper(
-        ici_context_parallelism=2,
-        context_parallel_load_balance=False,
-        ici_expert_parallelism=2,
-        expert_shard_attention_option="context",
-    )
-    # cp + ep->cp, load_balance=true
-    self.tpu_flash_attention_cp_and_ep_helper(
-        ici_context_parallelism=2,
-        context_parallel_load_balance=True,
-        ici_expert_parallelism=2,
-        expert_shard_attention_option="context",
-    )
-    # ep->cp, load_balance=false
-    self.tpu_flash_attention_cp_and_ep_helper(
-        ici_context_parallelism=1,
-        context_parallel_load_balance=False,
-        ici_expert_parallelism=4,
-        expert_shard_attention_option="context",
-    )
-    # ep->cp, load_balance=true
-    self.tpu_flash_attention_cp_and_ep_helper(
-        ici_context_parallelism=1,
-        context_parallel_load_balance=True,
-        ici_expert_parallelism=4,
-        expert_shard_attention_option="context",
-    )
-
-  def tpu_flash_attention_cp_and_ep_helper(
-      self,
-      ici_context_parallelism=1,
-      context_parallel_load_balance=True,
-      ici_expert_parallelism=1,
-      expert_shard_attention_option="context",
+  def test_tpu_flash_attention_context_parallel(
+      self, ici_context_parallelism, context_parallel_load_balance, ici_expert_parallelism, expert_shard_attention_option
   ):
     """Test equivalence between dot_product and flash attention + context/expert parallelism"""
     num_kv_heads = self.num_kv_heads
@@ -1219,57 +1215,53 @@ class MLATest(parameterized.TestCase):
       # TODO (b/394626702) uncomment last check when decode and kv_cache are implemented for MLA
       # self.assertTrue(jax.numpy.allclose(mla_full_this_idx, mla_idx, rtol=1e-02, atol=1e-02, equal_nan=False))
 
+  @parameterized.named_parameters(
+      {
+          "testcase_name": "cp_no_load_balance",
+          "ici_context_parallelism": 4,
+          "context_parallel_load_balance": False,
+          "ici_expert_parallelism": 1,
+          "expert_shard_attention_option": "fsdp",
+      },
+      {
+          "testcase_name": "cp_with_load_balance",
+          "ici_context_parallelism": 4,
+          "context_parallel_load_balance": True,
+          "ici_expert_parallelism": 1,
+          "expert_shard_attention_option": "fsdp",
+      },
+      {
+          "testcase_name": "cp_ep_no_load_balance",
+          "ici_context_parallelism": 2,
+          "context_parallel_load_balance": False,
+          "ici_expert_parallelism": 2,
+          "expert_shard_attention_option": "context",
+      },
+      {
+          "testcase_name": "cp_ep_with_load_balance",
+          "ici_context_parallelism": 2,
+          "context_parallel_load_balance": True,
+          "ici_expert_parallelism": 2,
+          "expert_shard_attention_option": "context",
+      },
+      {
+          "testcase_name": "ep_no_load_balance",
+          "ici_context_parallelism": 1,
+          "context_parallel_load_balance": False,
+          "ici_expert_parallelism": 4,
+          "expert_shard_attention_option": "context",
+      },
+      {
+          "testcase_name": "ep_with_load_balance",
+          "ici_context_parallelism": 1,
+          "context_parallel_load_balance": True,
+          "ici_expert_parallelism": 4,
+          "expert_shard_attention_option": "context",
+      },
+  )
   @pytest.mark.tpu_only
-  def test_tpu_flash_attention_cp_and_ep(self):
-    # cp, load_balance=false
-    self.tpu_flash_attention_cp_and_ep_helper(
-        ici_context_parallelism=4,
-        context_parallel_load_balance=False,
-        ici_expert_parallelism=1,
-        expert_shard_attention_option="fsdp",
-    )
-    # cp, load_balance=true
-    self.tpu_flash_attention_cp_and_ep_helper(
-        ici_context_parallelism=4,
-        context_parallel_load_balance=True,
-        ici_expert_parallelism=1,
-        expert_shard_attention_option="fsdp",
-    )
-    # cp + ep->cp, load_balance=false
-    self.tpu_flash_attention_cp_and_ep_helper(
-        ici_context_parallelism=2,
-        context_parallel_load_balance=False,
-        ici_expert_parallelism=2,
-        expert_shard_attention_option="context",
-    )
-    # cp + ep->cp, load_balance=true
-    self.tpu_flash_attention_cp_and_ep_helper(
-        ici_context_parallelism=2,
-        context_parallel_load_balance=True,
-        ici_expert_parallelism=2,
-        expert_shard_attention_option="context",
-    )
-    # ep->cp, load_balance=false
-    self.tpu_flash_attention_cp_and_ep_helper(
-        ici_context_parallelism=1,
-        context_parallel_load_balance=False,
-        ici_expert_parallelism=4,
-        expert_shard_attention_option="context",
-    )
-    # ep->cp, load_balance=true
-    self.tpu_flash_attention_cp_and_ep_helper(
-        ici_context_parallelism=1,
-        context_parallel_load_balance=True,
-        ici_expert_parallelism=4,
-        expert_shard_attention_option="context",
-    )
-
-  def tpu_flash_attention_cp_and_ep_helper(
-      self,
-      ici_context_parallelism=1,
-      context_parallel_load_balance=True,
-      ici_expert_parallelism=1,
-      expert_shard_attention_option="context",
+  def test_tpu_flash_attention_context_parallel(
+      self, ici_context_parallelism, context_parallel_load_balance, ici_expert_parallelism, expert_shard_attention_option
   ):
     """Test equivalence between dot_product and flash attention + context/expert parallelism"""
 
@@ -1357,10 +1349,7 @@ def _forward_with_context_expert_parallelism(
   attention_cp_variable = attention_cp.init({"params": rng, "aqt": rng}, lnx, lnx, decoder_segment_ids)
   # If load balanced cp, shuffle along seq dim for input
   # This correponds to the pre-shuffle step in training
-  context_parallel_size = cfg_cp.ici_context_parallelism
-  # ep acts like cp
-  if cfg_cp.expert_shard_attention_option == "context":
-    context_parallel_size = context_parallel_size * cfg_cp.ici_expert_parallelism
+  context_parallel_size = cfg_cp.context_parallel_size
   if context_parallel_size > 1 and cfg_cp.context_parallel_load_balance:
     batch = {"inputs": lnx, "inputs_segmentation": decoder_segment_ids, "inputs_position": decoder_positions}
     with mesh_cp:
