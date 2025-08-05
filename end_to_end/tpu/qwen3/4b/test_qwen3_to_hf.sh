@@ -4,9 +4,7 @@
 
 # The flow of this file is as follows:
 # 1. Convert the checkpoint downloaded from Hugging Face to make it compatible with MaxText
-# 2. Run decoding, finetuning of Qwen3-4B. with the converted checkpoint. Also, run pretraining of Qwen3-4B.
-# 3. Convert the scanned checkpoint from step 1 into unscanned checkpoint format and run more efficient decoding.
-# 4. Run decoding from the finetuned checkpoint from step 2
+# 2. 
 
 
 set -ex

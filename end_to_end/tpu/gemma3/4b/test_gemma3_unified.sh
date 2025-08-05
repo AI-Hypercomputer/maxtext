@@ -4,9 +4,9 @@
 
 # The flow of this file is as follows:
 # 1. Convert the checkpoint downloaded from Hugging Face to make it compatible with MaxText
-# 2. Run decoding, finetuning of Gemma3-4b. with the converted checkpoint. Also, run pretraining of Gemma3-4b
-# 3. Convert the scanned checkpoint from step 1 into unscanned checkpoint format and run more efficient decoding.
-# 4. Run decoding from the finetuned checkpoint from step 2
+# 2. Run a forward pass logits check to compare with the original HF golden model
+# 2. Run decoding, finetuning of Gemma3-4B. with the converted checkpoint.
+# 3. Run decoding from the finetuned checkpoint from step 2
 
 
 set -ex
@@ -14,6 +14,10 @@ idx=$(date +%Y-%m-%d-%H-%M)
 MODEL_NAME='gemma3-4b'
 export MODEL_VARIATION='4b'
 HF_TOKEN='' # Important!!! Save your hf access token here
+HF_GOLDEN_MODEL='google/gemma-3-4b-it'
+TOKENIZER_PATH='assets/tokenizer.gemma3'
+# To convert the multimodal model, make sure the use_multimodal is set to be true
+USE_MULTIMODAL=true
 
 # Installing torch for deps in forward_pass_logit_checker.py
 python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
@@ -28,17 +32,18 @@ python3 -m MaxText.utils.ckpt_conversion.to_maxtext MaxText/configs/base.yml \
     model_name=${MODEL_NAME} \
     hf_access_token=${HF_TOKEN} \
     base_output_directory=${MODEL_BUCKET}/${MODEL_VARIATION}/unscanned/${idx} \
-    use_multimodal=true \
+    use_multimodal=${USE_MULTIMODAL} \
     scan_layers=false 
 
 export UNSCANNED_CKPT_PATH=${MODEL_BUCKET}/${MODEL_VARIATION}/unscanned/${idx}/0/items
 
-# # To get scanned ckpt, flip the scan_layers:
+# # To get scanned ckpt, flip the scan_layers. 
+# ToDo: gemma3 multimodal scanned ckpt
 # python3 -m MaxText.utils.ckpt_conversion.to_maxtext MaxText/configs/base.yml \
 #     model_name=${MODEL_NAME} \
 #     hf_access_token=${HF_TOKEN} \
 #     base_output_directory=${MODEL_BUCKET}/${MODEL_VARIATION}/scanned/${idx} \
-#     use_multimodal=true \
+#     use_multimodal=${USE_MULTIMODAL} \
 #     scan_layers=true 
 
 # export SCANNED_CKPT_PATH=${MODEL_BUCKET}/${MODEL_VARIATION}/scanned/${idx}/0/items
@@ -48,17 +53,21 @@ export UNSCANNED_CKPT_PATH=${MODEL_BUCKET}/${MODEL_VARIATION}/unscanned/${idx}/0
 
 # ToDo: improve forward_pass_logit_checker to test multi-modal prompt
 python3 -m MaxText.tests.forward_pass_logit_checker MaxText/configs/base.yml \
-    tokenizer_path=assets/tokenizer.gemma3  \
+    tokenizer_path==${TOKENIZER_PATH}  \
     load_parameters_path=${UNSCANNED_CKPT_PATH} \
     model_name=${MODEL_NAME} \
-    use_multimodal=true \
+    use_multimodal=${USE_MULTIMODAL} \
     scan_layers=false \
-    --hf_model_path=google/gemma-3-4b-it \
+    --hf_model_path=${HF_GOLDEN_MODEL} \
     --max_kl_div=0.015 \
     --run_hf_model=true 
 
 # We can run decoding for unscanned checkpoints.
-python3 -m MaxText.decode MaxText/configs/base.yml model_name=${MODEL_NAME} tokenizer_path=assets/tokenizer.gemma3 load_parameters_path=${UNSCANNED_CKPT_PATH} per_device_batch_size=1 run_name=ht_test max_prefill_predict_length=272 max_target_length=300 steps=1 async_checkpointing=false scan_layers=false use_multimodal=true prompt=\'Describe\ image\ \<start_of_image\>\' image_path=\'MaxText/test_assets/test_image.jpg\' attention=\'dot_product\'
+if [ ${USE_MULTIMODAL} == true ]; then
+    python3 -m MaxText.decode MaxText/configs/base.yml model_name=${MODEL_NAME} tokenizer_path=${TOKENIZER_PATH} load_parameters_path=${UNSCANNED_CKPT_PATH} per_device_batch_size=1 run_name=ht_test max_prefill_predict_length=272 max_target_length=300 steps=1 async_checkpointing=false scan_layers=false use_multimodal=${USE_MULTIMODAL} prompt=\'Describe\ image\ \<start_of_image\>\' image_path=\'MaxText/test_assets/test_image.jpg\' attention=\'dot_product\'
+else:
+    python3 -m MaxText.decode MaxText/configs/base.yml model_name=${MODEL_NAME} tokenizer_path=${TOKENIZER_PATH} load_parameters_path=${UNSCANNED_CKPT_PATH} per_device_batch_size=1 run_name=ht_test max_prefill_predict_length=8 max_target_length=16 steps=1 async_checkpointing=false scan_layers=false prompt='I love to' attention=\'dot_product\'
+fi
 
 # Non-Googlers please remember to point `DATASET_PATH` to the GCS bucket where you have your training data
 export DATASET_PATH=gs://maxtext-dataset
@@ -68,7 +77,11 @@ export BASE_OUTPUT_DIRECTORY=gs://runner-maxtext-logs
 # We can also run finetuning by using the scanned converted checkpoint.
 # Note that scanned checkpoint helps with efficient finetuning
 export FINETUNE_RUN_NAME=runner_finetune_${idx}
-python3 -m MaxText.train MaxText/configs/base.yml base_output_directory=${BASE_OUTPUT_DIRECTORY} dataset_path=${DATASET_PATH} tokenizer_path=assets/tokenizer.gemma3  load_parameters_path=${UNSCANNED_CKPT_PATH} per_device_batch_size=1 run_name=${FINETUNE_RUN_NAME} max_target_length=8192 steps=10 async_checkpointing=false model_name=${MODEL_NAME} checkpoint_period=5 scan_layers=false
+python3 -m MaxText.train MaxText/configs/base.yml base_output_directory=${BASE_OUTPUT_DIRECTORY} dataset_path=${DATASET_PATH} tokenizer_path=${TOKENIZER_PATH}  load_parameters_path=${UNSCANNED_CKPT_PATH} per_device_batch_size=1 run_name=${FINETUNE_RUN_NAME} max_target_length=8192 steps=10 async_checkpointing=false model_name=${MODEL_NAME} checkpoint_period=5 scan_layers=false
 
 # Now, run decoding on the checkpoint generated from our finetune run.
-python3 -m MaxText.decode MaxText/configs/base.yml model_name=${MODEL_NAME} tokenizer_path=assets/tokenizer.gemma3 load_parameters_path=${BASE_OUTPUT_DIRECTORY}/${FINETUNE_RUN_NAME}/checkpoints/0/items per_device_batch_size=1 run_name=ht_test max_prefill_predict_length=272 max_target_length=300 steps=1 async_checkpointing=false scan_layers=false use_multimodal=true prompt=\'Describe\ image\ \<start_of_image\>\' image_path=\'MaxText/test_assets/test_image.jpg\' attention=\'dot_product\'
+if [ ${USE_MULTIMODAL} == true ]; then
+    python3 -m MaxText.decode MaxText/configs/base.yml model_name=${MODEL_NAME} tokenizer_path=${TOKENIZER_PATH} load_parameters_path=${BASE_OUTPUT_DIRECTORY}/${FINETUNE_RUN_NAME}/checkpoints/0/items per_device_batch_size=1 run_name=ht_test max_prefill_predict_length=272 max_target_length=300 steps=1 async_checkpointing=false scan_layers=false use_multimodal=${USE_MULTIMODAL} prompt=\'Describe\ image\ \<start_of_image\>\' image_path=\'MaxText/test_assets/test_image.jpg\' attention=\'dot_product\'
+else:
+    python3 -m MaxText.decode MaxText/configs/base.yml model_name=${MODEL_NAME} tokenizer_path=${TOKENIZER_PATH} load_parameters_path=${BASE_OUTPUT_DIRECTORY}/${FINETUNE_RUN_NAME}/checkpoints/0/items per_device_batch_size=1 run_name=ht_test max_prefill_predict_length=8 max_target_length=16 steps=1 async_checkpointing=false scan_layers=false prompt='I love to' attention=\'dot_product\'
+fi
