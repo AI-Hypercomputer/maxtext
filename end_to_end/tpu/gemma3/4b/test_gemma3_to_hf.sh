@@ -13,6 +13,8 @@ MODEL_NAME='gemma3-4b'
 export MODEL_VARIATION='4b'
 HF_TOKEN='' # Important!!! Save your hf access token here
 TOKENIZER_PATH='assets/tokenizer.gemma3'
+# To convert the multimodal model, make sure the use_multimodal is set to be true
+USE_MULTIMODAL=true
 
 # Installing torch for deps in forward_pass_logit_checker.py
 python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
@@ -33,6 +35,7 @@ python3 -m MaxText.utils.ckpt_conversion.to_huggingface MaxText/configs/base.yml
     hf_access_token=${HF_TOKEN} \
     load_parameters_path=${CKPT_PATH} \
     base_output_directory=${LOCAL_PATH} \
+    use_multimodal=${USE_MULTIMODAL} \
     scan_layers=false 
 
 # Alternatively, if uploaded the converted ckpt, HF requires local storage of model
@@ -45,6 +48,7 @@ python3 -m MaxText.tests.forward_pass_logit_checker MaxText/configs/base.yml \
     tokenizer_path=${TOKENIZER_PATH} \
     load_parameters_path=${CKPT_PATH} \
     model_name=${MODEL_NAME} \
+    use_multimodal=${USE_MULTIMODAL} \
     scan_layers=false \
     --hf_model_path=${LOCAL_PATH} \
     --max_kl_div=0.015 \
