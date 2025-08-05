@@ -16,7 +16,7 @@
 
 import functools
 from typing import Any
-
+from functools import partial
 import numpy as np
 
 from jax import numpy as jnp
@@ -603,6 +603,10 @@ class Pipeline(nn.Module):
     return jax.lax.with_sharding_constraint(self.layers.variables, physical_constraint_no_fsdp)
 
   @nn.compact
+  # add import for partial
+
+  
+
   def __call__(
       self,
       inputs: jnp.ndarray,

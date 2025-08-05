@@ -248,7 +248,24 @@ class Decoder(nn.Module):
       pipeline_modules_list = list((None for _ in range(self.config.num_successive_pipelines)))
       for i in range(self.config.num_successive_pipelines):
         pipeline_stage_module = self.get_pipeline_stage_module(self.decoder_layer)
-        pipeline_module = pipeline.Pipeline(
+
+        use_remat = True
+        # Apply remat policy to layer
+        if use_remat:
+          rematted_pipeline = nn.remat(
+              pipeline.Pipeline,
+              prevent_cse=not self.config.scan_layers,
+              policy=remat_policy,
+              static_argnums=(4, 5),  # Deterministic and model mode are static arguments.
+              static_argnames=("partition_spec",)
+          )
+        else:
+          rematted_pipeline = pipeline.Pipeline
+
+        # pipeline_module = pipeline.Pipeline(
+        #   config=self.config, mesh=self.mesh, layers=pipeline_stage_module, remat_policy=remat_policy
+        # )
+        pipeline_module = rematted_pipeline(
           config=self.config, mesh=self.mesh, layers=pipeline_stage_module, remat_policy=remat_policy
         )
         pipeline_modules_list[i] = pipeline_module
