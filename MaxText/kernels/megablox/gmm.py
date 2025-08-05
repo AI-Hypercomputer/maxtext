@@ -312,6 +312,7 @@ LutFn = Callable[[int, int, int], Optional[tuple[int, int, int]]]
         "lhs_quantize_dtype",
         "rhs_quantize_dtype",
     ],
+    inline=True,
 )
 def gmm(
     lhs: jnp.ndarray,
@@ -589,10 +590,7 @@ def gmm(
     lhs = qpl.quantize(lhs, qtype=lhs_quantize_dtype, channelwise_axes=[0])
 
   if rhs_quantize_dtype is not None:
-    # Since block_spec.block_shape of rhs is None, the first axis is reduced
-    # inside kernel, e.g., if block_shape is (None, tn, tk) then a tensor of
-    # shape (tn, tk) will be feteched inside kernel instead of (1, tn, tk).
-    # Therefore, we need to add one to rhs_contracting_axis.
+    # Use per-channel scales for non-contracting axes, i.e., num_groups, m, n but not k.
     rhs = qpl.quantize(rhs, qtype=rhs_quantize_dtype, channelwise_axes=[0, 1 if transpose_rhs else 2])
 
   out = call_gmm(
