@@ -556,7 +556,8 @@ def calculate_tflops_training_per_device(config, log=True):
           f"{config.model_name} vision layers per train step:\n",
           f"Total TFLOPs: {mm_total_tflops:.2f} \n",
           f"split as {100 * mm_learnable_weight_tflops/mm_total_tflops:.2f}% learnable weight flops",
-          f"and {100 * mm_attention_tflops/mm_total_tflops:.2f}% attention flops",
+          f"and {100 * mm_attention_tflops/mm_total_tflops:.2f}% attention flops;\n",
+          f"learnable weight {mm_learnable_weight_tflops:.2f} TFLOPs, attention {mm_attention_tflops:.2f} TFLOPs",
       )
     total_tflops += mm_total_tflops
     learnable_weight_tflops += mm_learnable_weight_tflops
