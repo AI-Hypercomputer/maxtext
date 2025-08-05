@@ -2,6 +2,10 @@
 
 This guide provides instructions for using the scripts that convert model checkpoints bidirectionally between Hugging Face and MaxText formats.
 
+## Supported Models
+
+Gemma2 (2B, 9B, 27B), Gemma3 (4B, 12B, 27B), Qwen3 (0.6B, 4B, 8B, 14B, 32B).
+
 
 ## Hugging Face → MaxText
 
