@@ -29,6 +29,7 @@ from flax import nnx
 import flax.linen as nn
 
 from MaxText import max_logging
+from MaxText import max_utils
 from MaxText.common_types import MODEL_MODE_PREFILL, DecoderBlockType, DType, Array, Config
 from MaxText.layers import nnx_wrappers, quantizations
 from MaxText.layers import normalizations
@@ -211,7 +212,7 @@ class DenseGeneral(nnx.Module):
       # Move logit_dense kernel to device if parameter offloading is enabled
       if self.parameter_memory_host_offload:
         max_logging.log("linear.py: Moving parameter logits_dense kernel to device")
-        kernel = jax.device_put(kernel, jax.memory.Space.Device)
+        kernel = jax.device_put(kernel, max_utils.device_space())
       kernel = jnp.asarray(kernel, self.dtype)
 
     contract_ind = tuple(range(0, len(self.axis)))
