@@ -104,17 +104,10 @@ class GemmaDecoderLayer(nn.Module):
     )
     attention_lnx += inputs
     residual = attention_lnx
-    attn_output = rms_norm(
-        num_features=attention_lnx.shape[-1],
-        dtype=cfg.dtype,
-        weight_dtype=cfg.weight_dtype,
-        name="pre_ffw_norm",
-        kernel_axes=("norm",),
-    )(attention_lnx)
 
-    # MLP block.
+    # MLP block with pre-norm.
     mlp_lnx = mlp_block(
-        in_features=attn_output.shape[-1],
+        in_features=residual.shape[-1],
         intermediate_dim=cfg.mlp_dim,
         activations=cfg.mlp_activations,
         intermediate_dropout_rate=cfg.dropout_rate,
@@ -123,7 +116,8 @@ class GemmaDecoderLayer(nn.Module):
         name="mlp",
         config=cfg,
         quant=self.quant,
-    )(attn_output, deterministic=deterministic)
+        use_pre_norm=True,
+    )(residual, deterministic=deterministic)
     mlp_lnx = nn.with_logical_constraint(mlp_lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
 
     next_layer_addition = mlp_lnx + residual
