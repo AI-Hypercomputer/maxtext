@@ -4,7 +4,7 @@
 
 # The flow of this file is as follows:
 # 1. Convert the checkpoint downloaded from Hugging Face to make it compatible with MaxText
-# 2. 
+# 2. Run a forward pass check to compare the logits and KL divergence between the converted ckpt and orginal golden HF model
 
 
 set -ex
