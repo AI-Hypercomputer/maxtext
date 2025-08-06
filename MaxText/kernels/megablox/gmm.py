@@ -588,10 +588,12 @@ def gmm(
 
   if lhs_quantize_dtype is not None:
     lhs = qpl.quantize(lhs, qtype=lhs_quantize_dtype, channelwise_axes=[0])
+    lhs = dataclasses.replace(lhs, scale=lhs.scale.astype(jnp.float32))
 
   if rhs_quantize_dtype is not None:
     # Use per-channel scales for non-contracting axes, i.e., num_groups, m, n but not k.
     rhs = qpl.quantize(rhs, qtype=rhs_quantize_dtype, channelwise_axes=[0, 1 if transpose_rhs else 2])
+    rhs = dataclasses.replace(rhs, scale=rhs.scale.astype(jnp.float32))
 
   out = call_gmm(
       group_metadata,
