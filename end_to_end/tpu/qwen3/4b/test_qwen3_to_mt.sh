@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# This file is both an integration test that runs once a day on a v4-8 and documentation for how to get started with Qwen3-4B.
+# This file contains an end-to-end Airflow nightly test, designed to run once a day on a v4-8, along with documentation to guide users in getting started with Gemma2-2B.
 
 # The flow of this file is as follows:
 # 1. Convert the checkpoint downloaded from Hugging Face to make it compatible with MaxText
