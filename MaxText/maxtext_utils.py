@@ -876,7 +876,7 @@ def setup_initial_state(
         # Check if a nested 'params' key exists.
         if 'params' in raw_params:
           # If so, extract the nested parameters.
-          new_params = raw_params['params']
+          raw_params = raw_params['params']
           # Merge the new nested params into the existing state's params dictionary.
           state = state.replace(params=dict(state.params, params=raw_params))
         else:
