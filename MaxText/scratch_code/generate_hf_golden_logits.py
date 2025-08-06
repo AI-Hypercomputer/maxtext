@@ -17,7 +17,7 @@ Usage:
 
 python3 -m MaxText.scratch_code.generate_hf_golden_logits --model-id=deepseek-ai/DeepSeek-V2-Lite \
      --output-path=golden_DeepSeek-V2-Lite.jsonl --prompts='I love to,Today is a,What is the' \
-     --gcs-bucket=my-gcs-bucket
+     --gcs-bucket=gs://aireenmei-multipod/logits/ --checkpoint_path=
 
 """
 
@@ -38,11 +38,13 @@ def upload_blob(bucket_name, source_file_name, destination_blob_name):
   blob.upload_from_filename(source_file_name)
 
 
-def save_golden_logits(model_id, output_path, prompt_texts, gcs_bucket):
+def save_golden_logits(model_id, output_path, prompt_texts, gcs_bucket, checkpoint_path):
   """save golden logits"""
-  tokenizer = AutoTokenizer.from_pretrained(model_id)
+  if checkpoint_path is None:
+     checkpoint_path = model_id
+  tokenizer = AutoTokenizer.from_pretrained(checkpoint_path)
   model = AutoModelForCausalLM.from_pretrained(
-      model_id,
+      checkpoint_path,
       torch_dtype=torch.float32,
       trust_remote_code=True,
   )
@@ -82,9 +84,12 @@ def main(raw_args=None) -> None:
   parser.add_argument(
       "--gcs-bucket", type=str, required=False, default=None, help="A GCS bucket to store logits, without gs://."
   )
+  parser.add_argument(
+      "--checkpoint_path", type=str, required=False, default=None, help="A GCS bucket to store logits, without gs://."
+  )
   args = parser.parse_args(raw_args)
   prompts = args.prompts.split(",")
-  save_golden_logits(args.model_id, args.output_path, prompts, args.gcs_bucket)
+  save_golden_logits(args.model_id, args.output_path, prompts, args.gcs_bucket, args.checkpoint_path)
 
 
 if __name__ == "__main__":
