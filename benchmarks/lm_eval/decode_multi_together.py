@@ -6,6 +6,8 @@ from absl import app
 import jax
 import numpy as np
 
+import time
+
 from MaxText import max_utils, maxengine, pyconfig
 
 def _validate_config(config, num_streams, batch_size):
@@ -36,7 +38,6 @@ def main(argv: Sequence[str]) -> None:
 
     prompts = [
         "The best thing about Kirkland, Washington on a sunny afternoon is",
-        "Who is Elon Musk?",
     ]
     if _NUM_STREAMS > len(prompts):
         prompts = [prompts[i % len(prompts)] for i in range(_NUM_STREAMS)]
@@ -74,6 +75,8 @@ def main(argv: Sequence[str]) -> None:
     # 4. Move the final, uniform batch to the device.
     final_padded_tokens = jax.device_put(final_padded_tokens)
     print("Finished tokenizing and batching.")
+
+    start = time.time()
 
     # ========================================================================
     print("Jax Device Count:", jax.device_count())
@@ -119,6 +122,10 @@ def main(argv: Sequence[str]) -> None:
                 token_for_slot = sampled_tokens.get_result_at_slot(slot_idx).tokens.item()
                 streams_results[slot_idx].append(token_for_slot)
 
+    end = time.time()
+
+
+
     print("\n--- Final Results ---")
     for i in range(_NUM_STREAMS):
         if streams_results[i]:
@@ -130,6 +137,9 @@ def main(argv: Sequence[str]) -> None:
                 ), f"Stream {i} generated text mismatch: `{output}` vs expected start `{config.autoregressive_decode_assert}`"
         else:
             print(f"Stream {i}: Was not activated.")
+
+    
+    print("Decode time used: ", end - start)
 
 if __name__ == "__main__":
     app.run(main)
