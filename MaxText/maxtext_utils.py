@@ -872,8 +872,15 @@ def setup_initial_state(
           in_shardings=None,
           out_shardings=state_mesh_shardings,
       )(rng)
-      if raw_params:  # If we loaded a partial state, we need to merge it.
-        state = state.replace(params=raw_params)
+      if raw_params:
+        # Check if a nested 'params' key exists.
+        if 'params' in raw_params:
+          # If so, extract the nested parameters.
+          new_params = raw_params['params']
+          # Merge the new nested params into the existing state's params dictionary.
+          state = state.replace(params=dict(state.params, params=raw_params))
+        else:
+          state = state.replace(params=raw_params)
 
   state = max_utils.unbox_logicallypartioned(state)
 
