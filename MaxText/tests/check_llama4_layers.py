@@ -648,8 +648,8 @@ class Llama4VisionAttentionTest(unittest.TestCase):
         head_dim=self.cfg.hidden_size_for_vit // self.cfg.num_attention_heads_for_vit,
         max_target_length=self.seq_len_for_vit,
         attention_kernel="dot_product",  # TODO aireenmei: support flash attention
-        inputs_q=lnx,
-        inputs_kv=lnx,
+        inputs_q_shape=lnx.shape,
+        inputs_kv_shape=lnx.shape,
         mesh=self.mesh,
         dropout_rate=0,
         name="self_attention_vision",
