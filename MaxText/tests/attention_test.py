@@ -313,8 +313,8 @@ class AttentionTest(parameterized.TestCase):
         head_dim=self.head_dim,
         max_target_length=self.max_target_length,
         max_prefill_predict_length=self.max_prefill_predict_length,
-        inputs_q=dummy_inputs_q,
-        inputs_kv=dummy_inputs_kv,
+        inputs_q_shape=dummy_inputs_q.shape,
+        inputs_kv_shape=dummy_inputs_kv.shape,
         mesh=self.mesh,
         attention_kernel="dot_product",
         dtype=self.dtype,
@@ -430,8 +430,8 @@ class AttentionTest(parameterized.TestCase):
         head_dim=self.head_dim,
         max_target_length=self.max_target_length,
         max_prefill_predict_length=self.cfg.max_prefill_predict_length,
-        inputs_q=dummy_inputs_q,
-        inputs_kv=dummy_inputs_kv,
+        inputs_q_shape=dummy_inputs_q.shape,
+        inputs_kv_shape=dummy_inputs_kv.shape,
         mesh=self.mesh,
         attention_kernel="dot_product",
         dtype=dtype,
@@ -477,8 +477,8 @@ class AttentionTest(parameterized.TestCase):
         head_dim=self.head_dim,
         max_target_length=self.max_target_length,
         max_prefill_predict_length=self.cfg.max_prefill_predict_length,
-        inputs_q=dummy_inputs_q,
-        inputs_kv=dummy_inputs_kv,
+        inputs_q_shape=dummy_inputs_q.shape,
+        inputs_kv_shape=dummy_inputs_kv.shape,
         mesh=self.mesh,
         attention_kernel="dot_product",
         dtype=self.dtype,
@@ -506,8 +506,8 @@ class AttentionTest(parameterized.TestCase):
         head_dim=self.head_dim,
         max_target_length=self.max_target_length,
         max_prefill_predict_length=self.cfg.max_prefill_predict_length,
-        inputs_q=dummy_inputs_q,
-        inputs_kv=dummy_inputs_kv,
+        inputs_q_shape=dummy_inputs_q.shape,
+        inputs_kv_shape=dummy_inputs_kv.shape,
         mesh=self.mesh,
         attention_kernel="flash",
         dtype=self.dtype,
@@ -589,6 +589,7 @@ class AttentionTest(parameterized.TestCase):
         deterministic=True,
         model_mode=MODEL_MODE_TRAIN,
     )
+    generic_state = nnx.state(self._attention_as_mha_generic)
 
     # Test with Context Parallelism
     cfg_cp = pyconfig.initialize(
@@ -610,8 +611,8 @@ class AttentionTest(parameterized.TestCase):
         head_dim=cfg_cp.head_dim,
         max_target_length=cfg_cp.max_target_length,
         max_prefill_predict_length=cfg_cp.max_prefill_predict_length,
-        inputs_q=dummy_inputs_q,
-        inputs_kv=dummy_inputs_kv,
+        inputs_q_shape=dummy_inputs_q.shape,
+        inputs_kv_shape=dummy_inputs_kv.shape,
         mesh=mesh_cp,
         attention_kernel="flash",
         dtype=self.dtype,
@@ -619,6 +620,7 @@ class AttentionTest(parameterized.TestCase):
         model_mode=MODEL_MODE_PREFILL,
         rngs=self.nnx_rng,
     )
+    nnx.update(attention_as_mha_flash_cp, generic_state)
 
     mha_generic_flash_cp_output = _forward_with_context_expert_parallelism(
         cfg_cp, mesh_cp, attention_as_mha_flash_cp, lnx, decoder_segment_ids, decoder_positions
@@ -682,8 +684,8 @@ class AttentionTest(parameterized.TestCase):
         num_query_heads=config.num_query_heads,
         num_kv_heads=config.num_kv_heads,
         head_dim=config.head_dim,
-        inputs_q=dummy_inputs_q,
-        inputs_kv=dummy_inputs_kv,
+        inputs_q_shape=dummy_inputs_q.shape,
+        inputs_kv_shape=dummy_inputs_kv.shape,
         max_target_length=config.max_target_length,
         max_prefill_predict_length=config.max_prefill_predict_length,
         attention_kernel=config.attention,
@@ -775,8 +777,8 @@ class AttentionTest(parameterized.TestCase):
         head_dim=config.head_dim,
         max_target_length=config.max_target_length,
         max_prefill_predict_length=config.max_prefill_predict_length,
-        inputs_q=dummy_inputs_q,
-        inputs_kv=dummy_inputs_kv,
+        inputs_q_shape=dummy_inputs_q.shape,
+        inputs_kv_shape=dummy_inputs_kv.shape,
         attention_kernel=config.attention,
         dtype=config.dtype,
         compute_axis_order=compute_axis_order,
@@ -793,8 +795,8 @@ class AttentionTest(parameterized.TestCase):
         head_dim=config.head_dim,
         max_target_length=config.max_target_length,
         max_prefill_predict_length=config.max_prefill_predict_length,
-        inputs_q=dummy_inputs_q,
-        inputs_kv=dummy_inputs_kv,
+        inputs_q_shape=dummy_inputs_q.shape,
+        inputs_kv_shape=dummy_inputs_kv.shape,
         attention_kernel=config.attention,
         dtype=config.dtype,
         compute_axis_order=compute_axis_order,
@@ -916,8 +918,8 @@ class AttentionTest(parameterized.TestCase):
         max_target_length=self.max_target_length,
         max_prefill_predict_length=self.max_prefill_predict_length,
         mesh=self.mesh,
-        inputs_q=dummy_inputs_q,
-        inputs_kv=dummy_inputs_kv,
+        inputs_q_shape=dummy_inputs_q.shape,
+        inputs_kv_shape=dummy_inputs_kv.shape,
         attention_kernel="dot_product",
         dtype=self.dtype,
         dropout_rate=self.cfg.dropout_rate,
@@ -935,8 +937,8 @@ class AttentionTest(parameterized.TestCase):
         max_target_length=self.max_target_length,
         max_prefill_predict_length=self.max_prefill_predict_length,
         mesh=self.mesh,
-        inputs_q=dummy_inputs_q,
-        inputs_kv=dummy_inputs_kv,
+        inputs_q_shape=dummy_inputs_q.shape,
+        inputs_kv_shape=dummy_inputs_kv.shape,
         attention_kernel="dot_product",
         dtype=self.dtype,
         dropout_rate=self.cfg.dropout_rate,
@@ -985,8 +987,8 @@ class AttentionTest(parameterized.TestCase):
         max_target_length=self.max_target_length,
         max_prefill_predict_length=self.max_prefill_predict_length,
         mesh=self.mesh,
-        inputs_q=dummy_inputs_q,
-        inputs_kv=dummy_inputs_kv,
+        inputs_q_shape=dummy_inputs_q.shape,
+        inputs_kv_shape=dummy_inputs_kv.shape,
         attention_kernel="dot_product",
         dtype=self.dtype,
         dropout_rate=self.cfg.dropout_rate,
@@ -1048,20 +1050,16 @@ class MLATest(parameterized.TestCase):
     devices_array = maxtext_utils.create_device_mesh(cfg)
     mesh = Mesh(devices_array, cfg.mesh_axes)
 
-    global_batch_size = cfg.global_batch_size_to_train_on
-    max_target_length = cfg.max_target_length
-    embed_dim = cfg.base_emb_dim
-
-    dummy_inputs_q = jnp.ones((global_batch_size, max_target_length, embed_dim))
-    dummy_inputs_kv = jnp.ones((global_batch_size, max_target_length, embed_dim))
+    dummy_inputs_q = jnp.ones((cfg.global_batch_size_to_train_on, cfg.max_target_length, cfg.base_emb_dim))
+    dummy_inputs_kv = jnp.ones((cfg.global_batch_size_to_train_on, cfg.max_target_length, cfg.base_emb_dim))
 
     mla = MLA(
         config=cfg,
         num_query_heads=cfg.num_query_heads,
         num_kv_heads=cfg.num_kv_heads,
         head_dim=cfg.head_dim,
-        inputs_q=dummy_inputs_q,
-        inputs_kv=dummy_inputs_kv,
+        inputs_q_shape=dummy_inputs_q.shape,
+        inputs_kv_shape=dummy_inputs_kv.shape,
         max_target_length=cfg.max_target_length,
         max_prefill_predict_length=cfg.max_prefill_predict_length,
         mesh=mesh,
@@ -1252,6 +1250,8 @@ class MLATest(parameterized.TestCase):
         deterministic=True,
         model_mode=MODEL_MODE_TRAIN,
     )
+    generic_state = nnx.state(mla)
+
     # Test with Context Parallelism
     cfg_cp = pyconfig.initialize(
         [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
@@ -1264,11 +1264,15 @@ class MLATest(parameterized.TestCase):
     )
     devices_array_cp = maxtext_utils.create_device_mesh(cfg_cp)
     mesh_cp = Mesh(devices_array_cp, cfg_cp.mesh_axes)
+    dummy_inputs_q = jnp.ones((cfg_cp.global_batch_size_to_train_on, cfg_cp.max_target_length, cfg_cp.base_emb_dim))
+    dummy_inputs_kv = jnp.ones((cfg_cp.global_batch_size_to_train_on, cfg_cp.max_target_length, cfg_cp.base_emb_dim))
     attention_as_mla_flash_cp = MLA(
         config=cfg_cp,
         num_query_heads=cfg_cp.num_query_heads,
         num_kv_heads=cfg_cp.num_kv_heads,
         head_dim=cfg_cp.head_dim,
+        inputs_q_shape=dummy_inputs_q.shape,
+        inputs_kv_shape=dummy_inputs_kv.shape,
         max_target_length=cfg_cp.max_target_length,
         max_prefill_predict_length=cfg_cp.max_prefill_predict_length,
         mesh=mesh_cp,
@@ -1284,6 +1288,7 @@ class MLATest(parameterized.TestCase):
         model_mode=MODEL_MODE_PREFILL,
         rngs=self.nnx_rng,
     )
+    nnx.update(attention_as_mla_flash_cp, generic_state)
     mla_generic_flash_cp_output = _forward_with_context_expert_parallelism(
         cfg_cp, mesh_cp, attention_as_mla_flash_cp, lnx, decoder_segment_ids, decoder_positions
     )

@@ -1505,8 +1505,8 @@ def attention_as_linen(
     max_target_length: int,
     mesh: Mesh,
     attention_kernel: str,
-    inputs_q: Array,
-    inputs_kv: Array,
+    inputs_q_shape: Tuple,
+    inputs_kv_shape: Tuple,
     dtype: DType = jnp.float32,
     weight_dtype: DType = jnp.float32,
     max_prefill_predict_length: int = -1,
@@ -1571,8 +1571,8 @@ def attention_as_linen(
       max_target_length=max_target_length,
       mesh=mesh,
       attention_kernel=attention_kernel,
-      inputs_q=inputs_q,
-      inputs_kv=inputs_kv,
+      inputs_q_shape=inputs_q_shape,
+      inputs_kv_shape=inputs_kv_shape,
       dtype=dtype,
       weight_dtype=weight_dtype,
       max_prefill_predict_length=max_prefill_predict_length,
@@ -1631,28 +1631,28 @@ class Attention(nnx.Module):
   value vectors, applies the attention mechanism, and projects the results to
   an output vector.
 
-  Attributes:
-    config: The model configuration.
-    num_query_heads: Number of query attention heads.
-    num_kv_heads: Number of key-value attention heads.
-    head_dim: The dimension of each attention head.
-    max_target_length: Maximum sequence length.
-    mesh: The device mesh.
-    attention_kernel: The attention kernel to use (e.g., 'dot_product', 'flash').
-    inputs_q: Dummy query inputs for initialization, required by NNX.
-    inputs_kv: Dummy key/value inputs for initialization, required by NNX.
-    dtype: The data type for computation.
-    weight_dtype: The data type for weights.
-    max_prefill_predict_length: Maximum length for prefill.
-    dropout_rate: The dropout rate.
-    kernel_init: Initializer for the kernel of the dense layers.
-    float32_qk_product: If True, compute query-key product in float32.
-    float32_logits: If True, cast logits to float32 before softmax.
-    quant: Quantization configuration.
-    kv_quant: KV cache quantization configuration.
-    attention_type: The type of attention (e.g., 'global', 'local_sliding').
-    attn_logits_soft_cap: Soft cap for attention logits.
-    ... and other configuration parameters.
+    Attributes:
+      config: The model configuration.
+      num_query_heads: Number of query attention heads.
+      num_kv_heads: Number of key-value attention heads.
+      head_dim: The dimension of each attention head.
+      max_target_length: Maximum sequence length.
+      mesh: The device mesh.
+      attention_kernel: The attention kernel to use (e.g., 'dot_product', 'flash').
+      inputs_q_shape: Query inputs shape for initialization, required by NNX.
+      inputs_kv_shape: Key/value inputs shape for initialization, required by NNX.
+      dtype: The data type for computation.
+      weight_dtype: The data type for weights.
+      max_prefill_predict_length: Maximum length for prefill.
+      dropout_rate: The dropout rate.
+      kernel_init: Initializer for the kernel of the dense layers.
+      float32_qk_product: If True, compute query-key product in float32.
+      float32_logits: If True, cast logits to float32 before softmax.
+      quant: Quantization configuration.
+      kv_quant: KV cache quantization configuration.
+      attention_type: The type of attention (e.g., 'global', 'local_sliding').
+      attn_logits_soft_cap: Soft cap for attention logits.
+      ... and other configuration parameters.
   """
 
   def __init__(
@@ -1664,8 +1664,8 @@ class Attention(nnx.Module):
       max_target_length: int,
       mesh: Mesh,
       attention_kernel: str,
-      inputs_q: Array,
-      inputs_kv: Array,
+      inputs_q_shape: Tuple,
+      inputs_kv_shape: Tuple,
       dtype: DType = jnp.float32,
       weight_dtype: DType = jnp.float32,
       max_prefill_predict_length: int = -1,
@@ -1728,8 +1728,8 @@ class Attention(nnx.Module):
       max_target_length: Maximum sequence length.
       mesh: The device mesh.
       attention_kernel: The attention kernel to use (e.g., 'dot_product', 'flash').
-      inputs_q: Dummy query inputs for initialization, required by NNX.
-      inputs_kv: Dummy key/value inputs for initialization, required by NNX.
+      inputs_q_shape: Query inputs shape for initialization, required by NNX.
+      inputs_kv_shape: Key/value inputs shape for initialization, required by NNX.
       dtype: The data type for computation.
       weight_dtype: The data type for weights.
       max_prefill_predict_length: Maximum length for prefill.
@@ -1815,7 +1815,9 @@ class Attention(nnx.Module):
 
     # Module attribute names must match names previously passed to Linen for checkpointing
     self.KVCache_0 = (
-        self.init_kv_caches(inputs_kv=inputs_kv) if self.model_mode != MODEL_MODE_TRAIN and base_kv_cache else None
+        self.init_kv_caches(inputs_kv_shape=inputs_kv_shape)
+        if self.model_mode != MODEL_MODE_TRAIN and base_kv_cache
+        else None
     )
 
     self.rotary_embedding = self.init_rotary_embedding()
@@ -1864,13 +1866,13 @@ class Attention(nnx.Module):
       )
 
     if self.config.fused_qkv:
-      self.qkv_proj = self.init_qkv_w(inputs=inputs_q, proj_name="qkv_proj")
+      self.qkv_proj = self.init_qkv_w(inputs_shape=inputs_q_shape)
     else:
-      self.query = self.init_query_w(inputs_q=inputs_q)
-      self.key = self.init_kv_w(inputs_kv=inputs_kv, proj_name="key")
-      self.value = self.init_kv_w(inputs_kv=inputs_kv, proj_name="value")
+      self.query = self.init_query_w(inputs_q_shape=inputs_q_shape)
+      self.key = self.init_kv_w(inputs_kv_shape=inputs_kv_shape)
+      self.value = self.init_kv_w(inputs_kv_shape=inputs_kv_shape)
 
-    self.out = self.init_out_w(output_dim=inputs_q.shape[-1], out=inputs_q)
+    self.out = self.init_out_w(output_dim=inputs_q_shape[-1])
 
     is_llama4_decoder_block = self.config.decoder_block == DecoderBlockType.LLAMA4
     if self.use_qk_norm and not is_llama4_decoder_block:
@@ -1894,7 +1896,7 @@ class Attention(nnx.Module):
       self.query_norm = None
       self.key_norm = None
 
-  def init_query_w(self, inputs_q: Array) -> nnx.Module:
+  def init_query_w(self, inputs_q_shape: Tuple) -> nnx.Module:
     """Query projection initialization."""
 
     # NOTE: T5 does not explicitly rescale the attention logits by
@@ -1910,7 +1912,7 @@ class Attention(nnx.Module):
         (None, None, None) if self.config.ici_context_autoregressive_parallelism > 1 else ("embed", "q_heads", "kv")
     )
     return DenseGeneral(
-        in_features_shape=self.convert_dense_general_inputs_shape(inputs_q.shape),
+        in_features_shape=self.convert_dense_general_inputs_shape(inputs_q_shape),
         out_features_shape=(self.num_query_heads, self.head_dim),
         axis=-1,
         kernel_init=query_init,
@@ -1928,12 +1930,11 @@ class Attention(nnx.Module):
 
     return self.query(inputs_q)
 
-  def init_kv_w(self, inputs_kv: Array, proj_name: str) -> nnx.Module:
+  def init_kv_w(self, inputs_kv_shape: Tuple) -> nnx.Module:
     """Initializes the key or value projection.
 
     Args:
-      inputs_kv: Dummy key/value inputs for initialization.
-      proj_name: The name of the projection ("key" or "value").
+      inputs_kv_shape: Key/value inputs shape for initialization.
 
     Returns:
       A DenseGeneral module that performs the key or value projection.
@@ -1951,7 +1952,7 @@ class Attention(nnx.Module):
     )
 
     return DenseGeneral(
-        in_features_shape=self.convert_dense_general_inputs_shape(inputs_kv.shape),
+        in_features_shape=self.convert_dense_general_inputs_shape(inputs_kv_shape),
         out_features_shape=(self.num_kv_heads, self.head_dim),
         axis=-1,
         kernel_init=self.kernel_init,
@@ -1986,9 +1987,9 @@ class Attention(nnx.Module):
     else:
       raise ValueError(f"proj_name must be 'key' or 'value', but got {proj_name}")
 
-  def init_qkv_w(self, inputs: Array, proj_name: str) -> nnx.Module:
+  def init_qkv_w(self, inputs_shape: Tuple) -> nnx.Module:
     return DenseGeneral(
-        in_features_shape=self.convert_dense_general_inputs_shape(inputs.shape),
+        in_features_shape=self.convert_dense_general_inputs_shape(inputs_shape),
         out_features_shape=(3, self.num_query_heads, self.head_dim),
         axis=-1,
         kernel_init=self.kernel_init,
@@ -2009,7 +2010,7 @@ class Attention(nnx.Module):
     query, key, value = qkv_proj[:, :, 0, ...], qkv_proj[:, :, 1, ...], qkv_proj[:, :, 2, ...]
     return query, key, value
 
-  def init_out_w(self, output_dim: int, out: Array) -> nnx.Module:
+  def init_out_w(self, output_dim: int) -> nnx.Module:
     """out projection"""
     out_kernel_axis = (
         (None, None, None) if self.config.ici_context_autoregressive_parallelism > 1 else ("heads", "kv", "embed")
@@ -2112,17 +2113,17 @@ class Attention(nnx.Module):
     """
     return self.rotary_embedding(inputs, inputs_positions)
 
-  def init_kv_caches(self, inputs_kv: Array):
+  def init_kv_caches(self, inputs_kv_shape: Tuple):
     """Initializes KVCache.
 
     Args:
-      inputs_kv: Dummy key/value inputs for initialization.
+      inputs_kv_shape: Key/value inputs shape for initialization.
 
     Returns:
       A KVCache module instance.
 
     """
-    batch_size, _, _ = inputs_kv.shape
+    batch_size, _, _ = inputs_kv_shape
     # During initialization, seq_len of inputs_kv is max_target_length,
     # which is not always correct for some functions in KVCache.
     # However, KVCache internal cache shapes are based on max_prefill_length
@@ -2333,8 +2334,8 @@ def mla_as_linen(
     max_target_length: int,
     mesh: Mesh,
     attention_kernel: str,
-    inputs_q: Array,
-    inputs_kv: Array,
+    inputs_q_shape: Tuple,
+    inputs_kv_shape: Tuple,
     dtype: DType = jnp.float32,
     weight_dtype: DType = jnp.float32,
     max_prefill_predict_length: int = -1,
@@ -2408,8 +2409,8 @@ def mla_as_linen(
       max_target_length=max_target_length,
       mesh=mesh,
       attention_kernel=attention_kernel,
-      inputs_q=inputs_q,
-      inputs_kv=inputs_kv,
+      inputs_q_shape=inputs_q_shape,
+      inputs_kv_shape=inputs_kv_shape,
       dtype=dtype,
       weight_dtype=weight_dtype,
       max_prefill_predict_length=max_prefill_predict_length,
@@ -2481,8 +2482,8 @@ class MLA(Attention):
       max_target_length: int,
       mesh: Mesh,
       attention_kernel: str,
-      inputs_q: Array,
-      inputs_kv: Array,
+      inputs_q_shape: Tuple,
+      inputs_kv_shape: Tuple,
       dtype: DType = jnp.float32,
       weight_dtype: DType = jnp.float32,
       max_prefill_predict_length: int = -1,
@@ -2573,8 +2574,8 @@ class MLA(Attention):
         max_target_length=max_target_length,
         mesh=mesh,
         attention_kernel=attention_kernel,
-        inputs_q=inputs_q,
-        inputs_kv=inputs_kv,
+        inputs_q_shape=inputs_q_shape,
+        inputs_kv_shape=inputs_kv_shape,
         dtype=dtype,
         weight_dtype=weight_dtype,
         max_prefill_predict_length=max_prefill_predict_length,
@@ -2624,7 +2625,7 @@ class MLA(Attention):
     )
 
     # Module attribute names must match names previously passed to Linen for checkpointing
-    self.MlaKVCache_0 = self.init_mla_kv_caches(inputs_kv) if model_mode != MODEL_MODE_TRAIN else None
+    self.MlaKVCache_0 = self.init_mla_kv_caches(inputs_kv_shape) if model_mode != MODEL_MODE_TRAIN else None
 
     # Assert required configuration parameters for MLA attention.
     assert (
@@ -2807,11 +2808,11 @@ class MLA(Attention):
       value = nn.with_logical_constraint(value, self.value_axis_names)
     return key, value
 
-  def init_mla_kv_caches(self, inputs_kv: Array):
+  def init_mla_kv_caches(self, inputs_kv_shape: Tuple):
     """Initializes MlaKVCache.
 
     Args:
-      inputs_kv: Dummy key/value inputs for initialization.
+      inputs_kv_shape: Key/value inputs shape for initialization.
 
     Returns:
       An MlaKVCache module instance.
@@ -2820,7 +2821,7 @@ class MLA(Attention):
       ValueError: If the configuration is invalid.
 
     """
-    batch_size, _, _ = inputs_kv.shape
+    batch_size, _, _ = inputs_kv_shape
     # During initialization, seq_len of inputs_kv is max_target_length,
     # which is not always correct for some functions in MlaKVCache.
     # However, MlaKVCache internal cache shapes are based on max_prefill_length
