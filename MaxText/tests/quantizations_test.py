@@ -17,13 +17,15 @@ limitations under the License.
 """ Tests for the quantizations """
 import unittest
 import os.path
-
+import sys
 import pytest
 
 import numpy as np
 
+import jax
 from jax import numpy as jnp
 from jax import random, lax
+from jax.sharding import Mesh
 
 from flax import linen as nn
 
@@ -32,6 +34,9 @@ from aqt.jax.v2 import aqt_tensor
 from MaxText.globals import PKG_DIR
 from MaxText import pyconfig
 from MaxText.layers import quantizations
+from MaxText import maxtext_utils
+from MaxText import train_utils
+from MaxText.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR
 
 _QUERY_REGEX = ".*/query"
 _VALUE_REGEX = ".*/value"
@@ -225,6 +230,113 @@ class QuantizationTest(unittest.TestCase):
     }
     result = quantizations.remove_quantized_params(_params, _aqt_vars)
     self.assertEqual(_expected, result)
+
+
+class QuantTest(unittest.TestCase):
+  """Tests for quantized model correctness."""
+
+  def setUp(self):
+    self.cfg = self.init_pyconfig()
+    devices_array = maxtext_utils.create_device_mesh(self.cfg)
+    self.mesh = Mesh(devices_array, self.cfg.mesh_axes)
+    self.inputs = jnp.ones((4, 16))
+    self.rng = jax.random.PRNGKey(0)
+    self.rtol = 5e-1
+    self.atol = 5e-1
+
+  def init_pyconfig(self, **kwargs):
+    """Initialize MaxText pyconfig."""
+    init_kwargs = {
+        "run_name": "test",
+        "dataset_type": "synthetic",
+        "enable_checkpointing": False,
+        "enable_goodput_recording": False,
+        "steps": 1,
+        "per_device_batch_size": 1,
+        "use_qwix_quantization": True,
+        "skip_jax_distributed_system": True,
+    } | kwargs
+    config = pyconfig.initialize(
+        [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
+        **init_kwargs,
+    )
+    return config
+
+  def get_data(self):
+    """Get data."""
+    s = (self.cfg.global_batch_size_to_train_on, self.cfg.max_target_length)
+    ids = jax.random.randint(self.rng, s, 0, self.cfg.vocab_size)
+
+    decoder_segment_ids = jax.numpy.zeros(s) + DECODING_ACTIVE_SEQUENCE_INDICATOR
+    decoder_positions = jnp.stack(
+        [jnp.arange(self.cfg.max_target_length, dtype=jnp.int32) for _ in range(self.cfg.global_batch_size_to_train_on)]
+    )
+    return ids, decoder_segment_ids, decoder_positions
+
+  def pytree_allclose(self, a, b, *, tolerance=0.01):
+    """Return True if every pair of leaves is all-close."""
+    leaves_a, leaves_b = jax.tree_util.tree_leaves(a), jax.tree_util.tree_leaves(b)
+    return all(jnp.abs(y - x).mean() / jnp.abs(x).mean() < tolerance for x, y in zip(leaves_a, leaves_b))
+
+  def quantization_config(self, quant):
+    """ Run forward pass and backward pass for quantized model and compare with base model.
+    """
+    cfg = self.init_pyconfig(quantization=quant)
+    model = train_utils.create_model(self.cfg, self.mesh)
+    qt_model = train_utils.create_model(cfg, self.mesh)
+
+    ids, decoder_segment_ids, decoder_positions = self.get_data()
+    var = model.init(
+        {"params": self.rng, "aqt": self.rng}, ids, decoder_positions, decoder_segment_ids, enable_dropout=False
+    )
+    quantized_vars = qt_model.init(
+        {"params": self.rng, "aqt": self.rng}, ids, decoder_positions, decoder_segment_ids, enable_dropout=False
+    )
+
+    def loss_base(params, inputs):
+      logits = model.apply({"params": params}, *inputs, enable_dropout=False, rngs={"params": self.rng})
+      return jnp.mean((logits) ** 2)
+
+    def loss_quant(params, inputs):
+      logits = qt_model.apply({"params": params}, *inputs, enable_dropout=False, rngs={"params": self.rng})
+      return jnp.mean((logits) ** 2)
+
+    # Compute gradients w.r.t. both models
+    grads_base = jax.grad(loss_base)(var["params"], (ids, decoder_positions, decoder_segment_ids))
+    grads_quant = jax.grad(loss_quant)(quantized_vars["params"], (ids, decoder_positions, decoder_segment_ids))
+
+    logits = model.apply(
+        {"params": var["params"]},
+        ids,
+        decoder_positions,
+        decoder_segment_ids,
+        enable_dropout=False,
+        rngs={"params": self.rng},
+    )
+    quant_logits = qt_model.apply(
+        {"params": quantized_vars["params"]},
+        ids,
+        decoder_positions,
+        decoder_segment_ids,
+        enable_dropout=False,
+        rngs={"params": self.rng},
+    )
+    print(f"relative error in logits: {jnp.abs(quant_logits - logits).mean() / jnp.abs(logits).mean()}")
+    assert jnp.abs(quant_logits - logits).mean() / jnp.abs(logits).mean() < 2e-1
+
+    self.assertTrue(self.pytree_allclose(grads_base, grads_quant, tolerance=5e-1))
+
+  @pytest.mark.tpu_only
+  def test_int8_quantization(self):
+    self.quantization_config("int8")
+
+  @pytest.mark.tpu_only
+  def test_fp8_quantization(self):
+    self.quantization_config("fp8")
+
+  @pytest.mark.tpu_only
+  def test_fp8_full_quantization(self):
+    self.quantization_config("fp8_full")
 
 
 if __name__ == "__main__":

@@ -30,7 +30,7 @@ from flax import linen as nn
 from MaxText.layers.linears import mlp_block
 from MaxText.layers import models
 from MaxText.layers import quantizations
-from MaxText.layers.attentions import Attention
+from MaxText.layers.attentions import attention_as_linen
 from MaxText.layers.quantizations import AqtQuantization as Quant
 from MaxText.layers.normalizations import rms_norm
 
@@ -77,7 +77,7 @@ class MistralDecoderLayer(nn.Module):
     lnx = nn.with_logical_constraint(lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
 
     # Self-attention block
-    attention_layer = Attention(
+    attention_layer = attention_as_linen(
         config=cfg,
         num_query_heads=cfg.num_query_heads,
         num_kv_heads=cfg.num_kv_heads,
@@ -85,6 +85,8 @@ class MistralDecoderLayer(nn.Module):
         max_target_length=cfg.max_target_length,
         max_prefill_predict_length=cfg.max_prefill_predict_length,
         attention_kernel=cfg.attention,
+        inputs_q=lnx,
+        inputs_kv=lnx,
         mesh=mesh,
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
@@ -97,6 +99,7 @@ class MistralDecoderLayer(nn.Module):
         prefill_cache_axis_order=tuple(map(int, cfg.prefill_cache_axis_order.split(","))),
         ar_cache_axis_order=tuple(map(int, cfg.ar_cache_axis_order.split(","))),
         compute_axis_order=tuple(map(int, cfg.compute_axis_order.split(","))),
+        model_mode=model_mode,
     )
 
     attention_lnx = attention_layer(

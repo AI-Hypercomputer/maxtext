@@ -25,7 +25,7 @@ from jax.sharding import Mesh
 from flax import linen as nn
 
 from MaxText.common_types import Config, MODEL_MODE_TRAIN
-from MaxText.layers.attentions import dense_general
+from MaxText.layers.linears import dense_general
 from MaxText.layers.normalizations import rms_norm
 from MaxText.layers.decoders import Decoder, DecoderLayer
 from MaxText import max_utils

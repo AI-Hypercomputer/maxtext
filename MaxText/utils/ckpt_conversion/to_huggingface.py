@@ -94,9 +94,9 @@ def _get_model_mappings(model_name: str, scan_layers: bool, config_dict: dict):
     raise ValueError(f"Mappings not found for model: {model_name}. Available PARAM_MAPPING keys: {PARAM_MAPPING.keys()}")
 
   return {
-      "param_mapping": PARAM_MAPPING[model_name],
-      "shape_mapping": SHAPE_MAPPING[model_name],
-      "hook_fn_mapping": HOOK_FNS[model_name],
+      "param_mapping": PARAM_MAPPING[model_name](config_dict, scan_layers),
+      "shape_mapping": SHAPE_MAPPING[model_name](config_dict),
+      "hook_fn_mapping": HOOK_FNS[model_name](config_dict, scan_layers, saving_to_hf=True),
   }
 
 

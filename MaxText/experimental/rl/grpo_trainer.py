@@ -18,7 +18,20 @@ limitations under the License.
 """
 This script implements Group Relative Policy Optimization (GRPO) training
 using JAX. It optimizes a language model with reinforcement learning by
-updating policy gradients based on reward functions
+updating policy gradients based on reward functions.
+
+The training process involves a producer-consumer pattern:
+  - A "producer" thread continuously generates text completions from prompts
+    using an offline inference engine. These completions, along with their
+    log-probabilities, are stored in a shared buffer.
+  - The main "consumer" thread fetches these generated samples from the buffer
+    and uses them to perform GRPO training steps.
+
+This decoupling allows the training process (consumer) to proceed without
+being blocked by the potentially slower generation process (producer).
+The script sets up separate configurations for training and inference,
+handles model parameter resharding between the two, and manages the
+entire training loop, including checkpointing and metric logging.
 """
 
 
@@ -28,7 +41,7 @@ import os
 import functools
 import threading
 
-from typing import Sequence
+from typing import Sequence, Callable, Iterator
 
 from absl import app
 
@@ -39,10 +52,10 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 from jax import random
-import numpy as np
 
 from flax.linen import partitioning as nn_partitioning
 from flax import struct
+from flax.nnx import TrainState
 
 from cloud_tpu_diagnostics import diagnostic
 from cloud_tpu_diagnostics.configuration import debug_configuration
@@ -50,6 +63,8 @@ from cloud_tpu_diagnostics.configuration import diagnostic_configuration
 from cloud_tpu_diagnostics.configuration import stack_trace_configuration
 
 import transformers
+
+from ml_goodput_measurement.src.goodput import GoodputRecorder
 
 import MaxText as mt
 from MaxText import checkpointing
@@ -60,32 +75,18 @@ from MaxText import maxtext_utils
 from MaxText import train_utils
 from MaxText import profiler
 from MaxText import pyconfig
-
-
+from MaxText.checkpointing import CheckpointManager
+from MaxText.utils import gcs_utils
 from MaxText.inference import offline_engine
-
-from MaxText.metric_logger import MetricLogger
-
-from MaxText.vertex_tensorboard import VertexTensorboardManager
-
 from MaxText.data_loader import DataLoader
 from MaxText.experimental.rl import grpo_input_pipeline
 from MaxText.experimental.rl import grpo_utils
-from MaxText.layers import models
-
-
 from MaxText.globals import EPS
-from MaxText.layers import models
 from MaxText.metric_logger import MetricLogger
-
-import transformers
-
 from MaxText.train import (
     validate_train_config,
     get_first_step,
 )
-
-
 from MaxText.utils.goodput_utils import (
     GoodputEvent,
     create_goodput_recorder,
@@ -97,26 +98,66 @@ from MaxText.vertex_tensorboard import VertexTensorboardManager
 
 # pylint: disable=too-many-positional-arguments
 
-Transformer = models.Transformer
-EPS = 1e-8
-
 # -----------------------------------------------------------------------------
 # GRPO
 # -----------------------------------------------------------------------------
 
 
 def _split_grpo_state(state):
+  """Splits the reference parameters from the main training state.
+
+  This is a utility function to separate the reference model's parameters,
+  which are kept frozen, from the policy model's parameters that are actively
+  being trained.
+
+  Args:
+    state: The combined training state, expected to contain a 'reference_params'
+      key within its `params` attribute.
+
+  Returns:
+    A tuple containing:
+      - new_state: The training state with 'reference_params' removed.
+      - reference_params: The extracted reference parameters.
+  """
   reference_params = state.params["reference_params"]
   new_state = state.replace(params={k: v for k, v in state.params.items() if k != "reference_params"})
   return new_state, reference_params
 
 
 def _merge_grpo_state(state, reference_params):
+  """Merges the reference parameters back into the training state.
+
+  This is the inverse operation of `_split_grpo_state`, used to reconstruct
+  the full state object after a training step.
+
+  Args:
+    state: The training state, without 'reference_params'.
+    reference_params: The frozen reference parameters to be added back.
+
+  Returns:
+    A new state object with the 'reference_params' re-integrated.
+  """
   return state.replace(params=dict(state.params, reference_params=reference_params))
 
 
 @struct.dataclass
 class LossAux:
+  """A dataclass to hold auxiliary outputs from the GRPO loss function.
+
+  This structure is used to pass various metrics and intermediate values
+  from the loss function for logging and analysis.
+
+  Attributes:
+    total_loss: The final computed loss value for the step.
+    avg_reward: The average reward obtained across the batch.
+    avg_reward_std: The standard deviation of rewards within the batch.
+    avg_advantage: The average normalized advantage across the batch.
+    avg_kl: The average KL divergence between the policy and reference models.
+    completion_length: The average token length of the generated completions.
+    moe_lb_loss: The load balancing loss for Mixture-of-Experts layers.
+    total_weights: The total number of tokens used to normalize the loss.
+  """
+
   total_loss: float
   avg_reward: float
   avg_reward_std: float
@@ -200,14 +241,12 @@ def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_
       rngs={"dropout": rng1, "params": rng_fwd},
   )  # [BxG,S-1,E]
 
-
   completion_target_segmentation = data["ar_completions_segmentation"][..., 1:]  # [BxG,S-1]
   # Because of the shifting, token_logps have shape [BxG, S-1]. So, we create a mask for the valid tokens
   # Create a mask to clear out the last token position in the ar_completions
   # and to make sure loss is computed on non-padding tokens
   valid_seq_mask = completion_target_segmentation != 0  # [BxG, S-1]
 
-  
   # --- (2) Compute a scalar reward for each generated completion via reward_fn.
   rewards = grpo_utils.dummy_reward_len(valid_seq_mask)
   rewards = jnp.array(rewards)  # shape [BxG]
@@ -227,11 +266,11 @@ def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_
 
   # We calculate the policy difference with old_per_token_logps for off-policy training,
   # else, for on-policy training old_per_token_logps = stop_gradient(token_logps_policy)
-  if data["completions_logprobs"] is None: # off-policy
+  if data["completions_logprobs"] is None:  # off-policy
     old_per_token_logps = jax.lax.stop_gradient(token_logps_policy)
-  else: # on-policy
+  else:  # on-policy
     old_per_token_logps = data["completions_logprobs"]
-  
+
   policy_diff = token_logps_policy - old_per_token_logps
   coef_1 = jnp.exp(policy_diff)
   coef_2 = jnp.clip(coef_1, 1 - config.grpo_epsilon, 1 + config.grpo_epsilon)
@@ -239,19 +278,19 @@ def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_
       coef_1 * advantages_exp,
       coef_2 * advantages_exp,
   )
-  
+
   # --- (5) Compute per-token KL divergence for each token in the generated completion, if beta != 0.
   if config.grpo_beta != 0.0:
     token_logps_ref, _ = grpo_utils.compute_log_probs(
-      model,
-      {"params": reference_params},
-      prompt_with_completions,
-      prompt_completions_position,
-      prompt_completions_segmentation,
-      completions_segmentation,
-      config,
-      is_train=False,
-      rngs={"dropout": rng1, "params": rng_fwd},
+        model,
+        {"params": reference_params},
+        prompt_with_completions,
+        prompt_completions_position,
+        prompt_completions_segmentation,
+        completions_segmentation,
+        config,
+        is_train=False,
+        rngs={"dropout": rng1, "params": rng_fwd},
     )  # [BxG,S-1,E]
 
     token_diff_logps_ref_policy = token_logps_ref - token_logps_policy
@@ -302,20 +341,27 @@ def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_
 # Trainer and top level training functions
 # -----------------------------------------------------------------------------
 
+
 def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
-  """
+  """Performs a single training step of the GRPO algorithm.
+
+  This function computes the GRPO loss, calculates gradients, and updates the
+  model's parameters. It handles gradient accumulation and clipping as configured.
+  The reference model's parameters are held constant during the update.
 
   Args:
-    model: A nn.Module
-    state: A pytree of the current state of the model
-    data: Batch of data to apply to the model
-    dropout_rng: A key to use to generate rng for dropout
+    model: The transformer model to be trained.
+    config: The training configuration object.
+    state_mesh_shardings: Pytree of sharding specifications for the training state.
+    state: The current training state, including parameters and optimizer state.
+    data: A batch of training data, including prompts and generated completions.
+    dropout_rng: JAX PRNG key for dropout.
 
   Returns:
-    new_state: Same format as state.
-    metrics: Dictionary of model metrics such as loss, training rate, etc.
-    rng2: A new rng key that can be used in future calls.
-
+    A tuple containing:
+      - new_state: The updated training state after applying gradients.
+      - metrics: A dictionary of metrics for logging, including loss, reward,
+        and gradient norms.
   """
   state, reference_params = _split_grpo_state(state)
   state_mesh_shardings, reference_params_sharding = _split_grpo_state(state_mesh_shardings)
@@ -410,7 +456,21 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
 
 
 def eval_step(model, config, state, data, dropout_rng):
-  """eval_step no backprop and new state compared with train_step."""
+  """Performs a single evaluation step.
+
+  This function computes the loss and other metrics on an evaluation dataset
+  without performing backpropagation or updating model parameters.
+
+  Args:
+    model: The transformer model.
+    config: The training configuration object.
+    state: The current training state.
+    data: A batch of evaluation data.
+    dropout_rng: JAX PRNG key for dropout.
+
+  Returns:
+    A dictionary of evaluation metrics.
+  """
 
   reference_params, extra_grpo_args, _loss_fn = [], [], grpo_loss_fn
   state, reference_params = _split_grpo_state(state)
@@ -436,34 +496,57 @@ def eval_step(model, config, state, data, dropout_rng):
   return metrics
 
 
-def setup_train_loop(config, config_inference, recorder):
-  """Set up prerequisites for the training loop -
-      checkpoint_manager, PRNG keys, Mesh, Model and optimizer.
-      Set up data iterator and tokenizer, initialize the model.
+def setup_train_loop(
+    config,
+    config_inference,
+    recorder: GoodputRecorder,
+) -> tuple[
+    jax.Array,
+    CheckpointManager,
+    TrainState,
+    TrainState,
+    mt.Transformer,
+    mt.Transformer,
+    mt.Mesh,
+    mt.Mesh,
+    Callable[[int], float],
+    Iterator,
+    Iterator,
+    TrainState,
+]:
+  """Initializes objects needed for the training loop.
+
+  This function sets up the training and inference meshes, models, optimizers,
+  learning rate schedules, and checkpoint managers. It also initializes the
+  training state.
 
   Args:
-    config
-    config_inference
-    recorder
+    config: The main training configuration object.
+    config_inference: The configuration object for the inference engine.
+    recorder: A GoodputRecorder for performance tracking.
 
   Returns:
-    init_rng:
-    checkpoint_manager: Orbax checkpointer
-    state_mesh_annotations: the mesh annotations for the train state
-    model:
-    mesh:
-    learning_rate_schedule:
-    data_iterator:
-    eval_data_iterator:
-    state: the initialized train state
+    A tuple containing:
+      - init_rng: The initial JAX PRNG key.
+      - checkpoint_manager: The Orbax checkpoint manager.
+      - state_mesh_shardings: Sharding specifications for the training state.
+      - inference_state_mesh_shardings: Sharding specs for the inference state.
+      - model: The training model instance.
+      - inference_model: The inference model instance.
+      - mesh: The device mesh for training.
+      - inference_mesh: The device mesh for inference.
+      - learning_rate_schedule: The learning rate schedule function.
+      - data_iterator: The iterator for the input prompt dataset.
+      - eval_data_iterator: The iterator for the evaluation dataset (or None).
+      - state: The initialized training state.
   """
   with maybe_record_goodput(recorder, GoodputEvent.TPU_INIT):
-    max_logging.log(f"Training mesh used for the workload")
+    max_logging.log("Training mesh used for the workload")
     num_inference_devices = config.inference_devices_per_replica * config.inference_replicas
     training_devices = jax.devices()[num_inference_devices:]
-    model = mt.from_pretrained(config, devices = training_devices)
+    model = mt.from_pretrained(config, devices=training_devices)
     mesh = model.mesh
-    max_logging.log(f"Inference mesh used for the workload")
+    max_logging.log("Inference mesh used for the workload")
     inference_devices = jax.devices()[:num_inference_devices]
     inference_model = mt.from_pretrained(config_inference, devices=inference_devices)
     inference_mesh = inference_model.mesh
@@ -476,7 +559,9 @@ def setup_train_loop(config, config_inference, recorder):
     )
 
   # create inference_state_mesh_shardings from inference_mesh
-  inference_state_mesh_shardings = maxtext_utils.get_abstract_state(inference_model, tx, config_inference, init_rng, inference_mesh, is_training=False)[2]
+  inference_state_mesh_shardings = maxtext_utils.get_abstract_state(
+      inference_model, tx, config_inference, init_rng, inference_mesh, is_training=False
+  )[2]
   if not config.using_pipeline_parallelism:
     # The vocab tensor(s) of shape [vocab, embed] (and transpose) are not sharded by stage
     maxtext_utils.assert_params_sufficiently_sharded(state.params, mesh, config.sharding_tolerance)
@@ -492,45 +577,91 @@ def setup_train_loop(config, config_inference, recorder):
       inference_mesh,
       learning_rate_schedule,
       data_iterator,
-      None, # GRPO does not support eval_dataset
+      iter(()),  # GRPO does not support eval_dataset
       state,
   )
 
 
 def generate_completions(
-  worker_data_loader,
-  worker_inference_engine,
-  worker_tokenizer_model,
-  worker_config_inference,
-  worker_config_train,
-  worker_data_buffer,
-  worker_data_buffer_lock,
-  worker_input_data_shardings,
-  engine_lock,
+    worker_data_loader,
+    worker_inference_engine,
+    worker_tokenizer_model,
+    worker_config_inference,
+    worker_config_train,
+    worker_data_buffer,
+    worker_data_buffer_lock,
+    worker_input_data_shardings,
+    engine_lock,
 ):
+  """Loads a batch of prompts and generates completions using the inference engine.
+
+  This function is designed to be run by the generation worker thread. It loads
+  a batch of prompts from the data loader, uses the offline inference engine to
+  generate multiple completions for each prompt, processes the results, and adds
+  them to a shared data buffer for the training loop to consume.
+
+  Args:
+    worker_data_loader: The DataLoader instance for fetching prompt data.
+    worker_inference_engine: The offline inference engine for generation.
+    worker_tokenizer_model: The tokenizer model.
+    worker_config_inference: The configuration for the inference process.
+    worker_config_train: The main training configuration.
+    worker_data_buffer: A list acting as a shared buffer to store generated data.
+    worker_data_buffer_lock: A lock to ensure thread-safe access to the buffer.
+    worker_input_data_shardings: Sharding specifications for the data.
+    engine_lock: A lock to ensure thread-safe use of the inference engine.
+  """
   with engine_lock:
     thread_example_batch = worker_data_loader.load_next_batch()
     # Trim data for inference processing
-    thread_example_batch_trimmed = jax.tree_util.tree_map(lambda arr: arr[:int(worker_config_inference.per_device_batch_size * worker_config_train.inference_replicas * worker_config_train.inference_devices_per_replica)], thread_example_batch)
-    processed_batch = grpo_utils.generate_offline_completions(worker_config_inference, worker_tokenizer_model, worker_inference_engine, thread_example_batch_trimmed)
+    thread_example_batch_trimmed = jax.tree_util.tree_map(
+        lambda arr: arr[
+            : int(
+                worker_config_inference.per_device_batch_size
+                * worker_config_train.inference_replicas
+                * worker_config_train.inference_devices_per_replica
+            )
+        ],
+        thread_example_batch,
+    )
+    processed_batch = grpo_utils.generate_offline_completions(
+        worker_config_inference, worker_tokenizer_model, worker_inference_engine, thread_example_batch_trimmed
+    )
     processed_batch = jax.device_put(processed_batch, worker_input_data_shardings)
   with worker_data_buffer_lock:
     if not worker_data_buffer:
       worker_data_buffer.append(processed_batch)
     else:
       worker_data_buffer[0] = jax.tree_util.tree_map(
-        lambda a, b: np.concatenate([a, b], axis=0),
-        worker_data_buffer[0],
-        processed_batch
+          lambda a, b: np.concatenate([a, b], axis=0), worker_data_buffer[0], processed_batch
       )
 
+
 def train_loop(config, config_inference, recorder, state=None):
-  """Main Training loop.
+  """The main GRPO training loop.
+
+  This function orchestrates the entire training process. It initializes the
+  necessary components, starts a background thread for continuous data generation,
+  and then enters a loop to perform training steps.
+
+  The loop consists of:
+  1. Fetching pre-generated prompt-completion pairs from a shared buffer.
+  2. Executing a training step with the fetched batch.
+  3. Periodically resharding the updated policy parameters to the inference engine.
+  4. Logging metrics and saving checkpoints.
+  5. Handling evaluation if configured.
+
+  The loop continues for the configured number of steps and manages the lifecycle
+  of the generation worker thread.
+
   Args:
-    config:
-    state:
-    ckpt_path:
+    config: The main training configuration object.
+    config_inference: The configuration for the inference engine.
+    recorder: A GoodputRecorder for performance tracking.
+    state: An optional pre-existing training state to resume from.
+
   Returns:
+    The final training state after the loop completes.
   """
 
   (
@@ -539,7 +670,7 @@ def train_loop(config, config_inference, recorder, state=None):
       state_mesh_shardings,
       inference_state_mesh_shardings,
       model,
-      inference_model,
+      _,  # inference_model
       mesh,
       inference_mesh,
       learning_rate_schedule,
@@ -566,10 +697,10 @@ def train_loop(config, config_inference, recorder, state=None):
   )
 
   data_sharding = maxtext_utils.get_input_data_sharding(config, mesh)
-  
+
   inference_engine = offline_engine.OfflineEngine(
-    config = config_inference,
-    mesh = inference_mesh,
+      config=config_inference,
+      mesh=inference_mesh,
   )
   data_buffer = []
   data_buffer_lock = threading.Lock()
@@ -580,61 +711,89 @@ def train_loop(config, config_inference, recorder, state=None):
   metric_logger = MetricLogger(config=config, learning_rate_schedule=learning_rate_schedule)
 
   # Write train config params, num model params, and XLA flags to tensorboard
-  metric_logger.write_setup_info_to_tensorboard(state.params['params'])
+  metric_logger.write_setup_info_to_tensorboard(state.params["params"])
 
   def generation_worker_fn(
-    worker_inference_engine,
-    worker_tokenizer_model,
-    worker_config_inference,
-    worker_config_train,
-    worker_data_buffer,
-    worker_data_buffer_lock,
-    worker_input_data_shardings,
-    engine_lock,
-    stop_event
+      worker_inference_engine,
+      worker_tokenizer_model,
+      worker_config_inference,
+      worker_config_train,
+      worker_data_buffer,
+      worker_data_buffer_lock,
+      worker_input_data_shardings,
+      engine_lock,
+      stop_event,
   ):
+    """The target function for the data generation worker thread.
+
+    This function runs in a loop, continuously calling `generate_completions`
+    to populate the shared data buffer. It stops when the `stop_event` is set
+    by the main thread.
+
+    Args:
+      worker_inference_engine: The offline inference engine.
+      worker_tokenizer_model: The tokenizer model.
+      worker_config_inference: The inference configuration.
+      worker_config_train: The training configuration.
+      worker_data_buffer: The shared list used as a data buffer.
+      worker_data_buffer_lock: A lock for thread-safe buffer access.
+      worker_input_data_shardings: Sharding specs for the generated data.
+      engine_lock: A lock for thread-safe inference engine access.
+      stop_event: A threading.Event to signal when the worker should stop.
+    """
     while not stop_event.is_set():
       try:
         with jax.profiler.StepTraceAnnotation("inference"):
           generate_completions(
-            data_loader,
-            worker_inference_engine,
-            worker_tokenizer_model,
-            worker_config_inference,
-            worker_config_train,
-            worker_data_buffer,
-            worker_data_buffer_lock,
-            worker_input_data_shardings,
-            engine_lock,
+              data_loader,
+              worker_inference_engine,
+              worker_tokenizer_model,
+              worker_config_inference,
+              worker_config_train,
+              worker_data_buffer,
+              worker_data_buffer_lock,
+              worker_input_data_shardings,
+              engine_lock,
           )
       except StopIteration:
         max_logging.log("Data iterator exhausted in generation worker. Stopping.")
         break
-      except Exception as e: # pylint: disable=broad-except
+      except Exception as e:  # pylint: disable=broad-except
         max_logging.log(f"Error in generation worker: {e}")
         break
     max_logging.log("Generation worker thread finished.")
 
   stop_event = threading.Event()
   inference_engine_lock = threading.Lock()
-  
-  max_logging.log(f"Inference Rollout")
-  generate_completions(data_loader, inference_engine, tokenizer_model, config_inference, config, data_buffer, data_buffer_lock, data_sharding, inference_engine_lock)
-  
+
+  max_logging.log("Inference Rollout")
+  generate_completions(
+      data_loader,
+      inference_engine,
+      tokenizer_model,
+      config_inference,
+      config,
+      data_buffer,
+      data_buffer_lock,
+      data_sharding,
+      inference_engine_lock,
+  )
+
+  required_batch_size = int(config.per_device_batch_size * config.num_generations * mesh.size)
   generation_thread = threading.Thread(
       target=generation_worker_fn,
       args=(
-          inference_engine, # Shared inference engine
+          inference_engine,  # Shared inference engine
           tokenizer_model,
           config_inference,
-          config, # Main config for load_next_batch
+          config,  # Main config for load_next_batch
           data_buffer,
           data_buffer_lock,
-          data_sharding, # Sharding for the data put into the buffer
+          data_sharding,  # Sharding for the data put into the buffer
           inference_engine_lock,
           stop_event,
       ),
-      daemon=True # So it exits when the main thread exits
+      daemon=True,  # So it exits when the main thread exits
   )
   generation_thread.start()
 
@@ -651,16 +810,9 @@ def train_loop(config, config_inference, recorder, state=None):
               break
             if data_buffer:
               example_batch = data_buffer[0]
-              required_batch_size = int(config.per_device_batch_size * config.num_generations * mesh.size)
               if example_batch[config.train_data_columns].shape[0] >= required_batch_size:
-                example_batch = jax.tree_util.tree_map(
-                  lambda arr: arr[:required_batch_size],
-                  data_buffer[0]
-                )
-                data_buffer[0] = jax.tree_util.tree_map(
-                  lambda arr: arr[required_batch_size:],
-                  data_buffer[0]
-                )
+                example_batch = jax.tree_util.tree_map(lambda arr: arr[:required_batch_size], data_buffer[0])
+                data_buffer[0] = jax.tree_util.tree_map(lambda arr: arr[required_batch_size:], data_buffer[0])
                 break
               else:
                 time.sleep(0.1)
@@ -668,14 +820,20 @@ def train_loop(config, config_inference, recorder, state=None):
             else:
               time.sleep(0.1)
               continue
-          time.sleep(0.1)
         train_rng, rng = random.split(init_rng)
         example_batch = jax.device_put(example_batch, data_sharding)
         with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
           state, metrics = p_train_step(state, example_batch, train_rng)
       with jax.profiler.StepTraceAnnotation("transfer data", step_num=step):
         if step != 0 and step % config.inference_rollouts == 0:
-          grpo_utils.pathways_reshard(config_inference, inference_engine, {'params':state.params['params']}, {'params': state_mesh_shardings.params['params']}, mesh, inference_state_mesh_shardings)
+          grpo_utils.pathways_reshard(
+              config_inference,
+              inference_engine,
+              {"params": state.params["params"]},
+              {"params": state_mesh_shardings.params["params"]},
+              mesh,
+              inference_state_mesh_shardings,
+          )
 
       step_time_delta = datetime.datetime.now() - last_step_completion
       last_step_completion = datetime.datetime.now()
@@ -683,10 +841,9 @@ def train_loop(config, config_inference, recorder, state=None):
       state_to_save = _split_grpo_state(state)[0]
       checkpointing.maybe_save_checkpoint(checkpoint_manager, state_to_save, config, data_iterator, step)
 
-
       if config.dump_hlo and step == start_step:
         jax.block_until_ready(state)  # Ensure compilation has finished.
-        max_utils.upload_dump(
+        gcs_utils.upload_dump(
             config.dump_hlo_local_dir,
             config.dump_hlo_gcs_dir,
             module_name=config.dump_hlo_module_name,
@@ -699,7 +856,7 @@ def train_loop(config, config_inference, recorder, state=None):
         eval_step_count = 0
         # pylint: disable=not-callable
         for eval_batch in eval_data_iterator:
-          if config.eval_steps > 0 and eval_step_count >= config.eval_steps:
+          if 0 < config.eval_steps <= eval_step_count:
             break
           with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
             eval_metrics = p_eval_step(state, eval_batch, rng)
@@ -716,7 +873,7 @@ def train_loop(config, config_inference, recorder, state=None):
       if step == start_step:
         max_utils.print_mem_stats("After params initialized")
 
-      metric_logger.buffer_and_write_train_metrics(metrics, step, step_time_delta)      
+      metric_logger.buffer_and_write_train_metrics(metrics, step, step_time_delta)
       state_to_save = _split_grpo_state(state)[0]
       checkpointing.maybe_save_checkpoint(checkpoint_manager, state_to_save, config, data_iterator)
   except exceptions.StopTraining as e:
@@ -726,14 +883,20 @@ def train_loop(config, config_inference, recorder, state=None):
     max_logging.log("Training loop finished or exited. Signaling generation worker to stop.")
     stop_event.set()
     # Wait for the generation thread to finish
-    generation_thread.join(timeout=60.0) # Increased timeout
+    generation_thread.join(timeout=60.0)  # Increased timeout
     if generation_thread.is_alive():
-        max_logging.log("Warning: Generation worker did not stop in time after loop completion.")
+      max_logging.log("Warning: Generation worker did not stop in time after loop completion.")
 
   return state
 
 
 def main(argv: Sequence[str]) -> None:
+  """Main entry point for the GRPO training script.
+
+  This function parses command-line arguments, initializes configurations for
+  training and inference, sets up system environment variables, and launches
+  the `train_loop`.
+  """
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
   # TF allocates extraneous GPU memory when using TFDS data
   # this leads to CUDA OOMs. WAR for now is to hide GPUs from TF
@@ -747,17 +910,19 @@ def main(argv: Sequence[str]) -> None:
     raise ValueError("Please set the value of use_grpo to True")
   if config.inference_rollouts < 1 or config.inference_rollouts > config.steps:
     raise ValueError(
-        f"Please set the value of inference_rollouts to be less than {config.steps} or greater than 1. Current value: {config.inference_rollouts}"
+        f"Please set the value of inference_rollouts to be less than {config.steps} or greater than 1. "
+        f"Current value: {config.inference_rollouts}"
     )
   if config.decode_sampling_strategy == "greedy" or config.decode_sampling_temperature == 0.0:
     raise ValueError(
         "Please set decode_sampling_strategy as 'weighted' and decode_sampling_temperature as a positive number"
     )
   if config.inference_devices_per_replica * config.inference_replicas >= jax.device_count():
-    raise ValueError(f"Invalid value chosen for {config.inference_devices_per_replica=} and {config.inference_replicas=} with {jax.device_count()} devices")
-  config_inference = pyconfig.initialize(
-      configs_argv[1]
-  )
+    raise ValueError(
+        f"Invalid value chosen for {config.inference_devices_per_replica=} and {config.inference_replicas=} "
+        f"with {jax.device_count()} devices"
+    )
+  config_inference = pyconfig.initialize(configs_argv[1])
   if config.per_device_batch_size < 1.0 or config_inference.per_device_batch_size < 1.0:
     raise ValueError("GRPO does not support setting per_device_batch_size < 1.0")
   jax.config.update("jax_use_shardy_partitioner", config.shardy)

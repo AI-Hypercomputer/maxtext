@@ -62,6 +62,13 @@ checkpoint_storage_use_zarr3: True
 # larger models requires higher concurrent GB for I/O
 # default concurrent gb for PytreeCheckpointHandler is 96GB
 checkpoint_storage_concurrent_gb: 96
+
+# Bool flag for enabling Orbax v1.
+enable_orbax_v1: False
+# Function for processing loaded checkpoint dict into a format MaxText can understand. (for other formats, i.e. SafeTensors)
+checkpoint_conversion_fn: None
+# Optional checkpoint context to use for loading. Options: "orbax", "safetensors"
+source_checkpoint_layout: "orbax"
 ############################### END CHECKPOINTING ##################################
 
 
@@ -110,7 +117,9 @@ save_quantized_params_path: ""
 # when left as is, corresponds to training
 # accepted values are "inference"
 model_call_mode: ""
-
+use_qwix_quantization: False # Whether to use qwix for quantization. If set to True, the model will be quantized using qwix.
+# Quantization calibration method used for weights and activations. Supported methods can be found in https://github.com/google/qwix/blob/dc2a0770351c740e5ab3cce7c0efe9f7beacce9e/qwix/qconfig.py#L70-L80
+quantization_calibration_method: "absmax"
 # Shard the range finding operation for quantization. By default this is set to number of slices.
 quantization_local_shard_count: -1
 
