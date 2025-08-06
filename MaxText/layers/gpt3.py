@@ -32,12 +32,11 @@ from flax import nnx
 from MaxText import max_logging
 from MaxText.common_types import Config, DType, AxisNames, BATCH, LENGTH, EMBED, HEAD, D_KV, Array, MODEL_MODE_TRAIN
 from MaxText.layers import initializers, nnx_wrappers
-from MaxText.layers.linears import DenseGeneral, MlpBlock, _canonicalize_tuple, _normalize_axes
+from MaxText.layers.linears import DenseGeneral, MlpBlock, canonicalize_tuple, normalize_axes
 from MaxText.layers import models
 from MaxText.layers import quantizations
 from MaxText.layers.attentions import AttentionOp, KVQuant
 from MaxText.layers.initializers import Initializer, NdInitializer, nd_dense_init
-from MaxText.layers.linears import dense_general
 from MaxText.layers.quantizations import AqtQuantization as Quant
 
 # -----------------------------------------
@@ -231,18 +230,20 @@ class Gpt3MultiHeadAttention(nnx.Module):
     self.value_axis_names = value_axis_names
     self.out_axis_names = out_axis_names
     self.rngs = rngs if rngs is not None else kwargs.get("rngs", nnx.Rngs(0))
-    self.qkv_projection_layer = self.create_projection_layer(
-        feature_dim, (3, self.num_heads, self.head_dim), ("embed", "qkv", "heads", "kv")
-    )
-    self.q_projection_layer = self.create_projection_layer(
-        feature_dim, (self.num_heads, self.head_dim), ("embed", "heads", "kv")
-    )
-    self.k_projection_layer = self.create_projection_layer(
-        feature_dim, (self.num_heads, self.head_dim), ("embed", "heads", "kv")
-    )
-    self.v_projection_layer = self.create_projection_layer(
-        feature_dim, (self.num_heads, self.head_dim), ("embed", "heads", "kv")
-    )
+    if self.fused_qkv:
+      self.qkv_projection_layer = self.create_projection_layer(
+          feature_dim, (3, self.num_heads, self.head_dim), ("embed", "qkv", "heads", "kv")
+      )
+    else:
+      self.q_projection_layer = self.create_projection_layer(
+          feature_dim, (self.num_heads, self.head_dim), ("embed", "heads", "kv")
+      )
+      self.k_projection_layer = self.create_projection_layer(
+          feature_dim, (self.num_heads, self.head_dim), ("embed", "heads", "kv")
+      )
+      self.v_projection_layer = self.create_projection_layer(
+          feature_dim, (self.num_heads, self.head_dim), ("embed", "heads", "kv")
+      )
     self.out_projection_layer = self.create_projection_layer(
         (self.num_heads, self.head_dim), self.num_heads * self.head_dim, ("heads", "kv", "embed"), axis=(-2, -1)
     )
@@ -264,8 +265,8 @@ class Gpt3MultiHeadAttention(nnx.Module):
       self, input_shape: tuple[int], output_shape: tuple[int], kernel_axes: tuple[str], axis: int = -1
   ):
     """Create projection layer for Key, Value, Query and Output"""
-    axis = _canonicalize_tuple(axis)
-    in_features_shape = tuple(input_shape[ax] for ax in _normalize_axes(axis, len(input_shape)))
+    axis = canonicalize_tuple(axis)
+    in_features_shape = tuple(input_shape[ax] for ax in normalize_axes(axis, len(input_shape)))
 
     return DenseGeneral(
         in_features_shape=in_features_shape,
@@ -346,7 +347,7 @@ class Gpt3DecoderLayer(nnx.Module):
     self.mesh = mesh
     self.quant = quant
     self.rngs = rngs if rngs is not None else kwargs.get("rngs", nnx.Rngs(0))
-    self.gpt3_layer_norm = Gpt3LayerNorm(
+    self.layer_norm = Gpt3LayerNorm(
         num_features=config.base_emb_dim,
         dtype=self.config.dtype,
         kernel_axes=("norm",),
@@ -402,7 +403,7 @@ class Gpt3DecoderLayer(nnx.Module):
   ):
     inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
     inputs = checkpoint_name(inputs, "decoder_layer_input")
-    lnx = self.gpt3_layer_norm(inputs)
+    lnx = self.layer_norm(inputs)
 
     lnx = nn.with_logical_constraint(lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
 
