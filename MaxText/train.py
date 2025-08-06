@@ -56,7 +56,7 @@ from MaxText.layers.multi_token_prediction import calculate_mtp_acceptance_rate,
 from MaxText.data_loader import DataLoader
 from MaxText.input_pipeline.input_pipeline_interface import create_data_iterator
 from MaxText.globals import EPS
-from MaxText.metric_logger import MetricLogger
+from MaxText.metric_logger import MetricLogger, record_activation_metrics
 from MaxText.utils import gcs_utils
 from MaxText.utils.goodput_utils import (
     GoodputEvent,
@@ -105,26 +105,6 @@ def get_first_step(state):
 # -----------------------------------------------------------------------------
 # Top-level Functions
 # -----------------------------------------------------------------------------
-
-
-def record_activation_metrics(output_metrics, intermediate_outputs, config):
-  """Adds the activation metrics to the metrics dict"""
-
-  if config.scan_layers:
-    metrics_dict = intermediate_outputs["intermediates"]["decoder"]["decoder"]
-
-    for layer_num in range(config.num_decoder_layers):
-      output_metrics["scalar"][f"activ_fraction_zero/layer_{layer_num:03d}"] = metrics_dict["activation_fraction_zero"][0][
-          layer_num
-      ]
-      output_metrics["scalar"][f"activ_mean/layer_{layer_num:03d}"] = metrics_dict["activation_mean"][0][layer_num]
-      output_metrics["scalar"][f"activ_stdev/layer_{layer_num:03d}"] = metrics_dict["activation_stdev"][0][layer_num]
-  else:
-    for layer_num in range(config.num_decoder_layers):
-      layer = intermediate_outputs["intermediates"]["decoder"][f"layers_{layer_num}"]
-      output_metrics["scalar"][f"activ_fraction_zero/layer_{layer_num:03d}"] = layer["activation_fraction_zero"][0]
-      output_metrics["scalar"][f"activ_mean/layer_{layer_num:03d}"] = layer["activation_mean"][0]
-      output_metrics["scalar"][f"activ_stdev/layer_{layer_num:03d}"] = layer["activation_stdev"][0]
 
 
 def _split_dpo_state(state):
