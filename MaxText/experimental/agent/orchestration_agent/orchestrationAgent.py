@@ -32,10 +32,10 @@ python orchestrationAgent.py \
 """
 import json
 import os.path
-from Utils import check_github_file_exists
+from .Utils import check_github_file_exists
 import argparse, logging
-from GetFilesInHierarchicalOrder import get_dependency_sorted_files
-from SplitPythonFile import get_modules_in_order
+from .GetFilesInHierarchicalOrder import get_dependency_sorted_files
+from .SplitPythonFile import get_modules_in_order
 
 # Set up basic configuration
 logging.basicConfig(

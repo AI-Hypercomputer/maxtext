@@ -29,6 +29,7 @@ from flax.linen.partitioning import ScanIn
 
 from MaxText.common_types import DecoderBlockType, Config, MODEL_MODE_TRAIN, MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE
 from MaxText import max_logging
+from MaxText import max_utils
 from MaxText.inference import page_manager
 from MaxText.layers import linears
 from MaxText.layers import quantizations
@@ -375,7 +376,7 @@ class Decoder(nn.Module):
           def map_fn(path, value):
             max_logging.log(f"models.py: Moving parameter {path} to device")
             return jax.device_put(
-                value, jax.memory.Space.Device
+                value, max_utils.device_space()
             )
 
           return jax.tree_util.tree_map_with_path(map_fn, variables)

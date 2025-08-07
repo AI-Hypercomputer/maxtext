@@ -298,7 +298,6 @@ class TrainTests(unittest.TestCase):
 
   @pytest.mark.integration_test
   @pytest.mark.gpu_only
-  @pytest.mark.skip(reason="Requires jax 0.7.0 or later, see b/436565838 for more.")
   def test_gpu_parameter_offload(self):
     os.environ["NVTE_FUSED_ATTN"] = "1"  # Enable fused attention
     parameter_offload = [  # tests base config on GPU with parameter offload"""
