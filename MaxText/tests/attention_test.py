@@ -560,6 +560,13 @@ class AttentionTest(parameterized.TestCase):
           "expert_shard_attention_option": "context",
       },
       {
+          "testcase_name": "cp_ep_with_load_balance2",
+          "ici_context_parallelism": 2,
+          "context_parallel_load_balance": True,
+          "ici_expert_parallelism": 2,
+          "expert_shard_attention_option": "fsdp",
+      },
+      {
           "testcase_name": "ep_no_load_balance",
           "ici_context_parallelism": 1,
           "context_parallel_load_balance": False,
@@ -1199,6 +1206,13 @@ class MLATest(parameterized.TestCase):
           "context_parallel_load_balance": True,
           "ici_expert_parallelism": 2,
           "expert_shard_attention_option": "context",
+      },
+      {
+          "testcase_name": "cp_ep_with_load_balance2",
+          "ici_context_parallelism": 2,
+          "context_parallel_load_balance": True,
+          "ici_expert_parallelism": 2,
+          "expert_shard_attention_option": "fsdp",
       },
       {
           "testcase_name": "ep_no_load_balance",
