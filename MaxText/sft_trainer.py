@@ -41,11 +41,10 @@ from MaxText.metric_logger import MetricLogger
 from MaxText.train import (
     eval_step,
     get_first_step,
-    setup_train_loop,
     train_step,
-    validate_train_config,
 )
 from MaxText.utils import gcs_utils
+from MaxText.train_utils import setup_train_loop, validate_train_config
 from MaxText.utils.goodput_utils import (
     GoodputEvent,
     create_goodput_recorder,

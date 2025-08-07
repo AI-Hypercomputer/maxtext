@@ -15,6 +15,7 @@
 # pylint: disable=bare-except, consider-using-generator
 """ Utils that are only interesting for training in MaxText. """
 
+import os
 import jax
 from MaxText.common_types import MODEL_MODE_TRAIN
 from MaxText.layers import quantizations
@@ -22,6 +23,14 @@ from MaxText.layers import models
 from MaxText import optimizers
 from MaxText import checkpointing
 from MaxText import maxtext_utils
+from MaxText import max_logging
+from MaxText import max_utils
+from MaxText.input_pipeline.input_pipeline_interface import create_data_iterator
+from MaxText.utils.goodput_utils import (
+    GoodputEvent,
+    maybe_record_goodput,
+)
+import MaxText as mt
 
 
 def get_transformer_model(config, mesh, quant):
@@ -142,3 +151,102 @@ def jit_train_and_eval_step(
     p_eval_step = jit_eval_step(config, model, state_mesh_shardings, data_sharding, eval_step)
 
   return p_train_step, p_eval_step
+
+
+def _merge_dpo_state(state, reference_params):
+  return state.replace(params=dict(state.params, reference_params=reference_params))
+
+
+def setup_train_loop(config, recorder, devices=None):
+  """Set up prerequisites for the training loop -
+      checkpoint_manager, PRNG keys, Mesh, Model and optimizer.
+      Set up data iterator and tokenizer, initialize the model.
+
+  Args:
+    config
+    recorder
+
+  Returns:
+    init_rng:
+    checkpoint_manager: Orbax checkpointer
+    state_mesh_annotations: the mesh annotations for the train state
+    model:
+    mesh:
+    learning_rate_schedule:
+    data_iterator:
+    state: the initialized train state
+  """
+
+  with maybe_record_goodput(recorder, GoodputEvent.TPU_INIT):
+    model = mt.from_pretrained(config, devices)
+    mesh = model.mesh
+    init_rng, checkpoint_manager, learning_rate_schedule, tx = create_training_tools(config, model, mesh)
+
+  with maybe_record_goodput(recorder, GoodputEvent.TRAINING_PREPARATION):
+    data_iterator, eval_data_iterator = create_data_iterator(config, mesh)
+    context_parallel_size = mesh.shape["context"]
+    # Check if context parallelism is being used with sequence packing
+    if context_parallel_size > 1 and config.packing and config.dataset_type != "synthetic":
+      raise ValueError(
+          "Context parallelism cannot be used with sequence packing except for synthetic data where packing is not applied. "
+          "Either disable sequence packing (set packing=False) or disable context parallelism. "
+          "Context parallelism with packing support will be added soon."
+      )
+
+    # Apply reordering wrapper to data iterators if context parallelism is enabled
+    with mesh:
+      if context_parallel_size > 1 and config.context_parallel_load_balance:
+        data_iterator = map(max_utils.get_reorder_callable(context_parallel_size), data_iterator)
+        if eval_data_iterator:
+          eval_data_iterator = map(max_utils.get_reorder_callable(context_parallel_size), eval_data_iterator)
+
+    state, _, state_mesh_shardings, data_iterator = maxtext_utils.setup_training_state(
+        model, data_iterator, tx, config, init_rng, mesh, checkpoint_manager
+    )
+
+    # TODO(aireenmei, hengtaoguo): support sharding in vit for multimodal
+    if not config.using_pipeline_parallelism and not config.use_multimodal:
+      # The vocab tensor(s) of shape [vocab, embed] (and transpose) are not sharded by stage
+      maxtext_utils.assert_params_sufficiently_sharded(state.params, mesh, config.sharding_tolerance)
+
+    if config.use_dpo:
+      abstract_state, _, _ = maxtext_utils.get_abstract_state(model, tx, config, init_rng, mesh, is_training=True)
+      max_logging.log(f"Restoring reference parameters for DPO from '{os.path.join(str(config.checkpoint_dir), str(0))}'")
+      try:
+        step0_restored, _ = checkpointing.load_state_if_possible(
+            checkpoint_manager,
+            data_iterator,
+            load_parameters_from_path="",
+            load_full_state_from_path="",
+            checkpoint_storage_concurrent_gb=config.checkpoint_storage_concurrent_gb,
+            abstract_unboxed_pre_state=abstract_state,
+            enable_single_replica_ckpt_restoring=False,
+            dataset_type=config.dataset_type,
+            step=0,
+            use_ocdbt=config.checkpoint_storage_use_ocdbt,
+            use_zarr3=config.checkpoint_storage_use_zarr3,
+            enable_orbax_v1=config.enable_orbax_v1,
+            checkpoint_conversion_fn=config.checkpoint_conversion_fn,
+            source_checkpoint_layout=config.source_checkpoint_layout,
+        )
+      except FileNotFoundError:
+        step0_restored = None
+      if step0_restored is not None:
+        reference_params = step0_restored["items"].params["params"]
+        state = _merge_dpo_state(state, reference_params)
+      else:
+        max_logging.log(
+            f"Could not restore reference parameters for DPO from '{os.path.join(str(config.checkpoint_dir), str(0))}'"
+        )
+
+  return (
+      init_rng,
+      checkpoint_manager,
+      state_mesh_shardings,
+      model,
+      mesh,
+      learning_rate_schedule,
+      data_iterator,
+      eval_data_iterator,
+      state,
+  )
