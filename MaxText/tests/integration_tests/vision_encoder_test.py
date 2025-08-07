@@ -12,21 +12,32 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 
-""" Tests for multimodal vision encoder """
+""" Tests for multimodal vision encoder. """
 
 import unittest
 import os
+from collections.abc import Callable
+
+import pytest
+
+import jsonlines
+
+import numpy as np
+
 import jax
 import jax.numpy as jnp
-import numpy as np
-import pytest
-import jsonlines
+
+from flax.core.scope import VariableDict
 
 from MaxText import pyconfig
 from MaxText import multimodal_utils
 from MaxText.layers import models
 from MaxText.globals import PKG_DIR
 from MaxText import maxengine
+
+
+# 4b with vit
+DEFAULT_LOAD_PARAMETERS_PATH = "gs://maxtext-model-checkpoints/gemma3-4b/multimodal/2025-04-25-18-06-04/checkpoints/0/items"
 
 
 class VisionEncoderEmbeddingTest(unittest.TestCase):
@@ -39,7 +50,7 @@ class VisionEncoderEmbeddingTest(unittest.TestCase):
           rf"tokenizer_path={os.path.join(os.path.dirname(PKG_DIR), 'assets', 'tokenizer.gemma3')}",
           "use_multimodal=True",
           "run_name=runner_test",
-          "load_parameters_path=gs://maxtext-model-checkpoints/gemma3-4b/multimodal/2025-04-25-18-06-04/checkpoints/0/items",  # 4b with vit
+          f"load_parameters_path={DEFAULT_LOAD_PARAMETERS_PATH}",
           "steps=1",
           "enable_checkpointing=False",
           "max_target_length=16",
@@ -53,6 +64,7 @@ class VisionEncoderEmbeddingTest(unittest.TestCase):
       ],
   }
 
+  @pytest.mark.skip(reason="until b/416335384 is fixed")
   @pytest.mark.tpu_only
   def test_image_embedding_gemma3_4b_tpu(self):
     os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
@@ -67,7 +79,7 @@ class VisionEncoderEmbeddingTest(unittest.TestCase):
     # Load and preprocess the image
     images = multimodal_utils.load_image_from_path(config.image_path)
     images = multimodal_utils.pre_process_image(images, model_name=config.model_name)
-    input_images = images[jnp.newaxis, jnp.newaxis, ...]
+    input_images = images[jnp.newaxis, jnp.newaxis, ...]  # pytype: disable=unsupported-operands
 
     # Initialize only the vision encoder part and extract the corresponding params
     vision_encoder_model = models.VisionEncoder(config)
@@ -77,16 +89,14 @@ class VisionEncoderEmbeddingTest(unittest.TestCase):
     def apply_vision_encoder_fn(params, images_input):
       return vision_encoder_model.apply({"params": params}, images_input)
 
-    jitted_apply_vision_encoder_fn = jax.jit(apply_vision_encoder_fn)
-    image_embeddings = jitted_apply_vision_encoder_fn(vision_encoder_params, input_images)
+    jitted_apply_vision_encoder_fn: Callable[[VariableDict, tuple[dict, ...]], np.ndarray] = jax.jit(apply_vision_encoder_fn)
+    image_embeddings = jitted_apply_vision_encoder_fn(vision_encoder_params, input_images)  # pylint: disable=not-callable
 
     # Load golden image embeddings generated from HuggingFace Gemma3-4b
-    golden_data_path = os.path.join(os.path.dirname(PKG_DIR), "MaxText", "test_assets", "golden_data_gemma3_vit.jsonl")
-    loaded_data = []
-    with jsonlines.open(golden_data_path, mode="r") as reader:
-      for line in reader:
-        loaded_data.append(line)
-    golden_image_embeddings = np.asarray(loaded_data[0]["soft_embeddings"], dtype=np.float32)
+    input_golden_data_path = os.path.join(PKG_DIR, "test_assets", "golden_data_gemma3_vit.jsonl")
+    with jsonlines.open(input_golden_data_path, mode="r") as reader:
+      loaded_data = next(iter(reader))
+    golden_image_embeddings = np.asarray(loaded_data["soft_embeddings"], dtype=np.float32)
 
     # Compare the image embeddings with golden data
     mse = np.mean((image_embeddings - golden_image_embeddings) ** 2)

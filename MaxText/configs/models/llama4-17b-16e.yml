@@ -18,7 +18,6 @@ mlp_activations: ["silu","linear"]
 enable_dropout: False
 logits_via_embedding: False
 tokenizer_type: "huggingface"
-tokenizer_path: "meta-llama/Llama-4-Scout-17B-16E"
 
 base_emb_dim: 5120
 base_num_decoder_layers: 48
@@ -36,8 +35,10 @@ num_experts_per_tok: 1
 use_qk_norm: True # Llama4 models apply an L2Norm to the Query and Keys after RoPE
 nope_layer_interval: 4 # Every fourth layer should NOT use RoPE
 interleave_moe_layer_step: 1 # Every layer is MoE layer
+inhomogeneous_layer_cycle_interval: 4 # Every four layers the pattern of nope and moe repeats (least common multiple of nope interval and moe interval)
 
 temperature_tuning: True
 # Chunk attention is used on all RoPE layers
 # otherwise, on NoPE layers, use global attention
 chunk_attn_window_size: 8192
+image_size_for_vit: 336 

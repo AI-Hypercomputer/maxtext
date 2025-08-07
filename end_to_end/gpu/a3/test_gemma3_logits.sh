@@ -27,7 +27,7 @@ export MODEL_BUCKET=gs://maxtext-gemma/gemma3
 
 python3 -m MaxText.convert_gemma3_chkpt --base_model_path ${CHKPT_BUCKET}/${MODEL_VARIATION} --maxtext_model_path ${MODEL_BUCKET}/${MODEL_VARIATION}/${idx} --model_size ${MODEL_VARIATION}
 
-# Current MaxText.generate_param_only_checkpoint will need to skip on GPU due to cpu process error. reuse the unscanned ckpt generated seperately.
+# Current MaxText.generate_param_only_checkpoint will need to skip on GPU due to cpu process error. reuse the unscanned ckpt generated separately.
 
 # # Non-Googlers please remember to point `DATASET_PATH` to the GCS bucket where you have your training data
 # export DATASET_PATH=gs://maxtext-dataset

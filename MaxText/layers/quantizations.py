@@ -26,15 +26,18 @@ from aqt.jax.v2.flax import aqt_flax
 from aqt.jax.v2 import tiled_dot_general
 from aqt.jax.v2 import calibration
 
+import qwix
+
 import jax
 import jax.numpy as jnp
 from jax.tree_util import tree_flatten_with_path, tree_unflatten
+
 from flax.linen import fp8_ops
 from flax.linen import initializers as flax_initializers
 import flax.linen as nn
 
-from MaxText.inference import kvcache
-from MaxText import common_types
+from MaxText.common_types import DType, Config
+from MaxText.inference.kvcache import KVQuant
 
 # Params used to define mixed precision quantization configs
 DEFAULT = "__default__"  # default config
@@ -43,16 +46,6 @@ _A_BITS = "a_bits"  # Number of bits used to represent activations
 _W_SCALE = "w_scale"  # Clipping scale for weights
 _A_SCALE = "a_scale"  # Clipping scale for activations
 _TILE_SIZE = "tile_size"  # Tile size for subchannel
-
-Array = common_types.Array
-Config = common_types.Config
-DType = common_types.DType
-AxisIdxes = common_types.AxisIdxes
-AxisNames = common_types.AxisNames
-CACHE_HEADS = common_types.CACHE_HEADS
-CACHE_KV = common_types.CACHE_KV
-KVTensor = aqt_tensor.QTensor
-KVQuant = kvcache.KVQuant
 
 
 @dataclass
@@ -67,6 +60,7 @@ class Quantization:
 
 
 def _tiling_fn(lhs, rhs, dimension_numbers, tile_size):
+  """apply tiling function"""
   del lhs, rhs
 
   (lhs_ca, rhs_ca), _ = dimension_numbers
@@ -90,12 +84,13 @@ def _rhs_axis_metadata_wrapper(
     is_tiled: bool,
     replicate_scale: bool = False,
 ):
+  """right-hand-side axis metadata wrapper"""
   if replicate_scale:
     # Temporarily using the shape to identify the scale.
     # TODO: remove the replication once the 2d sharding quantization
     # works as expected.
     if len(x.shape) == 1:
-      return nn.with_logical_partitioning((lambda: x), tuple([None for _ in mesh_axes]))()
+      return nn.with_logical_partitioning((lambda: x), tuple(None for _ in mesh_axes))()
 
   mesh_axes = list(mesh_axes)
   if is_tiled:
@@ -126,10 +121,13 @@ class AqtQuantization:
   replicate_scale: bool = False
 
   def _get_mixed_precision_cfg(self):
+    """get configuration for mixed precision"""
     quant_dg = None
     is_tiled = False
     tiling_fn = None
+    # pylint: disable=protected-access
     module_path = "/".join(nn.module._context.module_stack[-1].path)
+    tile_size = -1
     for layer_name_re, layer_quant_dg in self.quant_dg.items():
       if re.fullmatch(layer_name_re, module_path):
         quant_dg, tile_size = layer_quant_dg
@@ -207,7 +205,21 @@ class Fp8Quantization(Quantization):
     return nn.Fp8DirectDotGeneralOp
 
   def einsum(self, dtype: DType = jnp.float32):
-    return Fp8Einsum(dtype=dtype)
+    return _Fp8EinsumWrapper(dtype=dtype)
+
+
+class _Fp8EinsumWrapper(nn.Module):
+  """Wrapper for nn.Fp8Einsum to handle computation dtype."""
+
+  dtype: DType
+
+  @nn.compact
+  def __call__(self, eqn, lhs, rhs, **kwargs):
+    # nn.Fp8Einsum determines compute dtype from rhs.
+    # We cast rhs to the desired computation dtype.
+    # nn.Fp8Einsum will then cast lhs to the same dtype.
+    rhs = rhs.astype(self.dtype)
+    return nn.Fp8Einsum(name="fp8_einsum")(eqn, lhs, rhs, **kwargs)
 
 
 class Fp8Einsum(nn.Module):
@@ -226,6 +238,8 @@ class Fp8Einsum(nn.Module):
   dtype: DType = jnp.float32
 
   def setup(self) -> None:
+    """init with input_amax_history, kernel_amax_history, output_grad_amax_history,
+    input_scale, kernel_scale, output_grad_scale"""
     scale_args = (
         flax_initializers.ones_init(),
         jax.random.PRNGKey(0),
@@ -358,50 +372,100 @@ def _build_const_scale_config(
   return aqt_dg
 
 
+@dataclass
+class PerTensorScales:
+  fwd_lhs: bool = False
+  fwd_rhs: bool = False
+  dlhs_lhs: bool = False
+  dlhs_rhs: bool = False
+  drhs_lhs: bool = False
+  drhs_rhs: bool = False
+
+
 def _build_per_tensor_config(
     aqt_dg: aqt_config.DotGeneral,
+    per_tensor_scales: PerTensorScales,
 ) -> aqt_config.DotGeneral:
+  """Build a per tensor config for AQT dot general.
 
-  aqt_dg.fwd.dg_quantizer.lhs.calib_shared_axes = "per_tensor"
-  aqt_dg.fwd.dg_quantizer.rhs.calib_shared_axes = "per_tensor"
-  aqt_dg.dlhs.dg_quantizer.lhs.calib_shared_axes = "per_tensor"
-  aqt_dg.dlhs.dg_quantizer.rhs.calib_shared_axes = "per_tensor"
-  aqt_dg.drhs.dg_quantizer.lhs.calib_shared_axes = "per_tensor"
-  aqt_dg.drhs.dg_quantizer.rhs.calib_shared_axes = "per_tensor"
+  Args:
+    aqt_dg: The AQT dot general config.
+    per_tensor_scales: The per tensor scales config.
+
+  Returns:
+    The AQT dot general config with per tensor config.
+  """
+  if per_tensor_scales.fwd_lhs:
+    aqt_dg.fwd.dg_quantizer.lhs.calib_shared_axes = "per_tensor"
+  if per_tensor_scales.fwd_rhs:
+    aqt_dg.fwd.dg_quantizer.rhs.calib_shared_axes = "per_tensor"
+  if per_tensor_scales.dlhs_lhs:
+    aqt_dg.dlhs.dg_quantizer.lhs.calib_shared_axes = "per_tensor"
+  if per_tensor_scales.dlhs_rhs:
+    aqt_dg.dlhs.dg_quantizer.rhs.calib_shared_axes = "per_tensor"
+  if per_tensor_scales.drhs_lhs:
+    aqt_dg.drhs.dg_quantizer.lhs.calib_shared_axes = "per_tensor"
+  if per_tensor_scales.drhs_rhs:
+    aqt_dg.drhs.dg_quantizer.rhs.calib_shared_axes = "per_tensor"
   return aqt_dg
 
 
-def _get_aqt_fp8_quant_config(config):
+# fp8 training recipe of dynamic scaling with configurable constant_bound_config for static scaling option
+def _get_aqt_fp8_default_config(config):
   """Get aqt for 8-bit floating point quantization configuration."""
   aqt_dg = aqt_config.config_v4(
       fwd_bits="e4m3",
       dlhs_bits="e5m2",
       drhs_bits="e5m2",
-      use_dummy_static_bound=True,
+      use_dummy_static_bound=False,
       fwd_accumulator_dtype=jnp.bfloat16,
       dlhs_accumulator_dtype=jnp.bfloat16,
       drhs_accumulator_dtype=jnp.bfloat16,
       dlhs_use_fwd_quant=False,
       drhs_use_fwd_quant=False,
   )
+  constant_bound_config = None
 
-  constant_bound_config = ConstantBoundConfig(
-      fwd_lhs_bound=245.66246032714844,
-      fwd_rhs_bound=16.86667823791504,
-      dlhs_lhs_bound=60.014862060546875,
-      dlhs_rhs_bound=245.66246032714844,
-      drhs_lhs_bound=60.014862060546875,
-      drhs_rhs_bound=129.5323028564453,
+  if len(config.constant_bound_config) == 6:
+    fwd_lhs_bound, fwd_rhs_bound, dlhs_lhs_bound, dlhs_rhs_bound, drhs_lhs_bound, drhs_rhs_bound = (
+        config.constant_bound_config
+    )
+    constant_bound_config = ConstantBoundConfig(
+        fwd_lhs_bound=fwd_lhs_bound,
+        fwd_rhs_bound=fwd_rhs_bound,
+        dlhs_lhs_bound=dlhs_lhs_bound,
+        dlhs_rhs_bound=dlhs_rhs_bound,
+        drhs_lhs_bound=drhs_lhs_bound,
+        drhs_rhs_bound=drhs_rhs_bound,
+    )
+    aqt_dg = _build_const_scale_config(aqt_dg, constant_bound_config)
+
+  aqt_config.set_stochastic_rounding(
+      aqt_dg,
+      vjp_lhs_stochastic_rounding=False,
+      vjp_rhs_stochastic_rounding=False,
+      implementation="jax.uniform",
   )
-  # if constant_bound_config is not None:
-  aqt_dg = _build_const_scale_config(
-      aqt_dg, constant_bound_config
+
+  per_tensor_scales = PerTensorScales(
+      fwd_lhs=True,
+      fwd_rhs=True,
+      dlhs_lhs=True,
+      dlhs_rhs=True,
+      drhs_lhs=True,
+      drhs_rhs=True,
   )
-  # return _build_per_tensor_config(aqt_dg)
-  return aqt_dg
+  return _build_per_tensor_config(aqt_dg, per_tensor_scales)
+
+
+def _get_aqt_fp8_quant_config(config):
+  """get aqt for 8-bit floating point quantization configuration"""
+  cfg = aqt_config.config_v4(fwd_bits="e4m3", dlhs_bits=None, drhs_bits=None, fwd_accumulator_dtype=jnp.bfloat16)
+  return cfg
 
 
 def _dot_general_make(quant_cfg):
+  """Create quantization configs for input matrices to a matmul"""
   lhs_bits = quant_cfg[_A_BITS]
   lhs_scale = quant_cfg[_A_SCALE]
   rhs_bits = quant_cfg[_W_BITS]
@@ -417,8 +481,7 @@ def _dot_general_make(quant_cfg):
 def _get_default_mp_config(default=None):
   default_config = {_W_BITS: None, _A_BITS: None, _W_SCALE: 1.0, _A_SCALE: 1.0, _TILE_SIZE: -1}
   if default:
-    for k in default_config.keys():
-      default_config[k] = default.get(k, default_config[k])
+    default_config.update(default)
   return default_config
 
 
@@ -432,7 +495,7 @@ def _get_mixed_precision_quant_config(mixed_precision_config):
     # print(f"Mixed precision config: processing
     # {layer_name_re} - {layer_quantization_config}, default config - {quant_config}")
     if layer_name_re != DEFAULT:
-      for k in quant_config.keys():
+      for k in quant_config:
         quant_config[k] = layer_quantization_config.get(k, default_mp_config[k])
     ret_config[layer_name_re] = [_dot_general_make(quant_config), quant_config["tile_size"]]
   return ret_config
@@ -455,6 +518,9 @@ def _get_quant_config(config):
     return "nanoo_fp8"
   if config.quantization == "aqt_fp8":
     return _get_aqt_fp8_quant_config(config)
+  if config.quantization == "aqt_fp8_full":
+    return _get_aqt_fp8_default_config(config)
+
   raise ValueError(f"Invalid value configured for quantization {config.quantization}.")
 
 
@@ -481,6 +547,8 @@ def get_quant_mode(quant_mode_str: str = "train"):
 
 def configure_quantization(config: Config, quant_mode_str: str = "train"):
   """Configure quantization based on user config and quant mode."""
+  if config.use_qwix_quantization:
+    return None
   quant_cfg = _get_quant_config(config)
   if quant_cfg:
     if quant_cfg == "fp8":
@@ -494,6 +562,7 @@ def configure_quantization(config: Config, quant_mode_str: str = "train"):
 
 
 def match_aqt_and_unquantized_param(aqt_params, params):
+  """match aqt and unquantized params"""
   aqt_param_flat, aqt_tree_def = jax.tree_util.tree_flatten_with_path(
       aqt_params, is_leaf=lambda x: isinstance(x, aqt_tensor.QTensor)
   )
@@ -503,15 +572,19 @@ def match_aqt_and_unquantized_param(aqt_params, params):
   param_paths = []
 
   for aqt_k, _ in aqt_param_flat:
+    index = None
     for index, (k, _) in enumerate(param_tree_flat):
       path_depth = len(k)
       # every quantized parameter has AQT.. as the leaf node
       # AqtDotGeneral and AqtEinsum replace leaf node.
       # Therefore, leaf node should be ignored for path matching
-      if k[: path_depth - 1] == aqt_k[: path_depth - 1]:
+      # Note: Aqt only operates on kernels so don't pop bias parameters.
+      # Ref: https://github.com/AI-Hypercomputer/maxtext/compare/main...quantize_r1
+      if k[: path_depth - 1] == aqt_k[: path_depth - 1] and k[-1].key != "bias":
         aqt_paths.append(aqt_k)
         param_paths.append(k)
         break
+    assert index is not None
     # since the parameter is already added, we can delete it.
     param_tree_flat.pop(index)
   return jax.tree_util.tree_unflatten(aqt_tree_def, param_paths)
@@ -537,3 +610,67 @@ def remove_quantized_params(params, aqt_vars):
 
 def configure_kv_quant(config):
   return None if not config.quantize_kvcache else KVQuant(config)
+
+
+def get_basic_config(config, dtype):
+  """Basic Qwix config that only quantizes forward passes."""
+  rules = [
+      # Dot-product attention is not quantized for now.
+      qwix.QtRule(
+        module_path='decoder/.*layers.*/self_attention/attention_op',
+        weight_qtype=None,
+        act_qtype=None,
+      ),
+      qwix.QtRule(
+        module_path='decoder/.*layers.*',  # Apply to all modules
+        weight_qtype=dtype,
+        act_qtype=dtype,
+        bwd_weight_grad_tile_size = 1 / config.quantization_local_shard_count
+      )
+    ]
+  return rules
+
+
+def get_fp8_config(config):
+  """ fp8 config rules with per-tensor calibration.
+  """
+  rules = [
+      # Dot-product attention is not quantized for now.
+      qwix.QtRule(
+        module_path='decoder/.*layers.*/self_attention/attention_op',
+        weight_qtype=None,
+        act_qtype=None,
+      ),
+      qwix.QtRule(
+        module_path='decoder/.*layers.*',  # Apply to all modules
+        weight_qtype=jnp.float8_e4m3fn,
+        act_qtype=jnp.float8_e4m3fn,
+        bwd_qtype=jnp.float8_e5m2,
+        bwd_use_original_residuals=True,
+        disable_channelwise_axes=True, # per_tensor calibration
+        weight_calibration_method = config.quantization_calibration_method,
+        act_calibration_method = config.quantization_calibration_method,
+        bwd_calibration_method = config.quantization_calibration_method,
+      )
+    ]
+  return rules
+
+def get_qt_provider(config):
+  """Get quantization rules based on the config."""
+  match config.quantization:
+    case "int8":
+      return qwix.QtProvider(get_basic_config(config, jnp.int8))
+    case "fp8":
+      return qwix.QtProvider(get_basic_config(config, jnp.float8_e4m3fn))
+    case "fp8_full":
+      return qwix.QtProvider(get_fp8_config(config))
+  return None
+
+
+def maybe_quantize_model(model, config):
+  """Quantize the model if quantization is enabled."""
+  if config.use_qwix_quantization:
+    quantization_provider = get_qt_provider(config)
+    if quantization_provider:
+      model = qwix.quantize_model(model, quantization_provider)
+  return model

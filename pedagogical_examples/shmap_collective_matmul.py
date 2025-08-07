@@ -22,8 +22,10 @@ import os
 
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
 
-import numpy as np
 from functools import partial
+
+import numpy as np
+
 import jax
 import jax.numpy as jnp
 from jax.experimental.pjit import pjit

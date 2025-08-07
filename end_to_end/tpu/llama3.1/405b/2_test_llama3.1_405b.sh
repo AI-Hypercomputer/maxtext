@@ -38,7 +38,7 @@ export SCANNED_CHECKCKPOINT=gs://maxtext-llama/llama3.1_405b_bf16/scanned/0/item
 export UNSCANNED_CHECKPOINT=gs://maxtext-llama/llama3.1_405b_bf16/unscanned/0/items
 
 # We run finetuning by using the scanned converted checkpoint located at `CONVERTED_CHECKPOINT`. Again, we use it by specifying`load_parameters_path=${CONVERTED_CHECKPOINT}`. Note that scanned checkpoint helps with efficient finetuning.
-# We use a small per_device_batch_size and SGD optmizer for the model to fit on a v4-128. This config is only used for unit testing.
+# We use a small per_device_batch_size and SGD optimizer for the model to fit on a v4-128. This config is only used for unit testing.
 export FINETUNE_RUN_NAME=runner_finetune
 python3 -m MaxText.train MaxText/configs/base.yml base_output_directory=${BASE_OUTPUT_PATH} dataset_type=synthetic tokenizer_path=assets/tokenizer_llama3.tiktoken tokenizer_type=tiktoken load_parameters_path=${SCANNED_CHECKCKPOINT} per_device_batch_size=0.25 ici_tensor_parallelism=4 run_name=${FINETUNE_RUN_NAME} steps=10 enable_checkpointing=false model_name=${MODEL_VARIATION} logits_dot_in_fp32=false weight_dtype=bfloat16 opt_type=sgd
 

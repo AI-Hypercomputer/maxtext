@@ -42,10 +42,10 @@ class Standalone_DL_CKPT(unittest.TestCase):
     random_run_name = self._get_random_test_name("standalone_dataloader")
     sdl_main(
         (
-            None,
+            "",
             os.path.join(PKG_DIR, "configs", "base.yml"),
-            "run_name=" + random_run_name,
-            f"base_output_directory=gs://runner-maxtext-logs",
+            f"run_name={random_run_name}",
+            "base_output_directory=gs://runner-maxtext-logs",
             "dataset_path=gs://maxtext-dataset",
             "steps=100",
             "enable_checkpointing=false",
@@ -61,10 +61,10 @@ class Standalone_DL_CKPT(unittest.TestCase):
     # checkpoint at 50
     sckpt_main(
         (
-            None,
+            "",
             os.path.join(PKG_DIR, "configs", "base.yml"),
             f"run_name={random_run_name}",
-            f"base_output_directory=gs://runner-maxtext-logs",
+            "base_output_directory=gs://runner-maxtext-logs",
             "dataset_path=gs://maxtext-dataset",
             "base_emb_dim=128",
             "base_num_query_heads=4",
@@ -76,15 +76,16 @@ class Standalone_DL_CKPT(unittest.TestCase):
             "checkpoint_period=50",
             "async_checkpointing=False",
             "enable_goodput_recording=False",
+            "skip_jax_distributed_system=True",
         )
     )
     # restore at 50 and checkpoint at 100
     sckpt_main(
         (
-            None,
+            "",
             os.path.join(PKG_DIR, "configs", "base.yml"),
             f"run_name={random_run_name}",
-            f"base_output_directory=gs://runner-maxtext-logs",
+            "base_output_directory=gs://runner-maxtext-logs",
             "dataset_path=gs://maxtext-dataset",
             "base_emb_dim=128",
             "base_num_query_heads=4",
@@ -96,6 +97,7 @@ class Standalone_DL_CKPT(unittest.TestCase):
             "checkpoint_period=50",
             "async_checkpointing=False",
             "enable_goodput_recording=False",
+            "skip_jax_distributed_system=True",
         )
     )
 

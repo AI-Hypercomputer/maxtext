@@ -12,41 +12,46 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Implementation of Engine API for MaxText"""
-import functools
-from typing import Any, List, Optional, Tuple, Callable
-from collections import defaultdict
-import uuid
-import os.path
+"""Implementation of Engine API for MaxText."""
 
+from collections import defaultdict
+from typing import Any, List, Optional, Tuple, Callable
+import functools
+import os.path
+import uuid
+import warnings
+
+from jax.experimental.layout import Format
+from jax.sharding import PartitionSpec as P
 import jax
 import jax.numpy as jnp
-from jax.sharding import PartitionSpec as P
-from jax.experimental import layout as jax_layout
 
-import flax
+if jax.__version_info__ >= (0, 6, 3):
+  from jax.experimental.layout import Layout as DLL  # type: ignore
+else:
+  from jax.experimental.layout import DeviceLocalLayout as DLL  # type: ignore
+
 from flax import linen as nn
-from flax.linen import partitioning as nn_partitioning
 from flax import struct
+from flax.linen import partitioning as nn_partitioning
+import flax
 
 from jetstream.core import config_lib
 from jetstream.engine import engine_api
+from jetstream.engine import token_utils
+from jetstream.engine import tokenizer_api
 from jetstream.engine.tokenizer_pb2 import TokenizerParameters
 from jetstream.engine.tokenizer_pb2 import TokenizerType
-from jetstream.engine import tokenizer_api
-from jetstream.engine import token_utils
 
+from MaxText import inference_utils
 from MaxText import max_utils
 from MaxText import maxtext_utils
-from MaxText import inference_utils
 from MaxText import pyconfig
-from MaxText import common_types
-from MaxText.utils import lora_utils
+from MaxText.common_types import MODEL_MODE_PREFILL, DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_AUTOREGRESSIVE
 from MaxText.globals import PKG_DIR
 from MaxText.inference.page_manager import PageManager, PageState
 from MaxText.layers import models, quantizations
-
-import warnings
+from MaxText.utils import lora_utils
 
 
 warnings.simplefilter("ignore", category=FutureWarning)
@@ -55,8 +60,6 @@ Prefix = Any
 PackedPrefix = Any
 Params = Any
 PRNGKeyType = Any
-DLL = jax_layout.DeviceLocalLayout
-Layout = jax_layout.Layout
 
 
 # TODO(yuyanpeng): Should import ExistingPrefix from jetstream.engine.engine_api
@@ -123,6 +126,7 @@ class MaxEngine(engine_api.Engine):
     self.decode_state_shapes = None
     self.decode_state_layouts = None
     self.param_layouts = None
+    self.rng = None
 
     # Initialize page manager and page state
     self.page_manager = None
@@ -147,21 +151,21 @@ class MaxEngine(engine_api.Engine):
   ) -> tuple[Any, Any, Any, Any]:
     """Optimal memory layout for params and decode_state."""
 
-    param_layout = Layout(DLL.AUTO)
-    decode_state_layout = Layout(DLL.AUTO)
+    param_layout = Format(DLL.AUTO)
+    decode_state_layout = Format(DLL.AUTO)
     # Keyword arguments are not yet supported in JAX for specifying shardings. Therefore, all AOT
     # compiled functions use arguments instead.
     compiled_generate = (
         jax.jit(
             self.generate_aot,
             in_shardings=(param_layout, decode_state_layout, None),
-            out_shardings=(Layout(DLL.AUTO), Layout(DLL.AUTO)),
+            out_shardings=(Format(DLL.AUTO), Format(DLL.AUTO)),
             donate_argnames=("decode_state",),
         ).lower(params, decode_state, rng_shape)
     ).compile(compiler_options=xla_flags)
 
-    arg_layouts, _ = compiled_generate.input_layouts
-    generate_out_layouts, _ = compiled_generate.output_layouts
+    arg_layouts, _ = compiled_generate.input_formats
+    generate_out_layouts, _ = compiled_generate.output_formats
 
     return compiled_generate, arg_layouts[0], arg_layouts[1], generate_out_layouts
 
@@ -174,11 +178,11 @@ class MaxEngine(engine_api.Engine):
     """Lays out an array tensor by tensor to prevent OOMs."""
 
     def _layout(x, s, l):
-      if x.layout == l:
+      if x.format == l:
         return x
       # Somehow this can be None sometimes.
-      dll = l.device_local_layout if isinstance(l, Layout) else l
-      f = jax.jit(self._identity, out_shardings=Layout(dll, s)).lower(x).compile(compiler_options=xla_flags)
+      dll = (l.layout if jax.__version_info__ >= (0, 6, 3) else l.device_local_layout) if isinstance(l, Format) else l
+      f = jax.jit(self._identity, out_shardings=Format(dll, s)).lower(x).compile(compiler_options=xla_flags)
       y = f(x)
       # Achieves donation of the input argument, but allows for different memory
       # layouts and shapes.
@@ -325,20 +329,14 @@ class MaxEngine(engine_api.Engine):
           jnp.ones((1, self.config.max_prefill_predict_length), dtype=jnp.int32),
           jnp.ones((1, self.config.max_prefill_predict_length), dtype=jnp.int32),
           encoder_images=jnp.ones(
-              (
-                  1,
-                  maxtext_utils.NUM_IMAGES_PER_SEQUENCE,
-                  self.config.image_size_for_vit,
-                  self.config.image_size_for_vit,
-                  maxtext_utils.NUM_IMAGE_CHANNELS,
-              ),
+              maxtext_utils.get_dummy_image_shape_for_init(self.config),
               dtype=jnp.float32,
           )
           if self.config.use_multimodal
           else None,
           decoder_segment_ids=jnp.zeros((1, self.config.max_prefill_predict_length), dtype=jnp.int32),
           enable_dropout=False,
-          model_mode=common_types.MODEL_MODE_PREFILL,
+          model_mode=MODEL_MODE_PREFILL,
           rngs={"params": _rng},
           mutable=True,
       )
@@ -399,7 +397,7 @@ class MaxEngine(engine_api.Engine):
         rng=rng,
     )
 
-  @functools.partial(jax.jit, static_argnums=(0,), static_argnames=("request_id",))
+  @functools.partial(jax.jit, static_argnums=(0,), static_argnames=("return_prompt_logp",))
   def _prefill_jit(
       self,
       *,
@@ -410,9 +408,9 @@ class MaxEngine(engine_api.Engine):
       true_length: int,
       sampler: Optional[Callable[[Any], Any]] = None,  # pylint: disable=unused-argument
       rng: Optional[PRNGKeyType] = None,
-      request_id: Optional[uuid.UUID] = None,  # pylint: disable=unused-argument
       slot: Optional[int] = None,
       page_state: Optional[PageState] = None,
+      return_prompt_logp: bool = False,
   ) -> Tuple[Prefix, engine_api.ResultTokens]:
     """Computes a kv-cache for a new generate request.
 
@@ -430,9 +428,6 @@ class MaxEngine(engine_api.Engine):
       kv_cache: For the resulting text.
     """
 
-    if rng is None:
-      rng = jax.random.PRNGKey(0)
-
     start_position = 0
     previous_chunk = None
     input_params = params
@@ -449,13 +444,17 @@ class MaxEngine(engine_api.Engine):
     input_tokens = jnp.expand_dims(padded_tokens, 0)  # [BATCH, SEQUENCE]
     positions = jnp.expand_dims(jnp.arange(start_position, start_position + input_tokens.shape[1]), 0)
 
-    if self.config.use_multimodal:
-      input_images = images[jnp.newaxis, jnp.newaxis, ...]  # Add batch and sequence dimension [B, N, H, W, C]
+    input_images = None
+    if self.config.use_multimodal and images is not None:
+      if self.config.model_name.startswith("gemma3"):
+        input_images = images[jnp.newaxis, jnp.newaxis, ...]  # Add batch and sequence dimension [B, N, H, W, C]
+      elif self.config.model_name.startswith("llama4"):
+        input_images = images[jnp.newaxis, ...]  # Add batch dimension [B, T, C, H, W]
 
     # sequence_indicator will be concatenated to existing_prefix decoder_segment_ids
     start_to_n = jnp.arange(start_position, start_position + input_tokens.shape[1])
     ones_to_keep = start_to_n < full_true_length
-    one_d_output = ones_to_keep * common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR
+    one_d_output = ones_to_keep * DECODING_ACTIVE_SEQUENCE_INDICATOR
     sequence_indicator = jnp.expand_dims(one_d_output, 0)
 
     rng, new_rng = jax.random.split(rng)
@@ -464,10 +463,10 @@ class MaxEngine(engine_api.Engine):
           input_params,
           input_tokens,
           positions,
-          encoder_images=input_images if self.config.use_multimodal else None,
+          encoder_images=input_images,
           decoder_segment_ids=sequence_indicator,
           enable_dropout=False,
-          model_mode=common_types.MODEL_MODE_PREFILL,
+          model_mode=MODEL_MODE_PREFILL,
           rngs={"params": new_rng},
           mutable=["cache"],
           previous_chunk=previous_chunk,
@@ -475,6 +474,11 @@ class MaxEngine(engine_api.Engine):
           slot=slot,
           page_state=page_state,
       )
+    if return_prompt_logp:
+      prompt_logp = inference_utils.log_prob_of_chosen_token(flat_logits, input_tokens)
+    else:
+      prompt_logp = None
+
     generated_tokens = jnp.zeros((1, 1), dtype=jnp.int32)
     selected_logits = jax.lax.dynamic_slice(
         flat_logits,
@@ -484,9 +488,10 @@ class MaxEngine(engine_api.Engine):
     selected_logits = jax.lax.with_sharding_constraint(selected_logits, self.replicated_sharding)
 
     # sampling first token
+    rng, new_rng = jax.random.split(rng)
     first_generated_token = inference_utils.sampling(
         selected_logits,
-        rng,
+        new_rng,
         self.config.decode_sampling_strategy,
         topk=self.config.decode_sampling_top_k,
         nucleus_topp=self.config.decode_sampling_nucleus_p,
@@ -521,6 +526,7 @@ class MaxEngine(engine_api.Engine):
         "next_pos": next_pos,
         "generated_tokens": generated_tokens,
         "tokens": first_generated_token,
+        "prompt_logp": prompt_logp,
     }, result
 
   # Public non-JIT prefill method that updates page state
@@ -536,6 +542,7 @@ class MaxEngine(engine_api.Engine):
       rng: Optional[PRNGKeyType] = None,
       request_id: Optional[uuid.UUID] = None,  # pylint: disable=unused-argument
       slot: Optional[int] = None,
+      return_prompt_logp: bool = False,
   ) -> Tuple[Prefix, engine_api.ResultTokens]:
     """Public API for prefill that updates page state outside JIT."""
     # Update page state before JIT call
@@ -545,6 +552,12 @@ class MaxEngine(engine_api.Engine):
           page_group_id=slot,
           true_length=true_length,
       )
+
+    # Sample rng before JIT call
+    if rng is None:
+      if self.rng is None:
+        self.rng = jax.random.PRNGKey(0)
+      self.rng, rng = jax.random.split(self.rng)
 
     # Call JIT-compiled version with current state
     return self._prefill_jit(
@@ -557,7 +570,7 @@ class MaxEngine(engine_api.Engine):
         page_state=self.page_state,  # Pass current page state
         slot=slot,
         rng=rng,
-        request_id=request_id,
+        return_prompt_logp=return_prompt_logp,
     )
 
   def prefill_multisampling_aot(  # pylint: disable=too-many-positional-arguments
@@ -579,8 +592,37 @@ class MaxEngine(engine_api.Engine):
         num_samples=num_samples,
     )
 
-  @functools.partial(jax.jit, static_argnums=(0,), static_argnames=("num_samples",))
   def prefill_multisampling(
+      self,  # pytype: disable=signature-mismatch
+      *,
+      # pylint: disable=arguments-differ
+      params: Params,
+      padded_tokens: jax.Array,
+      true_length: int,
+      sampler: Optional[Callable[[Any], Any]] = None,  # pylint: disable=unused-argument
+      rng: Optional[PRNGKeyType] = None,
+      num_samples: int = 1,
+  ) -> Tuple[Prefix, engine_api.ResultTokens]:
+    """Public API for prefill multisampling."""
+
+    # Sample rng before JIT call
+    if rng is None:
+      if self.rng is None:
+        self.rng = jax.random.PRNGKey(0)
+      self.rng, rng = jax.random.split(self.rng)
+
+    # Call JIT-compiled version
+    return self._prefill_multisampling_jit(
+        params=params,
+        padded_tokens=padded_tokens,
+        true_length=true_length,
+        sampler=sampler,
+        rng=rng,
+        num_samples=num_samples,
+    )
+
+  @functools.partial(jax.jit, static_argnums=(0,), static_argnames=("num_samples",))
+  def _prefill_multisampling_jit(
       self,
       *,
       params: Params,
@@ -596,15 +638,12 @@ class MaxEngine(engine_api.Engine):
     prefilling stage. The number of tokens is specified by num_samples.
     """
 
-    if rng is None:
-      rng = jax.random.PRNGKey(0)
-
     input_tokens = jnp.expand_dims(padded_tokens, 0)  # [BATCH, SEQUENCE]
     positions = jnp.expand_dims(jnp.arange(0, input_tokens.shape[1]), 0)
 
     zero_to_n = jnp.arange(0, padded_tokens.shape[0])
     ones_to_keep = zero_to_n < true_length
-    one_d_output = ones_to_keep * common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR
+    one_d_output = ones_to_keep * DECODING_ACTIVE_SEQUENCE_INDICATOR
     sequence_indicator = jnp.expand_dims(one_d_output, 0)
 
     rng, new_rng = jax.random.split(rng)
@@ -615,7 +654,7 @@ class MaxEngine(engine_api.Engine):
           positions,
           decoder_segment_ids=sequence_indicator,
           enable_dropout=False,
-          model_mode=common_types.MODEL_MODE_PREFILL,
+          model_mode=MODEL_MODE_PREFILL,
           rngs={"params": new_rng},
           mutable=["cache"],
       )
@@ -676,7 +715,7 @@ class MaxEngine(engine_api.Engine):
         "tokens": first_generated_tokens,
     }, result
 
-  @functools.partial(jax.jit, static_argnums=(0,), static_argnames=("num_prompts",))
+  @functools.partial(jax.jit, static_argnums=(0,), static_argnames=("num_prompts", "return_prompt_logp"))
   def prefill_concat(
       self,
       *,
@@ -690,6 +729,7 @@ class MaxEngine(engine_api.Engine):
       num_prompts: int,
       sampler: Optional[Callable[[Any], Any]] = None,  # pylint: disable=unused-argument
       rng: Optional[PRNGKeyType] = None,
+      return_prompt_logp: bool = False,
   ) -> Tuple[Any, PackedPrefix, List[engine_api.ResultTokens]]:
     """Computes a kv-cache for a new packed generate request, which is a
     concatenation of several shorter prompts. Experimentation shows that
@@ -728,14 +768,19 @@ class MaxEngine(engine_api.Engine):
           decoder_positions,
           decoder_segment_ids=decoder_segment_ids,
           enable_dropout=False,
-          model_mode=common_types.MODEL_MODE_PREFILL,
+          model_mode=MODEL_MODE_PREFILL,
           rngs={"params": new_rng},
           mutable=["cache"],
       )
     cache = new_vars["cache"]
     cache = self._maybe_stack_prefill_result_cache(cache)
+    if return_prompt_logp:
+      prompt_logp = inference_utils.log_prob_of_chosen_token(flat_logits, input_tokens)
+    else:
+      prompt_logp = None
 
     def process_packed_logits_and_caches(packed_flat_logits, idx):
+
       next_pos = jnp.full((1, 1), true_lengths[idx], dtype=jnp.int32)
       generated_tokens = jnp.zeros((1, 1), dtype=jnp.int32)
       selected_logits = jax.lax.dynamic_slice(
@@ -770,6 +815,7 @@ class MaxEngine(engine_api.Engine):
           log_prob=token_logp,
           samples_per_slot=1,
       )
+
       return {
           "logits": selected_logits,
           "next_pos": next_pos,
@@ -785,6 +831,7 @@ class MaxEngine(engine_api.Engine):
         prefill_results[k].append(v)
       first_tokens.append(first_token)
     prefill_results = {k: jnp.stack(v) for k, v in prefill_results.items()}
+    prefill_results["prompt_logp"] = prompt_logp
     return cache, prefill_results, first_tokens
 
   # Public non-JIT generate method that updates page state
@@ -796,10 +843,16 @@ class MaxEngine(engine_api.Engine):
       rng: Optional[PRNGKeyType] = None,
   ) -> Tuple[DecodeState, engine_api.ResultTokens]:
     """Public API for generate that updates page state outside JIT."""
-    # Update page state before JIT call
 
+    # Update page state before JIT call
     if self.page_manager is not None and self.page_state is not None:
       self.page_state = self.page_manager.update_decode_pages(self.page_state)
+
+    # Sample rng before JIT call
+    if rng is None:
+      if self.rng is None:
+        self.rng = jax.random.PRNGKey(0)
+      self.rng, rng = jax.random.split(self.rng)
 
     # Call JIT-compiled version with current state
     new_state, result = self._generate_jit(
@@ -810,7 +863,7 @@ class MaxEngine(engine_api.Engine):
         rng=rng,
     )
 
-    return new_state, result
+    return max_utils.unbox_logicallypartioned(new_state), result
 
   @functools.partial(jax.jit, static_argnums=(0,), donate_argnums=(2,))
   def _generate_jit(
@@ -823,8 +876,6 @@ class MaxEngine(engine_api.Engine):
       page_state: Optional[PageState] = None,
   ) -> Tuple[DecodeState, engine_api.ResultTokens]:
     """Run one generate step"""
-    if rng is None:
-      rng = jax.random.PRNGKey(0)
 
     previous_token = decode_state["tokens"]
     rng, new_rng = jax.random.split(rng)
@@ -835,7 +886,7 @@ class MaxEngine(engine_api.Engine):
           previous_token,
           decode_state["next_pos"],
           enable_dropout=False,
-          model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
+          model_mode=MODEL_MODE_AUTOREGRESSIVE,
           rngs={"params": new_rng},
           mutable=["cache"],
           page_state=page_state,
@@ -843,9 +894,10 @@ class MaxEngine(engine_api.Engine):
     out_logits = jax.lax.with_sharding_constraint(out_logits, self.replicated_sharding)
     new_cache = jax.lax.with_sharding_constraint(new_vars["cache"], self.kv_cache_shardings)
     # sampling tokens
+    rng, new_rng = jax.random.split(rng)
     new_token = inference_utils.sampling(
         out_logits,
-        rng,
+        new_rng,
         self.config.decode_sampling_strategy,
         topk=self.config.decode_sampling_top_k,
         nucleus_topp=self.config.decode_sampling_nucleus_p,
@@ -856,8 +908,13 @@ class MaxEngine(engine_api.Engine):
       token_logp = inference_utils.log_prob_of_chosen_token(out_logits, new_token)
     else:
       token_logp = None
+
+    # Increment index by 1 as prefill returns first token
+    next_pos = decode_state["next_pos"] + 1
+    generated_tokens = decode_state["generated_tokens"] + 1
+
     result = engine_api.ResultTokens(
-        data=jnp.concatenate((new_token, all_valid, decode_state["generated_tokens"]), axis=1),
+        data=jnp.concatenate((new_token, all_valid, generated_tokens), axis=1),
         # Tokens are shape [batch, speculations], so when we concatenate
         # tokens, validity and length along their index 1 dimension then they
         # occupy 0:speculations.
@@ -873,8 +930,8 @@ class MaxEngine(engine_api.Engine):
     return {
         "logits": out_logits,
         "cache": new_cache,
-        "next_pos": decode_state["next_pos"] + 1,
-        "generated_tokens": decode_state["generated_tokens"] + 1,
+        "next_pos": next_pos,
+        "generated_tokens": generated_tokens,
         "tokens": new_token,
     }, result
 
@@ -1326,25 +1383,17 @@ class MaxEngine(engine_api.Engine):
     # pylint: disable=unused-argument
     def init(abstract_params, page_state):
       x = jnp.ones(
-          (int(self.config.per_device_batch_size * jax.device_count()), 1),
+          (int(self.config.per_device_batch_size * self.mesh.size), 1),
           dtype=jnp.int32,
       )
-      dummy_image = jnp.ones(
-          (
-              int(self.config.per_device_batch_size * jax.device_count()),
-              maxtext_utils.NUM_IMAGES_PER_SEQUENCE,
-              self.config.image_size_for_vit,
-              self.config.image_size_for_vit,
-              maxtext_utils.NUM_IMAGE_CHANNELS,
-          ),
-      )
+      dummy_image = jnp.ones(maxtext_utils.get_dummy_image_shape_for_init(self.config), dtype=jnp.int32)
       _, cache = self.model.apply(
           abstract_params,
           x,
           x,
           encoder_images=dummy_image if self.config.use_multimodal else None,
           enable_dropout=False,
-          model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
+          model_mode=MODEL_MODE_AUTOREGRESSIVE,
           rngs={"params": rng},
           mutable=["cache"],
           page_state=page_state,
@@ -1352,21 +1401,21 @@ class MaxEngine(engine_api.Engine):
       )
 
       next_pos = jnp.zeros(
-          (int(self.config.per_device_batch_size * jax.device_count()), 1),
+          (int(self.config.per_device_batch_size * self.mesh.size), 1),
           dtype=jnp.int32,
       )
       generated_tokens = jnp.zeros(
-          (int(self.config.per_device_batch_size * jax.device_count()), 1),
+          (int(self.config.per_device_batch_size * self.mesh.size), 1),
           dtype=jnp.int32,
       )
       tokens = jnp.zeros(
-          (int(self.config.per_device_batch_size * jax.device_count()), 1),
+          (int(self.config.per_device_batch_size * self.mesh.size), 1),
           dtype=jnp.int32,
       )
       return {
           "logits": jnp.zeros(
               (
-                  int(self.config.per_device_batch_size * jax.device_count()),
+                  int(self.config.per_device_batch_size * self.mesh.size),
                   1,
                   self.config.vocab_size,
               )
@@ -1406,7 +1455,7 @@ class MaxEngine(engine_api.Engine):
   @property
   def max_concurrent_decodes(self) -> int:
     """Free slots."""
-    return int(self.config.per_device_batch_size * jax.device_count())
+    return int(self.config.per_device_batch_size * self.mesh.size)
 
   @property
   def max_prefill_length(self) -> int:

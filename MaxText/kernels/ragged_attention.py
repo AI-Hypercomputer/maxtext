@@ -25,14 +25,8 @@ from jax import lax
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 import jax.numpy as jnp
-from jax.experimental import shard_map
 
-from MaxText import common_types
-
-
-BATCH = common_types.BATCH
-DEFAULT_MASK_VALUE = common_types.DEFAULT_MASK_VALUE
-shard_map = shard_map.shard_map
+from MaxText.common_types import DEFAULT_MASK_VALUE
 
 
 def get_mha_cost_estimate(shape_dtype):
@@ -278,7 +272,7 @@ def ragged_mqa(
           ],
           grid=(batch_size, seq_len // block_size),
       ),
-      compiler_params=pltpu.TPUCompilerParams(dimension_semantics=("parallel", "arbitrary")),
+      compiler_params=pltpu.CompilerParams(dimension_semantics=("parallel", "arbitrary")),
       out_shape=[
           jax.ShapeDtypeStruct((batch_size, num_heads, head_dim), jnp.float32),
           jax.ShapeDtypeStruct((batch_size, num_heads, head_dim), jnp.float32),

@@ -14,11 +14,17 @@
 """ Evaluation script based on MLPerf requirements"""
 
 import argparse
-from transformers import AutoTokenizer, LlamaTokenizer
-import nltk
-import evaluate
-import numpy as np
 import json
+
+from transformers import AutoTokenizer, LlamaTokenizer
+
+import nltk
+
+import evaluate
+
+import numpy as np
+
+import pandas as pd
 
 
 def get_args():
@@ -33,8 +39,6 @@ def get_args():
 
 
 def get_groundtruth(processed_dataset_file):
-  import pandas as pd
-
   data = pd.read_pickle(processed_dataset_file)
   ground_truths = data["output"]
   return ground_truths

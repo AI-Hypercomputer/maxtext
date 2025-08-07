@@ -18,6 +18,8 @@ limitations under the License.
 import datetime
 import jax
 import json
+import os
+import sys
 
 from absl import app
 from collections.abc import MutableMapping
@@ -28,6 +30,7 @@ from MaxText import maxtext_utils
 from MaxText import prefill_packing
 from MaxText import profiler
 from MaxText import pyconfig
+from MaxText.utils import gcs_utils
 
 import warnings
 
@@ -115,8 +118,10 @@ def prefill_insert_benchmark_loop(
   prof = profiler.Profiler(config)
   prof.activate(optional_postfix=profile_name)
   start = datetime.datetime.now()
+  rng = jax.random.PRNGKey(1234)
+  rng, _ = jax.random.split(rng)
   for i in range(iters):
-    _, decode_state = engine_insert(params, tokens, int(i % total_slots), true_length, decode_state)
+    _, decode_state = engine_insert(params, tokens, int(i % total_slots), true_length, decode_state, rng)
   jax.block_until_ready(decode_state)
   end = datetime.datetime.now()
   prof.deactivate()
@@ -125,8 +130,10 @@ def prefill_insert_benchmark_loop(
 
 def prefill_insert_benchmark(config, engine_insert, decode_state, params, total_slots, tokens, true_length, iters):
   """Handles warmup, running insert benchmark, and printing results."""
+  rng = jax.random.PRNGKey(1234)
+  rng, _ = jax.random.split(rng)
   for i in range(_WARMUP_ITERS):
-    _, decode_state = engine_insert(params, tokens, int(i % total_slots), true_length, decode_state)
+    _, decode_state = engine_insert(params, tokens, int(i % total_slots), true_length, decode_state, rng)
   jax.block_until_ready(decode_state)
 
   print(f"Prefill and insert benchmark results for length {tokens.size}:\n")
@@ -223,6 +230,11 @@ def write_results(results, filename, flatten_microbenchmark_results):
     with open(filename, "wt", encoding="utf-8") as f:
       json.dump(results, f, indent=2)
   return results
+
+
+def upload_results_to_gcs(results_file_name, destination_gcs_name):
+  """Upload the results file to destination GCS bucket."""
+  gcs_utils.upload_blob(destination_gcs_name, results_file_name)
 
 
 def print_results_for_analyze(results):
@@ -403,12 +415,25 @@ def run_benchmarks(config):
         filename=config.inference_microbenchmark_log_file_path,
         flatten_microbenchmark_results=_FLATTEN_MICROBENCHMARK_RESULTS,
     )
+  if config.gcs_metrics:
+    metrics_filename = f"{config.run_name}_results.txt"
+    write_results(
+        results,
+        filename=metrics_filename,
+        flatten_microbenchmark_results=_FLATTEN_MICROBENCHMARK_RESULTS,
+    )
+    gcs_filename = os.path.join(config.base_output_directory, metrics_filename)
+    upload_results_to_gcs(metrics_filename, gcs_filename)
   return results
 
 
-def main(config, **kwargs):
+def run_benchmarks_with_unsafe_rbg(config, **kwargs):
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
   return run_benchmarks(pyconfig.initialize(config, **kwargs))
+
+
+def main(config, **kwargs):
+  json.dump(run_benchmarks_with_unsafe_rbg(config, **kwargs), sys.stdout)
 
 
 if __name__ == "__main__":

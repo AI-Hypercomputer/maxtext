@@ -53,6 +53,9 @@ done
 if [[ -z ${BASE_OUTPUT_DIRECTORY} ]] ; then
     export BASE_OUTPUT_DIRECTORY="/tmp/maxtext"
 fi
+if [[ -z ${INFERENCE_LOG_FILE_PATH} ]] ; then
+    export INFERENCE_LOG_FILE_PATH="${BASE_OUTPUT_DIRECTORY}/microbenchmark_llama2-70b_h100-8_results.txt"
+fi
 if [[ -z ${MAXENGINE_CONFIG_FILEPATH} ]] ; then
     MAXENGINE_CONFIG_FILEPATH="$(dirname $0)/../../configs/inference.yml"
 fi
@@ -82,6 +85,9 @@ PROFILER_STR=""
 if [[ "$enable_profiler" = true ]] ; then
     PROFILER_STR=" profiler=xplane"
 fi
+if [[ -z ${GCS_METRICS} ]] ; then
+    GCS_METRICS=False
+fi
 
 # Get max prefill length
 IFS=',' read -r -a prefill_lengths_arr <<< "$PREFILL_LENGTHS"
@@ -110,6 +116,7 @@ python3 -m MaxText.inference_microbenchmark $MAXENGINE_CONFIG_FILEPATH  \
     inference_microbenchmark_prefill_lengths=$PREFILL_LENGTHS  \
     inference_microbenchmark_stages=$stages \
     inference_microbenchmark_loop_iters=64 \
+    inference_microbenchmark_log_file_path=$INFERENCE_LOG_FILE_PATH \
     run_name=$run_name \
     ici_fsdp_parallelism=1 \
     ici_autoregressive_parallelism=$AUTOREGRESSIVE_PARALLELISM \
@@ -117,4 +124,5 @@ python3 -m MaxText.inference_microbenchmark $MAXENGINE_CONFIG_FILEPATH  \
     weight_dtype=bfloat16 \
     kv_quant_dtype=$KV_QUANT_DTYPE \
     quantize_kvcache=$QUANTIZE_KVCACHE \
-    quantization=$QUANTIZATION$PROFILER_STR
+    quantization=$QUANTIZATION$PROFILER_STR \
+    gcs_metrics=$GCS_METRICS 

@@ -45,7 +45,6 @@ from MaxText import pyconfig
 from MaxText.layers import models
 from MaxText.layers import quantizations
 from MaxText.utils import gcs_utils
-from MaxText.input_pipeline import input_pipeline_interface
 
 # pylint: disable=too-many-positional-arguments
 
@@ -158,9 +157,12 @@ def main(argv: Sequence[str]) -> None:
   # Get shaped inputs
   shaped_train_args, shaped_train_kwargs, state_mesh_shardings, model = get_shaped_inputs(topology_mesh, config)
 
+  # Get data sharding
+  data_sharding = maxtext_utils.get_input_data_sharding(config, topology_mesh)
+
   # Get function to compile and shardings
   func_to_compile, in_shard, out_shard, static_argnums, donate_argnums = maxtext_utils.get_functional_train_with_signature(
-      train.train_step, topology_mesh, state_mesh_shardings, model, config
+      train.train_step, data_sharding, state_mesh_shardings, model, config
   )
 
   # Compile

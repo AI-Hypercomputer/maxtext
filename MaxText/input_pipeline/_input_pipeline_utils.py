@@ -27,6 +27,7 @@ import numpy as np
 import tensorflow as tf
 from MaxText import max_logging
 from MaxText import tokenizer
+from MaxText import multimodal_utils
 
 Features = Dict[str, tf.Tensor]
 AUTOTUNE = tf.data.experimental.AUTOTUNE
@@ -68,6 +69,37 @@ def add_segmentation_and_position(x, data_columns, padding_token=0):
 ########## Functions used by HF pipeline
 
 
+def reformat_prompt(example, column, image_placeholder, model_name):
+  """reformat prompt for multimodal SFT"""
+  example[column] = multimodal_utils.reformat_prompt(example[column], image_placeholder, model_name)
+  return example
+
+
+def reformat_response(example, column, model_name):
+  """reformat response for multimodal SFT"""
+  example[column] = multimodal_utils.reformat_response(example[column], model_name)
+  return example
+
+
+def pre_process_image_sft(example, image_column, model_name):
+  """pre-process image for multimodal SFT"""
+  image = multimodal_utils.convert_to_RGB(example[image_column])
+  # TODO(aireenmei, hengtaoguo): add support for different image sizes
+  image = multimodal_utils.resize_image(image, model_name)
+  image = np.array(image)
+  example[image_column] = multimodal_utils.pre_process_image(image, model_name)
+  return example
+
+
+def prepare_text_for_image_fusion(example, column_name, model_name):
+  """prepare text for image fusion for multimodal SFT"""
+  example[column_name] = multimodal_utils.prepare_text_for_image_fusion(
+      example[column_name], model_name, processor_output=example["images"]
+  )
+  example["images"] = example["images"].pixel_values
+  return example
+
+
 def combine_columns(example, columns, data_column):
   """Combine columns such as 'prompt' and 'completion' for sft training"""
   assert len(columns) > 1
@@ -94,25 +126,55 @@ def is_conversational(features, data_columns):
   """
   for column in data_columns:
     messages = features[column]
-    if isinstance(messages, list):
-      if isinstance(messages[0], dict) and "role" in messages[0] and "content" in messages[0]:
+    if isinstance(messages, datasets.Sequence):
+      if isinstance(messages.feature, dict) and "role" in messages.feature and "content" in messages.feature:
         return True
 
   return False
 
 
-def extract_messages_and_mask(example, data_column_name):
-  """For sft training, we will have a column containing all the message contents,
-  and the 'is_prompt' column indicating whether each message is prompt or not."""
+def apply_chat_template(example, tokenizer_model, data_column_name):
+  """Formats conversational data by applying the tokenizer's chat template
+  and identifying prompt/completion segments.
+
+  Args:
+    example: A dictionary containing conversational data. It is expected to have a key
+      specified by `data_column_name` that holds a list of messages.
+    tokenizer_model: The tokenizer instance associated with the language model,
+      which contains the specific chat template.
+    data_column_name: The name of the column in the `example` dictionary
+      that contains the list of messages.
+
+  Returns:
+    The modified `example` dictionary.
+      - The `data_column_name` column will be updated to a list of
+        messages, each formatted according to the tokenizer's chat template.
+      - A new column named "is_prompt" will be added, where `True`
+        indicates a user message (prompt) and `False` indicates an assistant
+        message (completion).
+  """
   messages = []
   is_prompt = []
-  for x in example[data_column_name]:
-    if x["role"] == "user":
-      messages.append("<user>" + x["content"] + "</user>")
-      is_prompt.append(True)
-    elif x["role"] == "assistant":
-      messages.append("<assistant>" + x["content"] + "</assistant>")
-      is_prompt.append(False)
+  prompt = None
+  try:
+    for message in example[data_column_name]:
+      if message["role"] == "user":
+        prompt = message
+        prompt_in_chat_template = tokenizer_model.apply_chat_template([prompt], add_generation_prompt=False, tokenize=False)
+        messages.append(prompt_in_chat_template)
+        is_prompt.append(True)
+      elif message["role"] == "assistant":
+        prompt_completion_tokens = tokenizer_model.apply_chat_template(
+            [prompt, message], add_generation_prompt=False, tokenize=True
+        )
+        prompt_tokens = tokenizer_model.apply_chat_template([prompt], add_generation_prompt=False, tokenize=True)
+        completion_tokens = prompt_completion_tokens[len(prompt_tokens) :]
+        completion_in_chat_template = tokenizer_model.decode(completion_tokens, skip_special_tokens=False)
+        messages.append(completion_in_chat_template)
+        is_prompt.append(False)
+  except ValueError as e:
+    max_logging.log(f"Unable to apply chat template: {e}")
+    raise e
   example["is_prompt"] = is_prompt
   example[data_column_name] = messages
   return example
@@ -136,34 +198,49 @@ class SFTPromptMasking(grain.MapTransform):
   For targets, if train on completion only, the prompt will be masked by unk_id. Otherwise the same as inputs.
   """
 
-  def __init__(
-      self, text_column_name, completion_only, max_target_length, add_bos, add_eos, bos_id=None, eos_id=None, unk_id=0
-  ):
+  def __init__(self, text_column_name, completion_only, max_target_length, unk_id=0):
     self.text_column_name = text_column_name
     self.completion_only = completion_only
     self.max_target_length = max_target_length
-    self.add_bos = add_bos
-    self.add_eos = add_eos
-    if self.add_bos:
-      self.bos_id = bos_id
-    if self.add_eos:
-      self.eos_id = eos_id
     self.unk_id = unk_id
 
   def map(self, element):
+    """
+    Maps a single dataset element to an SFT training instance.
+    It concatenates the prompt and completion to form the `inputs` sequence.
+    For the `targets` sequence:
+    - If `self.completion_only` is `True`, the prompt portion of the
+      concatenated sequence is masked using `self.unk_id`.
+    - If `self.completion_only` is `False`, the target sequence is
+      identical to the input sequence.
+    """
     inputs, targets = [], []
     for i, text in enumerate(element[self.text_column_name]):
       inputs += text
       targets += [self.unk_id] * len(text) if self.completion_only and element["is_prompt"][i] else text
-    if self.add_bos:
-      inputs = [self.bos_id] + inputs
-      targets = [self.bos_id] + targets
-    if self.add_eos:
-      inputs += [self.eos_id]
-      targets += [self.eos_id]
     return {
         "inputs": np.asarray(inputs[: self.max_target_length], dtype=np.int32),
         "targets": np.asarray(targets[: self.max_target_length], dtype=np.int32),
+    }
+
+
+@dataclasses.dataclass
+class SFTPromptMaskingVision(grain.MapTransform):
+  """SFT prompt masking for multimodal"""
+
+  def __init__(self, query_column, response_column, max_target_length, unk_id):
+    self.query_column = query_column
+    self.response_column = response_column
+    self.max_target_length = max_target_length
+    self.unk_id = unk_id
+
+  def map(self, element):
+    inputs = np.concatenate((element[self.query_column], element[self.response_column]))
+    targets = np.concatenate((np.asarray([self.unk_id] * len(element[self.query_column])), element[self.response_column]))
+    return {
+        "inputs": np.asarray(inputs[: self.max_target_length], dtype=np.int32),
+        "targets": np.asarray(targets[: self.max_target_length], dtype=np.int32),
+        "images": element["images"],
     }
 
 
@@ -221,6 +298,7 @@ class HFDataSource(grain.RandomAccessDataSource):
       self.n_shards = self.dataloading_host_count * self.num_threads
 
   def _update_shard(self, idx):
+    """update shard"""
     new_shard = self.dataset_shards[idx] + self.dataloading_host_count * self.num_threads
     if new_shard < self.n_shards:
       max_logging.log(f"Updating host {self.dataloading_host_index} dataset {idx}, was on shard {self.dataset_shards[idx]}")
@@ -306,7 +384,7 @@ class NormalizeFeatures(grain.MapTransform):
 
 @dataclasses.dataclass
 class Rekey(grain.MapTransform):
-  """Rname keys according to a mappign dict"""
+  """Rename keys according to a mapping dict"""
 
   def __init__(self, mapping_dict, keep_old_keys=False):
     self.mapping_dict = mapping_dict
@@ -360,7 +438,7 @@ class PadOrTrimToMaxLength(grain.MapTransform):
     for data_column in data_columns:
       element[f"{data_column}_segmentation"] = (element[data_column] != 0).astype(np.int32)
       element[f"{data_column}_position"] = np.arange(element[data_column].shape[0], dtype=np.int32)
-      element[f"{data_column}_true_length"] = np.array(element[data_column].shape[0], dtype=np.int32)
+      element[f"{data_column}_true_length"] = np.array([element[data_column].shape[0]], dtype=np.int32)
     for key, _ in element.items():
       if "true_length" not in key:
         element[key] = _pad(element[key], self.max_length)
@@ -387,10 +465,12 @@ class PadToMaxLength(grain.MapTransform):
 
     data_columns = list(element.keys())
     for data_column in data_columns:
-      element[f"{data_column}_segmentation"] = (element[data_column] != self.pad_id).astype(np.int32)
-      element[f"{data_column}_position"] = np.arange(element[data_column].shape[0], dtype=np.int32)
+      if data_column != "images":
+        element[f"{data_column}_segmentation"] = (element[data_column] != self.pad_id).astype(np.int32)
+        element[f"{data_column}_position"] = np.arange(element[data_column].shape[0], dtype=np.int32)
     for key, _ in element.items():
-      element[key] = _pad(element[key], self.max_length, self.pad_id)
+      if key != "images":
+        element[key] = _pad(element[key], self.max_length, self.pad_id)
     return element
 
 
