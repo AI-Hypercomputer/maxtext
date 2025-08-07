@@ -16,6 +16,7 @@ from jax import numpy as jnp
 from jax.sharding import Mesh
 
 from flax import nnx
+from flax import linen
 from MaxText.common_types import Config
 from MaxText.layers import quantizations, nnx_wrappers
 from MaxText.layers.initializers import variable_to_logically_partitioned
@@ -24,16 +25,6 @@ from MaxText import max_logging
 
 from typing import Any, Optional
 # pytype: disable=attribute-error
-
-
-def set_attrs_from_kwargs(obj, kwargs, *, skip_if_exists: bool = True, warn_on_skip: bool = False):
-  for key, value in kwargs.items():
-    if skip_if_exists and hasattr(obj, key):
-      if warn_on_skip:
-        max_logging.log(f"Skip overriding existing attribute {key} with value {value} in {obj.__class__.__name__}")
-      continue
-    setattr(obj, key, value)
-
 
 class SimpleDecoderLayer(nnx.Module):
   """Decoder layer consisting of a single [embed, embed] weight matrix."""
@@ -59,8 +50,6 @@ class SimpleDecoderLayer(nnx.Module):
 
     self.weight_mat = nnx.Param(init_fn(self.rngs.params(), (self.config.emb_dim, self.config.emb_dim), self.weight_dtype), )
 
-    set_attrs_from_kwargs(self, kwargs, skip_if_exists=True, warn_on_skip=True)
-
   def __call__(
       self, inputs: jnp.ndarray, positions, segmentation, deterministic, model_mode, previous_chunk=None, page_state=None
   ):
@@ -69,13 +58,24 @@ class SimpleDecoderLayer(nnx.Module):
     return inputs @ self.weight_mat.astype(inputs.dtype)
 
 
-def simple_decoder_layer_class():
-  """Creates a SimpleDecoderLayer class."""
-  return nnx_wrappers.to_linen_class(
-      SimpleDecoderLayer,
-      metadata_fn=variable_to_logically_partitioned,
-  )
+class SimpleDecoderLayerWrapper(linen.Module):
+  """A Linen wrapper for the NNX SimpleDecoderLayer"""
 
+  config: Config
+  mesh: Mesh
+  quant: Quant | None = None
+
+  @linen.compact
+  def __call__(self, *args, **kwargs):
+    """Call the underlying NNX layer"""
+    layer = nnx_wrappers.to_linen(
+      SimpleDecoderLayer,
+      config=self.config,
+      mesh=self.mesh,
+      quant=self.quant,
+      metadata_fn=variable_to_logically_partitioned,
+    )
+    return layer(*args, **kwargs)
 
 def simple_decoder_layer(
     *,
@@ -125,7 +125,6 @@ class SimpleMlpDecoderLayer(nnx.Module):
 
     self.ff_2 = nnx.Param(init_ff2_fn(self.rngs.params(), (self.config.mlp_dim, self.config.emb_dim), self.weight_dtype), )
 
-    set_attrs_from_kwargs(self, kwargs, skip_if_exists=True, warn_on_skip=True)
 
   def __call__(
       self,
@@ -145,30 +144,21 @@ class SimpleMlpDecoderLayer(nnx.Module):
     else:
       return output
 
+class SimpleMlpDecoderLayerWrapper(linen.Module):
+  """A Linen wrapper for the NNX SimpleMlpDecoderLayer"""
 
-def simple_mlp_decoder_layer_class():
-  """Creates a SimpleMlpDecoderLayer class."""
-  return nnx_wrappers.to_linen_class(
+  config: Config
+  mesh: Mesh
+  quant: Quant | None = None
+
+  @linen.compact
+  def __call__(self, *args, **kwargs):
+    """Call the underlying NNX layer"""
+    layer = nnx_wrappers.to_linen(
       SimpleMlpDecoderLayer,
+      config=self.config,
+      mesh=self.mesh,
+      quant=self.quant,
       metadata_fn=variable_to_logically_partitioned,
-  )
-
-
-def simple_mlp_decoder_layer(
-    *,
-    config: Config,
-    mesh: Mesh,
-    name: Optional[str] = None,
-    quant: Optional[Quant] = None,
-    **kwargs: Any,
-):
-  """Creates a SimpleMlpDecoderLayer object."""
-  return nnx_wrappers.to_linen(
-      SimpleMlpDecoderLayer,
-      config=config,
-      mesh=mesh,
-      name=name,
-      quant=quant,
-      **kwargs,
-      metadata_fn=variable_to_logically_partitioned,
-  )
+    )
+    return layer(*args, **kwargs)
