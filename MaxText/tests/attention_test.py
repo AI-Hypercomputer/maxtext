@@ -1036,8 +1036,11 @@ class MLATest(parameterized.TestCase):
       "qk_rope_head_dim": 64,
       "v_head_dim": 192,
   }
-  rng = jax.random.PRNGKey(0)
-  nnx_rng = nnx.Rngs(params=0, dropout=jax.random.PRNGKey(42))
+
+  def setUp(self):
+    """Initializes the configuration for each test"""
+    self.rng = jax.random.PRNGKey(0)
+    self.nnx_rng = nnx.Rngs(params=0, dropout=jax.random.PRNGKey(42))
 
   def init_mla(self, config_arguments, rope_type):
     """Helper function to initialize MLA with different model names."""
