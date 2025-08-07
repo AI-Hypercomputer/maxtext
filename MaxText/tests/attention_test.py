@@ -282,6 +282,7 @@ class AttentionTest(parameterized.TestCase):
   }
 
   def setUp(self):
+    """Initializes the configuration for each test"""
     super().setUp()
     config = pyconfig.initialize(
         [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
@@ -602,8 +603,6 @@ class AttentionTest(parameterized.TestCase):
     )
     devices_array_cp = maxtext_utils.create_device_mesh(cfg_cp)
     mesh_cp = Mesh(devices_array_cp, cfg_cp.mesh_axes)
-    dummy_inputs_q = jnp.ones((self.global_batch_size, self.max_target_length, self.embed_dim))
-    dummy_inputs_kv = jnp.ones((self.global_batch_size, self.max_target_length, self.embed_dim))
     attention_as_mha_flash_cp = Attention(
         config=cfg_cp,
         num_query_heads=cfg_cp.num_query_heads,
@@ -611,8 +610,8 @@ class AttentionTest(parameterized.TestCase):
         head_dim=cfg_cp.head_dim,
         max_target_length=cfg_cp.max_target_length,
         max_prefill_predict_length=cfg_cp.max_prefill_predict_length,
-        inputs_q_shape=dummy_inputs_q.shape,
-        inputs_kv_shape=dummy_inputs_kv.shape,
+        inputs_q_shape=lnx.shape,
+        inputs_kv_shape=lnx.shape,
         mesh=mesh_cp,
         attention_kernel="flash",
         dtype=self.dtype,
@@ -1030,6 +1029,7 @@ class MLATest(parameterized.TestCase):
       "max_target_length": 128,
       "max_prefill_predict_length": 16,
       "attention_type": attentions.AttentionType.MLA.value,
+      "head_dim": 192,
       "q_lora_rank": 10,
       "kv_lora_rank": 20,
       "qk_nope_head_dim": 128,
@@ -1264,15 +1264,13 @@ class MLATest(parameterized.TestCase):
     )
     devices_array_cp = maxtext_utils.create_device_mesh(cfg_cp)
     mesh_cp = Mesh(devices_array_cp, cfg_cp.mesh_axes)
-    dummy_inputs_q = jnp.ones((cfg_cp.global_batch_size_to_train_on, cfg_cp.max_target_length, cfg_cp.base_emb_dim))
-    dummy_inputs_kv = jnp.ones((cfg_cp.global_batch_size_to_train_on, cfg_cp.max_target_length, cfg_cp.base_emb_dim))
     attention_as_mla_flash_cp = MLA(
         config=cfg_cp,
         num_query_heads=cfg_cp.num_query_heads,
         num_kv_heads=cfg_cp.num_kv_heads,
         head_dim=cfg_cp.head_dim,
-        inputs_q_shape=dummy_inputs_q.shape,
-        inputs_kv_shape=dummy_inputs_kv.shape,
+        inputs_q_shape=lnx.shape,
+        inputs_kv_shape=lnx.shape,
         max_target_length=cfg_cp.max_target_length,
         max_prefill_predict_length=cfg_cp.max_prefill_predict_length,
         mesh=mesh_cp,
