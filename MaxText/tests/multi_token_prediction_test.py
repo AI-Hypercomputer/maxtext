@@ -142,7 +142,6 @@ class MTPBlockTestModel(nn.Module):
         mesh=self.mesh,
         name="mtp_block",
         transformer_layer_module=DecoderLayer,
-        decoder=self.decoder,
     )
 
   def __call__(

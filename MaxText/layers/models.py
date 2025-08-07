@@ -74,7 +74,7 @@ class Transformer(nn.Module):
       # By convention, this is the last layer in the list.
       mtp_layer = layer_types[-1]
       self.mtp_block = MultiTokenPredictionBlock(
-          config=self.config, mesh=self.mesh, name="mtp_block", transformer_layer_module=mtp_layer, decoder=self.decoder
+          config=self.config, mesh=self.mesh, name="mtp_block", transformer_layer_module=mtp_layer
       )
 
   def __call__(
@@ -150,6 +150,7 @@ class Transformer(nn.Module):
     # Its only effect is to "sow" these losses; it does not alter the primary logits output.
     if self.config.mtp_num_layers > 0:
       self.mtp_block(
+          shared_embedding=self.shared_embedding,
           main_hidden_state=hidden_state,
           input_ids=decoder_input_tokens,
           target_ids=decoder_target_tokens,
@@ -215,7 +216,9 @@ class TransformerNNX(nnx.Module):
       # By convention, this is the last layer in the list.
       mtp_layer = layer_types[-1]
       mtp_block_linen = MultiTokenPredictionBlock(
-          config=self.config, mesh=self.mesh, name="mtp_block", transformer_layer_module=mtp_layer, decoder=decoder_linen
+          config=self.config,
+          mesh=self.mesh,
+          name="mtp_block",
       )
       self.mtp_block = nnx_wrappers.ToNNX(mtp_block_linen, rngs=rngs)
       self.mtp_block.lazy_init(
@@ -306,6 +309,7 @@ class TransformerNNX(nnx.Module):
     # Its only effect is to "sow" these losses; it does not alter the primary logits output.
     if self.config.mtp_num_layers > 0:
       self.mtp_block(
+          shared_embedding=self.token_embedder,
           main_hidden_state=hidden_state,
           input_ids=decoder_input_tokens,
           target_ids=decoder_target_tokens,

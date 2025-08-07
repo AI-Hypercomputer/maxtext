@@ -16,6 +16,7 @@ limitations under the License.
 
 """JAX implementation of the Multi Token Predicition https://arxiv.org/pdf/2412.19437 """
 
+import functools
 from typing import Optional, Type
 
 import jax
@@ -23,13 +24,23 @@ import jax.numpy as jnp
 from jax.sharding import Mesh
 
 from flax import linen as nn
+from flax import nnx
 
-from MaxText.common_types import Config, MODEL_MODE_TRAIN
+from MaxText.common_types import (
+    MODEL_MODE_AUTOREGRESSIVE,
+    MODEL_MODE_PREFILL,
+    Config,
+    DecoderBlockType,
+    MODEL_MODE_TRAIN,
+)
 from MaxText.layers.attentions import dense_general
 from MaxText.layers.normalizations import rms_norm
-from MaxText.layers.decoders import Decoder, DecoderLayer
+from MaxText.layers.decoders import DecoderLayer
 from MaxText import max_utils
 from MaxText import maxtext_utils
+from MaxText.layers import embeddings
+from MaxText.layers import linears
+from MaxText.layers.embeddings import attend_on_embedding
 
 from MaxText.globals import EPS
 
@@ -180,7 +191,123 @@ class MultiTokenPredictionBlock(nn.Module):
   config: Config
   mesh: Mesh
   transformer_layer_module: Type[DecoderLayer]
-  decoder: Decoder
+
+  def get_norm_layer(self, num_features: int):
+    """get normalization layer (return type inherits from nn.Module)"""
+    if self.config.decoder_block in (
+        DecoderBlockType.DEFAULT,
+        DecoderBlockType.LLAMA2,
+        DecoderBlockType.MISTRAL,
+        DecoderBlockType.MIXTRAL,
+        DecoderBlockType.DEEPSEEK,
+        DecoderBlockType.GEMMA,
+        DecoderBlockType.GEMMA2,
+        DecoderBlockType.GEMMA3,
+        DecoderBlockType.QWEN3,
+        DecoderBlockType.SIMPLE,
+        DecoderBlockType.SIMPLE_MLP,
+        DecoderBlockType.LLAMA4,
+    ):
+      return functools.partial(rms_norm, num_features=num_features)
+    elif self.config.decoder_block == DecoderBlockType.GPT3:
+      from MaxText.layers import gpt3  # pylint: disable=import-outside-toplevel
+
+      return functools.partial(gpt3.gpt3_layer_norm, num_features=num_features, reductions_in_fp32=False, use_bias=True)
+    else:
+      raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block.value=}")
+
+  @nn.compact
+  def _apply_embedding(
+      self,
+      shared_embedding: nn.Module | nnx.Module,
+      decoder_input_tokens,
+      decoder_positions,
+      deterministic,
+      model_mode,
+      image_embeddings=None,
+      bidirectional_mask=None,
+  ):
+    """Applies token and positional embeddings to the input tokens."""
+    cfg = self.config
+
+    y = shared_embedding(decoder_input_tokens.astype("int32"), model_mode=model_mode)
+
+    if image_embeddings is not None:
+      raise NotImplementedError("MTP does not support multimodal inputs yet.")
+
+    y = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(y, deterministic=deterministic)
+    y = y.astype(cfg.dtype)
+
+    if cfg.use_untrainable_positional_embedding:
+      y = embeddings.positional_embedding_as_linen(embedding_dims=cfg.base_emb_dim)(y, decoder_positions)
+
+    if cfg.trainable_position_size > 0:
+      y += embeddings.embed_as_linen(
+          num_embeddings=cfg.trainable_position_size,
+          num_features=cfg.emb_dim,
+          dtype=cfg.dtype,
+          embedding_init=nn.initializers.normal(stddev=1.0),
+          name="position_embedder",
+          config=cfg,
+      )(decoder_positions, model_mode=model_mode)
+    return y
+
+  @nn.compact
+  def _apply_output_head(self, shared_embedding: nn.Module | nnx.Module, y, deterministic, model_mode):
+    """Applies final normalization and projects hidden states to logits."""
+    cfg = self.config
+    y = self.get_norm_layer(num_features=y.shape[-1])(
+        dtype=cfg.dtype,
+        weight_dtype=cfg.weight_dtype,
+        name="mtp_output_norm",
+        epsilon=cfg.normalization_layer_epsilon,
+        kernel_axes=("norm",),
+        parameter_memory_host_offload=cfg.parameter_memory_host_offload,
+    )(y)
+    y = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(y, deterministic=deterministic)
+
+    # [batch, length, emb_dim] -> [batch, length, vocab_size]
+    if cfg.logits_via_embedding:
+      # Use the transpose of embedding matrix for logit transform.
+      if isinstance(shared_embedding, nnx.Module):
+        embedding_table = shared_embedding.embedding.value
+      else:
+        embedding_table = shared_embedding.variables["params"]["embedding"]
+      if isinstance(embedding_table, nn.spmd.LogicallyPartitioned):
+        embedding_table = embedding_table.unbox()
+      attend_dtype = jnp.float32 if cfg.logits_dot_in_fp32 else cfg.dtype
+      logits = attend_on_embedding(y, embedding_table, attend_dtype, self.config)
+
+      if self.config.normalize_embedding_logits:
+        # Correctly normalize pre-softmax logits for this shared case.
+        logits = logits / jnp.sqrt(y.shape[-1])
+      if cfg.final_logits_soft_cap:
+        logits = logits / cfg.final_logits_soft_cap
+        logits = jnp.tanh(logits) * cfg.final_logits_soft_cap
+    else:
+      logits = linears.dense_general(
+          inputs_shape=y.shape,
+          out_features_shape=cfg.vocab_size,
+          weight_dtype=cfg.weight_dtype,
+          dtype=jnp.float32 if cfg.logits_dot_in_fp32 else cfg.dtype,  # for logit training stability
+          kernel_axes=("embed", "vocab"),
+          name="logits_dense",
+          matmul_precision=self.config.matmul_precision,
+          parameter_memory_host_offload=cfg.parameter_memory_host_offload,
+      )(
+          y
+      )  # We do not quantize the logits matmul.
+    if model_mode in (MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE):
+      logits = nn.with_logical_constraint(logits, (None, None, "activation_vocab"))
+    else:
+      logits = nn.with_logical_constraint(
+          logits, ("activation_embed_and_logits_batch", "activation_length", "activation_vocab")
+      )
+
+    if self.config.cast_logits_to_fp32:
+      logits = logits.astype(jnp.float32)
+
+    return logits
 
   @nn.compact
   def __call__(
@@ -215,7 +342,7 @@ class MultiTokenPredictionBlock(nn.Module):
       rolled_position_id = roll_and_mask(rolled_position_id)
 
       # Embed the k-th future input tokens using the shared embedding module
-      target_token_embedding = self.decoder._apply_embedding(shared_embedding, rolled_input_ids, rolled_position_id, deterministic, model_mode)
+      target_token_embedding = self._apply_embedding(shared_embedding, rolled_input_ids, rolled_position_id, deterministic, model_mode)
 
       # Instantiate and apply the MTP layer for this step
       mtp_layer = MultiTokenPredictionLayer(
@@ -231,7 +358,7 @@ class MultiTokenPredictionBlock(nn.Module):
       )
 
       # Project to logits using the shared embedding transpose
-      mtp_logits = self.decoder._apply_output_head(shared_embedding, next_mtp_hidden_state, deterministic, model_mode)
+      mtp_logits = self._apply_output_head(shared_embedding, next_mtp_hidden_state, deterministic, model_mode)
 
       # Calculate cross-entropy loss for this specific layer's prediction
       mtp_xent, _ = max_utils.cross_entropy_with_logits(mtp_logits, jax.nn.one_hot(rolled_target_ids, cfg.vocab_size), 0.0)
