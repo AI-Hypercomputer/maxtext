@@ -762,7 +762,6 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
   max_logging.log("Processing self attention")
   for layer_idx in tqdm(range(base_num_decoder_layers), desc="layers", leave=False):
     if is_llama4_model:
-      # e.g., interval=4, layer 11 is sublayer 2 in block 3
       block_layer_idx, block_idx = divmod(layer_idx, layer_cycle_interval)
       stack_shape = (base_num_decoder_layers // layer_cycle_interval,)
       self_attention = jax_weights["decoder"]["layers"][f"layers_{block_idx}"]["self_attention"]
@@ -774,18 +773,28 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
     wq = chkpt_vars[f"layers.{layer_idx}.attention.wq.weight"].to(torch.float32).numpy().astype(CAST_DTYPE).transpose()
     wk = chkpt_vars[f"layers.{layer_idx}.attention.wk.weight"].to(torch.float32).numpy().astype(CAST_DTYPE).transpose()
     wv = chkpt_vars[f"layers.{layer_idx}.attention.wv.weight"].to(torch.float32).numpy().astype(CAST_DTYPE).transpose()
+    w_post = chkpt_vars[f"layers.{layer_idx}.attention.wo.weight"].to(torch.float32).numpy().astype(CAST_DTYPE)
 
-    wq = np.reshape(wq, [base_num_query_heads * head_dim, base_num_query_heads, head_dim])
-    wk = np.reshape(wk, [base_num_query_heads * head_dim, base_num_kv_heads, head_dim])
-    wv = np.reshape(wv, [base_num_query_heads * head_dim, base_num_kv_heads, head_dim])
+    # Conditionally reshape based on the model type
+    if "qwen3" in model_size:
+        # Qwen3 logic: Reshape based on base_emb_dim (4096)
+        wq = np.reshape(wq, [model_params["base_emb_dim"], base_num_query_heads, head_dim])
+        wk = np.reshape(wk, [model_params["base_emb_dim"], base_num_kv_heads, head_dim])
+        wv = np.reshape(wv, [model_params["base_emb_dim"], base_num_kv_heads, head_dim])
+        # The output projection's input is (num_heads * head_dim) and output is base_emb_dim.
+        # After loading, its shape is (base_emb_dim, num_heads * head_dim).
+        w_post = np.reshape(w_post, [model_params["base_emb_dim"], base_num_query_heads, head_dim])
+    else:
+        # logic for Llama/Mistral
+        wq = np.reshape(wq, [base_num_query_heads * head_dim, base_num_query_heads, head_dim])
+        wk = np.reshape(wk, [base_num_query_heads * head_dim, base_num_kv_heads, head_dim])
+        wv = np.reshape(wv, [base_num_query_heads * head_dim, base_num_kv_heads, head_dim])
+        w_post = np.reshape(w_post, [base_num_query_heads * head_dim, base_num_query_heads, head_dim])
+
 
     if model_size[:8] == "llama3.1":
       wq = max_utils.permute_to_match_maxtext_rope(wq)
       wk = max_utils.permute_to_match_maxtext_rope(wk)
-
-    w_post = chkpt_vars[f"layers.{layer_idx}.attention.wo.weight"].to(torch.float32).numpy().astype(CAST_DTYPE)
-
-    w_post = np.reshape(w_post, [base_num_query_heads * head_dim, base_num_query_heads, head_dim])
 
     if self_attention["query"]["kernel"] is None:
       self_attention["query"]["kernel"] = np.zeros(stack_shape + wq.shape, dtype=CAST_DTYPE)
