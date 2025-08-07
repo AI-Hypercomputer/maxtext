@@ -19,16 +19,18 @@ required for generating a MaxText checkpoint compatible with scanned model layer
 Example cmd:
 
 python3 -m MaxText.convert_qwen3_moe_ckpt --base_model_path <path/to/hf/ckpt> \
-    --maxtext_model_path <GCS/path/to/save/new/maxtext/ckpt> --model_size qwen3-moe
+    --maxtext_model_path <path/to/save/new/maxtext/ckpt> --model_size qwen3-moe
 """
 
 import argparse
 import gc
 import os
 import pathlib
+import logging
 
 import numpy as np
 import torch
+import jax
 from safetensors import safe_open
 from tqdm import tqdm
 
@@ -180,7 +182,6 @@ def convert_hf_to_maxtext(base_model_path: str, model_params: dict) -> dict:
     
     moe["gate"]["kernel"] = np.transpose(moe["gate"]["kernel"], axes=(1, 0, 2))
 
-    # Expert weights are already in (expert, layer, ...), which is the desired format. No final transpose needed for them.
     
     gc.collect()
     return maxtext_weights
@@ -188,15 +189,23 @@ def convert_hf_to_maxtext(base_model_path: str, model_params: dict) -> dict:
 
 def main(args):
     """Main function to run the conversion."""
+    # Set up JAX simulated environment
+    os.environ["JAX_PLATFORMS"] = "cpu"
+    os.environ["XLA_FLAGS"] = f"--xla_force_host_platform_device_count={args.simulated_cpu_devices_count}"
+
     if args.model_size not in MODEL_PARAMS_DICT:
         raise ValueError(f"Model size '{args.model_size}' not found in MODEL_PARAMS_DICT.")
+    
+    # Convert checkpoint path to absolute path to satisfy Orbax's requirement.
+    maxtext_model_path = os.path.abspath(args.maxtext_model_path)
+    os.makedirs(maxtext_model_path, exist_ok=True)
 
     model_params = MODEL_PARAMS_DICT[args.model_size]
     max_logging.log(f"Starting conversion for Qwen3-MoE model size: {args.model_size}")
     jax_weights = convert_hf_to_maxtext(args.base_model_path, model_params)
-    max_logging.log(f"Conversion complete. Saving MaxText checkpoint to {args.maxtext_model_path}")
+    max_logging.log(f"Conversion complete. Saving MaxText checkpoint to {maxtext_model_path}")
     llama_or_mistral_ckpt.save_weights_to_checkpoint(
-        args.maxtext_model_path, jax_weights, args.simulated_cpu_devices_count, args.use_ocdbt, args.use_zarr3
+        maxtext_model_path, jax_weights, args.simulated_cpu_devices_count, args.use_ocdbt, args.use_zarr3
     )
     max_logging.log("Checkpoint saved successfully.")
 
@@ -211,5 +220,5 @@ if __name__ == "__main__":
     parser.add_argument("--use-zarr3", type=str2bool, default=True, help="Use Zarr3 format for saving.")
 
     args = parser.parse_args()
-    os.makedirs(args.maxtext_model_path, exist_ok=True)
     main(args)
+
