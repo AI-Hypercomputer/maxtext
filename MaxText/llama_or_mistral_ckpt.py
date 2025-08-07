@@ -187,6 +187,16 @@ MODEL_PARAMS_DICT = {
         "base_mlp_dim": 16384,
         "num_experts": 8,
     },
+    "qwen3-moe-235b-a22b": {
+        "num_layers": 94,
+        "num_heads": 64,
+        "num_kv_heads": 4,
+        "dims_per_head": 128,
+        "vocab": 151936,
+        "num_experts": 128,
+        "base_emb_dim": 4096, # From HF config: hidden_size
+        "base_mlp_dim": 1536, # From HF config: moe_intermediate_size
+    },
 }
 
 llama3_variants = {"llama3.1", "llama3.3"}
@@ -324,6 +334,14 @@ def _hf_to_maxtext_mapping(layer_idx: int = -1, expert_idx: int = -1) -> dict:
       f"language_model.model.layers.{layer_idx}.feed_forward.gate_proj.weight": f"layers.{layer_idx}.feed_forward.w1.weight",
       f"language_model.model.layers.{layer_idx}.feed_forward.up_proj.weight": f"layers.{layer_idx}.feed_forward.w2.weight",
       f"language_model.model.layers.{layer_idx}.feed_forward.down_proj.weight": f"layers.{layer_idx}.feed_forward.w3.weight",
+      # Qwen3 specific query and key norms
+      f"model.layers.{layer_idx}.self_attn.q_norm.weight": f"layers.{layer_idx}.self_attention.q_norm.weight",
+      f"model.layers.{layer_idx}.self_attn.k_norm.weight": f"layers.{layer_idx}.self_attention.k_norm.weight",
+      # Qwen3 MoE MLP layers
+      f"model.layers.{layer_idx}.mlp.gate.weight": f"layers.{layer_idx}.feed_forward.gate.weight",
+      f"model.layers.{layer_idx}.mlp.experts.{expert_idx}.gate_proj.weight": f"layers.{layer_idx}.feed_forward.experts.{expert_idx}.w1.weight",
+      f"model.layers.{layer_idx}.mlp.experts.{expert_idx}.up_proj.weight": f"layers.{layer_idx}.feed_forward.experts.{expert_idx}.w3.weight",
+      f"model.layers.{layer_idx}.mlp.experts.{expert_idx}.down_proj.weight": f"layers.{layer_idx}.feed_forward.experts.{expert_idx}.w2.weight",
   }
 
 
@@ -681,6 +699,8 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
                     "key": {"kernel": None},
                     "value": {"kernel": None},
                     "out": {"kernel": None},
+                    "query_norm": {"scale": None},
+                    "key_norm": {"scale": None},
                 },
             },
             "decoder_norm": {"scale": None},
@@ -846,6 +866,23 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
     layer_weight["post_self_attention_layer_norm"]["scale"] = np.transpose(
         layer_weight["post_self_attention_layer_norm"]["scale"], axes=(1, 0)
     )
+  if "qwen3" in model_size:
+    max_logging.log("Processing Q/K norms for Qwen3")
+    self_attention = jax_weights["decoder"]["layers"]["self_attention"]
+    for layer_idx in tqdm(range(base_num_decoder_layers), desc="q/k norms", leave=False):
+        q_norm_scale = chkpt_vars[f"layers.{layer_idx}.self_attention.q_norm.weight"].type(torch.float32).numpy().astype(CAST_DTYPE)
+        k_norm_scale = chkpt_vars[f"layers.{layer_idx}.self_attention.k_norm.weight"].type(torch.float32).numpy().astype(CAST_DTYPE)
+
+        if self_attention["query_norm"]["scale"] is None:
+            stack_shape = (base_num_decoder_layers,)
+            self_attention["query_norm"]["scale"] = np.zeros(stack_shape + q_norm_scale.shape, dtype=CAST_DTYPE)
+            self_attention["key_norm"]["scale"] = np.zeros(stack_shape + k_norm_scale.shape, dtype=CAST_DTYPE)
+
+        self_attention["query_norm"]["scale"][layer_idx, ...] = q_norm_scale
+        self_attention["key_norm"]["scale"][layer_idx, ...] = k_norm_scale
+
+    self_attention["query_norm"]["scale"] = np.transpose(self_attention["query_norm"]["scale"], axes=(1, 0))
+    self_attention["key_norm"]["scale"] = np.transpose(self_attention["key_norm"]["scale"], axes=(1, 0))
 
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
 
