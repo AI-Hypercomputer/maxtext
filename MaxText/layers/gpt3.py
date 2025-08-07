@@ -448,9 +448,20 @@ class Gpt3DecoderLayer(nnx.Module):
       return layer_output
 
 
-def gpt3_decoder_layer_class() -> nn.Module:
+class Gpt3DecoderLayerWrapper(nn.Module):
   """Creates a Gemma3DecoderLayer Linen module."""
-  return nnx_wrappers.to_linen_class(
+  config: Config
+  mesh: Mesh
+  quant: Quant | None = None
+
+  @nn.compact
+  def __call__(self, *args, **kwargs):
+    """Call the underlying NNX layer"""
+    gpt3_nnx_layer = nnx_wrappers.to_linen(
       Gpt3DecoderLayer,
+      config=self.config,
+      mesh=self.mesh,
+      quant=self.quant,
       metadata_fn=initializers.variable_to_logically_partitioned,
-  )
+    )
+    return gpt3_nnx_layer(*args, **kwargs)
