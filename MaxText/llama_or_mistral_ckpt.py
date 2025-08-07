@@ -628,6 +628,7 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
     with safe_open(ckpt_path, framework="pt", device="cpu") as f:
       for key in f.keys():
         parts = key.split(".")
+        expert = -1
         if is_llama4_model:
           layer = int(parts[3]) if "layers" in key else 0
           # TODO: update when mutli-modality support is added
