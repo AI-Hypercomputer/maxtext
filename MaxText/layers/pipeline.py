@@ -25,6 +25,7 @@ import jax
 import jax.ad_checkpoint
 
 from flax.core import meta
+from flax.core import freeze, meta
 from flax import linen as nn
 
 from MaxText.common_types import Config, MODEL_MODE_TRAIN
@@ -557,6 +558,7 @@ class Pipeline(nn.Module):
 
     partition_spec_with_extra_layer = get_partition_spec(weights)
     partition_spec = {"params": partition_spec_with_extra_layer["params"]["layers"]}
+    #partition_spec = freeze({"params": partition_spec_with_extra_layer["params"]["layers"]})
     return partition_spec
 
   def get_physical_spec_no_fsdp(self, full_logical):
@@ -716,10 +718,11 @@ class Pipeline(nn.Module):
       broadcasted_stage_outpus = jax.lax.broadcast(
           stage_outputs[0], [self.config.micro_batch_size_to_train_on // self.pipeline_microbatch_size]
       )
-      return jnp.reshape(
+      to_ret = jnp.reshape(
           broadcasted_stage_outpus,
           [self.config.micro_batch_size_to_train_on, self.config.max_target_length, self.config.emb_dim],
       )
+      return to_ret, None
 
     if self.config.pipeline_fsdp_ag_once:
       all_pipeline_weights = all_gather_over_fsdp(
@@ -788,4 +791,4 @@ class Pipeline(nn.Module):
         final_output, (self.config.micro_batch_size_to_train_on, self.config.max_target_length, self.config.emb_dim)
     )
 
-    return final_output
+    return final_output, None

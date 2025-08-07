@@ -247,8 +247,8 @@ class Decoder(nn.Module):
       remat_policy = self.get_remat_policy()
 
       # Scan
-
-      in_axes_tuple = (nn.broadcast,) * 4
+      cfg=self.config
+      in_axes_tuple = (nn.broadcast,) * 5
       initializing = self.is_mutable_collection("params")
       params_spec = self.config.param_scan_axis if initializing else ScanIn(cfg.param_scan_axis)
       cache_spec = 0
@@ -269,8 +269,10 @@ class Decoder(nn.Module):
           length=cfg.num_successive_pipelines,
           metadata_params={nn.PARTITION_NAME: "successive_pipelines"},
       )
-      initialized_scan = scan_fn(config=cfg, mesh=self.mesh, layers=self.pipeline_stage_module, remat_policy=self.get_remat_policy())
-      rawr = initialized_scan(y, *broadcast_args, partition_spec=partition_spec)
+      pipeline_stage_module = self.get_pipeline_stage_module(self.decoder_layer)
+      initialized_scan = scan_fn(config=cfg, mesh=self.mesh, layers=pipeline_stage_module, remat_policy=self.get_remat_policy())
+      self.initialized_scan = initialized_scan
+      #rawr = initialized_scan(y, *broadcast_args, partition_spec=partition_spec)
 
 
 
@@ -689,7 +691,10 @@ class Decoder(nn.Module):
             )(y, *broadcast_args)
         y = self.pipeline_module(y, *broadcast_args, partition_spec)
       else:  # Not DeepSeek
-        y = run_successive_pipelines(self.pipeline_modules, y, *broadcast_args, partition_spec)
+        #y = run_successive_pipelines(self.pipeline_modules, y, *broadcast_args, partition_spec)
+        #y = self.initialized_scan(y, *broadcast_args, partition_spec)
+
+        y, _ = self.initialized_scan(y, *broadcast_args, partition_spec)
         remaining_layers = self.config.num_decoder_layers - self.config.pipeline_parallel_layers
         if remaining_layers > 0:
           logical_axis_rules_pp_as_dp = maxtext_utils.logical_axis_rules_pp_act_as_dp(self.config.logical_axis_rules)

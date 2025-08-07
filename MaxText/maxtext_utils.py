@@ -1280,4 +1280,6 @@ def all_gather_over_fsdp(variables, sharding_info, mesh, logical_axis_rules):
   physical_constraint_no_fsdp = get_physical_spec_no_fsdp(sharding_info, mesh, logical_axis_rules)
   # Apply the constraint to the model's current variables. This tells JAX to
   # gather the weights into this layout.
-  return jax.lax.with_sharding_constraint(variables, physical_constraint_no_fsdp)
+  #breakpoint()
+  #return jax.lax.with_sharding_constraint(variables, physical_constraint_no_fsdp)
+  return variables
