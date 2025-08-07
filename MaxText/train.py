@@ -52,7 +52,6 @@ from MaxText import profiler
 from MaxText import pyconfig
 from MaxText.layers.multi_token_prediction import calculate_mtp_acceptance_rate, calculate_mtp_loss
 from MaxText.data_loader import DataLoader
-from MaxText.input_pipeline.input_pipeline_interface import create_data_iterator
 from MaxText.globals import EPS
 from MaxText.metric_logger import MetricLogger
 from MaxText.utils import gcs_utils
@@ -65,7 +64,7 @@ from MaxText.utils.goodput_utils import (
 from MaxText.vertex_tensorboard import VertexTensorboardManager
 # Placeholder: internal
 
-import MaxText as mt
+from MaxText.train_utils import _merge_dpo_state
 # pylint: disable=too-many-positional-arguments
 
 
