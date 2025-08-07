@@ -33,6 +33,7 @@ from safetensors import safe_open
 from tqdm import tqdm
 
 from MaxText import llama_or_mistral_ckpt, max_logging
+from MaxText.inference_utils import str2bool
 
 # Static model parameters dictionary
 MODEL_PARAMS_DICT = {
@@ -194,7 +195,9 @@ def main(args):
     max_logging.log(f"Starting conversion for Qwen3-MoE model size: {args.model_size}")
     jax_weights = convert_hf_to_maxtext(args.base_model_path, model_params)
     max_logging.log(f"Conversion complete. Saving MaxText checkpoint to {args.maxtext_model_path}")
-    llama_or_mistral_ckpt.save_weights_to_checkpoint(args.maxtext_model_path, jax_weights)
+    llama_or_mistral_ckpt.save_weights_to_checkpoint(
+        args.maxtext_model_path, jax_weights, args.simulated_cpu_devices_count, args.use_ocdbt, args.use_zarr3
+    )
     max_logging.log("Checkpoint saved successfully.")
 
 
@@ -203,8 +206,10 @@ if __name__ == "__main__":
     parser.add_argument("--base_model_path", type=str, required=True, help="Path to the HF Qwen3-MoE checkpoint files.")
     parser.add_argument("--maxtext_model_path", type=str, required=True, help="Path to save the MaxText checkpoint.")
     parser.add_argument("--model_size", type=str, required=True, choices=MODEL_PARAMS_DICT.keys(), help="The model size to convert.")
+    parser.add_argument("--simulated_cpu_devices_count", type=int, default=16, help="Number of simulated CPU devices for saving.")
+    parser.add_argument("--use-ocdbt", type=str2bool, default=True, help="Use OCDBT format for saving.")
+    parser.add_argument("--use-zarr3", type=str2bool, default=True, help="Use Zarr3 format for saving.")
 
     args = parser.parse_args()
     os.makedirs(args.maxtext_model_path, exist_ok=True)
     main(args)
-    
