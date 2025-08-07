@@ -54,7 +54,7 @@ class LlamaDecoderLayer(nnx.Module):
       mesh: Mesh,
       quant: Optional[Quant] = None,
       rngs: Optional[nnx.Rngs] = None,
-      **kwargs: Any,
+      #**kwargs: Any,
   ):
 
     self.config = config
@@ -203,22 +203,39 @@ class LlamaDecoderLayer(nnx.Module):
       return layer_output
 
 
-class LlamaDecoderLayerToLinen(nn.Module):
-  """A Linan wrapper for the NNX MistralDecoderLayer"""
+# def llama_decoder_as_linen(self, config, mesh, quant):
+#   return nnx_wrappers.to_linen_class(
+#       LlamaDecoderLayer,
+#       config=self.config,
+#       mesh=self.mesh,
+#       quant=self.quant,
+#       metadata_fn=initializers.variable_to_logically_partitioned,
+#       abstract_init=False,
+#     )
 
-  config: Config
-  mesh: Mesh
-  quant: Quant | None = None
+LlamaDecoderLayerToLinen = nnx_wrappers.to_linen_class(
+  LlamaDecoderLayer,
+  metadata_fn=initializers.variable_to_logically_partitioned,
+)
 
-  @nn.compact
-  def __call__(self, *args, **kwargs):
-    """Call the underlying NNX layer"""
-    llama_decoder_layer_to_linen = nnx_wrappers.to_linen(
-      LlamaDecoderLayer,
-      config=self.config,
-      mesh=self.mesh,
-      quant=self.quant,
-      metadata_fn=initializers.variable_to_logically_partitioned,
-      abstract_init=False,
-    )
-    return llama_decoder_layer_to_linen(*args, **kwargs)
+
+
+# class LlamaDecoderLayerToLinen(nn.Module):
+#   """A Linan wrapper for the NNX MistralDecoderLayer"""
+
+#   config: Config
+#   mesh: Mesh
+#   quant: Quant | None = None
+
+#   @nn.compact
+#   def __call__(self, *args, **kwargs):
+#     """Call the underlying NNX layer"""
+#     llama_decoder_layer_to_linen = nnx_wrappers.to_linen(
+#       LlamaDecoderLayer,
+#       config=self.config,
+#       mesh=self.mesh,
+#       quant=self.quant,
+#       metadata_fn=initializers.variable_to_logically_partitioned,
+#       abstract_init=False,
+#     )
+#     return llama_decoder_layer_to_linen(*args, **kwargs)

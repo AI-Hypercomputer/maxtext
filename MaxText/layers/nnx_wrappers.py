@@ -499,3 +499,34 @@ def to_linen(
     skip_rng=skip_rng,
     name=name,
   )
+
+def to_linen_class(
+    nnx_class: type[M],
+    metadata_fn: (
+      tp.Callable[[variablelib.VariableState], tp.Any] | None
+    ) = to_linen_var,
+    name: str | None = None,
+    skip_rng: bool = False,
+    **partial_kwargs: tp.Any,
+) -> type[ToLinen]:
+  """Dynamically wraps an NNX module class into a Flax Linen module class."""
+  class ToLinenPartial(ToLinen):
+
+    def __init_subclass__(cls, **kwargs):
+      super().__init_subclass__(**kwargs)
+
+      #def __init__(self, *args, **kwargs):
+      def __init__(self, **kwargs):
+        ToLinen.__init__(
+          self,
+          nnx_class,
+          #args=args,
+          kwargs=FrozenDict({**partial_kwargs, **kwargs}),
+          metadata_fn=metadata_fn,
+          skip_rng=skip_rng,
+          name=name,
+        )
+
+      cls.__init__ = __init__
+
+  return ToLinenPartial
