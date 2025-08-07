@@ -245,6 +245,38 @@ class Decoder(nn.Module):
     self.norm_layer = self.get_norm_layer(num_features=self.config.emb_dim)
     if self.config.using_pipeline_parallelism:
       remat_policy = self.get_remat_policy()
+
+      # Scan
+
+      in_axes_tuple = (nn.broadcast,) * 4
+      initializing = self.is_mutable_collection("params")
+      params_spec = self.config.param_scan_axis if initializing else ScanIn(cfg.param_scan_axis)
+      cache_spec = 0
+      scan_fn = nn.scan(
+          pipeline.Pipeline, #pipeline_module,
+          variable_axes={
+              "params": params_spec,
+              "cache": cache_spec,
+              "intermediates": 0,
+              "aqt": 0,
+              "_overwrite_with_gradient": 0,
+          },
+          split_rngs={
+              "params": True,
+              "dropout": cfg.enable_dropout,
+          },
+          in_axes=in_axes_tuple,
+          length=cfg.num_successive_pipelines,
+          metadata_params={nn.PARTITION_NAME: "successive_pipelines"},
+      )
+      initialized_scan = scan_fn(config=cfg, mesh=self.mesh, layers=self.pipeline_stage_module, remat_policy=self.get_remat_policy())
+      rawr = initialized_scan(y, *broadcast_args, partition_spec=partition_spec)
+
+
+
+
+
+
       pipeline_modules_list = list((None for _ in range(self.config.num_successive_pipelines)))
       for i in range(self.config.num_successive_pipelines):
         pipeline_stage_module = self.get_pipeline_stage_module(self.decoder_layer)
