@@ -106,11 +106,11 @@ class GateLogit(nn.Module):
   @nn.compact
   def __call__(self, inputs: ctypes.Array) -> Tuple[ctypes.Array, Optional[ctypes.Array]]:
 
-    features = linears._canonicalize_tuple(self.features)
-    axis = linears._canonicalize_tuple(self.axis)
+    features = linears.canonicalize_tuple(self.features)
+    axis = linears.canonicalize_tuple(self.axis)
 
     inputs = jnp.asarray(inputs, self.dtype)
-    axis = linears._normalize_axes(axis, inputs.ndim)
+    axis = linears.normalize_axes(axis, inputs.ndim)
 
     kernel_shape = tuple(inputs.shape[ax] for ax in axis) + features
     kernel_in_axis = np.arange(len(axis))

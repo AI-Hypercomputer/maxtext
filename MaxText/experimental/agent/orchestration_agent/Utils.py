@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-import requests
+import requests, ast  # if this is not available, please try ``pip install requests``
 from urllib.parse import urlparse, urljoin
 
 
@@ -152,3 +152,136 @@ def find_cycle(graph):
         except (ValueError, IndexError):
           return path
   return None
+
+
+def remove_local_imports(source_code, filepath=None):
+  """
+  Removes local imports from Python source code.
+
+  This function parses the provided source code and removes import statements
+  that are considered 'local'. Local imports are defined as:
+  1. Relative imports (e.g., `from . import my_module`).
+  2. Imports from the base module if a `filepath` is provided (e.g., if
+     filepath is 'my_project/module.py', then `import my_project.utils`
+     would be removed).
+
+  Args:
+      source_code (str): The Python source code as a string.
+      filepath (str, optional): The path to the file containing the source
+                                code. Used to determine the base module for
+                                identifying local imports. Defaults to None.
+
+  Returns:
+      tuple: A tuple containing:
+          - str: The modified source code with local imports removed.
+          - str: A newline-separated string of the names of the removed imports.
+  """
+  if filepath is not None:
+    # Determine the base module from the filepath
+    basemodule = filepath.lstrip("/").split("/")[0]
+  else:
+    basemodule = ""
+  tree = ast.parse(source_code)
+  lines = source_code.splitlines()
+  new_lines = []
+  removed_imports = []
+  # Build a mapping from line number to node for import nodes
+  import_nodes = {node.lineno: node for node in tree.body if isinstance(node, (ast.Import, ast.ImportFrom))}
+
+  i = 0
+  while i < len(lines):
+    line = lines[i]
+    node = import_nodes.get(i + 1, None)
+    if node:
+      # Detect multi-line import (parenthesis)
+      if "(" in line.strip() and ")" not in line:
+        # Detect multi-line import (parenthesis)
+        # Find the closing parenthesis, even if comments are present
+        start = i
+        while i < len(lines) and not lines[i].strip().endswith(")"):
+          i += 1
+        i += 1  # include the closing parenthesis line
+        import_block = "\n".join(lines[start:i])
+        # Parse the import block to check if it should be removed
+        try:
+          import_tree = ast.parse(import_block)
+          import_node = import_tree.body[0]
+        except Exception:
+          import_node = node  # fallback
+
+        remove = False
+        import_names = []
+        if isinstance(import_node, ast.ImportFrom):
+          # Remove relative imports
+          if import_node.level > 0:
+            remove = True
+          # Remove imports from basemodule
+          elif import_node.module and import_node.module.split(".")[0] == basemodule:
+            remove = True
+          if remove:
+            import_names = [alias.name for alias in import_node.names]
+        elif isinstance(import_node, ast.Import):
+          for alias in import_node.names:
+            if alias.name.split(".")[0] == basemodule:
+              remove = True
+              import_names.append(alias.name)
+          # Only add names if remove is True
+          if not remove:
+            import_names = []
+        if remove:
+          removed_imports.extend(import_names)
+        else:
+          new_lines.extend(lines[start:i])
+        # increment i to avoid infinite loop
+        continue  # already incremented i
+      else:
+        remove = False
+        import_names = []
+        if isinstance(node, ast.ImportFrom):
+          if node.level > 0:
+            remove = True
+          elif node.module and node.module.split(".")[0] == basemodule:
+            remove = True
+          if remove:
+            import_names = [alias.name for alias in node.names]
+        elif isinstance(node, ast.Import):
+          for alias in node.names:
+            if alias.name.split(".")[0] == basemodule:
+              remove = True
+              import_names.append(alias.name)
+          if not remove:
+            import_names = []
+        if remove:
+          removed_imports.extend(import_names)
+        else:
+          new_lines.append(line)
+        i += 1
+        continue
+    else:
+      new_lines.append(line)
+      i += 1
+
+  return "\n".join(new_lines), "\n".join(removed_imports)
+
+
+def parse_python_code(code):
+  """
+  Extracts Python code from a string that might contain markdown code blocks.
+
+  This function looks for Python code blocks delimited by triple backticks.
+  It supports both '```python' and generic '```' delimiters.
+
+  Args:
+      code (str): The input string potentially containing Python code blocks.
+
+  Returns:
+      str: The extracted Python code. Returns the original string if no
+           code blocks are found.
+  """
+  if "```python" in code:
+    code = code.split("```python")[1]
+    if "```" in code:
+      code = code.split("```")[0]
+  elif "```" in code:
+    code = code.split("```")[1]
+  return code

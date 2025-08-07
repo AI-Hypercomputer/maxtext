@@ -613,7 +613,14 @@ def configure_kv_quant(config):
 
 
 def get_basic_config(config, dtype):
+  """Basic Qwix config that only quantizes forward passes."""
   rules = [
+      # Dot-product attention is not quantized for now.
+      qwix.QtRule(
+        module_path='decoder/.*layers.*/self_attention/attention_op',
+        weight_qtype=None,
+        act_qtype=None,
+      ),
       qwix.QtRule(
         module_path='decoder/.*layers.*',  # Apply to all modules
         weight_qtype=dtype,
@@ -628,6 +635,12 @@ def get_fp8_config(config):
   """ fp8 config rules with per-tensor calibration.
   """
   rules = [
+      # Dot-product attention is not quantized for now.
+      qwix.QtRule(
+        module_path='decoder/.*layers.*/self_attention/attention_op',
+        weight_qtype=None,
+        act_qtype=None,
+      ),
       qwix.QtRule(
         module_path='decoder/.*layers.*',  # Apply to all modules
         weight_qtype=jnp.float8_e4m3fn,
