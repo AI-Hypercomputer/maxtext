@@ -916,7 +916,6 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
       stack_shape = (base_num_decoder_layers,)
       is_dense_layer = num_experts is None
       layer_weight = jax_weights["decoder"]["layers"]
-      stack_shape = (base_num_decoder_layers,)
 
     if is_dense_layer:
       wi_0 = (
@@ -945,79 +944,6 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
           .astype(CAST_DTYPE)
           .transpose()
       )
-      if layer_weight["Llama4MoEBlock_0"]["MoeBlock_0"]["gate"]["kernel"] is None:
-        layer_weight["Llama4MoEBlock_0"]["MoeBlock_0"]["gate"]["kernel"] = np.zeros(
-            stack_shape + gate.shape, dtype=CAST_DTYPE
-        )
-      layer_weight["Llama4MoEBlock_0"]["MoeBlock_0"]["gate"]["kernel"][block_layer_idx, ...] = gate
-
-      # 2 routed experts: Llama4MoEBlock_0.MoeBlock_0.wi_0, Llama4MoEBlock_0.MoeBlock_0.wi_1, Llama4MoEBlock_0.MoeBlock_0.wo
-      wi_0_1 = (
-          chkpt_vars[f"layers.{layer_idx}.feed_forward.experts.gate_up_proj"].type(torch.float32).numpy().astype(CAST_DTYPE)
-      )
-      # pylint: disable=unbalanced-tuple-unpacking
-      wi_0, wi_1 = np.split(wi_0_1, 2, axis=-1)
-      del wi_0_1
-
-      wo = chkpt_vars[f"layers.{layer_idx}.feed_forward.experts.down_proj"].type(torch.float32).numpy().astype(CAST_DTYPE)
-
-      if layer_weight["Llama4MoEBlock_0"]["MoeBlock_0"]["wi_0"] is None:
-        layer_weight["Llama4MoEBlock_0"]["MoeBlock_0"]["wi_0"] = np.zeros(stack_shape + wi_0.shape, dtype=CAST_DTYPE)
-        layer_weight["Llama4MoEBlock_0"]["MoeBlock_0"]["wi_1"] = np.zeros(stack_shape + wi_1.shape, dtype=CAST_DTYPE)
-        layer_weight["Llama4MoEBlock_0"]["MoeBlock_0"]["wo"] = np.zeros(stack_shape + wo.shape, dtype=CAST_DTYPE)
-
-      layer_weight["Llama4MoEBlock_0"]["MoeBlock_0"]["wi_0"][block_layer_idx, ...] = wi_0
-      layer_weight["Llama4MoEBlock_0"]["MoeBlock_0"]["wi_1"][block_layer_idx, ...] = wi_1
-      layer_weight["Llama4MoEBlock_0"]["MoeBlock_0"]["wo"][block_layer_idx, ...] = wo
-
-      # 3 shared experts: Llama4MoEBlock_0.shared_experts.wi_0.kernel,
-      # Llama4MoEBlock_0.shared_experts.wi_1.kernel, Llama4MoEBlock_0.shared_experts.wo.kernel
-      wi_0 = (
-          chkpt_vars[f"layers.{layer_idx}.feed_forward.shared_experts.gate_proj.weight"]
-          .type(torch.float32)
-          .numpy()
-          .astype(CAST_DTYPE)
-          .transpose()
-      )
-
-      wi_1 = (
-          chkpt_vars[f"layers.{layer_idx}.feed_forward.shared_experts.up_proj.weight"]
-          .type(torch.float32)
-          .numpy()
-          .astype(CAST_DTYPE)
-          .transpose()
-      )
-
-      wo = (
-          chkpt_vars[f"layers.{layer_idx}.feed_forward.shared_experts.down_proj.weight"]
-          .type(torch.float32)
-          .numpy()
-          .astype(CAST_DTYPE)
-          .transpose()
-      )
-
-      if layer_weight["Llama4MoEBlock_0"]["shared_experts"]["wi_0"]["kernel"] is None:
-        layer_weight["Llama4MoEBlock_0"]["shared_experts"]["wi_0"]["kernel"] = np.zeros(
-            stack_shape + wi_0.shape, dtype=CAST_DTYPE
-        )
-        layer_weight["Llama4MoEBlock_0"]["shared_experts"]["wi_1"]["kernel"] = np.zeros(
-            stack_shape + wi_1.shape, dtype=CAST_DTYPE
-        )
-        layer_weight["Llama4MoEBlock_0"]["shared_experts"]["wo"]["kernel"] = np.zeros(
-            stack_shape + wo.shape, dtype=CAST_DTYPE
-        )
-      layer_weight["Llama4MoEBlock_0"]["shared_experts"]["wi_0"]["kernel"][block_layer_idx, ...] = wi_0
-      layer_weight["Llama4MoEBlock_0"]["shared_experts"]["wi_1"]["kernel"][block_layer_idx, ...] = wi_1
-      layer_weight["Llama4MoEBlock_0"]["shared_experts"]["wo"]["kernel"][block_layer_idx, ...] = wo
-    else:
-      # 1 MoeBlock_0.gate.kernel
-      gate = np.concatenate(
-          [
-              var[f"layers.{layer_idx}.feed_forward.gate.weight"].type(torch.float32).numpy().astype(CAST_DTYPE)
-              for var in chkpt_vars
-          ],
-          axis=0,
-      ).transpose()
       if layer_weight["MoeBlock_0"]["gate"]["kernel"] is None:
         layer_weight["MoeBlock_0"]["gate"]["kernel"] = np.zeros(stack_shape + gate.shape, dtype=CAST_DTYPE)
       layer_weight["MoeBlock_0"]["gate"]["kernel"][layer_idx, ...] = gate
@@ -1051,10 +977,10 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
           layer_weight["MoeBlock_0"]["wi_0"] = np.zeros(stack_shape_expert + wi_0.shape, dtype=CAST_DTYPE)
           layer_weight["MoeBlock_0"]["wi_1"] = np.zeros(stack_shape_expert + wi_1.shape, dtype=CAST_DTYPE)
           layer_weight["MoeBlock_0"]["wo"] = np.zeros(stack_shape_expert + wo.shape, dtype=CAST_DTYPE)
-        ei, li = k, layer_idx
-        layer_weight["MoeBlock_0"]["wi_0"][ei, li, ...] = wi_0
-        layer_weight["MoeBlock_0"]["wi_1"][ei, li, ...] = wi_1
-        layer_weight["MoeBlock_0"]["wo"][ei, li, ...] = wo
+
+        layer_weight["MoeBlock_0"]["wi_0"][k, layer_idx, ...] = wi_0
+        layer_weight["MoeBlock_0"]["wi_1"][k, layer_idx, ...] = wi_1
+        layer_weight["MoeBlock_0"]["wo"][k, layer_idx, ...] = wo
       gc.collect()
 
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
