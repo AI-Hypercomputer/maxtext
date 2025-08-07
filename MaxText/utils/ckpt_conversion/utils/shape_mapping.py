@@ -308,6 +308,57 @@ def QWEN3_HF_WEIGHTS_TO_SHAPE_MAPPING(config):
   return mapping
 
 
+def QWEN3_MOE_HF_WEIGHTS_TO_SHAPE_MAPPING(config):
+  """Returns mapping between HuggingFace Qwen3 MoE weights path and shape."""
+  hidden_size = config["hidden_size"]
+  num_hidden_layers = config["num_hidden_layers"]
+  num_attention_heads = config["num_attention_heads"]
+  num_key_value_heads = config["num_key_value_heads"]
+  head_dim = config.get("head_dim", hidden_size // num_attention_heads)
+  num_experts = config.get("num_experts")
+  moe_intermediate_size = config.get("moe_intermediate_size")
+
+  if not num_experts or not moe_intermediate_size:
+    raise ValueError("MoE config parameters (num_experts, moe_intermediate_size) are missing.")
+
+  mapping = {
+      "model.embed_tokens.weight": [config["vocab_size"], hidden_size],
+      "model.norm.weight": [hidden_size],
+      "lm_head.weight": [config["vocab_size"], hidden_size],
+  }
+
+  for i in range(num_hidden_layers):
+    layer_prefix = f"model.layers.{i}"
+
+    # Common Attention and Norms
+    mapping.update(
+        {
+            f"{layer_prefix}.input_layernorm.weight": [hidden_size],
+            f"{layer_prefix}.post_attention_layernorm.weight": [hidden_size],
+            f"{layer_prefix}.self_attn.q_proj.weight": [num_attention_heads * head_dim, hidden_size],
+            f"{layer_prefix}.self_attn.k_proj.weight": [num_key_value_heads * head_dim, hidden_size],
+            f"{layer_prefix}.self_attn.v_proj.weight": [num_key_value_heads * head_dim, hidden_size],
+            f"{layer_prefix}.self_attn.o_proj.weight": [hidden_size, num_attention_heads * head_dim],
+            f"{layer_prefix}.self_attn.q_norm.weight": [head_dim],
+            f"{layer_prefix}.self_attn.k_norm.weight": [head_dim],
+        }
+    )
+
+    # MoE specific layers for every layer
+    mapping[f"{layer_prefix}.mlp.gate.weight"] = [num_experts, hidden_size]
+    for j in range(num_experts):
+      expert_prefix = f"{layer_prefix}.mlp.experts.{j}"
+      mapping.update(
+          {
+              f"{expert_prefix}.gate_proj.weight": [moe_intermediate_size, hidden_size],
+              f"{expert_prefix}.up_proj.weight": [moe_intermediate_size, hidden_size],
+              f"{expert_prefix}.down_proj.weight": [hidden_size, moe_intermediate_size],
+          }
+      )
+
+  return mapping
+
+
 SHAPE_MAPPING = {
     "gemma2-2b": GEMMA2_HF_WEIGHTS_TO_SHAPE_MAPPING,
     "gemma2-9b": GEMMA2_HF_WEIGHTS_TO_SHAPE_MAPPING,
@@ -320,4 +371,5 @@ SHAPE_MAPPING = {
     "qwen3-8b": QWEN3_HF_WEIGHTS_TO_SHAPE_MAPPING,
     "qwen3-14b": QWEN3_HF_WEIGHTS_TO_SHAPE_MAPPING,
     "qwen3-32b": QWEN3_HF_WEIGHTS_TO_SHAPE_MAPPING,
+    "qwen3-moe-235b-a22b": QWEN3_MOE_HF_WEIGHTS_TO_SHAPE_MAPPING,
 }
