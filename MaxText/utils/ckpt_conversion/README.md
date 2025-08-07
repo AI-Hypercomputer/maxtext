@@ -10,6 +10,10 @@ The following models are supported:
 - Gemma3 multimodal (4B, 12B, 27B).
 - Qwen3 (0.6B, 4B, 8B, 14B, 32B).
 
+## Prerequisites
+- Hugging Face requires Pytorch.
+- Hugging Face model checkpoints requires local disk space.
+  - The model files are always downloaded to a disk cache first before being loaded into memory, [see](https://huggingface.co/docs/accelerate/en/concept_guides/big_model_inference)
 
 ## Hugging Face to MaxText
 
