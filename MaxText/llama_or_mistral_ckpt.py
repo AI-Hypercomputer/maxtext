@@ -636,7 +636,12 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
             continue
         else:
           layer = int(parts[2]) if "layers" in key else 0
-        mapped_key = _hf_to_maxtext_mapping(layer)[key]
+          # For Qwen3 MoE, the expert index is at part 4
+          # e.g., model.layers.{idx}.mlp.experts.{idx}
+          if "mlp.experts" in key:
+            expert = int(parts[4])
+
+        mapped_key = _hf_to_maxtext_mapping(layer, expert)[key]
         chkpt_vars[mapped_key] = f.get_tensor(key)
 
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
