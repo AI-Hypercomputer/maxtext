@@ -16,15 +16,13 @@ limitations under the License.
 
 """Packed Sequence Op."""
 
-from typing import Dict, Optional, List, Union
-
 import tensorflow as tf
 
 AUTOTUNE = tf.data.experimental.AUTOTUNE
 
 
 def pack_dataset(
-    dataset: tf.data.Dataset, key2length: Union[int, Dict[str, int]], pad_id: int, keys: Optional[List[str]] = None
+    dataset: tf.data.Dataset, key2length: int | dict[str, int], pad_id: int, keys: None | list[str] = None
 ) -> tf.data.Dataset:
   """Creates a 'packed' version of a dataset on-the-fly.
   Adapted from the mesh-tf implementation.
@@ -97,7 +95,7 @@ def pack_dataset(
   return dataset.map(my_fn, num_parallel_calls=AUTOTUNE)
 
 
-def _pack_with_tf_ops(dataset: tf.data.Dataset, keys: List[str], key2length: Dict[str, int], pad_id: int) -> tf.data.Dataset:
+def _pack_with_tf_ops(dataset: tf.data.Dataset, keys: list[str], key2length: dict[str, int], pad_id: int) -> tf.data.Dataset:
   """Helper-function for packing a dataset which has already been batched.
   Helper for pack_dataset()  Uses tf.while_loop.
   Args:

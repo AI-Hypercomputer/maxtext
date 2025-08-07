@@ -14,7 +14,7 @@
 
 """Implementation of the kvcache."""
 
-from typing import Any, Optional, Tuple
+from typing import Any
 
 import jax
 import jax.numpy as jnp
@@ -160,7 +160,7 @@ def kv_cache_as_linen(
     key_head_size: int,
     value_head_size: int,
     dtype: DType,
-    kv_quant: Optional[KVQuant] = None,
+    kv_quant: None | KVQuant = None,
     prefill_cache_logical_axis_names: AxisNames = (CACHE_BATCH_PREFILL, CACHE_SEQUENCE, CACHE_HEADS, CACHE_KV),
     cache_logical_axis_names: AxisNames = (CACHE_BATCH, CACHE_SEQUENCE, CACHE_HEADS, CACHE_KV),
     cache_scale_logical_axis_names: AxisNames = (
@@ -247,7 +247,7 @@ class KVCache(nnx.Module):
       key_head_size: int,
       value_head_size: int,
       dtype: DType,
-      kv_quant: Optional[KVQuant] = None,
+      kv_quant: None | KVQuant = None,
       prefill_cache_logical_axis_names: AxisNames = (CACHE_BATCH_PREFILL, CACHE_SEQUENCE, CACHE_HEADS, CACHE_KV),
       cache_logical_axis_names: AxisNames = (CACHE_BATCH, CACHE_SEQUENCE, CACHE_HEADS, CACHE_KV),
       cache_scale_logical_axis_names: AxisNames = (
@@ -488,7 +488,7 @@ class KVCache(nnx.Module):
 
 
   def kv_cache_chunked_prefill(
-      self, key: Array, value: Array, decoder_segment_ids: Array, previous_chunk: Optional[Array] = None
+      self, key: Array, value: Array, decoder_segment_ids: Array, previous_chunk: None | Array = None
   ):
     """Update the current kv cache into previous chunk and return needed length.
 
@@ -843,7 +843,7 @@ def mla_kv_cache_as_linen(
     dtype: DType,
     key_heads: int = 1,
     value_heads: int = 1,
-    kv_quant: Optional[KVQuant] = None,
+    kv_quant: None | KVQuant = None,
     prefill_cache_axis_order: AxisIdxes = (1, 2, 0, 3),
     ar_cache_axis_order: AxisIdxes = (1, 2, 0, 3),
     use_chunked_prefill: bool = False,
@@ -914,7 +914,7 @@ class MlaKVCache(KVCache):
       dtype: DType,
       key_heads: int = 1,
       value_heads: int = 1,
-      kv_quant: Optional[KVQuant] = None,
+      kv_quant: None | KVQuant = None,
       prefill_cache_logical_axis_names: AxisNames = (CACHE_BATCH_PREFILL, CACHE_SEQUENCE, CACHE_HEADS_NONE, CACHE_KV),
       cache_logical_axis_names: AxisNames = (CACHE_BATCH, CACHE_SEQUENCE, CACHE_HEADS_NONE, CACHE_KV),
       cache_scale_logical_axis_names: AxisNames = (
@@ -998,9 +998,9 @@ class MlaKVCache(KVCache):
       model_mode: str,
       use_ragged_attention: bool = False,
       previous_chunk: Any = None,
-  ) -> Tuple[
-      Optional[Tuple[Array, Array, Array]],
-      Optional[Tuple[Array, Array, Array, Array]],
+  ) -> tuple[
+      None | tuple[Array, Array, Array],
+      None | tuple[Array, Array, Array, Array],
   ]:
     assert model_mode != MODEL_MODE_TRAIN, "incorrectly updating kvcache in train mode."
     assert self.kv_quant is None, "kvcache quantization not supported with mla."

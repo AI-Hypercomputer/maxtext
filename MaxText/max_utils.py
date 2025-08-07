@@ -24,7 +24,7 @@ import socket
 import subprocess
 import collections
 from collections.abc import Sequence
-from typing import Any, Tuple
+from typing import Any
 from functools import partial
 
 import numpy as np
@@ -86,8 +86,7 @@ def device_space():
   if jax.__version__ >= "0.7.1":
     return jax.memory.Space.Device # pytype: disable=module-attr
   else:
-    # pytype: disable=module-attr
-    return jax._src.sharding_impls.TransferToMemoryKind("device") # pylint: disable=protected-access 
+    return jax._src.sharding_impls.TransferToMemoryKind("device") # pylint: disable=protected-access
 
 def calculate_total_params_per_chip(params):
   """Calculate total params per chip."""
@@ -562,7 +561,7 @@ def unbox_logicallypartioned(boxed_pytree):
 # Cross entropy implementation is taken from original T5X codebase:
 # https://github.com/google-research/t5x/blob/ace831eea1e2742b4299cd1a9af7e4f302038351/t5x/losses.py#L25-L101
 @jax.custom_vjp
-def cross_entropy_with_logits(logits: jnp.ndarray, targets: jnp.ndarray, z_loss: float) -> Tuple[jnp.ndarray, jnp.ndarray]:
+def cross_entropy_with_logits(logits: jnp.ndarray, targets: jnp.ndarray, z_loss: float) -> tuple[jnp.ndarray, jnp.ndarray]:
   """Computes cross entropy loss with stable custom gradient.
   Computes a stabilized-gradient version of:
     -jnp.sum(targets * nn.log_softmax(logits), axis=-1)
@@ -591,9 +590,9 @@ def cross_entropy_with_logits(logits: jnp.ndarray, targets: jnp.ndarray, z_loss:
   return loss, total_z_loss
 
 
-def _cross_entropy_with_logits_fwd(logits: jnp.ndarray, targets: jnp.ndarray, z_loss: float = 0.0) -> Tuple[
-    Tuple[jnp.ndarray, jnp.ndarray],
-    Tuple[
+def _cross_entropy_with_logits_fwd(logits: jnp.ndarray, targets: jnp.ndarray, z_loss: float = 0.0) -> tuple[
+    tuple[jnp.ndarray, jnp.ndarray],
+    tuple[
         jnp.ndarray,
         jnp.ndarray,
         jnp.ndarray,
@@ -626,7 +625,7 @@ def _cross_entropy_with_logits_fwd(logits: jnp.ndarray, targets: jnp.ndarray, z_
 
 
 def _cross_entropy_with_logits_bwd(
-    res: Tuple[
+    res: tuple[
         jnp.ndarray,
         jnp.ndarray,
         jnp.ndarray,
@@ -635,8 +634,8 @@ def _cross_entropy_with_logits_bwd(
         jnp.ndarray,
         jnp.ndarray,
     ],
-    g: Tuple[jnp.ndarray, jnp.ndarray],
-) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    g: tuple[jnp.ndarray, jnp.ndarray],
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
   """Backward-mode of `cross_entropy_with_logits`."""
   g = g[0]  # Ignore z_loss component as that is only used for logging.
   logits, targets, z_loss, exp_shifted, sum_exp, log_softmax, log_z = res

@@ -38,19 +38,17 @@ python MakePytorchFile.py \
 
 Make sure to set the `output_dir` variable to your desired output directory.
 """
+import argparse
+import ast
+import os
 import os.path
-import ast, argparse
-import os, sys
 
-# Add parent directory to path to allow imports from orchestration_agent
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-
-from orchestration_agent.SplitPythonFile import get_modules_in_order
-from orchestration_agent.GetFilesInHierarchicalOrder import get_dependency_sorted_files
-from orchestration_agent.Utils import remove_local_imports, get_github_file_content
+from MaxText.experimental.agent.orchestration_agent.SplitPythonFile import get_modules_in_order
+from MaxText.experimental.agent.orchestration_agent.GetFilesInHierarchicalOrder import get_dependency_sorted_files
+from MaxText.experimental.agent.orchestration_agent.Utils import remove_local_imports, get_github_file_content
 
 BASE_PATH = "https://github.com/huggingface/transformers/blob/main/src"
-outFolder = "dataset/PyTorch"  # Specify your output folder here, e.g., "dataset/PyTorch"
+outFolder = os.path.join("dataset", "PyTorch")  # Specify your output folder here, e.g., "dataset/PyTorch"
 os.makedirs(outFolder, exist_ok=True)
 
 

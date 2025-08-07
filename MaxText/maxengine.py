@@ -15,7 +15,7 @@
 """Implementation of Engine API for MaxText."""
 
 from collections import defaultdict
-from typing import Any, List, Optional, Tuple, Callable
+from typing import Any, Callable
 import functools
 import os.path
 import uuid
@@ -140,8 +140,8 @@ class MaxEngine(engine_api.Engine):
     max_utils.print_cpu_ram_stats(label)
 
   def generate_aot(
-      self, params: Params, decode_state: DecodeState, rng: Optional[PRNGKeyType] = None
-  ) -> Tuple[DecodeState, engine_api.ResultTokens]:
+      self, params: Params, decode_state: DecodeState, rng: None | PRNGKeyType = None
+  ) -> tuple[DecodeState, engine_api.ResultTokens]:
     """Wrapper to generate for ahead of time compilation."""
 
     return self.generate(params=params, decode_state=decode_state, rng=rng)
@@ -196,7 +196,7 @@ class MaxEngine(engine_api.Engine):
 
   def aot_compile(
       self, params: Params, pass_rng_shape: bool, xla_flags: dict[str, Any] | None = None
-  ) -> Tuple[Any, Params, Any]:
+  ) -> tuple[Any, Params, Any]:
     """Ahead of time compilation of generate with auto layout, relayout parameters."""
     if pass_rng_shape:
       rng_shape = jax.ShapeDtypeStruct([4], jax.numpy.dtype("uint32"))
@@ -215,7 +215,7 @@ class MaxEngine(engine_api.Engine):
         .compile(),
     )
 
-  def load_params(self, *args, params=None, rng: Optional[PRNGKeyType] = None, **kwargs) -> Params:
+  def load_params(self, *args, params=None, rng: None | PRNGKeyType = None, **kwargs) -> Params:
     """Load Parameters from GCS or reshard given Parameters"""
     # pylint: disable=unused-argument
 
@@ -315,7 +315,7 @@ class MaxEngine(engine_api.Engine):
     lora_scale_factor = float(adapter_config["lora_alpha"]) / lora_rank
     lora_utils.unapply_lora_from_base_params(base_params, adapter_params, lora_scale_factor)
 
-  def quantize_params(self, state, rng: Optional[PRNGKeyType] = None):
+  def quantize_params(self, state, rng: None | PRNGKeyType = None):
     """Forward pass to quantize decode params."""
     if rng is None:
       rng = jax.random.PRNGKey(0)
@@ -386,8 +386,8 @@ class MaxEngine(engine_api.Engine):
       params: Params,
       padded_tokens: jax.Array,
       true_length: int,
-      rng: Optional[PRNGKeyType] = None,
-  ) -> Tuple[Prefix, engine_api.ResultTokens]:
+      rng: None | PRNGKeyType = None,
+  ) -> tuple[Prefix, engine_api.ResultTokens]:
     """Wrapper for prefill for ahead-of-time compilation."""
 
     return self.prefill(
@@ -402,16 +402,16 @@ class MaxEngine(engine_api.Engine):
       self,
       *,
       params: Params,
-      existing_prefix: Optional[ExistingPrefix] = None,
+      existing_prefix: None | ExistingPrefix = None,
       padded_tokens: jax.Array,
-      images: Optional[jax.Array] = None,
+      images: None | jax.Array = None,
       true_length: int,
-      sampler: Optional[Callable[[Any], Any]] = None,  # pylint: disable=unused-argument
-      rng: Optional[PRNGKeyType] = None,
-      slot: Optional[int] = None,
-      page_state: Optional[PageState] = None,
+      sampler: None | Callable[[Any], Any] = None,  # pylint: disable=unused-argument
+      rng: None | PRNGKeyType = None,
+      slot: None | int = None,
+      page_state: None | PageState = None,
       return_prompt_logp: bool = False,
-  ) -> Tuple[Prefix, engine_api.ResultTokens]:
+  ) -> tuple[Prefix, engine_api.ResultTokens]:
     """Computes a kv-cache for a new generate request.
 
     Args:
@@ -534,16 +534,16 @@ class MaxEngine(engine_api.Engine):
       self,  # pytype: disable=signature-mismatch
       *,
       params: Params,
-      existing_prefix: Optional[ExistingPrefix] = None,
+      existing_prefix: None | ExistingPrefix = None,
       padded_tokens: jax.Array,
-      images: Optional[jax.Array] = None,
+      images: None | jax.Array = None,
       true_length: int,
-      sampler: Optional[Callable[[Any], Any]] = None,  # pylint: disable=unused-argument
-      rng: Optional[PRNGKeyType] = None,
-      request_id: Optional[uuid.UUID] = None,  # pylint: disable=unused-argument
-      slot: Optional[int] = None,
+      sampler: None | Callable[[Any], Any] = None,  # pylint: disable=unused-argument
+      rng: None | PRNGKeyType = None,
+      request_id: None | uuid.UUID = None,  # pylint: disable=unused-argument
+      slot: None | int = None,
       return_prompt_logp: bool = False,
-  ) -> Tuple[Prefix, engine_api.ResultTokens]:
+  ) -> tuple[Prefix, engine_api.ResultTokens]:
     """Public API for prefill that updates page state outside JIT."""
     # Update page state before JIT call
     if self.config.attention == "paged" and self.page_manager is not None and self.page_state is not None:
@@ -578,10 +578,10 @@ class MaxEngine(engine_api.Engine):
       params: Params,
       padded_tokens: jax.Array,
       true_length: int,
-      rng: Optional[PRNGKeyType] = None,
+      rng: None | PRNGKeyType = None,
       num_samples: int = 1,
-      sampler: Optional[Callable[[Any], Any]] = None,
-  ) -> Tuple[Prefix, engine_api.ResultTokens]:
+      sampler: None | Callable[[Any], Any] = None,
+  ) -> tuple[Prefix, engine_api.ResultTokens]:
     """Wrapper for multi-sampling prefill for ahead-of-time compilation."""
     return self.prefill_multisampling(
         params=params,
@@ -599,10 +599,10 @@ class MaxEngine(engine_api.Engine):
       params: Params,
       padded_tokens: jax.Array,
       true_length: int,
-      sampler: Optional[Callable[[Any], Any]] = None,  # pylint: disable=unused-argument
-      rng: Optional[PRNGKeyType] = None,
+      sampler: None | Callable[[Any], Any] = None,  # pylint: disable=unused-argument
+      rng: None | PRNGKeyType = None,
       num_samples: int = 1,
-  ) -> Tuple[Prefix, engine_api.ResultTokens]:
+  ) -> tuple[Prefix, engine_api.ResultTokens]:
     """Public API for prefill multisampling."""
 
     # Sample rng before JIT call
@@ -628,10 +628,10 @@ class MaxEngine(engine_api.Engine):
       params: Params,
       padded_tokens: jax.Array,
       true_length: int,
-      sampler: Optional[Callable[[Any], Any]] = None,  # pylint: disable=unused-argument
-      rng: Optional[PRNGKeyType] = None,
+      sampler: None | Callable[[Any], Any] = None,  # pylint: disable=unused-argument
+      rng: None | PRNGKeyType = None,
       num_samples: int = 1,
-  ) -> Tuple[Prefix, engine_api.ResultTokens]:
+  ) -> tuple[Prefix, engine_api.ResultTokens]:
     """Computes a kv-cache for a new generate request.
 
     With multi-sampling, the engine will generate multiple first tokens in the
@@ -720,17 +720,17 @@ class MaxEngine(engine_api.Engine):
       self,
       *,
       params: Params,
-      existing_prefix: Optional[ExistingPrefix] = None,
+      existing_prefix: None | ExistingPrefix = None,
       padded_tokens: jax.Array,
       decoder_positions: jax.Array,
       decoder_segment_ids: jax.Array,
       start_pos: jax.Array,
       true_lengths: jax.Array,
       num_prompts: int,
-      sampler: Optional[Callable[[Any], Any]] = None,  # pylint: disable=unused-argument
-      rng: Optional[PRNGKeyType] = None,
+      sampler: None | Callable[[Any], Any] = None,  # pylint: disable=unused-argument
+      rng: None | PRNGKeyType = None,
       return_prompt_logp: bool = False,
-  ) -> Tuple[Any, PackedPrefix, List[engine_api.ResultTokens]]:
+  ) -> tuple[Any, PackedPrefix, list[engine_api.ResultTokens]]:
     """Computes a kv-cache for a new packed generate request, which is a
     concatenation of several shorter prompts. Experimentation shows that
     longer prefill sequences gives approximately 15% boost in time per prefilled
@@ -839,9 +839,9 @@ class MaxEngine(engine_api.Engine):
       self,
       params: Params,
       decode_state: DecodeState,
-      sampler: Optional[Callable[[Any], Any]] = None,  # pylint: disable=unused-argument
-      rng: Optional[PRNGKeyType] = None,
-  ) -> Tuple[DecodeState, engine_api.ResultTokens]:
+      sampler: None | Callable[[Any], Any] = None,  # pylint: disable=unused-argument
+      rng: None | PRNGKeyType = None,
+  ) -> tuple[DecodeState, engine_api.ResultTokens]:
     """Public API for generate that updates page state outside JIT."""
 
     # Update page state before JIT call
@@ -871,10 +871,10 @@ class MaxEngine(engine_api.Engine):
       params: Params,
       decode_state: DecodeState,
       *,
-      sampler: Optional[Callable[[Any], Any]] = None,  # pylint: disable=unused-argument
-      rng: Optional[PRNGKeyType] = None,
-      page_state: Optional[PageState] = None,
-  ) -> Tuple[DecodeState, engine_api.ResultTokens]:
+      sampler: None | Callable[[Any], Any] = None,  # pylint: disable=unused-argument
+      rng: None | PRNGKeyType = None,
+      page_state: None | PageState = None,
+  ) -> tuple[DecodeState, engine_api.ResultTokens]:
     """Run one generate step"""
 
     previous_token = decode_state["tokens"]
@@ -1048,8 +1048,8 @@ class MaxEngine(engine_api.Engine):
       prefix: Prefix,
       decode_state: DecodeState,
       slot: int,
-      request_id: Optional[uuid.UUID] = None,  # pylint: disable=unused-argument
-      page_state_in: Optional[PageState] = None,
+      request_id: None | uuid.UUID = None,  # pylint: disable=unused-argument
+      page_state_in: None | PageState = None,
   ) -> DecodeState:
     """Insert a single computed prefill cache into KV cache."""
     unboxed_prefix = max_utils.unbox_logicallypartioned(prefix)
@@ -1168,7 +1168,7 @@ class MaxEngine(engine_api.Engine):
       prefix: Prefix,
       decode_state: DecodeState,
       slot: int,
-      request_id: Optional[uuid.UUID] = None,
+      request_id: None | uuid.UUID = None,
   ) -> DecodeState:
     """Non-JIT wrapper for inserting prefill cache."""
 
@@ -1370,7 +1370,7 @@ class MaxEngine(engine_api.Engine):
   def init_decode_state(
       self,
       *args,  # pylint: disable=unused-argument
-      rng: Optional[PRNGKeyType] = None,
+      rng: None | PRNGKeyType = None,
       **kwargs,  # pylint: disable=unused-argument
   ) -> DecodeState:
     """Initialises any state which a generation step transforms."""

@@ -14,7 +14,7 @@
 
 "Bash helper commands for AOTC artifacts"
 from tempfile import gettempdir
-from typing import Dict, Any, Type
+from typing import Any, Type
 import dataclasses
 import getpass
 import logging
@@ -40,7 +40,7 @@ class Metrics:
   e2e_step_time: float
 
 
-def recover_tuning_params(tuning_params: str) -> Dict[str, Any]:
+def recover_tuning_params(tuning_params: str) -> dict[str, Any]:
   """
   Parse tuning params from json str format
   e.g. {"per_device_batch_size": 2, "ici_fsdp_parallelism": 1, ...}
@@ -48,7 +48,7 @@ def recover_tuning_params(tuning_params: str) -> Dict[str, Any]:
   Args:
     tuning_params: Tuning parameters in json str format
   Return type:
-    Dict[str, Any]: Dictionary mapping tuning param name to its value
+    dict[str, Any]: Dictionary mapping tuning param name to its value
   """
   items = tuning_params[1:-1].split(",")
   tuning_params_dict = {}

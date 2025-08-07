@@ -18,7 +18,7 @@
 import enum
 import functools
 import math
-from typing import Iterable, Optional, Tuple, Union
+from typing import Iterable
 
 from aqt.jax.v2 import aqt_tensor as aqt
 import flax.linen as nn
@@ -91,20 +91,20 @@ class GateLogit(nn.Module):
     matmul_precision: precision for JAX functions.
   """
 
-  features: Union[Iterable[int], int]
+  features: Iterable[int] | int
   model_name: str
-  axis: Union[Iterable[int], int] = -1
+  axis: Iterable[int] | int = -1
   weight_dtype: ctypes.DType = jnp.float32
   dtype: ctypes.DType = jnp.float32
   kernel_init: attentions.NdInitializer = attentions.nd_dense_init(1.0, "fan_in", "truncated_normal")
-  kernel_axes: Tuple[Optional[str], ...] = ()
+  kernel_axes: tuple[None | str, ...] = ()
   use_bias: bool = False
   score_func: str = ""
-  quant: Optional[quantizations.AqtQuantization] = None
+  quant: None | quantizations.AqtQuantization = None
   matmul_precision: str = "default"
 
   @nn.compact
-  def __call__(self, inputs: ctypes.Array) -> Tuple[ctypes.Array, Optional[ctypes.Array]]:
+  def __call__(self, inputs: ctypes.Array) -> tuple[ctypes.Array, None | ctypes.Array]:
 
     features = linears.canonicalize_tuple(self.features)
     axis = linears.canonicalize_tuple(self.axis)
@@ -172,7 +172,7 @@ class RoutedMoE(nn.Module):
     num_experts_per_tok: Number of experts for each token.
     mesh: Mesh, device mesh.
     kernel_init: Kernel function, passed to the dense layers.
-    kernel_axes: Tuple with axes to apply kernel function.
+    kernel_axes: tuple with axes to apply kernel function.
     intermediate_dim: Intermediate dimension of MoE.
     weight_dtype: Type for the weights.
     dtype: Type for the dense layer.
@@ -184,11 +184,11 @@ class RoutedMoE(nn.Module):
   num_experts_per_tok: int
   mesh: jax.sharding.Mesh
   kernel_init: attentions.NdInitializer
-  kernel_axes: Tuple[Optional[str], ...]
+  kernel_axes: tuple[None | str, ...]
   intermediate_dim: int = 2048
   weight_dtype: ctypes.DType = jnp.float32
   dtype: ctypes.DType = jnp.float32
-  quant: Optional[quantizations.AqtQuantization] = None
+  quant: None | quantizations.AqtQuantization = None
 
   # The first axes is expert
   wi_kernel_axes = ("exp", "embed_no_exp", "mlp")
@@ -1091,7 +1091,7 @@ class RoutedMoE(nn.Module):
 
   def get_einsum(
       self,
-      rhs_mesh_axes: Tuple[Optional[str], ...] = (),
+      rhs_mesh_axes: tuple[None | str, ...] = (),
       einsum_name: str | None = None,
   ):
     """Get the Einstein summation."""
@@ -1120,7 +1120,7 @@ class RoutedMoE(nn.Module):
     return einsum_op
 
   def maybe_all_gather_kernel_weight_in_expert_parallelism(
-      self, kernel: ctypes.Array, kernel_axes: Tuple[Optional[str], ...]
+      self, kernel: ctypes.Array, kernel_axes: tuple[None | str, ...]
   ):
     """All-gather kernel weight in expert parallelism if needed."""
     if self.get_expert_parallelism_size() > 1:
@@ -1140,7 +1140,7 @@ class RoutedMoE(nn.Module):
       w0_kernel,
       w1_kernel,
       wo_kernel,
-  ) -> tuple[ctypes.Array, Optional[ctypes.Array]]:
+  ) -> tuple[ctypes.Array, None | ctypes.Array]:
     """Dense matrix multiplication."""
     # gate_logits: batch, length, expert
     gate_logits = nn.with_logical_constraint(gate_logits, ("activation_batch", "activation_length", None))
@@ -1418,7 +1418,7 @@ class RoutedMoE(nn.Module):
   @nn.compact
   def __call__(
       self, inputs: ctypes.Array
-  ) -> tuple[ctypes.Array, Optional[ctypes.Array]]:
+  ) -> tuple[ctypes.Array, None | ctypes.Array]:
     cfg = self.config
     inputs = inputs.astype(cfg.dtype)
     gate_logits, pre_bias_logits = GateLogit(
@@ -1458,7 +1458,7 @@ class RoutedAndSharedMoE(nn.Module):
     config: Model configs.
     mesh: device mesh.
     kernel_init: Kernel function, passed to the dense layers.
-    kernel_axes: Tuple with axes to apply kernel function.
+    kernel_axes: tuple with axes to apply kernel function.
     weight_dtype: Type for the weights.
     dtype: Type for the dense layer.
     quant: Optional quantization config, no quantization if None.
@@ -1467,10 +1467,10 @@ class RoutedAndSharedMoE(nn.Module):
   config: ctypes.Config
   mesh: jax.sharding.Mesh
   kernel_init: attentions.NdInitializer
-  kernel_axes: Tuple[Optional[str], ...]
+  kernel_axes: tuple[None | str, ...]
   weight_dtype: ctypes.DType = jnp.float32
   dtype: ctypes.DType = jnp.float32
-  quant: Optional[quantizations.AqtQuantization] = None
+  quant: None | quantizations.AqtQuantization = None
 
   @nn.compact
   def __call__(self, inputs: ctypes.Array) -> ctypes.Array:

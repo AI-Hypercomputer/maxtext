@@ -20,7 +20,7 @@ limitations under the License.
 # Calling jax.device_count here prevents a "TPU platform already registered" error.
 # See github.com/google/maxtext/issues/20 for more
 
-from typing import Any, Sequence, Tuple
+from typing import Any, Sequence
 import datetime
 import functools
 import os
@@ -696,7 +696,7 @@ def train_loop(config, recorder, state=None):
   return state
 
 
-def initialize(argv: Sequence[str]) -> Tuple[pyconfig.HyperParameters, Any, Any]:
+def initialize(argv: Sequence[str]) -> tuple[pyconfig.HyperParameters, Any, Any]:
   """Initialization of hyperparameters and utilities"""
   pathwaysutils.initialize()
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")

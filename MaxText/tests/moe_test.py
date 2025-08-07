@@ -15,7 +15,6 @@
 
 import os.path
 import unittest
-from typing import Tuple
 
 import pytest
 
@@ -271,7 +270,7 @@ class MoeLoopBlock(nn.Module):
   num_experts: int
   num_experts_per_tok: int
   kernel_init: NdInitializer
-  kernel_axes: Tuple[str, ...]
+  kernel_axes: tuple[str, ...]
   weight_dtype: DType = jnp.float32
   dtype: DType = jnp.bfloat16
 

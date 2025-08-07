@@ -113,7 +113,7 @@ flags.DEFINE_bool(
 flags.DEFINE_string(
     "prefill_lengths_and_per_device_batch_sizes",
     "256,80|512,40|1024,20",
-    "List of prefill lengths and batch sizes to use for each engine. Format len_1,bs_1|len_2,bs_2|..",
+    "list of prefill lengths and batch sizes to use for each engine. Format len_1,bs_1|len_2,bs_2|..",
     required=False,
 )
 
@@ -302,7 +302,7 @@ class SUT:
     # pandas dataframe, it has tok
     self._dataset = data
 
-    # List of things with .id and .index
+    # list of things with .id and .index
     self._queries = None
 
     # index to loaded data

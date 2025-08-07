@@ -17,7 +17,7 @@ limitations under the License.
 """Create an Orbax CheckpointManager with specified (Async or not) Checkpointer."""
 
 import time
-from typing import Any, Optional, Union
+from typing import Any
 
 from absl import flags
 from etils import epath
@@ -102,7 +102,7 @@ def create_orbax_checkpoint_manager(
     enable_checkpointing: bool,
     use_async: bool,
     save_interval_steps: int,
-    dataset_type: Optional[str] = "tfds",
+    dataset_type: None | str = "tfds",
     orbax_logger: Any = None,  # pytype: disable=attribute-error
     use_ocdbt: bool = True,
     use_zarr3: bool = True,
@@ -277,14 +277,14 @@ def _replica_devices(device_array: np.ndarray, replica_axis_idx: int):
 
 
 def load_state_if_possible(
-    checkpoint_manager: Union[CheckpointManager, None],
-    data_iterator: Union[MultiHostDataLoadIterator, None],
+    checkpoint_manager: CheckpointManager | None,
+    data_iterator: MultiHostDataLoadIterator | None,
     load_parameters_from_path: str,
     load_full_state_from_path: str,
     checkpoint_storage_concurrent_gb: int,
     abstract_unboxed_pre_state: train_state.TrainState,
-    enable_single_replica_ckpt_restoring: Optional[bool] = False,
-    dataset_type: Optional[str] = "tfds",
+    enable_single_replica_ckpt_restoring: bool | None = False,
+    dataset_type: str | None = "tfds",
     step: int = -1,  # -1 means latest
     use_ocdbt=True,
     use_zarr3=True,

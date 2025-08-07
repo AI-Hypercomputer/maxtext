@@ -16,7 +16,6 @@ limitations under the License.
 
 """Input pipeline for gpt3 c4 mlperf dataset."""
 
-from typing import Optional
 import functools
 
 import numpy as np
@@ -163,7 +162,7 @@ def split_tokens_to_targets_length(dataset, sequence_length):
 def _pad_to_batch_size(
     ds: tf.data.Dataset,
     batch_size: int,
-    num_examples: Optional[int] = None,
+    num_examples: None | int = None,
 ) -> tf.data.Dataset:
   """Pad unevenly distributed eval data in each shard with new entries to multiples of batch size."""
 
@@ -277,7 +276,7 @@ def preprocess_eval_dataset(
     sp_tokenizer,
     eval_global_batch_size_to_load: int,
     max_target_length: int,
-    num_examples: Optional[int] = None,
+    num_examples: None | int = None,
     is_tokenized_dataset: bool = True,
 ) -> tf.data.Dataset:
   """Preprocess the evaluation dataset."""

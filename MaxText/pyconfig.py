@@ -394,7 +394,7 @@ def validate_and_assign_remat_tensors(keys):
   return keys
 
 
-def _lists_to_tuples(l: list[Any]) -> Union[tuple[Any], list[Any]]:
+def _lists_to_tuples(l: list[Any]) -> tuple[Any] | list[Any]:
   return tuple(_lists_to_tuples(x) for x in l) if isinstance(l, list) else l
 
 

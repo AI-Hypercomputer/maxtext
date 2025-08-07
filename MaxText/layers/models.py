@@ -16,8 +16,6 @@
 # pylint: disable=arguments-differ
 # pylint: disable=no-name-in-module
 
-from typing import Optional
-
 import jax.numpy as jnp
 from jax.sharding import Mesh
 
@@ -80,15 +78,15 @@ class Transformer(nn.Module):
       decoder_input_tokens: jnp.ndarray,
       decoder_positions: jnp.ndarray,
       decoder_segment_ids=None,
-      encoder_images: Optional[jnp.ndarray] = None,
+      encoder_images: None | jnp.ndarray = None,
       enable_dropout=True,
       model_mode=MODEL_MODE_TRAIN,
       previous_chunk=None,
-      true_length: Optional[int] = None,
-      slot: Optional[int] = None,
-      page_state: Optional[page_manager.PageState] = None,
-      decoder_target_tokens: Optional[jnp.ndarray] = None,
-      decoder_target_mask: Optional[jnp.ndarray] = None,
+      true_length: None | int = None,
+      slot: None | int = None,
+      page_state: None | page_manager.PageState = None,
+      decoder_target_tokens: None | jnp.ndarray = None,
+      decoder_target_mask: None | jnp.ndarray = None,
   ):
     """Applies Transformer decoder-branch on encoded-input and target.
 
@@ -189,16 +187,16 @@ class ZeroOneTransformer(nn.Module):
       decoder_input_tokens: jnp.ndarray,
       decoder_positions: jnp.ndarray,
       decoder_segment_ids=None,
-      encoder_images: Optional[jnp.ndarray] = None,
+      encoder_images: None | jnp.ndarray = None,
       enable_dropout=True,
       model_mode=MODEL_MODE_TRAIN,
       previous_chunk=None,
-      true_length: Optional[int] = None,
-      slot: Optional[int] = None,
-      page_state: Optional[page_manager.PageState] = None,
+      true_length: None | int = None,
+      slot: None | int = None,
+      page_state: None | page_manager.PageState = None,
       partition_spec=None,
-      decoder_target_tokens: Optional[jnp.ndarray] = None,
-      decoder_target_mask: Optional[jnp.ndarray] = None,
+      decoder_target_tokens: None | jnp.ndarray = None,
+      decoder_target_mask: None | jnp.ndarray = None,
   ):
     if self.is_initializing():
       return self.model(

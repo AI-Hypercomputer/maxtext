@@ -70,18 +70,17 @@ Example Invocations:
 """
 
 from pathlib import Path
+import argparse
+import logging
+import os
+
 from dotenv import load_dotenv  # If this is not available, try ``pip install python-dotenv``
 
 load_dotenv()
-import os, logging, sys
-from llm_agent import GeminiAgent
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-
-from orchestration_agent.Utils import parse_python_code
-
-from prompt_code_generation import CodeGeneration
-import argparse
+from MaxText.experimental.agent.code_generation_agent.llm_agent import GeminiAgent
+from MaxText.experimental.agent.code_generation_agent.prompt_code_generation import CodeGeneration
+from MaxText.experimental.agent.orchestration_agent.Utils import parse_python_code
 
 # Set up basic configuration
 logging.basicConfig(
@@ -91,7 +90,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("__name__")
 
-JAX_OUTPUT_DIR = "./dataset/jax_converted"  # Please set your output directory here, eg. "./dataset/jax_converted"
+JAX_OUTPUT_DIR = os.path.join(os.getcwd(), "dataset", "jax_converted")  # Please set your output directory here, eg. "./dataset/jax_converted"
 os.makedirs(JAX_OUTPUT_DIR, exist_ok=True)
 
 llm_agent = GeminiAgent(CodeGeneration["SystemPrompt"])

@@ -13,6 +13,7 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 """
+from typing import TypedDict, TypeVar
 
 """
 This file provides functionality to analyze a Python file and break it down into
@@ -51,7 +52,13 @@ class ReferenceVisitor(ast.NodeVisitor):
     self.generic_visit(node)
 
 
-class dependency_analyzer:
+SortedStructure = TypedDict('SortedStructure', {
+        "sorted_modules": dict,
+        "component_dependencies": dict,
+        "warning": str | None,
+    })
+
+class DependencyAnalyzer:
   """
   Analyzes a Python source file to find dependencies between all top-level
   definitions. It groups circular dependencies (Strongly Connected Components)
@@ -66,6 +73,7 @@ class dependency_analyzer:
     self.conditional_imports = []
     self.definitions = {}
     self.dependencies = defaultdict(set)
+    self.sorted_components = {}
     # Adjacency list for graph algorithms
     self.adj = defaultdict(list)
 
@@ -189,7 +197,7 @@ class dependency_analyzer:
     if conditional_import_components:
       self.sorted_components["conditional_imports"] = "\n\n".join(conditional_import_components)
 
-  def get_sorted_structure(self):
+  def get_sorted_structure(self) -> SortedStructure:
     """
     Topologically sorts the definitions and returns a structured output
     where cyclic dependencies are grouped into single components.
@@ -228,7 +236,6 @@ class dependency_analyzer:
           queue.append(v_scc_idx)
 
     # 4. Reconstruct the modules based on the sorted components.
-    self.sorted_components = {}
     comp_to_name_map = {}
     warning_message = None
 
@@ -311,7 +318,8 @@ class dependency_analyzer:
     }
 
 
-def get_modules_in_order(filepath):
+def get_modules_in_order(filepath: str) -> SortedStructure:
+  source_code = ''
   try:
     if filepath.startswith("https"):
       flag, source_code = get_github_file_content(filepath)
@@ -327,7 +335,7 @@ def get_modules_in_order(filepath):
     print(f"An error occurred: {e}")
     sys.exit(1)
   print(f"--- Analyzing '{filepath}' and creating structured output ---\n")
-  analyzer = dependency_analyzer(source_code)
+  analyzer = DependencyAnalyzer(source_code)
   return analyzer.get_sorted_structure()
 
 
@@ -365,7 +373,7 @@ def main():
   print("--- Sorted Modules (Topological Order) ---")
   print(json.dumps(list(result["sorted_modules"].keys()), indent=2))
 
-  print("\n--- Component Dependencies (Adjacency List) ---")
+  print("\n--- Component Dependencies (Adjacency list) ---")
   print(json.dumps(result["component_dependencies"], indent=2))
 
   if result["warning"]:

@@ -16,7 +16,7 @@ limitations under the License.
 
 """JAX implementation of the Multi Token Predicition https://arxiv.org/pdf/2412.19437 """
 
-from typing import Optional, Type
+from typing import Type
 
 import jax
 import jax.numpy as jnp
@@ -83,7 +83,7 @@ class MultiTokenPredictionLayer(nn.Module):
       prev_hidden_state: jnp.ndarray,
       target_token_embedding: jnp.ndarray,
       position_ids: jnp.ndarray,
-      decoder_segment_ids: Optional[jnp.ndarray],
+      decoder_segment_ids: None | jnp.ndarray,
       deterministic: bool,
       model_mode: str = MODEL_MODE_TRAIN,
   ) -> jnp.ndarray:

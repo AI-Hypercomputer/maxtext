@@ -16,7 +16,7 @@
 # pylint: disable=arguments-differ
 # pylint: disable=no-name-in-module
 
-from typing import Any, Optional
+from typing import Any
 import functools
 
 import jax
@@ -68,7 +68,7 @@ class DecoderLayer(nn.Module):
 
   config: Config
   mesh: Mesh
-  quant: Optional[Quant] = None
+  quant: None | Quant = None
 
   @nn.compact
   def __call__(
@@ -79,8 +79,8 @@ class DecoderLayer(nn.Module):
       deterministic,
       model_mode,
       previous_chunk=None,
-      slot: Optional[int] = None,
-      page_state: Optional[page_manager.PageState] = None,
+      slot: None | int = None,
+      page_state: None | page_manager.PageState = None,
   ):
     cfg = self.config
     mesh = self.mesh
@@ -214,8 +214,8 @@ class SequentialBlockDecoderLayers(nn.Module):
       decoder_positions,
       deterministic: bool,
       model_mode,
-      slot: Optional[int] = None,
-      page_state: Optional[page_manager.PageState] = None,
+      slot: None | int = None,
+      page_state: None | page_manager.PageState = None,
   ) -> jnp.ndarray:
     for lyr in range(self.num_decoder_layers):
       inputs = self.decoder_layer(config=self.config, mesh=self.mesh, name=f"layers_{lyr}", quant=self.quant)(
@@ -241,7 +241,7 @@ class Decoder(nn.Module):
   config: Config
   shared_embedding: nn.Module
   mesh: Mesh
-  quant: Optional[Quant] = None
+  quant: None | Quant = None
 
   def setup(self):
     """Initialize decoder layer."""
@@ -583,10 +583,10 @@ class Decoder(nn.Module):
       deterministic=False,
       model_mode=MODEL_MODE_TRAIN,
       previous_chunk=None,
-      slot: Optional[int] = None,
-      page_state: Optional[page_manager.PageState] = None,
-      bidirectional_mask: Optional[Any] = None,
-      image_embeddings: Optional[jnp.ndarray] = None,
+      slot: None | int = None,
+      page_state: None | page_manager.PageState = None,
+      bidirectional_mask: None | Any = None,
+      image_embeddings: None | jnp.ndarray = None,
   ):
     cfg = self.config
     mesh = self.mesh

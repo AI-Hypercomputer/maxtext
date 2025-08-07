@@ -18,7 +18,6 @@ limitations under the License.
 
 import dataclasses
 import warnings
-from typing import Dict
 from threading import current_thread
 import datasets
 from datasets.distributed import split_dataset_by_node
@@ -29,7 +28,7 @@ from MaxText import max_logging
 from MaxText import tokenizer
 from MaxText import multimodal_utils
 
-Features = Dict[str, tf.Tensor]
+Features = dict[str, tf.Tensor]
 AUTOTUNE = tf.data.experimental.AUTOTUNE
 
 ########## Functions used by TFDS pipeline

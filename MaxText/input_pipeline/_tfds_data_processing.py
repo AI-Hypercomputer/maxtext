@@ -16,7 +16,6 @@ limitations under the License.
 
 """Input pipeline for a LM1B dataset."""
 
-from typing import Optional
 import warnings
 import functools
 
@@ -89,7 +88,7 @@ def preprocessing_pipeline(
     tokenize: bool = True,
     add_bos: bool = True,
     add_eos: bool = True,
-    num_epochs: Optional[int] = 1,
+    num_epochs: None | int = 1,
     pack_examples: bool = True,
     shuffle_buffer_size: int = 1024,
     shift: bool = True,

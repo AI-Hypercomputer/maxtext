@@ -14,8 +14,6 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-from typing import Optional
-
 import jax
 from jax.ad_checkpoint import checkpoint_name
 from jax.sharding import Mesh
@@ -63,7 +61,7 @@ class Gemma3DecoderLayer(nn.Module):
 
   config: Config
   mesh: Mesh
-  quant: Optional[Quant] = None
+  quant: None | Quant = None
   attention_type: AttentionType = AttentionType.LOCAL_SLIDING
 
   @nn.compact
@@ -213,13 +211,13 @@ class Gemma3ScannableBlock(nn.Module):
   Attributes:
     config: Config, MaxText model config
     mesh: Mesh, JAX device mesh (used for sharding)
-    quant: Optional[Quant], quantization config
+    quant: None | Quant, quantization config
     num_of_layers: int, number of decoder layers in the block
   """
 
   config: Config
   mesh: Mesh
-  quant: Optional[Quant] = None
+  quant: None | Quant = None
   num_of_layers: int = 1
 
   @nn.compact

@@ -17,7 +17,7 @@
 import functools
 import json
 import re
-from typing import Tuple, Sequence
+from typing import Sequence
 from dataclasses import dataclass
 
 from aqt.jax.v2 import config as aqt_config
@@ -52,7 +52,7 @@ _TILE_SIZE = "tile_size"  # Tile size for subchannel
 class Quantization:
   """Base class for quantization configurations"""
 
-  def dot_general_cls(self, mesh_axes: Tuple[str, ...] = ()):
+  def dot_general_cls(self, mesh_axes: tuple[str, ...] = ()):
     """Placeholder for dot_general implementation in subclasses."""
 
   def einsum(self, dtype: DType = jnp.float32):
@@ -80,7 +80,7 @@ def _rhs_axis_metadata_wrapper(
     x: jnp.ndarray,
     tile_map,
     no_sharding_axis: Sequence[int],
-    mesh_axes: Tuple[str, ...],
+    mesh_axes: tuple[str, ...],
     is_tiled: bool,
     replicate_scale: bool = False,
 ):
@@ -139,7 +139,7 @@ class AqtQuantization:
     return quant_dg, is_tiled, tiling_fn
 
   def _get_rhs_axis_metadata_wrapper(
-      self, mesh_axes: Tuple[str, ...] = (), is_tiled: bool = False, replicate_scale: bool = False
+      self, mesh_axes: tuple[str, ...] = (), is_tiled: bool = False, replicate_scale: bool = False
   ):
     if self.quant_mode == aqt_flax.QuantMode.CONVERT:
       return None
@@ -147,7 +147,7 @@ class AqtQuantization:
         _rhs_axis_metadata_wrapper, mesh_axes=mesh_axes, is_tiled=is_tiled, replicate_scale=replicate_scale
     )
 
-  def dot_general_cls(self, mesh_axes: Tuple[str, ...] = ()):
+  def dot_general_cls(self, mesh_axes: tuple[str, ...] = ()):
     """Returns dot_general configured with aqt params."""
     if isinstance(self.quant_dg, dict):
       quant_dg, is_tiled, tiling_fn = self._get_mixed_precision_cfg()
@@ -170,7 +170,7 @@ class AqtQuantization:
     )
     return aqt_dg_cls
 
-  def einsum(self, mesh_axes: Tuple[str, ...] = ()):
+  def einsum(self, mesh_axes: tuple[str, ...] = ()):
     """Returns einsum configured with aqt params."""
     if isinstance(self.quant_dg, dict):
       quant_dg, is_tiled, tiling_fn = self._get_mixed_precision_cfg()
@@ -200,7 +200,7 @@ class Fp8Quantization(Quantization):
 
   quant_mode = "train"
 
-  def dot_general_cls(self, mesh_axes: Tuple[str, ...] = ()):
+  def dot_general_cls(self, mesh_axes: tuple[str, ...] = ()):
     """Returns dot_general configured with aqt params."""
     return nn.Fp8DirectDotGeneralOp
 
@@ -292,7 +292,7 @@ class NANOOFp8Quantization(Quantization):
 
   quant_mode = "train"
 
-  def dot_general_cls(self, mesh_axes: Tuple[str, ...] = ()):
+  def dot_general_cls(self, mesh_axes: tuple[str, ...] = ()):
     """Returns dot_general configured with aqt params."""
     return nn.NANOOFp8DotGeneralOp
 

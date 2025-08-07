@@ -17,7 +17,6 @@ limitations under the License.
 # pylint: disable=line-too-long, disable=bare-except, consider-using-generator
 """ Utils that are only interesting to MaxText. """
 
-from typing import Optional
 import functools
 import pickle
 
@@ -916,7 +915,7 @@ def get_abstract_state(model, tx, config, rng, mesh, is_training=True):
   )
 
 
-def get_prefill_kv_cache_annotations(model, config, rng, mesh, page_state: Optional[PageState] = None):
+def get_prefill_kv_cache_annotations(model, config, rng, mesh, page_state: None | PageState = None):
   """Get a shaped abstraction of the state (including optimizer)"""
 
   def init_kv_cache(model, config):
@@ -946,7 +945,7 @@ def get_prefill_kv_cache_annotations(model, config, rng, mesh, page_state: Optio
   return state_mesh_annotations
 
 
-def get_kv_cache_annotations(model, config, rng, mesh, page_state: Optional[PageState] = None):
+def get_kv_cache_annotations(model, config, rng, mesh, page_state: None | PageState = None):
   """Get a shaped abstraction of the state (including optimizer)"""
 
   def init_kv_cache(model, config):

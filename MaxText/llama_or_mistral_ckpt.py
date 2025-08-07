@@ -11,8 +11,6 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-from typing import Optional
-
 """
 Convert weights from a Llama or Mistral HuggingFace or PyTorch model to a MaxText one.
 
@@ -375,9 +373,9 @@ def initialize_self_attention_lora_kernels(
     module_name: str,
     layer_idx: int,
     reshape_a: bool = False,
-    shape_a: Optional[list[int]] = None,
+    shape_a: None | list[int] = None,
     reshape_b: bool = False,
-    shape_b: Optional[list[int]] = None,
+    shape_b: None | list[int] = None,
 ):
   """Helper function to initialize LoRA kernels for given target module.
 

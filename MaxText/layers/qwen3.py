@@ -18,8 +18,6 @@ limitations under the License.
 # pylint: disable=arguments-differ
 # pylint: disable=no-name-in-module
 
-from typing import Optional
-
 from jax.ad_checkpoint import checkpoint_name
 from jax.sharding import Mesh
 import jax.numpy as jnp
@@ -42,19 +40,19 @@ class Qwen3DecoderLayer(nn.Module):
 
   config: Config
   mesh: Mesh
-  quant: Optional[Quant] = None
+  quant: None | Quant = None
 
   @nn.compact
   def __call__(
       self,
       inputs: jnp.ndarray,
-      decoder_segment_ids: Optional[jnp.ndarray],
-      decoder_positions: Optional[jnp.ndarray],
+      decoder_segment_ids: None | jnp.ndarray,
+      decoder_positions: None | jnp.ndarray,
       deterministic: bool,
       model_mode: str,
       previous_chunk=None,
-      page_state: Optional[page_manager.PageState] = None,
-      slot: Optional[int] = None,
+      page_state: None | page_manager.PageState = None,
+      slot: None | int = None,
   ):
     cfg = self.config
     mesh = self.mesh

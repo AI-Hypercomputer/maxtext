@@ -16,7 +16,7 @@
 
 import os
 import uuid
-from typing import Sequence, List
+from typing import Sequence
 
 from absl import app
 
@@ -68,9 +68,9 @@ def main(argv: Sequence[str]) -> None:
   print("Initial decode state initialized.")
 
   # Keep track of results per stream (slot)
-  streams_results: dict[int, List[int]] = {i: [] for i in range(_NUM_STREAMS)}
-  streams_active: List[bool] = [False] * _NUM_STREAMS  # Track which slots are active
-  streams_finished: List[bool] = [False] * _NUM_STREAMS  # Track finished streams
+  streams_results: dict[int, list[int]] = {i: [] for i in range(_NUM_STREAMS)}
+  streams_active: list[bool] = [False] * _NUM_STREAMS  # Track which slots are active
+  streams_finished: list[bool] = [False] * _NUM_STREAMS  # Track finished streams
   streams_prefilled_count = 0
   streams_inserted_count = 0
 

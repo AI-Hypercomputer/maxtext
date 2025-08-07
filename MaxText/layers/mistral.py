@@ -18,9 +18,6 @@ limitations under the License.
 # pylint: disable=arguments-differ
 # pylint: disable=no-name-in-module
 
-
-from typing import Optional
-
 from jax.ad_checkpoint import checkpoint_name
 from jax.sharding import Mesh
 import jax.numpy as jnp
@@ -45,7 +42,7 @@ class MistralDecoderLayer(nn.Module):
 
   config: models.Config
   mesh: Mesh
-  quant: Optional[Quant] = None
+  quant: None | Quant = None
 
   @nn.compact
   def __call__(

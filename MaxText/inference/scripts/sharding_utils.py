@@ -12,10 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Tuple
-import matplotlib.pyplot as plt
 import pprint
+from typing import Sequence
+
 import numpy as np
+
+import matplotlib.pyplot as plt
 
 
 def latency_bound_comms(comm: float, latency=1e-6):
@@ -23,8 +25,8 @@ def latency_bound_comms(comm: float, latency=1e-6):
 
 
 def calculate_matmul_resources(
-    activations_shape: Tuple[int],
-    weights_shape: Tuple[int],
+    activations_shape: tuple[int, ...],
+    weights_shape: tuple[int, ...],
     ici_bandwidth: float,
     peak_flops: float,
     sD: int = 1,
@@ -35,7 +37,7 @@ def calculate_matmul_resources(
     activation_size_bytes: int = 2,
     weight_size_bytes: int = 2,
     ici_latency: float = 1e-6,
-    all_gather_axes: Tuple[int] = [],
+    all_gather_axes: Sequence[str] = tuple(),
     debug=True,
 ) -> dict[str, float]:
   """

@@ -96,7 +96,7 @@ def get_next_batch_sharded(local_iterator: Iterator, global_mesh: Mesh) -> jax.A
 class MultiHostDataLoadIterator:
   """fold get_next_batch_sharded into a iterator class"""
 
-  def __init__(self, dataloader: Union[tf.data.Dataset, Iterable], global_mesh: Mesh):
+  def __init__(self, dataloader: tf.data.Dataset | Iterable, global_mesh: Mesh):
     self.global_mesh = global_mesh
     self.dataloader = dataloader
     if isinstance(self.dataloader, tf.data.Dataset):

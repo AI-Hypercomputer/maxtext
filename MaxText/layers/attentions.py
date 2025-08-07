@@ -17,7 +17,7 @@
 import dataclasses
 import enum
 import functools
-from typing import Any, Callable, Iterable, Optional, Tuple, Union
+from typing import Any, Callable, Iterable
 from functools import partial
 import math
 
@@ -281,8 +281,8 @@ def attention_op_as_linen(
     reshape_q: bool = False,
     dropout_rate: float = 0.0,
     dtype: DType = jnp.float32,
-    quant: Optional[Quant] = None,
-    kv_quant: Optional[KVQuant] = None,
+    quant: None | Quant = None,
+    kv_quant: None | KVQuant = None,
     attention_type: AttentionType = AttentionType.GLOBAL,  # Default to global attention
     attn_logits_soft_cap: float | None = None,
     sliding_window_size: int | None = None,
@@ -362,8 +362,8 @@ class AttentionOp(nnx.Module):
       reshape_q: bool = False,
       dropout_rate: float = 0.0,
       dtype: DType = jnp.float32,
-      quant: Optional[Quant] = None,
-      kv_quant: Optional[KVQuant] = None,
+      quant: None | Quant = None,
+      kv_quant: None | KVQuant = None,
       attention_type: AttentionType = AttentionType.GLOBAL,  # Default to global attention
       attn_logits_soft_cap: float | None = None,
       sliding_window_size: int | None = None,
@@ -766,7 +766,7 @@ class AttentionOp(nnx.Module):
         out_specs=(bnd, bn, bn),
         check_rep=False,
     )
-    def wrap_ragged_attention(q: Array, k: Array, v: Array, lengths: Array, block_size: int) -> Tuple[Array, Array, Array]:
+    def wrap_ragged_attention(q: Array, k: Array, v: Array, lengths: Array, block_size: int) -> tuple[Array, Array, Array]:
       # Use the original gqa function to get the attention output
       """
       Wraps the GQA function with appropriate sharding.
@@ -1333,9 +1333,9 @@ class AttentionOp(nnx.Module):
     """Normalize across two cuDNN attentions
 
     Args:
-        local_outs (list): List of outputs entries for each cudnn attention
+        local_outs (list): list of outputs entries for each cudnn attention
           in shape [b, t, n, d].
-        local_stats (list): List of logsumexp entries for each cudnn attention
+        local_stats (list): list of logsumexp entries for each cudnn attention
           in shape [b, n, t].
 
     Returns:
@@ -1355,9 +1355,9 @@ class AttentionOp(nnx.Module):
     """Normalize across multiple localized attentions
 
     Args:
-        local_outs (list): List of unnormalized outputs entries for each local attention
-        local_maxes (list): List of max exponentials entries for each local attention
-        local_sums (list): List of exponential sum entries for each local attention
+        local_outs (list): list of unnormalized outputs entries for each local attention
+        local_maxes (list): list of max exponentials entries for each local attention
+        local_sums (list): list of exponential sum entries for each local attention
 
     Returns:
         Array: Combined attention that has been normalized
@@ -1384,8 +1384,8 @@ class AttentionOp(nnx.Module):
       cached_values=None,
       previous_chunk=None,
       bidirectional_mask=None,
-      slot: Optional[int] = None,
-      page_state: Optional[page_manager.PageState] = None,
+      slot: None | int = None,
+      page_state: None | page_manager.PageState = None,
   ):
     if cached_values is None:
       prefill_kv_cache, ar_kv_cache = None, None
@@ -1479,8 +1479,8 @@ def attention_as_linen(
     max_target_length: int,
     mesh: Mesh,
     attention_kernel: str,
-    inputs_q_shape: Tuple,
-    inputs_kv_shape: Tuple,
+    inputs_q_shape: tuple,
+    inputs_kv_shape: tuple,
     dtype: DType = jnp.float32,
     weight_dtype: DType = jnp.float32,
     max_prefill_predict_length: int = -1,
@@ -1488,8 +1488,8 @@ def attention_as_linen(
     kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "normal"),
     float32_qk_product: bool = False,  # computes logits in float32 for stability.
     float32_logits: bool = False,  # cast logits in float32 for stability.
-    quant: Optional[Quant] = None,
-    kv_quant: Optional[KVQuant] = None,
+    quant: None | Quant = None,
+    kv_quant: None | KVQuant = None,
     attention_type: AttentionType = AttentionType.GLOBAL,  # Default to global attention
     attn_logits_soft_cap: float | None = None,
     sliding_window_size: int | None = None,
@@ -1628,8 +1628,8 @@ class Attention(nnx.Module):
       max_target_length: int,
       mesh: Mesh,
       attention_kernel: str,
-      inputs_q_shape: Tuple,
-      inputs_kv_shape: Tuple,
+      inputs_q_shape: tuple,
+      inputs_kv_shape: tuple,
       dtype: DType = jnp.float32,
       weight_dtype: DType = jnp.float32,
       max_prefill_predict_length: int = -1,
@@ -1637,8 +1637,8 @@ class Attention(nnx.Module):
       kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "normal"),
       float32_qk_product: bool = False,  # computes logits in float32 for stability.
       float32_logits: bool = False,  # cast logits in float32 for stability.
-      quant: Optional[Quant] = None,
-      kv_quant: Optional[KVQuant] = None,
+      quant: None | Quant = None,
+      kv_quant: None | KVQuant = None,
       attention_type: AttentionType = AttentionType.GLOBAL,  # Default to global attention
       attn_logits_soft_cap: float | None = None,
       sliding_window_size: int | None = None,
@@ -1675,7 +1675,7 @@ class Attention(nnx.Module):
       model_mode: str = MODEL_MODE_TRAIN,
       base_kv_cache: bool = True,
       name: str | None = None,
-      rngs: Optional[nnx.Rngs] = None,
+      rngs: None | nnx.Rngs = None,
   ):
     """Initializes the Attention module.
 
@@ -1849,7 +1849,7 @@ class Attention(nnx.Module):
       self.key_norm = None
 
 
-  def init_query_w(self, inputs_q_shape: Tuple) -> nnx.Module:
+  def init_query_w(self, inputs_q_shape: tuple) -> nnx.Module:
     """Query projection initialization."""
 
     # NOTE: T5 does not explicitly rescale the attention logits by
@@ -1883,7 +1883,7 @@ class Attention(nnx.Module):
 
     return self.query(inputs_q)
 
-  def init_kv_w(self, inputs_kv_shape: Tuple) -> nnx.Module:
+  def init_kv_w(self, inputs_kv_shape: tuple) -> nnx.Module:
     """Initializes the key or value projection.
 
     Args:
@@ -1940,7 +1940,7 @@ class Attention(nnx.Module):
     else:
       raise ValueError(f"proj_name must be 'key' or 'value', but got {proj_name}")
 
-  def init_qkv_w(self, inputs_shape: Tuple) -> nnx.Module:
+  def init_qkv_w(self, inputs_shape: tuple) -> nnx.Module:
     return DenseGeneral(
         in_features_shape=self.convert_dense_general_inputs_shape(inputs_shape),
         out_features_shape=(3, self.num_query_heads, self.head_dim),
@@ -1990,8 +1990,8 @@ class Attention(nnx.Module):
   def convert_dense_general_inputs_shape(
       self,
       inputs_shape: tuple[int, ...] | None = None,
-      axis: Union[Iterable[int], int] = -1,
-  ) -> Union[Iterable[int], int]:
+      axis: Iterable[int] | int = -1,
+  ) -> Iterable[int] | int:
     axis = canonicalize_tuple(axis)
     return tuple(inputs_shape[ax] for ax in normalize_axes(axis, len(inputs_shape)))
 
@@ -2054,7 +2054,7 @@ class Attention(nnx.Module):
     return rotary_embedding
 
 
-  def apply_rotary_embedding(self, inputs: Array, inputs_positions: Optional[Array | None] = None):
+  def apply_rotary_embedding(self, inputs: Array, inputs_positions: None | Array = None):
     """Applies rotary embeddings, handling different model types.
 
     Args:
@@ -2067,7 +2067,7 @@ class Attention(nnx.Module):
     """
     return self.rotary_embedding(inputs, inputs_positions)
 
-  def init_kv_caches(self, inputs_kv_shape: Tuple):
+  def init_kv_caches(self, inputs_kv_shape: tuple):
     """Initializes KVCache.
 
     Args:
@@ -2144,8 +2144,8 @@ class Attention(nnx.Module):
       model_mode: str = MODEL_MODE_TRAIN,
       deterministic: bool = False,
       previous_chunk: Any = None,
-      slot: Optional[int] = None,
-      page_state: Optional[page_manager.PageState] = None,
+      slot: None | int = None,
+      page_state: None | page_manager.PageState = None,
       bidirectional_mask: Any = None,
   ):
     """Applies Attention on the input data.
@@ -2277,8 +2277,8 @@ def mla_as_linen(
     max_target_length: int,
     mesh: Mesh,
     attention_kernel: str,
-    inputs_q_shape: Tuple,
-    inputs_kv_shape: Tuple,
+    inputs_q_shape: tuple,
+    inputs_kv_shape: tuple,
     dtype: DType = jnp.float32,
     weight_dtype: DType = jnp.float32,
     max_prefill_predict_length: int = -1,
@@ -2286,8 +2286,8 @@ def mla_as_linen(
     kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "normal"),
     float32_qk_product: bool = False,  # computes logits in float32 for stability.
     float32_logits: bool = False,  # cast logits in float32 for stability.
-    quant: Optional[Quant] = None,
-    kv_quant: Optional[KVQuant] = None,
+    quant: None | Quant = None,
+    kv_quant: None | KVQuant = None,
 
     attention_type: AttentionType = AttentionType.GLOBAL,  # Default to global attention
     attn_logits_soft_cap: float | None = None,
@@ -2420,8 +2420,8 @@ class MLA(Attention):
       max_target_length: int,
       mesh: Mesh,
       attention_kernel: str,
-      inputs_q_shape: Tuple,
-      inputs_kv_shape: Tuple,
+      inputs_q_shape: tuple,
+      inputs_kv_shape: tuple,
       dtype: DType = jnp.float32,
       weight_dtype: DType = jnp.float32,
       max_prefill_predict_length: int = -1,
@@ -2429,8 +2429,8 @@ class MLA(Attention):
       kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "normal"),
       float32_qk_product: bool = False,  # computes logits in float32 for stability.
       float32_logits: bool = False,  # cast logits in float32 for stability.
-      quant: Optional[Quant] = None,
-      kv_quant: Optional[KVQuant] = None,
+      quant: None | Quant = None,
+      kv_quant: None | KVQuant = None,
       attention_type: AttentionType = AttentionType.GLOBAL,  # Default to global attention
       attn_logits_soft_cap: float | None = None,
       sliding_window_size: int | None = None,
@@ -2475,7 +2475,7 @@ class MLA(Attention):
       mscale: float = 1.0,  # scaling factor for softmax
       rope_factor: float = 40.0,  # rotary embedding factor
       name: str | None = None,
-      rngs: Optional[nnx.Rngs] = None,
+      rngs: None | nnx.Rngs = None,
   ):
     """Initializes the MLA module.
 
@@ -2730,7 +2730,7 @@ class MLA(Attention):
       value = nn.with_logical_constraint(value, self.value_axis_names)
     return key, value
 
-  def init_mla_kv_caches(self, inputs_kv_shape: Tuple):
+  def init_mla_kv_caches(self, inputs_kv_shape: tuple):
     """Initializes MlaKVCache.
 
     Args:
@@ -2846,9 +2846,9 @@ class MLA(Attention):
       model_mode: str = MODEL_MODE_TRAIN,
       deterministic: bool = False,
       previous_chunk: Any = None,
-      slot: Optional[int] = None,
-      page_state: Optional[page_manager.PageState] = None,
-      bidirectional_mask: Optional[Any] = None,
+      slot: None | int = None,
+      page_state: None | page_manager.PageState = None,
+      bidirectional_mask: None | Any = None,
   ) -> Array:
     """Forward pass for MLA, reusing `AttentionOp` for the actual attention.
 
