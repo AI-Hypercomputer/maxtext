@@ -215,7 +215,7 @@ class TransformerNNX(nnx.Module):
       # By convention, this is the last layer in the list.
       mtp_layer = layer_types[-1]
       mtp_block_linen = MultiTokenPredictionBlock(
-          config=self.config, mesh=self.mesh, name="mtp_block", transformer_layer_module=mtp_layer, decoder=self.decoder
+          config=self.config, mesh=self.mesh, name="mtp_block", transformer_layer_module=mtp_layer, decoder=decoder_linen
       )
       self.mtp_block = nnx_wrappers.ToNNX(mtp_block_linen, rngs=rngs)
       self.mtp_block.lazy_init(
