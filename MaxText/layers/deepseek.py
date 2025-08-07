@@ -77,10 +77,9 @@ def self_attention_with_norm(obj: DeepSeekCommonAttribute, inputs: Array, decode
 def post_process(cfg, layer_output, sow):
   """postprocessing."""
   if cfg.record_internal_nn_metrics:
-    sow("intermediates", "activation_mean", jnp.mean(layer_output))
-    sow("intermediates", "activation_stdev", jnp.std(layer_output))
-    sow(
-        "intermediates",
+    sow(nnx.Intermediate, "activation_mean", jnp.mean(layer_output))
+    sow(nnx.Intermediate, "activation_stdev", jnp.std(layer_output))
+    sow(nnx.Intermediate,
         "activation_fraction_zero",
         jnp.sum(layer_output == 0) / jnp.size(layer_output),
     )
@@ -192,7 +191,7 @@ class BaseDeepSeekLayer(nnx.Module):
         page_state,
         slot,
     )
-    
+
     if isinstance(self.mlp_block, linears.MlpBlock):
       mlp_lnx = self.mlp_block(hidden_states, deterministic=deterministic)
     elif isinstance(self.mlp_block, moe.RoutedAndSharedMoE):
