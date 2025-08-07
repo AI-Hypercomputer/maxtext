@@ -26,19 +26,20 @@ def build_maxtext_nnx_llama(
     init_seq_len: int = 1,
 ) -> LlamaTransformerNNX:
     """Instantiate & initialize the raw LlamaTransformerNNX model."""
-    model = LlamaTransformerNNX(config, mesh=mesh, rngs=rngs, enable_dropout=enable_dropout)
+    with mesh:
+        model = LlamaTransformerNNX(config, mesh=mesh, rngs=rngs, enable_dropout=enable_dropout)
 
-    # Lazy variable materialization using dummy shapes; real weights loaded later.
-    dummy_tokens = jnp.zeros((init_batch_size, init_seq_len), dtype=jnp.int32)
-    dummy_pos    = jnp.zeros_like(dummy_tokens)
+        # Lazy variable materialization using dummy shapes; real weights loaded later.
+        dummy_tokens = jnp.zeros((init_batch_size, init_seq_len), dtype=jnp.int32)
+        dummy_pos    = jnp.zeros_like(dummy_tokens)
 
-    # This call will create params in submodules
-    _ = model.forward_train(
-        decoder_input_tokens=dummy_tokens,
-        decoder_positions=dummy_pos,
-        decoder_segment_ids=None,
-        attention_mask=None,
-    )
+        # This call will create params in submodules
+        _ = model.forward_train(
+            decoder_input_tokens=dummy_tokens,
+            decoder_positions=dummy_pos,
+            decoder_segment_ids=None,
+            attention_mask=None,
+        )
     return model
 
 #Anisha: this is the mt.from_pretrained that we need

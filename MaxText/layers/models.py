@@ -182,26 +182,27 @@ class LlamaTransformerNNX(nnx.Module):
         self.config = config
         self.mesh = mesh
 
-        # ------------------------------------------------------------------
-        # Build submodules
-        # ------------------------------------------------------------------
-       
-        self.token_embedder = Embed(
-            num_embeddings=config.vocab_size,
-            num_features=config.emb_dim,
-            config=config,
-            rngs=rngs,
-        )
-        self.mlp = linears.MlpBlock(
-            config=config,
-            in_features=config.emb_dim,
-            intermediate_dim=config.mlp_dim,
-            activations=config.mlp_activations,
-            intermediate_dropout_rate=config.dropout_rate,
-            dtype=config.dtype,
-            weight_dtype=config.weight_dtype,
-            rngs=rngs,
-        )
+        with self.mesh:
+            # ------------------------------------------------------------------
+            # Build submodules
+            # ------------------------------------------------------------------
+
+            self.token_embedder = Embed(
+                num_embeddings=config.vocab_size,
+                num_features=config.emb_dim,
+                config=config,
+                rngs=rngs,
+            )
+            self.mlp = linears.MlpBlock(
+                config=config,
+                in_features=config.emb_dim,
+                intermediate_dim=config.mlp_dim,
+                activations=config.mlp_activations,
+                intermediate_dropout_rate=config.dropout_rate,
+                dtype=config.dtype,
+                weight_dtype=config.weight_dtype,
+                rngs=rngs,
+            )
 
      # ------------------------------------------------------------------ #
     # Mask utility
