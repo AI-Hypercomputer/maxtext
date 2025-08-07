@@ -814,7 +814,7 @@ llama3_1_8b_8192 = _add_to_model_dictionary(
         model_name="llama3_1-8b-8192",
         model_type="llama3.1-8b",
         tuning_params={
-            "per_device_batch_size": BATCH_SIZE,
+            "per_device_batch_size": 4,
             "ici_fsdp_parallelism": -1,
             "remat_policy": "custom",
             "decoder_layer_input": "offload",
@@ -840,7 +840,6 @@ llama3_1_8b_8192 = _add_to_model_dictionary(
             "profiler": "xplane",
             "skip_first_n_steps_for_profiler": 10,
             "profiler_steps": 5,
-            "quantization": QUANTIZATION
         },
         xla_flags=(
             xla_flags_library.DENSE_VMEM_LIMIT_FLAG
@@ -851,18 +850,10 @@ llama3_1_8b_8192 = _add_to_model_dictionary(
             + xla_flags_library.HOST_OFFLOAD_FLAGS
         ),
         pathways_xla_flag_options={
-            xla_flags_library.REMOVE: [
-                "--2a886c8_chip_config_name=megachip_tccontrol"
-            ],
-            xla_flags_library.ADD_SERVER: (
-                xla_flags_library.ENHANCED_LAUNCH_BARRIER
-            ),
-            xla_flags_library.ADD_PROXY: (
-                xla_flags_library.ENHANCED_LAUNCH_BARRIER
-            ),
-            xla_flags_library.ADD_WORKER: (
-                xla_flags_library.ENHANCED_LAUNCH_BARRIER
-            ),
+            xla_flags_library.REMOVE: ["--2a886c8_chip_config_name=megachip_tccontrol"],
+            xla_flags_library.ADD_SERVER: (xla_flags_library.ENHANCED_LAUNCH_BARRIER),
+            xla_flags_library.ADD_PROXY: (xla_flags_library.ENHANCED_LAUNCH_BARRIER),
+            xla_flags_library.ADD_WORKER: (xla_flags_library.ENHANCED_LAUNCH_BARRIER),
         },
     ),
 )
@@ -990,7 +981,6 @@ llama3_1_70b_8192 = _add_to_model_dictionary(
             "profiler": "xplane",
             "skip_first_n_steps_for_profiler": 10,
             "profiler_steps": 5,
-            "quantization": QUANTIZATION
         },
         xla_flags=(
             xla_flags_library.DENSE_VMEM_LIMIT_FLAG
@@ -1733,7 +1723,7 @@ mixtral_8x7b_dropless = _add_to_model_dictionary(
         model_name="mixtral_8x7b_dropless",
         model_type="mixtral-8x7b",
         tuning_params={
-            "per_device_batch_size": BATCH_SIZE,
+            "per_device_batch_size": 12,
             "ici_fsdp_parallelism": -1,
             "max_target_length": 4096,
             "remat_policy": "full",
@@ -1750,7 +1740,6 @@ mixtral_8x7b_dropless = _add_to_model_dictionary(
             "sa_block_q_dq": 2048,
             "megablox": True,
             "sparse_matmul": True,
-            "quantization": QUANTIZATION
         },
         xla_flags=(
             xla_flags_library.MOE_VMEM_LIMIT_FLAG
@@ -2120,7 +2109,7 @@ llama3_1_405b_8192_fsdp_dcn_mlperf = _add_to_model_dictionary(
         tuning_params={
             "per_device_batch_size": 1,
             "ici_fsdp_parallelism": 256,
-            "dcn_fsdp_parallelism": 4,
+            "dcn_fsdp_parallelism": 2,
             "remat_policy": "custom",
             "decoder_layer_input": "offload",
             "max_target_length": 8192,
