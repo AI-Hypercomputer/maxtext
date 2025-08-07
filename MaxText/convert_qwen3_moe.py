@@ -138,8 +138,8 @@ def convert_hf_to_maxtext(base_model_path: str, model_params: dict) -> dict:
     s_attn["key"]["kernel"] = np.zeros((num_layers, hidden_size, num_kv_heads, head_dim), dtype=np.float16)
     s_attn["value"]["kernel"] = np.zeros((num_layers, hidden_size, num_kv_heads, head_dim), dtype=np.float16)
     s_attn["out"]["kernel"] = np.zeros((num_layers, num_heads, head_dim, hidden_size), dtype=np.float16)
-    s_attn["query_norm"]["scale"] = np.zeros((num_layers, num_heads * head_dim), dtype=np.float16)
-    s_attn["key_norm"]["scale"] = np.zeros((num_layers, num_kv_heads * head_dim), dtype=np.float16)
+    s_attn["query_norm"]["scale"] = np.zeros((num_layers, head_dim), dtype=np.float16)
+    s_attn["key_norm"]["scale"] = np.zeros((num_layers, head_dim), dtype=np.float16)
     moe["gate"]["kernel"] = np.zeros((num_layers, hidden_size, num_experts), dtype=np.float16)
     moe["wi_0"] = np.zeros((num_experts, num_layers, hidden_size, moe_intermediate_size), dtype=np.float16)
     moe["wi_1"] = np.zeros((num_experts, num_layers, hidden_size, moe_intermediate_size), dtype=np.float16)
@@ -207,3 +207,4 @@ if __name__ == "__main__":
     args = parser.parse_args()
     os.makedirs(args.maxtext_model_path, exist_ok=True)
     main(args)
+    
