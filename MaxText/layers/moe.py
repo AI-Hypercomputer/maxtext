@@ -643,7 +643,9 @@ class RoutedMoE(nn.Module):
         if self.config.quantization == "int8":
           lhs_quantize_dtype = jnp.int8
           rhs_quantize_dtype = jnp.int8
-
+        elif self.config.quantization == "fp8":
+          lhs_quantize_dtype = jnp.float8_e4m3fn
+          rhs_quantize_dtype = jnp.float8_e4m3fn
       m, k, n = inputs.shape[0], inputs.shape[1], kernel.shape[2]
       tiling = (
           min(tile_size[0], m),

@@ -312,7 +312,6 @@ LutFn = Callable[[int, int, int], Optional[tuple[int, int, int]]]
         "lhs_quantize_dtype",
         "rhs_quantize_dtype",
     ],
-    inline=True,
 )
 def gmm(
     lhs: jnp.ndarray,
@@ -402,7 +401,6 @@ def gmm(
       visit_empty_groups=False,
   )
 
-  # We need to know contracting axis when we quantized lhs and rhs
   # Thus move this code part outside of kernel.
   if transpose_rhs:
     dot_general_dims = (((1,), (1,)), ((), ()))

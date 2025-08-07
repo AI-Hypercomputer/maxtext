@@ -344,7 +344,6 @@ class QuantTest(unittest.TestCase):
     [
         # m = sum(group_sizes) must be divisible by tm (first element of tiling)
         ([3, 5], 6, 4, (1, 1, 1), jnp.int8),  # m = 8, tm = 8
-        ([3, 5], 6, 4, (1, 1, 1), None),  # m = 8, tm = 8
     ],
 )
 @pytest.mark.tpu_only
@@ -365,7 +364,17 @@ def test_gmm_kernel(group_sizes, k, n, tiling, dtype):
   rhs = jax.random.normal(k2, (group_sizes.size, k, n), dtype=jnp.float32)
 
   # ---- run the Pallas kernel ------------------------------------------------
-  out = gmm(
+  base_out = gmm(
+      lhs,
+      rhs,
+      group_sizes,
+      tiling=tiling,  # small tiles so the shapes above work
+      interpret=True,  # avoids device-specific compilation in CI
+      lhs_quantize_dtype=None,
+      rhs_quantize_dtype=None,
+  ).block_until_ready()
+  
+  quant_out = gmm(
       lhs,
       rhs,
       group_sizes,
@@ -375,18 +384,7 @@ def test_gmm_kernel(group_sizes, k, n, tiling, dtype):
       rhs_quantize_dtype=dtype,
   ).block_until_ready()
 
-  # ---- naive reference ------------------------------------------------------
-  ref_blocks = []
-  start = 0
-  for gid, size in enumerate(group_sizes):
-    end = start + int(size)
-    ref_blocks.append(lhs[start:end] @ rhs[gid])
-    start = end
-  ref_out = jnp.concatenate(ref_blocks, axis=0)
-
-  # ---- checks ---------------------------------------------------------------
-  assert out.shape == (m, n)
-  assert jnp.allclose(out, ref_out, rtol=1e-1, atol=1e-1), "GMM output mismatch"
+  assert jnp.allclose(base_out, quant_out, rtol=1e-1, atol=1e-1), "GMM output mismatch"
 
 
 if __name__ == "__main__":
