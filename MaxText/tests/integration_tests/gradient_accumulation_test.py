@@ -23,7 +23,7 @@ import random
 import os.path
 
 from MaxText.train import main as train_main
-from MaxText.globals import PKG_DIR
+from MaxText.globals import PKG_DIR, tpu_present
 
 
 def generate_random_string(length=10):
@@ -35,6 +35,7 @@ class GradientAccumulationTest(unittest.TestCase):
 
   @pytest.mark.integration_test
   @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_grad_accumulate_same_loss(self):
     random_suffix = generate_random_string()
     temp_dir = tempfile.gettempdir()

@@ -22,7 +22,7 @@ import os.path
 
 from MaxText import profiler
 from MaxText import pyconfig
-from MaxText.globals import PKG_DIR
+from MaxText.globals import PKG_DIR, tpu_present
 
 
 class ProfilerTest(unittest.TestCase):
@@ -30,6 +30,7 @@ class ProfilerTest(unittest.TestCase):
 
   # These periodic proilfer tests can run on any platform (cpu, gpu or tpu)
   @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_periodic_profiler_third_period_starts(self):
     config = pyconfig.initialize(
         [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
@@ -46,6 +47,7 @@ class ProfilerTest(unittest.TestCase):
     assert prof.should_activate_periodic_profile(step)
 
   @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_periodic_profiler_not_start_middle_period(self):
     config = pyconfig.initialize(
         [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
@@ -62,6 +64,7 @@ class ProfilerTest(unittest.TestCase):
     assert not prof.should_activate_periodic_profile(step)
 
   @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_periodic_profiler_third_period_ends(self):
     config = pyconfig.initialize(
         [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
@@ -78,6 +81,7 @@ class ProfilerTest(unittest.TestCase):
     assert prof.should_deactivate_periodic_profile(step)
 
   @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_periodic_profiler_third_period_middle_not_end(self):
     config = pyconfig.initialize(
         [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],

@@ -17,6 +17,7 @@ import os.path
 import unittest
 from typing import Tuple
 
+import numpy as np
 import pytest
 
 import jax
@@ -29,7 +30,7 @@ from flax.linen import partitioning as nn_partitioning
 from MaxText import maxtext_utils
 from MaxText import pyconfig
 from MaxText.common_types import Config, DType
-from MaxText.globals import PKG_DIR
+from MaxText.globals import PKG_DIR, tpu_present, get_devices
 from MaxText.layers.linears import mlp_block
 from MaxText.layers import moe
 from MaxText.layers.initializers import NdInitializer, nd_dense_init
@@ -53,7 +54,10 @@ class TokenDroppingTest(unittest.TestCase):
         capacity_factor=2,
     )
     self.rng = jax.random.PRNGKey(42)
-    devices_array = maxtext_utils.create_device_mesh(self.cfg)
+    if jax.device_count() == 1:
+      devices_array = np.array(get_devices()).reshape((1,) * len(self.cfg.mesh_axes))
+    else:
+      devices_array = maxtext_utils.create_device_mesh(config=self.cfg)
     self.model = moe.RoutedMoE(
         name="MoeBlock",
         config=self.cfg,
@@ -159,6 +163,7 @@ class TokenDroppingTest(unittest.TestCase):
     self.assertTrue((expected_dispatch_mask == actual_dispatch_mask).all())
     self.assertTrue(jax.numpy.allclose(expected_combine_mask, actual_combine_mask, rtol=1e-02, atol=1e-02))
 
+
 class MlpBlockTest(unittest.TestCase):
 
   def setUp(self):
@@ -187,12 +192,13 @@ class MlpBlockTest(unittest.TestCase):
         weight_dtype=jnp.bfloat16,
         name="mlp",
         quant=quant,
-        use_bias=True
+        use_bias=True,
     )
 
   def test_init(self):
     x = jnp.array([1.0, 2.0])
     self.model.init({"params": self.rng, "dropout": self.rng}, x)
+
 
 class DeepSeekRoutingTest(unittest.TestCase):
 
@@ -214,7 +220,10 @@ class DeepSeekRoutingTest(unittest.TestCase):
         sparse_matmul=True,
     )
     self.rng = jax.random.PRNGKey(42)
-    devices_array = maxtext_utils.create_device_mesh(self.cfg)
+    if jax.device_count() == 1:
+      devices_array = np.array(get_devices()).reshape((1,) * len(self.cfg.mesh_axes))
+    else:
+      devices_array = maxtext_utils.create_device_mesh(self.cfg)
     self.model = moe.RoutedMoE(
         name="MoeBlock",
         config=self.cfg,
@@ -375,6 +384,7 @@ class RoutedMoeTest(unittest.TestCase):
     return output
 
   @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_megablox(self):
     cfg = pyconfig.initialize(
         [None, os.path.join(PKG_DIR, "configs", "base.yml")],
@@ -396,13 +406,17 @@ class RoutedMoeTest(unittest.TestCase):
         dtype=cfg.dtype,
     )
 
-    devices_array = maxtext_utils.create_device_mesh(cfg)
+    if device_count == 1:
+      devices_array = np.array(get_devices()).reshape((1,) * len(cfg.mesh_axes))
+    else:
+      devices_array = maxtext_utils.create_device_mesh(cfg)
     mesh = Mesh(devices_array, cfg.mesh_axes)
     variables, expected_output = self.get_expected_output(rng_model, hidden_states, cfg)
     actual_output, _ = self.get_moe_output(variables, hidden_states, cfg, mesh)
     self.assertTrue(jax.numpy.allclose(expected_output, actual_output, rtol=1e-02, atol=1e-02, equal_nan=False))
 
   @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_ragged_dot(self):
     cfg = pyconfig.initialize(
         [None, os.path.join(PKG_DIR, "configs", "base.yml")],
@@ -431,6 +445,7 @@ class RoutedMoeTest(unittest.TestCase):
     self.assertTrue(jax.numpy.allclose(expected_output, actual_output, rtol=1e-02, atol=1e-02, equal_nan=False))
 
   @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_dense(self):
     cfg = pyconfig.initialize(
         [None, os.path.join(PKG_DIR, "configs", "base.yml")],
@@ -459,6 +474,7 @@ class RoutedMoeTest(unittest.TestCase):
     self.assertTrue(jax.numpy.allclose(expected_output, actual_output, rtol=1e-05, atol=1e-05, equal_nan=False))
 
   @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_megablox_expert_parallelism(self):
     cfg = pyconfig.initialize(
         [None, os.path.join(PKG_DIR, "configs", "base.yml")],
@@ -489,6 +505,7 @@ class RoutedMoeTest(unittest.TestCase):
       self.assertTrue(jax.numpy.allclose(expected_output, actual_output, rtol=1e-02, atol=1e-02, equal_nan=False))
 
   @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_megablox_tp_transpose_parallelism(self):
     cfg = pyconfig.initialize(
         [None, os.path.join(PKG_DIR, "configs", "base.yml")],
@@ -534,6 +551,7 @@ class RoutedMoeTest(unittest.TestCase):
       self.assertTrue(jax.numpy.allclose(tp_output, tp_transpose_output, rtol=1e-05, atol=1e-05, equal_nan=False))
 
   @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_megablox_context_parallelism(self):
     cfg = pyconfig.initialize(
         [None, os.path.join(PKG_DIR, "configs", "base.yml")],

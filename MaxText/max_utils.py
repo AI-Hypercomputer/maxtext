@@ -22,6 +22,7 @@ import time
 import os
 import socket
 import subprocess
+import sys
 import collections
 from collections.abc import Sequence
 from typing import Any, Tuple
@@ -74,12 +75,12 @@ def l2norm_pytree(x):
   return jnp.sqrt(jax.tree_util.tree_reduce(lambda x, y: x + jnp.sum(jnp.square(y)), x, initializer=0.0))
 
 
-def calculate_num_params_from_pytree(params):
-  params_sizes = jax.tree_util.tree_map(jax.numpy.size, params)
-  total_parameters = jax.tree_util.tree_reduce(lambda x, y: x + y, params_sizes)
-  assert total_parameters >= 0
-  return total_parameters
-
+def calculate_num_params_from_pytree(pytree):
+  return sum(
+    leaf.size if isinstance(leaf, (np.ndarray, jax.Array))
+    else 1
+    for leaf in jax.tree_util.tree_leaves(pytree)
+  )
 
 def calculate_total_params_per_chip(params):
   """Calculate total params per chip."""
@@ -919,8 +920,7 @@ def reorder_mask_load_balancing(tensor, cp_size: int, seq_dim: int):
 
 
 def parse_custom_args(argv):
-  """ Load multiple YAML config files from command line arguments.
-  """
+  """Load multiple YAML config files from command line arguments."""
   configs = []
   current_argv = []
   python_script = argv[0]
@@ -954,7 +954,7 @@ def unscan_train_state_params(params, sharding, mesh, scan_axis, layer_groups):
     scanned_layers = decoder[layer_name]
 
     def strip_axis(pspec):
-      return jax.sharding.PartitionSpec(*(pspec[:scan_axis] + pspec[scan_axis+1:]))
+      return jax.sharding.PartitionSpec(*(pspec[:scan_axis] + pspec[scan_axis + 1 :]))
 
     old_spec = jax.tree_util.tree_map(lambda x: x.spec, sharding[layer_name])
     new_spec = jax.tree_util.tree_map(strip_axis, old_spec)
@@ -962,6 +962,7 @@ def unscan_train_state_params(params, sharding, mesh, scan_axis, layer_groups):
 
     def slice_layer(arr, i):
       return jax.tree_util.tree_map(lambda x: jnp.take(x, i, axis=scan_axis), arr)
+
     p_slice_layer = jax.jit(slice_layer, out_shardings=new_sharding)
 
     for i in range(num_layers):
@@ -970,10 +971,11 @@ def unscan_train_state_params(params, sharding, mesh, scan_axis, layer_groups):
 
     del decoder[layer_name]  # Free memory
 
+
 def rescan_train_state_params(params, source_shardings, scan_axis, layer_groups):
   """
   Reconstruct scanned layers from per-layer entries using minimal HBM.
-  
+
   Args:
     train_state: training state with unrolled {layer_name}_{i} entries
     scan_axis: axis to scan over
@@ -990,9 +992,9 @@ def rescan_train_state_params(params, source_shardings, scan_axis, layer_groups)
 
     # Create a wrapper that allows pjit + donation
     compiled_stack = jax.jit(
-      stack_layers,
-      out_shardings=sharding[layer_name],
-      # donate_argnums=tuple(range(num_layers)),
+        stack_layers,
+        out_shardings=sharding[layer_name],
+        # donate_argnums=tuple(range(num_layers)),
     )
 
     # Collect per-layer entries for stacking
@@ -1003,3 +1005,34 @@ def rescan_train_state_params(params, source_shardings, scan_axis, layer_groups)
 
     # Store result and clear temporary memory
     decoder[layer_name] = scanned
+
+
+def gcs_bucket_accessible(bucket_name="maxtext-dataset"):
+  """
+  Check whether a Google Cloud Storage bucket is accessible.
+
+  Args:
+    bucket_name: Bucket name.
+  Returns:
+    Boolean of whether the bucket is accessible.
+  """
+  if bucket_name in gcs_bucket_accessible.accessible:
+    return gcs_bucket_accessible.accessible[bucket_name]
+  try:
+    exit_code = subprocess.call(
+        ["gsutil", "ubla", "get", f"gs://{bucket_name}/"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+    )
+    gcs_bucket_accessible.accessible[bucket_name] = exit_code == os.R_OK
+    return gcs_bucket_accessible.accessible[bucket_name]
+  except subprocess.CalledProcessError:
+    gcs_bucket_accessible.accessible[bucket_name] = False
+    return False
+  except FileNotFoundError:
+    print(
+        "Error: 'gsutil' command not found. Please ensure Google Cloud SDK is installed and in your PATH.", file=sys.stderr
+    )
+    gcs_bucket_accessible.accessible[bucket_name] = False
+    return False
+
+
+gcs_bucket_accessible.accessible = {}

@@ -16,15 +16,18 @@
 import os.path
 import unittest
 
+import numpy as np
+
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
+
 from flax import linen as nn
 
 from MaxText.common_types import Config
 from MaxText import max_logging, pyconfig
 from MaxText import maxtext_utils
-from MaxText.globals import PKG_DIR
+from MaxText.globals import PKG_DIR, get_devices, tpu_present, gpu_present
 from MaxText.layers.decoders import Decoder, DecoderLayer
 from MaxText.layers import multi_token_prediction  # The class under test
 from MaxText.layers import embeddings
@@ -43,7 +46,10 @@ class MultiTokenPredictionLayerTest(unittest.TestCase):
         skip_jax_distributed_system=True,
     )
     self.rng = jax.random.PRNGKey(42)  # Base RNG for setup
-    devices_array = maxtext_utils.create_device_mesh(self.cfg)
+    if jax.device_count() == 1:
+      devices_array = np.array(get_devices()).reshape((1,) * len(self.cfg.mesh_axes))
+    else:
+      devices_array = maxtext_utils.create_device_mesh(self.cfg)
     self.mesh = Mesh(devices_array, self.cfg.mesh_axes)
 
     # Instantiate the Layer
@@ -82,6 +88,7 @@ class MultiTokenPredictionLayerTest(unittest.TestCase):
     )
     max_logging.log("Setup complete.")
 
+  @unittest.skipIf(not tpu_present and not gpu_present, "TPU|GPU only test")
   def test_multi_token_prediction_layer_output(self):
     """Tests the basic forward pass and output shape of MultiTokenPredictionLayer."""
 
@@ -171,7 +178,10 @@ class MultiTokenPredictionBlockTest(unittest.TestCase):
         mtp_num_layers=2,
     )
     self.rng = jax.random.PRNGKey(43)
-    devices_array = maxtext_utils.create_device_mesh(self.cfg)
+    if jax.device_count() == 1:
+      devices_array = np.array(get_devices()).reshape((1,) * len(self.cfg.mesh_axes))
+    else:
+      devices_array = maxtext_utils.create_device_mesh(self.cfg)
     self.mesh = Mesh(devices_array, self.cfg.mesh_axes)
     data_rng, self.init_rng = jax.random.split(self.rng)
 

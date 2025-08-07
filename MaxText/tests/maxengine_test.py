@@ -31,7 +31,7 @@ from jax.sharding import Mesh
 from MaxText import maxtext_utils
 from MaxText import pyconfig, maxengine
 from MaxText.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR
-from MaxText.globals import PKG_DIR
+from MaxText.globals import PKG_DIR, get_devices
 from MaxText.layers import models
 from MaxText.layers import quantizations
 from MaxText.maxengine import MaxEngine
@@ -109,7 +109,10 @@ class MaxEngineTest(unittest.TestCase):
     jax.tree.map(np.testing.assert_array_equal, got_unstacked, input_d)
 
   def test_basic_prefill(self):
-    devices_array = maxtext_utils.create_device_mesh(self.cfg)
+    if jax.device_count() == 1:
+      devices_array = np.array(get_devices()).reshape((1,) * len(self.cfg.mesh_axes))
+    else:
+      devices_array = maxtext_utils.create_device_mesh(config=self.cfg)
     mesh = Mesh(devices_array, self.cfg.mesh_axes)
     quant = quantizations.configure_quantization(self.cfg)
     model = models.Transformer(config=self.cfg, mesh=mesh, quant=quant)
@@ -133,7 +136,10 @@ class MaxEngineTest(unittest.TestCase):
     self.assertEqual(first_token.log_prob.shape, (1, 1))
 
   def test_basic_decode(self):
-    devices_array = maxtext_utils.create_device_mesh(self.cfg)
+    if jax.device_count() == 1:
+      devices_array = np.array(get_devices()).reshape((1,) * len(self.cfg.mesh_axes))
+    else:
+      devices_array = maxtext_utils.create_device_mesh(config=self.cfg)
     mesh = Mesh(devices_array, self.cfg.mesh_axes)
     quant = quantizations.configure_quantization(self.cfg)
     model = models.Transformer(config=self.cfg, mesh=mesh, quant=quant)
@@ -156,6 +162,7 @@ class MaxEngineTest(unittest.TestCase):
     self.assertEqual(result_token.data.shape[1], 3)
 
   @pytest.mark.skip(reason="Can only pass on CPU.")
+  @unittest.skip("Can only pass on CPU.")
   def test_chunked_prefill(self):
     """Test identical result between chunked prefill with single and multiple chunked.
 
