@@ -86,8 +86,7 @@ def device_space():
     return jax.memory.Space.Device  # pytype: disable=module-attr
   else:
     # pytype: disable=module-attr
-    return jax._src.sharding_impls.TransferToMemoryKind("device")   # pylint: disable=protected-access
-    # pytype: enable=module-attr
+    return jax._src.sharding_impls.TransferToMemoryKind("device") # pylint: disable=protected-access
 
 def calculate_total_params_per_chip(params):
   """Calculate total params per chip."""
