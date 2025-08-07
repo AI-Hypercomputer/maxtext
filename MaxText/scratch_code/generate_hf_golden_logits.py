@@ -15,9 +15,9 @@ limitations under the License.
 
 Usage:
 
-python3 -m MaxText.scratch_code.generate_hf_golden_logits --model-id=meta-llama/Llama-4-Scout-17B-16E \
+python3 MaxText/scratch_code/generate_hf_golden_logits.py --model-id=meta-llama/Llama-4-Scout-17B-16E \
      --output-path=golden_Llama-4-Scout-17B-16E_vision.jsonl --prompts='Describe this image.' \
-     --gcs-bucket=aireenmei-multipod --checkpoint_path=/home/aireenmei_google_com/hf-checkpoint \
+     --gcs-bucket=aireenmei-multipod --hf_model_path=/home/aireenmei_google_com/hf-checkpoint \
      --image_path=/home/aireenmei_google_com/maxtext/MaxText/test_assets/test_image.jpg
 """
 
@@ -39,13 +39,13 @@ def upload_blob(bucket_name, source_file_name, destination_blob_name):
   blob.upload_from_filename(source_file_name)
 
 
-def save_golden_logits(model_id, output_path, prompt_texts, gcs_bucket, checkpoint_path, image_paths):
+def save_golden_logits(model_id, output_path, prompt_texts, gcs_bucket, hf_model_path, image_paths):
   """save golden logits"""
-  if checkpoint_path is None:
-     checkpoint_path = model_id
-  tokenizer = AutoTokenizer.from_pretrained(checkpoint_path)
+  if hf_model_path is None:
+     hf_model_path = model_id
+  tokenizer = AutoTokenizer.from_pretrained(hf_model_path)
   model = AutoModelForCausalLM.from_pretrained(
-      checkpoint_path,
+      hf_model_path,
       torch_dtype=torch.float32,
       trust_remote_code=True,
   )
@@ -60,7 +60,7 @@ def save_golden_logits(model_id, output_path, prompt_texts, gcs_bucket, checkpoi
         raise e
       image = image.convert("RGB")
       image = image.resize((336, 336))
-      processor = AutoProcessor.from_pretrained(checkpoint_path)
+      processor = AutoProcessor.from_pretrained(model_id, token=True)
       messages = [
           {
               "role": "user",
@@ -76,30 +76,34 @@ def save_golden_logits(model_id, output_path, prompt_texts, gcs_bucket, checkpoi
           add_generation_prompt=True
       )
       inputs = processor(text=formatted_prompt, images=image, return_tensors="pt")
+      with torch.no_grad():
+        outputs = model(**inputs)
+        logits = outputs.logits.cpu().numpy().astype("float32")
+      
       data_to_save = {
         "prompt": prompt_text,
         "formatted_prompt": formatted_prompt,
-        "input_ids": inputs["input_ids"].tolist()[0],
+        "tokens": inputs["input_ids"].tolist()[0],
         "attention_mask": inputs["attention_mask"].tolist()[0],
         "image_path": image_paths[i],
         "pixel_values": inputs["pixel_values"].tolist()[0],
+        "logits": logits.tolist()[0]
       }
     else:
       formatted_prompt = prompt_text
-      inputs = tokenizer.encode(formatted_prompt, return_tensors="pt")
+      input_ids = tokenizer.encode(formatted_prompt, return_tensors="pt")
+      # Get the logits for the prompt + completion
+      with torch.no_grad():
+        outputs = model(input_ids)
+        logits = outputs.logits.cpu().numpy().astype("float32")
+
       # Prepare data to be saved
       data_to_save = {
           "prompt": prompt_text,
-          "tokens": inputs.tolist()[0],
+          "tokens": input_ids.tolist()[0],
+          "logits": logits.tolist()[0], # Convert numpy array to list for JSON serialization
       }
-
-    # Get the logits for the prompt + completion
-    with torch.no_grad():
-      outputs = model(inputs)
-      logits = outputs.logits.cpu().numpy().astype("float32")
-      data_to_save["logits"] = logits.tolist()[0] # Convert numpy array to list for JSON serialization
-
-      all_data_to_save.append(data_to_save)
+    all_data_to_save.append(data_to_save)
 
   with jsonlines.open(output_path, "w") as f:
     f.write_all(all_data_to_save)
@@ -119,7 +123,7 @@ def main(raw_args=None) -> None:
       "--gcs-bucket", type=str, required=False, default=None, help="A GCS bucket to store logits, without gs://."
   )
   parser.add_argument(
-      "--checkpoint_path", type=str, required=False, default=None, help="local path to checkpoint if exists."
+      "--hf_model_path", type=str, required=False, default=None, help="local path to checkpoint if exists."
   )
   parser.add_argument(
       "--image_paths", type=str, required=False, default='', help="A comma-separated list of image_paths."
@@ -129,7 +133,7 @@ def main(raw_args=None) -> None:
   image_paths = args.image_paths.split(",")
   if len(image_paths) > 0:
     assert len(image_paths) == len(prompts), "when image paths are provided, image_paths and prompts must have the same length."
-  save_golden_logits(args.model_id, args.output_path, prompts, args.gcs_bucket, args.checkpoint_path, image_paths)
+  save_golden_logits(args.model_id, args.output_path, prompts, args.gcs_bucket, args.hf_model_path, image_paths)
 
 
 if __name__ == "__main__":
