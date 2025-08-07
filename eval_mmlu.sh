@@ -10,7 +10,7 @@ export SCAN_LAYERS=false
 export WEIGHT_DTYPE=bfloat16
 export PER_DEVICE_BATCH_SIZE=4
 export INFERENCE_SERVER=MaxtextInterleavedServer
-python -m benchmarks.lm_eval.decode_multi_test \
+python -m benchmarks.mmlu.mmlu_eval \
   MaxText/configs/base.yml \
   tokenizer_path=${TOKENIZER_PATH} \
   load_parameters_path=${LOAD_PARAMETERS_PATH} \
@@ -32,7 +32,7 @@ python -m benchmarks.lm_eval.decode_multi_test \
   stack_prefill_result_cache=False \
   inference_benchmark_test=True \
   inference_server=${INFERENCE_SERVER} \
-  attention=paged \
+  attention=dot_product \
   pagedattn_num_pages=128 \
   pagedattn_tokens_per_page=32 \
   pagedattn_pages_per_compute_block=4

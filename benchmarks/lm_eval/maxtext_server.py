@@ -1,4 +1,5 @@
 import sys
+import os
 import time
 import uuid
 from typing import List, Optional, Union, Dict
@@ -7,13 +8,25 @@ import uvicorn
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-from maxtext_generator import MaxTextGenerator
+# Assuming the MaxTextGenerator class is in a file named maxtext_generator.py
+from benchmarks.lm_eval.maxtext_generator import MaxTextGenerator
 
+def get_maxtext_args_from_env():
+    """
+    Provides a base list of arguments for MaxText's pyconfig.
+    pyconfig expects an argv-style list where the first element is a placeholder
+    for the script name. All other configs are loaded from the YAML file.
+    """
+    args = [
+        "maxtext_server.py",         # Placeholder script name
+        "MaxText/configs/base.yml",
+    ]
+    return args
 
 # --- 1. Initialize FastAPI App and MaxTextGenerator ---
 
 print("Starting server and initializing MaxTextGenerator...")
-llm = MaxTextGenerator(sys.argv)
+llm = MaxTextGenerator(get_maxtext_args_from_env())
 app = FastAPI()
 
 
@@ -22,10 +35,10 @@ app = FastAPI()
 class CompletionRequest(BaseModel):
     model: str
     prompt: Union[str, List[str]]
+    # max_tokens is accepted for API compatibility but will be ignored by the server.
     max_tokens: int = 128
     temperature: float = 0.7
     stream: bool = False
-    # You can add other OpenAI parameters as needed (e.g., top_p, logprobs, stop, etc.)
 
 class CompletionChoice(BaseModel):
     text: str
@@ -40,19 +53,7 @@ class CompletionResponse(BaseModel):
     choices: List[CompletionChoice]
 
 
-# --- 3. Utility Functions ---
-
-def get_prompt_lengths(prompts: List[str], tokenizer) -> List[int]:
-    """Tokenize prompts and get their lengths (excluding any BOS token added by tokenizer)."""
-    lengths = []
-    for prompt in prompts:
-        # returns (tokens, length)
-        tokens, true_length = tokenizer.encode(prompt, is_bos=False)
-        lengths.append(true_length)
-    return lengths
-
-
-# --- 4. Create the API Endpoint ---
+# --- 3. Create the API Endpoint ---
 
 @app.post("/v1/completions", response_model=CompletionResponse)
 async def create_completion(request: CompletionRequest):
@@ -69,23 +70,10 @@ async def create_completion(request: CompletionRequest):
     print(f"\nReceived completion request for {len(prompts)} prompt(s).")
     start_time = time.time()
 
-    # Compute per-prompt max_target_length: prompt length + max_tokens
+    # Run batch inference. The max generation length is now controlled
+    # entirely by the MaxTextGenerator's internal configuration.
     try:
-        prompt_lengths = get_prompt_lengths(prompts, llm.tokenizer)
-        max_target_lengths = [pl + request.max_tokens for pl in prompt_lengths]
-    except Exception as e:
-        print(f"Tokenization failed: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Tokenization failed: {e}"
-        )
-
-    # Run batch inference (handle chunking inside generate_batch)
-    try:
-        generated_texts = llm.generate_batch(
-            prompts=prompts,
-            max_target_length=max(max_target_lengths)  # Use max; all outputs will be trimmed to requested length
-        )
+        generated_texts = llm.generate_batch(prompts=prompts)
     except Exception as e:
         print(f"Inference failed: {e}")
         raise HTTPException(
@@ -93,19 +81,8 @@ async def create_completion(request: CompletionRequest):
             detail=f"Inference failed: {e}"
         )
 
-    # For each output, truncate to requested max_tokens if over-generated
-    # (Since batch must run with a single max_target_length)
-    outputs = []
-    for i, (text, prompt_len) in enumerate(zip(generated_texts, prompt_lengths)):
-        # Re-tokenize output and trim if needed (robust to tokenizer differences)
-        out_tokens, _ = llm.tokenizer.encode(text, is_bos=False)
-        if len(out_tokens) > request.max_tokens:
-            # Decode only up to max_tokens
-            out_tokens = out_tokens[:request.max_tokens]
-            trimmed_text = llm.tokenizer.decode(out_tokens)
-        else:
-            trimmed_text = text
-        outputs.append(trimmed_text.strip())
+    # Clean up whitespace from the outputs.
+    outputs = [text.strip() for text in generated_texts]
 
     end_time = time.time()
     print(f"Request processed in {end_time - start_time:.2f} seconds.")
@@ -116,7 +93,8 @@ async def create_completion(request: CompletionRequest):
         choice = CompletionChoice(
             text=text,
             index=i,
-            finish_reason="stop",  # If you add EOS/max_length detection, change this accordingly
+            # This is now more accurate, as the backend handles stopping.
+            finish_reason="stop",
         )
         response_choices.append(choice)
 
@@ -129,11 +107,8 @@ def health_check():
     return {"status": "ok", "message": "MaxText API server is running."}
 
 
-# --- 5. Instructions for Running the Server ---
+# --- 4. Instructions for Running the Server ---
 
 if __name__ == "__main__":
     print("\nTo run the server, use the following command (replace ... with your model args):")
     print("python -m uvicorn maxtext_server:app --host 0.0.0.0 --port 8000 -- run_name=... [maxtext_args]")
-    print("Or, for basic testing:")
-    print("uvicorn maxtext_server:app --reload --host 127.0.0.1 --port 8000 -- run_name=... [maxtext_args]")
-
