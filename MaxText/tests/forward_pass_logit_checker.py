@@ -177,6 +177,12 @@ def get_data(golden_data, golden_data_index, config):
 
   max_logging.log(f"Comparing forward pass for golden data index = {golden_data_index}")
   max_logging.log(f"config.global_batch_size_to_train_on={config.global_batch_size_to_train_on}")
+  if config.use_multimodal:
+    assert "pixel_values" in golden_data[golden_data_index], "no image found in golden data while use_multimodal=True"
+    pixel_values = np.asarray(golden_data[golden_data_index]["pixel_values"], dtype=np.int32)
+    max_logging.log(f"pixel_values.shape = {pixel_values.shape}")
+  else:
+    pixel_values = None
 
   original_ids = np.asarray(golden_data[golden_data_index]["tokens"], dtype=np.int32)
   seq_len = len(original_ids)
@@ -202,46 +208,53 @@ def get_data(golden_data, golden_data_index, config):
   decoder_positions = np.stack(
       [np.arange(config.max_target_length, dtype=np.int32) for _ in range(config.global_batch_size_to_train_on)]
   )
-
-  return ids, decoder_segment_ids, decoder_positions, logits, seq_len
+  pixel_values = np.stack([pixel_values[None, :] for _ in range(config.global_batch_size_to_train_on)])
+  return ids, decoder_segment_ids, decoder_positions, logits, seq_len, pixel_values
 
 
 def main(config, test_args):  # pylint: disable=W0621
   """Test the Whole Model of model_name"""
+  if config.use_multimodal:
+    assert not test_args.run_hf_model, "Multimodal does not support running hf model on-the-fly, please generate hf golden logits using generate_hf_golden_logits.py"
   if not test_args.run_hf_model:
     """Comparing maxtext/huggingface model with pre-loaded golden logitis"""
     # initialize the model with weights from reference ckpt
-    if test_args.hf_model_path != "":  # Initialize model from the given HF path
-      model = AutoModelForCausalLM.from_pretrained(test_args.hf_model_path)
-    else:  # Initialize MaxText model
-      init_rng = jax.random.PRNGKey(config.init_weights_seed)
-      init_rng, rng1 = jax.random.split(init_rng)
-      devices_array = maxtext_utils.create_device_mesh(config)
-      mesh = jax.sharding.Mesh(devices_array, config.mesh_axes)
-      quant = quantizations.configure_quantization(config)
-      model = models.Transformer(config, mesh=mesh, quant=quant)
-      state, _ = maxtext_utils.setup_decode_state(model, config, rng1, mesh, None)
+    # if test_args.hf_model_path != "":  # Initialize model from the given HF path
+    #   model = AutoModelForCausalLM.from_pretrained(test_args.hf_model_path)
+    # else:  # Initialize MaxText model
+
+    max_logging.log("Initializing MaxText model")
+    init_rng = jax.random.PRNGKey(config.init_weights_seed)
+    init_rng, rng1 = jax.random.split(init_rng)
+    devices_array = maxtext_utils.create_device_mesh(config)
+    mesh = jax.sharding.Mesh(devices_array, config.mesh_axes)
+    quant = quantizations.configure_quantization(config)
+    model = models.Transformer(config, mesh=mesh, quant=quant)
+    state, _ = maxtext_utils.setup_decode_state(model, config, rng1, mesh, None)
 
     if test_args.golden_logits_path == "":
       input_golden_data_path = os.path.join(PKG_DIR, "test_assets", f"golden_data_{config.model_name}.jsonl")
     else:
       input_golden_data_path = test_args.golden_logits_path
+    max_logging.log("loading hf goldens from jsonl file")
     with jsonlines.open(input_golden_data_path, "r") as f:
       golden_data = list(f)
-
+    max_logging.log(f"loaded {len(golden_data)} golden data points")
     for golden_data_index in range(len(golden_data)):
-      ids, decoder_segment_ids, decoder_positions, golden_logits, seq_len = get_data(golden_data, golden_data_index, config)
-
+      ids, decoder_segment_ids, decoder_positions, golden_logits, seq_len, images = get_data(golden_data, golden_data_index, config)
+      #import pdb; pdb.set_trace()
       if test_args.hf_model_path != "":
         with torch.no_grad():
           full_train_logits = model(torch.tensor(ids.tolist())).logits.cpu().numpy().astype("float32")
       else:
         # TODO(hengtaoguo): Add support for multimodal full prompt decoding check
+        max_logging.log("maxtext forward pass")
         full_train_logits = model.apply(
             state.params,
             ids,
             decoder_positions,
             decoder_segment_ids,
+            encoder_images=images,
             enable_dropout=False,
             rngs={"aqt": init_rng},
         )
