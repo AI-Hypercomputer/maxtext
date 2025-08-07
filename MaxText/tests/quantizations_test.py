@@ -279,8 +279,7 @@ class QuantTest(unittest.TestCase):
     return all(jnp.abs(y - x).mean() / jnp.abs(x).mean() < tolerance for x, y in zip(leaves_a, leaves_b))
 
   def quantization_config(self, quant):
-    """ Run forward pass and backward pass for quantized model and compare with base model.
-    """
+    """Run forward pass and backward pass for quantized model and compare with base model."""
     cfg = self.init_pyconfig(quantization=quant)
     model = train_utils.create_model(self.cfg, self.mesh)
     qt_model = train_utils.create_model(cfg, self.mesh)

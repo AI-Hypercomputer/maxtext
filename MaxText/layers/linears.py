@@ -63,6 +63,7 @@ def canonicalize_tuple(x):
   else:
     return (x,)
 
+
 def _compute_dot_general(inputs, kernel, kernel_axes, axis, contract_ind, matmul_precision, quant):
   """Computes a dot_general operation that may be quantized."""
   dot_general = lax.dot_general
@@ -75,13 +76,7 @@ def _compute_dot_general(inputs, kernel, kernel_axes, axis, contract_ind, matmul
 
 
 def _compute_dot_general_nnx(
-    inputs,
-    kernel,
-    axis,
-    contract_ind,
-    matmul_precision,
-    quant_dot_general: nnx_wrappers.ToNNX | None,
-    initializing: bool
+    inputs, kernel, axis, contract_ind, matmul_precision, quant_dot_general: nnx_wrappers.ToNNX | None, initializing: bool
 ):
   """Computes a dot_general operation that may be quantized."""
   dot_general = lax.dot_general
@@ -315,7 +310,7 @@ class MlpBlock(nnx.Module):
       rngs: nnx.Rngs,
   ) -> None:
     """A MlpBlock module.
-    
+
     Args:
       config: Config object containing model parameters.
       in_features: Number of input features.
@@ -414,7 +409,7 @@ class MlpBlock(nnx.Module):
       from MaxText.layers import gpt3  # pylint: disable=import-outside-toplevel
 
       return functools.partial(
-        gpt3.Gpt3LayerNorm, num_features=num_features, reductions_in_fp32=False, use_bias=self.use_bias
+          gpt3.Gpt3LayerNorm, num_features=num_features, reductions_in_fp32=False, use_bias=self.use_bias
       )
     else:
       raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block.value=}")
@@ -449,9 +444,7 @@ class MlpBlock(nnx.Module):
     # Take elementwise product of above intermediate activations.
     x = functools.reduce(operator.mul, activations).astype(self.dtype)
     # Apply dropout and final dense output projection.
-    x = self.dropout(
-        x, deterministic=deterministic
-    )  # Broadcast along length.
+    x = self.dropout(x, deterministic=deterministic)  # Broadcast along length.
     if self.model_mode == MODEL_MODE_PREFILL:
       x = nn.with_logical_constraint(x, ("activation_batch", "prefill_activation_length", "activation_mlp"))
     else:
@@ -460,6 +453,7 @@ class MlpBlock(nnx.Module):
 
     output = checkpoint_name(output, "mlpwo")
     return output
+
 
 def mlp_block(
     *,

@@ -127,7 +127,6 @@ class Embed(nnx.Module):
         sharding=("vocab", "embed"),
     )
 
-
   def __call__(self, inputs: Array, model_mode: str = MODEL_MODE_TRAIN) -> Array:
     """Embeds the inputs along the last dimension.
 

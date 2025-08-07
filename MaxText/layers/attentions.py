@@ -330,6 +330,7 @@ def attention_op_as_linen(
       metadata_fn=variable_to_logically_partitioned,
   )
 
+
 class AttentionOp(nnx.Module):
   """Attention operation"""
 
@@ -459,28 +460,26 @@ class AttentionOp(nnx.Module):
 
       # Prefill AqtEinsum instances
       self.AqtEinsum_0 = maybe_create_nnx(
-          self.kv_quant.einsum_fn_with_rhs_qtensor(),
-          "btkgd,bskd->bkgts", dummy_query_prefill, dummy_key_prefill
+          self.kv_quant.einsum_fn_with_rhs_qtensor(), "btkgd,bskd->bkgts", dummy_query_prefill, dummy_key_prefill
       )
       self.AqtEinsum_1 = maybe_create_nnx(
           self.kv_quant.einsum_fn_with_rhs_qtensor_and_dequant(),
-          "bkgts,bskd->btkgd", dummy_attn_weights_prefill, dummy_value_prefill
+          "bkgts,bskd->btkgd",
+          dummy_attn_weights_prefill,
+          dummy_value_prefill,
       )
       # Autoregressive AqtEinsum instances
       self.AqtEinsum_2 = maybe_create_nnx(
-          self.kv_quant.einsum_fn_with_rhs_qtensor(),
-          "btkgd,bskd->bkgts", dummy_query_ar, dummy_key_ar
+          self.kv_quant.einsum_fn_with_rhs_qtensor(), "btkgd,bskd->bkgts", dummy_query_ar, dummy_key_ar
       )
       self.AqtEinsum_3 = maybe_create_nnx(
-          self.kv_quant.einsum_fn_with_rhs_qtensor_and_dequant(),
-          "bkgts,bskd->btkgd", dummy_attn_weights_ar, dummy_value_ar
+          self.kv_quant.einsum_fn_with_rhs_qtensor_and_dequant(), "bkgts,bskd->btkgd", dummy_attn_weights_ar, dummy_value_ar
       )
     else:
       self.AqtEinsum_0 = jnp.einsum
       self.AqtEinsum_1 = jnp.einsum
       self.AqtEinsum_2 = jnp.einsum
       self.AqtEinsum_3 = jnp.einsum
-
 
   def check_attention_inputs(self, query: Array, key: Array | KVTensor, value: Array | KVTensor) -> None:
     """Check attention inputs."""
@@ -703,7 +702,7 @@ class AttentionOp(nnx.Module):
               model_mode,
               bidirectional_mask=bidirectional_mask,
               qk_product_einsum=qk_product_einsum,
-              wv_product_einsum=wv_product_einsum
+              wv_product_einsum=wv_product_einsum,
           )
         else:
           head_axis = -2
@@ -1133,7 +1132,12 @@ class AttentionOp(nnx.Module):
     return output, lse
 
   def compute_local_attention(
-      self, attn_weights: Array, value: Array | KVTensor, q_seq_len: int, model_mode: str, wv_product_einsum: Callable[..., Array]
+      self,
+      attn_weights: Array,
+      value: Array | KVTensor,
+      q_seq_len: int,
+      model_mode: str,
+      wv_product_einsum: Callable[..., Array],
   ) -> tuple[Array, Array, Array]:
     """Computes the attention of a local subset of the kv cache.
     Local attention results will need to be combined with any other local attentions and normalized
@@ -1192,7 +1196,7 @@ class AttentionOp(nnx.Module):
       bidirectional_mask: Any = None,
       *,
       qk_product_einsum: Callable[..., Array],
-      wv_product_einsum: Callable[..., Array]
+      wv_product_einsum: Callable[..., Array],
   ):
     """Apply Attention."""
     validate_compute_axis_order(self.compute_axis_order)
@@ -1288,9 +1292,7 @@ class AttentionOp(nnx.Module):
       raise NotImplementedError(self.compute_axis_order)
     return result
 
-  def wv_product(
-      self, attn_weights: Array, value: Array | KVTensor, model_mode: str, einsum: Callable[..., Array]
-  ) -> Array:
+  def wv_product(self, attn_weights: Array, value: Array | KVTensor, model_mode: str, einsum: Callable[..., Array]) -> Array:
     """weighted value product.
 
     Args:
@@ -1396,17 +1398,17 @@ class AttentionOp(nnx.Module):
       key, value, decoder_segment_ids = prefill_kv_cache
 
     prefill_unnormalized_output, prefill_exponentials_max, prefill_exponentials_sum = self.apply_attention(
-      query=query,
-      key=key,
-      value=value,
-      decoder_segment_ids=decoder_segment_ids,
-      lengths=None,
-      model_mode=model_mode,
-      use_ragged_attention=self.use_ragged_attention,
-      previous_chunk=previous_chunk,
-      bidirectional_mask=bidirectional_mask,
-      qk_product_einsum=self.AqtEinsum_0,
-      wv_product_einsum=self.AqtEinsum_1,
+        query=query,
+        key=key,
+        value=value,
+        decoder_segment_ids=decoder_segment_ids,
+        lengths=None,
+        model_mode=model_mode,
+        use_ragged_attention=self.use_ragged_attention,
+        previous_chunk=previous_chunk,
+        bidirectional_mask=bidirectional_mask,
+        qk_product_einsum=self.AqtEinsum_0,
+        wv_product_einsum=self.AqtEinsum_1,
     )
 
     # Return the "prefill" cache if it actually the combined prefill+ar kv cache
@@ -1516,7 +1518,7 @@ def attention_as_linen(
     value_axis_names: AxisNames = (KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM),
     out_axis_names: AxisNames = (BATCH, LENGTH, HEAD, D_KV),
     prefill_out_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, HEAD, D_KV),
-    decode_out_axis_names = (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV),
+    decode_out_axis_names=(DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV),
     prefill_cache_axis_order: AxisIdxes = (1, 2, 0, 3),
     ar_cache_axis_order: AxisIdxes = (1, 2, 0, 3),
     compute_axis_order: AxisIdxes = (0, 1, 2, 3),
@@ -1590,33 +1592,33 @@ def attention_as_linen(
 class Attention(nnx.Module):
   """Attention Module.
 
-    This module implements multi-headed attention as described in the
-    original Transformer paper. It projects the inputs into query, key, and
-    value vectors, applies the attention mechanism, and projects the results to
-    an output vector.
+  This module implements multi-headed attention as described in the
+  original Transformer paper. It projects the inputs into query, key, and
+  value vectors, applies the attention mechanism, and projects the results to
+  an output vector.
 
-    Attributes:
-      config: The model configuration.
-      num_query_heads: Number of query attention heads.
-      num_kv_heads: Number of key-value attention heads.
-      head_dim: The dimension of each attention head.
-      max_target_length: Maximum sequence length.
-      mesh: The device mesh.
-      attention_kernel: The attention kernel to use (e.g., 'dot_product', 'flash').
-      inputs_q_shape: Query inputs shape for initialization, required by NNX.
-      inputs_kv_shape: Key/value inputs shape for initialization, required by NNX.
-      dtype: The data type for computation.
-      weight_dtype: The data type for weights.
-      max_prefill_predict_length: Maximum length for prefill.
-      dropout_rate: The dropout rate.
-      kernel_init: Initializer for the kernel of the dense layers.
-      float32_qk_product: If True, compute query-key product in float32.
-      float32_logits: If True, cast logits to float32 before softmax.
-      quant: Quantization configuration.
-      kv_quant: KV cache quantization configuration.
-      attention_type: The type of attention (e.g., 'global', 'local_sliding').
-      attn_logits_soft_cap: Soft cap for attention logits.
-      ... and other configuration parameters.
+  Attributes:
+    config: The model configuration.
+    num_query_heads: Number of query attention heads.
+    num_kv_heads: Number of key-value attention heads.
+    head_dim: The dimension of each attention head.
+    max_target_length: Maximum sequence length.
+    mesh: The device mesh.
+    attention_kernel: The attention kernel to use (e.g., 'dot_product', 'flash').
+    inputs_q_shape: Query inputs shape for initialization, required by NNX.
+    inputs_kv_shape: Key/value inputs shape for initialization, required by NNX.
+    dtype: The data type for computation.
+    weight_dtype: The data type for weights.
+    max_prefill_predict_length: Maximum length for prefill.
+    dropout_rate: The dropout rate.
+    kernel_init: Initializer for the kernel of the dense layers.
+    float32_qk_product: If True, compute query-key product in float32.
+    float32_logits: If True, cast logits to float32 before softmax.
+    quant: Quantization configuration.
+    kv_quant: KV cache quantization configuration.
+    attention_type: The type of attention (e.g., 'global', 'local_sliding').
+    attn_logits_soft_cap: Soft cap for attention logits.
+    ... and other configuration parameters.
   """
 
   def __init__(
@@ -1665,7 +1667,7 @@ class Attention(nnx.Module):
       value_axis_names: AxisNames = (KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM),
       out_axis_names: AxisNames = (BATCH, LENGTH, HEAD, D_KV),
       prefill_out_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, HEAD, D_KV),
-      decode_out_axis_names = (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV),
+      decode_out_axis_names=(DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV),
       prefill_cache_axis_order: AxisIdxes = (1, 2, 0, 3),
       ar_cache_axis_order: AxisIdxes = (1, 2, 0, 3),
       compute_axis_order: AxisIdxes = (0, 1, 2, 3),
@@ -1847,7 +1849,6 @@ class Attention(nnx.Module):
     else:
       self.query_norm = None
       self.key_norm = None
-
 
   def init_query_w(self, inputs_q_shape: Tuple) -> nnx.Module:
     """Query projection initialization."""
@@ -2052,7 +2053,6 @@ class Attention(nnx.Module):
           rngs=self.rngs,
       )
     return rotary_embedding
-
 
   def apply_rotary_embedding(self, inputs: Array, inputs_positions: Optional[Array | None] = None):
     """Applies rotary embeddings, handling different model types.
@@ -2268,6 +2268,7 @@ class Attention(nnx.Module):
     out = checkpoint_name(out, "out_proj")
     return out
 
+
 def mla_as_linen(
     *,
     config: Config,
@@ -2288,7 +2289,6 @@ def mla_as_linen(
     float32_logits: bool = False,  # cast logits in float32 for stability.
     quant: Optional[Quant] = None,
     kv_quant: Optional[KVQuant] = None,
-
     attention_type: AttentionType = AttentionType.GLOBAL,  # Default to global attention
     attn_logits_soft_cap: float | None = None,
     sliding_window_size: int | None = None,
@@ -2301,7 +2301,6 @@ def mla_as_linen(
     temperature_tuning: bool = False,
     temperature_tuning_scale: float = 0.1,
     temperature_tuning_floor_scale: float = 8192.0,
-
     # Shard the query activation as the same as the key and value.
     # TODO: Find a better sharding axis name.
     # TODO: Further break down the Training and Inference axes for the q, k, v.
@@ -2316,17 +2315,14 @@ def mla_as_linen(
     value_axis_names: AxisNames = (KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM),
     out_axis_names: AxisNames = (BATCH, LENGTH, HEAD, D_KV),
     prefill_out_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, HEAD, D_KV),
-    decode_out_axis_names = (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV),
-
+    decode_out_axis_names=(DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV),
     prefill_cache_axis_order: AxisIdxes = (1, 2, 0, 3),
     ar_cache_axis_order: AxisIdxes = (1, 2, 0, 3),
     compute_axis_order: AxisIdxes = (0, 1, 2, 3),
     reshape_q: bool = False,
-
     is_nope_layer: bool = False,
     is_vision: bool = False,
     model_mode: str = MODEL_MODE_TRAIN,
-
     q_lora_rank: int = 0,
     kv_lora_rank: int = 512,
     qk_nope_head_dim: int = 128,
@@ -2336,7 +2332,6 @@ def mla_as_linen(
     original_max_position_embeddings: int = 4096,
     mscale: float = 1.0,  # scaling factor for softmax
     rope_factor: float = 40.0,  # rotary embedding factor
-
     name: str | None = None,
 ):
   """A factory function to create an MLA as a Linen module.
@@ -2408,6 +2403,7 @@ def mla_as_linen(
       abstract_init=False,
   )
 
+
 class MLA(Attention):
   """Multi-Head Latent Attention (MLA) layer."""
 
@@ -2457,7 +2453,7 @@ class MLA(Attention):
       value_axis_names: AxisNames = (KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM),
       out_axis_names: AxisNames = (BATCH, LENGTH, HEAD, D_KV),
       prefill_out_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, HEAD, D_KV),
-      decode_out_axis_names = (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV),
+      decode_out_axis_names=(DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV),
       prefill_cache_axis_order: AxisIdxes = (1, 2, 0, 3),
       ar_cache_axis_order: AxisIdxes = (1, 2, 0, 3),
       compute_axis_order: AxisIdxes = (0, 1, 2, 3),
