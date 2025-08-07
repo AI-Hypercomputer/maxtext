@@ -283,7 +283,7 @@ class RoutedMoE(nn.Module):
       top_k_weights = jax.nn.softmax(top_k_weights.astype(jnp.float32), axis=-1).astype(self.dtype)
 
     # This is the Qwen3-specific normalization of router weights.
-    if self.config.norm_top_k_prob:
+    if self.config.norm_topk_prob:
       top_k_weights /= top_k_weights.sum(axis=-1, keepdims=True)
 
     return top_k_weights, top_k_indices

@@ -148,9 +148,6 @@ class Qwen3DecoderLayer(nn.Module):
         decoder_positions,
         deterministic,
         model_mode,
-        previous_chunk,
-        page_state,
-        slot,
     )
 
     # Dense MLP block
@@ -212,9 +209,6 @@ class Qwen3MoeDecoderLayer(nn.Module):
         decoder_positions,
         deterministic,
         model_mode,
-        previous_chunk,
-        page_state,
-        slot,
     )
 
     # Mixture of Experts block
