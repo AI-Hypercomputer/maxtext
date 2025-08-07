@@ -41,10 +41,9 @@ from MaxText.metric_logger import MetricLogger
 from MaxText.train import (
     eval_step,
     get_first_step,
-    setup_train_loop,
     train_step,
-    validate_train_config,
 )
+from MaxText.train_utils import setup_train_loop, initialize
 from MaxText.utils.goodput_utils import (
     GoodputEvent,
     create_goodput_recorder,
@@ -150,21 +149,7 @@ def train_loop(config, recorder, state=None):
 
 
 def main(argv: Sequence[str]) -> None:
-  jax.config.update("jax_default_prng_impl", "unsafe_rbg")
-  # TF allocates extraneous GPU memory when using TFDS data
-  # this leads to CUDA OOMs. WAR for now is to hide GPUs from TF
-  tf.config.set_visible_devices([], "GPU")
-  os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
-  if "xla_tpu_spmd_rng_bit_generator_unsafe" not in os.environ.get("LIBTPU_INIT_ARGS", ""):
-    os.environ["LIBTPU_INIT_ARGS"] = os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
-  config = pyconfig.initialize(argv)
-  jax.config.update("jax_use_shardy_partitioner", config.shardy)
-  max_utils.print_system_information()
-  validate_train_config(config)
-  os.environ["TFDS_DATA_DIR"] = config.dataset_path
-
-  maybe_monitor_goodput(config)
-  recorder = create_goodput_recorder(config)
+  config, recorder, diagnostic_config = initialize(argv)
   with maybe_record_goodput(recorder, GoodputEvent.JOB):
     train_loop(config, recorder)
 

@@ -71,9 +71,8 @@ from MaxText import pyconfig
 from MaxText.data_loader import DataLoader
 from MaxText.metric_logger import MetricLogger
 from MaxText.train import get_first_step
-from MaxText.train import setup_train_loop
+from MaxText.train_utils import setup_train_loop, initialize
 from MaxText.train import train_step
-from MaxText.train import validate_train_config
 from MaxText.utils.goodput_utils import (
     GoodputEvent,
     create_goodput_recorder,
@@ -358,39 +357,9 @@ def elastic_initialize(devices: Sequence[jax.Device]) -> manager.Manager:
 
 
 def main(argv: Sequence[str]) -> None:
-  pathwaysutils.initialize()
-  jax.config.update("jax_default_prng_impl", "unsafe_rbg")
-  # TF allocates extraneous GPU memory when using TFDS data
-  # this leads to CUDA OOMs. WAR for now is to hide GPUs from TF
-  tf.config.set_visible_devices([], "GPU")
-  os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
-  if "xla_tpu_spmd_rng_bit_generator_unsafe" not in os.environ.get("LIBTPU_INIT_ARGS", ""):
-    os.environ["LIBTPU_INIT_ARGS"] = os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
-
+  config, recorder, diagnostic_config = initialize(argv)
+  
   elastic_manager = elastic_initialize(jax.devices())
-
-  config = pyconfig.initialize(argv)
-  jax.config.update("jax_use_shardy_partitioner", config.shardy)
-  max_utils.print_system_information()
-  validate_train_config(config)
-  os.environ["TFDS_DATA_DIR"] = config.dataset_path or ""
-  vertex_tensorboard_manager = VertexTensorboardManager()
-  if config.use_vertex_tensorboard or os.environ.get("UPLOAD_DATA_TO_TENSORBOARD"):
-    vertex_tensorboard_manager.configure_vertex_tensorboard(config)
-
-  # Goodput configurations
-  maybe_monitor_goodput(config)
-  recorder = create_goodput_recorder(config)
-
-  # Stack traces configurations
-  debug_config = debug_configuration.DebugConfig(
-      stack_trace_config=stack_trace_configuration.StackTraceConfig(
-          collect_stack_trace=config.collect_stack_trace,
-          stack_trace_to_cloud=config.stack_trace_to_cloud,
-          stack_trace_interval_seconds=config.stack_trace_interval_seconds,
-      )
-  )
-  diagnostic_config = diagnostic_configuration.DiagnosticConfig(debug_config)
 
   with diagnostic.diagnose(diagnostic_config):
     with maybe_record_goodput(recorder, GoodputEvent.JOB):

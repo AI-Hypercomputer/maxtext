@@ -39,7 +39,8 @@ from MaxText import maxtext_utils
 from MaxText import train_utils
 from MaxText import max_logging
 from MaxText import pyconfig
-from MaxText.train import get_first_step, validate_train_config
+from MaxText.train import get_first_step
+from MaxText.train_utils import validate_train_config, initialize
 from MaxText.layers import models
 
 Transformer = models.Transformer
@@ -116,14 +117,10 @@ def add_entropy_to_checkpoint(state):
 
 
 def main(argv: Sequence[str]) -> None:
-  jax.config.update("jax_cpu_enable_gloo_collectives", True)
-  os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
-  config = pyconfig.initialize(argv)
-  validate_train_config(config)
+  config, recorder, diagnostic_config = initialize(argv)
   print(f"Found {jax.device_count()} devices.")
   print(f"Found {jax.process_count()} processes.")
   print(f"Found {jax.devices()} devices.")
-  os.environ["TFDS_DATA_DIR"] = config.dataset_path
   checkpoint_loop(config)
 
 

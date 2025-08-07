@@ -29,7 +29,8 @@ import jax
 from MaxText import max_logging
 from MaxText import pyconfig
 from MaxText.data_loader import DataLoader
-from MaxText.train import validate_train_config, get_first_step, setup_train_loop
+from MaxText.train import get_first_step
+from MaxText.train_utils import setup_train_loop, initialize
 
 
 def data_load_loop(config, state=None):
@@ -61,15 +62,10 @@ def data_load_loop(config, state=None):
 
 
 def main(argv: Sequence[str]) -> None:
-  jax.config.update("jax_cpu_enable_gloo_collectives", True)
-  os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
-  config = pyconfig.initialize(argv)
-  validate_train_config(config)
+  config, recorder, diagnostic_config = initialize(argv)
   max_logging.log(f"Found {jax.device_count()} devices.")
   max_logging.log(f"Found {jax.process_count()} processes.")
   max_logging.log(f"Found {jax.devices()} devices.")
-  if config.dataset_type in ("tfds", "c4_mlperf"):
-    os.environ["TFDS_DATA_DIR"] = config.dataset_path
   data_load_loop(config)
 
 

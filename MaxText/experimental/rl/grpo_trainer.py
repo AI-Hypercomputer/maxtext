@@ -41,7 +41,7 @@ import os
 import functools
 import threading
 
-from typing import Sequence, Callable, Iterator
+from typing import Sequence, Callable, Iterator, Tuple, Any
 
 from absl import app
 
@@ -84,9 +84,9 @@ from MaxText.experimental.rl import grpo_utils
 from MaxText.globals import EPS
 from MaxText.metric_logger import MetricLogger
 from MaxText.train import (
-    validate_train_config,
     get_first_step,
 )
+from MaxText.train_utils import validate_train_config, initialize
 from MaxText.utils.goodput_utils import (
     GoodputEvent,
     create_goodput_recorder,
@@ -890,22 +890,22 @@ def train_loop(config, config_inference, recorder, state=None):
   return state
 
 
-def main(argv: Sequence[str]) -> None:
-  """Main entry point for the GRPO training script.
-
-  This function parses command-line arguments, initializes configurations for
-  training and inference, sets up system environment variables, and launches
-  the `train_loop`.
+def grpo_initialize(argv: Sequence[str]) -> Tuple[pyconfig.HyperParameters, pyconfig.HyperParameters, Any, Any]:
+  """GRPO-specific initialization that uses centralized initialize but adds GRPO-specific logic.
+  
+  Args:
+    argv: Command line arguments
+    
+  Returns:
+    config: Training configuration
+    config_inference: Inference configuration  
+    recorder: Goodput recorder
+    diagnostic_config: Diagnostic configuration
   """
-  jax.config.update("jax_default_prng_impl", "unsafe_rbg")
-  # TF allocates extraneous GPU memory when using TFDS data
-  # this leads to CUDA OOMs. WAR for now is to hide GPUs from TF
-  tf.config.set_visible_devices([], "GPU")
-  os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
-  if "xla_tpu_spmd_rng_bit_generator_unsafe" not in os.environ.get("LIBTPU_INIT_ARGS", ""):
-    os.environ["LIBTPU_INIT_ARGS"] = os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
-  configs_argv = max_utils.parse_custom_args(argv)
-  config = pyconfig.initialize(configs_argv[0])
+  # Use centralized initialization for common setup
+  config, recorder, diagnostic_config = initialize(argv)
+  
+  # GRPO-specific validation and configuration
   if not config.use_grpo:
     raise ValueError("Please set the value of use_grpo to True")
   if config.inference_rollouts < 1 or config.inference_rollouts > config.steps:
@@ -922,30 +922,25 @@ def main(argv: Sequence[str]) -> None:
         f"Invalid value chosen for {config.inference_devices_per_replica=} and {config.inference_replicas=} "
         f"with {jax.device_count()} devices"
     )
+  
+  # Parse custom arguments for inference config
+  configs_argv = max_utils.parse_custom_args(argv)
   config_inference = pyconfig.initialize(configs_argv[1])
+  
   if config.per_device_batch_size < 1.0 or config_inference.per_device_batch_size < 1.0:
     raise ValueError("GRPO does not support setting per_device_batch_size < 1.0")
-  jax.config.update("jax_use_shardy_partitioner", config.shardy)
-  max_utils.print_system_information()
-  validate_train_config(config)
-  os.environ["TFDS_DATA_DIR"] = config.dataset_path
-  vertex_tensorboard_manager = VertexTensorboardManager()
-  if config.use_vertex_tensorboard or os.environ.get("UPLOAD_DATA_TO_TENSORBOARD"):
-    vertex_tensorboard_manager.configure_vertex_tensorboard(config)
+  
+  return config, config_inference, recorder, diagnostic_config
 
-  # Goodput configurations
-  maybe_monitor_goodput(config)
-  recorder = create_goodput_recorder(config)
 
-  # Stack traces configurations
-  debug_config = debug_configuration.DebugConfig(
-      stack_trace_config=stack_trace_configuration.StackTraceConfig(
-          collect_stack_trace=config.collect_stack_trace,
-          stack_trace_to_cloud=config.stack_trace_to_cloud,
-          stack_trace_interval_seconds=config.stack_trace_interval_seconds,
-      )
-  )
-  diagnostic_config = diagnostic_configuration.DiagnosticConfig(debug_config)
+def main(argv: Sequence[str]) -> None:
+  """Main entry point for the GRPO training script.
+
+  This function parses command-line arguments, initializes configurations for
+  training and inference, sets up system environment variables, and launches
+  the `train_loop`.
+  """
+  config, config_inference, recorder, diagnostic_config = grpo_initialize(argv)
 
   with diagnostic.diagnose(diagnostic_config):
     with maybe_record_goodput(recorder, GoodputEvent.JOB):
