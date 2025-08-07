@@ -58,9 +58,7 @@ PATHWAYS_SHORT_RUN_CHECKPOINTING_TUNING_PARAMS = {
 }
 
 
-
 trillium_model_dict = {}
-
 
 
 default_basic_1 = _add_to_model_dictionary(
@@ -2115,55 +2113,56 @@ custom_moe_700b = _add_to_model_dictionary(
 )
 
 llama3_1_405b_8192_fsdp_dcn_mlperf = _add_to_model_dictionary(
-  trillium_model_dict,
-  MaxTextModel(
-    model_name="llama3-1-405b-8192-fsdp-dcn-mlperf",
-    model_type="llama3.1-405b",
-    tuning_params={
-        "per_device_batch_size": 1,
-        "ici_fsdp_parallelism": 256,
-        "dcn_fsdp_parallelism": 4,
-        "remat_policy": "custom",
-        "decoder_layer_input": "offload",
-        "max_target_length": 8192,
-        "attention": "flash",
-        # "gcs_metrics": True,
-        "use_iota_embed": True,
-        # "dataset_type": "synthetic",
-        "reuse_example_batch": -1,
-        "profiler": "xplane",
-        "sa_block_q": 2048,
-        "sa_block_kv": 2048,
-        "sa_block_kv_compute": 2048,
-        "sa_block_q_dkv": 2048,
-        "sa_block_kv_dkv": 2048,
-        "sa_block_kv_dkv_compute": 2048,
-        "sa_block_q_dq": 2048,
-        "sa_block_kv_dq": 2048,
-        "opt_type": "adam_pax",
-        "adam_eps": 1e-5,
-        "enable_checkpointing": True,
-        "load_parameters_path": "gs://trillium-scale-tests-q1-25-west/mlperf50_llama405b_checkpoints/scanned_sharded/0/items",
-        "tokenizer_path": "assets/tokenizer.mistral-v3",
-        "dataset_path": "gs://trillium-scale-datasets-q1-25-west",
-        "dataset_type": "c4_mlperf",
-        "dataset_name": "c4/en:3.0.7",
-        "eval_dataset_name": "c4/en:3.0.9",
-        "skip_first_n_steps_for_profiler": 645,
-        "weight_dtype": "float32",
-        "dtype": "bfloat16",
-        "steps": 650,
-        "learning_rate": 8.e-5,
-        "warmup_steps_fraction": 0.0067,
-        "learning_rate_schedule_steps": 2400000,
-        "target_eval_loss": 5.6,
-        "data_shuffle_seed": 8941,
-        "quantization": "fp8"
-    },
-    xla_flags=(
-        xla_flags_library.DENSE_VMEM_LIMIT_FLAG
-        + xla_flags_library.CF_FOR_ALL_GATHER
-        + xla_flags_library.HOST_OFFLOAD_FLAGS
+    trillium_model_dict,
+    MaxTextModel(
+        model_name="llama3-1-405b-8192-fsdp-dcn-mlperf",
+        model_type="llama3.1-405b",
+        tuning_params={
+            "per_device_batch_size": 1,
+            "ici_fsdp_parallelism": 256,
+            "dcn_fsdp_parallelism": 4,
+            "remat_policy": "custom",
+            "decoder_layer_input": "offload",
+            "max_target_length": 8192,
+            "attention": "flash",
+            # "gcs_metrics": True,
+            "use_iota_embed": True,
+            # "dataset_type": "synthetic",
+            "reuse_example_batch": -1,
+            "profiler": "xplane",
+            "sa_block_q": 2048,
+            "sa_block_kv": 2048,
+            "sa_block_kv_compute": 2048,
+            "sa_block_q_dkv": 2048,
+            "sa_block_kv_dkv": 2048,
+            "sa_block_kv_dkv_compute": 2048,
+            "sa_block_q_dq": 2048,
+            "sa_block_kv_dq": 2048,
+            "opt_type": "adam_pax",
+            "adam_eps": 1e-5,
+            "enable_checkpointing": True,
+            "load_parameters_path": "gs://trillium-scale-tests-q1-25-west/mlperf50_llama405b_checkpoints/scanned_sharded/0/items",
+            "tokenizer_path": "assets/tokenizer.mistral-v3",
+            "dataset_path": "gs://trillium-scale-datasets-q1-25-west",
+            "dataset_type": "c4_mlperf",
+            "dataset_name": "c4/en:3.0.7",
+            "eval_dataset_name": "c4/en:3.0.9",
+            "skip_first_n_steps_for_profiler": 645,
+            "weight_dtype": "float32",
+            "dtype": "bfloat16",
+            "steps": 650,
+            "learning_rate": 8.0e-5,
+            "warmup_steps_fraction": 0.0067,
+            "learning_rate_schedule_steps": 2400000,
+            "target_eval_loss": 5.6,
+            "data_shuffle_seed": 8941,
+            "quantization": "fp8_full",
+            "use_qwix_quantization": True,
+        },
+        xla_flags=(
+            xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+            + xla_flags_library.CF_FOR_ALL_GATHER
+            + xla_flags_library.HOST_OFFLOAD_FLAGS
+        ),
     ),
-  )
 )

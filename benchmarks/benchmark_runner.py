@@ -19,7 +19,7 @@
 This script will run specific tuned workload on specified hardware and software environments
 Example usages:
   python3 benchmark_runner.py xpk --project=<my-project> --zone=<zone> \
-    --cluster_name=<xpk_cluster_name> --base_output_directory=<output_gcloud_bucket> --device_type=v6e-256 
+    --cluster_name=<xpk_cluster_name> --base_output_directory=<output_gcloud_bucket> --device_type=v6e-256
     --num_slices=1 --model_name="llama2_70b_4096" --libtpu_version=20241009 --base_docker_image=maxtext_base_image
 """
 import argparse
@@ -123,15 +123,14 @@ def add_xpk_runner_arguments(custom_parser: argparse.ArgumentParser):
       help='Number of slices for tpu devices command.',
   )
   custom_parser.add_argument(
-      '--model_name',
+      "--model_name",
       type=str,
-<<<<<<< HEAD
-      choices=list(trillium_model_dict.keys()) + list(v5p_model_dict.keys()) + list(v5e_model_dict.keys()),
-=======
-      choices=list(trillium_model_dict.keys()) + list(v5p_model_dict.keys()) + list(v5e_model_dict.keys()) + list(c4_pretrain_model_dict.keys()),
->>>>>>> main
+      choices=list(trillium_model_dict.keys())
+      + list(v5p_model_dict.keys())
+      + list(v5e_model_dict.keys())
+      + list(c4_pretrain_model_dict.keys()),
       default=list(trillium_model_dict.keys())[0],
-      help='model to be benchmarked, supported models are the command choices.',
+      help="model to be benchmarked, supported models are the command choices.",
   )
   custom_parser.add_argument(
       '--libtpu_version',
@@ -245,11 +244,7 @@ def main() -> None:
   options = parser.parse_args()
 
   # Check that there are no duplicate model configs
-<<<<<<< HEAD
-  duplicates = (trillium_model_dict.keys() & v5p_model_dict.keys() & v5e_model_dict.keys())
-=======
-  duplicates = (trillium_model_dict.keys() & v5p_model_dict.keys() & v5e_model_dict.keys() & c4_pretrain_model_dict.keys())
->>>>>>> main
+  duplicates = trillium_model_dict.keys() & v5p_model_dict.keys() & v5e_model_dict.keys() & c4_pretrain_model_dict.keys()
   assert len(duplicates) == 0 , f'Found duplicate model config {duplicates}'
 
   model = trillium_model_dict.get(options.model_name)
@@ -257,12 +252,8 @@ def main() -> None:
     model = v5e_model_dict.get(options.model_name)
   if model is None:
     model = v5p_model_dict.get(options.model_name)
-<<<<<<< HEAD
-
-=======
   if model is None:
     model = c4_pretrain_model_dict.get(options.model_name)
->>>>>>> main
   libtpu_type = None
   match options.libtpu_type:
     case LibTpuType.NIGHTLY.value:
