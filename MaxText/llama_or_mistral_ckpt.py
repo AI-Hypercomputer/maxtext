@@ -637,10 +637,10 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
             continue
         else:
           layer = int(parts[2]) if "layers" in key else 0
-          # For Qwen3 MoE, the expert index is at part 4
+          # For Qwen3 MoE, the expert index is at part 5
           # e.g., model.layers.{idx}.mlp.experts.{idx}
           if "mlp.experts" in key:
-            expert = int(parts[4])
+            expert = int(parts[5])
 
         mapped_key = _hf_to_maxtext_mapping(layer, expert)[key]
         chkpt_vars[mapped_key] = f.get_tensor(key)
