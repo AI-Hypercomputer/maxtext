@@ -215,7 +215,7 @@ class LlamaDecoderLayer(nnx.Module):
 
 LlamaDecoderLayerToLinen = nnx_wrappers.to_linen_class(
   LlamaDecoderLayer,
-  metadata_fn=initializers.variable_to_logically_partitioned,
+  base_metadata_fn=initializers.variable_to_logically_partitioned,
 )
 
 
