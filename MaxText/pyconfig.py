@@ -195,6 +195,9 @@ def validate_keys(keys):
         " use_replicator_service and replicator_backup_interval_minutes"
     )
 
+  if keys["use_ring_of_experts"]:
+    validate_ring_of_experts(keys)
+
   validate_multiple_slices(keys)
   if keys["num_experts"] > 1:
     validate_sparse_matmul_parallelism(keys)
@@ -295,6 +298,11 @@ def validate_llama4_config(keys: dict):
     raise ValueError(
         f"The number of decoder layers ({keys['base_num_decoder_layers']}) must be divisible by interleave moe layer step ({keys['interleave_moe_layer_step']})"
     )
+
+
+def validate_ring_of_experts(keys):
+  if not keys["sparse_matmul"]:
+    raise ValueError("Ring-of-experts requires `sparse_matmul=True`")
 
 
 def validate_model_name(s: str) -> bool:
