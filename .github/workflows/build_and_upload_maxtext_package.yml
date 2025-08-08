@@ -33,13 +33,13 @@ jobs:
   build_and_upload:
     name: Build and upload maxtext package (${{ inputs.device_name }})
     runs-on: ${{ inputs.cloud_runner != '' && inputs.cloud_runner || fromJson(format('["self-hosted", "{0}", "{1}"]', inputs.device_type, inputs.device_name)) }}
-    container: google/cloud-sdk:524.0.0
+    container: us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build:latest
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Mark git repository as safe
         run: git config --global --add safe.directory ${GITHUB_WORKSPACE}
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       - name: Install build tools
@@ -51,10 +51,11 @@ jobs:
       - name: Install seed-env
         run: |
           temp_dir=$(mktemp -d)
+          pwd_dir=$(pwd)
           git clone --depth 1 https://github.com/google-ml-infra/actions.git $temp_dir
-          pushd $temp_dir/python_seed_env
+          cd $temp_dir/python_seed_env
           python -m uv pip install .
-          popd
+          cd $pwd_dir
       - name: Build the wheel
         run: |
           rm pyproject.toml # Remove maxtext's pyproject.toml at main. It is not working now.
