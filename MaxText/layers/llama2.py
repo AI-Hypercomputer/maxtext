@@ -62,8 +62,8 @@ class LlamaDecoderLayer(nnx.Module):
     self.quant = quant
     self.rngs = rngs
 
-    #dummy_inputs_shape = (int(config.global_batch_size_to_load), config.max_target_length, int(config.emb_dim))
-    dummy_inputs_shape = (int(config.per_device_batch_size), config.max_target_length, int(config.emb_dim))
+    dummy_inputs_shape = (int(config.global_batch_size_to_load), config.max_target_length, int(config.emb_dim))
+    #dummy_inputs_shape = (int(config.per_device_batch_size), config.max_target_length, int(config.emb_dim))
 
     self.pre_self_attention_layer_norm = RMSNorm(
         num_features=config.emb_dim,
@@ -98,8 +98,8 @@ class LlamaDecoderLayer(nnx.Module):
         reshape_q=config.reshape_q,
         use_ragged_attention=config.use_ragged_attention,
         ragged_block_size=config.ragged_block_size,
-        model_mode=model_mode,
-        #model_mode=MODEL_MODE_AUTOREGRESSIVE,
+        #model_mode=model_mode,
+        model_mode=MODEL_MODE_AUTOREGRESSIVE,
         #model_mode=MODEL_MODE_TRAIN, # Only supporting training here
         #model_mode=MODEL_MODE_PREFILL,  # This is just for initialization
         rngs=self.rngs,
