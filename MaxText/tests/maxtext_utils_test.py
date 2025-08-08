@@ -37,6 +37,7 @@ import optax
 
 from MaxText import max_utils
 from MaxText import maxtext_utils
+from MaxText import inference_utils
 from MaxText import pyconfig
 from MaxText.common_types import MODEL_MODE_TRAIN
 from MaxText.globals import PKG_DIR
@@ -420,6 +421,119 @@ class TestAssert_Formatted_sharding_annotations(unittest.TestCase):
       }
       self.assertIsNotNone(get_formatted_sharding_annotations(params, self.mesh))
 
+
+class TestPromptLogprobsFromPrefill(unittest.TestCase):
+  """
+  Test suite for the inference utility function 'prompt_logprobs_from_prefill'.
+  """
+  def test_shift_and_masking(self):
+    # B=1, S=5, V=4
+    B, S, V = 1, 5, 4
+    # tokens: valid up to true_length=4 (positions 0..3); last token is padding
+    input_tokens = jnp.array([[1, 2, 3, 1, 0]], dtype=jnp.int32)
+    true_length = 4
+
+    # logits predict t+1 at index t.
+    # Make steps t=0,1,2 strongly favor the actual next token (input_tokens[:, t+1])
+    logits = jnp.zeros((B, S, V), dtype=jnp.float32)
+    logits = logits.at[0, 0, input_tokens[0, 1]].set(10.0)  # predicts token at pos 1
+    logits = logits.at[0, 1, input_tokens[0, 2]].set(10.0)  # predicts token at pos 2
+    logits = logits.at[0, 2, input_tokens[0, 3]].set(10.0)  # predicts token at pos 3
+    # logits[:, 3, :] would predict token at pos 4 (padding); won't be used after masking.
+
+    out = inference_utils.prompt_logprobs_from_prefill(logits, input_tokens, true_length)
+    out_np = np.asarray(out)
+
+    # pos 0 must be NaN (no previous token)
+    self.assertTrue(np.isnan(out_np[0, 0]))
+    # positions 1..3 should be ~0 (log prob ~0 for correct, very confident prediction)
+    for pos in (1, 2, 3):
+      self.assertTrue(np.isfinite(out_np[0, pos]))
+      self.assertGreater(out_np[0, pos], -1e-3)  # close to 0
+
+    # positions >= true_length (>=4) masked to NaN
+    self.assertTrue(np.isnan(out_np[0, 4]))
+
+  def test_true_length_one_all_nan(self):
+    # Only a single valid token => no predictable positions
+    input_tokens = jnp.array([[2, 1, 1]], dtype=jnp.int32)
+    logits = jnp.zeros((1, 3, 5), dtype=jnp.float32)
+    out = inference_utils.prompt_logprobs_from_prefill(logits, input_tokens, true_length=1)
+    out_np = np.asarray(out)
+    # All NaN (pos 0 NaN by definition; others masked by true_length)
+    self.assertTrue(np.all(np.isnan(out_np)))
+
+
+class TestPromptLogprobsFromPackedPrefill(unittest.TestCase):
+  """
+  Test suite for the inference utility function 'prompt_logprobs_from_packed_prefill'.
+  """
+  def test_respects_segments_and_masking(self):
+    # Build a packed sequence of two prompts.
+    # Global S=8, V=5
+    B, S, V = 1, 8, 5
+
+    # Segment 0: start=0, L0=4, positions 0..3
+    # Segment 1: start=4, L1=3, positions 0..2 (position 3 is padding in this segment)
+    start0, L0 = 0, 4
+    start1, L1 = 4, 3
+
+    # Tokens per segment (last token of seg1 padding at pos 7)
+    toks = np.array([1, 2, 3, 1,   4, 0, 2, 0], dtype=np.int32)  # shape [S]
+    input_tokens = jnp.asarray(toks)[None, :]  # [B, S]
+
+    # decoder_positions within each segment
+    pos0 = np.arange(0, L0)                  # [0,1,2,3]
+    pos1 = np.array([0, 1, 2, 3])            # last is padding for seg1
+    decoder_positions = jnp.asarray(np.concatenate([pos0, pos1])[None, :])  # [B, S]
+
+    # segment ids: 0 for first 4, 1 for next 4
+    decoder_segment_ids = jnp.asarray(np.concatenate([np.zeros(L0), np.ones(4)]).astype(np.int32)[None, :])  # [B, S]
+
+    # true lengths per prompt
+    true_lengths = jnp.asarray([L0, L1], dtype=jnp.int32)  # [num_prompts=2]
+
+    # Construct logits so that for each segment:
+    # logits[:, step, :] strongly favors the *next* token inside the same segment.
+    logits = jnp.zeros((B, S, V), dtype=jnp.float32)
+
+    # Segment 0: steps 0..2 predict tokens at positions 1..3
+    logits = logits.at[0, start0 + 0, toks[start0 + 1]].set(10.0)
+    logits = logits.at[0, start0 + 1, toks[start0 + 2]].set(10.0)
+    logits = logits.at[0, start0 + 2, toks[start0 + 3]].set(10.0)
+    # Step 3 would predict pos 4 (start of next segment) — must NOT be scored for seg0.
+
+    # Segment 1: steps 4..5 predict tokens at positions 5..6 (pos 7 is padding)
+    logits = logits.at[0, start1 + 0, toks[start1 + 1]].set(10.0)
+    logits = logits.at[0, start1 + 1, toks[start1 + 2]].set(10.0)
+    # Step start1+2 would predict pos 7 (padding) — must NOT be scored for seg1.
+
+    out = inference_utils.prompt_logprobs_from_packed_prefill(
+        logits=logits,
+        input_tokens=input_tokens,
+        decoder_positions=decoder_positions,
+        decoder_segment_ids=decoder_segment_ids,
+        true_lengths=true_lengths,
+    )
+    out_np = np.asarray(out)
+
+    # Segment 0 checks:
+    # pos 0 (seg0) NaN
+    self.assertTrue(np.isnan(out_np[0, 0]))
+    # pos 1..3 finite and ~0
+    for p in (1, 2, 3):
+      self.assertTrue(np.isfinite(out_np[0, p]))
+      self.assertGreater(out_np[0, p], -1e-3)
+    # position 4 is *start of seg1* (pos==0 in its segment) -> NaN
+    self.assertTrue(np.isnan(out_np[0, 4]))
+
+    # Segment 1 checks:
+    # pos 5..6 finite and ~0 (valid positions 1..2 of seg1)
+    for p in (5, 6):
+      self.assertTrue(np.isfinite(out_np[0, p]))
+      self.assertGreater(out_np[0, p], -1e-3)
+    # pos 7 >= true_length of seg1 -> NaN
+    self.assertTrue(np.isnan(out_np[0, 7]))
 
 if __name__ == "__main__":
   unittest.main()
