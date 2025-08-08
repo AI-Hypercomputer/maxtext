@@ -7,7 +7,7 @@ cloud_tpu_diagnostics==0.1.5
 datasets==3.6.0
 etils==1.12.2
 evaluate==0.4.4
-flax==0.10.6
+flax==0.11.0
 grain==0.2.10
 grpcio==1.72.0rc1
 huggingface_hub==0.33.0

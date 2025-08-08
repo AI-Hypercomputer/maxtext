@@ -116,7 +116,11 @@ class MaxEngineTest(unittest.TestCase):
     ids, decoder_segment_ids, decoder_positions = self.get_data()
 
     transformer_vars = model.init(
-        {"params": self.rng, "aqt": self.rng}, ids, decoder_positions, decoder_segment_ids, enable_dropout=False
+        {"params": self.rng, "aqt": self.rng, "dropout": self.rng},
+        ids,
+        decoder_positions,
+        decoder_segment_ids,
+        enable_dropout=False,
     )
     input_tokens = jnp.array([1, 306, 5360, 304, 0, 0, 0, 0])
     true_length = 4
@@ -140,7 +144,11 @@ class MaxEngineTest(unittest.TestCase):
     ids, decoder_segment_ids, decoder_positions = self.get_data()
 
     transformer_vars = model.init(
-        {"params": self.rng, "aqt": self.rng}, ids, decoder_positions, decoder_segment_ids, enable_dropout=False
+        {"params": self.rng, "aqt": self.rng, "dropout": self.rng},
+        ids,
+        decoder_positions,
+        decoder_segment_ids,
+        enable_dropout=False,
     )
     input_tokens = jnp.array([1, 306, 5360, 304])
     engine = MaxEngine(self.cfg, jax.devices())
