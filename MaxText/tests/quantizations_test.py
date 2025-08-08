@@ -36,6 +36,7 @@ from MaxText import pyconfig
 from MaxText.layers import quantizations
 from MaxText import maxtext_utils
 from MaxText import train_utils
+from MaxText.kernels.megablox.gmm import gmm
 from MaxText.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR
 
 _QUERY_REGEX = ".*/query"
@@ -344,6 +345,54 @@ class QuantTest(unittest.TestCase):
   @pytest.mark.tpu_only
   def test_fp8_full_quantization(self):
     self.quantization_config("fp8_full")
+
+
+@pytest.mark.parametrize(
+    "group_sizes,k,n,tiling,dtype",
+    [
+        # m = sum(group_sizes) must be divisible by tm (first element of tiling)
+        ([3, 5], 6, 4, (1, 1, 1), jnp.int8),  # m = 8, tm = 8
+    ],
+)
+@pytest.mark.tpu_only
+def test_gmm_kernel(group_sizes, k, n, tiling, dtype):
+  """
+  Smoke-test + correctness check for the grouped matrix-multiply kernel.
+  For each group i, gmm should compute
+      lhs[start_i:end_i, :]  @  rhs[i]
+  and stitch the results back together along rows.
+  """
+  group_sizes = jnp.array(group_sizes, dtype=jnp.int32)
+  m = int(group_sizes.sum())
+
+  key = jax.random.key(0)
+  key, k1, k2 = jax.random.split(key, 3)
+
+  lhs = jax.random.normal(k1, (m, k), dtype=jnp.float32)
+  rhs = jax.random.normal(k2, (group_sizes.size, k, n), dtype=jnp.float32)
+
+  # ---- run the Pallas kernel ------------------------------------------------
+  base_out = gmm(
+      lhs,
+      rhs,
+      group_sizes,
+      tiling=tiling,  # small tiles so the shapes above work
+      interpret=True,  # avoids device-specific compilation in CI
+      lhs_quantize_dtype=None,
+      rhs_quantize_dtype=None,
+  ).block_until_ready()
+
+  quant_out = gmm(
+      lhs,
+      rhs,
+      group_sizes,
+      tiling=tiling,  # small tiles so the shapes above work
+      interpret=True,  # avoids device-specific compilation in CI
+      lhs_quantize_dtype=dtype,
+      rhs_quantize_dtype=dtype,
+  ).block_until_ready()
+
+  assert jnp.abs(quant_out - base_out).mean() / jnp.abs(base_out).mean() < 2e-1
 
 
 if __name__ == "__main__":

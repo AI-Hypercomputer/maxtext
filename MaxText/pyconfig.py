@@ -241,6 +241,19 @@ def validate_constant_bound(keys):
   ), "Please specify competete constant bound or none"
 
 
+def validate_quantization_methods(keys):
+  """Validate quantization methods
+  """
+  valid_quant_methods = (
+    "", "int8", "fp8", "fp8_full"
+  )
+  if keys["use_qwix_quantization"]:
+    if keys["quantization"] not in valid_quant_methods:
+      raise ValueError(
+          f"Invalid quantization method {keys['quantization']}. Valid options are {valid_quant_methods}"
+      )
+
+
 def validate_data_input(keys):
   """validate provided parameters for data input"""
   if not keys["hf_access_token"]:
@@ -640,6 +653,7 @@ class _HyperParameters:
     validate_tokenizer(raw_keys)
     validate_data_input(raw_keys)
     validate_constant_bound(raw_keys)
+    validate_quantization_methods(raw_keys)
 
     raw_keys["decoder_block"] = DecoderBlockType(raw_keys["decoder_block"])
 
