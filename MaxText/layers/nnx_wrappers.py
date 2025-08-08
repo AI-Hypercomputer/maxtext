@@ -310,7 +310,7 @@ def _enable_linen_module_paths(module: Module):
         return call_fn(*args, **kwargs)
       nn_module = linen.module._context.module_stack[-1]  # pylint: disable=W0212
       old_path = nn_module.path
-      # We modify the path of the current nn module in place. This is a litte
+      # We modify the path of the current nn module in place. This is a little
       # bit hacky but should be good as a temporary solution.
       nn_module.scope.path += (name,)
       try:

@@ -362,8 +362,8 @@ class DependencyAnalyzer:
 
     # 5. Create the dependency list between components.
     dependency_list = set()
-    for dependant, deps in self.dependencies.items():
-      dependant_comp = comp_to_name_map.get(dependant)
+    for dependent, deps in self.dependencies.items():
+      dependant_comp = comp_to_name_map.get(dependent)
       for dependency in deps:
         dependency_comp = comp_to_name_map.get(dependency)
         if dependant_comp and dependency_comp and dependant_comp != dependency_comp:

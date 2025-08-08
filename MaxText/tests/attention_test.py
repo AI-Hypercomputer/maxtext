@@ -1312,7 +1312,7 @@ class MLATest(parameterized.TestCase):
 def _forward_with_context_expert_parallelism(cfg_cp, mesh_cp, attention_cp, lnx, decoder_segment_ids, decoder_positions):
   """Get logits from attention under context/expert parallelism."""
   # If load balanced cp, shuffle along seq dim for input
-  # This correponds to the pre-shuffle step in training
+  # This corresponds to the pre-shuffle step in training
   context_parallel_size = cfg_cp.context_parallel_size
   if context_parallel_size > 1 and cfg_cp.context_parallel_load_balance:
     batch = {"inputs": lnx, "inputs_segmentation": decoder_segment_ids, "inputs_position": decoder_positions}

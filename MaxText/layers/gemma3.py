@@ -519,7 +519,7 @@ class Gemma3VisionEncoderLayer(nn.Module):
       jnp.array for image embeddings, shaped [B, N, P, D], e.g. [4, 1, 256, 2560]
     """
     cfg = self.config
-    # currrently only supports N=1, the inputs shape is [B, H, W, C]
+    # currently only supports N=1, the inputs shape is [B, H, W, C]
     if len(inputs.shape) == 4:
       inputs = inputs[:, None, :]
     b, n, h, w, c = inputs.shape

@@ -516,7 +516,7 @@ def calculate_tflops_training_per_device(config, log=True):
         * config.head_dim
     )
 
-  # Divide attantion flops by 2 due to causal mask
+  # Divide attention flops by 2 due to causal mask
   # References:
   # NVIDIA/Megatron-LM (2025 March): https://github.com/NVIDIA/Megatron-LM/blob/250b79415dcc4b660521273c87f15334c804eeae/megatron/training/training.py#L361-L362
   # NVIDIA/NeMo (2025 April): https://github.com/NVIDIA/NeMo/blob/ba4d6d116463de512ff0cfc14641aa6cf4577a42/nemo/utils/flops_formulas.py#L259-L272

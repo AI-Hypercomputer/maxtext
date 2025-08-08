@@ -465,7 +465,7 @@ class InferenceWorker:
     self.running = True
     self.true_lengths = {input.id: input.true_length for input in data}
 
-    max_logging.log("Continous batching started")
+    max_logging.log("Continuous batching started")
 
     self._run_continous_batching(data)
 
