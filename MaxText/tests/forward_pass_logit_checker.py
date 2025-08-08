@@ -52,7 +52,7 @@ from MaxText.utils.ckpt_conversion.utils.hf_utils import (
 from MaxText import max_logging
 from MaxText import maxtext_utils
 from MaxText import pyconfig
-from MaxText.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR
+from MaxText.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_TRAIN
 from MaxText.globals import PKG_DIR
 from MaxText.layers import models
 from MaxText.layers import quantizations
@@ -219,7 +219,7 @@ def main(config, test_args):  # pylint: disable=W0621
       devices_array = maxtext_utils.create_device_mesh(config)
       mesh = jax.sharding.Mesh(devices_array, config.mesh_axes)
       quant = quantizations.configure_quantization(config)
-      model = models.Transformer(config, mesh=mesh, quant=quant)
+      model = models.Transformer(config, mesh=mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
       state, _ = maxtext_utils.setup_decode_state(model, config, rng1, mesh, None)
 
     if test_args.golden_logits_path == "":
@@ -297,7 +297,7 @@ def main(config, test_args):  # pylint: disable=W0621
     devices_array = maxtext_utils.create_device_mesh(config)
     mesh = jax.sharding.Mesh(devices_array, config.mesh_axes)
     quant = quantizations.configure_quantization(config)
-    maxtext_model = models.Transformer(config, mesh, quant=quant)
+    maxtext_model = models.Transformer(config, mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
     maxtext_state, _ = maxtext_utils.setup_decode_state(maxtext_model, config, rng1, mesh, None)
 
     prompts = ["I love to", "Today is a", "What is the"]

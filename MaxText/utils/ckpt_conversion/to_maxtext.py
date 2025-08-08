@@ -58,6 +58,7 @@ from MaxText import max_utils
 from MaxText import maxtext_utils
 from MaxText import pyconfig
 from MaxText import optimizers
+from MaxText.common_types import MODEL_MODE_TRAIN
 from MaxText.layers import models, quantizations
 from MaxText.checkpointing import save_checkpoint
 from MaxText.utils.ckpt_conversion.utils.param_mapping import HOOK_FNS, PARAM_MAPPING
@@ -100,7 +101,7 @@ def main(argv: Sequence[str]) -> None:
   # Initialize MaxText model, optimizer, and abstract state
   rng = jax.random.PRNGKey(config.init_weights_seed)
   quant = quantizations.configure_quantization(config)
-  maxtext_model_flax = models.Transformer(config, mesh, quant=quant)
+  maxtext_model_flax = models.Transformer(config, mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
   learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
   tx = optimizers.get_optimizer(config, learning_rate_schedule)
 

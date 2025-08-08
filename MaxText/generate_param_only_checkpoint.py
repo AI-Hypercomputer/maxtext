@@ -40,7 +40,7 @@ from MaxText import max_utils
 from MaxText import maxtext_utils
 from MaxText import optimizers
 from MaxText import pyconfig
-from MaxText.common_types import DecoderBlockType
+from MaxText.common_types import DecoderBlockType, MODEL_MODE_TRAIN
 from MaxText.layers import models, quantizations
 from MaxText.utils import gcs_utils
 from MaxText.utils import lora_utils
@@ -96,7 +96,7 @@ def _read_train_checkpoint(config, checkpoint_manager, mesh):
   """Read training checkpoint at path defined by load_full_state_path."""
   # Model and Optimizer definition
   quant = quantizations.configure_quantization(config)
-  model = Transformer(config, mesh, quant)
+  model = Transformer(config, mesh, quant, MODEL_MODE_TRAIN)
   rng = random.PRNGKey(0)
   learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
   tx = optimizers.get_optimizer(config, learning_rate_schedule)
@@ -112,7 +112,7 @@ def _generate_lora_decode_checkpoints(config, mesh):
   """Read lora checkpoints checkpoint at path defined by load_full_state_path."""
   # Model and Optimizer definition
   quant = quantizations.configure_quantization(config)
-  model = Transformer(config, mesh, quant)
+  model = Transformer(config, mesh, quant, MODEL_MODE_TRAIN)
   rng = random.PRNGKey(0)
   learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
   tx = optimizers.get_optimizer(config, learning_rate_schedule)

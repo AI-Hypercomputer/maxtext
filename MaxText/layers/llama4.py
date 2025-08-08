@@ -360,6 +360,7 @@ class Llama4DecoderLayer(nn.Module):
 
   config: Config
   mesh: Mesh
+  model_mode: str
   quant: Optional[Quant] = None
   is_nope_layer: bool = False
   is_moe_layer: bool = False
@@ -539,6 +540,7 @@ class Llama4ScannableBlock(nn.Module):
 
   config: Config
   mesh: Mesh
+  model_mode: str
   quant: Optional[Quant] = None
   nope_layer_interval: int = 1
   interleave_moe_layer_step: int = 1
@@ -571,6 +573,7 @@ class Llama4ScannableBlock(nn.Module):
           mesh=mesh,
           name=f"layers_{layer_id}",
           quant=self.quant,
+          model_mode=model_mode,
           is_nope_layer=nope_layer,
           is_moe_layer=moe_layer,
       )

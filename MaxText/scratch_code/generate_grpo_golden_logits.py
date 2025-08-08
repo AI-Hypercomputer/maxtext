@@ -51,7 +51,7 @@ from MaxText.experimental.rl.grpo_utils import compute_log_probs
 from MaxText.globals import PKG_DIR
 from MaxText.layers import models
 from MaxText.tests.grpo_trainer_correctness_test import prepare_maxtext_inputs
-from MaxText.common_types import Array
+from MaxText.common_types import Array, MODEL_MODE_TRAIN
 
 
 class GRPOTest(unittest.TestCase):
@@ -81,12 +81,14 @@ class GRPOTest(unittest.TestCase):
     devices_array = maxtext_utils.create_device_mesh(self.cfg)
     mesh = Mesh(devices_array, self.cfg.mesh_axes)
     # With checkpoint
-    self.model = models.Transformer(config=self.cfg, mesh=mesh, quant=None)
+    self.model = models.Transformer(config=self.cfg, mesh=mesh, quant=None, model_mode=MODEL_MODE_TRAIN)
     self.state, state_mesh_annotations = maxtext_utils.setup_decode_state(self.model, self.cfg, self.rng, mesh, None)
     self.state_mesh_shardings = nn.logical_to_mesh_sharding(state_mesh_annotations, mesh, self.cfg.logical_axis_rules)
     self.data_sharding = jax.NamedSharding(mesh, jax.sharding.PartitionSpec(None))
     # Without checkpoint
-    self.model_no_ckpt_loading = models.Transformer(config=self.cfg_no_ckpt_loading, mesh=mesh, quant=None)
+    self.model_no_ckpt_loading = models.Transformer(
+        config=self.cfg_no_ckpt_loading, mesh=mesh, quant=None, model_mode=MODEL_MODE_TRAIN
+    )
     self.state_no_ckpt_loading, _ = maxtext_utils.setup_decode_state(
         self.model_no_ckpt_loading, self.cfg_no_ckpt_loading, self.rng, mesh, None
     )

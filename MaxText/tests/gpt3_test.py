@@ -29,6 +29,7 @@ import jax
 from MaxText import maxtext_utils
 from MaxText import pyconfig
 from MaxText.globals import PKG_DIR
+from MaxText.common_types import MODEL_MODE_TRAIN
 from MaxText.layers import models
 from MaxText.layers import quantizations
 
@@ -71,7 +72,7 @@ class GPT3(unittest.TestCase):
     devices_array = maxtext_utils.create_device_mesh(self.cfg)
     mesh = Mesh(devices_array, self.cfg.mesh_axes)
     quant = quantizations.configure_quantization(self.cfg)
-    self.model = models.Transformer(config=self.cfg, mesh=mesh, quant=quant)
+    self.model = models.Transformer(config=self.cfg, mesh=mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
     self.example_batch = {
         "inputs": jnp.array([[11, 12, 13, 14, 15]], dtype=jnp.int32),
         "inputs_position": jnp.array([[0, 1, 2, 3, 4]], dtype=jnp.int32),

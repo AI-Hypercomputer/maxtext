@@ -58,10 +58,11 @@ class PipelineParallelismTest(unittest.TestCase):
     """check that the output and gradient are the same"""
     devices_array = maxtext_utils.create_device_mesh(config)
     mesh = Mesh(devices_array, config.mesh_axes)
+    model_mode = MODEL_MODE_TRAIN
     if single_pipeline_stage_class is None:
-      single_pipeline_stage = simple_layer.SimpleDecoderLayer(config=config, mesh=mesh)
+      single_pipeline_stage = simple_layer.SimpleDecoderLayer(config=config, mesh=mesh, model_mode=model_mode)
     else:
-      single_pipeline_stage = single_pipeline_stage_class(config=config, mesh=mesh)
+      single_pipeline_stage = single_pipeline_stage_class(config=config, mesh=mesh, model_mode=model_mode)
 
     def get_inputs(batch_size, sequence, features):
       """Get random inputs, and random dummy targets
@@ -85,9 +86,8 @@ class PipelineParallelismTest(unittest.TestCase):
         config.global_batch_size_to_train_on, config.max_target_length, config.emb_dim
     )
     deterministic = True
-    model_mode = MODEL_MODE_TRAIN
     # We use a simpler single matmul decoder layer for fast compilation in these tests.
-    single_pipeline_stage = simple_layer.SimpleDecoderLayer(config=config, mesh=mesh)
+    single_pipeline_stage = simple_layer.SimpleDecoderLayer(config=config, mesh=mesh, model_mode=model_mode)
     my_pipeline = pipeline.Pipeline(config=config, layers=single_pipeline_stage, mesh=mesh)
     init_pipeline_params = my_pipeline.init(
         jax.random.PRNGKey(0), inputs, inputs_position, inputs_segmentation, deterministic, model_mode
