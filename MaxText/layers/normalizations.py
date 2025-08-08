@@ -60,7 +60,21 @@ class RMSNorm(nnx.Module):
     mean2 = jnp.mean(lax.square(x), axis=-1, keepdims=True)
     y = jnp.asarray(x * lax.rsqrt(mean2 + self.epsilon), self.dtype)
     scale = self.scale.value
-    # Move scale to device if parameter offloading is enabled
+    
+    # THE FIX: This robustly handles the sharding propagation failure.
+    # We check if the scale parameter is unsharded by comparing its shape
+    # with the last dimension of the sharded activations 'y'.
+    if scale.shape[-1] != y.shape[-1]:
+        # If they don't match, we manually slice the 'scale' parameter.
+        # We get the device's index along the 'tensor' axis and use it
+        # to slice the correct shard from the full 'scale' parameter.
+        axis_index = lax.axis_index('tensor')
+        slice_size = y.shape[-1]
+        start_index = axis_index * slice_size
+        scale = lax.dynamic_slice_in_dim(
+            scale, start_index, slice_size, axis=0
+        )
+    
     if self.parameter_memory_host_offload:
       max_logging.log("normalizations.py: Moving scale parameter to device")
       scale = jax.device_put(scale, max_utils.device_space())

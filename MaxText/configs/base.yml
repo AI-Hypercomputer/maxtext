@@ -169,11 +169,6 @@ tile_batch_seq: 512
 tile_activation_dim: 1024
 tile_weight_dim: 1024
 
-# How the expert axis is used to shard attention weights and activations
-# "fsdp" (ep acts as fsdp parallelism)
-# "context" (ep acts as context parallelism, training only)
-expert_shard_attention_option: "fsdp"
-
 # deepseek moe
 base_moe_mlp_dim: 7168 # intermediate dimension at MoE layer (use base_mlp_dim if not DeepSeek style)
 first_num_dense_layers: 0 # number of initial dense layers in the model
@@ -188,7 +183,7 @@ topk_routing_group: -1 # number of top groups to route inputs. For EP,
 # For complex architectures like llama4 there are repeated sets of
 # inhomogeneous layers. E.g. maverick uses [dense+rope, moe+rope, dense+rope, moe+nope]
 # which can only be scanned together in one large block of inhomogeneous_layer_cycle_interval=4 layers.
-inhomogeneous_layer_cycle_interval: 1
+inhomogeneous_layer_cycle_interval: 1 
 
 # pipeline parallelism
 # The number of decoder layers is equal to the product of num_stages, num_layers_per_pipeline_stage and num_pipeline_repeats.
@@ -214,7 +209,7 @@ pipeline_delay_activation_forwarding: False # This delays the activation forward
 # the communication and compute in each iteration are now independent. However this comes at the cost of doubling the pipeline bubble,
 # and you must set the number of microbatches to at least 2 * num_stages (the minimum 2 * num_stages is set by default with this delay).
 
-model_fsdp_ag_once: False # This controls whether the Zero-1 optimization is active.
+model_fsdp_ag_once: True # This controls whether the Zero-1 optimization is active.
 # This is a memory/time tradeoff - True: This is Zero-1 Sharding. Use ZeroOneTransformer to gather weights once per gradient step. 
 # False: This is Zero-3 Sharing. Use the standard Transformer, which gathers for each microbatch's fwd/bwd pass.
 pipeline_fsdp_ag_once: False # If set to true then all gather all of the weights over FSDP before the first pipeline iteration.
@@ -236,7 +231,7 @@ scan_pipeline_iterations: True
 scan_layers_per_stage: False
 set_remat_policy_on_pipeline_iterations: True
 set_remat_policy_on_layers_per_stage: False
-
+expert_shard_attention_option: "fsdp" # This controls how the experts shard the attention. Options are "fsdp", "dcn", "ici" and "none".
 
 # Choose 'remat_policy' between 'minimal', 'save_dot_with_context_except_mlp', 'save_dot_except_mlpwi', 'save_dot_except_mlp',
 # 'save_qkv_proj', 'qkv_proj_offloaded', 'custom', 'minimal_offloaded', 'save_out_proj' and 'full'.
@@ -256,6 +251,7 @@ value_proj: 'remat'
 qkv_proj: 'remat'
 out_proj: 'remat'
 
+optimizer_zero1: True
 optimizer_memory_host_offload: False
 parameter_memory_host_offload: False
 scan_layers: True # We recommend setting this to false when using pipeline parallelism, instead scanning the PP iterations.
@@ -322,22 +318,18 @@ logical_axis_rules: [
                       ['activation_embed_and_logits_batch', ['data', 'stage', 'fsdp', 'fsdp_transpose', 'expert']],
                       ['activation_heads', ['tensor', 'tensor_transpose', 'sequence','tensor_sequence','autoregressive']],
                       ['activation_kv_heads', ['tensor', 'tensor_transpose', 'sequence','tensor_sequence']],
-                      ['activation_length', ['sequence', 'context', 'expert']],
-                      ['activation_length', ['context', 'expert']],
-                      ['activation_length_no_exp', ['sequence', 'context']],
-                      ['activation_length_no_exp', ['context']],
-                      ['activation_norm_length', ['tensor_sequence', 'context', 'sequence']],
-                      ['activation_q_length', ['context', 'expert']],
-                      ['activation_q_length_no_exp', ['context']],
+                      ['activation_length', ['sequence', 'context']],
                       ['prefill_activation_length', ['sequence', 'context']],
+                      ['activation_length', ['context']],
+                      ['activation_norm_length', ['tensor_sequence', 'context', 'sequence']],
                       ['prefill_activation_norm_length', ['tensor_sequence', 'context', 'sequence']],
+                      ['activation_q_length', ['context']],
                       ['activation_kv_length', []],
                       ['activation_embed', ['tensor', 'tensor_transpose']],
                       ['activation_mlp', ['tensor', 'tensor_transpose', 'tensor_sequence']],
                       ['activation_kv', ['tensor', 'tensor_transpose', 'tensor_sequence']],
                       ['activation_prefill_kv_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
                       ['activation_kv_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
-                      ['activation_kv_batch_no_exp', ['data', 'fsdp', 'fsdp_transpose']],
                       ['activation_kv_head_dim', ['tensor', 'tensor_transpose', 'tensor_sequence']],
                       ['activation_vocab', ['tensor', 'tensor_transpose', 'sequence', 'tensor_sequence']],
                       ['activation_vocab', ['tensor', 'tensor_transpose']],
@@ -563,7 +555,7 @@ gradient_clipping_threshold: 1.0
 
 # Instead of updating the weights every step, you may effectively use a larger
 # batch by accumulating the gradient over a set of steps.
-gradient_accumulation_steps: 1
+gradient_accumulation_steps: 5
 
 opt_type: "adamw"  # one of "adamw", "adam_pax" or "sgd"
 
@@ -775,7 +767,7 @@ image_path: "" # Local image path used for decoding
 image_placeholder: "<|image|>"
 
 ### llama4 multi modal configs
-hidden_size_for_vit: 1408
+hidden_size_for_vit: 1408 
 intermediate_size_for_vit: 5632
 num_attention_heads_for_vit: 16
 num_channels_for_vit: 3

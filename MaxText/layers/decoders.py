@@ -529,6 +529,7 @@ class Decoder(nn.Module):
           dtype=cfg.dtype,
           embedding_init=nn.initializers.normal(stddev=1.0),
           name="position_embedder",
+          mesh=self.mesh,
           config=cfg,
       )(decoder_positions, model_mode=model_mode)
     return y

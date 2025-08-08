@@ -67,6 +67,7 @@ class Transformer(nn.Module):
         attend_dtype=jnp.float32 if cfg.logits_dot_in_fp32 else cfg.dtype,  # for logit training stability
         embedding_init=nn.initializers.normal(stddev=1.0),
         name="token_embedder",
+        mesh=mesh,
         config=cfg,
     )
     self.vision_encoder = VisionEncoder(config=cfg, mesh=mesh) if cfg.use_multimodal else None

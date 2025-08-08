@@ -52,20 +52,26 @@ OVERWRITE_WITH_GRADIENT = "_overwrite_with_gradient"
 # Multimodal constants
 NUM_IMAGES_PER_SEQUENCE = 1
 NUM_IMAGE_CHANNELS = 3
-NUM_TILES_PER_IMAGE = 1  # Fake number of tiles for llama4, init purpose
+NUM_TILES_PER_IMAGE = 5  # Fake number of tiles for llama4, init purpose
 
 
 def get_input_data_sharding(config, mesh):
   """Get the input data sharding for the model"""
   return nn.logical_to_mesh_sharding(P(*config.input_data_sharding_logical_axes), mesh, config.logical_axis_rules)
 
-
-def get_functional_train_with_signature(train_step, data_sharding, state_mesh_shardings, model, config):
+def get_functional_train_with_signature(train_step,mesh, data_sharding, state_mesh_shardings, model, config,params_shardings):
   """Get the shardings (both state and data) for `train_step`."""
-  functional_train = functools.partial(train_step, model, config, state_mesh_shardings)
+  functional_train = functools.partial(train_step, model, config,mesh, state_mesh_shardings,params_shardings)
   functional_train.__name__ = "train_step"
   in_shardings = (state_mesh_shardings, data_sharding, None)  # State, batch, rng
-  out_shardings = (state_mesh_shardings, None)  # State, metrics
+  
+  # Ensure out_shardings are NamedSharding objects
+  out_shardings = (
+      state_mesh_shardings,
+      jax.tree_util.tree_map(lambda x: jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec()), 
+                             {'scalar': 1, 'scalars': 1}) # Create dummy structure for metrics
+  )
+
   static_argnums = ()  # We partial out the static argnums of model and config
   donate_argnums = 0  # This is the index of the state - we allow the compiler to make use of this memory.
   return functional_train, in_shardings, out_shardings, static_argnums, donate_argnums
@@ -337,141 +343,6 @@ def get_dense_moe_layers(config):
   return num_dense_layers, num_moe_layers
 
 
-def calculate_gemma3_vision_layers_tflops_per_device(config):
-  """
-  Estimate TFLOPs for Gemma3 vision encoder (ViT-style).
-  Returns:
-      total_tflops: Total TFLOPs (counts for fwd + bwd + optimizer)
-      learnable_weight_tflops: TFLOPs from learnable weights (patch embedding, qkv, MLP, projections)
-      attention_tflops: TFLOPs from attention multiplications
-  """
-  # Config values
-  B = config.per_device_batch_size
-  C = config.num_channels_for_vit
-  H = W = config.image_size_for_vit  # Gemma3 default 896
-  embed_dim = config.emb_dim  # text embedding dim after projection
-  # Values below are hardcoded in Gemma3VisionEncoderLayer
-  patch_size = 14
-  hidden_dim = 1152
-  intermediate_dim = 4304
-  num_layers = 27
-  vision_exit_pooling_window = 4
-
-  # 1. Patch embedding (Conv2D)
-  num_patches_h = H // patch_size
-  num_patches_w = W // patch_size
-  seq_len = num_patches_h * num_patches_w  # 64*64=4096
-  patch_embed_flops = 2 * B * seq_len * (C * patch_size * patch_size) * hidden_dim
-
-  # 2. gemma3.Encoder: num_layers * gemma3.Encoder1DBlock
-  qkv_flops_per_layer = 3 * (2 * B * seq_len * hidden_dim * hidden_dim)
-  attn_flops_per_layer = 4 * B * seq_len * seq_len * hidden_dim
-  projection_flops_per_layer = 2 * B * seq_len * hidden_dim * hidden_dim  # projection after attention multiplication
-  mlp_flops_per_layer = 2 * (2 * B * seq_len * hidden_dim * intermediate_dim)  # two fc layers
-  total_attn_flops = attn_flops_per_layer * num_layers
-  encoder_flops = (+qkv_flops_per_layer + projection_flops_per_layer + mlp_flops_per_layer) * num_layers
-
-  # 4. VisionEmbedder
-  seq_len_after_pooling = (num_patches_h // vision_exit_pooling_window) * (num_patches_w // vision_exit_pooling_window)
-  vision_embedder_flops = 2 * B * seq_len_after_pooling * hidden_dim * embed_dim  # One linear projection
-
-  # Learnable weights summation
-  learnable_weight_flops = patch_embed_flops + encoder_flops + vision_embedder_flops
-
-  if config.freeze_vision_encoder_params:
-    learnable_weight_flops += 2 * vision_embedder_flops  # only projector is learnable, add fwd+optimizer
-  else:
-    learnable_weight_flops *= 3  # multiply by 3 for fwd + bwd + optimizer
-
-  # Convert to TFLOPs
-  learnable_weight_tflops = learnable_weight_flops / 1e12
-  total_attn_tflops = total_attn_flops / 1e12
-  total_tflops = learnable_weight_tflops + total_attn_tflops
-
-  return total_tflops, learnable_weight_tflops, total_attn_tflops
-
-
-def calculate_llama4_vision_layers_tflops_per_device(config):
-  """
-  Estimate TFLOPs for Llama4 vision encoder (ViT-style).
-  Returns:
-      total_tflops: Total TFLOPs (counts for fwd + bwd + optimizer)
-      learnable_weight_tflops: TFLOPs from learnable weights (patch embedding, qkv, MLP, projections)
-      attention_tflops: TFLOPs from attention multiplications
-  """
-  # Config values
-  B = config.per_device_batch_size
-  C = config.num_channels_for_vit
-  H = W = config.tile_size_for_vit
-  patch_size = config.patch_size_for_vit
-  hidden_dim = config.hidden_size_for_vit
-  intermediate_dim = config.intermediate_size_for_vit
-  num_layers = config.num_hidden_layers_for_vit
-  pixel_shuffle_fc1_out_dim = config.projector_input_dim_for_vit  # 4096
-  pixel_shuffle_fc2_out_dim = config.projector_output_dim_for_vit  # 4096
-  base_emb_dim = config.base_emb_dim
-  pixel_shuffle_ratio = config.pixel_shuffle_ratio_for_vit  # 0.5
-  num_patches = (H // patch_size) * (W // patch_size)  # 24*24 = 576
-  pixel_shuffle_tokens = num_patches * pixel_shuffle_ratio**2  # 144
-
-  # 1. Llama4UnfoldConvolution (flops by linear projection)
-  # lax.conv_general_dilated_patches extracts patches through reshaping/indexing without flops
-  # Each patch: C * patch_size * patch_size -> hidden_dim
-  patch_embed_flops = 2 * B * num_patches * (C * patch_size * patch_size) * hidden_dim
-
-  # 2. Llama4VisionEncoder: num_layers * (qkv + att_projection + mlp)
-  seq_len = num_patches + 1  # +1 for class token, so 577
-  qkv_flops_per_layer = 3 * (2 * B * seq_len * hidden_dim * hidden_dim)  # Q, K, V projections
-  attn_flops_per_layer = 4 * B * seq_len * seq_len * hidden_dim  # Attention scores and weighted sum
-  projection_flops_per_layer = 2 * B * seq_len * hidden_dim * hidden_dim  # projection after attention multiplication
-  mlp_flops_per_layer = 2 * (2 * B * seq_len * hidden_dim * intermediate_dim)  # two fc layers
-  total_attn_flops = attn_flops_per_layer * num_layers
-  vision_encoder_flops = (+qkv_flops_per_layer + projection_flops_per_layer + mlp_flops_per_layer) * num_layers
-
-  # 3. Llama4VisionPixelShuffleMLP
-  # (B, 144, 5632) -> (B, 144, 4096) -> (B, 144, 4096)
-  pixel_shuffle_fc1_flops = 2 * B * pixel_shuffle_tokens * intermediate_dim * pixel_shuffle_fc1_out_dim
-  pixel_shuffle_fc2_flops = 2 * B * pixel_shuffle_tokens * pixel_shuffle_fc1_out_dim * pixel_shuffle_fc2_out_dim
-  pixel_shuffle_total_flops = pixel_shuffle_fc1_flops + pixel_shuffle_fc2_flops
-
-  # 4. Llama4MultiModalProjector: (B, 144, 5120) x (5120, base_emb_dim)
-  projector_flops = 2 * B * pixel_shuffle_tokens * pixel_shuffle_fc1_out_dim * base_emb_dim
-
-  # Learnable weights: all matmuls above
-  learnable_weight_flops = patch_embed_flops + vision_encoder_flops + pixel_shuffle_total_flops + projector_flops
-
-  if config.freeze_vision_encoder_params:
-    learnable_weight_flops += 2 * projector_flops  # only projector is learnable, add fwd+optimizer
-  else:
-    learnable_weight_flops *= 3  # multiply by 3 for fwd + bwd + optimizer
-
-  # Convert to TFLOPs
-  learnable_weight_tflops = learnable_weight_flops / 1e12
-  total_attn_tflops = total_attn_flops / 1e12
-  total_tflops = learnable_weight_tflops + total_attn_tflops
-
-  return total_tflops, learnable_weight_tflops, total_attn_tflops
-
-
-def calculate_vision_encoder_tflops(config):
-  """Calculate vision encoder TFLOPs per prefill step per device."""
-  if config.model_name.startswith("gemma3"):
-    mm_total_tflops, mm_learnable_weight_tflops, mm_attention_tflops = calculate_gemma3_vision_layers_tflops_per_device(
-        config
-    )
-  elif config.model_name.startswith("llama4"):
-    mm_total_tflops, mm_learnable_weight_tflops, mm_attention_tflops = calculate_llama4_vision_layers_tflops_per_device(
-        config
-    )
-  else:
-    max_logging.log(
-        f"Vision encoder TFLOPs calculation not implemented for model {config.model_name}, counting as 0 for now."
-    )
-    mm_total_tflops = mm_learnable_weight_tflops = mm_attention_tflops = 0
-
-  return mm_total_tflops, mm_learnable_weight_tflops, mm_attention_tflops
-
-
 def calculate_tflops_training_per_device(config, log=True):
   """Calculate training TFLOP"""
   # MLP flops
@@ -560,21 +431,6 @@ def calculate_tflops_training_per_device(config, log=True):
     reference_model_tflops = 0
 
   total_tflops = learnable_weight_tflops + attention_tflops + reference_model_tflops
-
-  if config.use_multimodal:
-    # Add vision layers TFLOPs for multimodal models
-    mm_total_tflops, mm_learnable_weight_tflops, mm_attention_tflops = calculate_vision_encoder_tflops(config)
-    if log:
-      print(
-          f"{config.model_name} vision layers per train step:\n",
-          f"Total TFLOPs: {mm_total_tflops:.2f} \n",
-          f"split as {100 * mm_learnable_weight_tflops/mm_total_tflops:.2f}% learnable weight flops",
-          f"and {100 * mm_attention_tflops/mm_total_tflops:.2f}% attention flops;\n",
-          f"learnable weight {mm_learnable_weight_tflops:.2f} TFLOPs, attention {mm_attention_tflops:.2f} TFLOPs",
-      )
-    total_tflops += mm_total_tflops
-    learnable_weight_tflops += mm_learnable_weight_tflops
-    attention_tflops += mm_attention_tflops
 
   if log:
     print(
@@ -950,7 +806,6 @@ def setup_training_state(model, data_iterator, tx, config, rng, mesh, checkpoint
       is_training,
   )
 
-
 def setup_initial_state(
     model,
     data_iterator,
@@ -978,7 +833,7 @@ def setup_initial_state(
     state_mesh_annotations: the mesh annotations for the train state
   """
 
-  unboxed_abstract_state, state_mesh_annotations, state_mesh_shardings = get_abstract_state(
+  unboxed_abstract_state, state_mesh_annotations, state_mesh_shardings,params_shardings = get_abstract_state(
       model, tx, config, rng, mesh, is_training
   )
 
@@ -1027,8 +882,55 @@ def setup_initial_state(
 
   state = max_utils.unbox_logicallypartioned(state)
 
-  return state, state_mesh_annotations, state_mesh_shardings, data_iterator
+  return state, state_mesh_annotations, state_mesh_shardings, data_iterator,params_shardings
 
+
+
+def add_data_to_sharding(mesh, path, aval, sharding):
+    if not isinstance(sharding, jax.sharding.NamedSharding):
+      raise AssertionError(
+        f"Expected NamedSharding, found {sharding} of {type(sharding)=} at {jax.tree_util.keystr(path)}")
+    try:
+      sharded_shape = sharding.shard_shape(aval.shape)
+    except Exception as e:
+      raise AssertionError(
+        f"Could not shard value {jax.tree_util.keystr(path)} of shape={aval.shape} with {sharding=}") from e
+    pspec = sharding.spec
+
+    if 'data' in jax.tree.leaves(pspec):
+      return sharding
+
+    for idx, (size, partition) in enumerate(zip(sharded_shape, pspec)):
+      if partition is None:
+        partition = ()
+
+      if isinstance(partition, str):
+        partition = (partition,)
+
+      if size % mesh.shape['data'] == 0 and (partition is None or 'tensor' not in partition):
+        added_component = ('data',) + partition
+        new_pspec = jax.sharding.PartitionSpec(*(pspec[:idx] + (added_component,) + pspec[idx + 1:]))
+        new_sharding = jax.sharding.NamedSharding(sharding.mesh, new_pspec)
+        # return sharding.with_spec(new_pspec)
+        return new_sharding
+    return sharding
+
+def maybe_update_params_sharding_with_opt(state_mesh_shardings):
+  prev_params_shardings = state_mesh_shardings.params
+  if isinstance(state_mesh_shardings.opt_state, optax.ScaleByAdamState):
+    sharded_fp32_params = state_mesh_shardings.opt_state.mu
+  elif isinstance(state_mesh_shardings.opt_state, tuple) and isinstance(state_mesh_shardings.opt_state[0],
+                                                                        optax.ScaleByAdamState):
+    sharded_fp32_params = state_mesh_shardings.opt_state[0].mu
+  else:
+    raise NotImplementedError(
+      f"Could not find optimizer state shardings from optimizer of type {type(state_mesh_shardings.opt_state)}")
+  if "params" not in sharded_fp32_params.keys():
+    # When quantization=fp8 is enabled the sharded_fp32_params
+    # are not wrapped in `params`. Here we wrap them back.
+    sharded_fp32_params = {"params": sharded_fp32_params}
+  state_mesh_shardings = state_mesh_shardings.replace(params=dict(prev_params_shardings, **sharded_fp32_params))
+  return prev_params_shardings, state_mesh_shardings
 
 def get_abstract_state(model, tx, config, rng, mesh, is_training=True):
   """Get a shaped abstraction of the state (including optimizer)"""
@@ -1053,8 +955,19 @@ def get_abstract_state(model, tx, config, rng, mesh, is_training=True):
     params = jax.tree_util.tree_map_with_path(move, state_mesh_shardings.params)
     state_mesh_shardings = state_mesh_shardings.replace(params=params)
 
-  abstract_sharded_state = jax.jit(init_state_partial, in_shardings=None, out_shardings=state_mesh_shardings).eval_shape()
+  if is_training and config.optimizer_zero1:
+    opt_state = jax.tree.map_with_path(
+      functools.partial(add_data_to_sharding, mesh),
+      max_utils.unbox_logicallypartioned(abstract_state).opt_state,
+      state_mesh_shardings.opt_state
+    )
+    state_mesh_shardings = state_mesh_shardings.replace(opt_state=opt_state)
+    # Shard params to be the same as the opt_state, keep the orginal params shardings in params_shardings
+    params_shardings, state_mesh_shardings = maybe_update_params_sharding_with_opt(state_mesh_shardings)
+  else:
+    params_shardings=state_mesh_shardings.params
 
+  abstract_sharded_state = jax.jit(init_state_partial, in_shardings=None, out_shardings=state_mesh_shardings).eval_shape()
   unboxed_abstract_sharded_state = max_utils.unbox_logicallypartioned(abstract_sharded_state)
   # Initialization
   with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
@@ -1063,7 +976,9 @@ def get_abstract_state(model, tx, config, rng, mesh, is_training=True):
       unboxed_abstract_sharded_state,
       state_mesh_annotations,
       state_mesh_shardings,
+      params_shardings,
   )
+
 
 
 def get_prefill_kv_cache_annotations(model, config, rng, mesh, page_state: Optional[PageState] = None):
@@ -1434,3 +1349,12 @@ def all_gather_over_fsdp(variables, sharding_info, mesh, logical_axis_rules):
   # Apply the constraint to the model's current variables. This tells JAX to
   # gather the weights into this layout.
   return jax.lax.with_sharding_constraint(variables, physical_constraint_no_fsdp)
+
+def named_sharding_to_partition_spec(sharding):
+    """Convert NamedSharding to PartitionSpec for shard_map"""
+    if isinstance(sharding, jax.sharding.NamedSharding):
+      return sharding.spec
+    elif isinstance(sharding, dict):
+      return jax.tree_util.tree_map(named_sharding_to_partition_spec, sharding)
+    else:
+      return sharding
