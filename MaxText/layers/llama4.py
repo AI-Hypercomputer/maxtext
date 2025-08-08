@@ -18,7 +18,6 @@ limitations under the License.
 # pylint: disable=arguments-differ, disable=no-name-in-module, missing-function-docstring
 
 import math
-from typing import Optional
 
 import jax.numpy as jnp
 from jax import lax

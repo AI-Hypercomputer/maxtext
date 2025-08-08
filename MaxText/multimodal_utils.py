@@ -423,7 +423,10 @@ def reformat_prompt(prompt, image_placeholder, model_name):
       prompt = prompt.replace(image_placeholder, LLAMA4_IMAGE_PLACEHOLDER_IN_PROMPT)
     if not LLAMA4_IMAGE_PLACEHOLDER_IN_PROMPT in prompt:
       prompt = LLAMA4_IMAGE_PLACEHOLDER_IN_PROMPT + prompt
-    formatted_prompt = f"<|begin_of_text|><|header_start|>user<|header_end|>\n\n{prompt}<|eot|><|header_start|>assistant<|header_end|>\n\n"
+    formatted_prompt = (
+        f"<|begin_of_text|><|header_start|>user<|header_end|>\n\n"
+        f"{prompt}<|eot|><|header_start|>assistant<|header_end|>\n\n"
+    )
     return formatted_prompt
   else:
     return prompt

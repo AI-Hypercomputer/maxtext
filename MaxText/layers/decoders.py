@@ -16,7 +16,7 @@
 # pylint: disable=arguments-differ
 # pylint: disable=no-name-in-module
 
-from typing import Any, Optional
+from typing import Any
 import functools
 
 import jax

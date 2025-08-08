@@ -16,7 +16,7 @@ limitations under the License.
 
 """Provides op for tokenizing a dataset."""
 
-from typing import Iterable, Union, Literal, Sequence, Collection
+from typing import Iterable, Literal, Sequence, Collection
 from pathlib import Path
 import tensorflow as tf
 import tensorflow_text as tftxt

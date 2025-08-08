@@ -14,11 +14,10 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-from collections.abc import Callable
-
 """ Tests for the common MaxText utilities """
 
-from typing import Union, Any
+from typing import Any
+from collections.abc import Callable
 import os.path
 import unittest
 

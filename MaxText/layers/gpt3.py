@@ -18,7 +18,7 @@ limitations under the License.
 # pylint: disable=arguments-differ
 # pylint: disable=no-name-in-module
 
-from typing import Any, Optional, Tuple
+from typing import Any
 
 import jax
 from jax import lax
@@ -55,7 +55,7 @@ class Gpt3LayerNorm(nnx.Module):
       epsilon: float = 1e-6,
       dtype: Any = jnp.float32,
       weight_dtype: Any = jnp.float32,
-      kernel_axes: Tuple[None | str, ...] = (),
+      kernel_axes: tuple[None | str, ...] = (),
       scale_init: Initializer = nn.initializers.zeros,
       use_bias: bool = True,
       reductions_in_fp32: bool = False,
@@ -115,7 +115,7 @@ def gpt3_layer_norm(
     epsilon: float = 1e-6,
     dtype: Any = jnp.float32,
     weight_dtype: Any = jnp.float32,
-    kernel_axes: Tuple[None | str, ...] = (),
+    kernel_axes: tuple[None | str, ...] = (),
     scale_init: Initializer = nn.initializers.zeros,
     use_bias: bool = True,
     reductions_in_fp32: bool = False,

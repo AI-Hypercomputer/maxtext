@@ -88,7 +88,7 @@ class GeminiAgent:
       resp = self.client.generate_content(memory_list, stream=False)
       if hasattr(resp, "text"):
         return resp
-      logger.error(f"Response not have text {resp}")
+      logger.error("Response not have text %s", resp)
       time.sleep(2)
     logger.error("Failed to get a valid response with 'text' attribute after multiple retries.")
     return None

@@ -67,6 +67,7 @@ def GEMMA3_MAXTEXT_TO_HF_PARAM_MAPPING(config, scan_layers=False):
   Ndec = tcfg["num_hidden_layers"]
   Nvis = vcfg["num_hidden_layers"]
 
+  # pylint: disable=line-too-long
   mapping = {
       # Embedding & final norm
       "params-token_embedder-embedding": "model.language_model.embed_tokens.weight",
@@ -394,6 +395,7 @@ def GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING(config, scan_layers=False):
     for maxtext_layer_idx in range(0, nlayers // 2):
       local_layer_idx = maxtext_layer_idx * 2
       global_layer_idx = maxtext_layer_idx * 2 + 1
+      # pylint: disable=line-too-long
       layer_mapping = {
           f"params-decoder-layers_{maxtext_layer_idx}-pre_self_attention_norm_global-scale": f"model.layers.{global_layer_idx}.input_layernorm.weight",
           f"params-decoder-layers_{maxtext_layer_idx}-mlp_global-wo-kernel": f"model.layers.{global_layer_idx}.mlp.down_proj.weight",
@@ -681,6 +683,7 @@ def QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING(config, scan_layers=False):
   else:  # not scan_layers
     for i in range(n_layers):
       # Common Attention and Norms
+      # pylint: disable=line-too-long
       mapping.update(
           {
               f"params-decoder-layers_{i}-pre_self_attention_layer_norm-scale": f"model.layers.{i}.input_layernorm.weight",

@@ -17,7 +17,7 @@
 import dataclasses
 import enum
 import functools
-from typing import Any, Callable, Iterable, Optional, Tuple, Union
+from typing import Any, Callable, Iterable, Tuple
 from functools import partial
 import math
 
@@ -791,7 +791,7 @@ class AttentionOp(nnx.Module):
     )
     def wrap_ragged_attention(
         q: Array, k: Array, v: Array, lengths: Array, block_size: int
-    ) -> Tuple[Array, Array, Array]:
+    ) -> tuple[Array, Array, Array]:
       # Use the original gqa function to get the attention output
       """
       Wraps the GQA function with appropriate sharding.

@@ -45,7 +45,8 @@ import traceback
 import functools
 import dataclasses
 from enum import Enum
-from typing import Any, Callable, Hashable
+from typing import Any, Callable
+from collections.abc import Hashable
 from collections import defaultdict
 import time
 

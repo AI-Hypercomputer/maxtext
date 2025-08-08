@@ -13,8 +13,6 @@ limitations under the License.
 
 """ Simple decoder layers for testing and debugging purposes."""
 
-from typing import Optional
-
 from jax import numpy as jnp
 from jax.sharding import Mesh
 

@@ -17,7 +17,7 @@ limitations under the License.
 # pytype: skip-file
 # pylint: disable=missing-module-docstring, bare-except, consider-using-generator, missing-function-docstring
 from collections import OrderedDict
-from typing import Any, Union
+from typing import Any
 from math import prod
 import math
 import os

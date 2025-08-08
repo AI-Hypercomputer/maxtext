@@ -16,7 +16,7 @@
 
 import functools
 import operator
-from typing import Any, Callable, Iterable, Sequence, Union
+from typing import Any, Callable, Iterable, Sequence
 
 import numpy as np
 import jax
