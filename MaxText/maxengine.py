@@ -475,7 +475,7 @@ class MaxEngine(engine_api.Engine):
           page_state=page_state,
       )
     if return_prompt_logp:
-      prompt_logp = inference_utils.log_prob_of_chosen_token(flat_logits, input_tokens)
+      prompt_logp = inference_utils.prompt_logprobs_from_prefill(flat_logits, input_tokens, true_length)
     else:
       prompt_logp = None
 
