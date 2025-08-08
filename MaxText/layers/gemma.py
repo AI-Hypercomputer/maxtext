@@ -27,6 +27,8 @@ from MaxText.layers.linears import mlp_block
 from MaxText.layers.normalizations import rms_norm
 from MaxText.layers.quantizations import AqtQuantization as Quant
 
+import jax
+
 
 # Decoder and Model definitions
 class GemmaDecoderLayer(nn.Module):
@@ -55,6 +57,7 @@ class GemmaDecoderLayer(nn.Module):
     inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
     inputs = checkpoint_name(inputs, "decoder_layer_input")
     # inputs: embedded inputs to the decoder with shape [batch, length, emb_dim]
+    # jax.debug.print("inputs={inputs}", inputs=inputs)
     lnx = rms_norm(
         num_features=inputs.shape[-1],
         dtype=cfg.dtype,
@@ -62,7 +65,7 @@ class GemmaDecoderLayer(nn.Module):
         name="pre_self_attention_norm",
         kernel_axes=("norm",),
     )(inputs)
-
+    # jax.debug.print("lnx={lnx}", lnx=lnx)
     lnx = nn.with_logical_constraint(lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
 
     attention_layer = attention_as_linen(
@@ -97,7 +100,7 @@ class GemmaDecoderLayer(nn.Module):
         deterministic=deterministic,
         model_mode=model_mode,
     )
-
+    # jax.debug.print("attention_lnx={attention_lnx}", attention_lnx=attention_lnx)
     attention_lnx = nn.with_logical_constraint(
         attention_lnx, ("activation_batch", "activation_norm_length", "activation_embed")
     )
@@ -110,7 +113,7 @@ class GemmaDecoderLayer(nn.Module):
         name="pre_ffw_norm",
         kernel_axes=("norm",),
     )(attention_lnx)
-
+    # jax.debug.print("attn_output={attn_output}", attn_output=attn_output)
     # MLP block.
     mlp_lnx = mlp_block(
         in_features=attn_output.shape[-1],
@@ -130,7 +133,7 @@ class GemmaDecoderLayer(nn.Module):
     next_layer_addition_dropped_out = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(
         next_layer_addition, deterministic=deterministic
     )
-
+    # jax.debug.print("next_layer_addition_dropped_out={next_layer_addition_dropped_out}", next_layer_addition_dropped_out=next_layer_addition_dropped_out)
     layer_output = next_layer_addition_dropped_out
     layer_output = nn.with_logical_constraint(
         layer_output,

@@ -23,6 +23,7 @@ import sys
 import datetime
 
 import jax
+from jax.tree_util import register_pytree_node_class
 from jax.experimental.compilation_cache import compilation_cache
 
 import omegaconf
@@ -1153,7 +1154,7 @@ def using_fsdp_and_transpose_parallelism(raw_keys) -> bool:
       or int(raw_keys["dcn_fsdp_transpose_parallelism"]) > 1
   )
 
-
+@register_pytree_node_class
 class HyperParameters:
   """Wrapper class to expose the configuration in a read-only manner."""
 
@@ -1161,14 +1162,35 @@ class HyperParameters:
     object.__setattr__(self, "_config", config)
 
   def __getattr__(self, attr):
+    # JAX transformations (like jit, grad, etc.) inspect objects to see
+    # if they are array-like by checking for a __jax_array__ attribute.
+    # We need to explicitly raise an AttributeError for this check to signal
+    # that this is not a JAX array, but a static configuration object.
+    if attr == '__jax_array__':
+        raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{attr}'")
+
+    # # JAX transformations (like jit, grad, etc.) inspect objects to see
+    # # if they are array-like by checking for a __jax_array__ attribute.
+    # # We need to explicitly raise an AttributeError for this check to signal
+    # # that this is not a JAX array, but a static configuration object.
+    # if attr == '__jax_array__':
+    #     raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{attr}'")
+
     try:
       # Attempt to perform the normal lookup
       return object.__getattribute__(self, "_config").keys[attr]
-    except AttributeError as exc:
+    except KeyError as exc:
       raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{attr}'") from exc
 
   def __setattr__(self, attr, value):
     raise ValueError("Reinitialization of config is not allowed")
+  
+  def tree_flatten(self):
+    return (), self
+  
+  @classmethod
+  def tree_unflatten(cls, aux_data, children):
+    return aux_data
 
   def get_keys(self):
     return self._config.keys

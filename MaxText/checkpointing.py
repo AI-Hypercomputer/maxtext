@@ -432,7 +432,7 @@ def load_params_from_path(
           use_zarr3=use_zarr3,
       )
   )
-
+  max_logging.log("Checkpoint manager created!")
   # This is a memory optimization. We don't want to restore the entire checkpoint - only the params.
   # Rather than pass the entire abstract state, which could unnecessarily restore opt_state and such and waste
   # memory, we instead specify here that we are just restoring the params field of the checkpoint

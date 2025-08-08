@@ -26,7 +26,7 @@ from collections.abc import Sequence
 from typing import overload
 
 from flax import nnx
-from layers import nnx_wrappers
+from MaxText.layers import nnx_wrappers
 from MaxText import maxtext_utils
 from MaxText import train_utils
 from MaxText import pyconfig
@@ -55,7 +55,7 @@ def from_pretrained(
     devices: Sequence[jax.Device] | None = None,
     *,
     rngs: nnx.Rngs | None = None,
-) -> nnx_wrappers.ToLinen | Transformer:
+) -> nnx_wrappers.ToLinen | Transformer | models.ZeroOneTransformer:
   """Load a pretrained MaxText model from checkpoint.
 
   This function loads a model from a checkpoint.
