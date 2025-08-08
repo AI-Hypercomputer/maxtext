@@ -31,14 +31,18 @@ AxisNames = tuple[str, ...]
 AxisIdxes = tuple[int, ...]
 
 BATCH = "activation_batch"
+BATCH_NO_EXP = "activation_batch_no_exp"
 LENGTH = "activation_length"
+LENGTH_NO_EXP = "activation_length_no_exp"
 PREFILL_LENGTH = "prefill_activation_length"
 Q_LENGTH = "activation_q_length"
+Q_LENGTH_NO_EXP = "activation_q_length_no_exp"
 KV_LENGTH = "activation_kv_length"
 EMBED = "activation_embed"
 HEAD = "activation_heads"
 PREFILL_KV_BATCH = "activation_prefill_kv_batch"
 KV_BATCH = "activation_kv_batch"
+KV_BATCH_NO_EXP = "activation_kv_batch_no_exp"
 KV_HEAD = "activation_kv_heads"
 KV_HEAD_DIM = "activation_kv_head_dim"
 D_KV = "activation_kv"
@@ -59,6 +63,9 @@ MODEL_MODE_AUTOREGRESSIVE = "autoregressive"
 MODEL_MODE_PREFILL = "prefill"
 MODEL_MODE_TRAIN = "train"
 MODEL_MODE_INSERT = "insert"
+
+# expert_shard_attention_option
+EP_AS_CONTEXT = "context"
 
 DECODING_ACTIVE_SEQUENCE_INDICATOR = 1
 

@@ -39,7 +39,7 @@ from flax import nnx
 from flax.linen import partitioning
 
 from MaxText import max_utils
-from MaxText.common_types import DecoderBlockType, DEFAULT_MASK_VALUE, BATCH, HEAD, KV_LENGTH, PREFILL_LENGTH, D_KV, CACHE_BATCH_PREFILL, CACHE_SEQUENCE, AxisNames, CACHE_BATCH, CACHE_HEADS, CACHE_SCALE_BATCH, CACHE_KV, CACHE_SCALE_SEQUENCE, CACHE_SCALE_HEADS, CACHE_SCALE_KV, AxisIdxes, LENGTH, DType, Config, Array, Q_LENGTH, DECODE_LENGTH, DECODE_BATCH, PREFILL_KV_BATCH, KV_HEAD, KV_HEAD_DIM, KV_BATCH, EMBED, MODEL_MODE_AUTOREGRESSIVE, DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_TRAIN, MODEL_MODE_PREFILL
+from MaxText.common_types import DecoderBlockType, DEFAULT_MASK_VALUE, BATCH, BATCH_NO_EXP, HEAD, KV_LENGTH, PREFILL_LENGTH, D_KV, CACHE_BATCH_PREFILL, CACHE_SEQUENCE, AxisNames, CACHE_BATCH, CACHE_HEADS, CACHE_SCALE_BATCH, CACHE_KV, CACHE_SCALE_SEQUENCE, CACHE_SCALE_HEADS, CACHE_SCALE_KV, AxisIdxes, LENGTH, LENGTH_NO_EXP, DType, Config, Array, Q_LENGTH, Q_LENGTH_NO_EXP, DECODE_LENGTH, DECODE_BATCH, PREFILL_KV_BATCH, KV_HEAD, KV_HEAD_DIM, KV_BATCH, KV_BATCH_NO_EXP, EMBED, MODEL_MODE_AUTOREGRESSIVE, DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_TRAIN, MODEL_MODE_PREFILL, EP_AS_CONTEXT
 from MaxText.inference import kvcache
 from MaxText.inference import page_manager
 from MaxText.inference import paged_attention
@@ -268,9 +268,12 @@ def attention_op_as_linen(
     float32_qk_product: bool = False,
     max_prefill_predict_length: int = -1,
     float32_logits: bool = False,
+    flash_axis_names_q: AxisNames = (BATCH, HEAD, LENGTH_NO_EXP, D_KV),
+    flash_axis_names_q_ep: AxisNames = (BATCH_NO_EXP, HEAD, LENGTH, D_KV),
     flash_axis_names_kv: AxisNames = (BATCH, HEAD, KV_LENGTH, D_KV),
-    flash_axis_names_q: AxisNames = (BATCH, HEAD, LENGTH, D_KV),
-    flash_axis_names_splash_kernel: AxisNames = (HEAD, LENGTH),
+    flash_axis_names_kv_ep: AxisNames = (BATCH_NO_EXP, HEAD, KV_LENGTH, D_KV),
+    flash_axis_names_splash_kernel: AxisNames = (HEAD, LENGTH_NO_EXP),
+    flash_axis_names_splash_kernel_ep: AxisNames = (HEAD, LENGTH),
     prefill_cache_logical_axis_names: AxisNames = (CACHE_BATCH_PREFILL, CACHE_SEQUENCE, CACHE_HEADS, CACHE_KV),
     cache_logical_axis_names: AxisNames = (CACHE_BATCH, CACHE_SEQUENCE, CACHE_HEADS, CACHE_KV),
     cache_scale_logical_axis_names: AxisNames = (CACHE_SCALE_BATCH, CACHE_SCALE_SEQUENCE, CACHE_SCALE_HEADS, CACHE_SCALE_KV),
@@ -306,9 +309,12 @@ def attention_op_as_linen(
       float32_qk_product=float32_qk_product,
       max_prefill_predict_length=max_prefill_predict_length,
       float32_logits=float32_logits,
-      flash_axis_names_kv=flash_axis_names_kv,
       flash_axis_names_q=flash_axis_names_q,
+      flash_axis_names_q_ep=flash_axis_names_q_ep,
+      flash_axis_names_kv=flash_axis_names_kv,
+      flash_axis_names_kv_ep=flash_axis_names_kv_ep,
       flash_axis_names_splash_kernel=flash_axis_names_splash_kernel,
+      flash_axis_names_splash_kernel_ep=flash_axis_names_splash_kernel_ep,
       prefill_cache_logical_axis_names=prefill_cache_logical_axis_names,
       cache_logical_axis_names=cache_logical_axis_names,
       cache_scale_logical_axis_names=cache_scale_logical_axis_names,
@@ -330,6 +336,7 @@ def attention_op_as_linen(
       metadata_fn=variable_to_logically_partitioned,
   )
 
+
 class AttentionOp(nnx.Module):
   """Attention operation"""
 
@@ -344,9 +351,12 @@ class AttentionOp(nnx.Module):
       float32_qk_product: bool = False,
       max_prefill_predict_length: int = -1,
       float32_logits: bool = False,
+      flash_axis_names_q: AxisNames = (BATCH, HEAD, LENGTH_NO_EXP, D_KV),
+      flash_axis_names_q_ep: AxisNames = (BATCH_NO_EXP, HEAD, LENGTH, D_KV),
       flash_axis_names_kv: AxisNames = (BATCH, HEAD, KV_LENGTH, D_KV),
-      flash_axis_names_q: AxisNames = (BATCH, HEAD, LENGTH, D_KV),
-      flash_axis_names_splash_kernel: AxisNames = (HEAD, LENGTH),
+      flash_axis_names_kv_ep: AxisNames = (BATCH_NO_EXP, HEAD, KV_LENGTH, D_KV),
+      flash_axis_names_splash_kernel: AxisNames = (HEAD, LENGTH_NO_EXP),
+      flash_axis_names_splash_kernel_ep: AxisNames = (HEAD, LENGTH),
       prefill_cache_logical_axis_names: AxisNames = (CACHE_BATCH_PREFILL, CACHE_SEQUENCE, CACHE_HEADS, CACHE_KV),
       cache_logical_axis_names: AxisNames = (CACHE_BATCH, CACHE_SEQUENCE, CACHE_HEADS, CACHE_KV),
       cache_scale_logical_axis_names: AxisNames = (
@@ -406,9 +416,12 @@ class AttentionOp(nnx.Module):
     self.float32_qk_product = float32_qk_product
     self.max_prefill_predict_length = max_prefill_predict_length
     self.float32_logits = float32_logits
-    self.flash_axis_names_kv = flash_axis_names_kv
     self.flash_axis_names_q = flash_axis_names_q
+    self.flash_axis_names_q_ep = flash_axis_names_q_ep
+    self.flash_axis_names_kv = flash_axis_names_kv
+    self.flash_axis_names_kv_ep = flash_axis_names_kv_ep
     self.flash_axis_names_splash_kernel = flash_axis_names_splash_kernel
+    self.flash_axis_names_splash_kernel_ep = flash_axis_names_splash_kernel_ep
     self.prefill_cache_logical_axis_names = prefill_cache_logical_axis_names
     self.cache_logical_axis_names = cache_logical_axis_names
     self.cache_scale_logical_axis_names = cache_scale_logical_axis_names
@@ -480,7 +493,6 @@ class AttentionOp(nnx.Module):
       self.AqtEinsum_1 = jnp.einsum
       self.AqtEinsum_2 = jnp.einsum
       self.AqtEinsum_3 = jnp.einsum
-
 
   def check_attention_inputs(self, query: Array, key: Array | KVTensor, value: Array | KVTensor) -> None:
     """Check attention inputs."""
@@ -703,7 +715,7 @@ class AttentionOp(nnx.Module):
               model_mode,
               bidirectional_mask=bidirectional_mask,
               qk_product_einsum=qk_product_einsum,
-              wv_product_einsum=wv_product_einsum
+              wv_product_einsum=wv_product_einsum,
           )
         else:
           head_axis = -2
@@ -842,7 +854,7 @@ class AttentionOp(nnx.Module):
   ) -> Array:
     """TPU Flash Attention."""
 
-    cp_size = self.mesh.shape["context"]
+    cp_size = self.config.context_parallel_size
     load_balanced_context_parallel = self.config.context_parallel_load_balance
 
     # Transpose to ('batch', 'heads', 'length', 'kv')
@@ -852,11 +864,21 @@ class AttentionOp(nnx.Module):
     segment_axis_names_q = None
     segment_axis_names_kv = None
     if decoder_segment_ids is not None:
-      segment_axis_names_q = nn.logical_to_mesh_axes((BATCH, Q_LENGTH))
-      segment_axis_names_kv = nn.logical_to_mesh_axes((BATCH, KV_LENGTH))
-    axis_names_splash_kernel = nn.logical_to_mesh_axes(self.flash_axis_names_splash_kernel)
-    axis_names_q = nn.logical_to_mesh_axes(self.flash_axis_names_q)
-    axis_names_kv = nn.logical_to_mesh_axes(self.flash_axis_names_kv)
+      if self.config.expert_shard_attention_option == EP_AS_CONTEXT:
+        segment_axis_names_q = nn.logical_to_mesh_axes((BATCH_NO_EXP, Q_LENGTH))
+        segment_axis_names_kv = nn.logical_to_mesh_axes((BATCH_NO_EXP, KV_LENGTH))
+      else:
+        segment_axis_names_q = nn.logical_to_mesh_axes((BATCH, Q_LENGTH_NO_EXP))
+        segment_axis_names_kv = nn.logical_to_mesh_axes((BATCH, KV_LENGTH))
+
+    if self.config.expert_shard_attention_option == EP_AS_CONTEXT:
+      axis_names_splash_kernel = nn.logical_to_mesh_axes(self.flash_axis_names_splash_kernel_ep)
+      axis_names_q = nn.logical_to_mesh_axes(self.flash_axis_names_q_ep)
+      axis_names_kv = nn.logical_to_mesh_axes(self.flash_axis_names_kv_ep)
+    else:
+      axis_names_splash_kernel = nn.logical_to_mesh_axes(self.flash_axis_names_splash_kernel)
+      axis_names_q = nn.logical_to_mesh_axes(self.flash_axis_names_q)
+      axis_names_kv = nn.logical_to_mesh_axes(self.flash_axis_names_kv)
 
     global global_block_q, global_block_kv, global_block_kv_compute, global_block_q_dkv, global_block_kv_dkv
     global global_block_kv_dkv_compute, global_block_q_dq, global_block_kv_dq, global_use_fused_bwd_kernel
@@ -998,7 +1020,7 @@ class AttentionOp(nnx.Module):
       # If load_balanced_context_parallel is enabled, reorder the key and value tensors
       # to ensure that they are contiguous in memory.
       # This is necessary for the splash attention kernel to work correctly because it expects
-      # the K and V  to be contiguous. Note that K and V are not sharded over the sequence aka context axis
+      # the K and V to be contiguous. Note that K and V are not sharded over the sequence aka context axis
       # This was we get the unsharded unpermuted key and value tensors
       if cp_size > 1 and load_balanced_context_parallel:
         key = max_utils.reorder_sequence(tensor=key, cp_size=cp_size, seq_dim=2, to_contiguous=True)
@@ -1192,7 +1214,7 @@ class AttentionOp(nnx.Module):
       bidirectional_mask: Any = None,
       *,
       qk_product_einsum: Callable[..., Array],
-      wv_product_einsum: Callable[..., Array]
+      wv_product_einsum: Callable[..., Array],
   ):
     """Apply Attention."""
     validate_compute_axis_order(self.compute_axis_order)
@@ -1508,15 +1530,20 @@ def attention_as_linen(
     prefill_query_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, KV_HEAD, KV_HEAD_DIM),
     prefill_key_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, KV_HEAD, KV_HEAD_DIM),
     prefill_value_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, KV_HEAD, KV_HEAD_DIM),
-    query_axis_names: AxisNames = (KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM),
-    input_axis_names: AxisNames = (BATCH, LENGTH, EMBED),
+    query_axis_names: AxisNames = (KV_BATCH, LENGTH_NO_EXP, KV_HEAD, KV_HEAD_DIM),
+    key_axis_names: AxisNames = (KV_BATCH, LENGTH_NO_EXP, KV_HEAD, KV_HEAD_DIM),
+    value_axis_names: AxisNames = (KV_BATCH, LENGTH_NO_EXP, KV_HEAD, KV_HEAD_DIM),
+    ep_query_axis_names: AxisNames = (KV_BATCH_NO_EXP, LENGTH, KV_HEAD, KV_HEAD_DIM),
+    ep_key_axis_names: AxisNames = (KV_BATCH_NO_EXP, LENGTH, KV_HEAD, KV_HEAD_DIM),
+    ep_value_axis_names: AxisNames = (KV_BATCH_NO_EXP, LENGTH, KV_HEAD, KV_HEAD_DIM),
+    input_axis_names: AxisNames = (BATCH, LENGTH_NO_EXP, EMBED),
+    ep_input_axis_names: AxisNames = (BATCH_NO_EXP, LENGTH, EMBED),
+    out_axis_names: AxisNames = (BATCH, LENGTH_NO_EXP, HEAD, D_KV),
+    ep_out_axis_names: AxisNames = (BATCH_NO_EXP, LENGTH, HEAD, D_KV),
     prefill_input_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, EMBED),
     decode_input_axis_names: AxisNames = (DECODE_BATCH, DECODE_LENGTH, EMBED),
-    key_axis_names: AxisNames = (KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM),
-    value_axis_names: AxisNames = (KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM),
-    out_axis_names: AxisNames = (BATCH, LENGTH, HEAD, D_KV),
     prefill_out_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, HEAD, D_KV),
-    decode_out_axis_names = (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV),
+    decode_out_axis_names: AxisNames = (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV),
     prefill_cache_axis_order: AxisIdxes = (1, 2, 0, 3),
     ar_cache_axis_order: AxisIdxes = (1, 2, 0, 3),
     compute_axis_order: AxisIdxes = (0, 1, 2, 3),
@@ -1566,12 +1593,17 @@ def attention_as_linen(
       prefill_key_axis_names=prefill_key_axis_names,
       prefill_value_axis_names=prefill_value_axis_names,
       query_axis_names=query_axis_names,
-      input_axis_names=input_axis_names,
-      prefill_input_axis_names=prefill_input_axis_names,
-      decode_input_axis_names=decode_input_axis_names,
       key_axis_names=key_axis_names,
       value_axis_names=value_axis_names,
+      ep_query_axis_names=ep_query_axis_names,
+      ep_key_axis_names=ep_key_axis_names,
+      ep_value_axis_names=ep_value_axis_names,
+      input_axis_names=input_axis_names,
+      ep_input_axis_names=ep_input_axis_names,
       out_axis_names=out_axis_names,
+      ep_out_axis_names=ep_out_axis_names,
+      prefill_input_axis_names=prefill_input_axis_names,
+      decode_input_axis_names=decode_input_axis_names,
       prefill_out_axis_names=prefill_out_axis_names,
       decode_out_axis_names=decode_out_axis_names,
       prefill_cache_axis_order=prefill_cache_axis_order,
@@ -1657,15 +1689,20 @@ class Attention(nnx.Module):
       prefill_query_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, KV_HEAD, KV_HEAD_DIM),
       prefill_key_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, KV_HEAD, KV_HEAD_DIM),
       prefill_value_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, KV_HEAD, KV_HEAD_DIM),
-      query_axis_names: AxisNames = (KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM),
-      input_axis_names: AxisNames = (BATCH, LENGTH, EMBED),
+      query_axis_names: AxisNames = (KV_BATCH, LENGTH_NO_EXP, KV_HEAD, KV_HEAD_DIM),
+      key_axis_names: AxisNames = (KV_BATCH, LENGTH_NO_EXP, KV_HEAD, KV_HEAD_DIM),
+      value_axis_names: AxisNames = (KV_BATCH, LENGTH_NO_EXP, KV_HEAD, KV_HEAD_DIM),
+      ep_query_axis_names: AxisNames = (KV_BATCH_NO_EXP, LENGTH, KV_HEAD, KV_HEAD_DIM),
+      ep_key_axis_names: AxisNames = (KV_BATCH_NO_EXP, LENGTH, KV_HEAD, KV_HEAD_DIM),
+      ep_value_axis_names: AxisNames = (KV_BATCH_NO_EXP, LENGTH, KV_HEAD, KV_HEAD_DIM),
+      input_axis_names: AxisNames = (BATCH, LENGTH_NO_EXP, EMBED),
+      ep_input_axis_names: AxisNames = (BATCH_NO_EXP, LENGTH, EMBED),
+      out_axis_names: AxisNames = (BATCH, LENGTH_NO_EXP, HEAD, D_KV),
+      ep_out_axis_names: AxisNames = (BATCH_NO_EXP, LENGTH, HEAD, D_KV),
       prefill_input_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, EMBED),
       decode_input_axis_names: AxisNames = (DECODE_BATCH, DECODE_LENGTH, EMBED),
-      key_axis_names: AxisNames = (KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM),
-      value_axis_names: AxisNames = (KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM),
-      out_axis_names: AxisNames = (BATCH, LENGTH, HEAD, D_KV),
       prefill_out_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, HEAD, D_KV),
-      decode_out_axis_names = (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV),
+      decode_out_axis_names: AxisNames = (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV),
       prefill_cache_axis_order: AxisIdxes = (1, 2, 0, 3),
       ar_cache_axis_order: AxisIdxes = (1, 2, 0, 3),
       compute_axis_order: AxisIdxes = (0, 1, 2, 3),
@@ -1748,12 +1785,17 @@ class Attention(nnx.Module):
     self.prefill_key_axis_names = prefill_key_axis_names
     self.prefill_value_axis_names = prefill_value_axis_names
     self.query_axis_names = query_axis_names
-    self.input_axis_names = input_axis_names
-    self.prefill_input_axis_names = prefill_input_axis_names
-    self.decode_input_axis_names = decode_input_axis_names
     self.key_axis_names = key_axis_names
     self.value_axis_names = value_axis_names
+    self.ep_query_axis_names = ep_query_axis_names
+    self.ep_key_axis_names = ep_key_axis_names
+    self.ep_value_axis_names = ep_value_axis_names
+    self.input_axis_names = input_axis_names
+    self.ep_input_axis_names = ep_input_axis_names
     self.out_axis_names = out_axis_names
+    self.ep_out_axis_names = ep_out_axis_names
+    self.prefill_input_axis_names = prefill_input_axis_names
+    self.decode_input_axis_names = decode_input_axis_names
     self.prefill_out_axis_names = prefill_out_axis_names
     self.decode_out_axis_names = decode_out_axis_names
     self.prefill_cache_axis_order = prefill_cache_axis_order
@@ -2181,6 +2223,9 @@ class Attention(nnx.Module):
     if model_mode == MODEL_MODE_PREFILL:
       inputs_q = nn.with_logical_constraint(inputs_q, self.prefill_input_axis_names)
       inputs_kv = nn.with_logical_constraint(inputs_kv, self.prefill_input_axis_names)
+    elif model_mode == MODEL_MODE_TRAIN and self.config.expert_shard_attention_option == EP_AS_CONTEXT:
+      inputs_q = nn.with_logical_constraint(inputs_q, self.ep_input_axis_names)
+      inputs_kv = nn.with_logical_constraint(inputs_kv, self.ep_input_axis_names)
     elif model_mode == MODEL_MODE_TRAIN:
       inputs_q = nn.with_logical_constraint(inputs_q, self.input_axis_names)
       inputs_kv = nn.with_logical_constraint(inputs_kv, self.input_axis_names)
@@ -2235,10 +2280,15 @@ class Attention(nnx.Module):
       query = nn.with_logical_constraint(query, (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV))
       key = nn.with_logical_constraint(key, (DECODE_BATCH, DECODE_LENGTH, KV_HEAD, D_KV))
       value = nn.with_logical_constraint(value, (DECODE_BATCH, DECODE_LENGTH, KV_HEAD, D_KV))
+    elif model_mode == MODEL_MODE_TRAIN and self.config.expert_shard_attention_option == EP_AS_CONTEXT:
+      query = nn.with_logical_constraint(query, self.ep_query_axis_names)
+      key = nn.with_logical_constraint(key, self.ep_key_axis_names)
+      value = nn.with_logical_constraint(value, self.ep_value_axis_names)
     else:
       query = nn.with_logical_constraint(query, self.query_axis_names)
       key = nn.with_logical_constraint(key, self.key_axis_names)
       value = nn.with_logical_constraint(value, self.value_axis_names)
+
     query = checkpoint_name(query, "query_proj")
     key = checkpoint_name(key, "key_proj")
     value = checkpoint_name(value, "value_proj")
@@ -2260,6 +2310,8 @@ class Attention(nnx.Module):
 
     if model_mode == MODEL_MODE_PREFILL:
       out = nn.with_logical_constraint(out, self.prefill_out_axis_names)
+    elif model_mode == MODEL_MODE_TRAIN and self.config.expert_shard_attention_option == EP_AS_CONTEXT:
+      out = nn.with_logical_constraint(out, self.ep_out_axis_names)
     elif model_mode == MODEL_MODE_TRAIN:
       out = nn.with_logical_constraint(out, self.out_axis_names)
     else:
@@ -2267,6 +2319,7 @@ class Attention(nnx.Module):
     out = self.out_projection(out)
     out = checkpoint_name(out, "out_proj")
     return out
+
 
 def mla_as_linen(
     *,
@@ -2288,7 +2341,6 @@ def mla_as_linen(
     float32_logits: bool = False,  # cast logits in float32 for stability.
     quant: Optional[Quant] = None,
     kv_quant: Optional[KVQuant] = None,
-
     attention_type: AttentionType = AttentionType.GLOBAL,  # Default to global attention
     attn_logits_soft_cap: float | None = None,
     sliding_window_size: int | None = None,
@@ -2301,32 +2353,33 @@ def mla_as_linen(
     temperature_tuning: bool = False,
     temperature_tuning_scale: float = 0.1,
     temperature_tuning_floor_scale: float = 8192.0,
-
     # Shard the query activation as the same as the key and value.
     # TODO: Find a better sharding axis name.
     # TODO: Further break down the Training and Inference axes for the q, k, v.
     prefill_query_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, KV_HEAD, KV_HEAD_DIM),
     prefill_key_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, KV_HEAD, KV_HEAD_DIM),
     prefill_value_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, KV_HEAD, KV_HEAD_DIM),
-    query_axis_names: AxisNames = (KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM),
-    input_axis_names: AxisNames = (BATCH, LENGTH, EMBED),
+    query_axis_names: AxisNames = (KV_BATCH, LENGTH_NO_EXP, KV_HEAD, KV_HEAD_DIM),
+    key_axis_names: AxisNames = (KV_BATCH, LENGTH_NO_EXP, KV_HEAD, KV_HEAD_DIM),
+    value_axis_names: AxisNames = (KV_BATCH, LENGTH_NO_EXP, KV_HEAD, KV_HEAD_DIM),
+    ep_query_axis_names: AxisNames = (KV_BATCH_NO_EXP, LENGTH, KV_HEAD, KV_HEAD_DIM),
+    ep_key_axis_names: AxisNames = (KV_BATCH_NO_EXP, LENGTH, KV_HEAD, KV_HEAD_DIM),
+    ep_value_axis_names: AxisNames = (KV_BATCH_NO_EXP, LENGTH, KV_HEAD, KV_HEAD_DIM),
+    input_axis_names: AxisNames = (BATCH, LENGTH_NO_EXP, EMBED),
+    ep_input_axis_names: AxisNames = (BATCH_NO_EXP, LENGTH, EMBED),
+    out_axis_names: AxisNames = (BATCH, LENGTH_NO_EXP, HEAD, D_KV),
+    ep_out_axis_names: AxisNames = (BATCH_NO_EXP, LENGTH, HEAD, D_KV),
     prefill_input_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, EMBED),
     decode_input_axis_names: AxisNames = (DECODE_BATCH, DECODE_LENGTH, EMBED),
-    key_axis_names: AxisNames = (KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM),
-    value_axis_names: AxisNames = (KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM),
-    out_axis_names: AxisNames = (BATCH, LENGTH, HEAD, D_KV),
     prefill_out_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, HEAD, D_KV),
-    decode_out_axis_names = (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV),
-
+    decode_out_axis_names: AxisNames = (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV),
     prefill_cache_axis_order: AxisIdxes = (1, 2, 0, 3),
     ar_cache_axis_order: AxisIdxes = (1, 2, 0, 3),
     compute_axis_order: AxisIdxes = (0, 1, 2, 3),
     reshape_q: bool = False,
-
     is_nope_layer: bool = False,
     is_vision: bool = False,
     model_mode: str = MODEL_MODE_TRAIN,
-
     q_lora_rank: int = 0,
     kv_lora_rank: int = 512,
     qk_nope_head_dim: int = 128,
@@ -2336,7 +2389,6 @@ def mla_as_linen(
     original_max_position_embeddings: int = 4096,
     mscale: float = 1.0,  # scaling factor for softmax
     rope_factor: float = 40.0,  # rotary embedding factor
-
     name: str | None = None,
 ):
   """A factory function to create an MLA as a Linen module.
@@ -2379,12 +2431,17 @@ def mla_as_linen(
       prefill_key_axis_names=prefill_key_axis_names,
       prefill_value_axis_names=prefill_value_axis_names,
       query_axis_names=query_axis_names,
-      input_axis_names=input_axis_names,
-      prefill_input_axis_names=prefill_input_axis_names,
-      decode_input_axis_names=decode_input_axis_names,
       key_axis_names=key_axis_names,
       value_axis_names=value_axis_names,
+      ep_query_axis_names=ep_query_axis_names,
+      ep_key_axis_names=ep_key_axis_names,
+      ep_value_axis_names=ep_value_axis_names,
+      input_axis_names=input_axis_names,
+      ep_input_axis_names=ep_input_axis_names,
       out_axis_names=out_axis_names,
+      ep_out_axis_names=ep_out_axis_names,
+      prefill_input_axis_names=prefill_input_axis_names,
+      decode_input_axis_names=decode_input_axis_names,
       prefill_out_axis_names=prefill_out_axis_names,
       decode_out_axis_names=decode_out_axis_names,
       prefill_cache_axis_order=prefill_cache_axis_order,
@@ -2407,6 +2464,7 @@ def mla_as_linen(
       metadata_fn=variable_to_logically_partitioned,
       abstract_init=False,
   )
+
 
 class MLA(Attention):
   """Multi-Head Latent Attention (MLA) layer."""
@@ -2449,15 +2507,20 @@ class MLA(Attention):
       prefill_query_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, KV_HEAD, KV_HEAD_DIM),
       prefill_key_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, KV_HEAD, KV_HEAD_DIM),
       prefill_value_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, KV_HEAD, KV_HEAD_DIM),
-      query_axis_names: AxisNames = (KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM),
-      input_axis_names: AxisNames = (BATCH, LENGTH, EMBED),
+      query_axis_names: AxisNames = (KV_BATCH, LENGTH_NO_EXP, KV_HEAD, KV_HEAD_DIM),
+      key_axis_names: AxisNames = (KV_BATCH, LENGTH_NO_EXP, KV_HEAD, KV_HEAD_DIM),
+      value_axis_names: AxisNames = (KV_BATCH, LENGTH_NO_EXP, KV_HEAD, KV_HEAD_DIM),
+      ep_query_axis_names: AxisNames = (KV_BATCH_NO_EXP, LENGTH, KV_HEAD, KV_HEAD_DIM),
+      ep_key_axis_names: AxisNames = (KV_BATCH_NO_EXP, LENGTH, KV_HEAD, KV_HEAD_DIM),
+      ep_value_axis_names: AxisNames = (KV_BATCH_NO_EXP, LENGTH, KV_HEAD, KV_HEAD_DIM),
+      input_axis_names: AxisNames = (BATCH, LENGTH_NO_EXP, EMBED),
+      ep_input_axis_names: AxisNames = (BATCH_NO_EXP, LENGTH, EMBED),
+      out_axis_names: AxisNames = (BATCH, LENGTH_NO_EXP, HEAD, D_KV),
+      ep_out_axis_names: AxisNames = (BATCH_NO_EXP, LENGTH, HEAD, D_KV),
       prefill_input_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, EMBED),
       decode_input_axis_names: AxisNames = (DECODE_BATCH, DECODE_LENGTH, EMBED),
-      key_axis_names: AxisNames = (KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM),
-      value_axis_names: AxisNames = (KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM),
-      out_axis_names: AxisNames = (BATCH, LENGTH, HEAD, D_KV),
       prefill_out_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, HEAD, D_KV),
-      decode_out_axis_names = (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV),
+      decode_out_axis_names: AxisNames = (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV),
       prefill_cache_axis_order: AxisIdxes = (1, 2, 0, 3),
       ar_cache_axis_order: AxisIdxes = (1, 2, 0, 3),
       compute_axis_order: AxisIdxes = (0, 1, 2, 3),
@@ -2533,12 +2596,17 @@ class MLA(Attention):
         prefill_key_axis_names=prefill_key_axis_names,
         prefill_value_axis_names=prefill_value_axis_names,
         query_axis_names=query_axis_names,
-        input_axis_names=input_axis_names,
-        prefill_input_axis_names=prefill_input_axis_names,
-        decode_input_axis_names=decode_input_axis_names,
         key_axis_names=key_axis_names,
         value_axis_names=value_axis_names,
+        ep_query_axis_names=ep_query_axis_names,
+        ep_key_axis_names=ep_key_axis_names,
+        ep_value_axis_names=ep_value_axis_names,
+        input_axis_names=input_axis_names,
+        ep_input_axis_names=ep_input_axis_names,
         out_axis_names=out_axis_names,
+        ep_out_axis_names=ep_out_axis_names,
+        prefill_input_axis_names=prefill_input_axis_names,
+        decode_input_axis_names=decode_input_axis_names,
         prefill_out_axis_names=prefill_out_axis_names,
         decode_out_axis_names=decode_out_axis_names,
         prefill_cache_axis_order=prefill_cache_axis_order,
@@ -2706,8 +2774,11 @@ class MLA(Attention):
     # Query projection is scaled by self.softmax_scale to be consistent MaxText implementation.
     # DeepSeek v3 was doing it in attention score computation.
     query = jnp.concatenate([q_nope, q_pe], axis=-1) * self.softmax_scale
+
     if model_mode == MODEL_MODE_PREFILL:
       query = nn.with_logical_constraint(query, self.prefill_query_axis_names)
+    elif model_mode == MODEL_MODE_TRAIN and self.config.expert_shard_attention_option == EP_AS_CONTEXT:
+      query = nn.with_logical_constraint(query, self.ep_query_axis_names)
     else:
       query = nn.with_logical_constraint(query, self.query_axis_names)
     return query
@@ -2725,6 +2796,9 @@ class MLA(Attention):
     if model_mode == MODEL_MODE_PREFILL:
       key = nn.with_logical_constraint(key, self.prefill_key_axis_names)
       value = nn.with_logical_constraint(value, self.prefill_value_axis_names)
+    elif model_mode == MODEL_MODE_TRAIN and self.config.expert_shard_attention_option == EP_AS_CONTEXT:
+      key = nn.with_logical_constraint(key, self.ep_key_axis_names)
+      value = nn.with_logical_constraint(value, self.ep_value_axis_names)
     else:
       key = nn.with_logical_constraint(key, self.key_axis_names)
       value = nn.with_logical_constraint(value, self.value_axis_names)
@@ -2871,6 +2945,9 @@ class MLA(Attention):
     if model_mode == MODEL_MODE_PREFILL:
       inputs_q = nn.with_logical_constraint(inputs_q, self.prefill_input_axis_names)
       inputs_kv = nn.with_logical_constraint(inputs_kv, self.prefill_input_axis_names)
+    elif model_mode == MODEL_MODE_TRAIN and self.config.expert_shard_attention_option == EP_AS_CONTEXT:
+      inputs_q = nn.with_logical_constraint(inputs_q, self.ep_input_axis_names)
+      inputs_kv = nn.with_logical_constraint(inputs_kv, self.ep_input_axis_names)
     else:
       inputs_q = nn.with_logical_constraint(inputs_q, self.input_axis_names)
       inputs_kv = nn.with_logical_constraint(inputs_kv, self.input_axis_names)
@@ -2892,7 +2969,12 @@ class MLA(Attention):
       out = unnormalized_out / (exp_sum + 1e-9) if exp_sum is not None else unnormalized_out
     else:
       out = self.attention_op(query, key, value, decoder_segment_ids, model_mode, cached_values)
-    out = nn.with_logical_constraint(out, self.out_axis_names)
+
+    if model_mode == MODEL_MODE_TRAIN and self.config.expert_shard_attention_option == EP_AS_CONTEXT:
+      out = nn.with_logical_constraint(out, self.ep_out_axis_names)
+    else:
+      out = nn.with_logical_constraint(out, self.out_axis_names)
+
     out = self.out_projection(out)
     return out
 
