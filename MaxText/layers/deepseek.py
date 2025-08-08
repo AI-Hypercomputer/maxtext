@@ -106,16 +106,16 @@ class BaseDeepSeekLayer(nnx.Module):
     self.quant = quant
     self.rngs = rngs if rngs is not None else nnx.Rngs(0)
     self.mlp_block = mlp_block
-    self.inputs_shape = [
+    inputs_shape = (
       self.config.per_device_batch_size,
       self.config.max_target_length,
       self.config.base_emb_dim,
-    ]
+    )
 
     self.drop_out = nnx.Dropout(rate=self.config.dropout_rate, broadcast_dims=(-2,),rngs=self.rngs)
 
     self.pre_attention_norm = RMSNorm(
-      num_features=self.inputs_shape[-1],
+      num_features=inputs_shape[-1],
       dtype=self.config.dtype,
       weight_dtype=self.config.weight_dtype,
       kernel_axes=("norm", ),
@@ -124,7 +124,7 @@ class BaseDeepSeekLayer(nnx.Module):
     )
 
     self.post_attention_norm = RMSNorm(
-      num_features=self.inputs_shape[-1],
+      num_features=inputs_shape[-1],
       dtype=self.config.dtype,
       weight_dtype=self.config.weight_dtype,
       kernel_axes=("norm", ),
@@ -142,6 +142,8 @@ class BaseDeepSeekLayer(nnx.Module):
       attention_kernel=self.config.attention,
       mesh=mesh,
       dtype=self.config.dtype,
+      inputs_q_shape=inputs_shape,
+      inputs_kv_shape=inputs_shape,
       weight_dtype=self.config.weight_dtype,
       dropout_rate=self.config.dropout_rate,
       name="self_attention",
