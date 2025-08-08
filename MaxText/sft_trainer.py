@@ -45,6 +45,7 @@ from MaxText.train import (
     train_step,
     validate_train_config,
 )
+from MaxText.utils import gcs_utils
 from MaxText.utils.goodput_utils import (
     GoodputEvent,
     create_goodput_recorder,
@@ -108,7 +109,7 @@ def train_loop(config, recorder, state=None):
 
       if config.dump_hlo and step == start_step:
         jax.block_until_ready(state)  # Ensure compilation has finished.
-        max_utils.upload_dump(
+        gcs_utils.upload_dump(
             config.dump_hlo_local_dir,
             config.dump_hlo_gcs_dir,
             module_name=config.dump_hlo_module_name,
@@ -156,7 +157,9 @@ def main(argv: Sequence[str]) -> None:
   tf.config.set_visible_devices([], "GPU")
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
   if "xla_tpu_spmd_rng_bit_generator_unsafe" not in os.environ.get("LIBTPU_INIT_ARGS", ""):
-    os.environ["LIBTPU_INIT_ARGS"] = os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
+    os.environ["LIBTPU_INIT_ARGS"] = (
+        os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
+    )
   config = pyconfig.initialize(argv)
   jax.config.update("jax_use_shardy_partitioner", config.shardy)
   max_utils.print_system_information()

@@ -17,7 +17,6 @@ limitations under the License.
 # pylint: disable=line-too-long, disable=bare-except, consider-using-generator
 """ Utils that are only interesting to MaxText. """
 
-from typing import Optional
 import functools
 import pickle
 
@@ -249,7 +248,9 @@ def calculate_llama4_attention_tflops(config):
   num_chunked_layers = num_layers - num_global_layers
 
   # FLOPs for a single global attention layer (full attention, non-causal)
-  global_attention_flops_per_layer = 4 * config.per_device_batch_size * seq_len**2 * config.num_query_heads * config.head_dim
+  global_attention_flops_per_layer = (
+      4 * config.per_device_batch_size * seq_len**2 * config.num_query_heads * config.head_dim
+  )
 
   # FLOPs for a single chunked attention layer (non-causal)
   chunked_attention_flops_per_layer = _calculate_chunked_attention_flops_per_layer(config, seq_len, chunk_size)
@@ -276,7 +277,9 @@ def calculate_mla_tflops_per_device(config):
   else:
     # calculate query down and up flops
     q_flops = (
-        2 * batch_len * (config.emb_dim * config.q_lora_rank + config.q_lora_rank * config.num_query_heads * qk_head_dim_sum)
+        2
+        * batch_len
+        * (config.emb_dim * config.q_lora_rank + config.q_lora_rank * config.num_query_heads * qk_head_dim_sum)
     )
   # calculate mla kv projection with down and up flops
   kv_flops = (
@@ -289,7 +292,9 @@ def calculate_mla_tflops_per_device(config):
   )
   qkv_flops = q_flops + kv_flops
 
-  attention_flops = 2 * batch_len * config.max_target_length * config.num_query_heads * (qk_head_dim_sum + config.v_head_dim)
+  attention_flops = (
+      2 * batch_len * config.max_target_length * config.num_query_heads * (qk_head_dim_sum + config.v_head_dim)
+  )
   projection_flops = 2 * batch_len * config.emb_dim * config.num_query_heads * config.v_head_dim
   return qkv_flops, attention_flops, projection_flops
 
@@ -511,7 +516,7 @@ def calculate_tflops_training_per_device(config, log=True):
         * config.head_dim
     )
 
-  # Divide attantion flops by 2 due to causal mask
+  # Divide attention flops by 2 due to causal mask
   # References:
   # NVIDIA/Megatron-LM (2025 March): https://github.com/NVIDIA/Megatron-LM/blob/250b79415dcc4b660521273c87f15334c804eeae/megatron/training/training.py#L361-L362
   # NVIDIA/NeMo (2025 April): https://github.com/NVIDIA/NeMo/blob/ba4d6d116463de512ff0cfc14641aa6cf4577a42/nemo/utils/flops_formulas.py#L259-L272
@@ -1066,7 +1071,7 @@ def get_abstract_state(model, tx, config, rng, mesh, is_training=True):
   )
 
 
-def get_prefill_kv_cache_annotations(model, config, rng, mesh, page_state: Optional[PageState] = None):
+def get_prefill_kv_cache_annotations(model, config, rng, mesh, page_state: None | PageState = None):
   """Get a shaped abstraction of the state (including optimizer)"""
 
   def init_kv_cache(model, config):
@@ -1096,7 +1101,7 @@ def get_prefill_kv_cache_annotations(model, config, rng, mesh, page_state: Optio
   return state_mesh_annotations
 
 
-def get_kv_cache_annotations(model, config, rng, mesh, page_state: Optional[PageState] = None):
+def get_kv_cache_annotations(model, config, rng, mesh, page_state: None | PageState = None):
   """Get a shaped abstraction of the state (including optimizer)"""
 
   def init_kv_cache(model, config):

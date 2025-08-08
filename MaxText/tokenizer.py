@@ -16,7 +16,7 @@ limitations under the License.
 
 """Provides op for tokenizing a dataset."""
 
-from typing import Dict, Iterable, Union, Literal, Sequence, Collection, List
+from typing import Iterable, Literal, Sequence, Collection
 from pathlib import Path
 import tensorflow as tf
 import tensorflow_text as tftxt
@@ -27,7 +27,7 @@ from tiktoken.load import load_tiktoken_bpe
 from sentencepiece import SentencePieceProcessor
 
 
-Features = Dict[str, tf.Tensor]
+Features = dict[str, tf.Tensor]
 
 
 class TikTokenTokenizer:
@@ -35,7 +35,7 @@ class TikTokenTokenizer:
   Tokenizing and encoding/decoding text using the Tiktoken tokenizer.
   """
 
-  special_tokens: Dict[str, int]
+  special_tokens: dict[str, int]
 
   num_reserved_special_tokens = 256
 
@@ -89,9 +89,9 @@ class TikTokenTokenizer:
       self,
       s: str,
       *,
-      allowed_special: Union[Literal["all"], Collection[str]] = (),
-      disallowed_special: Union[Literal["all"], Collection[str]] = (),
-  ) -> List[int]:
+      allowed_special: Literal["all"] | Collection[str] = (),
+      disallowed_special: Literal["all"] | Collection[str] = (),
+  ) -> list[int]:
     """
     Encodes a string into a list of token IDs.
 
@@ -131,7 +131,7 @@ class TikTokenTokenizer:
             s[i : i + TIKTOKEN_MAX_ENCODE_CHARS], MAX_NO_WHITESPACES_CHARS
         )
     )
-    t: List[int] = []
+    t: list[int] = []
     for substr in substrs:
       t.extend(
           self.model.encode(
@@ -151,7 +151,7 @@ class TikTokenTokenizer:
     Decodes a list of token IDs into a string.
 
     Args:
-        t (List[int]): The list of token IDs to be decoded.
+        t (list[int]): The list of token IDs to be decoded.
 
     Returns:
         str: The decoded string.
@@ -197,7 +197,7 @@ class SentencePieceTokenizer:
     self.pad_id = self.sp_tokenizer.string_to_id("<pad>")
     self.unk_id = self.sp_tokenizer.string_to_id("<unk>")
 
-  def encode(self, s: str) -> List[int]:
+  def encode(self, s: str) -> list[int]:
     return self.sp_tokenizer.tokenize(s)
 
   def decode(self, t: Sequence[int]) -> str:
@@ -220,7 +220,7 @@ class SentencePieceTokenizerGrain:
     self.add_bos = add_bos
     self.add_eos = add_eos
 
-  def encode(self, s: str) -> List[int]:
+  def encode(self, s: str) -> list[int]:
     token_ids = self._tokenizer_model.EncodeAsIds(s)
     if self.add_bos:
       token_ids = [self.bos_id] + token_ids
@@ -250,7 +250,7 @@ class HFTokenizer:
     self.bos_id = self.tokenizer.bos_token_id
     self.eos_id = self.tokenizer.eos_token_id
 
-  def encode(self, s: str) -> List[int]:
+  def encode(self, s: str) -> list[int]:
     return self.tokenizer.encode(s)
 
   def decode(self, t: Sequence[int]) -> str:
