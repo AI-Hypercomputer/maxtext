@@ -19,7 +19,7 @@ import sys
 import unittest
 import os.path
 
-import pytest
+import numpy as np
 
 import jax
 import jax.numpy as jnp
@@ -28,7 +28,7 @@ from jax.sharding import Mesh
 from MaxText import maxtext_utils
 from MaxText import pyconfig
 from MaxText.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_TRAIN, MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE
-from MaxText.globals import PKG_DIR
+from MaxText.globals import PKG_DIR, get_devices
 from MaxText.layers import models
 from MaxText.layers import quantizations
 
@@ -80,7 +80,10 @@ class TestModel(unittest.TestCase):
     Does not perform any actual flops.
     """
     new_config = self.init_pyconfig(cast_logits_to_fp32=cast_logits_to_fp32, logits_dot_in_fp32=False)
-    devices_array = maxtext_utils.create_device_mesh(new_config)
+    if jax.device_count() == 1:
+      devices_array = np.array(get_devices()).reshape((1,) * len(new_config.mesh_axes))
+    else:
+      devices_array = maxtext_utils.create_device_mesh(new_config)
     mesh = Mesh(devices_array, new_config.mesh_axes)
     model = models.Transformer(config=new_config, mesh=mesh, quant=None, model_mode=MODEL_MODE_TRAIN)
 
@@ -112,12 +115,14 @@ class TestModel(unittest.TestCase):
     """Test logits datatype without casting."""
     self._test_logits_cast_driver(cast_logits_to_fp32=False, expected_dtype=jnp.bfloat16)
 
-  @pytest.mark.tpu_only
   def test_train_vs_prefill_and_autoregress(self):
     """Test train versus prefill and autoregress."""
     PREFILL_RANGE = MAX_PREFILL_PREDICT_LENGTH
 
-    devices_array = maxtext_utils.create_device_mesh(self.cfg)
+    if jax.device_count() == 1:
+      devices_array = np.array(get_devices()).reshape((1,) * len(self.cfg.mesh_axes))
+    else:
+      devices_array = maxtext_utils.create_device_mesh(self.cfg)
     mesh = Mesh(devices_array, self.cfg.mesh_axes)
     quant = quantizations.configure_quantization(self.cfg)
     train_model = models.Transformer(config=self.cfg, mesh=mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)

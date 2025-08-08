@@ -39,7 +39,7 @@ from MaxText import max_utils
 from MaxText import maxtext_utils
 from MaxText import pyconfig
 from MaxText.common_types import MODEL_MODE_TRAIN
-from MaxText.globals import PKG_DIR
+from MaxText.globals import PKG_DIR, get_devices
 from MaxText.layers import models
 from MaxText.layers import quantizations
 from MaxText.maxtext_utils import assert_params_sufficiently_sharded, get_formatted_sharding_annotations
@@ -214,7 +214,10 @@ class MaxUtilsInitTransformerState(unittest.TestCase):
 
   def setUp(self):
     self.config = pyconfig.initialize([None, os.path.join(PKG_DIR, "configs", "base.yml")], enable_checkpointing=False)
-    devices_array = maxtext_utils.create_device_mesh(self.config)
+    if jax.device_count() == 1:
+      devices_array = np.array(get_devices()).reshape((1,) * len(self.config.mesh_axes))
+    else:
+      devices_array = maxtext_utils.create_device_mesh(config=self.config)
     self.mesh = Mesh(devices_array, self.config.mesh_axes)
     quant = quantizations.configure_quantization(self.config)
     self.model = Transformer(self.config, mesh=self.mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
