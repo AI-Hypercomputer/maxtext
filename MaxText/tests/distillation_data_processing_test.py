@@ -25,6 +25,7 @@ from datasets import Dataset
 
 from MaxText.globals import PKG_DIR
 from MaxText.input_pipeline import _distillation_data_processing
+from MaxText.max_utils import gcs_bucket_accessible
 
 PROMPT_DATA = [
     [
@@ -75,7 +76,9 @@ class DistillationDataProcessingTest(unittest.TestCase):
   @classmethod
   def setUpClass(cls):
     super().setUpClass()
-    exit_code = subprocess.call(
+    if not gcs_bucket_accessible():
+      return
+    exit_code = subprocess.check_output(
         [
             "gsutil",
             "cp",
@@ -89,12 +92,14 @@ class DistillationDataProcessingTest(unittest.TestCase):
 
   def setUp(self):
     super().setUp()
-    self.tokenizer = transformers.AutoTokenizer.from_pretrained(
-        os.path.join(os.path.dirname(PKG_DIR), "assets", "llama2-chat-tokenizer"),
-    )
     self.parser = argparse.ArgumentParser()
     self.parser = add_arguments_to_parser(self.parser)
+    llama2_chat_tokenizer_dir = os.path.join(os.path.dirname(PKG_DIR), "assets", "llama2-chat-tokenizer")
+    if not os.path.isdir(llama2_chat_tokenizer_dir):
+      return
+    self.tokenizer = transformers.AutoTokenizer.from_pretrained(llama2_chat_tokenizer_dir)
 
+  @unittest.skipIf(not gcs_bucket_accessible(), "gs://maxtext-dataset bucket not accessible")
   def test_data_processing_with_messages(self):
     config = self.parser.parse_args(["--data-columns", "messages"])
     dataset = Dataset.from_dict({"messages": MESSAGES_DATA})
@@ -117,6 +122,7 @@ class DistillationDataProcessingTest(unittest.TestCase):
       for c_idx, completion in enumerate(expected_completions[idx]):
         self.assertEqual(data["completion"][c_idx], completion)
 
+  @unittest.skipIf(not gcs_bucket_accessible(), "gs://maxtext-dataset bucket not accessible")
   def test_data_filtering_with_messages(self):
     config = self.parser.parse_args(["--data-columns", "messages", "--use-chat-template"])
     dataset = Dataset.from_dict({"messages": MESSAGES_DATA})
@@ -128,6 +134,7 @@ class DistillationDataProcessingTest(unittest.TestCase):
     self.assertEqual(filtered_dataset[0].prompt, "What color is the sky?")
     self.assertEqual(filtered_dataset[0].actual_completion, "The sky is blue.")
 
+  @unittest.skipIf(not gcs_bucket_accessible(), "gs://maxtext-dataset bucket not accessible")
   def test_data_processing_with_prompt_completion(self):
     config = self.parser.parse_args(["--data-columns", "prompt", "completion"])
     dataset = Dataset.from_dict({"prompt": PROMPT_DATA, "completion": COMPLETION_DATA})
@@ -150,6 +157,7 @@ class DistillationDataProcessingTest(unittest.TestCase):
       for c_idx, completion in enumerate(expected_completions[idx]):
         self.assertEqual(data["completion"][c_idx], completion)
 
+  @unittest.skipIf(not gcs_bucket_accessible(), "gs://maxtext-dataset bucket not accessible")
   def test_data_filtering_with_prompt_completion(self):
     config = self.parser.parse_args(["--data-columns", "prompt", "completion", "--use-chat-template"])
     dataset = Dataset.from_dict({"prompt": PROMPT_DATA, "completion": COMPLETION_DATA})
