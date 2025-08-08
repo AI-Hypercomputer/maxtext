@@ -56,5 +56,8 @@ RUN if [ "$TEST_TYPE" = "xlml" ] || [ "$TEST_TYPE" = "unit_test" ]; then \
       fi; \
     fi
 
+RUN pip uninstall -y flaxlib
+RUN pip install --no-cache-dir flax==0.10.6
+
 # Run the script available in JAX AI base image to generate the manifest file
 RUN bash /jax-stable-stack/generate_manifest.sh PREFIX=maxtext COMMIT_HASH=$COMMIT_HASH
