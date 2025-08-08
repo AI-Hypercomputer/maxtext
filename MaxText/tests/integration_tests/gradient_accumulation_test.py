@@ -106,7 +106,9 @@ class GradientAccumulationTest(unittest.TestCase):
     ):
       accum_device_tflops = json.loads(accum_run.readlines()[-1])["perf/per_device_tflops"]
       regular_device_tflops = json.loads(regular_run.readlines()[-1])["perf/per_device_tflops"]
-      print(f"[Gradient Accumulation Test] per_device_tflops with gradient accumulation: {accum_device_tflops}", flush=True)
+      print(
+          f"[Gradient Accumulation Test] per_device_tflops with gradient accumulation: {accum_device_tflops}", flush=True
+      )
       print(
           f"[Gradient Accumulation Test] per_device_tflops without gradient accumulation: {regular_device_tflops}",
           flush=True,

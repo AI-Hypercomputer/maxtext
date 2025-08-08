@@ -37,7 +37,9 @@ from MaxText import maxengine
 
 
 # 4b with vit
-DEFAULT_LOAD_PARAMETERS_PATH = "gs://maxtext-model-checkpoints/gemma3-4b/multimodal/2025-04-25-18-06-04/checkpoints/0/items"
+DEFAULT_LOAD_PARAMETERS_PATH = (
+    "gs://maxtext-model-checkpoints/gemma3-4b/multimodal/2025-04-25-18-06-04/checkpoints/0/items"
+)
 
 
 class VisionEncoderEmbeddingTest(unittest.TestCase):
@@ -89,7 +91,9 @@ class VisionEncoderEmbeddingTest(unittest.TestCase):
     def apply_vision_encoder_fn(params, images_input):
       return vision_encoder_model.apply({"params": params}, images_input)
 
-    jitted_apply_vision_encoder_fn: Callable[[VariableDict, tuple[dict, ...]], np.ndarray] = jax.jit(apply_vision_encoder_fn)
+    jitted_apply_vision_encoder_fn: Callable[[VariableDict, tuple[dict, ...]], np.ndarray] = jax.jit(
+        apply_vision_encoder_fn
+    )
     image_embeddings = jitted_apply_vision_encoder_fn(vision_encoder_params, input_images)  # pylint: disable=not-callable
 
     # Load golden image embeddings generated from HuggingFace Gemma3-4b
