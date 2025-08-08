@@ -22,6 +22,7 @@ from jax import lax
 import jax
 import jax.numpy as jnp
 from MaxText import max_logging
+from MaxText import max_utils
 from MaxText.layers import nnx_wrappers
 from MaxText.layers.initializers import Initializer, variable_to_logically_partitioned
 
@@ -62,7 +63,7 @@ class RMSNorm(nnx.Module):
     # Move scale to device if parameter offloading is enabled
     if self.parameter_memory_host_offload:
       max_logging.log("normalizations.py: Moving scale parameter to device")
-      scale = jax.device_put(scale, jax.memory.Space.Device)
+      scale = jax.device_put(scale, max_utils.device_space())
 
     scale = jnp.asarray(scale, self.dtype)
     return y * scale

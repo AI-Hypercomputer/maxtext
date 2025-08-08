@@ -31,6 +31,7 @@ class SimpleDecoderLayer(nn.Module):
 
   config: Config
   mesh: Mesh
+  model_mode: str
   quant: Optional[quantizations.AqtQuantization] = None
 
   def setup(self):
@@ -54,6 +55,7 @@ class SimpleMlpDecoderLayer(nn.Module):
 
   config: Config
   mesh: Mesh
+  model_mode: str
   quant: Optional[quantizations.AqtQuantization] = None
 
   def setup(self):

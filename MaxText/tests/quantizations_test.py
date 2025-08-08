@@ -279,18 +279,25 @@ class QuantTest(unittest.TestCase):
     return all(jnp.abs(y - x).mean() / jnp.abs(x).mean() < tolerance for x, y in zip(leaves_a, leaves_b))
 
   def quantization_config(self, quant):
-    """ Run forward pass and backward pass for quantized model and compare with base model.
-    """
+    """Run forward pass and backward pass for quantized model and compare with base model."""
     cfg = self.init_pyconfig(quantization=quant)
     model = train_utils.create_model(self.cfg, self.mesh)
     qt_model = train_utils.create_model(cfg, self.mesh)
 
     ids, decoder_segment_ids, decoder_positions = self.get_data()
     var = model.init(
-        {"params": self.rng, "aqt": self.rng}, ids, decoder_positions, decoder_segment_ids, enable_dropout=False
+        {"params": self.rng, "aqt": self.rng, "dropout": self.rng},
+        ids,
+        decoder_positions,
+        decoder_segment_ids,
+        enable_dropout=False,
     )
     quantized_vars = qt_model.init(
-        {"params": self.rng, "aqt": self.rng}, ids, decoder_positions, decoder_segment_ids, enable_dropout=False
+        {"params": self.rng, "aqt": self.rng, "dropout": self.rng},
+        ids,
+        decoder_positions,
+        decoder_segment_ids,
+        enable_dropout=False,
     )
 
     def loss_base(params, inputs):

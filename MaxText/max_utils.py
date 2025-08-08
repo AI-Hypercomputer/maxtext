@@ -80,6 +80,14 @@ def calculate_num_params_from_pytree(params):
   assert total_parameters >= 0
   return total_parameters
 
+def device_space():
+  """ Version guard for jax.memory.Space.Device."""
+  # See b/436565838 for more.
+  if jax.__version__ >= "0.7.1":
+    return jax.memory.Space.Device # pytype: disable=module-attr
+  else:
+    # pytype: disable=module-attr
+    return jax._src.sharding_impls.TransferToMemoryKind("device") # pylint: disable=protected-access
 
 def calculate_total_params_per_chip(params):
   """Calculate total params per chip."""

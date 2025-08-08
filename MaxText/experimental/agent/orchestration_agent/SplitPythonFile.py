@@ -32,10 +32,10 @@ import sys
 import json
 from collections import defaultdict, deque
 import argparse
-from Utils import get_github_file_content
+from .Utils import get_github_file_content
 
 
-class reference_visitor(ast.NodeVisitor):
+class ReferenceVisitor(ast.NodeVisitor):
   """
   Traverses an AST node to find all references to a known set of names.
   This is used to detect dependencies between code blocks.
@@ -93,7 +93,7 @@ class dependency_analyzer:
     # --- Pass 2: Find dependencies and build graph ---
     defined_names = set(self.definitions.keys())
     for name, node in self.definitions.items():
-      visitor = reference_visitor(defined_names)
+      visitor = ReferenceVisitor(defined_names)
       if isinstance(node, ast.Assign):
         visitor.visit(node.value)
         targets_in_assignment = {t.id for t in node.targets if isinstance(t, ast.Name)}
@@ -232,7 +232,7 @@ class dependency_analyzer:
     comp_to_name_map = {}
     warning_message = None
 
-    self.getImportComponents()
+    self.get_import_components()
 
     comp_counter = 1
     for scc_idx in sorted_scc_indices:

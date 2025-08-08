@@ -71,7 +71,7 @@ class MultiTokenPredictionLayerTest(unittest.TestCase):
     self.decoder_segment_ids = jnp.ones((self.batch_size, self.seq_len), dtype=jnp.int32)
 
     # Initialize Layer Parameters
-    init_rngs = {"params": init_rng}
+    init_rngs = {"params": init_rng, "dropout": init_rng}
     self.variables = self.mtp_layer.init(
         init_rngs,
         self.prev_hidden_state,

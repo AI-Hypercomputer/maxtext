@@ -26,6 +26,7 @@ from flax import linen as nn
 from flax import nnx
 
 from MaxText import max_logging
+from MaxText import max_utils
 from MaxText.common_types import MODEL_MODE_PREFILL, MODEL_MODE_TRAIN, Array, Config, DType
 from MaxText.layers import nnx_wrappers
 from MaxText.layers.initializers import Initializer, default_embed_init, variable_to_logically_partitioned
@@ -37,7 +38,7 @@ def _maybe_move_embedding_to_device(embedding_table: Array, config: Config) -> A
   """Moves embedding table to device if parameter offloading is enabled."""
   if config.parameter_memory_host_offload:
     max_logging.log("embeddings.py: Moving embedding parameter to device")
-    return jax.device_put(embedding_table, jax.memory.Space.Device)
+    return jax.device_put(embedding_table, max_utils.device_space())
   return embedding_table
 
 

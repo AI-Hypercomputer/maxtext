@@ -41,12 +41,19 @@ from MaxText.maxtext_utils import all_gather_over_fsdp
 class Transformer(nn.Module):
   """An autoregressive transformer model."""
 
-  # Make new attributes required, so that all Transformer dependencies (train, decode, compile, etc) will error instead
-  #   of silently use defaults.
+  # Make new attributes required, so that all Transformer dependencies (train, decode,
+  # compile, etc) will error instead of silently use defaults.
   # pylint: disable=attribute-defined-outside-init
   config: Config
   mesh: Mesh
   quant: Quant
+  # Possible model_mode values can be found in MaxText.common_types.
+  # We generally use MaxText.common_types.MODEL_MODE_TRAIN or
+  # MaxText.common_types.MODEL_MODE_PREFILL for initializations here.
+  # TODO: Make model_mode required after confirming no users are affected.
+  model_mode: str = MODEL_MODE_TRAIN # May be different than the model_mode passed to __call__
+  # pylint: enable=attribute-defined-outside-init
+
 
   def setup(self):
     """Initialize shared_embedding & decoder layers."""
@@ -63,7 +70,9 @@ class Transformer(nn.Module):
         config=cfg,
     )
     self.vision_encoder = VisionEncoder(config=cfg, mesh=mesh) if cfg.use_multimodal else None
-    self.decoder = Decoder(config=cfg, shared_embedding=self.shared_embedding, mesh=mesh, quant=self.quant)
+    self.decoder = Decoder(
+        config=cfg, shared_embedding=self.shared_embedding, mesh=mesh, quant=self.quant, model_mode=self.model_mode
+    )
     # If MTP is enabled via config, set up the MTP block.
     if self.config.mtp_num_layers > 0:
       # Get the list of layer blueprints for the current model.
@@ -180,9 +189,14 @@ class ZeroOneTransformer(nn.Module):
   config: Config
   mesh: Mesh
   quant: Quant
+  # Possible model_mode values can be found in MaxText.common_types.
+  # We generally use MaxText.common_types.MODEL_MODE_TRAIN or
+  # MaxText.common_types.MODEL_MODE_PREFILL for initializations here.
+  # TODO: Make model_mode required after confirming no users are affected.
+  model_mode: str = MODEL_MODE_TRAIN # May be different than the model_mode passed to __call__
 
   def setup(self):
-    self.model = Transformer(self.config, self.mesh, self.quant)
+    self.model = Transformer(self.config, self.mesh, self.quant, self.model_mode)
 
   def __call__(
       self,

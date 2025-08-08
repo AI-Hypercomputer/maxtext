@@ -159,6 +159,7 @@ class TokenDroppingTest(unittest.TestCase):
     self.assertTrue((expected_dispatch_mask == actual_dispatch_mask).all())
     self.assertTrue(jax.numpy.allclose(expected_combine_mask, actual_combine_mask, rtol=1e-02, atol=1e-02))
 
+
 class MlpBlockTest(unittest.TestCase):
 
   def setUp(self):
@@ -187,12 +188,13 @@ class MlpBlockTest(unittest.TestCase):
         weight_dtype=jnp.bfloat16,
         name="mlp",
         quant=quant,
-        use_bias=True
+        use_bias=True,
     )
 
   def test_init(self):
     x = jnp.array([1.0, 2.0])
     self.model.init({"params": self.rng, "dropout": self.rng}, x)
+
 
 class DeepSeekRoutingTest(unittest.TestCase):
 
@@ -325,7 +327,8 @@ class RoutedMoeTest(unittest.TestCase):
         dtype=cfg.dtype,
     )
     variables = model.init(
-        rng, jax.random.normal(rng, (int(cfg.per_device_batch_size), cfg.max_target_length, cfg.base_emb_dim))
+        {"params": rng, "dropout": rng},
+        jax.random.normal(rng, (int(cfg.per_device_batch_size), cfg.max_target_length, cfg.base_emb_dim)),
     )
 
     output = jax.jit(model.apply)(variables, hidden_states)  # pylint: disable=not-callable

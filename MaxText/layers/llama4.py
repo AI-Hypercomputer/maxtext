@@ -27,7 +27,7 @@ from jax.sharding import Mesh
 
 from flax import linen as nn
 
-from MaxText.common_types import Config, Array
+from MaxText.common_types import Config, Array, MODEL_MODE_TRAIN
 from MaxText.inference import page_manager
 from MaxText.layers import initializers
 from MaxText.layers.linears import mlp_block
@@ -39,8 +39,6 @@ from MaxText.layers.attentions import AttentionType
 from MaxText.layers.quantizations import AqtQuantization as Quant
 from MaxText.layers.normalizations import rms_norm
 
-
-Attention = attentions.Attention
 
 #### Multi modal model implementation
 
@@ -362,6 +360,7 @@ class Llama4DecoderLayer(nn.Module):
 
   config: Config
   mesh: Mesh
+  model_mode: str
   quant: Optional[Quant] = None
   is_nope_layer: bool = False
   is_moe_layer: bool = False
@@ -402,7 +401,7 @@ class Llama4DecoderLayer(nn.Module):
     query_pre_attn_scalar = cfg.head_dim**-0.5
 
     # Self-attention block
-    attention_layer = Attention(
+    attention_layer = attentions.attention_as_linen(
         config=cfg,
         num_query_heads=cfg.num_query_heads,
         num_kv_heads=cfg.num_kv_heads,
@@ -410,6 +409,8 @@ class Llama4DecoderLayer(nn.Module):
         max_target_length=cfg.max_target_length,
         max_prefill_predict_length=cfg.max_prefill_predict_length,
         attention_kernel=cfg.attention,
+        inputs_q_shape=lnx.shape,
+        inputs_kv_shape=lnx.shape,
         mesh=mesh,
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
@@ -433,6 +434,7 @@ class Llama4DecoderLayer(nn.Module):
         temperature_tuning_floor_scale=8192.0,
         # note: chunk_attn_window_size is set in the config
         attention_type=AttentionType.GLOBAL if self.is_nope_layer else AttentionType.CHUNK,
+        model_mode=model_mode,
     )
 
     attention_lnx = attention_layer(
@@ -538,6 +540,7 @@ class Llama4ScannableBlock(nn.Module):
 
   config: Config
   mesh: Mesh
+  model_mode: str
   quant: Optional[Quant] = None
   nope_layer_interval: int = 1
   interleave_moe_layer_step: int = 1
@@ -570,6 +573,7 @@ class Llama4ScannableBlock(nn.Module):
           mesh=mesh,
           name=f"layers_{layer_id}",
           quant=self.quant,
+          model_mode=model_mode,
           is_nope_layer=nope_layer,
           is_moe_layer=moe_layer,
       )
@@ -620,13 +624,15 @@ class Llama4VisionEncoderLayer(nn.Module):
     hidden_states = nn.LayerNorm(name="input_layer_norm", epsilon=1e-5)(hidden_states)
 
     # Self attention
-    attention_layer = Attention(
+    attention_layer = attentions.attention_as_linen(
         config=self.config,
         num_query_heads=self.config.num_attention_heads_for_vit,
         num_kv_heads=self.config.num_attention_heads_for_vit,
         head_dim=self.config.hidden_size_for_vit // self.config.num_attention_heads_for_vit,
         max_target_length=(self.config.image_size_for_vit // self.config.patch_size_for_vit) ** 2 + 1,
         attention_kernel="dot_product",
+        inputs_q_shape=hidden_states.shape,
+        inputs_kv_shape=hidden_states.shape,
         float32_qk_product=self.config.float32_qk_product,
         float32_logits=self.config.float32_logits,
         mesh=self.mesh,
@@ -638,6 +644,11 @@ class Llama4VisionEncoderLayer(nn.Module):
         is_vision=True,
         use_qk_norm=False,
         query_pre_attn_scalar=1 / math.sqrt(self.config.hidden_size_for_vit // self.config.num_attention_heads_for_vit),
+        # The vision encoder processes an image in a single forward pass to produce
+        # embeddings. It doesn't have the concept of "prefill" and "autoregressive"
+        # steps that a text decoder has. Therefore, it doesn't need a KV cache for
+        # its self-attention mechanism.
+        model_mode=MODEL_MODE_TRAIN,
     )
 
     hidden_states = attention_layer(

@@ -24,6 +24,7 @@ import jax.numpy as jnp
 
 from MaxText import pyconfig
 from MaxText import optimizers
+from MaxText.common_types import MODEL_MODE_TRAIN
 from MaxText.layers import models
 from MaxText.layers import quantizations
 from MaxText import maxtext_utils
@@ -43,7 +44,7 @@ class StateDtypes(unittest.TestCase):
     quant = quantizations.configure_quantization(config)
     devices_array = maxtext_utils.create_device_mesh(config)
     mesh = Mesh(devices_array, config.mesh_axes)
-    model = Transformer(config, mesh, quant=quant)
+    model = Transformer(config, mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
     learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
     tx = optimizers.get_optimizer(config, learning_rate_schedule)
     _, example_rng = jax.random.split(jax.random.PRNGKey(0), 2)

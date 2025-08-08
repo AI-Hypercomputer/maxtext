@@ -25,7 +25,7 @@ from flax import linen as nn
 from MaxText.common_types import MODEL_MODE_PREFILL, Config
 from MaxText.layers import attentions
 from MaxText.layers import quantizations
-from MaxText.layers.attentions import Attention
+from MaxText.layers.attentions import attention_as_linen
 from MaxText.layers.linears import mlp_block
 from MaxText.layers.normalizations import rms_norm
 from MaxText.layers.quantizations import AqtQuantization as Quant
@@ -37,6 +37,7 @@ class Gemma2DecoderLayer(nn.Module):
 
   config: Config
   mesh: Mesh
+  model_mode: str
   quant: Optional[Quant] = None
 
   @nn.compact
@@ -70,7 +71,7 @@ class Gemma2DecoderLayer(nn.Module):
     )(inputs)
     lnx = nn.with_logical_constraint(lnx, activation_axis_names)
 
-    attention_layer = Attention(
+    attention_layer = attention_as_linen(
         config=cfg,
         num_query_heads=cfg.num_query_heads,
         num_kv_heads=cfg.num_kv_heads,
@@ -78,6 +79,8 @@ class Gemma2DecoderLayer(nn.Module):
         max_target_length=cfg.max_target_length,
         max_prefill_predict_length=cfg.max_prefill_predict_length,
         attention_kernel=cfg.attention,
+        inputs_q_shape=lnx.shape,
+        inputs_kv_shape=lnx.shape,
         mesh=mesh,
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
@@ -90,6 +93,7 @@ class Gemma2DecoderLayer(nn.Module):
         attention_type=attentions.AttentionType.LOCAL_SLIDING,
         sliding_window_size=cfg.sliding_window_size,
         attn_logits_soft_cap=cfg.attn_logits_soft_cap,
+        model_mode=model_mode,
     )
 
     attention_lnx = attention_layer(
@@ -165,7 +169,7 @@ class Gemma2DecoderLayer(nn.Module):
     )(inputs)
     lnx = nn.with_logical_constraint(lnx, activation_axis_names)
 
-    attention_layer = Attention(
+    attention_layer = attention_as_linen(
         config=cfg,
         num_query_heads=cfg.num_query_heads,
         num_kv_heads=cfg.num_kv_heads,
@@ -173,6 +177,8 @@ class Gemma2DecoderLayer(nn.Module):
         max_target_length=cfg.max_target_length,
         max_prefill_predict_length=cfg.max_prefill_predict_length,
         attention_kernel=cfg.attention,
+        inputs_q_shape=lnx.shape,
+        inputs_kv_shape=lnx.shape,
         mesh=mesh,
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
@@ -184,6 +190,7 @@ class Gemma2DecoderLayer(nn.Module):
         kv_quant=quantizations.configure_kv_quant(cfg),
         attention_type=attentions.AttentionType.GLOBAL,
         attn_logits_soft_cap=cfg.attn_logits_soft_cap,
+        model_mode=model_mode,
     )
 
     attention_lnx = attention_layer(

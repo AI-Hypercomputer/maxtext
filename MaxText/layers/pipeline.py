@@ -424,7 +424,7 @@ class Pipeline(nn.Module):
         in_axes=(0, 0, 0, None, None),
         spmd_axis_name="stage",
         variable_axes={"params": 0, "_overwrite_with_gradient": 0},
-        split_rngs={"params": self.is_initializing()},
+        split_rngs={"params": self.is_initializing(), "dropout": self.config.enable_dropout},
         metadata_params={
             nn.PARTITION_NAME: "layers",
             "sub_weight_split_dims_mapping": (None),
@@ -450,7 +450,7 @@ class Pipeline(nn.Module):
         in_axes=(0, 0, 0, 0, None, None),
         spmd_axis_name="stage",
         variable_axes={"params": 0},
-        split_rngs={"params": self.is_initializing()},
+        split_rngs={"params": self.is_initializing(), "dropout": self.config.enable_dropout},
         metadata_params={
             nn.PARTITION_NAME: "layers",
             "sub_weight_split_dims_mapping": (None),
@@ -682,7 +682,7 @@ class Pipeline(nn.Module):
                 "non_trainable": 0,
                 "hyper_params": 0,
             },
-            split_rngs={"params": True},
+            split_rngs={"params": True, "dropout": self.config.enable_dropout},
             metadata_params={
                 nn.PARTITION_NAME: "circular_repeats",
                 "sub_weight_split_dims_mapping": (None,),

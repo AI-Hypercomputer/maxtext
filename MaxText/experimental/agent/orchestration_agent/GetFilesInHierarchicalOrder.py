@@ -34,7 +34,7 @@ Example Invocations:
 """
 import ast, json
 from collections import deque
-from Utils import find_cycle, check_github_file_exists, get_github_file_content, url_join
+from .Utils import find_cycle, check_github_file_exists, get_github_file_content, url_join
 import argparse, logging
 
 # Set up basic configuration

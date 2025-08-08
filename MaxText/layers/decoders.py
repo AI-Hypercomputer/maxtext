@@ -29,13 +29,14 @@ from flax.linen.partitioning import ScanIn
 
 from MaxText.common_types import DecoderBlockType, Config, MODEL_MODE_TRAIN, MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE
 from MaxText import max_logging
+from MaxText import max_utils
 from MaxText.inference import page_manager
 from MaxText.layers import linears
 from MaxText.layers import quantizations
 from MaxText.layers import pipeline
 from MaxText import maxtext_utils
 from MaxText import multimodal_utils
-from MaxText.layers.attentions import Attention
+from MaxText.layers.attentions import attention_as_linen
 from MaxText.layers.normalizations import rms_norm
 from MaxText.layers.embeddings import attend_on_embedding, embed_as_linen, positional_embedding_as_linen
 from MaxText.layers.quantizations import AqtQuantization as Quant
@@ -67,6 +68,7 @@ class DecoderLayer(nn.Module):
 
   config: Config
   mesh: Mesh
+  model_mode: str
   quant: Optional[Quant] = None
 
   @nn.compact
@@ -108,7 +110,7 @@ class DecoderLayer(nn.Module):
     else:
       lnx = nn.with_logical_constraint(lnx, logical_axis_names)
 
-    attention_layer = Attention(
+    attention_layer = attention_as_linen(
         config=self.config,
         num_query_heads=cfg.num_query_heads,
         num_kv_heads=cfg.num_kv_heads,
@@ -116,6 +118,8 @@ class DecoderLayer(nn.Module):
         max_target_length=cfg.max_target_length,
         max_prefill_predict_length=cfg.max_prefill_predict_length,
         attention_kernel=cfg.attention,
+        inputs_q_shape=lnx.shape,
+        inputs_kv_shape=lnx.shape,
         mesh=mesh,
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
@@ -129,6 +133,7 @@ class DecoderLayer(nn.Module):
         ar_cache_axis_order=tuple(map(int, cfg.ar_cache_axis_order.split(","))),
         compute_axis_order=tuple(map(int, cfg.compute_axis_order.split(","))),
         reshape_q=cfg.reshape_q,
+        model_mode=model_mode,
     )
 
     attention_lnx = attention_layer(
@@ -201,6 +206,7 @@ class SequentialBlockDecoderLayers(nn.Module):
   config: Config
   mesh: Mesh
   quant: Quant
+  model_mode: str
 
   @nn.compact
   def __call__(
@@ -214,7 +220,9 @@ class SequentialBlockDecoderLayers(nn.Module):
       page_state: Optional[page_manager.PageState] = None,
   ) -> jnp.ndarray:
     for lyr in range(self.num_decoder_layers):
-      inputs = self.decoder_layer(config=self.config, mesh=self.mesh, name=f"layers_{lyr}", quant=self.quant)(
+      inputs = self.decoder_layer(
+          config=self.config, mesh=self.mesh, name=f"layers_{lyr}", quant=self.quant, model_mode=model_mode
+      )(
           inputs,
           decoder_segment_ids,
           decoder_positions,
@@ -238,6 +246,7 @@ class Decoder(nn.Module):
   shared_embedding: nn.Module
   mesh: Mesh
   quant: Optional[Quant] = None
+  model_mode: str = MODEL_MODE_TRAIN
 
   def setup(self):
     """Initialize decoder layer."""
@@ -413,7 +422,7 @@ class Decoder(nn.Module):
     else:
       raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block.value=}")
 
-  def scan_decoder_layers(self, cfg, decoder_layer, length, metadata_axis_name, mesh, in_axes_tuple, **kwargs):
+  def scan_decoder_layers(self, cfg, decoder_layer, length, metadata_axis_name, mesh, in_axes_tuple, model_mode, **kwargs):
     """scan decoder layers, calls `flax.linen.transforms.scan`"""
     initializing = self.is_mutable_collection("params")
     params_spec = cfg.param_scan_axis if initializing else ScanIn(cfg.param_scan_axis)
@@ -435,7 +444,14 @@ class Decoder(nn.Module):
         length=length,
         metadata_params={nn.PARTITION_NAME: metadata_axis_name},
     )
-    return scan_fn(config=cfg, mesh=mesh, name=metadata_axis_name, quant=self.quant, **kwargs)
+    return scan_fn(
+        config=cfg,
+        mesh=mesh,
+        name=metadata_axis_name,
+        quant=self.quant,
+        model_mode=model_mode,
+        **kwargs
+    )
 
   def get_pipeline_stage_module(self, decoder_blocks):
     """get pipeline stage module"""
@@ -452,7 +468,7 @@ class Decoder(nn.Module):
       policy = self.get_remat_policy()
       base_stage = self.set_remat_policy([base_stage], policy)[0]
     if cfg.num_layers_per_pipeline_stage == 1:
-      stage_module = base_stage(config=cfg, mesh=self.mesh, quant=self.quant)
+      stage_module = base_stage(config=cfg, mesh=self.mesh, quant=self.quant, model_mode=self.model_mode)
     elif cfg.scan_layers_per_stage:
       stage_module = self.scan_decoder_layers(
           cfg,
@@ -461,6 +477,7 @@ class Decoder(nn.Module):
           "layers_per_stage",
           self.mesh,
           in_axes_tuple=(nn.broadcast,) * 4,
+          model_mode=self.model_mode,
       )
     else:
       stage_module = SequentialBlockDecoderLayers(
@@ -469,6 +486,7 @@ class Decoder(nn.Module):
           config=cfg,
           mesh=self.mesh,
           quant=self.quant,
+          model_mode=self.model_mode,
       )
     return stage_module
 
@@ -626,6 +644,7 @@ class Decoder(nn.Module):
               "dense_layers",
               mesh,
               in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
+              model_mode=model_mode,
           )(y, *broadcast_args)
           if num_moe_layers_outside_pp > 0:
             y, _ = self.scan_decoder_layers(
@@ -635,6 +654,7 @@ class Decoder(nn.Module):
                 "moe_layers",
                 mesh,
                 in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
+                model_mode=model_mode,
             )(y, *broadcast_args)
         y = self.pipeline_module(y, *broadcast_args, partition_spec=partition_spec)
       else:  # Not DeepSeek
@@ -650,6 +670,7 @@ class Decoder(nn.Module):
                 "layers_outside_pipeline",
                 mesh,
                 in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
+                model_mode=model_mode,
             )(y, *broadcast_args)
     else:
       if cfg.scan_layers:
@@ -669,12 +690,19 @@ class Decoder(nn.Module):
               "dense_layers",
               mesh,
               in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
+              model_mode=model_mode,
           )(y, *broadcast_args)
           moe_layer = RemattedBlockLayers[1]
           moe_layer.__call__ = functools.partial(moe_layer.__call__, **layer_call_kwargs)
           num_moe_layers = cfg.num_decoder_layers - cfg.first_num_dense_layers
           y, _ = self.scan_decoder_layers(
-              cfg, moe_layer, num_moe_layers, "moe_layers", mesh, in_axes_tuple=(nn.broadcast,) * len(broadcast_args)
+              cfg,
+              moe_layer,
+              num_moe_layers,
+              "moe_layers",
+              mesh,
+              in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
+              model_mode=model_mode,
           )(y, *broadcast_args)
         elif cfg.decoder_block == DecoderBlockType.GEMMA3:
           y = self._apply_gemma3_scanned_blocks(
@@ -705,6 +733,7 @@ class Decoder(nn.Module):
               "layers",
               mesh,
               in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
+              model_mode=model_mode,
               **layer_kwargs,
           )(y, *broadcast_args)
       else:
@@ -720,7 +749,7 @@ class Decoder(nn.Module):
           # Iterate over the two layer groups (dense and MoE) and apply layer transformation
           for layer, num_layers, layer_prefix in zip(layers, num_layers_list, layer_prefixes):
             for index in range(num_layers):
-              y = layer(config=cfg, mesh=mesh, name=f"{layer_prefix}_{index}", quant=self.quant)(
+              y = layer(config=cfg, mesh=mesh, name=f"{layer_prefix}_{index}", quant=self.quant, model_mode=self.model_mode)(
                   y,
                   decoder_segment_ids,
                   decoder_positions,
@@ -745,7 +774,9 @@ class Decoder(nn.Module):
                   "is_moe_layer": llama4.determine_is_moe_layer(lyr, self.config.interleave_moe_layer_step),
               }
               layer_call_kwargs = {"bidirectional_mask": bidirectional_mask}
-            layer = RemattedBlockLayer(config=cfg, mesh=mesh, name=f"layers_{lyr}", quant=self.quant, **layer_kwargs)
+            layer = RemattedBlockLayer(
+                config=cfg, mesh=mesh, name=f"layers_{lyr}", quant=self.quant, model_mode=self.model_mode, **layer_kwargs
+            )
             y = layer(
                 y,
                 decoder_segment_ids,
@@ -811,6 +842,7 @@ class Decoder(nn.Module):
           "layers",
           mesh,
           in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
+          model_mode=model_mode,
           **layer_kwargs,
       )(y, *broadcast_args, **layer_call_kwargs)
 
@@ -819,7 +851,9 @@ class Decoder(nn.Module):
     if num_remaining_layers > 0:
       # We name the remainder block with a 'remainder' suffix to avoid parameter name collisions
       rem_layer_kwargs = {"num_of_layers": num_remaining_layers}
-      layer = RemattedGemma3Block(config=cfg, mesh=mesh, quant=self.quant, name="layers_remainder", **rem_layer_kwargs)
+      layer = RemattedGemma3Block(
+          config=cfg, mesh=mesh, quant=self.quant, model_mode=self.model_mode, name="layers_remainder", **rem_layer_kwargs
+      )
       y, _ = layer(
           y,
           decoder_segment_ids,
