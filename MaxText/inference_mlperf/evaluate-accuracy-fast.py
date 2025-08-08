@@ -25,10 +25,9 @@ import tqdm
 from multiprocessing import Pool, cpu_count
 from functools import partial
 from transformers import LlamaTokenizer, AutoTokenizer
-from typing import List, Dict, Tuple
 
 
-def split_data(preds: List[str], refs: List[str], num_chunks: int) -> List[Tuple[List[str], List[str]]]:
+def split_data(preds: list[str], refs: list[str], num_chunks: int) -> list[tuple[list[str], list[str]]]:
   """Split predictions and references into roughly equal chunks"""
   chunk_size = len(preds) // num_chunks + (1 if len(preds) % num_chunks else 0)
   chunks = []
@@ -41,13 +40,13 @@ def split_data(preds: List[str], refs: List[str], num_chunks: int) -> List[Tuple
   return chunks
 
 
-def compute_rouge_chunk(chunk: Tuple[List[str], List[str]], metric) -> Dict:
+def compute_rouge_chunk(chunk: tuple[list[str], list[str]], metric) -> dict:
   """Compute ROUGE scores for a chunk of data"""
   preds, refs = chunk
   return metric.compute(predictions=preds, references=refs, use_stemmer=True, use_aggregator=False)
 
 
-def aggregate_rouge_scores(chunk_results: List[Dict]) -> Dict:
+def aggregate_rouge_scores(chunk_results: list[dict]) -> dict:
   """Aggregate ROUGE scores from chunks"""
   # Concatenate all scores
   all_scores = {}
@@ -176,7 +175,9 @@ def main():
   # Parallel postprocessing of texts
   print("Post-processing texts...")
   with Pool(num_workers) as pool:
-    processed_pairs = list(tqdm.tqdm(pool.starmap(postprocess_text, zip(all_preds, target_required)), total=len(all_preds)))
+    processed_pairs = list(
+        tqdm.tqdm(pool.starmap(postprocess_text, zip(all_preds, target_required)), total=len(all_preds))
+    )
   preds, refs = zip(*processed_pairs)
 
   # Split data into chunks for parallel ROUGE computation
