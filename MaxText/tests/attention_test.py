@@ -35,9 +35,11 @@ from flax import nnx
 from MaxText import maxtext_utils
 from MaxText import pyconfig
 from MaxText.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_PREFILL, MODEL_MODE_TRAIN
-from MaxText.globals import PKG_DIR
+from MaxText.globals import PKG_DIR, device_presence, get_devices
 from MaxText.layers import attentions
 from MaxText.layers.attentions import Attention, MLA, ChunkedCausalMask
+
+_, gpu_present, tpu_present = device_presence()
 
 
 class BidirectionalBlockMaskTest(unittest.TestCase):
@@ -284,6 +286,7 @@ class AttentionTest(unittest.TestCase):
     config = pyconfig.initialize(
         [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
         **self.config_arguments,
+        **{} if tpu_present else {"mesh_axes": ["data"], "scan_layers": False},
     )
     self.cfg = config
 
@@ -293,15 +296,30 @@ class AttentionTest(unittest.TestCase):
         ici_context_parallelism=4,  # use context parallelism of 4
         context_parallel_load_balance=False,  # set load_balancing to False such that
         # there's no need for reordering the input/output
+        **{}
+        if tpu_present
+        else {
+            "mesh_axes": ["data"],
+            "scan_layers": False,
+            "ici_fsdp_parallelism": -1,
+            # "ici_parallelism": -1
+        },
     )
 
     self.cfg_cp = config_cp
     self.rng = jax.random.PRNGKey(0)
     self.nnx_rng = nnx.Rngs(params=0, dropout=jax.random.PRNGKey(42))
 
-    devices_array = maxtext_utils.create_device_mesh(self.cfg)
-    self.mesh = Mesh(devices_array, self.cfg.mesh_axes)
-    devices_array_cp = maxtext_utils.create_device_mesh(self.cfg_cp)  # for context parallelism
+    if jax.device_count() == 1:
+      devices_array = np.asarray(get_devices(), dtype=object)
+    else:
+      devices_array = maxtext_utils.create_device_mesh(self.cfg)
+    mesh_axes = self.cfg.mesh_axes
+    self.mesh = Mesh(devices_array, mesh_axes)
+    if jax.device_count() == 1:
+      devices_array_cp = np.array(get_devices()).reshape((1,) * len(self.cfg_cp.mesh_axes))
+    else:
+      devices_array_cp = maxtext_utils.create_device_mesh(self.cfg_cp)  # for context parallelism
     self.mesh_cp = Mesh(devices_array_cp, self.cfg_cp.mesh_axes)  # for context parallelism
     self.global_batch_size = self.cfg.global_batch_size_to_train_on
     self.num_kv_heads = self.cfg.num_kv_heads
@@ -366,7 +384,6 @@ class AttentionTest(unittest.TestCase):
 
     return lnx, decoder_segment_ids, decoder_positions
 
-  @pytest.mark.tpu_only
   def test_autoregression(self):
     prefill_length = self.cfg.max_prefill_predict_length
     decode_total_length = self.cfg.max_target_length
@@ -413,11 +430,9 @@ class AttentionTest(unittest.TestCase):
       self.assertTrue(mha_full_this_idx.shape == mha_idx.shape)
       self.assertTrue(jax.numpy.allclose(mha_full_this_idx, mha_idx, rtol=1e-02, atol=1e-02, equal_nan=False))
 
-  @pytest.mark.tpu_only
   def test_model_mode_prefill_dtype_float32(self):
     self._test_model_mode_prefill_dtype(jnp.float32)
 
-  @pytest.mark.tpu_only
   def test_model_mode_prefill_dtype_bfloat16(self):
     """test model mode prefill for dtype bfloat16"""
     self._test_model_mode_prefill_dtype(jnp.bfloat16)
@@ -461,14 +476,17 @@ class AttentionTest(unittest.TestCase):
     self.assertEqual(dtype, mha_prefill.dtype)
 
   @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_tpu_kernel_attention_mha(self):
     self.tpu_kernel_attention_helper(self.num_kv_heads)
 
   @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_tpu_kernel_attention_gqa(self):
     self.tpu_kernel_attention_helper(self.num_kv_heads // 2)
 
   @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_tpu_kernel_attention_mqa(self):
     self.tpu_kernel_attention_helper(1)
 
@@ -578,7 +596,6 @@ class AttentionTest(unittest.TestCase):
         msg="Logits from generic dot product and flash attention+context parallelism are not close.",
     )
 
-  @pytest.mark.tpu_only
   def test_dot_product_cache_axis_order(self):
     all_axis_orders = tuple(itertools.permutations(range(4)))
     for axis_order in random.choices(all_axis_orders, k=4):
@@ -680,7 +697,6 @@ class AttentionTest(unittest.TestCase):
           jax.numpy.allclose(attention_w_layout_full_this_idx, attention_w_layout_idx, rtol=rtol, atol=atol, equal_nan=False)
       )
 
-  @pytest.mark.tpu_only
   def test_dot_product_reshape_q(self):
     for compute_axis_order in [(0, 1, 2, 3), (0, 2, 1, 3)]:
       self._dot_product_attention_reshape_q(
@@ -979,11 +995,15 @@ class MLATest(parameterized.TestCase):
         max_prefill_predict_length=16,
         attention_type=attentions.AttentionType.MLA.value,
         rope_type=rope_type,
+        **{} if tpu_present else {"mesh_axes": ["data"]},
     )
     rng = jax.random.PRNGKey(0)
     nnx_rng = nnx.Rngs(params=0, dropout=jax.random.PRNGKey(42))
 
-    devices_array = maxtext_utils.create_device_mesh(cfg)
+    if jax.device_count() == 1:
+      devices_array = np.array(get_devices()).reshape((1,) * len(cfg.mesh_axes))
+    else:
+      devices_array = maxtext_utils.create_device_mesh(cfg)
     mesh = Mesh(devices_array, cfg.mesh_axes)
 
     global_batch_size = cfg.global_batch_size_to_train_on
@@ -1064,7 +1084,6 @@ class MLATest(parameterized.TestCase):
       {"testcase_name": "RoPE_Yarn_Autoregression", "rope_type": "yarn"},
       {"testcase_name": "Default_Autoregression", "rope_type": "default"},
   )
-  @pytest.mark.tpu_only
   def test_autoregression(self, rope_type):
     cfg, mla, rng = self.init_mla(rope_type)
     prefill_length = cfg.max_prefill_predict_length
