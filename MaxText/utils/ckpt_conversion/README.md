@@ -13,7 +13,7 @@ The following models are supported:
 ## Prerequisites
 - Hugging Face requires Pytorch.
 - Hugging Face model checkpoints requires local disk space.
-  - The model files are always downloaded to a disk cache first before being loaded into memory, [see](https://huggingface.co/docs/accelerate/en/concept_guides/big_model_inference)
+  - The model files are always downloaded to a disk cache first before being loaded into memory, [see](https://huggingface.co/docs/accelerate/en/concept_guides/big_model_inference). The default Hugging Face storage path is $HOME/.cache/huggingface/hub
 
 ## Hugging Face to MaxText
 
