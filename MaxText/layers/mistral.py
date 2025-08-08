@@ -45,6 +45,7 @@ class MistralDecoderLayer(nn.Module):
 
   config: models.Config
   mesh: Mesh
+  model_mode: str
   quant: Optional[Quant] = None
 
   @nn.compact
