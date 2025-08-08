@@ -18,6 +18,7 @@ limitations under the License.
 # pylint: disable=arguments-differ, disable=no-name-in-module, missing-function-docstring
 
 import math
+from typing import Optional
 
 import jax.numpy as jnp
 from jax import lax
@@ -352,14 +353,15 @@ class Llama4DecoderLayer(nn.Module):
   Attributes:
     config: Config, MaxText model config
     mesh: Mesh, JAX device mesh (used for sharding)
-    quant: None | Quant, quantization config
+    quant: Optional[Quant], quantization config
     is_nope_layer: bool, whether to use RoPE or not on this layer
     is_moe_layer: bool, whether this layer operates as a MoE layer
   """
 
   config: Config
   mesh: Mesh
-  quant: None | Quant = None
+  model_mode: str
+  quant: Optional[Quant] = None
   is_nope_layer: bool = False
   is_moe_layer: bool = False
 
@@ -372,8 +374,8 @@ class Llama4DecoderLayer(nn.Module):
       deterministic,
       model_mode,
       bidirectional_mask=None,
-      slot: None | int = None,
-      page_state: None | page_manager.PageState = None,
+      slot: Optional[int] = None,
+      page_state: Optional[page_manager.PageState] = None,
       previous_chunk=None,
   ):
     cfg = self.config
@@ -530,7 +532,7 @@ class Llama4ScannableBlock(nn.Module):
   Attributes:
     config: Config, MaxText model config
     mesh: Mesh, JAX device mesh (used for sharding)
-    quant: None | Quant, quantization config
+    quant: Optional[Quant], quantization config
     nope_layer_interval: int, the interval at which layers should use NoPE.
     interleave_moe_layer_step: int, the interval or stride for placing MoE layers.
   """
@@ -538,7 +540,8 @@ class Llama4ScannableBlock(nn.Module):
 
   config: Config
   mesh: Mesh
-  quant: None | Quant = None
+  model_mode: str
+  quant: Optional[Quant] = None
   nope_layer_interval: int = 1
   interleave_moe_layer_step: int = 1
 
@@ -551,8 +554,8 @@ class Llama4ScannableBlock(nn.Module):
       deterministic,
       model_mode,
       bidirectional_mask=None,
-      slot: None | int = None,
-      page_state: None | page_manager.PageState = None,
+      slot: Optional[int] = None,
+      page_state: Optional[page_manager.PageState] = None,
       previous_chunk=None,
   ):
 
@@ -570,6 +573,7 @@ class Llama4ScannableBlock(nn.Module):
           mesh=mesh,
           name=f"layers_{layer_id}",
           quant=self.quant,
+          model_mode=model_mode,
           is_nope_layer=nope_layer,
           is_moe_layer=moe_layer,
       )
@@ -746,10 +750,10 @@ class Llama4VisionModel(nn.Module):
   def __call__(
       self,
       pixel_values: Array,
-      output_attentions: None | bool = None,
-      output_hidden_states: None | bool = None,
-      return_dict: None | bool = None,
-      deterministic: None | bool = False,
+      output_attentions: Optional[bool] = None,
+      output_hidden_states: Optional[bool] = None,
+      return_dict: Optional[bool] = None,
+      deterministic: Optional[bool] = False,
   ) -> Array:
     """Forward pass of the Llama4 vision model.
 

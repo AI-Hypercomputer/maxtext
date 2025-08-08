@@ -19,6 +19,8 @@ limitations under the License.
 # pylint: disable=no-name-in-module
 
 
+from typing import Optional
+
 from jax.ad_checkpoint import checkpoint_name
 from jax.sharding import Mesh
 import jax.numpy as jnp
@@ -51,8 +53,8 @@ def self_attention_with_norm(
     deterministic,
     model_mode,
     previous_chunk=None,
-    page_state: None | page_manager.PageState = None,
-    slot: None | int = None,
+    page_state: Optional[page_manager.PageState] = None,
+    slot: Optional[int] = None,
 ):
   """self-attention with normalization"""
   # Normalization
@@ -151,7 +153,8 @@ class DeepSeekDenseLayer(nn.Module):
 
   config: Config
   mesh: Mesh
-  quant: None | Quant = None
+  model_mode: str
+  quant: Optional[Quant] = None
 
   @nn.compact
   def __call__(
@@ -162,8 +165,8 @@ class DeepSeekDenseLayer(nn.Module):
       deterministic,
       model_mode,
       previous_chunk=None,
-      page_state: None | page_manager.PageState = None,
-      slot: None | int = None,
+      page_state: Optional[page_manager.PageState] = None,
+      slot: Optional[int] = None,
   ):
     cfg = self.config
     if model_mode == MODEL_MODE_PREFILL:
@@ -216,7 +219,8 @@ class DeepSeekMoELayer(nn.Module):
 
   config: Config
   mesh: Mesh
-  quant: None | Quant = None
+  model_mode: str
+  quant: Optional[Quant] = None
 
   @nn.compact
   def __call__(
@@ -227,8 +231,8 @@ class DeepSeekMoELayer(nn.Module):
       deterministic,
       model_mode,
       previous_chunk=None,
-      page_state: None | page_manager.PageState = None,
-      slot: None | int = None,
+      page_state: Optional[page_manager.PageState] = None,
+      slot: Optional[int] = None,
   ):
     cfg = self.config
     if model_mode == MODEL_MODE_PREFILL:

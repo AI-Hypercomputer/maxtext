@@ -24,7 +24,7 @@ import socket
 import subprocess
 import collections
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, Tuple
 from functools import partial
 
 import numpy as np
@@ -86,6 +86,7 @@ def device_space():
   if jax.__version__ >= "0.7.1":
     return jax.memory.Space.Device # pytype: disable=module-attr
   else:
+    # pytype: disable=module-attr
     return jax._src.sharding_impls.TransferToMemoryKind("device") # pylint: disable=protected-access
 
 def calculate_total_params_per_chip(params):
@@ -561,7 +562,7 @@ def unbox_logicallypartioned(boxed_pytree):
 # Cross entropy implementation is taken from original T5X codebase:
 # https://github.com/google-research/t5x/blob/ace831eea1e2742b4299cd1a9af7e4f302038351/t5x/losses.py#L25-L101
 @jax.custom_vjp
-def cross_entropy_with_logits(logits: jnp.ndarray, targets: jnp.ndarray, z_loss: float) -> tuple[jnp.ndarray, jnp.ndarray]:
+def cross_entropy_with_logits(logits: jnp.ndarray, targets: jnp.ndarray, z_loss: float) -> Tuple[jnp.ndarray, jnp.ndarray]:
   """Computes cross entropy loss with stable custom gradient.
   Computes a stabilized-gradient version of:
     -jnp.sum(targets * nn.log_softmax(logits), axis=-1)
@@ -590,9 +591,9 @@ def cross_entropy_with_logits(logits: jnp.ndarray, targets: jnp.ndarray, z_loss:
   return loss, total_z_loss
 
 
-def _cross_entropy_with_logits_fwd(logits: jnp.ndarray, targets: jnp.ndarray, z_loss: float = 0.0) -> tuple[
-    tuple[jnp.ndarray, jnp.ndarray],
-    tuple[
+def _cross_entropy_with_logits_fwd(logits: jnp.ndarray, targets: jnp.ndarray, z_loss: float = 0.0) -> Tuple[
+    Tuple[jnp.ndarray, jnp.ndarray],
+    Tuple[
         jnp.ndarray,
         jnp.ndarray,
         jnp.ndarray,
@@ -625,7 +626,7 @@ def _cross_entropy_with_logits_fwd(logits: jnp.ndarray, targets: jnp.ndarray, z_
 
 
 def _cross_entropy_with_logits_bwd(
-    res: tuple[
+    res: Tuple[
         jnp.ndarray,
         jnp.ndarray,
         jnp.ndarray,
@@ -634,8 +635,8 @@ def _cross_entropy_with_logits_bwd(
         jnp.ndarray,
         jnp.ndarray,
     ],
-    g: tuple[jnp.ndarray, jnp.ndarray],
-) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    g: Tuple[jnp.ndarray, jnp.ndarray],
+) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
   """Backward-mode of `cross_entropy_with_logits`."""
   g = g[0]  # Ignore z_loss component as that is only used for logging.
   logits, targets, z_loss, exp_shifted, sum_exp, log_softmax, log_z = res
@@ -926,7 +927,8 @@ def reorder_mask_load_balancing(tensor, cp_size: int, seq_dim: int):
 
 
 def parse_custom_args(argv):
-  """Load multiple YAML config files from command line arguments."""
+  """ Load multiple YAML config files from command line arguments.
+  """
   configs = []
   current_argv = []
   python_script = argv[0]
@@ -960,7 +962,7 @@ def unscan_train_state_params(params, sharding, mesh, scan_axis, layer_groups):
     scanned_layers = decoder[layer_name]
 
     def strip_axis(pspec):
-      return jax.sharding.PartitionSpec(*(pspec[:scan_axis] + pspec[scan_axis + 1 :]))
+      return jax.sharding.PartitionSpec(*(pspec[:scan_axis] + pspec[scan_axis+1:]))
 
     old_spec = jax.tree_util.tree_map(lambda x: x.spec, sharding[layer_name])
     new_spec = jax.tree_util.tree_map(strip_axis, old_spec)
@@ -968,7 +970,6 @@ def unscan_train_state_params(params, sharding, mesh, scan_axis, layer_groups):
 
     def slice_layer(arr, i):
       return jax.tree_util.tree_map(lambda x: jnp.take(x, i, axis=scan_axis), arr)
-
     p_slice_layer = jax.jit(slice_layer, out_shardings=new_sharding)
 
     for i in range(num_layers):
@@ -977,11 +978,10 @@ def unscan_train_state_params(params, sharding, mesh, scan_axis, layer_groups):
 
     del decoder[layer_name]  # Free memory
 
-
 def rescan_train_state_params(params, source_shardings, scan_axis, layer_groups):
   """
   Reconstruct scanned layers from per-layer entries using minimal HBM.
-
+  
   Args:
     train_state: training state with unrolled {layer_name}_{i} entries
     scan_axis: axis to scan over
@@ -998,9 +998,9 @@ def rescan_train_state_params(params, source_shardings, scan_axis, layer_groups)
 
     # Create a wrapper that allows pjit + donation
     compiled_stack = jax.jit(
-        stack_layers,
-        out_shardings=sharding[layer_name],
-        # donate_argnums=tuple(range(num_layers)),
+      stack_layers,
+      out_shardings=sharding[layer_name],
+      # donate_argnums=tuple(range(num_layers)),
     )
 
     # Collect per-layer entries for stacking

@@ -47,6 +47,7 @@ from MaxText import maxengine
 from MaxText import maxtext_utils
 from MaxText import pyconfig
 import MaxText as mt
+from MaxText.common_types import MODEL_MODE_TRAIN
 from MaxText.experimental.rl.grpo_trainer import grpo_loss_fn, _merge_grpo_state
 from MaxText.experimental.rl.grpo_utils import compute_log_probs
 from MaxText.inference import offline_engine
@@ -69,7 +70,7 @@ def setup_maxtext_model(config, mesh):
   init_rng = jax.random.PRNGKey(config.init_weights_seed)
   quant = quantizations.configure_quantization(config)
 
-  maxtext_model = models.Transformer(config=config, mesh=mesh, quant=quant)
+  maxtext_model = models.Transformer(config=config, mesh=mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
   state, state_mesh_annotations = maxtext_utils.setup_decode_state(maxtext_model, config, init_rng, mesh, None)
   state_mesh_shardings = nn.logical_to_mesh_sharding(state_mesh_annotations, mesh, config.logical_axis_rules)
   data_sharding = jax.NamedSharding(mesh, jax.sharding.PartitionSpec(None))

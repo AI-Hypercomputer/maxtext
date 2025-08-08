@@ -18,7 +18,7 @@ limitations under the License.
 # pylint: disable=arguments-differ
 # pylint: disable=no-name-in-module
 
-from typing import Any
+from typing import Any, Optional, Tuple
 
 import jax
 from jax import lax
@@ -55,7 +55,7 @@ class Gpt3LayerNorm(nnx.Module):
       epsilon: float = 1e-6,
       dtype: Any = jnp.float32,
       weight_dtype: Any = jnp.float32,
-      kernel_axes: tuple[None | str, ...] = (),
+      kernel_axes: Tuple[Optional[str], ...] = (),
       scale_init: Initializer = nn.initializers.zeros,
       use_bias: bool = True,
       reductions_in_fp32: bool = False,
@@ -115,12 +115,12 @@ def gpt3_layer_norm(
     epsilon: float = 1e-6,
     dtype: Any = jnp.float32,
     weight_dtype: Any = jnp.float32,
-    kernel_axes: tuple[None | str, ...] = (),
+    kernel_axes: Tuple[Optional[str], ...] = (),
     scale_init: Initializer = nn.initializers.zeros,
     use_bias: bool = True,
     reductions_in_fp32: bool = False,
     parameter_memory_host_offload: bool = False,
-    name: None | str = None,
+    name: Optional[str] = None,
 ):
   """Initializes the gpt3_layer_norm module.
 
@@ -195,8 +195,8 @@ class Gpt3MultiHeadAttention(nn.Module):
   float32_qk_product: bool = False  # computes logits in float32 for stability.
   float32_logits: bool = True  # cast logits in float32 for stability.
   fused_qkv: bool = True
-  quant: None | Quant = None
-  kv_quant: None | KVQuant = None
+  quant: Optional[Quant] = None
+  kv_quant: Optional[KVQuant] = None
   use_bias: bool = True
 
   input_axis_names: AxisNames = (BATCH, LENGTH, EMBED)
@@ -321,7 +321,8 @@ class Gpt3DecoderLayer(nn.Module):
 
   config: models.Config
   mesh: Mesh
-  quant: None | Quant = None
+  model_mode: str
+  quant: Optional[Quant] = None
 
   @nn.compact
   def __call__(

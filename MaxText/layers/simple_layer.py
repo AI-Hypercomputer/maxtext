@@ -13,6 +13,8 @@ limitations under the License.
 
 """ Simple decoder layers for testing and debugging purposes."""
 
+from typing import Optional
+
 from jax import numpy as jnp
 from jax.sharding import Mesh
 
@@ -29,7 +31,8 @@ class SimpleDecoderLayer(nn.Module):
 
   config: Config
   mesh: Mesh
-  quant: None | quantizations.AqtQuantization = None
+  model_mode: str
+  quant: Optional[quantizations.AqtQuantization] = None
 
   def setup(self):
     self.weight_mat = self.param(
@@ -52,7 +55,8 @@ class SimpleMlpDecoderLayer(nn.Module):
 
   config: Config
   mesh: Mesh
-  quant: None | quantizations.AqtQuantization = None
+  model_mode: str
+  quant: Optional[quantizations.AqtQuantization] = None
 
   def setup(self):
     self.ff_1 = self.param(

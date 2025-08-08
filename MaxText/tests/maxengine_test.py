@@ -30,7 +30,7 @@ from jax.sharding import Mesh
 
 from MaxText import maxtext_utils
 from MaxText import pyconfig, maxengine
-from MaxText.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR
+from MaxText.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_PREFILL
 from MaxText.globals import PKG_DIR
 from MaxText.layers import models
 from MaxText.layers import quantizations
@@ -112,7 +112,7 @@ class MaxEngineTest(unittest.TestCase):
     devices_array = maxtext_utils.create_device_mesh(self.cfg)
     mesh = Mesh(devices_array, self.cfg.mesh_axes)
     quant = quantizations.configure_quantization(self.cfg)
-    model = models.Transformer(config=self.cfg, mesh=mesh, quant=quant)
+    model = models.Transformer(config=self.cfg, mesh=mesh, quant=quant, model_mode=MODEL_MODE_PREFILL)
     ids, decoder_segment_ids, decoder_positions = self.get_data()
 
     transformer_vars = model.init(
@@ -136,7 +136,7 @@ class MaxEngineTest(unittest.TestCase):
     devices_array = maxtext_utils.create_device_mesh(self.cfg)
     mesh = Mesh(devices_array, self.cfg.mesh_axes)
     quant = quantizations.configure_quantization(self.cfg)
-    model = models.Transformer(config=self.cfg, mesh=mesh, quant=quant)
+    model = models.Transformer(config=self.cfg, mesh=mesh, quant=quant, model_mode=MODEL_MODE_PREFILL)
     ids, decoder_segment_ids, decoder_positions = self.get_data()
 
     transformer_vars = model.init(

@@ -14,6 +14,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
+from typing import Optional
+
 from jax.ad_checkpoint import checkpoint_name
 from jax.sharding import Mesh
 import jax.numpy as jnp
@@ -35,7 +37,8 @@ class Gemma2DecoderLayer(nn.Module):
 
   config: Config
   mesh: Mesh
-  quant: None | Quant = None
+  model_mode: str
+  quant: Optional[Quant] = None
 
   @nn.compact
   def __call__(

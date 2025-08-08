@@ -82,7 +82,7 @@ class TestModel(unittest.TestCase):
     new_config = self.init_pyconfig(cast_logits_to_fp32=cast_logits_to_fp32, logits_dot_in_fp32=False)
     devices_array = maxtext_utils.create_device_mesh(new_config)
     mesh = Mesh(devices_array, new_config.mesh_axes)
-    model = models.Transformer(config=new_config, mesh=mesh, quant=None)
+    model = models.Transformer(config=new_config, mesh=mesh, quant=None, model_mode=MODEL_MODE_TRAIN)
 
     ids, decoder_segment_ids, decoder_positions = self.get_data()
 
@@ -120,16 +120,21 @@ class TestModel(unittest.TestCase):
     devices_array = maxtext_utils.create_device_mesh(self.cfg)
     mesh = Mesh(devices_array, self.cfg.mesh_axes)
     quant = quantizations.configure_quantization(self.cfg)
-    model = models.Transformer(config=self.cfg, mesh=mesh, quant=quant)
+    train_model = models.Transformer(config=self.cfg, mesh=mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
+    prefill_model = models.Transformer(config=self.cfg, mesh=mesh, quant=quant, model_mode=MODEL_MODE_PREFILL)
 
     ids, decoder_segment_ids, decoder_positions = self.get_data()
 
-    transformer_vars = model.init(
+    train_transformer_vars = train_model.init(
         {"params": self.rng, "aqt": self.rng}, ids, decoder_positions, decoder_segment_ids, enable_dropout=False
     )
 
-    full_train_logits = model.apply(
-        transformer_vars,
+    prefill_transformer_vars = prefill_model.init(
+        {"params": self.rng, "aqt": self.rng}, ids, decoder_positions, decoder_segment_ids, enable_dropout=False
+    )
+
+    full_train_logits = train_model.apply(
+        train_transformer_vars,
         ids,
         decoder_positions,
         decoder_segment_ids,
@@ -138,8 +143,8 @@ class TestModel(unittest.TestCase):
         rngs={"aqt": self.rng},
     )
 
-    partial_prefill_logits, partial_cache = model.apply(
-        transformer_vars,
+    partial_prefill_logits, partial_cache = prefill_model.apply(
+        prefill_transformer_vars,
         ids[:, :PREFILL_RANGE],
         decoder_positions[:, :PREFILL_RANGE],
         decoder_segment_ids=decoder_segment_ids[:, :PREFILL_RANGE],
@@ -158,9 +163,9 @@ class TestModel(unittest.TestCase):
     for idx in range(PREFILL_RANGE, self.cfg.max_target_length):
       ids_idx = ids[:, idx : idx + 1]
       decoder_positions_idx = decoder_positions[:, idx : idx + 1]
-      transformer_vars.update(partial_cache)
-      ar_logits, partial_cache = model.apply(
-          transformer_vars,
+      prefill_transformer_vars.update(partial_cache)
+      ar_logits, partial_cache = prefill_model.apply(
+          prefill_transformer_vars,
           ids_idx,
           decoder_positions_idx,
           enable_dropout=False,

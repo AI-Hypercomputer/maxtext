@@ -18,6 +18,7 @@ limitations under the License.
 """ Utils that are only interesting for training in MaxText. """
 
 import jax
+from MaxText.common_types import MODEL_MODE_TRAIN
 from MaxText.layers import quantizations
 from MaxText.layers import models
 from MaxText import optimizers
@@ -27,9 +28,9 @@ from MaxText import maxtext_utils
 
 def get_transformer_model(config, mesh, quant):
   if config.model_fsdp_ag_once:
-    return models.ZeroOneTransformer(config, mesh, quant=quant)
+    return models.ZeroOneTransformer(config, mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
   else:
-    return models.Transformer(config, mesh, quant=quant)
+    return models.Transformer(config, mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
 
 
 def create_model(config, mesh):
