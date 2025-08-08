@@ -360,6 +360,7 @@ class Llama4DecoderLayer(nn.Module):
 
   config: Config
   mesh: Mesh
+  model_mode: str
   quant: Optional[Quant] = None
   is_nope_layer: bool = False
   is_moe_layer: bool = False
@@ -408,8 +409,8 @@ class Llama4DecoderLayer(nn.Module):
         max_target_length=cfg.max_target_length,
         max_prefill_predict_length=cfg.max_prefill_predict_length,
         attention_kernel=cfg.attention,
-        inputs_q=lnx,
-        inputs_kv=lnx,
+        inputs_q_shape=lnx.shape,
+        inputs_kv_shape=lnx.shape,
         mesh=mesh,
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
@@ -539,6 +540,7 @@ class Llama4ScannableBlock(nn.Module):
 
   config: Config
   mesh: Mesh
+  model_mode: str
   quant: Optional[Quant] = None
   nope_layer_interval: int = 1
   interleave_moe_layer_step: int = 1
@@ -571,6 +573,7 @@ class Llama4ScannableBlock(nn.Module):
           mesh=mesh,
           name=f"layers_{layer_id}",
           quant=self.quant,
+          model_mode=model_mode,
           is_nope_layer=nope_layer,
           is_moe_layer=moe_layer,
       )
@@ -628,8 +631,8 @@ class Llama4VisionEncoderLayer(nn.Module):
         head_dim=self.config.hidden_size_for_vit // self.config.num_attention_heads_for_vit,
         max_target_length=(self.config.image_size_for_vit // self.config.patch_size_for_vit) ** 2 + 1,
         attention_kernel="dot_product",
-        inputs_q=hidden_states,
-        inputs_kv=hidden_states,
+        inputs_q_shape=hidden_states.shape,
+        inputs_kv_shape=hidden_states.shape,
         float32_qk_product=self.config.float32_qk_product,
         float32_logits=self.config.float32_logits,
         mesh=self.mesh,

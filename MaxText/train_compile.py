@@ -42,6 +42,7 @@ from MaxText import maxtext_utils
 from MaxText import optimizers
 from MaxText import max_utils
 from MaxText import pyconfig
+from MaxText.common_types import MODEL_MODE_TRAIN
 from MaxText.layers import models
 from MaxText.layers import quantizations
 from MaxText.utils import gcs_utils
@@ -86,7 +87,7 @@ def get_shaped_inputs(topology_mesh, config):
   """Get shaped abstractions of inputs to train_step: state, batch and rng"""
   # Construct the model and optimizer to get shaped versions of the state
   quant = quantizations.configure_quantization(config)
-  model = Transformer(config, topology_mesh, quant=quant)
+  model = Transformer(config, topology_mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
   # The learning_rate_schedule is baked into the compiled object.
   learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
   tx = optimizers.get_optimizer(config, learning_rate_schedule)

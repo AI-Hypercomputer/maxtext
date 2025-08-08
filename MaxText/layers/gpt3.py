@@ -30,6 +30,7 @@ from flax import linen as nn
 from flax import nnx
 
 from MaxText import max_logging
+from MaxText import max_utils
 from MaxText.common_types import Config, DType, AxisNames, BATCH, LENGTH, EMBED, HEAD, D_KV, Array, MODEL_MODE_TRAIN
 from MaxText.layers import initializers, nnx_wrappers
 from MaxText.layers.linears import mlp_block
@@ -96,7 +97,7 @@ class Gpt3LayerNorm(nnx.Module):
     # Move scale to device if parameter offloading is enabled
     if self.parameter_memory_host_offload:
       max_logging.log("gpt3.py: Moving scale parameter to device")
-      scale = jax.device_put(scale, jax.memory.Space.Device)
+      scale = jax.device_put(scale, max_utils.device_space())
 
     scale = jnp.asarray(scale, self.dtype)
     output = normed_inputs * (scale + 1)
@@ -320,6 +321,7 @@ class Gpt3DecoderLayer(nn.Module):
 
   config: models.Config
   mesh: Mesh
+  model_mode: str
   quant: Optional[Quant] = None
 
   @nn.compact

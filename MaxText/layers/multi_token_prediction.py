@@ -154,7 +154,7 @@ class MultiTokenPredictionLayer(nn.Module):
     projected_features = projection_layer(concatenated_features)
 
     # --- 4. Pass through MTP Transformer Block ---
-    output = self.transformer_layer_module(config=cfg, mesh=mesh, name=f"mtp_{k}_transformer_layer")(
+    output = self.transformer_layer_module(config=cfg, mesh=mesh, model_mode=model_mode, name=f"mtp_{k}_transformer_layer")(
         inputs=projected_features,
         decoder_segment_ids=decoder_segment_ids,
         decoder_positions=position_ids,

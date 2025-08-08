@@ -54,6 +54,7 @@ from MaxText import maxtext_utils
 from MaxText import max_utils
 from MaxText import optimizers
 from MaxText import pyconfig
+from MaxText.common_types import MODEL_MODE_TRAIN
 from MaxText.globals import PKG_DIR
 from MaxText.layers import quantizations
 from MaxText.layers.models import Transformer
@@ -89,7 +90,7 @@ def convert(paxml_ckpt_path, maxtext_model_name, base_output_directory, run_name
   mesh = Mesh(devices_array, cfg.mesh_axes)
 
   quant = quantizations.configure_quantization(cfg)
-  model = Transformer(cfg, mesh, quant=quant)
+  model = Transformer(cfg, mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
   learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(cfg)
   tx = optimizers.get_optimizer(cfg, learning_rate_schedule)
 

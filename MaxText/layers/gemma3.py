@@ -63,6 +63,7 @@ class Gemma3DecoderLayer(nn.Module):
 
   config: Config
   mesh: Mesh
+  model_mode: str
   quant: Optional[Quant] = None
   attention_type: AttentionType = AttentionType.LOCAL_SLIDING
 
@@ -103,8 +104,8 @@ class Gemma3DecoderLayer(nn.Module):
         max_target_length=cfg.max_target_length,
         max_prefill_predict_length=cfg.max_prefill_predict_length,
         attention_kernel=cfg.attention,
-        inputs_q=lnx,
-        inputs_kv=lnx,
+        inputs_q_shape=lnx.shape,
+        inputs_kv_shape=lnx.shape,
         mesh=mesh,
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
@@ -219,6 +220,7 @@ class Gemma3ScannableBlock(nn.Module):
 
   config: Config
   mesh: Mesh
+  model_mode: str
   quant: Optional[Quant] = None
   num_of_layers: int = 1
 
@@ -247,6 +249,7 @@ class Gemma3ScannableBlock(nn.Module):
       layer = Gemma3DecoderLayer(
           config=cfg,
           mesh=mesh,
+          model_mode=model_mode,
           name=f"layers_{layer_id}",
           quant=self.quant,
           attention_type=attention_type,
