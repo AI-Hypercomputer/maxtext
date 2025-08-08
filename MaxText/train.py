@@ -13,6 +13,7 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 """
+import sys
 
 # pylint: disable=g-bad-todo, abstract-method, consider-using-with
 """Training loop and Decoding of the model."""
@@ -307,7 +308,11 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
   xent = xent * (data["targets_segmentation"] != 0)
   total_loss = jnp.sum(xent)
   total_weights = jnp.sum(data["targets_segmentation"] != 0)
-  loss = total_loss / (total_weights + EPS)
+  if config.gradient_accumulation_steps > 1:
+      loss = total_loss
+  else:
+      loss = total_loss / (total_weights + EPS)
+
 
   # Calculate and Add MTP Loss
   mtp_loss = 0.0
@@ -337,20 +342,19 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
   return loss, aux
 
 
-def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
+def train_step(model, config, state_mesh_shardings, params_shardings, state, data, dropout_rng):
   """
-
   Args:
     model: A nn.Module
+    config: Config of parameters
+    state_mesh_shardings: Shardings of the model state
+    params_shardings: Shardings of the model parameters
     state: A pytree of the current state of the model
     data: Batch of data to apply to the model
     dropout_rng: A key to use to generate rng for dropout
-
   Returns:
     new_state: Same format as state.
     metrics: Dictionary of model metrics such as loss, training rate, etc.
-    rng2: A new rng key that can be used in future calls.
-
   """
   reference_params, reference_params_sharding, extra_dpo_args, _loss_fn = [], [], [], loss_fn
   if config.use_dpo:
@@ -360,41 +364,67 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
     _loss_fn = dpo_loss_fn
 
   if config.gradient_accumulation_steps > 1:
-
-    def accumulate_gradient(acc_grad_and_loss, data):
-      grad_func = jax.value_and_grad(_loss_fn, argnums=4, has_aux=True)
-      (_, aux), cur_batch_gradient = grad_func(
-          model, config, data, dropout_rng, state.params, *extra_dpo_args, is_train=True
-      )
-      acc_grad_and_loss["loss"] += aux["total_loss"]
-      acc_grad_and_loss["moe_lb_loss"] += aux["moe_lb_loss"]
-      acc_grad_and_loss["mtp_loss"] += aux["mtp_loss"]
-      acc_grad_and_loss["grad"] = jax.tree_util.tree_map(
-          lambda x, y: x * aux["total_weights"] + y, cur_batch_gradient, acc_grad_and_loss["grad"]
-      )
-      acc_grad_and_loss["total_weights"] += aux["total_weights"]
-      return acc_grad_and_loss, aux
-
+    
+    # Reshape the data into microbatches
     def reshape_to_microbatch_accumulations(batch_arr):
       """Reshape global batch to microbatches, assuming batch axis is leading."""
       microbatches = config.gradient_accumulation_steps
       microbatch_shape = (microbatches, batch_arr.shape[0] // microbatches) + batch_arr.shape[1:]
-      return jnp.reshape(batch_arr, microbatch_shape)
+      return jnp.reshape(batch_arr, microbatch_shape, order='F')
 
     data = jax.tree_util.tree_map(reshape_to_microbatch_accumulations, data)
-    init_grad = jax.tree_util.tree_map(jnp.zeros_like, state.params)
-    init_grad_and_loss = {"loss": 0.0, "grad": init_grad, "total_weights": 0, "moe_lb_loss": 0.0, "mtp_loss": 0.0}
+    data = jax.lax.with_sharding_constraint(data, jax.sharding.PartitionSpec(None, 'data', None))
 
-    grad_and_loss, aux = jax.lax.scan(
-        accumulate_gradient, init_grad_and_loss, data, length=config.gradient_accumulation_steps
-    )
-    loss = (
-        grad_and_loss["loss"] / grad_and_loss["total_weights"]
-        + grad_and_loss["moe_lb_loss"] / config.gradient_accumulation_steps
-        + grad_and_loss["mtp_loss"] / config.gradient_accumulation_steps
-    )
-    raw_grads = jax.tree_util.tree_map(lambda arr: arr / grad_and_loss["total_weights"], grad_and_loss["grad"])
-    aux = jax.tree.map(lambda x: jnp.sum(x, axis=0), aux)  # pytype: disable=module-attr
+    # Define a function that computes the total loss over all microbatches.
+    # jax.grad will be applied to this function once.
+    def accumulated_loss_fn(params):
+        
+        # This inner function will be scanned over. It computes the forward pass
+        # for a single microbatch and accumulates the necessary metrics.
+        def microbatch_loss_fn(carry, microbatch_data):
+            loss, aux = _loss_fn(
+                model, config, microbatch_data, dropout_rng, params, *extra_dpo_args, is_train=True
+            )
+            carry['total_loss'] += aux['total_loss']
+            carry['total_weights'] += aux['total_weights']
+            carry['moe_lb_loss'] += aux['moe_lb_loss']
+            carry['mtp_loss'] += aux['mtp_loss']
+            # The 'aux' from the last microbatch is used for activation metrics
+            return carry, aux
+
+        # Initialize the state for the scan
+        init_carry = {
+            'total_loss': 0.0,
+            'total_weights': 0.0,
+            'moe_lb_loss': 0.0,
+            'mtp_loss': 0.0
+        }
+        
+        # Run the scan to accumulate losses from all microbatches
+        final_carry, last_aux = jax.lax.scan(
+            microbatch_loss_fn, init_carry, data, length=config.gradient_accumulation_steps
+        )
+        
+        # The final loss that we will differentiate is the average loss.
+        loss = (
+            final_carry['total_loss'] / final_carry['total_weights']
+            + final_carry['moe_lb_loss'] / config.gradient_accumulation_steps
+            + final_carry['mtp_loss'] / config.gradient_accumulation_steps
+        )
+
+        return loss, {'final_carry': final_carry, 'last_aux': last_aux}
+
+    # Apply jax.grad ONCE to the entire accumulated loss function.
+    grad_fn = jax.value_and_grad(accumulated_loss_fn, has_aux=True)
+    (loss, aux_data), raw_grads = grad_fn(state.params)
+
+    # Extract metrics from the auxiliary data returned by the loss function
+    final_carry = aux_data['final_carry']
+    aux = aux_data['last_aux']
+    total_weights = final_carry['total_weights']
+    moe_lb_loss = final_carry['moe_lb_loss'] / config.gradient_accumulation_steps
+    mtp_loss = final_carry['mtp_loss'] / config.gradient_accumulation_steps
+    
   else:
     if config.optimizer_memory_host_offload:
       if config.use_dpo:
@@ -402,15 +432,17 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
         extra_dpo_args = [reference_params]
     grad_func = jax.value_and_grad(_loss_fn, argnums=4, has_aux=True)
     (loss, aux), raw_grads = grad_func(model, config, data, dropout_rng, state.params, *extra_dpo_args, is_train=True)
+  
   intermediate_outputs = aux["intermediate_outputs"]
-  total_weights = aux["total_weights"]
-  moe_lb_loss = aux["moe_lb_loss"]
-  mtp_loss = aux["mtp_loss"]
+  total_weights = aux["total_weights"] if config.gradient_accumulation_steps <= 1 else total_weights
+  moe_lb_loss = aux["moe_lb_loss"] if config.gradient_accumulation_steps <= 1 else moe_lb_loss
+  mtp_loss = aux["mtp_loss"] if config.gradient_accumulation_steps <= 1 else mtp_loss
 
   if config.gradient_clipping_threshold > 0:
     grads = maxtext_utils.apply_gradient_clipping(raw_grads, state, config.gradient_clipping_threshold)
   else:
     grads = raw_grads
+    
   if config.optimizer_memory_host_offload:
     state = state.replace(
         opt_state=jax.device_put(
@@ -418,6 +450,7 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
             jax.tree_util.tree_map(lambda x: x.with_memory_kind(kind="device"), state_mesh_shardings.opt_state),
         )
     )
+    
   # Move all parameters to device before optimizer update
   if config.parameter_memory_host_offload:
     max_logging.log("\nMoving all parameters to device before optimizer update")
@@ -432,6 +465,7 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
             jax.tree_util.tree_map_with_path(move, state_mesh_shardings.params),
         )
     )
+    
   new_state = state.apply_gradients(grads=grads)
 
   scalar_metrics = {
@@ -440,12 +474,15 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
       "learning/mtp_loss": mtp_loss,
       "learning/total_weights": total_weights,
   }
+  
   if not config.optimizer_memory_host_offload:
     scalar_metrics["learning/grad_norm"] = max_utils.l2norm_pytree(grads)
     scalar_metrics["learning/raw_grad_norm"] = max_utils.l2norm_pytree(raw_grads)
     scalar_metrics["learning/param_norm"] = max_utils.l2norm_pytree(new_state.params)
+    
   if config.use_dpo:
     scalar_metrics["learning/dpo_reward_accuracy"] = aux["reward_accuracy"]
+    
   metrics = {
       "scalar": scalar_metrics,
       "scalars": {},
@@ -539,7 +576,7 @@ def setup_train_loop(config, recorder, devices=None):
         if eval_data_iterator:
           eval_data_iterator = map(max_utils.get_reorder_callable(context_parallel_size), eval_data_iterator)
 
-    state, _, state_mesh_shardings, data_iterator = maxtext_utils.setup_training_state(
+    state, _, state_mesh_shardings, data_iterator,params_shardings = maxtext_utils.setup_training_state(
         model, data_iterator, tx, config, init_rng, mesh, checkpoint_manager
     )
 
@@ -588,6 +625,7 @@ def setup_train_loop(config, recorder, devices=None):
       data_iterator,
       eval_data_iterator,
       state,
+      params_shardings
   )
 
 
@@ -603,6 +641,7 @@ def train_loop(config, recorder, state=None):
       data_iterator,
       eval_data_iterator,
       state,
+      params_shardings
   ) = setup_train_loop(config, recorder)
 
   if config.use_dpo:
@@ -612,7 +651,7 @@ def train_loop(config, recorder, state=None):
     state_mesh_shardings = _merge_dpo_state(state_mesh_shardings, state_mesh_shardings.params["params"])
 
   p_train_step, p_eval_step = train_utils.jit_train_and_eval_step(
-      config, model, mesh, state, state_mesh_shardings, train_step, eval_step, eval_data_iterator
+      config, model, mesh, state, state_mesh_shardings, train_step,params_shardings, eval_step, eval_data_iterator
   )
 
   with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
@@ -640,6 +679,7 @@ def train_loop(config, recorder, state=None):
         nextrng = jax.jit(jax.random.fold_in)(init_rng, step)
         with maybe_record_goodput(recorder, GoodputEvent.STEP, step):
           with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+            state = jax.lax.with_sharding_constraint(state, state_mesh_shardings)
             state, metrics = p_train_step(state, example_batch, nextrng)
 
       step_time_delta = datetime.datetime.now() - last_step_completion

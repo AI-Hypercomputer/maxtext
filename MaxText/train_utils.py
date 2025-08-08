@@ -35,9 +35,11 @@ def get_transformer_model(config, mesh, quant):
 def create_model(config, mesh):
   """Instantiates and returns the model object, sharded across the mesh."""
   # Model definition
+  # Set a default for use_qwix_quantization to prevent a KeyError if it's not in the config.
+  if "use_qwix_quantization" not in config.get_keys():
+    config.get_keys()["use_qwix_quantization"] = False
   quant = quantizations.configure_quantization(config)
   model = get_transformer_model(config, mesh, quant)
-  model = quantizations.maybe_quantize_model(model, config)
   return model
 
 
@@ -89,10 +91,10 @@ def create_training_tools(config, model, mesh):
   return init_rng, checkpoint_manager, learning_rate_schedule, tx
 
 
-def jit_train_step(config, model, state, state_mesh_shardings, data_sharding, train_step):
+def jit_train_step(config, model, state, state_mesh_shardings, data_sharding, train_step,params_shardings):
   """Returns a JIT-compiled train step function, which is loaded from a file if specified in the config."""
   functional_train, in_shardings, out_shardings, static_argnums, donate_argnums = (
-      maxtext_utils.get_functional_train_with_signature(train_step, data_sharding, state_mesh_shardings, model, config)
+      maxtext_utils.get_functional_train_with_signature(train_step, data_sharding, state_mesh_shardings, model, config,params_shardings)
   )
 
   # Define the compilation of functional_train, either by loading the compiled version or wrapping a new one in a jit
@@ -133,11 +135,11 @@ def jit_eval_step(config, model, state_mesh_shardings, data_sharding, eval_step)
 
 
 def jit_train_and_eval_step(
-    config, model, mesh, state, state_mesh_shardings, train_step, eval_step=None, eval_data_iterator=None
+    config, model, mesh, state, state_mesh_shardings, train_step,params_shardings, eval_step=None, eval_data_iterator=None
 ):
   """Returns a JIT-compiled train and eval step function."""
   data_sharding = maxtext_utils.get_input_data_sharding(config, mesh)
-  p_train_step = jit_train_step(config, model, state, state_mesh_shardings, data_sharding, train_step)
+  p_train_step = jit_train_step(config, model, state, state_mesh_shardings, data_sharding, train_step,params_shardings)
   p_eval_step = None
   if eval_data_iterator:
     p_eval_step = jit_eval_step(config, model, state_mesh_shardings, data_sharding, eval_step)
