@@ -17,7 +17,7 @@ limitations under the License.
 # pylint: disable=arguments-differ
 # pylint: disable=no-name-in-module
 
-from typing import Any, Optional, Protocol
+from typing import Optional, Protocol
 
 from jax.ad_checkpoint import checkpoint_name
 from jax.sharding import Mesh
@@ -97,6 +97,7 @@ class BaseDeepSeekLayer(nnx.Module):
       config: Config,
       mesh: Mesh,
       mlp_block: nnx.Module|nn.Module,
+      model_mode: str,
       quant: Optional[quantizations.AqtQuantization] = None,
       rngs: Optional[nnx.Rngs] = None,
   ) -> None:
@@ -138,13 +139,13 @@ class BaseDeepSeekLayer(nnx.Module):
       num_kv_heads=self.config.num_kv_heads,
       head_dim=self.config.head_dim,
       max_target_length=self.config.max_target_length,
-      max_prefill_predict_length=self.config.max_prefill_predict_length,
-      attention_kernel=self.config.attention,
       mesh=mesh,
-      dtype=self.config.dtype,
+      attention_kernel=self.config.attention,
       inputs_q_shape=inputs_shape,
       inputs_kv_shape=inputs_shape,
+      dtype=self.config.dtype,
       weight_dtype=self.config.weight_dtype,
+      max_prefill_predict_length=self.config.max_prefill_predict_length,
       dropout_rate=self.config.dropout_rate,
       name="self_attention",
       quant=quant,
@@ -158,6 +159,8 @@ class BaseDeepSeekLayer(nnx.Module):
       original_max_position_embeddings=self.config.original_max_position_embeddings,
       mscale=self.config.mscale,
       rope_factor=self.config.rope_factor,
+      model_mode=model_mode,
+      rngs=self.rngs,
     )
 
 
@@ -216,6 +219,7 @@ class DeepSeekDenseLayer(BaseDeepSeekLayer):
       *,
       config: Config,
       mesh: Mesh,
+      model_mode: str,
       quant: Optional[quantizations.AqtQuantization] = None,
       rngs: Optional[nnx.Rngs] = None,
   ) -> None:
@@ -233,7 +237,7 @@ class DeepSeekDenseLayer(BaseDeepSeekLayer):
       quant=quant,
       rngs=safe_rngs
     )
-    super().__init__(config=config, mesh=mesh,mlp_block=mlp_block, quant=quant, rngs=safe_rngs)
+    super().__init__(config=config, mesh=mesh,mlp_block=mlp_block,model_mode=model_mode, quant=quant, rngs=safe_rngs)
 
 
 class DeepSeekDenseLayerWrapper(nn.Module):
@@ -241,6 +245,7 @@ class DeepSeekDenseLayerWrapper(nn.Module):
 
   config: Config
   mesh: Mesh
+  model_mode: str
   quant: Quant | None = None
 
   @nn.compact
@@ -250,6 +255,7 @@ class DeepSeekDenseLayerWrapper(nn.Module):
       DeepSeekDenseLayer,
       config=self.config,
       mesh=self.mesh,
+      model_mode=self.model_mode,
       quant=self.quant,
       metadata_fn=initializers.variable_to_logically_partitioned,
     )
@@ -266,6 +272,7 @@ class DeepSeekMoELayer(BaseDeepSeekLayer):
       *,
       config: Config,
       mesh: Mesh,
+      model_mode: str,
       quant: Optional[quantizations.AqtQuantization] = None,
       rngs: Optional[nnx.Rngs] = None,
   ) -> None:
@@ -279,7 +286,7 @@ class DeepSeekMoELayer(BaseDeepSeekLayer):
         weight_dtype=config.weight_dtype,
         quant=quant,
     )
-    super().__init__(config=config, mesh=mesh,mlp_block=mlp_block, quant=quant, rngs=rngs)
+    super().__init__(config=config, mesh=mesh,mlp_block=mlp_block, model_mode=model_mode,quant=quant, rngs=rngs)
 
 class DeepSeekMoELayerWrapper(nn.Module):
   """A Linen wrapper for the NNX DeepSeekMoELayer"""
@@ -296,6 +303,7 @@ class DeepSeekMoELayerWrapper(nn.Module):
       DeepSeekMoELayer,
       config=self.config,
       mesh=self.mesh,
+      model_mode=self.model_mode,
       quant=self.quant,
       metadata_fn=initializers.variable_to_logically_partitioned,
     )
