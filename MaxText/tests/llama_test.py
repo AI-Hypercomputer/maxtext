@@ -16,7 +16,6 @@ limitations under the License.
 
 """ Tests for Llama. """
 
-from typing import Tuple
 import unittest
 
 import numpy as np
@@ -50,7 +49,7 @@ def apply_rotary_emb(
     xk: jnp.ndarray,
     freqs_cis: jnp.ndarray,
     dtype: jnp.dtype = jnp.bfloat16,
-) -> Tuple[jnp.ndarray, jnp.ndarray]:
+) -> tuple[jnp.ndarray, jnp.ndarray]:
   """Apply the computed Rotary Positional Embedding."""
   reshape_xq = xq.astype(jnp.float32).reshape(*xq.shape[:-1], -1, 2)
   reshape_xk = xk.astype(jnp.float32).reshape(*xk.shape[:-1], -1, 2)

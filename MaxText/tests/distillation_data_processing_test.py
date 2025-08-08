@@ -101,7 +101,10 @@ class DistillationDataProcessingTest(unittest.TestCase):
 
     processed_dataset = _distillation_data_processing.process_dataset(config, dataset)
 
-    expected_prompts = [["What color is the sky?", "Why is the sky blue?"], ["Can you tell me how many days are in a week?"]]
+    expected_prompts = [
+        ["What color is the sky?", "Why is the sky blue?"],
+        ["Can you tell me how many days are in a week?"],
+    ]
     expected_completions = [
         ["The sky is blue.", "The sky appears blue due a phenomemon called Rayleigh scattering."],
         ["There are 7 days in a week."],
@@ -134,7 +137,10 @@ class DistillationDataProcessingTest(unittest.TestCase):
 
     processed_dataset = _distillation_data_processing.process_dataset(config, dataset)
 
-    expected_prompts = [["What color is the sky?", "Why is the sky blue?"], ["Can you tell me how many days are in a week?"]]
+    expected_prompts = [
+        ["What color is the sky?", "Why is the sky blue?"],
+        ["Can you tell me how many days are in a week?"],
+    ]
     expected_completions = [
         ["The sky is blue.", "The sky appears blue due a phenomemon called Rayleigh scattering."],
         ["There are 7 days in a week."],

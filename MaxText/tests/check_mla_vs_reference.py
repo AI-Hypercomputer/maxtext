@@ -74,7 +74,7 @@ def precompute_freqs_cis(dim, seqlen, beta_fast=32, beta_slow=1, base=10000.0, f
         max_seq_len (int): Maximum sequence length.
 
     Returns:
-        Tuple[int, int]: The range of correction dimensions (low, high), clamped to valid indices.
+        tuple[int, int]: The range of correction dimensions (low, high), clamped to valid indices.
     """
     low = math.floor(find_correction_dim(low_rot, dim, base, max_seq_len))
     high = math.ceil(find_correction_dim(high_rot, dim, base, max_seq_len))

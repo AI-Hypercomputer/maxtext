@@ -93,8 +93,12 @@ class RaggedAttentionTest(unittest.TestCase):
     k1, k2, k3 = jax.random.split(key, 3)
 
     q = jax.random.normal(k1, (self.batch_size, 1, self.num_query_heads, self.head_dim), dtype=self.dtype)
-    k = jax.random.normal(k2, (self.batch_size, self.max_target_length, self.num_kv_heads, self.head_dim), dtype=self.dtype)
-    v = jax.random.normal(k3, (self.batch_size, self.max_target_length, self.num_kv_heads, self.head_dim), dtype=self.dtype)
+    k = jax.random.normal(
+        k2, (self.batch_size, self.max_target_length, self.num_kv_heads, self.head_dim), dtype=self.dtype
+    )
+    v = jax.random.normal(
+        k3, (self.batch_size, self.max_target_length, self.num_kv_heads, self.head_dim), dtype=self.dtype
+    )
     lengths = jnp.array(np.random.randint(1, self.max_target_length, self.batch_size), dtype=jnp.int32)
 
     ragged_out, _, ragged_denom = ragged_gqa(q, k, v, lengths)
