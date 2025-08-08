@@ -53,6 +53,39 @@ def str2bool(v: str) -> bool:
 
 
 @jax.jit
+def prompt_logprobs_from_prefill(
+    logits: jax.Array,       # [B, S, V]  predicts token t+1 at position t
+    input_tokens: jax.Array, # [B, S]
+    true_length              # int or jax.Array with shape [] or [B]
+) -> jax.Array:
+    """
+    Returns [B, S] where out[:, t] = log P(token[t] | tokens[:t]).
+    - Position 0 is NaN (To match OpenAI format).
+    - Positions >= true_length are masked to NaN.
+    """
+    B, S = input_tokens.shape
+
+    # Next-token logprobs for steps 0..S-2
+    logps   = jax.nn.log_softmax(logits[:, :-1, :], axis=-1)        # [B, S-1, V]
+    targets = input_tokens[:, 1:]                                    # [B, S-1]
+    scored  = jnp.take_along_axis(logps, targets[..., None], -1)[..., 0]  # [B, S-1]
+
+    # Align to token positions (pad NaN at t=0)
+    pad = jnp.full((B, 1), jnp.nan, dtype=logps.dtype)               # [B, 1]
+    out = jnp.concatenate([pad, scored], axis=1)                      # [B, S]
+
+    # Mask padding (and keep t>0)
+    tl = jnp.asarray(true_length)
+    tl = jnp.broadcast_to(tl, (B,)) if tl.ndim == 0 else tl          # [B]
+    pos = jnp.arange(S)[None, :]                                     # [1, S]
+    valid = (pos < tl[:, None]) & (pos > 0)                          # [B, S]
+    out = jnp.where(valid, out, jnp.nan)
+
+    return out
+
+
+
+@jax.jit
 def log_prob_of_chosen_token(logits, chosen_index):
   """
   logits: unnormalized logits, shape [batch, seq, vocab]
