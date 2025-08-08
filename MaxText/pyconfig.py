@@ -149,6 +149,14 @@ def validate_rope_type(rope_type: str) -> None:
     raise ValueError(f"Invalid RoPE type was passed. Got: {rope_type}. Valid options: {valid_rope_types}")
 
 
+def validate_expert_shard_attention_option(expert_shard_attention_option: str) -> None:
+  valid_expert_shard_attention_option = ("fsdp", "context")
+  if expert_shard_attention_option not in valid_expert_shard_attention_option:
+    raise ValueError(
+        f"Invalid expert_shard_attention_option was passed. Got: {expert_shard_attention_option}. Valid options: {valid_expert_shard_attention_option}"
+    )
+
+
 def validate_keys(keys):
   validate_attention_kernel(keys["attention"])
   validate_attention_type(keys["attention_type"])
@@ -200,6 +208,7 @@ def validate_keys(keys):
     validate_sparse_matmul_parallelism(keys)
     validate_ragged_dot(keys)
     validate_deepseek_moe(keys)
+    validate_expert_shard_attention_option(keys["expert_shard_attention_option"])
     assert keys["decoder_block"] != "qwen3", "Qwen3 MoE mode has not been tested, please set num_experts to 1."
 
   if keys["use_multimodal"]:
@@ -606,6 +615,7 @@ class _HyperParameters:
 
     raw_keys["num_slices"] = max_utils.get_num_slices(raw_keys)
     raw_keys["quantization_local_shard_count"] = get_quantization_local_shard_count(raw_keys)
+    raw_keys["context_parallel_size"] = get_context_parallel_size(raw_keys)
     raw_keys = create_parallelisms_list(raw_keys)
     raw_keys = set_and_validate_pipeline_config(raw_keys)
 
@@ -1095,6 +1105,14 @@ def get_quantization_local_shard_count(raw_keys):
     return raw_keys["num_slices"]
   else:
     return raw_keys["quantization_local_shard_count"]
+
+
+def get_context_parallel_size(raw_keys):
+  cp_size = raw_keys["ici_context_parallelism"] * raw_keys["dcn_context_parallelism"]
+  # ep acts as cp in attention
+  if raw_keys["expert_shard_attention_option"] == "context":
+    cp_size = cp_size * raw_keys["ici_expert_parallelism"] * raw_keys["dcn_expert_parallelism"]
+  return cp_size
 
 
 def using_pipeline_parallelism(raw_keys) -> bool:
