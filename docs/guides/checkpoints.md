@@ -26,7 +26,7 @@ To work with `jax.lax.scan`, the model's parameters must be "stacked". For a Tra
 1. **Unstacked Checkpoints**: Parameters for each layer are stored in separate groups (e.g., `layers_0`, `layers_1`, `layers_2`). This is the common format for models released publicly. (Figure 1, left).
 2. **Stacked Checkpoints**: Corresponding parameters from all layers are combined into a single, larger tensor (e.g., all attention weights are in one array). This is the format `jax.lax.scan` expects. (Figure 1, right).
 
-![Illustration of an unstacked checkpoint versus a stacked checkpoint.](checkpoints_explain.png)
+![Illustration of an unstacked checkpoint versus a stacked checkpoint.](../_static/checkpoints_explain.png)
 *Figure 1: A comparison of an unstacked checkpoint and a stacked checkpoint for a simple language model.*
 
 Their difference can also be represented in the following pytree structure:
