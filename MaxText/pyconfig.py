@@ -1110,7 +1110,7 @@ def get_quantization_local_shard_count(raw_keys):
 def get_context_parallel_size(raw_keys):
   cp_size = raw_keys["ici_context_parallelism"] * raw_keys["dcn_context_parallelism"]
   # ep acts as cp in attention
-  if raw_keys["expert_shard_attention_option"] == "context":
+  if raw_keys.get("num_experts", 1) > 1 and raw_keys.get("expert_shard_attention_option") == "context":
     cp_size = cp_size * raw_keys["ici_expert_parallelism"] * raw_keys["dcn_expert_parallelism"]
   return cp_size
 

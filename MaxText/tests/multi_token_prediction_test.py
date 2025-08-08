@@ -132,6 +132,7 @@ class MTPBlockTestModel(nn.Module):
         num_embeddings=self.config.vocab_size,
         num_features=self.config.base_emb_dim,
         config=self.config,
+        mesh=self.mesh,
         name="shared_embedding",
     )
     self.decoder = Decoder(

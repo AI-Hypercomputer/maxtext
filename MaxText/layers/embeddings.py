@@ -20,6 +20,7 @@ from typing import Optional
 
 import jax
 from jax import lax
+from jax.sharding import Mesh
 import jax.numpy as jnp
 
 from flax import linen as nn
@@ -47,6 +48,7 @@ def embed_as_linen(
     num_embeddings: int,
     num_features: int,
     config: Config,
+    mesh: Mesh,
     cast_input_dtype: Optional[DType] = None,
     dtype: DType = jnp.float32,
     attend_dtype: Optional[DType] = None,
@@ -63,6 +65,7 @@ def embed_as_linen(
     num_embeddings: The number of embeddings.
     num_features: The number of feature dimensions for each embedding.
     config: The model configuration.
+    mesh: The device mesh.
     cast_input_dtype: The dtype to cast the input to, if any.
     dtype: The dtype of the embedding vectors.
     attend_dtype: The dtype for the `attend` method.
@@ -77,6 +80,7 @@ def embed_as_linen(
       num_embeddings=num_embeddings,
       num_features=num_features,
       config=config,
+      mesh=mesh,
       cast_input_dtype=cast_input_dtype,
       dtype=dtype,
       attend_dtype=attend_dtype,
@@ -94,6 +98,7 @@ class Embed(nnx.Module):
       num_embeddings: int,
       num_features: int,
       config: Config,
+      mesh: Mesh,
       cast_input_dtype: Optional[DType] = None,
       dtype: DType = jnp.float32,
       attend_dtype: Optional[DType] = None,
@@ -109,6 +114,7 @@ class Embed(nnx.Module):
       num_embeddings: The number of embeddings.
       num_features: The number of feature dimensions for each embedding.
       config: The model configuration.
+      mesh: The device mesh.
       cast_input_dtype: The dtype to cast the input to, if any.
       dtype: The dtype of the embedding vectors.
       attend_dtype: The dtype for the `attend` method.
@@ -118,6 +124,7 @@ class Embed(nnx.Module):
     self.num_embeddings = num_embeddings
     self.num_features = num_features
     self.config = config
+    self.mesh = mesh
     self.cast_input_dtype = cast_input_dtype
     self.dtype = dtype
     self.attend_dtype = attend_dtype
@@ -155,11 +162,20 @@ class Embed(nnx.Module):
 
     output_prefill_axis_names = ("activation_embed_and_logits_batch", "prefill_activation_length", "activation_embed")
     output_default_axis_names = ("activation_embed_and_logits_batch", "activation_length", "activation_embed")
+    
+    def get_sharding_spec(default_spec):
+        mesh = self.mesh
+        if mesh is not None:
+            # Filter out the 'data' axis, which is manually controlled by shard_map.
+            return tuple(axis for axis in default_spec if axis != 'data')
+        return default_spec
 
     if model_mode == MODEL_MODE_PREFILL:
-      output = nn.with_logical_constraint(output, output_prefill_axis_names)
+      spec = get_sharding_spec(output_prefill_axis_names)
+      output = nn.with_logical_constraint(output, spec)
     else:
-      output = nn.with_logical_constraint(output, output_default_axis_names)
+      spec = get_sharding_spec(output_default_axis_names)
+      output = nn.with_logical_constraint(output, spec)
     return output
 
   def attend(self, query: Array) -> Array:
@@ -197,7 +213,6 @@ def attend_on_embedding(query: Array, embedding_table: Array, attend_dtype: DTyp
   """
   embedding_table = _maybe_move_embedding_to_device(embedding_table, config)
   return jnp.dot(query, jnp.asarray(embedding_table, jnp.bfloat16).T, preferred_element_type=attend_dtype)
-
 
 def rotary_embedding_as_linen(
     *,

@@ -42,7 +42,6 @@ from MaxText import maxtext_utils
 from MaxText import optimizers
 from MaxText import max_utils
 from MaxText import pyconfig
-from MaxText.common_types import MODEL_MODE_TRAIN
 from MaxText.layers import models
 from MaxText.layers import quantizations
 from MaxText.utils import gcs_utils
@@ -82,12 +81,11 @@ def get_topology_mesh(config):
   topology_mesh = Mesh(topology_device_mesh, config.mesh_axes)
   return topology_mesh
 
-
 def get_shaped_inputs(topology_mesh, config):
   """Get shaped abstractions of inputs to train_step: state, batch and rng"""
   # Construct the model and optimizer to get shaped versions of the state
   quant = quantizations.configure_quantization(config)
-  model = Transformer(config, topology_mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
+  model = Transformer(config, topology_mesh, quant=quant)
   # The learning_rate_schedule is baked into the compiled object.
   learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
   tx = optimizers.get_optimizer(config, learning_rate_schedule)
@@ -97,14 +95,14 @@ def get_shaped_inputs(topology_mesh, config):
   shaped_rng = jax.ShapeDtypeStruct(example_rng.shape, example_rng.dtype)
 
   # Shaped state
-  abstract_state, _, state_mesh_shardings = maxtext_utils.get_abstract_state(model, tx, config, example_rng, topology_mesh)
+  abstract_state, _, state_mesh_shardings,params_shardings = maxtext_utils.get_abstract_state(model, tx, config, example_rng, topology_mesh)
 
   # Shaped batch
   shaped_batch = maxtext_utils.get_shaped_batch(config)
 
   shaped_train_args = (abstract_state, shaped_batch, shaped_rng)
   shaped_train_kwargs = {}
-  return shaped_train_args, shaped_train_kwargs, state_mesh_shardings, model
+  return shaped_train_args, shaped_train_kwargs, state_mesh_shardings, model,params_shardings
 
 
 def jit_and_compile(
@@ -156,14 +154,14 @@ def main(argv: Sequence[str]) -> None:
   max_utils.print_system_information()
 
   # Get shaped inputs
-  shaped_train_args, shaped_train_kwargs, state_mesh_shardings, model = get_shaped_inputs(topology_mesh, config)
+  shaped_train_args, shaped_train_kwargs, state_mesh_shardings, model,params_shardings = get_shaped_inputs(topology_mesh, config)
 
   # Get data sharding
   data_sharding = maxtext_utils.get_input_data_sharding(config, topology_mesh)
 
   # Get function to compile and shardings
   func_to_compile, in_shard, out_shard, static_argnums, donate_argnums = maxtext_utils.get_functional_train_with_signature(
-      train.train_step, data_sharding, state_mesh_shardings, model, config
+      train.train_step, data_sharding, state_mesh_shardings, model, config,params_shardings
   )
 
   # Compile

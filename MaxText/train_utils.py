@@ -18,7 +18,6 @@ limitations under the License.
 """ Utils that are only interesting for training in MaxText. """
 
 import jax
-from MaxText.common_types import MODEL_MODE_TRAIN
 from MaxText.layers import quantizations
 from MaxText.layers import models
 from MaxText import optimizers
@@ -28,9 +27,9 @@ from MaxText import maxtext_utils
 
 def get_transformer_model(config, mesh, quant):
   if config.model_fsdp_ag_once:
-    return models.ZeroOneTransformer(config, mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
+    return models.ZeroOneTransformer(config, mesh, quant=quant)
   else:
-    return models.Transformer(config, mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
+    return models.Transformer(config, mesh, quant=quant)
 
 
 def create_model(config, mesh):
@@ -90,10 +89,10 @@ def create_training_tools(config, model, mesh):
   return init_rng, checkpoint_manager, learning_rate_schedule, tx
 
 
-def jit_train_step(config, model, state, state_mesh_shardings, data_sharding, train_step):
+def jit_train_step(config,mesh, model, state, state_mesh_shardings, data_sharding, train_step,params_shardings):
   """Returns a JIT-compiled train step function, which is loaded from a file if specified in the config."""
   functional_train, in_shardings, out_shardings, static_argnums, donate_argnums = (
-      maxtext_utils.get_functional_train_with_signature(train_step, data_sharding, state_mesh_shardings, model, config)
+      maxtext_utils.get_functional_train_with_signature(train_step,mesh, data_sharding, state_mesh_shardings, model, config,params_shardings)
   )
 
   # Define the compilation of functional_train, either by loading the compiled version or wrapping a new one in a jit
@@ -134,11 +133,11 @@ def jit_eval_step(config, model, state_mesh_shardings, data_sharding, eval_step)
 
 
 def jit_train_and_eval_step(
-    config, model, mesh, state, state_mesh_shardings, train_step, eval_step=None, eval_data_iterator=None
+    config, model, mesh, state, state_mesh_shardings, train_step,params_shardings, eval_step=None, eval_data_iterator=None
 ):
   """Returns a JIT-compiled train and eval step function."""
   data_sharding = maxtext_utils.get_input_data_sharding(config, mesh)
-  p_train_step = jit_train_step(config, model, state, state_mesh_shardings, data_sharding, train_step)
+  p_train_step = jit_train_step(config,mesh, model, state, state_mesh_shardings, data_sharding, train_step,params_shardings)
   p_eval_step = None
   if eval_data_iterator:
     p_eval_step = jit_eval_step(config, model, state_mesh_shardings, data_sharding, eval_step)
