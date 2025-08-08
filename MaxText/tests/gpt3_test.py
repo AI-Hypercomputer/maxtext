@@ -85,6 +85,7 @@ class GPT3(unittest.TestCase):
 
   @pytest.mark.skip(reason="Numerical differences large on jax>0.5.0")
   @pytest.mark.tpu_only
+  @unittest.skip("Numerical differences large on jax>0.5.0")
   def test_logits_numerically(self):
     # ground truth values are calculated from paxml after loading above model_vars
     # note we expect all xents are the same except the padding one since:

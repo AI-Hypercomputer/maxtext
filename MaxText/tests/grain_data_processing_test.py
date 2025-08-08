@@ -19,6 +19,7 @@ import sys
 import os.path
 import tempfile
 import unittest
+from shutil import which
 
 import jax
 from jax.sharding import Mesh
@@ -29,13 +30,25 @@ from MaxText.input_pipeline import _grain_data_processing
 from MaxText.input_pipeline import input_pipeline_interface
 from MaxText.globals import PKG_DIR
 
+skipGcsFuseTests = False
+
+
+def skipping_gcs_fuse() -> bool:
+  global skipGcsFuseTests
+  if skipGcsFuseTests:
+    return skipGcsFuseTests
+  elif which("gcsfuse") is None or which("fusermount") is None:
+    skipGcsFuseTests = True
+  return skipGcsFuseTests
+
 
 class GrainArrayRecordProcessingTest(unittest.TestCase):
 
   @classmethod
   def setUpClass(cls):
     super().setUpClass()
-    mount_gcsfuse()
+    if not skipping_gcs_fuse():
+      mount_gcsfuse()
 
   def setUp(self):
     super().setUp()
@@ -62,8 +75,11 @@ class GrainArrayRecordProcessingTest(unittest.TestCase):
         self.config.max_target_length,
         self.mesh,
     )
+    if skipping_gcs_fuse():
+      return
     self.train_iter = _grain_data_processing.make_grain_train_iterator(self.config, self.mesh, self.process_indices)
 
+  @unittest.skipIf(skipping_gcs_fuse(), "Skipping GCS Fuse required tests")
   def test_train_ds(self):
     expected_shape = [jax.device_count(), self.config.max_target_length]
     # For training we pack multiple short examples in one example.
@@ -81,6 +97,7 @@ class GrainArrayRecordProcessingTest(unittest.TestCase):
         },
     )
 
+  @unittest.skipIf(skipping_gcs_fuse(), "Skipping GCS Fuse required tests")
   def test_batch_determinism(self):
     batch1 = next(self.train_iter)
     train_iter = _grain_data_processing.make_grain_train_iterator(self.config, self.mesh, self.process_indices)
@@ -92,6 +109,7 @@ class GrainArrayRecordProcessingTest(unittest.TestCase):
     self.assertTrue((batch1["inputs_position"] == batch2["inputs_position"]).all())
     self.assertTrue((batch1["targets_position"] == batch2["targets_position"]).all())
 
+  @unittest.skipIf(skipping_gcs_fuse(), "Skipping GCS Fuse required tests")
   def test_for_loop_repeatable(self):
     def get_first_batch(iterator):
       batch = None
@@ -146,7 +164,8 @@ class GrainParquetProcessingTest(unittest.TestCase):
   @classmethod
   def setUpClass(cls):
     super().setUpClass()
-    mount_gcsfuse()
+    if not skipping_gcs_fuse():
+      mount_gcsfuse()
 
   def setUp(self):
     super().setUp()
@@ -175,8 +194,10 @@ class GrainParquetProcessingTest(unittest.TestCase):
         self.config.max_target_length,
         self.mesh,
     )
-    self.train_iter = _grain_data_processing.make_grain_train_iterator(self.config, self.mesh, self.process_indices)
+    if not skipping_gcs_fuse():
+      self.train_iter = _grain_data_processing.make_grain_train_iterator(self.config, self.mesh, self.process_indices)
 
+  @unittest.skipIf(skipping_gcs_fuse(), "Skipping GCS Fuse required tests")
   def test_train_ds(self):
     expected_shape = [jax.device_count(), self.config.max_target_length]
     # For training we pack multiple short examples in one example.
@@ -194,6 +215,7 @@ class GrainParquetProcessingTest(unittest.TestCase):
         },
     )
 
+  @unittest.skipIf(skipping_gcs_fuse(), "Skipping GCS Fuse required tests")
   def test_batch_determinism(self):
     batch1 = next(self.train_iter)
     train_iter = _grain_data_processing.make_grain_train_iterator(self.config, self.mesh, self.process_indices)
@@ -205,6 +227,7 @@ class GrainParquetProcessingTest(unittest.TestCase):
     self.assertTrue((batch1["inputs_position"] == batch2["inputs_position"]).all())
     self.assertTrue((batch1["targets_position"] == batch2["targets_position"]).all())
 
+  @unittest.skipIf(skipping_gcs_fuse(), "Skipping GCS Fuse required tests")
   def test_for_loop_repeatable(self):
     def get_first_batch(iterator):
       batch = None

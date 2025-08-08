@@ -16,10 +16,26 @@
 
 import os
 import unittest
+from unittest import mock
+
+import google.auth
+import google.auth.exceptions
+
 from MaxText import pyconfig
 from MaxText.globals import PKG_DIR
-from unittest import mock
 from MaxText.utils.goodput_utils import create_goodput_recorder, maybe_monitor_goodput, maybe_record_goodput, GoodputEvent
+
+
+def has_bad_google_cred() -> bool:
+  try:
+    google.auth.default()
+    has_bad_google_cred.bad_google_cred = False
+  except google.auth.exceptions.DefaultCredentialsError:
+    has_bad_google_cred.bad_google_cred = True
+  return has_bad_google_cred.bad_google_cred
+
+
+has_bad_google_cred.bad_google_cred = False
 
 
 class GoodputUtilsTest(unittest.TestCase):
@@ -55,6 +71,7 @@ class GoodputUtilsTest(unittest.TestCase):
 
   @mock.patch("ml_goodput_measurement.monitoring.GoodputMonitor.start_step_deviation_uploader")
   @mock.patch("ml_goodput_measurement.monitoring.GoodputMonitor.start_goodput_uploader")
+  @unittest.skipIf(has_bad_google_cred(), "Skipping impending test failure due to bad Google Credentials")
   def test_monitor_goodput(self, mock_start_goodput_uploader, mock_start_step_deviation_uploader):
     mock_start_goodput_uploader.return_value = mock.MagicMock()
     mock_start_step_deviation_uploader.return_value = mock.MagicMock()
