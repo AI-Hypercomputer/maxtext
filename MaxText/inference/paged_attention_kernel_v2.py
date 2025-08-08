@@ -109,7 +109,7 @@ def ref_ragged_paged_attention(
   return jnp.concatenate(outputs, axis=0)
 
 
-# Expect to run these checkes during runtime.
+# Expect to run these checks during runtime.
 def validate_inputs_on_runtime(
     q: jax.Array,  # [max_num_batched_tokens, num_q_heads, head_dim]
     k_pages: jax.Array,  # [total_num_pages, page_size, num_kv_heads, head_dim]
@@ -474,7 +474,7 @@ def ragged_paged_attention_kernel(
       v_ref = cur_async_copy_v.wait().reshape(kv_to_load_shape)
       for kv_head_idx in range(num_kv_heads_per_blk):
         q_head_idx = kv_head_idx * num_q_heads_per_kv_head
-        # TODO(jevinjiang): extra handlig for packed type that can start at
+        # TODO(jevinjiang): extra handling for packed type that can start at
         # unaligned position!
         q = fold_on_2nd_minor(q_ref[:, q_head_idx : q_head_idx + num_q_heads_per_kv_head, :])
         k = strided_load_kv(k_ref, kv_head_idx, num_kv_heads_per_blk)
