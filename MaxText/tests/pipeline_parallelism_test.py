@@ -59,7 +59,8 @@ class PipelineParallelismTest(unittest.TestCase):
     devices_array = maxtext_utils.create_device_mesh(config)
     mesh = Mesh(devices_array, config.mesh_axes)
     if single_pipeline_stage_class is None:
-      single_pipeline_stage = simple_layer.SimpleDecoderLayer(config=config, mesh=mesh)
+      #TODO: change this to use SimpleDecoderLayer after migration to nnx is complete
+      single_pipeline_stage = simple_layer.simple_decoder_layer(config=config, mesh=mesh)
     else:
       single_pipeline_stage = single_pipeline_stage_class(config=config, mesh=mesh)
 
@@ -87,7 +88,8 @@ class PipelineParallelismTest(unittest.TestCase):
     deterministic = True
     model_mode = MODEL_MODE_TRAIN
     # We use a simpler single matmul decoder layer for fast compilation in these tests.
-    single_pipeline_stage = simple_layer.SimpleDecoderLayer(config=config, mesh=mesh)
+    # TODO: change this to use SimpleDecoderLayer after migration to nnx is complete
+    single_pipeline_stage = simple_layer.simple_decoder_layer(config=config, mesh=mesh)
     my_pipeline = pipeline.Pipeline(config=config, layers=single_pipeline_stage, mesh=mesh)
     init_pipeline_params = my_pipeline.init(
         jax.random.PRNGKey(0), inputs, inputs_position, inputs_segmentation, deterministic, model_mode
