@@ -99,13 +99,12 @@ class BaseDeepSeekLayer(nnx.Module):
       mlp_block: nnx.Module|nn.Module,
       quant: Optional[quantizations.AqtQuantization] = None,
       rngs: Optional[nnx.Rngs] = None,
-      **kwargs: Any
   ) -> None:
     super().__init__()
     self.config = config
     self.mesh = mesh
     self.quant = quant
-    self.rngs = rngs if rngs is not None else kwargs.get("rngs", nnx.Rngs(0))
+    self.rngs = rngs if rngs is not None else nnx.Rngs(0)
     self.mlp_block = mlp_block
     self.inputs_shape = [
       self.config.per_device_batch_size,
@@ -217,10 +216,9 @@ class DeepSeekDenseLayer(BaseDeepSeekLayer):
       mesh: Mesh,
       quant: Optional[quantizations.AqtQuantization] = None,
       rngs: Optional[nnx.Rngs] = None,
-      **kwargs: Any
   ) -> None:
     
-    safe_rngs: nnx.Rngs = rngs if rngs is not None else kwargs.get("rngs", nnx.Rngs(0))
+    safe_rngs: nnx.Rngs = rngs if rngs is not None else nnx.Rngs(0)
 
     mlp_block = linears.MlpBlock(
       in_features=config.base_emb_dim,
@@ -233,7 +231,7 @@ class DeepSeekDenseLayer(BaseDeepSeekLayer):
       quant=quant,
       rngs=safe_rngs
     )
-    super().__init__(config=config, mesh=mesh,mlp_block=mlp_block, quant=quant, rngs=safe_rngs, **kwargs)
+    super().__init__(config=config, mesh=mesh,mlp_block=mlp_block, quant=quant, rngs=safe_rngs)
 
 
 class DeepSeekDenseLayerWrapper(nn.Module):
@@ -268,7 +266,6 @@ class DeepSeekMoELayer(BaseDeepSeekLayer):
       mesh: Mesh,
       quant: Optional[quantizations.AqtQuantization] = None,
       rngs: Optional[nnx.Rngs] = None,
-      **kwargs: Any
   ) -> None:
     mlp_block = moe.RoutedAndSharedMoE(
         name="DeepSeekMoeBlock_0",
@@ -280,7 +277,7 @@ class DeepSeekMoELayer(BaseDeepSeekLayer):
         weight_dtype=config.weight_dtype,
         quant=quant,
     )
-    super().__init__(config=config, mesh=mesh,mlp_block=mlp_block, quant=quant, rngs=rngs, **kwargs)
+    super().__init__(config=config, mesh=mesh,mlp_block=mlp_block, quant=quant, rngs=rngs)
 
 class DeepSeekMoELayerWrapper(nn.Module):
   """A Linen wrapper for the NNX DeepSeekMoELayer"""
