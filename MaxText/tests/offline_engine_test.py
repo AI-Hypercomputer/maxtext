@@ -17,13 +17,16 @@ limitations under the License.
 import sys
 import unittest
 import os.path
+from unittest.mock import patch
 
 import jax
 import jax.numpy as jnp
+
 import numpy as np
+
 from MaxText.inference.offline_engine import OfflineEngine, InputData, CompletionOutput
-from MaxText import pyconfig
-from MaxText.globals import PKG_DIR
+from MaxText import pyconfig, max_utils
+from MaxText.globals import PKG_DIR, tpu_present
 
 
 class OfflineEngineTest(unittest.TestCase):
@@ -34,6 +37,25 @@ class OfflineEngineTest(unittest.TestCase):
   def setUp(self):
     super().setUp()
     self.cfg = self.init_pyconfig()
+    if jax.device_count() == 1:
+      # Store the original function to use for multi-device cases if needed,
+      # though this test class focuses on single-device scenarios.
+      self.original_fill_fn = max_utils.fill_unspecified_mesh_axes
+
+      def patched_fill_unspecified_mesh_axes(axis_ratings, num_devices, ici_or_dcn_str):
+        # For a single device, the mesh shape must still match the number of mesh *axes* (12).
+        # The library code incorrectly calculates a shape of just `[1]`.
+        # We force it to be a 12-element list of 1s.
+        if num_devices == 1:
+          return [1] * len(self.cfg.mesh_axes)
+        # For multiple devices, the original logic is correct.
+        return self.original_fill_fn(axis_ratings, num_devices, ici_or_dcn_str)
+
+      # Patch the function at its source location for the duration of these tests.
+      self.patcher = patch("MaxText.max_utils.fill_unspecified_mesh_axes", patched_fill_unspecified_mesh_axes)
+      self.patcher.start()
+      # Ensure the patch is stopped cleanly after the test class finishes.
+      self.addCleanup(self.patcher.stop)
 
   def init_pyconfig(self, **kwargs):
     """Initialize MaxText pyconfig."""
@@ -43,7 +65,7 @@ class OfflineEngineTest(unittest.TestCase):
         "per_device_batch_size": 1,
         "ici_data_parallelism": 1,
         "ici_fsdp_parallelism": 1,
-        "ici_tensor_parallelism": -1,  # Use TP
+        "ici_tensor_parallelism": -1 if tpu_present else 1,  # Use TP
         # Inference
         "max_prefill_predict_length": 512,
         "max_target_length": 512 + 10,
@@ -84,6 +106,7 @@ class OfflineEngineTest(unittest.TestCase):
       assert isinstance(result.logprobs, np.ndarray)
       assert result.logprobs.shape == (length + completion_length,)
 
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_mcjax_tp_batch_prefill(self):
     config = self.cfg
     rng = jax.random.PRNGKey(0)

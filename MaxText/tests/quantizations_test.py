@@ -31,7 +31,7 @@ from flax import linen as nn
 
 from aqt.jax.v2 import aqt_tensor
 
-from MaxText.globals import PKG_DIR
+from MaxText.globals import PKG_DIR, tpu_present
 from MaxText import pyconfig
 from MaxText.layers import quantizations
 from MaxText import maxtext_utils
@@ -111,6 +111,7 @@ class QuantizationTest(unittest.TestCase):
       self.assertNotEqual(quant, None)
 
   @pytest.mark.tpu_only  # b/421002974
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_aqt_quantization(self):
     # Without quantization
     inputs, res_einsum, res_dg = _apply()
@@ -279,8 +280,7 @@ class QuantTest(unittest.TestCase):
     return all(jnp.abs(y - x).mean() / jnp.abs(x).mean() < tolerance for x, y in zip(leaves_a, leaves_b))
 
   def quantization_config(self, quant):
-    """ Run forward pass and backward pass for quantized model and compare with base model.
-    """
+    """Run forward pass and backward pass for quantized model and compare with base model."""
     cfg = self.init_pyconfig(quantization=quant)
     model = train_utils.create_model(self.cfg, self.mesh)
     qt_model = train_utils.create_model(cfg, self.mesh)
@@ -327,14 +327,17 @@ class QuantTest(unittest.TestCase):
     self.assertTrue(self.pytree_allclose(grads_base, grads_quant, tolerance=5e-1))
 
   @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_int8_quantization(self):
     self.quantization_config("int8")
 
   @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_fp8_quantization(self):
     self.quantization_config("fp8")
 
   @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_fp8_full_quantization(self):
     self.quantization_config("fp8_full")
 

@@ -14,6 +14,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
+import unittest
+
 """Integration test for pedagogical_examples/shmap_collective_matmul.py"""
 
 import os.path
@@ -32,6 +34,7 @@ sys.path.append(os.path.join(os.path.dirname(PKG_DIR), "pedagogical_examples"))
 @pytest.mark.skip(reason="Enable when b/415022795 is fixed")
 @pytest.mark.integration_test
 @pytest.mark.tpu_only
+@unittest.skip("Enable when b/415022795 is fixed")
 def test_shmap_collective_matmul_example():
   """Validate Pedagogical Example, Shmap_collective_matmul."""
   # Uncomment main() assertion when b/415022795 is fixed
