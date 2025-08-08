@@ -204,7 +204,9 @@ class MetricLogger:
   def record_eval_metrics(self, step, metrics=None, eval_step_count=None):
     """Records eval metrics and writes the metrics to GCS and/or to TensorBoard."""
     if metrics:
-      self.cumulative_eval_metrics["scalar"]["eval/total_loss"] += float(metrics["scalar"].get("evaluation/total_loss", 0.0))
+      self.cumulative_eval_metrics["scalar"]["eval/total_loss"] += float(
+          metrics["scalar"].get("evaluation/total_loss", 0.0)
+      )
       self.cumulative_eval_metrics["scalar"]["eval/total_weights"] += float(
           metrics["scalar"].get("evaluation/total_weights", 0.0)
       )

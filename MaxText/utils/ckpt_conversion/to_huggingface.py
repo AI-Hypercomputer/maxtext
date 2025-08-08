@@ -53,7 +53,7 @@ Example Usage:
 
 import jax
 import os
-from typing import Sequence, Dict, Any
+from typing import Sequence, Any
 
 from transformers import AutoTokenizer, AutoProcessor
 
@@ -153,7 +153,7 @@ def main(argv: Sequence[str]) -> None:
   hook_fn_map = mappings["hook_fn_mapping"]
 
   # 4. Transform Weights
-  transformed_hf_weights: Dict[str, Any] = {}
+  transformed_hf_weights: dict[str, Any] = {}
 
   # MaxText `engine.load_params()` returns `state.params` (a FrozenDict).
   # The actual weights are typically under `state.params['params']`.

@@ -126,7 +126,9 @@ class ContextParallelismTest(unittest.TestCase):
       actual_data = shard.data
 
       self.assertIn(
-          actual_device, expected_map, f"Shard found on device {actual_device} which was not in the mesh's expected devices."
+          actual_device,
+          expected_map,
+          f"Shard found on device {actual_device} which was not in the mesh's expected devices.",
       )
 
       expected_props = expected_map[actual_device]

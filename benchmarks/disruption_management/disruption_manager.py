@@ -15,7 +15,6 @@ from collections import defaultdict
 import os
 import sys
 import threading
-from typing import List
 
 parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.append(parent_dir)
@@ -33,7 +32,7 @@ class DisruptionManager:
 
   def __init__(self) -> None:
     """Initializes the DisruptionManager."""
-    self.threads_to_monitor: defaultdict[str, List[threading.Thread]] = (
+    self.threads_to_monitor: defaultdict[str, list[threading.Thread]] = (
         defaultdict(list)
     )
 
@@ -41,7 +40,7 @@ class DisruptionManager:
       self,
       workload_name: str,
       cluster_config: XpkClusterConfig,
-      disruption_configs: List[DisruptionConfig],
+      disruption_configs: list[DisruptionConfig],
   ) -> None:
     """Adds a workload and starts monitoring for disruptions & recovery.
 
