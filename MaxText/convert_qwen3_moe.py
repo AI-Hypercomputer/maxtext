@@ -19,7 +19,7 @@ required for generating a MaxText checkpoint compatible with scanned model layer
 Example cmd:
 
 python3 -m MaxText.convert_qwen3_moe_ckpt --base_model_path <path/to/hf/ckpt> \
-    --maxtext_model_path <path/to/save/new/maxtext/ckpt> --model_size qwen3-moe
+    --maxtext_model_path gs://<gcs_bucket>/<path/to/save/ckpt> --model_size qwen3-moe
 """
 
 import argparse
@@ -196,16 +196,12 @@ def main(args):
     if args.model_size not in MODEL_PARAMS_DICT:
         raise ValueError(f"Model size '{args.model_size}' not found in MODEL_PARAMS_DICT.")
     
-    # Convert checkpoint path to absolute path to satisfy Orbax's requirement.
-    maxtext_model_path = os.path.abspath(args.maxtext_model_path)
-    os.makedirs(maxtext_model_path, exist_ok=True)
-
     model_params = MODEL_PARAMS_DICT[args.model_size]
     max_logging.log(f"Starting conversion for Qwen3-MoE model size: {args.model_size}")
     jax_weights = convert_hf_to_maxtext(args.base_model_path, model_params)
-    max_logging.log(f"Conversion complete. Saving MaxText checkpoint to {maxtext_model_path}")
+    max_logging.log(f"Conversion complete. Saving MaxText checkpoint to {args.maxtext_model_path}")
     llama_or_mistral_ckpt.save_weights_to_checkpoint(
-        maxtext_model_path, jax_weights, args.simulated_cpu_devices_count, args.use_ocdbt, args.use_zarr3
+        args.maxtext_model_path, jax_weights, args.simulated_cpu_devices_count, args.use_ocdbt, args.use_zarr3
     )
     max_logging.log("Checkpoint saved successfully.")
 
@@ -213,7 +209,7 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Convert Qwen3-MoE HF weights to MaxText.")
     parser.add_argument("--base_model_path", type=str, required=True, help="Path to the HF Qwen3-MoE checkpoint files.")
-    parser.add_argument("--maxtext_model_path", type=str, required=True, help="Path to save the MaxText checkpoint.")
+    parser.add_argument("--maxtext_model_path", type=str, required=True, help="Path to save the MaxText checkpoint (local or GCS).")
     parser.add_argument("--model_size", type=str, required=True, choices=MODEL_PARAMS_DICT.keys(), help="The model size to convert.")
     parser.add_argument("--simulated_cpu_devices_count", type=int, default=16, help="Number of simulated CPU devices for saving.")
     parser.add_argument("--use-ocdbt", type=str2bool, default=True, help="Use OCDBT format for saving.")
@@ -221,4 +217,3 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
     main(args)
-
