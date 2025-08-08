@@ -247,13 +247,26 @@ class Decoder(nn.Module):
       remat_policy = self.get_remat_policy()
 
       # Scan
+      use_remat = True
+      # Apply remat policy to layer
+      if use_remat:
+        rematted_pipeline = nn.remat(
+            pipeline.Pipeline,
+            prevent_cse=True,
+            policy=remat_policy,
+            static_argnums=(4, 5, 6),  # Deterministic and model mode are static arguments.
+        )
+      else:
+        rematted_pipeline = pipeline.Pipeline
+
+      
       cfg=self.config
       in_axes_tuple = (nn.broadcast,) * 5
       initializing = self.is_mutable_collection("params")
       params_spec = self.config.param_scan_axis if initializing else ScanIn(cfg.param_scan_axis)
       cache_spec = 0
       scan_fn = nn.scan(
-          pipeline.Pipeline, #pipeline_module,
+          rematted_pipeline, #pipeline_module,
           variable_axes={
               "params": params_spec,
               "cache": cache_spec,
