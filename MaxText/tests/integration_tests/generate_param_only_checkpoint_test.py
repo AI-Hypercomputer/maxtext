@@ -22,7 +22,7 @@ from datetime import datetime
 import os
 import pytest
 
-from MaxText.globals import PKG_DIR
+from MaxText.globals import PKG_DIR, tpu_present, gpu_present
 from MaxText.train import main as train_main
 from MaxText.decode import main as decode_main
 from MaxText.generate_param_only_checkpoint import main as generate_param_only_ckpt_main
@@ -94,6 +94,7 @@ def run_generate_param_only_checkpoint(hardware, attention_type, quantization):
 @pytest.mark.integration_test
 @pytest.mark.tpu_only
 @pytest.mark.parametrize("quantization", [(""), ("int8")])
+@pytest.mark.skipif(not tpu_present, reason="TPU only test")
 def test_autoselected_attention(quantization, capsys):
   run_generate_param_only_checkpoint("tpu", "autoselected", quantization)
   captured = capsys.readouterr()
@@ -104,6 +105,7 @@ def test_autoselected_attention(quantization, capsys):
 @pytest.mark.integration_test
 @pytest.mark.gpu_only
 @pytest.mark.parametrize("quantization", [(""), ("int8")])
+@pytest.mark.skipif(not gpu_present, reason="GPU only test")
 def test_with_dot_product(quantization, capsys):
   os.environ["NVTE_FUSED_ATTN"] = "1"  # Enable fused attention
   run_generate_param_only_checkpoint("gpu", "dot_product", quantization)

@@ -31,8 +31,10 @@ from datetime import datetime
 import json
 import os
 import pytest
+
 from MaxText.train import main as train_main
 from MaxText.tests.integration_tests.checkpointing_test import get_checkpointing_command
+from MaxText.globals import tpu_present, gpu_present
 
 
 def check_start_step(metrics_file, start_step_target):
@@ -83,12 +85,14 @@ def run_checkpoint_compatibility(hardware, attention_type):
 
 @pytest.mark.integration_test
 @pytest.mark.tpu_only
+@pytest.mark.skipif(not tpu_present, reason="TPU only test")
 def test_autoselected_attention():
   run_checkpoint_compatibility("tpu", "autoselected")
 
 
 @pytest.mark.integration_test
 @pytest.mark.gpu_only
+@pytest.mark.skipif(not gpu_present, reason="GPU only test")
 def test_with_dot_product():
   os.environ["NVTE_FUSED_ATTN"] = "1"  # Enable fused attention
   run_checkpoint_compatibility("gpu", "dot_product")

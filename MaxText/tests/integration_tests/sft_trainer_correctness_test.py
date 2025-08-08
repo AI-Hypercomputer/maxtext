@@ -170,6 +170,7 @@ class SFTTrainerCorrectnessTest(unittest.TestCase):
   @pytest.mark.skip(reason="Logit output test fragile, failing on jax upgrade to 0.6.2 b/425997645")
   @pytest.mark.integration_test
   @pytest.mark.tpu_only  # ATTENTION: Only run on TPU V4-8
+  @unittest.skip("Logit output test fragile, failing on jax upgrade to 0.6.2 b/425997645")
   def test_sft_trainer_correctness(self):
     config = initialize_config()
     golden_data = get_golden_data(config.model_name)
