@@ -341,7 +341,7 @@ class Decoder(nn.Module):
       case DecoderBlockType.DEFAULT:
         return [DecoderLayer]
       case DecoderBlockType.LLAMA2:
-        return [llama2.LlamaDecoderLayer]
+        return [llama2.LlamaDecoderLayerToLinen]
       case DecoderBlockType.MISTRAL:
         # TODO(ranran): update to Mistral with sliding window attention
         return [mistral.MistralDecoderLayer]
@@ -643,7 +643,7 @@ class Decoder(nn.Module):
               "dense_layers",
               mesh,
               in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
-              model_mode=model_mode,
+              model_mode=self.model_mode,
           )(y, *broadcast_args)
           if num_moe_layers_outside_pp > 0:
             y, _ = self.scan_decoder_layers(
@@ -653,7 +653,7 @@ class Decoder(nn.Module):
                 "moe_layers",
                 mesh,
                 in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
-                model_mode=model_mode,
+                model_mode=self.model_mode,
             )(y, *broadcast_args)
         y = self.pipeline_module(y, *broadcast_args, partition_spec=partition_spec)
       else:  # Not DeepSeek
@@ -669,7 +669,7 @@ class Decoder(nn.Module):
                 "layers_outside_pipeline",
                 mesh,
                 in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
-                model_mode=model_mode,
+                model_mode=self.model_mode,
             )(y, *broadcast_args)
     else:
       if cfg.scan_layers:
@@ -689,7 +689,7 @@ class Decoder(nn.Module):
               "dense_layers",
               mesh,
               in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
-              model_mode=model_mode,
+              model_mode=self.model_mode,
           )(y, *broadcast_args)
           moe_layer = RemattedBlockLayers[1]
           moe_layer.__call__ = functools.partial(moe_layer.__call__, **layer_call_kwargs)
@@ -701,7 +701,7 @@ class Decoder(nn.Module):
               "moe_layers",
               mesh,
               in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
-              model_mode=model_mode,
+              model_mode=self.model_mode,
           )(y, *broadcast_args)
         elif cfg.decoder_block == DecoderBlockType.GEMMA3:
           y = self._apply_gemma3_scanned_blocks(
@@ -732,7 +732,7 @@ class Decoder(nn.Module):
               "layers",
               mesh,
               in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
-              model_mode=model_mode,
+              model_mode=self.model_mode,
               **layer_kwargs,
           )(y, *broadcast_args)
       else:
@@ -841,7 +841,7 @@ class Decoder(nn.Module):
           "layers",
           mesh,
           in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
-          model_mode=model_mode,
+          model_mode=self.model_mode,
           **layer_kwargs,
       )(y, *broadcast_args, **layer_call_kwargs)
 
