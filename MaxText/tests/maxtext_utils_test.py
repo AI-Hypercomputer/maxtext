@@ -38,7 +38,6 @@ import optax
 from MaxText import max_utils
 from MaxText import maxtext_utils
 from MaxText import pyconfig
-from MaxText.common_types import MODEL_MODE_TRAIN
 from MaxText.globals import PKG_DIR
 from MaxText.layers import models
 from MaxText.layers import quantizations
@@ -217,7 +216,7 @@ class MaxUtilsInitTransformerState(unittest.TestCase):
     devices_array = maxtext_utils.create_device_mesh(self.config)
     self.mesh = Mesh(devices_array, self.config.mesh_axes)
     quant = quantizations.configure_quantization(self.config)
-    self.model = Transformer(self.config, mesh=self.mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
+    self.model = Transformer(self.config, mesh=self.mesh, quant=quant)
 
   def test_setup_decode_state(self):
     rng = random.PRNGKey(0)

@@ -47,7 +47,6 @@ class LlamaDecoderLayer(nn.Module):
 
   config: Config
   mesh: Mesh
-  model_mode: str
   quant: Optional[Quant] = None
 
   @nn.compact
