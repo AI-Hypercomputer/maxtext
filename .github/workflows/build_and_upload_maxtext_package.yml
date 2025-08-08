@@ -1,0 +1,71 @@
+# Copyright 2024 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# This file defines a module for building and uploading an image used in UnitTests.yml
+
+name: Build and Upload MaxText Package
+
+on:
+  workflow_call:
+    inputs:
+      device_type:
+        required: true
+        type: string
+      device_name:
+        required: true
+        type: string
+      cloud_runner:
+        required: false
+        type: string
+
+jobs:
+  build_and_upload:
+    name: Build and upload maxtext package (${{ inputs.device_name }})
+    runs-on: ${{ inputs.cloud_runner != '' && inputs.cloud_runner || fromJson(format('["self-hosted", "{0}", "{1}"]', inputs.device_type, inputs.device_name)) }}
+    container: google/cloud-sdk:524.0.0
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Mark git repository as safe
+        run: git config --global --add safe.directory ${GITHUB_WORKSPACE}
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.12'
+      - name: Install build tools
+        run: |
+          python -m pip install --upgrade pip build uv
+      # seed-env is under developement to adopt maxtext package changes. Once finished, seed-env will release a compatible version to pypi.
+      # After that, we can install seed-env in the above step and remove the below step. The workflow will be faster as there will be no
+      # need to build seed-env from source.
+      - name: Install seed-env
+        run: |
+          temp_dir=$(mktemp -d)
+          git clone --depth 1 https://github.com/google-ml-infra/actions.git $temp_dir
+          pushd $temp_dir/python_seed_env
+          python -m uv pip install .
+          popd
+      - name: Build the wheel
+        run: |
+          rm pyproject.toml # Remove maxtext's pyproject.toml at main. It is not working now.
+          # seed-env generates new pyproject.toml for maxtext. I recommend to move this step to another workflow and have the generated toml
+          # file and the req lock files commited to the maxtext's repo. This can let the users see the generated files and easily check the
+          # deps and the versions for testing back time. Also reduce time in this workflow. seed-env only needs to run in the presubmit if a PR
+          # changes the maxtext's requirements.txt or modified the source package structure (won't be needed if maxtext uses src-layout).
+          seed-env --local-requirements=requirements_with_lower_bounds.txt --host-name=MaxText --seed-commit=779c6aefcac3ff0149b28e183770cc1da0879c84 --output-dir=. --build-pypi-package
+      - name: Get wheel filename
+        id: get_wheel_filename
+        # Finds the .whl file in dist/ and sets it as an output
+        run: echo "name=$(basename dist/*.whl)" >> $GITHUB_OUTPUT
+      - name: Upload Python wheel to GCS
+        run: gcloud storage cp dist/*.whl gs://seed-env-dev/maxtext/${{ github.sha }}/
