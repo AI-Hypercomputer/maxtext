@@ -17,7 +17,7 @@
 import functools
 import json
 import re
-from typing import Tuple, Sequence
+from typing import Sequence
 from dataclasses import dataclass
 
 from aqt.jax.v2 import config as aqt_config
@@ -52,7 +52,7 @@ _TILE_SIZE = "tile_size"  # Tile size for subchannel
 class Quantization:
   """Base class for quantization configurations"""
 
-  def dot_general_cls(self, mesh_axes: Tuple[str, ...] = ()):
+  def dot_general_cls(self, mesh_axes: tuple[str, ...] = ()):
     """Placeholder for dot_general implementation in subclasses."""
 
   def einsum(self, dtype: DType = jnp.float32):
@@ -80,7 +80,7 @@ def _rhs_axis_metadata_wrapper(
     x: jnp.ndarray,
     tile_map,
     no_sharding_axis: Sequence[int],
-    mesh_axes: Tuple[str, ...],
+    mesh_axes: tuple[str, ...],
     is_tiled: bool,
     replicate_scale: bool = False,
 ):
@@ -139,7 +139,7 @@ class AqtQuantization:
     return quant_dg, is_tiled, tiling_fn
 
   def _get_rhs_axis_metadata_wrapper(
-      self, mesh_axes: Tuple[str, ...] = (), is_tiled: bool = False, replicate_scale: bool = False
+      self, mesh_axes: tuple[str, ...] = (), is_tiled: bool = False, replicate_scale: bool = False
   ):
     if self.quant_mode == aqt_flax.QuantMode.CONVERT:
       return None
@@ -147,7 +147,7 @@ class AqtQuantization:
         _rhs_axis_metadata_wrapper, mesh_axes=mesh_axes, is_tiled=is_tiled, replicate_scale=replicate_scale
     )
 
-  def dot_general_cls(self, mesh_axes: Tuple[str, ...] = ()):
+  def dot_general_cls(self, mesh_axes: tuple[str, ...] = ()):
     """Returns dot_general configured with aqt params."""
     if isinstance(self.quant_dg, dict):
       quant_dg, is_tiled, tiling_fn = self._get_mixed_precision_cfg()
@@ -170,7 +170,7 @@ class AqtQuantization:
     )
     return aqt_dg_cls
 
-  def einsum(self, mesh_axes: Tuple[str, ...] = ()):
+  def einsum(self, mesh_axes: tuple[str, ...] = ()):
     """Returns einsum configured with aqt params."""
     if isinstance(self.quant_dg, dict):
       quant_dg, is_tiled, tiling_fn = self._get_mixed_precision_cfg()
@@ -200,7 +200,7 @@ class Fp8Quantization(Quantization):
 
   quant_mode = "train"
 
-  def dot_general_cls(self, mesh_axes: Tuple[str, ...] = ()):
+  def dot_general_cls(self, mesh_axes: tuple[str, ...] = ()):
     """Returns dot_general configured with aqt params."""
     return nn.Fp8DirectDotGeneralOp
 
@@ -292,7 +292,7 @@ class NANOOFp8Quantization(Quantization):
 
   quant_mode = "train"
 
-  def dot_general_cls(self, mesh_axes: Tuple[str, ...] = ()):
+  def dot_general_cls(self, mesh_axes: tuple[str, ...] = ()):
     """Returns dot_general configured with aqt params."""
     return nn.NANOOFp8DotGeneralOp
 
@@ -410,7 +410,7 @@ def _build_per_tensor_config(
   return aqt_dg
 
 
-# fp8 training recipe of dynmaic scaling with configurable constant_bound_config for static scaling option
+# fp8 training recipe of dynamic scaling with configurable constant_bound_config for static scaling option
 def _get_aqt_fp8_default_config(config):
   """Get aqt for 8-bit floating point quantization configuration."""
   aqt_dg = aqt_config.config_v4(
@@ -490,7 +490,7 @@ def _get_mixed_precision_quant_config(mixed_precision_config):
   ret_config = {}
   default_mp_config = _get_default_mp_config(default=mixed_precision_config.get(DEFAULT, None))
   for layer_name_re, layer_quantization_config in mixed_precision_config.items():
-    # Make a copy of default_mp_config to avoid updaing original dict
+    # Make a copy of default_mp_config to avoid updating original dict
     quant_config = default_mp_config.copy()
     # print(f"Mixed precision config: processing
     # {layer_name_re} - {layer_quantization_config}, default config - {quant_config}")
@@ -617,43 +617,43 @@ def get_basic_config(config, dtype):
   rules = [
       # Dot-product attention is not quantized for now.
       qwix.QtRule(
-        module_path='decoder/.*layers.*/self_attention/attention_op',
-        weight_qtype=None,
-        act_qtype=None,
+          module_path="decoder/.*layers.*/self_attention/attention_op",
+          weight_qtype=None,
+          act_qtype=None,
       ),
       qwix.QtRule(
-        module_path='decoder/.*layers.*',  # Apply to all modules
-        weight_qtype=dtype,
-        act_qtype=dtype,
-        bwd_weight_grad_tile_size = 1 / config.quantization_local_shard_count
-      )
-    ]
+          module_path="decoder/.*layers.*",  # Apply to all modules
+          weight_qtype=dtype,
+          act_qtype=dtype,
+          bwd_weight_grad_tile_size=1 / config.quantization_local_shard_count,
+      ),
+  ]
   return rules
 
 
 def get_fp8_config(config):
-  """ fp8 config rules with per-tensor calibration.
-  """
+  """fp8 config rules with per-tensor calibration."""
   rules = [
       # Dot-product attention is not quantized for now.
       qwix.QtRule(
-        module_path='decoder/.*layers.*/self_attention/attention_op',
-        weight_qtype=None,
-        act_qtype=None,
+          module_path="decoder/.*layers.*/self_attention/attention_op",
+          weight_qtype=None,
+          act_qtype=None,
       ),
       qwix.QtRule(
-        module_path='decoder/.*layers.*',  # Apply to all modules
-        weight_qtype=jnp.float8_e4m3fn,
-        act_qtype=jnp.float8_e4m3fn,
-        bwd_qtype=jnp.float8_e5m2,
-        bwd_use_original_residuals=True,
-        disable_channelwise_axes=True, # per_tensor calibration
-        weight_calibration_method = config.quantization_calibration_method,
-        act_calibration_method = config.quantization_calibration_method,
-        bwd_calibration_method = config.quantization_calibration_method,
-      )
-    ]
+          module_path="decoder/.*layers.*",  # Apply to all modules
+          weight_qtype=jnp.float8_e4m3fn,
+          act_qtype=jnp.float8_e4m3fn,
+          bwd_qtype=jnp.float8_e5m2,
+          bwd_use_original_residuals=True,
+          disable_channelwise_axes=True,  # per_tensor calibration
+          weight_calibration_method=config.quantization_calibration_method,
+          act_calibration_method=config.quantization_calibration_method,
+          bwd_calibration_method=config.quantization_calibration_method,
+      ),
+  ]
   return rules
+
 
 def get_qt_provider(config):
   """Get quantization rules based on the config."""

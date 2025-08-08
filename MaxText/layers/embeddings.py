@@ -16,7 +16,6 @@
 
 import dataclasses
 import math
-from typing import Optional
 
 import jax
 from jax import lax
@@ -47,9 +46,9 @@ def embed_as_linen(
     num_embeddings: int,
     num_features: int,
     config: Config,
-    cast_input_dtype: Optional[DType] = None,
+    cast_input_dtype: None | DType = None,
     dtype: DType = jnp.float32,
-    attend_dtype: Optional[DType] = None,
+    attend_dtype: None | DType = None,
     embedding_init: Initializer = default_embed_init,
     name: str | None = None,
 ):
@@ -94,9 +93,9 @@ class Embed(nnx.Module):
       num_embeddings: int,
       num_features: int,
       config: Config,
-      cast_input_dtype: Optional[DType] = None,
+      cast_input_dtype: None | DType = None,
       dtype: DType = jnp.float32,
-      attend_dtype: Optional[DType] = None,
+      attend_dtype: None | DType = None,
       embedding_init: Initializer = default_embed_init,
       *,
       # Not used in Embed but passed in by nnx.bridge.to_linen.
@@ -126,7 +125,6 @@ class Embed(nnx.Module):
         embedding_init(rngs.params(), (self.num_embeddings, self.num_features), self.config.weight_dtype),
         sharding=("vocab", "embed"),
     )
-
 
   def __call__(self, inputs: Array, model_mode: str = MODEL_MODE_TRAIN) -> Array:
     """Embeds the inputs along the last dimension.
@@ -277,7 +275,7 @@ class RotaryEmbedding(nnx.Module):
   def __call__(
       self,  # pytype: disable=signature-mismatch  # overriding-parameter-count-checks
       inputs: jax.Array,
-      position: Optional[jax.Array] = None,
+      position: None | jax.Array = None,
   ) -> jax.Array:
     """Generates a jax.Array of sinusoids with different frequencies.
 
@@ -434,7 +432,7 @@ class LLaMARotaryEmbedding(RotaryEmbedding):
     lower_wavelen_cond = wavelen < high_freq_wavelen
     return jax.lax.cond(lower_wavelen_cond, lower_wavelen, bigger_or_equal_wavelen, freq)
 
-  def __call__(self, inputs: jax.Array, position: Optional[jax.Array] = None) -> jax.Array:
+  def __call__(self, inputs: jax.Array, position: None | jax.Array = None) -> jax.Array:
     """Applies LLaMA variant of rotary position embedding.
 
     Args:
@@ -450,7 +448,9 @@ class LLaMARotaryEmbedding(RotaryEmbedding):
     if len(inputs.shape) != 4:
       raise ValueError("Input is assumed to be a rank 4 tensor of shape [B, S, N, H].")
     if self.embedding_dims != inputs.shape[3]:
-      raise ValueError("The embedding dims of the rotary position embedding must match the hidden dimension of the inputs.")
+      raise ValueError(
+          "The embedding dims of the rotary position embedding must match the hidden dimension of the inputs."
+      )
 
     # Shift the inputs left and right as per LLaMA's specific behavior
     inputs_shifted_left = jnp.concatenate([inputs[..., 1:], inputs[..., :1]], axis=-1)
@@ -618,7 +618,7 @@ class YarnRotaryEmbedding(nnx.Module):
         max_position_embeddings (int): Maximum sequence length.
 
     Returns:
-        Tuple[int, int]: The range of correction dimensions (low, high), clamped to valid indices.
+        tuple[int, int]: The range of correction dimensions (low, high), clamped to valid indices.
     """
     low = math.floor(self._find_correction_dim(low_rot, dim, base, max_position_embeddings))
     high = math.ceil(self._find_correction_dim(high_rot, dim, base, max_position_embeddings))
@@ -636,7 +636,7 @@ class YarnRotaryEmbedding(nnx.Module):
     linear_func = (jnp.arange(dim, dtype=jnp.float32) - min_val) / (max_val - min_val)
     return jnp.clip(linear_func, 0, 1)
 
-  def __call__(self, inputs: Array, position: Optional[Array] = None) -> Array:
+  def __call__(self, inputs: Array, position: None | Array = None) -> Array:
     """Applies the rotary positional embedding using the precomputed complex frequencies.
 
     Args:
@@ -649,7 +649,9 @@ class YarnRotaryEmbedding(nnx.Module):
     if len(inputs.shape) != 4:
       raise ValueError("Input is assumed to be a rank 4 tensor of shape [batch, sequence, heads, dims].")
     if self.embedding_dims != inputs.shape[3]:
-      raise ValueError("The embedding dims of the rotary position embedding must match the hidden dimension of the inputs.")
+      raise ValueError(
+          "The embedding dims of the rotary position embedding must match the hidden dimension of the inputs."
+      )
 
     # Determine positions if not provided
     if position is None:
@@ -838,7 +840,7 @@ class LlamaVisionRotaryEmbedding(nnx.Module):
     # Convert to complex representation
     return jnp.exp(1j * freqs)
 
-  def __call__(self, inputs: Array, position: Optional[Array] = None) -> Array:
+  def __call__(self, inputs: Array, position: None | Array = None) -> Array:
     """Applies rotary embeddings to the input tensor for Llama4 vision encoder.
 
     Args:

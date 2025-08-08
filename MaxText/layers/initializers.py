@@ -14,7 +14,7 @@
 
 """Initializers."""
 
-from typing import Callable, Tuple, Union
+from typing import Callable
 
 import jax
 
@@ -25,7 +25,7 @@ from aqt.jax.v2 import aqt_tensor
 from MaxText.common_types import Array, DType, Shape, PRNGKey
 
 Initializer = Callable[[PRNGKey, Shape, DType], Array]
-InitializerAxis = Union[int, Tuple[int, ...]]
+InitializerAxis = int | tuple[int, ...]
 NdInitializer = Callable[[PRNGKey, Shape, DType, InitializerAxis, InitializerAxis], Array]
 
 default_embed_init = nn.initializers.variance_scaling(1.0, "fan_in", "normal", out_axis=0)
