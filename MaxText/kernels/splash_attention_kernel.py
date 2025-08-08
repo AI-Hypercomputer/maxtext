@@ -74,7 +74,7 @@ class SegmentIds(NamedTuple):
 # Return type of SplashAttention function that implements the custom vjp rule.
 # `jax.Array` no residuals
 # `tuple[jax.Array, tuple[jax.Array,]]` # residuals,
-SplashCustomReturnType: UnionType = jax.Array | tuple[jax.Array, tuple[jax.Array,]]
+SplashCustomReturnType = jax.Array | tuple[jax.Array, tuple[jax.Array,]]
 
 SplashResidualsType = tuple[
     jax.Array,  # q

@@ -16,7 +16,7 @@
 
 import functools
 import operator
-from typing import Any, Callable, Iterable, Sequence
+from typing import Any, Callable, Iterable, Sequence, Union
 
 import numpy as np
 import jax
@@ -302,7 +302,7 @@ class MlpBlock(nnx.Module):
       config: Config,
       in_features: int,
       intermediate_dim: int = 2048,
-      activations: Sequence[str, Callable[..., Any]] = ("relu",),
+      activations: Sequence[str | Callable[..., Any]] = ("relu",),
       kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "truncated_normal"),
       intermediate_dropout_rate: float = 0.1,
       dtype: Any = jnp.float32,
