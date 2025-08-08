@@ -23,7 +23,7 @@ from jax.sharding import Mesh
 
 from flax import linen as nn
 from flax import nnx
-from layers import initializers
+from MaxText.layers import initializers
 
 from MaxText.common_types import DecoderBlockType, Config, MODEL_MODE_TRAIN, MODEL_MODE_AUTOREGRESSIVE, DECODING_ACTIVE_SEQUENCE_INDICATOR
 from MaxText.inference import page_manager
@@ -120,6 +120,9 @@ class Transformer(nnx.Module):
 
     decoder_linen = Decoder(config=cfg, mesh=mesh, quant=self.quant)
     self.decoder = nnx_wrappers.ToNNX(decoder_linen, rngs=rngs)
+    # for multi device training
+    devices_in_data_fsdp = self.mesh.shape["data"] * self.mesh.shape["fsdp"]
+
 
     if cfg.using_pipeline_parallelism:
       # When using pipeline parallelism, the inputs to the decoder are reshaped.
@@ -128,8 +131,8 @@ class Transformer(nnx.Module):
       batch_size = cfg.micro_batch_size_to_train_on
       seq_len = cfg.max_target_length
     else:
-      batch_size = 1
-      seq_len = 1
+      batch_size = devices_in_data_fsdp
+      seq_len = cfg.max_target_length
 
     dummy_decoder_input_tokens = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
     dummy_decoder_positions = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
