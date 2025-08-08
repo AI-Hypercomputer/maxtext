@@ -67,7 +67,7 @@ def self_attention_with_norm(
   lnx = nn.with_logical_constraint(lnx, ("activation_batch", "activation_length", "activation_embed"))
 
   # Self-attention block
-  attention_layer = attentions.Attention(
+  attention_layer = attentions.attention_as_linen(
       config=cfg,
       num_query_heads=cfg.num_query_heads,
       num_kv_heads=cfg.num_kv_heads,
@@ -75,6 +75,8 @@ def self_attention_with_norm(
       max_target_length=cfg.max_target_length,
       max_prefill_predict_length=cfg.max_prefill_predict_length,
       attention_kernel=cfg.attention,
+      inputs_q_shape=lnx.shape,
+      inputs_kv_shape=lnx.shape,
       mesh=mesh,
       dtype=cfg.dtype,
       weight_dtype=cfg.weight_dtype,
@@ -84,6 +86,7 @@ def self_attention_with_norm(
       kv_quant=quantizations.configure_kv_quant(cfg),
       use_qk_norm=True,
       query_pre_attn_scalar=(cfg.head_dim**-0.5),  # Qwen3 specific scaling
+      model_mode=model_mode,
   )
 
   attention_output = attention_layer(
