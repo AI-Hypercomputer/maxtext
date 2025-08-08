@@ -2126,7 +2126,10 @@ class Attention(nnx.Module):
     # and max_target_length, not the passed seq_len.
     # We can use a placeholder value. The correct fix might involve refactoring
     # KVCache.
+    #placeholder_seq_len = 1
     placeholder_seq_len = 1
+
+    #batch_size, placeholder_seq_len, emb_dim = inputs_kv_shape
 
     return kvcache.KVCache(
         max_prefill_length=self.max_prefill_predict_length,

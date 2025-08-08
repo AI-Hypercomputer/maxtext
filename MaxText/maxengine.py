@@ -1065,6 +1065,8 @@ class MaxEngine(engine_api.Engine):
           "cached_ar_value_scale",
       ]:
         return full_cache
+      
+      print('annotations: ' + str(annotations))
 
       batch_idx = -1
       if "cache_batch" in annotations:

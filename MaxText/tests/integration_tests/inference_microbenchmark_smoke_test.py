@@ -28,25 +28,51 @@ from MaxText.inference_microbenchmark import run_benchmarks
 class Inference_Microbenchmark(unittest.TestCase):
   """integration test for inference microbenchmark"""
 
-  @pytest.mark.integration_test
-  @pytest.mark.tpu_only
+  #@pytest.mark.integration_test
+  #@pytest.mark.tpu_only
   def test(self):
     jax.config.update("jax_default_prng_impl", "unsafe_rbg")
     config = pyconfig.initialize(
         [
             None,
             os.path.join(PKG_DIR, "configs", "tpu_smoke_test.yml"),
-            rf"tokenizer_path={os.path.join(os.path.dirname(PKG_DIR), 'assets', 'tokenizer.llama2')}",
+            #rf"tokenizer_path={os.path.join(os.path.dirname(PKG_DIR), 'assets', 'tokenizer.llama2')}",
+            rf"tokenizer_path={os.path.join(os.path.dirname(PKG_DIR), 'assets', 'tokenizer_llama3.tiktoken')}",
+            "model_name=llama3.1-8b",
+            "tokenizer_type=tiktoken",
+            "scan_layers=false",
+            "per_device_batch_size=1",
             "ici_autoregressive_parallelism=-1",
             "ici_fsdp_parallelism=1",
-            "max_prefill_predict_length=1024",
-            "max_target_length=2048",
-            "scan_layers=false",
-            "weight_dtype=bfloat16",
+            
+
+            #"ici_autoregressive_parallelism=-1",
+            #"ici_fsdp_parallelism=1",
+            "max_prefill_predict_length=128",
+            "max_target_length=256",
+            #"scan_layers=false",
+            #"weight_dtype=bfloat16",
             "attention=dot_product",
-            "skip_jax_distributed_system=True",
+            "prompt='I love to'",
+            #"skip_jax_distributed_system=True",
+
+            
         ]
     )
+
+    """
+    model_name=llama3.1-8b 
+            tokenizer_path=assets/tokenizer_llama3.tiktoken
+                      tokenizer_type=tiktoken     
+                      scan_layers=false     
+                      per_device_batch_size=1     
+                      ici_fsdp_parallelism=1     
+                      ici_autoregressive_parallelism=-1     
+                      max_prefill_predict_length=128     
+                      max_target_length=256     
+                      prompt="I love to"     
+                      attention=dot_product
+    """
     run_benchmarks(config)
 
 

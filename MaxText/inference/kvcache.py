@@ -419,9 +419,18 @@ class KVCache(nnx.Module):
     cache_axis_names = transpose_tuple(cache_logical_axis_names, self.ar_cache_axis_order)
 
     cache_logical_shape = (self.batch, cache_length, self.key_heads, self.key_head_size)
+    #cache_logical_shape = (8, cache_length, self.key_heads, self.key_head_size)
+    #cache_logical_shape = (self.batch, cache_length, 16, self.key_head_size)
+    #cache_logical_shape = (8, cache_length, 8, self.key_head_size)
+    print('key cache_logical_shape: ' + str(cache_logical_shape))
     cache_shape_key = transpose_tuple(cache_logical_shape, self.ar_cache_axis_order)
 
     cache_logical_shape = (self.batch, cache_length, self.value_heads, self.value_head_size)
+    #cache_logical_shape = (8, cache_length, self.value_heads, self.value_head_size)
+    #cache_logical_shape = (self.batch, cache_length, 8, self.value_head_size)
+    #cache_logical_shape = (16, 16, 16, 16)
+    #cache_logical_shape = (8, cache_length, 8, self.value_head_size)
+    print('value cache_logical_shape: ' + str(cache_logical_shape))
     cache_shape_value = transpose_tuple(cache_logical_shape, self.ar_cache_axis_order)
 
     # TODO(b/339703100): investigate the issue why with_logical_partitioning doesn't enforce sharding
@@ -693,6 +702,15 @@ class KVCache(nnx.Module):
 
     else:
       one_hot_indices = one_hot_indices.astype(int)
+      print('cached_key.value: ' + str(cached_key.value))
+      print('one_token_key_shaped_for_cache: ' + str(one_token_key_shaped_for_cache))
+      print('ar_cache_update_idx: ' + str(ar_cache_update_idx))
+      print('ar_cache_update_axis: ' + str(ar_cache_update_axis))
+      print('cached_value.value: ' + str(cached_value.value))
+      print('one_token_value_shaped_for_cache: ' + str(one_token_value_shaped_for_cache))
+      print('ar_cache_update_idx: ' + str(ar_cache_update_idx))
+      print('ar_cache_update_axis: ' + str(ar_cache_update_axis))
+
       cached_key.value = jax.lax.dynamic_update_index_in_dim(
           cached_key.value, one_token_key_shaped_for_cache, ar_cache_update_idx, ar_cache_update_axis
       )
