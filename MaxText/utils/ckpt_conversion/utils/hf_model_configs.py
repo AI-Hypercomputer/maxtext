@@ -294,26 +294,26 @@ qwen3_32b_config = transformers.Qwen3Config(
 
 qwen3_moe_235b_a22b_config = transformers.Qwen3MoeConfig(
     vocab_size=151936,
-    hidden_size=8192,
-    intermediate_size=28672,
-    num_hidden_layers=94,  # Your model has layers 0-93
+    hidden_size=4096,
+    intermediate_size=12288,
+    num_hidden_layers=94,
     num_attention_heads=64,
-    num_key_value_heads=8,
+    num_key_value_heads=4,
     head_dim=128,
     hidden_act="silu",
-    max_position_embeddings=32768,
+    max_position_embeddings=262144,
     rms_norm_eps=1e-6,
-    rope_theta=1000000.0,
+    rope_theta=5000000.0,
     tie_word_embeddings=False,
-    # MoE specific parameters
-    decoder_sparse_step=1,  # Indicates every layer is potentially MoE
-    mlp_only_layers=[],  # Explicitly state no layers are dense-only
-    moe_intermediate_size=7168,
+    torch_dtype="bfloat16",
+    decoder_sparse_step=1,
+    mlp_only_layers=[],
+    moe_intermediate_size=1536,
     num_experts=128,
     num_experts_per_tok=8,
     norm_topk_prob=True,
     output_router_logits=False,
-    router_aux_loss_coef=0.001,
+    router_aux_loss_coef=0.001
 )
 
 
