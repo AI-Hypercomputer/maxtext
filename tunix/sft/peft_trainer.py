@@ -316,12 +316,17 @@ class PeftTrainer:
     """
     if mesh.empty:
       return
-    optimizer_state = nnx.state(
+    optimizer_state_arrays = nnx.state(
         self.optimizer, nnx.optimizer.OptState
     )  # select only the optimizer state
-    optimizer_shardings = nnx.get_named_sharding(optimizer_state, mesh)
+    print("Sharding optimizer state:", optimizer_state_arrays)
+    optimizer_shardings = nn.logical_to_mesh_sharding(
+              nnx.get_partition_spec(optimizer_state_arrays),
+              mesh,
+          )
+    print("Optimizer shardings after logical_to_mesh_sharding:", optimizer_shardings)
     optimizer_sharded_state = jax.lax.with_sharding_constraint(
-        optimizer_state, optimizer_shardings
+        optimizer_state_arrays, optimizer_shardings
     )
     nnx.update(self.optimizer, optimizer_sharded_state)
 
