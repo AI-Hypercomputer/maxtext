@@ -313,7 +313,7 @@ qwen3_235b_a22b_config = transformers.Qwen3MoeConfig(
     num_experts_per_tok=8,
     norm_topk_prob=True,
     output_router_logits=False,
-    router_aux_loss_coef=0.001
+    router_aux_loss_coef=0.001,
 )
 
 
