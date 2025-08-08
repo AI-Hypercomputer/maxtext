@@ -714,6 +714,7 @@ class Sampler:
     )
 
     token_buffers = sampling_state.token_buffer
+    print("token_buffers={token_buffers}")
     logits_buffers = sampling_state.logits_buffer
 
     if sampling_state.sampling_mode == 'beam_search':

@@ -173,16 +173,17 @@ class RLCluster:
     ], f"Unsupported rollout engine: {self.cluster_config.rollout_engine}"
     if self.cluster_config.rollout_engine == "vanilla":
       assert hasattr(
-          self.rollout_actor, "config"
+          self.rollout_actor.base, "config"
       ), "Actor model must have a config attribute."
       self._rollout = vanilla_rollout.VanillaRollout(
           self.rollout_actor,
           self.tokenizer,
           cache_config=vanilla_rollout.CacheConfig(
               cache_size=self.cluster_config.rollout_config.kv_cache_size,
-              num_layers=self.rollout_actor.config.num_layers,
-              num_kv_heads=self.rollout_actor.config.num_kv_heads,
-              head_dim=self.rollout_actor.config.head_dim,
+              #TODO(mazumdera@): make these configurable.
+              num_layers=self.rollout_actor.base.config.base_num_decoder_layers,
+              num_kv_heads=self.rollout_actor.base.config.num_kv_heads,
+              head_dim=self.rollout_actor.base.config.head_dim,
           ),
       )
     elif self.cluster_config.rollout_engine == "vllm":
