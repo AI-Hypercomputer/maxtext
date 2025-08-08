@@ -340,7 +340,16 @@ class BatchedPrefillProcessor:
       self.process_batch_func[(padded_length, num_prompts, return_prompt_logp)] = (
           jax.jit(
               self._process_batch,
-              in_shardings=(self.engine.param_layouts, None, None, None, None, None, None, self.engine.decode_state_layouts),
+              in_shardings=(
+                  self.engine.param_layouts,
+                  None,
+                  None,
+                  None,
+                  None,
+                  None,
+                  None,
+                  self.engine.decode_state_layouts,
+              ),
               out_shardings=(None, self.engine.decode_state_layouts),
               static_argnames=(
                   "num_prompts",

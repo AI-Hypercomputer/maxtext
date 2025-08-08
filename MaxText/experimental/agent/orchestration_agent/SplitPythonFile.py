@@ -13,6 +13,7 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 """
+
 from typing import TypedDict, TypeVar
 
 """
@@ -52,11 +53,15 @@ class ReferenceVisitor(ast.NodeVisitor):
     self.generic_visit(node)
 
 
-SortedStructure = TypedDict('SortedStructure', {
+SortedStructure = TypedDict(
+    "SortedStructure",
+    {
         "sorted_modules": dict,
         "component_dependencies": dict,
         "warning": str | None,
-    })
+    },
+)
+
 
 class DependencyAnalyzer:
   """
@@ -319,7 +324,7 @@ class DependencyAnalyzer:
 
 
 def get_modules_in_order(filepath: str) -> SortedStructure:
-  source_code = ''
+  source_code = ""
   try:
     if filepath.startswith("https"):
       flag, source_code = get_github_file_content(filepath)

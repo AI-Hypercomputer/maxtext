@@ -329,7 +329,11 @@ def plot_sharding_scheme_comparison(
   fig_flops_comm_grouped, ax_flops_comm_grouped = plt.subplots(figsize=(max(10, num_schemes * 1.7), 7))
 
   rects_flops = ax_flops_comm_grouped.bar(
-      categorical_x - grouped_bar_width_fc / 2, t_flops_list, grouped_bar_width_fc, label="T_flops", color="mediumseagreen"
+      categorical_x - grouped_bar_width_fc / 2,
+      t_flops_list,
+      grouped_bar_width_fc,
+      label="T_flops",
+      color="mediumseagreen",
   )
   rects_comms_grouped = ax_flops_comm_grouped.bar(
       categorical_x + grouped_bar_width_fc / 2, t_comms_list, grouped_bar_width_fc, label="T_comms", color="deepskyblue"

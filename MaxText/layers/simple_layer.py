@@ -32,7 +32,7 @@ class SimpleDecoderLayer(nn.Module):
   config: Config
   mesh: Mesh
   model_mode: str
-  quant: Optional[quantizations.AqtQuantization] = None
+  quant: None | quantizations.AqtQuantization = None
 
   def setup(self):
     self.weight_mat = self.param(
@@ -56,7 +56,7 @@ class SimpleMlpDecoderLayer(nn.Module):
   config: Config
   mesh: Mesh
   model_mode: str
-  quant: Optional[quantizations.AqtQuantization] = None
+  quant: None | quantizations.AqtQuantization = None
 
   def setup(self):
     self.ff_1 = self.param(

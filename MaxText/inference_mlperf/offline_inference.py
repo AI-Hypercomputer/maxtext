@@ -228,7 +228,11 @@ class OfflineInference:
     self.init_decode_state()
 
     self.prefill.aot_compile(
-        max_length, self.params, self.engine.param_layouts, self.engine.decode_state_layouts, self.engine.decode_state_shapes
+        max_length,
+        self.params,
+        self.engine.param_layouts,
+        self.engine.decode_state_layouts,
+        self.engine.decode_state_shapes,
     )
 
     self.batch_inference(warmup_samples, desc="warmup")
@@ -368,7 +372,11 @@ class OfflineInference:
     self.live = False
     detokenize_thread.join()
     log.info(
-        "summary-%s-prefills-%d-decodes-%d-detokens-%d completed.", desc, counter.prefill, counter.decode, counter.detokenize
+        "summary-%s-prefills-%d-decodes-%d-detokens-%d completed.",
+        desc,
+        counter.prefill,
+        counter.decode,
+        counter.detokenize,
     )
 
   def batch_inference(self, data: list[InputData], desc="") -> dict[str, list[int]]:

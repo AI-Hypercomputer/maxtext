@@ -253,7 +253,9 @@ def _make_bidirectional_block_mask(bidirectional_mask):
   """
   q_block_indices = _make_block_mask_indices(bidirectional_mask)
   kv_block_indices = q_block_indices
-  bidirectional_block_mask = (kv_block_indices[:, None, :] == q_block_indices[..., None]) & (q_block_indices[..., None] > 0)
+  bidirectional_block_mask = (kv_block_indices[:, None, :] == q_block_indices[..., None]) & (
+      q_block_indices[..., None] > 0
+  )
   return bidirectional_block_mask
 
 
@@ -276,7 +278,12 @@ def attention_op_as_linen(
     flash_axis_names_splash_kernel_ep: AxisNames = (HEAD, LENGTH),
     prefill_cache_logical_axis_names: AxisNames = (CACHE_BATCH_PREFILL, CACHE_SEQUENCE, CACHE_HEADS, CACHE_KV),
     cache_logical_axis_names: AxisNames = (CACHE_BATCH, CACHE_SEQUENCE, CACHE_HEADS, CACHE_KV),
-    cache_scale_logical_axis_names: AxisNames = (CACHE_SCALE_BATCH, CACHE_SCALE_SEQUENCE, CACHE_SCALE_HEADS, CACHE_SCALE_KV),
+    cache_scale_logical_axis_names: AxisNames = (
+        CACHE_SCALE_BATCH,
+        CACHE_SCALE_SEQUENCE,
+        CACHE_SCALE_HEADS,
+        CACHE_SCALE_KV,
+    ),
     ragged_qkv_axis_names: AxisNames = (CACHE_BATCH, CACHE_HEADS, CACHE_SEQUENCE, CACHE_KV),
     ragged_lengths_names: AxisNames = (CACHE_BATCH,),
     compute_axis_order: AxisIdxes = (0, 1, 2, 3),
@@ -284,8 +291,8 @@ def attention_op_as_linen(
     reshape_q: bool = False,
     dropout_rate: float = 0.0,
     dtype: DType = jnp.float32,
-    quant: Optional[Quant] = None,
-    kv_quant: Optional[KVQuant] = None,
+    quant: None | Quant = None,
+    kv_quant: None | KVQuant = None,
     attention_type: AttentionType = AttentionType.GLOBAL,  # Default to global attention
     attn_logits_soft_cap: float | None = None,
     sliding_window_size: int | None = None,
@@ -372,8 +379,8 @@ class AttentionOp(nnx.Module):
       reshape_q: bool = False,
       dropout_rate: float = 0.0,
       dtype: DType = jnp.float32,
-      quant: Optional[Quant] = None,
-      kv_quant: Optional[KVQuant] = None,
+      quant: None | Quant = None,
+      kv_quant: None | KVQuant = None,
       attention_type: AttentionType = AttentionType.GLOBAL,  # Default to global attention
       attn_logits_soft_cap: float | None = None,
       sliding_window_size: int | None = None,
@@ -472,21 +479,23 @@ class AttentionOp(nnx.Module):
 
       # Prefill AqtEinsum instances
       self.AqtEinsum_0 = maybe_create_nnx(
-          self.kv_quant.einsum_fn_with_rhs_qtensor(),
-          "btkgd,bskd->bkgts", dummy_query_prefill, dummy_key_prefill
+          self.kv_quant.einsum_fn_with_rhs_qtensor(), "btkgd,bskd->bkgts", dummy_query_prefill, dummy_key_prefill
       )
       self.AqtEinsum_1 = maybe_create_nnx(
           self.kv_quant.einsum_fn_with_rhs_qtensor_and_dequant(),
-          "bkgts,bskd->btkgd", dummy_attn_weights_prefill, dummy_value_prefill
+          "bkgts,bskd->btkgd",
+          dummy_attn_weights_prefill,
+          dummy_value_prefill,
       )
       # Autoregressive AqtEinsum instances
       self.AqtEinsum_2 = maybe_create_nnx(
-          self.kv_quant.einsum_fn_with_rhs_qtensor(),
-          "btkgd,bskd->bkgts", dummy_query_ar, dummy_key_ar
+          self.kv_quant.einsum_fn_with_rhs_qtensor(), "btkgd,bskd->bkgts", dummy_query_ar, dummy_key_ar
       )
       self.AqtEinsum_3 = maybe_create_nnx(
           self.kv_quant.einsum_fn_with_rhs_qtensor_and_dequant(),
-          "bkgts,bskd->btkgd", dummy_attn_weights_ar, dummy_value_ar
+          "bkgts,bskd->btkgd",
+          dummy_attn_weights_ar,
+          dummy_value_ar,
       )
     else:
       self.AqtEinsum_0 = jnp.einsum
@@ -627,7 +636,9 @@ class AttentionOp(nnx.Module):
 
       row_ids_sliding = jax.lax.broadcasted_iota(jnp.int32, (q_seq_len, 1), 0) + next_pos
       col_ids_sliding = jax.lax.broadcasted_iota(jnp.int32, (1, kv_seq_len), 1)
-      sliding_mask = (col_ids_sliding > (row_ids_sliding - self.sliding_window_size)) & (col_ids_sliding <= row_ids_sliding)
+      sliding_mask = (col_ids_sliding > (row_ids_sliding - self.sliding_window_size)) & (
+          col_ids_sliding <= row_ids_sliding
+      )
       output_mask = sliding_mask * output_mask
     elif self.attention_type == AttentionType.CHUNK and output_mask is not None:
       mask_shape = (q_seq_len, kv_seq_len)
@@ -778,7 +789,9 @@ class AttentionOp(nnx.Module):
         out_specs=(bnd, bn, bn),
         check_rep=False,
     )
-    def wrap_ragged_attention(q: Array, k: Array, v: Array, lengths: Array, block_size: int) -> Tuple[Array, Array, Array]:
+    def wrap_ragged_attention(
+        q: Array, k: Array, v: Array, lengths: Array, block_size: int
+    ) -> Tuple[Array, Array, Array]:
       # Use the original gqa function to get the attention output
       """
       Wraps the GQA function with appropriate sharding.
@@ -1044,7 +1057,14 @@ class AttentionOp(nnx.Module):
       return attention_output
 
     x = wrap_flash_attention(
-        query, key, value, decoder_segment_ids, decoder_segment_ids, splash_kernel, cp_size, load_balanced_context_parallel
+        query,
+        key,
+        value,
+        decoder_segment_ids,
+        decoder_segment_ids,
+        splash_kernel,
+        cp_size,
+        load_balanced_context_parallel,
     )
 
     x = jnp.transpose(x, axes=(0, 2, 1, 3))
@@ -1155,7 +1175,12 @@ class AttentionOp(nnx.Module):
     return output, lse
 
   def compute_local_attention(
-      self, attn_weights: Array, value: Array | KVTensor, q_seq_len: int, model_mode: str, wv_product_einsum: Callable[..., Array]
+      self,
+      attn_weights: Array,
+      value: Array | KVTensor,
+      q_seq_len: int,
+      model_mode: str,
+      wv_product_einsum: Callable[..., Array],
   ) -> tuple[Array, Array, Array]:
     """Computes the attention of a local subset of the kv cache.
     Local attention results will need to be combined with any other local attentions and normalized
@@ -1179,8 +1204,12 @@ class AttentionOp(nnx.Module):
     local_sum = jnp.moveaxis(local_sum, -2, 1)
     local_max = jnp.moveaxis(local_max, -2, 1)
 
-    local_max = jnp.reshape(local_max, (local_max.shape[0], local_max.shape[1], local_max.shape[2] * local_max.shape[3], 1))
-    local_sum = jnp.reshape(local_sum, (local_sum.shape[0], local_sum.shape[1], local_sum.shape[2] * local_sum.shape[3], 1))
+    local_max = jnp.reshape(
+        local_max, (local_max.shape[0], local_max.shape[1], local_max.shape[2] * local_max.shape[3], 1)
+    )
+    local_sum = jnp.reshape(
+        local_sum, (local_sum.shape[0], local_sum.shape[1], local_sum.shape[2] * local_sum.shape[3], 1)
+    )
 
     local_out = self.wv_product(local_exps, value, model_mode, wv_product_einsum)
     if model_mode == MODEL_MODE_AUTOREGRESSIVE and self.is_partition_in_decode(q_seq_len):
@@ -1261,7 +1290,9 @@ class AttentionOp(nnx.Module):
     # Casting softmaxt computation for float32 for model stability.
     if self.float32_logits:
       attn_weights = attn_weights.astype(jnp.float32)
-    attn_mask = self.generate_attention_mask(query, key, decoder_segment_ids, model_mode, previous_chunk, bidirectional_mask)
+    attn_mask = self.generate_attention_mask(
+        query, key, decoder_segment_ids, model_mode, previous_chunk, bidirectional_mask
+    )
     if self.is_partition_in_decode(q_seq_len):
       attn_mask = partitioning.with_sharding_constraint(attn_mask, (KV_LENGTH, HEAD, None, None, None))
     elif model_mode == MODEL_MODE_PREFILL:
@@ -1406,8 +1437,8 @@ class AttentionOp(nnx.Module):
       cached_values=None,
       previous_chunk=None,
       bidirectional_mask=None,
-      slot: Optional[int] = None,
-      page_state: Optional[page_manager.PageState] = None,
+      slot: None | int = None,
+      page_state: None | page_manager.PageState = None,
   ):
     if cached_values is None:
       prefill_kv_cache, ar_kv_cache = None, None
@@ -1418,17 +1449,17 @@ class AttentionOp(nnx.Module):
       key, value, decoder_segment_ids = prefill_kv_cache
 
     prefill_unnormalized_output, prefill_exponentials_max, prefill_exponentials_sum = self.apply_attention(
-      query=query,
-      key=key,
-      value=value,
-      decoder_segment_ids=decoder_segment_ids,
-      lengths=None,
-      model_mode=model_mode,
-      use_ragged_attention=self.use_ragged_attention,
-      previous_chunk=previous_chunk,
-      bidirectional_mask=bidirectional_mask,
-      qk_product_einsum=self.AqtEinsum_0,
-      wv_product_einsum=self.AqtEinsum_1,
+        query=query,
+        key=key,
+        value=value,
+        decoder_segment_ids=decoder_segment_ids,
+        lengths=None,
+        model_mode=model_mode,
+        use_ragged_attention=self.use_ragged_attention,
+        previous_chunk=previous_chunk,
+        bidirectional_mask=bidirectional_mask,
+        qk_product_einsum=self.AqtEinsum_0,
+        wv_product_einsum=self.AqtEinsum_1,
     )
 
     # Return the "prefill" cache if it actually the combined prefill+ar kv cache
@@ -1510,8 +1541,8 @@ def attention_as_linen(
     kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "normal"),
     float32_qk_product: bool = False,  # computes logits in float32 for stability.
     float32_logits: bool = False,  # cast logits in float32 for stability.
-    quant: Optional[Quant] = None,
-    kv_quant: Optional[KVQuant] = None,
+    quant: None | Quant = None,
+    kv_quant: None | KVQuant = None,
     attention_type: AttentionType = AttentionType.GLOBAL,  # Default to global attention
     attn_logits_soft_cap: float | None = None,
     sliding_window_size: int | None = None,
@@ -1622,33 +1653,33 @@ def attention_as_linen(
 class Attention(nnx.Module):
   """Attention Module.
 
-    This module implements multi-headed attention as described in the
-    original Transformer paper. It projects the inputs into query, key, and
-    value vectors, applies the attention mechanism, and projects the results to
-    an output vector.
+  This module implements multi-headed attention as described in the
+  original Transformer paper. It projects the inputs into query, key, and
+  value vectors, applies the attention mechanism, and projects the results to
+  an output vector.
 
-    Attributes:
-      config: The model configuration.
-      num_query_heads: Number of query attention heads.
-      num_kv_heads: Number of key-value attention heads.
-      head_dim: The dimension of each attention head.
-      max_target_length: Maximum sequence length.
-      mesh: The device mesh.
-      attention_kernel: The attention kernel to use (e.g., 'dot_product', 'flash').
-      inputs_q_shape: Query inputs shape for initialization, required by NNX.
-      inputs_kv_shape: Key/value inputs shape for initialization, required by NNX.
-      dtype: The data type for computation.
-      weight_dtype: The data type for weights.
-      max_prefill_predict_length: Maximum length for prefill.
-      dropout_rate: The dropout rate.
-      kernel_init: Initializer for the kernel of the dense layers.
-      float32_qk_product: If True, compute query-key product in float32.
-      float32_logits: If True, cast logits to float32 before softmax.
-      quant: Quantization configuration.
-      kv_quant: KV cache quantization configuration.
-      attention_type: The type of attention (e.g., 'global', 'local_sliding').
-      attn_logits_soft_cap: Soft cap for attention logits.
-      ... and other configuration parameters.
+  Attributes:
+    config: The model configuration.
+    num_query_heads: Number of query attention heads.
+    num_kv_heads: Number of key-value attention heads.
+    head_dim: The dimension of each attention head.
+    max_target_length: Maximum sequence length.
+    mesh: The device mesh.
+    attention_kernel: The attention kernel to use (e.g., 'dot_product', 'flash').
+    inputs_q_shape: Query inputs shape for initialization, required by NNX.
+    inputs_kv_shape: Key/value inputs shape for initialization, required by NNX.
+    dtype: The data type for computation.
+    weight_dtype: The data type for weights.
+    max_prefill_predict_length: Maximum length for prefill.
+    dropout_rate: The dropout rate.
+    kernel_init: Initializer for the kernel of the dense layers.
+    float32_qk_product: If True, compute query-key product in float32.
+    float32_logits: If True, cast logits to float32 before softmax.
+    quant: Quantization configuration.
+    kv_quant: KV cache quantization configuration.
+    attention_type: The type of attention (e.g., 'global', 'local_sliding').
+    attn_logits_soft_cap: Soft cap for attention logits.
+    ... and other configuration parameters.
   """
 
   def __init__(
@@ -1669,8 +1700,8 @@ class Attention(nnx.Module):
       kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "normal"),
       float32_qk_product: bool = False,  # computes logits in float32 for stability.
       float32_logits: bool = False,  # cast logits in float32 for stability.
-      quant: Optional[Quant] = None,
-      kv_quant: Optional[KVQuant] = None,
+      quant: None | Quant = None,
+      kv_quant: None | KVQuant = None,
       attention_type: AttentionType = AttentionType.GLOBAL,  # Default to global attention
       attn_logits_soft_cap: float | None = None,
       sliding_window_size: int | None = None,
@@ -1712,7 +1743,7 @@ class Attention(nnx.Module):
       model_mode: str = MODEL_MODE_TRAIN,
       base_kv_cache: bool = True,
       name: str | None = None,
-      rngs: Optional[nnx.Rngs] = None,
+      rngs: None | nnx.Rngs = None,
   ):
     """Initializes the Attention module.
 
@@ -1890,7 +1921,6 @@ class Attention(nnx.Module):
       self.query_norm = None
       self.key_norm = None
 
-
   def init_query_w(self, inputs_q_shape: Tuple) -> nnx.Module:
     """Query projection initialization."""
 
@@ -2032,8 +2062,8 @@ class Attention(nnx.Module):
   def convert_dense_general_inputs_shape(
       self,
       inputs_shape: tuple[int, ...] | None = None,
-      axis: Union[Iterable[int], int] = -1,
-  ) -> Union[Iterable[int], int]:
+      axis: Iterable[int] | int = -1,
+  ) -> Iterable[int] | int:
     axis = canonicalize_tuple(axis)
     return tuple(inputs_shape[ax] for ax in normalize_axes(axis, len(inputs_shape)))
 
@@ -2095,8 +2125,7 @@ class Attention(nnx.Module):
       )
     return rotary_embedding
 
-
-  def apply_rotary_embedding(self, inputs: Array, inputs_positions: Optional[Array | None] = None):
+  def apply_rotary_embedding(self, inputs: Array, inputs_positions: None | Array = None):
     """Applies rotary embeddings, handling different model types.
 
     Args:
@@ -2186,8 +2215,8 @@ class Attention(nnx.Module):
       model_mode: str = MODEL_MODE_TRAIN,
       deterministic: bool = False,
       previous_chunk: Any = None,
-      slot: Optional[int] = None,
-      page_state: Optional[page_manager.PageState] = None,
+      slot: None | int = None,
+      page_state: None | page_manager.PageState = None,
       bidirectional_mask: Any = None,
   ):
     """Applies Attention on the input data.
@@ -2339,8 +2368,8 @@ def mla_as_linen(
     kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "normal"),
     float32_qk_product: bool = False,  # computes logits in float32 for stability.
     float32_logits: bool = False,  # cast logits in float32 for stability.
-    quant: Optional[Quant] = None,
-    kv_quant: Optional[KVQuant] = None,
+    quant: None | Quant = None,
+    kv_quant: None | KVQuant = None,
     attention_type: AttentionType = AttentionType.GLOBAL,  # Default to global attention
     attn_logits_soft_cap: float | None = None,
     sliding_window_size: int | None = None,
@@ -2487,8 +2516,8 @@ class MLA(Attention):
       kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "normal"),
       float32_qk_product: bool = False,  # computes logits in float32 for stability.
       float32_logits: bool = False,  # cast logits in float32 for stability.
-      quant: Optional[Quant] = None,
-      kv_quant: Optional[KVQuant] = None,
+      quant: None | Quant = None,
+      kv_quant: None | KVQuant = None,
       attention_type: AttentionType = AttentionType.GLOBAL,  # Default to global attention
       attn_logits_soft_cap: float | None = None,
       sliding_window_size: int | None = None,
@@ -2538,7 +2567,7 @@ class MLA(Attention):
       mscale: float = 1.0,  # scaling factor for softmax
       rope_factor: float = 40.0,  # rotary embedding factor
       name: str | None = None,
-      rngs: Optional[nnx.Rngs] = None,
+      rngs: None | nnx.Rngs = None,
   ):
     """Initializes the MLA module.
 
@@ -2906,7 +2935,9 @@ class MLA(Attention):
       if self.config.mla_naive_kvcache:
         cached_values = self.update_kv_caches(key, value, decoder_segment_ids, model_mode, previous_chunk)
       else:
-        cached_values = self.update_mla_kv_caches(low_rank_main, key_rope, decoder_segment_ids, model_mode, previous_chunk)
+        cached_values = self.update_mla_kv_caches(
+            low_rank_main, key_rope, decoder_segment_ids, model_mode, previous_chunk
+        )
 
     return key, value, cached_values
 
@@ -2920,9 +2951,9 @@ class MLA(Attention):
       model_mode: str = MODEL_MODE_TRAIN,
       deterministic: bool = False,
       previous_chunk: Any = None,
-      slot: Optional[int] = None,
-      page_state: Optional[page_manager.PageState] = None,
-      bidirectional_mask: Optional[Any] = None,
+      slot: None | int = None,
+      page_state: None | page_manager.PageState = None,
+      bidirectional_mask: None | Any = None,
   ) -> Array:
     """Forward pass for MLA, reusing `AttentionOp` for the actual attention.
 

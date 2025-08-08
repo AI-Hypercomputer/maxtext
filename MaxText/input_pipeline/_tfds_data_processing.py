@@ -173,7 +173,9 @@ def make_tfds_train_iterator(
     process_indices_train,
 ):
   """load dataset, preprocess and return iterators"""
-  assert config.global_batch_size_to_load % global_mesh.size == 0, "Batch size should be divisible number of global devices."
+  assert (
+      config.global_batch_size_to_load % global_mesh.size == 0
+  ), "Batch size should be divisible number of global devices."
   if not config.colocated_python_data_input:
     train_ds = get_datasets(
         dataset_name=config.dataset_name,
@@ -229,6 +231,7 @@ def make_tfds_train_iterator(
     )
     global_shape = (config.global_batch_size_to_load, config.max_target_length)
     return multihost_dataloading.RemoteIterator(get_ds_fn, preprocessing_fn, global_mesh, global_shape)
+
 
 def make_tfds_eval_iterator(
     config: ml_collections.ConfigDict,

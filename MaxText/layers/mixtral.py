@@ -47,7 +47,7 @@ class MixtralDecoderLayer(nn.Module):
   config: models.Config
   mesh: Mesh
   model_mode: str
-  quant: Optional[Quant] = None
+  quant: None | Quant = None
 
   @nn.compact
   def __call__(

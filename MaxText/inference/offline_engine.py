@@ -648,7 +648,9 @@ class InferenceWorker:
 
       # Get next item from queue with timeout
       try:
-        result_tokens, log_prob, is_first_token, row_id, slot, prompt_logp = self.generated_token_backlog.get(timeout=0.01)
+        result_tokens, log_prob, is_first_token, row_id, slot, prompt_logp = self.generated_token_backlog.get(
+            timeout=0.01
+        )
       except queue.Empty:
         if not self.running:
           break
@@ -711,7 +713,7 @@ class InferenceWorker:
     index = len(self.completion_tokens_by_id[prompt_id])
     if prompt_logp is not None:
       self.prompt_logprobs_by_id[prompt_id] = [prompt_logp]
-    self.completion_tokens_by_id[prompt_id].append(TokenOutput(result_token, log_prob))
+    self.completion_tokens_by_id[prompt_id].append(TokenOutput(np.array(result_token), np.array(log_prob)))
     return (result_token in self.eos_ids) or (index + 1 == self.max_decode_length)
 
 

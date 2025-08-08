@@ -43,19 +43,19 @@ class Qwen3DecoderLayer(nn.Module):
   config: Config
   mesh: Mesh
   model_mode: str
-  quant: Optional[Quant] = None
+  quant: None | Quant = None
 
   @nn.compact
   def __call__(
       self,
       inputs: jnp.ndarray,
-      decoder_segment_ids: Optional[jnp.ndarray],
-      decoder_positions: Optional[jnp.ndarray],
+      decoder_segment_ids: None | jnp.ndarray,
+      decoder_positions: None | jnp.ndarray,
       deterministic: bool,
       model_mode: str,
       previous_chunk=None,
-      page_state: Optional[page_manager.PageState] = None,
-      slot: Optional[int] = None,
+      page_state: None | page_manager.PageState = None,
+      slot: None | int = None,
   ):
     cfg = self.config
     mesh = self.mesh

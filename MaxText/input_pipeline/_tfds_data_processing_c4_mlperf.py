@@ -188,7 +188,8 @@ def _pad_to_batch_size(
   pad_num = num_batches * batch_size - local_num
   assert pad_num >= 0
   max_logging.log(
-      f"Eval data has {local_num} local entries, padding now with " f"{pad_num} extra entries to get {num_batches} batches."
+      f"Eval data has {local_num} local entries, padding now with "
+      f"{pad_num} extra entries to get {num_batches} batches."
   )
 
   # Repeat a random example to make the last batch full.
@@ -259,7 +260,8 @@ def preprocess_train_dataset(
   else:
     pad_id = -1
   train_ds = train_ds.map(
-      lambda x: tokenizer.TokenizeOp(tokenizer=sp_tokenizer, features=x, data_keys=("targets",)), num_parallel_calls=AUTOTUNE
+      lambda x: tokenizer.TokenizeOp(tokenizer=sp_tokenizer, features=x, data_keys=("targets",)),
+      num_parallel_calls=AUTOTUNE,
   )
   train_ds = reduce_concat_tokens(train_ds, feature_key="targets", batch_size=4096)
   train_ds = split_tokens_to_targets_length(train_ds, max_target_length)

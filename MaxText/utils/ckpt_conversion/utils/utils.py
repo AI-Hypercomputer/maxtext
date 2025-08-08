@@ -197,7 +197,11 @@ def create_huggingface_hub_repo_if_not_exist(repo_id, repo_type):
 
 
 def save_config_file(
-    config, local_path_to_save_to: str, output_dir_final: str, file_name: str, remove_local_copy_after_upload: bool = False
+    config,
+    local_path_to_save_to: str,
+    output_dir_final: str,
+    file_name: str,
+    remove_local_copy_after_upload: bool = False,
 ):
   """Saves the model configuration file(config.json)."""
   if jax.process_index() == 0:
@@ -396,7 +400,9 @@ def save_weight_files(
         future.result()
 
     # Save index file
-    save_index_file(index, local_dir_to_save_to, output_dir_final, SAFE_TENSORS_INDEX_FILE, remove_local_copy_after_upload)
+    save_index_file(
+        index, local_dir_to_save_to, output_dir_final, SAFE_TENSORS_INDEX_FILE, remove_local_copy_after_upload
+    )
 
 
 @contextlib.contextmanager

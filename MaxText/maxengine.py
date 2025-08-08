@@ -237,7 +237,9 @@ class MaxEngine(engine_api.Engine):
       state = maxtext_utils.init_decode_state(None, params)
       state = max_utils.unbox_logicallypartioned(state)
     else:
-      state, self.state_mesh_annotations = maxtext_utils.setup_decode_state(self.model, self.config, rng1, self._mesh, None)
+      state, self.state_mesh_annotations = maxtext_utils.setup_decode_state(
+          self.model, self.config, rng1, self._mesh, None
+      )
     # pylint: disable=isinstance-second-argument-not-valid-type
     self.abstract_params = jax.tree_util.tree_map(
         lambda x: jax.ShapeDtypeStruct(shape=x.shape, dtype=x.dtype, sharding=x.sharding)
@@ -1011,7 +1013,9 @@ class MaxEngine(engine_api.Engine):
     )
 
     for i, slot in enumerate(slots):
-      decode_state["logits"] = jax.lax.dynamic_update_index_in_dim(decode_state["logits"], unboxed_prefix["logits"], slot, 0)
+      decode_state["logits"] = jax.lax.dynamic_update_index_in_dim(
+          decode_state["logits"], unboxed_prefix["logits"], slot, 0
+      )
       decode_state["next_pos"] = jax.lax.dynamic_update_index_in_dim(
           decode_state["next_pos"], unboxed_prefix["next_pos"], slot, 0
       )
@@ -1029,7 +1033,9 @@ class MaxEngine(engine_api.Engine):
       )
 
     inserted_logits = jax.lax.with_sharding_constraint(decode_state["logits"], self.replicated_sharding)
-    inserted_generated_tokens = jax.lax.with_sharding_constraint(decode_state["generated_tokens"], self.replicated_sharding)
+    inserted_generated_tokens = jax.lax.with_sharding_constraint(
+        decode_state["generated_tokens"], self.replicated_sharding
+    )
     inserted_next_pos = jax.lax.with_sharding_constraint(decode_state["next_pos"], self.replicated_sharding)
     inserted_tokens = jax.lax.with_sharding_constraint(decode_state["tokens"], self.replicated_sharding)
     inserted_cache = jax.lax.with_sharding_constraint(inserted_cache, self.kv_cache_shardings)
@@ -1113,7 +1119,9 @@ class MaxEngine(engine_api.Engine):
             decode_state_pages, prefix_pages, current_page_map = state
             prefix_page = jax.lax.dynamic_index_in_dim(prefix_pages, prefix_page_idx, axis=1)
             dest_page_idx = current_page_map[prefix_page_idx]
-            decode_state_pages = jax.lax.dynamic_update_slice_in_dim(decode_state_pages, prefix_page, dest_page_idx, axis=1)
+            decode_state_pages = jax.lax.dynamic_update_slice_in_dim(
+                decode_state_pages, prefix_page, dest_page_idx, axis=1
+            )
             return decode_state_pages, prefix_pages, current_page_map
 
           decode_state_cache, _, _ = jax.lax.fori_loop(
@@ -1292,9 +1300,13 @@ class MaxEngine(engine_api.Engine):
     for i in range(num_prompts):
       start_idx = start_indices[i]
       slot = slots[i]
-      inserted_cache = jax.tree_util.tree_map_with_path(copy, cache_unboxed, inserted_cache, self.kv_cache_annotations_named)
+      inserted_cache = jax.tree_util.tree_map_with_path(
+          copy, cache_unboxed, inserted_cache, self.kv_cache_annotations_named
+      )
       inserted_logits = jax.lax.dynamic_update_index_in_dim(inserted_logits, unboxed_prefix["logits"][i, ...], slot, 0)
-      inserted_next_pos = jax.lax.dynamic_update_index_in_dim(inserted_next_pos, unboxed_prefix["next_pos"][i, ...], slot, 0)
+      inserted_next_pos = jax.lax.dynamic_update_index_in_dim(
+          inserted_next_pos, unboxed_prefix["next_pos"][i, ...], slot, 0
+      )
       inserted_generated_tokens = jax.lax.dynamic_update_index_in_dim(
           inserted_generated_tokens,
           unboxed_prefix["generated_tokens"][i, ...],

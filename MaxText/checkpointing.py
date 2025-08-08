@@ -70,17 +70,11 @@ def _load_full_state_from_path(
 
   if enable_orbax_v1:
     if source_checkpoint_layout == "orbax":
-      context = ocp_v1.Context(
-          checkpoint_layout=ocp_v1.options.CheckpointLayout.ORBAX
-          )
+      context = ocp_v1.Context(checkpoint_layout=ocp_v1.options.CheckpointLayout.ORBAX)
     elif source_checkpoint_layout == "safetensors":
-      context = ocp_v1.Context(
-          checkpoint_layout=ocp_v1.options.CheckpointLayout.SAFETENSORS
-          )
+      context = ocp_v1.Context(checkpoint_layout=ocp_v1.options.CheckpointLayout.SAFETENSORS)
     else:
-      raise ocp_v1.errors.InvalidLayoutError(
-          f"Unknown checkpoint layout: {source_checkpoint_layout}"
-          )
+      raise ocp_v1.errors.InvalidLayoutError(f"Unknown checkpoint layout: {source_checkpoint_layout}")
     if ocp_v1.is_orbax_checkpoint(path):
       state = ocp_v1.load_pytree(path, abstract_unboxed_pre_state)
     else:
@@ -308,7 +302,7 @@ def load_state_if_possible(
     checkpoint_storage_concurrent_gb: concurrent GB for checkpoint byte I/O.
     enable_orbax_v1: bool flag for enabling Orbax v1.
     checkpoint_conversion_fn: function for converting checkpoint to Orbax v1.
-    source_checkpoint_layout: Optional checkpoint context to use for loading, 
+    source_checkpoint_layout: Optional checkpoint context to use for loading,
     provided in string format with the default being "orbax".
 
   Returns:
@@ -382,9 +376,7 @@ def load_state_if_possible(
     )
     return None, restored_params
   elif load_full_state_from_path != "":
-    max_logging.log(
-        f"Loading full state from path: {load_full_state_from_path}"
-    )
+    max_logging.log(f"Loading full state from path: {load_full_state_from_path}")
     restored_state = _load_full_state_from_path(
         path=load_full_state_from_path,
         abstract_unboxed_pre_state=abstract_unboxed_pre_state,
@@ -510,7 +502,9 @@ def save_checkpoint(checkpoint_manager, step, state, config=None, data_iterator=
       )
 
   # specify chunk_byte_size to force orbax to control maximum file size in checkpoint
-  chunk_byte_size = config.checkpoint_storage_target_data_file_size_bytes if config else DEFAULT_OCDBT_TARGET_DATA_FILE_SIZE
+  chunk_byte_size = (
+      config.checkpoint_storage_target_data_file_size_bytes if config else DEFAULT_OCDBT_TARGET_DATA_FILE_SIZE
+  )
 
   checkpoint_args = ocp.args.PyTreeSave(
       item=state,

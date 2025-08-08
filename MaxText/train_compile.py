@@ -97,7 +97,9 @@ def get_shaped_inputs(topology_mesh, config):
   shaped_rng = jax.ShapeDtypeStruct(example_rng.shape, example_rng.dtype)
 
   # Shaped state
-  abstract_state, _, state_mesh_shardings = maxtext_utils.get_abstract_state(model, tx, config, example_rng, topology_mesh)
+  abstract_state, _, state_mesh_shardings = maxtext_utils.get_abstract_state(
+      model, tx, config, example_rng, topology_mesh
+  )
 
   # Shaped batch
   shaped_batch = maxtext_utils.get_shaped_batch(config)
@@ -141,7 +143,9 @@ def save_compiled(compiled, save_name):
 
 def main(argv: Sequence[str]) -> None:
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
-  os.environ["LIBTPU_INIT_ARGS"] = os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
+  os.environ["LIBTPU_INIT_ARGS"] = (
+      os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
+  )
   print("Starting train_compile.py...", flush=True)
 
   # Parse and validate configuration
@@ -162,8 +166,10 @@ def main(argv: Sequence[str]) -> None:
   data_sharding = maxtext_utils.get_input_data_sharding(config, topology_mesh)
 
   # Get function to compile and shardings
-  func_to_compile, in_shard, out_shard, static_argnums, donate_argnums = maxtext_utils.get_functional_train_with_signature(
-      train.train_step, data_sharding, state_mesh_shardings, model, config
+  func_to_compile, in_shard, out_shard, static_argnums, donate_argnums = (
+      maxtext_utils.get_functional_train_with_signature(
+          train.train_step, data_sharding, state_mesh_shardings, model, config
+      )
   )
 
   # Compile

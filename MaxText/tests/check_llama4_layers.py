@@ -234,8 +234,12 @@ class Llama4VisionPixelShuffleMLPTest(unittest.TestCase):
     # Create new params with copied weights
     updated_params = jax.tree_util.tree_map(lambda x: x, params)
     # Copy weights for both MLP layers
-    updated_params["params"]["pixel_shuffle_mlp"]["vit_pixel_shuffle_mlp_fc1"]["kernel"] = to_jax(pt_model.mlp.fc1.weight).T
-    updated_params["params"]["pixel_shuffle_mlp"]["vit_pixel_shuffle_mlp_fc2"]["kernel"] = to_jax(pt_model.mlp.fc2.weight).T
+    updated_params["params"]["pixel_shuffle_mlp"]["vit_pixel_shuffle_mlp_fc1"]["kernel"] = to_jax(
+        pt_model.mlp.fc1.weight
+    ).T
+    updated_params["params"]["pixel_shuffle_mlp"]["vit_pixel_shuffle_mlp_fc2"]["kernel"] = to_jax(
+        pt_model.mlp.fc2.weight
+    ).T
     return updated_params
 
   def test_pixel_shuffle_mlp(self):
@@ -847,7 +851,9 @@ class Llama4VisionEncoderTest(unittest.TestCase):
       updated_params["params"][f"layers_{i}"]["input_layer_norm"]["scale"] = to_jax(
           pt_model.layers[i].input_layernorm.weight
       )
-      updated_params["params"][f"layers_{i}"]["input_layer_norm"]["bias"] = to_jax(pt_model.layers[i].input_layernorm.bias)
+      updated_params["params"][f"layers_{i}"]["input_layer_norm"]["bias"] = to_jax(
+          pt_model.layers[i].input_layernorm.bias
+      )
       updated_params["params"][f"layers_{i}"]["post_attention_layer_norm"]["scale"] = to_jax(
           pt_model.layers[i].post_attention_layernorm.weight
       )

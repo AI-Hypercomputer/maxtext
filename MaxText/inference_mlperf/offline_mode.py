@@ -285,7 +285,11 @@ def get_warmup_samples(dataset):
         if start < sample.true_length <= end:
           warmup_samples[group_idx].append(sample)
           log.debug(
-              "Added warmup sample of length %d for (%d, %d) bucket for group %d", sample.true_length, start, end, group_idx
+              "Added warmup sample of length %d for (%d, %d) bucket for group %d",
+              sample.true_length,
+              start,
+              end,
+              group_idx,
           )
           break
     warmup_samples[group_idx].extend(group_val[:50])
@@ -334,7 +338,10 @@ class SUT:
         self._query_batches[group_idx].append(input_data)
     num_grouped_queries = list(map(len, self._query_batches.values()))
     log.info(
-        "Issue %d queries - classified queries %s num_skipped %d", num_queries, str(num_grouped_queries), num_skipped_queries
+        "Issue %d queries - classified queries %s num_skipped %d",
+        num_queries,
+        str(num_grouped_queries),
+        num_skipped_queries,
     )
 
     assert len(self._queries) - num_skipped_queries == sum(

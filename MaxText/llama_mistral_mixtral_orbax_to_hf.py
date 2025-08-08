@@ -150,7 +150,9 @@ def convert_state_to_hf(training_state, model_size):
     hf_model_params[f"model.layers.{layer_int}.self_attn.k_proj.weight"] = torch.tensor(
         np.asarray(
             unpermute_from_match_maxtext_rope(
-                training_state.params["params"]["decoder"]["layers"]["self_attention"]["key"]["kernel"][:, layer_int, :, :],
+                training_state.params["params"]["decoder"]["layers"]["self_attention"]["key"]["kernel"][
+                    :, layer_int, :, :
+                ],
                 model_size,
             )
             .reshape(base_num_query_heads * head_dim, base_num_kv_heads * head_dim)

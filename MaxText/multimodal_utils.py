@@ -85,7 +85,7 @@ class PreprocessorOutput:
 def resize_image(image, model_name):
   """resize image if needed"""
   image_sizes = {
-      #resize for vanilla llama4 support, will be removed once size support is added to multimodal llama4
+      # resize for vanilla llama4 support, will be removed once size support is added to multimodal llama4
       "llama4": (LLAMA4_TILE_SIZE, LLAMA4_TILE_SIZE),
   }
   model_prefix = model_name.split("-")[0]
@@ -423,9 +423,7 @@ def reformat_prompt(prompt, image_placeholder, model_name):
       prompt = prompt.replace(image_placeholder, LLAMA4_IMAGE_PLACEHOLDER_IN_PROMPT)
     if not LLAMA4_IMAGE_PLACEHOLDER_IN_PROMPT in prompt:
       prompt = LLAMA4_IMAGE_PLACEHOLDER_IN_PROMPT + prompt
-    formatted_prompt = (
-        f"<|begin_of_text|><|header_start|>user<|header_end|>\n\n{prompt}<|eot|><|header_start|>assistant<|header_end|>\n\n"
-    )
+    formatted_prompt = f"<|begin_of_text|><|header_start|>user<|header_end|>\n\n{prompt}<|eot|><|header_start|>assistant<|header_end|>\n\n"
     return formatted_prompt
   else:
     return prompt
@@ -452,11 +450,15 @@ def get_image_offsets(model_name, processor_output: PreprocessorOutput | None):
     assert processor_output.aspect_ratios is not None, "Aspect ratio must be provided for Llama4 image fusion."
     image_height, image_width = LLAMA4_TILE_SIZE, LLAMA4_TILE_SIZE
     downsample_ratio = int(round(1.0 / (LLAMA4_PIXEL_SHUFFLE_RATIO**2)))
-    num_patches_per_chunk = int((image_height // LLAMA4_PATCH_SIZE) * (image_width // LLAMA4_PATCH_SIZE) // downsample_ratio)
+    num_patches_per_chunk = int(
+        (image_height // LLAMA4_PATCH_SIZE) * (image_width // LLAMA4_PATCH_SIZE) // downsample_ratio
+    )
     num_images = processor_output.aspect_ratios.shape[0]
     image_tokens_count = 0
     for image_index in range(num_images):
-      image_tokens_count += get_num_tokens_for_this_image(processor_output.aspect_ratios[image_index], num_patches_per_chunk)
+      image_tokens_count += get_num_tokens_for_this_image(
+          processor_output.aspect_ratios[image_index], num_patches_per_chunk
+      )
     images_offsets = image_tokens_count - num_images
     return images_offsets  # -num_images because replacing every <|image|> tokens.
   else:
@@ -491,7 +493,9 @@ def add_extra_tokens_for_images_llama4(tokens, processor_output: PreprocessorOut
 
   image_height, image_width = LLAMA4_TILE_SIZE, LLAMA4_TILE_SIZE
   downsample_ratio = int(round(1.0 / (LLAMA4_PIXEL_SHUFFLE_RATIO**2)))
-  num_patches_per_chunk = int((image_height // LLAMA4_PATCH_SIZE) * (image_width // LLAMA4_PATCH_SIZE) // downsample_ratio)
+  num_patches_per_chunk = int(
+      (image_height // LLAMA4_PATCH_SIZE) * (image_width // LLAMA4_PATCH_SIZE) // downsample_ratio
+  )
 
   image_index = 0
   for local_image_index, split_part in enumerate(sublists):

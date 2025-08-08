@@ -164,10 +164,10 @@ def kv_cache_as_linen(
     prefill_cache_logical_axis_names: AxisNames = (CACHE_BATCH_PREFILL, CACHE_SEQUENCE, CACHE_HEADS, CACHE_KV),
     cache_logical_axis_names: AxisNames = (CACHE_BATCH, CACHE_SEQUENCE, CACHE_HEADS, CACHE_KV),
     cache_scale_logical_axis_names: AxisNames = (
-          CACHE_SCALE_BATCH,
-          CACHE_SCALE_SEQUENCE,
-          CACHE_SCALE_HEADS,
-          CACHE_SCALE_KV,
+        CACHE_SCALE_BATCH,
+        CACHE_SCALE_SEQUENCE,
+        CACHE_SCALE_HEADS,
+        CACHE_SCALE_KV,
     ),
     prefill_cache_axis_order: AxisIdxes = (1, 2, 0, 3),
     ar_cache_axis_order: AxisIdxes = (1, 2, 0, 3),
@@ -359,12 +359,12 @@ class KVCache(nnx.Module):
     cache_shape_value = transpose_tuple(cache_logical_shape, self.prefill_cache_axis_order)
 
     self.cached_prefill_key = nnx.Cache(
-      jnp.zeros(cache_shape_key, dtype=dtype),
-      sharding=cache_axis_names,
+        jnp.zeros(cache_shape_key, dtype=dtype),
+        sharding=cache_axis_names,
     )
     self.cached_prefill_value = nnx.Cache(
-      jnp.zeros(cache_shape_value, dtype=dtype),
-      sharding=cache_axis_names,
+        jnp.zeros(cache_shape_value, dtype=dtype),
+        sharding=cache_axis_names,
     )
 
     if model_mode == MODEL_MODE_PREFILL:
@@ -373,8 +373,8 @@ class KVCache(nnx.Module):
       segment_id_axis_names = (CACHE_BATCH, CACHE_SEQUENCE)
 
     self.cache_prefill_segment_id = nnx.Cache(
-      jnp.zeros((cache_logical_shape[0], cache_length), dtype=jnp.int32),
-      sharding=segment_id_axis_names,
+        jnp.zeros((cache_logical_shape[0], cache_length), dtype=jnp.int32),
+        sharding=segment_id_axis_names,
     )
 
     if self.kv_quant:
@@ -387,12 +387,12 @@ class KVCache(nnx.Module):
       cache_value_scale_shape = transpose_tuple(cache_scale_logical_shape, self.prefill_cache_axis_order)
 
       self.cached_prefill_key_scale = nnx.Cache(
-        jnp.zeros(cache_key_scale_shape, dtype=jnp.bfloat16),
-        sharding=cache_scale_axis_names,
+          jnp.zeros(cache_key_scale_shape, dtype=jnp.bfloat16),
+          sharding=cache_scale_axis_names,
       )
       self.cached_prefill_value_scale = nnx.Cache(
-        jnp.zeros(cache_value_scale_shape, dtype=jnp.bfloat16),
-        sharding=cache_scale_axis_names,
+          jnp.zeros(cache_value_scale_shape, dtype=jnp.bfloat16),
+          sharding=cache_scale_axis_names,
       )
     else:
       self.cached_prefill_key_scale = None
@@ -426,8 +426,8 @@ class KVCache(nnx.Module):
 
     # TODO(b/339703100): investigate the issue why with_logical_partitioning doesn't enforce sharding
     self.cached_ar_key = nnx.Cache(
-      jnp.zeros(cache_shape_key, dtype=dtype),
-      sharding=cache_axis_names,
+        jnp.zeros(cache_shape_key, dtype=dtype),
+        sharding=cache_axis_names,
     )
     self.cached_ar_key.value = nn.with_logical_constraint(
         self.cached_ar_key.value,
@@ -435,8 +435,8 @@ class KVCache(nnx.Module):
     )
 
     self.cached_ar_value = nnx.Cache(
-      jnp.zeros(cache_shape_value, dtype=dtype),
-      sharding=cache_axis_names,
+        jnp.zeros(cache_shape_value, dtype=dtype),
+        sharding=cache_axis_names,
     )
     self.cached_ar_value.value = nn.with_logical_constraint(
         self.cached_ar_value.value,
@@ -448,13 +448,13 @@ class KVCache(nnx.Module):
     else:
       segment_id_axis_names = (CACHE_BATCH, CACHE_SEQUENCE)
     self.cache_ar_segment_id = nnx.Cache(
-      jnp.zeros((cache_logical_shape[0], cache_length), dtype=jnp.int32),
-      sharding=segment_id_axis_names,
+        jnp.zeros((cache_logical_shape[0], cache_length), dtype=jnp.int32),
+        sharding=segment_id_axis_names,
     )
 
     self.cached_ar_lengths = nnx.Cache(
-      jnp.zeros((cache_logical_shape[0],), dtype=jnp.int32),
-      sharding=(CACHE_BATCH,),
+        jnp.zeros((cache_logical_shape[0],), dtype=jnp.int32),
+        sharding=(CACHE_BATCH,),
     )
 
     if self.kv_quant:
@@ -467,12 +467,12 @@ class KVCache(nnx.Module):
       cache_value_scale_shape = transpose_tuple(cache_scale_logical_shape, self.ar_cache_axis_order)
 
       self.cached_ar_key_scale = nnx.Cache(
-        jnp.zeros(cache_key_scale_shape, dtype=jnp.bfloat16),
-        sharding=cache_scale_axis_names,
+          jnp.zeros(cache_key_scale_shape, dtype=jnp.bfloat16),
+          sharding=cache_scale_axis_names,
       )
       self.cached_ar_value_scale = nnx.Cache(
-        jnp.zeros(cache_value_scale_shape, dtype=jnp.bfloat16),
-        sharding=cache_scale_axis_names,
+          jnp.zeros(cache_value_scale_shape, dtype=jnp.bfloat16),
+          sharding=cache_scale_axis_names,
       )
     else:
       self.cached_ar_key_scale = None
@@ -481,11 +481,10 @@ class KVCache(nnx.Module):
     self.cache_ar_index = nnx.Cache(
         jnp.zeros((1,), dtype=jnp.int32),
         sharding=(),
-      )
+    )
 
   def _get_ar_cache_vars(self):
     return self.ar_key_vars, self.ar_value_vars, self.cache_ar_segment_id, self.cache_ar_index, self.cached_ar_lengths
-
 
   def kv_cache_chunked_prefill(
       self, key: Array, value: Array, decoder_segment_ids: Array, previous_chunk: None | Array = None
@@ -609,7 +608,9 @@ class KVCache(nnx.Module):
 
     if self.kv_quant:
       prefill_key_axis_names = transpose_tuple(self.cache_logical_axis_names, self.prefill_cache_axis_order)
-      key_shaped_for_cache, key_scale_shaped_for_cache = self.kv_quant.quantize(key_shaped_for_cache, prefill_key_axis_names)
+      key_shaped_for_cache, key_scale_shaped_for_cache = self.kv_quant.quantize(
+          key_shaped_for_cache, prefill_key_axis_names
+      )
       value_shaped_for_cache, value_scale_shaped_for_cache = self.kv_quant.quantize(
           value_shaped_for_cache, prefill_key_axis_names
       )

@@ -49,9 +49,8 @@ class Transformer(nn.Module):
   # We generally use MaxText.common_types.MODEL_MODE_TRAIN or
   # MaxText.common_types.MODEL_MODE_PREFILL for initializations here.
   # TODO: Make model_mode required after confirming no users are affected.
-  model_mode: str = MODEL_MODE_TRAIN # May be different than the model_mode passed to __call__
+  model_mode: str = MODEL_MODE_TRAIN  # May be different than the model_mode passed to __call__
   # pylint: enable=attribute-defined-outside-init
-
 
   def setup(self):
     """Initialize shared_embedding & decoder layers."""
@@ -191,7 +190,7 @@ class ZeroOneTransformer(nn.Module):
   # We generally use MaxText.common_types.MODEL_MODE_TRAIN or
   # MaxText.common_types.MODEL_MODE_PREFILL for initializations here.
   # TODO: Make model_mode required after confirming no users are affected.
-  model_mode: str = MODEL_MODE_TRAIN # May be different than the model_mode passed to __call__
+  model_mode: str = MODEL_MODE_TRAIN  # May be different than the model_mode passed to __call__
 
   def setup(self):
     self.model = Transformer(self.config, self.mesh, self.quant, self.model_mode)

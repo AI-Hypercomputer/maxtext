@@ -71,9 +71,7 @@ def to_nnx_var(col: str, x: meta.AxisMetadata | Any) -> variablelib.Variable:
   """Convert a Linen variable to an NNX variable."""
   vtype = variablelib.variable_type_from_name(col, allow_register=True)
   if isinstance(x, nnx.bridge.NNXMeta):
-    assert vtype == x.var_type, (
-      f"Type stored in NNXMeta {x.var_type} != type inferred from collection name {vtype}"
-    )
+    assert vtype == x.var_type, f"Type stored in NNXMeta {x.var_type} != type inferred from collection name {vtype}"
     return x.to_nnx_variable()
   if isinstance(x, meta.AxisMetadata):
     x_metadata = vars(x)
@@ -94,20 +92,20 @@ def _recursive_merge(dict1, dict2):
 def linen_vars_to_nnx_attrs(variables: tp.Mapping[str, Any]) -> dict[str, Any]:
   """Convert a dict of Linen-style variables to NNX variables."""
   nnx_vars = jax.tree_util.tree_map_with_path(
-    lambda kp, x: to_nnx_var(get_col_name(kp), x),
-    variables,
-    is_leaf=lambda x: not isinstance(x, dict),
+      lambda kp, x: to_nnx_var(get_col_name(kp), x),
+      variables,
+      is_leaf=lambda x: not isinstance(x, dict),
   )
 
   flat_paths: dict[tuple, tp.Any] = {}
 
-  for col_name, col_variables in nnx_vars.items(): # pylint: disable=unused-variable
+  for col_name, col_variables in nnx_vars.items():  # pylint: disable=unused-variable
     for path, variable in nnx.traversals.flatten_mapping(col_variables).items():
       if path in flat_paths:
         raise ValueError(
-          f"Found duplicate variable path {path} with variables "
-          f"{flat_paths[path]} and {variable}. "
-          "This is not allowed in NNX."
+            f"Found duplicate variable path {path} with variables "
+            f"{flat_paths[path]} and {variable}. "
+            "This is not allowed in NNX."
         )
       flat_paths[path] = variable
 
@@ -135,7 +133,7 @@ def nnx_attrs_to_linen_vars(nnx_attrs: dict) -> dict:
 def _set_initializing(module: Module, initializing: bool):
   for _, value in graph.iter_graph(module):
     if isinstance(value, Object):
-      value._object__state._initializing = initializing # pylint: disable=protected-access
+      value._object__state._initializing = initializing  # pylint: disable=protected-access
 
 
 def lazy_init(fn: Module | tp.Callable[..., tp.Any], *args, **kwargs):
@@ -188,9 +186,9 @@ class ToNNX(Module):
   """
 
   def __init__(
-    self,
-    module: linen.Module,
-    rngs: Rngs | jax.Array | None = None,
+      self,
+      module: linen.Module,
+      rngs: Rngs | jax.Array | None = None,
   ):
     self.to_nnx__module = module
 
@@ -216,11 +214,11 @@ class ToNNX(Module):
     return super().__getattribute__(name)
 
   def __call__(
-    self,
-    *args: Any,
-    rngs: Rngs | jax.Array | None = None,
-    method: tp.Callable[..., Any] | str | None = None,
-    **kwargs: Any,
+      self,
+      *args: Any,
+      rngs: Rngs | jax.Array | None = None,
+      method: tp.Callable[..., Any] | str | None = None,
+      **kwargs: Any,
   ) -> Any:
     # Shape-based lazy init of the flax variables
     if rngs is None:
@@ -235,16 +233,12 @@ class ToNNX(Module):
     if "params" not in _rngs and "default" in _rngs:
       _rngs["params"] = _rngs.pop("default")
     if self._object__state.initializing:
-      out, updates = self.to_nnx__module.init_with_output(
-        _rngs, *args, method=method, **kwargs
-      )
+      out, updates = self.to_nnx__module.init_with_output(_rngs, *args, method=method, **kwargs)
     else:
       nnx_attrs = {
-        k: v
-        for k, v in vars(self).items()
-        if not k.startswith("to_nnx__")
-        and not k.startswith("_pytree__")
-        and not k.startswith("_object__")
+          k: v
+          for k, v in vars(self).items()
+          if not k.startswith("to_nnx__") and not k.startswith("_pytree__") and not k.startswith("_object__")
       }
       variables = nnx_attrs_to_linen_vars(nnx_attrs)
 
@@ -254,14 +248,11 @@ class ToNNX(Module):
         mutable = m.scope.mutable
         if "mutable" in kwargs and kwargs["mutable"] != mutable:
           raise ValueError(
-            f"Multiple `mutable` arguments detected: {mutable} at top level vs "
-            f"{kwargs['mutable']} in ToNNX() call"
+              f"Multiple `mutable` arguments detected: {mutable} at top level vs " f"{kwargs['mutable']} in ToNNX() call"
           )
         kwargs["mutable"] = mutable
 
-      out = self.to_nnx__module.apply(
-        variables, *args, rngs=_rngs, method=method, **kwargs
-      )
+      out = self.to_nnx__module.apply(variables, *args, rngs=_rngs, method=method, **kwargs)
 
       # Split out the updates if `mutable` is passed into the Flax module
       if kwargs.get("mutable", False) is not False:
@@ -285,12 +276,8 @@ class ToNNX(Module):
 
 def linen_rngs_dict(linen_module: linen.Module, add_default: bool = False):
   """Given a module, split out one of its every active RNG key collections."""
-  assert linen_module.scope is not None, (
-    "linen_rngs_dict() must be called inside a Linen module."
-  )
-  rngs: dict[str, tp.Any] = {
-    name: linen_module.make_rng(name) for name in linen_module.scope.rngs.keys()
-  }
+  assert linen_module.scope is not None, "linen_rngs_dict() must be called inside a Linen module."
+  rngs: dict[str, tp.Any] = {name: linen_module.make_rng(name) for name in linen_module.scope.rngs.keys()}
   if add_default and "default" not in rngs:
     rngs["default"] = 0
   return rngs
@@ -306,9 +293,7 @@ def _get_module_method(module, method: tp.Callable[..., Any] | str | None):
     method = getattr(type(module), attribute_name)
     if not callable(method):
       class_name = type(module).__name__
-      raise TypeError(
-        f"'{class_name}.{attribute_name}' must be a callable, got {type(method)}."
-      )
+      raise TypeError(f"'{class_name}.{attribute_name}' must be a callable, got {type(method)}.")
   if not callable(method):
     class_name = type(module).__name__
     raise TypeError(f"'{method}' must be a callable, got {type(method)}.")
@@ -318,6 +303,7 @@ def _get_module_method(module, method: tp.Callable[..., Any] | str | None):
 
 def _enable_linen_module_paths(module: Module):
   """Ensure that linen module_path is correct when in NNX."""
+
   def wrap(call_fn, name: str):
     def wrapped(*args, **kwargs):
       if not linen.module._context.module_stack:  # pylint: disable=W0212
@@ -331,14 +317,19 @@ def _enable_linen_module_paths(module: Module):
         return call_fn(*args, **kwargs)
       finally:
         nn_module.scope.path = old_path
+
     return wrapped
 
   for path, node in nnx.iter_graph(module):
     # Only enable it on non-root nnx modules.
     if path and isinstance(node, nnx.Module):
-      node.__class__ = type(node.__class__.__name__, (node.__class__,), {
-        '__call__': wrap(node.__class__.__call__, str(path[-1])),
-      })
+      node.__class__ = type(
+          node.__class__.__name__,
+          (node.__class__,),
+          {
+              "__call__": wrap(node.__class__.__call__, str(path[-1])),
+          },
+      )
 
 
 class ToLinen(linen.Module):
@@ -387,17 +378,13 @@ class ToLinen(linen.Module):
   metadata_fn: tp.Callable[[variablelib.VariableState], tp.Any] | None = to_linen_var
 
   @linen.compact
-  def __call__(
-    self, *args, nnx_method: tp.Callable[..., Any] | str | None = None, **kwargs
-  ):
+  def __call__(self, *args, nnx_method: tp.Callable[..., Any] | str | None = None, **kwargs):
     module_kwargs = dict(self.kwargs)
     maybe_add_default = not self.is_initializing()
 
     def _module_kwargs():
       if not self.skip_rng:
-        module_kwargs["rngs"] = nnx.Rngs(
-          **linen_rngs_dict(self, add_default=maybe_add_default)
-        )
+        module_kwargs["rngs"] = nnx.Rngs(**linen_rngs_dict(self, add_default=maybe_add_default))
       return module_kwargs
 
     # init codepath
@@ -414,15 +401,17 @@ class ToLinen(linen.Module):
     # create the nnx module
     module = self.nnx_class(*self.args, **_module_kwargs())
     _enable_linen_module_paths(module)
+
     # update nnx module from linen variables
     def maybe_unbox(x):
       if isinstance(x, meta.AxisMetadata):
         return x.unbox()
       return x
+
     states = jtu.tree_map(
-      maybe_unbox,
-      list(self.variables.values()),
-      is_leaf=lambda x: isinstance(x, meta.AxisMetadata),
+        maybe_unbox,
+        list(self.variables.values()),
+        is_leaf=lambda x: isinstance(x, meta.AxisMetadata),
     )
     if not states:
       states = ({},)
@@ -464,38 +453,36 @@ class ToLinen(linen.Module):
         def _to_linen_var(x):
           if isinstance(x, nnx.VariableState):
             if self.metadata_fn is not None:
-              return self.metadata_fn(x) # pylint: disable=too-many-function-args
+              return self.metadata_fn(x)  # pylint: disable=too-many-function-args
             else:
               return x.value
           return x
 
         collection_state = nnx.traversals.unflatten_mapping(flat_state)
         collection_state = jax.tree.map(
-          _to_linen_var,
-          collection_state,
-          is_leaf=lambda x: isinstance(x, nnx.VariableState),
+            _to_linen_var,
+            collection_state,
+            is_leaf=lambda x: isinstance(x, nnx.VariableState),
         )
         for k, v in collection_state.items():
           self.put_variable(collection, k, v)
 
 
 def to_linen(
-  nnx_class: tp.Callable[..., Module],
-  *args,
-  metadata_fn: (
-    tp.Callable[[variablelib.VariableState], tp.Any] | None
-  ) = to_linen_var,
-  name: str | None = None,
-  skip_rng: bool = False,
-  abstract_init: bool = True,
-  **kwargs,
+    nnx_class: tp.Callable[..., Module],
+    *args,
+    metadata_fn: tp.Callable[[variablelib.VariableState], tp.Any] | None = to_linen_var,
+    name: str | None = None,
+    skip_rng: bool = False,
+    abstract_init: bool = True,
+    **kwargs,
 ):
   """Shortcut of `nnx.bridge.ToLinen` if user is not changing any of its default fields."""
   return ToLinen(
-    nnx_class,
-    args=args,
-    kwargs=FrozenDict(kwargs),
-    metadata_fn=metadata_fn,
-    skip_rng=skip_rng,
-    name=name,
+      nnx_class,
+      args=args,
+      kwargs=FrozenDict(kwargs),
+      metadata_fn=metadata_fn,
+      skip_rng=skip_rng,
+      name=name,
   )

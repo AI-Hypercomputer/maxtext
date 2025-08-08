@@ -731,7 +731,9 @@ class AttentionTest(parameterized.TestCase):
       attention_w_layout_full_this_idx = attention_w_layout_full[:, idx : idx + 1, :]
       self.assertTrue(attention_w_layout_full_this_idx.shape == attention_w_layout_idx.shape)
       self.assertTrue(
-          jax.numpy.allclose(attention_w_layout_full_this_idx, attention_w_layout_idx, rtol=rtol, atol=atol, equal_nan=False)
+          jax.numpy.allclose(
+              attention_w_layout_full_this_idx, attention_w_layout_idx, rtol=rtol, atol=atol, equal_nan=False
+          )
       )
 
   @pytest.mark.tpu_only
@@ -848,7 +850,9 @@ class AttentionTest(parameterized.TestCase):
         model_mode=MODEL_MODE_PREFILL,
     )
     self.assertTrue(
-        jax.numpy.allclose(attention_w_reshape_q_full[:, :prefill_length, :], attention_w_reshape_q_prefill, equal_nan=False)
+        jax.numpy.allclose(
+            attention_w_reshape_q_full[:, :prefill_length, :], attention_w_reshape_q_prefill, equal_nan=False
+        )
     )
 
     self.assertTrue(jax.numpy.allclose(attention_wo_reshape_q_prefill, attention_w_reshape_q_prefill, equal_nan=False))
@@ -1014,7 +1018,10 @@ class AttentionTest(parameterized.TestCase):
     # Test if sliding window attention with max_target_length size is the same as global attention
     self.assertTrue(
         jax.numpy.allclose(
-            sliding_window_output_full.astype(jnp.bfloat16), global_attn_output.astype(jnp.bfloat16), rtol=1e-04, atol=1e-04
+            sliding_window_output_full.astype(jnp.bfloat16),
+            global_attn_output.astype(jnp.bfloat16),
+            rtol=1e-04,
+            atol=1e-04,
         )
     )
 
