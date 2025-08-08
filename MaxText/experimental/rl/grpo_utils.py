@@ -26,7 +26,15 @@ from MaxText.inference.offline_engine import InputData
 
 
 def compute_log_probs(
-    model, params, inputs, inputs_position, inputs_segmentation, completion_segmentation, config, is_train=False, rngs=None
+    model,
+    params,
+    inputs,
+    inputs_position,
+    inputs_segmentation,
+    completion_segmentation,
+    config,
+    is_train=False,
+    rngs=None,
 ):
   """Computes per-token log-probabilities for a sequence of tokens.
 
@@ -104,7 +112,9 @@ def generate_offline_completions(config, tokenizer_model, inference_engine, data
     The input `data` dictionary updated with the generated completions,
     segmentations, positions, and log-probabilities.
   """
-  data[config.train_data_columns] = np.asarray(jnp.repeat(data[config.train_data_columns], config.num_generations, axis=0))
+  data[config.train_data_columns] = np.asarray(
+      jnp.repeat(data[config.train_data_columns], config.num_generations, axis=0)
+  )
   data[f"{config.train_data_columns}_true_length"] = np.asarray(
       jnp.repeat(data[f"{config.train_data_columns}_true_length"], config.num_generations, axis=0)
   )
@@ -112,7 +122,9 @@ def generate_offline_completions(config, tokenizer_model, inference_engine, data
   for i, d in enumerate(data[config.train_data_columns]):
     input_data.append(
         InputData(
-            id=f"input_{i}", tokens=np.array(d), true_length=np.array(data[f"{config.train_data_columns}_true_length"][i])[0]
+            id=f"input_{i}",
+            tokens=np.array(d),
+            true_length=np.array(data[f"{config.train_data_columns}_true_length"][i])[0],
         )
     )
 
@@ -279,7 +291,10 @@ def pad_or_trim(arr, max_target_length, pad_token):
     A 2D numpy array of shape `(len(arr), max_target_length)`.
   """
   padded = np.array(
-      [np.pad(seq[:max_target_length], (0, max(0, max_target_length - len(seq))), constant_values=pad_token) for seq in arr]
+      [
+          np.pad(seq[:max_target_length], (0, max(0, max_target_length - len(seq))), constant_values=pad_token)
+          for seq in arr
+      ]
   )
   return padded
 
