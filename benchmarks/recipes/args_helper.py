@@ -17,6 +17,8 @@ import argparse
 import os
 import sys
 
+from benchmarks.benchmark_utils import get_xpk_path
+
 # Needed to import files from the parent directory
 parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.append(parent_dir)
@@ -37,7 +39,7 @@ def _handle_delete(
       user: User string
       **kwargs: Optional keyword arguments, such as xpk_path
   """
-  xpk_path = kwargs.get("xpk_path", "xpk")  # Default to "xpk" if not provided
+  xpk_path = kwargs.get("xpk_path", get_xpk_path())  # Default to "xpk" if not provided
   first_three_chars = user[:3]
   delete_command = (
       f"python3 {xpk_path}/xpk.py workload delete "
@@ -61,7 +63,7 @@ def handle_delete_specific_workload(
       workload_name: workload name
       **kwargs: Optional keyword arguments, such as xpk_path
   """
-  xpk_path = kwargs.get("xpk_path", "xpk")  # Default to "xpk" if not provided
+  xpk_path = kwargs.get("xpk_path", get_xpk_path())
   delete_command = (
       f"python3 {xpk_path}/xpk.py workload delete "
       f"--project={cluster_config.project} --cluster={cluster_config.cluster_name}"
