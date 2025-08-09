@@ -115,7 +115,7 @@ def setup_maxtext_model(config):
   quant = quantizations.configure_quantization(config)
   devices_array = maxtext_utils.create_device_mesh(config)
   mesh = Mesh(devices_array, config.mesh_axes)
-  maxtext_model = models.Transformer(config=config, mesh=mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
+  maxtext_model = models.transformer_as_linen(config=config, mesh=mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
   state, _ = maxtext_utils.setup_decode_state(maxtext_model, config, init_rng, mesh, None)
   return maxtext_model, state, init_rng
 

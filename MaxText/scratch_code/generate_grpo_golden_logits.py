@@ -81,12 +81,12 @@ class GRPOTest(unittest.TestCase):
     devices_array = maxtext_utils.create_device_mesh(self.cfg)
     mesh = Mesh(devices_array, self.cfg.mesh_axes)
     # With checkpoint
-    self.model = models.Transformer(config=self.cfg, mesh=mesh, quant=None, model_mode=MODEL_MODE_TRAIN)
+    self.model = models.transformer_as_linen(config=self.cfg, mesh=mesh, quant=None, model_mode=MODEL_MODE_TRAIN)
     self.state, state_mesh_annotations = maxtext_utils.setup_decode_state(self.model, self.cfg, self.rng, mesh, None)
     self.state_mesh_shardings = nn.logical_to_mesh_sharding(state_mesh_annotations, mesh, self.cfg.logical_axis_rules)
     self.data_sharding = jax.NamedSharding(mesh, jax.sharding.PartitionSpec(None))
     # Without checkpoint
-    self.model_no_ckpt_loading = models.Transformer(
+    self.model_no_ckpt_loading = models.transformer_as_linen(
         config=self.cfg_no_ckpt_loading, mesh=mesh, quant=None, model_mode=MODEL_MODE_TRAIN
     )
     self.state_no_ckpt_loading, _ = maxtext_utils.setup_decode_state(
