@@ -101,7 +101,9 @@ def main(argv: Sequence[str]) -> None:
   prefill_length = config.max_prefill_predict_length
   processor_output = multimodal_utils.PreprocessorOutput()
   if config.use_multimodal:
-    text = multimodal_utils.reformat_prompt(text, image_placeholder=config.image_placeholder, model_name=config.model_name)
+    text = multimodal_utils.reformat_prompt(
+        text, image_placeholder=config.image_placeholder, model_name=config.model_name
+    )
     # TODO(hengtaoguo): Support multiple images as input.
     images = multimodal_utils.load_image_from_path(config.image_path)
     processor_output = multimodal_utils.pre_process_image(images, model_name=config.model_name)
@@ -128,7 +130,9 @@ def main(argv: Sequence[str]) -> None:
   assert config.quantization != "nanoo_fp8", "NANOO fp8 on AMD MI300/MI325 GPUs is not supported in decode.py yet"
 
   batch_size = int(config.per_device_batch_size * jax.device_count())
-  assert 0 < _NUM_STREAMS <= batch_size, f"The number of streams {_NUM_STREAMS} must be > 0 and <= batch size {batch_size}"
+  assert (
+      0 < _NUM_STREAMS <= batch_size
+  ), f"The number of streams {_NUM_STREAMS} must be > 0 and <= batch size {batch_size}"
 
   prefill_result_list = []
   first_token_list = []
@@ -192,7 +196,8 @@ def main(argv: Sequence[str]) -> None:
 
 def _validate_config(config):
   assert config.load_full_state_path == "", (
-      "Decode doesn't operate on full states! Convert to parameter checkpoint first." "Using generate_param_only_checkpoint."
+      "Decode doesn't operate on full states! Convert to parameter checkpoint first."
+      "Using generate_param_only_checkpoint."
   )
 
 
