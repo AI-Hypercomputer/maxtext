@@ -622,6 +622,7 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
         chkpt_vars[mapped_key] = f.get_tensor(key)
 
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
+  max_logging.log(f"Memory usage: {mem_info.memory_info().rss / (1024**3)} GB")
 
   # initialize the data structure for storing jax_weights
   if is_llama4_model:
@@ -1707,9 +1708,17 @@ if __name__ == "__main__":
   if args.lora_input_adapters_path:
     base_weights_path += "/base"
 
+  from MaxText import llama4_ckpt_unscanned  # pylint: disable=g-import-not-at-top
+  unscanned_jax_weights = llama4_ckpt_unscanned.convert_to_jax_weights(args.base_model_path, args.model_size, args.huggingface_checkpoint)
+  jax_weights_vision_encoder = unscanned_jax_weights["vision_encoder"]
+  del unscanned_jax_weights
+
+  scanned_jax_weights = convert_to_jax_weights(args.base_model_path, args.model_size, args.huggingface_checkpoint)
+  scanned_jax_weights["vision_encoder"] = jax_weights_vision_encoder
+
   save_weights_to_checkpoint(
       args.maxtext_model_path,
-      convert_to_jax_weights(args.base_model_path, args.model_size, args.huggingface_checkpoint),
+      scanned_jax_weights,
       SIMULATED_CPU_DEVICES_COUNT,
       args.use_ocdbt,
       args.use_zarr3,
