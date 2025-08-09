@@ -63,7 +63,7 @@ jobs:
         run: |
           mkdir dist
           gsutil cp gs://seed-env-dev/maxtext/${{ github.sha }}/*.whl dist/
-          uv pip install dist/*.whl --resolution=lowest
+          uv pip install dist/*.whl --resolution=lowest --system
       - name: Copy test assets files
         run : gcloud storage cp gs://maxtext-test-assets/* MaxText/test_assets
       - name: Run Tests
