@@ -64,6 +64,8 @@ jobs:
           mkdir dist
           gsutil cp gs://seed-env-dev/maxtext/${{ github.sha }}/*.txt dist/
           uv pip install dist/*.whl --resolution=lowest
+      - name: Copy test assets files
+        run : gcloud storage cp gs://maxtext-test-assets/* MaxText/test_assets
       - name: Run Tests
         run: |
           if [ "${{ inputs.is_scheduled_run }}" == "true" ]; then
