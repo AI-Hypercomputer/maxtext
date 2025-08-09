@@ -24,16 +24,18 @@ import jax.numpy as jnp
 from jax.sharding import Mesh
 
 import flax.linen as nn
+from flax import nnx
 from flax.linen import partitioning as nn_partitioning
 
 from MaxText import maxtext_utils
 from MaxText import pyconfig
 from MaxText.common_types import Config, DType
 from MaxText.globals import PKG_DIR
-from MaxText.layers.linears import mlp_block
+from MaxText.layers import linears
 from MaxText.layers import moe
-from MaxText.layers.initializers import NdInitializer, nd_dense_init
+from MaxText.layers.initializers import NdInitializer, nd_dense_init, variable_to_logically_partitioned
 from MaxText.layers.quantizations import Fp8Quantization
+from MaxText.layers import nnx_wrappers
 
 
 class TokenDroppingTest(unittest.TestCase):
@@ -52,10 +54,9 @@ class TokenDroppingTest(unittest.TestCase):
         per_device_batch_size=1,
         capacity_factor=2,
     )
-    self.rng = jax.random.PRNGKey(42)
+    self.rngs = nnx.Rngs(params=0)
     devices_array = maxtext_utils.create_device_mesh(self.cfg)
     self.model = moe.RoutedMoE(
-        name="MoeBlock",
         config=self.cfg,
         num_experts=self.cfg.num_experts,
         num_experts_per_tok=self.cfg.num_experts_per_tok,
@@ -63,6 +64,7 @@ class TokenDroppingTest(unittest.TestCase):
         kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
         kernel_axes=("embed", "mlp"),
         dtype=self.cfg.dtype,
+        rngs=self.rngs,
     )
 
   def test_generate_masks(self):
@@ -166,7 +168,7 @@ class MlpBlockTest(unittest.TestCase):
     super().setUp()
     self.config = pyconfig.initialize(
         [None, os.path.join(PKG_DIR, "configs", "base.yml")],
-        run_name="token_dropping_test",
+        run_name="mlp_block_init_test",
         enable_checkpointing=False,
         model_name="mixtral-8x7b",
         dtype="bfloat16",
@@ -178,7 +180,7 @@ class MlpBlockTest(unittest.TestCase):
     )
     self.rng = jax.random.PRNGKey(42)
     quant = Fp8Quantization()
-    self.model = mlp_block(
+    self.model = linears.mlp_block(
         config=self.config,
         in_features=2,
         intermediate_dim=2,
@@ -215,10 +217,9 @@ class DeepSeekRoutingTest(unittest.TestCase):
         num_experts_per_tok=4,
         sparse_matmul=True,
     )
-    self.rng = jax.random.PRNGKey(42)
+    self.rngs = nnx.Rngs(params=0)
     devices_array = maxtext_utils.create_device_mesh(self.cfg)
     self.model = moe.RoutedMoE(
-        name="MoeBlock",
         config=self.cfg,
         num_experts=self.cfg.num_experts,
         num_experts_per_tok=self.cfg.num_experts_per_tok,
@@ -226,6 +227,7 @@ class DeepSeekRoutingTest(unittest.TestCase):
         kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
         kernel_axes=("embed", "mlp"),
         dtype=self.cfg.dtype,
+        rngs=self.rngs,
     )
 
   def test_deepseek_routing(self):
@@ -264,30 +266,55 @@ class DeepSeekRoutingTest(unittest.TestCase):
     )
 
 
-class MoeLoopBlock(nn.Module):
+class MoeLoopBlock(nnx.Module):
   """Reference implementation from https://github.com/mistralai/mistral-inference.
   This is not included anymore in our repo, due to a limitation of for-loop implementation in sharding.
   """
 
-  config: Config
-  num_experts: int
-  num_experts_per_tok: int
-  kernel_init: NdInitializer
-  kernel_axes: Tuple[str, ...]
-  weight_dtype: DType = jnp.float32
-  dtype: DType = jnp.bfloat16
-
-  @nn.compact
-  def __call__(self, inputs, deterministic: bool = False):
-    gate_logits = moe.GateLogit(
-        self.num_experts,
-        self.config.model_name,
+  def __init__(
+      self,
+      config: Config,
+      inputs_shape: tuple[int, ...],
+      num_experts: int,
+      num_experts_per_tok: int,
+      kernel_init: NdInitializer,
+      kernel_axes: Tuple[str, ...],
+      rngs: nnx.Rngs,
+      weight_dtype: DType = jnp.float32,
+      dtype: DType = jnp.bfloat16,
+  ):
+    self.config = config
+    self.inputs_shape = inputs_shape
+    self.num_experts = num_experts
+    self.num_experts_per_tok = num_experts_per_tok
+    self.kernel_init = kernel_init
+    self.kernel_axes = kernel_axes
+    self.weight_dtype = weight_dtype
+    self.dtype = dtype
+    self.gate = moe.GateLogit(
+        in_features_shape=self.inputs_shape[-1],
+        out_features_shape=self.num_experts,
+        model_name=self.config.model_name,
         dtype=self.dtype,
         kernel_init=self.kernel_init,
         kernel_axes=self.kernel_axes,
-        name="gate",
-    )(inputs)[0]
+        rngs=rngs,
+    )
+    for k in range(self.num_experts):
+      expert_module = linears.MlpBlock(
+          config=self.config,
+          in_features=self.inputs_shape[-1],
+          intermediate_dim=self.config.mlp_dim,
+          activations=["silu", "linear"],
+          intermediate_dropout_rate=self.config.dropout_rate,
+          dtype=dtype,
+          weight_dtype=weight_dtype,
+          rngs=rngs,
+      )
+      setattr(self, f"mlp_{k}", expert_module)
 
+  def __call__(self, inputs, deterministic: bool = False):
+    gate_logits = self.gate(inputs)[0]
     weights, selected_experts = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
     weights = jax.nn.softmax(weights.astype(jnp.float32), axis=-1).astype(self.weight_dtype)
     mlp_lnx = jnp.zeros_like(inputs)
@@ -295,17 +322,8 @@ class MoeLoopBlock(nn.Module):
 
     for k in range(self.num_experts):
       weights_exp = jnp.sum(jnp.multiply(selected_experts == k, weights), axis=-1)
-      mlp_lnx_exp = mlp_block(
-          config=self.config,
-          in_features=inputs.shape[-1],
-          intermediate_dim=self.config.mlp_dim,
-          activations=["silu", "linear"],
-          intermediate_dropout_rate=self.config.dropout_rate,
-          dtype=self.dtype,
-          weight_dtype=self.weight_dtype,
-          name=f"mlp_{k}",
-      )(inputs, deterministic=deterministic)
-
+      getattr(self, f"mlp_{k}")
+      mlp_lnx_exp = getattr(self, f"mlp_{k}")(inputs, deterministic=deterministic)
       mlp_lnx_exp = nn.with_logical_constraint(mlp_lnx_exp, ("activation_batch", "activation_length", "activation_embed"))
       mlp_lnx_exp = weights_exp[:, :, None] * mlp_lnx_exp
       mlp_lnx += mlp_lnx_exp
@@ -313,18 +331,46 @@ class MoeLoopBlock(nn.Module):
     return mlp_lnx
 
 
+def get_moe_loop(
+    config: Config,
+    inputs_shape: tuple[int, ...],
+    num_experts: int,
+    num_experts_per_tok: int,
+    kernel_init: NdInitializer,
+    kernel_axes: Tuple[str, ...],
+    weight_dtype: DType = jnp.float32,
+    dtype: DType = jnp.bfloat16,
+):
+  """Creates a MoeLoopBlock Linen module."""
+  module = nnx_wrappers.to_linen(
+      MoeLoopBlock,
+      config=config,
+      inputs_shape=inputs_shape,
+      num_experts=num_experts,
+      num_experts_per_tok=num_experts_per_tok,
+      kernel_init=kernel_init,
+      kernel_axes=kernel_axes,
+      weight_dtype=weight_dtype,
+      dtype=dtype,
+      metadata_fn=variable_to_logically_partitioned,
+  )
+  return module
+
+
 class RoutedMoeTest(unittest.TestCase):
   """Routed Mixture of Experts test."""
 
   def get_expected_output(self, rng, hidden_states, cfg):
     """Retrieve expected output from Routed Mixture of Experts."""
-    model = MoeLoopBlock(
+    model = get_moe_loop(
         config=cfg,
+        inputs_shape=hidden_states.shape,
         num_experts=cfg.num_experts,
         num_experts_per_tok=cfg.num_experts_per_tok,
         kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
         kernel_axes=("embed", "mlp"),
         dtype=cfg.dtype,
+        weight_dtype=cfg.weight_dtype,
     )
     variables = model.init(
         {"params": rng, "dropout": rng},
@@ -336,7 +382,7 @@ class RoutedMoeTest(unittest.TestCase):
 
   def get_moe_output(self, variables, hidden_states, cfg, mesh):
     """retrieve expected output from MoE"""
-    model = moe.RoutedMoE(
+    model = moe.get_routed_moe(
         name="MoeBlock",
         config=cfg,
         num_experts=cfg.num_experts,

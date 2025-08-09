@@ -139,7 +139,7 @@ class Qwen3DecoderLayer(nn.Module):
       )(residual_after_attention)
       mlp_input = nn.with_logical_constraint(mlp_input, ("activation_batch", "activation_length", "activation_embed"))
 
-      mlp_output, _ = moe.RoutedMoE(
+      mlp_output, _ = moe.get_routed_moe(
           config=cfg,
           num_experts=cfg.num_experts,
           num_experts_per_tok=cfg.num_experts_per_tok,

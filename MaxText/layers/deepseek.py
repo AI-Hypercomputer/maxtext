@@ -259,7 +259,7 @@ class DeepSeekMoELayer(nn.Module):
     # NOTE: the naming mismatch here is to ensure reverse compatibility with existing checkpoints.
     # The `name` represents the weight name in JAX/checkpoints and so the class name
     # is just for readability.
-    mlp_lnx = moe.RoutedAndSharedMoE(
+    mlp_lnx = moe.get_routed_and_shared_moe(
         name="DeepSeekMoeBlock_0",
         config=cfg,
         mesh=self.mesh,
