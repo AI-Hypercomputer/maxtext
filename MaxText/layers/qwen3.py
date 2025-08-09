@@ -84,7 +84,7 @@ def self_attention_with_norm(
       name="self_attention",
       quant=quant,
       kv_quant=quantizations.configure_kv_quant(cfg),
-      use_qk_norm=True,
+      use_qk_norm=cfg.use_qk_norm,
       query_pre_attn_scalar=(cfg.head_dim**-0.5),  # Qwen3 specific scaling
       model_mode=model_mode,
   )
