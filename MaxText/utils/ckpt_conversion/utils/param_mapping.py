@@ -680,34 +680,31 @@ def QWEN3_MOE_MAXTEXT_TO_HF_PARAM_MAPPING(config, scan_layers=False):
                 if f"params-decoder-layers_{i}-{key}" in mapping:
                     del mapping[f"params-decoder-layers_{i}-{key}"]
 
-    # Add MoE-specific mappings.
+    # Add MoE-specific mappings WITHOUT the "-kernel" suffix for experts.
     if scan_layers:
         mapping["params-decoder-layers-moe_block-gate-kernel"] = [f"model.layers.{i}.mlp.gate.weight" for i in range(n_layers)]
-        mapping["params-decoder-layers-moe_block-wi_0-kernel"] = [[f"model.layers.{i}.mlp.experts.{j}.gate_proj.weight" for j in range(num_experts)] for i in range(n_layers)]
-        mapping["params-decoder-layers-moe_block-wi_1-kernel"] = [[f"model.layers.{i}.mlp.experts.{j}.up_proj.weight" for j in range(num_experts)] for i in range(n_layers)]
-        mapping["params-decoder-layers-moe_block-wo-kernel"] = [[f"model.layers.{i}.mlp.experts.{j}.down_proj.weight" for j in range(num_experts)] for i in range(n_layers)]
+        mapping["params-decoder-layers-moe_block-wi_0"] = [[f"model.layers.{i}.mlp.experts.{j}.gate_proj.weight" for j in range(num_experts)] for i in range(n_layers)]
+        mapping["params-decoder-layers-moe_block-wi_1"] = [[f"model.layers.{i}.mlp.experts.{j}.up_proj.weight" for j in range(num_experts)] for i in range(n_layers)]
+        mapping["params-decoder-layers-moe_block-wo"] = [[f"model.layers.{i}.mlp.experts.{j}.down_proj.weight" for j in range(num_experts)] for i in range(n_layers)]
     else:
         for i in range(n_layers):
             mapping[f"params-decoder-layers_{i}-moe_block-gate-kernel"] = f"model.layers.{i}.mlp.gate.weight"
-            mapping[f"params-decoder-layers_{i}-moe_block-wi_0-kernel"] = [f"model.layers.{i}.mlp.experts.{j}.gate_proj.weight" for j in range(num_experts)]
-            mapping[f"params-decoder-layers_{i}-moe_block-wi_1-kernel"] = [f"model.layers.{i}.mlp.experts.{j}.up_proj.weight" for j in range(num_experts)]
-            mapping[f"params-decoder-layers_{i}-moe_block-wo-kernel"] = [f"model.layers.{i}.mlp.experts.{j}.down_proj.weight" for j in range(num_experts)]
+            mapping[f"params-decoder-layers_{i}-moe_block-wi_0"] = [f"model.layers.{i}.mlp.experts.{j}.gate_proj.weight" for j in range(num_experts)]
+            mapping[f"params-decoder-layers_{i}-moe_block-wi_1"] = [f"model.layers.{i}.mlp.experts.{j}.up_proj.weight" for j in range(num_experts)]
+            mapping[f"params-decoder-layers_{i}-moe_block-wo"] = [f"model.layers.{i}.mlp.experts.{j}.down_proj.weight" for j in range(num_experts)]
             
     return mapping
 
 def QWEN3_MOE_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, scan_layers=False, saving_to_hf=False):
     """Creates transformation hooks for Qwen3-MoE, replicating the original script's logic."""
-    # Start with the standard hooks for attention, norms, etc.
     mapping = QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, scan_layers, saving_to_hf)
-    reshape_kernel = mapping["params-decoder-logits_dense-kernel"] # This is the "Standard Rule"
+    reshape_kernel = mapping["params-decoder-logits_dense-kernel"] 
+    simple_transpose = lambda x, _: x.T if not saving_to_hf else x.T # Simplified for clarity
 
-    # The "Special Rule" for expert weights that only does the individual transpose.
-    def simple_transpose(input_tensor, target_shape):
-        return input_tensor.T.reshape(target_shape) if not saving_to_hf else input_tensor.reshape(np.flip(np.array(target_shape))).T
-
-    # Define which kernels get which rule.
+    # The gate kernel DOES have a "-kernel" suffix and gets the standard rule.
     gate_kernel = ["moe_block-gate-kernel"]
-    expert_kernels = ["moe_block-wi_0-kernel", "moe_block-wi_1-kernel", "moe_block-wo-kernel"]
+    # The expert weights DO NOT have a "-kernel" suffix and get the special rule.
+    expert_kernels = ["moe_block-wi_0", "moe_block-wi_1", "moe_block-wo"]
 
     if scan_layers:
         mapping[f"params-decoder-layers-{gate_kernel[0]}"] = reshape_kernel
