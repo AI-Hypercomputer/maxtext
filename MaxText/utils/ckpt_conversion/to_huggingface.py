@@ -67,7 +67,7 @@ from MaxText.utils.ckpt_conversion.utils.param_mapping import (
     HOOK_FNS,
     PARAM_MAPPING,
 )
-from MaxText.utils.ckpt_conversion.utils.shape_mapping import SHAPE_MAPPING
+from MaxText.utils.ckpt_conversion.utils.hf_shape import SHAPE_MAPPING
 from MaxText.utils.ckpt_conversion.utils.hf_model_configs import HF_MODEL_CONFIGS
 from MaxText.utils.ckpt_conversion.utils.utils import (process_leaf_param, save_model_files, HF_IDS)
 
@@ -140,11 +140,12 @@ def main(argv: Sequence[str]) -> None:
   # 2. Load Tokenizer
   if model_key not in HF_IDS:
     raise ValueError(f"HF Tokenizer ID not found for model key: {model_key}")
+  hf_token = config.hf_access_token
   hf_tokenizer_id = HF_IDS[model_key]
-  tokenizer = AutoTokenizer.from_pretrained(hf_tokenizer_id)
+  tokenizer = AutoTokenizer.from_pretrained(hf_tokenizer_id,  token=hf_token)
 
   # For multi-modal case:
-  processor = AutoProcessor.from_pretrained(hf_tokenizer_id) if config.use_multimodal else None
+  processor = AutoProcessor.from_pretrained(hf_tokenizer_id,  token=hf_token) if config.use_multimodal else None
 
   # 3. Get parameter mappings
   mappings = _get_model_mappings(model_key, config.scan_layers, hf_config_obj.to_dict())
