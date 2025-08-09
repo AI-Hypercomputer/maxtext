@@ -691,7 +691,13 @@ class RoutedMoE(nnx.Module):
         quant_dg = self.quant.quant_dg
         lhs_quantize_dtype = quant_dg.fwd.dg_quantizer.lhs.numerics.get_dtype()
         rhs_quantize_dtype = quant_dg.fwd.dg_quantizer.rhs.numerics.get_dtype()
-
+      if self.config.use_qwix_quantization:
+        if self.config.quantization == "int8":
+          lhs_quantize_dtype = jnp.int8
+          rhs_quantize_dtype = jnp.int8
+        elif self.config.quantization == "fp8":
+          lhs_quantize_dtype = jnp.float8_e4m3fn
+          rhs_quantize_dtype = jnp.float8_e4m3fn
       m, k, n = inputs.shape[0], inputs.shape[1], kernel.shape[2]
       tiling = (
           min(tile_size[0], m),

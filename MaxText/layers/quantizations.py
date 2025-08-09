@@ -625,6 +625,8 @@ def get_basic_config(config, dtype):
         module_path='decoder/.*layers.*',  # Apply to all modules
         weight_qtype=dtype,
         act_qtype=dtype,
+        bwd_qtype=dtype,
+        op_names=('dot_general',),
         bwd_weight_grad_tile_size = 1 / config.quantization_local_shard_count
       )
     ]
