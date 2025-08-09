@@ -29,6 +29,6 @@ dynamic = ["dependencies"]
 dependencies = {file = ["requirements.txt"]}
 
 [tool.setuptools.packages.find]  
-where = ["MaxText"]
+where = ["."]
 include = ["MaxText*"]
 exclude = ["MaxText.tests.*"]
