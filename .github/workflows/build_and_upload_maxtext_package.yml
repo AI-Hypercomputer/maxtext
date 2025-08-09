@@ -64,9 +64,5 @@ jobs:
           # deps and the versions for testing back time. Also reduce time in this workflow. seed-env only needs to run in the presubmit if a PR
           # changes the maxtext's requirements.txt or modified the source package structure (won't be needed if maxtext uses src-layout).
           seed-env --local-requirements=requirements_with_lower_bounds.txt --host-name=MaxText --seed-commit=779c6aefcac3ff0149b28e183770cc1da0879c84 --output-dir=. --build-pypi-package
-      - name: Get wheel filename
-        id: get_wheel_filename
-        # Finds the .whl file in dist/ and sets it as an output
-        run: echo "name=$(basename dist/*.whl)" >> $GITHUB_OUTPUT
       - name: Upload Python wheel to GCS
         run: gcloud storage cp dist/*.whl gs://seed-env-dev/maxtext/${{ github.sha }}/
