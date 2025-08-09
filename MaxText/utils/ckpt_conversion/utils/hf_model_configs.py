@@ -292,6 +292,31 @@ qwen3_32b_config = transformers.Qwen3Config(
     torch_dtype="bfloat16",
 )
 
+qwen3_235b_a22b_config = transformers.Qwen3MoeConfig(
+    vocab_size=151936,
+    hidden_size=4096,
+    intermediate_size=12288,
+    num_hidden_layers=94,
+    num_attention_heads=64,
+    num_key_value_heads=4,
+    head_dim=128,
+    hidden_act="silu",
+    max_position_embeddings=262144,
+    rms_norm_eps=1e-6,
+    rope_theta=5000000.0,
+    tie_word_embeddings=False,
+    torch_dtype="bfloat16",
+    decoder_sparse_step=1,
+    mlp_only_layers=[],
+    moe_intermediate_size=1536,
+    num_experts=128,
+    num_experts_per_tok=8,
+    norm_topk_prob=True,
+    output_router_logits=False,
+    router_aux_loss_coef=0.001,
+)
+
+
 HF_MODEL_CONFIGS = {
     "gemma2-2b": gemma2_2b_config,
     "gemma2-9b": gemma2_9b_config,
@@ -304,4 +329,5 @@ HF_MODEL_CONFIGS = {
     "qwen3-8b": qwen3_8b_config,
     "qwen3-14b": qwen3_14b_config,
     "qwen3-32b": qwen3_32b_config,
+    "qwen3-235b-a22b": qwen3_235b_a22b_config,
 }

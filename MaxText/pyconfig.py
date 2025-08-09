@@ -340,6 +340,7 @@ def validate_model_name(s: str) -> bool:
       "qwen3-8b",
       "qwen3-14b",
       "qwen3-32b",
+      "qwen3-235b-a22b",
       "gpt3-175b",
       "gpt3-22b",
       "gpt3-6b",
@@ -796,7 +797,9 @@ def set_and_validate_pipeline_config(raw_keys):
   if using_pipeline_parallelism(raw_keys):
     # For pipeline parallelism, model_fsdp_ag_once should be False, and pipeline_fsdp_ag_once is typically True.
     if raw_keys["model_fsdp_ag_once"]:
-      raise ValueError("You should only set pipeline_fsdp_once=True, leave model_fsdp_ag_once=False with pipeline parallelism.")
+      raise ValueError(
+          "You should only set pipeline_fsdp_once=True, leave model_fsdp_ag_once=False with pipeline parallelism."
+      )
 
     def modify_activation_embed_and_logits_batch(logical_axis_rules):
       for idx, logical_rule in enumerate(logical_axis_rules):
@@ -954,22 +957,15 @@ def validate_deepseek_moe(raw_keys):
 def validate_sparse_matmul_parallelism(raw_keys):
   # TODO: remove once b/434699033 resolved
   if raw_keys["sparse_matmul"] and (using_expert_parallelism(raw_keys) and using_pipeline_parallelism(raw_keys)):
-    raise ValueError(
-        "Sparse matmul doesn't support using expert and pipeline parallelism together."
-    )
+    raise ValueError("Sparse matmul doesn't support using expert and pipeline parallelism together.")
 
   # TODO: remove once b/435539039 resolved
-  if (
-      raw_keys["sparse_matmul"]
-      and (
-          using_fsdp_and_transpose_parallelism(raw_keys)
-          and using_expert_parallelism(raw_keys)
-          and using_tensor_parallelism(raw_keys)
-      )
+  if raw_keys["sparse_matmul"] and (
+      using_fsdp_and_transpose_parallelism(raw_keys)
+      and using_expert_parallelism(raw_keys)
+      and using_tensor_parallelism(raw_keys)
   ):
-    raise ValueError(
-        "Sparse matmul doesn't support using fsdp, expert, and tensor parallelism together."
-    )
+    raise ValueError("Sparse matmul doesn't support using fsdp, expert, and tensor parallelism together.")
   tensor_parallelism = (
       raw_keys["ici_tensor_parallelism"]
       * raw_keys["dcn_tensor_parallelism"]
