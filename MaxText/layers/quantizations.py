@@ -615,18 +615,15 @@ def configure_kv_quant(config):
 def get_basic_config(config, dtype):
   """Basic Qwix config that only quantizes forward passes."""
   rules = [
-      # Dot-product attention is not quantized for now.
       qwix.QtRule(
-        module_path='decoder/.*layers.*/self_attention/attention_op',
-        weight_qtype=None,
-        act_qtype=None,
+          # This rule applies to all projections in attention and mlp layers,
+          # but not the dot-product attention or logits_dense.
+          module_path="decoder/.*layers.*",
+          op_names=("dot_general",),
+          weight_qtype=dtype,
+          act_qtype=dtype,
+          bwd_weight_grad_tile_size=1 / config.quantization_local_shard_count,
       ),
-      qwix.QtRule(
-        module_path='decoder/.*layers.*',  # Apply to all modules
-        weight_qtype=dtype,
-        act_qtype=dtype,
-        bwd_weight_grad_tile_size = 1 / config.quantization_local_shard_count
-      )
     ]
   return rules
 
@@ -635,23 +632,20 @@ def get_fp8_config(config):
   """ fp8 config rules with per-tensor calibration.
   """
   rules = [
-      # Dot-product attention is not quantized for now.
       qwix.QtRule(
-        module_path='decoder/.*layers.*/self_attention/attention_op',
-        weight_qtype=None,
-        act_qtype=None,
+          # This rule applies to all projections in attention and mlp layers,
+          # but not the dot-product attention or logits_dense.
+          module_path="decoder/.*layers.*",
+          op_names=("dot_general",),
+          weight_qtype=jnp.float8_e4m3fn,
+          act_qtype=jnp.float8_e4m3fn,
+          bwd_qtype=jnp.float8_e5m2,
+          bwd_use_original_residuals=True,
+          disable_channelwise_axes=True,  # per_tensor calibration
+          weight_calibration_method=config.quantization_calibration_method,
+          act_calibration_method=config.quantization_calibration_method,
+          bwd_calibration_method=config.quantization_calibration_method,
       ),
-      qwix.QtRule(
-        module_path='decoder/.*layers.*',  # Apply to all modules
-        weight_qtype=jnp.float8_e4m3fn,
-        act_qtype=jnp.float8_e4m3fn,
-        bwd_qtype=jnp.float8_e5m2,
-        bwd_use_original_residuals=True,
-        disable_channelwise_axes=True, # per_tensor calibration
-        weight_calibration_method = config.quantization_calibration_method,
-        act_calibration_method = config.quantization_calibration_method,
-        bwd_calibration_method = config.quantization_calibration_method,
-      )
     ]
   return rules
 
