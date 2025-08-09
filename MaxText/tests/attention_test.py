@@ -36,8 +36,9 @@ from flax.linen import partitioning as nn_partitioning
 from MaxText import maxtext_utils
 from MaxText import max_utils
 from MaxText import pyconfig
+from MaxText import maxtext_utils, pyconfig
 from MaxText.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_PREFILL, MODEL_MODE_TRAIN
-from MaxText.globals import PKG_DIR
+from MaxText.globals import PKG_DIR, has_tpu, has_gpu
 from MaxText.layers import attentions
 from MaxText.layers.attentions import Attention, MLA, ChunkedCausalMask
 
@@ -164,7 +165,6 @@ class BidirectionalBlockMaskTest(unittest.TestCase):
     )
     np.testing.assert_array_equal(combined_mask, expected_mask)
 
-
 class ChunkedCausalMaskTest(unittest.TestCase):
   """Test for the ChunkedCausalMask."""
 
@@ -290,6 +290,15 @@ class AttentionTest(parameterized.TestCase):
     )
     self.cfg = config
 
+    config_cp = pyconfig.initialize(
+        [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
+        **self.config_arguments,
+        ici_context_parallelism=4,  # use context parallelism of 4
+        context_parallel_load_balance=False,  # set load_balancing to False such that
+        # there's no need for reordering the input/output
+    )
+
+    self.cfg_cp = config_cp
     self.rng = jax.random.PRNGKey(0)
     self.nnx_rng = nnx.Rngs(params=0, dropout=jax.random.PRNGKey(42))
 
@@ -301,7 +310,7 @@ class AttentionTest(parameterized.TestCase):
     self.max_target_length = self.cfg.max_target_length
     self.max_prefill_predict_length = self.cfg.max_prefill_predict_length
     self.head_dim = self.cfg.head_dim
-    self.embed_dim = self.cfg.base_emb_dim
+    self.embed_dim = self.cfg.emb_dim
     self.dtype = self.cfg.dtype
     self.attention_type = self.cfg.attention_type
 
@@ -453,14 +462,17 @@ class AttentionTest(parameterized.TestCase):
     self.assertEqual(dtype, mha_prefill.dtype)
 
   @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only")
   def test_tpu_kernel_attention_mha(self):
     self.tpu_kernel_attention_helper(self.num_kv_heads)
 
   @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only")
   def test_tpu_kernel_attention_gqa(self):
     self.tpu_kernel_attention_helper(self.num_kv_heads // 2)
 
   @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only")
   def test_tpu_kernel_attention_mqa(self):
     self.tpu_kernel_attention_helper(1)
 

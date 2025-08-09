@@ -13,8 +13,14 @@
 #  limitations under the License.
 
 """Common types."""
-import enum
+
 from typing import Any, Sequence
+import sys
+
+if sys.version_info >= (3, 11):
+    from enum import StrEnum
+else:
+    from backports.strenum import StrEnum
 
 import numpy as np
 
@@ -74,7 +80,7 @@ DECODING_ACTIVE_SEQUENCE_INDICATOR = 1
 DEFAULT_MASK_VALUE = -0.7 * float(np.finfo(np.dtype("float32")).max)
 
 
-class DecoderBlockType(enum.Enum):
+class DecoderBlockType(StrEnum):
   """Decoder block types."""
 
   DEFAULT = "default"
