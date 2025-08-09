@@ -150,55 +150,47 @@ def main(argv: Sequence[str]) -> None:
     final_mt_tensor_numpy = None
 
     if isinstance(hf_source_keys_or_key, list):  # This branch handles any scanned MaxText parameter.
-      # Check if the map is a nested list, which signals an MoE parameter.
-      # e.g., [['L0E0', 'L0E1'], ['L1E0', 'L1E1']]
-      if hf_source_keys_or_key and isinstance(hf_source_keys_or_key[0], list):
-        all_layers = []
+        # Check if the map is a nested list, which signals an MoE parameter.
+        if hf_source_keys_or_key and isinstance(hf_source_keys_or_key[0], list):
+            # This is the new logic for a nested list [layer][expert]
+            all_layers = []
+            mt_slice_shape = tuple(mt_target_shape_final[2:])
 
-        # A single HF expert weight has shape, for example, [Intermediate, Dim].
-        # Our final MaxText tensor will have shape [Experts, Layers, Dim, Intermediate].
-        # The 'slice_shape' is the shape of a single, transposed HF weight: [Dim, Intermediate].
-        # We get this by taking all dimensions *after* the first two (E and L).
-        mt_slice_shape = tuple(mt_target_shape_final[2:])
+            for expert_keys_in_layer in hf_source_keys_or_key:
+                all_experts_in_layer = []
+                for hf_key_single in expert_keys_in_layer:
+                    if hf_key_single not in hf_state_dict_numpy:
+                        raise ValueError(f"HuggingFace key {hf_key_single} not found in HF state_dict.")
+                    hf_tensor_numpy = hf_state_dict_numpy[hf_key_single]
+                    processed_hf_tensor = apply_hook_fns(hf_tensor_numpy, mt_slice_shape, hook_fn_list_or_fn)
+                    all_experts_in_layer.append(processed_hf_tensor)
 
-        # This outer loop iterates through the layers.
-        # On the first pass, `expert_keys_in_layer` will be ['L0E0_w', 'L0E1_w'].
-        for expert_keys_in_layer in hf_source_keys_or_key:
-          all_experts_in_layer = []
-          # This inner loop iterates through the experts for the current layer.
-          # `hf_key_single` will be 'L0E0_w', then 'L0E1_w', etc.
-          for hf_key_single in expert_keys_in_layer:
-            if hf_key_single not in hf_state_dict_numpy:
-              raise ValueError(f"HuggingFace key {hf_key_single} not found in HF state_dict.")
+                all_layers.append(np.stack(all_experts_in_layer, axis=0))
 
-            hf_tensor_numpy = hf_state_dict_numpy[hf_key_single]
-            # The hook function performs the simple transpose from HF's [I, D] to MaxText's [D, I].
-            processed_hf_tensor = apply_hook_fns(hf_tensor_numpy, mt_slice_shape, hook_fn_list_or_fn)
-            all_experts_in_layer.append(processed_hf_tensor)
+            stacked_by_layer_first = np.stack(all_layers, axis=0)
+            final_mt_tensor_numpy = np.transpose(stacked_by_layer_first, axes=(1, 0) + tuple(range(2, stacked_by_layer_first.ndim)))
 
-          # Stack all the processed expert tensors for this layer.
-          # This creates one tensor of shape [Num_Experts, Dim, Intermediate].
-          all_layers.append(np.stack(all_experts_in_layer, axis=0))
+        else:
+            tensors_to_stack = []
+            mt_slice_shape_list = list(mt_target_shape_final)
+            del mt_slice_shape_list[config.param_scan_axis]
+            mt_slice_shape = tuple(mt_slice_shape_list)
 
-        # Stack all the layer tensors. For consistency, we always stack by layer first.
-        # This creates the intermediate tensor of shape [Num_Layers, Num_Experts, Dim, Intermediate].
-        # The final transpose to get the [E, L, D, I] format is now handled by the hook function
-        final_mt_tensor_numpy = np.stack(all_layers, axis=0)
-      else:
-        tensors_to_stack = []
-        mt_slice_shape_list = list(mt_target_shape_final)
-        del mt_slice_shape_list[config.param_scan_axis]
-        mt_slice_shape = tuple(mt_slice_shape_list)
-
-        for hf_key_single in hf_source_keys_or_key:
-          if hf_key_single not in hf_state_dict_numpy:
-            raise ValueError(f"HuggingFace key {hf_key_single} not in HF state_dict.")
-
-          hf_tensor_numpy = hf_state_dict_numpy[hf_key_single]
-          processed_hf_tensor = apply_hook_fns(hf_tensor_numpy, mt_slice_shape, hook_fn_list_or_fn)
-          tensors_to_stack.append(processed_hf_tensor)
-
-        final_mt_tensor_numpy = np.stack(tensors_to_stack, axis=config.param_scan_axis)
+            for hf_key_single in hf_source_keys_or_key:
+                if hf_key_single not in hf_state_dict_numpy:
+                    raise ValueError(f"HuggingFace key {hf_key_single} not found in HF state_dict.")
+                hf_tensor_numpy = hf_state_dict_numpy[hf_key_single]
+                processed_hf_tensor = apply_hook_fns(hf_tensor_numpy, mt_slice_shape, hook_fn_list_or_fn)
+                tensors_to_stack.append(processed_hf_tensor)
+            
+            final_mt_tensor_numpy = np.stack(tensors_to_stack, axis=config.param_scan_axis)
+            
+    else:
+        hf_key_single = hf_source_keys_or_key
+        if hf_key_single not in hf_state_dict_numpy:
+            raise ValueError(f"HuggingFace key {hf_key_single} (for MaxText {mt_param_key}) not found in HF state_dict.")
+        hf_tensor_numpy = hf_state_dict_numpy[hf_key_single]
+        final_mt_tensor_numpy = apply_hook_fns(hf_tensor_numpy, mt_target_shape_final, hook_fn_list_or_fn)
 
     if final_mt_tensor_numpy.shape != mt_target_shape_final:
       raise ValueError(
