@@ -162,7 +162,7 @@ def GEMMA2_HF_WEIGHTS_TO_SHAPE_MAPPING(config):
   Returns:
       dict: A mapping where:
           - Keys are HuggingFace model parameter paths
-          - Values are parameter shape as a List
+          - Values are parameter shape as a list
   """
 
   mapping = {
@@ -231,7 +231,7 @@ def QWEN3_HF_WEIGHTS_TO_SHAPE_MAPPING(config):
   Returns:
       dict: A mapping where:
           - Keys are HuggingFace model parameter paths
-          - Values are parameter shape as a List
+          - Values are parameter shape as a list
   """
   hidden_size = config["hidden_size"]
   num_hidden_layers = config["num_hidden_layers"]
