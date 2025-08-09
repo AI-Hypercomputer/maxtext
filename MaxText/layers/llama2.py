@@ -128,20 +128,9 @@ class LlamaDecoderLayer(nn.Module):
     attention_lnx = nn.with_logical_constraint(attention_lnx, activation_axis_names)
     intermediate_inputs = inputs + attention_lnx
 
-    # Fully Connected
-    hidden_states = rms_norm(
-        num_features=intermediate_inputs.shape[-1],
-        dtype=cfg.dtype,
-        weight_dtype=cfg.weight_dtype,
-        name="post_self_attention_layer_norm",
-        kernel_axes=("norm",),
-        epsilon=cfg.normalization_layer_epsilon,
-    )(intermediate_inputs)
-    hidden_states = nn.with_logical_constraint(hidden_states, activation_axis_names)
-
-    # MLP block.
+    # MLP block with pre-norm.
     mlp_lnx = mlp_block(
-        in_features=hidden_states.shape[-1],
+        in_features=intermediate_inputs.shape[-1],
         intermediate_dim=cfg.mlp_dim,
         activations=cfg.mlp_activations,
         intermediate_dropout_rate=cfg.dropout_rate,
@@ -151,7 +140,8 @@ class LlamaDecoderLayer(nn.Module):
         config=cfg,
         quant=self.quant,
         model_mode=model_mode,
-    )(hidden_states, deterministic=deterministic)
+        use_pre_norm=True,
+    )(intermediate_inputs, deterministic=deterministic)
     mlp_lnx = nn.with_logical_constraint(mlp_lnx, activation_axis_names)
 
     layer_output = mlp_lnx + intermediate_inputs

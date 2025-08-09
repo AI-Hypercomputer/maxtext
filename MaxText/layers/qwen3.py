@@ -112,21 +112,11 @@ class Qwen3DecoderLayer(nn.Module):
     # Residual connection after attention
     residual_after_attention = inputs_checkpoint + attention_output
 
-    # Post Attention LayerNorm (corresponds to Qwen3's `post_attention_layernorm`)
-    mlp_input = rms_norm(
-        num_features=residual_after_attention.shape[-1],
-        dtype=cfg.dtype,
-        weight_dtype=cfg.weight_dtype,
-        name="post_self_attention_layer_norm",  # Standard MaxText naming
-        epsilon=cfg.normalization_layer_epsilon,
-        kernel_axes=("norm",),
-    )(residual_after_attention)
-    mlp_input = nn.with_logical_constraint(mlp_input, ("activation_batch", "activation_length", "activation_embed"))
 
     # MLP block
     if cfg.num_experts is None or cfg.num_experts <= 1:  # Dense MLP
       mlp_output = linears.mlp_block(
-          in_features=mlp_input.shape[-1],
+          in_features=residual_after_attention.shape[-1],
           intermediate_dim=cfg.mlp_dim,
           activations=cfg.mlp_activations,
           intermediate_dropout_rate=cfg.dropout_rate,
@@ -135,8 +125,20 @@ class Qwen3DecoderLayer(nn.Module):
           name="mlp",
           config=cfg,
           quant=self.quant,
-      )(mlp_input, deterministic=deterministic)
+          use_pre_norm=True,
+      )(residual_after_attention, deterministic=deterministic)
     else:  # Mixture of Experts MLP -- not supported / tested in MaxText
+      # Post Attention LayerNorm (corresponds to Qwen3's `post_attention_layernorm`)
+      mlp_input = rms_norm(
+          num_features=residual_after_attention.shape[-1],
+          dtype=cfg.dtype,
+          weight_dtype=cfg.weight_dtype,
+          name="post_self_attention_layer_norm",  # Standard MaxText naming
+          epsilon=cfg.normalization_layer_epsilon,
+          kernel_axes=("norm",),
+      )(residual_after_attention)
+      mlp_input = nn.with_logical_constraint(mlp_input, ("activation_batch", "activation_length", "activation_embed"))
+
       mlp_output, _ = moe.RoutedMoE(
           config=cfg,
           num_experts=cfg.num_experts,
