@@ -19,6 +19,11 @@ python3 MaxText/scratch_code/generate_hf_golden_logits.py --model-id=meta-llama/
      --output-path=golden_Llama-4-Scout-17B-16E_vision.jsonl --prompts='Describe this image.' \
      --gcs-bucket=aireenmei-multipod --hf_model_path=/home/aireenmei_google_com/hf-checkpoint \
      --image_path=/home/aireenmei_google_com/maxtext/MaxText/test_assets/test_image.jpg
+     
+python3 MaxText/scratch_code/generate_hf_golden_logits.py --model-id=google/gemma-3-4b-pt \
+     --output-path=golden_gemma-3-4b-pt_vision.jsonl --prompts='Describe this image.' \
+     --gcs-bucket=aireenmei-multipod --hf_model_path=/home/aireenmei_google_com/gemma3-4b-pt-hf \
+     --image_path=/home/aireenmei_google_com/maxtext/MaxText/test_assets/test_image.jpg
 """
 
 import torch
@@ -27,6 +32,7 @@ from transformers import AutoTokenizer, AutoProcessor, AutoModelForCausalLM
 import jsonlines
 from google.cloud import storage
 from PIL import Image
+import multimodal_utils
 
 # Load the tokenizer and model from Hugging Face
 
@@ -76,10 +82,11 @@ def save_golden_logits(model_id, output_path, prompt_texts, gcs_bucket, hf_model
           add_generation_prompt=True
       )
       inputs = processor(text=formatted_prompt, images=image, return_tensors="pt")
+
       with torch.no_grad():
         outputs = model(**inputs)
         logits = outputs.logits.cpu().numpy().astype("float32")
-      
+
       data_to_save = {
         "prompt": prompt_text,
         "formatted_prompt": formatted_prompt,
@@ -90,8 +97,7 @@ def save_golden_logits(model_id, output_path, prompt_texts, gcs_bucket, hf_model
         "logits": logits.tolist()[0]
       }
     else:
-      formatted_prompt = prompt_text
-      input_ids = tokenizer.encode(formatted_prompt, return_tensors="pt")
+      input_ids = tokenizer.encode(prompt_text, return_tensors="pt")
       # Get the logits for the prompt + completion
       with torch.no_grad():
         outputs = model(input_ids)
