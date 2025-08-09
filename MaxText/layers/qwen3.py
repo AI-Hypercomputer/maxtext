@@ -126,6 +126,7 @@ class Qwen3DecoderLayer(nn.Module):
 
   config: Config
   mesh: Mesh
+  model_mode: str
   quant: Optional[Quant] = None
 
   @nn.compact
@@ -135,7 +136,6 @@ class Qwen3DecoderLayer(nn.Module):
       decoder_segment_ids: Optional[jnp.ndarray],
       decoder_positions: Optional[jnp.ndarray],
       deterministic: bool,
-      model_mode: str,
       previous_chunk=None,
       page_state: Optional[page_manager.PageState] = None,
       slot: Optional[int] = None,
@@ -150,7 +150,7 @@ class Qwen3DecoderLayer(nn.Module):
         decoder_segment_ids,
         decoder_positions,
         deterministic,
-        model_mode,
+        self.model_mode,
     )
 
     # Dense MLP block
@@ -187,6 +187,7 @@ class Qwen3MoeDecoderLayer(nn.Module):
 
   config: Config
   mesh: Mesh
+  model_mode: str
   quant: Optional[Quant] = None
 
   @nn.compact
@@ -196,7 +197,6 @@ class Qwen3MoeDecoderLayer(nn.Module):
       decoder_segment_ids: Optional[jnp.ndarray],
       decoder_positions: Optional[jnp.ndarray],
       deterministic: bool,
-      model_mode: str,
       previous_chunk=None,
       page_state: Optional[page_manager.PageState] = None,
       slot: Optional[int] = None,
@@ -211,7 +211,7 @@ class Qwen3MoeDecoderLayer(nn.Module):
         decoder_segment_ids,
         decoder_positions,
         deterministic,
-        model_mode,
+        self.model_mode,
     )
 
     # Mixture of Experts block
