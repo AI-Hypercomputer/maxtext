@@ -947,7 +947,7 @@ class AttentionOp(nnx.Module):
 
     # Create multi-head mask
     multi_head_mask = splash_attention_mask.MultiHeadMask(masks=(mask,) * query.shape[1])
-    jax.debug.print("multi_head_mask={multi_head_mask}", multi_head_mask=multi_head_mask)
+    # jax.debug.print("multi_head_mask={multi_head_mask}", multi_head_mask=multi_head_mask)
     # Create the splash attention kernel object separately, jit it for performance
     @partial(
         jax.jit,
@@ -1257,7 +1257,7 @@ class AttentionOp(nnx.Module):
       attn_mask = partitioning.with_sharding_constraint(attn_mask, (KV_LENGTH, HEAD, None, None, None))
     elif model_mode == MODEL_MODE_PREFILL:
       attn_mask = partitioning.with_sharding_constraint(attn_mask, (BATCH, HEAD, None, PREFILL_LENGTH, KV_LENGTH))
-    jax.debug.print("attn_mask={attn_mask}", attn_mask=attn_mask)
+    # jax.debug.print("attn_mask={attn_mask}", attn_mask=attn_mask)
     if attn_mask is not None:
       attn_weights = apply_mask_to_logits(attn_weights, attn_mask)
     return self.compute_local_attention(attn_weights, value, q_seq_len, model_mode, wv_product_einsum)
