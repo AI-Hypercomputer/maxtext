@@ -18,7 +18,7 @@
 
 from collections.abc import Callable
 from functools import partial
-from typing import Any, Optional, Literal
+from typing import Any, Literal
 import dataclasses
 import functools
 
@@ -288,7 +288,7 @@ def _zero_uninitialized_memory(
   return jnp.where(valid_mask[:, None], out, 0)
 
 
-LutFn = Callable[[int, int, int], Optional[tuple[int, int, int]]]
+LutFn = Callable[[int, int, int], None | tuple[int, int, int]]
 
 
 @functools.partial(
