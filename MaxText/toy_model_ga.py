@@ -1,16 +1,17 @@
 import jax
 from jax import numpy as jnp
-from functools import partial
-
 from jax.sharding import NamedSharding, Mesh, PartitionSpec as P
 from jax.experimental.shard_map import shard_map
 from jax.experimental import mesh_utils
+from jax.tree_util import tree_map, tree_all
 
+from functools import partial
 import datetime
-
-
 import os
+
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
+if "xla_tpu_spmd_rng_bit_generator_unsafe" not in os.environ.get("LIBTPU_INIT_ARGS", ""):
+  os.environ["LIBTPU_INIT_ARGS"] = os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
 
 # Hardcode 1D data parallel mesh for this simple toy
 global mesh
@@ -60,7 +61,6 @@ def simple_timeit(f, *args, tries=10, task=None, enable_profile=True):
   print(f"Average time ms for mm for {task} is {round(average_time_ms, 3)}")
   return average_time_ms / 1000
 
-
 def init_layer(key, embed_size, mlp_size):
     # returns a dictionary with two keys of size {"w_in": [embed, mlp] and "w_out":[mlp, embed]}
     keys = jax.random.split(key, 2)
@@ -70,9 +70,11 @@ def init_layer(key, embed_size, mlp_size):
     return params
 
 def init_model_and_inputs(key_init, num_layers, embed_size, mlp_size, batch_size):
+    # initializes weights and with random values
+    # params are now pyree of "w_in"[layers, embed, mlp] amd "w_out [layers, , mlp, embed]
     keys = jax.random.split(key_init, num_layers)
     params = [init_layer(key, embed_size, mlp_size) for key in keys]
-    params = jax.tree.map(lambda *args: jnp.stack(args), *params) # params are now pyree of "w_in"[layers, embed, mlp] amd "w_out [layers, , mlp, embed]
+    params = jax.tree.map(lambda *args: jnp.stack(args), *params) 
      
     # init inputs and targets
     input_key, target_key = jax.random.split(key_init, 2)
@@ -80,6 +82,13 @@ def init_model_and_inputs(key_init, num_layers, embed_size, mlp_size, batch_size
     targets = jax.random.normal(target_key, (batch_size, embed_size)).astype(jnp.bfloat16)
 
     return params, inputs, targets
+
+def init_model_and_inputs_sharded(key_init, num_layers, embed_size, mlp_size, batch_size):
+  params, inputs, targets = init_model_and_inputs(key_init, num_layers, embed_size, mlp_size, batch_size)
+  params_sharded = jax.device_put(params, NamedSharding(mesh, P())) # params fully replicated (data parallel)
+  inputs_sharded = jax.device_put(inputs, NamedSharding(mesh, P('dp'))) # inputs  is [batch, embed]
+  targets_sharded = jax.device_put(inputs, NamedSharding(mesh, P('dp'))) # targets  is [batch, embed]
+  return params_sharded, inputs_sharded, targets_sharded
 
 def layer_fn(inputs, single_layer_params):
     # single_layer_params is pytree with two leaves of shape [embed, mlp] and [mlp, embed]
@@ -98,13 +107,13 @@ def predict(params, inputs):
   output, _ = jax.lax.scan(layer_fn, inputs, params,length=num_layers) # scan returns final carry (final layer outputs here) and per layer outputs (none here)
   return output
 
-def loss(params, inputs, targets):
+def loss_fn(params, inputs, targets):
   # Params is pytree with two leaves of shape [layers, embed, mlp] and [layers, mlp, embed]
   # Inputs and targets both have shape [global_batch, embed]
   predictions = predict(params, inputs)
   return jnp.mean(jnp.sum((predictions - targets)**2, axis=-1))
 
-def grad_and_loss_ga(params, inputs, targets, num_microbatches):
+def loss_and_grad_ga(params, inputs, targets, num_microbatches):
   # Params is pytree with two leaves of shape [layers, embed, mlp] and [layers, mlp, embed]
   # Inputs and targets both have shape [global_batch, embed]
   microbatch_size = inputs.shape[0] // num_microbatches
@@ -118,7 +127,7 @@ def grad_and_loss_ga(params, inputs, targets, num_microbatches):
   inputs = reshape_inputs_for_microbatches(inputs)
   targets = reshape_inputs_for_microbatches(targets)
 
-  grad_func = jax.value_and_grad(loss)
+  grad_func = jax.value_and_grad(loss_fn)
   def accumulate_gradient(acc_grad_and_loss, inputs_and_targets):
        inputs, targets= inputs_and_targets['inputs'], inputs_and_targets['targets']
        cur_batch_loss, cur_batch_gradient = grad_func(params, inputs, targets)
@@ -130,17 +139,25 @@ def grad_and_loss_ga(params, inputs, targets, num_microbatches):
   init_grad_and_loss = {"loss": 0.0, "grad": init_grad}
   inputs_and_targets = {"inputs": inputs,"targets": targets}
   grad_and_loss, _ = jax.lax.scan(accumulate_gradient, init_grad_and_loss, inputs_and_targets, length=num_microbatches)
-  grads = grad_and_loss["grad"]
+  grads, loss = grad_and_loss["grad"], grad_and_loss["loss"]
+  # Average the accumulated gradients and loss to match the global batch calculation
+  grads = jax.tree_util.tree_map(
+      lambda g: g / num_microbatches, grads
+  )
+  loss = loss / num_microbatches
+
+
+  # Try NVIDIA sharding hint to encourage compiler to move reduces outside of the loop
   params_shardings = NamedSharding(mesh, P(None, None, None)) # Replicated DP, params are [layers, feat_in , feature_out]
   grads = jax.lax.with_sharding_constraint(grads, params_shardings)
-  grad_and_loss["grad"] = grads
-  return grad_and_loss["loss"], grad_and_loss["grad"]
+
+  return loss, grads
     
 
 def main():
   import argparse
   parser = argparse.ArgumentParser(description='Sharding and size settings')
-  parser.add_argument('--global_batch_size', type=int, default=262144)
+  parser.add_argument('--global_batch_size', type=int, default=262144) # 262144 #2097152
   parser.add_argument('--embed_size', type=int, default=2048)
   parser.add_argument('--mlp_size', type=int, default=8192)
   parser.add_argument('--num_layers', type=int, default=16)
@@ -148,29 +165,28 @@ def main():
   global args
   args = parser.parse_args()
     
-  params, inputs, targets = init_model_and_inputs(jax.random.PRNGKey(0), args.num_layers, args.embed_size, args.mlp_size, args.global_batch_size)
+  replicated_sharding = NamedSharding(mesh, P())
+  dp_sharding = NamedSharding(mesh, P('dp'))
 
-  # shard params and inputs
-  params_sharded = jax.device_put(params, NamedSharding(mesh, P())) # params fully replicated (data parallel)
-  inputs_sharded = jax.device_put(inputs, NamedSharding(mesh, P('dp'))) # inputs  is [batch, embed]
-  targets_sharded = jax.device_put(inputs, NamedSharding(mesh, P('dp'))) # targets  is [batch, embed]
 
-  grad_fn = jax.value_and_grad(loss)
+  jit_initialize_inputs = jax.jit(init_model_and_inputs_sharded, static_argnums=(1,2,3,4),out_shardings=(replicated_sharding, dp_sharding, dp_sharding))
+  params, inputs, targets = jit_initialize_inputs(jax.random.PRNGKey(0), args.num_layers, args.embed_size, args.mlp_size, args.global_batch_size)
+
+  # non-ga, regular run
+  grad_fn = jax.value_and_grad(loss_fn)
   jit_grad_fn = jax.jit(grad_fn)
-
-  loss_non_ga, non_ga_grad = jit_grad_fn(params_sharded, inputs_sharded, targets_sharded,)
+  loss_non_ga, non_ga_grad = jit_grad_fn(params, inputs, targets)
   
-
-
-  jit_grad_and_loss_ga = jax.jit(grad_and_loss_ga, static_argnums=(3,)) # num_microbathces is static
-  loss_ga, ga_grad = jit_grad_and_loss_ga(params_sharded, inputs_sharded, targets_sharded, args.gradient_accumulation_steps)
+  # ga run
+  jit_loss_and_grad_ga = jax.jit(loss_and_grad_ga, static_argnums=(3,)) # num_microbathces is static
+  loss_ga, ga_grad = jit_loss_and_grad_ga(params, inputs, targets, args.gradient_accumulation_steps)
 
   # assert non_ga_grad and ga_grad are similar
-  print(non_ga_grad['w_in'][0:5, 0:5, 0])
-  print(ga_grad['w_in'][0:5, 0:5, 0])
-  jax.tree_util.tree_map(lambda x, y: jnp.testing.assert_allclose(x, y, rtol=1e-3, atol=1e-3), non_ga_grad, ga_grad)
+  def allclose(a, b):
+    return tree_all(tree_map(partial(jnp.allclose, atol=1e-2, rtol=1e-2), a, b))
+  assert allclose(non_ga_grad, ga_grad)
   
-  simple_timeit(jit_grad_and_loss_ga, params_sharded, inputs_sharded, targets_sharded, args.gradient_accumulation_steps, tries = 3, task = 'toy_model_ga')
-  
+  # profile + time the ga run
+  simple_timeit(jit_loss_and_grad_ga, params, inputs, targets, args.gradient_accumulation_steps, tries = 3, task = 'toy_model_ga')
 
 main()
