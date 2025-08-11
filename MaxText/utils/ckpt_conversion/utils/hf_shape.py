@@ -15,7 +15,7 @@
  """
 
 
-def GEMMA3_HF_WEIGHTS_TO_SHAPE_MAPPING(config):
+def GEMMA3_HF_WEIGHTS_TO_SHAPE(config):
   """Generates a shape mapping for Hugging Face Gemma3 parameters.
 
   This function computes the expected shapes for all parameters in a Hugging
@@ -153,7 +153,7 @@ def GEMMA3_HF_WEIGHTS_TO_SHAPE_MAPPING(config):
   return shapes
 
 
-def GEMMA2_HF_WEIGHTS_TO_SHAPE_MAPPING(config):
+def GEMMA2_HF_WEIGHTS_TO_SHAPE(config):
   """Returns mapping between HuggingFace weights path and weights shape.
 
   Args:
@@ -208,7 +208,7 @@ def GEMMA2_HF_WEIGHTS_TO_SHAPE_MAPPING(config):
   return mapping
 
 
-def QWEN3_HF_WEIGHTS_TO_SHAPE_MAPPING(config):
+def QWEN3_HF_WEIGHTS_TO_SHAPE(config):
   """Returns mapping between HuggingFace Qwen3 weights path and the HuggingFace weights shape.
 
   To check this mapping, dump the huggingface model shapes:
@@ -308,16 +308,16 @@ def QWEN3_HF_WEIGHTS_TO_SHAPE_MAPPING(config):
   return mapping
 
 
-SHAPE_MAPPING = {
-    "gemma2-2b": GEMMA2_HF_WEIGHTS_TO_SHAPE_MAPPING,
-    "gemma2-9b": GEMMA2_HF_WEIGHTS_TO_SHAPE_MAPPING,
-    "gemma2-27b": GEMMA2_HF_WEIGHTS_TO_SHAPE_MAPPING,
-    "gemma3-4b": GEMMA3_HF_WEIGHTS_TO_SHAPE_MAPPING,
-    "gemma3-12b": GEMMA3_HF_WEIGHTS_TO_SHAPE_MAPPING,
-    "gemma3-27b": GEMMA3_HF_WEIGHTS_TO_SHAPE_MAPPING,
-    "qwen3-0.6b": QWEN3_HF_WEIGHTS_TO_SHAPE_MAPPING,
-    "qwen3-4b": QWEN3_HF_WEIGHTS_TO_SHAPE_MAPPING,
-    "qwen3-8b": QWEN3_HF_WEIGHTS_TO_SHAPE_MAPPING,
-    "qwen3-14b": QWEN3_HF_WEIGHTS_TO_SHAPE_MAPPING,
-    "qwen3-32b": QWEN3_HF_WEIGHTS_TO_SHAPE_MAPPING,
+HF_SHAPE = {
+    "gemma2-2b": GEMMA2_HF_WEIGHTS_TO_SHAPE,
+    "gemma2-9b": GEMMA2_HF_WEIGHTS_TO_SHAPE,
+    "gemma2-27b": GEMMA2_HF_WEIGHTS_TO_SHAPE,
+    "gemma3-4b": GEMMA3_HF_WEIGHTS_TO_SHAPE,
+    "gemma3-12b": GEMMA3_HF_WEIGHTS_TO_SHAPE,
+    "gemma3-27b": GEMMA3_HF_WEIGHTS_TO_SHAPE,
+    "qwen3-0.6b": QWEN3_HF_WEIGHTS_TO_SHAPE,
+    "qwen3-4b": QWEN3_HF_WEIGHTS_TO_SHAPE,
+    "qwen3-8b": QWEN3_HF_WEIGHTS_TO_SHAPE,
+    "qwen3-14b": QWEN3_HF_WEIGHTS_TO_SHAPE,
+    "qwen3-32b": QWEN3_HF_WEIGHTS_TO_SHAPE,
 }
