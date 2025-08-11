@@ -359,7 +359,7 @@ class Decoder(nn.Module):
       case DecoderBlockType.GPT3:
         return [gpt3.Gpt3DecoderLayer]
       case DecoderBlockType.GPT_OSS:
-        return [gpt_oss.GptOssDecoderLayer]
+        return [gpt_oss.GptOssDecoderLayerWrapper]
       case DecoderBlockType.QWEN3:
         return [qwen3.Qwen3DecoderLayer]
       case DecoderBlockType.SIMPLE:

@@ -208,6 +208,7 @@ def validate_keys(keys):
     validate_sparse_matmul_parallelism(keys)
     validate_ragged_dot(keys)
     validate_deepseek_moe(keys)
+    validate_gpt_oss(keys)
     validate_expert_shard_attention_option(keys["expert_shard_attention_option"])
     assert keys["decoder_block"] != "qwen3", "Qwen3 MoE mode has not been tested, please set num_experts to 1."
 
@@ -951,6 +952,11 @@ def validate_deepseek_moe(raw_keys):
       raise ValueError(
           f'config num_experts: {raw_keys["num_experts"]} must be divisible by n_routing_groups: {raw_keys["n_routing_groups"]}'
       )
+
+
+def validate_gpt_oss(raw_keys):
+  if raw_keys["scan_layers"]:
+    raise ValueError("Currently scan feature is not supported for GPT OSS models.")
 
 
 def validate_sparse_matmul_parallelism(raw_keys):
