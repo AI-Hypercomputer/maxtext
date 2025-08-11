@@ -54,6 +54,15 @@ class Transformer(nn.Module):
   model_mode: str = MODEL_MODE_TRAIN # May be different than the model_mode passed to __call__
   # pylint: enable=attribute-defined-outside-init
 
+  def init(self, *args, model_mode: str = MODEL_MODE_TRAIN, **kwargs):
+    """Initializes the model."""
+    module = self.clone(model_mode=model_mode)
+    return nn.Module.init(module, *args, **kwargs)
+  
+  def apply(self, *args, model_mode: str = MODEL_MODE_TRAIN, **kwargs):
+    """Initializes the model."""
+    module = self.clone(model_mode=model_mode)
+    return nn.Module.apply(module, *args, **kwargs)
 
   def setup(self):
     """Initialize shared_embedding & decoder layers."""
@@ -91,7 +100,6 @@ class Transformer(nn.Module):
       decoder_segment_ids=None,
       encoder_images: Optional[jnp.ndarray] = None,
       enable_dropout=True,
-      model_mode=MODEL_MODE_TRAIN,
       previous_chunk=None,
       true_length: Optional[int] = None,
       slot: Optional[int] = None,
@@ -107,7 +115,7 @@ class Transformer(nn.Module):
         for this request.
     """
 
-    if decoder_segment_ids is not None and model_mode == MODEL_MODE_AUTOREGRESSIVE:
+    if decoder_segment_ids is not None and self.model_mode == MODEL_MODE_AUTOREGRESSIVE:
       raise ValueError(
           f"During autoregressive decoding we assume the tokens are in the active sequence"
           f" which is always {DECODING_ACTIVE_SEQUENCE_INDICATOR}."
@@ -128,7 +136,7 @@ class Transformer(nn.Module):
         decoder_positions=decoder_positions,
         decoder_segment_ids=decoder_segment_ids,
         deterministic=not enable_dropout,
-        model_mode=model_mode,
+        model_mode=self.model_mode,
         previous_chunk=previous_chunk,
         slot=slot,
         page_state=page_state,
@@ -164,7 +172,7 @@ class Transformer(nn.Module):
           position_ids=decoder_positions,
           decoder_segment_ids=decoder_segment_ids,
           deterministic=not enable_dropout,
-          model_mode=model_mode,
+          model_mode=self.model_mode,
       )
 
     return logits
@@ -205,7 +213,7 @@ class ZeroOneTransformer(nn.Module):
       decoder_segment_ids=None,
       encoder_images: Optional[jnp.ndarray] = None,
       enable_dropout=True,
-      model_mode=MODEL_MODE_TRAIN,
+      #model_mode=MODEL_MODE_TRAIN,
       previous_chunk=None,
       true_length: Optional[int] = None,
       slot: Optional[int] = None,
@@ -221,7 +229,7 @@ class ZeroOneTransformer(nn.Module):
           decoder_segment_ids,
           encoder_images,
           enable_dropout,
-          model_mode,
+          self.model_mode,
           previous_chunk,
           true_length,
           slot,
@@ -238,7 +246,7 @@ class ZeroOneTransformer(nn.Module):
         decoder_segment_ids=decoder_segment_ids,
         encoder_images=encoder_images,
         enable_dropout=enable_dropout,
-        model_mode=model_mode,
+        model_mode=self.model_mode,
         previous_chunk=previous_chunk,
         true_length=true_length,
         slot=slot,

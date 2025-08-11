@@ -67,7 +67,7 @@ from MaxText.utils.ckpt_conversion.utils.param_mapping import (
     HOOK_FNS,
     PARAM_MAPPING,
 )
-from MaxText.utils.ckpt_conversion.utils.shape_mapping import SHAPE_MAPPING
+from MaxText.utils.ckpt_conversion.utils.hf_shape import HF_SHAPE
 from MaxText.utils.ckpt_conversion.utils.hf_model_configs import HF_MODEL_CONFIGS
 from MaxText.utils.ckpt_conversion.utils.utils import (process_leaf_param, save_model_files, HF_IDS)
 
@@ -90,12 +90,12 @@ def _get_model_mappings(model_name: str, scan_layers: bool, config_dict: dict):
   Raises:
     ValueError: If mappings for the specified `model_name` are not found.
   """
-  if model_name not in PARAM_MAPPING or model_name not in SHAPE_MAPPING or model_name not in HOOK_FNS:
+  if model_name not in PARAM_MAPPING or model_name not in HF_SHAPE or model_name not in HOOK_FNS:
     raise ValueError(f"Mappings not found for model: {model_name}. Available PARAM_MAPPING keys: {PARAM_MAPPING.keys()}")
 
   return {
       "param_mapping": PARAM_MAPPING[model_name](config_dict, scan_layers),
-      "shape_mapping": SHAPE_MAPPING[model_name](config_dict),
+      "shape_mapping": HF_SHAPE[model_name](config_dict),
       "hook_fn_mapping": HOOK_FNS[model_name](config_dict, scan_layers, saving_to_hf=True),
   }
 
@@ -140,11 +140,12 @@ def main(argv: Sequence[str]) -> None:
   # 2. Load Tokenizer
   if model_key not in HF_IDS:
     raise ValueError(f"HF Tokenizer ID not found for model key: {model_key}")
+  hf_token = config.hf_access_token
   hf_tokenizer_id = HF_IDS[model_key]
-  tokenizer = AutoTokenizer.from_pretrained(hf_tokenizer_id)
+  tokenizer = AutoTokenizer.from_pretrained(hf_tokenizer_id,  token=hf_token)
 
   # For multi-modal case:
-  processor = AutoProcessor.from_pretrained(hf_tokenizer_id) if config.use_multimodal else None
+  processor = AutoProcessor.from_pretrained(hf_tokenizer_id,  token=hf_token) if config.use_multimodal else None
 
   # 3. Get parameter mappings
   mappings = _get_model_mappings(model_key, config.scan_layers, hf_config_obj.to_dict())

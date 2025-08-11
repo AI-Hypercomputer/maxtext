@@ -280,11 +280,15 @@ def GEMMA3_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, scan_layers=False, saving_to_hf=F
   # Vision layers
   vc = config.get("vision_config", {})
   nvis = vc.get("num_hidden_layers", 0)
-  for i in list(range(nvis)):
-    base = f"params-vision_encoder-Gemma3VisionEncoderLayer_0-" f"Transformer-encoderblock_{i}-"
+  vision_layer_ids = [None] if scan_layers else list(range(nvis))
+  for i in vision_layer_ids:
+    base = (
+        f"params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_{i}-"
+        if i is not None
+        else "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock-"
+    )
     # Attention kernels & biases
     for qkv in ["query", "key", "value"]:
-      # key is [1152, 1152]-> [1152, 16, 72]
       hooks[base + f"MultiHeadDotProductAttention_0-{qkv}-kernel"] = reshape_kernel
       hooks[base + f"MultiHeadDotProductAttention_0-{qkv}-bias"] = vis_bias
     # [1152, 1152] -> [16, 72, 1152]
