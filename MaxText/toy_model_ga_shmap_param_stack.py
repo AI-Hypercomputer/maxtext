@@ -165,10 +165,10 @@ def loss_and_grad_ga(params, inputs, targets, num_microbatches):
 def main():
   import argparse
   parser = argparse.ArgumentParser(description='Sharding and size settings')
-  parser.add_argument('--global_batch_size', type=int, default=262144) # 262144 #2097152
+  parser.add_argument('--global_batch_size', type=int, default=1048576) # 262144 #2097152
   parser.add_argument('--embed_size', type=int, default=2048)
   parser.add_argument('--mlp_size', type=int, default=8192)
-  parser.add_argument('--num_layers', type=int, default=2)
+  parser.add_argument('--num_layers', type=int, default=6)
   parser.add_argument('--gradient_accumulation_steps', type=int, default=16)
   global args
   args = parser.parse_args()
