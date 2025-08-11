@@ -406,6 +406,9 @@ class MlpBlock(nnx.Module):
         DecoderBlockType.MISTRAL,
         DecoderBlockType.MIXTRAL,
         DecoderBlockType.GEMMA,
+        DecoderBlockType.GEMMA2,
+        DecoderBlockType.GEMMA3,
+        DecoderBlockType.QWEN3,
         DecoderBlockType.DEEPSEEK,
         DecoderBlockType.LLAMA4,
     ):
