@@ -63,6 +63,8 @@ def simple_timeit(f, *args, tries=10, task=None, enable_profile=True):
 # Hardcode 1D data parallel mesh for this simple toy
 global mesh
 mesh = Mesh(jax.devices(), ('dp',))
+replicated_sharding = NamedSharding(mesh, P()) # used for params - replicated for DP
+dp_sharding = NamedSharding(mesh, P('dp')) # use for inputs
 
 def init_layer(key, embed_size, mlp_size):
     # returns a dictionary with two keys of sizes {"w_in": [embed, mlp] and "w_out":[mlp, embed]}
@@ -109,45 +111,69 @@ def loss_fn(params, inputs, targets):
   predictions = predict(params, inputs)
   return jnp.mean(jnp.sum((predictions - targets)**2, axis=-1))
 
-def loss_and_grad_ga(params, inputs, targets, num_microbatches):
-  # Params is pytree with two leaves of shape [layers, embed, mlp] and [layers, mlp, embed]
-  # Inputs and targets both have shape [global_batch, embed]
-  microbatch_size = inputs.shape[0] // num_microbatches
-  embed = inputs.shape[-1]
-  def reshape_inputs_for_microbatches(inputs):
-    inputs = inputs.reshape([microbatch_size, num_microbatches, embed])
-    inputs = inputs.transpose([1, 0, 2]) 
-    # This ensures the previous dp sharding of 2D inputs does not need any communication to reshape to microbatches
-    input_sharding_constraint = NamedSharding(mesh, P(None, "dp", None))
-    return jax.lax.with_sharding_constraint(inputs, input_sharding_constraint)
-  inputs = reshape_inputs_for_microbatches(inputs)
-  targets = reshape_inputs_for_microbatches(targets)
-
-  grad_func = jax.value_and_grad(loss_fn)
-  def accumulate_gradient(acc_grad_and_loss, inputs_and_targets):
-       inputs, targets= inputs_and_targets['inputs'], inputs_and_targets['targets']
-       cur_batch_loss, cur_batch_gradient = grad_func(params, inputs, targets)
-       acc_grad_and_loss["loss"] += cur_batch_loss
-       acc_grad_and_loss["grad"] = jax.tree_util.tree_map(lambda x, y: x + y, cur_batch_gradient, acc_grad_and_loss["grad"])
-       return acc_grad_and_loss, None # We will scan this so need to return None
-
-  init_grad = jax.tree_util.tree_map(jnp.zeros_like, params) 
-  init_grad_and_loss = {"loss": 0.0, "grad": init_grad}
-  inputs_and_targets = {"inputs": inputs,"targets": targets}
-  grad_and_loss, _ = jax.lax.scan(accumulate_gradient, init_grad_and_loss, inputs_and_targets, length=num_microbatches)
-  grads, loss = grad_and_loss["grad"], grad_and_loss["loss"]
-  # Average the accumulated gradients and loss to match the global batch calculation
-  grads = jax.tree_util.tree_map(
-      lambda g: g / num_microbatches, grads
-  )
-  loss = loss / num_microbatches
-
-  # Try NVIDIA sharding hint to encourage compiler to move reduces outside of the loop
-  params_shardings = NamedSharding(mesh, P(None, None, None)) # Replicated DP, params are [layers, feat_in , feature_out]
-  grads = jax.lax.with_sharding_constraint(grads, params_shardings)
-
-  return loss, grads
+@partial(jax.experimental.shard_map.shard_map, mesh=mesh, in_specs=((P('dp')), P('dp'), P('dp')),
+        out_specs=P('dp'))
+def per_device_losses_and_grads(params, inputs, targets):
+    # remove initial singleton dim from params
+    params = jax.tree_util.tree_map(lambda x: x[0], params)
+    grad_func = jax.value_and_grad(loss_fn)
+    losses, grads = grad_func(params, inputs, targets)
+    losses = jax.tree_util.tree_map(lambda x: jnp.expand_dims(x, axis=0), losses)
+    grads = jax.tree_util.tree_map(lambda x: jnp.expand_dims(x, axis=0), grads)
     
+    return losses, grads
+  
+
+def loss_and_grad_ga(params, inputs, targets, num_microbatches):
+    # Params is pytree with two leaves of shape [layers, embed, mlp] and [layers, mlp, embed]
+    # Inputs and targets both have shape [global_batch, embed]
+    # Outputs is params, same size and sharding as params
+
+    num_dp_replicas = jax.device_count()
+    microbatch_size = inputs.shape[0] // num_microbatches
+    embed = inputs.shape[1]
+    def reshape_inputs_for_microbatches(inputs):
+        inputs = inputs.reshape([microbatch_size, num_microbatches, embed])
+        inputs = inputs.transpose([1, 0, 2]) 
+        # This ensures the previous dp sharding of 2D inputs does not need any communication to reshape to microbatches
+        input_sharding_constraint = NamedSharding(mesh, P(None, "dp", None)) # [microbatches, microbatch_size, embed] microbatches is leading since it will be scanned over
+        return jax.lax.with_sharding_constraint(inputs, input_sharding_constraint)
+    inputs = reshape_inputs_for_microbatches(inputs)
+    targets = reshape_inputs_for_microbatches(targets)
+    params_replicated = jax.tree_util.tree_map(lambda x: jnp.stack([x] * num_dp_replicas), params) # our hack around shmap + grad
+
+    #grad_func = jax.value_and_grad(loss_fn)
+    grad_func = per_device_losses_and_grads
+    def accumulate_gradient(acc_grad_and_loss, inputs_and_targets):
+        inputs, targets= inputs_and_targets['inputs'], inputs_and_targets['targets']
+        cur_batch_loss, cur_batch_gradient = grad_func(params_replicated, inputs, targets)
+        acc_grad_and_loss["loss"] += cur_batch_loss
+        acc_grad_and_loss["grad"] = jax.tree_util.tree_map(lambda x, y: x + y, cur_batch_gradient, acc_grad_and_loss["grad"])
+        return acc_grad_and_loss, None # We will scan this so need to return None
+
+    init_grad = jax.tree_util.tree_map(jnp.zeros_like, params_replicated)
+    # init_loss is a jax array of length num_dp_replicas of zeros
+    init_loss = jnp.zeros(num_dp_replicas)
+    init_grad_and_loss = {"loss": init_loss, "grad": init_grad}
+    inputs_and_targets = {"inputs": inputs,"targets": targets}
+    grad_and_loss, _ = jax.lax.scan(accumulate_gradient, init_grad_and_loss, inputs_and_targets, length=num_microbatches)
+    grads, loss = grad_and_loss["grad"], grad_and_loss["loss"]
+    # Average the accumulated gradients and loss to match the global batch calculation
+    # grads = jax.tree_util.tree_map(
+    #     lambda g: g / num_microbatches, grads
+    # )
+    # loss = loss / num_microbatches
+
+    # grads = jax.lax.pmean(grads, axis_name='dp')
+    # # TODO(mattdavidow: Why do we need an additional divison by num_dp_replicas here? We already took average above?)
+    # grads = jax.tree_util.tree_map(
+    #     lambda g: g / num_dp_replicas, grads
+    # )
+    # loss = jax.lax.pmean(loss, axis_name='dp')
+    # return loss, grads
+    return loss, grads
+
+ 
 
 def main():
   import argparse
@@ -155,13 +181,12 @@ def main():
   parser.add_argument('--global_batch_size', type=int, default=262144) # 262144 #2097152
   parser.add_argument('--embed_size', type=int, default=2048)
   parser.add_argument('--mlp_size', type=int, default=8192)
-  parser.add_argument('--num_layers', type=int, default=16)
-  parser.add_argument('--gradient_accumulation_steps', type=int, default=8)
+  parser.add_argument('--num_layers', type=int, default=2)
+  parser.add_argument('--gradient_accumulation_steps', type=int, default=16)
   global args
   args = parser.parse_args()
     
-  replicated_sharding = NamedSharding(mesh, P()) # used for params - replicated for DP
-  dp_sharding = NamedSharding(mesh, P('dp')) # use for inputs
+
 
   jit_initialize_inputs = jax.jit(init_model_and_inputs, static_argnums=(1,2,3,4),out_shardings=(replicated_sharding, dp_sharding, dp_sharding))
   params, inputs, targets = jit_initialize_inputs(jax.random.PRNGKey(0), args.num_layers, args.embed_size, args.mlp_size, args.global_batch_size)
@@ -175,14 +200,27 @@ def main():
   jit_loss_and_grad_ga = jax.jit(loss_and_grad_ga, static_argnums=(3,)) # num_microbathces is static
   loss_ga, ga_grad = jit_loss_and_grad_ga(params, inputs, targets, args.gradient_accumulation_steps)
 
+  # tree map sum ga_grad along leading axis
+  ga_grad_avg = jax.tree_util.tree_map(lambda x: jnp.mean(x, axis=0), ga_grad)
+  loss_ga = jnp.sum(loss_ga, axis=0)
+
+  print(f"{loss_ga=}")
+  print(f"{loss_non_ga=}")
+  
+  nga=non_ga_grad['w_in'][0:3,0:3,0]
+  ga=ga_grad['w_in'][0:3,0:3,0]
+  rawr = ga/nga
+  print(rawr)
+
   # assert non_ga_grad and ga_grad are similar
   def allclose(a, b):
     return tree_all(tree_map(partial(jnp.allclose, atol=1e-2, rtol=1e-2), a, b))
   assert allclose(non_ga_grad, ga_grad)
   
   # profile + time the ga run
-  #simple_timeit(jit_loss_and_grad_ga, params, inputs, targets, args.gradient_accumulation_steps, tries = 3, task = 'toy_model_ga')
+  simple_timeit(jit_loss_and_grad_ga, params, inputs, targets, args.gradient_accumulation_steps, tries = 3, task = 'toy_model_ga')
 
-  simple_timeit(jit_grad_fn, params, inputs, targets, tries = 3, task = 'toy_model_non_ga')
+  # profile + time the non-ga run
+  #simple_timeit(jit_grad_fn, params, inputs, targets, tries = 3, task = 'toy_model_non_ga')
 
 main()
