@@ -136,6 +136,7 @@ base_mlp_dim: 7168
 base_num_decoder_layers: 16
 head_dim: 128
 mlp_activations: ["silu", "linear"]
+mlp_activations_limit: -1.0
 dropout_rate: 0.0
 logits_via_embedding: False
 normalize_embedding_logits: True  # whether to normalize pre-softmax logits if logits_via_embedding is true
@@ -265,6 +266,7 @@ param_scan_axis: 1
 # The attention_type parameter determines the variants of attention, e.g. global or local_sliding
 attention: 'autoselected' # Supported attention: autoselected, dot_product, flash, cudnn_flash_te
 attention_type: 'global' # Supported attention_type: global, local_sliding, chunk, mla
+attention_bias: False
 sliding_window_size: 0
 chunk_attn_window_size: 0
 attn_logits_soft_cap: 0.0
