@@ -30,6 +30,7 @@ from flax.nnx import Object
 from flax.nnx.rnglib import Rngs
 import jax
 from jax import tree_util as jtu
+import qwix
 
 M = tp.TypeVar("M", bound=Module)
 
@@ -316,8 +317,21 @@ def _get_module_method(module, method: tp.Callable[..., Any] | str | None):
   return method
 
 
-def _enable_linen_module_paths(module: Module):
-  """Ensure that linen module_path is correct when in NNX."""
+def _fix_for_qwix_quantization(module: Module):
+  """Process the nnx module to make it compatible with QWIX quantization.
+
+  Normally Qwix only works with pure Linen modules or pure NNX modules. When
+  NNX modules are called inside Linen modules, Qwix will have issues to
+    * detect the correct module path when a Jax op (e.g. einsum) is called.
+    * detect the input types (whether it's a weight) of the Jax op.
+
+  This function will fix those issues.
+
+  Args:
+    module: The NNX module to be processed.
+  """
+  # Wrap the __call__ function of the nnx modules to make sure the linen module
+  # path is updated correctly.
   def wrap(call_fn, name: str):
     def wrapped(*args, **kwargs):
       if not linen.module._context.module_stack:  # pylint: disable=W0212
@@ -339,6 +353,10 @@ def _enable_linen_module_paths(module: Module):
       node.__class__ = type(node.__class__.__name__, (node.__class__,), {
         '__call__': wrap(node.__class__.__call__, str(path[-1])),
       })
+
+  # Set the correct weight names. We call QtProvider.process_model_inputs here
+  # to avoid using Qwix internal APIs.
+  qwix.QtProvider.process_model_inputs(None, module, None, None)  # pytype: disable=wrong-arg-types
 
 
 class ToLinen(linen.Module):
@@ -403,17 +421,16 @@ class ToLinen(linen.Module):
     # init codepath
     if self.is_initializing():
       module = self.nnx_class(*self.args, **_module_kwargs())
-      _enable_linen_module_paths(module)
       # TODO: add lazy_init here in case there's an `ToNNX` submodule under `module`.
       # update linen variables before call module to save initial state
       self._update_variables(module)
+      _fix_for_qwix_quantization(module)
       method_fn = _get_module_method(module, nnx_method)
       out = method_fn(module, *args, **kwargs)
       return out
 
     # create the nnx module
     module = self.nnx_class(*self.args, **_module_kwargs())
-    _enable_linen_module_paths(module)
     # update nnx module from linen variables
     def maybe_unbox(x):
       if isinstance(x, meta.AxisMetadata):
@@ -428,6 +445,7 @@ class ToLinen(linen.Module):
       states = ({},)
     nnx.update(module, *states)
 
+    _fix_for_qwix_quantization(module)
     method_fn = _get_module_method(module, nnx_method)
     out = method_fn(module, *args, **kwargs)
     self._update_variables(module)
