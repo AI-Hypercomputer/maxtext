@@ -308,6 +308,8 @@ class RoutedMoE(nnx.Module):
       # memory. Instead they are retrieved from the tensors stored in the 'aqt'
       # collection.
       self.wi_0 = jnp.zeros((num_experts, self.config.emb_dim, intermediate_dim))
+      self.wi_1 = jnp.zeros((num_experts, self.config.emb_dim, intermediate_dim))
+      self.wo = jnp.zeros((num_experts, intermediate_dim, self.config.emb_dim))
     else:
       self.wi_0 = nnx.Param(
           self.kernel_init(
@@ -319,10 +321,6 @@ class RoutedMoE(nnx.Module):
           ),
           sharding=self.wi_kernel_axes,
       )
-
-    if quantizations.in_serve_mode(self.quant):
-      self.wi_1 = jnp.zeros((num_experts, self.config.emb_dim, intermediate_dim))
-    else:
       self.wi_1 = nnx.Param(
           self.kernel_init(
               rngs.params(),
@@ -333,10 +331,6 @@ class RoutedMoE(nnx.Module):
           ),
           sharding=self.wi_kernel_axes,
       )
-
-    if quantizations.in_serve_mode(self.quant):
-      self.wo = jnp.zeros((num_experts, intermediate_dim, self.config.emb_dim))
-    else:
       self.wo = nnx.Param(
           self.kernel_init(
               rngs.params(),
@@ -347,6 +341,28 @@ class RoutedMoE(nnx.Module):
           ),
           sharding=self.wo_kernel_axes,
       )
+
+    if self.config.mlp_bias:
+      wi_bias_axes = ("exp", "activation_mlp")
+      wo_bias_axes = ("exp", "activation_embed")
+      wi_bias_shape = (self.num_experts, self.intermediate_dim)
+      wo_bias_shape = (self.num_experts, self.config.emb_dim)
+      self.wi_0_bias = nnx.Param(
+          default_bias_init(rngs.params(), wi_bias_shape, self.weight_dtype),
+          sharding=wi_bias_axes,
+      )
+      self.wi_1_bias = nnx.Param(
+          default_bias_init(rngs.params(), wi_bias_shape, self.weight_dtype),
+          sharding=wi_bias_axes,
+      )
+      self.wo_bias = nnx.Param(
+          default_bias_init(rngs.params(), wo_bias_shape, self.weight_dtype),
+          sharding=wo_bias_axes,
+      )
+    else:
+      self.wi_0_bias = None
+      self.wi_1_bias = None
+      self.wo_bias = None
 
   def get_expert_parallelism_size(self):
     return self.mesh.shape["expert"]
@@ -702,6 +718,10 @@ class RoutedMoE(nnx.Module):
     )
     return input_offsets, send_sizes, output_offsets, recv_sizes
 
+  def transform_bias(self, experts_index, *biases):
+    """Selects bias values for a variable number of bias tensors based on chosen experts."""
+    return tuple(bias[experts_index] for bias in biases)
+
   def sparse_matmul(
       self,
       inputs,
@@ -710,6 +730,9 @@ class RoutedMoE(nnx.Module):
       w0_kernel,
       w1_kernel,
       wo_kernel,
+      w0_bias,
+      w1_bias,
+      wo_bias,
   ):
     """Perform sparse matrix multiplication of inputs and Experts."""
 
@@ -813,8 +836,14 @@ class RoutedMoE(nnx.Module):
 
     if self.get_tensor_transpose_parallelism_size() > 1:
       input_partition_pspec = nn.logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", "activation_embed"))
+      w0_bias_pspec = nn.logical_to_mesh_axes(("exp", None))
+      w1_bias_pspec = nn.logical_to_mesh_axes(("exp", None))
+      wo_bias_pspec = nn.logical_to_mesh_axes(("exp", "activation_embed"))
     else:
       input_partition_pspec = nn.logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", None))
+      w0_bias_pspec = nn.logical_to_mesh_axes(("exp", "activation_mlp"))
+      w1_bias_pspec = nn.logical_to_mesh_axes(("exp", "activation_mlp"))
+      wo_bias_pspec = nn.logical_to_mesh_axes(("exp", "activation_embed"))
 
     gate_logits_pspec = nn.logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", None))
     if self.config.model_name.startswith("deepseek3"):
@@ -842,11 +871,14 @@ class RoutedMoE(nnx.Module):
             w0_pspec,
             w1_pspec,
             wo_pspec,
+            w0_bias_pspec,
+            w1_bias_pspec,
+            wo_bias_pspec,
         ),
         out_specs=(nn.logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", "activation_embed"))),
         check_rep=False,
     )
-    def wrapper(x, logits, pre_bias_logits, w0, w1, wo):
+    def wrapper(x, logits, pre_bias_logits, w0, w1, wo, w0_bias, w1_bias, wo_bias):
       batch_size, sequence_length, _ = x.shape
       x, sorted_selected_experts, weights, group_sizes, selected_experts = self.permute(x, logits, pre_bias_logits)
       expert_axis_name = "expert"
@@ -909,18 +941,37 @@ class RoutedMoE(nnx.Module):
               global_sorted_experts=selected_experts,
           )
 
+      if self.config.mlp_bias:
+        w0_bias, w1_bias, wo_bias = self.transform_bias(selected_experts, w0_bias, w1_bias, wo_bias)
+
       layer_w0 = gmm(x, w0, group_sizes, selected_experts)
+      if self.config.mlp_bias:
+        layer_w0 = layer_w0 + w0_bias
       if self.get_tensor_transpose_parallelism_size() > 1:
         layer_w0 = jax.lax.psum(layer_w0, "tensor_transpose")
       layer_w0 = adc.checkpoint_name(layer_w0, "mlpwi_0")
+
       layer_w1 = gmm(x, w1, group_sizes, selected_experts)
+      if self.config.mlp_bias:
+        layer_w1 = layer_w1 + w1_bias
       if self.get_tensor_transpose_parallelism_size() > 1:
         layer_w1 = jax.lax.psum(layer_w1, "tensor_transpose")
       layer_w1 = adc.checkpoint_name(layer_w1, "mlpwi_1")
       # pylint: disable=protected-access
-      layer_act = linears._convert_to_activation_function(self.config.mlp_activations[0])(layer_w0)
-      intermediate_layer = jnp.multiply(layer_act, layer_w1)
+
+      if self.config.decoder_block == ctypes.DecoderBlockType.GPT_OSS:
+        layer_w0 = jnp.clip(layer_w0, a_min=None, a_max=self.config.mlp_activations_limit)
+        layer_w1 = jnp.clip(layer_w1, a_min=-self.config.mlp_activations_limit, a_max=self.config.mlp_activations_limit)
+        layer_act = linears._convert_to_activation_function(self.config.mlp_activations[0])(layer_w0 * 1.702)
+        glu = jnp.multiply(layer_w0, layer_act)
+        intermediate_layer = jnp.multiply(glu, (layer_w1 + 1))
+      else:
+        layer_act = linears._convert_to_activation_function(self.config.mlp_activations[0])(layer_w0)
+        intermediate_layer = jnp.multiply(layer_act, layer_w1)
+
       intermediate_output = gmm(intermediate_layer, wo, group_sizes, selected_experts)
+      if self.config.mlp_bias:
+        intermediate_output = intermediate_output + wo_bias
       intermediate_output = adc.checkpoint_name(intermediate_output, "mlpwo")
 
       if self.get_tensor_parallelism_size() > 1:
@@ -985,7 +1036,7 @@ class RoutedMoE(nnx.Module):
 
       return output, None
 
-    return wrapper(inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel)
+    return wrapper(inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel, w0_bias, w1_bias, wo_bias)
 
   def reshape_and_update_weights(self, weights, indices):
     """reshape and update weights."""
@@ -1236,6 +1287,9 @@ class RoutedMoE(nnx.Module):
       w0_kernel,
       w1_kernel,
       wo_kernel,
+      w0_bias,
+      w1_bias,
+      wo_bias,
   ) -> tuple[jax.Array, Optional[jax.Array]]:
     """Dense matrix multiplication."""
     # gate_logits: batch, length, expert
@@ -1384,6 +1438,9 @@ class RoutedMoE(nnx.Module):
         layer_w0 = self.get_einsum(rhs_mesh_axes=w0_kernel_axes)(
             mlp_up_einsum, dispatch, w0_kernel, precision=matmul_precision
         )
+        if self.config.mlp_bias:
+          w0_bias = w0_bias[:, None, None, :]
+          layer_w0 = layer_w0 + w0_bias
 
         if self.config.activations_in_float32:
           layer_w0 = layer_w0.astype(jnp.float32)
@@ -1398,6 +1455,9 @@ class RoutedMoE(nnx.Module):
         layer_w1 = self.get_einsum(rhs_mesh_axes=w1_kernel_axes)(
             mlp_up_einsum, dispatch, w1_kernel, precision=matmul_precision
         )
+        if self.config.mlp_bias:
+          w1_bias = w1_bias[:, None, None, :]
+          layer_w1 = layer_w1 + w1_bias
         if self.config.activations_in_float32:
           layer_w1 = layer_w1.astype(jnp.float32)
         layer_w1 = nn.with_logical_constraint(
@@ -1417,6 +1477,9 @@ class RoutedMoE(nnx.Module):
             wo_kernel,
             precision=matmul_precision,
         )
+        if self.config.mlp_bias:
+          wo_bias = wo_bias[:, None, None, :]
+          intermediate_layer = intermediate_layer + wo_bias
         if self.config.activations_in_float32:
           intermediate_layer = intermediate_layer.astype(jnp.float32)
         if self.config.model_call_mode != "inference":
@@ -1454,6 +1517,8 @@ class RoutedMoE(nnx.Module):
         layer_w0 = self.get_einsum(rhs_mesh_axes=self.wi_kernel_axes)(
             "BSM,EMH -> BSEH", inputs, w0_kernel, precision=matmul_precision
         )
+        if self.config.mlp_bias:
+          layer_w0 = layer_w0 + w0_bias
         if self.config.activations_in_float32:
           layer_w0 = layer_w0.astype(jnp.float32)
         layer_w0 = adc.checkpoint_name(layer_w0, "mlpwi_0")
@@ -1461,6 +1526,8 @@ class RoutedMoE(nnx.Module):
         layer_w1 = self.get_einsum(rhs_mesh_axes=self.wi_kernel_axes)(
             "BSM,EMH -> BSEH", inputs, w1_kernel, precision=matmul_precision
         )
+        if self.config.mlp_bias:
+          layer_w1 = layer_w1 + w1_bias
         if self.config.activations_in_float32:
           layer_w1 = layer_w1.astype(jnp.float32)
         layer_w1 = adc.checkpoint_name(layer_w1, "mlpwi_1")
@@ -1474,6 +1541,8 @@ class RoutedMoE(nnx.Module):
             wo_kernel,
             precision=matmul_precision,
         )
+        if self.config.mlp_bias:
+          intermediate_layer = intermediate_layer + wo_bias
         if self.config.activations_in_float32:
           intermediate_layer = intermediate_layer.astype(jnp.float32)
         intermediate_layer = adc.checkpoint_name(intermediate_layer, "mlpwo")
@@ -1520,6 +1589,13 @@ class RoutedMoE(nnx.Module):
     w1_kernel = jnp.asarray(self.wi_1[...], self.dtype)
     wo_kernel = jnp.asarray(self.wo[...], self.dtype)
 
+    if cfg.mlp_bias:
+      w0_bias = jnp.asarray(self.wi_0_bias[...], self.dtype)
+      w1_bias = jnp.asarray(self.wi_1_bias[...], self.dtype)
+      wo_bias = jnp.asarray(self.wo_bias[...], self.dtype)
+    else:
+      w0_bias, w1_bias, wo_bias = None, None, None
+
     if cfg.sparse_matmul:
       if quantizations.in_serve_mode(self.quant):
         w0_kernel, w1_kernel, wo_kernel = self.retrieve_quantized_weight(
@@ -1530,9 +1606,13 @@ class RoutedMoE(nnx.Module):
             w1_kernel,
             wo_kernel,
         )
-      return self.sparse_matmul(inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel)
+      return self.sparse_matmul(
+          inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel, w0_bias, w1_bias, wo_bias
+      )
     else:
-      return self.dense_matmul(inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel)
+      return self.dense_matmul(
+          inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel, w0_bias, w1_bias, wo_bias
+      )
 
 
 class RoutedAndSharedMoE(nnx.Module):

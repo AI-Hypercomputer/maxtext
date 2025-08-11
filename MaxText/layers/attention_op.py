@@ -20,6 +20,7 @@ from functools import partial
 import math
 
 import numpy as np
+from packaging import version
 
 from jax import lax
 from jax.ad_checkpoint import checkpoint_name
@@ -129,6 +130,12 @@ def apply_mask_to_logits(logits: Array, mask: Array):
     Masked logits.
   """
   return jnp.where((mask >= DEFAULT_MASK_VALUE * 0.5), logits, DEFAULT_MASK_VALUE)
+
+
+def validate_flash_attention_with_sinks_on_gpu(sinks: Array | None) -> None:
+  """Helper function to check for sinks with flash attention on GPU."""
+  if sinks is not None:
+    raise ValueError("The flash attention with sinks is not supported on GPU yet.")
 
 
 # TODO(agagik): change splash_attention_mask._ComputableMask to be non protected
@@ -677,6 +684,7 @@ class AttentionOp(nnx.Module):
       use_ragged_attention: bool = False,
       previous_chunk: Any = None,
       bidirectional_mask: Any = None,
+      sinks: Array = None,
       *,
       qk_product_einsum: Callable[..., Array],
       wv_product_einsum: Callable[..., Array],
@@ -712,6 +720,7 @@ class AttentionOp(nnx.Module):
           model_mode,
           previous_chunk,
           bidirectional_mask=bidirectional_mask,
+          sinks=sinks,
           qk_product_einsum=qk_product_einsum,
           wv_product_einsum=wv_product_einsum,
       )
@@ -727,8 +736,9 @@ class AttentionOp(nnx.Module):
               """Decode not supported with flash attention.
                               Use `dot_product` instead."""
           )
-        return self.tpu_flash_attention(query, key, value, decoder_segment_ids, self.attn_logits_soft_cap), None, None
+        return self.tpu_flash_attention(query, key, value, decoder_segment_ids, self.attn_logits_soft_cap, sinks), None, None
       else:
+        validate_flash_attention_with_sinks_on_gpu(sinks)
         if model_mode == MODEL_MODE_AUTOREGRESSIVE:
           # fallback to dot_product as pallas gpu flash attention doesn't support decode stage
           return self.apply_attention_dot(
@@ -763,6 +773,7 @@ class AttentionOp(nnx.Module):
           out = gpu_pallas_attention.mha(query, key, value, decoder_segment_ids, sm_scale=1.0, causal=True)
           return out, None, None
     elif self.attention_kernel == "cudnn_flash_te":
+      validate_flash_attention_with_sinks_on_gpu(sinks)
       if isinstance(key, KVTensor):
         key = key.dequant()
       if isinstance(value, KVTensor):
@@ -774,6 +785,7 @@ class AttentionOp(nnx.Module):
         )
       return self.cudnn_flash_attention(query, key, value, decoder_segment_ids, model_mode), None, None
     elif self.attention_kernel == "cudnn_flash_jax":
+      validate_flash_attention_with_sinks_on_gpu(sinks)
       if isinstance(key, KVTensor):
         key = key.dequant()
       if isinstance(value, KVTensor):
@@ -877,6 +889,7 @@ class AttentionOp(nnx.Module):
       value: Array,
       decoder_segment_ids: Array | None,
       attn_logits_soft_cap: float | None = None,
+      sinks: Array = None,
   ) -> Array:
     """TPU Flash Attention."""
 
@@ -1029,6 +1042,7 @@ class AttentionOp(nnx.Module):
             segment_axis_names_splash_kernel,
             None,  # no sharding for cp_size
             None,  # no sharding for load_balanced_context_parallel
+            None,  # no sharding for sinks
         ),
         out_specs=axis_names_q,
         check_rep=False,
@@ -1042,6 +1056,7 @@ class AttentionOp(nnx.Module):
         splash_kernel,
         cp_size,
         load_balanced_context_parallel,
+        sinks,
     ):
       # If load_balanced_context_parallel is enabled, reorder the key and value tensors
       # to ensure that they are contiguous in memory.
@@ -1065,8 +1080,13 @@ class AttentionOp(nnx.Module):
           decoder_segment_ids_tuple = splash_attention_kernel.SegmentIds(decoder_segment_ids_q, decoder_segment_ids_kv)
       else:
         decoder_segment_ids_tuple = None
-      attention_output = jax.vmap(splash_kernel)(query, key, value, segment_ids=decoder_segment_ids_tuple)
-
+      # TODO(ranran): remove if/else branch once b/441336842 is fixed
+      if version.parse(jax.__version__) < version.parse("0.7.2.dev20250824"):
+        attention_output = jax.vmap(splash_kernel)(query, key, value, decoder_segment_ids_tuple)
+      else:
+        attention_output = jax.vmap(splash_kernel, in_axes=(0, 0, 0, 0, None))(
+            query, key, value, decoder_segment_ids_tuple, sinks
+        )
       return attention_output
 
     x = wrap_flash_attention(
@@ -1078,6 +1098,7 @@ class AttentionOp(nnx.Module):
         splash_kernel,
         cp_size,
         load_balanced_context_parallel,
+        sinks,
     )
 
     x = jnp.transpose(x, axes=(0, 2, 1, 3))
@@ -1194,6 +1215,7 @@ class AttentionOp(nnx.Module):
       q_seq_len: int,
       model_mode: str,
       wv_product_einsum: Callable[..., Array],
+      sinks: Array = None,
   ) -> tuple[Array, Array, Array]:
     """Computes the attention of a local subset of the kv cache.
     Local attention results will need to be combined with any other local attentions and normalized
@@ -1210,19 +1232,26 @@ class AttentionOp(nnx.Module):
           local_max is the local max of exponentials
           local_sum is the sum of exponentials for this chunk, divided by exp(local_max).
     """
-    local_max = jnp.max(attn_weights, axis=-1, keepdims=True)
-    local_exps = jnp.exp(attn_weights - local_max)
-    local_sum = jnp.sum(local_exps, axis=-1, keepdims=True)
+    b, n_kv, g, t, s = attn_weights.shape
+    n_q = n_kv * g
+    logits = jnp.reshape(attn_weights, (b, n_q, t, s))
+    if sinks is not None:
+      # broadcast sinks to match the attn weights dimension and combine
+      sinks_param = sinks.astype(attn_weights.dtype)  # (n_q,)
+      sinks_logits = sinks_param[jnp.newaxis, :, jnp.newaxis, jnp.newaxis]  # (1, n_q, 1, 1)
+      sinks_logits = jnp.broadcast_to(sinks_logits, (b, n_q, t, 1))
+      logits = jnp.concatenate([logits, sinks_logits], axis=-1)
 
-    local_sum = jnp.moveaxis(local_sum, -2, 1)
-    local_max = jnp.moveaxis(local_max, -2, 1)
+    # softmax
+    local_max = jnp.max(logits, axis=-1, keepdims=True)
+    local_exps_combined = jnp.exp(logits - local_max)
+    local_sum = jnp.sum(local_exps_combined, axis=-1, keepdims=True)
 
-    local_max = jnp.reshape(
-        local_max, (local_max.shape[0], local_max.shape[1], local_max.shape[2] * local_max.shape[3], 1)
-    )
-    local_sum = jnp.reshape(
-        local_sum, (local_sum.shape[0], local_sum.shape[1], local_sum.shape[2] * local_sum.shape[3], 1)
-    )
+    # reshape and transpose
+    local_exps = local_exps_combined[..., :s]
+    local_exps = jnp.reshape(local_exps, (b, n_kv, g, t, s))
+    local_max = jnp.transpose(local_max, (0, 2, 1, 3))  # (b, t, n_q, 1)
+    local_sum = jnp.transpose(local_sum, (0, 2, 1, 3))  # (b, t, n_q, 1)
 
     local_out = self.wv_product(local_exps, value, model_mode, wv_product_einsum)
     if model_mode == MODEL_MODE_AUTOREGRESSIVE and self.is_partition_in_decode(q_seq_len):
@@ -1254,6 +1283,7 @@ class AttentionOp(nnx.Module):
       model_mode: str = MODEL_MODE_TRAIN,
       previous_chunk: Any = None,
       bidirectional_mask: Any = None,
+      sinks: Array = None,
       *,
       qk_product_einsum: Callable[..., Array],
       wv_product_einsum: Callable[..., Array],
@@ -1312,7 +1342,7 @@ class AttentionOp(nnx.Module):
       attn_mask = partitioning.with_sharding_constraint(attn_mask, (BATCH, HEAD, None, PREFILL_LENGTH, KV_LENGTH))
     if attn_mask is not None:
       attn_weights = apply_mask_to_logits(attn_weights, attn_mask)
-    return self.compute_local_attention(attn_weights, value, q_seq_len, model_mode, wv_product_einsum)
+    return self.compute_local_attention(attn_weights, value, q_seq_len, model_mode, wv_product_einsum, sinks)
 
   def qk_product(
       self, query: Array, key: Array | KVTensor, q_seq_len: int, model_mode: str, einsum: Callable[..., Array]
@@ -1450,6 +1480,7 @@ class AttentionOp(nnx.Module):
       cached_values=None,
       previous_chunk=None,
       bidirectional_mask=None,
+      sinks=None,
       slot: Optional[int] = None,
       page_state: Optional[page_manager.PageState] = None,
   ):
@@ -1471,6 +1502,7 @@ class AttentionOp(nnx.Module):
         use_ragged_attention=self.use_ragged_attention,
         previous_chunk=previous_chunk,
         bidirectional_mask=bidirectional_mask,
+        sinks=sinks,
         qk_product_einsum=self.AqtEinsum_0,
         wv_product_einsum=self.AqtEinsum_1,
     )
