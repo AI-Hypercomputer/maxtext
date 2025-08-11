@@ -76,8 +76,9 @@ def init_layer(key, embed_size, mlp_size):
 
 def init_model_and_inputs(key_init, num_layers, embed_size, mlp_size, batch_size):
     # initializes weights and with random values
-    # params are now pytree with two keys: "w_in" : [layers, embed, mlp] amd "w_out [layers, mlp, embed]
-    # returns inputs and targets of size [batch_size, embed]
+    # Returns:
+    # * params are pytree with two keys: "w_in" : [layers, embed, mlp] amd "w_out" : [layers, mlp, embed]
+    # * inputs and targets of size [batch_size, embed]
     keys = jax.random.split(key_init, num_layers)
     params = [init_layer(key, embed_size, mlp_size) for key in keys]
     params = jax.tree.map(lambda *args: jnp.stack(args), *params) 
@@ -97,7 +98,6 @@ def layer_fn(inputs, single_layer_params):
     return output, None # scan expect two outputs, carries to next layer (output) and per layer outputs (None in this case)
         
 def predict(params, inputs):
-  # Params is pytree with two leaves of shape [layers, embed, mlp] and [layers, mlp, embed]
   # Inputs have shape [global_batch, embed]
   num_layers = params['w_in'].shape[0] #w_in is [layers, embed, mlp]
   # jax.lax.scan: https://docs.jax.dev/en/latest/_autosummary/jax.lax.scan.html
@@ -114,25 +114,20 @@ def loss_fn(params, inputs, targets):
 @partial(jax.experimental.shard_map.shard_map, mesh=mesh, in_specs=((P('dp')), P('dp'), P('dp')),
         out_specs=P('dp'))
 def per_device_losses_and_grads(params, inputs, targets):
-    # remove initial singleton dim from params
+    # Remove leading singleton dim from params - shmap is rank preserving, but we want to remove the  DP axis which is now length DP/DP=1 inside the shmap.
     params = jax.tree_util.tree_map(lambda x: x[0], params)
     grad_func = jax.value_and_grad(loss_fn)
     losses, grads = grad_func(params, inputs, targets)
     losses = jax.tree_util.tree_map(lambda x: jnp.expand_dims(x, axis=0), losses)
     grads = jax.tree_util.tree_map(lambda x: jnp.expand_dims(x, axis=0), grads)
-    
     return losses, grads
   
-
 def loss_and_grad_ga(params, inputs, targets, num_microbatches):
-    # Params is pytree with two leaves of shape [layers, embed, mlp] and [layers, mlp, embed]
-    # Inputs and targets both have shape [global_batch, embed]
-    # Outputs is params, same size and sharding as params
-
     num_dp_replicas = jax.device_count()
     microbatch_size = inputs.shape[0] // num_microbatches
     embed = inputs.shape[1]
     def reshape_inputs_for_microbatches(inputs):
+        # reshape inputs of [batch, embed] -> [num_microbatches, microbatch_size, embed]
         inputs = inputs.reshape([microbatch_size, num_microbatches, embed])
         inputs = inputs.transpose([1, 0, 2]) 
         # This ensures the previous dp sharding of 2D inputs does not need any communication to reshape to microbatches
@@ -142,7 +137,6 @@ def loss_and_grad_ga(params, inputs, targets, num_microbatches):
     targets = reshape_inputs_for_microbatches(targets)
     params_replicated = jax.tree_util.tree_map(lambda x: jnp.stack([x] * num_dp_replicas), params) # our hack around shmap + grad
 
-    #grad_func = jax.value_and_grad(loss_fn)
     grad_func = per_device_losses_and_grads
     def accumulate_gradient(acc_grad_and_loss, inputs_and_targets):
         inputs, targets= inputs_and_targets['inputs'], inputs_and_targets['targets']
@@ -152,28 +146,21 @@ def loss_and_grad_ga(params, inputs, targets, num_microbatches):
         return acc_grad_and_loss, None # We will scan this so need to return None
 
     init_grad = jax.tree_util.tree_map(jnp.zeros_like, params_replicated)
-    # init_loss is a jax array of length num_dp_replicas of zeros
     init_loss = jnp.zeros(num_dp_replicas)
     init_grad_and_loss = {"loss": init_loss, "grad": init_grad}
     inputs_and_targets = {"inputs": inputs,"targets": targets}
     grad_and_loss, _ = jax.lax.scan(accumulate_gradient, init_grad_and_loss, inputs_and_targets, length=num_microbatches)
     grads, loss = grad_and_loss["grad"], grad_and_loss["loss"]
-    # Average the accumulated gradients and loss to match the global batch calculation
-    # grads = jax.tree_util.tree_map(
-    #     lambda g: g / num_microbatches, grads
-    # )
-    # loss = loss / num_microbatches
 
-    # grads = jax.lax.pmean(grads, axis_name='dp')
-    # # TODO(mattdavidow: Why do we need an additional divison by num_dp_replicas here? We already took average above?)
-    # grads = jax.tree_util.tree_map(
-    #     lambda g: g / num_dp_replicas, grads
-    # )
-    # loss = jax.lax.pmean(loss, axis_name='dp')
-    # return loss, grads
+    # Average loss and grads across DP replicas (the final reduce outside of the loop)
+    loss = jnp.mean(loss, axis=0)
+    loss = loss / num_microbatches # The loss function uses jnp.mean() - we need to average over microbatches still, we were accumulating using sum
+    
+    grads = jax.tree_util.tree_map(lambda x: jnp.mean(x, axis=0), grads)
+    grads = jax.tree_util.tree_map(
+        lambda g: g / num_microbatches, grads
+    )
     return loss, grads
-
- 
 
 def main():
   import argparse
@@ -185,8 +172,6 @@ def main():
   parser.add_argument('--gradient_accumulation_steps', type=int, default=16)
   global args
   args = parser.parse_args()
-    
-
 
   jit_initialize_inputs = jax.jit(init_model_and_inputs, static_argnums=(1,2,3,4),out_shardings=(replicated_sharding, dp_sharding, dp_sharding))
   params, inputs, targets = jit_initialize_inputs(jax.random.PRNGKey(0), args.num_layers, args.embed_size, args.mlp_size, args.global_batch_size)
@@ -199,18 +184,6 @@ def main():
   # ga run
   jit_loss_and_grad_ga = jax.jit(loss_and_grad_ga, static_argnums=(3,)) # num_microbathces is static
   loss_ga, ga_grad = jit_loss_and_grad_ga(params, inputs, targets, args.gradient_accumulation_steps)
-
-  # tree map sum ga_grad along leading axis
-  ga_grad_avg = jax.tree_util.tree_map(lambda x: jnp.mean(x, axis=0), ga_grad)
-  loss_ga = jnp.sum(loss_ga, axis=0)
-
-  print(f"{loss_ga=}")
-  print(f"{loss_non_ga=}")
-  
-  nga=non_ga_grad['w_in'][0:3,0:3,0]
-  ga=ga_grad['w_in'][0:3,0:3,0]
-  rawr = ga/nga
-  print(rawr)
 
   # assert non_ga_grad and ga_grad are similar
   def allclose(a, b):
