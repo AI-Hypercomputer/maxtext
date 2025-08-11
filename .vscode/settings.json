@@ -2,5 +2,15 @@
     "python.testing.pytestArgs": [],
     "python.testing.cwd": "${workspaceFolder}/MaxText",
     "python.testing.unittestEnabled": false,
-    "python.testing.pytestEnabled": true
+    "python.testing.pytestEnabled": true,
+    "editor.fontSize": 16,
+    "black-formatter.path": [
+      "pyink",
+      "--pyink-indentation=2",
+      "--line-length=125"
+    ],
+    "editor.formatOnSave": true,
+    "editor.formatOnSaveMode": "modifications",
+    "editor.tabSize": 2,
+    "editor.detectIndentation": false,
 }

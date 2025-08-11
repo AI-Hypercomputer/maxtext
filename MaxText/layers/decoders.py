@@ -46,6 +46,7 @@ from MaxText.layers import (
     gemma2,
     gemma3,
     gpt3,
+    gpt_oss,
     llama2,
     llama4,
     mistral,
@@ -357,6 +358,8 @@ class Decoder(nn.Module):
         return [gemma3.Gemma3DecoderLayer]
       case DecoderBlockType.GPT3:
         return [gpt3.Gpt3DecoderLayer]
+      case DecoderBlockType.GPT_OSS:
+        return [gpt_oss.GptOssDecoderLayer]
       case DecoderBlockType.QWEN3:
         return [qwen3.Qwen3DecoderLayer]
       case DecoderBlockType.SIMPLE:
@@ -411,6 +414,7 @@ class Decoder(nn.Module):
         DecoderBlockType.GEMMA2,
         DecoderBlockType.GEMMA3,
         DecoderBlockType.QWEN3,
+        DecoderBlockType.GPT_OSS,
         DecoderBlockType.SIMPLE,
         DecoderBlockType.SIMPLE_MLP,
         DecoderBlockType.LLAMA4,

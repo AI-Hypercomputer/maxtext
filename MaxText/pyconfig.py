@@ -344,6 +344,8 @@ def validate_model_name(s: str) -> bool:
       "gpt3-22b",
       "gpt3-6b",
       "gpt3-52k",
+      "gpt-oss-20b",
+      "gpt-oss-120b",
       "llama4-17b-16e",
       "llama4-17b-128e",
   )
