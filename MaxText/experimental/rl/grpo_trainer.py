@@ -81,9 +81,7 @@ from MaxText.experimental.rl import grpo_input_pipeline
 from MaxText.experimental.rl import grpo_utils
 from MaxText.globals import EPS
 from MaxText.metric_logger import MetricLogger
-from MaxText.train import (
-    get_first_step,
-)
+from MaxText.train import get_first_step
 from MaxText.train_utils import validate_train_config
 from MaxText.utils.goodput_utils import (
     GoodputEvent,
