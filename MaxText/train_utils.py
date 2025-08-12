@@ -154,9 +154,6 @@ def jit_train_and_eval_step(
   return p_train_step, p_eval_step
 
 
-
-
-
 def setup_train_loop(config, recorder, devices=None):
   """Set up prerequisites for the training loop -
       checkpoint_manager, PRNG keys, Mesh, Model and optimizer.
