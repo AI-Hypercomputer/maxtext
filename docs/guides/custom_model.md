@@ -6,7 +6,7 @@ This document provides a guide to optimize and customize your LLM model configur
 
 ## Step 1. Identify Initial Configs
 
-To begin, identify your model's size, review open-source model configs, and establish the initial configurations for each block. You can use our [reference calculator (not available)](https://docs.google.com/spreadsheets/d/e/2PACX-1vRjwRtX0g6ktlbXQl_da1f8Kg7ofBAYh1hAJEQKfoVT-6sM7u_C8TiO3WcsThomJIF0Fy1yPGbmfl8m/pub?output=xlsx) to estimate parameters and FLOPs for dense, Mixtral-like Mixture of Experts (MoE), and DeepSeek-like MoE models to help you estimate the parameter count and FLOPs.
+To begin, identify your model's size, review open-source model configs, and establish the initial configurations for each block. You can use our [reference calculator (on Colab)](https://colab.research.google.com/github/AI-Hypercomputer/maxtext/blob/main/docs/guides/llm_calculator.ipynb) to estimate parameters and FLOPs for dense, Mixtral-like Mixture of Experts (MoE), and DeepSeek-like MoE models to help you estimate the parameter count and FLOPs.
 
 Based on resources like [Language Modeling from Scratch](https://github.com/stanford-cs336/spring2025-lectures/blob/e9cb2488fdb53ea37f0e38924ec3a1701925cef3/nonexecutable/2025%20Lecture%203%20-%20architecture.pdf), we observe common architectural ratios for dense models, as shown below:
 
