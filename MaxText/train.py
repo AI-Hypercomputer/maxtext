@@ -38,6 +38,9 @@ import jax.numpy as jnp
 
 from flax import linen as nn
 from flax.linen import partitioning as nn_partitioning
+from jax.experimental.shard_map import shard_map  # Import shard_map
+from jax.sharding import PartitionSpec as P
+from functools import partial
 
 from cloud_tpu_diagnostics import diagnostic
 from cloud_tpu_diagnostics.configuration import debug_configuration
@@ -349,7 +352,7 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
   return loss, aux
 
 
-def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
+def train_step(model, config,mesh, state_mesh_shardings, state, data, dropout_rng):
   """
 
   Args:
@@ -372,40 +375,66 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
     _loss_fn = dpo_loss_fn
 
   if config.gradient_accumulation_steps > 1:
-
-    def accumulate_gradient(acc_grad_and_loss, data):
-      grad_func = jax.value_and_grad(_loss_fn, argnums=4, has_aux=True)
-      (_, aux), cur_batch_gradient = grad_func(
-          model, config, data, dropout_rng, state.params, *extra_dpo_args, is_train=True
-      )
-      acc_grad_and_loss["loss"] += aux["total_loss"]
-      acc_grad_and_loss["moe_lb_loss"] += aux["moe_lb_loss"]
-      acc_grad_and_loss["mtp_loss"] += aux["mtp_loss"]
-      acc_grad_and_loss["grad"] = jax.tree_util.tree_map(
-          lambda x, y: x + y, cur_batch_gradient, acc_grad_and_loss["grad"]
-      )
-      acc_grad_and_loss["total_weights"] += aux["total_weights"]
-      return acc_grad_and_loss, aux
+    outspec=(jax.sharding.PartitionSpec('data'), jax.sharding.PartitionSpec('data'),{"total_weights": jax.sharding.PartitionSpec('data'), "moe_lb_loss": jax.sharding.PartitionSpec('data'), "mtp_loss": jax.sharding.PartitionSpec('data')})
 
     def reshape_to_microbatch_accumulations(batch_arr):
       """Reshape global batch to microbatches, assuming batch axis is leading."""
       microbatches = config.gradient_accumulation_steps
       microbatch_shape = (microbatches, batch_arr.shape[0] // microbatches) + batch_arr.shape[1:]
-      return jnp.reshape(batch_arr, microbatch_shape)
+      return jnp.reshape(batch_arr, microbatch_shape, order='F')
 
-    data = jax.tree_util.tree_map(reshape_to_microbatch_accumulations, data)
-    init_grad = jax.tree_util.tree_map(jnp.zeros_like, state.params)
-    init_grad_and_loss = {"loss": 0.0, "grad": init_grad, "total_weights": 0, "moe_lb_loss": 0.0, "mtp_loss": 0.0}
+    # Apply shard_map to the microbatch function.
+    @partial(jax.experimental.shard_map.shard_map, mesh=mesh, in_specs=(P('data', None), P('data', None)), out_specs=outspec)
+    def microbatch_step(params, data):
+        def accumulate_gradient(acc_grad_and_loss, data):
+            grad_func = jax.value_and_grad(_loss_fn, argnums=4, has_aux=True)
+            (_, aux), cur_batch_gradient = grad_func(
+                model, config, data, dropout_rng, state.params, *extra_dpo_args, is_train=True
+            )
+            acc_grad_and_loss["loss"] += aux["total_loss"]
+            acc_grad_and_loss["moe_lb_loss"] += aux["moe_lb_loss"]
+            acc_grad_and_loss["mtp_loss"] += aux["mtp_loss"]
+            acc_grad_and_loss["grad"] = jax.tree_util.tree_map(
+                lambda x, y: x + y, cur_batch_gradient, acc_grad_and_loss["grad"]
+            )
+            acc_grad_and_loss["total_weights"] += aux["total_weights"]
+            return acc_grad_and_loss, aux
 
-    grad_and_loss, aux = jax.lax.scan(
-        accumulate_gradient, init_grad_and_loss, data, length=config.gradient_accumulation_steps
-    )
-    loss = (
-        grad_and_loss["loss"] / grad_and_loss["total_weights"]
-        + grad_and_loss["moe_lb_loss"] / config.gradient_accumulation_steps
-        + grad_and_loss["mtp_loss"] / config.gradient_accumulation_steps
-    )
-    raw_grads = jax.tree_util.tree_map(lambda arr: arr / grad_and_loss["total_weights"], grad_and_loss["grad"])
+        params = jax.tree_util.tree_map(lambda x: x[0], params)
+        data = jax.tree_util.tree_map(reshape_to_microbatch_accumulations, data)
+        data = jax.lax.with_sharding_constraint(data, jax.sharding.PartitionSpec(None, 'data', None))
+        init_grad = jax.tree_util.tree_map(jnp.zeros_like, params)
+        init_grad_and_loss = {
+            "loss": jax.lax.pvary(0.0, "data"),
+            "grad": init_grad,
+            "total_weights": jax.lax.pvary(0, "data"),
+            "moe_lb_loss": jax.lax.pvary(0.0, "data"),
+            "mtp_loss": jax.lax.pvary(0.0, "data"),
+        }
+
+        grad_and_loss, aux = jax.lax.scan(
+            accumulate_gradient, init_grad_and_loss, data, length=config.gradient_accumulation_steps
+        )
+        loss = (
+                grad_and_loss["loss"] / grad_and_loss["total_weights"]
+                + grad_and_loss["moe_lb_loss"] / config.gradient_accumulation_steps
+                + grad_and_loss["mtp_loss"] / config.gradient_accumulation_steps
+        )
+        raw_grads = jax.tree_util.tree_map(lambda arr: arr / grad_and_loss["total_weights"], grad_and_loss["grad"])
+        aux = { k: jnp.array([v]) if isinstance(v, (float, int)) else v for k, v in aux.items()}
+        return raw_grads, jnp.array([loss]),aux
+
+
+    @partial(jax.experimental.shard_map.shard_map, mesh=mesh, in_specs=outspec, out_specs=(P(),P(),P()))
+    def reduce_fn(grads, loss,aux):
+        grads_accum = jax.tree_util.tree_map(lambda x: jax.lax.psum(x,axis_name='data'), grads)
+        loss_accum = jax.lax.psum(loss,axis_name='data')[[0]]
+        aux = jax.tree_util.tree_map(lambda x: jax.lax.psum(x,axis_name='data'), aux)
+        return grads_accum, loss_accum,aux
+
+    params_replicated = jax.tree_util.tree_map(lambda x: jnp.stack([x] * jax.device_count()), state.params)
+    raw_grads, loss,aux=microbatch_step(params_replicated, data)
+    raw_grads, loss,aux=reduce_fn(raw_grads, loss,aux)
     aux = jax.tree.map(lambda x: jnp.sum(x, axis=0), aux)  # pytype: disable=module-attr
   else:
     if config.optimizer_memory_host_offload:

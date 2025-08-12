@@ -256,6 +256,7 @@ value_proj: 'remat'
 qkv_proj: 'remat'
 out_proj: 'remat'
 
+optimizer_zero1: True
 optimizer_memory_host_offload: False
 parameter_memory_host_offload: False
 scan_layers: True # We recommend setting this to false when using pipeline parallelism, instead scanning the PP iterations.
@@ -563,7 +564,7 @@ gradient_clipping_threshold: 1.0
 
 # Instead of updating the weights every step, you may effectively use a larger
 # batch by accumulating the gradient over a set of steps.
-gradient_accumulation_steps: 1
+gradient_accumulation_steps: 5
 
 opt_type: "adamw"  # one of "adamw", "adam_pax" or "sgd"
 
