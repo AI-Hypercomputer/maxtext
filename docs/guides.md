@@ -17,4 +17,5 @@ guides/gcp_workload_observability.md
 guides/monitor_goodput.md
 guides/use_vertex_ai_tensorboard.md
 guides/features_and_diagnostics.md
+guides/performance_metrics.md
 ```
