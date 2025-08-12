@@ -37,7 +37,8 @@ from jax.experimental.serialize_executable import serialize
 from flax.linen import partitioning as nn_partitioning
 
 from MaxText import accelerator_to_spec_map
-from MaxText import train
+# from MaxText import train
+from MaxText.experimental.rl import grpo_trainer
 from MaxText import maxtext_utils
 from MaxText import optimizers
 from MaxText import max_utils
@@ -97,7 +98,8 @@ def get_shaped_inputs(topology_mesh, config):
 
   # Shaped state
   abstract_state, _, state_mesh_shardings = maxtext_utils.get_abstract_state(model, tx, config, example_rng, topology_mesh)
-
+  abstract_state = abstract_state.replace(params=dict(abstract_state.params, reference_params=abstract_state.params["params"]))
+  state_mesh_shardings = state_mesh_shardings.replace(params=dict(state_mesh_shardings.params, reference_params=state_mesh_shardings.params["params"]))
   # Shaped batch
   shaped_batch = maxtext_utils.get_shaped_batch(config)
 
@@ -162,7 +164,7 @@ def main(argv: Sequence[str]) -> None:
 
   # Get function to compile and shardings
   func_to_compile, in_shard, out_shard, static_argnums, donate_argnums = maxtext_utils.get_functional_train_with_signature(
-      train.train_step, data_sharding, state_mesh_shardings, model, config
+      grpo_trainer.train_step, data_sharding, state_mesh_shardings, model, config
   )
 
   # Compile
