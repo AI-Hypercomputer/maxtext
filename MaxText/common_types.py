@@ -62,7 +62,6 @@ CACHE_SCALE_KV = "cache_scale_kv"
 MODEL_MODE_AUTOREGRESSIVE = "autoregressive"
 MODEL_MODE_PREFILL = "prefill"
 MODEL_MODE_TRAIN = "train"
-MODEL_MODE_INSERT = "insert"
 
 # expert_shard_attention_option
 EP_AS_CONTEXT = "context"
