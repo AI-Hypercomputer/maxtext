@@ -18,7 +18,6 @@ limitations under the License.
 
 import jax
 import jax.numpy as jnp
-from flax import linen as nn
 
 from MaxText import maxtext_utils
 
@@ -34,7 +33,7 @@ def dpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_t
   """loss_fn for both train and eval.
 
   Args:
-    model: A nn.Module
+    model: A model module
     config: Config of parameters
     data: Batch of data to apply to the model
     dropout_rng: A key to use to generate rng for dropout
@@ -117,7 +116,7 @@ def dpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_t
       jax.nn.log_softmax(rejected_ref_logits[..., :-1, :], axis=-1), rejected_ids[..., None], axis=-1
   )[..., 0]
   rejected_ref_logps = jnp.sum(rejected_ref_logps_seq * valid_seq_mask, axis=-1)  # [B]
-  rejected_logratios = rejected_logps - rejected_ref_logits  # [B]
+  rejected_logratios = rejected_logps - rejected_ref_logps  # [B]
 
   # DPO loss from chosen and rejected logratios
   LABEL_SMOOTHING, BETA = config.dpo_label_smoothing, config.dpo_beta
