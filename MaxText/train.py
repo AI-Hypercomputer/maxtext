@@ -207,7 +207,7 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
       acc_grad_and_loss["moe_lb_loss"] += aux["moe_lb_loss"]
       acc_grad_and_loss["mtp_loss"] += aux["mtp_loss"]
       acc_grad_and_loss["grad"] = jax.tree_util.tree_map(
-          lambda x, y: x + y, cur_batch_gradient, acc_grad_and_loss["grad"]mbda x, y: x * aux["total_weights"] + y, cur_batch_gradient, acc_grad_and_loss["grad"]
+          lambda x, y: x * aux["total_weights"] + y, cur_batch_gradient, acc_grad_and_loss["grad"]
       )
       acc_grad_and_loss["total_weights"] += aux["total_weights"]
       return acc_grad_and_loss, aux
