@@ -70,9 +70,6 @@ jobs:
           - image_name: maxtext_stable_stack_nightly_jax
             dockerfile: ./maxtext_jax_ai_image.Dockerfile
             base_image: us-docker.pkg.dev/tpu-prod-env-multipod/jax-stable-stack/tpu/jax_nightly:latest
-          - image_name: maxtext_stable_stack_candidate
-            dockerfile: ./maxtext_jax_ai_image.Dockerfile
-            base_image: us-docker.pkg.dev/tpu-prod-env-multipod/jax-stable-stack/candidate/tpu:latest
 
     # Setup for GKE runners per b/412986220#comment82 and b/412986220#comment90
     steps:
