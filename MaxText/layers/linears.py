@@ -312,6 +312,7 @@ class MlpBlock(nnx.Module):
       model_mode: Optional[str] = None,
       *,
       rngs: nnx.Rngs,
+      norm_ckpt_name: Optional[str] = "pre_mlp_norm",
   ) -> None:
     """A MlpBlock module.
 
@@ -329,6 +330,7 @@ class MlpBlock(nnx.Module):
       use_bias: whether to add bias in all feedforward layers.
       use_pre_norm: whether to add pre layer norm in mlp layers.
       quant: Optional quantization config, no quantization if None.
+      norm_ckpt_name: name of the norm layer for checkpointing.
     """
     self.config = config
     self.in_features = in_features
@@ -342,6 +344,7 @@ class MlpBlock(nnx.Module):
     self.use_pre_norm = use_pre_norm
     self.quant = quant
     self.model_mode = model_mode
+    self.norm_ckpt_name = norm_ckpt_name
 
     if self.use_pre_norm:
       self.mlp_layer_norm = self.get_norm_layer(num_features=in_features)(
@@ -349,7 +352,7 @@ class MlpBlock(nnx.Module):
           weight_dtype=config.weight_dtype,
           kernel_axes=("norm",),
           epsilon=config.normalization_layer_epsilon,
-          rngs=rngs,
+          name=self.norm_ckpt_name
       )
     else:
       self.mlp_layer_norm = None
@@ -408,12 +411,12 @@ class MlpBlock(nnx.Module):
         DecoderBlockType.DEEPSEEK,
         DecoderBlockType.LLAMA4,
     ):
-      return functools.partial(normalizations.RMSNorm, num_features=num_features)
+      return functools.partial(normalizations.rms_norm, num_features=num_features)
     elif self.config.decoder_block == DecoderBlockType.GPT3:
       from MaxText.layers import gpt3  # pylint: disable=import-outside-toplevel
 
       return functools.partial(
-        gpt3.Gpt3LayerNorm, num_features=num_features, reductions_in_fp32=False, use_bias=self.use_bias
+        gpt3.gpt3_layer_norm, num_features=num_features, reductions_in_fp32=False, use_bias=self.use_bias
       )
     else:
       raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block.value=}")
@@ -486,6 +489,7 @@ def mlp_block(
     quant: Optional[Quant] = None,
     model_mode: Optional[str] = None,
     name: Optional[str] = None,
+    norm_ckpt_name: Optional[str] = None,
 ):
   """Creates a MlpBlock Linen module using nnx.bridge.to_linen."""
   module = nnx_wrappers.to_linen(
@@ -502,6 +506,7 @@ def mlp_block(
       use_pre_norm=use_pre_norm,
       quant=quant,
       model_mode=model_mode,
+      norm_ckpt_name=norm_ckpt_name,
       name=name,
       metadata_fn=variable_to_logically_partitioned,
       abstract_init=False,

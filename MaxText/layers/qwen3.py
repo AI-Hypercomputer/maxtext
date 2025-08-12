@@ -125,6 +125,7 @@ class Qwen3DecoderLayer(nn.Module):
           config=cfg,
           quant=self.quant,
           use_pre_norm=True,
+          norm_ckpt_name="post_self_attention_layer_norm",
       )(residual_after_attention, deterministic=deterministic)
     else:  # Mixture of Experts MLP -- not supported / tested in MaxText
       # Post Attention LayerNorm (corresponds to Qwen3's `post_attention_layernorm`)

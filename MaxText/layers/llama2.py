@@ -140,6 +140,7 @@ class LlamaDecoderLayer(nn.Module):
         quant=self.quant,
         model_mode=model_mode,
         use_pre_norm=True,
+        norm_ckpt_name="post_self_attention_layer_norm",
     )(intermediate_inputs, deterministic=deterministic)
     mlp_lnx = nn.with_logical_constraint(mlp_lnx, activation_axis_names)
 

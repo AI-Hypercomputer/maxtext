@@ -117,6 +117,7 @@ class GemmaDecoderLayer(nn.Module):
         config=cfg,
         quant=self.quant,
         use_pre_norm=True,
+        norm_ckpt_name="pre_ffw_norm",
     )(residual, deterministic=deterministic)
     mlp_lnx = nn.with_logical_constraint(mlp_lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
 

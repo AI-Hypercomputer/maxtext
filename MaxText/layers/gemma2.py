@@ -128,6 +128,7 @@ class Gemma2DecoderLayer(nn.Module):
         config=cfg,
         quant=self.quant,
         use_pre_norm=True,
+        norm_ckpt_name="pre_ffw_norm_local",
     )(attention_lnx, deterministic=deterministic)
 
     if cfg.use_post_ffw_norm:
