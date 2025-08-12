@@ -738,7 +738,6 @@ def create_parallelisms_list(raw_keys):
 
 
 def set_mu_dtype(raw_keys):
-  # TODO(shuningjin): double check
   # Default mu_dtype to weight_dtype if unset
   if raw_keys["mu_dtype"]:
     assert raw_keys["opt_type"] != "adam_pax", "opt_type adam_pax doesn't support explicitly setting mu_dtype"
