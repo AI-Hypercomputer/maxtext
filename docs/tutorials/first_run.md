@@ -69,11 +69,8 @@ Failed to execute XLA Runtime executable: run time error: custom call 'xla.gpu.a
 ```
 
 ## Multihost development
-There are three patterns for running MaxText with more than one host.
 
-1. Recommended: Google Kubernetes Engine (GKE) [Running Maxtext with XPK](run-xpk) - Quick experimentation and production support.
-2. Google Compute Engine (GCE) [Running Maxtext with Multihost Jobs](run-multihost-job) - Long running production jobs with queued resources.
-3. Google Compute Engine (GCE) [Running Maxtext with Multihost Runner](run-multihost-runner) - Fast experiments via multiple ssh connections.
+Google Kubernetes Engine (GKE) is the recommended way to run MaxText on multiple hosts. It provides a managed environment for deploying and scaling containerized applications, including those that require TPUs or GPUs. See [Running Maxtext with XPK](run-xpk) for details.
 
 ## Next steps: Preflight optimizations
 

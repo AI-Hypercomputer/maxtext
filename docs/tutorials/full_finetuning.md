@@ -1,3 +1,4 @@
+(full-finetuning)=
 # Full Finetuning LLama3-8B  Model
 
 MaxText can perform pre-training and full finetuning. To perform full fine

@@ -36,3 +36,9 @@ myst_enable_extensions = [
     "colon_fence",
 ]
 myst_linkify_fuzzy_links = False
+
+# Remove specific documents from ToC
+exclude_patterns = [
+    "guides/run_maxtext_via_multihost_job.md",
+    "guides/run_maxtext_via_multihost_runner.md",
+]
