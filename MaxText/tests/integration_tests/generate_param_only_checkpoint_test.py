@@ -29,11 +29,8 @@ from MaxText.generate_param_only_checkpoint import main as generate_param_only_c
 from MaxText.tests.integration_tests.checkpointing_test import get_checkpointing_command
 
 
-def run_generate_param_only_checkpoint(hardware, attention_type, quantization):
-  """Tests generating a parameter-only checkpoint."""
-
-  run_date = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
-  model_params = [
+def get_model_params(quantization):
+  return [
       f"quantization={quantization}",
       "base_emb_dim=384",
       "base_num_query_heads=8",
@@ -43,59 +40,58 @@ def run_generate_param_only_checkpoint(hardware, attention_type, quantization):
       "head_dim=128",
   ]
 
-  train_main(
-      get_checkpointing_command(
-          run_date,
-          hardware=hardware,
-          steps=1,
-          metrics_file="run_metrics.txt",
-          attention_type=attention_type,
-          dataset_type="tfds",
-          dataset_path="gs://maxtext-dataset",
-      )
-      + model_params
-  )
 
-  state_path = f"gs://runner-maxtext-logs/runner_{run_date}/checkpoints/0/items"
-  generate_param_only_ckpt_main(
-      [
-          None,
-          os.path.join(PKG_DIR, "configs", "base.yml"),
-          f"hardware={hardware}",
-          f"run_name=generate_param_{run_date}",
-          "base_output_directory=gs://runner-maxtext-logs",
-          "dataset_path=gs://maxtext-dataset",
-          "async_checkpointing=False",
-          f"attention={attention_type}",
-          f"load_full_state_path={state_path}",
-      ]
-      + model_params
-  )
+def run_e2e_test_flow(hardware, model_config, attention_type="autoselected", state_path=None):
+  """Helper function to run training, generate parameter-only checkpoint, and decode."""
+  run_date = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
+  test_config = [
+      None,
+      os.path.join(PKG_DIR, "configs", "base.yml"),
+      "base_output_directory=gs://runner-maxtext-logs",
+      "async_checkpointing=False",
+      f"hardware={hardware}",
+      f"attention={attention_type}",
+      "max_target_length=128",
+      "per_device_batch_size=1",
+  ] + model_config
 
-  decode_ckpt_path = f"gs://runner-maxtext-logs/generate_param_{run_date}/checkpoints/0/items"
-  decode_main(
-      [
-          None,
-          os.path.join(PKG_DIR, "configs", "base.yml"),
-          f"hardware={hardware}",
-          f"run_name=decode_{run_date}",
-          "base_output_directory=gs://runner-maxtext-logs",
-          "dataset_path=gs://maxtext-dataset",
-          f"load_parameters_path={decode_ckpt_path}",
-          f"attention={attention_type}",
-          "max_target_length=128",
-          "ici_tensor_parallelism=4",
-          "per_device_batch_size=1",
-      ]
-      + model_params
-  )
+  if state_path is None:
+    # Run training to get a checkpoint
+    train_main(
+        get_checkpointing_command(
+            run_date=run_date,
+            hardware=hardware,
+            steps=1,
+            metrics_file="run_metrics.txt",
+            attention_type=attention_type,
+            dataset_type="tfds",
+            dataset_path="gs://maxtext-dataset",
+        )
+    )
+    state_path = f"gs://runner-maxtext-logs/runner_{run_date}/checkpoints/0/items"
+
+  # Generate parameter-only checkpoint
+  generate_param_only_ckpt_config = test_config + [
+      f"run_name=generate_param_{run_date}",
+      f"load_full_state_path={state_path}",
+  ]
+  generate_param_only_ckpt_main(generate_param_only_ckpt_config)
+
+  # Run inference on parameter-only checkpoint
+  decode_config = test_config + [
+      f"run_name=decode_{run_date}",
+      f"load_parameters_path=gs://runner-maxtext-logs/generate_param_{run_date}/checkpoints/0/items",
+  ]
+  decode_main(decode_config)
 
 
 @pytest.mark.integration_test
 @pytest.mark.tpu_only
 @pytest.mark.parametrize("quantization", [(""), ("int8")])
-def test_autoselected_attention(quantization, capsys):
-  run_generate_param_only_checkpoint("tpu", "autoselected", quantization)
+def test_param_ckpt_generation_with_autoselected_attention(quantization, capsys):
+  """Tests the parameter-only checkpoint generation and decode flow on TPU with autoselected attention."""
+  model_config = get_model_params(quantization)
+  run_e2e_test_flow(hardware="tpu", attention_type="autoselected", model_config=model_config)
   captured = capsys.readouterr()
   expected_output = "Input `I love to`"
   assert expected_output in captured.out
@@ -104,9 +100,30 @@ def test_autoselected_attention(quantization, capsys):
 @pytest.mark.integration_test
 @pytest.mark.gpu_only
 @pytest.mark.parametrize("quantization", [(""), ("int8")])
-def test_with_dot_product(quantization, capsys):
+def test_param_ckpt_generation_with_dot_product(quantization, capsys):
+  """Tests the parameter-only checkpoint generation and decode flow on GPU with dot product attention."""
   os.environ["NVTE_FUSED_ATTN"] = "1"  # Enable fused attention
-  run_generate_param_only_checkpoint("gpu", "dot_product", quantization)
+  model_config = get_model_params(quantization)
+  run_e2e_test_flow(hardware="gpu", attention_type="dot_product", model_config=model_config)
+  captured = capsys.readouterr()
+  expected_output = "Input `I love to`"
+  assert expected_output in captured.out
+
+
+@pytest.mark.integration_test
+@pytest.mark.tpu_only
+@pytest.mark.scheduled_only
+def test_param_ckpt_generation_with_pre_generated_ckpt(capsys):
+  """Tests the parameter-only checkpoint generation and decode flow with a pre-generated Gemma-2b model checkpoint."""
+  model_config = [
+      "model_name=gemma-2b",
+      "tokenizer_path=assets/tokenizer.gemma",
+  ]
+  run_e2e_test_flow(
+      hardware="tpu",
+      model_config=model_config,
+      state_path="gs://runner-maxtext-logs/runner_finetune_2025-08-15-04-05/checkpoints/5/items",
+  )
   captured = capsys.readouterr()
   expected_output = "Input `I love to`"
   assert expected_output in captured.out
