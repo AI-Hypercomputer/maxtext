@@ -168,7 +168,7 @@ def create_orbax_emergency_checkpoint_manager(
       local_checkpoint_dir,
       epath.Path(persistent_checkpoint_dir),
       global_mesh=global_mesh,
-      abstract_state=abstract_state,
+      abstract_state=Composite(state=abstract_state),
       options=emergency_checkpoint_manager.CheckpointManagerOptions(
           local=LocalCheckpointOptions(save_interval_steps=local_save_interval_steps),
           persistent=PersistentCheckpointOptions(save_interval_steps=persistent_save_interval_steps),
