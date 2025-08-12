@@ -29,7 +29,6 @@ from flax.linen.partitioning import ScanIn
 
 from MaxText.common_types import DecoderBlockType, Config, MODEL_MODE_TRAIN, MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE
 from MaxText import max_logging
-from MaxText import max_utils
 from MaxText.inference import page_manager
 from MaxText.layers import linears
 from MaxText.layers import quantizations
@@ -359,6 +358,8 @@ class Decoder(nn.Module):
         return [gpt3.Gpt3DecoderLayer]
       case DecoderBlockType.QWEN3:
         return [qwen3.Qwen3DecoderLayer]
+      case DecoderBlockType.QWEN3_MOE:
+        return [qwen3.Qwen3MoeDecoderLayer]
       case DecoderBlockType.SIMPLE:
         return [simple_layer.SimpleDecoderLayer]
       case DecoderBlockType.SIMPLE_MLP:
@@ -380,9 +381,7 @@ class Decoder(nn.Module):
 
           def map_fn(path, value):
             max_logging.log(f"models.py: Moving parameter {path} to device")
-            return jax.device_put(
-                value, max_utils.device_space()
-            )
+            return jax.device_put(value, jax.memory.Space.Device)
 
           return jax.tree_util.tree_map_with_path(map_fn, variables)
 
@@ -411,6 +410,7 @@ class Decoder(nn.Module):
         DecoderBlockType.GEMMA2,
         DecoderBlockType.GEMMA3,
         DecoderBlockType.QWEN3,
+        DecoderBlockType.QWEN3_MOE,
         DecoderBlockType.SIMPLE,
         DecoderBlockType.SIMPLE_MLP,
         DecoderBlockType.LLAMA4,
@@ -443,14 +443,7 @@ class Decoder(nn.Module):
         length=length,
         metadata_params={nn.PARTITION_NAME: metadata_axis_name},
     )
-    return scan_fn(
-        config=cfg,
-        mesh=mesh,
-        name=metadata_axis_name,
-        quant=self.quant,
-        model_mode=model_mode,
-        **kwargs
-    )
+    return scan_fn(config=cfg, mesh=mesh, name=metadata_axis_name, quant=self.quant, model_mode=model_mode, **kwargs)
 
   def get_pipeline_stage_module(self, decoder_blocks):
     """get pipeline stage module"""
