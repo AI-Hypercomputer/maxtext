@@ -73,7 +73,7 @@ from MaxText.metric_logger import MetricLogger
 from MaxText.train import get_first_step
 from MaxText.train_utils import setup_train_loop
 from MaxText.train import train_step
-from MaxText.train import validate_train_config
+from MaxText.train_utils import validate_train_config
 from MaxText.utils.goodput_utils import (
     GoodputEvent,
     create_goodput_recorder,

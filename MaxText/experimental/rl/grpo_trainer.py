@@ -82,9 +82,9 @@ from MaxText.experimental.rl import grpo_utils
 from MaxText.globals import EPS
 from MaxText.metric_logger import MetricLogger
 from MaxText.train import (
-    validate_train_config,
     get_first_step,
 )
+from MaxText.train_utils import validate_train_config
 from MaxText.utils.goodput_utils import (
     GoodputEvent,
     create_goodput_recorder,
