@@ -350,7 +350,7 @@ class Decoder(nn.Module):
       case DecoderBlockType.DEEPSEEK:
         return [deepseek.DeepSeekDenseLayer, deepseek.DeepSeekMoELayer]
       case DecoderBlockType.GEMMA:
-        return [gemma.GemmaDecoderLayer]
+        return [gemma.GemmaDecoderLayerToLinen]
       case DecoderBlockType.GEMMA2:
         return [gemma2.Gemma2DecoderLayer]
       case DecoderBlockType.GEMMA3:
