@@ -277,7 +277,3 @@ def validate_train_config(config):
         "Please disable sequence packing (set packing=False) or use a different attention mechanism. "
         "With synthetic data, the format is not important as packing is not applied."
     )
-
-
-def _merge_dpo_state(state, reference_params):
-  return state.replace(params=dict(state.params, reference_params=reference_params))
