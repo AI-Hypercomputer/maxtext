@@ -39,8 +39,7 @@ from MaxText import pyconfig
 from MaxText.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_PREFILL, MODEL_MODE_TRAIN
 from MaxText.globals import PKG_DIR
 from MaxText.layers import attentions
-from MaxText.layers.attentions import Attention, ChunkedCausalMask
-from MaxText.layers.attention_mla import MLA
+from MaxText.layers.attentions import Attention, MLA, ChunkedCausalMask
 
 
 class BidirectionalBlockMaskTest(unittest.TestCase):
