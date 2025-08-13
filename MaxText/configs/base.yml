@@ -90,6 +90,7 @@ dtype: "bfloat16"
 # 'intmp' for mixed precision quantization for inference as described here: MaxText/configs/quantization/README.md
 # 'fp8' for 8-bit floating-point GeMMs on NVIDIA GPUs.
 # 'nanoo_fp8' for 8-bit floating-point GeMMs on AMD MI300/MI325 GPUs.
+# 'fp8_full' for FP8 quantization with static scaling.
 quantization: ""
 # Used to configure constant_bound_config in aqt lib for static scaling, e.g. constant_bound_config='0.5, 0.5, 0.5, 0.5, 0.5, 0.5'
 constant_bound_config: ""
