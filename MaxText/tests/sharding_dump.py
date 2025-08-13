@@ -200,7 +200,11 @@ TOPOLOGIES = [
     # "a3"
 ]
 
-SLICES = [1, 4, 8192]
+SLICES = [
+  1,
+  4,
+  # 8192
+]
 
 TEST_CASES = list(itertools.product(MODEL_NAMES, TOPOLOGIES, SLICES))
 

@@ -91,14 +91,21 @@ def test_sharding_dump_for_model(model_name: str, topology: str, num_slice: str)
   ]
 
   json_path = f"MaxText/tests/sharding_info/" f"{model_name}/" f"{topology}/" f"slice_{num_slice}/named_shardings.json"
-  if not os.path.exists(json_path):
-    return
+  expected_json_exists = os.path.exists(json_path)
 
   config = pyconfig.initialize(params)
   validate_config(config)
 
-  topology_mesh = get_topology_mesh(config)
-  _, _, state_mesh_shardings, _ = get_shaped_inputs(topology_mesh, config)
+  try:
+    topology_mesh = get_topology_mesh(config)
+    _, _, state_mesh_shardings, _ = get_shaped_inputs(topology_mesh, config)
+  except:  # pylint: disable=bare-except
+    state_mesh_shardings = {}
+
+  if state_mesh_shardings == {}:
+    assert expected_json_exists is False
+    return
+
   actual_json = named_shardings_to_json(state_mesh_shardings)
   expected_json = load_named_sharding_json(json_path)
 
