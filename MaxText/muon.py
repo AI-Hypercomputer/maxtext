@@ -53,7 +53,8 @@ def orthogonalize_via_newton_schulz(
   USV^T = G is the SVD.
 
   Args:
-    x: A matrix to orthogonalize.
+    x: A matrix or batch of matrices to orthogonalize. This function is batch-aware and can process 2D (m, n) or 3D (b, m, n)
+  tensors.
     ns_coeffs: Coefficients for the Newton-schulz iterators.
       Must have shape (n, 3) where n is the number of iterations.
     ns_steps: Number of Newton-schulz iterations.
@@ -61,24 +62,35 @@ def orthogonalize_via_newton_schulz(
     eps: Term added to denominators to improve numerical stability.
 
   Returns:
-    The orthogonalized matrix.
+    The orthogonalized matrix or batch of matrices.
   """
-  if x.ndim != 2:
-    raise ValueError(f'Input must have shape (m, n), got {x.shape}')
+  # MODIFIED: Support 2D or 3D (batched) tensors.
+  if x.ndim != 2 and x.ndim != 3:
+    raise ValueError(f"Input must have shape (m, n) or (b, m, n), got {x.shape}")
   if ns_coeffs.ndim > 2 or ns_coeffs.shape[-1] != 3:
     raise ValueError(
         'Newton-Schulz coefficients must have shape (3,) or (n, 3), '
         f'got {ns_coeffs.shape}'
     )
+
+  original_ndim = x.ndim
+  if original_ndim == 2:
+    x = x[None, ...]  # Add dummy batch dimension
+
   def newton_schulz_iterator(x: jax.Array, coeffs: jax.Array) -> jax.Array:
-    a = x @ x.T
+    # MODIFIED: Use swapaxes for batch-aware transpose.
+    a = x @ x.swapaxes(-2, -1)
     b = coeffs[1] * a + coeffs[2] * a @ a
     return coeffs[0] * x + b @ x
+
   transposed = False
-  if x.shape[0] > x.shape[1]:
-    x = x.T
+  # MODIFIED: Use negative axes for batch-aware shape checking.
+  if x.shape[-2] > x.shape[-1]:
+    x = x.swapaxes(-2, -1)
     transposed = True
-  x /= jnp.linalg.norm(x) + eps  # Ensure spectral norm is at most 1
+
+  # MODIFIED: Normalize each matrix in the batch by its own norm.
+  x /= jnp.linalg.norm(x, axis=(-2, -1), keepdims=True) + eps  # Ensure spectral norm is at most 1
   ns_coeffs = ns_coeffs.astype(x.dtype)
   if ns_coeffs.ndim == 1:
     x = jax.lax.fori_loop(
@@ -89,7 +101,10 @@ def orthogonalize_via_newton_schulz(
         lambda x, abc: (newton_schulz_iterator(x, abc), None), x, ns_coeffs
     )
   if transposed:
-    x = x.T
+    x = x.swapaxes(-2, -1)
+
+  if original_ndim == 2:
+    x = x[0]  # Squeeze dummy batch dimension
   return x
 
 
@@ -112,6 +127,8 @@ def scale_by_muon(
     *,
     nesterov: bool = True,
     adaptive: bool = False,
+    # MODIFIED: Added muon_spec argument.
+    muon_spec: Optional[base.Params] = None,
 ) -> base.GradientTransformation:
   r"""Rescale updates according to the Muon algorithm.
 
@@ -159,6 +176,32 @@ def scale_by_muon(
 
   def update_fn(updates, state, params=None):
     del params
+
+    # --- START: ADDED: Reshaping logic using muon_spec. ---
+    def _reshape_for_muon(param, spec):
+      if spec is None:
+        return param, None
+      batch_axes, row_axes, col_axes = spec["batch_axes"], spec["rows"], spec["columns"]
+      perm = (*batch_axes, *row_axes, *col_axes)
+      inv_perm = jnp.argsort(jnp.array(perm))
+      param_permuted = jnp.transpose(param, perm)
+      batch_dim = jnp.prod(jnp.array([param.shape[i] for i in batch_axes])).astype(int)
+      row_dim = jnp.prod(jnp.array([param.shape[i] for i in row_axes])).astype(int)
+      col_dim = jnp.prod(jnp.array([param.shape[i] for i in col_axes])).astype(int)
+      reshaped_param = param_permuted.reshape((batch_dim, row_dim, col_dim))
+      restore_info = (param.shape, inv_perm)
+      return reshaped_param, restore_info
+
+    def _restore_from_muon(param, restore_info):
+      if restore_info is None:
+        return param
+      original_shape, inv_perm = restore_info
+      permuted_shape = jnp.transpose(jnp.empty(original_shape), jnp.argsort(inv_perm)).shape
+      param_permuted = param.reshape(permuted_shape)
+      return jnp.transpose(param_permuted, inv_perm)
+
+    # --- END: ADDED: Reshaping logic. ---
+
     mu = optax.tree.update_moment(updates, state.mu, beta, 1)
     count_inc = numerics.safe_increment(state.count)
     if nesterov:
@@ -171,6 +214,9 @@ def scale_by_muon(
       )
     else:
       mu_hat = optax.tree.bias_correction(mu, beta, count_inc)
+
+    # MODIFIED: Reshape before orthogonalization 
+    mu_hat, restore_infos = jax.tree.map(_reshape_for_muon, mu_hat, muon_spec)
     # Apply Newton-schulz orthogonalization.
     updates = jax.tree.map(
         lambda x: orthogonalize_via_newton_schulz(
@@ -178,11 +224,13 @@ def scale_by_muon(
         ),
         mu_hat,
     )
+    # MODIFIED: Restore after orthogonalization
+    updates = jax.tree.map(_restore_from_muon, updates, restore_infos)
     if adaptive:
       # Scale the orthogonalized updates by the dual norm of the original
       # updates. See https://arxiv.org/abs/2409.20325 for the derivation.
       updates = jax.tree.map(
-          lambda x, y: jnp.einsum('ij,ij,ab->ab', x, y, y), mu_hat, updates
+        lambda x, y: jnp.einsum("...ij,...ij,...ab->...ab", x, y, y), mu_hat, updates
       )
     updates = jax.tree.map(
         lambda x: jnp.sqrt(jnp.maximum(1, x.shape[-1] / x.shape[-2])) * x,
@@ -218,6 +266,10 @@ def muon(
     adam_b2: float = 0.999,
     adam_eps_root: float = 0.0,
     adam_weight_decay: float = 0.0,
+    # MODIFIED: Added muon_weight_mask (robert's change)
+    muon_weight_mask: Callable[[base.Params], Any] | base.Params | None = None,
+    # MODIFIED: Added muon_spec arguments.
+    muon_spec: Optional[base.Params] = None,
 ) -> base.GradientTransformation:
   r"""Muon: Momentum Orthogonalized by Newton-schulz.
 
@@ -256,6 +308,12 @@ def muon(
     adam_b2: Exponential decay rate for Adam's second moment estimates.
     adam_eps_root: Epsilon to stabilize division in Adam, square root version.
     adam_weight_decay: Weight decay factor for Adam.
+    muon_weight_mask: A True/False mask indicating which parameters to
+      scale by Muon (vs Adam) or a callable returning such a mask given the
+      params. If 'None', all params with ndim == 2 are scaled by Muon.
+    muon_spec: A PyTree with the same structure as params, where leaves
+      are dicts like `{'batch_axes': (0,), 'rows':(1,), 'columns':(2,3)}`
+      specifying how to reshape/permute N-D params (N>=3) into 3D for Muon.
 
   Returns:
     The corresponding `GradientTransformation`.
@@ -267,9 +325,19 @@ def muon(
     Bernstein et al., `Old Optimizer, New Norm: An Anthology
     <https://arxiv.org/abs/2409.20325>`_, 2024
   """
+  if muon_weight_mask is None:
+    param_labels = lambda params: jax.tree.map(lambda x: "muon" if x.ndim == 2 else "adam", params)
+  elif callable(muon_weight_mask):
+    # mask comes first since it can be a prefix tree
+    # no-op map over parameters to ensure same structure as params
+    param_labels = lambda params: jax.tree.map(lambda m, x: "muon" if m else "adam", muon_weight_mask(params), params)
+  else:
+    # mask comes first since it can be a prefix tree
+    # no-op map over parameters to ensure same structure as params
+    param_labels = lambda params: jax.tree.map(lambda m, x: "muon" if m else "adam", muon_weight_mask, params)
   return combine.partition(
       transforms={
-          'muon': combine.chain(
+          "muon": combine.chain(
               scale_by_muon(
                   ns_coeffs=ns_coeffs,
                   ns_steps=ns_steps,
@@ -278,11 +346,13 @@ def muon(
                   mu_dtype=mu_dtype,
                   nesterov=nesterov,
                   adaptive=adaptive,
+                  # MODIFIED: Pass muon_spec down.
+                  muon_spec=muon_spec,
               ),
               transform.add_decayed_weights(weight_decay, weight_decay_mask),
               transform.scale_by_learning_rate(learning_rate),
           ),
-          'adam': alias.adamw(
+          "adam": alias.adamw(
               learning_rate=learning_rate,
               b1=adam_b1,
               b2=adam_b2,
@@ -293,7 +363,5 @@ def muon(
               nesterov=nesterov,
           ),
       },
-      param_labels=lambda params: jax.tree.map(
-          lambda x: 'muon' if x.ndim == 2 else 'adam', params
-      ),
+      param_labels=param_labels,
   )
