@@ -26,6 +26,7 @@ mlp_activations: ["silu", "linear"]
 vocab_size: 151936
 normalization_layer_epsilon: 1.0e-6
 use_qk_norm: True
+normalize_embedding_logits: False
 
 # MoE Specific Parameters
 num_experts: 128
