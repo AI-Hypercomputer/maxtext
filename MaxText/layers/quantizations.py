@@ -612,6 +612,33 @@ def configure_kv_quant(config):
   return None if not config.quantize_kvcache else KVQuant(config)
 
 
+class NvidaFp8Provider(qwix.QtProvider):
+  """Wraps nn.Fp8DirectDotGeneralOp with Qwix's provider interface."""
+
+  def dot_general(self, *args, **kwargs):
+    # Here we only check if the rule is None or not.
+    rule, op_id = self._get_current_rule_and_op_id("dot_general")
+    if rule is None:
+      return jax.lax.dot_general(*args, **kwargs)
+    return nn.Fp8DirectDotGeneralOp(name=op_id)(*args, **kwargs)
+
+  def einsum(self, *args, **kwargs):
+    rule, op_id = self._get_current_rule_and_op_id("einsum")
+    if rule is None:
+      return jnp.einsum(*args, **kwargs)
+    return nn.Fp8Einsum(name=op_id)(*args, **kwargs)
+
+
+class NANOOFp8Provider(qwix.QtProvider):
+
+  def dot_general(self, *args, **kwargs):
+    # Here we only check if the rule is None or not.
+    rule, op_id = self._get_current_rule_and_op_id("dot_general")
+    if rule is None:
+      return jax.lax.dot_general(*args, **kwargs)
+    return nn.NANOOFp8DotGeneralOp(name=op_id)(*args, **kwargs)
+
+
 def get_quantization_rule(config: Config):
   match config.quantization:
     case "int8":
@@ -645,8 +672,27 @@ def get_quantization_rule(config: Config):
           bwd_calibration_method = config.quantization_calibration_method,
           op_names=('dot_general',),
       )
+    case "fp8_gpu":
+      return qwix.QtRule(
+          module_path="decoder/.*layers.*",
+          weight_qtype = jnp.float8_e4m3fn,
+          act_qtype = jnp.float8_e4m3fn,
+          bwd_qtype = jnp.float8_e4m3fn,
+          bwd_weight_grad_tile_size = 1 / config.quantization_local_shard_count,
+          op_names=('dot_general',),
+      )
+    case "fp8_nanoo":
+      return qwix.QtRule(
+          module_path="decoder/.*layers.*",
+          weight_qtype = jnp.float8_e4m3fn,
+          act_qtype = jnp.float8_e4m3fn,
+          bwd_qtype = jnp.float8_e4m3fn,
+          bwd_weight_grad_tile_size = 1 / config.quantization_local_shard_count,
+          op_names=('dot_general',),
+      )
     case "":
       return None
+
 
 def get_qt_provider(config):
   """Get quantization rules based on the config."""
@@ -657,6 +703,10 @@ def get_qt_provider(config):
       return qwix.QtProvider([get_quantization_rule(config)])
     case "fp8_full":
       return qwix.QtProvider([get_quantization_rule(config)])
+    case "fp8_gpu":
+      return NvidaFp8Provider([get_quantization_rule(config)])
+    case "fp8_nanoo":
+      return NANOOFp8Provider([get_quantization_rule(config)])
   return None
 
 
