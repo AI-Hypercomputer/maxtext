@@ -22,6 +22,7 @@ from jax.sharding import Mesh
 import jax.numpy as jnp
 
 from flax import linen as nn
+from flax import nnx
 
 from MaxText.common_types import Config
 from MaxText.layers import attentions
@@ -365,43 +366,18 @@ class Encoder(nn.Module):
 
   @nn.compact
   def __call__(self, x: jax.Array, deterministic: bool = True) -> jax.Array:
-    if self.scan:
-      # TODO(aireenmei, hengtaoguo): fix this branch to enable scan support for vision encoder
-      block = nn.remat(
-          Encoder1DBlock,
-          prevent_cse=False,
-          static_argnums=(2,),  # 0=self, 2=deterministic
-          policy=getattr(jax.checkpoint_policies, self.remat_policy, None),
-      )
-      x = nn.scan(
-          block,
-          variable_axes={"params": 0},
-          split_rngs={"params": True, "dropout": True},
-          in_axes=nn.broadcast,
-          length=self.depth,
-      )(
-          block_id=0,
-          name="encoderblock",
+    # TODO(aireenmei, hengtaoguo): fix this branch to enable scan support for vision encoder
+    for lyr in range(self.depth):
+      block_cur = Encoder1DBlock(
+          block_id=lyr,
+          name=f"encoderblock_{lyr}",
           dtype_mm=self.dtype_mm,
           mlp_dim=self.mlp_dim,
           num_heads=self.num_heads,
           dropout=self.dropout,
-      )(
-          x, deterministic
       )
-    else:
-      # Input Encoder
-      for lyr in range(self.depth):
-        block_cur = Encoder1DBlock(
-            block_id=lyr,
-            name=f"encoderblock_{lyr}",
-            dtype_mm=self.dtype_mm,
-            mlp_dim=self.mlp_dim,
-            num_heads=self.num_heads,
-            dropout=self.dropout,
-        )
-        x = block_cur(x, deterministic)
-    x: jax.Array = nn.LayerNorm(name="encoder_norm")(x)
+      x = block_cur(x, deterministic)
+    x = nn.LayerNorm(name="encoder_norm")(x)
     return x
 
 
@@ -445,7 +421,7 @@ class VisionEmbedder(nn.Module):
     return self.encode_vision(x)
 
 
-class VisionExit(nn.Module):
+class VisionExit(nnx.Module):
   """The vision exit layer.
 
   Possibly downsample the soft tokens to a required output length.
@@ -454,7 +430,9 @@ class VisionExit(nn.Module):
     output_length: The embed will be spatially avg-pooled to this output length.
   """
 
-  output_length: int = 256
+  def __init__(self, output_length: int = 256, rngs: nnx.Rngs = None):
+    self.output_length = output_length
+    self.rngs = rngs
 
   def __call__(self, x):
     cur_length = x.shape[1]
@@ -470,9 +448,14 @@ class VisionExit(nn.Module):
     assert not cur_width % output_width, f"{cur_width=} {output_width=}"
     window = cur_width // output_width
     window_shape = (window, window)
-    x = nn.avg_pool(x, window_shape=window_shape, strides=window_shape)
+    x = nnx.avg_pool(x, window_shape=window_shape, strides=window_shape)
     batch_size, height, width, embed_dim = x.shape
     return jnp.reshape(x, (batch_size, height * width, embed_dim))
+
+
+def vision_exit_as_linen(x: jax.Array, output_length: int) -> jax.Array:
+  """A wrapper to use VisionExit as a function."""
+  return nnx.bridge.to_linen(VisionExit, output_length=output_length)(x)
 
 
 class Gemma3VisionEncoderLayer(nn.Module):
@@ -555,7 +538,7 @@ class Gemma3VisionEncoderLayer(nn.Module):
     )(x, deterministic=deterministic)
 
     # Gemma3 use a vision exit layer to downsample the soft tokens to a required output length.
-    x = VisionExit(output_length=256)(x)
+    x = vision_exit_as_linen(x, output_length=256)
     bn, l, c = x.shape
     x = jnp.reshape(x, [b, n, l, c])
     return x
