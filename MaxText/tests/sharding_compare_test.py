@@ -90,7 +90,7 @@ def test_sharding_dump_for_model(model_name: str, topology: str, num_slice: str)
       f"model_name={model_name}",
   ]
 
-  json_path = f"sharding_info/" f"{model_name}/" f"{topology}/" f"slice_{num_slice}/named_shardings.json"
+  json_path = f"MaxText/tests/sharding_info/" f"{model_name}/" f"{topology}/" f"slice_{num_slice}/named_shardings.json"
   if not os.path.exists(json_path):
     return
 
