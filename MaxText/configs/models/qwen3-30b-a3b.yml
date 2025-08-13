@@ -17,7 +17,6 @@
 # Core Architectural Parameters
 decoder_block: "qwen3_moe"
 base_emb_dim: 2048
-base_mlp_dim: 6144
 base_num_query_heads: 32
 base_num_kv_heads: 4
 base_num_decoder_layers: 48
@@ -26,7 +25,6 @@ mlp_activations: ["silu", "linear"]
 vocab_size: 151936
 normalization_layer_epsilon: 1.0e-6
 use_qk_norm: True
-normalize_embedding_logits: False
 
 # MoE Specific Parameters
 num_experts: 128
