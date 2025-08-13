@@ -777,6 +777,8 @@ class Decoder(nn.Module):
                   "is_moe_layer": llama4.determine_is_moe_layer(lyr, self.config.interleave_moe_layer_step),
               }
               layer_call_kwargs = {"bidirectional_mask": bidirectional_mask}
+            if cfg.decoder_block == DecoderBlockType.GPT_OSS:
+              layer_kwargs = {"attention_type": gpt_oss.get_attention_type(layer_id=lyr)}
             layer = RemattedBlockLayer(
                 config=cfg, mesh=mesh, name=f"layers_{lyr}", quant=self.quant, model_mode=self.model_mode, **layer_kwargs
             )

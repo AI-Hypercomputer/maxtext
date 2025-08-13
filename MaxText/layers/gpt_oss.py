@@ -29,6 +29,7 @@ from flax import linen as nn
 from flax import nnx
 
 from MaxText.layers import initializers
+from MaxText.layers import attentions
 from MaxText.layers import models
 from MaxText.layers import moe
 from MaxText.layers import quantizations
@@ -41,6 +42,17 @@ from MaxText.layers.normalizations import rms_norm
 # The Decoder Layer for GPT OSS models
 # -----------------------------------------
 
+GPT_OSS_ATTENTION_PATTERN = (
+    attentions.AttentionType.LOCAL_SLIDING,
+    attentions.AttentionType.GLOBAL,
+)
+
+
+def get_attention_type(layer_id):
+  """Get attention type based on layer ID."""
+  layer_id %= len(GPT_OSS_ATTENTION_PATTERN)
+  return GPT_OSS_ATTENTION_PATTERN[layer_id]
+
 
 class GptOssDecoderLayer(nn.Module):
   """Transformer decoder layer that attends to the encoder."""
@@ -48,6 +60,7 @@ class GptOssDecoderLayer(nn.Module):
   config: models.Config
   mesh: Mesh
   model_mode: str
+  attention_type: str
   quant: Optional[Quant] = None
 
   @nn.compact
@@ -94,14 +107,12 @@ class GptOssDecoderLayer(nn.Module):
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
         dropout_rate=cfg.dropout_rate,
-        name="self_attention",
-        float32_qk_product=cfg.float32_qk_product,
-        float32_logits=cfg.float32_logits,
+        name="GptOssAttention",
         quant=self.quant,
         kv_quant=quantizations.configure_kv_quant(cfg),
-        prefill_cache_axis_order=tuple(map(int, cfg.prefill_cache_axis_order.split(","))),
-        ar_cache_axis_order=tuple(map(int, cfg.ar_cache_axis_order.split(","))),
-        compute_axis_order=tuple(map(int, cfg.compute_axis_order.split(","))),
+        use_bias_in_projections=cfg.attention_bias,
+        attention_type=self.attention_type,
+        sliding_window_size=cfg.sliding_window_size,
         model_mode=model_mode,
     )
 
@@ -135,7 +146,7 @@ class GptOssDecoderLayer(nn.Module):
 
     load_balance_loss = None
     mlp_lnx, load_balance_loss = moe.get_routed_moe(
-        name="GptOssMoeBlock",
+        name="GptOssMlp",
         config=cfg,
         num_experts=cfg.num_experts,
         num_experts_per_tok=cfg.num_experts_per_tok,

@@ -175,14 +175,13 @@ tile_weight_dim: 1024
 # "context" (ep acts as context parallelism, training only)
 expert_shard_attention_option: "fsdp"
 
-# deepseek moe
 base_moe_mlp_dim: 7168 # intermediate dimension at MoE layer (use base_mlp_dim if not DeepSeek style)
 first_num_dense_layers: 0 # number of initial dense layers in the model
 shared_experts: 1
 routed_scaling_factor: 1.0 # scaling factor for routing scores
 routed_score_func: "" # scoring function for routing
-routed_bias: False # a flag if a bias term is added for routing
-mlp_bias: False # a flag if a bias term is added for MLP matmul
+routed_bias: False # a flag if a learnable bias is added for routing
+mlp_bias: False # a flag if a learnable bias is added for MLP matmul
 n_routing_groups: -1 # number of groups for routing, disabled by default
 topk_routing_group: -1 # number of top groups to route inputs. For EP,
 # sending activations to a maximum of topk_routing_group distinct devices can yield performance benefits.
@@ -267,7 +266,8 @@ param_scan_axis: 1
 # The attention_type parameter determines the variants of attention, e.g. global or local_sliding
 attention: 'autoselected' # Supported attention: autoselected, dot_product, flash, cudnn_flash_te
 attention_type: 'global' # Supported attention_type: global, local_sliding, chunk, mla
-attention_bias: False
+attention_bias: False # If True, adds a learnable bias to the query, key, and value projections 
+attention_sink: False
 sliding_window_size: 0
 chunk_attn_window_size: 0
 attn_logits_soft_cap: 0.0

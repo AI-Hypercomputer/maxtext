@@ -53,10 +53,11 @@ from MaxText.layers.embeddings import (
     RotaryEmbedding,
     YarnRotaryEmbedding,
 )
-from MaxText.layers.initializers import nd_dense_init, NdInitializer, variable_to_logically_partitioned
+from MaxText.layers.initializers import nd_dense_init, NdInitializer, variable_to_logically_partitioned, default_bias_init
 from MaxText.layers.linears import DenseGeneral, canonicalize_tuple, normalize_axes
 from MaxText.layers.normalizations import RMSNorm
 from MaxText.layers.quantizations import AqtQuantization as Quant
+
 
 # pylint: disable=line-too-long, g-doc-args, g-doc-return-or-yield, bad-continuation, g-inconsistent-quotes
 # pytype: disable=attribute-error
@@ -653,6 +654,7 @@ class AttentionOp(nnx.Module):
       use_ragged_attention: bool = False,
       previous_chunk: Any = None,
       bidirectional_mask: Any = None,
+      sinks: Array = None,
       *,
       qk_product_einsum: Callable[..., Array],
       wv_product_einsum: Callable[..., Array],
@@ -688,6 +690,7 @@ class AttentionOp(nnx.Module):
           model_mode,
           previous_chunk,
           bidirectional_mask=bidirectional_mask,
+          sinks=sinks,
           qk_product_einsum=qk_product_einsum,
           wv_product_einsum=wv_product_einsum,
       )
@@ -957,7 +960,6 @@ class AttentionOp(nnx.Module):
     # Create multi-head mask
     multi_head_mask = splash_attention_mask.MultiHeadMask(masks=(mask,) * query.shape[1])
 
-    # Create the splash attention kernel object separately, jit it for performance
     @partial(
         jax.jit,
         static_argnames=[
@@ -1155,7 +1157,13 @@ class AttentionOp(nnx.Module):
     return output, lse
 
   def compute_local_attention(
-      self, attn_weights: Array, value: Array | KVTensor, q_seq_len: int, model_mode: str, wv_product_einsum: Callable[..., Array]
+      self,
+      attn_weights: Array,
+      value: Array | KVTensor,
+      q_seq_len: int,
+      model_mode: str,
+      wv_product_einsum: Callable[..., Array],
+      sinks: Array = None,
   ) -> tuple[Array, Array, Array]:
     """Computes the attention of a local subset of the kv cache.
     Local attention results will need to be combined with any other local attentions and normalized
@@ -1172,16 +1180,40 @@ class AttentionOp(nnx.Module):
           local_max is the local max of exponentials
           local_sum is the sum of exponentials for this chunk, divided by exp(local_max).
     """
-    local_max = jnp.max(attn_weights, axis=-1, keepdims=True)
-    local_exps = jnp.exp(attn_weights - local_max)
-    local_sum = jnp.sum(local_exps, axis=-1, keepdims=True)
+    if sinks is not None:
+      b, n_kv, g, t, s = attn_weights.shape
+      n_q = n_kv * g
+      attn_weights_reshaped = jnp.reshape(attn_weights, (b, n_q, t, s))
 
-    local_sum = jnp.moveaxis(local_sum, -2, 1)
-    local_max = jnp.moveaxis(local_max, -2, 1)
+      sinks_param = sinks.value.astype(attn_weights.dtype)  # (n_q,)
+      sinks_logits = sinks_param[jnp.newaxis, :, jnp.newaxis, jnp.newaxis]  # (1, n_q, 1, 1)
+      sinks_logits = jnp.broadcast_to(sinks_logits, (b, n_q, t, self.config.num_query_heads))
+      combined_logits = jnp.concatenate([attn_weights_reshaped, sinks_logits], axis=-1)
 
-    local_max = jnp.reshape(local_max, (local_max.shape[0], local_max.shape[1], local_max.shape[2] * local_max.shape[3], 1))
-    local_sum = jnp.reshape(local_sum, (local_sum.shape[0], local_sum.shape[1], local_sum.shape[2] * local_sum.shape[3], 1))
+      local_max = jnp.max(combined_logits, axis=-1, keepdims=True)
+      local_exps_combined = jnp.exp(combined_logits - local_max)
+      local_sum = jnp.sum(local_exps_combined, axis=-1, keepdims=True)
 
+      local_exps = local_exps_combined[..., :s]
+      local_exps = jnp.reshape(local_exps, (b, n_kv, g, t, s))
+
+      # Transpose for normalize_attention
+      local_max = jnp.transpose(local_max, (0, 2, 1, 3))  # (b, t, n_q, 1)
+      local_sum = jnp.transpose(local_sum, (0, 2, 1, 3))  # (b, t, n_q, 1)
+    else:
+      local_max = jnp.max(attn_weights, axis=-1, keepdims=True)
+      local_exps = jnp.exp(attn_weights - local_max)
+      local_sum = jnp.sum(local_exps, axis=-1, keepdims=True)
+
+      local_sum = jnp.moveaxis(local_sum, -2, 1)
+      local_max = jnp.moveaxis(local_max, -2, 1)
+
+      local_max = jnp.reshape(
+          local_max, (local_max.shape[0], local_max.shape[1], local_max.shape[2] * local_max.shape[3], 1)
+      )
+      local_sum = jnp.reshape(
+          local_sum, (local_sum.shape[0], local_sum.shape[1], local_sum.shape[2] * local_sum.shape[3], 1)
+      )
     local_out = self.wv_product(local_exps, value, model_mode, wv_product_einsum)
     if model_mode == MODEL_MODE_AUTOREGRESSIVE and self.is_partition_in_decode(q_seq_len):
       local_out = partitioning.with_sharding_constraint(local_out, (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV))
@@ -1212,6 +1244,7 @@ class AttentionOp(nnx.Module):
       model_mode: str = MODEL_MODE_TRAIN,
       previous_chunk: Any = None,
       bidirectional_mask: Any = None,
+      sinks: Array = None,
       *,
       qk_product_einsum: Callable[..., Array],
       wv_product_einsum: Callable[..., Array],
@@ -1268,7 +1301,7 @@ class AttentionOp(nnx.Module):
       attn_mask = partitioning.with_sharding_constraint(attn_mask, (BATCH, HEAD, None, PREFILL_LENGTH, KV_LENGTH))
     if attn_mask is not None:
       attn_weights = apply_mask_to_logits(attn_weights, attn_mask)
-    return self.compute_local_attention(attn_weights, value, q_seq_len, model_mode, wv_product_einsum)
+    return self.compute_local_attention(attn_weights, value, q_seq_len, model_mode, wv_product_einsum, sinks)
 
   def qk_product(
       self, query: Array, key: Array | KVTensor, q_seq_len: int, model_mode: str, einsum: Callable[..., Array]
@@ -1406,6 +1439,7 @@ class AttentionOp(nnx.Module):
       cached_values=None,
       previous_chunk=None,
       bidirectional_mask=None,
+      sinks=None,
       slot: Optional[int] = None,
       page_state: Optional[page_manager.PageState] = None,
   ):
@@ -1418,17 +1452,18 @@ class AttentionOp(nnx.Module):
       key, value, decoder_segment_ids = prefill_kv_cache
 
     prefill_unnormalized_output, prefill_exponentials_max, prefill_exponentials_sum = self.apply_attention(
-      query=query,
-      key=key,
-      value=value,
-      decoder_segment_ids=decoder_segment_ids,
-      lengths=None,
-      model_mode=model_mode,
-      use_ragged_attention=self.use_ragged_attention,
-      previous_chunk=previous_chunk,
-      bidirectional_mask=bidirectional_mask,
-      qk_product_einsum=self.AqtEinsum_0,
-      wv_product_einsum=self.AqtEinsum_1,
+        query=query,
+        key=key,
+        value=value,
+        decoder_segment_ids=decoder_segment_ids,
+        lengths=None,
+        model_mode=model_mode,
+        use_ragged_attention=self.use_ragged_attention,
+        previous_chunk=previous_chunk,
+        bidirectional_mask=bidirectional_mask,
+        sinks=sinks,
+        qk_product_einsum=self.AqtEinsum_0,
+        wv_product_einsum=self.AqtEinsum_1,
     )
 
     # Return the "prefill" cache if it actually the combined prefill+ar kv cache
@@ -1868,6 +1903,14 @@ class Attention(nnx.Module):
 
     self.out = self.init_out_w(output_dim=inputs_q_shape[-1])
 
+    if self.config.attention_sink:
+      self.sinks = nnx.Param(
+          default_bias_init(self.rngs.params(), (self.config.num_query_heads,), self.weight_dtype),
+          sharding=(None,),
+      )
+    else:
+      self.sinks = None
+
     is_llama4_decoder_block = self.config.decoder_block == DecoderBlockType.LLAMA4
     if self.use_qk_norm and not is_llama4_decoder_block:
       self.query_norm = RMSNorm(
@@ -1889,7 +1932,6 @@ class Attention(nnx.Module):
     else:
       self.query_norm = None
       self.key_norm = None
-
 
   def init_query_w(self, inputs_q_shape: Tuple) -> nnx.Module:
     """Query projection initialization."""
@@ -2094,7 +2136,6 @@ class Attention(nnx.Module):
           rngs=self.rngs,
       )
     return rotary_embedding
-
 
   def apply_rotary_embedding(self, inputs: Array, inputs_positions: Optional[Array | None] = None):
     """Applies rotary embeddings, handling different model types.
@@ -2305,7 +2346,7 @@ class Attention(nnx.Module):
       if model_mode != MODEL_MODE_TRAIN:
         cached_values = self.update_kv_caches(key, value, decoder_segment_ids, model_mode, previous_chunk)
       out = self.attention_op(
-          query, key, value, decoder_segment_ids, model_mode, cached_values, previous_chunk, bidirectional_mask
+          query, key, value, decoder_segment_ids, model_mode, cached_values, previous_chunk, bidirectional_mask, self.sinks
       )
 
     if model_mode == MODEL_MODE_PREFILL:

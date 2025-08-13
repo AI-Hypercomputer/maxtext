@@ -955,6 +955,9 @@ def validate_deepseek_moe(raw_keys):
 
 
 def validate_gpt_oss_moe(raw_keys):
+  if raw_keys["decoder_block"] == "gpt_oss" and raw_keys["scan_layers"]:
+    raise ValueError(f"Currently, GPT OSS model only supports unscanned layers. Please set scan_layers=False.")
+
   if raw_keys["decoder_block"] == "gpt_oss" and not raw_keys["sparse_matmul"]:
     raise ValueError(f"GPT OSS model only supports sparse matmul. Please set sparse_matmul=True.")
 

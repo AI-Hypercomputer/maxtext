@@ -22,10 +22,11 @@ base_num_kv_heads: 8
 head_dim: 128 # 64
 sliding_window_size: 128
 attention_bias: True
+attention_sink: True
 
 # RoPE
 rope_type: "yarn"
-rope_max_timescale: 10_000
+rope_max_timescale: 150_000
 max_position_embeddings: 131072
 original_max_position_embeddings: 4096
 rope_factor: 32
