@@ -909,7 +909,7 @@ class RoutedMoE(nnx.Module):
       layer_w1 = adc.checkpoint_name(layer_w1, "mlpwi_1")
       # pylint: disable=protected-access
 
-      if self.config.decoder_block == "gpt_oss":
+      if self.config.decoder_block == ctypes.DecoderBlockType.GPT_OSS:
         layer_w0 = jnp.clip(layer_w0, a_max=self.config.mlp_activations_limit)
         layer_w1 = jnp.clip(layer_w1, a_min=-self.config.mlp_activations_limit, a_max=self.config.mlp_activations_limit)
         layer_act = linears._convert_to_activation_function(self.config.mlp_activations[0])(layer_w0 * 1.702)

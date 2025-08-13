@@ -180,7 +180,7 @@ def calculate_gemma2_tflops_training_per_device(config, total_ffn_flops, qkv_flo
 
   return attention_tflops, learnable_weight_tflops
 
-
+# TODO(ranran): refactor to apply gpt-oss model
 def calculate_gemma3_tflops_training_per_device(config, total_ffn_flops, qkv_flops, projection_flops, embedding_flops):
   """
   Calculate training TFLOPs for Gemma3, which has an alternating pattern of
