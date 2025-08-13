@@ -287,10 +287,18 @@ class QuantTest(unittest.TestCase):
 
     ids, decoder_segment_ids, decoder_positions = self.get_data()
     var = model.init(
-        {"params": self.rng, "aqt": self.rng}, ids, decoder_positions, decoder_segment_ids, enable_dropout=False
+        {"params": self.rng, "aqt": self.rng, "dropout": self.rng},
+        ids,
+        decoder_positions,
+        decoder_segment_ids,
+        enable_dropout=False,
     )
     quantized_vars = qt_model.init(
-        {"params": self.rng, "aqt": self.rng}, ids, decoder_positions, decoder_segment_ids, enable_dropout=False
+        {"params": self.rng, "aqt": self.rng, "dropout": self.rng},
+        ids,
+        decoder_positions,
+        decoder_segment_ids,
+        enable_dropout=False,
     )
 
     def loss_base(params, inputs):

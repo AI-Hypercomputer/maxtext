@@ -61,11 +61,11 @@ Here's a breakdown of its functionality:
 Example Invocations:
 
 1. Convert a single PyTorch file to JAX:
-   python LLMCodeGeneration.py --file Dataset/Pytorch/masking_utils__or_masks.py
+   python llm_code_generation.py --file dataset/PyTorch/masking_utils__or_masks.py
    (Ensure the output directory exists or modify the script to create it if necessary.)
 
 2. Convert all PyTorch files in a folder to JAX:
-   python LLMCodeGeneration.py --folder Dataset/Pytorch/
+   python llm_code_generation.py --folder dataset/PyTorch/
    (Ensure the output directory exists or modify the script to create it if necessary.)
 """
 

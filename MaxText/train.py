@@ -307,7 +307,19 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
   xent = xent * (data["targets_segmentation"] != 0)
   total_loss = jnp.sum(xent)
   total_weights = jnp.sum(data["targets_segmentation"] != 0)
-  loss = total_loss / (total_weights + EPS)
+
+  # If gradient accumulation is enabled, we don't need to divide total_loss
+  # by total_weights and then multiply the computed gradient by total_weights,
+  # since it's equivalent to computing the gradient from total_loss.
+  # This simplification reduces the number of operations and makes it easier
+  # for XLA to move all-reduce out of the gradient accumulation loop when use
+  # Zero1+GA to reduce communication overhead.
+  # EPS was used to avoid division by zero, but it's not needed when gradient
+  # accumulation is enabled since there's no division.
+  if config.gradient_accumulation_steps > 1:
+    loss = total_loss
+  else:
+    loss = total_loss / (total_weights + EPS)
 
   # Calculate and Add MTP Loss
   mtp_loss = 0.0
@@ -370,7 +382,7 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
       acc_grad_and_loss["moe_lb_loss"] += aux["moe_lb_loss"]
       acc_grad_and_loss["mtp_loss"] += aux["mtp_loss"]
       acc_grad_and_loss["grad"] = jax.tree_util.tree_map(
-          lambda x, y: x * aux["total_weights"] + y, cur_batch_gradient, acc_grad_and_loss["grad"]
+          lambda x, y: x + y, cur_batch_gradient, acc_grad_and_loss["grad"]
       )
       acc_grad_and_loss["total_weights"] += aux["total_weights"]
       return acc_grad_and_loss, aux
@@ -523,7 +535,7 @@ def setup_train_loop(config, recorder, devices=None):
 
   with maybe_record_goodput(recorder, GoodputEvent.TRAINING_PREPARATION):
     data_iterator, eval_data_iterator = create_data_iterator(config, mesh)
-    context_parallel_size = mesh.shape["context"]
+    context_parallel_size = config.context_parallel_size
     # Check if context parallelism is being used with sequence packing
     if context_parallel_size > 1 and config.packing and config.dataset_type != "synthetic":
       raise ValueError(

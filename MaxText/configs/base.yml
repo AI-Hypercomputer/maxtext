@@ -169,6 +169,11 @@ tile_batch_seq: 512
 tile_activation_dim: 1024
 tile_weight_dim: 1024
 
+# How the expert axis is used to shard attention weights and activations
+# "fsdp" (ep acts as fsdp parallelism)
+# "context" (ep acts as context parallelism, training only)
+expert_shard_attention_option: "fsdp"
+
 # deepseek moe
 base_moe_mlp_dim: 7168 # intermediate dimension at MoE layer (use base_mlp_dim if not DeepSeek style)
 first_num_dense_layers: 0 # number of initial dense layers in the model
@@ -183,7 +188,7 @@ topk_routing_group: -1 # number of top groups to route inputs. For EP,
 # For complex architectures like llama4 there are repeated sets of
 # inhomogeneous layers. E.g. maverick uses [dense+rope, moe+rope, dense+rope, moe+nope]
 # which can only be scanned together in one large block of inhomogeneous_layer_cycle_interval=4 layers.
-inhomogeneous_layer_cycle_interval: 1 
+inhomogeneous_layer_cycle_interval: 1
 
 # pipeline parallelism
 # The number of decoder layers is equal to the product of num_stages, num_layers_per_pipeline_stage and num_pipeline_repeats.
@@ -317,18 +322,22 @@ logical_axis_rules: [
                       ['activation_embed_and_logits_batch', ['data', 'stage', 'fsdp', 'fsdp_transpose', 'expert']],
                       ['activation_heads', ['tensor', 'tensor_transpose', 'sequence','tensor_sequence','autoregressive']],
                       ['activation_kv_heads', ['tensor', 'tensor_transpose', 'sequence','tensor_sequence']],
-                      ['activation_length', ['sequence', 'context']],
-                      ['prefill_activation_length', ['sequence', 'context']],
-                      ['activation_length', ['context']],
+                      ['activation_length', ['sequence', 'context', 'expert']],
+                      ['activation_length', ['context', 'expert']],
+                      ['activation_length_no_exp', ['sequence', 'context']],
+                      ['activation_length_no_exp', ['context']],
                       ['activation_norm_length', ['tensor_sequence', 'context', 'sequence']],
+                      ['activation_q_length', ['context', 'expert']],
+                      ['activation_q_length_no_exp', ['context']],
+                      ['prefill_activation_length', ['sequence', 'context']],
                       ['prefill_activation_norm_length', ['tensor_sequence', 'context', 'sequence']],
-                      ['activation_q_length', ['context']],
                       ['activation_kv_length', []],
                       ['activation_embed', ['tensor', 'tensor_transpose']],
                       ['activation_mlp', ['tensor', 'tensor_transpose', 'tensor_sequence']],
                       ['activation_kv', ['tensor', 'tensor_transpose', 'tensor_sequence']],
                       ['activation_prefill_kv_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
                       ['activation_kv_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
+                      ['activation_kv_batch_no_exp', ['data', 'fsdp', 'fsdp_transpose']],
                       ['activation_kv_head_dim', ['tensor', 'tensor_transpose', 'tensor_sequence']],
                       ['activation_vocab', ['tensor', 'tensor_transpose', 'sequence', 'tensor_sequence']],
                       ['activation_vocab', ['tensor', 'tensor_transpose']],
@@ -766,7 +775,7 @@ image_path: "" # Local image path used for decoding
 image_placeholder: "<|image|>"
 
 ### llama4 multi modal configs
-hidden_size_for_vit: 1408 
+hidden_size_for_vit: 1408
 intermediate_size_for_vit: 5632
 num_attention_heads_for_vit: 16
 num_channels_for_vit: 3

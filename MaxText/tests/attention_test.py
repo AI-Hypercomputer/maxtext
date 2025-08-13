@@ -31,8 +31,10 @@ import jax
 import jax.numpy as jnp
 
 from flax import nnx
+from flax.linen import partitioning as nn_partitioning
 
 from MaxText import maxtext_utils
+from MaxText import max_utils
 from MaxText import pyconfig
 from MaxText.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_PREFILL, MODEL_MODE_TRAIN
 from MaxText.globals import PKG_DIR, device_presence, get_devices
@@ -259,7 +261,7 @@ class ChunkedCausalMaskTest(unittest.TestCase):
       attentions._generate_chunk_attention_mask(mask_shape=(4, 4), chunk_size=0)
 
 
-class AttentionTest(unittest.TestCase):
+class AttentionTest(parameterized.TestCase):
   """Test for the Attention"""
 
   # Note: if you are changing these configs, please make sure to change the configs in
@@ -282,6 +284,7 @@ class AttentionTest(unittest.TestCase):
   }
 
   def setUp(self):
+    """Initializes the configuration for each test"""
     super().setUp()
     config = pyconfig.initialize(
         [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
@@ -518,8 +521,8 @@ class AttentionTest(unittest.TestCase):
     mha_generic_output = attention_as_mha_generic(
         lnx,
         lnx,
-        decoder_segment_ids=decoder_positions,
-        inputs_positions=decoder_segment_ids,
+        decoder_segment_ids=decoder_segment_ids,
+        inputs_positions=decoder_positions,
         deterministic=True,
         model_mode=MODEL_MODE_TRAIN,
     )
@@ -546,8 +549,8 @@ class AttentionTest(unittest.TestCase):
     mha_generic_flash_output = attention_as_mha_flash(
         lnx,
         lnx,
-        decoder_segment_ids=decoder_positions,
-        inputs_positions=decoder_segment_ids,
+        decoder_segment_ids=decoder_segment_ids,
+        inputs_positions=decoder_positions,
         deterministic=True,
         model_mode=MODEL_MODE_TRAIN,
     )
@@ -556,44 +559,106 @@ class AttentionTest(unittest.TestCase):
         jax.numpy.allclose(mha_generic_output, mha_generic_flash_output, rtol=1e-01, atol=1e-01, equal_nan=False)
     )
 
+  @parameterized.named_parameters(
+      {
+          "testcase_name": "cp_no_load_balance",
+          "ici_context_parallelism": 4,
+          "context_parallel_load_balance": False,
+          "ici_expert_parallelism": 1,
+          "expert_shard_attention_option": "fsdp",
+      },
+      {
+          "testcase_name": "cp_with_load_balance",
+          "ici_context_parallelism": 4,
+          "context_parallel_load_balance": True,
+          "ici_expert_parallelism": 1,
+          "expert_shard_attention_option": "fsdp",
+      },
+      {
+          "testcase_name": "cp_ep_no_load_balance",
+          "ici_context_parallelism": 2,
+          "context_parallel_load_balance": False,
+          "ici_expert_parallelism": 2,
+          "expert_shard_attention_option": "context",
+      },
+      {
+          "testcase_name": "cp_ep_with_load_balance",
+          "ici_context_parallelism": 2,
+          "context_parallel_load_balance": True,
+          "ici_expert_parallelism": 2,
+          "expert_shard_attention_option": "context",
+      },
+      {
+          "testcase_name": "ep_no_load_balance",
+          "ici_context_parallelism": 1,
+          "context_parallel_load_balance": False,
+          "ici_expert_parallelism": 4,
+          "expert_shard_attention_option": "context",
+      },
+      {
+          "testcase_name": "ep_with_load_balance",
+          "ici_context_parallelism": 1,
+          "context_parallel_load_balance": True,
+          "ici_expert_parallelism": 4,
+          "expert_shard_attention_option": "context",
+      },
+  )
+  @pytest.mark.tpu_only
+  def test_tpu_flash_attention_context_parallel(
+      self, ici_context_parallelism, context_parallel_load_balance, ici_expert_parallelism, expert_shard_attention_option
+  ):
+    """Test equivalence between dot_product and flash attention + context/expert parallelism"""
+    num_kv_heads = self.num_kv_heads
+    lnx, decoder_segment_ids, decoder_positions = self.get_data(self.dtype)
+    # Dot product
+    mha_generic_output = self._attention_as_mha_generic(
+        lnx,
+        lnx,
+        decoder_segment_ids=decoder_segment_ids,
+        inputs_positions=decoder_positions,
+        deterministic=True,
+        model_mode=MODEL_MODE_TRAIN,
+    )
+    generic_state = nnx.state(self._attention_as_mha_generic)
+
     # Test with Context Parallelism
+    cfg_cp = pyconfig.initialize(
+        [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
+        **self.config_arguments,
+        ici_context_parallelism=ici_context_parallelism,
+        context_parallel_load_balance=context_parallel_load_balance,
+        ici_expert_parallelism=ici_expert_parallelism,
+        expert_shard_attention_option=expert_shard_attention_option,
+    )
+    devices_array_cp = maxtext_utils.create_device_mesh(cfg_cp)
+    mesh_cp = Mesh(devices_array_cp, cfg_cp.mesh_axes)
     attention_as_mha_flash_cp = Attention(
-        config=self.cfg_cp,  # we pass the context parallelism in the config
-        num_query_heads=self.cfg_cp.num_query_heads,
+        config=cfg_cp,
+        num_query_heads=cfg_cp.num_query_heads,
         num_kv_heads=num_kv_heads,
-        head_dim=self.cfg_cp.head_dim,
-        max_target_length=self.cfg_cp.max_target_length,
-        max_prefill_predict_length=self.cfg_cp.max_prefill_predict_length,
-        inputs_q_shape=dummy_inputs_q.shape,
-        inputs_kv_shape=dummy_inputs_kv.shape,
-        mesh=self.mesh_cp,
+        head_dim=cfg_cp.head_dim,
+        max_target_length=cfg_cp.max_target_length,
+        max_prefill_predict_length=cfg_cp.max_prefill_predict_length,
+        inputs_q_shape=lnx.shape,
+        inputs_kv_shape=lnx.shape,
+        mesh=mesh_cp,
         attention_kernel="flash",
         dtype=self.dtype,
-        dropout_rate=self.cfg_cp.dropout_rate,
+        dropout_rate=cfg_cp.dropout_rate,
         model_mode=MODEL_MODE_PREFILL,
         rngs=self.nnx_rng,
     )
     nnx.update(attention_as_mha_flash_cp, generic_state)
 
-    mha_generic_flash_cp_output = attention_as_mha_flash_cp(
-        lnx,
-        lnx,
-        decoder_segment_ids=decoder_positions,
-        inputs_positions=decoder_segment_ids,
-        deterministic=True,
-        model_mode=MODEL_MODE_TRAIN,
+    mha_generic_flash_cp_output = _forward_with_context_expert_parallelism(
+        cfg_cp, mesh_cp, attention_as_mha_flash_cp, lnx, decoder_segment_ids, decoder_positions
     )
 
-    # Assert that the logits generated by the generic flash and flash attention+context parallelism are close
-    self.assertTrue(
-        jax.numpy.allclose(mha_generic_flash_output, mha_generic_flash_cp_output, rtol=1e-01, atol=1e-01, equal_nan=False),
-        msg="Logits from generic flash and flash attention+context parallelism are not close.",
-    )
-
-    # Assert that the logits generated by the generic dot product and flash attention+context parallelism are close
     self.assertTrue(
         jax.numpy.allclose(mha_generic_output, mha_generic_flash_cp_output, rtol=1e-01, atol=1e-01, equal_nan=False),
-        msg="Logits from generic dot product and flash attention+context parallelism are not close.",
+        msg="Logits from generic dot product and flash attention + context/expert parallelism are not close.\n"
+        f"ici_context_parallelism={ici_context_parallelism}, context_parallel_load_balance={context_parallel_load_balance},"
+        f" ici_expert_parallelism={ici_expert_parallelism}, expert_shard_attention_option={expert_shard_attention_option}.",
     )
 
   def test_dot_product_cache_axis_order(self):
@@ -984,21 +1049,34 @@ class AttentionTest(unittest.TestCase):
 class MLATest(parameterized.TestCase):
   """Test for the Multi-Headed Latent Attention"""
 
-  def init_mla(self, rope_type):
+  config_arguments = {
+      "per_device_batch_size": 1.0,
+      "run_name": "test",
+      "enable_checkpointing": False,
+      "max_target_length": 128,
+      "max_prefill_predict_length": 16,
+      "attention_type": attentions.AttentionType.MLA.value,
+      "head_dim": 192,
+      "q_lora_rank": 10,
+      "kv_lora_rank": 20,
+      "qk_nope_head_dim": 128,
+      "qk_rope_head_dim": 64,
+      "v_head_dim": 192,
+  }
+
+  def setUp(self):
+    """Initializes the configuration for each test"""
+    self.rng = jax.random.PRNGKey(0)
+    self.nnx_rng = nnx.Rngs(params=0, dropout=jax.random.PRNGKey(42))
+
+  def init_mla(self, config_arguments, rope_type):
     """Helper function to initialize MLA with different model names."""
     cfg = pyconfig.initialize(
         [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
-        per_device_batch_size=1.0,
-        run_name="test",
-        enable_checkpointing=False,
-        max_target_length=128,
-        max_prefill_predict_length=16,
-        attention_type=attentions.AttentionType.MLA.value,
+        **config_arguments,
         rope_type=rope_type,
         **{} if tpu_present else {"mesh_axes": ["data"]},
     )
-    rng = jax.random.PRNGKey(0)
-    nnx_rng = nnx.Rngs(params=0, dropout=jax.random.PRNGKey(42))
 
     if jax.device_count() == 1:
       devices_array = np.array(get_devices()).reshape((1,) * len(cfg.mesh_axes))
@@ -1006,62 +1084,53 @@ class MLATest(parameterized.TestCase):
       devices_array = maxtext_utils.create_device_mesh(cfg)
     mesh = Mesh(devices_array, cfg.mesh_axes)
 
-    global_batch_size = cfg.global_batch_size_to_train_on
-    num_kv_heads = cfg.num_kv_heads
-    num_query_heads = cfg.num_query_heads
-    max_target_length = cfg.max_target_length
-    max_prefill_predict_length = cfg.max_prefill_predict_length
-    embed_dim = cfg.base_emb_dim
-    dtype = cfg.dtype
-    attention_type = cfg.attention_type
-
-    dummy_inputs_q = jnp.ones((global_batch_size, max_target_length, embed_dim))
-    dummy_inputs_kv = jnp.ones((global_batch_size, max_target_length, embed_dim))
+    dummy_inputs_q = jnp.ones((cfg.global_batch_size_to_train_on, cfg.max_target_length, cfg.base_emb_dim))
+    dummy_inputs_kv = jnp.ones((cfg.global_batch_size_to_train_on, cfg.max_target_length, cfg.base_emb_dim))
 
     mla = MLA(
         config=cfg,
-        num_query_heads=num_query_heads,
-        num_kv_heads=num_kv_heads,
-        head_dim=192,
+        num_query_heads=cfg.num_query_heads,
+        num_kv_heads=cfg.num_kv_heads,
+        head_dim=cfg.head_dim,
         inputs_q_shape=dummy_inputs_q.shape,
         inputs_kv_shape=dummy_inputs_kv.shape,
-        max_target_length=max_target_length,
-        max_prefill_predict_length=max_prefill_predict_length,
+        max_target_length=cfg.max_target_length,
+        max_prefill_predict_length=cfg.max_prefill_predict_length,
         mesh=mesh,
         attention_kernel="dot_product",
-        dtype=dtype,
+        dtype=cfg.dtype,
         dropout_rate=cfg.dropout_rate,
-        attention_type=attention_type,
-        q_lora_rank=10,
-        kv_lora_rank=20,
-        qk_nope_head_dim=128,
-        qk_rope_head_dim=64,
-        v_head_dim=192,
+        attention_type=cfg.attention_type,
+        q_lora_rank=cfg.q_lora_rank,
+        kv_lora_rank=cfg.kv_lora_rank,
+        qk_nope_head_dim=cfg.qk_nope_head_dim,
+        qk_rope_head_dim=cfg.qk_rope_head_dim,
+        v_head_dim=cfg.v_head_dim,
         model_mode=MODEL_MODE_PREFILL,
-        rngs=nnx_rng,
+        rngs=self.nnx_rng,
     )
 
-    return cfg, mla, rng
+    return cfg, mla
 
-  def get_data(self, cfg, rng, dtype):
+  def get_data(self, cfg, dtype):
     """get data"""
     lnx = jax.random.normal(
-        rng,
+        self.rng,
         shape=(cfg.global_batch_size_to_train_on, cfg.max_target_length, cfg.base_emb_dim),
         dtype=dtype,
     )
 
-    decoder_segment_ids = jax.random.randint(rng, (cfg.global_batch_size_to_train_on, cfg.max_target_length), 0, 4)
+    decoder_segment_ids = jax.random.randint(self.rng, (cfg.global_batch_size_to_train_on, cfg.max_target_length), 0, 4)
     decoder_positions = jax.random.randint(
-        rng, (cfg.global_batch_size_to_train_on, cfg.max_target_length), 0, cfg.max_target_length
+        self.rng, (cfg.global_batch_size_to_train_on, cfg.max_target_length), 0, cfg.max_target_length
     )
 
     return lnx, decoder_segment_ids, decoder_positions
 
-  def get_structured_data(self, cfg, rng, dtype):
+  def get_structured_data(self, cfg, dtype):
     """get structured data"""
     lnx = jax.random.normal(
-        rng,
+        self.rng,
         shape=(
             cfg.global_batch_size_to_train_on,
             cfg.max_target_length,
@@ -1085,10 +1154,10 @@ class MLATest(parameterized.TestCase):
       {"testcase_name": "Default_Autoregression", "rope_type": "default"},
   )
   def test_autoregression(self, rope_type):
-    cfg, mla, rng = self.init_mla(rope_type)
+    cfg, mla = self.init_mla(self.config_arguments, rope_type)
     prefill_length = cfg.max_prefill_predict_length
     decode_total_length = cfg.max_target_length
-    lnx, decoder_segment_ids, decoder_positions = self.get_structured_data(cfg, rng, cfg.dtype)
+    lnx, decoder_segment_ids, decoder_positions = self.get_structured_data(cfg, cfg.dtype)
 
     mla_full = mla(
         lnx,
@@ -1131,6 +1200,167 @@ class MLATest(parameterized.TestCase):
       self.assertEqual(mla_full_this_idx.shape, mla_idx.shape)
       # TODO (b/394626702) uncomment last check when decode and kv_cache are implemented for MLA
       # self.assertTrue(jax.numpy.allclose(mla_full_this_idx, mla_idx, rtol=1e-02, atol=1e-02, equal_nan=False))
+
+  @parameterized.named_parameters(
+      {
+          "testcase_name": "cp_no_load_balance",
+          "ici_context_parallelism": 4,
+          "context_parallel_load_balance": False,
+          "ici_expert_parallelism": 1,
+          "expert_shard_attention_option": "fsdp",
+      },
+      {
+          "testcase_name": "cp_with_load_balance",
+          "ici_context_parallelism": 4,
+          "context_parallel_load_balance": True,
+          "ici_expert_parallelism": 1,
+          "expert_shard_attention_option": "fsdp",
+      },
+      {
+          "testcase_name": "cp_ep_no_load_balance",
+          "ici_context_parallelism": 2,
+          "context_parallel_load_balance": False,
+          "ici_expert_parallelism": 2,
+          "expert_shard_attention_option": "context",
+      },
+      {
+          "testcase_name": "cp_ep_with_load_balance",
+          "ici_context_parallelism": 2,
+          "context_parallel_load_balance": True,
+          "ici_expert_parallelism": 2,
+          "expert_shard_attention_option": "context",
+      },
+      {
+          "testcase_name": "ep_no_load_balance",
+          "ici_context_parallelism": 1,
+          "context_parallel_load_balance": False,
+          "ici_expert_parallelism": 4,
+          "expert_shard_attention_option": "context",
+      },
+      {
+          "testcase_name": "ep_with_load_balance",
+          "ici_context_parallelism": 1,
+          "context_parallel_load_balance": True,
+          "ici_expert_parallelism": 4,
+          "expert_shard_attention_option": "context",
+      },
+  )
+  @pytest.mark.tpu_only
+  def test_tpu_flash_attention_context_parallel(
+      self, ici_context_parallelism, context_parallel_load_balance, ici_expert_parallelism, expert_shard_attention_option
+  ):
+    """Test equivalence between dot_product and flash attention + context/expert parallelism"""
+
+    config_arguments = {
+        "per_device_batch_size": 1.0,
+        "run_name": "test",
+        "enable_checkpointing": False,
+        "max_target_length": 512,
+        "sa_block_q": 128,
+        "sa_block_kv": 128,
+        "sa_block_kv_compute": 128,
+        "sa_block_q_dkv": 128,
+        "sa_block_kv_dkv": 128,
+        "sa_block_kv_dkv_compute": 128,
+        "sa_block_q_dq": 128,
+        "sa_block_kv_dq": 128,
+        "attention_type": attentions.AttentionType.MLA.value,
+        "q_lora_rank": 4,
+        "kv_lora_rank": 4,
+        "qk_nope_head_dim": 128,
+        "qk_rope_head_dim": 64,
+        "v_head_dim": 128,
+    }
+
+    cfg, mla = self.init_mla(config_arguments, rope_type="default")
+    lnx, decoder_segment_ids, decoder_positions = self.get_data(cfg, cfg.dtype)
+    # Dot product
+    mla_generic_output = mla(
+        lnx,
+        lnx,
+        decoder_segment_ids=decoder_segment_ids,
+        inputs_positions=decoder_positions,
+        deterministic=True,
+        model_mode=MODEL_MODE_TRAIN,
+    )
+    generic_state = nnx.state(mla)
+
+    # Test with Context Parallelism
+    cfg_cp = pyconfig.initialize(
+        [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
+        **config_arguments,
+        rope_type=cfg.rope_type,
+        ici_context_parallelism=ici_context_parallelism,
+        context_parallel_load_balance=context_parallel_load_balance,
+        ici_expert_parallelism=ici_expert_parallelism,
+        expert_shard_attention_option=expert_shard_attention_option,
+    )
+    devices_array_cp = maxtext_utils.create_device_mesh(cfg_cp)
+    mesh_cp = Mesh(devices_array_cp, cfg_cp.mesh_axes)
+    attention_as_mla_flash_cp = MLA(
+        config=cfg_cp,
+        num_query_heads=cfg_cp.num_query_heads,
+        num_kv_heads=cfg_cp.num_kv_heads,
+        head_dim=cfg_cp.head_dim,
+        inputs_q_shape=lnx.shape,
+        inputs_kv_shape=lnx.shape,
+        max_target_length=cfg_cp.max_target_length,
+        max_prefill_predict_length=cfg_cp.max_prefill_predict_length,
+        mesh=mesh_cp,
+        attention_kernel="flash",
+        dtype=cfg_cp.dtype,
+        dropout_rate=cfg_cp.dropout_rate,
+        attention_type=cfg_cp.attention_type,
+        q_lora_rank=cfg_cp.q_lora_rank,
+        kv_lora_rank=cfg_cp.kv_lora_rank,
+        qk_nope_head_dim=cfg_cp.qk_nope_head_dim,
+        qk_rope_head_dim=cfg_cp.qk_rope_head_dim,
+        v_head_dim=cfg_cp.v_head_dim,
+        model_mode=MODEL_MODE_PREFILL,
+        rngs=self.nnx_rng,
+    )
+    nnx.update(attention_as_mla_flash_cp, generic_state)
+    mla_generic_flash_cp_output = _forward_with_context_expert_parallelism(
+        cfg_cp, mesh_cp, attention_as_mla_flash_cp, lnx, decoder_segment_ids, decoder_positions
+    )
+
+    self.assertTrue(
+        jax.numpy.allclose(mla_generic_output, mla_generic_flash_cp_output, rtol=1e-01, atol=1e-01, equal_nan=False),
+        msg="MLA Logits from generic dot product and flash attention + context/expert parallelism are not close.\n"
+        f"ici_context_parallelism={ici_context_parallelism}, context_parallel_load_balance={context_parallel_load_balance},"
+        f" ici_expert_parallelism={ici_expert_parallelism}, expert_shard_attention_option={expert_shard_attention_option}.",
+    )
+
+
+def _forward_with_context_expert_parallelism(cfg_cp, mesh_cp, attention_cp, lnx, decoder_segment_ids, decoder_positions):
+  """Get logits from attention under context/expert parallelism."""
+  # If load balanced cp, shuffle along seq dim for input
+  # This correponds to the pre-shuffle step in training
+  context_parallel_size = cfg_cp.context_parallel_size
+  if context_parallel_size > 1 and cfg_cp.context_parallel_load_balance:
+    batch = {"inputs": lnx, "inputs_segmentation": decoder_segment_ids, "inputs_position": decoder_positions}
+    with mesh_cp:
+      reordered_batch = max_utils.get_reorder_callable(context_parallel_size)(batch)
+    lnx = reordered_batch["inputs"]
+    decoder_segment_ids = reordered_batch["inputs_segmentation"]
+    decoder_positions = reordered_batch["inputs_position"]
+  # apply attention with sharding
+  with mesh_cp, nn_partitioning.axis_rules(cfg_cp.logical_axis_rules):
+    attention_cp_output = attention_cp(
+        lnx,
+        lnx,
+        decoder_segment_ids=decoder_segment_ids,
+        inputs_positions=decoder_positions,
+        deterministic=True,
+        model_mode=MODEL_MODE_TRAIN,
+    )
+  # If load balanced cp, de-shuffle and gather along seq dim for output
+  # Note training does not need post-shuffle. Since the target seq is also pre-shuffled, the loss remains correct
+  if context_parallel_size > 1 and cfg_cp.context_parallel_load_balance:
+    attention_cp_output = max_utils.reorder_sequence(
+        tensor=attention_cp_output, cp_size=context_parallel_size, seq_dim=1, to_contiguous=True
+    )
+  return attention_cp_output
 
 
 if __name__ == "__main__":

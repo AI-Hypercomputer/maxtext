@@ -315,7 +315,7 @@ class MlpBlock(nnx.Module):
       rngs: nnx.Rngs,
   ) -> None:
     """A MlpBlock module.
-    
+
     Args:
       config: Config object containing model parameters.
       in_features: Number of input features.
@@ -406,6 +406,9 @@ class MlpBlock(nnx.Module):
         DecoderBlockType.MISTRAL,
         DecoderBlockType.MIXTRAL,
         DecoderBlockType.GEMMA,
+        DecoderBlockType.GEMMA2,
+        DecoderBlockType.GEMMA3,
+        DecoderBlockType.QWEN3,
         DecoderBlockType.DEEPSEEK,
         DecoderBlockType.LLAMA4,
     ):
@@ -423,8 +426,19 @@ class MlpBlock(nnx.Module):
     """Applies Transformer MlpBlock module."""
     cfg = self.config
 
+
     if self.mlp_layer_norm is not None:
       inputs = self.mlp_layer_norm(inputs)
+      if self.model_mode == MODEL_MODE_PREFILL:
+        inputs = nn.with_logical_constraint(inputs, ("activation_batch",
+                                                     "prefill_activation_norm_length",
+                                                     "activation_embed")
+                                            )
+      else:
+        inputs = nn.with_logical_constraint(inputs, ("activation_batch",
+                                                     "activation_norm_length",
+                                                     "activation_embed")
+                                            )
 
     # Iterate over specified MLP input activation functions.
     # e.g. ('relu',) or ('gelu', 'linear') for gated-gelu.

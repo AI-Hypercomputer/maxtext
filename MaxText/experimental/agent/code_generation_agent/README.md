@@ -3,8 +3,8 @@
 This agent is designed to automate the conversion of Python code, with a primary focus on transforming PyTorch code into functionally equivalent JAX code using the Google Gemini model.
 
 The workflow is typically a two-step process:
-1.  **Test File Generation**: Use `MakePytorchFile.py` to analyze a large, complex Python file (e.g., a model implementation from a library like `transformers`) and extract standalone, self-contained PyTorch modules. This step is crucial for creating manageable test cases for the conversion agent.
-2.  **Code Conversion**: Use `LLMCodeGeneration.py` to take the generated PyTorch files (or any other PyTorch file) and convert them into JAX.
+1.  **Test File Generation**: Use `make_pytorch_file.py` to analyze a large, complex Python file (e.g., a model implementation from a library like `transformers`) and extract standalone, self-contained PyTorch modules. This step is crucial for creating manageable test cases for the conversion agent.
+2.  **Code Conversion**: Use `llm_code_generation.py` to take the generated PyTorch files (or any other PyTorch file) and convert them into JAX.
 
 ## File Descriptions
 

@@ -136,7 +136,7 @@ class MixtralDecoderLayer(nn.Module):
     # NOTE: the naming mismatch here is to ensure reverse compatibility with existing checkpoints.
     # The `name` represents the weight name in JAX/checkpoints and so the class name
     # is just for readability.
-    mlp_lnx, load_balance_loss = moe.RoutedMoE(
+    mlp_lnx, load_balance_loss = moe.get_routed_moe(
         name="MoeBlock_0",
         config=cfg,
         num_experts=cfg.num_experts,

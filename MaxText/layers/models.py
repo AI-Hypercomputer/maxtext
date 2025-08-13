@@ -50,7 +50,8 @@ class Transformer(nn.Module):
   # Possible model_mode values can be found in MaxText.common_types.
   # We generally use MaxText.common_types.MODEL_MODE_TRAIN or
   # MaxText.common_types.MODEL_MODE_PREFILL for initializations here.
-  model_mode: str # May be different than the model_mode passed to __call__
+  # TODO: Make model_mode required after confirming no users are affected.
+  model_mode: str = MODEL_MODE_TRAIN # May be different than the model_mode passed to __call__
   # pylint: enable=attribute-defined-outside-init
 
 
@@ -191,7 +192,8 @@ class ZeroOneTransformer(nn.Module):
   # Possible model_mode values can be found in MaxText.common_types.
   # We generally use MaxText.common_types.MODEL_MODE_TRAIN or
   # MaxText.common_types.MODEL_MODE_PREFILL for initializations here.
-  model_mode: str # May be different than the model_mode passed to __call__
+  # TODO: Make model_mode required after confirming no users are affected.
+  model_mode: str = MODEL_MODE_TRAIN # May be different than the model_mode passed to __call__
 
   def setup(self):
     self.model = Transformer(self.config, self.mesh, self.quant, self.model_mode)

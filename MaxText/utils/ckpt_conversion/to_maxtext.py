@@ -102,7 +102,6 @@ def main(argv: Sequence[str]) -> None:
   rng = jax.random.PRNGKey(config.init_weights_seed)
   quant = quantizations.configure_quantization(config)
   maxtext_model_flax = models.Transformer(config, mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
-  maxtext_model_flax.init(rng)
   learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
   tx = optimizers.get_optimizer(config, learning_rate_schedule)
 

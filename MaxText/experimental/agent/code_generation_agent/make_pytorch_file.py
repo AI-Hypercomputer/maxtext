@@ -32,7 +32,7 @@ output directory.
 
 Example Invocation:
 
-python MakePytorchFile.py \
+python make_pytorch_file.py \
   --entry_file_path "transformers/models/llama/modeling_llama.py" \
   --base_path "https://github.com/huggingface/transformers/blob/main/src" 
 
