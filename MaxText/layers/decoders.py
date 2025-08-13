@@ -296,7 +296,7 @@ class Decoder(nn.Module):
       )
       pipeline_stage_module = self.get_pipeline_stage_module(self.decoder_layer)
       initialized_scan = scan_fn(config=cfg, mesh=self.mesh, layers=pipeline_stage_module, remat_policy=self.get_remat_policy())
-      self.initialized_scan = initialized_scan
+      self.pp_initialized_scan = initialized_scan
       pipeline_module = rematted_pipeline(
           config=self.config, mesh=self.mesh, layers=pipeline_stage_module, remat_policy=remat_policy
         )
@@ -666,7 +666,7 @@ class Decoder(nn.Module):
     if cfg.using_pipeline_parallelism:
       if cfg.pipeline_fsdp_ag_once:
         partition_spec = self.pipeline_module.get_weight_sharding(
-            y, decoder_segment_ids, decoder_positions, deterministic, model_mode
+            y, decoder_segment_ids, decoder_positions, deterministic, model_mode, None
         )
       else:
         partition_spec = None  # This partition spec is only used for the fsdp_ag_once feature.
@@ -698,10 +698,11 @@ class Decoder(nn.Module):
                 in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
                 model_mode=model_mode,
             )(y, *broadcast_args)
-        y = self.pipeline_module(y, *broadcast_args, partition_spec=partition_spec)
+        y, _ = self.pp_initialized_scan(y, *broadcast_args, partition_spec) # TODO: support 1 or two outputs
+        
       else:  # Not DeepSeek
         #y = self.pipeline_module(y, *broadcast_args, partition_spec=partition_spec) # TODO- maintain support for both?
-        y, _ = self.initialized_scan(y, *broadcast_args, partition_spec)
+        y, _ = self.pp_initialized_scan(y, *broadcast_args, partition_spec)
         remaining_layers = self.config.num_decoder_layers - self.config.pipeline_parallel_layers
         if remaining_layers > 0:
           logical_axis_rules_pp_as_dp = maxtext_utils.logical_axis_rules_pp_act_as_dp(self.config.logical_axis_rules)

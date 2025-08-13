@@ -790,7 +790,7 @@ class Pipeline(nn.Module):
     final_output = jnp.reshape(
         final_output, (self.config.micro_batch_size_to_train_on, self.config.max_target_length, self.config.emb_dim)
     )
-    if self.config_num_successive_pipelines > 1:
+    if self.config.num_successive_pipelines > 1:
       return final_output, None
     else:
       return final_output
