@@ -643,6 +643,9 @@ def gmm(
         "tiling",
         "num_actual_groups",
         "interpret",
+        "lhs_quantize_dtype",
+        "rhs_quantize_dtype",
+        "use_qwix_quantization",
     ],
 )
 def tgmm(
@@ -655,6 +658,9 @@ def tgmm(
     num_actual_groups: int | None = None,
     existing_out: jnp.ndarray | None = None,
     interpret: bool = False,
+    lhs_quantize_dtype=None,
+    rhs_quantize_dtype=None,
+    use_qwix_quantization: bool = False,
 ) -> jnp.ndarray:
   """Compute lhs[:, sizes[i-1]:sizes[i]] @ rhs[sizes[i-1]:sizes[i], :].
 
@@ -750,23 +756,45 @@ def tgmm(
           tm=tm,
           tn=tk,
       )
-
-      loaded_lhs = lhs[...]
-      loaded_rhs = rhs[...]
-      loaded_lhs = lax.select(
-          lhs_mask[...],
-          loaded_lhs.astype(jnp.float32),
-          jnp.zeros_like(lhs, jnp.float32),
-      ).swapaxes(0, 1)
-      loaded_rhs = lax.select(
-          rhs_mask[...],
-          loaded_rhs.astype(jnp.float32),
-          jnp.zeros_like(rhs, jnp.float32),
-      )
-
-      acc_scratch[...] += lax.dot(
-          loaded_lhs.astype(input_dtype),
-          loaded_rhs.astype(input_dtype),
+      if use_qwix_quantization and isinstance(lhs, QArray):
+        loaded_lhs = lhs[...]
+        qvalue = lax.select(
+            lhs_mask[...],
+            lhs.qvalue[...],
+            jnp.zeros_like(lhs.qvalue, lhs.qvalue.dtype),
+        ).swapaxes(0, 1)
+        loaded_lhs = dataclasses.replace(loaded_lhs, qvalue=qvalue)
+      else:
+        loaded_lhs = lhs[...]
+        loaded_lhs = (
+            lax.select(
+                lhs_mask[...],
+                loaded_lhs.astype(jnp.float32),
+                jnp.zeros_like(lhs, jnp.float32),
+            )
+            .astype(input_dtype)
+            .swapaxes(0, 1)
+        )
+      if use_qwix_quantization and isinstance(rhs, QArray):
+        loaded_rhs = rhs[...]
+        qvalue = lax.select(
+            rhs_mask[...],
+            rhs.qvalue[...],
+            jnp.zeros_like(rhs.qvalue, lhs.qvalue.dtype),
+        )
+        loaded_rhs = dataclasses.replace(loaded_rhs, qvalue=qvalue)
+      else:
+        loaded_rhs = rhs[...]
+        loaded_rhs = lax.select(
+            rhs_mask[...],
+            loaded_rhs.astype(jnp.float32),
+            jnp.zeros_like(rhs, jnp.float32),
+        ).astype(input_dtype)
+      is_quantized = (lhs_quantize_dtype or rhs_quantize_dtype) and use_qwix_quantization
+      dot = qpl.dot if is_quantized else lax.dot
+      acc_scratch[...] += dot(
+          loaded_lhs,
+          loaded_rhs,
           preferred_element_type=jnp.float32,
       )
 
@@ -825,7 +853,11 @@ def tgmm(
   flops = 2 * m * k * n
   cost_estimate = pl.CostEstimate(flops=flops, bytes_accessed=bytes_accessed, transcendentals=0)
   lhs = lhs.swapaxes(0, 1)
-  call_gmm = pl.pallas_call(
+  if use_qwix_quantization and (lhs_quantize_dtype is not None or rhs_quantize_dtype is not None):
+    pallas_call_fn = qpl.pallas_call
+  else:
+    pallas_call_fn = pl.pallas_call
+  call_gmm = pallas_call_fn(
       kernel,
       out_shape=jax.ShapeDtypeStruct((num_actual_groups, k, n), preferred_element_type),
       grid_spec=pltpu.PrefetchScalarGridSpec(
@@ -844,6 +876,13 @@ def tgmm(
       interpret=interpret,
       cost_estimate=cost_estimate,
   )
+
+  if use_qwix_quantization and lhs_quantize_dtype is not None:
+    lhs = qpl.quantize(lhs, qtype=lhs_quantize_dtype, scale_dtype=jnp.float32)
+
+  if use_qwix_quantization and rhs_quantize_dtype is not None:
+    # Use per-channel scales for non-contracting axes, i.e., num_groups, m, n but not k.
+    rhs = qpl.quantize(rhs, qtype=rhs_quantize_dtype, scale_dtype=jnp.float32)
 
   out = call_gmm(
       group_metadata,

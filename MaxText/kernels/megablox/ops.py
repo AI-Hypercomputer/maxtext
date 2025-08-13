@@ -106,7 +106,17 @@ def _gmm_bwd(
       use_qwix_quantization=use_qwix_quantization,
   )
   grad_rhs = backend.tgmm(
-      lhs.swapaxes(0, 1), grad, group_sizes, rhs.dtype, tiling, group_offset, num_actual_groups, interpret=interpret
+      lhs.swapaxes(0, 1),
+      grad,
+      group_sizes,
+      rhs.dtype,
+      tiling,
+      group_offset,
+      num_actual_groups,
+      interpret=interpret,
+      lhs_quantize_dtype=lhs_quantize_dtype,
+      rhs_quantize_dtype=rhs_quantize_dtype,
+      use_qwix_quantization=use_qwix_quantization,
   )
 
   # NOTE: If the rhs transposition is fused into the forward pass we need to
