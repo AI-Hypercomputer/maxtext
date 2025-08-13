@@ -51,3 +51,4 @@ enable_dropout: False
 logits_via_embedding: False
 use_bias: True
 decoder_block: "gpt_oss"
+inhomogeneous_layer_cycle_interval: 2

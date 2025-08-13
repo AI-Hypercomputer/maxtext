@@ -71,9 +71,6 @@ class GptOssDecoderLayer(nn.Module):
       decoder_positions,
       deterministic,
       model_mode,
-      previous_chunk=None,
-      page_state=None,
-      slot=None,
   ):
     cfg = self.config
     mesh = self.mesh
@@ -123,7 +120,6 @@ class GptOssDecoderLayer(nn.Module):
         decoder_segment_ids=decoder_segment_ids,
         deterministic=deterministic,
         model_mode=model_mode,
-        previous_chunk=previous_chunk,
     )
 
     attention_lnx = nn.with_logical_constraint(
@@ -184,3 +180,63 @@ class GptOssDecoderLayer(nn.Module):
       return layer_output, None
     else:
       return layer_output
+
+
+class GptOssScannableBlock(nn.Module):
+  """A repeatable block of GPT OSS decoder layers.
+
+    This block applies multiple decoder layers sequentially, using the attention
+    pattern defined by GPT_OSS_ATTENTION_PATTERN. It's designed to be
+    used with `nn.scan` for efficient compilation.
+
+  Attributes:
+    config: Config, MaxText model config
+    mesh: Mesh, JAX device mesh (used for sharding)
+    num_of_layers: int, number of decoder layers in the block
+    quant: Optional[Quant], quantization config
+  """
+
+  config: models.Config
+  mesh: Mesh
+  model_mode: str
+  quant: Optional[Quant] = None
+
+  @nn.compact
+  def __call__(
+      self,
+      inputs,
+      decoder_segment_ids,
+      decoder_positions,
+      deterministic,
+      model_mode,
+  ):
+
+    cfg = self.config
+    mesh = self.mesh
+
+    inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
+    inputs = checkpoint_name(inputs, "decoder_layer_input")
+    y = inputs
+    for layer_id in range(cfg.inhomogeneous_layer_cycle_interval):
+      attention_type = get_attention_type(layer_id)
+      layer = GptOssDecoderLayer(
+          config=cfg,
+          mesh=mesh,
+          model_mode=model_mode,
+          name=f"layers_{layer_id}",
+          attention_type=attention_type,
+          quant=self.quant,
+      )
+      y = layer(
+          y,
+          decoder_segment_ids,
+          decoder_positions,
+          deterministic,
+          model_mode,
+      )
+      if cfg.scan_layers:
+        y = y[0]
+    if cfg.scan_layers:
+      return y, None
+    else:
+      return y

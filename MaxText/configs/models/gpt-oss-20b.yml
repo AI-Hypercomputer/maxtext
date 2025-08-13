@@ -19,7 +19,7 @@
 base_emb_dim: 2880
 base_num_query_heads: 64
 base_num_kv_heads: 8
-head_dim: 128 # 64
+head_dim: 64
 sliding_window_size: 128
 attention_bias: True
 attention_sink: True
@@ -50,3 +50,4 @@ normalization_layer_epsilon: 1.0e-5
 enable_dropout: False
 logits_via_embedding: False
 decoder_block: "gpt_oss"
+inhomogeneous_layer_cycle_interval: 2
