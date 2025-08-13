@@ -29,10 +29,12 @@ from MaxText.multihost_dataloading import MultiHostDataLoadIterator
 import numpy as np
 import orbax.checkpoint as ocp
 from orbax.checkpoint import v1 as ocp_v1
+from orbax.checkpoint._src.arrays import sharding as sharding_utils
 import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_checkpoint_manager
 import orbax.checkpoint.experimental.emergency.replicator_checkpoint_manager as emergency_replicator_checkpoint_manager
 # pylint: disable=too-many-positional-arguments
 
+SafetensorsUtils = ocp.arrays
 CheckpointManager = ocp.CheckpointManager
 CheckpointManagerOptions = ocp.CheckpointManagerOptions
 Composite = ocp.args.Composite
@@ -59,8 +61,8 @@ def _load_full_state_from_path(
     enable_orbax_v1: whether to use orbax v1 or the previously supported v0.
     checkpoint_conversion_fn: user-provided function to convert checkpoint to
       maxtext-supported state.
-    source_checkpoint_layout: String representation of the checkpoint layout
-      of the source checkpoint.
+    source_checkpoint_layout: String representation of the checkpoint layout of
+      the source checkpoint.
 
   Returns:
     The loaded state.
@@ -83,10 +85,22 @@ def _load_full_state_from_path(
       state = ocp_v1.load_pytree(path, abstract_unboxed_pre_state)
     else:
       with context:
-        pre_transformed_state = ocp_v1.load_pytree(path)
+        metadata = ocp_v1.pytree_metadata(path)
+        simple_abstract_state = metadata.metadata
+        shardings = sharding_utils.construct_maximal_shardings(
+            simple_abstract_state
+        )
+
+        def combine_sharding(sds, shardings):
+          return jax.ShapeDtypeStruct(
+              shape=sds.shape, dtype=sds.dtype, sharding=shardings
+          )
+
+        sharded_abstract_state = jax.tree.map(
+            combine_sharding, simple_abstract_state, shardings
+        )
+        pre_transformed_state = ocp_v1.load_pytree(path, sharded_abstract_state)
       state = checkpoint_conversion_fn(pre_transformed_state)
-      # TODO(zachmeyers): Add call to place on devices, after sharding logic
-      # is implemented on Orbax side.
     return state
   else:
     # This is the original v0 logic that should be restored. For the edge case
@@ -306,8 +320,8 @@ def load_state_if_possible(
     checkpoint_storage_concurrent_gb: concurrent GB for checkpoint byte I/O.
     enable_orbax_v1: bool flag for enabling Orbax v1.
     checkpoint_conversion_fn: function for converting checkpoint to Orbax v1.
-    source_checkpoint_layout: Optional checkpoint context to use for loading, 
-    provided in string format with the default being "orbax".
+    source_checkpoint_layout: Optional checkpoint context to use for loading,
+      provided in string format with the default being "orbax".
 
   Returns:
     A tuple of (train_state, train_state_params) where full_train_state captures
@@ -355,9 +369,15 @@ def load_state_if_possible(
         # or EmergencyReplicatorCheckpointManager. The '_' indicates that 'dataset_type' and
         # 'data_iterator' can be any value and aren't used in this pattern.
         case (checkpoint_manager, _, _) if isinstance(
-            checkpoint_manager, (EmergencyCheckpointManager, EmergencyReplicatorCheckpointManager)
+            checkpoint_manager,
+            (EmergencyCheckpointManager, EmergencyReplicatorCheckpointManager),
         ):
-          return (checkpoint_manager.restore(step, args=Composite(state=checkpoint_args)).state, None)
+          return (
+              checkpoint_manager.restore(
+                  step, args=Composite(state=checkpoint_args)
+              ).state,
+              None,
+          )
         # Case 2: Matches if dataset type is "grain" and a specific checkpoint file exits for the iterator
         # exists within the checkpoint manager's directory for the given step.
         case (checkpoint_manager, dataset_type, data_iterator) if dataset_type == "grain" and data_iterator and (
