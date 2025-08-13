@@ -39,7 +39,9 @@ from MaxText import pyconfig
 from MaxText.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_PREFILL, MODEL_MODE_TRAIN
 from MaxText.globals import PKG_DIR
 from MaxText.layers import attentions
-from MaxText.layers.attentions import Attention, ChunkedCausalMask
+from MaxText.layers import attention_op
+from MaxText.layers.attentions import Attention
+from MaxText.layers.attention_op import ChunkedCausalMask, _make_bidirectional_block_mask, _generate_chunk_attention_mask
 from MaxText.layers.attention_mla import MLA
 
 
@@ -49,7 +51,7 @@ class BidirectionalBlockMaskTest(unittest.TestCase):
   def test_one_block_mask(self):
     bidirectional_mask = np.asarray([[0, 1, 1, 1, 0, 0]])
     # pylint: disable=protected-access
-    block_mask = attentions._make_bidirectional_block_mask(bidirectional_mask)
+    block_mask = _make_bidirectional_block_mask(bidirectional_mask)
     expected_mask = np.asarray(
         [
             [
@@ -67,7 +69,7 @@ class BidirectionalBlockMaskTest(unittest.TestCase):
   def test_two_blocks_mask(self):
     bidirectional_mask = np.asarray([[0, 1, 1, 0, 1, 1]])
     # pylint: disable=protected-access
-    block_mask = attentions._make_bidirectional_block_mask(bidirectional_mask)
+    block_mask = _make_bidirectional_block_mask(bidirectional_mask)
     expected_mask = np.asarray(
         [
             [
@@ -85,7 +87,7 @@ class BidirectionalBlockMaskTest(unittest.TestCase):
   def test_batch_block_masks(self):
     bidirectional_mask = np.asarray([[0, 1, 1, 1, 0, 0], [0, 1, 1, 0, 1, 1]])
     # pylint: disable=protected-access
-    block_mask = attentions._make_bidirectional_block_mask(bidirectional_mask)
+    block_mask = _make_bidirectional_block_mask(bidirectional_mask)
     expected_mask = np.asarray(
         [
             [
@@ -111,7 +113,7 @@ class BidirectionalBlockMaskTest(unittest.TestCase):
   def test_empty_block_mask(self):
     bidirectional_mask = np.asarray([[0, 0, 0, 0, 0, 0]])
     # pylint: disable=protected-access
-    block_mask = attentions._make_bidirectional_block_mask(bidirectional_mask)
+    block_mask = _make_bidirectional_block_mask(bidirectional_mask)
     expected_mask = np.zeros(
         (bidirectional_mask.shape[0], bidirectional_mask.shape[1], bidirectional_mask.shape[1]), dtype=bool
     )
@@ -120,7 +122,7 @@ class BidirectionalBlockMaskTest(unittest.TestCase):
   def test_full_block_mask(self):
     bidirectional_mask = np.asarray([[1, 1, 1, 1, 1, 1]])
     # pylint: disable=protected-access
-    block_mask = attentions._make_bidirectional_block_mask(bidirectional_mask)
+    block_mask = _make_bidirectional_block_mask(bidirectional_mask)
     expected_mask = np.ones(
         (bidirectional_mask.shape[0], bidirectional_mask.shape[1], bidirectional_mask.shape[1]), dtype=bool
     )
@@ -133,7 +135,7 @@ class BidirectionalBlockMaskTest(unittest.TestCase):
     causal_mask = (col_ids <= row_ids)[None, None, None, :, :]
     bidirectional_mask = np.asarray([[0, 1, 1, 1, 0, 0], [0, 1, 1, 0, 1, 1]])
     # pylint: disable=protected-access
-    image_mask = attentions._make_bidirectional_block_mask(bidirectional_mask)
+    image_mask = _make_bidirectional_block_mask(bidirectional_mask)
     combined_mask = causal_mask | image_mask[:, None, None, ...]
     expected_mask = np.asarray(
         [
@@ -191,7 +193,7 @@ class ChunkedCausalMaskTest(unittest.TestCase):
     np.testing.assert_array_equal(actual_mask, expected_mask)
     # Make sure _generate_chunk_attention_mask also produces the same mask
     # pylint: disable=protected-access
-    actual_mask = attentions._generate_chunk_attention_mask(mask_shape=mask.shape, chunk_size=chunk_size)
+    actual_mask = _generate_chunk_attention_mask(mask_shape=mask.shape, chunk_size=chunk_size)
     np.testing.assert_array_equal(actual_mask, expected_mask)
 
   def test_full_length_chunk(self):
@@ -207,7 +209,7 @@ class ChunkedCausalMaskTest(unittest.TestCase):
     np.testing.assert_array_equal(actual_mask, expected_mask)
     # Make sure _generate_chunk_attention_mask also produces the same mask
     # pylint: disable=protected-access
-    actual_mask = attentions._generate_chunk_attention_mask(mask_shape=mask.shape, chunk_size=chunk_size)
+    actual_mask = _generate_chunk_attention_mask(mask_shape=mask.shape, chunk_size=chunk_size)
     np.testing.assert_array_equal(actual_mask, expected_mask)
 
   def test_single_token_chunk(self):
@@ -223,7 +225,7 @@ class ChunkedCausalMaskTest(unittest.TestCase):
     np.testing.assert_array_equal(actual_mask, expected_mask)
     # Make sure _generate_chunk_attention_mask also produces the same mask
     # pylint: disable=protected-access
-    actual_mask = attentions._generate_chunk_attention_mask(mask_shape=mask.shape, chunk_size=chunk_size)
+    actual_mask = _generate_chunk_attention_mask(mask_shape=mask.shape, chunk_size=chunk_size)
     np.testing.assert_array_equal(actual_mask, expected_mask)
 
   def test_non_square_shape(self):
@@ -246,7 +248,7 @@ class ChunkedCausalMaskTest(unittest.TestCase):
     np.testing.assert_array_equal(actual_mask, expected_mask)
     # Make sure _generate_chunk_attention_mask also produces the same mask
     # pylint: disable=protected-access
-    actual_mask = attentions._generate_chunk_attention_mask(mask_shape=mask.shape, chunk_size=chunk_size)
+    actual_mask = _generate_chunk_attention_mask(mask_shape=mask.shape, chunk_size=chunk_size)
     np.testing.assert_array_equal(actual_mask, expected_mask)
 
   def test_value_error_on_zero_chunk_size(self):
@@ -257,7 +259,7 @@ class ChunkedCausalMaskTest(unittest.TestCase):
       ChunkedCausalMask(shape=(4, 4), chunk_size=-2)
     with self.assertRaises(ValueError):
       # pylint: disable=protected-access
-      attentions._generate_chunk_attention_mask(mask_shape=(4, 4), chunk_size=0)
+      _generate_chunk_attention_mask(mask_shape=(4, 4), chunk_size=0)
 
 
 class AttentionTest(parameterized.TestCase):
@@ -923,7 +925,7 @@ class AttentionTest(parameterized.TestCase):
         attention_kernel="dot_product",
         dtype=self.dtype,
         dropout_rate=self.cfg.dropout_rate,
-        attention_type=attentions.AttentionType.GLOBAL,
+        attention_type=attention_op.AttentionType.GLOBAL,
         model_mode=MODEL_MODE_TRAIN,
         rngs=self.nnx_rng,
     )
@@ -942,7 +944,7 @@ class AttentionTest(parameterized.TestCase):
         attention_kernel="dot_product",
         dtype=self.dtype,
         dropout_rate=self.cfg.dropout_rate,
-        attention_type=attentions.AttentionType.LOCAL_SLIDING,
+        attention_type=attention_op.AttentionType.LOCAL_SLIDING,
         sliding_window_size=8,
         model_mode=MODEL_MODE_TRAIN,
         rngs=self.nnx_rng,
@@ -992,7 +994,7 @@ class AttentionTest(parameterized.TestCase):
         attention_kernel="dot_product",
         dtype=self.dtype,
         dropout_rate=self.cfg.dropout_rate,
-        attention_type=attentions.AttentionType.LOCAL_SLIDING,
+        attention_type=attention_op.AttentionType.LOCAL_SLIDING,
         sliding_window_size=self.max_target_length,
         model_mode=MODEL_MODE_TRAIN,
         rngs=self.nnx_rng,
