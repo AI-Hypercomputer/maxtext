@@ -78,6 +78,7 @@ def compare_named_sharding_jsons(json1: dict, model1_name: str, json2: dict, mod
   return not only_in_1 and not only_in_2 and all(json1[k] == json2[k] for k in shared_keys)
 
 
+@pytest.mark.cpu_only
 @pytest.mark.parametrize("model_name, topology, num_slice", TEST_CASES)
 def test_sharding_dump_for_model(model_name: str, topology: str, num_slice: str) -> None:
   """Test if the sharding of new model implementation is as expected."""
