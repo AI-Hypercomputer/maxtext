@@ -19,7 +19,7 @@ limitations under the License.
 
 import hashlib
 from MaxText.train_compile import get_shaped_inputs, get_topology_mesh, validate_config
-from MaxText.tests.sharding_dump import named_shardings_to_json, load_named_sharding_json, TEST_CASES
+from MaxText.tests.sharding_dump import valid_test_cases, sharding_info_folder, named_shardings_to_json, load_named_sharding_json
 from MaxText import pyconfig
 import pytest
 import os
@@ -79,18 +79,18 @@ def compare_named_sharding_jsons(json1: dict, model1_name: str, json2: dict, mod
 
 
 @pytest.mark.cpu_only
-@pytest.mark.parametrize("model_name, topology, num_slice", TEST_CASES)
+@pytest.mark.parametrize("model_name, topology, num_slice", valid_test_cases())
 def test_sharding_dump_for_model(model_name: str, topology: str, num_slice: str) -> None:
   """Test if the sharding of new model implementation is as expected."""
   params = [
-      "/deps/MaxText/tests/sharding_compare_test",
+      "MaxText/tests/sharding_compare_test",
       "MaxText/configs/base.yml",
       f"compile_topology={topology}",
       f"compile_topology_num_slices={num_slice}",
       f"model_name={model_name}",
   ]
 
-  json_path = f"MaxText/tests/sharding_info/" f"{model_name}/" f"{topology}/" f"slice_{num_slice}/named_shardings.json"
+  json_path = f"{sharding_info_folder}/{model_name}/{topology}/slice_{num_slice}/named_shardings.json"
   expected_json_exists = os.path.exists(json_path)
 
   config = pyconfig.initialize(params)
@@ -102,9 +102,7 @@ def test_sharding_dump_for_model(model_name: str, topology: str, num_slice: str)
   except:  # pylint: disable=bare-except
     state_mesh_shardings = {}
 
-  if state_mesh_shardings == {}:
-    assert expected_json_exists is False
-    return
+  assert state_mesh_shardings is not {}
 
   actual_json = named_shardings_to_json(state_mesh_shardings)
   expected_json = load_named_sharding_json(json_path)
