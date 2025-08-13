@@ -19,7 +19,7 @@ import unittest
 import pytest
 from MaxText.standalone_checkpointer import main as sckpt_main
 from MaxText.standalone_dataloader import main as sdl_main
-from MaxText.globals import PKG_DIR
+from MaxText.globals import PKG_DIR, tpu_present
 from datetime import datetime
 import random
 import string
@@ -38,6 +38,7 @@ class Standalone_DL_CKPT(unittest.TestCase):
 
   @pytest.mark.integration_test
   @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_standalone_dataloader(self):
     random_run_name = self._get_random_test_name("standalone_dataloader")
     sdl_main(
@@ -56,6 +57,7 @@ class Standalone_DL_CKPT(unittest.TestCase):
 
   @pytest.mark.integration_test
   @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_standalone_checkpointer(self):
     random_run_name = self._get_random_test_name("standalone_checkpointer")
     # checkpoint at 50

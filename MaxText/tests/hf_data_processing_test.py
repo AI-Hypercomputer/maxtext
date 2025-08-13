@@ -26,12 +26,15 @@ from MaxText import pyconfig
 from MaxText.globals import PKG_DIR
 from MaxText.input_pipeline import _hf_data_processing
 from MaxText.input_pipeline import input_pipeline_interface
+from MaxText.max_utils import gcs_bucket_accessible
 
 
 class HfDataProcessingTest(unittest.TestCase):
 
   def setUp(self):
     super().setUp()
+    if not gcs_bucket_accessible("maxtext-dataset"):
+      return
     config = pyconfig.initialize(
         [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
         per_device_batch_size=1,
@@ -60,6 +63,7 @@ class HfDataProcessingTest(unittest.TestCase):
 
     self.train_iter = _hf_data_processing.make_hf_train_iterator(self.config, self.mesh, self.process_indices)
 
+  @unittest.skipIf(not gcs_bucket_accessible("maxtext-dataset"), "gs://maxtext-dataset bucket not accessible")
   def test_train_ds(self):
     expected_shape = [jax.device_count(), self.config.max_target_length]
     # For training we pack multiple short examples in one example.
@@ -77,6 +81,7 @@ class HfDataProcessingTest(unittest.TestCase):
         },
     )
 
+  @unittest.skipIf(not gcs_bucket_accessible("maxtext-dataset"), "gs://maxtext-dataset bucket not accessible")
   def test_batch_determinism(self):
     batch1 = next(self.train_iter)
     train_iter = _hf_data_processing.make_hf_train_iterator(self.config, self.mesh, self.process_indices)
@@ -88,6 +93,7 @@ class HfDataProcessingTest(unittest.TestCase):
     self.assertTrue((batch1["inputs_position"] == batch2["inputs_position"]).all())
     self.assertTrue((batch1["targets_position"] == batch2["targets_position"]).all())
 
+  @unittest.skipIf(not gcs_bucket_accessible("maxtext-dataset"), "gs://maxtext-dataset bucket not accessible")
   def test_for_loop_repeatable(self):
     def get_first_batch(iterator):
       batch = None

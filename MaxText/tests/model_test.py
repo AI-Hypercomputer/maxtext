@@ -28,7 +28,7 @@ from jax.sharding import Mesh
 from MaxText import maxtext_utils
 from MaxText import pyconfig
 from MaxText.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_TRAIN, MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE
-from MaxText.globals import PKG_DIR
+from MaxText.globals import PKG_DIR, tpu_present
 from MaxText.layers import models
 from MaxText.layers import quantizations
 
@@ -117,6 +117,7 @@ class TestModel(unittest.TestCase):
     self._test_logits_cast_driver(cast_logits_to_fp32=False, expected_dtype=jnp.bfloat16)
 
   @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_train_vs_prefill_and_autoregress(self):
     """Test train versus prefill and autoregress."""
     PREFILL_RANGE = MAX_PREFILL_PREDICT_LENGTH

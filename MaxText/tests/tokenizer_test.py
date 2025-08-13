@@ -13,6 +13,7 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 """
+from MaxText.max_utils import gcs_bucket_accessible
 
 """ Tests for tokenizer
 """
@@ -20,7 +21,7 @@ limitations under the License.
 import numpy as np
 from MaxText import train_tokenizer
 from MaxText.input_pipeline import _input_pipeline_utils
-from MaxText.globals import PKG_DIR
+from MaxText.globals import PKG_DIR, tpu_present
 
 import unittest
 import pytest
@@ -36,6 +37,8 @@ class TokenizerTest(unittest.TestCase):
   def setUpClass(cls):
     dataset_name = "c4/en:3.0.1"
     dataset_path = "gs://maxtext-dataset"
+    if not gcs_bucket_accessible("maxtext-dataset"):
+      return
     cls.vocab_size = 32_768
     cls.max_corpus_chars = 10_000_000
     assets_path = "tests"
@@ -62,15 +65,19 @@ class TokenizerTest(unittest.TestCase):
 
   @classmethod
   def tearDownClass(cls):
+    if not gcs_bucket_accessible("maxtext-dataset"):
+      return
     os.remove(cls.tokenizer_path)
 
   @pytest.mark.skip(reason="mohitkhatwani@ will fix this")
   @pytest.mark.tpu_only
+  @unittest.skip("mohitkhatwani@ will fix this")
   def test_tokenize(self):
     text = "This is a test"
     self.assertTrue(np.array_equal(self.source_tokenizer.encode(text).numpy(), self.test_tokenizer.encode(text).numpy()))
 
   @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_detokenize(self):
     tokens = [66, 12, 10, 698]
     self.assertEqual(np.asarray(self.source_tokenizer.decode(tokens)), np.asarray(self.test_tokenizer.decode(tokens)))
@@ -83,6 +90,8 @@ class TikTokenTest(unittest.TestCase):
   def setUpClass(cls):
     dataset_name = "c4/en:3.0.1"
     dataset_path = "gs://maxtext-dataset"
+    if not gcs_bucket_accessible("maxtext-dataset"):
+      return
     cls.source_tokenizer = _input_pipeline_utils.get_tokenizer(
         os.path.join(os.path.dirname(PKG_DIR), "assets", "tokenizer_llama3.tiktoken"),
         "tiktoken",
@@ -97,12 +106,14 @@ class TikTokenTest(unittest.TestCase):
     cls.dataset = train_ds_builder.as_dataset(split="train", read_config=read_config, shuffle_files=True)
 
   @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_tokenize(self):
     text = "This is a test"
     tokens = [2028, 374, 264, 1296]
     self.assertTrue(np.array_equal(self.source_tokenizer.encode(text), tokens))
 
   @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_detokenize(self):
     tokens = [2028, 374, 264, 1296]
     text = "This is a test"
@@ -116,6 +127,8 @@ class HFTokenizerTest(unittest.TestCase):
   def setUpClass(cls):
     source = "gs://maxtext-gemma/huggingface/gemma2-2b"
     destination = os.path.join(os.path.dirname(PKG_DIR), "assets")
+    if not gcs_bucket_accessible("maxtext-gemma"):
+      return
     subprocess.run(
         ["gcloud", "storage", "cp", "-R", source, destination],
         check=True,
@@ -128,6 +141,7 @@ class HFTokenizerTest(unittest.TestCase):
     )
 
   @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_tokenize(self):
     text = "This is a test"
     self.assertTrue(np.array_equal(self.hf_tokenizer.encode(text), self.sp_tokenizer.encode(text)))

@@ -27,7 +27,7 @@ import jax.numpy as jnp
 from jax.sharding import Mesh, PartitionSpec, NamedSharding
 
 from MaxText import pyconfig
-from MaxText.globals import PKG_DIR
+from MaxText.globals import PKG_DIR, tpu_present
 from MaxText import maxtext_utils
 
 
@@ -73,6 +73,7 @@ class ContextParallelismTest(unittest.TestCase):
     self.mesh_cp = Mesh(devices_array_cp, self.cfg_cp.mesh_axes)  # for context parallelism
 
   @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_context_parallelism_sharding(self):
     # Ensure data is sharded following context parallelism axis when enabled
     # Global array: 8x3. Sharded along first dim (8) across 4 devices, it becomes four 2x3 shards.

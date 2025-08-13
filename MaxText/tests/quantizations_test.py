@@ -31,7 +31,7 @@ from flax import linen as nn
 
 from aqt.jax.v2 import aqt_tensor
 
-from MaxText.globals import PKG_DIR
+from MaxText.globals import PKG_DIR, tpu_present
 from MaxText import pyconfig
 from MaxText.layers import quantizations
 from MaxText import maxtext_utils
@@ -334,14 +334,17 @@ class QuantTest(unittest.TestCase):
     self.assertTrue(self.pytree_allclose(grads_base, grads_quant, tolerance=5e-1))
 
   @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_int8_quantization(self):
     self.quantization_config("int8")
 
   @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_fp8_quantization(self):
     self.quantization_config("fp8")
 
   @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_fp8_full_quantization(self):
     self.quantization_config("fp8_full")
 

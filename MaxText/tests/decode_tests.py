@@ -24,7 +24,7 @@ import pytest
 from absl.testing import absltest
 
 from MaxText.decode import main as decode_main
-from MaxText.globals import PKG_DIR
+from MaxText.globals import PKG_DIR, tpu_present, gpu_present
 
 
 class DecodeTests(unittest.TestCase):
@@ -75,26 +75,32 @@ class DecodeTests(unittest.TestCase):
   }
 
   @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_tpu_base(self):
     decode_main(DecodeTests.CONFIGS["base"])
 
   @pytest.mark.gpu_only
+  @unittest.skipIf(not gpu_present, "GPU only test")
   def test_gpu_base(self):
     decode_main(DecodeTests.CONFIGS["base"] + ["attention=dot_product"])
 
   @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_tpu_int8(self):
     decode_main(DecodeTests.CONFIGS["int8"] + ["attention=dot_product"])
 
   @pytest.mark.gpu_only
+  @unittest.skipIf(not gpu_present, "GPU only test")
   def test_gpu_int8(self):
     decode_main(DecodeTests.CONFIGS["int8"] + ["attention=dot_product"])
 
   @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_tpu_pdb_lt_1(self):
     decode_main(DecodeTests.CONFIGS["pdb_lt_1"])
 
   @pytest.mark.gpu_only
+  @unittest.skipIf(not gpu_present, "GPU only test")
   def test_gpu_pdb_lt_1(self):
     decode_main(DecodeTests.CONFIGS["pdb_lt_1"] + ["attention=dot_product"])
 

@@ -31,7 +31,7 @@ from jax.sharding import Mesh
 from MaxText import maxtext_utils
 from MaxText import pyconfig, maxengine
 from MaxText.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_PREFILL
-from MaxText.globals import PKG_DIR
+from MaxText.globals import PKG_DIR, gpu_present, tpu_present
 from MaxText.layers import models
 from MaxText.layers import quantizations
 from MaxText.maxengine import MaxEngine
@@ -163,7 +163,8 @@ class MaxEngineTest(unittest.TestCase):
     self.assertEqual(result_token.data.ndim, 2)
     self.assertEqual(result_token.data.shape[1], 3)
 
-  @pytest.mark.skip(reason="Can only pass on CPU.")
+  @pytest.mark.skipif(not gpu_present and not tpu_present, reason="Can only pass on CPU.")
+  @unittest.skipIf(not gpu_present and not tpu_present, reason="Can only pass on CPU.")
   def test_chunked_prefill(self):
     """Test identical result between chunked prefill with single and multiple chunked.
 

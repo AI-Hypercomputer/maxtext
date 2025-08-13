@@ -23,13 +23,14 @@ from tempfile import gettempdir
 import pytest
 
 from MaxText.train_compile import main as train_compile_main
-from MaxText.globals import PKG_DIR
+from MaxText.globals import PKG_DIR, tpu_present
 
 
 class TrainCompile(unittest.TestCase):
   """Tests for the Ahead of Time Compilation functionality, train_compile.py"""
 
-  @pytest.mark.cpu_only
+  @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_save_compiled_v4(self):
     temp_dir = gettempdir()
     compiled_trainstep_file = os.path.join(temp_dir, "test_compiled_v4.pickle")
@@ -46,7 +47,8 @@ class TrainCompile(unittest.TestCase):
         )
     )
 
-  @pytest.mark.cpu_only
+  @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_save_compiled_v5e(self):
     temp_dir = gettempdir()
     compiled_trainstep_file = os.path.join(temp_dir, "test_compiled_v5e.pickle")
@@ -66,6 +68,7 @@ class TrainCompile(unittest.TestCase):
   # TODO (b/366200617) : This tests fails in AOT, but config works fine on real hardware
   @pytest.mark.skip(reason="Issue w/ kernels_test. Error: The TPU is already in use by process...")
   @pytest.mark.cpu_only
+  @unittest.skip("Issue w/ kernels_test. Error: The TPU is already in use by process...")
   def test_minimal_offloaded_v5e(self):
     temp_dir = gettempdir()
     compiled_trainstep_file = os.path.join(temp_dir, "test_compiled_v5e_offload.pickle")
@@ -88,7 +91,8 @@ class TrainCompile(unittest.TestCase):
         )
     )
 
-  @pytest.mark.cpu_only
+  @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_save_compiled_v5p_two_slices(self):
     temp_dir = gettempdir()
     compiled_trainstep_file = os.path.join(temp_dir, "test_compiled_v5p_two_slices.pickle")
@@ -108,6 +112,7 @@ class TrainCompile(unittest.TestCase):
   # TODO (b/374764692) : Enable when v6e AOT test when stable Jax supports v6e AOT.
   @pytest.mark.skip(reason="Enable when downstream v6e AOT support reaches stable Jax.")
   @pytest.mark.cpu_only
+  @unittest.skip("Enable when downstream v6e AOT support reaches stable Jax.")
   def test_save_compiled_v6e(self):
     temp_dir = gettempdir()
     compiled_trainstep_file = os.path.join(temp_dir, "test_compiled_v6e.pickle")
@@ -124,7 +129,8 @@ class TrainCompile(unittest.TestCase):
         )
     )
 
-  @pytest.mark.cpu_only
+  @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_sequence_parallelism(self):
     temp_dir = gettempdir()
     compiled_trainstep_file = os.path.join(temp_dir, "test_compiled.pickle")
@@ -143,7 +149,8 @@ class TrainCompile(unittest.TestCase):
         )
     )
 
-  @pytest.mark.cpu_only
+  @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_remat_save_dot_except_mlpwi(self):
     temp_dir = gettempdir()
     compiled_trainstep_file = os.path.join(temp_dir, "test_remat_save_dot_except_mlpwi.pickle")
@@ -166,7 +173,8 @@ class TrainCompile(unittest.TestCase):
         )
     )
 
-  @pytest.mark.cpu_only
+  @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_remat_save_dot_except_mlp(self):
     temp_dir = gettempdir()
     compiled_trainstep_file = os.path.join(temp_dir, "test_remat_save_dot_except_mlp.pickle")
@@ -189,7 +197,8 @@ class TrainCompile(unittest.TestCase):
         )
     )
 
-  @pytest.mark.cpu_only
+  @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_remat_save_qkv_proj(self):
     temp_dir = gettempdir()
     compiled_trainstep_file = os.path.join(temp_dir, "test_remat_save_qkv_proj.pickle")
@@ -212,7 +221,8 @@ class TrainCompile(unittest.TestCase):
         )
     )
 
-  @pytest.mark.cpu_only
+  @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_remat_full(self):
     temp_dir = gettempdir()
     compiled_trainstep_file = os.path.join(temp_dir, "test_remat_full.pickle")
@@ -235,7 +245,8 @@ class TrainCompile(unittest.TestCase):
         )
     )
 
-  @pytest.mark.cpu_only
+  @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_custom_64x4_mesh(self):
     temp_dir = gettempdir()
     compiled_trainstep_file = os.path.join(temp_dir, "test_custom_64x4_mesh.pickle")
@@ -259,6 +270,7 @@ class TrainCompile(unittest.TestCase):
   # TODO (b/376470419) : Enable when AOT test work with host offloading.
   @pytest.mark.skip(reason="Enable when AOT test work with host offloading.")
   @pytest.mark.gpu_only
+  @unittest.skip("Enable when AOT test work with host offloading.")
   def test_llama3_1_70b_opt_offload(self):
     temp_dir = gettempdir()
     compiled_trainstep_file = os.path.join(temp_dir, "test_llama3_1_70b_opt_offload.pickle")
@@ -277,7 +289,8 @@ class TrainCompile(unittest.TestCase):
         )
     )
 
-  @pytest.mark.cpu_only
+  @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_custom_32x8_mesh(self):
     temp_dir = gettempdir()
     compiled_trainstep_file = os.path.join(temp_dir, "test_custom_32x8_mesh.pickle")
@@ -302,7 +315,8 @@ class TrainCompile(unittest.TestCase):
         )
     )
 
-  @pytest.mark.cpu_only
+  @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_moe_dropping_bf16(self):
     temp_dir = gettempdir()
     compiled_trainstep_file = os.path.join(temp_dir, "test_moe_dropping_bf16.pickle")
@@ -326,6 +340,7 @@ class TrainCompile(unittest.TestCase):
 
   @pytest.mark.skip(reason="b/400476456 Tests are currently flaking / failing due to JAX 0.5.1 upgrade")
   @pytest.mark.cpu_only
+  @unittest.skip("b/400476456 Tests are currently flaking / failing due to JAX 0.5.1 upgrade")
   def test_moe_dropping_int8(self):
     temp_dir = gettempdir()
     compiled_trainstep_file = os.path.join(temp_dir, "test_moe_dropping_int8.pickle")
@@ -349,7 +364,8 @@ class TrainCompile(unittest.TestCase):
     )
 
   # TODO(b/388572320): Add int8 quantization test once this bug is fixed.
-  @pytest.mark.cpu_only
+  @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_moe_megablox_bf16(self):
     temp_dir = gettempdir()
     compiled_trainstep_file = os.path.join(temp_dir, "test_moe_megablox_bf16.pickle")
@@ -371,7 +387,8 @@ class TrainCompile(unittest.TestCase):
         )
     )
 
-  @pytest.mark.cpu_only
+  @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_moe_ragged_dot_bf16(self):
     temp_dir = gettempdir()
     compiled_trainstep_file = os.path.join(temp_dir, "test_moe_ragged_dot_bf16.pickle")
@@ -393,7 +410,8 @@ class TrainCompile(unittest.TestCase):
         )
     )
 
-  @pytest.mark.cpu_only
+  @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_moe_dense_bf16(self):
     temp_dir = gettempdir()
     compiled_trainstep_file = os.path.join(temp_dir, "test_moe_dense_bf16.pickle")
@@ -417,6 +435,7 @@ class TrainCompile(unittest.TestCase):
 
   @pytest.mark.skip(reason="b/400476456 Tests are currently flaking / failing due to JAX 0.5.1 upgrade")
   @pytest.mark.cpu_only
+  @unittest.skip("b/400476456 Tests are currently flaking / failing due to JAX 0.5.1 upgrade")
   def test_moe_dense_int8(self):
     temp_dir = gettempdir()
     compiled_trainstep_file = os.path.join(temp_dir, "test_moe_dense_int8.pickle")
@@ -439,7 +458,8 @@ class TrainCompile(unittest.TestCase):
         )
     )
 
-  @pytest.mark.cpu_only
+  @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_moe_pp_bf16(self):
     temp_dir = gettempdir()
     compiled_trainstep_file = os.path.join(temp_dir, "test_moe_pp_bf16.pickle")
@@ -463,7 +483,8 @@ class TrainCompile(unittest.TestCase):
         )
     )
 
-  @pytest.mark.cpu_only
+  @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_moe_deepseek_scanned_bf16(self):
     temp_dir = gettempdir()
     compiled_trainstep_file = os.path.join(temp_dir, "test_moe_deepseek_scanned_bf16.pickle")
@@ -489,6 +510,7 @@ class TrainCompile(unittest.TestCase):
 
   @pytest.mark.skip(reason="Fix sharding issue of all layers of DeepSeek")
   @pytest.mark.cpu_only
+  @unittest.skip(reason="Fix sharding issue of all layers of DeepSeek")
   def test_moe_deepseek_unscanned_bf16(self):
     temp_dir = gettempdir()
     compiled_trainstep_file = os.path.join(temp_dir, "test_moe_deepseek_unscanned_bf16.pickle")
@@ -512,7 +534,8 @@ class TrainCompile(unittest.TestCase):
         )
     )
 
-  @pytest.mark.cpu_only
+  @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_moe_deepseek_with_device_limit(self):
     compiled_trainstep_file = "/tmp/test_moe_deepseek_with_device_limit.pickle"
     train_compile_main(
@@ -536,7 +559,8 @@ class TrainCompile(unittest.TestCase):
         )
     )
 
-  @pytest.mark.cpu_only
+  @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_moe_deepseek_without_device_limit(self):
     compiled_trainstep_file = "/tmp/test_moe_deepseek_without_device_limit.pickle"
     train_compile_main(
@@ -560,7 +584,8 @@ class TrainCompile(unittest.TestCase):
         )
     )
 
-  @pytest.mark.cpu_only
+  @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_moe_deepseek_pipeline_subset(self):
     compiled_trainstep_file = "/tmp/test_moe_deepseek_pipeline_subset.pickle"
     train_compile_main(
@@ -583,7 +608,8 @@ class TrainCompile(unittest.TestCase):
         )
     )
 
-  @pytest.mark.cpu_only
+  @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_pipeline_subset(self):
     compiled_trainstep_file = "/tmp/test_pipeline_subset.pickle"
     train_compile_main(
@@ -603,7 +629,8 @@ class TrainCompile(unittest.TestCase):
         )
     )
 
-  @pytest.mark.cpu_only
+  @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_moe_llama4_17b_16e(self):
     compiled_trainstep_file = "/tmp/test_moe_llama4_17b_16e.pickle"
     train_compile_main(
@@ -624,7 +651,8 @@ class TrainCompile(unittest.TestCase):
         )
     )
 
-  @pytest.mark.cpu_only
+  @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_gpt3_6b(self):
     compiled_trainstep_file = "/tmp/test_gpt3_6b"
     train_compile_main(

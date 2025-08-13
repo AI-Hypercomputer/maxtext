@@ -19,7 +19,7 @@ import os
 import unittest
 import pytest
 from MaxText.train import main as train_main
-from MaxText.globals import PKG_DIR
+from MaxText.globals import PKG_DIR, tpu_present, gpu_present
 from absl.testing import absltest
 
 
@@ -141,81 +141,97 @@ class TrainTests(unittest.TestCase):
 
   @pytest.mark.integration_test
   @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_tpu_base(self):
     train_main(TrainTests.CONFIGS["base"])
 
   @pytest.mark.integration_test
   @pytest.mark.gpu_only
+  @unittest.skipIf(not gpu_present, "GPU only test")
   def test_gpu_base(self):
     train_main(TrainTests.CONFIGS["base"] + ["attention=dot_product"])
 
   @pytest.mark.integration_test
   @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_tpu_synthetic(self):
     train_main(TrainTests.CONFIGS["synthetic"])
 
   @pytest.mark.integration_test
   @pytest.mark.gpu_only
+  @unittest.skipIf(not gpu_present, "GPU only test")
   def test_gpu_synthetic(self):
     train_main(TrainTests.CONFIGS["synthetic"] + ["attention=dot_product"])
 
   @pytest.mark.integration_test
   @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_tpu_pdb_lt_1(self):
     train_main(TrainTests.CONFIGS["pdb_lt_1"])
 
   @pytest.mark.integration_test
   @pytest.mark.gpu_only
+  @unittest.skipIf(not gpu_present, "GPU only test")
   def test_gpu_pdb_lt_1(self):
     train_main(TrainTests.CONFIGS["pdb_lt_1"] + ["attention=dot_product"])
 
   @pytest.mark.integration_test
   @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_tpu_int8(self):
     train_main(TrainTests.CONFIGS["int8"])
 
   @pytest.mark.integration_test
   @pytest.mark.gpu_only
+  @unittest.skipIf(not gpu_present, "GPU only test")
   def test_gpu_int8(self):
     train_main(TrainTests.CONFIGS["int8"] + ["attention=dot_product"])
 
   @pytest.mark.integration_test
   @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_tpu_fp8(self):
     train_main(TrainTests.CONFIGS["fp8"])
 
   @pytest.mark.integration_test
   @pytest.mark.gpu_only
+  @unittest.skipIf(not gpu_present, "GPU only test")
   def test_gpu_fp8(self):
     train_main(TrainTests.CONFIGS["fp8"] + ["attention=dot_product"])
 
   @pytest.mark.integration_test
   @pytest.mark.gpu_only
+  @unittest.skipIf(not gpu_present, "GPU only test")
   def test_gpu_nanoo_fp8(self):
     train_main(TrainTests.CONFIGS["nanoo_fp8"] + ["attention=dot_product"])
 
   @pytest.mark.integration_test
   @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_tpu_dropout(self):
     train_main(TrainTests.CONFIGS["dropout"])
 
   @pytest.mark.integration_test
   @pytest.mark.gpu_only
+  @unittest.skipIf(not gpu_present, "GPU only test")
   def test_gpu_dropout(self):
     train_main(TrainTests.CONFIGS["dropout"] + ["attention=dot_product"])
 
   @pytest.mark.integration_test
   @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_tpu_hf_input_pipeline(self):
     train_main(TrainTests.CONFIGS["hf_input_pipeline"])
 
   @pytest.mark.integration_test
   @pytest.mark.gpu_only
+  @unittest.skipIf(not gpu_present, "GPU only test")
   def test_gpu_hf_input_pipeline(self):
     train_main(TrainTests.CONFIGS["hf_input_pipeline"] + ["attention=dot_product"])
 
   @pytest.mark.integration_test
   @pytest.mark.gpu_only
+  @unittest.skipIf(not gpu_present, "GPU only test")
   def test_gpu_cudnn_flash_te(self):
     os.environ["NVTE_FUSED_ATTN"] = "1"  # Enable fused attention
     cudnn_flash_te = [  # tests base config on GPU with flash attention"""
@@ -235,6 +251,7 @@ class TrainTests(unittest.TestCase):
 
   @pytest.mark.integration_test
   @pytest.mark.gpu_only
+  @unittest.skipIf(not gpu_present, "GPU only test")
   def test_gpu_context_parallelism(self):
     os.environ["NVTE_FUSED_ATTN"] = "1"  # Enable fused attention
     context_parallel = [  # tests base config on GPU with context parallelism and flash attention"""
@@ -257,6 +274,7 @@ class TrainTests(unittest.TestCase):
 
   @pytest.mark.integration_test
   @pytest.mark.gpu_only
+  @unittest.skipIf(not gpu_present, "GPU only test")
   def test_gpu_tensor_parallelism(self):
     os.environ["NVTE_FUSED_ATTN"] = "1"  # Enable fused attention
     tensor_parallel = [  # tests base config on GPU with context parallelism and flash attention"""
@@ -278,6 +296,7 @@ class TrainTests(unittest.TestCase):
 
   @pytest.mark.integration_test
   @pytest.mark.gpu_only
+  @unittest.skipIf(not gpu_present, "GPU only test")
   def test_gpu_optimizer_offload(self):
     os.environ["NVTE_FUSED_ATTN"] = "1"  # Enable fused attention
     optimizer_offload = [  # tests base config on GPU with optimizer state offload"""
@@ -298,6 +317,7 @@ class TrainTests(unittest.TestCase):
 
   @pytest.mark.integration_test
   @pytest.mark.gpu_only
+  @unittest.skipIf(not gpu_present, "GPU only test")
   def test_gpu_parameter_offload(self):
     os.environ["NVTE_FUSED_ATTN"] = "1"  # Enable fused attention
     parameter_offload = [  # tests base config on GPU with parameter offload"""
@@ -318,6 +338,7 @@ class TrainTests(unittest.TestCase):
     train_main(parameter_offload)
 
   @pytest.mark.gpu_only
+  @unittest.skipIf(not gpu_present, "GPU only test")
   def test_gpu_cudnn_flash_jax(self):
     cudnn_flash_jax = [  # tests base config on GPU with flash attention"""
         None,
@@ -337,15 +358,18 @@ class TrainTests(unittest.TestCase):
 
   @pytest.mark.integration_test
   @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_tpu_base_model_ag_once(self):
     train_main(TrainTests.CONFIGS["base"] + ["model_fsdp_ag_once=True"])
 
   @pytest.mark.integration_test
+  @unittest.skipIf(not tpu_present or not gpu_present, "TPU|GPU only test")
   def test_base_model_shardy_false(self):
     train_main(TrainTests.CONFIGS["base"] + ["shardy=False"])
 
   @pytest.mark.integration_test
   @pytest.mark.gpu_only
+  @unittest.skipIf(not gpu_present, "GPU only test")
   def test_gpu_synthetic_model_ag_once(self):
     train_main(TrainTests.CONFIGS["synthetic"] + ["model_fsdp_ag_once=True"])
 

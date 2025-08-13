@@ -21,12 +21,13 @@ import unittest
 from absl.testing import absltest
 
 from MaxText.train import main as train_main
-from MaxText.globals import PKG_DIR
+from MaxText.globals import PKG_DIR, gpu_present, tpu_present
 
 
 class Train(unittest.TestCase):
   """Smoke test G3 only"""
 
+  @unittest.skipIf(not gpu_present and not tpu_present, "GPU|TPU not available")
   def test_tiny_config(self):
     test_tmpdir = os.environ.get("TEST_TMPDIR")  # pylint: disable=unused-variable
     train_main(

@@ -32,7 +32,7 @@ import tensorflow as tf
 
 from MaxText import pyconfig
 from MaxText import multihost_dataloading
-from MaxText.globals import PKG_DIR
+from MaxText.globals import PKG_DIR, tpu_present
 
 
 class MultihostDataloadingTest(unittest.TestCase):
@@ -63,6 +63,7 @@ class MultihostDataloadingTest(unittest.TestCase):
     self.multihost_gen = multihost_dataloading.MultiHostDataLoadIterator(dataset, self.mesh)
 
   @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_batch_sharded_data_pipeline(self):
     first_batch = next(self.multihost_gen)
     sec_batch = next(self.multihost_gen)

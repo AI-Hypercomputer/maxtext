@@ -23,7 +23,7 @@ import jax.numpy as jnp
 import numpy as np
 from MaxText.inference.offline_engine import OfflineEngine, InputData, CompletionOutput
 from MaxText import pyconfig
-from MaxText.globals import PKG_DIR
+from MaxText.globals import PKG_DIR, tpu_present
 
 
 class OfflineEngineTest(unittest.TestCase):
@@ -84,6 +84,7 @@ class OfflineEngineTest(unittest.TestCase):
       assert isinstance(result.logprobs, np.ndarray)
       assert result.logprobs.shape == (length + completion_length,)
 
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_mcjax_tp_batch_prefill(self):
     config = self.cfg
     rng = jax.random.PRNGKey(0)

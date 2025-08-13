@@ -33,6 +33,7 @@ from MaxText import pyconfig
 from MaxText.globals import PKG_DIR
 from MaxText.input_pipeline import _hf_data_processing
 from MaxText.input_pipeline import input_pipeline_interface
+from MaxText.max_utils import gcs_bucket_accessible
 
 PROMPT_DATA = [
     [
@@ -93,6 +94,8 @@ class SFTDataProcessingTest(unittest.TestCase):
   @classmethod
   def setUpClass(cls):
     super().setUpClass()
+    if not gcs_bucket_accessible():
+      return
     exit_code = subprocess.call(
         [
             "gsutil",
@@ -164,6 +167,7 @@ class SFTDataProcessingTest(unittest.TestCase):
         grain_worker_count=0,
     )
 
+  @unittest.skipIf(not gcs_bucket_accessible(), "gs://maxtext-dataset bucket not accessible")
   def test_sft_format_with_messages(self):
     dataset = Dataset.from_dict({"messages": MESSAGES_DATA * 4})
     data_columns = ["messages"]
@@ -229,6 +233,7 @@ class SFTDataProcessingTest(unittest.TestCase):
         packed_exp2_targets_predictable,
     )
 
+  @unittest.skipIf(not gcs_bucket_accessible(), "gs://maxtext-dataset bucket not accessible")
   def test_sft_format_with_prompt_completion(self):
     dataset = Dataset.from_dict({"prompt": PROMPT_DATA * 4, "completion": COMPLETION_DATA * 4})
     data_columns = ["prompt", "completion"]

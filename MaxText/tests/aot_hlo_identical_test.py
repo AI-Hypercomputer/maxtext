@@ -25,7 +25,7 @@ import shutil
 import hashlib
 import re
 import jax
-from MaxText.globals import PKG_DIR
+from MaxText.globals import PKG_DIR, tpu_present
 from MaxText import train_compile
 from MaxText import train
 
@@ -152,6 +152,7 @@ class AotHloIdenticalTest(unittest.TestCase):
     print("AOT Compiled and train HLO files are identical for test {test_name}!")
 
   @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_default_hlo_match(self):
     self.assert_compile_and_real_match_hlo("default_run")
 

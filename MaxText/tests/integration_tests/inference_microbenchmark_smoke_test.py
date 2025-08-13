@@ -21,7 +21,7 @@ import unittest
 from absl.testing import absltest
 
 from MaxText import pyconfig
-from MaxText.globals import PKG_DIR
+from MaxText.globals import PKG_DIR, tpu_present
 from MaxText.inference_microbenchmark import run_benchmarks
 
 
@@ -30,6 +30,7 @@ class Inference_Microbenchmark(unittest.TestCase):
 
   @pytest.mark.integration_test
   @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test(self):
     jax.config.update("jax_default_prng_impl", "unsafe_rbg")
     config = pyconfig.initialize(
