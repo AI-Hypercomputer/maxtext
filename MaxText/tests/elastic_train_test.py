@@ -17,6 +17,7 @@ Tests the elastic related functions in elastic_train.py
 
 import logging
 import time
+import os.path
 from unittest import mock
 
 from absl.testing import absltest
@@ -29,6 +30,7 @@ from pathwaysutils.elastic import manager
 from MaxText import elastic_train
 from MaxText import max_utils
 from MaxText import pyconfig
+from MaxText.globals import PKG_DIR
 
 logging.basicConfig()
 logging.getLogger("pathwaysutils.elastic.manager").setLevel(logging.INFO)
@@ -114,7 +116,7 @@ class ElasticTrainTest(parameterized.TestCase):
     config = pyconfig.initialize(
         argv=[
             "test",
-            "MaxText/configs/base.yml",
+            os.path.join(PKG_DIR, "configs", "base.yml"),
         ],
         per_device_batch_size=base_number,
         checkpoint_period=1234,

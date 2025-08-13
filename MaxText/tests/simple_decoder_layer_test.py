@@ -16,12 +16,13 @@ import os.path
 import pytest
 
 from MaxText.train import main as train_main
-from MaxText.globals import PKG_DIR
+from MaxText.globals import PKG_DIR, tpu_present
 
 
 class SimpleDecoderLayerTest(unittest.TestCase):
 
   @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_simple_decoder_layer(self):
     train_main(
         [
@@ -39,6 +40,7 @@ class SimpleDecoderLayerTest(unittest.TestCase):
     )
 
   @pytest.mark.tpu_only
+  @unittest.skipIf(not tpu_present, "TPU only test")
   def test_mlp_decoder_layer(self):
     train_main(
         [

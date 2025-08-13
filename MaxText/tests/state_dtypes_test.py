@@ -14,6 +14,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
+import numpy as np
+
 """ Test that all weights are expected dtype (default float32) """
 import unittest
 import os.path
@@ -43,6 +45,8 @@ class StateDtypes(unittest.TestCase):
     config = pyconfig.initialize(argv)
     quant = quantizations.configure_quantization(config)
     devices_array = maxtext_utils.create_device_mesh(config)
+    if jax.device_count() == 1:
+      devices_array = np.array(devices_array).reshape((1,) * len(config.mesh_axes))
     mesh = Mesh(devices_array, config.mesh_axes)
     model = Transformer(config, mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
     learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
