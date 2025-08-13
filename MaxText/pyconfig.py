@@ -245,7 +245,7 @@ def validate_quantization_methods(keys):
   """Validate quantization methods
   """
   valid_quant_methods = (
-    "", "int8", "fp8", "fp8_full"
+    "", "int8", "fp8", "fp8_full", "fp8_gpu", "fp8_nanoo"
   )
   if keys["use_qwix_quantization"]:
     if keys["quantization"] not in valid_quant_methods:

@@ -38,7 +38,6 @@ from MaxText import max_utils
 from MaxText import pyconfig
 from MaxText.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_PREFILL, MODEL_MODE_TRAIN
 from MaxText.globals import PKG_DIR
-from MaxText.layers import attentions
 from MaxText.layers import attention_op
 from MaxText.layers.attentions import Attention
 from MaxText.layers.attention_op import ChunkedCausalMask, _make_bidirectional_block_mask, _generate_chunk_attention_mask

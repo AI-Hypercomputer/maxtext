@@ -256,6 +256,11 @@ class QuantTest(unittest.TestCase):
         "per_device_batch_size": 1,
         "use_qwix_quantization": True,
         "skip_jax_distributed_system": True,
+        "base_emb_dim": 1024,
+        "base_num_query_heads": 8,
+        "base_num_kv_heads": 8,
+        "base_mlp_dim": 4096,
+        "base_num_decoder_layers": 12,
     } | kwargs
     config = pyconfig.initialize(
         [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
@@ -277,9 +282,21 @@ class QuantTest(unittest.TestCase):
   def pytree_allclose(self, a, b, *, tolerance=0.01):
     """Return True if every pair of leaves is all-close."""
     leaves_a, leaves_b = jax.tree_util.tree_leaves(a), jax.tree_util.tree_leaves(b)
-    return all(jnp.abs(y - x).mean() / jnp.abs(x).mean() < tolerance for x, y in zip(leaves_a, leaves_b))
+    return all(jnp.abs(y - x).mean() / (jnp.abs(x).mean() + 1e-8) < tolerance for x, y in zip(leaves_a, leaves_b))
 
-  def quantization_config(self, quant):
+  def print_grad_diff(self, a, b):
+    """Print the key path and relative error for each leaf in two gradient PyTrees."""
+
+    def format_key_path(keys):
+      return "/".join(str(k) for k in keys)
+
+    def compare_fn(path, x, y):
+      rel_error = jnp.abs(y - x).mean() / (jnp.abs(x).mean() + 1e-8)
+      print(f"{format_key_path(path)}: relative error = {rel_error}")
+
+    jax.tree_util.tree_map_with_path(compare_fn, a, b)
+
+  def quantization_config(self, quant, logits_tolerance=2e-1, grad_tolerance=5e-1):
     """Run forward pass and backward pass for quantized model and compare with base model."""
     cfg = self.init_pyconfig(quantization=quant)
     model = train_utils.create_model(self.cfg, self.mesh)
@@ -292,6 +309,7 @@ class QuantTest(unittest.TestCase):
         decoder_positions,
         decoder_segment_ids,
         enable_dropout=False,
+        mutable=True,
     )
     quantized_vars = qt_model.init(
         {"params": self.rng, "aqt": self.rng, "dropout": self.rng},
@@ -299,40 +317,43 @@ class QuantTest(unittest.TestCase):
         decoder_positions,
         decoder_segment_ids,
         enable_dropout=False,
+        mutable=True,
     )
 
-    def loss_base(params, inputs):
-      logits = model.apply({"params": params}, *inputs, enable_dropout=False, rngs={"params": self.rng})
+    def loss_base(all_vars, inputs):
+      logits, _ = model.apply(all_vars, *inputs, enable_dropout=False, rngs={"params": self.rng}, mutable=True)
       return jnp.mean((logits) ** 2)
 
-    def loss_quant(params, inputs):
-      logits = qt_model.apply({"params": params}, *inputs, enable_dropout=False, rngs={"params": self.rng})
+    def loss_quant(all_vars, inputs):
+      logits, _ = qt_model.apply(all_vars, *inputs, enable_dropout=False, rngs={"params": self.rng}, mutable=True)
       return jnp.mean((logits) ** 2)
 
     # Compute gradients w.r.t. both models
-    grads_base = jax.grad(loss_base)(var["params"], (ids, decoder_positions, decoder_segment_ids))
-    grads_quant = jax.grad(loss_quant)(quantized_vars["params"], (ids, decoder_positions, decoder_segment_ids))
+    grads_base = jax.grad(loss_base)(var, (ids, decoder_positions, decoder_segment_ids))
+    grads_quant = jax.grad(loss_quant)(quantized_vars, (ids, decoder_positions, decoder_segment_ids))
 
-    logits = model.apply(
-        {"params": var["params"]},
+    logits, _ = model.apply(
+        var,
         ids,
         decoder_positions,
         decoder_segment_ids,
         enable_dropout=False,
         rngs={"params": self.rng},
+        mutable=True,
     )
-    quant_logits = qt_model.apply(
-        {"params": quantized_vars["params"]},
+    quant_logits, _ = qt_model.apply(
+        quantized_vars,
         ids,
         decoder_positions,
         decoder_segment_ids,
         enable_dropout=False,
         rngs={"params": self.rng},
+        mutable=True,
     )
     print(f"relative error in logits: {jnp.abs(quant_logits - logits).mean() / jnp.abs(logits).mean()}")
-    assert jnp.abs(quant_logits - logits).mean() / jnp.abs(logits).mean() < 2e-1
-
-    self.assertTrue(self.pytree_allclose(grads_base, grads_quant, tolerance=5e-1))
+    assert jnp.abs(quant_logits - logits).mean() / jnp.abs(logits).mean() < logits_tolerance
+    self.print_grad_diff(grads_base["params"], grads_quant["params"])
+    self.assertTrue(self.pytree_allclose(grads_base["params"], grads_quant["params"], tolerance=grad_tolerance))
 
   @pytest.mark.tpu_only
   def test_int8_quantization(self):
@@ -345,6 +366,14 @@ class QuantTest(unittest.TestCase):
   @pytest.mark.tpu_only
   def test_fp8_full_quantization(self):
     self.quantization_config("fp8_full")
+
+  @pytest.mark.gpu_only
+  def test_fp8_gpu_quantization(self):
+    self.quantization_config("fp8_gpu", grad_tolerance=1.0)
+
+  @pytest.mark.gpu_only
+  def test_fp8_nanoo_quantization(self):
+    self.quantization_config("fp8_nanoo", grad_tolerance=1.0)
 
 
 @pytest.mark.parametrize(
