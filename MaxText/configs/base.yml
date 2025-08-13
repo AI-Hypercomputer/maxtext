@@ -169,6 +169,7 @@ use_random_routing: False # whether to use random routing for debug/test purpose
 tile_batch_seq: 512
 tile_activation_dim: 1024
 tile_weight_dim: 1024
+norm_topk_prob: False # Boolean to enable the top-k probability normalization. Qwen3-specific normalization of router weights.
 
 # How the expert axis is used to shard attention weights and activations
 # "fsdp" (ep acts as fsdp parallelism)
