@@ -253,11 +253,54 @@ class Decoder(nn.Module):
     self.decoder_layer = self.get_decoder_layers()
     self.norm_layer = self.get_norm_layer(num_features=self.config.emb_dim)
     if self.config.using_pipeline_parallelism:
-      pipeline_stage_module = self.get_pipeline_stage_module(self.decoder_layer)
+
       remat_policy = self.get_remat_policy()
-      self.pipeline_module = pipeline.Pipeline(
-          config=self.config, mesh=self.mesh, layers=pipeline_stage_module, remat_policy=remat_policy
+
+      # TODO(mattdavidow): maintain support for the old num_successive_pipelines=1
+      # TODO(mattdavidow): Move this PP init crap to its own method
+      # Scan
+      use_remat = True
+      # Apply remat policy to layer
+      if use_remat:
+        rematted_pipeline = nn.remat(
+            pipeline.Pipeline,
+            prevent_cse=True,
+            policy=remat_policy,
+            static_argnums=(4, 5, 6),  # Deterministic and model mode are static arguments.
+        )
+      else:
+        rematted_pipeline = pipeline.Pipeline
+
+
+      cfg=self.config
+      in_axes_tuple = (nn.broadcast,) * 5
+      initializing = self.is_mutable_collection("params")
+      params_spec = self.config.param_scan_axis if initializing else ScanIn(cfg.param_scan_axis)
+      cache_spec = 0
+      scan_fn = nn.scan(
+          rematted_pipeline, #pipeline_module,
+          variable_axes={
+              "params": params_spec,
+              "cache": cache_spec,
+              "intermediates": 0,
+              "aqt": 0,
+              "_overwrite_with_gradient": 0,
+          },
+          split_rngs={
+              "params": True,
+              "dropout": cfg.enable_dropout,
+          },
+          in_axes=in_axes_tuple,
+          length=cfg.num_successive_pipelines,
+          metadata_params={nn.PARTITION_NAME: "successive_pipelines"},
       )
+      pipeline_stage_module = self.get_pipeline_stage_module(self.decoder_layer)
+      initialized_scan = scan_fn(config=cfg, mesh=self.mesh, layers=pipeline_stage_module, remat_policy=self.get_remat_policy())
+      self.initialized_scan = initialized_scan
+      pipeline_module = rematted_pipeline(
+          config=self.config, mesh=self.mesh, layers=pipeline_stage_module, remat_policy=remat_policy
+        )
+      self.pipeline_module = pipeline_module # rawr to both support old and also get partition spec for both
 
   def get_remat_policy(self):
     """Get remat policy"""
@@ -657,7 +700,8 @@ class Decoder(nn.Module):
             )(y, *broadcast_args)
         y = self.pipeline_module(y, *broadcast_args, partition_spec=partition_spec)
       else:  # Not DeepSeek
-        y = self.pipeline_module(y, *broadcast_args, partition_spec=partition_spec)
+        #y = self.pipeline_module(y, *broadcast_args, partition_spec=partition_spec) # TODO- maintain support for both?
+        y, _ = self.initialized_scan(y, *broadcast_args, partition_spec)
         remaining_layers = self.config.num_decoder_layers - self.config.pipeline_parallel_layers
         if remaining_layers > 0:
           logical_axis_rules_pp_as_dp = maxtext_utils.logical_axis_rules_pp_act_as_dp(self.config.logical_axis_rules)

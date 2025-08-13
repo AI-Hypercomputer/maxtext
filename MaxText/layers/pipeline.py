@@ -609,8 +609,8 @@ class Pipeline(nn.Module):
       segment_ids: jnp.ndarray,
       positions: jnp.ndarray,
       deterministic: bool,
-      model_mode=MODEL_MODE_TRAIN,
-      partition_spec=None,  # Pytree of sharding specifications of the weights (aka self.layers.variables)
+      model_mode,
+      partition_spec,  # Pytree of sharding specifications of the weights (aka self.layers.variables)
   ) -> jnp.ndarray:
     """The main method that maps the series of decoder layer inputs to final layer outputs.
     Has the same signature of a single decoder layer, and expects the same shapes, e.g. the inputs should have shape
@@ -716,10 +716,14 @@ class Pipeline(nn.Module):
       broadcasted_stage_outpus = jax.lax.broadcast(
           stage_outputs[0], [self.config.micro_batch_size_to_train_on // self.pipeline_microbatch_size]
       )
-      return jnp.reshape(
+      to_ret = jnp.reshape(
           broadcasted_stage_outpus,
           [self.config.micro_batch_size_to_train_on, self.config.max_target_length, self.config.emb_dim],
       )
+      if self.config.num_successive_pipelines > 1:
+        return to_ret, None
+      else:
+        return to_ret
 
     if self.config.pipeline_fsdp_ag_once:
       all_pipeline_weights = all_gather_over_fsdp(
@@ -727,6 +731,9 @@ class Pipeline(nn.Module):
       )
     else:
       all_pipeline_weights = self.layers.variables
+    # pytree checkpoint name all_pipeline_weights using jax.tree.map
+    if self.config.num_successive_pipelines > 1:
+      all_pipeline_weights = jax.tree.map(lambda x: jax.ad_checkpoint.checkpoint_name(x, "all_gather_me_again"), all_pipeline_weights)
 
     def run_iteration_scannable(model, loop_state, xs):
       # flax transforms like nn.scan and nn.remat can only be applied to nn.module classes or nn.module instances, so we
@@ -783,5 +790,7 @@ class Pipeline(nn.Module):
     final_output = jnp.reshape(
         final_output, (self.config.micro_batch_size_to_train_on, self.config.max_target_length, self.config.emb_dim)
     )
-
-    return final_output
+    if self.config_num_successive_pipelines > 1:
+      return final_output, None
+    else:
+      return final_output
