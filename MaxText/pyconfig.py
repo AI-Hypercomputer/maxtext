@@ -169,6 +169,10 @@ def validate_keys(keys):
   validate_prefill_and_target_lengths(keys["max_prefill_predict_length"], keys["max_target_length"])
   validate_rope_type(keys["rope_type"])
 
+  # TODO remove after b/435512699 resolved
+  if keys["context_parallel_size"] > 1 and keys["context_parallel_load_balance"] and keys["attention_type"] == "chunk":
+    raise ValueError("Currently load-balanced context parallelism is not supported for chunk attention.")
+
   if keys["mtp_eval_target_module"] < 0:
     raise ValueError("mtp_eval_target_module cannot be negative. Set to 0 to disable evaluation.")
 
