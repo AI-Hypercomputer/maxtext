@@ -17,9 +17,8 @@ limitations under the License.
 """ Run script to dump sharding of various combination of model and topology. """
 
 
-import json
 from typing import Sequence
-from MaxText.tests.sharding_dump import TEST_CASES, sharding_info_folder
+from MaxText.tests.sharding_dump import TEST_CASES
 import subprocess
 from absl import app
 
@@ -38,7 +37,6 @@ def run_single_dump(model_name: str, topology: str, num_slice: str) -> None:
       ],
       check=True,
   )
-
 
 
 def main(argv: Sequence[str]) -> None:

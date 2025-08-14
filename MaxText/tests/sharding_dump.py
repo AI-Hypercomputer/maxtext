@@ -201,25 +201,26 @@ TOPOLOGIES = [
 ]
 
 SLICES = [
-  1,
-  4,
-  # 8192
+    1,
+    4,
+    # 8192
 ]
 
 TEST_CASES = list(itertools.product(MODEL_NAMES, TOPOLOGIES, SLICES))
 
 sharding_info_folder = Path("MaxText/tests/sharding_info")
 
-valid_test_case_json = f"{sharding_info_folder}/valid_test_cases.json"
+valid_test_case_json = sharding_info_folder / "valid_test_cases.json"
+
 
 def valid_test_cases() -> List[tuple[str]]:
   """Generate valid test cases of combination of model/topology/slice"""
   test_cases = []
 
-  if not os.path.exists(valid_test_case_json):
-    return
+  if not valid_test_case_json.exists():
+    return []
 
-  with open(valid_test_case_json, "r", encoding="utf-8") as f:
+  with valid_test_case_json.open("r", encoding="utf-8") as f:
     data = json.load(f)
 
   for model_name, topologies in data.items():
@@ -275,10 +276,9 @@ def save_named_sharding_dict(output_path: str | Path, sharding_dict: dict) -> No
     json.dump(sharding_dict, f, indent=2)
 
 
-def load_named_sharding_json(json_path: str | Path) -> dict:
+def load_named_sharding_json(json_path: Path) -> dict:
   """Loads the named_shardings.json file into a plain Python dict."""
-  json_path = Path(json_path)
-  with open(json_path, "r", encoding="utf-8") as f:
+  with json_path.open("r", encoding="utf-8") as f:
     return json.load(f)
 
 
@@ -292,42 +292,43 @@ def main(argv: Sequence[str]) -> None:
   validate_config(config)
 
   sharding_info_folder.mkdir(parents=True, exist_ok=True)
-  json_path = f"{sharding_info_folder}/{config.model_name}/{config.compile_topology}/slice_{config.compile_topology_num_slices}/named_shardings.json"
+
+  json_path = (
+      sharding_info_folder
+      / config.model_name
+      / config.compile_topology
+      / f"slice_{config.compile_topology_num_slices}"
+      / "named_shardings.json"
+  )
+
+  data = {}
+
+  if valid_test_case_json.exists() and valid_test_case_json.stat().st_size != 0:
+    with valid_test_case_json.open("r", encoding="utf-8") as f:
+      data = json.load(f)
 
   try:
     topology_mesh = get_topology_mesh(config)
-    get_shaped_inputs(topology_mesh, config)
+    _, _, state_mesh_shardings, _ = get_shaped_inputs(topology_mesh, config)
 
-  except:  # pylint: disable=bare-except
+    if config.model_name not in data:
+      data[config.model_name] = {}
+    if config.compile_topology not in data[config.model_name]:
+      data[config.model_name][config.compile_topology] = []
+    data[config.model_name][config.compile_topology].append(config.compile_topology_num_slices)
+
+  except Exception:  # pylint: disable=broad-except
     state_mesh_shardings = {}
 
-  data = {}
-  if os.path.exists(valid_test_case_json):
-    with open(valid_test_case_json, "r", encoding="utf-8") as f:
-      if os.stat(f.name).st_size is not 0:
-        data = json.load(f)
+  if not state_mesh_shardings:
+    return
 
-  with open(valid_test_case_json, "w", encoding="utf-8") as f:
-    try:
-      topology_mesh = get_topology_mesh(config)
-      _, _, state_mesh_shardings, _ = get_shaped_inputs(topology_mesh, config)
-      if config.model_name not in data:
-        data[config.model_name] = {}
-      if config.compile_topology not in data[config.model_name]:
-        data[config.model_name][config.compile_topology] = []
-      data[config.model_name][config.compile_topology].append(config.compile_topology_num_slices)
+  sharding_dict = named_shardings_to_json(state_mesh_shardings)
+  save_named_sharding_dict(json_path, sharding_dict)
+  load_named_sharding_json(json_path)
+  print(config.model_name, config.compile_topology)
 
-    except:  # pylint: disable=bare-except
-      state_mesh_shardings = {}
-
-    if state_mesh_shardings == {}:
-      return
-
-    sharding_dict = named_shardings_to_json(state_mesh_shardings)
-    save_named_sharding_dict(json_path, sharding_dict)
-    load_named_sharding_json(json_path)
-    print(config.model_name, config.compile_topology)
-
+  with valid_test_case_json.open("w", encoding="utf-8") as f:
     json.dump(data, f, indent=2)
 
 

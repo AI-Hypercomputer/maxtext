@@ -136,7 +136,7 @@ class LlamaDecoderLayer(nn.Module):
         intermediate_dropout_rate=cfg.dropout_rate,
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
-        name="mlp",
+        name="mlp_sharding_test",
         config=cfg,
         quant=self.quant,
         model_mode=model_mode,
