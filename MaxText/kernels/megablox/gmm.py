@@ -568,7 +568,13 @@ def gmm(
   max_active_tiles = group_metadata[1].size
   bytes_accessed = (lhs_bytes * tiles_n) + (rhs_bytes * max_active_tiles) + out_bytes
   flops = 2 * m * k * n
-  cost_estimate = pl.CostEstimate(flops=flops, bytes_accessed=bytes_accessed, transcendentals=0)
+  cost_estimate = pl.CostEstimate(
+      flops=flops,
+      bytes_accessed=bytes_accessed,
+      transcendentals=0,
+      # TODO(yzp): update before using it
+      remote_bytes_transferred=0,
+  )
   if (lhs_quantize_dtype is not None or rhs_quantize_dtype is not None) and use_qwix_quantization:
     pallas_call_fn = qpl.pallas_call
   elif lhs_quantize_dtype is not None or rhs_quantize_dtype is not None:
@@ -851,7 +857,13 @@ def tgmm(
   out_bytes = (num_actual_groups * k * n) * out_bytewidth
   bytes_accessed = (lhs_bytes * tiles_n) + (rhs_bytes * tiles_k) + out_bytes
   flops = 2 * m * k * n
-  cost_estimate = pl.CostEstimate(flops=flops, bytes_accessed=bytes_accessed, transcendentals=0)
+  cost_estimate = pl.CostEstimate(
+      flops=flops,
+      bytes_accessed=bytes_accessed,
+      transcendentals=0,
+      # TODO(yzp): update before using it
+      remote_bytes_transferred=0,
+  )
   lhs = lhs.swapaxes(0, 1)
   if use_qwix_quantization and (lhs_quantize_dtype is not None or rhs_quantize_dtype is not None):
     pallas_call_fn = qpl.pallas_call
