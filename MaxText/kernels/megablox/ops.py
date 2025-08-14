@@ -52,7 +52,7 @@ def _gmm_fwd(
         jnp.ndarray,
         jnp.ndarray | None,
         int,
-    ],
+i    ],
 ]:
   """Forward function for GMM VJP."""
   out = backend.gmm(
@@ -65,8 +65,8 @@ def _gmm_fwd(
       existing_out,
       transpose_rhs=transpose_rhs,
       interpret=interpret,
-      lhs_quantize_dtype=lhs_quantize_dtype,
-      rhs_quantize_dtype=rhs_quantize_dtype,
+      lhs_quantize_dtype='e4m3',
+      rhs_quantize_dtype='e4m3',
       use_qwix_quantization=use_qwix_quantization,
   )
   return out, (lhs, rhs, group_sizes, group_offset, rhs.shape[0])
@@ -101,8 +101,8 @@ def _gmm_bwd(
       group_offset,
       transpose_rhs=not transpose_rhs,
       interpret=interpret,
-      lhs_quantize_dtype=lhs_quantize_dtype,
-      rhs_quantize_dtype=rhs_quantize_dtype,
+      lhs_quantize_dtype='e5m2',
+      rhs_quantize_dtype='e4m3',
       use_qwix_quantization=use_qwix_quantization,
   )
   grad_rhs = backend.tgmm(
@@ -114,8 +114,8 @@ def _gmm_bwd(
       group_offset,
       num_actual_groups,
       interpret=interpret,
-      lhs_quantize_dtype=lhs_quantize_dtype,
-      rhs_quantize_dtype=rhs_quantize_dtype,
+      lhs_quantize_dtype='e4m3',
+      rhs_quantize_dtype='e5m2',
       use_qwix_quantization=use_qwix_quantization,
   )
 
