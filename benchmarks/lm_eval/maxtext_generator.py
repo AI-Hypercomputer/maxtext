@@ -19,7 +19,7 @@ os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
 class LogProbs:
     tokens: List[int]
     token_logprobs: List[float]
-    top_logprobs: Optional[List[None]] = None  # placeholder for now
+    top_logprobs: Optional[List[None]] = None
     text_offset: List[int] = field(default_factory=list)
 
 @dataclass
@@ -332,7 +332,7 @@ if __name__ == "__main__":
 
     # Generation config
     max_tokens = 10           # counts ALL generated tokens (includes prefill's 1st token)
-    echo = False             # include prompt tokens in text/logprobs if True
+    echo = True             # include prompt tokens in text/logprobs if True
     want_logprobs = 1        # non-None triggers logprob collection; top_logprobs left None for now
 
     print(f"\n--- Starting Batch Generation for {len(prompts_to_run)} Prompts "

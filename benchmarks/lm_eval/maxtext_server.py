@@ -18,7 +18,7 @@ from benchmarks.lm_eval.maxtext_generator import MaxTextGenerator
 def get_maxtext_args_from_env() -> List[str]:
     return [
         "maxtext_server.py",
-        "MaxText/configs/base_gemma3_4b.yml",
+        "MaxText/configs/base_qwen3.yml",
     ]
 
 print("Starting server and initializing MaxTextGenerator...")
@@ -51,8 +51,8 @@ class CompletionRequest(BaseModel):
 
 class LogProbsPayload(BaseModel):
     tokens: List[str]
-    token_logprobs: List[float]
-    top_logprobs: Optional[List[Dict[str, float]]] = None
+    token_logprobs: List[Optional[float]]
+    top_logprobs: Optional[List[Optional[Dict[str, float]]]] = None
     text_offset: List[int]
 
 
@@ -120,18 +120,19 @@ def _normalize_prompts(prompt: Union[str, List[str], List[int], List[List[int]]]
 def _decode_token_id(token_id: int) -> str:
     return llm.tokenizer.decode([int(token_id)])
 
-def _finite_or_clamp(v: Optional[float]) -> float:
+def _finite_or_none(v: Optional[float]) -> Optional[float]:
     if v is None:
-        return -1e10
+        return None
     f = float(v)
-    return f if math.isfinite(f) else -1e10
+    return f if math.isfinite(f) else None
+
 
 def _to_openai_logprobs(lp_obj: Any, want_top: bool = True) -> Optional[LogProbsPayload]:
     if lp_obj is None:
         return None
 
     token_strings = [_decode_token_id(tid) for tid in lp_obj.tokens]
-    token_logprobs = [_finite_or_clamp(v) for v in lp_obj.token_logprobs]
+    token_logprobs = [_finite_or_none(v) for v in lp_obj.token_logprobs]
     text_offset = list(lp_obj.text_offset)
 
     # ensure equal lengths
@@ -140,10 +141,13 @@ def _to_openai_logprobs(lp_obj: Any, want_top: bool = True) -> Optional[LogProbs
     token_logprobs = token_logprobs[:L]
     text_offset = text_offset[:L]
 
-    top_logprobs = None
+    top_logprobs: Optional[List[Optional[Dict[str, float]]]] = None
     if want_top:
-        # Provide a dict per token with at least the chosen token → its logprob.
-        top_logprobs = [{tok: lp} for tok, lp in zip(token_strings, token_logprobs)]
+        # If lp is None for a position, top_logprobs[pos] must be None too.
+        top_logprobs = [
+            ({tok: lp} if lp is not None else None)
+            for tok, lp in zip(token_strings, token_logprobs)
+        ]
 
     return LogProbsPayload(
         tokens=token_strings,
@@ -151,6 +155,7 @@ def _to_openai_logprobs(lp_obj: Any, want_top: bool = True) -> Optional[LogProbs
         top_logprobs=top_logprobs,
         text_offset=text_offset,
     )
+
 
 def _count_tokens(s: str) -> int:
     try:
@@ -232,7 +237,8 @@ async def create_completion(request: CompletionRequest):
         item = completions[idx]
         if hasattr(item, "text"):
             text_out = item.text if isinstance(item.text, str) else str(item.text)
-            lp_payload = _to_openai_logprobs(getattr(item, "logprobs", None), want_top=(request.logprobs is not None))
+            want_top = (request.logprobs or 0) > 0
+            lp_payload = _to_openai_logprobs(getattr(item, "logprobs", None), want_top=want_top)
             finish_reason = getattr(item, "finish_reason", "stop")
         else:
             text_out = str(item)
