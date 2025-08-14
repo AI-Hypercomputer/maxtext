@@ -606,7 +606,7 @@ def gmm(
     if use_qwix_quantization:
       lhs = qpl.quantize(lhs, qtype=lhs_quantize_dtype, channelwise_axes=[0], scale_dtype=jnp.float32)
     else:
-      lhs_quantize_bits = 4 if lhs_quantize_dtype == jnp.int4 else 8
+      lhs_quantize_bits = 4 if lhs_quantize_dtype == jnp.int4 else 8 if lhs_quantize_dtype == jnp.int8 else lhs_quantize_dtype
       lhs = aqt_pl.quant(lhs, lhs_quantize_bits, lhs_contracting_axis)
 
   if rhs_quantize_dtype is not None:
@@ -616,8 +616,8 @@ def gmm(
           rhs, qtype=rhs_quantize_dtype, channelwise_axes=[0, 1 if transpose_rhs else 2], scale_dtype=jnp.float32
       )
     else:
-      rhs_quantize_bits = 4 if rhs_quantize_dtype == jnp.int4 else 8
-      rhs = aqt_pl.quant(rhs, rhs_quantize_bits, list(rhs_contracting_axis))
+      rhs_quantize_bits = 4 if rhs_quantize_dtype == jnp.int4 else 8 if lhs_quantize_dtype == jnp.int8 else rhs_quantize_dtype
+      rhs = aqt_pl.quant(rhs, rhs_quantize_bits)
 
   out = call_gmm(
       group_metadata,
@@ -791,10 +791,12 @@ def tgmm(
             jnp.zeros_like(rhs, jnp.float32),
         ).astype(input_dtype)
       is_quantized = (lhs_quantize_dtype or rhs_quantize_dtype) and use_qwix_quantization
-      dot = qpl.dot if is_quantized else lax.dot
-      acc_scratch[...] += dot(
+      # dot = qpl.dot if is_quantized else lax.dot
+      dot_general = qpl.dot_general if use_qwix_quantization and is_quantized else aqt_pl.dot_general if is_quantized else jax.lax.dot_general
+      acc_scratch[...] += dot_general(
           loaded_lhs,
           loaded_rhs,
+          (((lhs.ndim - 1,), (0,)), ((), ())),
           preferred_element_type=jnp.float32,
       )
 
@@ -879,10 +881,26 @@ def tgmm(
 
   if use_qwix_quantization and lhs_quantize_dtype is not None:
     lhs = qpl.quantize(lhs, qtype=lhs_quantize_dtype, scale_dtype=jnp.float32)
+  elif lhs_quantize_dtype is not None:
+    if lhs_quantize_dtype == jnp.int4:
+      lhs_quantize_bits = 4
+    elif lhs_quantize_dtype == jnp.int8:
+      lhs_quantize_bits = 8
+    else:
+      lhs_quantize_bits = lhs_quantize_dtype
+    lhs = aqt_pl.quant(lhs, lhs_quantize_bits, use_dummy_static_bound=True)
 
   if use_qwix_quantization and rhs_quantize_dtype is not None:
     # Use per-channel scales for non-contracting axes, i.e., num_groups, m, n but not k.
     rhs = qpl.quantize(rhs, qtype=rhs_quantize_dtype, scale_dtype=jnp.float32)
+  elif not isinstance(rhs, QTensor) and rhs_quantize_dtype is not None:
+    if rhs_quantize_dtype == jnp.int4:
+      rhs_quantize_bits = 4
+    elif rhs_quantize_dtype == jnp.int8:
+      rhs_quantize_bits = 8
+    else:
+      rhs_quantize_bits = rhs_quantize_dtype
+    rhs = aqt_pl.quant(rhs, rhs_quantize_bits, use_dummy_static_bound=True)
 
   out = call_gmm(
       group_metadata,
