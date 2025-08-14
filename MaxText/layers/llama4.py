@@ -27,7 +27,7 @@ from jax.sharding import Mesh
 
 from flax import linen as nn
 
-from MaxText.common_types import Config, Array, MODEL_MODE_TRAIN
+from MaxText.common_types import Config, Array, MODEL_MODE_TRAIN, AttentionType
 from MaxText.inference import page_manager
 from MaxText.layers import initializers
 from MaxText.layers.linears import mlp_block
@@ -35,7 +35,6 @@ from MaxText.layers import linears
 from MaxText.layers import moe
 from MaxText.layers import quantizations
 from MaxText.layers import attentions
-from MaxText.layers.attentions import AttentionType
 from MaxText.layers.quantizations import AqtQuantization as Quant
 from MaxText.layers.normalizations import rms_norm
 
@@ -638,7 +637,7 @@ class Llama4VisionEncoderLayer(nn.Module):
         mesh=self.mesh,
         dropout_rate=0,
         name="self_attention_vision",
-        attention_type=attentions.AttentionType.FULL,
+        attention_type=AttentionType.FULL,
         is_nope_layer=False,
         use_bias_in_projections=True,
         is_vision=True,

@@ -36,7 +36,7 @@ from MaxText.layers import initializers, nnx_wrappers
 from MaxText.layers.linears import mlp_block
 from MaxText.layers import models
 from MaxText.layers import quantizations
-from MaxText.layers.attentions import KVQuant, attention_op_as_linen
+from MaxText.layers.attention_op import KVQuant, attention_op_as_linen
 from MaxText.layers.initializers import Initializer, NdInitializer, nd_dense_init
 from MaxText.layers.linears import dense_general
 from MaxText.layers.quantizations import AqtQuantization as Quant
