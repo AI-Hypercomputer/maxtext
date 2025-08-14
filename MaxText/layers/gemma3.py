@@ -384,47 +384,101 @@ def mlp_block_vit_as_linen(x: jax.Array, block_id: int, input_dim: int, mlp_dim:
   return nnx.bridge.to_linen(MlpBlockViT, block_id=block_id, input_dim=input_dim, mlp_dim=mlp_dim, dropout=dropout, dtype_mm=dtype_mm, name=mlp_block_vit_name)(x, deterministic)
 
 
-class Encoder1DBlock(nn.Module):
+class Encoder1DBlock(nnx.Module):
   """Single transformer encoder block (MHSA + MLP)."""
 
-  block_id: int
-  dtype_mm: str
-  mlp_dim: int | None = None  # Defaults to 4x input dim
-  num_heads: int = 12
-  dropout: float = 0.0
+  def __init__(self, block_id: int, dtype_mm: str, mlp_dim: int | None = None, num_heads: int = 12, dropout: float = 0.0, rngs: nnx.Rngs = None):
+    self.block_id = block_id
+    self.dtype_mm = dtype_mm
+    self.mlp_dim = mlp_dim
+    self.num_heads = num_heads
+    self.dropout = dropout
+    self.rngs = rngs
 
-  @nn.compact
-  def __call__(self, x: jax.Array, deterministic: bool = True) -> jax.Array:
-    y = nn.LayerNorm()(x)
-
-    y = nn.MultiHeadDotProductAttention(
-        num_heads=self.num_heads,
-        kernel_init=nn.initializers.xavier_uniform(),
-        deterministic=deterministic,
+    self.LayerNorm_0 = nnx.LayerNorm(num_features=1152, rngs=self.rngs)
+    self.MultiHeadDotProductAttention_0 = nnx.MultiHeadAttention(
+        in_features=1152,
+        out_features=1152,
+        num_heads=num_heads,
         dtype=self.dtype_mm,
-    )(y, y)
-    y = nn.Dropout(rate=self.dropout)(y, deterministic)
-    x = x + y
-
-    y = nn.LayerNorm()(x)
-    # y = MlpBlockViT(
-    #     block_id=self.block_id,
-    #     mlp_dim=self.mlp_dim,
-    #     dropout=self.dropout,
-    #     dtype_mm=self.dtype_mm,
-    # )(y, deterministic)
-    y = mlp_block_vit_as_linen(
-      y,
+        kernel_init=nnx.initializers.xavier_uniform(),
+        rngs=self.rngs
+    )
+    self.LayerNorm_1 = nnx.LayerNorm(num_features=1152, rngs=self.rngs)
+    self.MlpBlockViT_0 = MlpBlockViT(
       block_id=self.block_id,
       input_dim=1152,
+      dtype_mm=self.dtype_mm,
       mlp_dim=self.mlp_dim,
       dropout=self.dropout,
-      dtype_mm=self.dtype_mm,
-      deterministic=deterministic
+      rngs=self.rngs,
     )
-    y = nn.Dropout(rate=self.dropout)(y, deterministic)
+    self.Dropout_0 = nnx.Dropout(self.dropout, rngs=self.rngs)
+
+  def __call__(self, x: jax.Array, deterministic: bool = True) -> jax.Array:
+    y = self.LayerNorm_0(x)
+
+    y = self.MultiHeadDotProductAttention_0(
+        inputs_q=y,
+        inputs_k=y,
+        inputs_v=y,
+        deterministic=deterministic,
+        decode=False,
+    )
+    y = self.Dropout_0(y, deterministic=deterministic)
+    x = x + y
+
+    y = self.LayerNorm_1(x)
+    y = self.MlpBlockViT_0(y, deterministic=deterministic)
+    y = self.Dropout_0(y, deterministic=deterministic)
     x = x + y
     return x
+
+
+def encoder1dblock_as_linen(x: jax.Array, block_id: int, dtype_mm: str, mlp_dim: int | None = None, num_heads: int = 12, dropout: float = 0.0, deterministic: bool = True) -> jax.Array:
+  return nnx.bridge.to_linen(Encoder1DBlock, block_id=block_id, dtype_mm=dtype_mm, mlp_dim=mlp_dim, num_heads=num_heads, dropout=dropout, name=f"encoderblock_{block_id}")(x, deterministic)
+
+# class Encoder1DBlock(nn.Module):
+#   """Single transformer encoder block (MHSA + MLP)."""
+
+#   block_id: int
+#   dtype_mm: str
+#   mlp_dim: int | None = None  # Defaults to 4x input dim
+#   num_heads: int = 12
+#   dropout: float = 0.0
+
+#   @nn.compact
+#   def __call__(self, x: jax.Array, deterministic: bool = True) -> jax.Array:
+#     y = nn.LayerNorm()(x)
+
+#     y = nn.MultiHeadDotProductAttention(
+#         num_heads=self.num_heads,
+#         kernel_init=nn.initializers.xavier_uniform(),
+#         deterministic=deterministic,
+#         dtype=self.dtype_mm,
+#     )(y, y)
+#     y = nn.Dropout(rate=self.dropout)(y, deterministic)
+#     x = x + y
+
+#     y = nn.LayerNorm()(x)
+#     # y = MlpBlockViT(
+#     #     block_id=self.block_id,
+#     #     mlp_dim=self.mlp_dim,
+#     #     dropout=self.dropout,
+#     #     dtype_mm=self.dtype_mm,
+#     # )(y, deterministic)
+#     y = mlp_block_vit_as_linen(
+#       y,
+#       block_id=self.block_id,
+#       input_dim=1152,
+#       mlp_dim=self.mlp_dim,
+#       dropout=self.dropout,
+#       dtype_mm=self.dtype_mm,
+#       deterministic=deterministic
+#     )
+#     y = nn.Dropout(rate=self.dropout)(y, deterministic)
+#     x = x + y
+#     return x
 
 
 class Encoder(nn.Module):
@@ -442,15 +496,7 @@ class Encoder(nn.Module):
   def __call__(self, x: jax.Array, deterministic: bool = True) -> jax.Array:
     # TODO(aireenmei, hengtaoguo): fix this branch to enable scan support for vision encoder
     for lyr in range(self.depth):
-      block_cur = Encoder1DBlock(
-          block_id=lyr,
-          name=f"encoderblock_{lyr}",
-          dtype_mm=self.dtype_mm,
-          mlp_dim=self.mlp_dim,
-          num_heads=self.num_heads,
-          dropout=self.dropout,
-      )
-      x = block_cur(x, deterministic)
+      x = encoder1dblock_as_linen(x, block_id=lyr, dtype_mm=self.dtype_mm, mlp_dim=self.mlp_dim, num_heads=self.num_heads, dropout=self.dropout, deterministic=deterministic)
     x = nn.LayerNorm(name="encoder_norm")(x)
     return x
 
