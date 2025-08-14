@@ -719,6 +719,7 @@ class RoutedMoE(nnx.Module):
             tiling=tiling,
             lhs_quantize_dtype=lhs_quantize_dtype,
             rhs_quantize_dtype=rhs_quantize_dtype,
+            use_qwix_quantization=self.config.use_qwix_quantization,
         )
       else:
         rhs_inputs = kernel

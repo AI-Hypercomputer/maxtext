@@ -18,7 +18,7 @@ base_emb_dim: 2048
 base_num_query_heads: 16
 base_num_kv_heads: 16
 base_mlp_dim: 10944
-base_moe_mlp_dim: 1408
+base_moe_mlp_dim: 2048
 base_num_decoder_layers: 27
 first_num_dense_layers: 1
 mlp_activations: ["silu","linear"]
