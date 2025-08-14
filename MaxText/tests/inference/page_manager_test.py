@@ -22,13 +22,14 @@ import jax
 import jax.numpy as jnp
 
 from MaxText import pyconfig
-from MaxText.globals import PKG_DIR
+from MaxText.globals import PKG_DIR, tpu_present, gpu_present
 from MaxText.inference.page_manager import PageManager, PageState
 
 
 class TestPageManager(unittest.TestCase):
   """Test page manager."""
 
+  @unittest.skipIf(not tpu_present and not gpu_present, "TPU | GPU presence required")
   def setUp(self):
     super().setUp()
     self.num_pages = 128

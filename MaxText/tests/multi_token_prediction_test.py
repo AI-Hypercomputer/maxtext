@@ -24,7 +24,7 @@ from flax import linen as nn
 from MaxText.common_types import Config
 from MaxText import max_logging, pyconfig
 from MaxText import maxtext_utils
-from MaxText.globals import PKG_DIR
+from MaxText.globals import PKG_DIR, tpu_present, gpu_present
 from MaxText.layers.decoders import Decoder, DecoderLayer
 from MaxText.layers import multi_token_prediction  # The class under test
 from MaxText.layers import embeddings
@@ -82,6 +82,7 @@ class MultiTokenPredictionLayerTest(unittest.TestCase):
     )
     max_logging.log("Setup complete.")
 
+  @unittest.skipIf(not tpu_present and not gpu_present, "TPU|GPU only test")
   def test_multi_token_prediction_layer_output(self):
     """Tests the basic forward pass and output shape of MultiTokenPredictionLayer."""
 

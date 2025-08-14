@@ -30,6 +30,7 @@ from MaxText import pyconfig
 from MaxText.globals import PKG_DIR
 from MaxText.input_pipeline import _tfds_data_processing
 from MaxText.input_pipeline import input_pipeline_interface
+from MaxText.max_utils import gcs_bucket_accessible
 
 
 class TfdsDataProcessingTest(unittest.TestCase):
@@ -64,6 +65,8 @@ class TfdsDataProcessingTest(unittest.TestCase):
         shuffle_seed=self.config.data_shuffle_seed,
     )
     self.read_config.add_tfds_id = True
+    if not gcs_bucket_accessible("max-experiments"):
+      return
     self.train_ds = self._get_datasets()
     self.train_iter = _tfds_data_processing.make_tfds_train_iterator(self.config, self.mesh, self.process_indices)
     self.eval_iter = _tfds_data_processing.make_tfds_eval_iterator(self.config, self.mesh, self.process_indices)
@@ -78,6 +81,7 @@ class TfdsDataProcessingTest(unittest.TestCase):
 
     return ds
 
+  @unittest.skipIf(not gcs_bucket_accessible("max-experiments"), "gs://max-experiments bucket not accessible")
   def test_train_ds(self):
     expected_shape = [jax.device_count(), self.config.max_target_length]
     # For training we pack multiple short examples in one example.
@@ -95,6 +99,7 @@ class TfdsDataProcessingTest(unittest.TestCase):
         },
     )
 
+  @unittest.skipIf(not gcs_bucket_accessible("max-experiments"), "gs://max-experiments bucket not accessible")
   def test_ds_determinism(self):
     train_ds1 = self.train_ds.batch(64)
     train_ds1 = next(train_ds1.as_numpy_iterator())
@@ -105,6 +110,7 @@ class TfdsDataProcessingTest(unittest.TestCase):
 
     self.assertCountEqual(train_ds1["tfds_id"], train_ds2["tfds_id"])
 
+  @unittest.skipIf(not gcs_bucket_accessible("max-experiments"), "gs://max-experiments bucket not accessible")
   def test_batch_determinism(self):
     batch1 = next(self.train_iter)
     train_iter = _tfds_data_processing.make_tfds_train_iterator(self.config, self.mesh, self.process_indices)
@@ -116,6 +122,7 @@ class TfdsDataProcessingTest(unittest.TestCase):
     self.assertTrue(tf.reduce_all(tf.equal(batch1["inputs_position"], batch2["inputs_position"])))
     self.assertTrue(tf.reduce_all(tf.equal(batch1["targets_position"], batch2["targets_position"])))
 
+  @unittest.skipIf(not gcs_bucket_accessible("max-experiments"), "gs://max-experiments bucket not accessible")
   def test_for_loop_repeatable(self):
     def get_first_batch(iterator):
       batch = None
