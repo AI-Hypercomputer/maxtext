@@ -21,22 +21,21 @@ import jax.numpy as jnp
 
 from flax import linen as nn
 
-from MaxText.common_types import Config
-from MaxText.layers import attentions
+from MaxText.common_types import Config, AttentionType
 from MaxText.layers import quantizations
-from MaxText.layers.attentions import AttentionType, attention_as_linen
+from MaxText.layers.attentions import attention_as_linen
 from MaxText.layers.linears import mlp_block
 from MaxText.layers.normalizations import rms_norm
 from MaxText.layers.quantizations import AqtQuantization as Quant
 
 
 GEMMA3_ATTENTION_PATTERN = (
-    attentions.AttentionType.LOCAL_SLIDING,
-    attentions.AttentionType.LOCAL_SLIDING,
-    attentions.AttentionType.LOCAL_SLIDING,
-    attentions.AttentionType.LOCAL_SLIDING,
-    attentions.AttentionType.LOCAL_SLIDING,
-    attentions.AttentionType.GLOBAL,
+    AttentionType.LOCAL_SLIDING,
+    AttentionType.LOCAL_SLIDING,
+    AttentionType.LOCAL_SLIDING,
+    AttentionType.LOCAL_SLIDING,
+    AttentionType.LOCAL_SLIDING,
+    AttentionType.GLOBAL,
 )
 
 

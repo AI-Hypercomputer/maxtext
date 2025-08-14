@@ -25,7 +25,7 @@ import jax.numpy as jnp
 
 from flax import linen as nn
 
-from MaxText.layers import attentions
+from MaxText.layers import attention_mla
 from MaxText.layers import initializers
 from MaxText.layers import linears
 from MaxText.common_types import Config
@@ -72,7 +72,7 @@ def self_attention_with_norm(
 
   lnx = nn.with_logical_constraint(lnx, logical_axis_names)
 
-  attention_layer = attentions.mla_as_linen(
+  attention_layer = attention_mla.mla_as_linen(
       config=cfg,
       num_query_heads=cfg.num_query_heads,
       num_kv_heads=cfg.num_kv_heads,
