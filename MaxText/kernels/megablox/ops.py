@@ -52,7 +52,7 @@ def _gmm_fwd(
         jnp.ndarray,
         jnp.ndarray | None,
         int,
-i    ],
+    ],
 ]:
   """Forward function for GMM VJP."""
   out = backend.gmm(

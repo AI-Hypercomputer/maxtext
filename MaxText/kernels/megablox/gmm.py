@@ -764,6 +764,14 @@ def tgmm(
             jnp.zeros_like(lhs.qvalue, lhs.qvalue.dtype),
         ).swapaxes(0, 1)
         loaded_lhs = dataclasses.replace(loaded_lhs, qvalue=qvalue)
+      elif isinstance(lhs, QTensor):
+	qvalue = lax.select(
+            lhs_mask[...],
+            lhs.qvalue[...].astype(jnp.float32),
+            jnp.zeros_like(lhs, jnp.float32),
+        ).swapaxes(0, 1)
+        loaded_lhs = dataclasses.replace(lhs, qvalue=qvalue)
+        loaded_lhs = aqt_pl.load_qtensor(loaded_lhs)
       else:
         loaded_lhs = lhs[...]
         loaded_lhs = (
@@ -772,7 +780,6 @@ def tgmm(
                 loaded_lhs.astype(jnp.float32),
                 jnp.zeros_like(lhs, jnp.float32),
             )
-            .astype(input_dtype)
             .swapaxes(0, 1)
         )
       if use_qwix_quantization and isinstance(rhs, QArray):
@@ -783,14 +790,22 @@ def tgmm(
             jnp.zeros_like(rhs.qvalue, lhs.qvalue.dtype),
         )
         loaded_rhs = dataclasses.replace(loaded_rhs, qvalue=qvalue)
+      elif isinstance(rhs, QTensor):
+	qvalue = lax.select(
+            rhs_mask[...],
+            rhs.qvalue[...].astype(jnp.float32),
+            jnp.zeros_like(lhs, jnp.float32),
+        )
+        loaded_rhs = dataclasses.replace(rhs, qvalue=qvalue)
+        loaded_rhs = aqt_pl.load_qtensor(loaded_rhs)
       else:
         loaded_rhs = rhs[...]
         loaded_rhs = lax.select(
             rhs_mask[...],
             loaded_rhs.astype(jnp.float32),
             jnp.zeros_like(rhs, jnp.float32),
-        ).astype(input_dtype)
-      is_quantized = (lhs_quantize_dtype or rhs_quantize_dtype) and use_qwix_quantization
+        )
+      is_quantized = (lhs_quantize_dtype or rhs_quantize_dtype)
       # dot = qpl.dot if is_quantized else lax.dot
       dot_general = qpl.dot_general if use_qwix_quantization and is_quantized else aqt_pl.dot_general if is_quantized else jax.lax.dot_general
       acc_scratch[...] += dot_general(
