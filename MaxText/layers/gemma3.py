@@ -294,29 +294,94 @@ def _posemb_sincos_2d(
   return jnp.asarray(pe, dtype)[None, :, :]
 
 
-class MlpBlockViT(nn.Module):
-  """Transformer MLP / feed-forward block."""
+# class MlpBlockViT(nn.Module):
+#   """Transformer MLP / feed-forward block."""
 
-  block_id: int
-  dtype_mm: str
-  mlp_dim: int | None = None  # Defaults to 4x input dim
-  dropout: float = 0.0
+#   block_id: int
+#   dtype_mm: str
+#   mlp_dim: int | None = None  # Defaults to 4x input dim
+#   dropout: float = 0.0
 
-  @nn.compact
-  def __call__(self, x: jax.Array, deterministic: bool = True) -> jax.Array:
-    """Applies Transformer MlpBlock module."""
-    inits = {"kernel_init": nn.initializers.xavier_uniform(), "bias_init": nn.initializers.normal(stddev=1e-6)}
+#   @nn.compact
+#   def __call__(self, x: jax.Array, deterministic: bool = True) -> jax.Array:
+#     """Applies Transformer MlpBlock module."""
+#     inits = {"kernel_init": nn.initializers.xavier_uniform(), "bias_init": nn.initializers.normal(stddev=1e-6)}
 
-    d = x.shape[-1]
-    x = nn.Dense(features=self.mlp_dim or 4 * d, dtype=self.dtype_mm, **inits)(x)
-    x = nn.gelu(x)
-    x = nn.Dropout(rate=self.dropout)(x, deterministic)
-    x = nn.Dense(
-        features=d,
-        dtype=self.dtype_mm,
+#     d = x.shape[-1]
+#     x = nn.Dense(features=self.mlp_dim or 4 * d, dtype=self.dtype_mm, **inits)(x)
+#     x = nn.gelu(x)
+#     x = nn.Dropout(rate=self.dropout)(x, deterministic)
+#     x = nn.Dense(
+#         features=d,
+#         dtype=self.dtype_mm,
+#         **inits,
+#     )(x)
+#     return x
+
+
+class MlpBlockViT(nnx.Module):
+  """NNX version of Transformer MLP / feed-forward block."""
+
+  def __init__(
+      self,
+      block_id: int,
+      dtype_mm: jnp.dtype,
+      input_dim: int,
+      mlp_dim: int | None,
+      dropout: float = 0.0,
+      *,
+      rngs: nnx.Rngs = None,
+  ):
+    """
+    Initializes the MlpBlockViT module.
+
+    Args:
+      input_dim: The dimension of the input features.
+      mlp_dim: The dimension of the mlp on hidden layer. Defaults to 4x input_dim.
+      dropout: The dropout rate.
+      dtype_mm: The data type for matrix multiplications.
+      rngs: The random number generators for initialization.
+    """
+    self.block_id = block_id
+    # Set the hidden dimension, defaulting to 4x the input dimension
+    hidden_dim = mlp_dim
+    
+    # Define initializers for the linear layers
+    inits = {
+        "kernel_init": nnx.initializers.xavier_uniform(),
+        "bias_init": nnx.initializers.normal(stddev=1e-6),
+    }
+
+    # As requested, layers are named explicitly. Note: nn.Dense becomes nnx.Linear.
+    self.Dense_0 = nnx.Linear(
+        in_features=input_dim,
+        out_features=hidden_dim,
+        dtype=dtype_mm,
         **inits,
-    )(x)
+        rngs=rngs,
+    )
+    self.Dropout_0 = nnx.Dropout(rate=dropout)
+    self.Dense_1 = nnx.Linear(
+        in_features=hidden_dim,
+        out_features=input_dim,
+        dtype=dtype_mm,
+        **inits,
+        rngs=rngs,
+    )
+
+  def __call__(self, x: jax.Array, deterministic: bool = True) -> jax.Array:
+    """Applies the Transformer MlpBlock module."""
+    x = self.Dense_0(x)
+    x = nnx.gelu(x)
+    # The 'dropout' RNG stream is used by default if rngs is not None
+    x = self.Dropout_0(x, deterministic=deterministic)
+    x = self.Dense_1(x)
     return x
+
+
+def mlp_block_vit_as_linen(x: jax.Array, block_id: int, input_dim: int, mlp_dim: int | None, dropout: float, dtype_mm: jnp.dtype, deterministic: bool = True):
+  mlp_block_vit_name = "MlpBlockViT_0"
+  return nnx.bridge.to_linen(MlpBlockViT, block_id=block_id, input_dim=input_dim, mlp_dim=mlp_dim, dropout=dropout, dtype_mm=dtype_mm, name=mlp_block_vit_name)(x, deterministic)
 
 
 class Encoder1DBlock(nn.Module):
@@ -342,12 +407,21 @@ class Encoder1DBlock(nn.Module):
     x = x + y
 
     y = nn.LayerNorm()(x)
-    y = MlpBlockViT(
-        block_id=self.block_id,
-        mlp_dim=self.mlp_dim,
-        dropout=self.dropout,
-        dtype_mm=self.dtype_mm,
-    )(y, deterministic)
+    # y = MlpBlockViT(
+    #     block_id=self.block_id,
+    #     mlp_dim=self.mlp_dim,
+    #     dropout=self.dropout,
+    #     dtype_mm=self.dtype_mm,
+    # )(y, deterministic)
+    y = mlp_block_vit_as_linen(
+      y,
+      block_id=self.block_id,
+      input_dim=1152,
+      mlp_dim=self.mlp_dim,
+      dropout=self.dropout,
+      dtype_mm=self.dtype_mm,
+      deterministic=deterministic
+    )
     y = nn.Dropout(rate=self.dropout)(y, deterministic)
     x = x + y
     return x
