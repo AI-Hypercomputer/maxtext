@@ -532,6 +532,32 @@ def to_linen_class(
 ) -> type[ToLinen]:
   """Dynamically wraps an NNX module class into a Flax Linen module class."""
 
+  def __init__(
+      self,
+      args=None,
+      kwargs=None,
+      nnx_class=None,
+      skip_rng=None,
+      metadata_fn=None,
+      name=_MISSING,
+      parent=_MISSING,
+      **other_kwargs,
+  ):
+    linen_kwargs = {}
+    if not isinstance(parent, _Missing):
+      linen_kwargs["parent"] = parent
+    if not isinstance(name, _Missing):
+      linen_kwargs["name"] = name
+    ToLinen.__init__(
+      self,
+      nnx_class=nnx_class or base_nnx_class,
+      args=args or (),
+      metadata_fn=metadata_fn or base_metadata_fn,
+      skip_rng=skip_rng or base_skip_rng,
+      kwargs=FrozenDict({**partial_kwargs, **(kwargs or {}), **other_kwargs}),
+      **linen_kwargs,
+    )
+
   class ToLinenPartial(ToLinen):
     """A dynamically created Linen Module that wraps a specific NNX Module.
 
@@ -566,32 +592,8 @@ def to_linen_class(
 
     def __init_subclass__(cls, **kwargs):
       super().__init_subclass__(**kwargs)
-
-      def __init__(self,
-                   args=None,
-                   kwargs=None,
-                   nnx_class=None,
-                   skip_rng=None,
-                   metadata_fn=None,
-                   name=_MISSING,
-                   parent=_MISSING,
-                   **other_kwargs,
-      ):
-        linen_kwargs = {}
-        if not isinstance(parent, _Missing):
-          linen_kwargs["parent"] = parent
-        if not isinstance(name, _Missing):
-          linen_kwargs["name"] = name
-        ToLinen.__init__(
-          self,
-          nnx_class=nnx_class or base_nnx_class,
-          args=args or (),
-          metadata_fn=metadata_fn or base_metadata_fn,
-          skip_rng=skip_rng or base_skip_rng,
-          kwargs=FrozenDict({**partial_kwargs, **(kwargs or {}), **other_kwargs}),
-          **linen_kwargs,
-        )
-
       cls.__init__ = __init__
+
+  ToLinenPartial.__init__ = __init__
 
   return ToLinenPartial
