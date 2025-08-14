@@ -20,6 +20,12 @@ model_name: "default" # override config settings to match a specific model. othe
 override_model_config: False # When set to true allows overriding model parameters via CLI for the purpose of debugging/testing.
 normalization_layer_epsilon: 1.e-05
 
+# Temporary flag to determine whether to use NNX implementation for certain modules.
+# This flag mainly targets modules at the decoder layer of the pytree and higher.
+# Modules below that will be NNX regardless.
+# TODO: Remove this flag when NNX inference memory is optimized
+enable_nnx: False
+
 ################################## CHECKPOINTING ##################################
 # Checkpointing makes the following choices in the following order, starting with (1):
 #   (1) If there is already a checkpoint for this run_name, we load the latest entire checkpoint.
