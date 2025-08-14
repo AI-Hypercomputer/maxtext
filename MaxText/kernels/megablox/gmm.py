@@ -765,7 +765,7 @@ def tgmm(
         ).swapaxes(0, 1)
         loaded_lhs = dataclasses.replace(loaded_lhs, qvalue=qvalue)
       elif isinstance(lhs, QTensor):
-	qvalue = lax.select(
+        qvalue = lax.select(
             lhs_mask[...],
             lhs.qvalue[...].astype(jnp.float32),
             jnp.zeros_like(lhs, jnp.float32),
@@ -791,7 +791,7 @@ def tgmm(
         )
         loaded_rhs = dataclasses.replace(loaded_rhs, qvalue=qvalue)
       elif isinstance(rhs, QTensor):
-	qvalue = lax.select(
+        qvalue = lax.select(
             rhs_mask[...],
             rhs.qvalue[...].astype(jnp.float32),
             jnp.zeros_like(lhs, jnp.float32),
@@ -872,6 +872,8 @@ def tgmm(
   lhs = lhs.swapaxes(0, 1)
   if use_qwix_quantization and (lhs_quantize_dtype is not None or rhs_quantize_dtype is not None):
     pallas_call_fn = qpl.pallas_call
+  elif lhs_quantize_dtype is not None or rhs_quantize_dtype is not None:
+    pallas_call_fn = aqt_pl.pallas_call
   else:
     pallas_call_fn = pl.pallas_call
   call_gmm = pallas_call_fn(
