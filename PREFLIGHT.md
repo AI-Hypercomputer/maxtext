@@ -7,12 +7,12 @@ Before you run ML workload on Multihost with GCE or GKE, simply apply `bash pref
 
 Here is an example for GCE:
 ```
-bash preflight.sh PLATFORM=GCE && python3 -m MaxText.train MaxText/configs/base.yml run_name=$YOUR_JOB_NAME
+bash preflight.sh PLATFORM=GCE && python3 -m MaxText.train src/MaxText/configs/base.yml run_name=$YOUR_JOB_NAME
 ```
 
 Here is an example for GKE:
 ```
-bash preflight.sh PLATFORM=GKE && python3 -m MaxText.train MaxText/configs/base.yml run_name=$YOUR_JOB_NAME
+bash preflight.sh PLATFORM=GKE && python3 -m MaxText.train src/MaxText/configs/base.yml run_name=$YOUR_JOB_NAME
 ```
 
 # Optimization 2: Numa binding (You can only apply this to v4 and v5p)
@@ -22,14 +22,14 @@ For GCE,
 [preflight.sh](https://github.com/google/maxtext/blob/main/preflight.sh) will help you install `numactl` dependency, so you can use it directly, here is an example:
 
 ```
-bash preflight.sh PLATFORM=GCE && numactl --membind 0 --cpunodebind=0 python3 -m MaxText.train MaxText/configs/base.yml run_name=$YOUR_JOB_NAME
+bash preflight.sh PLATFORM=GCE && numactl --membind 0 --cpunodebind=0 python3 -m MaxText.train src/MaxText/configs/base.yml run_name=$YOUR_JOB_NAME
 ```
 
 For GKE,
 `numactl` should be built into your docker image from [maxtext_dependencies.Dockerfile](https://github.com/google/maxtext/blob/main/maxtext_dependencies.Dockerfile), so you can use it directly if you built the maxtext docker image. Here is an example
 
 ```
-bash preflight.sh PLATFORM=GKE && numactl --membind 0 --cpunodebind=0 python3 -m MaxText.train MaxText/configs/base.yml run_name=$YOUR_JOB_NAME
+bash preflight.sh PLATFORM=GKE && numactl --membind 0 --cpunodebind=0 python3 -m MaxText.train src/MaxText/configs/base.yml run_name=$YOUR_JOB_NAME
 ```
 
 1. `numactl`: This is the command-line tool used for controlling NUMA policy for processes or shared memory. It's particularly useful on multi-socket systems where memory locality can impact performance.

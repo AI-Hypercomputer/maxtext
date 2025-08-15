@@ -53,7 +53,7 @@ then
         hf_eval_files=$DATASET_PATH/hf/c4/c4-validation-*.parquet "
 fi
 
-TRAIN_CMD="python3 -m MaxText.train MaxText/configs/base.yml \
+TRAIN_CMD="python3 -m MaxText.train src/MaxText/configs/base.yml \
         steps=$STEPS eval_steps=$EVAL_STEPS eval_interval=2 \
         per_device_batch_size=8.0 learning_rate=3e-4 enable_checkpointing=false \
         max_target_length=2048 global_parameter_scale=1 \

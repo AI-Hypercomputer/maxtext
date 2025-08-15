@@ -33,7 +33,7 @@ export BASE_OUTPUT_DIRECTORY=gs://runner-maxtext-logs
 
 # Run fine-tuning with MTP enabled
 # We add `mtp_num_layers=1` and `mtp_loss_scaling_factor=0.1` to activate the MTP block.
-python3 -m MaxText.train MaxText/configs/base.yml \
+python3 -m MaxText.train src/MaxText/configs/base.yml \
     base_output_directory=${BASE_OUTPUT_DIRECTORY} \
     dataset_path=${DATASET_PATH} \
     load_parameters_path=${CONVERTED_CHECKPOINT} \

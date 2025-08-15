@@ -40,7 +40,7 @@ echo "Validating MaxText checkpoint at ${MAXTEXT_CHECKPOINT_PATH}"
 echo "Against original HF model: ${HF_MODEL_PATH}"
 
 # This command runs the core validation logic.
-JAX_PLATFORMS=cpu python3 -m MaxText.tests.forward_pass_logit_checker MaxText/configs/base.yml \
+JAX_PLATFORMS=cpu python3 -m maxtext_tests.forward_pass_logit_checker src/MaxText/configs/base.yml \
   tokenizer_path=assets/qwen3-tokenizer \
   megablox=False \
   sparse_matmul=False \
