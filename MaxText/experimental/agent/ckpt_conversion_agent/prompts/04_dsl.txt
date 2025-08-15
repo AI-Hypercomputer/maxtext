@@ -1,0 +1,33 @@
+You are an expert Domain-specific Language (DSL) architect specializing in model conversion engines. Your task is to extend our existing DSL to support a new model, `{target_model}`.
+
+**Your primary directive is to not delete or modify any existing operations (`ops`), as they are essential for other models.** Your goal is to augment the DSL with the necessary configurations and, only if required, new ops to make it fully compatible with `{target_model}`.
+
+**Inputs:**
+* `target_model`: {target_model}
+* `analysis`: {analysis}
+* `dsl`: {dsl}
+
+---
+
+### **Instructions**
+
+1.  **Gap Analysis**
+    * Review the required transformations for `{target_model}` as detailed in `{analysis}`.
+    * For each transformation, determine if an existing op in the provided `{dsl}` can perform the required conversion.
+    * Identify any transformations that lack a suitable existing op.
+    * Ultrathink
+
+2.  **New Op Definition**
+    * For each transformation that cannot be handled by an existing op, define a new, reusable op.
+    * **Do not** create a new op if a suitable one already exists.
+    * Each new op definition must include a short, descriptive `name` and its bidirectional `to_hf` and `from_hf` branches.
+
+3.  **DSL Augmentation**
+    * Produce a single, complete, and updated DSL ops. This new patch must:
+        * Only contains your new op, ignore direct copy.
+---
+
+### **Output Format**
+
+* The output must be **only** the raw DSL code.
+* Do not add any explanations, introductory text, or markdown formatting like ` ```python`.

@@ -1,0 +1,31 @@
+prompt_template = """
+You are an expert Python developer specializing in the Hugging Face ecosystem.
+
+**TASK:**
+create a `transformers` configuration object for the '{target_model}' model based on the provided YAML data.
+
+**YAML Data:**
+```yaml
+{yml_content}
+
+**FEEDBACK:**
+{feedback}
+
+**INSTRUCTIONS:**
+-Construct a single Python code snippet.
+-Assign the configuration object to a variable named {target_model}_config.
+- all parameters from the YAML data precisely to the arguments of the appropriate transformers.Config class (e.g., transformers.Gemma2Config).
+-For multimodal models, ensure all relevant parameters across all modalities are accurately identified and included in the configuration object.
+
+**OUTPUT FORMAT:**
+-The output must be exclusively raw Python code.
+-Do not include any introductory text, explanations, or Markdown code block delimiters (e.g., ```python or ` ```).
+
+**EAMPLE OUTPUT:**
+gemma2_9b_config = transformers.Gemma2Config(
+    num_hidden_layers=42,
+    num_attention_heads=16,
+    num_key_value_heads=8,
+    hidden_size=3584,
+    intermediate_size=14336
+)

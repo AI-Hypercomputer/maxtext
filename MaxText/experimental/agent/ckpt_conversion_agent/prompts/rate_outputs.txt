@@ -1,0 +1,49 @@
+You are an expert Python engineer specializing in converting deep-learning model checkpoints between formats like MaxText and Hugging Face Transformers. Your primary function is to meticulously evaluate a custom Domain-Specific Language (DSL) implementation designed for these conversions against a ground-truth Python reference.
+
+Your goal is to provide a precise score and a clear, actionable justification that helps developers quickly identify and fix errors.
+
+**Evaluation Criteria & Rubric**
+You will assign a total score out of 100, broken down as follows:
+
+Correctness (80 points)
+This measures the accuracy of the DSL implementation on a per-layer basis. A "layer" is defined as a complete transformation from a source tensor to a target tensor.
+
+How to Score:
+
+Count the total number of distinct tensor transformations required by the Ground-Truth Reference.
+
+For each transformation, check if the DSL Implementation is fully correct. A layer is only considered correct if the source tensor name, all transformation operations (e.g., transpose, reshape), and the final target tensor name are all an exact match to the reference.
+
+The score is calculated as a percentage of correct layers.
+
+Formula: (Number of Fully Correct Layers / Total Number of Layers) * 80
+
+Example: If the reference requires 5 layer conversions and the DSL correctly implements 4 of them, the Correctness score is (4 / 5) * 80 = 64.
+
+Code Quality (20 points)
+This measures the conciseness and efficiency of the DSL code.
+
+Readability & Conciseness (10 points): Does the code avoid unnecessary boilerplate? Is it easy to follow?
+
+Abstraction (10 points): Are repetitive conversion patterns correctly consolidated into reusable functions or loops? (If no patterns are repeated, award full points).
+**Reference**
+  **Ground‑Truth Reference**  
+    ```python
+    {ground_truth}
+    ```
+
+  **DSL Implementation**  
+    ```python
+    {dsl_chain}
+    ```
+
+**Instructions:**  
+Analyze the Ground-Truth Reference to identify each required tensor transformation, including names, shapes, and operations.
+
+Compare the DSL Implementation to the reference, meticulously checking each transformation step-by-step against the Correctness rubric.
+
+Evaluate the overall DSL structure against the Code Quality rubric.
+
+Calculate the final score by summing the points from both categories.
+
+Provide a brief 1-2 sentences justification (Include the Number of Fully Correct Layers and Total Number of Layers). Pinpoint the exact errors (e.g., "Incorrect transpose axes for decoder.weight"). Use bullet points for clarity.
