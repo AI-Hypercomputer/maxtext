@@ -481,24 +481,65 @@ def encoder1dblock_as_linen(x: jax.Array, block_id: int, dtype_mm: str, mlp_dim:
 #     return x
 
 
-class Encoder(nn.Module):
+# class Encoder(nn.Module):
+#   """Transformer Model Encoder for sequence to sequence translation."""
+
+#   depth: int
+#   dtype_mm: str
+#   remat_policy: str
+#   mlp_dim: int | None = None  # Defaults to 4x input dim
+#   num_heads: int = 12
+#   dropout: float = 0.0
+#   scan: bool = False
+
+#   @nn.compact
+#   def __call__(self, x: jax.Array, deterministic: bool = True) -> jax.Array:
+#     # TODO(aireenmei, hengtaoguo): fix this branch to enable scan support for vision encoder
+#     for lyr in range(self.depth):
+#       x = encoder1dblock_as_linen(x, block_id=lyr, dtype_mm=self.dtype_mm, mlp_dim=self.mlp_dim, num_heads=self.num_heads, dropout=self.dropout, deterministic=deterministic)
+#     x = nn.LayerNorm(name="encoder_norm")(x)
+#     return x
+
+
+class Encoder(nnx.Module):
   """Transformer Model Encoder for sequence to sequence translation."""
 
-  depth: int
-  dtype_mm: str
-  remat_policy: str
-  mlp_dim: int | None = None  # Defaults to 4x input dim
-  num_heads: int = 12
-  dropout: float = 0.0
-  scan: bool = False
+  def __init__(self, depth: int, dtype_mm: str, remat_policy: str, mlp_dim: int | None = None, num_heads: int = 12, dropout: float = 0.0, scan: bool = False, *, rngs: nnx.Rngs = None):
 
-  @nn.compact
+    self.depth = depth
+    self.dtype_mm = dtype_mm
+    self.remat_policy = remat_policy
+    self.mlp_dim = mlp_dim
+    self.num_heads = num_heads
+    self.dropout = dropout
+    self.scan = scan
+    self.rngs = rngs
+
+    for lyr in range(self.depth):
+      layer_name = f"encoderblock_{lyr}"
+      layer = Encoder1DBlock(
+          block_id=lyr,
+          dtype_mm=self.dtype_mm,
+          mlp_dim=self.mlp_dim,
+          num_heads=self.num_heads,
+          dropout=self.dropout,
+          rngs=self.rngs
+      )
+      setattr(self, layer_name, layer)
+    self.encoder_norm = nnx.LayerNorm(num_features=1152, rngs=self.rngs)
+
   def __call__(self, x: jax.Array, deterministic: bool = True) -> jax.Array:
     # TODO(aireenmei, hengtaoguo): fix this branch to enable scan support for vision encoder
     for lyr in range(self.depth):
-      x = encoder1dblock_as_linen(x, block_id=lyr, dtype_mm=self.dtype_mm, mlp_dim=self.mlp_dim, num_heads=self.num_heads, dropout=self.dropout, deterministic=deterministic)
-    x = nn.LayerNorm(name="encoder_norm")(x)
+      x = getattr(self, f"encoderblock_{lyr}")(x, deterministic=deterministic)
+    x = self.encoder_norm(x)
     return x
+
+
+def encoder_as_linen(x: jax.Array, depth: int, dtype_mm: str, remat_policy: str, mlp_dim: int | None, num_heads: int, dropout: float, scan: bool, rngs: nnx.Rngs = None) -> jax.Array:
+  """A wrapper to use Encoder as a function."""
+  layername = "Transformer"
+  return nnx.bridge.to_linen(Encoder, depth=depth, dtype_mm=dtype_mm, remat_policy=remat_policy, mlp_dim=mlp_dim, num_heads=num_heads, dropout=dropout, scan=scan, rngs=rngs, name=layername)(x)
 
 
 class Einsum(nn.Module):
@@ -646,7 +687,8 @@ class Gemma3VisionEncoderLayer(nn.Module):
     x = nn.Dropout(rate=self.dropout)(x, not train)
 
     # Transformer encoder to extract image features.
-    x = Encoder(
+    x = encoder_as_linen(
+        x=x,
         depth=self.depth,
         mlp_dim=self.mlp_dim,
         num_heads=self.num_heads,
@@ -654,11 +696,108 @@ class Gemma3VisionEncoderLayer(nn.Module):
         scan=False,  # TODO(aireenmei, hengtaoguo): support scan in vision encoder
         remat_policy=cfg.remat_policy_for_vit,
         dtype_mm=cfg.dtype_mm,
-        name="Transformer",
-    )(x, deterministic=deterministic)
+    )
 
     # Gemma3 use a vision exit layer to downsample the soft tokens to a required output length.
     x = vision_exit_as_linen(x, output_length=256)
     bn, l, c = x.shape
     x = jnp.reshape(x, [b, n, l, c])
     return x
+
+
+# class Gemma3VisionEncoderLayer(nn.Module):
+#   """gemma 3 vision encoder layer"""
+
+#   config: Config
+#   mesh: Mesh
+#   patch_size: tuple[int, int] = (14, 14)
+#   width: int = 1152
+#   mlp_dim: int | None = 4304  # Defaults to 4x input dim
+#   depth: int = 27
+#   num_heads: int = 16
+#   posemb: str = "learn"  # Can also be "sincos2d"
+#   dropout: float = 0.0
+#   # or "dots_with_no_batch_dims_saveable" for more speed (memory costly)
+
+#   def _get_posemb(
+#       self,
+#       typ: str,
+#       *,
+#       seqshape: tuple[int, int],
+#       width: int,
+#       name: str,
+#       dtype: jnp.dtype = jnp.float32,
+#   ):
+#     """Returns the position embedding."""
+#     if typ == "learn":
+#       shape_product = seqshape[0] * seqshape[1]
+#       return self.param(
+#           name,
+#           nn.initializers.normal(stddev=1 / (width**0.5)),
+#           (1, shape_product, width),
+#           dtype,
+#       )
+#     elif typ == "sincos2d":
+#       return _posemb_sincos_2d(*seqshape, width=width, dtype=dtype)
+#     else:
+#       raise ValueError(f"Unknown posemb type: {typ}")
+
+#   @nn.compact
+#   def __call__(self, inputs, deterministic, train=False):
+#     """ViT model that transforms image inputs to image embeddings.
+#     Args:
+#       inputs: jnp.array shaped [B, N, H, W, C], e.g. [4, 1, 896, 896, 3]
+#     Returns:
+#       jnp.array for image embeddings, shaped [B, N, P, D], e.g. [4, 1, 256, 2560]
+#     """
+#     cfg = self.config
+#     # currrently only supports N=1, the inputs shape is [B, H, W, C]
+#     if len(inputs.shape) == 4:
+#       inputs = inputs[:, None, :]
+#     b, n, h, w, c = inputs.shape
+#     x = jnp.reshape(inputs, [b * n, h, w, c])
+#     # Gemma3 uses conv2d with stride 14 and kernel size 14 to extract patches.
+#     x = nn.Conv(features=1152, kernel_size=(14, 14), strides=14, padding="VALID", name="embedding")(x)
+#     bn, h, w, c = x.shape
+#     x = jnp.reshape(x, [bn, h * w, c])
+
+#     # Add posemb before adding extra token.
+#     x = x + self._get_posemb(
+#         self.posemb,
+#         seqshape=(h, w),
+#         width=c,
+#         name="pos_embedding",
+#         dtype=x.dtype,
+#     )
+
+#     x = nn.Dropout(rate=self.dropout)(x, not train)
+
+#     # Transformer encoder to extract image features.
+#     # x = Encoder(
+#     #     depth=self.depth,
+#     #     mlp_dim=self.mlp_dim,
+#     #     num_heads=self.num_heads,
+#     #     dropout=self.dropout,
+#     #     scan=False,  # TODO(aireenmei, hengtaoguo): support scan in vision encoder
+#     #     remat_policy=cfg.remat_policy_for_vit,
+#     #     dtype_mm=cfg.dtype_mm,
+#     #     name="Transformer",
+#     # )(x, deterministic=deterministic)
+
+#     x = encoder_as_linen(
+#         x=x,
+#         depth=self.depth,
+#         mlp_dim=self.mlp_dim,
+#         num_heads=self.num_heads,
+#         dropout=self.dropout,
+#         scan=False,  # TODO(aireenmei, hengtaoguo): support scan in vision encoder
+#         remat_policy=cfg.remat_policy_for_vit,
+#         dtype_mm=cfg.dtype_mm,
+#         deterministic=deterministic,
+#     )
+
+#     # Gemma3 use a vision exit layer to downsample the soft tokens to a required output length.
+#     x = vision_exit_as_linen(x, output_length=256)
+#     bn, l, c = x.shape
+#     x = jnp.reshape(x, [b, n, l, c])
+#     return x
