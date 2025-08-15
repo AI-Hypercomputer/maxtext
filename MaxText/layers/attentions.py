@@ -706,7 +706,7 @@ class AttentionOp(nnx.Module):
               """Decode not supported with flash attention.
                               Use `dot_product` instead."""
           )
-        return self.tpu_flash_attention(query, key, value, decoder_segment_ids, self.attn_logits_soft_cap), None, None
+        return self.tpu_flash_attention(query, key, value, decoder_segment_ids, self.attn_logits_soft_cap, sinks), None, None
       else:
         if model_mode == MODEL_MODE_AUTOREGRESSIVE:
           # fallback to dot_product as pallas gpu flash attention doesn't support decode stage
@@ -854,6 +854,7 @@ class AttentionOp(nnx.Module):
       value: Array,
       decoder_segment_ids: Array | None,
       attn_logits_soft_cap: float | None = None,
+      sinks: Array = None,
   ) -> Array:
     """TPU Flash Attention."""
 
@@ -1005,6 +1006,7 @@ class AttentionOp(nnx.Module):
             segment_axis_names_splash_kernel,
             None,  # no sharding for cp_size
             None,  # no sharding for load_balanced_context_parallel
+            None,  # no sharding for sinks
         ),
         out_specs=axis_names_q,
         check_rep=False,
@@ -1018,6 +1020,7 @@ class AttentionOp(nnx.Module):
         splash_kernel,
         cp_size,
         load_balanced_context_parallel,
+        sinks,
     ):
       # If load_balanced_context_parallel is enabled, reorder the key and value tensors
       # to ensure that they are contiguous in memory.
@@ -1041,12 +1044,22 @@ class AttentionOp(nnx.Module):
           decoder_segment_ids_tuple = splash_attention_kernel.SegmentIds(decoder_segment_ids_q, decoder_segment_ids_kv)
       else:
         decoder_segment_ids_tuple = None
-      attention_output = jax.vmap(splash_kernel)(query, key, value, segment_ids=decoder_segment_ids_tuple)
+      print(f"query.shape: {query.shape}, key.shape: {key.shape}, value.shape: {value.shape}")
+      print(f"sinks.shape: {sinks.shape}")
+      attention_output = jax.vmap(splash_kernel, in_axes=(0, 0, 0, 0, None))(query, key, value, decoder_segment_ids_tuple, sinks)
 
       return attention_output
 
     x = wrap_flash_attention(
-        query, key, value, decoder_segment_ids, decoder_segment_ids, splash_kernel, cp_size, load_balanced_context_parallel
+        query,
+        key,
+        value,
+        decoder_segment_ids,
+        decoder_segment_ids,
+        splash_kernel,
+        cp_size,
+        load_balanced_context_parallel,
+        sinks,
     )
 
     x = jnp.transpose(x, axes=(0, 2, 1, 3))
@@ -1185,9 +1198,9 @@ class AttentionOp(nnx.Module):
       n_q = n_kv * g
       attn_weights_reshaped = jnp.reshape(attn_weights, (b, n_q, t, s))
 
-      sinks_param = sinks.value.astype(attn_weights.dtype)  # (n_q,)
+      sinks_param = sinks.astype(attn_weights.dtype)  # (n_q,)
       sinks_logits = sinks_param[jnp.newaxis, :, jnp.newaxis, jnp.newaxis]  # (1, n_q, 1, 1)
-      sinks_logits = jnp.broadcast_to(sinks_logits, (b, n_q, t, self.config.num_query_heads))
+      sinks_logits = jnp.broadcast_to(sinks_logits, (b, n_q, t, 1))
       combined_logits = jnp.concatenate([attn_weights_reshaped, sinks_logits], axis=-1)
 
       local_max = jnp.max(combined_logits, axis=-1, keepdims=True)
