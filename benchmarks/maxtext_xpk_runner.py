@@ -102,6 +102,7 @@ class WorkloadConfig:
   generate_metrics_and_upload_to_big_query: bool = True
   hardware_id: str = 'v6e'
   metrics_gcs_file: str = ''
+  enable_rich_metrics: bool = True
   base_config: str = os.path.join("MaxText", "configs", "base.yml")
   topology: str = dataclasses.field(init=False)
   num_devices_per_slice: int = dataclasses.field(init=False)
@@ -340,6 +341,7 @@ def _build_args_from_config(wl_config: WorkloadConfig) -> dict:
     log.info("using steps=(%d) in model convergence test setup", num_steps)
 
   return {"metrics_gcs_file": wl_config.metrics_gcs_file,
+          # "enable_rich_metrics": wl_config.enable_rich_metrics,
           "model_id": wl_config.model.model_type,
           "hardware_id": wl_config.hardware_id,
           "software_id": "jax_maxtext",
@@ -414,6 +416,8 @@ def build_user_command(
     # Save metrics to gcs bucket so that we can upload them to bq in post processing.
     enable_metrics_cmd = 'gcs_metrics=true'
 
+  enable_rich_metrics_cmd="enable_rich_metrics=true"
+
   upload_hlo_dump=""
   hlo_dump=""
   if wl_config.hlo_dump:
@@ -435,6 +439,7 @@ def build_user_command(
       f'{vertex_tensorboard}',
       f'{run_name_command}',
       f'{enable_metrics_cmd}'
+      f'{enable_rich_metrics_cmd}'
       f'{upload_hlo_dump}'
   ])
   return command
