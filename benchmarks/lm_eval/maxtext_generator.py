@@ -1,7 +1,7 @@
 import os
 import time
 import uuid
-from typing import Sequence, Optional, List
+from typing import Sequence, Optional, List, Union
 
 import jax
 import jax.numpy as jnp
@@ -137,6 +137,7 @@ class MaxTextGenerator:
 
         # Per-stream accumulators
         streams_finished = [False] * _NUM_STREAMS
+        finish_reasons: dict[int, str] = {i: "length" for i in range(_NUM_STREAMS)}
         # prompt
         prompt_ids: dict[int, List[int]] = {i: [] for i in range(_NUM_STREAMS)}
         prompt_logps: dict[int, List[float]] = {i: [] for i in range(_NUM_STREAMS)}
@@ -212,6 +213,8 @@ class MaxTextGenerator:
                 is_eos = tok_id == self.eos_id
                 if is_max_len or is_eos:
                     streams_finished[slot_idx] = True
+                    if is_eos:
+                        finish_reasons[slot_idx] = "stop"
                     self.engine.release_pages(slot=slot_idx)
 
         # 5) Build Completions
@@ -237,7 +240,7 @@ class MaxTextGenerator:
             # IMPORTANT: do NOT .strip() — that would break offsets
             text = self.tokenizer.decode(tokens_for_text)
 
-            print("Output generation: ", text)
+            # print("Output generation: ", text)
 
             # Offsets must be computed over the *same* tokens that build `text`
             offsets = self._token_offsets(tokens_for_text, 0)
@@ -258,7 +261,12 @@ class MaxTextGenerator:
             else:
                 lp = None
 
-            completions.append(Completion(index=i, text=text, logprobs=lp))
+            completions.append(Completion(
+                index=i,
+                text=text,
+                logprobs=lp,
+                finish_reason=finish_reasons[i]
+            ))
 
         end_time = time.time()
         print(f"Chunk processing time: {end_time - start_time:.2f}s")
@@ -327,11 +335,11 @@ if __name__ == "__main__":
     prompts_to_run = [
         # "The best thing about Seattle, Washington is",
         # "The capital of Germany",
-        "The capital of France is"
-    ]
+        "Who is Elon Musk?"
+        ]
 
     # Generation config
-    max_tokens = 10           # counts ALL generated tokens (includes prefill's 1st token)
+    max_tokens = 256          # counts ALL generated tokens (includes prefill's 1st token)
     echo = True             # include prompt tokens in text/logprobs if True
     want_logprobs = 1        # non-None triggers logprob collection; top_logprobs left None for now
 
@@ -354,6 +362,8 @@ if __name__ == "__main__":
         print(f"index: {comp.index}")
         print(f"text: {repr(comp.text)}")
 
+
+        """
         if comp.logprobs is None:
             print("logprobs: None")
             return
@@ -374,6 +384,7 @@ if __name__ == "__main__":
         for tid, logp, off in zip(lp.tokens, lp.token_logprobs, lp.text_offset):
             piece = llm.tokenizer.decode([int(tid)])
             print(f"    {repr(piece):>12s}  id={int(tid):>6d}  logp={logp:>10.6f}  offset={off}")
+        """
 
     # Print & validate each completion
     for i, comp in enumerate(completions):

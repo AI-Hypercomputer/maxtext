@@ -10,6 +10,9 @@ from pydantic import BaseModel, Field, field_validator
 
 from benchmarks.lm_eval.maxtext_generator import MaxTextGenerator
 
+import json
+from datetime import datetime, timezone
+
 
 # ----------------------------
 # Init
@@ -25,6 +28,12 @@ print("Starting server and initializing MaxTextGenerator...")
 llm = MaxTextGenerator(get_maxtext_args_from_env())
 app = FastAPI()
 
+DEBUG_MODE = os.environ.get("MAXTEXT_SERVER_DEBUG", "0") == "1"
+DEBUG_LOG_FILE = "server_debug_log.jsonl"
+
+if DEBUG_MODE:
+    print(f"DEBUG MODE IS ENABLED. Requests and responses will be logged to {DEBUG_LOG_FILE}")
+
 
 # ----------------------------
 # Models (OpenAI compat-ish)
@@ -34,7 +43,7 @@ class CompletionRequest(BaseModel):
     model: str
     # Accept strings, list[str], list[int], or list[list[int]] (tokenized requests)
     prompt: Union[str, List[str], List[int], List[List[int]]]
-    max_tokens: Optional[int] = 128
+    max_tokens: Optional[int] = None
     temperature: Optional[float] = 0.7
     stream: Optional[bool] = False
     echo: Optional[bool] = False
@@ -208,15 +217,38 @@ def _apply_stops_to_text_and_logprobs(
 
 @app.post("/v1/completions", response_model=CompletionResponse)
 async def create_completion(request: CompletionRequest):
+    request_id = f"req_{uuid.uuid4().hex}"
+
+    # First, normalize the prompts so we can use them for both logging and processing.
+    prompts = _normalize_prompts(request.prompt)
+
+    if DEBUG_MODE:
+        try:
+            # Create a dictionary from the request model.
+            loggable_request = request.model_dump()
+            # OVERWRITE the 'prompt' field with our newly normalized string version.
+            loggable_request["prompt"] = prompts
+            
+            log_entry = {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "request_id": request_id,
+                "event": "request_received",
+                "request": loggable_request,  # Use the modified dictionary here
+            }
+            with open(DEBUG_LOG_FILE, "a") as f:
+                f.write(json.dumps(log_entry) + "\n")
+        except Exception as e:
+            print(f"Error writing request to debug log file: {e}")
+
     if request.stream:
         raise HTTPException(status_code=400, detail="Streaming is not supported by this server.")
 
-    prompts = _normalize_prompts(request.prompt)
     if len(prompts) == 0:
         raise HTTPException(status_code=400, detail="Empty prompt list.")
 
     start = time.time()
     try:
+        # The `prompts` variable is already calculated and ready to use.
         completions = llm.generate_batch(
             prompts=prompts,
             image_paths=None,
@@ -269,11 +301,27 @@ async def create_completion(request: CompletionRequest):
         total_tokens=prompt_tokens_total + completion_tokens_total,
     )
 
-    return CompletionResponse(
+    response = CompletionResponse(
         model=request.model,
         choices=choices,
         usage=usage,
     )
+
+    if DEBUG_MODE:
+        try:
+            log_entry = {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "request_id": request_id,
+                "event": "response_generated",
+                "response": response.model_dump(),
+            }
+            with open(DEBUG_LOG_FILE, "a") as f:
+                f.write(json.dumps(log_entry) + "\n")
+        except Exception as e:
+            # Non-fatal: log to console and continue
+            print(f"Error writing response to debug log file: {e}")
+
+    return response
 
 
 @app.get("/")
