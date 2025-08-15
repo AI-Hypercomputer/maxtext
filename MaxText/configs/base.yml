@@ -78,6 +78,7 @@ reuse_example_batch: 0 # for testing TPU performance, this options repeated uses
 metrics_file: "" # for testing, local file that stores scalar metrics. If empty, no metrics are written.
 # If true save metrics such as loss and TFLOPS to GCS in {base_output_directory}/{run_name}/metrics/
 gcs_metrics: False
+enable_rich_metrics: false
 
 # If true save config to GCS in {base_output_directory}/{run_name}/
 save_config_to_gcs: False

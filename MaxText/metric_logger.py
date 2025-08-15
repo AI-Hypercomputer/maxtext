@@ -34,6 +34,8 @@ from MaxText.gcp_workload_monitor import GCPWorkloadMonitor
 from MaxText.globals import EPS
 
 from collections import defaultdict
+from datetime import datetime
+from ml_goodput_measurement import goodput
 
 
 def _prepare_metrics_for_json(metrics, step, run_name):
@@ -54,6 +56,7 @@ class MetricLogger:
     self.config = config
     self.metadata = {}
     self.running_gcs_metrics = [] if config.gcs_metrics else None
+    self.running_gcs_rich_metrics = [] if config.enable_rich_metrics else None
     self.performance_metric_queue = self.get_performance_metric_queue(config)
     self.learning_rate_schedule = learning_rate_schedule
     self.cumulative_eval_metrics = {"scalar": defaultdict(float)}
@@ -73,6 +76,9 @@ class MetricLogger:
 
       if self.config.metrics_file:
         self.write_metrics_locally(metrics, step)
+
+      if self.config.enable_rich_metrics:
+        self.write_rich_metrics_for_gcs(metrics,step, is_training)
 
       if self.config.gcs_metrics and jax.process_index() == 0:
         self.write_metrics_for_gcs(metrics, step, is_training)
@@ -134,6 +140,84 @@ class MetricLogger:
       gcs_utils.upload_blob(gcs_filename, metrics_filename)
       max_logging.log(f"File {metrics_filename} moved successfully!")
       self.running_gcs_metrics = []  # reset running_metrics to empty list
+
+  def write_rich_metrics_for_gcs(self, metrics, step, is_training):
+    """Writes step metrics summary JSON directly to GCS using real perf metrics."""
+    run_name = self.config.run_name
+    goodput_logger_name = f"goodput_{run_name}"
+    metrics_dict_step = _prepare_metrics_for_json(metrics, step, run_name)
+    self.running_gcs_rich_metrics.append(metrics_dict_step)
+    if is_training and (step + 1) % self.config.log_period == 0 or step == self.config.steps - 1:
+      start_step = (step // self.config.log_period) * self.config.log_period
+
+      step_times = []
+      tflops_sec = []
+      for m in self.running_gcs_rich_metrics:
+        if "perf/step_time_seconds" in m:
+          step_times.append((m["step"], float(m["perf/step_time_seconds"])))
+        if "perf/per_device_tflops_per_sec" in m:
+          tflops_sec.append(float(m["perf/per_device_tflops_per_sec"]))
+
+      if step_times:
+        avg_step_time = sum(t for _, t in step_times) / len(step_times)
+        min_step, min_time = min(step_times, key=lambda x: x[1])
+        max_step, max_time = max(step_times, key=lambda x: x[1])
+      else:
+        avg_step_time = min_time = max_time = 0
+        min_step = max_step = None
+
+      if tflops_sec:
+        mfu_val = f"{(sum(tflops_sec) / len(tflops_sec)):.2f} TFLOPs/s"
+      else:
+        mfu_val = "N/A"
+
+      # Todo: Goodput/badput breakdown and lins
+      goodput_calculator = goodput.GoodputCalculator(
+          job_name=run_name, logger_name=goodput_logger_name
+      )
+      current_goodput, current_badput_breakdown, last_step = (
+         goodput_calculator.get_job_goodput(include_badput_breakdown=True)
+      )
+      goodput_val = f"{current_goodput:.2f}%"
+      badput_breakdown = {
+          "checkpoint_loading": f"{current_badput_breakdown[goodput.BadputType.UNPRODUCTIVE_CHECKPOINT_RESTORE_TIME]:.2f}%",
+          "data_loading": f"{current_badput_breakdown[goodput.BadputType.DATA_LOADING]:.2f}%",
+          "failure": "N/A",
+          "reshard": "N/A"
+      }
+
+      project = os.environ["PROJECT"]
+      cluster = os.environ["CLUSTER"]
+      zone = os.environ["ZONE"]
+      region = zone.split('-')[0] + '-' + zone.split('-')[1] 
+      links = {
+          "cloud_logging": f"https://console.cloud.google.com/logs/query;query=resource.type%3D%22k8s_container%22%0Aresource.labels.project_id%3D%22{project}%22%0Aresource.labels.location%3D%22{region}%22%0Aresource.labels.cluster_name%3D%22{cluster}%22%0Aresource.labels.namespace_name%3D%22default%22%0Aresource.labels.pod_name:%22{run_name}%22%0A;duration=PT1H?project={project}",
+          "goodput_monitor": "...",
+          "disruption_dashboard": "..."
+      }
+
+      summary_data = {
+          "avg_step_time": f"{avg_step_time:.2f}s" if step_times else "N/A",
+          "min_step_time": f"{min_time:.2f}s on step {min_step}" if min_step is not None else "N/A",
+          "max_step_time": f"{max_time:.2f}s on step {max_step}" if max_step is not None else "N/A",
+          "goodput": goodput_val,
+          "MFU": mfu_val,
+          "badput_breakdown": badput_breakdown,
+          "links": links,
+          "generated_at": datetime.utcnow().isoformat() + "Z"
+      }
+
+      rich_metrics_filename = f"rich_metrics_step_{start_step:06}_to_step_{step:06}.txt"
+
+      with open(rich_metrics_filename, "wt", encoding="utf8") as rich_metrics_for_gcs:
+        rich_metrics_for_gcs.write(json.dumps(summary_data, indent=2))
+
+      gcs_filename = os.path.join(self.config.metrics_dir, rich_metrics_filename)
+      max_logging.log(f"Moving file {rich_metrics_filename} to GCS...")
+      gcs_utils.upload_blob(gcs_filename, rich_metrics_filename)
+      max_logging.log(f"File {rich_metrics_filename} moved successfully!")
+
+      self.running_gcs_rich_metrics = []  # reset running_metrics to empty list
 
   def write_metrics_to_tensorboard(self, metrics, step, is_training):
     """Writes metrics to TensorBoard."""
