@@ -9,7 +9,7 @@ jaxtyping
 jsonlines
 mlperf-logging@git+https://github.com/mlperf/logging.git
 omegaconf
-orbax-checkpoint>=0.10.3
+orbax-checkpoint>=0.11.22
 pathwaysutils>=0.1.1
 pillow>=11.1.0
 pre-commit
