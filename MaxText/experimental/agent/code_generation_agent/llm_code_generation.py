@@ -72,13 +72,12 @@ from dotenv import load_dotenv  # If this is not available, try ``pip install py
 
 load_dotenv()
 import os, logging, sys
-from llm_agent import GeminiAgent
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+from llm_agent import GeminiAgent  # If you are in debugging mode, please change to `from .llm_agent import GeminiAgent`
 from orchestration_agent.Utils import parse_python_code
-
-from prompt_code_generation import CodeGeneration
+from prompt_code_generation import CodeGeneration  # If you are in debugging mode, please change to `from .prompt_code_generation import CodeGeneration`
 import argparse
 
 # Set up basic configuration
