@@ -31,7 +31,7 @@ set -xe
 RUN_NAME=sft-$(date +%Y-%m-%d-%H-%M-%S)
 PER_DEVICE_BATCH_SIZE=1
 
-python3 -m MaxText.sft_trainer MaxText/configs/sft.yml \
+python3 -m MaxText.sft_trainer src/MaxText/configs/sft.yml \
     run_name=${RUN_NAME} base_output_directory=${BASE_OUTPUT_DIRECTORY} \
     model_name=${PRE_TRAINED_MODEL} load_parameters_path=${PRE_TRAINED_MODEL_CKPT_PATH} \
     hf_access_token=$HF_TOKEN tokenizer_path=${PRE_TRAINED_MODEL_TOKENIZER} \

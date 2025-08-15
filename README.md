@@ -38,7 +38,7 @@ Key supported features:
 * [June 25, 2025] DeepSeek R1-0528 variant is now supported!
 * [April 24, 2025] Llama 4 Maverick models are now supported!
 * [April 14, 2025] Llama 4 Scout models are now supported. Context length is currently limited to 8k and we have many ideas for optimization but we're working on both these things.  Note that models are text-only for now, but we're working on full multi-modal support!
-* **[April 7, 2025] 🚨🚨🚨 We support modular imports. This comes with an API change for `train.py`: Now you should invoke the script via `python3 -m MaxText.train MaxText/configs/base.yml run_name=...`. If you want the old behavior you can stick to an older commit `git checkout pre-module-v0.1.0` and use the older API `python MaxText/train.py MaxText/configs/base.yml run_name=...`.**
+* **[April 7, 2025] 🚨🚨🚨 We support modular imports. This comes with an API change for `train.py`: Now you should invoke the script via `python3 -m MaxText.train src/MaxText/configs/base.yml run_name=...`. If you want the old behavior you can stick to an older commit `git checkout pre-module-v0.1.0` and use the older API `python src/MaxText/train.py src/MaxText/configs/base.yml run_name=...`.**
 * [April 2, 2025] DeepSeek v3-0324 variant is now supported!
 * [March 24, 2025] We are excited to announce support for DeepSeek v3 (671B) and v2-Lite (16B), compatible with both TPUs and GPUs. We are actively working on further optimization.
 * [March 12, 2025] We are excited to announce support for Gemma 3: 4B, 12B, and 27B in text-only formats. Please see [Google Launch Blog](https://blog.google/technology/developers/gemma-3/) and [Developer Blog](https://developers.googleblog.com/en/introducing-gemma3/) for more information on Gemma 3.
@@ -68,7 +68,7 @@ In addition to the getting started guides, there are always other MaxText capabi
 
 # Runtime Performance Results
 
-More details on reproducing these results can be found in [MaxText/configs/README.md](MaxText/configs/README.md).
+More details on reproducing these results can be found in [src/MaxText/configs/README.md](src/MaxText/configs/README.md).
 
 ## TPU v5p
 
@@ -87,7 +87,7 @@ More details on reproducing these results can be found in [MaxText/configs/READM
 
 ## TPU v5e
 
-For 16B, 32B, 64B, and 128B models. See full run configs in [MaxText/configs/v5e/](MaxText/configs/v5e/) as `16b.sh`, `32b.sh`, `64b.sh`, `128b.sh`.
+For 16B, 32B, 64B, and 128B models. See full run configs in [src/MaxText/configs/v5e/](src/MaxText/configs/v5e/) as `16b.sh`, `32b.sh`, `64b.sh`, `128b.sh`.
 
 | Hardware    | 16B TFLOP/sec/chip | 16B MFU | 32B TFLOP/sec/chip | 32B MFU | 64B TFLOP/sec/chip | 64B MFU | 128B TFLOP/sec/chip | 128B MFU |
 | ----------- | -----------------: | ------- | -----------------: | ------- | -----------------: | ------- | ------------------: | -------- |
@@ -138,7 +138,7 @@ The tool `train_compile.py` is tightly linked to `train.py` and uses the same co
 After installing the dependencies listed above, you are ready to compile ahead of time:
 ```
 # Run the below on a single machine, e.g. a CPU
-python3 -m MaxText.train_compile MaxText/configs/base.yml compile_topology=v5e-256 compile_topology_num_slices=2 \
+python3 -m MaxText.train_compile src/MaxText/configs/base.yml compile_topology=v5e-256 compile_topology_num_slices=2 \
 global_parameter_scale=16 per_device_batch_size=4
 ```
 
@@ -151,7 +151,7 @@ Here is an example that saves then loads the compiled `train_step`, starting wit
 ```
 # Run the below on a single machine, e.g. a CPU
 export LIBTPU_INIT_ARGS="--xla_enable_async_all_gather=true"
-python3 -m MaxText.train_compile MaxText/configs/base.yml compile_topology=v5e-256 \
+python3 -m MaxText.train_compile src/MaxText/configs/base.yml compile_topology=v5e-256 \
 compile_topology_num_slices=2 \
 compiled_trainstep_file=my_compiled_train.pickle global_parameter_scale=16 \
 per_device_batch_size=4 steps=10000 learning_rate=1e-3
@@ -163,7 +163,7 @@ To load the compiled train_step, you just need to pass `compiled_trainstep_file=
 ```
 # Run the below on each host of the target hardware, e.g. each host on 2 slices of v5e-256
 export LIBTPU_INIT_ARGS="--xla_enable_async_all_gather=true"
-python3 -m MaxText.train MaxText/configs/base.yml run_name=example_load_compile \
+python3 -m MaxText.train src/MaxText/configs/base.yml run_name=example_load_compile \
 compiled_trainstep_file=my_compiled_train.pickle \
 global_parameter_scale=16  per_device_batch_size=4 steps=10000 learning_rate=1e-3 \
 base_output_directory=gs://my-output-bucket dataset_path=gs://my-dataset-bucket
@@ -185,7 +185,7 @@ This example illustrates the flags to use for a multihost GPU compilation target
 ```
 # Run the below on a single A3 machine
 export XLA_FLAGS="--xla_gpu_enable_async_collectives=true"
-python3 -m MaxText.train_compile MaxText/configs/base.yml compile_topology=a3 \
+python3 -m MaxText.train_compile src/MaxText/configs/base.yml compile_topology=a3 \
 compile_topology_num_slices=4 \
 compiled_trainstep_file=my_compiled_train.pickle global_parameter_scale=16 \
 attention=dot_product per_device_batch_size=4 steps=10000 learning_rate=1e-3
@@ -197,7 +197,7 @@ To load the compiled train_step, you just need to pass `compiled_trainstep_file=
 ```
 # Run the below on each of the 4 target A3 hosts.
 export XLA_FLAGS="--xla_gpu_enable_async_collectives=true"
-python3 -m MaxText.train MaxText/configs/base.yml run_name=example_load_compile \
+python3 -m MaxText.train src/MaxText/configs/base.yml run_name=example_load_compile \
 compiled_trainstep_file=my_compiled_train.pickle \
 attention=dot_product global_parameter_scale=16  per_device_batch_size=4 steps=10000 learning_rate=1e-3 \
 base_output_directory=gs://my-output-bucket dataset_path=gs://my-dataset-bucket
