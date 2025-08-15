@@ -671,6 +671,12 @@ def get_quantization_rule(config: Config):
           act_calibration_method = config.quantization_calibration_method,
           bwd_calibration_method = config.quantization_calibration_method,
           op_names=('dot_general',),
+          additional_qt_config={
+            "dlhs_lhs_qtype": jnp.float8_e5m2,
+            "dlhs_rhs_qtype": jnp.float8_e4m3fn,
+            "drhs_lhs_qtype": jnp.float8_e4m3fn,
+            "drhs_rhs_qtype": jnp.float8_e5m2,
+          },
       )
     case "fp8_gpu":
       return qwix.QtRule(
