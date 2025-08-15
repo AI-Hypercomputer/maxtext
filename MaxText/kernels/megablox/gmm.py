@@ -895,7 +895,7 @@ def tgmm(
       interpret=interpret,
       cost_estimate=cost_estimate,
   )
-
+  print(f"line 900 {lhs_quantize_dtype}")
   if use_qwix_quantization and lhs_quantize_dtype is not None:
     lhs = qpl.quantize(lhs, qtype=lhs_quantize_dtype, scale_dtype=jnp.float32)
   elif lhs_quantize_dtype is not None:

@@ -695,10 +695,11 @@ class RoutedMoE(nnx.Module):
       lhs_quantize_dtype, rhs_quantize_dtype = None, None
       if self.quant is not None:
         quant_dg = self.quant.quant_dg
-        # lhs_quantize_dtype = quant_dg.fwd.dg_quantizer.lhs.numerics.get_dtype()
-        # rhs_quantize_dtype = quant_dg.fwd.dg_quantizer.rhs.numerics.get_dtype()
-        lhs_quantize_dtype = 'e4m3'
-        rhs_quantize_dtype = 'e4m3'
+        lhs_quantize_dtype = quant_dg.fwd.dg_quantizer.lhs.numerics.get_dtype()
+        rhs_quantize_dtype = quant_dg.fwd.dg_quantizer.rhs.numerics.get_dtype()
+        print("why are you hereeeee.....!!!")
+        # lhs_quantize_dtype = 'e4m3'
+        # rhs_quantize_dtype = 'e4m3'
       if self.config.use_qwix_quantization:
         quantization_rule = qpl.get_current_rule('dot_general')
         if quantization_rule is not None:
