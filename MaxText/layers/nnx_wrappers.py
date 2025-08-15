@@ -158,6 +158,12 @@ def lazy_init(fn: Module | tp.Callable[..., tp.Any], *args, **kwargs):
   return fn
 
 
+def current_linen_module() -> linen.Module | None:
+  """Get the current Linen module from the Linen context."""
+  if linen.module._context.module_stack:  # pylint: disable=W0212
+    return linen.module._context.module_stack[-1]  # pylint: disable=W0212
+  return None
+
 class ToNNX(Module):
   """A wrapper to turn any Linen module into an NNX module.
 
@@ -195,10 +201,11 @@ class ToNNX(Module):
   ):
     self.to_nnx__module = module
 
+    self.to_nnx__rngs: Rngs | None
     if isinstance(rngs, jax.Array):
       self.to_nnx__rngs = Rngs(params=rngs)
     elif isinstance(rngs, nnx.Rngs):
-      self.to_nnx__rngs = rngs.fork() if hasattr(rngs, "fork") else nnx.clone(rngs)
+      self.to_nnx__rngs = rngs.fork() if hasattr(type(rngs), "fork") else nnx.clone(rngs)  # type: ignore
     else:
       self.to_nnx__rngs = rngs
 
@@ -209,7 +216,7 @@ class ToNNX(Module):
   def __getattr__(self, name: str):
     if hasattr(super(), name):
       return super().__getattribute__(name)
-    maybe_method = getattr(self.to_nnx__module.__class__, name, None)
+    maybe_method = getattr(type(self.to_nnx__module), name, None)
     if callable(maybe_method):
       method = partial(self.__call__, method=maybe_method)
       method.__self__ = self
@@ -221,6 +228,7 @@ class ToNNX(Module):
     *args: Any,
     rngs: Rngs | jax.Array | None = None,
     method: tp.Callable[..., Any] | str | None = None,
+    mutable: tp.Any = None,
     **kwargs: Any,
   ) -> Any:
     # Shape-based lazy init of the flax variables
@@ -250,22 +258,23 @@ class ToNNX(Module):
       variables = nnx_attrs_to_linen_vars(nnx_attrs)
 
       # Get `mutable` from top level bridge.Module context if any
-      if (m := bdg_module.current_module()) is not None:
+      if mutable is not None:
+        pass
+      elif (m := bdg_module.current_module()) is not None:
         assert m.scope is not None
         mutable = m.scope.mutable
-        if "mutable" in kwargs and kwargs["mutable"] != mutable:
-          raise ValueError(
-            f"Multiple `mutable` arguments detected: {mutable} at top level vs "
-            f"{kwargs['mutable']} in ToNNX() call"
-          )
-        kwargs["mutable"] = mutable
+      elif (m := current_linen_module()) is not None:
+        assert m.scope is not None
+        mutable = m.scope.mutable
+      else:
+        mutable = False
 
       out = self.to_nnx__module.apply(
-        variables, *args, rngs=_rngs, method=method, **kwargs
+        variables, *args, rngs=_rngs, method=method, mutable=mutable, **kwargs
       )
 
       # Split out the updates if `mutable` is passed into the Flax module
-      if kwargs.get("mutable", False) is not False:
+      if mutable is not False:
         out, updates = out
       else:
         updates = None
@@ -273,6 +282,10 @@ class ToNNX(Module):
     # Split out the updates if `mutable` is passed into the Flax module
     if updates:
       nnx_attrs = linen_vars_to_nnx_attrs(updates)
+      # nnx.update(self, nnx_attrs)
+      # TODO(cgarciae): ideally we just do an update but currently dictionaries don't allow
+      # insertion of new keys, we need to enable this in NNX to simplify the code bellow
+      # to the simple nnx.update(self, nnx_attrs) above.
       for attr_name, value in nnx_attrs.items():
         if hasattr(self, attr_name) and isinstance(value, dict):
           original_value = getattr(self, attr_name)
@@ -408,10 +421,9 @@ class ToLinen(linen.Module):
   def __call__(
     self, *args, nnx_method: tp.Callable[..., Any] | str | None = None, **kwargs
   ):
-    module_kwargs = dict(self.kwargs)
-    maybe_add_default = not self.is_initializing()
-
     def _module_kwargs():
+      maybe_add_default = not self.is_initializing()
+      module_kwargs = dict(self.kwargs)
       if not self.skip_rng:
         module_kwargs["rngs"] = nnx.Rngs(
           **linen_rngs_dict(self, add_default=maybe_add_default)
@@ -454,6 +466,8 @@ class ToLinen(linen.Module):
   def __getattr__(self, name: str):
     if hasattr(super(), name):
       return super().__getattribute__(name)
+    if name in self.kwargs:
+      return self.kwargs[name]
     maybe_method = getattr(self.nnx_class, name, None)
     if callable(maybe_method):
       method = partial(self.__call__, nnx_method=maybe_method)

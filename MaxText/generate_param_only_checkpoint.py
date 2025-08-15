@@ -43,7 +43,7 @@ from MaxText.layers import models, quantizations
 from MaxText.utils import gcs_utils
 from MaxText.utils import lora_utils
 
-Transformer = models.Transformer
+Transformer = models.transformer_as_linen
 
 
 def _possibly_unroll_params(config, training_state, training_state_annotations, mesh):
