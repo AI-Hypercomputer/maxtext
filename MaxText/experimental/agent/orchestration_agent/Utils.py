@@ -12,8 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import requests, ast  # if this is not available, please try ``pip install requests``
+import ast
 from urllib.parse import urlparse, urljoin
+
+import requests  # if this is not available, please try ``pip install requests``
 
 
 def github_blob_to_raw(blob_url):
@@ -204,7 +206,7 @@ def remove_local_imports(source_code, filepath=None):
         try:
           import_tree = ast.parse(import_block)
           import_node = import_tree.body[0]
-        except Exception:
+        except (SyntaxError, TypeError, ValueError, RecursionError):
           import_node = node  # fallback
 
         remove = False
