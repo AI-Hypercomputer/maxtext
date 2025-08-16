@@ -139,7 +139,8 @@ def main(argv: Sequence[str]) -> None:
   final_mt_weights = []
 
   for path_tuple, abstract_leaf_value in abstract_params_flat:
-    mt_param_key = "params-" + "-".join(k.key for k in path_tuple)
+    key_parts = [k.key for k in path_tuple]
+    mt_param_key = "params-" + "-".join(key_parts)
     mt_target_shape_final = abstract_leaf_value.shape
 
     hf_source_keys_or_key = param_map_mt_to_hf.get(mt_param_key)
@@ -149,27 +150,55 @@ def main(argv: Sequence[str]) -> None:
     hook_fn_list_or_fn = hook_fn_map_mt.get(mt_param_key)
     final_mt_tensor_numpy = None
 
-    if isinstance(hf_source_keys_or_key, list):  # MaxText param is scanned, built from multiple HF params
-      tensors_to_stack = []
-      # Determine the shape of an individual slice for hooks
-      mt_slice_shape_list = list(mt_target_shape_final)
-      del mt_slice_shape_list[config.param_scan_axis]
-      mt_slice_shape = tuple(mt_slice_shape_list)
+    if isinstance(hf_source_keys_or_key, list):
+      # This handles tensors constructed by stacking multiple HF weights, covering:
+      # 1. Scanned MoE layers (source is a 2D nested list of HF keys)
+      # 2. Standard Scanned layers (source is a 1D list of HF keys)
+      # 3. Unscanned MoE layers (source is a 1D list of HF keys)
+      is_scanned_moe_layer = isinstance(hf_source_keys_or_key[0], list)
 
-      for hf_key_single in hf_source_keys_or_key:
-        if hf_key_single not in hf_state_dict_numpy:
-          raise ValueError(f"HuggingFace key {hf_key_single} (for MaxText {mt_param_key}) not found in HF state_dict.")
-        hf_tensor_numpy = hf_state_dict_numpy[hf_key_single]
-        # The target_shape for the hook should be the shape of the MaxText slice it produces
-        processed_hf_tensor = apply_hook_fns(hf_tensor_numpy, mt_slice_shape, hook_fn_list_or_fn)
-        tensors_to_stack.append(processed_hf_tensor)
-      final_mt_tensor_numpy = np.stack(tensors_to_stack, axis=config.param_scan_axis)
-    else:  # Single HF source key
+      if is_scanned_moe_layer:
+        # Case 1: Scanned MoE. We build the (experts, layers, ...) tensor.
+        all_expert_tensors = []
+        # Outer loop for experts
+        for layer_keys_for_expert in hf_source_keys_or_key:
+          layer_tensors_for_expert = []
+          # Inner loop for layers
+          for hf_key_single in layer_keys_for_expert:
+            if hf_key_single not in hf_state_dict_numpy:
+              raise ValueError(f"HuggingFace key {hf_key_single} (for MaxText {mt_param_key}) not found in HF state_dict.")
+            hf_tensor_numpy = hf_state_dict_numpy[hf_key_single]
+            # The target_shape for the hook is the final MaxText parameter shape
+            processed_hf_tensor = apply_hook_fns(hf_tensor_numpy, None, hook_fn_list_or_fn)
+            layer_tensors_for_expert.append(processed_hf_tensor)
+
+          # Stack all layers for the current expert along the layer axis.
+          stacked_expert_tensor = np.stack(layer_tensors_for_expert, axis=0)  # New axis is 'layers'
+          all_expert_tensors.append(stacked_expert_tensor)
+
+        # Stack all experts along the expert axis.
+        final_mt_tensor_numpy = np.stack(all_expert_tensors, axis=0)  # New axis is 'experts'
+      else:
+        # Case 2 & 3: Standard Scanned (stack on layer axis) or Unscanned MoE (stack on expert axis).
+        tensors_to_stack = []
+        axis_to_stack = config.param_scan_axis if len(hf_source_keys_or_key) == config.base_num_decoder_layers else 0
+
+        mt_slice_shape_list = list(mt_target_shape_final)
+        del mt_slice_shape_list[axis_to_stack]
+        mt_slice_shape = tuple(mt_slice_shape_list)
+
+        for hf_key_single in hf_source_keys_or_key:
+          if hf_key_single not in hf_state_dict_numpy:
+             raise ValueError(f"HuggingFace key {hf_key_single} (for MaxText {mt_param_key}) not found in HF state_dict.")
+          hf_tensor_numpy = hf_state_dict_numpy[hf_key_single]
+          processed_hf_tensor = apply_hook_fns(hf_tensor_numpy, mt_slice_shape, hook_fn_list_or_fn)
+          tensors_to_stack.append(processed_hf_tensor)
+        final_mt_tensor_numpy = np.stack(tensors_to_stack, axis=axis_to_stack)
+    else:  # Single HF source key for a single MaxText param
       hf_key_single = hf_source_keys_or_key
       if hf_key_single not in hf_state_dict_numpy:
-        raise ValueError(f"HuggingFace key {hf_key_single} (for MaxText {mt_param_key}) not found in HF state_dict.")
+         raise ValueError(f"HuggingFace key {hf_key_single} (for MaxText {mt_param_key}) not found in HF state_dict.")
       hf_tensor_numpy = hf_state_dict_numpy[hf_key_single]
-      # The target_shape for the hook is the final MaxText parameter shape
       final_mt_tensor_numpy = apply_hook_fns(hf_tensor_numpy, mt_target_shape_final, hook_fn_list_or_fn)
 
     if final_mt_tensor_numpy.shape != mt_target_shape_final:
