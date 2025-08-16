@@ -1,0 +1,6 @@
+git+https://github.com/SamuelMarks/griffe.git@rest
+mkdocs-gen-files
+mkdocs-literate-nav
+mkdocs-material
+mkdocs-section-index
+mkdocstrings-python
