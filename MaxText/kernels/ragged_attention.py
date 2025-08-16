@@ -16,15 +16,13 @@
 
 import functools
 
-import numpy as np
-
 import jax
 from jax import lax
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 import jax.numpy as jnp
-
 from MaxText.common_types import DEFAULT_MASK_VALUE
+import numpy as np
 
 
 def get_mha_cost_estimate(shape_dtype):
@@ -44,7 +42,11 @@ def get_mha_cost_estimate(shape_dtype):
   return pl.CostEstimate(
       flops=flops,
       transcendentals=batch_size * num_heads * seq_len,
-      bytes_accessed=int(sum(np.prod(s.shape) * s.dtype.itemsize for s in shape_dtype)),
+      bytes_accessed=int(
+          sum(np.prod(s.shape) * s.dtype.itemsize for s in shape_dtype)
+      ),
+      # TODO(yzp): update before using it
+      remote_bytes_transferred=0,
   )
 
 
@@ -72,7 +74,9 @@ def reference_mqa(
     max logit ([batch_size, num_heads]) and softmax denominator ([batch_size,
     num_heads]).
   """
-  logits = jnp.einsum("bhd,btd->bht", q.astype(jnp.float32), k.astype(jnp.float32))
+  logits = jnp.einsum(
+      "bhd,btd->bht", q.astype(jnp.float32), k.astype(jnp.float32)
+  )
   mask = jnp.arange(k.shape[1])[None] < lengths[:, None]
 
   logits = logits + jnp.where(mask, 0.0, mask_value)[:, None]
@@ -80,7 +84,10 @@ def reference_mqa(
 
   unnormalized = jnp.exp(logits - logits_max[..., None])
   denominator = unnormalized.sum(axis=-1)
-  o = jnp.einsum("bht,btd->bhd", unnormalized.astype(v.dtype), v) / denominator[..., None]
+  o = (
+      jnp.einsum("bht,btd->bhd", unnormalized.astype(v.dtype), v)
+      / denominator[..., None]
+  )
   return o, logits_max[..., None], denominator[..., None]
 
 
@@ -111,9 +118,11 @@ def reference_mha(
   q = jnp.swapaxes(q, 1, 2)
   k = jnp.swapaxes(k, 1, 2)
   v = jnp.swapaxes(v, 1, 2)
-  return jax.vmap(functools.partial(reference_mqa, mask_value=mask_value), in_axes=(1, 1, 1, None), out_axes=2)(
-      q, k, v, lengths
-  )
+  return jax.vmap(
+      functools.partial(reference_mqa, mask_value=mask_value),
+      in_axes=(1, 1, 1, None),
+      out_axes=2,
+  )(q, k, v, lengths)
 
 
 @functools.partial(jax.jit, static_argnames=["mask_value"])
@@ -146,13 +155,18 @@ def reference_gqa(
 
   q = q.reshape(batch_size, num_heads_kv, num_heads_q // num_heads_kv, head_dim)
 
-  logits = jnp.einsum("bhgd,bhtd->bhgt", q.astype(jnp.float32), k.astype(jnp.float32))
+  logits = jnp.einsum(
+      "bhgd,bhtd->bhgt", q.astype(jnp.float32), k.astype(jnp.float32)
+  )
   mask = jnp.arange(seq_len)[None] < lengths[:, None]
   logits = logits + jnp.where(mask, 0.0, mask_value)[:, None, None, :]
   logits_max = logits.max(axis=-1)
   unnormalized = jnp.exp(logits - logits_max[..., None])
   denominator = unnormalized.sum(axis=-1)
-  o = jnp.einsum("bhgt,bhtd->bhgd", unnormalized.astype(v.dtype), v) / denominator[..., None]
+  o = (
+      jnp.einsum("bhgt,bhtd->bhgd", unnormalized.astype(v.dtype), v)
+      / denominator[..., None]
+  )
   logits_max = logits_max.reshape(batch_size, 1, num_heads_q, 1)
   denominator = denominator.reshape(batch_size, 1, num_heads_q, 1)
   o = o.reshape(batch_size, 1, num_heads_q, head_dim)
@@ -189,9 +203,14 @@ def ragged_flash_attention_kernel(
     v = v_ref[...].astype(jnp.float32)
     m_prev, l_prev = m_ref[...], l_ref[...]
 
-    qk = lax.dot_general(q, k, (((1,), (1,)), ((), ())), preferred_element_type=jnp.float32)
+    qk = lax.dot_general(
+        q, k, (((1,), (1,)), ((), ())), preferred_element_type=jnp.float32
+    )
 
-    mask = i * block_size + jax.lax.broadcasted_iota(jnp.int32, qk.shape, 1) < length
+    mask = (
+        i * block_size + jax.lax.broadcasted_iota(jnp.int32, qk.shape, 1)
+        < length
+    )
     qk = qk + jnp.where(mask, 0.0, mask_value)
     m_curr = qk.max(axis=-1)
 
@@ -207,7 +226,9 @@ def ragged_flash_attention_kernel(
     l_next_safe = jnp.where(l_next == 0.0, 1.0, l_next)
 
     m_ref[...], l_ref[...] = m_next, l_next_safe
-    o_ref[...] = ((l_prev * alpha * o_ref[...] + beta * o_curr_times_l_curr) / l_next_safe).astype(o_ref.dtype)
+    o_ref[...] = (
+        (l_prev * alpha * o_ref[...] + beta * o_curr_times_l_curr) / l_next_safe
+    ).astype(o_ref.dtype)
 
 
 def ragged_mqa(
@@ -229,7 +250,8 @@ def ragged_mqa(
     lengths: A i32[batch_size] jax.Array.
     mask_value: The value used for padding in attention. By default it is a very
       negative floating point number.
-    cost_estimate: A Pallas TPU cost estimate based on a reference implementation
+    cost_estimate: A Pallas TPU cost estimate based on a reference
+      implementation
 
   Returns:
     The output of attention([batch_size, num_heads, head_dim]), along with the
@@ -247,7 +269,9 @@ def ragged_mqa(
     am_last_batch = b == batch_size - 1
     last_good_block = lax.div(length, block_size) - 1
     b_next = jnp.where(not_done, b, jnp.where(am_last_batch, b, b + 1))
-    i_next = jnp.where(not_done, i, jnp.where(am_last_batch, last_good_block, 0))
+    i_next = jnp.where(
+        not_done, i, jnp.where(am_last_batch, last_good_block, 0)
+    )
     return b_next, i_next, 0
 
   out, m, l = pl.pallas_call(
@@ -259,18 +283,32 @@ def ragged_mqa(
       grid_spec=pltpu.PrefetchScalarGridSpec(
           num_scalar_prefetch=1,
           in_specs=[
-              pl.BlockSpec((None, num_heads, head_dim), lambda b, i, _: (b, 0, 0)),
-              pl.BlockSpec((None, block_size, head_dim), compute_ragged_block_indices),
-              pl.BlockSpec((None, block_size, head_dim), compute_ragged_block_indices),
+              pl.BlockSpec(
+                  (None, num_heads, head_dim), lambda b, i, _: (b, 0, 0)
+              ),
+              pl.BlockSpec(
+                  (None, block_size, head_dim), compute_ragged_block_indices
+              ),
+              pl.BlockSpec(
+                  (None, block_size, head_dim), compute_ragged_block_indices
+              ),
           ],
           out_specs=[
-              pl.BlockSpec((None, num_heads, head_dim), lambda b, i, _: (b, 0, 0)),
-              pl.BlockSpec((None, num_heads, head_dim), lambda b, i, _: (b, 0, 0)),
-              pl.BlockSpec((None, num_heads, head_dim), lambda b, i, _: (b, 0, 0)),
+              pl.BlockSpec(
+                  (None, num_heads, head_dim), lambda b, i, _: (b, 0, 0)
+              ),
+              pl.BlockSpec(
+                  (None, num_heads, head_dim), lambda b, i, _: (b, 0, 0)
+              ),
+              pl.BlockSpec(
+                  (None, num_heads, head_dim), lambda b, i, _: (b, 0, 0)
+              ),
           ],
           grid=(batch_size, seq_len // block_size),
       ),
-      compiler_params=pltpu.CompilerParams(dimension_semantics=("parallel", "arbitrary")),
+      compiler_params=pltpu.CompilerParams(
+          dimension_semantics=("parallel", "arbitrary")
+      ),
       out_shape=[
           jax.ShapeDtypeStruct((batch_size, num_heads, head_dim), jnp.float32),
           jax.ShapeDtypeStruct((batch_size, num_heads, head_dim), jnp.float32),
@@ -373,7 +411,9 @@ def ragged_gqa(
   batch_size, _, num_heads_q, head_dim = query.shape
   _, _, num_heads_kv, _ = key.shape
 
-  query = query.reshape(batch_size, num_heads_kv, num_heads_q // num_heads_kv, head_dim)
+  query = query.reshape(
+      batch_size, num_heads_kv, num_heads_q // num_heads_kv, head_dim
+  )
   key = jnp.swapaxes(key, 1, 2)
   value = jnp.swapaxes(value, 1, 2)
 
