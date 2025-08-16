@@ -264,7 +264,7 @@ class Decoder(nn.Module):
       if use_remat:
         rematted_pipeline = nn.remat(
             pipeline.Pipeline,
-            prevent_cse=True,
+            prevent_cse=False, # This will get scanned
             policy=remat_policy,
             static_argnums=(4, 5, 6),  # Deterministic and model mode are static arguments.
         )
