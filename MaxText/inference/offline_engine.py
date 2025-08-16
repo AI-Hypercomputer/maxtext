@@ -43,7 +43,8 @@ import traceback
 import functools
 import dataclasses
 from enum import Enum
-from typing import Any, List, Tuple, Callable, Optional, Dict, Union
+from typing import Any, Callable
+from collections.abc import Hashable
 from collections import defaultdict
 import time
 
@@ -131,7 +132,7 @@ class PrefillResult:
 
   result_tokens: engine_api.ResultTokens
   slot: int
-  prompt_logp: Optional[jax.Array]
+  prompt_logp: None | jax.Array
 
 
 class PrefillHelper:
@@ -145,7 +146,7 @@ class PrefillHelper:
       self,
       prefill_type: PrefillType,
       engine: MaxEngine,
-      prefill_lengths: List[int],
+      prefill_lengths: list[int],
       batch_prefill_max_batch_size: int = 16,
       rng=None,
   ):
@@ -154,7 +155,7 @@ class PrefillHelper:
     Args:
         type: The type of prefill processor to use ("default" or "batch")
         engine: The MaxEngine instance to use for prefill operations
-        prefill_lengths: List of prompt lengths to support
+        prefill_lengths: list of prompt lengths to support
         batch_prefill_max_batch_size: Maximum number of prompts in one packed
             sequence for batch prefill
     """
@@ -180,7 +181,7 @@ class PrefillHelper:
   @functools.partial(jax.jit, static_argnums=(0), donate_argnames=("decode_state",))
   def _jitted_single_prefill(
       self, params, tokens, slot, true_length, decode_state, rng
-  ) -> Tuple[jax.Array, jax.Array, DecodeState, jax.Array]:
+  ) -> tuple[jax.Array, jax.Array, DecodeState, jax.Array] | tuple[jax.Array, jax.Array, DecodeState]:
     """Prefill a single input."""
     # pylint: disable=protected-access
     first_token, decode_state = self._processor._process(
@@ -313,10 +314,10 @@ class InferenceWorker:
       params: Params | None,
       min_decode_steps: int,
       enable_batch_prefill: bool,
-      devices: List[Any],
+      devices: list[Any],
       tokenizer: Any,
-      eos_ids: List[int],
-      prefill_lengths: List[int],
+      eos_ids: list[int],
+      prefill_lengths: list[int],
       max_decode_length: int,
       batch_prefill_max_batch_size: int,
       is_pw_reshard: bool = True,
@@ -333,7 +334,7 @@ class InferenceWorker:
         devices: JAX devices to use for this worker
         tokenizer: Tokenizer to use
         eos_ids: End-of-sequence token IDs
-        prefill_lengths: List of supported prefill lengths
+        prefill_lengths: list of supported prefill lengths
         max_decode_length: Maximum tokens to generate per sequence
         batch_prefill_max_batch_size: Maximum batch size for batch prefill
         run_as_a_thread: Whether to run in a separate thread
@@ -362,12 +363,12 @@ class InferenceWorker:
     # Inference state (initialized later)
     self.running = False
     self.generated_token_backlog = queue.Queue()
-    self.empty_decode_slots: List[int] = []
-    self.slot_to_id: Dict[int, int] = {}
+    self.empty_decode_slots: list[int] = []
+    self.slot_to_id: dict[int, int] = {}
     self.decode_state: DecodeState = None
-    self.completion_tokens_by_id: Dict[any, List[TokenOutput]] = {}
-    self.prompt_logprobs_by_id: Dict[any, List[np.ndarray]] = {}
-    self.true_lengths: Dict[any, int] = {}
+    self.completion_tokens_by_id: dict[Hashable, list[TokenOutput]] = {}
+    self.prompt_logprobs_by_id: dict[Hashable, list[np.ndarray]] = {}
+    self.true_lengths: dict[Hashable, int] = {}
     # Model components (initialized later)
     self.engine = None
     self.decode_batch_size = None
@@ -405,7 +406,7 @@ class InferenceWorker:
         params: Model parameters
 
     Returns:
-        Tuple of (params, engine)
+        tuple of (params, engine)
     """
     start_time = time.time()
     engine = MaxEngine(self.config, self.devices)
@@ -442,11 +443,11 @@ class InferenceWorker:
     else:
       self.params = jax.device_put(params, destination_sharding)
 
-  def run_inference(self, data: List[InputData], rng=None):
+  def run_inference(self, data: list[InputData], rng=None):
     """Start the inference process.
 
     Args:
-        data: List of InputData objects containing input sequences
+        data: list of InputData objects containing input sequences
         rng: Random number generator key. If None, the previous key will be used.
     """
 
@@ -462,7 +463,7 @@ class InferenceWorker:
     self.running = True
     self.true_lengths = {input.id: input.true_length for input in data}
 
-    max_logging.log("Continous batching started")
+    max_logging.log("Continuous batching started")
 
     self._run_continous_batching(data)
 
@@ -470,12 +471,12 @@ class InferenceWorker:
 
   def _run_continous_batching(
       self,
-      data: List[InputData],
+      data: list[InputData],
   ):
     """Run inference on a batch of inputs.
 
     Args:
-        data: List of InputData objects containing input sequences
+        data: list of InputData objects containing input sequences
     """
 
     # Start token emission thread
@@ -500,7 +501,7 @@ class InferenceWorker:
           model_params=self.params,
           decode_state=self.decode_state,
           decode_slot=slot,
-          input_id=row.id,
+          input_id=int(row.id),
           input_tokens_padded=row.tokens,
           input_true_length=row.true_length,
           prefill_done=self.prefill_done,
@@ -524,7 +525,7 @@ class InferenceWorker:
       token_emission_thread.join()
     max_logging.log(f"Inference worker: token emission thread joined in {time.time() - start_time} seconds")
 
-  def _build_final_outputs(self, input_data: List[InputData]) -> List[CompletionOutput]:
+  def _build_final_outputs(self, input_data: list[InputData]) -> list[CompletionOutput]:
     """Build the final list of CompletionOutput."""
 
     with jax.profiler.TraceAnnotation("offline_engine.batch_inference.return_final_output"):
@@ -560,14 +561,14 @@ class InferenceWorker:
         )
     return completion_outputs
 
-  def prefill_done(self, prefill_result: List[PrefillResult], prompt_ids: List[any], decode_state: DecodeState):
+  def prefill_done(self, prefill_result: list[PrefillResult], prompt_ids: list[any], decode_state: DecodeState):
     """Callback function called when prefill completes.
     This function adds the prefill tokens to the detokenization queue,
     which manages the token emission and decode slot evictions.
 
     Args:
-        prefill_result: List of (token, slot) tuples
-        prompt_ids: List of prompt IDs
+        prefill_result: list of (token, slot) tuples
+        prompt_ids: list of prompt IDs
         decode_state: Updated decode state
     """
     # Update decode state
@@ -646,7 +647,9 @@ class InferenceWorker:
 
       # Get next item from queue with timeout
       try:
-        result_tokens, log_prob, is_first_token, row_id, slot, prompt_logp = self.generated_token_backlog.get(timeout=0.01)
+        result_tokens, log_prob, is_first_token, row_id, slot, prompt_logp = self.generated_token_backlog.get(
+            timeout=0.01
+        )
       except queue.Empty:
         if not self.running:
           break
@@ -708,8 +711,8 @@ class InferenceWorker:
 
     index = len(self.completion_tokens_by_id[prompt_id])
     if prompt_logp is not None:
-      self.prompt_logprobs_by_id[prompt_id] = prompt_logp
-    self.completion_tokens_by_id[prompt_id].append(TokenOutput(result_token, log_prob))
+      self.prompt_logprobs_by_id[prompt_id] = [prompt_logp]
+    self.completion_tokens_by_id[prompt_id].append(TokenOutput(np.array(result_token), np.array(log_prob)))
     return (result_token in self.eos_ids) or (index + 1 == self.max_decode_length)
 
 
@@ -719,12 +722,12 @@ class OfflineEngine:
   def __init__(
       self,
       config: Any,
-      params: Optional[Params] = None,
+      params: None | Params = None,
       enable_batch_prefill: bool = False,
       min_decode_steps: int = 10,
       tokenizer: Any = None,
-      eos_ids: List[int] = None,
-      prefill_lengths: Union[List[int], str] = "auto",
+      eos_ids: list[int] | None = None,
+      prefill_lengths: list[int] | str = "auto",
       batch_prefill_max_batch_size: int = 16,
       mesh: Mesh = None,
       rng: jax.random.PRNGKey = None,
@@ -740,11 +743,11 @@ class OfflineEngine:
             config.scan_layers must be False if this is True
         min_decode_steps: Number of decode steps to perform at a time,
             before checking for completion.
-        eos_ids: List of EOS token IDs for checking sequence completion.
+        eos_ids: list of EOS token IDs for checking sequence completion.
           If None, the tokenizer's EOS token will be used.
         tokenizer: Tokenizer instance for encoding/decoding text. If None,
           will be created using the config if eos_ids is not provided.
-        prefill_lengths: List of expected prefill lengths, or "auto" to
+        prefill_lengths: list of expected prefill lengths, or "auto" to
             automatically determine appropriate lengths from the engine
             config. Input sequences will be padded to the nearest length
             in this list.
@@ -820,33 +823,33 @@ class OfflineEngine:
 
   def batch_inference(
       self,
-      data: Union[List[InputData], List[jax.Array], List[np.ndarray]],
+      data: list[InputData] | list[jax.Array] | list[np.ndarray],
       desc: str = "",
       rng=None,
-  ) -> List[CompletionOutput]:
+  ) -> list[CompletionOutput]:
     """Run inference on a batch of inputs.
 
     Args:
-        data: List of InputData objects, or JAX or numpy arrays.
+        data: list of InputData objects, or JAX or numpy arrays.
             If input is JAX or numpy array, it must not contain padding tokens.
         desc: Description string for logging
         rng: Random number generator key. If None, the previous key will be used.
 
     Returns:
-        List of CompletionOutput objects, one for each input in data
+        list of CompletionOutput objects, one for each input in data
     """
     data = self.prepare_data(data)
 
     return self.worker.run_inference(data, rng)
 
-  def prepare_data(self, data: List[Union[InputData, jax.Array, np.ndarray]]) -> List[InputData]:
+  def prepare_data(self, data: list[InputData | jax.Array | np.ndarray]) -> list[InputData]:
     """Pad and if batch prefill is enabled, sort data by length.
 
     Args:
-        data: List of InputData objects, or JAX or numpy arrays
+        data: list of InputData objects, or JAX or numpy arrays
 
     Returns:
-        List of prepared InputData objects
+        list of prepared InputData objects
     """
     # Convert JAX arrays to numpy arrays
     if isinstance(data[0], jax.Array):
@@ -858,7 +861,7 @@ class OfflineEngine:
           "When you provide JAX/numpy arrays to Offline Engine, "
           "make sure that the arrays are not padded with padding tokens."
       )
-      data = [InputData(id=i, tokens=array, true_length=len(array)) for i, array in enumerate(data)]
+      data = [InputData(id=str(i), tokens=array, true_length=len(array)) for i, array in enumerate(data)]
 
     # Make sure all data id is unique
     if len(data) != len({item.id for item in data}):
@@ -871,15 +874,15 @@ class OfflineEngine:
 
     return data
 
-  def pad_data(self, data: List[InputData]) -> List[InputData]:
+  def pad_data(self, data: list[InputData]) -> list[InputData]:
     """For each input, pad it to the next length in self.prefill_lengths
     that is greater than or equal to its true length.
 
     Args:
-        data: List of InputData objects
+        data: list of InputData objects
 
     Returns:
-        List of padded InputData objects
+        list of padded InputData objects
     """
     padded_data = []
 
