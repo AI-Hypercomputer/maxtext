@@ -19,17 +19,16 @@ IF YOU MODIFY THIS FILE YOU SHOULD ALSO ADD CORRESPONDING MODIFICATIONS TO
 UserFacingNameToSystemCharacteristics in xpk/xpk.py !!!!! """
 
 from dataclasses import dataclass
-from typing import Optional
 
 
 @dataclass
 class SystemCharacteristics:
   platform: str
-  topology_name: Optional[str]
-  chip_config_name: Optional[str]  # 'megacore' or 'default'
-  chips_per_host_bounds: Optional[tuple]  # number of chips on each host in each dimension.
+  topology_name: None | str
+  chip_config_name: None | str  # 'megacore' or 'default'
+  chips_per_host_bounds: None | tuple  # number of chips on each host in each dimension.
   devices_per_slice: int
-  wrap: Optional[tuple]  # wrap around for each dimension (i.e., locus type)
+  wrap: None | tuple  # wrap around for each dimension (i.e., locus type)
 
 
 UserFacingNameToSystemCharacteristics = {

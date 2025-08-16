@@ -15,7 +15,7 @@
 # pytype: skip-file
 # pylint: disable=missing-module-docstring, bare-except, consider-using-generator, missing-function-docstring
 from collections import OrderedDict
-from typing import Any, Union
+from typing import Any
 from math import prod
 import math
 import os
@@ -307,7 +307,9 @@ def validate_llama4_config(keys: dict):
 
   """
   if keys["capacity_factor"] >= 0:
-    raise ValueError("Llama4 decoder has not been tested with capacity_factor >= 0 -- please set that value to -1 for now!")
+    raise ValueError(
+        "Llama4 decoder has not been tested with capacity_factor >= 0 -- please set that value to -1 for now!"
+    )
   if keys["num_experts_per_tok"] > 1:
     raise ValueError("Only top-1 routing is supported for Llama4 for now!")
   if keys["base_num_decoder_layers"] % keys["interleave_moe_layer_step"] != 0:
@@ -414,7 +416,7 @@ def validate_and_assign_remat_tensors(keys):
   return keys
 
 
-def _lists_to_tuples(l: list[Any]) -> Union[tuple[Any], list[Any]]:
+def _lists_to_tuples(l: list[Any]) -> tuple[Any] | list[Any]:
   return tuple(_lists_to_tuples(x) for x in l) if isinstance(l, list) else l
 
 

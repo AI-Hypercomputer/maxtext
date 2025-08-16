@@ -64,7 +64,7 @@ from MaxText.utils import gcs_utils
 
 from jetstream.core.proto import jetstream_pb2
 from jetstream.core.proto import jetstream_pb2_grpc
-from tqdm.asyncio import tqdm
+import tqdm.asyncio
 
 _GRPC_KEEPALIVE_TIMEOUT_MS = 10000
 _GRPC_MAX_ATTEMPTS = 5
@@ -112,7 +112,7 @@ async def send_request(config, request, stub, tokenizer, progress_bar):  # pylin
 
 async def run_inference(config, requests, tokenizer):  # pylint: disable=redefined-outer-name
   """Asynchronously runs inference on JetStream server."""
-  progress_bar = tqdm(total=len(requests))
+  progress_bar = tqdm.asyncio.tqdm(total=len(requests))
   progress_bar.set_description(f"Running inference on {len(requests)} prompts")
 
   server_url = f"localhost:{config.jetstream_server_port}"
@@ -283,7 +283,9 @@ if __name__ == "__main__":
   upload_to_gcs_parser.add_argument(
       "--gcs-bucket", type=str, required=True, help="Name of GCS bucket to upload generated dataset."
   )
-  upload_to_gcs_parser.add_argument("--gcs-data-path", type=str, required=True, help="Path to store dataset in GCS bucket.")
+  upload_to_gcs_parser.add_argument(
+      "--gcs-data-path", type=str, required=True, help="Path to store dataset in GCS bucket."
+  )
 
   # Subparser to upload dataset to Hugging Face
   upload_to_hf_parser = subparsers.add_parser(
