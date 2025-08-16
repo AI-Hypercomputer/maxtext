@@ -14,7 +14,7 @@
 """ Offline inference for mlperf """
 
 from collections import defaultdict
-from typing import Any, List, Tuple, Callable
+from typing import Any, Callable
 import dataclasses
 import functools
 import logging
@@ -130,7 +130,7 @@ class PrefillHelper:
       input_tokens_padded: jax.Array,
       input_true_length: int,
       max_length: int,
-      prefill_done: Callable[[List[Tuple[engine_api.ResultTokens, int]], List[int], DecodeState], None],
+      prefill_done: Callable[[list[tuple[engine_api.ResultTokens, int]], list[int], DecodeState], None],
       rng: PRNGKeyType,
   ) -> None:
     """Prefill helper process runner"""
@@ -167,7 +167,7 @@ class PrefillHelper:
       self,
       model_params: Params,
       decode_state: DecodeState,
-      prefill_done: Callable[[List[Tuple[engine_api.ResultTokens, int]], List[int], DecodeState], None],
+      prefill_done: Callable[[list[tuple[engine_api.ResultTokens, int]], list[int], DecodeState], None],
   ) -> None:
     """Finalize helper process"""
     if self._type == "default":
@@ -228,14 +228,18 @@ class OfflineInference:
     self.init_decode_state()
 
     self.prefill.aot_compile(
-        max_length, self.params, self.engine.param_layouts, self.engine.decode_state_layouts, self.engine.decode_state_shapes
+        max_length,
+        self.params,
+        self.engine.param_layouts,
+        self.engine.decode_state_layouts,
+        self.engine.decode_state_shapes,
     )
 
     self.batch_inference(warmup_samples, desc="warmup")
 
   def batch_inference_with_callback(
       self,
-      data: List[InputData],
+      data: list[InputData],
       emit_first_token: Callable[[str, int], bool],
       emit_token: Callable[[str, int], bool],
       desc: str,
@@ -368,10 +372,14 @@ class OfflineInference:
     self.live = False
     detokenize_thread.join()
     log.info(
-        "summary-%s-prefills-%d-decodes-%d-detokens-%d completed.", desc, counter.prefill, counter.decode, counter.detokenize
+        "summary-%s-prefills-%d-decodes-%d-detokens-%d completed.",
+        desc,
+        counter.prefill,
+        counter.decode,
+        counter.detokenize,
     )
 
-  def batch_inference(self, data: List[InputData], desc="") -> dict[str, List[int]]:
+  def batch_inference(self, data: list[InputData], desc="") -> dict[str, list[int]]:
     """data is list of obj with id, tokens, and true length"""
     data_dict = defaultdict(list)
     log.info("sorting data")
