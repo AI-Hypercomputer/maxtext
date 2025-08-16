@@ -85,12 +85,12 @@ class DecoderLayer(nn.Module):
   ):
     cfg = self.config
     mesh = self.mesh
-    if model_mode == MODEL_MODE_PREFILL:
+    if self.model_mode == MODEL_MODE_PREFILL:
       logical_axis_names = ("activation_batch", "prefill_activation_length", "activation_embed")
     else:
       logical_axis_names = ("activation_batch", "activation_length", "activation_embed")
 
-    if model_mode == MODEL_MODE_PREFILL:
+    if self.model_mode == MODEL_MODE_PREFILL:
       inputs = nn.with_logical_constraint(inputs, logical_axis_names)
     else:
       inputs = nn.with_logical_constraint(inputs, logical_axis_names)
@@ -105,7 +105,7 @@ class DecoderLayer(nn.Module):
         epsilon=cfg.normalization_layer_epsilon,
         kernel_axes=("norm",),
     )(inputs)
-    if model_mode == MODEL_MODE_PREFILL:
+    if self.model_mode == MODEL_MODE_PREFILL:
       lnx = nn.with_logical_constraint(lnx, logical_axis_names)
     else:
       lnx = nn.with_logical_constraint(lnx, logical_axis_names)
@@ -133,7 +133,7 @@ class DecoderLayer(nn.Module):
         ar_cache_axis_order=tuple(map(int, cfg.ar_cache_axis_order.split(","))),
         compute_axis_order=tuple(map(int, cfg.compute_axis_order.split(","))),
         reshape_q=cfg.reshape_q,
-        model_mode=model_mode,
+        model_mode=self.model_mode,
     )
 
     attention_lnx = attention_layer(
@@ -142,10 +142,10 @@ class DecoderLayer(nn.Module):
         decoder_positions,
         decoder_segment_ids=decoder_segment_ids,
         deterministic=deterministic,
-        model_mode=model_mode,
+        model_mode=self.model_mode,
     )
 
-    if model_mode == MODEL_MODE_PREFILL:
+    if self.model_mode == MODEL_MODE_PREFILL:
       attention_lnx = nn.with_logical_constraint(attention_lnx, logical_axis_names)
     else:
       attention_lnx = nn.with_logical_constraint(attention_lnx, logical_axis_names)
@@ -159,11 +159,11 @@ class DecoderLayer(nn.Module):
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
         name="mlp",
-        model_mode=model_mode,
+        model_mode=self.model_mode,
         config=cfg,
         quant=self.quant,
     )(lnx, deterministic=deterministic)
-    if model_mode == MODEL_MODE_PREFILL:
+    if self.model_mode == MODEL_MODE_PREFILL:
       mlp_lnx = nn.with_logical_constraint(mlp_lnx, logical_axis_names)
     else:
       mlp_lnx = nn.with_logical_constraint(mlp_lnx, logical_axis_names)
@@ -175,7 +175,7 @@ class DecoderLayer(nn.Module):
     )
 
     layer_output = next_layer_addition_dropped_out + inputs
-    if model_mode == MODEL_MODE_PREFILL:
+    if self.model_mode == MODEL_MODE_PREFILL:
       layer_output = nn.with_logical_constraint(
           layer_output,
           logical_axis_names,
@@ -221,13 +221,13 @@ class SequentialBlockDecoderLayers(nn.Module):
   ) -> jnp.ndarray:
     for lyr in range(self.num_decoder_layers):
       inputs = self.decoder_layer(
-          config=self.config, mesh=self.mesh, name=f"layers_{lyr}", quant=self.quant, model_mode=model_mode
+          config=self.config, mesh=self.mesh, name=f"layers_{lyr}", quant=self.quant, model_mode=self.model_mode
       )(
           inputs,
           decoder_segment_ids,
           decoder_positions,
           deterministic,
-          model_mode,
+          self.model_mode,
           slot=slot,
           page_state=page_state,
       )
@@ -341,7 +341,7 @@ class Decoder(nn.Module):
       case DecoderBlockType.DEFAULT:
         return [DecoderLayer]
       case DecoderBlockType.LLAMA2:
-        return [llama2.LlamaDecoderLayer]
+        return [llama2.LlamaDecoderLayerToLinen]
       case DecoderBlockType.MISTRAL:
         # TODO(ranran): update to Mistral with sliding window attention
         return [mistral.MistralDecoderLayer]
@@ -446,7 +446,14 @@ class Decoder(nn.Module):
         length=length,
         metadata_params={nn.PARTITION_NAME: metadata_axis_name},
     )
-    return scan_fn(config=cfg, mesh=mesh, name=metadata_axis_name, quant=self.quant, model_mode=model_mode, **kwargs)
+    return scan_fn(
+        config=cfg,
+        mesh=mesh,
+        name=metadata_axis_name,
+        quant=self.quant,
+        model_mode=self.model_mode,
+        **kwargs
+    )
 
   def get_pipeline_stage_module(self, decoder_blocks):
     """get pipeline stage module"""
@@ -498,7 +505,7 @@ class Decoder(nn.Module):
     """Applies token and positional embeddings to the input tokens."""
     cfg = self.config
 
-    y = self.shared_embedding(decoder_input_tokens.astype("int32"), model_mode=model_mode)
+    y = self.shared_embedding(decoder_input_tokens.astype("int32"), model_mode=self.model_mode)
 
     # Merge the image embeddings with the text embeddings for multimodal models
     if image_embeddings is not None and cfg.use_multimodal:
@@ -526,7 +533,7 @@ class Decoder(nn.Module):
           embedding_init=nn.initializers.normal(stddev=1.0),
           name="position_embedder",
           config=cfg,
-      )(decoder_positions, model_mode=model_mode)
+      )(decoder_positions, model_mode=self.model_mode)
     return y
 
   @nn.compact
@@ -572,7 +579,7 @@ class Decoder(nn.Module):
       )(
           y
       )  # We do not quantize the logits matmul.
-    if model_mode in (MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE):
+    if self.model_mode in (MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE):
       logits = nn.with_logical_constraint(logits, (None, None, "activation_vocab"))
     else:
       logits = nn.with_logical_constraint(
@@ -604,7 +611,7 @@ class Decoder(nn.Module):
 
     # [batch, length] -> [batch, length, emb_dim]
     y = self._apply_embedding(
-        decoder_input_tokens, decoder_positions, deterministic, model_mode, image_embeddings, bidirectional_mask
+        decoder_input_tokens, decoder_positions, deterministic, self.model_mode, image_embeddings, bidirectional_mask
     )
 
     policy = self.get_remat_policy()
@@ -614,12 +621,12 @@ class Decoder(nn.Module):
         decoder_segment_ids,
         decoder_positions,
         deterministic,
-        model_mode,
+        self.model_mode,
     )
     if cfg.using_pipeline_parallelism:
       if cfg.pipeline_fsdp_ag_once:
         partition_spec = self.pipeline_module.get_weight_sharding(
-            y, decoder_segment_ids, decoder_positions, deterministic, model_mode
+            y, decoder_segment_ids, decoder_positions, deterministic, self.model_mode
         )
       else:
         partition_spec = None  # This partition spec is only used for the fsdp_ag_once feature.
@@ -639,7 +646,7 @@ class Decoder(nn.Module):
               "dense_layers",
               mesh,
               in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
-              model_mode=model_mode,
+              model_mode=self.model_mode,
           )(y, *broadcast_args)
           if num_moe_layers_outside_pp > 0:
             y, _ = self.scan_decoder_layers(
@@ -649,7 +656,7 @@ class Decoder(nn.Module):
                 "moe_layers",
                 mesh,
                 in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
-                model_mode=model_mode,
+                model_mode=self.model_mode,
             )(y, *broadcast_args)
         y = self.pipeline_module(y, *broadcast_args, partition_spec=partition_spec)
       else:  # Not DeepSeek
@@ -665,7 +672,7 @@ class Decoder(nn.Module):
                 "layers_outside_pipeline",
                 mesh,
                 in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
-                model_mode=model_mode,
+                model_mode=self.model_mode,
             )(y, *broadcast_args)
     else:
       if cfg.scan_layers:
@@ -685,7 +692,7 @@ class Decoder(nn.Module):
               "dense_layers",
               mesh,
               in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
-              model_mode=model_mode,
+              model_mode=self.model_mode,
           )(y, *broadcast_args)
           moe_layer = RemattedBlockLayers[1]
           moe_layer.__call__ = functools.partial(moe_layer.__call__, **layer_call_kwargs)
@@ -697,7 +704,7 @@ class Decoder(nn.Module):
               "moe_layers",
               mesh,
               in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
-              model_mode=model_mode,
+              model_mode=self.model_mode,
           )(y, *broadcast_args)
         elif cfg.decoder_block == DecoderBlockType.GEMMA3:
           y = self._apply_gemma3_scanned_blocks(
@@ -705,7 +712,7 @@ class Decoder(nn.Module):
               decoder_segment_ids,
               decoder_positions,
               deterministic,
-              model_mode,
+              self.model_mode,
               bidirectional_mask,
               previous_chunk,
               page_state,
@@ -728,7 +735,7 @@ class Decoder(nn.Module):
               "layers",
               mesh,
               in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
-              model_mode=model_mode,
+              model_mode=self.model_mode,
               **layer_kwargs,
           )(y, *broadcast_args)
       else:
@@ -749,7 +756,7 @@ class Decoder(nn.Module):
                   decoder_segment_ids,
                   decoder_positions,
                   deterministic,
-                  model_mode,
+                  self.model_mode,
                   previous_chunk=previous_chunk,
                   page_state=page_state,
                   slot=slot,
@@ -777,7 +784,7 @@ class Decoder(nn.Module):
                 decoder_segment_ids,
                 decoder_positions,
                 deterministic,
-                model_mode,
+                self.model_mode,
                 previous_chunk=previous_chunk,
                 page_state=page_state,
                 slot=slot,
@@ -789,7 +796,7 @@ class Decoder(nn.Module):
     # After the final transformer layer, `y` holds the raw, un-normalized hidden state.
     hidden_state = y
 
-    logits = self._apply_output_head(hidden_state, deterministic, model_mode)
+    logits = self._apply_output_head(hidden_state, deterministic, self.model_mode)
 
     # The API of the Decoder is now a tuple, providing both the main output
     # and the raw hidden state needed for auxiliary tasks.
@@ -828,7 +835,7 @@ class Decoder(nn.Module):
           decoder_segment_ids,
           decoder_positions,
           deterministic,
-          model_mode,
+          self.model_mode,
       )
       y, _ = self.scan_decoder_layers(
           cfg,
@@ -837,7 +844,7 @@ class Decoder(nn.Module):
           "layers",
           mesh,
           in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
-          model_mode=model_mode,
+          model_mode=self.model_mode,
           **layer_kwargs,
       )(y, *broadcast_args, **layer_call_kwargs)
 
@@ -854,7 +861,7 @@ class Decoder(nn.Module):
           decoder_segment_ids,
           decoder_positions,
           deterministic,
-          model_mode,
+          self.model_mode,
           previous_chunk=previous_chunk,
           page_state=page_state,
           slot=slot,
