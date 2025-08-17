@@ -33,6 +33,7 @@ from MaxText.layers.attentions import attention_as_linen
 from MaxText.layers.quantizations import AqtQuantization as Quant
 from MaxText.layers.normalizations import rms_norm
 from MaxText.common_types import MODEL_MODE_PREFILL
+from MaxText.sharding import create_sharding_rules
 
 
 # -----------------------------------------
@@ -62,6 +63,7 @@ class LlamaDecoderLayer(nn.Module):
   ):
     cfg = self.config
     mesh = self.mesh
+    sharding = create_sharding_rules(self.config.sharding_rules)
 
     if model_mode == MODEL_MODE_PREFILL:
       activation_axis_names = ("activation_batch", "prefill_activation_norm_length", "activation_embed")

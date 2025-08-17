@@ -22,7 +22,6 @@ import jax
 from jax import lax
 import jax.numpy as jnp
 
-from flax import linen as nn
 from flax import nnx
 
 from MaxText import max_logging
@@ -30,6 +29,7 @@ from MaxText import max_utils
 from MaxText.common_types import MODEL_MODE_PREFILL, MODEL_MODE_TRAIN, Array, Config, DType
 from MaxText.layers import nnx_wrappers
 from MaxText.layers.initializers import Initializer, default_embed_init, variable_to_logically_partitioned
+from MaxText.sharding import MeshSharding, WT, ACT, LogicalAxisRulesSharding
 
 _MAX_WAVELENGTH = 10_000
 
@@ -52,6 +52,7 @@ def embed_as_linen(
     attend_dtype: Optional[DType] = None,
     embedding_init: Initializer = default_embed_init,
     name: str | None = None,
+    sharding: MeshSharding | None = None,
 ):
   """Initializes the Embed NNX module and returns it as a Linen module.
 
@@ -83,6 +84,7 @@ def embed_as_linen(
       embedding_init=embedding_init,
       metadata_fn=variable_to_logically_partitioned,
       name=name,
+      sharding=sharding,
   )
 
 
@@ -102,6 +104,7 @@ class Embed(nnx.Module):
       # Not used in Embed but passed in by nnx.bridge.to_linen.
       # TODO: Remove when bridge no longer needed
       rngs: nnx.Rngs,
+      sharding: MeshSharding | None = None,
   ):
     """Initializes the Embed module.
 
@@ -121,10 +124,11 @@ class Embed(nnx.Module):
     self.cast_input_dtype = cast_input_dtype
     self.dtype = dtype
     self.attend_dtype = attend_dtype
+    self.sharding = sharding if sharding else LogicalAxisRulesSharding()
 
     self.embedding = nnx.Param(
         embedding_init(rngs.params(), (self.num_embeddings, self.num_features), self.config.weight_dtype),
-        sharding=("vocab", "embed"),
+        sharding=self.sharding.get(t="embedding", a=("vocab", "embed"), tt=WT),
     )
 
 
@@ -153,13 +157,20 @@ class Embed(nnx.Module):
     else:
       output = jnp.asarray(embedding, self.dtype)[inputs]
 
+    # TODO: this and the conditional can  be deleted when LogicalAxisRulesSharding is no longer needed
+    #       (for backwards compatibility with parent modules which still use it, e.g. Mixtral), replaced with
+    #       self.sharding.shard(output, t="embed_output", tt=ACT, mode=model_mode)
     output_prefill_axis_names = ("activation_embed_and_logits_batch", "prefill_activation_length", "activation_embed")
     output_default_axis_names = ("activation_embed_and_logits_batch", "activation_length", "activation_embed")
 
+    # from flax import linen as nn
+    # test = nn.with_logical_constraint(output, output_prefill_axis_names)
+    # return test
+
     if model_mode == MODEL_MODE_PREFILL:
-      output = nn.with_logical_constraint(output, output_prefill_axis_names)
+      output = self.sharding.shard(output, t="embed_output", a=output_prefill_axis_names, tt=ACT)
     else:
-      output = nn.with_logical_constraint(output, output_default_axis_names)
+      output = self.sharding.shard(output, t="embed_output", a=output_default_axis_names, tt=ACT)
     return output
 
   def attend(self, query: Array) -> Array:
@@ -849,7 +860,7 @@ class LlamaVisionRotaryEmbedding(nnx.Module):
     """
     if len(inputs.shape) != 4:
       raise ValueError(
-          """Input is assumed to be a rank 4 tensor of shape [batch_size_times_tiles, num_patches_incl_cls, 
+          """Input is assumed to be a rank 4 tensor of shape [batch_size_times_tiles, num_patches_incl_cls,
           num_heads, head_dim]."""
       )
 
