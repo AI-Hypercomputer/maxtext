@@ -1,4 +1,4 @@
-# Copyright 2023–2025 Google LLC
+# Copyright 2025 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -22,112 +22,90 @@ from jax.ad_checkpoint import checkpoint_name
 from jax.sharding import Mesh
 import jax.numpy as jnp
 
-from flax import linen as nn
+from flax import nnx
 
-from MaxText.common_types import Config
+from MaxText.common_types import Config, MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE
 from MaxText.layers import attentions
 from MaxText.layers import initializers
 from MaxText.layers import linears
 from MaxText.layers import moe
+from MaxText.layers import nnx_wrappers
 from MaxText.layers import quantizations
-from MaxText.layers.normalizations import rms_norm
+from MaxText.layers.normalizations import RMSNorm
 from MaxText.layers.quantizations import AqtQuantization as Quant
 from MaxText.inference import page_manager
 
 # -----------------------------------------
-# Helper functions for Qwen3 layers
+# Self-Attention Block for Qwen3
 # -----------------------------------------
 
 
-def self_attention_with_norm(
-    inputs: jnp.ndarray,
-    cfg: Config,
-    mesh: Mesh,
-    quant: Optional[Quant],
-    decoder_segment_ids: Optional[jnp.ndarray],
-    decoder_positions: Optional[jnp.ndarray],
-    deterministic: bool,
-    model_mode: str,
-):
-  """A helper function for self-attention block with normalization."""
+class Qwen3SelfAttentionWithNorm(nnx.Module):
+  """A self-attention block with pre and post normalization."""
 
-  inputs_checkpoint = checkpoint_name(inputs, "decoder_layer_input")
+  def __init__(
+      self,
+      config: Config,
+      mesh: Mesh,
+      quant: Optional[Quant],
+      model_mode: str,
+      rngs: nnx.Rngs,
+  ):
+    self.config = config
+    self.mesh = mesh
+    self.quant = quant
+    cfg = self.config
 
-  # Corresponds to Qwen3's `input_layernorm`
-  lnx = rms_norm(
-      num_features=inputs.shape[-1],
-      dtype=cfg.dtype,
-      weight_dtype=cfg.weight_dtype,
-      name="pre_self_attention_layer_norm",
-      epsilon=cfg.normalization_layer_epsilon,
-      kernel_axes=("norm",),
-  )(inputs_checkpoint)
-  lnx = nn.with_logical_constraint(lnx, ("activation_batch", "activation_length", "activation_embed"))
+    if model_mode == MODEL_MODE_PREFILL:
+      seq_len = cfg.max_prefill_predict_length
+    elif model_mode == MODEL_MODE_AUTOREGRESSIVE:
+      seq_len = 1
+    else:
+      seq_len = cfg.max_target_length
 
-  # Self-attention block
-  attention_layer = attentions.attention_as_linen(
-      config=cfg,
-      num_query_heads=cfg.num_query_heads,
-      num_kv_heads=cfg.num_kv_heads,
-      head_dim=cfg.head_dim,
-      max_target_length=cfg.max_target_length,
-      max_prefill_predict_length=cfg.max_prefill_predict_length,
-      attention_kernel=cfg.attention,
-      inputs_q_shape=lnx.shape,
-      inputs_kv_shape=lnx.shape,
-      mesh=mesh,
-      dtype=cfg.dtype,
-      weight_dtype=cfg.weight_dtype,
-      dropout_rate=cfg.dropout_rate,
-      name="self_attention",
-      quant=quant,
-      kv_quant=quantizations.configure_kv_quant(cfg),
-      use_qk_norm=cfg.use_qk_norm,
-      query_pre_attn_scalar=(cfg.head_dim**-0.5),  # Qwen3 specific scaling
-      model_mode=model_mode,
-  )
+    dummy_inputs_shape = (cfg.micro_batch_size_to_train_on, seq_len, cfg.emb_dim)
 
-  attention_output = attention_layer(
-      lnx,  # inputs_q
-      lnx,  # inputs_kv
-      decoder_positions,
-      decoder_segment_ids=decoder_segment_ids,
-      deterministic=deterministic,
-      model_mode=model_mode,
-  )
-  attention_output = nn.with_logical_constraint(
-      attention_output, ("activation_batch", "activation_length", "activation_embed")
-  )
+    self.pre_self_attention_layer_norm = RMSNorm(
+        num_features=cfg.emb_dim,
+        dtype=cfg.dtype,
+        weight_dtype=cfg.weight_dtype,
+        name="pre_self_attention_layer_norm",
+        epsilon=cfg.normalization_layer_epsilon,
+        kernel_axes=("norm",),
+        rngs=rngs,
+    )
+    self.self_attention = attentions.Attention(
+        config=cfg,
+        num_query_heads=cfg.num_query_heads,
+        num_kv_heads=cfg.num_kv_heads,
+        head_dim=cfg.head_dim,
+        max_target_length=cfg.max_target_length,
+        max_prefill_predict_length=cfg.max_prefill_predict_length,
+        attention_kernel=cfg.attention,
+        inputs_q_shape=dummy_inputs_shape,
+        inputs_kv_shape=dummy_inputs_shape,
+        mesh=mesh,
+        dtype=cfg.dtype,
+        weight_dtype=cfg.weight_dtype,
+        dropout_rate=cfg.dropout_rate,
+        name="self_attention",
+        quant=quant,
+        kv_quant=quantizations.configure_kv_quant(cfg),
+        use_qk_norm=cfg.use_qk_norm,
+        query_pre_attn_scalar=(cfg.head_dim**-0.5),  # Qwen3 specific scaling
+        model_mode=model_mode,
+        rngs=rngs,
+    )
+    self.post_self_attention_layer_norm = RMSNorm(
+        num_features=cfg.emb_dim,
+        dtype=cfg.dtype,
+        weight_dtype=cfg.weight_dtype,
+        name="post_self_attention_layer_norm",
+        epsilon=cfg.normalization_layer_epsilon,
+        kernel_axes=("norm",),
+        rngs=rngs,
+    )
 
-  # Residual connection after attention
-  residual_after_attention = inputs_checkpoint + attention_output
-
-  # Post Attention LayerNorm (corresponds to Qwen3's `post_attention_layernorm`)
-  hidden_states = rms_norm(
-      num_features=residual_after_attention.shape[-1],
-      dtype=cfg.dtype,
-      weight_dtype=cfg.weight_dtype,
-      name="post_self_attention_layer_norm",
-      epsilon=cfg.normalization_layer_epsilon,
-      kernel_axes=("norm",),
-  )(residual_after_attention)
-  hidden_states = nn.with_logical_constraint(hidden_states, ("activation_batch", "activation_length", "activation_embed"))
-
-  return hidden_states, residual_after_attention
-
-
-# -----------------------------------------
-# The Dense Decoder Layer for Qwen3
-# -----------------------------------------
-class Qwen3DecoderLayer(nn.Module):
-  """Qwen3 Transformer decoder layer (dense)."""
-
-  config: Config
-  mesh: Mesh
-  model_mode: str
-  quant: Optional[Quant] = None
-
-  @nn.compact
   def __call__(
       self,
       inputs: jnp.ndarray,
@@ -135,26 +113,64 @@ class Qwen3DecoderLayer(nn.Module):
       decoder_positions: Optional[jnp.ndarray],
       deterministic: bool,
       model_mode: str,
-      previous_chunk=None,
-      page_state: Optional[page_manager.PageState] = None,
-      slot: Optional[int] = None,
+      activation_axis_names: tuple[str, ...],
   ):
+    """Helper function for self-attention block with normalization."""
+    inputs_checkpoint = checkpoint_name(inputs, "decoder_layer_input")
+
+    lnx = self.pre_self_attention_layer_norm(inputs_checkpoint)
+    lnx = nnx.with_logical_constraint(lnx, activation_axis_names)
+
+    attention_output = self.self_attention(
+        lnx,  # inputs_q
+        lnx,  # inputs_kv
+        decoder_positions,
+        decoder_segment_ids=decoder_segment_ids,
+        deterministic=deterministic,
+        model_mode=model_mode,
+    )
+    attention_output = nnx.with_logical_constraint(attention_output, activation_axis_names)
+
+    residual_after_attention = inputs_checkpoint + attention_output
+
+    hidden_states = self.post_self_attention_layer_norm(residual_after_attention)
+    hidden_states = nnx.with_logical_constraint(hidden_states, activation_axis_names)
+
+    return hidden_states, residual_after_attention
+
+
+# -----------------------------------------
+# The Dense Decoder Layer for Qwen3
+# -----------------------------------------
+
+
+class Qwen3DecoderLayer(nnx.Module):
+  """Qwen3 Transformer decoder layer (dense)."""
+
+  def __init__(
+      self,
+      config: Config,
+      mesh: Mesh,
+      model_mode: str,
+      rngs: nnx.Rngs,
+      quant: Optional[Quant] = None,
+  ):
+    self.config = config
+    self.mesh = mesh
+    self.quant = quant
+    self.model_mode = model_mode
     cfg = self.config
 
-    hidden_states, residual_after_attention = self_attention_with_norm(
-        inputs,
-        cfg,
-        self.mesh,
-        self.quant,
-        decoder_segment_ids,
-        decoder_positions,
-        deterministic,
-        model_mode,
+    self.attention = Qwen3SelfAttentionWithNorm(
+        config=cfg,
+        mesh=self.mesh,
+        quant=self.quant,
+        model_mode=self.model_mode,
+        rngs=rngs,
     )
 
-    # Dense MLP block
-    mlp_output = linears.mlp_block(
-        in_features=hidden_states.shape[-1],
+    self.mlp = linears.MlpBlock(
+        in_features=cfg.emb_dim,
         intermediate_dim=cfg.mlp_dim,
         activations=cfg.mlp_activations,
         intermediate_dropout_rate=cfg.dropout_rate,
@@ -163,33 +179,15 @@ class Qwen3DecoderLayer(nn.Module):
         name="mlp",
         config=cfg,
         quant=self.quant,
-    )(hidden_states, deterministic=deterministic)
-
-    # Final residual connection
-    layer_output = residual_after_attention + mlp_output
-    layer_output = nn.with_logical_constraint(
-        layer_output,
-        ("activation_batch", "activation_length", "activation_embed"),
+        model_mode=model_mode,
+        rngs=rngs,
     )
 
-    if cfg.scan_layers:
-      return layer_output, None
+    if self.model_mode == MODEL_MODE_PREFILL:
+      self.activation_axis_names = ("activation_batch", "prefill_activation_length", "activation_embed")
     else:
-      return layer_output
+      self.activation_axis_names = ("activation_batch", "activation_length", "activation_embed")
 
-
-# -----------------------------------------
-# The MoE Decoder Layer for Qwen3
-# -----------------------------------------
-class Qwen3MoeDecoderLayer(nn.Module):
-  """Qwen3 Transformer decoder layer (MoE)."""
-
-  config: Config
-  mesh: Mesh
-  model_mode: str
-  quant: Optional[Quant] = None
-
-  @nn.compact
   def __call__(
       self,
       inputs: jnp.ndarray,
@@ -203,19 +201,56 @@ class Qwen3MoeDecoderLayer(nn.Module):
   ):
     cfg = self.config
 
-    hidden_states, residual_after_attention = self_attention_with_norm(
+    hidden_states, residual_after_attention = self.attention(
         inputs,
-        cfg,
-        self.mesh,
-        self.quant,
         decoder_segment_ids,
         decoder_positions,
         deterministic,
         model_mode,
+        self.activation_axis_names,
     )
 
-    # Mixture of Experts block
-    mlp_output, load_balance_loss = moe.get_routed_moe(
+    mlp_output = self.mlp(hidden_states, deterministic=deterministic)
+
+    layer_output = residual_after_attention + mlp_output
+    layer_output = nnx.with_logical_constraint(layer_output, self.activation_axis_names)
+
+    if cfg.scan_layers:
+      return layer_output, None
+    return layer_output
+
+
+# -----------------------------------------
+# The MoE Decoder Layer for Qwen3
+# -----------------------------------------
+
+
+class Qwen3MoeDecoderLayer(nnx.Module):
+  """Qwen3 Transformer decoder layer (MoE)."""
+
+  def __init__(
+      self,
+      config: Config,
+      mesh: Mesh,
+      model_mode: str,
+      rngs: nnx.Rngs,
+      quant: Optional[Quant] = None,
+  ):
+    self.config = config
+    self.mesh = mesh
+    self.quant = quant
+    self.model_mode = model_mode
+    cfg = self.config
+
+    self.attention = Qwen3SelfAttentionWithNorm(
+        config=cfg,
+        mesh=self.mesh,
+        quant=self.quant,
+        model_mode=self.model_mode,
+        rngs=rngs,
+    )
+
+    self.moe_block = moe.MoeBlock(
         config=cfg,
         num_experts=cfg.num_experts,
         num_experts_per_tok=cfg.num_experts_per_tok,
@@ -227,21 +262,58 @@ class Qwen3MoeDecoderLayer(nn.Module):
         weight_dtype=cfg.weight_dtype,
         name="moe_block",
         quant=self.quant,
-    )(hidden_states)
+        rngs=rngs,
+    )
+
+    if self.model_mode == MODEL_MODE_PREFILL:
+      self.activation_axis_names = ("activation_batch", "prefill_activation_length", "activation_embed")
+    else:
+      self.activation_axis_names = ("activation_batch", "activation_length", "activation_embed")
+
+  def __call__(
+      self,
+      inputs: jnp.ndarray,
+      decoder_segment_ids: Optional[jnp.ndarray],
+      decoder_positions: Optional[jnp.ndarray],
+      deterministic: bool,
+      model_mode: str,
+      previous_chunk=None,
+      page_state: Optional[page_manager.PageState] = None,
+      slot: Optional[int] = None,
+  ):
+    cfg = self.config
+
+    hidden_states, residual_after_attention = self.attention(
+        inputs,
+        decoder_segment_ids,
+        decoder_positions,
+        deterministic,
+        model_mode,
+        self.activation_axis_names,
+    )
+
+    mlp_output, load_balance_loss = self.moe_block(hidden_states)
 
     if load_balance_loss is not None:
       self.sow("intermediates", "moe_lb_loss", load_balance_loss)
 
-    mlp_output = nn.with_logical_constraint(mlp_output, ("activation_batch", "activation_length", "activation_embed"))
+    mlp_output = nnx.with_logical_constraint(mlp_output, self.activation_axis_names)
 
     # Final residual connection
     layer_output = residual_after_attention + mlp_output
-    layer_output = nn.with_logical_constraint(
-        layer_output,
-        ("activation_batch", "activation_length", "activation_embed"),
-    )
+    layer_output = nnx.with_logical_constraint(layer_output, self.activation_axis_names)
 
     if cfg.scan_layers:
       return layer_output, None
-    else:
-      return layer_output
+    return layer_output
+
+
+# Linen wrappers for backward compatibility
+Qwen3DecoderLayerToLinen = nnx_wrappers.to_linen_class(
+    Qwen3DecoderLayer,
+    base_metadata_fn=initializers.variable_to_logically_partitioned,
+)
+Qwen3MoeDecoderLayerToLinen = nnx_wrappers.to_linen_class(
+    Qwen3MoeDecoderLayer,
+    base_metadata_fn=initializers.variable_to_logically_partitioned,
+)
