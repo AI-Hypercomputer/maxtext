@@ -295,7 +295,7 @@ class Decoder(nn.Module):
           metadata_params={nn.PARTITION_NAME: "successive_pipelines"},
       )
       pipeline_stage_module = self.get_pipeline_stage_module(self.decoder_layer)
-      initialized_scan = scan_fn(config=cfg, mesh=self.mesh, layers=pipeline_stage_module, remat_policy=self.get_remat_policy())
+      initialized_scan = scan_fn(config=cfg, mesh=self.mesh, layers=pipeline_stage_module, remat_policy=None)
       self.pp_initialized_scan = initialized_scan
       pipeline_module = rematted_pipeline(
           config=self.config, mesh=self.mesh, layers=pipeline_stage_module, remat_policy=remat_policy
