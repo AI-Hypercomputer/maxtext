@@ -646,13 +646,24 @@ def generate_xpk_workload_cmd(
     docker_image_flag = f'--docker-image="gcr.io/tpu-prod-env-multipod/mattdavidow-successive-a1"'
 
   upload_metrics_to_bq_cmd = ""
-  if wl_config.generate_metrics_and_upload_to_big_query and not is_pathways_headless_enabled:
-    # TODO (optionally) make it so that this upload step is done on local device instead of within the workload.
-    args = _build_args_from_config(wl_config)
-    args_str = ""
-    for k,v in args.items():
-      args_str += f'--{k}={v} '
-    upload_metrics_to_bq_cmd = f"&& python3 -m benchmarks.upload_metrics_to_bq {args_str}"
+  # Getting error trying to upload to bq
+  #   "Traceback (most recent call last):
+  #   File "<frozen runpy>", line 198, in _run_module_as_main
+  #   File "<frozen runpy>", line 88, in _run_code
+  #   File "/deps/benchmarks/upload_metrics_to_bq.py", line 329, in <module>
+  #     main(sys.argv[1:])
+  #   File "/deps/benchmarks/upload_metrics_to_bq.py", line 310, in main
+  #     write_run(
+  #   File "/deps/benchmarks/benchmark_db_utils.py", line 136, in write_run
+  #     from benchmark_db_writer import bq_writer_utils
+  # ModuleNotFoundError: No module named 'benchmark_db_writer'"
+  # if wl_config.generate_metrics_and_upload_to_big_query and not is_pathways_headless_enabled:
+  #   # TODO (optionally) make it so that this upload step is done on local device instead of within the workload.
+  #   args = _build_args_from_config(wl_config)
+  #   args_str = ""
+  #   for k,v in args.items():
+  #     args_str += f'--{k}={v} '
+  #   upload_metrics_to_bq_cmd = f"&& python3 -m benchmarks.upload_metrics_to_bq {args_str}"
 
   print(f'User command: {user_command}')
   all_xpk_storage = ""
