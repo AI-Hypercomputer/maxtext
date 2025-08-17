@@ -2015,6 +2015,7 @@ deepseek_manual_matt_a1 = _add_to_model_dictionary(
         "dtype": "bfloat16",
         "opt_type": "sgd",
         "weight_dtype": "bfloat16",
+        "profiler": "xplane",
 
         # DS def
         "base_emb_dim": 7168,
