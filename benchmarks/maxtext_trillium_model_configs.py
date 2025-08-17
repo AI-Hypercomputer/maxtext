@@ -2029,7 +2029,7 @@ deepseek_manual_matt_a1 = _add_to_model_dictionary(
         "enable_dropout": False,
         "logits_via_embedding": False,
         "normalization_layer_epsilon": 1.0e-6,
-        "num_experts": 64,
+        "num_experts": 32,
         "num_experts_per_tok": 8,
         "shared_experts": 1,
         "routed_scaling_factor": 2.5,
