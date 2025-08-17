@@ -158,14 +158,13 @@ class Qwen3DecoderLayer(nnx.Module):
     self.config = config
     self.mesh = mesh
     self.quant = quant
-    self.model_mode = model_mode
     cfg = self.config
 
     self.attention = Qwen3SelfAttentionWithNorm(
         config=cfg,
         mesh=self.mesh,
         quant=self.quant,
-        model_mode=self.model_mode,
+        model_mode=model_mode,
         rngs=rngs,
     )
 
@@ -183,11 +182,6 @@ class Qwen3DecoderLayer(nnx.Module):
         rngs=rngs,
     )
 
-    if self.model_mode == MODEL_MODE_PREFILL:
-      self.activation_axis_names = ("activation_batch", "prefill_activation_length", "activation_embed")
-    else:
-      self.activation_axis_names = ("activation_batch", "activation_length", "activation_embed")
-
   def __call__(
       self,
       inputs: jnp.ndarray,
@@ -201,19 +195,24 @@ class Qwen3DecoderLayer(nnx.Module):
   ):
     cfg = self.config
 
+    if model_mode == MODEL_MODE_PREFILL:
+      activation_axis_names = ("activation_batch", "prefill_activation_length", "activation_embed")
+    else:
+      activation_axis_names = ("activation_batch", "activation_length", "activation_embed")
+
     hidden_states, residual_after_attention = self.attention(
         inputs,
         decoder_segment_ids,
         decoder_positions,
         deterministic,
         model_mode,
-        self.activation_axis_names,
+        activation_axis_names,
     )
 
     mlp_output = self.mlp(hidden_states, deterministic=deterministic)
 
     layer_output = residual_after_attention + mlp_output
-    layer_output = nnx.with_logical_constraint(layer_output, self.activation_axis_names)
+    layer_output = nnx.with_logical_constraint(layer_output, activation_axis_names)
 
     if cfg.scan_layers:
       return layer_output, None
@@ -239,14 +238,13 @@ class Qwen3MoeDecoderLayer(nnx.Module):
     self.config = config
     self.mesh = mesh
     self.quant = quant
-    self.model_mode = model_mode
     cfg = self.config
 
     self.attention = Qwen3SelfAttentionWithNorm(
         config=cfg,
         mesh=self.mesh,
         quant=self.quant,
-        model_mode=self.model_mode,
+        model_mode=model_mode,
         rngs=rngs,
     )
 
@@ -265,11 +263,6 @@ class Qwen3MoeDecoderLayer(nnx.Module):
         rngs=rngs,
     )
 
-    if self.model_mode == MODEL_MODE_PREFILL:
-      self.activation_axis_names = ("activation_batch", "prefill_activation_length", "activation_embed")
-    else:
-      self.activation_axis_names = ("activation_batch", "activation_length", "activation_embed")
-
   def __call__(
       self,
       inputs: jnp.ndarray,
@@ -283,13 +276,18 @@ class Qwen3MoeDecoderLayer(nnx.Module):
   ):
     cfg = self.config
 
+    if model_mode == MODEL_MODE_PREFILL:
+      activation_axis_names = ("activation_batch", "prefill_activation_length", "activation_embed")
+    else:
+      activation_axis_names = ("activation_batch", "activation_length", "activation_embed")
+
     hidden_states, residual_after_attention = self.attention(
         inputs,
         decoder_segment_ids,
         decoder_positions,
         deterministic,
         model_mode,
-        self.activation_axis_names,
+        activation_axis_names,
     )
 
     mlp_output, load_balance_loss = self.moe_block(hidden_states)
@@ -297,11 +295,11 @@ class Qwen3MoeDecoderLayer(nnx.Module):
     if load_balance_loss is not None:
       self.sow("intermediates", "moe_lb_loss", load_balance_loss)
 
-    mlp_output = nnx.with_logical_constraint(mlp_output, self.activation_axis_names)
+    mlp_output = nnx.with_logical_constraint(mlp_output, activation_axis_names)
 
     # Final residual connection
     layer_output = residual_after_attention + mlp_output
-    layer_output = nnx.with_logical_constraint(layer_output, self.activation_axis_names)
+    layer_output = nnx.with_logical_constraint(layer_output, activation_axis_names)
 
     if cfg.scan_layers:
       return layer_output, None
