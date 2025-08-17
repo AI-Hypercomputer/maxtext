@@ -643,7 +643,7 @@ def generate_xpk_workload_cmd(
         f'--docker-image={pw_config.runner_image}'
     )
   else:
-    docker_image_flag = f'--base-docker-image="{wl_config.base_docker_image}"'
+    docker_image_flag = f'--docker-image="gcr.io/tpu-prod-env-multipod/mattdavidow-successive-a1"'
 
   upload_metrics_to_bq_cmd = ""
   if wl_config.generate_metrics_and_upload_to_big_query and not is_pathways_headless_enabled:
@@ -788,12 +788,14 @@ def main() -> int:
       device_type='v5litepod-256',
   )
 
+  # maxtext
   v6e_cluster_config = XpkClusterConfig(
-      cluster_name='v6e-256',
-      project='my-cool-project',
-      zone='us-central2-b',
-      device_type='v6e-256',
+    cluster_name='bodaborg-v6e-256-lcscld-c',
+    project='tpu-prod-env-one-vm',
+    zone='southamerica-west1-a',
+    device_type='v6e-256',
   )
+
 
   xpk_workload_cmds = []
   xpk_workload_names = []
@@ -801,7 +803,7 @@ def main() -> int:
   list_of_models = [
     # model_configs.llama2_70b_4096_sc,
     # model_configs.default_128
-    model_configs.llama3_1_70b_131072,
+    model_configs.deepseek_manual_matt_a1,
   ]
 
   # Loop possibilities:
