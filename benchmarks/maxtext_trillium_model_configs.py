@@ -1994,7 +1994,7 @@ deepseek_manual_matt_a1 = _add_to_model_dictionary(
         "pipeline_parallel_layers": 64,
         "num_pipeline_microbatches": 32,
         "remat_policy": "custom",
-        "decoder_layer_input": "offload",
+        "decoder_layer_input": "full",
         # "out_proj": "offload",
         # "query_proj": "offload",
         # "key_proj": "offload",
