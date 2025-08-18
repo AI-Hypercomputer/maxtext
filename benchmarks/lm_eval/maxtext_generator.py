@@ -13,7 +13,7 @@ from MaxText import max_utils, maxengine, pyconfig, multimodal_utils
 from dataclasses import dataclass, field
 
 # Set TF log level to avoid verbose startup messages.
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 
 @dataclass
 class LogProbs:
@@ -62,6 +62,8 @@ class MaxTextGenerator:
             self.has_chat_template = getattr(self.tokenizer.tokenizer, "chat_template", False)
         except AttributeError:
             self.has_chat_template = False
+
+        print("Chat Template: \n", self.has_chat_template)
 
         self.batch_size = int(self.config.per_device_batch_size * jax.device_count())
         end_time = time.time()
@@ -335,11 +337,12 @@ if __name__ == "__main__":
     prompts_to_run = [
         # "The best thing about Seattle, Washington is",
         # "The capital of Germany",
-        "Who is Elon Musk?"
+        # "<s>[INST] What is the capital of France? [/INST]",
+        "<s> [INST] Problem: Find the sum of all integer bases $b > 9$ for which $17_b$ is a divisor of $97_b$.\nMark your solution with \boxed\nAnswer: [/INST]"
         ]
 
     # Generation config
-    max_tokens = 256          # counts ALL generated tokens (includes prefill's 1st token)
+    max_tokens = 1024          # counts ALL generated tokens (includes prefill's 1st token)
     echo = True             # include prompt tokens in text/logprobs if True
     want_logprobs = 1        # non-None triggers logprob collection; top_logprobs left None for now
 

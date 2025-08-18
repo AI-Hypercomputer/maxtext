@@ -1,1 +1,20 @@
-uvicorn maxtext_server:app --host 0.0.0.0 --port 8000
+#!/bin/bash
+# This script starts the MaxText server from the project root,
+# ensuring that Python can find the necessary modules regardless of
+# where the script is invoked from.
+set -e
+
+# Get the absolute path of the directory where the script is located.
+SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
+
+# The project root is two levels up from the script's directory.
+PROJECT_ROOT=$(dirname $(dirname "$SCRIPT_DIR"))
+
+# Change to the project root directory.
+cd "$PROJECT_ROOT"
+
+echo "Starting MaxText server on http://0.0.0.0:8000"
+echo "Executing from project root: $(pwd)"
+
+# Now that we are in the project root, the module path is correct.
+python -m uvicorn benchmarks.lm_eval.maxtext_server:app --host 0.0.0.0 --port 8000

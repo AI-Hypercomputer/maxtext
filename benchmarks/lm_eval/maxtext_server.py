@@ -21,7 +21,19 @@ from datetime import datetime, timezone
 def get_maxtext_args_from_env() -> List[str]:
     return [
         "maxtext_server.py",
-        "MaxText/configs/base_qwen3.yml",
+        "MaxText/configs/base.yml",
+        'model_name="mixtral-8x7b"',
+        'load_parameters_path="gs://ml-auto-solutions/output/sparsity_diffusion_devx/maxtext/chained_tests_mixtral-8x7b_stable-2025-08-15-01-00-23//unscanned_ckpt/checkpoints/0/items"',
+        'tokenizer_path="mistralai/Mixtral-8x7B-Instruct-v0.1"',
+        'tokenizer_type="huggingface"',
+        'per_device_batch_size=4',
+        'ici_tensor_parallelism=4',
+        'max_prefill_predict_length=4096',
+        'max_target_length=8192',
+        'scan_layers=false',
+        'attention="dot_product"',
+        'return_log_prob=True',
+        'async_checkpointing=false'
     ]
 
 print("Starting server and initializing MaxTextGenerator...")
@@ -86,6 +98,37 @@ class CompletionResponse(BaseModel):
     choices: List[CompletionChoice]
     usage: Usage
 
+
+# ---- Chat Completions Models ----
+
+class ChatMessage(BaseModel):
+    role: str
+    content: str
+
+class ChatCompletionRequest(BaseModel):
+    model: str
+    messages: List[ChatMessage]
+    max_tokens: Optional[int] = None
+    temperature: Optional[float] = 0.7
+    stream: Optional[bool] = False
+    logprobs: Optional[bool] = False  # Note: Different from legacy `completions`
+    top_logprobs: Optional[int] = None
+    stop: Optional[Union[str, List[str]]] = None
+    seed: Optional[int] = None
+
+class ChatCompletionChoice(BaseModel):
+    index: int
+    message: ChatMessage
+    finish_reason: str = "stop"
+    logprobs: Optional[LogProbsPayload] = None # Not fully supported yet, but good for structure
+
+class ChatCompletionResponse(BaseModel):
+    id: str = Field(default_factory=lambda: f"chatcmpl-{uuid.uuid4().hex}")
+    object: str = "chat.completion"
+    created: int = Field(default_factory=lambda: int(time.time()))
+    model: str
+    choices: List[ChatCompletionChoice]
+    usage: Usage
 
 # ----------------------------
 # Helpers
@@ -320,6 +363,100 @@ async def create_completion(request: CompletionRequest):
         except Exception as e:
             # Non-fatal: log to console and continue
             print(f"Error writing response to debug log file: {e}")
+
+    return response
+
+
+@app.post("/v1/chat/completions", response_model=ChatCompletionResponse)
+async def create_chat_completion(request: ChatCompletionRequest):
+    """
+    Handles OpenAI-compatible chat completion requests.
+    This is the standard endpoint for instruction-tuned models.
+    """
+    request_id = f"req_{uuid.uuid4().hex}"
+    if not llm.has_chat_template:
+        raise HTTPException(
+            status_code=400,
+            detail="This model does not have a chat template. Please use the legacy /v1/completions endpoint."
+        )
+
+    # Convert Pydantic models to a list of dictionaries for the tokenizer
+    messages_for_template = [msg.model_dump() for msg in request.messages]
+
+    try:
+        # This is the key step: applying the model-specific chat template.
+        formatted_prompt = llm.tokenizer.tokenizer.apply_chat_template(
+            messages_for_template,
+            tokenize=False,
+            add_generation_prompt=True  # Ensures the model knows to generate a response
+        )
+        print("\n--- Applied Chat Template ---")
+        print(formatted_prompt)
+        print("---------------------------\n")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to apply chat template: {e}")
+
+    if DEBUG_MODE:
+        # Log the request, including the formatted prompt for easy debugging
+        log_entry = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "request_id": request_id,
+            "event": "chat_request_received",
+            "request": request.model_dump(),
+            "formatted_prompt": formatted_prompt,
+        }
+        with open(DEBUG_LOG_FILE, "a") as f:
+            f.write(json.dumps(log_entry) + "\n")
+
+    if request.stream:
+        raise HTTPException(status_code=400, detail="Streaming is not supported by this server.")
+
+    # Use the existing generator to get the model's reply
+    completions = llm.generate_batch(
+        prompts=[formatted_prompt],
+        image_paths=None,
+        max_tokens=request.max_tokens,
+        logprobs=request.top_logprobs,
+        echo=False, # Echo is not used in chat APIs
+    )
+    result = completions[0]
+
+    # Apply stop sequences if any
+    text_out, _, finish_reason = _apply_stops_to_text_and_logprobs(result.text, None, request.stop)
+    if finish_reason is None:
+        finish_reason = result.finish_reason
+
+    # Calculate token usage
+    prompt_tokens = _count_tokens(formatted_prompt)
+    completion_tokens = _count_tokens(text_out)
+    usage = Usage(
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_tokens=prompt_tokens + completion_tokens,
+    )
+
+    # Build the final response object
+    response = ChatCompletionResponse(
+        model=request.model,
+        choices=[
+            ChatCompletionChoice(
+                index=0,
+                message=ChatMessage(role="assistant", content=text_out),
+                finish_reason=finish_reason,
+            )
+        ],
+        usage=usage,
+    )
+
+    if DEBUG_MODE:
+        log_entry = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "request_id": request_id,
+            "event": "chat_response_generated",
+            "response": response.model_dump(),
+        }
+        with open(DEBUG_LOG_FILE, "a") as f:
+            f.write(json.dumps(log_entry) + "\n")
 
     return response
 
