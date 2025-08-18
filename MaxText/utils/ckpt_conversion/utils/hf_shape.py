@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Hugging Face shape checkpoint conversion utils."""
 
 def GEMMA3_HF_WEIGHTS_TO_SHAPE(config):
   """Generates a shape mapping for Hugging Face Gemma3 parameters.
@@ -160,7 +161,7 @@ def GEMMA2_HF_WEIGHTS_TO_SHAPE(config):
   Returns:
       dict: A mapping where:
           - Keys are HuggingFace model parameter paths
-          - Values are parameter shape as a List
+          - Values are parameter shape as a list
   """
 
   mapping = {
@@ -229,7 +230,7 @@ def QWEN3_HF_WEIGHTS_TO_SHAPE(config):
   Returns:
       dict: A mapping where:
           - Keys are HuggingFace model parameter paths
-          - Values are parameter shape as a List
+          - Values are parameter shape as a list
   """
   hidden_size = config["hidden_size"]
   num_hidden_layers = config["num_hidden_layers"]
@@ -305,60 +306,59 @@ def QWEN3_HF_WEIGHTS_TO_SHAPE(config):
     mapping.update(layer_mapping)
   return mapping
 
+
 def LLAMA31_HF_WEIGHTS_TO_SHAPE(config):
-    """Returns mapping between HuggingFace weights path and weights shape.
+  """Returns mapping between HuggingFace weights path and weights shape.
 
-    Args:
-        config (dict): Model configuration dictionary, defined in `model_configs.py`
+  Args:
+      config (dict): Model configuration dictionary, defined in `model_configs.py`
 
-    Returns:
-        dict: A mapping where:
-            - Keys are HuggingFace model parameter paths
-            - Values are parameter shape as a List
-    """
+  Returns:
+      dict: A mapping where:
+          - Keys are HuggingFace model parameter paths
+          - Values are parameter shape as a List
+  """
 
-    mapping = {
-        "model.embed_tokens.weight": [config["vocab_size"], config["hidden_size"]],
-        "model.norm.weight": [config["hidden_size"]],
-        "lm_head.weight": [config["vocab_size"], config["hidden_size"]]
+  mapping = {
+      "model.embed_tokens.weight": [config["vocab_size"], config["hidden_size"]],
+      "model.norm.weight": [config["hidden_size"]],
+      "lm_head.weight": [config["vocab_size"], config["hidden_size"]],
+  }
+  for layer_idx in range(config["num_hidden_layers"]):
+    layer_mapping = {
+        f"model.layers.{layer_idx}.input_layernorm.weight": [config["hidden_size"]],
+        f"model.layers.{layer_idx}.mlp.down_proj.weight": [
+            config["hidden_size"],
+            config["intermediate_size"],
+        ],
+        f"model.layers.{layer_idx}.mlp.up_proj.weight": [
+            config["intermediate_size"],
+            config["hidden_size"],
+        ],
+        f"model.layers.{layer_idx}.mlp.gate_proj.weight": [
+            config["intermediate_size"],
+            config["hidden_size"],
+        ],
+        f"model.layers.{layer_idx}.post_attention_layernorm.weight": [config["hidden_size"]],
+        f"model.layers.{layer_idx}.self_attn.k_proj.weight": [
+            config["num_key_value_heads"] * config["head_dim"],
+            config["hidden_size"],
+        ],
+        f"model.layers.{layer_idx}.self_attn.o_proj.weight": [
+            config["hidden_size"],
+            config["num_attention_heads"] * config["head_dim"],
+        ],
+        f"model.layers.{layer_idx}.self_attn.q_proj.weight": [
+            config["num_attention_heads"] * config["head_dim"],
+            config["hidden_size"],
+        ],
+        f"model.layers.{layer_idx}.self_attn.v_proj.weight": [
+            config["num_key_value_heads"] * config["head_dim"],
+            config["hidden_size"],
+        ],
     }
-    for layer_idx in range(config["num_hidden_layers"]):
-        layer_mapping = {
-            f"model.layers.{layer_idx}.input_layernorm.weight": [config["hidden_size"]],
-            f"model.layers.{layer_idx}.mlp.down_proj.weight": [
-                config["hidden_size"],
-                config["intermediate_size"],
-            ],
-            f"model.layers.{layer_idx}.mlp.up_proj.weight": [
-                config["intermediate_size"],
-                config["hidden_size"],
-            ],
-            f"model.layers.{layer_idx}.mlp.gate_proj.weight": [
-                config["intermediate_size"],
-                config["hidden_size"],
-            ],
-            f"model.layers.{layer_idx}.post_attention_layernorm.weight": [
-                config["hidden_size"]
-            ],
-            f"model.layers.{layer_idx}.self_attn.k_proj.weight": [
-                config["num_key_value_heads"] * config["head_dim"],
-                config["hidden_size"],
-            ],
-            f"model.layers.{layer_idx}.self_attn.o_proj.weight": [
-                config["hidden_size"],
-                config["num_attention_heads"] * config["head_dim"],
-            ],
-            f"model.layers.{layer_idx}.self_attn.q_proj.weight": [
-                config["num_attention_heads"] * config["head_dim"],
-                config["hidden_size"],
-            ],
-            f"model.layers.{layer_idx}.self_attn.v_proj.weight": [
-                config["num_key_value_heads"] * config["head_dim"],
-                config["hidden_size"],
-            ],
-        }
-        mapping = {**mapping, **layer_mapping}
-    return mapping
+    mapping = {**mapping, **layer_mapping}
+  return mapping
 
 
 HF_SHAPE = {
