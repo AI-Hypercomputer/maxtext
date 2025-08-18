@@ -16,7 +16,6 @@
 
 import dataclasses
 import warnings
-from typing import Dict
 from threading import current_thread
 import datasets
 from datasets.distributed import split_dataset_by_node
@@ -27,7 +26,7 @@ from MaxText import max_logging
 from MaxText import tokenizer
 from MaxText import multimodal_utils
 
-Features = Dict[str, tf.Tensor]
+Features = dict[str, tf.Tensor]
 AUTOTUNE = tf.data.experimental.AUTOTUNE
 
 ########## Functions used by TFDS pipeline
@@ -158,7 +157,9 @@ def apply_chat_template(example, tokenizer_model, data_column_name):
     for message in example[data_column_name]:
       if message["role"] == "user":
         prompt = message
-        prompt_in_chat_template = tokenizer_model.apply_chat_template([prompt], add_generation_prompt=False, tokenize=False)
+        prompt_in_chat_template = tokenizer_model.apply_chat_template(
+            [prompt], add_generation_prompt=False, tokenize=False
+        )
         messages.append(prompt_in_chat_template)
         is_prompt.append(True)
       elif message["role"] == "assistant":
@@ -299,7 +300,9 @@ class HFDataSource(grain.RandomAccessDataSource):
     """update shard"""
     new_shard = self.dataset_shards[idx] + self.dataloading_host_count * self.num_threads
     if new_shard < self.n_shards:
-      max_logging.log(f"Updating host {self.dataloading_host_index} dataset {idx}, was on shard {self.dataset_shards[idx]}")
+      max_logging.log(
+          f"Updating host {self.dataloading_host_index} dataset {idx}, was on shard {self.dataset_shards[idx]}"
+      )
       max_logging.log(f"New shard is {new_shard}")
       self.dataset_shards[idx] = new_shard
       self.datasets[idx] = split_dataset_by_node(self.dataset, world_size=self.n_shards, rank=self.dataset_shards[idx])
@@ -328,7 +331,9 @@ class HFDataSource(grain.RandomAccessDataSource):
       try:
         if self.out_of_data:
           if self.generate_padding_example:
-            return {column_name: np.zeros(self.max_target_lenth, dtype=np.int32) for column_name in self.data_column_names}
+            return {
+                column_name: np.zeros(self.max_target_lenth, dtype=np.int32) for column_name in self.data_column_names
+            }
           else:
             raise StopIteration("Running out of data")
         data = next(self.data_iters[idx])

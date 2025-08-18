@@ -22,7 +22,6 @@ The conversational dataset should conform to one of the two schemas:
 """
 
 from dataclasses import dataclass, field
-from typing import List
 
 import datasets
 
@@ -33,7 +32,7 @@ from MaxText.input_pipeline import _input_pipeline_utils
 @dataclass
 class InputRequest:
   prompt: str = ""
-  prompt_token_ids: List[int] = field(default_factory=list)
+  prompt_token_ids: list[int] = field(default_factory=list)
   actual_completion: str = ""
   max_output_tokens: int = 0
 
