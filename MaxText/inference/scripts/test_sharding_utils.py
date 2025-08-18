@@ -102,7 +102,7 @@ class ShardingTests(unittest.TestCase):
         abs(result["t_flops"] - expected_t_flops) < TOLERANCE
     ), f"FLOPs mismatch: got {result['t_flops']}, expected {expected_t_flops}"
 
-    # Expeted comms
+    # Expected comms
     expected_t_comms = 0.0
     assert (
         abs(result["t_comms"] - expected_t_comms) < TOLERANCE

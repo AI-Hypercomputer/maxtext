@@ -12,10 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Tuple
-import matplotlib.pyplot as plt
 import pprint
+from typing import Sequence
+
 import numpy as np
+
+import matplotlib.pyplot as plt
 
 
 def latency_bound_comms(comm: float, latency=1e-6):
@@ -23,8 +25,8 @@ def latency_bound_comms(comm: float, latency=1e-6):
 
 
 def calculate_matmul_resources(
-    activations_shape: Tuple[int],
-    weights_shape: Tuple[int],
+    activations_shape: tuple[int, ...],
+    weights_shape: tuple[int, ...],
     ici_bandwidth: float,
     peak_flops: float,
     sD: int = 1,
@@ -35,7 +37,7 @@ def calculate_matmul_resources(
     activation_size_bytes: int = 2,
     weight_size_bytes: int = 2,
     ici_latency: float = 1e-6,
-    all_gather_axes: Tuple[int] = [],
+    all_gather_axes: Sequence[str] = tuple(),
     debug=True,
 ) -> dict[str, float]:
   """
@@ -327,7 +329,11 @@ def plot_sharding_scheme_comparison(
   fig_flops_comm_grouped, ax_flops_comm_grouped = plt.subplots(figsize=(max(10, num_schemes * 1.7), 7))
 
   rects_flops = ax_flops_comm_grouped.bar(
-      categorical_x - grouped_bar_width_fc / 2, t_flops_list, grouped_bar_width_fc, label="T_flops", color="mediumseagreen"
+      categorical_x - grouped_bar_width_fc / 2,
+      t_flops_list,
+      grouped_bar_width_fc,
+      label="T_flops",
+      color="mediumseagreen",
   )
   rects_comms_grouped = ax_flops_comm_grouped.bar(
       categorical_x + grouped_bar_width_fc / 2, t_comms_list, grouped_bar_width_fc, label="T_comms", color="deepskyblue"
