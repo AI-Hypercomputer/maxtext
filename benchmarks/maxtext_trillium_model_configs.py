@@ -1978,7 +1978,7 @@ custom_moe_700b = _add_to_model_dictionary(
 )
 
 # docker_image_flag = '--docker-image="gcr.io/tpu-prod-env-multipod/mattdavidow-successive-a1"'
-# commit 91a6aedc9a6dd8babbdc48360ba0346cf9fef4e8 (HEAD -> mattdavidow-ds-gogo, origin/mattdavidow-ds-gogo)
+# commit 741114ad52a3dd51481364b209a59f492781d252 (HEAD -> mattdavidow-successive-pipeline-a4, origin/mattdavidow-successive-pipeline-a4)
 deepseek_manual_matt_a1 = _add_to_model_dictionary(
   trillium_model_dict,
   MaxTextModel(
