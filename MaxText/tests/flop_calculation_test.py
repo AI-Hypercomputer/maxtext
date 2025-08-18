@@ -1,18 +1,16 @@
-"""
-Copyright 2025 Google LLC
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-     https://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-"""
+# Copyright 2023–2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """ Tests for verifying FLOPs calculation in maxtext_utils.py"""
 
@@ -24,12 +22,16 @@ from MaxText.maxtext_utils import calculate_tflops_training_per_device
 from MaxText.globals import PKG_DIR
 from MaxText import pyconfig
 
+
 class FlopCalculation(unittest.TestCase):
   """Tests for verifying FLOP calculation in MaxText"""
+
   def assertFlopsAlmostEqual(self, flops1, flops2, rel_tol=5e-2):
     """Assert that two FLOPs values are almost equal, within 5% relative tolerance."""
-    self.assertTrue(abs(flops1 - flops2) / max(abs(flops1), abs(flops2)) <= rel_tol,
-                f"FLOPs values are not equal: {flops1} != {flops2} (rel_tol={rel_tol:.2e})")
+    self.assertTrue(
+        abs(flops1 - flops2) / max(abs(flops1), abs(flops2)) <= rel_tol,
+        f"FLOPs values are not equal: {flops1} != {flops2} (rel_tol={rel_tol:.2e})",
+    )
 
   def compute_llama_attention_flops_per_device(self, kwargs: dict) -> float:
     """
@@ -50,7 +52,7 @@ class FlopCalculation(unittest.TestCase):
     # This accounts for causal masking.
     attention_flops = 2 * 3 * N * B * (S**2) * H_q * D_head
 
-    return attention_flops / 1e12 # return tflops
+    return attention_flops / 1e12  # return tflops
 
   def compute_mixtral_attention_flops_per_device(self, kwargs: dict) -> float:
     """
@@ -71,7 +73,7 @@ class FlopCalculation(unittest.TestCase):
     # This accounts for causal masking.
     attention_flops = 2 * 3 * N * B * (S**2) * H_q * D_head
 
-    return attention_flops / 1e12 # return tflops
+    return attention_flops / 1e12  # return tflops
 
   def compute_deepseek_attention_flops_per_device(self, kwargs: dict) -> float:
     """
@@ -93,28 +95,28 @@ class FlopCalculation(unittest.TestCase):
     # This accounts for causal masking.
     attention_flops = 3 * N * B * (S**2) * H_q * (qk_nope_hd + qk_rope_hd + v_hd)
 
-    return attention_flops / 1e12 # Convert to TFLOPs (10^12)
+    return attention_flops / 1e12  # Convert to TFLOPs (10^12)
 
   @pytest.mark.cpu_only
   def test_llama2_7b_flops(self):
     """Test Llama2 7b Flops calculation with default parameters"""
     kwargs = {
-      # Model bases
-      "model_name": "llama2-7b",
-      "override_model_config": True,
-      # Core workload parameters
-      "per_device_batch_size": 12,
-      "max_target_length": 2048,
-      # Model dimensions
-      "base_emb_dim": 4096,
-      "base_mlp_dim": 11008,
-      "base_num_query_heads": 32,
-      "base_num_kv_heads": 32,
-      "base_num_decoder_layers": 32,
-      "head_dim": 128,
-      "vocab_size": 32_000,
-      "mlp_activations": ["silu", "linear"],
-      "skip_jax_distributed_system": True,
+        # Model bases
+        "model_name": "llama2-7b",
+        "override_model_config": True,
+        # Core workload parameters
+        "per_device_batch_size": 12,
+        "max_target_length": 2048,
+        # Model dimensions
+        "base_emb_dim": 4096,
+        "base_mlp_dim": 11008,
+        "base_num_query_heads": 32,
+        "base_num_kv_heads": 32,
+        "base_num_decoder_layers": 32,
+        "head_dim": 128,
+        "vocab_size": 32_000,
+        "mlp_activations": ["silu", "linear"],
+        "skip_jax_distributed_system": True,
     }
     B = kwargs["per_device_batch_size"]
     S = kwargs["max_target_length"]
@@ -124,8 +126,8 @@ class FlopCalculation(unittest.TestCase):
     golden_param_size = 6.74e9
     golden_tflops = 6 * B * S * golden_param_size / 1e12 + attention_flops
     cfg = pyconfig.initialize(
-      [None, os.path.join(PKG_DIR, "configs", "base.yml")],
-      **kwargs,
+        [None, os.path.join(PKG_DIR, "configs", "base.yml")],
+        **kwargs,
     )
     calculated_tflops, _, _ = calculate_tflops_training_per_device(cfg)
     self.assertFlopsAlmostEqual(calculated_tflops, golden_tflops)
@@ -134,23 +136,23 @@ class FlopCalculation(unittest.TestCase):
   def test_llama3_8b_flops(self):
     """Test Llama3 8b Flops calculation with default parameters"""
     kwargs = {
-      # Model bases
-      "model_name": "llama3-8b",
-      "override_model_config": True,
-      # Core workload parameters
-      "per_device_batch_size": 4,
-      "max_target_length": 2048,
-      "gradient_accumulation_steps": 1,
-      # Model dimensions
-      "base_emb_dim": 4096,
-      "base_mlp_dim": 14336,
-      "base_num_query_heads": 32,
-      "base_num_kv_heads": 8,
-      "base_num_decoder_layers": 32,
-      "head_dim": 128,
-      "vocab_size": 128256,
-      "mlp_activations": ["silu", "linear"],
-      "skip_jax_distributed_system": True,
+        # Model bases
+        "model_name": "llama3-8b",
+        "override_model_config": True,
+        # Core workload parameters
+        "per_device_batch_size": 4,
+        "max_target_length": 2048,
+        "gradient_accumulation_steps": 1,
+        # Model dimensions
+        "base_emb_dim": 4096,
+        "base_mlp_dim": 14336,
+        "base_num_query_heads": 32,
+        "base_num_kv_heads": 8,
+        "base_num_decoder_layers": 32,
+        "head_dim": 128,
+        "vocab_size": 128256,
+        "mlp_activations": ["silu", "linear"],
+        "skip_jax_distributed_system": True,
     }
     B = kwargs["per_device_batch_size"]
     S = kwargs["max_target_length"]
@@ -162,8 +164,8 @@ class FlopCalculation(unittest.TestCase):
     golden_param_size = 7.50e9
     golden_tflops = 6 * B * S * golden_param_size / 1e12 + attention_flops
     cfg = pyconfig.initialize(
-      [None, os.path.join(PKG_DIR, "configs", "base.yml")],
-      **kwargs,
+        [None, os.path.join(PKG_DIR, "configs", "base.yml")],
+        **kwargs,
     )
     calculated_tflops, _, _ = calculate_tflops_training_per_device(cfg)
     self.assertFlopsAlmostEqual(calculated_tflops, golden_tflops)
@@ -172,25 +174,25 @@ class FlopCalculation(unittest.TestCase):
   def test_mixtral_8x7b_flops(self):
     """Test Mixtral 8x7b Flops calculation"""
     kwargs = {
-    # Model bases
-    "model_name": "mixtral-8x7b",
-    "override_model_config": True,
-    # Core workload parameters
-    "per_device_batch_size": 4,
-    "max_target_length": 8192,
-    "num_experts": 8,
-    "num_experts_per_tok": 2,
-    "gradient_accumulation_steps": 1,
-    # model dimensions
-    "base_emb_dim": 4096,
-    "base_mlp_dim": 14336,
-    "base_num_query_heads": 32,
-    "base_num_kv_heads": 8,
-    "head_dim": 128,
-    "base_num_decoder_layers": 32,
-    "vocab_size": 32000,
-    "mlp_activations": ["silu", "linear"],
-    "skip_jax_distributed_system": True,
+        # Model bases
+        "model_name": "mixtral-8x7b",
+        "override_model_config": True,
+        # Core workload parameters
+        "per_device_batch_size": 4,
+        "max_target_length": 8192,
+        "num_experts": 8,
+        "num_experts_per_tok": 2,
+        "gradient_accumulation_steps": 1,
+        # model dimensions
+        "base_emb_dim": 4096,
+        "base_mlp_dim": 14336,
+        "base_num_query_heads": 32,
+        "base_num_kv_heads": 8,
+        "head_dim": 128,
+        "base_num_decoder_layers": 32,
+        "vocab_size": 32000,
+        "mlp_activations": ["silu", "linear"],
+        "skip_jax_distributed_system": True,
     }
     B = kwargs["per_device_batch_size"]
     S = kwargs["max_target_length"]
@@ -200,8 +202,8 @@ class FlopCalculation(unittest.TestCase):
     golden_param_size = 12.9e9
     golden_tflops = 6 * B * S * golden_param_size / 1e12 + attention_flops
     cfg = pyconfig.initialize(
-      [None, os.path.join(PKG_DIR, "configs", "base.yml")],
-      **kwargs,
+        [None, os.path.join(PKG_DIR, "configs", "base.yml")],
+        **kwargs,
     )
     calculated_tflops, _, _ = calculate_tflops_training_per_device(cfg)
     self.assertFlopsAlmostEqual(calculated_tflops, golden_tflops)
@@ -210,32 +212,32 @@ class FlopCalculation(unittest.TestCase):
   def test_deepseek2_16b_flops(self):
     """Test DeepSeek2-16b FLops calculation"""
     kwargs = {
-      # Model bases
-      "model_name": "deepseek2-16b",
-      "override_model_config": True,
-      # Core workload parameters
-      "per_device_batch_size": 4,
-      "max_target_length": 8192,
-      "num_experts": 64,
-      "num_experts_per_tok": 6,
-      "shared_experts": 2,
-      # Model dimensions
-      "base_emb_dim": 2048,
-      "base_num_query_heads": 16,
-      "base_num_kv_heads": 16,
-      "base_mlp_dim": 10944,
-      "base_moe_mlp_dim": 1408,
-      "base_num_decoder_layers": 27,
-      "first_num_dense_layers": 1,
-      "mlp_activations": ["silu","linear"],
-      "vocab_size": 102400,
-      # MLA
-      "q_lora_rank": 0,
-      "kv_lora_rank": 512,
-      "qk_nope_head_dim": 128,
-      "qk_rope_head_dim": 64,
-      "v_head_dim": 128,
-      "skip_jax_distributed_system": True,
+        # Model bases
+        "model_name": "deepseek2-16b",
+        "override_model_config": True,
+        # Core workload parameters
+        "per_device_batch_size": 4,
+        "max_target_length": 8192,
+        "num_experts": 64,
+        "num_experts_per_tok": 6,
+        "shared_experts": 2,
+        # Model dimensions
+        "base_emb_dim": 2048,
+        "base_num_query_heads": 16,
+        "base_num_kv_heads": 16,
+        "base_mlp_dim": 10944,
+        "base_moe_mlp_dim": 1408,
+        "base_num_decoder_layers": 27,
+        "first_num_dense_layers": 1,
+        "mlp_activations": ["silu", "linear"],
+        "vocab_size": 102400,
+        # MLA
+        "q_lora_rank": 0,
+        "kv_lora_rank": 512,
+        "qk_nope_head_dim": 128,
+        "qk_rope_head_dim": 64,
+        "v_head_dim": 128,
+        "skip_jax_distributed_system": True,
     }
     B = kwargs["per_device_batch_size"]
     S = kwargs["max_target_length"]
@@ -245,8 +247,8 @@ class FlopCalculation(unittest.TestCase):
     golden_param_size = 2.4e9
     golden_tflops = 6 * B * S * golden_param_size / 1e12 + attention_flops
     cfg = pyconfig.initialize(
-      [None, os.path.join(PKG_DIR, "configs", "base.yml")],
-      **kwargs,
+        [None, os.path.join(PKG_DIR, "configs", "base.yml")],
+        **kwargs,
     )
     calculated_tflops, _, _ = calculate_tflops_training_per_device(cfg)
     self.assertFlopsAlmostEqual(calculated_tflops, golden_tflops)

@@ -1,18 +1,16 @@
-"""
-Copyright 2025 Google LLC
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-     https://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-"""
+# Copyright 2023–2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Decoder layer definition for mixtral."""
 # pylint: disable=arguments-differ
@@ -136,7 +134,7 @@ class MixtralDecoderLayer(nn.Module):
     # NOTE: the naming mismatch here is to ensure reverse compatibility with existing checkpoints.
     # The `name` represents the weight name in JAX/checkpoints and so the class name
     # is just for readability.
-    mlp_lnx, load_balance_loss = moe.RoutedMoE(
+    mlp_lnx, load_balance_loss = moe.get_routed_moe(
         name="MoeBlock_0",
         config=cfg,
         num_experts=cfg.num_experts,

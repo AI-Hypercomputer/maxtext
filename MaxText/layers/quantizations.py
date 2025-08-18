@@ -1,16 +1,16 @@
-#  Copyright 2024 Google LLC
+# Copyright 2023–2025 Google LLC
 #
-#  Licensed under the Apache License, Version 2.0 (the "License");
-#  you may not use this file except in compliance with the License.
-#  You may obtain a copy of the License at
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
 #
-#       https://www.apache.org/licenses/LICENSE-2.0
+#    https://www.apache.org/licenses/LICENSE-2.0
 #
-#  Unless required by applicable law or agreed to in writing, software
-#  distributed under the License is distributed on an "AS IS" BASIS,
-#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-#  See the License for the specific language governing permissions and
-#  limitations under the License.
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Quantization library."""
 
@@ -612,58 +612,101 @@ def configure_kv_quant(config):
   return None if not config.quantize_kvcache else KVQuant(config)
 
 
-def get_basic_config(config, dtype):
-  """Basic Qwix config that only quantizes forward passes."""
-  rules = [
-      # Dot-product attention is not quantized for now.
-      qwix.QtRule(
-        module_path='decoder/.*layers.*/self_attention/attention_op',
-        weight_qtype=None,
-        act_qtype=None,
-      ),
-      qwix.QtRule(
-        module_path='decoder/.*layers.*',  # Apply to all modules
-        weight_qtype=dtype,
-        act_qtype=dtype,
-        bwd_weight_grad_tile_size = 1 / config.quantization_local_shard_count
-      )
-    ]
-  return rules
+class NvidaFp8Provider(qwix.QtProvider):
+  """Wraps nn.Fp8DirectDotGeneralOp with Qwix's provider interface."""
+
+  def dot_general(self, *args, **kwargs):
+    # Here we only check if the rule is None or not.
+    rule, op_id = self._get_current_rule_and_op_id("dot_general")
+    if rule is None:
+      return jax.lax.dot_general(*args, **kwargs)
+    return nn.Fp8DirectDotGeneralOp(name=op_id)(*args, **kwargs)
+
+  def einsum(self, *args, **kwargs):
+    rule, op_id = self._get_current_rule_and_op_id("einsum")
+    if rule is None:
+      return jnp.einsum(*args, **kwargs)
+    return nn.Fp8Einsum(name=op_id)(*args, **kwargs)
 
 
-def get_fp8_config(config):
-  """ fp8 config rules with per-tensor calibration.
-  """
-  rules = [
-      # Dot-product attention is not quantized for now.
-      qwix.QtRule(
-        module_path='decoder/.*layers.*/self_attention/attention_op',
-        weight_qtype=None,
-        act_qtype=None,
-      ),
-      qwix.QtRule(
-        module_path='decoder/.*layers.*',  # Apply to all modules
-        weight_qtype=jnp.float8_e4m3fn,
-        act_qtype=jnp.float8_e4m3fn,
-        bwd_qtype=jnp.float8_e5m2,
-        bwd_use_original_residuals=True,
-        disable_channelwise_axes=True, # per_tensor calibration
-        weight_calibration_method = config.quantization_calibration_method,
-        act_calibration_method = config.quantization_calibration_method,
-        bwd_calibration_method = config.quantization_calibration_method,
+class NANOOFp8Provider(qwix.QtProvider):
+
+  def dot_general(self, *args, **kwargs):
+    # Here we only check if the rule is None or not.
+    rule, op_id = self._get_current_rule_and_op_id("dot_general")
+    if rule is None:
+      return jax.lax.dot_general(*args, **kwargs)
+    return nn.NANOOFp8DotGeneralOp(name=op_id)(*args, **kwargs)
+
+
+def get_quantization_rule(config: Config):
+  match config.quantization:
+    case "int8":
+      return qwix.QtRule(
+          module_path="decoder/.*layers.*",
+          weight_qtype = jnp.int8,
+          act_qtype = jnp.int8,
+          bwd_qtype = jnp.int8,
+          bwd_weight_grad_tile_size = 1 / config.quantization_local_shard_count,
+          op_names=('dot_general',),
       )
-    ]
-  return rules
+    case "fp8":
+      return qwix.QtRule(
+          module_path="decoder/.*layers.*",
+          weight_qtype = jnp.float8_e4m3fn,
+          act_qtype = jnp.float8_e4m3fn,
+          bwd_qtype = jnp.float8_e4m3fn,
+          bwd_weight_grad_tile_size = 1 / config.quantization_local_shard_count,
+          op_names=('dot_general',),
+      )
+    case "fp8_full":
+      return qwix.QtRule(
+          module_path="decoder/.*layers.*",
+          weight_qtype = jnp.float8_e4m3fn,
+          act_qtype = jnp.float8_e4m3fn,
+          bwd_qtype = jnp.float8_e5m2,
+          bwd_use_original_residuals=True,
+          disable_channelwise_axes=True, # per_tensor calibration
+          weight_calibration_method = config.quantization_calibration_method,
+          act_calibration_method = config.quantization_calibration_method,
+          bwd_calibration_method = config.quantization_calibration_method,
+          op_names=('dot_general',),
+      )
+    case "fp8_gpu":
+      return qwix.QtRule(
+          module_path="decoder/.*layers.*",
+          weight_qtype = jnp.float8_e4m3fn,
+          act_qtype = jnp.float8_e4m3fn,
+          bwd_qtype = jnp.float8_e4m3fn,
+          bwd_weight_grad_tile_size = 1 / config.quantization_local_shard_count,
+          op_names=('dot_general',),
+      )
+    case "fp8_nanoo":
+      return qwix.QtRule(
+          module_path="decoder/.*layers.*",
+          weight_qtype = jnp.float8_e4m3fn,
+          act_qtype = jnp.float8_e4m3fn,
+          bwd_qtype = jnp.float8_e4m3fn,
+          bwd_weight_grad_tile_size = 1 / config.quantization_local_shard_count,
+          op_names=('dot_general',),
+      )
+    case "":
+      return None
+
 
 def get_qt_provider(config):
   """Get quantization rules based on the config."""
   match config.quantization:
     case "int8":
-      return qwix.QtProvider(get_basic_config(config, jnp.int8))
+      return qwix.QtProvider([get_quantization_rule(config)])
     case "fp8":
-      return qwix.QtProvider(get_basic_config(config, jnp.float8_e4m3fn))
+      return qwix.QtProvider([get_quantization_rule(config)])
     case "fp8_full":
-      return qwix.QtProvider(get_fp8_config(config))
+      return qwix.QtProvider([get_quantization_rule(config)])
+    case "fp8_gpu":
+      return NvidaFp8Provider([get_quantization_rule(config)])
+    case "fp8_nanoo":
+      return NANOOFp8Provider([get_quantization_rule(config)])
   return None
 
 

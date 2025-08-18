@@ -6,29 +6,44 @@ Model Flops Utilization (MFU) is one of the most commonly used metrics to summar
 
 ### Definition
 
-
-
+Model FLOPs are the floating point operations required to perform model computations regardless of implementation or hardware limitations. 
+For training, this corresponds to the operations in a single forward and backward pass (one model step).
 
 $$ MFU:= \frac{\text{model flops/s}}{\text{peak hardware flops/s}} $$
 
+Model flops are generally easy to calculate/estimate theoretically since the model is mostly performing matmuls, and so we can just sum up the flops of each matmul. For example a $[A,B] \times [B,C] = [A,C]$ matmul has $2ABC$ flops. Hence, to calculate the observed model flops/s we can sum up the theoretical flops required in a training step of the model and then divide by the measured step time (in seconds).
 
+ $$ MFU = \frac{\text{model flops/s}}{\text{peak hardware flops/s}} = \frac{\text{theoretical model flops per step}}{\text{measured step time} \times \text{peak hardware flops/s}}$$
 
+Furthermore, since
 
-Model flops are the theoretical number of flops needed to execute the computation (both forward and backward passes for training). This is generally easy to calculate/estimate theoretically since the model is mostly performing matmuls, and so we can just sum up the flops of each matmul. For example a $[A,B] \times [B,C] = [A,C]$ matmul has $2ABC$ flops.
+$$
+\frac{\text{theoretical model flops per step}}
+     {\text{peak hardware flops/s}}
+= \text{theoretically optimal step time}
+$$
 
-### MaxText Calculating + Reporting 
-In MaxText, we calculate MFU by calculating the theoretical number of flops and measuring step time.
+we also get that:
 
-We calculate theoretical model flops per step as described above, summing all of the matmuls needed in detail, see [calculate_tflops_per_device](https://github.com/AI-Hypercomputer/maxtext/blob/e969faabbb571285a51545530f34d8f0a9f237e9/MaxText/maxtext_utils.py#L297)
-We divide this by the measured step time (measured via python `time.time()`), to get the Model Flops per second that we print each step [`per_device_tflops_seconds`](https://github.com/AI-Hypercomputer/maxtext/blob/e969faabbb571285a51545530f34d8f0a9f237e9/MaxText/metric_logger.py#L193-L194). You can get the MFU by dividing this number by the peak tflops of the hardware (e,g. $918e^{12}$ FLOPS/s for Trillium)
+$$
+MFU = \frac{\text{theoretically optimal step time}}
+           {\text{measured step time}}
+$$
 
- $$ MFU = \frac{\text{model flops/s}}{\text{peak hardware flops/s}} = \frac{\text{theoretical model flops}}{\text{measured step time} \times \text{peak hardware flops/s}}$$
+Finally, we can also look at througput utilization. In each training step, the model processes $(batch_size x seq_length)$ tokens. Since the (optimal or measured) number of tokens per second is just the number of tokens per step divided by step time (optimal or measured, respectively), we get that:
 
-This is also equivalent to the ratio of the theoretically optimal step time and measured step time:
+$$
+MFU = \frac{\text{theoretically optimal step time}}
+           {\text{measured step time}} = \frac{\text{number of tokens per step / optimal tokens/s}}
+           {\text{number of tokens per step / measured tokens/s}} = \frac{\text{measured tokens/s}}
+           {\text{optimal tokens/s}}
+$$
 
-$$\text{theoretically optimal step time} = \frac{\text{theoretical model flops}}{\text{peak hardware flops/s }} $$
+Hence, MFU is the fraction of peak hardware performance actually utilized by the model, and can be expressed in different units — step time, throughput, or raw flops/s.
 
-$$\frac{\text{theoretically optimal step}}{\text{measured step time}} = \frac{\text{theoretical model flops}}{\text{measured step time} \times \text{peak hardware flops/s }} = MFU$$
+### MaxText Calculating + Reporting
+In MaxText, we sum all of the matmuls performed in one step, see [calculate_tflops_per_device](https://github.com/AI-Hypercomputer/maxtext/blob/e969faabbb571285a51545530f34d8f0a9f237e9/MaxText/maxtext_utils.py#L297)
+and divide it by the measured (via python `time.time()`) step time. In each step we print the resulting Model Flops per second [`per_device_tflops_per_sec`](https://github.com/AI-Hypercomputer/maxtext/blob/e969faabbb571285a51545530f34d8f0a9f237e9/MaxText/metric_logger.py#L193-L194). One can calculate the MFU by dividing this number by the peak tflops of the hardware (e.g., $918e^{12}$ FLOPS/s for Trillium).
 
 
 ### Causal Attention
@@ -76,4 +91,4 @@ This shows any of step time, tokens/s or MFU can be used to determine how long t
 
 ## Why not Hardware Flops?
 
-Hardware (e.g., XLA reported) FLOPs do not accurately reflect computation efficiency as they depend on the program / implementation, not just on the model and its inherent computations (higher hardware FLOPs does not necessarily mean less room for improvement). For example, they includes remat and potentially auxilliary operations (such as reshaping for dropless moe [here](https://github.com/AI-Hypercomputer/maxtext/blob/4b6142950aff5d9ba42d830efc5ce4c4ac9d4135/MaxText/layers/moe.py#L1267)), which are an implementation detail and not part of the model. In addition, XLA reported FLOPs may not be accurate with pallas kernels. Hardware flops utilization is not (inversely) proprtional to step time as opposed to MFU, since hardware flops can change with implementation details like remat policies. 
+Hardware (e.g., XLA reported) FLOPs do not accurately reflect computation efficiency as they depend on the program / implementation, not just on the model and its inherent computations (higher hardware FLOPs does not necessarily mean less room for improvement). For example, they includes remat and potentially auxilliary operations (such as reshaping for dropping moe [here](https://github.com/AI-Hypercomputer/maxtext/blob/4b6142950aff5d9ba42d830efc5ce4c4ac9d4135/MaxText/layers/moe.py#L1267)), which are an implementation detail and not part of the model. In addition, XLA reported FLOPs may not be accurate with pallas kernels. Hardware flops utilization is not (inversely) proprtional to step time as opposed to MFU, since hardware flops can change with implementation details like remat policies. 

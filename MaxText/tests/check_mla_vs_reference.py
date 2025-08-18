@@ -1,18 +1,16 @@
-"""
-Copyright 2025 Google LLC
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-     https://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-"""
+# Copyright 2023–2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """ Tests for DeepSeek """
 import math
@@ -74,7 +72,7 @@ def precompute_freqs_cis(dim, seqlen, beta_fast=32, beta_slow=1, base=10000.0, f
         max_seq_len (int): Maximum sequence length.
 
     Returns:
-        Tuple[int, int]: The range of correction dimensions (low, high), clamped to valid indices.
+        tuple[int, int]: The range of correction dimensions (low, high), clamped to valid indices.
     """
     low = math.floor(find_correction_dim(low_rot, dim, base, max_seq_len))
     high = math.ceil(find_correction_dim(high_rot, dim, base, max_seq_len))

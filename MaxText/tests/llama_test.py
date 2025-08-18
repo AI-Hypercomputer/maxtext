@@ -1,22 +1,19 @@
-"""
-Copyright 2023 Google LLC
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-     https://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-"""
+# Copyright 2023–2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """ Tests for Llama. """
 
-from typing import Tuple
 import unittest
 
 import numpy as np
@@ -50,7 +47,7 @@ def apply_rotary_emb(
     xk: jnp.ndarray,
     freqs_cis: jnp.ndarray,
     dtype: jnp.dtype = jnp.bfloat16,
-) -> Tuple[jnp.ndarray, jnp.ndarray]:
+) -> tuple[jnp.ndarray, jnp.ndarray]:
   """Apply the computed Rotary Positional Embedding."""
   reshape_xq = xq.astype(jnp.float32).reshape(*xq.shape[:-1], -1, 2)
   reshape_xk = xk.astype(jnp.float32).reshape(*xk.shape[:-1], -1, 2)

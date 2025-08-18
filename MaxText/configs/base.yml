@@ -1,10 +1,10 @@
-# Copyright 2023 Google LLC
+# Copyright 2023–2025 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#      https://www.apache.org/licenses/LICENSE-2.0
+#    https://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -90,6 +90,7 @@ dtype: "bfloat16"
 # 'intmp' for mixed precision quantization for inference as described here: MaxText/configs/quantization/README.md
 # 'fp8' for 8-bit floating-point GeMMs on NVIDIA GPUs.
 # 'nanoo_fp8' for 8-bit floating-point GeMMs on AMD MI300/MI325 GPUs.
+# 'fp8_full' for FP8 quantization with static scaling.
 quantization: ""
 # Used to configure constant_bound_config in aqt lib for static scaling, e.g. constant_bound_config='0.5, 0.5, 0.5, 0.5, 0.5, 0.5'
 constant_bound_config: ""
@@ -168,6 +169,7 @@ use_random_routing: False # whether to use random routing for debug/test purpose
 tile_batch_seq: 512
 tile_activation_dim: 1024
 tile_weight_dim: 1024
+norm_topk_prob: False # Boolean to enable the top-k probability normalization. Qwen3-specific normalization of router weights.
 
 # How the expert axis is used to shard attention weights and activations
 # "fsdp" (ep acts as fsdp parallelism)
@@ -545,8 +547,9 @@ dump_step: -1 # Dump modules at the given step if set to a positive integer.
 dump_hlo_local_dir: "/tmp/xla_dump/"
 dump_hlo_delete_local_after: True # Cleans local directory after its uploaded
 dump_hlo_gcs_dir: "" # Defaults to {base_output_directory}/{run_name}/xla_dump
+dump_hlo_local_module_name: "jit_train_step" # Filter saving modules locally by this string. Set to empty string to remove any filter.
 dump_hlo_module_name: "jit_train_step" # Filter uploading modules by this string. Set to empty string to remove any filter.
-dump_hlo_xla_flags: "" # Defaults to "--xla_dump_to={dump_hlo_local_dir} --xla_dump_hlo_module_re={dump_hlo_module_name} --xla_dump_large_constants"
+dump_hlo_xla_flags: "" # Defaults to "--xla_dump_to={dump_hlo_local_dir} --xla_dump_hlo_module_re={dump_hlo_local_module_name} --xla_dump_large_constants"
 dump_hlo_upload_all: False # If true all hosts dump HLO, false only jax.process_index()==0
 # All hosts should have identical HLO for SPMD programs, however we have encountered some bugs
 # where this is not the case and it is helpful to compare HLO across hosts.

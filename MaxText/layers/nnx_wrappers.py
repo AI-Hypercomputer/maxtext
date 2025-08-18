@@ -1,10 +1,10 @@
-# Copyright 2024 The Flax Authors.
+# Copyright 2023–2025 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+#    https://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -30,6 +30,7 @@ from flax.nnx import Object
 from flax.nnx.rnglib import Rngs
 import jax
 from jax import tree_util as jtu
+import qwix
 
 M = tp.TypeVar("M", bound=Module)
 
@@ -316,8 +317,21 @@ def _get_module_method(module, method: tp.Callable[..., Any] | str | None):
   return method
 
 
-def _enable_linen_module_paths(module: Module):
-  """Ensure that linen module_path is correct when in NNX."""
+def _fix_for_qwix_quantization(module: Module):
+  """Process the nnx module to make it compatible with QWIX quantization.
+
+  Normally Qwix only works with pure Linen modules or pure NNX modules. When
+  NNX modules are called inside Linen modules, Qwix will have issues to
+    * detect the correct module path when a Jax op (e.g. einsum) is called.
+    * detect the input types (whether it's a weight) of the Jax op.
+
+  This function will fix those issues.
+
+  Args:
+    module: The NNX module to be processed.
+  """
+  # Wrap the __call__ function of the nnx modules to make sure the linen module
+  # path is updated correctly.
   def wrap(call_fn, name: str):
     def wrapped(*args, **kwargs):
       if not linen.module._context.module_stack:  # pylint: disable=W0212
@@ -339,6 +353,10 @@ def _enable_linen_module_paths(module: Module):
       node.__class__ = type(node.__class__.__name__, (node.__class__,), {
         '__call__': wrap(node.__class__.__call__, str(path[-1])),
       })
+
+  # Set the correct weight names. We call QtProvider.process_model_inputs here
+  # to avoid using Qwix internal APIs.
+  qwix.QtProvider.process_model_inputs(None, module, None, None)  # pytype: disable=wrong-arg-types
 
 
 class ToLinen(linen.Module):
@@ -403,17 +421,16 @@ class ToLinen(linen.Module):
     # init codepath
     if self.is_initializing():
       module = self.nnx_class(*self.args, **_module_kwargs())
-      _enable_linen_module_paths(module)
       # TODO: add lazy_init here in case there's an `ToNNX` submodule under `module`.
       # update linen variables before call module to save initial state
       self._update_variables(module)
+      _fix_for_qwix_quantization(module)
       method_fn = _get_module_method(module, nnx_method)
       out = method_fn(module, *args, **kwargs)
       return out
 
     # create the nnx module
     module = self.nnx_class(*self.args, **_module_kwargs())
-    _enable_linen_module_paths(module)
     # update nnx module from linen variables
     def maybe_unbox(x):
       if isinstance(x, meta.AxisMetadata):
@@ -428,6 +445,7 @@ class ToLinen(linen.Module):
       states = ({},)
     nnx.update(module, *states)
 
+    _fix_for_qwix_quantization(module)
     method_fn = _get_module_method(module, nnx_method)
     out = method_fn(module, *args, **kwargs)
     self._update_variables(module)
@@ -478,6 +496,10 @@ class ToLinen(linen.Module):
         for k, v in collection_state.items():
           self.put_variable(collection, k, v)
 
+class _Missing:
+  ...
+
+_MISSING = _Missing()
 
 def to_linen(
   nnx_class: tp.Callable[..., Module],
@@ -499,3 +521,77 @@ def to_linen(
     skip_rng=skip_rng,
     name=name,
   )
+
+def to_linen_class(
+    base_nnx_class: type[M],
+    base_metadata_fn: (
+      tp.Callable[[variablelib.VariableState], tp.Any] | None
+    ) = to_linen_var,
+    base_skip_rng: bool = False,
+    **partial_kwargs: tp.Any,
+) -> type[ToLinen]:
+  """Dynamically wraps an NNX module class into a Flax Linen module class."""
+
+  class ToLinenPartial(ToLinen):
+    """A dynamically created Linen Module that wraps a specific NNX Module.
+
+    This class is not meant to be used directly. Instead, it is created and
+    returned by the `to_linen_class` function. It acts as a "partially applied"
+    version of the `ToLinen` wrapper, where the NNX module to be wrapped and
+    its default arguments are pre-configured.
+
+    When you instantiate this class, it behaves like a standard Linen module.
+    The arguments you provide during instantiation can override the defaults
+    that were set when this class was created by `to_linen_class`.
+
+    For example:
+      >>> from flax import linen as nn, nnx
+      >>> from MaxText.layers import linears
+      >>> # Create a specialized Linen wrapper for linears.DenseGeneral
+      >>> LinenDenseGeneral = to_linen_class(linears.DenseGeneral)
+      >>> # Now, LinenDenseGeneral can be used like a regular Linen module
+      >>> class MyModel(nn.Module):
+      ...   def setup(self):
+      ...     # Instantiate the wrapped linears.DenseGeneral with its arguments
+      ...     self.dense = LinenDenseGeneral(
+      ...         in_features_shape=10, out_features_shape=5
+      ...     )
+      ...   def __call__(self, x):
+      ...     return self.dense(x)
+
+    Attributes:
+      (The attributes are dynamically set by the `ToLinen` parent class based
+       on the arguments provided during instantiation.)
+    """
+
+    def __init_subclass__(cls, **kwargs):
+      super().__init_subclass__(**kwargs)
+
+      def __init__(self,
+                   args=None,
+                   kwargs=None,
+                   nnx_class=None,
+                   skip_rng=None,
+                   metadata_fn=None,
+                   name=_MISSING,
+                   parent=_MISSING,
+                   **other_kwargs,
+      ):
+        linen_kwargs = {}
+        if not isinstance(parent, _Missing):
+          linen_kwargs["parent"] = parent
+        if not isinstance(name, _Missing):
+          linen_kwargs["name"] = name
+        ToLinen.__init__(
+          self,
+          nnx_class=nnx_class or base_nnx_class,
+          args=args or (),
+          metadata_fn=metadata_fn or base_metadata_fn,
+          skip_rng=skip_rng or base_skip_rng,
+          kwargs=FrozenDict({**partial_kwargs, **(kwargs or {}), **other_kwargs}),
+          **linen_kwargs,
+        )
+
+      cls.__init__ = __init__
+
+  return ToLinenPartial

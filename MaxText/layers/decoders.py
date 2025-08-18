@@ -1,16 +1,16 @@
-#  Copyright 2025 Google LLC
+# Copyright 2023–2025 Google LLC
 #
-#  Licensed under the Apache License, Version 2.0 (the "License");
-#  you may not use this file except in compliance with the License.
-#  You may obtain a copy of the License at
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
 #
-#       https://www.apache.org/licenses/LICENSE-2.0
+#    https://www.apache.org/licenses/LICENSE-2.0
 #
-#  Unless required by applicable law or agreed to in writing, software
-#  distributed under the License is distributed on an "AS IS" BASIS,
-#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-#  See the License for the specific language governing permissions and
-#  limitations under the License.
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """"Module for decoder layers."""
 # pylint: disable=arguments-differ
@@ -359,6 +359,8 @@ class Decoder(nn.Module):
         return [gpt3.Gpt3DecoderLayer]
       case DecoderBlockType.QWEN3:
         return [qwen3.Qwen3DecoderLayer]
+      case DecoderBlockType.QWEN3_MOE:
+        return [qwen3.Qwen3MoeDecoderLayer]
       case DecoderBlockType.SIMPLE:
         return [simple_layer.SimpleDecoderLayer]
       case DecoderBlockType.SIMPLE_MLP:
@@ -411,6 +413,7 @@ class Decoder(nn.Module):
         DecoderBlockType.GEMMA2,
         DecoderBlockType.GEMMA3,
         DecoderBlockType.QWEN3,
+        DecoderBlockType.QWEN3_MOE,
         DecoderBlockType.SIMPLE,
         DecoderBlockType.SIMPLE_MLP,
         DecoderBlockType.LLAMA4,
@@ -443,14 +446,7 @@ class Decoder(nn.Module):
         length=length,
         metadata_params={nn.PARTITION_NAME: metadata_axis_name},
     )
-    return scan_fn(
-        config=cfg,
-        mesh=mesh,
-        name=metadata_axis_name,
-        quant=self.quant,
-        model_mode=model_mode,
-        **kwargs
-    )
+    return scan_fn(config=cfg, mesh=mesh, name=metadata_axis_name, quant=self.quant, model_mode=model_mode, **kwargs)
 
   def get_pipeline_stage_module(self, decoder_blocks):
     """get pipeline stage module"""

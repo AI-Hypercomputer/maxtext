@@ -1,16 +1,16 @@
-#  Copyright 2025 Google LLC
+# Copyright 2023–2025 Google LLC
 #
-#  Licensed under the Apache License, Version 2.0 (the "License");
-#  you may not use this file except in compliance with the License.
-#  You may obtain a copy of the License at
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
 #
-#       https://www.apache.org/licenses/LICENSE-2.0
+#    https://www.apache.org/licenses/LICENSE-2.0
 #
-#  Unless required by applicable law or agreed to in writing, software
-#  distributed under the License is distributed on an "AS IS" BASIS,
-#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-#  See the License for the specific language governing permissions and
-#  limitations under the License.
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Script to check correctness of `sft_trainer` in MaxText with `SFTTrainer` in TRL & generate golden data for `sft_trainer`.
 
@@ -27,10 +27,13 @@ To check correctness for other models:
 """
 
 import argparse
-import jax
-import jsonlines
 import os
 import sys
+
+import jsonlines
+
+import jax
+
 import torch
 from transformers import TrainingArguments, AutoModelForCausalLM, AutoTokenizer
 from trl import SFTConfig, SFTTrainer
@@ -190,13 +193,18 @@ def test_with_trl_and_save_golden_data(config):
 if __name__ == "__main__":
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
   if "xla_tpu_spmd_rng_bit_generator_unsafe" not in os.environ.get("LIBTPU_INIT_ARGS", ""):
-    os.environ["LIBTPU_INIT_ARGS"] = os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
+    os.environ["LIBTPU_INIT_ARGS"] = (
+        os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
+    )
 
   parser = argparse.ArgumentParser()
   parser.add_argument("--model-name", type=str, required=False, default="llama2-7b")
   parser.add_argument("--tokenizer-path", type=str, required=False, default="meta-llama/Llama-2-7b-chat-hf")
   parser.add_argument(
-      "--model-ckpt-path", type=str, required=False, default="gs://maxtext-model-checkpoints/llama2-7b-chat/scanned/0/items"
+      "--model-ckpt-path",
+      type=str,
+      required=False,
+      default="gs://maxtext-model-checkpoints/llama2-7b-chat/scanned/0/items",
   )
 
   trl_config = parser.parse_args(sys.argv[1:])
