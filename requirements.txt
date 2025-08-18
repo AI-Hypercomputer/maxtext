@@ -4,7 +4,7 @@ array-record
 cloud-accelerator-diagnostics
 cloud-tpu-diagnostics
 datasets>=4.0.0
-flax==0.10.6
+flax>=0.11.0
 gcsfs
 google-api-python-client
 google-cloud-aiplatform==1.61.0
@@ -22,7 +22,7 @@ mlperf-logging@git+https://github.com/mlperf/logging.git
 numpy
 omegaconf
 optax
-orbax-checkpoint>=0.10.3
+orbax-checkpoint>=0.11.22
 pathwaysutils>=0.1.1
 pillow>=11.1.0
 pre-commit
@@ -40,3 +40,4 @@ tensorflow-text>=2.17.0
 tensorflow>=2.16.0
 tiktoken
 transformers
+tunix@git+https://github.com/google/tunix.git

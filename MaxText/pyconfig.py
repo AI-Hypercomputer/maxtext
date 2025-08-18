@@ -1,18 +1,16 @@
-"""
-Copyright 2023 Google LLC
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-     https://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-"""
+# Copyright 2023–2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 # pytype: skip-file
 # pylint: disable=missing-module-docstring, bare-except, consider-using-generator, missing-function-docstring
@@ -209,7 +207,6 @@ def validate_keys(keys):
     validate_ragged_dot(keys)
     validate_deepseek_moe(keys)
     validate_expert_shard_attention_option(keys["expert_shard_attention_option"])
-    assert keys["decoder_block"] != "qwen3", "Qwen3 MoE mode has not been tested, please set num_experts to 1."
 
   if keys["use_multimodal"]:
     validate_multimodal_model_name(keys["model_name"])
@@ -239,6 +236,19 @@ def validate_constant_bound(keys):
   assert (
       len(keys["constant_bound_config"]) == 0 or len(keys["constant_bound_config"]) == 6
   ), "Please specify competete constant bound or none"
+
+
+def validate_quantization_methods(keys):
+  """Validate quantization methods
+  """
+  valid_quant_methods = (
+    "", "int8", "fp8", "fp8_full", "fp8_gpu", "fp8_nanoo"
+  )
+  if keys["use_qwix_quantization"]:
+    if keys["quantization"] not in valid_quant_methods:
+      raise ValueError(
+          f"Invalid quantization method {keys['quantization']}. Valid options are {valid_quant_methods}"
+      )
 
 
 def validate_data_input(keys):
@@ -340,6 +350,7 @@ def validate_model_name(s: str) -> bool:
       "qwen3-8b",
       "qwen3-14b",
       "qwen3-32b",
+      "qwen3-235b-a22b",
       "gpt3-175b",
       "gpt3-22b",
       "gpt3-6b",
@@ -640,6 +651,7 @@ class _HyperParameters:
     validate_tokenizer(raw_keys)
     validate_data_input(raw_keys)
     validate_constant_bound(raw_keys)
+    validate_quantization_methods(raw_keys)
 
     raw_keys["decoder_block"] = DecoderBlockType(raw_keys["decoder_block"])
 
@@ -755,9 +767,9 @@ def validate_and_set_hlo_dump_defaults(raw_keys):
     raise ValueError("You must set either XLA_FLAGS or dump_hlo_xla_flags to dump HLO, but not both.")
   if not os.environ.get("XLA_FLAGS") and not raw_keys["dump_hlo_xla_flags"]:
     raw_keys["dump_hlo_xla_flags"] = f"--xla_dump_to={raw_keys['dump_hlo_local_dir']} --xla_dump_large_constants"
-    if raw_keys["dump_hlo_module_name"]:
+    if raw_keys["dump_hlo_local_module_name"]:
       raw_keys["dump_hlo_xla_flags"] = (
-          f"{raw_keys['dump_hlo_xla_flags']} --xla_dump_hlo_module_re={raw_keys['dump_hlo_module_name']}"
+          f"{raw_keys['dump_hlo_xla_flags']} --xla_dump_hlo_module_re={raw_keys['dump_hlo_local_module_name']}"
       )
   if not raw_keys["dump_hlo_gcs_dir"]:
     raw_keys["dump_hlo_gcs_dir"] = os.path.join(raw_keys["base_output_directory"], raw_keys["run_name"], "xla_dump")
@@ -796,7 +808,9 @@ def set_and_validate_pipeline_config(raw_keys):
   if using_pipeline_parallelism(raw_keys):
     # For pipeline parallelism, model_fsdp_ag_once should be False, and pipeline_fsdp_ag_once is typically True.
     if raw_keys["model_fsdp_ag_once"]:
-      raise ValueError("You should only set pipeline_fsdp_once=True, leave model_fsdp_ag_once=False with pipeline parallelism.")
+      raise ValueError(
+          "You should only set pipeline_fsdp_once=True, leave model_fsdp_ag_once=False with pipeline parallelism."
+      )
 
     def modify_activation_embed_and_logits_batch(logical_axis_rules):
       for idx, logical_rule in enumerate(logical_axis_rules):
@@ -954,22 +968,15 @@ def validate_deepseek_moe(raw_keys):
 def validate_sparse_matmul_parallelism(raw_keys):
   # TODO: remove once b/434699033 resolved
   if raw_keys["sparse_matmul"] and (using_expert_parallelism(raw_keys) and using_pipeline_parallelism(raw_keys)):
-    raise ValueError(
-        "Sparse matmul doesn't support using expert and pipeline parallelism together."
-    )
+    raise ValueError("Sparse matmul doesn't support using expert and pipeline parallelism together.")
 
   # TODO: remove once b/435539039 resolved
-  if (
-      raw_keys["sparse_matmul"]
-      and (
-          using_fsdp_and_transpose_parallelism(raw_keys)
-          and using_expert_parallelism(raw_keys)
-          and using_tensor_parallelism(raw_keys)
-      )
+  if raw_keys["sparse_matmul"] and (
+      using_fsdp_and_transpose_parallelism(raw_keys)
+      and using_expert_parallelism(raw_keys)
+      and using_tensor_parallelism(raw_keys)
   ):
-    raise ValueError(
-        "Sparse matmul doesn't support using fsdp, expert, and tensor parallelism together."
-    )
+    raise ValueError("Sparse matmul doesn't support using fsdp, expert, and tensor parallelism together.")
   tensor_parallelism = (
       raw_keys["ici_tensor_parallelism"]
       * raw_keys["dcn_tensor_parallelism"]

@@ -7,7 +7,7 @@ cloud_tpu_diagnostics==0.1.5
 datasets==3.6.0
 etils==1.12.2
 evaluate==0.4.4
-flax==0.10.6
+flax==0.11.0
 grain==0.2.10
 grpcio==1.72.0rc1
 huggingface_hub==0.33.0
@@ -25,7 +25,7 @@ nltk==3.9.1
 numpy==2.3.1
 omegaconf==2.3.0
 optax==0.2.5
-orbax==0.11.20
+orbax==0.11.22
 pandas==2.3.0
 pathwaysutils@git+https://github.com/AI-Hypercomputer/pathways-utils.git@d6fffd3f9bd5e06c323f5bade04b40fa741c728f
 Pillow==11.2.1

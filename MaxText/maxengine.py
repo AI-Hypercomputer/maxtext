@@ -1,10 +1,10 @@
-# Copyright 2024 Google LLC
+# Copyright 2023–2025 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+#    https://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -475,7 +475,7 @@ class MaxEngine(engine_api.Engine):
           page_state=page_state,
       )
     if return_prompt_logp:
-      prompt_logp = inference_utils.log_prob_of_chosen_token(flat_logits, input_tokens)
+      prompt_logp = inference_utils.prompt_logprobs_from_prefill(flat_logits, input_tokens, true_length)
     else:
       prompt_logp = None
 
@@ -775,7 +775,13 @@ class MaxEngine(engine_api.Engine):
     cache = new_vars["cache"]
     cache = self._maybe_stack_prefill_result_cache(cache)
     if return_prompt_logp:
-      prompt_logp = inference_utils.log_prob_of_chosen_token(flat_logits, input_tokens)
+      prompt_logp = inference_utils.prompt_logprobs_from_packed_prefill(
+          flat_logits,
+          input_tokens,
+          decoder_positions,
+          decoder_segment_ids,
+          true_lengths
+      )
     else:
       prompt_logp = None
 

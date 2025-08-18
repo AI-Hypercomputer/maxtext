@@ -46,7 +46,7 @@ exceptiongroup==1.2.2
 fastapi==0.115.3
 filelock==3.16.1
 flatbuffers==24.3.25
-flax==0.10.6
+flax==0.11.0
 frozenlist==1.5.0
 fsspec==2024.9.0
 gast==0.6.0
@@ -127,7 +127,7 @@ opentelemetry-api==1.27.0
 opt_einsum==3.4.0
 optax==0.2.3
 optree==0.13.0
-orbax-checkpoint==0.11.20
+orbax-checkpoint==0.11.22
 packaging==24.1
 pandas==2.2.3
 parameterized==0.9.0
@@ -200,6 +200,7 @@ toolz==1.0.0
 tqdm==4.66.5
 transformer-engine==1.13.0+e5edd6c
 transformers==4.46.0
+tunix@git+https://github.com/google/tunix.git
 typeguard==2.13.3
 typing_extensions==4.12.2
 tzdata==2024.2
