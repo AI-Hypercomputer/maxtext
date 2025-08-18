@@ -36,9 +36,9 @@ _MAX_WAVELENGTH = 10_000
 
 def _maybe_move_embedding_to_device(embedding_table: Array, config: Config) -> Array:
   """Moves embedding table to device if parameter offloading is enabled."""
-  if config.parameter_memory_host_offload:
-    max_logging.log("embeddings.py: Moving embedding parameter to device")
-    return jax.device_put(embedding_table, max_utils.device_space())
+  # if config.parameter_memory_host_offload:
+  #   max_logging.log("embeddings.py: Moving embedding parameter to device")
+  #   return jax.device_put(embedding_table, max_utils.device_space())
   return embedding_table
 
 

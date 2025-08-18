@@ -61,9 +61,9 @@ class RMSNorm(nnx.Module):
     y = jnp.asarray(x * lax.rsqrt(mean2 + self.epsilon), self.dtype)
     scale = self.scale.value
     # Move scale to device if parameter offloading is enabled
-    if self.parameter_memory_host_offload:
-      max_logging.log("normalizations.py: Moving scale parameter to device")
-      scale = jax.device_put(scale, max_utils.device_space())
+    # if self.parameter_memory_host_offload:
+    #   max_logging.log("normalizations.py: Moving scale parameter to device")
+    #   scale = jax.device_put(scale, max_utils.device_space())
 
     scale = jnp.asarray(scale, self.dtype)
     return y * scale

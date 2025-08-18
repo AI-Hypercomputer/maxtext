@@ -19,8 +19,7 @@ import operator
 from typing import Any, Callable, Iterable, Optional, Sequence, Tuple, Union
 
 import numpy as np
-import jax
-import jax.numpy as jnp
+from jax import numpy as jnp
 
 from jax import lax
 from jax.ad_checkpoint import checkpoint_name
@@ -209,10 +208,10 @@ class DenseGeneral(nnx.Module):
       kernel = jnp.zeros(kernel_shape, dtype=self.dtype)
     else:
       kernel = self.kernel[...]
-      # Move logit_dense kernel to device if parameter offloading is enabled
-      if self.parameter_memory_host_offload:
-        max_logging.log("linear.py: Moving parameter logits_dense kernel to device")
-        kernel = jax.device_put(kernel, max_utils.device_space())
+      # # Move logit_dense kernel to device if parameter offloading is enabled
+      # if self.parameter_memory_host_offload:
+      #   max_logging.log("linear.py: Moving parameter logits_dense kernel to device")
+      #   kernel = jax.device_put(kernel, max_utils.device_space())
       kernel = jnp.asarray(kernel, self.dtype)
 
     contract_ind = tuple(range(0, len(self.axis)))

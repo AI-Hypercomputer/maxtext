@@ -1043,15 +1043,15 @@ def get_abstract_state(model, tx, config, rng, mesh, is_training=True):
   if is_training and config.optimizer_memory_host_offload:
     opt_state = jax.tree_util.tree_map(lambda x: x.with_memory_kind(kind="pinned_host"), state_mesh_shardings.opt_state)
     state_mesh_shardings = state_mesh_shardings.replace(opt_state=opt_state)
-  if is_training and config.parameter_memory_host_offload:
-    assert config.param_scan_axis == 0, "You must set the scan axis 0 to enable parameter offloading."
+  # if is_training and config.parameter_memory_host_offload:
+  #   assert config.param_scan_axis == 0, "You must set the scan axis 0 to enable parameter offloading."
 
-    def move(path, x):
-      max_logging.log(f"max_utils.py: Moving {path} to host")
-      return x.with_memory_kind(kind="pinned_host")
+  #   def move(path, x):
+  #     max_logging.log(f"max_utils.py: Moving {path} to host")
+  #     return x.with_memory_kind(kind="pinned_host")
 
-    params = jax.tree_util.tree_map_with_path(move, state_mesh_shardings.params)
-    state_mesh_shardings = state_mesh_shardings.replace(params=params)
+  #   params = jax.tree_util.tree_map_with_path(move, state_mesh_shardings.params)
+  #   state_mesh_shardings = state_mesh_shardings.replace(params=params)
 
   abstract_sharded_state = jax.jit(init_state_partial, in_shardings=None, out_shardings=state_mesh_shardings).eval_shape()
 
