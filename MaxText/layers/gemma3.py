@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Optional
+"""Specialised layers for Gemma 3."""
 
 import jax
 from jax.ad_checkpoint import checkpoint_name
@@ -61,7 +61,7 @@ class Gemma3DecoderLayer(nn.Module):
   config: Config
   mesh: Mesh
   model_mode: str
-  quant: Optional[Quant] = None
+  quant: None | Quant = None
   attention_type: AttentionType = AttentionType.LOCAL_SLIDING
 
   @nn.compact
@@ -211,14 +211,14 @@ class Gemma3ScannableBlock(nn.Module):
   Attributes:
     config: Config, MaxText model config
     mesh: Mesh, JAX device mesh (used for sharding)
-    quant: Optional[Quant], quantization config
+    quant: None | Quant, quantization config
     num_of_layers: int, number of decoder layers in the block
   """
 
   config: Config
   mesh: Mesh
   model_mode: str
-  quant: Optional[Quant] = None
+  quant: None | Quant = None
   num_of_layers: int = 1
 
   @nn.compact
@@ -518,7 +518,7 @@ class Gemma3VisionEncoderLayer(nn.Module):
       jnp.array for image embeddings, shaped [B, N, P, D], e.g. [4, 1, 256, 2560]
     """
     cfg = self.config
-    # currrently only supports N=1, the inputs shape is [B, H, W, C]
+    # currently only supports N=1, the inputs shape is [B, H, W, C]
     if len(inputs.shape) == 4:
       inputs = inputs[:, None, :]
     b, n, h, w, c = inputs.shape

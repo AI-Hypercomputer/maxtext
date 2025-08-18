@@ -698,7 +698,7 @@ class RoutedMoE(nnx.Module):
         lhs_quantize_dtype = quant_dg.fwd.dg_quantizer.lhs.numerics.get_dtype()
         rhs_quantize_dtype = quant_dg.fwd.dg_quantizer.rhs.numerics.get_dtype()
       if self.config.use_qwix_quantization:
-        quantization_rule = qpl.get_current_rule('dot_general')
+        quantization_rule = qpl.get_current_rule("dot_general")
         if quantization_rule is not None:
           lhs_quantize_dtype = quantization_rule.act_qtype
           rhs_quantize_dtype = quantization_rule.weight_qtype
@@ -1179,7 +1179,9 @@ class RoutedMoE(nnx.Module):
       einsum_op = jnp.einsum
     return einsum_op
 
-  def maybe_all_gather_kernel_weight_in_expert_parallelism(self, kernel: jax.Array, kernel_axes: Tuple[Optional[str], ...]):
+  def maybe_all_gather_kernel_weight_in_expert_parallelism(
+      self, kernel: jax.Array, kernel_axes: Tuple[Optional[str], ...]
+  ):
     """All-gather kernel weight in expert parallelism if needed."""
     if self.get_expert_parallelism_size() > 1:
       # This will trigger all-gather using weight_dtype

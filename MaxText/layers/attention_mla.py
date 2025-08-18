@@ -47,7 +47,7 @@ from MaxText.common_types import (
     MODEL_MODE_TRAIN,
     PREFILL_KV_BATCH,
     PREFILL_LENGTH,
-    AttentionType
+    AttentionType,
 )
 from MaxText.inference import kvcache
 from MaxText.inference import page_manager
@@ -646,7 +646,9 @@ class MLA(Attention):
       if self.config.mla_naive_kvcache:
         cached_values = self.update_kv_caches(key, value, decoder_segment_ids, model_mode, previous_chunk)
       else:
-        cached_values = self.update_mla_kv_caches(low_rank_main, key_rope, decoder_segment_ids, model_mode, previous_chunk)
+        cached_values = self.update_mla_kv_caches(
+            low_rank_main, key_rope, decoder_segment_ids, model_mode, previous_chunk
+        )
 
     return key, value, cached_values
 

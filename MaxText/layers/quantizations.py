@@ -410,7 +410,7 @@ def _build_per_tensor_config(
   return aqt_dg
 
 
-# fp8 training recipe of dynmaic scaling with configurable constant_bound_config for static scaling option
+# fp8 training recipe of dynamic scaling with configurable constant_bound_config for static scaling option
 def _get_aqt_fp8_default_config(config):
   """Get aqt for 8-bit floating point quantization configuration."""
   aqt_dg = aqt_config.config_v4(
@@ -490,7 +490,7 @@ def _get_mixed_precision_quant_config(mixed_precision_config):
   ret_config = {}
   default_mp_config = _get_default_mp_config(default=mixed_precision_config.get(DEFAULT, None))
   for layer_name_re, layer_quantization_config in mixed_precision_config.items():
-    # Make a copy of default_mp_config to avoid updaing original dict
+    # Make a copy of default_mp_config to avoid updating original dict
     quant_config = default_mp_config.copy()
     # print(f"Mixed precision config: processing
     # {layer_name_re} - {layer_quantization_config}, default config - {quant_config}")
@@ -644,51 +644,51 @@ def get_quantization_rule(config: Config):
     case "int8":
       return qwix.QtRule(
           module_path="decoder/.*layers.*",
-          weight_qtype = jnp.int8,
-          act_qtype = jnp.int8,
-          bwd_qtype = jnp.int8,
-          bwd_weight_grad_tile_size = 1 / config.quantization_local_shard_count,
-          op_names=('dot_general',),
+          weight_qtype=jnp.int8,
+          act_qtype=jnp.int8,
+          bwd_qtype=jnp.int8,
+          bwd_weight_grad_tile_size=1 / config.quantization_local_shard_count,
+          op_names=("dot_general",),
       )
     case "fp8":
       return qwix.QtRule(
           module_path="decoder/.*layers.*",
-          weight_qtype = jnp.float8_e4m3fn,
-          act_qtype = jnp.float8_e4m3fn,
-          bwd_qtype = jnp.float8_e4m3fn,
-          bwd_weight_grad_tile_size = 1 / config.quantization_local_shard_count,
-          op_names=('dot_general',),
+          weight_qtype=jnp.float8_e4m3fn,
+          act_qtype=jnp.float8_e4m3fn,
+          bwd_qtype=jnp.float8_e4m3fn,
+          bwd_weight_grad_tile_size=1 / config.quantization_local_shard_count,
+          op_names=("dot_general",),
       )
     case "fp8_full":
       return qwix.QtRule(
           module_path="decoder/.*layers.*",
-          weight_qtype = jnp.float8_e4m3fn,
-          act_qtype = jnp.float8_e4m3fn,
-          bwd_qtype = jnp.float8_e5m2,
+          weight_qtype=jnp.float8_e4m3fn,
+          act_qtype=jnp.float8_e4m3fn,
+          bwd_qtype=jnp.float8_e5m2,
           bwd_use_original_residuals=True,
-          disable_channelwise_axes=True, # per_tensor calibration
-          weight_calibration_method = config.quantization_calibration_method,
-          act_calibration_method = config.quantization_calibration_method,
-          bwd_calibration_method = config.quantization_calibration_method,
-          op_names=('dot_general',),
+          disable_channelwise_axes=True,  # per_tensor calibration
+          weight_calibration_method=config.quantization_calibration_method,
+          act_calibration_method=config.quantization_calibration_method,
+          bwd_calibration_method=config.quantization_calibration_method,
+          op_names=("dot_general",),
       )
     case "fp8_gpu":
       return qwix.QtRule(
           module_path="decoder/.*layers.*",
-          weight_qtype = jnp.float8_e4m3fn,
-          act_qtype = jnp.float8_e4m3fn,
-          bwd_qtype = jnp.float8_e4m3fn,
-          bwd_weight_grad_tile_size = 1 / config.quantization_local_shard_count,
-          op_names=('dot_general',),
+          weight_qtype=jnp.float8_e4m3fn,
+          act_qtype=jnp.float8_e4m3fn,
+          bwd_qtype=jnp.float8_e4m3fn,
+          bwd_weight_grad_tile_size=1 / config.quantization_local_shard_count,
+          op_names=("dot_general",),
       )
     case "fp8_nanoo":
       return qwix.QtRule(
           module_path="decoder/.*layers.*",
-          weight_qtype = jnp.float8_e4m3fn,
-          act_qtype = jnp.float8_e4m3fn,
-          bwd_qtype = jnp.float8_e4m3fn,
-          bwd_weight_grad_tile_size = 1 / config.quantization_local_shard_count,
-          op_names=('dot_general',),
+          weight_qtype=jnp.float8_e4m3fn,
+          act_qtype=jnp.float8_e4m3fn,
+          bwd_qtype=jnp.float8_e4m3fn,
+          bwd_weight_grad_tile_size=1 / config.quantization_local_shard_count,
+          op_names=("dot_general",),
       )
     case "":
       return None

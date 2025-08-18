@@ -441,7 +441,9 @@ class Pipeline(nn.Module):
     else a set of layers if body_instance is a set of layers.
     """
 
-    def func_to_vmap(body_instance, weights, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode):
+    def func_to_vmap(
+        body_instance, weights, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode
+    ):
       """nn.vmap requires either a nn.module class or a function whose first argument is a nn.module instance."""
       return body_instance.apply(weights, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode)
 
@@ -516,7 +518,13 @@ class Pipeline(nn.Module):
 
     stage_weights = self.get_current_stage_weights(pipeline_weights, loop_iteration)
     stages_output = vmap_func(
-        decoder_layer_instance, stage_weights, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode
+        decoder_layer_instance,
+        stage_weights,
+        stages_inputs,
+        stages_segment_ids,
+        stages_positions,
+        deterministic,
+        model_mode,
     )
     if self.config.scan_layers:
       stages_output = stages_output[0]
@@ -699,7 +707,9 @@ class Pipeline(nn.Module):
             else None
         )
         example_position = (
-            jax.lax.broadcast(example_position, [self.config.num_pipeline_repeats]) if example_position is not None else None
+            jax.lax.broadcast(example_position, [self.config.num_pipeline_repeats])
+            if example_position is not None
+            else None
         )
       # We only need to run one set of stages to initialize the variables, instead of looping over all microbatches for
       # the full total_iterations.

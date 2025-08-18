@@ -74,6 +74,7 @@ from MaxText.layers.quantizations import AqtQuantization as Quant
 # pylint: disable=line-too-long, g-doc-args, g-doc-return-or-yield, bad-continuation, g-inconsistent-quotes
 # pytype: disable=attribute-error
 
+
 @dataclasses.dataclass(repr=False)
 class L2Norm(nnx.Module):
   """
@@ -230,33 +231,33 @@ def attention_as_linen(
 class Attention(nnx.Module):
   """Attention Module.
 
-    This module implements multi-headed attention as described in the
-    original Transformer paper. It projects the inputs into query, key, and
-    value vectors, applies the attention mechanism, and projects the results to
-    an output vector.
+  This module implements multi-headed attention as described in the
+  original Transformer paper. It projects the inputs into query, key, and
+  value vectors, applies the attention mechanism, and projects the results to
+  an output vector.
 
-    Attributes:
-      config: The model configuration.
-      num_query_heads: Number of query attention heads.
-      num_kv_heads: Number of key-value attention heads.
-      head_dim: The dimension of each attention head.
-      max_target_length: Maximum sequence length.
-      mesh: The device mesh.
-      attention_kernel: The attention kernel to use (e.g., 'dot_product', 'flash').
-      inputs_q_shape: Query inputs shape for initialization, required by NNX.
-      inputs_kv_shape: Key/value inputs shape for initialization, required by NNX.
-      dtype: The data type for computation.
-      weight_dtype: The data type for weights.
-      max_prefill_predict_length: Maximum length for prefill.
-      dropout_rate: The dropout rate.
-      kernel_init: Initializer for the kernel of the dense layers.
-      float32_qk_product: If True, compute query-key product in float32.
-      float32_logits: If True, cast logits to float32 before softmax.
-      quant: Quantization configuration.
-      kv_quant: KV cache quantization configuration.
-      attention_type: The type of attention (e.g., 'global', 'local_sliding').
-      attn_logits_soft_cap: Soft cap for attention logits.
-      ... and other configuration parameters.
+  Attributes:
+    config: The model configuration.
+    num_query_heads: Number of query attention heads.
+    num_kv_heads: Number of key-value attention heads.
+    head_dim: The dimension of each attention head.
+    max_target_length: Maximum sequence length.
+    mesh: The device mesh.
+    attention_kernel: The attention kernel to use (e.g., 'dot_product', 'flash').
+    inputs_q_shape: Query inputs shape for initialization, required by NNX.
+    inputs_kv_shape: Key/value inputs shape for initialization, required by NNX.
+    dtype: The data type for computation.
+    weight_dtype: The data type for weights.
+    max_prefill_predict_length: Maximum length for prefill.
+    dropout_rate: The dropout rate.
+    kernel_init: Initializer for the kernel of the dense layers.
+    float32_qk_product: If True, compute query-key product in float32.
+    float32_logits: If True, cast logits to float32 before softmax.
+    quant: Quantization configuration.
+    kv_quant: KV cache quantization configuration.
+    attention_type: The type of attention (e.g., 'global', 'local_sliding').
+    attn_logits_soft_cap: Soft cap for attention logits.
+    ... and other configuration parameters.
   """
 
   def __init__(
@@ -498,7 +499,6 @@ class Attention(nnx.Module):
       self.query_norm = None
       self.key_norm = None
 
-
   def init_query_w(self, inputs_q_shape: Tuple) -> nnx.Module:
     """Query projection initialization."""
 
@@ -702,7 +702,6 @@ class Attention(nnx.Module):
           rngs=self.rngs,
       )
     return rotary_embedding
-
 
   def apply_rotary_embedding(self, inputs: Array, inputs_positions: Optional[Array | None] = None):
     """Applies rotary embeddings, handling different model types.

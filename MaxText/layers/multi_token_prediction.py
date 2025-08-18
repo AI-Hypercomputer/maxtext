@@ -12,9 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""JAX implementation of the Multi Token Predicition https://arxiv.org/pdf/2412.19437 """
+"""JAX implementation of the Multi Token Prediction https://arxiv.org/pdf/2412.19437 """
 
-from typing import Optional, Type
+from typing import Type
 
 import jax
 import jax.numpy as jnp
@@ -81,7 +81,7 @@ class MultiTokenPredictionLayer(nn.Module):
       prev_hidden_state: jnp.ndarray,
       target_token_embedding: jnp.ndarray,
       position_ids: jnp.ndarray,
-      decoder_segment_ids: Optional[jnp.ndarray],
+      decoder_segment_ids: None | jnp.ndarray,
       deterministic: bool,
       model_mode: str = MODEL_MODE_TRAIN,
   ) -> jnp.ndarray:
@@ -152,7 +152,9 @@ class MultiTokenPredictionLayer(nn.Module):
     projected_features = projection_layer(concatenated_features)
 
     # --- 4. Pass through MTP Transformer Block ---
-    output = self.transformer_layer_module(config=cfg, mesh=mesh, model_mode=model_mode, name=f"mtp_{k}_transformer_layer")(
+    output = self.transformer_layer_module(
+        config=cfg, mesh=mesh, model_mode=model_mode, name=f"mtp_{k}_transformer_layer"
+    )(
         inputs=projected_features,
         decoder_segment_ids=decoder_segment_ids,
         decoder_positions=position_ids,
@@ -212,7 +214,9 @@ class MultiTokenPredictionBlock(nn.Module):
       rolled_position_id = roll_and_mask(rolled_position_id)
 
       # Embed the k-th future input tokens using the shared embedding module
-      target_token_embedding = self.decoder._apply_embedding(rolled_input_ids, rolled_position_id, deterministic, model_mode)
+      target_token_embedding = self.decoder._apply_embedding(
+          rolled_input_ids, rolled_position_id, deterministic, model_mode
+      )
 
       # Instantiate and apply the MTP layer for this step
       mtp_layer = MultiTokenPredictionLayer(
@@ -231,7 +235,9 @@ class MultiTokenPredictionBlock(nn.Module):
       mtp_logits = self.decoder._apply_output_head(next_mtp_hidden_state, deterministic, model_mode)
 
       # Calculate cross-entropy loss for this specific layer's prediction
-      mtp_xent, _ = max_utils.cross_entropy_with_logits(mtp_logits, jax.nn.one_hot(rolled_target_ids, cfg.vocab_size), 0.0)
+      mtp_xent, _ = max_utils.cross_entropy_with_logits(
+          mtp_logits, jax.nn.one_hot(rolled_target_ids, cfg.vocab_size), 0.0
+      )
       mtp_xent_masked = mtp_xent * rolled_target_mask
 
       # This logic doesn't run during model initialization to avoid unwated population of the mutable collections.
