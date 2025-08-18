@@ -27,10 +27,13 @@ To check correctness for other models:
 """
 
 import argparse
-import jax
-import jsonlines
 import os
 import sys
+
+import jsonlines
+
+import jax
+
 import torch
 from transformers import TrainingArguments, AutoModelForCausalLM, AutoTokenizer
 from trl import SFTConfig, SFTTrainer
@@ -190,13 +193,18 @@ def test_with_trl_and_save_golden_data(config):
 if __name__ == "__main__":
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
   if "xla_tpu_spmd_rng_bit_generator_unsafe" not in os.environ.get("LIBTPU_INIT_ARGS", ""):
-    os.environ["LIBTPU_INIT_ARGS"] = os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
+    os.environ["LIBTPU_INIT_ARGS"] = (
+        os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
+    )
 
   parser = argparse.ArgumentParser()
   parser.add_argument("--model-name", type=str, required=False, default="llama2-7b")
   parser.add_argument("--tokenizer-path", type=str, required=False, default="meta-llama/Llama-2-7b-chat-hf")
   parser.add_argument(
-      "--model-ckpt-path", type=str, required=False, default="gs://maxtext-model-checkpoints/llama2-7b-chat/scanned/0/items"
+      "--model-ckpt-path",
+      type=str,
+      required=False,
+      default="gs://maxtext-model-checkpoints/llama2-7b-chat/scanned/0/items",
   )
 
   trl_config = parser.parse_args(sys.argv[1:])

@@ -291,7 +291,10 @@ class GRPOTest(unittest.TestCase):
         "avg_advantage": aux.avg_advantage.tolist(),
     }
     model_output_path = os.path.join(
-        os.path.dirname(PKG_DIR), "MaxText", "test_assets", f"golden_data_grpo_{self.cfg_no_ckpt_loading.model_name}.jsonl"
+        os.path.dirname(PKG_DIR),
+        "MaxText",
+        "test_assets",
+        f"golden_data_grpo_{self.cfg_no_ckpt_loading.model_name}.jsonl",
     )
     with jsonlines.open(model_output_path, "w") as f:
       f.write(data_to_save)
