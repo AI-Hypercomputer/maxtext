@@ -32,6 +32,8 @@ from orbax.checkpoint import v1 as ocp_v1
 import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_checkpoint_manager
 import orbax.checkpoint.experimental.emergency.replicator_checkpoint_manager as emergency_replicator_checkpoint_manager
 # pylint: disable=too-many-positional-arguments
+from google.cloud import storage
+import os
 
 CheckpointManager = ocp.CheckpointManager
 CheckpointManagerOptions = ocp.CheckpointManagerOptions
@@ -150,6 +152,9 @@ def create_orbax_emergency_checkpoint_manager(
 ):
   """Returns an emergency checkpoint manager."""
   flags.FLAGS.experimental_orbax_use_distributed_process_id = True
+  flags.FLAGS.experimental_use_distributed_id_for_mesh_consistency = False
+  max_logging.log(f"experimental_orbax_use_distributed_process_id = {flags.FLAGS.experimental_orbax_use_distributed_process_id}")
+  max_logging.log(f"experimental_use_distributed_id_for_mesh_consistency = {flags.FLAGS.experimental_use_distributed_id_for_mesh_consistency}")
   max_logging.log("Creating emergency checkpoint manager...")
 
   # Only create directories if running on GPUs as the previous
@@ -357,7 +362,10 @@ def load_state_if_possible(
         case (checkpoint_manager, _, _) if isinstance(
             checkpoint_manager, (EmergencyCheckpointManager, EmergencyReplicatorCheckpointManager)
         ):
-          return (checkpoint_manager.restore(step, args=Composite(state=checkpoint_args)).state, None)
+          restored_state_debug=checkpoint_manager.restore(step, args=Composite(state=checkpoint_args)).state
+          max_logging.log(f"Restored state from step {step} with EmergencyCheckpointManager.")
+          max_logging.log(f"Restored state: {restored_state_debug}")
+          return (restored_state_debug, None)
         # Case 2: Matches if dataset type is "grain" and a specific checkpoint file exits for the iterator
         # exists within the checkpoint manager's directory for the given step.
         case (checkpoint_manager, dataset_type, data_iterator) if dataset_type == "grain" and data_iterator and (
@@ -477,6 +485,49 @@ def maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator, step
     checkpoint_saved = save_checkpoint(checkpoint_manager, actual_step, state, config, data_iterator, force_ckpt_save)
     if checkpoint_saved:
       print_save_message(actual_step, config.async_checkpointing)
+      # Upload local checkpoint to persistent path (GCS) if using emergency checkpoint manager
+      if isinstance(checkpoint_manager, EmergencyCheckpointManager) and checkpoint_saved and jax.process_index() == jax.process_count() - 1:
+        try:
+            max_logging.log(f"Jacky Uploading local checkpoint from step {actual_step} to persistent GCS path...")
+
+            # Get GCS bucket and path from checkpoint manager's persistent directory
+            persistent_path = str(checkpoint_manager.directory)
+            max_logging.log(f"Jacky Persistent checkpoint path: {persistent_path}")
+            if persistent_path.startswith('gs://'):
+              bucket_name = persistent_path.split('/')[2]
+              gcs_prefix = '/'.join(persistent_path.split('/')[3:])
+
+              client = storage.Client()
+              bucket = client.bucket(bucket_name)
+
+              # Upload local checkpoint directory to GCS
+              if hasattr(checkpoint_manager, '_checkpoint_manager') and hasattr(checkpoint_manager._checkpoint_manager, '_local_directory'):
+                local_directory = checkpoint_manager._checkpoint_manager._local_directory
+                local_checkpoint_path = os.path.join(local_directory, str(actual_step))
+                print(f"Jacky Local checkpoint path: {local_checkpoint_path}")
+                if os.path.exists(local_checkpoint_path):
+                  for root, dirs, files in os.walk(local_checkpoint_path):
+                    for file in files:
+                      local_file_path = os.path.join(root, file)
+                      relative_path = os.path.relpath(local_file_path, local_directory)
+                      gcs_blob_name = f"{gcs_prefix}/local/{relative_path}"
+
+                      blob = bucket.blob(gcs_blob_name)
+                      blob.upload_from_filename(local_file_path)
+
+                  max_logging.log(f"Jacky Successfully uploaded checkpoint step {actual_step} to GCS bucket {bucket_name}")
+                else:
+                  max_logging.log(f"Jacky Local checkpoint path {local_checkpoint_path} does not exist")
+            else:
+              max_logging.log(f"Jacky Persistent directory {persistent_path} is not a GCS path")
+
+        except ImportError:
+          max_logging.log("Jacky google.cloud.storage not available, falling back to checkpoint manager upload")
+          checkpoint_manager.upload_to_persistent(actual_step)
+        except Exception as upload_error:
+          max_logging.log(f"Jacky Warning: Failed to upload checkpoint to persistent storage: {upload_error}")
+          # Don't raise exception here as local checkpoint was saved successfully
+
   except Exception as e:
     raise exceptions.StopTraining(f"Checkpointing failed. {str(e)}") from e
 
