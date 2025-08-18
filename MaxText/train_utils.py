@@ -15,6 +15,7 @@
 # pylint: disable=bare-except, consider-using-generator
 """ Utils that are only interesting for training in MaxText. """
 
+import functools
 import jax
 from MaxText.common_types import MODEL_MODE_TRAIN
 from MaxText.layers import quantizations
@@ -142,3 +143,50 @@ def jit_train_and_eval_step(
     p_eval_step = jit_eval_step(config, model, state_mesh_shardings, data_sharding, eval_step)
 
   return p_train_step, p_eval_step
+
+
+def jit_train_step_update(config, model, state, state_mesh_shardings, train_step):
+  """Returns a JIT-compiled train step function, which is loaded from a file if specified in the config."""
+  
+  def get_functional_train_opt_update_signature(train_step, state_mesh_shardings, model, config):
+    functional_train = functools.partial(train_step)
+    functional_train.__name__ = "train_step_opt_update"
+    in_shardings = (state_mesh_shardings, state_mesh_shardings.params)  # State, grad
+    
+    out_shardings = (state_mesh_shardings) # new_state
+    
+    static_argnums = ()  # We partial out the static argnums of model and config
+    donate_argnums = 0  # This is the index of the state - we allow the compiler to make use of this memory.
+    return functional_train, in_shardings, out_shardings, static_argnums, donate_argnums
+  
+  functional_train, in_shardings, out_shardings, static_argnums, donate_argnums = (
+      get_functional_train_opt_update_signature(train_step, state_mesh_shardings, model, config)
+  )
+
+  p_train_step = jax.jit(
+      functional_train,
+      in_shardings=in_shardings,
+      out_shardings=out_shardings,
+      static_argnums=static_argnums,
+      donate_argnums=donate_argnums,
+  )
+
+  return p_train_step
+
+def jit_train_and_eval_step_fwd_bwd(
+  config, model, mesh, state, state_mesh_shardings, train_step, eval_step=None, eval_data_iterator=None
+):
+  data_sharding = maxtext_utils.get_input_data_sharding(config, mesh)
+  p_train_step = jit_train_step(config, model, state, state_mesh_shardings, data_sharding, train_step)
+  p_eval_step = None
+  if eval_data_iterator:
+    p_eval_step = jit_eval_step(config, model, state_mesh_shardings, data_sharding, eval_step)
+
+  return p_train_step, p_eval_step
+
+
+def jit_train_opt_update(
+  config, model, mesh, state, state_mesh_shardings, train_step
+):
+  p_train_opt_update = jit_train_step_update(config, model, state, state_mesh_shardings, train_step)
+  return p_train_opt_update

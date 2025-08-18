@@ -347,6 +347,102 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
   return loss, aux
 
 
+def train_step_fwd_bwd(model, config, state_mesh_shardings, state, data, dropout_rng):
+  """Forward and backward pass for training step.
+
+  Args:
+    model: A nn.Module
+    config: Config of parameters
+    state: A pytree of the current state of the model
+    data: Batch of data to apply to the model
+    dropout_rng: A key to use to generate rng for dropout
+
+  Returns:
+    grads: The gradients of the loss with respect to the model parameters.
+    metrics: Dictionary of model metrics such as loss, training rate, etc.
+  """
+  reference_params, reference_params_sharding, extra_dpo_args, _loss_fn = [], [], [], loss_fn
+
+  if config.gradient_accumulation_steps > 1:
+
+    def accumulate_gradient(acc_grad_and_loss, data):
+      grad_func = jax.value_and_grad(_loss_fn, argnums=4, has_aux=True)
+      (_, aux), cur_batch_gradient = grad_func(
+          model, config, data, dropout_rng, state.params, *extra_dpo_args, is_train=True
+      )
+      acc_grad_and_loss["loss"] += aux["total_loss"]
+      acc_grad_and_loss["moe_lb_loss"] += aux["moe_lb_loss"]
+      acc_grad_and_loss["mtp_loss"] += aux["mtp_loss"]
+      acc_grad_and_loss["grad"] = jax.tree_util.tree_map(
+          lambda x, y: x + y, cur_batch_gradient, acc_grad_and_loss["grad"]
+      )
+      acc_grad_and_loss["total_weights"] += aux["total_weights"]
+      return acc_grad_and_loss, aux
+
+    def reshape_to_microbatch_accumulations(batch_arr):
+      """Reshape global batch to microbatches, assuming batch axis is leading."""
+      microbatches = config.gradient_accumulation_steps
+      microbatch_shape = (microbatches, batch_arr.shape[0] // microbatches) + batch_arr.shape[1:]
+      return jnp.reshape(batch_arr, microbatch_shape)
+
+    data = jax.tree_util.tree_map(reshape_to_microbatch_accumulations, data)
+    init_grad = jax.tree_util.tree_map(jnp.zeros_like, state.params)
+    init_grad_and_loss = {"loss": 0.0, "grad": init_grad, "total_weights": 0, "moe_lb_loss": 0.0, "mtp_loss": 0.0}
+
+    grad_and_loss, aux = jax.lax.scan(
+        accumulate_gradient, init_grad_and_loss, data, length=config.gradient_accumulation_steps
+    )
+    loss = (
+        grad_and_loss["loss"] / grad_and_loss["total_weights"]
+        + grad_and_loss["moe_lb_loss"] / config.gradient_accumulation_steps
+        + grad_and_loss["mtp_loss"] / config.gradient_accumulation_steps
+    )
+    raw_grads = jax.tree_util.tree_map(lambda arr: arr / grad_and_loss["total_weights"], grad_and_loss["grad"])
+    aux = jax.tree.map(lambda x: jnp.sum(x, axis=0), aux)  # pytype: disable=module-attr
+  else:
+    if config.optimizer_memory_host_offload:
+      if config.use_dpo:
+        reference_params = jax.device_put(reference_params, max_utils.with_memory_kind(reference_params_sharding, "device"))
+        extra_dpo_args = [reference_params]
+    grad_func = jax.value_and_grad(_loss_fn, argnums=4, has_aux=True)
+    (loss, aux), raw_grads = grad_func(model, config, data, dropout_rng, state.params, *extra_dpo_args, is_train=True)
+  intermediate_outputs = aux["intermediate_outputs"]
+  total_weights = aux["total_weights"]
+  moe_lb_loss = aux["moe_lb_loss"]
+  mtp_loss = aux["mtp_loss"]
+
+  if config.gradient_clipping_threshold > 0:
+    grads = maxtext_utils.apply_gradient_clipping(raw_grads, state, config.gradient_clipping_threshold)
+  else:
+    grads = raw_grads
+     
+  scalar_metrics = {
+      "learning/loss": loss,
+      "learning/moe_lb_loss": moe_lb_loss,
+      "learning/mtp_loss": mtp_loss,
+      "learning/total_weights": total_weights,
+  }
+  if not config.optimizer_memory_host_offload:
+    scalar_metrics["learning/grad_norm"] = max_utils.l2norm_pytree(grads)
+    scalar_metrics["learning/raw_grad_norm"] = max_utils.l2norm_pytree(raw_grads)
+  if config.use_dpo:
+    scalar_metrics["learning/dpo_reward_accuracy"] = aux["reward_accuracy"]
+  
+  metrics = {
+      "scalar": scalar_metrics,
+      "scalars": {},
+  }
+  if config.record_internal_nn_metrics:
+    record_activation_metrics(metrics, intermediate_outputs, config)
+  return grads, metrics
+
+
+def train_step_opt_update(state, grads):
+  new_state = state.apply_gradients(grads=grads)
+  return new_state
+
+
+
 def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
   """
 
@@ -621,13 +717,21 @@ def train_loop(config, recorder, state=None):
       state = _merge_dpo_state(state, reference_params)
     state_mesh_shardings = _merge_dpo_state(state_mesh_shardings, state_mesh_shardings.params["params"])
 
-  p_train_step, p_eval_step = train_utils.jit_train_and_eval_step(
-      config, model, mesh, state, state_mesh_shardings, train_step, eval_step, eval_data_iterator
-  )
+  if config.simple_optimizer_offload:
+    p_train_fwd_bwd_step, p_eval_step = train_utils.jit_train_and_eval_step_fwd_bwd(
+      config, model, mesh, state, state_mesh_shardings, train_step_fwd_bwd, eval_step, eval_data_iterator
+    )
+    p_train_opt_update = train_utils.jit_train_opt_update(
+        config, model, mesh, state, state_mesh_shardings, train_step_opt_update
+    )
+  else:
+    p_train_step, p_eval_step = train_utils.jit_train_and_eval_step(
+        config, model, mesh, state, state_mesh_shardings, train_step, eval_step, eval_data_iterator
+    )
 
   with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
     shaped_batch = maxtext_utils.get_shaped_batch(config)
-    compiled = p_train_step.lower(state, shaped_batch, init_rng).compile()
+    compiled = p_train_fwd_bwd_step.lower(state, shaped_batch, init_rng).compile()
     compiled_stats = compiled.memory_analysis()
     max_utils.print_compiled_memory_stats(compiled_stats)
 
@@ -650,7 +754,12 @@ def train_loop(config, recorder, state=None):
         nextrng = jax.jit(jax.random.fold_in)(init_rng, step)
         with maybe_record_goodput(recorder, GoodputEvent.STEP, step):
           with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-            state, metrics = p_train_step(state, example_batch, nextrng)
+            if config.simple_optimizer_offload:
+              grads, metrics = p_train_fwd_bwd_step(state, example_batch, nextrng)
+              grads = jax.block_until_ready(grads)
+              state = p_train_opt_update(state, grads)
+            else:
+              state, metrics = p_train_step(state, example_batch, nextrng)
 
       step_time_delta = datetime.datetime.now() - last_step_completion
       last_step_completion = datetime.datetime.now()
