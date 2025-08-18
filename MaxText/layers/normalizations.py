@@ -14,7 +14,7 @@
 
 """Normalization Layers."""
 
-from typing import Any, Tuple, Optional
+from typing import Any
 
 from flax import linen as nn
 from flax import nnx
@@ -36,7 +36,7 @@ class RMSNorm(nnx.Module):
       epsilon: float = 1e-6,
       dtype: Any = jnp.float32,
       weight_dtype: Any = jnp.float32,
-      kernel_axes: Tuple[Optional[str], ...] = (),
+      kernel_axes: tuple[None | str, ...] = (),
       scale_init: Initializer = nn.initializers.ones,
       parameter_memory_host_offload: bool = False,
       *,
@@ -74,9 +74,9 @@ def rms_norm(
     epsilon: float = 1e-6,
     dtype: Any = jnp.float32,
     weight_dtype: Any = jnp.float32,
-    kernel_axes: Tuple[Optional[str], ...] = (),
+    kernel_axes: tuple[None | str, ...] = (),
     scale_init: Initializer = nn.initializers.ones,
-    name: Optional[str] = None,
+    name: None | str = None,
     parameter_memory_host_offload: bool = False,
 ):
   """Creates a RMSNorm module."""

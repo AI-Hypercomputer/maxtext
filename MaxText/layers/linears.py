@@ -16,7 +16,7 @@
 
 import functools
 import operator
-from typing import Any, Callable, Iterable, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Iterable, Sequence
 
 import numpy as np
 import jax
@@ -37,7 +37,7 @@ from MaxText.layers.initializers import NdInitializer, nd_dense_init, default_bi
 from MaxText.layers.quantizations import AqtQuantization as Quant
 
 
-def _convert_to_activation_function(fn_or_string: Union[str, Callable[..., Any]]) -> Callable[..., Any]:
+def _convert_to_activation_function(fn_or_string: str | Callable[..., Any]) -> Callable[..., Any]:
   """Convert a string to an activation function."""
   if fn_or_string == "linear":
     return lambda x: x
@@ -52,7 +52,7 @@ def _convert_to_activation_function(fn_or_string: Union[str, Callable[..., Any]]
     )
 
 
-def normalize_axes(axes: Iterable[int], ndim: int) -> Tuple[int, ...]:
+def normalize_axes(axes: Iterable[int], ndim: int) -> tuple[int, ...]:
   # A tuple by convention. len(axes_tuple) then also gives the rank efficiently.
   return tuple(ax if ax >= 0 else ndim + ax for ax in axes)
 
@@ -62,6 +62,7 @@ def canonicalize_tuple(x):
     return tuple(x)
   else:
     return (x,)
+
 
 def _compute_dot_general(inputs, kernel, kernel_axes, axis, contract_ind, matmul_precision, quant):
   """Computes a dot_general operation that may be quantized."""
@@ -75,13 +76,7 @@ def _compute_dot_general(inputs, kernel, kernel_axes, axis, contract_ind, matmul
 
 
 def _compute_dot_general_nnx(
-    inputs,
-    kernel,
-    axis,
-    contract_ind,
-    matmul_precision,
-    quant_dot_general: nnx_wrappers.ToNNX | None,
-    initializing: bool
+    inputs, kernel, axis, contract_ind, matmul_precision, quant_dot_general: nnx_wrappers.ToNNX | None, initializing: bool
 ):
   """Computes a dot_general operation that may be quantized."""
   dot_general = lax.dot_general
@@ -98,14 +93,14 @@ class DenseGeneral(nnx.Module):
 
   def __init__(
       self,
-      in_features_shape: Union[Iterable[int], int],
-      out_features_shape: Union[Iterable[int], int],
-      axis: Union[Iterable[int], int] = -1,
+      in_features_shape: Iterable[int] | int,
+      out_features_shape: Iterable[int] | int,
+      axis: Iterable[int] | int = -1,
       weight_dtype: DType = jnp.float32,
       dtype: DType = jnp.float32,
       kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "truncated_normal"),
-      kernel_axes: Tuple[Optional[str], ...] = (),
-      quant: Optional[Quant] = None,
+      kernel_axes: tuple[None | str, ...] = (),
+      quant: None | Quant = None,
       use_bias: bool = False,
       matmul_precision: str = "default",
       parameter_memory_host_offload: bool = False,
@@ -236,17 +231,17 @@ def dense_general(
     *,
     inputs_shape: tuple[int, ...] | None = None,
     in_features_shape: tuple[int, ...] | int | None = None,
-    out_features_shape: Union[Iterable[int], int],
-    axis: Union[Iterable[int], int] = -1,
+    out_features_shape: Iterable[int] | int,
+    axis: Iterable[int] | int = -1,
     weight_dtype: DType = jnp.float32,
     dtype: DType = jnp.float32,
     kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "truncated_normal"),
-    kernel_axes: Tuple[Optional[str], ...] = (),
-    quant: Optional[Quant] = None,
+    kernel_axes: tuple[None | str, ...] = (),
+    quant: None | Quant = None,
     use_bias: bool = False,
     matmul_precision: str = "default",
     parameter_memory_host_offload: bool = False,
-    name: Optional[str] = None,
+    name: None | str = None,
 ):
   """Creates a DenseGeneral Linen module using nnx.bridge.to_linen.
 
@@ -302,20 +297,20 @@ class MlpBlock(nnx.Module):
       config: Config,
       in_features: int,
       intermediate_dim: int = 2048,
-      activations: Sequence[Union[str, Callable[..., Any]]] = ("relu",),
+      activations: Sequence[str | Callable[..., Any]] = ("relu",),
       kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "truncated_normal"),
       intermediate_dropout_rate: float = 0.1,
       dtype: Any = jnp.float32,
       weight_dtype: Any = jnp.float32,
       use_bias: bool = False,
       use_pre_norm: bool = False,
-      quant: Optional[Quant] = None,
-      model_mode: Optional[str] = None,
+      quant: None | Quant = None,
+      model_mode: None | str = None,
       *,
       rngs: nnx.Rngs,
   ) -> None:
     """A MlpBlock module.
-    
+
     Args:
       config: Config object containing model parameters.
       in_features: Number of input features.
@@ -417,7 +412,7 @@ class MlpBlock(nnx.Module):
       from MaxText.layers import gpt3  # pylint: disable=import-outside-toplevel
 
       return functools.partial(
-        gpt3.Gpt3LayerNorm, num_features=num_features, reductions_in_fp32=False, use_bias=self.use_bias
+          gpt3.Gpt3LayerNorm, num_features=num_features, reductions_in_fp32=False, use_bias=self.use_bias
       )
     else:
       raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block.value=}")
@@ -452,9 +447,7 @@ class MlpBlock(nnx.Module):
     # Take elementwise product of above intermediate activations.
     x = functools.reduce(operator.mul, activations).astype(self.dtype)
     # Apply dropout and final dense output projection.
-    x = self.dropout(
-        x, deterministic=deterministic
-    )  # Broadcast along length.
+    x = self.dropout(x, deterministic=deterministic)  # Broadcast along length.
     if self.model_mode == MODEL_MODE_PREFILL:
       x = nn.with_logical_constraint(x, ("activation_batch", "prefill_activation_length", "activation_mlp"))
     else:
@@ -464,21 +457,22 @@ class MlpBlock(nnx.Module):
     output = checkpoint_name(output, "mlpwo")
     return output
 
+
 def mlp_block(
     *,
     config: Config,
     in_features: int,
     intermediate_dim: int = 2048,
-    activations: Sequence[Union[str, Callable[..., Any]]] = ("relu",),
+    activations: Sequence[str | Callable[..., Any]] = ("relu",),
     kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "truncated_normal"),
     intermediate_dropout_rate: float = 0.1,
     dtype: Any = jnp.float32,
     weight_dtype: Any = jnp.float32,
     use_bias: bool = False,
     use_pre_norm: bool = False,
-    quant: Optional[Quant] = None,
-    model_mode: Optional[str] = None,
-    name: Optional[str] = None,
+    quant: None | Quant = None,
+    model_mode: None | str = None,
+    name: None | str = None,
 ):
   """Creates a MlpBlock Linen module using nnx.bridge.to_linen."""
   module = nnx_wrappers.to_linen(

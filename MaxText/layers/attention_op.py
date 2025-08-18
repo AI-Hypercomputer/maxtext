@@ -266,7 +266,9 @@ def _make_bidirectional_block_mask(bidirectional_mask):
   """
   q_block_indices = _make_block_mask_indices(bidirectional_mask)
   kv_block_indices = q_block_indices
-  bidirectional_block_mask = (kv_block_indices[:, None, :] == q_block_indices[..., None]) & (q_block_indices[..., None] > 0)
+  bidirectional_block_mask = (kv_block_indices[:, None, :] == q_block_indices[..., None]) & (
+      q_block_indices[..., None] > 0
+  )
   return bidirectional_block_mask
 
 
@@ -289,7 +291,12 @@ def attention_op_as_linen(
     flash_axis_names_splash_kernel_ep: AxisNames = (HEAD, LENGTH),
     prefill_cache_logical_axis_names: AxisNames = (CACHE_BATCH_PREFILL, CACHE_SEQUENCE, CACHE_HEADS, CACHE_KV),
     cache_logical_axis_names: AxisNames = (CACHE_BATCH, CACHE_SEQUENCE, CACHE_HEADS, CACHE_KV),
-    cache_scale_logical_axis_names: AxisNames = (CACHE_SCALE_BATCH, CACHE_SCALE_SEQUENCE, CACHE_SCALE_HEADS, CACHE_SCALE_KV),
+    cache_scale_logical_axis_names: AxisNames = (
+        CACHE_SCALE_BATCH,
+        CACHE_SCALE_SEQUENCE,
+        CACHE_SCALE_HEADS,
+        CACHE_SCALE_KV,
+    ),
     ragged_qkv_axis_names: AxisNames = (CACHE_BATCH, CACHE_HEADS, CACHE_SEQUENCE, CACHE_KV),
     ragged_lengths_names: AxisNames = (CACHE_BATCH,),
     compute_axis_order: AxisIdxes = (0, 1, 2, 3),
@@ -485,21 +492,23 @@ class AttentionOp(nnx.Module):
 
       # Prefill AqtEinsum instances
       self.AqtEinsum_0 = maybe_create_nnx(
-          self.kv_quant.einsum_fn_with_rhs_qtensor(),
-          "btkgd,bskd->bkgts", dummy_query_prefill, dummy_key_prefill
+          self.kv_quant.einsum_fn_with_rhs_qtensor(), "btkgd,bskd->bkgts", dummy_query_prefill, dummy_key_prefill
       )
       self.AqtEinsum_1 = maybe_create_nnx(
           self.kv_quant.einsum_fn_with_rhs_qtensor_and_dequant(),
-          "bkgts,bskd->btkgd", dummy_attn_weights_prefill, dummy_value_prefill
+          "bkgts,bskd->btkgd",
+          dummy_attn_weights_prefill,
+          dummy_value_prefill,
       )
       # Autoregressive AqtEinsum instances
       self.AqtEinsum_2 = maybe_create_nnx(
-          self.kv_quant.einsum_fn_with_rhs_qtensor(),
-          "btkgd,bskd->bkgts", dummy_query_ar, dummy_key_ar
+          self.kv_quant.einsum_fn_with_rhs_qtensor(), "btkgd,bskd->bkgts", dummy_query_ar, dummy_key_ar
       )
       self.AqtEinsum_3 = maybe_create_nnx(
           self.kv_quant.einsum_fn_with_rhs_qtensor_and_dequant(),
-          "bkgts,bskd->btkgd", dummy_attn_weights_ar, dummy_value_ar
+          "bkgts,bskd->btkgd",
+          dummy_attn_weights_ar,
+          dummy_value_ar,
       )
     else:
       self.AqtEinsum_0 = jnp.einsum
@@ -640,7 +649,9 @@ class AttentionOp(nnx.Module):
 
       row_ids_sliding = jax.lax.broadcasted_iota(jnp.int32, (q_seq_len, 1), 0) + next_pos
       col_ids_sliding = jax.lax.broadcasted_iota(jnp.int32, (1, kv_seq_len), 1)
-      sliding_mask = (col_ids_sliding > (row_ids_sliding - self.sliding_window_size)) & (col_ids_sliding <= row_ids_sliding)
+      sliding_mask = (col_ids_sliding > (row_ids_sliding - self.sliding_window_size)) & (
+          col_ids_sliding <= row_ids_sliding
+      )
       output_mask = sliding_mask * output_mask
     elif self.attention_type == AttentionType.CHUNK and output_mask is not None:
       mask_shape = (q_seq_len, kv_seq_len)
@@ -791,7 +802,9 @@ class AttentionOp(nnx.Module):
         out_specs=(bnd, bn, bn),
         check_rep=False,
     )
-    def wrap_ragged_attention(q: Array, k: Array, v: Array, lengths: Array, block_size: int) -> Tuple[Array, Array, Array]:
+    def wrap_ragged_attention(
+        q: Array, k: Array, v: Array, lengths: Array, block_size: int
+    ) -> Tuple[Array, Array, Array]:
       # Use the original gqa function to get the attention output
       """
       Wraps the GQA function with appropriate sharding.
@@ -1057,7 +1070,14 @@ class AttentionOp(nnx.Module):
       return attention_output
 
     x = wrap_flash_attention(
-        query, key, value, decoder_segment_ids, decoder_segment_ids, splash_kernel, cp_size, load_balanced_context_parallel
+        query,
+        key,
+        value,
+        decoder_segment_ids,
+        decoder_segment_ids,
+        splash_kernel,
+        cp_size,
+        load_balanced_context_parallel,
     )
 
     x = jnp.transpose(x, axes=(0, 2, 1, 3))
@@ -1168,7 +1188,12 @@ class AttentionOp(nnx.Module):
     return output, lse
 
   def compute_local_attention(
-      self, attn_weights: Array, value: Array | KVTensor, q_seq_len: int, model_mode: str, wv_product_einsum: Callable[..., Array]
+      self,
+      attn_weights: Array,
+      value: Array | KVTensor,
+      q_seq_len: int,
+      model_mode: str,
+      wv_product_einsum: Callable[..., Array],
   ) -> tuple[Array, Array, Array]:
     """Computes the attention of a local subset of the kv cache.
     Local attention results will need to be combined with any other local attentions and normalized
@@ -1192,8 +1217,12 @@ class AttentionOp(nnx.Module):
     local_sum = jnp.moveaxis(local_sum, -2, 1)
     local_max = jnp.moveaxis(local_max, -2, 1)
 
-    local_max = jnp.reshape(local_max, (local_max.shape[0], local_max.shape[1], local_max.shape[2] * local_max.shape[3], 1))
-    local_sum = jnp.reshape(local_sum, (local_sum.shape[0], local_sum.shape[1], local_sum.shape[2] * local_sum.shape[3], 1))
+    local_max = jnp.reshape(
+        local_max, (local_max.shape[0], local_max.shape[1], local_max.shape[2] * local_max.shape[3], 1)
+    )
+    local_sum = jnp.reshape(
+        local_sum, (local_sum.shape[0], local_sum.shape[1], local_sum.shape[2] * local_sum.shape[3], 1)
+    )
 
     local_out = self.wv_product(local_exps, value, model_mode, wv_product_einsum)
     if model_mode == MODEL_MODE_AUTOREGRESSIVE and self.is_partition_in_decode(q_seq_len):
@@ -1274,7 +1303,9 @@ class AttentionOp(nnx.Module):
     # Casting softmaxt computation for float32 for model stability.
     if self.float32_logits:
       attn_weights = attn_weights.astype(jnp.float32)
-    attn_mask = self.generate_attention_mask(query, key, decoder_segment_ids, model_mode, previous_chunk, bidirectional_mask)
+    attn_mask = self.generate_attention_mask(
+        query, key, decoder_segment_ids, model_mode, previous_chunk, bidirectional_mask
+    )
     if self.is_partition_in_decode(q_seq_len):
       attn_mask = partitioning.with_sharding_constraint(attn_mask, (KV_LENGTH, HEAD, None, None, None))
     elif model_mode == MODEL_MODE_PREFILL:
@@ -1431,17 +1462,17 @@ class AttentionOp(nnx.Module):
       key, value, decoder_segment_ids = prefill_kv_cache
 
     prefill_unnormalized_output, prefill_exponentials_max, prefill_exponentials_sum = self.apply_attention(
-      query=query,
-      key=key,
-      value=value,
-      decoder_segment_ids=decoder_segment_ids,
-      lengths=None,
-      model_mode=model_mode,
-      use_ragged_attention=self.use_ragged_attention,
-      previous_chunk=previous_chunk,
-      bidirectional_mask=bidirectional_mask,
-      qk_product_einsum=self.AqtEinsum_0,
-      wv_product_einsum=self.AqtEinsum_1,
+        query=query,
+        key=key,
+        value=value,
+        decoder_segment_ids=decoder_segment_ids,
+        lengths=None,
+        model_mode=model_mode,
+        use_ragged_attention=self.use_ragged_attention,
+        previous_chunk=previous_chunk,
+        bidirectional_mask=bidirectional_mask,
+        qk_product_einsum=self.AqtEinsum_0,
+        wv_product_einsum=self.AqtEinsum_1,
     )
 
     # Return the "prefill" cache if it actually the combined prefill+ar kv cache
