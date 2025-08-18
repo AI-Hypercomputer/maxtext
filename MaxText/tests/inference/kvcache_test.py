@@ -44,7 +44,7 @@ class MlaKVCacheTest(unittest.TestCase):
         key_head_size=self.kv_lora_rank,
         value_head_size=self.k_rope_head_dim,
         dtype=self.dtype,
-        model_mode=MODEL_MODE_PREFILL
+        model_mode=MODEL_MODE_PREFILL,
     )
     low_rank_main = jnp.ones((self.batchsize, self.prefill_len, self.kv_lora_rank), dtype=self.dtype) * 0.02
     key_rope = (
