@@ -30,10 +30,11 @@ python orchestrationAgent.py \
 """
 import json
 import os.path
-from .Utils import check_github_file_exists
 import argparse, logging
-from .GetFilesInHierarchicalOrder import get_dependency_sorted_files
-from .SplitPythonFile import get_modules_in_order
+
+from MaxText.experimental.agent.orchestration_agent.orchestration_agent_utils import check_github_file_exists
+from MaxText.experimental.agent.orchestration_agent.get_files_in_hierarchical_order import get_dependency_sorted_files
+from MaxText.experimental.agent.orchestration_agent.split_python_file import get_modules_in_order
 
 # Set up basic configuration
 logging.basicConfig(

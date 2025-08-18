@@ -30,7 +30,9 @@ import sys
 import json
 from collections import defaultdict, deque
 import argparse
-from .Utils import get_github_file_content
+from typing import Hashable, Any
+
+from MaxText.experimental.agent.orchestration_agent.orchestration_agent_utils import get_github_file_content
 
 
 class ReferenceVisitor(ast.NodeVisitor):
@@ -49,7 +51,7 @@ class ReferenceVisitor(ast.NodeVisitor):
     self.generic_visit(node)
 
 
-class dependency_analyzer:
+class DependencyAnalyzer:
   """
   Analyzes a Python source file to find dependencies between all top-level
   definitions. It groups circular dependencies (Strongly Connected Components)
@@ -64,6 +66,7 @@ class dependency_analyzer:
     self.conditional_imports = []
     self.definitions = {}
     self.dependencies = defaultdict(set)
+    self.sorted_components = {}
     # Adjacency list for graph algorithms
     self.adj = defaultdict(list)
 
@@ -283,8 +286,8 @@ class dependency_analyzer:
 
     # 5. Create the dependency list between components.
     dependency_list = set()
-    for dependant, deps in self.dependencies.items():
-      dependant_comp = comp_to_name_map.get(dependant)
+    for dependent, deps in self.dependencies.items():
+      dependant_comp = comp_to_name_map.get(dependent)
       for dependency in deps:
         dependency_comp = comp_to_name_map.get(dependency)
         if dependant_comp and dependency_comp and dependant_comp != dependency_comp:
@@ -309,7 +312,7 @@ class dependency_analyzer:
     }
 
 
-def get_modules_in_order(filepath):
+def get_modules_in_order(filepath) -> dict[Hashable, Any]:
   try:
     if filepath.startswith("https"):
       flag, source_code = get_github_file_content(filepath)
@@ -325,7 +328,7 @@ def get_modules_in_order(filepath):
     print(f"An error occurred: {e}")
     sys.exit(1)
   print(f"--- Analyzing '{filepath}' and creating structured output ---\n")
-  analyzer = dependency_analyzer(source_code)
+  analyzer = DependencyAnalyzer(source_code)
   return analyzer.get_sorted_structure()
 
 
