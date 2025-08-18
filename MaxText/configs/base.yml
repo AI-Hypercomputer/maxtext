@@ -371,7 +371,7 @@ logical_axis_rules: [
                       ['kv_lora', ['fsdp', 'sequence', 'context', 'tensor_transpose', 'expert']],
                       ['kv_lora', ['fsdp', 'fsdp_transpose', 'sequence', 'context', 'expert']],
                       ['kv_lora', ['fsdp', 'sequence', 'context', 'expert']],
-                      ['norm', ['tensor', 'tensor_transpose', 'tensor_sequence']],
+                      ['norm', ['tensor', 'tensor_transpose']],
                       ['layers', 'stage'],
                       ['kv', []],
                       ['kv_head_dim', []],
