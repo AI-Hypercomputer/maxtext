@@ -20,6 +20,7 @@ from jax.sharding import Mesh
 
 from MaxText.common_types import Config
 from MaxText.layers import quantizations
+from MaxText.layers.gemma3 import gemma3visionencoderlayer_as_linen
 
 # Type alias for cleaner type hints
 Quant = quantizations.AqtQuantization
@@ -52,7 +53,11 @@ class VisionEncoder(nn.Module):
     cfg = self.config
     mesh = self.mesh
     # vision encoder output, frozen params in many cases
-    embeddings = self.vision_encoder_layer[0](config=cfg, mesh=mesh)(input_images, deterministic=deterministic)
+    # TODO(hengtaoguo): fully migrate VisionEncoder to nnx; now we are using bridge for Gemma3VisioneEncoderLayer
+    if self.config.model_name.startswith("gemma3"):
+      embeddings = gemma3visionencoderlayer_as_linen(x=input_images, config=cfg, mesh=mesh, deterministic=deterministic)
+    else:
+      embeddings = self.vision_encoder_layer[0](config=cfg, mesh=mesh)(input_images, deterministic=deterministic)
     if cfg.freeze_vision_encoder_params:
       embeddings = jax.lax.stop_gradient(embeddings)
 
