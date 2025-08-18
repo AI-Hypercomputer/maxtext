@@ -72,7 +72,9 @@ class TfdsDataProcessingTest(unittest.TestCase):
         input_pipeline_id=jax.process_index(),
         num_input_pipelines=jax.process_count(),
     )
-    ds = ds_builder.as_dataset(split="train", read_config=self.read_config, shuffle_files=self.config.enable_data_shuffling)
+    ds = ds_builder.as_dataset(
+        split="train", read_config=self.read_config, shuffle_files=self.config.enable_data_shuffling
+    )
 
     return ds
 

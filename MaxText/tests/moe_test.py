@@ -15,7 +15,6 @@
 
 import os.path
 import unittest
-from typing import Tuple
 
 import pytest
 
@@ -271,6 +270,7 @@ class MoeLoopBlock(nnx.Module):
   This is not included anymore in our repo, due to a limitation of for-loop implementation in sharding.
   """
 
+
   def __init__(
       self,
       config: Config,
@@ -278,7 +278,7 @@ class MoeLoopBlock(nnx.Module):
       num_experts: int,
       num_experts_per_tok: int,
       kernel_init: NdInitializer,
-      kernel_axes: Tuple[str, ...],
+      kernel_axes: tuple[str, ...],
       rngs: nnx.Rngs,
       weight_dtype: DType = jnp.float32,
       dtype: DType = jnp.bfloat16,
@@ -337,7 +337,7 @@ def get_moe_loop(
     num_experts: int,
     num_experts_per_tok: int,
     kernel_init: NdInitializer,
-    kernel_axes: Tuple[str, ...],
+    kernel_axes: tuple[str, ...],
     weight_dtype: DType = jnp.float32,
     dtype: DType = jnp.bfloat16,
 ):
@@ -647,7 +647,9 @@ class RoutedMoeTest(unittest.TestCase):
     # Calculate the cumulative sum of global group sizes to determine shard input slices
     global_group_sizes_cumsum = jnp.cumsum(global_group_sizes)
 
-    shard_start_indices = jnp.concatenate([jnp.array([0]), global_group_sizes_cumsum[:-experts_per_shard:experts_per_shard]])
+    shard_start_indices = jnp.concatenate(
+        [jnp.array([0]), global_group_sizes_cumsum[:-experts_per_shard:experts_per_shard]]
+    )
     shard_end_indices = global_group_sizes_cumsum[experts_per_shard - 1 :: experts_per_shard]
 
     #               *****Expected outputs****
@@ -699,7 +701,9 @@ class RoutedMoeTest(unittest.TestCase):
           jnp.arange(experts_per_shard), expected_local_group_size, total_repeat_length=shard_total_tokens
       )
 
-      self.assertTrue(jnp.array_equal(sorted_inputs, expected_sorted_inputs), f"Shard {shard_index}: sorted_inputs mismatch")
+      self.assertTrue(
+          jnp.array_equal(sorted_inputs, expected_sorted_inputs), f"Shard {shard_index}: sorted_inputs mismatch"
+      )
       self.assertTrue(
           jnp.array_equal(sorted_indices, expected_sorted_indices), f"Shard {shard_index}: sorted_indices mismatch"
       )

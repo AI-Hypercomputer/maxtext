@@ -230,7 +230,9 @@ def main(config, test_args):  # pylint: disable=W0621
       golden_data = list(f)
 
     for golden_data_index in range(len(golden_data)):
-      ids, decoder_segment_ids, decoder_positions, golden_logits, seq_len = get_data(golden_data, golden_data_index, config)
+      ids, decoder_segment_ids, decoder_positions, golden_logits, seq_len = get_data(
+          golden_data, golden_data_index, config
+      )
 
       if test_args.hf_model_path != "":
         with torch.no_grad():
@@ -307,7 +309,9 @@ def main(config, test_args):  # pylint: disable=W0621
       max_logging.log(f"\n--- Prompt: {input_text} ---")
 
       # Tokenize for HF
-      inputs = tokenizer(input_text, return_tensors="pt", padding=True, max_length=config.max_target_length, truncation=True)
+      inputs = tokenizer(
+          input_text, return_tensors="pt", padding=True, max_length=config.max_target_length, truncation=True
+      )
       actual_seq_len = inputs["input_ids"].shape[1]
 
       # Tokenize for MaxText

@@ -13,7 +13,7 @@
 # limitations under the License.
 
 """ Tests for Llama4 Vision RoPE """
-from typing import Callable, NamedTuple, Optional, Tuple
+from typing import Callable, NamedTuple
 import os.path
 import sys
 import math
@@ -233,8 +233,12 @@ class Llama4VisionPixelShuffleMLPTest(unittest.TestCase):
     # Create new params with copied weights
     updated_params = jax.tree_util.tree_map(lambda x: x, params)
     # Copy weights for both MLP layers
-    updated_params["params"]["pixel_shuffle_mlp"]["vit_pixel_shuffle_mlp_fc1"]["kernel"] = to_jax(pt_model.mlp.fc1.weight).T
-    updated_params["params"]["pixel_shuffle_mlp"]["vit_pixel_shuffle_mlp_fc2"]["kernel"] = to_jax(pt_model.mlp.fc2.weight).T
+    updated_params["params"]["pixel_shuffle_mlp"]["vit_pixel_shuffle_mlp_fc1"]["kernel"] = to_jax(
+        pt_model.mlp.fc1.weight
+    ).T
+    updated_params["params"]["pixel_shuffle_mlp"]["vit_pixel_shuffle_mlp_fc2"]["kernel"] = to_jax(
+        pt_model.mlp.fc2.weight
+    ).T
     return updated_params
 
   def test_pixel_shuffle_mlp(self):
@@ -472,7 +476,7 @@ def eager_attention_forward(
     query: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
-    attention_mask: Optional[torch.Tensor],
+    attention_mask: None | torch.Tensor,
     scaling: float,
     dropout: float = 0.0,
     **kwargs,
@@ -521,10 +525,10 @@ class Llama4VisionAttention(nn.Module):
       self,
       hidden_states: torch.Tensor,
       freqs_ci: torch.Tensor,
-      attention_mask: Optional[torch.Tensor] = None,
-      past_key_value: Optional[torch.Tensor] = None,
+      attention_mask: None | torch.Tensor = None,
+      past_key_value: None | torch.Tensor = None,
       **kwargs,
-  ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+  ) -> tuple[torch.Tensor, None | torch.Tensor]:
     input_shape = hidden_states.shape[:-1]
     hidden_shape = (*input_shape, -1, self.head_dim)
 
@@ -717,8 +721,8 @@ class Llama4VisionEncoderLayer(nn.Module):
       self,
       hidden_state: torch.Tensor,
       freqs_ci: torch.Tensor,
-      attention_mask: Optional[torch.Tensor] = None,
-      output_attentions: Optional[bool] = None,
+      attention_mask: None | torch.Tensor = None,
+      output_attentions: None | bool = None,
   ):
     # Self Attention
     residual = hidden_state
@@ -756,10 +760,10 @@ class Llama4VisionEncoder(nn.Module):
       self,
       hidden_states: torch.Tensor,
       freqs_ci: torch.Tensor,
-      attention_mask: Optional[torch.Tensor] = None,
-      output_attentions: Optional[bool] = None,
-      output_hidden_states: Optional[bool] = None,
-      return_dict: Optional[bool] = None,
+      attention_mask: None | torch.Tensor = None,
+      output_attentions: None | bool = None,
+      output_hidden_states: None | bool = None,
+      return_dict: None | bool = None,
   ):
     # all_hidden_states = () if output_hidden_states else None
     # all_attentions = () if output_attentions else None
@@ -846,7 +850,9 @@ class Llama4VisionEncoderTest(unittest.TestCase):
       updated_params["params"][f"layers_{i}"]["input_layer_norm"]["scale"] = to_jax(
           pt_model.layers[i].input_layernorm.weight
       )
-      updated_params["params"][f"layers_{i}"]["input_layer_norm"]["bias"] = to_jax(pt_model.layers[i].input_layernorm.bias)
+      updated_params["params"][f"layers_{i}"]["input_layer_norm"]["bias"] = to_jax(
+          pt_model.layers[i].input_layernorm.bias
+      )
       updated_params["params"][f"layers_{i}"]["post_attention_layer_norm"]["scale"] = to_jax(
           pt_model.layers[i].post_attention_layernorm.weight
       )
