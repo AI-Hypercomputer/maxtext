@@ -117,7 +117,7 @@ def get_chat_dict(input_message=""):
   return {"role": "user", "parts": input_message}
 
 
-def convert_code_from_torch_to_jax(codeComponent, memory_list):
+def convert_code_from_torch_to_jax(codeComponent, memory_list=None):
   """
   Converts a single code component from PyTorch to JAX using the LLM agent.
 
@@ -131,6 +131,8 @@ def convert_code_from_torch_to_jax(codeComponent, memory_list):
           - str: The converted JAX code.
           - list: The updated memory list.
   """
+  if memory_list is None:
+    memory_list = []
   # This appends the user's input message to the memory list for context.
   memory_list.append(get_chat_dict(input_message=CodeGeneration["CODE"].replace("{TORCHCODE}", codeComponent)))
   response = llm_agent(memory_list)

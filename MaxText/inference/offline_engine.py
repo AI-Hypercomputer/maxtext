@@ -43,7 +43,7 @@ import traceback
 import functools
 import dataclasses
 from enum import Enum
-from typing import Any, Callable
+from typing import Any, Callable, cast
 from collections.abc import Hashable
 from collections import defaultdict
 import time
@@ -540,7 +540,10 @@ class InferenceWorker:
         logprobs = np.array(
             [token_output.log_prob.flatten() for token_output in self.completion_tokens_by_id[input_id]]
         ).flatten()
-        prompt_logprobs = self.prompt_logprobs_by_id[input_id].flatten()
+        if isinstance(self.prompt_logprobs_by_id[input_id], np.ndarray):
+          prompt_logprobs = cast(np.ndarray, self.prompt_logprobs_by_id[input_id]).flatten()
+        else:
+          prompt_logprobs = self.prompt_logprobs_by_id[input_id]
         completion_outputs.append(
             CompletionOutput(
                 index=str(input_id),
@@ -711,7 +714,7 @@ class InferenceWorker:
 
     index = len(self.completion_tokens_by_id[prompt_id])
     if prompt_logp is not None:
-      self.prompt_logprobs_by_id[prompt_id] = [prompt_logp]
+      self.prompt_logprobs_by_id[prompt_id] = [cast(np.ndarray, prompt_logp)]
     self.completion_tokens_by_id[prompt_id].append(TokenOutput(np.array(result_token), np.array(log_prob)))
     return (result_token in self.eos_ids) or (index + 1 == self.max_decode_length)
 
