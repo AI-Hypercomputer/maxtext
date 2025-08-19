@@ -12,8 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import requests, ast  # if this is not available, please try ``pip install requests``
+"""Utility functions for orchestration agent."""
+
+import ast
 from urllib.parse import urlparse, urljoin
+
+import requests  # if this is not available, please try ``pip install requests``
 
 
 def github_blob_to_raw(blob_url):
@@ -187,6 +191,7 @@ def remove_local_imports(source_code, filepath=None):
   import_nodes = {node.lineno: node for node in tree.body if isinstance(node, (ast.Import, ast.ImportFrom))}
 
   i = 0
+  # pylint: disable=too-many-nested-blocks
   while i < len(lines):
     line = lines[i]
     node = import_nodes.get(i + 1, None)
@@ -204,7 +209,7 @@ def remove_local_imports(source_code, filepath=None):
         try:
           import_tree = ast.parse(import_block)
           import_node = import_tree.body[0]
-        except Exception:
+        except (SyntaxError, TypeError, ValueError, RecursionError):
           import_node = node  # fallback
 
         remove = False
@@ -254,7 +259,6 @@ def remove_local_imports(source_code, filepath=None):
         else:
           new_lines.append(line)
         i += 1
-        continue
     else:
       new_lines.append(line)
       i += 1
