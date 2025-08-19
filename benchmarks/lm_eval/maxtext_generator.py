@@ -76,6 +76,8 @@ class MaxTextGenerator:
         max_tokens: int = None,
         logprobs: int = None,
         echo: bool = False,
+        stop: Optional[Union[str, List[str]]] = None,
+        temperature: Optional[float] = None,
     ) -> List[Completion]:
         """
         Generates text for a batch of prompts, handling chunking automatically.
@@ -83,6 +85,8 @@ class MaxTextGenerator:
         Args:
             prompts: A list of prompt strings.
             image_paths: An optional list of image paths, one for each prompt.
+            stop: An optional list of stop sequences.
+            temperature: An optional temperature for sampling.
 
         Returns:
             A list of generated Completion, corresponding to the input prompts.
@@ -102,7 +106,7 @@ class MaxTextGenerator:
             total_chunks = (num_prompts + self.batch_size - 1) // self.batch_size
             print(f"\nProcessing chunk {chunk_count}/{total_chunks} with {len(prompt_chunk)} prompts...")
 
-            chunk_results = self._process_chunk(prompt_chunk, image_chunk, max_tokens, logprobs, echo)
+            chunk_results = self._process_chunk(prompt_chunk, image_chunk, max_tokens, logprobs, echo, stop, temperature)
             all_results.extend(chunk_results)
 
         return all_results
@@ -113,8 +117,14 @@ class MaxTextGenerator:
         image_paths: List[Optional[str]],
         max_tokens: int,
         logprobs: int = None,   # top_logprobs count; ignored for now
-        echo: bool = False
+        echo: bool = False,
+        stop: Optional[Union[str, List[str]]] = None,
+        temperature: Optional[float] = None,
     ) -> List[Completion]:
+        if stop:
+            print(f"[TESTING] Stop sequences received: {stop}")
+        if temperature is not None:
+            print(f"[TESTING] Temperature received: {temperature}")
         start_time = time.time()
         _NUM_STREAMS = len(prompts)
         target_length = getattr(self.config, "max_target_length", 2048)
@@ -151,6 +161,7 @@ class MaxTextGenerator:
         prefill_results_to_insert = {}
         for i in range(_NUM_STREAMS):
             self.rng, rng_prefill = jax.random.split(self.rng)
+            want_prompt_logp = logprobs is not None and echo
             prefill_result, _first_token_obj = self.engine.prefill(
                 params=self.params,
                 padded_tokens=stream_tokens[i],
@@ -158,7 +169,7 @@ class MaxTextGenerator:
                 images=stream_images[i],
                 rng=rng_prefill,
                 slot=i,
-                return_prompt_logp=True,
+                return_prompt_logp=want_prompt_logp,
             )
             prefill_results_to_insert[i] = prefill_result
 
@@ -217,7 +228,8 @@ class MaxTextGenerator:
                     streams_finished[slot_idx] = True
                     if is_eos:
                         finish_reasons[slot_idx] = "stop"
-                    self.engine.release_pages(slot=slot_idx)
+                    if getattr(self.config, "attention", "") == "paged": 
+                        self.engine.release_pages(slot=slot_idx)
 
         # 5) Build Completions
         completions: List[Completion] = []
@@ -337,14 +349,14 @@ if __name__ == "__main__":
     prompts_to_run = [
         # "The best thing about Seattle, Washington is",
         # "The capital of Germany",
-        # "<s>[INST] What is the capital of France? [/INST]",
-        "<s> [INST] Problem: Find the sum of all integer bases $b > 9$ for which $17_b$ is a divisor of $97_b$.\nMark your solution with \boxed\nAnswer: [/INST]"
+        "What is the capital of France?",
+        # "<s> [INST] Problem: Find the sum of all integer bases $b > 9$ for which $17_b$ is a divisor of $97_b$.\nMark your solution with \boxed\nAnswer: [/INST]"
         ]
 
     # Generation config
-    max_tokens = 1024          # counts ALL generated tokens (includes prefill's 1st token)
+    max_tokens = 32          # counts ALL generated tokens (includes prefill's 1st token)
     echo = True             # include prompt tokens in text/logprobs if True
-    want_logprobs = 1        # non-None triggers logprob collection; top_logprobs left None for now
+    want_logprobs = 5        # non-None triggers logprob collection; top_logprobs left None for now
 
     print(f"\n--- Starting Batch Generation for {len(prompts_to_run)} Prompts "
           f"(max_tokens={max_tokens}, echo={echo}) ---")
@@ -366,7 +378,6 @@ if __name__ == "__main__":
         print(f"text: {repr(comp.text)}")
 
 
-        """
         if comp.logprobs is None:
             print("logprobs: None")
             return
@@ -387,7 +398,6 @@ if __name__ == "__main__":
         for tid, logp, off in zip(lp.tokens, lp.token_logprobs, lp.text_offset):
             piece = llm.tokenizer.decode([int(tid)])
             print(f"    {repr(piece):>12s}  id={int(tid):>6d}  logp={logp:>10.6f}  offset={off}")
-        """
 
     # Print & validate each completion
     for i, comp in enumerate(completions):

@@ -31,6 +31,7 @@ pyink
 pylint
 pytest
 pytype
+pyyaml
 qwix@git+https://github.com/google/qwix.git
 sentencepiece==0.2.0
 tensorboard-plugin-profile
