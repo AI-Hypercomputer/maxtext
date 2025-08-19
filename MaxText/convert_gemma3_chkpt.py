@@ -111,7 +111,9 @@ def main(raw_args=None) -> None:
           },
           "VisionEmbedder_0": {
               "mm_input_projection": params["transformer"]["embedder"]["mm_input_projection"],
-              "mm_soft_embedding_norm": {"scale": params["transformer"]["embedder"]["mm_soft_embedding_norm"]["scale"] + 1},
+              "mm_soft_embedding_norm": {
+                  "scale": params["transformer"]["embedder"]["mm_soft_embedding_norm"]["scale"] + 1
+              },
           },
       },
   }
@@ -202,9 +204,9 @@ def main(raw_args=None) -> None:
       (1, 0)
   )
   layer_weight["pre_ffw_norm"]["scale"] = np.array(layer_weight["pre_ffw_norm"]["scale"]).transpose((1, 0))
-  layer_weight["post_self_attention_norm"]["scale"] = np.array(layer_weight["post_self_attention_norm"]["scale"]).transpose(
-      (1, 0)
-  )
+  layer_weight["post_self_attention_norm"]["scale"] = np.array(
+      layer_weight["post_self_attention_norm"]["scale"]
+  ).transpose((1, 0))
   layer_weight["post_ffw_norm"]["scale"] = np.array(layer_weight["post_ffw_norm"]["scale"]).transpose((1, 0))
 
   layer_weight["self_attention"] = copy.deepcopy(self_attention)

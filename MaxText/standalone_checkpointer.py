@@ -93,7 +93,9 @@ def checkpoint_loop(config, state=None):
         checkpoint_manager.wait_until_finished()
         end_time = datetime.datetime.now()
         if jax.process_index() == 0:
-          max_logging.log(f"STANDALONE CHECKPOINTER : Checkpoint saved in {end_time - start_time} ,step {step}, on host 0")
+          max_logging.log(
+              f"STANDALONE CHECKPOINTER : Checkpoint saved in {end_time - start_time} ,step {step}, on host 0"
+          )
 
   return state
 
