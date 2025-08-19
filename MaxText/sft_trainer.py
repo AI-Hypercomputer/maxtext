@@ -44,6 +44,7 @@ from MaxText.train import (
     train_step,
 )
 from MaxText.train_utils import setup_train_loop, validate_train_config
+from MaxText.utils import gcs_utils
 from MaxText.utils.goodput_utils import (
     GoodputEvent,
     create_goodput_recorder,
@@ -107,13 +108,13 @@ def train_loop(config, recorder, state=None):
 
       if config.dump_hlo and step == start_step:
         jax.block_until_ready(state)  # Ensure compilation has finished.
-        # gcs_utils.upload_dump(
-        #     config.dump_hlo_local_dir,
-        #     config.dump_hlo_gcs_dir,
-        #     module_name=config.dump_hlo_module_name,
-        #     delete_local_after=config.dump_hlo_delete_local_after,
-        #     all_host_upload=config.dump_hlo_upload_all,
-        # )
+        gcs_utils.upload_dump(
+            config.dump_hlo_local_dir,
+            config.dump_hlo_gcs_dir,
+            module_name=config.dump_hlo_module_name,
+            delete_local_after=config.dump_hlo_delete_local_after,
+            all_host_upload=config.dump_hlo_upload_all,
+        )
 
       if config.eval_interval > 0 and step > start_step and (step + 1) % config.eval_interval == 0:
         assert eval_data_iterator
