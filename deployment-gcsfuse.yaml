@@ -1,7 +1,7 @@
 apiVersion: v1
 kind: PersistentVolume
 metadata:
-  name: bernardhan-gcs-checkpoint-pv
+  name: bernardhan-gcs-checkpoint-pv-1
 spec:
   accessModes:
   - ReadWriteMany
@@ -10,7 +10,7 @@ spec:
   persistentVolumeReclaimPolicy: Retain
   storageClassName: gcsfuse-sc # dummy storage class
   claimRef:
-    name: bernardhan-gcs-checkpoint-claim
+    name: bernardhan-gcs-checkpoint-claim-1
     # Running in the "default" namespace so you can submit to the local queue
     # created in the default namespace.
     namespace: default
@@ -27,6 +27,7 @@ spec:
   - metadata-cache:type-cache-max-size-mb:-1
   # b/393009385 - metadata-cache:negative-ttl-secs must be set to 0 for checkpointing in Orbax.
   - metadata-cache:negative-ttl-secs:0
+  - read_ahead_kb=1024
   - file-cache:max-size-mb:-1
   - file-cache:cache-file-for-range-read:true
   - file-cache:enable-parallel-downloads:true
@@ -42,7 +43,7 @@ spec:
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: bernardhan-gcs-checkpoint-claim
+  name: bernardhan-gcs-checkpoint-claim-1
   namespace: default
 spec:
   accessModes:
@@ -50,7 +51,7 @@ spec:
   resources:
     requests:
       storage: 64Gi
-  volumeName: bernardhan-gcs-checkpoint-pv
+  volumeName: bernardhan-gcs-checkpoint-pv-1
   storageClassName: gcsfuse-sc # dummy storage class
 ---
 # Use Static provisioning to define a PV for Cloud Storage buckets.
@@ -108,7 +109,7 @@ spec:
               terminationGracePeriodSeconds: 30
               containers:
               - name: jax-cpu
-                image: gcr.io/gcs-tess/bernardhan_distributed_maxtext_checkpointing_benchmark_strict_is_true
+                image: gcr.io/gcs-tess/bernardhan_distributed_maxtext_checkpointing_benchmark_test
 
                 env:
                 - name: REPLICATED_JOB_NAME
@@ -188,14 +189,14 @@ spec:
                     PARAMETERS=512
 
                     # STEPS is the number of steps to run.
-                    STEPS=200
+                    STEPS=5
 
                     # CHECKPOINT_PERIOD is the number of steps between each checkpoint.
                     #   Roughly ((STEPS - 1) // CHECKPOINT_PERIOD + 1) checkpoint restores and writes
                     #   will be performed per run.
                     #   The total number of checkpoint restores and writes will be roughly
                     #   RUNS * ((STEPS - 1) // CHECKPOINT_PERIOD + 1).
-                    CHECKPOINT_PERIOD=50
+                    CHECKPOINT_PERIOD=1
 
                     # PER_STEP_INTERVAL is the minimum time each step should take. Note that it cannot
                     # be 300 seconds or more because the barriers will timeout.
@@ -213,7 +214,7 @@ spec:
                     # is used, which is around 2GB.
                     # This translates to the Orbax parameter at
                     # https://source.corp.google.com/piper///depot/google3/third_party/py/orbax/checkpoint/pytree_checkpoint_handler.py;l=1001?q=%20ocdbt_target_data_file_size%20f:orbax
-                    OCDBT_TARGET_DATA_FILE_SIZE=-1
+                    OCDBT_TARGET_DATA_FILE_SIZE=2147483648
 
                     # Specifies the maximum number of checkpoints to keep and older checkpoints are removed.
                     # This translates to the Orbax parameter at
@@ -229,7 +230,8 @@ spec:
                     FINAL_CKPTS_DELETION_TIMEOUT_IN_S=1800
 
                     export M_ICI_DATA_PARALLELISM=2
-                    ENABLE_SINGLE_REPLICA_CKPT_RESTORING=True
+                    ENABLE_SINGLE_REPLICA_CKPT_RESTORING=False
+                    USE_REPLICA_PARALLEL=False
 
                     # Do not change, common values for all runs.
                     EXECUTABLE=standalone_checkpointer
@@ -256,4 +258,4 @@ spec:
                 name: dshm-2
               - name: gcs-pvc
                 persistentVolumeClaim:
-                  claimName: bernardhan-gcs-checkpoint-claim
+                  claimName: bernardhan-gcs-checkpoint-claim-1

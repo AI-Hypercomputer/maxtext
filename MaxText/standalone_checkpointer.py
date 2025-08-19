@@ -33,6 +33,7 @@ import numpy as np
 
 import jax
 from jax import numpy as jnp
+from jax.sharding import PartitionSpec, NamedSharding
 
 from flax.linen import partitioning as nn_partitioning
 
@@ -115,7 +116,30 @@ def checkpoint_loop(config, state=None):
   mesh = model.mesh
   init_rng, checkpoint_manager, _, tx = train_utils.create_training_tools(config, model, mesh)
 
+  # Get the original abstract state to determine the length of opt_state.
   unboxed_abstract_state, _, _ = maxtext_utils.get_abstract_state(model, tx, config, init_rng, mesh, is_training=True)
+  num_opt_state_elements = len(unboxed_abstract_state.opt_state)
+  max_logging.log(f"Original opt_state has {num_opt_state_elements} elements. Each will be replaced.")
+
+  # Define the shape and type for the large arrays.
+  target_size_gb = 15
+  dtype = jnp.float32
+  bytes_per_element = jnp.dtype(dtype).itemsize
+  total_elements = (target_size_gb * 1024 * 1024 * 1024) // bytes_per_element
+  # Shape for 4,026,531,840 elements (15 GiB / 4 bytes per float32)
+  array_shape = (3932160, 1024)
+  assert np.prod(array_shape) == total_elements, "Array shape does not match target size"
+
+  # Create a new abstract state where *every* element of opt_state is replaced.
+  # This is crucial for Orbax to load checkpoints with the modified structure.
+  new_abstract_opt_state = []
+  for i in range(num_opt_state_elements):
+      # Each element will be a dictionary with a unique key.
+      new_abstract_opt_state.append(
+          {f'large_replicated_array_{i}': jax.ShapeDtypeStruct(array_shape, dtype)}
+      )
+  abstract_state_for_restore = unboxed_abstract_state.replace(opt_state=tuple(new_abstract_opt_state))
+  
   # A barrier to sync all hosts before starting to restore checkpoint
   jax.experimental.multihost_utils.sync_global_devices("Barrier before load")
   checkpoint_load_start = datetime.datetime.now()
@@ -126,7 +150,7 @@ def checkpoint_loop(config, state=None):
         config.load_parameters_path,
         config.load_full_state_path,
         config.checkpoint_storage_concurrent_gb,
-        unboxed_abstract_state,
+        abstract_state_for_restore,
         enable_single_replica_ckpt_restoring=config.enable_single_replica_ckpt_restoring,
         use_ocdbt=config.checkpoint_storage_use_ocdbt,
         use_zarr3=config.checkpoint_storage_use_zarr3,
@@ -142,6 +166,8 @@ def checkpoint_loop(config, state=None):
   else:  # Checkpoint was unavailable, state needs to be initialized
     state, _, _, _ = maxtext_utils.setup_training_state(model, None, tx, config, init_rng, mesh, checkpoint_manager)
   state = add_entropy_to_checkpoint(state)
+  # Add the 15GB fully replicated array to the state
+  state = replace_all_opt_state_elements(state, mesh)
 
   ckpt_read_idx = 0
   ckpt_write_idx = 0
@@ -152,7 +178,7 @@ def checkpoint_loop(config, state=None):
       # A barrier to sync all hosts before starting to save checkpoint
       jax.experimental.multihost_utils.sync_global_devices("Barrier before save")
       start_time = datetime.datetime.now()
-      if checkpointing.save_checkpoint(checkpoint_manager, int(step), state):
+      if checkpointing.save_checkpoint(checkpoint_manager, int(step), state, config=config):
         checkpoint_manager.wait_until_finished()
         end_time = datetime.datetime.now()
         checkpoint_write_time = (end_time - start_time).total_seconds()
@@ -174,7 +200,7 @@ def checkpoint_loop(config, state=None):
       try:
         state = checkpoint_manager.restore(
               step,
-              args=ocp.args.Composite(items=ocp.args.PyTreeRestore(item=unboxed_abstract_state)),
+              args=ocp.args.Composite(items=ocp.args.PyTreeRestore(item=abstract_state_for_restore)),
             )
         if state:
           state = state["items"]
@@ -220,18 +246,63 @@ def checkpoint_loop(config, state=None):
 
   return state
 
-def add_entropy_to_checkpoint(state):
-  """Introduce randomness in checkpoints. This is useful to simulate real checkpoints, without training.
+def replace_all_opt_state_elements(state, mesh):
+  """Replaces every element in opt_state with a new 15GB fully replicated array.
+
   Args:
-    state: Initial state
+    state: The current training state.
+    mesh: The device mesh for sharding.
+
   Returns:
-    state: Returns state with entropy added to the optimizer state.
+    The updated state with a completely replaced opt_state.
   """
-  opt_0 = state.opt_state[0]
-  opt_0 = opt_0._replace(mu=jax.tree_util.tree_map(lambda k: jnp.cos(1000 * k), state.params))
-  opt_0 = opt_0._replace(nu=jax.tree_util.tree_map(lambda k: jnp.sin(1000 * k), state.params))
-  new_opt = [opt_0] + list(state.opt_state[1:])
-  state = state.replace(opt_state=new_opt)
+  if state is None or len(state.opt_state) == 0:
+      return state
+
+  num_elements = len(state.opt_state)
+  target_size_gb = 15
+  dtype = jnp.float32
+  bytes_per_element = jnp.dtype(dtype).itemsize
+  total_elements = (target_size_gb * 1024 * 1024 * 1024) // bytes_per_element
+  array_shape = (3932160, 1024)
+  assert np.prod(array_shape) == total_elements, "Array shape does not match target size"
+
+  replicated_sharding = NamedSharding(mesh, PartitionSpec())
+  
+  # Create a base PRNGKey for generating random values.
+  key = jax.random.PRNGKey(0)
+  
+  new_opt_state_list = []
+  for i in range(num_elements):
+      max_logging.log(f"Creating {target_size_gb}GB replicated array with random values for opt_state element {i}...")
+      # Split the key for each iteration to get different random numbers for each array.
+      key, subkey = jax.random.split(key)
+
+      # Create an array with random values from a normal distribution on the host.
+      random_array_host = jax.random.normal(subkey, array_shape, dtype=dtype)
+
+      # Place the random array onto devices with replicated sharding.
+      replicated_array = jax.device_put(
+          random_array_host,
+          replicated_sharding
+      )
+      jax.block_until_ready(replicated_array)
+
+      # Verify that the sharding for the created array is fully replicated.
+      is_replicated = replicated_array.sharding.is_fully_replicated
+      max_logging.log(f"Verification: Is array for element {i} fully replicated? {is_replicated}")
+
+      new_element = {f'large_replicated_array_{i}': replicated_array}
+      new_opt_state_list.append(new_element)
+
+  return state.replace(opt_state=tuple(new_opt_state_list))
+
+
+def add_entropy_to_checkpoint(state):
+  """
+  This function is now a no-op because its target data structures in
+  the optimizer state have been completely replaced.
+  """
   return state
 
 def get_compute_instance_id():

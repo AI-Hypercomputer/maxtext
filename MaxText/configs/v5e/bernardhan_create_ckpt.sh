@@ -60,4 +60,5 @@ JAX_PLATFORMS=cpu python3 -m MaxText.$EXECUTABLE MaxText/configs/base.yml\
     max_ckpts_to_keep=$MAX_CKPTS_TO_KEEP\
     enable_background_delete=$ENABLE_BACKGROUND_DELETE\
     final_ckpts_deletion_timeout_in_s=$FINAL_CKPTS_DELETION_TIMEOUT_IN_S\
-    enable_single_replica_ckpt_restoring=$ENABLE_SINGLE_REPLICA_CKPT_RESTORING
+    enable_single_replica_ckpt_restoring=$ENABLE_SINGLE_REPLICA_CKPT_RESTORING\
+    use_replica_parallel=$USE_REPLICA_PARALLEL

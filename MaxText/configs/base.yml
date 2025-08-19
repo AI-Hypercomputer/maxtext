@@ -786,3 +786,6 @@ enable_background_delete: True
 # At the end of the workload, the maximum time the workload will wait for any lingering
 # old checkpoints to be deleted. Default to be 20 hrs.
 final_ckpts_deletion_timeout_in_s: 72000
+# Whether to parallelize saving across replicas.
+# https://github.com/google/orbax/blame/db654d0ee2af68e0ceb9bbfb634fb55872d9f8e9/checkpoint/orbax/checkpoint/experimental/v1/_src/context/options.py#L207C29-L207C75
+use_replica_parallel: True

@@ -28,6 +28,9 @@ import numpy as np
 import orbax.checkpoint as ocp
 import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_checkpoint_manager
 import orbax.checkpoint.experimental.emergency.replicator_checkpoint_manager as emergency_replicator_checkpoint_manager
+from orbax.checkpoint._src.serialization.type_handlers import ArrayHandler
+from orbax.checkpoint._src.metadata import array_metadata_store as array_metadata_store_lib
+
 
 from MaxText import exceptions
 from MaxText import max_logging
@@ -425,38 +428,55 @@ def maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator, step
 def save_checkpoint(checkpoint_manager, step, state, config=None, data_iterator=None, force=False):
   """Wrapper for saving checkpoint."""
   if config and config.enable_checkpointing:
-    if (
-        force
-        or (step % config.checkpoint_period == 0)
-        or (config.enable_emergency_checkpoint and step % config.local_checkpoint_period == 0)
-    ):
-      blocking_until_ready_start = time.time()
-      max_logging.log(f"Waiting for step {step} to finish before checkpoint...")
-      # We block here on the step finishing so that our checkpointing metrics
-      # measure only checkpointing time, not training time.
-      jax.block_until_ready(state)
-      max_logging.log(
-          f"Waited {time.time() - blocking_until_ready_start} seconds for step "
-          f"{step} to finish before starting checkpointing."
-      )
+      if (
+          force
+          or (step % config.checkpoint_period == 0)
+          or (config.enable_emergency_checkpoint and step % config.local_checkpoint_period == 0)
+      ):
+          blocking_until_ready_start = time.time()
+          max_logging.log(f"Waiting for step {step} to finish before checkpoint...")
+          jax.block_until_ready(state)
+          max_logging.log(
+              f"Waited {time.time() - blocking_until_ready_start} seconds for step "
+              f"{step} to finish before starting checkpointing."
+          )
 
-  # specify chunk_byte_size to force orbax to control maximum file size in checkpoint
-  chunk_byte_size = config.checkpoint_storage_target_data_file_size_bytes if config else DEFAULT_OCDBT_TARGET_DATA_FILE_SIZE
+          # Following the pattern from the axlearn reference, we temporarily
+          # override the handler for jax.Array to control use_replica_parallel.
+          original_handler = None
+          if not config.use_replica_parallel: #
+              # Store the original handler to restore it later.
+              original_handler = ocp.type_handlers.get_type_handler(jax.Array) #
+              # Register a new ArrayHandler with use_replica_parallel=False.
+              custom_handler = ArrayHandler(
+                  use_replica_parallel=False, #
+                  array_metadata_store=array_metadata_store_lib.Store(),
+              )
+              ocp.type_handlers.register_type_handler(jax.Array, custom_handler, override=True) #
 
-  checkpoint_args = ocp.args.PyTreeSave(
-      item=state,
-      save_args=jax.tree.map(lambda _: ocp.SaveArgs(chunk_byte_size=chunk_byte_size), state),
-      ocdbt_target_data_file_size=chunk_byte_size,
-  )
+          try:
+              # specify chunk_byte_size to force orbax to control maximum file size in checkpoint
+              chunk_byte_size = config.checkpoint_storage_target_data_file_size_bytes if config else DEFAULT_OCDBT_TARGET_DATA_FILE_SIZE
 
-  match (checkpoint_manager, config):
-    case (checkpoint_manager, _) if isinstance(
-        checkpoint_manager, (EmergencyCheckpointManager, EmergencyReplicatorCheckpointManager)
-    ):
-      replicator_error_handler(config)
-      return checkpoint_manager.save(step, args=Composite(state=checkpoint_args), force=force)
-    case (_, config) if config and config.dataset_type == "grain":
-      grain_iter = grain.PyGrainCheckpointSave(data_iterator.local_iterator)
-      return checkpoint_manager.save(step, args=Composite(items=checkpoint_args, iter=grain_iter), force=force)
-    case _:
-      return checkpoint_manager.save(step, args=Composite(items=checkpoint_args), force=force)
+              checkpoint_args = ocp.args.PyTreeSave(
+                  item=state,
+                  save_args=jax.tree.map(lambda _: ocp.SaveArgs(chunk_byte_size=chunk_byte_size), state),
+                  ocdbt_target_data_file_size=chunk_byte_size,
+              )
+
+              match (checkpoint_manager, config):
+                  case (checkpoint_manager, _) if isinstance(
+                      checkpoint_manager, (EmergencyCheckpointManager, EmergencyReplicatorCheckpointManager)
+                  ):
+                      replicator_error_handler(config)
+                      return checkpoint_manager.save(step, args=Composite(state=checkpoint_args), force=force)
+                  case (_, config) if config and config.dataset_type == "grain":
+                      grain_iter = grain.PyGrainCheckpointSave(data_iterator.local_iterator)
+                      return checkpoint_manager.save(step, args=Composite(items=checkpoint_args, iter=grain_iter), force=force)
+                  case _:
+                      return checkpoint_manager.save(step, args=Composite(items=checkpoint_args), force=force)
+          finally:
+              # Restore the original handler if we modified it.
+              if not config.use_replica_parallel and original_handler is not None: #
+                  ocp.type_handlers.register_type_handler(jax.Array, original_handler, override=True) #
+

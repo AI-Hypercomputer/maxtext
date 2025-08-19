@@ -20,8 +20,8 @@ spec:
       template:
         spec:
           # Modify the following two values if you intend to run the workload in smaller scale.
-          parallelism: 256    # Equal to the number of VMs per slice
-          completions: 256    # Same as the above.
+          parallelism: 512    # Equal to the number of VMs per slice
+          completions: 512    # Same as the above.
           backoffLimit: 0   # When any pod fails, the job is failed
           template:
             metadata:
@@ -51,7 +51,7 @@ spec:
               terminationGracePeriodSeconds: 30
               containers:
               - name: jax-cpu
-                image: gcr.io/gcs-tess/bernardhan_distributed_maxtext_checkpointing_benchmark_strict_is_true_broadcast
+                image: gcr.io/gcs-tess/bernardhan_distributed_maxtext_checkpointing_benchmark_test
 
                 env:
                 - name: REPLICATED_JOB_NAME
@@ -72,9 +72,9 @@ spec:
                       fieldPath: metadata.annotations['jobset.sigs.k8s.io/jobset-name']
                 # Modify the following two values too, if you intend to run the workload in smaller scale.
                 - name: PROCESSES_IN_JOB
-                  value: "256"
+                  value: "512"
                 - name: JAX_PROCESS_COUNT
-                  value: "256"
+                  value: "512"
                 - name: JAX_COORDINATOR_ADDRESS
                   value: "$(JOBSET_NAME)-$(REPLICATED_JOB_NAME)-0-0.$(JOBSET_NAME)"
                 - name: MY_NODE_NAME
@@ -128,7 +128,7 @@ spec:
 
                   benchmark_run_flags=(
                     # PARAMETERS is the number of parameters in the model (in billions).
-                    PARAMETERS=128
+                    PARAMETERS=512
 
                     # STEPS is the number of steps to run.
                     STEPS=5
@@ -156,7 +156,7 @@ spec:
                     # is used, which is around 2GB.
                     # This translates to the Orbax parameter at
                     # https://source.corp.google.com/piper///depot/google3/third_party/py/orbax/checkpoint/pytree_checkpoint_handler.py;l=1001?q=%20ocdbt_target_data_file_size%20f:orbax
-                    OCDBT_TARGET_DATA_FILE_SIZE=-1
+                    OCDBT_TARGET_DATA_FILE_SIZE=2147483648
 
                     # Specifies the maximum number of checkpoints to keep and older checkpoints are removed.
                     # This translates to the Orbax parameter at
@@ -172,7 +172,8 @@ spec:
                     FINAL_CKPTS_DELETION_TIMEOUT_IN_S=1800
 
                     export M_ICI_DATA_PARALLELISM=2
-                    ENABLE_SINGLE_REPLICA_CKPT_RESTORING=True
+                    ENABLE_SINGLE_REPLICA_CKPT_RESTORING=False
+                    USE_REPLICA_PARALLEL=False
 
                     # Do not change, common values for all runs.
                     EXECUTABLE=standalone_checkpointer
