@@ -57,9 +57,9 @@ def get_input_data_sharding(config, mesh):
   return nn.logical_to_mesh_sharding(P(*config.input_data_sharding_logical_axes), mesh, config.logical_axis_rules)
 
 
-def get_functional_train_with_signature(train_step, data_sharding, state_mesh_shardings, model, config):
+def get_functional_train_with_signature(train_step, data_sharding, state_mesh_shardings, model, config, params_shardings=None):
   """Get the shardings (both state and data) for `train_step`."""
-  functional_train = functools.partial(train_step, model, config, state_mesh_shardings)
+  functional_train = functools.partial(train_step, model, config, state_mesh_shardings, params_shardings)
   functional_train.__name__ = "train_step"
   in_shardings = (state_mesh_shardings, data_sharding, None)  # State, batch, rng
   out_shardings = (state_mesh_shardings, None)  # State, metrics
@@ -953,6 +953,62 @@ def setup_training_state(model, data_iterator, tx, config, rng, mesh, checkpoint
       is_training,
   )
 
+def unbox_logicallypartioned(boxed_pytree):
+  """Unboxes the flax.LogicallyPartitioned pieces
+  Args:
+    boxed_pytree: a pytree that includes LogicallyPartitioned
+      leaves.
+  Returns:
+    a pytree where all all LogicallyPartitioned leaves have been unboxed.
+  """
+  return jax.tree_util.tree_map(
+      lambda x: x.unbox() if isinstance(x, nn.spmd.LogicallyPartitioned) else x,
+      boxed_pytree,
+      is_leaf=lambda k: isinstance(k, nn.spmd.LogicallyPartitioned),
+  )
+
+def add_data_to_sharding(mesh, path, aval, sharding):
+  if not isinstance(sharding, jax.sharding.NamedSharding):
+    raise AssertionError(f"Expected NamedSharding, found {sharding} of {type(sharding)=} at {jax.tree_util.keystr(path)}")
+  try:
+    sharded_shape = sharding.shard_shape(aval.shape)
+  except Exception as e:
+    raise AssertionError(f"Could not shard value {jax.tree_util.keystr(path)} of shape={aval.shape} with {sharding=}") from e
+  pspec = sharding.spec
+
+  if 'data' in jax.tree.leaves(pspec):
+    return sharding
+
+  for idx, (size, partition) in enumerate(zip(sharded_shape, pspec)):
+    if partition is None:
+      partition = ()
+
+    if isinstance(partition, str):
+      partition = (partition,)
+
+    if size % mesh.shape['data'] == 0 and (partition is None or 'tensor' not in partition):
+      added_component = ('data',) + partition
+      new_pspec = jax.sharding.PartitionSpec(*(pspec[:idx] + (added_component,) + pspec[idx+1:]))
+      new_sharding = jax.sharding.NamedSharding(sharding.mesh, new_pspec)
+      # return sharding.with_spec(new_pspec)
+      return new_sharding
+  return sharding
+
+def maybe_update_params_sharding_with_opt(config, state_mesh_shardings):
+  prev_params_shardings = state_mesh_shardings.params
+  if config.shard_optimizer_over_data:
+    if isinstance(state_mesh_shardings.opt_state, optax.ScaleByAdamState):
+      sharded_fp32_params = state_mesh_shardings.opt_state.mu
+    elif isinstance(state_mesh_shardings.opt_state, tuple) and isinstance(state_mesh_shardings.opt_state[0], optax.ScaleByAdamState):
+      sharded_fp32_params = state_mesh_shardings.opt_state[0].mu
+    else:
+      raise NotImplementedError(f"Could not find optimizer state shardings from optimizer of type {type(state_mesh_shardings.opt_state)}")
+    if "params" not in sharded_fp32_params.keys():
+      # When quantization=fp8 is enabled the sharded_fp32_params
+      # are not wrapped in `params`. Here we wrap them back.
+      sharded_fp32_params = {"params": sharded_fp32_params}
+    state_mesh_shardings = state_mesh_shardings.replace(params=dict(prev_params_shardings, **sharded_fp32_params))
+  return prev_params_shardings, state_mesh_shardings
 
 def setup_initial_state(
     model,
@@ -1043,6 +1099,11 @@ def get_abstract_state(model, tx, config, rng, mesh, is_training=True):
   state_logical_annotations = nn.get_partition_spec(abstract_state)
 
   state_mesh_shardings = nn.logical_to_mesh_sharding(state_logical_annotations, mesh, config.logical_axis_rules)
+  if is_training and config.shard_optimizer_over_data:
+    # Add data to sharding for optimizer state
+    state_mesh_shardings = state_mesh_shardings.replace(
+      opt_state=jax.tree.map_with_path(functools.partial(add_data_to_sharding, mesh), unbox_logicallypartioned(abstract_state).opt_state, state_mesh_shardings.opt_state)
+    )
   if is_training and config.optimizer_memory_host_offload:
     opt_state = jax.tree_util.tree_map(lambda x: x.with_memory_kind(kind="pinned_host"), state_mesh_shardings.opt_state)
     state_mesh_shardings = state_mesh_shardings.replace(opt_state=opt_state)
