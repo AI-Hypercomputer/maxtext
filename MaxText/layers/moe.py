@@ -46,6 +46,42 @@ DISPATCH = "dispatch"
 COMBINE = "combine"
 
 
+@jax.custom_vjp
+def _sort_activations(inputs: jax.Array, sort_indices: jax.Array) -> jax.Array:
+  """Sort activations by `sort_indices`.
+
+  Critially, we assume that the backward-pass gradient is computed by the 
+  unsort operation which simply has `jnp.argsort(sort_indices)` as its sort
+  indices. 
+ 
+  Args:
+    inputs: `(tokens, ...)`-shaped array of input activations to sort.
+    sort_indices: `(tokens,)`-shaped array containing the sort order.
+
+  Returns:
+    `(tokens, ...)`-shaped array of input activations sorted by `sort_indices`.
+  """
+  assert inputs.shape[0] == sort_indices.shape[0]
+
+  with jax.named_scope("sort_activations"):
+    return inputs[sort_indices, ...]
+
+
+def _sort_activations_fwd(inputs: jax.Array, sort_indices: jax.Array
+) -> tuple[jax.Array, jax.Array]:
+  """Forward pass of the custom vjp for `_sort_activations()`."""
+  return _sort_activations(inputs, sort_indices), sort_indices
+
+
+def _sort_activations_bwd(residuals: jax.Array, grads: jax.Array
+) -> tuple[jax.Array, None]:
+  """Backward pass of the custom vjp for `_sort_activations()`."""
+  sort_indices = residuals
+  return _sort_activations(grads, jnp.argsort(sort_indices)), None
+
+_sort_activations.defvjp(_sort_activations_fwd, _sort_activations_bwd)
+
+
 def random_routing(rng_key, gate_logits, num_experts_per_tok):
   """Performs random routing of tokens to experts.
 
@@ -406,13 +442,13 @@ class RoutedMoE(nnx.Module):
     pre_bias logits.
 
     Args:
-      gate_logits: Array of shape `(..., num_experts)`.
-      pre_bias_logits: Array of shape `(..., num_experts)`.
+      gate_logits: Array of shape `(batch, seq, num_experts)`.
+      pre_bias_logits: Array of shape `(batch, seq,num_experts)`.
 
     Returns:
-      - top_k_weights: `(..., num_experts_per_tok)` array of weight values for
+      - top_k_weights: `(batch, seq, num_experts_per_tok)` array of weight values for
         each selected expert.
-      - top_k_indices: `(..., num_experts_per_tok)` array of indices
+      - top_k_indices: `(batch, seq, num_experts_per_tok)` array of indices
         identifying the selected experts for each token.
     """
     expert_mask = 1 if self.config.n_routing_groups == -1 else self.expert_group_mask(gate_logits)
@@ -441,7 +477,10 @@ class RoutedMoE(nnx.Module):
     sorted_selected_experts = jnp.argsort(flatten_selected_experts)
     sorted_indices = sorted_selected_experts // self.num_experts_per_tok
     # sort inputs for number of selected experts
-    sorted_inputs = jnp.take(inputs_2d, indices=sorted_indices, axis=0).astype(self.dtype)
+    replicated_inputs_2d = jnp.reshape(
+        jnp.broadcast_to(inputs_2d[None, ...], (self.num_experts_per_tok, *inputs_2d.shape)), 
+        (self.num_experts_per_tok * inputs_2d.shape[0], inputs_2d.shape[1]))
+    sorted_inputs = _sort_activations(replicated_inputs_2d, sorted_indices).astype(self.dtype)
     group_size = jnp.bincount(flatten_selected_experts, length=self.num_experts)
     # Return the experts for each sorted input.
     expert_indices = jnp.arange(self.num_experts)
@@ -468,7 +507,7 @@ class RoutedMoE(nnx.Module):
   ):
     """Unpermute tokens to original order and combine weights."""
 
-    unsort_intermediate = jnp.take(intermediate, indices=jnp.argsort(sorted_selected_experts), axis=0)
+    unsort_intermediate = _sort_activations(intermediate, jnp.argsort(sorted_selected_experts))
     reshaped_weights = jnp.reshape(weights, (-1, self.num_experts_per_tok))
     reshaped_intermediate = jnp.reshape(
         unsort_intermediate,
@@ -564,7 +603,7 @@ class RoutedMoE(nnx.Module):
       expert_indices = jnp.repeat(base_indices, local_sizes, total_repeat_length=inputs.shape[0])
 
     sorted_indices = jnp.argsort(expert_indices)
-    sorted_inputs = jnp.take(inputs, indices=sorted_indices, axis=0)
+    sorted_inputs = _sort_activations(inputs, sorted_indices)
     sorted_experts_ids = expert_indices[sorted_indices]
     return (
         sorted_inputs,
@@ -900,11 +939,7 @@ class RoutedMoE(nnx.Module):
         )
         if is_batch_sharded_by_expert:
           # locally unpermute back to the original order
-          local_output = jnp.take(
-              intermediate_output,
-              indices=jnp.argsort(local_sorted_indices),  # pylint: disable=undefined-variable
-              axis=0,
-          )
+          local_output = _sort_activations(intermediate_output, jnp.argsort(local_sorted_indices)) # pylint: disable=undefined-variable
           input_offsets, send_sizes, output_offsets, recv_sizes = RoutedMoE.get_all_to_all_params(
               jnp.transpose(all_shards_group_sizes),  # pylint: disable=undefined-variable
               expert_shard_id,
