@@ -24,6 +24,7 @@ import argparse
 import zlib
 import bz2
 import lzma
+import os.path
 
 # file pattern, [0] is groud truth, [1] is generated code
 
@@ -95,9 +96,9 @@ def main():
   #     print(f"  LZMA compressed size:      {stats['lzma_size']}")
   #     print(f"  Estimated K-complexity:    {stats['approx_k_complexity']}  (min of above)\n")
 
-  with open(f"{dir_path}/{args.files[0]}", "r") as f:
+  with open(os.path.join(dir_path, args.files[0]), "rt", encoding="utf8") as f:
     ground_truth = f.read()
-  with open(f"{dir_path}/{args.files[1]}", "r") as f:
+  with open(os.path.join(dir_path, args.files[1]), "rt", encoding="utf8") as f:
     dsl_chain = f.read()
 
   prompt = prompt_templates["eval"].format(

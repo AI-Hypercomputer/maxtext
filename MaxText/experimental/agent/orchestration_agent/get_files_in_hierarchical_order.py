@@ -20,18 +20,15 @@ It handles both absolute and relative imports, and can optionally exclude condit
 Example Invocations:
 
 1. Analyze a specific entry file in a repository, excluding conditional imports (default):
-```sh
-python get_files_in_hierarchical_order.py \
-   --base-path "https://github.com/huggingface/transformers/blob/main/src/" \
+   python GetFilesInHierarchicalOrder.py \
+     --base-path "https://github.com/huggingface/transformers/blob/main/src/" \
 --entry-file-path https://github.com/huggingface/transformers/blob/main/src/transformers/models/llama/modeling_llama.py
-```
+
 2. Analyze a specific entry file, including all imports (even conditional ones):
-```sh
-python get_files_in_hierarchical_order.py \
-  --base-path "https://github.com/huggingface/transformers/blob/main/src/" \
+   python GetFilesInHierarchicalOrder.py \
+     --base-path "https://github.com/huggingface/transformers/blob/main/src/" \
+     --no-exclude-conditional-imports \
 --entry-file-path https://github.com/huggingface/transformers/blob/main/src/transformers/models/llama/modeling_llama.py
-  --no-exclude-conditional-imports
-```
 """
 from collections import deque
 import argparse
@@ -39,7 +36,7 @@ import ast
 import json
 import logging
 
-from .utils import find_cycle, check_github_file_exists, get_github_file_content, url_join
+from MaxText.experimental.agent.orchestration_agent.utils import find_cycle, check_github_file_exists, get_github_file_content, url_join
 
 # Set up basic configuration
 logging.basicConfig(
@@ -51,24 +48,16 @@ logger = logging.getLogger(__name__)
 
 
 def have_module(target_name, file_url):
-  """Checks if a given name is defined in a Python file.
-
-  This function parses a Python file from a URL to determine if `target_name`
-  is defined as a function, class, or top-level variable. It can also detect
-  if `target_name` is an alias re-exported from another module via an
-  `ast.ImportFrom` statement.
+  """
+  Checks if a given module (function, class, or variable) exists in a Python file.
 
   Args:
-    target_name: The name of the function, class, or variable to find.
-    file_url: The full GitHub URL of the Python file to inspect.
+      target_name (str): The name of the module to search for.
+      file_url (str): The URL of the Python file to check.
 
   Returns:
-    A boolean or a tuple indicating the result:
-    - True: If `target_name` is explicitly defined in the file.
-    - ("ImportFrom", str): If `target_name` is an alias in an `ImportFrom`
-      statement. The second element is the full module path.
-    - False: If the name is not found, or if the file content cannot be
-      retrieved or parsed.
+      bool: True if the module is found, False otherwise.
+      tuple: ("ImportFrom", full_module) if the target_name is an alias from an import statement.
   """
   flag, content = get_github_file_content(file_url)
   if not flag:
@@ -94,82 +83,75 @@ def have_module(target_name, file_url):
           module = node.module or ""
           level = node.level
           full_module = "." * level + module if level > 0 else module
-          return "ImportFrom", full_module
+          return ("ImportFrom", full_module)
   return False
 
 
-def resolve_complex_import(module_path_base_url, import_package, base_url, current_dir_url, current_recursion_depth=0):
-  """Recursively resolves a complex import to a file URL.
-
-  This function handles imports that might refer to a package directory
-  (with an `__init__.py`) or a submodule. It attempts to resolve the import
-  by checking for `.py` files and package `__init__.py` files, and can
-  follow re-exports within `__init__.py` files.
+def resolve_complex_import(module_path_base_url, importPackage, base_url, current_dir_url, Try=0, Message=""):
+  """
+  Resolves a complex import statement, looking for the imported package/module
+  within a directory structure. This handles cases where 'importPackage' might
+  refer to a file or a directory (package) with an __init__.py.
 
   Args:
-    module_path_base_url: The base URL for the module path being resolved.
-    import_package: The specific name being imported (e.g., 'modeling_llama').
-    base_url: The root URL of the repository's source directory.
-    current_dir_url: The URL of the directory containing the import statement.
-    current_recursion_depth: Internal counter to prevent infinite recursion.
+      module_path_base_url (str): The base URL for the module path
+        (e.g., 'https://github.com/.../transformers/models/llama').
+      importPackage (str): The specific name being imported (e.g., 'modeling_llama', 'configuration_llama').
+      base_url (str): The base URL of the repository.
+      current_dir_url (str): The URL of the directory containing the original import statement.
+      Try (int): Counter for recursion depth.
+      Message (str): Accumulates error messages for recursion depth.
 
   Returns:
-    The resolved full GitHub URL of the imported file, or None if not found.
+      str: The resolved full GitHub URL of the imported file, or None if not found.
 
   Example:
-    If `module_path_base_url` is
-    "https://.../src/transformers/models/llama", `import_package` is
-    "modeling_llama", this function would check for:
-    1. `.../src/transformers/models/llama.py`
-    2. `.../src/transformers/models/llama/__init__.py`
-    If `__init__.py` re-exports the name, it will recurse to find the source.
+      If `module_path_base_url` is "https://github.com/org/repo/blob/main/src/transformers/models/llama",
+      `importPackage` is "modeling_llama", `base_url` is "https://github.com/org/repo/blob/main/src/",
+      and `current_dir_url` is "https://github.com/org/repo/blob/main/src/transformers/models/llama",
+      this function would first check for "https://github.com/org/repo/blob/main/src/transformers/models/llama.py".
+      If not found, it would then check for "__init__.py" in that "src/transformers/models".
+      If `__init__.py` exists and contains `from . import modeling_llama`, it would then check for
+      "https://github.com/org/repo/blob/main/src/transformers/models/llama/modeling_llama.py".
   """
 
-  if current_recursion_depth > 4:  # Increased recursion limit slightly for network latency
-    logger.error(
-        "Error: Exceeded recursion depth while resolving import for '%s' starting from '%s'",
-        import_package,
-        module_path_base_url,
-    )
+  if Try == 0:
+    Message = f"There is an issue with import {importPackage} in {module_path_base_url} current dir is {current_dir_url}"
+  if Try > 4:  # Increased recursion limit slightly for network latency
+    logger.error("Error: Exceeded recursion depth. %s", Message)
     return None
   # Check for a direct .py file containing the definition
   potential_py_url = f"{module_path_base_url}.py"
-  if check_github_file_exists(potential_py_url)[0]:
-    if have_module(import_package, potential_py_url) is True:
-      return potential_py_url
+  if check_github_file_exists(potential_py_url)[0] and have_module(importPackage, potential_py_url):
+    return potential_py_url
 
   # Check for a package (directory with __init__.py)
   potential_pkg_init_url = url_join(module_path_base_url, "__init__.py")
   if check_github_file_exists(potential_pkg_init_url)[0] and potential_pkg_init_url.startswith(base_url):
-    has_module = have_module(import_package, potential_pkg_init_url)
+    has_module = have_module(importPackage, potential_pkg_init_url)
     if has_module:
       return potential_pkg_init_url
     else:
       # The package exists, but the import is not in __init__. It could be a submodule.
-      potential_file_in_pkg_url = url_join(module_path_base_url, f"{import_package}.py")
+      potential_file_in_pkg_url = url_join(module_path_base_url, f"{importPackage}.py")
       if check_github_file_exists(potential_file_in_pkg_url)[0] and potential_file_in_pkg_url.startswith(base_url):
         return potential_file_in_pkg_url
   return None
 
 
-def resolve_import_path(importer_url, module_name, level, base_url, import_package=None):
-  """Resolves an import statement to a full GitHub file URL.
-
-  Handles both absolute and relative imports. For a given import statement,
-  it constructs the potential path to the imported module and checks for its
-  existence as a `.py` file or as a package.
+def resolve_import_path(importer_url, module_name, level, base_url, importPackage=None):
+  """
+  Resolves an import statement to a full GitHub URL.
 
   Args:
-    importer_url: The URL of the file containing the import.
-    module_name: The name of the module from the import statement (e.g.,
-      'transformers.models.llama').
-    level: The relative import level (0 for absolute, 1 for `.` , 2 for `..`).
-    base_url: The root URL of the repository's source directory.
-    import_package: The specific name being imported in a `from ... import ...`
-      statement (e.g., `LlamaModel` from `... import LlamaModel`).
+      importer_url (str): The URL of the file containing the import statement.
+      module_name (str): The name of the module being imported (e.g., 'os', 'transformers.models.llama').
+      level (int): The level of the import (0 for absolute, 1+ for relative).
+      base_url (str): The base URL of the repository (e.g., 'https://github.com/huggingface/transformers/blob/main/src/').
+      importPackage (str, optional): The specific package or module being imported from a 'from ... import ...' statement.
 
   Returns:
-    The resolved full GitHub URL of the imported file, or None if not found.
+      str: The resolved full GitHub URL of the imported file, or None if not found.
   """
   current_dir_url = importer_url[: importer_url.rfind("/")]
   if level > 0:  # Relative import
@@ -185,25 +167,22 @@ def resolve_import_path(importer_url, module_name, level, base_url, import_packa
     return potential_url_py
 
   # If it's not a direct file, it might be a complex package import
-  return resolve_complex_import(module_path_base_url, import_package, base_url, current_dir_url)
+  return resolve_complex_import(module_path_base_url, importPackage, base_url, current_dir_url)
 
 
 def find_file_dependencies(file_path_url, base_path_url, exclude_conditional_imports=True):
-  """Finds all direct Python file dependencies for a given file.
-
-  Parses a Python file to find all `import` and `from ... import ...`
-  statements. It then resolves these imports to their corresponding file URLs
-  within the repository.
+  """
+  Finds all direct Python file dependencies for a given file.
 
   Args:
-    file_path_url: The full GitHub URL of the Python file to analyze.
-    base_path_url: The base URL of the repository's source directory, used to
-      filter out external dependencies.
-    exclude_conditional_imports: If True, ignores imports inside functions,
-      classes, or `if TYPE_CHECKING:` blocks.
+      file_path_url (str): The full GitHub URL of the Python file to analyze.
+      base_path_url (str): The base URL of the GitHub repository's source directory.
+      exclude_conditional_imports (bool): If True, imports inside functions,
+                                          classes, or `if TYPE_CHECKING:` blocks
+                                          are ignored.
 
   Returns:
-    A set of full GitHub URLs corresponding to the dependent Python files.
+      set: A set of full GitHub URLs of the dependent Python files.
   """
   dependencies = set()
   flag, content = get_github_file_content(file_path_url)
@@ -260,29 +239,24 @@ def find_file_dependencies(file_path_url, base_path_url, exclude_conditional_imp
 
 
 def get_dependency_sorted_files(entry_file_path, base_path, exclude_conditional_imports=True, returnDependencies=False):
-  """Generates a dependency-sorted list of all Python files in a project.
-
-  Starting from an entry file, this function performs a dependency analysis
-  across a Python project on GitHub. It builds a graph of file-level imports
-  and returns a topologically sorted list of all discovered files.
+  """
+  Analyzes a given entry Python file within a GitHub repository and returns a
+  topologically sorted list of all dependent Python files.
 
   Args:
-    entry_file_path: The full GitHub URL of the starting Python file.
-    base_path: The base URL of the repository's source directory.
-    exclude_conditional_imports: If True, imports inside functions, classes,
-      or `if TYPE_CHECKING:` blocks are ignored during dependency analysis.
-    returnDependencies: If True, returns both the sorted file list and the
-      dependency graph.
+      entry_file_path (str): The full GitHub URL of the entry Python file.
+      base_path (str): The base URL of the GitHub repository's source directory.
+      exclude_conditional_imports (bool): If True, imports inside functions,
+                                          classes, or `if TYPE_CHECKING:` blocks
+                                          are ignored for dependency analysis.
+      returnDependencies (bool): If True, returns a tuple of (sorted_files,
+                                 dependency_graph), otherwise just sorted_files.
 
   Returns:
-    If `returnDependencies` is False (default):
-      A list of file paths (relative to `base_path`) in topological order.
-      Returns an empty list if a circular dependency is detected.
-    If `returnDependencies` is True:
-      A tuple containing:
-        - A list of relative file paths in topological order.
-        - A dictionary representing the dependency graph, where keys are
-          relative file paths and values are lists of their dependencies.
+      list: A list of file paths (relative to base_path) in topological order.
+            Returns an empty list if a circular dependency is detected.
+      dict (optional): A dictionary representing the dependency graph if
+                       returnDependencies is True.
   """
   dependency_graph = {}
   reverse_graph = {}
@@ -307,12 +281,12 @@ def get_dependency_sorted_files(entry_file_path, base_path, exclude_conditional_
     dependency_graph.setdefault(current_file, [])
     reverse_graph.setdefault(current_file, [])
 
-    dependencies = find_file_dependencies(current_file, base_path, exclude_conditional_imports)
-    dependencies_name = {k.replace(base_path, "") for k in dependencies}
-    logger.info("File %s Have %s", current_file.replace(base_path, ""), dependencies_name)
-    dependency_graph[current_file] = list(dependencies)
+    deps = find_file_dependencies(current_file, base_path, exclude_conditional_imports)
+    dependencies_name = {k.replace(base_path, "") for k in deps}
+    logger.info("File %s Has %s", current_file.replace(base_path, ""), dependencies_name)
+    dependency_graph[current_file] = list(deps)
 
-    for dep in dependencies:
+    for dep in deps:
       reverse_graph.setdefault(dep, []).append(current_file)
       # If a dependency is new to us, add it to the queue to be
       # processed in a future iteration.
@@ -326,8 +300,8 @@ def get_dependency_sorted_files(entry_file_path, base_path, exclude_conditional_
     all_files_in_graph.update(deps)
 
   in_degree = {file: 0 for file in all_files_in_graph}
-  for _, dependencies in reverse_graph.items():
-    for dep in dependencies:
+  for _, deps in reverse_graph.items():
+    for dep in deps:
       if dep in in_degree:
         in_degree[dep] += 1
 
@@ -362,11 +336,12 @@ def get_dependency_sorted_files(entry_file_path, base_path, exclude_conditional_
       return []
 
 
-def arg_parser():
-  """Creates and configures the argument parser for the script.
+def ArgParser():
+  """
+  Parses command-line arguments for file or folder processing.
 
   Returns:
-    An `argparse.ArgumentParser` instance.
+      argparse.Namespace: The parsed command-line arguments.
   """
   parser = argparse.ArgumentParser(description="Dependency sorter for Python files on GitHub.")
   parser.add_argument(
@@ -394,20 +369,14 @@ def arg_parser():
 
 
 def save_results_in_file(sorted_files, dependencies, args, outFile="FileOrder.txt"):
-  """Saves the sorted file list and dependencies to output files.
-
-  This function writes the analysis results into two files:
-  1. `all_files.json`: A JSON file containing the sorted file list and the
-     full dependency graph.
-  2. `FileOrder.txt`: A human-readable text file summarizing standalone and
-     dependent modules.
+  """
+  Saves the sorted files and their dependencies to a file.
 
   Args:
-    sorted_files: A list of file paths sorted by dependency.
-    dependencies: A dictionary where keys are file paths and values are lists
-      of their dependencies.
-    args: The parsed command-line arguments from `argparse`.
-    outFile: The name of the text output file.
+      sorted_files (list): A list of file paths sorted by dependency.
+      dependencies (dict): A dictionary where keys are file paths and values are lists of their dependencies.
+      args (argparse.Namespace): The command-line arguments.
+      outFile (str): The name of the output file.
   """
   with open("all_files.json", "wt", encoding="utf8") as f:
     json.dump({"sorted_files": sorted_files, "dependencies": dependencies}, f)
@@ -423,13 +392,7 @@ def save_results_in_file(sorted_files, dependencies, args, outFile="FileOrder.tx
 
 
 def main():
-  """Main entry point for the dependency analysis script.
-
-  Parses command-line arguments, runs the file dependency analysis starting
-  from the entry file, and saves the results to disk. It logs the progress
-  and the final sorted list of files.
-  """
-  args = arg_parser()
+  args = ArgParser()
   BASE_PATH = args.base_path
   ENTRY_FILE_PATH = args.entry_file_path
   EXCLUDE_CONDITIONAL_IMPORTS = args.exclude_conditional_imports

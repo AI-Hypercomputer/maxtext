@@ -12,103 +12,72 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Analyzes and splits a Python file into dependency-sorted components.
-
-This script provides functionality to analyze a Python file and break it down
-into its constituent components (functions, classes, variables, and imports),
-identifying internal dependencies between them. It then provides a
-topologically sorted list of these components, grouping circular dependencies
+"""
+This file provides functionality to analyze a Python file and break it down into
+its constituent components (functions, classes, variables, and imports),
+identifying internal dependencies between these components. It then provides
+a topologically sorted list of these components, grouping circular dependencies
 into single modules.
 
 Example Invocation:
-  python split_python_file.py \
-    "https://github.com/huggingface/transformers/blob/main/src/transformers/models/llama/modeling_llama.py"
-"""
 
+python SplitPythonFile.py \
+  "https://github.com/huggingface/transformers/blob/main/src/transformers/models/llama/modeling_llama.py"
+"""
+from collections import defaultdict, deque
+from collections.abc import Hashable
+from typing import Any
+import argparse
 import ast
+import json
 import os.path
 import sys
-import json
-import argparse
-from collections import defaultdict, deque
-from typing import TypedDict
 
-from .utils import get_github_file_content
+from MaxText.experimental.agent.orchestration_agent.utils import get_github_file_content
 
 
 class ReferenceVisitor(ast.NodeVisitor):
-  """Traverses an AST node to find all references to a known set of names.
-
-  This visitor is used to detect dependencies between different top-level code
-  definitions (functions, classes, variables) within a single file.
-
-  Attributes:
-    defined_names: A set of strings, where each string is a name of a
-      top-level definition in the file.
-    found_dependencies: A set that collects the names of all found
-      dependencies during traversal.
+  """
+  Traverses an AST node to find all references to a known set of names.
+  This is used to detect dependencies between code blocks.
   """
 
   def __init__(self, defined_names):
     """Initializes the ReferenceVisitor.
 
     Args:
-      defined_names: A set of top-level names defined in the current scope.
+      defined_names: A set of strings, where each string is a name of a
+        top-level definition (function, class, variable) in the source code.
     """
     self.defined_names = defined_names
     self.found_dependencies = set()
 
   def visit_Name(self, node):
-    """Visits a Name node and checks if it's a dependency.
+    """Visits an ast.Name node to check for dependencies.
 
-    If the node's ID is in the set of `defined_names`, it is added to the
-    `found_dependencies` set.
+    If the name of the node is in the set of defined names, it's added to
+    the set of found dependencies.
 
     Args:
-      node: The `ast.Name` node to visit.
+      node: The ast.Name node to visit.
     """
     if node.id in self.defined_names:
       self.found_dependencies.add(node.id)
     self.generic_visit(node)
 
 
-SortedStructure = TypedDict(
-    "SortedStructure",
-    {
-        "sorted_modules": dict,
-        "component_dependencies": dict,
-        "warning": str | None,
-    },
-)
-
-
 class DependencyAnalyzer:
-  """Analyzes dependencies between top-level definitions in a Python file.
-
-  This class parses Python source code to build a dependency graph of its
-  top-level functions, classes, and variable assignments. It uses Tarjan's
-  algorithm to identify and group cyclical dependencies (Strongly Connected
-  Components) and then produces a topologically sorted order of these
-  components.
-
-  Attributes:
-    source_code: The Python source code to analyze.
-    tree: The root of the parsed Abstract Syntax Tree (AST).
-    docstring: The module-level docstring, if present.
-    imports: A list of top-level import nodes.
-    conditional_imports: A list of import nodes found within `if` blocks.
-    definitions: A dictionary mapping names to their top-level definition nodes.
-    dependencies: A defaultdict mapping each defined name to a set of its
-      dependencies.
-    sorted_components: A dictionary that will hold the final sorted code blocks.
-    adj: An adjacency list representing the dependency graph.
+  """
+  Analyzes a Python source file to find dependencies between all top-level
+  definitions. It groups circular dependencies (Strongly Connected Components)
+  into single modules for sequential processing.
   """
 
   def __init__(self, source_code):
     """Initializes the DependencyAnalyzer.
 
     Args:
-      source_code: A string containing the Python source code to be analyzed.
+      source_code: A string containing the Python source code to analyze.
     """
     self.source_code = source_code
     self.tree = ast.parse(self.source_code)
@@ -125,8 +94,16 @@ class DependencyAnalyzer:
     """Performs a two-pass analysis to build a dependency graph.
 
     The first pass identifies all top-level definitions (imports, functions,
-    classes, variables). The second pass traverses the AST of each definition
-    to find references to other definitions, thereby building the dependency graph.
+    classes, and variables). The second pass analyzes the body of each
+    definition to find references to other definitions, thereby building
+    the dependency graph.
+
+    This method populates the following instance attributes:
+    - `self.imports`: List of import nodes.
+    - `self.conditional_imports`: List of import nodes found inside `if` blocks.
+    - `self.definitions`: Dictionary mapping names to their AST nodes.
+    - `self.dependencies`: Dictionary mapping names to a set of their dependencies.
+    - `self.adj`: An adjacency list representation of the dependency graph.
     """
     # --- Pass 1: Categorize all top-level nodes ---
     for node in self.tree.body:
@@ -162,15 +139,15 @@ class DependencyAnalyzer:
           self.adj[dep].append(name)
 
   def _find_sccs(self):
-    """Finds all Strongly Connected Components (SCCs) in the graph.
+    """Finds Strongly Connected Components (SCCs) using Tarjan's algorithm.
 
-    This method implements Tarjan's algorithm to detect cycles in the dependency
-    graph. Each SCC represents either a single component or a group of
-    cyclically dependent components.
+    This method implements Tarjan's algorithm to find all SCCs in the
+    dependency graph. SCCs represent groups of cyclically dependent
+    definitions.
 
     Returns:
-        A list of lists, where each inner list is an SCC containing the names
-        of the nodes in that component.
+      A list of lists, where each inner list is an SCC containing the names
+      of the definitions in that component.
     """
     nodes = list(self.definitions.keys())
     disc = {node: -1 for node in nodes}
@@ -210,14 +187,14 @@ class DependencyAnalyzer:
     return sccs
 
   def get_import_components(self):
-    """Extracts and groups all import statements from the source code.
+    """Extracts and processes import statements from the source code.
 
-    This method processes both regular and conditional imports, preserving
-    their original source text. It also captures the module-level docstring
-    and any comments or blank lines between import statements, grouping them
-    into separate components.
+    This method identifies regular and conditional imports, extracts their
+    source code, and handles module-level docstrings and comments/blank lines
+    between import statements. The results are stored in
+    `self.sorted_components`.
     """
-
+    # Component 0 is always imports
     lines = self.source_code.splitlines()
     import_components = []
     conditional_import_components = []
@@ -256,21 +233,22 @@ class DependencyAnalyzer:
     if conditional_import_components:
       self.sorted_components["conditional_imports"] = "\n\n".join(conditional_import_components)
 
-  def get_sorted_structure(self) -> SortedStructure:
-    """Topologically sorts definitions and returns a structured output.
+  def get_sorted_structure(self):
+    """Topologically sorts definitions and returns a structured analysis.
 
-    This is the main orchestration method. It runs the analysis, finds cycles
-    (SCCs), creates a condensation graph (where each SCC is a node),
-    topologically sorts this graph, and then reconstructs the source code into
-    ordered, independent components.
-
-    The sorting ensures that a component is defined only after all its
-    dependencies are defined. Cyclical dependencies are grouped into a single
-    component.
+    This is the main entry point for the analysis after initialization. It
+    orchestrates the dependency analysis, finds strongly connected components
+    (cycles), and constructs a topologically sorted order of the components.
 
     Returns:
-        A `SortedStructure` dictionary containing the sorted modules, their
-        dependencies, and any warnings (e.g., about cycles).
+      A dictionary containing the structured analysis of the file. The
+      dictionary has the following keys:
+        - "sorted_modules": A dictionary mapping component names to their
+          source code, sorted topologically.
+        - "component_dependencies": A dictionary representing the dependency
+          graph between the components.
+        - "warning": A warning message if circular dependencies were found,
+          otherwise None.
     """
     self.analyze()
 
@@ -304,6 +282,7 @@ class DependencyAnalyzer:
           queue.append(v_scc_idx)
 
     # 4. Reconstruct the modules based on the sorted components.
+    self.sorted_components = {}
     comp_to_name_map = {}
     warning_message = None
 
@@ -386,48 +365,61 @@ class DependencyAnalyzer:
     }
 
 
-def get_modules_in_order(filepath: str) -> SortedStructure:
-  """Analyzes a Python file and returns its components in dependency order.
+def get_modules_in_order(filepath) -> dict[Hashable, Any]:
+  """Reads a Python file and returns its topologically sorted components.
 
-  This function reads a Python file from a local path or a GitHub URL,
-  analyzes its internal structure to determine dependencies between functions,
-  classes, and variables, and returns a topologically sorted representation
-  of its components.
+  This function takes a filepath, which can be a local path or a GitHub URL,
+  fetches the source code, and then uses the DependencyAnalyzer to break it
+  down into a dependency-aware, structured format.
+
+  Note:
+    This function prints status messages to standard output and will call
+    `sys.exit(1)` upon file reading errors, terminating the program.
 
   Args:
-    filepath: The local path or GitHub URL of the Python file to analyze.
+    filepath: The path or URL to the Python file to be analyzed.
 
   Returns:
-    A `SortedStructure` dictionary containing the sorted code components,
-    their inter-dependencies, and a potential warning about circular refs.
+    A dictionary containing the structured analysis of the file. The dictionary
+    has the following keys:
+      - "sorted_modules": A dictionary mapping component names to their
+        source code, sorted topologically.
+      - "component_dependencies": A dictionary representing the dependency
+        graph between the components.
+      - "warning": A warning message if circular dependencies were found,
+        otherwise None.
   """
-  source_code = ""
   try:
+    source_code = ""
     if filepath.startswith("https"):
-      flag, source_code = get_github_file_content(filepath)
-      if flag is False:
-        print("Issue in reading", filepath, source_code)
+      flag, content = get_github_file_content(filepath)
+      if not flag:
+        print(f"Error reading file from URL '{filepath}': {content}")
+        sys.exit(1)
+      source_code = content
     elif os.path.exists(filepath):
-      with open(filepath, "r", encoding="utf-8") as f:
+      with open(filepath, "rt", encoding="utf-8") as f:
         source_code = f.read()
-  except FileNotFoundError:
-    print(f"Error: File not found at '{filepath}'")
+    else:
+      raise FileNotFoundError(f"File not found at path: {filepath}")
+
+    print(f"--- Analyzing '{filepath}' and creating structured output ---\n")
+    analyzer = DependencyAnalyzer(source_code)
+    return analyzer.get_sorted_structure()
+  except FileNotFoundError as e:
+    print(f"Error: {e}")
     sys.exit(1)
-  except OSError as e:
-    print(f"OSError: {e}")
+  except (OSError, UnicodeDecodeError) as e:
+    print(f"Error reading local file '{filepath}': {e}")
     sys.exit(1)
-  print(f"--- Analyzing '{filepath}' and creating structured output ---\n")
-  analyzer = DependencyAnalyzer(source_code)
-  return analyzer.get_sorted_structure()
 
 
 def get_argparser():
-  """Creates and returns the argument parser for the script.
+  """Creates and configures an ArgumentParser for the script.
 
   Returns:
-      An `argparse.ArgumentParser` instance configured for this script.
+    An argparse.ArgumentParser object configured with the script's arguments.
   """
-
   parser = argparse.ArgumentParser(description="Analyze Python file dependencies and split into components.")
   parser.add_argument(
       "filepath",
@@ -439,13 +431,13 @@ def get_argparser():
 
 
 def save_results_in_file(result, filename, outFile="file_component.txt"):
-  """Saves the analysis results to a file.
+  """Saves the analysis results to a text file.
 
-  The output file will contain the name of the analyzed file, a list of
-  standalone components, and a list of components with their dependencies.
+  This function writes a summary of the standalone and dependent modules
+  to a specified output file.
 
   Args:
-    result: The `SortedStructure` dictionary returned by the analyzer.
+    result: The dictionary returned by `get_sorted_structure`.
     filename: The name of the original file that was analyzed.
     outFile: The path to the output file.
   """
@@ -462,12 +454,11 @@ def save_results_in_file(result, filename, outFile="file_component.txt"):
 
 
 def main():
-  """Main entry point for the script.
+  """Main function to run the Python file splitter script.
 
-  Parses command-line arguments, runs the dependency analysis on the
-  specified file, and prints the results to the console and an output file.
+  Parses command-line arguments, analyzes the specified Python file,
+  saves the results, and prints a summary to the console.
   """
-
   parser = get_argparser()
   args = parser.parse_args()
   filepath = args.filepath
@@ -477,7 +468,7 @@ def main():
   print("--- Sorted Modules (Topological Order) ---")
   print(json.dumps(list(result["sorted_modules"].keys()), indent=2))
 
-  print("\n--- Component Dependencies (Adjacency list) ---")
+  print("\n--- Component Dependencies (Adjacency List) ---")
   print(json.dumps(result["component_dependencies"], indent=2))
 
   if result["warning"]:

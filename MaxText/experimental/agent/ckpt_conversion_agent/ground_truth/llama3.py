@@ -11,6 +11,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+"""Lllama3 ckpt conversation agent ground truth hook functions."""
+
+import jax
+
+import numpy as np
+
+
 def LLAMA31_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, scan_layers=False, saving_to_hf=False):
   """Creates parameter transformation functions for converting between MaxText and
   HuggingFace formats.
@@ -86,13 +94,13 @@ def LLAMA31_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, scan_layers=False, saving_to_hf=
   if scan_layers:
     hook_fns = {
         **hook_fns,
-        f"params-decoder-layers-self_attention-query-kernel": query_hooks,
-        f"params-decoder-layers-self_attention-key-kernel": key_hooks,
-        f"params-decoder-layers-self_attention-value-kernel": reshape_kernel,
-        f"params-decoder-layers-self_attention-out-kernel": reshape_kernel,
-        f"params-decoder-layers-mlp-wi_0-kernel": reshape_kernel,
-        f"params-decoder-layers-mlp-wi_1-kernel": reshape_kernel,
-        f"params-decoder-layers-mlp-wo-kernel": reshape_kernel,
+        "params-decoder-layers-self_attention-query-kernel": query_hooks,
+        "params-decoder-layers-self_attention-key-kernel": key_hooks,
+        "params-decoder-layers-self_attention-value-kernel": reshape_kernel,
+        "params-decoder-layers-self_attention-out-kernel": reshape_kernel,
+        "params-decoder-layers-mlp-wi_0-kernel": reshape_kernel,
+        "params-decoder-layers-mlp-wi_1-kernel": reshape_kernel,
+        "params-decoder-layers-mlp-wo-kernel": reshape_kernel,
     }
   else:
     for layer_idx in range(nlayers):

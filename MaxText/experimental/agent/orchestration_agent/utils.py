@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Utility functions for orchestration agent."""
+
 import ast
 from urllib.parse import urlparse, urljoin
 
@@ -189,6 +191,7 @@ def remove_local_imports(source_code, filepath=None):
   import_nodes = {node.lineno: node for node in tree.body if isinstance(node, (ast.Import, ast.ImportFrom))}
 
   i = 0
+  # pylint: disable=too-many-nested-blocks
   while i < len(lines):
     line = lines[i]
     node = import_nodes.get(i + 1, None)
@@ -256,7 +259,6 @@ def remove_local_imports(source_code, filepath=None):
         else:
           new_lines.append(line)
         i += 1
-        continue
     else:
       new_lines.append(line)
       i += 1

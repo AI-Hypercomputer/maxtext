@@ -37,16 +37,16 @@ Here's a breakdown of its functionality:
     *   This is the core conversion logic.
     *   It takes a `codeComponent` (a string containing the Python code to be converted) and an optional `memory_list`
         (for conversational context).
-    *   It constructs a user message using the `CODE` template from `prompt_code_generation.py`, embedding the 
+    *   It constructs a user message using the `CODE` template from `prompt_code_generation.py`, embedding the
         `codeComponent` into it.
     *   It appends this user message to the `memory_list`.
     *   It then calls the `llm_agent` (which wraps the Gemini model) with the `memory_list` to get a response.
-    *   Upon receiving a response, it extracts the converted code using `parse_python_code` (from 
+    *   Upon receiving a response, it extracts the converted code using `parse_python_code` (from
         `orchestration_agent.Utils`) and updates the `memory_list` with the model's response.
     *   It handles potential errors if the LLM agent fails to return a valid response.
 
 4.  **`parse_args` Function**:
-    *   Parses command-line arguments, allowing the user to specify either a single file (`--file`) or an entire folder 
+    *   Parses command-line arguments, allowing the user to specify either a single file (`--file`) or an entire folder
         (`--folder`) for processing. This ensures mutual exclusivity, meaning only one of these options can be provided.
 
 5.  **`process_single_file` Function**:
@@ -115,7 +115,7 @@ def get_chat_dict(input_message=""):
   return {"role": "user", "parts": input_message}
 
 
-def convert_code_from_torch_to_jax(codeComponent, memory_list):
+def convert_code_from_torch_to_jax(codeComponent, memory_list=None):
   """
   Converts a single code component from PyTorch to JAX using the LLM agent.
 
@@ -129,6 +129,8 @@ def convert_code_from_torch_to_jax(codeComponent, memory_list):
           - str: The converted JAX code.
           - list: The updated memory list.
   """
+  if memory_list is None:
+    memory_list = []
   # This appends the user's input message to the memory list for context.
   memory_list.append(get_chat_dict(input_message=CodeGeneration["CODE"].replace("{TORCHCODE}", codeComponent)))
   response = llm_agent(memory_list)
