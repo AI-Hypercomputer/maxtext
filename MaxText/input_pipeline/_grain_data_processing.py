@@ -186,7 +186,9 @@ def make_grain_train_iterator(
     process_indices,
 ):
   """Load, preprocess dataset and return iterators"""
-  assert config.global_batch_size_to_load % global_mesh.size == 0, "Batch size should be divisible number of global devices."
+  assert (
+      config.global_batch_size_to_load % global_mesh.size == 0
+  ), "Batch size should be divisible by number of global devices."
   if not config.colocated_python_data_input:
     train_ds = get_datasets(
         config.grain_train_files,
@@ -253,7 +255,7 @@ def make_grain_eval_iterator(
   """Load, preprocess dataset and return iterators"""
   assert (
       config.global_batch_size_to_load_eval % global_mesh.size == 0
-  ), "Batch size should be divisible number of global devices."
+  ), "Batch size should be divisible by number of global devices."
   if not config.colocated_python_data_input:
     eval_ds = get_datasets(
         config.grain_eval_files,

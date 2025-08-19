@@ -14,7 +14,6 @@
 
 """Input pipeline for gpt3 c4 mlperf dataset."""
 
-from typing import Optional
 import functools
 
 import numpy as np
@@ -161,7 +160,7 @@ def split_tokens_to_targets_length(dataset, sequence_length):
 def _pad_to_batch_size(
     ds: tf.data.Dataset,
     batch_size: int,
-    num_examples: Optional[int] = None,
+    num_examples: None | int = None,
 ) -> tf.data.Dataset:
   """Pad unevenly distributed eval data in each shard with new entries to multiples of batch size."""
 
@@ -187,7 +186,8 @@ def _pad_to_batch_size(
   pad_num = num_batches * batch_size - local_num
   assert pad_num >= 0
   max_logging.log(
-      f"Eval data has {local_num} local entries, padding now with " f"{pad_num} extra entries to get {num_batches} batches."
+      f"Eval data has {local_num} local entries, padding now with "
+      f"{pad_num} extra entries to get {num_batches} batches."
   )
 
   # Repeat a random example to make the last batch full.
@@ -258,7 +258,8 @@ def preprocess_train_dataset(
   else:
     pad_id = -1
   train_ds = train_ds.map(
-      lambda x: tokenizer.TokenizeOp(tokenizer=sp_tokenizer, features=x, data_keys=("targets",)), num_parallel_calls=AUTOTUNE
+      lambda x: tokenizer.TokenizeOp(tokenizer=sp_tokenizer, features=x, data_keys=("targets",)),
+      num_parallel_calls=AUTOTUNE,
   )
   train_ds = reduce_concat_tokens(train_ds, feature_key="targets", batch_size=4096)
   train_ds = split_tokens_to_targets_length(train_ds, max_target_length)
@@ -275,7 +276,7 @@ def preprocess_eval_dataset(
     sp_tokenizer,
     eval_global_batch_size_to_load: int,
     max_target_length: int,
-    num_examples: Optional[int] = None,
+    num_examples: None | int = None,
     is_tokenized_dataset: bool = True,
 ) -> tf.data.Dataset:
   """Preprocess the evaluation dataset."""
