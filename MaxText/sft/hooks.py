@@ -173,7 +173,10 @@ class SFTDataHooks(DataHooks):
     """Loads the next batch of data for evaluation."""
     try:
       # Run evaluation only for `config.eval_steps` steps.
-      if self.config.eval_steps > 0 and train_ctx.training_hooks.eval_metadata["eval_step_count"] >= self.config.eval_steps:
+      if (
+          self.config.eval_steps > 0
+          and train_ctx.training_hooks.eval_metadata["eval_step_count"] >= self.config.eval_steps
+      ):
         self.eval_batch = None
       else:
         self.eval_batch = next(self.eval_data_iterator)

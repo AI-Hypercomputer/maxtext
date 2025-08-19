@@ -12,6 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""
+MaxText is a high performance, highly scalable, open-source LLM written in pure Python/Jax and targeting Google Cloud
+TPUs and GPUs for training and inference. MaxText achieves high MFUs and scales from single host to very large clusters
+while staying simple and "optimization-free" thanks to the power of Jax and the XLA compiler.
+"""
+
 __author__ = "Google LLC"
 __version__ = "2025.07.24"
 __description__ = (

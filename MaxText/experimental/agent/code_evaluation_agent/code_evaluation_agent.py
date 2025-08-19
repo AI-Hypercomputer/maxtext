@@ -69,10 +69,27 @@ logger = logging.getLogger(__name__)
 
 
 parser = argparse.ArgumentParser(description="Code Evaluation Agent")
-parser.add_argument("--error_penalty", type=int, default=10, help="Penalty for errors in test case generation or execution.")
-parser.add_argument("--pytorch_path", type=str, default="../code_generation_agent/dataset/PyTorch/", help="Path to the directory containing PyTorch files.")
-parser.add_argument("--jax_path", type=str, default="../code_generation_agent/dataset/jax_converted/", help="Path to the directory containing JAX files.")
-parser.add_argument("--testcase_path", type=str, default="../code_generation_agent/dataset/test_cases/", help="Path to the directory for generated test cases.")
+parser.add_argument(
+    "--error_penalty", type=int, default=10, help="Penalty for errors in test case generation or execution."
+)
+parser.add_argument(
+    "--pytorch_path",
+    type=str,
+    default="../code_generation_agent/dataset/PyTorch/",
+    help="Path to the directory containing PyTorch files.",
+)
+parser.add_argument(
+    "--jax_path",
+    type=str,
+    default="../code_generation_agent/dataset/jax_converted/",
+    help="Path to the directory containing JAX files.",
+)
+parser.add_argument(
+    "--testcase_path",
+    type=str,
+    default="../code_generation_agent/dataset/test_cases/",
+    help="Path to the directory for generated test cases.",
+)
 parser.add_argument("--overwrite_existing_files", action="store_true", help="Overwrite existing test case files.")
 args = parser.parse_args()
 
@@ -178,7 +195,7 @@ def run_code_evaluation():
   all_passed, all_failed, total_files = 0, 0, 0
   for python_file, jax_file in zip(*get_file_pairs(pytorch_path, jax_path)):
     num_passed, num_failed = make_test_case_and_run(python_file, jax_file)
-    if num_passed == num_failed == 0: # when the code cannot be executed
+    if num_passed == num_failed == 0:  # when the code cannot be executed
       # Penalty in case of issue in test case and not executed
       num_failed = error_penalty
     logger.info(f"{python_file.split('/')[-1]} have {num_passed} cases passed and {num_failed} cases failed")

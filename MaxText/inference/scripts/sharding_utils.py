@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Utilities for calculating and plotting sharding schemes."""
+
 import pprint
 from typing import Sequence
 

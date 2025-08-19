@@ -778,11 +778,7 @@ class MaxEngine(engine_api.Engine):
     cache = self._maybe_stack_prefill_result_cache(cache)
     if return_prompt_logp:
       prompt_logp = inference_utils.prompt_logprobs_from_packed_prefill(
-          flat_logits,
-          input_tokens,
-          decoder_positions,
-          decoder_segment_ids,
-          true_lengths
+          flat_logits, input_tokens, decoder_positions, decoder_segment_ids, true_lengths
       )
     else:
       prompt_logp = None

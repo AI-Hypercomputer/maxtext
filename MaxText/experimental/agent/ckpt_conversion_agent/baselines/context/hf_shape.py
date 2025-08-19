@@ -16,6 +16,7 @@
 
 """Example code for agent, only gemma2 mappings"""
 
+
 def GEMMA2_HF_WEIGHTS_TO_SHAPE(config):
   """Returns mapping between HuggingFace weights path and weights shape.
 
