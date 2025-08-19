@@ -1,23 +1,23 @@
-#  Copyright 2024 Google LLC
+# Copyright 2023–2025 Google LLC
 #
-#  Licensed under the Apache License, Version 2.0 (the "License");
-#  you may not use this file except in compliance with the License.
-#  You may obtain a copy of the License at
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
 #
-#       https://www.apache.org/licenses/LICENSE-2.0
+#    https://www.apache.org/licenses/LICENSE-2.0
 #
-#  Unless required by applicable law or agreed to in writing, software
-#  distributed under the License is distributed on an "AS IS" BASIS,
-#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-#  See the License for the specific language governing permissions and
-#  limitations under the License.
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Quantization library."""
 
 import functools
 import json
 import re
-from typing import Sequence
+from typing import Tuple, Sequence
 from dataclasses import dataclass
 
 from aqt.jax.v2 import config as aqt_config
@@ -52,7 +52,7 @@ _TILE_SIZE = "tile_size"  # Tile size for subchannel
 class Quantization:
   """Base class for quantization configurations"""
 
-  def dot_general_cls(self, mesh_axes: tuple[str, ...] = ()):
+  def dot_general_cls(self, mesh_axes: Tuple[str, ...] = ()):
     """Placeholder for dot_general implementation in subclasses."""
 
   def einsum(self, dtype: DType = jnp.float32):
@@ -80,7 +80,7 @@ def _rhs_axis_metadata_wrapper(
     x: jnp.ndarray,
     tile_map,
     no_sharding_axis: Sequence[int],
-    mesh_axes: tuple[str, ...],
+    mesh_axes: Tuple[str, ...],
     is_tiled: bool,
     replicate_scale: bool = False,
 ):
@@ -139,7 +139,7 @@ class AqtQuantization:
     return quant_dg, is_tiled, tiling_fn
 
   def _get_rhs_axis_metadata_wrapper(
-      self, mesh_axes: tuple[str, ...] = (), is_tiled: bool = False, replicate_scale: bool = False
+      self, mesh_axes: Tuple[str, ...] = (), is_tiled: bool = False, replicate_scale: bool = False
   ):
     if self.quant_mode == aqt_flax.QuantMode.CONVERT:
       return None
@@ -147,7 +147,7 @@ class AqtQuantization:
         _rhs_axis_metadata_wrapper, mesh_axes=mesh_axes, is_tiled=is_tiled, replicate_scale=replicate_scale
     )
 
-  def dot_general_cls(self, mesh_axes: tuple[str, ...] = ()):
+  def dot_general_cls(self, mesh_axes: Tuple[str, ...] = ()):
     """Returns dot_general configured with aqt params."""
     if isinstance(self.quant_dg, dict):
       quant_dg, is_tiled, tiling_fn = self._get_mixed_precision_cfg()
@@ -170,7 +170,7 @@ class AqtQuantization:
     )
     return aqt_dg_cls
 
-  def einsum(self, mesh_axes: tuple[str, ...] = ()):
+  def einsum(self, mesh_axes: Tuple[str, ...] = ()):
     """Returns einsum configured with aqt params."""
     if isinstance(self.quant_dg, dict):
       quant_dg, is_tiled, tiling_fn = self._get_mixed_precision_cfg()
@@ -200,7 +200,7 @@ class Fp8Quantization(Quantization):
 
   quant_mode = "train"
 
-  def dot_general_cls(self, mesh_axes: tuple[str, ...] = ()):
+  def dot_general_cls(self, mesh_axes: Tuple[str, ...] = ()):
     """Returns dot_general configured with aqt params."""
     return nn.Fp8DirectDotGeneralOp
 
@@ -292,7 +292,7 @@ class NANOOFp8Quantization(Quantization):
 
   quant_mode = "train"
 
-  def dot_general_cls(self, mesh_axes: tuple[str, ...] = ()):
+  def dot_general_cls(self, mesh_axes: Tuple[str, ...] = ()):
     """Returns dot_general configured with aqt params."""
     return nn.NANOOFp8DotGeneralOp
 
@@ -612,58 +612,107 @@ def configure_kv_quant(config):
   return None if not config.quantize_kvcache else KVQuant(config)
 
 
-def get_basic_config(config, dtype):
-  """Basic Qwix config that only quantizes forward passes."""
-  rules = [
-      # Dot-product attention is not quantized for now.
-      qwix.QtRule(
-          module_path="decoder/.*layers.*/self_attention/attention_op",
-          weight_qtype=None,
-          act_qtype=None,
-      ),
-      qwix.QtRule(
-          module_path="decoder/.*layers.*",  # Apply to all modules
-          weight_qtype=dtype,
-          act_qtype=dtype,
+class NvidaFp8Provider(qwix.QtProvider):
+  """Wraps nn.Fp8DirectDotGeneralOp with Qwix's provider interface."""
+
+  def dot_general(self, *args, **kwargs):
+    # Here we only check if the rule is None or not.
+    rule, op_id = self._get_current_rule_and_op_id("dot_general")
+    if rule is None:
+      return jax.lax.dot_general(*args, **kwargs)
+    return nn.Fp8DirectDotGeneralOp(name=op_id)(*args, **kwargs)
+
+  def einsum(self, *args, **kwargs):
+    rule, op_id = self._get_current_rule_and_op_id("einsum")
+    if rule is None:
+      return jnp.einsum(*args, **kwargs)
+    return nn.Fp8Einsum(name=op_id)(*args, **kwargs)
+
+
+class NANOOFp8Provider(qwix.QtProvider):
+
+  def dot_general(self, *args, **kwargs):
+    # Here we only check if the rule is None or not.
+    rule, op_id = self._get_current_rule_and_op_id("dot_general")
+    if rule is None:
+      return jax.lax.dot_general(*args, **kwargs)
+    return nn.NANOOFp8DotGeneralOp(name=op_id)(*args, **kwargs)
+
+
+def get_quantization_rule(config: Config):
+  match config.quantization:
+    case "int8":
+      return qwix.QtRule(
+          module_path="decoder/.*layers.*",
+          weight_qtype=jnp.int8,
+          act_qtype=jnp.int8,
+          bwd_qtype=jnp.int8,
           bwd_weight_grad_tile_size=1 / config.quantization_local_shard_count,
-      ),
-  ]
-  return rules
-
-
-def get_fp8_config(config):
-  """fp8 config rules with per-tensor calibration."""
-  rules = [
-      # Dot-product attention is not quantized for now.
-      qwix.QtRule(
-          module_path="decoder/.*layers.*/self_attention/attention_op",
-          weight_qtype=None,
-          act_qtype=None,
-      ),
-      qwix.QtRule(
-          module_path="decoder/.*layers.*",  # Apply to all modules
+          op_names=("dot_general",),
+      )
+    case "fp8":
+      return qwix.QtRule(
+          module_path="decoder/.*layers.*",
+          weight_qtype=jnp.float8_e4m3fn,
+          act_qtype=jnp.float8_e4m3fn,
+          bwd_qtype=jnp.float8_e4m3fn,
+          bwd_weight_grad_tile_size=1 / config.quantization_local_shard_count,
+          op_names=("dot_general",),
+      )
+    case "fp8_full":
+      return qwix.QtRule(
+          module_path="decoder/.*layers.*",
           weight_qtype=jnp.float8_e4m3fn,
           act_qtype=jnp.float8_e4m3fn,
           bwd_qtype=jnp.float8_e5m2,
           bwd_use_original_residuals=True,
-          disable_channelwise_axes=True,  # per_tensor calibration
+          disable_channelwise_axes=True, # per_tensor calibration
           weight_calibration_method=config.quantization_calibration_method,
           act_calibration_method=config.quantization_calibration_method,
           bwd_calibration_method=config.quantization_calibration_method,
-      ),
-  ]
-  return rules
+          op_names=("dot_general",),
+          additional_qt_config={
+            "dlhs_lhs_qtype": jnp.float8_e5m2,
+            "dlhs_rhs_qtype": jnp.float8_e4m3fn,
+            "drhs_lhs_qtype": jnp.float8_e4m3fn,
+            "drhs_rhs_qtype": jnp.float8_e5m2,
+          },
+      )
+    case "fp8_gpu":
+      return qwix.QtRule(
+          module_path="decoder/.*layers.*",
+          weight_qtype=jnp.float8_e4m3fn,
+          act_qtype=jnp.float8_e4m3fn,
+          bwd_qtype=jnp.float8_e4m3fn,
+          bwd_weight_grad_tile_size=1 / config.quantization_local_shard_count,
+          op_names=("dot_general",),
+      )
+    case "fp8_nanoo":
+      return qwix.QtRule(
+          module_path="decoder/.*layers.*",
+          weight_qtype=jnp.float8_e4m3fn,
+          act_qtype=jnp.float8_e4m3fn,
+          bwd_qtype=jnp.float8_e4m3fn,
+          bwd_weight_grad_tile_size=1 / config.quantization_local_shard_count,
+          op_names=("dot_general",),
+      )
+    case "":
+      return None
 
 
 def get_qt_provider(config):
   """Get quantization rules based on the config."""
   match config.quantization:
     case "int8":
-      return qwix.QtProvider(get_basic_config(config, jnp.int8))
+      return qwix.QtProvider([get_quantization_rule(config)])
     case "fp8":
-      return qwix.QtProvider(get_basic_config(config, jnp.float8_e4m3fn))
+      return qwix.QtProvider([get_quantization_rule(config)])
     case "fp8_full":
-      return qwix.QtProvider(get_fp8_config(config))
+      return qwix.QtProvider([get_quantization_rule(config)])
+    case "fp8_gpu":
+      return NvidaFp8Provider([get_quantization_rule(config)])
+    case "fp8_nanoo":
+      return NANOOFp8Provider([get_quantization_rule(config)])
   return None
 
 

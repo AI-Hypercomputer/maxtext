@@ -1,18 +1,16 @@
-"""
-Copyright 2023 Google LLC
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-     https://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-"""
+# Copyright 2023–2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Transformer model definition."""
 # pylint: disable=arguments-differ
@@ -36,7 +34,7 @@ from MaxText.layers import initializers, nnx_wrappers
 from MaxText.layers.linears import mlp_block
 from MaxText.layers import models
 from MaxText.layers import quantizations
-from MaxText.layers.attentions import KVQuant, attention_op_as_linen
+from MaxText.layers.attention_op import KVQuant, attention_op_as_linen
 from MaxText.layers.initializers import Initializer, NdInitializer, nd_dense_init
 from MaxText.layers.linears import dense_general
 from MaxText.layers.quantizations import AqtQuantization as Quant

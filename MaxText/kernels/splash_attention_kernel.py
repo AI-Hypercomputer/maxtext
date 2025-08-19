@@ -1,13 +1,13 @@
 # pylint: skip-file
 from __future__ import annotations
 
-# Copyright 2025 Google LLC
+# Copyright 2023–2025 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     https://www.apache.org/licenses/LICENSE-2.0
+#    https://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -898,9 +898,7 @@ def _splash_attention_forward(
     raise ValueError(f"Expected {expected_kv_rank}-dim 'key' tensor for MQA. Instead got a" f" {len(k.shape)}-dim one.")
 
   if k.shape[kv_head_dimension] != head_dim_qk:
-    raise ValueError(
-        f"Expected 'key' head dimension to be: {head_dim_qk}. Instead got:" f" {k.shape[kv_head_dimension]}."
-    )
+    raise ValueError(f"Expected 'key' head dimension to be: {head_dim_qk}. Instead got: {k.shape[kv_head_dimension]}.")
 
   if not is_mqa and num_q_heads % num_kv_heads != 0:
     raise ValueError(

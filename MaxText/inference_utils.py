@@ -1,18 +1,16 @@
-"""
-Copyright 2023 Google LLC
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-     https://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-"""
+# Copyright 2023–2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 import jax
 import jax.numpy as jnp
@@ -50,6 +48,71 @@ def str2bool(v: str) -> bool:
     return False
   else:
     raise ValueError(f"Invalid value '{v}'!")
+
+
+@jax.jit
+def prompt_logprobs_from_packed_prefill(
+    logits: jax.Array,               # [B, S, V] predicts token t+1 at position t
+    input_tokens: jax.Array,         # [B, S]
+    decoder_positions: jax.Array,    # [B, S] position within its own prompt
+    decoder_segment_ids: jax.Array,  # [B, S] which prompt each token belongs to
+    true_lengths: jax.Array          # [num_prompts] true lengths per prompt
+) -> jax.Array:
+  """
+  Returns [B, S] where out[b, t] = log P(token[t] | tokens[:t] of its prompt).
+  - First token of each segment = NaN (no prediction).
+  - Tokens at or beyond the true length of their segment = NaN.
+  """
+  B, _, _ = logits.shape  # B, S, V
+
+  # Compute next-token logprobs
+  logps   = jax.nn.log_softmax(logits[:, :-1, :], axis=-1)               # [B, S-1, V]
+  targets = input_tokens[:, 1:]                                          # [B, S-1]
+  scored  = jnp.take_along_axis(logps, targets[..., None], axis=-1)[..., 0]  # [B, S-1]
+
+  # Shift so index matches token position (pad NaN at t=0)
+  pad = jnp.full((B, 1), jnp.nan, dtype=logits.dtype)                     # [B, 1]
+  shifted = jnp.concatenate([pad, scored], axis=1)                        # [B, S]
+
+  # Get per-token true length by segment
+  tl_tokens = jnp.take(true_lengths, decoder_segment_ids, mode="clip")    # [B, S]
+
+  # Valid if not the first token in its segment and before true length
+  valid = (decoder_positions > 0) & (decoder_positions < tl_tokens)      # [B, S]
+
+  return jnp.where(valid, shifted, jnp.nan)
+
+
+@jax.jit
+def prompt_logprobs_from_prefill(
+    logits: jax.Array,       # [B, S, V]  predicts token t+1 at position t
+    input_tokens: jax.Array, # [B, S]
+    true_length              # int or jax.Array with shape [] or [B]
+) -> jax.Array:
+  """
+  Returns [B, S] where out[:, t] = log P(token[t] | tokens[:t]).
+  - Position 0 is NaN (To match OpenAI format).
+  - Positions >= true_length are masked to NaN.
+  """
+  B, S = input_tokens.shape
+
+  # Next-token logprobs for steps 0..S-2
+  logps   = jax.nn.log_softmax(logits[:, :-1, :], axis=-1)        # [B, S-1, V]
+  targets = input_tokens[:, 1:]                                    # [B, S-1]
+  scored  = jnp.take_along_axis(logps, targets[..., None], -1)[..., 0]  # [B, S-1]
+
+  # Align to token positions (pad NaN at t=0)
+  pad = jnp.full((B, 1), jnp.nan, dtype=logps.dtype)               # [B, 1]
+  out = jnp.concatenate([pad, scored], axis=1)                      # [B, S]
+
+  # Mask padding (and keep t>0)
+  tl = jnp.asarray(true_length)
+  tl = jnp.broadcast_to(tl, (B,)) if tl.ndim == 0 else tl          # [B]
+  pos = jnp.arange(S)[None, :]                                     # [1, S]
+  valid = (pos < tl[:, None]) & (pos > 0)                          # [B, S]
+  out = jnp.where(valid, out, jnp.nan)
+
+  return out
 
 
 @jax.jit

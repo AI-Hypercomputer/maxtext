@@ -1,0 +1,60 @@
+Generate the Python code of the `{target_model}_HF_WEIGHTS_TO_SHAPE_MAPPING` function.
+Use the provided Hugging Face parameter structure and a `config` dictionary.
+
+Hugging Face Parameters:
+{hf_params_json}
+
+Analysis:
+{analysis}
+
+Pitfalls: 
+{pitfalls}
+
+Feedback:
+{feedback}
+
+Model Configurations:
+#    - For text‐only models, use config directly, e.g: config.num_hidden_layers
+#    - For multimodal, include both text_config & vision_config.
+config:
+  text_config?:
+    num_hidden_layers: ${{config.text_config.num_hidden_layers}}
+    hidden_size:        ${{config.text_config.hidden_size}}
+    head_dim:           ${{config.text_config.head_dim}}
+  vision_config?:
+    num_hidden_layers: ${{config.vision_config.num_hidden_layers}}
+
+
+INSTRUCTIONS:
+1. Use the Hugging Face parameter reference from {hf_params_json} and the `config`
+   object to construct the shape mapping.
+2. The keys should be the final Hugging Face parameter names.
+3. The values should be the parameter shapes as lists of integers.
+4. Do not wrap the code in markdown backticks (i.e., no markdown formatting like ` ```python` ).
+5. The output must be only the raw Python code. Do not add any explanation.
+6. Do not hard-code config numbers
+
+Code Example:
+def {target_model}_HF_WEIGHTS_TO_SHAPE_MAPPING(config: Dict[str, Any]) -> Dict[str, List[int]]:
+    \"\"\"
+    Returns a mapping of Hugging Face parameter names to their tensor shapes.
+
+    This serves as a manifest for validating the final converted checkpoint.
+
+    Args:
+        config (dict): The model configuration dictionary, used to calculate
+                       dynamic shape values (e.g., hidden size, vocab size).
+
+    Returns:
+        A dictionary mapping Hugging Face parameter paths to their tensor shapes.
+    \"\"\"
+    shapes = {{}}
+    shapes['model.embed_tokens.weight'] = [config['vocab_size'], config['hidden_size']]
+
+    for i in range(config['num_hidden_layers']):
+    shapes[f'model.layers.{{i}}.self_attn.q_proj.weight'] = [
+        config['hidden_size'], config['hidden_size']
+        ]
+
+
+    return shapes

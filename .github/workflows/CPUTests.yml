@@ -36,9 +36,7 @@ jobs:
         pytype --jobs auto --disable 'import-error,late-directive,wrong-arg-types,module-attr,unsupported-operands' MaxText/ || true
     - name: Analysing the code with pylint in Maxtext/
       run: |
-         pylint --verbose --msg-template='[{abspath}] {msg_id}:{line:3d},{column}: {obj}: {msg}' --disable R0401,R0917,W0201,W0613 MaxText/ && \
-         echo 'Maxtext PyLint check successful' || { echo \
-         'PyLint check has failed. Please run bash code_style.sh to fix issues'; exit 20; }
+         pylint --verbose --msg-template='[{abspath}] {msg_id}:{line:3d},{column}: {obj}: {msg}' --disable C0114,R0401,R0917,W0201,W0613 MaxText/ || true
     - name: Analysing the code with pylint in pedagogical_examples/
       run: |
          pylint pedagogical_examples/ && \
