@@ -12,7 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Sharding related utilities."""
+
 import pprint
+import warnings
 from typing import Sequence
 
 import numpy as np
@@ -106,11 +109,13 @@ def calculate_matmul_resources(
     # implying an average or approximation if not perfectly divisible.
     if M % sD != 0:
       print(
-          f"Warning: Activations M dimension ({M}) is not perfectly divisible by sharding amount {sD}. Results are approximate."
+          f"Warning: Activations M dimension ({M}) is not perfectly divisible by sharding amount {sD}.",
+          "Results are approximate.",
       )
     if K_act % sK != 0:
       print(
-          f"Warning: Common K dimension ({K_act}) is not perfectly divisible by sharding amount {sK}. Results are approximate."
+          f"Warning: Common K dimension ({K_act}) is not perfectly divisible by sharding amount {sK}.",
+          "Results are approximate.",
       )
     if K_w % sW != 0:
       print(
@@ -268,21 +273,20 @@ def plot_sharding_scheme_comparison(
     print(f"\n--- Scheme: {label} ---")
     try:
       # Clear previous warnings for divisibility for cleaner output per iteration
-      import warnings
-
       with warnings.catch_warnings(record=True) as caught_warnings:
+        del caught_warnings
         warnings.simplefilter("always")  # Catch all warnings
 
         # Call the resource calculation function
         res = calc_resource_func(activations_shape, weights_shape, **shard_settings)
-        print(f"Workload stats:\n")
+        print("Workload stats:\n")
         pprint.PrettyPrinter(indent=4).pprint(res)
 
       results.append(res)
       valid_schemes_labels.append(label)
     except ValueError as e:
       print(f"Error calculating resources for scheme '{label}': {e}. Skipping.")
-    except Exception as e:
+    except (TypeError, KeyError, ZeroDivisionError, AttributeError) as e:
       print(f"An unexpected error occurred for scheme '{label}': {e}. Skipping.")
 
   if not results:
@@ -426,7 +430,7 @@ def plot_sharding_scheme_comparison(
         va="bottom",  # Vertical alignment (anchor at bottom of text, so text is above y)
         fontsize=8,
         rotation=0,
-        bbox=dict(facecolor="white", alpha=0.6, pad=2, boxstyle="round,pad=0.3"),  # Added bbox
+        bbox={"facecolor": "white", "alpha": 0.6, "pad": 2, "boxstyle": "round,pad=0.3"},  # Added bbox
     )
 
   if mem_list.size > 0:
