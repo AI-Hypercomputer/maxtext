@@ -93,7 +93,7 @@ class CompletionOutput:
       prompt_length: The number of prompt tokens.
   """
 
-  index: int
+  index: str
   token_ids: np.ndarray
   logprobs: np.ndarray
   prompt_length: int
@@ -364,7 +364,7 @@ class InferenceWorker:
     self.running = False
     self.generated_token_backlog = queue.Queue()
     self.empty_decode_slots: list[int] = []
-    self.slot_to_id: dict[int, int] = {}
+    self.slot_to_id: dict[int, None | int] = {}
     self.decode_state: DecodeState = None
     self.completion_tokens_by_id: dict[Hashable, list[TokenOutput]] = {}
     self.prompt_logprobs_by_id: dict[Hashable, list[np.ndarray]] = {}
@@ -543,7 +543,7 @@ class InferenceWorker:
         prompt_logprobs = self.prompt_logprobs_by_id[input_id].flatten()
         completion_outputs.append(
             CompletionOutput(
-                index=input_id,
+                index=str(input_id),
                 prompt_length=prompt_length,
                 token_ids=np.concatenate(
                     (
@@ -561,7 +561,7 @@ class InferenceWorker:
         )
     return completion_outputs
 
-  def prefill_done(self, prefill_result: list[PrefillResult], prompt_ids: list[any], decode_state: DecodeState):
+  def prefill_done(self, prefill_result: list[PrefillResult], prompt_ids: list[int], decode_state: DecodeState):
     """Callback function called when prefill completes.
     This function adds the prefill tokens to the detokenization queue,
     which manages the token emission and decode slot evictions.
@@ -686,7 +686,7 @@ class InferenceWorker:
       prompt_id,
       result_token: int,
       log_prob: float,
-      prompt_logp: np.ndarray = None,
+      prompt_logp: None | np.ndarray = None,
   ):
     """Adds the token to the results for the specified prompt ID and
     determines if generation should terminate.
