@@ -143,6 +143,8 @@ def sampling(logits, rng, algorithm, topk=0, nucleus_topp=0, temperature=1.0):
     return sample_nucleus_topp_logits(logits, nucleus_topp, temperature, rng)
   elif algorithm == "topk":
     return sample_topk_logits(logits, topk, temperature, rng)
+  elif algorithm == "stochastic":
+    return sample_topk_topp_weighted(logits, topk, nucleus_topp, temperature, rng)
   else:
     raise ValueError(f"Sampling {algorithm=} not supported!")
 
@@ -172,3 +174,49 @@ def sample_topk_logits(logits, topk, temperature, rng):
   topk_token = jnp.expand_dims(jax.random.categorical(rng, topk_logits / temperature).astype(jnp.int32), axis=-1)
   sampled_tokens = jnp.squeeze(jnp.take_along_axis(topk_idxs, topk_token, axis=-1), axis=-1).astype(jnp.int32)
   return sampled_tokens
+
+
+def sample_topk_topp_weighted(logits, topk, nucleus_topp, temperature, rng):
+  """Combines top-k, top-p, and temperature sampling.
+
+  Sequence of operations:
+  1. Filter to top-k logits.
+  2. Filter the remaining logits by top-p (nucleus).
+  3. Apply temperature scaling.
+  4. Sample from the final distribution.
+  """
+  if topk <= 0:
+    raise ValueError(f"topk must be positive, got {topk=}")
+  if not (0.0 < nucleus_topp <= 1.0):
+    raise ValueError(f"nucleus_topp must be in (0, 1], got {nucleus_topp=}")
+
+  # 1. Top-K filtering
+  topk_logits, topk_idxs = jax.lax.top_k(logits, topk)
+
+  # 2. Top-P filtering on the top-k results
+  # Sort the top-k logits and get their cumulative probabilities
+  topk_logits_sorted = jnp.sort(topk_logits, axis=-1)[..., ::-1]
+  sorted_cum_probs = jnp.cumsum(jax.nn.softmax(topk_logits_sorted, axis=-1), axis=-1)
+
+  # Find the cutoff index for nucleus sampling
+  cutoff_index = jnp.sum(sorted_cum_probs < nucleus_topp, axis=-1, keepdims=True)
+  cutoff_logit = jnp.take_along_axis(topk_logits_sorted, cutoff_index, axis=-1)
+
+  # Mask logits that are below the cutoff
+  filtered_topk_logits = jnp.where(
+      topk_logits < cutoff_logit, jnp.full_like(topk_logits, NEG_INF), topk_logits
+  )
+
+  # 3. Apply temperature
+  scaled_logits = filtered_topk_logits / temperature
+
+  # 4. Sample
+  sampled_topk_index = jax.random.categorical(rng, scaled_logits).astype(jnp.int32)
+
+  # Map the index back to the original vocabulary
+  sampled_token = jnp.squeeze(
+      jnp.take_along_axis(topk_idxs, jnp.expand_dims(sampled_topk_index, axis=-1), axis=-1),
+      axis=-1
+  ).astype(jnp.int32)
+
+  return sampled_token
