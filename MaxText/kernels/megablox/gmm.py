@@ -433,13 +433,13 @@ def gmm(
         def _init_out():
           out[...] = existing_out[...]
 
-    def mask_k_rem(x, *, dim, quantize):
+    def mask_k_rem(x: jax.Array, *, dim: int, quantize: bool):
       if k_rem == 0:
         return x
 
       orig_dtype = x.dtype
       iota = lax.broadcasted_iota(jnp.int32, x.shape, dim)
-      if quantize is None:
+      if not quantize:
         x = x.astype(jnp.float32)
       else:
         x = x.astype(jnp.int32)
