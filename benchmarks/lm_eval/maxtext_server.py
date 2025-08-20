@@ -62,6 +62,7 @@ async def create_completion(request: CompletionRequest):
             echo=request.echo,
             stop=request.stop,
             temperature=request.temperature,
+            seed=request.seed,
         )
     except Exception as e:
         server_utils.log_debug_event(request_id, "inference_error", {"detail": str(e)})
@@ -162,6 +163,7 @@ async def create_chat_completion(request: ChatCompletionRequest):
         echo=False,
         stop=request.stop,
         temperature=request.temperature,
+        seed=request.seed,
     )
     result = completions[0]
 
