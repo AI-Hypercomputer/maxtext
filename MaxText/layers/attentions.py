@@ -70,6 +70,7 @@ from MaxText.layers.initializers import nd_dense_init, NdInitializer, variable_t
 from MaxText.layers.linears import DenseGeneral, canonicalize_tuple, normalize_axes
 from MaxText.layers.normalizations import RMSNorm
 from MaxText.layers.quantizations import AqtQuantization as Quant
+from MaxText.sharding import MeshSharding, LogicalAxisRulesSharding, WT, ACT
 
 # pylint: disable=line-too-long, g-doc-args, g-doc-return-or-yield, bad-continuation, g-inconsistent-quotes
 # pytype: disable=attribute-error
@@ -160,6 +161,7 @@ def attention_as_linen(
     is_vision: bool = False,
     model_mode: str = MODEL_MODE_TRAIN,
     name: str | None = None,
+    sharding: MeshSharding | None = None,
 ):
   """A factory function to create an Attention as a Linen module.
 
@@ -224,6 +226,7 @@ def attention_as_linen(
       name=name,
       metadata_fn=variable_to_logically_partitioned,
       abstract_init=False,
+      sharding=sharding,
   )
 
 
@@ -321,6 +324,7 @@ class Attention(nnx.Module):
       base_kv_cache: bool = True,
       name: str | None = None,
       rngs: Optional[nnx.Rngs] = None,
+      sharding: MeshSharding | None = None,
   ):
     """Initializes the Attention module.
 
@@ -414,6 +418,7 @@ class Attention(nnx.Module):
     self.is_vision = is_vision
     self.model_mode = model_mode
     self.rngs = rngs
+    self.sharding = sharding if sharding else LogicalAxisRulesSharding()
 
     # Module attribute names must match names previously passed to Linen for checkpointing
     self.KVCache_0 = (
@@ -485,6 +490,7 @@ class Attention(nnx.Module):
           epsilon=self.config.normalization_layer_epsilon,
           kernel_axes=("norm",),
           rngs=self.rngs,
+          sharding=self.sharding,
       )
       self.key_norm = RMSNorm(
           num_features=self.head_dim,
@@ -493,6 +499,7 @@ class Attention(nnx.Module):
           epsilon=self.config.normalization_layer_epsilon,
           kernel_axes=("norm",),
           rngs=self.rngs,
+          sharding=self.sharding,
       )
     else:
       self.query_norm = None
@@ -511,6 +518,8 @@ class Attention(nnx.Module):
       # pylint: disable=no-value-for-parameter
       return self.kernel_init(*args) / depth_scaling
 
+    # TODO: this can be pushed into sharding rules (with this config as a parameter) once we stop supporting
+    #       logical axis rules (for models not migrated to new sharding)
     kernel_axes = (
         (None, None, None) if self.config.ici_context_autoregressive_parallelism > 1 else ("embed", "q_heads", "kv")
     )
@@ -519,7 +528,7 @@ class Attention(nnx.Module):
         out_features_shape=(self.num_query_heads, self.head_dim),
         axis=-1,
         kernel_init=query_init,
-        kernel_axes=kernel_axes,
+        kernel_axes=self.sharding(t="query", a=kernel_axes, tt=WT),
         dtype=self.dtype,
         weight_dtype=self.weight_dtype,
         quant=self.quant,
@@ -559,7 +568,7 @@ class Attention(nnx.Module):
         out_features_shape=(self.num_kv_heads, self.head_dim),
         axis=-1,
         kernel_init=self.kernel_init,
-        kernel_axes=kernel_axes,
+        kernel_axes=self.sharding(t="kv", a=kernel_axes, tt=WT),
         dtype=self.dtype,
         weight_dtype=self.weight_dtype,
         quant=self.quant,
@@ -596,7 +605,7 @@ class Attention(nnx.Module):
         out_features_shape=(3, self.num_query_heads, self.head_dim),
         axis=-1,
         kernel_init=self.kernel_init,
-        kernel_axes=("embed", "qkv", "heads", "kv"),
+        kernel_axes=self.sharding(t="qkv", a=("embed", "qkv", "heads", "kv"), tt=WT),
         dtype=self.dtype,
         weight_dtype=self.weight_dtype,
         quant=self.quant,
@@ -615,6 +624,8 @@ class Attention(nnx.Module):
 
   def init_out_w(self, output_dim: int) -> nnx.Module:
     """out projection"""
+    # TODO: this logic could be moved into sharding rules once we stop supporting LogicalAxisRulesSharding
+    #       (for callers that have not yet moved to new sharding)
     out_kernel_axis = (
         (None, None, None) if self.config.ici_context_autoregressive_parallelism > 1 else ("heads", "kv", "embed")
     )
@@ -623,7 +634,7 @@ class Attention(nnx.Module):
         out_features_shape=output_dim,
         axis=(-2, -1),
         kernel_init=self.kernel_init,
-        kernel_axes=out_kernel_axis,  # trade speed with memory
+        kernel_axes=self.sharding(t="out", a=out_kernel_axis, tt=WT),
         dtype=self.dtype,
         weight_dtype=self.weight_dtype,
         quant=self.quant,
@@ -828,18 +839,20 @@ class Attention(nnx.Module):
     Returns:
       output of shape `[batch, length, q_features]`.
     """
+    ep_ctx = self.config.expert_shard_attention_option == EP_AS_CONTEXT
+    # TODO: this logic can be moved into sharding when we no longer need to support LogicalAxisRulesSharding
     if model_mode == MODEL_MODE_PREFILL:
-      inputs_q = nn.with_logical_constraint(inputs_q, self.prefill_input_axis_names)
-      inputs_kv = nn.with_logical_constraint(inputs_kv, self.prefill_input_axis_names)
-    elif model_mode == MODEL_MODE_TRAIN and self.config.expert_shard_attention_option == EP_AS_CONTEXT:
-      inputs_q = nn.with_logical_constraint(inputs_q, self.ep_input_axis_names)
-      inputs_kv = nn.with_logical_constraint(inputs_kv, self.ep_input_axis_names)
+      inputs_q = self.sharding.shard(inputs_q, t="inputs_q", a=self.prefill_input_axis_names, tt=ACT)
+      inputs_kv = self.sharding.shard(inputs_kv, t="inputs_kv", a=self.prefill_input_axis_names, tt=ACT)
+    elif model_mode = MODEL_MODE_ TRAIN and ep_ctx:
+      inputs_q = self.sharding.shard(inputs_q, t="inputs_q", a=self.ep_input_axis_names, tt=ACT, ep_ctx=ep_ctx)
+      inputs_kv = self.sharding.shard(inputs_kv, t="inputs_kv", a=self.ep_input_axis_names, tt=ACT, ep_ctx=ep_ctx)
     elif model_mode == MODEL_MODE_TRAIN:
-      inputs_q = nn.with_logical_constraint(inputs_q, self.input_axis_names)
-      inputs_kv = nn.with_logical_constraint(inputs_kv, self.input_axis_names)
+      inputs_q = self.sharding.shard(inputs_q, t="inputs_q", a=self.input_axis_names, tt=ACT, ep_ctx=ep_ctx)
+      inputs_kv = self.sharding.shard(inputs_kv, t="inputs_kv", a=self.input_axis_names, tt=ACT, ep_ctx=ep_ctx)
     else:
-      inputs_q = nn.with_logical_constraint(inputs_q, self.decode_input_axis_names)
-      inputs_kv = nn.with_logical_constraint(inputs_kv, self.decode_input_axis_names)
+      inputs_q = self.sharding.shard(inputs_q, t="inputs_q", a=self.decode_input_axis_names, tt=ACT)
+      inputs_kv = self.sharding.shard(inputs_kv, t="inputs_kv", a=self.decode_input_axis_names, tt=ACT)
 
     # apply projection.
     if self.config.fused_qkv:
@@ -880,22 +893,23 @@ class Attention(nnx.Module):
       )
       query = (query * attn_scales[:, :, jnp.newaxis, jnp.newaxis]).astype(self.dtype)
 
+    # TODO: as above, these can be moved into sharding rules
     if model_mode == MODEL_MODE_PREFILL:
-      query = nn.with_logical_constraint(query, self.prefill_query_axis_names)
-      key = nn.with_logical_constraint(key, self.prefill_key_axis_names)
-      value = nn.with_logical_constraint(value, self.prefill_value_axis_names)
-    elif model_mode == MODEL_MODE_AUTOREGRESSIVE:
-      query = nn.with_logical_constraint(query, (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV))
-      key = nn.with_logical_constraint(key, (DECODE_BATCH, DECODE_LENGTH, KV_HEAD, D_KV))
-      value = nn.with_logical_constraint(value, (DECODE_BATCH, DECODE_LENGTH, KV_HEAD, D_KV))
-    elif model_mode == MODEL_MODE_TRAIN and self.config.expert_shard_attention_option == EP_AS_CONTEXT:
-      query = nn.with_logical_constraint(query, self.ep_query_axis_names)
-      key = nn.with_logical_constraint(key, self.ep_key_axis_names)
-      value = nn.with_logical_constraint(value, self.ep_value_axis_names)
+      query = self.sharding.shard(query, t="query", a=self.prefill_query_axis_names, tt=ACT)
+      key = self.sharding.shard(key, t="key", a=self.prefill_key_axis_names, tt=ACT)
+      value = self.sharding.shard(value, t="value", a=self.prefill_value_axis_names, tt=ACT)
+    elif model_mode == MODEL_MODE_TRAIN and ep_ctx:
+      query = self.sharding.shard(query, t="query", a=self.ep_query_axis_names, tt=ACT, ep_ctx=ep_ctx)
+      key = self.sharding.shard(key, t="key", a=self.ep_key_axis_names, tt=ACT, ep_ctx=ep_ctx)
+      value = self.sharding.shard(value, t="value", a=self.ep_value_axis_names, tt=ACT, ep_ctx=ep_ctx)
+    elif model_mode == MODEL_MODE_TRAIN:
+      query = self.sharding.shard(query, t="query", a=self.query_axis_names, tt=ACT, ep_ctx=ep_ctx)
+      key = self.sharding.shard(key, t="key", a=self.key_axis_names, tt=ACT, ep_ctx=ep_ctx)
+      value = self.sharding.shard(value, t="value", a=self.value_axis_names, tt=ACT, ep_ctx=ep_ctx)
     else:
-      query = nn.with_logical_constraint(query, self.query_axis_names)
-      key = nn.with_logical_constraint(key, self.key_axis_names)
-      value = nn.with_logical_constraint(value, self.value_axis_names)
+      query = self.sharding.shard(query, t="query", a=(DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV), tt=ACT)
+      key = self.sharding.shard(key, t="key", a=(DECODE_BATCH, DECODE_LENGTH, KV_HEAD, D_KV), tt=ACT)
+      value = self.sharding.shard(value, t="value", a=(DECODE_BATCH, DECODE_LENGTH, KV_HEAD, D_KV), tt=ACT)
 
     query = checkpoint_name(query, "query_proj")
     key = checkpoint_name(key, "key_proj")
@@ -916,14 +930,17 @@ class Attention(nnx.Module):
           query, key, value, decoder_segment_ids, model_mode, cached_values, previous_chunk, bidirectional_mask
       )
 
+    # TODO: as above, these can be moved into sharding rules
     if model_mode == MODEL_MODE_PREFILL:
-      out = nn.with_logical_constraint(out, self.prefill_out_axis_names)
-    elif model_mode == MODEL_MODE_TRAIN and self.config.expert_shard_attention_option == EP_AS_CONTEXT:
-      out = nn.with_logical_constraint(out, self.ep_out_axis_names)
+      out = self.sharding.shard(out, t="out", a=self.prefill_out_axis_names, tt=ACT)
+    elif model_mode == MODEL_MODE_TRAIN and ep_ctx:
+      out = self.sharding.shard(out, t="out", a=self.ep_out_axis_names, tt=ACT, ep_ctx=ep_ctx)
     elif model_mode == MODEL_MODE_TRAIN:
-      out = nn.with_logical_constraint(out, self.out_axis_names)
+      out = self.sharding.shard(out, t="out", a=self.out_axis_names, tt=ACT, ep_ctx=ep_ctx)
     else:
-      out = nn.with_logical_constraint(out, self.decode_out_axis_names)
+      out = self.sharding.shard(out, t="out", a=self.decode_out_axis_names, tt=ACT)
+
     out = self.out_projection(out)
     out = checkpoint_name(out, "out_proj")
+
     return out

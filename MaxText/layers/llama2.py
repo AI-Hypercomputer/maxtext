@@ -81,6 +81,7 @@ class LlamaDecoderLayer(nn.Module):
         name="pre_self_attention_layer_norm",
         kernel_axes=("norm",),
         epsilon=cfg.normalization_layer_epsilon,
+        sharding=sharding,
     )
     lnx = lnx_rms(inputs)
 
@@ -113,6 +114,7 @@ class LlamaDecoderLayer(nn.Module):
         use_ragged_attention=cfg.use_ragged_attention,
         ragged_block_size=cfg.ragged_block_size,
         model_mode=model_mode,
+        sharding=sharding,
     )
 
     attention_lnx = attention_layer(
@@ -127,7 +129,7 @@ class LlamaDecoderLayer(nn.Module):
         previous_chunk=previous_chunk,
     )
 
-    attention_lnx = nn.with_logical_constraint(attention_lnx, activation_axis_names)
+    attention_lnx = sharding.shard(attention_lnx, t="attn_lnx", a=activation_axis_names, tt=ACT)
     intermediate_inputs = inputs + attention_lnx
 
     # Fully Connected
@@ -138,8 +140,9 @@ class LlamaDecoderLayer(nn.Module):
         name="post_self_attention_layer_norm",
         kernel_axes=("norm",),
         epsilon=cfg.normalization_layer_epsilon,
+        sharding=sharding,
     )(intermediate_inputs)
-    hidden_states = nn.with_logical_constraint(hidden_states, activation_axis_names)
+    hidden_states = nn.with_logical_constraint(hidden_states, t="hidden", a=activation_axis_names, tt=ACT)
 
     # MLP block.
     mlp_lnx = mlp_block(
@@ -153,14 +156,13 @@ class LlamaDecoderLayer(nn.Module):
         config=cfg,
         quant=self.quant,
         model_mode=model_mode,
+        sharding = sharding,
     )(hidden_states, deterministic=deterministic)
-    mlp_lnx = nn.with_logical_constraint(mlp_lnx, activation_axis_names)
+    mlp_lnx = sharding.shard(mlp_lnx, t="mlp_lnx", a=activation_axis_names, tt=ACT)
 
     layer_output = mlp_lnx + intermediate_inputs
-
     layer_output = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(layer_output, deterministic=deterministic)
-
-    layer_output = nn.with_logical_constraint(layer_output, activation_axis_names)
+    layer_output = sharding.shard(layer_output, t="layer_output", a=activation_axis_names, tt=ACT)
 
     if cfg.record_internal_nn_metrics:
       self.sow("intermediates", "activation_mean", jnp.mean(layer_output))

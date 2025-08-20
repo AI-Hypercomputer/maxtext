@@ -127,7 +127,7 @@ class Embed(nnx.Module):
     self.attend_dtype = attend_dtype
     # TODO: decide whether to do this or to use what's in config
     # (i.e. should what's in config drive everything or just the top-level)
-    self.sharding = sharding if sharding else Llama2AxisShardingTraining()  # LogicalAxisRulesSharding()
+    self.sharding = sharding if sharding else LogicalAxisRulesSharding()
 
     self.embedding = nnx.Param(
         embedding_init(rngs.params(), (self.num_embeddings, self.num_features), self.config.weight_dtype),
