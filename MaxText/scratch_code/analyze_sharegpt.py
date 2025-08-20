@@ -1,16 +1,20 @@
-# Copyright 2024 Google LLC
+# Copyright 2023–2025 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+#    https://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+"""
+Analyse ShareGPT
+"""
 
 import argparse
 import json
@@ -31,11 +35,12 @@ def tokens_in_input_str(s):
 
 
 def get_prefill_and_generate_times(filename=""):
+  """get prefill and generate times"""
   if filename == "":
     return PREFILL_BUCKET_SIZE_TO_MS, SYSTEM_TIME_PER_DECODE_TOKEN_MS
 
   prefill_bucket_size_to_ms = {}
-  with open(filename, "r") as f:
+  with open(filename, "rt", encoding="utf8") as f:
     microbenchmark_results = json.load(f)
   for k, v in microbenchmark_results["Prefill"].items():
     prefill_bucket_size_to_ms[int(k)] = round(v["prefill_time_in_ms"], 3)
@@ -44,8 +49,9 @@ def get_prefill_and_generate_times(filename=""):
 
 
 def get_conversations_from_file(filename, max_input_tokens, max_output_tokens):
+  """get conversations from file"""
   convo_token_numbers = []
-  with open(filename, "r") as f:
+  with open(filename, "rt", encoding="utf8") as f:
     loaded_share_gpt = json.load(f)
   for example in loaded_share_gpt:
     if len(example["conversations"]) < 2:
@@ -65,10 +71,11 @@ def get_conversations_from_file(filename, max_input_tokens, max_output_tokens):
   return kept_convos
 
 
-def compute_times(convos, prefill_bucket_size_to_ms, system_time_per_decode_token_ms, verbose=False):
+def compute_times(conversations, prefill_bucket_size_to_ms, system_time_per_decode_token_ms, verbose=False):
+  """compute times"""
   total_prefill_system_ms = 0
   total_generate_system_ms = 0
-  for convo in convos:
+  for convo in conversations:
     input_tok, output_tok = convo
     bucket = max(128, next_power_of_2(input_tok))
     generate_system_ms = output_tok * system_time_per_decode_token_ms
@@ -90,9 +97,9 @@ def compute_times(convos, prefill_bucket_size_to_ms, system_time_per_decode_toke
   return total_time_s, total_prefill_time_seconds, total_generate_time_seconds
 
 
-def get_num_tokens_in_convos(convos):
-  num_input_tokens = sum(c[0] for c in convos)
-  num_output_tokens = sum(c[1] for c in convos)
+def get_num_tokens_in_convos(conversations):
+  num_input_tokens = sum(c[0] for c in conversations)
+  num_output_tokens = sum(c[1] for c in conversations)
   return num_input_tokens, num_output_tokens
 
 

@@ -1,12 +1,13 @@
 #!/bin/bash
 
 # This file is both an integration test that runs once a day on a v4-8 and documentation for how to get started with Llama2-7b
+# Additionally, this file serves as integration test for context parallelism for training in TPUs in MaxText
 
 # The flow of this file is as follows:
 # 1. Download the checkpoint from Meta (https://llama.meta.com/llama-downloads/) in your local directory. Convert this PyTorch checkpoint into Orbax checkpoint format for use in MaxText. 
 # 2. Run decoding, finetuning of Llama2-7b with this converted checkpoint. Also, run pretraining of Llama2-7b.
-# 3. Run decoding from the finetuned weights
-# 4. Convert the scanned checkpoint from step #1 into unscanned checkpoint format and run more efficient decoding. 
+# 3. Run decoding from the finetuned weights.
+# 4. Convert the scanned checkpoint from step #1 into unscanned checkpoint format and run more efficient decoding.
 
 
 set -ex
@@ -53,10 +54,11 @@ python3 -m MaxText.decode MaxText/configs/base.yml load_parameters_path=${UNSCAN
 python3 -m MaxText.decode MaxText/configs/base.yml load_parameters_path=${CONVERTED_CHECKPOINT} run_name=runner_direct_${idx} base_output_directory=${BASE_OUTPUT_DIRECTORY} per_device_batch_size=1 model_name='llama2-7b' ici_autoregressive_parallelism=4 max_prefill_predict_length=4  max_target_length=16 prompt="I love to" attention=dot_product
 
 # Alternatively, we skip to running finetuning by using the scanned converted checkpoint located at `CONVERTED_CHECKPOINT`. Again, we use it by specifying`load_parameters_path=${CONVERTED_CHECKPOINT}`. Note that scanned checkpoint helps with efficient finetuning
-python3 -m MaxText.train MaxText/configs/base.yml load_parameters_path=${CONVERTED_CHECKPOINT} run_name=runner_finetuning_${idx} base_output_directory=${BASE_OUTPUT_DIRECTORY} dataset_path=${DATASET_PATH} async_checkpointing=${ASYNC_CHECKPOINTING} per_device_batch_size=1 model_name='llama2-7b' ici_tensor_parallelism=4 steps=10 max_target_length=1024 per_device_batch_size=1 checkpoint_period=5
-
+# We run this with context parallelism and the `ici_context_parallelism` flag as an integration test for context parallelism
+python3 -m MaxText.train MaxText/configs/base.yml load_parameters_path=${CONVERTED_CHECKPOINT} run_name=runner_finetuning_${idx} base_output_directory=${BASE_OUTPUT_DIRECTORY} dataset_path=${DATASET_PATH} async_checkpointing=${ASYNC_CHECKPOINTING} per_device_batch_size=1 model_name='llama2-7b' ici_context_parallelism=4 steps=10 per_device_batch_size=1 checkpoint_period=5 packing=false
 # We also run pre-training of Llama2-7b, this is similar to the finetuning command except we don't pass any checkpoint directory to load parameters from
-python3 -m MaxText.train MaxText/configs/base.yml run_name=runner_pretraining_${idx} base_output_directory=${BASE_OUTPUT_DIRECTORY} dataset_path=${DATASET_PATH} async_checkpointing=${ASYNC_CHECKPOINTING} per_device_batch_size=1 model_name='llama2-7b' ici_tensor_parallelism=4 steps=10 max_target_length=1024 per_device_batch_size=1
+# We run this with context parallelism and the `ici_context_parallelism` flag as an integration test for context parallelism
+python3 -m MaxText.train MaxText/configs/base.yml run_name=runner_pretraining_${idx} base_output_directory=${BASE_OUTPUT_DIRECTORY} dataset_path=${DATASET_PATH} async_checkpointing=${ASYNC_CHECKPOINTING} per_device_batch_size=1 model_name='llama2-7b' ici_context_parallelism=4 steps=10 per_device_batch_size=1 packing=false
 
 # Now, run decoding on the checkpoint generated from our finetune run. Note that the finetune run checkpoint generates the `full state` which has both parameters and optimizer state. For decoding, we only need to use the parameters. So, we can use the `MaxText.generate_param_only_checkpoint` to convert
 # the full state checkpoint into a parameter only checkpoint for more efficient memory use. Note that the path provided to the flag `load_full_state_path` is the path to the checkpoint subdirectory inside the `BASE_OUTPUT_DIRECTORY` from our previous finetuning run, say the checkpoint saved at finetuning step #5
@@ -77,4 +79,5 @@ python3 -m MaxText.tests.forward_pass_logit_checker  MaxText/configs/base.yml lo
 JAX_PLATFORMS=cpu python3 -m MaxText.llama_mistral_mixtral_orbax_to_hf MaxText/configs/base.yml base_output_directory=gs://runner-maxtext-logs load_parameters_path=${CONVERTED_CHECKPOINT} run_name=convert_to_hf model_name=llama2-7b hf_model_path=/tmp/hf_llama2
 
 # Test whether the forward pass logits match the golden logits for Huggingface checkpoint converted from MaxText orbax checkpoint
-python3 -m MaxText.tests.forward_pass_logit_checker MaxText/configs/base.yml base_output_directory=${BASE_OUTPUT_DIRECTORY} load_parameters_path=${UNSCANNED_CKPT_PATH} run_name=forward_pass_test_hf ici_tensor_parallelism=4 model_name=llama2-7b max_prefill_predict_length=4 max_target_length=4 dataset_type=synthetic dtype=float32 activations_in_float32=true matmul_precision=float32 async_checkpointing=false scan_layers=false --hf_model_path=/tmp/hf_llama2 --max_kl_div=1e-4
+# We run this with context parallelism and the `ici_context_parallelism` flag as an integration test for context parallelism
+python3 -m MaxText.tests.forward_pass_logit_checker MaxText/configs/base.yml base_output_directory=${BASE_OUTPUT_DIRECTORY} load_parameters_path=${UNSCANNED_CKPT_PATH} run_name=forward_pass_test_hf ici_context_parallelism=4 model_name=llama2-7b max_prefill_predict_length=4 max_target_length=4 dataset_type=synthetic dtype=float32 activations_in_float32=true matmul_precision=float32 async_checkpointing=false scan_layers=false --hf_model_path=/tmp/hf_llama2 --max_kl_div=1e-4

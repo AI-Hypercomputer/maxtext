@@ -16,7 +16,34 @@ adam_b2: 0.999
 # Group Relative Policy Optimization (GRPO)
 num_generations: 4
 grpo_beta: 0.04
+inference_rollouts: 1
+grpo_epsilon: 0.2
 
 decode_sampling_strategy: "weighted"
 decode_sampling_temperature: 0.9
 async_checkpointing: false
+
+# Pathways inference
+inference_devices_per_replica: 4
+inference_replicas: 1
+use_pathways_reshard: True
+
+return_log_prob: True 
+
+add_bos: False
+add_eos: False
+
+### Splash attention block sizes
+# These values are tuned for small sequence lengths used in the grpo test script.
+sa_block_q: 128
+sa_block_kv: 128
+sa_block_kv_compute: 128
+sa_block_q_dkv: 128
+sa_block_kv_dkv: 128
+sa_block_kv_dkv_compute: 128
+sa_block_q_dq: 128
+sa_block_kv_dq: 128
+sa_use_fused_bwd_kernel: False
+sa_q_layout: "HEAD_DIM_MINOR"
+sa_k_layout: "HEAD_DIM_MINOR"
+sa_v_layout: "HEAD_DIM_MINOR"

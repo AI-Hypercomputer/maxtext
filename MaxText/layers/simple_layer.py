@@ -1,24 +1,26 @@
-"""
-Copyright 2024 Google LLC
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-     https://www.apache.org/licenses/LICENSE-2.0
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-"""
+# Copyright 2023–2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """ Simple decoder layers for testing and debugging purposes."""
 
 from jax import numpy as jnp
-from flax import linen as nn
 from jax.sharding import Mesh
-from typing import Optional
+
+from flax import linen as nn
+
+from MaxText.common_types import Config
 from MaxText.layers import quantizations
-from MaxText import common_types
 
 # pytype: disable=attribute-error
 
@@ -26,9 +28,10 @@ from MaxText import common_types
 class SimpleDecoderLayer(nn.Module):
   """Decoder layer consisting of a single [embed, embed] weight matrix."""
 
-  config: common_types.Config
+  config: Config
   mesh: Mesh
-  quant: Optional[quantizations.AqtQuantization] = None
+  model_mode: str
+  quant: None | quantizations.AqtQuantization = None
 
   def setup(self):
     self.weight_mat = self.param(
@@ -49,9 +52,10 @@ class SimpleDecoderLayer(nn.Module):
 class SimpleMlpDecoderLayer(nn.Module):
   """Decoder layer consisting of [embed,mlp] followed by an [mlp,embed] matmul."""
 
-  config: common_types.Config
+  config: Config
   mesh: Mesh
-  quant: Optional[quantizations.AqtQuantization] = None
+  model_mode: str
+  quant: None | quantizations.AqtQuantization = None
 
   def setup(self):
     self.ff_1 = self.param(

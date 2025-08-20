@@ -17,7 +17,10 @@ echo "Running test_convergence_1b_params.sh"
 export LOSS_THRESHOLD=100.0 # Set to large value so test is guaranteed to pass.
 export STEPS=20400 # Run for 20B tokens for a 1B sized mode for "chinchilla" scaling https://arxiv.org/abs/2203.15556
 export EVAL_STEPS=160
+export EVAL_INTERVAL=100
 export DATASET_TYPE=tfds
+export MTP_NUM_LAYERS=0 # Disable MTP by default
+export PER_DEVICE_BATCH_SIZE=8.0 # With the default learning rate (3e-4) this should have global batch of 512, with 2k sequence length (1M global batch in tokens)
 
 # Set environment variables
 for ARGUMENT in "$@"; do
@@ -53,12 +56,12 @@ then
 fi
 
 TRAIN_CMD="python3 -m MaxText.train MaxText/configs/base.yml \
-        steps=$STEPS eval_steps=$EVAL_STEPS eval_interval=$STEPS \
-        per_device_batch_size=8.0 learning_rate=3e-4 enable_checkpointing=false \
+        steps=$STEPS eval_steps=$EVAL_STEPS eval_interval=$EVAL_INTERVAL \
+        per_device_batch_size=$PER_DEVICE_BATCH_SIZE learning_rate=3e-4 enable_checkpointing=false \
         max_target_length=2048 global_parameter_scale=1 \
         metrics_file=metrics.txt base_output_directory=$OUTPUT_PATH \
         dataset_path=$DATASET_PATH dataset_type=$DATASET_TYPE log_period=150 \
-        remat_policy=minimal enable_data_shuffling=false "
+        remat_policy=minimal enable_data_shuffling=false mtp_num_layers=$MTP_NUM_LAYERS"
 TRAIN_CMD+=$CMD_DATA
 
 # Train

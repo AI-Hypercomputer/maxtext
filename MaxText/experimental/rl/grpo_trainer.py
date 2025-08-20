@@ -1,87 +1,100 @@
-"""
-Copyright 2025 Google LLC
+# Copyright 2023–2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-     https://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-"""
-
-# pylint: disable=g-bad-todo, abstract-method, consider-using-with, ungrouped-imports, attribute-error
+# pylint: disable=g-bad-todo, abstract-method, consider-using-with, attribute-error
 """
 This script implements Group Relative Policy Optimization (GRPO) training
 using JAX. It optimizes a language model with reinforcement learning by
-updating policy gradients based on reward functions
+updating policy gradients based on reward functions.
+
+The training process involves a producer-consumer pattern:
+  - A "producer" thread continuously generates text completions from prompts
+    using an offline inference engine. These completions, along with their
+    log-probabilities, are stored in a shared buffer.
+  - The main "consumer" thread fetches these generated samples from the buffer
+    and uses them to perform GRPO training steps.
+
+This decoupling allows the training process (consumer) to proceed without
+being blocked by the potentially slower generation process (producer).
+The script sets up separate configurations for training and inference,
+handles model parameter resharding between the two, and manages the
+entire training loop, including checkpointing and metric logging.
 """
 
 
 import datetime
+import time
 import os
-import sys
 import functools
-import queue
+import threading
 
-from typing import Sequence
+from typing import Sequence, Callable, Iterator
+
 from absl import app
+
 import tensorflow as tf
-from flax.linen import partitioning as nn_partitioning
-from flax import struct
+
+import numpy as np
+
 import jax
 import jax.numpy as jnp
 from jax import random
-import numpy as np
 
-
-from MaxText import checkpointing
-from MaxText import max_utils
-from MaxText import maxtext_utils
-from MaxText import max_logging
-from MaxText import profiler
-from MaxText import pyconfig
-from MaxText import maxengine
-
-from MaxText.metric_logger import MetricLogger
-
-from MaxText.vertex_tensorboard import VertexTensorboardManager
-
-from MaxText.experimental.rl import grpo_input_pipeline
-from MaxText.layers import models
-
-from MaxText.gcp_workload_monitor import GCPWorkloadMonitor
-
-from MaxText.train import (
-    validate_train_config,
-    get_first_step,
-    load_next_batch,
-    record_scalar_metrics,
-    save_checkpoint,
-    record_goodput,
-    create_goodput_recorder,
-    check_example_batch,
-    setup_mesh_and_model,
-)
+from flax.linen import partitioning as nn_partitioning
+from flax import struct
+from flax.nnx import TrainState
 
 from cloud_tpu_diagnostics import diagnostic
 from cloud_tpu_diagnostics.configuration import debug_configuration
 from cloud_tpu_diagnostics.configuration import diagnostic_configuration
 from cloud_tpu_diagnostics.configuration import stack_trace_configuration
 
-from ml_goodput_measurement import monitoring
-
 import transformers
 
+from ml_goodput_measurement.src.goodput import GoodputRecorder
+
+import MaxText as mt
+from MaxText import checkpointing
+from MaxText import exceptions
+from MaxText import max_logging
+from MaxText import max_utils
+from MaxText import maxtext_utils
+from MaxText import train_utils
+from MaxText import profiler
+from MaxText import pyconfig
+from MaxText.checkpointing import CheckpointManager
+from MaxText.utils import gcs_utils
+from MaxText.inference import offline_engine
+from MaxText.data_loader import DataLoader
+from MaxText.experimental.rl import grpo_input_pipeline
+from MaxText.experimental.rl import grpo_utils
+from MaxText.globals import EPS
+from MaxText.metric_logger import MetricLogger
+from MaxText.train import (
+    validate_train_config,
+    get_first_step,
+)
+from MaxText.utils.goodput_utils import (
+    GoodputEvent,
+    create_goodput_recorder,
+    maybe_monitor_goodput,
+    maybe_record_goodput,
+)
+from MaxText.vertex_tensorboard import VertexTensorboardManager
+
+
 # pylint: disable=too-many-positional-arguments
-
-Transformer = models.Transformer
-EPS = 1e-8
-
 
 # -----------------------------------------------------------------------------
 # GRPO
@@ -89,17 +102,60 @@ EPS = 1e-8
 
 
 def _split_grpo_state(state):
+  """Splits the reference parameters from the main training state.
+
+  This is a utility function to separate the reference model's parameters,
+  which are kept frozen, from the policy model's parameters that are actively
+  being trained.
+
+  Args:
+    state: The combined training state, expected to contain a 'reference_params'
+      key within its `params` attribute.
+
+  Returns:
+    A tuple containing:
+      - new_state: The training state with 'reference_params' removed.
+      - reference_params: The extracted reference parameters.
+  """
   reference_params = state.params["reference_params"]
   new_state = state.replace(params={k: v for k, v in state.params.items() if k != "reference_params"})
   return new_state, reference_params
 
 
 def _merge_grpo_state(state, reference_params):
+  """Merges the reference parameters back into the training state.
+
+  This is the inverse operation of `_split_grpo_state`, used to reconstruct
+  the full state object after a training step.
+
+  Args:
+    state: The training state, without 'reference_params'.
+    reference_params: The frozen reference parameters to be added back.
+
+  Returns:
+    A new state object with the 'reference_params' re-integrated.
+  """
   return state.replace(params=dict(state.params, reference_params=reference_params))
 
 
 @struct.dataclass
 class LossAux:
+  """A dataclass to hold auxiliary outputs from the GRPO loss function.
+
+  This structure is used to pass various metrics and intermediate values
+  from the loss function for logging and analysis.
+
+  Attributes:
+    total_loss: The final computed loss value for the step.
+    avg_reward: The average reward obtained across the batch.
+    avg_reward_std: The standard deviation of rewards within the batch.
+    avg_advantage: The average normalized advantage across the batch.
+    avg_kl: The average KL divergence between the policy and reference models.
+    completion_length: The average token length of the generated completions.
+    moe_lb_loss: The load balancing loss for Mixture-of-Experts layers.
+    total_weights: The total number of tokens used to normalize the loss.
+  """
+
   total_loss: float
   avg_reward: float
   avg_reward_std: float
@@ -118,14 +174,28 @@ def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_
 
     1. Compute the per-token log-probabilities for the full sequence (prompt + completion) both with
          the current model (policy) and the reference model.
-    2. Compute a per-token KL divergence:
-         kl = exp(ref_logp - policy_logp) - (ref_logp - policy_logp) - 1.
-    3. Compute a scalar reward for each generated completion via reward_fn.
-    4. Group the rewards (each prompt yields “G = num_generations” completions), compute the mean and std,
+    2. Compute a scalar reward for each generated completion via reward_fn.
+    3. Group the rewards (each prompt yields “G = num_generations” completions), compute the mean and std,
        and then compute a normalized advantage.
-    5. Compute a per-token loss that is given by
-         - [exp(policy_logp - stop_gradient(policy_logp)) * advantage - beta * kl]
-       (the jax.lax.stop_gradient ensures that only the advantage contributes to gradients).
+    4. Compute a per-token loss that is given by
+        - [min(exp(policy_logp - old_logp), clip(exp(policy_logp - old_logp), 1-e, 1+e)) * advantage - beta * kl
+        Where:
+        - `policy_logp`: The log probability of the current policy's output.
+        - `old_logp`: The log probability of the behavior policy's output
+          (i.e., the policy used to generate the samples).
+        - For on-policy training, `old_logp` is a stop-gradient of the current `policy_logp`,
+          ensuring that only the advantage term contributes to the gradients. This is because
+          the samples are generated using the current policy.
+        - For off-policy training, `old_logp` is obtained directly from the
+          `data["completions_logprobs"]`, which stores the log probabilities
+          from the behavior policy that generated the samples.
+        - `advantage`: The advantage, representing how much better a given
+          action is compared to the average action.
+        - `beta`: A hyperparameter that controls the strength of the KL divergence penalty.
+        - `kl_divergence`: The Kullback-Leibler divergence between the current
+          policy and the behavior policy.
+    5. Compute a per-token KL divergence:
+         kl = exp(ref_logp - policy_logp) - (ref_logp - policy_logp) - 1.
     6. Restrict the loss calculations to the generated completion tokens.
     7. Finally the loss is the average (over examples) of the mean per-token loss - where only tokens before the
        first eos (according to tokenizer.eos_id) are taken into account.
@@ -157,7 +227,7 @@ def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_
   # compute_log_probs returns logits.
   # We compute the log-probabilities for the entire generated sequence, then shift as usual.
   rng1, rng_fwd = random.split(dropout_rng)
-  token_logps_policy, intermediate_outputs = compute_log_probs(
+  token_logps_policy, intermediate_outputs = grpo_utils.compute_log_probs(
       model,
       params,
       prompt_with_completions,
@@ -169,36 +239,17 @@ def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_
       rngs={"dropout": rng1, "params": rng_fwd},
   )  # [BxG,S-1,E]
 
-  token_logps_ref, _ = compute_log_probs(
-      model,
-      {"params": reference_params},
-      prompt_with_completions,
-      prompt_completions_position,
-      prompt_completions_segmentation,
-      completions_segmentation,
-      config,
-      is_train=False,
-      rngs={"dropout": rng1, "params": rng_fwd},
-  )  # [BxG,S-1,E]
-
   completion_target_segmentation = data["ar_completions_segmentation"][..., 1:]  # [BxG,S-1]
   # Because of the shifting, token_logps have shape [BxG, S-1]. So, we create a mask for the valid tokens
   # Create a mask to clear out the last token position in the ar_completions
   # and to make sure loss is computed on non-padding tokens
   valid_seq_mask = completion_target_segmentation != 0  # [BxG, S-1]
 
-  # --- (2) Compute per-token KL divergence for each token in the generated completion.
-  token_diff_logps_ref_policy = token_logps_ref - token_logps_policy
-
-  per_token_kl = jnp.exp(token_diff_logps_ref_policy) - (token_diff_logps_ref_policy) - 1
-  # loss is computed on non-padding tokens
-  per_token_kl = per_token_kl * valid_seq_mask
-
-  # --- (3) Compute a scalar reward for each generated completion via reward_fn.
-  rewards = dummy_reward_len(valid_seq_mask)
+  # --- (2) Compute a scalar reward for each generated completion via reward_fn.
+  rewards = grpo_utils.dummy_reward_len(valid_seq_mask)
   rewards = jnp.array(rewards)  # shape [BxG]
 
-  # --- (4) Group rewards and compute normalized advantage.
+  # --- (3) Group rewards and compute normalized advantage.
   G = config.num_generations
   rewards_grouped = rewards.reshape(-1, G)  # shape [B, G]
   group_mean = jnp.mean(rewards_grouped, axis=1)  # shape [B]
@@ -207,18 +258,49 @@ def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_
   repeated_group_std = jnp.repeat(group_std, G)  # shape [BxG]
   advantages = (rewards - repeated_group_mean) / (repeated_group_std + EPS)  # shape [BxG]
 
-  # --- (5) Compute per-token loss.
-  # We follow the TRL GRPO loss:
-  #   loss_token = - [ exp(policy_logp - stop_gradient(policy_logp)) * advantage - beta * kl ]
+  # --- (4) Compute per-token loss.
   # Make sure to expand advantage along the token dimension.
   advantages_exp = advantages[:, None]  # shape [BxG, 1]
 
-  policy_diff = token_logps_policy - jax.lax.stop_gradient(token_logps_policy)
-  loss_tokens = -(jnp.exp(policy_diff) * advantages_exp - config.grpo_beta * per_token_kl)
+  # We calculate the policy difference with old_per_token_logps for off-policy training,
+  # else, for on-policy training old_per_token_logps = stop_gradient(token_logps_policy)
+  if data["completions_logprobs"] is None:  # off-policy
+    old_per_token_logps = jax.lax.stop_gradient(token_logps_policy)
+  else:  # on-policy
+    old_per_token_logps = data["completions_logprobs"]
+
+  policy_diff = token_logps_policy - old_per_token_logps
+  coef_1 = jnp.exp(policy_diff)
+  coef_2 = jnp.clip(coef_1, 1 - config.grpo_epsilon, 1 + config.grpo_epsilon)
+  loss_tokens = -jnp.minimum(
+      coef_1 * advantages_exp,
+      coef_2 * advantages_exp,
+  )
+
+  # --- (5) Compute per-token KL divergence for each token in the generated completion, if beta != 0.
+  if config.grpo_beta != 0.0:
+    token_logps_ref, _ = grpo_utils.compute_log_probs(
+        model,
+        {"params": reference_params},
+        prompt_with_completions,
+        prompt_completions_position,
+        prompt_completions_segmentation,
+        completions_segmentation,
+        config,
+        is_train=False,
+        rngs={"dropout": rng1, "params": rng_fwd},
+    )  # [BxG,S-1,E]
+
+    token_diff_logps_ref_policy = token_logps_ref - token_logps_policy
+
+    per_token_kl = jnp.exp(token_diff_logps_ref_policy) - (token_diff_logps_ref_policy) - 1
+    # loss is computed on non-padding tokens
+    per_token_kl = per_token_kl * valid_seq_mask
+    loss_tokens += config.grpo_beta * per_token_kl
 
   # --- (6) Restrict the loss calculations to the generated completion tokens.
   # Average over tokens per generated completion.
-  loss_per_example = jnp.sum(loss_tokens * valid_seq_mask, axis=1) / (jnp.sum(valid_seq_mask, axis=1) + EPS)
+  loss_per_example = jnp.sum(loss_tokens * valid_seq_mask, axis=1) / jnp.clip(jnp.sum(valid_seq_mask, axis=1), min=1)
 
   # --- (7) Finally the loss is the average (over examples) of the mean per-token loss
   loss = jnp.mean(loss_per_example)
@@ -232,7 +314,10 @@ def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_
     loss += moe_lb_loss
 
   # Compute auxiliary metrics.
-  avg_kl = jnp.mean((per_token_kl * valid_seq_mask) / (jnp.sum(valid_seq_mask, axis=1, keepdims=True) + EPS))
+  if config.grpo_beta != 0.0:
+    avg_kl = jnp.mean((per_token_kl * valid_seq_mask) / jnp.clip(jnp.sum(valid_seq_mask, axis=1, keepdims=True), min=1))
+  else:
+    avg_kl = None
   avg_reward = jnp.mean(rewards)
   avg_advantage = jnp.mean(advantages)
   avg_completion_length = jnp.mean(jnp.sum(data["ar_completions_segmentation"] != 0, axis=1))
@@ -250,260 +335,31 @@ def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_
   return loss, aux
 
 
-# --- GRPO Helpers ---
-
-
-def prefill(engine, params, prompts, true_length, num_generations, decode_state, rng):
-  """
-  Args:
-    engine: The generation engine instance responsible for managing decoding and inference.
-    params: Model parameters used for generating logits during inference.
-    decode_state: Current decoding state, which maintains token positions, masks, and cached states.
-    data: Input batch containing prompt tokens, segementation and position.
-    num_generations: Number of completions to generate per prompt (G in many RLHF-style pipelines).
-    rng: JAX PRNG key for controlling stochastic behavior (e.g., sampling, dropout).
-
-  Returns:
-    decode_state: Updated decode state after prefill, including new cached key/value pairs.
-    prefill_slots: A structure containing token positions and model states needed for next-stage decoding.
-  """
-  """
-  JIT-compatible version of prefill using a single lax.scan over the repeated batch.
-  """
-  # Repeat each prompt `num_generations` times
-  repeated_prompts = jnp.repeat(prompts, num_generations, axis=0)
-  repeated_true_length = jnp.repeat(true_length, num_generations, axis=0)
-
-  def _scan_prefill_step(carry, inputs):
-    decode_state, rng, slot = carry
-    tokens, true_len = inputs
-    rng, rng_prefill = jax.random.split(rng)
-    prefill_result, _ = engine.prefill(params=params, padded_tokens=tokens, true_length=true_len, rng=rng_prefill)
-    decode_state = engine.insert(prefill_result, decode_state, slot)
-    return (decode_state, rng, slot + 1), None
-
-  (decode_state, _, _), _ = jax.lax.scan(
-      _scan_prefill_step, init=(decode_state, rng, 0), xs=(repeated_prompts, repeated_true_length)
-  )
-
-  return decode_state
-
-
-def generate(engine, params, num_decode_steps, decode_state, rng):
-  """
-  Args:
-    engine: The generation engine instance used to run autoregressive decoding.
-    params: Model parameters used to compute logits during token generation.
-    decode_state: The current decode state containing cached attention key/value pairs and positions.
-    num_decode_steps: Number of decoding steps to perform (i.e., target length - prefill length).
-    rng: JAX PRNG key used for sampling, top-k/top-p filtering, or any stochastic decoding behavior.
-
-  Returns:
-    completions: Generated sequences (e.g., token IDs) of shape [num_prompts * num_generations, num_decode_steps].
-  """
-
-  def _scan_generate_step(carry, _):
-    rng, decode_state = carry
-    rng, rng_generate = jax.random.split(rng)
-    decode_state, result_tokens = engine.generate(params, decode_state, rng=rng_generate)
-    return (rng, decode_state), result_tokens.data[:, 0]
-
-  (_, all_tokens) = jax.lax.scan(_scan_generate_step, init=(rng, decode_state), xs=None, length=num_decode_steps)
-  return jnp.transpose(all_tokens, (1, 0))
-
-
-def concatenate_prompt_with_completions(config, tokenizer_model, prompts, true_length, completions):
-  """
-  Args:
-    config: Configuration object containing generation settings such as max sequence length or EOS token ID.
-    tokenizer_model: Tokenizer used to decode or manipulate tokens (e.g., identifying special tokens like EOS).
-    data: Input batch containing prompt tokens, segementation and position.
-    completions: Generated token sequences to be appended to the corresponding prompts.
-
-  Returns:
-    prompt_completions: Concatenated sequences of prompt + generated completions for each sample.
-    eos_positions: Indices indicating the position of the first EOS token in each concatenated sequence.
-  """
-
-  def _concat_and_find_eos(prompt, true_len, completion):
-    total_len = prompt.shape[0] + completion.shape[0]
-    prompt_mask = jnp.arange(prompt.shape[0]) < true_len
-    trimmed_prompt = jnp.where(prompt_mask, prompt, 0)
-
-    # Initialize with padded prompt
-    full_seq = jnp.zeros((total_len,), dtype=prompt.dtype)
-    full_seq = full_seq.at[: prompt.shape[0]].set(trimmed_prompt)
-
-    # Dynamically insert completion at true_len position
-    full_seq = jax.lax.dynamic_update_slice(full_seq, completion, (true_len,))
-
-    # Find EOS index
-    eos_mask = full_seq == tokenizer_model.eos_token_id
-    eos_indices = jnp.where(eos_mask, jnp.arange(total_len), total_len)
-    eos_index = jnp.min(eos_indices)
-
-    return full_seq, eos_index
-
-  batched_concat_and_eos = jax.vmap(_concat_and_find_eos, in_axes=(0, 0, 0))
-  prompts = jnp.repeat(prompts, config.num_generations, axis=0)
-  true_length = jnp.repeat(true_length, config.num_generations, axis=0)
-  prompt_completions, eos_positions = batched_concat_and_eos(prompts, true_length, completions)
-  return prompt_completions, eos_positions
-
-
-def generate_completions(config, tokenizer_model, engine, data, params, rng):
-  """
-  Autoregressively generates completions for a batch of prompts.
-
-  Args:
-    prompts: Array of shape [B, S] containing token ids.
-    config: Configuration containing:
-         - num_generations: number of completions to generate per prompt.
-         - max_completion_length: maximum number of tokens to generate.
-         - temperature: sampling temperature.
-    rng: JAX PRNGKeys.
-    tokenizer_model: Tokenizer for generate
-
-  Returns:
-    A jnp.array of shape [B x num_generations, S] where S = length_of_prompt + max_completion_length.
-  """
-  # decimate proportion of data when per_device_batch_size<1
-  for k, v in data.items():
-    assert v.ndim in (1, 2), f"Invalid {v.shape=} found for key={k}"
-    if v.ndim == 2:
-      data[k] = v[: config.micro_batch_size_to_train_on, :]
-    else:
-      data[k] = v[: config.micro_batch_size_to_train_on]
-
-  rng, rng_load_params = jax.random.split(rng)
-
-  rng, rng_init_decode = jax.random.split(rng_load_params)
-  decode_state = engine.init_decode_state(rng_init_decode)
-
-  prompts, true_length = data[f"{config.train_data_columns}"], data[f"{config.train_data_columns}_true_length"]
-  decode_state = jax.jit(
-      functools.partial(prefill, engine, params, prompts, true_length, config.num_generations), donate_argnums=(0,)
-  )(decode_state, rng)
-
-  completions = jax.jit(
-      functools.partial(generate, engine, params, config.max_target_length - config.max_prefill_predict_length)
-  )(decode_state, rng)
-
-  data[f"{config.train_data_columns}_completions"], eos_positions = concatenate_prompt_with_completions(
-      config, tokenizer_model, prompts, true_length, completions
-  )
-
-  data[f"{config.train_data_columns}_completions_segmentation"] = (
-      jnp.arange(data[f"{config.train_data_columns}_completions"].shape[1])[None, :] < eos_positions[:, None]
-  ).astype(jnp.int32)
-  data[f"{config.train_data_columns}_completions_position"] = jnp.where(
-      data[f"{config.train_data_columns}_completions_segmentation"],
-      jnp.arange(data[f"{config.train_data_columns}_completions"].shape[1]),
-      0,
-  )
-  true_length = jnp.repeat(true_length, config.num_generations, axis=0)
-  completion_mask = data[f"{config.train_data_columns}_completions_position"] >= true_length[:, None] - 1
-  data["ar_completions_segmentation"] = data[
-      f"{config.train_data_columns}_completions_segmentation"
-  ] * completion_mask.astype(jnp.int32)
-  return data
-
-
-def dummy_reward_len(valid_seq_mask):
-  # adding a 1 because valid_seq_mask is actually one less than the number of valid tokens
-  reward = -abs(20 - (1 + jnp.sum(valid_seq_mask, axis=-1)))  # [BxG]
-  return reward
-
-
-def jaccard_reward_fn(tokens1, tokens2, vocab_size):
-  """
-  A simple Jaccard similarity for now
-  # TODO: Include more reward functions
-  """
-
-  # Convert token id arrays to one-hot representations.
-  # The result has shape (..., seq_length, vocab_size).
-  tokens1_onehot = jax.nn.one_hot(tokens1, vocab_size, dtype=bool)
-  tokens2_onehot = jax.nn.one_hot(tokens2, vocab_size, dtype=bool)
-
-  # Reduce along the sequence dimension (axis=-2) to obtain a boolean presence vector
-  # for each token id in the vocabulary. This effectively converts each row to a set.
-  a_set = jnp.any(tokens1_onehot, axis=-2)
-  b_set = jnp.any(tokens2_onehot, axis=-2)
-
-  # Compute the intersection and union along the vocabulary dimension (axis=-1).
-  intersection = jnp.sum(jnp.logical_and(a_set, b_set), axis=-1)
-  union = jnp.sum(jnp.logical_or(a_set, b_set), axis=-1)
-
-  # Avoid division by zero: if union is 0 (e.g. both rows are empty), return 1.0.
-  return jnp.where(union == 0, 1.0, intersection / union)
-
-
-def compute_log_probs(
-    model, params, inputs, inputs_position, inputs_segmentation, completion_segmentation, config, is_train=False, rngs=None
-):
-  """
-  Given a sequence of tokens (shape [B, L]), this helper calls model.apply (with dropout enabled
-  if is_train) to obtain logits and then computes per-token log-probabilities.
-
-  Note: We assume that tokens have been already appropriately padded.
-  """
-  if not is_train:
-    params = jax.lax.stop_gradient(params)
-  logits, intermediate_outputs = model.apply(
-      params,
-      inputs,
-      inputs_position,
-      decoder_segment_ids=inputs_segmentation,
-      enable_dropout=(config.enable_dropout if is_train else False),
-      rngs=rngs,
-      mutable="intermediates",
-  )  # [B, S, E] - [batch, sequence, embedding/vocab]
-  logits = logits / config.decode_sampling_temperature
-  # Remove last time step since there is no target for the final position.
-  targets = inputs[:, 1:]
-  # Shift left using dynamic slice (skip first column)
-  shifted_completion_segmentation = jax.lax.dynamic_slice(
-      completion_segmentation, (0, 1), (completion_segmentation.shape[0], completion_segmentation.shape[1] - 1)
-  )
-  # Pad with 0 at the end to maintain the original shape
-  shifted_completion_segmentation = jnp.pad(
-      shifted_completion_segmentation, ((0, 0), (0, 1)), mode="constant", constant_values=0
-  )
-
-  mask = shifted_completion_segmentation[..., None]
-  mask = jnp.broadcast_to(mask, logits.shape)
-
-  masked_logits = jnp.where(mask, logits, -jnp.inf)
-  log_probs = jax.nn.log_softmax(masked_logits, axis=-1)
-  log_probs = jnp.where(mask, log_probs, -0.0)
-  log_probs = log_probs[:, :-1, :]
-  # Gather the log probabilities corresponding to each target token.
-  token_log_probs = jnp.take_along_axis(log_probs, targets[..., None], axis=-1)[..., 0]
-  token_log_probs = token_log_probs * shifted_completion_segmentation[:, :-1]
-
-  return token_log_probs, intermediate_outputs
-
-
 # -----------------------------------------------------------------------------
 # Trainer and top level training functions
 # -----------------------------------------------------------------------------
 
 
 def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
-  """
+  """Performs a single training step of the GRPO algorithm.
+
+  This function computes the GRPO loss, calculates gradients, and updates the
+  model's parameters. It handles gradient accumulation and clipping as configured.
+  The reference model's parameters are held constant during the update.
 
   Args:
-    model: A nn.Module
-    state: A pytree of the current state of the model
-    data: Batch of data to apply to the model
-    dropout_rng: A key to use to generate rng for dropout
+    model: The transformer model to be trained.
+    config: The training configuration object.
+    state_mesh_shardings: Pytree of sharding specifications for the training state.
+    state: The current training state, including parameters and optimizer state.
+    data: A batch of training data, including prompts and generated completions.
+    dropout_rng: JAX PRNG key for dropout.
 
   Returns:
-    new_state: Same format as state.
-    metrics: Dictionary of model metrics such as loss, training rate, etc.
-    rng2: A new rng key that can be used in future calls.
-
+    A tuple containing:
+      - new_state: The updated training state after applying gradients.
+      - metrics: A dictionary of metrics for logging, including loss, reward,
+        and gradient norms.
   """
   state, reference_params = _split_grpo_state(state)
   state_mesh_shardings, reference_params_sharding = _split_grpo_state(state_mesh_shardings)
@@ -550,7 +406,9 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
       cast_params = max_utils.cast_to_bf16(cast_params)
       state = state.replace(params=cast_params)
       if config.use_grpo:
-        reference_params = jax.device_put(reference_params, max_utils.with_memory_kind(reference_params_sharding, "device"))
+        reference_params = jax.device_put(
+            reference_params, max_utils.with_memory_kind(reference_params_sharding, "device")
+        )
         reference_params = max_utils.cast_to_bf16(reference_params)
         extra_grpo_args = [reference_params]
     grad_func = jax.value_and_grad(_loss_fn, argnums=4, has_aux=True)
@@ -578,6 +436,7 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
       "learning/avg_reward_std": aux.avg_reward_std,
       "learning/avg_advantage": aux.avg_advantage,
       "learning/avg_kl": aux.avg_kl,
+      "learning/completion_length": aux.completion_length,
       "learning/moe_lb_loss": moe_lb_loss,
       "learning/total_weights": total_weights,
   }
@@ -597,7 +456,21 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
 
 
 def eval_step(model, config, state, data, dropout_rng):
-  """eval_step no backprop and new state compared with train_step."""
+  """Performs a single evaluation step.
+
+  This function computes the loss and other metrics on an evaluation dataset
+  without performing backpropagation or updating model parameters.
+
+  Args:
+    model: The transformer model.
+    config: The training configuration object.
+    state: The current training state.
+    data: A batch of evaluation data.
+    dropout_rng: JAX PRNG key for dropout.
+
+  Returns:
+    A dictionary of evaluation metrics.
+  """
 
   reference_params, extra_grpo_args, _loss_fn = [], [], grpo_loss_fn
   state, reference_params = _split_grpo_state(state)
@@ -623,79 +496,188 @@ def eval_step(model, config, state, data, dropout_rng):
   return metrics
 
 
-def setup_train_loop(config):
-  """Set up prerequisites for the training loop -
-      checkpoint_manager, PRNG keys, Mesh, Model and optimizer.
-      Set up data iterator and tokenizer, initialize the model.
+def setup_train_loop(
+    config,
+    config_inference,
+    recorder: GoodputRecorder,
+) -> tuple[
+    jax.Array,
+    CheckpointManager,
+    TrainState,
+    TrainState,
+    mt.Transformer,
+    mt.Transformer,
+    mt.Mesh,
+    mt.Mesh,
+    Callable[[int], float],
+    Iterator,
+    Iterator,
+    TrainState,
+]:
+  """Initializes objects needed for the training loop.
+
+  This function sets up the training and inference meshes, models, optimizers,
+  learning rate schedules, and checkpoint managers. It also initializes the
+  training state.
 
   Args:
-    config
+    config: The main training configuration object.
+    config_inference: The configuration object for the inference engine.
+    recorder: A GoodputRecorder for performance tracking.
 
   Returns:
-    init_rng:
-    writer: Summary writer for tensorboard
-    checkpoint_manager: Orbax checkpointer
-    state_mesh_annotations: the mesh annotations for the train state
-    model:
-    mesh:
-    learning_rate_schedule:
-    data_iterator:
-    state: the initialized train state
+    A tuple containing:
+      - init_rng: The initial JAX PRNG key.
+      - checkpoint_manager: The Orbax checkpoint manager.
+      - state_mesh_shardings: Sharding specifications for the training state.
+      - inference_state_mesh_shardings: Sharding specs for the inference state.
+      - model: The training model instance.
+      - inference_model: The inference model instance.
+      - mesh: The device mesh for training.
+      - inference_mesh: The device mesh for inference.
+      - learning_rate_schedule: The learning rate schedule function.
+      - data_iterator: The iterator for the input prompt dataset.
+      - eval_data_iterator: The iterator for the evaluation dataset (or None).
+      - state: The initialized training state.
   """
-  recorder = create_goodput_recorder(config)
-  record_goodput(recorder, config, recorder.record_tpu_init_start_time if recorder else None)
-  init_rng, writer, checkpoint_manager, mesh, model, learning_rate_schedule, tx = setup_mesh_and_model(config)
+  with maybe_record_goodput(recorder, GoodputEvent.TPU_INIT):
+    max_logging.log("Training mesh used for the workload")
+    num_inference_devices = config.inference_devices_per_replica * config.inference_replicas
+    training_devices = jax.devices()[num_inference_devices:]
+    model = mt.from_pretrained(config, devices=training_devices)
+    mesh = model.mesh
+    max_logging.log("Inference mesh used for the workload")
+    inference_devices = jax.devices()[:num_inference_devices]
+    inference_model = mt.from_pretrained(config_inference, devices=inference_devices)
+    inference_mesh = inference_model.mesh
+    init_rng, checkpoint_manager, learning_rate_schedule, tx = train_utils.create_training_tools(config, model, mesh)
 
-  record_goodput(recorder, config, recorder.record_tpu_init_end_time if recorder else None)
-  record_goodput(recorder, config, recorder.record_training_preparation_start_time if recorder else None)
-  data_iterator, eval_data_iterator = grpo_input_pipeline.create_data_iterator(config, mesh)
-  state, _, state_mesh_shardings, data_iterator = maxtext_utils.setup_training_state(
-      model, data_iterator, tx, config, init_rng, mesh, checkpoint_manager
-  )
+  with maybe_record_goodput(recorder, GoodputEvent.TRAINING_PREPARATION):
+    data_iterator = grpo_input_pipeline.create_data_iterator(config_inference, inference_mesh)
+    state, _, state_mesh_shardings, data_iterator = maxtext_utils.setup_training_state(
+        model, data_iterator, tx, config, init_rng, mesh, checkpoint_manager
+    )
 
+  # create inference_state_mesh_shardings from inference_mesh
+  inference_state_mesh_shardings = maxtext_utils.get_abstract_state(
+      inference_model, tx, config_inference, init_rng, inference_mesh, is_training=False
+  )[2]
   if not config.using_pipeline_parallelism:
     # The vocab tensor(s) of shape [vocab, embed] (and transpose) are not sharded by stage
     maxtext_utils.assert_params_sufficiently_sharded(state.params, mesh, config.sharding_tolerance)
 
-  record_goodput(recorder, config, recorder.record_training_preparation_end_time if recorder else None)
   return (
       init_rng,
-      writer,
       checkpoint_manager,
       state_mesh_shardings,
+      inference_state_mesh_shardings,
       model,
+      inference_model,
       mesh,
+      inference_mesh,
       learning_rate_schedule,
       data_iterator,
-      eval_data_iterator,
+      iter(()),  # GRPO does not support eval_dataset
       state,
   )
 
 
-def train_loop(config, config_inference, state=None):
-  """Main Training loop.
+def generate_completions(
+    worker_data_loader,
+    worker_inference_engine,
+    worker_tokenizer_model,
+    worker_config_inference,
+    worker_config_train,
+    worker_data_buffer,
+    worker_data_buffer_lock,
+    worker_input_data_shardings,
+    engine_lock,
+):
+  """Loads a batch of prompts and generates completions using the inference engine.
+
+  This function is designed to be run by the generation worker thread. It loads
+  a batch of prompts from the data loader, uses the offline inference engine to
+  generate multiple completions for each prompt, processes the results, and adds
+  them to a shared data buffer for the training loop to consume.
+
   Args:
-    config:
-    state:
-    ckpt_path:
-  Returns:
+    worker_data_loader: The DataLoader instance for fetching prompt data.
+    worker_inference_engine: The offline inference engine for generation.
+    worker_tokenizer_model: The tokenizer model.
+    worker_config_inference: The configuration for the inference process.
+    worker_config_train: The main training configuration.
+    worker_data_buffer: A list acting as a shared buffer to store generated data.
+    worker_data_buffer_lock: A lock to ensure thread-safe access to the buffer.
+    worker_input_data_shardings: Sharding specifications for the data.
+    engine_lock: A lock to ensure thread-safe use of the inference engine.
   """
-  # Create a GoodputRecorder to log information
-  recorder = create_goodput_recorder(config)
-  record_goodput(recorder, config, recorder.record_job_start_time if recorder else None)
+  with engine_lock:
+    thread_example_batch = worker_data_loader.load_next_batch()
+    # Trim data for inference processing
+    thread_example_batch_trimmed = jax.tree_util.tree_map(
+        lambda arr: arr[
+            : int(
+                worker_config_inference.per_device_batch_size
+                * worker_config_train.inference_replicas
+                * worker_config_train.inference_devices_per_replica
+            )
+        ],
+        thread_example_batch,
+    )
+    processed_batch = grpo_utils.generate_offline_completions(
+        worker_config_inference, worker_tokenizer_model, worker_inference_engine, thread_example_batch_trimmed
+    )
+    processed_batch = jax.device_put(processed_batch, worker_input_data_shardings)
+  with worker_data_buffer_lock:
+    if not worker_data_buffer:
+      worker_data_buffer.append(processed_batch)
+    else:
+      worker_data_buffer[0] = jax.tree_util.tree_map(
+          lambda a, b: np.concatenate([a, b], axis=0), worker_data_buffer[0], processed_batch
+      )
+
+
+def train_loop(config, config_inference, recorder, state=None):
+  """The main GRPO training loop.
+
+  This function orchestrates the entire training process. It initializes the
+  necessary components, starts a background thread for continuous data generation,
+  and then enters a loop to perform training steps.
+
+  The loop consists of:
+  1. Fetching pre-generated prompt-completion pairs from a shared buffer.
+  2. Executing a training step with the fetched batch.
+  3. Periodically resharding the updated policy parameters to the inference engine.
+  4. Logging metrics and saving checkpoints.
+  5. Handling evaluation if configured.
+
+  The loop continues for the configured number of steps and manages the lifecycle
+  of the generation worker thread.
+
+  Args:
+    config: The main training configuration object.
+    config_inference: The configuration for the inference engine.
+    recorder: A GoodputRecorder for performance tracking.
+    state: An optional pre-existing training state to resume from.
+
+  Returns:
+    The final training state after the loop completes.
+  """
 
   (
       init_rng,
-      writer,
       checkpoint_manager,
       state_mesh_shardings,
+      inference_state_mesh_shardings,
       model,
+      _,  # inference_model
       mesh,
+      inference_mesh,
       learning_rate_schedule,
       data_iterator,
       eval_data_iterator,
       state,
-  ) = setup_train_loop(config)
+  ) = setup_train_loop(config, config_inference, recorder)
   tokenizer_model = transformers.AutoTokenizer.from_pretrained(
       config.tokenizer_path,
       add_bos_token=config.add_bos,
@@ -710,236 +692,242 @@ def train_loop(config, config_inference, state=None):
     state = _merge_grpo_state(state, reference_params)
   state_mesh_shardings = _merge_grpo_state(state_mesh_shardings, state_mesh_shardings.params["params"])
 
-  # pylint: disable=line-too-long
-  (
-      functional_train,
-      in_shard_train,
-      out_shard_train,
-      static_argnums_train,
-      donate_argnums_train,
-  ) = maxtext_utils.get_functional_train_with_signature(train_step, mesh, state_mesh_shardings, model, config)
-
-  # Initializing maxengine and everything related from decode.py
-  # TODO: Creating an engine here but might have two model compilation, need to initialize engine while passing model object
-  engine = maxengine.MaxEngine(config_inference)
-  init_rng, rng_load_params = jax.random.split(init_rng)
-  # TODO: loading parameters from GCS here, need to pass in the same params to engine which already loaded
-  _ = engine.load_params(rng_load_params)
-
-  if eval_data_iterator:
-    # pylint: disable=line-too-long
-    (
-        functional_eval,
-        in_shard_eval,
-        out_shard_eval,
-        static_argnums_eval,
-        donate_argnums_eval,
-    ) = maxtext_utils.get_functional_eval_with_signature(eval_step, mesh, state_mesh_shardings, model, config)
-
-  # TODO: fix tflops calculations for grpo setting
-  num_model_parameters = max_utils.calculate_num_params_from_pytree(state.params)
-  max_logging.log(f"number parameters: {num_model_parameters/1e9:.3f} billion")
-  per_device_tflops, _, _ = maxtext_utils.calculate_tflops_training_per_device(config)
-  per_device_tokens = maxtext_utils.calculate_tokens_training_per_device(config)
-
-  # Write train config params, num model params, and XLA flags to tensorboard
-  max_utils.add_text_to_summary_writer("num_model_parameters", str(num_model_parameters), writer)
-  max_utils.add_text_to_summary_writer("libtpu_init_args", os.environ["LIBTPU_INIT_ARGS"], writer)
-  maxtext_utils.add_config_to_summary_writer(config, writer)
-
-  # Define the compilation of functional_train, either by loading the compiled version or wrapping a new one in a jit
-  if config.compiled_trainstep_file != "":
-    print("Loading the compiled function...", flush=True)
-    # Need to pass train signature and state to determine i/o shapes of train_state for now.
-    p_train_step = maxtext_utils.load_compiled(config, functional_train, state)
-    # TODO: p_eval_step is not yet supported in load_compiled
-    p_eval_step = None
-    print("Loaded compiled function!", flush=True)
-  else:
-    p_train_step = jax.jit(
-        functional_train,
-        in_shardings=in_shard_train,
-        out_shardings=out_shard_train,
-        static_argnums=static_argnums_train,
-        donate_argnums=donate_argnums_train,
-    )
-
-    if eval_data_iterator:
-      p_eval_step = jax.jit(
-          functional_eval,
-          in_shardings=in_shard_eval,
-          out_shardings=out_shard_eval,
-          static_argnums=static_argnums_eval,
-          donate_argnums=donate_argnums_eval,
-      )
-    else:
-      p_eval_step = None
-
-  data_sharding = in_shard_train[1]
-  param_sharding = state_mesh_shardings.params
-  p_generate_completions = jax.jit(
-      functools.partial(generate_completions, config, tokenizer_model, engine),
-      in_shardings=(data_sharding, param_sharding, None),
-      out_shardings=data_sharding,
-      donate_argnums=(0,),
+  p_train_step, p_eval_step = train_utils.jit_train_and_eval_step(
+      config, model, mesh, state, state_mesh_shardings, train_step, eval_step, eval_data_iterator
   )
 
-  running_gcs_metrics = [] if config.gcs_metrics else None
+  data_sharding = maxtext_utils.get_input_data_sharding(config, mesh)
+
+  inference_engine = offline_engine.OfflineEngine(
+      config=config_inference,
+      mesh=inference_mesh,
+  )
+  data_buffer = []
+  data_buffer_lock = threading.Lock()
 
   start_step = get_first_step(state)  # this is the start_step for training
   prof = profiler.Profiler(config, offset_step=start_step)
-  first_profiling_step = prof.start_initial_profile_step
-  if config.profiler != "" and first_profiling_step >= config.steps:
-    raise ValueError("Profiling requested but initial profiling step set past training final step")
-  last_profiling_step = prof.finished_initial_profile_step
+  data_loader = DataLoader(config_inference, inference_mesh, data_iterator, recorder)
+  metric_logger = MetricLogger(config=config, learning_rate_schedule=learning_rate_schedule)
 
-  example_batch = None
-  last_step_completion = datetime.datetime.now()
+  # Write train config params, num model params, and XLA flags to tensorboard
+  metric_logger.write_setup_info_to_tensorboard(state.params["params"])
 
-  performance_metric_queue = None
-  if config.report_heartbeat_metric_for_gcp_monitoring or config.report_performance_metric_for_gcp_monitoring:
-    gcp_workload_monitor = GCPWorkloadMonitor(config.run_name)
-    if config.report_heartbeat_metric_for_gcp_monitoring:
-      gcp_workload_monitor.start_heartbeat_reporting_thread(config.heartbeat_reporting_interval_in_seconds)
-    if config.report_performance_metric_for_gcp_monitoring:
-      performance_metric_queue = queue.Queue()
-      gcp_workload_monitor.start_performance_reporting_thread(performance_metric_queue)
+  def generation_worker_fn(
+      worker_inference_engine,
+      worker_tokenizer_model,
+      worker_config_inference,
+      worker_config_train,
+      worker_data_buffer,
+      worker_data_buffer_lock,
+      worker_input_data_shardings,
+      engine_lock,
+      stop_event,
+  ):
+    """The target function for the data generation worker thread.
 
-  metric_logger = MetricLogger(writer, config)
-  for step in np.arange(start_step, config.steps):
-    if step == first_profiling_step or prof.should_activate_periodic_profile(step):
-      optional_postfix = f"step_{step}" if config.profile_periodically_period > 0 else ""
-      prof.activate(blocking_object=state, optional_postfix=optional_postfix)
+    This function runs in a loop, continuously calling `generate_completions`
+    to populate the shared data buffer. It stops when the `stop_event` is set
+    by the main thread.
 
-    with jax.profiler.StepTraceAnnotation("train", step_num=step):
-      record_goodput(recorder, config, recorder.record_data_loading_start_time if recorder else None)
-      example_batch = load_next_batch(data_iterator, example_batch, config)
-      record_goodput(recorder, config, recorder.record_data_loading_end_time if recorder else None)
-      check_example_batch(config, example_batch=example_batch)
-      # pylint: disable=not-callable
-      rng = jax.jit(jax.random.fold_in)(init_rng, step)
-      record_goodput(recorder, config, recorder.record_step_start_time if recorder else None, step)
-      rng, rng_gen = random.split(rng)
-      example_batch = p_generate_completions(example_batch, state.params, rng_gen)
-
-      # TODO: ensure this partitioning is correct
-      with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-        state, metrics = p_train_step(state, example_batch, rng)
-
-    step_time_delta = datetime.datetime.now() - last_step_completion
-    last_step_completion = datetime.datetime.now()
-    record_scalar_metrics(metrics, step_time_delta, per_device_tflops, learning_rate_schedule(step), per_device_tokens)
-    if performance_metric_queue:
-      performance_metric_queue.put(step_time_delta.total_seconds())
-
-    if checkpoint_manager is not None:
-      state_to_save = state if not config.use_dpo else _split_grpo_state(state)[0]
-      if save_checkpoint(checkpoint_manager, int(step), state_to_save, config.dataset_type, data_iterator, config):
-        checkpointing.print_save_message(step, config.async_checkpointing)
-
-      # Upon preemption, exit when and only when all ongoing saves are complete.
-      if checkpoint_manager.reached_preemption(step):
-        checkpoint_manager.wait_until_finished()
-        sys.exit()
-
-    metric_logger.write_metrics(running_gcs_metrics, metrics, step)
-
-    if config.dump_hlo and step == start_step:
-      jax.block_until_ready(state)  # Ensure compilation has finished.
-      max_utils.upload_dump(
-          config.dump_hlo_local_dir,
-          config.dump_hlo_gcs_dir,
-          module_name=config.dump_hlo_module_name,
-          delete_local_after=config.dump_hlo_delete_local_after,
-          all_host_upload=config.dump_hlo_upload_all,
-      )
-
-    if config.eval_interval > 0 and step > start_step and (step + 1) % config.eval_interval == 0:
-      assert eval_data_iterator
-      cumulative_eval_metrics = {
-          "scalar": {
-              "eval/total_loss": 0.0,
-              "eval/total_weights": 0.0,
-              "eval/avg_loss": 0.0,
-              "eval/moe_lb_loss": 0.0,
-          }
-      }
-      eval_dpo_reward_accuracy = 0.0
-      eval_step_count = 0
-      # pylint: disable=not-callable
-      for eval_batch in eval_data_iterator:
-        if config.eval_steps > 0 and eval_step_count >= config.eval_steps:
-          break
-        with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-          eval_metrics = p_eval_step(state, eval_batch, rng)
-        cumulative_eval_metrics["scalar"]["eval/total_loss"] += float(eval_metrics["scalar"]["evaluation/total_loss"])
-        cumulative_eval_metrics["scalar"]["eval/total_weights"] += float(eval_metrics["scalar"]["evaluation/total_weights"])
-        cumulative_eval_metrics["scalar"]["eval/moe_lb_loss"] += float(eval_metrics["scalar"]["evaluation/moe_lb_loss"])
-        eval_dpo_reward_accuracy += float(eval_metrics["scalar"].get("evaluation/dpo_reward_accuracy", 0.0))  # for dpo only
-        max_logging.log(f"Completed eval step {eval_step_count}")
-        eval_step_count += 1
-      eval_loss = cumulative_eval_metrics["scalar"]["eval/total_loss"] / (
-          cumulative_eval_metrics["scalar"]["eval/total_weights"] + EPS
-      )
-      cumulative_eval_metrics["scalar"]["eval/avg_loss"] = eval_loss
-      cumulative_eval_metrics["scalar"]["eval/avg_moe_lb_loss"] = (
-          cumulative_eval_metrics["scalar"]["eval/moe_lb_loss"] / eval_step_count
-      )
-      if config.use_dpo:
-        cumulative_eval_metrics["scalar"]["eval/dpo_reward_accuracy"] = eval_dpo_reward_accuracy / eval_step_count
-      metric_logger.write_metrics(running_gcs_metrics, cumulative_eval_metrics, step, is_training=False)
-      max_logging.log(
-          f"average loss after {step=}: {eval_step_count=}, {eval_loss=},"
-          f" total_weights={cumulative_eval_metrics['scalar']['eval/total_weights']}"
-      )
-      if eval_loss <= config.target_eval_loss:
-        max_logging.log(f"Early stop and exit loop after reaching {config.target_eval_loss=}")
-        prof.deactivate()
+    Args:
+      worker_inference_engine: The offline inference engine.
+      worker_tokenizer_model: The tokenizer model.
+      worker_config_inference: The inference configuration.
+      worker_config_train: The training configuration.
+      worker_data_buffer: The shared list used as a data buffer.
+      worker_data_buffer_lock: A lock for thread-safe buffer access.
+      worker_input_data_shardings: Sharding specs for the generated data.
+      engine_lock: A lock for thread-safe inference engine access.
+      stop_event: A threading.Event to signal when the worker should stop.
+    """
+    while not stop_event.is_set():
+      try:
+        with jax.profiler.StepTraceAnnotation("inference"):
+          generate_completions(
+              data_loader,
+              worker_inference_engine,
+              worker_tokenizer_model,
+              worker_config_inference,
+              worker_config_train,
+              worker_data_buffer,
+              worker_data_buffer_lock,
+              worker_input_data_shardings,
+              engine_lock,
+          )
+      except StopIteration:
+        max_logging.log("Data iterator exhausted in generation worker. Stopping.")
         break
+      except Exception as e:  # pylint: disable=broad-except
+        max_logging.log(f"Error in generation worker: {e}")
+        break
+    max_logging.log("Generation worker thread finished.")
 
-    if step == last_profiling_step or prof.should_deactivate_periodic_profile(step):
-      prof.deactivate(blocking_object=state)
+  stop_event = threading.Event()
+  inference_engine_lock = threading.Lock()
 
-    if step == start_step:
-      max_utils.print_mem_stats("After params initialized")
+  max_logging.log("Inference Rollout")
+  generate_completions(
+      data_loader,
+      inference_engine,
+      tokenizer_model,
+      config_inference,
+      config,
+      data_buffer,
+      data_buffer_lock,
+      data_sharding,
+      inference_engine_lock,
+  )
 
-  if checkpoint_manager is not None:
-    checkpoint_manager.wait_until_finished()
-  metric_logger.write_metrics(running_gcs_metrics, metrics, config.steps - 1)  # final step metrics
-  max_utils.close_summary_writer(writer)
-  record_goodput(recorder, config, recorder.record_job_end_time if recorder else None)
-  with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-    compiled = p_train_step.lower(state, example_batch, rng).compile()
-    compiled_stats = compiled.memory_analysis()
-    if compiled_stats is not None:
-      max_logging.log(
-          f"Output size: {compiled_stats.output_size_in_bytes}, "
-          f"temp size: {compiled_stats.temp_size_in_bytes}, "
-          f"argument size: {compiled_stats.argument_size_in_bytes}, "
-          f"host temp size: {compiled_stats.host_temp_size_in_bytes}, in bytes."
-      )
+  required_batch_size = int(config.per_device_batch_size * config.num_generations * mesh.size)
+  generation_thread = threading.Thread(
+      target=generation_worker_fn,
+      args=(
+          inference_engine,  # Shared inference engine
+          tokenizer_model,
+          config_inference,
+          config,  # Main config for load_next_batch
+          data_buffer,
+          data_buffer_lock,
+          data_sharding,  # Sharding for the data put into the buffer
+          inference_engine_lock,
+          stop_event,
+      ),
+      daemon=True,  # So it exits when the main thread exits
+  )
+  generation_thread.start()
+
+  try:
+    last_step_completion = datetime.datetime.now()
+    for step in np.arange(start_step, config.steps):
+      prof.maybe_activate_profiler(step, state)
+
+      with jax.profiler.StepTraceAnnotation("train", step_num=step):
+        while True:
+          with data_buffer_lock:
+            if not data_buffer and not generation_thread.is_alive():
+              max_logging.log("Generation worker is not alive and data buffer is empty. Exiting.")
+              break
+            if data_buffer:
+              example_batch = data_buffer[0]
+              if example_batch[config.train_data_columns].shape[0] >= required_batch_size:
+                example_batch = jax.tree_util.tree_map(lambda arr: arr[:required_batch_size], data_buffer[0])
+                data_buffer[0] = jax.tree_util.tree_map(lambda arr: arr[required_batch_size:], data_buffer[0])
+                break
+              else:
+                time.sleep(0.1)
+                continue
+            else:
+              time.sleep(0.1)
+              continue
+        train_rng, rng = random.split(init_rng)
+        example_batch = jax.device_put(example_batch, data_sharding)
+        with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+          state, metrics = p_train_step(state, example_batch, train_rng)
+      with jax.profiler.StepTraceAnnotation("transfer data", step_num=step):
+        if step != 0 and step % config.inference_rollouts == 0:
+          grpo_utils.pathways_reshard(
+              config_inference,
+              inference_engine,
+              {"params": state.params["params"]},
+              {"params": state_mesh_shardings.params["params"]},
+              mesh,
+              inference_state_mesh_shardings,
+          )
+
+      step_time_delta = datetime.datetime.now() - last_step_completion
+      last_step_completion = datetime.datetime.now()
+
+      state_to_save = _split_grpo_state(state)[0]
+      checkpointing.maybe_save_checkpoint(checkpoint_manager, state_to_save, config, data_iterator, step)
+
+      if config.dump_hlo and step == start_step:
+        jax.block_until_ready(state)  # Ensure compilation has finished.
+        gcs_utils.upload_dump(
+            config.dump_hlo_local_dir,
+            config.dump_hlo_gcs_dir,
+            module_name=config.dump_hlo_module_name,
+            delete_local_after=config.dump_hlo_delete_local_after,
+            all_host_upload=config.dump_hlo_upload_all,
+        )
+
+      if config.eval_interval > 0 and step > start_step and (step + 1) % config.eval_interval == 0:
+        assert eval_data_iterator
+        eval_step_count = 0
+        # pylint: disable=not-callable
+        for eval_batch in eval_data_iterator:
+          if 0 < config.eval_steps <= eval_step_count:
+            break
+          with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+            eval_metrics = p_eval_step(state, eval_batch, rng)
+          metric_logger.record_eval_metrics(step, metrics=eval_metrics)
+          max_logging.log(f"Completed eval step {eval_step_count}")
+          eval_step_count += 1
+        metric_logger.record_eval_metrics(step, eval_step_count=eval_step_count)
+        if metric_logger.cumulative_eval_metrics["scalar"]["eval/avg_loss"] <= config.target_eval_loss:
+          prof.deactivate()
+          raise exceptions.StopTraining(f"Target loss {config.target_eval_loss=} is achieved.")
+
+      prof.maybe_deactivate_profiler(step, state)
+
+      if step == start_step:
+        max_utils.print_mem_stats("After params initialized")
+
+      metric_logger.buffer_and_write_train_metrics(metrics, step, step_time_delta)
+      state_to_save = _split_grpo_state(state)[0]
+      checkpointing.maybe_save_checkpoint(checkpoint_manager, state_to_save, config, data_iterator)
+  except exceptions.StopTraining as e:
+    max_logging.log(f"Training stopped: {str(e)}")
+  finally:
+    metric_logger.flush_metrics_and_cleanup()
+    max_logging.log("Training loop finished or exited. Signaling generation worker to stop.")
+    stop_event.set()
+    # Wait for the generation thread to finish
+    generation_thread.join(timeout=60.0)  # Increased timeout
+    if generation_thread.is_alive():
+      max_logging.log("Warning: Generation worker did not stop in time after loop completion.")
+
   return state
 
 
 def main(argv: Sequence[str]) -> None:
+  """Main entry point for the GRPO training script.
+
+  This function parses command-line arguments, initializes configurations for
+  training and inference, sets up system environment variables, and launches
+  the `train_loop`.
+  """
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
   # TF allocates extraneous GPU memory when using TFDS data
   # this leads to CUDA OOMs. WAR for now is to hide GPUs from TF
   tf.config.set_visible_devices([], "GPU")
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
   if "xla_tpu_spmd_rng_bit_generator_unsafe" not in os.environ.get("LIBTPU_INIT_ARGS", ""):
-    os.environ["LIBTPU_INIT_ARGS"] = os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
-  config = pyconfig.initialize(argv)
+    os.environ["LIBTPU_INIT_ARGS"] = (
+        os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
+    )
+  configs_argv = max_utils.parse_custom_args(argv)
+  config = pyconfig.initialize(configs_argv[0])
   if not config.use_grpo:
     raise ValueError("Please set the value of use_grpo to True")
+  if config.inference_rollouts < 1 or config.inference_rollouts > config.steps:
+    raise ValueError(
+        f"Please set the value of inference_rollouts to be less than {config.steps} or greater than 1. "
+        f"Current value: {config.inference_rollouts}"
+    )
   if config.decode_sampling_strategy == "greedy" or config.decode_sampling_temperature == 0.0:
     raise ValueError(
         "Please set decode_sampling_strategy as 'weighted' and decode_sampling_temperature as a positive number"
     )
-  config_inference = pyconfig.initialize(
-      list(argv)
-      + ["ici_tensor_parallelism=4", "per_device_batch_size=" + str(config.per_device_batch_size * config.num_generations)]
-  )
+  if config.inference_devices_per_replica * config.inference_replicas >= jax.device_count():
+    raise ValueError(
+        f"Invalid value chosen for {config.inference_devices_per_replica=} and {config.inference_replicas=} "
+        f"with {jax.device_count()} devices"
+    )
+  config_inference = pyconfig.initialize(configs_argv[1])
+  if config.per_device_batch_size < 1.0 or config_inference.per_device_batch_size < 1.0:
+    raise ValueError("GRPO does not support setting per_device_batch_size < 1.0")
+  jax.config.update("jax_use_shardy_partitioner", config.shardy)
   max_utils.print_system_information()
   validate_train_config(config)
   os.environ["TFDS_DATA_DIR"] = config.dataset_path
@@ -947,19 +935,11 @@ def main(argv: Sequence[str]) -> None:
   if config.use_vertex_tensorboard or os.environ.get("UPLOAD_DATA_TO_TENSORBOARD"):
     vertex_tensorboard_manager.configure_vertex_tensorboard(config)
 
-  if config.monitor_goodput and jax.process_index() == 0:
-    logger_name = f"goodput_{config.run_name}"
-    goodput_monitor = monitoring.GoodputMonitor(
-        job_name=config.run_name,
-        logger_name=logger_name,
-        tensorboard_dir=config.tensorboard_dir,
-        upload_interval=config.goodput_upload_interval_seconds,
-        monitoring_enabled=True,
-        pathway_enabled=config.enable_pathways_goodput,
-        include_badput_breakdown=True,
-    )
-    goodput_monitor.start_goodput_uploader()
-    max_logging.log("Started Goodput upload to Tensorboard in the background!")
+  # Goodput configurations
+  maybe_monitor_goodput(config)
+  recorder = create_goodput_recorder(config)
+
+  # Stack traces configurations
   debug_config = debug_configuration.DebugConfig(
       stack_trace_config=stack_trace_configuration.StackTraceConfig(
           collect_stack_trace=config.collect_stack_trace,
@@ -968,8 +948,10 @@ def main(argv: Sequence[str]) -> None:
       )
   )
   diagnostic_config = diagnostic_configuration.DiagnosticConfig(debug_config)
+
   with diagnostic.diagnose(diagnostic_config):
-    train_loop(config, config_inference)
+    with maybe_record_goodput(recorder, GoodputEvent.JOB):
+      train_loop(config, config_inference, recorder)
 
 
 if __name__ == "__main__":

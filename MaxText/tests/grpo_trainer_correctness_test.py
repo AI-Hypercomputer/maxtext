@@ -1,18 +1,23 @@
-#  Copyright 2025 Google LLC
+# Copyright 2023–2025 Google LLC
 #
-#  Licensed under the Apache License, Version 2.0 (the "License");
-#  you may not use this file except in compliance with the License.
-#  You may obtain a copy of the License at
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
 #
-#       https://www.apache.org/licenses/LICENSE-2.0
+#    https://www.apache.org/licenses/LICENSE-2.0
 #
-#  Unless required by applicable law or agreed to in writing, software
-#  distributed under the License is distributed on an "AS IS" BASIS,
-#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-#  See the License for the specific language governing permissions and
-#  limitations under the License.
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """
+ATTENTION: This unit test should only be run on TPU v4-8. The test
+may fail on different versions like v5p-8, v6e-8
+
+TODO: b/413146740 - Match logits on other TPU versions
+
 Runs GRPO trainer unit test correctness with golden logits generated
   from maxtext/MaxText/scratch_code/generate_grpo_golden_logits.py
 
@@ -20,46 +25,52 @@ Usage:
   pytest MaxText/tests/grpo_trainer_correctness_test.py
 """
 
-import functools
-import subprocess
-import jax
-import jax.numpy as jnp
-import jsonlines
-import numpy as np
 import os
-import pytest
+import subprocess
 import unittest
 
+import pytest
+
+import jsonlines
+
+import numpy as np
+
+import jax
+import jax.numpy as jnp
 from jax.sharding import Mesh
+
 from flax import linen as nn
-from MaxText.globals import PKG_DIR
 
+import transformers
 
+from MaxText import maxengine
 from MaxText import maxtext_utils
 from MaxText import pyconfig
+import MaxText as mt
+from MaxText.common_types import MODEL_MODE_TRAIN
+from MaxText.experimental.rl.grpo_trainer import grpo_loss_fn, _merge_grpo_state
+from MaxText.experimental.rl.grpo_utils import compute_log_probs
+from MaxText.inference import offline_engine
+from MaxText.globals import PKG_DIR
 from MaxText.layers import models
 from MaxText.layers import quantizations
-
-from MaxText.experimental.rl.grpo_trainer import compute_log_probs, grpo_loss_fn, _merge_grpo_state, generate_completions
-from MaxText import maxengine
-import transformers
+from MaxText.inference.offline_engine import InputData
 
 
 def get_golden_data(config):
   """Get the golden data for GrpoTrainer from maxtext/MaxText/scratch_code/generate_grpo_golden_logits.py."""
-  golden_data_path = os.path.join(PKG_DIR, "test_assets", f"golden_data_grpo_{config.model_name}.jsonl")
-  print(f"Loading {golden_data_path}")
-  with jsonlines.open(golden_data_path, "r") as f:
-    golden_data = list(f)
-  return golden_data[0]
+  input_golden_data_path = os.path.join(PKG_DIR, "test_assets", f"golden_data_grpo_{config.model_name}.jsonl")
+  print(f"Loading {input_golden_data_path}")
+  with jsonlines.open(input_golden_data_path, "r") as reader:
+    return next(iter(reader))
 
 
-def setup_maxtext_model(config):
+def setup_maxtext_model(config, mesh):
+  """setup maxtext model"""
   init_rng = jax.random.PRNGKey(config.init_weights_seed)
   quant = quantizations.configure_quantization(config)
-  devices_array = maxtext_utils.create_device_mesh(config)
-  mesh = Mesh(devices_array, config.mesh_axes)
-  maxtext_model = models.Transformer(config=config, mesh=mesh, quant=quant)
+
+  maxtext_model = models.Transformer(config=config, mesh=mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
   state, state_mesh_annotations = maxtext_utils.setup_decode_state(maxtext_model, config, init_rng, mesh, None)
   state_mesh_shardings = nn.logical_to_mesh_sharding(state_mesh_annotations, mesh, config.logical_axis_rules)
   data_sharding = jax.NamedSharding(mesh, jax.sharding.PartitionSpec(None))
@@ -69,6 +80,7 @@ def setup_maxtext_model(config):
 
 
 def prepare_maxtext_inputs(input_str, tokenizer_model):
+  """prepare maxtext inputs"""
   prompt = tokenizer_model.encode(input_str)
   input_ids = jnp.pad(
       jnp.tile(jnp.concat([jnp.array(prompt), jnp.array(prompt)], axis=-1), (4, 1)),
@@ -87,6 +99,7 @@ class GrpoTrainerTest(unittest.TestCase):
 
   def setUp(self):
     super().setUp()
+    jax.config.update("jax_default_prng_impl", "unsafe_rbg")
     command = [
         "gsutil",
         "cp",
@@ -102,6 +115,7 @@ class GrpoTrainerTest(unittest.TestCase):
         run_name="unit_test_grpo_trainer",
         tokenizer_path=os.path.join(os.path.dirname(PKG_DIR), "assets", "llama3.1-tokenizer"),
         enable_checkpointing=False,
+        train_data_columns="prompt",
     )
     self.config_inference = pyconfig.initialize(
         [None, "MaxText/experimental/rl/grpo_trainer_test.yml"],
@@ -111,6 +125,8 @@ class GrpoTrainerTest(unittest.TestCase):
         ici_tensor_parallelism=4,
         per_device_batch_size=self.config.per_device_batch_size * self.config.num_generations,
     )
+    self.model = mt.from_pretrained(self.config)
+    self.inference_model = mt.from_pretrained(self.config_inference)
     self.rtol = 1e-05
     self.atol = 1e-08
     self.rng = jax.random.PRNGKey(self.config.init_weights_seed)
@@ -121,14 +137,21 @@ class GrpoTrainerTest(unittest.TestCase):
         legacy=False,
         padding_side="left",
     )
+    devices_array = maxtext_utils.create_device_mesh(self.config_inference)
+    self.mesh = Mesh(devices_array, self.config_inference.mesh_axes)
     self.tokenizer_model.add_special_tokens({"pad_token": "<pad>"})
+    self.inference_engine = offline_engine.OfflineEngine(
+        config=self.config_inference,
+        mesh=self.inference_model.mesh,
+    )
 
-  @pytest.mark.tpu_only
+  @pytest.mark.skip(reason="Logit output test fragile, failing on jax upgrade to 0.6.2 - see b/425997645")
+  @pytest.mark.tpu_only  # ATTENTION: Only run on TPU V4-8
   def test_grpo_trainer_correctness(self):
     # Get the expected (golden) data.
     golden_data = get_golden_data(self.config)
     # Initialize the model and related objects.
-    maxtext_model, state, reference_params, rng, state_mesh_shardings, data_sharding = setup_maxtext_model(self.config)
+    maxtext_model, state, reference_params, rng, _, _ = setup_maxtext_model(self.config, self.mesh)
     # Prepare inputs for the model.
     input_ids, input_segmentation, input_position, completion_segmentation = prepare_maxtext_inputs(
         self.config.prompt, self.tokenizer_model
@@ -190,15 +213,21 @@ class GrpoTrainerTest(unittest.TestCase):
     )
     prompt_true_length = jnp.array([len(prompt_tokens)] * 4)
     engine_data = {"prompt": prompt, "prompt_true_length": prompt_true_length}
-    p_generate_completions = jax.jit(
-        functools.partial(generate_completions, self.config, self.tokenizer_model, engine),
-        in_shardings=(data_sharding, state_mesh_shardings.params, None),
-        out_shardings=data_sharding,
-        donate_argnums=(0,),
-    )
-    engine_data = p_generate_completions(engine_data, {"params": state.params["params"]}, rng)
+
+    input_data = []
+    for i, d in enumerate(engine_data[self.config.train_data_columns]):
+      input_data.append(
+          InputData(
+              id=f"input_{i}",
+              tokens=np.array(d),
+              true_length=np.array(data[f"{self.config.train_data_columns}_true_length"][i])[0],
+          )
+      )
+
+    results = self.inference_engine.batch_inference(input_data)
+
     # Assert that the generated completions match the golden reference.
-    self.assertEqual(engine_data["prompt_completions"][0].tolist(), golden_data["generated_completions"])
+    self.assertEqual(results[0]["prompt_completions"].tolist(), golden_data["generated_completions"])
 
 
 if __name__ == "__main__":

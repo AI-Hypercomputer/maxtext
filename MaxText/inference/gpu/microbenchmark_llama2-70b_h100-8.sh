@@ -1,12 +1,12 @@
 #!/bin/bash
 
-# Copyright 2025 Google LLC
+# Copyright 2023–2025 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+#    https://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -24,7 +24,7 @@ helpFunction()
    echo "Usage: $0 [-p] [-s stages] [-r run_name]"
    echo -e "\t-p Enable profiler"
    echo -e "\t-r Specify run name"
-   echo -e "\t-s Specify comma-separated benchmark stages [prefill|prefix_cache|prefill-multisampling|generate] (default: prefill,generate)"
+   echo -e "\t-s Specify comma-separated benchmark stages [prefill|prefill-multisampling|generate] (default: prefill,generate)"
    exit 1
 }
 
@@ -44,14 +44,17 @@ done
 IFS=',' read -ra stage <<< "$stages"
 for i in "${stage[@]}"; do
     case "$i" in
-        prefill|prefix_cache|prefill-multisampling|generate) ;;
-        *) echo "Invalid benchmark stage '$i'. Must be: prefill, prefix_cache, prefill-multisampling, or generate."; exit 1 ;;
+        prefill|prefill-multisampling|generate) ;;
+        *) echo "Invalid benchmark stage '$i'. Must be: prefill, prefill-multisampling, or generate."; exit 1 ;;
     esac
 done
 
 # Default parameters
 if [[ -z ${BASE_OUTPUT_DIRECTORY} ]] ; then
     export BASE_OUTPUT_DIRECTORY="/tmp/maxtext"
+fi
+if [[ -z ${INFERENCE_LOG_FILE_PATH} ]] ; then
+    export INFERENCE_LOG_FILE_PATH="${BASE_OUTPUT_DIRECTORY}/microbenchmark_llama2-70b_h100-8_results.txt"
 fi
 if [[ -z ${MAXENGINE_CONFIG_FILEPATH} ]] ; then
     MAXENGINE_CONFIG_FILEPATH="$(dirname $0)/../../configs/inference.yml"
@@ -82,6 +85,9 @@ PROFILER_STR=""
 if [[ "$enable_profiler" = true ]] ; then
     PROFILER_STR=" profiler=xplane"
 fi
+if [[ -z ${GCS_METRICS} ]] ; then
+    GCS_METRICS=False
+fi
 
 # Get max prefill length
 IFS=',' read -r -a prefill_lengths_arr <<< "$PREFILL_LENGTHS"
@@ -110,6 +116,7 @@ python3 -m MaxText.inference_microbenchmark $MAXENGINE_CONFIG_FILEPATH  \
     inference_microbenchmark_prefill_lengths=$PREFILL_LENGTHS  \
     inference_microbenchmark_stages=$stages \
     inference_microbenchmark_loop_iters=64 \
+    inference_microbenchmark_log_file_path=$INFERENCE_LOG_FILE_PATH \
     run_name=$run_name \
     ici_fsdp_parallelism=1 \
     ici_autoregressive_parallelism=$AUTOREGRESSIVE_PARALLELISM \
@@ -117,4 +124,5 @@ python3 -m MaxText.inference_microbenchmark $MAXENGINE_CONFIG_FILEPATH  \
     weight_dtype=bfloat16 \
     kv_quant_dtype=$KV_QUANT_DTYPE \
     quantize_kvcache=$QUANTIZE_KVCACHE \
-    quantization=$QUANTIZATION$PROFILER_STR
+    quantization=$QUANTIZATION$PROFILER_STR \
+    gcs_metrics=$GCS_METRICS 

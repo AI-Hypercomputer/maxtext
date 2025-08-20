@@ -1,0 +1,9 @@
+Check if every parameter of Huggingface is covered in the given code. 
+If yes, only answer 'passed'
+If no, point out the uncovered parameters
+
+Hugging Face Parameters:
+{hf_params_json}
+
+Code:
+{code}

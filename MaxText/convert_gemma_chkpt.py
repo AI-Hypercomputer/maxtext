@@ -1,39 +1,40 @@
-"""
-Copyright 2023 Google LLC
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-     https://www.apache.org/licenses/LICENSE-2.0
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-"""
+# Copyright 2023–2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 # pylint: disable=line-too-long
 """
 Convert orbax Gemma checkpoint to MaxText compatible checkpoint.
 """
 
-import jax
-import jax.numpy as jnp
-import numpy as np
-
-jax.config.update("jax_platform_name", "cpu")
+from typing import Any
 import argparse
 import copy
-from flax.training import train_state
-
-from typing import Any
 import sys
-from MaxText import max_logging
 
+import numpy as np
+
+import jax
+import jax.numpy as jnp
+
+from flax.training import train_state
 
 import orbax
 
 from MaxText import checkpointing
-from MaxText.train import save_checkpoint
+from MaxText import max_logging
+
+jax.config.update("jax_platform_name", "cpu")
 
 Params = dict[str, Any]
 
@@ -57,7 +58,7 @@ def main(raw_args=None) -> None:
   parser.add_argument("--model_size", type=str, required=True)
   args = parser.parse_args(raw_args)
   if args.model_size not in ("2b", "7b", "9b"):
-    raise NotImplementedError
+    raise NotImplementedError(args.model_size)
 
   print("Loading checkpoint")
   checkpointer = orbax.checkpoint.PyTreeCheckpointer()
@@ -171,7 +172,7 @@ def main(raw_args=None) -> None:
   )
 
   if checkpoint_manager is not None:
-    if save_checkpoint(checkpoint_manager, 0, state_new):
+    if checkpointing.save_checkpoint(checkpoint_manager, 0, state_new):
       max_logging.log("saved a checkpoint at step 0")
     # Upon preemption, exit when and only when all ongoing saves are complete.
     if checkpoint_manager.reached_preemption(0):

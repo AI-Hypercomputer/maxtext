@@ -1,10 +1,10 @@
-# Copyright 2024 Google LLC
+# Copyright 2023–2025 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     https://www.apache.org/licenses/LICENSE-2.0
+#    https://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -29,14 +29,16 @@ def tpu_kind() -> str:
   return jax.devices()[0].device_kind
 
 
-_TPU_KIND_PATTERN = re.compile(r"TPU v(\d+)")
+# Ex: VPU v5; TPU v5 lite; TPU7x
+_TPU_KIND_PATTERN = re.compile(r"TPU(?: v)?(\d+)")
 
 
 def tpu_generation() -> int:
   """Generation number of the currently attached TPU."""
-  if version := _TPU_KIND_PATTERN.match(tpu_kind()):
+  my_tpu_kind = tpu_kind()
+  if version := _TPU_KIND_PATTERN.match(my_tpu_kind):
     return int(version[1])
-  raise NotImplementedError("only TPU devices are supported")
+  raise NotImplementedError(f"Only TPU devices are supported: Invalid device_kind: '{my_tpu_kind}'")
 
 
 def supports_bfloat16_matmul() -> bool:

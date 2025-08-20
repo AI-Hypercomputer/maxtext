@@ -1,17 +1,17 @@
 <!--
- Copyright 2025 Google LLC
-
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
-
-      https://www.apache.org/licenses/LICENSE-2.0
-
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
+ # Copyright 2023–2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 -->
 ## ML Goodput Measurement
 MaxText supports automatic measurement and upload of workload metrics such as Goodput, Badput Breakdown and Step Time Deviation using the ML Goodput Measurement library.
@@ -151,52 +151,30 @@ goodput_monitor = monitoring.GoodputMonitor(
 If you do not wish to send metrics to Google Cloud Monitoring then please set
 the flag `enable_gcp_goodput_metrics` to `False` for disabling goodput metrics
 and `enable_gcp_step_deviation_metrics` to `False` for disabling step deviation
-metrics while creating the GCPOptions object.
+metrics.
 
-Setting `monitoring_enabled` to `False` will disable both tensorboard and GCM
+```Python
+python3 -m MaxText.train MaxText/configs/base.yml base_output_directory=$OUTPUT_PATH dataset_path=$DATA_PATH run_name=goodput-test-run steps=200 goodput_upload_interval_seconds=30 enable_gcp_goodput_metrics=False enable_gcp_step_deviation_metrics=False
+```
+
+Setting `monitor_goodput` to `False` will disable both tensorboard and GCM
 monitoring.
 
-```python
-
-gcp_options = goodput_utils.GCPOptions(
-      project_id=None, # If None, the library will automatically identify from GCE internal metadata
-      location=None, # If None, the library will automatically identify from GCE internal metadata
-      replica_id='0', # Default is '0'
-      acc_type=None, # If None, the library will automatically identify from GCE internal metadata
-      enable_gcp_goodput_metrics=False,
-      enable_gcp_step_deviation_metrics=False,
-    )
-
-
-goodput_monitor = monitoring.GoodputMonitor(
-      job_name=config.run_name,
-      logger_name=logger_name,
-      tensorboard_dir=config.tensorboard_dir,
-      upload_interval=config.goodput_upload_interval_seconds,
-      monitoring_enabled=True,
-      include_badput_breakdown=True,
-      include_step_deviation=True,
-      configured_ideal_step_time=None,
-      gcp_options=gcp_options,
-    )
-```
-#### Monitoring Dashboards
-
-Goodput, Badput and Step Time Deviation metrics can be visualized using GCM dashboards:
-
-1. Navigate to your projects Google Cloud Monitoring `Dashboards` page.
-2. Create a Custom Dashboard if you do not have one already, and select the [metrics](https://cloud.google.com/monitoring/api/metrics_gcp) you want to monitor.
-   - compute.googleapis.com/workload/goodput_time (Goodput)
-   - compute.googleapis.com/workload/badput_time (Badput Breakdown)
-   - compute.googleapis.com/workload/performance (Step Time Deviation)
-
-
-#### Monitoring Raw Metrics
+#### Monitoring Raw Metrics and Dashboards
 
 Goodput, Badput and Step Time Deviation metrics can be monitored using GCM Metrics Explorer:
 
-1. Navigate to your projects Google Cloud Monitoring `Metrics Explorer` page.
-2. Select the [metrics](https://cloud.google.com/monitoring/api/metrics_gcp) you want to monitor:
-   - compute.googleapis.com/workload/goodput_time (Goodput)
-   - compute.googleapis.com/workload/badput_time (Badput Breakdown)
-   - compute.googleapis.com/workload/performance (Step Time Deviation)
+1.  Verify that the workload is executing with monitoring enabled. This ensures automatic data ingestion into Google Cloud Monitoring.
+2.  Navigate to [Metrics Explorer](https://console.cloud.google.com/monitoring/metrics-explorer). Initiate metric selection by clicking `Select a metric` then search for and select the `Workload` resource. Subsequently, choose the `Workload` metric category.
+
+    a.  [**Productive Time:**](https://cloud.google.com/monitoring/api/metrics_gcp#:~:text=workload/goodput_time)
+    Represents the cumulative duration the workload spent on productive tasks,
+    measured by `compute.googleapis.com/workload/goodput_time`.  
+    b.  [**Non-Productive Time:**](https://cloud.google.com/monitoring/api/metrics_gcp#:~:text=workload/badput_time)
+    Represents the cumulative duration the workload spent on non-productive tasks,
+    measured by `compute.googleapis.com/workload/badput_time`.  
+    c.  [**Performance:**](https://cloud.google.com/monitoring/api/metrics_gcp#:~:text=workload/performance)
+    Represents the workload's performance metric, specifically step deviation
+    in this context, measured by `compute.googleapis.com/workload/performance`.  
+3.  Navigate to [Dashboards](https://console.cloud.google.com/monitoring/dashboards).
+4.  Create a custom dashboard if there isn't one and add useful widgets with the above mentioned metrics.

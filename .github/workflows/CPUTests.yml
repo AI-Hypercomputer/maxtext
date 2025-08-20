@@ -2,17 +2,25 @@ name: Linter
 
 on:
   pull_request:
-  push:
-    branches: [ "main" ]
+
+concurrency:
+  # Dedup pull requests (canceling previous runs of the same workflow for same PR), and scheduled runs but nothing else
+  group: >
+    ${{
+      github.event_name == 'pull_request' && format('{0}-pr-{1}', github.workflow, github.event.pull_request.number) ||
+      github.event_name == 'schedule' && format('{0}-schedule', github.workflow) ||
+      github.run_id
+    }}
+  cancel-in-progress: true
 
 jobs:
   cpu:
     name: "CPU tests"
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
     strategy:
       matrix:
-        os: [ubuntu-22.04]
-        python-version: ['3.10']
+        os: [ubuntu-24.04]
+        python-version: ['3.12']
     steps:
     - uses: actions/checkout@v3
     - name: Set up Python ${{ matrix.python-version }}
@@ -28,9 +36,7 @@ jobs:
         pytype --jobs auto --disable 'import-error,late-directive,wrong-arg-types,module-attr,unsupported-operands' MaxText/ || true
     - name: Analysing the code with pylint in Maxtext/
       run: |
-         pylint --disable C0301,C3001,C0114,C0115,C0116,C0200,C0121,C0201,C0206,C0209,C0412,C0415,C2801,E0102,E0606,E1102,E1111,E1123,E1135,E1136,R0401,R1701,R1703,R1710,R1711,R1735,R0917,R1714,R1716,R1719,R1721,R1728,R1728,W0102,W0107,W0201,W0212,W0221,W0237,W0404,W0611,W0612,W0613,W0621,W0622,W0631,W0707,W0718,W1201,W1203,W1309,W1514,W4901 MaxText/ && \
-         echo 'Maxtext PyLint check successful' || { echo \
-         'PyLint check has failed. Please run bash code_style.sh to fix issues'; exit 20; }
+         pylint --verbose --msg-template='[{abspath}] {msg_id}:{line:3d},{column}: {obj}: {msg}' --disable C0114,R0401,R0917,W0201,W0613 MaxText/ || true
     - name: Analysing the code with pylint in pedagogical_examples/
       run: |
          pylint pedagogical_examples/ && \

@@ -1,29 +1,28 @@
-"""
-Copyright 2023 Google LLC
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-     https://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-"""
+# Copyright 2023–2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """ Common LoRA utils needed to support LoRA adapters."""
 
-from MaxText import checkpointing
-import os
 import json
+
 import jax
 import jax.numpy as jnp
+
 from flax.training import train_state
 from flax.linen import partitioning as nn_partitioning
 
+from MaxText import checkpointing
 from MaxText import max_utils
 from MaxText import maxtext_utils
 from MaxText import max_logging
@@ -119,7 +118,7 @@ def load_adapter(config, base_abstract_state_params, adapter_config_path, adapte
     if adapter_config_path.startswith("gs://"):
       lora_config = gcs_utils.read_json_from_gcs(adapter_config_path)
     else:
-      with open(adapter_config_path, "r") as f:
+      with open(adapter_config_path, "rt", encoding="utf8") as f:
         lora_config = json.load(f)
 
     if lora_config is None:
@@ -132,7 +131,11 @@ def load_adapter(config, base_abstract_state_params, adapter_config_path, adapte
 
     with nn_partitioning.axis_rules(config.logical_axis_rules):
       lora_params = checkpointing.load_params_from_path(
-          adapter_weights_path, lora_state.params, config.checkpoint_storage_concurrent_gb
+          adapter_weights_path,
+          lora_state.params,
+          config.checkpoint_storage_concurrent_gb,
+          config.checkpoint_storage_use_ocdbt,
+          config.checkpoint_storage_use_zarr3,
       )
 
   return lora_params, lora_config
@@ -163,9 +166,7 @@ def setup_initial_lora_state(model, data_iterator, tx, config, rng, mesh, checkp
 
   if lora_adapter_path:
     max_logging.log(f"Setting initial state of LoRA with lora_adapter_path = {lora_adapter_path}")
-    unboxed_abstract_state, state_mesh_annotations, state_mesh_shardings = maxtext_utils.get_abstract_state(
-        model, tx, config, rng, mesh, True
-    )
+    unboxed_abstract_state, _, _ = maxtext_utils.get_abstract_state(model, tx, config, rng, mesh, True)
 
     lora_config_path = lora_adapter_path + "adapter_config.json"
 
@@ -185,6 +186,8 @@ def setup_initial_lora_state(model, data_iterator, tx, config, rng, mesh, checkp
           lora_state,
           config.enable_single_replica_ckpt_restoring,
           config.dataset_type,
+          use_ocdbt=config.checkpoint_storage_use_ocdbt,
+          use_zarr3=config.checkpoint_storage_use_zarr3,
       )
 
       if restored_lora:
@@ -255,7 +258,7 @@ def get_lora_abstract_state(base_abstract_params, lora_config):
     base_sharding_pspec_size = len(base_param_sharding.spec)
 
     if base_sharding_pspec_size > 4:
-      raise ValueError(f"Encountered unexpected size of PartitionSpec in sharding. Size > 4 is not supported")
+      raise ValueError("Encountered unexpected size of PartitionSpec in sharding. Size > 4 is not supported")
 
     base_mesh = base_param_sharding.mesh
     base_memory_kind = base_param_sharding.memory_kind
@@ -308,10 +311,10 @@ def get_lora_abstract_state(base_abstract_params, lora_config):
           raise ValueError(f"Unexpected key={name} exists in the abstract params of base model.")
 
         if not isinstance(param, jax.ShapeDtypeStruct):
-          raise ValueError(f"Unexpected type found in the abstract params of the base model.")
+          raise ValueError("Unexpected type found in the abstract params of the base model.")
 
-        lora_a_key = f"lora_a.kernel"
-        lora_b_key = f"lora_b.kernel"
+        lora_a_key = "lora_a.kernel"
+        lora_b_key = "lora_b.kernel"
 
         target_module = module_is_target_module(module_name, lora_target_modules)
 

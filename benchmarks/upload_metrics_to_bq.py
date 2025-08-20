@@ -1,36 +1,37 @@
-"""
- Copyright 2025 Google LLC
-
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
-
-      https://www.apache.org/licenses/LICENSE-2.0
-
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
- """
+# Copyright 2023–2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 import argparse
-from typing import Any, Dict, Sequence
-from statistics import median
-
-import omegaconf
-from command_utils import run_command_with_updates
-# from benchmark_db_utils import install_mantaray_locally
-from benchmark_db_utils import write_run
-from benchmark_db_utils import DEFAULT_LOCAL_DIR
-from benchmark_db_utils import recover_tuning_params
-from benchmark_db_utils import Metrics
-from MaxText.inference_utils import str2bool
 import dataclasses
-import fnmatch
 import getpass
 import json
 import os
 import sys
+from typing import Any, Dict, Sequence
+
+import fnmatch
+
+from statistics import median
+
+import omegaconf
+
+from benchmarks.command_utils import run_command_with_updates
+from benchmarks.benchmark_db_utils import write_run
+from benchmarks.benchmark_db_utils import DEFAULT_LOCAL_DIR
+from benchmarks.benchmark_db_utils import recover_tuning_params
+from benchmarks.benchmark_db_utils import Metrics
+
+from MaxText.inference_utils import str2bool
 
 
 hardware_id_to_bf16_tflops = {"v4": 275,
@@ -181,7 +182,7 @@ def download_metrics_file_locally(metrics_gcs_file: str, local_file: str) -> int
 # Get the last n datapoints for a target metric
 def get_last_n_data(metrics_file, target, n=10):
   last_n_data = []
-  with open(metrics_file, 'r', encoding='utf8') as file:
+  with open(metrics_file, 'rt', encoding='utf8') as file:
     lines = file.readlines()
     for line in lines[::-1]:
       metrics = json.loads(line)
@@ -235,8 +236,12 @@ def update_config_with_tuning_params(base_config: omegaconf.DictConfig,
 
 
 def main(argv: Sequence[str]) -> None:
-  # only write once
-  if int(os.environ["TPU_WORKER_ID"]) != 0:
+  is_pathways = os.environ.get('JAX_PLATFORMS', '') == 'proxy'
+  is_mcjax_0th_worker = int(os.environ.get('TPU_WORKER_ID', -1)) == 0
+
+  # Only write once for McJAX. Pathways is single controller,
+  # so only can write once.
+  if not (is_pathways or is_mcjax_0th_worker):
     return
 
   parser = argparse.ArgumentParser(
@@ -253,9 +258,9 @@ def main(argv: Sequence[str]) -> None:
   local_metrics_file = local_dir
   print(f"Attempting metrics download from {options.metrics_gcs_file} to {local_metrics_file}.",flush=True)
   rc = download_metrics_file_locally(metrics_gcs_file=options.metrics_gcs_file, local_file=local_metrics_file)
-  if rc != 0:
+  if rc != os.EX_OK:
     print("metrics download FAIL")
-    exit(rc)
+    sys.exit(rc)
   print("metrics download SUCCESS")
 
   # Parse Metrics
@@ -277,7 +282,7 @@ def main(argv: Sequence[str]) -> None:
   number_of_chips = int(options.number_of_chips)
   if options.hardware_id.startswith("v"):
     number_of_nodes = number_of_chips // 4
-  elif options.hardware_id == "a3mega" or options.hardware_id == "'a3ultra":
+  elif options.hardware_id in ("a3mega", "a3ultra"):
     number_of_nodes = number_of_chips // 8
   else:
     number_of_nodes = number_of_chips

@@ -1,28 +1,27 @@
-"""
-Copyright 2023 Google LLC
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-     https://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-"""
+# Copyright 2023–2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Input pipeline for a LM1B dataset."""
 
-from typing import Optional
 import warnings
-
 import functools
+
 import ml_collections
+
 import tensorflow as tf
 import tensorflow_datasets as tfds
+
 import jax
 
 from MaxText import multihost_dataloading
@@ -46,9 +45,10 @@ def get_datasets(
     shuffle_seed,
     dataloading_host_index,
     dataloading_host_count,
+    dataset_path=None,
 ):
   """Load a TFDS dataset."""
-  ds_builder = tfds.builder(dataset_name)
+  ds_builder = tfds.builder(dataset_name, data_dir=dataset_path)
 
   if shuffle_files:
     read_config = tfds.ReadConfig(shuffle_seed=shuffle_seed)
@@ -63,9 +63,10 @@ def get_datasets(
     ds = ds_builder.as_dataset(split=data_split, read_config=read_config, shuffle_files=shuffle_files)
   else:
     warnings.warn(
-        f"WARNING: Inefficient dataloading. Your {dataset_name} contains {ds_builder.info.splits[data_split].num_shards} shards, "
-        f"smaller than {dataloading_host_count=}. This is known to lead to inefficient dataloading."
-        "see https://github.com/google/maxtext/blob/main/getting_started/Data_Input_Pipeline.md#multihost-dataloading-best-practice"
+        f"WARNING: Inefficient dataloading. Your {dataset_name} contains {ds_builder.info.splits[data_split].num_shards}"
+        f"shards, smaller than {dataloading_host_count=}. This is known to lead to inefficient dataloading."
+        "see https://github.com/google/maxtext/blob/main/getting_started/Data_Input_Pipeline.md"
+        "#multihost-dataloading-best-practice"
     )
     ds = ds_builder.as_dataset(split=data_split, read_config=read_config, shuffle_files=shuffle_files)
     ds = ds.shard(num_shards=dataloading_host_count, index=dataloading_host_index)
@@ -85,7 +86,7 @@ def preprocessing_pipeline(
     tokenize: bool = True,
     add_bos: bool = True,
     add_eos: bool = True,
-    num_epochs: Optional[int] = 1,
+    num_epochs: None | int = 1,
     pack_examples: bool = True,
     shuffle_buffer_size: int = 1024,
     shift: bool = True,
@@ -170,7 +171,9 @@ def make_tfds_train_iterator(
     process_indices_train,
 ):
   """load dataset, preprocess and return iterators"""
-  assert config.global_batch_size_to_load % global_mesh.size == 0, "Batch size should be divisible number of global devices."
+  assert (
+      config.global_batch_size_to_load % global_mesh.size == 0
+  ), "Batch size should be divisible by number of global devices."
   if not config.colocated_python_data_input:
     train_ds = get_datasets(
         dataset_name=config.dataset_name,
@@ -224,7 +227,8 @@ def make_tfds_train_iterator(
         use_dpo=config.use_dpo,
         hf_access_token=config.hf_access_token,
     )
-    return multihost_dataloading.RemoteIterator(get_ds_fn, preprocessing_fn, config, global_mesh)
+    global_shape = (config.global_batch_size_to_load, config.max_target_length)
+    return multihost_dataloading.RemoteIterator(get_ds_fn, preprocessing_fn, global_mesh, global_shape)
 
 
 def make_tfds_eval_iterator(
@@ -235,7 +239,7 @@ def make_tfds_eval_iterator(
   """load eval dataset, preprocess and return iterators"""
   assert (
       config.global_batch_size_to_load_eval % global_mesh.size == 0
-  ), "Batch size should be divisible number of global devices."
+  ), "Batch size should be divisible by number of global devices."
   if not config.colocated_python_data_input:
     eval_ds = get_datasets(
         dataset_name=config.eval_dataset_name,

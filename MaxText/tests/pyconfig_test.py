@@ -1,15 +1,16 @@
-"""
-Copyright 2024 Google LLC
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-     https://www.apache.org/licenses/LICENSE-2.0
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-"""
+# Copyright 2023–2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 import unittest
 import os.path
@@ -19,7 +20,7 @@ from MaxText.globals import PKG_DIR
 
 
 class PyconfigTest(unittest.TestCase):
-  """Tests for pyconfig.py"""
+  """Tests for 'pyconfig.py'."""
 
   def test_basic_override(self):
     raw_keys = {"megablox": None, "foo": ["bar", "baz"]}
@@ -113,6 +114,18 @@ class PyconfigTest(unittest.TestCase):
     )
     with self.assertRaises(ValueError):
       config_inference.ici_fsdp_parallelism = 4
+
+  def test_overriding_model(self):
+    config = pyconfig.initialize(
+        [os.path.join(PKG_DIR, "train.py"), os.path.join(PKG_DIR, "configs", "base.yml")],
+        skip_jax_distributed_system=True,
+        model_name="gemma-7b",
+        override_model_config=True,
+        base_emb_dim=1024,  # Defined as 3072 in gemma-7b
+    )
+
+    self.assertEqual(config.base_emb_dim, 1024)
+    self.assertEqual(config.base_mlp_dim, 24576)
 
 
 if __name__ == "__main__":

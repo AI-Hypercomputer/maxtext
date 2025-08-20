@@ -1,10 +1,10 @@
-# Copyright 2024 Google LLC
+# Copyright 2023–2025 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#      http://www.apache.org/licenses/LICENSE-2.0
+#    https://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -14,11 +14,17 @@
 """ Evaluation script based on MLPerf requirements"""
 
 import argparse
-from transformers import AutoTokenizer, LlamaTokenizer
-import nltk
-import evaluate
-import numpy as np
 import json
+
+from transformers import AutoTokenizer, LlamaTokenizer
+
+import nltk
+
+import evaluate
+
+import numpy as np
+
+import pandas as pd
 
 
 def get_args():
@@ -33,8 +39,6 @@ def get_args():
 
 
 def get_groundtruth(processed_dataset_file):
-  import pandas as pd
-
   data = pd.read_pickle(processed_dataset_file)
   ground_truths = data["output"]
   return ground_truths

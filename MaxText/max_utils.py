@@ -1,45 +1,48 @@
-"""
-Copyright 2023 Google LLC
+# Copyright 2023–2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
+""" Common Max Utils needed by multiple modules.
+All the functions include MaxText modules, such as Pyconfig, should be moved to MaxText utils file."""
 
-     https://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-"""
-
-""" Common Max Utils needed by multiple modules"""
-""" All the functions include MaxText modules, such as Pyconfig, should be moved to MaxText utils file."""
-import numpy as np
-import jax
-import jax.numpy as jnp
-from jax.experimental import mesh_utils
 import functools
 import time
 import os
-import psutil
 import socket
 import subprocess
-from etils import epath
-from collections.abc import Sequence
 import collections
-from typing import Any, Tuple
+from collections.abc import Sequence
+from typing import Any
 from functools import partial
 
-from MaxText import max_logging
+import numpy as np
 
+import jax
+import jax.numpy as jnp
+from jax.experimental import mesh_utils
+
+import flax
+
+import psutil
+
+from etils import epath
 
 import orbax.checkpoint as ocp
 
-
-import flax
 from tensorboardX import writer
+
+from MaxText import max_logging
+
 
 HYBRID_RING_64X4 = "hybrid_ring_64x4"
 HYBRID_RING_32X8 = "hybrid_ring_32x8"
@@ -76,8 +79,18 @@ def calculate_num_params_from_pytree(params):
   return total_parameters
 
 
+def device_space():
+  """Version guard for jax.memory.Space.Device."""
+  # See b/436565838 for more.
+  if jax.__version__ >= "0.7.1":
+    return jax.memory.Space.Device  # pytype: disable=module-attr
+  else:
+    # pytype: disable=module-attr
+    return jax._src.sharding_impls.TransferToMemoryKind("device")  # pylint: disable=protected-access
+
+
 def calculate_total_params_per_chip(params):
-  """Calculate total paramsper chip."""
+  """Calculate total params per chip."""
 
   def calculate_leaf_params_per_chip(arr):
     shard = arr.addressable_shards[0]
@@ -111,7 +124,7 @@ def close_summary_writer(summary_writer):
 
 
 def add_text_to_summary_writer(key, value, summary_writer):
-  """Writes given key-value pair to tensorboard as text/summary"""
+  """Writes given key-value pair to tensorboard as text/summary."""
   if jax.process_index() == 0:
     summary_writer.add_text(key, value)
 
@@ -127,6 +140,12 @@ def maybe_initialize_jax_distributed_system(raw_keys):
   if raw_keys["skip_jax_distributed_system"]:
     max_logging.log("Skipping jax distributed system due to skip_jax_distributed_system=True flag.")
     return
+  if raw_keys["enable_single_controller"]:
+    max_logging.log("Skipping jax distributed system since its not needed for single controller.")
+    return
+  if jax.distributed.is_initialized():
+    max_logging.log("Jax distributed system is already initialized.")
+    return
   if raw_keys["inference_benchmark_test"]:
     # Disable initialization for inference benmark test.
     return
@@ -141,17 +160,20 @@ def maybe_initialize_jax_distributed_system(raw_keys):
     max_logging.log("Attempting to initialize the jax distributed system for CPU backend...")
     initialize_jax_for_cpu(raw_keys)
     max_logging.log("Jax distributed system initialized on CPUs!")
-  elif (
-      raw_keys["enable_checkpointing"]
-      and raw_keys["async_checkpointing"]
-      and raw_keys["compile_topology_num_slices"] == -1
-      and not raw_keys["enable_single_controller"]
-  ) or raw_keys["hardware"] == "gpu_multiprocess":
+  elif (raw_keys["enable_checkpointing"] and raw_keys["compile_topology_num_slices"] == -1) or raw_keys[
+      "hardware"
+  ] == "gpu_multiprocess":
     max_logging.log("Attempting to initialize the jax distributed system...")
     if not raw_keys["enable_emergency_checkpoint"]:
       jax.distributed.initialize(initialization_timeout=raw_keys["jax_distributed_initialization_timeout"])
     else:
-      initialize_jax_for_tpu_with_emergency_checkpointing(raw_keys)
+      if raw_keys["hardware"] == "gpu_multiprocess":
+        max_logging.log("Initializing jax distribtued to support local checkpointing with GPUs...")
+        jax.distributed.initialize(initialization_timeout=raw_keys["jax_distributed_initialization_timeout"])
+        ocp.multihost.initialize_runtime_to_distributed_ids()
+        ocp.multihost.initialize_distributed_to_device_ids()
+      else:
+        initialize_jax_for_tpu_with_emergency_checkpointing(raw_keys)
     max_logging.log("Jax distributed system initialized!")
 
 
@@ -262,7 +284,9 @@ def initialize_jax_for_tpu_with_emergency_checkpointing(raw_keys):
       my_process_index = jax.process_index()
       processIndex_to_nodeRank = ocp.multihost.runtime_to_distributed_ids()
       max_logging.log(
-          f"Mapping of IDs: jax-init-info.txt={process_id}, NodeRank={node_rank}, ProcessIndex={my_process_index}, ProcessIndex->NodeRank={processIndex_to_nodeRank}"
+          f"Mapping of IDs: jax-init-info.txt={process_id}, \
+            NodeRank={node_rank}, ProcessIndex={my_process_index}, \
+            ProcessIndex->NodeRank={processIndex_to_nodeRank}"
       )
 
       my_in_pipeline_index = my_process_index % nodes_per_slice
@@ -538,7 +562,9 @@ def unbox_logicallypartioned(boxed_pytree):
 # Cross entropy implementation is taken from original T5X codebase:
 # https://github.com/google-research/t5x/blob/ace831eea1e2742b4299cd1a9af7e4f302038351/t5x/losses.py#L25-L101
 @jax.custom_vjp
-def cross_entropy_with_logits(logits: jnp.ndarray, targets: jnp.ndarray, z_loss: float) -> Tuple[jnp.ndarray, jnp.ndarray]:
+def cross_entropy_with_logits(
+    logits: jnp.ndarray, targets: jnp.ndarray, z_loss: float
+) -> tuple[jnp.ndarray, jnp.ndarray]:
   """Computes cross entropy loss with stable custom gradient.
   Computes a stabilized-gradient version of:
     -jnp.sum(targets * nn.log_softmax(logits), axis=-1)
@@ -567,9 +593,9 @@ def cross_entropy_with_logits(logits: jnp.ndarray, targets: jnp.ndarray, z_loss:
   return loss, total_z_loss
 
 
-def _cross_entropy_with_logits_fwd(logits: jnp.ndarray, targets: jnp.ndarray, z_loss: float = 0.0) -> Tuple[
-    Tuple[jnp.ndarray, jnp.ndarray],
-    Tuple[
+def _cross_entropy_with_logits_fwd(logits: jnp.ndarray, targets: jnp.ndarray, z_loss: float = 0.0) -> tuple[
+    tuple[jnp.ndarray, jnp.ndarray],
+    tuple[
         jnp.ndarray,
         jnp.ndarray,
         jnp.ndarray,
@@ -602,7 +628,7 @@ def _cross_entropy_with_logits_fwd(logits: jnp.ndarray, targets: jnp.ndarray, z_
 
 
 def _cross_entropy_with_logits_bwd(
-    res: Tuple[
+    res: tuple[
         jnp.ndarray,
         jnp.ndarray,
         jnp.ndarray,
@@ -611,8 +637,8 @@ def _cross_entropy_with_logits_bwd(
         jnp.ndarray,
         jnp.ndarray,
     ],
-    g: Tuple[jnp.ndarray, jnp.ndarray],
-) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    g: tuple[jnp.ndarray, jnp.ndarray],
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
   """Backward-mode of `cross_entropy_with_logits`."""
   g = g[0]  # Ignore z_loss component as that is only used for logging.
   logits, targets, z_loss, exp_shifted, sum_exp, log_softmax, log_z = res
@@ -710,6 +736,27 @@ def print_cpu_ram_stats(label: str):
     max_logging.log(f"\tRAM stats unavailable, error: {ex}")
 
 
+def print_compiled_memory_stats(compiled_stats):
+  """Prints a summary of the compiled memory statistics."""
+  if compiled_stats is None:
+    return
+
+  def bytes_to_gb(num_bytes):
+    return num_bytes / (1024**3)
+
+  output_gb = bytes_to_gb(compiled_stats.output_size_in_bytes)
+  temp_gb = bytes_to_gb(compiled_stats.temp_size_in_bytes)
+  argument_gb = bytes_to_gb(compiled_stats.argument_size_in_bytes)
+  alias_gb = bytes_to_gb(compiled_stats.alias_size_in_bytes)
+  host_temp_gb = bytes_to_gb(compiled_stats.host_temp_size_in_bytes)
+  total_gb = output_gb + temp_gb + argument_gb - alias_gb
+
+  max_logging.log(
+      f"Total memory size: {total_gb:.1f} GB, Output size: {output_gb:.1f} GB, Temp size: {temp_gb:.1f} GB, "
+      f"Argument size: {argument_gb:.1f} GB, Host temp size: {host_temp_gb:.1f} GB."
+  )
+
+
 def print_system_information():
   """Print system information of the current environment.
   Note that this will initialize the JAX backend."""
@@ -739,31 +786,68 @@ def unpermute_from_match_maxtext_rope(arr, model_size):
   return jax.numpy.concatenate((evens, odds), axis=arr.ndim - 1)
 
 
-@partial(jax.jit, static_argnums=1)
-def reorder_sequence(tensor, cp_size: int):
+@partial(jax.jit, static_argnames=("cp_size", "seq_dim", "to_contiguous"))
+def reorder_sequence(tensor, cp_size: int, seq_dim: int = 1, to_contiguous: bool = False):
   """Reorders the sequence of the tensor. For example, with cp_size=2,
-  [0, 1, 2, 3, 4, 5, 6, 7] -> [0, 1, 6, 7, 2, 3, 4, 5]"""
+  [0, 1, 2, 3, 4, 5, 6, 7] -> [0, 1, 6, 7, 2, 3, 4, 5]
+  and backward
+  [0, 1, 6, 7, 2, 3, 4, 5] -> [0, 1, 2, 3, 4, 5, 6, 7]
+  """
 
-  # Assumption is the tensor is of shape [B,S]
-  # Reshape [B,S] -> [B, 2*cp_size, S/(2*cp_size)]
-  batch_size = tensor.shape[0]
-  seq_len = tensor.shape[1]
+  if tensor is None:
+    return tensor
+
+  seq_len = tensor.shape[seq_dim]
   group_size = seq_len // (2 * cp_size)
 
-  reshaped = tensor.reshape(batch_size, 2 * cp_size, group_size)
+  if cp_size % 2 != 0:
+    raise ValueError(f"{cp_size=} must be a multiple of 2.")
 
-  # Create first and second halves
-  first_half = jnp.arange(cp_size)
-  second_half = jnp.arange(2 * cp_size - 1, cp_size - 1, -1)
+  # Need to ensure we have 2 pairs to swap for balancing between cp ranks
+  if seq_len % (cp_size * 2) != 0:
+    raise ValueError(f"{tensor.shape=} is not a multiple of {cp_size*2=}")
 
-  # Stack and reshape to interleave
-  src_indices = jnp.stack([first_half, second_half], axis=1).reshape(-1)
+  # [B, S, H, D]: [B, 2*cp_size, S/2*cp_size, H, D] -> [B, 2, S/2*cp_size, H, D]
+  # [S, B, H, D]: [2*cp_size, S/2*cp_size, B, H, D] -> [2, S/2*cp_size, B, H, D]
+  ori_tensor_shape = tensor.shape
+  reshaped = tensor.reshape(
+      *ori_tensor_shape[:seq_dim],
+      2 * cp_size,
+      group_size,
+      *ori_tensor_shape[seq_dim + 1 :],
+  )
 
-  # Indexing the reshaped tensor using JAX take operation
-  reordered = jnp.take(reshaped, src_indices, axis=1)
+  if not to_contiguous:
+    # Create first and second halves
+    first_half = jnp.arange(cp_size)
+    second_half = jnp.arange(2 * cp_size - 1, cp_size - 1, -1)
+
+    # Stack and reshape to interleave
+    src_indices = jnp.stack([first_half, second_half], axis=1).reshape(-1)
+
+  else:
+
+    half = cp_size // 2
+
+    # Build the 1st and 2nd groups of contiguous‑pair indices:
+    first_pair = [4 * r for r in range(half)]  # [0, 4, 8, …]
+    second_pair = [4 * r + 2 for r in range(half)]  # [2, 6, 10, …]
+    third_pair = [2 * cp_size - 1 - 4 * r for r in range(half)]  # [2*cp_size-1, 2*cp_size-5, …]
+    fourth_pair = [i - 2 for i in third_pair]  # [2*cp_size-3, 2*cp_size-7, …]
+
+    # Concatenate so each rank’s two indices sit next to each other:
+    # e.g. [0,2, 4,6, …, (2cp‑1),(2cp‑3), …]
+    first_block = first_pair + third_pair
+    second_block = second_pair + fourth_pair
+
+    # Stack into shape (2*cp_size//2, 2) → then flatten → length=2*cp_size
+    src_indices = jnp.stack([jnp.array(first_block), jnp.array(second_block)], axis=1).reshape(-1)
+
+  # One gather and one reshape
+  reordered = jnp.take(reshaped, src_indices, axis=seq_dim)
 
   # Reshape back to original dimensions
-  return reordered.reshape(batch_size, seq_len)
+  return reordered.reshape(ori_tensor_shape)
 
 
 @partial(jax.jit, static_argnums=1)
@@ -774,12 +858,160 @@ def reorder_causal_load_balanced(batch, cp_size):
           value,  # Pass each key's value inside batch separately
           cp_size=cp_size,
       )
-      if key in ["inputs", "targets", "inputs_position", "targets_position", "inputs_segmentation", "targets_segmentation"]
+      if key
+      in ["inputs", "targets", "inputs_position", "targets_position", "inputs_segmentation", "targets_segmentation"]
       else value
       for key, value in batch.items()
   }
 
 
+def shard_reorder_causal_load_balanced(batch, cp_size):
+  """Shard the output of the reordered sequence."""
+  reordered = reorder_causal_load_balanced(batch, cp_size)
+  for _, v in batch.items():
+    if isinstance(v, jax.Array):
+      reordered = jax.lax.with_sharding_constraint(reordered, v.sharding)
+      break
+  return reordered
+
+
 def get_reorder_callable(cp_size):
   """Creates a callable that can be used with map() to reorder batches."""
-  return functools.partial(reorder_causal_load_balanced, cp_size=cp_size)
+  return functools.partial(shard_reorder_causal_load_balanced, cp_size=cp_size)
+
+
+@staticmethod
+def reorder_mask_load_balancing(tensor, cp_size: int, seq_dim: int):
+  """
+  Reorders a tensor for load balancing the compute of causal attention.
+  This function works on numpy arrays instead of jax.numpy arrays.
+  This is needed because we need the mask to be statically computable.
+  So, we need to redefine the same logic as reorder_causal_load_balancing.
+  We are still doing [0, 1, 2, 3, 4, 5, 6, 7] -> [0, 1, 6, 7, 2, 3, 4, 5]
+
+  Args:
+    tensor: The tensor to reorder.
+    cp_size: The size of the compute parallelism.
+    seq_dim: The dimension of the sequence.
+  """
+
+  seq_len = tensor.shape[seq_dim]
+  group_size = seq_len // (2 * cp_size)
+
+  if cp_size % 2 != 0:
+    raise ValueError(f"{cp_size=} must be a multiple of 2.")
+
+  # Need to ensure we have 2 pairs to swap for balancing between cp ranks
+  if seq_len % (cp_size * 2) != 0:
+    raise ValueError(f"{tensor.shape=} is not a multiple of {cp_size*2=}")
+
+  # [B, S, H, D]: [B, 2*cp_size, S/2*cp_size, H, D] -> [B, 2, S/2*cp_size, H, D]
+  # [S, B, H, D]: [2*cp_size, S/2*cp_size, B, H, D] -> [2, S/2*cp_size, B, H, D]
+  ori_tensor_shape = tensor.shape
+  reshaped = tensor.reshape(
+      *ori_tensor_shape[:seq_dim],
+      2 * cp_size,
+      group_size,
+      *ori_tensor_shape[seq_dim + 1 :],
+  )
+
+  # Create first and second halves
+  first_half = np.arange(cp_size)
+  second_half = np.arange(2 * cp_size - 1, cp_size - 1, -1)
+
+  # Stack and reshape to interleave
+  src_indices = np.stack([first_half, second_half], axis=1).reshape(-1)
+
+  # One gather and one reshape
+  reordered = np.take(reshaped, src_indices, axis=seq_dim)
+
+  # Reshape back to original dimensions
+  return reordered.reshape(ori_tensor_shape)
+
+
+def parse_custom_args(argv):
+  """Load multiple YAML config files from command line arguments."""
+  configs = []
+  current_argv = []
+  python_script = argv[0]
+  for arg in argv[1:]:
+    if arg.endswith((".yaml", ".yml")):
+      if current_argv:
+        configs.append(current_argv)
+      current_argv = [python_script, arg]
+    else:
+      current_argv.append(arg)
+  if current_argv:
+    configs.append(current_argv)
+  return configs
+
+
+def unscan_train_state_params(params, sharding, mesh, scan_axis, layer_groups):
+  """
+  Unrolls scanned parameter groups into per-layer entries.
+
+  Args:
+    train_state: training state with scanned `params`
+    mesh: the mesh to use for sharding output
+    scan_axis: axis along which scanning was applied (usually 0)
+    layer_groups: list of tuples like:
+      [("dense_layers", 4), ("moe_layers", 12)]
+  """
+  decoder = params["params"]["decoder"]
+  sharding = sharding["params"]["decoder"]
+
+  for layer_name, num_layers in layer_groups:
+    scanned_layers = decoder[layer_name]
+
+    def strip_axis(pspec):
+      return jax.sharding.PartitionSpec(*(pspec[:scan_axis] + pspec[scan_axis + 1 :]))
+
+    old_spec = jax.tree_util.tree_map(lambda x: x.spec, sharding[layer_name])
+    new_spec = jax.tree_util.tree_map(strip_axis, old_spec)
+    new_sharding = jax.tree_util.tree_map(lambda ps: jax.sharding.NamedSharding(mesh, ps), new_spec)
+
+    def slice_layer(arr, i):
+      return jax.tree_util.tree_map(lambda x: jnp.take(x, i, axis=scan_axis), arr)
+
+    p_slice_layer = jax.jit(slice_layer, out_shardings=new_sharding)
+
+    for i in range(num_layers):
+      per_layer = p_slice_layer(scanned_layers, i)
+      decoder[f"{layer_name}_{i}"] = per_layer
+
+    del decoder[layer_name]  # Free memory
+
+
+def rescan_train_state_params(params, source_shardings, scan_axis, layer_groups):
+  """
+  Reconstruct scanned layers from per-layer entries using minimal HBM.
+
+  Args:
+    train_state: training state with unrolled {layer_name}_{i} entries
+    scan_axis: axis to scan over
+    layer_groups: list of (layer_name, num_layers)
+    mesh: jax.sharding.Mesh for out_shardings
+  """
+  decoder = params["params"]["decoder"]
+  sharding = source_shardings["params"]["decoder"]
+
+  for layer_name, num_layers in layer_groups:
+
+    def stack_layers(*layers):
+      return jax.tree_util.tree_map(lambda *xs: jnp.stack(xs, axis=scan_axis), *layers)
+
+    # Create a wrapper that allows pjit + donation
+    compiled_stack = jax.jit(
+        stack_layers,
+        out_shardings=sharding[layer_name],
+        # donate_argnums=tuple(range(num_layers)),
+    )
+
+    # Collect per-layer entries for stacking
+    layer_list = [decoder.pop(f"{layer_name}_{i}") for i in range(num_layers)]
+
+    # Stack them with donation
+    scanned = compiled_stack(*layer_list)
+
+    # Store result and clear temporary memory
+    decoder[layer_name] = scanned

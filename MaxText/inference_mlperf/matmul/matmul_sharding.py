@@ -1,10 +1,10 @@
-# Copyright 2024 Google LLC
+# Copyright 2023–2025 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#      http://www.apache.org/licenses/LICENSE-2.0
+#    https://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -12,13 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Matrix multiplication sharding"""
+
 from functools import partial
 
 import jax
 from jax.experimental import mesh_utils
 from jax.sharding import Mesh
 
-from MaxText.inference_mlperf.matmul.timing_util import simple_timeit
 
 PREFILL_LENS = [128, 256, 512, 1024]
 EMBED = 8192
@@ -28,6 +29,7 @@ DTYPES = [jax.numpy.int8, jax.numpy.bfloat16]
 
 
 def matmul(mesh, mesh_dim, dtype=jax.numpy.bfloat16, batch=1024, enable_visual=False):
+  """sharded matrix multiplication"""
   A = jax.numpy.ones((batch, EMBED), dtype=dtype)
   activation_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(None, "model"))
   A_ = jax.device_put(A, activation_sharding)
@@ -52,16 +54,6 @@ def matmul(mesh, mesh_dim, dtype=jax.numpy.bfloat16, batch=1024, enable_visual=F
     _A = jax.lax.with_sharding_constraint(_A @ _weights, activation_sharding)
     return _A
 
-  num_bits = 32
-  if dtype == jax.numpy.bfloat16:
-    num_bits = 16
-  elif dtype == jax.numpy.int8:
-    num_bits = 8
-  elif dtype == jax.numpy.int4:
-    num_bits = 4
-
-  time = simple_timeit(f, A_, W1_, task=f"matmuls_{mesh_dim}_batch_{batch}_bits_{num_bits} ")
-
 
 def matmuls(mesh, mesh_dim, enable_visual=False):
   for dtype in DTYPES:
@@ -71,7 +63,7 @@ def matmuls(mesh, mesh_dim, enable_visual=False):
 
 
 # Start here
-if __name__ == "__main__":
+def main():
   devices = jax.devices()
   print("Devices:")
   print(devices)
@@ -88,3 +80,7 @@ if __name__ == "__main__":
   print("Optimized device topology for 2x4")
   print(new_devices)
   matmuls(mesh, mesh_dim)
+
+
+if __name__ == "__main__":
+  main()

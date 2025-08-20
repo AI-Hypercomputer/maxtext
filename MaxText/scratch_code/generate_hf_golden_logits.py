@@ -1,25 +1,25 @@
+# Copyright 2023–2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 """
-Copyright 2025 Google LLC
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-     https://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-
 Usage:
 
-python3 -m MaxText.scratch_code.generate_hf_golden_logits --model-id=deepseek-ai/DeepSeek-V2-Lite --output-path=golden_DeepSeek-V2-Lite.jsonl --prompts='I love to,Today is a,What is the', --gcs_bucket=my-gcs-bucket
+python3 -m MaxText.scratch_code.generate_hf_golden_logits --model-id=deepseek-ai/DeepSeek-V2-Lite \
+     --output-path=golden_DeepSeek-V2-Lite.jsonl --prompts='I love to,Today is a,What is the' \
+     --gcs-bucket=my-gcs-bucket
 
 """
 
-import os
 import torch
 import argparse
 from transformers import AutoTokenizer, AutoModelForCausalLM
@@ -38,10 +38,12 @@ def upload_blob(bucket_name, source_file_name, destination_blob_name):
 
 
 def save_golden_logits(model_id, output_path, prompt_texts, gcs_bucket):
+  """save golden logits"""
   tokenizer = AutoTokenizer.from_pretrained(model_id)
   model = AutoModelForCausalLM.from_pretrained(
       model_id,
       torch_dtype=torch.float32,
+      trust_remote_code=True,
   )
 
   all_data_to_save = []
@@ -80,7 +82,7 @@ def main(raw_args=None) -> None:
       "--gcs-bucket", type=str, required=False, default=None, help="A GCS bucket to store logits, without gs://."
   )
   args = parser.parse_args(raw_args)
-  prompts = [prompt for prompt in args.prompts.split(",")]
+  prompts = args.prompts.split(",")
   save_golden_logits(args.model_id, args.output_path, prompts, args.gcs_bucket)
 
 

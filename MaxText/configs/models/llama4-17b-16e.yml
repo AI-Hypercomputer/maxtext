@@ -1,10 +1,10 @@
-# Copyright 2025 Google LLC
+# Copyright 2023–2025 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#      https://www.apache.org/licenses/LICENSE-2.0
+#    https://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -18,7 +18,6 @@ mlp_activations: ["silu","linear"]
 enable_dropout: False
 logits_via_embedding: False
 tokenizer_type: "huggingface"
-tokenizer_path: "meta-llama/Llama-4-Scout-17B-16E"
 
 base_emb_dim: 5120
 base_num_decoder_layers: 48
@@ -31,14 +30,15 @@ normalization_layer_epsilon: 1e-05
 rope_max_timescale: 500000
 rope_type: "llama3.1"
 num_experts: 16
-capacity_factor: -1.0 # TODO: this will be removed once we support dropless with megablox/ragged_dot
 shared_experts: 1
 num_experts_per_tok: 1
-# Llama4 models apply an L2Norm to the Query and Keys after RoPE
-use_qk_norm: True
-# Every fourth layer should NOT use RoPE
-nope_layer_interval: 4
+use_qk_norm: True # Llama4 models apply an L2Norm to the Query and Keys after RoPE
+nope_layer_interval: 4 # Every fourth layer should NOT use RoPE
+interleave_moe_layer_step: 1 # Every layer is MoE layer
+inhomogeneous_layer_cycle_interval: 4 # Every four layers the pattern of nope and moe repeats (least common multiple of nope interval and moe interval)
 
-# TODO: delete the following variables once we add support for dropless with megablox/ragged_dot
-sparse_matmul: False
-megablox: False
+temperature_tuning: True
+# Chunk attention is used on all RoPE layers
+# otherwise, on NoPE layers, use global attention
+chunk_attn_window_size: 8192
+image_size_for_vit: 336 

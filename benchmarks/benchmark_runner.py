@@ -1,25 +1,24 @@
-"""
- Copyright 2024 Google LLC
-
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
-
-      https://www.apache.org/licenses/LICENSE-2.0
-
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
- """
+# Copyright 2023–2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """ Script to run a benchmark/benchmarks on existing xpk or QR nodes (to be implemented)
                           ***** IMPORTANT *****
 This script will run specific tuned workload on specified hardware and software environments
 Example usages:
   python3 benchmark_runner.py xpk --project=<my-project> --zone=<zone> \
-    --cluster_name=<xpk_cluster_name> --base_output_directory=<output_gcloud_bucket> --device_type=v6e-256 --num_slices=1 --model_name="llama2_70b_4096" --libtpu_version=20241009 --base_docker_image=maxtext_base_image
+    --cluster_name=<xpk_cluster_name> --base_output_directory=<output_gcloud_bucket> --device_type=v6e-256 
+    --num_slices=1 --model_name="llama2_70b_4096" --libtpu_version=20241009 --base_docker_image=maxtext_base_image
 """
 import argparse
 import os
@@ -27,7 +26,9 @@ import time
 
 from MaxText.inference_utils import str2bool
 from benchmarks.maxtext_trillium_model_configs import trillium_model_dict
+from benchmarks.maxtext_v5p_model_configs import v5p_model_dict
 from benchmarks.maxtext_v5e_model_configs import v5e_model_dict
+from benchmarks.convergence.c4_exp import c4_pretrain_model_dict
 from benchmarks.maxtext_xpk_runner import PathwaysConfig
 from benchmarks.maxtext_xpk_runner import WorkloadConfig
 from benchmarks.maxtext_xpk_runner import xpk_benchmark_runner
@@ -46,20 +47,19 @@ def add_pathways_arguments(parser: argparse.ArgumentParser):
       '--pathways_server_image',
       type=str,
       default=(
-          'us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/server:latest'
+          'us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server'
       ),
       help='version of pathways server image to be benchmarked command.',
   )
   parser.add_argument(
       '--pathways_proxy_server_image',
       type=str,
-      default='us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/proxy_server:latest',
+      default='us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server',
       help='version of pathways proxy image to be benchmarked command.',
   )
   parser.add_argument(
       '--pathways_runner_image',
       type=str,
-      default='us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/maxtext_jax_stable:latest',
       help='version of pathways runner image to be benchmarked command.',
   )
   parser.add_argument(
@@ -123,23 +123,21 @@ def add_xpk_runner_arguments(custom_parser: argparse.ArgumentParser):
   custom_parser.add_argument(
       '--model_name',
       type=str,
-      choices=list(trillium_model_dict.keys()) + list(v5e_model_dict.keys()),
+      choices=list(trillium_model_dict.keys()) + list(v5p_model_dict.keys()) + list(v5e_model_dict.keys()) + list(c4_pretrain_model_dict.keys()),
       default=list(trillium_model_dict.keys())[0],
-      help=(
-        f'model to be benchmarked, supported models are the command choices.'
-      ),
+      help='model to be benchmarked, supported models are the command choices.',
   )
   custom_parser.add_argument(
       '--libtpu_version',
       type=str,
-      default='20241009',
+      default='',
       help='version of libtpu-nightly to be benchmarked command.',
   )
   custom_parser.add_argument(
       '--libtpu_type',
       type=str,
       choices=[t.value for t in LibTpuType],
-      default='nightly',
+      default='maxtext-docker',
       help='type of libtpu to be benchmarked command.',
   )
   custom_parser.add_argument(
@@ -202,7 +200,7 @@ def add_on_device_runner_arguments(custom_parser: argparse.ArgumentParser):
   custom_parser.add_argument(
       '--model_name',
       type=str,
-      choices=list(trillium_model_dict.keys()) + list(v5e_model_dict.keys()),
+      choices=list(trillium_model_dict.keys()) + list(v5p_model_dict.keys()) + list(v5e_model_dict.keys()) + list(c4_pretrain_model_dict.keys()),
       default=list(trillium_model_dict.keys())[0],
       help=(
         'model to be benchmarked, supported models are the command choices.'
@@ -211,14 +209,14 @@ def add_on_device_runner_arguments(custom_parser: argparse.ArgumentParser):
   custom_parser.add_argument(
       '--libtpu_version',
       type=str,
-      default='20241009',
+      default='',
       help='version of libtpu-nightly to be benchmarked command.',
   )
   custom_parser.add_argument(
       '--libtpu_type',
       type=str,
       choices=[t.value for t in LibTpuType],
-      default='nightly',
+      default='maxtext-docker',
       help='type of libtpu to be benchmarked command.',
   )
   custom_parser.add_argument(
@@ -241,13 +239,16 @@ def main() -> None:
   options = parser.parse_args()
 
   # Check that there are no duplicate model configs
-  duplicates = (trillium_model_dict.keys() & v5e_model_dict.keys())
+  duplicates = (trillium_model_dict.keys() & v5p_model_dict.keys() & v5e_model_dict.keys() & c4_pretrain_model_dict.keys())
   assert len(duplicates) == 0 , f'Found duplicate model config {duplicates}'
 
   model = trillium_model_dict.get(options.model_name)
   if model is None:
     model = v5e_model_dict.get(options.model_name)
-
+  if model is None:
+    model = v5p_model_dict.get(options.model_name)
+  if model is None:
+    model = c4_pretrain_model_dict.get(options.model_name)
   libtpu_type = None
   match options.libtpu_type:
     case LibTpuType.NIGHTLY.value:
@@ -256,7 +257,7 @@ def main() -> None:
       libtpu_type = LibTpuType.CUSTOM
     case LibTpuType.MAXTEXT.value:
       libtpu_type = LibTpuType.MAXTEXT
-      
+
   # Set up pathways configs
   pw_config = None
   if options.use_pathways:

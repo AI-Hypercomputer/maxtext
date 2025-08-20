@@ -1,37 +1,39 @@
-"""
-Copyright 2023 Google LLC
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-     https://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-"""
+# Copyright 2023–2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 # pytype: skip-file
 # pylint: disable=missing-module-docstring, bare-except, consider-using-generator, missing-function-docstring
 from collections import OrderedDict
+from typing import Any
+from math import prod
 import math
 import os
 import sys
-from typing import Any, Union
+import datetime
 
 import jax
 from jax.experimental.compilation_cache import compilation_cache
-from MaxText.layers.attentions import AttentionType
-from MaxText.utils import gcs_utils
+
+import omegaconf
+
 from MaxText import accelerator_to_spec_map
 from MaxText import max_logging
 from MaxText import max_utils
-import omegaconf
+from MaxText.common_types import DecoderBlockType
+from MaxText.layers.attentions import AttentionType
+from MaxText.utils import gcs_utils
 
-OmegaConf = omegaconf.OmegaConf
 
 # pylint: disable=line-too-long
 
@@ -59,7 +61,7 @@ _yaml_types_to_parser = {str: str, int: int, float: float, bool: string_to_bool}
 def validate_compute_axis_order(s: str) -> None:
   valid_compute_axis_order = ("0,1,2,3", "0,2,1,3")
   if s not in valid_compute_axis_order:  # currently supported compute_axis_order
-    raise ValueError("Invalid compute_axis_order was passed. Valid options ", valid_compute_axis_order)
+    raise ValueError("Invalid compute_axis_order was passed. Valid options are ", valid_compute_axis_order)
 
 
 def validate_kv_quant_axis(s: str, quantize_kvcache: bool) -> None:
@@ -71,7 +73,7 @@ def validate_kv_quant_axis(s: str, quantize_kvcache: bool) -> None:
 
 
 def validate_attention_kernel(s: str) -> None:
-  valid_attention_kernels = ("autoselected", "dot_product", "flash", "cudnn_flash_te", "paged")
+  valid_attention_kernels = ("autoselected", "dot_product", "flash", "cudnn_flash_te", "cudnn_flash_jax", "paged")
   if s not in valid_attention_kernels:  # currently supported attention
     raise ValueError("Invalid attention kernel was passed. Valid options ", valid_attention_kernels)
 
@@ -145,6 +147,14 @@ def validate_rope_type(rope_type: str) -> None:
     raise ValueError(f"Invalid RoPE type was passed. Got: {rope_type}. Valid options: {valid_rope_types}")
 
 
+def validate_expert_shard_attention_option(expert_shard_attention_option: str) -> None:
+  valid_expert_shard_attention_option = ("fsdp", "context")
+  if expert_shard_attention_option not in valid_expert_shard_attention_option:
+    raise ValueError(
+        f"Invalid expert_shard_attention_option was passed. Got: {expert_shard_attention_option}. Valid options: {valid_expert_shard_attention_option}"
+    )
+
+
 def validate_keys(keys):
   validate_attention_kernel(keys["attention"])
   validate_attention_type(keys["attention_type"])
@@ -158,6 +168,19 @@ def validate_keys(keys):
   validate_model_call_mode(keys["model_call_mode"])
   validate_prefill_and_target_lengths(keys["max_prefill_predict_length"], keys["max_target_length"])
   validate_rope_type(keys["rope_type"])
+
+  # TODO remove after b/435512699 resolved
+  if keys["context_parallel_size"] > 1 and keys["context_parallel_load_balance"] and keys["attention_type"] == "chunk":
+    raise ValueError("Currently load-balanced context parallelism is not supported for chunk attention.")
+
+  if keys["mtp_eval_target_module"] < 0:
+    raise ValueError("mtp_eval_target_module cannot be negative. Set to 0 to disable evaluation.")
+
+  if keys["mtp_num_layers"] > 0 and keys["model_call_mode"] == "inference":
+    raise ValueError(
+        "Multi-Token Prediction (MTP) is enabled (mtp_num_layers > 0), but it is not supported in inference mode. "
+        "Please disable MTP by setting mtp_num_layers=0 for inference."
+    )
 
   assert (keys["load_parameters_path"] == "" and keys["load_full_state_path"] == "") or keys[
       "enable_checkpointing"
@@ -185,16 +208,51 @@ def validate_keys(keys):
   validate_multiple_slices(keys)
   if keys["num_experts"] > 1:
     validate_sparse_matmul_parallelism(keys)
+    validate_ragged_dot(keys)
     validate_deepseek_moe(keys)
+    validate_expert_shard_attention_option(keys["expert_shard_attention_option"])
 
   if keys["use_multimodal"]:
     validate_multimodal_model_name(keys["model_name"])
+    if keys["use_sft"]:
+      assert keys[
+          "sft_train_on_completion_only"
+      ], "In multimodal SFT (use_multimodal=True, use_sft=True), sft_train_on_completion_only must be set to True"
+      # TODO(aireenmei, hengtaoguo): support packing
+      assert not keys["packing"], "In multimodal SFT (use_multimodal=True, use_sft=True), packing is not supported yet"
+
+  if keys["decoder_block"] == "llama4":
+    validate_llama4_config(keys)
 
 
 def validate_tokenizer(keys):
   assert keys[
       "tokenizer_path"
   ], "Please provide tokenizer_path. Even if using pre-tokenized data, tokenizer is required to process special tokens."
+
+
+def validate_constant_bound(keys):
+  if keys["constant_bound_config"] == "":
+    keys["constant_bound_config"] = []
+  else:
+    value_list = keys["constant_bound_config"].split(",")
+    keys["constant_bound_config"] = list(map(float, value_list))
+  assert (
+      len(keys["constant_bound_config"]) == 0 or len(keys["constant_bound_config"]) == 6
+  ), "Please specify competete constant bound or none"
+
+
+def validate_quantization_methods(keys):
+  """Validate quantization methods
+  """
+  valid_quant_methods = (
+    "", "int8", "fp8", "fp8_full", "fp8_gpu", "fp8_nanoo"
+  )
+  if keys["use_qwix_quantization"]:
+    if keys["quantization"] not in valid_quant_methods:
+      raise ValueError(
+          f"Invalid quantization method {keys['quantization']}. Valid options are {valid_quant_methods}"
+      )
 
 
 def validate_data_input(keys):
@@ -244,6 +302,26 @@ def validate_data_input(keys):
     )
 
 
+def validate_llama4_config(keys: dict):
+  """
+  Validates the following checks for Llama4 models:
+
+  Args:
+    keys: the raw config in dict form
+
+  """
+  if keys["capacity_factor"] >= 0:
+    raise ValueError(
+        "Llama4 decoder has not been tested with capacity_factor >= 0 -- please set that value to -1 for now!"
+    )
+  if keys["num_experts_per_tok"] > 1:
+    raise ValueError("Only top-1 routing is supported for Llama4 for now!")
+  if keys["base_num_decoder_layers"] % keys["interleave_moe_layer_step"] != 0:
+    raise ValueError(
+        f"The number of decoder layers ({keys['base_num_decoder_layers']}) must be divisible by interleave moe layer step ({keys['interleave_moe_layer_step']})"
+    )
+
+
 def validate_model_name(s: str) -> bool:
   """Validate provided model name."""
   # currently supported models
@@ -264,6 +342,7 @@ def validate_model_name(s: str) -> bool:
       "deepseek2-16b",
       "deepseek2-236b",
       "deepseek3-671b",
+      "deepseek3-test",
       "gemma-7b",
       "gemma-2b",
       "gemma2-2b",
@@ -272,11 +351,18 @@ def validate_model_name(s: str) -> bool:
       "gemma3-4b",
       "gemma3-12b",
       "gemma3-27b",
+      "qwen3-0.6b",
+      "qwen3-4b",
+      "qwen3-8b",
+      "qwen3-14b",
+      "qwen3-32b",
+      "qwen3-235b-a22b",
       "gpt3-175b",
       "gpt3-22b",
       "gpt3-6b",
       "gpt3-52k",
       "llama4-17b-16e",
+      "llama4-17b-128e",
   )
   if s not in valid_model_names:
     raise ValueError(f"Invalid model name was passed. Got {s}, Valid options {valid_model_names}")
@@ -287,6 +373,8 @@ def validate_multimodal_model_name(s: str) -> bool:
       "gemma3-4b",
       "gemma3-12b",
       "gemma3-27b",
+      "llama4-17b-16e",
+      "llama4-17b-128e",
   )
   if s not in valid_model_names:
     raise ValueError(
@@ -332,7 +420,7 @@ def validate_and_assign_remat_tensors(keys):
   return keys
 
 
-def _lists_to_tuples(l: list[Any]) -> Union[tuple[Any], list[Any]]:
+def _lists_to_tuples(l: list[Any]) -> tuple[Any] | list[Any]:
   return tuple(_lists_to_tuples(x) for x in l) if isinstance(l, list) else l
 
 
@@ -350,14 +438,14 @@ class _HyperParameters:
           raise ValueError(f"We received env `{environment_var}` but it isn't all uppercase.")
 
   def _update_from_env_and_command_line(self, raw_keys, raw_data_from_yaml, argv, **kwargs) -> list[str]:
-    """Update model config from environment and command line using OmegaConf overrides."""
-    # Use OmegaConf.from_cli to capture CLI arguments.
-    cli_cfg = OmegaConf.from_cli(argv[2:])
+    """Update model config from environment and command line using omegaconf.OmegaConf overrides."""
+    # Use omegaconf.OmegaConf.from_cli to capture CLI arguments.
+    cli_cfg = omegaconf.OmegaConf.from_cli(argv[2:])
     # Also create a configuration from any extra keyword arguments.
-    kwargs_cfg = OmegaConf.create(kwargs)
+    kwargs_cfg = omegaconf.OmegaConf.create(kwargs)
     # Merge command-line and keyword arguments.
-    cmdline_cfg = OmegaConf.merge(cli_cfg, kwargs_cfg)
-    raw_data_from_cmd_line = OmegaConf.to_container(cmdline_cfg, resolve=True)
+    cmdline_cfg = omegaconf.OmegaConf.merge(cli_cfg, kwargs_cfg)
+    raw_data_from_cmd_line = omegaconf.OmegaConf.to_container(cmdline_cfg, resolve=True)
 
     updated_keys = []
 
@@ -402,9 +490,9 @@ class _HyperParameters:
     return updated_keys
 
   def _load_config(self, config_name: str) -> dict[str, Any]:
-    """Loads the YAML config from a file using OmegaConf, and resolves inheritance."""
-    base_cfg = OmegaConf.load(config_name)
-    raw_data_from_yaml = OmegaConf.to_container(base_cfg, resolve=True)
+    """Loads the YAML config from a file using omegaconf.OmegaConf, and resolves inheritance."""
+    base_cfg = omegaconf.OmegaConf.load(config_name)
+    raw_data_from_yaml = omegaconf.OmegaConf.to_container(base_cfg, resolve=True)
 
     # Load data from parent config. Note that inheritance has override
     # semantics, and the path is relative to the current config.
@@ -434,9 +522,10 @@ class _HyperParameters:
     raw_keys = OrderedDict()
     keys_from_env_and_command_line = self._update_from_env_and_command_line(raw_keys, raw_data_from_yaml, argv, **kwargs)
     max_logging.log(f"Updating keys from env and command line: {keys_from_env_and_command_line}")
-    keys_from_model = _HyperParameters.update_model_vars(argv[1], raw_keys, config_name)
+    keys_from_model = _HyperParameters.update_model_vars(argv[1], raw_keys, config_name, keys_from_env_and_command_line)
     max_logging.log(f"Updating keys from model: {keys_from_model}")
-    validate_no_keys_overwritten_twice(keys_from_env_and_command_line, keys_from_model)
+    if not raw_keys["override_model_config"]:
+      validate_no_keys_overwritten_twice(keys_from_env_and_command_line, keys_from_model)
 
     # This must be invoked before initializing the backend
     raw_keys = validate_and_set_hlo_dump_defaults(raw_keys)
@@ -452,6 +541,9 @@ class _HyperParameters:
     _HyperParameters.user_init(raw_keys)
     if raw_keys["dataset_type"] == "c4_mlperf" and raw_keys["model_name"] == "gpt3-175b":
       _HyperParameters.configure_gpt3_task(raw_keys)
+
+    if raw_keys["dataset_type"] == "c4_mlperf" and raw_keys["model_name"] != "gpt3-175b":
+      _HyperParameters.configure_c4_mlperf_task(raw_keys)
 
     if not os.path.isfile(raw_keys["tokenizer_path"]):
       # Try and find the tokenizer path relative to the config file.
@@ -477,6 +569,10 @@ class _HyperParameters:
     """Transformations between the config data and configs used at runtime"""
     if raw_keys["run_name"] == "":
       raw_keys["run_name"] = os.environ.get("JOBSET_NAME")  # using XPK default
+      if raw_keys["run_name"] == "":
+        now = datetime.datetime.now()
+        timestamp = now.strftime("%Y-%m-%d-%H-%M")
+        raw_keys["run_name"] = f'{raw_keys["model_name"]}_{timestamp}'
     run_name = raw_keys["run_name"]
     base_output_directory = raw_keys["base_output_directory"]
     if run_name:
@@ -529,8 +625,14 @@ class _HyperParameters:
         1,
     )
 
+    if raw_keys["pagedattn_max_pages_per_group"] <= 0:
+      raw_keys["pagedattn_max_pages_per_group"] = (
+          raw_keys["max_target_length"] + raw_keys["pagedattn_tokens_per_page"] - 1
+      ) // raw_keys["pagedattn_tokens_per_page"]
+
     raw_keys["num_slices"] = max_utils.get_num_slices(raw_keys)
     raw_keys["quantization_local_shard_count"] = get_quantization_local_shard_count(raw_keys)
+    raw_keys["context_parallel_size"] = get_context_parallel_size(raw_keys)
     raw_keys = create_parallelisms_list(raw_keys)
     raw_keys = set_and_validate_pipeline_config(raw_keys)
 
@@ -554,6 +656,10 @@ class _HyperParameters:
     validate_keys(raw_keys)
     validate_tokenizer(raw_keys)
     validate_data_input(raw_keys)
+    validate_constant_bound(raw_keys)
+    validate_quantization_methods(raw_keys)
+
+    raw_keys["decoder_block"] = DecoderBlockType(raw_keys["decoder_block"])
 
   @staticmethod
   def configure_gpt3_task(raw_keys):
@@ -572,7 +678,26 @@ class _HyperParameters:
     raw_keys["eval_interval"] = math.ceil(24567 / global_batch_size_to_train_on)
 
   @staticmethod
-  def update_model_vars(base_config_path, raw_keys, config_name: str):
+  def configure_c4_mlperf_task(raw_keys):
+    """dynamically configure based on training rules"""
+    # follow https://github.com/google/paxml/blob/19db52eed85ae0d2365339b83a97cd0b873bbf73/paxml/tasks/lm/params/c4.py#L280
+    #   according to training_rules of mlperf
+    global_batch_size_to_train_on = raw_keys["global_batch_size_to_train_on"]
+    global_batch_size_to_eval_on = raw_keys["global_batch_size_to_eval_on"]
+    max_target_length = raw_keys["max_target_length"]
+
+    learning_rate = (8.0e-5 * global_batch_size_to_train_on) / 1152
+    warmup_steps = math.ceil(8000.0 * 1152 / global_batch_size_to_train_on - 1e-6)
+    decay_end_step = math.ceil(1200000.0 * 1152 / global_batch_size_to_train_on - 1e-6)
+    raw_keys["learning_rate"] = learning_rate
+    raw_keys["learning_rate_schedule_steps"] = decay_end_step
+    raw_keys["warmup_steps_fraction"] = warmup_steps / decay_end_step
+
+    raw_keys["eval_steps"] = math.ceil(5760 * 8192 / max_target_length / global_batch_size_to_eval_on)
+    raw_keys["eval_interval"] = math.ceil(377487360 / max_target_length / global_batch_size_to_train_on)
+
+  @staticmethod
+  def update_model_vars(base_config_path, raw_keys, config_name: str, keys_from_env_and_command_line):
     """Update model config variables"""
     validate_model_name(raw_keys["model_name"])
     max_logging.log(f"Running Model: {raw_keys['model_name']}")
@@ -586,9 +711,11 @@ class _HyperParameters:
       if not os.path.isfile(file_path):
         dir_path = os.path.dirname(os.path.realpath(__file__))
         file_path = os.path.join(dir_path, "configs", "models", f"{model_name}.yml")
-      # Use OmegaConf to load the model-specific configuration.
-      model_vars = OmegaConf.load(file_path)
-      model_vars = OmegaConf.to_container(model_vars, resolve=True)
+      # Use omegaconf.OmegaConf to load the model-specific configuration.
+      model_vars = omegaconf.OmegaConf.load(file_path)
+      model_vars = omegaconf.OmegaConf.to_container(model_vars, resolve=True)
+      if raw_keys["override_model_config"]:
+        model_vars = {key: value for key, value in model_vars.items() if key not in keys_from_env_and_command_line}
       updated_keys = list(model_vars.keys())
       raw_keys = validate_and_update_keys(raw_keys, model_vars, config_name)
     return updated_keys
@@ -646,9 +773,9 @@ def validate_and_set_hlo_dump_defaults(raw_keys):
     raise ValueError("You must set either XLA_FLAGS or dump_hlo_xla_flags to dump HLO, but not both.")
   if not os.environ.get("XLA_FLAGS") and not raw_keys["dump_hlo_xla_flags"]:
     raw_keys["dump_hlo_xla_flags"] = f"--xla_dump_to={raw_keys['dump_hlo_local_dir']} --xla_dump_large_constants"
-    if raw_keys["dump_hlo_module_name"]:
+    if raw_keys["dump_hlo_local_module_name"]:
       raw_keys["dump_hlo_xla_flags"] = (
-          f"{raw_keys['dump_hlo_xla_flags']} --xla_dump_hlo_module_re={raw_keys['dump_hlo_module_name']}"
+          f"{raw_keys['dump_hlo_xla_flags']} --xla_dump_hlo_module_re={raw_keys['dump_hlo_local_module_name']}"
       )
   if not raw_keys["dump_hlo_gcs_dir"]:
     raw_keys["dump_hlo_gcs_dir"] = os.path.join(raw_keys["base_output_directory"], raw_keys["run_name"], "xla_dump")
@@ -685,6 +812,11 @@ def validate_multiple_slices(raw_keys):
 
 def set_and_validate_pipeline_config(raw_keys):
   if using_pipeline_parallelism(raw_keys):
+    # For pipeline parallelism, model_fsdp_ag_once should be False, and pipeline_fsdp_ag_once is typically True.
+    if raw_keys["model_fsdp_ag_once"]:
+      raise ValueError(
+          "You should only set pipeline_fsdp_once=True, leave model_fsdp_ag_once=False with pipeline parallelism."
+      )
 
     def modify_activation_embed_and_logits_batch(logical_axis_rules):
       for idx, logical_rule in enumerate(logical_axis_rules):
@@ -770,18 +902,41 @@ def set_and_validate_pipeline_config(raw_keys):
     raw_keys["logical_axis_rules"] = modify_activation_embed_and_logits_batch(raw_keys["logical_axis_rules"])
     raw_keys = pipeline_first_axis(raw_keys)
     num_stages = int(raw_keys["ici_pipeline_parallelism"] * raw_keys["dcn_pipeline_parallelism"])
+    if raw_keys["pipeline_parallel_layers"] == -1:
+      if raw_keys["decoder_block"] == "deepseek":
+        moe_layers = raw_keys["num_decoder_layers"] - raw_keys["first_num_dense_layers"]
+        raw_keys["pipeline_parallel_layers"] = moe_layers
+      else:
+        raw_keys["pipeline_parallel_layers"] = raw_keys["num_decoder_layers"]
+    else:
+      if raw_keys["decoder_block"] == "deepseek":
+        moe_layers = raw_keys["num_decoder_layers"] - raw_keys["first_num_dense_layers"]
+        assert (
+            raw_keys["pipeline_parallel_layers"] <= moe_layers
+        ), f"You can only pipeline a subset of the moe decoder layers for deepseek, but you requested to pipeline {raw_keys['pipeline_parallel_layers']} with pipeline_parallel_layers and there are only {moe_layers} decoder layers."
+      else:
+        assert (
+            raw_keys["pipeline_parallel_layers"] <= raw_keys["num_decoder_layers"]
+        ), f"You can only pipeline a subset of the decoder layers, but you requested to pipeline {raw_keys['pipeline_parallel_layers']} with pipeline_parallel_layers and there are only {raw_keys['num_decoder_layers']} decoder layers."
+    assert (
+        raw_keys["scan_layers"] or raw_keys["pipeline_parallel_layers"] == raw_keys["num_decoder_layers"]
+    ), "Currently we only support scan_layers=True when pipelining a subset of layers."
+    assert (
+        raw_keys["pipeline_parallel_layers"] > 0
+    ), "You must set pipeline_parallel_layers to a positive integer less than or equal to the number of layers"
+
     if raw_keys["num_pipeline_repeats"] == -1:
       num_pipeline_repeats, remainder = divmod(
-          raw_keys["num_decoder_layers"], num_stages * raw_keys["num_layers_per_pipeline_stage"]
+          raw_keys["pipeline_parallel_layers"], num_stages * raw_keys["num_layers_per_pipeline_stage"]
       )
       assert (
           not remainder
-      ), f"The number of layers per stage ({raw_keys['num_layers_per_pipeline_stage']}) times the number of stages ({num_stages}) must divide the number of decoder layers ({raw_keys['num_decoder_layers']}) "
+      ), f"The number of layers per stage ({raw_keys['num_layers_per_pipeline_stage']}) times the number of stages ({num_stages}) must divide the number of pipeline_parallel_layers which defaults to decoder layers  ({raw_keys['pipeline_parallel_layers']}) "
       raw_keys["num_pipeline_repeats"] = num_pipeline_repeats
     assert (
         num_stages * raw_keys["num_pipeline_repeats"] * raw_keys["num_layers_per_pipeline_stage"]
-        == raw_keys["num_decoder_layers"]
-    ), f"The product of pipeline stages ({num_stages}), repeats ({raw_keys['num_pipeline_repeats']}), and layers per stage ({raw_keys['num_layers_per_pipeline_stage']}) must be equal to the number of layers ({raw_keys['num_decoder_layers']})"
+        == raw_keys["pipeline_parallel_layers"]
+    ), f"The product of pipeline stages ({num_stages}), repeats ({raw_keys['num_pipeline_repeats']}), and layers per stage ({raw_keys['num_layers_per_pipeline_stage']}) must be equal to pipeline_parallel_layers which defaults to decoder layers ({raw_keys['pipeline_parallel_layers']})"
     if raw_keys["num_pipeline_microbatches"] == -1:
       if raw_keys["pipeline_delay_activation_forwarding"]:
         raw_keys["num_pipeline_microbatches"] = 2 * num_stages
@@ -803,8 +958,6 @@ def set_and_validate_pipeline_config(raw_keys):
 
 
 def validate_deepseek_moe(raw_keys):
-  if raw_keys["decoder_block"] == "deepseek" and using_pipeline_parallelism(raw_keys):
-    raise ValueError("Currently we do not support DeepSeek MoE with pipeline parallelism.")
   if raw_keys["n_routing_groups"] != -1:
     if raw_keys["topk_routing_group"] == -1:
       raise ValueError(f'config topk_routing_group: {raw_keys["topk_routing_group"]} is not defined')
@@ -819,8 +972,17 @@ def validate_deepseek_moe(raw_keys):
 
 
 def validate_sparse_matmul_parallelism(raw_keys):
-  if raw_keys["sparse_matmul"] and (using_sequence_parallelism(raw_keys) or using_pipeline_parallelism(raw_keys)):
-    raise ValueError("Currently we only support Megablox and Ragged dot with data, tensor, and expert parallelism.")
+  # TODO: remove once b/434699033 resolved
+  if raw_keys["sparse_matmul"] and (using_expert_parallelism(raw_keys) and using_pipeline_parallelism(raw_keys)):
+    raise ValueError("Sparse matmul doesn't support using expert and pipeline parallelism together.")
+
+  # TODO: remove once b/435539039 resolved
+  if raw_keys["sparse_matmul"] and (
+      using_fsdp_and_transpose_parallelism(raw_keys)
+      and using_expert_parallelism(raw_keys)
+      and using_tensor_parallelism(raw_keys)
+  ):
+    raise ValueError("Sparse matmul doesn't support using fsdp, expert, and tensor parallelism together.")
   tensor_parallelism = (
       raw_keys["ici_tensor_parallelism"]
       * raw_keys["dcn_tensor_parallelism"]
@@ -838,6 +1000,15 @@ def validate_sparse_matmul_parallelism(raw_keys):
     raise ValueError(
         f"The expert dimension {raw_keys['num_experts']} is not divisible by expert parallelism setting {expert_parallelism}."
     )
+
+
+def validate_ragged_dot(raw_keys):
+  if raw_keys["sparse_matmul"] and not raw_keys["megablox"]:
+    config_flag = "jax_ragged_dot_use_ragged_dot_instruction"
+    try:
+      jax.config.update(config_flag, True)
+    except AttributeError:
+      max_logging.log(f"JAX config {config_flag} not found, possibly due to old JAX version.")
 
 
 def create_new_logical_axis_rules(old_logical_axis_rules, new_logical_axis_rules):
@@ -935,6 +1106,9 @@ def get_num_target_devices(raw_keys):
     compile_topology = accelerator_to_spec_map.get_system_characteristics(raw_keys["compile_topology"])
     devices_per_slice = compile_topology.devices_per_slice
     return int(devices_per_slice * raw_keys["compile_topology_num_slices"])
+  elif raw_keys.get("subslice_shape") and raw_keys.get("enable_single_controller"):
+    subslice_shape = tuple(int(x) for x in raw_keys["subslice_shape"].split(","))
+    return prod(subslice_shape)
   else:
     return len(jax.devices())
 
@@ -944,6 +1118,14 @@ def get_quantization_local_shard_count(raw_keys):
     return raw_keys["num_slices"]
   else:
     return raw_keys["quantization_local_shard_count"]
+
+
+def get_context_parallel_size(raw_keys):
+  cp_size = raw_keys["ici_context_parallelism"] * raw_keys["dcn_context_parallelism"]
+  # ep acts as cp in attention
+  if raw_keys["expert_shard_attention_option"] == "context":
+    cp_size = cp_size * raw_keys["ici_expert_parallelism"] * raw_keys["dcn_expert_parallelism"]
+  return cp_size
 
 
 def using_pipeline_parallelism(raw_keys) -> bool:
@@ -967,6 +1149,15 @@ def using_sequence_parallelism(raw_keys) -> bool:
 
 def using_expert_parallelism(raw_keys) -> bool:
   return int(raw_keys["ici_expert_parallelism"]) > 1 or int(raw_keys["dcn_expert_parallelism"]) > 1
+
+
+def using_fsdp_and_transpose_parallelism(raw_keys) -> bool:
+  return (
+      int(raw_keys["ici_fsdp_parallelism"]) > 1
+      or int(raw_keys["dcn_fsdp_parallelism"]) > 1
+      or int(raw_keys["ici_fsdp_transpose_parallelism"]) > 1
+      or int(raw_keys["dcn_fsdp_transpose_parallelism"]) > 1
+  )
 
 
 class HyperParameters:

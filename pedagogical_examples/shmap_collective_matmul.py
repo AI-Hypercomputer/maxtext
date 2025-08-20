@@ -1,20 +1,18 @@
 #!/usr/bin/python3
 
-"""
-Copyright 2023 Google LLC
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-     https://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-"""
+# Copyright 2023–2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """This script is an example collective matmul."""
 
@@ -22,8 +20,10 @@ import os
 
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
 
-import numpy as np
 from functools import partial
+
+import numpy as np
+
 import jax
 import jax.numpy as jnp
 from jax.experimental.pjit import pjit
@@ -35,6 +35,7 @@ MESH_DATA_AXIS = "dp"
 MESH_FSDP_AXIS = "fsdp"
 MESH_TENSOR_AXIS = "tp"
 
+# We should not call jax.devices() when this file is imported b/415022795.
 d = jax.devices()
 outd = [[[d[0], d[1], d[3], d[2]]]]
 global_mesh = Mesh(outd, (MESH_DATA_AXIS, MESH_FSDP_AXIS, MESH_TENSOR_AXIS))

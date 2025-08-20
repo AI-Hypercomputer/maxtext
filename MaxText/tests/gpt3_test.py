@@ -1,43 +1,39 @@
-"""
-Copyright 2023 Google LLC
+# Copyright 2023–2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
+""" Tests for GPT3. """
 
-     https://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-"""
-
-""" Tests for GPT3 """
-import sys
-import jax
-import unittest
 import os.path
-from MaxText import maxtext_utils
-from MaxText.globals import PKG_DIR
-from jax.sharding import Mesh
-from MaxText.layers import models
-from MaxText.layers import embeddings
-from MaxText.layers import quantizations
+import sys
+import unittest
 
-import jax.numpy as jnp
-
-from MaxText import pyconfig
 import pytest
 
+from jax.sharding import Mesh
+import jax.numpy as jnp
+import jax
 
-Mesh = jax.sharding.Mesh
-Embed = embeddings.Embed
+from MaxText import maxtext_utils
+from MaxText import pyconfig
+from MaxText.globals import PKG_DIR
+from MaxText.common_types import MODEL_MODE_TRAIN
+from MaxText.layers import models
+from MaxText.layers import quantizations
 
 
 def init_random_model_vars(model, rng, example_batch):
-  """initialize random model vars."""
+  """Initialize random model vars."""
   model_vars = model.init(
       {"params": rng, "aqt": rng},
       example_batch["inputs"],
@@ -48,7 +44,7 @@ def init_random_model_vars(model, rng, example_batch):
   def _replace_initialization(key, value):
     keystr = jax.tree_util.keystr(key)
     # replace zero initializer to ensure strong test cases
-    #   including Gpt3LayerNorm scale, Gpt3LayerNorm bias, and DenseGeneral bias
+    #   including Gpt3LayerNorm scale, Gpt3LayerNorm bias, and dense_general bias
     if "scale" in keystr or "bias" in keystr:
       value = jax.nn.initializers.normal(1.0)(rng, value.shape, dtype=value.dtype)
     return value
@@ -58,7 +54,7 @@ def init_random_model_vars(model, rng, example_batch):
 
 
 class GPT3(unittest.TestCase):
-  """numerical tests for GPT3."""
+  """Numerical tests for GPT3."""
 
   def setUp(self):
     super().setUp()
@@ -74,7 +70,7 @@ class GPT3(unittest.TestCase):
     devices_array = maxtext_utils.create_device_mesh(self.cfg)
     mesh = Mesh(devices_array, self.cfg.mesh_axes)
     quant = quantizations.configure_quantization(self.cfg)
-    self.model = models.Transformer(config=self.cfg, mesh=mesh, quant=quant)
+    self.model = models.Transformer(config=self.cfg, mesh=mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
     self.example_batch = {
         "inputs": jnp.array([[11, 12, 13, 14, 15]], dtype=jnp.int32),
         "inputs_position": jnp.array([[0, 1, 2, 3, 4]], dtype=jnp.int32),

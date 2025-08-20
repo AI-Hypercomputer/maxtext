@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 
+# NOTE: please check the README located at MaxText/inference_mlperf/README.md for instructions on how
+# to set up the environment before running this script.
 # Run command:
 # bash benchmarks_llama2-70b-trillium_2x4.sh [-b benchmark_type]
-# benchmark_type can be: performance, audit, accuracy, or all (default)
+# benchmark_type can be: performance (default), audit, accuracy, or all
 
 run_name="trillium_llama2-70b"
 dry_run=false
@@ -84,13 +86,13 @@ if [[ -z ${CHECKPOINT} ]] ; then
 fi
 
 if [[ -z ${TOKENIZER_PATH} ]] ; then
-  export TOKENIZER_PATH="/home/${USER}/maxtext/assets/tokenizer.llama2"
+  export TOKENIZER_PATH="/home/${USER}/maxtext/assets/tokenizer.llama2" # NOTE: you may need to change this path for your VM
 fi
 
 if [ -z "$PREFILL_LENS_AND_PER_DEVICE_BATCH_SIZES" ];
 then
     PREFILL_LEN="1024"
-    BATCH_SIZE_PER_DEVICE="64" 
+    BATCH_SIZE_PER_DEVICE="64"
     export PREFILL_LENS_AND_PER_DEVICE_BATCH_SIZES="${PREFILL_LEN},${BATCH_SIZE_PER_DEVICE}"
 fi
 
@@ -98,7 +100,7 @@ fi
 BASE_CFG="model_name=llama2-70b tokenizer_path=${TOKENIZER_PATH} load_parameters_path=${CHECKPOINT}"
 QUANT_CFG="quantization=${QUANTIZATION} quant_cfg_path=${QUANT_PATH} checkpoint_is_quantized=True"
 KV_QUANT_CFG="quantize_kvcache=True kv_quant_dtype=${KV_QUANT_DTYPE}"
-export MAXENGINE_ARGS="${BASE_CFG} ${QUANT_CFG} ${KV_QUANT_CFG} optimize_mesh_for_tpu_v6e=True"
+export MAXENGINE_ARGS="${BASE_CFG} ${QUANT_CFG} ${KV_QUANT_CFG} optimize_mesh_for_tpu_v6e=True skip_jax_distributed_system=True"
 echo
 echo $MAXENGINE_ARGS
 echo
@@ -117,7 +119,7 @@ run_benchmark() {
             ;;
         "accuracy")
             export HF_CKPT="meta-llama/Llama-2-70b-chat-hf"
-            $cmd bash llama_offline_run.sh ${RUN_OPTIONS} -r benchmarks_accuracy_${RUN_DESC} -a  
+            $cmd bash llama_offline_run.sh ${RUN_OPTIONS} -r benchmarks_accuracy_${RUN_DESC} -a
             ;;
     esac
 }

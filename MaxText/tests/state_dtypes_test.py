@@ -1,33 +1,32 @@
-"""
-Copyright 2023 Google LLC
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-     https://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-"""
+# Copyright 2023–2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """ Test that all weights are expected dtype (default float32) """
 import unittest
 import os.path
 
-from MaxText import pyconfig
+import jax
+from jax.sharding import Mesh
+import jax.numpy as jnp
 
+from MaxText import pyconfig
 from MaxText import optimizers
+from MaxText.common_types import MODEL_MODE_TRAIN
 from MaxText.layers import models
 from MaxText.layers import quantizations
 from MaxText import maxtext_utils
 from MaxText.globals import PKG_DIR
-import jax
-from jax.sharding import Mesh
-import jax.numpy as jnp
 
 Transformer = models.Transformer
 
@@ -43,7 +42,7 @@ class StateDtypes(unittest.TestCase):
     quant = quantizations.configure_quantization(config)
     devices_array = maxtext_utils.create_device_mesh(config)
     mesh = Mesh(devices_array, config.mesh_axes)
-    model = Transformer(config, mesh, quant=quant)
+    model = Transformer(config, mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
     learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
     tx = optimizers.get_optimizer(config, learning_rate_schedule)
     _, example_rng = jax.random.split(jax.random.PRNGKey(0), 2)

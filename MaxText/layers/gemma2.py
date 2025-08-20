@@ -1,53 +1,31 @@
-"""
-Copyright 2024 Google LLC
+# Copyright 2023–2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
+"""Specialised layers for Gemma2."""
 
-     https://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-"""
+from jax.ad_checkpoint import checkpoint_name
+from jax.sharding import Mesh
+import jax.numpy as jnp
 
 from flax import linen as nn
-from MaxText import common_types
-import jax.numpy as jnp
-from jax.ad_checkpoint import checkpoint_name
 
-from MaxText.layers import normalizations
-from MaxText.layers import attentions
-from MaxText.layers import initializers
-from MaxText.layers import embeddings
-from MaxText.layers import linears
+from MaxText.common_types import MODEL_MODE_PREFILL, Config, AttentionType
 from MaxText.layers import quantizations
-
-from typing import Optional
-
-Embed = embeddings.Embed
-RMSNorm = normalizations.RMSNorm
-NdInitializer = initializers.NdInitializer
-Attention = attentions.Attention
-MlpBlock = linears.MlpBlock
-Config = common_types.Config
-AxisNames = common_types.AxisNames
-Mesh = common_types.Mesh
-ScanIn = common_types.ScanIn
-DType = common_types.DType
-Array = common_types.Array
-BATCH = common_types.BATCH
-LENGTH = common_types.LENGTH
-HEAD = common_types.HEAD
-D_KV = common_types.D_KV
-
-
-nd_dense_init = initializers.nd_dense_init
-Quant = quantizations.AqtQuantization
-KVQuant = quantizations.KVQuant
+from MaxText.layers.attentions import attention_as_linen
+from MaxText.layers.linears import mlp_block
+from MaxText.layers.normalizations import rms_norm
+from MaxText.layers.quantizations import AqtQuantization as Quant
 
 
 # Decoder and Model definitions
@@ -56,7 +34,8 @@ class Gemma2DecoderLayer(nn.Module):
 
   config: Config
   mesh: Mesh
-  quant: Optional[Quant] = None
+  model_mode: str
+  quant: None | Quant = None
 
   @nn.compact
   def __call__(
@@ -72,16 +51,24 @@ class Gemma2DecoderLayer(nn.Module):
   ):
     cfg = self.config
     mesh = self.mesh
-    inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
+    if model_mode == MODEL_MODE_PREFILL:
+      activation_axis_names = ("activation_batch", "prefill_activation_norm_length", "activation_embed")
+    else:
+      activation_axis_names = ("activation_batch", "activation_norm_length", "activation_embed")
+
+    inputs = nn.with_logical_constraint(inputs, activation_axis_names)
     inputs = checkpoint_name(inputs, "decoder_layer_input")
     # inputs: embedded inputs to the decoder with shape [batch, length, emb_dim]
-    lnx = RMSNorm(
-        dtype=cfg.dtype, weight_dtype=cfg.weight_dtype, name="pre_self_attention_norm_local", kernel_axes=("norm",)
+    lnx = rms_norm(
+        num_features=inputs.shape[-1],
+        dtype=cfg.dtype,
+        weight_dtype=cfg.weight_dtype,
+        name="pre_self_attention_norm_local",
+        kernel_axes=("norm",),
     )(inputs)
+    lnx = nn.with_logical_constraint(lnx, activation_axis_names)
 
-    lnx = nn.with_logical_constraint(lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
-
-    attention_layer = Attention(
+    attention_layer = attention_as_linen(
         config=cfg,
         num_query_heads=cfg.num_query_heads,
         num_kv_heads=cfg.num_kv_heads,
@@ -89,6 +76,8 @@ class Gemma2DecoderLayer(nn.Module):
         max_target_length=cfg.max_target_length,
         max_prefill_predict_length=cfg.max_prefill_predict_length,
         attention_kernel=cfg.attention,
+        inputs_q_shape=lnx.shape,
+        inputs_kv_shape=lnx.shape,
         mesh=mesh,
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
@@ -98,9 +87,10 @@ class Gemma2DecoderLayer(nn.Module):
         float32_logits=cfg.float32_logits,
         quant=self.quant,
         kv_quant=quantizations.configure_kv_quant(cfg),
-        attention_type=attentions.AttentionType.LOCAL_SLIDING,
+        attention_type=AttentionType.LOCAL_SLIDING,
         sliding_window_size=cfg.sliding_window_size,
         attn_logits_soft_cap=cfg.attn_logits_soft_cap,
+        model_mode=model_mode,
     )
 
     attention_lnx = attention_layer(
@@ -112,37 +102,48 @@ class Gemma2DecoderLayer(nn.Module):
         model_mode=model_mode,
     )
     if cfg.use_post_attn_norm:
-      attention_lnx = RMSNorm(
-          dtype=cfg.dtype, weight_dtype=cfg.weight_dtype, name="post_self_attention_norm_local", kernel_axes=("norm",)
+      attention_lnx = rms_norm(
+          num_features=attention_lnx.shape[-1],
+          dtype=cfg.dtype,
+          weight_dtype=cfg.weight_dtype,
+          name="post_self_attention_norm_local",
+          kernel_axes=("norm",),
       )(attention_lnx)
-
-    attention_lnx = nn.with_logical_constraint(
-        attention_lnx, ("activation_batch", "activation_norm_length", "activation_embed")
-    )
+    attention_lnx = nn.with_logical_constraint(attention_lnx, activation_axis_names)
     attention_lnx += inputs
     residual = attention_lnx
 
-    attn_output = RMSNorm(dtype=cfg.dtype, weight_dtype=cfg.weight_dtype, name="pre_ffw_norm_local", kernel_axes=("norm",))(
-        attention_lnx
-    )
+    attn_output = rms_norm(
+        num_features=attention_lnx.shape[-1],
+        dtype=cfg.dtype,
+        weight_dtype=cfg.weight_dtype,
+        name="pre_ffw_norm_local",
+        kernel_axes=("norm",),
+    )(attention_lnx)
 
     # MLP block.
-    mlp_lnx = MlpBlock(
+    mlp_lnx = mlp_block(
+        in_features=attn_output.shape[-1],
         intermediate_dim=cfg.mlp_dim,
         activations=cfg.mlp_activations,
         intermediate_dropout_rate=cfg.dropout_rate,
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
         name="mlp_local",
+        model_mode=model_mode,
         config=cfg,
         quant=self.quant,
     )(attn_output, deterministic=deterministic)
 
     if cfg.use_post_ffw_norm:
-      mlp_lnx = RMSNorm(dtype=cfg.dtype, weight_dtype=cfg.weight_dtype, name="post_ffw_norm_local", kernel_axes=("norm",))(
-          mlp_lnx
-      )
-    mlp_lnx = nn.with_logical_constraint(mlp_lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
+      mlp_lnx = rms_norm(
+          num_features=mlp_lnx.shape[-1],
+          dtype=cfg.dtype,
+          weight_dtype=cfg.weight_dtype,
+          name="post_ffw_norm_local",
+          kernel_axes=("norm",),
+      )(mlp_lnx)
+    mlp_lnx = nn.with_logical_constraint(mlp_lnx, activation_axis_names)
 
     next_layer_addition = mlp_lnx + residual
 
@@ -151,22 +152,21 @@ class Gemma2DecoderLayer(nn.Module):
     )
 
     layer_output = next_layer_addition_dropped_out
-    layer_output = nn.with_logical_constraint(
-        layer_output,
-        ("activation_batch", "activation_norm_length", "activation_embed"),
-    )
+    layer_output = nn.with_logical_constraint(layer_output, activation_axis_names)
 
     ### global part
-    inputs = nn.with_logical_constraint(layer_output, ("activation_batch", "activation_norm_length", "activation_embed"))
-
+    inputs = nn.with_logical_constraint(layer_output, activation_axis_names)
     # inputs: embedded inputs to the decoder with shape [batch, length, emb_dim]
-    lnx = RMSNorm(
-        dtype=cfg.dtype, weight_dtype=cfg.weight_dtype, name="pre_self_attention_norm_global", kernel_axes=("norm",)
+    lnx = rms_norm(
+        num_features=inputs.shape[-1],
+        dtype=cfg.dtype,
+        weight_dtype=cfg.weight_dtype,
+        name="pre_self_attention_norm_global",
+        kernel_axes=("norm",),
     )(inputs)
+    lnx = nn.with_logical_constraint(lnx, activation_axis_names)
 
-    lnx = nn.with_logical_constraint(lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
-
-    attention_layer = Attention(
+    attention_layer = attention_as_linen(
         config=cfg,
         num_query_heads=cfg.num_query_heads,
         num_kv_heads=cfg.num_kv_heads,
@@ -174,6 +174,8 @@ class Gemma2DecoderLayer(nn.Module):
         max_target_length=cfg.max_target_length,
         max_prefill_predict_length=cfg.max_prefill_predict_length,
         attention_kernel=cfg.attention,
+        inputs_q_shape=lnx.shape,
+        inputs_kv_shape=lnx.shape,
         mesh=mesh,
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
@@ -183,8 +185,9 @@ class Gemma2DecoderLayer(nn.Module):
         float32_logits=True,
         quant=self.quant,
         kv_quant=quantizations.configure_kv_quant(cfg),
-        attention_type=attentions.AttentionType.GLOBAL,
+        attention_type=AttentionType.GLOBAL,
         attn_logits_soft_cap=cfg.attn_logits_soft_cap,
+        model_mode=model_mode,
     )
 
     attention_lnx = attention_layer(
@@ -196,37 +199,49 @@ class Gemma2DecoderLayer(nn.Module):
         model_mode=model_mode,
     )
     if cfg.use_post_attn_norm:
-      attention_lnx = RMSNorm(
-          dtype=cfg.dtype, weight_dtype=cfg.weight_dtype, name="post_self_attention_norm_global", kernel_axes=("norm",)
+      attention_lnx = rms_norm(
+          num_features=attention_lnx.shape[-1],
+          dtype=cfg.dtype,
+          weight_dtype=cfg.weight_dtype,
+          name="post_self_attention_norm_global",
+          kernel_axes=("norm",),
       )(attention_lnx)
 
-    attention_lnx = nn.with_logical_constraint(
-        attention_lnx, ("activation_batch", "activation_norm_length", "activation_embed")
-    )
+    attention_lnx = nn.with_logical_constraint(attention_lnx, activation_axis_names)
     attention_lnx += inputs
     residual = attention_lnx
 
-    attn_output = RMSNorm(dtype=cfg.dtype, weight_dtype=cfg.weight_dtype, name="pre_ffw_norm_global", kernel_axes=("norm",))(
-        attention_lnx
-    )
+    attn_output = rms_norm(
+        num_features=attention_lnx.shape[-1],
+        dtype=cfg.dtype,
+        weight_dtype=cfg.weight_dtype,
+        name="pre_ffw_norm_global",
+        kernel_axes=("norm",),
+    )(attention_lnx)
 
     # MLP block.
-    mlp_lnx = MlpBlock(
+    mlp_lnx = mlp_block(
+        in_features=attn_output.shape[-1],
         intermediate_dim=cfg.mlp_dim,
         activations=cfg.mlp_activations,
         intermediate_dropout_rate=cfg.dropout_rate,
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
         name="mlp_global",
+        model_mode=model_mode,
         config=cfg,
         quant=self.quant,
     )(attn_output, deterministic=deterministic)
     if cfg.use_post_ffw_norm:
-      mlp_lnx = RMSNorm(dtype=cfg.dtype, weight_dtype=cfg.weight_dtype, name="post_ffw_norm_global", kernel_axes=("norm",))(
-          mlp_lnx
-      )
+      mlp_lnx = rms_norm(
+          num_features=mlp_lnx.shape[-1],
+          dtype=cfg.dtype,
+          weight_dtype=cfg.weight_dtype,
+          name="post_ffw_norm_global",
+          kernel_axes=("norm",),
+      )(mlp_lnx)
 
-    mlp_lnx = nn.with_logical_constraint(mlp_lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
+    mlp_lnx = nn.with_logical_constraint(mlp_lnx, activation_axis_names)
 
     next_layer_addition = mlp_lnx + residual
 
@@ -235,10 +250,7 @@ class Gemma2DecoderLayer(nn.Module):
     )
 
     layer_output = next_layer_addition_dropped_out
-    layer_output = nn.with_logical_constraint(
-        layer_output,
-        ("activation_batch", "activation_norm_length", "activation_embed"),
-    )
+    layer_output = nn.with_logical_constraint(layer_output, activation_axis_names)
 
     if cfg.record_internal_nn_metrics:
       self.sow("intermediates", "activation_mean", jnp.mean(layer_output))

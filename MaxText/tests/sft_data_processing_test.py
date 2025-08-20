@@ -1,28 +1,32 @@
-"""
-Copyright 2023 Google LLC
+# Copyright 2023–2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-     https://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-"""
+"""Data processing tests for SFT."""
 
 import subprocess
 import unittest
 import os.path
 
 import numpy as np
+
 import jax
+
 from jax.sharding import Mesh
 from jax.experimental import mesh_utils
+
 from datasets import Dataset
+
 import transformers
 
 from MaxText import pyconfig
@@ -94,7 +98,7 @@ class SFTDataProcessingTest(unittest.TestCase):
             "gsutil",
             "cp",
             "-r",
-            "gs://maxtext-dataset/hf/llama2-tokenizer",
+            "gs://maxtext-dataset/hf/llama2-chat-tokenizer",
             os.path.join(os.path.dirname(PKG_DIR), "assets", ""),
         ]
     )
@@ -111,11 +115,13 @@ class SFTDataProcessingTest(unittest.TestCase):
         logical_axis_rules=[["batch", "data"]],
         data_sharding=["data"],
         base_output_directory="gs://max-experiments/",
-        tokenizer_path=os.path.join(os.path.dirname(PKG_DIR), "assets", "llama2-tokenizer"),
+        tokenizer_path=os.path.join(os.path.dirname(PKG_DIR), "assets", "llama2-chat-tokenizer"),
         train_split="train",
         enable_checkpointing=False,
         use_sft=True,
         enable_data_shuffling=False,
+        max_target_length=32,
+        max_prefill_predict_length=16,
     )
     self.mesh_shape_1d = (len(jax.devices()),)
     self.mesh = Mesh(mesh_utils.create_device_mesh(self.mesh_shape_1d), self.config.mesh_axes)
@@ -126,7 +132,6 @@ class SFTDataProcessingTest(unittest.TestCase):
         self.config.max_target_length,
         self.mesh,
     )
-    self.max_target_length = 44
     self.tokenizer = transformers.AutoTokenizer.from_pretrained(
         self.config.tokenizer_path,
         add_bos_token=False,
@@ -134,8 +139,9 @@ class SFTDataProcessingTest(unittest.TestCase):
         legacy=False,
     )
 
-  def get_train_iterator(self, train_ds, data_columns):
-    self.train_iter = _hf_data_processing.preprocessing_pipeline(
+  def get_data_iterator(self, train_ds, data_columns):
+    """Get data iterator."""
+    return _hf_data_processing.preprocessing_pipeline(
         dataloading_host_index=self.process_indices.index(jax.process_index()),
         dataloading_host_count=len(self.process_indices),
         global_mesh=self.mesh,
@@ -145,7 +151,7 @@ class SFTDataProcessingTest(unittest.TestCase):
         tokenizer_path=self.config.tokenizer_path,
         hf_access_token=self.config.hf_access_token,
         global_batch_size=self.config.global_batch_size_to_load,
-        max_target_length=self.max_target_length,
+        max_target_length=self.config.max_target_length,
         shuffle=self.config.enable_data_shuffling,
         data_shuffle_seed=self.config.data_shuffle_seed,
         add_bos=self.config.add_bos,
@@ -159,43 +165,51 @@ class SFTDataProcessingTest(unittest.TestCase):
     )
 
   def test_sft_format_with_messages(self):
-    train_ds = Dataset.from_dict({"messages": MESSAGES_DATA * 4})
+    dataset = Dataset.from_dict({"messages": MESSAGES_DATA * 4})
     data_columns = ["messages"]
-    self.get_train_iterator(train_ds, data_columns)
+    data_iter = self.get_data_iterator(dataset, data_columns)
 
-    # exp1 is longer than max_target_length=44, testing truncation
+    # exp1 is longer than max_target_length, testing truncation
     truncated_exp1_inputs = (
-        "<s> <user>example one question one</user> <assistant>example one answer one</assistant> "
-        "<user>example one question two</user> <assistant>example one answer two</assistant"
+        "<s> [INST] example one question one [/INST] "
+        "example one answer one </s>"
+        "<s> [INST] example one question two [/INST] "
+        "example one"
     )
     truncated_exp1_targets = (
-        "<unk><unk><unk><unk><unk><unk><unk><unk><unk><unk> <assistant>example one answer one"
-        "</assistant><unk><unk><unk><unk><unk><unk><unk><unk><unk><unk> <assistant>example one "
-        "answer two</assistant<unk>"
+        "<unk><unk><unk><unk><unk><unk><unk><unk><unk><unk><unk> "
+        "example one answer one </s>"
+        "<unk><unk><unk><unk><unk><unk><unk><unk><unk><unk><unk><unk> "
+        "example one<unk>"
     )
     truncated_exp1_targets_predictable = (
-        "<unk><unk><unk><unk><unk><unk><unk><unk><unk><unk> <assistant>example one "
-        "answer one</assistant><unk><unk><unk><unk><unk><unk><unk><unk><unk><unk> "
-        "<assistant>example one answer two</assistant<unk>"
+        "<unk><unk><unk><unk><unk><unk><unk><unk><unk><unk><unk> "
+        "example one answer one </s>"
+        "<unk><unk><unk><unk><unk><unk><unk><unk><unk><unk><unk><unk> "
+        "example one<unk>"
     )
 
     # exp2 is packed from 2nd and 3rd entries, testing packing
     packed_exp2_inputs = (
-        "<s> <user>question two</user> <assistant>answer two</assistant></s><s> <user>question three"
-        "</user> <assistant>answer three</assistant></s><unk><unk><unk><unk>"
+        "<s> [INST] question two [/INST] "
+        "answer two </s>"
+        "<s> [INST] question three [/INST] "
+        "answer three </s><unk><unk><unk><unk>"
     )
     packed_exp2_targets = (
-        "<unk><unk><unk><unk><unk><unk><unk><unk> <assistant>answer two</assistant></s><s><unk><unk>"
-        "<unk><unk><unk><unk><unk><unk> <assistant>answer three</assistant></s><unk><unk><unk><unk>"
-        "<unk>"
+        "<unk><unk><unk><unk><unk><unk><unk><unk><unk> "
+        "answer two </s>"
+        "<unk><unk><unk><unk><unk><unk><unk><unk><unk><unk> "
+        "answer three </s><unk><unk><unk><unk><unk>"
     )
     packed_exp2_targets_predictable = (
-        "<unk><unk><unk><unk><unk><unk><unk><unk> <assistant>answer two</assistant></s>"
-        "<unk><unk><unk><unk><unk><unk><unk><unk><unk> <assistant>answer three"
-        "</assistant></s><unk><unk><unk><unk><unk>"
+        "<unk><unk><unk><unk><unk><unk><unk><unk><unk> "
+        "answer two </s>"
+        "<unk><unk><unk><unk><unk><unk><unk><unk><unk><unk> "
+        "answer three </s><unk><unk><unk><unk><unk>"
     )
 
-    batch = next(self.train_iter)
+    batch = next(data_iter)
     self.assertEqual(self.tokenizer.decode(batch["inputs"][0]), truncated_exp1_inputs)
     self.assertEqual(self.tokenizer.decode(batch["targets"][0]), truncated_exp1_targets)
     self.assertEqual(
@@ -216,43 +230,51 @@ class SFTDataProcessingTest(unittest.TestCase):
     )
 
   def test_sft_format_with_prompt_completion(self):
-    train_ds = Dataset.from_dict({"prompt": PROMPT_DATA * 4, "completion": COMPLETION_DATA * 4})
+    dataset = Dataset.from_dict({"prompt": PROMPT_DATA * 4, "completion": COMPLETION_DATA * 4})
     data_columns = ["prompt", "completion"]
-    self.get_train_iterator(train_ds, data_columns)
+    data_iter = self.get_data_iterator(dataset, data_columns)
 
-    # exp1 is longer than max_target_length=44, testing truncation
+    # exp1 is longer than max_target_length, testing truncation
     truncated_exp1_inputs = (
-        "<s> <user>example one question one</user> <assistant>example one answer one</assistant> "
-        "<user>example one question two</user> <assistant>example one answer two</assistant"
+        "<s> [INST] example one question one [/INST] "
+        "example one answer one </s>"
+        "<s> [INST] example one question two [/INST] "
+        "example one"
     )
     truncated_exp1_targets = (
-        "<unk><unk><unk><unk><unk><unk><unk><unk><unk><unk> <assistant>example one answer one"
-        "</assistant><unk><unk><unk><unk><unk><unk><unk><unk><unk><unk> <assistant>example one "
-        "answer two</assistant<unk>"
+        "<unk><unk><unk><unk><unk><unk><unk><unk><unk><unk><unk> "
+        "example one answer one </s>"
+        "<unk><unk><unk><unk><unk><unk><unk><unk><unk><unk><unk><unk> "
+        "example one<unk>"
     )
     truncated_exp1_targets_predictable = (
-        "<unk><unk><unk><unk><unk><unk><unk><unk><unk><unk> <assistant>example one "
-        "answer one</assistant><unk><unk><unk><unk><unk><unk><unk><unk><unk><unk> "
-        "<assistant>example one answer two</assistant<unk>"
+        "<unk><unk><unk><unk><unk><unk><unk><unk><unk><unk><unk> "
+        "example one answer one </s>"
+        "<unk><unk><unk><unk><unk><unk><unk><unk><unk><unk><unk><unk> "
+        "example one<unk>"
     )
 
     # exp2 is packed from 2nd and 3rd entries, testing packing
     packed_exp2_inputs = (
-        "<s> <user>question two</user> <assistant>answer two</assistant></s><s> <user>question three"
-        "</user> <assistant>answer three</assistant></s><unk><unk><unk><unk>"
+        "<s> [INST] question two [/INST] "
+        "answer two </s>"
+        "<s> [INST] question three [/INST] "
+        "answer three </s><unk><unk><unk><unk>"
     )
     packed_exp2_targets = (
-        "<unk><unk><unk><unk><unk><unk><unk><unk> <assistant>answer two</assistant></s><s><unk><unk>"
-        "<unk><unk><unk><unk><unk><unk> <assistant>answer three</assistant></s><unk><unk><unk><unk>"
-        "<unk>"
+        "<unk><unk><unk><unk><unk><unk><unk><unk><unk> "
+        "answer two </s>"
+        "<unk><unk><unk><unk><unk><unk><unk><unk><unk><unk> "
+        "answer three </s><unk><unk><unk><unk><unk>"
     )
     packed_exp2_targets_predictable = (
-        "<unk><unk><unk><unk><unk><unk><unk><unk> <assistant>answer two</assistant></s>"
-        "<unk><unk><unk><unk><unk><unk><unk><unk><unk> <assistant>answer three"
-        "</assistant></s><unk><unk><unk><unk><unk>"
+        "<unk><unk><unk><unk><unk><unk><unk><unk><unk> "
+        "answer two </s>"
+        "<unk><unk><unk><unk><unk><unk><unk><unk><unk><unk> "
+        "answer three </s><unk><unk><unk><unk><unk>"
     )
 
-    batch = next(self.train_iter)
+    batch = next(data_iter)
     self.assertEqual(self.tokenizer.decode(batch["inputs"][0]), truncated_exp1_inputs)
     self.assertEqual(self.tokenizer.decode(batch["targets"][0]), truncated_exp1_targets)
     self.assertEqual(

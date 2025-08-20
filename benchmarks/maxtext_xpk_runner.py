@@ -1,52 +1,46 @@
-"""
- Copyright 2024 Google LLC
+# Copyright 2023–2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
-
-      https://www.apache.org/licenses/LICENSE-2.0
-
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
- """
-
-"""  This file contains data classes and runner logic to execute the XPK runs triggered by benchmarks/benchmark_runner.py"
+"""  This file contains data classes and runner logic to execute the XPK runs triggered by benchmarks.benchmark_runner"
 
 """
 # Improvements:
 # Toggle Vertex AI Experiment on/off.
 # Group libtpu / jax / jaxlib dependencies instead of just libtpu.
 # Split out maxtext command generation and xpk runner from this file.
-# Enable hlo dumps.
 
 import dataclasses
 import enum
 import json
-import omegaconf
 import os
 import queue
 import random
 import string
 import subprocess
-import tempfile
 import threading
 import time
+from typing import Optional, List
+
+import omegaconf
 
 import benchmarks.maxtext_trillium_model_configs as model_configs
 from benchmarks.command_utils import run_command_with_updates
-from benchmarks.benchmark_db_utils import DEFAULT_TUNING_PARAMS_FILE
-
 import benchmarks.xla_flags_library as xla_flags
 from benchmarks.disruption_management.disruption_handler import DisruptionConfig
 from benchmarks.disruption_management.disruption_manager import DisruptionManager
-from typing import Optional, List
 from benchmarks.xpk_configs import XpkClusterConfig
 
-from MaxText.globals import PKG_DIR
 
 # Assumes you built maxtext dep image.
 # Assumes you have xpk installed in a git clone repo of ~/{wl_config.xpk_path}/xpk.py
@@ -82,6 +76,7 @@ class PathwaysConfig:
   server_flags: str = ''
   proxy_flags: str = ''
   worker_flags: str = ''
+  headless: bool = False
 
 
 # TODO(@vbarr): Split out parameters related to XPK workload and a General workload
@@ -113,13 +108,15 @@ class WorkloadConfig:
   db_is_test: bool = True
   disruption_configs: DisruptionConfig = None
   xpk_storage: Optional[List[str]] = None
+  hlo_dump: Optional[bool] = None
 
   def __post_init__(self):
     """Initializes num_devices_per_slice and topology for recording the run into BigQuery"""
     if not self.generate_metrics_and_upload_to_big_query:
       return
     if self.device_type is None:
-      raise ValueError(f"device_type is None and generate_metrics_and_upload_to_big_query is enabled. Device_type is required for uploading run results to BigQuery")
+      raise ValueError("device_type is None and generate_metrics_and_upload_to_big_query is enabled. "
+                       "Device_type is required for uploading run results to BigQuery")
     if self.device_type.startswith("v6e") or self.device_type.startswith("v5e") or self.device_type.startswith("v5litepod"):
       size = int(self.device_type.split("-")[-1])
       if size == 256:
@@ -330,33 +327,36 @@ def _build_args_from_config(wl_config: WorkloadConfig) -> dict:
 
   # Extract xla_flags arg
   xla_flags_str = wl_config.model.xla_flags.strip().replace(" ",",")
-  
+
   # Extract tuning_params arg
   tuning_params_str = json.dumps(wl_config.model.tuning_params)
-  
-  args = {}
-  args["metrics_gcs_file"] = wl_config.metrics_gcs_file
-  args["model_id"] = wl_config.model.model_type
-  args["hardware_id"] = wl_config.hardware_id
-  args["software_id"] = "jax_maxtext"
-  args["number_of_chips"] = wl_config.num_devices_per_slice*wl_config.num_slices
-  args["container_image_name"] = wl_config.base_docker_image
-  args["global_batch_size"] = per_device_batch_size * wl_config.num_devices_per_slice * wl_config.num_slices
-  args["precision"] = precision
-  args["optimizer"] = optimizer
-  args["seq_length"] = sequence_length
-  args["number_of_steps"] = wl_config.num_steps
-  args["xla_flags"] = f"'{xla_flags_str}'"
-  args["dataset"] = dataset
-  args["run_type"] = "maxtext-xpk"
-  args["config_file"] = os.path.join("MaxText", "configs", "base.yml")
-  args["topology"] = wl_config.topology
-  args["tuning_params"] = f"'{tuning_params_str}'"
-  args["db_project"] = wl_config.db_project
-  args["db_dataset"] = wl_config.db_dataset
-  args["is_test"] = wl_config.db_is_test
 
-  return args
+  num_steps = wl_config.num_steps # default case
+
+  if "steps" in wl_config.model.tuning_params and wl_config.num_steps == -1: # replace num_step for not provided num_steps and configuration exist in tuning_params.
+    num_steps = model.tuning_params["steps"]
+    log.info("using steps=(%d) in model convergence test setup", num_steps)
+
+  return {"metrics_gcs_file": wl_config.metrics_gcs_file,
+          "model_id": wl_config.model.model_type,
+          "hardware_id": wl_config.hardware_id,
+          "software_id": "jax_maxtext",
+          "number_of_chips": wl_config.num_devices_per_slice * wl_config.num_slices,
+          "container_image_name": wl_config.base_docker_image,
+          "global_batch_size": per_device_batch_size * wl_config.num_devices_per_slice * wl_config.num_slices,
+          "precision": precision,
+          "optimizer": optimizer,
+          "seq_length": sequence_length,
+          "number_of_steps": wl_config.num_steps,
+          "xla_flags": f"'{xla_flags_str}'",
+          "dataset": dataset,
+          "run_type": "maxtext-xpk",
+          "config_file": os.path.join("MaxText", "configs", "base.yml"),
+          "topology": wl_config.topology,
+          "tuning_params": f"'{tuning_params_str}'",
+          "db_project": wl_config.db_project,
+          "db_dataset": wl_config.db_dataset,
+          "is_test": wl_config.db_is_test}
 
 
 def build_user_command(
@@ -375,10 +375,17 @@ def build_user_command(
     jax_platforms = 'proxy'
   else:
     if wl_config.libtpu_type == LibTpuType.NIGHTLY:
-      install_libtpu_cmd += (
-          f' python3 -m pip install libtpu-nightly==0.1.dev{wl_config.libtpu_nightly_version} -f'
-          ' https://storage.googleapis.com/libtpu-releases/index.html &&'
-      )
+      if wl_config.libtpu_nightly_version:
+        install_libtpu_cmd += (
+            f' python3 -m pip install libtpu=={wl_config.libtpu_nightly_version} -f'
+            ' https://storage.googleapis.com/libtpu-wheels/index.html &&'
+        )
+      else:
+        # If no version is specified, install the latest stable libtpu.
+        install_libtpu_cmd += (
+            ' python3 -m pip install libtpu --pre -f'
+            ' https://storage.googleapis.com/libtpu-wheels/index.html &&'
+        )
     elif wl_config.libtpu_type == LibTpuType.CUSTOM:
       # In order to use a custom libtpu, put a libtpu.so file in your local
       # working directory.
@@ -405,6 +412,11 @@ def build_user_command(
     # Save metrics to gcs bucket so that we can upload them to bq in post processing.
     enable_metrics_cmd = 'gcs_metrics=true'
 
+  upload_hlo_dump=""
+  hlo_dump=""
+  if wl_config.hlo_dump:
+    hlo_dump = "XLA_FLAGS=\'--xla_dump_large_constants --xla_dump_to=/tmp/xla_dump\'"
+    upload_hlo_dump =  f' && gsutil -m cp -r /tmp/xla_dump  {wl_config.base_output_directory}/{wl_config.run_name}/hlo_dump'
   # Construct the command string with proper formatting and line continuations
   command = ' '.join([
       f'{install_libtpu_cmd}',
@@ -413,7 +425,7 @@ def build_user_command(
       'export ENABLE_PATHWAYS_PERSISTENCE=1 &&',
       f'export JAX_PLATFORMS={jax_platforms} &&',
       'export ENABLE_PJRT_COMPATIBILITY=true &&',
-      f'python3 -m MaxText.train {os.path.join("MaxText", "configs", "base.yml")}',
+      f'{hlo_dump} python3 -m MaxText.train {os.path.join("MaxText", "configs", "base.yml")}',
       f'{config_tuning_params}',
       f'steps={wl_config.num_steps}',
       f'model_name={wl_config.model.model_type}',
@@ -421,6 +433,7 @@ def build_user_command(
       f'{vertex_tensorboard}',
       f'{run_name_command}',
       f'{enable_metrics_cmd}'
+      f'{upload_hlo_dump}'
   ])
   return command
 
@@ -432,7 +445,7 @@ def _get_pathways_proxy_flags(wl_config: WorkloadConfig):
 
   # Get proxy and xla flag string from model config
   proxy_flags_string = pw_config.proxy_flags
-  xla_flags_string = wl_config.model.xla_flags
+  xla_flags_string = wl_config.model.xla_flags if not pw_config.headless else ''
 
   # Split both proxy_flags_string and xla_flags_string into lists of flags
   proxy_flags_list = proxy_flags_string.strip().split()
@@ -443,8 +456,8 @@ def _get_pathways_proxy_flags(wl_config: WorkloadConfig):
 
   # Remove the flags that are specified to be removed.
   if (
-      wl_config.model.pathways_xla_flag_options
-      and xla_flags.REMOVE in wl_config.model.pathways_xla_flag_options
+      not pw_config.headless and (wl_config.model.pathways_xla_flag_options
+      and xla_flags.REMOVE in wl_config.model.pathways_xla_flag_options)
   ):
     flags_to_remove = wl_config.model.pathways_xla_flag_options[
         xla_flags.REMOVE
@@ -457,16 +470,23 @@ def _get_pathways_proxy_flags(wl_config: WorkloadConfig):
 
   # Add the flags that are specified to be added.
   if (
-      wl_config.model.pathways_xla_flag_options
-      and xla_flags.ADD_PROXY in wl_config.model.pathways_xla_flag_options
+      not pw_config.headless and (wl_config.model.pathways_xla_flag_options
+      and xla_flags.ADD_PROXY in wl_config.model.pathways_xla_flag_options)
   ):
     flags_to_add = wl_config.model.pathways_xla_flag_options[
         xla_flags.ADD_PROXY
     ]
-    proxy_flags.append(flags_to_add)
+    flags_to_add_list = flags_to_add.strip().split()
+    proxy_flags += flags_to_add_list
 
   # Join the list of flags back into a single string, space-separated
   return ' '.join(proxy_flags)
+
+
+def _combine_flag_strings(base_flags: str, flags_to_add: str) -> str:
+  """Combines two flag strings and removes extraneous whitespace."""
+  all_flags = base_flags.split() + flags_to_add.split()
+  return ' '.join(all_flags)
 
 
 def _get_pathways_worker_flags(wl_config: WorkloadConfig):
@@ -479,13 +499,14 @@ def _get_pathways_worker_flags(wl_config: WorkloadConfig):
 
   # Add the flags that are specified to be added.
   if (
-      wl_config.model.pathways_xla_flag_options
-      and xla_flags.ADD_WORKER in wl_config.model.pathways_xla_flag_options
+      not pw_config.headless and (wl_config.model.pathways_xla_flag_options
+      and xla_flags.ADD_WORKER in wl_config.model.pathways_xla_flag_options)
   ):
     flags_to_add = wl_config.model.pathways_xla_flag_options[
         xla_flags.ADD_WORKER
     ]
-    worker_flags += flags_to_add
+
+    worker_flags = _combine_flag_strings(worker_flags, flags_to_add)
 
   # Join the list of flags back into a single string, space-separated
   return worker_flags
@@ -501,13 +522,13 @@ def _get_pathways_server_flags(wl_config: WorkloadConfig):
 
   # Add the flags that are specified to be added.
   if (
-      wl_config.model.pathways_xla_flag_options
-      and xla_flags.ADD_SERVER in wl_config.model.pathways_xla_flag_options
+      not pw_config.headless and (wl_config.model.pathways_xla_flag_options
+      and xla_flags.ADD_SERVER in wl_config.model.pathways_xla_flag_options)
   ):
     flags_to_add = wl_config.model.pathways_xla_flag_options[
         xla_flags.ADD_SERVER
     ]
-    server_flags += flags_to_add
+    server_flags = _combine_flag_strings(server_flags, flags_to_add)
 
   # Join the list of flags back into a single string, space-separated
   return server_flags
@@ -547,6 +568,7 @@ def _get_pathways_specific_flags(wl_config: WorkloadConfig):
       f' --custom-pathways-server-args="{server_flags}" '
       f' --custom-pathways-proxy-server-args="{proxy_flags}" '
       f' --custom-pathways-worker-args="{worker_flags}" '
+      f' {"--headless" if pw_config.headless else ""}'
   )
   return pathways_specific_flags
 
@@ -555,10 +577,12 @@ def generate_xpk_workload_cmd(
     cluster_config: XpkClusterConfig,
     wl_config: WorkloadConfig,
     workload_name=None,
+    exp_name=None,
 ):
   """Generates a command to run a maxtext model on XPK."""
 
   is_pathways_enabled = wl_config.pathways_config is not None
+  is_pathways_headless_enabled = wl_config.pathways_config and wl_config.pathways_config.headless
 
   time.localtime()
   length_of_random_str = 3
@@ -566,14 +590,15 @@ def generate_xpk_workload_cmd(
       random.choice(string.ascii_lowercase + string.digits) for _ in range(length_of_random_str)
   )
 
-  truncate_model_name = 12
-  truncate_prefix = 5
-  common_post_fix = f"-{wl_config.num_slices}-{time.strftime('%m%d%H', time.localtime())}-{temp_post_fix}"
+  truncate_model_name = 10
+  truncate_prefix = 3
+  post_fix = f"-{wl_config.num_slices}-{time.strftime('%m%d%H', time.localtime())}-{temp_post_fix}"
   common_prefix = os.environ['USER']
   pw_prefix = "pw-"
 
   if workload_name is None: # Generate name if not provided
     if is_pathways_enabled:
+      post_fix = f"-{wl_config.num_slices}-{temp_post_fix}"
       name = (
           f"{pw_prefix}{wl_config.model.model_name.replace('_', '-')[:truncate_model_name - len(pw_prefix)]}"
       )
@@ -581,7 +606,7 @@ def generate_xpk_workload_cmd(
       name = (
         f"{wl_config.model.model_name.replace('_', '-')[:truncate_model_name]}"
       )
-    name = f"{common_prefix[:truncate_prefix]}-{name}{common_post_fix}"
+    name = f"{common_prefix[:truncate_prefix]}-{name}{post_fix}"
   else:
     name = workload_name # Use provided name
 
@@ -590,10 +615,12 @@ def generate_xpk_workload_cmd(
                                             wl_config.run_name,
                                             'metrics')
 
-  user_command = build_user_command(
-      name=name,
-      wl_config=wl_config
-  )
+  user_command = ''
+  if not is_pathways_headless_enabled:
+    user_command = build_user_command(
+        name=name,
+        wl_config=wl_config
+    )
 
   additional_flags = ''
   if not is_pathways_enabled and wl_config.libtpu_type == LibTpuType.CUSTOM:
@@ -617,18 +644,24 @@ def generate_xpk_workload_cmd(
     docker_image_flag = f'--base-docker-image="{wl_config.base_docker_image}"'
 
   upload_metrics_to_bq_cmd = ""
-  if wl_config.generate_metrics_and_upload_to_big_query:
+  if wl_config.generate_metrics_and_upload_to_big_query and not is_pathways_headless_enabled:
     # TODO (optionally) make it so that this upload step is done on local device instead of within the workload.
     args = _build_args_from_config(wl_config)
     args_str = ""
     for k,v in args.items():
       args_str += f'--{k}={v} '
-    upload_metrics_to_bq_cmd = f"&& python3 benchmarks/upload_metrics_to_bq.py {args_str}"
+    upload_metrics_to_bq_cmd = f"&& python3 -m benchmarks.upload_metrics_to_bq {args_str}"
 
   print(f'User command: {user_command}')
   all_xpk_storage = ""
   if wl_config.xpk_storage:
     all_xpk_storage = " ".join(f"--storage={storage_test}" for storage_test in wl_config.xpk_storage)
+
+  hlo_dump = ""
+  if wl_config.hlo_dump:
+    # HLO dump gets saved in a subdirectory called "hlo_dump" of the base output directory.
+    hlo_dump = f'--debug-dump-gcs={wl_config.base_output_directory}/{wl_config.run_name}/hlo_dump'
+
   return (
       (
           f'{workload_create_command}'
@@ -645,8 +678,9 @@ def generate_xpk_workload_cmd(
           f' --workload={name}'
           f' --priority={wl_config.priority}'
           f' --max-restarts={wl_config.max_restarts}'
+          f' {hlo_dump}'
           # ' --use-vertex-tensorboard'
-          # f' --experiment-name={test_purpose_name}'
+          # f' --experiment-name={exp_name}'
           f' {additional_flags}'
       ),
       name,
@@ -677,7 +711,9 @@ def run_xpk_workload(
   )
   return_code = run_command_with_updates(command, 'Run XPK workload')
   if return_code == 0 and wait_for_completion:
-    return_code = wait_for_xpk_workload_completion(cluster_config, workload_name, wl_config.xpk_path) # Wait for completion after successful run
+    return_code = wait_for_xpk_workload_completion(
+        cluster_config, workload_name, wl_config.xpk_path
+    ) # Wait for completion after successful run
   return return_code
 
 
@@ -685,12 +721,13 @@ def xpk_benchmark_runner(
     cluster_config: XpkClusterConfig,
     workload_configs: list[WorkloadConfig],
     disruption_manager: DisruptionManager = DisruptionManager(),
+    exp_name: str = None,
 ):
   xpk_workload_names = []
   xpk_workload_cmds = []
   for wl_config in workload_configs:
     command, name = generate_xpk_workload_cmd(
-        cluster_config=cluster_config, wl_config=wl_config
+        cluster_config=cluster_config, wl_config=wl_config, exp_name=exp_name
     )
 
     print(f"Name of the workload is: {name} \n")
@@ -716,7 +753,7 @@ def xpk_benchmark_runner(
       # If the workload fails to start, remove it from the disruption manager.
       # No-op if disruption manager does not contain the workload name.
       disruption_manager.remove_workload(xpk_workload_name)
-      print('Unable to run xpk workload: {xpk_workload_name}')
+      print(f"Unable to run xpk workload: {xpk_workload_name}")
 
   return disruption_manager
 
@@ -760,8 +797,9 @@ def main() -> int:
   xpk_workload_names = []
 
   list_of_models = [
-    model_configs.llama2_70b_4096_sc,
+    # model_configs.llama2_70b_4096_sc,
     # model_configs.default_128
+    model_configs.llama3_1_70b_131072,
   ]
 
   # Loop possibilities:
@@ -785,8 +823,7 @@ def main() -> int:
     # Run workloads on the below clusters
     for cluster_config in [
       # v5e_cluster_config,
-      # v6e_cluster_config,
-      v6e_cluster_config_yucmhab,
+      v6e_cluster_config,
       # another_config,
     ]:
       # Run workloads in the following slice configurations
@@ -825,7 +862,7 @@ def main() -> int:
   for xpk_workload_name, xpk_workload_cmd in zip(xpk_workload_names, xpk_workload_cmds):
     return_code = run_command_with_updates(xpk_workload_cmd, xpk_workload_name)
     if return_code != 0:
-      print('Unable to run xpk workload: {xpk_workload_name}')
+      print(f"Unable to run xpk workload: {xpk_workload_name}")
 
   # Support Batch workloads one day. Note that this doesn't show the xpk logs per workload.
   # They are saved to file instead.

@@ -1,15 +1,16 @@
-"""
-Copyright 2025 Google LLC
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-     https://www.apache.org/licenses/LICENSE-2.0
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-"""
+# Copyright 2023–2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 r"""Convert weights from a DeepSeek style model to a MaxText one.
 
@@ -64,8 +65,10 @@ def _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info)
         layer = int(parts[2]) if "layers" in key else 0
         if key.endswith("_scale_inv"):
           raise ValueError("fp8 checkpoint is not supported.")
-        if ds_ckpt.is_key_ending_allowed(key, ds_ckpt.MTP_KEYS_SUFFIX):
-          mapped_key = ds_ckpt.hf_to_maxtext_mapping(layer, num_experts, first_num_dense_layers)[key]
+        if ds_ckpt.is_key_allowed(key, ds_ckpt.MTP_KEYS_TO_SKIP):
+          mapped_key = ds_ckpt.hf_to_maxtext_mapping(layer, num_experts, first_num_dense_layers, base_num_decoder_layers)[
+              key
+          ]
           chkpt_vars[mapped_key] = f.get_tensor(key)
 
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
@@ -86,7 +89,9 @@ def _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info)
 
   # logits dense #################################################
   max_logging.log("Processing logits dense")
-  jax_weights["decoder"]["logits_dense"]["kernel"] = chkpt_vars["logits_dense.kernel"].to(torch.float16).numpy().transpose()
+  jax_weights["decoder"]["logits_dense"]["kernel"] = (
+      chkpt_vars["logits_dense.kernel"].to(torch.float16).numpy().transpose()
+  )
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
 
   # token embedding ##############################################

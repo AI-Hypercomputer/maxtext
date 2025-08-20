@@ -1,10 +1,10 @@
-# Copyright 2025 The JAX Authors.
+# Copyright 2023–2025 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     https://www.apache.org/licenses/LICENSE-2.0
+#    https://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -25,6 +25,7 @@ during inference.
 """
 
 import functools
+
 import jax
 from jax import lax
 from jax.experimental import pallas as pl
@@ -79,6 +80,7 @@ def ref_ragged_paged_attention(
     sm_scale: float = 1.0,
     mask_value: float = DEFAULT_MASK_VALUE,
 ):
+  """Ref ragged paged attention."""
   _, _, num_kv_heads, head_dim = k_pages.shape
   num_q_heads = queries.shape[1]
   assert num_q_heads % num_kv_heads == 0
@@ -107,7 +109,7 @@ def ref_ragged_paged_attention(
   return jnp.concatenate(outputs, axis=0)
 
 
-# Expect to run these checkes during runtime.
+# Expect to run these checks during runtime.
 def validate_inputs_on_runtime(
     q: jax.Array,  # [max_num_batched_tokens, num_q_heads, head_dim]
     k_pages: jax.Array,  # [total_num_pages, page_size, num_kv_heads, head_dim]
@@ -117,6 +119,7 @@ def validate_inputs_on_runtime(
     cu_q_lens: jax.Array,  # i32[max_num_seqs + 1]
     num_seqs,  # i32[1]
 ):
+  """validate inputs on runtime"""
   check_inputs_shapes(q, k_pages, v_pages, kv_lens, page_indices, cu_q_lens, num_seqs)
   max_num_batched_tokens = q.shape[0]
   page_size = k_pages.shape[1]
@@ -148,6 +151,7 @@ def check_inputs_shapes(
     cu_q_lens: jax.Array,  # i32[max_num_seqs + 1]
     num_seqs,  # i32[1]
 ):
+  """check shapes of inputs"""
   _, num_q_heads, head_dim = q.shape
   _, _, num_kv_heads, head_dim_k = k_pages.shape
   max_num_seqs, _ = page_indices.shape
@@ -199,6 +203,7 @@ def ragged_paged_attention_kernel(
     sm_scale: float,
     mask_value: float,
 ):
+  """ragged paged-attention kernel"""
   num_q_per_blk, num_q_heads_per_blk, head_dim = q_ref.shape
   num_seqs = num_seqs_ref[0]
   _, num_kv_pages_per_blk, page_size, num_kv_heads_per_blk, _ = k_bufs.shape
@@ -469,7 +474,7 @@ def ragged_paged_attention_kernel(
       v_ref = cur_async_copy_v.wait().reshape(kv_to_load_shape)
       for kv_head_idx in range(num_kv_heads_per_blk):
         q_head_idx = kv_head_idx * num_q_heads_per_kv_head
-        # TODO(jevinjiang): extra handlig for packed type that can start at
+        # TODO(jevinjiang): extra handling for packed type that can start at
         # unaligned position!
         q = fold_on_2nd_minor(q_ref[:, q_head_idx : q_head_idx + num_q_heads_per_kv_head, :])
         k = strided_load_kv(k_ref, kv_head_idx, num_kv_heads_per_blk)
@@ -522,6 +527,7 @@ def get_dtype_packing(dtype):
 
 
 def get_min_heads_per_blk(num_q_heads, num_kv_heads, q_dtype, kv_dtype):
+  """get min heads per block"""
   q_packing = get_dtype_packing(q_dtype)
   kv_packing = get_dtype_packing(kv_dtype)
 
@@ -616,8 +622,8 @@ def ragged_paged_attention(
   )
   in_specs = [
       q_block_spec,
-      pl.BlockSpec(memory_space=pltpu.TPUMemorySpace.ANY),
-      pl.BlockSpec(memory_space=pltpu.TPUMemorySpace.ANY),
+      pl.BlockSpec(memory_space=pltpu.MemorySpace.ANY),
+      pl.BlockSpec(memory_space=pltpu.MemorySpace.ANY),
   ]
   out_specs = q_block_spec
   lm_scratch = pltpu.VMEM(
@@ -663,7 +669,7 @@ def ragged_paged_attention(
           grid=grid,
           scratch_shapes=scratch_shapes,
       ),
-      compiler_params=pltpu.TPUCompilerParams(
+      compiler_params=pltpu.CompilerParams(
           dimension_semantics=(
               "arbitrary",
               "arbitrary",

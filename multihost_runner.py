@@ -1,18 +1,16 @@
-"""
- Copyright 2023 Google LLC
-
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
-
-      https://www.apache.org/licenses/LICENSE-2.0
-
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
- """
+# Copyright 2023–2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 from tempfile import gettempdir
 
 from MaxText.globals import PKG_DIR
@@ -161,7 +159,7 @@ def filter_instances(instance_list, tpu_prefix):
 
 def write_kill_script(kill_processes_script_name):
   kill_processes_script = os.path.join(args.SCRIPT_DIR, kill_processes_script_name)
-  with open(kill_processes_script, "w", encoding="utf-8") as f:
+  with open(kill_processes_script, "wt", encoding="utf-8") as f:
     f.write(kill_existing_processes_str())
 
 def kill_existing_processes_str():
@@ -280,10 +278,10 @@ def run_commands(commands, id_to_print, jobname, worker_list, is_shell=False, ou
   start_time = datetime.now()
   for i, command in enumerate(commands):
     if output_logs and i == id_to_print:
-      persistent_log = open(output_logs[i], "w", encoding="utf-8")
+      persistent_log = open(output_logs[i], "wt", encoding="utf-8")
       output_log = Tee(sys.stdout, persistent_log)
     elif output_logs:
-      output_log = open(output_logs[i], "w", encoding="utf-8")
+      output_log = open(output_logs[i], "wt", encoding="utf-8")
     elif i == id_to_print:
       output_log = None
     else:

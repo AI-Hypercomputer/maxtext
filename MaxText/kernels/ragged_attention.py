@@ -1,18 +1,16 @@
-"""
-Copyright 2024 Google LLC
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-     https://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-"""
+# Copyright 2023–2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Kernels for ragged attention for efficient inference."""
 
@@ -25,14 +23,8 @@ from jax import lax
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 import jax.numpy as jnp
-from jax.experimental import shard_map
 
-from MaxText import common_types
-
-
-BATCH = common_types.BATCH
-DEFAULT_MASK_VALUE = common_types.DEFAULT_MASK_VALUE
-shard_map = shard_map.shard_map
+from MaxText.common_types import DEFAULT_MASK_VALUE
 
 
 def get_mha_cost_estimate(shape_dtype):
@@ -278,7 +270,7 @@ def ragged_mqa(
           ],
           grid=(batch_size, seq_len // block_size),
       ),
-      compiler_params={"mosaic": {"dimension_semantics": ("parallel", "arbitrary")}},
+      compiler_params=pltpu.CompilerParams(dimension_semantics=("parallel", "arbitrary")),
       out_shape=[
           jax.ShapeDtypeStruct((batch_size, num_heads, head_dim), jnp.float32),
           jax.ShapeDtypeStruct((batch_size, num_heads, head_dim), jnp.float32),

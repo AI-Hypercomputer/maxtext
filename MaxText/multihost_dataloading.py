@@ -1,18 +1,16 @@
-"""
-Copyright 2023 Google LLC
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-     https://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-"""
+# Copyright 2023–2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 # pylint: disable=unused-import
 """SPMD Multihost Dataloading Utilities.
@@ -20,11 +18,13 @@ limitations under the License.
 Adapted from Sholto's:
 https://github.com/sholtodouglas/multihost_dataloading
 """
-from functools import lru_cache, partial  # pylint: disable=g-importing-member
-from typing import Callable, Any, Union, Sequence
+from functools import partial
+from typing import Union, Sequence
 from collections.abc import Iterator, Iterable
-import tensorflow as tf  # pylint: disable=g-import-not-at-top
 import time
+
+import tensorflow as tf  # pylint: disable=g-import-not-at-top
+
 import numpy as np
 
 import jax
@@ -34,7 +34,6 @@ from jax.sharding import NamedSharding
 from jax.sharding import Mesh
 from jax.experimental import colocated_python
 import jax.numpy as jnp
-import grain.python as grain
 
 from MaxText import max_logging
 
@@ -95,7 +94,7 @@ def get_next_batch_sharded(local_iterator: Iterator, global_mesh: Mesh) -> jax.A
 class MultiHostDataLoadIterator:
   """fold get_next_batch_sharded into a iterator class"""
 
-  def __init__(self, dataloader: Union[tf.data.Dataset, Iterable], global_mesh: Mesh):
+  def __init__(self, dataloader: tf.data.Dataset | Iterable, global_mesh: Mesh):
     self.global_mesh = global_mesh
     self.dataloader = dataloader
     if isinstance(self.dataloader, tf.data.Dataset):
@@ -163,13 +162,9 @@ def _colocated_cpu_devices(
   return colocated_python.colocated_cpu_devices(devices)
 
 
-def _get_cpu_mesh(mesh: Mesh):
-  flat_devices = tuple(mesh.devices.flat)
-  flat_cpu_devices = _colocated_cpu_devices(flat_devices)
-  cpu_mesh = jax.sharding.Mesh(
-      np.array(flat_cpu_devices).reshape(mesh.devices.shape), mesh.axis_names, axis_types=mesh.axis_types
-  )
-  return cpu_mesh
+def _colocated_cpu_mesh(mesh: Mesh) -> Mesh:
+  """Returns a CPU mesh that has colocated CPU devices."""
+  return colocated_python.colocated_cpu_devices(mesh)
 
 
 class RemoteIterator:
@@ -178,7 +173,7 @@ class RemoteIterator:
   def __init__(self, get_ds_fn, preprocessing_fn, global_mesh, global_shape):
     self.cpu_devices = _colocated_cpu_devices(jax.local_devices())
     self.tpu_devices = jax.local_devices()
-    self.cpu_mesh = _get_cpu_mesh(global_mesh)
+    self.cpu_mesh = _colocated_cpu_mesh(global_mesh)
     self.tpu_sharding = jax.sharding.NamedSharding(global_mesh, PartitionSpec(global_mesh.axis_names))
     self.cpu_sharding = jax.sharding.NamedSharding(self.cpu_mesh, PartitionSpec(self.cpu_mesh.axis_names))
     self.dummy_array = jnp.zeros((len(self.cpu_devices)))
@@ -199,7 +194,7 @@ class RemoteIterator:
 
     out = jax.device_get(init(self.dummy_array))
     if out is not None:
-      max_logging.log("RemoteIterator initiated.")
+      max_logging.log(f"RemoteIterator initiated. Test output: {out}")
 
   def __iter__(self):
     return self
@@ -209,9 +204,10 @@ class RemoteIterator:
 
     def put_to_tpu_devices(path, array, sharding):
       try:
-        jax.device_put(array, sharding)
+        return jax.device_put(array, sharding)
       except Exception as e:  # pylint: disable=broad-exception-caught
         max_logging.log(f"Error putting data to TPU device path{path}, exception={e}")
+        raise
 
     input_gdas = jtu.tree_map_with_path(partial(put_to_tpu_devices, sharding=self.tpu_sharding), out)
 

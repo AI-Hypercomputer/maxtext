@@ -1,10 +1,10 @@
-# Copyright 2023 Google LLC
+# Copyright 2023–2025 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#      https://www.apache.org/licenses/LICENSE-2.0
+#    https://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -50,53 +50,32 @@ jobs:
               console.log("This workflow is running within an invalid context")
               process.exit(1)
             }
-
-            // This list should match with CODEOWNERS.
-            let requiredReviewers = {
-              gobbleturk: "",
-              khatwanimohit: "",
-              bvandermoon: "",
-              vipannalla: "",
-              RissyRan: "",
-              richjames0: "",
-              rni418: "",
-              gagika: "",
-              shralex: "",
-              yangyuwei: "",
-              SurbhiJainUSC: "",
-              hengtaoguo: "",
-              A9isha: "",
-              wang2yn84: "",
-              wyzhang: "",
-              mitalisi: "",
-              gpolovets1: "",
-              mailvijayasingh: "",
-            }
             const reviews = await github.rest.pulls.listReviews({
               owner,
               repo,
               pull_number,
             })
-
-            const pullRequest = await github.rest.pulls.get({
-              owner,
-              repo,
-              pull_number,
-            });
-            const pullRequester = pullRequest.data.user.login;
+            const decision_query = `
+              query($owner: String!, $repo: String!, $pull_number: Int!) {
+                repository(owner: $owner, name: $repo) {
+                  pullRequest(number: $pull_number) {
+                    reviewDecision # Fetches the overall review status
+                  }
+                }
+              }
+            `;
+            const decision_result = await github.graphql(decision_query, { owner, repo, pull_number });
 
             if (reviews.data.length === 0) {
               console.log("Not adding pull ready because the PR is not approved yet.")
               process.exit()
             }
-            let num_approved = 0
-            for (const review of reviews.data) {
-              if (review.state === "APPROVED" && review.user.login in requiredReviewers) {
-                num_approved = num_approved + 1
-              }
+            let is_approved = false
+            if (decision_result.repository.pullRequest.reviewDecision === "APPROVED") {
+              is_approved = true
             }
-            if (num_approved < 2) {
-              console.log("Not adding pull ready because the PR is not approved yet by 2 code owners.")
+            if (!is_approved) {
+              console.log("Not adding pull ready because the PR is not approved yet by sufficient code owners.")
               process.exit()
             }
 

@@ -1,57 +1,57 @@
-#  Copyright 2025 Google LLC
+# Copyright 2023–2025 Google LLC
 #
-#  Licensed under the Apache License, Version 2.0 (the "License");
-#  you may not use this file except in compliance with the License.
-#  You may obtain a copy of the License at
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
 #
-#       https://www.apache.org/licenses/LICENSE-2.0
+#    https://www.apache.org/licenses/LICENSE-2.0
 #
-#  Unless required by applicable law or agreed to in writing, software
-#  distributed under the License is distributed on an "AS IS" BASIS,
-#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-#  See the License for the specific language governing permissions and
-#  limitations under the License.
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Script to get golden data for GRPOTrainer in TRL. Currently hardcoded for llama3.1-8b
 
 Usage:
 
-python -m MaxText.scratch_code.generate_grpo_golden_logits
+python3 -m MaxText.scratch_code.generate_grpo_golden_logits
 """
 
 import functools
-import jax
 import os
 import unittest
+from collections.abc import Callable
 
 import jsonlines
-from MaxText.layers import models
-from MaxText.layers import initializers
-import jax.numpy as jnp
+
 import numpy as np
 
-from MaxText import pyconfig
-from MaxText import maxtext_utils
-from MaxText import max_utils
+import jax.numpy as jnp
+import jax
 from jax.sharding import Mesh
+
 from flax import linen as nn
-from MaxText import common_types
+
 import torch
+
 # from datasets import Dataset
 from trl import GRPOConfig, GRPOTrainer
+
 import transformers
 
 from datasets import load_dataset
 
-from MaxText.experimental.rl.grpo_trainer import compute_log_probs, grpo_loss_fn, _merge_grpo_state, generate_completions
-from MaxText.tests.grpo_trainer_correctness_test import prepare_maxtext_inputs
 from MaxText import maxengine
+from MaxText import maxtext_utils
+from MaxText import pyconfig
+from MaxText.experimental.rl.grpo_trainer import grpo_loss_fn, _merge_grpo_state, generate_completions
+from MaxText.experimental.rl.grpo_utils import compute_log_probs
 from MaxText.globals import PKG_DIR
-
-Array = common_types.Array
-Config = common_types.Config
-DType = common_types.DType
-NdInitializer = initializers.NdInitializer
+from MaxText.layers import models
+from MaxText.tests.grpo_trainer_correctness_test import prepare_maxtext_inputs
+from MaxText.common_types import Array, MODEL_MODE_TRAIN
 
 
 class GRPOTest(unittest.TestCase):
@@ -81,12 +81,14 @@ class GRPOTest(unittest.TestCase):
     devices_array = maxtext_utils.create_device_mesh(self.cfg)
     mesh = Mesh(devices_array, self.cfg.mesh_axes)
     # With checkpoint
-    self.model = models.Transformer(config=self.cfg, mesh=mesh, quant=None)
+    self.model = models.Transformer(config=self.cfg, mesh=mesh, quant=None, model_mode=MODEL_MODE_TRAIN)
     self.state, state_mesh_annotations = maxtext_utils.setup_decode_state(self.model, self.cfg, self.rng, mesh, None)
     self.state_mesh_shardings = nn.logical_to_mesh_sharding(state_mesh_annotations, mesh, self.cfg.logical_axis_rules)
     self.data_sharding = jax.NamedSharding(mesh, jax.sharding.PartitionSpec(None))
     # Without checkpoint
-    self.model_no_ckpt_loading = models.Transformer(config=self.cfg_no_ckpt_loading, mesh=mesh, quant=None)
+    self.model_no_ckpt_loading = models.Transformer(
+        config=self.cfg_no_ckpt_loading, mesh=mesh, quant=None, model_mode=MODEL_MODE_TRAIN
+    )
     self.state_no_ckpt_loading, _ = maxtext_utils.setup_decode_state(
         self.model_no_ckpt_loading, self.cfg_no_ckpt_loading, self.rng, mesh, None
     )
@@ -163,13 +165,16 @@ class GRPOTest(unittest.TestCase):
         # using the same model as the ref model,
         # which is equivalent of step 0 of GRPO training when
         # the on-policy params are the same as the ref model
-        "ref_per_token_logps": self.trainer._get_per_token_logps(self.hf_model, hf_input_ids, attention_mask, logits_to_keep),  # pylint: disable=protected-access
+        # pylint: disable=protected-access
+        "ref_per_token_logps": self.trainer._get_per_token_logps(
+            self.hf_model, hf_input_ids, attention_mask, logits_to_keep
+        ),  # pylint: disable=protected-access
         # using only one advantage because we have just one sequence
         "advantages": advantages[0][0].unsqueeze(0),
     }
     hf_loss = self.trainer.compute_loss(self.hf_model, inputs)
 
-    hf_per_token_logps = self.trainer._get_per_token_logps(self.hf_model, hf_input_ids, attention_mask, logits_to_keep)  # pylint: disable=protected-access
+    self.trainer._get_per_token_logps(self.hf_model, hf_input_ids, attention_mask, logits_to_keep)  # pylint: disable=protected-access
 
     input_ids, input_segmentation, input_position, completion_segmentation = prepare_maxtext_inputs(
         self.cfg.prompt, self.tokenizer_model
@@ -198,6 +203,7 @@ class GRPOTest(unittest.TestCase):
         "ar_completions_segmentation": completion_segmentation,
     }
     maxtext_loss, aux = grpo_loss_fn(self.model, self.cfg, data, self.rng, self.state.params, reference_params)
+    # pylint: disable=protected-access
     self.assertEqual(self.trainer._metrics["train"]["kl"][0], aux.avg_kl.tolist())
     self.assertEqual(hf_loss.item(), maxtext_loss.tolist())
     # since this is on-policy
@@ -266,12 +272,13 @@ class GRPOTest(unittest.TestCase):
     )
     prompt_true_length = jnp.array([len(prompt_tokens)] * 4)
     engine_data = {"prompt": prompt, "prompt_true_length": prompt_true_length}
-    p_generate_completions = jax.jit(
+    p_generate_completions: Callable[[dict, dict, Array], Array] = jax.jit(
         functools.partial(generate_completions, self.cfg, self.tokenizer_model, engine),
         in_shardings=(self.data_sharding, self.state_mesh_shardings.params, None),
         out_shardings=self.data_sharding,
         donate_argnums=(0,),
     )
+    # pylint: disable=not-callable
     engine_data = p_generate_completions(engine_data, {"params": self.state_no_ckpt_loading.params["params"]}, self.rng)
     data_to_save = {
         "maxtext_loss": maxtext_loss.tolist(),
@@ -284,7 +291,10 @@ class GRPOTest(unittest.TestCase):
         "avg_advantage": aux.avg_advantage.tolist(),
     }
     model_output_path = os.path.join(
-        os.path.dirname(PKG_DIR), "MaxText", "test_assets", f"golden_data_grpo_{self.cfg_no_ckpt_loading.model_name}.jsonl"
+        os.path.dirname(PKG_DIR),
+        "MaxText",
+        "test_assets",
+        f"golden_data_grpo_{self.cfg_no_ckpt_loading.model_name}.jsonl",
     )
     with jsonlines.open(model_output_path, "w") as f:
       f.write(data_to_save)

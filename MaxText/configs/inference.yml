@@ -8,7 +8,7 @@ logical_axis_rules: [
                       ['activation_kv_heads', ['tensor', 'tensor_transpose', 'sequence','tensor_sequence']],
                       ['activation_length', ['context_autoregressive', 'sequence']],
                       ['activation_length', ['context_autoregressive']],
-                      ['activation_length_q', ['context_autoregressive']],
+                      ['activation_q_length', ['context_autoregressive']],
                       ['activation_kv_length', ['context_autoregressive']],
                       ['activation_norm_length', ['tensor_sequence', 'sequence']],
                       ['activation_embed', ['tensor_transpose']],

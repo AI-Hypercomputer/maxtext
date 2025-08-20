@@ -1,17 +1,16 @@
-"""Copyright 2025 Google LLC
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    https://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-"""
+# Copyright 2023–2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 import argparse
 import os
@@ -38,14 +37,14 @@ def _handle_delete(
       **kwargs: Optional keyword arguments, such as xpk_path
   """
   xpk_path = kwargs.get("xpk_path", "xpk")  # Default to "xpk" if not provided
-  first_five_chars = user[:5]
+  first_three_chars = user[:3]
   delete_command = (
       f"python3 {xpk_path}/xpk.py workload delete "
       f"--project={cluster_config.project} --cluster={cluster_config.cluster_name}"
-      f" --filter-by-job={first_five_chars} --zone={cluster_config.zone}"
+      f" --filter-by-job={first_three_chars} --zone={cluster_config.zone}"
   )
   print(
-      f"Deleting workloads starting with: {first_five_chars} using command:"
+      f"Deleting workloads starting with: {first_three_chars} using command:"
       f" {delete_command}"
   )
   os.system(delete_command)

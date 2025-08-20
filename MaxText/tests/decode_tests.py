@@ -1,38 +1,40 @@
-"""
-Copyright 2023 Google LLC
+# Copyright 2023–2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
+"""Tests for decode with various configs."""
 
-     https://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-"""
-
-"""Tests for decode with various configs"""
 import os
 import unittest
+
 import pytest
+
+from absl.testing import absltest
+
 from MaxText.decode import main as decode_main
 from MaxText.globals import PKG_DIR
-from absl.testing import absltest
 
 
 class DecodeTests(unittest.TestCase):
-  """Tests decode with various configs"""
+  """Tests decode with various configs."""
 
   CONFIGS = {
       "base": [  # tests decode
           None,
           os.path.join(PKG_DIR, "configs", "base.yml"),
-          rf"base_output_directory=gs://runner-maxtext-logs",
+          "base_output_directory=gs://runner-maxtext-logs",
           "run_name=runner_test",
-          r"dataset_path=gs://maxtext-dataset",
+          "dataset_path=gs://maxtext-dataset",
           "steps=2",
           "enable_checkpointing=False",
           "ici_tensor_parallelism=4",
@@ -43,9 +45,9 @@ class DecodeTests(unittest.TestCase):
       "int8": [  # tests decode with int8 quantization
           None,
           os.path.join(PKG_DIR, "configs", "base.yml"),
-          rf"base_output_directory=gs://runner-maxtext-logs",
+          "base_output_directory=gs://runner-maxtext-logs",
           "run_name=runner_test",
-          r"dataset_path=gs://maxtext-dataset",
+          "dataset_path=gs://maxtext-dataset",
           "steps=2",
           "enable_checkpointing=False",
           "ici_tensor_parallelism=4",
@@ -58,9 +60,9 @@ class DecodeTests(unittest.TestCase):
       "pdb_lt_1": [  # tests decode with per_device_batch_size < 1
           None,
           os.path.join(PKG_DIR, "configs", "base.yml"),
-          rf"base_output_directory=gs://runner-maxtext-logs",
+          "base_output_directory=gs://runner-maxtext-logs",
           "run_name=runner_test",
-          r"dataset_path=gs://maxtext-dataset",
+          "dataset_path=gs://maxtext-dataset",
           "steps=2",
           "enable_checkpointing=False",
           "ici_tensor_parallelism=4",
@@ -78,10 +80,9 @@ class DecodeTests(unittest.TestCase):
   def test_gpu_base(self):
     decode_main(DecodeTests.CONFIGS["base"] + ["attention=dot_product"])
 
-  @pytest.mark.skip(reason="until b/400476456 is fixed")
   @pytest.mark.tpu_only
   def test_tpu_int8(self):
-    decode_main(DecodeTests.CONFIGS["int8"])
+    decode_main(DecodeTests.CONFIGS["int8"] + ["attention=dot_product"])
 
   @pytest.mark.gpu_only
   def test_gpu_int8(self):

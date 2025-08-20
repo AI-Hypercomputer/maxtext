@@ -1,17 +1,17 @@
 <!--
- Copyright 2023 Google LLC
-
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
-
-      https://www.apache.org/licenses/LICENSE-2.0
-
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
+ # Copyright 2023–2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 -->
 
 
@@ -67,7 +67,7 @@ after which log out and log back in to the machine.
 1. Git clone maxtext locally
 
     ```shell
-    git clone https://github.com/google/maxtext.git
+    git clone https://github.com/AI-Hypercomputer/maxtext.git
     cd maxtext
     ```
 2. Build local Maxtext docker image
@@ -79,34 +79,34 @@ after which log out and log back in to the machine.
     bash docker_build_dependency_image.sh
     ```
 
-    #### Build Maxtext Docker Image with JAX Stable Stack (Preview)
-    We're excited to announce the preview of building Maxtext Docker images using the JAX Stable Stack base image, available for both TPUs and GPUs. This provides a more reliable and consistent build environment.
+    #### Build Maxtext Docker Image with JAX AI Images (Preview)
+    We're excited to announce the preview of building Maxtext Docker images using the JAX AI Training Images, available for both TPUs and GPUs. This provides a more reliable and consistent build environment.
 
-    ###### What is JAX Stable Stack?
-    JAX Stable Stack provides a consistent environment for Maxtext by bundling JAX with core packages like `orbax`, `flax`, and `optax`, along with Google Cloud utilities and other essential tools. These libraries are tested to ensure compatibility, providing a stable foundation for building and running Maxtext and eliminating potential conflicts due to incompatible package versions.
+    ###### What is JAX AI Images?
+    JAX AI Images provides a consistent environment for Maxtext by bundling JAX with core packages like `orbax`, `flax`, and `optax`, along with Google Cloud utilities and other essential tools. These libraries are tested to ensure compatibility, providing a stable foundation for building and running Maxtext and eliminating potential conflicts due to incompatible package versions.
 
     ###### How to Use It
-    Use the `docker_build_dependency_image.sh` script to build your Maxtext Docker image with JAX Stable Stack. Set MODE to `stable_stack` and specify the desired `BASEIMAGE`. The `DEVICE` variable determines whether to build for TPUs or GPUs.
+    Use the `docker_build_dependency_image.sh` script to build your Maxtext Docker image with JAX AI Images. Set MODE to `stable_stack` and specify the desired `BASEIMAGE`. The `DEVICE` variable determines whether to build for TPUs or GPUs.
 
     ###### For TPUs:
     
     ```
-    # Example: bash docker_build_dependency_image.sh DEVICE=tpu MODE=stable_stack BASEIMAGE=us-docker.pkg.dev/cloud-tpu-images/jax-stable-stack/tpu:jax0.4.37-rev1
-    bash docker_build_dependency_image.sh DEVICE=tpu MODE=stable_stack BASEIMAGE={{JAX_STABLE_STACK_TPU_BASEIMAGE}}
+    # Example: bash docker_build_dependency_image.sh DEVICE=tpu MODE=jax_ai_image BASEIMAGE=us-docker.pkg.dev/cloud-tpu-images/jax-ai-image/tpu:jax0.5.2-rev2
+    bash docker_build_dependency_image.sh DEVICE=tpu MODE=stable_stack BASEIMAGE={{JAX_AI_IMAGE_TPU_BASEIMAGE}}
     ```
 
-    You can find a list of available JAX Stable Stack base images [here](https://us-docker.pkg.dev/cloud-tpu-images/jax-stable-stack/tpu).
+    You can find a list of available JAX AI base images [here](https://us-docker.pkg.dev/cloud-tpu-images/jax-ai-image/tpu).
 
     ###### [New] For GPUs:
 
     ```
-    # Example bash docker_build_dependency_image.sh DEVICE=gpu MODE=stable_stack BASEIMAGE=us-central1-docker.pkg.dev/deeplearning-images/jax-stable-stack/gpu:jax0.4.37-cuda_dl24.10-rev1
-    bash docker_build_dependency_image.sh MODE=stable_stack BASEIMAGE={{JAX_STABLE_STACK_BASEIMAGE}}
+    # Example bash docker_build_dependency_image.sh DEVICE=gpu MODE=stable_stack BASEIMAGE=us-central1-docker.pkg.dev/deeplearning-images/jax-ai-image/gpu:jax0.5.1-cuda_dl25.02-rev1
+    bash docker_build_dependency_image.sh MODE=jax_ai_image BASEIMAGE={{JAX_AI_IMAGE_TPU_BASEIMAGE}}
     ```
 
-    You can find a list of available JAX Stable Stack base images [here](https://us-central1-docker.pkg.dev/deeplearning-images/jax-stable-stack/gpu).
+    You can find a list of available JAX AI base images [here](https://us-central1-docker.pkg.dev/deeplearning-images/jax-ai-image/gpu).
 
-    **Important Note:** The JAX Stable Stack is currently in the experimental phase. We encourage you to try it out and provide feedback.
+    **Important Note:** The JAX AI Image is currently in the experimental phase. We encourage you to try it out and provide feedback.
 
 3. After building the dependency image `maxtext_base_image`, xpk can handle updates to the working directory when running `xpk workload create` and using `--base-docker-image`.
 
@@ -132,7 +132,7 @@ after which log out and log back in to the machine.
       --workload ${USER}-first-job \
       --tpu-type=v5litepod-256 \
       --num-slices=1  \
-      --command "python3 -m MaxText.train MaxText/configs/base.yml base_output_directory=${BASE_OUTPUT_DIR} dataset_path=${DATASET_PATH} steps=100 per_device_batch_size=1"
+      --command "python3 -m MaxText.train MaxText/configs/base.yml run_name=${USER}-first-job base_output_directory=${BASE_OUTPUT_DIR} dataset_path=${DATASET_PATH} steps=100 per_device_batch_size=1"
       ```
 
       __Using [xpk github repo](https://github.com/google/xpk.git)__
@@ -147,5 +147,5 @@ after which log out and log back in to the machine.
       --workload ${USER}-first-job \
       --tpu-type=v5litepod-256 \
       --num-slices=1  \
-      --command "python3 -m MaxText.train MaxText/configs/base.yml base_output_directory=${BASE_OUTPUT_DIR} dataset_path=${DATASET_PATH} steps=100 per_device_batch_size=1"
+      --command "python3 -m MaxText.train MaxText/configs/base.yml run_name=${USER}-first-job base_output_directory=${BASE_OUTPUT_DIR} dataset_path=${DATASET_PATH} steps=100 per_device_batch_size=1"
       ```

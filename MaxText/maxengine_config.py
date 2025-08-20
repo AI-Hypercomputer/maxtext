@@ -1,10 +1,10 @@
-# Copyright 2024 Google LLC
+# Copyright 2023–2025 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+#    https://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -14,12 +14,13 @@
 
 """Configure MaxText For JetStream"""
 import functools
+from typing import Any, Type
 
 import jax
-from typing import Any, Type
 
 from jetstream.core import config_lib
 from jetstream.engine import engine_api
+
 from MaxText import maxengine
 
 
@@ -45,25 +46,13 @@ def get_server_config(config_str: str, config: Any) -> Type[config_lib.ServerCon
           generate_engine_create_fns=(),
           interleaved_engine_create_fns=(functools.partial(create_maxengine, config=config),),
       )
-    case "ExperimentalMaxtextDisaggregatedServer_16":
+    case "ExperimentalMaxtextDisaggregatedServer":
       # ExperimentalMaxtextDisaggregatedServer is still under development.
       # Its dependencies IFRT Proxy and other components are not publicly available
       # either.
       server_config = config_lib.ServerConfig(
-          prefill_slices=("v5e-16",),
-          generate_slices=("v5e-16",),
-          interleaved_slices=(),
-          prefill_engine_create_fns=(functools.partial(create_exp_maxengine, config=config),),
-          generate_engine_create_fns=(functools.partial(create_exp_maxengine, config=config),),
-          interleaved_engine_create_fns=(),
-      )
-    case "ExperimentalMaxtextDisaggregatedServer_8":
-      # ExperimentalMaxtextDisaggregatedServer is still under development.
-      # Its dependencies IFRT Proxy and other components are not publicly available
-      # either.
-      server_config = config_lib.ServerConfig(
-          prefill_slices=("v6e-8",),
-          generate_slices=("v6e-8",),
+          prefill_slices=(config.prefill_slice,),
+          generate_slices=(config.generate_slice,),
           interleaved_slices=(),
           prefill_engine_create_fns=(functools.partial(create_exp_maxengine, config=config),),
           generate_engine_create_fns=(functools.partial(create_exp_maxengine, config=config),),

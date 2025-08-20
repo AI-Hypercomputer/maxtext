@@ -1,15 +1,16 @@
-"""
-Copyright 2023 Google LLC
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-     https://www.apache.org/licenses/LICENSE-2.0
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-"""
+# Copyright 2023–2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """
 Convert weights from a Llama or Mistral HuggingFace or PyTorch model to a MaxText one.
@@ -39,24 +40,30 @@ import re
 import logging
 import json
 from dataclasses import dataclass
+
 from safetensors import safe_open
+
+import ml_dtypes
+
+import psutil
+
+from tqdm import tqdm
+
+import numpy as np
 
 os.environ["JAX_PLATFORMS"] = "cpu"
 
-from flax.training import train_state
+import torch
+
 import jax
 from jax import tree
-import ml_dtypes
-import numpy as np
-import psutil
-from tqdm import tqdm
-import torch
+
+from flax.training import train_state
 
 from MaxText import checkpointing
 from MaxText import max_logging
 from MaxText import max_utils
 from MaxText.inference_utils import str2bool
-from MaxText.train import save_checkpoint
 from MaxText.utils import gcs_utils
 
 MODEL_PARAMS_DICT = {
@@ -133,6 +140,24 @@ MODEL_PARAMS_DICT = {
         "num_experts": 16,
         "rope_type": "llama3.1",
         "scale_query": False,
+        "interleave_moe_layer_step": 1,
+        "inhomogeneous_layer_cycle_interval": 4,
+        "num_layers_vit": 34,
+        "num_att_head_vit": 16,
+        "hidden_size_vit": 1408,
+    },
+    "llama4-17b-128e": {
+        "num_layers": 48,
+        "num_heads": 40,
+        "num_kv_heads": 8,
+        "dims_per_head": 128,
+        "vocab": 202048,
+        "base_emb_dim": 5120,
+        "num_experts": 128,
+        "rope_type": "llama3.1",
+        "scale_query": False,
+        "interleave_moe_layer_step": 2,
+        "inhomogeneous_layer_cycle_interval": 4,
     },
     "mistral-7b": {
         "num_layers": 32,
@@ -243,6 +268,7 @@ def _incoming_ckpt_to_maxtext_mapping(layer_idx: int = -1, expert_idx: int = -1,
     base_mapping[f"layers.{layer_idx}.feed_forward.experts.moe_w_swiglu_eD_F"] = base_mapping.pop(
         f"layers.{layer_idx}.feed_forward.experts.{expert_idx}.w3.weight"
     )
+  return base_mapping
 
 
 def _hf_to_maxtext_mapping(layer_idx: int = -1, expert_idx: int = -1) -> dict:
@@ -273,9 +299,32 @@ def _hf_to_maxtext_mapping(layer_idx: int = -1, expert_idx: int = -1) -> dict:
       f"model.layers.{layer_idx}.block_sparse_moe.experts.{expert_idx}.w1.weight": f"layers.{layer_idx}.feed_forward.experts.{expert_idx}.w1.weight",
       f"model.layers.{layer_idx}.block_sparse_moe.experts.{expert_idx}.w2.weight": f"layers.{layer_idx}.feed_forward.experts.{expert_idx}.w2.weight",
       f"model.layers.{layer_idx}.block_sparse_moe.experts.{expert_idx}.w3.weight": f"layers.{layer_idx}.feed_forward.experts.{expert_idx}.w3.weight",
+      # FFN
       f"model.layers.{layer_idx}.mlp.gate_proj.weight": f"layers.{layer_idx}.feed_forward.w1.weight",
-      f"model.layers.{layer_idx}.mlp.down_proj.weight": f"layers.{layer_idx}.feed_forward.w2.weight",
-      f"model.layers.{layer_idx}.mlp.up_proj.weight": f"layers.{layer_idx}.feed_forward.w3.weight",
+      f"model.layers.{layer_idx}.mlp.up_proj.weight": f"layers.{layer_idx}.feed_forward.w2.weight",
+      f"model.layers.{layer_idx}.mlp.down_proj.weight": f"layers.{layer_idx}.feed_forward.w3.weight",
+      # llama4
+      "language_model.model.embed_tokens.weight": "tok_embeddings.weight",
+      "language_model.model.norm.weight": "norm.weight",
+      "language_model.lm_head.weight": "output.weight",
+      f"language_model.model.layers.{layer_idx}.input_layernorm.weight": f"layers.{layer_idx}.attention_norm.weight",
+      f"language_model.model.layers.{layer_idx}.post_attention_layernorm.weight": f"layers.{layer_idx}.ffn_norm.weight",
+      f"language_model.model.layers.{layer_idx}.self_attn.q_proj.weight": f"layers.{layer_idx}.attention.wq.weight",
+      f"language_model.model.layers.{layer_idx}.self_attn.k_proj.weight": f"layers.{layer_idx}.attention.wk.weight",
+      f"language_model.model.layers.{layer_idx}.self_attn.v_proj.weight": f"layers.{layer_idx}.attention.wv.weight",
+      f"language_model.model.layers.{layer_idx}.self_attn.o_proj.weight": f"layers.{layer_idx}.attention.wo.weight",
+      # llama4 MoE
+      f"language_model.model.layers.{layer_idx}.feed_forward.router.weight": f"layers.{layer_idx}.feed_forward.gate.weight",
+      f"language_model.model.layers.{layer_idx}.feed_forward.experts.down_proj": f"layers.{layer_idx}.feed_forward.experts.down_proj",
+      # NOTE: this contains up_proj and gate_proj concated together (we'll split/chunk them later)
+      f"language_model.model.layers.{layer_idx}.feed_forward.experts.gate_up_proj": f"layers.{layer_idx}.feed_forward.experts.gate_up_proj",
+      f"language_model.model.layers.{layer_idx}.feed_forward.shared_expert.gate_proj.weight": f"layers.{layer_idx}.feed_forward.shared_experts.gate_proj.weight",
+      f"language_model.model.layers.{layer_idx}.feed_forward.shared_expert.down_proj.weight": f"layers.{layer_idx}.feed_forward.shared_experts.down_proj.weight",
+      f"language_model.model.layers.{layer_idx}.feed_forward.shared_expert.up_proj.weight": f"layers.{layer_idx}.feed_forward.shared_experts.up_proj.weight",
+      # llama4 FFN
+      f"language_model.model.layers.{layer_idx}.feed_forward.gate_proj.weight": f"layers.{layer_idx}.feed_forward.w1.weight",
+      f"language_model.model.layers.{layer_idx}.feed_forward.up_proj.weight": f"layers.{layer_idx}.feed_forward.w2.weight",
+      f"language_model.model.layers.{layer_idx}.feed_forward.down_proj.weight": f"layers.{layer_idx}.feed_forward.w3.weight",
   }
 
 
@@ -319,17 +368,17 @@ def permute_to_match_maxtext_rope(arr):
 # pylint: disable=too-many-positional-arguments
 def initialize_self_attention_lora_kernels(
     self_attention_lora: dict,
-    lora_chkpt_vars: dict,
+    lora_chkpt_vars: _NamespaceMapper,
     key_prefix: str,
     stack_shape: tuple,
     module_name: str,
     layer_idx: int,
     reshape_a: bool = False,
-    shape_a: bool = None,
+    shape_a: None | list[int] = None,
     reshape_b: bool = False,
-    shape_b: bool = None,
+    shape_b: None | list[int] = None,
 ):
-  """Helper function to intialize LoRA kernels for given target module.
+  """Helper function to initialize LoRA kernels for given target module.
 
   Args:
     self_attention_lora (dict): Intermediate dictionary to store LoRA kernels.
@@ -338,10 +387,10 @@ def initialize_self_attention_lora_kernels(
     stack_shape (tuple): Shape of the stack of layers.
     module_name (str): Name of the target module.
     layer_idx (int): Index of the current layer.
-    reshape_a (bool, optional): Flag to reshape lora_A. Defaults to False.
-    shape_a (tuple, optional): Shape to reshape lora_A. Defaults to None.
-    reshape_b (bool, optional): Flag to reshape lora_B. Defaults to False.
-    shape_b (tuple, optional): Shape to reshape lora_B. Defaults to None.
+    reshape_a (bool): Flag to reshape lora_A. Defaults to False.
+    shape_a (list[int], optional): Shape to reshape lora_A. Defaults to None.
+    reshape_b (bool): Flag to reshape lora_B. Defaults to False.
+    shape_b (list[int], optional): Shape to reshape lora_B. Defaults to None.
   """
 
   lora_A = lora_chkpt_vars[f"{key_prefix}.lora_A.weights"].type(torch.float32).numpy().astype(CAST_DTYPE).transpose()
@@ -440,10 +489,10 @@ def convert_lora_weights_to_jax_weights(lora_config: dict, model_size: str):
             lora_chkpt_vars=lora_chkpt_vars,
             key_prefix=f"layers.{layer_idx}.attention.wq",
             stack_shape=stack_shape,
+            module_name="query",
+            layer_idx=layer_idx,
             reshape_b=True,
             shape_b=[lora_rank, base_num_query_heads, head_dim],
-            layer_idx=layer_idx,
-            module_name="query",
         )
 
       if "k_proj" in target_module:
@@ -452,10 +501,10 @@ def convert_lora_weights_to_jax_weights(lora_config: dict, model_size: str):
             lora_chkpt_vars=lora_chkpt_vars,
             key_prefix=f"layers.{layer_idx}.attention.wk",
             stack_shape=stack_shape,
+            module_name="key",
+            layer_idx=layer_idx,
             reshape_b=True,
             shape_b=[lora_rank, base_num_query_heads, head_dim],
-            layer_idx=layer_idx,
-            module_name="key",
         )
 
       if "v_proj" in target_module:
@@ -464,18 +513,24 @@ def convert_lora_weights_to_jax_weights(lora_config: dict, model_size: str):
             lora_chkpt_vars=lora_chkpt_vars,
             key_prefix=f"layers.{layer_idx}.attention.wv",
             stack_shape=stack_shape,
+            module_name="value",
+            layer_idx=layer_idx,
             reshape_b=True,
             shape_b=[lora_rank, base_num_query_heads, head_dim],
-            layer_idx=layer_idx,
-            module_name="value",
         )
 
       if "o_proj" in target_module:
         lora_A_o = (
-            lora_chkpt_vars[f"layers.{layer_idx}.attention.wo.lora_A.weights"].type(torch.float32).numpy().astype(CAST_DTYPE)
+            lora_chkpt_vars[f"layers.{layer_idx}.attention.wo.lora_A.weights"]
+            .type(torch.float32)
+            .numpy()
+            .astype(CAST_DTYPE)
         )
         lora_B_o = (
-            lora_chkpt_vars[f"layers.{layer_idx}.attention.wo.lora_B.weights"].type(torch.float32).numpy().astype(CAST_DTYPE)
+            lora_chkpt_vars[f"layers.{layer_idx}.attention.wo.lora_B.weights"]
+            .type(torch.float32)
+            .numpy()
+            .astype(CAST_DTYPE)
         )
 
         # This is for "out" matrix. So we don't transpose it above as well as here
@@ -498,7 +553,9 @@ def convert_lora_weights_to_jax_weights(lora_config: dict, model_size: str):
     )
 
   if self_attention_lora["key"]["lora_a.kernel"] is not None:
-    self_attention_lora["key"]["lora_a.kernel"] = np.transpose(self_attention_lora["key"]["lora_a.kernel"], axes=(1, 0, 2))
+    self_attention_lora["key"]["lora_a.kernel"] = np.transpose(
+        self_attention_lora["key"]["lora_a.kernel"], axes=(1, 0, 2)
+    )
     self_attention_lora["key"]["lora_b.kernel"] = np.transpose(
         self_attention_lora["key"]["lora_b.kernel"], axes=(1, 0, 2, 3)
     )
@@ -515,7 +572,9 @@ def convert_lora_weights_to_jax_weights(lora_config: dict, model_size: str):
     self_attention_lora["out"]["lora_a.kernel"] = np.transpose(
         self_attention_lora["out"]["lora_a.kernel"], axes=(2, 0, 3, 1)
     )
-    self_attention_lora["out"]["lora_b.kernel"] = np.transpose(self_attention_lora["out"]["lora_b.kernel"], axes=(1, 0, 2))
+    self_attention_lora["out"]["lora_b.kernel"] = np.transpose(
+        self_attention_lora["out"]["lora_b.kernel"], axes=(1, 0, 2)
+    )
 
   # Not sure if I need to scale the lora query weights by dividing it by np.sqrt(head_dim). Validate it later.
 
@@ -529,7 +588,9 @@ def convert_lora_weights_to_jax_weights(lora_config: dict, model_size: str):
   return jax_weights_lora
 
 
-def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, model_params: dict, mem_info: psutil.Process):
+def _convert_huggingface_to_jax_weights(
+    base_model_path: str, model_size: str, model_params: dict, mem_info: psutil.Process
+):
   """Convert a Huggingface Checkpoint to a dictionary of Numpy arrays representing the weights.
 
   Args:
@@ -548,6 +609,11 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
   vocab_size = model_params["vocab"]
   num_experts = model_params["num_experts"] if "num_experts" in model_params else None
 
+  is_llama4_model = model_size[:6] == "llama4"
+  interleave_moe_layer = model_params.get("interleave_moe_layer_step")
+  layer_cycle_interval = model_params.get("inhomogeneous_layer_cycle_interval")
+  scale_query = model_params.get("scale_query", True)
+
   max_logging.log(f"Loading the base model from {base_model_path}")
   ckpt_paths = sorted(pathlib.Path(base_model_path).glob("[!.]*.safetensors"))
   chkpt_vars = {}
@@ -557,27 +623,97 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
     with safe_open(ckpt_path, framework="pt", device="cpu") as f:
       for key in f.keys():
         parts = key.split(".")
-        layer = int(parts[2]) if "layers" in key else 0
+        if is_llama4_model:
+          layer = int(parts[3]) if "layers" in key else 0
+          # TODO: update when mutli-modality support is added
+          if "vision" in key or "multi_modal_projector" in key:
+            print("WARNING: skipping vision or multi-modal key: ", key)
+            continue
+        else:
+          layer = int(parts[2]) if "layers" in key else 0
         mapped_key = _hf_to_maxtext_mapping(layer)[key]
         chkpt_vars[mapped_key] = f.get_tensor(key)
 
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
 
   # initialize the data structure for storing jax_weights
-  layer_key = "MoeBlock_0" if num_experts else "mlp"
-  jax_weights = {
-      "decoder": {
-          "layers": {
-              layer_key: {},
-              "pre_self_attention_layer_norm": {},
-              "post_self_attention_layer_norm": {},
-              "self_attention": {},
-          },
-          "decoder_norm": {"scale": None},
-          "logits_dense": {"kernel": None},
-      },
-      "token_embedder": {"embedding": None},
-  }
+  if is_llama4_model:
+    jax_weights = {
+        "decoder": {"decoder_norm": {"scale": None}, "logits_dense": {"kernel": None}, "layers": {}},
+        "token_embedder": {"embedding": None},
+    }
+    # block 0, 1, 2, 3
+    for block_idx in range(layer_cycle_interval):
+      layer_name = f"layers_{block_idx}"
+      jax_weights["decoder"]["layers"].update(
+          {
+              layer_name: {
+                  "self_attention": {
+                      "query": {"kernel": None},
+                      "key": {"kernel": None},
+                      "value": {"kernel": None},
+                      "out": {"kernel": None},
+                  },
+                  "pre_self_attention_layer_norm": {"scale": None},
+                  "post_self_attention_layer_norm": {"scale": None},
+              },
+          }
+      )
+      # scout: 0, 1, 2, 3 are moe; maverick: 0, 2 are mlp, 1, 3 are moe
+      is_dense_layer = (block_idx + 1) % interleave_moe_layer != 0
+      if is_dense_layer:
+        # mlp_dict
+        jax_weights["decoder"]["layers"][layer_name]["mlp"] = {
+            "wi_0": {"kernel": None},
+            "wi_1": {"kernel": None},
+            "wo": {"kernel": None},
+        }
+      else:
+        # moe_dict
+        jax_weights["decoder"]["layers"][layer_name]["Llama4MoEBlock_0"] = {
+            "MoeBlock_0": {
+                "wi_0": None,
+                "wi_1": None,
+                "wo": None,
+                "gate": {"kernel": None},
+            },
+            "shared_experts": {
+                "wi_0": {"kernel": None},
+                "wi_1": {"kernel": None},
+                "wo": {"kernel": None},
+            },
+        }
+  else:
+    jax_weights = {
+        "decoder": {
+            "layers": {
+                "pre_self_attention_layer_norm": {"scale": None},
+                "post_self_attention_layer_norm": {"scale": None},
+                "self_attention": {
+                    "query": {"kernel": None},
+                    "key": {"kernel": None},
+                    "value": {"kernel": None},
+                    "out": {"kernel": None},
+                },
+            },
+            "decoder_norm": {"scale": None},
+            "logits_dense": {"kernel": None},
+        },
+        "token_embedder": {"embedding": None},
+    }
+    if num_experts is None:
+      jax_weights["decoder"]["layers"]["mlp"] = {
+          "wi_0": {"kernel": None},
+          "wi_1": {"kernel": None},
+          "wo": {"kernel": None},
+      }
+    else:
+      jax_weights["decoder"]["layers"]["MoeBlock_0"] = {
+          "wi_0": None,
+          "wi_1": None,
+          "wo": None,
+          "gate": {"kernel": None},
+      }
 
   # decoder norm scale ###########################################
   max_logging.log("Processing decoder norm scale")
@@ -598,7 +734,7 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
   # token embedding ##############################################
   max_logging.log("Processing token embeddings")
 
-  if model_size[:6] == "llama3":
+  if model_size[:6] in ["llama3", "llama4"]:
     jax_weights["token_embedder"]["embedding"] = (
         chkpt_vars["tok_embeddings.weight"].to(torch.float32).numpy().astype(CAST_DTYPE)
     )
@@ -611,13 +747,17 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
 
   # self attention ###############################################
   max_logging.log("Processing self attention")
-  self_attention = {
-      "query": {"kernel": None},
-      "key": {"kernel": None},
-      "value": {"kernel": None},
-      "out": {"kernel": None},
-  }
   for layer_idx in tqdm(range(base_num_decoder_layers), desc="layers", leave=False):
+    if is_llama4_model:
+      # e.g., interval=4, layer 11 is sublayer 2 in block 3
+      block_layer_idx, block_idx = divmod(layer_idx, layer_cycle_interval)
+      stack_shape = (base_num_decoder_layers // layer_cycle_interval,)
+      self_attention = jax_weights["decoder"]["layers"][f"layers_{block_idx}"]["self_attention"]
+    else:
+      block_layer_idx = layer_idx
+      stack_shape = (base_num_decoder_layers,)
+      self_attention = jax_weights["decoder"]["layers"]["self_attention"]
+
     wq = chkpt_vars[f"layers.{layer_idx}.attention.wq.weight"].to(torch.float32).numpy().astype(CAST_DTYPE).transpose()
     wk = chkpt_vars[f"layers.{layer_idx}.attention.wk.weight"].to(torch.float32).numpy().astype(CAST_DTYPE).transpose()
     wv = chkpt_vars[f"layers.{layer_idx}.attention.wv.weight"].to(torch.float32).numpy().astype(CAST_DTYPE).transpose()
@@ -635,44 +775,62 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
     w_post = np.reshape(w_post, [base_num_query_heads * head_dim, base_num_query_heads, head_dim])
 
     if self_attention["query"]["kernel"] is None:
-      stack_shape = (base_num_decoder_layers,)
       self_attention["query"]["kernel"] = np.zeros(stack_shape + wq.shape, dtype=CAST_DTYPE)
       self_attention["key"]["kernel"] = np.zeros(stack_shape + wk.shape, dtype=CAST_DTYPE)
       self_attention["value"]["kernel"] = np.zeros(stack_shape + wv.shape, dtype=CAST_DTYPE)
       self_attention["out"]["kernel"] = np.zeros(stack_shape + w_post.shape, dtype=CAST_DTYPE)
 
-    self_attention["query"]["kernel"][layer_idx, ...] = wq  # pylint: disable=E1137
-    self_attention["key"]["kernel"][layer_idx, ...] = wk  # pylint: disable=E1137
-    self_attention["value"]["kernel"][layer_idx, ...] = wv  # pylint: disable=E1137
-    self_attention["out"]["kernel"][layer_idx, ...] = w_post  # pylint: disable=E1137
+    self_attention["query"]["kernel"][block_layer_idx, ...] = wq  # pylint: disable=E1137 # pytype: disable=unsupported-operands
+    self_attention["key"]["kernel"][block_layer_idx, ...] = wk  # pylint: disable=E1137 # pytype: disable=unsupported-operands
+    self_attention["value"]["kernel"][block_layer_idx, ...] = wv  # pylint: disable=E1137 # pytype: disable=unsupported-operands
+    self_attention["out"]["kernel"][block_layer_idx, ...] = w_post  # pylint: disable=E1137 # pytype: disable=unsupported-operands
 
-  self_attention["query"]["kernel"] = np.transpose(
-      self_attention["query"]["kernel"], axes=(1, 0, 2, 3)
-  )  # [embed, layer, q, head_dim]
-  self_attention["key"]["kernel"] = np.transpose(
-      self_attention["key"]["kernel"], axes=(1, 0, 2, 3)
-  )  # [embed, layer, kv, head_dim]
-  self_attention["value"]["kernel"] = np.transpose(
-      self_attention["value"]["kernel"], axes=(1, 0, 2, 3)
-  )  # [embed, layer, kv, head_dim]
-  # layers, base_num_query_heads * head_dim, base_num_query_heads, head_dim =>
-  # base_num_query_heads, layers,head_dim, base_num_query_heads * head_dim
-  self_attention["out"]["kernel"] = np.transpose(
-      self_attention["out"]["kernel"], axes=(2, 0, 3, 1)
-  )  # [q, layer, head_dim, embed]
+  self_attention_list = (
+      [jax_weights["decoder"]["layers"]["self_attention"]]
+      if not is_llama4_model
+      else [
+          jax_weights["decoder"]["layers"][f"layers_{block_idx}"]["self_attention"]
+          for block_idx in range(layer_cycle_interval)
+      ]
+  )
+  for self_attention in self_attention_list:
+    self_attention["query"]["kernel"] = np.transpose(
+        self_attention["query"]["kernel"], axes=(1, 0, 2, 3)
+    )  # [embed, layer, q, head_dim]
+    self_attention["key"]["kernel"] = np.transpose(
+        self_attention["key"]["kernel"], axes=(1, 0, 2, 3)
+    )  # [embed, layer, kv, head_dim]
+    self_attention["value"]["kernel"] = np.transpose(
+        self_attention["value"]["kernel"], axes=(1, 0, 2, 3)
+    )  # [embed, layer, kv, head_dim]
+    # layers, base_num_query_heads * head_dim, base_num_query_heads, head_dim =>
+    # base_num_query_heads, layers,head_dim, base_num_query_heads * head_dim
+    self_attention["out"]["kernel"] = np.transpose(
+        self_attention["out"]["kernel"], axes=(2, 0, 3, 1)
+    )  # [q, layer, head_dim, embed]
 
-  # scale the query weights
-  self_attention["query"]["kernel"] = self_attention["query"]["kernel"] / np.sqrt(head_dim)
+    # scale the query weights
+    # NOTE: the np.sqrt here will silently cast to float64, so we add a manual cast to ensure the CAST_DTYPE is respected
+    if scale_query:
+      self_attention["query"]["kernel"] = self_attention["query"]["kernel"] / (np.sqrt(head_dim).astype(CAST_DTYPE))  # pylint: disable=E1137
 
-  jax_weights["decoder"]["layers"]["self_attention"] = self_attention
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
 
   # layer weight pre and post self attention norm ################
   max_logging.log("Processing pre and post self attention norms")
-  layer_weight = {"pre_self_attention_layer_norm": {"scale": None}, "post_self_attention_layer_norm": {"scale": None}}
 
   # self attention layer norm and swap the layer index
   for layer_idx in tqdm(range(base_num_decoder_layers), desc="layers", leave=False):
+    if is_llama4_model:
+      # e.g., interval=4, layer 11 is sublayer 2 in block 3
+      block_layer_idx, block_idx = divmod(layer_idx, layer_cycle_interval)
+      stack_shape = (base_num_decoder_layers // layer_cycle_interval,)
+      layer_weight = jax_weights["decoder"]["layers"][f"layers_{block_idx}"]
+    else:
+      block_layer_idx = layer_idx
+      stack_shape = (base_num_decoder_layers,)
+      layer_weight = jax_weights["decoder"]["layers"]
+
     pre_self_attention_layernorm = (
         chkpt_vars[f"layers.{layer_idx}.attention_norm.weight"].type(torch.float32).numpy().astype(CAST_DTYPE)
     )
@@ -680,66 +838,155 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
         chkpt_vars[f"layers.{layer_idx}.ffn_norm.weight"].type(torch.float32).numpy().astype(CAST_DTYPE)
     )
     if layer_weight["pre_self_attention_layer_norm"]["scale"] is None:
-      stack_shape = (base_num_decoder_layers,)
       layer_weight["pre_self_attention_layer_norm"]["scale"] = np.zeros(
           stack_shape + pre_self_attention_layernorm.shape, dtype=CAST_DTYPE
       )
       layer_weight["post_self_attention_layer_norm"]["scale"] = np.zeros(
           stack_shape + post_self_attention_layernorm.shape, dtype=CAST_DTYPE
       )
-    layer_weight["pre_self_attention_layer_norm"]["scale"][layer_idx, ...] = pre_self_attention_layernorm  # pylint: disable=E1137
-    layer_weight["post_self_attention_layer_norm"]["scale"][layer_idx, ...] = post_self_attention_layernorm  # pylint: disable=E1137
+    layer_weight["pre_self_attention_layer_norm"]["scale"][block_layer_idx, ...] = pre_self_attention_layernorm  # pylint: disable=E1137
+    layer_weight["post_self_attention_layer_norm"]["scale"][block_layer_idx, ...] = post_self_attention_layernorm  # pylint: disable=E1137
 
-  layer_weight["pre_self_attention_layer_norm"]["scale"] = np.transpose(
-      layer_weight["pre_self_attention_layer_norm"]["scale"], axes=(1, 0)
+  layer_weight_list = (
+      [jax_weights["decoder"]["layers"]]
+      if not is_llama4_model
+      else [jax_weights["decoder"]["layers"][f"layers_{block_idx}"] for block_idx in range(layer_cycle_interval)]
   )
-  layer_weight["post_self_attention_layer_norm"]["scale"] = np.transpose(
-      layer_weight["post_self_attention_layer_norm"]["scale"], axes=(1, 0)
-  )
+  for layer_weight in layer_weight_list:
+    layer_weight["pre_self_attention_layer_norm"]["scale"] = np.transpose(
+        layer_weight["pre_self_attention_layer_norm"]["scale"], axes=(1, 0)
+    )
+    layer_weight["post_self_attention_layer_norm"]["scale"] = np.transpose(
+        layer_weight["post_self_attention_layer_norm"]["scale"], axes=(1, 0)
+    )
 
-  jax_weights["decoder"]["layers"]["pre_self_attention_layer_norm"] = layer_weight["pre_self_attention_layer_norm"]
-  jax_weights["decoder"]["layers"]["post_self_attention_layer_norm"] = layer_weight["post_self_attention_layer_norm"]
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
 
   # layer weights ################################################
   max_logging.log("Processing layer weights")
-  if num_experts is None:
-    layer_weight["mlp"] = {
-        "wi_0": {"kernel": None},
-        "wi_1": {"kernel": None},
-        "wo": {"kernel": None},
-    }
-  else:
-    layer_weight["gate"] = {"kernel": None}
-
-    jax_weights["decoder"]["layers"]["MoeBlock_0"]["gate"] = {}
-    layer_weight["mlp"] = {
-        "wi_0": {"kernel": None},
-        "wi_1": {"kernel": None},
-        "wo": {"kernel": None},
-    }
 
   for layer_idx in tqdm(range(base_num_decoder_layers), desc="layers", leave=False):
-    if num_experts is None:
+    if is_llama4_model:
+      # e.g., interval=4, layer 11 is sublayer 2 in block 3
+      block_layer_idx, block_idx = divmod(layer_idx, layer_cycle_interval)
+      stack_shape = (base_num_decoder_layers // layer_cycle_interval,)
+      layer_weight = jax_weights["decoder"]["layers"][f"layers_{block_idx}"]
+      is_dense_layer = (layer_idx + 1) % interleave_moe_layer != 0
+    else:
+      block_layer_idx = layer_idx
+      stack_shape = (base_num_decoder_layers,)
+      is_dense_layer = num_experts is None
+      layer_weight = jax_weights["decoder"]["layers"]
+      stack_shape = (base_num_decoder_layers,)
+
+    if is_dense_layer:
       wi_0 = (
-          chkpt_vars[f"layers.{layer_idx}.feed_forward.w1.weight"].type(torch.float32).numpy().astype(CAST_DTYPE).transpose()
+          chkpt_vars[f"layers.{layer_idx}.feed_forward.w1.weight"]
+          .type(torch.float32)
+          .numpy()
+          .astype(CAST_DTYPE)
+          .transpose()
       )
       wi_1 = (
-          chkpt_vars[f"layers.{layer_idx}.feed_forward.w3.weight"].type(torch.float32).numpy().astype(CAST_DTYPE).transpose()
+          chkpt_vars[f"layers.{layer_idx}.feed_forward.w2.weight"]
+          .type(torch.float32)
+          .numpy()
+          .astype(CAST_DTYPE)
+          .transpose()
       )
       wo = (
-          chkpt_vars[f"layers.{layer_idx}.feed_forward.w2.weight"].type(torch.float32).numpy().astype(CAST_DTYPE).transpose()
+          chkpt_vars[f"layers.{layer_idx}.feed_forward.w3.weight"]
+          .type(torch.float32)
+          .numpy()
+          .astype(CAST_DTYPE)
+          .transpose()
       )
-
       if layer_weight["mlp"]["wi_0"]["kernel"] is None:
-        stack_shape = (base_num_decoder_layers,)
         layer_weight["mlp"]["wi_0"]["kernel"] = np.zeros(stack_shape + wi_0.shape, dtype=CAST_DTYPE)
         layer_weight["mlp"]["wi_1"]["kernel"] = np.zeros(stack_shape + wi_1.shape, dtype=CAST_DTYPE)
         layer_weight["mlp"]["wo"]["kernel"] = np.zeros(stack_shape + wo.shape, dtype=CAST_DTYPE)
-      layer_weight["mlp"]["wi_0"]["kernel"][layer_idx, ...] = wi_0  # pytype: disable=unsupported-operands
-      layer_weight["mlp"]["wi_1"]["kernel"][layer_idx, ...] = wi_1  # pytype: disable=unsupported-operands
-      layer_weight["mlp"]["wo"]["kernel"][layer_idx, ...] = wo  # pytype: disable=unsupported-operands
+      layer_weight["mlp"]["wi_0"]["kernel"][block_layer_idx, ...] = wi_0  # pytype: disable=unsupported-operands
+      layer_weight["mlp"]["wi_1"]["kernel"][block_layer_idx, ...] = wi_1  # pytype: disable=unsupported-operands
+      layer_weight["mlp"]["wo"]["kernel"][block_layer_idx, ...] = wo  # pytype: disable=unsupported-operands
+    elif is_llama4_model:
+      # no need to gather for llama4 safetensors
+      # 1 gate: Llama4MoEBlock_0.MoeBlock_0.gate.kernel
+      gate = (
+          chkpt_vars[f"layers.{layer_idx}.feed_forward.gate.weight"]
+          .type(torch.float32)
+          .numpy()
+          .astype(CAST_DTYPE)
+          .transpose()
+      )
+      if layer_weight["Llama4MoEBlock_0"]["MoeBlock_0"]["gate"]["kernel"] is None:
+        layer_weight["Llama4MoEBlock_0"]["MoeBlock_0"]["gate"]["kernel"] = np.zeros(
+            stack_shape + gate.shape, dtype=CAST_DTYPE
+        )
+      layer_weight["Llama4MoEBlock_0"]["MoeBlock_0"]["gate"]["kernel"][block_layer_idx, ...] = gate
+
+      # 2 routed experts: Llama4MoEBlock_0.MoeBlock_0.wi_0, Llama4MoEBlock_0.MoeBlock_0.wi_1, Llama4MoEBlock_0.MoeBlock_0.wo
+      wi_0_1 = (
+          chkpt_vars[f"layers.{layer_idx}.feed_forward.experts.gate_up_proj"]
+          .type(torch.float32)
+          .numpy()
+          .astype(CAST_DTYPE)
+      )
+      # pylint: disable=unbalanced-tuple-unpacking
+      wi_0, wi_1 = np.split(wi_0_1, 2, axis=-1)
+      del wi_0_1
+
+      wo = chkpt_vars[f"layers.{layer_idx}.feed_forward.experts.down_proj"].type(torch.float32).numpy().astype(CAST_DTYPE)
+
+      if layer_weight["Llama4MoEBlock_0"]["MoeBlock_0"]["wi_0"] is None:
+        layer_weight["Llama4MoEBlock_0"]["MoeBlock_0"]["wi_0"] = np.zeros(stack_shape + wi_0.shape, dtype=CAST_DTYPE)
+        layer_weight["Llama4MoEBlock_0"]["MoeBlock_0"]["wi_1"] = np.zeros(stack_shape + wi_1.shape, dtype=CAST_DTYPE)
+        layer_weight["Llama4MoEBlock_0"]["MoeBlock_0"]["wo"] = np.zeros(stack_shape + wo.shape, dtype=CAST_DTYPE)
+
+      layer_weight["Llama4MoEBlock_0"]["MoeBlock_0"]["wi_0"][block_layer_idx, ...] = wi_0
+      layer_weight["Llama4MoEBlock_0"]["MoeBlock_0"]["wi_1"][block_layer_idx, ...] = wi_1
+      layer_weight["Llama4MoEBlock_0"]["MoeBlock_0"]["wo"][block_layer_idx, ...] = wo
+
+      # 3 shared experts: Llama4MoEBlock_0.shared_experts.wi_0.kernel,
+      # Llama4MoEBlock_0.shared_experts.wi_1.kernel, Llama4MoEBlock_0.shared_experts.wo.kernel
+      wi_0 = (
+          chkpt_vars[f"layers.{layer_idx}.feed_forward.shared_experts.gate_proj.weight"]
+          .type(torch.float32)
+          .numpy()
+          .astype(CAST_DTYPE)
+          .transpose()
+      )
+
+      wi_1 = (
+          chkpt_vars[f"layers.{layer_idx}.feed_forward.shared_experts.up_proj.weight"]
+          .type(torch.float32)
+          .numpy()
+          .astype(CAST_DTYPE)
+          .transpose()
+      )
+
+      wo = (
+          chkpt_vars[f"layers.{layer_idx}.feed_forward.shared_experts.down_proj.weight"]
+          .type(torch.float32)
+          .numpy()
+          .astype(CAST_DTYPE)
+          .transpose()
+      )
+
+      if layer_weight["Llama4MoEBlock_0"]["shared_experts"]["wi_0"]["kernel"] is None:
+        layer_weight["Llama4MoEBlock_0"]["shared_experts"]["wi_0"]["kernel"] = np.zeros(
+            stack_shape + wi_0.shape, dtype=CAST_DTYPE
+        )
+        layer_weight["Llama4MoEBlock_0"]["shared_experts"]["wi_1"]["kernel"] = np.zeros(
+            stack_shape + wi_1.shape, dtype=CAST_DTYPE
+        )
+        layer_weight["Llama4MoEBlock_0"]["shared_experts"]["wo"]["kernel"] = np.zeros(
+            stack_shape + wo.shape, dtype=CAST_DTYPE
+        )
+      layer_weight["Llama4MoEBlock_0"]["shared_experts"]["wi_0"]["kernel"][block_layer_idx, ...] = wi_0
+      layer_weight["Llama4MoEBlock_0"]["shared_experts"]["wi_1"]["kernel"][block_layer_idx, ...] = wi_1
+      layer_weight["Llama4MoEBlock_0"]["shared_experts"]["wo"]["kernel"][block_layer_idx, ...] = wo
     else:
+      # 1 MoeBlock_0.gate.kernel
       gate = np.concatenate(
           [
               var[f"layers.{layer_idx}.feed_forward.gate.weight"].type(torch.float32).numpy().astype(CAST_DTYPE)
@@ -747,10 +994,11 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
           ],
           axis=0,
       ).transpose()
-      if layer_weight["gate"]["kernel"] is None:
-        stack_shape = (base_num_decoder_layers,)
-        layer_weight["gate"]["kernel"] = np.zeros(stack_shape + gate.shape, dtype=CAST_DTYPE)
-      layer_weight["gate"]["kernel"][layer_idx, ...] = gate
+      if layer_weight["MoeBlock_0"]["gate"]["kernel"] is None:
+        layer_weight["MoeBlock_0"]["gate"]["kernel"] = np.zeros(stack_shape + gate.shape, dtype=CAST_DTYPE)
+      layer_weight["MoeBlock_0"]["gate"]["kernel"][layer_idx, ...] = gate
+
+      # 2 MoeBlock_0.wi_0, MoeBlock_0.wi_1, MoeBlock_0.wo
       for k in tqdm(range(num_experts), desc="experts", leave=False):
         wi_0 = (
             chkpt_vars[f"layers.{layer_idx}.feed_forward.experts.{k}.w1.weight"]
@@ -774,32 +1022,61 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
             .transpose()
         )
 
-        if layer_weight["mlp"]["wi_0"]["kernel"] is None:
-          stack_shape = (num_experts, base_num_decoder_layers)
-          layer_weight["mlp"]["wi_0"]["kernel"] = np.zeros(stack_shape + wi_0.shape, dtype=CAST_DTYPE)
-          layer_weight["mlp"]["wi_1"]["kernel"] = np.zeros(stack_shape + wi_1.shape, dtype=CAST_DTYPE)
-          layer_weight["mlp"]["wo"]["kernel"] = np.zeros(stack_shape + wo.shape, dtype=CAST_DTYPE)
+        if layer_weight["MoeBlock_0"]["wi_0"] is None:
+          stack_shape_expert = (num_experts, base_num_decoder_layers)
+          layer_weight["MoeBlock_0"]["wi_0"] = np.zeros(stack_shape_expert + wi_0.shape, dtype=CAST_DTYPE)
+          layer_weight["MoeBlock_0"]["wi_1"] = np.zeros(stack_shape_expert + wi_1.shape, dtype=CAST_DTYPE)
+          layer_weight["MoeBlock_0"]["wo"] = np.zeros(stack_shape_expert + wo.shape, dtype=CAST_DTYPE)
         ei, li = k, layer_idx
-        layer_weight["mlp"]["wi_0"]["kernel"][ei, li, ...] = wi_0
-        layer_weight["mlp"]["wi_1"]["kernel"][ei, li, ...] = wi_1
-        layer_weight["mlp"]["wo"]["kernel"][ei, li, ...] = wo
+        layer_weight["MoeBlock_0"]["wi_0"][ei, li, ...] = wi_0
+        layer_weight["MoeBlock_0"]["wi_1"][ei, li, ...] = wi_1
+        layer_weight["MoeBlock_0"]["wo"][ei, li, ...] = wo
       gc.collect()
+
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
 
-  if num_experts is None:
-    # swap the layer index
-    layer_weight["mlp"]["wi_0"]["kernel"] = np.transpose(layer_weight["mlp"]["wi_0"]["kernel"], axes=(1, 0, 2))
-    layer_weight["mlp"]["wi_1"]["kernel"] = np.transpose(layer_weight["mlp"]["wi_1"]["kernel"], axes=(1, 0, 2))
-    layer_weight["mlp"]["wo"]["kernel"] = np.transpose(layer_weight["mlp"]["wo"]["kernel"], axes=(1, 0, 2))
-
-    jax_weights["decoder"]["layers"]["mlp"] = layer_weight["mlp"]
+  if not is_llama4_model:
+    if not num_experts:
+      # swap the layer index
+      layer_weight["mlp"]["wi_0"]["kernel"] = np.transpose(layer_weight["mlp"]["wi_0"]["kernel"], axes=(1, 0, 2))
+      layer_weight["mlp"]["wi_1"]["kernel"] = np.transpose(layer_weight["mlp"]["wi_1"]["kernel"], axes=(1, 0, 2))
+      layer_weight["mlp"]["wo"]["kernel"] = np.transpose(layer_weight["mlp"]["wo"]["kernel"], axes=(1, 0, 2))
+    else:
+      # no need to transpose for wi_0, wi_1, wo in MoeBlock_0
+      layer_weight["MoeBlock_0"]["gate"]["kernel"] = np.transpose(
+          layer_weight["MoeBlock_0"]["gate"]["kernel"], axes=(1, 0, 2)
+      )
   else:
-    layer_weight["gate"]["kernel"] = np.transpose(layer_weight["gate"]["kernel"], axes=(1, 0, 2))
-    jax_weights["decoder"]["layers"]["MoeBlock_0"]["gate"]["kernel"] = layer_weight["gate"]["kernel"]
+    for block_idx in range(layer_cycle_interval):
+      layer_weight = jax_weights["decoder"]["layers"][f"layers_{block_idx}"]
+      is_dense_layer = (block_idx + 1) % interleave_moe_layer != 0
+      if is_dense_layer:
+        layer_weight["mlp"]["wi_0"]["kernel"] = np.transpose(layer_weight["mlp"]["wi_0"]["kernel"], axes=(1, 0, 2))
+        layer_weight["mlp"]["wi_1"]["kernel"] = np.transpose(layer_weight["mlp"]["wi_1"]["kernel"], axes=(1, 0, 2))
+        layer_weight["mlp"]["wo"]["kernel"] = np.transpose(layer_weight["mlp"]["wo"]["kernel"], axes=(1, 0, 2))
+      else:
+        layer_weight["Llama4MoEBlock_0"]["MoeBlock_0"]["gate"]["kernel"] = np.transpose(
+            layer_weight["Llama4MoEBlock_0"]["MoeBlock_0"]["gate"]["kernel"], axes=(1, 0, 2)
+        )
+        layer_weight["Llama4MoEBlock_0"]["MoeBlock_0"]["wi_0"] = np.transpose(
+            layer_weight["Llama4MoEBlock_0"]["MoeBlock_0"]["wi_0"], axes=(1, 0, 2, 3)
+        )
+        layer_weight["Llama4MoEBlock_0"]["MoeBlock_0"]["wi_1"] = np.transpose(
+            layer_weight["Llama4MoEBlock_0"]["MoeBlock_0"]["wi_1"], axes=(1, 0, 2, 3)
+        )
+        layer_weight["Llama4MoEBlock_0"]["MoeBlock_0"]["wo"] = np.transpose(
+            layer_weight["Llama4MoEBlock_0"]["MoeBlock_0"]["wo"], axes=(1, 0, 2, 3)
+        )
+        layer_weight["Llama4MoEBlock_0"]["shared_experts"]["wi_0"]["kernel"] = np.transpose(
+            layer_weight["Llama4MoEBlock_0"]["shared_experts"]["wi_0"]["kernel"], axes=(1, 0, 2)
+        )
+        layer_weight["Llama4MoEBlock_0"]["shared_experts"]["wi_1"]["kernel"] = np.transpose(
+            layer_weight["Llama4MoEBlock_0"]["shared_experts"]["wi_1"]["kernel"], axes=(1, 0, 2)
+        )
+        layer_weight["Llama4MoEBlock_0"]["shared_experts"]["wo"]["kernel"] = np.transpose(
+            layer_weight["Llama4MoEBlock_0"]["shared_experts"]["wo"]["kernel"], axes=(1, 0, 2)
+        )
 
-    jax_weights["decoder"]["layers"]["MoeBlock_0"]["wi_0"] = layer_weight["mlp"]["wi_0"]["kernel"]
-    jax_weights["decoder"]["layers"]["MoeBlock_0"]["wi_1"] = layer_weight["mlp"]["wi_1"]["kernel"]
-    jax_weights["decoder"]["layers"]["MoeBlock_0"]["wo"] = layer_weight["mlp"]["wo"]["kernel"]
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
 
   del chkpt_vars
@@ -826,7 +1103,7 @@ def _convert_pytorch_to_jax_weights(base_model_path: str, model_size: str, model
   base_num_kv_heads = model_params["num_kv_heads"]
   vocab_size = model_params["vocab"]
   num_experts = model_params["num_experts"] if "num_experts" in model_params else None
-  rope_type = model_params.get("rope_type")
+  rope_type = model_params.get("rope_type", "")
   scale_query = model_params.get("scale_query", True)
 
   chkpt_vars = {}
@@ -835,7 +1112,9 @@ def _convert_pytorch_to_jax_weights(base_model_path: str, model_size: str, model
     max_logging.log(f"Loading checkpoint {i+1} of {len(ckpt_paths)} ...")
     # NOTE: starting in PT2.6, `weights_only` was switched from the default of `False` to `True`
     # thus we need to specify this or else loading will fail
-    chkpt_vars[int(ckpt_path.name.split(".", maxsplit=2)[1])] = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    chkpt_vars[int(ckpt_path.name.split(".", maxsplit=2)[1])] = torch.load(
+        ckpt_path, map_location="cpu", weights_only=False
+    )
   chkpt_vars = [chkpt_vars[i] for i in sorted(list(chkpt_vars.keys()))]
   # map weight names if they use HuggingFace instead of PyTorch convention
   chkpt_vars = [_NamespaceMapper(var, model_size=model_size) for var in chkpt_vars]
@@ -844,7 +1123,8 @@ def _convert_pytorch_to_jax_weights(base_model_path: str, model_size: str, model
 
   # initialize the data structure for storing jax_weights
   layer_key = "MoeBlock_0" if num_experts else "mlp"
-  deepseek_layer_key = "DeepSeekMoeBlock_0"
+  is_llama4_model = model_size[:6] == "llama4"
+  routed_and_shared_layer_key = "Llama4MoEBlock_0" if is_llama4_model else "DeepSeekMoeBlock_0"
   jax_weights = {
       "decoder": {
           "layers": {
@@ -858,10 +1138,9 @@ def _convert_pytorch_to_jax_weights(base_model_path: str, model_size: str, model
       },
       "token_embedder": {"embedding": None},
   }
-  is_llama4_model = model_size[:6] == "llama4"
   if is_llama4_model:
     del jax_weights["decoder"]["layers"][layer_key]
-    jax_weights["decoder"]["layers"][deepseek_layer_key] = {
+    jax_weights["decoder"]["layers"][routed_and_shared_layer_key] = {
         layer_key: {},
         "shared_experts": {},
     }
@@ -971,7 +1250,9 @@ def _convert_pytorch_to_jax_weights(base_model_path: str, model_size: str, model
       wk = permute_to_match_maxtext_rope(wk)
     else:
       if not has_printed_warning:
-        max_logging.log("Skipping permute_to_match_maxtext_rope because model is a Llama3 variant or has RoPE Type Llama3.1")
+        max_logging.log(
+            "Skipping permute_to_match_maxtext_rope because model is a Llama3 variant or has RoPE Type Llama3.1"
+        )
         has_printed_warning = True
 
     w_post = np.concatenate(
@@ -1067,11 +1348,10 @@ def _convert_pytorch_to_jax_weights(base_model_path: str, model_size: str, model
     layer_weight["gate"] = {"kernel": None}
 
     if is_llama4_model:
-      jax_weights["decoder"]["layers"]["DeepSeekMoeBlock_0"]["MoeBlock_0"]["gate"] = {}
-      jax_weights["decoder"]["layers"]["DeepSeekMoeBlock_0"]["shared_experts"]["wi_0"] = {}
-      jax_weights["decoder"]["layers"]["DeepSeekMoeBlock_0"]["shared_experts"]["wi_1"] = {}
-      jax_weights["decoder"]["layers"]["DeepSeekMoeBlock_0"]["shared_experts"]["wo"] = {}
-      # TODO: need to remove if no shared experts
+      jax_weights["decoder"]["layers"][routed_and_shared_layer_key]["MoeBlock_0"]["gate"] = {}
+      jax_weights["decoder"]["layers"][routed_and_shared_layer_key]["shared_experts"]["wi_0"] = {}
+      jax_weights["decoder"]["layers"][routed_and_shared_layer_key]["shared_experts"]["wi_1"] = {}
+      jax_weights["decoder"]["layers"][routed_and_shared_layer_key]["shared_experts"]["wo"] = {}
       layer_weight["shared_experts"] = {
           "wi_0": {"kernel": None},
           "wi_1": {"kernel": None},
@@ -1105,7 +1385,7 @@ def _convert_pytorch_to_jax_weights(base_model_path: str, model_size: str, model
       ).transpose()
       wo = np.concatenate(
           [
-              var[f"layers.{layer_idx}.feed_forward.w1.weight"].type(torch.float32).numpy().astype(CAST_DTYPE)
+              var[f"layers.{layer_idx}.feed_forward.w2.weight"].type(torch.float32).numpy().astype(CAST_DTYPE)
               for var in chkpt_vars
           ],
           axis=1,
@@ -1120,10 +1400,19 @@ def _convert_pytorch_to_jax_weights(base_model_path: str, model_size: str, model
       layer_weight["mlp"]["wi_1"]["kernel"][layer_idx, ...] = wi_1  # pytype: disable=unsupported-operands
       layer_weight["mlp"]["wo"]["kernel"][layer_idx, ...] = wo  # pytype: disable=unsupported-operands
     else:
-      router_weight_name = (
-          f"layers.{layer_idx}.feed_forward.router_DE" if is_llama4_model else f"layers.{layer_idx}.feed_forward.gate.weight"
-      )
-      gate = chkpt_vars[0][router_weight_name].type(torch.float32).numpy().astype(CAST_DTYPE).transpose()
+      if is_llama4_model:
+        gate = (
+            chkpt_vars[0][f"layers.{layer_idx}.feed_forward.router_DE"]
+            .type(torch.float32)
+            .numpy()
+            .astype(CAST_DTYPE)
+            .transpose()
+        )
+      else:
+        gate = np.concatenate(
+            [var[f"layers.{layer_idx}.feed_forward.gate.weight"].type(torch.float16).numpy() for var in chkpt_vars],
+            axis=0,
+        ).transpose()
       if layer_weight["gate"]["kernel"] is None:
         stack_shape = (base_num_decoder_layers,)
         layer_weight["gate"]["kernel"] = np.zeros(stack_shape + gate.shape, dtype=CAST_DTYPE)
@@ -1188,7 +1477,10 @@ def _convert_pytorch_to_jax_weights(base_model_path: str, model_size: str, model
         # shared experts
         wi_0 = np.concatenate(
             [
-                var[f"layers.{layer_idx}.feed_forward.w_in_shared_FD.weight"].type(torch.float32).numpy().astype(CAST_DTYPE)
+                var[f"layers.{layer_idx}.feed_forward.w_in_shared_FD.weight"]
+                .type(torch.float32)
+                .numpy()
+                .astype(CAST_DTYPE)
                 for var in chkpt_vars
             ],
             axis=0,
@@ -1202,7 +1494,10 @@ def _convert_pytorch_to_jax_weights(base_model_path: str, model_size: str, model
         ).transpose()
         wo = np.concatenate(
             [
-                var[f"layers.{layer_idx}.feed_forward.w_out_shared_DF.weight"].type(torch.float32).numpy().astype(CAST_DTYPE)
+                var[f"layers.{layer_idx}.feed_forward.w_out_shared_DF.weight"]
+                .type(torch.float32)
+                .numpy()
+                .astype(CAST_DTYPE)
                 for var in chkpt_vars
             ],
             axis=1,
@@ -1225,21 +1520,30 @@ def _convert_pytorch_to_jax_weights(base_model_path: str, model_size: str, model
         for k in tqdm(range(num_experts), desc="experts", leave=False):
           wi_0 = np.concatenate(
               [
-                  var[f"layers.{layer_idx}.feed_forward.experts.{k}.w1.weight"].type(torch.float16).numpy()
+                  var[f"layers.{layer_idx}.feed_forward.experts.{k}.w1.weight"]
+                  .type(torch.float32)
+                  .numpy()
+                  .astype(CAST_DTYPE)
                   for var in chkpt_vars
               ],
               axis=0,
           ).transpose()
           wi_1 = np.concatenate(
               [
-                  var[f"layers.{layer_idx}.feed_forward.experts.{k}.w3.weight"].type(torch.float16).numpy()
+                  var[f"layers.{layer_idx}.feed_forward.experts.{k}.w3.weight"]
+                  .type(torch.float32)
+                  .numpy()
+                  .astype(CAST_DTYPE)
                   for var in chkpt_vars
               ],
               axis=0,
           ).transpose()
           wo = np.concatenate(
               [
-                  var[f"layers.{layer_idx}.feed_forward.experts.{k}.w2.weight"].type(torch.float16).numpy()
+                  var[f"layers.{layer_idx}.feed_forward.experts.{k}.w2.weight"]
+                  .type(torch.float32)
+                  .numpy()
+                  .astype(CAST_DTYPE)
                   for var in chkpt_vars
               ],
               axis=1,
@@ -1265,23 +1569,38 @@ def _convert_pytorch_to_jax_weights(base_model_path: str, model_size: str, model
 
     jax_weights["decoder"]["layers"]["mlp"] = layer_weight["mlp"]
   else:
-    layer_weight["gate"]["kernel"] = np.transpose(layer_weight["gate"]["kernel"], axes=(2, 0, 1))
-    jax_weights["decoder"]["layers"]["DeepSeekMoeBlock_0"]["MoeBlock_0"]["gate"]["kernel"] = layer_weight["gate"]["kernel"]
-    # routed experts
-    jax_weights["decoder"]["layers"]["DeepSeekMoeBlock_0"]["MoeBlock_0"]["wi_0"] = layer_weight["mlp"]["wi_0"]["kernel"]
-    jax_weights["decoder"]["layers"]["DeepSeekMoeBlock_0"]["MoeBlock_0"]["wi_1"] = layer_weight["mlp"]["wi_1"]["kernel"]
-    jax_weights["decoder"]["layers"]["DeepSeekMoeBlock_0"]["MoeBlock_0"]["wo"] = layer_weight["mlp"]["wo"]["kernel"]
-    # TODO: make this optional for setups that don't use shared experts
-    # shared experts
-    jax_weights["decoder"]["layers"]["DeepSeekMoeBlock_0"]["shared_experts"]["wi_0"]["kernel"] = layer_weight[
-        "shared_experts"
-    ]["wi_0"]["kernel"]
-    jax_weights["decoder"]["layers"]["DeepSeekMoeBlock_0"]["shared_experts"]["wi_1"]["kernel"] = layer_weight[
-        "shared_experts"
-    ]["wi_1"]["kernel"]
-    jax_weights["decoder"]["layers"]["DeepSeekMoeBlock_0"]["shared_experts"]["wo"]["kernel"] = layer_weight[
-        "shared_experts"
-    ]["wo"]["kernel"]
+    gate_kernel_axes = (2, 0, 1) if is_llama4_model else (1, 0, 2)
+    layer_weight["gate"]["kernel"] = np.transpose(layer_weight["gate"]["kernel"], axes=gate_kernel_axes)
+    if is_llama4_model:
+      jax_weights["decoder"]["layers"][routed_and_shared_layer_key]["MoeBlock_0"]["gate"]["kernel"] = layer_weight[
+          "gate"
+      ]["kernel"]
+      # routed experts
+      jax_weights["decoder"]["layers"][routed_and_shared_layer_key]["MoeBlock_0"]["wi_0"] = layer_weight["mlp"]["wi_0"][
+          "kernel"
+      ]
+      jax_weights["decoder"]["layers"][routed_and_shared_layer_key]["MoeBlock_0"]["wi_1"] = layer_weight["mlp"]["wi_1"][
+          "kernel"
+      ]
+      jax_weights["decoder"]["layers"][routed_and_shared_layer_key]["MoeBlock_0"]["wo"] = layer_weight["mlp"]["wo"][
+          "kernel"
+      ]
+      # if "shared_experts" in layer_weight:
+      jax_weights["decoder"]["layers"][routed_and_shared_layer_key]["shared_experts"]["wi_0"]["kernel"] = layer_weight[
+          "shared_experts"
+      ]["wi_0"]["kernel"]
+      jax_weights["decoder"]["layers"][routed_and_shared_layer_key]["shared_experts"]["wi_1"]["kernel"] = layer_weight[
+          "shared_experts"
+      ]["wi_1"]["kernel"]
+      jax_weights["decoder"]["layers"][routed_and_shared_layer_key]["shared_experts"]["wo"]["kernel"] = layer_weight[
+          "shared_experts"
+      ]["wo"]["kernel"]
+    else:
+      jax_weights["decoder"]["layers"]["MoeBlock_0"]["gate"]["kernel"] = layer_weight["gate"]["kernel"]
+
+      jax_weights["decoder"]["layers"]["MoeBlock_0"]["wi_0"] = layer_weight["mlp"]["wi_0"]["kernel"]
+      jax_weights["decoder"]["layers"]["MoeBlock_0"]["wi_1"] = layer_weight["mlp"]["wi_1"]["kernel"]
+      jax_weights["decoder"]["layers"]["MoeBlock_0"]["wo"] = layer_weight["mlp"]["wo"]["kernel"]
 
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
 
@@ -1330,7 +1649,9 @@ def save_weights_to_checkpoint(
   gc.collect()
   mesh = jax.sharding.Mesh(jax.devices(), "checkpoint_sharding_axis")
   s1 = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("checkpoint_sharding_axis"))  # shards first axis
-  s2 = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(None, "checkpoint_sharding_axis"))  # shards second axis
+  s2 = jax.sharding.NamedSharding(
+      mesh, jax.sharding.PartitionSpec(None, "checkpoint_sharding_axis")
+  )  # shards second axis
   s3 = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(None))  # no sharding
 
   def checkpoint_device_put(arr):
@@ -1377,7 +1698,7 @@ def save_weights_to_checkpoint(
 
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
   if checkpoint_manager is not None:
-    if save_checkpoint(checkpoint_manager, step_number_to_save_new_ckpt, state_new):
+    if checkpointing.save_checkpoint(checkpoint_manager, step_number_to_save_new_ckpt, state_new):
       max_logging.log(f"saved a checkpoint at step {step_number_to_save_new_ckpt}")
     # Upon preemption, exit when and only when all ongoing saves are complete.
     checkpoint_manager.wait_until_finished()
@@ -1420,6 +1741,9 @@ if __name__ == "__main__":
   if args.model_size not in MODEL_PARAMS_DICT:
     raise NotImplementedError
 
+  if args.model_size.startswith("llama4") and not args.huggingface_checkpoint:
+    raise NotImplementedError("Currently, llama4 scanned checkpoint conversion only supports huggingface safetensor.")
+
   os.environ["XLA_FLAGS"] = f"--xla_force_host_platform_device_count={SIMULATED_CPU_DEVICES_COUNT}"
   base_weights_path = args.maxtext_model_path
 
@@ -1451,7 +1775,7 @@ if __name__ == "__main__":
         max_logging.log(f"Ignoring {lora_id} adapter because its directory doesn't have adapter_config.json.")
         continue
 
-      with open(lora_config_path, "r", encoding="utf8") as file:
+      with open(lora_config_path, "rt", encoding="utf8") as file:
         lora_config_dict = json.load(file)
 
         if lora_config_dict is not None:

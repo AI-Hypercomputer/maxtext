@@ -1,18 +1,16 @@
-"""
-Copyright 2023 Google LLC
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-     https://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-"""
+# Copyright 2023–2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """
 Save a Cross Ahead of Time Compiled (XAOT) version of train.py's train step
@@ -23,25 +21,29 @@ before having to use the target hardware - you will see the same OOM error messa
 as you would on the target hardware.
 """
 
+from typing import Sequence
+import os
+import pickle
+
+from absl import app
+
 import jax
 from jax.experimental.topologies import get_topology_desc
 from jax.sharding import Mesh
 from jax.experimental.serialize_executable import serialize
+
 from flax.linen import partitioning as nn_partitioning
+
+from MaxText import accelerator_to_spec_map
+from MaxText import train
 from MaxText import maxtext_utils
 from MaxText import optimizers
 from MaxText import max_utils
 from MaxText import pyconfig
+from MaxText.common_types import MODEL_MODE_TRAIN
 from MaxText.layers import models
 from MaxText.layers import quantizations
-from typing import Sequence
-from absl import app
 from MaxText.utils import gcs_utils
-import os
-import pickle
-from MaxText import accelerator_to_spec_map
-from MaxText import train
-from MaxText.input_pipeline import input_pipeline_interface
 
 # pylint: disable=too-many-positional-arguments
 
@@ -83,7 +85,7 @@ def get_shaped_inputs(topology_mesh, config):
   """Get shaped abstractions of inputs to train_step: state, batch and rng"""
   # Construct the model and optimizer to get shaped versions of the state
   quant = quantizations.configure_quantization(config)
-  model = Transformer(config, topology_mesh, quant=quant)
+  model = Transformer(config, topology_mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
   # The learning_rate_schedule is baked into the compiled object.
   learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
   tx = optimizers.get_optimizer(config, learning_rate_schedule)
@@ -93,7 +95,9 @@ def get_shaped_inputs(topology_mesh, config):
   shaped_rng = jax.ShapeDtypeStruct(example_rng.shape, example_rng.dtype)
 
   # Shaped state
-  abstract_state, _, state_mesh_shardings = maxtext_utils.get_abstract_state(model, tx, config, example_rng, topology_mesh)
+  abstract_state, _, state_mesh_shardings = maxtext_utils.get_abstract_state(
+      model, tx, config, example_rng, topology_mesh
+  )
 
   # Shaped batch
   shaped_batch = maxtext_utils.get_shaped_batch(config)
@@ -137,7 +141,9 @@ def save_compiled(compiled, save_name):
 
 def main(argv: Sequence[str]) -> None:
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
-  os.environ["LIBTPU_INIT_ARGS"] = os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
+  os.environ["LIBTPU_INIT_ARGS"] = (
+      os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
+  )
   print("Starting train_compile.py...", flush=True)
 
   # Parse and validate configuration
@@ -154,9 +160,14 @@ def main(argv: Sequence[str]) -> None:
   # Get shaped inputs
   shaped_train_args, shaped_train_kwargs, state_mesh_shardings, model = get_shaped_inputs(topology_mesh, config)
 
+  # Get data sharding
+  data_sharding = maxtext_utils.get_input_data_sharding(config, topology_mesh)
+
   # Get function to compile and shardings
-  func_to_compile, in_shard, out_shard, static_argnums, donate_argnums = maxtext_utils.get_functional_train_with_signature(
-      train.train_step, topology_mesh, state_mesh_shardings, model, config
+  func_to_compile, in_shard, out_shard, static_argnums, donate_argnums = (
+      maxtext_utils.get_functional_train_with_signature(
+          train.train_step, data_sharding, state_mesh_shardings, model, config
+      )
   )
 
   # Compile

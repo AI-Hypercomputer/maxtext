@@ -1,10 +1,10 @@
-# Copyright 2024 Google LLC
+# Copyright 2023–2025 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#      https://www.apache.org/licenses/LICENSE-2.0
+#    https://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -31,20 +31,41 @@ on:
       base_image:
         required: false
         type: string
+      cloud_runner:
+        required: false
+        type: string
 
 jobs:
   build_and_upload:
     name: Build and upload image (${{ inputs.device_name }})
-    runs-on: ["self-hosted", "${{ inputs.device_type }}", "${{ inputs.device_name }}"]
+    runs-on: ${{ inputs.cloud_runner != '' && inputs.cloud_runner || fromJson(format('["self-hosted", "{0}", "{1}"]', inputs.device_type, inputs.device_name)) }}
+    container: google/cloud-sdk:524.0.0
     steps:
-      - uses: actions/checkout@v4
-      - name: Build an image
-        run: |
-          bash docker_build_dependency_image.sh MODE=${{ inputs.build_mode }} DEVICE=${{ inputs.device_type }} BASEIMAGE=${{ inputs.base_image }}
-      - name: Tag the image
-        run: |
-          docker tag maxtext_base_image gcr.io/tpu-prod-env-multipod/maxtext_${{ github.run_id }}:${{ inputs.device_type }}
-      - name: Upload the image
-        run: |
-          docker push gcr.io/tpu-prod-env-multipod/maxtext_${{ github.run_id }}:${{ inputs.device_type }}
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Mark git repository as safe
+        run: git config --global --add safe.directory ${GITHUB_WORKSPACE}
+      - name: Configure Docker
+        run: gcloud auth configure-docker us-docker.pkg.dev,gcr.io,us-central1-docker.pkg.dev -q
+      - name: Set up Docker BuildX
+        uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2
+        with:
+          driver: remote
+          endpoint: tcp://localhost:1234
+      - name: Get short commit hash
+        id: vars
+        run: echo "sha_short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          push: true
+          context: .
+          file: ./maxtext_jax_ai_image.Dockerfile
+          tags: gcr.io/tpu-prod-env-multipod/maxtext_${{ github.run_id }}:${{ inputs.device_type }}
+          provenance: false
+          build-args: |
+            JAX_AI_IMAGE_BASEIMAGE=${{ inputs.base_image }}
+            COMMIT_HASH=${{ steps.vars.outputs.sha_short }}
+            DEVICE=${{ inputs.device_type }}
+            TEST_TYPE=unit_test
+
 

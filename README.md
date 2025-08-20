@@ -1,17 +1,17 @@
 <!--
- Copyright 2024 Google LLC
-
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
-
-      https://www.apache.org/licenses/LICENSE-2.0
-
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
+ # Copyright 2023–2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
  -->
 
 
@@ -28,14 +28,21 @@ We have used MaxText to [demonstrate high-performance, well-converging training 
 Key supported features:
 * TPUs and GPUs
 * Training and Inference
-* Models: Llama 2, Llama 3, Mistral and Mixtral family, Gemma, Gemma 2, Gemma 3, and DeepSeek family
+* Models: Llama 2, Llama 3, Llama 4, Mistral and Mixtral family, Gemma, Gemma 2, Gemma 3, DeepSeek, Qwen3 Dense and MoE family
 
 ## Announcements
-* [Apr 14, 2025] Llama 4 Scout models are now supported. Context length is currently limited to 8k and we have many ideas for optimization but we're working on both these things.  Note that models are text-only for now, but we're working on full multi-modal support!
+* [August 13, 2025] The Qwen3 MoE family of models is now supported. We are starting with Qwen3-235B-A22B-Thinking-2507, in addition to our existing Qwen3 Dense family of 0.6B, 4B, 8B, 14B, and 32B models.
+* [July 27, 2025] We have updated our TFLOPS/s calculation to account for causal attention, dividing the attention flops in half in this [PR](https://github.com/AI-Hypercomputer/maxtext/pull/1988). Also we account for sliding window and chunked attention reduced attention flops in [PR](https://github.com/AI-Hypercomputer/maxtext/pull/2009) and [PR](https://github.com/AI-Hypercomputer/maxtext/pull/2030). These changes especially impact large sequence configs, since attention flops grow quadratically with sequence length, as explained in this [ReadMe](https://github.com/AI-Hypercomputer/maxtext/blob/main/getting_started/Performance_Metrics.md)
+* [July 16, 2025] We will be restructuring the MaxText repository for improved organization and clarity. Please review the [proposed structure](RESTRUCTURE.md) and provide feedback.
+* [July 11, 2025] Multi-Token Prediction (MTP) training is now supported! This feature adds an auxiliary loss based on predicting multiple future tokens, inspired by the [DeepSeek-V3 paper](https://arxiv.org/html/2412.19437v1), to enhance training efficiency.
+* [June 25, 2025] DeepSeek R1-0528 variant is now supported!
+* [April 24, 2025] Llama 4 Maverick models are now supported!
+* [April 14, 2025] Llama 4 Scout models are now supported. Context length is currently limited to 8k and we have many ideas for optimization but we're working on both these things.  Note that models are text-only for now, but we're working on full multi-modal support!
 * **[April 7, 2025] 🚨🚨🚨 We support modular imports. This comes with an API change for `train.py`: Now you should invoke the script via `python3 -m MaxText.train MaxText/configs/base.yml run_name=...`. If you want the old behavior you can stick to an older commit `git checkout pre-module-v0.1.0` and use the older API `python MaxText/train.py MaxText/configs/base.yml run_name=...`.**
+* [April 2, 2025] DeepSeek v3-0324 variant is now supported!
 * [March 24, 2025] We are excited to announce support for DeepSeek v3 (671B) and v2-Lite (16B), compatible with both TPUs and GPUs. We are actively working on further optimization.
 * [March 12, 2025] We are excited to announce support for Gemma 3: 4B, 12B, and 27B in text-only formats. Please see [Google Launch Blog](https://blog.google/technology/developers/gemma-3/) and [Developer Blog](https://developers.googleblog.com/en/introducing-gemma3/) for more information on Gemma 3.
-* [February, 2025] (Preview): We're excited to announce the preview of building Maxtext Docker images using the JAX Stable Stack base image, available for both TPUs and GPUs. This provides a more reliable and consistent build environment. Learn more [Here](getting_started/Run_MaxText_via_xpk.md)
+* [February, 2025] (Preview): We're excited to announce the preview of building Maxtext Docker images using the JAX AI Training Images, available for both TPUs and GPUs. This provides a more reliable and consistent build environment. Learn more [Here](getting_started/Run_MaxText_via_xpk.md)
 
 # Table of Contents
 

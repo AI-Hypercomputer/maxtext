@@ -1,20 +1,18 @@
-"""
-Copyright 2023 Google LLC
+# Copyright 2023–2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-     https://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-"""
-
-# pylint: disable=g-bad-todo, abstract-method, consider-using-with, ungrouped-imports
+# pylint: disable=g-bad-todo, abstract-method, consider-using-with
 """Transforms a "full state" including optimizer state to a bfloat16 "parameter state" without optimizer state.
    This typically used for turning a state output by training.py into a state than can be consumed by decode.py.
 
@@ -24,21 +22,24 @@ limitations under the License.
 """
 
 import os.path
-from MaxText import checkpointing
+from typing import Sequence
+
+from absl import app
+
+from etils import epath
+
 import jax
+from jax.sharding import Mesh
+from jax import random
+
+from MaxText import checkpointing
 from MaxText import max_logging
 from MaxText import max_utils
 from MaxText import maxtext_utils
 from MaxText import optimizers
 from MaxText import pyconfig
-
-from absl import app
-from etils import epath
-from jax.sharding import Mesh
-from jax import random
-from typing import Sequence
+from MaxText.common_types import DecoderBlockType, MODEL_MODE_TRAIN
 from MaxText.layers import models, quantizations
-from MaxText.train import save_checkpoint
 from MaxText.utils import gcs_utils
 from MaxText.utils import lora_utils
 
@@ -81,7 +82,7 @@ def _possibly_unroll_params(config, training_state, training_state_annotations, 
 
     jax.tree_util.tree_map(lambda x: x.delete(), layers)
 
-  if config.decoder_block == "deepseek":
+  if config.decoder_block == DecoderBlockType.DEEPSEEK:
     # Unroll dense and MoE layers separately
     unroll_layer_group(config.first_num_dense_layers, layer_name="dense_layers")
     unroll_layer_group(config.num_decoder_layers - config.first_num_dense_layers, layer_name="moe_layers")
@@ -93,7 +94,7 @@ def _read_train_checkpoint(config, checkpoint_manager, mesh):
   """Read training checkpoint at path defined by load_full_state_path."""
   # Model and Optimizer definition
   quant = quantizations.configure_quantization(config)
-  model = Transformer(config, mesh, quant)
+  model = Transformer(config, mesh, quant, MODEL_MODE_TRAIN)
   rng = random.PRNGKey(0)
   learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
   tx = optimizers.get_optimizer(config, learning_rate_schedule)
@@ -109,7 +110,7 @@ def _generate_lora_decode_checkpoints(config, mesh):
   """Read lora checkpoints checkpoint at path defined by load_full_state_path."""
   # Model and Optimizer definition
   quant = quantizations.configure_quantization(config)
-  model = Transformer(config, mesh, quant)
+  model = Transformer(config, mesh, quant, MODEL_MODE_TRAIN)
   rng = random.PRNGKey(0)
   learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
   tx = optimizers.get_optimizer(config, learning_rate_schedule)
@@ -148,7 +149,7 @@ def _save_decode_checkpoint(config, state, checkpoint_manager):
       None, jax.tree_util.tree_map(lambda x: x.astype(jax.numpy.bfloat16), state.params)
   )
   if checkpoint_manager is not None:
-    if save_checkpoint(checkpoint_manager, 0, decode_state):
+    if checkpointing.save_checkpoint(checkpoint_manager, 0, decode_state):
       max_logging.log(f"saved an decode checkpoint at {config.checkpoint_dir}")
   checkpoint_manager.wait_until_finished()
 

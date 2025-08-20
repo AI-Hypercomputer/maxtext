@@ -1,30 +1,28 @@
-"""
-Copyright 2023 Google LLC
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-     https://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-"""
+# Copyright 2023–2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Input pipeline for gpt3 c4 mlperf dataset."""
-
-from typing import Optional
 
 import functools
 
 import numpy as np
 
 import ml_collections
+
 import tensorflow as tf
 import tensorflow_datasets as tfds
+
 import jax
 import jax.numpy as jnp
 from jax.experimental import multihost_utils
@@ -32,8 +30,8 @@ from jax.experimental import multihost_utils
 from MaxText import tokenizer
 from MaxText import multihost_dataloading
 from MaxText import sequence_packing
-from MaxText.input_pipeline._input_pipeline_utils import get_tokenizer
 from MaxText import max_logging
+from MaxText.input_pipeline._input_pipeline_utils import get_tokenizer
 
 AUTOTUNE = tf.data.experimental.AUTOTUNE
 
@@ -41,7 +39,7 @@ AUTOTUNE = tf.data.experimental.AUTOTUNE
 # data processing functions:
 #   _shift_left_and_pad, rekey, reduce_concat_tokens and split_tokens_to_targets_length
 # Adapted from:
-#   https://github.com/google-research/text-to-text-transfer-transformer/blob/ba171b6f94eafcee60d0714fd6d60749b572d1f2/t5/data/preprocessors.py
+#   https://github.com/google-research/text-to-text-transfer-transformer/blob/ba171b6/t5/data/preprocessors.py
 # -----------------------------------------------------------------------------
 def _shift_left_and_pad(tensor, pad_val):
   """Shift the input to the left with pad_val"""
@@ -162,7 +160,7 @@ def split_tokens_to_targets_length(dataset, sequence_length):
 def _pad_to_batch_size(
     ds: tf.data.Dataset,
     batch_size: int,
-    num_examples: Optional[int] = None,
+    num_examples: None | int = None,
 ) -> tf.data.Dataset:
   """Pad unevenly distributed eval data in each shard with new entries to multiples of batch size."""
 
@@ -188,7 +186,8 @@ def _pad_to_batch_size(
   pad_num = num_batches * batch_size - local_num
   assert pad_num >= 0
   max_logging.log(
-      f"Eval data has {local_num} local entries, padding now with " f"{pad_num} extra entries to get {num_batches} batches."
+      f"Eval data has {local_num} local entries, padding now with "
+      f"{pad_num} extra entries to get {num_batches} batches."
   )
 
   # Repeat a random example to make the last batch full.
@@ -259,7 +258,8 @@ def preprocess_train_dataset(
   else:
     pad_id = -1
   train_ds = train_ds.map(
-      lambda x: tokenizer.TokenizeOp(tokenizer=sp_tokenizer, features=x, data_keys=("targets",)), num_parallel_calls=AUTOTUNE
+      lambda x: tokenizer.TokenizeOp(tokenizer=sp_tokenizer, features=x, data_keys=("targets",)),
+      num_parallel_calls=AUTOTUNE,
   )
   train_ds = reduce_concat_tokens(train_ds, feature_key="targets", batch_size=4096)
   train_ds = split_tokens_to_targets_length(train_ds, max_target_length)
@@ -276,9 +276,21 @@ def preprocess_eval_dataset(
     sp_tokenizer,
     eval_global_batch_size_to_load: int,
     max_target_length: int,
-    num_examples: Optional[int] = None,
+    num_examples: None | int = None,
+    is_tokenized_dataset: bool = True,
 ) -> tf.data.Dataset:
   """Preprocess the evaluation dataset."""
+  # group text up to max_target_length if the dataset is not pre-tokenized/pre-processed
+  if not is_tokenized_dataset:
+    eval_ds = eval_ds.map(
+        lambda x: tokenizer.TokenizeOp(tokenizer=sp_tokenizer, features=x, data_keys=("targets",)),
+        num_parallel_calls=AUTOTUNE,
+    )
+    # hardcode batch_sizes 24567 i.e. the exp size in split validation_24567exp
+    #   to avoid padding tokens inserted in group text
+    eval_ds = reduce_concat_tokens(eval_ds, feature_key="targets", batch_size=24567)
+    eval_ds = split_tokens_to_targets_length(eval_ds, max_target_length)
+
   if sp_tokenizer.pad_id is not None:
     pad_id = sp_tokenizer.pad_id
   elif sp_tokenizer.unk_id is not None:
@@ -340,16 +352,40 @@ def make_c4_mlperf_eval_iterator(
     process_indices,
 ):
   """Make eval iterator of customized C4 dataset for mlperf gpt3 training."""
-  eval_ds = get_dataset(
-      dataset_name=config.eval_dataset_name,
-      split="validation_tokenized_5662seqs",
-      dataloading_host_index=process_indices.index(jax.process_index()),
-      dataloading_host_count=len(process_indices),
-      enable_data_shuffling=False,
-  )
-  # note validation_tokenized_5662seqs split is pre tokenized, reduce_concated and split to target_length
-  #   mainly to avoid eval sequences change depending on the number of hosts
-  eval_ds = rekey(eval_ds, {"inputs": None, "targets": "ids"})
+  eval_slit = "None"
+  if config.eval_dataset_name == "c4/en:3.0.5":
+    is_tokenized_dataset = True
+  elif config.eval_dataset_name == "c4/en:3.0.4":
+    is_tokenized_dataset = False
+    eval_slit = "validation_24567exp"
+  elif config.eval_dataset_name in ["c4/en:3.0.1", "c4/en:3.0.8", "c4/en:3.0.9"]:
+    is_tokenized_dataset = False
+    eval_slit = "validation"
+  else:
+    raise ValueError(f"{config.eval_dataset_name=} should be one of ('c4/en:3.0.1', 'c4/en:3.0.4', 'c4/en:3.0.5')")
+
+  if is_tokenized_dataset:
+    eval_ds = get_dataset(
+        dataset_name=config.eval_dataset_name,
+        split="validation_tokenized_5662seqs",
+        dataloading_host_index=process_indices.index(jax.process_index()),
+        dataloading_host_count=len(process_indices),
+        enable_data_shuffling=False,
+    )
+    # note validation_tokenized_5662seqs split is pre tokenized, reduce_concated and split to target_length
+    #   mainly to avoid eval sequences change depending on the number of hosts
+    eval_ds = rekey(eval_ds, {"inputs": None, "targets": "ids"})
+  else:
+    eval_ds = get_dataset(
+        dataset_name=config.eval_dataset_name,
+        split=eval_slit,
+        dataloading_host_index=process_indices.index(jax.process_index()),
+        dataloading_host_count=len(process_indices),
+        enable_data_shuffling=False,
+    )
+
+    eval_ds = rekey(eval_ds, {"inputs": None, "targets": "text"})
+
   sp_tokenizer = get_tokenizer(
       config.tokenizer_path, config.tokenizer_type, config.add_bos, config.add_eos, config.hf_access_token
   )
@@ -358,6 +394,7 @@ def make_c4_mlperf_eval_iterator(
       sp_tokenizer=sp_tokenizer,
       eval_global_batch_size_to_load=config.global_batch_size_to_load_eval,
       max_target_length=config.max_target_length,
+      is_tokenized_dataset=is_tokenized_dataset,
   )
 
   eval_multihost_gen = multihost_dataloading.MultiHostDataLoadIterator(eval_ds, global_mesh)

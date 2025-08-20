@@ -1,34 +1,36 @@
-"""
-Copyright 2025 Google LLC
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-     https://www.apache.org/licenses/LICENSE-2.0
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-"""
+# Copyright 2023–2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+from typing import Any
+import argparse
+import copy
+import sys
+
+import numpy as np
 
 import jax
 import jax.numpy as jnp
-import numpy as np
 
-jax.config.update("jax_platform_name", "cpu")
-import argparse
-import copy
 from flax.training import train_state
-
-from typing import Any
-import sys
-from MaxText import max_logging
-
 
 import orbax
 
 from MaxText import checkpointing
-from MaxText.train import save_checkpoint
+from MaxText import max_logging
+
+jax.config.update("jax_platform_name", "cpu")
+
 
 Params = dict[str, Any]
 
@@ -43,6 +45,28 @@ def nest_params(params: Params) -> Params:
       subdict = subdict.setdefault(key, {})
     subdict[leaf] = param
   return nested_params
+
+
+def rename_nested_keys(data, old_key, new_key):
+  """
+  Recursively renames keys in a nested dictionary.
+  Args:
+      data (dict): The nested dictionary to process.
+      old_key (str): The key to find and rename.
+      new_key (str): The new name for the key.
+  Returns:
+      dict: A new dictionary with the specified keys renamed.
+  """
+  new_data = {}
+  for key, value in data.items():
+    new_k = new_key if key == old_key else key
+    if isinstance(value, dict):
+      new_data[new_k] = rename_nested_keys(value, old_key, new_key)
+    elif isinstance(value, list):
+      new_data[new_k] = [rename_nested_keys(item, old_key, new_key) if isinstance(item, dict) else item for item in value]
+    else:
+      new_data[new_k] = value
+  return new_data
 
 
 def main(raw_args=None) -> None:
@@ -76,7 +100,29 @@ def main(raw_args=None) -> None:
           "decoder_norm": {"scale": params["transformer"]["final_norm"]["scale"] + 1},
       },
       "token_embedder": {"embedding": params["transformer"]["embedder"]["input_embedding"] * jnp.sqrt(embed_dim)},
+      "vision_encoder": {
+          "Gemma3VisionEncoderLayer_0": {
+              "embedding": {
+                  "bias": params["SigLiPFromPatches_0"]["siglip_encoder"]["embedding"]["bias"],
+                  "kernel": params["SigLiPFromPatches_0"]["siglip_encoder"]["embedding"]["kernel"],
+              },
+              "pos_embedding": params["SigLiPFromPatches_0"]["siglip_encoder"]["pos_embedding"],
+              "Transformer": params["SigLiPFromPatches_0"]["siglip_encoder"]["Transformer"],
+          },
+          "VisionEmbedder_0": {
+              "mm_input_projection": params["transformer"]["embedder"]["mm_input_projection"],
+              "mm_soft_embedding_norm": {
+                  "scale": params["transformer"]["embedder"]["mm_soft_embedding_norm"]["scale"] + 1
+              },
+          },
+      },
   }
+  # Rename MlpBlock_0 to MlpBlockViT_0 in vision encoder
+  # This is because the gemma3 model has MlpBlock in the vision encoder,
+  # which has the same name as the MlpBlock in the MaxText decoder but different structure.
+  # Hence, we need to rename it to avoid confusion.
+  vision_encoder_weights = rename_nested_keys(jax_weights["vision_encoder"], "MlpBlock_0", "MlpBlockViT_0")
+  jax_weights["vision_encoder"] = vision_encoder_weights
   self_attention = dict(
       {
           "query": {"kernel": []},
@@ -158,9 +204,9 @@ def main(raw_args=None) -> None:
       (1, 0)
   )
   layer_weight["pre_ffw_norm"]["scale"] = np.array(layer_weight["pre_ffw_norm"]["scale"]).transpose((1, 0))
-  layer_weight["post_self_attention_norm"]["scale"] = np.array(layer_weight["post_self_attention_norm"]["scale"]).transpose(
-      (1, 0)
-  )
+  layer_weight["post_self_attention_norm"]["scale"] = np.array(
+      layer_weight["post_self_attention_norm"]["scale"]
+  ).transpose((1, 0))
   layer_weight["post_ffw_norm"]["scale"] = np.array(layer_weight["post_ffw_norm"]["scale"]).transpose((1, 0))
 
   layer_weight["self_attention"] = copy.deepcopy(self_attention)
@@ -189,8 +235,9 @@ def main(raw_args=None) -> None:
   )
 
   if checkpoint_manager is not None:
-    if save_checkpoint(checkpoint_manager, 0, state_new):
+    if checkpointing.save_checkpoint(checkpoint_manager, 0, state_new):
       max_logging.log("saved a checkpoint at step 0")
+      max_logging.log(f"Checkpoint saved to: {args.maxtext_model_path}")
     # Upon preemption, exit when and only when all ongoing saves are complete.
     if checkpoint_manager.reached_preemption(0):
       checkpoint_manager.wait_until_finished()

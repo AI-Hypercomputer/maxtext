@@ -1,26 +1,24 @@
-"""Copyright 2025 Google LLC.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-     https://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-"""
+# Copyright 2023–2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 import unittest
 
-from MaxText import common_types
-from MaxText.inference import kvcache
-
 import jax
-from jax import random
 import jax.numpy as jnp
+
+from MaxText.common_types import MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE
+from MaxText.inference import kvcache
 
 
 class MlaKVCacheTest(unittest.TestCase):
@@ -37,7 +35,17 @@ class MlaKVCacheTest(unittest.TestCase):
     self.k_rope_head_dim = 64
 
   def test_update_kv_cache(self):
-    test_module = kvcache.MlaKVCache(self.prefill_len, self.target_len, self.dtype)
+    test_module = kvcache.MlaKVCache(
+        max_prefill_length=self.prefill_len,
+        max_target_length=self.target_len,
+        batch=self.batchsize,
+        key_seq_len=self.prefill_len,
+        value_seq_len=self.prefill_len,
+        key_head_size=self.kv_lora_rank,
+        value_head_size=self.k_rope_head_dim,
+        dtype=self.dtype,
+        model_mode=MODEL_MODE_PREFILL,
+    )
     low_rank_main = jnp.ones((self.batchsize, self.prefill_len, self.kv_lora_rank), dtype=self.dtype) * 0.02
     key_rope = (
         jnp.ones(
@@ -47,36 +55,25 @@ class MlaKVCacheTest(unittest.TestCase):
         * 0.03
     )
     decoder_segment_ids = None
-    model_mode = common_types.MODEL_MODE_PREFILL
-    variables = test_module.init(
-        {"params": self.rng},
-        low_rank_main,
-        key_rope,
-        decoder_segment_ids,
-        model_mode,
-    )
+    model_mode = MODEL_MODE_PREFILL
 
-    # Prefill step. Inits all cache variables but populates only prefill
-    # variables
-    _, new_vars = test_module.apply(
-        variables,
+    # Prefill step.
+    _ = test_module(
         low_rank_main,
         key_rope,
         decoder_segment_ids,
         model_mode,
-        rngs={"params": random.PRNGKey(0)},
-        mutable=True,
     )
     prefill_low_rank_main = jnp.transpose(
-        new_vars["cache"]["cached_prefill_key"].value,
+        test_module.cached_prefill_key.value,
         test_module.key_axis_order,
     )
     prefill_key_rope = jnp.transpose(
-        new_vars["cache"]["cached_prefill_value"].value,
+        test_module.cached_prefill_value.value,
         test_module.key_axis_order,
     )
-    ar_low_rank_main = jnp.transpose(new_vars["cache"]["cached_ar_key"].value, test_module.key_axis_order)
-    ar_key_rope = jnp.transpose(new_vars["cache"]["cached_ar_value"].value, test_module.key_axis_order)
+    ar_low_rank_main = jnp.transpose(test_module.cached_ar_key.value, test_module.key_axis_order)
+    ar_key_rope = jnp.transpose(test_module.cached_ar_value.value, test_module.key_axis_order)
 
     # Ensure prefill cache variables have correct shapes and values
     self.assertEqual(
@@ -104,28 +101,25 @@ class MlaKVCacheTest(unittest.TestCase):
 
     # Autoregressive step. Prefill remains same but updates autoregressive
     # variables
-    model_mode = common_types.MODEL_MODE_AUTOREGRESSIVE
+    model_mode = MODEL_MODE_AUTOREGRESSIVE
     low_rank_main_1 = jnp.ones((self.batchsize, 1, self.kv_lora_rank), dtype=self.dtype) * 0.04
     key_rope_1 = jnp.ones((self.batchsize, 1, 1, self.k_rope_head_dim), dtype=self.dtype) * 0.05
-    _, new_vars = test_module.apply(
-        new_vars,
+    _ = test_module(
         low_rank_main_1,
         key_rope_1,
         decoder_segment_ids,
         model_mode,
-        rngs={"params": random.PRNGKey(0)},
-        mutable=True,
     )
     prefill_low_rank_main = jnp.transpose(
-        new_vars["cache"]["cached_prefill_key"].value,
+        test_module.cached_prefill_key.value,
         test_module.key_axis_order,
     )
     prefill_key_rope = jnp.transpose(
-        new_vars["cache"]["cached_prefill_value"].value,
+        test_module.cached_prefill_value.value,
         test_module.key_axis_order,
     )
-    ar_low_rank_main = jnp.transpose(new_vars["cache"]["cached_ar_key"].value, test_module.key_axis_order)
-    ar_key_rope = jnp.transpose(new_vars["cache"]["cached_ar_value"].value, test_module.key_axis_order)
+    ar_low_rank_main = jnp.transpose(test_module.cached_ar_key.value, test_module.key_axis_order)
+    ar_key_rope = jnp.transpose(test_module.cached_ar_value.value, test_module.key_axis_order)
 
     # Ensure prefill cache variables are same as before
     self.assertEqual(

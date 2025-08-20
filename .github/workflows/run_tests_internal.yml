@@ -1,10 +1,10 @@
-# Copyright 2024 Google LLC
+# Copyright 2023–2025 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#      https://www.apache.org/licenses/LICENSE-2.0
+#    https://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -25,10 +25,13 @@ on:
       device_name:
         required: true
         type: string
+      image_type:
+        required: false
+        type: string
       pytest_marker:
         required: true
         type: string
-      test_directory:
+      is_scheduled_run:
         required: true
         type: string
       xla_python_client_mem_fraction:
@@ -40,21 +43,28 @@ on:
       container_resource_option:
         required: true
         type: string
+      cloud_runner:
+        required: false
+        type: string
 
 jobs:
   run:
-    runs-on: ["self-hosted", "${{ inputs.device_type }}", "${{ inputs.device_name }}"]
+    runs-on: ${{ inputs.cloud_runner != '' && inputs.cloud_runner || fromJson(format('["self-hosted", "{0}", "{1}"]', inputs.device_type, inputs.device_name)) }}
     container:
-      image: gcr.io/tpu-prod-env-multipod/maxtext_${{ github.run_id }}:${{ inputs.device_type }}
-      volumes:
-        - /home/runner/actions-runner/_work/maxtext/maxtext:/deps
+      image: gcr.io/tpu-prod-env-multipod/maxtext_${{ github.run_id }}:${{ inputs.image_type != '' && inputs.image_type || inputs.device_type }}
       env:
         XLA_PYTHON_CLIENT_MEM_FRACTION: ${{ inputs.xla_python_client_mem_fraction }}
         TF_FORCE_GPU_ALLOW_GROWTH: ${{ inputs.tf_force_gpu_allow_growth }}
+        TPU_SKIP_MDS_QUERY: ${{ inputs.image_type == 'tpu' && inputs.device_type != 'tpu' && '1' || '' }}
       options: ${{ inputs.container_resource_option }}
     steps:
       - uses: actions/checkout@v4
       - name: Run Tests
         run: |
-          python3 -m pip install -e .
-          python3 -m pytest --pyargs MaxText.tests -m "${{ inputs.pytest_marker }}" --durations=0
+          if [ "${{ inputs.is_scheduled_run }}" == "true" ]; then
+            FINAL_PYTEST_MARKER="${{ inputs.pytest_marker }}"
+          else
+            FINAL_PYTEST_MARKER="${{ inputs.pytest_marker }} and not scheduled_only"
+          fi
+          python3 -m pip install -e . --no-dependencies &&
+          python3 -m pytest -v --pyargs MaxText.tests -m "${FINAL_PYTEST_MARKER}" --durations=0

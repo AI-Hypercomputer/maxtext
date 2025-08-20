@@ -1,26 +1,27 @@
-"""
-Copyright 2024 Google LLC
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-     https://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-"""
+# Copyright 2023–2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Sweep across inference microbenchmarks."""
 
 import os
 import sys
-import jax
 import json
+
 import jsonlines
+
+import jax
+
 from MaxText import inference_microbenchmark
 from MaxText import pyconfig
 
@@ -48,7 +49,7 @@ def main():
   config = pyconfig.initialize(sys.argv)
   base_run_name = config.run_name
 
-  with open(config.inference_metadata_file, encoding="utf-8") as json_file:
+  with open(config.inference_metadata_file, "rt", encoding="utf-8") as json_file:
     inference_metadata = json.load(json_file)
     print(f"inference_metadata: {inference_metadata}")
 
@@ -73,7 +74,9 @@ def main():
     print(f"prefill_cache_axis_order {prefill_cache_axis_order}")
     print(f"ar_cache_axis_order {ar_cache_axis_order}")
 
-    run_tag = f"{two_axis_order_product_id}-{prefill_cache_axis_order.replace(',','')}-{ar_cache_axis_order.replace(',','')}"
+    run_tag = (
+        f"{two_axis_order_product_id}-{prefill_cache_axis_order.replace(',','')}-{ar_cache_axis_order.replace(',','')}"
+    )
     run_name = f"{base_run_name}/{run_tag}"
 
     tensorboard_dir = os.path.join(config.base_output_directory, run_name, "tensorboard", "")
@@ -120,9 +123,14 @@ def main():
         **inference_metadata,
     }
     try:
-      microbenchmark_results = inference_microbenchmark.main(config, inference_metadata=inference_metadata)
-      metrics = microbenchmark_results["flattened_results"]
-      metrics = {k.lower(): v for k, v in metrics.items()}
+      microbenchmark_results = inference_microbenchmark.run_benchmarks_with_unsafe_rbg(
+          config, inference_metadata=inference_metadata
+      )
+      if microbenchmark_results:
+        metrics = microbenchmark_results["flattened_results"]
+        metrics = {k.lower(): v for k, v in metrics.items()}
+      else:
+        metrics = {}
       dimensions_json["oom"] = "False"
       print(
           f"Completed run {two_axis_order_product_id} out of: "

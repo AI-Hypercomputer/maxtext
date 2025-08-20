@@ -1,2 +1,24 @@
-# Changes in this file should match with requiredReviewers in file .github/workflows/AddLabel.yml
-* @gobbleturk @khatwanimohit @bvandermoon @vipannalla @RissyRan @richjames0 @rni418 @gagika @shralex @yangyuwei @SurbhiJainUSC @hengtaoguo @A9isha @wang2yn84 @wyzhang @mitalisi @gpolovets1 @mailvijayasingh
+* @gobbleturk @khatwanimohit @bvandermoon @vipannalla @RissyRan @richjames0 @gagika @shralex @yangyuwei @SurbhiJainUSC @hengtaoguo @A9isha @aireenmei @NuojCheng
+
+# Features
+MaxText/experimental/rl @A9isha @khatwanimohit @gagika @richjames0
+MaxText/input_pipeline @aireenmei @SurbhiJainUSC @richjames0
+MaxText/kernels/megablox @RissyRan @michelle-yooh @gagika @richjames0
+MaxText/kernels/ragged_attention.py @patemotter @vipannalla @richjames0
+MaxText/layers/pipeline.py @gobbleturk @richjames0
+MaxText/layers/moe.py @RissyRan @michelle-yooh @gagika @richjames0
+MaxText/layers/multi_token_prediction.py @parambole @RissyRan @gagika @richjames0
+MaxText/elastic_train.py @lukebaumann @shauryagup @RoshaniN
+MaxText/layers/quantizations.py @khatwanimohit @jshin1394 @liudangyi @richjames0
+
+# Inference
+MaxText/tests/inference @vipannalla @mitalisi @gpolovets1 @mailvijayasingh @jrplatin @patemotter @lumosis @richjames0
+MaxText/inference @vipannalla @mitalisi @gpolovets1 @mailvijayasingh @jrplatin @patemotter @lumosis @richjames0
+MaxText/inference_mlperf @vipannalla @mitalisi @gpolovets1 @mailvijayasingh @jrplatin @patemotter @lumosis @richjames0
+
+# Dockerfiles and dependencies
+*.Dockerfile @bvandermoon @yangyuwei @parambole @richjames0
+*.txt @bvandermoon @yangyuwei @parambole @richjames0
+
+# Workflow files
+.github/workflows @gobbleturk @khatwanimohit @shralex @parambole @richjames0

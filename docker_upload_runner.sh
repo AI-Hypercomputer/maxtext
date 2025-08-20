@@ -1,12 +1,12 @@
 #!/bin/bash
 
-# Copyright 2023 Google LLC
+# Copyright 2023–2025 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#      https://www.apache.org/licenses/LICENSE-2.0
+#    https://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -42,6 +42,11 @@ echo "In PROJECT=$PROJECT, uploading local image ${LOCAL_IMAGE_NAME} to CLOUD_IM
 if [[ ! -v CLOUD_IMAGE_NAME ]]; then
   echo "Erroring out because CLOUD_IMAGE_NAME is unset, please set it!"
   exit 1
+fi
+
+# Download other test assets from GCS into MaxText/test_assets
+if ! gcloud storage cp gs://maxtext-test-assets/* MaxText/test_assets; then
+  echo "WARNING: Failed to download test assets from GCS. These files are only used for end-to-end tests; you may not have access to the bucket."
 fi
 
 docker build --build-arg BASEIMAGE=${LOCAL_IMAGE_NAME} -f ./maxtext_runner.Dockerfile -t ${LOCAL_IMAGE_NAME_RUNNER} .

@@ -1,15 +1,16 @@
-"""
- Copyright 2025 Google LLC
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
-      https://www.apache.org/licenses/LICENSE-2.0
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
- """
+# Copyright 2023–2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 import abc
 import os
@@ -105,8 +106,7 @@ class StepMonitor(Monitor):
           match = re.search(STANDARD_STEP_LOG_REGEX, line)
           if match:
             step_number = int(match.group(1))
-            if step_number > last_step:
-              last_step = step_number  # Update last seen step
+            last_step = max(last_step, step_number)  # Update last seen step
             if step_number >= self.disruption_config.trigger_value:
               print(
                   f"Workload '{self.workload_name}', Pod '{pod_name}': STEP"

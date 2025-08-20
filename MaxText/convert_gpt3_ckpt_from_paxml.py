@@ -1,17 +1,16 @@
-"""
-Copyright 2023 Google LLC
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-     https://www.apache.org/licenses/LICENSE-2.0
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-"""
-
-from MaxText.globals import PKG_DIR
+# Copyright 2023–2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 # pylint: disable=line-too-long
 """Convert weights from a paxml gpt3 model to a MaxText one.
@@ -34,27 +33,32 @@ python3 -m MaxText.convert_gpt3_ckpt_from_paxml \
   --run-name=$RUN_NAME \
   --base-output-directory=$BASE_OUTPUT_DIR
 """
-from MaxText import max_utils
-from MaxText import maxtext_utils
-from MaxText import optimizers
-from MaxText import pyconfig
+
+import argparse
+import gc
 import os
-from jax import random
-from jax.sharding import Mesh
-from MaxText.layers.models import Transformer
-from MaxText.layers import quantizations
-from MaxText import checkpointing
+import sys
+
+from psutil import Process
 
 import numpy as np
+
+import jax
+from jax import random
+from jax.sharding import Mesh
+
 import tensorstore as ts
 
-import sys
-import jax
-import gc
+from MaxText import checkpointing
 from MaxText import max_logging
-from psutil import Process
-from MaxText.train import save_checkpoint
-import argparse
+from MaxText import maxtext_utils
+from MaxText import max_utils
+from MaxText import optimizers
+from MaxText import pyconfig
+from MaxText.common_types import MODEL_MODE_TRAIN
+from MaxText.globals import PKG_DIR
+from MaxText.layers import quantizations
+from MaxText.layers.models import Transformer
 
 
 def fmt_size(num_bytes: int) -> str:
@@ -64,17 +68,6 @@ def fmt_size(num_bytes: int) -> str:
       break
     num_bytes /= 1024.0
   return f"{num_bytes:.2f} {unit}"
-
-
-def check_memory():
-  """print out cpu/tpu memory."""
-  cpu_bytes = Process().memory_info().rss
-  max_logging.log(f"cpu memory: {fmt_size(cpu_bytes)}")
-  for d in jax.local_devices():
-    stats = d.memory_stats()
-    used = stats["bytes_in_use"]
-    limit = stats["bytes_limit"]
-    max_logging.log(f"tpu memory: Using {fmt_size(used)} / {fmt_size(limit)} ({used/limit:%}) on {d}")
 
 
 def convert(paxml_ckpt_path, maxtext_model_name, base_output_directory, run_name):
@@ -98,7 +91,7 @@ def convert(paxml_ckpt_path, maxtext_model_name, base_output_directory, run_name
   mesh = Mesh(devices_array, cfg.mesh_axes)
 
   quant = quantizations.configure_quantization(cfg)
-  model = Transformer(cfg, mesh, quant=quant)
+  model = Transformer(cfg, mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
   learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(cfg)
   tx = optimizers.get_optimizer(cfg, learning_rate_schedule)
 
@@ -111,7 +104,7 @@ def convert(paxml_ckpt_path, maxtext_model_name, base_output_directory, run_name
 
   state, _, _, _ = maxtext_utils.setup_training_state(model, None, tx, cfg, init_rng, mesh, checkpoint_manager)
   max_logging.log("start")
-  check_memory()
+  max_utils.print_mem_stats("After params initialized")
 
   # maxtext keystr: (paxml keystr, transform_fn)
   keystr_map = {
@@ -265,14 +258,14 @@ def convert(paxml_ckpt_path, maxtext_model_name, base_output_directory, run_name
     del arr
     gc.collect()
     max_logging.log(f"{key_path_str} finished")
-    check_memory()
+    max_utils.print_mem_stats("After params conversion")
     return result
 
   converted_state = jax.tree_util.tree_map_with_path(map_fn, state)
   max_logging.log("converted state finished")
-  check_memory()
+  max_utils.print_mem_stats("converted state finished")
 
-  if save_checkpoint(checkpoint_manager, converted_state.step, converted_state):
+  if checkpointing.save_checkpoint(checkpoint_manager, converted_state.step, converted_state):
     max_logging.log(f"saved a checkpoint at step {converted_state.step}")
   # Upon preemption, exit when and only when all ongoing saves are complete.
   if checkpoint_manager.reached_preemption(converted_state.step):

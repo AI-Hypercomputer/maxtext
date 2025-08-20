@@ -1,18 +1,16 @@
-"""
-Copyright 2024 Google LLC
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-     https://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-"""
+# Copyright 2023–2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
@@ -70,5 +68,5 @@ def upload_blob(bucket_name, source_file_name, destination_blob_name):
   blob.upload_from_filename(source_file_name)
 
 
-upload_blob("maxtext-llama", output_path, "llama2-70b/golden-logits/" + output_path)
-print("File {} uploaded to {}.".format(output_path, "llama2-70b/golden-logits/" + output_path))
+upload_blob("maxtext-llama", output_path, f"llama2-70b/golden-logits/{output_path}")
+print("File", repr(output_path), "uploaded to", f"llama2-70b/golden-logits/{output_path}.")

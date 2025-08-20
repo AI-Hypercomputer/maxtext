@@ -1,47 +1,45 @@
-#  Copyright 2025 Google LLC
+# Copyright 2023–2025 Google LLC
 #
-#  Licensed under the Apache License, Version 2.0 (the "License");
-#  you may not use this file except in compliance with the License.
-#  You may obtain a copy of the License at
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
 #
-#       https://www.apache.org/licenses/LICENSE-2.0
+#    https://www.apache.org/licenses/LICENSE-2.0
 #
-#  Unless required by applicable law or agreed to in writing, software
-#  distributed under the License is distributed on an "AS IS" BASIS,
-#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-#  See the License for the specific language governing permissions and
-#  limitations under the License.
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""
+GRPO correctness tests
+"""
 
-import jax
 import os
 import unittest
-from MaxText.layers import models
-from MaxText.layers import initializers
-import jax.numpy as jnp
+
 import numpy as np
 
-from MaxText import pyconfig
-from MaxText import maxtext_utils
+import jax
+import jax.numpy as jnp
 from jax.sharding import Mesh
-import flax.linen as nn
-from typing import Tuple
-import sys
-from MaxText import common_types
-from MaxText.globals import PKG_DIR
+
 import torch
 # from datasets import Dataset
+
 from trl import GRPOConfig, GRPOTrainer
+
 import transformers
 
 from datasets import load_dataset
 
-from MaxText.experimental.rl.grpo_trainer import compute_log_probs, grpo_loss_fn, _merge_grpo_state
-
-
-Array = common_types.Array
-Config = common_types.Config
-DType = common_types.DType
-NdInitializer = initializers.NdInitializer
+from MaxText import maxtext_utils
+from MaxText import pyconfig
+from MaxText.experimental.rl.grpo_trainer import grpo_loss_fn, _merge_grpo_state
+from MaxText.experimental.rl.grpo_utils import compute_log_probs
+from MaxText.common_types import MODEL_MODE_TRAIN
+from MaxText.globals import PKG_DIR
+from MaxText.layers import models
 
 
 class GRPOTest(unittest.TestCase):
@@ -66,7 +64,7 @@ class GRPOTest(unittest.TestCase):
     self.rng = jax.random.PRNGKey(42)
     devices_array = maxtext_utils.create_device_mesh(self.cfg)
     mesh = Mesh(devices_array, self.cfg.mesh_axes)
-    self.model = models.Transformer(config=self.cfg, mesh=mesh, quant=None)
+    self.model = models.Transformer(config=self.cfg, mesh=mesh, quant=None, model_mode=MODEL_MODE_TRAIN)
     self.state, _ = maxtext_utils.setup_decode_state(self.model, self.cfg, self.rng, mesh, None)
     self.tokenizer_model = transformers.AutoTokenizer.from_pretrained(
         "meta-llama/Llama-3.1-8B",
@@ -103,6 +101,7 @@ class GRPOTest(unittest.TestCase):
     )
 
   def _prepare_maxtext_inputs(self):
+    """prepare maxtext inputs"""
     prompt = self.tokenizer_model.encode(self.input_str)
     input_ids = jnp.pad(
         jnp.tile(jnp.concat([jnp.array(prompt), jnp.array(prompt)], axis=-1), (4, 1)),
@@ -168,7 +167,8 @@ class GRPOTest(unittest.TestCase):
       hf_per_token_logps = self.trainer._get_per_token_logps(self.hf_model, hf_input_ids, attention_mask, logits_to_keep)  # pylint: disable=protected-access
 
     print(
-        f"Max Diff {np.max(np.abs(np.trim_zeros(np.asarray(maxtext_per_token_logps)[0]) - hf_per_token_logps.detach().numpy()[0]))}"
+        "Max Diff",
+        np.max(np.abs(np.trim_zeros(np.asarray(maxtext_per_token_logps)[0]) - hf_per_token_logps.detach().numpy()[0])),
     )
     self.assertTrue(
         jax.numpy.allclose(
@@ -209,13 +209,16 @@ class GRPOTest(unittest.TestCase):
         # using the same model as the ref model,
         # which is equivalent of step 0 of GRPO training when
         # the on-policy params are the same as the ref model
-        "ref_per_token_logps": self.trainer._get_per_token_logps(self.hf_model, hf_input_ids, attention_mask, logits_to_keep),  # pylint: disable=protected-access
+        # pylint: disable=protected-access
+        "ref_per_token_logps": self.trainer._get_per_token_logps(
+            self.hf_model, hf_input_ids, attention_mask, logits_to_keep
+        ),
         # using only one advantage because we have just one sequence
         "advantages": advantages[0][0].unsqueeze(0),
     }
     hf_loss = self.trainer.compute_loss(self.hf_model, inputs)
 
-    hf_per_token_logps = self.trainer._get_per_token_logps(self.hf_model, hf_input_ids, attention_mask, logits_to_keep)  # pylint: disable=protected-access
+    self.trainer._get_per_token_logps(self.hf_model, hf_input_ids, attention_mask, logits_to_keep)  # pylint: disable=protected-access
 
     input_ids, input_segmentation, input_position, completion_segmentation = self._prepare_maxtext_inputs()
     maxtext_per_token_logps, _ = compute_log_probs(
@@ -238,7 +241,7 @@ class GRPOTest(unittest.TestCase):
         "ar_completions_segmentation": completion_segmentation,
     }
     maxtext_loss, aux = grpo_loss_fn(self.model, self.cfg, data, self.rng, self.state.params, reference_params)
-    self.assertEqual(self.trainer._metrics["train"]["kl"][0], aux.avg_kl.tolist())
+    self.assertEqual(self.trainer._metrics["train"]["kl"][0], aux.avg_kl.tolist())  # pylint: disable=protected-access
     self.assertEqual(hf_loss.item(), maxtext_loss.tolist())
     # since this is on-policy
     self.assertEqual(aux.avg_advantage.tolist(), 0.0)

@@ -1,43 +1,52 @@
-"""
-Copyright 2024 Google LLC
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-     https://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-"""
+# Copyright 2023–2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """ Tests for the common MaxText utilities """
+
+from typing import Any
+from collections.abc import Callable
+import os.path
 import unittest
-import jax.numpy as jnp
-
-from MaxText import maxtext_utils
-from MaxText import max_utils
-
-
-from flax import linen as nn
-from flax.training import train_state
 
 from jax import random
-from jax.sharding import Mesh
+from jax.sharding import Mesh, NamedSharding, PartitionSpec
+import jax
+import jax.numpy as jnp
+import numpy as np
+
+from flax import linen as nn
+from flax.core.scope import FrozenVariableDict
+from flax.linen import Dense
+from flax.training import train_state
+
 import optax
+
+from MaxText import max_utils
+from MaxText import maxtext_utils
+from MaxText import inference_utils
 from MaxText import pyconfig
-import os.path
-from MaxText.layers import quantizations
+from MaxText.common_types import MODEL_MODE_TRAIN
 from MaxText.globals import PKG_DIR
 from MaxText.layers import models
+from MaxText.layers import quantizations
+from MaxText.maxtext_utils import assert_params_sufficiently_sharded, get_formatted_sharding_annotations
 
 Transformer = models.Transformer
 
 
 class TestGradientClipping(unittest.TestCase):
+  """test class for gradient clipping"""
 
   def test_grad_clipping_with_no_fp8_stats(self):
     raw_grads = {"params": jnp.array([3.0, -4.0]), "wi_0": jnp.array([5.0, -6.0])}
@@ -67,6 +76,7 @@ class TestGradientClipping(unittest.TestCase):
 
 
 class TestNestedValueRetrieval(unittest.TestCase):
+  """test class for NestedValueRetrieval"""
 
   def setUp(self):
     self.test_dict = {
@@ -123,7 +133,9 @@ class MaxUtilsInitState(unittest.TestCase):
   def test_init_decode_state(self):
     decode_state = maxtext_utils.init_decode_state(self.model.apply, self.params)
     self.assertEqual(decode_state.apply_fn, self.model.apply)
-    output = decode_state.apply_fn(self.params, self.input)
+    apply_fn: Callable = decode_state.apply_fn
+    # pylint: disable=not-callable
+    output: Any | tuple[Any, FrozenVariableDict | dict[str, Any]] = apply_fn(self.params, self.input)
     self.assertEqual(output.tolist(), self.output.tolist())
     self.assertEqual(decode_state.tx, None)
     self.assertEqual(decode_state.opt_state, {})
@@ -148,8 +160,9 @@ class ModelWithMultipleCollections(nn.Module):
   A simple model that has variables in multiple collections - "params" and "special_variables"
   """
 
+  dense: Dense = nn.Dense(4)
+
   def setup(self):
-    self.dense = nn.Dense(4)
     self.kernel = self.variable("special_variables", "my_first_kernel", lambda: jnp.ones((4, 5)))
 
   def __call__(self, x, y, encoder_images=None):
@@ -159,6 +172,7 @@ class ModelWithMultipleCollections(nn.Module):
 
 
 class MaxUtilsInitStateWithMultipleCollections(unittest.TestCase):
+  """test class for multiple collection state in maxutils"""
 
   def setUp(self):
     self.config = pyconfig.initialize([None, os.path.join(PKG_DIR, "configs", "base.yml")], enable_checkpointing=False)
@@ -169,6 +183,7 @@ class MaxUtilsInitStateWithMultipleCollections(unittest.TestCase):
     self.tx = optax.adam(learning_rate=0.001)
 
   def _test_init_initial_state_driver(self, is_training):
+    """test initiating of the initial state driver"""
     state_under_test = maxtext_utils.init_initial_state(self.model, self.tx, self.config, is_training, self.key3)
     self.assertEqual(state_under_test.apply_fn, self.model.apply)
     if is_training:
@@ -200,7 +215,7 @@ class MaxUtilsInitTransformerState(unittest.TestCase):
     devices_array = maxtext_utils.create_device_mesh(self.config)
     self.mesh = Mesh(devices_array, self.config.mesh_axes)
     quant = quantizations.configure_quantization(self.config)
-    self.model = Transformer(self.config, mesh=self.mesh, quant=quant)
+    self.model = Transformer(self.config, mesh=self.mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
 
   def test_setup_decode_state(self):
     rng = random.PRNGKey(0)
@@ -215,6 +230,307 @@ class MaxUtilsInitTransformerState(unittest.TestCase):
     self.assertEqual(state.tx, tx)
     self.assertNotEqual(state.opt_state, {})
 
+
+class MaxUtilsPpAsDp(unittest.TestCase):
+  """Tests logical_axis_rules_pp_act_as_dp converts rules so stage is added before data."""
+
+  def test_stage_added_before_data(self):
+    input_rules = (("activation_batch", ("data", "fsdp")),)
+    expected_transform = (("activation_batch", ("stage", "data", "fsdp")),)
+    transformed_rules = maxtext_utils.logical_axis_rules_pp_act_as_dp(input_rules)
+    self.assertEqual(transformed_rules, expected_transform)
+
+  def test_stage_removed(self):
+    input_rules = (("layers", "stage"),)
+    expected_transform = (
+        (
+            "layers",
+            (),
+        ),
+    )
+    transformed_rules = maxtext_utils.logical_axis_rules_pp_act_as_dp(input_rules)
+    self.assertEqual(transformed_rules, expected_transform)
+
+  def multiple_rules(self):
+    """test multiple rules"""
+    input_rules = (
+        ("activation_batch", ("data", "fsdp")),
+        ("layers", "stage"),
+        ("experts", "expert"),
+    )
+    expected_transform = (
+        ("activation_batch", ("stage", "data", "fsdp")),
+        ("layers", ()),
+        ("experts", "expert"),
+    )
+    transformed_rules = maxtext_utils.logical_axis_rules_pp_act_as_dp(input_rules)
+    self.assertEqual(transformed_rules, expected_transform)
+
+
+class TestAssertParamsSufficientlySharded(unittest.TestCase):
+  """
+  Test suite for the sharding assertion utility function 'assert_params_sufficiently_sharded'.
+  """
+
+  def setUp(self):
+    """
+    Set up the test environment before each test method is run.
+    This method initializes a device mesh required for sharding tests.
+    """
+    # Skip these tests if the environment has fewer than 4 devices, as the mesh requires them.
+    if len(jax.devices()) < 4:
+      self.skipTest("This test suite requires at least 4 TPU devices.")
+    # Create a 2x2 device mesh from the first 4 available JAX devices.
+    devices = np.array(jax.devices()[:4]).reshape((2, 2))
+    # Define the non-trival mesh axes and a broader set of mesh axes.
+    nonTrival_mesh_axes = ("fsdp", "tensor")
+    self.mesh = Mesh(devices, nonTrival_mesh_axes)
+    self.mesh_axes = ("fsdp", "sequence", "tensor", "stage", "context")
+
+  def test_fully_sharded_2d(self):
+    """
+    Tests that a 2D tensor fully sharded across both mesh axes passes the assertion.
+    """
+    # Activate the mesh context.
+    with self.mesh:
+      # Define a sharding spec that shards the first tensor dimension by the 'fsdp' mesh axis
+      # and the second dimension by the 'tensor' mesh axis.
+      pspec = PartitionSpec("fsdp", "tensor")
+      # Create a parameter and apply the sharding, ensuring it's distributed across all devices.
+      params = {"layer1": jax.device_put(jnp.ones((8, 8)), NamedSharding(self.mesh, pspec))}
+
+      # Assert that the parameters are sufficiently sharded; this should pass with no error.
+      assert_params_sufficiently_sharded(params, self.mesh, tolerance=0.1)
+
+  def test_unsharded_fails(self):
+    """
+    Tests that a completely unsharded (fully replicated) parameter fails the assertion.
+    """
+    with self.mesh:
+      # Create a parameter without any sharding specification. It will be replicated on all devices.
+      params = {"layer1": jnp.ones((8, 8))}
+
+      # Expect an AssertionError because 100% of params are unsharded, exceeding the 10% tolerance.
+      with self.assertRaises(AssertionError):
+        assert_params_sufficiently_sharded(params, self.mesh, tolerance=0.1)
+
+  def test_mixed_sharding_fails(self):
+    """
+    Tests that a mix of sharded and unsharded parameters fails when the unsharded
+    portion exceeds the tolerance.
+    """
+    with self.mesh:
+      sharded_param = jax.device_put(jnp.ones((8, 8)), NamedSharding(self.mesh, PartitionSpec("fsdp", "tensor")))
+      unsharded_param = jnp.ones((8, 8))
+      params = {"layer1": sharded_param, "layer2": unsharded_param}
+
+      with self.assertRaises(AssertionError):
+        assert_params_sufficiently_sharded(params, self.mesh, tolerance=0.5)
+
+  def test_3d_tensor_sharded_on_fsdp_axis(self):
+    """
+    Tests that a 3D tensor sharded only on a valid target axis ('fsdp') should fail.
+    """
+    with self.mesh:
+      pspec = PartitionSpec("fsdp", None, None)
+      params = {"conv3d_layer": jax.device_put(jnp.ones((8, 4, 4)), NamedSharding(self.mesh, pspec))}
+
+      with self.assertRaises(AssertionError):
+        assert_params_sufficiently_sharded(params, self.mesh, tolerance=0.2)
+
+  def test_multi_axis_sharding_pass(self):
+    """
+    Tests that a tensor sharded with a valid axis ('fsdp') on a complex,
+    multi-dimensional mesh passes the assertion.
+    """
+    # Create a mesh shape for a 5D mesh.
+    devices = np.array(jax.devices()).reshape((4, 1, 1, 1, 1))
+    mesh = Mesh(devices, self.mesh_axes)
+
+    with mesh:
+      # Shard across multiple axes, including the valid 'fsdp' axis.
+      pspec = PartitionSpec(("fsdp", "sequence"), "stage", ("tensor"), None)
+      params = {"complex_layer": jax.device_put(jnp.ones((8, 8, 2, 2)), NamedSharding(mesh, pspec))}
+
+      # This should pass because 'fsdp' is a valid sharding axis being used.
+      assert_params_sufficiently_sharded(params, mesh, tolerance=0.05)
+
+  def test_multi_axis_not_sharded_fails(self):
+    """
+    Tests that a tensor on a complex mesh fails if it's not sharded along any
+    of the primary valid axes (like 'fsdp').
+    """
+    devices = np.array(jax.devices()).reshape((4, 1, 1, 1, 1))
+    mesh = Mesh(devices, self.mesh_axes)
+    with mesh:
+      pspec = PartitionSpec(("sequence", "context"), "stage", "tensor", None)
+      params = {"complex_layer": jax.device_put(jnp.ones((8, 8, 2, 2)), NamedSharding(mesh, pspec))}
+
+      with self.assertRaises(AssertionError):
+        assert_params_sufficiently_sharded(params, mesh, tolerance=0.05)
+
+  def test_multi_axis_mixed_sharding_fails(self):
+    """
+    Tests that a mix of sharded (correctly) and unsharded tensors on a complex mesh fails.
+    """
+    devices = np.array(jax.devices()).reshape((4, 1, 1, 1, 1))
+    mesh = Mesh(devices, self.mesh_axes)
+    with mesh:
+      sharded_pspec = PartitionSpec(("fsdp", "sequence"), "stage", ("tensor"), None)
+      sharded_param = jax.device_put(jnp.ones((8, 8, 2, 2)), NamedSharding(mesh, sharded_pspec))
+      unsharded_param = jnp.ones((8, 8, 2, 2))
+      params = {
+          "sharded_layer": sharded_param,
+          "unsharded_layer": unsharded_param,
+      }
+
+      with self.assertRaises(AssertionError):
+        assert_params_sufficiently_sharded(params, mesh, tolerance=0.5)
+
+
+class TestAssert_Formatted_sharding_annotations(unittest.TestCase):
+  """
+  Test suite for sharding assertion formatting functions.
+  """
+
+  def setUp(self):
+    """
+    Set up the common 2*2 mesh for sharding tests.
+    """
+    if len(jax.devices()) < 4:
+      self.skipTest("This test suite requires at least 4 TPU devices")
+
+    self.mesh_axes = ("fsdp", "sequence", "tensor", "stage", "context")
+    devices = np.array(jax.devices()).reshape((4, 1, 1, 1, 1))
+    self.mesh = Mesh(devices, self.mesh_axes)
+
+  def test_multi_axis_mixed_formating(self):
+    """
+    Tests a mix of sharded and unsharded tensors on a complex mesh fails.
+    """
+    with self.mesh:
+      sharded_pspec = PartitionSpec(("fsdp", "sequence"), "stage", ("tensor"), None)
+      sharded_param = jax.device_put(jnp.ones((8, 8, 2, 2)), NamedSharding(self.mesh, sharded_pspec))
+      unsharded_param = jnp.ones((8, 8, 2, 2))
+      params = {
+          "sharded_layer": sharded_param,
+          "unsharded_layer": unsharded_param,
+      }
+      self.assertIsNotNone(get_formatted_sharding_annotations(params, self.mesh))
+
+
+class TestPromptLogprobsFromPrefill(unittest.TestCase):
+  """
+  Test suite for the inference utility function 'prompt_logprobs_from_prefill'.
+  """
+  def test_shift_and_masking(self):
+    # B=1, S=5, V=4
+    B, S, V = 1, 5, 4
+    # tokens: valid up to true_length=4 (positions 0..3); last token is padding
+    input_tokens = jnp.array([[1, 2, 3, 1, 0]], dtype=jnp.int32)
+    true_length = 4
+
+    # logits predict t+1 at index t.
+    # Make steps t=0,1,2 strongly favor the actual next token (input_tokens[:, t+1])
+    logits = jnp.zeros((B, S, V), dtype=jnp.float32)
+    logits = logits.at[0, 0, input_tokens[0, 1]].set(10.0)  # predicts token at pos 1
+    logits = logits.at[0, 1, input_tokens[0, 2]].set(10.0)  # predicts token at pos 2
+    logits = logits.at[0, 2, input_tokens[0, 3]].set(10.0)  # predicts token at pos 3
+    # logits[:, 3, :] would predict token at pos 4 (padding); won't be used after masking.
+
+    out = inference_utils.prompt_logprobs_from_prefill(logits, input_tokens, true_length)
+    out_np = np.asarray(out)
+
+    # pos 0 must be NaN (no previous token)
+    self.assertTrue(np.isnan(out_np[0, 0]))
+    # positions 1..3 should be ~0 (log prob ~0 for correct, very confident prediction)
+    for pos in (1, 2, 3):
+      self.assertTrue(np.isfinite(out_np[0, pos]))
+      self.assertGreater(out_np[0, pos], -1e-3)  # close to 0
+
+    # positions >= true_length (>=4) masked to NaN
+    self.assertTrue(np.isnan(out_np[0, 4]))
+
+  def test_true_length_one_all_nan(self):
+    # Only a single valid token => no predictable positions
+    input_tokens = jnp.array([[2, 1, 1]], dtype=jnp.int32)
+    logits = jnp.zeros((1, 3, 5), dtype=jnp.float32)
+    out = inference_utils.prompt_logprobs_from_prefill(logits, input_tokens, true_length=1)
+    out_np = np.asarray(out)
+    # All NaN (pos 0 NaN by definition; others masked by true_length)
+    self.assertTrue(np.all(np.isnan(out_np)))
+
+
+class TestPromptLogprobsFromPackedPrefill(unittest.TestCase):
+  """
+  Test suite for the inference utility function 'prompt_logprobs_from_packed_prefill'.
+  """
+  def test_respects_segments_and_masking(self):
+    # Build a packed sequence of two prompts.
+    # Global S=8, V=5
+    B, S, V = 1, 8, 5
+
+    # Segment 0: start=0, L0=4, positions 0..3
+    # Segment 1: start=4, L1=3, positions 0..2 (position 3 is padding in this segment)
+    start0, L0 = 0, 4
+    start1, L1 = 4, 3
+
+    # Tokens per segment (last token of seg1 padding at pos 7)
+    toks = np.array([1, 2, 3, 1,   4, 0, 2, 0], dtype=np.int32)  # shape [S]
+    input_tokens = jnp.asarray(toks)[None, :]  # [B, S]
+
+    # decoder_positions within each segment
+    pos0 = np.arange(0, L0)                  # [0,1,2,3]
+    pos1 = np.array([0, 1, 2, 3])            # last is padding for seg1
+    decoder_positions = jnp.asarray(np.concatenate([pos0, pos1])[None, :])  # [B, S]
+
+    # segment ids: 0 for first 4, 1 for next 4
+    decoder_segment_ids = jnp.asarray(np.concatenate([np.zeros(L0), np.ones(4)]).astype(np.int32)[None, :])  # [B, S]
+
+    # true lengths per prompt
+    true_lengths = jnp.asarray([L0, L1], dtype=jnp.int32)  # [num_prompts=2]
+
+    # Construct logits so that for each segment:
+    # logits[:, step, :] strongly favors the *next* token inside the same segment.
+    logits = jnp.zeros((B, S, V), dtype=jnp.float32)
+
+    # Segment 0: steps 0..2 predict tokens at positions 1..3
+    logits = logits.at[0, start0 + 0, toks[start0 + 1]].set(10.0)
+    logits = logits.at[0, start0 + 1, toks[start0 + 2]].set(10.0)
+    logits = logits.at[0, start0 + 2, toks[start0 + 3]].set(10.0)
+    # Step 3 would predict pos 4 (start of next segment) — must NOT be scored for seg0.
+
+    # Segment 1: steps 4..5 predict tokens at positions 5..6 (pos 7 is padding)
+    logits = logits.at[0, start1 + 0, toks[start1 + 1]].set(10.0)
+    logits = logits.at[0, start1 + 1, toks[start1 + 2]].set(10.0)
+    # Step start1+2 would predict pos 7 (padding) — must NOT be scored for seg1.
+
+    out = inference_utils.prompt_logprobs_from_packed_prefill(
+        logits=logits,
+        input_tokens=input_tokens,
+        decoder_positions=decoder_positions,
+        decoder_segment_ids=decoder_segment_ids,
+        true_lengths=true_lengths,
+    )
+    out_np = np.asarray(out)
+
+    # Segment 0 checks:
+    # pos 0 (seg0) NaN
+    self.assertTrue(np.isnan(out_np[0, 0]))
+    # pos 1..3 finite and ~0
+    for p in (1, 2, 3):
+      self.assertTrue(np.isfinite(out_np[0, p]))
+      self.assertGreater(out_np[0, p], -1e-3)
+    # position 4 is *start of seg1* (pos==0 in its segment) -> NaN
+    self.assertTrue(np.isnan(out_np[0, 4]))
+
+    # Segment 1 checks:
+    # pos 5..6 finite and ~0 (valid positions 1..2 of seg1)
+    for p in (5, 6):
+      self.assertTrue(np.isfinite(out_np[0, p]))
+      self.assertGreater(out_np[0, p], -1e-3)
+    # pos 7 >= true_length of seg1 -> NaN
+    self.assertTrue(np.isnan(out_np[0, 7]))
 
 if __name__ == "__main__":
   unittest.main()

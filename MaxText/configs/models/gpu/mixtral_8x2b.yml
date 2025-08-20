@@ -1,10 +1,10 @@
-# Copyright 2024 Google LLC
+# Copyright 2023–2025 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#      https://www.apache.org/licenses/LICENSE-2.0
+#    https://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -13,7 +13,7 @@
 # limitations under the License.
 
 base_config: "base.yml"
-# The model_name gurantees we use the correct model params from
+# The model_name guarantees we use the correct model params from
 # configs/models/mixtral-8x7b. mixtral-8x2b is mixtral-8x7b but
 # with different base_num_decoder_layers.
 model_name: "mixtral-8x7b"

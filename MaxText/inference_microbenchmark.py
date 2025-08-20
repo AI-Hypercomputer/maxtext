@@ -1,35 +1,34 @@
-"""
-Copyright 2024 Google LLC
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-     https://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-"""
+# Copyright 2023–2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Inference microbenchmark for prefill and autoregressive steps."""
 import datetime
 import jax
 import json
+import os
+import sys
 
 from absl import app
 from collections.abc import MutableMapping
 
-from jetstream.engine import token_utils
-
 from MaxText import max_utils
 from MaxText import maxengine
 from MaxText import maxtext_utils
-from MaxText import prefix_cache
+from MaxText import prefill_packing
 from MaxText import profiler
 from MaxText import pyconfig
+from MaxText.utils import gcs_utils
 
 import warnings
 
@@ -38,119 +37,6 @@ warnings.simplefilter("ignore", category=FutureWarning)
 _WARMUP_ITERS = 2
 _FLATTEN_MICROBENCHMARK_RESULTS = False
 # pylint: disable=too-many-positional-arguments
-
-
-def prefix_cache_benchmark(
-    prefix, prefill_length: int, true_length: int, common_prefix_proportion: float, prefix_cache_entries_num: int, iters: int
-):
-  """Handles running prefix cache benchmark, and printing results.
-
-  Create different key with half of prefill_length common prefix insert into cache.
-  The value is not relevant to the cache for now. Just copy the prefix for every cache entry.
-  1. Fill the prefix cache to full capacity.
-  2. Benchmark save prefix cache with evicting time average by prefix_cache_entries_num.
-  3. Benchmark fetch_longest_common_prefix_key average by iters.
-  4. Benchmark load prefix cache time average by iters.
-
-  Args:
-    prefix: prefix return from prefill function
-    prefill_length: prefill token length after padding
-    true_length: true prefill token length
-    common_prefix_proportion: [0., 1.] common prefix proportion to the prefill_length
-    prefix_cache_entries_num: number of prefix cache entries insert into PrefixCache
-    iters: repeat time to test fetch_longest_common_prefix_key and load from cache
-  """
-
-  print(f"Prefix Cache benchmark results for prefill length {prefill_length}:\n")
-
-  value: prefix_cache.Value = prefix_cache.Value(
-      prefix=prefix,
-      true_length=true_length,
-      padded_length=prefill_length,
-      tokens=tuple(i for i in range(prefill_length)),
-  )
-
-  def copy_jax_array(x):
-    return x.copy()
-
-  def clone_value():
-    return prefix_cache.Value(
-        prefix=jax.tree.map(copy_jax_array, value.prefix),
-        true_length=value.true_length,
-        padded_length=value.padded_length,
-        tokens=value.tokens,
-        prefix_size_bytes=value.prefix_size_bytes,
-        device=value.device,
-    )
-
-  prefix_size_bytes_gb = value.prefix_size_bytes / 1024 / 1024 / 1024
-  max_bytes = prefix_cache_entries_num * value.prefix_size_bytes
-  # TODO(yuyanpeng): test hierarchical cache
-  prefix_cache_inst = prefix_cache.PrefixCache(hbm_bytes=max_bytes, dram_bytes=max_bytes)
-  common_len = int(prefill_length * common_prefix_proportion)
-  remain_len = prefill_length - common_len
-  common_prefix_key = tuple(i for i in range(common_len))
-
-  # Fill the prefix caching
-  new_value_list = []
-  for c_idx in range(prefix_cache_entries_num):
-    # Add 100 to make sure filled prefix caching will not share the common_prefix_key.
-    # The later save prefix part will evict all of them.
-    key = tuple(100 + i + c_idx * prefill_length for i in range(prefill_length))
-    new_value = clone_value()
-    prefix_cache_inst.save(key, new_value)
-    new_value_list.append(new_value)
-  jax.block_until_ready(new_value_list)
-  del new_value_list
-
-  # Save prefix
-  new_value = None
-  save_sec = 0
-  for c_idx in range(iters):
-    key = common_prefix_key + tuple(i + c_idx * remain_len for i in range(remain_len))
-    # values are not relevant for caching now, just clone the same tokens and values for test
-    new_value = clone_value()
-    jax.block_until_ready(new_value)
-    start = datetime.datetime.now()
-    prefix_cache_inst.save(key, new_value)
-    end = datetime.datetime.now()
-    save_sec += (end - start).total_seconds()
-  del new_value
-  save_avg_ms = save_sec * 1000 / iters
-
-  # Fetch longest prefix key
-  key_load = common_prefix_key + tuple(i + prefix_cache_entries_num * remain_len for i in range(remain_len))
-  matched_key = None
-  fetch_sec = 0
-  for _ in range(iters):
-    start = datetime.datetime.now()
-    matched_key = prefix_cache_inst.fetch_longest_common_prefix_key(key_load)
-    end = datetime.datetime.now()
-    fetch_sec += (end - start).total_seconds()
-  fetch_avg_ms = fetch_sec * 1000 / iters
-
-  assert matched_key is not None
-
-  # Load prefix
-  load_sec = 0
-  value_load = None
-  for _ in range(iters):
-    start = datetime.datetime.now()
-    loaded_value = prefix_cache_inst.load(matched_key)
-    jax.block_until_ready(loaded_value)
-    end = datetime.datetime.now()
-    load_sec += (end - start).total_seconds()
-  del value_load
-  load_avg_ms = load_sec * 1000 / iters
-
-  print(
-      f"PrefixCaching results:\n"
-      f"\tPer prefix size bytes: {prefix_size_bytes_gb:.3f} GB\n"
-      f"\tAverage save cache time: {save_avg_ms:.3f} ms\n"
-      f"\tAverage fetch longest prefix time: {fetch_avg_ms:.3f} ms\n"
-      f"\tAverage load cache time: {load_avg_ms:.3f} ms\n\n\n"
-  )
-  del prefix_cache_inst
 
 
 def prefill_benchmark_loop(engine_prefill, params, tokens, true_length, iters, num_samples: int | None = None):
@@ -183,7 +69,9 @@ def prefill_benchmark(config, engine_prefill, params, tokens, true_length, num_m
   print(f"Prefill benchmark results for length {tokens.size}:\n")
   time_in_s = prefill_benchmark_loop(engine_prefill, params, tokens, true_length, iters)
   prefill_average_ms = 1000 * time_in_s / iters
-  prefill_tflops_per_device, _, _ = maxtext_utils.calculate_prefill_tflops_per_device(num_model_params, tokens.size, config)
+  prefill_tflops_per_device, _, _ = maxtext_utils.calculate_prefill_tflops_per_device(
+      num_model_params, tokens.size, config
+  )
   tflops_per_sec_per_device = prefill_tflops_per_device / prefill_average_ms * 1000.0
   print(
       f"\tPrefill step average time: {prefill_average_ms:.3f} ms\n"
@@ -215,7 +103,8 @@ def prefill_multisampling_benchmark(config, engine_prefill_multisampling, params
     time_in_s = prefill_benchmark_loop(engine_prefill_multisampling, params, tokens, true_length, iters, num_samples)
     multisampling_prefill_average_ms = 1000 * time_in_s / iters
     print(
-        f"\nNum samples: {num_samples}\n" f"\tPrefill step average time: {multisampling_prefill_average_ms:.3f} ms\n\n\n\n"
+        f"\nNum samples: {num_samples}\n"
+        f"\tPrefill step average time: {multisampling_prefill_average_ms:.3f} ms\n\n\n\n"
     )
     result_dict[num_samples] = {
         "time_in_ms": multisampling_prefill_average_ms,
@@ -231,9 +120,9 @@ def prefill_insert_benchmark_loop(
   prof.activate(optional_postfix=profile_name)
   start = datetime.datetime.now()
   rng = jax.random.PRNGKey(1234)
+  rng, _ = jax.random.split(rng)
   for i in range(iters):
-    rng, rng_prefill = jax.random.split(rng)
-    decode_state = engine_insert(tokens, true_length, rng_prefill, decode_state, int(i % total_slots), params)
+    _, decode_state = engine_insert(params, tokens, int(i % total_slots), true_length, decode_state, rng)
   jax.block_until_ready(decode_state)
   end = datetime.datetime.now()
   prof.deactivate()
@@ -243,14 +132,22 @@ def prefill_insert_benchmark_loop(
 def prefill_insert_benchmark(config, engine_insert, decode_state, params, total_slots, tokens, true_length, iters):
   """Handles warmup, running insert benchmark, and printing results."""
   rng = jax.random.PRNGKey(1234)
+  rng, _ = jax.random.split(rng)
   for i in range(_WARMUP_ITERS):
-    rng, rng_prefill = jax.random.split(rng)
-    decode_state = engine_insert(tokens, true_length, rng_prefill, decode_state, int(i % total_slots), params)
+    _, decode_state = engine_insert(params, tokens, int(i % total_slots), true_length, decode_state, rng)
   jax.block_until_ready(decode_state)
 
   print(f"Prefill and insert benchmark results for length {tokens.size}:\n")
   time_in_s, decode_state = prefill_insert_benchmark_loop(
-      config, engine_insert, decode_state, params, total_slots, tokens, true_length, iters, f"prefill_insert_{tokens.size}"
+      config,
+      engine_insert,
+      decode_state,
+      params,
+      total_slots,
+      tokens,
+      true_length,
+      iters,
+      f"prefill_insert_{tokens.size}",
   )
   prefill_insert_average_ms = time_in_s / iters * 1000.0
   print(f"\tPrefill + Insert step average time: {prefill_insert_average_ms:.3f} ms\n\n\n\n")
@@ -339,9 +236,14 @@ def write_results(results, filename, flatten_microbenchmark_results):
   if flatten_microbenchmark_results:
     results["flattened_results"] = flatten_dict(results)
   if filename:
-    with open(filename, "w", encoding="utf-8") as f:
+    with open(filename, "wt", encoding="utf-8") as f:
       json.dump(results, f, indent=2)
   return results
+
+
+def upload_results_to_gcs(results_file_name, destination_gcs_name):
+  """Upload the results file to destination GCS bucket."""
+  gcs_utils.upload_blob(destination_gcs_name, results_file_name)
 
 
 def print_results_for_analyze(results):
@@ -398,6 +300,7 @@ def summarize_prefill_result(engine_prefill, params, tokens, true_length):
 def run_benchmarks(config):
   """Run microbenchmarks."""
   engine = maxengine.MaxEngine(config)
+  prefill_processor = prefill_packing.PrefillProcessor(engine)
   rng = jax.random.PRNGKey(1234)
   rng, rng_load_params = jax.random.split(rng)
   params = engine.load_params(rng_load_params)
@@ -441,34 +344,11 @@ def run_benchmarks(config):
           ).lower(params, key_shape, i32_scalar, rng_shape)
       ).compile(compiler_options=None)
 
-      prefill_insert_executable[prefill_length] = (
-          jax.jit(
-              engine.prefill_insert,
-              in_shardings=(None, None, None, engine.decode_state_layouts, None, engine.param_layouts),
-              out_shardings=(engine.decode_state_layouts),
-              donate_argnames=("decode_state",),
-          ).lower(key_shape, i32_scalar, rng_shape, engine.decode_state_shapes, i32_scalar, params)
-      ).compile(compiler_options=None)
+      prefill_insert_executable[prefill_length] = prefill_processor.aot_compile(params, prefill_length)
 
       benchmark_results["prefill-result-sizes"][prefill_length] = summarize_prefill_result(
           prefill_executable[prefill_length], params, prefill_tokens[prefill_length], prefill_true_lengths[prefill_length]
       )
-
-    if "prefix_cache" in stages_to_benchmark:
-      for prefill_length in prefill_lengths:
-        rng_cache = jax.random.PRNGKey(1234)
-        prefill_result, _ = prefill_executable[prefill_length](
-            params, prefill_tokens[prefill_length], prefill_true_lengths[prefill_length], rng_cache
-        )
-        prefix_cache_benchmark(
-            prefill_result,
-            prefill_length,
-            prefill_true_lengths[prefill_length],
-            config.inference_microbenchmark_prefix_cache_common_prefix_proportion,
-            config.inference_microbenchmark_prefix_cache_entries_num,
-            benchmark_loop_iters,
-        )
-        del prefill_result
 
     for prefill_length in prefill_lengths:
       benchmark_results["prefill"][prefill_length] = prefill_benchmark(
@@ -544,12 +424,25 @@ def run_benchmarks(config):
         filename=config.inference_microbenchmark_log_file_path,
         flatten_microbenchmark_results=_FLATTEN_MICROBENCHMARK_RESULTS,
     )
+  if config.gcs_metrics:
+    metrics_filename = f"{config.run_name}_results.txt"
+    write_results(
+        results,
+        filename=metrics_filename,
+        flatten_microbenchmark_results=_FLATTEN_MICROBENCHMARK_RESULTS,
+    )
+    gcs_filename = os.path.join(config.base_output_directory, metrics_filename)
+    upload_results_to_gcs(metrics_filename, gcs_filename)
   return results
 
 
-def main(argv):
+def run_benchmarks_with_unsafe_rbg(config, **kwargs):
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
-  run_benchmarks(pyconfig.initialize(argv))
+  return run_benchmarks(pyconfig.initialize(config, **kwargs))
+
+
+def main(config, **kwargs):
+  json.dump(run_benchmarks_with_unsafe_rbg(config, **kwargs), sys.stdout)
 
 
 if __name__ == "__main__":

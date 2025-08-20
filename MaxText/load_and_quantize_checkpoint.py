@@ -1,10 +1,10 @@
-# Copyright 2025 Google LLC
+# Copyright 2023–2025 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+#    https://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -14,16 +14,16 @@
 
 """CLI utility for loading and quantizing a checkpoint."""
 
+import os
+from typing import Sequence
+
+from absl import app
+
 import jax
 
 from MaxText import max_utils
 from MaxText import maxengine
-
-import os
 from MaxText import pyconfig
-
-from typing import Sequence
-from absl import app
 
 
 def main(argv: Sequence[str]) -> None:
@@ -46,7 +46,9 @@ def main(argv: Sequence[str]) -> None:
 
 
 def validate_config(config):
-  assert config.load_full_state_path == "", "Operation on full states not supported! Convert to parameter checkpoint first."
+  assert (
+      config.load_full_state_path == ""
+  ), "Operation on full states not supported! Convert to parameter checkpoint first."
 
 
 if __name__ == "__main__":

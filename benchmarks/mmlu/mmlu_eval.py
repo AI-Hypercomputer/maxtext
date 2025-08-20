@@ -1,10 +1,10 @@
-# Copyright 2025 Google LLC
+# Copyright 2023–2025 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+#    https://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -13,29 +13,32 @@
 # limitations under the License.
 
 """This is a simple script for MMLU benchmark for a trained checkpoint.
+Dataset: https://huggingface.co/datasets/lighteval/mmlu
 
 To get optimal performance the prompt template needs to be adjusted (e.g. CoT or 5-shot prompt) per model.
 
 
 To run the MMLU benchmark:
-python3 -m MaxText.benchmarks.mmlu.mmlu_eval MaxText/configs/base.yml \
+# Default is zero-shot prompting
+python3 -m benchmarks.mmlu.mmlu_eval MaxText/configs/base.yml \
   tokenizer_path=assets/tokenizer_llama3.tiktoken \
   load_parameters_path=check_point_path model_name=llama3.1-8b \
-  max_prefill_predict_length=1024 max_target_length=2048 ici_tensor_parallelism=4  per_device_batch_size=1
+  max_prefill_predict_length=1024 max_target_length=2048 ici_tensor_parallelism=4 per_device_batch_size=1
 
 # Example of using the prompt_template flag for Chain-of-Thought (CoT) prompting:
-python3 -m MaxText.benchmarks.mmlu.mmlu_eval MaxText/configs/base.yml \
+python3 -m benchmarks.mmlu.mmlu_eval MaxText/configs/base.yml \
   tokenizer_path=assets/tokenizer_llama3.tiktoken \
   load_parameters_path=check_point_path model_name=llama3.1-8b \
   max_prefill_predict_length=1024 max_target_length=2048 ici_tensor_parallelism=4 per_device_batch_size=1 \
-  prompt_template="The following are multiple choice questions (with answers) about {subject}.\n\n{question}\n{choices}\nAnswer: Let's think step by step."
+  prompt_template="The following are multiple choice questions (with answers) about {subject}.\n\n{question}\n
+  {choices}\nAnswer: Let's think step by step."
 
 # Example of using the prompt_template flag for 5-shot prompting (replace with actual examples):
-python3 -m MaxText.benchmarks.mmlu.mmlu_eval MaxText/configs/base.yml \
+python3 -m benchmarks.mmlu.mmlu_eval MaxText/configs/base.yml \
   tokenizer_path=assets/tokenizer_llama3.tiktoken \
   load_parameters_path=check_point_path model_name=llama3.1-8b \
   max_prefill_predict_length=1024 max_target_length=2048 ici_tensor_parallelism=4 per_device_batch_size=1 \
-  prompt_template='Example 1:\nQuestion: What is the capital of France?\nChoices:\nA. London\nB. Paris\nC. Rome\nD. Berlin\nAnswer: B\n\nExample 2:\nQuestion: What is the highest mountain in the world?\nChoices:\nA. K2\nB. Kangchenjunga\nC. Mount Everest\nD. Lhotse\nAnswer: C\n\nExample 3:\nQuestion: What is the chemical symbol for water?\nChoices:\nA. H2O\nB. CO2\nC. O2\nD. NaCl\nAnswer: A\n\nExample 4:\nQuestion: Who painted the Mona Lisa?\nChoices:\nA. Michelangelo\nB. Leonardo da Vinci\nC. Raphael\nD. Donatello\nAnswer: B\n\nExample 5:\nQuestion: Which planet is known as the Red Planet?\nChoices:\nA. Venus\nB. Mars\nC. Jupiter\nD. Saturn\nAnswer: B\n\nThe following are multiple choice questions (with answers) about {subject}.\n\n{question}\n{choices}\nAnswer:'
+  prompt_template='Example 1:\nQuestion: What is the capital of France?\nChoices:\nA. London\nB. Paris\nC. Rome\nD. Berlin\nAnswer: B\n\nExample 2:\nQuestion: What is the highest mountain in the world?\nChoices:\nA. K2\nB. Kangchenjunga\nC. Mount Everest\nD. Lhotse\nAnswer: C\n\nExample 3:\nQuestion: What is the chemical symbol for water?\nChoices:\nA. H2O\nB. CO2\nC. O2\nD. NaCl\nAnswer: A\n\nExample 4:\nQuestion: Who painted the Mona Lisa?\nChoices:\nA. Michelangelo\nB. Leonardo da Vinci\nC. Raphael\nD. Donatello\nAnswer: B\n\nExample 5:\nQuestion: Which planet is known as the Red Planet?\nChoices:\nA. Venus\nB. Mars\nC. Jupiter\nD. Saturn\nAnswer: B\n\nThe following are multiple choice questions (with answers) about {subject}.\n\n{question}\n{choices}\nAnswer:'   # pylint: disable=line-too-long
 """
 
 import collections
@@ -43,16 +46,20 @@ import re
 import sys
 
 from absl import flags
+
 import datasets
+
 import jax
+
+from benchmarks.mmlu.mmlu_categories import categories
+from benchmarks.mmlu.mmlu_categories import subcategories
+
+from tqdm import tqdm
+
+from MaxText import pyconfig
 from MaxText import max_logging
 from MaxText import max_utils
 from MaxText import maxengine
-from mmlu_categories import categories
-from mmlu_categories import subcategories
-from MaxText import pyconfig
-from tqdm import tqdm
-
 
 ASCII_UPPERCASE_A = ord("A")  # ASCII value for uppercase 'A'
 
@@ -154,6 +161,12 @@ def main(config):
     # Convert the label index to the corresponding letter
     correct_answer = chr(65 + label)
 
+    # Log answer
+    max_logging.log(
+        f"{total_count + 1} | {prompt}\n[Model output] {output}\n"
+        f"[Correct answer] {correct_answer}, Matching: {predicted_answer == correct_answer}"
+    )
+
     # Update accuracy for overall and per-subject
     if predicted_answer == correct_answer:
       correct_count += 1
@@ -162,7 +175,7 @@ def main(config):
     subject_total[subject] += 1
 
     if idx % 50 == 0:
-      max_logging.log(f" Accuracy: {correct_count / total_count:.4f}")
+      max_logging.log(f" Accuracy: {correct_count / total_count:.4f} | Processed: {total_count}/{len(mmlu_test_ds)}")
 
   # Final accuracy
   if total_count > 0:

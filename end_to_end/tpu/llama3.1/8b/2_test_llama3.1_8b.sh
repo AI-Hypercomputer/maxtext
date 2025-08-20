@@ -1,6 +1,7 @@
 #!/bin/bash
 
 # This file is both an integration test that runs once a day on a v5p-8 and documentation for how to get started with LLama3.1-8b. 
+# Additionally, this file serves as integration test for context parallelism for training in TPUs in MaxText
 # Please make sure you have run end_to_end/tpu/llama3.1/8b/1_test_llama3.1_8b.sh before running commands from this file. 
 
 # The flow of this file is as follows:
@@ -49,10 +50,12 @@ python3 -m MaxText.decode MaxText/configs/base.yml tokenizer_path=assets/tokeniz
 
 # Alternatively, we skip to running finetuning by using the scanned converted checkpoint located at `CONVERTED_CHECKPOINT`. Again, we use it by specifying`load_parameters_path=${CONVERTED_CHECKPOINT}`. Note that scanned checkpoint helps with efficient finetuning
 export FINETUNE_RUN_NAME=runner_finetune
-python3 -m MaxText.train MaxText/configs/base.yml base_output_directory=${BASE_OUTPUT_PATH} dataset_path=${DATASET_PATH} tokenizer_path=assets/tokenizer_llama3.tiktoken tokenizer_type=tiktoken load_parameters_path=${CONVERTED_CHECKPOINT} per_device_batch_size=1 run_name=${FINETUNE_RUN_NAME} steps=10 async_checkpointing=false model_name=${MODEL_VARIATION} checkpoint_period=5
+# We run this with context parallelism and the `ici_context_parallelism` flag as an integration test for context parallelism
+python3 -m MaxText.train MaxText/configs/base.yml base_output_directory=${BASE_OUTPUT_PATH} dataset_path=${DATASET_PATH} tokenizer_path=assets/tokenizer_llama3.tiktoken tokenizer_type=tiktoken load_parameters_path=${CONVERTED_CHECKPOINT} per_device_batch_size=1 run_name=${FINETUNE_RUN_NAME} ici_context_parallelism=4 steps=10 async_checkpointing=false model_name=${MODEL_VARIATION} checkpoint_period=5 packing=false
 
 # We also test whether the forward pass logits match the golden logits for LLama3.1-8B
-python3 -m MaxText.tests.forward_pass_logit_checker MaxText/configs/base.yml base_output_directory=${BASE_OUTPUT_PATH} tokenizer_path=assets/tokenizer_llama3.tiktoken tokenizer_type=tiktoken load_parameters_path=${UNSCANNED_CKPT_PATH} run_name=forward_pass_test per_device_batch_size=1 model_name=${MODEL_VARIATION} max_prefill_predict_length=4 max_target_length=4 dataset_type=synthetic dtype=float32 activations_in_float32=true matmul_precision=float32 async_checkpointing=false scan_layers=false  --max_kl_div=1e-4
+# We run this with context parallelism and the `ici_context_parallelism` flag as an integration test for context parallelism
+python3 -m MaxText.tests.forward_pass_logit_checker MaxText/configs/base.yml base_output_directory=${BASE_OUTPUT_PATH} tokenizer_path=assets/tokenizer_llama3.tiktoken tokenizer_type=tiktoken load_parameters_path=${UNSCANNED_CKPT_PATH} run_name=forward_pass_test per_device_batch_size=1 ici_context_parallelism=4 model_name=${MODEL_VARIATION} max_prefill_predict_length=4 max_target_length=4 dataset_type=synthetic dtype=float32 activations_in_float32=true matmul_precision=float32 async_checkpointing=false scan_layers=false  --max_kl_div=1e-4
 
 # Converting MaxText orbax checkpoint to HF
 JAX_PLATFORMS=cpu python3 -m MaxText.llama_mistral_mixtral_orbax_to_hf MaxText/configs/base.yml base_output_directory=gs://runner-maxtext-logs load_parameters_path=${CONVERTED_CHECKPOINT} run_name=convert_to_hf model_name=${MODEL_VARIATION} hf_model_path=/tmp/hf_llama3_1
@@ -60,4 +63,5 @@ JAX_PLATFORMS=cpu python3 -m MaxText.llama_mistral_mixtral_orbax_to_hf MaxText/c
 # Installing torch for running forward pass of a Huggingface checkpoint
 python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 # Test whether the forward pass logits match the golden logits for Huggingface checkpoint converted from MaxText orbax checkpoint
-python3 -m MaxText.tests.forward_pass_logit_checker MaxText/configs/base.yml base_output_directory=${BASE_OUTPUT_PATH} tokenizer_path=assets/tokenizer_llama3.tiktoken tokenizer_type=tiktoken load_parameters_path=${UNSCANNED_CKPT_PATH} run_name=forward_pass_test_hf per_device_batch_size=1 model_name=${MODEL_VARIATION} max_prefill_predict_length=3 max_target_length=4 dataset_type=synthetic dtype=float32 activations_in_float32=true matmul_precision=float32 async_checkpointing=false scan_layers=false --hf_model_path=/tmp/hf_llama3_1 --max_kl_div=1e-4
+# We run this with context parallelism and the `ici_context_parallelism` flag as an integration test for context parallelism
+python3 -m MaxText.tests.forward_pass_logit_checker MaxText/configs/base.yml base_output_directory=${BASE_OUTPUT_PATH} tokenizer_path=assets/tokenizer_llama3.tiktoken tokenizer_type=tiktoken load_parameters_path=${UNSCANNED_CKPT_PATH} run_name=forward_pass_test_hf per_device_batch_size=1 ici_context_parallelism=4 model_name=${MODEL_VARIATION} max_prefill_predict_length=3 max_target_length=4 dataset_type=synthetic dtype=float32 activations_in_float32=true matmul_precision=float32 async_checkpointing=false scan_layers=false --hf_model_path=/tmp/hf_llama3_1 --max_kl_div=1e-4

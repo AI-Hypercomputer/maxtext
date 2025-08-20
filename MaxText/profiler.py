@@ -1,32 +1,31 @@
-"""
-Copyright 2024 Google LLC
+# Copyright 2023–2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
+"""Dispatch to the chosen profiler."""
 
-     https://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-"""
-
-"""Dispatch to the chosen profiler"""
 from ctypes import cdll
 import os
 import subprocess
 import shutil
 
-from MaxText import max_logging
-
 import jax
+
+from MaxText import max_logging
 
 
 class Profiler:
-  """Activate/deactivate a profiler based on the 'profiler' config"""
+  """Activate/deactivate a profiler based on the 'profiler' config."""
 
   def __init__(self, config, offset_step=0):
     self.libcudart = None
@@ -39,10 +38,22 @@ class Profiler:
     self.profile_period = config.profile_periodically_period
     self.start_initial_profile_step = self._set_first_profiler_step(config.skip_first_n_steps_for_profiler, offset_step)
     self.finished_initial_profile_step = self._set_last_profiler_step(config.profiler_steps, config.steps)
+    if config.profiler != "" and self.start_initial_profile_step >= config.steps:
+      raise ValueError("Profiling requested but initial profiling step set past training final step")
+
+  def maybe_activate_profiler(self, step, state):
+    """Conditionally activates the profiler based on the current step.
+    This method checks if the current training step matches the step designated
+    for starting an initial profile, or if it meets the criteria for
+    activating a new periodic profile.
+    """
+    if self.mode != "" and (step == self.start_initial_profile_step or self.should_activate_periodic_profile(step)):
+      optional_postfix = f"step_{step}" if self.profile_period > 0 else ""
+      self.activate(blocking_object=state, optional_postfix=optional_postfix)
 
   def activate(self, blocking_object=None, optional_postfix=""):
     """Start the profiler.
-    nsys profiler becomes no-op when libcudart.so is not available on the system"""
+    nsys profiler becomes no-op when libcudart.so is not available on the system."""
     if self.profile_cleanly and blocking_object is not None:
       jax.block_until_ready(blocking_object)
     if not (self.upload_all_profiler_results or jax.process_index() == 0):
@@ -59,9 +70,18 @@ class Profiler:
     elif self.mode == "xplane":
       jax.profiler.start_trace(self.output_path)
 
+  def maybe_deactivate_profiler(self, step, state):
+    """Conditionally deactivates the profiler based on the current step.
+    This method checks if the current training step matches the step designated
+    for finishing the initial profile, or if it meets the criteria for
+    deactivating a periodic profile.
+    """
+    if self.mode != "" and (step == self.finished_initial_profile_step or self.should_deactivate_periodic_profile(step)):
+      self.deactivate(blocking_object=state)
+
   def deactivate(self, blocking_object=None):
     """End the profiler.
-    The result is uploaded to the output bucket"""
+    The result is uploaded to the output bucket."""
     if self.profile_cleanly and blocking_object is not None:
       jax.block_until_ready(blocking_object)
     if not (self.upload_all_profiler_results or jax.process_index() == 0):
@@ -91,3 +111,6 @@ class Profiler:
 
   def should_deactivate_periodic_profile(self, step):
     return self.profile_period > 0 and (step - self.finished_initial_profile_step) % self.profile_period == 0
+
+  def post_process(self):
+    pass
