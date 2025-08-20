@@ -844,7 +844,7 @@ class Attention(nnx.Module):
     if model_mode == MODEL_MODE_PREFILL:
       inputs_q = self.sharding.shard(inputs_q, t="inputs_q", a=self.prefill_input_axis_names, tt=ACT)
       inputs_kv = self.sharding.shard(inputs_kv, t="inputs_kv", a=self.prefill_input_axis_names, tt=ACT)
-    elif model_mode = MODEL_MODE_ TRAIN and ep_ctx:
+    elif model_mode == MODEL_MODE_TRAIN and ep_ctx:
       inputs_q = self.sharding.shard(inputs_q, t="inputs_q", a=self.ep_input_axis_names, tt=ACT, ep_ctx=ep_ctx)
       inputs_kv = self.sharding.shard(inputs_kv, t="inputs_kv", a=self.ep_input_axis_names, tt=ACT, ep_ctx=ep_ctx)
     elif model_mode == MODEL_MODE_TRAIN:

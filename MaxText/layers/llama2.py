@@ -142,7 +142,7 @@ class LlamaDecoderLayer(nn.Module):
         epsilon=cfg.normalization_layer_epsilon,
         sharding=sharding,
     )(intermediate_inputs)
-    hidden_states = nn.with_logical_constraint(hidden_states, t="hidden", a=activation_axis_names, tt=ACT)
+    hidden_states = sharding.shard(hidden_states, t="hidden", a=activation_axis_names, tt=ACT)
 
     # MLP block.
     mlp_lnx = mlp_block(
