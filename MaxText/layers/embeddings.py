@@ -242,6 +242,7 @@ class RotaryEmbedding(nnx.Module):
       fprop_dtype: DType = jnp.bfloat16,
       # Not used in RotaryEmbedding but passed in by nnx.bridge.to_linen.
       # TODO: Remove when bridge no longer needed
+      rope_linear_scaling_factor: float = 1.0,
       rngs: nnx.Rngs = None,
   ):
     """Initializes the RotaryEmbedding module.
@@ -261,6 +262,7 @@ class RotaryEmbedding(nnx.Module):
     self.embedding_dims = embedding_dims
     self.cast_as_fprop_dtype = cast_as_fprop_dtype
     self.fprop_dtype = fprop_dtype
+    self.rope_linear_scaling_factor = rope_linear_scaling_factor
 
     if self.embedding_dims % 2:
       raise ValueError("Embedding dim for rotary position embedding must be a multiple of 2.")
@@ -270,7 +272,10 @@ class RotaryEmbedding(nnx.Module):
     """Returns the timescale for the rotary embedding."""
     half_embedding_dim = self.embedding_dims // 2
     fraction = 2 * jnp.arange(0, half_embedding_dim) / self.embedding_dims
-    return self.min_timescale * (self.max_timescale / self.min_timescale) ** fraction
+    timescale = self.min_timescale * (self.max_timescale / self.min_timescale) ** fraction
+    if self.rope_linear_scaling_factor != 1.0:
+      timescale = timescale * self.rope_linear_scaling_factor
+    return timescale
 
   def __call__(
       self,  # pytype: disable=signature-mismatch  # overriding-parameter-count-checks
@@ -448,9 +453,7 @@ class LLaMARotaryEmbedding(RotaryEmbedding):
     if len(inputs.shape) != 4:
       raise ValueError("Input is assumed to be a rank 4 tensor of shape [B, S, N, H].")
     if self.embedding_dims != inputs.shape[3]:
-      raise ValueError(
-          "The embedding dims of the rotary position embedding must match the hidden dimension of the inputs."
-      )
+      raise ValueError("The embedding dims of the rotary position embedding must match the hidden dimension of the inputs.")
 
     # Shift the inputs left and right as per LLaMA's specific behavior
     inputs_shifted_left = jnp.concatenate([inputs[..., 1:], inputs[..., :1]], axis=-1)
@@ -649,9 +652,7 @@ class YarnRotaryEmbedding(nnx.Module):
     if len(inputs.shape) != 4:
       raise ValueError("Input is assumed to be a rank 4 tensor of shape [batch, sequence, heads, dims].")
     if self.embedding_dims != inputs.shape[3]:
-      raise ValueError(
-          "The embedding dims of the rotary position embedding must match the hidden dimension of the inputs."
-      )
+      raise ValueError("The embedding dims of the rotary position embedding must match the hidden dimension of the inputs.")
 
     # Determine positions if not provided
     if position is None:
