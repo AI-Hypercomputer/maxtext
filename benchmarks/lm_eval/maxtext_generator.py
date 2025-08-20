@@ -130,6 +130,9 @@ class MaxTextGenerator:
         target_length = getattr(self.config, "max_target_length", 2048)
         prefill_length = getattr(self.config, "max_prefill_predict_length", 1024)
 
+        # If temperature is passed, we use weighted sampling.
+        sampling_algorithm = "weighted" if temperature is not None else None
+
         # Guard: max_tokens counts ALL generated tokens (incl. prefill one)
         if max_tokens is not None and max_tokens <= 0:
             return [Completion(index=i, text="", logprobs=None) for i in range(_NUM_STREAMS)]
@@ -170,6 +173,8 @@ class MaxTextGenerator:
                 rng=rng_prefill,
                 slot=i,
                 return_prompt_logp=want_prompt_logp,
+                temperature=temperature,
+                algorithm=sampling_algorithm,
             )
             prefill_results_to_insert[i] = prefill_result
 
@@ -205,7 +210,13 @@ class MaxTextGenerator:
                 break
 
             self.rng, rng_generate = jax.random.split(self.rng)
-            decode_state, _sampled_tokens = self.engine.generate(self.params, decode_state, rng=rng_generate)
+            decode_state, _sampled_tokens = self.engine.generate(
+                self.params,
+                decode_state,
+                rng=rng_generate,
+                temperature=temperature,
+                algorithm=sampling_algorithm,
+            )
 
             # Pull ids/logps directly from decode_state
             # tokens shape [batch,1]; token_logp shape [batch,1] (if enabled)
@@ -354,9 +365,10 @@ if __name__ == "__main__":
         ]
 
     # Generation config
-    max_tokens = 32          # counts ALL generated tokens (includes prefill's 1st token)
+    max_tokens = 16          # counts ALL generated tokens (includes prefill's 1st token)
     echo = True             # include prompt tokens in text/logprobs if True
     want_logprobs = 5        # non-None triggers logprob collection; top_logprobs left None for now
+    temperature = 1.5
 
     print(f"\n--- Starting Batch Generation for {len(prompts_to_run)} Prompts "
           f"(max_tokens={max_tokens}, echo={echo}) ---")
@@ -367,6 +379,7 @@ if __name__ == "__main__":
         max_tokens=max_tokens,
         logprobs=want_logprobs,
         echo=echo,
+        temperature=temperature
     )
 
     print("--- Batch Generation Complete ---")

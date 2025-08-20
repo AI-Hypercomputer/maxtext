@@ -397,7 +397,9 @@ class MaxEngine(engine_api.Engine):
         rng=rng,
     )
 
-  @functools.partial(jax.jit, static_argnums=(0,), static_argnames=("return_prompt_logp",))
+  @functools.partial(
+      jax.jit, static_argnums=(0,), static_argnames=("return_prompt_logp", "algorithm")
+  )
   def _prefill_jit(
       self,
       *,
@@ -411,6 +413,10 @@ class MaxEngine(engine_api.Engine):
       slot: Optional[int] = None,
       page_state: Optional[PageState] = None,
       return_prompt_logp: bool = False,
+      algorithm: Optional[str] = None,
+      topk: Optional[int] = None,
+      nucleus_topp: Optional[float] = None,
+      temperature: Optional[float] = None,
   ) -> Tuple[Prefix, engine_api.ResultTokens]:
     """Computes a kv-cache for a new generate request.
 
@@ -492,10 +498,10 @@ class MaxEngine(engine_api.Engine):
     first_generated_token = inference_utils.sampling(
         selected_logits,
         new_rng,
-        self.config.decode_sampling_strategy,
-        topk=self.config.decode_sampling_top_k,
-        nucleus_topp=self.config.decode_sampling_nucleus_p,
-        temperature=self.config.decode_sampling_temperature,
+        algorithm if algorithm is not None else self.config.decode_sampling_strategy,
+        topk=topk if topk is not None else self.config.decode_sampling_top_k,
+        nucleus_topp=nucleus_topp if nucleus_topp is not None else self.config.decode_sampling_nucleus_p,
+        temperature=temperature if temperature is not None else self.config.decode_sampling_temperature,
     )
 
     all_valid = jnp.ones(first_generated_token.shape, dtype=jnp.int8)
@@ -544,6 +550,10 @@ class MaxEngine(engine_api.Engine):
       request_id: Optional[uuid.UUID] = None,  # pylint: disable=unused-argument
       slot: Optional[int] = None,
       return_prompt_logp: bool = False,
+      algorithm: Optional[str] = None,
+      topk: Optional[int] = None,
+      nucleus_topp: Optional[float] = None,
+      temperature: Optional[float] = None,
   ) -> Tuple[Prefix, engine_api.ResultTokens]:
     """Public API for prefill that updates page state outside JIT."""
     # Update page state before JIT call
@@ -572,6 +582,10 @@ class MaxEngine(engine_api.Engine):
         slot=slot,
         rng=rng,
         return_prompt_logp=return_prompt_logp,
+        algorithm=algorithm,
+        topk=topk,
+        nucleus_topp=nucleus_topp,
+        temperature=temperature,
     )
 
   def prefill_multisampling_aot(  # pylint: disable=too-many-positional-arguments
@@ -848,6 +862,10 @@ class MaxEngine(engine_api.Engine):
       decode_state: DecodeState,
       sampler: Optional[Callable[[Any], Any]] = None,  # pylint: disable=unused-argument
       rng: Optional[PRNGKeyType] = None,
+      algorithm: Optional[str] = None,
+      topk: Optional[int] = None,
+      nucleus_topp: Optional[float] = None,
+      temperature: Optional[float] = None,
   ) -> Tuple[DecodeState, engine_api.ResultTokens]:
     """Public API for generate that updates page state outside JIT."""
 
@@ -868,11 +886,15 @@ class MaxEngine(engine_api.Engine):
         sampler=sampler,
         page_state=self.page_state,
         rng=rng,
+        algorithm=algorithm,
+        topk=topk,
+        nucleus_topp=nucleus_topp,
+        temperature=temperature,
     )
 
     return max_utils.unbox_logicallypartioned(new_state), result
 
-  @functools.partial(jax.jit, static_argnums=(0,), donate_argnums=(2,))
+  @functools.partial(jax.jit, static_argnums=(0,), donate_argnums=(2,), static_argnames=("algorithm",))
   def _generate_jit(
       self,
       params: Params,
@@ -881,6 +903,10 @@ class MaxEngine(engine_api.Engine):
       sampler: Optional[Callable[[Any], Any]] = None,  # pylint: disable=unused-argument
       rng: Optional[PRNGKeyType] = None,
       page_state: Optional[PageState] = None,
+      algorithm: Optional[str] = None,
+      topk: Optional[int] = None,
+      nucleus_topp: Optional[float] = None,
+      temperature: Optional[float] = None,
   ) -> Tuple[DecodeState, engine_api.ResultTokens]:
     """Run one generate step"""
 
@@ -905,10 +931,10 @@ class MaxEngine(engine_api.Engine):
     new_token = inference_utils.sampling(
         out_logits,
         new_rng,
-        self.config.decode_sampling_strategy,
-        topk=self.config.decode_sampling_top_k,
-        nucleus_topp=self.config.decode_sampling_nucleus_p,
-        temperature=self.config.decode_sampling_temperature,
+        algorithm if algorithm is not None else self.config.decode_sampling_strategy,
+        topk=topk if topk is not None else self.config.decode_sampling_top_k,
+        nucleus_topp=nucleus_topp if nucleus_topp is not None else self.config.decode_sampling_nucleus_p,
+        temperature=temperature if temperature is not None else self.config.decode_sampling_temperature,
     )
     all_valid = jnp.ones(new_token.shape, dtype=jnp.int8)
     if self.config.return_log_prob:
