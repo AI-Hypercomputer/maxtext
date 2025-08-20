@@ -31,7 +31,8 @@ class TensorType(enum.Enum):
   WT = "weight"
   CACHE = "cache"
 
-
+# NOTE: these can be used a convenience when calling __call__ or shard but should **not** be used in the case statement
+# of a match expression (where they will be considered a capture pattern and not a constant)
 ACT, WT, CACHE = TensorType
 
 
@@ -45,10 +46,10 @@ def create_mesh(axes: Dict[Axis, int]) -> Mesh:
 class MeshSharding(ABC):
 
   @abstractmethod
-  def get(self, *args: Any, **kwargs) -> tuple[str | None, ...] | None:
+  def __call__(self, *args: Any, **kwargs) -> PartitionSpec:
     pass
 
-  def assert_valid_axes(self, axes: tuple[str, ...]) -> None:
+  def assert_valid_axes(self, axes: PartitionSpec) -> None:
     valid_axis_values = {member.value for member in Axis}
     valid_axes_str = ", ".join(f"'{v}'" for v in valid_axis_values)
 
@@ -70,20 +71,18 @@ class MeshSharding(ABC):
     if not mesh.devices.shape:
       return tensor
 
-    shardings = self.get(*args, **kwargs)
-    # Unpack the tuple to pass them as separate arguments to PartitionSpec
-    spec = PartitionSpec(*shardings)
+    shardings = self(*args, **kwargs)
     with mesh:
-      return jax.lax.with_sharding_constraint(tensor, spec)
+      return jax.lax.with_sharding_constraint(tensor, shardings)
 
 
 class LogicalAxisRulesSharding(MeshSharding):
 
-  def get(self, *args: Any, **kwargs) -> PartitionSpec:
+  def __call__(self, *args: Any, **kwargs) -> PartitionSpec:
     axes = kwargs["a"]
     mesh_axes = logical_to_mesh_axes(axes, get_logical_axis_rules())
     self.assert_valid_axes(mesh_axes)
-    return mesh_axes
+    return mesh_axes  # TODO: consider asserting/raising when an axis comes back as None
 
 
 def create_sharding_rules(sharding_rules_name: str):

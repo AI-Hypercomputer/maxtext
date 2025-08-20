@@ -33,7 +33,7 @@ from MaxText.layers.attentions import attention_as_linen
 from MaxText.layers.quantizations import AqtQuantization as Quant
 from MaxText.layers.normalizations import rms_norm
 from MaxText.common_types import MODEL_MODE_PREFILL
-from MaxText.sharding import create_sharding_rules
+from MaxText.sharding import create_sharding_rules, ACT
 
 
 # -----------------------------------------
@@ -65,12 +65,14 @@ class LlamaDecoderLayer(nn.Module):
     mesh = self.mesh
     sharding = create_sharding_rules(self.config.sharding_rules)
 
+    # FIXME: this logic can be cleaned up when we move off from LogicalAxisRulesSharding after testing, replaced with
+    #       self.sharding.shard(inputs, t="inputs", tt=ACT, mode=model_mode)
     if model_mode == MODEL_MODE_PREFILL:
       activation_axis_names = ("activation_batch", "prefill_activation_norm_length", "activation_embed")
     else:
       activation_axis_names = ("activation_batch", "activation_norm_length", "activation_embed")
 
-    inputs = nn.with_logical_constraint(inputs, activation_axis_names)
+    inputs = sharding.shard(inputs, t='inputs', a=activation_axis_names, tt=ACT)
     inputs = checkpoint_name(inputs, "decoder_layer_input")
     lnx_rms = rms_norm(
         num_features=inputs.shape[-1],

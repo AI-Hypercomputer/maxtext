@@ -30,6 +30,7 @@ from MaxText.common_types import MODEL_MODE_PREFILL, MODEL_MODE_TRAIN, Array, Co
 from MaxText.layers import nnx_wrappers
 from MaxText.layers.initializers import Initializer, default_embed_init, variable_to_logically_partitioned
 from MaxText.sharding import MeshSharding, WT, ACT, LogicalAxisRulesSharding
+from MaxText.layers.llama2_sharding import Llama2TensorShardingTraining, Llama2AxisShardingTraining
 
 _MAX_WAVELENGTH = 10_000
 
@@ -124,11 +125,13 @@ class Embed(nnx.Module):
     self.cast_input_dtype = cast_input_dtype
     self.dtype = dtype
     self.attend_dtype = attend_dtype
-    self.sharding = sharding if sharding else LogicalAxisRulesSharding()
+    # TODO: decide whether to do this or to use what's in config
+    # (i.e. should what's in config drive everything or just the top-level)
+    self.sharding = sharding if sharding else Llama2AxisShardingTraining()  # LogicalAxisRulesSharding()
 
     self.embedding = nnx.Param(
         embedding_init(rngs.params(), (self.num_embeddings, self.num_features), self.config.weight_dtype),
-        sharding=self.sharding.get(t="embedding", a=("vocab", "embed"), tt=WT),
+        sharding=self.sharding(t="embedding", a=("vocab", "embed"), tt=WT),
     )
 
 

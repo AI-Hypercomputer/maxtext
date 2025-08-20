@@ -1030,9 +1030,9 @@ def setup_initial_state(
 
 def get_abstract_state(model, tx, config, rng, mesh, is_training=True):
   """Get a shaped abstraction of the state (including optimizer)"""
-  init_state_partial = functools.partial(init_initial_state, model, tx, config, is_training, rng)
+  init_state_partial = functools.partial(init_initial_state, model, tx, config, is_training, rng)  # TODO: it's overkill to do this with the train state too, maybe? per rafi example
 
-  with nn_partitioning.axis_rules(config.logical_axis_rules):
+  with nn_partitioning.axis_rules(config.logical_axis_rules):  # TODO: this is probably not needed - no-ops when not in context of a mesh (which we are not)
     abstract_state = jax.eval_shape(init_state_partial)
 
   state_logical_annotations = nn.get_partition_spec(abstract_state)

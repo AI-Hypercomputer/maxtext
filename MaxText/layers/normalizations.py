@@ -21,10 +21,12 @@ from flax import nnx
 from jax import lax
 import jax
 import jax.numpy as jnp
+from flax import nnx
 from MaxText import max_logging
 from MaxText import max_utils
 from MaxText.layers import nnx_wrappers
 from MaxText.layers.initializers import Initializer, variable_to_logically_partitioned
+from MaxText.sharding import MeshSharding, LogicalAxisRulesSharding, WT
 
 
 class RMSNorm(nnx.Module):
@@ -41,6 +43,7 @@ class RMSNorm(nnx.Module):
       parameter_memory_host_offload: bool = False,
       *,
       rngs: nnx.Rngs,
+      sharding: MeshSharding | None = None,
   ):
     self.num_features = num_features
     self.epsilon = epsilon
@@ -49,9 +52,14 @@ class RMSNorm(nnx.Module):
     self.kernel_axes = kernel_axes
     self.scale_init = scale_init
     self.parameter_memory_host_offload = parameter_memory_host_offload
+    self.sharding = sharding if sharding else LogicalAxisRulesSharding()
+
     self.scale = nnx.Param(
+        # nnx.with_partitioning(scale_init(rngs.params(), (num_features,), weight_dtype),
+        #                       self.sharding(t="rms_norm", a=kernel_axes, tt=WT))
+        # NOTE: it's displeasing that the axis names are args where the tensor names are not but will suffice for now
         scale_init(rngs.params(), (num_features,), weight_dtype),
-        sharding=kernel_axes,
+        sharding=self.sharding(t="rms_norm", a=kernel_axes, tt=WT),  # kernel_axes,
     )
 
   def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
@@ -78,6 +86,7 @@ def rms_norm(
     scale_init: Initializer = nn.initializers.ones,
     name: Optional[str] = None,
     parameter_memory_host_offload: bool = False,
+    sharding: MeshSharding | None = None,
 ):
   """Creates a RMSNorm module."""
   module = nnx_wrappers.to_linen(
@@ -91,5 +100,6 @@ def rms_norm(
       parameter_memory_host_offload=parameter_memory_host_offload,
       name=name,
       metadata_fn=variable_to_logically_partitioned,
+      sharding=sharding,
   )
   return module
