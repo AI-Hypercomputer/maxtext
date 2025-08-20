@@ -277,6 +277,7 @@ def _posemb_sincos_2d(
     width: int,
     temperature: float = 10_000.0,
     dtype: jnp.dtype = jnp.float32,
+    precision: str = "default",
 ):
   """Follows the MoCo v3 logic."""
   y, x = jnp.mgrid[:h, :w]  # pylint: disable=unpacking-non-sequence
@@ -284,8 +285,8 @@ def _posemb_sincos_2d(
   assert width % 4 == 0, "Width must be mult of 4 for sincos posemb"
   omega = jnp.arange(width // 4) / (width // 4 - 1)
   omega = 1.0 / (temperature**omega)
-  y = jnp.einsum("m,d->md", y.flatten(), omega)
-  x = jnp.einsum("m,d->md", x.flatten(), omega)
+  y = jnp.einsum("m,d->md", y.flatten(), omega, precision=jax.lax.Precision(precision))
+  x = jnp.einsum("m,d->md", x.flatten(), omega, precision=jax.lax.Precision(precision))
   pe = jnp.concatenate([jnp.sin(x), jnp.cos(x), jnp.sin(y), jnp.cos(y)], axis=1)
   return jnp.asarray(pe, dtype)[None, :, :]
 
@@ -297,6 +298,7 @@ class MlpBlockViT(nn.Module):
   dtype_mm: str
   mlp_dim: int | None = None  # Defaults to 4x input dim
   dropout: float = 0.0
+  precision: str = "default"
 
   @nn.compact
   def __call__(self, x: jax.Array, deterministic: bool = True) -> jax.Array:
@@ -304,11 +306,14 @@ class MlpBlockViT(nn.Module):
     inits = {"kernel_init": nn.initializers.xavier_uniform(), "bias_init": nn.initializers.normal(stddev=1e-6)}
 
     d = x.shape[-1]
-    x = nn.Dense(features=self.mlp_dim or 4 * d, dtype=self.dtype_mm, **inits)(x)
+    x = nn.Dense(features=self.mlp_dim or 4 * d, precision=jax.lax.Precision(self.precision), dtype=self.dtype_mm, **inits)(
+        x
+    )
     x = nn.gelu(x)
     x = nn.Dropout(rate=self.dropout)(x, deterministic)
     x = nn.Dense(
         features=d,
+        precision=jax.lax.Precision(self.precision),
         dtype=self.dtype_mm,
         **inits,
     )(x)
@@ -323,6 +328,7 @@ class Encoder1DBlock(nn.Module):
   mlp_dim: int | None = None  # Defaults to 4x input dim
   num_heads: int = 12
   dropout: float = 0.0
+  precision: str = "default"
 
   @nn.compact
   def __call__(self, x: jax.Array, deterministic: bool = True) -> jax.Array:
@@ -331,6 +337,7 @@ class Encoder1DBlock(nn.Module):
     y = nn.MultiHeadDotProductAttention(
         num_heads=self.num_heads,
         kernel_init=nn.initializers.xavier_uniform(),
+        precision=jax.lax.Precision(self.precision),
         deterministic=deterministic,
         dtype=self.dtype_mm,
     )(y, y)
@@ -343,6 +350,7 @@ class Encoder1DBlock(nn.Module):
         mlp_dim=self.mlp_dim,
         dropout=self.dropout,
         dtype_mm=self.dtype_mm,
+        precision=self.precision,
     )(y, deterministic)
     y = nn.Dropout(rate=self.dropout)(y, deterministic)
     x = x + y
@@ -358,7 +366,8 @@ class Encoder(nn.Module):
   mlp_dim: int | None = None  # Defaults to 4x input dim
   num_heads: int = 12
   dropout: float = 0.0
-  scan: bool = False
+  scan: bool = (False,)
+  precision: str = ("default",)
 
   @nn.compact
   def __call__(self, x: jax.Array, deterministic: bool = True) -> jax.Array:
@@ -383,6 +392,7 @@ class Encoder(nn.Module):
           mlp_dim=self.mlp_dim,
           num_heads=self.num_heads,
           dropout=self.dropout,
+          precision=self.precision,
       )(
           x, deterministic
       )
@@ -396,6 +406,7 @@ class Encoder(nn.Module):
             mlp_dim=self.mlp_dim,
             num_heads=self.num_heads,
             dropout=self.dropout,
+            precision=self.precision,
         )
         x = block_cur(x, deterministic)
     x: jax.Array = nn.LayerNorm(name="encoder_norm")(x)
@@ -409,6 +420,7 @@ class Einsum(nn.Module):
   weight_name: str = "w"
   initializer: nn.initializers.Initializer = nn.initializers.normal()
   dtype: jnp.dtype | None = None
+  precision: str = "default"
 
   @nn.compact
   def __call__(self, eqn: str, x: jax.Array) -> jax.Array:
@@ -418,7 +430,7 @@ class Einsum(nn.Module):
         self.shape,
         self.dtype if self.dtype is not None else None,
     )
-    return jnp.einsum(eqn, x, w)
+    return jnp.einsum(eqn, x, w, precision=jax.lax.Precision(self.precision))
 
 
 class VisionEmbedder(nn.Module):
@@ -430,8 +442,10 @@ class VisionEmbedder(nn.Module):
 
   def setup(self):
     if self.vision_proj_dim:
-      self.mm_soft_embedding_norm = rms_norm(self.vision_proj_dim)
-      self.mm_input_projection = Einsum((self.vision_proj_dim, self.config.emb_dim))
+      self.mm_soft_embedding_norm = rms_norm(self.vision_proj_dim, dtype=self.config.dtype_mm)
+      self.mm_input_projection = Einsum(
+          (self.vision_proj_dim, self.config.emb_dim), dtype=self.config.dtype_mm, precision=self.config.matmul_precision
+      )
 
   def encode_vision(self, x: jax.Array) -> jax.Array:
     x = self.mm_soft_embedding_norm(x)
@@ -494,6 +508,7 @@ class Gemma3VisionEncoderLayer(nn.Module):
       width: int,
       name: str,
       dtype: jnp.dtype = jnp.float32,
+      precision: str = "default",
   ):
     """Returns the position embedding."""
     if typ == "learn":
@@ -505,7 +520,7 @@ class Gemma3VisionEncoderLayer(nn.Module):
           dtype,
       )
     elif typ == "sincos2d":
-      return _posemb_sincos_2d(*seqshape, width=width, dtype=dtype)
+      return _posemb_sincos_2d(*seqshape, width=width, dtype=dtype, precision=precision)
     else:
       raise ValueError(f"Unknown posemb type: {typ}")
 
@@ -524,7 +539,15 @@ class Gemma3VisionEncoderLayer(nn.Module):
     b, n, h, w, c = inputs.shape
     x = jnp.reshape(inputs, [b * n, h, w, c])
     # Gemma3 uses conv2d with stride 14 and kernel size 14 to extract patches.
-    x = nn.Conv(features=1152, kernel_size=(14, 14), strides=14, padding="VALID", name="embedding")(x)
+    x = nn.Conv(
+        features=1152,
+        kernel_size=(14, 14),
+        strides=14,
+        padding="VALID",
+        name="embedding",
+        dtype=cfg.dtype_mm,
+        precision=jax.lax.Precision(cfg.matmul_precision),
+    )(x)
     bn, h, w, c = x.shape
     x = jnp.reshape(x, [bn, h * w, c])
 
@@ -535,6 +558,7 @@ class Gemma3VisionEncoderLayer(nn.Module):
         width=c,
         name="pos_embedding",
         dtype=x.dtype,
+        precision=cfg.matmul_precision,
     )
 
     x = nn.Dropout(rate=self.dropout)(x, not train)
@@ -549,6 +573,7 @@ class Gemma3VisionEncoderLayer(nn.Module):
         remat_policy=cfg.remat_policy_for_vit,
         dtype_mm=cfg.dtype_mm,
         name="Transformer",
+        precision=cfg.matmul_precision,
     )(x, deterministic=deterministic)
 
     # Gemma3 use a vision exit layer to downsample the soft tokens to a required output length.
