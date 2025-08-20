@@ -51,9 +51,13 @@ def variable_to_logically_partitioned(variable: nnx.VariableState):
     return variable.value
 
   metadata = variable.get_metadata()
-  return nn.LogicallyPartitioned(  # type: ignore[wrong-keyword-args]
-      variable.value,
-      variable.sharding,  # type: ignore[arg-type]
-      mesh=metadata.get("mesh"),
-      rules=metadata.get("rules"),
-  )
+  if "sharding" in metadata or "sharding_names" in metadata:
+    sharding_names = metadata.get("sharding_names", metadata.get("sharding"))
+    return nn.LogicallyPartitioned(  # type: ignore[wrong-keyword-args]
+        variable.value,
+        sharding_names,  # type: ignore[arg-type]
+        mesh=metadata.get("mesh"),
+        rules=metadata.get("rules"),
+    )
+  else:
+    return variable.value
