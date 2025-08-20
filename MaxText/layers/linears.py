@@ -21,6 +21,7 @@ from typing import Any, Callable, Iterable, Optional, Sequence, Tuple, Union
 import numpy as np
 import jax
 import jax.numpy as jnp
+from jax.sharding import PartitionSpec
 
 from jax import lax
 from jax.ad_checkpoint import checkpoint_name
@@ -35,6 +36,7 @@ from MaxText.layers import nnx_wrappers, quantizations
 from MaxText.layers import normalizations
 from MaxText.layers.initializers import NdInitializer, nd_dense_init, default_bias_init, variable_to_logically_partitioned
 from MaxText.layers.quantizations import AqtQuantization as Quant
+from MaxText.sharding import MeshSharding, LogicalAxisRulesSharding, ACT, WT
 
 
 def _convert_to_activation_function(fn_or_string: Union[str, Callable[..., Any]]) -> Callable[..., Any]:
@@ -104,7 +106,7 @@ class DenseGeneral(nnx.Module):
       weight_dtype: DType = jnp.float32,
       dtype: DType = jnp.float32,
       kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "truncated_normal"),
-      kernel_axes: Tuple[Optional[str], ...] = (),
+      kernel_axes: Tuple[Optional[str], ...] | PartitionSpec | None = None,
       quant: Optional[Quant] = None,
       use_bias: bool = False,
       matmul_precision: str = "default",
@@ -155,15 +157,18 @@ class DenseGeneral(nnx.Module):
               kernel_in_axis,
               kernel_out_axis,
           ),
-          sharding=self.kernel_axes,
+          sharding=kernel_axes,
+          # sharding=self.sharding(t="dense", a=self.kernel_axes, tt=WT),
       )
 
     if self.use_bias:
+      # FIXME: check this works when kernel_axes is a PartitionSpec
       bias_axes = self.kernel_axes[-len(self.out_features_shape) :]
       bias_shape = kernel_shape[-len(self.out_features_shape) :]
       self.bias = nnx.Param(
           default_bias_init(rngs.params(), bias_shape, self.weight_dtype),
           sharding=bias_axes,
+          # sharding=self.sharding(t="dense", a=bias_axes, tt=WT),
       )
     else:
       self.bias = None
@@ -241,7 +246,7 @@ def dense_general(
     weight_dtype: DType = jnp.float32,
     dtype: DType = jnp.float32,
     kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "truncated_normal"),
-    kernel_axes: Tuple[Optional[str], ...] = (),
+    kernel_axes: Tuple[Optional[str], ...] | PartitionSpec | None = None,
     quant: Optional[Quant] = None,
     use_bias: bool = False,
     matmul_precision: str = "default",
@@ -313,9 +318,10 @@ class MlpBlock(nnx.Module):
       model_mode: Optional[str] = None,
       *,
       rngs: nnx.Rngs,
+      sharding: MeshSharding | None = None,
   ) -> None:
     """A MlpBlock module.
-    
+
     Args:
       config: Config object containing model parameters.
       in_features: Number of input features.
@@ -343,12 +349,13 @@ class MlpBlock(nnx.Module):
     self.use_pre_norm = use_pre_norm
     self.quant = quant
     self.model_mode = model_mode
+    self.sharding = sharding if sharding else LogicalAxisRulesSharding()
 
     if self.use_pre_norm:
       self.mlp_layer_norm = self.get_norm_layer(num_features=in_features)(
           dtype=config.dtype,
           weight_dtype=config.weight_dtype,
-          kernel_axes=("norm",),
+          kernel_axes=self.sharding(t="mlp_pre_norm", a="norm", tt=WT),
           epsilon=config.normalization_layer_epsilon,
           rngs=rngs,
       )
@@ -362,7 +369,7 @@ class MlpBlock(nnx.Module):
           dtype=self.dtype,
           weight_dtype=self.weight_dtype,
           kernel_init=self.kernel_init,
-          kernel_axes=("embed", "num_activations", "mlp"),
+          kernel_axes=self.sharding(t="mlp_wi_fused", a=("embed", "num_activations", "mlp"), tt=WT),
           quant=self.quant,
           use_bias=self.use_bias,
           matmul_precision=self.config.matmul_precision,
@@ -377,7 +384,7 @@ class MlpBlock(nnx.Module):
             dtype=self.dtype,
             weight_dtype=self.weight_dtype,
             kernel_init=self.kernel_init,
-            kernel_axes=("embed", "mlp"),
+            kernel_axes=self.sharding(t="mlp_wi_unfused", a=("embed", "mlp"), tt=WT),
             quant=self.quant,
             use_bias=self.use_bias,
             matmul_precision=self.config.matmul_precision,
@@ -391,7 +398,7 @@ class MlpBlock(nnx.Module):
         dtype=self.dtype,
         weight_dtype=self.weight_dtype,
         kernel_init=self.kernel_init,
-        kernel_axes=("mlp", "embed"),
+        kernel_axes=self.sharding(t="mlp_wo", a=("mlp", "embed"), tt=WT),
         quant=self.quant,
         use_bias=self.use_bias,
         matmul_precision=self.config.matmul_precision,
@@ -455,12 +462,16 @@ class MlpBlock(nnx.Module):
     x = self.dropout(
         x, deterministic=deterministic
     )  # Broadcast along length.
-    if self.model_mode == MODEL_MODE_PREFILL:
-      x = nn.with_logical_constraint(x, ("activation_batch", "prefill_activation_length", "activation_mlp"))
-    else:
-      x = nn.with_logical_constraint(x, ("activation_batch", "activation_length", "activation_mlp"))
-    output = self.wo(x)
 
+    # TODO: we can remove this code when we no longer need to support LogicalAxisRulesSharding
+    #       and instead pass self.model_mode to the sharding class
+    if self.model_mode == MODEL_MODE_PREFILL:
+      axes = ("activation_batch", "prefill_activation_length", "activation_mlp")
+    else:
+      axes = ("activation_batch", "activation_length", "activation_mlp")
+    self.sharding.shard(x, t="mlp_pre_out", a=axes, tt=ACT)
+
+    output = self.wo(x)
     output = checkpoint_name(output, "mlpwo")
     return output
 
@@ -479,6 +490,7 @@ def mlp_block(
     quant: Optional[Quant] = None,
     model_mode: Optional[str] = None,
     name: Optional[str] = None,
+    sharding: MeshSharding | None = None,
 ):
   """Creates a MlpBlock Linen module using nnx.bridge.to_linen."""
   module = nnx_wrappers.to_linen(
@@ -498,5 +510,6 @@ def mlp_block(
       name=name,
       metadata_fn=variable_to_logically_partitioned,
       abstract_init=False,
+      sharding=sharding,
   )
   return module
