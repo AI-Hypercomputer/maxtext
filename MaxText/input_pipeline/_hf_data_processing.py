@@ -50,7 +50,11 @@ def vision_sft_preprocessing_pipeline(
   dataset = dataset.select_columns(text_columns + [image_column])
   dataset = dataset.map(
       _input_pipeline_utils.reformat_prompt,
-      fn_kwargs={"column": text_columns[0], "image_placeholder": config.image_placeholder, "model_name": config.model_name},
+      fn_kwargs={
+          "column": text_columns[0],
+          "image_placeholder": config.image_placeholder,
+          "model_name": config.model_name,
+      },
   )
   dataset = dataset.map(
       _input_pipeline_utils.reformat_response,
@@ -167,7 +171,7 @@ def preprocessing_pipeline(
 ):
   """pipeline for preprocessing HF dataset"""
 
-  assert global_batch_size % global_mesh.size == 0, "Batch size should be divisible number of global devices."
+  assert global_batch_size % global_mesh.size == 0, "Batch size should be divisible by number of global devices."
 
   if shuffle:
     dataset = dataset.shuffle(seed=data_shuffle_seed)

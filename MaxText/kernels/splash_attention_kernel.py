@@ -22,7 +22,8 @@ from collections.abc import Callable, Mapping
 import dataclasses
 import enum
 import functools
-from typing import Any, Literal, NamedTuple, Optional, Union, overload
+from types import UnionType
+from typing import Any, Literal, NamedTuple, overload
 
 import jax
 from jax import ad_checkpoint
@@ -71,22 +72,19 @@ class SegmentIds(NamedTuple):
 
 
 # Return type of SplashAttention function that implements the custom vjp rule.
-SplashCustomReturnType = Union[
-    # out, no residuals
-    jax.Array,
-    # out, residuals:
-    tuple[jax.Array, tuple[jax.Array,]],
-]
+# `jax.Array` no residuals
+# `tuple[jax.Array, tuple[jax.Array,]]` # residuals,
+SplashCustomReturnType = jax.Array | tuple[jax.Array, tuple[jax.Array,]]
 
 SplashResidualsType = tuple[
     jax.Array,  # q
     jax.Array,  # k
     jax.Array,  # v
-    Optional[SegmentIds],  # segment_ids
+    None | SegmentIds,  # segment_ids
     jax.Array,  # out
     jax.Array,  # logsumexp
-    Optional[mask_info_lib.MaskInfo],  # dq_mask_info
-    Optional[mask_info_lib.MaskInfo],  # dkv_mask_info
+    None | mask_info_lib.MaskInfo,  # dq_mask_info
+    None | mask_info_lib.MaskInfo,  # dkv_mask_info
 ]
 
 MaskFunctionType = Callable[..., jax.Array]
@@ -432,7 +430,9 @@ def make_attention_reference(
       def reshape_activations(activations):
         if activations.ndim == 4:  # pytype: disable=attribute-error
           kv_heads, q_heads_per_kv_head, q_seq_len, head_dim = activations.shape  # pytype: disable=attribute-error
-          return activations.reshape(kv_heads * q_heads_per_kv_head, q_seq_len, head_dim)  # pytype: disable=attribute-error
+          return activations.reshape(
+              kv_heads * q_heads_per_kv_head, q_seq_len, head_dim
+          )  # pytype: disable=attribute-error
         return activations
 
       def reshape_residuals(residuals):
@@ -898,7 +898,7 @@ def _splash_attention_forward(
     raise ValueError(f"Expected {expected_kv_rank}-dim 'key' tensor for MQA. Instead got a" f" {len(k.shape)}-dim one.")
 
   if k.shape[kv_head_dimension] != head_dim_qk:
-    raise ValueError(f"Expected 'key' head dimension to be: {head_dim_qk}. Instead got:" f" {k.shape[kv_head_dimension]}.")
+    raise ValueError(f"Expected 'key' head dimension to be: {head_dim_qk}. Instead got: {k.shape[kv_head_dimension]}.")
 
   if not is_mqa and num_q_heads % num_kv_heads != 0:
     raise ValueError(

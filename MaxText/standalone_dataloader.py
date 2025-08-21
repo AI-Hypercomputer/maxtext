@@ -49,7 +49,9 @@ def data_load_loop(config, state=None):
   first_end = datetime.datetime.now()
   time_to_load_first_batch = first_end - start
   if jax.process_index() == 0:
-    max_logging.log(f"STANDALONE DATALOADER : First step completed in {time_to_load_first_batch.seconds} seconds, on host 0")
+    max_logging.log(
+        f"STANDALONE DATALOADER : First step completed in {time_to_load_first_batch.seconds} seconds, on host 0"
+    )
 
   for _ in np.arange(start_step + 1, config.steps):
     example_batch = data_loader.load_next_batch()

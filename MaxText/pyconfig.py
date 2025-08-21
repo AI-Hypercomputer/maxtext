@@ -15,7 +15,7 @@
 # pytype: skip-file
 # pylint: disable=missing-module-docstring, bare-except, consider-using-generator, missing-function-docstring
 from collections import OrderedDict
-from typing import Any, Union
+from typing import Any
 from math import prod
 import math
 import os
@@ -169,6 +169,10 @@ def validate_keys(keys):
   validate_prefill_and_target_lengths(keys["max_prefill_predict_length"], keys["max_target_length"])
   validate_rope_type(keys["rope_type"])
 
+  # TODO remove after b/435512699 resolved
+  if keys["context_parallel_size"] > 1 and keys["context_parallel_load_balance"] and keys["attention_type"] == "chunk":
+    raise ValueError("Currently load-balanced context parallelism is not supported for chunk attention.")
+
   if keys["mtp_eval_target_module"] < 0:
     raise ValueError("mtp_eval_target_module cannot be negative. Set to 0 to disable evaluation.")
 
@@ -307,7 +311,9 @@ def validate_llama4_config(keys: dict):
 
   """
   if keys["capacity_factor"] >= 0:
-    raise ValueError("Llama4 decoder has not been tested with capacity_factor >= 0 -- please set that value to -1 for now!")
+    raise ValueError(
+        "Llama4 decoder has not been tested with capacity_factor >= 0 -- please set that value to -1 for now!"
+    )
   if keys["num_experts_per_tok"] > 1:
     raise ValueError("Only top-1 routing is supported for Llama4 for now!")
   if keys["base_num_decoder_layers"] % keys["interleave_moe_layer_step"] != 0:
@@ -351,6 +357,8 @@ def validate_model_name(s: str) -> bool:
       "qwen3-14b",
       "qwen3-32b",
       "qwen3-235b-a22b",
+      "qwen3-30b-a3b",
+      "qwen3-480b-a35b",
       "gpt3-175b",
       "gpt3-22b",
       "gpt3-6b",
@@ -414,7 +422,7 @@ def validate_and_assign_remat_tensors(keys):
   return keys
 
 
-def _lists_to_tuples(l: list[Any]) -> Union[tuple[Any], list[Any]]:
+def _lists_to_tuples(l: list[Any]) -> tuple[Any] | list[Any]:
   return tuple(_lists_to_tuples(x) for x in l) if isinstance(l, list) else l
 
 
@@ -767,9 +775,9 @@ def validate_and_set_hlo_dump_defaults(raw_keys):
     raise ValueError("You must set either XLA_FLAGS or dump_hlo_xla_flags to dump HLO, but not both.")
   if not os.environ.get("XLA_FLAGS") and not raw_keys["dump_hlo_xla_flags"]:
     raw_keys["dump_hlo_xla_flags"] = f"--xla_dump_to={raw_keys['dump_hlo_local_dir']} --xla_dump_large_constants"
-    if raw_keys["dump_hlo_module_name"]:
+    if raw_keys["dump_hlo_local_module_name"]:
       raw_keys["dump_hlo_xla_flags"] = (
-          f"{raw_keys['dump_hlo_xla_flags']} --xla_dump_hlo_module_re={raw_keys['dump_hlo_module_name']}"
+          f"{raw_keys['dump_hlo_xla_flags']} --xla_dump_hlo_module_re={raw_keys['dump_hlo_local_module_name']}"
       )
   if not raw_keys["dump_hlo_gcs_dir"]:
     raw_keys["dump_hlo_gcs_dir"] = os.path.join(raw_keys["base_output_directory"], raw_keys["run_name"], "xla_dump")

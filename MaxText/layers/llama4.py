@@ -16,7 +16,6 @@
 # pylint: disable=arguments-differ, disable=no-name-in-module, missing-function-docstring
 
 import math
-from typing import Optional
 
 import jax.numpy as jnp
 from jax import lax
@@ -25,7 +24,7 @@ from jax.sharding import Mesh
 
 from flax import linen as nn
 
-from MaxText.common_types import Config, Array, MODEL_MODE_TRAIN
+from MaxText.common_types import Config, Array, MODEL_MODE_TRAIN, AttentionType
 from MaxText.inference import page_manager
 from MaxText.layers import initializers
 from MaxText.layers.linears import mlp_block
@@ -33,7 +32,6 @@ from MaxText.layers import linears
 from MaxText.layers import moe
 from MaxText.layers import quantizations
 from MaxText.layers import attentions
-from MaxText.layers.attentions import AttentionType
 from MaxText.layers.quantizations import AqtQuantization as Quant
 from MaxText.layers.normalizations import rms_norm
 
@@ -351,7 +349,7 @@ class Llama4DecoderLayer(nn.Module):
   Attributes:
     config: Config, MaxText model config
     mesh: Mesh, JAX device mesh (used for sharding)
-    quant: Optional[Quant], quantization config
+    quant: None | Quant, quantization config
     is_nope_layer: bool, whether to use RoPE or not on this layer
     is_moe_layer: bool, whether this layer operates as a MoE layer
   """
@@ -359,7 +357,7 @@ class Llama4DecoderLayer(nn.Module):
   config: Config
   mesh: Mesh
   model_mode: str
-  quant: Optional[Quant] = None
+  quant: None | Quant = None
   is_nope_layer: bool = False
   is_moe_layer: bool = False
 
@@ -372,8 +370,8 @@ class Llama4DecoderLayer(nn.Module):
       deterministic,
       model_mode,
       bidirectional_mask=None,
-      slot: Optional[int] = None,
-      page_state: Optional[page_manager.PageState] = None,
+      slot: None | int = None,
+      page_state: None | page_manager.PageState = None,
       previous_chunk=None,
   ):
     cfg = self.config
@@ -530,7 +528,7 @@ class Llama4ScannableBlock(nn.Module):
   Attributes:
     config: Config, MaxText model config
     mesh: Mesh, JAX device mesh (used for sharding)
-    quant: Optional[Quant], quantization config
+    quant: None | Quant, quantization config
     nope_layer_interval: int, the interval at which layers should use NoPE.
     interleave_moe_layer_step: int, the interval or stride for placing MoE layers.
   """
@@ -539,7 +537,7 @@ class Llama4ScannableBlock(nn.Module):
   config: Config
   mesh: Mesh
   model_mode: str
-  quant: Optional[Quant] = None
+  quant: None | Quant = None
   nope_layer_interval: int = 1
   interleave_moe_layer_step: int = 1
 
@@ -552,8 +550,8 @@ class Llama4ScannableBlock(nn.Module):
       deterministic,
       model_mode,
       bidirectional_mask=None,
-      slot: Optional[int] = None,
-      page_state: Optional[page_manager.PageState] = None,
+      slot: None | int = None,
+      page_state: None | page_manager.PageState = None,
       previous_chunk=None,
   ):
 
@@ -636,7 +634,7 @@ class Llama4VisionEncoderLayer(nn.Module):
         mesh=self.mesh,
         dropout_rate=0,
         name="self_attention_vision",
-        attention_type=attentions.AttentionType.FULL,
+        attention_type=AttentionType.FULL,
         is_nope_layer=False,
         use_bias_in_projections=True,
         is_vision=True,
@@ -748,10 +746,10 @@ class Llama4VisionModel(nn.Module):
   def __call__(
       self,
       pixel_values: Array,
-      output_attentions: Optional[bool] = None,
-      output_hidden_states: Optional[bool] = None,
-      return_dict: Optional[bool] = None,
-      deterministic: Optional[bool] = False,
+      output_attentions: None | bool = None,
+      output_hidden_states: None | bool = None,
+      return_dict: None | bool = None,
+      deterministic: None | bool = False,
   ) -> Array:
     """Forward pass of the Llama4 vision model.
 

@@ -230,7 +230,9 @@ def main(config, test_args):  # pylint: disable=W0621
       golden_data = list(f)
 
     for golden_data_index in range(len(golden_data)):
-      ids, decoder_segment_ids, decoder_positions, golden_logits, seq_len = get_data(golden_data, golden_data_index, config)
+      ids, decoder_segment_ids, decoder_positions, golden_logits, seq_len = get_data(
+          golden_data, golden_data_index, config
+      )
 
       if test_args.hf_model_path != "":
         with torch.no_grad():
@@ -291,6 +293,8 @@ def main(config, test_args):  # pylint: disable=W0621
       raise ValueError
     hf_model = AutoModelForCausalLM.from_pretrained(test_args.hf_model_path, torch_dtype=torch.bfloat16)
     tokenizer = AutoTokenizer.from_pretrained(test_args.hf_model_path)
+    if 'Llama-3.1' in test_args.hf_model_path:
+      tokenizer.pad_token = tokenizer.eos_token
 
     init_rng = jax.random.PRNGKey(config.init_weights_seed)
     init_rng, rng1 = jax.random.split(init_rng)
@@ -305,7 +309,9 @@ def main(config, test_args):  # pylint: disable=W0621
       max_logging.log(f"\n--- Prompt: {input_text} ---")
 
       # Tokenize for HF
-      inputs = tokenizer(input_text, return_tensors="pt", padding=True, max_length=config.max_target_length, truncation=True)
+      inputs = tokenizer(
+          input_text, return_tensors="pt", padding=True, max_length=config.max_target_length, truncation=True
+      )
       actual_seq_len = inputs["input_ids"].shape[1]
 
       # Tokenize for MaxText

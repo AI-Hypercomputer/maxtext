@@ -218,7 +218,11 @@ def train_loop(config, elastic_manager, recorder, state=None):
       prof.maybe_activate_profiler(step, state)
 
       max_logging.log(f"{step=} {elastic_manager.elastic_down_event_count=} {elastic_manager.good_slice_count=}")
-      with mesh, nn_partitioning.axis_rules(config.logical_axis_rules), jax.default_device(elastic_manager.default_device):
+      with (
+          mesh,
+          nn_partitioning.axis_rules(config.logical_axis_rules),
+          jax.default_device(elastic_manager.default_device),
+      ):
         with jax.profiler.StepTraceAnnotation("train", step_num=step):
           example_batch = data_loader.load_next_batch()
           # pylint: disable=not-callable
@@ -365,7 +369,9 @@ def main(argv: Sequence[str]) -> None:
   tf.config.set_visible_devices([], "GPU")
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
   if "xla_tpu_spmd_rng_bit_generator_unsafe" not in os.environ.get("LIBTPU_INIT_ARGS", ""):
-    os.environ["LIBTPU_INIT_ARGS"] = os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
+    os.environ["LIBTPU_INIT_ARGS"] = (
+        os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
+    )
 
   elastic_manager = elastic_initialize(jax.devices())
 

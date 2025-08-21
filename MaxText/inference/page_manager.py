@@ -23,7 +23,6 @@ represents an individual request or sequence.
 """
 
 from functools import partial
-from typing import Tuple
 
 import jax
 import jax.numpy as jnp
@@ -251,13 +250,13 @@ def _reserve_pages_for_group(
   sufficient_free_pages = jax.lax.ge(num_free_pages, num_pages_needed)
   has_enough_resources = jnp.logical_and(sufficient_free_pages, group_has_capacity)
 
-  def allocate_and_update_state(initial_state_tuple: Tuple[PagesInt1d, GroupsPagesInt2d, GroupsInt1d]) -> PageState:
+  def allocate_and_update_state(initial_state_tuple: tuple[PagesInt1d, GroupsPagesInt2d, GroupsInt1d]) -> PageState:
     """Allocates pages iteratively if resources are sufficient."""
     initial_status, initial_map, initial_num_used = initial_state_tuple
 
     def allocate_one_page(
-        page_idx_in_group: ScalarInt, loop_state_tuple: Tuple[PagesInt1d, GroupsPagesInt2d, GroupsInt1d]
-    ) -> Tuple[PagesInt1d, GroupsPagesInt2d, GroupsInt1d]:
+        page_idx_in_group: ScalarInt, loop_state_tuple: tuple[PagesInt1d, GroupsPagesInt2d, GroupsInt1d]
+    ) -> tuple[PagesInt1d, GroupsPagesInt2d, GroupsInt1d]:
       """Allocates a single page within the fori_loop."""
       current_loop_status, current_loop_map, current_loop_num_used = loop_state_tuple
       next_free_page_global = _find_next_free_page_index(current_loop_status)

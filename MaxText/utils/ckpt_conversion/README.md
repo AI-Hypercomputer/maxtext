@@ -85,6 +85,8 @@ python3 -m MaxText.tests.forward_pass_logit_checker MaxText/configs/base.yml \
     load_parameters_path=<path-to-maxtext-checkpoint> \
     model_name=<MODEL_NAME> \
     scan_layers=false \
+    max_prefill_predict_length=4 \
+     max_target_length=8 \
     use_multimodal=false \
     --run_hf_model=True \
     --hf_model_path=<path-to-HF-checkpoint> \
@@ -165,6 +167,9 @@ To extend conversion support to a new model architecture, you must define its sp
 Here is an example [PR to add support for gemma3 multi-modal model](https://github.com/AI-Hypercomputer/maxtext/pull/1983)
 
 ## Debugging tips
+
+If the converted checkpoint can not get loaded and got error like: "type <class 'jax._src.core.ShapeDtypeStruct'> is not a valid JAX type."
+* **Potential Cause**: The scan_layers flag is set wrong. 
 
 If a converted checkpoint loads without errors but produces incorrect output, consider these common issues:
 

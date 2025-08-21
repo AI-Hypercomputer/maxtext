@@ -16,7 +16,7 @@
 # pylint: disable=arguments-differ
 # pylint: disable=no-name-in-module
 
-from typing import Any, Optional, Tuple
+from typing import Any
 
 import jax
 from jax import lax
@@ -34,7 +34,7 @@ from MaxText.layers import initializers, nnx_wrappers
 from MaxText.layers.linears import mlp_block
 from MaxText.layers import models
 from MaxText.layers import quantizations
-from MaxText.layers.attentions import KVQuant, attention_op_as_linen
+from MaxText.layers.attention_op import KVQuant, attention_op_as_linen
 from MaxText.layers.initializers import Initializer, NdInitializer, nd_dense_init
 from MaxText.layers.linears import dense_general
 from MaxText.layers.quantizations import AqtQuantization as Quant
@@ -53,7 +53,7 @@ class Gpt3LayerNorm(nnx.Module):
       epsilon: float = 1e-6,
       dtype: Any = jnp.float32,
       weight_dtype: Any = jnp.float32,
-      kernel_axes: Tuple[Optional[str], ...] = (),
+      kernel_axes: tuple[None | str, ...] = (),
       scale_init: Initializer = nn.initializers.zeros,
       use_bias: bool = True,
       reductions_in_fp32: bool = False,
@@ -113,12 +113,12 @@ def gpt3_layer_norm(
     epsilon: float = 1e-6,
     dtype: Any = jnp.float32,
     weight_dtype: Any = jnp.float32,
-    kernel_axes: Tuple[Optional[str], ...] = (),
+    kernel_axes: tuple[None | str, ...] = (),
     scale_init: Initializer = nn.initializers.zeros,
     use_bias: bool = True,
     reductions_in_fp32: bool = False,
     parameter_memory_host_offload: bool = False,
-    name: Optional[str] = None,
+    name: None | str = None,
 ):
   """Initializes the gpt3_layer_norm module.
 
@@ -193,8 +193,8 @@ class Gpt3MultiHeadAttention(nn.Module):
   float32_qk_product: bool = False  # computes logits in float32 for stability.
   float32_logits: bool = True  # cast logits in float32 for stability.
   fused_qkv: bool = True
-  quant: Optional[Quant] = None
-  kv_quant: Optional[KVQuant] = None
+  quant: None | Quant = None
+  kv_quant: None | KVQuant = None
   use_bias: bool = True
 
   input_axis_names: AxisNames = (BATCH, LENGTH, EMBED)
@@ -320,7 +320,7 @@ class Gpt3DecoderLayer(nn.Module):
   config: models.Config
   mesh: Mesh
   model_mode: str
-  quant: Optional[Quant] = None
+  quant: None | Quant = None
 
   @nn.compact
   def __call__(

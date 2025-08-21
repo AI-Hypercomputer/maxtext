@@ -12,11 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from collections.abc import Callable
-
 """ Tests for the common MaxText utilities """
 
-from typing import Union, Any, Dict, Tuple
+from typing import Any
+from collections.abc import Callable
 import os.path
 import unittest
 
@@ -136,7 +135,7 @@ class MaxUtilsInitState(unittest.TestCase):
     self.assertEqual(decode_state.apply_fn, self.model.apply)
     apply_fn: Callable = decode_state.apply_fn
     # pylint: disable=not-callable
-    output: Union[Any, Tuple[Any, Union[FrozenVariableDict, Dict[str, Any]]]] = apply_fn(self.params, self.input)
+    output: Any | tuple[Any, FrozenVariableDict | dict[str, Any]] = apply_fn(self.params, self.input)
     self.assertEqual(output.tolist(), self.output.tolist())
     self.assertEqual(decode_state.tx, None)
     self.assertEqual(decode_state.opt_state, {})

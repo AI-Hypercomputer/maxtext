@@ -191,24 +191,32 @@ class QuantizationTest(unittest.TestCase):
                 "mlp": {
                     "wi_0": {
                         "AqtDotGeneral_0": {
-                            "qrhs": {"frozen": aqt_tensor.QTensor(qvalue=[1.1, 1.0], scale=[1.0], scale_t=[1.0], bias=1.0)}
+                            "qrhs": {
+                                "frozen": aqt_tensor.QTensor(qvalue=[1.1, 1.0], scale=[1.0], scale_t=[1.0], bias=1.0)
+                            }
                         }
                     },
                     "wi_1": {
                         "AqtDotGeneral_0": {
-                            "qrhs": {"frozen": aqt_tensor.QTensor(qvalue=[1.1, 1.0], scale=[1.0], scale_t=[1.0], bias=1.0)}
+                            "qrhs": {
+                                "frozen": aqt_tensor.QTensor(qvalue=[1.1, 1.0], scale=[1.0], scale_t=[1.0], bias=1.0)
+                            }
                         }
                     },
                     "wo": {
                         "AqtDotGeneral_0": {
-                            "qrhs": {"frozen": aqt_tensor.QTensor(qvalue=[1.1, 1.0], scale=[1.0], scale_t=[1.0], bias=1.0)}
+                            "qrhs": {
+                                "frozen": aqt_tensor.QTensor(qvalue=[1.1, 1.0], scale=[1.0], scale_t=[1.0], bias=1.0)
+                            }
                         }
                     },
                 },
                 "self_attention": {
                     "key": {
                         "AqtDotGeneral_0": {
-                            "qrhs": {"frozen": aqt_tensor.QTensor(qvalue=[1.1, 1.0], scale=[1.0], scale_t=[1.0], bias=1.0)}
+                            "qrhs": {
+                                "frozen": aqt_tensor.QTensor(qvalue=[1.1, 1.0], scale=[1.0], scale_t=[1.0], bias=1.0)
+                            }
                         }
                     }
                 },

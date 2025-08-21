@@ -90,3 +90,11 @@ class DecoderBlockType(enum.Enum):
   SIMPLE = "simple"
   SIMPLE_MLP = "simple_mlp"
   LLAMA4 = "llama4"
+
+
+class AttentionType(enum.Enum):
+  GLOBAL = "global"  # default, with causality
+  LOCAL_SLIDING = "local_sliding"
+  CHUNK = "chunk"
+  MLA = "mla"
+  FULL = "full"

@@ -33,13 +33,15 @@ The workflow is typically a two-step process:
     ```
 
 3.  **Set Output Directory**:
-    In `llm_code_generation.py`, you must set the `JAX_OUTPUT_DIR` variable to your desired output path for the converted JAX files.
+    In `llm_code_generation.py`, the `JAX_OUTPUT_DIR` variable is configured to save converted files into `code_generation_agent/dataset/jax_converted/`. You can modify this variable if you need a different output path.
     ```python
     # in llm_code_generation.py
-    JAX_OUTPUT_DIR = "./dataset/JAX_converted/" # Example path
+    JAX_OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "dataset/jax_converted")
     ```
 
 ## Usage
+
+To run the agent scripts, you should first navigate to the `MaxText/experimental/agent` directory. The scripts are designed to be run as Python modules from this location.
 
 ### Step 1: Create Standalone PyTorch Test Files
 
@@ -47,10 +49,10 @@ This step is for breaking down large, complex PyTorch files into smaller, indepe
 
 **Example Invocation:**
 
-This example command analyzes the Llama model file from the Hugging Face `transformers` repository and extracts standalone modules.
+This example command analyzes the Llama model file from the Hugging Face `transformers` repository and extracts standalone modules. Run it from the `MaxText/experimental/agent` directory.
 
 ```bash
-python make_pytorch_file.py \
+python -m code_generation_agent.make_pytorch_file \
   --entry_file_path "transformers/models/llama/modeling_llama.py" \
   --base_path "https://github.com/huggingface/transformers/blob/main/src"
 ```

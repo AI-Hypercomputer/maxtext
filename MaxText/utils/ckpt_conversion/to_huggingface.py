@@ -53,7 +53,7 @@ Example Usage:
 
 import jax
 import os
-from typing import Sequence, Dict, Any
+from typing import Sequence, Any
 
 from transformers import AutoTokenizer, AutoProcessor
 
@@ -142,10 +142,10 @@ def main(argv: Sequence[str]) -> None:
     raise ValueError(f"HF Tokenizer ID not found for model key: {model_key}")
   hf_token = config.hf_access_token
   hf_tokenizer_id = HF_IDS[model_key]
-  tokenizer = AutoTokenizer.from_pretrained(hf_tokenizer_id,  token=hf_token)
+  tokenizer = AutoTokenizer.from_pretrained(hf_tokenizer_id, token=hf_token)
 
   # For multi-modal case:
-  processor = AutoProcessor.from_pretrained(hf_tokenizer_id,  token=hf_token) if config.use_multimodal else None
+  processor = AutoProcessor.from_pretrained(hf_tokenizer_id, token=hf_token) if config.use_multimodal else None
 
   # 3. Get parameter mappings
   mappings = _get_model_mappings(model_key, config.scan_layers, hf_config_obj.to_dict())
@@ -154,7 +154,7 @@ def main(argv: Sequence[str]) -> None:
   hook_fn_map = mappings["hook_fn_mapping"]
 
   # 4. Transform Weights
-  transformed_hf_weights: Dict[str, Any] = {}
+  transformed_hf_weights: dict[str, Any] = {}
 
   # MaxText `engine.load_params()` returns `state.params` (a FrozenDict).
   # The actual weights are typically under `state.params['params']`.

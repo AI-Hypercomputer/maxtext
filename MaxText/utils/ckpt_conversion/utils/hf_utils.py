@@ -16,8 +16,6 @@
 Utility functions to support the HF checkpoint conversion and verification process in test_hf.py.
 """
 
-from typing import Optional
-
 import numpy as np
 
 import jax
@@ -30,7 +28,7 @@ import torch
 from tabulate import tabulate
 
 
-def convert_jax_weight_to_torch(weight: "jax.Array", dtype: Optional[str] = None) -> torch.Tensor:
+def convert_jax_weight_to_torch(weight: "jax.Array", dtype: None | str = None) -> torch.Tensor:
   expected_dtype = str(weight.dtype) if dtype is None else dtype
   expected_shape = weight.shape
   weight = multihost_utils.process_allgather(weight)
@@ -49,8 +47,8 @@ def check_arrays_match(arrayA, arrayB, atol=0.01, rtol=1e-5):
   the specified tolerance, it prints detailed information about the mismatches.
 
   Args:
-      arrayA (Union[torch.Tensor, jax.Array]): First set of arrays to compare
-      arrayB (Union[torch.Tensor, jax.Array]): Second set of arrays to compare
+      arrayA (torch.Tensor | jax.Array): First set of arrays to compare
+      arrayB (torch.Tensor | jax.Array): Second set of arrays to compare
       atol (float, optional): Absolute tolerance for comparison. Defaults to 0.01.
       rtol (float, optional): Relative tolerance for comparison. Defaults to 1e-5.
 
@@ -132,7 +130,8 @@ def check_predicted_tokens_match(logits_a, logits_b, tolerance=0.1):
 
   if disagreement_rate > tolerance:
     raise AssertionError(
-        f"Token prediction mismatch: {disagreement_rate:.1%} of tokens disagree " f"(exceeds tolerance of {tolerance:.1%})"
+        f"Token prediction mismatch: {disagreement_rate:.1%} of tokens disagree "
+        f"(exceeds tolerance of {tolerance:.1%})"
     )
 
 

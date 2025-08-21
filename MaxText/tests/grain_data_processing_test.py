@@ -47,7 +47,9 @@ class GrainArrayRecordProcessingTest(unittest.TestCase):
         data_sharding=["data"],
         base_output_directory="gs://max-experiments/",
         dataset_type="grain",
-        grain_train_files=os.path.join(temp_dir, "gcsfuse", "array-record", "c4", "en", "3.0.1", "c4-train.array_record*"),
+        grain_train_files=os.path.join(
+            temp_dir, "gcsfuse", "array-record", "c4", "en", "3.0.1", "c4-train.array_record*"
+        ),
         tokenizer_path=os.path.join(os.path.dirname(PKG_DIR), "assets", "tokenizer"),
         enable_checkpointing=False,
     )
