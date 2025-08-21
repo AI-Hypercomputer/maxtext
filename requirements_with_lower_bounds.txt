@@ -3,10 +3,8 @@ aqtp
 array-record
 cloud-accelerator-diagnostics
 cloud-tpu-diagnostics
-flax>=0.10.6,<0.10.7
-fiddle
+flax>=0.11.0
 gcsfs
-graphviz
 google-api-python-client
 google-cloud-aiplatform>=1.105.0
 google-cloud-monitoring
@@ -21,7 +19,7 @@ ml-goodput-measurement>=0.0.13
 numpy
 omegaconf
 optax
-orbax-checkpoint>=0.10.3
+orbax-checkpoint>=0.11.22
 pathwaysutils>=0.1.1
 pillow>=11.1.0
 pre-commit
@@ -39,6 +37,7 @@ tensorflow>=2.16.0
 transformer-engine[jax]
 tiktoken
 transformers
+tunix @ https://github.com/google/tunix/archive/ee3229a43362fc1209cd477352309c86ca3496b0.zip
 google-jetstream @ https://github.com/AI-Hypercomputer/JetStream/archive/261f25007e4d12bb57cf8d5d61e291ba8f18430f.zip
 mlperf-logging @ https://github.com/mlcommons/logging/archive/44b4810e65e8c0a7d9e4e207c60e51d9458a3fb8.zip
 qwix @ https://github.com/google/qwix/archive/9fc58cdbb5e344aff5be2922cb6b7292f3454f60.zip
