@@ -1,10 +1,10 @@
-# Generalized Reinforcement Policy Optimization (GRPO) in MaxText
+# Group Relative Policy Optimization (GRPO) in MaxText
 
 This directory contains code and documentation for **GRPO**, a reinforcement learning algorithm designed to optimize language model policies within the MaxText framework. GRPO enables training language models to perform specific tasks by optimizing for a reward signal, going beyond standard language modeling objectives. This implementation leverages techniques such as **Fully Sharded Data Parallelism (FSDP)** for training and **Data Parallelism (DP) + Tensor Parallelism (TP)** for inference.
 
 ## Key Concepts
 
-*   **GRPO (Generalized Reinforcement Policy Optimization):** A policy optimization algorithm that uses reinforcement learning principles to improve the quality of a language model's responses based on a provided reward signal.
+*   **GRPO (Group Relative Policy Optimization):** A policy optimization algorithm that uses reinforcement learning principles to improve the quality of a language model's responses based on a provided reward signal.
 *   **FSDP (Fully Sharded Data Parallelism):** A technique for distributing model parameters across multiple devices during training, allowing for efficient training of large models.
 *   **DP (Data Parallelism):** A technique for distributing data across multiple devices during inference, allowing for efficient inference of large models.
 *   **Sharding:** For more information on sharding, refer to [getting_started/Sharding.md](https://github.com/AI-Hypercomputer/maxtext/blob/main/getting_started/Sharding.md)
