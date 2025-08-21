@@ -16,18 +16,20 @@ class Llama2TensorShardingTraining(MeshSharding):
 
     mesh_axes = []
     match tensor, tensor_type:
-      case "embedding", TT.WT:
+      case "token_embedder" | "logits_dense", TT.WT:
         mesh_axes = (
           ('tensor', 'tensor_transpose', 'tensor_sequence', 'autoregressive'),
           ('fsdp', 'fsdp_transpose', 'sequence', 'context', 'expert')
         )
+        if tensor == "logits_dense":
+          mesh_axes = tuple(mesh_axes[1], mesh_axes[2])
       case "embed_output", TT.ACT:
         mesh_axes = (
           ('data', 'stage', 'fsdp', 'fsdp_transpose', 'expert'),
           ("tensor_sequence", "context", "sequence"),
           ("tensor", "tensor_transpose"),
         )
-      case "rms_norm", TT.WT:
+      case ("pre_self_attention_layer_norm" | "post_self_attention_layer_norm" | "decoder_norm" | "rms_norm"), TT.WT:
         mesh_axes = (
           ('tensor', 'tensor_transpose', 'tensor_sequence'),
         )

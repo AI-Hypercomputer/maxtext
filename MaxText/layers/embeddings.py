@@ -86,6 +86,9 @@ def embed_as_linen(
       metadata_fn=variable_to_logically_partitioned,
       name=name,
       sharding=sharding,
+      # TODO: consider setting (optional) tensor_name and (optional) axes on sharding (which can have a stack of them
+      #       pushed and popped in a context manager
+      tensor_name=name,
   )
 
 
@@ -106,6 +109,7 @@ class Embed(nnx.Module):
       # TODO: Remove when bridge no longer needed
       rngs: nnx.Rngs,
       sharding: MeshSharding | None = None,
+      tensor_name: str = "embedding"
   ):
     """Initializes the Embed module.
 
@@ -125,13 +129,14 @@ class Embed(nnx.Module):
     self.cast_input_dtype = cast_input_dtype
     self.dtype = dtype
     self.attend_dtype = attend_dtype
+    self.tensor_name = tensor_name
     # TODO: decide whether to do this or to use what's in config
     # (i.e. should what's in config drive everything or just the top-level)
     self.sharding = sharding if sharding else LogicalAxisRulesSharding()
 
     self.embedding = nnx.Param(
         embedding_init(rngs.params(), (self.num_embeddings, self.num_features), self.config.weight_dtype),
-        sharding=self.sharding(t="embedding", a=("vocab", "embed"), tt=WT),
+        sharding=self.sharding(t=self.tensor_name, a=("vocab", "embed"), tt=WT),
     )
 
 

@@ -528,13 +528,14 @@ class Attention(nnx.Module):
         out_features_shape=(self.num_query_heads, self.head_dim),
         axis=-1,
         kernel_init=query_init,
-        kernel_axes=self.sharding(t="query", a=kernel_axes, tt=WT),
+        kernel_axes=kernel_axes,
         dtype=self.dtype,
         weight_dtype=self.weight_dtype,
         quant=self.quant,
         matmul_precision=self.config.matmul_precision,
         use_bias=self.use_bias_in_projections,
         rngs=self.rngs,
+        tensor_name="query",
     )
 
   def query_projection(self, inputs_q: Array) -> Array:
@@ -568,13 +569,14 @@ class Attention(nnx.Module):
         out_features_shape=(self.num_kv_heads, self.head_dim),
         axis=-1,
         kernel_init=self.kernel_init,
-        kernel_axes=self.sharding(t="kv", a=kernel_axes, tt=WT),
+        kernel_axes=kernel_axes,
         dtype=self.dtype,
         weight_dtype=self.weight_dtype,
         quant=self.quant,
         matmul_precision=self.config.matmul_precision,
         use_bias=self.use_bias_in_projections,
         rngs=self.rngs,
+        tensor_name="kv",
     )
 
   def kv_projection(self, inputs_kv: Array, proj_name: str) -> nnx.Module:
@@ -605,13 +607,14 @@ class Attention(nnx.Module):
         out_features_shape=(3, self.num_query_heads, self.head_dim),
         axis=-1,
         kernel_init=self.kernel_init,
-        kernel_axes=self.sharding(t="qkv", a=("embed", "qkv", "heads", "kv"), tt=WT),
+        kernel_axes=("embed", "qkv", "heads", "kv"),
         dtype=self.dtype,
         weight_dtype=self.weight_dtype,
         quant=self.quant,
         matmul_precision=self.config.matmul_precision,
         use_bias=self.use_bias_in_projections,
         rngs=self.rngs,
+        tensor_name="qkv"
     )
 
   def qkv_projection(self, inputs: Array, proj_name: str):
@@ -634,13 +637,14 @@ class Attention(nnx.Module):
         out_features_shape=output_dim,
         axis=(-2, -1),
         kernel_init=self.kernel_init,
-        kernel_axes=self.sharding(t="out", a=out_kernel_axis, tt=WT),
+        kernel_axes=out_kernel_axis,
         dtype=self.dtype,
         weight_dtype=self.weight_dtype,
         quant=self.quant,
         matmul_precision=self.config.matmul_precision,
         use_bias=self.use_bias_in_projections,
         rngs=self.rngs,
+        tensor_name="out",
     )
 
   def out_projection(self, out: Array) -> Array:

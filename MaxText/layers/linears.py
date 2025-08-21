@@ -113,6 +113,8 @@ class DenseGeneral(nnx.Module):
       parameter_memory_host_offload: bool = False,
       *,  # Following arguments are keyword-only
       rngs: nnx.Rngs = None,
+      tensor_name: str = "dense_general",
+      sharding: MeshSharding | None = LogicalAxisRulesSharding(),
   ):
     """Initializes the DenseGeneral module.
 
@@ -142,6 +144,8 @@ class DenseGeneral(nnx.Module):
     self.use_bias = use_bias
     self.matmul_precision = matmul_precision
     self.parameter_memory_host_offload = parameter_memory_host_offload
+    self.tensor_name = tensor_name
+    self.sharding = sharding
 
     # Parameter initialization
     kernel_shape = self.in_features_shape + self.out_features_shape
@@ -157,18 +161,15 @@ class DenseGeneral(nnx.Module):
               kernel_in_axis,
               kernel_out_axis,
           ),
-          sharding=kernel_axes,
-          # sharding=self.sharding(t="dense", a=self.kernel_axes, tt=WT),
+          sharding=self.sharding(t=self.tensor_name, a=self.kernel_axes, tt=WT),
       )
 
     if self.use_bias:
-      # FIXME: check this works when kernel_axes is a PartitionSpec
       bias_axes = self.kernel_axes[-len(self.out_features_shape) :]
       bias_shape = kernel_shape[-len(self.out_features_shape) :]
       self.bias = nnx.Param(
           default_bias_init(rngs.params(), bias_shape, self.weight_dtype),
-          sharding=bias_axes,
-          # sharding=self.sharding(t="dense", a=bias_axes, tt=WT),
+          sharding=self.sharding(t=f"{self.tensor_name}_bias", a=bias_axes, tt=WT),
       )
     else:
       self.bias = None
@@ -252,6 +253,7 @@ def dense_general(
     matmul_precision: str = "default",
     parameter_memory_host_offload: bool = False,
     name: Optional[str] = None,
+    sharding: MeshSharding | None = LogicalAxisRulesSharding(),
 ):
   """Creates a DenseGeneral Linen module using nnx.bridge.to_linen.
 
@@ -295,6 +297,8 @@ def dense_general(
       name=name,
       metadata_fn=variable_to_logically_partitioned,
       abstract_init=False,
+      sharding=sharding,
+      tensor_name=name,
   )
   return module
 
@@ -369,11 +373,12 @@ class MlpBlock(nnx.Module):
           dtype=self.dtype,
           weight_dtype=self.weight_dtype,
           kernel_init=self.kernel_init,
-          kernel_axes=self.sharding(t="mlp_wi_fused", a=("embed", "num_activations", "mlp"), tt=WT),
+          kernel_axes=("embed", "num_activations", "mlp"),
           quant=self.quant,
           use_bias=self.use_bias,
           matmul_precision=self.config.matmul_precision,
           rngs=rngs,
+          tensor_name="mlp_wi_fused"
       )
     else:
       for idx in range(len(self.activations)):
@@ -384,25 +389,28 @@ class MlpBlock(nnx.Module):
             dtype=self.dtype,
             weight_dtype=self.weight_dtype,
             kernel_init=self.kernel_init,
-            kernel_axes=self.sharding(t="mlp_wi_unfused", a=("embed", "mlp"), tt=WT),
+            kernel_axes=("embed", "mlp"),
             quant=self.quant,
             use_bias=self.use_bias,
             matmul_precision=self.config.matmul_precision,
             rngs=rngs,
+            tensor_name="mlp_wi_unfused",
         )
         setattr(self, dense_name, module)
     self.dropout = nnx.Dropout(rate=self.intermediate_dropout_rate, broadcast_dims=(-2,), rngs=rngs)
+
     self.wo = DenseGeneral(
         in_features_shape=self.intermediate_dim,
         out_features_shape=in_features,
         dtype=self.dtype,
         weight_dtype=self.weight_dtype,
         kernel_init=self.kernel_init,
-        kernel_axes=self.sharding(t="mlp_wo", a=("mlp", "embed"), tt=WT),
+        kernel_axes=("mlp", "embed"),
         quant=self.quant,
         use_bias=self.use_bias,
         matmul_precision=self.config.matmul_precision,
         rngs=rngs,
+        tensor_name="mlp_wo",
     )
 
   def get_norm_layer(self, num_features: int):

@@ -49,6 +49,7 @@ class MeshSharding(ABC):
   def __call__(self, *args: Any, **kwargs) -> PartitionSpec:
     pass
 
+  # TODO: rename to check and throw instead of or as well as asserting
   def assert_valid_axes(self, axes: PartitionSpec) -> None:
     valid_axis_values = {member.value for member in Axis}
     valid_axes_str = ", ".join(f"'{v}'" for v in valid_axis_values)
@@ -78,9 +79,22 @@ class MeshSharding(ABC):
 
 class LogicalAxisRulesSharding(MeshSharding):
 
+  def check_valid_axes(axes, axis_rules):
+     for axis in axes:
+        axis_found = False
+        for mapping in axis_rules:
+           axis_found = True
+           break
+        if not axis_found:
+          # TODO: maybe remove assert, depending how this shows up in debugger
+          assert False
+          raise Exception(f"Logical axis {axis} not found  in axis rules:\n {axis_rules}")
+
   def __call__(self, *args: Any, **kwargs) -> PartitionSpec:
     axes = kwargs["a"]
-    mesh_axes = logical_to_mesh_axes(axes, get_logical_axis_rules())
+    axis_rules = get_logical_axis_rules()
+
+    mesh_axes = logical_to_mesh_axes(axes, axis_rules)
     self.assert_valid_axes(mesh_axes)
     return mesh_axes  # TODO: consider asserting/raising when an axis comes back as None
 
