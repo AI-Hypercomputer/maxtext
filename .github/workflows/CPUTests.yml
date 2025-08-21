@@ -74,6 +74,7 @@ jobs:
       with:
         message: |
           _(execution **${{ github.run_id }}** / attempt **${{ github.run_attempt }}**)_
+          git diff --name-only HEAD "${GITHUB_BASE_REF}" '*.py'
           python3 -m pylint --disable C0114,R0401,R0917,W0201,W0613 $(git ls-files '*.py')
           pyink pedagogical_examples --check --diff --color --pyink-indentation=2 --line-length=125
         comment-tag: execution
