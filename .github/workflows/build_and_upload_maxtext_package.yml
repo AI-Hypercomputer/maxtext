@@ -63,6 +63,6 @@ jobs:
           # file and the req lock files commited to the maxtext's repo. This can let the users see the generated files and easily check the
           # deps and the versions for testing back time. Also reduce time in this workflow. seed-env only needs to run in the presubmit if a PR
           # changes the maxtext's requirements.txt or modified the source package structure (won't be needed if maxtext uses src-layout).
-          seed-env --local-requirements=requirements_with_lower_bounds.txt --host-name=MaxText --seed-commit=779c6aefcac3ff0149b28e183770cc1da0879c84 --output-dir=. --python-version=3.11,3.12 --build-pypi-package
+          seed-env --local-requirements=requirements_with_lower_bounds.txt --host-name=MaxText --seed-commit=a2af277352a86d85c5212243ac7b9cda5fd2f1f9 --output-dir=. --python-version=3.11,3.12 --build-pypi-package
       - name: Upload Python wheel to GCS
         run: gcloud storage cp dist/*.whl gs://seed-env-dev/maxtext/${{ github.sha }}/
