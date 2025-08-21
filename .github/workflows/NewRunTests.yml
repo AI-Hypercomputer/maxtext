@@ -46,11 +46,15 @@ jobs:
   cpu_unit_tests:
     needs: build_and_upload_maxtext_package
     uses: ./.github/workflows/run_tests_against_package.yml
+    strategy:
+        fail-fast: false # don't cancel all jobs on failure
+        matrix:
+          image_type: ["tpu_py311", "tpu_py312"]
     with:
       device_type: cpu
       device_name: X64
       cloud_runner: linux-x86-n2-16
-      image_type: tpu
+      image_type: ${{ matrix.image_type }}
       pytest_marker: 'cpu_only'
       xla_python_client_mem_fraction: 0.75
       tf_force_gpu_allow_growth: false
@@ -60,9 +64,14 @@ jobs:
   tpu_unit_tests:
     needs: build_and_upload_maxtext_package
     uses: ./.github/workflows/run_tests_against_package.yml
+    strategy:
+        fail-fast: false # don't cancel all jobs on failure
+        matrix:
+          image_type: ["tpu_py311", "tpu_py312"]
     with:
       device_type: tpu
       device_name: v4-8
+      image_type: ${{ matrix.image_type }}
       cloud_runner: linux-x86-ct4p-240-4tpu
       pytest_marker: 'not cpu_only and not gpu_only and not integration_test'
       xla_python_client_mem_fraction: 0.75
@@ -73,9 +82,14 @@ jobs:
   tpu_integration_tests:
     needs: build_and_upload_maxtext_package
     uses: ./.github/workflows/run_tests_against_package.yml
+    strategy:
+        fail-fast: false # don't cancel all jobs on failure
+        matrix:
+          image_type: ["tpu_py311", "tpu_py312"]
     with:
       device_type: tpu
       device_name: v4-8
+      image_type: ${{ matrix.image_type }}
       cloud_runner: linux-x86-ct4p-240-4tpu
       pytest_marker: 'not cpu_only and not gpu_only and integration_test'
       xla_python_client_mem_fraction: 0.75

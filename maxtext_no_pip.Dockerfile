@@ -1,5 +1,9 @@
-# Use Python 3.12-slim-bullseye as the base image
-FROM python:3.12.3-slim-bullseye
+# Default to Python 3.12. This ARG must be declared before FROM.
+ARG PYTHON_VERSION=3.12
+
+# FROM python:3.12.3-slim-bullseye
+# Use the PYTHON_VERSION ARG to specify the base image tag
+FROM python:${PYTHON_VERSION}-slim-bullseye
 
 # Set the working directory in the container
 WORKDIR /deps
@@ -12,9 +16,9 @@ ARG DEVICE
 # Enviroment variables
 # ENV COMMIT_HASH=$COMMIT_HASH
 ENV DEVICE=$DEVICE
+ENV PYTHON_VERSION=${PYTHON_VERSION}
 ENV PIP_NO_CACHE_DIR=1
 ENV PIP_ROOT_USER_ACTION=ignore
-ENV PYTHON_VERSION=3.12
 ENV CLOUD_SDK_VERSION=latest
 # Ensure apt package installations run without manual intervention
 ENV DEBIAN_FRONTEND=noninteractive
@@ -37,16 +41,6 @@ RUN export GCSFUSE_REPO=gcsfuse-bullseye && \
 # See all installed system level packages
 RUN apt list --installed
 
-# COPY . .
-# RUN ls .
-# TODO(kanglan): Move this to the github workflow.
-# # Copy over test assets if building image for end-to-end tests or unit tests
-# RUN if [ "$TEST_TYPE" = "xlml" ] || [ "$TEST_TYPE" = "unit_test" ]; then \
-#       if ! gcloud storage cp -r gs://maxtext-test-assets/* MaxText/test_assets; then \
-#         echo "WARNING: Failed to download test assets from GCS. These files are only used for end-to-end tests; you may not have access to the bucket."; \
-#       fi; \
-#     fi
-
 # Upgrade pip to the latest version
 RUN python -m pip install uv
 RUN python -m uv pip install --upgrade pip
@@ -54,8 +48,6 @@ RUN rm -rf /root/.cache/pip
 
 # Clean python env
 RUN python -m uv pip list
-
-# RUN gcloud storage cp -r gs://maxtext-test-assets/* MaxText/test_assets
 
 # Run the script to generate the manifest file
 # TODO(kanglan): Check if this line is needed.

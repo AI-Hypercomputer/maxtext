@@ -36,6 +36,7 @@ tensorboardx>=2.6.2.2
 tensorflow-datasets
 tensorflow-text>=2.17.0
 tensorflow>=2.16.0
+transformer-engine[jax]
 tiktoken
 transformers
 google-jetstream @ https://github.com/AI-Hypercomputer/JetStream/archive/261f25007e4d12bb57cf8d5d61e291ba8f18430f.zip

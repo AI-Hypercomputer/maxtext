@@ -64,6 +64,9 @@ jobs:
           mkdir dist
           gsutil cp gs://seed-env-dev/maxtext/${{ github.sha }}/*.whl dist/
           uv pip install dist/*.whl --resolution=lowest --system
+          # TODO(kanglant): Remove these two lines later
+          python3 --version
+          python3 -m pip list
       - name: Copy test assets files
         run : gcloud storage cp gs://maxtext-test-assets/* MaxText/test_assets
       - name: Run Tests
@@ -73,5 +76,5 @@ jobs:
           else
             FINAL_PYTEST_MARKER="${{ inputs.pytest_marker }} and not scheduled_only"
           fi
-          python3 -m pip install -e . --no-dependencies &&
+          # python3 -m pip install -e . --no-dependencies &&
           python3 -m pytest -v --pyargs MaxText.tests -m "${FINAL_PYTEST_MARKER}" --durations=0
