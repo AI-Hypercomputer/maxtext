@@ -10,8 +10,8 @@ google-cloud-aiplatform>=1.105.0
 google-cloud-monitoring
 grain[parquet]>=0.2.6
 huggingface_hub
-jax>=0.4.30
-jaxlib>=0.4.30
+jax>=0.4.30,<0.7.1
+jaxlib>=0.4.30,<0.7.1
 jaxtyping
 jsonlines
 ml-collections
