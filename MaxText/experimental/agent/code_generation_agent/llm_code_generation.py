@@ -29,29 +29,35 @@ Here's a breakdown of its functionality:
     *   It loads environment variables (presumably for API keys and model names) using `python-dotenv`.
     *   It sets up logging for better traceability.
     *   It defines an output directory (`JAX_OUTPUT_DIR`) for the converted JAX files.
-    *   It initializes a `GeminiAgent` instance, providing it with a `SystemPrompt` from `prompt_code_generation.py`. This prompt guides the Gemini model on its role as an expert machine learning engineer for code conversion.
+    *   It initializes a `GeminiAgent` instance, providing it with a `SystemPrompt` from `prompt_code_generation.py`.
+        This prompt guides the Gemini model on its role as an expert machine learning engineer for code conversion.
 
 2.  **`get_chat_dict` Function**:
     *   A helper function to format user messages into the dictionary structure expected by the Gemini API.
 
 3.  **`convert_code_from_torch_to_jax` Function**:
     *   This is the core conversion logic.
-    *   It takes a `codeComponent` (a string containing the Python code to be converted) and an optional `memory_list` (for conversational context).
-    *   It constructs a user message using the `CODE` template from `prompt_code_generation.py`, embedding the `codeComponent` into it.
+    *   It takes a `codeComponent` (a string containing the Python code to be converted) and an optional `memory_list`
+        (for conversational context).
+    *   It constructs a user message using the `CODE` template from `prompt_code_generation.py`, embedding the 
+        `codeComponent` into it.
     *   It appends this user message to the `memory_list`.
     *   It then calls the `llm_agent` (which wraps the Gemini model) with the `memory_list` to get a response.
-    *   Upon receiving a response, it extracts the converted code using `parse_python_code` (from `orchestration_agent.Utils`) and updates the `memory_list` with the model's response.
+    *   Upon receiving a response, it extracts the converted code using `parse_python_code` (from 
+        `orchestration_agent.Utils`) and updates the `memory_list` with the model's response.
     *   It handles potential errors if the LLM agent fails to return a valid response.
 
 4.  **`parse_args` Function**:
-    *   Parses command-line arguments, allowing the user to specify either a single file (`--file`) or an entire folder (`--folder`) for processing. This ensures mutual exclusivity, meaning only one of these options can be provided.
+    *   Parses command-line arguments, allowing the user to specify either a single file (`--file`) or an entire folder 
+        (`--folder`) for processing. This ensures mutual exclusivity, meaning only one of these options can be provided.
 
 5.  **`process_single_file` Function**:
     *   Reads the content of a specified Python file.
     *  Calls `convert_code_from_torch_to_jax` to perform the conversion.
     *  Writes the converted code to the output directory.
 6.  **`process_files` Function**:
-    *   Determines whether to process a single file or all Python files in a specified folder based on the parsed command-line arguments.
+    *   Determines whether to process a single file or all Python files in a specified folder based on the parsed
+        command-line arguments.
     *   It validates the existence of the specified file or folder and logs errors if they do not exist.
     *   It iterates over all `.py` files in the folder if a folder is specified.
 7.  **Main Execution Block**:
@@ -61,28 +67,26 @@ Here's a breakdown of its functionality:
 Example Invocations:
 
 1. Convert a single PyTorch file to JAX:
-   python llm_code_generation.py --file dataset/PyTorch/masking_utils__or_masks.py
+   python LLMCodeGeneration.py --file Dataset/Pytorch/masking_utils__or_masks.py
    (Ensure the output directory exists or modify the script to create it if necessary.)
 
 2. Convert all PyTorch files in a folder to JAX:
-   python llm_code_generation.py --folder dataset/PyTorch/
+   python LLMCodeGeneration.py --folder Dataset/Pytorch/
    (Ensure the output directory exists or modify the script to create it if necessary.)
 """
 
 from pathlib import Path
+import argparse
+import logging
+import os
+
 from dotenv import load_dotenv  # If this is not available, try ``pip install python-dotenv``
 
 load_dotenv()
-import os, logging, sys
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-
-# What the root dir for running these scripts? Do you have to add this line?
-
-from code_generation_agent.llm_agent import GeminiAgent  
-from orchestration_agent.Utils import parse_python_code
-from code_generation_agent.prompt_code_generation import CodeGeneration  
-import argparse
+from MaxText.experimental.agent.code_generation_agent.llm_agent import GeminiAgent
+from MaxText.experimental.agent.code_generation_agent.prompt_code_generation import CodeGeneration
+from MaxText.experimental.agent.orchestration_agent.utils import parse_python_code
 
 # Set up basic configuration
 logging.basicConfig(
@@ -92,7 +96,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger("__name__")
 
-JAX_OUTPUT_DIR = "./dataset/jax_converted"  # Please set your output directory here, eg. "./dataset/jax_converted"
+JAX_OUTPUT_DIR = os.path.join(
+    os.getcwd(), "dataset", "jax_converted"
+)  # Please set your output directory here, eg. "./dataset/jax_converted"
 os.makedirs(JAX_OUTPUT_DIR, exist_ok=True)
 
 llm_agent = GeminiAgent(CodeGeneration["SystemPrompt"])
@@ -111,7 +117,7 @@ def get_chat_dict(input_message=""):
   return {"role": "user", "parts": input_message}
 
 
-def convert_code_from_torch_to_jax(codeComponent, memory_list=[]):
+def convert_code_from_torch_to_jax(codeComponent, memory_list=None):
   """
   Converts a single code component from PyTorch to JAX using the LLM agent.
 
@@ -125,6 +131,8 @@ def convert_code_from_torch_to_jax(codeComponent, memory_list=[]):
           - str: The converted JAX code.
           - list: The updated memory list.
   """
+  if memory_list is None:
+    memory_list = []
   # This appends the user's input message to the memory list for context.
   memory_list.append(get_chat_dict(input_message=CodeGeneration["CODE"].replace("{TORCHCODE}", codeComponent)))
   response = llm_agent(memory_list)
@@ -162,7 +170,7 @@ def process_single_file(input_path):
     with open(input_path, "r", encoding="utf-8") as f:
       code = f.read()
 
-    converted_code, _ = convert_code_from_torch_to_jax(code)
+    converted_code, _ = convert_code_from_torch_to_jax(code, [])
 
     output_dir = Path(JAX_OUTPUT_DIR)
     output_dir.mkdir(exist_ok=True)
@@ -174,8 +182,8 @@ def process_single_file(input_path):
     logger.info("Converted code written to %s", output_file)
   except FileNotFoundError:
     logger.error("File not found at %s", input_path)
-  except Exception as e:
-    logger.error("An error occurred while processing %s: %s", input_path, e)
+  except OSError as e:
+    logger.error("OSError occurred while processing %s: %s", input_path, e)
 
 
 def process_files(args):
@@ -202,5 +210,4 @@ def process_files(args):
 
 
 if __name__ == "__main__":
-  args = parse_args()
-  process_files(args)
+  process_files(parse_args())

@@ -16,8 +16,7 @@
 A transformation agent to generate the 
 layerwise and bidirectional transformation hook functions between HF & Maxtext
 """
-
-
+import argparse
 import os
 from MaxText.experimental.agent.ckpt_conversion_agent.utils.utils import load_prompt_template, load_text_file, load_json
 from MaxText.experimental.agent.ckpt_conversion_agent.base import BaseAgent
@@ -89,5 +88,12 @@ class TransformationAgent(BaseAgent):
 
 if __name__ == "__main__":
   TARGET_MODEL = "gemma3-4b"
-  agent = TransformationAgent(target_model=TARGET_MODEL)
-  hook_fn_code = agent.generate_hook_functions()
+  parser = argparse.ArgumentParser(description="A script to process model transformations.")
+  parser.add_argument("--target_model", type=str, required=True, help='The name of the target model (e.g., "GEMMA3").')
+  parser.add_argument(
+      "--dir_path", type=str, required=True, help='The file path to the context directory (e.g., "context/gemma3").'
+  )
+  parser.add_argument("--api_key", type=str, help="Optional API key for external services.")
+  args = parser.parse_args()
+  agent = TransformationAgent(api_key=args.api_key, dir_path=args.dir_path, target_model=TARGET_MODEL)
+  global_hook_fn_code = agent.generate_hook_functions()

@@ -17,6 +17,7 @@ This file contains the prompt templates used by the code generation agent.
 """
 
 CodeGeneration = {
+    # pylint: disable=line-too-long
     "SystemPrompt": """You are an expert machine learning engineer with deep knowledge of PyTorch, NumPy, and JAX (including libraries such as Flax and Optax).
 
     Your task:

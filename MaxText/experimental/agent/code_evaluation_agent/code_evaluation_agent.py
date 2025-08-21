@@ -1,18 +1,16 @@
-"""
-Copyright 2025 Google LLC
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-     https://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-"""
+# Copyright 2023–2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """
 This file implements an agent that evaluates the correctness of JAX code
@@ -52,14 +50,14 @@ Relevant Files:
   code from LLM responses.
 """
 import argparse
-import os, logging, sys
-from prompt_code_evaluation import CodeEvaluation
-from utils import get_last_defined_module, run_pytest_capture_output
+import logging
+import os
+import subprocess
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-
-from code_generation_agent.llm_agent import GeminiAgent
-from orchestration_agent.Utils import parse_python_code
+from MaxText.experimental.agent.code_evaluation_agent.prompt_code_evaluation import CodeEvaluation
+from MaxText.experimental.agent.code_evaluation_agent.utils import get_last_defined_module, run_pytest_capture_output
+from MaxText.experimental.agent.code_generation_agent.llm_agent import GeminiAgent
+from MaxText.experimental.agent.orchestration_agent.utils import parse_python_code
 
 logging.basicConfig(
     format="%(asctime)s %(levelname)-8s %(message)s",
@@ -68,39 +66,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 # logging.raiseExceptions = False
-
-
-parser = argparse.ArgumentParser(description="Code Evaluation Agent")
-parser.add_argument("--error_penalty", type=int, default=10, help="Penalty for errors in test case generation or execution.")
-parser.add_argument(
-    "--pytorch_path",
-    type=str,
-    default="../code_generation_agent/dataset/PyTorch/",
-    help="Path to the directory containing PyTorch files.",
-)
-parser.add_argument(
-    "--jax_path",
-    type=str,
-    default="../code_generation_agent/dataset/jax_converted/",
-    help="Path to the directory containing JAX files.",
-)
-parser.add_argument(
-    "--testcase_path",
-    type=str,
-    default="../code_generation_agent/dataset/test_cases/",
-    help="Path to the directory for generated test cases.",
-)
-parser.add_argument("--overwrite_existing_files", action="store_true", help="Overwrite existing test case files.")
-args = parser.parse_args()
-
-overwrite_existing_files = args.overwrite_existing_files
-error_penalty = args.error_penalty
-pytorch_path = args.pytorch_path
-jax_path = args.jax_path
-testcase_path = args.testcase_path
-os.makedirs(testcase_path, exist_ok=True)
-
-llm_agent = GeminiAgent(CodeEvaluation["SystemPrompt"])
 
 
 def get_file_pairs(pytorch_path, jax_path):
@@ -124,7 +89,7 @@ def get_file_pairs(pytorch_path, jax_path):
   return list(map(lambda x: pytorch_path + x, common_files)), list(map(lambda x: jax_path + x, common_files))
 
 
-def make_test_case_and_run(python_file, jax_file):
+def make_test_case_and_run(error_penalty, jax_file, llm_agent, overwrite_existing_files, python_file, testcase_path):
   """Generates a test case and runs it for a given PyTorch and JAX file pair.
 
   This function uses a language model to generate a pytest-compatible test case
@@ -139,32 +104,36 @@ def make_test_case_and_run(python_file, jax_file):
   Returns:
       A tuple containing the number of passed and failed test cases.
   """
+  response = None
   try:
-    logger.info(f"Processing {python_file}")
+    logger.info("Processing %s", python_file)
     out_file_path = os.path.join(testcase_path, python_file.split("/")[-1])
     if overwrite_existing_files or not os.path.exists(out_file_path):
-      with open(python_file) as f:
+      with open(python_file, "rt", encoding="utf8") as f:
         python_code = f.read()
-      with open(jax_file) as f:
+      with open(jax_file, "rt", encoding="utf8") as f:
         jax_code = f.read()
       entry_module = get_last_defined_module(python_code)
       if get_last_defined_module(jax_code) != entry_module:
         logger.error(
-            f"It seems inconsistency in {python_file} code PyTorch have {entry_module} and JAX have {get_last_defined_module(jax_code)} as entry Module"
+            "It seems inconsistency in %s code PyTorch have %s and JAX have %s as entry Module",
+            python_file,
+            entry_module,
+            get_last_defined_module(jax_code),
         )
         # Penalty in case of Entry point not exist or different from torch
         return 0, error_penalty
       prompt = CodeEvaluation["TESTCASE"]
-      python_code = (
-          "from " + ".".join(python_file.split("/")[1:]).replace(".py", " import " + entry_module) + "\n\n" + python_code
-      )
-      jax_code = "from " + ".".join(jax_file.split("/")[1:]).replace(".py", " import " + entry_module) + "\n\n" + jax_code
+      python_code = f"from {
+          '.'.join(python_file.split('/')[1:]).replace('.py', f' import {entry_module}')}\n\n{python_code}"
+      jax_code = f"from {
+          '.'.join(jax_file.split('/')[1:]).replace('.py', f' import {entry_module}')}\n\n{jax_code}"
       prompt = prompt.replace("<module.path.to.pytorch_code>", python_code)
       prompt = prompt.replace("<module.path.to.jax_code>", jax_code)
       prompt = prompt.replace("<function_or_class_to_call>", entry_module)
       response = llm_agent(prompt)
       generated_code = parse_python_code(response.text)
-      with open(out_file_path, "w") as f:
+      with open(out_file_path, "wt", encoding="utf8") as f:
         f.write("import os,sys\nsys.path.append(os.path.abspath('..'))\n")
         f.write(generated_code)
       logger.info("Written at %s", out_file_path)
@@ -173,17 +142,38 @@ def make_test_case_and_run(python_file, jax_file):
     else:
       logger.info("File Exists using same")
     file = python_file.split("/")[-1]
-    output, exit_code, is_dependency_error, passed, failed = run_pytest_capture_output(file, code_folder=testcase_path)
+    _, _, _, passed, failed = run_pytest_capture_output(file, code_folder=testcase_path)
     return passed, failed
-  except Exception as e:
-    logger.error("Exception in code generation %s", e)
+  except FileNotFoundError as e:
+    logger.error("File not found during test case generation: %s", e)
     logger.error("The code file is %s", python_file.split("/")[-1])
-    logger.error("The generated Code is %s", response)
-    # Penalty in case of Exception
+    return 0, error_penalty
+  except OSError as e:
+    logger.error("File I/O error during test case generation: %s", e)
+    logger.error("The code file is %s", python_file.split("/")[-1])
+    return 0, error_penalty
+  except SyntaxError as e:
+    logger.error("Syntax error in source or generated code: %s", e)
+    logger.error("The code file is %s", python_file.split("/")[-1])
+    return 0, error_penalty
+  except subprocess.SubprocessError as e:
+    logger.error("Error running pytest subprocess: %s", e)
+    logger.error("The code file is %s", python_file.split("/")[-1])
+    return 0, error_penalty
+  except (KeyError, AttributeError, TypeError, ValueError) as e:
+    logger.error("Data handling error during test case generation: %s", e)
+    logger.error("The code file is %s", python_file.split("/")[-1])
+    logger.error("The LLM response was: %s", response)
+    return 0, error_penalty
+  except RuntimeError as e:
+    # Catch other unexpected errors, e.g., from the LLM agent call
+    logger.error("An unexpected runtime error occurred: %s", e)
+    logger.error("The code file is %s", python_file.split("/")[-1])
+    logger.error("The LLM response was: %s", response)
     return 0, error_penalty
 
 
-def run_code_evaluation():
+def run_code_evaluation(error_penalty, jax_path, llm_agent, overwrite_existing_files, pytorch_path, testcase_path):
   """Runs the full code evaluation process.
 
   This function orchestrates the evaluation of PyTorch and JAX code file pairs.
@@ -194,11 +184,18 @@ def run_code_evaluation():
   total_passed, total_failed = 0, 0
   all_passed, all_failed, total_files = 0, 0, 0
   for python_file, jax_file in zip(*get_file_pairs(pytorch_path, jax_path)):
-    num_passed, num_failed = make_test_case_and_run(python_file, jax_file)
-    if num_passed == num_failed == 0: # when the code cannot be executed
+    num_passed, num_failed = make_test_case_and_run(
+        error_penalty=error_penalty,
+        jax_file=jax_file,
+        llm_agent=llm_agent,
+        overwrite_existing_files=overwrite_existing_files,
+        python_file=python_file,
+        testcase_path=testcase_path,
+    )
+    if num_passed == num_failed == 0:  # when the code cannot be executed
       # Penalty in case of issue in test case and not executed
       num_failed = error_penalty
-    logger.info(f"{python_file.split('/')[-1]} have {num_passed} cases passed and {num_failed} cases failed")
+    logger.info("%s have %d cases passed and %d cases failed", python_file.split("/")[-1], num_passed, num_failed)
     total_passed += num_passed
     total_failed += num_failed
     if num_passed == 0:
@@ -208,14 +205,62 @@ def run_code_evaluation():
     total_files += 1
 
   logger.info("****** Results ******")
-  logger.info(f"{all_passed} files have all module passed {all_failed} files have all module failed")
+  logger.info("%d files have all module passed %d files have all module failed", all_passed, all_failed)
+  logger.info("Test case Accuracy %.2f%%", total_passed * 100 / (total_passed + total_failed))
   logger.info(
-      f"Test case Accuracy {total_passed*100/(total_passed+total_failed):.2f}%",
+      "File Accuracy %.2f%%",
+      all_passed * 100 / total_files,
   )
-  logger.info(
-      f"File Accuracy {all_passed * 100 / total_files:.2f}%",
+
+
+def argparse_parser():
+  """
+  Parses command-line arguments for file or folder processing.
+
+  Returns:
+      argparse.Namespace: The parsed command-line arguments.
+  """
+  parser = argparse.ArgumentParser(description="Code Evaluation Agent")
+  parser.add_argument(
+      "--error_penalty", type=int, default=10, help="Penalty for errors in test case generation or execution."
+  )
+  parser.add_argument(
+      "--pytorch_path",
+      type=str,
+      default="../code_generation_agent/dataset/PyTorch/",
+      help="Path to the directory containing PyTorch files.",
+  )
+  parser.add_argument(
+      "--jax_path",
+      type=str,
+      default="../code_generation_agent/dataset/jax_converted/",
+      help="Path to the directory containing JAX files.",
+  )
+  parser.add_argument(
+      "--testcase_path",
+      type=str,
+      default="../code_generation_agent/dataset/test_cases/",
+      help="Path to the directory for generated test cases.",
+  )
+  parser.add_argument("--overwrite_existing_files", action="store_true", help="Overwrite existing test case files.")
+  return parser
+
+
+def main():
+  args = argparse_parser().parse_args()
+
+  os.makedirs(args.testcase_path, exist_ok=True)
+
+  llm_agent = GeminiAgent(CodeEvaluation["SystemPrompt"])
+  return run_code_evaluation(
+      error_penalty=args.error_penalty,
+      jax_path=args.jax_path,
+      llm_agent=llm_agent,
+      overwrite_existing_files=args.overwrite_existing_files,
+      pytorch_path=args.pytorch_path,
+      testcase_path=args.testcase_path,
   )
 
 
 if __name__ == "__main__":
-  run_code_evaluation()
+  main()

@@ -11,6 +11,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+"""Qwen3 ckpt conversation agent ground truth hook functions."""
+
+import numpy as np
+
+
 def QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, scan_layers=False, saving_to_hf=False):
   """Creates parameter transformation functions for Qwen3.
 

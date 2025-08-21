@@ -270,7 +270,6 @@ class MoeLoopBlock(nnx.Module):
   This is not included anymore in our repo, due to a limitation of for-loop implementation in sharding.
   """
 
-
   def __init__(
       self,
       config: Config,
