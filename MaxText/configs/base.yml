@@ -44,6 +44,7 @@ load_full_state_path: ""
 # async_checkpointing is true, else a synchronous one is used. If you have
 # problems with the checkpointer we recommend trying the synchronous one.
 enable_checkpointing: True
+save_checkpoint_on_completion: True
 async_checkpointing: True
 checkpoint_period: 10_000
 # enables one replica to read the ckpt then broadcast to the rest
