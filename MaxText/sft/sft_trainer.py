@@ -40,12 +40,12 @@ from flax import nnx
 from functools import partial
 import jax
 from tunix.sft import peft_trainer, profiler
-import optax
 import os
 import MaxText as mt
 from orbax import checkpoint as ocp
 from MaxText import max_utils
 from MaxText import maxtext_utils
+from MaxText import optimizers
 from MaxText import pyconfig
 from MaxText.integration.tunix.tunix_adaptor import TunixMaxTextLlama
 from MaxText.sft import hooks
@@ -86,16 +86,6 @@ def get_tunix_config(mt_config):
       profiler_options=profiler_options,
   )
 
-
-def gen_model_input_fn(x):
-  return {
-      "input_tokens": x["inputs"],
-      "input_mask": x["inputs_segmentation"],
-      "positions": x["inputs_position"],
-      "attention_mask": x["inputs_segmentation"],
-  }
-
-
 def get_maxtext_model(config):
   def create_model():
     return mt.from_pretrained(config, rngs=nnx.Rngs(params=0, dropout=1))
@@ -133,29 +123,46 @@ def get_maxtext_model(config):
     if checkpoint:
       nnx.update(model, checkpoint)
 
+    # Required when using Tunix default loss function.
     tunix_model = TunixMaxTextLlama(
         base_model=model,
         use_attention_mask=False,  # trust Tunix loss masking
     )
+
   return tunix_model, mesh
 
 
-def run_sft_training(mt_config, goodput_recorder):
+def use_tunix_default_loss_function(trainer):
+  def gen_model_input_fn(x):
+    return {
+        "input_tokens": x["inputs"],
+        "positions": x["inputs_position"],
+        "input_mask": x["inputs_segmentation"],
+        "attention_mask": x["inputs_segmentation"],
+    }
+
+  trainer = trainer.with_gen_model_input_fn(gen_model_input_fn)
+  return trainer
+
+
+def train(mt_config, goodput_recorder=None):
+  tunix_config = get_tunix_config(mt_config)
   with maybe_record_goodput(goodput_recorder, GoodputEvent.TPU_INIT):
     model, mesh = get_maxtext_model(mt_config)
+    learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(mt_config)
+    optimizer = optimizers.get_optimizer(mt_config, learning_rate_schedule)
 
   with maybe_record_goodput(goodput_recorder, GoodputEvent.TRAINING_PREPARATION):
-    learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(mt_config)
     training_hooks = hooks.SFTTrainingHooks(mt_config, mesh, learning_rate_schedule, goodput_recorder)
     data_hooks = hooks.SFTDataHooks(mt_config, mesh, goodput_recorder)
 
-    tunix_config = get_tunix_config(mt_config)
-    trainer = peft_trainer.PeftTrainer(model, optax.sgd(learning_rate_schedule), tunix_config)
+    trainer = peft_trainer.PeftTrainer(model, optimizer, tunix_config)
     trainer.with_training_hooks(training_hooks)
     trainer.with_data_hooks(data_hooks)
-    trainer = trainer.with_gen_model_input_fn(gen_model_input_fn)
+    trainer = use_tunix_default_loss_function(trainer)
 
-  trainer.train(data_hooks.train_data_iterator, data_hooks.eval_data_iterator)
+  with mesh:
+    trainer.train(data_hooks.train_data_iterator, data_hooks.eval_data_iterator)
 
 
 def main(argv: Sequence[str]) -> None:
@@ -171,7 +178,7 @@ def main(argv: Sequence[str]) -> None:
   goodput_recorder = create_goodput_recorder(mt_config)
 
   with maybe_record_goodput(goodput_recorder, GoodputEvent.JOB):
-    run_sft_training(mt_config, goodput_recorder)
+    train(mt_config, goodput_recorder)
 
 
 if __name__ == "__main__":
