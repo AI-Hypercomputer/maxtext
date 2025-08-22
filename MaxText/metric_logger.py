@@ -181,23 +181,23 @@ class MetricLogger:
       (step_to_write, metrics_to_write) = self.buffered_train_metrics
       self.write_metrics(metrics_to_write, step_to_write)
 
-    self.record_train_metrics(metrics, step, step_time_delta)
+    self.record_train_metrics(metrics, step, step_time_delta.total_seconds())
     self.buffered_train_metrics = (step, metrics)
 
-  def record_train_metrics(self, metrics, step, step_time_delta):
+  def record_train_metrics(self, metrics, step, step_time):
     """Records training metrics for the current step."""
-    metrics["scalar"].update({"perf/step_time_seconds": step_time_delta.total_seconds()})
+    metrics["scalar"].update({"perf/step_time_seconds": step_time})
     metrics["scalar"].update({"perf/per_device_tflops": self.metadata["per_device_tflops"]})
     metrics["scalar"].update(
-        {"perf/per_device_tflops_per_sec": self.metadata["per_device_tflops"] / step_time_delta.total_seconds()}
+        {"perf/per_device_tflops_per_sec": self.metadata["per_device_tflops"] / step_time}
     )
     metrics["scalar"].update({"perf/per_device_tokens": self.metadata["per_device_tokens"]})
     metrics["scalar"].update(
-        {"perf/per_device_tokens_per_sec": self.metadata["per_device_tokens"] / step_time_delta.total_seconds()}
+        {"perf/per_device_tokens_per_sec": self.metadata["per_device_tokens"] / step_time}
     )
     metrics["scalar"].update({"learning/current_learning_rate": self.learning_rate_schedule(step)})
     if self.performance_metric_queue:
-      self.performance_metric_queue.put(step_time_delta.total_seconds())
+      self.performance_metric_queue.put(step_time)
 
   def record_eval_metrics(self, step, metrics=None, eval_step_count=None):
     """Records eval metrics and writes the metrics to GCS and/or to TensorBoard."""
