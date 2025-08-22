@@ -24,7 +24,7 @@ import argparse
 import os
 import time
 
-from MaxText.inference_utils import str2bool
+from benchmarks.benchmark_utils import str2bool
 from benchmarks.maxtext_trillium_model_configs import trillium_model_dict
 from benchmarks.maxtext_v5p_model_configs import v5p_model_dict
 from benchmarks.maxtext_v5e_model_configs import v5e_model_dict

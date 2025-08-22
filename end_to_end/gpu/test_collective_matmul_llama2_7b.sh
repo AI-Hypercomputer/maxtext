@@ -42,7 +42,7 @@ export XLA_FLAGS="--xla_dump_hlo_as_text
     --xla_gpu_multi_streamed_windowed_einsum=true"
 
 python3 -m MaxText.train \
-    MaxText/configs/base.yml \
+    src/MaxText/configs/base.yml \
     model_name=${MODEL} \
     per_device_batch_size=0.125 \
     steps=1 \

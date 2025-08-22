@@ -16,4 +16,4 @@
 
 python3 -m pylint --disable C0114,R0401,R0917,W0201,W0613 $(git ls-files '*.py')
 
-python3 -m pytest --pyargs MaxText.tests
+python3 -m pytest --pyargs tests

@@ -28,7 +28,7 @@ export CKPT_PATH=gs://maxtext-gemma/unified/gemma2/2b/unscanned/2025-08-05-18-06
 # export HF_CKPT_PATH=${MODEL_BUCKET}/${MODEL_VARIATION}/hf/${idx}
 export LOCAL_PATH=./tmp/hf/${MODEL_NAME}/${idx}
 
-python3 -m MaxText.utils.ckpt_conversion.to_huggingface MaxText/configs/base.yml \
+python3 -m MaxText.utils.ckpt_conversion.to_huggingface src/MaxText/configs/base.yml \
     model_name=${MODEL_NAME} \
     hf_access_token=${HF_TOKEN} \
     load_parameters_path=${CKPT_PATH} \
@@ -41,7 +41,7 @@ python3 -m MaxText.utils.ckpt_conversion.to_huggingface MaxText/configs/base.yml
 
 # We also test whether the forward pass logits match the original HF model
 # to get higher precision (eg. float32) run on CPU with `JAX_PLATFORMS=cpu`
-python3 -m MaxText.tests.forward_pass_logit_checker MaxText/configs/base.yml \
+python3 -m tests.forward_pass_logit_checker src/MaxText/configs/base.yml \
     tokenizer_path=${TOKENIZER_PATH} \
     load_parameters_path=${CKPT_PATH} \
     model_name=${MODEL_NAME} \

@@ -36,7 +36,7 @@ Pre-training and Fine-tuning
 After converting the checkpoint, you can use it for fine-tuning or start a pre-training run from scratch. The command below is an example for fine-tuning on a v5p-256 slice. To pre-train, simply remove the `load_parameters_path` argument.
 
 ```
-python3 -m MaxText.train MaxText/configs/base.yml\
+python3 -m MaxText.train src/MaxText/configs/base.yml\
     base_output_directory=${BASE_OUTPUT_DIRECTORY}\
     dataset_path=${DATASET_PATH}\
     load_parameters_path=gs://your-gcs-bucket/qwen3_maxtext_ckpt/0/items\
@@ -58,7 +58,7 @@ Decoding
 To generate text with a trained model, use the `decode` command.
 
 ```
-python3 -m MaxText.decode MaxText/configs/base.yml\
+python3 -m MaxText.decode src/MaxText/configs/base.yml\
     load_parameters_path=gs://your-gcs-bucket/qwen3_maxtext_ckpt/0/items\
     tokenizer_path=assets/qwen3-tokenizer\
     prompt="Today is a beautiful day to"\
@@ -85,6 +85,6 @@ export MAXTEXT_CHECKPOINT_PATH=gs://your-gcs-bucket/qwen3_maxtext_ckpt/0/items/
 # export HF_MODEL_PATH=/path/to/local/qwen3_hf_checkpoint
 
 # Execute the validation script
-bash MaxText/end_to_end/tpu/qwen/moe/qwen3-235b-a22b/1_test_qwen3_235b_a22b.sh
+bash src/MaxText/end_to_end/tpu/qwen/moe/qwen3-235b-a22b/1_test_qwen3_235b_a22b.sh
 
 ```

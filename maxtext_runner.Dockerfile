@@ -10,7 +10,7 @@ WORKDIR /deps
 
 # Copy assets separately
 COPY assets assets/
-COPY MaxText/test_assets/ MaxText/test_assets/
+COPY src/MaxText/test_assets src/MaxText/test_assets/
 
 # Copy all files except assets from local workspace into docker container
-COPY --exclude=assets --exclude=MaxText/test_assets . .
+COPY --exclude=assets --exclude=src/MaxText/test_assets . .

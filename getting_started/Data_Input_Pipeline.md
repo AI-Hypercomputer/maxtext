@@ -118,7 +118,7 @@ Note: When using multiple data sources, only ArrayRecord format is supported.
 bash setup_gcsfuse.sh \
 DATASET_GCS_BUCKET=maxtext-dataset \
 MOUNT_PATH=/tmp/gcsfuse && \
-python3 -m MaxText.train MaxText/configs/base.yml \
+python3 -m MaxText.train src/MaxText/configs/base.yml \
 run_name=<RUN_NAME> base_output_directory=gs://<MY_BUCKET>  \
 dataset_type=grain \
 grain_file_type=arrayrecord \

@@ -39,7 +39,7 @@ export XLA_FLAGS="--xla_dump_hlo_as_text
     --xla_disable_hlo_passes=rematerialization"
 
 python3 -m MaxText.train \
-    MaxText/configs/base.yml \
+    src/MaxText/configs/base.yml \
     model_name=${MODEL} \
     quantization=fp8 \
     per_device_batch_size=0.125 \
