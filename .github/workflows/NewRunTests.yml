@@ -49,7 +49,7 @@ jobs:
     strategy:
         fail-fast: false # don't cancel all jobs on failure
         matrix:
-          image_type: ["tpu_py311", "tpu_py312"]
+          image_type: ["tpu_py312"]
     with:
       device_type: cpu
       device_name: X64
@@ -67,7 +67,7 @@ jobs:
     strategy:
         fail-fast: false # don't cancel all jobs on failure
         matrix:
-          image_type: ["tpu_py311", "tpu_py312"]
+          image_type: ["tpu_py312"]
     with:
       device_type: tpu
       device_name: v4-8
@@ -85,7 +85,7 @@ jobs:
     strategy:
         fail-fast: false # don't cancel all jobs on failure
         matrix:
-          image_type: ["tpu_py311", "tpu_py312"]
+          image_type: ["tpu_py312"]
     with:
       device_type: tpu
       device_name: v4-8
