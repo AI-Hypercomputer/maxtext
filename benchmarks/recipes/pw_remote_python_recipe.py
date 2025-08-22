@@ -15,6 +15,7 @@
 import os
 import sys
 import args_helper as helper
+from benchmarks.benchmark_utils import get_xpk_path
 
 parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.append(parent_dir)
@@ -33,7 +34,7 @@ def main() -> int:
       device_type="v6e-256",
   )
 
-  xpk_path = "xpk"
+  xpk_path = get_xpk_path()
 
   # Handle command line arguments using args_helper
   should_continue = helper.handle_cmd_args(
