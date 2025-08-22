@@ -62,19 +62,20 @@ jobs:
     - name: Analysing the code with pyink in pedagogical_examples/
       run: |
         pyink pedagogical_examples --check --diff --color --pyink-indentation=2 --line-length=125
+#    - name: Comment on PR with a quality report
+#      uses: actions/github-script@v7
+#      with:
+#        script: |
+#          pyink pedagogical_examples --check --diff --color --pyink-indentation=2 --line-length=125
+#          const script = require('./.github/workflows/utils/qa_issue_comment.js')
+#          console.log(script({github, context}))
+    - name: Prepare quality report
+      run: .github/workflows/utils/qa_markdown.sh > /tmp/qa.md
     - name: Comment on PR with a quality report
-      uses: actions/github-script@v7
-      with:
-        script: |
-          pyink pedagogical_examples --check --diff --color --pyink-indentation=2 --line-length=125
-          const script = require('./.github/workflows/utils/qa_issue_comment.js')
-          console.log(script({github, context}))
-    - name: Comment PR with execution number
       uses: thollander/actions-comment-pull-request@v3
       with:
+        file-path: /tmp/qa.md
         message: |
-          _(execution **${{ github.run_id }}** / attempt **${{ github.run_attempt }}**)_
-          git diff --name-only HEAD "${GITHUB_BASE_REF}" '*.py'
-          python3 -m pylint --disable C0114,R0401,R0917,W0201,W0613 $(git ls-files '*.py')
-          pyink pedagogical_examples --check --diff --color --pyink-indentation=2 --line-length=125
+          ## QA checker result # _(execution **${{ github.run_id }}** / attempt **${{ github.run_attempt }}**)_
+
         comment-tag: execution
