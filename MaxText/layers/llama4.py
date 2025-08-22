@@ -19,6 +19,7 @@ import math
 from typing import Optional
 
 import jax.numpy as jnp
+import jax
 from jax import lax
 from jax.ad_checkpoint import checkpoint_name
 from jax.sharding import Mesh
@@ -647,12 +648,13 @@ class Llama4VisionEncoderLayer(nn.Module):
         # its self-attention mechanism.
         model_mode=MODEL_MODE_TRAIN,
     )
-
+    jax.debug.print("Input shape before: {shape}", shape=hidden_states.shape)
     hidden_states = attention_layer(
         inputs_q=hidden_states,
         inputs_kv=hidden_states,
         deterministic=deterministic,
     )
+    jax.debug.print("Input shape after: {shape}", shape=hidden_states.shape)
 
     hidden_states = residual + hidden_states
 

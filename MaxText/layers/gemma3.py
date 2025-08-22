@@ -25,6 +25,7 @@ from flax import nnx
 from MaxText.common_types import Config, AttentionType
 from MaxText.layers import quantizations
 from MaxText.layers.attentions import attention_as_linen
+from MaxText.layers.attentions import Attention
 from MaxText.layers.linears import mlp_block
 from MaxText.layers.normalizations import rms_norm
 from MaxText.layers.quantizations import AqtQuantization as Quant
@@ -343,22 +344,24 @@ class Encoder1DBlock(nnx.Module):
   def __init__(
       self,
       config: Config,
+      mesh: Mesh,
       block_id: int,
       rngs: nnx.Rngs = None,
   ):
     self.block_id = block_id
     self.config = config
+    self.mesh = mesh
     self.rngs = rngs
 
     self.LayerNorm_0 = nnx.LayerNorm(num_features=self.config.hidden_size_for_vit, rngs=self.rngs)
-    self.MultiHeadDotProductAttention_0 = nnx.MultiHeadAttention(
-        in_features=self.config.hidden_size_for_vit,
-        out_features=self.config.hidden_size_for_vit,
-        num_heads=self.config.num_attention_heads_for_vit,
-        dtype=self.config.dtype_mm,
-        kernel_init=nnx.initializers.xavier_uniform(),
-        rngs=self.rngs,
-    )
+    # self.MultiHeadDotProductAttention_0 = nnx.MultiHeadAttention(
+    #     in_features=self.config.hidden_size_for_vit,
+    #     out_features=self.config.hidden_size_for_vit,
+    #     num_heads=self.config.num_attention_heads_for_vit,
+    #     dtype=self.config.dtype_mm,
+    #     kernel_init=nnx.initializers.xavier_uniform(),
+    #     rngs=self.rngs,
+    # )
     self.LayerNorm_1 = nnx.LayerNorm(num_features=self.config.hidden_size_for_vit, rngs=self.rngs)
     self.MlpBlockViT_0 = MlpBlockViT(
         block_id=self.block_id,
@@ -367,16 +370,38 @@ class Encoder1DBlock(nnx.Module):
     )
     self.Dropout_0 = nnx.Dropout(self.config.dropout_rate, rngs=self.rngs)
 
+    # Try MaxText layers
+    self.MultiHeadDotProductAttention_0 = Attention(
+      config=self.config,
+      num_query_heads=self.config.num_attention_heads_for_vit,
+      num_kv_heads=self.config.num_attention_heads_for_vit,
+      head_dim=self.config.hidden_size_for_vit // self.config.num_attention_heads_for_vit,
+      max_target_length=4096,
+      mesh=self.mesh,
+      attention_kernel="dot_product",
+      dropout_rate=0,
+      inputs_q_shape=(4, 4096, 1152),
+      inputs_kv_shape=(4, 4096, 1152),
+      is_nope_layer=True,
+      use_bias_in_projections=True,
+      use_qk_norm=False,
+      model_mode="train",
+      # name="MultiHeadDotProductAttention_0",
+      rngs=self.rngs,
+    )
+    
+
   def __call__(self, x: jax.Array, deterministic: bool = True) -> jax.Array:
     y = self.LayerNorm_0(x)
 
-    y = self.MultiHeadDotProductAttention_0(
-        inputs_q=y,
-        inputs_k=y,
-        inputs_v=y,
-        deterministic=deterministic,
-        decode=False,
-    )
+    # y = self.MultiHeadDotProductAttention_0(
+    #     inputs_q=y,
+    #     inputs_k=y,
+    #     inputs_v=y,
+    #     deterministic=deterministic,
+    #     decode=False,
+    # )
+    y = self.MultiHeadDotProductAttention_0(y, y)
     y = self.Dropout_0(y, deterministic=deterministic)
     x = x + y
 
@@ -393,10 +418,12 @@ class Encoder(nnx.Module):
   def __init__(
       self,
       config: Config,
+      mesh: Mesh,
       *,
       rngs: nnx.Rngs = None,
   ):
     self.config = config
+    self.mesh = mesh
     self.rngs = rngs
 
     for lyr in range(self.config.num_hidden_layers_for_vit):
@@ -404,6 +431,7 @@ class Encoder(nnx.Module):
       layer = Encoder1DBlock(
           block_id=lyr,
           config=self.config,
+          mesh=self.mesh,
           rngs=self.rngs,
       )
       setattr(self, layer_name, layer)
@@ -528,6 +556,7 @@ class Gemma3VisionEncoderLayer(nnx.Module):
     self.Dropout_0 = nnx.Dropout(self.config.dropout_rate, rngs=self.rngs)
     self.Transformer = Encoder(
         config=self.config,
+        mesh=self.mesh,
         rngs=self.rngs,
     )
     self.VisionExit = VisionExit(output_length=256, rngs=self.rngs)

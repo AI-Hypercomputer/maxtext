@@ -14,7 +14,7 @@
 
 # model config for gemma3-4b
 
-base_num_decoder_layers: 34
+base_num_decoder_layers: 1
 base_emb_dim: 2560
 base_num_query_heads: 8
 base_num_kv_heads: 4
