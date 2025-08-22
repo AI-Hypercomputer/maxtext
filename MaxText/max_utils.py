@@ -209,6 +209,8 @@ def initialize_jax_for_cpu(raw_keys):
       num_processes=int(os.environ.get("JAX_PROCESS_COUNT")),
       initialization_timeout=raw_keys["jax_distributed_initialization_timeout"],
   )
+  ocp.multihost.initialize_runtime_to_distributed_ids()
+  ocp.multihost.initialize_distributed_to_device_ids()
 
 
 def _wait_for_file_to_disappear(f, timeout=300):
