@@ -310,8 +310,9 @@ class KVCache(nnx.Module):
     self.model_mode = model_mode
     self.use_chunked_prefill = use_chunked_prefill
 
-    self._initialize_prefill_caches(model_mode)
-    self._initialize_ar_cache_vars(model_mode)
+    if self.model_mode in (MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE):
+      self._initialize_prefill_caches(model_mode)
+      self._initialize_ar_cache_vars(model_mode)
 
   @property
   def prefill_key_vars(self):
