@@ -64,6 +64,9 @@ Relevant Files:
 import argparse
 import os
 import logging
+import sys
+# Add parent directory to path to allow imports from sibling directories
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from code_generation_agent.llm_agent import GeminiAgent
 from code_evaluation_agent.prompt_code_evaluation import CodeEvaluation
 from code_evaluation_agent.utils import get_last_defined_module, run_pytest_capture_output

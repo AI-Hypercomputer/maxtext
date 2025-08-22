@@ -73,16 +73,15 @@ from pathlib import Path
 from dotenv import load_dotenv  # If this is not available, try ``pip install python-dotenv``
 
 load_dotenv()
-import os, logging, sys
+import os
+import logging
+import sys
+import argparse
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-
-# What the root dir for running these scripts? Do you have to add this line?
-
-from code_generation_agent.llm_agent import GeminiAgent  
+from code_generation_agent.llm_agent import GeminiAgent
 from orchestration_agent.Utils import parse_python_code
-from code_generation_agent.prompt_code_generation import CodeGeneration  
-import argparse
+from code_generation_agent.prompt_code_generation import CodeGeneration
 
 # Set up basic configuration
 logging.basicConfig(
