@@ -79,7 +79,7 @@ def validate_train_config(config):
     max_logging.log("WARNING: 'base_output_directory' might be pointing your local file system")
   assert config.steps > 0, "You must set steps or learning_rate_schedule_steps to a positive integer."
 
-  if config.quantization in ("fp8", "nanoo_fp8"):
+  if config.quantization in ("fp8", "nanoo_fp8", "fp8_nanoo"):
     # pylint: disable=line-too-long
     assert config.gradient_accumulation_steps == 1, (
         "fp8 can't be used with gradient_accumulation_steps right now. Please use other quantization or set "
