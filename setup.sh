@@ -32,10 +32,9 @@ export NEEDRESTART_SUSPEND=1
 export NEEDRESTART_MODE=l
 
 # Enable automatic restart of services without the need for prompting 
-if command -v sudo &> /dev/null; then
-  if [ -f /etc/needrestart/needrestart.conf ]; then
-     sudo sed -i "s/#\$nrconf{restart} = 'i';/\$nrconf{restart} = 'a';/" /etc/needrestart/needrestart.conf
-  fi
+if command -v sudo &> /dev/null
+then
+   sudo sed -i "s/#\$nrconf{restart} = 'i';/\$nrconf{restart} = 'a';/" /etc/needrestart/needrestart.conf
 else
    echo "Unable to find sudo. Skipping editing needrestart.conf" 
 fi
