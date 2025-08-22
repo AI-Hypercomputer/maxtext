@@ -140,6 +140,9 @@ else
     python3 -m pip install --no-cache-dir -U -r requirements.txt
 fi
 
+# Install maxtext package
+python3 -m pip install -e . --no-dependencies
+
 # Uninstall existing jax, jaxlib and  libtpu-nightly
 python3 -m pip show jax && python3 -m pip uninstall -y jax
 python3 -m pip show jaxlib && python3 -m pip uninstall -y jaxlib

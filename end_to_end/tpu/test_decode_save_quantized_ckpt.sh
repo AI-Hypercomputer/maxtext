@@ -51,7 +51,7 @@ mkdir -p $OUTDIR
 echo
 # Run command
 ${cmd} python3 -m MaxText.decode \
-  MaxText/configs/base.yml \
+  src/MaxText/configs/base.yml \
   tokenizer_path=${TOKENIZER_PATH} \
   load_parameters_path=${LOAD_PARAMETERS_PATH} \
   max_prefill_predict_length=${MAX_PREFILL_PREDICT_LENGTH} \

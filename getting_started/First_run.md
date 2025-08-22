@@ -25,7 +25,7 @@ pre-commit install
 ```
 4. After installation completes, run training on synthetic data with the following command:
 ```
-python3 -m MaxText.train MaxText/configs/base.yml \
+python3 -m MaxText.train src/MaxText/configs/base.yml \
   run_name=$YOUR_JOB_NAME \
   base_output_directory=gs://<my-bucket> \
   dataset_type=synthetic \
@@ -35,7 +35,7 @@ Optional: If you want to try training on a Hugging Face dataset, see [Data Input
 
 5. To demonstrate model output, run the following command:
 ```
-python3 -m MaxText.decode MaxText/configs/base.yml \
+python3 -m MaxText.decode src/MaxText/configs/base.yml \
   run_name=$YOUR_JOB_NAME \
   base_output_directory=gs://<my-bucket> \
   per_device_batch_size=1
@@ -47,7 +47,7 @@ This command uses a model with randomly initialized weights, so the outputs are 
 1. Use `bash docker_build_dependency_image.sh DEVICE=gpu` to build a container with the required dependencies.
 2. After installation is complete, run training with the following command on synthetic data:
 ```
-python3 -m MaxText.train MaxText/configs/base.yml \
+python3 -m MaxText.train src/MaxText/configs/base.yml \
   run_name=$YOUR_JOB_NAME \
   base_output_directory=gs://<my-bucket> \
   dataset_type=synthetic \
@@ -56,7 +56,7 @@ python3 -m MaxText.train MaxText/configs/base.yml \
 
 3. To demonstrate model output, run the following command: 
 ```
-python3 -m MaxText.decode MaxText/configs/base.yml \
+python3 -m MaxText.decode src/MaxText/configs/base.yml \
   run_name=$YOUR_JOB_NAME \
   base_output_directory=gs://<my-bucket> \
   per_device_batch_size=1  
