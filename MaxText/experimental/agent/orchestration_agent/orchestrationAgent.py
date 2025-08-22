@@ -30,10 +30,14 @@ python orchestrationAgent.py \
 """
 import json
 import os.path
-from .Utils import check_github_file_exists
-import argparse, logging
-from .GetFilesInHierarchicalOrder import get_dependency_sorted_files
-from .SplitPythonFile import get_modules_in_order
+import sys
+import argparse
+import logging
+# Add parent directory to path to allow imports from sibling directories
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+from orchestration_agent.Utils import check_github_file_exists
+from orchestration_agent.GetFilesInHierarchicalOrder import get_dependency_sorted_files
+from orchestration_agent.SplitPythonFile import get_modules_in_order
 
 # Set up basic configuration
 logging.basicConfig(
@@ -111,7 +115,7 @@ def saveFilewithComponents(sorted_files, dependencies, basepath, outFile="FilesW
     }
     with open(outFile, "a") as f:
       f.write(f"\nComponents for {m}\n")
-      f.write(f"There File Dependencies {dep}\n")
+      f.write(f"Their File Dependencies {dep}\n")
       f.write(f"StandAlone Modules: {json.dumps(standalone_modules)}\n")
       f.write(f"Dependent Modules\n {json.dumps(dependent_sorted_modules, indent=4)}\n")
   logger.info(f"Check Results at {outFile}")
@@ -137,7 +141,7 @@ if __name__ == "__main__":
       with open(all_files_info) as f:
         data = json.load(f)
         sorted_files, dependencies = data["sorted_files"], data["dependencies"]
-        if data["entery_file"] == ENTRY_FILE_PATH:
+        if data["entry_file"] == ENTRY_FILE_PATH:
           modules_found = True
           logger.info("---> Reading Files order from all Files.json You can delete this if have some update in code. ")
     if not modules_found:
@@ -145,7 +149,7 @@ if __name__ == "__main__":
           ENTRY_FILE_PATH, BASE_PATH, EXCLUDE_CONDITIONAL_IMPORTS, returnDependencies=True
       )
       with open(all_files_info, "w") as f:
-        json.dump({"entery_file": ENTRY_FILE_PATH, "sorted_files": sorted_files, "dependencies": dependencies}, f)
+        json.dump({"entry_file": ENTRY_FILE_PATH, "sorted_files": sorted_files, "dependencies": dependencies}, f)
     saveFilewithComponents(sorted_files, dependencies, args.base_path)
 
     if sorted_files:

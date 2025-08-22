@@ -31,9 +31,14 @@ Example Invocations:
      --no-exclude-conditional-imports
 """
 import ast, json
+import os
+import sys
+import argparse
+import logging
 from collections import deque
-from .Utils import find_cycle, check_github_file_exists, get_github_file_content, url_join
-import argparse, logging
+# Add parent directory to path to allow imports from sibling directories
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+from orchestration_agent.Utils import find_cycle, check_github_file_exists, get_github_file_content, resolve_import_path
 
 # Set up basic configuration
 logging.basicConfig(
@@ -42,143 +47,6 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 logger = logging.getLogger(__name__)
-
-
-def have_module(target_name, file_url):
-  """
-  Checks if a given module (function, class, or variable) exists in a Python file.
-
-  Args:
-      target_name (str): The name of the module to search for.
-      file_url (str): The URL of the Python file to check.
-
-  Returns:
-      bool: True if the module is found, False otherwise.
-      tuple: ("ImportFrom", full_module) if the target_name is an alias from an import statement.
-  """
-  flag, content = get_github_file_content(file_url)
-  if not flag:
-    logger.warning(f"Warning: Could not read or parse {file_url}. Error: {content}")
-    return False  # Fail if content cannot be retrieved
-
-  try:
-    tree = ast.parse(content, filename=file_url)
-  except (SyntaxError, ValueError):
-    logger.warning(f"Warning: Could not parse {file_url}")
-    return False
-
-  for node in ast.walk(tree):
-    if isinstance(node, (ast.FunctionDef, ast.ClassDef)) and node.name == target_name:
-      return True
-    if isinstance(node, ast.Assign):
-      for target in node.targets:
-        if isinstance(target, ast.Name) and target.id == target_name:
-          return True
-    if isinstance(node, ast.ImportFrom):
-      for alias in node.names:
-        if alias.asname == target_name or alias.name == target_name:
-          module = node.module or ""
-          level = node.level
-          full_module = "." * level + module if level > 0 else module
-          return ("ImportFrom", full_module)
-  return False
-
-
-def resolve_complex_import(module_path_base_url, importPackage, base_url, current_dir_url, Try=0, Message=""):
-  """
-  Resolves a complex import statement, looking for the imported package/module
-  within a directory structure. This handles cases where 'importPackage' might
-  refer to a file or a directory (package) with an __init__.py.
-
-  Args:
-      module_path_base_url (str): The base URL for the module path (e.g., 'https://github.com/.../transformers/models/llama').
-      importPackage (str): The specific name being imported (e.g., 'modeling_llama', 'configuration_llama').
-      base_url (str): The base URL of the repository.
-      current_dir_url (str): The URL of the directory containing the original import statement.
-      Try (int): Counter for recursion depth.
-      Message (str): Accumulates error messages for recursion depth.
-
-  Returns:
-      str: The resolved full GitHub URL of the imported file, or None if not found.
-
-  Example:
-      If `module_path_base_url` is "https://github.com/org/repo/blob/main/src/transformers/models/llama",
-      `importPackage` is "modeling_llama", `base_url` is "https://github.com/org/repo/blob/main/src/",
-      and `current_dir_url` is "https://github.com/org/repo/blob/main/src/transformers/models/llama",
-      this function would first check for "https://github.com/org/repo/blob/main/src/transformers/models/llama.py".
-      If not found, it would then check for "https://github.com/org/repo/blob/main/src/transformers/models/llama/__init__.py".
-      If `__init__.py` exists and contains `from . import modeling_llama`, it would then check for
-      "https://github.com/org/repo/blob/main/src/transformers/models/llama/modeling_llama.py".
-  """
-
-  if Try == 0:
-    Message = f"There is an issue with import {importPackage} in {module_path_base_url} current dir is {current_dir_url}"
-  if Try > 4:  # Increased recursion limit slightly for network latency
-    logger.error(f"Error: Exceeded recursion depth. {Message}")
-    return None
-  # Check for a direct .py file containing the definition
-  potential_py_url = f"{module_path_base_url}.py"
-  if check_github_file_exists(potential_py_url)[0] and have_module(importPackage, potential_py_url) == True:
-    return potential_py_url
-
-  # Check for a package (directory with __init__.py)
-  potential_pkg_init_url = url_join(module_path_base_url, "__init__.py")
-  if check_github_file_exists(potential_pkg_init_url)[0] and potential_pkg_init_url.startswith(base_url):
-    has_module = have_module(importPackage, potential_pkg_init_url)
-    if has_module:
-      if has_module == True:
-        return potential_pkg_init_url
-      elif has_module[0] == "ImportFrom":
-        # The name is re-exported from another module
-        re_export_module = has_module[1]
-        if re_export_module in (".", ""):
-          # from . import X -> look for X.py in the same directory
-          potential_file_in_pkg_url = url_join(module_path_base_url, f"{importPackage}.py")
-          if check_github_file_exists(potential_file_in_pkg_url)[0]:
-            return potential_file_in_pkg_url
-        else:
-          # from .foo import X -> recurse into foo
-          new_module_path_base_url = url_join(module_path_base_url, re_export_module)
-          return resolve_complex_import(
-              new_module_path_base_url, importPackage, base_url, new_module_path_base_url, Try + 1, Message
-          )
-    else:
-      # The package exists, but the import is not in __init__. It could be a submodule.
-      potential_file_in_pkg_url = url_join(module_path_base_url, f"{importPackage}.py")
-      if check_github_file_exists(potential_file_in_pkg_url)[0] and potential_file_in_pkg_url.startswith(base_url):
-        return potential_file_in_pkg_url
-  return None
-
-
-def resolve_import_path(importer_url, module_name, level, base_url, importPackage=None):
-  """
-  Resolves an import statement to a full GitHub URL.
-
-  Args:
-      importer_url (str): The URL of the file containing the import statement.
-      module_name (str): The name of the module being imported (e.g., 'os', 'transformers.models.llama').
-      level (int): The level of the import (0 for absolute, 1+ for relative).
-      base_url (str): The base URL of the repository (e.g., 'https://github.com/huggingface/transformers/blob/main/src/').
-      importPackage (str, optional): The specific package or module being imported from a 'from ... import ...' statement.
-
-  Returns:
-      str: The resolved full GitHub URL of the imported file, or None if not found.
-  """
-  current_dir_url = importer_url[: importer_url.rfind("/")]
-  if level > 0:  # Relative import
-    path_parts = [current_dir_url] + [".."] * (level - 1)
-    if module_name:
-      path_parts.extend(module_name.split("."))
-    module_path_base_url = url_join(*path_parts)
-  else:  # Absolute import
-    module_path_base_url = url_join(base_url, *module_name.split("."))
-  # Check for a direct .py file
-  potential_url_py = f"{module_path_base_url}.py"
-  if check_github_file_exists(potential_url_py)[0]:
-    return potential_url_py
-
-  # If it's not a direct file, it might be a complex package import
-  return resolve_complex_import(module_path_base_url, importPackage, base_url, current_dir_url)
 
 
 def find_file_dependencies(file_path_url, base_path_url, exclude_conditional_imports=True):
@@ -293,8 +161,8 @@ def get_dependency_sorted_files(entry_file_path, base_path, exclude_conditional_
     reverse_graph.setdefault(current_file, [])
 
     dependencies = find_file_dependencies(current_file, base_path, exclude_conditional_imports)
-    dependenciesname = {k.replace(base_path, "") for k in dependencies}
-    logger.info(f"File {current_file.replace(base_path,'')} Have {dependenciesname}")
+    dependencies_name = {k.replace(base_path, "") for k in dependencies}
+    logger.info(f"File {current_file.replace(base_path,'')} Have {dependencies_name}")
     dependency_graph[current_file] = list(dependencies)
 
     for dep in dependencies:
