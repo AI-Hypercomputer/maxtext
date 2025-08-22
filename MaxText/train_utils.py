@@ -16,6 +16,7 @@
 """ Utils that are only interesting for training in MaxText. """
 
 import os
+from collections.abc import Sequence
 import jax
 from MaxText.common_types import MODEL_MODE_TRAIN
 from MaxText.layers import quantizations
@@ -31,7 +32,7 @@ from MaxText.utils.goodput_utils import (
     maybe_record_goodput,
 )
 from MaxText.dpo_utils import _merge_dpo_state
-import MaxText as mt
+from MaxText import pyconfig
 
 
 def get_transformer_model(config, mesh, quant):
@@ -175,7 +176,7 @@ def setup_train_loop(config, recorder, devices=None):
   """
 
   with maybe_record_goodput(recorder, GoodputEvent.TPU_INIT):
-    model = mt.from_pretrained(config, devices)
+    model = from_pretrained(config, devices)
     mesh = model.mesh
     init_rng, checkpoint_manager, learning_rate_schedule, tx = create_training_tools(config, model, mesh)
 
@@ -274,3 +275,30 @@ def validate_train_config(config):
         "Please disable sequence packing (set packing=False) or use a different attention mechanism. "
         "With synthetic data, the format is not important as packing is not applied."
     )
+
+
+def from_pretrained(
+    config: pyconfig.HyperParameters,
+    devices: Sequence[jax.Device] | None = None,
+) -> models.Transformer:
+  """Load a pretrained MaxText model from checkpoint.
+
+  This function loads a model from a checkpoint.
+
+  Args:
+      config: Config object.
+
+  Returns:
+      Transformer: The loaded model instance (only the model)
+
+  Example:
+      model = from_pretrained(config)
+  """
+  from jax.sharding import Mesh
+  
+  devices_array = maxtext_utils.create_device_mesh(config, devices)
+  mesh = Mesh(devices_array, config.mesh_axes)
+  model = create_model(config, mesh)
+
+  # Return only the model
+  return model
