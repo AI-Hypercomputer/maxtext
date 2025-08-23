@@ -362,9 +362,9 @@ class Decoder(nn.Module):
       case DecoderBlockType.QWEN3_MOE:
         return [qwen3.Qwen3MoeDecoderLayer]
       case DecoderBlockType.SIMPLE:
-        return [simple_layer.SimpleDecoderLayer]
+        return [simple_layer.SimpleDecoderLayerToLinen]
       case DecoderBlockType.SIMPLE_MLP:
-        return [simple_layer.SimpleMlpDecoderLayer]
+        return [simple_layer.SimpleMlpDecoderLayerToLinen]
       case DecoderBlockType.LLAMA4:
         return [llama4.Llama4ScannableBlock] if self.config.scan_layers else [llama4.Llama4DecoderLayer]
       case _:
