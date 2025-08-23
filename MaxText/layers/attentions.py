@@ -512,7 +512,7 @@ class Attention(nnx.Module):
       return self.kernel_init(*args) / depth_scaling
 
     kernel_axes = (
-        (None, None, None) if self.config.ici_context_autoregressive_parallelism > 1 else ("embed", "q_heads", "kv")
+        (None, None, None) if self.config.ici_context_autoregressive_parallelism > 1 or self.is_vision else ("embed", "q_heads", "kv")
     )
     return DenseGeneral(
         in_features_shape=self.convert_dense_general_inputs_shape(inputs_q_shape),
@@ -550,7 +550,7 @@ class Attention(nnx.Module):
 
     kernel_axes = (
         (None, None, None)
-        if self.config.ici_context_autoregressive_parallelism > 1
+        if self.config.ici_context_autoregressive_parallelism > 1 or self.is_vision
         else ("embed", "kv_heads", "kv_head_dim")
     )
 
@@ -596,7 +596,7 @@ class Attention(nnx.Module):
         out_features_shape=(3, self.num_query_heads, self.head_dim),
         axis=-1,
         kernel_init=self.kernel_init,
-        kernel_axes=("embed", "qkv", "heads", "kv"),
+        kernel_axes=("embed", "qkv", "heads", "kv") if not self.is_vision else (None, None, None, None),
         dtype=self.dtype,
         weight_dtype=self.weight_dtype,
         quant=self.quant,
@@ -616,7 +616,7 @@ class Attention(nnx.Module):
   def init_out_w(self, output_dim: int) -> nnx.Module:
     """out projection"""
     out_kernel_axis = (
-        (None, None, None) if self.config.ici_context_autoregressive_parallelism > 1 else ("heads", "kv", "embed")
+        (None, None, None) if self.config.ici_context_autoregressive_parallelism > 1 or self.is_vision else ("heads", "kv", "embed")
     )
     return DenseGeneral(
         in_features_shape=(self.num_query_heads, self.head_dim),
