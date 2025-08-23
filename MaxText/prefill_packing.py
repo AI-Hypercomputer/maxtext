@@ -1,20 +1,20 @@
-#  Copyright 2025 Google LLC
+# Copyright 2023–2025 Google LLC
 #
-#  Licensed under the Apache License, Version 2.0 (the "License");
-#  you may not use this file except in compliance with the License.
-#  You may obtain a copy of the License at
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
 #
-#       https://www.apache.org/licenses/LICENSE-2.0
+#    https://www.apache.org/licenses/LICENSE-2.0
 #
-#  Unless required by applicable law or agreed to in writing, software
-#  distributed under the License is distributed on an "AS IS" BASIS,
-#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-#  See the License for the specific language governing permissions and
-#  limitations under the License.
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Implementation of Prefill Packing feature"""
 
-from typing import Any, List, Tuple, Callable
+from typing import Any, Callable
 
 import jax
 import jax.numpy as jnp
@@ -116,7 +116,7 @@ class PrefillProcessor:
       input_true_length: int,
       rng: PRNGKeyType,
       return_prompt_logp: bool = False,
-  ) -> Tuple[engine_api.ResultTokens, DecodeState]:
+  ) -> tuple[engine_api.ResultTokens, DecodeState]:
     """Process a new input."""
 
     process_fn = self._process_compiled(model_params, len(input_tokens_padded), return_prompt_logp)
@@ -162,7 +162,7 @@ class PrefillProcessor:
       decode_state: DecodeState,
       rng: PRNGKeyType,
       return_prompt_logp: bool = False,
-  ) -> Tuple[engine_api.ResultTokens, DecodeState]:
+  ) -> tuple[engine_api.ResultTokens, DecodeState]:
     """Prefill and insert a request."""
 
     prefill_result, first_token = self.engine.prefill(
@@ -205,7 +205,7 @@ class BatchedPrefillProcessor:
       input_prompt: jax.Array,
       input_padding: int,
       capacity: int,
-      prefill_done: Callable[[List[Tuple[engine_api.ResultTokens, int]], List[int], DecodeState], None],
+      prefill_done: Callable[[list[tuple[engine_api.ResultTokens, int]], list[int], DecodeState], None],
       return_prompt_logp: bool = False,
   ) -> None:
     """Process a new input.
@@ -241,7 +241,7 @@ class BatchedPrefillProcessor:
       self,
       model_params: Params,
       decode_state: DecodeState,
-      prefill_done: Callable[[List[Tuple[engine_api.ResultTokens, int]], List[int], DecodeState], None],
+      prefill_done: Callable[[list[tuple[engine_api.ResultTokens, int]], list[int], DecodeState], None],
       return_prompt_logp: bool = False,
   ) -> None:
     """Process all remaining items in buckets."""
@@ -262,7 +262,7 @@ class BatchedPrefillProcessor:
       input_padding: int,
       decode_state: DecodeState,
       return_prompt_logp: bool = False,
-  ) -> Tuple[List[Tuple[engine_api.ResultTokens, int]], DecodeState]:
+  ) -> tuple[list[tuple[engine_api.ResultTokens, int]], DecodeState]:
     """Process all items in a bucket."""
     # pylint: disable=import-outside-toplevel
     from MaxText.inference.offline_engine import PrefillResult  # type: ignore
@@ -340,7 +340,16 @@ class BatchedPrefillProcessor:
       self.process_batch_func[(padded_length, num_prompts, return_prompt_logp)] = (
           jax.jit(
               self._process_batch,
-              in_shardings=(self.engine.param_layouts, None, None, None, None, None, None, self.engine.decode_state_layouts),
+              in_shardings=(
+                  self.engine.param_layouts,
+                  None,
+                  None,
+                  None,
+                  None,
+                  None,
+                  None,
+                  self.engine.decode_state_layouts,
+              ),
               out_shardings=(None, self.engine.decode_state_layouts),
               static_argnames=(
                   "num_prompts",
@@ -379,7 +388,7 @@ class BatchedPrefillProcessor:
       true_lengths: jax.Array,
       decode_state: DecodeState,
       return_prompt_logp: bool = False,
-  ) -> Tuple[List[engine_api.ResultTokens], DecodeState]:
+  ) -> tuple[list[engine_api.ResultTokens], DecodeState]:
     """Prefill and insert a packed request."""
 
     cache, prefix_state, first_tokens = self.engine.prefill_concat(

@@ -1,15 +1,16 @@
-"""
- Copyright 2023 Google LLC
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
-      https://www.apache.org/licenses/LICENSE-2.0
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
- """
+# Copyright 2023–2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 r"""Convert weights from a MaxText model to a HuggingFace model.
 
@@ -150,7 +151,9 @@ def convert_state_to_hf(training_state, model_size):
     hf_model_params[f"model.layers.{layer_int}.self_attn.k_proj.weight"] = torch.tensor(
         np.asarray(
             unpermute_from_match_maxtext_rope(
-                training_state.params["params"]["decoder"]["layers"]["self_attention"]["key"]["kernel"][:, layer_int, :, :],
+                training_state.params["params"]["decoder"]["layers"]["self_attention"]["key"]["kernel"][
+                    :, layer_int, :, :
+                ],
                 model_size,
             )
             .reshape(base_num_query_heads * head_dim, base_num_kv_heads * head_dim)

@@ -1,37 +1,44 @@
-"""
- Copyright 2025 Google LLC
+# Copyright 2023–2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
-
-      https://www.apache.org/licenses/LICENSE-2.0
-
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
- """
+""" Checkpoint conversion utility functions. """
 
 import contextlib
-import time
-import os
 import io
-import jax
-import jax.numpy as jnp
-import jax.tree_util
-from jaxtyping import Array
-import numpy as np
+import os
+import tempfile
+import time
 import json
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any
+
+import jax
+import jax.tree_util
 from jax.experimental import multihost_utils
-from typing import Optional, List, Dict, Tuple, Callable, Any
+
+from jaxtyping import Array
+
+import numpy as np
+
 from google.cloud.storage import Client, transfer_manager
+
 from safetensors.numpy import save_file as numpy_save_file
 from safetensors.flax import save as save_flax_to_bytes
+
 from huggingface_hub import HfApi, repo_exists
+
 from transformers.models.auto.modeling_auto import MODEL_FOR_CAUSAL_LM_MAPPING_NAMES
-from concurrent.futures import ThreadPoolExecutor
 
 from MaxText import max_logging
 
@@ -54,7 +61,10 @@ HF_IDS = {
     "qwen3-4b": "Qwen/Qwen3-4B",
     "qwen3-8b": "Qwen/Qwen3-8B",
     "qwen3-14b": "Qwen/Qwen3-14B",
-    "qwen3-14b": "Qwen/Qwen3-14B",
+    "qwen3-32b": "Qwen/Qwen3-32B",
+    "llama3.1-8b": "meta-llama/Llama-3.1-8B",
+    "llama3.1-70b": "meta-llama/Llama-3.1-70B",
+    "llama3.1-405b": "meta-llama/Llama-3.1-405B",
 }
 
 
@@ -62,7 +72,7 @@ def _get_local_directory(output_dir: str) -> str:
   """Determines the local directory for saving files."""
   if output_dir.startswith("gs://") or output_dir.startswith("hf://"):
     # Fallback to a generic temp directory name if used directly
-    local_dir = os.path.join(os.path.expanduser("~/.cache/maxtext_hf_conversion_temp"), "temp_files")
+    local_dir = os.path.join(os.path.expanduser("~"), ".cache", "maxtext_hf_conversion_temp", "temp_files")
   else:
     local_dir = output_dir
   os.makedirs(local_dir, exist_ok=True)
@@ -72,9 +82,9 @@ def _get_local_directory(output_dir: str) -> str:
 def process_leaf_param(
     path_tuple: Any,
     leaf_value: jax.Array,
-    param_map_local: Dict[str, Any],
-    shape_map_local: Dict[str, Any],
-    hook_fn_map_local: Dict[str, Any],
+    param_map_local: dict[str, Any],
+    shape_map_local: dict[str, Any],
+    hook_fn_map_local: dict[str, Any],
     current_config: Any,
 ) -> list[tuple[str, np.ndarray]]:
   """Processes a single leaf from the MaxText parameter tree."""
@@ -125,13 +135,15 @@ def process_leaf_param(
   else:  # Stacked MaxText weight
     if not (leaf_value.ndim > 0 and leaf_value.shape[current_config.param_scan_axis] == len(hf_target_paths)):
       max_logging.log(
-          f"Warning: Mismatch for stacked layer {maxtext_param_key}. MaxText shape {leaf_value.shape}, expected {len(hf_target_paths)} slices on axis {current_config.param_scan_axis}. Skipping."
+          f"Warning: Mismatch for stacked layer {maxtext_param_key}. MaxText shape {leaf_value.shape}, expected "
+          f"{len(hf_target_paths)} slices on axis {current_config.param_scan_axis}. Skipping."
       )
       return []
     for i, hf_path in enumerate(hf_target_paths):
       if hf_path not in shape_map_local:
         max_logging.log(
-            f"Warning: HF path '{hf_path}' for slice {i} of MaxText key '{maxtext_param_key}' not found in shape_map. Skipping slice."
+            f"Warning: HF path '{hf_path}' for slice {i} of MaxText key '{maxtext_param_key}' not found in shape_map. "
+            f"Skipping slice."
         )
         continue
       current_slice_target_hf_shape = shape_map_local[hf_path]
@@ -144,7 +156,7 @@ def process_leaf_param(
   return output_weights
 
 
-def convert_jax_weight_to_numpy(weight: "jax.Array", dtype_str: Optional[str] = None) -> np.ndarray:
+def convert_jax_weight_to_numpy(weight: "jax.Array", dtype_str: None | str = None) -> np.ndarray:
   """Converts a JAX array to a NumPy array with the specified dtype."""
   final_dtype_str = str(weight.dtype) if dtype_str is None else dtype_str
   # JAX dtypes like 'bfloat16', 'float32' are understood by np.dtype()
@@ -188,7 +200,11 @@ def create_huggingface_hub_repo_if_not_exist(repo_id, repo_type):
 
 
 def save_config_file(
-    config, local_path_to_save_to: str, output_dir_final: str, file_name: str, remove_local_copy_after_upload: bool = False
+    config,
+    local_path_to_save_to: str,
+    output_dir_final: str,
+    file_name: str,
+    remove_local_copy_after_upload: bool = False,
 ):
   """Saves the model configuration file(config.json)."""
   if jax.process_index() == 0:
@@ -222,10 +238,10 @@ def save_config_file(
 
 
 def shard_checkpoint(
-    weights_dict: Dict[str, Array],
+    weights_dict: dict[str, Array],
     max_shard_size: int = DEFAULT_MAX_SHARD_SIZE,
     weights_name: str = "model.safetensors",
-) -> Tuple[Dict[str, Dict[str, Array]], Optional[Dict]]:
+) -> tuple[dict[str, dict[str, Array]], None | dict]:
   """Shards a model checkpoint into smaller pieces based on size constraints.
 
   Args:
@@ -234,12 +250,12 @@ def shard_checkpoint(
       weights_name: Base filename for the shards
 
   Returns:
-      Tuple of (sharded weights dict, optional index dict)
+      tuple of (sharded weights dict, optional index dict)
       Index contains metadata and weight mapping information
   """
   # Track current shard and accumulated sizes
-  current_shard: Dict[str, Array] = {}
-  shards: List[Dict[str, Array]] = [current_shard]
+  current_shard: dict[str, Array] = {}
+  shards: list[dict[str, Array]] = [current_shard]
   current_size = 0
   total_size = 0
 
@@ -316,7 +332,6 @@ def save_safetensor_file(
       max_logging.log(f"   Saved {file_name} to {local_path}")
 
 
-
 def save_index_file(
     index: dict,
     local_dir_to_save_to: str,
@@ -342,7 +357,7 @@ def save_index_file(
         )
       max_logging.log(f"   Successfully uploaded {file_name} to HF repo: {repo_id}")
     else:
-      with open(local_path, "w") as f:
+      with open(local_path, "wt", encoding="utf8") as f:
         json.dump(index, f, indent=2)
       max_logging.log(f"   Saved {file_name} to {local_path}")
       if output_dir_final.startswith("gs://"):
@@ -369,9 +384,7 @@ def save_weight_files(
   """
   if index is None:
     # 'shards' is actually the single state_dict here
-    save_safetensor_file(
-        shards, local_dir_to_save_to, output_dir_final, SAFE_TENSORS_WEIGHTS_FILE
-    )
+    save_safetensor_file(shards, local_dir_to_save_to, output_dir_final, SAFE_TENSORS_WEIGHTS_FILE)
   else:
     # Save sharded weights in parallel
     with ThreadPoolExecutor(max_workers=parallel_threads) as executor:
@@ -390,7 +403,9 @@ def save_weight_files(
         future.result()
 
     # Save index file
-    save_index_file(index, local_dir_to_save_to, output_dir_final, SAFE_TENSORS_INDEX_FILE, remove_local_copy_after_upload)
+    save_index_file(
+        index, local_dir_to_save_to, output_dir_final, SAFE_TENSORS_INDEX_FILE, remove_local_copy_after_upload
+    )
 
 
 @contextlib.contextmanager
@@ -402,8 +417,6 @@ def get_local_save_path_manager(output_dir: str):
   Yields:
       tuple: (path_to_use_for_saving: str, is_temporary: bool)
   """
-  import tempfile  # Local import to keep it contained
-
   if output_dir.startswith("gs://") or output_dir.startswith("hf://"):
     with tempfile.TemporaryDirectory(prefix="maxtext_hf_save_") as temp_dir:
       max_logging.log(f"   Using temporary local staging directory: {temp_dir}")
@@ -415,16 +428,16 @@ def get_local_save_path_manager(output_dir: str):
 
 
 def save_model_files(
-    weight_arrays: Dict,
+    weight_arrays: dict,
     config,  # HF config object
-    tokenizer: Optional[Any],  # transformers.PreTrainedTokenizerBase
+    tokenizer: None | Any,  # transformers.PreTrainedTokenizerBase
     processor,
     output_dir: str,
     parallel_threads=8,
 ):
   """
   Saves model files (config and weights) to the specified directory.
-  When uploading to GCS/HF hub, 
+  When uploading to GCS/HF hub,
           *.safetensors are uploaded from memory to remote, no local storage is used to save disk usage
   """
 
@@ -491,6 +504,7 @@ def save_model_files(
   if jax.process_index() == 0:
     max_logging.log(f"✅ Model and tokenizer (if provided) successfully processed for {output_dir}")
 
+
 def upload_state_dict_to_gcs(state_dict: dict, gs_bucket_path: str):
   """Uploads a state_dict from memory to Google Cloud Storage.
 
@@ -506,7 +520,7 @@ def upload_state_dict_to_gcs(state_dict: dict, gs_bucket_path: str):
   # 1. Serialize the state_dict to an in-memory byte buffer
   buffer = io.BytesIO()
   np.savez(buffer, **state_dict)
-  buffer.seek(0) # Rewind the buffer to the beginning
+  buffer.seek(0)  # Rewind the buffer to the beginning
 
   # 2. Upload the bytes to GCS
   storage_client = Client()
@@ -514,7 +528,7 @@ def upload_state_dict_to_gcs(state_dict: dict, gs_bucket_path: str):
   blob = bucket.blob(blob_name)
 
   print(f"-> Uploading in-memory state_dict to {gs_bucket_path}...")
-  blob.upload_from_file(buffer, content_type='application/octet-stream', timeout=600)
+  blob.upload_from_file(buffer, content_type="application/octet-stream", timeout=600)
   print(f"✅ Uploaded to {bucket.name}/{blob_name}")
 
 
@@ -558,10 +572,10 @@ def upload_folder_to_gcs(local_folder: str, gs_bucket_path: str, num_workers: in
   # Standardize bucket path format
   gs_bucket_path = gs_bucket_path.removeprefix("gs://")
   bucket_name = gs_bucket_path.split("/")[0]
-  # Ensure destination ends with "/"
   destination_dir = gs_bucket_path[len(bucket_name) :]
   if destination_dir.startswith("/"):
     destination_dir = destination_dir[1:]
+  # Ensure destination ends with "/"
   if destination_dir != "" and not destination_dir.endswith("/"):
     destination_dir += "/"
 

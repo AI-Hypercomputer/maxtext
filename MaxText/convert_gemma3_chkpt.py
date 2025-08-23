@@ -1,15 +1,16 @@
-"""
-Copyright 2025 Google LLC
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-     https://www.apache.org/licenses/LICENSE-2.0
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-"""
+# Copyright 2023–2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 from typing import Any
 import argparse
@@ -110,7 +111,9 @@ def main(raw_args=None) -> None:
           },
           "VisionEmbedder_0": {
               "mm_input_projection": params["transformer"]["embedder"]["mm_input_projection"],
-              "mm_soft_embedding_norm": {"scale": params["transformer"]["embedder"]["mm_soft_embedding_norm"]["scale"] + 1},
+              "mm_soft_embedding_norm": {
+                  "scale": params["transformer"]["embedder"]["mm_soft_embedding_norm"]["scale"] + 1
+              },
           },
       },
   }
@@ -201,9 +204,9 @@ def main(raw_args=None) -> None:
       (1, 0)
   )
   layer_weight["pre_ffw_norm"]["scale"] = np.array(layer_weight["pre_ffw_norm"]["scale"]).transpose((1, 0))
-  layer_weight["post_self_attention_norm"]["scale"] = np.array(layer_weight["post_self_attention_norm"]["scale"]).transpose(
-      (1, 0)
-  )
+  layer_weight["post_self_attention_norm"]["scale"] = np.array(
+      layer_weight["post_self_attention_norm"]["scale"]
+  ).transpose((1, 0))
   layer_weight["post_ffw_norm"]["scale"] = np.array(layer_weight["post_ffw_norm"]["scale"]).transpose((1, 0))
 
   layer_weight["self_attention"] = copy.deepcopy(self_attention)

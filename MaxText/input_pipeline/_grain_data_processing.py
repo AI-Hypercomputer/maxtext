@@ -1,18 +1,16 @@
-"""
-Copyright 2023 Google LLC
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-     https://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-"""
+# Copyright 2023–2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Input pipeline using Grain."""
 
@@ -188,7 +186,9 @@ def make_grain_train_iterator(
     process_indices,
 ):
   """Load, preprocess dataset and return iterators"""
-  assert config.global_batch_size_to_load % global_mesh.size == 0, "Batch size should be divisible number of global devices."
+  assert (
+      config.global_batch_size_to_load % global_mesh.size == 0
+  ), "Batch size should be divisible by number of global devices."
   if not config.colocated_python_data_input:
     train_ds = get_datasets(
         config.grain_train_files,
@@ -255,7 +255,7 @@ def make_grain_eval_iterator(
   """Load, preprocess dataset and return iterators"""
   assert (
       config.global_batch_size_to_load_eval % global_mesh.size == 0
-  ), "Batch size should be divisible number of global devices."
+  ), "Batch size should be divisible by number of global devices."
   if not config.colocated_python_data_input:
     eval_ds = get_datasets(
         config.grain_eval_files,

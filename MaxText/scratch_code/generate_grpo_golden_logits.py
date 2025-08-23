@@ -1,16 +1,16 @@
-#  Copyright 2025 Google LLC
+# Copyright 2023–2025 Google LLC
 #
-#  Licensed under the Apache License, Version 2.0 (the "License");
-#  you may not use this file except in compliance with the License.
-#  You may obtain a copy of the License at
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
 #
-#       https://www.apache.org/licenses/LICENSE-2.0
+#    https://www.apache.org/licenses/LICENSE-2.0
 #
-#  Unless required by applicable law or agreed to in writing, software
-#  distributed under the License is distributed on an "AS IS" BASIS,
-#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-#  See the License for the specific language governing permissions and
-#  limitations under the License.
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Script to get golden data for GRPOTrainer in TRL. Currently hardcoded for llama3.1-8b
 
@@ -51,7 +51,7 @@ from MaxText.experimental.rl.grpo_utils import compute_log_probs
 from MaxText.globals import PKG_DIR
 from MaxText.layers import models
 from MaxText.tests.grpo_trainer_correctness_test import prepare_maxtext_inputs
-from MaxText.common_types import Array
+from MaxText.common_types import Array, MODEL_MODE_TRAIN
 
 
 class GRPOTest(unittest.TestCase):
@@ -81,12 +81,14 @@ class GRPOTest(unittest.TestCase):
     devices_array = maxtext_utils.create_device_mesh(self.cfg)
     mesh = Mesh(devices_array, self.cfg.mesh_axes)
     # With checkpoint
-    self.model = models.Transformer(config=self.cfg, mesh=mesh, quant=None)
+    self.model = models.Transformer(config=self.cfg, mesh=mesh, quant=None, model_mode=MODEL_MODE_TRAIN)
     self.state, state_mesh_annotations = maxtext_utils.setup_decode_state(self.model, self.cfg, self.rng, mesh, None)
     self.state_mesh_shardings = nn.logical_to_mesh_sharding(state_mesh_annotations, mesh, self.cfg.logical_axis_rules)
     self.data_sharding = jax.NamedSharding(mesh, jax.sharding.PartitionSpec(None))
     # Without checkpoint
-    self.model_no_ckpt_loading = models.Transformer(config=self.cfg_no_ckpt_loading, mesh=mesh, quant=None)
+    self.model_no_ckpt_loading = models.Transformer(
+        config=self.cfg_no_ckpt_loading, mesh=mesh, quant=None, model_mode=MODEL_MODE_TRAIN
+    )
     self.state_no_ckpt_loading, _ = maxtext_utils.setup_decode_state(
         self.model_no_ckpt_loading, self.cfg_no_ckpt_loading, self.rng, mesh, None
     )
@@ -289,7 +291,10 @@ class GRPOTest(unittest.TestCase):
         "avg_advantage": aux.avg_advantage.tolist(),
     }
     model_output_path = os.path.join(
-        os.path.dirname(PKG_DIR), "MaxText", "test_assets", f"golden_data_grpo_{self.cfg_no_ckpt_loading.model_name}.jsonl"
+        os.path.dirname(PKG_DIR),
+        "MaxText",
+        "test_assets",
+        f"golden_data_grpo_{self.cfg_no_ckpt_loading.model_name}.jsonl",
     )
     with jsonlines.open(model_output_path, "w") as f:
       f.write(data_to_save)

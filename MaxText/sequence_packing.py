@@ -1,22 +1,18 @@
-"""
-Copyright 2023 Google LLC
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-     https://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-"""
+# Copyright 2023–2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Packed Sequence Op."""
-
-from typing import Dict, Optional, List, Union
 
 import tensorflow as tf
 
@@ -24,7 +20,7 @@ AUTOTUNE = tf.data.experimental.AUTOTUNE
 
 
 def pack_dataset(
-    dataset: tf.data.Dataset, key2length: Union[int, Dict[str, int]], pad_id: int, keys: Optional[List[str]] = None
+    dataset: tf.data.Dataset, key2length: int | dict[str, int], pad_id: int, keys: None | list[str] = None
 ) -> tf.data.Dataset:
   """Creates a 'packed' version of a dataset on-the-fly.
   Adapted from the mesh-tf implementation.
@@ -97,7 +93,9 @@ def pack_dataset(
   return dataset.map(my_fn, num_parallel_calls=AUTOTUNE)
 
 
-def _pack_with_tf_ops(dataset: tf.data.Dataset, keys: List[str], key2length: Dict[str, int], pad_id: int) -> tf.data.Dataset:
+def _pack_with_tf_ops(
+    dataset: tf.data.Dataset, keys: list[str], key2length: dict[str, int], pad_id: int
+) -> tf.data.Dataset:
   """Helper-function for packing a dataset which has already been batched.
   Helper for pack_dataset()  Uses tf.while_loop.
   Args:
@@ -158,7 +156,9 @@ def _pack_with_tf_ops(dataset: tf.data.Dataset, keys: List[str], key2length: Dic
         val = val[: tf.reduce_sum(tf.cast(tf.not_equal(val, -1), tf.int32))]
         one_example[k] = val
       for k in keys:
-        can_append = tf.logical_and(can_append, tf.less_equal(tf.size(partial[k]) + tf.size(one_example[k]), key2length[k]))
+        can_append = tf.logical_and(
+            can_append, tf.less_equal(tf.size(partial[k]) + tf.size(one_example[k]), key2length[k])
+        )
 
       def false_fn():
         return write_packed_example(partial, outputs)

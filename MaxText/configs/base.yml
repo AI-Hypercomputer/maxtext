@@ -1,10 +1,10 @@
-# Copyright 2023 Google LLC
+# Copyright 2023–2025 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#      https://www.apache.org/licenses/LICENSE-2.0
+#    https://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -44,6 +44,7 @@ load_full_state_path: ""
 # async_checkpointing is true, else a synchronous one is used. If you have
 # problems with the checkpointer we recommend trying the synchronous one.
 enable_checkpointing: True
+save_checkpoint_on_completion: True
 async_checkpointing: True
 checkpoint_period: 10_000
 # enables one replica to read the ckpt then broadcast to the rest
@@ -62,6 +63,13 @@ checkpoint_storage_use_zarr3: True
 # larger models requires higher concurrent GB for I/O
 # default concurrent gb for PytreeCheckpointHandler is 96GB
 checkpoint_storage_concurrent_gb: 96
+
+# Bool flag for enabling Orbax v1.
+enable_orbax_v1: False
+# Function for processing loaded checkpoint dict into a format MaxText can understand. (for other formats, i.e. SafeTensors)
+checkpoint_conversion_fn: None
+# Optional checkpoint context to use for loading. Options: "orbax", "safetensors"
+source_checkpoint_layout: "orbax"
 ############################### END CHECKPOINTING ##################################
 
 
@@ -83,6 +91,7 @@ dtype: "bfloat16"
 # 'intmp' for mixed precision quantization for inference as described here: MaxText/configs/quantization/README.md
 # 'fp8' for 8-bit floating-point GeMMs on NVIDIA GPUs.
 # 'nanoo_fp8' for 8-bit floating-point GeMMs on AMD MI300/MI325 GPUs.
+# 'fp8_full' for FP8 quantization with static scaling.
 quantization: ""
 # Used to configure constant_bound_config in aqt lib for static scaling, e.g. constant_bound_config='0.5, 0.5, 0.5, 0.5, 0.5, 0.5'
 constant_bound_config: ""
@@ -110,7 +119,9 @@ save_quantized_params_path: ""
 # when left as is, corresponds to training
 # accepted values are "inference"
 model_call_mode: ""
-
+use_qwix_quantization: False # Whether to use qwix for quantization. If set to True, the model will be quantized using qwix.
+# Quantization calibration method used for weights and activations. Supported methods can be found in https://github.com/google/qwix/blob/dc2a0770351c740e5ab3cce7c0efe9f7beacce9e/qwix/qconfig.py#L70-L80
+quantization_calibration_method: "absmax"
 # Shard the range finding operation for quantization. By default this is set to number of slices.
 quantization_local_shard_count: -1
 
@@ -159,6 +170,12 @@ use_random_routing: False # whether to use random routing for debug/test purpose
 tile_batch_seq: 512
 tile_activation_dim: 1024
 tile_weight_dim: 1024
+norm_topk_prob: False # Boolean to enable the top-k probability normalization. Qwen3-specific normalization of router weights.
+
+# How the expert axis is used to shard attention weights and activations
+# "fsdp" (ep acts as fsdp parallelism)
+# "context" (ep acts as context parallelism, training only)
+expert_shard_attention_option: "fsdp"
 
 # deepseek moe
 base_moe_mlp_dim: 7168 # intermediate dimension at MoE layer (use base_mlp_dim if not DeepSeek style)
@@ -174,7 +191,7 @@ topk_routing_group: -1 # number of top groups to route inputs. For EP,
 # For complex architectures like llama4 there are repeated sets of
 # inhomogeneous layers. E.g. maverick uses [dense+rope, moe+rope, dense+rope, moe+nope]
 # which can only be scanned together in one large block of inhomogeneous_layer_cycle_interval=4 layers.
-inhomogeneous_layer_cycle_interval: 1 
+inhomogeneous_layer_cycle_interval: 1
 
 # pipeline parallelism
 # The number of decoder layers is equal to the product of num_stages, num_layers_per_pipeline_stage and num_pipeline_repeats.
@@ -308,18 +325,22 @@ logical_axis_rules: [
                       ['activation_embed_and_logits_batch', ['data', 'stage', 'fsdp', 'fsdp_transpose', 'expert']],
                       ['activation_heads', ['tensor', 'tensor_transpose', 'sequence','tensor_sequence','autoregressive']],
                       ['activation_kv_heads', ['tensor', 'tensor_transpose', 'sequence','tensor_sequence']],
-                      ['activation_length', ['sequence', 'context']],
-                      ['prefill_activation_length', ['sequence', 'context']],
-                      ['activation_length', ['context']],
+                      ['activation_length', ['sequence', 'context', 'expert']],
+                      ['activation_length', ['context', 'expert']],
+                      ['activation_length_no_exp', ['sequence', 'context']],
+                      ['activation_length_no_exp', ['context']],
                       ['activation_norm_length', ['tensor_sequence', 'context', 'sequence']],
+                      ['activation_q_length', ['context', 'expert']],
+                      ['activation_q_length_no_exp', ['context']],
+                      ['prefill_activation_length', ['sequence', 'context']],
                       ['prefill_activation_norm_length', ['tensor_sequence', 'context', 'sequence']],
-                      ['activation_q_length', ['context']],
                       ['activation_kv_length', []],
                       ['activation_embed', ['tensor', 'tensor_transpose']],
                       ['activation_mlp', ['tensor', 'tensor_transpose', 'tensor_sequence']],
                       ['activation_kv', ['tensor', 'tensor_transpose', 'tensor_sequence']],
                       ['activation_prefill_kv_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
                       ['activation_kv_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
+                      ['activation_kv_batch_no_exp', ['data', 'fsdp', 'fsdp_transpose']],
                       ['activation_kv_head_dim', ['tensor', 'tensor_transpose', 'tensor_sequence']],
                       ['activation_vocab', ['tensor', 'tensor_transpose', 'sequence', 'tensor_sequence']],
                       ['activation_vocab', ['tensor', 'tensor_transpose']],
@@ -342,6 +363,7 @@ logical_axis_rules: [
                       ['embed_no_exp', ['fsdp', 'sequence', 'tensor_transpose', 'context']],
                       ['embed_no_exp', ['fsdp', 'fsdp_transpose', 'sequence', 'context']],
                       ['embed_no_exp', ['fsdp', 'sequence', 'context']],
+                      ['embed_tensor_transpose', ['tensor_transpose']],           
                       ['q_lora', ['fsdp', 'fsdp_transpose', 'sequence', 'context', 'tensor_transpose', 'expert']],
                       ['q_lora', ['fsdp', 'sequence', 'context', 'tensor_transpose', 'expert']],
                       ['q_lora', ['fsdp', 'fsdp_transpose', 'sequence', 'context', 'expert']],
@@ -350,7 +372,7 @@ logical_axis_rules: [
                       ['kv_lora', ['fsdp', 'sequence', 'context', 'tensor_transpose', 'expert']],
                       ['kv_lora', ['fsdp', 'fsdp_transpose', 'sequence', 'context', 'expert']],
                       ['kv_lora', ['fsdp', 'sequence', 'context', 'expert']],
-                      ['norm', ['tensor', 'tensor_transpose', 'tensor_sequence']],
+                      ['norm', ['tensor', 'tensor_transpose']],
                       ['layers', 'stage'],
                       ['kv', []],
                       ['kv_head_dim', []],
@@ -526,8 +548,9 @@ dump_step: -1 # Dump modules at the given step if set to a positive integer.
 dump_hlo_local_dir: "/tmp/xla_dump/"
 dump_hlo_delete_local_after: True # Cleans local directory after its uploaded
 dump_hlo_gcs_dir: "" # Defaults to {base_output_directory}/{run_name}/xla_dump
+dump_hlo_local_module_name: "jit_train_step" # Filter saving modules locally by this string. Set to empty string to remove any filter.
 dump_hlo_module_name: "jit_train_step" # Filter uploading modules by this string. Set to empty string to remove any filter.
-dump_hlo_xla_flags: "" # Defaults to "--xla_dump_to={dump_hlo_local_dir} --xla_dump_hlo_module_re={dump_hlo_module_name} --xla_dump_large_constants"
+dump_hlo_xla_flags: "" # Defaults to "--xla_dump_to={dump_hlo_local_dir} --xla_dump_hlo_module_re={dump_hlo_local_module_name} --xla_dump_large_constants"
 dump_hlo_upload_all: False # If true all hosts dump HLO, false only jax.process_index()==0
 # All hosts should have identical HLO for SPMD programs, however we have encountered some bugs
 # where this is not the case and it is helpful to compare HLO across hosts.
@@ -756,7 +779,7 @@ image_path: "" # Local image path used for decoding
 image_placeholder: "<|image|>"
 
 ### llama4 multi modal configs
-hidden_size_for_vit: 1408 
+hidden_size_for_vit: 1408
 intermediate_size_for_vit: 5632
 num_attention_heads_for_vit: 16
 num_channels_for_vit: 3

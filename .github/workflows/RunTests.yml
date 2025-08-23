@@ -1,10 +1,10 @@
-# Copyright 2023 Google LLC
+# Copyright 2023–2025 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#      https://www.apache.org/licenses/LICENSE-2.0
+#    https://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -75,6 +75,7 @@ jobs:
       xla_python_client_mem_fraction: 0.75
       tf_force_gpu_allow_growth: false
       container_resource_option: "--privileged"
+      is_scheduled_run: ${{ github.event_name == 'schedule' }}
 
   tpu_unit_tests:
     needs: tpu_image
@@ -87,6 +88,7 @@ jobs:
       xla_python_client_mem_fraction: 0.75
       tf_force_gpu_allow_growth: false
       container_resource_option: "--privileged"
+      is_scheduled_run: ${{ github.event_name == 'schedule' }}
 
   tpu_integration_tests:
     needs: tpu_image
@@ -99,6 +101,7 @@ jobs:
       xla_python_client_mem_fraction: 0.75
       tf_force_gpu_allow_growth: false
       container_resource_option: "--privileged"
+      is_scheduled_run: ${{ github.event_name == 'schedule' }}
 
   gpu_unit_tests:
     needs: gpu_image
@@ -111,6 +114,7 @@ jobs:
       xla_python_client_mem_fraction: 0.65
       tf_force_gpu_allow_growth: true
       container_resource_option: "--shm-size 2g --runtime=nvidia --gpus all --privileged"
+      is_scheduled_run: ${{ github.event_name == 'schedule' }}
 
   gpu_integration_tests:
     needs: gpu_image
@@ -123,6 +127,7 @@ jobs:
       xla_python_client_mem_fraction: 0.65
       tf_force_gpu_allow_growth: true
       container_resource_option: "--shm-size 2g --runtime=nvidia --gpus all --privileged"
+      is_scheduled_run: ${{ github.event_name == 'schedule' }}
 
   clean_up:
     if: ${{ always() }}
@@ -152,7 +157,7 @@ jobs:
       issues: write
     steps:
     - name: Check whether one of the jobs failed
-      if: ${{ contains(needs.*.result, 'failure') && github.event.pull_request == null }}
+      if: ${{ contains(needs.*.result, 'failure') && github.event.pull_request == null && github.event_name != 'workflow_dispatch' }}
       uses: jayqi/failed-build-issue-action@1a893bbf43ef1c2a8705e2b115cd4f0fe3c5649b  # v1.2.0
       with:
         github-token: ${{ secrets.GITHUB_TOKEN }}

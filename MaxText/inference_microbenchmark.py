@@ -1,18 +1,16 @@
-"""
-Copyright 2024 Google LLC
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-     https://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-"""
+# Copyright 2023–2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Inference microbenchmark for prefill and autoregressive steps."""
 import datetime
@@ -71,7 +69,9 @@ def prefill_benchmark(config, engine_prefill, params, tokens, true_length, num_m
   print(f"Prefill benchmark results for length {tokens.size}:\n")
   time_in_s = prefill_benchmark_loop(engine_prefill, params, tokens, true_length, iters)
   prefill_average_ms = 1000 * time_in_s / iters
-  prefill_tflops_per_device, _, _ = maxtext_utils.calculate_prefill_tflops_per_device(num_model_params, tokens.size, config)
+  prefill_tflops_per_device, _, _ = maxtext_utils.calculate_prefill_tflops_per_device(
+      num_model_params, tokens.size, config
+  )
   tflops_per_sec_per_device = prefill_tflops_per_device / prefill_average_ms * 1000.0
   print(
       f"\tPrefill step average time: {prefill_average_ms:.3f} ms\n"
@@ -103,7 +103,8 @@ def prefill_multisampling_benchmark(config, engine_prefill_multisampling, params
     time_in_s = prefill_benchmark_loop(engine_prefill_multisampling, params, tokens, true_length, iters, num_samples)
     multisampling_prefill_average_ms = 1000 * time_in_s / iters
     print(
-        f"\nNum samples: {num_samples}\n" f"\tPrefill step average time: {multisampling_prefill_average_ms:.3f} ms\n\n\n\n"
+        f"\nNum samples: {num_samples}\n"
+        f"\tPrefill step average time: {multisampling_prefill_average_ms:.3f} ms\n\n\n\n"
     )
     result_dict[num_samples] = {
         "time_in_ms": multisampling_prefill_average_ms,
@@ -138,7 +139,15 @@ def prefill_insert_benchmark(config, engine_insert, decode_state, params, total_
 
   print(f"Prefill and insert benchmark results for length {tokens.size}:\n")
   time_in_s, decode_state = prefill_insert_benchmark_loop(
-      config, engine_insert, decode_state, params, total_slots, tokens, true_length, iters, f"prefill_insert_{tokens.size}"
+      config,
+      engine_insert,
+      decode_state,
+      params,
+      total_slots,
+      tokens,
+      true_length,
+      iters,
+      f"prefill_insert_{tokens.size}",
   )
   prefill_insert_average_ms = time_in_s / iters * 1000.0
   print(f"\tPrefill + Insert step average time: {prefill_insert_average_ms:.3f} ms\n\n\n\n")

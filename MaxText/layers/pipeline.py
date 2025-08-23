@@ -1,10 +1,10 @@
-# Copyright 2024 Google LLC
+# Copyright 2023–2025 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+#    https://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -424,7 +424,7 @@ class Pipeline(nn.Module):
         in_axes=(0, 0, 0, None, None),
         spmd_axis_name="stage",
         variable_axes={"params": 0, "_overwrite_with_gradient": 0},
-        split_rngs={"params": self.is_initializing()},
+        split_rngs={"params": self.is_initializing(), "dropout": self.config.enable_dropout},
         metadata_params={
             nn.PARTITION_NAME: "layers",
             "sub_weight_split_dims_mapping": (None),
@@ -441,7 +441,9 @@ class Pipeline(nn.Module):
     else a set of layers if body_instance is a set of layers.
     """
 
-    def func_to_vmap(body_instance, weights, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode):
+    def func_to_vmap(
+        body_instance, weights, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode
+    ):
       """nn.vmap requires either a nn.module class or a function whose first argument is a nn.module instance."""
       return body_instance.apply(weights, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode)
 
@@ -450,7 +452,7 @@ class Pipeline(nn.Module):
         in_axes=(0, 0, 0, 0, None, None),
         spmd_axis_name="stage",
         variable_axes={"params": 0},
-        split_rngs={"params": self.is_initializing()},
+        split_rngs={"params": self.is_initializing(), "dropout": self.config.enable_dropout},
         metadata_params={
             nn.PARTITION_NAME: "layers",
             "sub_weight_split_dims_mapping": (None),
@@ -516,7 +518,13 @@ class Pipeline(nn.Module):
 
     stage_weights = self.get_current_stage_weights(pipeline_weights, loop_iteration)
     stages_output = vmap_func(
-        decoder_layer_instance, stage_weights, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode
+        decoder_layer_instance,
+        stage_weights,
+        stages_inputs,
+        stages_segment_ids,
+        stages_positions,
+        deterministic,
+        model_mode,
     )
     if self.config.scan_layers:
       stages_output = stages_output[0]
@@ -682,7 +690,7 @@ class Pipeline(nn.Module):
                 "non_trainable": 0,
                 "hyper_params": 0,
             },
-            split_rngs={"params": True},
+            split_rngs={"params": True, "dropout": self.config.enable_dropout},
             metadata_params={
                 nn.PARTITION_NAME: "circular_repeats",
                 "sub_weight_split_dims_mapping": (None,),
@@ -699,7 +707,9 @@ class Pipeline(nn.Module):
             else None
         )
         example_position = (
-            jax.lax.broadcast(example_position, [self.config.num_pipeline_repeats]) if example_position is not None else None
+            jax.lax.broadcast(example_position, [self.config.num_pipeline_repeats])
+            if example_position is not None
+            else None
         )
       # We only need to run one set of stages to initialize the variables, instead of looping over all microbatches for
       # the full total_iterations.

@@ -1,22 +1,22 @@
-#  Copyright 2025 Google LLC
+# Copyright 2023–2025 Google LLC
 #
-#  Licensed under the Apache License, Version 2.0 (the "License");
-#  you may not use this file except in compliance with the License.
-#  You may obtain a copy of the License at
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
 #
-#       https://www.apache.org/licenses/LICENSE-2.0
+#    https://www.apache.org/licenses/LICENSE-2.0
 #
-#  Unless required by applicable law or agreed to in writing, software
-#  distributed under the License is distributed on an "AS IS" BASIS,
-#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-#  See the License for the specific language governing permissions and
-#  limitations under the License.
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """"Module for decoder layers."""
 # pylint: disable=arguments-differ
 # pylint: disable=no-name-in-module
 
-from typing import Any, Optional
+from typing import Any
 import functools
 
 import jax
@@ -29,13 +29,14 @@ from flax.linen.partitioning import ScanIn
 
 from MaxText.common_types import DecoderBlockType, Config, MODEL_MODE_TRAIN, MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE
 from MaxText import max_logging
+from MaxText import max_utils
 from MaxText.inference import page_manager
 from MaxText.layers import linears
 from MaxText.layers import quantizations
 from MaxText.layers import pipeline
 from MaxText import maxtext_utils
 from MaxText import multimodal_utils
-from MaxText.layers.attentions import Attention
+from MaxText.layers.attentions import attention_as_linen
 from MaxText.layers.normalizations import rms_norm
 from MaxText.layers.embeddings import attend_on_embedding, embed_as_linen, positional_embedding_as_linen
 from MaxText.layers.quantizations import AqtQuantization as Quant
@@ -67,7 +68,8 @@ class DecoderLayer(nn.Module):
 
   config: Config
   mesh: Mesh
-  quant: Optional[Quant] = None
+  model_mode: str
+  quant: None | Quant = None
 
   @nn.compact
   def __call__(
@@ -78,8 +80,8 @@ class DecoderLayer(nn.Module):
       deterministic,
       model_mode,
       previous_chunk=None,
-      slot: Optional[int] = None,
-      page_state: Optional[page_manager.PageState] = None,
+      slot: None | int = None,
+      page_state: None | page_manager.PageState = None,
   ):
     cfg = self.config
     mesh = self.mesh
@@ -108,7 +110,7 @@ class DecoderLayer(nn.Module):
     else:
       lnx = nn.with_logical_constraint(lnx, logical_axis_names)
 
-    attention_layer = Attention(
+    attention_layer = attention_as_linen(
         config=self.config,
         num_query_heads=cfg.num_query_heads,
         num_kv_heads=cfg.num_kv_heads,
@@ -116,6 +118,8 @@ class DecoderLayer(nn.Module):
         max_target_length=cfg.max_target_length,
         max_prefill_predict_length=cfg.max_prefill_predict_length,
         attention_kernel=cfg.attention,
+        inputs_q_shape=lnx.shape,
+        inputs_kv_shape=lnx.shape,
         mesh=mesh,
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
@@ -129,6 +133,7 @@ class DecoderLayer(nn.Module):
         ar_cache_axis_order=tuple(map(int, cfg.ar_cache_axis_order.split(","))),
         compute_axis_order=tuple(map(int, cfg.compute_axis_order.split(","))),
         reshape_q=cfg.reshape_q,
+        model_mode=model_mode,
     )
 
     attention_lnx = attention_layer(
@@ -201,6 +206,7 @@ class SequentialBlockDecoderLayers(nn.Module):
   config: Config
   mesh: Mesh
   quant: Quant
+  model_mode: str
 
   @nn.compact
   def __call__(
@@ -210,11 +216,13 @@ class SequentialBlockDecoderLayers(nn.Module):
       decoder_positions,
       deterministic: bool,
       model_mode,
-      slot: Optional[int] = None,
-      page_state: Optional[page_manager.PageState] = None,
+      slot: None | int = None,
+      page_state: None | page_manager.PageState = None,
   ) -> jnp.ndarray:
     for lyr in range(self.num_decoder_layers):
-      inputs = self.decoder_layer(config=self.config, mesh=self.mesh, name=f"layers_{lyr}", quant=self.quant)(
+      inputs = self.decoder_layer(
+          config=self.config, mesh=self.mesh, name=f"layers_{lyr}", quant=self.quant, model_mode=model_mode
+      )(
           inputs,
           decoder_segment_ids,
           decoder_positions,
@@ -237,7 +245,8 @@ class Decoder(nn.Module):
   config: Config
   shared_embedding: nn.Module
   mesh: Mesh
-  quant: Optional[Quant] = None
+  quant: None | Quant = None
+  model_mode: str = MODEL_MODE_TRAIN
 
   def setup(self):
     """Initialize decoder layer."""
@@ -350,6 +359,8 @@ class Decoder(nn.Module):
         return [gpt3.Gpt3DecoderLayer]
       case DecoderBlockType.QWEN3:
         return [qwen3.Qwen3DecoderLayer]
+      case DecoderBlockType.QWEN3_MOE:
+        return [qwen3.Qwen3MoeDecoderLayer]
       case DecoderBlockType.SIMPLE:
         return [simple_layer.SimpleDecoderLayer]
       case DecoderBlockType.SIMPLE_MLP:
@@ -371,9 +382,7 @@ class Decoder(nn.Module):
 
           def map_fn(path, value):
             max_logging.log(f"models.py: Moving parameter {path} to device")
-            return jax.device_put(
-                value, jax._src.sharding_impls.TransferToMemoryKind("device")  # pylint: disable=protected-access
-            )
+            return jax.device_put(value, max_utils.device_space())
 
           return jax.tree_util.tree_map_with_path(map_fn, variables)
 
@@ -402,6 +411,7 @@ class Decoder(nn.Module):
         DecoderBlockType.GEMMA2,
         DecoderBlockType.GEMMA3,
         DecoderBlockType.QWEN3,
+        DecoderBlockType.QWEN3_MOE,
         DecoderBlockType.SIMPLE,
         DecoderBlockType.SIMPLE_MLP,
         DecoderBlockType.LLAMA4,
@@ -412,7 +422,9 @@ class Decoder(nn.Module):
     else:
       raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block.value=}")
 
-  def scan_decoder_layers(self, cfg, decoder_layer, length, metdata_axis_name, mesh, **kwargs):
+  def scan_decoder_layers(
+      self, cfg, decoder_layer, length, metadata_axis_name, mesh, in_axes_tuple, model_mode, **kwargs
+  ):
     """scan decoder layers, calls `flax.linen.transforms.scan`"""
     initializing = self.is_mutable_collection("params")
     params_spec = cfg.param_scan_axis if initializing else ScanIn(cfg.param_scan_axis)
@@ -430,16 +442,11 @@ class Decoder(nn.Module):
             "params": True,
             "dropout": cfg.enable_dropout,
         },
-        in_axes=(
-            nn.broadcast,
-            nn.broadcast,
-            nn.broadcast,
-            nn.broadcast,
-        ),
+        in_axes=in_axes_tuple,
         length=length,
-        metadata_params={nn.PARTITION_NAME: metdata_axis_name},
+        metadata_params={nn.PARTITION_NAME: metadata_axis_name},
     )
-    return scan_fn(config=cfg, mesh=mesh, name=metdata_axis_name, quant=self.quant, **kwargs)
+    return scan_fn(config=cfg, mesh=mesh, name=metadata_axis_name, quant=self.quant, model_mode=model_mode, **kwargs)
 
   def get_pipeline_stage_module(self, decoder_blocks):
     """get pipeline stage module"""
@@ -456,10 +463,16 @@ class Decoder(nn.Module):
       policy = self.get_remat_policy()
       base_stage = self.set_remat_policy([base_stage], policy)[0]
     if cfg.num_layers_per_pipeline_stage == 1:
-      stage_module = base_stage(config=cfg, mesh=self.mesh, quant=self.quant)
+      stage_module = base_stage(config=cfg, mesh=self.mesh, quant=self.quant, model_mode=self.model_mode)
     elif cfg.scan_layers_per_stage:
       stage_module = self.scan_decoder_layers(
-          cfg, base_stage, cfg.num_layers_per_pipeline_stage, "layers_per_stage", self.mesh
+          cfg,
+          base_stage,
+          cfg.num_layers_per_pipeline_stage,
+          "layers_per_stage",
+          self.mesh,
+          in_axes_tuple=(nn.broadcast,) * 4,
+          model_mode=self.model_mode,
       )
     else:
       stage_module = SequentialBlockDecoderLayers(
@@ -468,6 +481,7 @@ class Decoder(nn.Module):
           config=cfg,
           mesh=self.mesh,
           quant=self.quant,
+          model_mode=self.model_mode,
       )
     return stage_module
 
@@ -579,10 +593,10 @@ class Decoder(nn.Module):
       deterministic=False,
       model_mode=MODEL_MODE_TRAIN,
       previous_chunk=None,
-      slot: Optional[int] = None,
-      page_state: Optional[page_manager.PageState] = None,
-      bidirectional_mask: Optional[Any] = None,
-      image_embeddings: Optional[jnp.ndarray] = None,
+      slot: None | int = None,
+      page_state: None | page_manager.PageState = None,
+      bidirectional_mask: None | Any = None,
+      image_embeddings: None | jnp.ndarray = None,
   ):
     cfg = self.config
     mesh = self.mesh
@@ -595,7 +609,13 @@ class Decoder(nn.Module):
 
     policy = self.get_remat_policy()
     RemattedBlockLayers = self.set_remat_policy(self.decoder_layer, policy)
-
+    # scan does not support kwargs in layer call, passing broadcast_args as positional arg
+    broadcast_args = (
+        decoder_segment_ids,
+        decoder_positions,
+        deterministic,
+        model_mode,
+    )
     if cfg.using_pipeline_parallelism:
       if cfg.pipeline_fsdp_ag_once:
         partition_spec = self.pipeline_module.get_weight_sharding(
@@ -612,39 +632,41 @@ class Decoder(nn.Module):
         logical_axis_rules_pp_as_dp = maxtext_utils.logical_axis_rules_pp_act_as_dp(self.config.logical_axis_rules)
         # We chose not to pipeline the dense layers, only sparse for SPMD.
         with self.mesh, nn.partitioning.axis_rules(logical_axis_rules_pp_as_dp):
-          y, _ = self.scan_decoder_layers(cfg, dense_layer, cfg.first_num_dense_layers, "dense_layers", mesh)(
-              y,
-              decoder_segment_ids,
-              decoder_positions,
-              deterministic,
-              model_mode,
-          )
+          y, _ = self.scan_decoder_layers(
+              cfg,
+              dense_layer,
+              cfg.first_num_dense_layers,
+              "dense_layers",
+              mesh,
+              in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
+              model_mode=model_mode,
+          )(y, *broadcast_args)
           if num_moe_layers_outside_pp > 0:
-            y, _ = self.scan_decoder_layers(cfg, moe_layer, num_moe_layers_outside_pp, "moe_layers", mesh)(
-                y,
-                decoder_segment_ids,
-                decoder_positions,
-                deterministic,
-                model_mode,
-            )
-        y = self.pipeline_module(
-            y, decoder_segment_ids, decoder_positions, deterministic, model_mode, partition_spec=partition_spec
-        )
+            y, _ = self.scan_decoder_layers(
+                cfg,
+                moe_layer,
+                num_moe_layers_outside_pp,
+                "moe_layers",
+                mesh,
+                in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
+                model_mode=model_mode,
+            )(y, *broadcast_args)
+        y = self.pipeline_module(y, *broadcast_args, partition_spec=partition_spec)
       else:  # Not DeepSeek
-        y = self.pipeline_module(
-            y, decoder_segment_ids, decoder_positions, deterministic, model_mode, partition_spec=partition_spec
-        )
+        y = self.pipeline_module(y, *broadcast_args, partition_spec=partition_spec)
         remaining_layers = self.config.num_decoder_layers - self.config.pipeline_parallel_layers
         if remaining_layers > 0:
           logical_axis_rules_pp_as_dp = maxtext_utils.logical_axis_rules_pp_act_as_dp(self.config.logical_axis_rules)
           with self.mesh, nn.partitioning.axis_rules(logical_axis_rules_pp_as_dp):
-            y, _ = self.scan_decoder_layers(cfg, RemattedBlockLayers[0], remaining_layers, "layers_outside_pipeline", mesh)(
-                y,
-                decoder_segment_ids,
-                decoder_positions,
-                deterministic,
-                model_mode,
-            )
+            y, _ = self.scan_decoder_layers(
+                cfg,
+                RemattedBlockLayers[0],
+                remaining_layers,
+                "layers_outside_pipeline",
+                mesh,
+                in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
+                model_mode=model_mode,
+            )(y, *broadcast_args)
     else:
       if cfg.scan_layers:
         if cfg.decoder_block == DecoderBlockType.DEEPSEEK:
@@ -656,23 +678,27 @@ class Decoder(nn.Module):
           }
           dense_layer = RemattedBlockLayers[0]
           dense_layer.__call__ = functools.partial(dense_layer.__call__, **layer_call_kwargs)
-          y, _ = self.scan_decoder_layers(cfg, dense_layer, cfg.first_num_dense_layers, "dense_layers", mesh)(
-              y,
-              decoder_segment_ids,
-              decoder_positions,
-              deterministic,
-              model_mode,
-          )
+          y, _ = self.scan_decoder_layers(
+              cfg,
+              dense_layer,
+              cfg.first_num_dense_layers,
+              "dense_layers",
+              mesh,
+              in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
+              model_mode=model_mode,
+          )(y, *broadcast_args)
           moe_layer = RemattedBlockLayers[1]
           moe_layer.__call__ = functools.partial(moe_layer.__call__, **layer_call_kwargs)
           num_moe_layers = cfg.num_decoder_layers - cfg.first_num_dense_layers
-          y, _ = self.scan_decoder_layers(cfg, moe_layer, num_moe_layers, "moe_layers", mesh)(
-              y,
-              decoder_segment_ids,
-              decoder_positions,
-              deterministic,
-              model_mode,
-          )
+          y, _ = self.scan_decoder_layers(
+              cfg,
+              moe_layer,
+              num_moe_layers,
+              "moe_layers",
+              mesh,
+              in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
+              model_mode=model_mode,
+          )(y, *broadcast_args)
         elif cfg.decoder_block == DecoderBlockType.GEMMA3:
           y = self._apply_gemma3_scanned_blocks(
               y,
@@ -686,21 +712,25 @@ class Decoder(nn.Module):
               slot,
           )
         else:
+          RemattedBlockLayer = RemattedBlockLayers[0]
+          scan_length = int(cfg.num_decoder_layers / cfg.inhomogeneous_layer_cycle_interval)
           layer_kwargs = {}
           if cfg.decoder_block == DecoderBlockType.LLAMA4:
             layer_kwargs = {
                 "nope_layer_interval": self.config.nope_layer_interval,
                 "interleave_moe_layer_step": self.config.interleave_moe_layer_step,
             }
-          RemattedBlockLayer = RemattedBlockLayers[0]
-          scan_length = int(cfg.num_decoder_layers / cfg.inhomogeneous_layer_cycle_interval)
-          y, _ = self.scan_decoder_layers(cfg, RemattedBlockLayer, scan_length, "layers", mesh, **layer_kwargs)(
-              y,
-              decoder_segment_ids,
-              decoder_positions,
-              deterministic,
-              model_mode,
-          )
+            broadcast_args += (bidirectional_mask,)
+          y, _ = self.scan_decoder_layers(
+              cfg,
+              RemattedBlockLayer,
+              scan_length,
+              "layers",
+              mesh,
+              in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
+              model_mode=model_mode,
+              **layer_kwargs,
+          )(y, *broadcast_args)
       else:
         if cfg.decoder_block == DecoderBlockType.DEEPSEEK:
           assert len(RemattedBlockLayers) == 2, "Unscanned layers must have a length of 2 using deepseek."
@@ -714,7 +744,9 @@ class Decoder(nn.Module):
           # Iterate over the two layer groups (dense and MoE) and apply layer transformation
           for layer, num_layers, layer_prefix in zip(layers, num_layers_list, layer_prefixes):
             for index in range(num_layers):
-              y = layer(config=cfg, mesh=mesh, name=f"{layer_prefix}_{index}", quant=self.quant)(
+              y = layer(
+                  config=cfg, mesh=mesh, name=f"{layer_prefix}_{index}", quant=self.quant, model_mode=self.model_mode
+              )(
                   y,
                   decoder_segment_ids,
                   decoder_positions,
@@ -738,7 +770,10 @@ class Decoder(nn.Module):
                   "is_nope_layer": llama4.determine_is_nope_layer(lyr, self.config.nope_layer_interval),
                   "is_moe_layer": llama4.determine_is_moe_layer(lyr, self.config.interleave_moe_layer_step),
               }
-            layer = RemattedBlockLayer(config=cfg, mesh=mesh, name=f"layers_{lyr}", quant=self.quant, **layer_kwargs)
+              layer_call_kwargs = {"bidirectional_mask": bidirectional_mask}
+            layer = RemattedBlockLayer(
+                config=cfg, mesh=mesh, name=f"layers_{lyr}", quant=self.quant, model_mode=self.model_mode, **layer_kwargs
+            )
             y = layer(
                 y,
                 decoder_segment_ids,
@@ -791,21 +826,31 @@ class Decoder(nn.Module):
 
     # Apply the main scan over the full blocks
     if scan_length > 0:
-      y, _ = self.scan_decoder_layers(cfg, RemattedGemma3Block, scan_length, "layers", mesh, **layer_kwargs)(
-          y,
+      broadcast_args = (
           decoder_segment_ids,
           decoder_positions,
           deterministic,
           model_mode,
-          **layer_call_kwargs,
       )
+      y, _ = self.scan_decoder_layers(
+          cfg,
+          RemattedGemma3Block,
+          scan_length,
+          "layers",
+          mesh,
+          in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
+          model_mode=model_mode,
+          **layer_kwargs,
+      )(y, *broadcast_args, **layer_call_kwargs)
 
     # Apply any remaining layers that did not fit into a full scanned block
     num_remaining_layers = cfg.num_decoder_layers % attention_pattern_length
     if num_remaining_layers > 0:
       # We name the remainder block with a 'remainder' suffix to avoid parameter name collisions
       rem_layer_kwargs = {"num_of_layers": num_remaining_layers}
-      layer = RemattedGemma3Block(config=cfg, mesh=mesh, quant=self.quant, name="layers_remainder", **rem_layer_kwargs)
+      layer = RemattedGemma3Block(
+          config=cfg, mesh=mesh, quant=self.quant, model_mode=self.model_mode, name="layers_remainder", **rem_layer_kwargs
+      )
       y, _ = layer(
           y,
           decoder_segment_ids,

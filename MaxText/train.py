@@ -1,18 +1,16 @@
-"""
-Copyright 2023 Google LLC
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-     https://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-"""
+# Copyright 2023–2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 # pylint: disable=g-bad-todo, abstract-method, consider-using-with
 """Training loop and Decoding of the model."""
@@ -20,7 +18,7 @@ limitations under the License.
 # Calling jax.device_count here prevents a "TPU platform already registered" error.
 # See github.com/google/maxtext/issues/20 for more
 
-from typing import Any, Sequence, Tuple
+from typing import Any, Sequence
 import datetime
 import functools
 import os
@@ -114,9 +112,9 @@ def record_activation_metrics(output_metrics, intermediate_outputs, config):
     metrics_dict = intermediate_outputs["intermediates"]["decoder"]["decoder"]
 
     for layer_num in range(config.num_decoder_layers):
-      output_metrics["scalar"][f"activ_fraction_zero/layer_{layer_num:03d}"] = metrics_dict["activation_fraction_zero"][0][
-          layer_num
-      ]
+      output_metrics["scalar"][f"activ_fraction_zero/layer_{layer_num:03d}"] = metrics_dict["activation_fraction_zero"][
+          0
+      ][layer_num]
       output_metrics["scalar"][f"activ_mean/layer_{layer_num:03d}"] = metrics_dict["activation_mean"][0][layer_num]
       output_metrics["scalar"][f"activ_stdev/layer_{layer_num:03d}"] = metrics_dict["activation_stdev"][0][layer_num]
   else:
@@ -307,7 +305,19 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
   xent = xent * (data["targets_segmentation"] != 0)
   total_loss = jnp.sum(xent)
   total_weights = jnp.sum(data["targets_segmentation"] != 0)
-  loss = total_loss / (total_weights + EPS)
+
+  # If gradient accumulation is enabled, we don't need to divide total_loss
+  # by total_weights and then multiply the computed gradient by total_weights,
+  # since it's equivalent to computing the gradient from total_loss.
+  # This simplification reduces the number of operations and makes it easier
+  # for XLA to move all-reduce out of the gradient accumulation loop when use
+  # Zero1+GA to reduce communication overhead.
+  # EPS was used to avoid division by zero, but it's not needed when gradient
+  # accumulation is enabled since there's no division.
+  if config.gradient_accumulation_steps > 1:
+    loss = total_loss
+  else:
+    loss = total_loss / (total_weights + EPS)
 
   # Calculate and Add MTP Loss
   mtp_loss = 0.0
@@ -370,7 +380,7 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
       acc_grad_and_loss["moe_lb_loss"] += aux["moe_lb_loss"]
       acc_grad_and_loss["mtp_loss"] += aux["mtp_loss"]
       acc_grad_and_loss["grad"] = jax.tree_util.tree_map(
-          lambda x, y: x * aux["total_weights"] + y, cur_batch_gradient, acc_grad_and_loss["grad"]
+          lambda x, y: x + y, cur_batch_gradient, acc_grad_and_loss["grad"]
       )
       acc_grad_and_loss["total_weights"] += aux["total_weights"]
       return acc_grad_and_loss, aux
@@ -398,7 +408,9 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
   else:
     if config.optimizer_memory_host_offload:
       if config.use_dpo:
-        reference_params = jax.device_put(reference_params, max_utils.with_memory_kind(reference_params_sharding, "device"))
+        reference_params = jax.device_put(
+            reference_params, max_utils.with_memory_kind(reference_params_sharding, "device")
+        )
         extra_dpo_args = [reference_params]
     grad_func = jax.value_and_grad(_loss_fn, argnums=4, has_aux=True)
     (loss, aux), raw_grads = grad_func(model, config, data, dropout_rng, state.params, *extra_dpo_args, is_train=True)
@@ -523,7 +535,7 @@ def setup_train_loop(config, recorder, devices=None):
 
   with maybe_record_goodput(recorder, GoodputEvent.TRAINING_PREPARATION):
     data_iterator, eval_data_iterator = create_data_iterator(config, mesh)
-    context_parallel_size = mesh.shape["context"]
+    context_parallel_size = config.context_parallel_size
     # Check if context parallelism is being used with sequence packing
     if context_parallel_size > 1 and config.packing and config.dataset_type != "synthetic":
       raise ValueError(
@@ -543,7 +555,8 @@ def setup_train_loop(config, recorder, devices=None):
         model, data_iterator, tx, config, init_rng, mesh, checkpoint_manager
     )
 
-    if not config.using_pipeline_parallelism:
+    # TODO(aireenmei, hengtaoguo): support sharding in vit for multimodal
+    if not config.using_pipeline_parallelism and not config.use_multimodal:
       # The vocab tensor(s) of shape [vocab, embed] (and transpose) are not sharded by stage
       maxtext_utils.assert_params_sufficiently_sharded(state.params, mesh, config.sharding_tolerance)
 
@@ -563,6 +576,9 @@ def setup_train_loop(config, recorder, devices=None):
             step=0,
             use_ocdbt=config.checkpoint_storage_use_ocdbt,
             use_zarr3=config.checkpoint_storage_use_zarr3,
+            enable_orbax_v1=config.enable_orbax_v1,
+            checkpoint_conversion_fn=config.checkpoint_conversion_fn,
+            source_checkpoint_layout=config.source_checkpoint_layout,
         )
       except FileNotFoundError:
         step0_restored = None
@@ -682,8 +698,9 @@ def train_loop(config, recorder, state=None):
 
       metric_logger.buffer_and_write_train_metrics(metrics, step, step_time_delta)
 
-    state_to_save = state if not config.use_dpo else _split_dpo_state(state)[0]
-    checkpointing.maybe_save_checkpoint(checkpoint_manager, state_to_save, config, data_iterator)
+    if config.save_checkpoint_on_completion:
+      state_to_save = state if not config.use_dpo else _split_dpo_state(state)[0]
+      checkpointing.maybe_save_checkpoint(checkpoint_manager, state_to_save, config, data_iterator)
   except exceptions.StopTraining as e:
     max_logging.log(f"Training stopped: {str(e)}")
   finally:
@@ -692,7 +709,7 @@ def train_loop(config, recorder, state=None):
   return state
 
 
-def initialize(argv: Sequence[str]) -> Tuple[pyconfig.HyperParameters, Any, Any]:
+def initialize(argv: Sequence[str]) -> tuple[pyconfig.HyperParameters, Any, Any]:
   """Initialization of hyperparameters and utilities"""
   pathwaysutils.initialize()
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
@@ -701,7 +718,9 @@ def initialize(argv: Sequence[str]) -> Tuple[pyconfig.HyperParameters, Any, Any]
   tf.config.set_visible_devices([], "GPU")
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
   if "xla_tpu_spmd_rng_bit_generator_unsafe" not in os.environ.get("LIBTPU_INIT_ARGS", ""):
-    os.environ["LIBTPU_INIT_ARGS"] = os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
+    os.environ["LIBTPU_INIT_ARGS"] = (
+        os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
+    )
   # TODO: mazumdera@ : ensure missing mandatory fields in base.yml are filled in in argv,
   # or fill in here
   config = pyconfig.initialize(argv)

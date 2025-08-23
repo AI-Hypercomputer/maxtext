@@ -1,10 +1,10 @@
-# Copyright 2024 Google LLC
+# Copyright 2023–2025 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+#    https://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -31,7 +31,7 @@ python3 -m MaxText.layerwise_quantization  MaxText/configs/base.yml \
 """
 
 import os
-from typing import Any, Sequence, Optional
+from typing import Any, Sequence
 
 from tqdm import tqdm
 import jax
@@ -74,11 +74,11 @@ class LayerwiseQuantization:
 
     # Model and quantization config
     self.quant = quantizations.configure_quantization(config)
-    model = models.Transformer(config, mesh=self._mesh, quant=self.quant)
+    model = models.Transformer(config, mesh=self._mesh, quant=self.quant, model_mode=common_types.MODEL_MODE_TRAIN)
     rng = jax.random.PRNGKey(1234)
     self.unboxed_abstract_state, _, _ = maxtext_utils.get_abstract_state(model, None, self.config, rng, self._mesh, False)
 
-  def load_and_quantize(self, rng: Optional[PRNGKeyType] = None) -> None:
+  def load_and_quantize(self, rng: None | PRNGKeyType = None) -> None:
     """
     Load parameters layer by layer and quantize them.
     """
@@ -195,7 +195,9 @@ def main(argv: Sequence[str]) -> None:
 
 
 def validate_config(config):
-  assert config.load_full_state_path == "", "Operation on full states not supported! Convert to parameter checkpoint first."
+  assert (
+      config.load_full_state_path == ""
+  ), "Operation on full states not supported! Convert to parameter checkpoint first."
 
 
 if __name__ == "__main__":

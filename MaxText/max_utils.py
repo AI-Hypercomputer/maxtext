@@ -1,18 +1,16 @@
-"""
-Copyright 2023 Google LLC
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-     https://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-"""
+# Copyright 2023–2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """ Common Max Utils needed by multiple modules.
 All the functions include MaxText modules, such as Pyconfig, should be moved to MaxText utils file."""
@@ -24,7 +22,7 @@ import socket
 import subprocess
 import collections
 from collections.abc import Sequence
-from typing import Any, Tuple
+from typing import Any
 from functools import partial
 
 import numpy as np
@@ -79,6 +77,17 @@ def calculate_num_params_from_pytree(params):
   total_parameters = jax.tree_util.tree_reduce(lambda x, y: x + y, params_sizes)
   assert total_parameters >= 0
   return total_parameters
+
+
+def device_space():
+  """Version guard for jax.memory.Space.Device."""
+  # See b/436565838 for more.
+  if jax.__version__ >= "0.7.1":
+    return jax.memory.Space.Device  # pytype: disable=module-attr
+  else:
+    # pytype: disable=module-attr
+    return jax._src.sharding_impls.TransferToMemoryKind("device")   # pylint: disable=protected-access
+    # pytype: enable=module-attr
 
 
 def calculate_total_params_per_chip(params):
@@ -554,7 +563,9 @@ def unbox_logicallypartioned(boxed_pytree):
 # Cross entropy implementation is taken from original T5X codebase:
 # https://github.com/google-research/t5x/blob/ace831eea1e2742b4299cd1a9af7e4f302038351/t5x/losses.py#L25-L101
 @jax.custom_vjp
-def cross_entropy_with_logits(logits: jnp.ndarray, targets: jnp.ndarray, z_loss: float) -> Tuple[jnp.ndarray, jnp.ndarray]:
+def cross_entropy_with_logits(
+    logits: jnp.ndarray, targets: jnp.ndarray, z_loss: float
+) -> tuple[jnp.ndarray, jnp.ndarray]:
   """Computes cross entropy loss with stable custom gradient.
   Computes a stabilized-gradient version of:
     -jnp.sum(targets * nn.log_softmax(logits), axis=-1)
@@ -583,9 +594,9 @@ def cross_entropy_with_logits(logits: jnp.ndarray, targets: jnp.ndarray, z_loss:
   return loss, total_z_loss
 
 
-def _cross_entropy_with_logits_fwd(logits: jnp.ndarray, targets: jnp.ndarray, z_loss: float = 0.0) -> Tuple[
-    Tuple[jnp.ndarray, jnp.ndarray],
-    Tuple[
+def _cross_entropy_with_logits_fwd(logits: jnp.ndarray, targets: jnp.ndarray, z_loss: float = 0.0) -> tuple[
+    tuple[jnp.ndarray, jnp.ndarray],
+    tuple[
         jnp.ndarray,
         jnp.ndarray,
         jnp.ndarray,
@@ -618,7 +629,7 @@ def _cross_entropy_with_logits_fwd(logits: jnp.ndarray, targets: jnp.ndarray, z_
 
 
 def _cross_entropy_with_logits_bwd(
-    res: Tuple[
+    res: tuple[
         jnp.ndarray,
         jnp.ndarray,
         jnp.ndarray,
@@ -627,8 +638,8 @@ def _cross_entropy_with_logits_bwd(
         jnp.ndarray,
         jnp.ndarray,
     ],
-    g: Tuple[jnp.ndarray, jnp.ndarray],
-) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    g: tuple[jnp.ndarray, jnp.ndarray],
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
   """Backward-mode of `cross_entropy_with_logits`."""
   g = g[0]  # Ignore z_loss component as that is only used for logging.
   logits, targets, z_loss, exp_shifted, sum_exp, log_softmax, log_z = res
@@ -848,7 +859,8 @@ def reorder_causal_load_balanced(batch, cp_size):
           value,  # Pass each key's value inside batch separately
           cp_size=cp_size,
       )
-      if key in ["inputs", "targets", "inputs_position", "targets_position", "inputs_segmentation", "targets_segmentation"]
+      if key
+      in ["inputs", "targets", "inputs_position", "targets_position", "inputs_segmentation", "targets_segmentation"]
       else value
       for key, value in batch.items()
   }

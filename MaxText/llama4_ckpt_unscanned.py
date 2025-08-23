@@ -1,8 +1,11 @@
-# Copyright 2025 Google LLC
+# Copyright 2023–2025 Google LLC
+#
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
-#      https://www.apache.org/licenses/LICENSE-2.0
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -192,7 +195,9 @@ def _pt_to_np(pt_weight, cast_dtype=None, transpose=False):
   return np_weight
 
 
-def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, model_params: dict, mem_info: psutil.Process):
+def _convert_huggingface_to_jax_weights(
+    base_model_path: str, model_size: str, model_params: dict, mem_info: psutil.Process
+):
   """Convert a Huggingface Checkpoint to a dictionary of Numpy arrays representing the weights.
 
   Args:
@@ -286,16 +291,24 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
   for layer_idx in tqdm(range(num_hidden_layers_for_vit), desc="layers", leave=False):
     layer_name = f"layers_{layer_idx}"
     wq = _pt_to_np(
-        chkpt_vars[f"vision_model.model.layers.{layer_idx}.self_attn.q_proj.weight"], cast_dtype=CAST_DTYPE, transpose=True
+        chkpt_vars[f"vision_model.model.layers.{layer_idx}.self_attn.q_proj.weight"],
+        cast_dtype=CAST_DTYPE,
+        transpose=True,
     )
     wk = _pt_to_np(
-        chkpt_vars[f"vision_model.model.layers.{layer_idx}.self_attn.k_proj.weight"], cast_dtype=CAST_DTYPE, transpose=True
+        chkpt_vars[f"vision_model.model.layers.{layer_idx}.self_attn.k_proj.weight"],
+        cast_dtype=CAST_DTYPE,
+        transpose=True,
     )
     wv = _pt_to_np(
-        chkpt_vars[f"vision_model.model.layers.{layer_idx}.self_attn.v_proj.weight"], cast_dtype=CAST_DTYPE, transpose=True
+        chkpt_vars[f"vision_model.model.layers.{layer_idx}.self_attn.v_proj.weight"],
+        cast_dtype=CAST_DTYPE,
+        transpose=True,
     )
     wo = _pt_to_np(
-        chkpt_vars[f"vision_model.model.layers.{layer_idx}.self_attn.o_proj.weight"], cast_dtype=CAST_DTYPE, transpose=True
+        chkpt_vars[f"vision_model.model.layers.{layer_idx}.self_attn.o_proj.weight"],
+        cast_dtype=CAST_DTYPE,
+        transpose=True,
     )
     bq = _pt_to_np(chkpt_vars[f"vision_model.model.layers.{layer_idx}.self_attn.q_proj.bias"], cast_dtype=CAST_DTYPE)
     bk = _pt_to_np(chkpt_vars[f"vision_model.model.layers.{layer_idx}.self_attn.k_proj.bias"], cast_dtype=CAST_DTYPE)
@@ -482,7 +495,9 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
   for layer_idx in tqdm(range(base_num_decoder_layers), desc="layers", leave=False):
     is_dense_layer = (layer_idx + 1) % interleave_moe_layer != 0
     layer_name = f"layers_{layer_idx}"
-    pre_self_attention_layernorm = _pt_to_np(chkpt_vars[f"layers.{layer_idx}.attention_norm.weight"], cast_dtype=CAST_DTYPE)
+    pre_self_attention_layernorm = _pt_to_np(
+        chkpt_vars[f"layers.{layer_idx}.attention_norm.weight"], cast_dtype=CAST_DTYPE
+    )
     post_self_attention_layernorm = _pt_to_np(chkpt_vars[f"layers.{layer_idx}.ffn_norm.weight"], cast_dtype=CAST_DTYPE)
     jax_weights["decoder"][layer_name]["pre_self_attention_layer_norm"]["scale"] = pre_self_attention_layernorm
     jax_weights["decoder"][layer_name]["post_self_attention_layer_norm"]["scale"] = post_self_attention_layernorm
@@ -531,7 +546,9 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
           transpose=True,
       )
       wi_1 = _pt_to_np(
-          chkpt_vars[f"layers.{layer_idx}.feed_forward.shared_experts.up_proj.weight"], cast_dtype=CAST_DTYPE, transpose=True
+          chkpt_vars[f"layers.{layer_idx}.feed_forward.shared_experts.up_proj.weight"],
+          cast_dtype=CAST_DTYPE,
+          transpose=True,
       )
       wo = _pt_to_np(
           chkpt_vars[f"layers.{layer_idx}.feed_forward.shared_experts.down_proj.weight"],
@@ -582,7 +599,9 @@ def _convert_pytorch_to_jax_weights(base_model_path: str, model_size: str, model
     max_logging.log(f"Loading checkpoint {i+1} of {len(ckpt_paths)} ...")
     # NOTE: starting in PT2.6, `weights_only` was switched from the default of `False` to `True`
     # thus we need to specify this or else loading will fail
-    chkpt_vars[int(ckpt_path.name.split(".", maxsplit=2)[1])] = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    chkpt_vars[int(ckpt_path.name.split(".", maxsplit=2)[1])] = torch.load(
+        ckpt_path, map_location="cpu", weights_only=False
+    )
   chkpt_vars = [chkpt_vars[i] for i in sorted(list(chkpt_vars.keys()))]
   # map weight names if they use HuggingFace instead of PyTorch convention
   chkpt_vars = [_NamespaceMapper(var, model_size=model_size) for var in chkpt_vars]
@@ -807,7 +826,10 @@ def _convert_pytorch_to_jax_weights(base_model_path: str, model_size: str, model
       ).transpose()
 
       wo = np.concatenate(
-          [_pt_to_np(var[f"layers.{layer_idx}.feed_forward.mlp.fc2_weight"], cast_dtype=CAST_DTYPE) for var in chkpt_vars],
+          [
+              _pt_to_np(var[f"layers.{layer_idx}.feed_forward.mlp.fc2_weight"], cast_dtype=CAST_DTYPE)
+              for var in chkpt_vars
+          ],
           axis=1,
       ).transpose()
 

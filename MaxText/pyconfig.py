@@ -1,23 +1,21 @@
-"""
-Copyright 2023 Google LLC
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-     https://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-"""
+# Copyright 2023–2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 # pytype: skip-file
 # pylint: disable=missing-module-docstring, bare-except, consider-using-generator, missing-function-docstring
 from collections import OrderedDict
-from typing import Any, Union
+from typing import Any
 from math import prod
 import math
 import os
@@ -149,6 +147,14 @@ def validate_rope_type(rope_type: str) -> None:
     raise ValueError(f"Invalid RoPE type was passed. Got: {rope_type}. Valid options: {valid_rope_types}")
 
 
+def validate_expert_shard_attention_option(expert_shard_attention_option: str) -> None:
+  valid_expert_shard_attention_option = ("fsdp", "context")
+  if expert_shard_attention_option not in valid_expert_shard_attention_option:
+    raise ValueError(
+        f"Invalid expert_shard_attention_option was passed. Got: {expert_shard_attention_option}. Valid options: {valid_expert_shard_attention_option}"
+    )
+
+
 def validate_keys(keys):
   validate_attention_kernel(keys["attention"])
   validate_attention_type(keys["attention_type"])
@@ -162,6 +168,10 @@ def validate_keys(keys):
   validate_model_call_mode(keys["model_call_mode"])
   validate_prefill_and_target_lengths(keys["max_prefill_predict_length"], keys["max_target_length"])
   validate_rope_type(keys["rope_type"])
+
+  # TODO remove after b/435512699 resolved
+  if keys["context_parallel_size"] > 1 and keys["context_parallel_load_balance"] and keys["attention_type"] == "chunk":
+    raise ValueError("Currently load-balanced context parallelism is not supported for chunk attention.")
 
   if keys["mtp_eval_target_module"] < 0:
     raise ValueError("mtp_eval_target_module cannot be negative. Set to 0 to disable evaluation.")
@@ -200,7 +210,7 @@ def validate_keys(keys):
     validate_sparse_matmul_parallelism(keys)
     validate_ragged_dot(keys)
     validate_deepseek_moe(keys)
-    assert keys["decoder_block"] != "qwen3", "Qwen3 MoE mode has not been tested, please set num_experts to 1."
+    validate_expert_shard_attention_option(keys["expert_shard_attention_option"])
 
   if keys["use_multimodal"]:
     validate_multimodal_model_name(keys["model_name"])
@@ -230,6 +240,19 @@ def validate_constant_bound(keys):
   assert (
       len(keys["constant_bound_config"]) == 0 or len(keys["constant_bound_config"]) == 6
   ), "Please specify competete constant bound or none"
+
+
+def validate_quantization_methods(keys):
+  """Validate quantization methods
+  """
+  valid_quant_methods = (
+    "", "int8", "fp8", "fp8_full", "fp8_gpu", "fp8_nanoo"
+  )
+  if keys["use_qwix_quantization"]:
+    if keys["quantization"] not in valid_quant_methods:
+      raise ValueError(
+          f"Invalid quantization method {keys['quantization']}. Valid options are {valid_quant_methods}"
+      )
 
 
 def validate_data_input(keys):
@@ -288,7 +311,9 @@ def validate_llama4_config(keys: dict):
 
   """
   if keys["capacity_factor"] >= 0:
-    raise ValueError("Llama4 decoder has not been tested with capacity_factor >= 0 -- please set that value to -1 for now!")
+    raise ValueError(
+        "Llama4 decoder has not been tested with capacity_factor >= 0 -- please set that value to -1 for now!"
+    )
   if keys["num_experts_per_tok"] > 1:
     raise ValueError("Only top-1 routing is supported for Llama4 for now!")
   if keys["base_num_decoder_layers"] % keys["interleave_moe_layer_step"] != 0:
@@ -330,6 +355,10 @@ def validate_model_name(s: str) -> bool:
       "qwen3-4b",
       "qwen3-8b",
       "qwen3-14b",
+      "qwen3-32b",
+      "qwen3-235b-a22b",
+      "qwen3-30b-a3b",
+      "qwen3-480b-a35b",
       "gpt3-175b",
       "gpt3-22b",
       "gpt3-6b",
@@ -393,7 +422,7 @@ def validate_and_assign_remat_tensors(keys):
   return keys
 
 
-def _lists_to_tuples(l: list[Any]) -> Union[tuple[Any], list[Any]]:
+def _lists_to_tuples(l: list[Any]) -> tuple[Any] | list[Any]:
   return tuple(_lists_to_tuples(x) for x in l) if isinstance(l, list) else l
 
 
@@ -605,6 +634,7 @@ class _HyperParameters:
 
     raw_keys["num_slices"] = max_utils.get_num_slices(raw_keys)
     raw_keys["quantization_local_shard_count"] = get_quantization_local_shard_count(raw_keys)
+    raw_keys["context_parallel_size"] = get_context_parallel_size(raw_keys)
     raw_keys = create_parallelisms_list(raw_keys)
     raw_keys = set_and_validate_pipeline_config(raw_keys)
 
@@ -629,6 +659,7 @@ class _HyperParameters:
     validate_tokenizer(raw_keys)
     validate_data_input(raw_keys)
     validate_constant_bound(raw_keys)
+    validate_quantization_methods(raw_keys)
 
     raw_keys["decoder_block"] = DecoderBlockType(raw_keys["decoder_block"])
 
@@ -744,9 +775,9 @@ def validate_and_set_hlo_dump_defaults(raw_keys):
     raise ValueError("You must set either XLA_FLAGS or dump_hlo_xla_flags to dump HLO, but not both.")
   if not os.environ.get("XLA_FLAGS") and not raw_keys["dump_hlo_xla_flags"]:
     raw_keys["dump_hlo_xla_flags"] = f"--xla_dump_to={raw_keys['dump_hlo_local_dir']} --xla_dump_large_constants"
-    if raw_keys["dump_hlo_module_name"]:
+    if raw_keys["dump_hlo_local_module_name"]:
       raw_keys["dump_hlo_xla_flags"] = (
-          f"{raw_keys['dump_hlo_xla_flags']} --xla_dump_hlo_module_re={raw_keys['dump_hlo_module_name']}"
+          f"{raw_keys['dump_hlo_xla_flags']} --xla_dump_hlo_module_re={raw_keys['dump_hlo_local_module_name']}"
       )
   if not raw_keys["dump_hlo_gcs_dir"]:
     raw_keys["dump_hlo_gcs_dir"] = os.path.join(raw_keys["base_output_directory"], raw_keys["run_name"], "xla_dump")
@@ -783,6 +814,11 @@ def validate_multiple_slices(raw_keys):
 
 def set_and_validate_pipeline_config(raw_keys):
   if using_pipeline_parallelism(raw_keys):
+    # For pipeline parallelism, model_fsdp_ag_once should be False, and pipeline_fsdp_ag_once is typically True.
+    if raw_keys["model_fsdp_ag_once"]:
+      raise ValueError(
+          "You should only set pipeline_fsdp_once=True, leave model_fsdp_ag_once=False with pipeline parallelism."
+      )
 
     def modify_activation_embed_and_logits_batch(logical_axis_rules):
       for idx, logical_rule in enumerate(logical_axis_rules):
@@ -938,8 +974,17 @@ def validate_deepseek_moe(raw_keys):
 
 
 def validate_sparse_matmul_parallelism(raw_keys):
-  if raw_keys["sparse_matmul"] and (using_sequence_parallelism(raw_keys) or using_pipeline_parallelism(raw_keys)):
-    raise ValueError("Currently we only support Megablox and Ragged dot with data, tensor, and expert parallelism.")
+  # TODO: remove once b/434699033 resolved
+  if raw_keys["sparse_matmul"] and (using_expert_parallelism(raw_keys) and using_pipeline_parallelism(raw_keys)):
+    raise ValueError("Sparse matmul doesn't support using expert and pipeline parallelism together.")
+
+  # TODO: remove once b/435539039 resolved
+  if raw_keys["sparse_matmul"] and (
+      using_fsdp_and_transpose_parallelism(raw_keys)
+      and using_expert_parallelism(raw_keys)
+      and using_tensor_parallelism(raw_keys)
+  ):
+    raise ValueError("Sparse matmul doesn't support using fsdp, expert, and tensor parallelism together.")
   tensor_parallelism = (
       raw_keys["ici_tensor_parallelism"]
       * raw_keys["dcn_tensor_parallelism"]
@@ -957,12 +1002,7 @@ def validate_sparse_matmul_parallelism(raw_keys):
     raise ValueError(
         f"The expert dimension {raw_keys['num_experts']} is not divisible by expert parallelism setting {expert_parallelism}."
     )
-  if (
-      using_pipeline_parallelism(raw_keys)
-      and raw_keys["pipeline_parallel_layers"] is True
-      and raw_keys["model_fsdp_ag_once"] is True
-  ):
-    raise ValueError("You should use the pipeline_fsdp_ag_once = True and leave model_fsdp_ag_once = False.")
+
 
 def validate_ragged_dot(raw_keys):
   if raw_keys["sparse_matmul"] and not raw_keys["megablox"]:
@@ -970,9 +1010,8 @@ def validate_ragged_dot(raw_keys):
     try:
       jax.config.update(config_flag, True)
     except AttributeError:
-      max_logging.log(
-          f"JAX config {config_flag} not found, possibly due to old JAX version."
-      )
+      max_logging.log(f"JAX config {config_flag} not found, possibly due to old JAX version.")
+
 
 def create_new_logical_axis_rules(old_logical_axis_rules, new_logical_axis_rules):
   new_logical_axis = set()
@@ -1083,6 +1122,14 @@ def get_quantization_local_shard_count(raw_keys):
     return raw_keys["quantization_local_shard_count"]
 
 
+def get_context_parallel_size(raw_keys):
+  cp_size = raw_keys["ici_context_parallelism"] * raw_keys["dcn_context_parallelism"]
+  # ep acts as cp in attention
+  if raw_keys["expert_shard_attention_option"] == "context":
+    cp_size = cp_size * raw_keys["ici_expert_parallelism"] * raw_keys["dcn_expert_parallelism"]
+  return cp_size
+
+
 def using_pipeline_parallelism(raw_keys) -> bool:
   return int(raw_keys["ici_pipeline_parallelism"]) > 1 or int(raw_keys["dcn_pipeline_parallelism"]) > 1
 
@@ -1104,6 +1151,15 @@ def using_sequence_parallelism(raw_keys) -> bool:
 
 def using_expert_parallelism(raw_keys) -> bool:
   return int(raw_keys["ici_expert_parallelism"]) > 1 or int(raw_keys["dcn_expert_parallelism"]) > 1
+
+
+def using_fsdp_and_transpose_parallelism(raw_keys) -> bool:
+  return (
+      int(raw_keys["ici_fsdp_parallelism"]) > 1
+      or int(raw_keys["dcn_fsdp_parallelism"]) > 1
+      or int(raw_keys["ici_fsdp_transpose_parallelism"]) > 1
+      or int(raw_keys["dcn_fsdp_transpose_parallelism"]) > 1
+  )
 
 
 class HyperParameters:

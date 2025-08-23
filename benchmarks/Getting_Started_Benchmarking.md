@@ -85,6 +85,6 @@ for model in list_of_models:
   for xpk_workload_name, xpk_workload_cmd in zip(xpk_workload_names, xpk_workload_cmds):
     return_code = run_command_with_updates(xpk_workload_cmd, xpk_workload_name)
     if return_code != 0:
-      print('Unable to run xpk workload: {xpk_workload_name}')
+      print(f'Unable to run xpk workload: {xpk_workload_name}')
 
 ```

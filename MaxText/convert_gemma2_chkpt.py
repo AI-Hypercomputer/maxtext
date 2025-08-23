@@ -1,15 +1,16 @@
-"""
-Copyright 2023 Google LLC
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-     https://www.apache.org/licenses/LICENSE-2.0
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-"""
+# Copyright 2023–2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 # pylint: disable=line-too-long
 """
@@ -145,7 +146,9 @@ def main(raw_args=None) -> None:
     self_attention_local["value"]["kernel"].append(
         params["transformer"][in_layer_name_local]["attn"]["kv_einsum"]["w"][1].transpose((1, 0, 2))
     )
-    self_attention_local["out"]["kernel"].append(params["transformer"][in_layer_name_local]["attn"]["attn_vec_einsum"]["w"])
+    self_attention_local["out"]["kernel"].append(
+        params["transformer"][in_layer_name_local]["attn"]["attn_vec_einsum"]["w"]
+    )
 
     # mlp
     if transpose_gating_einsum:
@@ -240,8 +243,12 @@ def main(raw_args=None) -> None:
   layer_weight["mlp_local"]["wi_1"]["kernel"] = np.array(layer_weight["mlp_local"]["wi_1"]["kernel"]).transpose((1, 0, 2))
   layer_weight["mlp_local"]["wo"]["kernel"] = np.array(layer_weight["mlp_local"]["wo"]["kernel"]).transpose((1, 0, 2))
 
-  layer_weight["mlp_global"]["wi_0"]["kernel"] = np.array(layer_weight["mlp_global"]["wi_0"]["kernel"]).transpose((1, 0, 2))
-  layer_weight["mlp_global"]["wi_1"]["kernel"] = np.array(layer_weight["mlp_global"]["wi_1"]["kernel"]).transpose((1, 0, 2))
+  layer_weight["mlp_global"]["wi_0"]["kernel"] = np.array(layer_weight["mlp_global"]["wi_0"]["kernel"]).transpose(
+      (1, 0, 2)
+  )
+  layer_weight["mlp_global"]["wi_1"]["kernel"] = np.array(layer_weight["mlp_global"]["wi_1"]["kernel"]).transpose(
+      (1, 0, 2)
+  )
   layer_weight["mlp_global"]["wo"]["kernel"] = np.array(layer_weight["mlp_global"]["wo"]["kernel"]).transpose((1, 0, 2))
 
   layer_weight["pre_self_attention_norm_local"]["scale"] = np.array(
@@ -260,7 +267,9 @@ def main(raw_args=None) -> None:
   layer_weight["post_self_attention_norm_global"]["scale"] = np.array(
       layer_weight["post_self_attention_norm_global"]["scale"]
   ).transpose((1, 0))
-  layer_weight["post_ffw_norm_global"]["scale"] = np.array(layer_weight["post_ffw_norm_global"]["scale"]).transpose((1, 0))
+  layer_weight["post_ffw_norm_global"]["scale"] = np.array(layer_weight["post_ffw_norm_global"]["scale"]).transpose(
+      (1, 0)
+  )
 
   layer_weight["self_attention_local"] = copy.deepcopy(self_attention_local)
   layer_weight["self_attention_global"] = copy.deepcopy(self_attention_global)

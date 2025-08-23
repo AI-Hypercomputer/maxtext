@@ -1,22 +1,21 @@
-#  Copyright 2023 Google LLC
+# Copyright 2023–2025 Google LLC
 #
-#  Licensed under the Apache License, Version 2.0 (the "License");
-#  you may not use this file except in compliance with the License.
-#  You may obtain a copy of the License at
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
 #
-#       https://www.apache.org/licenses/LICENSE-2.0
+#    https://www.apache.org/licenses/LICENSE-2.0
 #
-#  Unless required by applicable law or agreed to in writing, software
-#  distributed under the License is distributed on an "AS IS" BASIS,
-#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-#  See the License for the specific language governing permissions and
-#  limitations under the License.
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Embedding Layers."""
 
 import dataclasses
 import math
-from typing import Optional
 
 import jax
 from jax import lax
@@ -26,6 +25,7 @@ from flax import linen as nn
 from flax import nnx
 
 from MaxText import max_logging
+from MaxText import max_utils
 from MaxText.common_types import MODEL_MODE_PREFILL, MODEL_MODE_TRAIN, Array, Config, DType
 from MaxText.layers import nnx_wrappers
 from MaxText.layers.initializers import Initializer, default_embed_init, variable_to_logically_partitioned
@@ -37,8 +37,7 @@ def _maybe_move_embedding_to_device(embedding_table: Array, config: Config) -> A
   """Moves embedding table to device if parameter offloading is enabled."""
   if config.parameter_memory_host_offload:
     max_logging.log("embeddings.py: Moving embedding parameter to device")
-    # pylint: disable=protected-access
-    return jax.device_put(embedding_table, jax._src.sharding_impls.TransferToMemoryKind("device"))
+    return jax.device_put(embedding_table, max_utils.device_space())
   return embedding_table
 
 
@@ -47,9 +46,9 @@ def embed_as_linen(
     num_embeddings: int,
     num_features: int,
     config: Config,
-    cast_input_dtype: Optional[DType] = None,
+    cast_input_dtype: None | DType = None,
     dtype: DType = jnp.float32,
-    attend_dtype: Optional[DType] = None,
+    attend_dtype: None | DType = None,
     embedding_init: Initializer = default_embed_init,
     name: str | None = None,
 ):
@@ -94,9 +93,9 @@ class Embed(nnx.Module):
       num_embeddings: int,
       num_features: int,
       config: Config,
-      cast_input_dtype: Optional[DType] = None,
+      cast_input_dtype: None | DType = None,
       dtype: DType = jnp.float32,
-      attend_dtype: Optional[DType] = None,
+      attend_dtype: None | DType = None,
       embedding_init: Initializer = default_embed_init,
       *,
       # Not used in Embed but passed in by nnx.bridge.to_linen.
@@ -276,7 +275,7 @@ class RotaryEmbedding(nnx.Module):
   def __call__(
       self,  # pytype: disable=signature-mismatch  # overriding-parameter-count-checks
       inputs: jax.Array,
-      position: Optional[jax.Array] = None,
+      position: None | jax.Array = None,
   ) -> jax.Array:
     """Generates a jax.Array of sinusoids with different frequencies.
 
@@ -433,7 +432,7 @@ class LLaMARotaryEmbedding(RotaryEmbedding):
     lower_wavelen_cond = wavelen < high_freq_wavelen
     return jax.lax.cond(lower_wavelen_cond, lower_wavelen, bigger_or_equal_wavelen, freq)
 
-  def __call__(self, inputs: jax.Array, position: Optional[jax.Array] = None) -> jax.Array:
+  def __call__(self, inputs: jax.Array, position: None | jax.Array = None) -> jax.Array:
     """Applies LLaMA variant of rotary position embedding.
 
     Args:
@@ -449,7 +448,9 @@ class LLaMARotaryEmbedding(RotaryEmbedding):
     if len(inputs.shape) != 4:
       raise ValueError("Input is assumed to be a rank 4 tensor of shape [B, S, N, H].")
     if self.embedding_dims != inputs.shape[3]:
-      raise ValueError("The embedding dims of the rotary position embedding must match the hidden dimension of the inputs.")
+      raise ValueError(
+          "The embedding dims of the rotary position embedding must match the hidden dimension of the inputs."
+      )
 
     # Shift the inputs left and right as per LLaMA's specific behavior
     inputs_shifted_left = jnp.concatenate([inputs[..., 1:], inputs[..., :1]], axis=-1)
@@ -617,7 +618,7 @@ class YarnRotaryEmbedding(nnx.Module):
         max_position_embeddings (int): Maximum sequence length.
 
     Returns:
-        Tuple[int, int]: The range of correction dimensions (low, high), clamped to valid indices.
+        tuple[int, int]: The range of correction dimensions (low, high), clamped to valid indices.
     """
     low = math.floor(self._find_correction_dim(low_rot, dim, base, max_position_embeddings))
     high = math.ceil(self._find_correction_dim(high_rot, dim, base, max_position_embeddings))
@@ -635,7 +636,7 @@ class YarnRotaryEmbedding(nnx.Module):
     linear_func = (jnp.arange(dim, dtype=jnp.float32) - min_val) / (max_val - min_val)
     return jnp.clip(linear_func, 0, 1)
 
-  def __call__(self, inputs: Array, position: Optional[Array] = None) -> Array:
+  def __call__(self, inputs: Array, position: None | Array = None) -> Array:
     """Applies the rotary positional embedding using the precomputed complex frequencies.
 
     Args:
@@ -648,7 +649,9 @@ class YarnRotaryEmbedding(nnx.Module):
     if len(inputs.shape) != 4:
       raise ValueError("Input is assumed to be a rank 4 tensor of shape [batch, sequence, heads, dims].")
     if self.embedding_dims != inputs.shape[3]:
-      raise ValueError("The embedding dims of the rotary position embedding must match the hidden dimension of the inputs.")
+      raise ValueError(
+          "The embedding dims of the rotary position embedding must match the hidden dimension of the inputs."
+      )
 
     # Determine positions if not provided
     if position is None:
@@ -837,7 +840,7 @@ class LlamaVisionRotaryEmbedding(nnx.Module):
     # Convert to complex representation
     return jnp.exp(1j * freqs)
 
-  def __call__(self, inputs: Array, position: Optional[Array] = None) -> Array:
+  def __call__(self, inputs: Array, position: None | Array = None) -> Array:
     """Applies rotary embeddings to the input tensor for Llama4 vision encoder.
 
     Args:

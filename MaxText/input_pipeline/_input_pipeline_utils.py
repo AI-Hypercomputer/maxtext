@@ -1,24 +1,21 @@
-"""
-Copyright 2023 Google LLC
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-     https://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-"""
+# Copyright 2023–2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Operations used by Grain"""
 
 import dataclasses
 import warnings
-from typing import Dict
 from threading import current_thread
 import datasets
 from datasets.distributed import split_dataset_by_node
@@ -29,7 +26,7 @@ from MaxText import max_logging
 from MaxText import tokenizer
 from MaxText import multimodal_utils
 
-Features = Dict[str, tf.Tensor]
+Features = dict[str, tf.Tensor]
 AUTOTUNE = tf.data.experimental.AUTOTUNE
 
 ########## Functions used by TFDS pipeline
@@ -77,7 +74,7 @@ def reformat_prompt(example, column, image_placeholder, model_name):
 
 def reformat_response(example, column, model_name):
   """reformat response for multimodal SFT"""
-  example[column] = multimodal_utils.reformat_response(example[column], model_name)
+  example[column] = multimodal_utils.reformat_response(example[column][0], model_name)
   return example
 
 
@@ -160,7 +157,9 @@ def apply_chat_template(example, tokenizer_model, data_column_name):
     for message in example[data_column_name]:
       if message["role"] == "user":
         prompt = message
-        prompt_in_chat_template = tokenizer_model.apply_chat_template([prompt], add_generation_prompt=False, tokenize=False)
+        prompt_in_chat_template = tokenizer_model.apply_chat_template(
+            [prompt], add_generation_prompt=False, tokenize=False
+        )
         messages.append(prompt_in_chat_template)
         is_prompt.append(True)
       elif message["role"] == "assistant":
@@ -301,7 +300,9 @@ class HFDataSource(grain.RandomAccessDataSource):
     """update shard"""
     new_shard = self.dataset_shards[idx] + self.dataloading_host_count * self.num_threads
     if new_shard < self.n_shards:
-      max_logging.log(f"Updating host {self.dataloading_host_index} dataset {idx}, was on shard {self.dataset_shards[idx]}")
+      max_logging.log(
+          f"Updating host {self.dataloading_host_index} dataset {idx}, was on shard {self.dataset_shards[idx]}"
+      )
       max_logging.log(f"New shard is {new_shard}")
       self.dataset_shards[idx] = new_shard
       self.datasets[idx] = split_dataset_by_node(self.dataset, world_size=self.n_shards, rank=self.dataset_shards[idx])
@@ -330,7 +331,9 @@ class HFDataSource(grain.RandomAccessDataSource):
       try:
         if self.out_of_data:
           if self.generate_padding_example:
-            return {column_name: np.zeros(self.max_target_lenth, dtype=np.int32) for column_name in self.data_column_names}
+            return {
+                column_name: np.zeros(self.max_target_lenth, dtype=np.int32) for column_name in self.data_column_names
+            }
           else:
             raise StopIteration("Running out of data")
         data = next(self.data_iters[idx])

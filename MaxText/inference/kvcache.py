@@ -1,20 +1,20 @@
-#  Copyright 2025 Google LLC
+# Copyright 2023–2025 Google LLC
 #
-#  Licensed under the Apache License, Version 2.0 (the "License");
-#  you may not use this file except in compliance with the License.
-#  You may obtain a copy of the License at
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
 #
-#       https://www.apache.org/licenses/LICENSE-2.0
+#    https://www.apache.org/licenses/LICENSE-2.0
 #
-#  Unless required by applicable law or agreed to in writing, software
-#  distributed under the License is distributed on an "AS IS" BASIS,
-#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-#  See the License for the specific language governing permissions and
-#  limitations under the License.
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Implementation of the kvcache."""
 
-from typing import Any, Optional, Tuple
+from typing import Any
 
 import jax
 import jax.numpy as jnp
@@ -22,7 +22,6 @@ import jax.numpy as jnp
 from flax import linen as nn
 from flax import nnx
 
-from aqt.jax.v2 import aqt_tensor
 from aqt.jax.v2 import config as aqt_config
 from aqt.jax.v2.aqt_tensor import QTensor as KVTensor
 from aqt.jax.v2.flax import aqt_flax
@@ -92,7 +91,6 @@ class KVQuant:
 
   def einsum_fn_with_rhs_qtensor(
       self,
-      kv: Array | aqt_tensor.QTensor,
       rhs_dequant_mode=None,
       rhs_calibration_mode=None,
       lhs_dequant_mode=None,
@@ -101,45 +99,43 @@ class KVQuant:
     """einsum function where QTensor is the right-hand-side"""
     # Assumes kv is already quantized.
     einsum = jnp.einsum
-    if isinstance(kv, aqt_tensor.QTensor):
-      if kv.qvalue.dtype != jnp.float8_e4m3fn:
-        num_bits = 4 if kv.qvalue.dtype == jnp.int4 else 8
-        kv_cfg = aqt_config.dot_general_make(
-            lhs_bits=None,
-            rhs_bits=num_bits,
-            bwd_bits=None,
-            use_fwd_quant=False,
-        )
-      else:
-        kv_cfg = aqt_config.config_fwd_fp8()
-
-      if rhs_dequant_mode:
-        aqt_config.set_fwd_dequant_mode(kv_cfg, rhs_dequant_mode=rhs_dequant_mode)
-      if rhs_calibration_mode:
-        aqt_config.set_fwd_calibration_mode(
-            kv_cfg,
-            rhs_calibration_mode=rhs_calibration_mode,
-        )
-      if lhs_dequant_mode:
-        aqt_config.set_fwd_dequant_mode(kv_cfg, lhs_dequant_mode=lhs_dequant_mode)
-      if lhs_calibration_mode:
-        aqt_config.set_fwd_calibration_mode(
-            kv_cfg,
-            lhs_calibration_mode=lhs_calibration_mode,
-        )
-      einsum = aqt_flax.AqtEinsum(
-          rhs_quant_mode=aqt_flax.QuantMode.TRAIN,
-          lhs_freeze_mode=aqt_flax.FreezerMode.NONE,
-          rhs_freeze_mode=aqt_flax.FreezerMode.NONE,
-          cfg=kv_cfg,
+    if self.dtype != jnp.float8_e4m3fn:
+      num_bits = 4 if self.dtype == jnp.int4 else 8
+      kv_cfg = aqt_config.dot_general_make(
+          lhs_bits=None,
+          rhs_bits=num_bits,
+          bwd_bits=None,
+          use_fwd_quant=False,
       )
+    else:
+      kv_cfg = aqt_config.config_fwd_fp8()
+
+    if rhs_dequant_mode:
+      aqt_config.set_fwd_dequant_mode(kv_cfg, rhs_dequant_mode=rhs_dequant_mode)
+    if rhs_calibration_mode:
+      aqt_config.set_fwd_calibration_mode(
+          kv_cfg,
+          rhs_calibration_mode=rhs_calibration_mode,
+      )
+    if lhs_dequant_mode:
+      aqt_config.set_fwd_dequant_mode(kv_cfg, lhs_dequant_mode=lhs_dequant_mode)
+    if lhs_calibration_mode:
+      aqt_config.set_fwd_calibration_mode(
+          kv_cfg,
+          lhs_calibration_mode=lhs_calibration_mode,
+      )
+    einsum = aqt_flax.AqtEinsum(
+        rhs_quant_mode=aqt_flax.QuantMode.TRAIN,
+        lhs_freeze_mode=aqt_flax.FreezerMode.NONE,
+        rhs_freeze_mode=aqt_flax.FreezerMode.NONE,
+        cfg=kv_cfg,
+    )
     return einsum
 
-  def einsum_fn_with_rhs_qtensor_and_dequant(self, value):
+  def einsum_fn_with_rhs_qtensor_and_dequant(self):
     """Get einstein summation for different dequant modes."""
     if self.dtype == jnp.float8_e4m3fn:
       return self.einsum_fn_with_rhs_qtensor(
-          value,
           lhs_dequant_mode=aqt_config.DequantMode.THIS_INPUT,
           lhs_calibration_mode=aqt_config.CalibrationMode.REMAINING_AXIS,
           rhs_dequant_mode=aqt_config.DequantMode.OTHER_INPUT,
@@ -147,7 +143,6 @@ class KVQuant:
       )
     else:
       return self.einsum_fn_with_rhs_qtensor(
-          value,
           rhs_dequant_mode=aqt_config.DequantMode.OTHER_INPUT,
           rhs_calibration_mode=aqt_config.CalibrationMode.REMAINING_AXIS,
       )
@@ -165,14 +160,14 @@ def kv_cache_as_linen(
     key_head_size: int,
     value_head_size: int,
     dtype: DType,
-    kv_quant: Optional[KVQuant] = None,
+    kv_quant: None | KVQuant = None,
     prefill_cache_logical_axis_names: AxisNames = (CACHE_BATCH_PREFILL, CACHE_SEQUENCE, CACHE_HEADS, CACHE_KV),
     cache_logical_axis_names: AxisNames = (CACHE_BATCH, CACHE_SEQUENCE, CACHE_HEADS, CACHE_KV),
     cache_scale_logical_axis_names: AxisNames = (
-          CACHE_SCALE_BATCH,
-          CACHE_SCALE_SEQUENCE,
-          CACHE_SCALE_HEADS,
-          CACHE_SCALE_KV,
+        CACHE_SCALE_BATCH,
+        CACHE_SCALE_SEQUENCE,
+        CACHE_SCALE_HEADS,
+        CACHE_SCALE_KV,
     ),
     prefill_cache_axis_order: AxisIdxes = (1, 2, 0, 3),
     ar_cache_axis_order: AxisIdxes = (1, 2, 0, 3),
@@ -252,7 +247,7 @@ class KVCache(nnx.Module):
       key_head_size: int,
       value_head_size: int,
       dtype: DType,
-      kv_quant: Optional[KVQuant] = None,
+      kv_quant: None | KVQuant = None,
       prefill_cache_logical_axis_names: AxisNames = (CACHE_BATCH_PREFILL, CACHE_SEQUENCE, CACHE_HEADS, CACHE_KV),
       cache_logical_axis_names: AxisNames = (CACHE_BATCH, CACHE_SEQUENCE, CACHE_HEADS, CACHE_KV),
       cache_scale_logical_axis_names: AxisNames = (
@@ -298,7 +293,7 @@ class KVCache(nnx.Module):
     self.max_prefill_length = max_prefill_length
     self.max_target_length = max_target_length
     self.batch = batch
-    self.val_seq_len = key_seq_len
+    self.key_seq_len = key_seq_len
     self.value_seq_len = value_seq_len
     self.key_heads = key_heads
     self.value_heads = value_heads
@@ -364,12 +359,12 @@ class KVCache(nnx.Module):
     cache_shape_value = transpose_tuple(cache_logical_shape, self.prefill_cache_axis_order)
 
     self.cached_prefill_key = nnx.Cache(
-      jnp.zeros(cache_shape_key, dtype=dtype),
-      sharding=cache_axis_names,
+        jnp.zeros(cache_shape_key, dtype=dtype),
+        sharding=cache_axis_names,
     )
     self.cached_prefill_value = nnx.Cache(
-      jnp.zeros(cache_shape_value, dtype=dtype),
-      sharding=cache_axis_names,
+        jnp.zeros(cache_shape_value, dtype=dtype),
+        sharding=cache_axis_names,
     )
 
     if model_mode == MODEL_MODE_PREFILL:
@@ -378,8 +373,8 @@ class KVCache(nnx.Module):
       segment_id_axis_names = (CACHE_BATCH, CACHE_SEQUENCE)
 
     self.cache_prefill_segment_id = nnx.Cache(
-      jnp.zeros((cache_logical_shape[0], cache_length), dtype=jnp.int32),
-      sharding=segment_id_axis_names,
+        jnp.zeros((cache_logical_shape[0], cache_length), dtype=jnp.int32),
+        sharding=segment_id_axis_names,
     )
 
     if self.kv_quant:
@@ -392,12 +387,12 @@ class KVCache(nnx.Module):
       cache_value_scale_shape = transpose_tuple(cache_scale_logical_shape, self.prefill_cache_axis_order)
 
       self.cached_prefill_key_scale = nnx.Cache(
-        jnp.zeros(cache_key_scale_shape, dtype=jnp.bfloat16),
-        sharding=cache_scale_axis_names,
+          jnp.zeros(cache_key_scale_shape, dtype=jnp.bfloat16),
+          sharding=cache_scale_axis_names,
       )
       self.cached_prefill_value_scale = nnx.Cache(
-        jnp.zeros(cache_value_scale_shape, dtype=jnp.bfloat16),
-        sharding=cache_scale_axis_names,
+          jnp.zeros(cache_value_scale_shape, dtype=jnp.bfloat16),
+          sharding=cache_scale_axis_names,
       )
     else:
       self.cached_prefill_key_scale = None
@@ -431,8 +426,8 @@ class KVCache(nnx.Module):
 
     # TODO(b/339703100): investigate the issue why with_logical_partitioning doesn't enforce sharding
     self.cached_ar_key = nnx.Cache(
-      jnp.zeros(cache_shape_key, dtype=dtype),
-      sharding=cache_axis_names,
+        jnp.zeros(cache_shape_key, dtype=dtype),
+        sharding=cache_axis_names,
     )
     self.cached_ar_key.value = nn.with_logical_constraint(
         self.cached_ar_key.value,
@@ -440,8 +435,8 @@ class KVCache(nnx.Module):
     )
 
     self.cached_ar_value = nnx.Cache(
-      jnp.zeros(cache_shape_value, dtype=dtype),
-      sharding=cache_axis_names,
+        jnp.zeros(cache_shape_value, dtype=dtype),
+        sharding=cache_axis_names,
     )
     self.cached_ar_value.value = nn.with_logical_constraint(
         self.cached_ar_value.value,
@@ -453,13 +448,13 @@ class KVCache(nnx.Module):
     else:
       segment_id_axis_names = (CACHE_BATCH, CACHE_SEQUENCE)
     self.cache_ar_segment_id = nnx.Cache(
-      jnp.zeros((cache_logical_shape[0], cache_length), dtype=jnp.int32),
-      sharding=segment_id_axis_names,
+        jnp.zeros((cache_logical_shape[0], cache_length), dtype=jnp.int32),
+        sharding=segment_id_axis_names,
     )
 
     self.cached_ar_lengths = nnx.Cache(
-      jnp.zeros((cache_logical_shape[0],), dtype=jnp.int32),
-      sharding=(CACHE_BATCH,),
+        jnp.zeros((cache_logical_shape[0],), dtype=jnp.int32),
+        sharding=(CACHE_BATCH,),
     )
 
     if self.kv_quant:
@@ -472,12 +467,12 @@ class KVCache(nnx.Module):
       cache_value_scale_shape = transpose_tuple(cache_scale_logical_shape, self.ar_cache_axis_order)
 
       self.cached_ar_key_scale = nnx.Cache(
-        jnp.zeros(cache_key_scale_shape, dtype=jnp.bfloat16),
-        sharding=cache_scale_axis_names,
+          jnp.zeros(cache_key_scale_shape, dtype=jnp.bfloat16),
+          sharding=cache_scale_axis_names,
       )
       self.cached_ar_value_scale = nnx.Cache(
-        jnp.zeros(cache_value_scale_shape, dtype=jnp.bfloat16),
-        sharding=cache_scale_axis_names,
+          jnp.zeros(cache_value_scale_shape, dtype=jnp.bfloat16),
+          sharding=cache_scale_axis_names,
       )
     else:
       self.cached_ar_key_scale = None
@@ -486,14 +481,13 @@ class KVCache(nnx.Module):
     self.cache_ar_index = nnx.Cache(
         jnp.zeros((1,), dtype=jnp.int32),
         sharding=(),
-      )
+    )
 
   def _get_ar_cache_vars(self):
     return self.ar_key_vars, self.ar_value_vars, self.cache_ar_segment_id, self.cache_ar_index, self.cached_ar_lengths
 
-
   def kv_cache_chunked_prefill(
-      self, key: Array, value: Array, decoder_segment_ids: Array, previous_chunk: Optional[Array] = None
+      self, key: Array, value: Array, decoder_segment_ids: Array, previous_chunk: None | Array = None
   ):
     """Update the current kv cache into previous chunk and return needed length.
 
@@ -614,7 +608,9 @@ class KVCache(nnx.Module):
 
     if self.kv_quant:
       prefill_key_axis_names = transpose_tuple(self.cache_logical_axis_names, self.prefill_cache_axis_order)
-      key_shaped_for_cache, key_scale_shaped_for_cache = self.kv_quant.quantize(key_shaped_for_cache, prefill_key_axis_names)
+      key_shaped_for_cache, key_scale_shaped_for_cache = self.kv_quant.quantize(
+          key_shaped_for_cache, prefill_key_axis_names
+      )
       value_shaped_for_cache, value_scale_shaped_for_cache = self.kv_quant.quantize(
           value_shaped_for_cache, prefill_key_axis_names
       )
@@ -848,7 +844,7 @@ def mla_kv_cache_as_linen(
     dtype: DType,
     key_heads: int = 1,
     value_heads: int = 1,
-    kv_quant: Optional[KVQuant] = None,
+    kv_quant: None | KVQuant = None,
     prefill_cache_axis_order: AxisIdxes = (1, 2, 0, 3),
     ar_cache_axis_order: AxisIdxes = (1, 2, 0, 3),
     use_chunked_prefill: bool = False,
@@ -919,7 +915,7 @@ class MlaKVCache(KVCache):
       dtype: DType,
       key_heads: int = 1,
       value_heads: int = 1,
-      kv_quant: Optional[KVQuant] = None,
+      kv_quant: None | KVQuant = None,
       prefill_cache_logical_axis_names: AxisNames = (CACHE_BATCH_PREFILL, CACHE_SEQUENCE, CACHE_HEADS_NONE, CACHE_KV),
       cache_logical_axis_names: AxisNames = (CACHE_BATCH, CACHE_SEQUENCE, CACHE_HEADS_NONE, CACHE_KV),
       cache_scale_logical_axis_names: AxisNames = (
@@ -1003,9 +999,9 @@ class MlaKVCache(KVCache):
       model_mode: str,
       use_ragged_attention: bool = False,
       previous_chunk: Any = None,
-  ) -> Tuple[
-      Optional[Tuple[Array, Array, Array]],
-      Optional[Tuple[Array, Array, Array, Array]],
+  ) -> tuple[
+      None | tuple[Array, Array, Array],
+      None | tuple[Array, Array, Array, Array],
   ]:
     assert model_mode != MODEL_MODE_TRAIN, "incorrectly updating kvcache in train mode."
     assert self.kv_quant is None, "kvcache quantization not supported with mla."

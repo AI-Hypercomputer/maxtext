@@ -1,15 +1,16 @@
-"""
-Copyright 2023 Google LLC
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-     https://www.apache.org/licenses/LICENSE-2.0
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-"""
+# Copyright 2023–2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 r"""Convert weights from a Llama for MaxText inference.
 
@@ -238,12 +239,18 @@ def convert(base_model_path, maxtext_model_path, model_size):
 
     # base_num_query_heads * head_dim, base_num_query_heads, head_dim =>
     # base_num_query_heads, head_dim, base_num_query_heads * head_dim
-    jax_weights["decoder"][f"layers_{layer_idx}"]["self_attention"]["out"]["kernel"] = np.transpose(w_post, axes=(1, 2, 0))
+    jax_weights["decoder"][f"layers_{layer_idx}"]["self_attention"]["out"]["kernel"] = np.transpose(
+        w_post, axes=(1, 2, 0)
+    )
 
-    pre_self_attention_layernorm = pytorch_vars[0][f"layers.{layer_idx}.attention_norm.weight"].type(torch.float16).numpy()
+    pre_self_attention_layernorm = (
+        pytorch_vars[0][f"layers.{layer_idx}.attention_norm.weight"].type(torch.float16).numpy()
+    )
     post_self_attention_layernorm = pytorch_vars[0][f"layers.{layer_idx}.ffn_norm.weight"].type(torch.float16).numpy()
     jax_weights["decoder"][f"layers_{layer_idx}"]["pre_self_attention_layer_norm"]["scale"] = pre_self_attention_layernorm
-    jax_weights["decoder"][f"layers_{layer_idx}"]["post_self_attention_layer_norm"]["scale"] = post_self_attention_layernorm
+    jax_weights["decoder"][f"layers_{layer_idx}"]["post_self_attention_layer_norm"][
+        "scale"
+    ] = post_self_attention_layernorm
 
     wi_0 = np.concatenate(
         [var[f"layers.{layer_idx}.feed_forward.w1.weight"].type(torch.float16).numpy() for var in pytorch_vars], axis=0
@@ -269,7 +276,9 @@ def convert(base_model_path, maxtext_model_path, model_size):
 
   mesh = jax.sharding.Mesh(jax.devices(), "checkpoint_sharding_axis")
   s1 = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("checkpoint_sharding_axis"))  # shards first axis
-  s2 = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(None, "checkpoint_sharding_axis"))  # shards second axis
+  s2 = jax.sharding.NamedSharding(
+      mesh, jax.sharding.PartitionSpec(None, "checkpoint_sharding_axis")
+  )  # shards second axis
   s3 = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(None))  # no sharding
 
   def checkpoint_device_put(arr):

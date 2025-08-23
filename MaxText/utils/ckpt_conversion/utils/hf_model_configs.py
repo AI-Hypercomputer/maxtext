@@ -1,18 +1,16 @@
-"""
-Copyright 2025 Google LLC
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-     https://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-"""
+# Copyright 2023–2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """
 This config defines the architectural configurations of the Hugging Face version of a model.
@@ -50,7 +48,6 @@ gemma3_4b_config = transformers.Gemma3Config(
         "rms_norm_eps": 1e-06,
         "rope_local_base_freq": 10000.0,
         "rope_scaling": {"factor": 8.0, "rope_type": "linear"},
-        "hidden_activation": "gelu",
         "rope_theta": 10000.0,
         "sliding_window": 1024,
         "sliding_window_pattern": 6,
@@ -103,7 +100,6 @@ gemma3_12b_config = transformers.Gemma3Config(
         "rms_norm_eps": 1e-06,
         "rope_local_base_freq": 10000.0,
         "rope_scaling": {"factor": 8.0, "rope_type": "linear"},
-        "hidden_activation": "gelu",
         "rope_theta": 10000.0,
         "sliding_window": 1024,
         "sliding_window_pattern": 6,
@@ -156,7 +152,6 @@ gemma3_27b_config = transformers.Gemma3Config(
         "rms_norm_eps": 1e-06,
         "rope_local_base_freq": 10000.0,
         "rope_scaling": {"factor": 8.0, "rope_type": "linear"},
-        "hidden_activation": "gelu",
         "rope_theta": 10000.0,
         "sliding_window": 1024,
         "sliding_window_pattern": 6,
@@ -279,6 +274,92 @@ qwen3_14b_config = transformers.Qwen3Config(
     torch_dtype="bfloat16",
 )
 
+qwen3_32b_config = transformers.Qwen3Config(
+    vocab_size=151936,
+    hidden_size=5120,
+    intermediate_size=25600,
+    num_hidden_layers=64,
+    num_attention_heads=64,
+    num_key_value_heads=8,
+    head_dim=128,
+    hidden_act="silu",
+    max_position_embeddings=40960,
+    rms_norm_eps=1.0e-6,
+    rope_theta=1000000.0,
+    tie_word_embeddings=False,
+    torch_dtype="bfloat16",
+)
+
+
+llama31_8b_config = transformers.LlamaConfig(
+    vocab_size=128256,
+    hidden_size=4096,
+    intermediate_size=14336,
+    num_hidden_layers=32,
+    num_attention_heads=32,
+    num_key_value_heads=8,
+    max_position_embeddings=131072,
+    head_dim=128,
+    rms_norm_eps=1e-5,
+    bos_token_id=128000,
+    eos_token_id=128001,
+    attention_bias=False,
+    attention_dropout=0.0,
+    hidden_act="silu",
+    initializer_range=0.02,
+    mlp_bias=False,
+    model_type="llama",
+    pretraining_tp=1,
+    rope_scaling={
+        "factor": 8.0,
+        "low_freq_factor": 1.0,
+        "high_freq_factor": 4.0,
+        "original_max_position_embeddings": 8192,
+        "rope_type": "llama3",
+    },
+    rope_theta=500000.0,
+    tie_word_embeddings=False,
+    use_cache=True,
+)
+
+llama31_70b_config = transformers.LlamaConfig(
+    vocab_size=128256,
+    hidden_size=8192,
+    intermediate_size=28672,
+    num_hidden_layers=80,
+    num_attention_heads=64,
+    head_dim=128,
+    num_key_value_heads=8,
+    max_position_embeddings=131072,
+    rms_norm_eps=1e-05,
+    bos_token_id=128000,
+    eos_token_id=[128001, 128008, 128009],
+    rope_scaling={
+        "factor": 8.0,
+        "high_freq_factor": 4.0,
+        "low_freq_factor": 1.0,
+        "original_max_position_embeddings": 8192,
+        "rope_type": "llama3",
+    },
+    rope_theta=500000.0,
+    tie_word_embeddings=False,
+)
+
+llama31_405b_config = transformers.LlamaConfig(
+    vocab_size=128256,
+    hidden_size=16384,
+    intermediate_size=53248,
+    num_hidden_layers=126,
+    num_attention_heads=128,
+    num_key_value_heads=8,
+    head_dim=128,
+    max_position_embeddings=131072,
+    rms_norm_eps=1e-05,
+    bos_token_id=128000,
+    eos_token_id=128001,
+)
+
+
 HF_MODEL_CONFIGS = {
     "gemma2-2b": gemma2_2b_config,
     "gemma2-9b": gemma2_9b_config,
@@ -290,4 +371,8 @@ HF_MODEL_CONFIGS = {
     "qwen3-4b": qwen3_4b_config,
     "qwen3-8b": qwen3_8b_config,
     "qwen3-14b": qwen3_14b_config,
+    "qwen3-32b": qwen3_32b_config,
+    "llama3.1-8b": llama31_8b_config,
+    "llama3.1-70b": llama31_70b_config,
+    "llama3.1-405b": llama31_405b_config,
 }

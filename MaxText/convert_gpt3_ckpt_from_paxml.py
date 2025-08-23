@@ -1,15 +1,16 @@
-"""
-Copyright 2023 Google LLC
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-     https://www.apache.org/licenses/LICENSE-2.0
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-"""
+# Copyright 2023–2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 # pylint: disable=line-too-long
 """Convert weights from a paxml gpt3 model to a MaxText one.
@@ -54,6 +55,7 @@ from MaxText import maxtext_utils
 from MaxText import max_utils
 from MaxText import optimizers
 from MaxText import pyconfig
+from MaxText.common_types import MODEL_MODE_TRAIN
 from MaxText.globals import PKG_DIR
 from MaxText.layers import quantizations
 from MaxText.layers.models import Transformer
@@ -89,7 +91,7 @@ def convert(paxml_ckpt_path, maxtext_model_name, base_output_directory, run_name
   mesh = Mesh(devices_array, cfg.mesh_axes)
 
   quant = quantizations.configure_quantization(cfg)
-  model = Transformer(cfg, mesh, quant=quant)
+  model = Transformer(cfg, mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
   learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(cfg)
   tx = optimizers.get_optimizer(cfg, learning_rate_schedule)
 

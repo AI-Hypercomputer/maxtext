@@ -1,23 +1,20 @@
-"""
-Copyright 2024 Google LLC
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-     https://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-"""
+# Copyright 2023–2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """ Tests for the common MaxText utilities """
 import unittest
 import numpy as np
-import jax.numpy as jnp
 
 from MaxText import multimodal_utils
 
@@ -75,8 +72,8 @@ class TestLlama4ImageProcessing(unittest.TestCase):
     self.NUM_IMAGE_CHANNELS = 3
 
   def test_get_best_resolution(self):
-    image_1 = jnp.ones((224, 300, self.NUM_IMAGE_CHANNELS))
-    image_2 = jnp.ones((536, 640, self.NUM_IMAGE_CHANNELS))
+    image_1 = np.ones((224, 300, self.NUM_IMAGE_CHANNELS))
+    image_2 = np.ones((536, 640, self.NUM_IMAGE_CHANNELS))
 
     possible_resolutions = multimodal_utils.find_supported_resolutions(
         max_num_chunks=self.LLAMA4_TILES_NUM, patch_size=self.LLAMA4_TILE_SIZE
@@ -97,14 +94,14 @@ class TestLlama4ImageProcessing(unittest.TestCase):
     self.assertEqual(best_resolution_2, (672, 672))
 
   def test_pad_to_best_fit_jax(self):
-    image = jnp.zeros((536, 640, self.NUM_IMAGE_CHANNELS))
+    image = np.zeros((536, 640, self.NUM_IMAGE_CHANNELS))
     best_resolution = (672, 672)
     padded_image = multimodal_utils.pad_to_best_fit_jax(image, best_resolution)
     self.assertEqual(padded_image.shape, (672, 672, self.NUM_IMAGE_CHANNELS))
-    self.assertTrue(jnp.all(padded_image == 0))
+    self.assertTrue(np.all(padded_image == 0))
 
   def test_split_to_tiles(self):
-    image = jnp.ones((672, 672, self.NUM_IMAGE_CHANNELS))
+    image = np.ones((672, 672, self.NUM_IMAGE_CHANNELS))
     best_resolution = (672, 672)
     ratio_h, ratio_w = (
         best_resolution[0] // self.LLAMA4_TILE_SIZE,
@@ -133,7 +130,7 @@ class TestLlama4PostProcessing(unittest.TestCase):
     self.model_name = "llama4-17b-16e"
 
   def test_image_tokens_for_single_image(self):
-    this_aspect_ratio = jnp.array([2, 2])
+    this_aspect_ratio = np.array([2, 2])
     num_patches_per_chunk = 4
     image_tokens = multimodal_utils.get_tokens_for_this_image(this_aspect_ratio, num_patches_per_chunk)
     expected_tokens = [
@@ -168,11 +165,11 @@ class TestLlama4PostProcessing(unittest.TestCase):
     self.assertEqual(image_tokens, expected_tokens)
 
   def test_post_process_image_tokens(self):
-    dummy_pixel_values = jnp.ones(
+    dummy_pixel_values = np.ones(
         (5, multimodal_utils.NUM_IMAGE_CHANNELS, multimodal_utils.LLAMA4_TILE_SIZE, multimodal_utils.LLAMA4_TILE_SIZE)
     )
-    dummy_aspect_ratios = jnp.array([[2, 2]])
-    dummy_tokens = jnp.array([1, 2, self.LLAMA4_FAKE_IMAGE_TOKEN, 4, 5])
+    dummy_aspect_ratios = np.array([[2, 2]])
+    dummy_tokens = np.array([1, 2, self.LLAMA4_FAKE_IMAGE_TOKEN, 4, 5])
     processor_output = multimodal_utils.PreprocessorOutput(
         pixel_values=dummy_pixel_values,
         aspect_ratios=dummy_aspect_ratios,

@@ -1,0 +1,12 @@
+Pitfalls to Avoid:
+Separate Q/K/V Kernels: Checkpoints store query, key, and value kernels as independent tensors—do not assume they’re fused.
+
+Unnecessary Transposes: If the source and target shapes already align, skip any transpose step.
+
+Multimodal Config Structure: For vision+text models, the top‑level config has two keys—config["vision_config"] and config["text_config"]—so don’t treat it as a flat namespace.
+
+The parameter mapping should be 1 to 1 mapping.
+
+Missing Embedding Scaling:** Do not omit to scales the embedding matrix by `sqrt(hidden_size)`.
+Missing All RMSNorm Scaling:** Do not omit all RMSNorm `scale` parameters (`decoder_norm`, `pre_self_attention_norm`, etc.). 
+Incorrect Vocabulary Padding:** Do not use a hardcoded `np.pad` with a static value of 64. 

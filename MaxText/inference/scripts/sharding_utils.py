@@ -1,10 +1,10 @@
-# Copyright 2025 Google LLC
+# Copyright 2023–2025 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+#    https://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -12,10 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Tuple, Iterable
-import matplotlib.pyplot as plt
+"""Sharding related utilities."""
+
 import pprint
+import warnings
+from typing import Sequence
+
 import numpy as np
+
+import matplotlib.pyplot as plt
 
 
 def latency_bound_comms(comm: float, latency=1e-6):
@@ -23,8 +28,8 @@ def latency_bound_comms(comm: float, latency=1e-6):
 
 
 def calculate_matmul_resources(
-    activations_shape: Tuple[int, ...],
-    weights_shape: Tuple[int, ...],
+    activations_shape: tuple[int, ...],
+    weights_shape: tuple[int, ...],
     ici_bandwidth: float,
     peak_flops: float,
     sD: int = 1,
@@ -35,7 +40,7 @@ def calculate_matmul_resources(
     activation_size_bytes: int = 2,
     weight_size_bytes: int = 2,
     ici_latency: float = 1e-6,
-    all_gather_axes: Iterable[str] = iter(()),
+    all_gather_axes: Sequence[str] = tuple(),
     debug=True,
 ) -> dict[str, float]:
   """
@@ -53,7 +58,7 @@ def calculate_matmul_resources(
 
   Args:
       activations_shape: Shape of the activations tensor (M, K).
-      weights_shape: Shape of the weights tensor (G, K, F) or (K_w, F).
+      weights_shape: Shape of the weights tensor (G, K, F).
                      G is the number of groups if this is a GMM (e.g in MoE layer).
       sD: Number of data parallel shards (sD). Must be >= 1.
       sK: Sharding factor for the activation embedding dimension.
@@ -63,7 +68,7 @@ def calculate_matmul_resources(
       activation_size_bytes: Size of a single element in bytes for the activations.
       weight_size_bytes: Size of a single element in bytes for the weights.
       ici_latency: The latency overhead of communicating between TPUs.
-      all_gather_axes: Optional additional output axes that need to be all-gathered (e.g. `("M", "F")`).
+      all_gather_axes: Optional additional output axes that need to be all-gathered (e.g. "M", "F").
       debug: Whether to print intermediate resource calculations.
 
   Returns:
@@ -77,16 +82,15 @@ def calculate_matmul_resources(
   M, K_act = activations_shape[0], activations_shape[-1]
   # Intermediate activation shape
   I = np.prod(np.array(activations_shape[1:-1]))
-  weights_shape_len = len(weights_shape)
-  if weights_shape_len == 3:
-    G, K_w, F = weights_shape  # pytype: disable=bad-unpacking
-  elif weights_shape_len == 2:
-    K_w, F = weights_shape  # pytype: disable=bad-unpacking
+  if len(weights_shape) == 3:
+    G, K_w, F = weights_shape
+  elif len(weights_shape) == 2:
+    K_w, F = weights_shape
     G = 1
   else:
     raise ValueError(f"weights_shape={weights_shape} is not supported!.")
 
-  def _gather_dim_to_shard() -> dict[str, int]:
+  def _gather_dim_to_shard():
     # # Used to map all-gather arguments to the respective shardings.
     return {"D": sD, "K": sK, "W": sW, "F": sF, "E": sE}
 
@@ -105,13 +109,13 @@ def calculate_matmul_resources(
     # implying an average or approximation if not perfectly divisible.
     if M % sD != 0:
       print(
-          f"Warning: Activations M dimension ({M}) is not perfectly divisible by sharding amount {sD}."
-          f" Results are approximate."
+          f"Warning: Activations M dimension ({M}) is not perfectly divisible by sharding amount {sD}.",
+          "Results are approximate.",
       )
     if K_act % sK != 0:
       print(
-          f"Warning: Common K dimension ({K_act}) is not perfectly divisible by sharding amount {sK}."
-          f" Results are approximate."
+          f"Warning: Common K dimension ({K_act}) is not perfectly divisible by sharding amount {sK}.",
+          "Results are approximate.",
       )
     if K_w % sW != 0:
       print(
@@ -178,7 +182,7 @@ def calculate_matmul_resources(
   if debug:
     print(f"Output memory (GB): {local_output_bytes/1e9}")
 
-  gathered_output_bytes = np.multiply(local_output_bytes, np.prod([gather_dim_to_shard[axis] for axis in all_gather_axes]))
+  gathered_output_bytes = local_output_bytes * np.prod([gather_dim_to_shard[axis] for axis in all_gather_axes])
   if debug:
     print(f"Output memory (GB) after additional axes gathers: {gathered_output_bytes/1e9}")
   memory_per_TPU_bytes = mem_activations_bytes + mem_weights_bytes + gathered_output_bytes
@@ -266,24 +270,23 @@ def plot_sharding_scheme_comparison(
     label = scheme.get("label", "Unknown Scheme")
     shard_settings = scheme.get("shard_settings")
 
-    print("\n--- Scheme: {label} ---")
+    print(f"\n--- Scheme: {label} ---")
     try:
       # Clear previous warnings for divisibility for cleaner output per iteration
-      import warnings
-
       with warnings.catch_warnings(record=True) as caught_warnings:
+        del caught_warnings
         warnings.simplefilter("always")  # Catch all warnings
 
         # Call the resource calculation function
         res = calc_resource_func(activations_shape, weights_shape, **shard_settings)
-        print(f"Workload stats:\n")
+        print("Workload stats:\n")
         pprint.PrettyPrinter(indent=4).pprint(res)
 
       results.append(res)
       valid_schemes_labels.append(label)
     except ValueError as e:
       print(f"Error calculating resources for scheme '{label}': {e}. Skipping.")
-    except Exception as e:
+    except (TypeError, KeyError, ZeroDivisionError, AttributeError) as e:
       print(f"An unexpected error occurred for scheme '{label}': {e}. Skipping.")
 
   if not results:
@@ -330,7 +333,11 @@ def plot_sharding_scheme_comparison(
   fig_flops_comm_grouped, ax_flops_comm_grouped = plt.subplots(figsize=(max(10, num_schemes * 1.7), 7))
 
   rects_flops = ax_flops_comm_grouped.bar(
-      categorical_x - grouped_bar_width_fc / 2, t_flops_list, grouped_bar_width_fc, label="T_flops", color="mediumseagreen"
+      categorical_x - grouped_bar_width_fc / 2,
+      t_flops_list,
+      grouped_bar_width_fc,
+      label="T_flops",
+      color="mediumseagreen",
   )
   rects_comms_grouped = ax_flops_comm_grouped.bar(
       categorical_x + grouped_bar_width_fc / 2, t_comms_list, grouped_bar_width_fc, label="T_comms", color="deepskyblue"
@@ -423,7 +430,7 @@ def plot_sharding_scheme_comparison(
         va="bottom",  # Vertical alignment (anchor at bottom of text, so text is above y)
         fontsize=8,
         rotation=0,
-        bbox=dict(facecolor="white", alpha=0.6, pad=2, boxstyle="round,pad=0.3"),  # Added bbox
+        bbox={"facecolor": "white", "alpha": 0.6, "pad": 2, "boxstyle": "round,pad=0.3"},  # Added bbox
     )
 
   if mem_list.size > 0:

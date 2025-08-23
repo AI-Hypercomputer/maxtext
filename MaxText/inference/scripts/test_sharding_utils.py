@@ -1,16 +1,25 @@
-# Copyright 2025 Google LLC
+# Copyright 2023–2025 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+#    https://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+"""Unit tests for sharding_utils.py.
+
+This module contains unit tests for the `calculate_matmul_resources` and
+`latency_bound_comms` functions in the `sharding_utils` script. It covers
+various sharding strategies, including data parallelism, tensor parallelism,
+FSDP, and expert parallelism, to verify the correctness of FLOPs, communication
+cost, and memory usage calculations.
+"""
 
 import unittest
 
@@ -31,11 +40,10 @@ TOLERANCE = 1e-9  # For floating point comparisons
 
 
 class ShardingTests(unittest.TestCase):
+  """Test suite for sharding resource calculation utilities."""
 
   def test_no_sharding(self):
-    """
-    Tests the basic case with no sharding.
-    """
+    """Tests the basic case with no sharding."""
     sD, sK, sW, sF, sE = 1, 1, 1, 1, 1
 
     result = calculate_matmul_resources(
@@ -75,9 +83,7 @@ class ShardingTests(unittest.TestCase):
     assert abs(result["memory_per_TPU_bytes"] - expected_memory_per_TPU) < TOLERANCE
 
   def test_output_feature_parallelism_sF(self):
-    """
-    Tests sharding on the F dimension of weights (sF > 1).
-    """
+    """Tests sharding on the F dimension of weights (sF > 1)."""
     sF = 4
     sD, sK, sW, sE = 1, 1, 1, 1
 
@@ -123,9 +129,7 @@ class ShardingTests(unittest.TestCase):
     ), f"Memory mismatch: got {result['memory_per_TPU_bytes']}, expected {expected_memory_per_TPU}"
 
   def test_data_parallelism_sD(self):
-    """
-    Tests sharding on the M dimension of activations (sD).
-    """
+    """Tests sharding on the M dimension of activations (sD)."""
     sD = 4
     sK, sW, sF, sE = 1, 1, 1, 1
 
@@ -165,9 +169,9 @@ class ShardingTests(unittest.TestCase):
     assert abs(result["memory_per_TPU_bytes"] - expected_memory_per_TPU) < TOLERANCE
 
   def test_fsdp_activation_sharding_sK(self):
-    """
-    Tests FSDP-style sharding on the K dimension of activations (sK).
-    Weights are not sharded (sW=1).
+    """Tests FSDP-style sharding on the K dimension of activations (sK).
+
+    In this scenario, the weights are not sharded (sW=1).
     """
     sK = 4
     sD, sW, sF, sE = 1, 1, 1, 1
@@ -211,9 +215,9 @@ class ShardingTests(unittest.TestCase):
     assert abs(result["memory_per_TPU_bytes"] - expected_memory_per_TPU) < TOLERANCE
 
   def test_fsdp_weight_sharding_sW(self):
-    """
-    Tests FSDP-style sharding on the W dimension of weights (sW).
-    Activations are not sharded (sK=1).
+    """Tests FSDP-style sharding on the W dimension of weights (sW).
+
+    In this scenario, the activations are not sharded (sK=1).
     """
     sW = 4
     sD, sK, sF, sE = 1, 1, 1, 1
@@ -257,9 +261,10 @@ class ShardingTests(unittest.TestCase):
     assert abs(result["memory_per_TPU_bytes"] - expected_memory_per_TPU) < TOLERANCE
 
   def test_tensor_parallel_sK_sW(self):
-    """
-    Tests tensor parallelism where both sK (on K_act) and sW (on K_w) are used.
-    Assumes sK == sW and reduce-scatter for partial results.
+    """Tests tensor parallelism where both sK and sW are used.
+
+    This test assumes sK == sW and a reduce-scatter operation for partial
+    results.
     """
     sK = 2
     sW = 2  # Must be equal to sK for this path
@@ -304,10 +309,7 @@ class ShardingTests(unittest.TestCase):
     assert abs(result["memory_per_TPU_bytes"] - expected_memory_per_TPU) < TOLERANCE
 
   def test_output_feature_parallelism_sF_with_all_gather_F(self):
-    """
-    Tests sharding on the F dimension of weights (sF > 1)
-    AND all-gathering the output along the F dimension.
-    """
+    """Tests sF sharding with a subsequent all-gather on the F dimension."""
     sF = 4  # Shard the output feature dimension
     sD, sK, sW, sE = 1, 1, 1, 1  # Isolate sF effect
     all_gather_axes = ["F"]
@@ -358,9 +360,7 @@ class ShardingTests(unittest.TestCase):
     ), f"Memory mismatch: got {result['memory_per_TPU_bytes']}, expected {expected_memory_per_TPU}"
 
   def test_expert_parallelism_sE(self):
-    """
-    Tests expert parallelism sharding on the G dimension (sE).
-    """
+    """Tests expert parallelism sharding on the G dimension (sE)."""
     G_val = 8
     weights_shape_3d = (G_val, K, F)
     sE = 4
@@ -405,9 +405,7 @@ class ShardingTests(unittest.TestCase):
     assert abs(result["memory_per_TPU_bytes"] - expected_memory_per_TPU) < TOLERANCE
 
   def test_mixed_sharding_sD_sK_sW(self):
-    """
-    Tests a mix of data parallelism and tensor parallelism (reduce-scatter).
-    """
+    """Tests a mix of data and tensor parallelism (reduce-scatter)."""
     sD = 2
     sK = 2
     sW = 2  # sK == sW
@@ -452,9 +450,7 @@ class ShardingTests(unittest.TestCase):
     assert abs(result["memory_per_TPU_bytes"] - expected_memory_per_TPU) < TOLERANCE
 
   def test_additional_all_gather_axes_D(self):
-    """
-    Tests additional all-gather on the 'D' dimension of the output.
-    """
+    """Tests an additional all-gather on the 'D' dimension of the output."""
     sD = 2
     sK, sW, sF, sE = 1, 1, 1, 1
     all_gather_axes = ["D"]

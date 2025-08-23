@@ -1,16 +1,16 @@
-#  Copyright 2025 Google LLC
+# Copyright 2023–2025 Google LLC
 #
-#  Licensed under the Apache License, Version 2.0 (the "License");
-#  you may not use this file except in compliance with the License.
-#  You may obtain a copy of the License at
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
 #
-#       https://www.apache.org/licenses/LICENSE-2.0
+#    https://www.apache.org/licenses/LICENSE-2.0
 #
-#  Unless required by applicable law or agreed to in writing, software
-#  distributed under the License is distributed on an "AS IS" BASIS,
-#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-#  See the License for the specific language governing permissions and
-#  limitations under the License.
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """ Tests for Page Manager. """
 
@@ -249,7 +249,9 @@ class TestPageManager(unittest.TestCase):
     decode_state_boundary = self.pm.update_decode_pages(page_state=prefill_state_boundary)
 
     self.assertEqual(
-        int(decode_state_boundary.sequence_lengths[0]), self.tokens_per_page + 1, "Seq length incorrect after boundary cross"
+        int(decode_state_boundary.sequence_lengths[0]),
+        self.tokens_per_page + 1,
+        "Seq length incorrect after boundary cross",
     )
     self.assertEqual(int(decode_state_boundary.num_pages_used[0]), 2, "Page count incorrect after boundary cross")
     # Active page should be the newly allocated one (different from the first)
@@ -534,7 +536,9 @@ class TestPageManager(unittest.TestCase):
     self.assertTrue(
         jnp.all(current_state.page_status[1:] == 0), "After repeated allocation/deallocation, all pages should be free"
     )
-    self.assertTrue(jnp.all(current_state.num_pages_used == 0), "After repeated cycles, num_pages_used should be all zero")
+    self.assertTrue(
+        jnp.all(current_state.num_pages_used == 0), "After repeated cycles, num_pages_used should be all zero"
+    )
 
 
 if __name__ == "__main__":

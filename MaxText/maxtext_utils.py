@@ -1,23 +1,20 @@
-"""
-Copyright 2023 Google LLC
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-     https://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-"""
+# Copyright 2023–2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 # pylint: disable=line-too-long, disable=bare-except, consider-using-generator
 """ Utils that are only interesting to MaxText. """
 
-from typing import Optional
 import functools
 import pickle
 
@@ -52,7 +49,7 @@ OVERWRITE_WITH_GRADIENT = "_overwrite_with_gradient"
 # Multimodal constants
 NUM_IMAGES_PER_SEQUENCE = 1
 NUM_IMAGE_CHANNELS = 3
-NUM_TILES_PER_IMAGE = 5  # Fake number of tiles for llama4, init purpose
+NUM_TILES_PER_IMAGE = 1  # Fake number of tiles for llama4, init purpose
 
 
 def get_input_data_sharding(config, mesh):
@@ -223,6 +220,51 @@ def calculate_gemma3_tflops_training_per_device(config, total_ffn_flops, qkv_flo
   return attention_tflops, learnable_weight_tflops
 
 
+def _calculate_chunked_attention_flops_per_layer(config, seq_len, chunk_size):
+  """Calculates the non-causal FLOPs for a single layer of chunked attention."""
+  num_chunks = seq_len // chunk_size
+  rem_chunk_size = seq_len % chunk_size
+  # The complexity of chunked attention is the sum of squares of chunk lengths.
+  chunked_complexity = (num_chunks * chunk_size**2) + (rem_chunk_size**2)
+  # The formula for non-causal attention FLOPs is 4 * B * complexity * H * D,
+  # where B=batch_size, H=num_heads, D=head_dim.
+  return 4 * config.per_device_batch_size * chunked_complexity * config.num_query_heads * config.head_dim
+
+
+def calculate_llama4_attention_tflops(config):
+  """
+  Calculates attention-only training TFLOPs for Llama4's specific architecture,
+  which has an alternating pattern of global and chunked attention layers.
+  """
+  num_layers = config.num_decoder_layers
+  seq_len = config.max_target_length
+  chunk_size = config.chunk_attn_window_size
+
+  # Determine number of global vs. chunked layers based on the NoPE interval.
+  # A "NoPE" layer uses global attention.
+  num_global_layers = num_layers // config.nope_layer_interval
+  num_chunked_layers = num_layers - num_global_layers
+
+  # FLOPs for a single global attention layer (full attention, non-causal)
+  global_attention_flops_per_layer = (
+      4 * config.per_device_batch_size * seq_len**2 * config.num_query_heads * config.head_dim
+  )
+
+  # FLOPs for a single chunked attention layer (non-causal)
+  chunked_attention_flops_per_layer = _calculate_chunked_attention_flops_per_layer(config, seq_len, chunk_size)
+
+  # Total non-causal attention FLOPs is the sum of all global and all chunked layers
+  noncausal_attention_flops = (num_global_layers * global_attention_flops_per_layer) + (
+      num_chunked_layers * chunked_attention_flops_per_layer
+  )
+
+  # Apply causal mask and convert to TFLOPs (multiply by 3 for fwd/bwd pass)
+  causal_attention_flops = noncausal_attention_flops / 2
+  attention_tflops = causal_attention_flops * 3 / 10**12
+
+  return attention_tflops
+
+
 def calculate_mla_tflops_per_device(config):
   """Calculate Multi-Head Latent Attention TFLOP"""
   batch_len = config.per_device_batch_size * config.max_target_length
@@ -233,7 +275,9 @@ def calculate_mla_tflops_per_device(config):
   else:
     # calculate query down and up flops
     q_flops = (
-        2 * batch_len * (config.emb_dim * config.q_lora_rank + config.q_lora_rank * config.num_query_heads * qk_head_dim_sum)
+        2
+        * batch_len
+        * (config.emb_dim * config.q_lora_rank + config.q_lora_rank * config.num_query_heads * qk_head_dim_sum)
     )
   # calculate mla kv projection with down and up flops
   kv_flops = (
@@ -246,7 +290,9 @@ def calculate_mla_tflops_per_device(config):
   )
   qkv_flops = q_flops + kv_flops
 
-  attention_flops = 2 * batch_len * config.max_target_length * config.num_query_heads * (qk_head_dim_sum + config.v_head_dim)
+  attention_flops = (
+      2 * batch_len * config.max_target_length * config.num_query_heads * (qk_head_dim_sum + config.v_head_dim)
+  )
   projection_flops = 2 * batch_len * config.emb_dim * config.num_query_heads * config.v_head_dim
   return qkv_flops, attention_flops, projection_flops
 
@@ -294,6 +340,141 @@ def get_dense_moe_layers(config):
   return num_dense_layers, num_moe_layers
 
 
+def calculate_gemma3_vision_layers_tflops_per_device(config):
+  """
+  Estimate TFLOPs for Gemma3 vision encoder (ViT-style).
+  Returns:
+      total_tflops: Total TFLOPs (counts for fwd + bwd + optimizer)
+      learnable_weight_tflops: TFLOPs from learnable weights (patch embedding, qkv, MLP, projections)
+      attention_tflops: TFLOPs from attention multiplications
+  """
+  # Config values
+  B = config.per_device_batch_size
+  C = config.num_channels_for_vit
+  H = W = config.image_size_for_vit  # Gemma3 default 896
+  embed_dim = config.emb_dim  # text embedding dim after projection
+  # Values below are hardcoded in Gemma3VisionEncoderLayer
+  patch_size = 14
+  hidden_dim = 1152
+  intermediate_dim = 4304
+  num_layers = 27
+  vision_exit_pooling_window = 4
+
+  # 1. Patch embedding (Conv2D)
+  num_patches_h = H // patch_size
+  num_patches_w = W // patch_size
+  seq_len = num_patches_h * num_patches_w  # 64*64=4096
+  patch_embed_flops = 2 * B * seq_len * (C * patch_size * patch_size) * hidden_dim
+
+  # 2. gemma3.Encoder: num_layers * gemma3.Encoder1DBlock
+  qkv_flops_per_layer = 3 * (2 * B * seq_len * hidden_dim * hidden_dim)
+  attn_flops_per_layer = 4 * B * seq_len * seq_len * hidden_dim
+  projection_flops_per_layer = 2 * B * seq_len * hidden_dim * hidden_dim  # projection after attention multiplication
+  mlp_flops_per_layer = 2 * (2 * B * seq_len * hidden_dim * intermediate_dim)  # two fc layers
+  total_attn_flops = attn_flops_per_layer * num_layers
+  encoder_flops = (+qkv_flops_per_layer + projection_flops_per_layer + mlp_flops_per_layer) * num_layers
+
+  # 4. VisionEmbedder
+  seq_len_after_pooling = (num_patches_h // vision_exit_pooling_window) * (num_patches_w // vision_exit_pooling_window)
+  vision_embedder_flops = 2 * B * seq_len_after_pooling * hidden_dim * embed_dim  # One linear projection
+
+  # Learnable weights summation
+  learnable_weight_flops = patch_embed_flops + encoder_flops + vision_embedder_flops
+
+  if config.freeze_vision_encoder_params:
+    learnable_weight_flops += 2 * vision_embedder_flops  # only projector is learnable, add fwd+optimizer
+  else:
+    learnable_weight_flops *= 3  # multiply by 3 for fwd + bwd + optimizer
+
+  # Convert to TFLOPs
+  learnable_weight_tflops = learnable_weight_flops / 1e12
+  total_attn_tflops = total_attn_flops / 1e12
+  total_tflops = learnable_weight_tflops + total_attn_tflops
+
+  return total_tflops, learnable_weight_tflops, total_attn_tflops
+
+
+def calculate_llama4_vision_layers_tflops_per_device(config):
+  """
+  Estimate TFLOPs for Llama4 vision encoder (ViT-style).
+  Returns:
+      total_tflops: Total TFLOPs (counts for fwd + bwd + optimizer)
+      learnable_weight_tflops: TFLOPs from learnable weights (patch embedding, qkv, MLP, projections)
+      attention_tflops: TFLOPs from attention multiplications
+  """
+  # Config values
+  B = config.per_device_batch_size
+  C = config.num_channels_for_vit
+  H = W = config.tile_size_for_vit
+  patch_size = config.patch_size_for_vit
+  hidden_dim = config.hidden_size_for_vit
+  intermediate_dim = config.intermediate_size_for_vit
+  num_layers = config.num_hidden_layers_for_vit
+  pixel_shuffle_fc1_out_dim = config.projector_input_dim_for_vit  # 4096
+  pixel_shuffle_fc2_out_dim = config.projector_output_dim_for_vit  # 4096
+  base_emb_dim = config.base_emb_dim
+  pixel_shuffle_ratio = config.pixel_shuffle_ratio_for_vit  # 0.5
+  num_patches = (H // patch_size) * (W // patch_size)  # 24*24 = 576
+  pixel_shuffle_tokens = num_patches * pixel_shuffle_ratio**2  # 144
+
+  # 1. Llama4UnfoldConvolution (flops by linear projection)
+  # lax.conv_general_dilated_patches extracts patches through reshaping/indexing without flops
+  # Each patch: C * patch_size * patch_size -> hidden_dim
+  patch_embed_flops = 2 * B * num_patches * (C * patch_size * patch_size) * hidden_dim
+
+  # 2. Llama4VisionEncoder: num_layers * (qkv + att_projection + mlp)
+  seq_len = num_patches + 1  # +1 for class token, so 577
+  qkv_flops_per_layer = 3 * (2 * B * seq_len * hidden_dim * hidden_dim)  # Q, K, V projections
+  attn_flops_per_layer = 4 * B * seq_len * seq_len * hidden_dim  # Attention scores and weighted sum
+  projection_flops_per_layer = 2 * B * seq_len * hidden_dim * hidden_dim  # projection after attention multiplication
+  mlp_flops_per_layer = 2 * (2 * B * seq_len * hidden_dim * intermediate_dim)  # two fc layers
+  total_attn_flops = attn_flops_per_layer * num_layers
+  vision_encoder_flops = (+qkv_flops_per_layer + projection_flops_per_layer + mlp_flops_per_layer) * num_layers
+
+  # 3. Llama4VisionPixelShuffleMLP
+  # (B, 144, 5632) -> (B, 144, 4096) -> (B, 144, 4096)
+  pixel_shuffle_fc1_flops = 2 * B * pixel_shuffle_tokens * intermediate_dim * pixel_shuffle_fc1_out_dim
+  pixel_shuffle_fc2_flops = 2 * B * pixel_shuffle_tokens * pixel_shuffle_fc1_out_dim * pixel_shuffle_fc2_out_dim
+  pixel_shuffle_total_flops = pixel_shuffle_fc1_flops + pixel_shuffle_fc2_flops
+
+  # 4. Llama4MultiModalProjector: (B, 144, 5120) x (5120, base_emb_dim)
+  projector_flops = 2 * B * pixel_shuffle_tokens * pixel_shuffle_fc1_out_dim * base_emb_dim
+
+  # Learnable weights: all matmuls above
+  learnable_weight_flops = patch_embed_flops + vision_encoder_flops + pixel_shuffle_total_flops + projector_flops
+
+  if config.freeze_vision_encoder_params:
+    learnable_weight_flops += 2 * projector_flops  # only projector is learnable, add fwd+optimizer
+  else:
+    learnable_weight_flops *= 3  # multiply by 3 for fwd + bwd + optimizer
+
+  # Convert to TFLOPs
+  learnable_weight_tflops = learnable_weight_flops / 1e12
+  total_attn_tflops = total_attn_flops / 1e12
+  total_tflops = learnable_weight_tflops + total_attn_tflops
+
+  return total_tflops, learnable_weight_tflops, total_attn_tflops
+
+
+def calculate_vision_encoder_tflops(config):
+  """Calculate vision encoder TFLOPs per prefill step per device."""
+  if config.model_name.startswith("gemma3"):
+    mm_total_tflops, mm_learnable_weight_tflops, mm_attention_tflops = calculate_gemma3_vision_layers_tflops_per_device(
+        config
+    )
+  elif config.model_name.startswith("llama4"):
+    mm_total_tflops, mm_learnable_weight_tflops, mm_attention_tflops = calculate_llama4_vision_layers_tflops_per_device(
+        config
+    )
+  else:
+    max_logging.log(
+        f"Vision encoder TFLOPs calculation not implemented for model {config.model_name}, counting as 0 for now."
+    )
+    mm_total_tflops = mm_learnable_weight_tflops = mm_attention_tflops = 0
+
+  return mm_total_tflops, mm_learnable_weight_tflops, mm_attention_tflops
+
+
 def calculate_tflops_training_per_device(config, log=True):
   """Calculate training TFLOP"""
   # MLP flops
@@ -333,7 +514,7 @@ def calculate_tflops_training_per_device(config, log=True):
         * config.head_dim
     )
 
-  # Divide attantion flops by 2 due to causal mask
+  # Divide attention flops by 2 due to causal mask
   # References:
   # NVIDIA/Megatron-LM (2025 March): https://github.com/NVIDIA/Megatron-LM/blob/250b79415dcc4b660521273c87f15334c804eeae/megatron/training/training.py#L361-L362
   # NVIDIA/NeMo (2025 April): https://github.com/NVIDIA/NeMo/blob/ba4d6d116463de512ff0cfc14641aa6cf4577a42/nemo/utils/flops_formulas.py#L259-L272
@@ -351,7 +532,14 @@ def calculate_tflops_training_per_device(config, log=True):
     attention_tflops, learnable_weight_tflops = calculate_gemma3_tflops_training_per_device(
         config, total_ffn_flops, qkv_flops, projection_flops, embedding_flops
     )
-  elif config.decoder_block in (DecoderBlockType.DEEPSEEK, DecoderBlockType.LLAMA4):
+  elif config.decoder_block == DecoderBlockType.LLAMA4:
+    # Use the new helper to calculate attention TFLOPs correctly.
+    attention_tflops = calculate_llama4_attention_tflops(config)
+    # The learnable weight calculation remains the same as it correctly handles Llama4's MoE structure.
+    learnable_weight_tflops = (
+        (total_ffn_flops + (qkv_flops + projection_flops) * config.num_decoder_layers + embedding_flops) * 3 / 10**12
+    )
+  elif config.decoder_block == DecoderBlockType.DEEPSEEK:
     learnable_weight_tflops = (
         (total_ffn_flops + (qkv_flops + projection_flops) * config.num_decoder_layers + embedding_flops) * 3 / 10**12
     )
@@ -375,6 +563,21 @@ def calculate_tflops_training_per_device(config, log=True):
     reference_model_tflops = 0
 
   total_tflops = learnable_weight_tflops + attention_tflops + reference_model_tflops
+
+  if config.use_multimodal:
+    # Add vision layers TFLOPs for multimodal models
+    mm_total_tflops, mm_learnable_weight_tflops, mm_attention_tflops = calculate_vision_encoder_tflops(config)
+    if log:
+      print(
+          f"{config.model_name} vision layers per train step:\n",
+          f"Total TFLOPs: {mm_total_tflops:.2f} \n",
+          f"split as {100 * mm_learnable_weight_tflops/mm_total_tflops:.2f}% learnable weight flops",
+          f"and {100 * mm_attention_tflops/mm_total_tflops:.2f}% attention flops;\n",
+          f"learnable weight {mm_learnable_weight_tflops:.2f} TFLOPs, attention {mm_attention_tflops:.2f} TFLOPs",
+      )
+    total_tflops += mm_total_tflops
+    learnable_weight_tflops += mm_learnable_weight_tflops
+    attention_tflops += mm_attention_tflops
 
   if log:
     print(
@@ -795,6 +998,9 @@ def setup_initial_state(
         config.dataset_type,
         use_ocdbt=config.checkpoint_storage_use_ocdbt,
         use_zarr3=config.checkpoint_storage_use_zarr3,
+        enable_orbax_v1=config.enable_orbax_v1,
+        checkpoint_conversion_fn=config.checkpoint_conversion_fn,
+        source_checkpoint_layout=config.source_checkpoint_layout,
     )
 
     if restored:
@@ -863,7 +1069,7 @@ def get_abstract_state(model, tx, config, rng, mesh, is_training=True):
   )
 
 
-def get_prefill_kv_cache_annotations(model, config, rng, mesh, page_state: Optional[PageState] = None):
+def get_prefill_kv_cache_annotations(model, config, rng, mesh, page_state: None | PageState = None):
   """Get a shaped abstraction of the state (including optimizer)"""
 
   def init_kv_cache(model, config):
@@ -893,7 +1099,7 @@ def get_prefill_kv_cache_annotations(model, config, rng, mesh, page_state: Optio
   return state_mesh_annotations
 
 
-def get_kv_cache_annotations(model, config, rng, mesh, page_state: Optional[PageState] = None):
+def get_kv_cache_annotations(model, config, rng, mesh, page_state: None | PageState = None):
   """Get a shaped abstraction of the state (including optimizer)"""
 
   def init_kv_cache(model, config):

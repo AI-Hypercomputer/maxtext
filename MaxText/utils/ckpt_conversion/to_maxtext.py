@@ -1,10 +1,10 @@
-# Copyright 2025 Google LLC
+# Copyright 2023–2025 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+#    https://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -48,7 +48,6 @@ from typing import Sequence
 
 import numpy as np
 import jax
-import jax.numpy as jnp
 from absl import app
 from flax.training import train_state
 from transformers import AutoConfig, AutoModelForCausalLM
@@ -59,6 +58,7 @@ from MaxText import max_utils
 from MaxText import maxtext_utils
 from MaxText import pyconfig
 from MaxText import optimizers
+from MaxText.common_types import MODEL_MODE_TRAIN
 from MaxText.layers import models, quantizations
 from MaxText.checkpointing import save_checkpoint
 from MaxText.utils.ckpt_conversion.utils.param_mapping import HOOK_FNS, PARAM_MAPPING
@@ -101,7 +101,7 @@ def main(argv: Sequence[str]) -> None:
   # Initialize MaxText model, optimizer, and abstract state
   rng = jax.random.PRNGKey(config.init_weights_seed)
   quant = quantizations.configure_quantization(config)
-  maxtext_model_flax = models.Transformer(config, mesh, quant=quant)
+  maxtext_model_flax = models.Transformer(config, mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
   learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
   tx = optimizers.get_optimizer(config, learning_rate_schedule)
 
@@ -124,7 +124,7 @@ def main(argv: Sequence[str]) -> None:
   # Get parameter mappings and hooks
   # example of param mapping (gemma2, maxtext:huggingface):
   # "params-decoder-layers_{maxtext_layer_idx}-pre_self_attention_norm_global-scale":
-  #                                                                    f"model.layers.{global_layer_idx}.input_layernorm.weight",
+  #   f"model.layers.{global_layer_idx}.input_layernorm.weight",
 
   model_key = config.model_name
   param_map_mt_to_hf = PARAM_MAPPING[model_key](hf_config_obj.to_dict(), config.scan_layers)

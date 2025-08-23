@@ -1,23 +1,22 @@
-"""
-Copyright 2023 Google LLC
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-     https://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-"""
+# Copyright 2023–2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 # pylint: disable=bare-except, consider-using-generator
 """ Utils that are only interesting for training in MaxText. """
 
 import jax
+from MaxText.common_types import MODEL_MODE_TRAIN
 from MaxText.layers import quantizations
 from MaxText.layers import models
 from MaxText import optimizers
@@ -27,9 +26,9 @@ from MaxText import maxtext_utils
 
 def get_transformer_model(config, mesh, quant):
   if config.model_fsdp_ag_once:
-    return models.ZeroOneTransformer(config, mesh, quant=quant)
+    return models.ZeroOneTransformer(config, mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
   else:
-    return models.Transformer(config, mesh, quant=quant)
+    return models.Transformer(config, mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
 
 
 def create_model(config, mesh):
@@ -37,6 +36,7 @@ def create_model(config, mesh):
   # Model definition
   quant = quantizations.configure_quantization(config)
   model = get_transformer_model(config, mesh, quant)
+  model = quantizations.maybe_quantize_model(model, config)
   return model
 
 

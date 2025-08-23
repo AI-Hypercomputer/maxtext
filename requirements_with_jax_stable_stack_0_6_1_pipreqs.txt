@@ -7,7 +7,7 @@ cloud_tpu_diagnostics==0.1.5
 datasets==3.6.0
 etils==1.12.2
 evaluate==0.4.4
-flax==0.10.6
+flax==0.11.0
 grain==0.2.10
 grpcio==1.72.0rc1
 huggingface_hub==0.33.0
@@ -25,9 +25,9 @@ nltk==3.9.1
 numpy==2.3.1
 omegaconf==2.3.0
 optax==0.2.5
-orbax==0.1.9
+orbax==0.11.22
 pandas==2.3.0
-pathwaysutils==0.1.1
+pathwaysutils@git+https://github.com/AI-Hypercomputer/pathways-utils.git@d6fffd3f9bd5e06c323f5bade04b40fa741c728f
 Pillow==11.2.1
 protobuf==6.31.1
 psutil==7.0.0
@@ -35,9 +35,10 @@ pytest==8.4.1
 PyYAML==6.0.2
 PyYAML==6.0.2
 Requests==2.32.4
+qwix@git+https://github.com/google/qwix.git
 safetensors==0.5.3
 sentencepiece==0.2.0
-setuptools==80.9.0
+setuptools
 tabulate==0.9.0
 tensorboard_plugin_profile==2.13.0
 tensorboardX==2.6.2.2

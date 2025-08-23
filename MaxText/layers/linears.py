@@ -1,22 +1,22 @@
-#  Copyright 2023 Google LLC
+# Copyright 2023–2025 Google LLC
 #
-#  Licensed under the Apache License, Version 2.0 (the "License");
-#  you may not use this file except in compliance with the License.
-#  You may obtain a copy of the License at
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
 #
-#       https://www.apache.org/licenses/LICENSE-2.0
+#    https://www.apache.org/licenses/LICENSE-2.0
 #
-#  Unless required by applicable law or agreed to in writing, software
-#  distributed under the License is distributed on an "AS IS" BASIS,
-#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-#  See the License for the specific language governing permissions and
-#  limitations under the License.
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Linear Layers."""
 
 import functools
 import operator
-from typing import Any, Callable, Iterable, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Iterable, Sequence
 
 import numpy as np
 
@@ -30,6 +30,7 @@ from flax import nnx
 import flax.linen as nn
 
 from MaxText import max_logging
+from MaxText import max_utils
 from MaxText.common_types import MODEL_MODE_PREFILL, DecoderBlockType, DType, Array, Config
 from MaxText.layers import nnx_wrappers, quantizations
 from MaxText.layers import normalizations
@@ -37,7 +38,7 @@ from MaxText.layers.initializers import NdInitializer, nd_dense_init, default_bi
 from MaxText.layers.quantizations import AqtQuantization as Quant
 
 
-def _convert_to_activation_function(fn_or_string: Union[str, Callable[..., Any]]) -> Callable[..., Any]:
+def _convert_to_activation_function(fn_or_string: str | Callable[..., Any]) -> Callable[..., Any]:
   """Convert a string to an activation function."""
   if fn_or_string == "linear":
     return lambda x: x
@@ -52,12 +53,12 @@ def _convert_to_activation_function(fn_or_string: Union[str, Callable[..., Any]]
     )
 
 
-def _normalize_axes(axes: Iterable[int], ndim: int) -> Tuple[int, ...]:
+def normalize_axes(axes: Iterable[int], ndim: int) -> tuple[int, ...]:
   # A tuple by convention. len(axes_tuple) then also gives the rank efficiently.
   return tuple(ax if ax >= 0 else ndim + ax for ax in axes)
 
 
-def _canonicalize_tuple(x):
+def canonicalize_tuple(x):
   if isinstance(x, Iterable):
     return tuple(x)
   else:
@@ -83,7 +84,7 @@ def _compute_dot_general_nnx(
   matmul_precision = lax.Precision(matmul_precision)
   if quant_dot_general is not None:
     if initializing:
-      return quant_dot_general.lazy_init(inputs, kernel, ((axis, contract_ind), ((), ())), precision=None)
+      quant_dot_general.lazy_init(inputs, kernel, ((axis, contract_ind), ((), ())), precision=None)
     return quant_dot_general(inputs, kernel, ((axis, contract_ind), ((), ())), precision=None, mutable=["aqt"])
   return dot_general(inputs, kernel, ((axis, contract_ind), ((), ())), precision=matmul_precision)
 
@@ -93,19 +94,19 @@ class DenseGeneral(nnx.Module):
 
   def __init__(
       self,
-      in_features_shape: Union[Iterable[int], int],
-      out_features_shape: Union[Iterable[int], int],
-      axis: Union[Iterable[int], int] = -1,
+      in_features_shape: Iterable[int] | int,
+      out_features_shape: Iterable[int] | int,
+      axis: Iterable[int] | int = -1,
       weight_dtype: DType = jnp.float32,
       dtype: DType = jnp.float32,
       kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "truncated_normal"),
-      kernel_axes: Tuple[Optional[str], ...] = (),
-      quant: Optional[Quant] = None,
+      kernel_axes: tuple[None | str, ...] = (),
+      quant: None | Quant = None,
       use_bias: bool = False,
       matmul_precision: str = "default",
       parameter_memory_host_offload: bool = False,
       *,  # Following arguments are keyword-only
-      rngs: nnx.Rngs,
+      rngs: nnx.Rngs = None,
   ):
     """Initializes the DenseGeneral module.
 
@@ -124,9 +125,9 @@ class DenseGeneral(nnx.Module):
       parameter_memory_host_offload: Determines whether to offload params to host
       rngs: RNG state for initialization in nnx.
     """
-    self.in_features_shape = _canonicalize_tuple(in_features_shape)
-    self.out_features_shape = _canonicalize_tuple(out_features_shape)
-    self.axis = _canonicalize_tuple(axis)
+    self.in_features_shape = canonicalize_tuple(in_features_shape)
+    self.out_features_shape = canonicalize_tuple(out_features_shape)
+    self.axis = canonicalize_tuple(axis)
     self.weight_dtype = weight_dtype
     self.dtype = dtype
     self.kernel_init = kernel_init
@@ -190,7 +191,7 @@ class DenseGeneral(nnx.Module):
       The transformed input.
     """
     inputs = jnp.asarray(inputs, self.dtype)
-    norm_axis = _normalize_axes(self.axis, inputs.ndim)
+    norm_axis = normalize_axes(self.axis, inputs.ndim)
 
     for i, ax in enumerate(norm_axis):
       if inputs.shape[ax] != self.in_features_shape[i]:
@@ -207,7 +208,7 @@ class DenseGeneral(nnx.Module):
       # Move logit_dense kernel to device if parameter offloading is enabled
       if self.parameter_memory_host_offload:
         max_logging.log("linear.py: Moving parameter logits_dense kernel to device")
-        kernel = jax.device_put(kernel, jax._src.sharding_impls.TransferToMemoryKind("device"))
+        kernel = jax.device_put(kernel, max_utils.device_space())
       kernel = jnp.asarray(kernel, self.dtype)
 
     contract_ind = tuple(range(0, len(self.axis)))
@@ -231,17 +232,17 @@ def dense_general(
     *,
     inputs_shape: tuple[int, ...] | None = None,
     in_features_shape: tuple[int, ...] | int | None = None,
-    out_features_shape: Union[Iterable[int], int],
-    axis: Union[Iterable[int], int] = -1,
+    out_features_shape: Iterable[int] | int,
+    axis: Iterable[int] | int = -1,
     weight_dtype: DType = jnp.float32,
     dtype: DType = jnp.float32,
     kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "truncated_normal"),
-    kernel_axes: Tuple[Optional[str], ...] = (),
-    quant: Optional[Quant] = None,
+    kernel_axes: tuple[None | str, ...] = (),
+    quant: None | Quant = None,
     use_bias: bool = False,
     matmul_precision: str = "default",
     parameter_memory_host_offload: bool = False,
-    name: Optional[str] = None,
+    name: None | str = None,
 ):
   """Creates a DenseGeneral Linen module using nnx.bridge.to_linen.
 
@@ -265,8 +266,8 @@ def dense_general(
     raise ValueError("Exactly one of inputs_shape or in_features must be specified.")
 
   if inputs_shape is not None:
-    axis = _canonicalize_tuple(axis)
-    in_features_shape = tuple(inputs_shape[ax] for ax in _normalize_axes(axis, len(inputs_shape)))
+    axis = canonicalize_tuple(axis)
+    in_features_shape = tuple(inputs_shape[ax] for ax in normalize_axes(axis, len(inputs_shape)))
   else:
     assert in_features_shape is not None
   module = nnx_wrappers.to_linen(
@@ -297,15 +298,15 @@ class MlpBlock(nnx.Module):
       config: Config,
       in_features: int,
       intermediate_dim: int = 2048,
-      activations: Sequence[Union[str, Callable[..., Any]]] = ("relu",),
+      activations: Sequence[str | Callable[..., Any]] = ("relu",),
       kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "truncated_normal"),
       intermediate_dropout_rate: float = 0.1,
       dtype: Any = jnp.float32,
       weight_dtype: Any = jnp.float32,
       use_bias: bool = False,
       use_pre_norm: bool = False,
-      quant: Optional[Quant] = None,
-      model_mode: Optional[str] = None,
+      quant: None | Quant = None,
+      model_mode: None | str = None,
       *,
       rngs: nnx.Rngs,
   ) -> None:
@@ -401,6 +402,9 @@ class MlpBlock(nnx.Module):
         DecoderBlockType.MISTRAL,
         DecoderBlockType.MIXTRAL,
         DecoderBlockType.GEMMA,
+        DecoderBlockType.GEMMA2,
+        DecoderBlockType.GEMMA3,
+        DecoderBlockType.QWEN3,
         DecoderBlockType.DEEPSEEK,
         DecoderBlockType.LLAMA4,
     ):
@@ -460,16 +464,16 @@ def mlp_block(
     config: Config,
     in_features: int,
     intermediate_dim: int = 2048,
-    activations: Sequence[Union[str, Callable[..., Any]]] = ("relu",),
+    activations: Sequence[str | Callable[..., Any]] = ("relu",),
     kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "truncated_normal"),
     intermediate_dropout_rate: float = 0.1,
     dtype: Any = jnp.float32,
     weight_dtype: Any = jnp.float32,
     use_bias: bool = False,
     use_pre_norm: bool = False,
-    quant: Optional[Quant] = None,
-    model_mode: Optional[str] = None,
-    name: Optional[str] = None,
+    quant: None | Quant = None,
+    model_mode: None | str = None,
+    name: None | str = None,
 ):
   """Creates a MlpBlock Linen module using nnx.bridge.to_linen."""
   module = nnx_wrappers.to_linen(

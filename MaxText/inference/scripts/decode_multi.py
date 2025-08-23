@@ -1,10 +1,10 @@
-# Copyright 2025 Google LLC
+# Copyright 2023–2025 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     [http://www.apache.org/licenses/LICENSE-2.0](http://www.apache.org/licenses/LICENSE-2.0)
+#    https://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -16,7 +16,7 @@
 
 import os
 import uuid
-from typing import Sequence, List
+from typing import Sequence
 
 from absl import app
 
@@ -32,7 +32,8 @@ _INITIAL_PREFILL_STREAMS = 2  # Example: Start generating after 2 streams are re
 def _validate_config(config):
   """Validate configuration settings."""
   assert config.load_full_state_path == "", (
-      "Decode doesn't operate on full states! Convert to parameter checkpoint first." "Using generate_param_only_checkpoint."
+      "Decode doesn't operate on full states! Convert to parameter checkpoint first."
+      "Using generate_param_only_checkpoint."
   )
   assert (
       0 < _INITIAL_PREFILL_STREAMS <= _NUM_STREAMS
@@ -60,7 +61,9 @@ def main(argv: Sequence[str]) -> None:
   assert true_length <= config.max_prefill_predict_length, "Prompt too long for prefill length"
 
   batch_size = int(config.per_device_batch_size * jax.device_count())
-  assert 0 < _NUM_STREAMS <= batch_size, f"The number of streams {_NUM_STREAMS} must be > 0 and <= batch size {batch_size}"
+  assert (
+      0 < _NUM_STREAMS <= batch_size
+  ), f"The number of streams {_NUM_STREAMS} must be > 0 and <= batch size {batch_size}"
 
   # Initialize decode state
   rng, rng_init_decode = jax.random.split(rng)
@@ -68,9 +71,9 @@ def main(argv: Sequence[str]) -> None:
   print("Initial decode state initialized.")
 
   # Keep track of results per stream (slot)
-  streams_results: dict[int, List[int]] = {i: [] for i in range(_NUM_STREAMS)}
-  streams_active: List[bool] = [False] * _NUM_STREAMS  # Track which slots are active
-  streams_finished: List[bool] = [False] * _NUM_STREAMS  # Track finished streams
+  streams_results: dict[int, list[int]] = {i: [] for i in range(_NUM_STREAMS)}
+  streams_active: list[bool] = [False] * _NUM_STREAMS  # Track which slots are active
+  streams_finished: list[bool] = [False] * _NUM_STREAMS  # Track finished streams
   streams_prefilled_count = 0
   streams_inserted_count = 0
 

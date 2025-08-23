@@ -1,17 +1,16 @@
-"""
-Copyright 2023 Google LLC
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-     https://www.apache.org/licenses/LICENSE-2.0
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-"""
-
-from typing import Optional
+# Copyright 2023–2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """
 Convert weights from a Llama or Mistral HuggingFace or PyTorch model to a MaxText one.
@@ -375,9 +374,9 @@ def initialize_self_attention_lora_kernels(
     module_name: str,
     layer_idx: int,
     reshape_a: bool = False,
-    shape_a: Optional[list[int]] = None,
+    shape_a: None | list[int] = None,
     reshape_b: bool = False,
-    shape_b: Optional[list[int]] = None,
+    shape_b: None | list[int] = None,
 ):
   """Helper function to initialize LoRA kernels for given target module.
 
@@ -522,10 +521,16 @@ def convert_lora_weights_to_jax_weights(lora_config: dict, model_size: str):
 
       if "o_proj" in target_module:
         lora_A_o = (
-            lora_chkpt_vars[f"layers.{layer_idx}.attention.wo.lora_A.weights"].type(torch.float32).numpy().astype(CAST_DTYPE)
+            lora_chkpt_vars[f"layers.{layer_idx}.attention.wo.lora_A.weights"]
+            .type(torch.float32)
+            .numpy()
+            .astype(CAST_DTYPE)
         )
         lora_B_o = (
-            lora_chkpt_vars[f"layers.{layer_idx}.attention.wo.lora_B.weights"].type(torch.float32).numpy().astype(CAST_DTYPE)
+            lora_chkpt_vars[f"layers.{layer_idx}.attention.wo.lora_B.weights"]
+            .type(torch.float32)
+            .numpy()
+            .astype(CAST_DTYPE)
         )
 
         # This is for "out" matrix. So we don't transpose it above as well as here
@@ -548,7 +553,9 @@ def convert_lora_weights_to_jax_weights(lora_config: dict, model_size: str):
     )
 
   if self_attention_lora["key"]["lora_a.kernel"] is not None:
-    self_attention_lora["key"]["lora_a.kernel"] = np.transpose(self_attention_lora["key"]["lora_a.kernel"], axes=(1, 0, 2))
+    self_attention_lora["key"]["lora_a.kernel"] = np.transpose(
+        self_attention_lora["key"]["lora_a.kernel"], axes=(1, 0, 2)
+    )
     self_attention_lora["key"]["lora_b.kernel"] = np.transpose(
         self_attention_lora["key"]["lora_b.kernel"], axes=(1, 0, 2, 3)
     )
@@ -565,7 +572,9 @@ def convert_lora_weights_to_jax_weights(lora_config: dict, model_size: str):
     self_attention_lora["out"]["lora_a.kernel"] = np.transpose(
         self_attention_lora["out"]["lora_a.kernel"], axes=(2, 0, 3, 1)
     )
-    self_attention_lora["out"]["lora_b.kernel"] = np.transpose(self_attention_lora["out"]["lora_b.kernel"], axes=(1, 0, 2))
+    self_attention_lora["out"]["lora_b.kernel"] = np.transpose(
+        self_attention_lora["out"]["lora_b.kernel"], axes=(1, 0, 2)
+    )
 
   # Not sure if I need to scale the lora query weights by dividing it by np.sqrt(head_dim). Validate it later.
 
@@ -579,7 +588,9 @@ def convert_lora_weights_to_jax_weights(lora_config: dict, model_size: str):
   return jax_weights_lora
 
 
-def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, model_params: dict, mem_info: psutil.Process):
+def _convert_huggingface_to_jax_weights(
+    base_model_path: str, model_size: str, model_params: dict, mem_info: psutil.Process
+):
   """Convert a Huggingface Checkpoint to a dictionary of Numpy arrays representing the weights.
 
   Args:
@@ -870,13 +881,25 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
 
     if is_dense_layer:
       wi_0 = (
-          chkpt_vars[f"layers.{layer_idx}.feed_forward.w1.weight"].type(torch.float32).numpy().astype(CAST_DTYPE).transpose()
+          chkpt_vars[f"layers.{layer_idx}.feed_forward.w1.weight"]
+          .type(torch.float32)
+          .numpy()
+          .astype(CAST_DTYPE)
+          .transpose()
       )
       wi_1 = (
-          chkpt_vars[f"layers.{layer_idx}.feed_forward.w2.weight"].type(torch.float32).numpy().astype(CAST_DTYPE).transpose()
+          chkpt_vars[f"layers.{layer_idx}.feed_forward.w2.weight"]
+          .type(torch.float32)
+          .numpy()
+          .astype(CAST_DTYPE)
+          .transpose()
       )
       wo = (
-          chkpt_vars[f"layers.{layer_idx}.feed_forward.w3.weight"].type(torch.float32).numpy().astype(CAST_DTYPE).transpose()
+          chkpt_vars[f"layers.{layer_idx}.feed_forward.w3.weight"]
+          .type(torch.float32)
+          .numpy()
+          .astype(CAST_DTYPE)
+          .transpose()
       )
       if layer_weight["mlp"]["wi_0"]["kernel"] is None:
         layer_weight["mlp"]["wi_0"]["kernel"] = np.zeros(stack_shape + wi_0.shape, dtype=CAST_DTYPE)
@@ -903,7 +926,10 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
 
       # 2 routed experts: Llama4MoEBlock_0.MoeBlock_0.wi_0, Llama4MoEBlock_0.MoeBlock_0.wi_1, Llama4MoEBlock_0.MoeBlock_0.wo
       wi_0_1 = (
-          chkpt_vars[f"layers.{layer_idx}.feed_forward.experts.gate_up_proj"].type(torch.float32).numpy().astype(CAST_DTYPE)
+          chkpt_vars[f"layers.{layer_idx}.feed_forward.experts.gate_up_proj"]
+          .type(torch.float32)
+          .numpy()
+          .astype(CAST_DTYPE)
       )
       # pylint: disable=unbalanced-tuple-unpacking
       wi_0, wi_1 = np.split(wi_0_1, 2, axis=-1)
@@ -1086,7 +1112,9 @@ def _convert_pytorch_to_jax_weights(base_model_path: str, model_size: str, model
     max_logging.log(f"Loading checkpoint {i+1} of {len(ckpt_paths)} ...")
     # NOTE: starting in PT2.6, `weights_only` was switched from the default of `False` to `True`
     # thus we need to specify this or else loading will fail
-    chkpt_vars[int(ckpt_path.name.split(".", maxsplit=2)[1])] = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    chkpt_vars[int(ckpt_path.name.split(".", maxsplit=2)[1])] = torch.load(
+        ckpt_path, map_location="cpu", weights_only=False
+    )
   chkpt_vars = [chkpt_vars[i] for i in sorted(list(chkpt_vars.keys()))]
   # map weight names if they use HuggingFace instead of PyTorch convention
   chkpt_vars = [_NamespaceMapper(var, model_size=model_size) for var in chkpt_vars]
@@ -1222,7 +1250,9 @@ def _convert_pytorch_to_jax_weights(base_model_path: str, model_size: str, model
       wk = permute_to_match_maxtext_rope(wk)
     else:
       if not has_printed_warning:
-        max_logging.log("Skipping permute_to_match_maxtext_rope because model is a Llama3 variant or has RoPE Type Llama3.1")
+        max_logging.log(
+            "Skipping permute_to_match_maxtext_rope because model is a Llama3 variant or has RoPE Type Llama3.1"
+        )
         has_printed_warning = True
 
     w_post = np.concatenate(
@@ -1380,7 +1410,8 @@ def _convert_pytorch_to_jax_weights(base_model_path: str, model_size: str, model
         )
       else:
         gate = np.concatenate(
-            [var[f"layers.{layer_idx}.feed_forward.gate.weight"].type(torch.float16).numpy() for var in chkpt_vars], axis=0
+            [var[f"layers.{layer_idx}.feed_forward.gate.weight"].type(torch.float16).numpy() for var in chkpt_vars],
+            axis=0,
         ).transpose()
       if layer_weight["gate"]["kernel"] is None:
         stack_shape = (base_num_decoder_layers,)
@@ -1446,7 +1477,10 @@ def _convert_pytorch_to_jax_weights(base_model_path: str, model_size: str, model
         # shared experts
         wi_0 = np.concatenate(
             [
-                var[f"layers.{layer_idx}.feed_forward.w_in_shared_FD.weight"].type(torch.float32).numpy().astype(CAST_DTYPE)
+                var[f"layers.{layer_idx}.feed_forward.w_in_shared_FD.weight"]
+                .type(torch.float32)
+                .numpy()
+                .astype(CAST_DTYPE)
                 for var in chkpt_vars
             ],
             axis=0,
@@ -1460,7 +1494,10 @@ def _convert_pytorch_to_jax_weights(base_model_path: str, model_size: str, model
         ).transpose()
         wo = np.concatenate(
             [
-                var[f"layers.{layer_idx}.feed_forward.w_out_shared_DF.weight"].type(torch.float32).numpy().astype(CAST_DTYPE)
+                var[f"layers.{layer_idx}.feed_forward.w_out_shared_DF.weight"]
+                .type(torch.float32)
+                .numpy()
+                .astype(CAST_DTYPE)
                 for var in chkpt_vars
             ],
             axis=1,
@@ -1535,9 +1572,9 @@ def _convert_pytorch_to_jax_weights(base_model_path: str, model_size: str, model
     gate_kernel_axes = (2, 0, 1) if is_llama4_model else (1, 0, 2)
     layer_weight["gate"]["kernel"] = np.transpose(layer_weight["gate"]["kernel"], axes=gate_kernel_axes)
     if is_llama4_model:
-      jax_weights["decoder"]["layers"][routed_and_shared_layer_key]["MoeBlock_0"]["gate"]["kernel"] = layer_weight["gate"][
-          "kernel"
-      ]
+      jax_weights["decoder"]["layers"][routed_and_shared_layer_key]["MoeBlock_0"]["gate"]["kernel"] = layer_weight[
+          "gate"
+      ]["kernel"]
       # routed experts
       jax_weights["decoder"]["layers"][routed_and_shared_layer_key]["MoeBlock_0"]["wi_0"] = layer_weight["mlp"]["wi_0"][
           "kernel"
@@ -1545,7 +1582,9 @@ def _convert_pytorch_to_jax_weights(base_model_path: str, model_size: str, model
       jax_weights["decoder"]["layers"][routed_and_shared_layer_key]["MoeBlock_0"]["wi_1"] = layer_weight["mlp"]["wi_1"][
           "kernel"
       ]
-      jax_weights["decoder"]["layers"][routed_and_shared_layer_key]["MoeBlock_0"]["wo"] = layer_weight["mlp"]["wo"]["kernel"]
+      jax_weights["decoder"]["layers"][routed_and_shared_layer_key]["MoeBlock_0"]["wo"] = layer_weight["mlp"]["wo"][
+          "kernel"
+      ]
       # if "shared_experts" in layer_weight:
       jax_weights["decoder"]["layers"][routed_and_shared_layer_key]["shared_experts"]["wi_0"]["kernel"] = layer_weight[
           "shared_experts"
@@ -1610,7 +1649,9 @@ def save_weights_to_checkpoint(
   gc.collect()
   mesh = jax.sharding.Mesh(jax.devices(), "checkpoint_sharding_axis")
   s1 = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("checkpoint_sharding_axis"))  # shards first axis
-  s2 = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(None, "checkpoint_sharding_axis"))  # shards second axis
+  s2 = jax.sharding.NamedSharding(
+      mesh, jax.sharding.PartitionSpec(None, "checkpoint_sharding_axis")
+  )  # shards second axis
   s3 = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(None))  # no sharding
 
   def checkpoint_device_put(arr):

@@ -1,18 +1,16 @@
-"""
-Copyright 2023 Google LLC
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-     https://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-"""
+# Copyright 2023–2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 # pylint: disable=g-bad-todo, abstract-method, consider-using-with
 """Transforms a "full state" including optimizer state to a bfloat16 "parameter state" without optimizer state.
@@ -40,7 +38,7 @@ from MaxText import max_utils
 from MaxText import maxtext_utils
 from MaxText import optimizers
 from MaxText import pyconfig
-from MaxText.common_types import DecoderBlockType
+from MaxText.common_types import DecoderBlockType, MODEL_MODE_TRAIN
 from MaxText.layers import models, quantizations
 from MaxText.utils import gcs_utils
 from MaxText.utils import lora_utils
@@ -96,7 +94,7 @@ def _read_train_checkpoint(config, checkpoint_manager, mesh):
   """Read training checkpoint at path defined by load_full_state_path."""
   # Model and Optimizer definition
   quant = quantizations.configure_quantization(config)
-  model = Transformer(config, mesh, quant)
+  model = Transformer(config, mesh, quant, MODEL_MODE_TRAIN)
   rng = random.PRNGKey(0)
   learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
   tx = optimizers.get_optimizer(config, learning_rate_schedule)
@@ -112,7 +110,7 @@ def _generate_lora_decode_checkpoints(config, mesh):
   """Read lora checkpoints checkpoint at path defined by load_full_state_path."""
   # Model and Optimizer definition
   quant = quantizations.configure_quantization(config)
-  model = Transformer(config, mesh, quant)
+  model = Transformer(config, mesh, quant, MODEL_MODE_TRAIN)
   rng = random.PRNGKey(0)
   learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
   tx = optimizers.get_optimizer(config, learning_rate_schedule)

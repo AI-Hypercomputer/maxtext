@@ -1,21 +1,19 @@
-"""
-Copyright 2025 Google LLC
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-     https://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-"""
+# Copyright 2023–2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """ Tests for Llama4 Vision RoPE """
-from typing import Callable, NamedTuple, Optional, Tuple
+from typing import Callable, NamedTuple
 import os.path
 import sys
 import math
@@ -27,7 +25,9 @@ import unittest
 import jax.numpy as jnp
 from jax.sharding import Mesh
 from jax.experimental import mesh_utils
+
 from MaxText.globals import PKG_DIR
+from MaxText.common_types import MODEL_MODE_TRAIN, AttentionType
 from MaxText import pyconfig
 from MaxText import maxtext_utils
 from MaxText.layers import attentions, embeddings, llama4
@@ -37,8 +37,8 @@ Attention = attentions.Attention
 
 # pylint: disable=line-too-long, missing-function-docstring
 
-"""  
-Llama4 Vision RoPE 
+"""
+Llama4 Vision RoPE
 Details https://github.com/huggingface/transformers/blob/main/src/transformers/models/llama4/modeling_llama4.py
 """
 
@@ -233,8 +233,12 @@ class Llama4VisionPixelShuffleMLPTest(unittest.TestCase):
     # Create new params with copied weights
     updated_params = jax.tree_util.tree_map(lambda x: x, params)
     # Copy weights for both MLP layers
-    updated_params["params"]["pixel_shuffle_mlp"]["vit_pixel_shuffle_mlp_fc1"]["kernel"] = to_jax(pt_model.mlp.fc1.weight).T
-    updated_params["params"]["pixel_shuffle_mlp"]["vit_pixel_shuffle_mlp_fc2"]["kernel"] = to_jax(pt_model.mlp.fc2.weight).T
+    updated_params["params"]["pixel_shuffle_mlp"]["vit_pixel_shuffle_mlp_fc1"]["kernel"] = to_jax(
+        pt_model.mlp.fc1.weight
+    ).T
+    updated_params["params"]["pixel_shuffle_mlp"]["vit_pixel_shuffle_mlp_fc2"]["kernel"] = to_jax(
+        pt_model.mlp.fc2.weight
+    ).T
     return updated_params
 
   def test_pixel_shuffle_mlp(self):
@@ -472,7 +476,7 @@ def eager_attention_forward(
     query: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
-    attention_mask: Optional[torch.Tensor],
+    attention_mask: None | torch.Tensor,
     scaling: float,
     dropout: float = 0.0,
     **kwargs,
@@ -521,10 +525,10 @@ class Llama4VisionAttention(nn.Module):
       self,
       hidden_states: torch.Tensor,
       freqs_ci: torch.Tensor,
-      attention_mask: Optional[torch.Tensor] = None,
-      past_key_value: Optional[torch.Tensor] = None,
+      attention_mask: None | torch.Tensor = None,
+      past_key_value: None | torch.Tensor = None,
       **kwargs,
-  ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+  ) -> tuple[torch.Tensor, None | torch.Tensor]:
     input_shape = hidden_states.shape[:-1]
     hidden_shape = (*input_shape, -1, self.head_dim)
 
@@ -639,25 +643,28 @@ class Llama4VisionAttentionTest(unittest.TestCase):
     freqs_ci = freqs_ci_model.forward()
     attn_output_pt, _ = model_pt(hidden_states_pt, freqs_ci=freqs_ci)
 
-    attention_layer = Attention(
+    lnx = to_jax(hidden_states_pt)
+    attention_layer = attentions.attention_as_linen(
         config=self.cfg,
         num_query_heads=self.cfg.num_attention_heads_for_vit,
         num_kv_heads=self.cfg.num_attention_heads_for_vit,
         head_dim=self.cfg.hidden_size_for_vit // self.cfg.num_attention_heads_for_vit,
         max_target_length=self.seq_len_for_vit,
         attention_kernel="dot_product",  # TODO aireenmei: support flash attention
+        inputs_q_shape=lnx.shape,
+        inputs_kv_shape=lnx.shape,
         mesh=self.mesh,
         dropout_rate=0,
         name="self_attention_vision",
-        attention_type=attentions.AttentionType.FULL,
+        attention_type=AttentionType.FULL,
         is_nope_layer=False,
         use_bias_in_projections=True,
         is_vision=True,
         use_qk_norm=False,
         query_pre_attn_scalar=1 / math.sqrt(self.cfg.hidden_size_for_vit // self.cfg.num_attention_heads_for_vit),
+        model_mode=MODEL_MODE_TRAIN,
     )
 
-    lnx = to_jax(hidden_states_pt)
     key = jax.random.PRNGKey(0)
     attention_layer_params = attention_layer.init(
         key,
@@ -714,8 +721,8 @@ class Llama4VisionEncoderLayer(nn.Module):
       self,
       hidden_state: torch.Tensor,
       freqs_ci: torch.Tensor,
-      attention_mask: Optional[torch.Tensor] = None,
-      output_attentions: Optional[bool] = None,
+      attention_mask: None | torch.Tensor = None,
+      output_attentions: None | bool = None,
   ):
     # Self Attention
     residual = hidden_state
@@ -753,10 +760,10 @@ class Llama4VisionEncoder(nn.Module):
       self,
       hidden_states: torch.Tensor,
       freqs_ci: torch.Tensor,
-      attention_mask: Optional[torch.Tensor] = None,
-      output_attentions: Optional[bool] = None,
-      output_hidden_states: Optional[bool] = None,
-      return_dict: Optional[bool] = None,
+      attention_mask: None | torch.Tensor = None,
+      output_attentions: None | bool = None,
+      output_hidden_states: None | bool = None,
+      return_dict: None | bool = None,
   ):
     # all_hidden_states = () if output_hidden_states else None
     # all_attentions = () if output_attentions else None
@@ -843,7 +850,9 @@ class Llama4VisionEncoderTest(unittest.TestCase):
       updated_params["params"][f"layers_{i}"]["input_layer_norm"]["scale"] = to_jax(
           pt_model.layers[i].input_layernorm.weight
       )
-      updated_params["params"][f"layers_{i}"]["input_layer_norm"]["bias"] = to_jax(pt_model.layers[i].input_layernorm.bias)
+      updated_params["params"][f"layers_{i}"]["input_layer_norm"]["bias"] = to_jax(
+          pt_model.layers[i].input_layernorm.bias
+      )
       updated_params["params"][f"layers_{i}"]["post_attention_layer_norm"]["scale"] = to_jax(
           pt_model.layers[i].post_attention_layernorm.weight
       )
