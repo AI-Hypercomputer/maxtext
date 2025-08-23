@@ -128,3 +128,8 @@ def create_sharding_rules(sharding_rules_name: str):
             raise ValueError(f"Class '{name}' not found in module '{__name__}'. Available: {list(globals().keys())}")
 
     return cls()
+
+
+def assert_matches_logical_axis_rules(axis_mapping, axis):
+   lar_axis_mapping = LogicalAxisRulesSharding()(axis)
+   assert axis_mapping == lar_axis_mapping, "Axis mapping does not match that of logical_axis_rules"

@@ -36,7 +36,7 @@ from MaxText import max_utils
 from MaxText.kernels import megablox as mblx
 from MaxText.layers import attentions, linears, quantizations, nnx_wrappers
 from MaxText.layers.initializers import NdInitializer, nd_dense_init, default_bias_init, variable_to_logically_partitioned
-from MaxText.sharding import MeshSharding, LogicalAxisRulesSharding
+from MaxText.sharding import MeshSharding, LogicalAxisRulesSharding, TensorType
 
 import qwix.pallas as qpl
 
@@ -774,25 +774,35 @@ class RoutedMoE(nnx.Module):
       )
     except:  # pylint: disable=bare-except
       is_batch_sharded_by_expert = False
+
+    # TODO: when we get to V2 sharding rules without backwards compatibility we can
     if is_batch_sharded_by_expert and inputs.shape[0] > 1:
       batch_logical_axis = "activation_batch"
     else:
       batch_logical_axis = "activation_batch_no_exp"
 
+    # TODO: as above, V2 sharding will allow us to switch activation_embed vs. None in sharding rules , based on
+    # presence of tensor_transpose
     if self.get_tensor_transpose_parallelism_size() > 1:
-      input_partition_pspec = nn.logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", "activation_embed"))
+      input_partition_pspec = self.sharding(
+        t="sparse_inputs", a=((batch_logical_axis, "activation_norm_length", "activation_embed"))
+       )
     else:
-      input_partition_pspec = nn.logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", None))
+      input_partition_pspec = self.sharding(t="sparse_inputs", a=(batch_logical_axis, "activation_norm_length", None))
 
-    gate_logits_pspec = nn.logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", None))
+    gate_logits_pspec = self.sharding(t="sparse_gate_logits", a=(batch_logical_axis, "activation_norm_length", None))
+
+    # TODO: in V2 sharding DeepSeek should have its own rules and this conditional won't be necessary
     if self.config.model_name.startswith("deepseek3"):
-      pre_bias_logits_pspec = nn.logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", None))
+      pre_bias_logits_pspec = self.sharding(t="sparse_pre_bias_logits", a=(batch_logical_axis, "activation_norm_length", None))
     else:
       # pre_bias_logits is None for non-DeepSeek v3 models
       pre_bias_logits_pspec = None
-    w0_pspec = nn.logical_to_mesh_axes(("exp", "embed_tensor_transpose", "mlp"))
-    w1_pspec = nn.logical_to_mesh_axes(("exp", "embed_tensor_transpose", "mlp"))
-    wo_pspec = nn.logical_to_mesh_axes(("exp", "mlp", "embed_tensor_transpose"))
+
+    w0_pspec = self.sharding(t="sparse_w0", a=("exp", "embed_tensor_transpose", "mlp"))
+    w1_pspec = self.sharding(t="sparse_w1", a=("exp", "embed_tensor_transpose", "mlp"))
+    wo_pspec = self.sharding(t="sparse_wo", a=("exp", "mlp", "embed_tensor_transpose"))
+
     if isinstance(w0_kernel, aqt.QTensor):
       w0_pspec = aqt.partition_spec(w0_pspec, (1,), w0_kernel.dtype, use_bias=False)
     if isinstance(w1_kernel, aqt.QTensor):
@@ -811,7 +821,9 @@ class RoutedMoE(nnx.Module):
             w1_pspec,
             wo_pspec,
         ),
-        out_specs=(nn.logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", "activation_embed"))),
+        out_specs=(self.sharding(t="sparse_shard_map",
+                                 a=(batch_logical_axis, "activation_norm_length", "activation_embed"),
+                                 tt=TensorType.Activation)),
         check_rep=False,
     )
     def wrapper(x, logits, pre_bias_logits, w0, w1, wo):

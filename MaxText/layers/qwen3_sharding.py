@@ -2,21 +2,24 @@ from typing import Any
 
 from jax.sharding import PartitionSpec, Mesh
 
-from MaxText.sharding import MeshSharding, TensorType as TT
+from MaxText.sharding import MeshSharding, TensorType as TT, assert_matches_logical_axis_rules
 
 
-# NOTE: differences to Llamna2/3
-#       addition of mlp_output, moe_wi_0, moe_wi_1, moe_wo, gate_logit
-#       we also added ctx_ar_parallel
-#
+# NOTE: very different to llame rules due to many more activation constraints in moe.py
 # TODO: rms_norm or possibly decoder_norm might not be used
+#
 class Qwen3TensorShardingTraining(MeshSharding):
 
   def __call__(self, *args: Any, **kwargs) -> PartitionSpec:
     tensor = kwargs["t"]
-    tensor_type = kwargs["tt"]
-    # FIXME: it's quite likely we have inverted the necessary conditional in several places
+    # when called by MeshSharding.shard this will be set to Activation. otherwise we assume Weight
+    tensor_type = kwargs.get("tensor_type", TT.Weight)
+
+    # TODO: it's quite likely we have inverted the necessary conditional in several places
     ep_as_context = kwargs.get("ep_ctx", False)
+    # TODO: the logic to determine these two bools would ideally live here and not in the caller (moe.py)
+    batch_sharded_by_expert = kwargs.get("batch_sharded_by_expert", False)
+    tensor_transpose = kwargs.get("tensor_transpose", False)
 
     mesh_axes = []
     match tensor, tensor_type:
@@ -179,6 +182,56 @@ class Qwen3TensorShardingTraining(MeshSharding):
           ('sequence', 'context', 'expert'),
           ("tensor", "tensor_transpose")
         )
+      case "sparse_inputs", TT.Weight:
+        if batch_sharded_by_expert:
+          batch_axis = ("data", "fsdp", "fsdp_transpose", "expert")
+        else:
+          batch_axis = ("data", "fsdp", "fsdp_transpose")
+
+        if tensor_transpose:
+          embed_axis = ("tensor", "tensor_transpose")
+        else:
+          embed_axis = None
+
+        mesh_axes = (
+          batch_axis,
+          ('sequence', 'context', 'expert'),
+          embed_axis
+        )
+      case ("sparse_gate_logits" | "sparse_pre_bias_logits"), TT.Weight:
+        if batch_sharded_by_expert:
+          batch_axis = ("data", "fsdp", "fsdp_transpose", "expert")
+        else:
+          batch_axis = ("data", "fsdp", "fsdp_transpose")
+
+        mesh_axes = (
+          batch_axis,
+          ('sequence', 'context', 'expert'),
+          None
+        )
+      case ("sparse_w0" | "sparse_w1"), TT.Weight:
+        mesh_axes = (
+          ("expert",),
+          ("tensor_transpose",),
+          ("tensor", "tensor_sequence", "autoregressive")
+        )
+      case "sparse_wo", TT.Weight:
+        mesh_axes = (
+          ("expert",),
+          ("tensor", "tensor_sequence", "autoregressive"),
+          ("expert",)
+        )
+      case "sparse_shard_map", TT.Activation:
+        if batch_sharded_by_expert:
+          batch_axis = ("data", "fsdp", "fsdp_transpose", "expert")
+        else:
+          batch_axis = ("data", "fsdp", "fsdp_transpose")
+
+        mesh_axes = (
+          batch_axis,
+          ('sequence', 'context', 'expert')
+          ("tensor", "tensor_transpose")
+        )
       case _, _:
         assert False, "Unexpected tensor name for sharding"
 
@@ -189,7 +242,7 @@ class Qwen3AxisShardingTraining(MeshSharding):
 
   def __call__(self, *args: Any, **kwargs) -> PartitionSpec:
     axes = kwargs["a"]
-    tensor_type = kwargs["tt"]
+    tensor_type = kwargs.get("tensor_type", TT.Weight)
 
     mesh_axes = []
     for axis in axes:
@@ -203,13 +256,15 @@ class Qwen3AxisShardingTraining(MeshSharding):
         case "activation_embed", TT.Activation:
           mesh_axes.append(("tensor", "tensor_transpose"))
         case "embed", TT.Weight:
+          # TODO: has multiple rules in current logical axis_rules
           mesh_axes.append(("fsdp", "fsdp_transpose", "sequence", "context", "expert"))
         case "vocab", TT.Weight:
           mesh_axes.append(('tensor', 'tensor_transpose', 'tensor_sequence', 'autoregressive'))
         case "norm", TT.Weight:
           mesh_axes.append(("tensor", "tensor_transpose", "tensor_sequence"))
         case ("activation_length" | "activation_norm_length"), TT.Activation:
-          mesh_axes.append(('sequence', 'context', 'expert'))  # TODO: has multiple rules for activation_length (not norm_length)
+          # TODO: has multiple rules for activation_length (not norm_length)
+          mesh_axes.append(('sequence', 'context', 'expert'))
         case "activation_length_no_exp", TT.Activation:
           mesh_axes.append(('sequence', 'context'))
         case "activation_kv", TT.Activation:
@@ -227,19 +282,86 @@ class Qwen3AxisShardingTraining(MeshSharding):
         case  ("heads" | "q_heads" | "kv_heads"), TT.Weight:
           mesh_axes.append(('tensor', 'tensor_transpose', 'tensor_sequence', 'autoregressive'))
         case ("kv", "kv_head_dim", "qkv", "num_activations"), TT.Weight:
-          mesh_axes.append((None))  # TODO: if this blows up it should have been ()
+          mesh_axes.append((None,))
         case "mlp", TT.Weight:
           mesh_axes.append(("fsdp_transpose", "tensor", "tensor_sequence", "autoregressive"))
         case "exp", TT.Weight:
           mesh_axes.append(("expert",))
         case "embed_no_exp", TT.Weight:
-          # TODO: has multiple rules
+          # TODO: has multiple rules in current logical axis_rules
           mesh_axes.append(('fsdp', 'fsdp_transpose', 'sequence', 'tensor_transpose', 'context'))
         case "activation_exp", TT.Activation:
           mesh_axes.append(('expert',))
         case "activation_mlp", TT.Activation:
           mesh_axes.append(('tensor', 'tensor_transpose', 'tensor_sequence'))
+        case "embed_tensor_transpose", TT.Weight:
+          mesh_axes.append(("tensor_transpose",))
         case _, _:
+          assert False, "Unexpected logical axis name for sharding"
+
+      assert_matches_logical_axis_rules(mesh_axes[-1], axis)
+
+    return PartitionSpec(*mesh_axes)
+
+
+class Qwen3AxisShardingTrainingV2(MeshSharding):
+
+  def __call__(self, *args: Any, **kwargs) -> PartitionSpec:
+    axes = kwargs["a"]
+    tensor_type = kwargs.get("tensor_type", TT.Weight)
+    # TODO: this isn't correct - we need to check:
+    # - whether ep is active
+    # - if it is then whether the tensor is an expert or whether we'll be using the expert axis for something else
+    # - if we'll be using for something else, whether we'll be using it for context or batch
+    ep_as_context = kwargs.get("ep_ctx", False)
+    tensor_transpose, fsdp_transpose = self.config.tensor_transpose, self.config.fsdp_transpose
+
+    mesh_axes = []
+    for axis in axes:
+      match axis, tensor_type, ep_as_context:
+        case "batch", TT.Activation, True:
+          mesh_axes.append(("data", "fsdp", "fsdp_transpose", "expert"))
+        case "batch", TT.Activation, False:
+          mesh_axes.append(('data', 'fsdp', 'fsdp_transpose'))
+        case "embed_and_logits_batch", TT.Activation:
+          mesh_axes.append(('data', 'stage', 'fsdp', 'fsdp_transpose', 'expert'))
+        case "embed", TT.Activation:
+          mesh_axes.append(("tensor", "tensor_transpose"))
+        case "embed", TT.Weight:
+          axis_mappings = ["fsdp", "sequence", "context", "expert"]
+          if tensor_name in ("mlp_wi_fused", "mlp_wi_unfused", "mlp_wo") and tensor_transpose:
+            axis_mappings.append("tensor")
+          mesh_axes.append(tuple(axis_mappings))
+        case "mlp", TT.Weight:
+          axis_mappings = ["tensor", "tensor_sequence", "autoregressive"]
+          if tensor_name in ("mlp_wi_fused", "mlp_wi_unfused", "mlp_wo") and fsdp_transpose:
+            axis_mappings.append("fsdp")
+          mesh_axes.append(tuple(axis_mappings))
+        case "vocab", TT.Weight, _:
+          mesh_axes.append(('tensor', 'tensor_transpose', 'tensor_sequence', 'autoregressive'))
+        case "norm", TT.Weight, _:
+          mesh_axes.append(("tensor", "tensor_transpose", "tensor_sequence"))
+        case ("length" | "norm_length"), TT.Activation, True:
+          mesh_axes.append(('sequence', 'context', 'expert'))
+        case ("length" | "norm_length"), TT.Activation, False:
+          mesh_axes.append(('sequence', 'context'))
+        case "kv", TT.Activation, _:
+          mesh_axes.append(('tensor', 'tensor_transpose', 'tensor_sequence'))
+        case "kv_batch", TT.Activation, True:
+          mesh_axes.append(('data', 'fsdp', 'fsdp_transpose', 'expert'))
+        case "kv_batch", TT.Activation, False:
+          mesh_axes.append(('data', 'fsdp', 'fsdp_transpose')),
+        case "kv_heads", TT.Activation, _:
+          mesh_axes.append(('tensor', 'tensor_transpose', 'sequence','tensor_sequence'))
+        case "kv_head_dim", TT.Activation, _:
+          mesh_axes.append(('tensor', 'tensor_transpose', 'tensor_sequence'))
+        case "heads", TT.Activation, _:
+          mesh_axes.append(('tensor', 'tensor_transpose', 'sequence','tensor_sequence','autoregressive'))
+        case  ("heads" | "q_heads" | "kv_heads"), TT.Weight, _:
+          mesh_axes.append(('tensor', 'tensor_transpose', 'tensor_sequence', 'autoregressive'))
+        case ("kv", "kv_head_dim", "qkv", "num_activations"), TT.Weight, _:
+          mesh_axes.append((None))
+        case _, _, _:
           assert False, "Unexpected logical axis name for sharding"
 
     return PartitionSpec(*mesh_axes)

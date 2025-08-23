@@ -1,16 +1,15 @@
 from typing import Any
 
-from jax.sharding import PartitionSpec, Mesh
+from jax.sharding import PartitionSpec
 
-from MaxText.sharding import MeshSharding, TensorType as TT
-# from MaxText.common_types import MODEL_MODE_PREFILL, MODEL_MODE_TRAIN, MODEL_MODE_AUTOREGRESSIVE
+from MaxText.sharding import MeshSharding, TensorType as TT, assert_matches_logical_axis_rules
 
 
 class Llama2TensorShardingTraining(MeshSharding):
 
   def __call__(self, *args: Any, **kwargs) -> PartitionSpec:
     tensor = kwargs["t"]
-    tensor_type = kwargs["tensor_type"]
+    tensor_type = kwargs.get("tensor_type", TT.Weight)
     # FIXME: it's quite likely we have inverted the necessary conditional in several places
     ep_as_context = kwargs.get("ep_ctx", False)
 
@@ -35,22 +34,23 @@ class Llama2TensorShardingTraining(MeshSharding):
         )
       case ("inputs_q", "inputs_kv"), TT.Activation:
         mesh_axes = (
-          ('data', 'fsdp', 'fsdp_transpose', 'expert') if ep_as_context else ('data', 'fsdp', 'fsdp_transpose'),
+          ('data', 'fsdp', 'fsdp_transpose'),
           # TODO: there are multiple matches for this axis in the current axis_rules. figure out which is correct
           #       (see also bigger note on axis rules, below)
-          ('sequence', 'context') if ep_as_context else ('sequence', 'context', 'expert'),
+          ('sequence', 'context', 'expert'),
           ("tensor", "tensor_transpose")
         )
       case ("query" | "key" | "value"), TT.Activation:
         mesh_axes = (
-          ('data', 'fsdp', 'fsdp_transpose', 'expert') if ep_as_context else ('data', 'fsdp', 'fsdp_transpose'),
+          ('data', 'fsdp', 'fsdp_transpose'),
           ('sequence', 'context') if ep_as_context else ('sequence', 'context', 'expert'),  # TODO: as above
           ('tensor', 'tensor_transpose', 'sequence','tensor_sequence')
           ('tensor', 'tensor_transpose', 'tensor_sequence')
         )
       case "out", TT.Activation:
-        mesh_axes = (("data", "fsdp", "fsdp_transpose", "expert") if ep_as_context else ("data", "fsdp", "fsdp_transpose"),
-          ('sequence', 'context') if ep_as_context else ('sequence', 'context', 'expert'),
+        mesh_axes = (
+          ("data", "fsdp", "fsdp_transpose"),
+          ('sequence', 'context', 'expert'),
           ('tensor', 'tensor_transpose', 'sequence','tensor_sequence','autoregressive'),
           ('tensor', 'tensor_transpose', 'tensor_sequence')
         )
@@ -117,7 +117,7 @@ class Llama2AxisShardingTraining(MeshSharding):
 
   def __call__(self, *args: Any, **kwargs) -> PartitionSpec:
     axes = kwargs["a"]
-    tensor_type = kwargs["tensor_type"]
+    tensor_type = kwargs.get("tensor_type", TT.Weight)
 
     mesh_axes = []
     for axis in axes:
@@ -161,6 +161,8 @@ class Llama2AxisShardingTraining(MeshSharding):
         case _, _:
           assert False, "Unexpected logical axis name for sharding"
 
+      assert_matches_logical_axis_rules(mesh_axes[-1], axis)
+
     return PartitionSpec(*mesh_axes)
 
 
@@ -169,18 +171,19 @@ class Llama2AxisShardingTraining(MeshSharding):
 #       we will need to check cases where
 #
 class Llama2AxisShardingTrainingV2(MeshSharding):
+  def __init__(self, config):
+    self.config = config
 
   def __call__(self, *args: Any, **kwargs) -> PartitionSpec:
     axes = kwargs["a"]
-    tensor_type = kwargs["tensor_type"]
-    ep_as_context = kwargs.get("ep_ctx", False)
+    tensor_name = kwargs["t"]
+    tensor_type = kwargs.get("tensor_type", TT.Weight)
+    tensor_transpose, fsdp_transpose = self.config.tensor_transpose, self.config.fsdp_transpose
 
     mesh_axes = []
     for axis in axes:
-      match axis, tensor_type, ep_as_context:
-        case "batch", TT.Activation, True:
-          mesh_axes.append(("data", "fsdp", "fsdp_transpose", "expert"))
-        case "batch", TT.Activation, False:
+      match axis, tensor_type:
+        case "batch", TT.Activation:
           mesh_axes.append(('data', 'fsdp', 'fsdp_transpose'))
         case "embed_and_logits_batch", TT.Activation:
           mesh_axes.append(('data', 'stage', 'fsdp', 'fsdp_transpose', 'expert'))
@@ -196,29 +199,25 @@ class Llama2AxisShardingTrainingV2(MeshSharding):
           if tensor_name in ("mlp_wi_fused", "mlp_wi_unfused", "mlp_wo") and fsdp_transpose:
             axis_mappings.append("fsdp")
           mesh_axes.append(tuple(axis_mappings))
-        case "vocab", TT.Weight, _:
+        case "vocab", TT.Weight:
           mesh_axes.append(('tensor', 'tensor_transpose', 'tensor_sequence', 'autoregressive'))
-        case "norm", TT.Weight, _:
+        case "norm", TT.Weight:
           mesh_axes.append(("tensor", "tensor_transpose", "tensor_sequence"))
-        case ("length" | "norm_length"), TT.Activation, True:
-          mesh_axes.append(('sequence', 'context', 'expert'))
-        case ("length" | "norm_length"), TT.Activation, False:
+        case ("length" | "norm_length"), TT.Activation:
           mesh_axes.append(('sequence', 'context'))
-        case "kv", TT.Activation, _:
+        case "kv", TT.Activation:
           mesh_axes.append(('tensor', 'tensor_transpose', 'tensor_sequence'))
-        case "kv_batch", TT.Activation, True:
-          mesh_axes.append(('data', 'fsdp', 'fsdp_transpose', 'expert'))
-        case "kv_batch", TT.Activation, False:
+        case "kv_batch", TT.Activation:
           mesh_axes.append(('data', 'fsdp', 'fsdp_transpose')),
-        case "kv_heads", TT.Activation, _:
+        case "kv_heads", TT.Activation:
           mesh_axes.append(('tensor', 'tensor_transpose', 'sequence','tensor_sequence'))
-        case "kv_head_dim", TT.Activation, _:
+        case "kv_head_dim", TT.Activation:
           mesh_axes.append(('tensor', 'tensor_transpose', 'tensor_sequence'))
-        case "heads", TT.Activation, _:
+        case "heads", TT.Activation:
           mesh_axes.append(('tensor', 'tensor_transpose', 'sequence','tensor_sequence','autoregressive'))
-        case  ("heads" | "q_heads" | "kv_heads"), TT.Weight, _:
+        case  ("heads" | "q_heads" | "kv_heads"), TT.Weight:
           mesh_axes.append(('tensor', 'tensor_transpose', 'tensor_sequence', 'autoregressive'))
-        case ("kv", "kv_head_dim", "qkv", "num_activations"), TT.Weight, _:
+        case ("kv", "kv_head_dim", "qkv", "num_activations"), TT.Weight:
           mesh_axes.append((None))
         case _, _, _:
           assert False, "Unexpected logical axis name for sharding"
