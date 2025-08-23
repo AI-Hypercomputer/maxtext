@@ -56,5 +56,8 @@ RUN if [ "$TEST_TYPE" = "xlml" ] || [ "$TEST_TYPE" = "unit_test" ]; then \
       fi; \
     fi
 
+# Change the libtpu version from some nightly to the stable
+RUN pip3 install jax[tpu]==0.6.2
+
 # Run the script available in JAX AI base image to generate the manifest file
 RUN bash /jax-stable-stack/generate_manifest.sh PREFIX=maxtext COMMIT_HASH=$COMMIT_HASH
