@@ -19,11 +19,12 @@ import operator
 from typing import Any, Callable, Iterable, Sequence
 
 import numpy as np
-import jax
-import jax.numpy as jnp
 
 from jax import lax
 from jax.ad_checkpoint import checkpoint_name
+import jax
+import jax._src.sharding_impls
+import jax.numpy as jnp
 
 from flax import nnx
 import flax.linen as nn

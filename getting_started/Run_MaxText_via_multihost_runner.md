@@ -16,7 +16,7 @@
 
 ## Getting Started: `multihost_runner.py` - Quick Experiments on Multiple Hosts (or Multiple Slices)
 
-This workflow using `multihost_runner.py` is optimized for quick experiments, repeatedly re-using the same TPUs. Because the `multihost_runner.py` script depends on long-lived `ssh` connections, we do not recommend it for any long-running jobs.
+This workflow using `multihost_runner.py` is optimized for quick experiments, repeatedly reusing the same TPUs. Because the `multihost_runner.py` script depends on long-lived `ssh` connections, we do not recommend it for any long-running jobs.
 
 We call the `runner` machine the one that `multihost_runner.py` is called from. This script will `ssh` into TPUVM `worker` machines that are found from the `--TPU_PREFIX` flag, and must be different than the runner machine.
 If the runner machine is a cloud VM, it must be in the same project as the workers.
