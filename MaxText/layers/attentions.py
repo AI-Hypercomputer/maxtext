@@ -70,7 +70,7 @@ from MaxText.layers.initializers import nd_dense_init, NdInitializer, variable_t
 from MaxText.layers.linears import DenseGeneral, canonicalize_tuple, normalize_axes
 from MaxText.layers.normalizations import RMSNorm
 from MaxText.layers.quantizations import AqtQuantization as Quant
-from MaxText.sharding import MeshSharding, LogicalAxisRulesSharding, WT, ACT
+from MaxText.sharding import MeshSharding, LogicalAxisRulesSharding
 
 # pylint: disable=line-too-long, g-doc-args, g-doc-return-or-yield, bad-continuation, g-inconsistent-quotes
 # pytype: disable=attribute-error
@@ -846,17 +846,17 @@ class Attention(nnx.Module):
     ep_ctx = self.config.expert_shard_attention_option == EP_AS_CONTEXT
     # TODO: this logic can be moved into sharding when we no longer need to support LogicalAxisRulesSharding
     if model_mode == MODEL_MODE_PREFILL:
-      inputs_q = self.sharding.shard(inputs_q, t="inputs_q", a=self.prefill_input_axis_names, tt=ACT)
-      inputs_kv = self.sharding.shard(inputs_kv, t="inputs_kv", a=self.prefill_input_axis_names, tt=ACT)
+      inputs_q = self.sharding.shard(inputs_q, t="inputs_q", a=self.prefill_input_axis_names)
+      inputs_kv = self.sharding.shard(inputs_kv, t="inputs_kv", a=self.prefill_input_axis_names)
     elif model_mode == MODEL_MODE_TRAIN and ep_ctx:
-      inputs_q = self.sharding.shard(inputs_q, t="inputs_q", a=self.ep_input_axis_names, tt=ACT, ep_ctx=ep_ctx)
-      inputs_kv = self.sharding.shard(inputs_kv, t="inputs_kv", a=self.ep_input_axis_names, tt=ACT, ep_ctx=ep_ctx)
+      inputs_q = self.sharding.shard(inputs_q, t="inputs_q", a=self.ep_input_axis_names, ep_ctx=ep_ctx)
+      inputs_kv = self.sharding.shard(inputs_kv, t="inputs_kv", a=self.ep_input_axis_names, ep_ctx=ep_ctx)
     elif model_mode == MODEL_MODE_TRAIN:
-      inputs_q = self.sharding.shard(inputs_q, t="inputs_q", a=self.input_axis_names, tt=ACT, ep_ctx=ep_ctx)
-      inputs_kv = self.sharding.shard(inputs_kv, t="inputs_kv", a=self.input_axis_names, tt=ACT, ep_ctx=ep_ctx)
+      inputs_q = self.sharding.shard(inputs_q, t="inputs_q", a=self.input_axis_names, ep_ctx=ep_ctx)
+      inputs_kv = self.sharding.shard(inputs_kv, t="inputs_kv", a=self.input_axis_names, ep_ctx=ep_ctx)
     else:
-      inputs_q = self.sharding.shard(inputs_q, t="inputs_q", a=self.decode_input_axis_names, tt=ACT)
-      inputs_kv = self.sharding.shard(inputs_kv, t="inputs_kv", a=self.decode_input_axis_names, tt=ACT)
+      inputs_q = self.sharding.shard(inputs_q, t="inputs_q", a=self.decode_input_axis_names)
+      inputs_kv = self.sharding.shard(inputs_kv, t="inputs_kv", a=self.decode_input_axis_names)
 
     # apply projection.
     if self.config.fused_qkv:
@@ -899,21 +899,21 @@ class Attention(nnx.Module):
 
     # TODO: as above, these can be moved into sharding rules
     if model_mode == MODEL_MODE_PREFILL:
-      query = self.sharding.shard(query, t="query", a=self.prefill_query_axis_names, tt=ACT)
-      key = self.sharding.shard(key, t="key", a=self.prefill_key_axis_names, tt=ACT)
-      value = self.sharding.shard(value, t="value", a=self.prefill_value_axis_names, tt=ACT)
+      query = self.sharding.shard(query, t="query", a=self.prefill_query_axis_names)
+      key = self.sharding.shard(key, t="key", a=self.prefill_key_axis_names)
+      value = self.sharding.shard(value, t="value", a=self.prefill_value_axis_names)
     elif model_mode == MODEL_MODE_TRAIN and ep_ctx:
-      query = self.sharding.shard(query, t="query", a=self.ep_query_axis_names, tt=ACT, ep_ctx=ep_ctx)
-      key = self.sharding.shard(key, t="key", a=self.ep_key_axis_names, tt=ACT, ep_ctx=ep_ctx)
-      value = self.sharding.shard(value, t="value", a=self.ep_value_axis_names, tt=ACT, ep_ctx=ep_ctx)
+      query = self.sharding.shard(query, t="query", a=self.ep_query_axis_names, ep_ctx=ep_ctx)
+      key = self.sharding.shard(key, t="key", a=self.ep_key_axis_names, ep_ctx=ep_ctx)
+      value = self.sharding.shard(value, t="value", a=self.ep_value_axis_names, ep_ctx=ep_ctx)
     elif model_mode == MODEL_MODE_TRAIN:
-      query = self.sharding.shard(query, t="query", a=self.query_axis_names, tt=ACT, ep_ctx=ep_ctx)
-      key = self.sharding.shard(key, t="key", a=self.key_axis_names, tt=ACT, ep_ctx=ep_ctx)
-      value = self.sharding.shard(value, t="value", a=self.value_axis_names, tt=ACT, ep_ctx=ep_ctx)
+      query = self.sharding.shard(query, t="query", a=self.query_axis_names, ep_ctx=ep_ctx)
+      key = self.sharding.shard(key, t="key", a=self.key_axis_names, ep_ctx=ep_ctx)
+      value = self.sharding.shard(value, t="value", a=self.value_axis_names, ep_ctx=ep_ctx)
     else:
-      query = self.sharding.shard(query, t="query", a=(DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV), tt=ACT)
-      key = self.sharding.shard(key, t="key", a=(DECODE_BATCH, DECODE_LENGTH, KV_HEAD, D_KV), tt=ACT)
-      value = self.sharding.shard(value, t="value", a=(DECODE_BATCH, DECODE_LENGTH, KV_HEAD, D_KV), tt=ACT)
+      query = self.sharding.shard(query, t="query", a=(DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV))
+      key = self.sharding.shard(key, t="key", a=(DECODE_BATCH, DECODE_LENGTH, KV_HEAD, D_KV))
+      value = self.sharding.shard(value, t="value", a=(DECODE_BATCH, DECODE_LENGTH, KV_HEAD, D_KV))
 
     query = checkpoint_name(query, "query_proj")
     key = checkpoint_name(key, "key_proj")
@@ -936,13 +936,13 @@ class Attention(nnx.Module):
 
     # TODO: as above, these can be moved into sharding rules
     if model_mode == MODEL_MODE_PREFILL:
-      out = self.sharding.shard(out, t="out", a=self.prefill_out_axis_names, tt=ACT)
+      out = self.sharding.shard(out, t="out", a=self.prefill_out_axis_names)
     elif model_mode == MODEL_MODE_TRAIN and ep_ctx:
-      out = self.sharding.shard(out, t="out", a=self.ep_out_axis_names, tt=ACT, ep_ctx=ep_ctx)
+      out = self.sharding.shard(out, t="out", a=self.ep_out_axis_names, ep_ctx=ep_ctx)
     elif model_mode == MODEL_MODE_TRAIN:
-      out = self.sharding.shard(out, t="out", a=self.out_axis_names, tt=ACT, ep_ctx=ep_ctx)
+      out = self.sharding.shard(out, t="out", a=self.out_axis_names, ep_ctx=ep_ctx)
     else:
-      out = self.sharding.shard(out, t="out", a=self.decode_out_axis_names, tt=ACT)
+      out = self.sharding.shard(out, t="out", a=self.decode_out_axis_names)
 
     out = self.out_projection(out)
     out = checkpoint_name(out, "out_proj")

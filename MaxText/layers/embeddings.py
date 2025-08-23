@@ -29,8 +29,7 @@ from MaxText import max_utils
 from MaxText.common_types import MODEL_MODE_PREFILL, MODEL_MODE_TRAIN, Array, Config, DType
 from MaxText.layers import nnx_wrappers
 from MaxText.layers.initializers import Initializer, default_embed_init, variable_to_logically_partitioned
-from MaxText.sharding import MeshSharding, WT, ACT, LogicalAxisRulesSharding
-from MaxText.layers.llama2_sharding import Llama2TensorShardingTraining, Llama2AxisShardingTraining
+from MaxText.sharding import MeshSharding, LogicalAxisRulesSharding
 
 _MAX_WAVELENGTH = 10_000
 
@@ -136,7 +135,7 @@ class Embed(nnx.Module):
 
     self.embedding = nnx.Param(
         embedding_init(rngs.params(), (self.num_embeddings, self.num_features), self.config.weight_dtype),
-        sharding=self.sharding(t=self.tensor_name, a=("vocab", "embed"), tt=WT),
+        sharding=self.sharding(t=self.tensor_name, a=("vocab", "embed")),
     )
 
 
@@ -167,7 +166,7 @@ class Embed(nnx.Module):
 
     # TODO: this and the conditional can  be deleted when LogicalAxisRulesSharding is no longer needed
     #       (for backwards compatibility with parent modules which still use it, e.g. Mixtral), replaced with
-    #       self.sharding.shard(output, t="embed_output", tt=ACT, mode=model_mode)
+    #       self.sharding.shard(output, t="embed_output", mode=model_mode)
     output_prefill_axis_names = ("activation_embed_and_logits_batch", "prefill_activation_length", "activation_embed")
     output_default_axis_names = ("activation_embed_and_logits_batch", "activation_length", "activation_embed")
 
@@ -176,9 +175,9 @@ class Embed(nnx.Module):
     # return test
 
     if model_mode == MODEL_MODE_PREFILL:
-      output = self.sharding.shard(output, t="embed_output", a=output_prefill_axis_names, tt=ACT)
+      output = self.sharding.shard(output, t="embed_output", a=output_prefill_axis_names)
     else:
-      output = self.sharding.shard(output, t="embed_output", a=output_default_axis_names, tt=ACT)
+      output = self.sharding.shard(output, t="embed_output", a=output_default_axis_names)
     return output
 
   def attend(self, query: Array) -> Array:

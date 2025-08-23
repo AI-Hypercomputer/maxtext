@@ -33,7 +33,7 @@ from MaxText.layers.attentions import attention_as_linen
 from MaxText.layers.quantizations import AqtQuantization as Quant
 from MaxText.layers.normalizations import rms_norm
 from MaxText.common_types import MODEL_MODE_PREFILL
-from MaxText.sharding import create_sharding_rules, ACT
+from MaxText.sharding import create_sharding_rules
 
 
 # -----------------------------------------
@@ -66,13 +66,13 @@ class LlamaDecoderLayer(nn.Module):
     sharding = create_sharding_rules(self.config.sharding_rules)
 
     # FIXME: this logic can be cleaned up when we move off from LogicalAxisRulesSharding after testing, replaced with
-    #       self.sharding.shard(inputs, t="inputs", tt=ACT, mode=model_mode)
+    #       self.sharding.shard(inputs, t="inputs", mode=model_mode)
     if model_mode == MODEL_MODE_PREFILL:
       activation_axis_names = ("activation_batch", "prefill_activation_norm_length", "activation_embed")
     else:
       activation_axis_names = ("activation_batch", "activation_norm_length", "activation_embed")
 
-    inputs = sharding.shard(inputs, t='inputs', a=activation_axis_names, tt=ACT)
+    inputs = sharding.shard(inputs, t='inputs', a=activation_axis_names)
     inputs = checkpoint_name(inputs, "decoder_layer_input")
     lnx_rms = rms_norm(
         num_features=inputs.shape[-1],
@@ -85,7 +85,7 @@ class LlamaDecoderLayer(nn.Module):
     )
     lnx = lnx_rms(inputs)
 
-    lnx = nn.with_logical_constraint(lnx, activation_axis_names)
+    lnx = sharding.shard(lnx, t="lnx", a=activation_axis_names)
 
     # Self-attention block
     attention_layer = attention_as_linen(
@@ -129,7 +129,7 @@ class LlamaDecoderLayer(nn.Module):
         previous_chunk=previous_chunk,
     )
 
-    attention_lnx = sharding.shard(attention_lnx, t="attn_lnx", a=activation_axis_names, tt=ACT)
+    attention_lnx = sharding.shard(attention_lnx, t="attn_lnx", a=activation_axis_names)
     intermediate_inputs = inputs + attention_lnx
 
     # Fully Connected
@@ -142,7 +142,7 @@ class LlamaDecoderLayer(nn.Module):
         epsilon=cfg.normalization_layer_epsilon,
         sharding=sharding,
     )(intermediate_inputs)
-    hidden_states = sharding.shard(hidden_states, t="hidden", a=activation_axis_names, tt=ACT)
+    hidden_states = sharding.shard(hidden_states, t="hidden", a=activation_axis_names)
 
     # MLP block.
     mlp_lnx = mlp_block(
@@ -158,11 +158,11 @@ class LlamaDecoderLayer(nn.Module):
         model_mode=model_mode,
         sharding = sharding,
     )(hidden_states, deterministic=deterministic)
-    mlp_lnx = sharding.shard(mlp_lnx, t="mlp_lnx", a=activation_axis_names, tt=ACT)
+    mlp_lnx = sharding.shard(mlp_lnx, t="mlp_lnx", a=activation_axis_names)
 
     layer_output = mlp_lnx + intermediate_inputs
     layer_output = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(layer_output, deterministic=deterministic)
-    layer_output = sharding.shard(layer_output, t="layer_output", a=activation_axis_names, tt=ACT)
+    layer_output = sharding.shard(layer_output, t="layer_output", a=activation_axis_names)
 
     if cfg.record_internal_nn_metrics:
       self.sow("intermediates", "activation_mean", jnp.mean(layer_output))

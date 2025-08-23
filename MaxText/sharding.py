@@ -27,13 +27,9 @@ class Axis(enum.Enum):
 
 
 class TensorType(enum.Enum):
-  ACT = "activation"
-  WT = "weight"
-  CACHE = "cache"
-
-# NOTE: these can be used a convenience when calling __call__ or shard but should **not** be used in the case statement
-# of a match expression (where they will be considered a capture pattern and not a constant)
-ACT, WT, CACHE = TensorType
+  Activation = "activation"
+  Weight = "weight"
+  Cache = "cache"
 
 
 def create_mesh(axes: Dict[Axis, int]) -> Mesh:
@@ -72,6 +68,7 @@ class MeshSharding(ABC):
     if not mesh.devices.shape:
       return tensor
 
+    kwargs["tensor_type"] = TensorType.Activation
     shardings = self(*args, **kwargs)
     with mesh:
       return jax.lax.with_sharding_constraint(tensor, shardings)

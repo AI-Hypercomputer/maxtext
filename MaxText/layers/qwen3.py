@@ -33,6 +33,7 @@ from MaxText.layers import quantizations
 from MaxText.layers.normalizations import rms_norm
 from MaxText.layers.quantizations import AqtQuantization as Quant
 from MaxText.inference import page_manager
+from MaxText.sharding import create_sharding_rules, MeshSharding
 
 # -----------------------------------------
 # Helper functions for Qwen3 layers
@@ -48,6 +49,7 @@ def self_attention_with_norm(
     decoder_positions: Optional[jnp.ndarray],
     deterministic: bool,
     model_mode: str,
+    sharding: MeshSharding,
 ):
   """A helper function for self-attention block with normalization."""
 
@@ -61,8 +63,9 @@ def self_attention_with_norm(
       name="pre_self_attention_layer_norm",
       epsilon=cfg.normalization_layer_epsilon,
       kernel_axes=("norm",),
+      sharding=sharding,
   )(inputs_checkpoint)
-  lnx = nn.with_logical_constraint(lnx, ("activation_batch", "activation_length", "activation_embed"))
+  lnx = sharding.shard(lnx, t="lnx", a=("activation_batch", "activation_length", "activation_embed"))
 
   # Self-attention block
   attention_layer = attentions.attention_as_linen(
@@ -85,9 +88,10 @@ def self_attention_with_norm(
       use_qk_norm=cfg.use_qk_norm,
       query_pre_attn_scalar=(cfg.head_dim**-0.5),  # Qwen3 specific scaling
       model_mode=model_mode,
+      sharding=sharding,
   )
 
-  attention_output = attention_layer(
+  attn_output = attention_layer(
       lnx,  # inputs_q
       lnx,  # inputs_kv
       decoder_positions,
@@ -95,25 +99,24 @@ def self_attention_with_norm(
       deterministic=deterministic,
       model_mode=model_mode,
   )
-  attention_output = nn.with_logical_constraint(
-      attention_output, ("activation_batch", "activation_length", "activation_embed")
-  )
+  attn_output = sharding.shard(t="attn_lnx", a=("activation_batch", "activation_length", "activation_embed"))
 
   # Residual connection after attention
-  residual_after_attention = inputs_checkpoint + attention_output
+  residual_after_attention = inputs_checkpoint + attn_output
 
   # Post Attention LayerNorm (corresponds to Qwen3's `post_attention_layernorm`)
-  hidden_states = rms_norm(
+  hidden = rms_norm(
       num_features=residual_after_attention.shape[-1],
       dtype=cfg.dtype,
       weight_dtype=cfg.weight_dtype,
       name="post_self_attention_layer_norm",
       epsilon=cfg.normalization_layer_epsilon,
       kernel_axes=("norm",),
+      sharding=sharding,
   )(residual_after_attention)
-  hidden_states = nn.with_logical_constraint(hidden_states, ("activation_batch", "activation_length", "activation_embed"))
+  hidden = sharding.shard(hidden, t="mlp_lnx", a=("activation_batch", "activation_length", "activation_embed"))
 
-  return hidden_states, residual_after_attention
+  return hidden, residual_after_attention
 
 
 # -----------------------------------------
@@ -140,6 +143,7 @@ class Qwen3DecoderLayer(nn.Module):
       slot: Optional[int] = None,
   ):
     cfg = self.config
+    sharding = create_sharding_rules(cfg.sharding_rules)
 
     hidden_states, residual_after_attention = self_attention_with_norm(
         inputs,
@@ -150,6 +154,7 @@ class Qwen3DecoderLayer(nn.Module):
         decoder_positions,
         deterministic,
         model_mode,
+        sharding,
     )
 
     # Dense MLP block
@@ -163,13 +168,13 @@ class Qwen3DecoderLayer(nn.Module):
         name="mlp",
         config=cfg,
         quant=self.quant,
+        sharding=sharding,
     )(hidden_states, deterministic=deterministic)
 
     # Final residual connection
     layer_output = residual_after_attention + mlp_output
-    layer_output = nn.with_logical_constraint(
-        layer_output,
-        ("activation_batch", "activation_length", "activation_embed"),
+    layer_output = sharding.shard(
+      layer_output, t="layer_output", a=("activation_batch", "activation_length", "activation_embed"),
     )
 
     if cfg.scan_layers:
@@ -202,6 +207,7 @@ class Qwen3MoeDecoderLayer(nn.Module):
       slot: Optional[int] = None,
   ):
     cfg = self.config
+    sharding = create_sharding_rules(cfg.sharding_rules)
 
     hidden_states, residual_after_attention = self_attention_with_norm(
         inputs,
@@ -212,6 +218,7 @@ class Qwen3MoeDecoderLayer(nn.Module):
         decoder_positions,
         deterministic,
         model_mode,
+        sharding,
     )
 
     # Mixture of Experts block
@@ -232,13 +239,14 @@ class Qwen3MoeDecoderLayer(nn.Module):
     if load_balance_loss is not None:
       self.sow("intermediates", "moe_lb_loss", load_balance_loss)
 
-    mlp_output = nn.with_logical_constraint(mlp_output, ("activation_batch", "activation_length", "activation_embed"))
+    mlp_output = sharding.shard(
+      mlp_output, t="mlp_output", a=("activation_batch", "activation_length", "activation_embed")
+    )
 
     # Final residual connection
     layer_output = residual_after_attention + mlp_output
-    layer_output = nn.with_logical_constraint(
-        layer_output,
-        ("activation_batch", "activation_length", "activation_embed"),
+    layer_output = sharding.shard(
+      layer_output, t="layer_output", a=("activation_batch", "activation_length", "activation_embed")
     )
 
     if cfg.scan_layers:

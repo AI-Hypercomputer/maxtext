@@ -3,14 +3,18 @@ from typing import Any
 from jax.sharding import PartitionSpec, Mesh
 
 from MaxText.sharding import MeshSharding, TensorType as TT
-# from MaxText.common_types import MODEL_MODE_PREFILL, MODEL_MODE_TRAIN, MODEL_MODE_AUTOREGRESSIVE
 
 
-class Llama2TensorShardingTraining(MeshSharding):
+# NOTE: differences to Llamna2/3
+#       addition of mlp_output, moe_wi_0, moe_wi_1, moe_wo, gate_logit
+#       we also added ctx_ar_parallel
+#
+# TODO: rms_norm or possibly decoder_norm might not be used
+class Qwen3TensorShardingTraining(MeshSharding):
 
   def __call__(self, *args: Any, **kwargs) -> PartitionSpec:
     tensor = kwargs["t"]
-    tensor_type = kwargs["tensor_type"]
+    tensor_type = kwargs["tt"]
     # FIXME: it's quite likely we have inverted the necessary conditional in several places
     ep_as_context = kwargs.get("ep_ctx", False)
 
@@ -74,7 +78,7 @@ class Llama2TensorShardingTraining(MeshSharding):
         )
       case "mlp_pre_norm", TT.Weight:
         mesh_axes = ("tensor", "tensor_transpose", "tensor_sequence")
-      case ("inputs" | "lnx", "attn_lnx" | "mlp_lnx" | "mlp_pre_norm" | "layer_output" | "hidden"), TT.Activation:
+      case ("inputs" | "lnx", "attn_lnx" | "mlp_lnx" | "mlp_pre_norm" | "layer_output" | "hidden" | "mlp_output"), TT.Activation:
         mesh_axes = (
             ("data", "fsdp", "fsdp_transpose", "expert"),
             ("tensor_sequence", "context", "sequence"),
@@ -83,7 +87,7 @@ class Llama2TensorShardingTraining(MeshSharding):
       case "mlp_wi_fused", TT.Weight:
         mesh_axes = (
             ("fsdp", "fsdp_transpose", "sequence", "tensor_transpose", "context", "expert"),
-            (None),
+            None,
             ("fsdp_transpose", "tensor", "tensor_sequence", "autoregressive"),
         )
       case ("mlp_wi_unfused" | "mlp_wo"), TT.Weight:
@@ -91,33 +95,101 @@ class Llama2TensorShardingTraining(MeshSharding):
             ("fsdp", "fsdp_transpose", "sequence", "tensor_transpose", "context", "expert"),
             ("fsdp_transpose", "tensor", "tensor_sequence", "autoregressive"),
         )
-      case "mlp_wo", TT.Weight:
+      case "gate_logit", TT.Weight:
         mesh_axes = (
-            ("fsdp_transpose", "tensor", "tensor_sequence", "autoregressive"),
-            ("fsdp", "fsdp_transpose", "sequence", "tensor_transpose", "context", "expert"),
+          ("fsdp", "fsdp_transpose", "sequence", "context", "expert"),
+          (None)
+        )
+      case ("moe_wi_0" | "moe_wi_1"), TT.Weight:
+        mesh_axes = (
+          ("expert",),
+          ('fsdp', 'fsdp_transpose', 'sequence', 'tensor_transpose', 'context'),
+          ("fsdp_transpose", "tensor", "tensor_sequence", "autoregressive")
+        )
+      case "moe_wo", TT.Weight:
+        mesh_axes = (
+          (("expert",),
+          ("fsdp_transpose", "tensor", "tensor_sequence", "autoregressive"),
+          ('fsdp', 'fsdp_transpose', 'sequence', 'tensor_transpose', 'context'))
+        )
+      case "expert_mask_fused", TT.Activation:
+        mesh_axes = (
+          ("data", "fsdp", "fsdp_transpose", "expert"),
+          None,
+          None,
+          None,
+        )
+      case "expert_token_count", TT.Activation:
+        mesh_axes = (
+          ("data", "fsdp", "fsdp_transpose", "expert"),
+          ('sequence', 'context', 'expert'),
+          None,
+          None,
+          None,
+        ),
+      case ("w0_kernel" | "w1_kernel"), TT.Weight:
+        mesh_axes = (
+          ('expert',),
+          None,
+          ("fsdp_transpose", "tensor", "tensor_sequence", "autoregressive"),
+        )
+      case "wo_kernel", TT.Activation:
+        mesh_axes = (
+          ('expert',),
+          ("fsdp_transpose", "tensor", "tensor_sequence", "autoregressive"),
+          None,
+        )
+      case ("gate_logits" | "pre_bias_logits"), TT.Activation:
+        mesh_axes = (
+          ("data", "fsdp", "fsdp_transpose", "expert"),
+          ('sequence', 'context', 'expert'),
+          None,
+        )
+      case ("dispatch_mask" | "combine_mask"), TT.Activation:
+        mesh_axes = (
+          ("data", "fsdp", "fsdp_transpose", "expert"),
+          ('sequence', 'context', 'expert'),
+          None,
+          None,
+        )
+      case "dispatch", TT.Activation:
+        mesh_axes = (
+          ('expert',),
+          ('data', 'fsdp', 'fsdp_transpose'),
+          None,
+         ("tensor", "tensor_transpose")
+        )
+      case ("layer_w0" | "layer_w1"), TT.Activation:
+        mesh_axes = (
+          ('expert',),
+          ('data', 'fsdp', 'fsdp_transpose'),
+          None,
+          ('tensor', 'tensor_transpose', 'tensor_sequence')
+        )
+      case "intermediate_layer", TT.Activation:
+        mesh_axes = (
+          ('expert',),
+          ('data', 'fsdp', 'fsdp_transpose'),
+          None,
+          ("tensor", "tensor_transpose"),
+        )
+      case "no_cap_inputs", TT.Activation:
+        mesh_axes = (
+          ("data", "fsdp", "fsdp_transpose", "expert"),
+          ('sequence', 'context', 'expert'),
+          ("tensor", "tensor_transpose")
         )
       case _, _:
         assert False, "Unexpected tensor name for sharding"
 
     return PartitionSpec(*mesh_axes)
 
-
-# NOTE: in current logical_axis_rules, embed has multiple mappings and the first is:
-# ("fsdp", "fsdp_transpose", "sequence", "tensor_transpose", "context", "expert") which is not what we return here.
-# The reason is that in Llama the embed axis (only) shares a tensor with the vocab axis and -- as below -- that uses
-# tensor_transpose, which means the mapping we return is not the first mapping from the current axis rules (above) but
-# is the mapping that is chosen. We are therefore able to replicate this behavior easily here but we would have an issue
-# if the embed axis also appeared on another tensor where e.g. tensor_transpose was **not** already taken
-# in which case we could only choose the correct mapping by also including the name of the tensor, or by
-# minicking the behavior of the logical_axis_rules implementation (e.g. storing already matches axes in a set)
-#
-# TODO: when creating a clean version take a param for expert abuse
-#
-class Llama2AxisShardingTraining(MeshSharding):
+# As Llama3 but plus exp and embed_no_exp, activation_exp and activation_mlp
+class Qwen3AxisShardingTraining(MeshSharding):
 
   def __call__(self, *args: Any, **kwargs) -> PartitionSpec:
     axes = kwargs["a"]
-    tensor_type = kwargs["tensor_type"]
+    tensor_type = kwargs["tt"]
 
     mesh_axes = []
     for axis in axes:
@@ -137,7 +209,7 @@ class Llama2AxisShardingTraining(MeshSharding):
         case "norm", TT.Weight:
           mesh_axes.append(("tensor", "tensor_transpose", "tensor_sequence"))
         case ("activation_length" | "activation_norm_length"), TT.Activation:
-          mesh_axes.append(('sequence', 'context', 'expert'))  # but has multiple rules
+          mesh_axes.append(('sequence', 'context', 'expert'))  # TODO: has multiple rules for activation_length (not norm_length)
         case "activation_length_no_exp", TT.Activation:
           mesh_axes.append(('sequence', 'context'))
         case "activation_kv", TT.Activation:
@@ -158,69 +230,16 @@ class Llama2AxisShardingTraining(MeshSharding):
           mesh_axes.append((None))  # TODO: if this blows up it should have been ()
         case "mlp", TT.Weight:
           mesh_axes.append(("fsdp_transpose", "tensor", "tensor_sequence", "autoregressive"))
+        case "exp", TT.Weight:
+          mesh_axes.append(("expert",))
+        case "embed_no_exp", TT.Weight:
+          # TODO: has multiple rules
+          mesh_axes.append(('fsdp', 'fsdp_transpose', 'sequence', 'tensor_transpose', 'context'))
+        case "activation_exp", TT.Activation:
+          mesh_axes.append(('expert',))
+        case "activation_mlp", TT.Activation:
+          mesh_axes.append(('tensor', 'tensor_transpose', 'tensor_sequence'))
         case _, _:
-          assert False, "Unexpected logical axis name for sharding"
-
-    return PartitionSpec(*mesh_axes)
-
-
-# NOTE: this is a potential target state of rules but we do not yet use it, as it's not
-#       backwards-compatible with current logical_axis_rules (since we've changed axis names)
-#       we will need to check cases where
-#
-class Llama2AxisShardingTrainingV2(MeshSharding):
-
-  def __call__(self, *args: Any, **kwargs) -> PartitionSpec:
-    axes = kwargs["a"]
-    tensor_type = kwargs["tensor_type"]
-    ep_as_context = kwargs.get("ep_ctx", False)
-
-    mesh_axes = []
-    for axis in axes:
-      match axis, tensor_type, ep_as_context:
-        case "batch", TT.Activation, True:
-          mesh_axes.append(("data", "fsdp", "fsdp_transpose", "expert"))
-        case "batch", TT.Activation, False:
-          mesh_axes.append(('data', 'fsdp', 'fsdp_transpose'))
-        case "embed_and_logits_batch", TT.Activation:
-          mesh_axes.append(('data', 'stage', 'fsdp', 'fsdp_transpose', 'expert'))
-        case "embed", TT.Activation:
-          mesh_axes.append(("tensor", "tensor_transpose"))
-        case "embed", TT.Weight:
-          axis_mappings = ["fsdp", "sequence", "context", "expert"]
-          if tensor_name in ("mlp_wi_fused", "mlp_wi_unfused", "mlp_wo") and tensor_transpose:
-            axis_mappings.append("tensor")
-          mesh_axes.append(tuple(axis_mappings))
-        case "mlp", TT.Weight:
-          axis_mappings = ["tensor", "tensor_sequence", "autoregressive"]
-          if tensor_name in ("mlp_wi_fused", "mlp_wi_unfused", "mlp_wo") and fsdp_transpose:
-            axis_mappings.append("fsdp")
-          mesh_axes.append(tuple(axis_mappings))
-        case "vocab", TT.Weight, _:
-          mesh_axes.append(('tensor', 'tensor_transpose', 'tensor_sequence', 'autoregressive'))
-        case "norm", TT.Weight, _:
-          mesh_axes.append(("tensor", "tensor_transpose", "tensor_sequence"))
-        case ("length" | "norm_length"), TT.Activation, True:
-          mesh_axes.append(('sequence', 'context', 'expert'))
-        case ("length" | "norm_length"), TT.Activation, False:
-          mesh_axes.append(('sequence', 'context'))
-        case "kv", TT.Activation, _:
-          mesh_axes.append(('tensor', 'tensor_transpose', 'tensor_sequence'))
-        case "kv_batch", TT.Activation, True:
-          mesh_axes.append(('data', 'fsdp', 'fsdp_transpose', 'expert'))
-        case "kv_batch", TT.Activation, False:
-          mesh_axes.append(('data', 'fsdp', 'fsdp_transpose')),
-        case "kv_heads", TT.Activation, _:
-          mesh_axes.append(('tensor', 'tensor_transpose', 'sequence','tensor_sequence'))
-        case "kv_head_dim", TT.Activation, _:
-          mesh_axes.append(('tensor', 'tensor_transpose', 'tensor_sequence'))
-        case "heads", TT.Activation, _:
-          mesh_axes.append(('tensor', 'tensor_transpose', 'sequence','tensor_sequence','autoregressive'))
-        case  ("heads" | "q_heads" | "kv_heads"), TT.Weight, _:
-          mesh_axes.append(('tensor', 'tensor_transpose', 'tensor_sequence', 'autoregressive'))
-        case ("kv", "kv_head_dim", "qkv", "num_activations"), TT.Weight, _:
-          mesh_axes.append((None))
-        case _, _, _:
           assert False, "Unexpected logical axis name for sharding"
 
     return PartitionSpec(*mesh_axes)

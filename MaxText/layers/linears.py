@@ -36,7 +36,7 @@ from MaxText.layers import nnx_wrappers, quantizations
 from MaxText.layers import normalizations
 from MaxText.layers.initializers import NdInitializer, nd_dense_init, default_bias_init, variable_to_logically_partitioned
 from MaxText.layers.quantizations import AqtQuantization as Quant
-from MaxText.sharding import MeshSharding, LogicalAxisRulesSharding, ACT, WT
+from MaxText.sharding import MeshSharding, LogicalAxisRulesSharding
 
 
 def _convert_to_activation_function(fn_or_string: Union[str, Callable[..., Any]]) -> Callable[..., Any]:
@@ -161,7 +161,7 @@ class DenseGeneral(nnx.Module):
               kernel_in_axis,
               kernel_out_axis,
           ),
-          sharding=self.sharding(t=self.tensor_name, a=self.kernel_axes, tt=WT),
+          sharding=self.sharding(t=self.tensor_name, a=self.kernel_axes),
       )
 
     if self.use_bias:
@@ -169,7 +169,7 @@ class DenseGeneral(nnx.Module):
       bias_shape = kernel_shape[-len(self.out_features_shape) :]
       self.bias = nnx.Param(
           default_bias_init(rngs.params(), bias_shape, self.weight_dtype),
-          sharding=self.sharding(t=f"{self.tensor_name}_bias", a=bias_axes, tt=WT),
+          sharding=self.sharding(t=f"{self.tensor_name}_bias", a=bias_axes),
       )
     else:
       self.bias = None
@@ -253,7 +253,7 @@ def dense_general(
     matmul_precision: str = "default",
     parameter_memory_host_offload: bool = False,
     name: Optional[str] = None,
-    sharding: MeshSharding | None = LogicalAxisRulesSharding(),
+    sharding: MeshSharding = LogicalAxisRulesSharding(),
 ):
   """Creates a DenseGeneral Linen module using nnx.bridge.to_linen.
 
@@ -359,7 +359,7 @@ class MlpBlock(nnx.Module):
       self.mlp_layer_norm = self.get_norm_layer(num_features=in_features)(
           dtype=config.dtype,
           weight_dtype=config.weight_dtype,
-          kernel_axes=self.sharding(t="mlp_pre_norm", a="norm", tt=WT),
+          kernel_axes=self.sharding(t="mlp_pre_norm", a="norm"),
           epsilon=config.normalization_layer_epsilon,
           rngs=rngs,
       )
@@ -477,7 +477,7 @@ class MlpBlock(nnx.Module):
       axes = ("activation_batch", "prefill_activation_length", "activation_mlp")
     else:
       axes = ("activation_batch", "activation_length", "activation_mlp")
-    self.sharding.shard(x, t="mlp_pre_out", a=axes, tt=ACT)
+    self.sharding.shard(x, t="mlp_pre_out", a=axes)
 
     output = self.wo(x)
     output = checkpoint_name(output, "mlpwo")

@@ -26,7 +26,7 @@ from MaxText import max_logging
 from MaxText import max_utils
 from MaxText.layers import nnx_wrappers
 from MaxText.layers.initializers import Initializer, variable_to_logically_partitioned
-from MaxText.sharding import MeshSharding, LogicalAxisRulesSharding, WT
+from MaxText.sharding import MeshSharding, LogicalAxisRulesSharding
 
 
 class RMSNorm(nnx.Module):
@@ -60,7 +60,7 @@ class RMSNorm(nnx.Module):
         # TODO: per linears.py it's probably better to extend kernel_axes to be a partition spec and have this
         #       sharding call happen in the caller
         scale_init(rngs.params(), (num_features,), weight_dtype),
-        sharding=self.sharding(t=self.tensor_name, a=kernel_axes, tt=WT),
+        sharding=self.sharding(t=self.tensor_name, a=kernel_axes),
     )
 
   def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
