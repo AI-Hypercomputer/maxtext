@@ -34,6 +34,7 @@ The main conversion script uses these mappings to systematically transform each
 parameter from the source checkpoint and build the target checkpoint.
 """
 
+import warnings
 import numpy as np
 
 import jax
@@ -181,8 +182,10 @@ def GEMMA3_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, scan_layers=False, saving_to_hf=F
 
     # Handle padding/truncation
     if source_vocab_size > target_vocab_size:
+      warnings.warn(f"source vocab={source_vocab_size} > target vocab={target_vocab_size}, truncate output layer for MaxText.")
       output_tensor = scaled_tensor[:target_vocab_size, :]
     elif source_vocab_size < target_vocab_size:
+      warnings.warn(f"source vocab={source_vocab_size} < target vocab={target_vocab_size}, pad output layer for MaxText.")
       padding_shape = (target_vocab_size - source_vocab_size, target_hidden_size)
       # Use jnp.zeros for JAX arrays, np.zeros for numpy arrays
       padding = (
