@@ -27,3 +27,4 @@ logits_via_embedding: False
 normalization_layer_epsilon: 1.0e-5
 decoder_block: "llama2"
 # logical_axis_rules: [['norm', 'fsdp']]
+sharding_rules: "MaxText.layers.llama2_sharding.Llama2ShardingTraining"

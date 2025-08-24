@@ -99,7 +99,7 @@ def self_attention_with_norm(
       deterministic=deterministic,
       model_mode=model_mode,
   )
-  attn_output = sharding.shard(t="attn_lnx", a=("activation_batch", "activation_length", "activation_embed"))
+  attn_output = sharding.shard(attn_output, t="attn_lnx", a=("activation_batch", "activation_length", "activation_embed"))
 
   # Residual connection after attention
   residual_after_attention = inputs_checkpoint + attn_output

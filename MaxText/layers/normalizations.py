@@ -57,8 +57,6 @@ class RMSNorm(nnx.Module):
     self.sharding = sharding if sharding else LogicalAxisRulesSharding()
 
     self.scale = nnx.Param(
-        # TODO: per linears.py it's probably better to extend kernel_axes to be a partition spec and have this
-        #       sharding call happen in the caller
         scale_init(rngs.params(), (num_features,), weight_dtype),
         sharding=self.sharding(t=self.tensor_name, a=kernel_axes),
     )
