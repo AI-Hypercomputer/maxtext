@@ -120,7 +120,7 @@ def generate_offline_completions(config, tokenizer_model, inference_engine, data
   for i, d in enumerate(data[config.train_data_columns]):
     input_data.append(
         InputData(
-            id=f"input_{i}",
+            id=i,
             tokens=np.array(d),
             true_length=np.array(data[f"{config.train_data_columns}_true_length"][i])[0],
         )

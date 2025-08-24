@@ -607,6 +607,7 @@ class InferenceWorker:
       # Generate next tokens
       self.decode_state, result_tokens, log_prob = self._jitted_generate_fn(self.params, self.decode_state, self.rng)
       # Add token to detokenization queue
+      '''
       start_time = time.time()
       with jax.profiler.TraceAnnotation("convert_to_numpy"):
         result_tokens = np.array(result_tokens)
@@ -614,7 +615,7 @@ class InferenceWorker:
 
       if self.debug:
         max_logging.log(f"Inference worker: convert to numpy " f"in Decode in {time.time() - start_time} seconds")
-
+      '''
       buffer.append((result_tokens, log_prob))
 
     # Add results to detokenization queue
@@ -654,7 +655,7 @@ class InferenceWorker:
         if not self.running:
           break
         continue
-
+      breakpoint()
       # Process generated tokens
       start_time = time.time()
       if is_first_token:
