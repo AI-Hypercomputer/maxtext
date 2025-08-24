@@ -819,10 +819,10 @@ def get_successive_pipelines(config, remat_policy, mesh, pipeline_stage_module, 
       },
       split_rngs={
           "params": True,
-          "dropout": cfg.enable_dropout,
+          "dropout": config.enable_dropout,
       },
       in_axes=in_axes_tuple,
-      length=cfg.num_successive_pipelines,
+      length=config.num_successive_pipelines,
       metadata_params={nn.PARTITION_NAME: "successive_pipelines"},
   )
   initialized_scan = scan_fn(config=config, mesh=mesh, layers=pipeline_stage_module, remat_policy=None)

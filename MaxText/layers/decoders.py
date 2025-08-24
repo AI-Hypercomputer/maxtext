@@ -258,19 +258,20 @@ class Decoder(nn.Module):
   def initialize_pipeline_module(self):
     remat_policy = self.get_remat_policy()
     pipeline_stage_module = self.get_pipeline_stage_module(self.decoder_layer)
-    rematted_pipeline = nn.remat(
-      pipeline.Pipeline,
-      prevent_cse=False, # This will get scanned
-      policy=remat_policy,
-      static_argnums=(4, 5, 6),  # Deterministic, model mode, and sharding_specs are static arguments.
-    )
     if self.config.num_successive_pipelines > 1:
       initializing = self.is_mutable_collection("params")
-      self.pp_initialized_scan = pipeline.get_successive_pipelines(self.config, remat_policy, self.mesh, pipeline_stage_module, initializing)
-    pipeline_module = rematted_pipeline(
+      self.pipeline_module = pipeline.get_successive_pipelines(self.config, remat_policy, self.mesh, pipeline_stage_module, initializing)
+    else:
+      rematted_pipeline = nn.remat(
+        pipeline.Pipeline,
+        prevent_cse=False, # This will get scanned
+        policy=remat_policy,
+        static_argnums=(4, 5, 6),  # Deterministic, model mode, and sharding_specs are static arguments.
+      )
+      self.pipeline_module = rematted_pipeline(
         config=self.config, mesh=self.mesh, layers=pipeline_stage_module, remat_policy=remat_policy
       )
-    self.pipeline_module = pipeline_module # rawr to both support old and also get partition spec for both
+    self.pipeline_module_for_sharding = pipeline.Pipeline(config=self.config, mesh=self.mesh, layers=pipeline_stage_module, remat_policy=remat_policy)
 
   def get_remat_policy(self):
     """Get remat policy"""
@@ -635,7 +636,7 @@ class Decoder(nn.Module):
     )
     if cfg.using_pipeline_parallelism:
       if cfg.pipeline_fsdp_ag_once:
-        partition_spec = self.pipeline_module.get_weight_sharding(
+        partition_spec = self.pipeline_module_for_sharding.get_weight_sharding(
             y, decoder_segment_ids, decoder_positions, deterministic, model_mode, None
         )
       else:
@@ -668,11 +669,11 @@ class Decoder(nn.Module):
                 in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
                 model_mode=model_mode,
             )(y, *broadcast_args)
-        y, _ = self.pp_initialized_scan(y, *broadcast_args, partition_spec) # TODO: support 1 or two outputs
+        y, _ = self.pipeline_module(y, *broadcast_args, partition_spec) # TODO: support 1 or two outputs
         
       else:  # Not DeepSeek
         #y = self.pipeline_module(y, *broadcast_args, partition_spec=partition_spec) # TODO- maintain support for both?
-        y, _ = self.pp_initialized_scan(y, *broadcast_args, partition_spec)
+        y, _ = self.pipeline_module(y, *broadcast_args, partition_spec)
         remaining_layers = self.config.num_decoder_layers - self.config.pipeline_parallel_layers
         if remaining_layers > 0:
           logical_axis_rules_pp_as_dp = maxtext_utils.logical_axis_rules_pp_act_as_dp(self.config.logical_axis_rules)
