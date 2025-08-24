@@ -794,3 +794,36 @@ class Pipeline(nn.Module):
       return final_output, None
     else:
       return final_output
+
+def get_successive_pipelines(config, remat_policy, mesh, pipeline_stage_module, initializing):
+  """Return a scanned set of pipelines."""
+
+  rematted_pipeline = nn.remat(
+      Pipeline,
+      prevent_cse=False, # This will get scanned
+      policy=remat_policy,
+      static_argnums=(4, 5, 6),  # Deterministic, model mode, and sharding_specs are static arguments.
+  )
+
+  in_axes_tuple = (nn.broadcast,) * 5
+  params_spec = config.param_scan_axis if initializing else nn.partitioning.ScanIn(config.param_scan_axis)
+  cache_spec = 0
+  scan_fn = nn.scan(
+      rematted_pipeline, #pipeline_module,
+      variable_axes={
+          "params": params_spec,
+          "cache": cache_spec,
+          "intermediates": 0,
+          "aqt": 0,
+          "_overwrite_with_gradient": 0,
+      },
+      split_rngs={
+          "params": True,
+          "dropout": cfg.enable_dropout,
+      },
+      in_axes=in_axes_tuple,
+      length=cfg.num_successive_pipelines,
+      metadata_params={nn.PARTITION_NAME: "successive_pipelines"},
+  )
+  initialized_scan = scan_fn(config=config, mesh=mesh, layers=pipeline_stage_module, remat_policy=None)
+  return initialized_scan

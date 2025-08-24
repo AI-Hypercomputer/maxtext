@@ -202,7 +202,7 @@ inhomogeneous_layer_cycle_interval: 1
 num_layers_per_pipeline_stage: 1
 # To save memory, you can run "successive" pipelines (e.g. a pipeline that runs layers 1-8, followed by another that runs layer 9-16).
 # The weights only need to be all-gathered for one pipeline at a time. This feature is generally needed when running large models with only
-# a mix of FSDP and PP in conjunction with pipeline_fsdp_ag_once=True (see below for description)
+# a mix of FSDP and PP in conjunction with pipeline_fsdp_ag_once=True.
 num_successive_pipelines: 1
 # By default number of repeats will be set to num_decoder_layers / (num_pipeline_stages * num_layers_per_pipeline_stage * num_successive_pipelines)
 num_pipeline_repeats: -1
