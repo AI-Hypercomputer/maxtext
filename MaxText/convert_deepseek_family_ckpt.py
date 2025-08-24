@@ -18,8 +18,8 @@ This script now includes support for converting Multi-Token Prediction (MTP) wei
 
 Example cmd:
 
-python3 -m MaxText.convert_deepseek_ckpt --base_model_path <path/to/meta/ckpt> \
-    --maxtext_model_path <GCS/path/to/save/new/maxtext/ckpt> --model_size deepseek2-16b
+python3 -m MaxText.convert_deepseek_family_ckpt --base_model_path <path/to/meta/ckpt> \
+    --maxtext_model_path <GCS/path/to/save/new/maxtext/ckpt> --model_size deepseek3-671b --enable_mtp
 """
 
 # pylint: disable=line-too-long
@@ -56,6 +56,7 @@ MODEL_PARAMS_DICT = {
         "qk_nope_head_dim": 128,
         "qk_rope_head_dim": 64,
         "v_head_dim": 128,
+        "has_mtp": False,
     },
     "deepseek3-671b": {
         "num_layers": 61,
@@ -68,6 +69,20 @@ MODEL_PARAMS_DICT = {
         "qk_nope_head_dim": 128,
         "qk_rope_head_dim": 64,
         "v_head_dim": 128,
+        "has_mtp": True,
+    },
+    "kimi-k2-1t": {
+        "num_layers": 61,
+        "first_num_dense_layers": 1,
+        "base_num_query_heads": 64,
+        "base_emb_dim": 7168,
+        "num_experts": 384,
+        "q_lora_rank": 1536,
+        "kv_lora_rank": 512,
+        "qk_nope_head_dim": 128,
+        "qk_rope_head_dim": 64,
+        "v_head_dim": 128,
+        "has_mtp": False,
     },
 }
 
@@ -88,7 +103,7 @@ def is_key_allowed(key, banned_keys) -> bool:
   return key not in banned_keys
 
 
-def hf_to_maxtext_mapping(layer_idx, num_experts, first_num_dense_layers, num_main_layers) -> dict:
+def hf_to_maxtext_mapping(layer_idx, num_experts, first_num_dense_layers, num_main_layers, has_mtp=False) -> dict:
   """
   Generates a mapping between Hugging Face (HF) and MaxText model weight names.
   HF MLP is using self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x)).
@@ -99,6 +114,7 @@ def hf_to_maxtext_mapping(layer_idx, num_experts, first_num_dense_layers, num_ma
       num_experts: The number of experts in MoE layers.
       first_num_dense_layers: The number of initial dense layers.
       num_main_layers: The total number of main layers in the model.
+      has_mtp: Whether the model has an MTP head.
 
   Returns:
       A dictionary mapping HF weight names to MaxText weight names.
@@ -158,7 +174,7 @@ def hf_to_maxtext_mapping(layer_idx, num_experts, first_num_dense_layers, num_ma
             f"model.layers.{layer_idx}.post_attention_layernorm.weight": f"moe_layers.{moe_layer_idx_in_maxtext}.post_self_attention_layer_norm.scale",
         }
     )
-  elif layer_idx == num_main_layers:
+  elif has_mtp and layer_idx == num_main_layers:
     mapping.update(
         {
             f"model.layers.{layer_idx}.enorm.weight": "mtp_block.mtp_layer_1.mtp_1_embedding_norm.scale",
@@ -196,7 +212,7 @@ def hf_to_maxtext_mapping(layer_idx, num_experts, first_num_dense_layers, num_ma
   return mapping
 
 
-def _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info) -> dict:
+def _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info, enable_mtp=False) -> dict:
   """Convert Huggingface Checkpoint to Jax."""
   base_num_decoder_layers = model_params["num_layers"]
   first_num_dense_layers = model_params["first_num_dense_layers"]
@@ -208,6 +224,7 @@ def _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info)
   qk_nope_head_dim = model_params["qk_nope_head_dim"]
   qk_rope_head_dim = model_params["qk_rope_head_dim"]
   v_head_dim = model_params["v_head_dim"]
+  has_mtp = model_params.get("has_mtp", False) and enable_mtp
 
   ckpt_paths = sorted(pathlib.Path(base_model_path).glob("[!.]*.safetensors"))
   chkpt_vars = {}
@@ -220,7 +237,9 @@ def _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info)
         if key.endswith("_scale_inv"):
           raise ValueError("fp8 checkpoint is not supported.")
         if is_key_allowed(key, MTP_KEYS_TO_SKIP):
-          mapped_key = hf_to_maxtext_mapping(layer, num_experts, first_num_dense_layers, base_num_decoder_layers).get(key)
+          mapped_key = hf_to_maxtext_mapping(
+              layer, num_experts, first_num_dense_layers, base_num_decoder_layers, has_mtp
+          ).get(key)
           if mapped_key:
             chkpt_vars[mapped_key] = f.get_tensor(key)
 
@@ -271,38 +290,8 @@ def _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info)
           "logits_dense": {"kernel": None},
       },
       "token_embedder": {"embedding": None},
-      "mtp_block": {
-          "mtp_layer_1": {
-              "mtp_1_embedding_norm": {"scale": None},
-              "mtp_1_hidden_state_norm": {"scale": None},
-              "mtp_1_projection": {"kernel": None},
-              "mtp_1_transformer_layer": {
-                  "pre_self_attention_layer_norm": {"scale": None},
-                  "post_self_attention_layer_norm": {"scale": None},
-                  "self_attention": {
-                      "kv_norm": {"scale": None},
-                      "wkv_a": {"kernel": None},
-                      "wkv_b": {"kernel": None},
-                      "out": {"kernel": None},
-                  },
-                  "DeepSeekMoeBlock_0": {
-                      "MoeBlock_0": {
-                          "wi_0": None,
-                          "wi_1": None,
-                          "wo": None,
-                          "gate": {"kernel": None},
-                      },
-                      "shared_experts": {
-                          "wi_0": {"kernel": None},
-                          "wi_1": {"kernel": None},
-                          "wo": {"kernel": None},
-                      },
-                  },
-              },
-          }
-      },
   }
-
+  
   # decoder norm scale ###########################################
   max_logging.log("Processing decoder norm scale")
   jax_weights["decoder"]["decoder_norm"]["scale"] = chkpt_vars["decoder_norm.scale"].to(torch.float16).numpy()
@@ -532,159 +521,161 @@ def _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info)
       logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
 
   # MTP Layer Processing ################################################
-  max_logging.log("Processing MTP Layer")
+  if has_mtp:
+    max_logging.log("Processing MTP Layer")
 
-  # MTP unique components
-  jax_weights["mtp_block"]["mtp_layer_1"]["mtp_1_embedding_norm"]["scale"] = (
-      chkpt_vars["mtp_block.mtp_layer_1.mtp_1_embedding_norm.scale"].to(torch.float16).numpy()
-  )
-  jax_weights["mtp_block"]["mtp_layer_1"]["mtp_1_hidden_state_norm"]["scale"] = (
-      chkpt_vars["mtp_block.mtp_layer_1.mtp_1_hidden_state_norm.scale"].to(torch.float16).numpy()
-  )
-  jax_weights["mtp_block"]["mtp_layer_1"]["mtp_1_projection"]["kernel"] = (
-      chkpt_vars["mtp_block.mtp_layer_1.mtp_1_projection.kernel"].to(torch.float16).numpy().transpose()
-  )
-
-  # MTP internal transformer layer - Attention and Norms
-  mtp_transformer_layer = jax_weights["mtp_block"]["mtp_layer_1"]["mtp_1_transformer_layer"]
-  mtp_transformer_layer["pre_self_attention_layer_norm"]["scale"] = (
-      chkpt_vars["mtp_block.mtp_layer_1.mtp_1_transformer_layer.pre_self_attention_layer_norm.scale"]
-      .to(torch.float16)
-      .numpy()
-  )
-  mtp_transformer_layer["post_self_attention_layer_norm"]["scale"] = (
-      chkpt_vars["mtp_block.mtp_layer_1.mtp_1_transformer_layer.post_self_attention_layer_norm.scale"]
-      .to(torch.float16)
-      .numpy()
-  )
-
-  mtp_attn_block = mtp_transformer_layer["self_attention"]
-  mtp_attn_block["kv_norm"]["scale"] = (
-      chkpt_vars["mtp_block.mtp_layer_1.mtp_1_transformer_layer.self_attention.kv_norm.scale"]
-      .to(torch.float16)
-      .numpy()
-      .transpose()
-  )
-  mtp_attn_block["wkv_a"]["kernel"] = (
-      chkpt_vars["mtp_block.mtp_layer_1.mtp_1_transformer_layer.self_attention.wkv_a.kernel"]
-      .to(torch.float16)
-      .numpy()
-      .transpose()
-  )
-  wkv_b = (
-      chkpt_vars["mtp_block.mtp_layer_1.mtp_1_transformer_layer.self_attention.wkv_b.kernel"]
-      .to(torch.float16)
-      .numpy()
-      .transpose()
-  )
-  out = (
-      chkpt_vars["mtp_block.mtp_layer_1.mtp_1_transformer_layer.self_attention.out.kernel"]
-      .to(torch.float16)
-      .numpy()
-      .transpose()
-  )
-  mtp_attn_block["wkv_b"]["kernel"] = np.reshape(
-      wkv_b, [kv_lora_rank, base_num_query_heads, (qk_nope_head_dim + v_head_dim)]
-  )
-  mtp_attn_block["out"]["kernel"] = np.reshape(out, [base_num_query_heads, v_head_dim, base_emb_dim])
-  if q_lora_rank != 0:
-    mtp_attn_block.update(
-        {
-            "q_norm": {"scale": None},
-            "wq_a": {"kernel": None},
-            "wq_b": {"kernel": None},
-        }
+    # MTP unique components
+    jax_weights["mtp_block"]["mtp_layer_1"]["mtp_1_embedding_norm"]["scale"] = (
+        chkpt_vars["mtp_block.mtp_layer_1.mtp_1_embedding_norm.scale"].to(torch.float16).numpy()
     )
-  else:
-    mtp_attn_block.update({"query": {"kernel": None}})
-  if q_lora_rank != 0:
-    mtp_attn_block["q_norm"]["scale"] = (
-        chkpt_vars["mtp_block.mtp_layer_1.mtp_1_transformer_layer.self_attention.q_norm.scale"].to(torch.float16).numpy()
+    jax_weights["mtp_block"]["mtp_layer_1"]["mtp_1_hidden_state_norm"]["scale"] = (
+        chkpt_vars["mtp_block.mtp_layer_1.mtp_1_hidden_state_norm.scale"].to(torch.float16).numpy()
     )
-    mtp_attn_block["wq_a"]["kernel"] = (
-        chkpt_vars["mtp_block.mtp_layer_1.mtp_1_transformer_layer.self_attention.wq_a.kernel"]
-        .to(torch.float16)
-        .numpy()
-        .transpose()
-    )
-    wq_b = (
-        chkpt_vars["mtp_block.mtp_layer_1.mtp_1_transformer_layer.self_attention.wq_b.kernel"]
-        .to(torch.float16)
-        .numpy()
-        .transpose()
-    )
-    mtp_attn_block["wq_b"]["kernel"] = np.reshape(
-        wq_b, [q_lora_rank, base_num_query_heads, (qk_nope_head_dim + qk_rope_head_dim)]
-    )
-  else:
-    query = (
-        chkpt_vars["mtp_block.mtp_layer_1.mtp_1_transformer_layer.self_attention.query.kernel"]
-        .to(torch.float16)
-        .numpy()
-        .transpose()
-    )
-    mtp_attn_block["query"]["kernel"] = np.reshape(
-        query, [base_emb_dim, base_num_query_heads, (qk_nope_head_dim + qk_rope_head_dim)]
+    jax_weights["mtp_block"]["mtp_layer_1"]["mtp_1_projection"]["kernel"] = (
+        chkpt_vars["mtp_block.mtp_layer_1.mtp_1_projection.kernel"].to(torch.float16).numpy().transpose()
     )
 
-  # MTP internal transformer layer - MoE Block
-  moe = mtp_transformer_layer["DeepSeekMoeBlock_0"]
-  moe["MoeBlock_0"]["gate"]["kernel"] = (
-      chkpt_vars["mtp_block.mtp_layer_1.mtp_1_transformer_layer.DeepSeekMoeBlock_0.MoeBlock_0.gate.kernel"]
-      .to(torch.float16)
-      .numpy()
-      .transpose()
-  )
-  moe["shared_experts"]["wi_0"]["kernel"] = (
-      chkpt_vars["mtp_block.mtp_layer_1.mtp_1_transformer_layer.DeepSeekMoeBlock_0.shared_experts.wi_0.kernel"]
-      .to(torch.float16)
-      .numpy()
-      .transpose()
-  )
-  moe["shared_experts"]["wi_1"]["kernel"] = (
-      chkpt_vars["mtp_block.mtp_layer_1.mtp_1_transformer_layer.DeepSeekMoeBlock_0.shared_experts.wi_1.kernel"]
-      .to(torch.float16)
-      .numpy()
-      .transpose()
-  )
-  moe["shared_experts"]["wo"]["kernel"] = (
-      chkpt_vars["mtp_block.mtp_layer_1.mtp_1_transformer_layer.DeepSeekMoeBlock_0.shared_experts.wo.kernel"]
-      .to(torch.float16)
-      .numpy()
-      .transpose()
-  )
-  if q_lora_rank != 0:
-    moe["MoeBlock_0"]["gate"]["bias"] = (
-        chkpt_vars["mtp_block.mtp_layer_1.mtp_1_transformer_layer.DeepSeekMoeBlock_0.MoeBlock_0.gate.bias"]
+    # MTP internal transformer layer - Attention and Norms
+    mtp_transformer_layer = jax_weights["mtp_block"]["mtp_layer_1"]["mtp_1_transformer_layer"]
+    mtp_transformer_layer["pre_self_attention_layer_norm"]["scale"] = (
+        chkpt_vars["mtp_block.mtp_layer_1.mtp_1_transformer_layer.pre_self_attention_layer_norm.scale"]
         .to(torch.float16)
         .numpy()
-        .transpose()
+    )
+    mtp_transformer_layer["post_self_attention_layer_norm"]["scale"] = (
+        chkpt_vars["mtp_block.mtp_layer_1.mtp_1_transformer_layer.post_self_attention_layer_norm.scale"]
+        .to(torch.float16)
+        .numpy()
     )
 
-  experts_wi0, experts_wi1, experts_wo = [], [], []
-  for k in range(num_experts):
-    experts_wi0.append(
-        chkpt_vars[f"mtp_block.mtp_layer_1.mtp_1_transformer_layer.DeepSeekMoeBlock_0.MoeBlock_0.{k}.wi_0"]
+    mtp_attn_block = mtp_transformer_layer["self_attention"]
+    mtp_attn_block["kv_norm"]["scale"] = (
+        chkpt_vars["mtp_block.mtp_layer_1.mtp_1_transformer_layer.self_attention.kv_norm.scale"]
         .to(torch.float16)
         .numpy()
         .transpose()
     )
-    experts_wi1.append(
-        chkpt_vars[f"mtp_block.mtp_layer_1.mtp_1_transformer_layer.DeepSeekMoeBlock_0.MoeBlock_0.{k}.wi_1"]
+    mtp_attn_block["wkv_a"]["kernel"] = (
+        chkpt_vars["mtp_block.mtp_layer_1.mtp_1_transformer_layer.self_attention.wkv_a.kernel"]
         .to(torch.float16)
         .numpy()
         .transpose()
     )
-    experts_wo.append(
-        chkpt_vars[f"mtp_block.mtp_layer_1.mtp_1_transformer_layer.DeepSeekMoeBlock_0.MoeBlock_0.{k}.wo"]
+    wkv_b = (
+        chkpt_vars["mtp_block.mtp_layer_1.mtp_1_transformer_layer.self_attention.wkv_b.kernel"]
         .to(torch.float16)
         .numpy()
         .transpose()
     )
+    out = (
+        chkpt_vars["mtp_block.mtp_layer_1.mtp_1_transformer_layer.self_attention.out.kernel"]
+        .to(torch.float16)
+        .numpy()
+        .transpose()
+    )
+    mtp_attn_block["wkv_b"]["kernel"] = np.reshape(
+        wkv_b, [kv_lora_rank, base_num_query_heads, (qk_nope_head_dim + v_head_dim)]
+    )
+    mtp_attn_block["out"]["kernel"] = np.reshape(out, [base_num_query_heads, v_head_dim, base_emb_dim])
+    if q_lora_rank != 0:
+      mtp_attn_block.update(
+          {
+              "q_norm": {"scale": None},
+              "wq_a": {"kernel": None},
+              "wq_b": {"kernel": None},
+          }
+      )
+    else:
+      mtp_attn_block.update({"query": {"kernel": None}})
+    if q_lora_rank != 0:
+      mtp_attn_block["q_norm"]["scale"] = (
+          chkpt_vars["mtp_block.mtp_layer_1.mtp_1_transformer_layer.self_attention.q_norm.scale"].to(torch.float16).numpy()
+      )
+      mtp_attn_block["wq_a"]["kernel"] = (
+          chkpt_vars["mtp_block.mtp_layer_1.mtp_1_transformer_layer.self_attention.wq_a.kernel"]
+          .to(torch.float16)
+          .numpy()
+          .transpose()
+      )
+      wq_b = (
+          chkpt_vars["mtp_block.mtp_layer_1.mtp_1_transformer_layer.self_attention.wq_b.kernel"]
+          .to(torch.float16)
+          .numpy()
+          .transpose()
+      )
+      mtp_attn_block["wq_b"]["kernel"] = np.reshape(
+          wq_b, [q_lora_rank, base_num_query_heads, (qk_nope_head_dim + qk_rope_head_dim)]
+      )
+    else:
+      query = (
+          chkpt_vars["mtp_block.mtp_layer_1.mtp_1_transformer_layer.self_attention.query.kernel"]
+          .to(torch.float16)
+          .numpy()
+          .transpose()
+      )
+      mtp_attn_block["query"]["kernel"] = np.reshape(
+          query, [base_emb_dim, base_num_query_heads, (qk_nope_head_dim + qk_rope_head_dim)]
+      )
 
-  moe["MoeBlock_0"]["wi_0"] = np.stack(experts_wi0)
-  moe["MoeBlock_0"]["wi_1"] = np.stack(experts_wi1)
-  moe["MoeBlock_0"]["wo"] = np.stack(experts_wo)
+    # MTP internal transformer layer - MoE Block
+    moe = mtp_transformer_layer["DeepSeekMoeBlock_0"]
+    moe["MoeBlock_0"]["gate"]["kernel"] = (
+        chkpt_vars["mtp_block.mtp_layer_1.mtp_1_transformer_layer.DeepSeekMoeBlock_0.MoeBlock_0.gate.kernel"]
+        .to(torch.float16)
+        .numpy()
+        .transpose()
+    )
+    moe["shared_experts"]["wi_0"]["kernel"] = (
+        chkpt_vars["mtp_block.mtp_layer_1.mtp_1_transformer_layer.DeepSeekMoeBlock_0.shared_experts.wi_0.kernel"]
+        .to(torch.float16)
+        .numpy()
+        .transpose()
+    )
+    moe["shared_experts"]["wi_1"]["kernel"] = (
+        chkpt_vars["mtp_block.mtp_layer_1.mtp_1_transformer_layer.DeepSeekMoeBlock_0.shared_experts.wi_1.kernel"]
+        .to(torch.float16)
+        .numpy()
+        .transpose()
+    )
+    moe["shared_experts"]["wo"]["kernel"] = (
+        chkpt_vars["mtp_block.mtp_layer_1.mtp_1_transformer_layer.DeepSeekMoeBlock_0.shared_experts.wo.kernel"]
+        .to(torch.float16)
+        .numpy()
+        .transpose()
+    )
+    if q_lora_rank != 0:
+      moe["MoeBlock_0"]["gate"].update({"bias": None})
+      moe["MoeBlock_0"]["gate"]["bias"] = (
+          chkpt_vars["mtp_block.mtp_layer_1.mtp_1_transformer_layer.DeepSeekMoeBlock_0.MoeBlock_0.gate.bias"]
+          .to(torch.float16)
+          .numpy()
+          .transpose()
+      )
+
+    experts_wi0, experts_wi1, experts_wo = [], [], []
+    for k in range(num_experts):
+      experts_wi0.append(
+          chkpt_vars[f"mtp_block.mtp_layer_1.mtp_1_transformer_layer.DeepSeekMoeBlock_0.MoeBlock_0.{k}.wi_0"]
+          .to(torch.float16)
+          .numpy()
+          .transpose()
+      )
+      experts_wi1.append(
+          chkpt_vars[f"mtp_block.mtp_layer_1.mtp_1_transformer_layer.DeepSeekMoeBlock_0.MoeBlock_0.{k}.wi_1"]
+          .to(torch.float16)
+          .numpy()
+          .transpose()
+      )
+      experts_wo.append(
+          chkpt_vars[f"mtp_block.mtp_layer_1.mtp_1_transformer_layer.DeepSeekMoeBlock_0.MoeBlock_0.{k}.wo"]
+          .to(torch.float16)
+          .numpy()
+          .transpose()
+      )
+
+    moe["MoeBlock_0"]["wi_0"] = np.stack(experts_wi0)
+    moe["MoeBlock_0"]["wi_1"] = np.stack(experts_wi1)
+    moe["MoeBlock_0"]["wo"] = np.stack(experts_wo)
 
   del chkpt_vars
   gc.collect()
@@ -692,7 +683,7 @@ def _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info)
   return jax_weights
 
 
-def _convert_to_jax_weights(base_model_path, model_size, mem_info) -> dict:
+def _convert_to_jax_weights(base_model_path, model_size, mem_info, enable_mtp=False) -> dict:
   """
   Function to convert the checkpoint at base_model_path into Orbax checkpoint
   for MaxText and output jax_weights ready for MaxText.
@@ -701,6 +692,7 @@ def _convert_to_jax_weights(base_model_path, model_size, mem_info) -> dict:
       base_model_path: Path to the Hugging Face model checkpoint.
       model_size: Model size key in MODEL_PARAMS_DICT.
       mem_info: A process instance used for memory tracking.
+      enable_mtp: Whether to enable MTP conversion.
 
   Returns:
       The converted JAX weights.
@@ -708,7 +700,7 @@ def _convert_to_jax_weights(base_model_path, model_size, mem_info) -> dict:
   model_params = MODEL_PARAMS_DICT[model_size]
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
   max_logging.log(f"Loading the base model from {base_model_path}")
-  return _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info)
+  return _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info, enable_mtp)
 
 
 def main() -> None:
@@ -719,6 +711,7 @@ def main() -> None:
   parser.add_argument("--simulated_cpu_devices_count", type=int, required=False, default=16)
   parser.add_argument("--use-ocdbt", type=str2bool, required=False, default=True)
   parser.add_argument("--use-zarr3", type=str2bool, required=False, default=True)
+  parser.add_argument("--enable_mtp", type=str2bool, required=False, default=False, help="Enable MTP layer conversion.")
   args = parser.parse_args()
 
   if args.model_size not in MODEL_PARAMS_DICT:
@@ -729,7 +722,7 @@ def main() -> None:
   mem_info = psutil.Process()
   llama_or_mistral_ckpt.save_weights_to_checkpoint(
       args.maxtext_model_path,
-      _convert_to_jax_weights(args.base_model_path, args.model_size, mem_info),
+      _convert_to_jax_weights(args.base_model_path, args.model_size, mem_info, args.enable_mtp),
       args.simulated_cpu_devices_count,
       args.use_ocdbt,
       args.use_zarr3,

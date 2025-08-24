@@ -93,8 +93,8 @@ comments, or questions by creating a new
 │   │   │   ├── to_hf/
 │   │   │   │   └── llama_mistral_mixtral_orbax_to_hf.py
 │   │   │   ├── to_maxtext/
-│   │   │   │   ├── convert_deepseek_ckpt.py
-│   │   │   │   ├── convert_deepseek_ckpt_unscanned.py
+│   │   │   │   ├── convert_deepseek_family_ckpt.py
+│   │   │   │   ├── convert_deepseek_family_ckpt_unscanned.py
 │   │   │   │   ├── convert_gemma2_ckpt.py
 │   │   │   │   ├── convert_gemma_ckpt.py
 │   │   │   │   ├── llama4_ckpt_unscanned.py
