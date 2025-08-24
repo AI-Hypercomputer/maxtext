@@ -669,11 +669,15 @@ class Decoder(nn.Module):
                 in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
                 model_mode=model_mode,
             )(y, *broadcast_args)
-        y, _ = self.pipeline_module(y, *broadcast_args, partition_spec) # TODO: support 1 or two outputs
+        y = self.pipeline_module(y, *broadcast_args, partition_spec) # TODO: support 1 or two outputs
+        if self.config.num_successive_pipelines > 1:
+          y = y[0]
         
       else:  # Not DeepSeek
         #y = self.pipeline_module(y, *broadcast_args, partition_spec=partition_spec) # TODO- maintain support for both?
-        y, _ = self.pipeline_module(y, *broadcast_args, partition_spec)
+        y = self.pipeline_module(y, *broadcast_args, partition_spec)
+        if self.config.num_successive_pipelines > 1:
+          y = y[0]
         remaining_layers = self.config.num_decoder_layers - self.config.pipeline_parallel_layers
         if remaining_layers > 0:
           logical_axis_rules_pp_as_dp = maxtext_utils.logical_axis_rules_pp_act_as_dp(self.config.logical_axis_rules)
