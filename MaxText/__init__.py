@@ -28,32 +28,10 @@ from MaxText import maxtext_utils
 from MaxText import train_utils
 from MaxText import pyconfig
 from MaxText.layers import models
+from MaxText import dpo_utils
 import jax
 from jax.sharding import Mesh
+from MaxText.train_utils import from_pretrained
 
 Transformer = models.Transformer
 
-
-def from_config(
-    config: pyconfig.HyperParameters,
-    devices: Sequence[jax.Device] | None = None,
-) -> Transformer:
-  """Instantiate a MaxText model.
-
-  This function creates a model instance from config but does not load any states.
-
-  Args:
-      config: Config object.
-
-  Returns:
-      Transformer: The loaded model instance (only the model)
-
-  Example:
-      model = from_config(config)
-  """
-  devices_array = maxtext_utils.create_device_mesh(config, devices)
-  mesh = Mesh(devices_array, config.mesh_axes)
-  model = train_utils.create_model(config, mesh)
-
-  # Return only the model
-  return model
