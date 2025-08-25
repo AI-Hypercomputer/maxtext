@@ -1,4 +1,4 @@
-# Understanding Logs and Metrics
+# Understand Logs and Metrics
 
 ## Introduction
 
@@ -165,7 +165,7 @@ As a background, **model FLOPs** are the floating point operations to perform mo
 - In MaxText, we estimate model FLOPs by summing operations in matrix multiplications (matmuls); see [calculate_tflops_training_per_device](https://github.com/AI-Hypercomputer/maxtext/blob/e969faabbb571285a51545530f34d8f0a9f237e9/MaxText/maxtext_utils.py#L297).
 - It depends on model architecture, input size (batch size, sequence length), and gradient accumulation steps. It does not include optimization operations.
 - We breakdown the FLOPs into two parts:
-  - "Learnable weight FLOPs" are matmuls between activations and learnable weights. Specifically, this occurs in embedding, feed forward networks, attention-related projections, and final output projection.
+  - "Learnable weight FLOPs" are matmuls between activations and learnable weights. Specifically, this occurs in embedding, feed forward networks, attention-related projections, and unembedding.
   - "Attention FLOPs" are matmuls in attention score computation like $\mathrm{softmax}{\left(\frac{QK^\top}{\sqrt{d}}\right)} V$. 
 - More information can be found in the [Performance Metrics](https://github.com/AI-Hypercomputer/maxtext/blob/main/getting_started/Performance_Metrics.md) page.
 
