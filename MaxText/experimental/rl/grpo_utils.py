@@ -125,19 +125,18 @@ def generate_offline_completions(config, tokenizer_model, inference_engine, data
             true_length=np.array(data[f"{config.train_data_columns}_true_length"][i])[0],
         )
     )
-  with jax.transfer_guard_host_to_device("disallow_explicit") and jax.transfer_guard_device_to_host("disallow_explicit"):
-    results = inference_engine.batch_inference(input_data)
+  results = inference_engine.batch_inference(input_data)
 
   prompt_completions_segmentation = []
   completion_segmentation = []
   prompt_completions = []
   prompt_completions_logprobs = []
   for i, r in enumerate(results):
-    indices = np.arange(r.token_ids.shape[0])
-    completion_mask = (indices >= np.array(data[f"{config.train_data_columns}_true_length"][i])[0]).astype(jnp.int32)
+    indices = jnp.arange(r.token_ids.shape[0])
+    completion_mask = (indices >= jnp.array(data[f"{config.train_data_columns}_true_length"][i])[0]).astype(jnp.int32)
     completion_segmentation.append(completion_mask)
     prompt_completions.append(r.token_ids)
-    prompt_completions_segmentation.append(np.full((r.token_ids.shape[0],), 1))
+    prompt_completions_segmentation.append(jnp.full((r.token_ids.shape[0],), 1))
     prompt_completions_logprobs.append(r.logprobs)
 
   prompt_completions = pad_or_trim(prompt_completions, config.max_target_length, 0)  # assume 0 for pad_token_id
@@ -288,9 +287,9 @@ def pad_or_trim(arr, max_target_length, pad_token):
   Returns:
     A 2D numpy array of shape `(len(arr), max_target_length)`.
   """
-  padded = np.array(
+  padded = jnp.array(
       [
-          np.pad(seq[:max_target_length], (0, max(0, max_target_length - len(seq))), constant_values=pad_token)
+          jnp.pad(seq[:max_target_length], (0, max(0, max_target_length - len(seq))), constant_values=pad_token)
           for seq in arr
       ]
   )

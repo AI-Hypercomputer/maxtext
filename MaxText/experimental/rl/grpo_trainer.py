@@ -624,10 +624,11 @@ def generate_completions(
         ],
         thread_example_batch,
     )
-    processed_batch = grpo_utils.generate_offline_completions(
+    with jax.transfer_guard_host_to_device("disallow_explicit") and jax.transfer_guard_device_to_host("disallow_explicit"):
+      processed_batch = grpo_utils.generate_offline_completions(
         worker_config_inference, worker_tokenizer_model, worker_inference_engine, thread_example_batch_trimmed
-    )
-    processed_batch = jax.device_put(processed_batch, worker_input_data_shardings)
+      )
+      processed_batch = jax.device_put(processed_batch, worker_input_data_shardings)
   with worker_data_buffer_lock:
     if not worker_data_buffer:
       worker_data_buffer.append(processed_batch)
