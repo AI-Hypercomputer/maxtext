@@ -31,7 +31,7 @@ from MaxText.layers import models
 from MaxText import dpo_utils
 import jax
 from jax.sharding import Mesh
-from MaxText.train_utils import from_pretrained
+from MaxText.train_utils import from_config
 
 Transformer = models.Transformer
 
