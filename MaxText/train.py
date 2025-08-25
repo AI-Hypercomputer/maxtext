@@ -529,7 +529,7 @@ def setup_train_loop(config, recorder, devices=None):
   """
 
   with maybe_record_goodput(recorder, GoodputEvent.TPU_INIT):
-    model = mt.from_pretrained(config, devices)
+    model = mt.from_config(config, devices)
     mesh = model.mesh
     init_rng, checkpoint_manager, learning_rate_schedule, tx = train_utils.create_training_tools(config, model, mesh)
 
