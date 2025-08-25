@@ -392,7 +392,7 @@ class Decoder(nn.Module):
       # Apply remat policy to layer
       layer = nn.remat(
           block_layer,
-          prevent_cse=not self.config.scan_layers,
+          prevent_cse=not (self.config.scan_layers or self.config.gradient_accumulation_steps > 1),
           policy=policy,
           static_argnums=(4, 5),  # Deterministic and model mode are static arguments.
       )
