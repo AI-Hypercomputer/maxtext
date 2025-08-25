@@ -94,8 +94,8 @@ class CompletionOutput:
   """
 
   index: int
-  token_ids: np.ndarray
-  logprobs: np.ndarray
+  token_ids: jax.Array
+  logprobs: jax.Array
   prompt_length: int
 
 
@@ -103,8 +103,8 @@ class CompletionOutput:
 class TokenOutput:
   """Container for individual token generation result."""
 
-  token: np.ndarray
-  log_prob: np.ndarray
+  token: jax.Array
+  log_prob: jax.Array
 
 
 class SafeThread(threading.Thread):
@@ -424,7 +424,7 @@ class InferenceWorker:
       tokenizer_params = self.engine.get_tokenizer()
       self.tokenizer = self.engine.build_tokenizer(tokenizer_params)
     if self.eos_ids is None:
-      self.eos_ids = [self.tokenizer.eos_id]
+      self.eos_ids = jax.numpy.array([self.tokenizer.eos_id])
     return self.tokenizer
 
   def update_params(
@@ -534,10 +534,10 @@ class InferenceWorker:
         input_id = row.id
         prompt_length = row.true_length
         prompt_tokens = row.tokens[: row.true_length].squeeze()
-        completion_tokens = np.array(
+        completion_tokens = jax.numpy.array(
             [token_output.token for token_output in self.completion_tokens_by_id[input_id]]
         ).flatten()
-        logprobs = np.array(
+        logprobs = jax.numpy.array(
             [token_output.log_prob.flatten() for token_output in self.completion_tokens_by_id[input_id]]
         ).flatten()
         prompt_logprobs = self.prompt_logprobs_by_id[input_id].flatten()
@@ -545,13 +545,13 @@ class InferenceWorker:
             CompletionOutput(
                 index=input_id,
                 prompt_length=prompt_length,
-                token_ids=np.concatenate(
+                token_ids=jax.numpy.concatenate(
                     (
                         prompt_tokens,
                         completion_tokens,
                     )
                 ),
-                logprobs=np.concatenate(
+                logprobs=jax.numpy.concatenate(
                     (
                         prompt_logprobs,
                         logprobs,
@@ -582,7 +582,7 @@ class InferenceWorker:
       true_length = self.true_lengths[input_id]
 
       self.slot_to_id[slot] = input_id
-
+      '''
       # Add token to detokenization queue
       start_time = time.time()
 
@@ -593,6 +593,10 @@ class InferenceWorker:
 
       if self.debug:
         max_logging.log(f"Inference worker: convert to numpy in Prefill in {time.time() - start_time} seconds")
+      '''
+      first_token = result_tokens.data[:, 0]
+      log_prob = result_tokens.log_prob
+      prompt_logp = result.prompt_logp[:, :true_length]
       self.generated_token_backlog.put_nowait((first_token, log_prob, True, prompt_ids[i], slot, prompt_logp))
 
   def decode(self):
@@ -655,11 +659,10 @@ class InferenceWorker:
         if not self.running:
           break
         continue
-      breakpoint()
       # Process generated tokens
       start_time = time.time()
       if is_first_token:
-        should_terminate = self.emit_token(row_id, int(result_tokens), log_prob, prompt_logp=prompt_logp)
+        should_terminate = self.emit_token(row_id, result_tokens, log_prob, prompt_logp=prompt_logp)
         if should_terminate:
           newly_empty.append(slot)
       else:
@@ -669,7 +672,7 @@ class InferenceWorker:
               continue
             log_prob_at_slot = log_prob[decode_step][slot]
             result_tokens_at_slot = result_tokens[decode_step][slot]
-            should_terminate = self.emit_token(id_, int(result_tokens_at_slot), log_prob_at_slot)
+            should_terminate = self.emit_token(id_, result_tokens_at_slot, log_prob_at_slot)
             if should_terminate:
               newly_empty.append(slot)
 
@@ -684,10 +687,10 @@ class InferenceWorker:
 
   def emit_token(
       self,
-      prompt_id,
-      result_token: int,
-      log_prob: float,
-      prompt_logp: np.ndarray = None,
+      prompt_id: int,
+      result_token: jax.Array,
+      log_prob: jax.Array,
+      prompt_logp: jax.Array | None = None,
   ):
     """Adds the token to the results for the specified prompt ID and
     determines if generation should terminate.
@@ -698,23 +701,22 @@ class InferenceWorker:
 
     Returns:
         True if this token signals the end of generation, False otherwise
-    """
+    """    
     # Return if already reached max decode length
     if len(self.completion_tokens_by_id[prompt_id]) == self.max_decode_length:
       return True
-
     # Return if already reached eos
     if (
         len(self.completion_tokens_by_id[prompt_id]) > 0
-        and self.completion_tokens_by_id[prompt_id][-1].token in self.eos_ids
+        and (self.completion_tokens_by_id[prompt_id][-1].token == self.eos_ids).any()
     ):
       return True
 
     index = len(self.completion_tokens_by_id[prompt_id])
     if prompt_logp is not None:
       self.prompt_logprobs_by_id[prompt_id] = [prompt_logp]
-    self.completion_tokens_by_id[prompt_id].append(TokenOutput(np.array(result_token), np.array(log_prob)))
-    return (result_token in self.eos_ids) or (index + 1 == self.max_decode_length)
+    self.completion_tokens_by_id[prompt_id].append(TokenOutput(result_token, log_prob))
+    return ((result_token == self.eos_ids).any()) or (index + 1 == self.max_decode_length)
 
 
 class OfflineEngine:
