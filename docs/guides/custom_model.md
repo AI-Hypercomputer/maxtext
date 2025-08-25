@@ -1,13 +1,20 @@
-# How to customize your model configs on TPU
+<!--
+ Copyright 2024 Google LLC
 
-## Table of Contents
-- [Introduction](#introduction)
-- [Step 1. Identify Initial Configs](#step-1-identify-initial-configs)
-- [Step 2. Consider TPU Best Practices](#step-2-consider-tpu-best-practices)
-- [Step 3. Choose Efficient Sharding Strategies Using Roofline Analysis](#step-3-calculate-arithmetic-intensity-and-choose-efficient-sharding-strategies-using-roofline-analysis)
-- [Step 4. Analyze Experiments](#step-4-analyze-experiments)
-- [Example of dense model](#example-of-dense-model)
-- [Example of MoE model](#example-of-moe-model)
+ Licensed under the Apache License, Version 2.0 (the "License");
+ you may not use this file except in compliance with the License.
+ You may obtain a copy of the License at
+
+      https://www.apache.org/licenses/LICENSE-2.0
+
+ Unless required by applicable law or agreed to in writing, software
+ distributed under the License is distributed on an "AS IS" BASIS,
+ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ See the License for the specific language governing permissions and
+ limitations under the License.
+ -->
+
+# How to customize your model configs on TPU
 
 ## Introduction
 
@@ -15,18 +22,18 @@ This document provides a guide to optimize and customize your LLM model configur
 
 ## Step 1. Identify Initial Configs
 
-To begin, identify your model's size, review open-source model configs, and establish the initial configurations for each block. You can use our [reference calculator](https://docs.google.com/spreadsheets/d/e/2PACX-1vRjwRtX0g6ktlbXQl_da1f8Kg7ofBAYh1hAJEQKfoVT-6sM7u_C8TiO3WcsThomJIF0Fy1yPGbmfl8m/pub?output=xlsx) to estimate parameters and FLOPs for dense, Mixtral-like Mixture of Experts (MoE), and DeepSeek-like MoE models to help you estimate the parameter count and FLOPs.
+To begin, identify your model's size, review open-source model configs, and establish the initial configurations for each block. You can use our [reference calculator (on Colab)](https://colab.research.google.com/github/AI-Hypercomputer/maxtext/blob/main/docs/guides/llm_calculator.ipynb) to estimate parameters and FLOPs for dense, Mixtral-like Mixture of Experts (MoE), and DeepSeek-like MoE models to help you estimate the parameter count and FLOPs.
 
 Based on resources like [Language Modeling from Scratch](https://github.com/stanford-cs336/spring2025-lectures/blob/e9cb2488fdb53ea37f0e38924ec3a1701925cef3/nonexecutable/2025%20Lecture%203%20-%20architecture.pdf), we observe common architectural ratios for dense models, as shown below:
 
-*   mlp_dim / emb_dim: 2.5-4
-*   head_dim * num_query_heads / emb_dim: 1-2
-*   emb_dim / num_decoder_layers: 100-200
+*   `mlp_dim / emb_dim`: 2.5-4
+*   `head_dim * num_query_heads / emb_dim`: 1-2
+*   `emb_dim / num_decoder_layers`: 100-200
 
 For MoE models,
 
-*   sparsity (num_experts / num_experts_per_tok): 4-32
-*   moe_mlp_dim / emb_dim: 0.3-3
+*   sparsity (`num_experts / num_experts_per_tok`): 4-32
+*   `moe_mlp_dim / emb_dim`: 0.3-3
 
 ## Step 2. Consider TPU Best Practices
 
@@ -57,9 +64,10 @@ Use these general runtime configurations to improve your model's performance.
 
 * **Benchmark**. For consistent speed tests, set `reuse_example_batch=1` to repeatedly use the same data batch, isolating computation speed from data loading. Or use on-the-fly generated data by setting `dataset_type=synthetic`.
 
+(roofline-sharding)=
 ## Step 3. Choose Efficient Sharding Strategies Using Roofline Analysis
 
-To achieve good performance, it's often necessary to co-design the model's dimensions (like the MLP dimension) along with the sharding strategy. We have included examples for Trillium that demonstrate which sharding approaches work well for specific models. We recommend reading MaxText’s [sharding readme](https://github.com/AI-Hypercomputer/maxtext/blob/3296117b471c4297a8eebf86af0c3905b63df454/getting_started/Sharding.md) and Jax’s [scaling book](https://jax-ml.github.io/scaling-book/sharding/).
+To achieve good performance, it's often necessary to co-design the model's dimensions (like the MLP dimension) along with the sharding strategy. We have included examples for Trillium that demonstrate which sharding approaches work well for specific models. We recommend reading [](sharding) and Jax’s [scaling book](https://jax-ml.github.io/scaling-book/sharding/).
 
 For the calculation below on Trillium, we will use Arithmetic Intensity (AI) of 5100 for 2 ICI links bandwidth bandwidth (1D with wrapound or 2D without wraparound) and 2500 for 4 ICI links bandwidth (2D with wraparound on both dimensions) over the ICI. The later bandwidth is particularly for Trillium v6e-256 (16x16) with wraparound connection.
 
@@ -69,12 +77,12 @@ For the calculation below on Trillium, we will use Arithmetic Intensity (AI) of 
 
 For pure FSDP to be effective, it must have enough memory to hold both a large data batch and a full, single layer of weights at the same time. 
 
-FSPD AI: `global batch / sparsity` (sparsity = num_experts / num_experts_per_tok).
+FSPD AI: `global batch / sparsity` (`sparsity = num_experts / num_experts_per_tok`).
 
 **Example with a sparsity of 16**:
-  * global batch / sparsity > hardware AI
-  * global batch / 16 > 2500 (16x16 with wraparound)
-  * global batch > 40k (in tokens)
+  * `global batch / sparsity > hardware AI`
+  * `global batch / 16 > 2500` (16x16 with wraparound)
+  * `global batch > 40k` (in tokens)
 
 We also need a single layer of weights to fit into memory which can be an issue for medium/large MoE models, e.g. DeepSeek has roughly 10B params per layer, which corresponds to 40GiB of bf16 weights and gradients, which will not fit into Trillium’s 32GiB of HBM. So the use of pure FSDP on Trillium is feasible for models with layers not exceeding roughly 5B parameters. For these larger models need Expert or Tensor Parallelism.
 
@@ -85,9 +93,9 @@ For sparse models, large models, or when scaling to a large number of chips FSDP
 The same AI as derived in the Pure FSDP section above still hold, we need `global batch / sparsity * FSDP > hardware AI` which is equivalently to `per device batch (pdb) / sparsity * TP * EP * PP > hardware AI`.
 
 **Example with EP=16, FSDP=16, and sparsity=32**:
-  * pdb * EP / sparsity > hardware AI
-  * pdb * 16 / 32 > 5100
-  * pdb > 5100 * 32 / 16 = 10200 (in tokens)
+  * `pdb * EP / sparsity > hardware AI`
+  * `pdb * 16 / 32 > 5100`
+  * `pdb > 5100 * 32 / 16 = 10200` (in tokens)
 
 We need a per device batch of at least 10200 in this case.
 
@@ -95,15 +103,15 @@ We need a per device batch of at least 10200 in this case.
 
 If pure FSDP doesn’t work either due to AI or to fit in layer weights, EP is generally the way to go for sparse models (large dense models should use TP).
 
-AI of 1D EP on ICI rings = 4 * mlp_dim / EP. Communication cost of all-to-all is roughly 1/4 of all-gather and reduce-scatter.
+AI of 1D EP on ICI rings `= 4 * mlp_dim / EP`. Communication cost of all-to-all is roughly 1/4 of all-gather and reduce-scatter.
 
 **Example with EP=4**
-* 4 * M > 5100 * 4
-* M > 5,100 * 4 = 5,100
+* `4 * M > 5100 * 4`
+* `M > 5,100 * 4 = 5,100`
 
 **Example with EP=16**
-* 4 * M > 5,100 * 16
-* M > 5,100 * 4 = 20,400
+* `4 * M > 5,100 * 16`
+* `M > 5,100 * 4 = 20,400`
 
 These examples show that to use EP, we need a large enough mlp dimension.
 
@@ -116,18 +124,18 @@ Tensor parallelism can be used for large dense models or super large sparse mode
 AI of TP: M / TP
 
 **Example with TP=4**
-* M / TP > hardware AI
-* M / 4 > 5100
-* M > 20400
+* `M / TP > hardware AI`
+* `M / 4 > 5100`
+* `M > 20400`
 
 We have seen in practice M should be even larger- ideally 40k+. This is what we use for Llama-405B (M=53k), and was used for a custom sparse 10T model (M=40k, 64 experts).
 
 TP=4 corresponds to a custom Trillium mesh, an 8x8 ring of 2x2 subrings (the TP communication operates on the 2x2 ring). This 2x2 ring performs well (near roofline), but the 8x8 rings perform poorly (0.5 x 1 axis). E.g. if we use FSDP=64, TP=4, the FSDP=64 communications will be slower than the hardware ICI roofline, so we prefer to use the full 16 axis when M is large enough.
 
 **Example with TP=16**
-* M / TP > hardware AI
-* M / 16 > 5100
-* M > 81600
+* `M / TP > hardware AI`
+* `M / 16 > 5100`
+* `M > 81600`
 
 To use TP=16, we need M > 80k (ideally larger, 100k+). We have used this in a custom dense model (900B, M=131k), which performs very well even at 1k per device tokens (scaling to 25k+ with a reasonable global batch).
 
@@ -135,7 +143,7 @@ To use TP=16, we need M > 80k (ideally larger, 100k+). We have used this in a cu
 
 With your configs, begin experimenting to evaluate the model's performance. We strongly recommend capturing a profile by following these [instructions](https://docs.jax.dev/en/latest/profiling.html#). If you are using MaxText, this can be done by simply setting `profiler=xplane` in your configuration.
 
-After generating the profile, use a tool, like [xprof](https://github.com/openxla/xprof), [xprofiler](https://github.com/AI-Hypercomputer/cloud-diagnostics-xprof), or [tensorboard](https://github.com/tensorflow/tensorboard) to analyze the results. These examples ([Profile TPU Programs](https://jax-ml.github.io/scaling-book/profiling/), [ML Workload Diagnostics](https://docs.google.com/presentation/d/1RV_wiamshnK-gus17PXEfn1wEBCThp1TwRBUGqO1L2Q/edit?slide=id.g29f3f75064e_0_0&resourcekey=0-AKu9jLL4jjWWfWzQA58GFQ#slide=id.g29f3f75064e_0_0)) can serve as your guide. A key principle for maximizing training throughput is to ensure you are fully utilizing the available HBM. Once you achieve satisfactory performance, you can proceed with full training runs. Continue to analyze your model and refine your configurations as needed.
+After generating the profile, use a tool, like [xprof](https://github.com/openxla/xprof), [xprofiler](https://github.com/AI-Hypercomputer/cloud-diagnostics-xprof), or [tensorboard](https://github.com/tensorflow/tensorboard) to analyze the results. This example ([Profile TPU Programs](https://jax-ml.github.io/scaling-book/profiling/) can serve as your guide. A key principle for maximizing training throughput is to ensure you are fully utilizing the available HBM. Once you achieve satisfactory performance, you can proceed with full training runs. Continue to analyze your model and refine your configurations as needed.
 
 ## Example of dense model
 

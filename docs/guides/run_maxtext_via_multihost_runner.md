@@ -1,20 +1,21 @@
 <!--
- # Copyright 2023–2025 Google LLC
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#    https://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+ Copyright 2023–2025 Google LLC
+
+ Licensed under the Apache License, Version 2.0 (the "License");
+ you may not use this file except in compliance with the License.
+ You may obtain a copy of the License at
+
+    https://www.apache.org/licenses/LICENSE-2.0
+
+ Unless required by applicable law or agreed to in writing, software
+ distributed under the License is distributed on an "AS IS" BASIS,
+ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ See the License for the specific language governing permissions and
+ limitations under the License.
 -->
 
-## Getting Started: `multihost_runner.py` - Quick Experiments on Multiple Hosts (or Multiple Slices)
+(run-multihost-runner)=
+# Quicks Experiments on Multiple Hosts or Multiple Slices (`multihost_runner.py`)
 
 This workflow using `multihost_runner.py` is optimized for quick experiments, repeatedly re-using the same TPUs. Because the `multihost_runner.py` script depends on long-lived `ssh` connections, we do not recommend it for any long-running jobs.
 
@@ -28,10 +29,10 @@ The `multihost_runner.py` script:
 
 Although there are several steps below, most are for the initial setup. Once setup you can continually make changes to your code and re-run your code with only step 5.
 
-1. Choose a directory on your runner machine to develop and clone MaxText into. The runner machine can
+1. **Choose a directory on your runner machine to develop and clone MaxText into.** The runner machine can
 either be a TPUVM or not, but it cannot be one of the workers. If your runner machine is a TPUVM, it needs service account roles that grant it permission to create queued resources and ssh into them, such as the `TPU ADMIN` role. Clone MaxText, and cd into the root of the repo.
 
-2. Set your project, zone, and ssh keys.
+2. **Set your project, zone, and ssh keys.**
 
     Set your gcloud config, see https://cloud.google.com/sdk/gcloud/reference/config for more.
     ```
@@ -50,7 +51,7 @@ either be a TPUVM or not, but it cannot be one of the workers. If your runner ma
     ssh-keygen -f ~/.ssh/google_compute_engine
     ```
 
-3. Create your instances via Queued Resource (QR).
+3. **Create your instances via Queued Resource (QR).**
     Choose names for your TPUs and QR:
     ```
     TPU_PREFIX=$YOUR_TPU_NAME # Use new names when you create new TPUs
@@ -71,14 +72,14 @@ either be a TPUVM or not, but it cannot be one of the workers. If your runner ma
     ```
     gcloud alpha compute tpus queued-resources list --filter=$QR_ID
     ```
-4. Install dependencies.
+4. **Install dependencies.**
     Install the dependencies of `train.py` on each worker using `multihost_runner.py`:
     ```
     python3 multihost_runner.py --TPU_PREFIX=$TPU_PREFIX --COMMAND="bash setup.sh"
     ```
     If you are running the `multihost_runner.py` script from a TPUVM, you will need to set `--INTERNAL_IP=true`.
 
-5. Run your training job.
+5. **Run your training job.**
 
     Set a RUN_NAME for your job:
     ```
@@ -90,7 +91,7 @@ either be a TPUVM or not, but it cannot be one of the workers. If your runner ma
     ```
     If you are running the `multihost_runner.py` script from a TPUVM, you will need to set `--INTERNAL_IP=true`.
 
-6. Clean up TPUs and QR when finished.
+6. **Clean up TPUs and QR when finished.**
 
      ```
     gcloud alpha compute tpus queued-resources delete $QR_ID --force --async

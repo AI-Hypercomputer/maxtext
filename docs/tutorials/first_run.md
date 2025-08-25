@@ -1,4 +1,21 @@
-# Get started with MaxText
+<!--
+ Copyright 2024 Google LLC
+
+ Licensed under the Apache License, Version 2.0 (the "License");
+ you may not use this file except in compliance with the License.
+ You may obtain a copy of the License at
+
+      https://www.apache.org/licenses/LICENSE-2.0
+
+ Unless required by applicable law or agreed to in writing, software
+ distributed under the License is distributed on an "AS IS" BASIS,
+ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ See the License for the specific language governing permissions and
+ limitations under the License.
+ -->
+
+(first-run)=
+# Getting Started: First Run
 
 This topic provides a basic introduction to get your MaxText workload up and running on single host and multihost environments using Cloud TPUs or NVIDIA GPUs. To help you get familiar with MaxText, we recommend starting with a single host first and then moving to multihost.
 
@@ -31,7 +48,7 @@ python3 -m MaxText.train MaxText/configs/base.yml \
   dataset_type=synthetic \
   steps=10
 ```
-Optional: If you want to try training on a Hugging Face dataset, see [Data Input Pipeline](https://github.com/google/maxtext/blob/main/getting_started/Data_Input_Pipeline.md) for data input options.
+Optional: If you want to try training on a Hugging Face dataset, see [Data Input Pipeline](data-input-pipeline) for data input options.
 
 5. To demonstrate model output, run the following command:
 ```
@@ -68,11 +85,8 @@ Failed to execute XLA Runtime executable: run time error: custom call 'xla.gpu.a
 ```
 
 ## Multihost development
-There are three patterns for running MaxText with more than one host.
 
-1. Recommended: Google Kubernetes Engine (GKE) [Running Maxtext with XPK](Run_MaxText_via_xpk.md) - Quick experimentation and production support.
-2. Google Compute Engine (GCE) [Running Maxtext with Multihost Jobs](Run_MaxText_via_multihost_job.md) - Long running production jobs with queued resources.
-3. Google Compute Engine (GCE) [Running Maxtext with Multihost Runner](Run_MaxText_via_multihost_runner.md) -  Fast experiments via multiple ssh connections.
+Google Kubernetes Engine (GKE) is the recommended way to run MaxText on multiple hosts. It provides a managed environment for deploying and scaling containerized applications, including those that require TPUs or GPUs. See [Running Maxtext with XPK](run-xpk) for details.
 
 ## Next steps: Preflight optimizations
 
