@@ -40,30 +40,30 @@ Transformer = models.Transformer
 transformer_as_linen = models.transformer_as_linen
 
 @overload
-def from_pretrained(
+def from_config(
     config: pyconfig.HyperParameters,
     devices: Sequence[jax.Device] | None = None,
     *,
     model_mode: str = MODEL_MODE_TRAIN,
-) -> nnx_wrappers.ToLinen: ...
+) -> nnx_wrappers.ToLinen | models.TransformerLinenPure: ...
 @overload
-def from_pretrained(
+def from_config(
     config: pyconfig.HyperParameters,
     devices: Sequence[jax.Device] | None = None,
     *,
     model_mode: str = MODEL_MODE_TRAIN,
     rngs: nnx.Rngs,
 ) -> Transformer: ...
-def from_pretrained(
+def from_config(
     config: pyconfig.HyperParameters,
     devices: Sequence[jax.Device] | None = None,
     *,
     model_mode: str = MODEL_MODE_TRAIN,
     rngs: nnx.Rngs | None = None,
-) -> nnx_wrappers.ToLinen | Transformer:
-  """Load a pretrained MaxText model from checkpoint.
+) -> nnx_wrappers.ToLinen | models.TransformerLinenPure | Transformer:
+  """Instantiate a MaxText model.
 
-  This function loads a model from a checkpoint.
+  This function creates a model instance from config but does not load any states.
 
   Args:
       config: Config object.
@@ -72,7 +72,7 @@ def from_pretrained(
       Transformer: The loaded model instance (only the model)
 
   Example:
-      model = from_pretrained(config)
+      model = from_config(config)
   """
   devices_array = maxtext_utils.create_device_mesh(config, devices)
   mesh = Mesh(devices_array, config.mesh_axes)

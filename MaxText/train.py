@@ -529,7 +529,7 @@ def setup_train_loop(config, recorder, devices=None):
   """
 
   with maybe_record_goodput(recorder, GoodputEvent.TPU_INIT):
-    model = mt.from_pretrained(config, devices)
+    model = mt.from_config(config, devices)
     mesh = model.mesh
     init_rng, checkpoint_manager, learning_rate_schedule, tx = train_utils.create_training_tools(config, model, mesh)
 
@@ -698,8 +698,9 @@ def train_loop(config, recorder, state=None):
 
       metric_logger.buffer_and_write_train_metrics(metrics, step, step_time_delta)
 
-    state_to_save = state if not config.use_dpo else _split_dpo_state(state)[0]
-    checkpointing.maybe_save_checkpoint(checkpoint_manager, state_to_save, config, data_iterator)
+    if config.save_checkpoint_on_completion:
+      state_to_save = state if not config.use_dpo else _split_dpo_state(state)[0]
+      checkpointing.maybe_save_checkpoint(checkpoint_manager, state_to_save, config, data_iterator)
   except exceptions.StopTraining as e:
     max_logging.log(f"Training stopped: {str(e)}")
   finally:

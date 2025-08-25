@@ -53,11 +53,11 @@ Relevant Files:
 """
 import argparse
 import os, logging, sys
-from prompt_code_evaluation import CodeEvaluation
-from utils import get_last_defined_module, run_pytest_capture_output
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-
+# Add parent directory to path to allow imports from sibling directories
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+from code_evaluation_agent.prompt_code_evaluation import CodeEvaluation
+from code_evaluation_agent.utils import get_last_defined_module, run_pytest_capture_output
 from code_generation_agent.llm_agent import GeminiAgent
 from orchestration_agent.Utils import parse_python_code
 
@@ -195,7 +195,7 @@ def run_code_evaluation():
   all_passed, all_failed, total_files = 0, 0, 0
   for python_file, jax_file in zip(*get_file_pairs(pytorch_path, jax_path)):
     num_passed, num_failed = make_test_case_and_run(python_file, jax_file)
-    if num_passed == num_failed == 0: # when the code cannot be executed
+    if num_passed == num_failed == 0:  # when the code cannot be executed
       # Penalty in case of issue in test case and not executed
       num_failed = error_penalty
     logger.info(f"{python_file.split('/')[-1]} have {num_passed} cases passed and {num_failed} cases failed")

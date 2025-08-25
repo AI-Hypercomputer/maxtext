@@ -22,3 +22,6 @@ MaxText/inference_mlperf @vipannalla @mitalisi @gpolovets1 @mailvijayasingh @jrp
 
 # Workflow files
 .github/workflows @gobbleturk @khatwanimohit @shralex @parambole @richjames0
+
+# Benchmarking/Recipes
+benchmarks @SujeethJinesh

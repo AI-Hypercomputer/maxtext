@@ -18,6 +18,31 @@ import ast, re, os, sys, pytest, io, traceback
 from contextlib import redirect_stdout, redirect_stderr
 
 
+def get_assigned_names(node):
+  """Extract target names from an assignment AST node.
+
+  Handles simple names, attributes (e.g., self.value), tuple unpacking, and
+  subscripts (e.g., arr[0]). For non-name targets, uses ast.unparse to
+  reconstruct a readable string.
+
+  Args:
+    node: An ast.Assign node whose `targets` will be inspected.
+
+  Returns:
+    A list of strings representing targets in left-to-right order.
+  """
+  names = []
+  for target in node.targets:
+    match target:
+      case ast.Name(id=name):  # simple variable
+        names.append(name)
+      case ast.Attribute() | ast.Subscript():  # e.g., self.value or arr[0]
+        names.append(ast.unparse(target))
+      case ast.Tuple(elts=elts):  # multiple assignment
+        names.extend(elt.id for elt in elts if isinstance(elt, ast.Name))
+  return names
+
+
 def get_last_defined_module(code_str):
   """Returns the name of the last defined class or function in a string of Python code.
 
@@ -39,6 +64,8 @@ def get_last_defined_module(code_str):
     for node in tree.body:
       if isinstance(node, (ast.FunctionDef, ast.ClassDef)):
         last_name = node.name
+      elif isinstance(node, ast.Assign):
+        last_name = get_assigned_names(node)[-1]
 
     return last_name
   except SyntaxError as e:

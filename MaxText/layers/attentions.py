@@ -505,7 +505,12 @@ class Attention(nnx.Module):
     # NOTE: T5 does not explicitly rescale the attention logits by
     #       1/sqrt(depth_kq)!  This is folded into the initializers of the
     #       linear transformations, which is equivalent under Adafactor.
-    depth_scaling = jnp.sqrt(self.head_dim).astype(self.dtype)
+    # We disable depth_scaling when using qk_norm or a query_pre_attn_scalar
+    # to avoid applying scaling twice.
+    if self.config.use_qk_norm or (self.query_pre_attn_scalar is not None and self.query_pre_attn_scalar != 1.0):
+      depth_scaling = 1.0
+    else:
+      depth_scaling = jnp.sqrt(self.head_dim).astype(self.dtype)
 
     def query_init(*args):
       # pylint: disable=no-value-for-parameter
