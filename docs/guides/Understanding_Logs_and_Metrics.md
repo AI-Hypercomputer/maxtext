@@ -65,8 +65,6 @@ Config param checkpoint_dir: gs://runner-maxtext-logs/demo/checkpoints/
 
 ### Understanding Output Paths
 
-
-
 MaxText organizes all of your run's artifacts into a main output directory. The primary location for your run is constructed by combining the `base_output_directory` and the `run_name` you specify in your command. Based on the logs above, the base path for this specific run is `gs://runner-maxtext-logs/demo`.
 
 Within this base path, MaxText creates several subdirectories for different types of artifacts. Many of these are optional and only created if you enable them with a specific flag.
@@ -115,11 +113,11 @@ TFRT TPU v5
 Num_devices: 4, shape (1, 1, 4, 1, 1, 1, 1, 1, 1, 1, 1, 1)
 ```
 
-  * **Software**: You can confirm the versions of `Jax` and `Jaxlib`, which are core frameworks for MaxText library.
-  * **Hardware**: You are running on the `TPU v5` accelerator with `4` total devices.
-  * **Parallelism Strategy**: The `shape` tuple `(1, 1, 4, 1, 1, 1, 1, 1, 1, 1, 1, 1)` shows how your devices are arranged for parallelism. 
-    - Recall from Section 1, `Config param data_sharding: (('data', 'stage', 'fsdp', 'fsdp_transpose', 'sequence', 'context', 'context_autoregressive', 'tensor', 'tensor_transpose', 'tensor_sequence', 'expert', 'autoregressive'),)`. This confirms that all 4 devices are being used for Fully Sharded Data Parallelism (FSDP), which is the default behavior.
-  
+- **Software**: You can confirm the versions of `Jax` and `Jaxlib`, which are core frameworks for MaxText library.
+- **Hardware**: You are running on the `TPU v5` accelerator with `4` total devices.
+- **Parallelism Strategy**: The `shape` tuple `(1, 1, 4, 1, 1, 1, 1, 1, 1, 1, 1, 1)` shows how your devices are arranged for parallelism. 
+	- Recall from Section 1, `Config param data_sharding: (('data', 'stage', 'fsdp', 'fsdp_transpose', 'sequence', 'context', 'context_autoregressive', 'tensor', 'tensor_transpose', 'tensor_sequence', 'expert', 'autoregressive'),)`. This confirms that all 4 devices are being used for Fully Sharded Data Parallelism (FSDP), which is the default behavior.
+
 
 ## 3 Memory and TFLOP
 
@@ -217,31 +215,34 @@ As shown in `seconds: 1.012`, $\text{measured step time in seconds} \approx 1.01
 **TFLOP Per Second Per device**
 
 - It is [computed](https://github.com/AI-Hypercomputer/maxtext/blob/e969faabbb571285a51545530f34d8f0a9f237e9/MaxText/metric_logger.py#L193-L194) as 
-$$
-\text{tflop/s/device} = \frac{\text{model tflop per device}}{\text{measured step time in seconds}}
-$$
+
+$$\text{tflop/s/device} = \frac{\text{model tflop per device}}{\text{measured step time in seconds}}$$
+
 - Here we have `TFLOP/s/device: 31.496`. Let's try to verify manually: $31.86 /1.012 = 31.482$. Not exactly same but close, since the both tflop and time are rounded in log.
 - Further, we can calculate **Model Flop Utilization (MFU)** from this:
-  $$
-  \text{MFU} = \frac{\text{tflop/s/device}}{\text{peak hardware tflop/s}}
-  $$For TPU v5p, $\text{peak hardware tflop/s}=459$. Thus, $31.496 / 459 = 6.86\%$.
+  
+$$\text{MFU} = \frac{\text{tflop/s/device}}{\text{peak hardware tflop/s}}$$
+  
+  For TPU v5p, $\text{peak hardware tflop/s}=459$. Thus, $31.496 / 459 = 6.86\%$.
 
 **Tokens Per Second Per Device (throughput)**
 
 -  It is [computed](https://github.com/AI-Hypercomputer/maxtext/blob/e969faabbb571285a51545530f34d8f0a9f237e9/MaxText/metric_logger.py#L197-L199) as
+
 $$\text{token/s/device} = \frac{\text{number of tokens per device}}{\text{measured step time in seconds}}$$
+
   - The numerator is from [calculate_tokens_training_per_device](https://github.com/AI-Hypercomputer/maxtext/blob/e969faabbb571285a51545530f34d8f0a9f237e9/MaxText/maxtext_utils.py#L151)
-  $$
-  \text{number of tokens per device} = \text{per device batch size} \times \text{max target length}
-  $$
-  - Here we have `Tokens/s/device: 2024.558`. Let's try to verify manually: $ 1 \times 2048 /1.012 = 2023.715$. Not exactly same but close, since the time is rounded in log.
+
+$$\text{number of tokens per device} = \text{per device batch size} \times \text{max target length}$$
+
+  - Here we have `Tokens/s/device: 2024.558`. Let's try to verify manually: $1 \times 2048 /1.012 = 2023.715$. Not exactly same but close, since the time is rounded in log.
 
 
 ### 4.2 Learning Metrics
 
 **Loss**. The loss is the key indicator of learning progress, which should decrease over time steps. Ideally, we want it to converge to a small value.
 
-**Total weight**. When discussing the throughput, we have $\text{number of tokens} = \text{per device batch size} \times \text{max target length} \times \text{number of device}$. In data preprocessing, for each sentence, we truncate or pad to max target length. The pad tokens are meaningless and the loss are calculated based on the nonpad tokens. Thus, we monitor $\text{number of nonpad tokens}$, which is shown as [total weights](https://github.com/AI-Hypercomputer/maxtext/blob/f82ce194c490d668b14574a072a0a630c27bbd6e/MaxText/train.py#L307).
+**Total Weights**. When discussing the throughput, we have $\text{number of tokens} = \text{per device batch size} \times \text{max target length} \times \text{number of device}$. In data preprocessing, for each sentence, we truncate or pad to max target length. The pad tokens are meaningless and the loss are calculated based on the nonpad tokens. Thus, we monitor $\text{number of nonpad tokens}$, which is shown as [total weights](https://github.com/AI-Hypercomputer/maxtext/blob/f82ce194c490d668b14574a072a0a630c27bbd6e/MaxText/train.py#L307).
 - Here we see `total_weights: 8192` for all steps. This is because we are using `dataset_type=synthetic`, where all sentences are generated with length of `max_target_length=2048`. As a result, there are no padded tokens and total weights = number of tokens. 
 - However, in real dataset, sentences can have variable lengths and total weights < number of tokens. For example, we can set `dataset_type=tfds dataset_path=gs://maxtext-dataset dataset_name='c4/en:3.0.1'`, and will see total weights is smaller than 8192:
   ```
