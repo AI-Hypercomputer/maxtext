@@ -15,15 +15,15 @@
 """ Common Max Utils needed by multiple modules.
 All the functions include MaxText modules, such as Pyconfig, should be moved to MaxText utils file."""
 
+from collections.abc import Sequence
+from functools import partial
+from typing import Any, Tuple
+import collections
 import functools
-import time
 import os
 import socket
 import subprocess
-import collections
-from collections.abc import Sequence
-from typing import Any
-from functools import partial
+import time
 
 import numpy as np
 
