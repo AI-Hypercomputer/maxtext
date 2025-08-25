@@ -540,7 +540,7 @@ class InferenceWorker:
         logprobs = np.array(
             [token_output.log_prob.flatten() for token_output in self.completion_tokens_by_id[input_id]]
         ).flatten()
-        prompt_logprobs = self.prompt_logprobs_by_id[input_id].flatten()
+        prompt_logprobs = np.array(self.prompt_logprobs_by_id[input_id]).flatten()
         completion_outputs.append(
             CompletionOutput(
                 index=input_id,
@@ -724,6 +724,7 @@ class OfflineEngine:
       config: Any,
       params: None | Params = None,
       enable_batch_prefill: bool = False,
+      is_data_padded: bool = True,
       min_decode_steps: int = 10,
       tokenizer: Any = None,
       eos_ids: list[int] | None = None,
@@ -766,6 +767,7 @@ class OfflineEngine:
     self.params = params
     self.min_decode_steps = min_decode_steps
     self.enable_batch_prefill = enable_batch_prefill
+    self.is_data_padded = is_data_padded
     self.mesh = mesh
     self.tokenizer = tokenizer
     self.eos_ids = eos_ids
@@ -867,7 +869,8 @@ class OfflineEngine:
     if len(data) != len({item.id for item in data}):
       raise ValueError("All data ids must be unique")
 
-    data = self.pad_data(data)
+    if not self.is_data_padded:
+      data = self.pad_data(data)
 
     if self.enable_batch_prefill:
       return sorted(data, key=lambda x: x.tokens.shape[0])
