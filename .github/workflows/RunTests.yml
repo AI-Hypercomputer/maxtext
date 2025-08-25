@@ -161,3 +161,27 @@ jobs:
       uses: jayqi/failed-build-issue-action@1a893bbf43ef1c2a8705e2b115cd4f0fe3c5649b  # v1.2.0
       with:
         github-token: ${{ secrets.GITHUB_TOKEN }}
+
+  close_issue_on_success:
+    name: Close issue on success # closes the issue created by notify_failure job if the build is now successful
+    needs: [cpu_unit_tests, gpu_unit_tests, gpu_integration_tests, tpu_unit_tests, tpu_integration_tests]
+    if: ${{ !contains(needs.*.result, 'failure') }}
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+    - name: Find and close existing issue
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        # Use GitHub CLI to find the issue.
+        # The title needs to match what the failed-build-issue-action uses.
+        ISSUE_TITLE="Failed build: Tests"
+        ISSUE_NUMBER=$(gh issue list --search "is:open in:title \"$ISSUE_TITLE\"" --json number -q '.[0].number')
+
+        if [ -n "$ISSUE_NUMBER" ]; then
+          echo "Found open issue #$ISSUE_NUMBER. Closing it."
+          gh issue close $ISSUE_NUMBER --comment "The build has passed, automatically closing this issue."
+        else
+          echo "No open issue with title '$ISSUE_TITLE' found."
+        fi
