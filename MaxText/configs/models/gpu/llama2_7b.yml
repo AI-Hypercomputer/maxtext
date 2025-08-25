@@ -8,7 +8,7 @@ max_target_length: 4096
 model_name: "llama2-7b"
 enable_checkpointing: False
 attention: "cudnn_flash_te"
-remat_policy: "minimal_flash"
+remat_policy: "minimal_with_context"
 use_iota_embed: True
 scan_layers: False
 dataset_type: "synthetic"

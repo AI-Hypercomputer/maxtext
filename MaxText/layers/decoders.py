@@ -264,8 +264,31 @@ class Decoder(nn.Module):
     policy = None
     cfg = self.config
     if cfg.remat_policy != "none":
-      if cfg.remat_policy == "minimal":
-        policy = jax.checkpoint_policies.checkpoint_dots_with_no_batch_dims
+      if cfg.remat_policy == "minimal_with_context":
+        policy = jax.checkpoint_policies.save_only_these_names(
+            "query_proj",
+            "value_proj",
+            "key_proj",
+            "qkv_proj",
+            "context",
+            "out_proj",
+            "mlpwi_0",
+            "mlpwi_1",
+            "mlpwi",
+            "mlpwo",
+        )
+      elif cfg.remat_policy == "minimal":
+        policy = jax.checkpoint_policies.save_only_these_names(
+            "query_proj",
+            "value_proj",
+            "key_proj",
+            "qkv_proj",
+            "out_proj",
+            "mlpwi_0",
+            "mlpwi_1",
+            "mlpwi",
+            "mlpwo",
+        )
       elif cfg.remat_policy == "save_dot_with_context_except_mlp":
         policy = jax.checkpoint_policies.save_only_these_names(
             "query_proj",
@@ -307,20 +330,28 @@ class Decoder(nn.Module):
             offload_dst="pinned_host",
         )
       elif cfg.remat_policy == "minimal_offloaded":
-        policy = jax.checkpoint_policies.offload_dot_with_no_batch_dims(offload_src="device", offload_dst="pinned_host")
+        policy = jax.checkpoint_policies.save_and_offload_only_these_names(
+            names_which_can_be_saved=[],
+            names_which_can_be_offloaded=[
+                "query_proj",
+                "value_proj",
+                "key_proj",
+                "qkv_proj",
+                "out_proj",
+                "mlpwi_0",
+                "mlpwi_1",
+                "mlpwi",
+                "mlpwo",
+            ],
+            offload_src="device",
+            offload_dst="pinned_host",
+        )
       elif cfg.remat_policy == "custom":
         policy = jax.checkpoint_policies.save_and_offload_only_these_names(
             names_which_can_be_saved=cfg.tensors_on_device,
             names_which_can_be_offloaded=cfg.tensors_to_offload,
             offload_src="device",
             offload_dst="pinned_host",
-        )
-      elif cfg.remat_policy == "minimal_flash":
-        policy = jax.checkpoint_policies.save_from_both_policies(
-            jax.checkpoint_policies.checkpoint_dots_with_no_batch_dims,
-            jax.checkpoint_policies.save_only_these_names(
-                "context",
-            ),
         )
       elif cfg.remat_policy == "save_out_proj":
         policy = jax.checkpoint_policies.save_only_these_names(
@@ -422,9 +453,7 @@ class Decoder(nn.Module):
     else:
       raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block.value=}")
 
-  def scan_decoder_layers(
-      self, cfg, decoder_layer, length, metadata_axis_name, mesh, in_axes_tuple, model_mode, **kwargs
-  ):
+  def scan_decoder_layers(self, cfg, decoder_layer, length, metadata_axis_name, mesh, in_axes_tuple, model_mode, **kwargs):
     """scan decoder layers, calls `flax.linen.transforms.scan`"""
     initializing = self.is_mutable_collection("params")
     params_spec = cfg.param_scan_axis if initializing else ScanIn(cfg.param_scan_axis)
@@ -744,9 +773,7 @@ class Decoder(nn.Module):
           # Iterate over the two layer groups (dense and MoE) and apply layer transformation
           for layer, num_layers, layer_prefix in zip(layers, num_layers_list, layer_prefixes):
             for index in range(num_layers):
-              y = layer(
-                  config=cfg, mesh=mesh, name=f"{layer_prefix}_{index}", quant=self.quant, model_mode=self.model_mode
-              )(
+              y = layer(config=cfg, mesh=mesh, name=f"{layer_prefix}_{index}", quant=self.quant, model_mode=self.model_mode)(
                   y,
                   decoder_segment_ids,
                   decoder_positions,
