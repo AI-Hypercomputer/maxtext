@@ -22,7 +22,7 @@ Training & Evaluation:
     model_name=$MODEL_NAME load_parameters_path=$CHECKPOINT_PATH \
     hf_access_token=$HF_ACCESS_TOKEN tokenizer_path=$TOKENIZER_PATH \
     per_device_batch_size=1 max_target_length=1024 \
-    eval_interval=2 eval_steps=2 steps=10 profiler=xplane
+    eval_interval=2 eval_steps=2 steps=10 profiler=xplane weight_dtype=bfloat16
 
 Training:
   python3 -m MaxText.sft.sft_trainer MaxText/configs/sft.yml \
@@ -30,7 +30,7 @@ Training:
     model_name=$MODEL_NAME load_parameters_path=$CHECKPOINT_PATH \
     hf_access_token=$HF_ACCESS_TOKEN tokenizer_path=$TOKENIZER_PATH \
     per_device_batch_size=1 max_target_length=1024 \
-    eval_interval=-1 steps=10 profiler=xplane
+    eval_interval=-1 steps=10 profiler=xplane weight_dtype=bfloat16
 """
 
 from typing import Sequence
@@ -86,9 +86,9 @@ def get_tunix_config(mt_config):
       profiler_options=profiler_options,
   )
 
-def get_maxtext_model(config):
+def get_maxtext_model(config, default_loss_function):
   def create_model():
-    return mt.from_pretrained(config, rngs=nnx.Rngs(params=0, dropout=1))
+    return mt.from_pretrained(config, rngs=nnx.Rngs(params=0, dropout=1)) # TODO: CHECK THE RNGs
 
   abstract_model = nnx.eval_shape(create_model)
   graphdef, abstract_state = nnx.split(abstract_model)
@@ -123,11 +123,14 @@ def get_maxtext_model(config):
     if checkpoint:
       nnx.update(model, checkpoint)
 
-    # Required when using Tunix default loss function.
-    tunix_model = TunixMaxTextLlama(
-        base_model=model,
-        use_attention_mask=False,  # trust Tunix loss masking
-    )
+    if default_loss_function:
+      # Required when using Tunix default loss function.
+      tunix_model = TunixMaxTextLlama(
+          base_model=model,
+          use_attention_mask=False,  # trust Tunix loss masking
+      )
+    else:
+      tunix_model = model
 
   return tunix_model, mesh
 
@@ -144,11 +147,27 @@ def use_tunix_default_loss_function(trainer):
   trainer = trainer.with_gen_model_input_fn(gen_model_input_fn)
   return trainer
 
+def use_maxtext_loss_function(trainer, mt_config):
+  def loss_fn(model, inputs, inputs_position, inputs_segmentation,
+                        targets, targets_position, targets_segmentation):
+    from MaxText.train import loss_fn
+    data = {
+        "inputs": inputs,
+        "inputs_position": inputs_position,
+        "inputs_segmentation": inputs_segmentation,
+        "targets": targets,
+        "targets_position": targets_position,
+        "targets_segmentation": targets_segmentation,
+    }
+    return loss_fn(model, mt_config, data, dropout_rng=None, params=None, is_train=True)
 
-def train(mt_config, goodput_recorder=None):
+  trainer = trainer.with_loss_fn(loss_fn, has_aux=True)
+  return trainer
+
+def train(mt_config, goodput_recorder=None, default_loss_function=True):
   tunix_config = get_tunix_config(mt_config)
   with maybe_record_goodput(goodput_recorder, GoodputEvent.TPU_INIT):
-    model, mesh = get_maxtext_model(mt_config)
+    model, mesh = get_maxtext_model(mt_config, default_loss_function)
     learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(mt_config)
     optimizer = optimizers.get_optimizer(mt_config, learning_rate_schedule)
 
@@ -159,7 +178,10 @@ def train(mt_config, goodput_recorder=None):
     trainer = peft_trainer.PeftTrainer(model, optimizer, tunix_config)
     trainer.with_training_hooks(training_hooks)
     trainer.with_data_hooks(data_hooks)
-    trainer = use_tunix_default_loss_function(trainer)
+    if default_loss_function:
+      trainer = use_tunix_default_loss_function(trainer)
+    else:
+      trainer = use_maxtext_loss_function(trainer, mt_config)
 
   with mesh:
     trainer.train(data_hooks.train_data_iterator, data_hooks.eval_data_iterator)
@@ -178,7 +200,7 @@ def main(argv: Sequence[str]) -> None:
   goodput_recorder = create_goodput_recorder(mt_config)
 
   with maybe_record_goodput(goodput_recorder, GoodputEvent.JOB):
-    train(mt_config, goodput_recorder)
+    train(mt_config, goodput_recorder, default_loss_function=False)
 
 
 if __name__ == "__main__":

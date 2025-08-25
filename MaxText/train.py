@@ -265,9 +265,6 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
     loss: average loss
     aux: a dictionary including intermediate_outputs, total_loss, and total_weights
   """
-  # inputs, targets, segments, positions = apply_args
-  rng1, aqt_rng = jax.random.split(dropout_rng)
-
   # decimate proportion of data when per_device_batch_size<1
   if is_train:
     for k, v in data.items():
@@ -286,18 +283,36 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
   if config.mtp_eval_target_module > 0 and not is_train:
     mutable_collections.append("mtp_acceptance")
 
-  logits, intermediate_outputs = model.apply(
-      params,
-      data["inputs"],
-      data["inputs_position"],
-      decoder_segment_ids=data["inputs_segmentation"],
-      encoder_images=data["images"] if config.use_multimodal else None,
-      enable_dropout=config.enable_dropout if is_train else False,
-      rngs={"dropout": rng1, "params": aqt_rng},
-      mutable=mutable_collections,
-      decoder_target_tokens=data["targets"],
-      decoder_target_mask=data["targets_segmentation"],
-  )
+  if isinstance(model, nn.Module):
+    # inputs, targets, segments, positions = apply_args
+    rng1, aqt_rng = jax.random.split(dropout_rng)
+    
+    # Flax Linen model
+    logits, intermediate_outputs = model.apply(
+        {"params": params},
+        data["inputs"],
+        data["inputs_position"],
+        decoder_segment_ids=data["inputs_segmentation"],
+        encoder_images=data["images"] if config.use_multimodal else None,
+        enable_dropout=config.enable_dropout if is_train else False,
+        rngs={"dropout": rng1, "params": aqt_rng},
+        mutable=mutable_collections,
+        decoder_target_tokens=data["targets"],
+        decoder_target_mask=data["targets_segmentation"],
+    )
+  else:
+    # Flax NNX model
+    logits = model(
+        decoder_input_tokens=data["inputs"],
+        decoder_positions=data["inputs_position"],
+        decoder_segment_ids=data["inputs_segmentation"],
+        encoder_images=data["images"] if config.use_multimodal else None,
+        enable_dropout=config.enable_dropout if is_train else False,
+        decoder_target_tokens=data["targets"],
+        decoder_target_mask=data["targets_segmentation"],
+    )
+    intermediate_outputs = {}
+
   one_hot_targets = jax.nn.one_hot(data["targets"], config.vocab_size)
   xent, _ = max_utils.cross_entropy_with_logits(logits, one_hot_targets, 0.0)
   xent = nn.with_logical_constraint(xent, ("activation_embed_and_logits_batch", "activation_length"))
@@ -379,9 +394,7 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
       acc_grad_and_loss["loss"] += aux["total_loss"]
       acc_grad_and_loss["moe_lb_loss"] += aux["moe_lb_loss"]
       acc_grad_and_loss["mtp_loss"] += aux["mtp_loss"]
-      acc_grad_and_loss["grad"] = jax.tree_util.tree_map(
-          lambda x, y: x + y, cur_batch_gradient, acc_grad_and_loss["grad"]
-      )
+      acc_grad_and_loss["grad"] = jax.tree_util.tree_map(lambda x, y: x + y, cur_batch_gradient, acc_grad_and_loss["grad"])
       acc_grad_and_loss["total_weights"] += aux["total_weights"]
       return acc_grad_and_loss, aux
 
