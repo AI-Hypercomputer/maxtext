@@ -17,7 +17,6 @@
 
 from typing import Sequence
 from MaxText.tests.sharding_dump import TEST_CASES
-import os
 import subprocess
 from absl import app
 
@@ -41,9 +40,6 @@ def run_single_dump(model_name: str, topology: str, num_slice: str) -> None:
 def main(argv: Sequence[str]) -> None:
   """Generate sharding json files for every combination of model, topology and slices."""
   for model_name, topology, num_slice in TEST_CASES:
-    json_path = f"sharding_info/{model_name}/{topology}/slice_{num_slice}/named_shardings.json"
-    if os.path.exists(json_path):
-      continue
     run_single_dump(model_name, topology, num_slice)
 
 
