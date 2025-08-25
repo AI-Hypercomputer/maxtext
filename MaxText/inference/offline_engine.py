@@ -714,7 +714,7 @@ class InferenceWorker:
 
     index = len(self.completion_tokens_by_id[prompt_id])
     if prompt_logp is not None:
-      self.prompt_logprobs_by_id[prompt_id] = [prompt_logp]
+      self.prompt_logprobs_by_id[prompt_id] = jax.numpy.array([prompt_logp])
     self.completion_tokens_by_id[prompt_id].append(TokenOutput(result_token, log_prob))
     return ((result_token == self.eos_ids).any()) or (index + 1 == self.max_decode_length)
 
@@ -727,6 +727,7 @@ class OfflineEngine:
       config: Any,
       params: None | Params = None,
       enable_batch_prefill: bool = False,
+      is_data_padded: bool = True,
       min_decode_steps: int = 10,
       tokenizer: Any = None,
       eos_ids: list[int] | None = None,
@@ -769,6 +770,7 @@ class OfflineEngine:
     self.params = params
     self.min_decode_steps = min_decode_steps
     self.enable_batch_prefill = enable_batch_prefill
+    self.is_data_padded = is_data_padded
     self.mesh = mesh
     self.tokenizer = tokenizer
     self.eos_ids = eos_ids
@@ -870,7 +872,8 @@ class OfflineEngine:
     if len(data) != len({item.id for item in data}):
       raise ValueError("All data ids must be unique")
 
-    data = self.pad_data(data)
+    if not self.is_data_padded:
+      data = self.pad_data(data)
 
     if self.enable_batch_prefill:
       return sorted(data, key=lambda x: x.tokens.shape[0])
