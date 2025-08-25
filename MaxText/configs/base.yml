@@ -796,3 +796,4 @@ projector_dropout_for_vit: 0.0
 # Subslice shape in the form of "x,y,z" when using pathways (single controller). 
 # Example: "8,8" to use a 8x8 subgrid (64 chips) of a full pod (16x16) of trillium.
 subslice_shape: ""
+max_to_keep: 5
