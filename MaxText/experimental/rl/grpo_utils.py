@@ -110,17 +110,14 @@ def generate_offline_completions(config, tokenizer_model, inference_engine, data
     The input `data` dictionary updated with the generated completions,
     segmentations, positions, and log-probabilities.
   """
-  data[config.train_data_columns] = np.asarray(
-      jnp.repeat(data[config.train_data_columns], config.num_generations, axis=0)
-  )
-  data[f"{config.train_data_columns}_true_length"] = np.asarray(
-      jnp.repeat(data[f"{config.train_data_columns}_true_length"], config.num_generations, axis=0)
-  )
+  data[config.train_data_columns] = jnp.repeat(data[config.train_data_columns], config.num_generations, axis=0)
+  
+  data[f"{config.train_data_columns}_true_length"] = jnp.repeat(data[f"{config.train_data_columns}_true_length"], config.num_generations, axis=0)
   input_data = []
   for i, d in enumerate(data[config.train_data_columns]):
     input_data.append(
         InputData(
-            id=f"input_{i}",
+            id=i,
             tokens=np.array(d),
             true_length=np.array(data[f"{config.train_data_columns}_true_length"][i])[0],
         )

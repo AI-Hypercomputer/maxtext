@@ -36,7 +36,7 @@ dataset_type=hf hf_path='trl-lib/tldr' \
 enable_single_controller=true \
 dtype=bfloat16 weight_dtype=bfloat16 \
 allow_split_physical_axes=true enable_goodput_recording=false monitor_goodput=false \
-profiler=xplane skip_first_n_steps_for_profiler=10 profiler_steps=5"
+profiler=xplane skip_first_n_steps_for_profiler=5 profiler_steps=3"
 
 TRAINING_ARGS="run_name=${RUN_NAME} scan_layers=true \
 inference_replicas=${NUM_SAMPLERS} inference_devices_per_replica=${DEVICES_PER_SAMPLER} \
