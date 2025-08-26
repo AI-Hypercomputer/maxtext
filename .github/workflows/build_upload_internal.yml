@@ -68,6 +68,8 @@ jobs:
             DEVICE=${{ inputs.device_type }}
             TEST_TYPE=unit_test
       - name: Print final dependencies
+        env:
+          DOCKER_HOST: tcp://localhost:1234
         run: |
           echo "--- Final dependencies for image gcr.io/tpu-prod-env-multipod/maxtext_${{ github.run_id }}:${{ inputs.device_type }} ---"
           docker run --rm gcr.io/tpu-prod-env-multipod/maxtext_${{ github.run_id }}:${{ inputs.device_type }} pip freeze
