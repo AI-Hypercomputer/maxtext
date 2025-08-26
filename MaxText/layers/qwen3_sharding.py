@@ -286,7 +286,7 @@ class Qwen3ShardingTraining(MeshSharding):
         case "activation_length_no_exp", TT.Activation:
           axis_mapping = (sp, cp) if tensor_name not in ("query", "key", "value", "out") else (cp,)
         case "activation_kv", TT.Activation:
-          axis_mapping = (tp, tp_t, tp_s) if tensor_name != ("out") else ()
+          axis_mapping = ()
         case "activation_kv_batch", TT.Activation:
           axis_mapping = (dp, fsdp, fsdp_t, ep)
         case "activation_kv_batch_no_exp", TT.Activation:
