@@ -117,12 +117,9 @@ class DetokenizationTask:
   prompt_logp: Any = None
   prompt_ids: list = None
   slots: list = None
-  true_lengths: dict = None
   # For decode tasks  
   tokens_buffer: list = None
   logprob_buffer: list = None
-  slot_to_id: dict = None
-  min_decode_steps: int = None
 
 
 class SafeThread(threading.Thread):
@@ -381,8 +378,7 @@ class InferenceWorker:
     # Inference state (initialized later)
     self.running = False
     self.detokenization_queue = queue.Queue()
-    self.processed_token_queue = queue.Queue()
-    self.empty_decode_slots: list[int] = []
+    self.empty_decode_slots = queue.Queue()
     self.slot_to_id: dict[int, int] = {}
     self.decode_state: DecodeState = None
     self.completion_tokens_by_id: dict[Hashable, list[TokenOutput]] = {}
@@ -472,11 +468,12 @@ class InferenceWorker:
     self.running = False
     self.completion_tokens_by_id = defaultdict(list)
     self.prompt_logprobs_by_id = defaultdict(list)
-    self.empty_decode_slots = list(range(self.decode_batch_size))
+    self.empty_decode_slots = queue.Queue()
+    for i in range(self.decode_batch_size):
+        self.empty_decode_slots.put(i)
     self.slot_to_id = {}
     self.true_lengths = {}
     self.detokenization_queue = queue.Queue()
-    self.processed_token_queue = queue.Queue()
         
     max_logging.log("InferenceWorker state reset complete")
 
@@ -522,20 +519,13 @@ class InferenceWorker:
     )
     detokenization_thread.start()
 
-    # Start token emission thread
-    token_emission_thread = SafeThread(
-        target=self.background_token_emission,
-        name="token_emission",
-    )
-    token_emission_thread.start()
-
     # Process each input
     for row in data:
       # 1. Wait for an empty slot
-      while not self.empty_decode_slots:
+      while self.empty_decode_slots.empty():
         self.decode()
       # 2. Get an available slot
-      slot = self.empty_decode_slots.pop()
+      slot = self.empty_decode_slots.get()
       # 3. Prefill and insert kv cache
       self.prefill_helper.process(
           model_params=self.params,
@@ -554,26 +544,15 @@ class InferenceWorker:
     while not all(value is None for value in self.slot_to_id.values()):
       self.decode()
 
-    # Wait for detokenization and token emission to complete
+    # Wait for detokenization to complete
     self.running = False
-    max_logging.log("Inference worker: joining detokenization and token emission threads")
+    max_logging.log("Inference worker: joining detokenization thread")
     start_time = time.time()
-    
-    # Wait for detokenization queue to be empty and thread to finish
-    # while not self.detokenization_queue.empty():
-    #   time.sleep(0.001)
     
     with jax.profiler.TraceAnnotation("Flushing detokenization thread"):
       detokenization_thread.join()
     
-    # Wait for processed token queue to be empty and thread to finish  
-    # while not self.processed_token_queue.empty():
-    #   time.sleep(0.001)
-      
-    with jax.profiler.TraceAnnotation("Flushing token emission thread"):
-      token_emission_thread.join()
-    
-    max_logging.log(f"Inference worker: background threads joined in {time.time() - start_time} seconds")
+    max_logging.log(f"Inference worker: detokenization thread joined in {time.time() - start_time} seconds")
 
   def _build_final_outputs(self, input_data: list[InputData]) -> list[CompletionOutput]:
     """Build the final list of CompletionOutput."""
@@ -613,7 +592,7 @@ class InferenceWorker:
 
   def prefill_done(self, prefill_result: list[PrefillResult], prompt_ids: list[any], decode_state: DecodeState):
     """Callback function called when prefill completes.
-    This function queues the prefill data for background detokenization.
+    This function queues the prefill data for background processing.
 
     Args:
         prefill_result: list of (token, slot) tuples
@@ -622,34 +601,34 @@ class InferenceWorker:
     """
     # Update decode state
     self.decode_state = decode_state
-    
-    # Extract data for detokenization
-    result_tokens_list = []
-    log_prob_list = []
-    prompt_logp_list = []
+    # Process each prefill result
     slots = []
-    
-    for result in prefill_result:
+    result_tokens_list = []
+    prompt_logp_list = []
+    for i, result in enumerate(prefill_result):
+      input_id = prompt_ids[i]
+      slot = result.slot
+      self.slot_to_id[slot] = input_id
+      slots.append(slot)
       result_tokens_list.append(result.result_tokens)
-      slots.append(result.slot)
       prompt_logp_list.append(result.prompt_logp)
     
-    # Queue detokenization task (non-blocking)
+    # Queue detokenization task
     task = DetokenizationTask(
         task_type="prefill",
         result_tokens=result_tokens_list,
         prompt_logp=prompt_logp_list,
         prompt_ids=prompt_ids,
         slots=slots,
-        true_lengths=self.true_lengths
     )
     self.detokenization_queue.put_nowait(task)
+    print(f"queued detokenization task from prefill for {prompt_ids}")
 
   def decode(self):
     """Run decode steps on current decoder state.
 
     Performs `self.min_decode_steps` decode operations
-    and queues results for background detokenization.
+    and queues results for background processing.
     """
 
     tokens_buffer = []
@@ -665,10 +644,9 @@ class InferenceWorker:
         task_type="decode",
         tokens_buffer=tokens_buffer,
         logprob_buffer=logprob_buffer,
-        slot_to_id=self.slot_to_id.copy(),  # Copy to avoid race conditions
-        min_decode_steps=self.min_decode_steps
     )
     self.detokenization_queue.put_nowait(task)
+    print(f"queued detokenization task from decode for {self.slot_to_id}")
 
   @functools.partial(jax.jit, static_argnums=(0,), donate_argnums=(2,))
   def _jitted_generate_fn(self, params, decode_state, rng):
@@ -676,135 +654,70 @@ class InferenceWorker:
     return decode_state, result_tokens.data[:, 0], result_tokens.log_prob
 
   def background_detokenization(self):
-    """Background thread that handles all GPU-to-CPU transfers.
+    """Background thread that handles all GPU-to-CPU transfers and token emission.
     
     This thread processes DetokenizationTask objects from the queue,
-    performs the numpy conversions, and forwards processed tokens
-    to the token emission thread.
+    performs the numpy conversions, emits tokens, and manages decode slots.
     """
-    max_logging.log("Inference worker: starting background detokenization thread")
+    max_logging.log("Inference worker: starting detokenization thread")
     
     while True:
       try:
-        task = self.detokenization_queue.get(timeout=0.01)
+        task = self.detokenization_queue.get(timeout=0.1)
+        # print("getting task", task)
       except queue.Empty:
         if not self.running and self.detokenization_queue.empty():
           break
+        print("self.running = ", self.running, "self.detokenization_queue", self.detokenization_queue.qsize())
         continue
       
       start_time = time.time()
+      newly_empty = []
       
       if task.task_type == "prefill":
-        # Process prefill results
-        with jax.profiler.TraceAnnotation("convert_to_numpy_prefill"):
+        # Process prefill results - convert to numpy and emit
+        with jax.profiler.TraceAnnotation("convert_to_numpy_and_emit_prefill"):
           for i, result_tokens in enumerate(task.result_tokens):
             prompt_id = task.prompt_ids[i]
             slot = task.slots[i]
             prompt_logp = task.prompt_logp[i]
-            true_length = task.true_lengths[prompt_id]
+            true_length = self.true_lengths[prompt_id]
             
             # Convert to numpy
             first_token = np.array(result_tokens.data[:, 0])
             log_prob = np.array(result_tokens.log_prob)
             prompt_logp_np = np.array(prompt_logp)[:, :true_length]
             
-            # Send to token emission thread
-            self.processed_token_queue.put_nowait({
-                'type': 'prefill',
-                'token': first_token,
-                'log_prob': log_prob,
-                'prompt_id': prompt_id,
-                'slot': slot,
-                'prompt_logp': prompt_logp_np
-            })
-      
-      elif task.task_type == "decode":
-        # Process decode results
-        with jax.profiler.TraceAnnotation("convert_to_numpy_decode"):
-          # Convert all tokens to numpy
-          tokens_np = [np.array(tokens) for tokens in task.tokens_buffer]
-          logprobs_np = [np.array(logprobs) for logprobs in task.logprob_buffer]
-          
-          # Send to token emission thread
-          self.processed_token_queue.put_nowait({
-              'type': 'decode',
-              'tokens': tokens_np,
-              'logprobs': logprobs_np,
-              'slot_to_id': task.slot_to_id,
-              'min_decode_steps': task.min_decode_steps
-          })
-      
-      if self.debug:
-        max_logging.log(f"Inference worker: detokenization in {time.time() - start_time} seconds")
-    
-    # Signal completion to token emission thread
-    self.processed_token_queue.put_nowait({'type': 'shutdown'})
-
-  def background_token_emission(self):
-    """Emit tokens and manage decode slots.
-
-    Runs in a background thread to process tokens from
-    the processed token queue, emit tokens, and free up
-    decode slots when sequences complete.
-    """
-    max_logging.log("Inference worker: starting background token emission thread")
-    
-    while True:
-      try:
-        processed_data = self.processed_token_queue.get(timeout=0.01)
-      except queue.Empty:
-        if not self.running and self.processed_token_queue.empty():
-          break
-        continue
-
-      # Check for shutdown signal
-      if processed_data.get('type') == 'shutdown':
-        break
-
-      newly_empty = []
-      start_time = time.time()
-      
-      if processed_data['type'] == 'prefill':
-        # Handle prefill token
-        prompt_id = processed_data['prompt_id']
-        slot = processed_data['slot']
-        token = processed_data['token']
-        log_prob = processed_data['log_prob']
-        prompt_logp = processed_data['prompt_logp']
-        
-        # Update slot mapping
-        self.slot_to_id[slot] = prompt_id
-        
-        # Emit token
-        should_terminate = self.emit_token(prompt_id, int(token), log_prob, prompt_logp=prompt_logp)
-        if should_terminate:
-          newly_empty.append(slot)
-      
-      elif processed_data['type'] == 'decode':
-        # Handle decode tokens
-        tokens = processed_data['tokens']
-        logprobs = processed_data['logprobs']
-        slot_to_id = processed_data['slot_to_id']
-        min_decode_steps = processed_data['min_decode_steps']
-        
-        for decode_step in range(min_decode_steps):
-          for slot, id_ in slot_to_id.items():
-            if id_ is None:
-              continue
-            log_prob_at_slot = logprobs[decode_step][slot]
-            result_tokens_at_slot = tokens[decode_step][slot]
-            should_terminate = self.emit_token(id_, int(result_tokens_at_slot), log_prob_at_slot)
+            # Emit token directly
+            should_terminate = self.emit_token(prompt_id, int(first_token), log_prob, prompt_logp=prompt_logp_np)
             if should_terminate:
               newly_empty.append(slot)
+      
+      elif task.task_type == "decode":
+        # Process decode results - convert to numpy and emit
+        with jax.profiler.TraceAnnotation("convert_to_numpy_and_emit_decode"):
+          # Convert all tokens to numpy and emit immediately
+          for decode_step in range(self.min_decode_steps):
+            result_tokens_step = np.array(task.tokens_buffer[decode_step])
+            log_prob_step = np.array(task.logprob_buffer[decode_step])
+            
+            for slot, id_ in self.slot_to_id.items():
+              if id_ is None:
+                continue
+              log_prob_at_slot = log_prob_step[slot]
+              result_tokens_at_slot = result_tokens_step[slot]
+              should_terminate = self.emit_token(id_, int(result_tokens_at_slot), log_prob_at_slot)
+              if should_terminate:
+                newly_empty.append(slot)
 
       # Update decode slots
       for slot in newly_empty:
         self.slot_to_id[slot] = None
-        if slot not in self.empty_decode_slots:
-          self.empty_decode_slots.append(slot)
-      
+        if slot not in self.empty_decode_slots.queue:
+          self.empty_decode_slots.put(slot)
+
       if self.debug:
-        max_logging.log(f"Inference worker: token emission in {time.time() - start_time} seconds")
+        max_logging.log(f"Inference worker: detokenization in {time.time() - start_time} seconds")
 
   def emit_token(
       self,
@@ -825,7 +738,9 @@ class InferenceWorker:
     """
     # Return if already reached max decode length
     if len(self.completion_tokens_by_id[prompt_id]) == self.max_decode_length:
+      print("already reached length")
       return True
+    print(f"emitting token {result_token} for {prompt_id}. Prompt already has {len(self.completion_tokens_by_id[prompt_id])} tokens.")
 
     # Return if already reached eos
     if (
@@ -1074,4 +989,3 @@ class OfflineEngine:
       max_logging.log(
           "WARNING: scan_layers=True will result in slow step time. " "It is recommended for debugging purposes only."
       )
-    
