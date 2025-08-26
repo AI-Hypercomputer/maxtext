@@ -594,6 +594,7 @@ use_untrainable_positional_embedding: False
 trainable_position_size: -1  # enable gpt3 position embedding with a positive trainable_position_size
 # RoPE parameters
 rope_type: "default" # one of "default", "llama3.1" or "yarn"
+rope_linear_scaling_factor: 1.0 # linear scaling factor for "default" RoPE (see class `RotaryEmbedding` for more)
 rope_use_scale: True # apply rope scaling for llama3.1 (see class `LLaMARotaryEmbedding` for more)
 rope_min_timescale: 1
 rope_max_timescale: 10_000 # Timescale For global Attention

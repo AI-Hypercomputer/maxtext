@@ -699,11 +699,18 @@ class Attention(nnx.Module):
       # For local attention use local_rope_max_timescale if it's is positive
       if self.attention_type == AttentionType.LOCAL_SLIDING and self.config.local_rope_max_timescale > 0:
         max_timescale = self.config.local_rope_max_timescale
+
+      rope_linear_scaling_factor = self.config.rope_linear_scaling_factor
+      # In gemma3, linear scaling factor does not apply to local sliding layers.
+      if self.config.model_name.startswith("gemma3") and self.attention_type == AttentionType.LOCAL_SLIDING:
+        rope_linear_scaling_factor = 1.0
+
       rotary_embedding = RotaryEmbedding(
           min_timescale=self.config.rope_min_timescale,
           max_timescale=max_timescale,
           embedding_dims=rope_embedding_dims,
           fprop_dtype=self.dtype,
+          rope_linear_scaling_factor=rope_linear_scaling_factor,
           rngs=self.rngs,
       )
     return rotary_embedding
