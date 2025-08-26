@@ -52,7 +52,6 @@ from MaxText import profiler
 from MaxText import pyconfig
 from MaxText.layers.multi_token_prediction import calculate_mtp_acceptance_rate, calculate_mtp_loss
 from MaxText.data_loader import DataLoader
-from MaxText.input_pipeline.input_pipeline_interface import create_data_iterator
 from MaxText.globals import EPS
 from MaxText.metric_logger import MetricLogger
 from MaxText.utils import gcs_utils
@@ -65,35 +64,10 @@ from MaxText.utils.goodput_utils import (
 from MaxText.vertex_tensorboard import VertexTensorboardManager
 # Placeholder: internal
 
-import MaxText as mt
+from MaxText.dpo_utils import _merge_dpo_state, _split_dpo_state, dpo_loss_fn
+from MaxText.train_utils import validate_train_config
+from MaxText.metric_logger import record_activation_metrics
 # pylint: disable=too-many-positional-arguments
-
-
-def validate_train_config(config):
-  """Validates the configuration is set correctly for 'train.py'."""
-
-  assert config.run_name, "Erroring out, need a real run_name"
-  if config.dataset_path and not config.dataset_path.startswith("gs://"):
-    max_logging.log("WARNING: 'dataset_path' might be pointing your local file system")
-  if not config.base_output_directory.startswith("gs://"):
-    max_logging.log("WARNING: 'base_output_directory' might be pointing your local file system")
-  assert config.steps > 0, "You must set steps or learning_rate_schedule_steps to a positive integer."
-
-  if config.quantization in ("fp8", "nanoo_fp8"):
-    # pylint: disable=line-too-long
-    assert config.gradient_accumulation_steps == 1, (
-        "fp8 can't be used with gradient_accumulation_steps right now. Please use other quantization or set "
-        "gradient_accumulation_steps to 1"
-    )
-
-  # Check if GPU Flash Attention is being used with sequence packing
-  if config.attention == "cudnn_flash_te" and config.packing and config.dataset_type != "synthetic":
-    raise ValueError(
-        "cudnn_flash_te only supports BSHD format. The THD (seq packing) support is going to be available in "
-        "Transformer Engine 2.0 release. "
-        "Please disable sequence packing (set packing=False) or use a different attention mechanism. "
-        "With synthetic data, the format is not important as packing is not applied."
-    )
 
 
 def get_first_step(state):
@@ -103,151 +77,6 @@ def get_first_step(state):
 # -----------------------------------------------------------------------------
 # Top-level Functions
 # -----------------------------------------------------------------------------
-
-
-def record_activation_metrics(output_metrics, intermediate_outputs, config):
-  """Adds the activation metrics to the metrics dict"""
-
-  if config.scan_layers:
-    metrics_dict = intermediate_outputs["intermediates"]["decoder"]["decoder"]
-
-    for layer_num in range(config.num_decoder_layers):
-      output_metrics["scalar"][f"activ_fraction_zero/layer_{layer_num:03d}"] = metrics_dict["activation_fraction_zero"][
-          0
-      ][layer_num]
-      output_metrics["scalar"][f"activ_mean/layer_{layer_num:03d}"] = metrics_dict["activation_mean"][0][layer_num]
-      output_metrics["scalar"][f"activ_stdev/layer_{layer_num:03d}"] = metrics_dict["activation_stdev"][0][layer_num]
-  else:
-    for layer_num in range(config.num_decoder_layers):
-      layer = intermediate_outputs["intermediates"]["decoder"][f"layers_{layer_num}"]
-      output_metrics["scalar"][f"activ_fraction_zero/layer_{layer_num:03d}"] = layer["activation_fraction_zero"][0]
-      output_metrics["scalar"][f"activ_mean/layer_{layer_num:03d}"] = layer["activation_mean"][0]
-      output_metrics["scalar"][f"activ_stdev/layer_{layer_num:03d}"] = layer["activation_stdev"][0]
-
-
-def _split_dpo_state(state):
-  reference_params = state.params["reference_params"]
-  new_state = state.replace(params={k: v for k, v in state.params.items() if k != "reference_params"})
-  return new_state, reference_params
-
-
-def _merge_dpo_state(state, reference_params):
-  return state.replace(params=dict(state.params, reference_params=reference_params))
-
-
-def dpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_train=True):
-  """loss_fn for both train and eval.
-
-  Args:
-    model: A nn.Module
-    config: Config of parameters
-    data: Batch of data to apply to the model
-    dropout_rng: A key to use to generate rng for dropout
-    params: Model params
-    is_train: True for train_step and False for eval_step
-
-  Returns:
-    loss: average loss
-    aux: a dictionary including intermediate_outputs, total_loss, and total_weights
-  """
-  # inputs, targets, segments, positions = apply_args
-  rng1, aqt_rng = jax.random.split(dropout_rng)
-
-  # decimate proportion of data when per_device_batch_size<1
-  if is_train:
-    for k, v in data.items():
-      data[k] = v[: config.micro_batch_size_to_train_on, :]
-
-  # for DPO we don't support packed sequence (they shouldn't be present in the first place)
-  data["chosen_segmentation"] = (data["chosen_segmentation"] == 1).astype(jnp.int32)
-  data["rejected_segmentation"] = (data["rejected_segmentation"] == 1).astype(jnp.int32)
-  data["chosen_position"] = data["chosen_position"] * (data["chosen_segmentation"] == 1)
-  data["rejected_position"] = data["rejected_position"] * (data["rejected_segmentation"] == 1)
-
-  # concatenated model and reference model forward pass
-  inputs = jnp.concatenate([data["chosen"], data["rejected"]], 0)
-  inputs_position = jnp.concatenate([data["chosen_position"], data["rejected_position"]], 0)
-  inputs_segmentation = jnp.concatenate([data["chosen_segmentation"], data["rejected_segmentation"]], 0)
-
-  logits, intermediate_outputs = model.apply(
-      params,
-      inputs,
-      inputs_position,
-      decoder_segment_ids=inputs_segmentation,
-      enable_dropout=config.enable_dropout if is_train else False,
-      rngs={"dropout": rng1, "params": aqt_rng},
-      mutable="intermediates",
-  )
-  ref_logits = model.apply(
-      {"params": reference_params},
-      inputs,
-      inputs_position,
-      decoder_segment_ids=inputs_segmentation,
-      enable_dropout=False,
-      rngs={"dropout": rng1, "params": aqt_rng},
-  )
-  ref_logits = jax.lax.stop_gradient(ref_logits)
-
-  # extract token ids, segmentation and logits for chosen and rejected sequences
-  chosen_ids = data["chosen"][..., 1:]
-  rejected_ids = data["rejected"][..., 1:]
-  chosen_segmentation = data["chosen_segmentation"][..., 1:]
-  rejected_segmentation = data["rejected_segmentation"][..., 1:]
-  n_logits = logits.shape[-3] // 2  # [B, S, E] - [batch, sequence, embedding/vocab]
-  chosen_logits, rejected_logits = logits[:n_logits, :, :], logits[n_logits:, :, :]  # [B, S, E], [B, S, E]
-  # ^ [B, S, E], [B, S, E]
-  chosen_ref_logits, rejected_ref_logits = ref_logits[:n_logits, :, :], ref_logits[n_logits:, :, :]
-
-  # common subsequence and padding mask
-  common_prefix_mask = jnp.cumsum(chosen_ids != rejected_ids, axis=-1) == 0  # [B, S]
-  valid_seq_mask = (chosen_segmentation != 0) & (rejected_segmentation != 0) & ~common_prefix_mask  # [B, S]
-
-  # compute logratios from the sequence-reduced observed token log-probability
-  chosen_logps_seq = jnp.take_along_axis(  # [B, S]
-      jax.nn.log_softmax(chosen_logits[..., :-1, :], axis=-1), chosen_ids[..., None], axis=-1
-  )[..., 0]
-  chosen_logps = jnp.sum(chosen_logps_seq * valid_seq_mask, axis=-1)  # [B]
-  chosen_ref_logps_seq = jnp.take_along_axis(  # [B, S]
-      jax.nn.log_softmax(chosen_ref_logits[..., :-1, :], axis=-1), chosen_ids[..., None], axis=-1
-  )[..., 0]
-  chosen_ref_logps = jnp.sum(chosen_ref_logps_seq * valid_seq_mask, axis=-1)  # [B]
-  chosen_logratios = chosen_logps - chosen_ref_logps  # [B]
-
-  rejected_logps_seq = jnp.take_along_axis(  # [B, S]
-      jax.nn.log_softmax(rejected_logits[..., :-1, :], axis=-1), rejected_ids[..., None], axis=-1
-  )[..., 0]
-  rejected_logps = jnp.sum(rejected_logps_seq * valid_seq_mask, axis=-1)  # [B]
-  rejected_ref_logps_seq = jnp.take_along_axis(  # [B, S]
-      jax.nn.log_softmax(rejected_ref_logits[..., :-1, :], axis=-1), rejected_ids[..., None], axis=-1
-  )[..., 0]
-  rejected_ref_logps = jnp.sum(rejected_ref_logps_seq * valid_seq_mask, axis=-1)  # [B]
-  rejected_logratios = rejected_logps - rejected_ref_logps  # [B]
-
-  # DPO loss from chosen and rejected logratios
-  LABEL_SMOOTHING, BETA = config.dpo_label_smoothing, config.dpo_beta
-  logratios_delta = BETA * (chosen_logratios - rejected_logratios)  # [B]
-  losses = (  # [B]
-      -jax.nn.log_sigmoid(BETA * logratios_delta) * (1 - LABEL_SMOOTHING)
-      - jax.nn.log_sigmoid(-BETA * logratios_delta) * LABEL_SMOOTHING
-  )
-  total_loss, total_weights = jnp.mean(losses), losses.shape[0]
-  loss = total_loss
-
-  moe_lb_loss = 0.0
-  if config.num_experts > 1:
-    nested_key = ("intermediates", "decoder", "layers", "moe_lb_loss")
-    total_moe_lb_loss = maxtext_utils.get_nested_value(intermediate_outputs, nested_key, 0.0)
-    moe_lb_loss = jnp.mean(jnp.array(total_moe_lb_loss))
-    loss += moe_lb_loss
-  reward_accuracy = jnp.mean(chosen_logratios > rejected_logratios)
-  aux = {
-      "intermediate_outputs": intermediate_outputs,
-      "total_loss": total_loss,
-      "total_weights": total_weights,
-      "moe_lb_loss": moe_lb_loss,
-      "reward_accuracy": reward_accuracy,
-  }
-  return loss, aux
 
 
 def loss_fn(model, config, data, dropout_rng, params, is_train=True):
@@ -305,7 +134,6 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
   xent = xent * (data["targets_segmentation"] != 0)
   total_loss = jnp.sum(xent)
   total_weights = jnp.sum(data["targets_segmentation"] != 0)
-
   # If gradient accumulation is enabled, we don't need to divide total_loss
   # by total_weights and then multiply the computed gradient by total_weights,
   # since it's equivalent to computing the gradient from total_loss.
@@ -508,101 +336,6 @@ def eval_step(model, config, state, data, dropout_rng):
   return metrics
 
 
-def setup_train_loop(config, recorder, devices=None):
-  """Set up prerequisites for the training loop -
-      checkpoint_manager, PRNG keys, Mesh, Model and optimizer.
-      Set up data iterator and tokenizer, initialize the model.
-
-  Args:
-    config
-    recorder
-
-  Returns:
-    init_rng:
-    checkpoint_manager: Orbax checkpointer
-    state_mesh_annotations: the mesh annotations for the train state
-    model:
-    mesh:
-    learning_rate_schedule:
-    data_iterator:
-    state: the initialized train state
-  """
-
-  with maybe_record_goodput(recorder, GoodputEvent.TPU_INIT):
-    model = mt.from_pretrained(config, devices)
-    mesh = model.mesh
-    init_rng, checkpoint_manager, learning_rate_schedule, tx = train_utils.create_training_tools(config, model, mesh)
-
-  with maybe_record_goodput(recorder, GoodputEvent.TRAINING_PREPARATION):
-    data_iterator, eval_data_iterator = create_data_iterator(config, mesh)
-    context_parallel_size = config.context_parallel_size
-    # Check if context parallelism is being used with sequence packing
-    if context_parallel_size > 1 and config.packing and config.dataset_type != "synthetic":
-      raise ValueError(
-          "Context parallelism cannot be used with sequence packing except for synthetic data where packing is not applied. "
-          "Either disable sequence packing (set packing=False) or disable context parallelism. "
-          "Context parallelism with packing support will be added soon."
-      )
-
-    # Apply reordering wrapper to data iterators if context parallelism is enabled
-    with mesh:
-      if context_parallel_size > 1 and config.context_parallel_load_balance:
-        data_iterator = map(max_utils.get_reorder_callable(context_parallel_size), data_iterator)
-        if eval_data_iterator:
-          eval_data_iterator = map(max_utils.get_reorder_callable(context_parallel_size), eval_data_iterator)
-
-    state, _, state_mesh_shardings, data_iterator = maxtext_utils.setup_training_state(
-        model, data_iterator, tx, config, init_rng, mesh, checkpoint_manager
-    )
-
-    # TODO(aireenmei, hengtaoguo): support sharding in vit for multimodal
-    if not config.using_pipeline_parallelism and not config.use_multimodal:
-      # The vocab tensor(s) of shape [vocab, embed] (and transpose) are not sharded by stage
-      maxtext_utils.assert_params_sufficiently_sharded(state.params, mesh, config.sharding_tolerance)
-
-    if config.use_dpo:
-      abstract_state, _, _ = maxtext_utils.get_abstract_state(model, tx, config, init_rng, mesh, is_training=True)
-      max_logging.log(f"Restoring reference parameters for DPO from '{os.path.join(str(config.checkpoint_dir), str(0))}'")
-      try:
-        step0_restored, _ = checkpointing.load_state_if_possible(
-            checkpoint_manager,
-            data_iterator,
-            load_parameters_from_path="",
-            load_full_state_from_path="",
-            checkpoint_storage_concurrent_gb=config.checkpoint_storage_concurrent_gb,
-            abstract_unboxed_pre_state=abstract_state,
-            enable_single_replica_ckpt_restoring=False,
-            dataset_type=config.dataset_type,
-            step=0,
-            use_ocdbt=config.checkpoint_storage_use_ocdbt,
-            use_zarr3=config.checkpoint_storage_use_zarr3,
-            enable_orbax_v1=config.enable_orbax_v1,
-            checkpoint_conversion_fn=config.checkpoint_conversion_fn,
-            source_checkpoint_layout=config.source_checkpoint_layout,
-        )
-      except FileNotFoundError:
-        step0_restored = None
-      if step0_restored is not None:
-        reference_params = step0_restored["items"].params["params"]
-        state = _merge_dpo_state(state, reference_params)
-      else:
-        max_logging.log(
-            f"Could not restore reference parameters for DPO from '{os.path.join(str(config.checkpoint_dir), str(0))}'"
-        )
-
-  return (
-      init_rng,
-      checkpoint_manager,
-      state_mesh_shardings,
-      model,
-      mesh,
-      learning_rate_schedule,
-      data_iterator,
-      eval_data_iterator,
-      state,
-  )
-
-
 def train_loop(config, recorder, state=None):
   """Main Training loop."""
   (
@@ -615,7 +348,7 @@ def train_loop(config, recorder, state=None):
       data_iterator,
       eval_data_iterator,
       state,
-  ) = setup_train_loop(config, recorder)
+  ) = train_utils.setup_train_loop(config, recorder)
 
   if config.use_dpo:
     if "reference_params" not in state.params:

@@ -178,7 +178,7 @@ norm_topk_prob: False # Boolean to enable the top-k probability normalization. Q
 expert_shard_attention_option: "fsdp"
 
 # deepseek moe
-base_moe_mlp_dim: 7168 # intermediate dimension at MoE layer (use base_mlp_dim if not DeepSeek style)
+base_moe_mlp_dim: 7168 # intermediate dimension at MoE layer. For a fully MoE model, base_mlp_dim must be equal to base_moe_mlp_dim.
 first_num_dense_layers: 0 # number of initial dense layers in the model
 shared_experts: 1
 routed_scaling_factor: 1.0 # scaling factor for routing scores

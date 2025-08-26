@@ -207,6 +207,7 @@ def validate_keys(keys):
 
   validate_multiple_slices(keys)
   if keys["num_experts"] > 1:
+    validate_mlp_dim(keys)
     validate_sparse_matmul_parallelism(keys)
     validate_ragged_dot(keys)
     validate_deepseek_moe(keys)
@@ -971,6 +972,14 @@ def validate_deepseek_moe(raw_keys):
       raise ValueError(
           f'config num_experts: {raw_keys["num_experts"]} must be divisible by n_routing_groups: {raw_keys["n_routing_groups"]}'
       )
+
+def validate_mlp_dim(raw_keys):
+  """Validates that MLP dimensions are consistent for fully MoE models."""
+  is_fully_moe_model = (raw_keys["interleave_moe_layer_step"] == 1 and raw_keys["first_num_dense_layers"] == 0)
+  base_mlp_dim = raw_keys["base_mlp_dim"]
+  base_moe_mlp_dim = raw_keys["base_moe_mlp_dim"]
+  if is_fully_moe_model and (base_mlp_dim != base_moe_mlp_dim):
+      raise ValueError(f'For a fully MoE model, base_mlp_dim must be equal to base_moe_mlp_dim. Received base_mlp_dim={base_mlp_dim} and base_moe_mlp_dim={base_moe_mlp_dim}.')
 
 
 def validate_sparse_matmul_parallelism(raw_keys):

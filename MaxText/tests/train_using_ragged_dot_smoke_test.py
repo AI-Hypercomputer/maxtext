@@ -38,9 +38,10 @@ class Train(unittest.TestCase):
             "base_num_query_heads=4",
             "base_num_kv_heads=4",
             "base_mlp_dim=32",
+            "base_moe_mlp_dim=32",
             "base_num_decoder_layers=8",
             "head_dim=128",
-            # Currently mistral is the only block that supports MoE.
+            # TODO: Update to mixtral decoder block after b/441100085 fix
             "decoder_block=mistral",
             "num_experts=2",
             # Enable sparse_matmul.

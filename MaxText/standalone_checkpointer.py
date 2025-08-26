@@ -37,7 +37,8 @@ from MaxText import maxtext_utils
 from MaxText import train_utils
 from MaxText import max_logging
 from MaxText import pyconfig
-from MaxText.train import get_first_step, validate_train_config
+from MaxText.train import get_first_step
+from MaxText.train_utils import validate_train_config
 from MaxText.layers import models
 
 Transformer = models.Transformer
@@ -52,7 +53,7 @@ def checkpoint_loop(config, state=None):
     ckpt_path:
   Returns:
   """
-  model = mt.from_pretrained(config)
+  model = mt.from_config(config)
   mesh = model.mesh
   init_rng, checkpoint_manager, _, tx = train_utils.create_training_tools(config, model, mesh)
 
