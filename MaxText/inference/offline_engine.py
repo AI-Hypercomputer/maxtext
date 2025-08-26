@@ -369,7 +369,7 @@ class InferenceWorker:
     self.decode_state: DecodeState = None
     self.completion_tokens_by_id: dict[Hashable, list[TokenOutput]] = {}
     self.prompt_logprobs_by_id: dict[Hashable, list[np.ndarray]] = {}
-    self.true_lengths: jax.Array = None
+    self.true_lengths: dict[Hashable, int] = {}
     # Model components (initialized later)
     self.engine = None
     self.decode_batch_size = None
@@ -462,7 +462,7 @@ class InferenceWorker:
     self.empty_decode_slots = list(range(self.decode_batch_size))
     self.slot_to_id = {}
     self.running = True
-    self.true_lengths = jax.numpy.array([input.true_length for input in data]).squeeze()
+    self.true_lengths = {input.id: input.true_length for input in data}
     max_logging.log("Continuous batching started")
 
     self._run_continous_batching(data)
@@ -603,6 +603,8 @@ class InferenceWorker:
       #   start_indices=(0, 0),
       #   slice_sizes=slice_sizes # (1, true_length) because we are doing prefill for one sequence at a time
       # )
+      if self.debug:
+        print("Prefill done for input id:", input_id, "slot:", slot)
       self.generated_token_backlog.put_nowait((first_token, log_prob, True, prompt_ids[i], slot, prompt_logp))
 
   def decode(self):
@@ -678,6 +680,8 @@ class InferenceWorker:
               continue
             log_prob_at_slot = log_prob[decode_step][slot]
             result_tokens_at_slot = result_tokens[decode_step][slot]
+            if self.debug:
+              print(f"emit before decode: {type(result_tokens_at_slot)=},{type(log_prob_at_slot)=}")
             should_terminate = self.emit_token(id_, result_tokens_at_slot, log_prob_at_slot)
             if should_terminate:
               newly_empty.append(slot)
@@ -722,6 +726,9 @@ class InferenceWorker:
     if prompt_logp is not None:
       self.prompt_logprobs_by_id[prompt_id] = prompt_logp
     self.completion_tokens_by_id[prompt_id].append(TokenOutput(result_token, log_prob))
+    if self.debug:
+      if prompt_logp is None:
+        print(f"emit token {prompt_id=}, {index=}, {len(self.completion_tokens_by_id[prompt_id])=}")
     return ((result_token == self.eos_ids).any()) or (index + 1 == self.max_decode_length)
 
 
@@ -741,7 +748,7 @@ class OfflineEngine:
       batch_prefill_max_batch_size: int = 16,
       mesh: Mesh = None,
       rng: jax.random.PRNGKey = None,
-      debug: bool = False,
+      debug: bool = True,
   ):
     """Initialize the OfflineEngine.
 
