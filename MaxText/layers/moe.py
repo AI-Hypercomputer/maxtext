@@ -151,7 +151,7 @@ class GateLogit(nnx.Module):
       bias_shape = kernel_shape[-len(self.out_features_shape) :]
       self.bias = nnx.Param(
           default_bias_init(rngs.params(), bias_shape, self.weight_dtype),
-          sharding=sharding(t=f"{self.tensor_name}_bias")
+          sharding=sharding(t=f"{self.tensor_name}_bias", a=bias_axes)
       )
     else:
       self.bias = None

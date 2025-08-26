@@ -282,7 +282,7 @@ class Qwen3ShardingTraining(MeshSharding):
         case "activation_norm_length", TT.Activation:
           axis_mapping = (tp_s, cp, sp)
         case "activation_length", TT.Activation:
-          axis_mapping = (sp, cp, ep) if tensor_name not in ("mlp_pre_out", "lnx", "attn_lnx", "mlp_lnx", "mlp_output", "layer_output") else ()
+          axis_mapping = ()
         case "activation_length_no_exp", TT.Activation:
           axis_mapping = (sp, cp) if tensor_name not in ("query", "key", "value", "out") else (cp,)
         case "activation_kv", TT.Activation:
@@ -294,13 +294,13 @@ class Qwen3ShardingTraining(MeshSharding):
         case "activation_kv_heads", TT.Activation:
           axis_mapping = (tp, tp_t, sp,tp_s)
         case "activation_kv_head_dim", TT.Activation:
-          axis_mapping = (tp, tp_t, tp_s) if tensor_name not in ("query", "key", "value") else ()
+          axis_mapping = ()
         case "activation_heads", TT.Activation:
           axis_mapping = (tp, tp_t, sp,tp_s,ar)
         case  ("heads" | "q_heads" | "kv_heads"), TT.Weight:
           axis_mapping = (tp, tp_t, tp_s, ar)
         case ("kv", "kv_head_dim", "qkv", "num_activations"), TT.Weight:
-          axis_mapping = (None,)
+          axis_mapping = ()
         case "mlp", TT.Weight:
           axis_mapping = (fsdp_t, tp, tp_s, ar)
         case "exp", TT.Weight:
