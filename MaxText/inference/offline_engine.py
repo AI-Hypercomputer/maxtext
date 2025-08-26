@@ -384,7 +384,7 @@ class InferenceWorker:
     self.completion_tokens_by_id: dict[Hashable, list[TokenOutput]] = {}
     self.prompt_logprobs_by_id: dict[Hashable, list[np.ndarray]] = {}
     self.true_lengths: dict[Hashable, int] = {}
-    self.completed_sequences: set = set()  # Track completed sequence IDs
+    self.completed_sequences: set = set()
     
     # Model components (initialized later)
     self.engine = None
@@ -476,7 +476,7 @@ class InferenceWorker:
     self.slot_to_id = {}
     self.true_lengths = {}
     self.detokenization_queue = queue.Queue()
-    self.completed_sequences = set()  # Reset completed sequences tracking
+    self.completed_sequences = set()
         
     max_logging.log("InferenceWorker state reset complete")
 
@@ -647,7 +647,7 @@ class InferenceWorker:
       )
 
       self.detokenization_queue.put_nowait(task)
-      print("queued decode task", task.tokens_buffer[0])
+      # print("queued decode task", task.tokens_buffer[0])
 
   @functools.partial(jax.jit, static_argnums=(0,), donate_argnums=(2,))
   def _jitted_generate_fn(self, params, decode_state, rng):
@@ -665,14 +665,14 @@ class InferenceWorker:
     while True:
       try:
         task = self.detokenization_queue.get(timeout=0.1)
-        try:
-          print("getting task", task.tokens_buffer[0])
-        except Exception as e:
-          pass
+        # try:
+        #   # print("getting task", task.tokens_buffer[0])
+        # except Exception as e:
+        #   pass
       except queue.Empty:
         if not self.running and self.detokenization_queue.empty():
           break
-        print("self.running = ", self.running, "self.detokenization_queue", self.detokenization_queue.qsize())
+        # print("self.running = ", self.running, "self.detokenization_queue", self.detokenization_queue.qsize())
         continue
       
       start_time = time.time()
@@ -723,38 +723,13 @@ class InferenceWorker:
                 if should_terminate:
                     self.completed_sequences.add(id_)
                     newly_empty.append(slot)
-
-        # # Process decode results - convert to numpy and emit
-        # with jax.profiler.TraceAnnotation("convert_to_numpy_and_emit_decode"):
-          
-          
-        #   # Convert all tokens to numpy and emit immediately
-        #   for decode_step in range(self.min_decode_steps):
-        #     result_tokens_step = np.array(task.tokens_buffer[decode_step])
-        #     log_prob_step = np.array(task.logprob_buffer[decode_step])
-            
-        #     for slot, id_ in self.slot_to_id.items():
-        #       if id_ is None:
-        #         continue
-                
-        #       # Skip if sequence already completed
-        #       if id_ in self.completed_sequences:
-        #         newly_empty.append(slot)
-        #         continue
-                
-        #       log_prob_at_slot = log_prob_step[slot]
-        #       result_tokens_at_slot = result_tokens_step[slot]
-        #       should_terminate = self.emit_token(id_, int(result_tokens_at_slot), log_prob_at_slot)
-        #       if should_terminate:
-        #         newly_empty.append(slot)
-
       # Update decode slots
-      print("newly empty slots", newly_empty)
+      # print("newly empty slots", newly_empty)
       for slot in newly_empty:
         self.slot_to_id[slot] = None
         if slot not in self.empty_decode_slots.queue:
           self.empty_decode_slots.put(slot)
-      print("self.empty_decode_slots", self.empty_decode_slots)
+      # print("self.empty_decode_slots", self.empty_decode_slots)
 
       if self.debug:
         max_logging.log(f"Inference worker: detokenization in {time.time() - start_time} seconds")
@@ -784,10 +759,10 @@ class InferenceWorker:
         
     # Return if already reached max decode length
     if len(self.completion_tokens_by_id[prompt_id]) == self.max_decode_length:
-      print("already reached length")
+      # print("already reached length")
       self.completed_sequences.add(prompt_id)
       return True
-    print(f"emitting token {result_token} for {prompt_id}. Prompt already has {len(self.completion_tokens_by_id[prompt_id])} tokens.")
+    # print(f"emitting token {result_token} for {prompt_id}. Prompt already has {len(self.completion_tokens_by_id[prompt_id])} tokens.")
 
     # Return if already reached eos
     if (
