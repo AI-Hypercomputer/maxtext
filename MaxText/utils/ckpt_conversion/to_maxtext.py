@@ -154,12 +154,23 @@ def main(argv: Sequence[str]) -> None:
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"  # Suppress TensorFlow logging
 
+  # Check if the user is using an Instruct version. If so, use the base model architecture
+  for i in range(len(argv)):
+    if argv[i].startswith("model_name="):
+      model_name_arg = argv[i].split("=")[1]
+      model_name_original = model_name_arg
+      if "-Instruct" in model_name_arg:
+        max_logging.log(f"Warning: You want an Instruct version, so we are using the base model architecture instead.")
+        model_name_arg = model_name_arg.replace("-Instruct", "")
+        argv[i] = f"model_name={model_name_arg}"
+      break
+
   config = pyconfig.initialize(argv)
   # check the supported model ids
-  if config.model_name not in HF_IDS:
-    raise ValueError(f"Unsupported model name: {config.model_name}. Supported models are: {list(HF_IDS.keys())}")
+  if model_name_original not in HF_IDS:
+    raise ValueError(f"Unsupported model name: {model_name_original}. Supported models are: {list(HF_IDS.keys())}")
 
-  model_id = HF_IDS[config.model_name]
+  model_id = HF_IDS[model_name_original]
   max_utils.print_system_information()
   if not config.base_output_directory:
     output_directory = f"tmp/{config.run_name}"

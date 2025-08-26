@@ -446,6 +446,7 @@ HF_MODEL_CONFIGS = {
     "qwen3-14b": qwen3_14b_config,
     "qwen3-32b": qwen3_32b_config,
     "llama3.1-8b": llama31_8b_config,
+    "llama3.1-8b-Instruct": llama31_8b_config,
     "llama3.1-70b": llama31_70b_config,
     "llama3.1-405b": llama31_405b_config,
     "qwen3-30b-a3b": qwen3_30b_a3b_thinking_2507_config,
