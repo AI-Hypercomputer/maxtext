@@ -825,7 +825,11 @@ class Decoder(nn.Module):
     # After the final transformer layer, `y` holds the raw, un-normalized hidden state.
     hidden_state = y
 
-    logits = self._apply_output_head(shared_embedding, hidden_state, deterministic)
+    if cfg.num_vocab_tiling > 1 and self.model_mode == MODEL_MODE_TRAIN:
+      logits = None
+      self.sow('intermediates', 'hidden_states', hidden_state)
+    else:
+      logits = self._apply_output_head(shared_embedding, hidden_state, deterministic)
 
     # The API of the Decoder is now a tuple, providing both the main output
     # and the raw hidden state needed for auxiliary tasks.

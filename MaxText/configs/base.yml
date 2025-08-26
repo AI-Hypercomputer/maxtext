@@ -440,6 +440,13 @@ ici_expert_parallelism: 1
 # you should set compile_toplogy_num_slices, which will in turn set this value. For non-TPU environments this is set to 1.
 num_slices: -1
 
+# Vocab Tiling Configs
+# Enables a memory-saving optimization by computing the cross-entropy loss in chunks.
+# The logits are tiled into `num_vocab_tiling` parts along the vocabulary axis,
+# reducing peak memory usage. This is highly recommended for models with large
+# vocabularies (e.g., Gemma). Set to a value greater than 1 to enable.
+num_vocab_tiling: 1
+
 # Tokenizer
 vocab_size: 32_000 # powers of 2 for sharding
 tokenizer_path: "assets/tokenizer.llama2"
