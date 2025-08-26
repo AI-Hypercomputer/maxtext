@@ -88,7 +88,8 @@ def get_tunix_config(mt_config):
 
 def get_maxtext_model(config, default_loss_function):
   def create_model():
-    return mt.from_pretrained(config, rngs=nnx.Rngs(params=0, dropout=1)) # TODO: CHECK THE RNGs
+    init_rng = jax.random.PRNGKey(config.init_weights_seed)
+    return mt.from_pretrained(config, rngs=nnx.Rngs(params=init_rng, dropout=1)) # TODO: CHECK THE RNGs
 
   abstract_model = nnx.eval_shape(create_model)
   graphdef, abstract_state = nnx.split(abstract_model)
@@ -113,15 +114,43 @@ def get_maxtext_model(config, default_loss_function):
     sharded_state = create_sharded_state()
     model = nnx.merge(graphdef, sharded_state)
 
-    target_for_restore = jax.tree.map(lambda v: v.value, sharded_state, is_leaf=lambda n: isinstance(n, nnx.Variable))
-    checkpoint = mt.checkpointing.load_params_from_path(
-        load_parameters_from_path=config.load_parameters_path,
-        abstract_unboxed_params=target_for_restore,
-        checkpoint_storage_concurrent_gb=None,
-    )
+    if config.load_parameters_path:
+      target_for_restore = jax.tree.map(
+          lambda v: v.value,
+          sharded_state,
+          is_leaf=lambda n: isinstance(n, nnx.Variable),
+      )
 
-    if checkpoint:
-      nnx.update(model, checkpoint)
+      try:
+        ckptr = ocp.Checkpointer(
+            ocp.PyTreeCheckpointHandler(
+                restore_concurrent_gb=None,
+                save_concurrent_gb=None,
+                use_ocdbt=True,
+                use_zarr3=True,
+            )
+        )
+        # This is a memory optimization. We don't want to restore the entire checkpoint - only the params.
+        # Rather than pass the entire abstract state, which could unnecessarily restore opt_state and such and waste
+        # memory, we instead specify here that we are just restoring the params field of the checkpoint
+        # (which itself may be a dictionary containing a key named 'params').
+        restore_args = ocp.checkpoint_utils.construct_restore_args(
+            target_for_restore
+        )
+        from etils import epath
+        restored = ckptr.restore(
+            epath.Path(config.load_parameters_path),
+            item={"params": {"params": target_for_restore}},
+            transforms={},
+            restore_args={"params": {"params": restore_args}},
+        )
+        checkpoint = restored["params"]["params"]
+
+        if checkpoint:
+          nnx.update(model, checkpoint)
+
+      except Exception as e:
+        raise ValueError(f"Checkpointing failed: {e}")
 
     if default_loss_function:
       # Required when using Tunix default loss function.
