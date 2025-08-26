@@ -35,14 +35,12 @@ from MaxText.utils.goodput_utils import GoodputEvent
 from MaxText.utils.goodput_utils import maybe_record_goodput
 
 
-def from_pretrained(
+def from_config(
     config: pyconfig.HyperParameters,
     devices: Sequence[jax.Device] | None = None,
 ) -> models.Transformer:
-  """Load a pretrained MaxText model from checkpoint.
-
-  This function loads a model from a checkpoint.
-
+  """Instantiate a MaxText model from a config.
+  This function instantiates a model from a config, but does not load any states.
   Args:
       config: Config object.
       devices: Sequence of devices to use for the model. If None, use all
@@ -52,7 +50,7 @@ def from_pretrained(
       Transformer: The loaded model instance (only the model)
 
   Example:
-      model = from_pretrained(config)
+      model = from_config(config)
   """
   devices_array = maxtext_utils.create_device_mesh(config, devices)
   mesh = Mesh(devices_array, config.mesh_axes)
@@ -239,7 +237,7 @@ def setup_train_loop(config, recorder, devices=None):
   """
 
   with maybe_record_goodput(recorder, GoodputEvent.TPU_INIT):
-    model = from_pretrained(config, devices)
+    model = from_config(config, devices)
     mesh = model.mesh
     init_rng, checkpoint_manager, learning_rate_schedule, tx = (
         create_training_tools(config, model, mesh)
