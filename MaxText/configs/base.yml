@@ -440,6 +440,11 @@ ici_expert_parallelism: 1
 # you should set compile_toplogy_num_slices, which will in turn set this value. For non-TPU environments this is set to 1.
 num_slices: -1
 
+# Tiling
+enable_vocab_seq_tiling: False
+num_vocab_seq_tiling: 32
+tiling_scan_layer: False
+
 # Tokenizer
 vocab_size: 32_000 # powers of 2 for sharding
 tokenizer_path: "assets/tokenizer.llama2"
