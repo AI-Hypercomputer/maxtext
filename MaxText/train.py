@@ -50,6 +50,8 @@ from MaxText import maxtext_utils
 from MaxText import train_utils
 from MaxText import profiler
 from MaxText import pyconfig
+from MaxText.common_types import MODEL_MODE_TRAIN
+from MaxText.layers.embeddings import attend_on_embedding
 from MaxText.layers.multi_token_prediction import calculate_mtp_acceptance_rate, calculate_mtp_loss
 from MaxText.data_loader import DataLoader
 from MaxText.globals import EPS
@@ -72,6 +74,176 @@ from MaxText.metric_logger import record_activation_metrics
 
 def get_first_step(state):
   return int(state.step)
+
+
+def get_seq_tiling_loss(
+    intermediate_outputs,
+    data,
+    config,
+    model,
+    params,
+):
+  nested_key = ("intermediates", "decoder", "hidden_states")
+  hidden_states = maxtext_utils.get_nested_value(intermediate_outputs, nested_key)[0]
+  labels = data["targets"]
+  batch_size, seq_len, emb_dim = hidden_states.shape
+  # make sure seq_len is divisible by num_vocab_seq_tiling
+  assert seq_len % config.num_vocab_seq_tiling == 0, "Sequence length should be divisible by the number of vocab tiles."
+  seq_tile_size = seq_len // config.num_vocab_seq_tiling
+
+  reshaped_hidden_states = hidden_states.reshape(
+      (batch_size, config.num_vocab_seq_tiling, seq_tile_size, emb_dim)
+  ).transpose(1, 0, 2, 3)
+  reshaped_labels = labels.reshape(
+      (batch_size, config.num_vocab_seq_tiling, seq_tile_size)
+  ).transpose(1, 0, 2)
+  reshaped_segmentation = data["targets_segmentation"].reshape(
+      (batch_size, config.num_vocab_seq_tiling, seq_tile_size)
+  ).transpose(1, 0, 2)
+
+
+  def scan_body(carry_loss, chunk_data):
+    """A pure function to compute loss for a single chunk within lax.scan."""
+    hidden_state_chunk, label_chunk, segmentation_chunk = chunk_data
+    embedding_table = params['params']['token_embedder']['embedding']
+    chunk_logits = jnp.dot(hidden_state_chunk, embedding_table.T)
+    # chunk_logits = model.apply(
+    #     {'params': params['params']},
+    #     hidden_state_chunk,
+    #     method='logits_from_hidden_states',
+    # )
+    one_hot_targets = jax.nn.one_hot(label_chunk, config.vocab_size)
+    chunk_xent, _ = max_utils.cross_entropy_with_logits(chunk_logits, one_hot_targets, 0.0)
+    
+    # The segmentation mask is chunked and applied to mask out padding tokens within the chunk loss calculation.
+    chunk_loss = jnp.sum(chunk_xent * (segmentation_chunk != 0))
+    
+    return carry_loss + chunk_loss, None
+
+  
+  if config.tiling_scan_layer:
+    total_loss, _ = jax.lax.scan(
+        scan_body, 0.0, (reshaped_hidden_states, reshaped_labels, reshaped_segmentation)
+    )
+  else:
+    total_loss = 0.0
+    for hidden_state_chunk, label_chunk, segmentation_chunk in zip(reshaped_hidden_states, reshaped_labels, reshaped_segmentation):
+      embedding_table = params['params']['token_embedder']['embedding']
+      chunk_logits = jnp.dot(hidden_state_chunk, embedding_table.T)
+      breakpoint()
+      # chunk_logits = model.apply(
+      #     {'params': params['params']},
+      #     hidden_state_chunk,
+      #     method='logits_from_hidden_states',
+      # )
+      one_hot_targets = jax.nn.one_hot(label_chunk, config.vocab_size)
+      chunk_xent, _ = max_utils.cross_entropy_with_logits(chunk_logits, one_hot_targets, 0.0)
+      total_loss += jnp.sum(chunk_xent * (segmentation_chunk != 0))
+
+  return total_loss
+
+
+def get_seq_tiling_loss_custom_grad(
+    intermediate_outputs,
+    data,
+    config,
+    model,
+    params,
+):
+  nested_key = ("intermediates", "decoder", "hidden_states")
+  hidden_states = maxtext_utils.get_nested_value(intermediate_outputs, nested_key)[0]
+  labels = data["targets"]
+  batch_size, seq_len, emb_dim = hidden_states.shape
+  assert seq_len % config.num_vocab_seq_tiling == 0, "Sequence length should be divisible by the number of vocab tiles."
+  seq_tile_size = seq_len // config.num_vocab_seq_tiling
+
+  reshaped_hidden_states = hidden_states.reshape(
+      (batch_size, config.num_vocab_seq_tiling, seq_tile_size, emb_dim)
+  ).transpose(1, 0, 2, 3)
+  reshaped_labels = labels.reshape(
+      (batch_size, config.num_vocab_seq_tiling, seq_tile_size)
+  ).transpose(1, 0, 2)
+  reshaped_segmentation = data["targets_segmentation"].reshape(
+      (batch_size, config.num_vocab_seq_tiling, seq_tile_size)
+  ).transpose(1, 0, 2)
+
+  def scan_body(carry_loss, chunk_data):
+    """A pure function to compute loss for a single chunk within lax.scan."""
+    hidden_state_chunk, label_chunk, segmentation_chunk = chunk_data
+    
+    chunk_loss = calculate_chunk_loss_with_custom_grad(
+        hidden_state_chunk, params, label_chunk, segmentation_chunk, model, config
+    )
+    
+    return carry_loss + chunk_loss, None
+
+  total_loss, _ = jax.lax.scan(
+        scan_body, 0.0, (reshaped_hidden_states, reshaped_labels, reshaped_segmentation)
+    )
+
+  return total_loss
+
+
+@jax.custom_vjp
+def calculate_chunk_loss_with_custom_grad(hidden_state_chunk, params, label_chunk, segmentation_chunk, model, config):
+    """
+    Calculates the loss for a single chunk. This function's backward pass is customized
+    to prevent repeated memory allocation for embedding table gradients.
+    """
+    # FORWARD PASS: Exactly as it was inside the original scan_body
+    chunk_logits = model.apply(
+        {'params': params},
+        hidden_state_chunk,
+        method='logits_from_hidden_states',
+    )
+    one_hot_targets = jax.nn.one_hot(label_chunk, config.vocab_size)
+    chunk_xent, _ = max_utils.cross_entropy_with_logits(chunk_logits, one_hot_targets, 0.0)
+    chunk_loss = jnp.sum(chunk_xent * (segmentation_chunk != 0))
+    return chunk_loss
+
+def _calculate_chunk_loss_fwd(hidden_state_chunk, label_chunk, segmentation_chunk, model, params, config):
+    """Forward pass for the custom VJP. It computes the output and saves inputs for the backward pass."""
+    chunk_loss = calculate_chunk_loss_with_custom_grad(
+        hidden_state_chunk, label_chunk, segmentation_chunk, model, params, config
+    )
+    # Return the output and save all inputs for the backward pass
+    return chunk_loss, (hidden_state_chunk, label_chunk, segmentation_chunk, model, params, config)
+
+def _calculate_chunk_loss_bwd(residuals, g):
+    """
+    Custom backward pass. `g` is the incoming gradient for `chunk_loss`.
+    This function calculates the gradient of the chunk loss with respect to
+    `hidden_state_chunk` and `params`.
+    """
+    hidden_state_chunk, label_chunk, segmentation_chunk, model, params, config = residuals
+
+    # Define a function for which we can get the gradient.
+    # It takes only the differentiable inputs: hidden_state and params.
+    def loss_for_grad(p, hs):
+        chunk_logits = model.apply(
+            {'params': p},
+            hs,
+            method='logits_from_hidden_states',
+        )
+        one_hot_targets = jax.nn.one_hot(label_chunk, config.vocab_size)
+        chunk_xent, _ = max_utils.cross_entropy_with_logits(chunk_logits, one_hot_targets, 0.0)
+        return jnp.sum(chunk_xent * (segmentation_chunk != 0))
+
+    # Calculate gradients with respect to params and hidden_state_chunk
+    grad_params, grad_hs_chunk = jax.grad(loss_for_grad, argnums=(0, 1))(params, hidden_state_chunk)
+
+    # Scale the gradients by the incoming gradient `g`
+    final_grad_params = jax.tree_util.tree_map(lambda x: x * g, grad_params)
+    final_grad_hs_chunk = jax.tree_util.tree_map(lambda x: x * g, grad_hs_chunk)
+    
+    # Return gradients for each input of the original function in the correct order.
+    # Non-differentiable inputs get a gradient of None.
+    return (final_grad_hs_chunk, None, None, None, final_grad_params, None)
+
+# Register the forward and backward functions with the custom VJP decorator
+calculate_chunk_loss_with_custom_grad.defvjp(
+    _calculate_chunk_loss_fwd, _calculate_chunk_loss_bwd
+)
 
 
 # -----------------------------------------------------------------------------
@@ -127,12 +299,16 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
       decoder_target_tokens=data["targets"],
       decoder_target_mask=data["targets_segmentation"],
   )
-  one_hot_targets = jax.nn.one_hot(data["targets"], config.vocab_size)
-  xent, _ = max_utils.cross_entropy_with_logits(logits, one_hot_targets, 0.0)
-  xent = nn.with_logical_constraint(xent, ("activation_embed_and_logits_batch", "activation_length"))
-  # Mask out paddings at the end of each example.
-  xent = xent * (data["targets_segmentation"] != 0)
-  total_loss = jnp.sum(xent)
+
+  if config.enable_vocab_seq_tiling:
+    total_loss = get_seq_tiling_loss(intermediate_outputs, data, config, model, params)
+  else:
+    one_hot_targets = jax.nn.one_hot(data["targets"], config.vocab_size)
+    xent, _ = max_utils.cross_entropy_with_logits(logits, one_hot_targets, 0.0)
+    xent = nn.with_logical_constraint(xent, ("activation_embed_and_logits_batch", "activation_length"))
+    # Mask out paddings at the end of each example.
+    xent = xent * (data["targets_segmentation"] != 0)
+    total_loss = jnp.sum(xent)
   total_weights = jnp.sum(data["targets_segmentation"] != 0)
   # If gradient accumulation is enabled, we don't need to divide total_loss
   # by total_weights and then multiply the computed gradient by total_weights,
