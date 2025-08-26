@@ -49,6 +49,7 @@ from collections import defaultdict
 import time
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec
@@ -368,7 +369,7 @@ class InferenceWorker:
     self.decode_state: DecodeState = None
     self.completion_tokens_by_id: dict[Hashable, list[TokenOutput]] = {}
     self.prompt_logprobs_by_id: dict[Hashable, list[np.ndarray]] = {}
-    self.true_lengths: dict[Hashable, int] = {}
+    self.true_lengths: jax.Array = None
     # Model components (initialized later)
     self.engine = None
     self.decode_batch_size = None
@@ -461,8 +462,7 @@ class InferenceWorker:
     self.empty_decode_slots = list(range(self.decode_batch_size))
     self.slot_to_id = {}
     self.running = True
-    self.true_lengths = {input.id: input.true_length for input in data}
-
+    self.true_lengths = jax.numpy.array([input.true_length for input in data]).squeeze()
     max_logging.log("Continuous batching started")
 
     self._run_continous_batching(data)
@@ -596,7 +596,13 @@ class InferenceWorker:
       '''
       first_token = result_tokens.data[:, 0]
       log_prob = result_tokens.log_prob
-      prompt_logp = result.prompt_logp[:, :true_length]
+      prompt_logp = result.prompt_logp
+      # slice_sizes = jnp.array([1, true_length])
+      # prompt_logp = jax.lax.dynamic_slice(
+      #   result.prompt_logp,
+      #   start_indices=(0, 0),
+      #   slice_sizes=slice_sizes # (1, true_length) because we are doing prefill for one sequence at a time
+      # )
       self.generated_token_backlog.put_nowait((first_token, log_prob, True, prompt_ids[i], slot, prompt_logp))
 
   def decode(self):
@@ -714,7 +720,7 @@ class InferenceWorker:
 
     index = len(self.completion_tokens_by_id[prompt_id])
     if prompt_logp is not None:
-      self.prompt_logprobs_by_id[prompt_id] = jax.numpy.array([prompt_logp])
+      self.prompt_logprobs_by_id[prompt_id] = prompt_logp
     self.completion_tokens_by_id[prompt_id].append(TokenOutput(result_token, log_prob))
     return ((result_token == self.eos_ids).any()) or (index + 1 == self.max_decode_length)
 
