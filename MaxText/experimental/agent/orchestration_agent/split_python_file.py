@@ -21,23 +21,26 @@ into single modules.
 
 Example Invocation:
 
-python SplitPythonFile.py \
+python split_python_file.py \
   "https://github.com/huggingface/transformers/blob/main/src/transformers/models/llama/modeling_llama.py"
 """
-import ast
-import os.path
-import json
-import sys
-import hashlib
-import logging
+
 from collections import defaultdict, deque
 import argparse
+import ast
+import hashlib
+import json
+import logging
+import os.path
+from typing import TypedDict, cast
 
-# Add parent directory to path to allow imports from sibling directories
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-from orchestration_agent.Utils import get_github_file_content, get_absolute_imports, check_github_file_exists
+from MaxText.experimental.agent.orchestration_agent.utils import get_github_file_content, get_absolute_imports, check_github_file_exists
 
 logger = logging.getLogger("__name__")
+
+SortedStructure = TypedDict(
+    "SortedStructure", {"sorted_modules": dict, "component_dependencies": list, "warning": str}, total=False
+)
 
 # Cache file for storing results of Python file splitting operations
 # Avoids re-parsing files that have already been analyzed
@@ -77,6 +80,7 @@ class ReferenceVisitor(ast.NodeVisitor):
     return None, None  # The base of the attribute access is not a simple name
 
   def visit_Attribute(self, node):
+    """visit ast.Attribute"""
     # If this node has already been processed as part of a larger attribute chain, skip it.
     if node in self._handled_nodes:
       return
@@ -132,7 +136,7 @@ class ReferenceVisitor(ast.NodeVisitor):
       self.found_dependencies.add(node.id)
 
 
-class dependency_analyzer:
+class DependencyAnalyzer:
   """
   Analyzes a Python source file to find dependencies between all top-level
   definitions. It groups circular dependencies (Strongly Connected Components)
@@ -150,10 +154,12 @@ class dependency_analyzer:
     self.conditional_imports = []
     self.definitions = {}
     self.dependencies = defaultdict(set)
+    self.sorted_components = {}
+    self.git_dependencies = {}
     # Adjacency list for graph algorithms
     self.adj = defaultdict(list)
-    root_index = len(file_path.split("/")) - 1 - file_path.split("/")[::-1].index(project_root)
-    self.package_path = "/".join(file_path.split("/")[root_index:])
+    root_index = len(file_path.split(os.path.sep)) - 1 - file_path.split(os.path.sep)[::-1].index(project_root)
+    self.package_path = os.path.sep.join(file_path.split(os.path.sep)[root_index:])
     self.split_python_cache_file = split_python_cache_file
 
   def get_source_code(self):
@@ -171,10 +177,11 @@ class dependency_analyzer:
             path is missing.
         Exception: When a remote file exists but cannot be read.
     """
+    source_code = ""
     if self.file_path.startswith("https"):
       flag, source_code = get_github_file_content(self.file_path)
       if flag is False:
-        exists, raw_url_or_error = check_github_file_exists(self.file_path)
+        exists, _ = check_github_file_exists(self.file_path)
         if exists:
           print("not able to read seems have some issue in file", self.file_path, source_code)
           raise Exception(source_code)
@@ -182,7 +189,7 @@ class dependency_analyzer:
           print("Unable to read file: does not exist", self.file_path)
           raise FileNotFoundError(self.file_path)
     elif os.path.exists(self.file_path):
-      with open(self.file_path, "r", encoding="utf-8") as f:
+      with open(self.file_path, "rt", encoding="utf-8") as f:
         source_code = f.read()
     return source_code
 
@@ -200,7 +207,7 @@ class dependency_analyzer:
     Returns:
         dict[str, str]: Mapping of imported names to "file.py#name" anchors.
     """
-    path_form, path_imports = path.removeprefix("from ").replace(".", "/").split(" import ")
+    path_form, path_imports = path.removeprefix("from ").replace(".", os.path.sep).split(" import ")
     import_dict = {}
     for pkg in path_imports.split(","):
       # This part might need to be smarter to distinguish module imports from object imports
@@ -474,8 +481,8 @@ class dependency_analyzer:
 
     # 5. Create the dependency list between components.
     dependency_list = set()
-    for dependant, deps in self.dependencies.items():
-      dependant_comp = comp_to_name_map.get(dependant)
+    for dependent, deps in self.dependencies.items():
+      dependant_comp = comp_to_name_map.get(dependent)
       if not dependant_comp:
         continue
 
@@ -518,11 +525,14 @@ class dependency_analyzer:
         if original_name not in component_dependencies:
           component_dependencies[original_name] = list(deps)
 
-    self.sorted_structure = {
-        "sorted_modules": self.sorted_components,
-        "component_dependencies": component_dependencies,
-        "warning": warning_message,
-    }
+    self.sorted_structure = cast(
+        SortedStructure,
+        {
+            "sorted_modules": self.sorted_components,
+            "component_dependencies": component_dependencies,
+            "warning": warning_message,
+        },
+    )
 
   def load_cache(self):
     """Load cached analysis result if caching is enabled.
@@ -534,7 +544,7 @@ class dependency_analyzer:
     search_cache = {}
     if enable_cache:
       if os.path.exists(self.split_python_cache_file):
-        with open(self.split_python_cache_file, "r") as f:
+        with open(self.split_python_cache_file, "rt", encoding="utf-8") as f:
           search_cache = json.load(f)
 
       dep_hash = hashlib.sha256(self.file_path.encode()).hexdigest()
@@ -546,10 +556,10 @@ class dependency_analyzer:
     """Persist the current `sorted_structure` under `cache_key` if enabled."""
     if enable_cache:
       search_cache[cache_key] = self.sorted_structure
-      with open(self.split_python_cache_file, "w") as f:
+      with open(self.split_python_cache_file, "wt", encoding="utf-8") as f:
         json.dump(search_cache, f, indent=4)
 
-  def get_sorted_structure(self):
+  def get_sorted_structure(self) -> SortedStructure:
     """Compute (or load) and return the full sorted structure for the file.
 
     Returns:
@@ -612,11 +622,11 @@ def get_modules_from_file(file_path, module, project_root="transformers", add_ex
   """
   analyzer = None
   try:
-    logger.info(f"--- Analyzing '{file_path}' for {module} ---\n")
-    analyzer = dependency_analyzer(file_path, project_root, add_external_dependencies=add_external_dependencies)
+    logger.info("--- Analyzing '%s' for %s ---\n", file_path, module)
+    analyzer = DependencyAnalyzer(file_path, project_root, add_external_dependencies=add_external_dependencies)
     return analyzer.get_module_code(module), analyzer.source_code
   except Exception as e:
-    logger.error(f"Unable to find module {module} from {file_path} due to {e}")
+    logger.error("Unable to find module %s from %s due to %s", module, file_path, e)
     if analyzer is None:
       return None, None
     else:
@@ -628,15 +638,21 @@ def get_modules_in_order(file_path, module=None, project_root="transformers", ad
 
   If `module` is provided, returns a structure filtered to that component.
   """
-  logger.info(f"\n--- Analyzing '{file_path}' and creating structured output for module {module} ---\n")
-  analyzer = dependency_analyzer(file_path, project_root, add_external_dependencies=add_external_dependencies)
+  logger.info("\n--- Analyzing '%s' and creating structured output for module %s ---\n", file_path, module)
+  analyzer = DependencyAnalyzer(file_path, project_root, add_external_dependencies=add_external_dependencies)
   analyzer.get_sorted_structure()
   if module is None:
     return analyzer.sorted_structure
   return analyzer.get_structure_for_module(module=module)
 
 
-def get_argparser():
+def parse_args():
+  """
+  Parses command-line arguments for file or folder processing.
+
+  Returns:
+      argparse.Namespace: The parsed command-line arguments.
+  """
   parser = argparse.ArgumentParser(description="Analyze Python file dependencies and split into components.")
   parser.add_argument(
       "filepath",
@@ -659,7 +675,7 @@ def get_argparser():
   return parser
 
 
-def save_results_in_file(result, filename, outFile="file_component.txt"):
+def save_results_in_file(result: SortedStructure, filename, outFile="file_component.txt"):
   """Write a summary of components and dependencies to `outFile`."""
   standalone_modules = [mod for mod in result["sorted_modules"].keys() if mod not in result["component_dependencies"]]
   dependent_sorted_modules = {
@@ -667,19 +683,19 @@ def save_results_in_file(result, filename, outFile="file_component.txt"):
       for mod in result["sorted_modules"].keys()
       if mod in result["component_dependencies"]
   }
-  with open(outFile, "w") as f:
+  with open(outFile, "wt", encoding="utf-8") as f:
     f.write(f"Components for {filename}\n")
     f.write(f"Standalone Modules: {json.dumps(standalone_modules)}\n")
     f.write(f"Dependent  Modules\n {json.dumps(dependent_sorted_modules,indent=4)}")
 
 
 def main():
-  parser = get_argparser()
+  parser = parse_args()
   args = parser.parse_args()
   filepath = args.filepath
   result = get_modules_in_order(filepath)
 
-  save_results_in_file(result, filename=filepath.split("/")[-1])
+  save_results_in_file(result, filename=filepath.split(os.path.sep)[-1])
   print("--- Sorted Modules (Topological Order) ---")
   print(json.dumps(list(result["sorted_modules"].keys()), indent=2))
 

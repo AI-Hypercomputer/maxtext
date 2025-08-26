@@ -46,26 +46,24 @@ python llm_rag_embedding_generation.py --override-existing-records
 ```
 """
 
-import os
-import sys
-import time
 import argparse
-import pickle, numpy as np
-import json
-import sqlite3
 import hashlib
+import json
+import os
+import pickle
+import sqlite3
+import time
 
-# Add parent directory to path to allow imports from sibling directories
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+import numpy as np
 
-from integrative_rag_agent import system_setup
-from integrative_rag_agent.config import maxtext_code_block, maxtext_block_description, enable_cache
-from code_generation_agent.llm_agent import GeminiAgent
-from integrative_rag_agent.llm_rag_agent import EmbeddingAgent
-from code_evaluation_agent.utils import get_last_defined_module
-from orchestration_agent.SplitPythonFile import get_modules_from_file
-from integrative_rag_agent.database_operations import save_document, load_all_documents
-from integrative_rag_agent.prompts_integrative_rag import Description_Prompt, CODE_DESCRIPTION
+from MaxText.experimental.agent.code_evaluation_agent.utils import get_last_defined_module
+from MaxText.experimental.agent.code_generation_agent.llm_agent import GeminiAgent
+from MaxText.experimental.agent.integrative_rag_agent import system_setup
+from MaxText.experimental.agent.integrative_rag_agent.config import maxtext_code_block, maxtext_block_description, enable_cache
+from MaxText.experimental.agent.integrative_rag_agent.database_operations import save_document, load_all_documents
+from MaxText.experimental.agent.integrative_rag_agent.llm_rag_agent import EmbeddingAgent
+from MaxText.experimental.agent.integrative_rag_agent.prompts_integrative_rag import Description_Prompt, CODE_DESCRIPTION
+from MaxText.experimental.agent.orchestration_agent.split_python_file import get_modules_from_file
 
 
 # Create cache table if it doesn't exist
@@ -179,10 +177,10 @@ def get_code_description_with_gemini(code_block, full_code_context, user_prompt=
       full_code_context (str): The full source code of the file for context.
       user_prompt (str): The prompt template for the user message.
   Returns:
-      dict: A dictionary containing the structured analysis, or an error message.
+      None | dict: A dictionary containing the structured analysis, or an error message and return `None`.
   """
   llm_agent = GeminiAgent(system_instruction=Description_Prompt)
-  for i in range(5):
+  for _ in range(5):
     resp = None
     try:
       resp = llm_agent(user_prompt.replace("{code_block}", code_block).replace("{full_code_context}", full_code_context))
@@ -190,6 +188,7 @@ def get_code_description_with_gemini(code_block, full_code_context, user_prompt=
     except Exception as e:
       print("Exception in analyze_code_with_gemini", e)
       print("Response", resp)
+  return None
 
 
 def save_analysis_blocks(scraped_blocks):
@@ -198,7 +197,7 @@ def save_analysis_blocks(scraped_blocks):
   Args:
     scraped_blocks (list[dict]): List of analysis records to write.
   """
-  with open(maxtext_block_description, "w") as f:
+  with open(maxtext_block_description, "wt", encoding="utf-8") as f:
     json.dump(scraped_blocks, f, indent=4)
 
 
@@ -215,14 +214,14 @@ def description_generation(skip_existing_records):
       present in the output JSON.
   """
   # --- Configuration ---
-  with open(maxtext_code_block) as f:
+  with open(maxtext_code_block, "rt", encoding="utf-8") as f:
     scraped_data = json.load(f)
   scraped_blocks, full_codes = scraped_data["scraped_blocks"], scraped_data["full_codes"]
 
   # 2. Analyze each block with Gemini
   all_analyses = []
   if os.path.exists(maxtext_block_description):
-    with open(maxtext_block_description) as f:
+    with open(maxtext_block_description, "rt", encoding="utf-8") as f:
       all_analyses = json.load(f)
   print("\n" + "=" * 20 + " ANALYZING CODE WITH GEMINI " + "=" * 20)
 
@@ -236,7 +235,7 @@ def description_generation(skip_existing_records):
       if block_name is None:
         continue
       block_name = file_path + "#" + block_name
-      if skip_existing_records and any([analyses["block_name"] == block_name for analyses in all_analyses]):
+      if skip_existing_records and any(analyses["block_name"] == block_name for analyses in all_analyses):
         print(f"Skipping block {block_name} as exists")
         continue
       print(f"  - Analyzing block {i + 1}/{len(blocks)}...")
@@ -266,11 +265,11 @@ def embedding_generation(skip_existing_records):
   """
   _, name_list, _, _, _ = load_all_documents()
   embedding_agent = EmbeddingAgent()
-  with open(maxtext_block_description) as f:
+  with open(maxtext_block_description, "rt", encoding="utf-8") as f:
     all_analyses = json.load(f)
   for doc in all_analyses:
     if skip_existing_records and doc["block_name"] in name_list:
-      print(f"Block {doc['block_name']} existing skiping")
+      print(f"Block {doc['block_name']} existing skipping")
       continue
     print(f"Generating embeddings for: {doc['block_name']}")
     desc = json.dumps(doc["analysis"])
@@ -294,7 +293,6 @@ if __name__ == "__main__":
       help="Override existing records for both description and embedding generation.",
   )
   args = parser.parse_args()
-  skip_existing_records = not args.override_existing_records
 
-  description_generation(skip_existing_records)
-  embedding_generation(skip_existing_records)
+  description_generation(not args.override_existing_records)
+  embedding_generation(not args.override_existing_records)

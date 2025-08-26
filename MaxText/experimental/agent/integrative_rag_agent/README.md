@@ -76,7 +76,7 @@ Copy the model ID from Hugging Face and run:
 
    ```python get_model_info.py --model-id Qwen/Qwen3-235B-A22B-Thinking-2507-FP8```
 
-   This will return the class name and file path from transformers. and these will be used in following step as filepath and  module_name. You need to use this infomation to the step 4.
+   This will return the class name and file path from transformers. and these will be used in following step as filepath and  module_name. You need to use this information to the step 4.
 
 
 4.**Sort components in hierarchical order**

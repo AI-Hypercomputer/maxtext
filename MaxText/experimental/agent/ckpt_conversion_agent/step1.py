@@ -16,10 +16,8 @@
 main script to execute the multi-agent workflow for model-specific mappings generation
 """
 import argparse
+
 from MaxText.experimental.agent.ckpt_conversion_agent.analysis import AnalysisAgent
-from MaxText.experimental.agent.ckpt_conversion_agent.plan import PlanAgent
-from MaxText.experimental.agent.ckpt_conversion_agent.transformation import TransformationAgent
-from MaxText.experimental.agent.ckpt_conversion_agent.mapping import MappingAgent
 from MaxText.experimental.agent.ckpt_conversion_agent.dsl import DSLAgent
 
 
@@ -45,4 +43,3 @@ if __name__ == "__main__":
 
   # Human interaction needed,
   # Before proceed, check outputs/proposed_dsl.txt to consider if new ops are needed
-

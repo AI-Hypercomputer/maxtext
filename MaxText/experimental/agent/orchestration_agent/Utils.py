@@ -11,9 +11,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-import requests, ast, os  # if this is not available, please try ``pip install requests``
+import sys
 from urllib.parse import urlparse, urljoin
+import ast
+import os
+
+import requests  # if this is not available, please try ``pip install requests``
 
 
 def github_blob_to_raw(blob_url):
@@ -30,14 +33,14 @@ def github_blob_to_raw(blob_url):
   if "github.com" not in parsed.netloc or "/blob/" not in parsed.path:
     raise ValueError(f"Invalid GitHub blob URL: {blob_url}")  # Not a valid blob URL
 
-  parts = parsed.path.split("/")
+  parts = parsed.path.split(os.path.sep)
   if len(parts) < 5:
     raise ValueError(f"Invalid GitHub blob URL: {blob_url}")  # Not a valid blob URL
 
   user = parts[1]
   repo = parts[2]
   commit = parts[4]
-  file_path = "/".join(parts[5:])
+  file_path = os.path.sep.join(parts[5:])
 
   raw_url = f"https://raw.githubusercontent.com/{user}/{repo}/{commit}/{file_path}"
   return raw_url
@@ -125,7 +128,7 @@ def get_file_content(url):
   if "http" in url and "github.com" in url:
     return get_github_file_content(url)
   if os.path.exists(url):
-    with open(url) as f:
+    with open(url, "rt", encoding="utf-8") as f:
       return True, f.read()
   else:
     return False, "Not a GitHub URL and no local file found"
@@ -216,7 +219,7 @@ def remove_local_imports(source_code, filepath=None):
   """
   if filepath is not None:
     # Determine the base module from the filepath
-    basemodule = filepath.lstrip("/").split("/")[0]
+    basemodule = filepath.lstrip(os.path.sep).split(os.path.sep)[0]
   else:
     basemodule = ""
   tree = ast.parse(source_code)
@@ -357,7 +360,7 @@ def have_module(target_name, file_url):
           return True
     if isinstance(node, ast.ImportFrom):
       for alias in node.names:
-        if alias.asname == target_name or alias.name == target_name:
+        if target_name in (alias.asname, alias.name):
           return ("ImportFrom", node.module or "." * node.level)
   return False
 
@@ -369,7 +372,8 @@ def resolve_complex_import(module_path_base_url, importPackage, base_url, curren
   refer to a file or a directory (package) with an __init__.py.
 
   Args:
-      module_path_base_url (str): The base URL for the module path (e.g., 'https://github.com/.../transformers/models/llama').
+      module_path_base_url (str): The base URL for the module path
+         (ex. 'https://github.com/.../transformers/models/llama').
       importPackage (str): The specific name being imported (e.g., 'modeling_llama', 'configuration_llama').
       base_url (str): The base URL of the repository.
       current_dir_url (str): The URL of the directory containing the original import statement.
@@ -384,19 +388,21 @@ def resolve_complex_import(module_path_base_url, importPackage, base_url, curren
       `importPackage` is "modeling_llama", `base_url` is "https://github.com/org/repo/blob/main/src/",
       and `current_dir_url` is "https://github.com/org/repo/blob/main/src/transformers/models/llama",
       this function would first check for "https://github.com/org/repo/blob/main/src/transformers/models/llama.py".
-      If not found, it would then check for "https://github.com/org/repo/blob/main/src/transformers/models/llama/__init__.py".
+      If not found, it would then check for
+      "https://github.com/org/repo/blob/main/src/transformers/models/llama/__init__.py".
       If `__init__.py` exists and contains `from . import modeling_llama`, it would then check for
       "https://github.com/org/repo/blob/main/src/transformers/models/llama/modeling_llama.py".
   """
 
+  message = ""
   if num_try == 0:
     message = f"There is an issue with import {importPackage} in {module_path_base_url} current dir is {current_dir_url}"
   if num_try > 4:  # Increased recursion limit slightly for network latency
-    print.error(f"Error: Exceeded recursion depth. {message}")
+    print("Error: Exceeded recursion depth.", message, file=sys.stderr)
     return None
   # Check for a direct .py file containing the definition
   potential_py_url = f"{module_path_base_url}.py"
-  if check_if_file_exists(potential_py_url)[0] and have_module(importPackage, potential_py_url) == True:
+  if check_if_file_exists(potential_py_url)[0] and have_module(importPackage, potential_py_url):
     return potential_py_url
 
   # Check for a package (directory with __init__.py)
@@ -406,22 +412,7 @@ def resolve_complex_import(module_path_base_url, importPackage, base_url, curren
   ):
     has_module = have_module(importPackage, potential_pkg_init_url)
     if has_module:
-      if has_module == True:
-        return potential_pkg_init_url
-      elif has_module[0] == "ImportFrom":
-        # The name is re-exported from another module
-        re_export_module = has_module[1]
-        if re_export_module in (".", ""):
-          # from . import X -> look for X.py in the same directory
-          potential_file_in_pkg_url = url_join(module_path_base_url, f"{importPackage}.py")
-          if check_if_file_exists(potential_file_in_pkg_url)[0]:
-            return potential_file_in_pkg_url
-        else:
-          # from .foo import X -> recurse into foo
-          new_module_path_base_url = url_join(module_path_base_url, re_export_module)
-          return resolve_complex_import(
-              new_module_path_base_url, importPackage, base_url, new_module_path_base_url, num_try + 1, Message
-          )
+      return potential_pkg_init_url
     else:
       # The package exists, but the import is not in __init__. It could be a submodule.
       potential_file_in_pkg_url = url_join(module_path_base_url, f"{importPackage}.py")
@@ -502,14 +493,17 @@ def get_absolute_imports(import_line, file_url, project_root="transformers"):
   base_url = file_url.rsplit(project_root + "/", 1)[0]
   packages_and_aliases = [pkg.split(" as ") if " as " in pkg else (pkg, None) for pkg in " ".join(parts[3:]).split(",")]
   packages_and_aliases = [(pkg, "") if alies is None else (pkg, " as " + alies) for pkg, alies in packages_and_aliases]
-  pakages = [
+  packages = [
       (resolve_import_path(file_url, module_rest, level, base_url, pkg.strip()), pkg, alies)
       for pkg, alies in packages_and_aliases
   ]
-  pakages = [
-      "from " + import_path.removeprefix(base_url).removesuffix(".py").replace("/", ".") + " import " + pkg.strip() + alies
-      for import_path, pkg, alies in pakages
+  packages = [
+      "from "
+      + import_path.removeprefix(base_url).removesuffix(".py").replace(os.path.sep, ".")
+      + " import "
+      + pkg.strip()
+      + alies
+      for import_path, pkg, alies in packages
       if import_path is not None
   ]
-  if len(pakages) > 0:
-    return "\n".join(pakages)
+  return "\n".join(packages) if packages else None

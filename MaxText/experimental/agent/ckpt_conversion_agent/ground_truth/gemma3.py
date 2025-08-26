@@ -12,6 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Gemma3 ckpt conversation agent ground truth hook functions."""
+
+import numpy as np
+
+import jax
+import jax.numpy as jnp
+
 
 def GEMMA3_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, scan_layers=False, saving_to_hf=False):
   """
@@ -22,7 +29,7 @@ def GEMMA3_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, scan_layers=False, saving_to_hf=F
 
   # ---- Embedding pad & scale ----
   def pad_and_scale_embedding(input_tensor, target_shape):
-    source_vocab_size, source_hidden_size = input_tensor.shape
+    source_vocab_size, _ = input_tensor.shape
     target_vocab_size, target_hidden_size = target_shape
 
     # MaxText embedding = original_embedding * sqrt(hidden_size)

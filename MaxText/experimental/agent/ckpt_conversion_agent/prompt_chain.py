@@ -18,12 +18,9 @@ This is a baseline agent, using prompt-chain + validator/executer architecture
 import os
 import json
 import argparse
+
 from MaxText.experimental.agent.ckpt_conversion_agent.base import BaseAgent
 from MaxText.experimental.agent.ckpt_conversion_agent.utils.utils import load_prompt_template
-
-
-target_model = "gemma3"
-MAX_RETRIES = 3
 
 
 class prompt_chaining_agent(BaseAgent):
@@ -39,11 +36,14 @@ class prompt_chaining_agent(BaseAgent):
     self.max_retries = max_retries
     self.dir_path = dir_path
 
-  def run_chain(self):
+  def run_chain(self, max_retries=3):
+    """Run chain"""
     # Load context data
-    with open(f"{self.dir_path}/context/{target_model}/maxtext_params.json", "r") as f:
+    with open(
+        os.path.join(self.dir_path, "context", self.target_model, "maxtext_params.json"), "rt", encoding="utf8"
+    ) as f:
       maxtext_params = json.load(f)
-    with open(f"{self.dir_path}/context/{target_model}/hf_params.json", "r") as f:
+    with open(os.path.join(self.dir_path, "context", self.target_model, "hf_params.json"), "rt", encoding="utf8") as f:
       hf_params = json.load(f)
 
     # Load prompt templates
@@ -60,7 +60,7 @@ class prompt_chaining_agent(BaseAgent):
     # ======== Analyze Model Structures ========
     print("Step 1: Analyzing model structures...")
     prompt1 = prompt_templates["analysis"].format(
-        target_model=target_model,
+        target_model=self.target_model,
         maxtext_params_json=json.dumps(maxtext_params, indent=2),
         hf_params_json=json.dumps(hf_params, indent=2),
         dsl=None,
@@ -72,10 +72,10 @@ class prompt_chaining_agent(BaseAgent):
     print("Step 2: Generating and verifying parameter mapping function...")
     param_mapping_code = None
     feedback = ""
-    for attempt in range(1, MAX_RETRIES + 1):
+    for attempt in range(1, max_retries + 1):
       print(f"  Attempt {attempt}...")
       prompt3 = prompt_templates["param_mapping"].format(
-          target_model=target_model,
+          target_model=self.target_model,
           analysis=analysis,
           pitfalls=None,
           maxtext_params_json=json.dumps(maxtext_params, indent=2),
@@ -98,18 +98,18 @@ class prompt_chaining_agent(BaseAgent):
 
       if "passed" in feedback:
         param_mapping_code = candidate
-        print(f"  Passed Validator...")
+        print("  Passed Validator...")
         break
       else:
-        if attempt == MAX_RETRIES:
-          raise RuntimeError("Max attemps tried")
+        if attempt == max_retries:
+          raise RuntimeError("Max attempts tried")
 
     output_dir = f"{self.dir_path}/outputs"
     if not os.path.exists(output_dir):
       os.makedirs(output_dir)
     file_path = os.path.join(output_dir, "param_mapping.py")
     try:
-      with open(file_path, "w", encoding="utf-8") as f:
+      with open(file_path, "wt", encoding="utf-8") as f:
         f.write(param_mapping_code)
       print(f"Parameter mapping successfully saved to {file_path}")
     except IOError as e:
@@ -119,10 +119,10 @@ class prompt_chaining_agent(BaseAgent):
     candidate = None
     feedback = ""
     shape_mapping_code = None
-    for attempt in range(1, MAX_RETRIES + 1):
+    for attempt in range(1, max_retries + 1):
       print("Step 3: Generating HF weights shape mapping function...")
       prompt2 = prompt_templates["shape_mapping"].format(
-          target_model=target_model,
+          target_model=self.target_model,
           hf_params_json=json.dumps(hf_params, indent=2),
           analysis=analysis,
           feedback=feedback,
@@ -141,15 +141,15 @@ class prompt_chaining_agent(BaseAgent):
 
       if "yes" in feedback.lower():
         shape_mapping_code = candidate
-        print(f"  Passed Validator...")
+        print("  Passed Validator...")
         break
       else:
-        if attempt == MAX_RETRIES:
-          raise RuntimeError("Max attemps tried")
+        if attempt == max_retries:
+          raise RuntimeError("Max attempts tried")
 
     file_path = os.path.join(output_dir, "hf_shape.py")
     try:
-      with open(file_path, "w", encoding="utf-8") as f:
+      with open(file_path, "wt", encoding="utf-8") as f:
         f.write(shape_mapping_code)
       print(f"hf_shape successfully saved to {file_path}")
     except IOError as e:
@@ -158,7 +158,7 @@ class prompt_chaining_agent(BaseAgent):
     # ======== Generate Hook Functions ========
     print("Step 4: Generating layerwise transformation hook functions...")
     prompt4 = prompt_templates["hook_fn"].format(
-        target_model=target_model,
+        target_model=self.target_model,
         analysis=analysis,
         param_mapping=param_mapping_code,
     )
@@ -166,7 +166,7 @@ class prompt_chaining_agent(BaseAgent):
 
     file_path = os.path.join(output_dir, "hook_fn.py")
     try:
-      with open(file_path, "w", encoding="utf-8") as f:
+      with open(file_path, "wt", encoding="utf-8") as f:
         f.write(hook_fn_code)
       print(f"Hook functions successfully saved to {file_path}")
     except IOError as e:

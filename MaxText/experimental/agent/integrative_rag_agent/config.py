@@ -17,14 +17,12 @@ Configuration file for the Code Conversion Agent
 This file contains all the configurable parameters for the PyTorch to JAX code conversion process
 """
 
-import os
-
 # Similarity threshold for finding similar code blocks between PyTorch and JAX implementations
 # Lower values (closer to 0) mean more strict similarity matching
 # Higher values (closer to 1) allow more lenient matching
 torch_jax_similarity_threshold = 0.20
 
-# Enables or disables caching. If True, results of previous computations are reused; if False, computations run fresh every time.
+# Enables or disables caching. If True, results of previous computations are reused; else rerun computations every time.
 enable_cache = True
 
 # Stores blocks of code/data that were found to be similar above the given similarity_threshold.
@@ -43,7 +41,7 @@ cache_folder = "Cache/"
 # GitHub or repository hosting owner/organization name where the codebase resides.
 repo_owner = "AI-Hypercomputer"
 
-# Repository name under the given owner. Combined with repo_owner, this uniquely identifies the repository (e.g., AI-Hypercomputer/maxtext).
+# Repository name under the given owner. Unique when combined with repo_owner, e.g., AI-Hypercomputer/maxtext.
 repo_name = "maxtext"
 
 # Directory where the final processed outputs, analysis, or reports are saved.
@@ -99,11 +97,6 @@ files_order_file_format = f"{results_folder}{{module_name}}_files_order.json"
 # File format string for saving progress status during conversion
 # Tracks which modules have been processed and their current state
 progress_status_file_format = f"{status_folder}{{module_name}}_Status.json"
-
-# Configuration for the target GitHub repository
-# Specifies which repository to scrape for JAX reference implementations
-repo_owner = repo_owner
-repo_name = repo_name
 
 # List of specific paths within the repository to scrape for code blocks
 # These paths contain the JAX implementations that will be used as reference

@@ -1,20 +1,26 @@
-"""
-Copyright 2025 Google LLC
+# Copyright 2023–2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
+"""Utility functions for code evaluation agent."""
 
-     https://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-"""
-
-import ast, re, os, sys, pytest, io, traceback
+import ast
+import io
+import os
+import pytest
+import re
+import sys
+import traceback
 from contextlib import redirect_stdout, redirect_stderr
 
 
@@ -72,7 +78,7 @@ def get_last_defined_module(code_str):
     return f"Syntax error in code: {e}"
 
 
-def run_pytest_capture_output(test_file: str, code_folder: str = None) -> tuple[str, int, bool, int, int]:
+def run_pytest_capture_output(test_file: str, code_folder: None | str = None) -> tuple[str, int, bool, int, int]:
   """Runs a specified pytest test file and captures the output.
 
   This function temporarily changes the current working directory to the specified
@@ -140,13 +146,17 @@ def run_pytest_capture_output(test_file: str, code_folder: str = None) -> tuple[
     print(f"\033[91m[ERROR] Expected a file but got a directory:\033[0m {e.filename}", file=sys.stderr)
     return "", 1, False, 0, 0
 
-  except Exception as e:
-    error_message = f"\033[91m[ERROR] An exception occurred while running pytest:\033[0m\n"
+  except (NotADirectoryError, PermissionError) as e:
+    print(f"\033[91m[ERROR] OS error accessing path:\033[0m {e}", file=sys.stderr)
+    return "", 1, False, 0, 0
+
+  except (ValueError, TypeError, AttributeError) as e:
+    # Catches potential errors during output parsing or other logic.
+    error_message = "\033[91m[ERROR] An unexpected internal error occurred while processing test results:\033[0m\n"
     error_message += f"{type(e).__name__}: {str(e)}\n"
     error_message += "\n\033[93mTraceback:\033[0m\n"
     error_message += "".join(traceback.format_exception(type(e), e, e.__traceback__))
     print(error_message, file=sys.stderr)
-    # Return safe defaults so caller can handle it
     return "", 1, False, 0, 0
 
   finally:

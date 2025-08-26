@@ -36,19 +36,17 @@ python make_pytorch_file.py \
 
 Make sure to set the `output_dir` variable to your desired output directory.
 """
+import argparse
+import ast
+import os
 import os.path
-import ast, argparse
-import os, sys
 
-# Add parent directory to path to allow imports from orchestration_agent
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-
-from orchestration_agent.SplitPythonFile import get_modules_in_order
-from orchestration_agent.GetFilesInHierarchicalOrder import get_dependency_sorted_files
-from orchestration_agent.Utils import remove_local_imports, get_github_file_content
+from MaxText.experimental.agent.orchestration_agent.split_python_file import get_modules_in_order
+from MaxText.experimental.agent.orchestration_agent.get_files_in_hierarchical_order import get_dependency_sorted_files
+from MaxText.experimental.agent.orchestration_agent.utils import remove_local_imports, get_github_file_content
 
 BASE_PATH = "https://github.com/huggingface/transformers/blob/main/src"
-outFolder = "dataset/PyTorch"  # Specify your output folder here, e.g., "dataset/PyTorch"
+outFolder = os.path.join("dataset", "PyTorch")  # Specify your output folder here, e.g., "dataset/PyTorch"
 os.makedirs(outFolder, exist_ok=True)
 
 
@@ -192,7 +190,9 @@ def extract_python_independent_modules(filepath, base_path):
 
   # Separate global and local imports
   global_imports, removed_imports = remove_local_imports(analysis_result["sorted_modules"].get("imports", ""), filepath)
-  conditional_imports, _ = remove_local_imports(analysis_result["sorted_modules"].get("conditional_imports", ""), filepath)
+  conditional_imports, _ = remove_local_imports(
+      analysis_result["sorted_modules"].get("conditional_imports", ""), filepath
+  )
 
   all_global_imports = global_imports + "\n" + conditional_imports
 
@@ -213,30 +213,18 @@ def extract_python_independent_modules(filepath, base_path):
 
     # Check if the component is a PyTorch-related class or function
     for node in comp_tree.body:
-      if is_torch_function_or_class(node):
-        # Ensure the file itself imports torch and the component has no local dependencies
-        if file_uses_torch(tree):
-          if not has_external_dependencies(code, removed_imports, other_local_components):
-            # This is a valid standalone PyTorch module
-            module_name = node.name if hasattr(node, "name") else comp_name
-            standalone_modules.append((comp_name, module_name))
-
-            # Save the component to a file
-            output_filename = f"{file_name}__{module_name}.py"
-            output_path = os.path.join(outFolder, output_filename)
-
-            if os.path.exists(output_path):
-              print(f"Overwriting {output_path}")
-
-            with open(output_path, "w", encoding="utf-8") as f:
-              # Prepend warning and imports if they exist
-              if analysis_result.get("warning"):
-                f.write(f"# {analysis_result['warning']}\n\n")
-              if all_global_imports.strip():
-                f.write(all_global_imports.strip() + "\n\n")
-              f.write(code.strip() + "\n")
-
-            print(f"✅ Saved: {output_path}")
+      _process_and_save_if_standalone_torch_module(
+          all_global_imports=all_global_imports,
+          analysis_result=analysis_result,
+          code=code,
+          comp_name=comp_name,
+          file_name=file_name,
+          node=node,
+          other_local_components=other_local_components,
+          removed_imports=removed_imports,
+          standalone_modules=standalone_modules,
+          tree=tree,
+      )
 
   print("\n--- Standalone PyTorch Modules Extracted ---")
   if standalone_modules:
@@ -244,6 +232,85 @@ def extract_python_independent_modules(filepath, base_path):
       print(f"- {name} ({comp}) from {filepath}")
   else:
     print("No standalone PyTorch modules found.")
+
+
+def _save_module_to_file(file_name, module_name, code, all_global_imports, analysis_result):
+  """Saves a standalone code component to a new Python file.
+
+  Args:
+    file_name (str): The base name of the original source file.
+    module_name (str): The name of the component/module to save.
+    code (str): The source code of the component.
+    all_global_imports (str): A string of global import statements.
+    analysis_result (dict): The result from dependency analysis, used for warnings.
+  """
+  output_filename = f"{file_name}__{module_name}.py"
+  output_path = os.path.join(outFolder, output_filename)
+
+  if os.path.exists(output_path):
+    print(f"Overwriting {output_path}")
+
+  with open(output_path, "wt", encoding="utf-8") as f:
+    # Prepend warning and imports if they exist
+    if analysis_result.get("warning"):
+      f.write(f"# {analysis_result['warning']}\n\n")
+    if all_global_imports.strip():
+      f.write(all_global_imports.strip() + "\n\n")
+    f.write(code.strip() + "\n")
+
+  print(f"✅ Saved: {output_path}")
+
+
+def _process_and_save_if_standalone_torch_module(
+    all_global_imports,
+    analysis_result,
+    code,
+    comp_name,
+    file_name,
+    node,
+    other_local_components,
+    removed_imports,
+    standalone_modules,
+    tree,
+):
+  """Checks if a component is a standalone PyTorch module and saves it.
+
+  This function acts as a filter and processor. It determines if a given code
+  component (a function or class node from the AST) is related to PyTorch,
+  is self-contained (has no local dependencies within its original file),
+  and comes from a file that imports `torch`.
+
+  If all conditions are met, it saves the component as a new standalone
+  Python file. It also logs the action to the console and updates the
+  `standalone_modules` list.
+
+  Args:
+    all_global_imports (str): A string containing all non-local import
+        statements from the original file.
+    analysis_result (dict): The result from `get_modules_in_order`,
+        containing component details and warnings.
+    code (str): The source code of the component being checked.
+    comp_name (str): The name of the component from the dependency analysis.
+    file_name (str): The base name of the original source file.
+    node (ast.AST): The AST node (FunctionDef or ClassDef) of the component.
+    other_local_components (list): A list of names of other components
+        defined in the same original file.
+    removed_imports (list): A list of names from local imports that were
+        stripped from the import block.
+    standalone_modules (list): A list to which the names of successfully
+        extracted modules will be appended (mutated by this function).
+    tree (ast.AST): The full AST of the original source file.
+  """
+  if is_torch_function_or_class(node):
+    # Ensure the file itself imports torch and the component has no local dependencies
+    if file_uses_torch(tree):
+      if not has_external_dependencies(code, removed_imports, other_local_components):
+        # This is a valid standalone PyTorch module
+        module_name = node.name if hasattr(node, "name") else comp_name
+        standalone_modules.append((comp_name, module_name))
+
+        # Save the component to a file
+        _save_module_to_file(file_name, module_name, code, all_global_imports, analysis_result)
 
 
 if __name__ == "__main__":

@@ -15,10 +15,10 @@
 """
 A mapping agent, to generate param_mappings and hf_shape
 """
-
+import argparse
 import json
 import os
-import re
+
 from MaxText.experimental.agent.ckpt_conversion_agent.utils.utils import load_prompt_template, load_json, load_text_file
 from MaxText.experimental.agent.ckpt_conversion_agent.base import BaseAgent
 
@@ -93,7 +93,7 @@ class MappingAgent(BaseAgent):
     output_dir = f"{self.dir_path}/outputs"
     file_path = os.path.join(output_dir, outputfile)
     try:
-      with open(file_path, "w", encoding="utf-8") as f:
+      with open(file_path, "wt", encoding="utf-8") as f:
         f.write(candidate_code)
       print(f"Code successfully saved to {file_path}")
     except IOError as e:
@@ -166,7 +166,14 @@ class MappingAgent(BaseAgent):
 
 if __name__ == "__main__":
   TARGET_MODEL = "gemma3-4b"
-  agent = MappingAgent(target_model=TARGET_MODEL)
+  parser = argparse.ArgumentParser(description="A script to process model transformations.")
+  parser.add_argument("--target_model", type=str, required=True, help='The name of the target model (e.g., "GEMMA3").')
+  parser.add_argument(
+      "--dir_path", type=str, required=True, help='The file path to the context directory (e.g., "context/gemma3").'
+  )
+  parser.add_argument("--api_key", type=str, help="Optional API key for external services.")
+  args = parser.parse_args()
+  agent = MappingAgent(api_key=args.api_key, dir_path=args.dir_path, target_model=TARGET_MODEL)
   try:
     param_mapping_code = agent.generate_param_mapping()
     shape_mapping_code = agent.generate_shape_mapping()

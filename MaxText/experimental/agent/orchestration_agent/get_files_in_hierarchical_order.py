@@ -20,25 +20,24 @@ It handles both absolute and relative imports, and can optionally exclude condit
 Example Invocations:
 
 1. Analyze a specific entry file in a repository, excluding conditional imports (default):
-   python GetFilesInHierarchicalOrder.py \
+   python get_files_in_hierarchical_order.py \
      --base-path "https://github.com/huggingface/transformers/blob/main/src/" \
-     --entry-file-path "https://github.com/huggingface/transformers/blob/main/src/transformers/models/llama/modeling_llama.py"
+--entry-file-path https://github.com/huggingface/transformers/blob/main/src/transformers/models/llama/modeling_llama.py
 
 2. Analyze a specific entry file, including all imports (even conditional ones):
-   python GetFilesInHierarchicalOrder.py \
+   python get_files_in_hierarchical_order.py \
      --base-path "https://github.com/huggingface/transformers/blob/main/src/" \
-     --entry-file-path "https://github.com/huggingface/transformers/blob/main/src/transformers/models/llama/modeling_llama.py" \
-     --no-exclude-conditional-imports
+     --no-exclude-conditional-imports \
+--entry-file-path https://github.com/huggingface/transformers/blob/main/src/transformers/models/llama/modeling_llama.py
 """
-import ast, json
-import os
-import sys
 import argparse
+import ast
+import json
 import logging
+import os.path
 from collections import deque
-# Add parent directory to path to allow imports from sibling directories
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-from orchestration_agent.Utils import find_cycle, check_github_file_exists, get_github_file_content, resolve_import_path
+
+from MaxText.experimental.agent.orchestration_agent.utils import find_cycle, check_github_file_exists, get_github_file_content, resolve_import_path
 
 # Set up basic configuration
 logging.basicConfig(
@@ -66,13 +65,13 @@ def find_file_dependencies(file_path_url, base_path_url, exclude_conditional_imp
   dependencies = set()
   flag, content = get_github_file_content(file_path_url)
   if not flag:
-    logger.warning(f"Warning: Could not read or parse {file_path_url}. Error: {content}")
+    logger.warning("Warning: Could not read or parse %s. Error: %s", file_path_url, content)
     return dependencies
 
   try:
     tree = ast.parse(content, filename=file_path_url)
   except (SyntaxError, ValueError) as e:
-    logger.warning(f"Warning: Could not parse {file_path_url}. Error: {e}")
+    logger.warning("Warning: Could not parse %s. Error: %s", file_path_url, e)
     return dependencies
 
   parent_map = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
@@ -151,7 +150,7 @@ def get_dependency_sorted_files(entry_file_path, base_path, exclude_conditional_
   while files_to_process:
     current_file = files_to_process.popleft()
     i += 1
-    logger.info(f"Processing {i} {current_file.replace(base_path,'')}")
+    logger.info("Processing %d %s", i, current_file.replace(base_path, ""))
     # Skip files that have already been processed to avoid redundant work and cycles.
     if current_file in processed_files:
       continue
@@ -162,7 +161,7 @@ def get_dependency_sorted_files(entry_file_path, base_path, exclude_conditional_
 
     dependencies = find_file_dependencies(current_file, base_path, exclude_conditional_imports)
     dependencies_name = {k.replace(base_path, "") for k in dependencies}
-    logger.info(f"File {current_file.replace(base_path,'')} Have {dependencies_name}")
+    logger.info("File %s Have %s Dependencies", current_file.replace(base_path, ""), dependencies_name)
     dependency_graph[current_file] = list(dependencies)
 
     for dep in dependencies:
@@ -208,14 +207,20 @@ def get_dependency_sorted_files(entry_file_path, base_path, exclude_conditional_
   else:
     cycle = find_cycle(dependency_graph)
     cycle_msg = " -> ".join([c.replace(base_path, "") for c in cycle]) if cycle else "unknown"
-    logger.error(f"\nError: A circular dependency was detected. Cycle: {cycle_msg}")
+    logger.error("\nError: A circular dependency was detected. Cycle: %s", cycle_msg)
     if returnDependencies:
       return [], rel_dependency_graph
     else:
       return []
 
 
-def ArgParser():
+def parse_args():
+  """
+  Parses command-line arguments for file or folder processing.
+
+  Returns:
+      argparse.Namespace: The parsed command-line arguments.
+  """
   parser = argparse.ArgumentParser(description="Dependency sorter for Python files on GitHub.")
   parser.add_argument(
       "--base-path",
@@ -251,32 +256,32 @@ def save_results_in_file(sorted_files, dependencies, args, outFile="FileOrder.tx
       args (argparse.Namespace): The command-line arguments.
       outFile (str): The name of the output file.
   """
-  with open("all_files.json", "w") as f:
+  with open("all_files.json", "wt", encoding="utf-8") as f:
     json.dump({"sorted_files": sorted_files, "dependencies": dependencies}, f)
   standalone_module = [mod for mod in sorted_files if mod not in dependencies or len(dependencies[mod]) == 0]
   dependent_sorted_modules = {
       mod: dependencies[mod] for mod in sorted_files if mod in dependencies and len(dependencies[mod]) > 0
   }
-  with open(outFile, "w") as f:
+  with open(outFile, "wt", encoding="utf-8") as f:
     f.write(f"BasePath {args.base_path}\n")
     f.write(f"Entry File {args.entry_file_path}\n")
     f.write(f"Standalone Files:\n {json.dumps(standalone_module,indent=4)}\n")
     f.write(f"Dependent Files\n {json.dumps(dependent_sorted_modules,indent=4)}\n")
 
 
-if __name__ == "__main__":
-  args = ArgParser()
+def main():
+  args = parse_args()
   BASE_PATH = args.base_path
   ENTRY_FILE_PATH = args.entry_file_path
   EXCLUDE_CONDITIONAL_IMPORTS = args.exclude_conditional_imports
   if not check_github_file_exists(ENTRY_FILE_PATH)[0]:
-    logger.error(f"Error: Entry file not found at '{ENTRY_FILE_PATH}'")
+    logger.error("Error: Entry file not found at '%s'", ENTRY_FILE_PATH)
   else:
     # Use rstrip to handle base paths that may or may not have a trailing slash
-    relative_entry = ENTRY_FILE_PATH.replace(BASE_PATH.rstrip("/"), "")
+    relative_entry = ENTRY_FILE_PATH.replace(BASE_PATH.rstrip(os.path.sep), "")
     mode = "Excluding Conditional Imports" if EXCLUDE_CONDITIONAL_IMPORTS else "Including All Imports"
-    logger.info(f"Analyzing dependencies for: {relative_entry}")
-    logger.info(f"Mode: {mode}")
+    logger.info("Analyzing dependencies for: %s", relative_entry)
+    logger.info("Mode: %s", mode)
     logger.info("-" * 40)
 
     sorted_files, dependencies = get_dependency_sorted_files(
@@ -291,3 +296,7 @@ if __name__ == "__main__":
         logger.info(file_path)
     else:
       logger.info("\nCould not generate sorted file list due to errors.")
+
+
+if __name__ == "__main__":
+  main()

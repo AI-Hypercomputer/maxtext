@@ -17,14 +17,17 @@ This file defines the `GemeiniAgent` class, which acts as an interface for inter
 with the Google Gemini model. It handles model initialization, configuration, and robust 
 API calls with retry mechanisms. Please add your API key and chosen model name in .env file. 
 """
+import logging
+import os
 import time
 
 from dotenv import load_dotenv  # If this is not available, try ``pip install python-dotenv``
 
 load_dotenv()
-import os, logging
-import google.generativeai as genai  # If this is not available, try ``pip install google-generativeai``
+
 import backoff  # If this is not available, try ``pip install backoff``
+
+import google.generativeai as genai  # If this is not available, try ``pip install google-generativeai``
 from google.api_core.exceptions import DeadlineExceeded, InternalServerError, RetryError
 
 
@@ -70,7 +73,7 @@ class GeminiAgent:
     chat dictionary format.
 
     Args:
-        memory_list (Union[str, list]): A single message string or a list of
+        memory_list (str | list): A single message string or a list of
                                         message dictionaries in the required
                                         model format.
 
@@ -83,7 +86,7 @@ class GeminiAgent:
       resp = self.client.generate_content(memory_list, stream=False)
       if hasattr(resp, "text"):
         return resp
-      logger.error(f"Response not have text {resp}")
+      logger.error("Response not have text %s", resp)
       time.sleep(2)
     logger.error("Failed to get a valid response with 'text' attribute after multiple retries.")
     return None

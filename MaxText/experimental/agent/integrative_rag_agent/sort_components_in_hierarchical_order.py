@@ -30,9 +30,22 @@ python get_components_in_hierarchical_order.py \
 ```
 """
 
+from collections import deque, defaultdict
+from typing import Any, DefaultDict, Deque, Dict, List, Set, Tuple, cast
+import argparse
 import copy
+import hashlib
+import json
+import logging
+import os
 
-from config import (
+from MaxText.experimental.agent.integrative_rag_agent import system_setup
+from MaxText.experimental.agent.integrative_rag_agent.prompts_integrative_rag import Dependency_Filter_Prompt
+from MaxText.experimental.agent.code_generation_agent.llm_agent import GeminiAgent
+from MaxText.experimental.agent.integrative_rag_agent.llm_rag_embedding_generation import get_code_embedding
+from MaxText.experimental.agent.integrative_rag_agent.database_operations import make_embedding_index, search_embedding
+from MaxText.experimental.agent.orchestration_agent.split_python_file import get_modules_in_order as get_file_components
+from MaxText.experimental.agent.integrative_rag_agent.config import (
     save_most_similar_block_for_debugging,
     similar_block_folder,
     dependency_filter_cache_file,
@@ -44,22 +57,6 @@ from config import (
     torch_jax_similar_dependency_cache_file,
     dependency_list_file_format,
 )
-
-import os, hashlib
-import sys
-import json
-import argparse
-from integrative_rag_agent import system_setup
-import logging
-
-# Add parent directory to path to allow imports from sibling directories
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-from collections import deque, defaultdict
-from integrative_rag_agent.prompts_integrative_rag import Dependency_Filter_Prompt
-from code_generation_agent.llm_agent import GeminiAgent
-from integrative_rag_agent.llm_rag_embedding_generation import get_code_embedding
-from integrative_rag_agent.database_operations import make_embedding_index, search_embedding
-from orchestration_agent.SplitPythonFile import get_modules_in_order as get_file_components
 
 # --- Basic Configuration ---
 logging.basicConfig(
@@ -94,7 +91,7 @@ def search_similar_dependency(depend, base_path, project_root):
   """
   if enable_cache:
     if os.path.exists(torch_jax_similar_dependency_cache_file):
-      with open(torch_jax_similar_dependency_cache_file, "r") as f:
+      with open(torch_jax_similar_dependency_cache_file, "rt", encoding="utf-8") as f:
         search_cache = json.load(f)
     else:
       search_cache = {}
@@ -107,7 +104,7 @@ def search_similar_dependency(depend, base_path, project_root):
 
   # llm call
   dep_file_path, dep_comp_name = depend.split("#")
-  module_code, description, embedding = get_code_embedding(base_path + dep_file_path, project_root, dep_comp_name)
+  module_code, _, embedding = get_code_embedding(base_path + dep_file_path, project_root, dep_comp_name)
   if module_code is None:
     return None, None
 
@@ -115,8 +112,8 @@ def search_similar_dependency(depend, base_path, project_root):
   logger.info("Distances %s", list(map(lambda x: x[1], results)))
   if save_most_similar_block_for_debugging:
     os.makedirs(similar_block_folder + dep_comp_name, exist_ok=True)
-    for i, (code, dis, index) in enumerate(results):
-      with open(similar_block_folder + dep_comp_name + "/" + str(i) + "_" + str(dis) + ".py", "w") as f:
+    for i, (code, dis, _) in enumerate(results):
+      with open(f"{similar_block_folder}{dep_comp_name}{os.path.sep}{i}_{dis}.py", "wt", encoding="utf-8") as f:
         f.write("# Distance:  " + str(dis) + "\n")
         f.write("##Base_code\n" + module_code)
         f.write("\n\n\n\n##Similarcode\n" + code)
@@ -128,7 +125,7 @@ def search_similar_dependency(depend, base_path, project_root):
 
   if enable_cache:
     search_cache[cache_key] = {"final_result": final_result, "module_code": module_code}
-    with open(torch_jax_similar_dependency_cache_file, "w") as f:
+    with open(torch_jax_similar_dependency_cache_file, "wt", encoding="utf-8") as f:
       json.dump(search_cache, f, indent=4)
 
   return final_result, module_code
@@ -151,7 +148,7 @@ def filter_out_dependency(code, dependency_list):
   """
   if enable_cache:
     if os.path.exists(dependency_filter_cache_file):
-      with open(dependency_filter_cache_file, "r") as f:
+      with open(dependency_filter_cache_file, "rt", encoding="utf-8") as f:
         cache = json.load(f)
     else:
       cache = {}
@@ -178,10 +175,23 @@ def filter_out_dependency(code, dependency_list):
 
   if enable_cache:
     cache[cache_key] = result
-    with open(dependency_filter_cache_file, "w") as f:
+    with open(dependency_filter_cache_file, "wt", encoding="utf-8") as f:
       json.dump(cache, f, indent=4)
 
   return result
+
+
+Status = Tuple[
+    Deque[Tuple[str, str]],
+    Set[str],
+    int,
+    Dict[str, Any],
+    List[Dict[str, Any]],
+    Dict[str, List[str]],
+    DefaultDict[str, Dict[str, Any]],
+    List[str],
+]
+"""Type alias for the state saved and loaded by save/load_status"""
 
 
 def save_status(
@@ -191,7 +201,7 @@ def save_status(
     file_analysis_cache,
     files_to_convert,
     original_dependencies,
-    jax_found_depencies,
+    jax_found_dependencies,
     jax_dependencies_list,
     outfile,
 ):
@@ -220,10 +230,10 @@ def save_status(
       "file_analysis_cache": file_analysis_cache,
       "files_to_convert": files_to_convert,
       "original_dependencies": original_dependencies,
-      "jax_found_depencies": jax_found_depencies,
+      "jax_found_dependencies": jax_found_dependencies,
       "jax_dependencies_list": jax_dependencies_list,
   }
-  with open(outfile, "w") as f:
+  with open(outfile, "wt", encoding="utf-8") as f:
     json.dump(
         {
             "data": {k: list(v) if isinstance(v, (set, deque)) else v for k, v in all_variables.items()},
@@ -234,20 +244,20 @@ def save_status(
     )
 
 
-def load_status(file_path):
+def load_status(file_path: str) -> Status:
   """
   Loads a previously saved analysis state from a JSON file.
 
   This function deserializes the data and restores the original data structures
-  (like deques and sets) to allow for the continuation of a paused analysis.
+  (like dequeues and sets) to allow for the continuation of a paused analysis.
 
   Args:
       file_path (str): The path to the JSON file containing the saved status.
 
   Returns:
-      list: A list of restored variables representing the analysis state.
+      tuple: A tuple of restored variables representing the analysis state.
   """
-  with open(file_path) as f:
+  with open(file_path, "rt", encoding="utf-8") as f:
     status = json.load(f)
   data = status["data"]
   metadata = status["metadata"]
@@ -262,8 +272,8 @@ def load_status(file_path):
     elif vtype == "<class 'collections.defaultdict'>":
       variable_list.append(defaultdict(dict, data[variable]))
     else:
-      logger.warning(f"{variable} {vtype} Not covered")
-  return variable_list
+      logger.warning("%s %s Not covered", variable, vtype)
+  return cast(Status, tuple(variable_list))
 
 
 # --- Main Component Dependency Analysis ---
@@ -286,8 +296,9 @@ def sort_and_search_dependency(base_path, file_path, module):
   files_order_file = files_order_file_format.format(module_name=module)
   progress_status_file = progress_status_file_format.format(module_name=module)
   if save_dependency_list:
-    open(dependency_list_file, "w").close()
-  project_root = file_path.split("/")[0]
+    with open(dependency_list_file, "a", encoding="utf-8"):
+      pass
+  project_root = file_path.split(os.path.sep)[0]
 
   if os.path.exists(progress_status_file):
     (
@@ -300,7 +311,7 @@ def sort_and_search_dependency(base_path, file_path, module):
         jax_found_dependencies,
         jax_dependencies_list,
     ) = load_status(progress_status_file)
-    logger.info(f"Loaded status for {processed_count} processed")
+    logger.info("Loaded status for %d processed", processed_count)
   else:
     q = deque([(file_path, module)])
     processed_components = set()
@@ -321,15 +332,15 @@ def sort_and_search_dependency(base_path, file_path, module):
     comp_id = f"{relative_file_path}#{comp_name}"
 
     if comp_id in processed_components:
-      logger.info(f"{comp_id} is in processed_components")
+      logger.info("%s is in processed_components", comp_id)
       continue
     processed_count += 1
-    logger.info(f"Processing ({processed_count}): {comp_id}  {sub_comp_name if sub_comp_name is not None else ''}")
+    logger.info("Processing (%d): %s  %s", processed_count, comp_id, sub_comp_name if sub_comp_name is not None else "")
 
     if comp_id not in file_analysis_cache:
-      logger.info(f"---> Analyzing file: {comp_id}")
+      logger.info("---> Analyzing file: %s", comp_id)
       try:
-        # Uses the function from SplitPythonFile.py
+        # Uses the function from split_python_file.py
         file_analysis_cache[comp_id] = get_file_components(
             file_url, module=comp_name, project_root=project_root, add_external_dependencies=True
         )
@@ -340,13 +351,13 @@ def sort_and_search_dependency(base_path, file_path, module):
               file_url, module=comp_name, project_root=project_root, add_external_dependencies=True
           )
         except Exception as e:
-          logger.error(f"Could not analyze file with subcompnenet {file_url}. Error: {e}")
+          logger.error("Could not analyze file with subcompnenet %s. Error: %s", file_url, e)
           continue  # Skip this file if it cannot be analyzed
       except Exception as e:
-        logger.error(f"Could not analyze file {file_url}. Error: {e}")
+        logger.error("Could not analyze file %s. Error: %s", file_url, e)
         continue  # Skip this file if it cannot be analyzed
     else:
-      logger.info(f"{comp_id}. already in file_analysis_cache")
+      logger.info("%s. already in file_analysis_cache", comp_id)
 
     processed_comp_ids = list(map(lambda x: x["comp_id"], files_to_convert))
     analysis = copy.deepcopy(file_analysis_cache[comp_id])
@@ -355,14 +366,16 @@ def sort_and_search_dependency(base_path, file_path, module):
           analysis["sorted_modules"][comp_name], analysis["component_dependencies"][comp_name]
       )
       logger.info(
-          f"Filter dependencies from \n {analysis['component_dependencies'][comp_name]} \nto {filtered_dependencies}"
+          "Filter dependencies from \n %s \nto %s", analysis["component_dependencies"][comp_name], filtered_dependencies
       )
       analysis["component_dependencies"][comp_name] = filtered_dependencies
       if save_dependency_list:
-        with open(dependency_list_file, "a") as f:
+        with open(dependency_list_file, "a", encoding="utf-8") as f:
           f.write(f"--- Dependency for {comp_name}\n")
           f.write(
-              json.dumps(list(filter(lambda x: x not in processed_comp_ids, analysis["component_dependencies"][comp_name])))
+              json.dumps(
+                  list(filter(lambda x: x not in processed_comp_ids, analysis["component_dependencies"][comp_name]))
+              )
               + "\n"
           )
           f.write("\n\n\n\n\n")
@@ -370,8 +383,8 @@ def sort_and_search_dependency(base_path, file_path, module):
         original_dependencies[comp_name] = analysis["component_dependencies"][comp_name]
     else:
       if save_dependency_list:
-        with open(dependency_list_file, "a") as f:
-          f.write(f"--- No Depenency for {comp_name}\n\n\n\n\n")
+        with open(dependency_list_file, "a", encoding="utf-8") as f:
+          f.write(f"--- No Dependency for {comp_name}\n\n\n\n\n")
     analysis["component_dependencies"][comp_name] = list(
         filter(
             lambda x: x not in processed_components and x not in jax_dependencies_list,
@@ -389,24 +402,26 @@ def sort_and_search_dependency(base_path, file_path, module):
               "JaxDependencies": jax_found_dependencies.get(comp_name, {}),
           }
       )
-      logger.info(f"➔➔➔➔Added {comp_id} to Modules to convert total founded modules {len(processed_components)}")
+      logger.info("➔➔➔➔Added %s to Modules to convert total founded modules %d", comp_id, len(processed_components))
     else:
-      logger.info(f"{comp_name} from {file_url} have dependencies {analysis['component_dependencies'][comp_name]}")
+      logger.info("%s from %s have dependencies %s", comp_name, file_url, analysis["component_dependencies"][comp_name])
       for dependency in analysis["component_dependencies"][comp_name]:
-        logger.info(f"Searching for {dependency} for {comp_name}")
+        logger.info("Searching for %s for %s", dependency, comp_name)
         dependencies, m_code = search_similar_dependency(dependency, base_path, project_root)
         if m_code is None:
           processed_components.add(dependency)
           continue
         elif dependencies is None:
-          logger.info(f"Maxtext similar dependency not found for {dependency} so adding to search there dependencies")
+          logger.info("Maxtext similar dependency not found for %s so adding to search there dependencies", dependency)
           f_path, m_name = dependency.split("#")
           if (f_path, m_name) not in q:
             q.append((f_path, m_name))
         else:
           jax_found_dependencies[comp_name][dependency] = dependencies
           jax_dependencies_list.append(dependency)
-          logger.info(f"🌟🌟Dependency Found Check for {dependency}, at {similar_block_folder}/{comp_name}")
+          logger.info(
+              "🌟🌟Dependency Found Check for %s, at %s", dependency, os.path.join(similar_block_folder, comp_name)
+          )
       logger.info("Re added %s %s", relative_file_path, comp_name)
       if len(analysis["component_dependencies"][comp_name]) > 0:
         if (relative_file_path, comp_name) not in q:
@@ -422,7 +437,7 @@ def sort_and_search_dependency(base_path, file_path, module):
                 "JaxDependencies": jax_found_dependencies.get(comp_name, {}),
             }
         )
-    with open(files_order_file, "w") as f:
+    with open(files_order_file, "wt", encoding="utf-8") as f:
       json.dump(files_to_convert, f, indent=4)
     save_status(
         q,
@@ -436,7 +451,7 @@ def sort_and_search_dependency(base_path, file_path, module):
         progress_status_file,
     )
 
-  logger.info(f"Total Module to convert {len(files_to_convert)}")
+  logger.info("Total Module to convert %d", len(files_to_convert))
 
 
 def arg_parser():
@@ -464,13 +479,17 @@ def arg_parser():
   return args
 
 
-if __name__ == "__main__":
+def main():
   system_setup.setup_directories()
   args = arg_parser()
   base_path = args.base_path
   entry_file_path = args.entry_file_path
   entry_module = args.entry_module
 
-  logger.info(f"Starting analysis from: {entry_module} in {entry_file_path}")
+  logger.info("Starting analysis from: %s in %s", entry_module, entry_file_path)
   logger.info("-" * 60)
   sort_and_search_dependency(base_path, entry_file_path, entry_module)
+
+
+if __name__ == "__main__":
+  main()

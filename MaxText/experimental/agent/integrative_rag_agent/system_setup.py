@@ -17,10 +17,8 @@ It ensures that all required directories are created based on the configuration 
 """
 
 import os
-import sys
 
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-from integrative_rag_agent import config
+from MaxText.experimental.agent.integrative_rag_agent import config
 
 
 def setup_directories():
