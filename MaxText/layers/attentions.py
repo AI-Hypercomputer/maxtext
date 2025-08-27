@@ -28,30 +28,11 @@ from flax import nnx
 
 from MaxText.common_types import (
     DecoderBlockType,
-    BATCH,
-    BATCH_NO_EXP,
-    HEAD,
-    PREFILL_LENGTH,
-    D_KV,
-    AxisNames,
     AxisIdxes,
-    LENGTH,
-    LENGTH_NO_EXP,
     DType,
     Config,
     Array,
-    DECODE_LENGTH,
-    DECODE_BATCH,
-    PREFILL_KV_BATCH,
-    KV_HEAD,
-    KV_HEAD_DIM,
-    KV_BATCH,
-    KV_BATCH_NO_EXP,
-    EMBED,
-    MODEL_MODE_AUTOREGRESSIVE,
     MODEL_MODE_TRAIN,
-    MODEL_MODE_PREFILL,
-    EP_AS_CONTEXT,
     AttentionType,
 )
 from MaxText.inference import kvcache
@@ -133,26 +114,6 @@ def attention_as_linen(
     temperature_tuning: bool = False,
     temperature_tuning_scale: float = 0.1,
     temperature_tuning_floor_scale: float = 8192.0,
-    # Shard the query activation as the same as the key and value.
-    # TODO: Find a better sharding axis name.
-    # TODO: Further break down the Training and Inference axes for the q, k, v.
-    prefill_query_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, KV_HEAD, KV_HEAD_DIM),
-    prefill_key_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, KV_HEAD, KV_HEAD_DIM),
-    prefill_value_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, KV_HEAD, KV_HEAD_DIM),
-    query_axis_names: AxisNames = (KV_BATCH, LENGTH_NO_EXP, KV_HEAD, KV_HEAD_DIM),
-    key_axis_names: AxisNames = (KV_BATCH, LENGTH_NO_EXP, KV_HEAD, KV_HEAD_DIM),
-    value_axis_names: AxisNames = (KV_BATCH, LENGTH_NO_EXP, KV_HEAD, KV_HEAD_DIM),
-    ep_query_axis_names: AxisNames = (KV_BATCH_NO_EXP, LENGTH, KV_HEAD, KV_HEAD_DIM),
-    ep_key_axis_names: AxisNames = (KV_BATCH_NO_EXP, LENGTH, KV_HEAD, KV_HEAD_DIM),
-    ep_value_axis_names: AxisNames = (KV_BATCH_NO_EXP, LENGTH, KV_HEAD, KV_HEAD_DIM),
-    input_axis_names: AxisNames = (BATCH, LENGTH_NO_EXP, EMBED),
-    ep_input_axis_names: AxisNames = (BATCH_NO_EXP, LENGTH, EMBED),
-    out_axis_names: AxisNames = (BATCH, LENGTH_NO_EXP, HEAD, D_KV),
-    ep_out_axis_names: AxisNames = (BATCH_NO_EXP, LENGTH, HEAD, D_KV),
-    prefill_input_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, EMBED),
-    decode_input_axis_names: AxisNames = (DECODE_BATCH, DECODE_LENGTH, EMBED),
-    prefill_out_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, HEAD, D_KV),
-    decode_out_axis_names: AxisNames = (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV),
     prefill_cache_axis_order: AxisIdxes = (1, 2, 0, 3),
     ar_cache_axis_order: AxisIdxes = (1, 2, 0, 3),
     compute_axis_order: AxisIdxes = (0, 1, 2, 3),
@@ -199,23 +160,6 @@ def attention_as_linen(
       temperature_tuning=temperature_tuning,
       temperature_tuning_scale=temperature_tuning_scale,
       temperature_tuning_floor_scale=temperature_tuning_floor_scale,
-      prefill_query_axis_names=prefill_query_axis_names,
-      prefill_key_axis_names=prefill_key_axis_names,
-      prefill_value_axis_names=prefill_value_axis_names,
-      query_axis_names=query_axis_names,
-      key_axis_names=key_axis_names,
-      value_axis_names=value_axis_names,
-      ep_query_axis_names=ep_query_axis_names,
-      ep_key_axis_names=ep_key_axis_names,
-      ep_value_axis_names=ep_value_axis_names,
-      input_axis_names=input_axis_names,
-      ep_input_axis_names=ep_input_axis_names,
-      out_axis_names=out_axis_names,
-      ep_out_axis_names=ep_out_axis_names,
-      prefill_input_axis_names=prefill_input_axis_names,
-      decode_input_axis_names=decode_input_axis_names,
-      prefill_out_axis_names=prefill_out_axis_names,
-      decode_out_axis_names=decode_out_axis_names,
       prefill_cache_axis_order=prefill_cache_axis_order,
       ar_cache_axis_order=ar_cache_axis_order,
       compute_axis_order=compute_axis_order,
@@ -294,26 +238,6 @@ class Attention(nnx.Module):
       temperature_tuning: bool = False,
       temperature_tuning_scale: float = 0.1,
       temperature_tuning_floor_scale: float = 8192.0,
-      # Shard the query activation as the same as the key and value.
-      # TODO: Find a better sharding axis name.
-      # TODO: Further break down the Training and Inference axes for the q, k, v.
-      prefill_query_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, KV_HEAD, KV_HEAD_DIM),
-      prefill_key_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, KV_HEAD, KV_HEAD_DIM),
-      prefill_value_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, KV_HEAD, KV_HEAD_DIM),
-      query_axis_names: AxisNames = (KV_BATCH, LENGTH_NO_EXP, KV_HEAD, KV_HEAD_DIM),
-      key_axis_names: AxisNames = (KV_BATCH, LENGTH_NO_EXP, KV_HEAD, KV_HEAD_DIM),
-      value_axis_names: AxisNames = (KV_BATCH, LENGTH_NO_EXP, KV_HEAD, KV_HEAD_DIM),
-      ep_query_axis_names: AxisNames = (KV_BATCH_NO_EXP, LENGTH, KV_HEAD, KV_HEAD_DIM),
-      ep_key_axis_names: AxisNames = (KV_BATCH_NO_EXP, LENGTH, KV_HEAD, KV_HEAD_DIM),
-      ep_value_axis_names: AxisNames = (KV_BATCH_NO_EXP, LENGTH, KV_HEAD, KV_HEAD_DIM),
-      input_axis_names: AxisNames = (BATCH, LENGTH_NO_EXP, EMBED),
-      ep_input_axis_names: AxisNames = (BATCH_NO_EXP, LENGTH, EMBED),
-      out_axis_names: AxisNames = (BATCH, LENGTH_NO_EXP, HEAD, D_KV),
-      ep_out_axis_names: AxisNames = (BATCH_NO_EXP, LENGTH, HEAD, D_KV),
-      prefill_input_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, EMBED),
-      decode_input_axis_names: AxisNames = (DECODE_BATCH, DECODE_LENGTH, EMBED),
-      prefill_out_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, HEAD, D_KV),
-      decode_out_axis_names: AxisNames = (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV),
       prefill_cache_axis_order: AxisIdxes = (1, 2, 0, 3),
       ar_cache_axis_order: AxisIdxes = (1, 2, 0, 3),
       compute_axis_order: AxisIdxes = (0, 1, 2, 3),
@@ -393,23 +317,6 @@ class Attention(nnx.Module):
     self.temperature_tuning = temperature_tuning
     self.temperature_tuning_scale = temperature_tuning_scale
     self.temperature_tuning_floor_scale = temperature_tuning_floor_scale
-    self.prefill_query_axis_names = prefill_query_axis_names
-    self.prefill_key_axis_names = prefill_key_axis_names
-    self.prefill_value_axis_names = prefill_value_axis_names
-    self.query_axis_names = query_axis_names
-    self.key_axis_names = key_axis_names
-    self.value_axis_names = value_axis_names
-    self.ep_query_axis_names = ep_query_axis_names
-    self.ep_key_axis_names = ep_key_axis_names
-    self.ep_value_axis_names = ep_value_axis_names
-    self.input_axis_names = input_axis_names
-    self.ep_input_axis_names = ep_input_axis_names
-    self.out_axis_names = out_axis_names
-    self.ep_out_axis_names = ep_out_axis_names
-    self.prefill_input_axis_names = prefill_input_axis_names
-    self.decode_input_axis_names = decode_input_axis_names
-    self.prefill_out_axis_names = prefill_out_axis_names
-    self.decode_out_axis_names = decode_out_axis_names
     self.prefill_cache_axis_order = prefill_cache_axis_order
     self.ar_cache_axis_order = ar_cache_axis_order
     self.compute_axis_order = compute_axis_order
@@ -518,17 +425,12 @@ class Attention(nnx.Module):
       # pylint: disable=no-value-for-parameter
       return self.kernel_init(*args) / depth_scaling
 
-    # TODO: this can be pushed into sharding rules (with this config as a parameter) once we stop supporting
-    #       logical axis rules (for models not migrated to new sharding)
-    kernel_axes = (
-        (None, None, None) if self.config.ici_context_autoregressive_parallelism > 1 else ("embed", "q_heads", "kv")
-    )
     return DenseGeneral(
         in_features_shape=self.convert_dense_general_inputs_shape(inputs_q_shape),
         out_features_shape=(self.num_query_heads, self.head_dim),
         axis=-1,
         kernel_init=query_init,
-        kernel_axes=kernel_axes,
+        kernel_axes=("embed", "q_heads", "kv"),
         dtype=self.dtype,
         weight_dtype=self.weight_dtype,
         quant=self.quant,
@@ -558,18 +460,12 @@ class Attention(nnx.Module):
     if self.num_query_heads % self.num_kv_heads != 0:
       raise ValueError("Invalid num_kv_heads for GQA.")
 
-    kernel_axes = (
-        (None, None, None)
-        if self.config.ici_context_autoregressive_parallelism > 1
-        else ("embed", "kv_heads", "kv_head_dim")
-    )
-
     return DenseGeneral(
         in_features_shape=self.convert_dense_general_inputs_shape(inputs_kv_shape),
         out_features_shape=(self.num_kv_heads, self.head_dim),
         axis=-1,
         kernel_init=self.kernel_init,
-        kernel_axes=kernel_axes,
+        kernel_axes=("embed", "q_heads", "kv"),
         dtype=self.dtype,
         weight_dtype=self.weight_dtype,
         quant=self.quant,
@@ -627,17 +523,13 @@ class Attention(nnx.Module):
 
   def init_out_w(self, output_dim: int) -> nnx.Module:
     """out projection"""
-    # TODO: this logic could be moved into sharding rules once we stop supporting LogicalAxisRulesSharding
-    #       (for callers that have not yet moved to new sharding)
-    out_kernel_axis = (
-        (None, None, None) if self.config.ici_context_autoregressive_parallelism > 1 else ("heads", "kv", "embed")
-    )
+
     return DenseGeneral(
         in_features_shape=(self.num_query_heads, self.head_dim),
         out_features_shape=output_dim,
         axis=(-2, -1),
         kernel_init=self.kernel_init,
-        kernel_axes=out_kernel_axis,
+        kernel_axes=("embed", "q_heads", "kv"),
         dtype=self.dtype,
         weight_dtype=self.weight_dtype,
         quant=self.quant,
@@ -843,20 +735,8 @@ class Attention(nnx.Module):
     Returns:
       output of shape `[batch, length, q_features]`.
     """
-    ep_ctx = self.config.expert_shard_attention_option == EP_AS_CONTEXT
-    # TODO: this logic can be moved into sharding when we no longer need to support LogicalAxisRulesSharding
-    if model_mode == MODEL_MODE_PREFILL:
-      inputs_q = self.sharding.shard(inputs_q, t="inputs_q", a=self.prefill_input_axis_names)
-      inputs_kv = self.sharding.shard(inputs_kv, t="inputs_kv", a=self.prefill_input_axis_names)
-    elif model_mode == MODEL_MODE_TRAIN and ep_ctx:
-      inputs_q = self.sharding.shard(inputs_q, t="inputs_q", a=self.ep_input_axis_names, ep_ctx=ep_ctx)
-      inputs_kv = self.sharding.shard(inputs_kv, t="inputs_kv", a=self.ep_input_axis_names, ep_ctx=ep_ctx)
-    elif model_mode == MODEL_MODE_TRAIN:
-      inputs_q = self.sharding.shard(inputs_q, t="inputs_q", a=self.input_axis_names, ep_ctx=ep_ctx)
-      inputs_kv = self.sharding.shard(inputs_kv, t="inputs_kv", a=self.input_axis_names, ep_ctx=ep_ctx)
-    else:
-      inputs_q = self.sharding.shard(inputs_q, t="inputs_q", a=self.decode_input_axis_names)
-      inputs_kv = self.sharding.shard(inputs_kv, t="inputs_kv", a=self.decode_input_axis_names)
+    inputs_q = self.sharding.shard(inputs_q, t="inputs_q", a=("batch", "length", "embed"))
+    inputs_kv = self.sharding.shard(inputs_kv, t="inputs_kv", a=("batch", "length", "embed"))
 
     # apply projection.
     if self.config.fused_qkv:
@@ -897,23 +777,9 @@ class Attention(nnx.Module):
       )
       query = (query * attn_scales[:, :, jnp.newaxis, jnp.newaxis]).astype(self.dtype)
 
-    # TODO: as above, these can be moved into sharding rules
-    if model_mode == MODEL_MODE_PREFILL:
-      query = self.sharding.shard(query, t="query", a=self.prefill_query_axis_names)
-      key = self.sharding.shard(key, t="key", a=self.prefill_key_axis_names)
-      value = self.sharding.shard(value, t="value", a=self.prefill_value_axis_names)
-    elif model_mode == MODEL_MODE_TRAIN and ep_ctx:
-      query = self.sharding.shard(query, t="query", a=self.ep_query_axis_names, ep_ctx=ep_ctx)
-      key = self.sharding.shard(key, t="key", a=self.ep_key_axis_names, ep_ctx=ep_ctx)
-      value = self.sharding.shard(value, t="value", a=self.ep_value_axis_names, ep_ctx=ep_ctx)
-    elif model_mode == MODEL_MODE_TRAIN:
-      query = self.sharding.shard(query, t="query", a=self.query_axis_names, ep_ctx=ep_ctx)
-      key = self.sharding.shard(key, t="key", a=self.key_axis_names, ep_ctx=ep_ctx)
-      value = self.sharding.shard(value, t="value", a=self.value_axis_names, ep_ctx=ep_ctx)
-    else:
-      query = self.sharding.shard(query, t="query", a=(DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV))
-      key = self.sharding.shard(key, t="key", a=(DECODE_BATCH, DECODE_LENGTH, KV_HEAD, D_KV))
-      value = self.sharding.shard(value, t="value", a=(DECODE_BATCH, DECODE_LENGTH, KV_HEAD, D_KV))
+    query = self.sharding.shard(query, t="query", a=("kv_batch", "length", "kv_heads", "kv_head_dim"))
+    key = self.sharding.shard(key, t="key", a=("kv_batch", "length", "kv_heads", "kv_head_dim"))
+    value = self.sharding.shard(value, t="value", a=("kv_batch", "length", "kv_heads", "kv_head_dim"))
 
     query = checkpoint_name(query, "query_proj")
     key = checkpoint_name(key, "key_proj")
@@ -934,16 +800,7 @@ class Attention(nnx.Module):
           query, key, value, decoder_segment_ids, model_mode, cached_values, previous_chunk, bidirectional_mask
       )
 
-    # TODO: as above, these can be moved into sharding rules
-    if model_mode == MODEL_MODE_PREFILL:
-      out = self.sharding.shard(out, t="out", a=self.prefill_out_axis_names)
-    elif model_mode == MODEL_MODE_TRAIN and ep_ctx:
-      out = self.sharding.shard(out, t="out", a=self.ep_out_axis_names, ep_ctx=ep_ctx)
-    elif model_mode == MODEL_MODE_TRAIN:
-      out = self.sharding.shard(out, t="out", a=self.out_axis_names, ep_ctx=ep_ctx)
-    else:
-      out = self.sharding.shard(out, t="out", a=self.decode_out_axis_names)
-
+    out = self.sharding.shard(out, t="out", a=("batch", "length", "heads", "kv"))
     out = self.out_projection(out)
     out = checkpoint_name(out, "out_proj")
 

@@ -26,7 +26,7 @@ from flax import nnx
 
 from MaxText import max_logging
 from MaxText import max_utils
-from MaxText.common_types import MODEL_MODE_PREFILL, MODEL_MODE_TRAIN, Array, Config, DType
+from MaxText.common_types import MODEL_MODE_TRAIN, Array, Config, DType
 from MaxText.layers import nnx_wrappers
 from MaxText.layers.initializers import Initializer, default_embed_init, variable_to_logically_partitioned
 from MaxText.sharding import MeshSharding, LogicalAxisRulesSharding
@@ -129,8 +129,6 @@ class Embed(nnx.Module):
     self.dtype = dtype
     self.attend_dtype = attend_dtype
     self.tensor_name = tensor_name
-    # TODO: decide whether to do this or to use what's in config
-    # (i.e. should what's in config drive everything or just the top-level)
     self.sharding = sharding if sharding else LogicalAxisRulesSharding()
 
     self.embedding = nnx.Param(
@@ -164,20 +162,9 @@ class Embed(nnx.Module):
     else:
       output = jnp.asarray(embedding, self.dtype)[inputs]
 
-    # TODO: this and the conditional can  be deleted when LogicalAxisRulesSharding is no longer needed
-    #       (for backwards compatibility with parent modules which still use it, e.g. Mixtral), replaced with
-    #       self.sharding.shard(output, t="embed_output", mode=model_mode)
-    output_prefill_axis_names = ("activation_embed_and_logits_batch", "prefill_activation_length", "activation_embed")
-    output_default_axis_names = ("activation_embed_and_logits_batch", "activation_length", "activation_embed")
-
-    # from flax import linen as nn
-    # test = nn.with_logical_constraint(output, output_prefill_axis_names)
-    # return test
-
-    if model_mode == MODEL_MODE_PREFILL:
-      output = self.sharding.shard(output, t="embed_output", a=output_prefill_axis_names)
-    else:
-      output = self.sharding.shard(output, t="embed_output", a=output_default_axis_names)
+    output = self.sharding.shard(
+      output, t="embed_output", a=("embed_and_logits_batch", "length", "embed"), mode=model_mode
+    )
     return output
 
   def attend(self, query: Array) -> Array:

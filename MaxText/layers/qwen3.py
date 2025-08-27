@@ -65,7 +65,7 @@ def self_attention_with_norm(
       kernel_axes=("norm",),
       sharding=sharding,
   )(inputs_checkpoint)
-  lnx = sharding.shard(lnx, t="lnx", a=("activation_batch", "activation_length", "activation_embed"))
+  lnx = sharding.shard(lnx, t="lnx", a=("batch", "length", "embed"))
 
   # Self-attention block
   attention_layer = attentions.attention_as_linen(
@@ -99,7 +99,7 @@ def self_attention_with_norm(
       deterministic=deterministic,
       model_mode=model_mode,
   )
-  attn_output = sharding.shard(attn_output, t="attn_lnx", a=("activation_batch", "activation_length", "activation_embed"))
+  attn_output = sharding.shard(attn_output, t="attn_lnx", a=("batch", "length", "embed"))
 
   # Residual connection after attention
   residual_after_attention = inputs_checkpoint + attn_output
@@ -114,7 +114,7 @@ def self_attention_with_norm(
       kernel_axes=("norm",),
       sharding=sharding,
   )(residual_after_attention)
-  hidden = sharding.shard(hidden, t="mlp_lnx", a=("activation_batch", "activation_length", "activation_embed"))
+  hidden = sharding.shard(hidden, t="mlp_lnx", a=("batch", "length", "embed"))
 
   return hidden, residual_after_attention
 
@@ -174,7 +174,7 @@ class Qwen3DecoderLayer(nn.Module):
     # Final residual connection
     layer_output = residual_after_attention + mlp_output
     layer_output = sharding.shard(
-      layer_output, t="layer_output", a=("activation_batch", "activation_length", "activation_embed"),
+      layer_output, t="layer_output", a=("batch", "length", "embed"),
     )
 
     if cfg.scan_layers:
@@ -240,13 +240,13 @@ class Qwen3MoeDecoderLayer(nn.Module):
       self.sow("intermediates", "moe_lb_loss", load_balance_loss)
 
     mlp_output = sharding.shard(
-      mlp_output, t="mlp_output", a=("activation_batch", "activation_length", "activation_embed")
+      mlp_output, t="mlp_output", a=("batch", "length", "embed")
     )
 
     # Final residual connection
     layer_output = residual_after_attention + mlp_output
     layer_output = sharding.shard(
-      layer_output, t="layer_output", a=("activation_batch", "activation_length", "activation_embed")
+      layer_output, t="layer_output", a=("batch", "length", "embed")
     )
 
     if cfg.scan_layers:

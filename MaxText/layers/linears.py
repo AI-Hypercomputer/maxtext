@@ -471,13 +471,7 @@ class MlpBlock(nnx.Module):
         x, deterministic=deterministic
     )  # Broadcast along length.
 
-    # TODO: we can remove this code when we no longer need to support LogicalAxisRulesSharding
-    #       and instead pass self.model_mode to the sharding class
-    if self.model_mode == MODEL_MODE_PREFILL:
-      axes = ("activation_batch", "prefill_activation_length", "activation_mlp")
-    else:
-      axes = ("activation_batch", "activation_length", "activation_mlp")
-    self.sharding.shard(x, t="mlp_pre_out", a=axes)
+    self.sharding.shard(x, t="mlp_pre_out", a=("batch", "length", "mlp"))
 
     output = self.wo(x)
     output = checkpoint_name(output, "mlpwo")
