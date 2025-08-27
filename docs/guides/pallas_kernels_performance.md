@@ -1,4 +1,20 @@
-# Performance optimizations with Pallas Kernels
+<!--
+ Copyright 2023–2025 Google LLC
+
+ Licensed under the Apache License, Version 2.0 (the "License");
+ you may not use this file except in compliance with the License.
+ You may obtain a copy of the License at
+
+    https://www.apache.org/licenses/LICENSE-2.0
+
+ Unless required by applicable law or agreed to in writing, software
+ distributed under the License is distributed on an "AS IS" BASIS,
+ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ See the License for the specific language governing permissions and
+ limitations under the License.
+-->
+
+# Performance Optimizations with Pallas Kernels
 
 ## Introduction
 
@@ -12,6 +28,16 @@ While the XLA compiler is highly effective, Pallas provides a powerful tool for 
 * **Hardware-Specific Optimizations**: Tailor code to the specific architecture of your GPU or TPU, leveraging features that the compiler might not fully utilize. This includes fine-grained control over memory access and parallelism.
 * **Improved Memory Access Patterns**: With Pallas, you can optimize how data is read from and written to memory to maximize bandwidth and reduce latency.
 * **Algorithmic Optimizations**: Implement novel algorithms not available in standard libraries, such as flash attention, which combines the benefits of the above points to significantly speed up attention and save memory.
+
+### When Not to Use Pallas
+
+Pallas is a specialized tool and not always the right choice. Stick with standard JAX in these scenarios:
+
+* **When XLA is Sufficient**: If profiling shows your code is already efficient, a custom kernel adds complexity for little gain. **Always profile first.**
+* **For Purely Compute-Bound Operations**: Pallas excels at memory-bound problems. For large, compute-bound operations like `jnp.matmul`, it's hard to beat XLA's highly optimized library calls.
+* **If Maintainability is a Top Priority**: Pallas kernels are lower-level and harder to debug. If the performance gain is marginal, the maintenance overhead may not be worth it.
+* **Without a Clear Bottleneck**: Avoid premature optimization. Use Pallas only after profiling has identified a specific, memory-bound bottleneck.
+
 
 ## Getting Started with Pallas Kernels
 
@@ -67,15 +93,15 @@ Tuning is essential for achieving optimal performance. A key technique is **pipe
 
 ##### Pipelining via Grid Iteration
 
-Instead of an explicit loop inside a kernel, you can define an iteration space using the `grid` argument in `pallas_call`. Pallas unrolls this grid into a series of kernel invocations. The Pallas runtime, especially with a `pltpu.PrefetchScalarGridSpec`, schedules these invocations and their memory transfers to overlap, effectively creating a pipeline. This is the approach used in MaxText kernels like [`megablox/gmm.py`](MaxText/kernels/megablox/gmm.py).
+Instead of an explicit loop inside a kernel, you can define an iteration space using the `grid` argument in `pallas_call`. Pallas unrolls this grid into a series of kernel invocations. The Pallas runtime, especially with a `pltpu.PrefetchScalarGridSpec`, schedules these invocations and their memory transfers to overlap, effectively creating a pipeline. This is the approach used in MaxText kernels like `megablox/gmm.py`.
 
-* **When to use**: This method is simpler and often sufficient when loop iterations are independent and don't require complex state to be carried between them.
+* **When to use**: Prefer `grid` with `PrefetchScalarGridSpec` for independent tiles as it provides simple, automatic pipelining.
 
 ##### Pipelining with `pallas.for_loop`
 
 For more complex scenarios, you can use an explicit `pallas.for_loop` inside your kernel. This is not a standard Python loop; it's a specific instruction to the compiler to create a pipelined schedule. It gives you fine-grained control to manage the state carried between iterations, which is necessary for more advanced pipelining patterns.
 
-* **When to use**: This is necessary when you need to manage complex state between loop iterations or have more intricate dependencies that can't be expressed easily through the grid.
+* **When to use**: Use `pallas.for_loop` for stateful operations or when there are dependencies carried between loop iterations.
 
 For more information, refer to the JAX documentation on [Pallas TPU pipelining](https://docs.jax.dev/en/latest/pallas/tpu/pipelining.html).
 
