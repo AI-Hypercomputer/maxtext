@@ -153,8 +153,11 @@ class MetricLogger:
       step_times = []
       tflops_sec = []
       for m in self.running_gcs_rich_metrics:
+        step_num = m["step"]
+        if step_num < 2:
+          continue
         if "perf/step_time_seconds" in m:
-          step_times.append((m["step"], float(m["perf/step_time_seconds"])))
+          step_times.append((step_num, float(m["perf/step_time_seconds"])))
         if "perf/per_device_tflops_per_sec" in m:
           tflops_sec.append(float(m["perf/per_device_tflops_per_sec"]))
 

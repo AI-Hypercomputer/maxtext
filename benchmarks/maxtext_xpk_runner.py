@@ -416,7 +416,7 @@ def build_user_command(
     # Save metrics to gcs bucket so that we can upload them to bq in post processing.
     enable_metrics_cmd = 'gcs_metrics=true'
 
-  enable_rich_metrics_cmd="enable_rich_metrics=true"
+  enable_rich_metrics_cmd='enable_rich_metrics=true'
 
   upload_hlo_dump=""
   hlo_dump=""
@@ -438,8 +438,8 @@ def build_user_command(
       f'base_output_directory={wl_config.base_output_directory}',
       f'{vertex_tensorboard}',
       f'{run_name_command}',
-      f'{enable_metrics_cmd}'
-      f'{enable_rich_metrics_cmd}'
+      f'{enable_metrics_cmd}',
+      f'{enable_rich_metrics_cmd}',
       f'{upload_hlo_dump}'
   ])
   return command
