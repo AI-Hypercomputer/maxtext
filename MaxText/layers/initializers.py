@@ -52,10 +52,7 @@ def variable_to_logically_partitioned(variable: nnx.VariableState):
 
   metadata = variable.get_metadata()
   if "sharding" in metadata or "sharding_names" in metadata:
-    if "sharding_names" in metadata:
-      sharding_names = metadata["sharding_names"]
-    else:
-      sharding_names = metadata["sharding"]
+    sharding_names = metadata.get("sharding_names", metadata.get("sharding"))
     return nn.LogicallyPartitioned(  # type: ignore[wrong-keyword-args]
         variable.value,
         sharding_names,  # type: ignore[arg-type]

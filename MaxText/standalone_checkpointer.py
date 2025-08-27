@@ -41,7 +41,7 @@ from MaxText.train import get_first_step
 from MaxText.train_utils import validate_train_config
 from MaxText.layers import models
 
-Transformer = models.transformer_as_linen
+Transformer = models.Transformer
 
 
 def checkpoint_loop(config, state=None):

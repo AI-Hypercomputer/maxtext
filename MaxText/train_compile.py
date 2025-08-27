@@ -47,7 +47,7 @@ from MaxText.utils import gcs_utils
 
 # pylint: disable=too-many-positional-arguments
 
-Transformer = models.transformer_as_linen
+Transformer = models.Transformer
 
 
 def validate_config(config):

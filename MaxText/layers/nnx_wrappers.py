@@ -17,10 +17,8 @@
 from functools import partial
 import typing as tp
 from typing import Any
-import warnings
 
 from flax import linen
-from flax import core
 from flax import nnx
 from flax.core import FrozenDict
 from flax.core import meta
@@ -158,12 +156,6 @@ def lazy_init(fn: Module | tp.Callable[..., tp.Any], *args, **kwargs):
   return fn
 
 
-def current_linen_module() -> linen.Module | None:
-  """Get the current Linen module from the Linen context."""
-  if linen.module._context.module_stack:  # pylint: disable=W0212
-    return linen.module._context.module_stack[-1]  # pylint: disable=W0212
-  return None
-
 class ToNNX(Module):
   """A wrapper to turn any Linen module into an NNX module.
 
@@ -201,11 +193,10 @@ class ToNNX(Module):
   ):
     self.to_nnx__module = module
 
-    self.to_nnx__rngs: Rngs | None
     if isinstance(rngs, jax.Array):
       self.to_nnx__rngs = Rngs(params=rngs)
     elif isinstance(rngs, nnx.Rngs):
-      self.to_nnx__rngs = rngs.fork() if hasattr(type(rngs), "fork") else nnx.clone(rngs)  # type: ignore
+      self.to_nnx__rngs = rngs.fork() if hasattr(rngs, "fork") else nnx.clone(rngs)
     else:
       self.to_nnx__rngs = rngs
 
@@ -216,7 +207,7 @@ class ToNNX(Module):
   def __getattr__(self, name: str):
     if hasattr(super(), name):
       return super().__getattribute__(name)
-    maybe_method = getattr(type(self.to_nnx__module), name, None)
+    maybe_method = getattr(self.to_nnx__module.__class__, name, None)
     if callable(maybe_method):
       method = partial(self.__call__, method=maybe_method)
       method.__self__ = self
@@ -224,12 +215,11 @@ class ToNNX(Module):
     return super().__getattribute__(name)
 
   def __call__(
-    self,
-    *args: Any,
-    rngs: Rngs | jax.Array | None = None,
-    method: tp.Callable[..., Any] | str | None = None,
-    mutable: tp.Any = None,
-    **kwargs: Any,
+      self,
+      *args: Any,
+      rngs: Rngs | jax.Array | None = None,
+      method: tp.Callable[..., Any] | str | None = None,
+      **kwargs: Any,
   ) -> Any:
     # Shape-based lazy init of the flax variables
     if rngs is None:
@@ -254,23 +244,19 @@ class ToNNX(Module):
       variables = nnx_attrs_to_linen_vars(nnx_attrs)
 
       # Get `mutable` from top level bridge.Module context if any
-      if mutable is not None:
-        pass
-      elif (m := bdg_module.current_module()) is not None:
+      if (m := bdg_module.current_module()) is not None:
         assert m.scope is not None
         mutable = m.scope.mutable
-      elif (m := current_linen_module()) is not None:
-        assert m.scope is not None
-        mutable = m.scope.mutable
-      else:
-        mutable = False
+        if "mutable" in kwargs and kwargs["mutable"] != mutable:
+          raise ValueError(
+              f"Multiple `mutable` arguments detected: {mutable} at top level vs " f"{kwargs['mutable']} in ToNNX() call"
+          )
+        kwargs["mutable"] = mutable
 
-      out = self.to_nnx__module.apply(
-        variables, *args, rngs=_rngs, method=method, mutable=mutable, **kwargs
-      )
+      out = self.to_nnx__module.apply(variables, *args, rngs=_rngs, method=method, **kwargs)
 
       # Split out the updates if `mutable` is passed into the Flax module
-      if mutable is not False:
+      if kwargs.get("mutable", False) is not False:
         out, updates = out
       else:
         updates = None
@@ -278,10 +264,6 @@ class ToNNX(Module):
     # Split out the updates if `mutable` is passed into the Flax module
     if updates:
       nnx_attrs = linen_vars_to_nnx_attrs(updates)
-      # nnx.update(self, nnx_attrs)
-      # TODO(cgarciae): ideally we just do an update but currently dictionaries don't allow
-      # insertion of new keys, we need to enable this in NNX to simplify the code bellow
-      # to the simple nnx.update(self, nnx_attrs) above.
       for attr_name, value in nnx_attrs.items():
         if hasattr(self, attr_name) and isinstance(value, dict):
           original_value = getattr(self, attr_name)
@@ -414,12 +396,11 @@ class ToLinen(linen.Module):
   metadata_fn: tp.Callable[[variablelib.VariableState], tp.Any] | None = to_linen_var
 
   @linen.compact
-  def __call__(
-    self, *args, nnx_method: tp.Callable[..., Any] | str | None = None, **kwargs
-  ):
+  def __call__(self, *args, nnx_method: tp.Callable[..., Any] | str | None = None, **kwargs):
+    module_kwargs = dict(self.kwargs)
+    maybe_add_default = not self.is_initializing()
+
     def _module_kwargs():
-      maybe_add_default = not self.is_initializing()
-      module_kwargs = dict(self.kwargs)
       if not self.skip_rng:
         module_kwargs["rngs"] = nnx.Rngs(**linen_rngs_dict(self, add_default=maybe_add_default))
       return module_kwargs
@@ -446,25 +427,12 @@ class ToLinen(linen.Module):
 
     states = jtu.tree_map(
         maybe_unbox,
-        list(core.unfreeze(self.variables).values()),  # type: ignore[wrong-arg-types]
+        list(self.variables.values()),
         is_leaf=lambda x: isinstance(x, meta.AxisMetadata),
     )
     if not states:
       states = ({},)
-
-    new_state = nnx.merge_state(*states)
-    new_state_flat = nnx.traversals.flatten_mapping(new_state)
-    current_state_flat = nnx.traversals.flatten_mapping(nnx.state(module))
-    unknown_state_flat = {path: v for path, v in new_state_flat.items() if path not in current_state_flat}
-
-    if unknown_state_flat:
-      paths_str = ""
-      for path, _ in unknown_state_flat.items():
-        paths_str += f"\n  - {'/'.join(map(str, path))}"
-
-      warnings.warn(f"Found unknown module paths in incoming state:{paths_str}")
-
-    nnx.update(module, new_state)
+    nnx.update(module, *states)
 
     _fix_for_qwix_quantization(module)
     method_fn = _get_module_method(module, nnx_method)
@@ -475,8 +443,6 @@ class ToLinen(linen.Module):
   def __getattr__(self, name: str):
     if hasattr(super(), name):
       return super().__getattribute__(name)
-    if name in self.kwargs:
-      return self.kwargs[name]
     maybe_method = getattr(self.nnx_class, name, None)
     if callable(maybe_method):
       method = partial(self.__call__, nnx_method=maybe_method)

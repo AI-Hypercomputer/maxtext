@@ -13,14 +13,11 @@
 # limitations under the License.
 
 # pylint: disable=bare-except, consider-using-generator
-""" Utils that are only interesting for training in MaxText. """
+"""Utils that are only interesting for training in MaxText."""
 
 from collections.abc import Sequence
 import os
-from typing import overload
 
-from flax import nnx
-import flax.linen as nn
 import jax
 from jax.sharding import Mesh
 from MaxText import checkpointing
@@ -38,32 +35,12 @@ from MaxText.utils.goodput_utils import GoodputEvent
 from MaxText.utils.goodput_utils import maybe_record_goodput
 
 
-@overload
 def from_config(
     config: pyconfig.HyperParameters,
     devices: Sequence[jax.Device] | None = None,
-    *,
-    model_mode: str = MODEL_MODE_TRAIN,
-) -> nn.Module: ...
-@overload
-def from_config(
-    config: pyconfig.HyperParameters,
-    devices: Sequence[jax.Device] | None = None,
-    *,
-    model_mode: str = MODEL_MODE_TRAIN,
-    rngs: nnx.Rngs,
-) -> models.Transformer: ...
-def from_config(
-    config: pyconfig.HyperParameters,
-    devices: Sequence[jax.Device] | None = None,
-    *,
-    model_mode: str = MODEL_MODE_TRAIN,
-    rngs: nnx.Rngs | None = None,
-) -> nn.Module | models.Transformer:
-  """Load a pretrained MaxText model from checkpoint.
-
-  This function loads a model from a checkpoint.
-
+) -> models.Transformer:
+  """Instantiate a MaxText model from a config.
+  This function instantiates a model from a config, but does not load any states.
   Args:
       config: Config object.
       devices: Sequence of devices to use for the model. If None, use all
@@ -77,31 +54,28 @@ def from_config(
   """
   devices_array = maxtext_utils.create_device_mesh(config, devices)
   mesh = Mesh(devices_array, config.mesh_axes)
-  model = create_model(config, mesh, model_mode=model_mode, rngs=rngs)
+  model = create_model(config, mesh)
 
   # Return only the model
   return model
 
 
-def get_transformer_model(config, mesh, quant, model_mode: str = MODEL_MODE_TRAIN, rngs: nnx.Rngs | None = None):
-  """Returns the transformer model based on the configuration."""
+def get_transformer_model(config, mesh, quant):
   if config.model_fsdp_ag_once:
-    if rngs is not None:
-      raise NotImplementedError
-    else:
-      return models.ZeroOneTransformer(config, mesh, quant=quant, model_mode=model_mode)
+    return models.ZeroOneTransformer(
+        config, mesh, quant=quant, model_mode=MODEL_MODE_TRAIN
+    )
   else:
-    if rngs is not None:
-      return models.Transformer(config, mesh, quant=quant, rngs=rngs, model_mode=model_mode)
-    else:
-      return models.transformer_as_linen(config, mesh, quant=quant, model_mode=model_mode)
+    return models.Transformer(
+        config, mesh, quant=quant, model_mode=MODEL_MODE_TRAIN
+    )
 
 
-def create_model(config, mesh, model_mode: str = MODEL_MODE_TRAIN, rngs: nnx.Rngs | None = None):
+def create_model(config, mesh):
   """Instantiates and returns the model object, sharded across the mesh."""
   # Model definition
   quant = quantizations.configure_quantization(config)
-  model = get_transformer_model(config, mesh, quant, model_mode=model_mode, rngs=rngs)
+  model = get_transformer_model(config, mesh, quant)
   model = quantizations.maybe_quantize_model(model, config)
   return model
 

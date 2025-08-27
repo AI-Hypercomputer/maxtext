@@ -29,9 +29,9 @@ from MaxText import train_utils
 from MaxText import pyconfig
 from MaxText.layers import models
 from MaxText import dpo_utils
+import jax
 from jax.sharding import Mesh
 from MaxText.train_utils import from_config
 
 Transformer = models.Transformer
-transformer_as_linen = models.transformer_as_linen
 

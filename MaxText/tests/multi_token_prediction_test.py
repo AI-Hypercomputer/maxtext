@@ -135,7 +135,7 @@ class MTPBlockTestModel(nn.Module):
         name="shared_embedding",
     )
     self.decoder = Decoder(
-        config=self.config, mesh=self.mesh, name="decoder_for_mtp"
+        config=self.config, mesh=self.mesh, shared_embedding=self.shared_embedding, name="decoder_for_mtp"
     )
     self.mtp_block = multi_token_prediction.MultiTokenPredictionBlock(
         config=self.config,
@@ -149,7 +149,6 @@ class MTPBlockTestModel(nn.Module):
       self, main_hidden_state, input_ids, target_ids, target_mask, position_ids, decoder_segment_ids, deterministic
   ):
     return self.mtp_block(
-        self.shared_embedding,
         main_hidden_state,
         input_ids,
         target_ids,

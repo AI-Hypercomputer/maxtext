@@ -28,7 +28,7 @@ from MaxText.layers import quantizations
 from MaxText import maxtext_utils
 from MaxText.globals import PKG_DIR
 
-Transformer = models.transformer_as_linen
+Transformer = models.Transformer
 
 
 class StateDtypes(unittest.TestCase):
