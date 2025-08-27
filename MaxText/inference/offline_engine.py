@@ -513,7 +513,7 @@ class InferenceWorker:
 
   def _build_final_outputs(self, input_data: list[InputData]) -> list[CompletionOutput]:
     """Build the final list of CompletionOutput."""
-
+    breakpoint()
     with jax.profiler.TraceAnnotation("offline_engine.batch_inference.return_final_output"):
       completion_outputs = []
       for row in input_data:
@@ -661,8 +661,6 @@ class InferenceWorker:
               continue
             log_prob_at_slot = log_prob[decode_step][slot]
             result_tokens_at_slot = result_tokens[decode_step][slot]
-            if self.debug:
-              print(f"emit before decode: {type(result_tokens_at_slot)=},{type(log_prob_at_slot)=}")
             should_terminate = self.emit_token(id_, result_tokens_at_slot, log_prob_at_slot)
             if should_terminate:
               newly_empty.append(slot)
