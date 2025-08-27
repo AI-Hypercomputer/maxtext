@@ -84,3 +84,65 @@ python3 -m MaxText.decode MaxText/configs/base.yml \
 ```
 
 **Note:** Because the model hasn't been properly trained, the output text will be random. To generate meaningful output, you need to load a trained checkpoint using the `load_parameters_path` argument.
+
+## Running Models Using Provided Configs
+Maxtext provides many OSS models configs that you can use directly to run training jobs on those model-specific architectures. The way to do this is to use the model-specific config files located at `Maxtext/configs/models` to override the base.yml we used earlier in our train command.
+
+### Train Command Examples for Small Models on TPUs
+
+<details open>
+<summary><strong>llama3-8b</strong></summary>
+
+```bash
+python3 -m MaxText.train MaxText/configs/llama3-8b.yml MaxText/configs/base.yml \
+  model_name=llama3-8b \
+  run_name=$YOUR_JOB_NAME \
+  base_output_directory=gs://<my-bucket> \
+  dataset_type=synthetic \
+  steps=10
+```
+</details>
+
+<details open>
+<summary><strong>qwen3-4b</strong></summary>
+
+```bash
+python3 -m MaxText.train MaxText/configs/qwen3-4b.yml MaxText/configs/base.yml \
+  model_name=qwen3-4b \
+  run_name=$YOUR_JOB_NAME \
+  base_output_directory=gs://<my-bucket> \
+  dataset_type=synthetic \
+  steps=10
+```
+</details>
+
+### Train Command Examples for Small Models on GPUs
+
+GPU model configs are located at `Maxtext/configs/models/gpu`
+
+<details open>
+<summary><strong>mixtral_8x7b</strong></summary>
+
+```bash
+python3 -m MaxText.train MaxText/configs/gpu/mixtral_8x7b.yml MaxText/configs/base.yml \
+  model_name=mixtral_8x7b \
+  run_name=$YOUR_JOB_NAME \
+  base_output_directory=gs://<my-bucket> \
+  dataset_type=synthetic \
+  steps=10
+```
+</details>
+
+<details open>
+<summary><strong>qwen3-4b</strong></summary>
+
+```bash
+python3 -m MaxText.train MaxText/configs/gpu/llama3-8b.yml MaxText/configs/base.yml \
+  model_name=llama3-8b \
+  run_name=$YOUR_JOB_NAME \
+  base_output_directory=gs://<my-bucket> \
+  dataset_type=synthetic \
+  steps=10
+```
+</details>
+
