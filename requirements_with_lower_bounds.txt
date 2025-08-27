@@ -43,4 +43,4 @@ mlperf-logging @ https://github.com/mlcommons/logging/archive/909ca852015cbc204f
 qwix @ https://github.com/google/qwix/archive/9fc58cdbb5e344aff5be2922cb6b7292f3454f60.zip
 # datasets 0.4.0 is not compatible with fsspec==2025.7.0. It will be updated in the next datasets release.
 datasets @ https://github.com/huggingface/datasets/archive/6790e138c00b87a1ddc72184f89e7814cf784360.zip
-seqio @ https://github.com/kanglant/seqio/archive/59b60a95c817ac6b160ab2b018bde3f3d44f066e.zip
+seqio @ https://github.com/kanglant/seqio/archive/638c9323d7f23ef16549882cce2a2bcd2d559bb5.zip
