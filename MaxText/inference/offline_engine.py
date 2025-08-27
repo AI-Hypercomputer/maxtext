@@ -108,16 +108,7 @@ class TokenOutput:
   log_prob: jax.Array
 
 
-class SafeThread(threading.Thread):
-  """Thread class with exception handling to prevent silent failures."""
 
-  def run(self):
-    try:
-      super().run()
-    except Exception as _:  # pylint: disable=broad-exception-caught
-      traceback.print_exc()
-      # Kill the process if a thread encounters an error
-      os.kill(os.getpid(), signal.SIGKILL)
 
 
 class PrefillType(Enum):
@@ -479,20 +470,12 @@ class InferenceWorker:
         data: list of InputData objects containing input sequences
     """
 
-    # Start token emission thread
-    token_emission_thread = SafeThread(
-        target=functools.partial(
-            self.background_token_emission,
-        ),
-        name="token_emission",
-    )
-    token_emission_thread.start()
-
     # Process each input
     for row in data:
       # 1. Wait for an empty slot
       while not self.empty_decode_slots:
         self.decode()
+        self._process_token_backlog()
 
       # 2. Get an available slot
       slot = self.empty_decode_slots.pop()
@@ -506,24 +489,27 @@ class InferenceWorker:
           input_true_length=row.true_length,
           prefill_done=self.prefill_done,
       )
+      self._process_token_backlog()
 
     # 4. Flush any pending inputs in batch prefill mode
     self.prefill_helper.finalize(self.params, self.decode_state, self.prefill_done)
+    self._process_token_backlog()
 
     # 5. Continue decoding until all sequences are complete
     while not all(value is None for value in self.slot_to_id.values()):
       self.decode()
+      self._process_token_backlog()
 
     # Wait for detokenization to complete
     self.running = False
     max_logging.log(
-        f"Inference worker: joining token emission thread. "
+        f"Inference worker: processing remaining tokens. "
         f"There are {self.generated_token_backlog.qsize()} elements in the backlog"
     )
     start_time = time.time()
-    with jax.profiler.TraceAnnotation("Flushing token emission thread"):
-      token_emission_thread.join()
-    max_logging.log(f"Inference worker: token emission thread joined in {time.time() - start_time} seconds")
+    with jax.profiler.TraceAnnotation("Flushing token emission"):
+      self._process_token_backlog()
+    max_logging.log(f"Inference worker: remaining tokens processed in {time.time() - start_time} seconds")
 
   def _build_final_outputs(self, input_data: list[InputData]) -> list[CompletionOutput]:
     """Build the final list of CompletionOutput."""
@@ -647,26 +633,21 @@ class InferenceWorker:
     decode_state, result_tokens = self.engine.generate(params, decode_state, rng=rng)
     return decode_state, result_tokens.data[:, 0], result_tokens.log_prob
 
-  def background_token_emission(self):
+  def _process_token_backlog(self):
     """Emit tokens and manage decode slots.
 
-    Runs in a background thread to process tokens from
-    the backlog, emit tokens, and free up
+    Process tokens from the backlog, emit tokens, and free up
     decode slots when sequences complete.
     """
-    max_logging.log("Inference worker: starting background token emission thread")
-    while self.running or not self.generated_token_backlog.empty():
+    while not self.generated_token_backlog.empty():
       newly_empty = []
 
-      # Get next item from queue with timeout
+      # Get next item from queue
       try:
-        result_tokens, log_prob, is_first_token, row_id, slot, prompt_logp = self.generated_token_backlog.get(
-            timeout=0.01
-        )
+        result_tokens, log_prob, is_first_token, row_id, slot, prompt_logp = self.generated_token_backlog.get_nowait()
       except queue.Empty:
-        if not self.running:
-          break
         continue
+
       # Process generated tokens
       start_time = time.time()
       if is_first_token:
@@ -748,7 +729,7 @@ class OfflineEngine:
       batch_prefill_max_batch_size: int = 16,
       mesh: Mesh = None,
       rng: jax.random.PRNGKey = None,
-      debug: bool = True,
+      debug: bool = False,
   ):
     """Initialize the OfflineEngine.
 
