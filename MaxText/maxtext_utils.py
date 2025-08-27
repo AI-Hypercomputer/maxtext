@@ -897,6 +897,7 @@ def init_initial_state(model, tx, config, is_training, key):
       np.ones(input_shape, dtype=jnp.int32),
       np.ones(input_shape, dtype=jnp.int32),
       encoder_images=np.ones(image_shape, dtype=jnp.int32) if config.use_multimodal else None,
+      # nnx_method="no_op",
   )
   if is_training:
     return init_training_state(model.apply, model_vars, tx)
@@ -1074,7 +1075,7 @@ def get_prefill_kv_cache_annotations(model, config, rng, mesh, page_state: None 
 
   def init_kv_cache(model, config):
     input_shape = (
-        config.global_batch_size_to_load,
+        config.micro_batch_size_to_train_on,
         config.max_prefill_predict_length,
     )
     image_shape = get_dummy_image_shape_for_init(config)
@@ -1103,10 +1104,7 @@ def get_kv_cache_annotations(model, config, rng, mesh, page_state: None | PageSt
   """Get a shaped abstraction of the state (including optimizer)"""
 
   def init_kv_cache(model, config):
-    input_shape = (
-        config.global_batch_size_to_load,
-        1,
-    )
+    input_shape = (config.micro_batch_size_to_train_on, 1)
     image_shape = get_dummy_image_shape_for_init(config)
 
     model_vars = model.init(

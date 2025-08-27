@@ -42,7 +42,7 @@ from MaxText.layers import models
 from MaxText.layers import quantizations
 from MaxText.maxtext_utils import assert_params_sufficiently_sharded, get_formatted_sharding_annotations
 
-Transformer = models.Transformer
+Transformer = models.transformer_as_linen
 
 
 class TestGradientClipping(unittest.TestCase):
@@ -165,7 +165,7 @@ class ModelWithMultipleCollections(nn.Module):
   def setup(self):
     self.kernel = self.variable("special_variables", "my_first_kernel", lambda: jnp.ones((4, 5)))
 
-  def __call__(self, x, y, encoder_images=None):
+  def __call__(self, x, y, encoder_images=None, nnx_method=None):
     x = self.dense(x)
     x = x @ self.kernel.value
     return x

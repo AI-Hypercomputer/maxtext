@@ -19,6 +19,7 @@ import sys
 import unittest
 import os.path
 
+import numpy as np
 import pytest
 
 import jax
@@ -82,7 +83,7 @@ class TestModel(unittest.TestCase):
     new_config = self.init_pyconfig(cast_logits_to_fp32=cast_logits_to_fp32, logits_dot_in_fp32=False)
     devices_array = maxtext_utils.create_device_mesh(new_config)
     mesh = Mesh(devices_array, new_config.mesh_axes)
-    model = models.Transformer(config=new_config, mesh=mesh, quant=None, model_mode=MODEL_MODE_TRAIN)
+    model = models.transformer_as_linen(config=new_config, mesh=mesh, quant=None, model_mode=MODEL_MODE_TRAIN)
 
     ids, decoder_segment_ids, decoder_positions = self.get_data()
 
@@ -124,13 +125,13 @@ class TestModel(unittest.TestCase):
     devices_array = maxtext_utils.create_device_mesh(self.cfg)
     mesh = Mesh(devices_array, self.cfg.mesh_axes)
     quant = quantizations.configure_quantization(self.cfg)
-    train_model = models.Transformer(config=self.cfg, mesh=mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
-    prefill_model = models.Transformer(config=self.cfg, mesh=mesh, quant=quant, model_mode=MODEL_MODE_PREFILL)
+    train_model = models.transformer_as_linen(config=self.cfg, mesh=mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
+    prefill_model = models.transformer_as_linen(config=self.cfg, mesh=mesh, quant=quant, model_mode=MODEL_MODE_PREFILL)
 
     ids, decoder_segment_ids, decoder_positions = self.get_data()
 
     train_transformer_vars = train_model.init(
-        {"params": self.rng, "aqt": self.rng, "dropout": self.rng},
+        {"params": self.rng, "aqt": self.rng},
         ids,
         decoder_positions,
         decoder_segment_ids,
@@ -138,7 +139,7 @@ class TestModel(unittest.TestCase):
     )
 
     prefill_transformer_vars = prefill_model.init(
-        {"params": self.rng, "aqt": self.rng, "dropout": self.rng},
+        {"params": self.rng, "aqt": self.rng},
         ids,
         decoder_positions,
         decoder_segment_ids,
@@ -166,10 +167,8 @@ class TestModel(unittest.TestCase):
         mutable=["cache"],
     )
 
-    self.assertTrue(
-        jax.numpy.allclose(
-            full_train_logits[:, :PREFILL_RANGE, :], partial_prefill_logits, rtol=1e-01, atol=1e-01, equal_nan=False
-        )
+    np.testing.assert_allclose(
+        full_train_logits[:, :PREFILL_RANGE, :], partial_prefill_logits, rtol=1e-01, atol=1e-01, equal_nan=False
     )
 
     for idx in range(PREFILL_RANGE, self.cfg.max_target_length):
@@ -188,7 +187,7 @@ class TestModel(unittest.TestCase):
 
       full_train_logits_idx = full_train_logits[:, idx : idx + 1, :]
       self.assertTrue(full_train_logits_idx.shape == ar_logits.shape)
-      self.assertTrue(jax.numpy.allclose(full_train_logits_idx, ar_logits, rtol=1e-01, atol=1e-01, equal_nan=False))
+      np.testing.assert_allclose(full_train_logits_idx, ar_logits, rtol=1e-01, atol=1e-01, equal_nan=False)
 
 
 if __name__ == "__main__":

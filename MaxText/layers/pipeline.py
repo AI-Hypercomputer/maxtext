@@ -445,6 +445,14 @@ class Pipeline(nn.Module):
         body_instance, weights, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode
     ):
       """nn.vmap requires either a nn.module class or a function whose first argument is a nn.module instance."""
+      weights = meta.remove_axis(
+          weights, 0, {
+              nn.PARTITION_NAME: "layers",
+              "sub_weight_split_dims_mapping": (None,),
+              "is_initializing": self.is_initializing(),
+              "x_times": self.num_stages,
+          }
+      )
       return body_instance.apply(weights, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode)
 
     vmap_func = nn.vmap(
