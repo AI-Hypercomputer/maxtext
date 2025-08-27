@@ -28,7 +28,7 @@ def read_code_blocks(file_path, number_of_blocks):
     str: A string containing the randomly selected code blocks, separated by
          three newlines.
   """
-  with open(file_path) as f:
+  with open(file_path, "rt", encoding="utf-8") as f:
     all_blocks = json.load(f)
   return "\n\n\n".join(
       random.choices(sum([v for k, v in all_blocks["scraped_blocks"].items() if len(v) > 0], []), k=number_of_blocks)

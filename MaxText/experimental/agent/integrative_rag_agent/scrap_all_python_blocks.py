@@ -25,17 +25,16 @@ functions, and try/if blocks, and saves them to a JSON file.
 Example Invocation:
 python scrap_all_python_blocks.py
 """
-import os, json
-import sys
 import ast
-import requests
 import base64
-import dotenv
+import json
+import os
 
-# Add parent directory to path to allow imports from sibling directories
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-from integrative_rag_agent import system_setup
-from integrative_rag_agent.config import repo_name, repo_owner, maxtext_code_block, block_for_rag
+import dotenv
+import requests
+
+from MaxText.experimental.agent.integrative_rag_agent import system_setup
+from MaxText.experimental.agent.integrative_rag_agent.config import repo_name, repo_owner, maxtext_code_block, block_for_rag
 
 dotenv.load_dotenv()
 
@@ -95,7 +94,7 @@ def scrape_github_repository(owner, repo, path, all_scraped_blocks, all_full_cod
     headers["Authorization"] = f"token {token}"
 
   try:
-    response = requests.get(api_url, headers=headers)
+    response = requests.get(api_url, headers=headers, timeout=360)
     response.raise_for_status()
   except requests.exceptions.RequestException as e:
     print(f"Error fetching {api_url}: {e}")
@@ -147,11 +146,11 @@ def find_and_scrape_from_github(owner, repo, paths, token=None):
 
 
 def save_scrapped_code_blocks(scraped_blocks):
-  with open(maxtext_code_block, "w") as f:
+  with open(maxtext_code_block, "wt", encoding="utf-8") as f:
     json.dump(scraped_blocks, f, indent=4)
 
 
-if __name__ == "__main__":
+def main():
   system_setup.setup_directories()
   GITHUB_TOKEN = os.environ["GITHUB_TOKEN"]
 
@@ -185,3 +184,7 @@ if __name__ == "__main__":
     print("No full source code was scraped.")
 
   print(f"\nTotal files scraped: {len(full_codes)}\nTotal Blocks {total_blocks}")
+
+
+if __name__ == "__main__":
+  main()

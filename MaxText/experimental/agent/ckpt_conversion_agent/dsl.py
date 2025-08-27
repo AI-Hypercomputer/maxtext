@@ -15,13 +15,14 @@
 """
 A DSL agent class, to propose potential new DSL rules/ops based on the previous analysis call. 
 """
-
+import argparse
 import os
 from MaxText.experimental.agent.ckpt_conversion_agent.utils.utils import load_prompt_template, load_text_file
 from MaxText.experimental.agent.ckpt_conversion_agent.base import BaseAgent
 
 
 class DSLAgent(BaseAgent):
+  """DSL Agent"""
 
   def __init__(self, api_key, dir_path, target_model="gemma3-4b", max_retries=3):
     """
@@ -49,6 +50,7 @@ class DSLAgent(BaseAgent):
     return templates
 
   def verify_dsl(self):
+    """Verify DSL."""
     prompt = self.prompt_templates["dsl"].format(
         analysis=self.analysis,
         target_model=self.target_model,
@@ -63,7 +65,7 @@ class DSLAgent(BaseAgent):
       os.makedirs(output_dir)
     file_path = os.path.join(output_dir, "proposed_dsl.txt")
     try:
-      with open(file_path, "w", encoding="utf-8") as f:
+      with open(file_path, "wt", encoding="utf-8") as f:
         f.write(verification_dsl)
       print(f"Proposed new DSL successfully saved to {file_path}")
     except IOError as e:
@@ -76,5 +78,12 @@ class DSLAgent(BaseAgent):
 
 if __name__ == "__main__":
   TARGET_MODEL = "gemma3-4b"
-  agent = DSLAgent(target_model=TARGET_MODEL)
-  verification_dsl = agent.verify_dsl()
+  parser = argparse.ArgumentParser(description="A script to process model transformations.")
+  parser.add_argument("--target_model", type=str, required=True, help='The name of the target model (e.g., "GEMMA3").')
+  parser.add_argument(
+      "--dir_path", type=str, required=True, help='The file path to the context directory (e.g., "context/gemma3").'
+  )
+  parser.add_argument("--api_key", type=str, help="Optional API key for external services.")
+  args = parser.parse_args()
+  agent = DSLAgent(api_key=args.api_key, dir_path=args.dir_path, target_model=TARGET_MODEL)
+  global_verification_dsl = agent.verify_dsl()

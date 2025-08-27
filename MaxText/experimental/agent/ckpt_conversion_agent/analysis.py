@@ -81,7 +81,7 @@ class AnalysisAgent(BaseAgent):
       os.makedirs(output_dir)
     file_path = os.path.join(output_dir, "analysis.txt")
     try:
-      with open(file_path, "w", encoding="utf-8") as f:
+      with open(file_path, "wt", encoding="utf-8") as f:
         f.write(analysis)
       print(f"Analysis successfully saved to {file_path}")
     except IOError as e:

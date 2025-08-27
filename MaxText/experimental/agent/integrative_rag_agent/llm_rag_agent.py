@@ -35,8 +35,8 @@ from dotenv import load_dotenv  # If this is not available, try ``pip install py
 
 load_dotenv()
 import logging
-from google import genai as google_genai  # If this is not available, try ``pip install google-genai==1.28.0``
 import backoff  # If this is not available, try ``pip install backoff``
+from google import genai as google_genai  # If this is not available, try ``pip install google-genai==1.28.0``
 from google.api_core.exceptions import DeadlineExceeded, InternalServerError, RetryError
 
 

@@ -16,6 +16,8 @@
 
 """Example code for agent, only gemma2 mappings"""
 
+import numpy as np
+
 
 def GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING(config, scan_layers=False):
   """Returns mapping between MaxText and HuggingFace Gemma2 weight paths.
@@ -121,6 +123,7 @@ def GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING(config, scan_layers=False):
     for maxtext_layer_idx in range(0, nlayers // 2):
       local_layer_idx = maxtext_layer_idx * 2
       global_layer_idx = maxtext_layer_idx * 2 + 1
+      # pylint: disable=line-too-long
       layer_mapping = {
           f"params-decoder-layers_{maxtext_layer_idx}-pre_self_attention_norm_global-scale": f"model.layers.{global_layer_idx}.input_layernorm.weight",
           f"params-decoder-layers_{maxtext_layer_idx}-mlp_global-wo-kernel": f"model.layers.{global_layer_idx}.mlp.down_proj.weight",

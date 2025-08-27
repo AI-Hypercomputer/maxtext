@@ -27,10 +27,13 @@ system. It includes functionalities for:
 """
 
 import sqlite3
-import numpy as np
-import faiss
 import pickle
-from config import rag_db_file
+
+import numpy as np
+
+import faiss
+
+from MaxText.experimental.agent.integrative_rag_agent.config import rag_db_file
 
 
 # -------- 1. Create DB --------
@@ -144,8 +147,8 @@ def search_embedding(query_embedding, index, texts, top_k=3):
       top_k (int): Number of nearest neighbors to retrieve.
 
   Returns:
-      list[tuple[str, float, int]]: For each neighbor, a tuple of
-      (text, distance, index_in_corpus). Distances are squared L2 (Euclidean) norms; smaller values indicate greater similarity.
+      list[tuple[str, float, int]]: For each neighbor, a tuple of (text, distance, index_in_corpus).
+        Distances are squared L2 (Euclidean) norms; smaller values indicate greater similarity.
   """
   if index is None:
     return []

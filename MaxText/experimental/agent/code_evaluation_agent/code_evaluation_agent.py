@@ -48,18 +48,17 @@ Relevant Files:
   (to execute pytest and capture its results).
 - `code_generation_agent/llm_agent.py`: Contains the `GeminiAgent` class used
   to interact with the language model.
-- `orchestration_agent/Utils.py`: Contains `parse_python_code` for extracting
+- `orchestration_agent/utils.py`: Contains `parse_python_code` for extracting
   code from LLM responses.
 """
 import argparse
-import os, logging, sys
+import logging
+import os
 
-# Add parent directory to path to allow imports from sibling directories
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-from code_evaluation_agent.prompt_code_evaluation import CodeEvaluation
-from code_evaluation_agent.utils import get_last_defined_module, run_pytest_capture_output
-from code_generation_agent.llm_agent import GeminiAgent
-from orchestration_agent.Utils import parse_python_code
+from MaxText.experimental.agent.code_evaluation_agent.prompt_code_evaluation import CodeEvaluation
+from MaxText.experimental.agent.code_evaluation_agent.utils import get_last_defined_module, run_pytest_capture_output
+from MaxText.experimental.agent.code_generation_agent.llm_agent import GeminiAgent
+from MaxText.experimental.agent.orchestration_agent.utils import parse_python_code
 
 logging.basicConfig(
     format="%(asctime)s %(levelname)-8s %(message)s",
@@ -68,39 +67,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 # logging.raiseExceptions = False
-
-
-parser = argparse.ArgumentParser(description="Code Evaluation Agent")
-parser.add_argument("--error_penalty", type=int, default=10, help="Penalty for errors in test case generation or execution.")
-parser.add_argument(
-    "--pytorch_path",
-    type=str,
-    default="../code_generation_agent/dataset/PyTorch/",
-    help="Path to the directory containing PyTorch files.",
-)
-parser.add_argument(
-    "--jax_path",
-    type=str,
-    default="../code_generation_agent/dataset/jax_converted/",
-    help="Path to the directory containing JAX files.",
-)
-parser.add_argument(
-    "--testcase_path",
-    type=str,
-    default="../code_generation_agent/dataset/test_cases/",
-    help="Path to the directory for generated test cases.",
-)
-parser.add_argument("--overwrite_existing_files", action="store_true", help="Overwrite existing test case files.")
-args = parser.parse_args()
-
-overwrite_existing_files = args.overwrite_existing_files
-error_penalty = args.error_penalty
-pytorch_path = args.pytorch_path
-jax_path = args.jax_path
-testcase_path = args.testcase_path
-os.makedirs(testcase_path, exist_ok=True)
-
-llm_agent = GeminiAgent(CodeEvaluation["SystemPrompt"])
 
 
 def get_file_pairs(pytorch_path, jax_path):
@@ -124,7 +90,7 @@ def get_file_pairs(pytorch_path, jax_path):
   return list(map(lambda x: pytorch_path + x, common_files)), list(map(lambda x: jax_path + x, common_files))
 
 
-def make_test_case_and_run(python_file, jax_file):
+def make_test_case_and_run(args, python_file, jax_file):
   """Generates a test case and runs it for a given PyTorch and JAX file pair.
 
   This function uses a language model to generate a pytest-compatible test case
@@ -133,72 +99,88 @@ def make_test_case_and_run(python_file, jax_file):
   a penalty is applied.
 
   Args:
+      args (argparse.Namespace): The command-line arguments.
       python_file: The path to the PyTorch code file.
       jax_file: The path to the JAX code file.
 
   Returns:
       A tuple containing the number of passed and failed test cases.
   """
+  response = None
   try:
-    logger.info(f"Processing {python_file}")
-    out_file_path = os.path.join(testcase_path, python_file.split("/")[-1])
-    if overwrite_existing_files or not os.path.exists(out_file_path):
-      with open(python_file) as f:
+    logger.info("Processing %s", python_file)
+    out_file_path = os.path.join(args.testcase_path, python_file.split(os.path.sep)[-1])
+    if args.overwrite_existing_files or not os.path.exists(out_file_path):
+      with open(python_file, "rt", encoding="utf-8") as f:
         python_code = f.read()
-      with open(jax_file) as f:
+      with open(jax_file, "rt", encoding="utf-8") as f:
         jax_code = f.read()
       entry_module = get_last_defined_module(python_code)
       if get_last_defined_module(jax_code) != entry_module:
         logger.error(
-            f"It seems inconsistency in {python_file} code PyTorch have {entry_module} and JAX have {get_last_defined_module(jax_code)} as entry Module"
+            "It seems inconsistency in %s code PyTorch have %s and JAX have %s as entry Module",
+            python_file,
+            entry_module,
+            get_last_defined_module(jax_code),
         )
         # Penalty in case of Entry point not exist or different from torch
-        return 0, error_penalty
+        return 0, args.error_penalty
       prompt = CodeEvaluation["TESTCASE"]
       python_code = (
-          "from " + ".".join(python_file.split("/")[1:]).replace(".py", " import " + entry_module) + "\n\n" + python_code
+          "from "
+          + ".".join(python_file.split(os.path.sep)[1:]).replace(".py", " import " + entry_module)
+          + "\n\n"
+          + python_code
       )
-      jax_code = "from " + ".".join(jax_file.split("/")[1:]).replace(".py", " import " + entry_module) + "\n\n" + jax_code
+      jax_code = (
+          "from "
+          + ".".join(jax_file.split(os.path.sep)[1:]).replace(".py", " import " + entry_module)
+          + "\n\n"
+          + jax_code
+      )
       prompt = prompt.replace("<module.path.to.pytorch_code>", python_code)
       prompt = prompt.replace("<module.path.to.jax_code>", jax_code)
       prompt = prompt.replace("<function_or_class_to_call>", entry_module)
       response = llm_agent(prompt)
       generated_code = parse_python_code(response.text)
-      with open(out_file_path, "w") as f:
+      with open(out_file_path, "wt", encoding="utf-8") as f:
         f.write("import os,sys\nsys.path.append(os.path.abspath('..'))\n")
         f.write(generated_code)
       logger.info("Written at %s", out_file_path)
       if "<UNABLETOGENERATE>" in response:
-        return 0, error_penalty
+        return 0, args.error_penalty
     else:
       logger.info("File Exists using same")
-    file = python_file.split("/")[-1]
-    output, exit_code, is_dependency_error, passed, failed = run_pytest_capture_output(file, code_folder=testcase_path)
+    file = python_file.split(os.path.sep)[-1]
+    _, _, _, passed, failed = run_pytest_capture_output(file, code_folder=args.testcase_path)
     return passed, failed
   except Exception as e:
     logger.error("Exception in code generation %s", e)
-    logger.error("The code file is %s", python_file.split("/")[-1])
+    logger.error("The code file is %s", python_file.split(os.path.sep)[-1])
     logger.error("The generated Code is %s", response)
     # Penalty in case of Exception
-    return 0, error_penalty
+    return 0, args.error_penalty
 
 
-def run_code_evaluation():
+def run_code_evaluation(args):
   """Runs the full code evaluation process.
 
   This function orchestrates the evaluation of PyTorch and JAX code file pairs.
   It iterates through the common files, generates and runs a test case for each,
   and then logs the results. It also calculates and prints the overall
   test case and file accuracy.
+
+  Args:
+    args (argparse.Namespace): The command-line arguments.
   """
   total_passed, total_failed = 0, 0
   all_passed, all_failed, total_files = 0, 0, 0
-  for python_file, jax_file in zip(*get_file_pairs(pytorch_path, jax_path)):
-    num_passed, num_failed = make_test_case_and_run(python_file, jax_file)
+  for python_file, jax_file in zip(*get_file_pairs(args.pytorch_path, args.jax_path)):
+    num_passed, num_failed = make_test_case_and_run(args, python_file, jax_file)
     if num_passed == num_failed == 0:  # when the code cannot be executed
       # Penalty in case of issue in test case and not executed
-      num_failed = error_penalty
-    logger.info(f"{python_file.split('/')[-1]} have {num_passed} cases passed and {num_failed} cases failed")
+      num_failed = args.error_penalty
+    logger.info("%s have %d cases passed and %d cases failed", python_file.split(os.path.sep)[-1], num_passed, num_failed)
     total_passed += num_passed
     total_failed += num_failed
     if num_passed == 0:
@@ -208,14 +190,48 @@ def run_code_evaluation():
     total_files += 1
 
   logger.info("****** Results ******")
-  logger.info(f"{all_passed} files have all module passed {all_failed} files have all module failed")
-  logger.info(
-      f"Test case Accuracy {total_passed*100/(total_passed+total_failed):.2f}%",
-  )
-  logger.info(
-      f"File Accuracy {all_passed * 100 / total_files:.2f}%",
-  )
+  logger.info("%d files have all module passed %d files have all module failed", all_passed, all_failed)
+  logger.info("Test case Accuracy %.2f%%", total_passed * 100 / (total_passed + total_failed))
+  logger.info("File Accuracy %.2f%%", all_passed * 100 / total_files)
 
+
+def parse_args():
+  """
+  Parses command-line arguments for file or folder processing.
+
+  Returns:
+      argparse.Namespace: The parsed command-line arguments.
+  """
+  parser = argparse.ArgumentParser(description="Code Evaluation Agent")
+  parser.add_argument(
+      "--error_penalty", type=int, default=10, help="Penalty for errors in test case generation or execution."
+  )
+  parser.add_argument(
+      "--pytorch_path",
+      type=str,
+      default="../code_generation_agent/dataset/PyTorch/",
+      help="Path to the directory containing PyTorch files.",
+  )
+  parser.add_argument(
+      "--jax_path",
+      type=str,
+      default="../code_generation_agent/dataset/jax_converted/",
+      help="Path to the directory containing JAX files.",
+  )
+  parser.add_argument(
+      "--testcase_path",
+      type=str,
+      default="../code_generation_agent/dataset/test_cases/",
+      help="Path to the directory for generated test cases.",
+  )
+  parser.add_argument("--overwrite_existing_files", action="store_true", help="Overwrite existing test case files.")
+  return parser.parse_args()
+
+
+llm_agent = GeminiAgent(CodeEvaluation["SystemPrompt"])
 
 if __name__ == "__main__":
-  run_code_evaluation()
+  cli_args = parse_args()
+  os.makedirs(cli_args.testcase_path, exist_ok=True)
+
+  run_code_evaluation(cli_args)

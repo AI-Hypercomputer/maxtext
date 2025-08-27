@@ -19,23 +19,18 @@ Get Huggingface ckpt Naming
 This is used for the ckpt conversion agent
 """
 
-import time
 import jax
 import os
-from typing import Sequence, List
-import jax.numpy as jnp
-import numpy as np
-from transformers import AutoModelForCausalLM, AutoConfig
-import flax
+from typing import List
 import json
-import torch
 import argparse
+
+from transformers import AutoModelForCausalLM, AutoConfig
 
 from MaxText import max_utils
 from MaxText import maxengine
 from MaxText import pyconfig
 from MaxText import max_logging
-from MaxText.globals import PKG_DIR
 
 
 def main(parsed_args: argparse.Namespace, unknown_pyconfig_args: List[str]) -> None:
@@ -110,11 +105,11 @@ def main(parsed_args: argparse.Namespace, unknown_pyconfig_args: List[str]) -> N
   hf_json_path = os.path.join(output_directory, "hf_params.json")
 
   if jax.process_index() == 0:  # Ensure only one process writes the files
-    with open(maxtext_json_path, "w") as f:
+    with open(maxtext_json_path, "wt", encoding="utf8") as f:
       json.dump(maxtext_params_info, f, indent=2)
     max_logging.log(f"MaxText parameters and shapes saved to {maxtext_json_path}")
 
-    with open(hf_json_path, "w") as f:
+    with open(hf_json_path, "wt", encoding="utf8") as f:
       json.dump(hf_params_info, f, indent=2)
     max_logging.log(f"Hugging Face parameters and shapes saved to {hf_json_path}")
 
@@ -127,6 +122,4 @@ if __name__ == "__main__":
       default="google/gemma-2-2b",
   )
 
-  parsed_args, unknown_args = parser.parse_known_args()
-
-  main(parsed_args, unknown_args)
+  main(*parser.parse_known_args())

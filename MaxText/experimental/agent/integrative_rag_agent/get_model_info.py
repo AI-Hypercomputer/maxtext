@@ -59,14 +59,23 @@ def get_model_info(model_id: str):
   return {"class_name": class_name, "file_path": file_path, "model_type": model_type}
 
 
+def parse_args():
+  """
+  Parses command-line arguments for file or folder processing.
+
+  Returns:
+      argparse.Namespace: The parsed command-line arguments.
+  """
+  parser = argparse.ArgumentParser(description="Get model info from HuggingFace model id")
+  parser.add_argument(
+      "--model-id", type=str, default="Qwen/Qwen3-235B-A22B-Thinking-2507-FP8", help="HuggingFace model id"
+  )
+  return parser.parse_args()
+
+
 # Example Run
 if __name__ == "__main__":
-
-  parser = argparse.ArgumentParser(description="Get model info from HuggingFace model id")
-  parser.add_argument("--model-id", type=str, default="Qwen/Qwen3-235B-A22B-Thinking-2507-FP8", help="HuggingFace model id")
-  args = parser.parse_args()
-  model_id = args.model_id
-  info = get_model_info(model_id)
+  info = get_model_info(parse_args().model_id)
 
   print("Class Name:", info["class_name"])
   print("File Path:", info["file_path"])

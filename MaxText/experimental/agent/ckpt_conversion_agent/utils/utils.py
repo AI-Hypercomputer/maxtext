@@ -11,21 +11,22 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from google import genai
-from google.genai.types import GenerateContentConfig
+
+"""Utility functions for the utility module"""
+
 import json
 
 
 def load_prompt_template(filepath: str) -> str:
   """Loads a prompt template from a file."""
-  with open(filepath, "r", encoding="utf-8") as f:
+  with open(filepath, "rt", encoding="utf-8") as f:
     return f.read()
 
 
 def load_text_file(file_path):
   """Loads a text file."""
   try:
-    with open(file_path, "r", encoding="utf-8") as f:
+    with open(file_path, "rt", encoding="utf-8") as f:
       return f.read()
   except FileNotFoundError:
     print(f"Error: Text file not found at {file_path}")
@@ -35,7 +36,7 @@ def load_text_file(file_path):
 def load_json(file_path):
   """Loads a JSON file."""
   try:
-    with open(file_path, "r", encoding="utf-8") as f:
+    with open(file_path, "rt", encoding="utf-8") as f:
       return json.load(f)
   except FileNotFoundError:
     print(f"Error: JSON file not found at {file_path}")

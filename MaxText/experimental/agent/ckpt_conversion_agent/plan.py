@@ -15,6 +15,7 @@
 """
 A plan agent to analysis the HF & Maxtext models architecture and generate a conversion plan in json format.
 """
+import argparse
 import json
 import os
 from MaxText.experimental.agent.ckpt_conversion_agent.utils.utils import load_prompt_template, load_json, load_text_file
@@ -56,7 +57,7 @@ class PlanAgent(BaseAgent):
     return templates
 
   def plan_conversion(self):
-    # Json Plan
+    """Json Plan"""
     plan = None
     feedback = ""
     for attempt in range(1, self.max_retries + 1):
@@ -91,7 +92,7 @@ class PlanAgent(BaseAgent):
       os.makedirs(output_dir)
     file_path = os.path.join(output_dir, "plan.json")
     try:
-      with open(file_path, "w", encoding="utf-8") as f:
+      with open(file_path, "wt", encoding="utf-8") as f:
         json.dump(candidate_code, f, ensure_ascii=False, indent=4)
       print(f"Plan successfully saved to {file_path}")
     except IOError as e:
@@ -103,5 +104,12 @@ class PlanAgent(BaseAgent):
 if __name__ == "__main__":
   # 1. Define the target model
   TARGET_MODEL = "gemma3-4b"
-  agent = PlanAgent(target_model=TARGET_MODEL)
-  agent.analyze_model_structures()
+  parser = argparse.ArgumentParser(description="A script to process model transformations.")
+  parser.add_argument("--target_model", type=str, required=True, help='The name of the target model (e.g., "GEMMA3").')
+  parser.add_argument(
+      "--dir_path", type=str, required=True, help='The file path to the context directory (e.g., "context/gemma3").'
+  )
+  parser.add_argument("--api_key", type=str, help="Optional API key for external services.")
+  args = parser.parse_args()
+  agent = PlanAgent(api_key=args.api_key, dir_path=args.dir_path, target_model=TARGET_MODEL)
+  agent.plan_conversion()
