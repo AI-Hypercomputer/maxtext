@@ -109,6 +109,8 @@ class WorkloadConfig:
   disruption_configs: DisruptionConfig = None
   xpk_storage: Optional[List[str]] = None
   hlo_dump: Optional[bool] = None
+  elastic_slices: Optional[int] = 0
+  max_slice_restarts: Optional[int] = 1
 
   def __post_init__(self):
     """Initializes num_devices_per_slice and topology for recording the run into BigQuery"""
@@ -682,6 +684,8 @@ def generate_xpk_workload_cmd(
           # ' --use-vertex-tensorboard'
           # f' --experiment-name={exp_name}'
           f' {additional_flags}'
+          f' --elastic-slices={wl_config.elastic_slices}'
+          f' --max-slice-restarts={wl_config.max_slice_restarts}'
       ),
       name,
   )

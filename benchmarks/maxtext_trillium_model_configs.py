@@ -1373,7 +1373,8 @@ llama3_1_70b_8192_iter_real_data_and_checkpointing_tfds = _add_to_model_dictiona
             "max_target_length": 8192,
             "attention": "flash",
             "use_iota_embed": True,
-            "dataset_path": "gs://trillium-scale-datasets-q1-25-west",
+            # "dataset_path": "gs://tess-apple-southamerica-west1/tensorflow_datasets",
+            "dataset_path": "gs://maxtext-scale-test-2025-08-29/",
             "dataset_type": "tfds",
             "enable_checkpointing": True,
             "async_checkpointing": True,
@@ -1393,7 +1394,7 @@ llama3_1_70b_8192_iter_real_data_and_checkpointing_tfds = _add_to_model_dictiona
             "skip_first_n_steps_for_profiler": 10,
             "profiler_steps": 5,
             "tokenizer_type": "tiktoken",
-            "tokenizer_path": "assets/tokenizer_llama3.tiktoken",
+            "tokenizer_path": "/app/maxtext/assets/tokenizer_llama3.tiktoken",
         },
         xla_flags=(
             xla_flags_library.DENSE_VMEM_LIMIT_FLAG

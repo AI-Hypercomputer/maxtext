@@ -19,26 +19,35 @@ import os
 import maxtext_xpk_runner as mxr
 from xpk_configs import XpkClusterConfig
 
+# cluster_config = XpkClusterConfig(
+#     cluster_name="bodaborg-v6e-256-lcscld-c",
+#     project="tpu-prod-env-one-vm",
+#     zone="southamerica-west1-a",
+#     device_type="v6e-256",
+# )
+# base_output_directory = f"gs://sujinesh-southamerica1/sept_2025_scale_test/"
+
 cluster_config = XpkClusterConfig(
-    cluster_name="test-v5e-32-cluster",
-    project="cloud-tpu-cluster",
-    zone="us-south1-a",
-    device_type="v5litepod-32",
+    cluster_name="tpu-cpq-yucmhke-v6e-256-qual",
+    project="tpu-prod-env-multipod",
+    zone="us-east5-a",
+    device_type="v6e-256",
 )
-xpk_path = "~/xpk"
+base_output_directory = f"gs://maxtext-scale-test-2025-08-29/pause_resume/"
+
+xpk_path = "../xpk"
 
 user = os.environ["USER"]
 region = "-".join(cluster_config.zone.split("-")[:-1])
 proxy_image = (
-    f"us-docker.pkg.dev/path/to/{user}/proxy_server"
+    f"us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/sujinesh/unsanitized_proxy_server:latest"
 )
 server_image = (
-    f"us-docker.pkg.dev/path/to/{user}/server"
+    f"us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/sujinesh/unsanitized_server:latest"
 )
-colocated_python_image = f"gcr.io/{cluster_config.project}/path/to/{user}/colocated_python_sidecar"
-runner = f"gcr.io/{cluster_config.project}/{user}_maxtext_latest:latest"
-base_output_directory = f"gs://{user}-{region}/{user}"
-headless = True
+colocated_python_image = f"gcr.io/cloud-tpu-multipod-dev/sujinesh_sidecar_debug:latest"
+runner = f"gcr.io/tpu-prod-env-one-vm/sujinesh_latest:latest"
+headless = False
 pathways_config = mxr.PathwaysConfig(
     server_image=server_image,
     proxy_server_image=proxy_image,
