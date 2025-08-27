@@ -40,7 +40,7 @@ transformers
 tunix @ https://github.com/google/tunix/archive/ee3229a43362fc1209cd477352309c86ca3496b0.zip
 google-jetstream @ https://github.com/AI-Hypercomputer/JetStream/archive/daedc21c393f23449fb54ddc4f75fca34348ea9c.zip
 mlperf-logging @ https://github.com/mlcommons/logging/archive/909ca852015cbc204f8f6d39555dc3f257378818.zip
-qwix @ https://github.com/google/qwix/archive/9fc58cdbb5e344aff5be2922cb6b7292f3454f60.zip
+qwix @ https://github.com/google/qwix/archive/f17dfb74a2a9964fa268cfb02365afa6dd67bd2b.zip
 # datasets 0.4.0 is not compatible with fsspec==2025.7.0. It will be updated in the next datasets release.
 datasets @ https://github.com/huggingface/datasets/archive/6790e138c00b87a1ddc72184f89e7814cf784360.zip
 seqio @ https://github.com/kanglant/seqio/archive/638c9323d7f23ef16549882cce2a2bcd2d559bb5.zip
