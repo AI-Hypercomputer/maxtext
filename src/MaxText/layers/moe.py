@@ -1539,19 +1539,21 @@ class RoutedMoE(nnx.Module):
       w0w1_kernel_psepc = nn.logical_to_mesh_axes(("exp", "embed_no_exp", "mlp"))
       layer_w0w1_psepc = nn.logical_to_mesh_axes(mlp_axis)
       with jax.named_scope("wi_0"):
-        # w0_kernel_axes = ("exp", None, "mlp")
-        # w0_kernel = self.maybe_all_gather_kernel_weight_in_expert_parallelism(w0_kernel, w0_kernel_axes)
-        # layer_w0 = self.get_einsum(rhs_mesh_axes=w0_kernel_axes)(
-        #     mlp_up_einsum, dispatch, w0_kernel, precision=matmul_precision
-        # )
-        # if self.config.mlp_bias:
-        #   w0_bias = w0_bias[:, None, None, :]
-        #   layer_w0 = layer_w0 + w0_bias
-
-        layer_w0 = self.run_te_grouped_gemm(dispatch, w0_kernel,
+        if self.config.te_grouped_gemm:
+          layer_w0 = self.run_te_grouped_gemm(dispatch, w0_kernel,
                                             in_specs=(dispatch_pspec, w0w1_kernel_psepc,),
                                             out_specs=layer_w0w1_psepc,
                                             w_fsdp_axis="fsdp", w_fsdp_dim=1)
+        else:
+          w0_kernel_axes = ("exp", None, "mlp")
+          w0_kernel = self.maybe_all_gather_kernel_weight_in_expert_parallelism(w0_kernel, w0_kernel_axes)
+          layer_w0 = self.get_einsum(rhs_mesh_axes=w0_kernel_axes)(
+              mlp_up_einsum, dispatch, w0_kernel, precision=matmul_precision
+          )
+
+        if self.config.mlp_bias:
+          w0_bias = w0_bias[:, None, None, :]
+          layer_w0 = layer_w0 + w0_bias
 
         if self.config.activations_in_float32:
           layer_w0 = layer_w0.astype(jnp.float32)
@@ -1561,19 +1563,22 @@ class RoutedMoE(nnx.Module):
         )
         layer_w0 = adc.checkpoint_name(layer_w0, "mlpwi_0")
       with jax.named_scope("wi_1"):
-        # w1_kernel_axes = ("exp", None, "mlp")
-        # w1_kernel = self.maybe_all_gather_kernel_weight_in_expert_parallelism(w1_kernel, w1_kernel_axes)
-        # layer_w1 = self.get_einsum(rhs_mesh_axes=w1_kernel_axes)(
-        #     mlp_up_einsum, dispatch, w1_kernel, precision=matmul_precision
-        # )
-        # if self.config.mlp_bias:
-        #   w1_bias = w1_bias[:, None, None, :]
-        #   layer_w1 = layer_w1 + w1_bias
+        if self.config.te_grouped_gemm:
+          layer_w1 = self.run_te_grouped_gemm(dispatch, w1_kernel,
+                                              in_specs=(dispatch_pspec, w0w1_kernel_psepc,),
+                                              out_specs=layer_w0w1_psepc,
+                                              w_fsdp_axis="fsdp", w_fsdp_dim=1)
+        else:
+          w1_kernel_axes = ("exp", None, "mlp")
+          w1_kernel = self.maybe_all_gather_kernel_weight_in_expert_parallelism(w1_kernel, w1_kernel_axes)
+          layer_w1 = self.get_einsum(rhs_mesh_axes=w1_kernel_axes)(
+              mlp_up_einsum, dispatch, w1_kernel, precision=matmul_precision
+          )
 
-        layer_w1 = self.run_te_grouped_gemm(dispatch, w1_kernel,
-                                            in_specs=(dispatch_pspec, w0w1_kernel_psepc,),
-                                            out_specs=layer_w0w1_psepc,
-                                            w_fsdp_axis="fsdp", w_fsdp_dim=1)
+        if self.config.mlp_bias:
+          w1_bias = w1_bias[:, None, None, :]
+          layer_w1 = layer_w1 + w1_bias
+
         if self.config.activations_in_float32:
           layer_w1 = layer_w1.astype(jnp.float32)
         layer_w1 = nn.with_logical_constraint(
@@ -1589,21 +1594,25 @@ class RoutedMoE(nnx.Module):
       wo_kernel_psepc = nn.logical_to_mesh_axes(("exp", "mlp", "embed_no_exp"))
       intermediate_layer_psepc = nn.logical_to_mesh_axes(("activation_exp", "activation_batch_no_exp", None, "activation_embed"))
       with jax.named_scope("wo"):
-        # wo_kernel_axes = ("exp", "mlp", None)
-        # wo_kernel = self.maybe_all_gather_kernel_weight_in_expert_parallelism(wo_kernel, wo_kernel_axes)
-        # intermediate_layer = self.get_einsum(rhs_mesh_axes=wo_kernel_axes)(
-        #     mlp_down_einsum,
-        #     layer_multiply,
-        #     wo_kernel,
-        #     precision=matmul_precision,
-        # )
-        # if self.config.mlp_bias:
-        #   wo_bias = wo_bias[:, None, None, :]
-        #   intermediate_layer = intermediate_layer + wo_bias
-        intermediate_layer = self.run_te_grouped_gemm(layer_multiply, wo_kernel,
-                                                      in_specs=(layer_multiply_pspec, wo_kernel_psepc,),
-                                                      out_specs=intermediate_layer_psepc,
-                                                      w_fsdp_axis="fsdp", w_fsdp_dim=2)
+        if self.config.te_grouped_gemm:
+          intermediate_layer = self.run_te_grouped_gemm(layer_multiply, wo_kernel,
+                                                        in_specs=(layer_multiply_pspec, wo_kernel_psepc,),
+                                                        out_specs=intermediate_layer_psepc,
+                                                        w_fsdp_axis="fsdp", w_fsdp_dim=2)
+        else:
+          wo_kernel_axes = ("exp", "mlp", None)
+          wo_kernel = self.maybe_all_gather_kernel_weight_in_expert_parallelism(wo_kernel, wo_kernel_axes)
+          intermediate_layer = self.get_einsum(rhs_mesh_axes=wo_kernel_axes)(
+              mlp_down_einsum,
+              layer_multiply,
+              wo_kernel,
+              precision=matmul_precision,
+          )
+
+        if self.config.mlp_bias:
+          wo_bias = wo_bias[:, None, None, :]
+          intermediate_layer = intermediate_layer + wo_bias
+
         if self.config.activations_in_float32:
           intermediate_layer = intermediate_layer.astype(jnp.float32)
         if self.config.model_call_mode != "inference":

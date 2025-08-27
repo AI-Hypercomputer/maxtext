@@ -164,6 +164,7 @@ num_experts: 1
 num_experts_per_tok: 1
 megablox: True
 sparse_matmul: True
+te_grouped_gemm: False
 capacity_factor: -1.0 # a factor to decide expert capacity for token dropping, and no dropping by default
 load_balance_loss_weight: 0.01 # weight for the load balance loss
 use_random_routing: False # whether to use random routing for debug/test purpose
