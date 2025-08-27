@@ -52,7 +52,7 @@ jobs:
         run: |
           temp_dir=$(mktemp -d)
           pwd_dir=$(pwd)
-          git clone --depth 1 https://github.com/google-ml-infra/actions.git $temp_dir
+          git clone --depth 3 https://github.com/google-ml-infra/actions.git $temp_dir
           cd $temp_dir/python_seed_env
           git checkout 3264df42c1d5b755812d34b82d72172b021ceaac
           python -m uv pip install .
