@@ -639,13 +639,16 @@ class InferenceWorker:
     and queues results for background processing.
     """
 
-    for _ in range(self.min_decode_steps):
+    for i in range(self.min_decode_steps):
       # Generate next tokens
       self.decode_state, result_tokens, log_prob = self._jitted_generate_fn(
           self.params, self.decode_state, self.rng
       )
-
-      # Queue detokenization task (non-blocking)
+      if i == self.min_decode_steps -1: 
+        # Block on the last token 
+        jax.block_until_ready(result_tokens)
+        
+      # Queue detokenization task
       task = DetokenizationTask(
           task_type="decode",
           tokens_buffer=result_tokens,
@@ -684,26 +687,23 @@ class InferenceWorker:
       if task.task_type == "prefill":
 
         # Process prefill results - convert to numpy and emit
-        with watchdog.watchdog(timeout=10, repeat=True):
-          with jax.profiler.TraceAnnotation("convert_to_numpy_and_emit_prefill"):
-            print("len(task.result_tokens)", len(task.result_tokens))
-            for i, result_tokens in enumerate(task.result_tokens):
-              prompt_id = task.prompt_ids[i]
-              slot = task.slots[i]
-              
-              prompt_logp = task.prompt_logp[i]
-              true_length = self.true_lengths[prompt_id]
-              
-              # Convert to numpy
-              first_token = np.array(result_tokens.data[:, 0])
-              log_prob = np.array(result_tokens.log_prob)
-              prompt_logp_np = np.array(prompt_logp)[:, :true_length]
-              print("time taken to convert to numpy", time.time() - start_time)
+        with jax.profiler.TraceAnnotation("convert_to_numpy_and_emit_prefill"):
+          for i, result_tokens in enumerate(task.result_tokens):
+            prompt_id = task.prompt_ids[i]
+            slot = task.slots[i]
+            
+            prompt_logp = task.prompt_logp[i]
+            true_length = self.true_lengths[prompt_id]
+            
+            # Convert to numpy
+            first_token = np.array(result_tokens.data[:, 0])
+            log_prob = np.array(result_tokens.log_prob)
+            prompt_logp_np = np.array(prompt_logp)[:, :true_length]
 
-              # Emit token directly
-              should_terminate = self.emit_token(prompt_id, int(first_token), log_prob, prompt_logp=prompt_logp_np)
-              if should_terminate:
-                newly_empty.append(slot)
+            # Emit token directly
+            should_terminate = self.emit_token(prompt_id, int(first_token), log_prob, prompt_logp=prompt_logp_np)
+            if should_terminate:
+              newly_empty.append(slot)
       
       elif task.task_type == "decode":
         
