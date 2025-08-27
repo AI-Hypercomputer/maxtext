@@ -54,6 +54,7 @@ jobs:
           pwd_dir=$(pwd)
           git clone --depth 1 https://github.com/google-ml-infra/actions.git $temp_dir
           cd $temp_dir/python_seed_env
+          git checkout 3264df42c1d5b755812d34b82d72172b021ceaac
           python -m uv pip install .
           cd $pwd_dir
       - name: Build the wheel
@@ -63,6 +64,7 @@ jobs:
           # file and the req lock files commited to the maxtext's repo. This can let the users see the generated files and easily check the
           # deps and the versions for testing back time. Also reduce time in this workflow. seed-env only needs to run in the presubmit if a PR
           # changes the maxtext's requirements.txt or modified the source package structure (won't be needed if maxtext uses src-layout).
-          seed-env --local-requirements=requirements_with_lower_bounds.txt --host-name=MaxText --seed-commit=dd237623861f04d3f5941f9ff2ce13a0f038bea4 --output-dir=. --python-version=3.12 --build-pypi-package
+          # Use a jax v0.7.0 commit sha: 5a4a3b9147811616f4d8ae2c69240d4685d6673f
+          seed-env --local-requirements=requirements_with_lower_bounds.txt --host-name=MaxText --seed-commit=5a4a3b9147811616f4d8ae2c69240d4685d6673f --output-dir=. --python-version=3.12 --build-pypi-package
       - name: Upload Python wheel to GCS
         run: gcloud storage cp dist/*.whl gs://seed-env-dev/maxtext/${{ github.sha }}/
