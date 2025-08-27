@@ -42,14 +42,14 @@ class Qwen3TensorShardingTraining(MeshSharding):
       case ("inputs_q", "inputs_kv"), TT.Activation:
         mesh_axes = (
           (dp, fsdp, fsdp_t, ep) if ep_as_context else (dp, fsdp, fsdp_t),
-          (sp, cp) if ep_as_context else (sp, cp, ep),
+          (sp, cp, ep) if ep_as_context else (sp, cp),
           (tp, tp_t)
         )
       case ("query" | "key" | "value"), TT.Activation:
         mesh_axes = (
-          (dp, fsdp, fsdp_t, ep) if ep_as_context else (dp, fsdp, fsdp_t),
-          (sp, cp) if ep_as_context else (sp, cp, ep),
-          (tp, tp_t, sp,tp_s),
+          (dp, fsdp, fsdp_t) if ep_as_context else (dp, fsdp, fsdp_t, ep),
+          (cp, ep) if ep_as_context else (cp,),
+          (tp, tp_t, sp, tp_s),
           (tp, tp_t, tp_s)
         )
       case "out", TT.Activation:
