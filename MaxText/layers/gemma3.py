@@ -423,9 +423,9 @@ class Einsum(nnx.Module):
   """Einsum is a convenience module for parameterized tensor multiplication."""
 
   def __init__(
-      self, 
-      shape: tuple[int, ...], 
-      initializer: nnx.initializers.Initializer = nnx.initializers.normal(), 
+      self,
+      shape: tuple[int, ...],
+      initializer: nnx.initializers.Initializer = nnx.initializers.normal(),
       dtype: jnp.dtype | None = None,
       *,
       rngs: nnx.Rngs,
@@ -438,22 +438,20 @@ class Einsum(nnx.Module):
 
 class VisionEmbedder(nnx.Module):
   """Projects image embeddings to the embedding space of the text encoder."""
+
   def __init__(self, config: Config, mesh: Mesh, *, rngs: Optional[nnx.Rngs] = None):
     self.config = config
     self.mesh = mesh
     self.rngs = rngs
 
     self.mm_soft_embedding_norm = RMSNorm(
-      num_features=self.config.hidden_size_for_vit,
-      dtype=self.config.dtype_mm,
-      weight_dtype=self.config.weight_dtype,
-      epsilon=self.config.normalization_layer_epsilon,
-      rngs=self.rngs
+        num_features=self.config.hidden_size_for_vit,
+        dtype=self.config.dtype_mm,
+        weight_dtype=self.config.weight_dtype,
+        epsilon=self.config.normalization_layer_epsilon,
+        rngs=self.rngs,
     )
-    self.mm_input_projection = Einsum(
-      shape=(self.config.hidden_size_for_vit, self.config.emb_dim), 
-      rngs=self.rngs
-    )
+    self.mm_input_projection = Einsum(shape=(self.config.hidden_size_for_vit, self.config.emb_dim), rngs=self.rngs)
 
   def __call__(self, x: jax.Array, eqn: str = "...tm,md->...td") -> jax.Array:
     x = self.mm_soft_embedding_norm(x)
