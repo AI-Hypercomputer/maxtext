@@ -640,7 +640,7 @@ report_performance_metric_for_gcp_monitoring: False
 
 enable_tensorboard: True
 
-# Vertex AI Tensorboard Configurations - https://github.com/google/maxtext/tree/main/getting_started/Use_Vertex_AI_Tensorboard.md
+# Vertex AI Tensorboard Configurations - https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/guides/use_vertex_ai_tensorboard.md
 # Set to True for GCE, False if running via XPK
 use_vertex_tensorboard: False
 # Project to create Vertex AI Tensorboard in for GCE, blank if project is set using 'gcloud config set project'
