@@ -18,6 +18,7 @@ import jax
 from jax.ad_checkpoint import checkpoint_name
 from jax.sharding import Mesh
 import jax.numpy as jnp
+from typing import Optional
 
 from flax import linen as nn
 from flax import nnx
@@ -573,7 +574,6 @@ class Gemma3VisionEncoderLayer(nnx.Module):
     Returns:
       jnp.array for image embeddings, shaped [B, N, P, D], e.g. [4, 1, 256, 1152]
     """
-    cfg = self.config
     # currently only supports N=1, the inputs shape is [B, H, W, C]
     if len(inputs.shape) == 4:
       inputs = inputs[:, None, :]
