@@ -722,6 +722,113 @@ def QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING(config, scan_layers=False):
   return mapping
 
 
+def GPT_OSS_MAXTEXT_TO_HF_PARAM_MAPPING(config, scan_layers=False):
+  """
+  return mapping: dict, key: maxtext_name, value: huggingface_name
+  """
+  assert not scan_layers
+  n_layers = config["num_hidden_layers"]
+  mapping = {
+      f"params-decoder-decoder_norm-scale": f"model.norm.weight",
+      f"params-decoder-logits_dense-kernel": f"lm_head.weight",
+      f"params-token_embedder-embedding": f"model.embed_tokens.weight",
+  }
+  for i in n_layers:
+    mapping.update(
+        {
+            # attention
+            f"params-decoder-layers_{i}-GptOssAttention-query-bias": f"model.layers.{i}.self_attn.q_proj.bias",
+            f"params-decoder-layers_{i}-GptOssAttention-query-kernel": f"model.layers.{i}.self_attn.q_proj.weight",
+            f"params-decoder-layers_{i}-GptOssAttention-key-bias": f"model.layers.{i}.self_attn.k_proj.bias",
+            f"params-decoder-layers_{i}-GptOssAttention-key-kernel": f"model.layers.{i}.self_attn.k_proj.weight",
+            f"params-decoder-layers_{i}-GptOssAttention-value-bias": f"model.layers.{i}.self_attn.v_proj.bias",
+            f"params-decoder-layers_{i}-GptOssAttention-value-kernel": f"model.layers.{i}.self_attn.v_proj.weight",
+            f"params-decoder-layers_{i}-GptOssAttention-out-bias": f"model.layers.{i}.self_attn.o_proj.bias",
+            f"params-decoder-layers_{i}-GptOssAttention-out-kernel": f"model.layers.{i}.self_attn.o_proj.weight",
+            f"params-decoder-layers_{i}-GptOssAttention-sinks": f"model.layers.{i}.self_attn.sinks",
+            # moe
+            f"params-decoder-layers_{i}-GptOssMlp-gate-bias": f"model.layers.{i}.mlp.router.bias",
+            f"params-decoder-layers_{i}-GptOssMlp-gate-kernel": f"model.layers.{i}.mlp.router.weight",
+            (
+                f"params-decoder-layers_{i}-GptOssMlp-wi_0",
+                f"params-decoder-layers_{i}-GptOssMlp-wi_1",
+            ): f"model.layers.{i}.mlp.experts.gate_up_proj",
+            (
+                f"params-decoder-layers_{i}-GptOssMlp-wi_0_bias",
+                f"params-decoder-layers_{i}-GptOssMlp-wi_1_bias",
+            ): f"model.layers.{i}.mlp.experts.gate_up_proj_bias",
+            f"params-decoder-layers_{i}-GptOssMlp-wo": f"model.layers.{i}.mlp.experts.down_proj",
+            f"params-decoder-layers_{i}-GptOssMlp-wo_bias": f"model.layers.{i}.mlp.experts.down_proj_bias",
+            # norm
+            f"params-decoder-layers_{i}-pre_self_attention_layer_norm-scale": f"model.layers.{i}.input_layernorm.weight",
+            f"params-decoder-layers_{i}-post_self_attention_layer_norm-scale": f"model.layers.{i}.post_attention_layernorm.weight",
+        }
+    )
+  return mapping
+
+
+def GPT_OSS_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, scan_layers=False, saving_to_hf=False):
+  # TODO: check if can remove identity
+  assert not scan_layers
+  assert not saving_to_hf
+  n_layers = config["num_hidden_layers"]
+  # base_num_query_heads = config["base_num_query_heads"]
+  # # dims_per_head
+  # # config["base_emb_dim"] / config["base_num_query_heads"]
+  # head_dim = config["head_dim"]
+  # base_num_kv_heads = config["base_num_kv_heads"]
+  # base_emb_dim = config["base_emb_dim"]
+
+  def identity(input_tensor, target_shape=None):
+    return input_tensor
+
+  def transpose_and_reshape(input_tensor, target_shape):
+    return input_tensor.T.reshape(target_shape)
+
+  def reshape(input_tensor, target_shape):
+    return input_tensor.reshape(target_shape)
+
+  def transpose(input_tensor, target_shpae=None):
+    return input_tensor.T
+
+  mapping = {
+      f"params-decoder-decoder_norm-scale": identity,
+      f"params-decoder-logits_dense-kernel": transpose,
+      f"params-token_embedder-embedding": identity,
+  }
+  for i in n_layers:
+    mapping.update(
+        {
+            # attention
+            f"params-decoder-layers_{i}-GptOssAttention-query-bias": reshape,
+            f"params-decoder-layers_{i}-GptOssAttention-query-kernel": transpose_and_reshape,
+            f"params-decoder-layers_{i}-GptOssAttention-key-bias": reshape,
+            f"params-decoder-layers_{i}-GptOssAttention-key-kernel": transpose_and_reshape,
+            f"params-decoder-layers_{i}-GptOssAttention-value-bias": reshape,
+            f"params-decoder-layers_{i}-GptOssAttention-value-kernel": transpose_and_reshape,
+            f"params-decoder-layers_{i}-GptOssAttention-out-bias": identity,
+            f"params-decoder-layers_{i}-GptOssAttention-out-kernel": transpose_and_reshape,
+            f"params-decoder-layers_{i}-GptOssAttention-sinks": identity,
+            # moe
+            f"params-decoder-layers_{i}-GptOssMlp-gate-bias": identity,  # f"model.layers.{i}.mlp.router.bias",
+            f"params-decoder-layers_{i}-GptOssMlp-gate-kernel": transpose,  # f"model.layers.{i}.mlp.router.weight",
+            (
+                f"params-decoder-layers_{i}-GptOssMlp-wi_0",
+                f"params-decoder-layers_{i}-GptOssMlp-wi_1",
+            ): TODO #f"model.layers.{i}.mlp.experts.gate_up_proj",
+            (
+                f"params-decoder-layers_{i}-GptOssMlp-wi_0_bias",
+                f"params-decoder-layers_{i}-GptOssMlp-wi_1_bias",
+            ): TODO #f"model.layers.{i}.mlp.experts.gate_up_proj_bias",
+            f"params-decoder-layers_{i}-GptOssMlp-wo": identity,  # f"model.layers.{i}.mlp.experts.down_proj",
+            f"params-decoder-layers_{i}-GptOssMlp-wo_bias": identity,  # f"model.layers.{i}.mlp.experts.down_proj_bias",
+            # norm
+            f"params-decoder-layers_{i}-pre_self_attention_layer_norm-scale": identity,
+            f"params-decoder-layers_{i}-post_self_attention_layer_norm-scale": identity,
+        }
+    )
+
+
 def QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, scan_layers=False, saving_to_hf=False):
   """Creates parameter transformation functions for Qwen3.
 
@@ -998,6 +1105,7 @@ PARAM_MAPPING = {
     "llama3.1-405b": LLAMA31_MAXTEXT_TO_HF_PARAM_MAPPING,
     "qwen3-30b-a3b": QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING,
     "qwen3-coder-480b-a35b": QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "gpt-oss-20b": GPT_OSS_MAXTEXT_TO_HF_PARAM_MAPPING,
 }
 
 HOOK_FNS = {
@@ -1017,4 +1125,5 @@ HOOK_FNS = {
     "llama3.1-405b": LLAMA31_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "qwen3-30b-a3b": QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "qwen3-coder-480b-a35b": QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "gpt-oss-20b": GPT_OSS_MAXTEXT_TO_HF_PARAM_HOOK_FN,
 }
