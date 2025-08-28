@@ -75,7 +75,7 @@ class TransformationAgent(BaseAgent):
 
     file_path = os.path.join(output_dir, "hook_fn.py")
     try:
-      with open(file_path, "w", encoding="utf-8") as f:
+      with open(file_path, "wt", encoding="utf-8") as f:
         f.write(hook_fn_code)
       print(f"Hook functions successfully saved to {file_path}")
     except IOError as e:

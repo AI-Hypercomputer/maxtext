@@ -31,6 +31,13 @@ export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_SUSPEND=1
 export NEEDRESTART_MODE=l
 
+# Enable automatic restart of services without the need for prompting 
+if command -v sudo &> /dev/null && [ -f /etc/needrestart/needrestart.conf ]; then
+    sudo sed -i "s/#\$nrconf{restart} = 'i';/\$nrconf{restart} = 'a';/" /etc/needrestart/needrestart.conf
+else
+   echo "Skipping editing needrestart.conf"
+fi
+
 echo "Checking Python version..."
 # This command will fail if the Python version is less than 3.12
 if ! python3 -c 'import sys; assert sys.version_info >= (3, 12)' 2>/dev/null; then

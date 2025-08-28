@@ -40,7 +40,7 @@ class prompt_chaining_agent(BaseAgent):
     """Run chain"""
     # Load context data
     with open(
-        os.path.join(self.dir_path, "context", self.target_model, "maxtext_params.json"), "r", encoding="utf8"
+        os.path.join(self.dir_path, "context", self.target_model, "maxtext_params.json"), "rt", encoding="utf8"
     ) as f:
       maxtext_params = json.load(f)
     with open(os.path.join(self.dir_path, "context", self.target_model, "hf_params.json"), "rt", encoding="utf8") as f:
@@ -109,7 +109,7 @@ class prompt_chaining_agent(BaseAgent):
       os.makedirs(output_dir)
     file_path = os.path.join(output_dir, "param_mapping.py")
     try:
-      with open(file_path, "w", encoding="utf-8") as f:
+      with open(file_path, "wt", encoding="utf-8") as f:
         f.write(param_mapping_code)
       print(f"Parameter mapping successfully saved to {file_path}")
     except IOError as e:
@@ -145,11 +145,11 @@ class prompt_chaining_agent(BaseAgent):
         break
       else:
         if attempt == max_retries:
-          raise RuntimeError("Max attemps tried")
+          raise RuntimeError("Max attempts tried")
 
     file_path = os.path.join(output_dir, "hf_shape.py")
     try:
-      with open(file_path, "w", encoding="utf-8") as f:
+      with open(file_path, "wt", encoding="utf-8") as f:
         f.write(shape_mapping_code)
       print(f"hf_shape successfully saved to {file_path}")
     except IOError as e:
@@ -166,7 +166,7 @@ class prompt_chaining_agent(BaseAgent):
 
     file_path = os.path.join(output_dir, "hook_fn.py")
     try:
-      with open(file_path, "w", encoding="utf-8") as f:
+      with open(file_path, "wt", encoding="utf-8") as f:
         f.write(hook_fn_code)
       print(f"Hook functions successfully saved to {file_path}")
     except IOError as e:

@@ -17,7 +17,6 @@
 
 from flax import nnx
 from collections import defaultdict
-import datetime
 import jax
 import jax.numpy as jnp
 
@@ -86,8 +85,6 @@ class SFTTrainingHooks(TrainingHooks):
   @override
   def on_train_step_start(self, train_ctx: peft_trainer.PeftTrainer):
     """Called at the beginning of a training step."""
-    self.train_metadata["step_start_time"] = datetime.datetime.now()
-
     if self.config.enable_goodput_recording:
       record_goodput(self.goodput_recorder, f"record_{GoodputEvent.STEP.value}_start_time", train_ctx.train_steps)
 
@@ -95,13 +92,17 @@ class SFTTrainingHooks(TrainingHooks):
     self.train_metadata["total_weights"] = jnp.sum(train_ctx.data_hooks.train_batch["targets_segmentation"] != 0)
 
   @override
-  def on_train_step_end(self, train_ctx: peft_trainer.PeftTrainer, train_loss: float):
+  def on_train_step_end(
+      self,
+      train_ctx: peft_trainer.PeftTrainer,
+      train_loss: float,
+      step_time: float,
+  ):
     """Called at the end of training step."""
-    assert (
-        self.train_metadata["step_start_time"] != 0
-    ), "SFTTrainingHooks.on_train_step_start() must be called before SFTTrainingHooks.on_train_step_end()"
-
-    step_time_delta = datetime.datetime.now() - self.train_metadata["step_start_time"]
+    assert "total_weights" in self.train_metadata, (
+        "SFTTrainingHooks.on_train_step_start() must be called before"
+        " SFTTrainingHooks.on_train_step_end()"
+    )
 
     # We check against `train_ctx.train_steps - 1` because this hook is called
     # after `train_ctx.train_steps` has been incremented for the current
@@ -115,7 +116,7 @@ class SFTTrainingHooks(TrainingHooks):
             "learning/total_weights": self.train_metadata["total_weights"],
         }
     }
-    self.metric_logger.record_train_metrics(metrics, train_ctx.train_steps - 1, step_time_delta)
+    self.metric_logger.record_train_metrics(metrics, train_ctx.train_steps - 1, step_time)
     self.metric_logger.write_metrics(metrics, train_ctx.train_steps - 1)
     self.train_metadata.clear()
 

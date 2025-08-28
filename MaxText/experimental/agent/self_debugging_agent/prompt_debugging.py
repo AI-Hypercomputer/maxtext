@@ -18,6 +18,7 @@ limitations under the License.
 This file contains the prompt templates used by the code debugging agent.
 """
 
+# pylint: disable=line-too-long
 CodeDebugging = {
     "SystemPrompt": """You are an expert machine learning engineer and automated testing specialist with deep knowledge of Python, NumPy, PyTorch, and JAX (including Flax, Flax.nnx, and Optax).
 

@@ -65,7 +65,7 @@ class DSLAgent(BaseAgent):
       os.makedirs(output_dir)
     file_path = os.path.join(output_dir, "proposed_dsl.txt")
     try:
-      with open(file_path, "w", encoding="utf-8") as f:
+      with open(file_path, "wt", encoding="utf-8") as f:
         f.write(verification_dsl)
       print(f"Proposed new DSL successfully saved to {file_path}")
     except IOError as e:

@@ -70,7 +70,7 @@ def setup_maxtext_model(config, mesh):
   init_rng = jax.random.PRNGKey(config.init_weights_seed)
   quant = quantizations.configure_quantization(config)
 
-  maxtext_model = models.Transformer(config=config, mesh=mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
+  maxtext_model = models.transformer_as_linen(config=config, mesh=mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
   state, state_mesh_annotations = maxtext_utils.setup_decode_state(maxtext_model, config, init_rng, mesh, None)
   state_mesh_shardings = nn.logical_to_mesh_sharding(state_mesh_annotations, mesh, config.logical_axis_rules)
   data_sharding = jax.NamedSharding(mesh, jax.sharding.PartitionSpec(None))
@@ -125,8 +125,8 @@ class GrpoTrainerTest(unittest.TestCase):
         ici_tensor_parallelism=4,
         per_device_batch_size=self.config.per_device_batch_size * self.config.num_generations,
     )
-    self.model = mt.from_pretrained(self.config)
-    self.inference_model = mt.from_pretrained(self.config_inference)
+    self.model = mt.from_config(self.config)
+    self.inference_model = mt.from_config(self.config_inference)
     self.rtol = 1e-05
     self.atol = 1e-08
     self.rng = jax.random.PRNGKey(self.config.init_weights_seed)

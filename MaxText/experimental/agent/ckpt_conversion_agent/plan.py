@@ -92,7 +92,7 @@ class PlanAgent(BaseAgent):
       os.makedirs(output_dir)
     file_path = os.path.join(output_dir, "plan.json")
     try:
-      with open(file_path, "w", encoding="utf-8") as f:
+      with open(file_path, "wt", encoding="utf-8") as f:
         json.dump(candidate_code, f, ensure_ascii=False, indent=4)
       print(f"Plan successfully saved to {file_path}")
     except IOError as e:

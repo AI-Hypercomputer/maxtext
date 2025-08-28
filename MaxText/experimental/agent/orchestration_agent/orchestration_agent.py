@@ -23,7 +23,7 @@ first by file-level dependencies, and then by component-level dependencies withi
 
 Example Invocation:
 
-python orchestrationAgent.py \
+python orchestration_agent.py \
   --base-path "https://github.com/huggingface/transformers/blob/main/src/" \
   --entry-file-path "https://github.com/huggingface/transformers/blob/main/src/transformers/models/llama/modeling_llama.py" \
   --no-exclude-conditional-imports
@@ -46,13 +46,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def ArgParser():
-  """
-  Parses command-line arguments for file or folder processing.
-
-  Returns:
-      argparse.Namespace: The parsed command-line arguments.
-  """
+def arg_parser():
+  """Parses command-line arguments."""
   parser = argparse.ArgumentParser(description="Dependency sorter for Python files on GitHub.")
   parser.add_argument(
       "--base-path",
@@ -78,55 +73,56 @@ def ArgParser():
   return args
 
 
-def saveFilewithComponents(sorted_files, dependencies, basepath, entry_file_path, outFile="FilesWithComponents.txt"):
+def save_file_with_components(args, sorted_files, dependencies, basepath, out_file="FilesWithComponents.txt"):
   """
   Saves the sorted files and their internal components to a file.
 
   Args:
-      sorted_files (list): A list of file paths sorted by dependency.
-      dependencies (dict): A dictionary where keys are file paths and values are lists of their dependencies.
-      basepath (str): The base URL of the project.
-      outFile (str): The name of the output file.
+    args (argparse.Namespace): CLI arguments
+    sorted_files (list): A list of file paths sorted by dependency.
+    dependencies (dict): A dictionary where keys are file paths and values are lists of their dependencies.
+    basepath (str): The base URL of the project.
+    out_file (str): The name of the output file.
   """
   standalone_modules = [mod for mod in sorted_files if mod not in dependencies or len(dependencies[mod]) == 0]
   dependent_sorted_modules = {
       mod: dependencies[mod] for mod in sorted_files if mod in dependencies and len(dependencies[mod]) > 0
   }
-  with open(outFile, "wt", encoding="utf8") as f:
-    f.write(f"BasePath {basepath}\n")
-    f.write(f"Entry File {entry_file_path}\n")
+  with open(out_file, "wt", encoding="utf-8") as f:
+    f.write(f"BasePath {args.base_path}\n")
+    f.write(f"Entry File {args.entry_file_path}\n")
   # f.write(f"StandAlone Files:\n {json.dumps(standalone_modules, indent=4)}\n")
   # f.write(f"Dependent Files\n {json.dumps(dependent_sorted_modules, indent=4)}\n")
   for m in standalone_modules:
     result = get_modules_in_order(basepath + m)
-    standalone_modules = [mod for mod in result["sorted_modules"] if mod not in result["component_dependencies"]]
+    standalone_modules = [mod for mod in result["sorted_modules"].keys() if mod not in result["component_dependencies"]]
     dependent_sorted_files = {
         mod: result["component_dependencies"][mod]
-        for mod in result["sorted_modules"]
+        for mod in result["sorted_modules"].keys()
         if mod in result["component_dependencies"]
     }
-    with open(outFile, "a", encoding="utf8") as f:
+    with open(out_file, "a", encoding="utf-8") as f:
       f.write(f"\nComponents for {m}\n")
       f.write(f"StandAlone Modules: {json.dumps(standalone_modules)}\n")
       f.write(f"Dependent Modules\n {json.dumps(dependent_sorted_files, indent=4)}\n")
   for m, dep in dependent_sorted_modules.items():
     result = get_modules_in_order(basepath + m)
-    standalone_modules = [mod for mod in result["sorted_modules"] if mod not in result["component_dependencies"]]
+    standalone_modules = [mod for mod in result["sorted_modules"].keys() if mod not in result["component_dependencies"]]
     dependent_sorted_modules = {
         mod: result["component_dependencies"][mod]
-        for mod in result["sorted_modules"]
+        for mod in result["sorted_modules"].keys()
         if mod in result["component_dependencies"]
     }
-    with open(outFile, "a", encoding="utf8") as f:
+    with open(out_file, "a", encoding="utf-8") as f:
       f.write(f"\nComponents for {m}\n")
-      f.write(f"There File Dependencies {dep}\n")
+      f.write(f"Their File Dependencies {dep}\n")
       f.write(f"StandAlone Modules: {json.dumps(standalone_modules)}\n")
       f.write(f"Dependent Modules\n {json.dumps(dependent_sorted_modules, indent=4)}\n")
-  logger.info("Check Results at %s", outFile)
+  logger.info("Check Results at %s", out_file)
 
 
 def main():
-  args = ArgParser()
+  args = arg_parser()
   BASE_PATH = args.base_path
   ENTRY_FILE_PATH = args.entry_file_path
   EXCLUDE_CONDITIONAL_IMPORTS = args.exclude_conditional_imports
@@ -134,7 +130,7 @@ def main():
     logger.error("Error: Entry file not found at '%s'", ENTRY_FILE_PATH)
   else:
     # Use rstrip to handle base paths that may or may not have a trailing slash
-    relative_entry = ENTRY_FILE_PATH.replace(BASE_PATH.rstrip("/"), "")
+    relative_entry = ENTRY_FILE_PATH.replace(BASE_PATH.rstrip(os.path.sep), "")
     mode = "Excluding Conditional Imports" if EXCLUDE_CONDITIONAL_IMPORTS else "Including All Imports"
     logger.info("Analyzing dependencies for: %s", relative_entry)
     logger.info("Mode: %s", mode)
@@ -142,19 +138,19 @@ def main():
     all_files_info = "all_files.json"
     modules_found = False
     if os.path.exists(all_files_info):
-      with open(all_files_info, "rt", encoding="utf8") as f:
+      with open(all_files_info, "rt", encoding="utf-8") as f:
         data = json.load(f)
         sorted_files, dependencies = data["sorted_files"], data["dependencies"]
-        if data["entery_file"] == ENTRY_FILE_PATH:
+        if data["entry_file"] == ENTRY_FILE_PATH:
           modules_found = True
           logger.info("---> Reading Files order from all Files.json You can delete this if have some update in code. ")
     if not modules_found:
       sorted_files, dependencies = get_dependency_sorted_files(
           ENTRY_FILE_PATH, BASE_PATH, EXCLUDE_CONDITIONAL_IMPORTS, returnDependencies=True
       )
-      with open(all_files_info, "wt", encoding="utf8") as f:
-        json.dump({"entery_file": ENTRY_FILE_PATH, "sorted_files": sorted_files, "dependencies": dependencies}, f)
-    saveFilewithComponents(sorted_files, dependencies, args.base_path, args.entry_file_path)
+      with open(all_files_info, "wt", encoding="utf-8") as f:
+        json.dump({"entry_file": ENTRY_FILE_PATH, "sorted_files": sorted_files, "dependencies": dependencies}, f)
+    save_file_with_components(args, sorted_files, dependencies, args.base_path)
 
     if sorted_files:
       logger.info("\n--- Dependency Sorted Files ---")

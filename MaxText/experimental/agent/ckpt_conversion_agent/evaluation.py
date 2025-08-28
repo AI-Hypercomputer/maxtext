@@ -63,7 +63,7 @@ def estimate_kolmogorov(filepath: str) -> dict:
 
 def main():
   parser = argparse.ArgumentParser(
-      description="Gemini evaluate the agent code implementation aginst human-written ground truth code"
+      description="Gemini evaluate the agent code implementation against human-written ground truth code"
   )
   parser.add_argument("--files", nargs=2, help="Paths to code files to analyze.")
   parser.add_argument("--api_key", type=str, help="API key.")

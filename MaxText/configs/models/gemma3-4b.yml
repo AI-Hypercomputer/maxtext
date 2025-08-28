@@ -30,3 +30,4 @@ use_post_attn_norm: true
 use_post_ffw_norm: true
 local_rope_max_timescale: 10_000
 rope_max_timescale: 1_000_000
+rope_linear_scaling_factor: 8.0

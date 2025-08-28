@@ -65,7 +65,7 @@ python3 -m MaxText.decode MaxText/configs/base.yml model_name=gemma3-4b tokenize
 ```
 If outputs are wrong, you can use jax.debug.print() to print the layer-wise mean/max/min values for debugging. 
 
-4. To further validate the converted checkpoint, we recommand to use the [forward_pass_logit_checker.py](https://github.com/AI-Hypercomputer/maxtext/blob/main/MaxText/utils/ckpt_conversion/README.md#verifying-conversion-correctness) to compare the orginal ckpt with the converted ckpt:
+4. To further validate the converted checkpoint, we recommend to use the [forward_pass_logit_checker.py](https://github.com/AI-Hypercomputer/maxtext/blob/main/MaxText/utils/ckpt_conversion/README.md#verifying-conversion-correctness) to compare the original ckpt with the converted ckpt:
 ```bash
 python3 -m MaxText.tests.forward_pass_logit_checker MaxText/configs/base.yml \
     tokenizer_path=assets/<tokenizer> \

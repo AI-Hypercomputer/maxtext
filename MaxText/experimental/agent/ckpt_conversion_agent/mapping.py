@@ -93,7 +93,7 @@ class MappingAgent(BaseAgent):
     output_dir = f"{self.dir_path}/outputs"
     file_path = os.path.join(output_dir, outputfile)
     try:
-      with open(file_path, "w", encoding="utf-8") as f:
+      with open(file_path, "wt", encoding="utf-8") as f:
         f.write(candidate_code)
       print(f"Code successfully saved to {file_path}")
     except IOError as e:

@@ -505,7 +505,12 @@ class Attention(nnx.Module):
     # NOTE: T5 does not explicitly rescale the attention logits by
     #       1/sqrt(depth_kq)!  This is folded into the initializers of the
     #       linear transformations, which is equivalent under Adafactor.
-    depth_scaling = jnp.sqrt(self.head_dim).astype(self.dtype)
+    # We disable depth_scaling when using qk_norm or a query_pre_attn_scalar
+    # to avoid applying scaling twice.
+    if self.config.use_qk_norm or (self.query_pre_attn_scalar is not None and self.query_pre_attn_scalar != 1.0):
+      depth_scaling = 1.0
+    else:
+      depth_scaling = jnp.sqrt(self.head_dim).astype(self.dtype)
 
     def query_init(*args):
       # pylint: disable=no-value-for-parameter
@@ -694,11 +699,18 @@ class Attention(nnx.Module):
       # For local attention use local_rope_max_timescale if it's is positive
       if self.attention_type == AttentionType.LOCAL_SLIDING and self.config.local_rope_max_timescale > 0:
         max_timescale = self.config.local_rope_max_timescale
+
+      rope_linear_scaling_factor = self.config.rope_linear_scaling_factor
+      # In gemma3, linear scaling factor does not apply to local sliding layers.
+      if self.config.model_name.startswith("gemma3") and self.attention_type == AttentionType.LOCAL_SLIDING:
+        rope_linear_scaling_factor = 1.0
+
       rotary_embedding = RotaryEmbedding(
           min_timescale=self.config.rope_min_timescale,
           max_timescale=max_timescale,
           embedding_dims=rope_embedding_dims,
           fprop_dtype=self.dtype,
+          rope_linear_scaling_factor=rope_linear_scaling_factor,
           rngs=self.rngs,
       )
     return rotary_embedding

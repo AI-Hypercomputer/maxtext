@@ -34,6 +34,7 @@ The main conversion script uses these mappings to systematically transform each
 parameter from the source checkpoint and build the target checkpoint.
 """
 
+import warnings
 import numpy as np
 
 import jax
@@ -181,8 +182,10 @@ def GEMMA3_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, scan_layers=False, saving_to_hf=F
 
     # Handle padding/truncation
     if source_vocab_size > target_vocab_size:
+      warnings.warn(f"source vocab={source_vocab_size} > target vocab={target_vocab_size}, truncate output layer for MaxText.")
       output_tensor = scaled_tensor[:target_vocab_size, :]
     elif source_vocab_size < target_vocab_size:
+      warnings.warn(f"source vocab={source_vocab_size} < target vocab={target_vocab_size}, pad output layer for MaxText.")
       padding_shape = (target_vocab_size - source_vocab_size, target_hidden_size)
       # Use jnp.zeros for JAX arrays, np.zeros for numpy arrays
       padding = (
@@ -619,7 +622,7 @@ def QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING(config, scan_layers=False):
   }
 
   if scan_layers:
-    # Common Attention and Norms for both Dense and MoE
+    # This block handles scanned layers for both dense and MoE models.
     mapping.update(
         {
             "params-decoder-layers-pre_self_attention_layer_norm-scale": [
@@ -648,31 +651,24 @@ def QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING(config, scan_layers=False):
             ],
         }
     )
-
     if num_experts > 1:
-      # MoE MLP layers
+      # For scanned MoE, we create a nested list: [[e0_l0, e0_l1..], [e1_l0, e1_l1..]..]
+      # This follows the (experts, layers, ...) tensor layout.
       mapping.update(
           {
-              "params-decoder-layers-moe_block-gate-kernel": [
-                  f"model.layers.{i}.mlp.gate.weight" for i in range(n_layers)
+              "params-decoder-layers-moe_block-gate-kernel": [f"model.layers.{i}.mlp.gate.weight" for i in range(n_layers)],
+              "params-decoder-layers-moe_block-wi_0": [
+                  [f"model.layers.{l}.mlp.experts.{e}.gate_proj.weight" for l in range(n_layers)] for e in range(num_experts)
               ],
-              # NOTE: The conversion script needs to handle unstacking on both layer and expert axes.
-              "params-decoder-layers-moe_block-wi_0-kernel": [
-                  [f"model.layers.{i}.mlp.experts.{j}.gate_proj.weight" for j in range(num_experts)]
-                  for i in range(n_layers)
+              "params-decoder-layers-moe_block-wi_1": [
+                  [f"model.layers.{l}.mlp.experts.{e}.up_proj.weight" for l in range(n_layers)] for e in range(num_experts)
               ],
-              "params-decoder-layers-moe_block-wi_1-kernel": [
-                  [f"model.layers.{i}.mlp.experts.{j}.up_proj.weight" for j in range(num_experts)]
-                  for i in range(n_layers)
-              ],
-              "params-decoder-layers-moe_block-wo-kernel": [
-                  [f"model.layers.{i}.mlp.experts.{j}.down_proj.weight" for j in range(num_experts)]
-                  for i in range(n_layers)
+              "params-decoder-layers-moe_block-wo": [
+                  [f"model.layers.{l}.mlp.experts.{e}.down_proj.weight" for l in range(n_layers)] for e in range(num_experts)
               ],
           }
       )
-    else:
-      # Dense MLP layers
+    else:  # Dense MLP
       mapping.update(
           {
               "params-decoder-layers-mlp-wi_0-kernel": [
@@ -682,7 +678,7 @@ def QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING(config, scan_layers=False):
               "params-decoder-layers-mlp-wo-kernel": [f"model.layers.{i}.mlp.down_proj.weight" for i in range(n_layers)],
           }
       )
-  else:  # not scan_layers
+  else:  # unscanned layers
     for i in range(n_layers):
       # Common Attention and Norms
       # pylint: disable=line-too-long
@@ -696,27 +692,26 @@ def QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING(config, scan_layers=False):
               f"params-decoder-layers_{i}-self_attention-query_norm-scale": f"model.layers.{i}.self_attn.q_norm.weight",
               f"params-decoder-layers_{i}-self_attention-key_norm-scale": f"model.layers.{i}.self_attn.k_norm.weight",
               f"params-decoder-layers_{i}-post_self_attention_layer_norm-scale": f"model.layers.{i}.post_attention_layernorm.weight",
+              f"params-decoder-layers_{i}-post_self_attention_layer_norm-scale": f"model.layers.{i}.post_attention_layernorm.weight",
           }
       )
       if num_experts > 1:
-        # MoE MLP layers
-        # NOTE: The conversion script needs to handle splitting the expert tensor along axis 0.
+        # For each unscanned MoE layer, map the MaxText parameter to a 1D list of all expert weights for that layer.
         mapping.update(
             {
                 f"params-decoder-layers_{i}-moe_block-gate-kernel": f"model.layers.{i}.mlp.gate.weight",
-                f"params-decoder-layers_{i}-moe_block-wi_0-kernel": [
+                f"params-decoder-layers_{i}-moe_block-wi_0": [
                     f"model.layers.{i}.mlp.experts.{j}.gate_proj.weight" for j in range(num_experts)
                 ],
-                f"params-decoder-layers_{i}-moe_block-wi_1-kernel": [
+                f"params-decoder-layers_{i}-moe_block-wi_1": [
                     f"model.layers.{i}.mlp.experts.{j}.up_proj.weight" for j in range(num_experts)
                 ],
-                f"params-decoder-layers_{i}-moe_block-wo-kernel": [
+                f"params-decoder-layers_{i}-moe_block-wo": [
                     f"model.layers.{i}.mlp.experts.{j}.down_proj.weight" for j in range(num_experts)
                 ],
             }
         )
-      else:
-        # Dense MLP layers
+      else:  # Dense MLP
         mapping.update(
             {
                 f"params-decoder-layers_{i}-mlp-wi_0-kernel": f"model.layers.{i}.mlp.gate_proj.weight",
@@ -724,7 +719,6 @@ def QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING(config, scan_layers=False):
                 f"params-decoder-layers_{i}-mlp-wo-kernel": f"model.layers.{i}.mlp.down_proj.weight",
             }
         )
-
   return mapping
 
 
@@ -792,6 +786,9 @@ def QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, scan_layers=False, saving_to_hf=Fa
       "moe_block-wi_0-kernel",
       "moe_block-wi_1-kernel",
       "moe_block-wo-kernel",
+      "moe_block-wi_0",
+      "moe_block-wi_1",
+      "moe_block-wo",
   ]
 
   if scan_layers:
@@ -999,6 +996,8 @@ PARAM_MAPPING = {
     "llama3.1-8b": LLAMA31_MAXTEXT_TO_HF_PARAM_MAPPING,
     "llama3.1-70b": LLAMA31_MAXTEXT_TO_HF_PARAM_MAPPING,
     "llama3.1-405b": LLAMA31_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "qwen3-30b-a3b": QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "qwen3-coder-480b-a35b": QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING,
 }
 
 HOOK_FNS = {
@@ -1016,4 +1015,6 @@ HOOK_FNS = {
     "llama3.1-8b": LLAMA31_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "llama3.1-70b": LLAMA31_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "llama3.1-405b": LLAMA31_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "qwen3-30b-a3b": QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "qwen3-coder-480b-a35b": QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
 }

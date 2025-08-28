@@ -58,7 +58,7 @@ def save_in_file_and_check_code_syntax(code, file_path):
           - An integer exit code (0 for success, 1 for error).
           - A string message indicating the result.
   """
-  with open(file_path, "w") as f:
+  with open(file_path, "wt", encoding="utf-8") as f:
     f.write(code)
   return check_code_syntax(file_path)
 
@@ -107,14 +107,14 @@ def smartly_copy_code(filename, base_jax_path, base_testcase_path, dest_jax_path
       True if both the module file and the test file exist in the
       destination after copying, otherwise False.
   """
-  base_jax_package = base_jax_path.removeprefix("../").removeprefix("./").replace("/", ".")
-  dest_jax_package = dest_jax_path.removeprefix("../").removeprefix("./").replace("/", ".")
+  base_jax_package = base_jax_path.removeprefix("../").removeprefix("./").replace(os.path.sep, ".")
+  dest_jax_package = dest_jax_path.removeprefix("../").removeprefix("./").replace(os.path.sep, ".")
   if os.path.exists(base_jax_path + filename):
-    with open(dest_jax_path + filename, "w") as fwrite:
-      with open(base_jax_path + filename) as fread:
+    with open(dest_jax_path + filename, "wt", encoding="utf-8") as fwrite:
+      with open(base_jax_path + filename, "rt", encoding="utf-8") as fread:
         fwrite.write(fread.read())
   if os.path.exists(base_testcase_path + filename):
-    with open(dest_testcase_path + filename, "w") as fwrite:
-      with open(base_testcase_path + filename) as fread:
+    with open(dest_testcase_path + filename, "wt", encoding="utf-8") as fwrite:
+      with open(base_testcase_path + filename, "rt", encoding="utf-8") as fread:
         fwrite.write(fread.read().replace(base_jax_package, dest_jax_package))
   return os.path.exists(dest_jax_path + filename) and os.path.exists(dest_testcase_path + filename)

@@ -250,7 +250,7 @@ def _save_module_to_file(file_name, module_name, code, all_global_imports, analy
   if os.path.exists(output_path):
     print(f"Overwriting {output_path}")
 
-  with open(output_path, "w", encoding="utf-8") as f:
+  with open(output_path, "wt", encoding="utf-8") as f:
     # Prepend warning and imports if they exist
     if analysis_result.get("warning"):
       f.write(f"# {analysis_result['warning']}\n\n")

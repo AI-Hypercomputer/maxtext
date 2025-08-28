@@ -44,6 +44,7 @@ load_full_state_path: ""
 # async_checkpointing is true, else a synchronous one is used. If you have
 # problems with the checkpointer we recommend trying the synchronous one.
 enable_checkpointing: True
+save_checkpoint_on_completion: True
 async_checkpointing: True
 checkpoint_period: 10_000
 # enables one replica to read the ckpt then broadcast to the rest
@@ -177,7 +178,7 @@ norm_topk_prob: False # Boolean to enable the top-k probability normalization. Q
 expert_shard_attention_option: "fsdp"
 
 # deepseek moe
-base_moe_mlp_dim: 7168 # intermediate dimension at MoE layer (use base_mlp_dim if not DeepSeek style)
+base_moe_mlp_dim: 7168 # intermediate dimension at MoE layer. For a fully MoE model, base_mlp_dim must be equal to base_moe_mlp_dim.
 first_num_dense_layers: 0 # number of initial dense layers in the model
 shared_experts: 1
 routed_scaling_factor: 1.0 # scaling factor for routing scores
@@ -371,7 +372,7 @@ logical_axis_rules: [
                       ['kv_lora', ['fsdp', 'sequence', 'context', 'tensor_transpose', 'expert']],
                       ['kv_lora', ['fsdp', 'fsdp_transpose', 'sequence', 'context', 'expert']],
                       ['kv_lora', ['fsdp', 'sequence', 'context', 'expert']],
-                      ['norm', ['tensor', 'tensor_transpose', 'tensor_sequence']],
+                      ['norm', ['tensor', 'tensor_transpose']],
                       ['layers', 'stage'],
                       ['kv', []],
                       ['kv_head_dim', []],
@@ -593,6 +594,7 @@ use_untrainable_positional_embedding: False
 trainable_position_size: -1  # enable gpt3 position embedding with a positive trainable_position_size
 # RoPE parameters
 rope_type: "default" # one of "default", "llama3.1" or "yarn"
+rope_linear_scaling_factor: 1.0 # linear scaling factor for "default" RoPE (see class `RotaryEmbedding` for more)
 rope_use_scale: True # apply rope scaling for llama3.1 (see class `LLaMARotaryEmbedding` for more)
 rope_min_timescale: 1
 rope_max_timescale: 10_000 # Timescale For global Attention
@@ -795,3 +797,6 @@ projector_dropout_for_vit: 0.0
 # Subslice shape in the form of "x,y,z" when using pathways (single controller). 
 # Example: "8,8" to use a 8x8 subgrid (64 chips) of a full pod (16x16) of trillium.
 subslice_shape: ""
+
+# NNX
+enable_nnx: false
