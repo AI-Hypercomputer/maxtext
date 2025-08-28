@@ -30,6 +30,7 @@ from MaxText.layers.attentions import attention_as_linen
 from MaxText.layers.linears import mlp_block
 from MaxText.layers.normalizations import rms_norm, RMSNorm
 from MaxText.layers.quantizations import AqtQuantization as Quant
+from MaxText.layers.initializers import variable_to_logically_partitioned
 
 
 GEMMA3_ATTENTION_PATTERN = (
@@ -449,6 +450,7 @@ class VisionEmbedder(nnx.Module):
         dtype=self.config.dtype_mm,
         weight_dtype=self.config.weight_dtype,
         epsilon=self.config.normalization_layer_epsilon,
+        kernel_axes=("norm",),
         rngs=self.rngs,
     )
     self.mm_input_projection = Einsum(shape=(self.config.hidden_size_for_vit, self.config.emb_dim), rngs=self.rngs)
@@ -469,6 +471,8 @@ def visionembedder_as_linen(
       config,
       mesh=mesh,
       name="VisionEmbedder_0",
+      abstract_init=False,
+      metadata_fn=variable_to_logically_partitioned,
   )
 
 
@@ -605,5 +609,7 @@ def gemma3visionencoder_as_linen(
       config=config,
       mesh=mesh,
       name="Gemma3VisionEncoderLayer_0",
+      abstract_init=False,
+      metadata_fn=variable_to_logically_partitioned,
   )
   return module
