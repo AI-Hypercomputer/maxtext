@@ -454,11 +454,68 @@ class InferenceWorker:
     self.slot_to_id = {}
     self.running = True
     self.true_lengths = {input.id: input.true_length for input in data}
-    max_logging.log("Continuous batching started")
 
-    self._run_continous_batching(data)
+    # self._run_continous_batching(data)
+    
+    self._prefill(data)
+    
+    self._decode(data)
 
     return self._build_final_outputs(data)
+
+
+  def _prefill(self, data: list[InputData]):
+    for row in data:
+      slot = self.empty_decode_slots.pop()
+      self.prefill_helper.process(
+        model_params=self.params,
+        decode_state=self.decode_state,
+        decode_slot=slot,
+        input_id=int(row.id),
+        input_tokens_padded=row.tokens,
+        input_true_length=row.true_length,
+        prefill_done=self._prefill_done,
+      )
+    while not self.generated_token_backlog.empty():
+      try:
+        result_tokens, log_prob, is_first_token, row_id, slot, prompt_logp = self.generated_token_backlog.get_nowait()
+      except queue.Empty:
+        continue
+
+      # check if EOS is in result_tokens
+      
+      # put prompt_logp in a dict with prompt_id
+      
+      should_terminate = (result_tokens == self.eos_ids).any()
+      self.slot_to_id[slot] = jax.lax.cond(
+        should_terminate,
+        lambda _: -1,
+        lambda x: x,
+        self.slot_to_id[slot]
+      )
+      
+  def _prefill_done(self, prefill_result: list[PrefillResult], prompt_ids: list[any], decode_state: DecodeState):
+    self.decode_state = decode_state
+    # Process each prefill result
+    for i, result in enumerate(prefill_result):
+      input_id = prompt_ids[i]
+      result_tokens = result.result_tokens
+      slot = result.slot
+      prompt_logp = result.prompt_logp
+
+      self.slot_to_id[slot] = input_id
+      
+      first_token = result_tokens.data[:, 0]
+      log_prob = result_tokens.log_prob
+      prompt_logp = result.prompt_logp
+
+      if self.debug:
+        print("Prefill done for input id:", input_id, "slot:", slot)
+      self.generated_token_backlog.put_nowait((first_token, log_prob, True, prompt_ids[i], slot, prompt_logp))
+
+
+  def _decode(self, data: list[InputData]):
+    pass
 
   def _run_continous_batching(
       self,
@@ -469,7 +526,7 @@ class InferenceWorker:
     Args:
         data: list of InputData objects containing input sequences
     """
-
+    max_logging.log("Continuous batching started")
     # Process each input
     for row in data:
       # 1. Wait for an empty slot

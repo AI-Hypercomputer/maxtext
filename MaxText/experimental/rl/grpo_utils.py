@@ -121,8 +121,8 @@ def generate_offline_completions(config, tokenizer_model, inference_engine, data
             true_length=data[f"{config.train_data_columns}_true_length"][i][0],
         )
     )
-  with jax.transfer_guard_host_to_device("disallow_explicit") and jax.transfer_guard_device_to_host("disallow_explicit"):
-    results = inference_engine.batch_inference(input_data)
+  # with jax.transfer_guard_host_to_device("disallow_explicit") and jax.transfer_guard_device_to_host("disallow_explicit"):
+  results = inference_engine.batch_inference(input_data)
 
   prompt_completions_segmentation = []
   completion_segmentation = []

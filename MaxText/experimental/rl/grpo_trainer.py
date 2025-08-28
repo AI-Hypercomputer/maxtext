@@ -617,7 +617,7 @@ def generate_completions(
     thread_example_batch_trimmed = jax.tree_util.tree_map(
         lambda arr: arr[
             : int(
-                worker_config_inference.per_device_batch_size
+                (worker_config_inference.per_device_batch_size // worker_config_inference.num_generations)
                 * worker_config_train.inference_replicas
                 * worker_config_train.inference_devices_per_replica
             )
