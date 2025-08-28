@@ -410,7 +410,7 @@ class Encoder(nnx.Module):
           rngs=self.rngs,
       )
       setattr(self, layer_name, layer)
-    self.encoder_norm = nnx.LayerNorm(num_features=1152, rngs=self.rngs)
+    self.encoder_norm = nnx.LayerNorm(num_features=self.config.hidden_size_for_vit, rngs=self.rngs)
 
   def __call__(self, x: jax.Array, deterministic: bool = True) -> jax.Array:
     # TODO(aireenmei, hengtaoguo): add if-scan branch to enable scan support for vision encoder
