@@ -28,7 +28,7 @@ def chunks(lst: list, n: int):
     n: size of each chunk.
 
   Returns:
-    List of n-sized chunks for lst.
+    list of n-sized chunks for lst.
   """
   return [lst[i : i + n] for i in range(0, len(lst), n)]
 
