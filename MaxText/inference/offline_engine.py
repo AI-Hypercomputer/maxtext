@@ -513,36 +513,43 @@ class InferenceWorker:
 
   def _build_final_outputs(self, input_data: list[InputData]) -> list[CompletionOutput]:
     """Build the final list of CompletionOutput."""
-    breakpoint()
     with jax.profiler.TraceAnnotation("offline_engine.batch_inference.return_final_output"):
       completion_outputs = []
       for row in input_data:
         input_id = row.id
         prompt_length = row.true_length
         prompt_tokens = row.tokens[: row.true_length].squeeze()
-        completion_tokens = jax.numpy.array(
-            [token_output.token for token_output in self.completion_tokens_by_id[input_id]]
-        ).flatten()
-        logprobs = jax.numpy.array(
-            [token_output.log_prob.flatten() for token_output in self.completion_tokens_by_id[input_id]]
-        ).flatten()
         prompt_logprobs = self.prompt_logprobs_by_id[input_id].flatten()
+
+        completion_tokens = jax.numpy.array(
+            [jnp.asarray(token_output.token).flatten() for token_output in self.completion_tokens_by_id[input_id]],
+            dtype=prompt_tokens.dtype
+        ).flatten()
+        completion_logprobs = jax.numpy.array(
+            [jnp.asarray(token_output.log_prob).flatten() for token_output in self.completion_tokens_by_id[input_id]],
+            dtype=prompt_logprobs.dtype
+        ).flatten()
+
+        total_length = prompt_length + len(completion_tokens)
+
+        # Build token_ids
+        token_ids = jax.numpy.empty((total_length,), dtype=prompt_tokens.dtype)
+        token_ids = jax.lax.dynamic_update_slice(token_ids, prompt_tokens, (0,))
+        if len(completion_tokens) > 0:
+          token_ids = jax.lax.dynamic_update_slice(token_ids, completion_tokens, (prompt_length,))
+
+        # Build logprobs
+        logprobs = jax.numpy.empty((total_length,), dtype=prompt_logprobs.dtype)
+        logprobs = jax.lax.dynamic_update_slice(logprobs, prompt_logprobs, (0,))
+        if len(completion_logprobs) > 0:
+          logprobs = jax.lax.dynamic_update_slice(logprobs, completion_logprobs, (prompt_length,))
+
         completion_outputs.append(
             CompletionOutput(
                 index=input_id,
                 prompt_length=prompt_length,
-                token_ids=jax.numpy.concatenate(
-                    (
-                        prompt_tokens,
-                        completion_tokens,
-                    )
-                ),
-                logprobs=jax.numpy.concatenate(
-                    (
-                        prompt_logprobs,
-                        logprobs,
-                    )
-                ),
+                token_ids=token_ids,
+                logprobs=logprobs,
             )
         )
     return completion_outputs
@@ -679,7 +686,7 @@ class InferenceWorker:
       prompt_id: int,
       result_token: jax.Array,
       log_prob: jax.Array,
-      prompt_logp: jax.Array | None = None,
+      prompt_log_prob: jax.Array | None = None,
   ):
     """Adds the token to the results for the specified prompt ID and
     determines if generation should terminate.
@@ -690,7 +697,7 @@ class InferenceWorker:
 
     Returns:
         True if this token signals the end of generation, False otherwise
-    """    
+    """
     # Return if already reached max decode length
     if len(self.completion_tokens_by_id[prompt_id]) == self.max_decode_length:
       return True
@@ -702,13 +709,13 @@ class InferenceWorker:
       return True
 
     index = len(self.completion_tokens_by_id[prompt_id])
-    if prompt_logp is not None:
-      self.prompt_logprobs_by_id[prompt_id] = prompt_logp
+    if prompt_log_prob is not None:
+      self.prompt_logprobs_by_id[prompt_id] = prompt_log_prob
     self.completion_tokens_by_id[prompt_id].append(TokenOutput(result_token, log_prob))
     if self.debug:
-      if prompt_logp is None:
+      if prompt_log_prob is None:
         print(f"emit token {prompt_id=}, {index=}, {len(self.completion_tokens_by_id[prompt_id])=}")
-    return ((result_token == self.eos_ids).any()) or (index + 1 == self.max_decode_length)
+    return jax.device_get((result_token == self.eos_ids).any()) or (index + 1 == self.max_decode_length)
 
 
 class OfflineEngine:
