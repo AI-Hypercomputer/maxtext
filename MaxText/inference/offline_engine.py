@@ -381,12 +381,11 @@ class InferenceWorker:
     self.empty_decode_slots = set()
     self.slot_to_id: dict[int, int] = {}
     self.completed_sequences: set = set()
-    
+
     self.decode_state: DecodeState = None
     self.completion_tokens_by_id: dict[Hashable, list[TokenOutput]] = {}
     self.prompt_logprobs_by_id: dict[Hashable, list[np.ndarray]] = {}
     self.true_lengths: dict[Hashable, int] = {}
-    
 
     # Model components (initialized later)
     self.engine = None
@@ -750,11 +749,10 @@ class InferenceWorker:
     if prompt_id in self.completed_sequences:
       return True
 
-
     index = len(self.completion_tokens_by_id[prompt_id])
     if prompt_logp is not None:
       self.prompt_logprobs_by_id[prompt_id] = [prompt_logp]
- 
+
     self.completion_tokens_by_id[prompt_id].append(TokenOutput(np.array(result_token), np.array(log_prob)))
 
     # Check if this token completes the sequence
