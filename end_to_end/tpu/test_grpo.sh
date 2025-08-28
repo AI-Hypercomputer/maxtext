@@ -15,16 +15,19 @@
 
 set -xe
 
-BASE_OUTPUT_DIRECTORY=gs://runner-maxtext-logs
-RUN_NAME=grpo-$(date +%Y-%m-%d-%H-%M-%S)
+BASE_OUTPUT_DIRECTORY=gs://xfgu-max-logs
+RUN_NAME=xfgu-grpo-0827-1
 
 JAX_PLATFORMS=proxy 
 JAX_BACKEND_TARGET=grpc://127.0.0.1:29000
 ENABLE_PATHWAYS_PERSISTENCE='1'
 HF_TOKEN=${HF_TOKEN}
 
-MAX_PREFILL_LENGTH=128
-MAX_TARGET_LENGTH=256
+
+echo "The HF_TOKEN is set to ${HF_TOKEN}"
+
+MAX_PREFILL_LENGTH=64
+MAX_TARGET_LENGTH=128
 NUM_GENERATIONS=2
 
 
@@ -36,7 +39,7 @@ dataset_type=hf hf_path='trl-lib/tldr' \
 enable_single_controller=true \
 dtype=bfloat16 weight_dtype=bfloat16 \
 allow_split_physical_axes=true enable_goodput_recording=false monitor_goodput=false \
-profiler=xplane skip_first_n_steps_for_profiler=10 profiler_steps=5"
+profiler=xplane skip_first_n_steps_for_profiler=5 profiler_steps=3"
 
 TRAINING_ARGS="run_name=${RUN_NAME} scan_layers=true \
 inference_replicas=${NUM_SAMPLERS} inference_devices_per_replica=${DEVICES_PER_SAMPLER} \
@@ -51,3 +54,7 @@ JAX_PLATFORMS=proxy JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 ENABLE_PATHWAYS_PE
     python3 -m MaxText.experimental.rl.grpo_trainer MaxText/experimental/rl/grpo.yml  \
     ${COMMON_ARGS} ${TRAINING_ARGS} MaxText/experimental/rl/grpo_inference.yml \
     ${COMMON_ARGS} ${INFERENCE_ARGS}
+
+
+
+xpk workload create-pathways --workload=xfgu-jax-try --num-slices=1 --tpu-type="v5p-64" --project="cloud-tpu-multipod-dev" --zone="europe-west4-b" --cluster="xfgu-v5p-64-pw" --base-docker-image gcr.io/tpu-prod-env-multipod/maxtext_jax_nightly:2025-08-25 --priority=high   --command "export JAX_PLATFORMS=proxy && export JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 && python3 -c 'import pathwaysutils; pathwaysutils.initialize(); import jax; print(jax.devices())'"
