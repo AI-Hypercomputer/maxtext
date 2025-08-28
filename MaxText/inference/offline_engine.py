@@ -378,13 +378,15 @@ class InferenceWorker:
     # Inference state (initialized later)
     self.running = False
     self.detokenization_queue = queue.Queue()
-    self.empty_decode_slots = queue.Queue()
+    self.empty_decode_slots = set()
     self.slot_to_id: dict[int, int] = {}
+    self.completed_sequences: set = set()
+    
     self.decode_state: DecodeState = None
     self.completion_tokens_by_id: dict[Hashable, list[TokenOutput]] = {}
     self.prompt_logprobs_by_id: dict[Hashable, list[np.ndarray]] = {}
     self.true_lengths: dict[Hashable, int] = {}
-    self.completed_sequences: set = set()
+    
 
     # Model components (initialized later)
     self.engine = None
@@ -470,9 +472,9 @@ class InferenceWorker:
     self.running = False
     self.completion_tokens_by_id = defaultdict(list)
     self.prompt_logprobs_by_id = defaultdict(list)
-    self.empty_decode_slots = queue.Queue()
+    self.empty_decode_slots = set()
     for i in range(self.decode_batch_size):
-      self.empty_decode_slots.put(i)
+      self.empty_decode_slots.add(i)
     self.slot_to_id = {}
     self.true_lengths = {}
     self.detokenization_queue = queue.Queue()
@@ -501,11 +503,11 @@ class InferenceWorker:
 
     max_logging.log("Continuous batching started")
 
-    self._run_continous_batching(data)
+    self._run_continuous_batching(data)
 
     return self._build_final_outputs(data)
 
-  def _run_continous_batching(
+  def _run_continuous_batching(
       self,
       data: list[InputData],
   ):
@@ -525,10 +527,10 @@ class InferenceWorker:
     # Process each input
     for row in data:
       # 1. Wait for an empty slot
-      while self.empty_decode_slots.empty():
+      while not self.empty_decode_slots:
         self.decode()
       # 2. Get an available slot
-      slot = self.empty_decode_slots.get()
+      slot = self.empty_decode_slots.pop()
       # 3. Prefill and insert kv cache
       self.prefill_helper.process(
           model_params=self.params,
@@ -716,13 +718,11 @@ class InferenceWorker:
             result_tokens_at_slot = result_tokens_step[slot]
             should_terminate = self.emit_token(id_, int(result_tokens_at_slot), log_prob_at_slot)
             if should_terminate:
-              self.completed_sequences.add(id_)
               newly_empty.append(slot)
       # Update decode slots
       for slot in newly_empty:
         self.slot_to_id[slot] = None
-        if slot not in self.empty_decode_slots.queue:
-          self.empty_decode_slots.put(slot)
+        self.empty_decode_slots.add(slot)
 
       if self.debug:
         max_logging.log(f"Inference worker: detokenization in {time.time() - start_time} seconds")
@@ -750,23 +750,11 @@ class InferenceWorker:
     if prompt_id in self.completed_sequences:
       return True
 
-    # Return if already reached max decode length
-    if len(self.completion_tokens_by_id[prompt_id]) == self.max_decode_length:
-      self.completed_sequences.add(prompt_id)
-      return True
-
-    # Return if already reached eos
-    if (
-        len(self.completion_tokens_by_id[prompt_id]) > 0
-        and self.completion_tokens_by_id[prompt_id][-1].token in self.eos_ids
-    ):
-      self.completed_sequences.add(prompt_id)
-      return True
 
     index = len(self.completion_tokens_by_id[prompt_id])
     if prompt_logp is not None:
       self.prompt_logprobs_by_id[prompt_id] = [prompt_logp]
-
+ 
     self.completion_tokens_by_id[prompt_id].append(TokenOutput(np.array(result_token), np.array(log_prob)))
 
     # Check if this token completes the sequence
