@@ -112,30 +112,29 @@ def create_training_tools(config, model, mesh):
   learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
   tx = optimizers.get_optimizer(config, learning_rate_schedule)
   logger = checkpointing.setup_checkpoint_logger(config)
-  if config.enable_emergency_checkpoint:
-    if config.use_replicator_service:
-      checkpoint_manager = (
-          checkpointing.create_orbax_emergency_replicator_checkpoint_manager(
-              config.local_checkpoint_directory,
-              config.local_checkpoint_period,
-              mesh,
-          )
-      )
-    else:
-      abstract_state, _, _ = maxtext_utils.get_abstract_state(
-          model, tx, config, init_rng, mesh, is_training=True
-      )
-      checkpoint_manager = (
-          checkpointing.create_orbax_emergency_checkpoint_manager(
-              config.local_checkpoint_directory,
-              config.checkpoint_dir,
-              mesh,
-              abstract_state,
-              config.local_checkpoint_period,
-              config.checkpoint_period,
-              logger,
-          )
-      )
+  if config.enable_multi_tier_checkpointing:
+    checkpoint_manager = (
+        checkpointing.create_orbax_emergency_replicator_checkpoint_manager(
+            config.local_checkpoint_directory,
+            config.local_checkpoint_period,
+            mesh,
+        )
+    )
+  elif config.enable_emergency_checkpoint:
+    abstract_state, _, _ = maxtext_utils.get_abstract_state(
+        model, tx, config, init_rng, mesh, is_training=True
+    )
+    checkpoint_manager = (
+        checkpointing.create_orbax_emergency_checkpoint_manager(
+            config.local_checkpoint_directory,
+            config.checkpoint_dir,
+            mesh,
+            abstract_state,
+            config.local_checkpoint_period,
+            config.checkpoint_period,
+            logger,
+        )
+    )
   else:
     # TODO(b/368121306): Remove this once zarr3 support is plumbed on the backend
     use_ocdbt = config.checkpoint_storage_use_ocdbt

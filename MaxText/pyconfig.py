@@ -188,6 +188,16 @@ def validate_keys(keys):
   assert (
       keys["load_parameters_path"] == "" or keys["load_full_state_path"] == ""
   ), "At most one of `load_parameters_path` or `load_full_state_path` should be set"
+
+  if keys["enable_multi_tier_checkpointing"]:
+    assert (
+        keys["local_checkpoint_directory"]
+    ), "A local checkpoint directory must be specified when using multi-tier checkpointing"
+    assert (keys["local_checkpoint_period"] > 0), "A positive local checkpoint period must be specified when using multi-tier checkpointing"
+    assert (
+        keys["multi_tier_checkpointing_backup_interval_minutes"] > 0
+    ), "A positive multi-tier checkpointing backup interval minutes must be specified when using multi-tier checkpointing"
+
   if keys["enable_emergency_checkpoint"]:
     assert (
         keys["local_checkpoint_directory"] != ""
@@ -195,10 +205,7 @@ def validate_keys(keys):
     assert (
         keys["local_checkpoint_period"] > 0
     ), "A positive local checkpoint period must be specified when using emergency checkpoint"
-    if keys["use_replicator_service"]:
-      assert (
-          keys["replicator_backup_interval_minutes"] > 0
-      ), "Replicator service is enabled, the backup interval minutes must be positive"
+
   else:
     max_logging.log(
         "Not using emergency checkpoint, ignoring local_checkpoint_directory, local_checkpoint_period,"
