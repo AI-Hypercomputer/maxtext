@@ -28,7 +28,7 @@ class Qwen3ShardingTrainingV2(MeshSharding):
     for axis in axes:
       match axis, tensor_type:
         case "batch", TT.Activation, :
-          axis_mappings = [dp, fsdp, ep]
+          axis_mappings = [dp, fsdp]
           if ep_attn_type == "batch":
             axis_mappings.append(ep)
           mesh_axes.append(tuple(axis_mappings))
@@ -40,12 +40,14 @@ class Qwen3ShardingTrainingV2(MeshSharding):
         case "embed", TT.Activation:
           mesh_axes.append((tp))
         case "embed", TT.Weight:
-          axis_mappings = [fsdp, sp, cp, ep]
+          axis_mappings = [fsdp, sp, cp]
+          if tensor_name not in ("mlp_wi_0", "mlp_wi_1", "mlp_wo"):
+              axis_mappings.append(ep)
           if tensor_name in ("mlp_wi_fused", "mlp_wi_unfused", "mlp_wo") and tensor_transpose:
             axis_mappings.append(tp)
           mesh_axes.append(tuple(axis_mappings))
         case "mlp", TT.Weight:
-          axis_mappings = [tp, tp_s, ar]
+          axis_mappings = [tp, tp_s]
           if tensor_name in ("mlp_wi_fused", "mlp_wi_unfused", "mlp_wo") and fsdp_transpose:
             axis_mappings.append(fsdp)
           mesh_axes.append(tuple(axis_mappings))
@@ -74,9 +76,9 @@ class Qwen3ShardingTrainingV2(MeshSharding):
         case "kv_head_dim", TT.Activation, _:
           mesh_axes.append((tp, tp_s))
         case "heads", TT.Activation, _:
-          mesh_axes.append((tp, sp,tp_s,ar))
+          mesh_axes.append((tp, sp,tp_s))
         case  ("heads" | "q_heads" | "kv_heads"), TT.Weight, _:
-          mesh_axes.append((tp, tp_s, ar))
+          mesh_axes.append((tp, tp_s))
         case ("kv", "kv_head_dim", "qkv", "num_activations"), TT.Weight, _:
           mesh_axes.append((None,))
         case "exp", _:
@@ -119,7 +121,7 @@ class Qwen3ShardingInferenceV2(MeshSharding):
         case _, "embed_and_logits_batch", TT.Activation, _:
           mesh_axes.append((dp, pp, fsdp))
         case _, "length", TT.Activation, TT.Prefill:
-          # actually resolves to the same as for Decode but was at least intnded to be mapped separately in current code
+          # actually resolves to the same as for Decode but was at least intended to be mapped separately in current code
           mesh_axes.append((sp, cp))
         case _, "length", TT.Activation, TT.Decode:
           mesh_axes.append((sp, cp))

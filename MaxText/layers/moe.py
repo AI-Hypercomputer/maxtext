@@ -254,7 +254,7 @@ class RoutedMoE(nnx.Module):
     self.sharding = sharding
 
     self.wi_kernel_axes = ("exp", "embed_no_exp", "mlp")
-    self.wo_kernel_axes = ("exp", "mlp", "embed_no_exp")
+    self.wo_kernel_axes = ("exp", "mlp", WYO_exp")
 
     self.gate = GateLogit(
         in_features_shape=self.config.emb_dim,
