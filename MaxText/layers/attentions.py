@@ -66,7 +66,7 @@ from MaxText.layers.embeddings import (
     RotaryEmbedding,
     YarnRotaryEmbedding,
 )
-from MaxText.layers.initializers import nd_dense_init, NdInitializer, variable_to_logically_partitioned
+from MaxText.layers.initializers import nd_dense_init, NdInitializer, variable_to_logically_partitioned, default_bias_init
 from MaxText.layers.linears import DenseGeneral, canonicalize_tuple, normalize_axes
 from MaxText.layers.normalizations import RMSNorm
 from MaxText.layers.quantizations import AqtQuantization as Quant
@@ -476,6 +476,14 @@ class Attention(nnx.Module):
       self.value = self.init_kv_w(inputs_kv_shape=inputs_kv_shape)
 
     self.out = self.init_out_w(output_dim=inputs_q_shape[-1])
+
+    if self.config.attention_sink:
+      self.sinks = nnx.Param(
+          default_bias_init(self.rngs.params(), (self.config.num_query_heads,), self.weight_dtype),
+          sharding=(None,),
+      )
+    else:
+      self.sinks = None
 
     is_llama4_decoder_block = self.config.decoder_block == DecoderBlockType.LLAMA4
     if self.use_qk_norm and not is_llama4_decoder_block:
@@ -924,7 +932,7 @@ class Attention(nnx.Module):
       if model_mode != MODEL_MODE_TRAIN:
         cached_values = self.update_kv_caches(key, value, decoder_segment_ids, model_mode, previous_chunk)
       out = self.attention_op(
-          query, key, value, decoder_segment_ids, model_mode, cached_values, previous_chunk, bidirectional_mask
+          query, key, value, decoder_segment_ids, model_mode, cached_values, previous_chunk, bidirectional_mask, self.sinks
       )
 
     if model_mode == MODEL_MODE_PREFILL:
