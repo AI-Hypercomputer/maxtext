@@ -316,6 +316,7 @@ class InferenceWorker:
       rng: jax.random.PRNGKey = None,
       mesh: Mesh = None,
       debug: bool = False,
+      continous_batching: bool = False,
   ):
     """
     Args:
@@ -351,6 +352,7 @@ class InferenceWorker:
     self.mesh = mesh
     self.rng = jax.random.PRNGKey(0) if rng is None else rng
     self.debug = debug
+    self.continous_batching = continous_batching
 
     # Inference state (initialized later)
     self.running = False
@@ -454,23 +456,34 @@ class InferenceWorker:
     self.slot_to_id = {}
     self.running = True
     self.true_lengths = {input.id: input.true_length for input in data}
-
-    # self._run_continous_batching(data)
+    self.current_index = {input.id: 0 for input in data}
+    self.eos_reached = jnp.array([False for _ in data])
+    self.result_tokens = {input.id: jnp.zeros((self.config.max_target_length,), dtype=jnp.int32) for input in data}
+    self.result_logprobs = {input.id: jnp.zeros((self.config.max_target_length,), dtype=jnp.float32) for input in data}
     
-    self._prefill(data)
-    
-    self._decode(data)
+    if self.continous_batching:
+      self._run_continous_batching(data)
+      return self._build_final_outputs(data)
+    else:
+      self._prefill(data)
+      self._decode(data)
+      return self._build_outputs()
 
-    return self._build_final_outputs(data)
+    
 
 
   def _prefill(self, data: list[InputData]):
     for row in data:
-      slot = self.empty_decode_slots.pop()
+      self.result_tokens[row.id] = jax.lax.dynamic_update_slice(
+        self.result_tokens[row.id],
+        row.tokens.flatten(),
+        (0,)
+      )
+      self.current_index[row.id] = row.true_length
       self.prefill_helper.process(
         model_params=self.params,
         decode_state=self.decode_state,
-        decode_slot=slot,
+        decode_slot=int(row.id),
         input_id=int(row.id),
         input_tokens_padded=row.tokens,
         input_true_length=row.true_length,
@@ -478,21 +491,35 @@ class InferenceWorker:
       )
     while not self.generated_token_backlog.empty():
       try:
-        result_tokens, log_prob, is_first_token, row_id, slot, prompt_logp = self.generated_token_backlog.get_nowait()
+        result_tokens, log_prob, id, prompt_logp = self.generated_token_backlog.get_nowait()
       except queue.Empty:
         continue
-
-      # check if EOS is in result_tokens
       
-      # put prompt_logp in a dict with prompt_id
-      
-      should_terminate = (result_tokens == self.eos_ids).any()
-      self.slot_to_id[slot] = jax.lax.cond(
-        should_terminate,
-        lambda _: -1,
-        lambda x: x,
-        self.slot_to_id[slot]
+      # put first token from prefill in result_tokens
+      self.result_logprobs[id] = jax.lax.dynamic_update_slice(
+        self.result_logprobs[id],
+        prompt_logp.flatten(),
+        (0,)
       )
+      self.result_logprobs[id] = jax.lax.dynamic_update_slice(
+        self.result_logprobs[id],
+        log_prob.flatten(),
+        (self.current_index[id],)
+      )
+      self.result_tokens[id] = jax.lax.dynamic_update_slice(
+        self.result_tokens[id],
+        result_tokens.flatten(),
+        (self.current_index[id],)
+      )
+      self.current_index[id] += 1
+      # check if EOS is in result_tokens    
+      should_terminate = (result_tokens == self.eos_ids).any()
+      self.eos_reached.at[id].set(jax.lax.cond(
+        should_terminate,
+        lambda _: False,
+        lambda x: x,
+        self.eos_reached[id]
+      ))
       
   def _prefill_done(self, prefill_result: list[PrefillResult], prompt_ids: list[any], decode_state: DecodeState):
     self.decode_state = decode_state
@@ -500,22 +527,67 @@ class InferenceWorker:
     for i, result in enumerate(prefill_result):
       input_id = prompt_ids[i]
       result_tokens = result.result_tokens
-      slot = result.slot
       prompt_logp = result.prompt_logp
 
-      self.slot_to_id[slot] = input_id
       
       first_token = result_tokens.data[:, 0]
       log_prob = result_tokens.log_prob
       prompt_logp = result.prompt_logp
 
       if self.debug:
-        print("Prefill done for input id:", input_id, "slot:", slot)
-      self.generated_token_backlog.put_nowait((first_token, log_prob, True, prompt_ids[i], slot, prompt_logp))
+        print("Prefill done for input id:", input_id)
+      self.generated_token_backlog.put_nowait((first_token, log_prob, prompt_ids[i], prompt_logp))
 
 
   def _decode(self, data: list[InputData]):
-    pass
+    def _continue(state):
+      _, eos_reached, _, _ = state
+      return jnp.any(eos_reached)
+    
+    def body_fn(state):
+      decode_state, eos_reached, final_result_tokens, final_result_logprobs = state
+      decode_state, result_tokens, log_prob = self._jitted_generate_fn(
+          self.params, decode_state, self.rng
+      )
+      for id in range(len(result_tokens)):
+        should_terminate = jnp.logical_or(jnp.logical_or((result_tokens[id] == self.eos_ids).any(), self.eos_reached[id]), self.current_index[id] >= self.max_decode_length)
+        self.eos_reached.at[id].set(jax.lax.cond(
+          should_terminate,
+          lambda _: False,
+          lambda x: x,
+          self.eos_reached[id]
+        ))
+        final_result_logprobs[id] = jax.lax.dynamic_update_slice(
+          self.result_logprobs[id],
+          log_prob[id].flatten(),
+          (self.current_index[id],)
+        )
+        final_result_tokens[id] = jax.lax.dynamic_update_slice(
+          self.result_tokens[id],
+          result_tokens[id].flatten(),
+          (self.current_index[id],)
+        )
+        self.current_index[id] += 1
+      return (decode_state, eos_reached, final_result_tokens, final_result_logprobs)
+
+    self.decode_state.pop('prompt_logp', None)
+    state = (self.decode_state, self.eos_reached, self.result_tokens, self.result_logprobs)
+    (self.decode_state, self.eos_reached, self.result_tokens, self.result_logprobs) = jax.lax.while_loop(_continue, body_fn, state)
+
+
+  def _build_outputs(self):
+    completion_outputs = []
+    for id, tokens in self.result_tokens.items():
+      logprobs = self.result_logprobs[id]
+      completion_outputs.append(
+          CompletionOutput(
+              index=id,
+              prompt_length=self.true_lengths[id],
+              token_ids=tokens,
+              logprobs=logprobs,
+          )
+      )
+    return completion_outputs
 
   def _run_continous_batching(
       self,
@@ -792,6 +864,7 @@ class OfflineEngine:
       mesh: Mesh = None,
       rng: jax.random.PRNGKey = None,
       debug: bool = False,
+      continous_batching: bool = False,
   ):
     """Initialize the OfflineEngine.
 
@@ -836,6 +909,7 @@ class OfflineEngine:
     self.max_decode_length = self.config.max_target_length - self.max_prefill_length
     self.rng = jax.random.PRNGKey(0) if rng is None else rng
     self.debug = debug
+    self.continous_batching = continous_batching
     self._validate_config()
 
     # Create prefill buckets: [0, 64], (64, 128], (128, 256], ..., [max_length//2, max_length]
@@ -862,6 +936,7 @@ class OfflineEngine:
         batch_prefill_max_batch_size=self.batch_prefill_max_batch_size,
         rng=self.rng,
         debug=self.debug,
+        continous_batching=self.continous_batching,
     )
 
     self.tokenizer = self.worker.tokenizer
