@@ -440,9 +440,9 @@ ici_expert_parallelism: 1
 # you should set compile_toplogy_num_slices, which will in turn set this value. For non-TPU environments this is set to 1.
 num_slices: -1
 
-# Tiling
-enable_vocab_tiling: False
-num_vocab_tiling: 32
+# Vocab Tiling to reduce memory usage but potentially increase step time
+# Set a value larger than 1 to enable.
+num_vocab_tiling: 1
 
 # Tokenizer
 vocab_size: 32_000 # powers of 2 for sharding

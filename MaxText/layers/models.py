@@ -102,9 +102,9 @@ class TransformerLinenPure(nn.Module):
     # Since this method is called via apply, the submodules are already initialized.
     # We can safely call the internal _apply_output_head method.
     logits = self.decoder._apply_output_head(
-        hidden_states,
-        deterministic=False, 
-        model_mode=MODEL_MODE_TRAIN
+        shared_embedding=self.shared_embedding,
+        y=hidden_states,
+        deterministic=False,
     )
     return logits
 

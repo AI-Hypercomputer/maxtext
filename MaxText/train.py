@@ -74,134 +74,6 @@ def get_first_step(state):
   return int(state.step)
 
 
-def get_seq_tiling_loss(
-    intermediate_outputs,
-    data,
-    config,
-    model,
-    params,
-):
-  nested_key = ("intermediates", "decoder", "hidden_states")
-  hidden_states = maxtext_utils.get_nested_value(intermediate_outputs, nested_key)[0]
-  labels = data["targets"]
-  batch_size, seq_len, emb_dim = hidden_states.shape
-  assert seq_len % config.num_vocab_tiling == 0, "Sequence length should be divisible by the number of vocab tiles."
-  seq_tile_size = seq_len // config.num_vocab_tiling
-
-  reshaped_hidden_states = hidden_states.reshape(
-      (batch_size, config.num_vocab_tiling, seq_tile_size, emb_dim)
-  ).transpose(1, 0, 2, 3)
-  reshaped_labels = labels.reshape(
-      (batch_size, config.num_vocab_tiling, seq_tile_size)
-  ).transpose(1, 0, 2)
-  reshaped_segmentation = data["targets_segmentation"].reshape(
-      (batch_size, config.num_vocab_tiling, seq_tile_size)
-  ).transpose(1, 0, 2)
-
-
-  # Customized forward and backward maps for the embedding tiling
-  @jax.custom_vjp
-  def chunked_cross_entropy_loss(params, reshaped_hidden_states, reshaped_labels, reshaped_segmentation):
-      """
-      Calculates the total cross-entropy loss using lax.scan
-      """
-      def fwd_scan_body(loss_accumulator, chunk_data):
-          hidden_chunk, label_chunk, segmentation_chunk = chunk_data
-          
-          # Calculate logits for the current chunk
-          chunk_logits = model.apply(
-              {'params': params['params']},
-              hidden_chunk,
-              method='logits_from_hidden_states'
-          )
-          one_hot_label_chunk = jax.nn.one_hot(label_chunk, config.vocab_size)
-          chunk_xent, _ = max_utils.cross_entropy_with_logits(chunk_logits, one_hot_label_chunk, 0.0)
-          masked_xent = jnp.sum(chunk_xent * (segmentation_chunk != 0))
-          loss_accumulator += masked_xent
-          return loss_accumulator, None
-
-      initial_loss = 0.0
-      total_loss, _ = jax.lax.scan(
-          fwd_scan_body,
-          initial_loss,
-          (reshaped_hidden_states, reshaped_labels, reshaped_segmentation)
-      )
-      return total_loss
-
-
-  def chunked_cross_entropy_loss_fwd(params, reshaped_hidden_states, reshaped_labels, reshaped_segmentation):
-      total_loss = chunked_cross_entropy_loss(params, reshaped_hidden_states, reshaped_labels, reshaped_segmentation)
-      residuals = (params, reshaped_hidden_states, reshaped_labels, reshaped_segmentation)
-      return total_loss, residuals
-
-  def chunked_cross_entropy_loss_bwd(residuals, loss_cotangent):
-      params, reshaped_hidden_states, reshaped_labels, reshaped_segmentation = residuals
-
-      def bwd_scan_body(carry, chunk_data):
-          grad_params_acc = carry
-          hidden_chunk, label_chunk, segmentation_chunk = chunk_data
-
-          def single_chunk_loss_fn(p, h):
-              chunk_logits = model.apply(
-                  {'params': p['params']},
-                  h,
-                  method='logits_from_hidden_states'
-              )
-              one_hot_label_chunk = jax.nn.one_hot(label_chunk, config.vocab_size)
-              xent, _ = max_utils.cross_entropy_with_logits(chunk_logits, one_hot_label_chunk, 0.0)
-              return jnp.sum(xent * (segmentation_chunk != 0))
-
-          # Get the vector-Jacobian product function
-          _, vjp_fn = jax.vjp(single_chunk_loss_fn, params, hidden_chunk)
-          (grad_params_update, grad_hidden_chunk) = vjp_fn(loss_cotangent)
-          grad_params_acc = jax.tree_util.tree_map(
-              lambda acc, update: acc + update, grad_params_acc, grad_params_update
-          )
-          return grad_params_acc, grad_hidden_chunk
-
-      initial_carry = jax.tree_util.tree_map(jnp.zeros_like, params)
-
-      # The scan now returns the total gradients for the params in the final carry
-      grad_params, grad_reshaped_hidden_states = jax.lax.scan(
-          bwd_scan_body,
-          initial_carry,
-          (reshaped_hidden_states, reshaped_labels, reshaped_segmentation)
-      )
-
-      return (
-        grad_params, # grad for params
-        grad_reshaped_hidden_states.astype(reshaped_hidden_states.dtype),
-        None, # grad for reshaped_labels
-        None, # grad for reshaped_segmentation
-      )
-
-  chunked_cross_entropy_loss.defvjp(chunked_cross_entropy_loss_fwd, chunked_cross_entropy_loss_bwd)
-
-
-  # if not config.logits_via_embedding:
-  #   total_loss = 0.0
-  #   for hidden_state_chunk, label_chunk, segmentation_chunk in zip(reshaped_hidden_states, reshaped_labels, reshaped_segmentation):
-  #     chunk_logits = model.apply(
-  #         {'params': params['params']},
-  #         hidden_state_chunk,
-  #         method='logits_from_hidden_states',
-  #     )
-  #     one_hot_targets = jax.nn.one_hot(label_chunk, config.vocab_size)
-  #     chunk_xent, _ = max_utils.cross_entropy_with_logits(chunk_logits, one_hot_targets, 0.0)
-  #     total_loss += jnp.sum(chunk_xent * (segmentation_chunk != 0))
-  # else:
-  total_loss = chunked_cross_entropy_loss(
-    params=params,
-    reshaped_hidden_states=reshaped_hidden_states,
-    reshaped_labels=reshaped_labels,
-    reshaped_segmentation=reshaped_segmentation,
-  )
-
-  return total_loss
-
-
-
-
 # -----------------------------------------------------------------------------
 # Top-level Functions
 # -----------------------------------------------------------------------------
@@ -256,7 +128,7 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
       decoder_target_mask=data["targets_segmentation"],
   )
 
-  if config.enable_vocab_tiling:
+  if config.num_vocab_tiling > 1:
     total_loss = get_seq_tiling_loss(intermediate_outputs, data, config, model, params)
   else:
     one_hot_targets = jax.nn.one_hot(data["targets"], config.vocab_size)
@@ -430,6 +302,119 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
     new_state = _merge_dpo_state(new_state, reference_params)
 
   return new_state, metrics
+
+
+def get_seq_tiling_loss(
+    intermediate_outputs,
+    data,
+    config,
+    model,
+    params,
+):
+  nested_key = ("intermediates", "decoder", "hidden_states")
+  hidden_states = maxtext_utils.get_nested_value(intermediate_outputs, nested_key)[0]
+  labels = data["targets"]
+  batch_size, seq_len, emb_dim = hidden_states.shape
+  assert seq_len % config.num_vocab_tiling == 0, "Sequence length should be divisible by the number of vocab tiles."
+  seq_tile_size = seq_len // config.num_vocab_tiling
+
+  reshaped_hidden_states = hidden_states.reshape(
+      (batch_size, config.num_vocab_tiling, seq_tile_size, emb_dim)
+  ).transpose(1, 0, 2, 3)
+  reshaped_labels = labels.reshape(
+      (batch_size, config.num_vocab_tiling, seq_tile_size)
+  ).transpose(1, 0, 2)
+  reshaped_segmentation = data["targets_segmentation"].reshape(
+      (batch_size, config.num_vocab_tiling, seq_tile_size)
+  ).transpose(1, 0, 2)
+
+
+  # Customized forward and backward maps for the embedding tiling
+  @jax.custom_vjp
+  def chunked_cross_entropy_loss(params, reshaped_hidden_states, reshaped_labels, reshaped_segmentation):
+      """
+      Calculates the total cross-entropy loss using lax.scan
+      """
+      def fwd_scan_body(loss_accumulator, chunk_data):
+          hidden_chunk, label_chunk, segmentation_chunk = chunk_data
+          
+          # Calculate logits for the current chunk
+          chunk_logits = model.apply(
+              {'params': params['params']},
+              hidden_chunk,
+              method='logits_from_hidden_states'
+          )
+          one_hot_label_chunk = jax.nn.one_hot(label_chunk, config.vocab_size)
+          chunk_xent, _ = max_utils.cross_entropy_with_logits(chunk_logits, one_hot_label_chunk, 0.0)
+          masked_xent = jnp.sum(chunk_xent * (segmentation_chunk != 0))
+          loss_accumulator += masked_xent
+          return loss_accumulator, None
+
+      initial_loss = 0.0
+      total_loss, _ = jax.lax.scan(
+          fwd_scan_body,
+          initial_loss,
+          (reshaped_hidden_states, reshaped_labels, reshaped_segmentation)
+      )
+      return total_loss
+
+
+  def chunked_cross_entropy_loss_fwd(params, reshaped_hidden_states, reshaped_labels, reshaped_segmentation):
+      total_loss = chunked_cross_entropy_loss(params, reshaped_hidden_states, reshaped_labels, reshaped_segmentation)
+      residuals = (params, reshaped_hidden_states, reshaped_labels, reshaped_segmentation)
+      return total_loss, residuals
+
+  def chunked_cross_entropy_loss_bwd(residuals, loss_cotangent):
+      params, reshaped_hidden_states, reshaped_labels, reshaped_segmentation = residuals
+
+      def bwd_scan_body(carry, chunk_data):
+          grad_params_acc = carry
+          hidden_chunk, label_chunk, segmentation_chunk = chunk_data
+
+          def single_chunk_loss_fn(p, h):
+              chunk_logits = model.apply(
+                  {'params': p['params']},
+                  h,
+                  method='logits_from_hidden_states'
+              )
+              one_hot_label_chunk = jax.nn.one_hot(label_chunk, config.vocab_size)
+              xent, _ = max_utils.cross_entropy_with_logits(chunk_logits, one_hot_label_chunk, 0.0)
+              return jnp.sum(xent * (segmentation_chunk != 0))
+
+          # Get the vector-Jacobian product function
+          _, vjp_fn = jax.vjp(single_chunk_loss_fn, params, hidden_chunk)
+          (grad_params_update, grad_hidden_chunk) = vjp_fn(loss_cotangent)
+          grad_params_acc = jax.tree_util.tree_map(
+              lambda acc, update: acc + update, grad_params_acc, grad_params_update
+          )
+          return grad_params_acc, grad_hidden_chunk
+
+      initial_carry = jax.tree_util.tree_map(jnp.zeros_like, params)
+
+      # The scan now returns the total gradients for the params in the final carry
+      grad_params, grad_reshaped_hidden_states = jax.lax.scan(
+          bwd_scan_body,
+          initial_carry,
+          (reshaped_hidden_states, reshaped_labels, reshaped_segmentation)
+      )
+
+      return (
+        grad_params, # grad for params
+        grad_reshaped_hidden_states.astype(reshaped_hidden_states.dtype),
+        None, # grad for reshaped_labels
+        None, # grad for reshaped_segmentation
+      )
+
+  chunked_cross_entropy_loss.defvjp(chunked_cross_entropy_loss_fwd, chunked_cross_entropy_loss_bwd)
+
+  total_loss = chunked_cross_entropy_loss(
+    params=params,
+    reshaped_hidden_states=reshaped_hidden_states,
+    reshaped_labels=reshaped_labels,
+    reshaped_segmentation=reshaped_segmentation,
+  )
+
+  return total_loss
 
 
 def eval_step(model, config, state, data, dropout_rng):
