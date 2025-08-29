@@ -209,7 +209,7 @@ For instance, to run a job across **four TPU slices**, you would change `--num-s
           --base-docker-image maxtext_base_image\
           --tpu-type v5litepod-256\
           --num-slices 1\
-          --command "python3 -m MaxText.train MaxText/configs/base.yml run_name=${USER}-tpu-job base_output_directory=${BASE_OUTPUT_DIR} dataset_path=${DATASET_PATH} steps=100"
+          --command "python3 -m MaxText.train src/MaxText/configs/base.yml run_name=${USER}-tpu-job base_output_directory=${BASE_OUTPUT_DIR} dataset_path=${DATASET_PATH} steps=100"
 
         ```
 
@@ -223,7 +223,7 @@ For instance, to run a job across **four TPU slices**, you would change `--num-s
           --base-docker-image maxtext_base_image\
           --device-type h100-80gb-8\
           --num-nodes 2\
-          --command "python3 -m MaxText.train MaxText/configs/base.yml run_name=${USER}-gpu-job base_output_directory=${BASE_OUTPUT_DIR} dataset_path=${DATASET_PATH} steps=100"
+          --command "python3 -m MaxText.train src/MaxText/configs/base.yml run_name=${USER}-gpu-job base_output_directory=${BASE_OUTPUT_DIR} dataset_path=${DATASET_PATH} steps=100"
 
         ```
 
