@@ -560,6 +560,7 @@ class Decoder(nn.Module):
         logits = logits / cfg.final_logits_soft_cap
         logits = jnp.tanh(logits) * cfg.final_logits_soft_cap
     else:
+      #y = nn.with_logical_constraint(y, ("activation_batch", "activation_length", "activation_embed"))
       logits = linears.dense_general(
           inputs_shape=y.shape,
           out_features_shape=cfg.vocab_size,
@@ -572,11 +573,18 @@ class Decoder(nn.Module):
       )(
           y
       )  # We do not quantize the logits matmul.
+      #logits = nn.with_logical_constraint(logits, ("activation_batch", "activation_length", "activation_vocab"))
     if self.model_mode in (MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE):
       logits = nn.with_logical_constraint(logits, (None, None, "activation_vocab"))
     else:
+      # logits = nn.with_logical_constraint(
+      #     logits, ("activation_embed_and_logits_batch", "activation_norm_length", "activation_vocab") #"activation_length"
+      # )
+      # logits = nn.with_logical_constraint(
+      #     logits, ("activation_embed_and_logits_batch", "activation_length", "activation_vocab") #""
+      # )
       logits = nn.with_logical_constraint(
-          logits, ("activation_embed_and_logits_batch", "activation_length", "activation_vocab")
+          logits, ("activation_embed_and_logits_batch", "activation_length_no_exp", "activation_vocab") #""
       )
 
     if self.config.cast_logits_to_fp32:
