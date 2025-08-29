@@ -94,6 +94,20 @@ class TransformerLinenPure(nn.Module):
           config=self.config, mesh=self.mesh, name="mtp_block", transformer_layer_module=mtp_layer, decoder=self.decoder
       )
 
+  def logits_from_hidden_states(self, hidden_states):
+    """
+    A pure function to compute logits from hidden states.
+    Designed to be safely used within other transformations like lax.scan.
+    """
+    # Since this method is called via apply, the submodules are already initialized.
+    # We can safely call the internal _apply_output_head method.
+    logits = self.decoder._apply_output_head(
+        hidden_states,
+        deterministic=False, 
+        model_mode=MODEL_MODE_TRAIN
+    )
+    return logits
+
   def __call__(
       self,
       decoder_input_tokens: jnp.ndarray,
