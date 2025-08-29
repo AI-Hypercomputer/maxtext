@@ -823,7 +823,7 @@ class Decoder(nn.Module):
     # After the final transformer layer, `y` holds the raw, un-normalized hidden state.
     hidden_state = y
 
-    if cfg.enable_vocab_seq_tiling and model_mode == MODEL_MODE_TRAIN:
+    if cfg.enable_vocab_tiling and model_mode == MODEL_MODE_TRAIN:
       logits = None
       self.sow('intermediates', 'hidden_states', hidden_state)
     else:

@@ -441,9 +441,8 @@ ici_expert_parallelism: 1
 num_slices: -1
 
 # Tiling
-enable_vocab_seq_tiling: False
-num_vocab_seq_tiling: 32
-tiling_scan_layer: False
+enable_vocab_tiling: False
+num_vocab_tiling: 32
 
 # Tokenizer
 vocab_size: 32_000 # powers of 2 for sharding
