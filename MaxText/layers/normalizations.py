@@ -51,7 +51,7 @@ class RMSNorm(nnx.Module):
     self.parameter_memory_host_offload = parameter_memory_host_offload
     self.scale = nnx.Param(
         scale_init(rngs.params(), (num_features,), weight_dtype),
-        sharding=kernel_axes,
+        sharding=self.kernel_axes,
     )
 
   def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
