@@ -29,7 +29,7 @@ from flax import nnx
 
 from MaxText import max_logging
 from MaxText import max_utils
-from MaxText.common_types import Config, DType, AxisNames, BATCH, LENGTH, EMBED, HEAD, D_KV, Array, MODEL_MODE_TRAIN
+from MaxText.common_types import Config, DType, AxisNames, BATCH, LENGTH_NO_EXP, EMBED, HEAD, D_KV, Array, MODEL_MODE_TRAIN
 from MaxText.layers import initializers, nnx_wrappers
 from MaxText.layers.linears import mlp_block
 from MaxText.layers import models
@@ -197,11 +197,11 @@ class Gpt3MultiHeadAttention(nn.Module):
   kv_quant: None | KVQuant = None
   use_bias: bool = True
 
-  input_axis_names: AxisNames = (BATCH, LENGTH, EMBED)
-  query_axis_names: AxisNames = (BATCH, LENGTH, HEAD, D_KV)
-  key_axis_names: AxisNames = (BATCH, LENGTH, HEAD, D_KV)
-  value_axis_names: AxisNames = (BATCH, LENGTH, HEAD, D_KV)
-  out_axis_names: AxisNames = (BATCH, LENGTH, HEAD, D_KV)
+  input_axis_names: AxisNames = (BATCH, LENGTH_NO_EXP, EMBED)
+  query_axis_names: AxisNames = (BATCH, LENGTH_NO_EXP, HEAD, D_KV)
+  key_axis_names: AxisNames = (BATCH, LENGTH_NO_EXP, HEAD, D_KV)
+  value_axis_names: AxisNames = (BATCH, LENGTH_NO_EXP, HEAD, D_KV)
+  out_axis_names: AxisNames = (BATCH, LENGTH_NO_EXP, HEAD, D_KV)
 
   def qkv_projection(self, inputs: Array, proj_name: str):
     """Fused QKV projection"""

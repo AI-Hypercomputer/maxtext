@@ -72,7 +72,7 @@ class MaxUtilsT5XCrossEntropy(unittest.TestCase):
     # Calculate xent from custom T5X implementation
     one_hot_targets = jax.nn.one_hot(targets, 4096)
     t5x_xent, _ = max_utils.cross_entropy_with_logits(logits, one_hot_targets, 0.0)
-    t5x_xent = nn.with_logical_constraint(t5x_xent, ("activation_batch", "activation_length"))
+    t5x_xent = nn.with_logical_constraint(t5x_xent, ("activation_batch", "activation_length_no_exp"))
 
     # Compare results
     self.assertTrue(jax.numpy.allclose(optax_xent, t5x_xent, rtol=1e-05, atol=1e-08, equal_nan=False))

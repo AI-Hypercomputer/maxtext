@@ -87,9 +87,9 @@ class DecoderLayer(nn.Module):
     cfg = self.config
     mesh = self.mesh
     if model_mode == MODEL_MODE_PREFILL:
-      logical_axis_names = ("activation_batch", "prefill_activation_length", "activation_embed")
+      logical_axis_names = ("activation_batch", "prefill_activation_norm_length", "activation_embed")
     else:
-      logical_axis_names = ("activation_batch", "activation_length", "activation_embed")
+      logical_axis_names = ("activation_batch", "activation_norm_length", "activation_embed")
 
     if model_mode == MODEL_MODE_PREFILL:
       inputs = nn.with_logical_constraint(inputs, logical_axis_names)

@@ -1153,12 +1153,12 @@ def using_tensor_parallelism(raw_keys) -> bool:
 
 
 def using_sequence_parallelism(raw_keys) -> bool:
-  if int(raw_keys["ici_expert_parallelism"]) > 1 and int(raw_keys["dcn_expert_parallelism"]) > 1:
-    raise ValueError("Expert parallelism can only be enabled on ICI or DCN, not both.")
   return int(raw_keys["ici_sequence_parallelism"]) > 1 or int(raw_keys["dcn_sequence_parallelism"]) > 1
 
 
 def using_expert_parallelism(raw_keys) -> bool:
+  if int(raw_keys["ici_expert_parallelism"]) > 1 and int(raw_keys["dcn_expert_parallelism"]) > 1:
+    raise ValueError("Expert parallelism can only be enabled on ICI or DCN, not both.")
   return int(raw_keys["ici_expert_parallelism"]) > 1 or int(raw_keys["dcn_expert_parallelism"]) > 1
 
 
