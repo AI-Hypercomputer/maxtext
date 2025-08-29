@@ -23,11 +23,11 @@ export TOKENIZER_PATH='deepseek-ai/DeepSeek-V3'
 # You can use the HuggingFace checkpoint at https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite
 export CHKPT_BUCKET=gs://maxtext-deepseek/deepseek3-671b/hf
 export MODEL_BUCKET=gs://maxtext-deepseek/deepseek3-671b
-JAX_PLATFORMS=cpu python3 -m MaxText.convert_deepseek_ckpt --base_model_path ${CHKPT_BUCKET} --maxtext_model_path ${MODEL_BUCKET}/${idx} --model_size ${MODEL_NAME}
+JAX_PLATFORMS=cpu python3 -m MaxText.convert_deepseek_family_ckpt --base_model_path ${CHKPT_BUCKET} --maxtext_model_path ${MODEL_BUCKET}/${idx} --model_size ${MODEL_NAME}
 
 # Step 2:
 # Note that the `CONVERTED_CHECKPOINT` is in a `scanned` format which is great for training but for efficient decoding performance we want the checkpoint in an `unscanned` format.
-JAX_PLATFORMS=cpu python3 -m MaxText.convert_deepseek_unscanned_ckpt --base_model_path ${CHKPT_BUCKET} --maxtext_model_path ${MODEL_BUCKET}/${idx}/unscanned --model_size ${MODEL_NAME}
+JAX_PLATFORMS=cpu python3 -m MaxText.convert_deepseek_family_unscanned_ckpt --base_model_path ${CHKPT_BUCKET} --maxtext_model_path ${MODEL_BUCKET}/${idx}/unscanned --model_size ${MODEL_NAME}
 
 # Step 3:
 # Non-Googlers please remember to point `DATASET_PATH` to the GCS bucket where you have your training data
