@@ -24,7 +24,7 @@ numpy==2.1.1
 omegaconf
 optax
 orbax-checkpoint>=0.11.22
-pathwaysutils>=0.1.1
+pathwaysutils>=0.1.2
 pillow>=11.1.0
 pre-commit
 protobuf==3.20.3

@@ -38,9 +38,6 @@ def main() -> int:
   model = model_configs.llama3_1_70b_8192_iter_real_data_and_checkpointing_tfds
   model.tuning_params["colocated_python_data_input"] = True
 
-  # Update
-  pathways_config.runner_image = "gcr.io/cloud-tpu-multipod-dev/lukebaumann_runner:latest"
-
   # Add one additional slice to the virtaul slices.
   if cluster_config.device_type == "v6e-256":
     pathways_config.proxy_flags = (
