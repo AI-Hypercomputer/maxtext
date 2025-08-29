@@ -687,7 +687,7 @@ class RoutedMoeTest(unittest.TestCase):
 
       # Get the actual local_permute outputs.
       sorted_inputs, sorted_indices, local_group_size, sorted_experts_ids = moe.RoutedMoE.local_permute(
-          inputs_shard, global_group_sizes[None, :], experts_per_shard, shard_index, is_offset=False
+          inputs_shard, global_group_sizes[None, :], experts_per_shard, shard_index, use_custom_sort_vjp=False, is_offset=False
       )
 
       # Calculate expected outputs for the current shard
@@ -748,6 +748,7 @@ class RoutedMoeTest(unittest.TestCase):
             global_expert_counts[None, :],
             experts_per_group,
             shard_index=shard_id,
+            use_custom_sort_vjp=False,
             is_offset=True,
             global_sorted_experts=expert_assignments,
         )
