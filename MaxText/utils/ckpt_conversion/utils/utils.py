@@ -67,6 +67,7 @@ HF_IDS = {
     "llama3.1-70b": "meta-llama/Llama-3.1-70B",
     "llama3.1-405b": "meta-llama/Llama-3.1-405B",
     "qwen3-30b-a3b": "Qwen/Qwen3-30B-A3B-Thinking-2507",
+    "qwen3-235b-a22b": "Qwen/Qwen3-235B-A22B-Thinking-2507",
     "qwen3-480b-a35b": "Qwen/Qwen3-Coder-480B-A35B-Instruct",
 }
 
