@@ -806,7 +806,7 @@ def get_successive_pipelines(config, remat_policy, mesh, pipeline_stage_module, 
   )
 
   in_axes_tuple = (nn.broadcast,) * 5
-  params_spec = config.param_scan_axis if initializing else nn.partitioning.ScanIn(config.param_scan_axis)
+  params_spec = 0 if initializing else nn.partitioning.ScanIn(0)
   cache_spec = 0
   scan_fn = nn.scan(
       rematted_pipeline, #pipeline_module,
