@@ -89,36 +89,40 @@ class SFTTrainingHooks(TrainingHooks):
       record_goodput(self.goodput_recorder, f"record_{GoodputEvent.STEP.value}_start_time", train_ctx.train_steps)
 
     # Calculate the number of non-padded tokens in the batch
-    self.train_metadata["total_weights"] = jnp.sum(train_ctx.data_hooks.train_batch["targets_segmentation"] != 0)
+    total_weights = jnp.sum(train_ctx.data_hooks.train_batch["targets_segmentation"] != 0)
+
+    self.train_metadata[train_ctx.train_steps] = {
+      "total_weights": total_weights,
+    }
 
   @override
   def on_train_step_end(
       self,
       train_ctx: peft_trainer.PeftTrainer,
+      train_step: int,
       train_loss: float,
       step_time: float,
   ):
     """Called at the end of training step."""
-    assert "total_weights" in self.train_metadata, (
+    assert train_step in self.train_metadata, (
         "SFTTrainingHooks.on_train_step_start() must be called before"
         " SFTTrainingHooks.on_train_step_end()"
     )
 
-    # We check against `train_ctx.train_steps - 1` because this hook is called
-    # after `train_ctx.train_steps` has been incremented for the current
-    # step.
-    if self.metadata["first_train_step"] == train_ctx.train_steps - 1:
+    if self.metadata["first_train_step"] == train_step:
       max_utils.print_mem_stats("After params initialized")
 
     metrics = {
         "scalar": {
             "learning/loss": train_loss,
-            "learning/total_weights": self.train_metadata["total_weights"],
+            "learning/total_weights": self.train_metadata[train_step][
+                "total_weights"
+            ],
         }
     }
-    self.metric_logger.record_train_metrics(metrics, train_ctx.train_steps - 1, step_time)
-    self.metric_logger.write_metrics(metrics, train_ctx.train_steps - 1)
-    self.train_metadata.clear()
+    self.metric_logger.record_train_metrics(metrics, train_step, step_time)
+    self.metric_logger.write_metrics(metrics, train_step)
+    del self.train_metadata[train_step]
 
   @override
   def on_eval_step_start(self, train_ctx: peft_trainer.PeftTrainer):
