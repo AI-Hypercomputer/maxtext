@@ -83,6 +83,7 @@ def run_e2e_test_flow(hardware, model_config, attention_type="autoselected", sta
   decode_main(decode_config)
 
 
+@pytest.mark.skip(reason="Test is flaky since Jax 0.6.2, see b/427048251")
 @pytest.mark.integration_test
 @pytest.mark.tpu_only
 @pytest.mark.parametrize("quantization", [(""), ("int8")])
