@@ -1,0 +1,3 @@
+base_config: "base.yml"
+
+enable_single_controller: True
