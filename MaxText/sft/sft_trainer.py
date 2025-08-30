@@ -52,7 +52,7 @@ from MaxText import max_utils
 from MaxText import maxtext_utils
 from MaxText import optimizers
 from MaxText import pyconfig
-from MaxText import train_utils
+from MaxText import model_creation_utils
 from MaxText.train import loss_fn
 from MaxText.sft import hooks
 from MaxText.utils.goodput_utils import (
@@ -113,7 +113,7 @@ def train(mt_config, goodput_recorder=None):
   tunix_config = get_tunix_config(mt_config)
 
   with maybe_record_goodput(goodput_recorder, GoodputEvent.TPU_INIT):
-    model, mesh = train_utils.create_nnx_model(mt_config)
+    model, mesh = model_creation_utils.create_nnx_model(mt_config)
     learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(mt_config)
     optimizer = optimizers.get_optimizer(mt_config, learning_rate_schedule)
 
