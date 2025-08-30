@@ -17,7 +17,8 @@
 
 set -e # Exit immediately if any command fails
 
-FOLDERS_TO_FORMAT=("MaxText" "pedagogical_examples")
+REPO_ROOT="${MAXTEXT_REPO_ROOT:-$PWD}"
+FOLDERS_TO_FORMAT=("${MAXTEXT_PKG_DIR:-${REPO_ROOT}/src/MaxText}" "${REPO_ROOT}/pedagogical_examples")
 LINE_LENGTH=$(grep -E "^max-line-length=" pylintrc | cut -d '=' -f 2)
 
 # Check for --check flag

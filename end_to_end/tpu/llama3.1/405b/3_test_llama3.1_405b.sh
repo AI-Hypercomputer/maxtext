@@ -17,8 +17,8 @@ export SAVE_QUANT_PARAMS_PATH=gs://maxtext-llama/llama3.1_405b_int8
 export QUANTIZE_TYPE="int8"
 
 JAX_PLATFORMS=cpu python3 -m MaxText.load_and_quantize_checkpoint \
-    MaxText/configs/base.yml \
-    tokenizer_path=assets/tokenizer_llama3.tiktoken \
+    "${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText}/"configs/base.yml \
+    tokenizer_path="${MAXTEXT_ASSETS_ROOT:-${MAXTEXT_REPO_ROOT:-$PWD}/assets}"/tokenizer_llama3.tiktoken \
     tokenizer_type=tiktoken \
     load_parameters_path=${UNSCANNED_CHECKPOINT} \
     max_prefill_predict_length=1024 \

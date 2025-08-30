@@ -6,7 +6,6 @@ We welcome feedback on this proposed structure. Please provide any thoughts,
 comments, or questions by creating a new 
 [issue](https://github.com/AI-Hypercomputer/maxtext/issues) in MaxText.
 
-
 ```
 .
 ├── .dockerignore
@@ -17,6 +16,14 @@ comments, or questions by creating a new
 ├── AUTHORS
 ├── CONTRIBUTING.md
 ├── LICENSE
+├── src/
+│   └── MaxText/
+│       ├── decode.py
+│       ├── sft.py
+│       ├── decode.py
+│       ├── train.py
+│       ├── decode.py
+│       └── train_compile.py
 ├── README.md
 ├── dependencies/
 │   ├── dockerfiles/
