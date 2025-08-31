@@ -34,15 +34,17 @@ class Train(unittest.TestCase):
             os.path.join(PKG_DIR, "configs", "base.yml"),
             f"base_output_directory={test_tmpdir}",
             "run_name=ragged_dot_smoke_test",
-            "base_emb_dim=8",
+            "base_emb_dim=128",
             "base_num_query_heads=4",
             "base_num_kv_heads=4",
-            "base_mlp_dim=32",
-            "base_moe_mlp_dim=32",
+            "base_mlp_dim=128",
+            "base_moe_mlp_dim=128",
             "base_num_decoder_layers=8",
             "head_dim=128",
-            # TODO: Update to mixtral decoder block after b/441100085 fix
-            "decoder_block=mistral",
+            # TODO(b/441100085): When changing the decoder_block we might
+            # need to adjust the tiling.
+            "decoder_block=deepseek",
+            "attention_type=mla",
             "num_experts=2",
             # Enable sparse_matmul.
             "sparse_matmul=True",

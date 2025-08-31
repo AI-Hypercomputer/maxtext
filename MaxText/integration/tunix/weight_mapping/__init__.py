@@ -12,19 +12,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-base_config: "base.yml"
-# The model_name guarantees we will use the correct model from
-# configs/models/llama3-8b.yml, see update_model_vars in pyconfig.py for details.
-model_name: "llama3-8b"
+from MaxText.integration.tunix.weight_mapping.llama3 import LLAMA3_VLLM_MAPPING
 
-run_name: "gpu_train_test"
-hardware: "gpu"
-steps: 30
-per_device_batch_size: 12
-max_target_length: 8192
-attention: "cudnn_flash_te"
-remat_policy: "minimal_with_context"
-use_iota_embed: True
-dataset_type: "synthetic"
-reuse_example_batch: 1
-enable_checkpointing: False
+
+class VLLM_WEIGHT_MAPPING:
+  """Mapping MaxText model weights to vLLM's model weights"""
+
+  def __getattr__(self, name):
+    if name.startswith("llama3.1"):
+      return LLAMA3_VLLM_MAPPING
+    else:
+      raise ValueError("{} vLLM weight mapping not found.".format(name))
+
+  def __getitem__(self, key):
+    return getattr(self, key)
+
+  @classmethod
+  def __class_getitem__(cls, key):
+    instance = cls()
+    return instance[key]

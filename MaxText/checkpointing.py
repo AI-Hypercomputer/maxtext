@@ -214,7 +214,7 @@ def create_orbax_emergency_replicator_checkpoint_manager(
 
 def replicator_error_handler(config: Any):
   """Replicator error handler to handle errors in replicator service."""
-  if config.enable_emergency_checkpoint and config.use_replicator_service and config.local_checkpoint_directory:
+  if config.enable_multi_tier_checkpointing:
     local_dir = config.local_checkpoint_directory
     replicator_errors_file = f"{local_dir}/replicator.errors"
     replicator_failed_file = f"{local_dir}/replicator.failed"
@@ -223,7 +223,9 @@ def replicator_error_handler(config: Any):
     # if the replicator.failed file exists, then we have a fatal error
     is_fatal = process_replicator_error_file(replicator_failed_file)
     if is_fatal:
-      raise ValueError("Replicator fatal error found in replicator.failed file.")
+      raise ValueError(
+          "Replicator fatal error found in replicator.failed file."
+      )
 
 
 def process_replicator_error_file(error_file: str) -> bool:

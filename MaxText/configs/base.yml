@@ -138,6 +138,7 @@ base_mlp_dim: 7168
 base_num_decoder_layers: 16
 head_dim: 128
 mlp_activations: ["silu", "linear"]
+mlp_activations_limit: -1.0
 dropout_rate: 0.0
 logits_via_embedding: False
 normalize_embedding_logits: True  # whether to normalize pre-softmax logits if logits_via_embedding is true
@@ -183,7 +184,8 @@ first_num_dense_layers: 0 # number of initial dense layers in the model
 shared_experts: 1
 routed_scaling_factor: 1.0 # scaling factor for routing scores
 routed_score_func: "" # scoring function for routing
-routed_bias: False # a flag if a bias term is added for routing
+routed_bias: False # a flag if a learnable bias is added for routing
+mlp_bias: False # a flag if a learnable bias is added for MLP matmul
 n_routing_groups: -1 # number of groups for routing, disabled by default
 topk_routing_group: -1 # number of top groups to route inputs. For EP,
 # sending activations to a maximum of topk_routing_group distinct devices can yield performance benefits.
@@ -241,7 +243,7 @@ set_remat_policy_on_pipeline_iterations: True
 set_remat_policy_on_layers_per_stage: False
 
 
-# Choose 'remat_policy' between 'minimal', 'save_dot_with_context_except_mlp', 'save_dot_except_mlpwi', 'save_dot_except_mlp',
+# Choose 'remat_policy' between 'minimal_with_context', 'minimal', 'save_dot_with_context_except_mlp', 'save_dot_except_mlpwi', 'save_dot_except_mlp',
 # 'save_qkv_proj', 'qkv_proj_offloaded', 'custom', 'minimal_offloaded', 'save_out_proj' and 'full'.
 # These options offer a trade-off between speed (fastest to slowest) and HBM usage (highest to lowest)
 remat_policy: 'full'
@@ -268,6 +270,8 @@ param_scan_axis: 1
 # The attention_type parameter determines the variants of attention, e.g. global or local_sliding
 attention: 'autoselected' # Supported attention: autoselected, dot_product, flash, cudnn_flash_te
 attention_type: 'global' # Supported attention_type: global, local_sliding, chunk, mla
+attention_bias: False # If True, adds a learnable bias to the query, key, and value projections 
+attention_sink: False
 sliding_window_size: 0
 chunk_attn_window_size: 0
 attn_logits_soft_cap: 0.0
@@ -293,23 +297,30 @@ record_internal_nn_metrics: 0
 # Create a GCS bucket, e.g. my-maxtext-outputs and set this to "gs://my-maxtext-outputs/"
 base_output_directory: ""
 
+# Multi-tier checkpointing is an experimental Orbax feature that: periodically saves to persistent storage(GCS bucket) dictated by `multi_tier_checkpointing_backup_interval_minutes` and,
+# saves to a local directory for smaller checkpoint intervals(local_checkpoint_period).
+# The local checkpoint directory must be specified when enabling multi-tier checkpointing.
+# During restore, if a local copy is available in any slice, it will be broadcast to other slices without having to fetch from persistent storage.
+# See more details on https://github.com/google/orbax/tree/main/checkpoint/orbax/checkpoint/experimental/emergency/multi_tier_checkpointing.
+# Example for enabling multi-tier checkpointing
+# enable_multi_tier_checkpointing=True local_checkpoint_directory="/local" local_checkpoint_period=20 multi_tier_checkpointing_backup_interval_minutes=20
+enable_multi_tier_checkpointing: False
+
+# The interval to backup local checkpoints to the persistent storage(GCS bucket) in minutes.
+# It should be a positive number when enabling multi-tier checkpointing.
+multi_tier_checkpointing_backup_interval_minutes: 0
+
 # Whether to enable emergency checkpoint. If True, `local_checkpoint_directory` and a non-zero `local_checkpoint_period` must also be specified.
 # Emergency checkpoint is an experimental Orbax feature that: periodically saves to persistent storage and, with a larger invertal, saves to a local directory.
 # During restore, if a local copy is available in any slice, it will be broadcast to other slices without having to fetch from persistent storage.
 # See more details on https://github.com/google/orbax/tree/main/checkpoint/orbax/checkpoint/experimental/emergency.
 enable_emergency_checkpoint: False
 
-# It should be specified when and only when `enable_emergency_checkpoint` is True.
+# It should be specified when and only when `enable_emergency_checkpoint` is True. Or when `enable_multi_tier_checkpointing` is True.
 local_checkpoint_directory: ""
 
-# It should be a positive number when and only when `enable_emergency_checkpoint` is True.
+# It should be a positive number when and only when `enable_emergency_checkpoint` or `enable_multi_tier_checkpointing` is True.
 local_checkpoint_period: 0
-
-# Whether to use emergency checkpoint with the replicator service.
-use_replicator_service: False
-
-# The interval to backup local checkpoints to the persistent storage.
-replicator_backup_interval_minutes: 0
 
 # Jax cache directory
 jax_cache_dir: "~/jax_cache"
@@ -640,7 +651,7 @@ report_performance_metric_for_gcp_monitoring: False
 
 enable_tensorboard: True
 
-# Vertex AI Tensorboard Configurations - https://github.com/google/maxtext/tree/main/getting_started/Use_Vertex_AI_Tensorboard.md
+# Vertex AI Tensorboard Configurations - https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/guides/use_vertex_ai_tensorboard.md
 # Set to True for GCE, False if running via XPK
 use_vertex_tensorboard: False
 # Project to create Vertex AI Tensorboard in for GCE, blank if project is set using 'gcloud config set project'

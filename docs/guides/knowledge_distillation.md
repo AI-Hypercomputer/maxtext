@@ -70,7 +70,7 @@ MaxText requires checkpoints to be in a specific format. You'll need to convert 
 ```bash
 # Get unscanned checkpoint for efficient decoding
 JAX_PLATFORMS=cpu \
-python3 -m MaxText.convert_deepseek_unscanned_ckpt \
+python3 -m MaxText.convert_deepseek_family_unscanned_ckpt \
   --base_model_path ~/deepseek2-16b-chat \
   --maxtext_model_path ${BASE_DIRECTORY}/deepseek2-16-chat/unscanned \
   --model_size deepseek2-16b

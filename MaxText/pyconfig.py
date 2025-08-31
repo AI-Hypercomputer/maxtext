@@ -24,6 +24,7 @@ import datetime
 
 import jax
 from jax.experimental.compilation_cache import compilation_cache
+from jax.tree_util import register_pytree_node_class
 
 import omegaconf
 
@@ -188,6 +189,16 @@ def validate_keys(keys):
   assert (
       keys["load_parameters_path"] == "" or keys["load_full_state_path"] == ""
   ), "At most one of `load_parameters_path` or `load_full_state_path` should be set"
+
+  if keys["enable_multi_tier_checkpointing"]:
+    assert (
+        keys["local_checkpoint_directory"]
+    ), "A local checkpoint directory must be specified when using multi-tier checkpointing"
+    assert (keys["local_checkpoint_period"] > 0), "A positive local checkpoint period must be specified when using multi-tier checkpointing"
+    assert (
+        keys["multi_tier_checkpointing_backup_interval_minutes"] > 0
+    ), "A positive multi-tier checkpointing backup interval minutes must be specified when using multi-tier checkpointing"
+
   if keys["enable_emergency_checkpoint"]:
     assert (
         keys["local_checkpoint_directory"] != ""
@@ -195,10 +206,7 @@ def validate_keys(keys):
     assert (
         keys["local_checkpoint_period"] > 0
     ), "A positive local checkpoint period must be specified when using emergency checkpoint"
-    if keys["use_replicator_service"]:
-      assert (
-          keys["replicator_backup_interval_minutes"] > 0
-      ), "Replicator service is enabled, the backup interval minutes must be positive"
+
   else:
     max_logging.log(
         "Not using emergency checkpoint, ignoring local_checkpoint_directory, local_checkpoint_period,"
@@ -211,6 +219,7 @@ def validate_keys(keys):
     validate_sparse_matmul_parallelism(keys)
     validate_ragged_dot(keys)
     validate_deepseek_moe(keys)
+    validate_gpt_oss_moe(keys)
     validate_expert_shard_attention_option(keys["expert_shard_attention_option"])
 
   if keys["use_multimodal"]:
@@ -344,6 +353,7 @@ def validate_model_name(s: str) -> bool:
       "deepseek2-236b",
       "deepseek3-671b",
       "deepseek3-test",
+      "kimi-k2-1t",
       "gemma-7b",
       "gemma-2b",
       "gemma2-2b",
@@ -364,6 +374,8 @@ def validate_model_name(s: str) -> bool:
       "gpt3-22b",
       "gpt3-6b",
       "gpt3-52k",
+      "gpt-oss-20b",
+      "gpt-oss-120b",
       "llama4-17b-16e",
       "llama4-17b-128e",
   )
@@ -982,6 +994,11 @@ def validate_mlp_dim(raw_keys):
       raise ValueError(f'For a fully MoE model, base_mlp_dim must be equal to base_moe_mlp_dim. Received base_mlp_dim={base_mlp_dim} and base_moe_mlp_dim={base_moe_mlp_dim}.')
 
 
+def validate_gpt_oss_moe(raw_keys):
+  if raw_keys["decoder_block"] == "gpt_oss" and not raw_keys["sparse_matmul"]:
+    raise ValueError(f"GPT OSS model only supports sparse matmul. Please set sparse_matmul=True.")
+
+
 def validate_sparse_matmul_parallelism(raw_keys):
   # TODO: remove once b/434699033 resolved
   if raw_keys["sparse_matmul"] and (using_expert_parallelism(raw_keys) and using_pipeline_parallelism(raw_keys)):
@@ -1170,7 +1187,7 @@ def using_fsdp_and_transpose_parallelism(raw_keys) -> bool:
       or int(raw_keys["dcn_fsdp_transpose_parallelism"]) > 1
   )
 
-
+@register_pytree_node_class
 class HyperParameters:
   """Wrapper class to expose the configuration in a read-only manner."""
 
@@ -1189,6 +1206,14 @@ class HyperParameters:
 
   def get_keys(self):
     return self._config.keys
+  
+
+  def tree_flatten(self):
+    return (), self
+
+  @classmethod
+  def tree_unflatten(cls, aux_data, children):
+    return aux_data
 
 
 def initialize(argv, **kwargs):

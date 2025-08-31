@@ -359,7 +359,6 @@ llama31_405b_config = transformers.LlamaConfig(
     eos_token_id=128001,
 )
 
-
 qwen3_30b_a3b_thinking_2507_config = transformers.Qwen3MoeConfig(
     architectures=["Qwen3MoeForCausalLM"],
     attention_bias=False,
@@ -390,6 +389,43 @@ qwen3_30b_a3b_thinking_2507_config = transformers.Qwen3MoeConfig(
     sliding_window=None,
     tie_word_embeddings=False,
     torch_dtype="bfloat16",
+    use_cache=True,
+    use_sliding_window=False,
+    vocab_size=151936,
+)
+
+qwen3_235b_a22b_thinking_2507_config = transformers.Qwen3MoeConfig(
+    architectures=["Qwen3MoeForCausalLM"],
+    attention_bias=False,
+    attention_dropout=0.0,
+    bos_token_id=151643,
+    decoder_sparse_step=1,
+    eos_token_id=151645,
+    head_dim=128,
+    hidden_act="silu",
+    hidden_size=4096,
+    initializer_range=0.02,
+    intermediate_size=12288,
+    max_position_embeddings=262144,
+    max_window_layers=94,
+    mlp_only_layers=[],
+    model_type="qwen3_moe",
+    moe_intermediate_size=1536,
+    norm_topk_prob=True,
+    num_attention_heads=64,
+    num_experts=128,
+    num_experts_per_tok=8,
+    num_hidden_layers=94,
+    num_key_value_heads=4,
+    output_router_logits=False,
+    rms_norm_eps=1e-06,
+    rope_scaling=None,
+    rope_theta=5000000.0,
+    router_aux_loss_coef=0.001,
+    sliding_window=None,
+    tie_word_embeddings=False,
+    torch_dtype="bfloat16",
+    transformers_version="4.51.0",
     use_cache=True,
     use_sliding_window=False,
     vocab_size=151936,
@@ -450,6 +486,6 @@ HF_MODEL_CONFIGS = {
     "llama3.1-70b": llama31_70b_config,
     "llama3.1-405b": llama31_405b_config,
     "qwen3-30b-a3b": qwen3_30b_a3b_thinking_2507_config,
+    "qwen3-235b-a22b": qwen3_235b_a22b_thinking_2507_config,
     "qwen3-480b-a35b": qwen3_coder_480b_a35b_config,
-
 }
