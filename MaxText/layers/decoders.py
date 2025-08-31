@@ -610,7 +610,7 @@ class Decoder(nn.Module):
       logits = nn.with_logical_constraint(logits, (None, None, "activation_vocab"))
     else:
       logits = nn.with_logical_constraint(
-          logits, ("activation_embed_and_logits_batch", "activation_length", "activation_vocab")
+          logits, ("activation_embed_and_logits_batch", "activation_length_no_exp", "activation_vocab")
       )
 
     if self.config.cast_logits_to_fp32:

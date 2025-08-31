@@ -31,7 +31,7 @@ from flax import nnx
 
 from MaxText.inference import page_manager
 from MaxText.inference import paged_attention_kernel_v2
-from MaxText.common_types import Array, DType, AxisNames, BATCH, LENGTH, HEAD, D_KV, MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE
+from MaxText.common_types import Array, DType, AxisNames, BATCH, LENGTH_NO_EXP, HEAD, D_KV, MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE
 from MaxText.layers.initializers import variable_to_logically_partitioned
 
 _use_kernel_v2 = False
@@ -49,7 +49,7 @@ def paged_attention_op_as_linen(
     kv_head_dim_size: int,
     dtype: DType = jnp.float32,
     attn_logits_soft_cap: float | None = None,
-    query_axis_names: AxisNames = (BATCH, LENGTH, HEAD, D_KV),
+    query_axis_names: AxisNames = (BATCH, LENGTH_NO_EXP, HEAD, D_KV),
     kv_pages_axis_names: AxisNames = (
         "paged_kv_heads",
         "num_pages",
@@ -120,7 +120,7 @@ class PagedAttentionOp(nnx.Module):
       kv_head_dim_size: int,
       dtype: DType = jnp.float32,
       attn_logits_soft_cap: float | None = None,
-      query_axis_names: AxisNames = (BATCH, LENGTH, HEAD, D_KV),
+      query_axis_names: AxisNames = (BATCH, LENGTH_NO_EXP, HEAD, D_KV),
       kv_pages_axis_names: AxisNames = (
           "paged_kv_heads",
           "num_pages",
