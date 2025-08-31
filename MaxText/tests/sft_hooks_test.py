@@ -85,8 +85,9 @@ class SFTHooksTest(unittest.TestCase):
     self.mock_train_ctx.train_steps = 0
     self.training_hooks.on_train_step_start(self.mock_train_ctx)
     self.mock_train_ctx.train_steps = 1
+    self.training_hooks.on_train_step_start(self.mock_train_ctx)
     self.training_hooks.on_train_step_end(
-        self.mock_train_ctx, train_loss=5.0, step_time=0.004
+        self.mock_train_ctx, train_step=0, train_loss=5.0, step_time=0.004
     )
 
     expected_metrics = {
@@ -101,7 +102,7 @@ class SFTHooksTest(unittest.TestCase):
     self.training_hooks.metric_logger.write_metrics.assert_called_with(
         expected_metrics, 0
     )
-    self.assertEqual(len(self.training_hooks.train_metadata), 0)
+    self.assertEqual(len(self.training_hooks.train_metadata), 1)
 
   def test_training_hooks_for_eval_step(self):
     self.mock_train_ctx.data_hooks.eval_batch = self.expected_batch
@@ -128,7 +129,7 @@ class SFTHooksTest(unittest.TestCase):
   def test_on_train_step_end_asserts_if_on_train_step_start_not_called(self):
     with self.assertRaises(AssertionError):
       self.training_hooks.on_train_step_end(
-          self.mock_train_ctx, train_loss=5.0, step_time=0.004
+          self.mock_train_ctx, train_step=1, train_loss=5.0, step_time=0.004
       )
 
   def test_on_eval_step_end_asserts_if_on_eval_step_start_not_called(self):

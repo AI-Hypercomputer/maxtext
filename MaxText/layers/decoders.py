@@ -47,6 +47,7 @@ from MaxText.layers import (
     gemma2,
     gemma3,
     gpt3,
+    gpt_oss,
     llama2,
     llama4,
     mistral,
@@ -259,13 +260,34 @@ class Decoder(nn.Module):
           config=self.config, mesh=self.mesh, layers=pipeline_stage_module, remat_policy=remat_policy
       )
 
+  def minimal_policy(self, with_context=False):
+    """Helper for creating minimal checkpoint policies."""
+    names = [
+        "query_proj",
+        "value_proj",
+        "key_proj",
+        "qkv_proj",
+        "out_proj",
+        "mlpwi_0",
+        "mlpwi_1",
+        "mlpwi",
+        "mlpwo",
+    ]
+    if with_context:
+      names.append("context")
+    return jax.checkpoint_policies.save_only_these_names(*names)
+
   def get_remat_policy(self):
     """Get remat policy"""
     policy = None
     cfg = self.config
     if cfg.remat_policy != "none":
-      if cfg.remat_policy == "minimal":
-        policy = jax.checkpoint_policies.checkpoint_dots_with_no_batch_dims
+      if cfg.remat_policy == "minimal_with_context":
+        # save all
+        policy = self.minimal_policy(with_context=True)
+      elif cfg.remat_policy == "minimal":
+        # save all except context
+        policy = self.minimal_policy()
       elif cfg.remat_policy == "save_dot_with_context_except_mlp":
         policy = jax.checkpoint_policies.save_only_these_names(
             "query_proj",
@@ -307,20 +329,29 @@ class Decoder(nn.Module):
             offload_dst="pinned_host",
         )
       elif cfg.remat_policy == "minimal_offloaded":
-        policy = jax.checkpoint_policies.offload_dot_with_no_batch_dims(offload_src="device", offload_dst="pinned_host")
+        # offload all except context
+        policy = jax.checkpoint_policies.save_and_offload_only_these_names(
+            names_which_can_be_saved=[],
+            names_which_can_be_offloaded=[
+                "query_proj",
+                "value_proj",
+                "key_proj",
+                "qkv_proj",
+                "out_proj",
+                "mlpwi_0",
+                "mlpwi_1",
+                "mlpwi",
+                "mlpwo",
+            ],
+            offload_src="device",
+            offload_dst="pinned_host",
+        )
       elif cfg.remat_policy == "custom":
         policy = jax.checkpoint_policies.save_and_offload_only_these_names(
             names_which_can_be_saved=cfg.tensors_on_device,
             names_which_can_be_offloaded=cfg.tensors_to_offload,
             offload_src="device",
             offload_dst="pinned_host",
-        )
-      elif cfg.remat_policy == "minimal_flash":
-        policy = jax.checkpoint_policies.save_from_both_policies(
-            jax.checkpoint_policies.checkpoint_dots_with_no_batch_dims,
-            jax.checkpoint_policies.save_only_these_names(
-                "context",
-            ),
         )
       elif cfg.remat_policy == "save_out_proj":
         policy = jax.checkpoint_policies.save_only_these_names(
@@ -357,6 +388,8 @@ class Decoder(nn.Module):
         return [gemma3.Gemma3DecoderLayer]
       case DecoderBlockType.GPT3:
         return [gpt3.Gpt3DecoderLayer]
+      case DecoderBlockType.GPT_OSS:
+        return [gpt_oss.GptOssScannableBlock] if self.config.scan_layers else [gpt_oss.GptOssDecoderLayer]
       case DecoderBlockType.QWEN3:
         return [qwen3.Qwen3DecoderLayer]
       case DecoderBlockType.QWEN3_MOE:
@@ -412,6 +445,7 @@ class Decoder(nn.Module):
         DecoderBlockType.GEMMA3,
         DecoderBlockType.QWEN3,
         DecoderBlockType.QWEN3_MOE,
+        DecoderBlockType.GPT_OSS,
         DecoderBlockType.SIMPLE,
         DecoderBlockType.SIMPLE_MLP,
         DecoderBlockType.LLAMA4,
@@ -742,9 +776,7 @@ class Decoder(nn.Module):
           # Iterate over the two layer groups (dense and MoE) and apply layer transformation
           for layer, num_layers, layer_prefix in zip(layers, num_layers_list, layer_prefixes):
             for index in range(num_layers):
-              y = layer(
-                  config=cfg, mesh=mesh, name=f"{layer_prefix}_{index}", quant=self.quant, model_mode=self.model_mode
-              )(
+              y = layer(config=cfg, mesh=mesh, name=f"{layer_prefix}_{index}", quant=self.quant, model_mode=self.model_mode)(
                   y,
                   decoder_segment_ids,
                   decoder_positions,
@@ -769,6 +801,8 @@ class Decoder(nn.Module):
                   "is_moe_layer": llama4.determine_is_moe_layer(lyr, self.config.interleave_moe_layer_step),
               }
               layer_call_kwargs = {"bidirectional_mask": bidirectional_mask}
+            if cfg.decoder_block == DecoderBlockType.GPT_OSS:
+              layer_kwargs = {"attention_type": gpt_oss.get_attention_type(layer_id=lyr)}
             layer = RemattedBlockLayer(
                 config=cfg, mesh=mesh, name=f"layers_{lyr}", quant=self.quant, model_mode=self.model_mode, **layer_kwargs
             )

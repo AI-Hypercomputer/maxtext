@@ -12,7 +12,7 @@
 # # (Optional) Override the default HF model
 # export HF_MODEL_PATH=MyCustom/Qwen3-variant
 #
-# bash end_to_end/tpu/qwen/moe/qwen3-235b-a22b/1_test_qwen3_235b_a22b.sh
+# bash end_to_end/tpu/qwen/moe/qwen3-480b-a35b/1_test_qwen3_480b_a35b.sh
 # ---
 
 set -ex
@@ -27,7 +27,7 @@ fi
 
 # Set a default for the HF model path if it's not provided by the user
 if [ -z "${HF_MODEL_PATH}" ]; then
-    export HF_MODEL_PATH="Qwen/Qwen3-235B-A22B-Thinking-2507"
+    export HF_MODEL_PATH="Qwen/Qwen3-Coder-480B-A35B-Instruct"
     echo "HF_MODEL_PATH is not set, using default: ${HF_MODEL_PATH}"
 fi
 
@@ -46,8 +46,8 @@ JAX_PLATFORMS=cpu python3 -m MaxText.tests.forward_pass_logit_checker MaxText/co
   megablox=False \
   sparse_matmul=False \
   load_parameters_path=${MAXTEXT_CHECKPOINT_PATH} \
-  model_name=qwen3-235b-a22b \
-  checkpoint_storage_concurrent_gb=512 \
+  model_name=qwen3-480b-a35b \
+  checkpoint_storage_concurrent_gb=1024 \
   skip_jax_distributed_system=True \
   --hf_model_path=${HF_MODEL_PATH} \
   --max_kl_div=0.015 \

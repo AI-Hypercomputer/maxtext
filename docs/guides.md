@@ -31,4 +31,5 @@ guides/monitor_goodput.md
 guides/use_vertex_ai_tensorboard.md
 guides/features_and_diagnostics.md
 guides/performance_metrics.md
+guides/understand_logs_and_metrics.md
 ```

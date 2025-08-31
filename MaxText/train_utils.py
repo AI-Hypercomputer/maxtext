@@ -21,7 +21,10 @@ from typing import overload
 
 from flax import nnx
 import flax.linen as nn
+from functools import partial
+from etils import epath
 import jax
+from orbax import checkpoint as ocp
 from jax.sharding import Mesh
 from MaxText import checkpointing
 from MaxText import max_logging
@@ -106,36 +109,103 @@ def create_model(config, mesh, model_mode: str = MODEL_MODE_TRAIN, rngs: nnx.Rng
   return model
 
 
+def create_nnx_model(config):
+  """Creates a NNX model with sharded parameters, possibly loading from a checkpoint."""
+
+  def create_model():
+    init_rng = jax.random.PRNGKey(config.init_weights_seed)
+    return from_config(config, rngs=nnx.Rngs(params=init_rng, dropout=1))
+
+  abstract_model = nnx.eval_shape(create_model)
+  graphdef, abstract_state = nnx.split(abstract_model)
+  specs = nnx.get_partition_spec(abstract_state)
+  mesh = abstract_model.mesh
+
+  # JIT a function that creates the model state with proper sharding from the start.
+  # By providing out_shardings, we instruct JAX to produce sharded output directly,
+  # avoiding a large intermediate allocation on a single device.
+  with nn.logical_axis_rules(config.logical_axis_rules):
+    out_shardings = nn.logical_to_mesh_sharding(specs, mesh)
+
+  @partial(jax.jit, out_shardings=out_shardings)
+  def create_sharded_state():
+    # This will be JIT-compiled. JAX knows the output sharding and can
+    # initialize the parameters directly on the target devices in a sharded way.
+    model = create_model()
+    return nnx.state(model)
+
+  with mesh:
+    # Create the model with sharded parameters.
+    sharded_state = create_sharded_state()
+    model = nnx.merge(graphdef, sharded_state)
+
+    if config.load_parameters_path:
+      target_for_restore = jax.tree.map(
+          lambda v: v.value,
+          sharded_state,
+          is_leaf=lambda n: isinstance(n, nnx.Variable),
+      )
+
+      try:
+        ckptr = ocp.Checkpointer(
+            ocp.PyTreeCheckpointHandler(
+                restore_concurrent_gb=None,
+                save_concurrent_gb=None,
+                use_ocdbt=True,
+                use_zarr3=True,
+            )
+        )
+        # This is a memory optimization. We don't want to restore the entire checkpoint - only the params.
+        # Rather than passing the entire abstract state, which could unnecessarily restore opt_state and
+        # waste memory, we instead restore the params field of the checkpoint (which itself may be a dictionary
+        #  containing a key named 'params').
+        restore_args = ocp.checkpoint_utils.construct_restore_args(target_for_restore)
+        restored = ckptr.restore(
+            epath.Path(config.load_parameters_path),
+            item={"params": {"params": target_for_restore}},
+            transforms={},
+            restore_args={"params": {"params": restore_args}},
+        )
+        checkpoint = restored["params"]["params"]
+
+        if checkpoint:
+          nnx.update(model, checkpoint)
+
+      except Exception as e:
+        raise ValueError(f"Checkpoint loading failed: {e}")
+
+    return model, mesh
+
+
 def create_training_tools(config, model, mesh):
   """Creates the init_rng, optimizer, learning rate schedule, and checkpoint manager."""
   init_rng = jax.random.PRNGKey(config.init_weights_seed)
   learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
   tx = optimizers.get_optimizer(config, learning_rate_schedule)
   logger = checkpointing.setup_checkpoint_logger(config)
-  if config.enable_emergency_checkpoint:
-    if config.use_replicator_service:
-      checkpoint_manager = (
-          checkpointing.create_orbax_emergency_replicator_checkpoint_manager(
-              config.local_checkpoint_directory,
-              config.local_checkpoint_period,
-              mesh,
-          )
-      )
-    else:
-      abstract_state, _, _ = maxtext_utils.get_abstract_state(
-          model, tx, config, init_rng, mesh, is_training=True
-      )
-      checkpoint_manager = (
-          checkpointing.create_orbax_emergency_checkpoint_manager(
-              config.local_checkpoint_directory,
-              config.checkpoint_dir,
-              mesh,
-              abstract_state,
-              config.local_checkpoint_period,
-              config.checkpoint_period,
-              logger,
-          )
-      )
+  if config.enable_multi_tier_checkpointing:
+    checkpoint_manager = (
+        checkpointing.create_orbax_emergency_replicator_checkpoint_manager(
+            config.local_checkpoint_directory,
+            config.local_checkpoint_period,
+            mesh,
+        )
+    )
+  elif config.enable_emergency_checkpoint:
+    abstract_state, _, _ = maxtext_utils.get_abstract_state(
+        model, tx, config, init_rng, mesh, is_training=True
+    )
+    checkpoint_manager = (
+        checkpointing.create_orbax_emergency_checkpoint_manager(
+            config.local_checkpoint_directory,
+            config.checkpoint_dir,
+            mesh,
+            abstract_state,
+            config.local_checkpoint_period,
+            config.checkpoint_period,
+            logger,
+        )
+    )
   else:
     # TODO(b/368121306): Remove this once zarr3 support is plumbed on the backend
     use_ocdbt = config.checkpoint_storage_use_ocdbt
