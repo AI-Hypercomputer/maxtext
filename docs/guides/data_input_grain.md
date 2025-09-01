@@ -1,6 +1,6 @@
-## Grain pipeline
-#### The recommended input pipeline for determinism and resilience!
----
+# Grain pipeline
+## The recommended input pipeline for determinism and resilience!
+
 Grain is a library for reading data for training and evaluating JAX models. Itâ€™s designed to be:
 * **Powerful**: Users can bring arbitrary Python transformations.
 * **Flexible**: Users can readily override Grain components for their needs.
@@ -9,29 +9,25 @@ Grain is a library for reading data for training and evaluating JAX models. Itâ€
 * **Performant**: Achieved with multiprocessing with shared memory. Tested on multiple data modalities.
 * **With minimal dependencies**: Does not depend on ML frameworks (Tensorflow).
 
----
+Reference links: [**Grain repo**](https://github.com/google/grain) | [**Grain-Read the Docs**](https://google-grain.readthedocs.io/en/latest/index.html)
 
-Reference links: [**Grain repo**](https://github.com/google/grain) | [**Grain-Read the Docs**](https://google-grain.readthedocs.io/en/latest/index.html) 
-
----
-
-### Why determinism is important for data input pipeline?
+## Why determinism is important for data input pipeline?
 Determinism in a data input pipeline means that the same input data always results in the same sequence of batches at each step. This is typically achieved by setting a fixed shuffle seed during pipeline initialization. In an ideal scenario, where training runs uninterrupted, this determinism is straightforward (deterministic without preemption). However, real-world distributed training environments often face preemptions due to maintenance, hardware failures, or resource constraints. 
 When a preempted training run resumes, the data input pipeline is re-initialized. If the same shuffle seed is used, the pipeline restarts from the beginning, potentially re-training the model on initial data. Conversely, a new seed produces a different batch sequence, making it difficult to track which data has been seen and how often each example is used for training. This lack of control can impact model performance and reproducibility.
 
-### How Grain achieves determinism
+## How Grain achieves determinism
 Grain ensures determinism in data input pipelines by saving the pipeline's state, including dataset metadata and processed data indices, within a small JSON file in checkpoints. When a training run is resumed with the same dataset and shuffle seed, Grain restores the pipeline's exact state from the checkpoint. This enables fully deterministic, reproducible training that is resilient to disruptions.
 
-### Cases where determinism is crucial
+## Cases where determinism is crucial
 * **Model sensitive to repetition**: When models are sensitive to the frequency with which they encounter specific examples, precise control over the order and repetition of data during training is essential. All LLMs belong to this category.
 * **Convergence comparison**: In sensitive convergence experiments like testing quantization techniques, maintaining identical data batches between runs (e.g., quantized vs. unquantized) is essential for comparison. Determinism ensures consistency even when the runs are long and undergo saving/resuming at different steps.
 * **Debug training anomalies**: When troubleshooting training spikes or anomalies, the ability to replay the exact data sequence helps distinguish between bad data batches and underlying hardware or software issues.
 
-### Data shuffling
+## Data shuffling
 * **Global shuffle**: This feature is only available when using Grain with [ArrayRecord](https://github.com/google/array_record) (random access) format, achieved by shuffling indices globally at the beginning of each epoch and then reading the elements according to the random order. This is usually fast enough, even when using hard drives and distributed file systems.
 * **Hierarchical shuffle**: For sequential access format [Parquet](https://arrow.apache.org/docs/python/parquet.html), shuffle is performed by these steps: file shuffling, interleave from files, and window shuffle using a fixed size buffer.
 
-### Using Grain
+## Using Grain
 1. Grain currently supports two data formats: [ArrayRecord](https://github.com/google/array_record) (random access) and [Parquet](https://arrow.apache.org/docs/python/parquet.html) (partial random-access through row groups). Only the ArrayRecord format supports the global shuffle mentioned above. For converting a dataset into ArrayRecord, see [Apache Beam Integration for ArrayRecord](https://github.com/google/array_record/tree/main/beam). Additionally, other random access data sources can be supported via a custom [data source](https://google-grain.readthedocs.io/en/latest/data_sources.html) class.
 2. When the dataset is hosted on a Cloud Storage bucket, Grain can read it through [Cloud Storage FUSE](https://cloud.google.com/storage/docs/gcs-fuse). The installation of Cloud Storage FUSE is included in [setup.sh](https://github.com/google/maxtext/blob/main/setup.sh). The user then needs to mount the Cloud Storage bucket to a local path for each worker, using the script [setup_gcsfuse.sh](https://github.com/google/maxtext/blob/main/setup_gcsfuse.sh). The script configures some parameters for the mount.
 ```
