@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Global constants for MaxText."""
+
 import os.path
 
 PKG_DIR = os.path.dirname(os.path.abspath(__file__))  # MaxText directory path

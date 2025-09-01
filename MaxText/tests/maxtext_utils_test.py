@@ -423,6 +423,7 @@ class TestPromptLogprobsFromPrefill(unittest.TestCase):
   """
   Test suite for the inference utility function 'prompt_logprobs_from_prefill'.
   """
+
   def test_shift_and_masking(self):
     # B=1, S=5, V=4
     B, S, V = 1, 5, 4
@@ -465,6 +466,7 @@ class TestPromptLogprobsFromPackedPrefill(unittest.TestCase):
   """
   Test suite for the inference utility function 'prompt_logprobs_from_packed_prefill'.
   """
+
   def test_respects_segments_and_masking(self):
     # Build a packed sequence of two prompts.
     # Global S=8, V=5
@@ -476,12 +478,12 @@ class TestPromptLogprobsFromPackedPrefill(unittest.TestCase):
     start1, L1 = 4, 3
 
     # Tokens per segment (last token of seg1 padding at pos 7)
-    toks = np.array([1, 2, 3, 1,   4, 0, 2, 0], dtype=np.int32)  # shape [S]
+    toks = np.array([1, 2, 3, 1, 4, 0, 2, 0], dtype=np.int32)  # shape [S]
     input_tokens = jnp.asarray(toks)[None, :]  # [B, S]
 
     # decoder_positions within each segment
-    pos0 = np.arange(0, L0)                  # [0,1,2,3]
-    pos1 = np.array([0, 1, 2, 3])            # last is padding for seg1
+    pos0 = np.arange(0, L0)  # [0,1,2,3]
+    pos1 = np.array([0, 1, 2, 3])  # last is padding for seg1
     decoder_positions = jnp.asarray(np.concatenate([pos0, pos1])[None, :])  # [B, S]
 
     # segment ids: 0 for first 4, 1 for next 4
@@ -531,6 +533,7 @@ class TestPromptLogprobsFromPackedPrefill(unittest.TestCase):
       self.assertGreater(out_np[0, p], -1e-3)
     # pos 7 >= true_length of seg1 -> NaN
     self.assertTrue(np.isnan(out_np[0, 7]))
+
 
 if __name__ == "__main__":
   unittest.main()
