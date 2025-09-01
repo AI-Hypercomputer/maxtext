@@ -43,7 +43,7 @@ class VisionEncoder(nn.Module):
     elif self.config.model_name in ["llama4-17b-16e", "llama4-17b-128e"]:
       from MaxText.layers import llama4  # pylint: disable=import-outside-toplevel
 
-      return [llama4.Llama4VisionModel, llama4.Llama4MultiModalProjector]
+      return [llama4.llama4visionmodel_as_linen, llama4.llama4multimodalprojector_as_linen]
     else:
       raise ValueError(f"No VisionEncoder implemented for {self.config.model_name} yet")
 
