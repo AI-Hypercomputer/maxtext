@@ -43,17 +43,23 @@ class Qwen3ShardingTrainingV2(MeshSharding):
                                                       axis_mappings = [fsdp, sp, cp]
                                                       if tensor_name not in ("moe_wi_0", "moe_wi_1", "moe_wo"):
                                                         axis_mappings.append(ep)
-                                                      if (tensor_name in ("mlp_wi_fused", "mlp_wi_unfused", "mlp_wo",
-                                                                         "moe_wi_0", "moe_wi_1", "moe_wo")
-                                                                         and tensor_transpose):
-                                                        axis_mappings.append(tp)
+                                                      if tensor_name in ("mlp_wi_fused", "mlp_wi_unfused", "mlp_wo",
+                                                                         "moe_wi_0", "moe_wi_1", "moe_wo"):
+                                                        if tensor_transpose:
+                                                          axis_mappings.append(tp)
+                                                        if fsdp_transpose:
+                                                          # remove fsdp
+                                                          axis_mappings = axis_mappings[1:]
                                                       mesh_axes.append(tuple(axis_mappings))
         case "mlp", TT.Weight:
                                                       axis_mappings = [tp, tp_s]
-                                                      if (tensor_name in ("mlp_wi_fused", "mlp_wi_unfused", "mlp_wo",
-                                                                         "moe_wi_0", "moe_wi_1", "moe_wo")
-                                                                         and fsdp_transpose):
-                                                        axis_mappings.append(fsdp)
+                                                      if tensor_name in ("mlp_wi_fused", "mlp_wi_unfused", "mlp_wo",
+                                                                         "moe_wi_0", "moe_wi_1", "moe_wo"):
+                                                        if fsdp_transpose:
+                                                          axis_mappings.append(fsdp)
+                                                        if tensor_transpose:
+                                                          # remove tensor
+                                                          axis_mappings = axis_mappings[1:]
                                                       mesh_axes.append(tuple(axis_mappings))
         case "mlp", TT.Activation:
                                                       mesh_axes.append((tp, tp_s))
