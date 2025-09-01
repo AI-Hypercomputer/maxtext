@@ -25,12 +25,12 @@ __description__ = (
 from collections.abc import Sequence
 
 from MaxText import maxtext_utils
-from MaxText import train_utils
+from MaxText import model_creation_utils
 from MaxText import pyconfig
 from MaxText.layers import models
 from MaxText import dpo_utils
 from jax.sharding import Mesh
-from MaxText.train_utils import from_config
+from MaxText.model_creation_utils import from_config
 
 Transformer = models.Transformer
 transformer_as_linen = models.transformer_as_linen
