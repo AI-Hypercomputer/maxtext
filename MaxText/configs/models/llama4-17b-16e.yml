@@ -20,7 +20,7 @@ logits_via_embedding: False
 tokenizer_type: "huggingface"
 
 base_emb_dim: 5120
-base_num_decoder_layers: 48
+base_num_decoder_layers: 4
 base_num_query_heads: 40
 base_num_kv_heads: 8
 base_mlp_dim: 8192
@@ -42,3 +42,5 @@ temperature_tuning: True
 # otherwise, on NoPE layers, use global attention
 chunk_attn_window_size: 8192
 image_size_for_vit: 336 
+num_hidden_layers_for_vit: 1
+

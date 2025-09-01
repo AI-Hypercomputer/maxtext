@@ -21,8 +21,11 @@ import jax.numpy as jnp
 from jax import lax
 from jax.ad_checkpoint import checkpoint_name
 from jax.sharding import Mesh
+import jax
+from typing import Optional
 
 from flax import linen as nn
+from flax import nnx
 
 from MaxText.common_types import Config, Array, MODEL_MODE_TRAIN, AttentionType
 from MaxText.inference import page_manager
@@ -32,14 +35,79 @@ from MaxText.layers import linears
 from MaxText.layers import moe
 from MaxText.layers import quantizations
 from MaxText.layers import attentions
+from MaxText.layers import nnx_wrappers
 from MaxText.layers.quantizations import AqtQuantization as Quant
 from MaxText.layers.normalizations import rms_norm
+from MaxText.layers.initializers import variable_to_logically_partitioned
 
 
 #### Multi modal model implementation
 
 
-class Llama4UnfoldConvolution(nn.Module):
+# class Llama4UnfoldConvolution(nn.Module):
+#   """implementation of Llama4UnfoldConvolution for Llama4 Multi modal model.
+
+#   This module extracts patches from input images and projects them to hidden dimension.
+
+#   Attributes:
+#     config: Config containing model parameters
+#   """
+
+#   config: Config
+
+#   def setup(self):
+#     """
+#     Initialize Llama4UnfoldConvolution
+#     """
+#     cfg = self.config
+#     # Linear projection layer using dense_general.
+#     # patches sent to dense_general with shape:
+#     # [batch_size, num_patches, num_channels * patch_size * patch_size]
+#     self.linear = linears.dense_general(
+#         in_features_shape=(cfg.num_channels_for_vit * cfg.patch_size_for_vit * cfg.patch_size_for_vit),
+#         out_features_shape=cfg.hidden_size_for_vit,
+#         dtype=cfg.dtype_mm,
+#         name="vit_unfold_linear",
+#         use_bias=False,
+#         matmul_precision=cfg.matmul_precision,
+#     )
+
+#   def __call__(self, inputs: Array) -> Array:
+#     """Extract patches and project to hidden dimension.
+
+#     Args:
+#       inputs: Input tensor of shape [batch_size, channels, img, img]
+
+#     Returns:
+#       Tensor of shape [batch_size, num_patches*num_patches, hidden_size]
+#     """
+#     cfg = self.config
+#     # Extract patches using conv_general_dilated_patches
+#     batch_size, num_channels, img, _ = inputs.shape
+#     num_patches = (img // cfg.patch_size_for_vit) ** 2
+
+#     # Extract patches using conv_general_dilated_patches
+#     patches = lax.conv_general_dilated_patches(
+#         inputs,
+#         filter_shape=[cfg.patch_size_for_vit, cfg.patch_size_for_vit],
+#         window_strides=[cfg.patch_size_for_vit, cfg.patch_size_for_vit],
+#         padding="VALID",
+#         dimension_numbers=("NCHW", "HWIO", "NCHW"),
+#     )
+
+#     # reshape patches to [batch_size, num_patches, num_channels * patch_size * patch_size]
+#     patches = patches.reshape(batch_size, num_channels * cfg.patch_size_for_vit * cfg.patch_size_for_vit, num_patches)
+#     # After transpose, patches shape:
+#     # [batch_size, num_patches, num_channels * patch_size * patch_size]
+#     patches = patches.transpose(0, 2, 1)
+
+#     # Project patches to hidden dimension using dense_general
+#     hidden_states = self.linear(patches)
+
+#     return hidden_states
+
+
+class Llama4UnfoldConvolution(nnx.Module):
   """implementation of Llama4UnfoldConvolution for Llama4 Multi modal model.
 
   This module extracts patches from input images and projects them to hidden dimension.
@@ -48,58 +116,46 @@ class Llama4UnfoldConvolution(nn.Module):
     config: Config containing model parameters
   """
 
-  config: Config
-
-  def setup(self):
-    """
-    Initialize Llama4UnfoldConvolution
-    """
-    cfg = self.config
-    # Linear projection layer using dense_general.
-    # patches sent to dense_general with shape:
-    # [batch_size, num_patches, num_channels * patch_size * patch_size]
-    self.linear = linears.dense_general(
-        in_features_shape=(cfg.num_channels_for_vit * cfg.patch_size_for_vit * cfg.patch_size_for_vit),
-        out_features_shape=cfg.hidden_size_for_vit,
-        dtype=cfg.dtype_mm,
-        name="vit_unfold_linear",
+  def __init__(self, config: Config, *, rngs: Optional[nnx.Rngs] = None):
+    self.config = config
+    self.rngs = rngs
+    self.vit_unfold_linear = linears.DenseGeneral(
+        in_features_shape=(self.config.num_channels_for_vit * self.config.patch_size_for_vit * self.config.patch_size_for_vit),
+        out_features_shape=self.config.hidden_size_for_vit,
+        dtype=self.config.dtype_mm,
         use_bias=False,
-        matmul_precision=cfg.matmul_precision,
+        matmul_precision=self.config.matmul_precision,
+        rngs=rngs,
     )
 
   def __call__(self, inputs: Array) -> Array:
-    """Extract patches and project to hidden dimension.
-
-    Args:
-      inputs: Input tensor of shape [batch_size, channels, img, img]
-
-    Returns:
-      Tensor of shape [batch_size, num_patches*num_patches, hidden_size]
-    """
-    cfg = self.config
-    # Extract patches using conv_general_dilated_patches
     batch_size, num_channels, img, _ = inputs.shape
-    num_patches = (img // cfg.patch_size_for_vit) ** 2
+    num_patches = (img // self.config.patch_size_for_vit) ** 2
 
-    # Extract patches using conv_general_dilated_patches
     patches = lax.conv_general_dilated_patches(
         inputs,
-        filter_shape=[cfg.patch_size_for_vit, cfg.patch_size_for_vit],
-        window_strides=[cfg.patch_size_for_vit, cfg.patch_size_for_vit],
+        filter_shape=[self.config.patch_size_for_vit, self.config.patch_size_for_vit],
+        window_strides=[self.config.patch_size_for_vit, self.config.patch_size_for_vit],
         padding="VALID",
         dimension_numbers=("NCHW", "HWIO", "NCHW"),
     )
 
-    # reshape patches to [batch_size, num_patches, num_channels * patch_size * patch_size]
-    patches = patches.reshape(batch_size, num_channels * cfg.patch_size_for_vit * cfg.patch_size_for_vit, num_patches)
-    # After transpose, patches shape:
-    # [batch_size, num_patches, num_channels * patch_size * patch_size]
+    patches = patches.reshape(batch_size, num_channels * self.config.patch_size_for_vit * self.config.patch_size_for_vit, num_patches)
     patches = patches.transpose(0, 2, 1)
 
-    # Project patches to hidden dimension using dense_general
-    hidden_states = self.linear(patches)
+    hidden_states = self.vit_unfold_linear(patches)
 
     return hidden_states
+
+
+def llama4unfoldconvolution_as_linen(config: Config):
+  return nnx_wrappers.to_linen(
+      Llama4UnfoldConvolution, 
+      config,
+      name="Llama4UnfoldConvolution_0",
+      abstract_init=False,
+      metadata_fn=variable_to_logically_partitioned,
+  )
 
 
 def pixel_shuffle(input_tensor: Array, shuffle_ratio: float) -> Array:
@@ -762,12 +818,15 @@ class Llama4VisionModel(nn.Module):
     """
     cfg = self.config
     mesh = self.mesh
+    jax.debug.print("input mean {}", jnp.mean(pixel_values))
 
     b, t, c, h, w = pixel_values.shape
     pixel_values = jnp.reshape(pixel_values, [b * t, c, h, w])
 
     # Unfold convolution to extract patches
-    hidden_states = Llama4UnfoldConvolution(config=cfg)(pixel_values)
+    # hidden_states = Llama4UnfoldConvolution(config=cfg)(pixel_values)
+    hidden_states = llama4unfoldconvolution_as_linen(config=cfg)(pixel_values)
+    jax.debug.print("unfold mean {}", jnp.mean(hidden_states))
 
     # Add class embedding to the beginning of the sequence
     class_embedding_expanded = jnp.expand_dims(jnp.expand_dims(self.class_embedding, axis=0), axis=0)
@@ -776,17 +835,25 @@ class Llama4VisionModel(nn.Module):
 
     # Add positional embedding
     hidden_states += self.positional_embedding_vlm
+    jax.debug.print("positional_embedding_vlm mean {}", jnp.mean(hidden_states))
 
     # Transformation layers
     hidden_states = nn.LayerNorm(name="layernorm_pre")(hidden_states)
+    jax.debug.print("layernorm_pre mean {}", jnp.mean(hidden_states))
+
     hidden_states = Llama4VisionEncoder(config=cfg, mesh=mesh)(hidden_states)
+    jax.debug.print("Llama4VisionEncoder mean {}", jnp.mean(hidden_states))
+
     hidden_states = nn.LayerNorm(name="layernorm_post")(hidden_states)
+    jax.debug.print("layernorm_post mean {}", jnp.mean(hidden_states))
     hidden_states = hidden_states[:, :-1, :]
 
     hidden_states = Llama4VisionPixelShuffleMLP(config=cfg)(hidden_states)
+    jax.debug.print("Llama4VisionPixelShuffleMLP mean {}", jnp.mean(hidden_states))
 
     # Reshape hidden states
     _, patch_num, patch_dim = hidden_states.shape
     hidden_states = jnp.reshape(hidden_states, [b, t, patch_num, patch_dim])
+    jax.debug.print("output mean {}", jnp.mean(hidden_states))
 
     return hidden_states
