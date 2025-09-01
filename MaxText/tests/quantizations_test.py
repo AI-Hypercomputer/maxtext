@@ -33,7 +33,7 @@ from MaxText.globals import PKG_DIR
 from MaxText import pyconfig
 from MaxText.layers import quantizations
 from MaxText import maxtext_utils
-from MaxText import train_utils
+from MaxText import model_creation_utils
 from MaxText.kernels.megablox.gmm import gmm
 from MaxText.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR
 
@@ -305,8 +305,8 @@ class QuantTest(unittest.TestCase):
   def quantization_config(self, quant, logits_tolerance=2e-1, grad_tolerance=5e-1):
     """Run forward pass and backward pass for quantized model and compare with base model."""
     cfg = self.init_pyconfig(quantization=quant)
-    model = train_utils.create_model(self.cfg, self.mesh)
-    qt_model = train_utils.create_model(cfg, self.mesh)
+    model = model_creation_utils.create_model(self.cfg, self.mesh)
+    qt_model = model_creation_utils.create_model(cfg, self.mesh)
 
     ids, decoder_segment_ids, decoder_positions = self.get_data()
     var = model.init(

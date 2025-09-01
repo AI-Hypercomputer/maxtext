@@ -52,6 +52,8 @@ if ! python3 -c 'import sys; assert sys.version_info >= (3, 12)' 2>/dev/null; th
         if ! command -v uv &> /dev/null; then
             pip install uv
         fi
+        maxtext_dir=$(pwd)
+        cd
         # Ask for the venv name
         read -p "Please enter a name for your new virtual environment (default: maxtext_venv): " venv_name
         # Use a default name if the user provides no input
@@ -63,8 +65,9 @@ if ! python3 -c 'import sys; assert sys.version_info >= (3, 12)' 2>/dev/null; th
         uv venv --python 3.12 "$venv_name" --seed
         echo -e "\n\e[32mVirtual environment '$venv_name' created successfully!\e[0m"
         echo "To activate it, run the following command:"
-        echo -e "\e[33m  source $venv_name/bin/activate\e[0m"
+        echo -e "\e[33m  source ~/$venv_name/bin/activate\e[0m"
         echo "After activating the environment, please re-run this script."
+        cd $maxtext_dir
     else
         echo "Exiting. Please upgrade your Python environment to continue."
     fi
