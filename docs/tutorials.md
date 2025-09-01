@@ -41,4 +41,5 @@ You can also find other examples in the [MaxText repository](https://github.com/
 tutorials/first_run.md
 tutorials/full_finetuning.md
 tutorials/run_llama2.md
+tutorials/grpo.md
 ```
