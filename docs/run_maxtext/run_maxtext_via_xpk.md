@@ -164,7 +164,7 @@ This guide focuses on submitting workloads to an existing cluster. Cluster creat
 
 The examples below run on a single TPU slice (`--num-slices=1`) or a small number of GPU nodes (`--num-nodes=2`). To scale your job to a larger, multi-host configuration, you simply increase these values.
 
-For instance, to run a job across **four TPU slices**, you would change `--num-slices=1` to `--num-slices=4`. This tells XPK to allocate four `v5litepod-256` slices and orchestrate the training job across all of them as a single workload. Similarly, for GPUs, you would increase the `--num-nodes` value.
+For instance, to run a job across **four TPU slices**, you would change `--num-slices=1` to `--num-slices=4`. This tells XPK to allocate four slices and orchestrate the training job across all of them as a single workload. Because `--tpu-type` is set to `v5litepod-256`, it allocates a total of `256*4 = 1,024` chips. Similarly, for GPUs, you would increase the `--num-nodes` value.
 ```
 
 3. **Create the workload (run the job)**
