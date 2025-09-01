@@ -186,47 +186,91 @@ def pixel_shuffle(input_tensor: Array, shuffle_ratio: float) -> Array:
   return output_tensor
 
 
-class Llama4VisionMLP(nn.Module):
+# class Llama4VisionMLP(nn.Module):
+#   """MLP block for Llama4EncoderLayer.
+
+#   Attributes:
+#     config: Config containing model parameters
+#   """
+
+#   config: Config
+
+#   def setup(self):
+#     cfg = self.config
+#     self.fc1 = linears.dense_general(
+#         in_features_shape=cfg.hidden_size_for_vit,
+#         out_features_shape=cfg.intermediate_size_for_vit,
+#         dtype=cfg.dtype_mm,
+#         name="vit_encoder_layer_mlp_fc1",
+#         use_bias=True,
+#         matmul_precision=cfg.matmul_precision,
+#     )
+#     self.fc2 = linears.dense_general(
+#         in_features_shape=cfg.intermediate_size_for_vit,
+#         out_features_shape=cfg.hidden_size_for_vit,
+#         dtype=cfg.dtype_mm,
+#         name="vit_encoder_layer_mlp_fc2",
+#         use_bias=True,
+#         matmul_precision=cfg.matmul_precision,
+#     )
+
+#   def __call__(self, hidden_states: Array) -> Array:
+#     """Apply MLP transformation to hidden states.
+
+#     Args:
+#       hidden_states: Input tensor
+#       deterministic: If True, disables dropout during inference
+#     """
+#     hidden_states = self.fc1(hidden_states)
+#     hidden_states = nn.gelu(hidden_states, approximate=False)
+
+#     hidden_states = self.fc2(hidden_states)
+
+#     return hidden_states
+
+
+class Llama4VisionMLP(nnx.Module):
   """MLP block for Llama4EncoderLayer.
 
   Attributes:
     config: Config containing model parameters
   """
 
-  config: Config
-
-  def setup(self):
-    cfg = self.config
-    self.fc1 = linears.dense_general(
-        in_features_shape=cfg.hidden_size_for_vit,
-        out_features_shape=cfg.intermediate_size_for_vit,
-        dtype=cfg.dtype_mm,
-        name="vit_encoder_layer_mlp_fc1",
+  def __init__(self, config: Config, *, rngs: Optional[nnx.Rngs] = None):
+    self.config = config
+    self.rngs = rngs
+    self.vit_encoder_layer_mlp_fc1 = linears.DenseGeneral(
+        in_features_shape=self.config.hidden_size_for_vit,
+        out_features_shape=self.config.intermediate_size_for_vit,
+        dtype=self.config.dtype_mm,
         use_bias=True,
-        matmul_precision=cfg.matmul_precision,
+        matmul_precision=self.config.matmul_precision,
+        rngs=self.rngs,
     )
-    self.fc2 = linears.dense_general(
-        in_features_shape=cfg.intermediate_size_for_vit,
-        out_features_shape=cfg.hidden_size_for_vit,
-        dtype=cfg.dtype_mm,
-        name="vit_encoder_layer_mlp_fc2",
+    self.vit_encoder_layer_mlp_fc2 = linears.DenseGeneral(
+        in_features_shape=self.config.intermediate_size_for_vit,
+        out_features_shape=self.config.hidden_size_for_vit,
+        dtype=self.config.dtype_mm,
         use_bias=True,
-        matmul_precision=cfg.matmul_precision,
+        matmul_precision=self.config.matmul_precision,
+        rngs=self.rngs,
     )
-
+  
   def __call__(self, hidden_states: Array) -> Array:
-    """Apply MLP transformation to hidden states.
-
-    Args:
-      hidden_states: Input tensor
-      deterministic: If True, disables dropout during inference
-    """
-    hidden_states = self.fc1(hidden_states)
-    hidden_states = nn.gelu(hidden_states, approximate=False)
-
-    hidden_states = self.fc2(hidden_states)
-
+    hidden_states = self.vit_encoder_layer_mlp_fc1(hidden_states)
+    hidden_states = nnx.gelu(hidden_states, approximate=False)
+    hidden_states = self.vit_encoder_layer_mlp_fc2(hidden_states)
     return hidden_states
+
+
+def llama4visionmlp_as_linen(config: Config) -> nn.Module:
+  return nnx_wrappers.to_linen(
+    Llama4VisionMLP,
+    config=config,
+    name="Llama4VisionMLP_0",
+    abstract_init=False,
+    metadata_fn=variable_to_logically_partitioned,
+  )
 
 
 class Llama4VisionMLP2(nn.Module):
@@ -281,6 +325,43 @@ class Llama4VisionMLP2(nn.Module):
     hidden_states = nn.gelu(hidden_states, approximate=False)
 
     return hidden_states
+
+
+# class Llama4VisionMLP2(nnx.Module):
+#   """MLP block for Llama4VisionPixelShuffleMLP.
+
+#   Attributes:
+#     config: Config containing model parameters
+#   """
+
+#   def __init__(self, config: Config, *, rngs: Optional[nnx.Rngs] = None):
+#     self.config = config
+#     self.rngs = rngs
+#     self.vit_pixel_shuffle_mlp_fc1 = linears.DenseGeneral(
+#         in_features_shape=self.config.intermediate_size_for_vit,
+#         out_features_shape=self.config.projector_input_dim_for_vit,
+#         dtype=self.config.dtype_mm,
+#         use_bias=False,
+#         matmul_precision=self.config.matmul_precision,
+#         rngs=self.rngs,
+#     )
+#     self.vit_pixel_shuffle_mlp_fc2 = linears.DenseGeneral(
+#         in_features_shape=self.config.projector_input_dim_for_vit,
+#         out_features_shape=self.config.projector_output_dim_for_vit,
+#         dtype=self.config.dtype_mm,
+#         use_bias=False,
+#         matmul_precision=self.config.matmul_precision,
+#         rngs=self.rngs,
+#     )
+#     self.dropout = nnx.Dropout(rate=self.config.projector_dropout_for_vit, rngs=self.rngs)
+
+#   def __call__(self, hidden_states: Array, deterministic: bool = False) -> Array:
+#     hidden_states = self.vit_pixel_shuffle_mlp_fc1(hidden_states)
+#     hidden_states = nnx.gelu(hidden_states, approximate=False)
+#     hidden_states = self.dropout(hidden_states, deterministic=deterministic)
+#     hidden_states = self.vit_pixel_shuffle_mlp_fc2(hidden_states)
+#     hidden_states = nnx.gelu(hidden_states, approximate=False)
+#     return hidden_states
 
 
 class Llama4VisionPixelShuffleMLP(nn.Module):
@@ -648,43 +729,107 @@ class Llama4ScannableBlock(nn.Module):
       return y
 
 
-class Llama4VisionEncoderLayer(nn.Module):
+# class Llama4VisionEncoderLayer(nn.Module):
+#   """Transformer encoder layer for Llama4 vision model."""
+
+#   config: Config
+#   mesh: Mesh
+
+#   @nn.compact
+#   def __call__(
+#       self,
+#       hidden_states: Array,
+#       deterministic: bool = False,
+#   ) -> Array:
+#     """Forward pass of the vision encoder layer.
+
+#     Args:
+#       hidden_states: Input hidden states
+#       deterministic: Whether to use deterministic mode
+
+#     Returns:
+#       Output hidden states
+#     """
+#     # Self Attention
+#     residual = hidden_states
+
+#     # Input layer norm
+#     hidden_states = nn.LayerNorm(name="input_layer_norm", epsilon=1e-5)(hidden_states)
+
+#     # Self attention
+#     attention_layer = attentions.attention_as_linen(
+#         config=self.config,
+#         num_query_heads=self.config.num_attention_heads_for_vit,
+#         num_kv_heads=self.config.num_attention_heads_for_vit,
+#         head_dim=self.config.hidden_size_for_vit // self.config.num_attention_heads_for_vit,
+#         max_target_length=(self.config.image_size_for_vit // self.config.patch_size_for_vit) ** 2 + 1,
+#         attention_kernel="dot_product",
+#         inputs_q_shape=hidden_states.shape,
+#         inputs_kv_shape=hidden_states.shape,
+#         float32_qk_product=self.config.float32_qk_product,
+#         float32_logits=self.config.float32_logits,
+#         mesh=self.mesh,
+#         dropout_rate=0,
+#         name="self_attention_vision",
+#         attention_type=AttentionType.FULL,
+#         is_nope_layer=False,
+#         use_bias_in_projections=True,
+#         is_vision=True,
+#         use_qk_norm=False,
+#         query_pre_attn_scalar=1 / math.sqrt(self.config.hidden_size_for_vit // self.config.num_attention_heads_for_vit),
+#         # The vision encoder processes an image in a single forward pass to produce
+#         # embeddings. It doesn't have the concept of "prefill" and "autoregressive"
+#         # steps that a text decoder has. Therefore, it doesn't need a KV cache for
+#         # its self-attention mechanism.
+#         model_mode=MODEL_MODE_TRAIN,
+#     )
+
+#     hidden_states = attention_layer(
+#         inputs_q=hidden_states,
+#         inputs_kv=hidden_states,
+#         deterministic=deterministic,
+#     )
+
+#     hidden_states = residual + hidden_states
+
+#     residual = hidden_states
+
+#     # Post attention layer norm
+#     hidden_states = nn.LayerNorm(name="post_attention_layer_norm", epsilon=1e-5)(hidden_states)
+
+#     # MLP
+#     # mlp = Llama4VisionMLP(self.config)
+#     # hidden_states = mlp(hidden_states)
+#     hidden_states = llama4visionmlp_as_linen(config=self.config)(hidden_states)
+
+#     hidden_states = residual + hidden_states
+
+#     return hidden_states
+
+
+class Llama4VisionEncoderLayer(nnx.Module):
   """Transformer encoder layer for Llama4 vision model."""
 
-  config: Config
-  mesh: Mesh
+  def __init__(self, config: Config, mesh: Mesh, *, rngs: Optional[nnx.Rngs] = None):
+    self.config = config
+    self.mesh = mesh
+    self.rngs = rngs
+    self.hidden_states_shape = (
+      self.config.per_device_batch_size,
+      (self.config.image_size_for_vit // self.config.patch_size_for_vit) ** 2 + 1,
+      self.config.hidden_size_for_vit,
+    )
 
-  @nn.compact
-  def __call__(
-      self,
-      hidden_states: Array,
-      deterministic: bool = False,
-  ) -> Array:
-    """Forward pass of the vision encoder layer.
-
-    Args:
-      hidden_states: Input hidden states
-      deterministic: Whether to use deterministic mode
-
-    Returns:
-      Output hidden states
-    """
-    # Self Attention
-    residual = hidden_states
-
-    # Input layer norm
-    hidden_states = nn.LayerNorm(name="input_layer_norm", epsilon=1e-5)(hidden_states)
-
-    # Self attention
-    attention_layer = attentions.attention_as_linen(
-        config=self.config,
+    self.input_layer_norm = nnx.LayerNorm(num_features=self.config.hidden_size_for_vit, epsilon=1e-5, rngs=self.rngs)
+    self.self_attention_vision = attentions.Attention(
+      config=self.config,
         num_query_heads=self.config.num_attention_heads_for_vit,
         num_kv_heads=self.config.num_attention_heads_for_vit,
         head_dim=self.config.hidden_size_for_vit // self.config.num_attention_heads_for_vit,
         max_target_length=(self.config.image_size_for_vit // self.config.patch_size_for_vit) ** 2 + 1,
         attention_kernel="dot_product",
-        inputs_q_shape=hidden_states.shape,
-        inputs_kv_shape=hidden_states.shape,
+        inputs_q_shape=self.hidden_states_shape,
+        inputs_kv_shape=self.hidden_states_shape,
         float32_qk_product=self.config.float32_qk_product,
         float32_logits=self.config.float32_logits,
         mesh=self.mesh,
@@ -701,9 +846,18 @@ class Llama4VisionEncoderLayer(nn.Module):
         # steps that a text decoder has. Therefore, it doesn't need a KV cache for
         # its self-attention mechanism.
         model_mode=MODEL_MODE_TRAIN,
+        rngs=self.rngs,
     )
+    self.post_attention_layer_norm = nnx.LayerNorm(num_features=self.config.hidden_size_for_vit, epsilon=1e-5, rngs=self.rngs)
+    self.Llama4VisionMLP_0 = Llama4VisionMLP(config=self.config, rngs=self.rngs)
 
-    hidden_states = attention_layer(
+  def __call__(self, hidden_states: Array, deterministic: bool = False,):
+
+    residual = hidden_states
+
+    hidden_states = self.input_layer_norm(hidden_states)
+
+    hidden_states = self.self_attention_vision(
         inputs_q=hidden_states,
         inputs_kv=hidden_states,
         deterministic=deterministic,
@@ -713,17 +867,25 @@ class Llama4VisionEncoderLayer(nn.Module):
 
     residual = hidden_states
 
-    # Post attention layer norm
-    hidden_states = nn.LayerNorm(name="post_attention_layer_norm", epsilon=1e-5)(hidden_states)
+    hidden_states = self.post_attention_layer_norm(hidden_states)
 
-    # MLP
-    mlp = Llama4VisionMLP(self.config)
-    hidden_states = mlp(hidden_states)
+    hidden_states = self.Llama4VisionMLP_0(hidden_states)
 
     hidden_states = residual + hidden_states
 
     return hidden_states
 
+
+def llama4visionencoderlayer_as_linen(config: Config, mesh: Mesh, name: str) -> nn.Module:
+  """Create a Llama4VisionEncoderLayer instance as a Linen module."""
+  return nnx_wrappers.to_linen(
+      Llama4VisionEncoderLayer,
+      config=config,
+      mesh=mesh,
+      name=name,
+      abstract_init=False,
+      metadata_fn=variable_to_logically_partitioned,
+  )
 
 class Llama4VisionEncoder(nn.Module):
   """Transformer encoder consisting of multiple Llama4VisionEncoderLayer layers.
@@ -760,14 +922,59 @@ class Llama4VisionEncoder(nn.Module):
     for layer_idx in range(cfg.num_hidden_layers_for_vit):
 
       # TODO： add scan version
-      layer = Llama4VisionEncoderLayer(config=cfg, mesh=self.mesh, name=f"layers_{layer_idx}")
+      # layer = Llama4VisionEncoderLayer(config=cfg, mesh=self.mesh, name=f"layers_{layer_idx}")
+      # hidden_states = layer(
+      #     hidden_states=hidden_states,
+      #     deterministic=deterministic,
+      # )
+      hidden_states = llama4visionencoderlayer_as_linen(config=cfg, mesh=self.mesh, name=f"layers_{layer_idx}")(hidden_states, deterministic=deterministic)
 
-      hidden_states = layer(
-          hidden_states=hidden_states,
-          deterministic=deterministic,
-      )
 
     return hidden_states
+
+
+class Llama4VisionEncoder(nnx.Module):
+  """Transformer encoder consisting of multiple Llama4VisionEncoderLayer layers.
+
+  This encoder is based on the PyTorch reference implementation and uses multiple
+  encoder layers to process vision input.
+
+  Attributes:
+    config: Config containing model parameters
+    mesh: Mesh, JAX device mesh (used for sharding)
+  """
+
+  def __init__(self, config: Config, mesh: Mesh, *, rngs: Optional[nnx.Rngs] = None):
+    self.config = config
+    self.mesh = mesh
+    self.rngs = rngs
+    for lyr in range(self.config.num_hidden_layers_for_vit):
+      layer_name = f"layers_{lyr}"
+      layer = Llama4VisionEncoderLayer(
+          config=self.config,
+          mesh=self.mesh,
+          rngs=self.rngs,
+      )
+      setattr(self, layer_name, layer)
+
+  def __call__(self, hidden_states: Array, deterministic: bool = False):
+    for lyr in range(self.config.num_hidden_layers_for_vit):
+      layer_name = f"layers_{lyr}"
+      layer = getattr(self, layer_name)
+      hidden_states = layer(hidden_states, deterministic=deterministic)
+    return hidden_states
+
+
+def llama4visionencoder_as_linen(config: Config, mesh: Mesh) -> nn.Module:
+  """Create a Llama4VisionEncoder instance as a Linen module."""
+  return nnx_wrappers.to_linen(
+      Llama4VisionEncoder,
+      config=config,
+      mesh=mesh,
+      name="Llama4VisionEncoder_0",
+      abstract_init=False,
+      metadata_fn=variable_to_logically_partitioned,
+  )
 
 
 class Llama4VisionModel(nn.Module):
@@ -841,7 +1048,8 @@ class Llama4VisionModel(nn.Module):
     hidden_states = nn.LayerNorm(name="layernorm_pre")(hidden_states)
     jax.debug.print("layernorm_pre mean {}", jnp.mean(hidden_states))
 
-    hidden_states = Llama4VisionEncoder(config=cfg, mesh=mesh)(hidden_states)
+    # hidden_states = Llama4VisionEncoder(config=cfg, mesh=mesh)(hidden_states)
+    hidden_states = llama4visionencoder_as_linen(config=cfg, mesh=mesh)(hidden_states)
     jax.debug.print("Llama4VisionEncoder mean {}", jnp.mean(hidden_states))
 
     hidden_states = nn.LayerNorm(name="layernorm_post")(hidden_states)
