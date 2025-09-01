@@ -253,9 +253,6 @@ class RoutedMoE(nnx.Module):
     self.quant = quant
     self.sharding = sharding
 
-    self.wi_kernel_axes = ("exp", "embed_no_exp", "mlp")
-    self.wo_kernel_axes = ("exp", "mlp", "embed_no_exp")
-
     self.gate = GateLogit(
         in_features_shape=self.config.emb_dim,
         out_features_shape=self.num_experts,
@@ -289,7 +286,7 @@ class RoutedMoE(nnx.Module):
               kernel_in_axis,
               kernel_out_axis,
           ),
-          sharding=sharding(t="moe_wi_0", a=self.wi_kernel_axes)
+          sharding=sharding(t="moe_wi_0", a=("exp", "embed", "mlp"))
       )
 
     if quantizations.in_serve_mode(self.quant):
@@ -303,7 +300,7 @@ class RoutedMoE(nnx.Module):
               kernel_in_axis,
               kernel_out_axis,
           ),
-          sharding=sharding(t="moe_wi_1", a=self.wi_kernel_axes),
+          sharding=sharding(t="moe_wi_1", a=("exp", "embed", "mlp")),
       )
 
     if quantizations.in_serve_mode(self.quant):
@@ -317,7 +314,7 @@ class RoutedMoE(nnx.Module):
               kernel_in_axis,
               kernel_out_axis,
           ),
-          sharding=sharding(t="moe_wo", a=self.wo_kernel_axes),
+          sharding=sharding(t="moe_wo", a=("exp", "mlp", "embed")),
       )
 
   def get_expert_parallelism_size(self):
@@ -692,7 +689,7 @@ class RoutedMoE(nnx.Module):
       hs_shape = inputs.shape
       # pad length is the 1st dimension of tiling size in gmm call
       if inputs.shape[0] != expert_assignments.shape[0]:
-        raise ValueError("The number of input tokens must match the number of expert" " assignments!")
+        raise ValueError("The number of input tokens must match the number of expert assignments!")
       if hs_shape[0] % pad_length:
         pad_length = pad_length - hs_shape[0] % pad_length
         inputs = jax.lax.pad(inputs.astype(jnp.float32), 0.0, [(0, pad_length, 0), (0, 0, 0)])
@@ -760,41 +757,22 @@ class RoutedMoE(nnx.Module):
     # Check if the batch should be sharded by expert and whether the batch_size
     # supports this. For example, for interleaved inference, prefill always has
     # batch_size=1 while decode can have batch_size > 1.
-    try:
-      is_batch_sharded_by_expert = (
-          "expert"
-          in tuple(
-              filter(
-                  lambda tup: tup[0] == "activation_batch",
-                  self.config.logical_axis_rules,
-              )
-          )[
-              0
-          ][1]
+    is_batch_sharded_by_expert = self.sharding.is_batch_sharded_by_expert()
+    # TODO: previous code had a check for batch size, for inference case, setting batch back to not sharding by exp
+    #       this should be replicated in inference sharding rules
+
+    tp_t_active = self.get_tensor_transpose_parallelism_size():
+    input_partition_pspec = self.sharding(
+      t="sparse_inputs", a=(("batch", "norm_length", "embed")),
+      tt=TensorType.Activation,
+      tp_t_active=tp_t_active,
       )
-    except:  # pylint: disable=bare-except
-      is_batch_sharded_by_expert = False
 
-    # TODO: when we get to V2 sharding rules without backwards compatibility we can
-    if is_batch_sharded_by_expert and inputs.shape[0] > 1:
-      batch_logical_axis = "activation_batch"
-    else:
-      batch_logical_axis = "activation_batch_no_exp"
-
-    # TODO: as above, V2 sharding will allow us to switch activation_embed vs. None in sharding rules , based on
-    # presence of tensor_transpose
-    if self.get_tensor_transpose_parallelism_size() > 1:
-      input_partition_pspec = self.sharding(
-        t="sparse_inputs", a=((batch_logical_axis, "activation_norm_length", "activation_embed"))
-       )
-    else:
-      input_partition_pspec = self.sharding(t="sparse_inputs", a=(batch_logical_axis, "activation_norm_length", None))
-
-    gate_logits_pspec = self.sharding(t="sparse_gate_logits", a=(batch_logical_axis, "activation_norm_length", None))
+    gate_logits_pspec = self.sharding(t="sparse_gate_logits", a=("batch", "norm_length", None))
 
     # TODO: in V2 sharding DeepSeek should have its own rules and this conditional won't be necessary
     if self.config.model_name.startswith("deepseek3"):
-      pre_bias_logits_pspec = self.sharding(t="sparse_pre_bias_logits", a=(batch_logical_axis, "activation_norm_length", None))
+      pre_bias_logits_pspec = self.sharding(t="sparse_pre_bias_logits", a=("batch", "norm_length", None))
     else:
       # pre_bias_logits is None for non-DeepSeek v3 models
       pre_bias_logits_pspec = None
@@ -821,9 +799,7 @@ class RoutedMoE(nnx.Module):
             w1_pspec,
             wo_pspec,
         ),
-        out_specs=(self.sharding(t="sparse_shard_map",
-                                 a=(batch_logical_axis, "activation_norm_length", "activation_embed"),
-                                 tt=TensorType.Activation)),
+        out_specs=(self.sharding(t="sparse_shard_map", a=("batch", "norm_length", "embed"), tt=TensorType.Activation)),
         check_rep=False,
     )
     def wrapper(x, logits, pre_bias_logits, w0, w1, wo):
@@ -833,13 +809,12 @@ class RoutedMoE(nnx.Module):
       expert_shard_id = jax.lax.axis_index(expert_axis_name)
       num_expert_parallelism = self.get_expert_parallelism_size()
       if num_expert_parallelism > 1:
-        batch_axis = "expert" if is_batch_sharded_by_expert else "data"
         # get group sizes for all shards
         local_expert_size = self.config.num_experts // num_expert_parallelism
         reshaped_group_sizes = jnp.sum(group_sizes.reshape(-1, local_expert_size), axis=1)
         global_group_sizes = group_sizes
         if is_batch_sharded_by_expert:
-          all_shards_group_sizes = jax.lax.all_gather(reshaped_group_sizes, axis_name=batch_axis)
+          all_shards_group_sizes = jax.lax.all_gather(reshaped_group_sizes, axis_name="expert")
           input_offsets, send_sizes, output_offsets, recv_sizes = RoutedMoE.get_all_to_all_params(
               all_shards_group_sizes,
               expert_shard_id,
@@ -1033,7 +1008,7 @@ class RoutedMoE(nnx.Module):
         (batch_size, cp, sub_seq * self.num_experts_per_tok, self.num_experts),
     )
     expert_mask_fused = self.sharding.shard(
-      expert_mask_fused, t='expert_mask_fused', a=("activation_batch", None, None, None)
+      expert_mask_fused, t='expert_mask_fused', a=("batch", None, None, None)
       )
     expert_token_count_fused = jnp.cumsum(expert_mask_fused, axis=2)
     expert_token_count = jnp.reshape(
@@ -1043,7 +1018,7 @@ class RoutedMoE(nnx.Module):
     expert_token_count = self.sharding.shard(
         expert_token_count,
         t="expert_token_count",
-        a=("activation_batch", "activation_norm_length", None, None, None),
+        a=("batch", "norm_length", None, None, None),
     )
     trunc_expert_mask = expert_mask * jnp.less_equal(expert_token_count, expert_capacity_per_batch)
     combined_expert_mask = jnp.sum(trunc_expert_mask, axis=3)
@@ -1124,7 +1099,7 @@ class RoutedMoE(nnx.Module):
         (batch_size, seq_len * self.num_experts_per_tok, self.num_experts),
     )
     expert_mask_fused = self.sharding.shard(
-      expert_mask_fused, t="expert_mash_fused", a=("activation_batch", None, None)
+      expert_mask_fused, t="expert_mash_fused", a=("batch", None, None)
     )
     expert_token_count_fused = jnp.cumsum(expert_mask_fused, axis=1)
     expert_token_count = jnp.reshape(
@@ -1134,7 +1109,7 @@ class RoutedMoE(nnx.Module):
     expert_token_count = self.sharding.shard(
         expert_token_count,
         t="expert_token_count",
-        a=("activation_batch", "activation_norm_length", None, None),
+        a=("batch", "norm_length", None, None),
     )
     trunc_expert_mask = expert_mask * jnp.less_equal(expert_token_count, expert_capacity_per_batch)
     combined_expert_mask = jnp.sum(trunc_expert_mask, axis=2)
@@ -1233,13 +1208,13 @@ class RoutedMoE(nnx.Module):
     """Dense matrix multiplication."""
     # gate_logits: batch, length, expert
     gate_logits = self.sharding.shard(
-      gate_logits, t="gate_logits", a=("activation_batch", "activation_norm_length", None)
+      gate_logits, t="gate_logits", a=("batch", "norm_length", None)
     )
 
     if self.config.model_name.startswith("deepseek3"):
       # pre_bias_logits is None for non-DeepSeek v3 models
       pre_bias_logits = self.sharding.shard(
-        pre_bias_logits, t="pre_bias_logits", a=("activation_batch", "activation_norm_length", None)
+        pre_bias_logits, t="pre_bias_logits", a=("batch", "norm_length", None)
 
       )
 
@@ -1264,68 +1239,31 @@ class RoutedMoE(nnx.Module):
 
     if self.config.capacity_factor > 0:
       # token dropping if needed
-      if self.config.model_call_mode != "inference":
-        # TODO(b/425930949): remove this pylint by refactoring the logic here.
-        dispatch_mask, combine_mask = self.generate_masks(
-            top_k_indices, weights  # pylint: disable=undefined-variable,possibly-used-before-assignment
-        )
-        mask_axes = ("activation_batch", "activation_norm_length", None, None)
-        dispatch_axis = ("activation_exp", "activation_batch_no_exp", None, "activation_embed")
-        mlp_axis = ("activation_exp", "activation_batch_no_exp", None,"activation_mlp")
+      assert self.config.model_call_mode != "inference", "not supporting inference for now as sharding rules are messy (but tractable)"
+      # TODO(b/425930949): remove this pylint by refactoring the logic here.
+      dispatch_mask, combine_mask = self.generate_masks(
+          top_k_indices, weights  # pylint: disable=undefined-variable,possibly-used-before-assignment
+      )
 
-        dispatch_eimsum = "BSM,BSEC -> EBCM"
-        mlp_up_einsum = "EBCM,EMH -> EBCH"
-        mlp_down_einsum = "EBCH,EHM -> EBCM"
-        output_einsum = "EBCM,BSEC -> BSM"
-      else:
-        assert False, "Not supporting inference for now"
+      dispatch_einsum = "BSM,BSEC -> EBCM"
+      mlp_up_einsum = "EBCM,EMH -> EBCH"
+      mlp_down_einsum = "EBCH,EHM -> EBCM"
+      output_einsum = "EBCM,BSEC -> BSM"
 
-        # TODO(b/425930507): Try replacing `softmax_probs` with padded weights
-        # and verify with decode acc tests.
-        softmax_probs = jax.nn.softmax(gate_logits.astype(jnp.float32), axis=-1).astype(self.dtype)
-        dispatch_mask, combine_mask = self.generate_masks_subgroup(top_k_indices, softmax_probs)
-
-        dispatch_axis = ("activation_exp", "activation_batch_no_exp", None, None, "activation_embed")
-        mlp_axis = ("activation_exp", "activation_batch_no_exp", None, None, "activation_mlp")
-
-        # TODO: there is probably a cleaner way to do this. it seems wrong to swap the axis names
-        #       with current logical axis rules we could introduce 4 new moe-specific axes, e.g.
-        #         1. moe_autoregressive_mask_axis_0; 2. moe_non_ar_mask_axis_0
-        #         3. moe_autoregressive_mask_axis_1; 2. moe_non_ar_mask_axis_2
-        #       probably there are better names but I don't understand the logic here
-        #       in any case, we can map contidional on this flag like so:
-        #         dispatch_mask = self.sharding.shard(dispatch_mask, t="dispatch_mask", a=mask_axes, ctx_ar=ctx_ar_parallel)
-        ctx_ar_parallel = self.get_context_autoregressive_parallelism_size() > 0 and cp == 1
-
-        if ctx_ar_parallel:
-          mask_axes = ("activation_norm_length", "activation_batch", None, None, None)
-          input_axis = ("activation_norm_length", "activation_batch", None, "activation_embed")
-        else:
-          mask_axes = ("activation_batch", "activation_norm_length", None, None, None)
-          input_axis = ("activation_batch", "activation_norm_length", None, "activation_embed")
-
-        dispatch_eimsum = "BNSM,BNSEC -> EBNCM"
-        mlp_up_einsum = "EBNCM,EMH -> EBNCH"
-        mlp_down_einsum = "EBNCH,EHM -> EBNCM"
-        output_einsum = "EBNCM,BNSEC -> BNSM"
-
-        inputs = jnp.reshape(inputs, (batch_size, cp, sub_seq, inputs.shape[2]))
-        inputs = self.sharding.shard(inputs, t="cap_inputs", a=input_axis, ctx_ar=ctx_ar_parallel)
-
-      dispatch_mask = self.sharding.shard(dispatch_mask, t="dispatch_mask", a=mask_axes)
-      combine_mask = self.sharding.shard(combine_mask, t="combine_mask", a=mask_axes)
+      dispatch_mask = self.sharding.shard(dispatch_mask, t="dispatch_mask", a=("batch", "norm_length", None, None))
+      combine_mask = self.sharding.shard(combine_mask, t="combine_mask", a=("batch", "norm_length", None, None))
 
       with jax.named_scope("dispatch"):
         # only cp during prefill
-        dispatch = self.get_einsum(rhs_mesh_axes=mask_axes, einsum_name=DISPATCH)(
-            dispatch_eimsum, inputs, dispatch_mask, precision=matmul_precision
+        dispatch = self.get_einsum(rhs_mesh_axes=("batch", "norm_length", None, None), einsum_name=DISPATCH)(
+            dispatch_einsum, inputs, dispatch_mask, precision=matmul_precision
         )
         # TODO: assuming that this is incorrect for now
         # if cp > 1:
         #   dispatch = nn.with_logical_constraint(
         #       dispatch, (None, "activation_batch_no_exp", "activation_norm_length", None, "activation_embed")
         # )
-        dispatch = self.sharding.shard(dispatch, t="dispatch", a=dispatch_axis)
+        dispatch = self.sharding.shard(dispatch, t="dispatch", a=("exp", "batch", None, "embed"))
 
       with jax.named_scope("wi_0"):
         w0_kernel_axes = ("exp", None, "mlp")
@@ -1336,7 +1274,7 @@ class RoutedMoE(nnx.Module):
 
         if self.config.activations_in_float32:
           layer_w0 = layer_w0.astype(jnp.float32)
-        layer_w0 = self.sharding.shard(layer_w0, t="layer_w0", a=mlp_axis)
+        layer_w0 = self.sharding.shard(layer_w0, t="layer_w0", a=("exp", "batch", None, "mlp"))
         layer_w0 = adc.checkpoint_name(layer_w0, "mlpwi_0")
       with jax.named_scope("wi_1"):
         w1_kernel_axes = ("exp", None, "mlp")
@@ -1346,7 +1284,7 @@ class RoutedMoE(nnx.Module):
         )
         if self.config.activations_in_float32:
           layer_w1 = layer_w1.astype(jnp.float32)
-        layer_w1 = self.sharding.shard(layer_w1, t="layer_w1", a=mlp_axis)
+        layer_w1 = self.sharding.shard(layer_w1, t="layer_w1", a=("exp", "batch", None, "mlp"))
         layer_w1 = adc.checkpoint_name(layer_w1, "mlpwi_1")
       # pylint: disable=protected-access
       layer_w0_act = linears._convert_to_activation_function(self.config.mlp_activations[0])(layer_w0)
@@ -1366,12 +1304,12 @@ class RoutedMoE(nnx.Module):
           intermediate_layer = self.sharding.shard(
               intermediate_layer,
               t="intermediate_layer",
-              a=("activation_exp", "activation_batch_no_exp", None, "activation_embed"),
+              a=("exp", "batch", None, "embed"),
           )
         intermediate_layer = adc.checkpoint_name(intermediate_layer, "mlpwo")
       with jax.named_scope("combine"):
         # Matmul & element wise operation
-        output = self.get_einsum(rhs_mesh_axes=mask_axes, einsum_name=COMBINE)(
+        output = self.get_einsum(rhs_mesh_axes=("batch", "norm_length", None, None), einsum_name=COMBINE)(
             output_einsum,
             intermediate_layer,
             combine_mask,
@@ -1389,17 +1327,17 @@ class RoutedMoE(nnx.Module):
       return output, loss
     else:
       inputs = self.sharding.shard(
-        inputs, t="no_cap_inputs", a=("activation_batch", "activation_norm_length", "activation_embed")
+        inputs, t="no_cap_inputs", a=("batch", "norm_length", "embed")
       )
       with jax.named_scope("wi_0"):
-        layer_w0 = self.get_einsum(rhs_mesh_axes=self.wi_kernel_axes)(
+        layer_w0 = self.get_einsum(rhs_mesh_axes=("exp", "embed", "mlp"))(
             "BSM,EMH -> BSEH", inputs, w0_kernel, precision=matmul_precision
         )
         if self.config.activations_in_float32:
           layer_w0 = layer_w0.astype(jnp.float32)
         layer_w0 = adc.checkpoint_name(layer_w0, "mlpwi_0")
       with jax.named_scope("wi_1"):
-        layer_w1 = self.get_einsum(rhs_mesh_axes=self.wi_kernel_axes)(
+        layer_w1 = self.get_einsum(rhs_mesh_axes=("exp", "embed", "mlp"))(
             "BSM,EMH -> BSEH", inputs, w1_kernel, precision=matmul_precision
         )
         if self.config.activations_in_float32:
@@ -1409,7 +1347,7 @@ class RoutedMoE(nnx.Module):
       layer_w0_act = linears._convert_to_activation_function(self.config.mlp_activations[0])(layer_w0)
       layer_multiply = jnp.multiply(layer_w0_act, layer_w1).astype(self.dtype)
       with jax.named_scope("wo"):
-        intermediate_layer = self.get_einsum(rhs_mesh_axes=self.wo_kernel_axes)(
+        intermediate_layer = self.get_einsum(rhs_mesh_axes=("exp", "mlp", "embed"))(
             "BSEH,EHM -> BSEM",
             layer_multiply,
             wo_kernel,

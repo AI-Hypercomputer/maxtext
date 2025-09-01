@@ -19,7 +19,7 @@ class Qwen3ShardingTrainingV2(MeshSharding):
     tensor_name = kwargs["t"]
     tensor_type = kwargs.get("tensor_type", TT.Weight)
     ep_attn_type = self.config.expert_shard_attention_option
-    tensor_transpose, fsdp_transpose = self.config.tensor_transpose, self.config.fsdp_transpose
+    tensor_transpose_active = kwargs.get("tp_t_active", False)
 
     if self.config.ici_context_autoregressive_parallelism > 1:
       raise Exception("Context autoregressive parallelism not supported for training")
@@ -29,7 +29,10 @@ class Qwen3ShardingTrainingV2(MeshSharding):
       match axis, tensor_type:
         case "batch", TT.Activation:
                                                       axis_mappings = [dp, fsdp, fsdp_t]
-                                                      if ep_attn_type == "batch":
+                                                      # for attention, we re-use the ep axis
+                                                      if (ep_attn_type == "batch" and
+                                                          tensor_name not in ("dispatch", "layer_w0", "layer_w1",
+                                                                              "intermediate_layer")):
                                                         axis_mappings.append(ep)
                                                       mesh_axes.append(tuple(axis_mappings))
         case "embed_and_logits_batch", TT.Activation:
@@ -38,9 +41,14 @@ class Qwen3ShardingTrainingV2(MeshSharding):
                                                         axis_mappings.append(ep)
                                                       mesh_axes.append(tuple(axis_mappings))
         case "embed", TT.Activation:
-                                                      mesh_axes.append((tp, tp_t))
+                                                      # TODO: this feels fragile. perhaps there's a better way
+                                                      if "tensor_name" == "sparse_inputs" and not tensor_transpose_active:
+                                                        mesh_axes.append(())
+                                                      else:
+                                                        mesh_axes.append((tp, tp_t))
         case "embed", TT.Weight:
                                                       axis_mappings = [fsdp, fsdp_t, sp, cp]
+                                                      # for attention, we re-use the ep axis
                                                       if tensor_name not in ("moe_wi_0", "moe_wi_1", "moe_wo"):
                                                         axis_mappings.append(ep)
                                                       mesh_axes.append(tuple(axis_mappings))
@@ -87,6 +95,10 @@ class Qwen3ShardingTrainingV2(MeshSharding):
 
     self.maybe_check_valid_mesh_axes(mesh_axes)
     return PartitionSpec(*mesh_axes)
+
+  def is_batch_sharded_by_expert(self):
+    ep_attn_type = self.config.expert_shard_attention_option
+    return ep_attn_type == "batch"
 
 
 class ModelMode(enum.Enum):
