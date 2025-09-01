@@ -67,12 +67,10 @@ class Qwen3ShardingTrainingV2(MeshSharding):
                                                       if ep_attn_type == "batch":
                                                         axis_mappings.append(ep)
                                                       mesh_axes.append(tuple(axis_mappings))
-        case "kv_heads", TT.Activation, _:
-                                                      mesh_axes.append((tp, tp_t, sp,tp_s))
+        case ("kv_heads" | "heads"), TT.Activation, _:
+                                                      mesh_axes.append((tp, tp_t, sp, tp_s))
         case "kv_head_dim", TT.Activation, _:
-                                                      mesh_axes.append((tp, tp_s))
-        case "heads", TT.Activation, _:
-                                                      mesh_axes.append((tp, tp_t, sp,tp_s))
+                                                      mesh_axes.append((tp, tp_t, tp_s))
         case  ("heads" | "q_heads" | "kv_heads"), TT.Weight, _:
                                                       mesh_axes.append((tp, tp_t, tp_s))
         case ("kv", "kv_head_dim", "qkv", "num_activations"), TT.Weight, _:
