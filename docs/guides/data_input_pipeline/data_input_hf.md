@@ -1,9 +1,12 @@
 # Hugging Face pipeline
-The Hugging Face pipeline supports streaming directly from the Hugging Face Hub, or from a Cloud Storage bucket in Hugging Face supported formats (parquet, json, etc.). This is through the Hugging Face [`datasets.load_dataset` API](https://huggingface.co/docs/datasets/en/loading) with `streaming=True`, which takes in `hf_*` parameters.
-## Example config for streaming from Hugging Face Hub (no download needed):
 
-In `src/MaxText/configs/base.yml` or through command line, set the following parameters:
-```
+The Hugging Face pipeline supports streaming directly from the Hugging Face Hub, or from a Cloud Storage bucket in Hugging Face supported formats (parquet, json, etc.). This is through the Hugging Face [`datasets.load_dataset` API](https://huggingface.co/docs/datasets/en/loading) with `streaming=True`, which takes in `hf_*` parameters.
+
+## Example config for streaming from Hugging Face Hub (no download needed)
+
+In [`src/MaxText/configs/base.yml`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/configs/base.yml) or through command line, set the following parameters:
+
+```yaml
 dataset_type: hf
 hf_path: 'allenai/c4'  # for using https://huggingface.co/datasets/allenai/c4
 hf_data_dir: 'en'
@@ -18,10 +21,11 @@ tokenizer_path: 'google-t5/t5-large'  # for using https://huggingface.co/google-
 hf_access_token: ''  # provide token if using gated dataset or tokenizer
 ```
 
-## Example config for streaming from downloaded data in a Cloud Storage bucket:
+## Example config for streaming from downloaded data in a Cloud Storage bucket
 
-In `src/MaxText/configs/base.yml` or through command line, set the following parameters:
-```
+In [`src/MaxText/configs/base.yml`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/configs/base.yml) or through the command line, set the following parameters:
+
+```yaml
 dataset_type: hf
 hf_path: 'parquet'  # or json, arrow, etc.
 hf_data_dir: ''
@@ -34,7 +38,9 @@ hf_eval_files: 'gs://<bucket>/<folder>/*-validation-*.parquet'  # match the val 
 # or a local path containing tokenizer in a format supported by transformers.AutoTokenizer
 tokenizer_path: 'google-t5/t5-large'  # for using https://huggingface.co/google-t5/t5-large
 ```
-## Limitations and recommendations
+
+## Limitations and Recommendations
+
 1. Streaming data directly from Hugging Face Hub may be impacted by the traffic of the server. During peak hours you may encounter "504 Server Error: Gateway Time-out". It's recommended to download the Hugging Face dataset to a Cloud Storage bucket or disk for the most stable experience.
 2. Streaming data directly from Hugging Face Hub works in multi-host settings with a small number of hosts. With a host number larger than 16, you might encounter a "read time out" error.
-3. Only supports num_epoch=1 at the moment.
+3. Only supports `num_epoch=1` at the moment.
