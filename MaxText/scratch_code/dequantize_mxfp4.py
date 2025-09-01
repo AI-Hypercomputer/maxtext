@@ -126,6 +126,9 @@ def main(input_path: str, output_path: str, target_dtype: torch.dtype, cache_siz
         weight_prefix = weight_name.removesuffix(block_suffix)
         scale = get_tensor(weight_prefix + scale_suffix)
         dequantized_weight = dequantize_mxfp4(weight, scale, target_dtype)
+        # gpt-oss: (num_experts, 2*expert_dim, hidden_size) -> (num_experts, hidden_size, 2*expert_dim)
+        if "gate_up_proj" in weight_prefix:
+          dequantized_weight = dequantized_weight.permute(0, 2, 1)
         new_state_dict[weight_prefix] = dequantized_weight
         print(f"{weight_name}: Dequantized weight type is {dequantized_weight.dtype}")
       elif weight_name.endswith(scale_suffix):
