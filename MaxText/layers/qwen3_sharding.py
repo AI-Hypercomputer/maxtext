@@ -27,66 +27,71 @@ class Qwen3ShardingTrainingV2(MeshSharding):
     mesh_axes = []
     for axis in axes:
       match axis, tensor_type:
-        case "batch", TT.Activation, :
-          axis_mappings = [dp, fsdp]
-          if ep_attn_type == "batch":
-            axis_mappings.append(ep)
-          mesh_axes.append(tuple(axis_mappings))
+        case "batch", TT.Activation:
+                                                      axis_mappings = [dp, fsdp]
+                                                      if ep_attn_type == "batch":
+                                                        axis_mappings.append(ep)
+                                                      mesh_axes.append(tuple(axis_mappings))
         case "embed_and_logits_batch", TT.Activation:
-          axis_mappings = [dp, pp, fsdp]
-          if ep_attn_type == "batch":
-            axis_mappings.append(ep)
-          mesh_axes.append(tuple(axis_mappings))
+                                                      axis_mappings = [dp, pp, fsdp]
+                                                      if ep_attn_type == "batch":
+                                                        axis_mappings.append(ep)
+                                                      mesh_axes.append(tuple(axis_mappings))
         case "embed", TT.Activation:
-          mesh_axes.append((tp))
+                                                      mesh_axes.append((tp))
         case "embed", TT.Weight:
-          axis_mappings = [fsdp, sp, cp]
-          if tensor_name not in ("mlp_wi_0", "mlp_wi_1", "mlp_wo"):
-              axis_mappings.append(ep)
-          if tensor_name in ("mlp_wi_fused", "mlp_wi_unfused", "mlp_wo") and tensor_transpose:
-            axis_mappings.append(tp)
-          mesh_axes.append(tuple(axis_mappings))
+                                                      axis_mappings = [fsdp, sp, cp]
+                                                      if tensor_name not in ("moe_wi_0", "moe_wi_1", "moe_wo"):
+                                                        axis_mappings.append(ep)
+                                                      if (tensor_name in ("mlp_wi_fused", "mlp_wi_unfused", "mlp_wo",
+                                                                         "moe_wi_0", "moe_wi_1", "moe_wo")
+                                                                         and tensor_transpose):
+                                                        axis_mappings.append(tp)
+                                                      mesh_axes.append(tuple(axis_mappings))
         case "mlp", TT.Weight:
-          axis_mappings = [tp, tp_s]
-          if tensor_name in ("mlp_wi_fused", "mlp_wi_unfused", "mlp_wo") and fsdp_transpose:
-            axis_mappings.append(fsdp)
-          mesh_axes.append(tuple(axis_mappings))
+                                                      axis_mappings = [tp, tp_s]
+                                                      if (tensor_name in ("mlp_wi_fused", "mlp_wi_unfused", "mlp_wo",
+                                                                         "moe_wi_0", "moe_wi_1", "moe_wo")
+                                                                         and fsdp_transpose):
+                                                        axis_mappings.append(fsdp)
+                                                      mesh_axes.append(tuple(axis_mappings))
         case "mlp", TT.Activation:
-          mesh_axes.append((tp, tp_s))
+                                                      mesh_axes.append((tp, tp_s))
         case "vocab", TT.Weight, _:
-          mesh_axes.append((tp, tp_s, ar))
+                                                      mesh_axes.append((tp, tp_s, ar))
         case "norm", TT.Weight, _:
-          mesh_axes.append((tp, tp_s))
+                                                      mesh_axes.append((tp, tp_s))
         case "length", TT.Activation:
-          axis_mappings = [sp, cp]
-          if ep_attn_type == "context":
-            axis_mappings.append(ep)
-          mesh_axes.append(tuple(axis_mappings))
+                                                      axis_mappings = [sp, cp]
+                                                      if ep_attn_type == "context":
+                                                        axis_mappings.append(ep)
+                                                      mesh_axes.append(tuple(axis_mappings))
         case "norm_length", TT.Activation:
-          mesh_axes.append((tp_s, sp, cp))
+                                                      mesh_axes.append((tp_s, sp, cp))
         case "kv", TT.Activation, _:
-          mesh_axes.append((tp, tp_s))
+                                                      mesh_axes.append((tp, tp_s))
         case "kv_batch", TT.Activation:
-          axis_mappings = [dp, fsdp]
-          if ep_attn_type == "batch":
-            axis_mappings.append(ep)
-          mesh_axes.append(tuple(axis_mappings))
+                                                      axis_mappings = [dp, fsdp]
+                                                      if ep_attn_type == "batch":
+                                                        axis_mappings.append(ep)
+                                                      mesh_axes.append(tuple(axis_mappings))
         case "kv_heads", TT.Activation, _:
-          mesh_axes.append((tp, sp,tp_s))
+                                                      mesh_axes.append((tp, sp,tp_s))
         case "kv_head_dim", TT.Activation, _:
-          mesh_axes.append((tp, tp_s))
+                                                      mesh_axes.append((tp, tp_s))
         case "heads", TT.Activation, _:
-          mesh_axes.append((tp, sp,tp_s))
+                                                      mesh_axes.append((tp, sp,tp_s))
         case  ("heads" | "q_heads" | "kv_heads"), TT.Weight, _:
-          mesh_axes.append((tp, tp_s))
+                                                      mesh_axes.append((tp, tp_s))
         case ("kv", "kv_head_dim", "qkv", "num_activations"), TT.Weight, _:
-          mesh_axes.append((None,))
+                                                      mesh_axes.append((None,))
         case "exp", _:
-          mesh_axes.append((ep,))
+                                                      mesh_axes.append((ep,))
         case "embed_tensor_transpose", TT.Weight:
-          # TODO: this previously mapped directly to tensor_transpose. should instead  map to fsdp in the case that
-          # tensor_transpose is enabled
-          mesh_axes.append(())
+                                                      # TODO: this previously mapped directly to tensor_transpose.
+                                                      # should instead  map to fsdp in the case that
+                                                      # tensor_transpose is enabled
+                                                      mesh_axes.append(())
         case _, _, _:
           assert False, "Unexpected logical axis name for sharding"
 
