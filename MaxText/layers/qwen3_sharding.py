@@ -19,7 +19,7 @@ class Qwen3ShardingTrainingV2(MeshSharding):
     tensor_name = kwargs["t"]
     tensor_type = kwargs.get("tensor_type", TT.Weight)
     ep_attn_type = self.config.expert_shard_attention_option
-    tensor_transpose_active = kwargs.get("tp_t_active", False)
+    tp_t_active = kwargs.get("tp_t_active", False)
 
     if self.config.ici_context_autoregressive_parallelism > 1:
       raise Exception("Context autoregressive parallelism not supported for training")
@@ -42,7 +42,7 @@ class Qwen3ShardingTrainingV2(MeshSharding):
                                                       mesh_axes.append(tuple(axis_mappings))
         case "embed", TT.Activation:
                                                       # TODO: this feels fragile. perhaps there's a better way
-                                                      if "tensor_name" == "sparse_inputs" and not tensor_transpose_active:
+                                                      if "tensor_name" == "sparse_inputs" and not tp_t_active:
                                                         mesh_axes.append(())
                                                       else:
                                                         mesh_axes.append((tp, tp_t))
@@ -86,9 +86,6 @@ class Qwen3ShardingTrainingV2(MeshSharding):
         case "exp", _:
                                                       mesh_axes.append((ep,))
         case "embed_tensor_transpose", TT.Weight:
-                                                      # TODO: this previously mapped directly to tensor_transpose.
-                                                      # should instead  map to fsdp in the case that
-                                                      # tensor_transpose is enabled
                                                       mesh_axes.append((tp_t))
         case _, _, _:
           assert False, "Unexpected logical axis name for sharding"
