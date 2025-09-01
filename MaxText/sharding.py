@@ -22,6 +22,8 @@ class Axis(enum.Enum):
   tp_s = "tensor_sequence"
   ep = "expert"
   ar = "autoregressive"
+  tp_t = "tensor_transpose"
+  fsdp_t = "fsdp_transpose"
 
 
 class TensorType(enum.Enum):
