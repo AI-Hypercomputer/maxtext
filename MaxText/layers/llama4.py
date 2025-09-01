@@ -273,98 +273,145 @@ def llama4visionmlp_as_linen(config: Config) -> nn.Module:
   )
 
 
-class Llama4VisionMLP2(nn.Module):
-  """MLP block for Llama4VisionPixelShuffleMLP.
-
-  Attributes:
-    config: Config containing model parameters
-  """
-
-  config: Config
-
-  def setup(self):
-    """
-    Initialize Llama4VisionMLP2
-    """
-    cfg = self.config
-    self.fc1 = linears.dense_general(
-        in_features_shape=cfg.intermediate_size_for_vit,
-        out_features_shape=cfg.projector_input_dim_for_vit,
-        dtype=cfg.dtype_mm,
-        name="vit_pixel_shuffle_mlp_fc1",
-        use_bias=False,
-        matmul_precision=cfg.matmul_precision,
-    )
-    self.fc2 = linears.dense_general(
-        in_features_shape=cfg.projector_input_dim_for_vit,
-        out_features_shape=cfg.projector_output_dim_for_vit,
-        dtype=cfg.dtype_mm,
-        name="vit_pixel_shuffle_mlp_fc2",
-        use_bias=False,
-        matmul_precision=cfg.matmul_precision,
-    )
-    self.dropout = nn.Dropout(rate=cfg.projector_dropout_for_vit)
-
-  def __call__(self, hidden_states: Array, deterministic: bool = False) -> Array:
-    """Apply MLP transformation to hidden states.
-
-    Args:
-      hidden_states: Input tensor
-      deterministic: If True, disables dropout during inference
-    """
-    # First linear layer with GELU activation
-    hidden_states = self.fc1(hidden_states)
-    hidden_states = nn.gelu(hidden_states, approximate=False)
-
-    # Apply dropout
-    # in pytorch it's using default Dropout Rate of 0.5
-    hidden_states = self.dropout(hidden_states, deterministic=deterministic)
-
-    # Second linear layer with GELU activation
-    hidden_states = self.fc2(hidden_states)
-    hidden_states = nn.gelu(hidden_states, approximate=False)
-
-    return hidden_states
-
-
-# class Llama4VisionMLP2(nnx.Module):
+# class Llama4VisionMLP2(nn.Module):
 #   """MLP block for Llama4VisionPixelShuffleMLP.
 
 #   Attributes:
 #     config: Config containing model parameters
 #   """
 
-#   def __init__(self, config: Config, *, rngs: Optional[nnx.Rngs] = None):
-#     self.config = config
-#     self.rngs = rngs
-#     self.vit_pixel_shuffle_mlp_fc1 = linears.DenseGeneral(
-#         in_features_shape=self.config.intermediate_size_for_vit,
-#         out_features_shape=self.config.projector_input_dim_for_vit,
-#         dtype=self.config.dtype_mm,
+#   config: Config
+
+#   def setup(self):
+#     """
+#     Initialize Llama4VisionMLP2
+#     """
+#     cfg = self.config
+#     self.fc1 = linears.dense_general(
+#         in_features_shape=cfg.intermediate_size_for_vit,
+#         out_features_shape=cfg.projector_input_dim_for_vit,
+#         dtype=cfg.dtype_mm,
+#         name="vit_pixel_shuffle_mlp_fc1",
 #         use_bias=False,
-#         matmul_precision=self.config.matmul_precision,
-#         rngs=self.rngs,
+#         matmul_precision=cfg.matmul_precision,
 #     )
-#     self.vit_pixel_shuffle_mlp_fc2 = linears.DenseGeneral(
-#         in_features_shape=self.config.projector_input_dim_for_vit,
-#         out_features_shape=self.config.projector_output_dim_for_vit,
-#         dtype=self.config.dtype_mm,
+#     self.fc2 = linears.dense_general(
+#         in_features_shape=cfg.projector_input_dim_for_vit,
+#         out_features_shape=cfg.projector_output_dim_for_vit,
+#         dtype=cfg.dtype_mm,
+#         name="vit_pixel_shuffle_mlp_fc2",
 #         use_bias=False,
-#         matmul_precision=self.config.matmul_precision,
-#         rngs=self.rngs,
+#         matmul_precision=cfg.matmul_precision,
 #     )
-#     self.dropout = nnx.Dropout(rate=self.config.projector_dropout_for_vit, rngs=self.rngs)
+#     self.dropout = nn.Dropout(rate=cfg.projector_dropout_for_vit)
 
 #   def __call__(self, hidden_states: Array, deterministic: bool = False) -> Array:
-#     hidden_states = self.vit_pixel_shuffle_mlp_fc1(hidden_states)
-#     hidden_states = nnx.gelu(hidden_states, approximate=False)
+#     """Apply MLP transformation to hidden states.
+
+#     Args:
+#       hidden_states: Input tensor
+#       deterministic: If True, disables dropout during inference
+#     """
+#     # First linear layer with GELU activation
+#     hidden_states = self.fc1(hidden_states)
+#     hidden_states = nn.gelu(hidden_states, approximate=False)
+
+#     # Apply dropout
+#     # in pytorch it's using default Dropout Rate of 0.5
 #     hidden_states = self.dropout(hidden_states, deterministic=deterministic)
-#     hidden_states = self.vit_pixel_shuffle_mlp_fc2(hidden_states)
-#     hidden_states = nnx.gelu(hidden_states, approximate=False)
+
+#     # Second linear layer with GELU activation
+#     hidden_states = self.fc2(hidden_states)
+#     hidden_states = nn.gelu(hidden_states, approximate=False)
+
 #     return hidden_states
 
 
-class Llama4VisionPixelShuffleMLP(nn.Module):
+class Llama4VisionMLP2(nnx.Module):
+  """MLP block for Llama4VisionPixelShuffleMLP.
+
+  Attributes:
+    config: Config containing model parameters
+  """
+
+  def __init__(self, config: Config, *, rngs: Optional[nnx.Rngs] = None):
+    self.config = config
+    self.rngs = rngs
+    self.vit_pixel_shuffle_mlp_fc1 = linears.DenseGeneral(
+        in_features_shape=self.config.intermediate_size_for_vit,
+        out_features_shape=self.config.projector_input_dim_for_vit,
+        dtype=self.config.dtype_mm,
+        use_bias=False,
+        matmul_precision=self.config.matmul_precision,
+        rngs=self.rngs,
+    )
+    self.vit_pixel_shuffle_mlp_fc2 = linears.DenseGeneral(
+        in_features_shape=self.config.projector_input_dim_for_vit,
+        out_features_shape=self.config.projector_output_dim_for_vit,
+        dtype=self.config.dtype_mm,
+        use_bias=False,
+        matmul_precision=self.config.matmul_precision,
+        rngs=self.rngs,
+    )
+    self.dropout = nnx.Dropout(rate=self.config.projector_dropout_for_vit, rngs=self.rngs)
+
+  def __call__(self, hidden_states: Array, deterministic: bool = False) -> Array:
+    hidden_states = self.vit_pixel_shuffle_mlp_fc1(hidden_states)
+    hidden_states = nnx.gelu(hidden_states, approximate=False)
+    hidden_states = self.dropout(hidden_states, deterministic=deterministic)
+    hidden_states = self.vit_pixel_shuffle_mlp_fc2(hidden_states)
+    hidden_states = nnx.gelu(hidden_states, approximate=False)
+    return hidden_states
+
+
+def llama4visionmlp2_as_linen(config: Config):
+  return nnx_wrappers.to_linen(
+      Llama4VisionMLP2,
+      config=config,
+      name="pixel_shuffle_mlp",
+      abstract_init=False,
+      metadata_fn=variable_to_logically_partitioned,
+  )
+
+
+# class Llama4VisionPixelShuffleMLP(nn.Module):
+#   """Implementation of Llama4VisionPixelShuffleMLP for Llama4 Multi modal model.
+
+#   This module applies pixel shuffle operation and MLP to encoded patches.
+
+#   Attributes:
+#     config: Config containing model parameters
+#   """
+
+#   config: Config
+
+#   def setup(self):
+#     cfg = self.config
+#     self.pixel_shuffle_ratio = cfg.pixel_shuffle_ratio_for_vit
+#     # self.pixel_shuffle_mlp = Llama4VisionMLP2(cfg)
+
+#   @nn.compact
+#   def __call__(self, encoded_patches: Array, deterministic: bool = False) -> Array:
+#     """Apply pixel shuffle and MLP to encoded patches.
+
+#     Args:
+#       encoded_patches: Input tensor of shape [batch_size, num_patches, hidden_size]
+#       deterministic: If True, disables dropout during inference
+
+#     Returns:
+#       Tensor of shape [batch_size, num_patches, hidden_size]
+#     """
+#     # Apply pixel shuffle operation
+#     encoded_patches = pixel_shuffle(encoded_patches, self.pixel_shuffle_ratio)
+
+#     # Apply MLP transformation
+#     # result = self.pixel_shuffle_mlp(encoded_patches, deterministic=deterministic)
+#     result = llama4visionmlp2_as_linen(config=self.config)(encoded_patches, deterministic=deterministic)
+
+#     return result
+
+
+class Llama4VisionPixelShuffleMLP(nnx.Module):
   """Implementation of Llama4VisionPixelShuffleMLP for Llama4 Multi modal model.
 
   This module applies pixel shuffle operation and MLP to encoded patches.
@@ -373,23 +420,13 @@ class Llama4VisionPixelShuffleMLP(nn.Module):
     config: Config containing model parameters
   """
 
-  config: Config
-
-  def setup(self):
-    cfg = self.config
-    self.pixel_shuffle_ratio = cfg.pixel_shuffle_ratio_for_vit
-    self.pixel_shuffle_mlp = Llama4VisionMLP2(cfg)
+  def __init__(self, config: Config, *, rngs: Optional[nnx.Rngs] = None):
+    self.config = config
+    self.rngs = rngs
+    self.pixel_shuffle_ratio = self.config.pixel_shuffle_ratio_for_vit
+    self.pixel_shuffle_mlp = Llama4VisionMLP2(config=config, rngs=self.rngs)
 
   def __call__(self, encoded_patches: Array, deterministic: bool = False) -> Array:
-    """Apply pixel shuffle and MLP to encoded patches.
-
-    Args:
-      encoded_patches: Input tensor of shape [batch_size, num_patches, hidden_size]
-      deterministic: If True, disables dropout during inference
-
-    Returns:
-      Tensor of shape [batch_size, num_patches, hidden_size]
-    """
     # Apply pixel shuffle operation
     encoded_patches = pixel_shuffle(encoded_patches, self.pixel_shuffle_ratio)
 
@@ -397,6 +434,16 @@ class Llama4VisionPixelShuffleMLP(nn.Module):
     result = self.pixel_shuffle_mlp(encoded_patches, deterministic=deterministic)
 
     return result
+
+
+def llama4visionpixelshufflemlp_as_linen(config: Config):
+  return nnx_wrappers.to_linen(
+      Llama4VisionPixelShuffleMLP,
+      config=config,
+      name="Llama4VisionPixelShuffleMLP_0",
+      abstract_init=False,
+      metadata_fn=variable_to_logically_partitioned,
+  )
 
 
 class Llama4MultiModalProjector(nn.Module):
@@ -437,6 +484,57 @@ class Llama4MultiModalProjector(nn.Module):
     _, c, d = hidden_states.shape
     hidden_states = hidden_states.reshape(b, t, c, d)
     return hidden_states
+
+
+class Llama4MultiModalProjector(nnx.Module):
+  """Implementation of Llama4MultiModalProjector for Llama4 Multi modal model.
+
+  This module projects vision features to text hidden dimension.
+
+  Attributes:
+    config: Config containing model parameters
+  """
+
+  def __init__(self, config: Config, mesh: Mesh, *, rngs: Optional[nnx.Rngs] = None):
+    self.config = config
+    self.mesh = mesh
+    self.rngs = rngs
+    self.vit_multi_modal_projector = linears.DenseGeneral(
+        in_features_shape=self.config.vision_output_dim_for_vit,
+        out_features_shape=self.config.base_emb_dim,
+        dtype=self.config.dtype_mm,
+        use_bias=False,
+        matmul_precision=self.config.matmul_precision,
+        rngs=self.rngs,
+    )
+  
+  def __call__(self, image_features: Array) -> Array:
+    """Project image features to text hidden dimension.
+
+    Args:
+      image_features: Input tensor of shape [batch_size, num_patches, (pixel_shuffle_ratio**2), vision_output_dim]
+
+    Returns:
+      Tensor of shape [batch_size, num_patches, (pixel_shuffle_ratio**2), vision_hidden_size]
+    """
+    b, t, c, d = image_features.shape
+    image_features = image_features.reshape(b * t, c, d)
+    hidden_states = self.vit_multi_modal_projector(image_features)
+    _, c, d = hidden_states.shape
+    hidden_states = hidden_states.reshape(b, t, c, d)
+    return hidden_states
+
+
+def llama4multimodalprojector_as_linen(config: Config, mesh: Mesh):
+  return nnx_wrappers.to_linen(
+      Llama4MultiModalProjector,
+      config=config,
+      mesh=mesh,
+      name="Llama4MultiModalProjector_0",
+      abstract_init=False,
+      metadata_fn=variable_to_logically_partitioned,
+  )
+
 
 
 def determine_is_nope_layer(layer_id: int, nope_layer_interval: int) -> bool:
@@ -977,7 +1075,98 @@ def llama4visionencoder_as_linen(config: Config, mesh: Mesh) -> nn.Module:
   )
 
 
-class Llama4VisionModel(nn.Module):
+# class Llama4VisionModel(nn.Module):
+#   """Llama4 vision model for processing image inputs.
+
+#   This model extracts patches from input image tiles and processes them
+#   through Llama4VisionEncoder and other vision-specific layers.
+
+#   Attributes:
+#     config: Config containing model parameters
+#     mesh: Mesh, JAX device mesh (used for sharding)
+#   """
+
+#   config: Config
+#   mesh: Mesh
+
+#   def setup(self):
+#     self.scale = self.config.hidden_size_for_vit**-0.5
+#     self.num_patches = (self.config.tile_size_for_vit // self.config.patch_size_for_vit) ** 2 + 1
+#     self.class_embedding = self.param(
+#         "class_embedding",
+#         nn.initializers.normal(stddev=self.scale, dtype=self.config.dtype_mm),
+#         (self.config.hidden_size_for_vit,),
+#     )
+#     self.positional_embedding_vlm = self.param(
+#         "positional_embedding_vlm",
+#         nn.initializers.normal(stddev=self.scale, dtype=self.config.dtype_mm),
+#         (self.num_patches, self.config.hidden_size_for_vit),
+#     )
+
+#   @nn.compact
+#   def __call__(
+#       self,
+#       pixel_values: Array,
+#       output_attentions: None | bool = None,
+#       output_hidden_states: None | bool = None,
+#       return_dict: None | bool = None,
+#       deterministic: None | bool = False,
+#   ) -> Array:
+#     """Forward pass of the Llama4 vision model.
+
+#     Args:
+#       inputs: Input tensor of shape [batch_size, num_tiles, num_channels_for_vit, tile_size_for_vit, tile_size_for_vit]
+#       deterministic: Whether to use deterministic mode (disables dropout)
+
+#     Returns:
+#       Final hidden states from the vision encoder of shape [batch_size, num_tiles, num_patches, vision_output_dim_for_vit]
+#     """
+#     cfg = self.config
+#     mesh = self.mesh
+#     jax.debug.print("input mean {}", jnp.mean(pixel_values))
+
+#     b, t, c, h, w = pixel_values.shape
+#     pixel_values = jnp.reshape(pixel_values, [b * t, c, h, w])
+
+#     # Unfold convolution to extract patches
+#     # hidden_states = Llama4UnfoldConvolution(config=cfg)(pixel_values)
+#     hidden_states = llama4unfoldconvolution_as_linen(config=cfg)(pixel_values)
+#     jax.debug.print("unfold mean {}", jnp.mean(hidden_states))
+
+#     # Add class embedding to the beginning of the sequence
+#     class_embedding_expanded = jnp.expand_dims(jnp.expand_dims(self.class_embedding, axis=0), axis=0)
+#     class_embedding = jnp.broadcast_to(class_embedding_expanded, (hidden_states.shape[0], 1, cfg.hidden_size_for_vit))
+#     hidden_states = jnp.concatenate([class_embedding, hidden_states], axis=1)
+
+#     # Add positional embedding
+#     hidden_states += self.positional_embedding_vlm
+#     jax.debug.print("positional_embedding_vlm mean {}", jnp.mean(hidden_states))
+
+#     # Transformation layers
+#     hidden_states = nn.LayerNorm(name="layernorm_pre")(hidden_states)
+#     jax.debug.print("layernorm_pre mean {}", jnp.mean(hidden_states))
+
+#     # hidden_states = Llama4VisionEncoder(config=cfg, mesh=mesh)(hidden_states)
+#     hidden_states = llama4visionencoder_as_linen(config=cfg, mesh=mesh)(hidden_states)
+#     jax.debug.print("Llama4VisionEncoder mean {}", jnp.mean(hidden_states))
+
+#     hidden_states = nn.LayerNorm(name="layernorm_post")(hidden_states)
+#     jax.debug.print("layernorm_post mean {}", jnp.mean(hidden_states))
+#     hidden_states = hidden_states[:, :-1, :]
+
+#     # hidden_states = Llama4VisionPixelShuffleMLP(config=cfg)(hidden_states)
+#     hidden_states = llama4visionpixelshufflemlp_as_linen(config=cfg)(hidden_states)
+#     jax.debug.print("Llama4VisionPixelShuffleMLP mean {}", jnp.mean(hidden_states))
+
+#     # Reshape hidden states
+#     _, patch_num, patch_dim = hidden_states.shape
+#     hidden_states = jnp.reshape(hidden_states, [b, t, patch_num, patch_dim])
+#     jax.debug.print("output mean {}", jnp.mean(hidden_states))
+
+#     return hidden_states
+
+
+class Llama4VisionModel(nnx.Module):
   """Llama4 vision model for processing image inputs.
 
   This model extracts patches from input image tiles and processes them
@@ -988,24 +1177,23 @@ class Llama4VisionModel(nn.Module):
     mesh: Mesh, JAX device mesh (used for sharding)
   """
 
-  config: Config
-  mesh: Mesh
-
-  def setup(self):
+  def __init__(self, config: Config, mesh: Mesh, *, rngs: nnx.Rngs = None):
+    self.config = config
+    self.mesh = mesh
+    self.rngs = rngs
     self.scale = self.config.hidden_size_for_vit**-0.5
     self.num_patches = (self.config.tile_size_for_vit // self.config.patch_size_for_vit) ** 2 + 1
-    self.class_embedding = self.param(
-        "class_embedding",
-        nn.initializers.normal(stddev=self.scale, dtype=self.config.dtype_mm),
-        (self.config.hidden_size_for_vit,),
-    )
-    self.positional_embedding_vlm = self.param(
-        "positional_embedding_vlm",
-        nn.initializers.normal(stddev=self.scale, dtype=self.config.dtype_mm),
-        (self.num_patches, self.config.hidden_size_for_vit),
-    )
+    self.initializer = nnx.initializers.normal(self.scale)
 
-  @nn.compact
+    self.class_embedding = nnx.Param(self.initializer(self.rngs.params(), (self.config.hidden_size_for_vit,), self.config.dtype_mm))
+    self.positional_embedding_vlm = nnx.Param(self.initializer(self.rngs.params(), (self.num_patches, self.config.hidden_size_for_vit), self.config.dtype_mm))
+    self.layernorm_pre = nnx.LayerNorm(num_features=self.config.hidden_size_for_vit, dtype=self.config.dtype_mm, rngs=self.rngs)
+    self.layernorm_post = nnx.LayerNorm(num_features=self.config.hidden_size_for_vit, dtype=self.config.dtype_mm, rngs=self.rngs)
+
+    self.Llama4UnfoldConvolution_0 = Llama4UnfoldConvolution(config=self.config, rngs=self.rngs)
+    self.Llama4VisionEncoder_0 = Llama4VisionEncoder(config=self.config, mesh=self.mesh, rngs=self.rngs)
+    self.Llama4VisionPixelShuffleMLP_0 = Llama4VisionPixelShuffleMLP(config=self.config, rngs=self.rngs)
+
   def __call__(
       self,
       pixel_values: Array,
@@ -1014,30 +1202,15 @@ class Llama4VisionModel(nn.Module):
       return_dict: None | bool = None,
       deterministic: None | bool = False,
   ) -> Array:
-    """Forward pass of the Llama4 vision model.
-
-    Args:
-      inputs: Input tensor of shape [batch_size, num_tiles, num_channels_for_vit, tile_size_for_vit, tile_size_for_vit]
-      deterministic: Whether to use deterministic mode (disables dropout)
-
-    Returns:
-      Final hidden states from the vision encoder of shape [batch_size, num_tiles, num_patches, vision_output_dim_for_vit]
-    """
-    cfg = self.config
-    mesh = self.mesh
-    jax.debug.print("input mean {}", jnp.mean(pixel_values))
-
     b, t, c, h, w = pixel_values.shape
     pixel_values = jnp.reshape(pixel_values, [b * t, c, h, w])
 
-    # Unfold convolution to extract patches
-    # hidden_states = Llama4UnfoldConvolution(config=cfg)(pixel_values)
-    hidden_states = llama4unfoldconvolution_as_linen(config=cfg)(pixel_values)
+    hidden_states = self.Llama4UnfoldConvolution_0(pixel_values)
     jax.debug.print("unfold mean {}", jnp.mean(hidden_states))
 
     # Add class embedding to the beginning of the sequence
     class_embedding_expanded = jnp.expand_dims(jnp.expand_dims(self.class_embedding, axis=0), axis=0)
-    class_embedding = jnp.broadcast_to(class_embedding_expanded, (hidden_states.shape[0], 1, cfg.hidden_size_for_vit))
+    class_embedding = jnp.broadcast_to(class_embedding_expanded, (hidden_states.shape[0], 1, self.config.hidden_size_for_vit))
     hidden_states = jnp.concatenate([class_embedding, hidden_states], axis=1)
 
     # Add positional embedding
@@ -1045,18 +1218,19 @@ class Llama4VisionModel(nn.Module):
     jax.debug.print("positional_embedding_vlm mean {}", jnp.mean(hidden_states))
 
     # Transformation layers
-    hidden_states = nn.LayerNorm(name="layernorm_pre")(hidden_states)
+    hidden_states = self.layernorm_pre(hidden_states)
     jax.debug.print("layernorm_pre mean {}", jnp.mean(hidden_states))
 
     # hidden_states = Llama4VisionEncoder(config=cfg, mesh=mesh)(hidden_states)
-    hidden_states = llama4visionencoder_as_linen(config=cfg, mesh=mesh)(hidden_states)
+    hidden_states = self.Llama4VisionEncoder_0(hidden_states)
     jax.debug.print("Llama4VisionEncoder mean {}", jnp.mean(hidden_states))
 
-    hidden_states = nn.LayerNorm(name="layernorm_post")(hidden_states)
+    hidden_states = self.layernorm_post(hidden_states)
     jax.debug.print("layernorm_post mean {}", jnp.mean(hidden_states))
     hidden_states = hidden_states[:, :-1, :]
 
-    hidden_states = Llama4VisionPixelShuffleMLP(config=cfg)(hidden_states)
+    # hidden_states = Llama4VisionPixelShuffleMLP(config=cfg)(hidden_states)
+    hidden_states = self.Llama4VisionPixelShuffleMLP_0(hidden_states)
     jax.debug.print("Llama4VisionPixelShuffleMLP mean {}", jnp.mean(hidden_states))
 
     # Reshape hidden states
@@ -1065,3 +1239,14 @@ class Llama4VisionModel(nn.Module):
     jax.debug.print("output mean {}", jnp.mean(hidden_states))
 
     return hidden_states
+
+
+def llama4visionmodel_as_linen(config: Config, mesh: Mesh) -> nn.Module:
+  return nnx_wrappers.to_linen(
+    Llama4VisionModel,
+    config=config,
+    mesh=mesh,
+    name="Llama4VisionModel_0",
+    abstract_init=False,
+    metadata_fn=variable_to_logically_partitioned,
+  )
