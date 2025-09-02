@@ -30,6 +30,7 @@ from MaxText.layers import attentions, moe
 import numpy as np
 from MaxText.layers.initializers import nd_dense_init
 from types import SimpleNamespace
+from transformers.models.gpt_oss.modeling_gpt_oss import GptOssAttention
 
 
 """  
@@ -423,6 +424,134 @@ class GptOssAttentionTest(unittest.TestCase):
     mse_flash = jnp.mean((to_jax(expected_attn_output) - actual_attn_output_flash) ** 2)
     self.assertLess(mse_flash, 1e-3, f"flash attention mismatch, MSE: {mse_flash}")
     np.testing.assert_allclose(to_jax(expected_attn_output), actual_attn_output_flash, rtol=1e-3, atol=1e-2)
+
+"""
+self.head_dim = getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)
+https://github.com/huggingface/transformers/blob/31ab7168ff7e07f61c90134e5238c4d97606aa70/src/transformers/models/gpt_oss/modeling_gpt_oss.py#L262
+self.sliding_window = config.sliding_window if config.layer_types[layer_idx] == "sliding_attention" else None
+"""
+
+
+class FullAttentionBlockTest(unittest.TestCase):
+
+  def setUp(self):
+    super().setUp()
+    torch.manual_seed(42)
+    # 1. Shared Configuration
+    self.config = SimpleNamespace(
+        hidden_size=64,
+        num_attention_heads=8,
+        num_key_value_heads=4,
+        head_dim=8,
+        attention_bias=False,
+        attention_dropout=0,
+        # additional
+        layer_types=["sliding_window", "full_attention"],
+        sliding_window=None,
+    )
+    self.batch_size = 2
+    self.seq_len = 128
+
+    # 2. PyTorch model and weights
+    self.torch_model = GptOssAttention(self.config, layer_idx=1)
+    self.predefined_weights = {
+        "q_proj.weight": torch.randn(self.config.num_attention_heads * self.config.head_dim, self.config.hidden_size),
+        "k_proj.weight": torch.randn(self.config.num_key_value_heads * self.config.head_dim, self.config.hidden_size),
+        "v_proj.weight": torch.randn(self.config.num_key_value_heads * self.config.head_dim, self.config.hidden_size),
+        "o_proj.weight": torch.randn(self.config.hidden_size, self.config.num_attention_heads * self.config.head_dim),
+        "sinks": torch.randn(self.config.num_attention_heads),
+    }
+    self.torch_model.load_state_dict(self.predefined_weights, strict=False)
+    self.torch_model.eval()
+
+    # Dummy input data
+    self.hidden_states_torch = torch.randn(self.batch_size, self.seq_len, self.config.hidden_size)
+    self.attention_mask_torch = torch.ones(self.batch_size, self.seq_len, dtype=torch.long)
+    self.position_embeddings_torch = torch.randn(self.batch_size, self.seq_len, self.config.hidden_size)
+
+  def test_full_attention_block(self):
+    # 3. Run PyTorch model for expected output
+    with torch.no_grad():
+      expected_output, _, _ = self.torch_model(
+          self.hidden_states_torch,
+          attention_mask=self.attention_mask_torch,
+          position_embeddings=self.position_embeddings_torch,
+      )
+
+    # 4. Setup MaxText model
+    # Using placeholder config path
+    # pkg_dir = os.path.expanduser("~")
+    # if not os.path.exists(os.path.join(pkg_dir, "configs")):
+    #   os.makedirs(os.path.join(pkg_dir, "configs"))
+    # with open(os.path.join(pkg_dir, "configs", "base.yml"), "w") as f:
+    #   f.write("learning_rate: 0.01")  # dummy content
+
+    cfg = pyconfig.initialize(
+        [None, os.path.join(PKG_DIR, "configs", "base.yml")],
+        run_name="attention_test",
+        enable_checkpointing=False,
+        model_name="default",
+        dtype="float32",
+        per_device_batch_size=self.batch_size,
+        max_target_length=self.seq_len,
+        base_num_query_heads=self.config.num_attention_heads,
+        base_num_kv_heads=self.config.num_key_value_heads,
+        base_emb_dim=self.config.hidden_size,
+        head_dim=self.config.head_dim,
+        attention="dot_product",
+        attention_bias=self.config.attention_bias,
+        attention_sink=True,
+    )
+    devices_array = maxtext_utils.create_device_mesh(cfg)
+    mesh = Mesh(devices_array, cfg.mesh_axes)
+
+    maxtext_attention_layer = attentions.Attention(
+        config=cfg,
+        num_query_heads=cfg.base_num_query_heads,
+        num_kv_heads=cfg.base_num_kv_heads,
+        head_dim=cfg.head_dim,
+        max_target_length=cfg.max_target_length,
+        mesh=mesh,
+        dtype=jnp.float32,
+        name="GptOssAttention",
+        use_bias=cfg.attention_bias,
+        attention_type=attentions.AttentionType.FULL,
+    )
+
+    # 5. Map weights from PyTorch to JAX/Flax format
+    # Note the transpose for dense kernels!
+    jax_weights = {
+        "params": {
+            "query": {"kernel": to_jax(self.predefined_weights["q_proj.weight"]).T},
+            "key": {"kernel": to_jax(self.predefined_weights["k_proj.weight"]).T},
+            "value": {"kernel": to_jax(self.predefined_weights["v_proj.weight"]).T},
+            "out": {"kernel": to_jax(self.predefined_weights["o_proj.weight"]).T},
+            "sinks": to_jax(self.predefined_weights["sinks"]),
+        }
+    }
+
+    # 6. Run MaxText model for actual output
+    hidden_states_jax = to_jax(self.hidden_states_torch)
+    decoder_segment_ids = (decoder_segment_ids,)
+    inputs_positions = (decoder_positions,)
+
+    @jax.jit
+    def run_maxtext_attention(weights, inputs):
+      return maxtext_attention_layer.apply(
+          weights,
+          inputs,  # query
+          inputs,  # key/value
+          decoder_segment_ids=decoder_segment_ids,
+          inputs_positions=decoder_positions,
+          model_mode="train",  # simplified for test
+      )
+
+    actual_output = run_maxtext_attention(jax_weights, hidden_states_jax)
+
+    # 7. Compare results
+    print(f"MSE between Torch and MaxText: {jnp.mean((to_jax(expected_output) - actual_output)**2):.6f}")
+    np.testing.assert_allclose(to_jax(expected_output), actual_output, rtol=1e-4, atol=1e-4)
+    print("✅ Test passed: PyTorch and MaxText attention outputs match!")
 
 
 if __name__ == "__main__":
