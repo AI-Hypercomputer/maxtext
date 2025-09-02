@@ -18,6 +18,8 @@ sphinx-build -b html . _build/html
 
 This will generate the documentation in the `docs/_build/html` directory.
 
+If you are adding a new document, make sure it is included in the `toctree` directive corresponding to the section where the new document should live. For example, if adding a new tutorial, make sure it is listed in [the `docs/tutorials.md`](https://github.com/AI-Hypercomputer/maxtext/blob/7070e8eecbea8951c8e5281219ce797c8df1441f/docs/tutorials.md?plain=1#L38).
+
 ### Documentation deployment
 
 The MaxText documentation is deployed to https://maxtext.readthedocs.io on any successful merge to the main branch.
