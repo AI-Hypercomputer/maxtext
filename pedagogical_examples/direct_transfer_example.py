@@ -1,6 +1,6 @@
 """
 A pedagogical example of creating a JAX array on a training mesh
-and then resharding it to a separate inference mesh.
+and then directly transferring it to a separate inference mesh.
 
 This version is hardcoded for a 32-device environment, splitting them
 into two 16-device meshes for training and inference.
@@ -10,15 +10,14 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh, PartitionSpec, NamedSharding
 import numpy as np
-from pathwaysutils.experimental import reshard as pathways_reshard
 
 
 pathwaysutils.initialize()
 
 
-def run_resharding_example():
+def run_direct_transfer_example():
   """
-  Demonstrates creating and resharding a JAX array between two different meshes.
+  Demonstrates creating and directly transferring a JAX array between two different meshes.
   """
   num_devices = len(jax.devices())
   if num_devices != 32:
@@ -28,7 +27,7 @@ def run_resharding_example():
   # 1. Set up two distinct 16-device meshes.
   all_devices = np.array(jax.devices())[:32]
   train_mesh_shape = (4, 4)
-  inference_mesh_shape = (2, 8)
+  inference_mesh_shape = (4, 4)
   axis_names = ('data', 'model')
 
   # First 16 devices for the training mesh.
@@ -63,7 +62,23 @@ def run_resharding_example():
     jax.transfer_guard_host_to_device("disallow_explicit"),
   ):
     print("Putting array_on_train_mesh on inference_mesh. It will fail if it goes through the host.")
-    array_on_inference_mesh = pathways_reshard.reshard(array_on_train_mesh, inference_sharding)
+
+    # Manual direct transfer implementation.
+
+    # 1. Get the shards from the source array.
+    source_shards = array_on_train_mesh.addressable_shards
+
+    # 2. Create a list of single-device arrays, each placed on a target device.
+    # This assumes a simple 1:1 mapping of device order, which works for this example.
+    single_device_arrays = []
+    for i, shard in enumerate(source_shards):
+      target_device = inference_mesh.devices.flat[i]
+      single_device_arrays.append(jax.device_put(shard.data, target_device))
+
+    # 3. Construct the new GlobalDeviceArray on the target mesh.
+    array_on_inference_mesh = jax.make_array_from_single_device_arrays(
+      array_on_train_mesh.shape, inference_sharding, single_device_arrays
+    )
 
 
   print("Array placed on the inference mesh.")
@@ -71,8 +86,8 @@ def run_resharding_example():
 
   # Verify the contents are the same.
   np.testing.assert_allclose(np.array(array_on_train_mesh), np.array(array_on_inference_mesh))
-  print("Verified: Array contents are identical after resharding.")
+  print("Verified: Array contents are identical after direct transfer.")
 
 
 if __name__ == "__main__":
-  run_resharding_example()
+  run_direct_transfer_example()
