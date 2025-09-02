@@ -3,10 +3,9 @@
 
 ## Contributing documentation
 
-### Building the documentation locally
+### Building the documentation locally (optional)
 
-To build the documentation locally, make sure you install the necessary dependencies. You can do this by navigating to your local clone of the MaxText repo and running:
-
+If you are writing documentation for MaxText, you may want to preview the documentation site locally. First, make sure you install the necessary dependencies. You can do this by navigating to your local clone of the MaxText repo and running:
 ```bash
 pip install -r requirements_docs.txt
 ```
