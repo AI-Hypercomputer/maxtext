@@ -1,5 +1,7 @@
 """
-python -m MaxText.forward
+# tpu
+export LIBTPU_INIT_ARGS='--xla_tpu_scoped_vmem_limit_kib=81920'
+python maxtext_forward.py
 """
 
 import jax
