@@ -57,7 +57,9 @@ class Llama4UnfoldConvolution(nnx.Module):
     self.config = config
     self.rngs = rngs
     self.vit_unfold_linear = linears.DenseGeneral(
-        in_features_shape=(self.config.num_channels_for_vit * self.config.patch_size_for_vit * self.config.patch_size_for_vit),
+        in_features_shape=(
+            self.config.num_channels_for_vit * self.config.patch_size_for_vit * self.config.patch_size_for_vit
+        ),
         out_features_shape=self.config.hidden_size_for_vit,
         dtype=self.config.dtype_mm,
         use_bias=False,
@@ -77,7 +79,9 @@ class Llama4UnfoldConvolution(nnx.Module):
         dimension_numbers=("NCHW", "HWIO", "NCHW"),
     )
 
-    patches = patches.reshape(batch_size, num_channels * self.config.patch_size_for_vit * self.config.patch_size_for_vit, num_patches)
+    patches = patches.reshape(
+        batch_size, num_channels * self.config.patch_size_for_vit * self.config.patch_size_for_vit, num_patches
+    )
     patches = patches.transpose(0, 2, 1)
 
     hidden_states = self.vit_unfold_linear(patches)
@@ -139,7 +143,7 @@ class Llama4VisionMLP(nnx.Module):
         matmul_precision=self.config.matmul_precision,
         rngs=self.rngs,
     )
-  
+
   def __call__(self, hidden_states: Array) -> Array:
     hidden_states = self.vit_encoder_layer_mlp_fc1(hidden_states)
     hidden_states = nnx.gelu(hidden_states, approximate=False)
@@ -230,7 +234,7 @@ class Llama4MultiModalProjector(nnx.Module):
         matmul_precision=self.config.matmul_precision,
         rngs=self.rngs,
     )
-  
+
   def __call__(self, image_features: Array) -> Array:
     """Project image features to text hidden dimension.
 
@@ -557,14 +561,14 @@ class Llama4VisionEncoderLayer(nnx.Module):
     self.mesh = mesh
     self.rngs = rngs
     self.hidden_states_shape = (
-      self.config.per_device_batch_size,
-      (self.config.image_size_for_vit // self.config.patch_size_for_vit) ** 2 + 1,
-      self.config.hidden_size_for_vit,
+        self.config.per_device_batch_size,
+        (self.config.image_size_for_vit // self.config.patch_size_for_vit) ** 2 + 1,
+        self.config.hidden_size_for_vit,
     )
 
     self.input_layer_norm = nnx.LayerNorm(num_features=self.config.hidden_size_for_vit, epsilon=1e-5, rngs=self.rngs)
     self.self_attention_vision = attentions.Attention(
-      config=self.config,
+        config=self.config,
         num_query_heads=self.config.num_attention_heads_for_vit,
         num_kv_heads=self.config.num_attention_heads_for_vit,
         head_dim=self.config.hidden_size_for_vit // self.config.num_attention_heads_for_vit,
@@ -590,10 +594,16 @@ class Llama4VisionEncoderLayer(nnx.Module):
         model_mode=MODEL_MODE_TRAIN,
         rngs=self.rngs,
     )
-    self.post_attention_layer_norm = nnx.LayerNorm(num_features=self.config.hidden_size_for_vit, epsilon=1e-5, rngs=self.rngs)
+    self.post_attention_layer_norm = nnx.LayerNorm(
+        num_features=self.config.hidden_size_for_vit, epsilon=1e-5, rngs=self.rngs
+    )
     self.Llama4VisionMLP_0 = Llama4VisionMLP(config=self.config, rngs=self.rngs)
 
-  def __call__(self, hidden_states: Array, deterministic: bool = False,):
+  def __call__(
+      self,
+      hidden_states: Array,
+      deterministic: bool = False,
+  ):
     residual = hidden_states
     hidden_states = self.input_layer_norm(hidden_states)
     hidden_states = self.self_attention_vision(
@@ -660,10 +670,18 @@ class Llama4VisionModel(nnx.Module):
     self.num_patches = (self.config.tile_size_for_vit // self.config.patch_size_for_vit) ** 2 + 1
     self.initializer = nnx.initializers.normal(self.scale)
 
-    self.class_embedding = nnx.Param(self.initializer(self.rngs.params(), (self.config.hidden_size_for_vit,), self.config.dtype_mm))
-    self.positional_embedding_vlm = nnx.Param(self.initializer(self.rngs.params(), (self.num_patches, self.config.hidden_size_for_vit), self.config.dtype_mm))
-    self.layernorm_pre = nnx.LayerNorm(num_features=self.config.hidden_size_for_vit, dtype=self.config.dtype_mm, rngs=self.rngs)
-    self.layernorm_post = nnx.LayerNorm(num_features=self.config.hidden_size_for_vit, dtype=self.config.dtype_mm, rngs=self.rngs)
+    self.class_embedding = nnx.Param(
+        self.initializer(self.rngs.params(), (self.config.hidden_size_for_vit,), self.config.dtype_mm)
+    )
+    self.positional_embedding_vlm = nnx.Param(
+        self.initializer(self.rngs.params(), (self.num_patches, self.config.hidden_size_for_vit), self.config.dtype_mm)
+    )
+    self.layernorm_pre = nnx.LayerNorm(
+        num_features=self.config.hidden_size_for_vit, dtype=self.config.dtype_mm, rngs=self.rngs
+    )
+    self.layernorm_post = nnx.LayerNorm(
+        num_features=self.config.hidden_size_for_vit, dtype=self.config.dtype_mm, rngs=self.rngs
+    )
 
     self.Llama4UnfoldConvolution_0 = Llama4UnfoldConvolution(config=self.config, rngs=self.rngs)
     self.Llama4VisionEncoder_0 = Llama4VisionEncoder(config=self.config, mesh=self.mesh, rngs=self.rngs)
@@ -685,7 +703,9 @@ class Llama4VisionModel(nnx.Module):
 
     # Add class embedding to the beginning of the sequence
     class_embedding_expanded = jnp.expand_dims(jnp.expand_dims(self.class_embedding, axis=0), axis=0)
-    class_embedding = jnp.broadcast_to(class_embedding_expanded, (hidden_states.shape[0], 1, self.config.hidden_size_for_vit))
+    class_embedding = jnp.broadcast_to(
+        class_embedding_expanded, (hidden_states.shape[0], 1, self.config.hidden_size_for_vit)
+    )
     hidden_states = jnp.concatenate([class_embedding, hidden_states], axis=1)
 
     # Add positional embedding
@@ -718,10 +738,10 @@ class Llama4VisionModel(nnx.Module):
 
 def llama4visionmodel_as_linen(config: Config, mesh: Mesh) -> nn.Module:
   return nnx_wrappers.to_linen(
-    Llama4VisionModel,
-    config=config,
-    mesh=mesh,
-    name="Llama4VisionModel_0",
-    abstract_init=False,
-    metadata_fn=variable_to_logically_partitioned,
+      Llama4VisionModel,
+      config=config,
+      mesh=mesh,
+      name="Llama4VisionModel_0",
+      abstract_init=False,
+      metadata_fn=variable_to_logically_partitioned,
   )
