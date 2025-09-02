@@ -3,6 +3,8 @@
 
 ## Contributing documentation
 
+The MaxText documentation website is built using [Sphinx](https://www.sphinx-doc.org) and [MyST](https://myst-parser.readthedocs.io/en/latest/). Documents are written in [MyST Markdown syntax](https://myst-parser.readthedocs.io/en/latest/syntax/typography.html#syntax-core).
+
 ### Building the documentation locally (optional)
 
 If you are writing documentation for MaxText, you may want to preview the documentation site locally. First, make sure you install the necessary dependencies. You can do this by navigating to your local clone of the MaxText repo and running:
