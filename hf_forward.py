@@ -16,9 +16,10 @@ hf_model = AutoModelForCausalLM.from_pretrained(
     trust_remote_code=True,
 )
 
-# config = AutoConfig.from_pretrained("gpt-oss-20b-test-bf16.json")
-# model = GptOssForCausalLM(config=config)
-# model.save_pretrained("/home/shuningjin/gpt-oss-20b/test-bf16")
+# print weight
+for name, param in hf_model.named_parameters():
+  print(name, "|", param.shape, "|", param.mean().item())
+
 
 # Dictionary to store the outputs from the HF model
 hf_intermediates = {}
@@ -122,7 +123,7 @@ for k, v in hf_intermediates.items():
     v = v.reshape(1, 4, -1, 64)
   if k == "attention_op_out":
     v = v.reshape(1, 4, -1, 64)
-  print(k)
+  print(k + " (hf)")
   print(f"mean={v.mean()}")
   print(f"shape={v.shape}")
   print(v)
