@@ -1,0 +1,16 @@
+base_config: "MaxText/configs/base.yml"
+args:
+  model_name: "qwen3-235b-a22b"
+  load_parameters_path: "gs://parambole-qwen3-moe-verification/scanned/07_08_2025/0/items"
+  tokenizer_path: "Qwen/Qwen3-235B-A22B-Thinking-2507"
+  tokenizer_type: "huggingface"
+  per_device_batch_size: 1
+  ici_tensor_parallelism: 4
+  ici_expert_parallelism: 8
+  max_prefill_predict_length: 4096
+  max_target_length: 8192
+  attention: "dot_product"
+  return_log_prob: True
+  scan_layers: True
+  megablox: True 
+  sparse_matmul: True

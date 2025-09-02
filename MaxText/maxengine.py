@@ -140,7 +140,7 @@ class MaxEngine(engine_api.Engine):
     max_utils.print_cpu_ram_stats(label)
 
   def generate_aot(
-      self, params: Params, decode_state: DecodeState, rng: None | PRNGKeyType = None
+      self, params: Params, decode_state: DecodeState, rng: PRNGKeyType | None = None
   ) -> tuple[DecodeState, engine_api.ResultTokens]:
     """Wrapper to generate for ahead of time compilation."""
 
@@ -215,7 +215,7 @@ class MaxEngine(engine_api.Engine):
         .compile(),
     )
 
-  def load_params(self, *args, params=None, rng: None | PRNGKeyType = None, **kwargs) -> Params:
+  def load_params(self, *args, params=None, rng: PRNGKeyType | None = None, **kwargs) -> Params:
     """Load Parameters from GCS or reshard given Parameters"""
     # pylint: disable=unused-argument
 
@@ -317,7 +317,7 @@ class MaxEngine(engine_api.Engine):
     lora_scale_factor = float(adapter_config["lora_alpha"]) / lora_rank
     lora_utils.unapply_lora_from_base_params(base_params, adapter_params, lora_scale_factor)
 
-  def quantize_params(self, state, rng: None | PRNGKeyType = None):
+  def quantize_params(self, state, rng: PRNGKeyType | None = None):
     """Forward pass to quantize decode params."""
     if rng is None:
       rng = jax.random.PRNGKey(0)
@@ -388,7 +388,7 @@ class MaxEngine(engine_api.Engine):
       params: Params,
       padded_tokens: jax.Array,
       true_length: int,
-      rng: None | PRNGKeyType = None,
+      rng: PRNGKeyType | None = None,
   ) -> tuple[Prefix, engine_api.ResultTokens]:
     """Wrapper for prefill for ahead-of-time compilation."""
 
@@ -399,20 +399,26 @@ class MaxEngine(engine_api.Engine):
         rng=rng,
     )
 
-  @functools.partial(jax.jit, static_argnums=(0,), static_argnames=("return_prompt_logp",))
+  @functools.partial(
+      jax.jit, static_argnums=(0,), static_argnames=("return_prompt_logp", "algorithm", "topk", "nucleus_topp")
+  )
   def _prefill_jit(
       self,
       *,
       params: Params,
-      existing_prefix: None | ExistingPrefix = None,
+      existing_prefix: ExistingPrefix | None = None,
       padded_tokens: jax.Array,
-      images: None | jax.Array = None,
+      images: jax.Array | None = None,
       true_length: int,
-      sampler: None | Callable[[Any], Any] = None,  # pylint: disable=unused-argument
-      rng: None | PRNGKeyType = None,
-      slot: None | int = None,
-      page_state: None | PageState = None,
+      sampler: Callable[[Any], Any] | None = None,  # pylint: disable=unused-argument
+      rng: PRNGKeyType | None = None,
+      slot: int | None = None,
+      page_state: PageState | None = None,
       return_prompt_logp: bool = False,
+      algorithm: str | None = None,
+      topk: int | None = None,
+      nucleus_topp: float | None = None,
+      temperature: float | None = None,
   ) -> tuple[Prefix, engine_api.ResultTokens]:
     """Computes a kv-cache for a new generate request.
 
@@ -494,17 +500,17 @@ class MaxEngine(engine_api.Engine):
     first_generated_token = inference_utils.sampling(
         selected_logits,
         new_rng,
-        self.config.decode_sampling_strategy,
-        topk=self.config.decode_sampling_top_k,
-        nucleus_topp=self.config.decode_sampling_nucleus_p,
-        temperature=self.config.decode_sampling_temperature,
+        algorithm if algorithm is not None else self.config.decode_sampling_strategy,
+        topk=topk if topk is not None else self.config.decode_sampling_top_k,
+        nucleus_topp=nucleus_topp if nucleus_topp is not None else self.config.decode_sampling_nucleus_p,
+        temperature=temperature if temperature is not None else self.config.decode_sampling_temperature,
     )
 
     all_valid = jnp.ones(first_generated_token.shape, dtype=jnp.int8)
     if self.config.return_log_prob:
       token_logp = inference_utils.log_prob_of_chosen_token(selected_logits, first_generated_token)
     else:
-      token_logp = None
+      token_logp = jnp.zeros(first_generated_token.shape, dtype=jnp.float32)
     result = engine_api.ResultTokens(
         data=jnp.concatenate((first_generated_token, all_valid, generated_tokens), axis=1),
         # Tokens are shape [batch, speculations], so when we concatenate
@@ -529,6 +535,7 @@ class MaxEngine(engine_api.Engine):
         "generated_tokens": generated_tokens,
         "tokens": first_generated_token,
         "prompt_logp": prompt_logp,
+        "token_logp": token_logp,         # First sampled token logp is also needed
     }, result
 
   # Public non-JIT prefill method that updates page state
@@ -536,15 +543,19 @@ class MaxEngine(engine_api.Engine):
       self,  # pytype: disable=signature-mismatch
       *,
       params: Params,
-      existing_prefix: None | ExistingPrefix = None,
+      existing_prefix: ExistingPrefix | None = None,
       padded_tokens: jax.Array,
-      images: None | jax.Array = None,
+      images: jax.Array | None = None,
       true_length: int,
-      sampler: None | Callable[[Any], Any] = None,  # pylint: disable=unused-argument
-      rng: None | PRNGKeyType = None,
-      request_id: None | uuid.UUID = None,  # pylint: disable=unused-argument
-      slot: None | int = None,
+      sampler: Callable[[Any], Any] | None = None,  # pylint: disable=unused-argument
+      rng: PRNGKeyType | None = None,
+      request_id: uuid.UUID | None = None,  # pylint: disable=unused-argument
+      slot: int | None = None,
       return_prompt_logp: bool = False,
+      algorithm: str | None = None,
+      topk: int | None = None,
+      nucleus_topp: float | None = None,
+      temperature: float | None = None,
   ) -> tuple[Prefix, engine_api.ResultTokens]:
     """Public API for prefill that updates page state outside JIT."""
     # Update page state before JIT call
@@ -573,6 +584,10 @@ class MaxEngine(engine_api.Engine):
         slot=slot,
         rng=rng,
         return_prompt_logp=return_prompt_logp,
+        algorithm=algorithm,
+        topk=topk,
+        nucleus_topp=nucleus_topp,
+        temperature=temperature,
     )
 
   def prefill_multisampling_aot(  # pylint: disable=too-many-positional-arguments
@@ -580,9 +595,13 @@ class MaxEngine(engine_api.Engine):
       params: Params,
       padded_tokens: jax.Array,
       true_length: int,
-      rng: None | PRNGKeyType = None,
+      rng: PRNGKeyType | None = None,
       num_samples: int = 1,
-      sampler: None | Callable[[Any], Any] = None,
+      sampler: Callable[[Any], Any] | None = None,
+      algorithm: str | None = None,
+      topk: int | None = None,
+      nucleus_topp: float | None = None,
+      temperature: float | None = None,
   ) -> tuple[Prefix, engine_api.ResultTokens]:
     """Wrapper for multi-sampling prefill for ahead-of-time compilation."""
     return self.prefill_multisampling(
@@ -592,6 +611,10 @@ class MaxEngine(engine_api.Engine):
         sampler=sampler,
         rng=rng,
         num_samples=num_samples,
+        algorithm=algorithm,
+        topk=topk,
+        nucleus_topp=nucleus_topp,
+        temperature=temperature,
     )
 
   def prefill_multisampling(
@@ -601,9 +624,13 @@ class MaxEngine(engine_api.Engine):
       params: Params,
       padded_tokens: jax.Array,
       true_length: int,
-      sampler: None | Callable[[Any], Any] = None,  # pylint: disable=unused-argument
-      rng: None | PRNGKeyType = None,
+      sampler: Callable[[Any], Any] | None = None,  # pylint: disable=unused-argument
+      rng: PRNGKeyType | None = None,
       num_samples: int = 1,
+      algorithm: str | None = None,
+      topk: int | None = None,
+      nucleus_topp: float | None = None,
+      temperature: float | None = None,
   ) -> tuple[Prefix, engine_api.ResultTokens]:
     """Public API for prefill multisampling."""
 
@@ -621,18 +648,26 @@ class MaxEngine(engine_api.Engine):
         sampler=sampler,
         rng=rng,
         num_samples=num_samples,
+        algorithm=algorithm,
+        topk=topk,
+        nucleus_topp=nucleus_topp,
+        temperature=temperature,
     )
 
-  @functools.partial(jax.jit, static_argnums=(0,), static_argnames=("num_samples",))
+  @functools.partial(jax.jit, static_argnums=(0,), static_argnames=("num_samples", "algorithm", "topk", "nucleus_topp"))
   def _prefill_multisampling_jit(
       self,
       *,
       params: Params,
       padded_tokens: jax.Array,
       true_length: int,
-      sampler: None | Callable[[Any], Any] = None,  # pylint: disable=unused-argument
-      rng: None | PRNGKeyType = None,
+      sampler: Callable[[Any], Any] | None = None,  # pylint: disable=unused-argument
+      rng: PRNGKeyType | None = None,
       num_samples: int = 1,
+      algorithm: str | None = None,
+      topk: int | None = None,
+      nucleus_topp: float | None = None,
+      temperature: float | None = None,
   ) -> tuple[Prefix, engine_api.ResultTokens]:
     """Computes a kv-cache for a new generate request.
 
@@ -677,10 +712,10 @@ class MaxEngine(engine_api.Engine):
       first_generated_token = inference_utils.sampling(
           selected_logits,
           new_rng,
-          self.config.decode_sampling_strategy,
-          topk=self.config.decode_sampling_top_k,
-          nucleus_topp=self.config.decode_sampling_nucleus_p,
-          temperature=self.config.decode_sampling_temperature,
+          algorithm if algorithm is not None else self.config.decode_sampling_strategy,
+          topk=topk if topk is not None else self.config.decode_sampling_top_k,
+          nucleus_topp=nucleus_topp if nucleus_topp is not None else self.config.decode_sampling_nucleus_p,
+          temperature=temperature if temperature is not None else self.config.decode_sampling_temperature,
       )
       first_generated_tokens.append(first_generated_token)
       if self.config.return_log_prob:
@@ -717,21 +752,25 @@ class MaxEngine(engine_api.Engine):
         "tokens": first_generated_tokens,
     }, result
 
-  @functools.partial(jax.jit, static_argnums=(0,), static_argnames=("num_prompts", "return_prompt_logp"))
+  @functools.partial(jax.jit, static_argnums=(0,), static_argnames=("num_prompts", "return_prompt_logp", "algorithm", "topk", "nucleus_topp"))
   def prefill_concat(
       self,
       *,
       params: Params,
-      existing_prefix: None | ExistingPrefix = None,
+      existing_prefix: ExistingPrefix | None = None,
       padded_tokens: jax.Array,
       decoder_positions: jax.Array,
       decoder_segment_ids: jax.Array,
       start_pos: jax.Array,
       true_lengths: jax.Array,
       num_prompts: int,
-      sampler: None | Callable[[Any], Any] = None,  # pylint: disable=unused-argument
-      rng: None | PRNGKeyType = None,
+      sampler: Callable[[Any], Any] | None = None,  # pylint: disable=unused-argument
+      rng: PRNGKeyType | None = None,
       return_prompt_logp: bool = False,
+      algorithm: str | None = None,
+      topk: int | None = None,
+      nucleus_topp: float | None = None,
+      temperature: float | None = None,
   ) -> tuple[Any, PackedPrefix, list[engine_api.ResultTokens]]:
     """Computes a kv-cache for a new packed generate request, which is a
     concatenation of several shorter prompts. Experimentation shows that
@@ -800,10 +839,10 @@ class MaxEngine(engine_api.Engine):
       first_generated_token = inference_utils.sampling(
           selected_logits,
           rng,
-          self.config.decode_sampling_strategy,
-          topk=self.config.decode_sampling_top_k,
-          nucleus_topp=self.config.decode_sampling_nucleus_p,
-          temperature=self.config.decode_sampling_temperature,
+          algorithm if algorithm is not None else self.config.decode_sampling_strategy,
+          topk=topk if topk is not None else self.config.decode_sampling_top_k,
+          nucleus_topp=nucleus_topp if nucleus_topp is not None else self.config.decode_sampling_nucleus_p,
+          temperature=temperature if temperature is not None else self.config.decode_sampling_temperature,
       )
       all_valid = jnp.ones(first_generated_token.shape, dtype=jnp.int8)
       if self.config.return_log_prob:
@@ -847,8 +886,12 @@ class MaxEngine(engine_api.Engine):
       self,
       params: Params,
       decode_state: DecodeState,
-      sampler: None | Callable[[Any], Any] = None,  # pylint: disable=unused-argument
-      rng: None | PRNGKeyType = None,
+      sampler: Callable[[Any], Any] | None = None,  # pylint: disable=unused-argument
+      rng: PRNGKeyType | None = None,
+      algorithm: str | None = None,
+      topk: int | None = None,
+      nucleus_topp: float | None = None,
+      temperature: float | None = None,
   ) -> tuple[DecodeState, engine_api.ResultTokens]:
     """Public API for generate that updates page state outside JIT."""
 
@@ -869,19 +912,27 @@ class MaxEngine(engine_api.Engine):
         sampler=sampler,
         page_state=self.page_state,
         rng=rng,
+        algorithm=algorithm,
+        topk=topk,
+        nucleus_topp=nucleus_topp,
+        temperature=temperature,
     )
 
     return max_utils.unbox_logicallypartioned(new_state), result
 
-  @functools.partial(jax.jit, static_argnums=(0,), donate_argnums=(2,))
+  @functools.partial(jax.jit, static_argnums=(0,), donate_argnums=(2,), static_argnames=("algorithm", "topk", "nucleus_topp"))
   def _generate_jit(
       self,
       params: Params,
       decode_state: DecodeState,
       *,
-      sampler: None | Callable[[Any], Any] = None,  # pylint: disable=unused-argument
-      rng: None | PRNGKeyType = None,
-      page_state: None | PageState = None,
+      sampler: Callable[[Any], Any] | None = None,  # pylint: disable=unused-argument
+      rng: PRNGKeyType | None = None,
+      page_state: PageState | None = None,
+      algorithm: str | None = None,
+      topk: int | None = None,
+      nucleus_topp: float | None = None,
+      temperature: float | None = None,
   ) -> tuple[DecodeState, engine_api.ResultTokens]:
     """Run one generate step"""
 
@@ -906,16 +957,16 @@ class MaxEngine(engine_api.Engine):
     new_token = inference_utils.sampling(
         out_logits,
         new_rng,
-        self.config.decode_sampling_strategy,
-        topk=self.config.decode_sampling_top_k,
-        nucleus_topp=self.config.decode_sampling_nucleus_p,
-        temperature=self.config.decode_sampling_temperature,
+        algorithm if algorithm is not None else self.config.decode_sampling_strategy,
+        topk=topk if topk is not None else self.config.decode_sampling_top_k,
+        nucleus_topp=nucleus_topp if nucleus_topp is not None else self.config.decode_sampling_nucleus_p,
+        temperature=temperature if temperature is not None else self.config.decode_sampling_temperature,
     )
     all_valid = jnp.ones(new_token.shape, dtype=jnp.int8)
     if self.config.return_log_prob:
       token_logp = inference_utils.log_prob_of_chosen_token(out_logits, new_token)
     else:
-      token_logp = None
+      token_logp = jnp.zeros(new_token.shape, dtype=jnp.float32)
 
     # Increment index by 1 as prefill returns first token
     next_pos = decode_state["next_pos"] + 1
@@ -941,6 +992,7 @@ class MaxEngine(engine_api.Engine):
         "next_pos": next_pos,
         "generated_tokens": generated_tokens,
         "tokens": new_token,
+        "token_logp": token_logp,
     }, result
 
   @functools.partial(
@@ -1037,6 +1089,12 @@ class MaxEngine(engine_api.Engine):
           slot,
           0,
       )
+      decode_state["token_logp"] = jax.lax.dynamic_update_index_in_dim(
+          decode_state["token_logp"],
+          jnp.expand_dims(unboxed_prefix["token_logp"][i], axis=0),
+          slot,
+          0,
+      )
 
     inserted_logits = jax.lax.with_sharding_constraint(decode_state["logits"], self.replicated_sharding)
     inserted_generated_tokens = jax.lax.with_sharding_constraint(
@@ -1045,6 +1103,7 @@ class MaxEngine(engine_api.Engine):
     inserted_next_pos = jax.lax.with_sharding_constraint(decode_state["next_pos"], self.replicated_sharding)
     inserted_tokens = jax.lax.with_sharding_constraint(decode_state["tokens"], self.replicated_sharding)
     inserted_cache = jax.lax.with_sharding_constraint(inserted_cache, self.kv_cache_shardings)
+    inserted_token_logp = jax.lax.with_sharding_constraint(decode_state["token_logp"], self.replicated_sharding)
 
     return {
         "logits": inserted_logits,
@@ -1052,6 +1111,7 @@ class MaxEngine(engine_api.Engine):
         "next_pos": inserted_next_pos,
         "generated_tokens": inserted_generated_tokens,
         "tokens": inserted_tokens,
+        "token_logp": inserted_token_logp,
     }
 
   @functools.partial(jax.jit, static_argnums=(0,), donate_argnames=("prefix", "decode_state"))
@@ -1060,8 +1120,8 @@ class MaxEngine(engine_api.Engine):
       prefix: Prefix,
       decode_state: DecodeState,
       slot: int,
-      request_id: None | uuid.UUID = None,  # pylint: disable=unused-argument
-      page_state_in: None | PageState = None,
+      request_id: uuid.UUID | None = None,  # pylint: disable=unused-argument
+      page_state_in: PageState | None = None,
   ) -> DecodeState:
     """Insert a single computed prefill cache into KV cache."""
     unboxed_prefix = max_utils.unbox_logicallypartioned(prefix)
@@ -1162,12 +1222,16 @@ class MaxEngine(engine_api.Engine):
         0,
     )
     inserted_tokens = jax.lax.dynamic_update_index_in_dim(decode_state["tokens"], unboxed_prefix["tokens"], slot, 0)
+    inserted_token_logp = jax.lax.dynamic_update_index_in_dim(
+        decode_state["token_logp"], unboxed_prefix["token_logp"], slot, 0
+    )
 
     inserted_logits = jax.lax.with_sharding_constraint(inserted_logits, self.replicated_sharding)
     inserted_generated_tokens = jax.lax.with_sharding_constraint(inserted_generated_tokens, self.replicated_sharding)
     inserted_next_pos = jax.lax.with_sharding_constraint(inserted_next_pos, self.replicated_sharding)
     inserted_tokens = jax.lax.with_sharding_constraint(inserted_tokens, self.replicated_sharding)
     inserted_cache = jax.lax.with_sharding_constraint(inserted_cache, self.kv_cache_shardings)
+    inserted_token_logp = jax.lax.with_sharding_constraint(inserted_token_logp, self.replicated_sharding)
 
     return {
         "logits": inserted_logits,
@@ -1175,6 +1239,7 @@ class MaxEngine(engine_api.Engine):
         "next_pos": inserted_next_pos,
         "generated_tokens": inserted_generated_tokens,
         "tokens": inserted_tokens,
+        "token_logp": inserted_token_logp,
     }
 
   def insert(
@@ -1182,7 +1247,7 @@ class MaxEngine(engine_api.Engine):
       prefix: Prefix,
       decode_state: DecodeState,
       slot: int,
-      request_id: None | uuid.UUID = None,
+      request_id: uuid.UUID | None = None,
   ) -> DecodeState:
     """Non-JIT wrapper for inserting prefill cache."""
 
@@ -1302,6 +1367,7 @@ class MaxEngine(engine_api.Engine):
     inserted_next_pos = decode_state["next_pos"]
     inserted_generated_tokens = decode_state["generated_tokens"]
     inserted_tokens = decode_state["tokens"]
+    inserted_token_logp = decode_state["token_logp"]
 
     for i in range(num_prompts):
       start_idx = start_indices[i]
@@ -1320,12 +1386,16 @@ class MaxEngine(engine_api.Engine):
           0,
       )
       inserted_tokens = jax.lax.dynamic_update_index_in_dim(inserted_tokens, unboxed_prefix["tokens"][i, ...], slot, 0)
+      inserted_token_logp = jax.lax.dynamic_update_index_in_dim(
+          inserted_token_logp, unboxed_prefix["token_logp"][i, ...], slot, 0
+      )
 
     inserted_logits = jax.lax.with_sharding_constraint(inserted_logits, self.replicated_sharding)
     inserted_generated_tokens = jax.lax.with_sharding_constraint(inserted_generated_tokens, self.replicated_sharding)
     inserted_next_pos = jax.lax.with_sharding_constraint(inserted_next_pos, self.replicated_sharding)
     inserted_tokens = jax.lax.with_sharding_constraint(inserted_tokens, self.replicated_sharding)
     inserted_cache = jax.lax.with_sharding_constraint(inserted_cache, self.kv_cache_shardings)
+    inserted_token_logp = jax.lax.with_sharding_constraint(inserted_token_logp, self.replicated_sharding)
 
     return {
         "logits": inserted_logits,
@@ -1333,6 +1403,7 @@ class MaxEngine(engine_api.Engine):
         "next_pos": inserted_next_pos,
         "generated_tokens": inserted_generated_tokens,
         "tokens": inserted_tokens,
+        "token_logp": inserted_token_logp,
     }
 
   def release_pages(self, slot: int):
@@ -1352,6 +1423,7 @@ class MaxEngine(engine_api.Engine):
         "next_pos": self.replicated_sharding,
         "generated_tokens": self.replicated_sharding,
         "tokens": self.replicated_sharding,
+        "token_logp": self.replicated_sharding,
     }
 
   def get_tokenizer(self) -> TokenizerParameters:
@@ -1388,7 +1460,7 @@ class MaxEngine(engine_api.Engine):
   def init_decode_state(
       self,
       *args,  # pylint: disable=unused-argument
-      rng: None | PRNGKeyType = None,
+      rng: PRNGKeyType | None = None,
       **kwargs,  # pylint: disable=unused-argument
   ) -> DecodeState:
     """Initialises any state which a generation step transforms."""
@@ -1430,6 +1502,10 @@ class MaxEngine(engine_api.Engine):
           (int(self.config.per_device_batch_size * self.mesh.size), 1),
           dtype=jnp.int32,
       )
+      token_logp = jnp.zeros(
+          (int(self.config.per_device_batch_size * self.mesh.size), 1),
+          dtype=jnp.float32,
+      )
       return {
           "logits": jnp.zeros(
               (
@@ -1442,6 +1518,7 @@ class MaxEngine(engine_api.Engine):
           "next_pos": next_pos,
           "generated_tokens": generated_tokens,
           "tokens": tokens,
+          "token_logp": token_logp
       }
 
     with nn_partitioning.axis_rules(self.config.logical_axis_rules):
