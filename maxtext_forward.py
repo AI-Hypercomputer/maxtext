@@ -71,6 +71,24 @@ model = models.transformer_as_linen(config, mesh, quant=quant, model_mode=MODEL_
 state, _ = maxtext_utils.setup_decode_state(model, config, rng1, mesh, None)
 
 
+def print_nested_keys(data, prefix=""):
+  """
+  Prints nested keys of a dictionary-like structure in a directory-like format.
+  Args:
+      data: The dictionary-like structure to traverse.
+      prefix: The current path prefix.
+  """
+  if isinstance(data, dict):
+    for key, value in data.items():
+      current_path = f"{prefix}{key}."
+      print_nested_keys(value, current_path)
+  else:
+    print(f"{prefix} | {data.shape} | {data.mean()}")
+
+
+print_nested_keys(state.params)
+
+
 # init_rng = jax.random.PRNGKey(config.init_weights_seed)
 # init_rng, rng1 = jax.random.split(init_rng)
 # devices_array = maxtext_utils.create_device_mesh(config)
