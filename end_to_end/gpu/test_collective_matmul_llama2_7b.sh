@@ -49,7 +49,7 @@ python3 -m MaxText.train \
     scan_layers=true \
     monitor_goodput=false \
     enable_goodput_recording=false \
-    remat_policy=minimal_flash \
+    remat_policy=minimal_with_context \
     attention=cudnn_flash_te \
     max_target_length=4096 \
     use_iota_embed=true \
