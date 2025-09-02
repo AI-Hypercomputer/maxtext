@@ -645,6 +645,7 @@ class Decoder(nn.Module):
         image_embeddings,
         bidirectional_mask
     )
+    jax.debug.print("token_embeddings\nmean={mean}\nshape={shape}\n{x}", x=y, mean=y.mean(), shape=y.shape)
 
     policy = self.get_remat_policy()
     RemattedBlockLayers = self.set_remat_policy(self.decoder_layer, policy)

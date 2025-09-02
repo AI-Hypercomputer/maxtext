@@ -20,6 +20,7 @@ limitations under the License.
 
 
 from typing import Optional
+import jax
 
 from jax.ad_checkpoint import checkpoint_name
 from jax.sharding import Mesh
@@ -78,9 +79,9 @@ class GptOssDecoderLayer(nn.Module):
   ):
     cfg = self.config
     mesh = self.mesh
-
     inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
     inputs = checkpoint_name(inputs, "decoder_layer_input")
+    # print("decoder_layer_input", inputs)
     lnx_rms = rms_norm(
         num_features=inputs.shape[-1],
         dtype=cfg.dtype,
@@ -90,6 +91,9 @@ class GptOssDecoderLayer(nn.Module):
         epsilon=cfg.normalization_layer_epsilon,
     )
     lnx = lnx_rms(inputs)
+    jax.debug.print(
+        "pre_self_attention_layer_norm\nmean={mean}\nshape={shape}\n{x}", x=lnx, mean=lnx.mean(), shape=lnx.shape
+    )
 
     lnx = nn.with_logical_constraint(lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
 
@@ -125,6 +129,12 @@ class GptOssDecoderLayer(nn.Module):
         deterministic=deterministic,
         model_mode=model_mode,
     )
+    jax.debug.print(
+        "attention_out\nmean={mean}\nshape={shape}\n{x}",
+        x=attention_lnx,
+        mean=attention_lnx.mean(),
+        shape=attention_lnx.shape,
+    )
 
     attention_lnx = nn.with_logical_constraint(
         attention_lnx, ("activation_batch", "activation_norm_length", "activation_embed")
@@ -143,6 +153,12 @@ class GptOssDecoderLayer(nn.Module):
     hidden_states = nn.with_logical_constraint(
         hidden_states, ("activation_batch", "activation_norm_length", "activation_embed")
     )
+    jax.debug.print(
+        "post_self_attention_layer_norm\nmean={mean}\nshape={shape}\n{x}",
+        x=hidden_states,
+        mean=hidden_states.mean(),
+        shape=hidden_states.shape,
+    )
 
     load_balance_loss = None
     mlp_lnx, load_balance_loss = moe.get_routed_moe(
@@ -159,6 +175,7 @@ class GptOssDecoderLayer(nn.Module):
         quant=self.quant,
     )(hidden_states)
     mlp_lnx = nn.with_logical_constraint(mlp_lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
+    jax.debug.print("GptOssMlp\nmean={mean}\nshape={shape}\n{x}", x=mlp_lnx, mean=mlp_lnx.mean(), shape=mlp_lnx.shape)
 
     layer_output = mlp_lnx + intermediate_inputs
     layer_output = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(layer_output, deterministic=deterministic)

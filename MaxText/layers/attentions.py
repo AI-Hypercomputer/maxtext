@@ -868,6 +868,10 @@ class Attention(nnx.Module):
       key = self.kv_projection(inputs_kv, proj_name="key")
       value = self.kv_projection(inputs_kv, proj_name="value")
 
+      jax.debug.print("q_proj_pre_rope\nmean={mean}\nshape={shape}\n{x}", x=query, mean=query.mean(), shape=query.shape)
+      jax.debug.print("k_proj_pre_rope\nmean={mean}\nshape={shape}\n{x}", x=key, mean=key.mean(), shape=key.shape)
+      jax.debug.print("v_proj_pre_rope\nmean={mean}\nshape={shape}\n{x}", x=value, mean=value.mean(), shape=value.shape)
+
     is_llama4_decoder_block = self.config.decoder_block == DecoderBlockType.LLAMA4
     # NOTE: llama 4 does L2 normalization after RoPE
     if self.use_qk_norm and not is_llama4_decoder_block:
@@ -922,6 +926,9 @@ class Attention(nnx.Module):
 
     assert not self.config.quantize_kvcache or self.kv_quant
 
+    query_pre_attn_scalar = self.config.head_dim**-0.5
+    query = query * query_pre_attn_scalar
+
     if self.config.attention == "paged" and model_mode != MODEL_MODE_TRAIN:
       unnormalized_out, _, exp_sum = self.paged_attention_op(
           query, key, value, decoder_segment_ids, model_mode, previous_chunk, slot=slot, page_state=page_state
@@ -934,6 +941,7 @@ class Attention(nnx.Module):
       out = self.attention_op(
           query, key, value, decoder_segment_ids, model_mode, cached_values, previous_chunk, bidirectional_mask, self.sinks
       )
+    jax.debug.print("attention_op_out\nmean={mean}\nshape={shape}\n{x}", x=out, mean=out.mean(), shape=out.shape)
 
     if model_mode == MODEL_MODE_PREFILL:
       out = nn.with_logical_constraint(out, self.prefill_out_axis_names)

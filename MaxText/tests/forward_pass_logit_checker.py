@@ -253,6 +253,14 @@ def main(config, test_args):  # pylint: disable=W0621
       max_logging.log(f"--- Comparing forward pass for golden data index: {golden_data_index} ---")
       ids, decoder_segment_ids, decoder_positions, golden_logits, seq_len, images = get_data(golden_data_point, config)
       max_logging.log("maxtext forward pass")
+      print(
+          "Golden token ids have values:",
+          ids,
+          "Golden decoder_positions have values:",
+          decoder_positions,
+          "Golden decoder_segment_ids have values:",
+          decoder_segment_ids,
+      )
       full_train_logits = model.apply(
           state.params,
           ids,
