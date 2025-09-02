@@ -33,7 +33,7 @@ Key supported features:
 
 ## Announcements
 * [August 13, 2025] The Qwen3 MoE family of models is now supported. We are starting with Qwen3-235B-A22B-Thinking-2507, Qwen3-30B-A3B and Qwen3-Coder-480B-A35B in addition to our existing Qwen3 Dense family of 0.6B, 4B, 8B, 14B, and 32B models.
-* [July 27, 2025] We have updated our TFLOPS/s calculation to account for causal attention, dividing the attention flops in half in this [PR](https://github.com/AI-Hypercomputer/maxtext/pull/1988). Also we account for sliding window and chunked attention reduced attention flops in [PR](https://github.com/AI-Hypercomputer/maxtext/pull/2009) and [PR](https://github.com/AI-Hypercomputer/maxtext/pull/2030). These changes especially impact large sequence configs, since attention flops grow quadratically with sequence length, as explained in this [ReadMe](https://github.com/AI-Hypercomputer/maxtext/blob/main/getting_started/Performance_Metrics.md)
+* [July 27, 2025] We have updated our TFLOPS/s calculation to account for causal attention, dividing the attention flops in half in this [PR](https://github.com/AI-Hypercomputer/maxtext/pull/1988). Also we account for sliding window and chunked attention reduced attention flops in [PR](https://github.com/AI-Hypercomputer/maxtext/pull/2009) and [PR](https://github.com/AI-Hypercomputer/maxtext/pull/2030). These changes especially impact large sequence configs, since attention flops grow quadratically with sequence length, as explained in this [document](https://maxtext.readthedocs.io/en/latest/guides/performance_metrics.html)
 * [July 16, 2025] We will be restructuring the MaxText repository for improved organization and clarity. Please review the [proposed structure](RESTRUCTURE.md) and provide feedback.
 * [July 11, 2025] Multi-Token Prediction (MTP) training is now supported! This feature adds an auxiliary loss based on predicting multiple future tokens, inspired by the [DeepSeek-V3 paper](https://arxiv.org/html/2412.19437v1), to enhance training efficiency.
 * [June 25, 2025] DeepSeek R1-0528 variant is now supported!
@@ -43,25 +43,25 @@ Key supported features:
 * [April 2, 2025] DeepSeek v3-0324 variant is now supported!
 * [March 24, 2025] We are excited to announce support for DeepSeek v3 (671B) and v2-Lite (16B), compatible with both TPUs and GPUs. We are actively working on further optimization.
 * [March 12, 2025] We are excited to announce support for Gemma 3: 4B, 12B, and 27B in text-only formats. Please see [Google Launch Blog](https://blog.google/technology/developers/gemma-3/) and [Developer Blog](https://developers.googleblog.com/en/introducing-gemma3/) for more information on Gemma 3.
-* [February, 2025] (Preview): We're excited to announce the preview of building Maxtext Docker images using the JAX AI Training Images, available for both TPUs and GPUs. This provides a more reliable and consistent build environment. Learn more [Here](getting_started/Run_MaxText_via_xpk.md)
+* [February, 2025] (Preview): We're excited to announce the preview of building Maxtext Docker images using the JAX AI Training Images, available for both TPUs and GPUs. This provides a more reliable and consistent build environment. Learn more [here](https://maxtext.readthedocs.io/en/latest/guides/run_maxtext_via_xpk.html).
 
 ## Table of Contents
 
-* [Getting Started](getting_started/First_run.md)
+* [Getting Started](#getting-started)
 * [Runtime Performance Results](#runtime-performance-results)
 * [Comparison To Alternatives](#comparison-to-alternatives)
-* [Development](#development)
+* [Development](docs/development.md)
 * [Features and Diagnostics](#features-and-diagnostics)
 
 ## Getting Started
 
-For your first time running MaxText, we provide specific [instructions](getting_started/First_run.md).
+For your first time running MaxText, we provide specific [instructions](https://maxtext.readthedocs.io/en/latest/tutorials/first_run.html).
 
-MaxText supports training and inference of various open models. Follow user guides in the [getting started](getting_started) folder to know more.
+MaxText supports training and inference of various open models. Follow user guides in the [documentation](https://maxtext.readthedocs.io/en/latest/index.html) to know more.
 
 Some extra helpful guides:
 * [Gemma (generations 1-3)](https://ai.google.dev/gemma): a family of open-weights Large Language Model (LLM) by [Google DeepMind](https://deepmind.google/), based on Gemini research and technology. You can run decode and finetuning using [these instructions](end_to_end/tpu/gemma/Run_Gemma.md). For Gemma 2 and 3, use the corresponding [gemma2](end_to_end/tpu/gemma2) and [gemma3](end_to_end/tpu/gemma3) scripts for checkpoint convertion and decoding.
-* [Llama2](https://llama.meta.com/llama2/): a family of open-weights Large Language Model (LLM) by Meta. You can run decode and finetuning using [these instructions](getting_started/Run_Llama2.md).
+* [Llama2](https://llama.meta.com/llama2/): a family of open-weights Large Language Model (LLM) by Meta. You can run decode and finetuning using [these instructions](file:///home/melissa/projects/maxtext/docs/_build/html/tutorials/run_llama2.html).
 * [Mixtral](https://mistral.ai/news/mixtral-of-experts/): a family of open-weights sparse mixture-of-experts (MoE) models by Mistral AI. You can run decode and finetuning using [these instructions](end_to_end/tpu/mixtral/Run_Mixtral.md).
 * [DeepSeek](https://api-docs.deepseek.com/news/news1226): a novel family of open-weights sparse MoE models by DeepSeek AI. DeepSeek-V3 features advanced techniques, including Multi-Head Latent Attention (MLA), finer-grained and shared experts, Multi-Token Prediction (MTP), and FP8 mixed precision designed for enhanced efficiency and performance. You can run pre-training, finetuning, and decoding using [these instructions](end_to_end/tpu/deepseek/Run_DeepSeek.md).
 
@@ -123,7 +123,7 @@ jsonPayload.verb="stacktraceanalyzer"
 Here is the related PyPI package: https://pypi.org/project/cloud-tpu-diagnostics.
 
 ### Ahead of Time Compilation (AOT)
-To compile your training run ahead of time, we provide a tool `train_compile.py`. This tool allows you to compile the main `train_step` in `train.py` for target hardware (e.g. a large number of v5e devices) without using the full cluster.
+To compile your training run ahead of time, we provide a tool [`train_compile.py`](MaxText/train_compile.py). This tool allows you to compile the main `train_step` in [`train.py`](MaxText/train.py) for target hardware (e.g. a large number of v5e devices) without using the full cluster.
 
 #### TPU Support
 
@@ -133,7 +133,7 @@ You may use only a CPU or a single VM from a different family to pre-compile for
 
 * The ahead of time compilation can be saved and then loaded for fast startup and restart times on the target hardware.
 
-The tool `train_compile.py` is tightly linked to `train.py` and uses the same configuration file `configs/base.yml`. Although you don't need to run on a TPU, you do need to install `jax[tpu]` in addition to other dependencies, so we recommend running `setup.sh` to install these if you have not already done so.
+The tool [`train_compile.py`](MaxText/train_compile.py) is tightly linked to [`train.py`](MaxText/train.py) and uses the same configuration file [`configs/base.yml`](MaxText/configs/base.yml). Although you don't need to run on a TPU, you do need to install `jax[tpu]` in addition to other dependencies, so we recommend running `setup.sh` to install these if you have not already done so.
 
 ##### Example AOT 1: Compile ahead of time basics
 After installing the dependencies listed above, you are ready to compile ahead of time:
@@ -208,7 +208,7 @@ As in the TPU case, note that the compilation environment must match the executi
 
 
 ### Automatically Upload Logs to Vertex Tensorboard
-MaxText supports automatic upload of logs collected in a directory to a Tensorboard instance in Vertex AI. Follow [user guide](getting_started/Use_Vertex_AI_Tensorboard.md) to know more.
+MaxText supports automatic upload of logs collected in a directory to a Tensorboard instance in Vertex AI. Follow [user guide](https://maxtext.readthedocs.io/en/latest/guides/use_vertex_ai_tensorboard.html) to know more.
 
 ### Monitor Goodput of Your Workload
-If you are interested in monitoring Goodput metrics of your workload, follow this [user guide](getting_started/Monitor_Goodput.md).
+If you are interested in monitoring Goodput metrics of your workload, follow this [user guide](https://maxtext.readthedocs.io/en/latest/guides/monitor_goodput.html).

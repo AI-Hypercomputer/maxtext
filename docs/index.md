@@ -93,4 +93,5 @@ tutorials.md
 guides.md
 explanations.md
 reference.md
+development.md
 ```
