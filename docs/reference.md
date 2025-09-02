@@ -20,5 +20,6 @@
 :maxdepth: 1
 
 reference/terminology.md
+reference/supported_models_and_architectures.md
 reference/alternatives.md
 ```
