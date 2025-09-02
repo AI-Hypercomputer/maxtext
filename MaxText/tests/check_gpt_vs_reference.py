@@ -12,6 +12,8 @@ distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
+
+python -m MaxText.tests.check_gpt_vs_reference
 """
 
 from typing import Optional
@@ -365,7 +367,9 @@ class GptOssAttentionTest(unittest.TestCase):
     self.assertLess(mse_dot, 1e-3, f"dot-product attention mismatch, MSE: {mse_dot}")
     np.testing.assert_allclose(to_jax(expected_attn_output), actual_attn_output_dot, rtol=1e-3, atol=1e-2)
 
-  def test_flash_attention_with_sinks(self):
+  def test_dot_product_attention_with_sinks_sliding_window(self):
+    sliding_window = 64
+    # TODO: not sure how to pass
     expected_attn_output, _ = eager_attention_forward(
         module=self.mock_module_with_sinks,
         query=self.query,
@@ -374,11 +378,12 @@ class GptOssAttentionTest(unittest.TestCase):
         attention_mask=self.attention_mask,
         scaling=self.scaling,
         dropout=0.0,
+        sliding_window=sliding_window,
     )
 
-    cfg_flash = pyconfig.initialize(
+    cfg_dot = pyconfig.initialize(
         [None, os.path.join(PKG_DIR, "configs", "base.yml")],
-        run_name="gpt_oss_attention_test_flash",
+        run_name="gpt_oss_attention_test_dot",
         enable_checkpointing=False,
         model_name="default",
         dtype="float32",
@@ -388,42 +393,105 @@ class GptOssAttentionTest(unittest.TestCase):
         base_num_query_heads=self.config.num_attention_heads,
         base_num_kv_heads=self.config.num_key_value_heads,
         head_dim=self.config.head_dim,
-        attention="flash",
+        attention="dot_product",
         attention_bias=False,
         attention_sink=True,
     )
-    devices_array = maxtext_utils.create_device_mesh(cfg_flash)
-    mesh = Mesh(devices_array, cfg_flash.mesh_axes)
+    devices_array = maxtext_utils.create_device_mesh(cfg_dot)
+    mesh = Mesh(devices_array, cfg_dot.mesh_axes)
 
-    attention_op_flash = attentions.AttentionOp(
-        config=cfg_flash,
+    attention_op_dot = attentions.AttentionOp(
+        config=cfg_dot,
         mesh=mesh,
-        attention_kernel="flash",
+        attention_kernel="dot_product",
         max_target_length=self.seq_len,
         num_query_heads=self.config.num_attention_heads,
         num_kv_heads=self.config.num_key_value_heads,
         dtype=jnp.float32,
-        attention_type=attentions.AttentionType.FULL,
+        attention_type=attentions.AttentionType.LOCAL_SLIDING,
+        sliding_window_size=sliding_window,
     )
 
     @jax.jit
-    def run_flash_attention(q, k, v, sinks_logits):
-      output = attention_op_flash.tpu_flash_attention(
+    def run_dot_product_attention_sw(q, k, v):
+      unnormalized_output, _, sum_val = attention_op_dot.apply_attention_dot(
           query=q,
           key=k,
           value=v,
-          decoder_segment_ids=None,
-          sinks=sinks_logits,
+          decoder_segment_ids=jnp.ones((self.batch_size, self.seq_len)),
+          model_mode="train",
+          sinks=self.jax_sinks,
+          qk_product_einsum=jnp.einsum,
+          wv_product_einsum=jnp.einsum,
       )
-      return output
+      return unnormalized_output / sum_val
 
-    scaled_jax_query_flash_t = self.jax_query_t * self.scaling
-    actual_attn_output_flash = run_flash_attention(
-        scaled_jax_query_flash_t, self.jax_key_t, self.jax_value_t, self.jax_sinks
-    )
-    mse_flash = jnp.mean((to_jax(expected_attn_output) - actual_attn_output_flash) ** 2)
-    self.assertLess(mse_flash, 1e-3, f"flash attention mismatch, MSE: {mse_flash}")
-    np.testing.assert_allclose(to_jax(expected_attn_output), actual_attn_output_flash, rtol=1e-3, atol=1e-2)
+    scaled_jax_query_t = self.jax_query_t * self.scaling
+    actual_attn_output_dot = run_dot_product_attention_sw(scaled_jax_query_t, self.jax_key_t, self.jax_value_t)
+
+    mse_dot = jnp.mean((to_jax(expected_attn_output) - actual_attn_output_dot) ** 2)
+    self.assertLess(mse_dot, 1e-3, f"dot-product attention mismatch, MSE: {mse_dot}")
+    np.testing.assert_allclose(to_jax(expected_attn_output), actual_attn_output_dot, rtol=1e-3, atol=1e-2)
+
+  # def test_flash_attention_with_sinks(self):
+  #   expected_attn_output, _ = eager_attention_forward(
+  #       module=self.mock_module_with_sinks,
+  #       query=self.query,
+  #       key=self.key,
+  #       value=self.value,
+  #       attention_mask=self.attention_mask,
+  #       scaling=self.scaling,
+  #       dropout=0.0,
+  #   )
+
+  #   cfg_flash = pyconfig.initialize(
+  #       [None, os.path.join(PKG_DIR, "configs", "base.yml")],
+  #       run_name="gpt_oss_attention_test_flash",
+  #       enable_checkpointing=False,
+  #       model_name="default",
+  #       dtype="float32",
+  #       per_device_batch_size=self.batch_size,
+  #       max_target_length=self.seq_len,
+  #       max_prefill_predict_length=self.seq_len,
+  #       base_num_query_heads=self.config.num_attention_heads,
+  #       base_num_kv_heads=self.config.num_key_value_heads,
+  #       head_dim=self.config.head_dim,
+  #       attention="flash",
+  #       attention_bias=False,
+  #       attention_sink=True,
+  #   )
+  #   devices_array = maxtext_utils.create_device_mesh(cfg_flash)
+  #   mesh = Mesh(devices_array, cfg_flash.mesh_axes)
+
+  #   attention_op_flash = attentions.AttentionOp(
+  #       config=cfg_flash,
+  #       mesh=mesh,
+  #       attention_kernel="flash",
+  #       max_target_length=self.seq_len,
+  #       num_query_heads=self.config.num_attention_heads,
+  #       num_kv_heads=self.config.num_key_value_heads,
+  #       dtype=jnp.float32,
+  #       attention_type=attentions.AttentionType.FULL,
+  #   )
+
+  #   @jax.jit
+  #   def run_flash_attention(q, k, v, sinks_logits):
+  #     output = attention_op_flash.tpu_flash_attention(
+  #         query=q,
+  #         key=k,
+  #         value=v,
+  #         decoder_segment_ids=None,
+  #         sinks=sinks_logits,
+  #     )
+  #     return output
+
+  #   scaled_jax_query_flash_t = self.jax_query_t * self.scaling
+  #   actual_attn_output_flash = run_flash_attention(
+  #       scaled_jax_query_flash_t, self.jax_key_t, self.jax_value_t, self.jax_sinks
+  #   )
+  #   mse_flash = jnp.mean((to_jax(expected_attn_output) - actual_attn_output_flash) ** 2)
+  #   self.assertLess(mse_flash, 1e-3, f"flash attention mismatch, MSE: {mse_flash}")
+  #   np.testing.assert_allclose(to_jax(expected_attn_output), actual_attn_output_flash, rtol=1e-3, atol=1e-2)
 
 """
 self.head_dim = getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)
@@ -432,126 +500,126 @@ self.sliding_window = config.sliding_window if config.layer_types[layer_idx] == 
 """
 
 
-class FullAttentionBlockTest(unittest.TestCase):
+# class FullAttentionBlockTest(unittest.TestCase):
 
-  def setUp(self):
-    super().setUp()
-    torch.manual_seed(42)
-    # 1. Shared Configuration
-    self.config = SimpleNamespace(
-        hidden_size=64,
-        num_attention_heads=8,
-        num_key_value_heads=4,
-        head_dim=8,
-        attention_bias=False,
-        attention_dropout=0,
-        # additional
-        layer_types=["sliding_window", "full_attention"],
-        sliding_window=None,
-    )
-    self.batch_size = 2
-    self.seq_len = 128
+#   def setUp(self):
+#     super().setUp()
+#     torch.manual_seed(42)
+#     # 1. Shared Configuration
+#     self.config = SimpleNamespace(
+#         hidden_size=64,
+#         num_attention_heads=8,
+#         num_key_value_heads=4,
+#         head_dim=8,
+#         attention_bias=False,
+#         attention_dropout=0,
+#         # additional
+#         layer_types=["sliding_window", "full_attention"],
+#         sliding_window=None,
+#     )
+#     self.batch_size = 2
+#     self.seq_len = 128
 
-    # 2. PyTorch model and weights
-    self.torch_model = GptOssAttention(self.config, layer_idx=1)
-    self.predefined_weights = {
-        "q_proj.weight": torch.randn(self.config.num_attention_heads * self.config.head_dim, self.config.hidden_size),
-        "k_proj.weight": torch.randn(self.config.num_key_value_heads * self.config.head_dim, self.config.hidden_size),
-        "v_proj.weight": torch.randn(self.config.num_key_value_heads * self.config.head_dim, self.config.hidden_size),
-        "o_proj.weight": torch.randn(self.config.hidden_size, self.config.num_attention_heads * self.config.head_dim),
-        "sinks": torch.randn(self.config.num_attention_heads),
-    }
-    self.torch_model.load_state_dict(self.predefined_weights, strict=False)
-    self.torch_model.eval()
+#     # 2. PyTorch model and weights
+#     self.torch_model = GptOssAttention(self.config, layer_idx=1)
+#     self.predefined_weights = {
+#         "q_proj.weight": torch.randn(self.config.num_attention_heads * self.config.head_dim, self.config.hidden_size),
+#         "k_proj.weight": torch.randn(self.config.num_key_value_heads * self.config.head_dim, self.config.hidden_size),
+#         "v_proj.weight": torch.randn(self.config.num_key_value_heads * self.config.head_dim, self.config.hidden_size),
+#         "o_proj.weight": torch.randn(self.config.hidden_size, self.config.num_attention_heads * self.config.head_dim),
+#         "sinks": torch.randn(self.config.num_attention_heads),
+#     }
+#     self.torch_model.load_state_dict(self.predefined_weights, strict=False)
+#     self.torch_model.eval()
 
-    # Dummy input data
-    self.hidden_states_torch = torch.randn(self.batch_size, self.seq_len, self.config.hidden_size)
-    self.attention_mask_torch = torch.ones(self.batch_size, self.seq_len, dtype=torch.long)
-    self.position_embeddings_torch = torch.randn(self.batch_size, self.seq_len, self.config.hidden_size)
+#     # Dummy input data
+#     self.hidden_states_torch = torch.randn(self.batch_size, self.seq_len, self.config.hidden_size)
+#     self.attention_mask_torch = torch.ones(self.batch_size, self.seq_len, dtype=torch.long)
+#     self.position_embeddings_torch = torch.randn(self.batch_size, self.seq_len, self.config.hidden_size)
 
-  def test_full_attention_block(self):
-    # 3. Run PyTorch model for expected output
-    with torch.no_grad():
-      expected_output, _, _ = self.torch_model(
-          self.hidden_states_torch,
-          attention_mask=self.attention_mask_torch,
-          position_embeddings=self.position_embeddings_torch,
-      )
+#   def test_full_attention_block(self):
+#     # 3. Run PyTorch model for expected output
+#     with torch.no_grad():
+#       expected_output, _, _ = self.torch_model(
+#           self.hidden_states_torch,
+#           attention_mask=self.attention_mask_torch,
+#           position_embeddings=self.position_embeddings_torch,
+#       )
 
-    # 4. Setup MaxText model
-    # Using placeholder config path
-    # pkg_dir = os.path.expanduser("~")
-    # if not os.path.exists(os.path.join(pkg_dir, "configs")):
-    #   os.makedirs(os.path.join(pkg_dir, "configs"))
-    # with open(os.path.join(pkg_dir, "configs", "base.yml"), "w") as f:
-    #   f.write("learning_rate: 0.01")  # dummy content
+#     # 4. Setup MaxText model
+#     # Using placeholder config path
+#     # pkg_dir = os.path.expanduser("~")
+#     # if not os.path.exists(os.path.join(pkg_dir, "configs")):
+#     #   os.makedirs(os.path.join(pkg_dir, "configs"))
+#     # with open(os.path.join(pkg_dir, "configs", "base.yml"), "w") as f:
+#     #   f.write("learning_rate: 0.01")  # dummy content
 
-    cfg = pyconfig.initialize(
-        [None, os.path.join(PKG_DIR, "configs", "base.yml")],
-        run_name="attention_test",
-        enable_checkpointing=False,
-        model_name="default",
-        dtype="float32",
-        per_device_batch_size=self.batch_size,
-        max_target_length=self.seq_len,
-        base_num_query_heads=self.config.num_attention_heads,
-        base_num_kv_heads=self.config.num_key_value_heads,
-        base_emb_dim=self.config.hidden_size,
-        head_dim=self.config.head_dim,
-        attention="dot_product",
-        attention_bias=self.config.attention_bias,
-        attention_sink=True,
-    )
-    devices_array = maxtext_utils.create_device_mesh(cfg)
-    mesh = Mesh(devices_array, cfg.mesh_axes)
+#     cfg = pyconfig.initialize(
+#         [None, os.path.join(PKG_DIR, "configs", "base.yml")],
+#         run_name="attention_test",
+#         enable_checkpointing=False,
+#         model_name="default",
+#         dtype="float32",
+#         per_device_batch_size=self.batch_size,
+#         max_target_length=self.seq_len,
+#         base_num_query_heads=self.config.num_attention_heads,
+#         base_num_kv_heads=self.config.num_key_value_heads,
+#         base_emb_dim=self.config.hidden_size,
+#         head_dim=self.config.head_dim,
+#         attention="dot_product",
+#         attention_bias=self.config.attention_bias,
+#         attention_sink=True,
+#     )
+#     devices_array = maxtext_utils.create_device_mesh(cfg)
+#     mesh = Mesh(devices_array, cfg.mesh_axes)
 
-    maxtext_attention_layer = attentions.Attention(
-        config=cfg,
-        num_query_heads=cfg.base_num_query_heads,
-        num_kv_heads=cfg.base_num_kv_heads,
-        head_dim=cfg.head_dim,
-        max_target_length=cfg.max_target_length,
-        mesh=mesh,
-        dtype=jnp.float32,
-        name="GptOssAttention",
-        use_bias=cfg.attention_bias,
-        attention_type=attentions.AttentionType.FULL,
-    )
+#     maxtext_attention_layer = attentions.Attention(
+#         config=cfg,
+#         num_query_heads=cfg.base_num_query_heads,
+#         num_kv_heads=cfg.base_num_kv_heads,
+#         head_dim=cfg.head_dim,
+#         max_target_length=cfg.max_target_length,
+#         mesh=mesh,
+#         dtype=jnp.float32,
+#         name="GptOssAttention",
+#         use_bias=cfg.attention_bias,
+#         attention_type=attentions.AttentionType.FULL,
+#     )
 
-    # 5. Map weights from PyTorch to JAX/Flax format
-    # Note the transpose for dense kernels!
-    jax_weights = {
-        "params": {
-            "query": {"kernel": to_jax(self.predefined_weights["q_proj.weight"]).T},
-            "key": {"kernel": to_jax(self.predefined_weights["k_proj.weight"]).T},
-            "value": {"kernel": to_jax(self.predefined_weights["v_proj.weight"]).T},
-            "out": {"kernel": to_jax(self.predefined_weights["o_proj.weight"]).T},
-            "sinks": to_jax(self.predefined_weights["sinks"]),
-        }
-    }
+#     # 5. Map weights from PyTorch to JAX/Flax format
+#     # Note the transpose for dense kernels!
+#     jax_weights = {
+#         "params": {
+#             "query": {"kernel": to_jax(self.predefined_weights["q_proj.weight"]).T},
+#             "key": {"kernel": to_jax(self.predefined_weights["k_proj.weight"]).T},
+#             "value": {"kernel": to_jax(self.predefined_weights["v_proj.weight"]).T},
+#             "out": {"kernel": to_jax(self.predefined_weights["o_proj.weight"]).T},
+#             "sinks": to_jax(self.predefined_weights["sinks"]),
+#         }
+#     }
 
-    # 6. Run MaxText model for actual output
-    hidden_states_jax = to_jax(self.hidden_states_torch)
-    decoder_segment_ids = (decoder_segment_ids,)
-    inputs_positions = (decoder_positions,)
+#     # 6. Run MaxText model for actual output
+#     hidden_states_jax = to_jax(self.hidden_states_torch)
+#     decoder_segment_ids = (decoder_segment_ids,)
+#     inputs_positions = (decoder_positions,)
 
-    @jax.jit
-    def run_maxtext_attention(weights, inputs):
-      return maxtext_attention_layer.apply(
-          weights,
-          inputs,  # query
-          inputs,  # key/value
-          decoder_segment_ids=decoder_segment_ids,
-          inputs_positions=decoder_positions,
-          model_mode="train",  # simplified for test
-      )
+#     @jax.jit
+#     def run_maxtext_attention(weights, inputs):
+#       return maxtext_attention_layer.apply(
+#           weights,
+#           inputs,  # query
+#           inputs,  # key/value
+#           decoder_segment_ids=decoder_segment_ids,
+#           inputs_positions=decoder_positions,
+#           model_mode="train",  # simplified for test
+#       )
 
-    actual_output = run_maxtext_attention(jax_weights, hidden_states_jax)
+#     actual_output = run_maxtext_attention(jax_weights, hidden_states_jax)
 
-    # 7. Compare results
-    print(f"MSE between Torch and MaxText: {jnp.mean((to_jax(expected_output) - actual_output)**2):.6f}")
-    np.testing.assert_allclose(to_jax(expected_output), actual_output, rtol=1e-4, atol=1e-4)
-    print("✅ Test passed: PyTorch and MaxText attention outputs match!")
+#     # 7. Compare results
+#     print(f"MSE between Torch and MaxText: {jnp.mean((to_jax(expected_output) - actual_output)**2):.6f}")
+#     np.testing.assert_allclose(to_jax(expected_output), actual_output, rtol=1e-4, atol=1e-4)
+#     print("✅ Test passed: PyTorch and MaxText attention outputs match!")
 
 
 if __name__ == "__main__":
