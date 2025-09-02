@@ -124,7 +124,6 @@ def _hf_to_maxtext_mapping(layer_idx: int = -1, expert_idx: int = -1) -> dict:
       f"model.layers.{layer_idx}.self_attn.k_proj.weight": f"layers.{layer_idx}.attention.wk.weight",
       f"model.layers.{layer_idx}.self_attn.v_proj.weight": f"layers.{layer_idx}.attention.wv.weight",
       f"model.layers.{layer_idx}.self_attn.o_proj.weight": f"layers.{layer_idx}.attention.wo.weight",
-      # attention additional
       f"model.layers.{layer_idx}.self_attn.q_proj.bias": f"layers.{layer_idx}.attention.wq.bias",
       f"model.layers.{layer_idx}.self_attn.k_proj.bias": f"layers.{layer_idx}.attention.wk.bias",
       f"model.layers.{layer_idx}.self_attn.v_proj.bias": f"layers.{layer_idx}.attention.wv.bias",
@@ -137,18 +136,6 @@ def _hf_to_maxtext_mapping(layer_idx: int = -1, expert_idx: int = -1) -> dict:
       f"model.layers.{layer_idx}.mlp.experts.gate_up_proj_bias": f"layers.{layer_idx}.feed_forward.experts.gate_up_proj_bias",
       f"model.layers.{layer_idx}.mlp.experts.down_proj": f"layers.{layer_idx}.feed_forward.experts.down_proj",
       f"model.layers.{layer_idx}.mlp.experts.down_proj_bias": f"layers.{layer_idx}.feed_forward.experts.down_proj_bias",
-      # f"language_model.model.layers.{layer_idx}.feed_forward.shared_expert.up_proj.weight": f"layers.{layer_idx}.feed_forward.shared_experts.up_proj.weight",
-      # f"language_model.model.layers.{layer_idx}.feed_forward.shared_expert.gate_proj.weight": f"layers.{layer_idx}.feed_forward.shared_experts.gate_proj.weight",
-      # f"language_model.model.layers.{layer_idx}.feed_forward.shared_expert.down_proj.weight": f"layers.{layer_idx}.feed_forward.shared_experts.down_proj.weight",
-      # # MOE model
-      # f"model.layers.{layer_idx}.block_sparse_moe.gate.weight": f"layers.{layer_idx}.feed_forward.gate.weight",
-      # f"model.layers.{layer_idx}.block_sparse_moe.experts.{expert_idx}.w1.weight": f"layers.{layer_idx}.feed_forward.experts.{expert_idx}.w1.weight",
-      # f"model.layers.{layer_idx}.block_sparse_moe.experts.{expert_idx}.w2.weight": f"layers.{layer_idx}.feed_forward.experts.{expert_idx}.w2.weight",
-      # f"model.layers.{layer_idx}.block_sparse_moe.experts.{expert_idx}.w3.weight": f"layers.{layer_idx}.feed_forward.experts.{expert_idx}.w3.weight",
-      # # FFN
-      # f"model.layers.{layer_idx}.mlp.gate_proj.weight": f"layers.{layer_idx}.feed_forward.w1.weight",
-      # f"model.layers.{layer_idx}.mlp.up_proj.weight": f"layers.{layer_idx}.feed_forward.w2.weight",
-      # f"model.layers.{layer_idx}.mlp.down_proj.weight": f"layers.{layer_idx}.feed_forward.w3.weight",
   }
 
 
@@ -227,12 +214,10 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
 
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
 
-  # # attention
   # f"model.layers.{layer_idx}.self_attn.q_proj.weight": f"layers.{layer_idx}.attention.wq.weight",
   # f"model.layers.{layer_idx}.self_attn.k_proj.weight": f"layers.{layer_idx}.attention.wk.weight",
   # f"model.layers.{layer_idx}.self_attn.v_proj.weight": f"layers.{layer_idx}.attention.wv.weight",
   # f"model.layers.{layer_idx}.self_attn.o_proj.weight": f"layers.{layer_idx}.attention.wo.weight",
-  # # attention additional
   # f"model.layers.{layer_idx}.self_attn.q_proj.bias": f"layers.{layer_idx}.attention.wq.bias",
   # f"model.layers.{layer_idx}.self_attn.k_proj.bias": f"layers.{layer_idx}.attention.wk.bias",
   # f"model.layers.{layer_idx}.self_attn.v_proj.bias": f"layers.{layer_idx}.attention.wv.bias",
@@ -249,43 +234,17 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
     w_post = _pt_to_np(chkpt_vars[f"layers.{layer_idx}.attention.wo.weight"], cast_dtype=CAST_DTYPE)
 
     # (num_attention_heads * head_dim, hidden_size) -> (hidden_size, num_attention_heads * head_dim) -> (hidden_size, num_attention_heads, head_dim)
+    # [embed, q, head_dim]
     self_attention["query"]["kernel"] = wq.transpose().reshape([base_emb_dim, base_num_query_heads, head_dim])
+    # [embed, kv, head_dim]
     self_attention["key"]["kernel"] = wk.transpose().reshape([base_emb_dim, base_num_kv_heads, head_dim])
+    # [embed, kv, head_dim]
     self_attention["value"]["kernel"] = wv.transpose().reshape([base_emb_dim, base_num_kv_heads, head_dim])
     # (hidden_size, num_attention_heads * head_dim) -> (hidden_size, num_attention_heads, head_dim) -> # [num_attention_heads, head_dim, hidden_size]
     # w_post = w_post.reshape([base_emb_dim, base_num_query_heads, head_dim]).tranpose(1, 2, 0)
     # TODO: double check
+    # [q, head_dim, embed]
     self_attention["out"]["kernel"] = w_post.transpose().reshape([base_num_query_heads, head_dim, base_emb_dim])
-
-    # wq = chkpt_vars[f"layers.{layer_idx}.attention.wq.weight"].to(torch.float32).numpy().astype(CAST_DTYPE).transpose()
-    # wk = chkpt_vars[f"layers.{layer_idx}.attention.wk.weight"].to(torch.float32).numpy().astype(CAST_DTYPE).transpose()
-    # wv = chkpt_vars[f"layers.{layer_idx}.attention.wv.weight"].to(torch.float32).numpy().astype(CAST_DTYPE).transpose()
-    # w_post = chkpt_vars[f"layers.{layer_idx}.attention.wo.weight"].to(torch.float32).numpy().astype(CAST_DTYPE)
-    # wq = np.reshape(wq, [base_num_query_heads * head_dim, base_num_query_heads, head_dim])
-    # wk = np.reshape(wk, [base_num_query_heads * head_dim, base_num_kv_heads, head_dim])
-    # wv = np.reshape(wv, [base_num_query_heads * head_dim, base_num_kv_heads, head_dim])
-    # w_post = np.reshape(w_post, [base_num_query_heads * head_dim, base_num_query_heads, head_dim])
-
-    # self_attention["query"]["kernel"][block_layer_idx, ...] = wq  # pylint: disable=E1137 # pytype: disable=unsupported-operands
-    # self_attention["key"]["kernel"][block_layer_idx, ...] = wk  # pylint: disable=E1137 # pytype: disable=unsupported-operands
-    # self_attention["value"]["kernel"][block_layer_idx, ...] = wv  # pylint: disable=E1137 # pytype: disable=unsupported-operands
-    # self_attention["out"]["kernel"][block_layer_idx, ...] = w_post  # pylint: disable=E1137 # pytype: disable=unsupported-operands
-
-    # for self_attention in self_attention_list:
-    #   self_attention["query"]["kernel"] = np.transpose(
-    #       self_attention["query"]["kernel"], axes=(1, 0, 2, 3)
-    #   )  # [embed, layer, q, head_dim]
-    #   self_attention["key"]["kernel"] = np.transpose(
-    #       self_attention["key"]["kernel"], axes=(1, 0, 2, 3)
-    #   )  # [embed, layer, kv, head_dim]
-    #   self_attention["value"]["kernel"] = np.transpose(
-    #       self_attention["value"]["kernel"], axes=(1, 0, 2, 3)
-    #   )  # [embed, layer, kv, head_dim]
-    #   # layers, base_num_query_heads * head_dim, base_num_query_heads, head_dim =>
-    #   # base_num_query_heads, layers, head_dim, base_num_query_heads * head_dim
-    #   self_attention["out"]["kernel"] = np.transpose(
-    #       self_attention["out"]["kernel"], axes=(2, 0, 3, 1)
-    #   )  # [q, layer, head_dim, embed]
 
     sinks = _pt_to_np(chkpt_vars[f"layers.{layer_idx}.attention.sinks"], cast_dtype=CAST_DTYPE)
     wq_bias = _pt_to_np(chkpt_vars[f"layers.{layer_idx}.attention.wq.bias"], cast_dtype=CAST_DTYPE)
@@ -316,9 +275,9 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
   # f"model.layers.{layer_idx}.mlp.router.weight": f"layers.{layer_idx}.feed_forward.gate.weight",
   # f"model.layers.{layer_idx}.mlp.router.bias": f"layers.{layer_idx}.feed_forward.gate.bias",
   # f"model.layers.{layer_idx}.mlp.experts.gate_up_proj": f"layers.{layer_idx}.feed_forward.experts.gate_up_proj",
-  # f"model.layers.{layer_idx}.mlp.experts.gate_up_proj.bias": f"layers.{layer_idx}.feed_forward.experts.gate_up_proj_bias",
+  # f"model.layers.{layer_idx}.mlp.experts.gate_up_proj_bias": f"layers.{layer_idx}.feed_forward.experts.gate_up_proj_bias",
   # f"model.layers.{layer_idx}.mlp.experts.down_proj": f"layers.{layer_idx}.feed_forward.experts.down_proj",
-  # f"model.layers.{layer_idx}.mlp.experts.down_proj.bias": f"layers.{layer_idx}.feed_forward.experts.down_proj_bias",
+  # f"model.layers.{layer_idx}.mlp.experts.down_proj_bias": f"layers.{layer_idx}.feed_forward.experts.down_proj_bias",
   # layer weights ################################################
   max_logging.log("Processing layer weights")
 
@@ -356,98 +315,6 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
   gc.collect()
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
   return jax_weights
-
-
-# def convert_to_jax_weights(base_model_path: str, model_size: str):
-#   """
-#   Function to convert the checkpoint at base_model_path into Orbax checkpoint
-#   for MaxText and output jax_weights ready for MaxText
-
-#   Attributes:
-#     base_model_path: checkpoint path
-#     model_size: llama2-7b to 70b, mistral-7b, or mixtral-8x7b, mixtral-8x22b
-#   """
-#   model_params = MODEL_PARAMS_DICT[model_size]
-#   mem_info = psutil.Process()
-#   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
-
-#   max_logging.log(f"Loading the base model from {base_model_path}")
-
-#   return _convert_huggingface_to_jax_weights(base_model_path, model_size, model_params, mem_info)
-
-
-# if __name__ == "__main__":
-#   parser = argparse.ArgumentParser()
-#   parser.add_argument("--base-model-path", type=str, required=True)
-#   parser.add_argument("--maxtext-model-path", type=str, required=True)
-#   parser.add_argument("--model-size", type=str, required=True)
-#   # parser.add_argument("--huggingface-checkpoint", type=str2bool, required=False, default=False)
-#   parser.add_argument("--use-ocdbt", type=str2bool, required=False, default=True)
-#   parser.add_argument("--use-zarr3", type=str2bool, required=False, default=True)
-#   args = parser.parse_args()
-
-#   if args.model_size not in MODEL_PARAMS_DICT or not args.model_size.startswith("llama4"):
-#     raise NotImplementedError("Currently, we only support llama4 models but got " + args.model_size)
-
-#   os.environ["XLA_FLAGS"] = f"--xla_force_host_platform_device_count={SIMULATED_CPU_DEVICES_COUNT}"
-#   base_weights_path = args.maxtext_model_path
-
-#   save_weights_to_checkpoint(
-#       args.maxtext_model_path,
-#       convert_to_jax_weights(args.base_model_path, args.model_size),
-#       SIMULATED_CPU_DEVICES_COUNT,
-#       args.use_ocdbt,
-#       args.use_zarr3,
-#   )
-#   max_logging.log(f"Successfully saved base_weights to {base_weights_path}.")
-
-
-# def _convert_to_jax_weights(base_model_path, model_size, mem_info) -> dict:
-#   """
-#   Function to convert the checkpoint at base_model_path into Orbax checkpoint
-#   for MaxText and output jax_weights ready for MaxText.
-
-#   Args:
-#       base_model_path: Path to the Hugging Face model checkpoint.
-#       model_size: Model size key in MODEL_PARAMS_DICT.
-#       mem_info: A process instance used for memory tracking.
-
-#   Returns:
-#       The converted JAX weights.
-#   """
-#   model_params = MODEL_PARAMS_DICT[model_size]
-#   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
-#   max_logging.log(f"Loading the base model from {base_model_path}")
-#   return _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info)
-
-
-# def main() -> None:
-#   parser = argparse.ArgumentParser(description="Convert and save DeepSeek model weights.")
-#   parser.add_argument("--base_model_path", type=str, required=True)
-#   parser.add_argument("--maxtext_model_path", type=str, required=True)
-#   parser.add_argument("--model_size", type=str, required=True)
-#   parser.add_argument("--simulated_cpu_devices_count", type=int, required=False, default=16)
-#   parser.add_argument("--use-ocdbt", type=str2bool, required=False, default=True)
-#   parser.add_argument("--use-zarr3", type=str2bool, required=False, default=True)
-#   args = parser.parse_args()
-
-#   if args.model_size not in MODEL_PARAMS_DICT:
-#     raise NotImplementedError(f"Model '{args.model_size}' is not supported.")
-
-#   os.environ["JAX_PLATFORMS"] = "cpu"
-#   os.environ["XLA_FLAGS"] = f"--xla_force_host_platform_device_count={args.simulated_cpu_devices_count}"
-#   mem_info = psutil.Process()
-#   save_weights_to_checkpoint(
-#       args.maxtext_model_path,
-#       _convert_to_jax_weights(args.base_model_path, args.model_size, mem_info),
-#       args.simulated_cpu_devices_count,
-#       args.use_ocdbt,
-#       args.use_zarr3,
-#   )
-
-
-# if __name__ == "__main__":
-#   main()
 
 
 def convert_to_jax_weights(base_model_path: str, model_size: str):
