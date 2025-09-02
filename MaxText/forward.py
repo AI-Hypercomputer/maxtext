@@ -39,15 +39,20 @@ class MockConfigForForwardPass:
 model_args = [
     "something.py",
     "MaxText/configs/base.yml",
-    "hardware=cpu",
-    "scan_layers=false",
+    # "hardware=cpu",
     "base_output_directory=test",
     "run_name=temp-testing-only",
-    "model_name=gpt-oss-20b",
     "skip_jax_distributed_system=true",
+    # model specific
+    "model_name=gpt-oss-20b",
+    "scan_layers=false",
     "attention=dot_product",
     "load_parameters_path=gs://shuningjin-multipod-dev/gpt-oss-20b/unscan-bf16-v2-2025-09-02-01-16-00/0/items",
-    "weight_dtype=float32", "dtype=float32", "activations_in_float32=true", "matmul_precision=high",
+    # high precision flags
+    "weight_dtype=float32",
+    "dtype=float32",
+    "activations_in_float32=true",
+    "matmul_precision=high",
 ]
 
 
@@ -127,7 +132,6 @@ def get_data(golden_data, golden_data_index, config):
   )
 
   return ids, decoder_segment_ids, decoder_positions, logits#, seq_len
-
 
 
 def setup_golden_data(input_golden_data_path):
