@@ -98,8 +98,13 @@ def calculate_total_params_per_chip(params):
 
 
 def calculate_bytes_from_pytree(params):
-  params_bytes = jax.tree_util.tree_map(lambda x: x.nbytes, params)
-  total_bytes = jax.tree_util.tree_reduce(lambda x, y: x + y, params_bytes)
+  """Calculates the number of bytes in a pytree."""
+  def get_nbytes(x):
+    if isinstance(x, jax.ShapeDtypeStruct):
+      return np.prod(x.shape) * x.dtype.itemsize
+    return x.nbytes
+  params_bytes = jax.tree_util.tree_map(get_nbytes, params)
+  total_bytes = jax.tree_util.tree_reduce(lambda x, y: x + y, params_bytes, 0)
   return total_bytes
 
 
