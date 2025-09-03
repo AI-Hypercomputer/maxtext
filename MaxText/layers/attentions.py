@@ -886,6 +886,9 @@ class Attention(nnx.Module):
       query = self.apply_rotary_embedding(query, inputs_positions=inputs_positions)
       key = self.apply_rotary_embedding(key, inputs_positions=inputs_positions)
 
+      jax.debug.print("q_after_rope\nmean={mean}\nshape={shape}\n{x}", x=query, mean=query.mean(), shape=query.shape)
+      jax.debug.print("k_after_rope\nmean={mean}\nshape={shape}\n{x}", x=key, mean=key.mean(), shape=key.shape)
+
     if use_qk_norm and is_llama4_decoder_block:
       l2_norm = L2Norm(eps=self.config.normalization_layer_epsilon)
       query = l2_norm(query)
@@ -926,9 +929,6 @@ class Attention(nnx.Module):
 
     assert not self.config.quantize_kvcache or self.kv_quant
 
-    query_pre_attn_scalar = self.config.head_dim**-0.5
-    query = query * query_pre_attn_scalar
-
     if self.config.attention == "paged" and model_mode != MODEL_MODE_TRAIN:
       unnormalized_out, _, exp_sum = self.paged_attention_op(
           query, key, value, decoder_segment_ids, model_mode, previous_chunk, slot=slot, page_state=page_state
@@ -938,6 +938,14 @@ class Attention(nnx.Module):
       cached_values = [None, None]
       if model_mode != MODEL_MODE_TRAIN:
         cached_values = self.update_kv_caches(key, value, decoder_segment_ids, model_mode, previous_chunk)
+
+      # jax.debug.print("kernel_in_query\nmean={mean}\nshape={shape}\n{x}", x=query, mean=query.mean(), shape=query.shape)
+      # jax.debug.print("kernel_in_key\nmean={mean}\nshape={shape}\n{x}", x=key, mean=key.mean(), shape=key.shape)
+      # jax.debug.print("kernel_in_value\nmean={mean}\nshape={shape}\n{x}", x=value, mean=value.mean(), shape=value.shape)
+
+      query_pre_attn_scalar = self.config.head_dim**-0.5
+      query = query * query_pre_attn_scalar
+
       out = self.attention_op(
           query, key, value, decoder_segment_ids, model_mode, cached_values, previous_chunk, bidirectional_mask, self.sinks
       )
