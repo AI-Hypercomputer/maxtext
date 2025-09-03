@@ -97,7 +97,7 @@ For hard cases, inspect compiler dumps (e.g., LLO) to understand schedules, memo
 
 ### **3\. Systematic Tuning**
 
-Performance is a function of interacting hyperparameters, chiefly block shapes (via BlockSpec), buffering, and preload distance. Write a small harness to sweep plausible settings and record throughput/latency. Let data, not rules of thumb, pick the winners.
+Performance is a function of interacting hyperparameters, chiefly block shapes (via BlockSpec), buffering, and preload distance. Build a small test script (a "harness") to systematically run the kernel with many different hyperparameter settings, such as various block sizes and buffering strategies. **Record the throughput and latency** for each run, and let data, not rules of thumb, pick the winners.
 
 
 ## **⚙️ Understanding TPU Memory & Compute**
