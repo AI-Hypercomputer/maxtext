@@ -22,7 +22,7 @@ This document provides a guide to optimize and customize your LLM model configur
 
 ## Step 1. Identify Initial Configs
 
-To begin, identify your model's size, review open-source model configs, and establish the initial configurations for each block. You can use our [reference calculator (on Colab)](https://colab.research.google.com/github/AI-Hypercomputer/maxtext/blob/main/docs/guides/llm_calculator.ipynb) to estimate parameters and FLOPs for dense, Mixtral-like Mixture of Experts (MoE), and DeepSeek-like MoE models to help you estimate the parameter count and FLOPs.
+To begin, identify your model's size, review open-source model configs, and establish the initial configurations for each block. You can use our [reference calculator (on Colab)](https://colab.research.google.com/github/AI-Hypercomputer/src/MaxText/blob/main/docs/guides/llm_calculator.ipynb) to estimate parameters and FLOPs for dense, Mixtral-like Mixture of Experts (MoE), and DeepSeek-like MoE models to help you estimate the parameter count and FLOPs.
 
 Based on resources like [Language Modeling from Scratch](https://github.com/stanford-cs336/spring2025-lectures/blob/e9cb2488fdb53ea37f0e38924ec3a1701925cef3/nonexecutable/2025%20Lecture%203%20-%20architecture.pdf), we observe common architectural ratios for dense models, as shown below:
 
@@ -60,7 +60,7 @@ Use these general runtime configurations to improve your model's performance.
 
 * **Memory usage**. To free up memory with large models, use custom remat policy to offload layer activations (including inputs, query, key, value, out projections, etc) to the host CPU.
 
-* **Compiler flags**. XLA is the backend compiler for TPUs. Many critical performance settings can be controlled directly through XLA flags. We suggest beginning with the proven flags we have tested and provided [here](https://github.com/AI-Hypercomputer/maxtext/blob/02b6b8d2558f7dab7d2be024783977bdbb3ed251/benchmarks/xla_flags_library.py).
+* **Compiler flags**. XLA is the backend compiler for TPUs. Many critical performance settings can be controlled directly through XLA flags. We suggest beginning with the proven flags we have tested and provided [here](https://github.com/AI-Hypercomputer/src/MaxText/blob/02b6b8d2558f7dab7d2be024783977bdbb3ed251/benchmarks/xla_flags_library.py).
 
 * **Benchmark**. For consistent speed tests, set `reuse_example_batch=1` to repeatedly use the same data batch, isolating computation speed from data loading. Or use on-the-fly generated data by setting `dataset_type=synthetic`.
 
@@ -171,7 +171,7 @@ Our objective was to develop a custom Mixtral-like MoE model capable of high MFU
 *   Increased the MLP dimension from 3x to 4x of the model dimension (32,768 : 8,192).
 *   Increased query heads from 32 to 128 for each layer, while reducing the number of layers from 72 to 56 to preserve overall model size around 700B.
 
-These changes, without updating sharding strategies, initially yielded nearly 50% MFU. Upon increasing the capacity factor to 1.5 (adding a buffer to allow experts to handle imbalance in token routing), MFU slightly decreased to 38.1% and scaling to 4 pods to get 35.3% MFU, which still exceeded our target of 35%. More detailed configs can be found [here](https://github.com/AI-Hypercomputer/maxtext/blob/3662540ee852d0d8f8333a36c04ddc0f1316ebfb/benchmarks/maxtext_trillium_model_configs.py#L1743) in the repo.
+These changes, without updating sharding strategies, initially yielded nearly 50% MFU. Upon increasing the capacity factor to 1.5 (adding a buffer to allow experts to handle imbalance in token routing), MFU slightly decreased to 38.1% and scaling to 4 pods to get 35.3% MFU, which still exceeded our target of 35%. More detailed configs can be found [here](https://github.com/AI-Hypercomputer/src/MaxText/blob/3662540ee852d0d8f8333a36c04ddc0f1316ebfb/benchmarks/src/MaxText_trillium_model_configs.py#L1743) in the repo.
 
 | | Initial Configs | Experimental Config | Final Configs |
 |---|---|---|---|

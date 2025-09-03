@@ -19,7 +19,7 @@
 
 MaxText supports [Llama2](https://llama.meta.com/llama2) pretraining, finetuning and decoding for its 7B and 70B flavors. To get started on decoding and finetuning of Llama2, you will first need to download weights along with its tokenizer from [Meta](https://llama.meta.com/llama-downloads). 
 
-The file [test_llama2_7b.sh](https://github.com/google/maxtext/blob/main/end_to_end/tpu/llama2/7b/test_llama2_7b.sh) provides details on how to convert the PyTorch weights in orbax checkpoint format, and thereafter use it for running decoding and finetuning. [test_llama2_7b.sh](https://github.com/google/maxtext/blob/main/end_to_end/tpu/llama2/7b/test_llama2_7b.sh) also shows how to run pretraining and also how to run decoding on the finetuned model checkpoint.
+The file [test_llama2_7b.sh](https://github.com/google/src/MaxText/blob/main/end_to_end/tpu/llama2/7b/test_llama2_7b.sh) provides details on how to convert the PyTorch weights in orbax checkpoint format, and thereafter use it for running decoding and finetuning. [test_llama2_7b.sh](https://github.com/google/src/MaxText/blob/main/end_to_end/tpu/llama2/7b/test_llama2_7b.sh) also shows how to run pretraining and also how to run decoding on the finetuned model checkpoint.
 
 ## MaxText supports pretraining and finetuning with high performance.
 

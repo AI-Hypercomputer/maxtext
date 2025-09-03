@@ -16,7 +16,7 @@
 
 import os
 
-import maxtext_xpk_runner as mxr
+import src/MaxText_xpk_runner as mxr
 from xpk_configs import XpkClusterConfig
 
 cluster_config = XpkClusterConfig(
@@ -36,7 +36,7 @@ server_image = (
     f"us-docker.pkg.dev/path/to/{user}/server"
 )
 colocated_python_image = f"gcr.io/{cluster_config.project}/path/to/{user}/colocated_python_sidecar"
-runner = f"gcr.io/{cluster_config.project}/{user}_maxtext_latest:latest"
+runner = f"gcr.io/{cluster_config.project}/{user}_src/MaxText_latest:latest"
 base_output_directory = f"gs://{user}-{region}/{user}"
 headless = True
 pathways_config = mxr.PathwaysConfig(

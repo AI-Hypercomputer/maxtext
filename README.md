@@ -16,7 +16,7 @@
 
 # MaxText
 
-[![Unit Tests](https://github.com/google/maxtext/actions/workflows/RunTests.yml/badge.svg)](https://github.com/google/maxtext/actions/workflows/RunTests.yml)
+[![Unit Tests](https://github.com/google/src/MaxText/actions/workflows/RunTests.yml/badge.svg)](https://github.com/google/src/MaxText/actions/workflows/RunTests.yml)
 
 ## Overview
 
@@ -32,14 +32,14 @@ Key supported features:
 * Models: Llama 2, Llama 3, Llama 4, Mistral and Mixtral family, Gemma, Gemma 2, Gemma 3, DeepSeek, Qwen3 Dense and MoE family
 
 ## Announcements
-* [August 13, 2025] The Qwen3 MoE family of models is now supported. We are starting with Qwen3-235B-A22B-Thinking-2507, Qwen3-30B-A3B and Qwen3-Coder-480B-A35B in addition to our existing Qwen3 Dense family of 0.6B, 4B, 8B, 14B, and 32B models.
-* [July 27, 2025] We have updated our TFLOPS/s calculation to account for causal attention, dividing the attention flops in half in this [PR](https://github.com/AI-Hypercomputer/maxtext/pull/1988). Also we account for sliding window and chunked attention reduced attention flops in [PR](https://github.com/AI-Hypercomputer/maxtext/pull/2009) and [PR](https://github.com/AI-Hypercomputer/maxtext/pull/2030). These changes especially impact large sequence configs, since attention flops grow quadratically with sequence length, as explained in this [ReadMe](https://github.com/AI-Hypercomputer/maxtext/blob/main/getting_started/Performance_Metrics.md)
+* [August 13, 2025] The Qwen3 MoE family of models is now supported. We are starting with Qwen3-235B-A22B-Thinking-2507, in addition to our existing Qwen3 Dense family of 0.6B, 4B, 8B, 14B, and 32B models.
+* [July 27, 2025] We have updated our TFLOPS/s calculation to account for causal attention, dividing the attention flops in half in this [PR](https://github.com/AI-Hypercomputer/src/MaxText/pull/1988). Also we account for sliding window and chunked attention reduced attention flops in [PR](https://github.com/AI-Hypercomputer/src/MaxText/pull/2009) and [PR](https://github.com/AI-Hypercomputer/src/MaxText/pull/2030). These changes especially impact large sequence configs, since attention flops grow quadratically with sequence length, as explained in this [ReadMe](https://github.com/AI-Hypercomputer/src/MaxText/blob/main/getting_started/Performance_Metrics.md)
 * [July 16, 2025] We will be restructuring the MaxText repository for improved organization and clarity. Please review the [proposed structure](RESTRUCTURE.md) and provide feedback.
 * [July 11, 2025] Multi-Token Prediction (MTP) training is now supported! This feature adds an auxiliary loss based on predicting multiple future tokens, inspired by the [DeepSeek-V3 paper](https://arxiv.org/html/2412.19437v1), to enhance training efficiency.
 * [June 25, 2025] DeepSeek R1-0528 variant is now supported!
 * [April 24, 2025] Llama 4 Maverick models are now supported!
 * [April 14, 2025] Llama 4 Scout models are now supported. Context length is currently limited to 8k and we have many ideas for optimization but we're working on both these things.  Note that models are text-only for now, but we're working on full multi-modal support!
-* **[April 7, 2025] 🚨🚨🚨 We support modular imports. This comes with an API change for `train.py`: Now you should invoke the script via `python3 -m MaxText.train MaxText/configs/base.yml run_name=...`. If you want the old behavior you can stick to an older commit `git checkout pre-module-v0.1.0` and use the older API `python MaxText/train.py MaxText/configs/base.yml run_name=...`.**
+* **[April 7, 2025] 🚨🚨🚨 We support modular imports. This comes with an API change for `train.py`: Now you should invoke the script via `python3 -m MaxText.train src/MaxText/configs/base.yml run_name=...`. If you want the old behavior you can stick to an older commit `git checkout pre-module-v0.1.0` and use the older API `python src/MaxText/train.py src/MaxText/configs/base.yml run_name=...`.**
 * [April 2, 2025] DeepSeek v3-0324 variant is now supported!
 * [March 24, 2025] We are excited to announce support for DeepSeek v3 (671B) and v2-Lite (16B), compatible with both TPUs and GPUs. We are actively working on further optimization.
 * [March 12, 2025] We are excited to announce support for Gemma 3: 4B, 12B, and 27B in text-only formats. Please see [Google Launch Blog](https://blog.google/technology/developers/gemma-3/) and [Developer Blog](https://developers.googleblog.com/en/introducing-gemma3/) for more information on Gemma 3.
@@ -69,7 +69,7 @@ In addition to the getting started guides, there are always other MaxText capabi
 
 ## Runtime Performance Results
 
-More details on reproducing these results can be found in [MaxText/configs/README.md](MaxText/configs/README.md).
+More details on reproducing these results can be found in [src/MaxText/configs/README.md](src/MaxText/configs/README.md).
 
 ### TPU v5p
 
@@ -88,7 +88,7 @@ More details on reproducing these results can be found in [MaxText/configs/READM
 
 ### TPU v5e
 
-For 16B, 32B, 64B, and 128B models. See full run configs in [MaxText/configs/v5e/](MaxText/configs/v5e/) as `16b.sh`, `32b.sh`, `64b.sh`, `128b.sh`.
+For 16B, 32B, 64B, and 128B models. See full run configs in [src/MaxText/configs/v5e/](src/MaxText/configs/v5e/) as `16b.sh`, `32b.sh`, `64b.sh`, `128b.sh`.
 
 | Hardware    | 16B TFLOP/sec/chip | 16B MFU | 32B TFLOP/sec/chip | 32B MFU | 64B TFLOP/sec/chip | 64B MFU | 128B TFLOP/sec/chip | 128B MFU |
 | ----------- | -----------------: | ------- | -----------------: | ------- | -----------------: | ------- | ------------------: | -------- |
@@ -111,7 +111,7 @@ MaxText is also comparable to [Pax](https://github.com/google/paxml). Like Pax, 
 ### Collect Stack Traces
 When running a Single Program, Multiple Data (SPMD) job on accelerators, the overall process can hang if there is any error or any VM hangs/crashes for some reason. In this scenario, capturing stack traces will help to identify and troubleshoot the issues for the jobs running on TPU VMs.
 
-The following configurations will help to debug a fault or when a program is stuck or hung somewhere by collecting stack traces. Change the parameter values accordingly in `MaxText/configs/base.yml`:
+The following configurations will help to debug a fault or when a program is stuck or hung somewhere by collecting stack traces. Change the parameter values accordingly in `src/MaxText/configs/base.yml`:
 1. Set `collect_stack_trace: True` to enable collection of stack traces on faults or when the program is hung. This setting will periodically dump the traces for the program to help in debugging. To disable this, set `collect_stack_trace: False`.
 2. Set `stack_trace_to_cloud: False` to display stack traces on console. `stack_trace_to_cloud: True` will create a temporary file in `/tmp/debugging` in the TPUs to store the stack traces. There is an agent running on TPU VMs that will periodically upload the traces from the temporary directory to cloud logging in the gcp project. You can view the traces in Logs Explorer on Cloud Logging using the following query:
 ```
@@ -139,7 +139,7 @@ The tool `train_compile.py` is tightly linked to `train.py` and uses the same co
 After installing the dependencies listed above, you are ready to compile ahead of time:
 ```
 # Run the below on a single machine, e.g. a CPU
-python3 -m MaxText.train_compile MaxText/configs/base.yml compile_topology=v5e-256 compile_topology_num_slices=2 \
+python3 -m MaxText.train_compile src/MaxText/configs/base.yml compile_topology=v5e-256 compile_topology_num_slices=2 \
 global_parameter_scale=16 per_device_batch_size=4
 ```
 
@@ -152,7 +152,7 @@ Here is an example that saves then loads the compiled `train_step`, starting wit
 ```
 # Run the below on a single machine, e.g. a CPU
 export LIBTPU_INIT_ARGS="--xla_enable_async_all_gather=true"
-python3 -m MaxText.train_compile MaxText/configs/base.yml compile_topology=v5e-256 \
+python3 -m MaxText.train_compile src/MaxText/configs/base.yml compile_topology=v5e-256 \
 compile_topology_num_slices=2 \
 compiled_trainstep_file=my_compiled_train.pickle global_parameter_scale=16 \
 per_device_batch_size=4 steps=10000 learning_rate=1e-3
@@ -164,7 +164,7 @@ To load the compiled train_step, you just need to pass `compiled_trainstep_file=
 ```
 # Run the below on each host of the target hardware, e.g. each host on 2 slices of v5e-256
 export LIBTPU_INIT_ARGS="--xla_enable_async_all_gather=true"
-python3 -m MaxText.train MaxText/configs/base.yml run_name=example_load_compile \
+python3 -m MaxText.train src/MaxText/configs/base.yml run_name=example_load_compile \
 compiled_trainstep_file=my_compiled_train.pickle \
 global_parameter_scale=16  per_device_batch_size=4 steps=10000 learning_rate=1e-3 \
 base_output_directory=gs://my-output-bucket dataset_path=gs://my-dataset-bucket
@@ -186,7 +186,7 @@ This example illustrates the flags to use for a multihost GPU compilation target
 ```
 # Run the below on a single A3 machine
 export XLA_FLAGS="--xla_gpu_enable_async_collectives=true"
-python3 -m MaxText.train_compile MaxText/configs/base.yml compile_topology=a3 \
+python3 -m MaxText.train_compile src/MaxText/configs/base.yml compile_topology=a3 \
 compile_topology_num_slices=4 \
 compiled_trainstep_file=my_compiled_train.pickle global_parameter_scale=16 \
 attention=dot_product per_device_batch_size=4 steps=10000 learning_rate=1e-3
@@ -198,7 +198,7 @@ To load the compiled train_step, you just need to pass `compiled_trainstep_file=
 ```
 # Run the below on each of the 4 target A3 hosts.
 export XLA_FLAGS="--xla_gpu_enable_async_collectives=true"
-python3 -m MaxText.train MaxText/configs/base.yml run_name=example_load_compile \
+python3 -m MaxText.train src/MaxText/configs/base.yml run_name=example_load_compile \
 compiled_trainstep_file=my_compiled_train.pickle \
 attention=dot_product global_parameter_scale=16  per_device_batch_size=4 steps=10000 learning_rate=1e-3 \
 base_output_directory=gs://my-output-bucket dataset_path=gs://my-dataset-bucket

@@ -17,7 +17,7 @@
 # Try SFT!
 Supervised fine-tuning (SFT) is a process where a pre-trained large language model is fine-tuned on a labeled dataset to adapt the model to perform better on specific tasks.
 
-This tutorial demonstrates step-by-step instructions for setting up the environment and then training the Llama3.1 8B model on the [HuggingFaceH4/ultrachat_200k](https://huggingface.co/datasets/HuggingFaceH4/ultrachat_200k) dataset using SFT. If you wish to use a different dataset, you can [update the dataset configurations](https://github.com/AI-Hypercomputer/maxtext/blob/main/MaxText/configs/sft.yml).
+This tutorial demonstrates step-by-step instructions for setting up the environment and then training the Llama3.1 8B model on the [HuggingFaceH4/ultrachat_200k](https://huggingface.co/datasets/HuggingFaceH4/ultrachat_200k) dataset using SFT. If you wish to use a different dataset, you can [update the dataset configurations](https://github.com/AI-Hypercomputer/src/MaxText/blob/main/MaxText/configs/sft.yml).
 
 We use [Tunix](https://github.com/google/tunix), a JAX-based library designed for post-training tasks, to perform SFT.
  
@@ -33,7 +33,7 @@ bash setup.sh
 ### Activate virtual environment
 ```
 # Replace with your virtual environment name if not using this default name
-venv_name="maxtext_venv"
+venv_name="src/MaxText_venv"
 source ~/$venv_name/bin/activate
 ```
 
@@ -68,9 +68,9 @@ Choose the scenario that matches your workflow and follow the corresponding inst
  export PER_DEVICE_BATCH_SIZE=1
 ```
 
-Finally, run the [script](https://github.com/AI-Hypercomputer/maxtext/blob/main/end_to_end/tpu/llama3.1/8b/run_sft.sh):
+Finally, run the [script](https://github.com/AI-Hypercomputer/src/MaxText/blob/main/end_to_end/tpu/llama3.1/8b/run_sft.sh):
 ```
-bash ~/maxtext/end_to_end/tpu/llama3.1/8b/run_sft.sh
+bash ~/src/MaxText/end_to_end/tpu/llama3.1/8b/run_sft.sh
 ```
 
 ### Run SFT on MaxText checkpoint
@@ -90,7 +90,7 @@ bash ~/maxtext/end_to_end/tpu/llama3.1/8b/run_sft.sh
  export PRE_TRAINED_MODEL_CKPT_PATH=<gcs path for MaxText checkpoint>
 ```
 
-Finally, run the [script](https://github.com/AI-Hypercomputer/maxtext/blob/main/end_to_end/tpu/llama3.1/8b/run_sft.sh):
+Finally, run the [script](https://github.com/AI-Hypercomputer/src/MaxText/blob/main/end_to_end/tpu/llama3.1/8b/run_sft.sh):
 ```
-bash ~/maxtext/end_to_end/tpu/llama3.1/8b/run_sft.sh
+bash ~/src/MaxText/end_to_end/tpu/llama3.1/8b/run_sft.sh
 ```

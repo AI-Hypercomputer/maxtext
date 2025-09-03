@@ -3,10 +3,10 @@
 Two approaches are here:
 
 1. Run a model recipe with a single CLI command. Great to replicate performance results previously measured. See https://github.com/AI-Hypercomputer/tpu-recipes/tree/main/training/trillium for examples.
-2. Run several experiments pythonically across a sweep of parameters (cluster configuration, maxtext parameters) with XPK workloads.
+2. Run several experiments pythonically across a sweep of parameters (cluster configuration, src/MaxText parameters) with XPK workloads.
 
 - **xla_flags_library.py**: A grouping of xla flags organized by purpose with details on how they can be applied to a model.
-- **maxtext_trillium_model_config.py**: A list of model definitions for Trillium. See optimized models here and how they apply xla flags. This config provides a pythonic way to run MaxText models.
+- **src/MaxText_trillium_model_config.py**: A list of model definitions for Trillium. See optimized models here and how they apply xla flags. This config provides a pythonic way to run MaxText models.
 - **benchmark_runner.py**: A cli interface to running a specific model recipe, on pathways or mcjax directly or with orchestration like xpk with one command.
 
 ```shell
@@ -14,25 +14,25 @@ Two approaches are here:
 CLUSTER=my-cluster
 ZONE=my-zone
 PROJECT=my-project
-python3 -m benchmarks.benchmark_runner xpk --project $PROJECT --zone $ZONE --cluster_name $CLUSTER --device_type v6e-256 --base_output_directory gs://maxtext-experiments-tpem/ --num_steps=5
+python3 -m benchmarks.benchmark_runner xpk --project $PROJECT --zone $ZONE --cluster_name $CLUSTER --device_type v6e-256 --base_output_directory gs://src/MaxText-experiments-tpem/ --num_steps=5
 ```
 
 ```shell
 # Pathways with XPK
-export RUNNER=us-docker.pkg.dev/path/to/maxtext_runner
+export RUNNER=us-docker.pkg.dev/path/to/src/MaxText_runner
 export PROXY_IMAGE=us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server
 export SERVER_IMAGE=us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server
 
-python3 -m benchmarks.benchmark_runner xpk --project $PROJECT --zone $ZONE --cluster_name $CLUSTER --device_type v6e-256 --base_output_directory gs://maxtext-experiments-tpem/ --num_steps=5 --pathways_server_image="${SERVER_IMAGE}" --pathways_proxy_server_image="${PROXY_IMAGE}" --pathways_runner_image="${RUNNER}"
+python3 -m benchmarks.benchmark_runner xpk --project $PROJECT --zone $ZONE --cluster_name $CLUSTER --device_type v6e-256 --base_output_directory gs://src/MaxText-experiments-tpem/ --num_steps=5 --pathways_server_image="${SERVER_IMAGE}" --pathways_proxy_server_image="${PROXY_IMAGE}" --pathways_runner_image="${RUNNER}"
 ```
 
 ```shell
 # On-device
 # Run model benchmark on current device (must run same command on all workers).
-python3 -m benchmarks.benchmark_runner on-device --base_output_directory gs://maxtext-experiments-tpem/ --run_name="test-run" --num_steps=5
+python3 -m benchmarks.benchmark_runner on-device --base_output_directory gs://src/MaxText-experiments-tpem/ --run_name="test-run" --num_steps=5
 ```
 
-- **maxtext_xpk_runner.py**: A pythonic way to run xpk workloads! With the magic of for looping and python code, run several xpk workloads across a sweep of parameters including libtpu version, gke clusters, and maxtext parameters with one python script.
+- **src/MaxText_xpk_runner.py**: A pythonic way to run xpk workloads! With the magic of for looping and python code, run several xpk workloads across a sweep of parameters including libtpu version, gke clusters, and src/MaxText parameters with one python script.
 
 ```shell
 # Loop possibilities:

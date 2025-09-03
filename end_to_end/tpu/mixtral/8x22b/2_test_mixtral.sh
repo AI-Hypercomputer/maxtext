@@ -15,15 +15,15 @@ MODEL_VARIATION='8x22b'
 
 if [ -z "${BASE_OUTPUT_PATH}" ]; then
     # Non-Googlers please remember to point BASE_OUTPUT_PATH to GCS buckets that you own, this script uses internal buckets for testing.
-    export BASE_OUTPUT_PATH=gs://runner-maxtext-logs/$(date +%Y-%m-%d)
+    export BASE_OUTPUT_PATH=gs://runner-src/MaxText-logs/$(date +%Y-%m-%d)
     echo "BASE_OUTPUT_PATH is not set, using BASE_OUTPUT_PATH = ${BASE_OUTPUT_PATH}"
 fi
 
-export DATASET_PATH=gs://maxtext-dataset
-export TOKENIZER_PATH=assets/tokenizer.mistral-v3
+export DATASET_PATH=gs://src/MaxText-dataset
+export TOKENIZER_PATH="${MAXTEXT_ASSETS_ROOT:-${MAXTEXT_REPO_ROOT:-$PWD}/assets}"/tokenizer.mistral-v3
 
 # Run pre-training without load_parameters_path - megablox implementation
-python3 -m MaxText.train MaxText/configs/base.yml \
+python3 -m MaxText.train "${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText}/"configs/base.yml \
   base_output_directory=${BASE_OUTPUT_PATH} dataset_path=${DATASET_PATH} \
   run_name=pre_training_megablox per_device_batch_size=4 enable_checkpointing=false \
   model_name=mixtral-8x22b ici_tensor_parallelism=1 ici_fsdp_parallelism=-1 \
@@ -32,7 +32,7 @@ python3 -m MaxText.train MaxText/configs/base.yml \
   weight_dtype=bfloat16 megablox=True sparse_matmul=True
 
 # Run pre-training without load_parameters_path - matmul implementation
-python3 -m MaxText.train MaxText/configs/base.yml \
+python3 -m MaxText.train "${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText}/"configs/base.yml \
   base_output_directory=${BASE_OUTPUT_PATH} dataset_path=${DATASET_PATH} \
   run_name=pre_training_matmul per_device_batch_size=4 enable_checkpointing=false \
   model_name=mixtral-8x22b ici_tensor_parallelism=1 ici_fsdp_parallelism=-1 \
@@ -41,7 +41,7 @@ python3 -m MaxText.train MaxText/configs/base.yml \
   weight_dtype=bfloat16 megablox=False sparse_matmul=False
 
 # Run pre-training without load_parameters_path - dropping implementation
-python3 -m MaxText.train MaxText/configs/base.yml \
+python3 -m MaxText.train "${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText}/"configs/base.yml \
   base_output_directory=${BASE_OUTPUT_PATH} dataset_path=${DATASET_PATH} \
   run_name=pre_training_dropping per_device_batch_size=4 enable_checkpointing=false \
   model_name=mixtral-8x22b ici_tensor_parallelism=1 ici_fsdp_parallelism=-1 \

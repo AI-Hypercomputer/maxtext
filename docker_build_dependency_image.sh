@@ -22,7 +22,7 @@
 # Nightly build with JAX_VERSION for GPUs. Available versions listed at https://us-python.pkg.dev/ml-oss-artifacts-published/jax-public-nightly-artifacts-registry/simple/jax:
 # bash docker_build_dependency_image.sh DEVICE=gpu MODE=nightly JAX_VERSION=0.4.36.dev20241109 # Note: this sets both jax-nightly and jaxlib-nightly 
 # MODE=custom_wheels is the same as nightly except that it reinstalls any
-# additional wheels that are present in the maxtext directory.
+# additional wheels that are present in the src/MaxText directory.
 # The main use case is to install custom jax or jaxlib wheels but it also
 # works with any custom wheels.
 # bash docker_build_dependency_image.sh MODE=custom_wheels
@@ -30,7 +30,7 @@
 # Enable "exit immediately if any command fails" option
 set -e
 
-export LOCAL_IMAGE_NAME=maxtext_base_image
+export LOCAL_IMAGE_NAME=src/MaxText_base_image
 echo "Building to $LOCAL_IMAGE_NAME"
 
 # Use Docker BuildKit so we can cache pip packages.
@@ -81,7 +81,7 @@ build_ai_image() {
         --build-arg DEVICE="$DEVICE" \
         --network=host \
         -t ${LOCAL_IMAGE_NAME} \
-        -f ./maxtext_jax_ai_image.Dockerfile .
+        -f ./src/MaxText_jax_ai_image.Dockerfile .
 }
 
 if [[ -z ${LIBTPU_GCS_PATH+x} ]] ; then
@@ -96,26 +96,26 @@ if [[ -z ${LIBTPU_GCS_PATH+x} ]] ; then
       else
         export BASEIMAGE=ghcr.io/nvidia/jax:base
       fi
-      docker build --network host --build-arg MODE=${MODE} --build-arg JAX_VERSION=$JAX_VERSION --build-arg DEVICE=$DEVICE --build-arg BASEIMAGE=$BASEIMAGE -f ./maxtext_gpu_dependencies.Dockerfile -t ${LOCAL_IMAGE_NAME} .
+      docker build --network host --build-arg MODE=${MODE} --build-arg JAX_VERSION=$JAX_VERSION --build-arg DEVICE=$DEVICE --build-arg BASEIMAGE=$BASEIMAGE -f ./src/MaxText_gpu_dependencies.Dockerfile -t ${LOCAL_IMAGE_NAME} .
     fi
   else
     if [[ ${MODE} == "stable_stack" || ${MODE} == "jax_ai_image" ]]; then
       build_ai_image
     elif [[ ${MANTARAY} == "true" ]]; then
       echo "Building with benchmark-db"
-      docker build --network host --build-arg MODE=${MODE} --build-arg JAX_VERSION=$JAX_VERSION --build-arg LIBTPU_GCS_PATH=$LIBTPU_GCS_PATH --build-arg DEVICE=$DEVICE -f ./maxtext_db_dependencies.Dockerfile -t ${LOCAL_IMAGE_NAME} .
+      docker build --network host --build-arg MODE=${MODE} --build-arg JAX_VERSION=$JAX_VERSION --build-arg LIBTPU_GCS_PATH=$LIBTPU_GCS_PATH --build-arg DEVICE=$DEVICE -f ./src/MaxText_db_dependencies.Dockerfile -t ${LOCAL_IMAGE_NAME} .
     else
-      docker build --network host --build-arg MODE=${MODE} --build-arg JAX_VERSION=$JAX_VERSION --build-arg LIBTPU_GCS_PATH=$LIBTPU_GCS_PATH --build-arg DEVICE=$DEVICE -f ./maxtext_dependencies.Dockerfile -t ${LOCAL_IMAGE_NAME} .
+      docker build --network host --build-arg MODE=${MODE} --build-arg JAX_VERSION=$JAX_VERSION --build-arg LIBTPU_GCS_PATH=$LIBTPU_GCS_PATH --build-arg DEVICE=$DEVICE -f ./src/MaxText_dependencies.Dockerfile -t ${LOCAL_IMAGE_NAME} .
     fi
   fi
 else
-  docker build --network host --build-arg MODE=${MODE} --build-arg JAX_VERSION=$JAX_VERSION --build-arg LIBTPU_GCS_PATH=$LIBTPU_GCS_PATH -f ./maxtext_dependencies.Dockerfile -t ${LOCAL_IMAGE_NAME} .
-  docker build --network host --build-arg CUSTOM_LIBTPU=true -f ./maxtext_libtpu_path.Dockerfile -t ${LOCAL_IMAGE_NAME} .
+  docker build --network host --build-arg MODE=${MODE} --build-arg JAX_VERSION=$JAX_VERSION --build-arg LIBTPU_GCS_PATH=$LIBTPU_GCS_PATH -f ./src/MaxText_dependencies.Dockerfile -t ${LOCAL_IMAGE_NAME} .
+  docker build --network host --build-arg CUSTOM_LIBTPU=true -f ./src/MaxText_libtpu_path.Dockerfile -t ${LOCAL_IMAGE_NAME} .
 fi
 
 if [[ ${CUSTOM_JAX} -eq 1 ]] ; then
   echo "Installing custom jax and jaxlib"
-  docker build --network host -f ./maxtext_custom_wheels.Dockerfile -t ${LOCAL_IMAGE_NAME} .
+  docker build --network host -f ./src/MaxText_custom_wheels.Dockerfile -t ${LOCAL_IMAGE_NAME} .
 fi
 
 echo ""

@@ -16,6 +16,31 @@ import dataclasses
 import math
 import typing
 
+
+def str2bool(v: str) -> bool:
+  """Convert a string of truth to True or False.
+
+  Args:
+    - v (str):
+      - True values are 'y', 'yes', 't', 'true', and '1';
+      - False values are 'n', 'no', 'f', 'false', and '0'.
+
+  Returns:
+    bool: True or False
+
+  Raises:
+    ValueError if v is anything else.
+  """
+  v = v.lower()
+  true_values = ["y", "yes", "t", "true", "1"]
+  false_values = ["n", "no", "f", "false", "0"]
+  if v in true_values:
+    return True
+  elif v in false_values:
+    return False
+  else:
+    raise ValueError(f"Invalid value '{v}'!")
+
 @dataclasses.dataclass
 class MaxTextModel:
   model_name: str
@@ -33,6 +58,6 @@ class MaxTextModel:
 
 
 # Run this for new definitions that should be part of the library.
-def _add_to_model_dictionary(model_dictionary: dict[str, MaxTextModel], maxtext_model: MaxTextModel) -> MaxTextModel:
-  model_dictionary[maxtext_model.model_name.replace("-", "_")] = maxtext_model
-  return maxtext_model
+def _add_to_model_dictionary(model_dictionary: dict[str, MaxTextModel], src/MaxText_model: MaxTextModel) -> MaxTextModel:
+  model_dictionary[src/MaxText_model.model_name.replace("-", "_")] = src/MaxText_model
+  return src/MaxText_model

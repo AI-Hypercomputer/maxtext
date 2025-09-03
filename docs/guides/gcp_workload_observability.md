@@ -39,4 +39,4 @@ User can control which metric they want to report via config:
 - This metric will be a double, capturing the training step time in seconds.
 - To turn on this metric, set `report_performance_metric_for_gcp_monitoring` to `True`
 
-For an example, please refer to [base.yml](https://github.com/AI-Hypercomputer/maxtext/blob/main/MaxText/configs/base.yml).
+For an example, please refer to [base.yml](https://github.com/AI-Hypercomputer/src/MaxText/blob/main/src/MaxText/configs/base.yml).

@@ -21,8 +21,8 @@
 
 guides/checkpoints.md
 guides/custom_model.md
-guides/run_maxtext_via_xpk.md
-guides/run_maxtext_via_pathways.md
+guides/run_src/MaxText_via_xpk.md
+guides/run_src/MaxText_via_pathways.md
 guides/data_input_pipeline.md
 guides/single_host_gpu.md
 guides/knowledge_distillation.md

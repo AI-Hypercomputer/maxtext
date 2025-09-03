@@ -9,16 +9,16 @@ python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 
 # This is defined in 2_test_llama3.1_405b.sh
 export MODEL_VARIATION='llama3.1-405b'
-export UNSCANNED_CHECKPOINT=gs://maxtext-llama/llama3.1_405b_bf16/unscanned/0/items
+export UNSCANNED_CHECKPOINT=gs://src/MaxText-llama/llama3.1_405b_bf16/unscanned/0/items
 
 # Non-Googlers please remember to point `SAVE_QUANT_PARAMS_PATH` to the GCS bucket where you want to save your quantized checkpoint
-export SAVE_QUANT_PARAMS_PATH=gs://maxtext-llama/llama3.1_405b_int8
+export SAVE_QUANT_PARAMS_PATH=gs://src/MaxText-llama/llama3.1_405b_int8
 
 export QUANTIZE_TYPE="int8"
 
 JAX_PLATFORMS=cpu python3 -m MaxText.load_and_quantize_checkpoint \
-    MaxText/configs/base.yml \
-    tokenizer_path=assets/tokenizer_llama3.tiktoken \
+    "${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText}/"configs/base.yml \
+    tokenizer_path="${MAXTEXT_ASSETS_ROOT:-${MAXTEXT_REPO_ROOT:-$PWD}/assets}"/tokenizer_llama3.tiktoken \
     tokenizer_type=tiktoken \
     load_parameters_path=${UNSCANNED_CHECKPOINT} \
     max_prefill_predict_length=1024 \

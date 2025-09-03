@@ -11,23 +11,23 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import maxtext_trillium_model_configs as model_configs
-from maxtext_xpk_runner import BenchmarkRunner
-from maxtext_xpk_runner import HWConfig
-from maxtext_xpk_runner import SWconfig
-from maxtext_xpk_runner import xpk_benchmark_runner
-from maxtext_xpk_runner import XpkConfig
+import src/MaxText_trillium_model_configs as model_configs
+from src/MaxText_xpk_runner import BenchmarkRunner
+from src/MaxText_xpk_runner import HWConfig
+from src/MaxText_xpk_runner import SWconfig
+from src/MaxText_xpk_runner import xpk_benchmark_runner
+from src/MaxText_xpk_runner import XpkConfig
 
 
 DATE = '20241009'
-BASE_DOCKER_IMAGE = 'maxtext_base_image'
+BASE_DOCKER_IMAGE = 'src/MaxText_base_image'
 
 ZONE = 'europe-west4'
 PROJECT = 'tpu-prod-env-multipod'
 CLUSTER_NAME = 'mlperf-v6e-256'
 DEVICE_TYPE = 'v6e-256'
 NUM_SLICES = 1
-BASE_OUTPUT_DIR = 'gs://maxtext-experiments-tpem/'
+BASE_OUTPUT_DIR = 'gs://src/MaxText-experiments-tpem/'
 
 v6e_env_configs = SWconfig(
     base_docker_image=BASE_DOCKER_IMAGE, libtpu_version=DATE

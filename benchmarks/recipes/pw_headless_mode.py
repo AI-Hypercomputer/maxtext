@@ -16,7 +16,7 @@ import os
 import sys
 
 import benchmarks.recipes.args_helper as helper
-import maxtext_xpk_runner as mxr
+import src/MaxText_xpk_runner as mxr
 from recipes.user_configs import cluster_config, xpk_path, pathways_config, base_output_directory, headless_workload_name
 
 

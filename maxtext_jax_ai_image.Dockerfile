@@ -7,6 +7,10 @@ ARG JAX_AI_IMAGE_BASEIMAGE
 ARG COMMIT_HASH
 ENV COMMIT_HASH=$COMMIT_HASH
 
+ENV MAXTEXT_ASSETS_ROOT=/deps/assets
+ENV MAXTEXT_PKG_DIR=/deps/src/MaxText
+ENV MAXTEXT_REPO_ROOT=/deps
+
 RUN mkdir -p /deps
 
 # Set the working directory in the container
@@ -46,15 +50,19 @@ RUN if [ "$DEVICE" = "tpu" ] && [ "$JAX_STABLE_STACK_BASEIMAGE" = "us-docker.pkg
 
 # Now copy the remaining code (source files that may change frequently)
 COPY . .
+
 RUN ls .
 
 ARG TEST_TYPE
 # Copy over test assets if building image for end-to-end tests or unit tests
 RUN if [ "$TEST_TYPE" = "xlml" ] || [ "$TEST_TYPE" = "unit_test" ]; then \
-      if ! gcloud storage cp -r gs://maxtext-test-assets/* MaxText/test_assets; then \
+      if ! gcloud storage cp -r gs://src/MaxText-test-assets/* src/MaxText/test_assets; then \
         echo "WARNING: Failed to download test assets from GCS. These files are only used for end-to-end tests; you may not have access to the bucket."; \
       fi; \
     fi
 
 # Run the script available in JAX AI base image to generate the manifest file
-RUN bash /jax-stable-stack/generate_manifest.sh PREFIX=maxtext COMMIT_HASH=$COMMIT_HASH
+RUN bash /jax-stable-stack/generate_manifest.sh PREFIX=src/MaxText COMMIT_HASH=$COMMIT_HASH
+
+# Install (editable) MaxText
+RUN test -f '/tmp/venv_created' && "$(tail -n1 /tmp/venv_created)"/bin/activate ; pip install --no-dependencies -e .

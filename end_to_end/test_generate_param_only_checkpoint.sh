@@ -8,8 +8,8 @@ helpFunction()
   echo "Usage: $0 <dataset_path> <output_path>"
   echo -e "\t-n dry_run is true "
   echo -e "\t-r runid: run_test_model_0b"
-  echo -e "\t-d dataset_path: gs://test-maxtext-dataset"
-  echo -e "\t-o output_path: gs://test-maxtext-output"
+  echo -e "\t-d dataset_path: gs://test-src/MaxText-dataset"
+  echo -e "\t-o output_path: gs://test-src/MaxText-output"
   echo -e "\t-i ici_tensor_parallelism: 8"
   echo -e "\t-a attention: flash"
   echo -e "\t-q quantization: int8"
@@ -19,8 +19,8 @@ helpFunction()
 # Default option values
 dry_run=false
 run_id=test_model_0b_$(date +%Y-%m-%d-%H)
-dataset_path=gs://test-maxtext-dataset
-base_output_directory=gs://test-maxtext-output
+dataset_path=gs://test-src/MaxText-dataset
+base_output_directory=gs://test-src/MaxText-output
 ici_tensor_parallelism=8
 attention=flash
 quantization=""
@@ -58,7 +58,7 @@ model_params="base_emb_dim=384 base_num_query_heads=8 base_num_kv_heads=8 base_m
 echo
 echo "Create a test training checkpoint"
 echo
-$cmd python3 -m MaxText.train MaxText/configs/base.yml \
+$cmd python3 -m MaxText.train ${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText}/configs/base.yml \
 run_name=${training_ckpt_run_id} \
 base_output_directory=${base_output_directory} \
 dataset_path=${dataset_path} attention=${attention} \
@@ -82,7 +82,7 @@ echo
 echo "Generate a decode checkpoint from the test training checkpoint"
 echo
 
-$cmd python3 -m MaxText.generate_param_only_checkpoint MaxText/configs/base.yml \
+$cmd python3 -m MaxText.generate_param_only_checkpoint "${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText}/"configs/base.yml \
 run_name=${decode_ckpt_run_id} attention=${attention} \
 base_output_directory=${base_output_directory} \
 dataset_path=${dataset_path} async_checkpointing=false \
@@ -104,7 +104,7 @@ fi
 echo
 echo "Run decode using the generated checkpoint"
 echo
-$cmd python3 -m MaxText.decode MaxText/configs/base.yml \
+$cmd python3 -m MaxText.decode "${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText}/"configs/base.yml \
 run_name=${run_id}-decode-steps-50 \
 base_output_directory=${base_output_directory} \
 dataset_path=${dataset_path} \

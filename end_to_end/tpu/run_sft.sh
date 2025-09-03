@@ -48,8 +48,8 @@ RUN_NAME=$(date +%Y-%m-%d-%H-%M-%S)
 # Convert the Hugging Face checkpoint to MaxText format if PRE_TRAINED_MODEL_CKPT_PATH is not set
 if [ -z "${PRE_TRAINED_MODEL_CKPT_PATH}" ]; then
   echo "PRE_TRAINED_MODEL_CKPT_PATH is not set. Converting Hugging Face checkpoint to MaxText format."
-  CONVERTED_CKPT_DIR=${BASE_OUTPUT_DIRECTORY}/${PRE_TRAINED_MODEL}/${RUN_NAME}/maxtext-checkpoint
-  python3 -m MaxText.utils.ckpt_conversion.to_maxtext MaxText/configs/base.yml \
+  CONVERTED_CKPT_DIR=${BASE_OUTPUT_DIRECTORY}/${PRE_TRAINED_MODEL}/${RUN_NAME}/src/MaxText-checkpoint
+  python3 -m MaxText.utils.ckpt_conversion.to_src/MaxText "${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText}/"configs/base.yml \
       model_name=${PRE_TRAINED_MODEL} \
       hf_access_token=${HF_TOKEN} \
       base_output_directory=${CONVERTED_CKPT_DIR} \
@@ -59,7 +59,7 @@ fi
 echo "Running fine-tuning on checkpoint: ${PRE_TRAINED_MODEL_CKPT_PATH}"
 
 # Run Supervised Fine-Tuning on MaxText checkpoint using HuggingFaceH4/ultrachat_200k dataset
-python3 -m MaxText.sft_trainer MaxText/configs/sft.yml \
+python3 -m MaxText.sft_trainer "${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText}/"configs/sft.yml \
     run_name=${RUN_NAME} base_output_directory=${BASE_OUTPUT_DIRECTORY}/${PRE_TRAINED_MODEL} \
     model_name=${PRE_TRAINED_MODEL} load_parameters_path=${PRE_TRAINED_MODEL_CKPT_PATH} \
     hf_access_token=$HF_TOKEN tokenizer_path=${PRE_TRAINED_MODEL_TOKENIZER} \
@@ -82,7 +82,7 @@ echo "Fine-tuned model checkpoint: ${FINE_TUNED_MODEL_CKPT_PATH}"
 
 # Convert the fine-tuned MaxText checkpoint to Hugging Face checkpoint
 export LOCAL_PATH=./tmp/hf/${PRE_TRAINED_MODEL}/${RUN_NAME}
-python3 -m MaxText.utils.ckpt_conversion.to_huggingface MaxText/configs/base.yml \
+python3 -m MaxText.utils.ckpt_conversion.to_huggingface "${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText}/"configs/base.yml \
     model_name=${PRE_TRAINED_MODEL} \
     hf_access_token=${HF_TOKEN} \
     load_parameters_path=${FINE_TUNED_MODEL_CKPT_PATH} \

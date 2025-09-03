@@ -20,13 +20,13 @@ parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.append(parent_dir)
 
 import recipes.args_helper as helper
-import maxtext_trillium_model_configs as model_configs
-import maxtext_xpk_runner as mxr
+import src/MaxText_trillium_model_configs as model_configs
+import src/MaxText_xpk_runner as mxr
 from xpk_configs import XpkClusterConfig
 
 PROXY_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server"
 SERVER_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server"
-RUNNER = "us-docker.pkg.dev/path/to/maxtext_runner"
+RUNNER = "us-docker.pkg.dev/path/to/src/MaxText_runner"
 
 # Cluster Params
 CLUSTER = "v6e-256-cluster"
@@ -37,7 +37,7 @@ COUNTRY = "us"
 DEVICE_TYPE = "v6e-256"
 
 # Other parameters (MUST BE SET BY USER)
-XPK_PATH = os.path.join("~", "xpk")  # We're running this script from the maxtext directory
+XPK_PATH = os.path.join("~", "xpk")  # We're running this script from the src/MaxText directory
 USER = os.environ["USER"]
 BASE_OUTPUT_DIRECTORY = (
     f"gs://{USER}-{PROJECT}-{COUNTRY}/pw_long_run/"

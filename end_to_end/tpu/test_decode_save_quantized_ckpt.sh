@@ -31,8 +31,8 @@ if [ "$model" = "llama2-70b" ]; then
 fi
 
 export MODEL_NAME=${model}
-export TOKENIZER_PATH=assets/tokenizer.llama2
-export LOAD_PARAMETERS_PATH=gs://inference-benchmarks/models/${MODEL_NAME}-chat/${checkpoint_ts}/param-only-decode-ckpt-maxtext/checkpoints/0/items
+export TOKENIZER_PATH="${MAXTEXT_ASSETS_ROOT:-${MAXTEXT_REPO_ROOT:-$PWD}/assets}"/tokenizer.llama2
+export LOAD_PARAMETERS_PATH=gs://inference-benchmarks/models/${MODEL_NAME}-chat/${checkpoint_ts}/param-only-decode-ckpt-src/MaxText/checkpoints/0/items
 export MAX_PREFILL_PREDICT_LENGTH=128
 export MAX_TARGET_LENGTH=256
 export ICI_FSDP_PARALLELISM=1
@@ -51,7 +51,7 @@ mkdir -p $OUTDIR
 echo
 # Run command
 ${cmd} python3 -m MaxText.decode \
-  MaxText/configs/base.yml \
+  "${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText}"/configs/base.yml \
   tokenizer_path=${TOKENIZER_PATH} \
   load_parameters_path=${LOAD_PARAMETERS_PATH} \
   max_prefill_predict_length=${MAX_PREFILL_PREDICT_LENGTH} \

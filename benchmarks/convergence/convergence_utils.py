@@ -93,9 +93,9 @@ def setup_convergence_configs(model, params: ConvHParams, num_devices: int, glob
     model.tuning_params["data_shuffle_seed"] = params.seeds
 
 def _setup_model_convergence_(
-    maxtext_model: MaxTextModel, dataset: DatasetHParams, convergence_configs: ConvHParams, num_devices: int, global_batch_size: int,
+    src/MaxText_model: MaxTextModel, dataset: DatasetHParams, convergence_configs: ConvHParams, num_devices: int, global_batch_size: int,
 ) -> MaxTextModel:
-  convergence_model = dataclasses.replace(maxtext_model)
+  convergence_model = dataclasses.replace(src/MaxText_model)
   setup_dataset(convergence_model, dataset)
   setup_convergence_configs(convergence_model, convergence_configs, num_devices, global_batch_size)
   convergence_model.model_name = convergence_model.model_name + "-" + dataset.name

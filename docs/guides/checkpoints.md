@@ -97,4 +97,4 @@ Furthermore, MaxText supports emergency checkpointing, which saves a local copy 
 -   `local_checkpoint_directory`: The local path for storing emergency checkpoints.
 -   `local_checkpoint_period`: The interval, in training steps, for saving local checkpoints.
 
-More configs about checkpoints can be found in [here](https://github.com/AI-Hypercomputer/maxtext/blob/518a87037abb2497a2514ff0c8ffc263c69c6f9f/MaxText/configs/base.yml#L23-L65).
+More configs about checkpoints can be found in [here](https://github.com/AI-Hypercomputer/src/MaxText/blob/518a87037abb2497a2514ff0c8ffc263c69c6f9f/MaxText/configs/base.yml#L23-L65).

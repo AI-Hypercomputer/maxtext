@@ -52,22 +52,23 @@ if ! python3 -c 'import sys; assert sys.version_info >= (3, 12)' 2>/dev/null; th
         if ! command -v uv &> /dev/null; then
             pip install uv
         fi
-        maxtext_dir=$(pwd)
+        src/MaxText_dir=$(pwd)
         cd
         # Ask for the venv name
-        read -p "Please enter a name for your new virtual environment (default: maxtext_venv): " venv_name
+        read -p "Please enter a name for your new virtual environment (default: src/MaxText_venv): " venv_name
         # Use a default name if the user provides no input
         if [ -z "$venv_name" ]; then
-            venv_name="maxtext_venv"
+            venv_name="src/MaxText_venv"
             echo "No name provided. Using default name: '$venv_name'"
         fi
         echo "Creating virtual environment '$venv_name' with Python 3.12..."
         uv venv --python 3.12 "$venv_name" --seed
+        printf '%s\n' "$(realpath -- "$venv_name")" >> /tmp/venv_created
         echo -e "\n\e[32mVirtual environment '$venv_name' created successfully!\e[0m"
         echo "To activate it, run the following command:"
         echo -e "\e[33m  source ~/$venv_name/bin/activate\e[0m"
         echo "After activating the environment, please re-run this script."
-        cd $maxtext_dir
+        cd $src/MaxText_dir
     else
         echo "Exiting. Please upgrade your Python environment to continue."
     fi
@@ -132,7 +133,7 @@ if [[ $DEVICE == "tpu" ]]; then
     fi
 fi
 
-# Save the script folder path of maxtext
+# Save the script folder path of src/MaxText
 run_name_folder_path=$(pwd)
 
 # Install dependencies from requirements.txt
@@ -141,6 +142,11 @@ if [[ "$MODE" == "pinned" ]]; then
     python3 -m pip install --no-cache-dir -U -r requirements.txt -c constraints_gpu.txt
 else
     python3 -m pip install --no-cache-dir -U -r requirements.txt
+fi
+
+# Install src/MaxText package
+if [ -f 'pyproject.toml' ]; then
+  python3 -m pip install -e . --no-dependencies
 fi
 
 # Uninstall existing jax, jaxlib and  libtpu-nightly

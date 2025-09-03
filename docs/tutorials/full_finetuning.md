@@ -43,8 +43,8 @@ The conversion scripts for LLama work with Meta’s original checkpoints and not
 E.g.
 
 ```bash
-python3 MaxText/llama_or_mistral_ckpt.py --base-model-path <path/to/meta/ckpt> \
-    --maxtext-model-path <GCS/path/to/save/new/maxtext/ckpt> --model-size llama2-7b
+python3 -m MaxText.llama_or_mistral_ckpt --base-model-path <path/to/meta/ckpt> \
+    --src/MaxText-model-path <GCS/path/to/save/new/src/MaxText/ckpt> --model-size llama2-7b
 ```
 
 The conversion scripts do not use accelerators but need large host memory to perform the conversion.
@@ -59,22 +59,24 @@ The conversion scripts do not use accelerators but need large host memory to per
 Below is a sample training script for LLama2-7b.
 
 ```bash
-python3 MaxText/train.py \
-MaxText/configs/base.yml \
-run_name="llama2-finetune-maxtext" \
-base_output_directory=${output_directory} \load_parameters_path=${path_to_checkpoint} \ model_name='llama2-7b' \
-dataset_path=${dataset_path} \
-async_checkpointing=False  \
-model_name='llama2-7b' \
-steps=10 per_device_batch_size=.25
+python3 -m MaxText.train \
+  src/MaxText/configs/base.yml \
+  run_name="llama2-finetune-src/MaxText" \
+  base_output_directory=${output_directory} \
+  load_parameters_path=${path_to_checkpoint} \
+  model_name='llama2-7b' \
+  dataset_path=${dataset_path} \
+  async_checkpointing=False  \
+  model_name='llama2-7b' \
+  steps=10 per_device_batch_size=.25
 ```
 
-You can find some [end to end scripts here](https://github.com/AI-Hypercomputer/maxtext/tree/main/end_to_end/tpu).
+You can find some [end to end scripts here](https://github.com/AI-Hypercomputer/src/MaxText/tree/main/end_to_end/tpu).
 These scripts can provide a reference point for various scripts.
 
 ### Maxtext Checkpoint to Hugging Face
 
-Post finetuning or pre-training, maxtext also provides scripts to convert maxtext format weights back to [hugging face](https://github.com/AI-Hypercomputer/maxtext/blob/main/MaxText/llama_mistral_mixtral_orbax_to_hf.py).
+Post finetuning or pre-training, src/MaxText also provides scripts to convert src/MaxText format weights back to [hugging face](https://github.com/AI-Hypercomputer/src/MaxText/blob/main/src/MaxText/llama_mistral_mixtral_orbax_to_hf.py).
 
 #### Dataset
 

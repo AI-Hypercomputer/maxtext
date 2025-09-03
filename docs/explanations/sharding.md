@@ -17,9 +17,9 @@
 (sharding)=
 # Sharding
 
-Choosing efficient sharding strategies is key to achieving good performance, especially at scale. In general there are other related knobs to optimize performance - you should make use of all your HBM (by tuning batch size and rematerialization policies), but here we discuss the various sharding strategies we support in maxtext.
+Choosing efficient sharding strategies is key to achieving good performance, especially at scale. In general there are other related knobs to optimize performance - you should make use of all your HBM (by tuning batch size and rematerialization policies), but here we discuss the various sharding strategies we support in src/MaxText.
 
-When considering different sharding strategies, the main concern is the amount of communication executed between chips. Different sharding strategies will require different patterns of communication - how often communication is needed and the amount of data needed to communicate. A very helpful tool to understand the performance implications of these communications is **arithmetic intensity** - which roughly gives the ratio of useful computation to the communication cost. We highly recommend understanding arithmetic intensity if you are serious about optimizing performance - we recommend both the [“Jax Train your LLM”](https://jax-ml.github.io/scaling-book/sharding/) document and a MaxText HighPerformanceLLM [class](https://github.com/rwitten/HighPerfLLMs2024) (specifically classes 1-4). We briefly describe how to compute arithmetic intensities, and then explain the various sharding strategies we support in maxtext below, starting with some notation.
+When considering different sharding strategies, the main concern is the amount of communication executed between chips. Different sharding strategies will require different patterns of communication - how often communication is needed and the amount of data needed to communicate. A very helpful tool to understand the performance implications of these communications is **arithmetic intensity** - which roughly gives the ratio of useful computation to the communication cost. We highly recommend understanding arithmetic intensity if you are serious about optimizing performance - we recommend both the [“Jax Train your LLM”](https://jax-ml.github.io/scaling-book/sharding/) document and a MaxText HighPerformanceLLM [class](https://github.com/rwitten/HighPerfLLMs2024) (specifically classes 1-4). We briefly describe how to compute arithmetic intensities, and then explain the various sharding strategies we support in src/MaxText below, starting with some notation.
 
 ## Sharding notation
 
@@ -34,7 +34,7 @@ We illustrate this notation on model parallelism as well:
 
 $BM_x \times M_xE = BE \rightarrow \text{Reduce-Scatter (RS) over x} \rightarrow BE_x$
 
-Explanation: Both the activations ($BM$) and weights ($ME$) are sharded on the M dimension. Thus each device is able to perform the matmul locally with its shard of the $M_x$ dimension, the local result is of the right global shape ($BE$) but is only a partial result - it needs to be summed with the other shards to get the full result. This is achieved with a reduce scatter (which does the summation and additionally shards the activations). Note that some flavors of tensor parallelism call for an all reduce instead a reduce scatter, but generally in maxtext we use a reduce scatter here.
+Explanation: Both the activations ($BM$) and weights ($ME$) are sharded on the M dimension. Thus each device is able to perform the matmul locally with its shard of the $M_x$ dimension, the local result is of the right global shape ($BE$) but is only a partial result - it needs to be summed with the other shards to get the full result. This is achieved with a reduce scatter (which does the summation and additionally shards the activations). Note that some flavors of tensor parallelism call for an all reduce instead a reduce scatter, but generally in src/MaxText we use a reduce scatter here.
 
 ### Axis labels
 | Symbol | Description                                                                       |
@@ -114,27 +114,27 @@ arithmetic intensity analysis since they shard the batch, as we will illustrate 
 
 ## Code implementation of sharding in MaxText
 
-Sharding in maxtext is split into 3 layers
+Sharding in src/MaxText is split into 3 layers
 
-* **Physical** mesh axes (e.g. `data`, `fsdp`, `tensor`) defined [here](https://github.com/AI-Hypercomputer/maxtext/blob/f269268bd622f6d2f40d38632ede7a7834a6024e/MaxText/configs/base.yml#L269)
+* **Physical** mesh axes (e.g. `data`, `fsdp`, `tensor`) defined [here](https://github.com/AI-Hypercomputer/src/MaxText/blob/f269268bd622f6d2f40d38632ede7a7834a6024e/MaxText/configs/base.yml#L269)
 
-    * Mesh is created via [create_device_mesh](https://github.com/AI-Hypercomputer/maxtext/blob/f269268bd622f6d2f40d38632ede7a7834a6024e/MaxText/max_utils.py#L576-L580)
+    * Mesh is created via [create_device_mesh](https://github.com/AI-Hypercomputer/src/MaxText/blob/f269268bd622f6d2f40d38632ede7a7834a6024e/MaxText/max_utils.py#L576-L580)
 
-    * Mesh given names in train.py via [Mesh](https://github.com/AI-Hypercomputer/maxtext/blob/f269268bd622f6d2f40d38632ede7a7834a6024e/MaxText/train.py#L594)
+    * Mesh given names in train.py via [Mesh](https://github.com/AI-Hypercomputer/src/MaxText/blob/f269268bd622f6d2f40d38632ede7a7834a6024e/MaxText/train.py#L594)
 
-* **Logical** axes which map a meaningful axes name to physical axes defined [here](https://github.com/AI-Hypercomputer/maxtext/blob/f269268bd622f6d2f40d38632ede7a7834a6024e/MaxText/configs/base.yml#L270)
+* **Logical** axes which map a meaningful axes name to physical axes defined [here](https://github.com/AI-Hypercomputer/src/MaxText/blob/f269268bd622f6d2f40d38632ede7a7834a6024e/MaxText/configs/base.yml#L270)
 
     * E.g. logical axes `activation_batch` is sharded by the physical axes of `data` and `fsdp` (among others) since those sharding strategies shard the batch. `Activation_batch` is a common axis among most activation tensors. Note that if we use `data_parallelism=4` and `fsdp_parallelism=2`, then the `activation_batch` dimension will get sharded over both, e.g. $4*2=8$ ways.
 
 * **Individual tensors** have sharding constraints - generally specified by logical rules
 
-    * Example for weights using `kernel_axes` in `MlpBlock` [here](https://github.com/AI-Hypercomputer/maxtext/blob/f269268bd622f6d2f40d38632ede7a7834a6024e/MaxText/layers/linears.py#L240) which in turns relies on flax’s param argument `nn.with_logical_partitioning` [here](https://github.com/AI-Hypercomputer/maxtext/blob/f269268bd622f6d2f40d38632ede7a7834a6024e/MaxText/layers/linears.py#L135)
+    * Example for weights using `kernel_axes` in `MlpBlock` [here](https://github.com/AI-Hypercomputer/src/MaxText/blob/f269268bd622f6d2f40d38632ede7a7834a6024e/MaxText/layers/linears.py#L240) which in turns relies on flax’s param argument `nn.with_logical_partitioning` [here](https://github.com/AI-Hypercomputer/src/MaxText/blob/f269268bd622f6d2f40d38632ede7a7834a6024e/MaxText/layers/linears.py#L135)
 
-    * For activations we use `nn.with_logical_constraint` to give sharding hints for the compiler - here is an [example](https://github.com/AI-Hypercomputer/maxtext/blob/f269268bd622f6d2f40d38632ede7a7834a6024e/MaxText/layers/llama2.py#L85). Sharding hints for the activations is not strictly necessary but the compiler may do funky/inefficient things without these hints.
+    * For activations we use `nn.with_logical_constraint` to give sharding hints for the compiler - here is an [example](https://github.com/AI-Hypercomputer/src/MaxText/blob/f269268bd622f6d2f40d38632ede7a7834a6024e/MaxText/layers/llama2.py#L85). Sharding hints for the activations is not strictly necessary but the compiler may do funky/inefficient things without these hints.
 
 ## Hierarchical Mesh
 
-Constructing a hierarchical mesh and specifying shardings is very similar to a “flat” mesh except we use the nice API [create_hybrid_device_mesh](https://github.com/AI-Hypercomputer/maxtext/blob/f269268bd622f6d2f40d38632ede7a7834a6024e/MaxText/max_utils.py#L558) and specify both the degree of lower level faster network (e.g. `TPU ICI`) and higher level slower network (e.g. `DCN`) separately. For example if we want to use 4x fsdp parallelism over `ICI` and 2x data parallelism over `DCN` then we specify
+Constructing a hierarchical mesh and specifying shardings is very similar to a “flat” mesh except we use the nice API [create_hybrid_device_mesh](https://github.com/AI-Hypercomputer/src/MaxText/blob/f269268bd622f6d2f40d38632ede7a7834a6024e/MaxText/max_utils.py#L558) and specify both the degree of lower level faster network (e.g. `TPU ICI`) and higher level slower network (e.g. `DCN`) separately. For example if we want to use 4x fsdp parallelism over `ICI` and 2x data parallelism over `DCN` then we specify
 
 ```
 mesh = mesh_utils.create_hybrid_device_mesh(
@@ -317,7 +317,7 @@ This is the same amount of compute, and also the same amount of communication - 
 
 ## Tensor Sequence Parallelism
 
-This sharding strategy is very similar to tensor parallelism, except we shard the initial feed forward (FF) activations on the  sequence dimension as opposed to the model dimension. The activations have to get all-gathered at the start of the FF and reduce-scattered at the end, but it's the same amount of total comms, just a different axis (see above analysis for TP). The intermediate activations of shape [batch, sequence, mlp] are still sharded by mlp (since the weights are sharded on mlp). The benefits are explained in more detail in this [paper](https://arxiv.org/pdf/2205.05198), TL;DR is that all-reduces for small normalizations are not needed since the feature dimension is not sharded with `TP sequence` as opposed to when its sharded with regular `TP`. This is generally recommended for GPUs over tensor parallelism. See [PR #1136](https://github.com/AI-Hypercomputer/maxtext/pull/1136) which introduces this parallelism.
+This sharding strategy is very similar to tensor parallelism, except we shard the initial feed forward (FF) activations on the  sequence dimension as opposed to the model dimension. The activations have to get all-gathered at the start of the FF and reduce-scattered at the end, but it's the same amount of total comms, just a different axis (see above analysis for TP). The intermediate activations of shape [batch, sequence, mlp] are still sharded by mlp (since the weights are sharded on mlp). The benefits are explained in more detail in this [paper](https://arxiv.org/pdf/2205.05198), TL;DR is that all-reduces for small normalizations are not needed since the feature dimension is not sharded with `TP sequence` as opposed to when its sharded with regular `TP`. This is generally recommended for GPUs over tensor parallelism. See [PR #1136](https://github.com/AI-Hypercomputer/src/MaxText/pull/1136) which introduces this parallelism.
 
 ### Tensor Sequence Arithmetic Intensity
 
@@ -401,7 +401,7 @@ We are actively investing in Multiple Program Multiple Data (`MPMD`) style jax t
 
 ### PP + FSDP/DP
 
-Pipelining and FSDP/DP interactions have to be considered together to achieve optimal performance. Generally we want to reduce the gradients across DP replicas only once outside of the pipeline loop as opposed to every microbatch (we want the gradient reduction performed locally across microbatches first and only once across DP replicas). We rely on the XLA compiler for this optimization. Similarly for FSDP we want to all-gather the weights across FSDP only once before the pipeline loop as opposed to every microbatch - we have implemented this in maxtext with `pipeline_fsdp_ag_once` and generally recommend this with small batch sizes. However this comes with a huge memory cost - the weights and gradients are not sharded by FSDP, and thus a significant amount of other sharding (PP, EP, TP) must be used. This is roughly equivalent  0-1 sharding, FSDP only shards the optimizer state, not the weights and gradients.
+Pipelining and FSDP/DP interactions have to be considered together to achieve optimal performance. Generally we want to reduce the gradients across DP replicas only once outside of the pipeline loop as opposed to every microbatch (we want the gradient reduction performed locally across microbatches first and only once across DP replicas). We rely on the XLA compiler for this optimization. Similarly for FSDP we want to all-gather the weights across FSDP only once before the pipeline loop as opposed to every microbatch - we have implemented this in src/MaxText with `pipeline_fsdp_ag_once` and generally recommend this with small batch sizes. However this comes with a huge memory cost - the weights and gradients are not sharded by FSDP, and thus a significant amount of other sharding (PP, EP, TP) must be used. This is roughly equivalent  0-1 sharding, FSDP only shards the optimizer state, not the weights and gradients.
 
 ### PP Arithmetic Intensity
 
@@ -423,8 +423,8 @@ Note that for MoE models, this arithmetic intensity grows by a factor of `expert
 
 ## Context Autoregressive
 
-Context Autoregressive shards the KV cache on the sequence dimension. It shards feed forward layer by experts for both activations and weights. This is used for inference only, see [inference.yml](https://github.com/AI-Hypercomputer/maxtext/blob/353a45d57eb1f1cc02e5c8d9e7b18eaf634d7edc/MaxText/configs/inference.yml#L4) for the modified logical axis rules for inference.
+Context Autoregressive shards the KV cache on the sequence dimension. It shards feed forward layer by experts for both activations and weights. This is used for inference only, see [inference.yml](https://github.com/AI-Hypercomputer/src/MaxText/blob/353a45d57eb1f1cc02e5c8d9e7b18eaf634d7edc/MaxText/configs/inference.yml#L4) for the modified logical axis rules for inference.
 
 ## Autoregressive
 
-Autoregressive shards weights, but not activations. This is used for inference only. See [inference.yml](https://github.com/AI-Hypercomputer/maxtext/blob/353a45d57eb1f1cc02e5c8d9e7b18eaf634d7edc/MaxText/configs/inference.yml#L4) for the modified logical axis rules for inference.
+Autoregressive shards weights, but not activations. This is used for inference only. See [inference.yml](https://github.com/AI-Hypercomputer/src/MaxText/blob/353a45d57eb1f1cc02e5c8d9e7b18eaf634d7edc/MaxText/configs/inference.yml#L4) for the modified logical axis rules for inference.

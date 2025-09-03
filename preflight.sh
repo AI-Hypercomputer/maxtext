@@ -6,7 +6,7 @@ echo "Running preflight.sh"
 # bash preflight.sh
 
 # Warning:
-# For any dependencies, please add them into `setup.sh` or `maxtext_dependencies.Dockerfile`. 
+# For any dependencies, please add them into `setup.sh` or `src/MaxText_dependencies.Dockerfile`. 
 # You should not install any dependencies in this file.
 
 # Stop execution if any command exits with error

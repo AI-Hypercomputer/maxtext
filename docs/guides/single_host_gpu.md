@@ -64,17 +64,17 @@ https://stackoverflow.com/questions/72932940/failed-to-initialize-nvml-unknown-e
 Clone Maxtext:
 
 ```bash
-git clone https://github.com/AI-Hypercomputer/maxtext.git
+git clone https://github.com/AI-Hypercomputer/src/MaxText.git
 ```
 
 ## Build Maxtext Docker Image
 
-This builds a docker image called `maxtext_base_image`. You can retag to a different name.
+This builds a docker image called `src/MaxText_base_image`. You can retag to a different name.
 
 1. Check out the code changes:
 
 ```bash
-cd maxtext
+cd src/MaxText
 ```
 
 2. Run the following commands to build and push the docker image:
@@ -82,7 +82,7 @@ cd maxtext
 ```bash
 export LOCAL_IMAGE_NAME=<docker_image_name>
 sudo bash docker_build_dependency_image.sh DEVICE=gpu 
-docker tag maxtext_base_image $LOCAL_IMAGE_NAME
+docker tag src/MaxText_base_image $LOCAL_IMAGE_NAME
 docker push $LOCAL_IMAGE_NAME
 ```
 
@@ -98,7 +98,7 @@ specify it explicitly:
 Test the docker, to see if jax can see all the 8 GPUs
 
 ```bash
-sudo docker run maxtext_base_image:latest  python3 -c "import jax; print(jax.devices())"
+sudo docker run src/MaxText_base_image:latest  python3 -c "import jax; print(jax.devices())"
 ```
 
 You should see the following:
@@ -114,13 +114,13 @@ We will Run the next commands from inside the docker for convenience.
 ## SSH into the docker
 
 ```bash
-sudo docker run --runtime=nvidia --gpus all -it maxtext_base_image:latest  bash
+sudo docker run --runtime=nvidia --gpus all -it src/MaxText_base_image:latest  bash
 ```
 
 If you do not wish to ssh execute the next set of commands by pre-pending the following:
 
 ```bash
-sudo docker run --runtime=nvidia --gpus all -it maxtext_base_image:latest ....
+sudo docker run --runtime=nvidia --gpus all -it src/MaxText_base_image:latest ....
 ```
 
 ### Test a 1B model training
@@ -138,7 +138,7 @@ Update script and run the command with synthetic data:
 ```
 base_output_directory: A GCS Bucket 
 dataset_type: Synthetic or pass a real bucket
-attention:cudnn_flash_te (The default in maxtext is flash. Flash does not work on GPUs)
+attention:cudnn_flash_te (The default in src/MaxText is flash. Flash does not work on GPUs)
 scan_layers=False 
 use_iota_embed=True 
 hardware=gpu
@@ -147,14 +147,16 @@ Hardware: GPU
 ```
 
 ```bash
-python3 MaxText/train.py MaxText/configs/base.yml   run_name=gpu01   base_output_directory=/deps/output  dataset_type=synthetic   enable_checkpointing=True  steps=10 attention=cudnn_flash_te scan_layers=False use_iota_embed=True hardware=gpu per_device_batch_size=12
+python3 -m MaxText.train src/MaxText/configs/base.yml   run_name=gpu01   base_output_directory=/deps/output  \
+  dataset_type=synthetic   enable_checkpointing=True  steps=10 attention=cudnn_flash_te scan_layers=False \
+  use_iota_embed=True hardware=gpu per_device_batch_size=12
 ```
 
 ### Test a LLama2-7B model training
 
 You can find the optimized running of LLama Models for various host configurations here:
 
-https://github.com/AI-Hypercomputer/maxtext/tree/main/MaxText/configs/a3/llama_2_7b
+https://github.com/AI-Hypercomputer/src/MaxText/tree/main/MaxText/configs/a3/llama_2_7b
 
 `1vm.sh` modified script below:
 
@@ -165,7 +167,7 @@ echo "Running 1vm.sh"
 # python3 xpk/xpk.py workload create --cluster ${CLUSTER_NAME} \
 # --workload ${WORKLOAD_NAME} --docker-image=gcr.io/supercomputer-testing/${LOCAL_IMAGE_NAME} \
 # --device-type ${DEVICE_TYPE} --num-slices 1 \
-# --command "bash MaxText/configs/a3/llama_2_7b/1vm.sh"
+# --command "bash src/MaxText/configs/a3/llama_2_7b/1vm.sh"
 
 # Stop execution if any command exits with error
 set -e
@@ -191,6 +193,7 @@ export XLA_FLAGS="--xla_dump_to=$OUTPUT_PATH/$RUN_NAME/HLO_dumps/
 
 
 # 1 node, DATA_DP=1, ICI_FSDP=8
-python MaxText/train.py MaxText/configs/models/gpu/llama2_7b.yml run_name=$RUN_NAME \
-    dcn_data_parallelism=1 ici_fsdp_parallelism=8 base_output_directory=$OUTPUT_PATH attention=cudnn_flash_te scan_layers=False use_iota_embed=True hardware=gpu
+python3 -m MaxText.train src/MaxText/configs/models/gpu/llama2_7b.yml run_name=$RUN_NAME dcn_data_parallelism=1 \
+  ici_fsdp_parallelism=8 base_output_directory=$OUTPUT_PATH attention=cudnn_flash_te scan_layers=False \
+  use_iota_embed=True hardware=gpu
 ```

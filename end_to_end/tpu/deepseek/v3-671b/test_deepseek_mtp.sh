@@ -14,11 +14,11 @@ export TOKENIZER_PATH='deepseek-ai/DeepSeek-V3'
 # Step 1: Convert the HuggingFace Checkpoint with MTP Enabled
 # Note: Non-Googlers should use their own GCS buckets.
 # The --enable_mtp flag is crucial for processing the MTP-specific layers.
-export CHKPT_BUCKET=gs://maxtext-deepseek/deepseek3-671b/hf
-export MODEL_BUCKET=gs://maxtext-deepseek/deepseek3-671b
+export CHKPT_BUCKET=gs://src/MaxText-deepseek/deepseek3-671b/hf
+export MODEL_BUCKET=gs://src/MaxText-deepseek/deepseek3-671b
 JAX_PLATFORMS=cpu python3 -m MaxText.convert_deepseek_family_ckpt \
     --base_model_path ${CHKPT_BUCKET} \
-    --maxtext_model_path ${MODEL_BUCKET}/${idx} \
+    --src/MaxText_model_path ${MODEL_BUCKET}/${idx} \
     --model_size ${MODEL_NAME} \
     --enable_mtp
 
@@ -28,12 +28,12 @@ export CONVERTED_CHECKPOINT=${MODEL_BUCKET}/${idx}/0/items
 
 # Step 3: Run Training
 # Note: Non-Googlers should point DATASET_PATH and BASE_OUTPUT_DIRECTORY to their own GCS buckets.
-export DATASET_PATH=gs://maxtext-dataset
-export BASE_OUTPUT_DIRECTORY=gs://runner-maxtext-logs
+export DATASET_PATH=gs://src/MaxText-dataset
+export BASE_OUTPUT_DIRECTORY=gs://runner-src/MaxText-logs
 
 # Run fine-tuning with MTP enabled
 # We add `mtp_num_layers=1` and `mtp_loss_scaling_factor=0.1` to activate the MTP block.
-python3 -m MaxText.train MaxText/configs/base.yml \
+python3 -m MaxText.train "${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText}/"configs/base.yml \
     base_output_directory=${BASE_OUTPUT_DIRECTORY} \
     dataset_path=${DATASET_PATH} \
     load_parameters_path=${CONVERTED_CHECKPOINT} \
