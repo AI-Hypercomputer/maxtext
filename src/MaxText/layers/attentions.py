@@ -468,14 +468,7 @@ class Attention(nnx.Module):
           rngs=self.rngs,
       )
 
-    if self.config.fused_qkv:
-      self.qkv_proj = self.init_qkv_w(inputs_shape=inputs_q_shape)
-    else:
-      self.query = self.init_query_w(inputs_q_shape=inputs_q_shape)
-      self.key = self.init_kv_w(inputs_kv_shape=inputs_kv_shape)
-      self.value = self.init_kv_w(inputs_kv_shape=inputs_kv_shape)
-
-    self.out = self.init_out_w(output_dim=inputs_q_shape[-1])
+    self._init_projections(inputs_q_shape, inputs_kv_shape)
 
     if self.config.attention_sink:
       self.sinks = nnx.Param(
@@ -506,6 +499,16 @@ class Attention(nnx.Module):
     else:
       self.query_norm = None
       self.key_norm = None
+
+  def _init_projections(self, inputs_q_shape: Tuple, inputs_kv_shape: Tuple) -> None:
+    """Initializes the query, key, value, and output projections."""
+    if self.config.fused_qkv:
+      self.qkv_proj = self.init_qkv_w(inputs_shape=inputs_q_shape)
+    else:
+      self.query = self.init_query_w(inputs_q_shape=inputs_q_shape)
+      self.key = self.init_kv_w(inputs_kv_shape=inputs_kv_shape)
+      self.value = self.init_kv_w(inputs_kv_shape=inputs_kv_shape)
+    self.out = self.init_out_w(output_dim=inputs_q_shape[-1])
 
   def init_query_w(self, inputs_q_shape: Tuple) -> nnx.Module:
     """Query projection initialization."""
