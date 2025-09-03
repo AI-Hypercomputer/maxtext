@@ -13,11 +13,12 @@
 # limitations under the License.
 """Shared Benchmark config for v6e orchestrations."""
 
+import dataclasses
 import os.path
+import typing
 from tempfile import gettempdir
 from benchmarks.benchmark_utils import MaxTextModel, _add_to_model_dictionary
 from benchmarks import xla_flags_library
-from benchmarks.globals import MAXTEXT_ASSETS_ROOT
 
 # TODO(vbarr@) Abstract software features like checkpointing,
 # real data / synthetic data out of this config
@@ -606,7 +607,7 @@ llama2_70b_4096_real_data_long_run = _add_to_model_dictionary(
             "profiler": "xplane",
             "dataset_path": "gs://max-datasets-rogue",
             "dataset_type": "tfds",
-            "tokenizer_path": os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizer.llama2"),
+            "tokenizer_path": os.path.join("assets", "tokenizer.llama2"),
             "sa_block_q": 1024,
             "sa_block_q_dkv": 2048,
             "sa_block_q_dq": 2048,
@@ -1392,7 +1393,7 @@ llama3_1_70b_8192_iter_real_data_and_checkpointing_tfds = _add_to_model_dictiona
             "skip_first_n_steps_for_profiler": 10,
             "profiler_steps": 5,
             "tokenizer_type": "tiktoken",
-            "tokenizer_path": os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizer_llama3.tiktoken"),
+            "tokenizer_path": "assets/tokenizer_llama3.tiktoken",
         },
         xla_flags=(
             xla_flags_library.DENSE_VMEM_LIMIT_FLAG
@@ -1456,7 +1457,7 @@ llama3_1_70b_8192_iter_synth_data_and_checkpointing = _add_to_model_dictionary(
             "skip_first_n_steps_for_profiler": 10,
             "profiler_steps": 5,
             "tokenizer_type": "tiktoken",
-            "tokenizer_path": os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizer_llama3.tiktoken"),
+            "tokenizer_path": "assets/tokenizer_llama3.tiktoken",
         },
         xla_flags=(
             xla_flags_library.DENSE_VMEM_LIMIT_FLAG
@@ -1653,7 +1654,7 @@ mixtral_8x7b_dropped = _add_to_model_dictionary(
             "megablox": False,
             "sparse_matmul": False,
             "capacity_factor": 1.25,
-            "tokenizer_path": os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizer.mistral-v1"),
+            "tokenizer_path": "assets/tokenizer.mistral-v1",
         },
         xla_flags=(
             xla_flags_library.MOE_VMEM_LIMIT_FLAG
@@ -1688,7 +1689,7 @@ mixtral_8x7b_dropped_int8 = _add_to_model_dictionary(
             "sparse_matmul": False,
             "capacity_factor": 1.25,
             "quantization": "int8",
-            "tokenizer_path": os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizer.mistral-v1"),
+            "tokenizer_path": "assets/tokenizer.mistral-v1",
         },
         xla_flags=(
             xla_flags_library.MOE_VMEM_LIMIT_FLAG
@@ -1729,7 +1730,7 @@ mixtral_8x22b_dropped = _add_to_model_dictionary(
             "megablox": False,
             "sparse_matmul": False,
             "capacity_factor": 1.25,
-            "tokenizer_path": os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizer.mistral-v3"),
+            "tokenizer_path": "assets/tokenizer.mistral-v3",
             "dtype": "bfloat16",
             "weight_dtype": "bfloat16",
             "allow_split_physical_axes": True,
@@ -1770,7 +1771,7 @@ deepseek_v3_ep16 = _add_to_model_dictionary(
             "megablox": False,
             "sparse_matmul": False,
             "capacity_factor": 1.0,
-            "tokenizer_path": os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizer.mistral-v3"),
+            "tokenizer_path": "assets/tokenizer.mistral-v3",
             "dtype": "bfloat16",
             "opt_type": "sgd",
             "weight_dtype": "bfloat16",
@@ -1803,7 +1804,7 @@ gemma2_9b_8192 = _add_to_model_dictionary(
             "reuse_example_batch": 1,
             "enable_checkpointing": False,
             "profiler": "xplane",
-            "tokenizer_path": os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizer.llama2"),
+            "tokenizer_path": os.path.join("assets", "tokenizer.llama2"),
             "sa_block_q": 2048,
             "sa_block_q_dkv": 2048,
             "sa_block_q_dq": 2048,
@@ -1836,7 +1837,7 @@ gemma2_27b_8192 = _add_to_model_dictionary(
         "reuse_example_batch": 1,
         "enable_checkpointing": False,
         "profiler": "xplane",
-        "tokenizer_path": os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizer.llama2"),
+        "tokenizer_path": os.path.join("assets", "tokenizer.llama2"),
         "sa_block_q": 2048,
         "sa_block_q_dkv": 2048,
         "sa_block_q_dq": 2048,
@@ -1885,7 +1886,7 @@ llama3_1_70b_131072 = _add_to_model_dictionary(
         "skip_first_n_steps_for_profiler": 10,
         "profiler_steps": 5,
         "tokenizer_type": "tiktoken",
-        "tokenizer_path": os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizer_llama3.tiktoken"),
+        "tokenizer_path": "assets/tokenizer_llama3.tiktoken", 
         "packing": False,
     },
     xla_flags=(xla_flags_library.DENSE_VMEM_LIMIT_FLAG
@@ -1958,7 +1959,7 @@ custom_moe_700b = _add_to_model_dictionary(
             "sa_use_fused_bwd_kernel": True,
             "sparse_matmul": False,
             "capacity_factor": 1.5,
-            "tokenizer_path": os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizer.mistral-v1"),
+            "tokenizer_path": "assets/tokenizer.mistral-v1",
             "dtype": "bfloat16",
             "weight_dtype": "bfloat16",
             "opt_type": "sgd",

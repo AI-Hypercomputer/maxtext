@@ -132,12 +132,12 @@ A recommended approach for running MaxText is to build your image from a **JAX A
 
 
     ```
-    git clone https://github.com/google/src/MaxText.git
-    cd src/MaxText
+    git clone https://github.com/google/maxtext.git
+    cd maxtext
 
     ```
 
-2.  **Build the Image for your target hardware (TPU or GPU)** This script creates a local Docker image named `src/MaxText_base_image`. You can find a full list of available base images in the [JAX AI Images documentation](https://cloud.google.com/ai-hypercomputer/docs/images).
+2.  **Build the Image for your target hardware (TPU or GPU)** This script creates a local Docker image named `maxtext_base_image`. You can find a full list of available base images in the [JAX AI Images documentation](https://cloud.google.com/ai-hypercomputer/docs/images).
 
     -   **For TPUs:**
 
@@ -201,10 +201,10 @@ For instance, to run a job across **four TPU slices**, you would change `--num-s
         xpk workload create\
           --cluster ${CLUSTER_NAME}\
           --workload ${USER}-tpu-job\
-          --base-docker-image src/MaxText_base_image\
+          --base-docker-image maxtext_base_image\
           --tpu-type v5litepod-256\
           --num-slices 1\
-          --command "python3 -m MaxText.train src/MaxText/configs/base.yml run_name=${USER}-tpu-job base_output_directory=${BASE_OUTPUT_DIR} dataset_path=${DATASET_PATH} steps=100"
+          --command "python3 -m MaxText.train MaxText/configs/base.yml run_name=${USER}-tpu-job base_output_directory=${BASE_OUTPUT_DIR} dataset_path=${DATASET_PATH} steps=100"
 
         ```
 
@@ -215,10 +215,10 @@ For instance, to run a job across **four TPU slices**, you would change `--num-s
         xpk workload create\
           --cluster ${CLUSTER_NAME}\
           --workload ${USER}-gpu-job\
-          --base-docker-image src/MaxText_base_image\
+          --base-docker-image maxtext_base_image\
           --device-type h100-80gb-8\
           --num-nodes 2\
-          --command "python3 -m MaxText.train src/MaxText/configs/base.yml run_name=${USER}-gpu-job base_output_directory=${BASE_OUTPUT_DIR} dataset_path=${DATASET_PATH} steps=100"
+          --command "python3 -m MaxText.train MaxText/configs/base.yml run_name=${USER}-gpu-job base_output_directory=${BASE_OUTPUT_DIR} dataset_path=${DATASET_PATH} steps=100"
 
         ```
 

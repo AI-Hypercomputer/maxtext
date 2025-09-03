@@ -4,7 +4,8 @@ we are not changing the actual file contents.
 
 We welcome feedback on this proposed structure. Please provide any thoughts,
 comments, or questions by creating a new 
-[issue](https://github.com/AI-Hypercomputer/src/MaxText/issues) in MaxText.
+[issue](https://github.com/AI-Hypercomputer/maxtext/issues) in MaxText.
+
 
 ```
 .
@@ -16,26 +17,18 @@ comments, or questions by creating a new
 ├── AUTHORS
 ├── CONTRIBUTING.md
 ├── LICENSE
-├── src/
-│   └── MaxText/
-│       ├── decode.py
-│       ├── sft.py
-│       ├── decode.py
-│       ├── train.py
-│       ├── decode.py
-│       └── train_compile.py
 ├── README.md
 ├── dependencies/
 │   ├── dockerfiles/
 │   │   ├── jetstream_pathways.Dockerfile
 │   │   ├── maxengine_server.Dockerfile
-│   │   ├── src/MaxText_custom_wheels.Dockerfile
-│   │   ├── src/MaxText_db_dependencies.Dockerfile
-│   │   ├── src/MaxText_dependencies.Dockerfile
-│   │   ├── src/MaxText_gpu_dependencies.Dockerfile
-│   │   ├── src/MaxText_jax_ai_image.Dockerfile
-│   │   ├── src/MaxText_libtpu_path.Dockerfile
-│   │   └── src/MaxText_runner.Dockerfile
+│   │   ├── maxtext_custom_wheels.Dockerfile
+│   │   ├── maxtext_db_dependencies.Dockerfile
+│   │   ├── maxtext_dependencies.Dockerfile
+│   │   ├── maxtext_gpu_dependencies.Dockerfile
+│   │   ├── maxtext_jax_ai_image.Dockerfile
+│   │   ├── maxtext_libtpu_path.Dockerfile
+│   │   └── maxtext_runner.Dockerfile
 │   ├── requirements/
 │   │   ├── constraints_gpu.txt
 │   │   └── requirements.txt
@@ -53,7 +46,7 @@ comments, or questions by creating a new
 │   ├── README.md
 │   └── Sharding.md
 ├── src/
-│   ├── src/MaxText/
+│   ├── maxtext/
 │   │   ├── assets/
 │   │   │   └── tokenizers/
 │   │   │       ├── tokenizer.default
@@ -76,16 +69,16 @@ comments, or questions by creating a new
 │   │   │   │   ├── benchmark_runner.py
 │   │   │   │   ├── benchmark_utils.py
 │   │   │   │   ├── command_utils.py
-│   │   │   │   └── src/MaxText_xpk_runner.py
+│   │   │   │   └── maxtext_xpk_runner.py
 │   │   │   └── workload_configs/
 │   │   │       ├── convergence/
 │   │   │       │   ├── c4_exp.py
 │   │   │       │   └── convergence_utils.py
 │   │   │       ├── hardware_optimized/
 │   │   │       │   └── tpu/
-│   │   │       │       ├── src/MaxText_trillium_model_configs.py
-│   │   │       │       ├── src/MaxText_v5e_model_configs.py
-│   │   │       │       └── src/MaxText_v5p_model_configs.py
+│   │   │       │       ├── maxtext_trillium_model_configs.py
+│   │   │       │       ├── maxtext_v5e_model_configs.py
+│   │   │       │       └── maxtext_v5p_model_configs.py
 │   │   │       ├── mmlu/
 │   │   │       │   ├── mmlu_categories.py
 │   │   │       │   └── mmlu_eval.py
@@ -99,7 +92,7 @@ comments, or questions by creating a new
 │   │   ├── checkpoint_conversion/
 │   │   │   ├── to_hf/
 │   │   │   │   └── llama_mistral_mixtral_orbax_to_hf.py
-│   │   │   ├── to_src/MaxText/
+│   │   │   ├── to_maxtext/
 │   │   │   │   ├── convert_deepseek_family_ckpt.py
 │   │   │   │   ├── convert_deepseek_family_ckpt_unscanned.py
 │   │   │   │   ├── convert_gemma2_ckpt.py
@@ -263,7 +256,7 @@ comments, or questions by creating a new
 │   │       ├── globals.py
 │   │       ├── max_logging.py
 │   │       ├── max_utils.py
-│   │       ├── src/MaxText_utils.py
+│   │       ├── maxtext_utils.py
 │   │       ├── metric_logger.py
 │   │       └── multimodal_utils.py
 │   └── MaxText/

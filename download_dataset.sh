@@ -16,7 +16,7 @@
 
 # This script downloads c4/en/3.0.1 to your gcs bucket directory
 # Usage bash download_dataset.sh <<gcp project>> <<gcs bucket name>>
-# Usage example: bash download_dataset.sh cloud-tpu-multipod-dev gs://src/MaxText-dataset
+# Usage example: bash download_dataset.sh cloud-tpu-multipod-dev gs://maxtext-dataset
 
 function remove_trailing_slash {
   if [[ $1 =~ /$ ]]; then  # Check if the path ends with a slash

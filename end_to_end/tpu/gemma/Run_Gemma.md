@@ -19,7 +19,7 @@
 
 Following the instructions at [kaggle](https://www.kaggle.com/models/google/gemma/frameworks/maxText) will let you download Gemma model weights. You will have to consent to license for Gemma using your kaggle account's [API credentials](https://github.com/Kaggle/kaggle-api?tab=readme-ov-file#api-credentials).
 
-After downloading the weights run [convert_gemma_chkpt.py](https://github.com/AI-Hypercomputer/src/MaxText/blob/main/src/MaxText/convert_gemma_chkpt.py), which converts the checkpoint to be compatible with MaxText and uploads them to a GCS bucket. You can run decode and finetuning using instructions mentioned in the test scripts at [end_to_end/tpu/gemma](https://github.com/AI-Hypercomputer/src/MaxText/tree/main/end_to_end/tpu/gemma).
+After downloading the weights run [convert_gemma_chkpt.py](https://github.com/AI-Hypercomputer/maxtext/blob/main/MaxText/convert_gemma_chkpt.py), which converts the checkpoint to be compatible with MaxText and uploads them to a GCS bucket. You can run decode and finetuning using instructions mentioned in the test scripts at [end_to_end/tpu/gemma](https://github.com/AI-Hypercomputer/maxtext/tree/main/end_to_end/tpu/gemma).
 
 ## MaxText supports pretraining and finetuning with high performance
 

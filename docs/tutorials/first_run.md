@@ -34,15 +34,15 @@ multiple hosts but is a good way to learn about MaxText.
 1. [Create and SSH to the single host VM of your choice](https://cloud.google.com/tpu/docs/managing-tpus-tpu-vm). You can use any available single host TPU, such as `v5litepod-8`, `v5p-8`, or `v4-8`.
 2. Clone MaxText onto that TPU VM.
 3. Within the root directory of the cloned repo, install dependencies and pre-commit hook by running:
-```sh
-python3 -m venv ~/venv-src/MaxText
-source ~/venv-src/MaxText/bin/activate
+```
+python3 -m venv ~/venv-maxtext
+source ~/venv-maxtext/bin/activate
 bash setup.sh
 pre-commit install
 ```
 4. After installation completes, run training on synthetic data with the following command:
-```sh
-python3 -m MaxText.train src/MaxText/configs/base.yml \
+```
+python3 -m MaxText.train MaxText/configs/base.yml \
   run_name=$YOUR_JOB_NAME \
   base_output_directory=gs://<my-bucket> \
   dataset_type=synthetic \
@@ -51,8 +51,8 @@ python3 -m MaxText.train src/MaxText/configs/base.yml \
 Optional: If you want to try training on a Hugging Face dataset, see [Data Input Pipeline](data-input-pipeline) for data input options.
 
 5. To demonstrate model output, run the following command:
-```sh
-python3 -m MaxText.decode src/MaxText/configs/base.yml \
+```
+python3 -m MaxText.decode MaxText/configs/base.yml \
   run_name=$YOUR_JOB_NAME \
   base_output_directory=gs://<my-bucket> \
   per_device_batch_size=1
@@ -64,15 +64,15 @@ This command uses a model with randomly initialized weights, so the outputs are 
 In the same TPU VM where you just installed all the dependencies of MaxText, You can also run training and decoding in MaxText via Notebook (for e.g., via Jupyter or Colab). 
 
 #### Decoding in MaxText via Notebook
-You can use [demo_decoding.ipynb](https://github.com/AI-Hypercomputer/src/MaxText/blob/main/src/MaxText/examples/demo_decoding.ipynb) to try out decoding on MaxText's `Llama3.1-8b` model implementation. In this notebook, we give `"I love to"` as the prompt, and the greedily sampled first output token is `" cook"`. Please remember to provide the path to your `Llama3.1-8b` checkpoint for the `load_parameters_path` argument in the config inside the notebook. You can use [to_src/MaxText.py](https://github.com/AI-Hypercomputer/src/MaxText/blob/main/src/MaxText/utils/ckpt_conversion/to_src/MaxText.py) to create a MaxText/Orbax checkpoint from a Huggingface checkpoint.
+You can use [demo_decoding.ipynb](https://github.com/AI-Hypercomputer/maxtext/blob/main/MaxText/examples/demo_decoding.ipynb) to try out decoding on MaxText's `Llama3.1-8b` model implementation. In this notebook, we give `"I love to"` as the prompt, and the greedily sampled first output token is `" cook"`. Please remember to provide the path to your `Llama3.1-8b` checkpoint for the `load_parameters_path` argument in the config inside the notebook. You can use [to_maxtext.py](https://github.com/AI-Hypercomputer/maxtext/blob/main/MaxText/utils/ckpt_conversion/to_maxtext.py) to create a MaxText/Orbax checkpoint from a Huggingface checkpoint.
 
 
 
 ### Run MaxText on NVIDIA GPUs
 1. Use `bash docker_build_dependency_image.sh DEVICE=gpu` to build a container with the required dependencies.
 2. After installation is complete, run training with the following command on synthetic data:
-```sh
-python3 -m MaxText.train src/MaxText/configs/base.yml \
+```
+python3 -m MaxText.train MaxText/configs/base.yml \
   run_name=$YOUR_JOB_NAME \
   base_output_directory=gs://<my-bucket> \
   dataset_type=synthetic \
@@ -80,8 +80,8 @@ python3 -m MaxText.train src/MaxText/configs/base.yml \
 ```
 
 3. To demonstrate model output, run the following command: 
-```sh
-python3 -m MaxText.decode src/MaxText/configs/base.yml \
+```
+python3 -m MaxText.decode MaxText/configs/base.yml \
   run_name=$YOUR_JOB_NAME \
   base_output_directory=gs://<my-bucket> \
   per_device_batch_size=1  
@@ -98,4 +98,4 @@ Google Kubernetes Engine (GKE) is the recommended way to run MaxText on multiple
 
 ## Next steps: Preflight optimizations
 
-After you get workloads running, there are optimizations you can apply to improve performance. For more information, see [PREFLIGHT.md](https://github.com/google/src/MaxText/blob/main/PREFLIGHT.md).
+After you get workloads running, there are optimizations you can apply to improve performance. For more information, see [PREFLIGHT.md](https://github.com/google/maxtext/blob/main/PREFLIGHT.md).

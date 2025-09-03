@@ -62,7 +62,7 @@ You can enable quantization in MaxText by setting flags in your configuration fi
 Here is an example of how to run a training job with int8 quantization enabled via Qwix:
 
 ```bash
-python3 -m MaxText.train src/MaxText/configs/base.yml ... use_qwix_quantization=True quantization='int8'
+python3 -m MaxText.train MaxText/configs/base.yml ... use_qwix_quantization=True quantization='int8'
 ```
 
 ## The Qwix interception API

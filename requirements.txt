@@ -41,4 +41,3 @@ tensorflow>=2.16.0
 tiktoken
 transformers
 tunix@git+https://github.com/google/tunix.git
-pathwaysutils@git+https://github.com/AI-Hypercomputer/pathways-utils.git#5756f63

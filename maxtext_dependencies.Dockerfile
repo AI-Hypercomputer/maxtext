@@ -31,10 +31,6 @@ ENV ENV_LIBTPU_GCS_PATH=$LIBTPU_GCS_PATH
 ARG DEVICE
 ENV ENV_DEVICE=$DEVICE
 
-ENV MAXTEXT_ASSETS_ROOT=/deps/assets
-ENV MAXTEXT_PKG_DIR=/deps/src/MaxText
-ENV MAXTEXT_REPO_ROOT=/deps
-
 RUN mkdir -p /deps
 
 # Set the working directory in the container
@@ -50,6 +46,3 @@ RUN --mount=type=cache,target=/root/.cache/pip bash setup.sh MODE=${ENV_MODE} JA
 
 # Now copy the remaining code (source files that may change frequently)
 COPY . .
-
-# Install (editable) MaxText
-RUN test -f '/tmp/venv_created' && "$(tail -n1 /tmp/venv_created)"/bin/activate ; pip install --no-dependencies -e .

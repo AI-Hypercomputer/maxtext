@@ -137,7 +137,7 @@ This configuration manages a `multi-tiered checkpointing` system designed for bo
 | Flag | Description | Type | Default |
 | :--- | :--- | :--- | :--- |
 | `enable_checkpointing` | A master switch to enable (`True`) or disable (`False`) saving checkpoints during the training run. | `boolean` | `False` |
-| `enable_multi_tier_checkpointing` | When set to (`True`), this flag enables the multi-tier checkpointing feature on src/MaxText level. | `boolean` | `False` |
+| `enable_multi_tier_checkpointing` | When set to (`True`), this flag enables the multi-tier checkpointing feature on maxtext level. | `boolean` | `False` |
 | `local_checkpoint_directory` | The high-speed local filesystem path(i.e. ramdisk) where **Multi-tier checkpoints** are saved. Setting this path, along with a non-zero `local_checkpoint_period`, enables the Multi-tier Checkpointing feature. | `string` | `""` |
 | `local_checkpoint_period` | The interval, in training steps, for how often a **Multi-tier checkpoint** is saved in local ramdisks. | `integer` | `0` |
 | `multi_tier_checkpointing_backup_interval_minutes`| The interval, in minutes, for how often a **Multi-tier checkpoint** is saved to backup from local ramdisks. | `integer` | `0` |
@@ -183,5 +183,5 @@ The flags below would give the user access to the ramdisk in their workload:
     --num-slices=${NUM_SLICES} \
     --ramdisk-directory=${RAMDISK_DIRECTORY} \
     --mtc-enabled  \
-    --command "python3 src/MaxText/train.py src/MaxText/configs/base.yml base_output_directory=$OUTPUT_PATH dataset_path=$DATA_PATH steps=120 per_device_batch_size=6 enable_checkpoint_cloud_logger=True checkpoint_period=${CHECKPOINT_PEROID} enable_multi_tier_checkpointing=True local_checkpoint_period=${LOCAL_CHECKPOINT_PERIOD} local_checkpoint_directory=/${RAMDISK_DIRECTORY} multi_tier_checkpointing_backup_interval_minutes=${MULTI_TIER_CHECKPOINTING_BACKUP_INT_MIN}"
+    --command "python3 MaxText/train.py MaxText/configs/base.yml base_output_directory=$OUTPUT_PATH dataset_path=$DATA_PATH steps=120 per_device_batch_size=6 enable_checkpoint_cloud_logger=True checkpoint_period=${CHECKPOINT_PEROID} enable_multi_tier_checkpointing=True local_checkpoint_period=${LOCAL_CHECKPOINT_PERIOD} local_checkpoint_directory=/${RAMDISK_DIRECTORY} multi_tier_checkpointing_backup_interval_minutes=${MULTI_TIER_CHECKPOINTING_BACKUP_INT_MIN}"
     ```

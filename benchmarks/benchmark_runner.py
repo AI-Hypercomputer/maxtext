@@ -18,23 +18,23 @@ This script will run specific tuned workload on specified hardware and software 
 Example usages:
   python3 benchmark_runner.py xpk --project=<my-project> --zone=<zone> \
     --cluster_name=<xpk_cluster_name> --base_output_directory=<output_gcloud_bucket> --device_type=v6e-256 
-    --num_slices=1 --model_name="llama2_70b_4096" --libtpu_version=20241009 --base_docker_image=src/MaxText_base_image
+    --num_slices=1 --model_name="llama2_70b_4096" --libtpu_version=20241009 --base_docker_image=maxtext_base_image
 """
 import argparse
 import os
 import time
 
-from benchmarks.benchmark_utils import str2bool
-from benchmarks.src/MaxText_trillium_model_configs import trillium_model_dict
-from benchmarks.src/MaxText_v5p_model_configs import v5p_model_dict
-from benchmarks.src/MaxText_v5e_model_configs import v5e_model_dict
+from MaxText.inference_utils import str2bool
+from benchmarks.maxtext_trillium_model_configs import trillium_model_dict
+from benchmarks.maxtext_v5p_model_configs import v5p_model_dict
+from benchmarks.maxtext_v5e_model_configs import v5e_model_dict
 from benchmarks.convergence.c4_exp import c4_pretrain_model_dict
-from benchmarks.src/MaxText_xpk_runner import PathwaysConfig
-from benchmarks.src/MaxText_xpk_runner import WorkloadConfig
-from benchmarks.src/MaxText_xpk_runner import xpk_benchmark_runner
-from benchmarks.src/MaxText_xpk_runner import on_device_benchmark_runner
+from benchmarks.maxtext_xpk_runner import PathwaysConfig
+from benchmarks.maxtext_xpk_runner import WorkloadConfig
+from benchmarks.maxtext_xpk_runner import xpk_benchmark_runner
+from benchmarks.maxtext_xpk_runner import on_device_benchmark_runner
 from benchmarks.xpk_configs import XpkClusterConfig
-from benchmarks.src/MaxText_xpk_runner import LibTpuType
+from benchmarks.maxtext_xpk_runner import LibTpuType
 
 def add_pathways_arguments(parser: argparse.ArgumentParser):
   """Add pathways arguments to arg parsers that need it.
@@ -137,13 +137,13 @@ def add_xpk_runner_arguments(custom_parser: argparse.ArgumentParser):
       '--libtpu_type',
       type=str,
       choices=[t.value for t in LibTpuType],
-      default='src/MaxText-docker',
+      default='maxtext-docker',
       help='type of libtpu to be benchmarked command.',
   )
   custom_parser.add_argument(
       '--base_docker_image',
       type=str,
-      default='src/MaxText_base_image',
+      default='maxtext_base_image',
       help='version of base docker image to be benchmarked command.',
   )
   custom_parser.add_argument(
@@ -216,7 +216,7 @@ def add_on_device_runner_arguments(custom_parser: argparse.ArgumentParser):
       '--libtpu_type',
       type=str,
       choices=[t.value for t in LibTpuType],
-      default='src/MaxText-docker',
+      default='maxtext-docker',
       help='type of libtpu to be benchmarked command.',
   )
   custom_parser.add_argument(

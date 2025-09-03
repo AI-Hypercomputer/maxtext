@@ -19,13 +19,13 @@
 
 # This script wraps several steps meant for the github runners to push nightly images.
 # If you want to create and push your own images you should instead use docker_build_dependency_image and
-# docker_upload_runner in the src/MaxText root directory.
+# docker_upload_runner in the maxtext root directory.
 
 # Example command:
 # bash build_and_upload_images.sh PROJECT=<project> MODE=stable DEVICE=tpu CLOUD_IMAGE_NAME=${USER}_runner
 
 
-export LOCAL_IMAGE_NAME=src/MaxText_base_image
+export LOCAL_IMAGE_NAME=maxtext_base_image
 
 # Set environment variables
 for ARGUMENT in "$@"; do
@@ -50,13 +50,13 @@ docker push gcr.io/$PROJECT/${dependency_image_name}:latest
 docker tag ${LOCAL_IMAGE_NAME} gcr.io/$PROJECT/${dependency_image_name}:${image_date}
 docker push gcr.io/$PROJECT/${dependency_image_name}:${image_date}
 
-# Download other test assets from GCS into "${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText}"/test_assets
-if ! gcloud storage cp gs://src/MaxText-test-assets/* "${MAXTEXT_TEST_ASSETS_ROOT:-${MAXTEXT_REPO_ROOT:-$PWD}/test_assets}"; then
+# Download other test assets from GCS into MaxText/test_assets
+if ! gcloud storage cp gs://maxtext-test-assets/* MaxText/test_assets; then
   echo "WARNING: Failed to download test assets from GCS. These files are only used for end-to-end tests; you may not have access to the bucket."
 fi
 
 # Build then upload "dependencies + code" image
-docker build --build-arg BASEIMAGE=${LOCAL_IMAGE_NAME} -f ./src/MaxText_runner.Dockerfile -t ${LOCAL_IMAGE_NAME}_runner .
+docker build --build-arg BASEIMAGE=${LOCAL_IMAGE_NAME} -f ./maxtext_runner.Dockerfile -t ${LOCAL_IMAGE_NAME}_runner .
 docker tag ${LOCAL_IMAGE_NAME}_runner gcr.io/$PROJECT/${CLOUD_IMAGE_NAME}:latest
 docker push gcr.io/$PROJECT/${CLOUD_IMAGE_NAME}:latest
 docker tag ${LOCAL_IMAGE_NAME}_runner gcr.io/$PROJECT/${CLOUD_IMAGE_NAME}:${image_date}

@@ -13,15 +13,20 @@
 # limitations under the License.
 
 from collections import defaultdict
+import os
+import sys
 import threading
 from typing import List
 
-from benchmarks.disruption_management.disruption_handler import create_disruption_handler
-from benchmarks.disruption_management.disruption_handler import DisruptionConfig
-from benchmarks.disruption_management.disruption_handler import DisruptionHandler
-from benchmarks.disruption_management.monitor import create_monitor
-from benchmarks.disruption_management.monitor import Monitor
-from benchmarks.xpk_configs import XpkClusterConfig
+parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.append(parent_dir)
+
+from disruption_management.disruption_handler import create_disruption_handler
+from disruption_management.disruption_handler import DisruptionConfig
+from disruption_management.disruption_handler import DisruptionHandler
+from disruption_management.monitor import create_monitor
+from disruption_management.monitor import Monitor
+from xpk_configs import XpkClusterConfig
 
 
 class DisruptionManager:

@@ -33,10 +33,10 @@ jobs:
         python3 -m pip install pylint pyink pytype==2024.2.27
     - name: Typecheck the code with pytype
       run: |
-        pytype --jobs auto --disable 'import-error,late-directive,wrong-arg-types,module-attr,unsupported-operands' src/MaxText/ || true
+        pytype --jobs auto --disable 'import-error,late-directive,wrong-arg-types,module-attr,unsupported-operands' MaxText/ || true
     - name: Analysing the code with pylint in Maxtext/
       run: |
-         pylint --verbose --msg-template='[{abspath}] {msg_id}:{line:3d},{column}: {obj}: {msg}' --disable C0114,R0401,R0917,W0201,W0613 src/MaxText/ || true
+         pylint --verbose --msg-template='[{abspath}] {msg_id}:{line:3d},{column}: {obj}: {msg}' --disable C0114,R0401,R0917,W0201,W0613 MaxText/ || true
     - name: Analysing the code with pylint in pedagogical_examples/
       run: |
          pylint pedagogical_examples/ && \
@@ -44,7 +44,7 @@ jobs:
          'PyLint check has failed. Please run bash code_style.sh to fix issues'; exit 20; }
     - name: Analysing the code with pyink in Maxtext/
       run: |
-        pyink src/MaxText --check --diff --color --pyink-indentation=2 --line-length=125 || true
+        pyink MaxText --check --diff --color --pyink-indentation=2 --line-length=125 || true
     - name: Analysing the code with pyink in pedagogical_examples/
       run: |
         pyink pedagogical_examples --check --diff --color --pyink-indentation=2 --line-length=125

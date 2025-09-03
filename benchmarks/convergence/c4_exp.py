@@ -15,7 +15,7 @@ import dataclasses
 from benchmarks.benchmark_utils import MaxTextModel, _add_to_model_dictionary
 from benchmarks.convergence.convergence_utils import DatasetHParams, ConvHParams, _setup_model_convergence_
 
-from benchmarks.src/MaxText_v5p_model_configs import v5p_model_dict, deepseek_v3_ep_256_v5p_512
+from benchmarks.maxtext_v5p_model_configs import v5p_model_dict, deepseek_v3_ep_256_v5p_512
 
 c4_pretrain_model_dict = {}
 
@@ -33,7 +33,7 @@ c4_mlperf_hp = DatasetHParams(
 
 c4_en_hp = DatasetHParams(
         name="c4en",
-        dataset_path="gs://src/MaxText-dataset",
+        dataset_path="gs://maxtext-dataset",
         dataset_name="c4/en:3.0.1",
         dataset_type="tfds",
         train_split="train",

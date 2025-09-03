@@ -18,7 +18,7 @@
 # Improvements:
 # Toggle Vertex AI Experiment on/off.
 # Group libtpu / jax / jaxlib dependencies instead of just libtpu.
-# Split out src/MaxText command generation and xpk runner from this file.
+# Split out maxtext command generation and xpk runner from this file.
 
 import dataclasses
 import enum
@@ -34,8 +34,7 @@ from typing import Optional, List
 
 import omegaconf
 
-import benchmarks.src/MaxText_trillium_model_configs as model_configs
-from benchmarks.globals import MAXTEXT_PKG_DIR
+import benchmarks.maxtext_trillium_model_configs as model_configs
 from benchmarks.command_utils import run_command_with_updates
 import benchmarks.xla_flags_library as xla_flags
 from benchmarks.disruption_management.disruption_handler import DisruptionConfig
@@ -43,9 +42,9 @@ from benchmarks.disruption_management.disruption_manager import DisruptionManage
 from benchmarks.xpk_configs import XpkClusterConfig
 
 
-# Assumes you built src/MaxText dep image.
+# Assumes you built maxtext dep image.
 # Assumes you have xpk installed in a git clone repo of ~/{wl_config.xpk_path}/xpk.py
-_DEFAULT_MAXTEXT_BASE_DOCKER_IMAGE_NAME = 'src/MaxText_base_image'
+_DEFAULT_MAXTEXT_BASE_DOCKER_IMAGE_NAME = 'maxtext_base_image'
 
 COMPLETION_TIMEOUT_SECONDS = 10
 
@@ -65,7 +64,7 @@ class LibTpuType(enum.Enum):
   # In order to use a custom libtpu, put a libtpu.so file in your local
   # working directory.
   CUSTOM = 'custom'
-  MAXTEXT = 'src/MaxText-docker'
+  MAXTEXT = 'maxtext-docker'
 
 
 @dataclasses.dataclass
@@ -101,7 +100,7 @@ class WorkloadConfig:
   generate_metrics_and_upload_to_big_query: bool = True
   hardware_id: str = 'v6e'
   metrics_gcs_file: str = ''
-  base_config: str = os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")
+  base_config: str = os.path.join("MaxText", "configs", "base.yml")
   topology: str = dataclasses.field(init=False)
   num_devices_per_slice: int = dataclasses.field(init=False)
   db_project: str = ""
@@ -341,7 +340,7 @@ def _build_args_from_config(wl_config: WorkloadConfig) -> dict:
   return {"metrics_gcs_file": wl_config.metrics_gcs_file,
           "model_id": wl_config.model.model_type,
           "hardware_id": wl_config.hardware_id,
-          "software_id": "jax_src/MaxText",
+          "software_id": "jax_maxtext",
           "number_of_chips": wl_config.num_devices_per_slice * wl_config.num_slices,
           "container_image_name": wl_config.base_docker_image,
           "global_batch_size": per_device_batch_size * wl_config.num_devices_per_slice * wl_config.num_slices,
@@ -351,8 +350,8 @@ def _build_args_from_config(wl_config: WorkloadConfig) -> dict:
           "number_of_steps": wl_config.num_steps,
           "xla_flags": f"'{xla_flags_str}'",
           "dataset": dataset,
-          "run_type": "src/MaxText-xpk",
-          "config_file": os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+          "run_type": "maxtext-xpk",
+          "config_file": os.path.join("MaxText", "configs", "base.yml"),
           "topology": wl_config.topology,
           "tuning_params": f"'{tuning_params_str}'",
           "db_project": wl_config.db_project,
@@ -426,8 +425,7 @@ def build_user_command(
       'export ENABLE_PATHWAYS_PERSISTENCE=1 &&',
       f'export JAX_PLATFORMS={jax_platforms} &&',
       'export ENABLE_PJRT_COMPATIBILITY=true &&',
-      'export MAXTEXT_ASSETS_ROOT=/deps/assets MAXTEXT_PKG_DIR=/deps/src/MaxText MAXTEXT_REPO_ROOT=/deps &&'
-      f'{hlo_dump} python3 -m MaxText.train {os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")}',
+      f'{hlo_dump} python3 -m MaxText.train {os.path.join("MaxText", "configs", "base.yml")}',
       f'{config_tuning_params}',
       f'steps={wl_config.num_steps}',
       f'model_name={wl_config.model.model_type}',
@@ -581,7 +579,7 @@ def generate_xpk_workload_cmd(
     workload_name=None,
     exp_name=None,
 ):
-  """Generates a command to run a src/MaxText model on XPK."""
+  """Generates a command to run a maxtext model on XPK."""
 
   is_pathways_enabled = wl_config.pathways_config is not None
   is_pathways_headless_enabled = wl_config.pathways_config and wl_config.pathways_config.headless
@@ -694,7 +692,7 @@ def run_xpk_workload(
     wl_config: WorkloadConfig,
     wait_for_completion: bool = False,
 ) -> int:
-  """Runs a src/MaxText model on XPK and waits for completion.
+  """Runs a maxtext model on XPK and waits for completion.
 
   Args:
     cluster_config: XPK cluster configuration.
@@ -771,10 +769,10 @@ def on_device_benchmark_runner(
     print(f'User command: {user_command}')
     subprocess.run(user_command, shell=True, text=True)
 
-# Run src/MaxText_xpk_runner.py as a script for executing multiple workloads pythonically!
+# Run maxtext_xpk_runner.py as a script for executing multiple workloads pythonically!
 def main() -> int:
   # Variables to configure:
-  output_bucket = 'gs://src/MaxText-experiments-temp/'
+  output_bucket = 'gs://maxtext-experiments-temp/'
   base_docker_image = _DEFAULT_MAXTEXT_BASE_DOCKER_IMAGE_NAME
   # Configure these for writing to benchmark DB
   db_project = "supercomputer-testing"

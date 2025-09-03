@@ -25,7 +25,7 @@
 
 set -e
 
-export LOCAL_IMAGE_NAME=src/MaxText_base_image
+export LOCAL_IMAGE_NAME=maxtext_base_image
 export PROJECT=$(gcloud config get-value project)
 
 # Set environment variables
@@ -44,12 +44,12 @@ if [[ ! -v CLOUD_IMAGE_NAME ]]; then
   exit 1
 fi
 
-# Download other test assets from GCS into "${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText}"/test_assets
-if ! gcloud storage cp gs://src/MaxText-test-assets/* "${MAXTEXT_TEST_ASSETS_ROOT:-${MAXTEXT_REPO_ROOT:-$PWD}/test_assets}"; then
+# Download other test assets from GCS into MaxText/test_assets
+if ! gcloud storage cp gs://maxtext-test-assets/* MaxText/test_assets; then
   echo "WARNING: Failed to download test assets from GCS. These files are only used for end-to-end tests; you may not have access to the bucket."
 fi
 
-docker build --build-arg BASEIMAGE=${LOCAL_IMAGE_NAME} -f ./src/MaxText_runner.Dockerfile -t ${LOCAL_IMAGE_NAME_RUNNER} .
+docker build --build-arg BASEIMAGE=${LOCAL_IMAGE_NAME} -f ./maxtext_runner.Dockerfile -t ${LOCAL_IMAGE_NAME_RUNNER} .
 
 docker tag ${LOCAL_IMAGE_NAME_RUNNER} gcr.io/$PROJECT/${CLOUD_IMAGE_NAME}:latest
 docker push gcr.io/$PROJECT/${CLOUD_IMAGE_NAME}:latest

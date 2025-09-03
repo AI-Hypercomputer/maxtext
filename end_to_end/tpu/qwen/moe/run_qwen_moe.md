@@ -31,7 +31,7 @@ To get started, you first need a MaxText-compatible checkpoint.
     ```
     python3 -m MaxText.convert_qwen3_moe\
       --base_model_path /path/to/qwen3_hf_checkpoint\
-      --src/MaxText_model_path gs://your-gcs-bucket/qwen3_src/MaxText_ckpt\
+      --maxtext_model_path gs://your-gcs-bucket/qwen3_maxtext_ckpt\
       --model_size <qwen3-30b-a3b|qwen3-235b-a22b|qwen3-480b-a35b>
 
     ```
@@ -44,10 +44,10 @@ Pre-training and Fine-tuning
 After converting the checkpoint, you can use it for fine-tuning or start a pre-training run from scratch. The command below is an example for fine-tuning on a v5p-512 slice. To pre-train, simply remove the `load_parameters_path` argument.
 
 ```
-python3 -m MaxText.train src/MaxText/configs/base.yml\
+python3 -m MaxText.train MaxText/configs/base.yml\
     base_output_directory=${BASE_OUTPUT_DIRECTORY}\
     dataset_path=${DATASET_PATH}\
-    load_parameters_path=gs://your-gcs-bucket/qwen3_src/MaxText_ckpt/0/items\
+    load_parameters_path=gs://your-gcs-bucket/qwen3_maxtext_ckpt/0/items\
     run_name=qwen3_finetuning\
     per_device_batch_size=1\
     model_name=<qwen3-30b-a3b|qwen3-235b-a22b|qwen3-480b-a35b>\
@@ -67,8 +67,8 @@ Decoding
 To generate text with a trained model, use the `decode` command. The command below is an example for fine-tuning on a v5p-512 slice.
 
 ```
-python3 -m MaxText.decode src/MaxText/configs/base.yml\
-    load_parameters_path=gs://your-gcs-bucket/qwen3_src/MaxText_ckpt/0/items\
+python3 -m MaxText.decode MaxText/configs/base.yml\
+    load_parameters_path=gs://your-gcs-bucket/qwen3_maxtext_ckpt/0/items\
     tokenizer_type=huggingface\
     tokenizer_path=assets/qwen3-tokenizer\
     prompt="Today is a beautiful day to"\
@@ -94,7 +94,7 @@ Bash
 
 ```
 # Set the required path to your converted MaxText checkpoint
-export MAXTEXT_CHECKPOINT_PATH=gs://your-gcs-bucket/qwen3-30b-a3b_src/MaxText_ckpt/0/items/
+export MAXTEXT_CHECKPOINT_PATH=gs://your-gcs-bucket/qwen3-30b-a3b_maxtext_ckpt/0/items/
 
 # (Optional) Set the path to your local Hugging Face checkpoint
 # export HF_MODEL_PATH=/path/to/local/qwen3-30b-a3b_hf_checkpoint
@@ -110,7 +110,7 @@ Bash
 
 ```
 # Set the required path to your converted MaxText checkpoint
-export MAXTEXT_CHECKPOINT_PATH=gs://your-gcs-bucket/qwen3-235b-a22b_src/MaxText_ckpt/0/items/
+export MAXTEXT_CHECKPOINT_PATH=gs://your-gcs-bucket/qwen3-235b-a22b_maxtext_ckpt/0/items/
 
 # (Optional) Set the path to your local Hugging Face checkpoint
 # export HF_MODEL_PATH=/path/to/local/qwen3-235b-a22b_hf_checkpoint
@@ -126,11 +126,11 @@ Bash
 
 ```
 # Set the required path to your converted MaxText checkpoint
-export MAXTEXT_CHECKPOINT_PATH=gs://your-gcs-bucket/qwen3-480b-a35b_src/MaxText_ckpt/0/items/
+export MAXTEXT_CHECKPOINT_PATH=gs://your-gcs-bucket/qwen3-480b-a35b_maxtext_ckpt/0/items/
 
 # (Optional) Set the path to your local Hugging Face checkpoint
 # export HF_MODEL_PATH=/path/to/local/qwen3-480b-a35b_hf_checkpoint
 
 # Execute the validation script
-bash src/MaxText/end_to_end/tpu/qwen/moe/qwen3-480b-a35b/1_test_qwen3_480b_a35b.sh
+bash end_to_end/tpu/qwen/moe/qwen3-480b-a35b/1_test_qwen3_480b_a35b.sh
 ```

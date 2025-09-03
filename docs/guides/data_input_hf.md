@@ -1,7 +1,7 @@
 # Hugging Face pipeline
 The Hugging Face pipeline supports streaming directly from the Hugging Face Hub, or from a Cloud Storage bucket in Hugging Face supported formats (parquet, json, etc.). This is through the Hugging Face [`datasets.load_dataset` API](https://huggingface.co/docs/datasets/en/loading) with `streaming=True`, which takes in `hf_*` parameters.
 ## Example config for streaming from Hugging Face Hub (no download needed):
-In `src/MaxText/configs/base.yml` or through command line, set the following parameters:
+In `MaxText/configs/base.yml` or through command line, set the following parameters:
 ```
 dataset_type: hf
 hf_path: 'allenai/c4'  # for using https://huggingface.co/datasets/allenai/c4
@@ -18,7 +18,7 @@ hf_access_token: ''  # provide token if using gated dataset or tokenizer
 ```
 
 ## Example config for streaming from downloaded data in a Cloud Storage bucket:
-In `src/MaxText/configs/base.yml` or through command line, set the following parameters:
+In `MaxText/configs/base.yml` or through command line, set the following parameters:
 ```
 dataset_type: hf
 hf_path: 'parquet'  # or json, arrow, etc.

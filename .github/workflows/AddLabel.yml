@@ -35,7 +35,7 @@ jobs:
         with:
           script: |
             const owner = "google"
-            const repo = "src/MaxText"
+            const repo = "maxtext"
             let pull_number = -1
             if (context.payload.pull_request !== undefined) {
               pull_number = context.payload.pull_request.number

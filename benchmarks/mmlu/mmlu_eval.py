@@ -20,13 +20,13 @@ To get optimal performance the prompt template needs to be adjusted (e.g. CoT or
 
 To run the MMLU benchmark:
 # Default is zero-shot prompting
-python3 -m benchmarks.mmlu.mmlu_eval src/MaxText/configs/base.yml \
+python3 -m benchmarks.mmlu.mmlu_eval MaxText/configs/base.yml \
   tokenizer_path=assets/tokenizer_llama3.tiktoken \
   load_parameters_path=check_point_path model_name=llama3.1-8b \
   max_prefill_predict_length=1024 max_target_length=2048 ici_tensor_parallelism=4 per_device_batch_size=1
 
 # Example of using the prompt_template flag for Chain-of-Thought (CoT) prompting:
-python3 -m benchmarks.mmlu.mmlu_eval src/MaxText/configs/base.yml \
+python3 -m benchmarks.mmlu.mmlu_eval MaxText/configs/base.yml \
   tokenizer_path=assets/tokenizer_llama3.tiktoken \
   load_parameters_path=check_point_path model_name=llama3.1-8b \
   max_prefill_predict_length=1024 max_target_length=2048 ici_tensor_parallelism=4 per_device_batch_size=1 \
@@ -34,7 +34,7 @@ python3 -m benchmarks.mmlu.mmlu_eval src/MaxText/configs/base.yml \
   {choices}\nAnswer: Let's think step by step."
 
 # Example of using the prompt_template flag for 5-shot prompting (replace with actual examples):
-python3 -m benchmarks.mmlu.mmlu_eval src/MaxText/configs/base.yml \
+python3 -m benchmarks.mmlu.mmlu_eval MaxText/configs/base.yml \
   tokenizer_path=assets/tokenizer_llama3.tiktoken \
   load_parameters_path=check_point_path model_name=llama3.1-8b \
   max_prefill_predict_length=1024 max_target_length=2048 ici_tensor_parallelism=4 per_device_batch_size=1 \

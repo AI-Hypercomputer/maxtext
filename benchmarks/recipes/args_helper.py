@@ -14,8 +14,13 @@
 
 import argparse
 import os
+import sys
 
-from benchmarks.xpk_configs import XpkClusterConfig
+# Needed to import files from the parent directory
+parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.append(parent_dir)
+
+from xpk_configs import XpkClusterConfig
 
 # Constants for defining supported actions
 DELETE = "delete"

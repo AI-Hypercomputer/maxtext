@@ -43,11 +43,11 @@ if [ "$DATASET_TYPE" == "hf" ]
 then
     # We use a local copy of tokenizer from https://huggingface.co/meta-llama/Llama-2-7b-hf
     # Alternatively, you can set tokenizer_path="meta-llama/Llama-2-7b-hf" and hf_access_token="<your-token>" after gaining access through HF website.
-    gsutil cp -r gs://src/MaxText-dataset/hf/llama2-tokenizer assets
-    CMD_DATA=" hf_path=parquet hf_data_files=gs://src/MaxText-dataset/hf/c4/c4-train-*.parquet dataset_type=hf tokenizer_path="${MAXTEXT_ASSETS_ROOT:-${MAXTEXT_REPO_ROOT:-$PWD}/assets}"/llama2-tokenizer"
+    gsutil cp -r gs://maxtext-dataset/hf/llama2-tokenizer assets
+    CMD_DATA=" hf_path=parquet hf_data_files=gs://maxtext-dataset/hf/c4/c4-train-*.parquet dataset_type=hf tokenizer_path=assets/llama2-tokenizer"
 fi
 
-TRAIN_CMD="python3 -m MaxText.train ${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText}/configs/base.yml run_name=$RUN_NAME hardware=gpu \
+TRAIN_CMD="python3 -m MaxText.train MaxText/configs/base.yml run_name=$RUN_NAME hardware=gpu \
         steps=$STEPS dcn_data_parallelism=1 learning_rate=3e-4 \
         base_emb_dim=1024 base_num_query_heads=8 base_num_kv_heads=8 base_mlp_dim=3584 base_num_decoder_layers=8 \
         ici_fsdp_parallelism=8 metrics_file=metrics.txt per_device_batch_size=4 \

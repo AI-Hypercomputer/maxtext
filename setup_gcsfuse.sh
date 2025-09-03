@@ -15,7 +15,7 @@
 # limitations under the License.
 
 # Description:
-# bash setup_gcsfuse.sh DATASET_GCS_BUCKET=src/MaxText-dataset MOUNT_PATH=/tmp/gcsfuse FILE_PATH=/tmp/gcsfuse/my_dataset
+# bash setup_gcsfuse.sh DATASET_GCS_BUCKET=maxtext-dataset MOUNT_PATH=/tmp/gcsfuse FILE_PATH=/tmp/gcsfuse/my_dataset
 
 set -e
 

@@ -15,10 +15,16 @@
 import abc
 import dataclasses
 import enum
+import os
+import sys
 
-from benchmarks.disruption_management.disruption_utils import execute_command_as_subprocess
-from benchmarks.disruption_management.disruption_utils import get_pod_name_from_regex
-from benchmarks.xpk_configs import XpkClusterConfig
+parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.append(parent_dir)
+
+
+from disruption_management.disruption_utils import execute_command_as_subprocess
+from disruption_management.disruption_utils import get_pod_name_from_regex
+from xpk_configs import XpkClusterConfig
 
 
 MCJAX_STANDARD_TARGET_POD_REGEX_SUFFIX = ".*slice-job-0-0.*"

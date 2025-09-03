@@ -57,13 +57,13 @@ export ZONE="your-gcp-zone"
 export CLUSTER="your-gke-cluster-name"
 
 # -- Workload Configuration --
-export WORKLOAD_NAME="src/MaxText-job-$(date +%Y%m%d-%H%M%S)"
+export WORKLOAD_NAME="maxtext-job-$(date +%Y%m%d-%H%M%S)"
 export TPU_TYPE="v5p-8" # Or your desired TPU type, e.g., v5e-4
 export WORKLOAD_NODEPOOL_COUNT=1 # Number of TPU slices for your job
 
 # -- MaxText & Storage Configuration --
 export BUCKET_NAME="your-gcs-bucket-name"
-export RUN_NAME="src/MaxText-run-1"
+export RUN_NAME="maxtext-run-1"
 # The Docker image you pushed in the prerequisite step
 export DOCKER_IMAGE="gcr.io/${PROJECT}/${USER}_runner"
 ```
@@ -85,7 +85,7 @@ xpk workload create-pathways \
   --project=$PROJECT \
   --zone=$ZONE \
   --docker-image=${DOCKER_IMAGE} \
-  --command="python3 -m MaxText.train src/MaxText/configs/base.yml \
+  --command="python3 -m MaxText.train MaxText/configs/base.yml \
     base_output_directory=gs://${BUCKET_NAME} \
     per_device_batch_size=1 \
     enable_checkpointing=false \
@@ -143,7 +143,7 @@ export JAX_PLATFORMS=proxy
 export JAX_BACKEND_TARGET=grpc://127.0.0.1:29000
 
 # Run the training script
-python3 -m MaxText.train src/MaxText/configs/base.yml \
+python3 -m MaxText.train MaxText/configs/base.yml \
   base_output_directory=gs://${BUCKET_NAME} \
   per_device_batch_size=1 \
   enable_checkpointing=false \

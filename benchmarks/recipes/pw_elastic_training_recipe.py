@@ -13,24 +13,28 @@
 # limitations under the License.
 
 import os
+import sys
 
 import args_helper as helper
 
-from benchmarks.disruption_management.disruption_handler import DisruptionConfig
-from benchmarks.disruption_management.disruption_handler import DisruptionMethod
-from benchmarks.disruption_management.disruption_handler import MCJAX_STANDARD_TARGET_POD_REGEX_SUFFIX
-from benchmarks.disruption_management.disruption_handler import MCJAX_WORKER_CONTAINER_NAME
-from benchmarks.disruption_management.disruption_handler import PATHWAYS_STANDARD_TARGET_POD_REGEX_SUFFIX
-from benchmarks.disruption_management.disruption_handler import PATHWAYS_WORKER_CONTAINER_NAME
-from benchmarks.disruption_management.disruption_handler import TriggerType
-from benchmarks.src/MaxText_trillium_model_configs import MaxTextModel
-from benchmarks import src/MaxText_v5e_model_configs as v5e_model_configs
-from benchmarks import src/MaxText_xpk_runner as mxr
-from benchmarks.xpk_configs import XpkClusterConfig
+parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.append(parent_dir)
+
+from disruption_management.disruption_handler import DisruptionConfig
+from disruption_management.disruption_handler import DisruptionMethod
+from disruption_management.disruption_handler import MCJAX_STANDARD_TARGET_POD_REGEX_SUFFIX
+from disruption_management.disruption_handler import MCJAX_WORKER_CONTAINER_NAME
+from disruption_management.disruption_handler import PATHWAYS_STANDARD_TARGET_POD_REGEX_SUFFIX
+from disruption_management.disruption_handler import PATHWAYS_WORKER_CONTAINER_NAME
+from disruption_management.disruption_handler import TriggerType
+from maxtext_trillium_model_configs import MaxTextModel
+import maxtext_v5e_model_configs as v5e_model_configs
+import maxtext_xpk_runner as mxr
+from xpk_configs import XpkClusterConfig
 
 PROXY_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server"
 SERVER_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server"
-RUNNER = "us-docker.pkg.dev/path/to/src/MaxText_runner"
+RUNNER = "us-docker.pkg.dev/path/to/maxtext_runner"
 
 # Cluster Params
 CLUSTER = "v6e-256-cluster"
@@ -40,7 +44,7 @@ COUNTRY = "us"
 DEVICE_TYPE = "v6e-256"
 
 # Other parameters (MUST BE SET BY USER)
-XPK_PATH = "../xpk"  # We're running this script from the src/MaxText directory
+XPK_PATH = "../xpk"  # We're running this script from the maxtext directory
 USER = os.environ["USER"]
 BASE_OUTPUT_DIRECTORY = (
     f"gs://{USER}-{PROJECT}-{COUNTRY}/disruption_management/"
