@@ -281,6 +281,7 @@ class RoutedMoE(nnx.Module):
     self.weight_dtype = weight_dtype
     self.dtype = dtype
     self.quant = quant
+    self.rngs = rngs
 
     self.wi_kernel_axes = ("exp", "embed_no_exp", "mlp")
     self.wo_kernel_axes = ("exp", "mlp", "embed_no_exp")
@@ -297,7 +298,7 @@ class RoutedMoE(nnx.Module):
         use_bias=self.config.routed_bias,
         score_func=self.config.routed_score_func,
         matmul_precision=self.config.matmul_precision,
-        rngs=rngs,
+        rngs=self.rngs,
     )
 
     kernel_in_axis = np.arange(1)
@@ -313,7 +314,7 @@ class RoutedMoE(nnx.Module):
     else:
       self.wi_0 = nnx.Param(
           self.kernel_init(
-              rngs.params(),
+              self.rngs.params(),
               (num_experts, self.config.emb_dim, intermediate_dim),
               weight_dtype,
               kernel_in_axis,
@@ -323,7 +324,7 @@ class RoutedMoE(nnx.Module):
       )
       self.wi_1 = nnx.Param(
           self.kernel_init(
-              rngs.params(),
+              self.rngs.params(),
               (num_experts, self.config.emb_dim, intermediate_dim),
               weight_dtype,
               kernel_in_axis,
@@ -333,7 +334,7 @@ class RoutedMoE(nnx.Module):
       )
       self.wo = nnx.Param(
           self.kernel_init(
-              rngs.params(),
+              self.rngs.params(),
               (self.num_experts, self.intermediate_dim, self.config.emb_dim),
               self.weight_dtype,
               kernel_in_axis,
@@ -348,15 +349,15 @@ class RoutedMoE(nnx.Module):
       wi_bias_shape = (self.num_experts, self.intermediate_dim)
       wo_bias_shape = (self.num_experts, self.config.emb_dim)
       self.wi_0_bias = nnx.Param(
-          default_bias_init(rngs.params(), wi_bias_shape, self.weight_dtype),
+          default_bias_init(self.rngs.params(), wi_bias_shape, self.weight_dtype),
           sharding=wi_bias_axes,
       )
       self.wi_1_bias = nnx.Param(
-          default_bias_init(rngs.params(), wi_bias_shape, self.weight_dtype),
+          default_bias_init(self.rngs.params(), wi_bias_shape, self.weight_dtype),
           sharding=wi_bias_axes,
       )
       self.wo_bias = nnx.Param(
-          default_bias_init(rngs.params(), wo_bias_shape, self.weight_dtype),
+          default_bias_init(self.rngs.params(), wo_bias_shape, self.weight_dtype),
           sharding=wo_bias_axes,
       )
     else:
@@ -381,7 +382,10 @@ class RoutedMoE(nnx.Module):
     # shape of top_k_weights & top_k_indices:
     # (batch, sequence, num_experts_per_tok).
     if self.config.use_random_routing:
-      rng = self.make_rng("random_routing")
+      # WORKAROUND: Generate a pseudo-random key from the input logits.
+      # This avoids the TraceContextError by using self.rngs.params() here.
+      seed = jnp.sum(gate_logits).astype(jnp.int32)
+      rng = jax.random.key(seed)
       top_k_weights, top_k_indices = random_routing(rng, gate_logits, self.num_experts_per_tok)
       return top_k_weights, top_k_indices
 
@@ -1574,9 +1578,9 @@ class RoutedMoE(nnx.Module):
     # will not affect performance.
     _ = self.dense_matmul(inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel, w0_bias, w1_bias, wo_bias)
 
-    w0_kernel = self.variables["aqt"]["AqtEinsum_0"]["AqtDotGeneral_0"]["qrhs"]["frozen"]
-    w1_kernel = self.variables["aqt"]["AqtEinsum_1"]["AqtDotGeneral_0"]["qrhs"]["frozen"]
-    wo_kernel = self.variables["aqt"]["AqtEinsum_2"]["AqtDotGeneral_0"]["qrhs"]["frozen"]
+    w0_kernel = self.scope.variables["aqt"]["AqtEinsum_0"]["AqtDotGeneral_0"]["qrhs"]["frozen"]
+    w1_kernel = self.scope.variables["aqt"]["AqtEinsum_1"]["AqtDotGeneral_0"]["qrhs"]["frozen"]
+    wo_kernel = self.scope.variables["aqt"]["AqtEinsum_2"]["AqtDotGeneral_0"]["qrhs"]["frozen"]
 
     w0_kernel = max_utils.unbox_logicallypartioned(w0_kernel)
     w1_kernel = max_utils.unbox_logicallypartioned(w1_kernel)
