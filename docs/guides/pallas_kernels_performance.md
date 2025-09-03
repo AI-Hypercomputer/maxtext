@@ -14,131 +14,211 @@
  limitations under the License.
 -->
 
-# Performance Optimizations with Pallas Kernels
+# **🚀 Performance Optimizations with Pallas Kernels**
 
-## Introduction
-> New to Pallas? Start with the official docs:  
-> https://docs.jax.dev/en/latest/pallas/index.html
+New to Pallas? Start with the [official docs](https://docs.jax.dev/en/latest/pallas/index.html).
 
-While JAX and the XLA compiler provide excellent out-of-the-box performance, writing custom kernels with Pallas, a JAX extension for GPUs and TPUs, can unlock even greater speed. Pallas allows for lower-level control over hardware execution, which is especially beneficial for memory-bound operations. This guide provides an overview of writing and integrating custom Pallas kernels to optimize MaxText's performance.
+While JAX and the XLA compiler provide excellent out-of-the-box performance, some scenarios demand the next level of optimization. **Pallas** is a JAX extension for TPUs and GPUs that gives expert users fine-grained control over how kernels execute on accelerator hardware. When you know something about your problem’s structure that the general-purpose compiler cannot infer, you can often translate that knowledge into *tiling*, *pipelining*, and *data-layout* choices that outperform the default lowering.
 
-## Benefits of Using Pallas
-
-While the XLA compiler is highly effective, Pallas provides a powerful tool for expert users to unlock additional performance in specific scenarios. Key benefits include:
-
-* **Operator Fusion**: Manually fuse multiple operations into a single kernel to reduce launch overhead and memory I/O, especially when XLA's automatic fusion is suboptimal.
-* **Hardware-Specific Optimizations**: Tailor code to the specific architecture of your GPU or TPU, leveraging features that the compiler might not fully utilize. This includes fine-grained control over memory access and parallelism.
-* **Improved Memory Access Patterns**: With Pallas, you can optimize how data is read from and written to memory to maximize bandwidth and reduce latency.
-* **Algorithmic Optimizations**: Implement novel algorithms not available in standard libraries, such as flash attention, which combines the benefits of the above points to significantly speed up attention and save memory.
-
-## When Not to Use Pallas (and Notable Exceptions)
-
-Pallas is a specialized tool and not always the right choice. Stick with standard JAX in these scenarios:
-
-* **When XLA is Sufficient**: If profiling shows your code is already efficient, a custom kernel adds complexity for little gain. **Always profile first.**
-* **For Most Purely Compute-Bound Operations**: For large, dense operations like `jnp.matmul`, it's hard to beat XLA's highly optimized library calls.
-    
-    **A key exception**, however, is when the data layout is irregular. In **Mixture-of-Experts (MoE) MLPs**, for example, using standard dense matmuls on ragged tensors (where different experts process different numbers of tokens) leads to significant wasted computation. A custom Pallas kernel can avoid this waste and often outperform the generic XLA path in practice.
-
-* **If Maintainability is a Top Priority**: Pallas kernels are lower-level and can be harder to debug. If the performance gain is marginal, the maintenance overhead may not be worth it.
-
-* **Without a Clear Bottleneck**: Avoid premature optimization. Use Pallas only after profiling has identified a specific, memory-bound bottleneck.
+This guide explains **when** to consider Pallas, a **workflow** for developing and tuning kernels, and how Pallas is **used in MaxText** today.
 
 
-### Pallas Kernels in MaxText
+## **🧠 The Pallas Mindset: When to Write a Custom Kernel**
 
-MaxText uses custom kernels written in Pallas to achieve high performance on TPUs. These kernels optimize key operations within the model, boosting training and inference speed.
+Think in **roofline** terms and in terms of **structure the compiler can’t see**:
 
-* **Splash Attention**: MaxText can use a Pallas-based implementation of Splash Attention for training language models. This is a memory-efficient attention mechanism that processes calculations in smaller, tiled blocks to avoid memory bottlenecks and accelerate training, especially for long sequences. You can find its implementation in `MaxText/kernels/splash_attention_kernel.py`.
+* **Roofline framing.** Is your op **compute-limited** (MXU at or near peak) or **bandwidth-limited** (HBM↔on-chip transfers dominate)? Pallas tends to shine when you can reduce bandwidth pressure or avoid wasted work via better tiling and scheduling.  
+* **Compiler invisibles.** Irregular sparsity, ragged batch shapes, non-contiguous memory access, and domain-specific invariants are all signals that a custom kernel could help.
 
-* **Paged and Ragged Attention**: For inference, MaxText uses Paged and Ragged Attention kernels. These are highly efficient for handling batched requests with varying sequence lengths by managing the KV cache in non-contiguous memory "pages" and avoiding padding. This is crucial for high-throughput serving and is used across most models. The implementation can be found in `MaxText/inference/paged_attention.py` and `MaxText/inference/paged_attention_kernel_v2.py`.
+**Know when XLA is enough.** Before writing a custom kernel, always profile your baseline. If a standard operation (like a dense `jnp.matmul`) is already performing well, the XLA compiler is doing its job. In these cases, a Pallas kernel will increase code complexity and maintenance burden with minimal performance improvement.
 
-* **MegaBlox**: For Mixture-of-Experts (MoE) models such as **Mixtral, Qwen, and Deepseek**, we utilize MegaBlox kernels. These are optimized for the sparse Grouped matrix multiplication (GMM) in MoE layers, enabling efficient routing of tokens to experts. It also support quantization for further performance gains. You can see the implementation in `MaxText/kernels/megablox/gmm.py`.
-
-> This list will evolve; treat it as guidance rather than a contract.
+**When maintainability wins.** Pallas kernels are lower-level and harder to debug. If gains are small, prefer the simpler path.
 
 
-## Getting Started with Pallas Kernels
+## **💡 Use Cases**
 
-### Writing a Custom Kernel
+### **1\. Irregular Compute (MoE, ragged activations)**
 
-Pallas kernels are Python functions decorated with `@pallas.kernel` that use JAX APIs to operate on `Ref` objects, which are references to JAX arrays. Inside a kernel, you have direct control over reading from and writing to these references.
+For dense, regular GEMMs, XLA’s libraries are hard to beat. The exception is Mixture-of-Experts (MoE) MLPs with ragged token-to-expert layouts. Zero-padding to make dense tensors wastes FLOPs; a custom kernel can operate only on the actually-selected tokens.
 
-**Example Kernel:**
+* In MaxText, we use Grouped Matrix Multiplication (GMM) via MegaBlox to compute per-expert matmuls on ragged batches. Precomputed metadata (e.g., token→expert indices and ranges) guides the grouped computation and avoids work on padded regions.
+
+### **2\. Memory-Access-Bound Work (Attention)**
+
+Attention kernels are classically **bandwidth-limited** if you materialize the full \[L,L\] score matrix. A Pallas kernel can block **Q/K/V** into tiles that fit on-chip and perform **online softmax accumulation**, never storing the massive intermediate.
+
+* MaxText uses a Pallas attention kernel for training (Flash/Splash-style) and **paged/ragged** attention for inference to efficiently fetch KV cache pages and handle non-contiguous layouts.
+
+
+## **🛠️ Pallas Kernels in MaxText**
+
+To maximize performance, MaxText uses custom Pallas kernels for memory-bandwidth-bound or structurally irregular operations that a general-purpose compiler cannot optimize as effectively. Below are the key kernels we use. **Note**: Examples evolve; treat this list as guidance.
+
+* **Training Attention (Flash/Splash-style):** This kernel is the default for training Transformer models in MaxText, such as DeepSeek, Gemma and Llama. It avoids creating the large \[L,L\] attention matrix to save memory, processing data in smaller, tiled chunks with online softmax accumulation.
+  * MaxText/kernels/splash\_attention\_kernel.py  
+* **Serving Attention (Paged & Ragged):** For high-throughput inference, this kernel efficiently fetches non-contiguous "pages" of the KV cache from memory. It is a key optimization for our serving stack and is used for models running on MaxText's inference engine.
+  * MaxText/inference/paged\_attention.py  
+  * MaxText/inference/paged\_attention\_kernel\_v2.py  
+* **MoE Grouped Matmul (MegaBlox GMM):** Sparse/irregular grouped GEMMs driven by host-built metadata. 
+
+  >  This is an efficient computation method for Mixture-of-Experts (MoE) models like DeepSeek, Llama 4, Mixtral and Qwen-MoE.  In MoE, each token is processed by only a few "experts," which is inefficient for standard matrix multiplication. MegaBlox solves this by having the CPU (**host**) first create a routing plan (**metadata**) that assigns tokens to experts. The accelerator (**device**) then uses this plan to perform many small, dense matrix multiplications in parallel (**Grouped Matrix Multiplication**), avoiding wasted work on unused experts.
+  * MaxText/kernels/megablox/gmm.py
+ 
+  **Note:** MegaBlox accelerates the grouped **matmul**; **routing/gating** is separate code (MaxText/layers/moe.py).
+
+
+
+## **🔧 The Pallas Optimization Workflow: Code → Profile → Tune → Repeat**
+
+### **1\. High-Level Profiling**
+
+Give the kernel a clear name in traces and capture a profile. Always use jax.block\_until\_ready() when timing your operations.
+
+
+``` Python
+import jax  
+from jax import profiler
+
+def my_op(...):  
+  # This name shows up in Perfetto/TensorBoard traces  
+  with jax.named_scope("my_custom_kernel"):  
+    out = my_kernel_wrapper(...)  
+  return out
+
+# Capture a Perfetto/TensorBoard trace  
+with profiler.trace("/tmp/tb_profile"):  
+  y = my_op(x)  
+  # Stabilize timing for accurate measurement  
+  jax.block_until_ready(y)
+```
+
+### **2\. Deeper Compiler View (Optional)**
+
+For hard cases, inspect compiler dumps (e.g., LLO) to understand schedules, memory moves, and resource usage. Keep this as an advanced tool—most tuning decisions come from traces and microbenchmarks.
+
+### **3\. Systematic Tuning**
+
+Performance is a function of interacting hyperparameters, chiefly block shapes (via BlockSpec), buffering, and preload distance. Write a small harness to sweep plausible settings and record throughput/latency. Let data, not rules of thumb, pick the winners.
+
+
+## **⚙️ Understanding TPU Memory & Compute**
+
+Pallas exposes the underlying hardware primitives for you to control.
+
+* **HBM:** High-Bandwidth Memory (standard device memory).  
+* **VMEM:** On-chip vector SRAM for array tiles; your kernel primarily reads/writes VMEM refs.  
+* **SMEM:** On-chip scalar SRAM for control/metadata (e.g., counters, small tables).  
+* **Semaphores:** Available for advanced async/barrier patterns in manual pipelines.  
+* **MXU:** The Matrix Unit, optimized for large block GEMMs/convolutions.  
+* **VPU:** The Vector Processing Unit, used for elementwise/vector work.
+
+**Alignment & Constraints:** Respect TPU BlockSpec constraints (divisibility/shape rules for trailing dimensions and supported block shapes). Start with tile shapes that fit in VMEM and meet these requirements, then sweep different sizes to find the optimum. Let profiling guide you; don't assume powers of two are always best.
+
+
+## **🧱 Core Pallas Design Patterns**
+
+These are the common techniques used in MaxText's Pallas kernels.
+
+* **Tiling & Blocking:** Move just a tile that fits on-chip, compute on it, and write it back.  
+* **Explicit Pipelining:** Overlap HBM↔VMEM loads with compute to hide latency (e.g., double-buffering).  
+* **Online Accumulation:** Combine partial results as you go; don’t materialize huge intermediate arrays.  
+* **Auxiliary Metadata:** Precompute control tables (e.g., token-to-expert ranges) and keep them in fast scalar memory.  
+* **Compute↔Communication Overlap:** In distributed runs, overlap local work with cross-device traffic when possible.
+
+
+## **✍️ Writing & Integrating a Kernel**
+
+A Pallas kernel is a plain Python function that operates on Refs (references to array tiles). You pass the function to pl.pallas\_call, which compiles and schedules it.
+
+### **Example 1: Minimal Elementwise Add**
+
+This is a simple example to show the basic structure.
+
+
+```python
+import jax  
+import jax.numpy as jnp  
+from jax.experimental import pallas as pl
+
+def add_vectors_kernel(x_ref, y_ref, o_ref):  
+  o_ref[:] = x_ref[:] + y_ref[:]
+
+def add_vectors(x: jax.Array, y: jax.Array) -> jax.Array:  
+  assert x.shape == y.shape  
+  return pl.pallas_call(  
+      add_vectors_kernel,  
+      out_shape=jax.ShapeDtypeStruct(shape=x.shape, dtype=x.dtype),  
+  )(x, y)
+```
+
+### **Example 2: Blocked 2D Add with BlockSpec**
+
+This example shows how to map a grid of blocks over larger arrays.
 
 ```python
 import jax
 import jax.numpy as jnp
 from jax.experimental import pallas as pl
 
-@pl.kernel
-def add_vectors_kernel(x_ref, y_ref, o_ref):
-  x = x_ref[:]
-  y = y_ref[:]
-  o_ref[:] = x + y
+def tile_add_kernel(x_ref, y_ref, o_ref):
+  # Operate on the tile slices handed in by BlockSpecs (already in VMEM on TPU).
+  o_ref[:, :] = x_ref[:, :] + y_ref[:, :]
 
-def add_vectors(x: jax.Array, y: jax.Array) -> jax.Array:
+def tile_add(x: jax.Array, y: jax.Array) -> jax.Array:
+  assert x.shape == y.shape and x.ndim == 2
+  B0 = min(128, x.shape[0])  # Example choice; tune this with a sweep
+  B1 = x.shape[1]            # Full width tile (for illustration)
+
+  # Map program id -> tile origin in the global arrays.
+  in_out_spec = pl.BlockSpec(
+      block_shape=(B0, B1),
+      index_map=lambda i: (i * B0, 0),
+  )
+
+  # Grid is implied by data & block shape.
+  grid = ((x.shape[0] + B0 - 1) // B0,)
+
   return pl.pallas_call(
-      add_vectors_kernel,
-      out_shape=jax.ShapeDtypeStruct(shape=x.shape, dtype=x.dtype),
+      tile_add_kernel,
+      out_shape=jax.ShapeDtypeStruct(x.shape, x.dtype),
+      in_specs=[in_out_spec, in_out_spec],
+      out_specs=in_out_spec,
+      grid=grid,
   )(x, y)
 ```
 
-For a deeper dive, see the [Pallas Quickstart guide](https://jax.readthedocs.io/en/latest/pallas/quickstart.html).
-
-### Integration Steps
-
-* **Define the kernel**: Write the Pallas kernel function.
-* **Create a wrapper**: Write a function that invokes the kernel using `pallas_call`.
-* **Replace in MaxText**: Substitute the original JAX operation in the MaxText code with your new wrapper function.
+**Tip:** In practice, you’ll sweep (B0, B1) and buffering choices. Focus tuning on block shapes, buffering, and prefetch distance; treat grid as derived.
 
 
-### Advanced Topics
+## **⏩ Pipelining Best Practices (TPU)**
 
-#### Understanding Pallas on TPU
-
-On TPUs, Pallas kernels are compiled using **Mosaic**. When a Pallas kernel is called, its inputs are loaded from High Bandwidth Memory (HBM) into the TPU's fast, on-chip **Vector Memory (VMEM)**. The computations within the kernel are performed on data residing in VMEM.
-
-TPUs have two main compute units:
-
-* **Vector Unit (VPU)**: Executes element-wise operations.
-* **Matrix Unit (MXU)**: Specialized for large matrix multiplications and convolutions.
-
-Understanding this memory hierarchy and the different compute units is key to writing high-performance kernels. For more information, refer to the JAX documentation on [Pallas TPU details](https://docs.jax.dev/en/latest/pallas/tpu/details.html).
-
-#### Kernel Tuning and Pipelining
-
-Tuning is essential for achieving optimal performance. A key technique is **pipelining**, which hides memory access latency by overlapping computation with data transfers from HBM to VMEM. Pallas offers two main ways to implement this.
-
-##### Pipelining via Grid Iteration
-
-Instead of an explicit loop inside a kernel, you can define an iteration space using the `grid` argument in `pallas_call`. Pallas unrolls this grid into a series of kernel invocations. The Pallas runtime, especially with a `pltpu.PrefetchScalarGridSpec`, schedules these invocations and their memory transfers to overlap, effectively creating a pipeline. This is the approach used in MaxText kernels like `megablox/gmm.py`.
-
-* **When to use**: Prefer `grid` with `PrefetchScalarGridSpec` for independent tiles as it provides simple, automatic pipelining.
-
-##### Pipelining with `pallas.for_loop`
-
-For more complex scenarios, you can use an explicit `pallas.for_loop` inside your kernel. This is not a standard Python loop; it's a specific instruction to the compiler to create a pipelined schedule. It gives you fine-grained control to manage the state carried between iterations, which is necessary for more advanced pipelining patterns.
-
-* **When to use**: Use `pallas.for_loop` for stateful operations or when there are dependencies carried between loop iterations.
-
-For more information, refer to the JAX documentation on [Pallas TPU pipelining](https://docs.jax.dev/en/latest/pallas/tpu/pipelining.html).
-
-#### Block Sizes & Other Parameters
+Prefer pl.pallas\_call with scratch buffers allocated in the appropriate memory space (VMEM/SMEM) and use multi-buffering to overlap HBM loads with compute. Only reach for advanced pipeline controls (e.g., explicit semaphores) when traces show you need them.
 
 
-#### Block Sizes & Other Parameters
+## **🌐 Distributed Execution**
 
-* **Block Sizes**: The `BlockSpec` which defines data tiling is critical for performance. A good tuning process involves:
-    1.  **Start with a baseline**: Choose a tile size (multiple of 128) that fits in fast on-chip memory (VMEM on TPUs, shared memory on GPUs) and keeps register usage within reasonable limits.
-    2.  **Sweep upward**: Systematically increase the block size until you hit memory capacity limits or performance stops improving.
-    3.  **Align the shape**: Prefer block shapes that align with the data access patterns of your algorithm (e.g., multiples of the K-dimension in a matrix multiplication). This alignment is often more important than sticking to powers of two.
-
-* **Grid Size**: The `grid` parameter sets the number of kernel instances. Tune it to balance parallelism and overhead.
-* **Memory Spaces**: Use VMEM for intermediate results to reduce latency.
-* **Compiler Parameters**: The `compiler_params` argument can pass additional flags to the Mosaic compiler for specific optimizations.
+Compose kernels across devices with jax.experimental.shard\_map. It’s usually simpler and more maintainable than in-kernel cross-device communication. While Pallas supports low-level comms, shard\_map is the right first choice for multi-device parallelism.
 
 
-### Distributed Execution with `shard_map`
+## **🐞 Debugging Tips**
 
-Pallas kernels can be seamlessly used in distributed environments with `jax.experimental.shard_map`. This allows you to run your custom kernels across a `Mesh` of devices, which is essential for large-scale training with MaxText. When using `shard_map`, you specify how your data is partitioned across the devices using the `in_specs` and `out_specs` arguments. For more details, see the JAX documentation on [distributed Pallas kernels](https://docs.jax.dev/en/latest/pallas/tpu/distributed.html).
+* Use interpret=True in pallas\_call for CPU emulation to debug kernel logic without compiling.  
+* Start with a tiny problem size and assert on invariants inside the kernel.  
+* Add jax.named\_scope liberally so kernels are easy to spot in performance traces.
+
+
+## **✅ Putting It All Together (Checklist)**
+
+1. **Profile** the baseline using named\_scope and block\_until\_ready.  
+2. If the op is bandwidth-limited or irregular, **prototype** a Pallas tile.  
+3. Build a **sweep harness** for block shapes, buffering, and prefetch distance.  
+4. **Validate** end-to-end performance in the model, not just microbenchmarks.  
+5. Consider **maintainability** and guard the new kernel with tests.
+
+
+## 📚 References
+
+* **Pallas Docs & Quickstart:** [docs.jax.dev/en/latest/pallas/index.html](https://docs.jax.dev/en/latest/pallas/index.html)
+* **JAX Profiling Guides:** [jax.readthedocs.io/en/latest/profiling.html](https://jax.readthedocs.io/en/latest/profiling.html)
+* **Manual Parallelism (shard_map):** [docs.jax.dev/en/latest/notebooks/shard_map.html](https://docs.jax.dev/en/latest/notebooks/shard_map.html)
+* **Distributed Pallas on TPU:** [docs.jax.dev/en/latest/pallas/tpu/distributed.html](https://docs.jax.dev/en/latest/pallas/tpu/distributed.html)
