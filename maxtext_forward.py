@@ -5,14 +5,17 @@
 # tpu
 export LIBTPU_INIT_ARGS='--xla_tpu_scoped_vmem_limit_kib=81920'
 python maxtext_forward.py
+
+export LIBTPU_INIT_ARGS='--xla_tpu_scoped_vmem_limit_kib=81920'
+python maxtext_forward.py \
+--attention=dot_product \
+--scan_layers=false \
+--load_parameters_path=gs://shuningjin-multipod-dev/gpt-oss-20b/unscan-bf16-v2-2025-09-02-01-16-00/0/items
 """
 
 import jax
 import jax.numpy as jnp
 import numpy as np
-# from importlib import reload
-# import MaxText
-# reload(MaxText)
 import MaxText.layers.models as models
 import MaxText.layers.quantizations as quantizations
 from MaxText import pyconfig
@@ -123,6 +126,25 @@ def setup_golden_data(input_golden_data_path):
 
 
 if __name__ == "__main__":
+  parser = argparse.ArgumentParser(description="Run a MaxText model with specified configurations.")
+  # Arguments that were in the original list
+  # parser.add_argument("--base_output_directory", type=str, default="test", help="Base directory for output.")
+  # parser.add_argument("--run_name", type=str, default="temp-testing-only", help="Name of the run.")
+  # parser.add_argument("--skip_jax_distributed_system", type=str, default="true", help="Set to 'true' to skip JAX distributed setup.")
+  # parser.add_argument("--model_name", type=str, default="gpt-oss-20b", help="Name of the model to use.")
+  parser.add_argument("--scan_layers", type=str, default="false", help="Whether to use scanned layers.")
+  parser.add_argument("--attention", type=str, default="dot_product", help="Attention mechanism type.")
+  parser.add_argument(
+      "--load_parameters_path",
+      type=str,
+      default="gs://shuningjin-multipod-dev/gpt-oss-20b/unscan-bf16-v2-2025-09-02-01-16-00/0/items",
+      help="Path to load model parameters from.",
+  )
+  # parser.add_argument("--weight_dtype", type=str, default="float32", help="Data type for model weights.")
+  # parser.add_argument("--dtype", type=str, default="float32", help="Data type for computations.")
+  # parser.add_argument("--activations_in_float32", type=str, default="true", help="Use float32 for activations.")
+  # parser.add_argument("--matmul_precision", type=str, default="high", help="Precision for matrix multiplications.")
+  args = parser.parse_args()
 
   golden_data_path = "/tmp/gpt-oss-20b-golden_bf16_v2_debug.jsonl"
 
@@ -135,9 +157,9 @@ if __name__ == "__main__":
       "skip_jax_distributed_system=true",
       # model specific
       "model_name=gpt-oss-20b",
-      "scan_layers=false",
-      "attention=dot_product",
-      "load_parameters_path=gs://shuningjin-multipod-dev/gpt-oss-20b/unscan-bf16-v2-2025-09-02-01-16-00/0/items",
+      f"scan_layers={args.scan_layers}",
+      f"attention={args.attention}",
+      f"load_parameters_path={args.load_parameters_path}",
       # high precision flags
       "weight_dtype=float32",
       "dtype=float32",
