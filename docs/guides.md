@@ -32,4 +32,7 @@ guides/use_vertex_ai_tensorboard.md
 guides/features_and_diagnostics.md
 guides/performance_metrics.md
 guides/understand_logs_and_metrics.md
+guides/checkpointing_solutions/gcs_checkpointing.md
+guides/checkpointing_solutions/emergency_checkpointing.md
+guides/checkpointing_solutions/multi_tier_checkpointing.md
 ```
