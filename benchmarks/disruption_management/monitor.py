@@ -13,19 +13,14 @@
 # limitations under the License.
 
 import abc
-import os
 import re
 import subprocess
-import sys
 import time
 
-from disruption_management.disruption_utils import wait_for_pod_to_start
+from benchmarks.disruption_management.disruption_utils import wait_for_pod_to_start
 
-parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-sys.path.append(parent_dir)
-
-from disruption_management.disruption_handler import DisruptionConfig
-from disruption_management.disruption_handler import TriggerType
+from benchmarks.disruption_management.disruption_handler import DisruptionConfig
+from benchmarks.disruption_management.disruption_handler import TriggerType
 
 STANDARD_STEP_LOG_REGEX = r".*completed step: (\d+), .*"
 

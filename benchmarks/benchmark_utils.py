@@ -16,6 +16,31 @@ import dataclasses
 import math
 import typing
 
+
+def str2bool(v: str) -> bool:
+  """Convert a string of truth to True or False.
+
+  Args:
+    - v (str):
+      - True values are 'y', 'yes', 't', 'true', and '1';
+      - False values are 'n', 'no', 'f', 'false', and '0'.
+
+  Returns:
+    bool: True or False
+
+  Raises:
+    ValueError if v is anything else.
+  """
+  v = v.lower()
+  true_values = ["y", "yes", "t", "true", "1"]
+  false_values = ["n", "no", "f", "false", "0"]
+  if v in true_values:
+    return True
+  elif v in false_values:
+    return False
+  else:
+    raise ValueError(f"Invalid value '{v}'!")
+
 @dataclasses.dataclass
 class MaxTextModel:
   model_name: str

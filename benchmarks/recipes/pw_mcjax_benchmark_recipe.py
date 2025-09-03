@@ -15,16 +15,12 @@
 """Used to perf benchmarks between Pathways and McJax."""
 
 import datetime
-import sys
 import os
 import args_helper as helper
 
-parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-sys.path.append(parent_dir)
-
-import maxtext_trillium_model_configs as model_configs
-import maxtext_xpk_runner as mxr
-from xpk_configs import XpkClusterConfig
+import benchmarks.maxtext_trillium_model_configs as model_configs
+import benchmarks.maxtext_xpk_runner as mxr
+from benchmarks.xpk_configs import XpkClusterConfig
 
 
 PROXY_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server"
