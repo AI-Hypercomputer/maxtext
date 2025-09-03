@@ -423,6 +423,7 @@ class TestPromptLogprobsFromPrefill(unittest.TestCase):
   """
   Test suite for the inference utility function 'prompt_logprobs_from_prefill'.
   """
+
   def test_shift_and_masking(self):
     # B=1, S=5, V=4
     B, S, V = 1, 5, 4
@@ -465,6 +466,7 @@ class TestPromptLogprobsFromPackedPrefill(unittest.TestCase):
   """
   Test suite for the inference utility function 'prompt_logprobs_from_packed_prefill'.
   """
+
   def test_respects_segments_and_masking(self):
     # Build a packed sequence of two prompts.
     # Global S=8, V=5
@@ -531,6 +533,43 @@ class TestPromptLogprobsFromPackedPrefill(unittest.TestCase):
       self.assertGreater(out_np[0, p], -1e-3)
     # pos 7 >= true_length of seg1 -> NaN
     self.assertTrue(np.isnan(out_np[0, 7]))
+
+
+class TestCalculateBytesFromPytree(unittest.TestCase):
+  """Test suite for the byte calculation utility function."""
+
+  def test_bytes_from_pytree_arrays(self):
+    """Tests byte calculation with standard JAX and NumPy arrays."""
+    params = {
+        "a": jnp.zeros((2, 3), jnp.float32), # 2 * 3 * 4 = 24 bytes
+        "b": np.zeros((5,), np.int32)        # 5 * 4 = 20 bytes
+    }
+    expected_total_bytes = 44
+    self.assertEqual(max_utils.calculate_bytes_from_pytree(params), expected_total_bytes)
+
+  def test_bytes_from_pytree_shape_dtype_struct(self):
+    """Tests byte calculation with a ShapeDtypeStruct."""
+    s = jax.ShapeDtypeStruct(shape=(7, 11), dtype=jnp.bfloat16)
+    params = {"s": s}
+    # 7 * 11 * 2 (bfloat16 size) = 154 bytes
+    expected_total_bytes = 154
+    self.assertEqual(max_utils.calculate_bytes_from_pytree(params), expected_total_bytes)
+
+  def test_bytes_from_pytree_mixed_and_none(self):
+    """Tests a heterogeneous pytree with mixed types including None and scalars."""
+    params = {
+        "a": None,                               # 0 bytes
+        "b": 3,                                  # 8 bytes (int64)
+        "c": 1.0,                                # 8 bytes (float64)
+        "d": jax.ShapeDtypeStruct((4,), jnp.int8) # 4 * 1 = 4 bytes
+    }
+    expected_total_bytes = 20
+    self.assertEqual(max_utils.calculate_bytes_from_pytree(params), expected_total_bytes)
+
+  def test_bytes_from_pytree_empty_dict(self):
+    """Tests that an empty pytree correctly returns 0 bytes."""
+    self.assertEqual(max_utils.calculate_bytes_from_pytree({}), 0)
+
 
 if __name__ == "__main__":
   unittest.main()
