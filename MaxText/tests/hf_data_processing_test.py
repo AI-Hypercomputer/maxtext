@@ -15,6 +15,7 @@
 import sys
 import unittest
 import os.path
+import pytest
 
 import jax
 from jax.sharding import Mesh
@@ -58,6 +59,7 @@ class HfDataProcessingTest(unittest.TestCase):
 
     self.train_iter = _hf_data_processing.make_hf_train_iterator(self.config, self.mesh, self.process_indices)
 
+  @pytest.mark.cpu_only
   def test_train_ds(self):
     expected_shape = [jax.device_count(), self.config.max_target_length]
     # For training we pack multiple short examples in one example.
@@ -75,6 +77,7 @@ class HfDataProcessingTest(unittest.TestCase):
         },
     )
 
+  @pytest.mark.cpu_only
   def test_batch_determinism(self):
     batch1 = next(self.train_iter)
     train_iter = _hf_data_processing.make_hf_train_iterator(self.config, self.mesh, self.process_indices)
@@ -86,6 +89,7 @@ class HfDataProcessingTest(unittest.TestCase):
     self.assertTrue((batch1["inputs_position"] == batch2["inputs_position"]).all())
     self.assertTrue((batch1["targets_position"] == batch2["targets_position"]).all())
 
+  @pytest.mark.cpu_only
   def test_for_loop_repeatable(self):
     def get_first_batch(iterator):
       batch = None
