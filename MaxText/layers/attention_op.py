@@ -1290,6 +1290,8 @@ class AttentionOp(nnx.Module):
         key = partitioning.with_sharding_constraint(key, prefill_qkv_sharding)
         value = partitioning.with_sharding_constraint(value, prefill_qkv_sharding)
 
+    jax.debug.print("q bf product: {}", jnp.mean(query))
+    jax.debug.print("k bf product: {}", jnp.mean(key))
     attn_weights = self.qk_product(query, key, q_seq_len, model_mode, qk_product_einsum)
     if self.is_partition_in_decode(q_seq_len):
       attn_weights = partitioning.with_sharding_constraint(attn_weights, (KV_LENGTH, HEAD, None, None, None))
@@ -1474,6 +1476,7 @@ class AttentionOp(nnx.Module):
         qk_product_einsum=self.AqtEinsum_0,
         wv_product_einsum=self.AqtEinsum_1,
     )
+    jax.debug.print("prefill_unnormalized_output: {}", jnp.mean(prefill_unnormalized_output))
 
     # Return the "prefill" cache if it actually the combined prefill+ar kv cache
     if ar_kv_cache is None:

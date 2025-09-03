@@ -926,7 +926,10 @@ class Attention(nnx.Module):
       out = self.attention_op(
           query, key, value, decoder_segment_ids, model_mode, cached_values, previous_chunk, bidirectional_mask
       )
-
+    
+    jax.debug.print("query {}", jnp.mean(query))
+    jax.debug.print("key {}", jnp.mean(key))
+    jax.debug.print("value {}", jnp.mean(value))
     if model_mode == MODEL_MODE_PREFILL:
       out = nn.with_logical_constraint(out, self.prefill_out_axis_names)
     elif model_mode == MODEL_MODE_TRAIN and self.config.expert_shard_attention_option == EP_AS_CONTEXT:
@@ -935,6 +938,8 @@ class Attention(nnx.Module):
       out = nn.with_logical_constraint(out, self.out_axis_names)
     else:
       out = nn.with_logical_constraint(out, self.decode_out_axis_names)
+    jax.debug.print("x {}", jnp.mean(out))
     out = self.out_projection(out)
+    jax.debug.print("out {}", jnp.mean(out))
     out = checkpoint_name(out, "out_proj")
     return out
