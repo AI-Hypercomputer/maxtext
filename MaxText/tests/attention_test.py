@@ -732,9 +732,7 @@ class AttentionTest(parameterized.TestCase):
       attention_w_layout_full_this_idx = attention_w_layout_full[:, idx : idx + 1, :]
       self.assertTrue(attention_w_layout_full_this_idx.shape == attention_w_layout_idx.shape)
       self.assertTrue(
-          jax.numpy.allclose(
-              attention_w_layout_full_this_idx, attention_w_layout_idx, rtol=rtol, atol=atol, equal_nan=False
-          )
+          jax.numpy.allclose(attention_w_layout_full_this_idx, attention_w_layout_idx, rtol=rtol, atol=atol, equal_nan=False)
       )
 
   @pytest.mark.tpu_only
@@ -851,9 +849,7 @@ class AttentionTest(parameterized.TestCase):
         model_mode=MODEL_MODE_PREFILL,
     )
     self.assertTrue(
-        jax.numpy.allclose(
-            attention_w_reshape_q_full[:, :prefill_length, :], attention_w_reshape_q_prefill, equal_nan=False
-        )
+        jax.numpy.allclose(attention_w_reshape_q_full[:, :prefill_length, :], attention_w_reshape_q_prefill, equal_nan=False)
     )
 
     self.assertTrue(jax.numpy.allclose(attention_wo_reshape_q_prefill, attention_w_reshape_q_prefill, equal_nan=False))
@@ -1178,6 +1174,59 @@ class MLATest(parameterized.TestCase):
       self.assertEqual(mla_full_this_idx.shape, mla_idx.shape)
       # TODO (b/394626702) uncomment last check when decode and kv_cache are implemented for MLA
       # self.assertTrue(jax.numpy.allclose(mla_full_this_idx, mla_idx, rtol=1e-02, atol=1e-02, equal_nan=False))
+
+  def test_projection_initialization(self):
+    """Tests that MLA and Attention layers initialize the correct projection weights."""
+    # 1. Initialize a standard Attention layer for comparison
+    attention_cfg = pyconfig.initialize(
+        [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
+        **self.config_arguments,
+        attention_type=AttentionType.GLOBAL.value,  # Explicitly set to global
+    )
+    dummy_inputs_q = jnp.ones(
+        (attention_cfg.global_batch_size_to_train_on, attention_cfg.max_target_length, attention_cfg.base_emb_dim)
+    )
+    dummy_inputs_kv = jnp.ones(
+        (attention_cfg.global_batch_size_to_train_on, attention_cfg.max_target_length, attention_cfg.base_emb_dim)
+    )
+
+    base_attention = Attention(
+        config=attention_cfg,
+        num_query_heads=attention_cfg.num_query_heads,
+        num_kv_heads=attention_cfg.num_kv_heads,
+        head_dim=attention_cfg.head_dim,
+        max_target_length=attention_cfg.max_target_length,
+        max_prefill_predict_length=attention_cfg.max_prefill_predict_length,
+        inputs_q_shape=dummy_inputs_q.shape,
+        inputs_kv_shape=dummy_inputs_kv.shape,
+        mesh=self.mesh,
+        attention_kernel="dot_product",
+        dtype=attention_cfg.dtype,
+        rngs=self.nnx_rng,
+    )
+
+    # 2. Assert that the base Attention layer HAS all its standard projections
+    self.assertTrue(hasattr(base_attention, "query"), "Base Attention should have 'query' projection.")
+    self.assertTrue(hasattr(base_attention, "key"), "Base Attention should have 'key' projection.")
+    self.assertTrue(hasattr(base_attention, "value"), "Base Attention should have 'value' projection.")
+    self.assertTrue(hasattr(base_attention, "out"), "Base Attention should have 'out' projection.")
+
+    # 3. Initialize the MLA layer
+    mla_cfg, mla_layer = self.init_mla(self.config_arguments, rope_type="default")
+
+    # 4. Assert that the MLA layer DOES NOT HAVE the base projections
+    self.assertFalse(hasattr(mla_layer, "query"), "MLA should not have 'query' projection.")
+    self.assertFalse(hasattr(mla_layer, "key"), "MLA should not have 'key' projection.")
+    self.assertFalse(hasattr(mla_layer, "value"), "MLA should not have 'value' projection.")
+
+    # 5. Assert that the MLA layer HAS all of its own specific projections AND the common 'out' projection
+    self.assertTrue(hasattr(mla_layer, "wq_a"), "MLA should have 'wq_a' projection.")
+    self.assertTrue(hasattr(mla_layer, "wq_b"), "MLA should have 'wq_b' projection.")
+    self.assertTrue(hasattr(mla_layer, "wkv_a"), "MLA should have 'wkv_a' projection.")
+    self.assertTrue(hasattr(mla_layer, "wkv_b"), "MLA should have 'wkv_b' projection.")
+    self.assertTrue(hasattr(mla_layer, "q_norm"), "MLA should have 'q_norm' projection.")
+    self.assertTrue(hasattr(mla_layer, "kv_norm"), "MLA should have 'kv_norm' projection.")
+    self.assertTrue(hasattr(mla_layer, "out"), "MLA should have 'out' projection.")
 
   @parameterized.named_parameters(
       {
