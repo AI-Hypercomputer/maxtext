@@ -18,10 +18,9 @@
 
 New to Pallas? Start with the [official docs](https://docs.jax.dev/en/latest/pallas/index.html).
 
-While JAX and the XLA compiler provide excellent out-of-the-box performance, some scenarios demand the next level of optimization. **Pallas** is a JAX extension for TPUs and GPUs that gives expert users fine-grained control over how kernels execute on accelerator hardware. When you know something about your problem’s structure that the general-purpose compiler cannot infer, you can often translate that knowledge into *tiling*, *pipelining*, and *data-layout* choices that outperform the default lowering.
+While JAX and the XLA compiler provide excellent out-of-the-box performance, some scenarios demand the next level of optimization. **Pallas** is a JAX extension for TPUs and GPUs that gives expert users fine-grained control over how kernels execute on accelerator hardware. When you know something about your problem’s structure that the general-purpose compiler cannot infer, you can often translate that knowledge into choices that outperform the default lowering. For example, you can explicitly manage **cache locality** through tiling, handle **data sparsity** in workloads like Mixture-of-Experts, or orchestrate **matrix unit overlap** with memory transfers through manual pipelining.
 
 This guide explains **when** to consider Pallas, a **workflow** for developing and tuning kernels, and how Pallas is **used in MaxText** today.
-
 
 ## **🧠 The Pallas Mindset: When to Write a Custom Kernel**
 
