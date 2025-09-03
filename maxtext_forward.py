@@ -165,6 +165,7 @@ if __name__ == "__main__":
       "dtype=float32",
       "activations_in_float32=true",
       "matmul_precision=high",
+      # "max_prefill_predict_length=4",
   ]
 
   # model_args = ['/mnt/disks/jacobplatin/code/maxtext/llama4_maverick_check_weight.py', 'MaxText/configs/base.yml', 'hardware=cpu', 'scan_layers=false', 'base_output_directory=llama4', 'run_name=temp-testing-only', 'model_name=llama4-17b-128e', 'skip_jax_distributed_system=true', 'load_parameters_path=/mnt/disks/jacobplatin/models/llama4/maverick/4-layer-unscanned/0/items/']

@@ -885,7 +885,7 @@ class Attention(nnx.Module):
     if use_rope:
       query = self.apply_rotary_embedding(query, inputs_positions=inputs_positions)
       key = self.apply_rotary_embedding(key, inputs_positions=inputs_positions)
-
+      jax.debug.print("inputs_positions\nshape={shape}\n{x}", x=inputs_positions, shape=inputs_positions.shape)
       jax.debug.print("q_after_rope\nmean={mean}\nshape={shape}\n{x}", x=query, mean=query.mean(), shape=query.shape)
       jax.debug.print("k_after_rope\nmean={mean}\nshape={shape}\n{x}", x=key, mean=key.mean(), shape=key.shape)
 
