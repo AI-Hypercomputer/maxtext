@@ -672,6 +672,7 @@ class YarnRotaryEmbedding(nnx.Module):
     # Lookup the precomputed frequencies using the position indices.
     # self.freqs_cis has shape [max_position_embeddings, half_dim] so we use jnp.take along axis 0.
     # After indexing, shape becomes [B, S, half_dim]; we then add an axis for the heads.
+    jax.debug.print("self.freqs_cis: {x}", x=self.freqs_cis)
     freqs = jnp.take(self.freqs_cis, position, axis=0)  # shape: [B, S, half_dim]
     freqs = freqs[:, :, jnp.newaxis, :]  # shape: [B, S, 1, half_dim]
 
@@ -686,6 +687,132 @@ class YarnRotaryEmbedding(nnx.Module):
     if self.cast_as_fprop_dtype:
       output = output.astype(self.fprop_dtype)
     return output
+
+
+def gpt_oss_rotary_embedding_as_linen(
+    *,
+    embedding_dims: int,
+    max_position_embeddings: int = 4096 * 4,
+    original_max_position_embeddings: int = 4096,
+    beta_fast: float = 32,
+    beta_slow: float = 1,
+    rope_theta: float = 10000.0,
+    rope_factor: float = 40,
+    cast_as_fprop_dtype: bool = True,
+    fprop_dtype: DType = jnp.bfloat16,
+    name: str | None = None,
+):
+  """Initializes the YarnRotaryEmbedding module and returns it as a Linen module.
+
+  Args:
+    embedding_dims: The dimension of the embeddings.
+    max_position_embeddings: The maximum number of positions.
+    original_max_position_embeddings: The original maximum number of positions.
+    beta_fast: The fast beta parameter for YaRN.
+    beta_slow: The slow beta parameter for YaRN.
+    rope_theta: The base for the rotary frequencies.
+    rope_factor: The scaling factor for RoPE.
+    cast_as_fprop_dtype: Whether to cast the output to `fprop_dtype`.
+    fprop_dtype: The forward pass dtype.
+    name: The name of the module.
+  """
+  return nnx_wrappers.to_linen(
+      GptOssRotaryEmbedding,
+      embedding_dims=embedding_dims,
+      max_position_embeddings=max_position_embeddings,
+      original_max_position_embeddings=original_max_position_embeddings,
+      beta_fast=beta_fast,
+      beta_slow=beta_slow,
+      rope_theta=rope_theta,
+      rope_factor=rope_factor,
+      cast_as_fprop_dtype=cast_as_fprop_dtype,
+      fprop_dtype=fprop_dtype,
+      metadata_fn=variable_to_logically_partitioned,
+      name=name,
+  )
+
+class GptOssRotaryEmbedding(nnx.Module):
+  """Yarn rotary embedding.
+
+  This implementation uses gpt-oss PyTorch as reference
+  https://github.com/huggingface/transformers/blob/afd1393df1f53bdebd6cf2778130c1d30d05d845/src/transformers/models/gpt_oss/modeling_gpt_oss.py#L169
+
+  Attributes:
+    embedding_dims: Dimension of the embedding to be generated.
+    max_position_embeddings: The maximum sequence length that will be encountered.
+    original_max_position_embeddings: The sequence length for which the base frequencies were defined.
+    beta_fast: Lower bound parameter for correction.
+    beta_slow: Upper bound parameter for correction.
+    rope_theta: The base theta value for the frequency computation.
+    rope_factor: Factor applied to adjust the frequencies.
+    cast_as_fprop_dtype: Whether to cast the output to `fprop_dtype`.
+    fprop_dtype: The forward pass dtype.
+    rngs: rng keys passed in by nnx.bridge.to_linen.
+  """
+
+  def __init__(
+      self,
+      embedding_dims: int,
+      max_position_embeddings: int = 4096 * 4,
+      original_max_position_embeddings: int = 4096,
+      beta_fast: float = 32,
+      beta_slow: float = 1,
+      rope_theta: float = 10000.0,
+      rope_factor: float = 40,
+      cast_as_fprop_dtype: bool = True,
+      fprop_dtype: DType = jnp.bfloat16,
+      # Not used in YarnRotaryEmbedding but passed in by nnx.bridge.to_linen.
+      # TODO: Remove when bridge no longer needed
+      rngs: nnx.Rngs = None,
+  ):
+    """Initializes the YarnRotaryEmbedding module."""
+    self.embedding_dims = embedding_dims
+    self.max_position_embeddings = max_position_embeddings
+    self.original_max_position_embeddings = original_max_position_embeddings
+    self.beta_fast = beta_fast
+    self.beta_slow = beta_slow
+    self.rope_theta = rope_theta
+    self.rope_factor = rope_factor
+    self.cast_as_fprop_dtype = cast_as_fprop_dtype
+    self.fprop_dtype = fprop_dtype
+
+    if self.embedding_dims % 2:
+      raise ValueError("Embedding dim for rotary position embedding must be a multiple of 2.")
+
+  def _generate_pos_embeddings(self, positions: jax.Array) -> tuple[jax.Array, jax.Array]:
+    features = self.embedding_dims
+    base, factor = self.rope_theta, self.rope_factor
+    original_max_pos = self.original_max_position_embeddings
+
+    low = (features * math.log(original_max_pos / (self.beta_fast * 2 * math.pi))) / (2 * math.log(base))
+    high = (features * math.log(original_max_pos / (self.beta_slow * 2 * math.pi))) / (2 * math.log(base))   
+    low, high = max(low, 0), min(high, features - 1) 
+    timescale = base ** (jnp.arange(0, features, 2, dtype=jnp.float32) / features)
+    rot_freq_extra, rot_freq_inter = 1.0 / timescale, 1.0 / (factor * timescale)
+    
+    high = high if low != high else (high + 0.001)
+    interp_factor = 1 - jnp.clip((jnp.arange(features // 2, dtype=jnp.float32) - low) / (high - low), min=0, max=1)
+    rotational_frequency = rot_freq_inter * (1 - interp_factor) + rot_freq_extra * interp_factor
+    sinusoid_inp = jnp.einsum(
+      "BT,k->BTk",
+      positions,
+      rotational_frequency,
+      precision=jax.lax.Precision.HIGHEST,
+      )
+    m_scale = 1.0
+    attention_scaling = 1.0 if factor <= 1 else (0.1 * m_scale * math.log(factor) + 1.0)
+    return jnp.sin(sinusoid_inp) * attention_scaling, jnp.cos(sinusoid_inp) * attention_scaling
+
+  def __call__(self, inputs: Array, position: None | Array = None) -> Array:
+    sin, cos = self._generate_pos_embeddings(position)
+    assert inputs.ndim == 4 and sin.ndim == 3 and cos.ndim == 3
+    sin = sin[:, jnp.newaxis, :, :]
+    cos = cos[:, jnp.newaxis, :, :]
+    first_half = inputs[..., : inputs.shape[-1] // 2] 
+    second_half = inputs[..., inputs.shape[-1] // 2 :]
+    updated_first = first_half * cos - second_half * sin
+    updated_second = second_half * cos + first_half * sin
+    return jnp.concatenate([updated_first, updated_second], axis=-1)
 
 
 def positional_embedding_as_linen(*, embedding_dims: int, max_wavelength: int = _MAX_WAVELENGTH):
