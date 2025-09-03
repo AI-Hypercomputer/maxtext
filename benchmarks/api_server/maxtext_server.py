@@ -1,4 +1,5 @@
 import os
+import sys
 import time
 import uuid
 import json
@@ -37,7 +38,7 @@ from benchmarks.api_server import server_utils
 # We suppress the normal logger until after JAX is initialized.
 logging.basicConfig(level=logging.WARNING)
 print("Initializing MaxTextGenerator and JAX distributed system...")
-llm = MaxTextGenerator(server_utils.get_maxtext_args())
+llm = MaxTextGenerator(sys.argv)
 rank = jax.process_index()
 
 # Now that JAX is initialized, we can get our rank-specific logger.
