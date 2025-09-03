@@ -240,7 +240,7 @@ class MaxTextGenerator:
         if temperature == 0.0:
             return "greedy"
         if top_k is not None and top_p is not None:
-            return "stochastic"
+            return "composite"
         if top_k is not None:
             return "topk"
         if top_p is not None:

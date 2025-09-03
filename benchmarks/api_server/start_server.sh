@@ -4,13 +4,12 @@
 # where the script is invoked from.
 set -e
 
-# Check if a model config file was provided.
+# Check if arguments were provided.
 if [ -z "$1" ]; then
-  echo "Usage: $0 <path_to_model_config.yml>"
+  echo "Usage: $0 <path_to_base_config.yml> [arg1=value1 arg2=value2 ...]"
+  echo "Or: $0 <path_to_full_model_config.yml>"
   exit 1
 fi
-
-MODEL_CONFIG_PATH="$1"
 
 # Get the absolute path of the directory where the script is located.
 SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
@@ -23,10 +22,7 @@ cd "$PROJECT_ROOT"
 
 echo "Starting MaxText server on http://0.0.0.0:8000"
 echo "Executing from project root: $(pwd)"
-echo "Using model config: $MODEL_CONFIG_PATH"
+echo "Using arguments: $@"
 
-# Export the environment variable for the server to use.
-export MAXTEXT_MODEL_CONFIG="$MODEL_CONFIG_PATH"
-
-# Now that we are in the project root, the module path is correct.
-python -u -m benchmarks.api_server.maxtext_server
+# Pass all script arguments directly to the python module.
+python -u -m benchmarks.api_server.maxtext_server "$@"

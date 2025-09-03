@@ -36,40 +36,7 @@ def log_debug_event(request_id: str, event_type: str, content: dict):
         # Use logger for errors
         logger.error(f"Error writing to debug log file '{DEBUG_LOG_FILE}': {e}")
 
-# ----------------------------
-# Argument & Config Parsing
-# ----------------------------
 
-def get_maxtext_args() -> List[str]:
-    """
-    Constructs MaxText arguments from a YAML config file specified by an environment variable.
-    """
-    config_path = os.environ.get("MAXTEXT_MODEL_CONFIG")
-    if not config_path:
-        raise ValueError("MAXTEXT_MODEL_CONFIG environment variable not set. This should point to a YAML config file.")
-
-    logger.info(f"Loading model configuration from: {config_path}")
-    try:
-        with open(config_path, 'r', encoding='utf-8') as f:
-            config_data = yaml.safe_load(f)
-    except FileNotFoundError:
-        raise FileNotFoundError(f"Config file not found at: {config_path}") from None
-    except yaml.YAMLError as e:
-        raise yaml.YAMLError(f"Error parsing YAML file '{config_path}': {e}") from e
-
-    args = ["maxtext_server.py"]
-
-    if "base_config" in config_data:
-        args.append(config_data["base_config"])
-
-    if "args" in config_data:
-        for key, value in config_data["args"].items():
-            if isinstance(value, str):
-                args.append(f'{key}="{value}"')
-            else:
-                args.append(f'{key}={value}')
-    logger.info(f"Constructed MaxText args: {args}")
-    return args
 
 # ----------------------------
 # Request/Response Helpers
