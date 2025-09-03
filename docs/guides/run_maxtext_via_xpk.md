@@ -14,12 +14,12 @@
  limitations under the License.
 -->
 
-Running MaxText at Scale with XPK
-=================================
+(run-xpk)=
+# Running MaxText at Scale with XPK
 
 This guide provides the recommended workflow for running MaxText on Google Kubernetes Engine (GKE) using the **Accelerated Processing Kit (XPK)**. For a complete reference on XPK, please see the [official XPK repository](https://github.com/AI-Hypercomputer/xpk).
 
-### Overview of the Workflow
+## Overview of the Workflow
 
 The process involves two main stages. First, you will package the MaxText application and its dependencies into a self-contained Docker image. This is done on your local machine or any environment where Docker is installed. Second, you will use the XPK command-line tool to orchestrate the deployment of this image as a training job on a GKE cluster equipped with accelerators (TPUs or GPUs).
 
@@ -39,8 +39,7 @@ XPK abstracts away the complexity of cluster management and job submission, hand
 
 * * * * *
 
-1\. Prerequisites
------------------
+## 1. Prerequisites
 
 Before you begin, you must have the necessary tools installed and permissions configured.
 
@@ -76,8 +75,7 @@ Your Google Cloud user account needs the following IAM roles for the project you
 
 * * * * *
 
-2\. One-Time Environment Setup
-------------------------------
+## 2. One-Time Environment Setup
 
 These commands configure your local environment to connect to Google Cloud services.
 
@@ -107,8 +105,7 @@ These commands configure your local environment to connect to Google Cloud servi
 
 * * * * *
 
-3\. Install XPK
----------------
+## 3. Install XPK
 
 It is best practice to install XPK in a dedicated Python virtual environment.
 
@@ -127,8 +124,7 @@ pip install xpk
 
 * * * * *
 
-4\. Build the MaxText Docker Image
-----------------------------------
+## 4. Build the MaxText Docker Image
 
 A recommended approach for running MaxText is to build your image from a **JAX AI Image**, which ensures all core libraries are version-matched and stable.
 
@@ -161,8 +157,7 @@ A recommended approach for running MaxText is to build your image from a **JAX A
 
 * * * * *
 
-5\. Run Your First MaxText Job
-------------------------------
+## 5. Run Your First MaxText Job
 
 This section assumes you have an existing GKE cluster with either TPU or GPU nodes.
 
@@ -191,7 +186,7 @@ This section assumes you have an existing GKE cluster with either TPU or GPU nod
 
     ```
 
-#### A Note on Multi-Slice and Multi-Node Runs
+### A Note on Multi-Slice and Multi-Node Runs
 
 The examples below run on a single TPU slice (`--num-slices=1`) or a small number of GPU nodes (`--num-nodes=2`). To scale your job to a larger, multi-host configuration, you simply increase these values.
 
@@ -229,8 +224,7 @@ For instance, to run a job across **four TPU slices**, you would change `--num-s
 
 * * * * *
 
-6\. Managing and Monitoring Your Job
-------------------------------------
+## 6. Managing and Monitoring Your Job
 
 -   **View Logs in Real-Time:** The easiest way to see the output of your training job is through the Google Cloud Console.
 
