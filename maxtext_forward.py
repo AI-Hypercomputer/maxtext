@@ -29,6 +29,7 @@ import sys
 from MaxText.tests.forward_pass_logit_checker import get_data
 import jsonlines
 from MaxText import max_logging
+import os
 
 
 class MockConfigForForwardPass:
@@ -126,6 +127,10 @@ def setup_golden_data(input_golden_data_path):
 
 
 if __name__ == "__main__":
+
+  jax.config.update("jax_default_prng_impl", "unsafe_rbg")
+  os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
+
   parser = argparse.ArgumentParser(description="Run a MaxText model with specified configurations.")
   # Arguments that were in the original list
   # parser.add_argument("--base_output_directory", type=str, default="test", help="Base directory for output.")
@@ -165,7 +170,8 @@ if __name__ == "__main__":
       "dtype=float32",
       "activations_in_float32=true",
       "matmul_precision=high",
-      # "max_prefill_predict_length=4",
+      "max_prefill_predict_length=4",
+      "max_target_length=4",
   ]
 
   # model_args = ['/mnt/disks/jacobplatin/code/maxtext/llama4_maverick_check_weight.py', 'MaxText/configs/base.yml', 'hardware=cpu', 'scan_layers=false', 'base_output_directory=llama4', 'run_name=temp-testing-only', 'model_name=llama4-17b-128e', 'skip_jax_distributed_system=true', 'load_parameters_path=/mnt/disks/jacobplatin/models/llama4/maverick/4-layer-unscanned/0/items/']
@@ -179,9 +185,9 @@ if __name__ == "__main__":
   model = models.transformer_as_linen(config, mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
   state, _ = maxtext_utils.setup_decode_state(model, config, rng1, mesh, None)
 
-  print_nested_keys(state.params)
+  # print_nested_keys(state.params)
 
-  ids, decoder_segment_ids, decoder_positions, golden_logits = setup_golden_data(golden_data_path)
+  ids, decoder_segment_ids, decoder_positions, logits_hf = setup_golden_data(golden_data_path)
 
   full_train_logits = model.apply(
       state.params,
@@ -192,4 +198,24 @@ if __name__ == "__main__":
       rngs={"aqt": init_rng},
   )
 
-  print(full_train_logits)
+  full_train_logits = jax.experimental.multihost_utils.process_allgather(full_train_logits)
+
+  token_size = logits_hf.shape[0]
+  max_logging.log(f"{token_size=}")
+  logits_maxtext = full_train_logits[0, :token_size, :]
+  logits_hf = logits_hf[:token_size, :]
+  max_logging.log(f"{logits_maxtext.shape=}")
+  max_logging.log(f"{logits_hf.shape=}")
+  max_logging.log(f"Max Numerical Difference {np.abs(logits_hf - logits_maxtext).max()}")
+
+  max_logging.log(f"{logits_maxtext=}")
+  max_logging.log(f"{logits_hf=}")
+
+  maxtext_probabilities = jax.nn.softmax(logits_maxtext, axis=-1)
+  hf_probabilities = jax.nn.softmax(logits_hf, axis=-1)
+
+  max_logging.log(f"{maxtext_probabilities=}")
+  max_logging.log(f"{hf_probabilities=}")
+
+  kl_div = jax.numpy.sum(jax.scipy.special.kl_div(hf_probabilities, maxtext_probabilities), axis=-1)
+  max_logging.log(f"KL divergence = {kl_div}, max KL divergence = {jax.numpy.max(kl_div)}")
