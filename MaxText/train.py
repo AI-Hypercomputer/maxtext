@@ -365,6 +365,15 @@ def train_loop(config, recorder, state=None):
       state,
   ) = train_utils.setup_train_loop(config, recorder)
 
+  max_logging.log("Immediately after setup_train_loop:")
+  def print_leaf_type_and_shape(x):
+    if hasattr(x, 'shape'):
+      max_logging.log(f"  Type: {type(x)}, Shape: {x.shape}")
+    else:
+      max_logging.log(f"  Type: {type(x)}")
+    return x
+  jax.tree_util.tree_map(print_leaf_type_and_shape, state.params)
+
   if config.use_dpo:
     if "reference_params" not in state.params:
       reference_params = jax.tree.map(jnp.copy, state.params["params"])
@@ -376,6 +385,9 @@ def train_loop(config, recorder, state=None):
   )
 
   with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+    state = jax.device_put(state, state_mesh_shardings)
+    max_logging.log("Immediately after jax.device_put:")
+    jax.tree_util.tree_map(print_leaf_type_and_shape, state.params)
     shaped_batch = maxtext_utils.get_shaped_batch(config)
     compiled = p_train_step.lower(state, shaped_batch, init_rng).compile()
     compiled_stats = compiled.memory_analysis()
