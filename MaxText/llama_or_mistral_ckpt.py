@@ -157,6 +157,9 @@ MODEL_PARAMS_DICT = {
         "scale_query": False,
         "interleave_moe_layer_step": 2,
         "inhomogeneous_layer_cycle_interval": 4,
+        "num_layers_vit": 34,
+        "num_att_head_vit": 16,
+        "hidden_size_vit": 1408,
     },
     "mistral-7b": {
         "num_layers": 32,
@@ -590,6 +593,7 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
     jax_weights (dict): Dictionary containing the converted weights.
   """
   base_num_decoder_layers = model_params["num_layers"]
+  # base_num_decoder_layers = 4
   base_num_query_heads = model_params["num_heads"]
   head_dim = model_params["dims_per_head"]
   base_num_kv_heads = model_params["num_kv_heads"]
@@ -1656,6 +1660,7 @@ def save_weights_to_checkpoint(
 
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
   if checkpoint_manager is not None:
+    max_logging.log(f"start saving a checkpoint at step {step_number_to_save_new_ckpt} to {maxtext_model_path}")
     if checkpointing.save_checkpoint(checkpoint_manager, step_number_to_save_new_ckpt, state_new):
       max_logging.log(f"saved a checkpoint at step {step_number_to_save_new_ckpt}")
     # Upon preemption, exit when and only when all ongoing saves are complete.
