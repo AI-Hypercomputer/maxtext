@@ -1,19 +1,20 @@
+# Benchmark and Performance Tuning
 This tutorial guides you through setting up benchmarks and performing performance tuning in MaxText, **focusing on key aspects** like how to set up benchmarks, choose the right config and tuning the benchmark performance.
 
 
-# How to Setup Benchmark
+## How to Setup Benchmark
 
 Setting up effective benchmarks is crucial for accurate performance tuning. Here's how to approach it:
 
 
-## Benchmark with synthetic data and repeated batches
+### Benchmark with synthetic data and repeated batches
 
 To efficiently benchmark MaxText without large, real datasets, use synthetic data to eliminate input and pipeline bottlenecks. 
 
 set `dataset_type` to "synthetic" and `reuse_example_batch` to 1.
 
 
-## Start with arithmetic intensity analysis
+### Start with arithmetic intensity analysis
 
 Begin your benchmarking efforts by performing an arithmetic intensity analysis. This fundamental step helps you determine the ideal batch size and sharding strategy for your specific hardware and workload. Based on your analysis and hardware configuration, select the sharding approach that yields the best results.
 
@@ -28,7 +29,7 @@ This metric helps determine whether a computation is CPU-bound (high arithmetic 
 [link to Scaling & Sharding Concepts in MaxText] This document illustrates various sharding strategies and their roofline analysis, through AI analysis.
 
 
-# Metrics for Benchmark Analysis
+## Metrics for Benchmark Analysis
 
 For benchmarking purposes, we collect the step time for training. This step time is then used to calculate MFU and throughputs, which provide insights into the utilization achieved for each benchmark workload.
 
@@ -38,10 +39,10 @@ For benchmarking purposes, we collect the step time for training. This step time
 *   **Throughput = global tokens / step_time / number of devices**
 
 
-# Tuning benchmark performance
+## Tuning benchmark performance
 
 
-## Tuning Remat Policy
+### Tuning Remat Policy
 
 Rematerialization (remat) is a technique used to reduce memory consumption during model training. It works by recomputing activations during the backward pass instead of storing them in memory during the forward pass. This can be particularly beneficial for large models where memory is a bottleneck.
 
@@ -60,7 +61,7 @@ Remat policies can be chosen from: `minimal`, `save_dot_with_context_except_mlp`
 To use a custom policy, set `remat_policy` to `custom` and specify the layers in the decode module as `offload`, `device`, or `remat`.
 
 
-## **Low Precision Training**
+### **Low Precision Training**
 
 MaxText supports quantization via QWIX. To enable this, set `use_qwix_quantization=true`.
 
@@ -71,14 +72,14 @@ For v6e and earlier generation TPUs, use the "int8" recipe. For v7x and later ge
 [link to quantization doc]
 
 
-## Choose Sharding Strategy 
+### Choose Sharding Strategy 
 
 Sharding is crucial for optimizing model performance. MaxText offers various sharding strategies and hybrid options, including FSDP, TP, EP, CP, and PP, which can be configured through your MaxText settings.
 
 [Scaling & Sharding Concepts in MaxText] This document illustrates in detail how sharding works in maxtext and chooses the write sharding config for your workload.
 
 
-## Performance Tuning on Custom Pallas call
+### Performance Tuning on Custom Pallas call
 
 [Tune-jax](https://github.com/rdyro/tune-jax) offers a tuning tool for Pallas kernels on both GPU and TPU. Users can tune custom kernels for specific model configurations by providing input shapes and defining a tuning search space.
 
@@ -97,7 +98,7 @@ def my_pallas_function(...):
 This example code will benchmark `my_pallas_function` across all combinations of `block_q` and `block_k`, automatically handling any compilation failures.
 
 
-## Communication Overlaps and Tuning
+### Communication Overlaps and Tuning
 
 There are two methods for asynchronous collective offloading:
 
@@ -127,7 +128,7 @@ There are two methods for asynchronous collective offloading:
 Those XLA can be set via `LIBTPU_INIT_ARGS`
 
 
-## Scoped Vmem Tuning
+### Scoped Vmem Tuning
 
 `scoped_vmem` can be tuned using `xla_tpu_scoped_vmem_limit_kib`. The hardware limitations for vmem are 64M for v5e, 96M for v6e, and 64M for v7x.
 
