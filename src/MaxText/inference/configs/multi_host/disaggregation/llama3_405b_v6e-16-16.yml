@@ -1,0 +1,39 @@
+base_config: "inference_jetstream.yml"
+
+model_name: "llama3.1-405b"
+sharding_strategy: "experimental"
+attention: 'dot_product'
+allow_split_physical_axes: True
+tokenizer_path: "assets/tokenizer_llama3.tiktoken"
+# Used to replicate the quantization scale to avoid the inefficient XLA fusion.
+replicate_quant_scale: True
+
+inference_server: "ExperimentalMaxtextDisaggregatedServer"
+
+logical_axis_rules: [
+                      ['embed', []],
+                      ['vocab', ['tensor', 'autoregressive']],
+                      ['activation_batch', []],
+                      ['activation_length', []],
+                      ['activation_embed', []],
+                      ['activation_vocab', ['tensor', 'autoregressive']],
+                      ['heads', ['tensor', 'autoregressive']],
+                      ['kv', []],
+                      ['kv_heads', ['tensor']],
+                      ['q_heads', ['tensor']],
+                      ['kv_head_dim', []],
+                      ['activation_prefill_kv_batch', []],
+                      ['activation_kv_batch', ['autoregressive']],
+                      ['activation_kv_heads', ['tensor']],
+                      ['activation_kv_head_dim', []],
+                      ['activation_heads', ['tensor']],
+                      ['activation_kv', ['tensor', 'autoregressive']],
+                      ['norm', []],
+                      ['mlp', ['tensor', 'autoregressive']],
+                      ['activation_mlp', ['tensor', 'autoregressive']],
+                      ['cache_batch_prefill', []],
+                      ['cache_batch', []],
+                      ['cache_sequence', []],
+                      ['cache_heads', ['tensor']],
+                      ['cache_kv', []],
+                    ]

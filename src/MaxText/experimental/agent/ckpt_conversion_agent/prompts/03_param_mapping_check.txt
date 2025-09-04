@@ -1,0 +1,24 @@
+Analyze the provided Python script to verify the parameter mapping from a Hugging Face (HF) model to a MaxText model.
+
+**Instructions & Rules:**
+1.  **Check for Unmapped Parameters:** Identify any parameters from the HF model that are NOT mapped to a MaxText parameter by the script.
+2.  **Validate Weight Tying Logic:**
+    * First, determine if the model uses weight tying (the token embedding weights are the same as the `lm_head` weights).
+    * **If weight tying is used,** the `lm_head.weight` parameter will likely be **absent** from the conversion script. This is correct. Verify that the script uses the **token embedding weights** for the final output layer in MaxText. The absence of a direct `lm_head.weight` mapping should **pass** validation in this case.
+    * **If weight tying is NOT used,** the `lm_head.weight` parameter **must** be present in the HF list and the script **must** map it.
+3.  **Provide a Clear Report:**
+    * If the script is correct according to the rules above, respond with: "**Validation passed.**"
+    * If there are issues, provide a bulleted list of all unmapped parameters and explain any failures in handling the weight tying logic.
+
+**Inputs:**
+
+* **Hugging Face Parameters:**
+    `{hf_params_json}`
+* **MaxText Parameters:**
+    `{maxtext_params_json}`
+* **Conversion Script:**
+    ```python
+    {code}
+    ```
+* **Analysis:**
+{analysis}

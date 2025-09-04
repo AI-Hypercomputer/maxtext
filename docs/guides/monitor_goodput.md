@@ -85,7 +85,8 @@ Please use a unique workload name, unless you intend to monitor cumulative Goodp
 MaxText enables Goodput recording and monitoring by default with `enable_goodput_recording=True` and `monitor_goodput=True`. You can configure the goodput upload frequency by setting `goodput_upload_interval_seconds`.
 
 ```bash
-python3 -m MaxText.train MaxText/configs/base.yml base_output_directory=$OUTPUT_PATH dataset_path=$DATA_PATH run_name=goodput-test-run steps=200 goodput_upload_interval_seconds=30
+python3 -m MaxText.train src/MaxText/configs/base.yml base_output_directory=$OUTPUT_PATH \
+  dataset_path=$DATA_PATH run_name=goodput-test-run steps=200 goodput_upload_interval_seconds=30
 ```
 
 #### How to Monitor Step Time Deviation
@@ -93,7 +94,8 @@ python3 -m MaxText.train MaxText/configs/base.yml base_output_directory=$OUTPUT_
 MaxText enables step time deviation monitoring by default with `monitor_step_time_deviation=True`. You can configure the upload frequency by setting `step_deviation_interval_seconds`.
 
 ```bash
-python3 -m MaxText.train MaxText/configs/base.yml base_output_directory=$OUTPUT_PATH dataset_path=$DATA_PATH run_name=goodput-test-run steps=200 step_deviation_interval_seconds=30
+python3 -m MaxText.train src/MaxText/configs/base.yml base_output_directory=$OUTPUT_PATH \
+  dataset_path=$DATA_PATH run_name=goodput-test-run steps=200 step_deviation_interval_seconds=30
 ```
 
 #### How to enable Pathways Goodput
@@ -105,7 +107,8 @@ Enabling `enable_pathways_goodput` turns on Goodput measurement for Pathways wor
 ```
 
 ```bash
-python3 -m MaxText.train MaxText/configs/base.yml base_output_directory=$OUTPUT_PATH dataset_path=$DATA_PATH run_name=goodput-test-run steps=200 goodput_upload_interval_seconds=30 enable_pathways_goodput=True
+python3 -m MaxText.train src/MaxText/configs/base.yml base_output_directory=$OUTPUT_PATH dataset_path=$DATA_PATH \
+  run_name=goodput-test-run steps=200 goodput_upload_interval_seconds=30 enable_pathways_goodput=True
 ```
 
 #### How to enable Checkpoint Logging
@@ -161,7 +164,9 @@ and `enable_gcp_step_deviation_metrics` to `False` for disabling step deviation
 metrics.
 
 ```bash
-python3 -m MaxText.train MaxText/configs/base.yml base_output_directory=$OUTPUT_PATH dataset_path=$DATA_PATH run_name=goodput-test-run steps=200 goodput_upload_interval_seconds=30 enable_gcp_goodput_metrics=False enable_gcp_step_deviation_metrics=False
+python3 -m MaxText.train src/MaxText/configs/base.yml base_output_directory=$OUTPUT_PATH dataset_path=$DATA_PATH \
+  run_name=goodput-test-run steps=200 goodput_upload_interval_seconds=30 enable_gcp_goodput_metrics=False \
+  enable_gcp_step_deviation_metrics=False
 ```
 
 Setting `monitor_goodput` to `False` will disable both tensorboard and GCM
