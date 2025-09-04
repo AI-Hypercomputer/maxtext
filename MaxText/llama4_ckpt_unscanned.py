@@ -389,6 +389,10 @@ def _convert_huggingface_to_jax_weights(
       chkpt_vars["multi_modal_projector.linear_1.weight"], cast_dtype=CAST_DTYPE, transpose=True
   )
 
+  return_vision = True
+  if return_vision:
+    return jax_weights
+
   # language model ###########################################
   max_logging.log("Processing language model")
   # decoder norm scale ###########################################
@@ -947,9 +951,11 @@ if __name__ == "__main__":
   os.environ["XLA_FLAGS"] = f"--xla_force_host_platform_device_count={SIMULATED_CPU_DEVICES_COUNT}"
   base_weights_path = args.maxtext_model_path
 
+  jax_weights = convert_to_jax_weights(args.base_model_path, args.model_size, args.huggingface_checkpoint)
+
   save_weights_to_checkpoint(
       args.maxtext_model_path,
-      convert_to_jax_weights(args.base_model_path, args.model_size, args.huggingface_checkpoint),
+      jax_weights,
       SIMULATED_CPU_DEVICES_COUNT,
       args.use_ocdbt,
       args.use_zarr3,

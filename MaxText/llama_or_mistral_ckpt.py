@@ -158,6 +158,9 @@ MODEL_PARAMS_DICT = {
         "scale_query": False,
         "interleave_moe_layer_step": 2,
         "inhomogeneous_layer_cycle_interval": 4,
+        "num_layers_vit": 34,
+        "num_att_head_vit": 16,
+        "hidden_size_vit": 1408,
     },
     "mistral-7b": {
         "num_layers": 32,
@@ -603,6 +606,7 @@ def _convert_huggingface_to_jax_weights(
     jax_weights (dict): Dictionary containing the converted weights.
   """
   base_num_decoder_layers = model_params["num_layers"]
+  # base_num_decoder_layers = 4
   base_num_query_heads = model_params["num_heads"]
   head_dim = model_params["dims_per_head"]
   base_num_kv_heads = model_params["num_kv_heads"]
@@ -635,6 +639,7 @@ def _convert_huggingface_to_jax_weights(
         chkpt_vars[mapped_key] = f.get_tensor(key)
 
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
+  max_logging.log(f"Memory usage: {mem_info.memory_info().rss / (1024**3)} GB")
 
   # initialize the data structure for storing jax_weights
   if is_llama4_model:
@@ -1698,6 +1703,7 @@ def save_weights_to_checkpoint(
 
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
   if checkpoint_manager is not None:
+    max_logging.log(f"start saving a checkpoint at step {step_number_to_save_new_ckpt} to {maxtext_model_path}")
     if checkpointing.save_checkpoint(checkpoint_manager, step_number_to_save_new_ckpt, state_new):
       max_logging.log(f"saved a checkpoint at step {step_number_to_save_new_ckpt}")
     # Upon preemption, exit when and only when all ongoing saves are complete.
@@ -1750,9 +1756,17 @@ if __name__ == "__main__":
   if args.lora_input_adapters_path:
     base_weights_path += "/base"
 
+  from MaxText import llama4_ckpt_unscanned  # pylint: disable=g-import-not-at-top
+  unscanned_jax_weights = llama4_ckpt_unscanned.convert_to_jax_weights(args.base_model_path, args.model_size, args.huggingface_checkpoint)
+  jax_weights_vision_encoder = unscanned_jax_weights["vision_encoder"]
+  del unscanned_jax_weights
+
+  scanned_jax_weights = convert_to_jax_weights(args.base_model_path, args.model_size, args.huggingface_checkpoint)
+  scanned_jax_weights["vision_encoder"] = jax_weights_vision_encoder
+
   save_weights_to_checkpoint(
       args.maxtext_model_path,
-      convert_to_jax_weights(args.base_model_path, args.model_size, args.huggingface_checkpoint),
+      scanned_jax_weights,
       SIMULATED_CPU_DEVICES_COUNT,
       args.use_ocdbt,
       args.use_zarr3,
