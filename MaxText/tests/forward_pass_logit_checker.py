@@ -335,17 +335,12 @@ def main(config, test_args):  # pylint: disable=W0621
 
   else:
     """Comparing maxtext model with HF model on-the-fly"""
-    # if test_args.hf_model_path == "":
-    #   raise ValueError
-    hf_model_path = "/home/ranran_google_com/gpt_20b/gpt-oss-20b-bf16-v2"
-    hf_model = AutoModelForCausalLM.from_pretrained(
-        hf_model_path,
-        trust_remote_code=True,
-        torch_dtype=getattr(torch, config.dtype.name)
-    )
-    tokenizer = AutoTokenizer.from_pretrained("openai/gpt-oss-20b")
-    # if "Llama-3.1" in test_args.hf_model_path:
-    #   tokenizer.pad_token = tokenizer.eos_token
+    if test_args.hf_model_path == "":
+      raise ValueError
+    hf_model = AutoModelForCausalLM.from_pretrained(test_args.hf_model_path, torch_dtype=torch.bfloat16)
+    tokenizer = AutoTokenizer.from_pretrained(test_args.hf_model_path)
+    if "Llama-3.1" in test_args.hf_model_path:
+      tokenizer.pad_token = tokenizer.eos_token
 
     init_rng = jax.random.PRNGKey(config.init_weights_seed)
     init_rng, rng1 = jax.random.split(init_rng)
@@ -355,7 +350,7 @@ def main(config, test_args):  # pylint: disable=W0621
     maxtext_model = models.transformer_as_linen(config, mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
     maxtext_state, _ = maxtext_utils.setup_decode_state(maxtext_model, config, rng1, mesh, None)
 
-    prompts = ["I"]
+    prompts = ["I love to", "Today is a", "What is the"]
     all_data_to_save = []
     for input_text in prompts:
       max_logging.log(f"\n--- Prompt: {input_text} ---")
@@ -441,7 +436,7 @@ if __name__ == "__main__":
   parser.add_argument("--max_kl_div", type=float, required=False, default=None)
   parser.add_argument("--golden_logits_path", type=str, required=False, default="")
   parser.add_argument("--hf_model_path", type=str, required=False, default="")
-  parser.add_argument("--run_hf_model", type=bool, required=False, default=True)
+  parser.add_argument("--run_hf_model", type=bool, required=False, default=False)
   parser.add_argument("--output_logits_path", type=str, required=False, default="")
   parser.add_argument("--gcs_output_logits_path", type=str, required=False, default="")
   test_args, _ = parser.parse_known_args()
