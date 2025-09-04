@@ -1,34 +1,41 @@
-# Copyright 2023–2025 Google LLC
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#    https://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
 [build-system]
-requires = ["setuptools"]
-build-backend = "setuptools.build_meta"
+requires = ["hatchling", "hatch-requirements-txt"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "src/MaxText/__init__.py"
 
 [project]
 name = "MaxText"
-version = "0.1.0"
-description = "MaxText is a high performance, highly scalable, open-source LLM written in pure Python/Jax and targeting Google Cloud TPUs and GPUs for training and inference"
-readme = "README.md"
+description = "MaxText is a simple, performant and scalable Jax LLM!"
+dynamic = ["dependencies", "optional-dependencies", "version"]
 requires-python = ">=3.10"
-license = {file = "LICENSE"}
-dynamic = ["dependencies"]
+readme = "README.md"
+license = "Apache-2.0"
+keywords = ["llm", "jax", "llama", "mistral", "mixtral", "gemma", "deepseek"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: ML",
+    "Environment :: GPU"
+]
 
-[tool.setuptools.dynamic]
-dependencies = {file = ["requirements.txt"]}
+[project.urls]
+Repository = "https://github.com/AI-Hypercomputer/maxtext.git"
+"Bug Tracker" = "https://github.com/AI-Hypercomputer/maxtext/issues"
 
-[tool.setuptools.packages.find]  
-where = ["MaxText"]
-include = ["MaxText*"]
-exclude = ["MaxText.tests.*"]
+#[tool.hatch.metadata.hooks.requirements_txt]
+#files = ["requirements.txt"]
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+#[tool.hatch.metadata.hooks.requirements_txt.optional-dependencies]
+#gpu = ["requirements-gpu.txt"]
+#tpu = ["requirements-tpu.txt"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/MaxText"]
