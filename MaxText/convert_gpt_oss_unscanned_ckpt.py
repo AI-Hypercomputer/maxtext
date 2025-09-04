@@ -96,7 +96,42 @@ MODEL_PARAMS_DICT = {
         # logits_via_embedding: False
         # decoder_block: "gpt_oss"
         # "inhomogeneous_layer_cycle_interval": 2,
-    }
+    },
+    "gpt-oss-120b": {
+        # # Attention
+        "base_emb_dim": 2880,
+        "base_num_query_heads": 64,
+        "base_num_kv_heads": 8,
+        "head_dim": 64,
+        # sliding_window_size: 128
+        # attention_bias: True
+        # attention_sink: True
+        # # RoPE
+        # rope_type: "yarn"
+        # rope_max_timescale: 150_000
+        # max_position_embeddings: 131072
+        # original_max_position_embeddings: 4096
+        # rope_factor: 32
+        # beta_fast: 32
+        # beta_slow: 1
+        # # MLP
+        # base_mlp_dim: 2880
+        # base_moe_mlp_dim: 2880
+        # mlp_activations: ["sigmoid","linear"]
+        # mlp_activations_limit: 7.0
+        # routed_bias: True
+        # mlp_bias: True
+        # num_experts: 128
+        # num_experts_per_tok: 4
+        # # General
+        "base_num_decoder_layers": 36,
+        # vocab_size: 201088
+        # normalization_layer_epsilon: 1.0e-5
+        # enable_dropout: False
+        # logits_via_embedding: False
+        # decoder_block: "gpt_oss"
+        # inhomogeneous_layer_cycle_interval: 2
+    },
 }
 
 
@@ -235,6 +270,7 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
 
     # (num_attention_heads * head_dim, hidden_size) -> (hidden_size, num_attention_heads * head_dim) -> (hidden_size, num_attention_heads, head_dim)
     # [embed, q, head_dim]
+    # NOTE: not scale the query weights in checkpoint, but apply query_pre_attn_scalar=1/np.sqrt(head_dim) for attention
     self_attention["query"]["kernel"] = wq.transpose().reshape([base_emb_dim, base_num_query_heads, head_dim])
     # [embed, kv, head_dim]
     self_attention["key"]["kernel"] = wk.transpose().reshape([base_emb_dim, base_num_kv_heads, head_dim])
@@ -291,9 +327,10 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
     wo = _pt_to_np(chkpt_vars[f"layers.{layer_idx}.feed_forward.experts.down_proj"], cast_dtype=CAST_DTYPE)
     wo_bias = _pt_to_np(chkpt_vars[f"layers.{layer_idx}.feed_forward.experts.down_proj_bias"], cast_dtype=CAST_DTYPE)
 
+    # router
     mlp_weight["gate"]["kernel"] = gate.transpose()
     mlp_weight["gate"]["bias"] = gate_bias
-
+    # experts.gate_up_proj
     wi_0 = wi_0_1[..., ::2]
     wi_1 = wi_0_1[..., 1::2]
     del wi_0_1
@@ -304,13 +341,12 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
     del wi_0_1_bias
     mlp_weight["wi_0_bias"] = wi_0_bias
     mlp_weight["wi_1_bias"] = wi_1_bias
-
+    # experts.down_proj
     mlp_weight["wo"] = wo
     mlp_weight["wo_bias"] = wo_bias
 
     gc.collect()
 
-  # final
   del chkpt_vars
   gc.collect()
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
@@ -324,7 +360,7 @@ def convert_to_jax_weights(base_model_path: str, model_size: str):
 
   Attributes:
     base_model_path: checkpoint path
-    model_size: TODO
+    model_size: gpt-oss-20b, gpt-oss-120b
   """
   model_params = MODEL_PARAMS_DICT[model_size]
   mem_info = psutil.Process()
