@@ -371,16 +371,16 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
 
   params = state.params
 
-  def convert_to_bf16(param):
-    if param.dtype == jnp.float32:
-      return param.astype(jnp.bfloat16)
-    else:
-      return param
-
-  params_bf16 = jax.tree_util.tree_map(convert_to_bf16, params)
-  params_bf16 = jax.tree.map(jax.lax.with_sharding_constraint, params_bf16, params_shardings)
-
   if config.gradient_accumulation_steps > 1:
+    def convert_to_bf16(param):
+      if param.dtype == jnp.float32:
+        return param.astype(jnp.bfloat16)
+      else:
+        return param
+    # Cast params to bf16 and unshard before gradient accumulation loop so that 
+    # all-gather is done once in bf16 
+    params_bf16 = jax.tree_util.tree_map(convert_to_bf16, params)
+    params_bf16 = jax.tree.map(jax.lax.with_sharding_constraint, params_bf16, params_shardings)
 
     def accumulate_gradient(acc_grad_and_loss, data):
       params_bf16 = acc_grad_and_loss["params_bf16"]
