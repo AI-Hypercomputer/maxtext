@@ -268,17 +268,17 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
     wv = _pt_to_np(chkpt_vars[f"layers.{layer_idx}.attention.wv.weight"], cast_dtype=CAST_DTYPE)
     w_post = _pt_to_np(chkpt_vars[f"layers.{layer_idx}.attention.wo.weight"], cast_dtype=CAST_DTYPE)
 
+    # NOTE: not scale the query weights in checkpoint, but apply query_pre_attn_scalar=1/np.sqrt(head_dim) for attention
     # (num_attention_heads * head_dim, hidden_size) -> (hidden_size, num_attention_heads * head_dim) -> (hidden_size, num_attention_heads, head_dim)
     # [embed, q, head_dim]
-    # NOTE: not scale the query weights in checkpoint, but apply query_pre_attn_scalar=1/np.sqrt(head_dim) for attention
     self_attention["query"]["kernel"] = wq.transpose().reshape([base_emb_dim, base_num_query_heads, head_dim])
     # [embed, kv, head_dim]
     self_attention["key"]["kernel"] = wk.transpose().reshape([base_emb_dim, base_num_kv_heads, head_dim])
     # [embed, kv, head_dim]
     self_attention["value"]["kernel"] = wv.transpose().reshape([base_emb_dim, base_num_kv_heads, head_dim])
-    # (hidden_size, num_attention_heads * head_dim) -> (hidden_size, num_attention_heads, head_dim) -> # [num_attention_heads, head_dim, hidden_size]
-    # w_post = w_post.reshape([base_emb_dim, base_num_query_heads, head_dim]).tranpose(1, 2, 0)
+    # (hidden_size, num_attention_heads * head_dim) -> (hidden_size, num_attention_heads, head_dim) -> (num_attention_heads, head_dim, hidden_size)
     # TODO: double check
+    # w_post = w_post.reshape([base_emb_dim, base_num_query_heads, head_dim]).tranpose(1, 2, 0)
     # [q, head_dim, embed]
     self_attention["out"]["kernel"] = w_post.transpose().reshape([base_num_query_heads, head_dim, base_emb_dim])
 
@@ -330,15 +330,15 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
     # router
     mlp_weight["gate"]["kernel"] = gate.transpose()
     mlp_weight["gate"]["bias"] = gate_bias
-    # experts.gate_up_proj
+    # experts.gate_up_proj: de-interleave last dim, even for gate, odd for up_proj
     wi_0 = wi_0_1[..., ::2]
     wi_1 = wi_0_1[..., 1::2]
     del wi_0_1
-    mlp_weight["wi_0"] = wi_0
-    mlp_weight["wi_1"] = wi_1
     wi_0_bias = wi_0_1_bias[..., ::2]
     wi_1_bias = wi_0_1_bias[..., 1::2]
     del wi_0_1_bias
+    mlp_weight["wi_0"] = wi_0
+    mlp_weight["wi_1"] = wi_1
     mlp_weight["wi_0_bias"] = wi_0_bias
     mlp_weight["wi_1_bias"] = wi_1_bias
     # experts.down_proj
