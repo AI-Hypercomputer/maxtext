@@ -143,6 +143,8 @@ def sampling(logits, rng, algorithm, topk=0, nucleus_topp=0, temperature=1.0):
     return sample_nucleus_topp_logits(logits, nucleus_topp, temperature, rng)
   elif algorithm == "topk":
     return sample_topk_logits(logits, topk, temperature, rng)
+  elif algorithm == "composite":
+    return sample_topk_topp_weighted(logits, topk, nucleus_topp, temperature, rng)
   else:
     raise ValueError(f"Sampling {algorithm=} not supported!")
 
@@ -172,3 +174,77 @@ def sample_topk_logits(logits, topk, temperature, rng):
   topk_token = jnp.expand_dims(jax.random.categorical(rng, topk_logits / temperature).astype(jnp.int32), axis=-1)
   sampled_tokens = jnp.squeeze(jnp.take_along_axis(topk_idxs, topk_token, axis=-1), axis=-1).astype(jnp.int32)
   return sampled_tokens
+
+
+def sample_topk_topp_weighted(logits, topk, nucleus_topp, temperature, rng):
+  """Applies top-k, top-p, and temperature sampling to logits.
+
+  This function combines three common sampling techniques to control the
+  randomness and diversity of the generated text. The operations are applied
+  sequentially:
+
+  1.  **Top-k filtering**: The vocabulary is restricted to the `topk` most
+      likely tokens.
+  2.  **Top-p (nucleus) filtering**: From the `topk` tokens, the smallest
+      set of tokens whose cumulative probability exceeds `nucleus_topp` is
+      selected.
+  3.  **Temperature scaling**: The logits of the filtered tokens are scaled
+      by the `temperature`. Higher temperatures result in a flatter
+      distribution (more randomness), while lower temperatures make the
+      distribution sharper (less randomness).
+  4.  **Sampling**: A token is sampled from the final probability
+      distribution using composite sampling.
+
+  Args:
+    logits: The unnormalized log probabilities of the vocabulary tokens,
+      with shape `[batch, sequence, vocab_size]`.
+    topk: The number of most likely tokens to consider. Must be positive.
+    nucleus_topp: The cumulative probability threshold for nucleus sampling.
+      Must be in the range (0, 1].
+    temperature: The temperature for scaling the logits.
+    rng: The JAX random number generator key.
+
+  Returns:
+    The sampled token indices, with shape `[batch, sequence]`.
+  """
+  if topk <= 0:
+    raise ValueError(f"topk must be positive, got {topk=}")
+  if not (0.0 < nucleus_topp <= 1.0):
+    raise ValueError(f"nucleus_topp must be in (0, 1], got {nucleus_topp=}")
+
+  # 1. Top-K filtering
+  topk_logits, topk_idxs = jax.lax.top_k(logits, topk)
+
+  # 2. Top-P filtering on the top-k results
+  sorted_cum_probs = jnp.cumsum(jax.nn.softmax(topk_logits, axis=-1), axis=-1)
+
+  # Find the number of elements to keep. We keep all elements until the cumulative
+  # probability exceeds nucleus_topp. This is equivalent to finding the index of
+  # the first element that is >= nucleus_topp and keeping all elements up to that index.
+  # `jnp.sum(sorted_cum_probs < nucleus_topp)` gives the index of the last element
+  # strictly within the nucleus. We need to include the next element that crosses the threshold.
+  cutoff_index = jnp.sum(sorted_cum_probs < nucleus_topp, axis=-1, keepdims=True)
+  
+  # Create a mask that is True for indices we want to keep.
+  # We keep all indices up to and including the cutoff_index.
+  indices = jnp.arange(topk_logits.shape[-1])
+  mask = indices <= cutoff_index
+
+  # Apply the mask to filter the logits.
+  filtered_topk_logits = jnp.where(
+      mask, topk_logits, jnp.full_like(topk_logits, NEG_INF)
+  )
+
+  # 3. Apply temperature
+  scaled_logits = filtered_topk_logits / jnp.maximum(temperature, 1e-6) # add epsilon for stability
+
+  # 4. Sample
+  sampled_topk_index = jax.random.categorical(rng, scaled_logits).astype(jnp.int32)
+
+  # Map the index back to the original vocabulary
+  sampled_token = jnp.squeeze(
+      jnp.take_along_axis(topk_idxs, jnp.expand_dims(sampled_topk_index, axis=-1), axis=-1),
+      axis=-1
+  ).astype(jnp.int32)
+
+  return sampled_token

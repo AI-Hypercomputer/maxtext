@@ -19,7 +19,7 @@ from collections.abc import Callable
 import os.path
 import unittest
 
-from jax import random
+from jax import random, vmap
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 import jax
 import jax.numpy as jnp
@@ -532,5 +532,114 @@ class TestPromptLogprobsFromPackedPrefill(unittest.TestCase):
     # pos 7 >= true_length of seg1 -> NaN
     self.assertTrue(np.isnan(out_np[0, 7]))
 
+
+class TestSamplingFunctions(unittest.TestCase):
+  """Test suite for sampling utility functions."""
+
+  def setUp(self):
+    """Set up common logits and RNG for tests."""
+    self.rng = jax.random.PRNGKey(0)
+    # Logits with a clear ranking for a vocabulary of 10
+    self.logits = jnp.array([[0.1, 0.5, 0.2, 1.5, 0.8, 2.5, 0.3, 1.8, 0.7, 0.4]])
+    self.expected_order = jnp.argsort(self.logits, axis=None, descending=True)
+
+  def test_topk_filtering(self):
+    """Tests that sampling is restricted to the top-k tokens."""
+    topk = 3
+    # The indices with the 3 highest logits
+    top_k_indices = set(self.expected_order[:topk].tolist())
+    rngs = jax.random.split(self.rng, 100)
+
+    for r in rngs:
+      token = inference_utils.sample_topk_topp_weighted(
+          self.logits, topk=topk, nucleus_topp=1.0, temperature=1.0, rng=r
+      )
+      self.assertIn(token.item(), top_k_indices)
+
+  def test_topp_filtering(self):
+    """Tests that nucleus sampling (top-p) is correctly applied."""
+    # With nucleus_topp=0.8, we expect the top 6 indices.
+    nucleus_topp = 0.8
+    top_p_indices = set(self.expected_order[:6].tolist())
+    rngs = jax.random.split(self.rng, 100)
+
+    for r in rngs:
+      token = inference_utils.sample_topk_topp_weighted(
+          self.logits, topk=10, nucleus_topp=nucleus_topp, temperature=1.0, rng=r
+      )
+      self.assertIn(token.item(), top_p_indices)
+
+  def test_combined_filtering(self):
+    """Tests the combination of top-k and top-p filtering."""
+    # First, filter to top_k=5.
+    # Then, apply nucleus_topp=0.8 to this smaller set.
+    # The renormalized probabilities lead to a nucleus of the top 3 tokens.
+    topk = 5
+    nucleus_topp = 0.8
+    valid_indices = set(self.expected_order[:3].tolist())
+    rngs = jax.random.split(self.rng, 100)
+
+    for r in rngs:
+      token = inference_utils.sample_topk_topp_weighted(
+          self.logits, topk=topk, nucleus_topp=nucleus_topp, temperature=1.0, rng=r
+      )
+      self.assertIn(token.item(), valid_indices)
+
+  def test_low_temperature_is_greedy(self):
+    """Tests that a very low temperature results in greedy sampling."""
+    low_temp = 1e-6
+    greedy_token_index = self.expected_order[0]  # Index of the highest logit
+    rngs = jax.random.split(self.rng, 10)
+
+    for r in rngs:
+      token = inference_utils.sample_topk_topp_weighted(
+          self.logits, topk=10, nucleus_topp=1.0, temperature=low_temp, rng=r
+      )
+      self.assertEqual(token.item(), greedy_token_index)
+
+  def test_invalid_args_raise_error(self):
+    """Tests that invalid arguments for topk and nucleus_topp raise errors."""
+    with self.assertRaises(ValueError):
+      inference_utils.sample_topk_topp_weighted(
+          self.logits, topk=0, nucleus_topp=1.0, temperature=1.0, rng=self.rng
+      )
+    with self.assertRaises(ValueError):
+      inference_utils.sample_topk_topp_weighted(
+          self.logits, topk=-1, nucleus_topp=1.0, temperature=1.0, rng=self.rng
+      )
+    with self.assertRaises(ValueError):
+      inference_utils.sample_topk_topp_weighted(
+          self.logits, topk=10, nucleus_topp=0.0, temperature=1.0, rng=self.rng
+      )
+    with self.assertRaises(ValueError):
+      inference_utils.sample_topk_topp_weighted(
+          self.logits, topk=10, nucleus_topp=1.1, temperature=1.0, rng=self.rng
+      )
+
+  def test_batch_dimension(self):
+    """Tests that the function handles a batch of logits correctly."""
+    batched_logits = jnp.vstack([self.logits, self.logits, self.logits])
+    batch_size = batched_logits.shape[0]
+    topk = 3
+    top_k_indices = set(self.expected_order[:topk].tolist())
+    rngs = jax.random.split(self.rng, batch_size)
+
+    # CORRECTED: Use vmap to handle batching for JAX's random functions.
+    # We map over the first axis (0) of logits and rngs.
+    # Other arguments (topk, nucleus_topp, temperature) are fixed (None).
+    vmapped_sample = vmap(
+        inference_utils.sample_topk_topp_weighted,
+        in_axes=(0, None, None, None, 0),
+        out_axes=0
+    )
+
+    tokens = vmapped_sample(batched_logits, topk, 1.0, 1.0, rngs)
+
+    self.assertEqual(tokens.shape, (batch_size,))
+    for token in tokens:
+        self.assertIn(token.item(), top_k_indices)
+
+
 if __name__ == "__main__":
   unittest.main()
+
