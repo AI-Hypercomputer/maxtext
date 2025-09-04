@@ -678,6 +678,21 @@ class _HyperParameters:
         1,
     )
 
+    # Automatically disable shardy when gradient accumulation is enabled on GPU
+    # This incompatibility is specific to GPU hardware
+    if (
+        raw_keys["gradient_accumulation_steps"] > 1
+        and raw_keys["shardy"]
+        and raw_keys["hardware"] in ("gpu", "gpu_multiprocess")
+    ):
+      max_logging.log(
+          "WARNING: Automatically setting shardy=False because"
+          f" gradient_accumulation_steps={raw_keys['gradient_accumulation_steps']} > 1"
+          f" on hardware={raw_keys['hardware']}."
+          " Shardy is not compatible with gradient accumulation on GPU."
+      )
+      raw_keys["shardy"] = False
+
     if raw_keys["pagedattn_max_pages_per_group"] <= 0:
       raw_keys["pagedattn_max_pages_per_group"] = (
           raw_keys["max_target_length"] + raw_keys["pagedattn_tokens_per_page"] - 1
