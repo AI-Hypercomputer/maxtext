@@ -701,6 +701,7 @@ class Attention(nnx.Module):
           rope_factor=self.config.rope_factor,
           embedding_dims=rope_embedding_dims,
           fprop_dtype=self.dtype,
+          decoder_block=self.config.decoder_block,
           rngs=self.rngs,
       )
     elif rope_type.startswith("gpt"):

@@ -27,7 +27,7 @@ attention_bias: True
 attention_sink: True
 
 # RoPE
-rope_type: "gpt"
+rope_type: "yarn"
 rope_max_timescale: 150_000
 max_position_embeddings: 131072
 original_max_position_embeddings: 4096

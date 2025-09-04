@@ -25,7 +25,7 @@ from MaxText.common_types import MODEL_MODE_TRAIN
 
 
 
-prompt_text = "I love to sleep"
+prompt_text = "What is the day"
 
 
 def get_data_hf(config, prompt_text, hf_token, model_id="openai/gpt-oss-20b"):

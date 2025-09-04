@@ -26,7 +26,7 @@ from flax import nnx
 
 from MaxText import max_logging
 from MaxText import max_utils
-from MaxText.common_types import MODEL_MODE_PREFILL, MODEL_MODE_TRAIN, Array, Config, DType
+from MaxText.common_types import MODEL_MODE_PREFILL, MODEL_MODE_TRAIN, Array, Config, DType, DecoderBlockType
 from MaxText.layers import nnx_wrappers
 from MaxText.layers.initializers import Initializer, default_embed_init, variable_to_logically_partitioned
 
@@ -502,6 +502,7 @@ def yarn_rotary_embedding_as_linen(
     rope_factor: float = 40,
     cast_as_fprop_dtype: bool = True,
     fprop_dtype: DType = jnp.bfloat16,
+    decoder_block: DecoderBlockType = DecoderBlockType.DEEPSEEK,
     name: str | None = None,
 ):
   """Initializes the YarnRotaryEmbedding module and returns it as a Linen module.
@@ -529,6 +530,7 @@ def yarn_rotary_embedding_as_linen(
       rope_factor=rope_factor,
       cast_as_fprop_dtype=cast_as_fprop_dtype,
       fprop_dtype=fprop_dtype,
+      decoder_block=decoder_block,
       metadata_fn=variable_to_logically_partitioned,
       name=name,
   )
@@ -565,6 +567,7 @@ class YarnRotaryEmbedding(nnx.Module):
       rope_factor: float = 40,
       cast_as_fprop_dtype: bool = True,
       fprop_dtype: DType = jnp.bfloat16,
+      decoder_block: DecoderBlockType = DecoderBlockType.DEEPSEEK,
       # Not used in YarnRotaryEmbedding but passed in by nnx.bridge.to_linen.
       # TODO: Remove when bridge no longer needed
       rngs: nnx.Rngs = None,
@@ -579,6 +582,7 @@ class YarnRotaryEmbedding(nnx.Module):
     self.rope_factor = rope_factor
     self.cast_as_fprop_dtype = cast_as_fprop_dtype
     self.fprop_dtype = fprop_dtype
+    self.decoder_blcok = decoder_block
 
     if self.embedding_dims % 2:
       raise ValueError("Embedding dim for rotary position embedding must be a multiple of 2.")
@@ -681,8 +685,18 @@ class YarnRotaryEmbedding(nnx.Module):
     # Convert the complex result back to a real tensor.
     # Split the complex number into its real and imaginary parts.
     rotated_real = jnp.stack([jnp.real(rotated), jnp.imag(rotated)], axis=-2)  # shape: [B, S, N, 2, half_dim]
-    # [sin1, sin2, sin3, ..., cos1, cos2, ...] at last dimension
-    output = rotated_real.reshape(B, S, N, H)
+    # # [sin1, sin2, sin3, ..., cos1, cos2, ...] at last dimension
+
+    if self.decoder_blcok == DecoderBlockType.GPT_OSS:
+      jax.debug.print("insdie of block.....")
+      # swap the order and apply scaling
+      output = jnp.swapaxes(rotated_real, -2, -1)
+      m_scale = 1.0
+      attention_scaling = 1.0 if self.rope_factor <= 1 else (0.1 * m_scale * math.log(self.rope_factor) + 1.0)
+      output = output * attention_scaling
+
+    jax.debug.print("output of block.....")
+    output = output.reshape(B, S, N, H)
     if self.cast_as_fprop_dtype:
       output = output.astype(self.fprop_dtype)
     return output
