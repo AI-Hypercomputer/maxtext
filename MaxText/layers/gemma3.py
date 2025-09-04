@@ -354,26 +354,36 @@ class Encoder1DBlock(nnx.Module):
     self.seq_len = (self.config.image_size_for_vit // self.config.patch_size_for_vit) ** 2
 
     self.LayerNorm_0 = nnx.LayerNorm(num_features=self.config.hidden_size_for_vit, rngs=self.rngs)
-    self.MultiHeadDotProductAttention_0 = Attention(
-        config=self.config,
-        num_query_heads=self.config.num_attention_heads_for_vit,
-        num_kv_heads=self.config.num_attention_heads_for_vit,
-        head_dim=self.config.hidden_size_for_vit // self.config.num_attention_heads_for_vit,
-        max_target_length=self.seq_len,
-        mesh=self.mesh,
-        attention_kernel="dot_product",
-        inputs_q_shape=(self.config.per_device_batch_size, self.seq_len, self.config.hidden_size_for_vit),
-        inputs_kv_shape=(self.config.per_device_batch_size, self.seq_len, self.config.hidden_size_for_vit),
-        dropout_rate=0,
-        is_nope_layer=True,
-        use_bias_in_projections=True,
-        attention_type=AttentionType.FULL,
-        use_qk_norm=False,
-        query_pre_attn_scalar=1 / math.sqrt(self.config.hidden_size_for_vit // self.config.num_attention_heads_for_vit),
-        model_mode="train",
-        is_vision=True,
-        rngs=self.rngs,
-    )
+    # self.MultiHeadDotProductAttention_0 = nnx.MultiHeadAttention(
+    #     in_features=self.config.hidden_size_for_vit,
+    #     out_features=self.config.hidden_size_for_vit,
+    #     num_heads=self.config.num_attention_heads_for_vit,
+    #     dtype=self.config.dtype_mm,
+    #     kernel_init=nnx.initializers.xavier_uniform(),
+    #     precision=self.config.matmul_precision,
+    #     rngs=self.rngs,
+    # )
+    # self.MultiHeadDotProductAttention_0 = Attention(
+    #     config=self.config,
+    #     num_query_heads=self.config.num_attention_heads_for_vit,
+    #     num_kv_heads=self.config.num_attention_heads_for_vit,
+    #     head_dim=self.config.hidden_size_for_vit // self.config.num_attention_heads_for_vit,
+    #     max_target_length=self.seq_len,
+    #     mesh=self.mesh,
+    #     weight_dtype=self.config.weight_dtype,
+    #     attention_kernel="dot_product",
+    #     inputs_q_shape=(self.config.per_device_batch_size, self.seq_len, self.config.hidden_size_for_vit),
+    #     inputs_kv_shape=(self.config.per_device_batch_size, self.seq_len, self.config.hidden_size_for_vit),
+    #     dropout_rate=0,
+    #     is_nope_layer=True,
+    #     use_bias_in_projections=True,
+    #     attention_type=AttentionType.FULL,
+    #     use_qk_norm=False,
+    #     query_pre_attn_scalar=1 / math.sqrt(self.config.hidden_size_for_vit // self.config.num_attention_heads_for_vit),
+    #     model_mode="train",
+    #     is_vision=True,
+    #     rngs=self.rngs,
+    # )
     self.LayerNorm_1 = nnx.LayerNorm(num_features=self.config.hidden_size_for_vit, rngs=self.rngs)
     self.MlpBlockViT_0 = MlpBlockViT(
         block_id=self.block_id,
@@ -384,8 +394,14 @@ class Encoder1DBlock(nnx.Module):
 
   def __call__(self, x: jax.Array, deterministic: bool = False) -> jax.Array:
     y = self.LayerNorm_0(x)
-
-    y = self.MultiHeadDotProductAttention_0(inputs_q=y, inputs_kv=y, deterministic=deterministic)
+    # y = self.MultiHeadDotProductAttention_0(
+    #     inputs_q=y,
+    #     inputs_k=y,
+    #     inputs_v=y,
+    #     deterministic=deterministic,
+    #     decode=False,
+    # )
+    # y = self.MultiHeadDotProductAttention_0(inputs_q=y, inputs_kv=y, deterministic=deterministic)
     y = self.Dropout_0(y, deterministic=deterministic)
     x = x + y
 
@@ -437,13 +453,15 @@ class Einsum(nnx.Module):
       shape: tuple[int, ...],
       initializer: nnx.initializers.Initializer = nnx.initializers.normal(),
       dtype: jnp.dtype | None = None,
+      matmul_precision: str = "default",
       *,
       rngs: Optional[nnx.Rngs] = None,
   ):
+    self.matmul_precision = matmul_precision
     self.w = nnx.Param(initializer(rngs.params(), shape, dtype))
 
   def __call__(self, eqn: str, x: jax.Array) -> jax.Array:
-    return jnp.einsum(eqn, x, self.w)
+    return jnp.einsum(eqn, x, self.w, precision=self.matmul_precision)
 
 
 class VisionEmbedder(nnx.Module):
@@ -462,7 +480,11 @@ class VisionEmbedder(nnx.Module):
         kernel_axes=("norm",),
         rngs=self.rngs,
     )
-    self.mm_input_projection = Einsum(shape=(self.config.hidden_size_for_vit, self.config.emb_dim), rngs=self.rngs)
+    self.mm_input_projection = Einsum(
+        shape=(self.config.hidden_size_for_vit, self.config.emb_dim),
+        matmul_precision=self.config.matmul_precision,
+        rngs=self.rngs
+    )
 
   def __call__(self, x: jax.Array, eqn: str = "...tm,md->...td") -> jax.Array:
     x = self.mm_soft_embedding_norm(x)
@@ -574,7 +596,7 @@ class Gemma3VisionEncoderLayer(nnx.Module):
     if typ == "learn":
       shape = (1, seqshape[0] * seqshape[1], width)
       initializer = nnx.initializers.normal(stddev=1 / (width**0.5))
-      return nnx.Param(initializer(self.rngs.params(), shape, dtype))
+      return nnx.Param(initializer(self.rngs.params(), shape, dtype), precision=self.config.matmul_precision)
     elif typ == "sincos2d":
       return _posemb_sincos_2d(*seqshape, width=width, dtype=dtype)
     else:

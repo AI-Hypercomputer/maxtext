@@ -97,7 +97,7 @@ quantization: ""
 constant_bound_config: ""
 # Choose one of default, high, and highest.
 # https://kolonist26-jax-kr.readthedocs.io/en/latest/jax.lax.html#jax.lax.Precision
-matmul_precision: "default"
+matmul_precision: "highest"
 activations_in_float32: False # Sets activations to float32 before nonlinearity it true, else dtype
 # Used to replicate the quantization scale to avoid the inefficient XLA fusion for 2d sharding.
 replicate_quant_scale: False
