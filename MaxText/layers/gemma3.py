@@ -332,13 +332,13 @@ class Encoder1DBlock(nn.Module):
   def __call__(self, x: jax.Array, deterministic: bool = True) -> jax.Array:
     y = nn.LayerNorm()(x)
 
-    y = nn.MultiHeadDotProductAttention(
-        num_heads=self.num_heads,
-        kernel_init=nn.initializers.xavier_uniform(),
-        deterministic=deterministic,
-        dtype=self.dtype_mm,
-        precision=jax.lax.Precision.HIGHEST,
-    )(y, y)
+    # y = nn.MultiHeadDotProductAttention(
+    #     num_heads=self.num_heads,
+    #     kernel_init=nn.initializers.xavier_uniform(),
+    #     deterministic=deterministic,
+    #     dtype=self.dtype_mm,
+    #     precision=jax.lax.Precision.HIGHEST,
+    # )(y, y)
     # y = attention_as_linen(
     #     config=self.config,
     #     num_query_heads=self.config.num_attention_heads_for_vit,
@@ -357,6 +357,7 @@ class Encoder1DBlock(nn.Module):
     #     query_pre_attn_scalar=1 / (self.config.hidden_size_for_vit // self.config.num_attention_heads_for_vit)**0.5,
     #     model_mode="train",
     #     is_vision=True,
+    #     dtype=self.config.dtype_mm,
     #     name="MultiHeadDotProductAttention_0",
     # )(y, y, deterministic=deterministic)
     y = nn.Dropout(rate=self.dropout)(y, deterministic)
@@ -459,7 +460,7 @@ class VisionEmbedder(nn.Module):
 
   def setup(self):
     if self.vision_proj_dim:
-      self.mm_soft_embedding_norm = rms_norm(self.vision_proj_dim)
+      self.mm_soft_embedding_norm = rms_norm(self.vision_proj_dim, dtype=self.config.dtype_mm)
       self.mm_input_projection = Einsum((self.vision_proj_dim, self.config.emb_dim))
 
   def encode_vision(self, x: jax.Array) -> jax.Array:
@@ -553,7 +554,7 @@ class Gemma3VisionEncoderLayer(nn.Module):
     b, n, h, w, c = inputs.shape
     x = jnp.reshape(inputs, [b * n, h, w, c])
     # Gemma3 uses conv2d with stride 14 and kernel size 14 to extract patches.
-    x = nn.Conv(features=1152, kernel_size=(14, 14), strides=14, padding="VALID", name="embedding", precision=jax.lax.Precision.HIGHEST)(x)
+    x = nn.Conv(features=1152, kernel_size=(14, 14), strides=14, padding="VALID", name="embedding", precision=jax.lax.Precision.HIGHEST, dtype=self.config.dtype_mm)(x)
     bn, h, w, c = x.shape
     x = jnp.reshape(x, [bn, h * w, c])
 
