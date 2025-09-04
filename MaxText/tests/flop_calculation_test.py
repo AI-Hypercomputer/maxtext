@@ -33,30 +33,9 @@ class FlopCalculation(unittest.TestCase):
         f"FLOPs values are not equal: {flops1} != {flops2} (rel_tol={rel_tol:.2e})",
     )
 
-  def compute_llama_attention_flops_per_device(self, kwargs: dict) -> float:
+  def compute_regular_attention_flops_per_device(self, kwargs: dict) -> float:
     """
-    Computes the attention TFLOPs per device for a Llama-style model.
-    """
-    # Configuration parameters from kwargs
-    B = kwargs["per_device_batch_size"]
-    S = kwargs["max_target_length"]
-    N = kwargs["base_num_decoder_layers"]
-
-    # Model dimensions
-    D_head = kwargs["head_dim"]
-    H_q = kwargs["base_num_query_heads"]
-
-    # Attention flops
-    # The factor of 2 is 1 for QK^T and 1 for SV.
-    # 3 for forward plus backward pass
-    # This accounts for causal masking.
-    attention_flops = 2 * 3 * N * B * (S**2) * H_q * D_head
-
-    return attention_flops / 1e12  # return tflops
-
-  def compute_mixtral_attention_flops_per_device(self, kwargs: dict) -> float:
-    """
-    Computes the total training TFLOPs per device for a Mixtral-style model.
+    Computes the attention TFLOPs per device for a Llama-style and Mixtral-style model.
     """
     # Configuration parameters from kwargs
     B = kwargs["per_device_batch_size"]
@@ -97,6 +76,28 @@ class FlopCalculation(unittest.TestCase):
 
     return attention_flops / 1e12  # Convert to TFLOPs (10^12)
 
+  def compute_gpt_attention_flops_per_device(self, kwargs: dict) -> float:
+    """
+    Computes the total training TFLOPs per device for a GPT-style model.
+    """
+    # Configuration parameters from kwargs
+    B = kwargs["per_device_batch_size"]
+    S = kwargs["max_target_length"]
+    W = kwargs["sliding_window_size"]
+    N = kwargs["base_num_decoder_layers"]
+
+    # Model dimensions
+    D_head = kwargs["head_dim"]
+    H_q = kwargs["base_num_query_heads"]
+
+    # Attention flops (mixed with global and local_sliding attentions)
+    # The factor of 2 is 1 for QK^T and 1 for SV.
+    # 3 for forward plus backward pass
+    # This accounts for causal masking.
+    attention_flops = 2 * 3 * B * (N/2 * S**2 + N/2 * W**2) * H_q * D_head
+
+    return attention_flops / 1e12  # return tflops
+
   @pytest.mark.cpu_only
   def test_llama2_7b_flops(self):
     """Test Llama2 7b Flops calculation with default parameters"""
@@ -120,7 +121,7 @@ class FlopCalculation(unittest.TestCase):
     }
     B = kwargs["per_device_batch_size"]
     S = kwargs["max_target_length"]
-    attention_flops = self.compute_llama_attention_flops_per_device(kwargs)
+    attention_flops = self.compute_regular_attention_flops_per_device(kwargs)
     # Llama2-7b has ~6.74B parameters
     # https://adithyask.medium.com/from-7b-to-8b-parameters-understanding-weight-matrix-changes-in-llama-transformer-models-31ea7ed5fd88
     golden_param_size = 6.74e9
@@ -156,7 +157,7 @@ class FlopCalculation(unittest.TestCase):
     }
     B = kwargs["per_device_batch_size"]
     S = kwargs["max_target_length"]
-    attention_flops = self.compute_llama_attention_flops_per_device(kwargs)
+    attention_flops = self.compute_regular_attention_flops_per_device(kwargs)
     # LLaMA3-8b has ~8.03B parameters
     # https://adithyask.medium.com/from-7b-to-8b-parameters-understanding-weight-matrix-changes-in-llama-transformer-models-31ea7ed5fd88
     # Note: The commonly cited 8.03B parameter count for Llama 3 8B corresponds to a version with UNTIED embeddings.
@@ -196,7 +197,7 @@ class FlopCalculation(unittest.TestCase):
     }
     B = kwargs["per_device_batch_size"]
     S = kwargs["max_target_length"]
-    attention_flops = self.compute_mixtral_attention_flops_per_device(kwargs)
+    attention_flops = self.compute_regular_attention_flops_per_device(kwargs)
     # mixtral-8x7b has ~12.9B active parameters
     # https://mistral.ai/news/mixtral-of-experts
     golden_param_size = 12.9e9
@@ -245,6 +246,45 @@ class FlopCalculation(unittest.TestCase):
     # deepseek2-16b has ~2.4B active parameters
     # https://arxiv.org/pdf/2405.04434
     golden_param_size = 2.4e9
+    golden_tflops = 6 * B * S * golden_param_size / 1e12 + attention_flops
+    cfg = pyconfig.initialize(
+        [None, os.path.join(PKG_DIR, "configs", "base.yml")],
+        **kwargs,
+    )
+    calculated_tflops, _, _ = calculate_tflops_training_per_device(cfg)
+    self.assertFlopsAlmostEqual(calculated_tflops, golden_tflops)
+
+  @pytest.mark.cpu_only
+  def test_gpt_oss_20b_flops(self):
+    """Test GPT OSS 20B Flops calculation"""
+    kwargs = {
+        # Model bases
+        "model_name": "gpt-oss-20b",
+        "override_model_config": True,
+        # Core workload parameters
+        "per_device_batch_size": 4,
+        "max_target_length": 8192,
+        "sliding_window_size": 128,
+        "num_experts": 32,
+        "num_experts_per_tok": 4,
+        "gradient_accumulation_steps": 1,
+        # model dimensions
+        "base_emb_dim": 2880,
+        "base_mlp_dim": 2880,
+        "base_num_query_heads": 64,
+        "base_num_kv_heads": 8,
+        "head_dim": 64,
+        "base_num_decoder_layers": 24,
+        "vocab_size": 201088,
+        "mlp_activations": ["silu", "linear"],
+        "skip_jax_distributed_system": True,
+    }
+    B = kwargs["per_device_batch_size"]
+    S = kwargs["max_target_length"]
+    attention_flops = self.compute_gpt_attention_flops_per_device(kwargs)
+    # gpt-oss-20b has ~3.6B active parameters
+    # https://openai.com/index/introducing-gpt-oss/
+    golden_param_size = 3.6e9
     golden_tflops = 6 * B * S * golden_param_size / 1e12 + attention_flops
     cfg = pyconfig.initialize(
         [None, os.path.join(PKG_DIR, "configs", "base.yml")],

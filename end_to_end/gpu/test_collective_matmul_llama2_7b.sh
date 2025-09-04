@@ -26,7 +26,7 @@ export XLA_FLAGS="--xla_dump_hlo_as_text
     --xla_dump_to=$BASE_OUTPUT_DIR/$RUN_NAME/HLO_dumps/
     --xla_gpu_enable_latency_hiding_scheduler=true
     --xla_gpu_enable_triton_gemm=false
-    --xla_gpu_graph_level=0
+    --xla_gpu_enable_command_buffer=''
     --xla_gpu_enable_highest_priority_async_stream=true
     --xla_gpu_all_reduce_combine_threshold_bytes=${AR_THRESHOLD}
     --xla_gpu_all_gather_combine_threshold_bytes=${AG_THRESHOLD}
@@ -49,7 +49,7 @@ python3 -m MaxText.train \
     scan_layers=true \
     monitor_goodput=false \
     enable_goodput_recording=false \
-    remat_policy=minimal_flash \
+    remat_policy=minimal_with_context \
     attention=cudnn_flash_te \
     max_target_length=4096 \
     use_iota_embed=true \

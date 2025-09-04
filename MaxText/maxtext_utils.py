@@ -178,14 +178,16 @@ def calculate_gemma2_tflops_training_per_device(config, total_ffn_flops, qkv_flo
   return attention_tflops, learnable_weight_tflops
 
 
-def calculate_gemma3_tflops_training_per_device(config, total_ffn_flops, qkv_flops, projection_flops, embedding_flops):
+def calculate_mixed_attention_model_tflops_training_per_device(
+    config, total_ffn_flops, qkv_flops, projection_flops, embedding_flops, attention_pattern_length
+):
   """
-  Calculate training TFLOPs for Gemma3, which has an alternating pattern of
-  5 local attention layers and 1 global attention layer.
+  Calculate training TFLOPs for models with a mixed attention pattern of local
+  and global attention layers, like Gemma3 and GPT-OSS.
   """
   num_layers = config.num_decoder_layers
 
-  num_global_layers = num_layers // 6
+  num_global_layers = num_layers // attention_pattern_length
   num_local_layers = num_layers - num_global_layers
 
   # FLOPs for a single global attention layer (full attention)
@@ -529,8 +531,12 @@ def calculate_tflops_training_per_device(config, log=True):
         config, total_ffn_flops, qkv_flops, projection_flops, embedding_flops
     )
   elif config.decoder_block == DecoderBlockType.GEMMA3:
-    attention_tflops, learnable_weight_tflops = calculate_gemma3_tflops_training_per_device(
-        config, total_ffn_flops, qkv_flops, projection_flops, embedding_flops
+    attention_tflops, learnable_weight_tflops = calculate_mixed_attention_model_tflops_training_per_device (
+        config, total_ffn_flops, qkv_flops, projection_flops, embedding_flops, attention_pattern_length=6
+    )
+  elif config.decoder_block == DecoderBlockType.GPT_OSS:
+    attention_tflops, learnable_weight_tflops = calculate_mixed_attention_model_tflops_training_per_device(
+        config, total_ffn_flops, qkv_flops, projection_flops, embedding_flops, attention_pattern_length=2
     )
   elif config.decoder_block == DecoderBlockType.LLAMA4:
     # Use the new helper to calculate attention TFLOPs correctly.
