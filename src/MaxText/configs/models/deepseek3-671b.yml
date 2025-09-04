@@ -1,0 +1,53 @@
+# Copyright 2023–2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# model config for DeepSeek V3 - 671B
+
+# For DeepSeek default device-limited routing, 
+# please set n_routing_groups=8 and topk_routing_group=4 in your command-line arguments.
+
+base_emb_dim: 7168
+base_num_query_heads: 128
+base_num_kv_heads: 128
+base_mlp_dim: 18432
+base_moe_mlp_dim: 2048
+base_num_decoder_layers: 61
+first_num_dense_layers: 3
+mlp_activations: ["silu","linear"]
+vocab_size: 129280
+enable_dropout: False
+logits_via_embedding: False
+normalization_layer_epsilon: 1.0e-6
+num_experts: 256
+num_experts_per_tok: 8
+shared_experts: 1
+routed_scaling_factor: 2.5
+routed_score_func: "sigmoid"
+routed_bias: True
+decoder_block: "deepseek"
+# MLA
+attention_type: "mla"
+q_lora_rank: 1536
+kv_lora_rank: 512
+qk_nope_head_dim: 128
+qk_rope_head_dim: 64
+v_head_dim: 128
+mscale: 1.0
+# RoPE
+rope_type: "yarn"
+rope_max_timescale: 10_000 # DeepSeek uses  "rope_theta": 10000
+max_position_embeddings: 163840
+original_max_position_embeddings: 4096
+rope_factor: 40
+beta_fast: 32

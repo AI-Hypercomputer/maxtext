@@ -13,15 +13,11 @@
 # limitations under the License.
 
 import os
-import sys
 import args_helper as helper
 
-parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-sys.path.append(parent_dir)
-
-import maxtext_trillium_model_configs as model_configs
-import maxtext_xpk_runner as mxr
-from xpk_configs import XpkClusterConfig
+from benchmarks import maxtext_trillium_model_configs as model_configs
+from benchmarks import maxtext_xpk_runner as mxr
+from benchmarks.xpk_configs import XpkClusterConfig
 
 
 def main() -> int:

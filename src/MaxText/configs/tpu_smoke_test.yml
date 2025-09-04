@@ -1,0 +1,14 @@
+base_config: "base.yml"
+
+hardware: "tpu"
+async_checkpointing: false
+attention: autoselected
+base_emb_dim: 32
+base_num_query_heads: 8
+base_num_kv_heads: 8
+base_mlp_dim: 32
+base_num_decoder_layers: 8
+dataset_type: "synthetic"
+head_dim: 128
+per_device_batch_size: 1
+steps: 10

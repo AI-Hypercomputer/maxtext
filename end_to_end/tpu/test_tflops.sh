@@ -15,7 +15,7 @@ else
 fi
 
 #Train
-python3 -m MaxText.train MaxText/configs/base.yml run_name=$RUN_NAME\
+python3 -m MaxText.train "${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText}"/configs/base.yml run_name=$RUN_NAME\
     steps=150 reuse_example_batch=1 remat_policy='full' profiler=xplane enable_checkpointing=False metrics_file='metrics.txt'\
     base_output_directory=$OUTPUT_PATH dataset_path=$DATASET_PATH log_period=150
 
