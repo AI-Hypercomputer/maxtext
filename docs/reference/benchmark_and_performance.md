@@ -38,6 +38,7 @@ For benchmarking purposes, we collect the step time for training. This step time
 *   **MFU = flops_train_step / step_time / peak HW FLOPS**
 *   **Throughput = global tokens / step_time / number of devices**
 
+More detailed are explained in [performance_metrics ](https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/guides/performance_metrics.md)
 
 ## Tuning benchmark performance
 
@@ -52,7 +53,7 @@ MaxText offers both preset and granular re-materialization policies, allowing yo
 
 **Provided Remat Policies**
 
-Remat policies can be chosen from: `minimal`, `save_dot_with_context_except_mlp`, `save_dot_except_mlpwi`, `save_dot_except_mlp`, `save_qkv_proj`, `qkv_proj_offloaded`, `minimal_flash`, `minimal_offloaded`, `save_out_proj`, and `full`.
+Remat policies can be chosen from: `minimal`, `save_dot_with_context_except_mlp`, `save_dot_except_mlpwi`, `save_dot_except_mlp`, `save_qkv_proj`, `qkv_proj_offloaded`, `minimal_with_context`, `minimal_offloaded`, `save_out_proj`, and `full`.
 
 `Minimal` consumes the most HBM memory, while `full` signifies minimal checkpointing, with everything being rematerialized. [Add MaxText link]
 
@@ -67,16 +68,16 @@ MaxText supports quantization via QWIX. To enable this, set `use_qwix_quantizati
 
 Different quantization recipes are available, including` "int8", "fp8", "fp8_full", "fp8_gpu", and "fp8_nanoo"`.
 
-For v6e and earlier generation TPUs, use the "int8" recipe. For v7x and later generation TPUs, use `"fp8_full`". GPUs should use “`fp8_gpu"`.
+For v6e and earlier generation TPUs, use the "int8" recipe. For v7x and later generation TPUs, use "fp8_full". GPUs should use “fp8_gpu” for NVIDIA and "nanoo_fp8" for AMD.
 
-[link to quantization doc]
+[quantization doc](https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/explanations/quantization.md?plain=1)
 
 
 ### Choose Sharding Strategy 
 
 Sharding is crucial for optimizing model performance. MaxText offers various sharding strategies and hybrid options, including FSDP, TP, EP, CP, and PP, which can be configured through your MaxText settings.
 
-[Scaling & Sharding Concepts in MaxText] This document illustrates in detail how sharding works in maxtext and chooses the write sharding config for your workload.
+[Scaling & Sharding Concepts in MaxText](https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/explanations/sharding.md) This document illustrates in detail how sharding works in maxtext and chooses the write sharding config for your workload.
 
 
 ### Performance Tuning on Custom Pallas call
