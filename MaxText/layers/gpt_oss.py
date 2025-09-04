@@ -115,6 +115,7 @@ class GptOssDecoderLayer(nn.Module):
         attention_type=self.attention_type,
         sliding_window_size=cfg.sliding_window_size,
         model_mode=model_mode,
+        query_pre_attn_scalar=(cfg.head_dim**-0.5),
     )
 
     attention_lnx = attention_layer(

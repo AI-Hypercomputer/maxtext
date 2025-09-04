@@ -34,6 +34,7 @@
         "dtype=float32",
         "activations_in_float32=true",
         "matmul_precision=high",
+        // "attention=dot_product",
       ],
       "console": "integratedTerminal",
       "justMyCode": false

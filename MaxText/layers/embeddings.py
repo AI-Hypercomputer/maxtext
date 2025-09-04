@@ -672,7 +672,6 @@ class YarnRotaryEmbedding(nnx.Module):
     # Lookup the precomputed frequencies using the position indices.
     # self.freqs_cis has shape [max_position_embeddings, half_dim] so we use jnp.take along axis 0.
     # After indexing, shape becomes [B, S, half_dim]; we then add an axis for the heads.
-    jax.debug.print("self.freqs_cis: {x}", x=self.freqs_cis)
     freqs = jnp.take(self.freqs_cis, position, axis=0)  # shape: [B, S, half_dim]
     freqs = freqs[:, :, jnp.newaxis, :]  # shape: [B, S, 1, half_dim]
 
@@ -731,8 +730,8 @@ def gpt_oss_rotary_embedding_as_linen(
       name=name,
   )
 
-class GptOssRotaryEmbedding(nnx.Module):
-  """Yarn rotary embedding.
+class GptOssRotaryEmbedding(YarnRotaryEmbedding):
+  """GPT oss rotary embedding.
 
   This implementation uses gpt-oss PyTorch as reference
   https://github.com/huggingface/transformers/blob/afd1393df1f53bdebd6cf2778130c1d30d05d845/src/transformers/models/gpt_oss/modeling_gpt_oss.py#L169
@@ -757,62 +756,57 @@ class GptOssRotaryEmbedding(nnx.Module):
       original_max_position_embeddings: int = 4096,
       beta_fast: float = 32,
       beta_slow: float = 1,
-      rope_theta: float = 10000.0,
-      rope_factor: float = 40,
+      rope_theta: float = 150000.0,
+      rope_factor: float = 32,
       cast_as_fprop_dtype: bool = True,
       fprop_dtype: DType = jnp.bfloat16,
-      # Not used in YarnRotaryEmbedding but passed in by nnx.bridge.to_linen.
-      # TODO: Remove when bridge no longer needed
       rngs: nnx.Rngs = None,
   ):
-    """Initializes the YarnRotaryEmbedding module."""
-    self.embedding_dims = embedding_dims
-    self.max_position_embeddings = max_position_embeddings
-    self.original_max_position_embeddings = original_max_position_embeddings
-    self.beta_fast = beta_fast
-    self.beta_slow = beta_slow
-    self.rope_theta = rope_theta
-    self.rope_factor = rope_factor
-    self.cast_as_fprop_dtype = cast_as_fprop_dtype
-    self.fprop_dtype = fprop_dtype
-
-    if self.embedding_dims % 2:
-      raise ValueError("Embedding dim for rotary position embedding must be a multiple of 2.")
+    """Initializes the GptOssRotaryEmbedding module."""
+    super().__init__(
+      embedding_dims=embedding_dims,
+      max_position_embeddings=max_position_embeddings,
+      original_max_position_embeddings=original_max_position_embeddings, 
+      beta_fast=beta_fast,
+      beta_slow=beta_slow,
+      rope_theta=rope_theta,
+      rope_factor=rope_factor,
+      cast_as_fprop_dtype=cast_as_fprop_dtype,
+      fprop_dtype=fprop_dtype,
+      rngs=rngs,
+    )
 
   def _generate_pos_embeddings(self, positions: jax.Array) -> tuple[jax.Array, jax.Array]:
-    features = self.embedding_dims
-    base, factor = self.rope_theta, self.rope_factor
-    original_max_pos = self.original_max_position_embeddings
-
-    low = (features * math.log(original_max_pos / (self.beta_fast * 2 * math.pi))) / (2 * math.log(base))
-    high = (features * math.log(original_max_pos / (self.beta_slow * 2 * math.pi))) / (2 * math.log(base))   
-    low, high = max(low, 0), min(high, features - 1) 
-    timescale = base ** (jnp.arange(0, features, 2, dtype=jnp.float32) / features)
-    rot_freq_extra, rot_freq_inter = 1.0 / timescale, 1.0 / (factor * timescale)
     
-    high = high if low != high else (high + 0.001)
-    interp_factor = 1 - jnp.clip((jnp.arange(features // 2, dtype=jnp.float32) - low) / (high - low), min=0, max=1)
+    low, high = self._find_correction_range(self.beta_fast, self.beta_slow, self.embedding_dims, self.rope_theta, self.original_max_position_embeddings)
+    interp_factor = 1 - self._linear_ramp_factor(low, high, self.embedding_dims // 2)
+
+    timescale = self.rope_theta ** (jnp.arange(0, self.embedding_dims, 2, dtype=jnp.float32) / self.embedding_dims)
+    rot_freq_extra, rot_freq_inter = 1.0 / timescale, 1.0 / (self.rope_factor * timescale)
     rotational_frequency = rot_freq_inter * (1 - interp_factor) + rot_freq_extra * interp_factor
+
     sinusoid_inp = jnp.einsum(
       "BT,k->BTk",
       positions,
       rotational_frequency,
       precision=jax.lax.Precision.HIGHEST,
       )
+
     m_scale = 1.0
-    attention_scaling = 1.0 if factor <= 1 else (0.1 * m_scale * math.log(factor) + 1.0)
+    attention_scaling = 1.0 if self.rope_factor <= 1 else (0.1 * m_scale * math.log(self.rope_factor) + 1.0)
     return jnp.sin(sinusoid_inp) * attention_scaling, jnp.cos(sinusoid_inp) * attention_scaling
 
   def __call__(self, inputs: Array, position: None | Array = None) -> Array:
     sin, cos = self._generate_pos_embeddings(position)
-    assert inputs.ndim == 4 and sin.ndim == 3 and cos.ndim == 3
-    sin = sin[:, jnp.newaxis, :, :]
-    cos = cos[:, jnp.newaxis, :, :]
-    first_half = inputs[..., : inputs.shape[-1] // 2] 
-    second_half = inputs[..., inputs.shape[-1] // 2 :]
-    updated_first = first_half * cos - second_half * sin
-    updated_second = second_half * cos + first_half * sin
-    return jnp.concatenate([updated_first, updated_second], axis=-1)
+    sin = sin[:, :, jnp.newaxis, :]
+    cos = cos[:, :, jnp.newaxis, :]
+    first_half, second_half = jnp.split(inputs, 2, axis=-1)
+    first_part = first_half * cos - second_half * sin
+    second_part = second_half * cos + first_half * sin
+    output = jnp.concatenate([first_part, second_part], axis=-1)
+    if self.cast_as_fprop_dtype:
+      output = output.astype(self.fprop_dtype)
+    return output
 
 
 def positional_embedding_as_linen(*, embedding_dims: int, max_wavelength: int = _MAX_WAVELENGTH):

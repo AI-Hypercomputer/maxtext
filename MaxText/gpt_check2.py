@@ -92,7 +92,6 @@ def main(argv):
   state, _ = maxtext_utils.setup_decode_state(model, config, rng1, mesh, None)
 
   ids, decoder_segment_ids, decoder_positions, logits_hf = get_data_hf(config, prompt_text, hf_token="")
-  
   full_train_logits = model.apply(
       state.params,
       ids,
@@ -107,6 +106,8 @@ def main(argv):
   max_logging.log(f"{token_size=}")
   logits_maxtext = full_train_logits[0, :token_size, :]
   logits_hf = logits_hf[:token_size, :]
+  max_logging.log(f"{logits_maxtext.shape=}")
+  max_logging.log(f"{logits_hf.shape=}")
   max_logging.log(f"Max Numerical Difference {np.abs(logits_hf - logits_maxtext).max()}")
 
   max_logging.log(f"{logits_maxtext=}")
@@ -115,8 +116,8 @@ def main(argv):
   maxtext_probabilities = jax.nn.softmax(logits_maxtext, axis=-1)
   hf_probabilities = jax.nn.softmax(logits_hf, axis=-1)
   
-  max_logging.log(f"{maxtext_probabilities}=")
-  max_logging.log(f"{hf_probabilities}=")
+  max_logging.log(f"{maxtext_probabilities=}")
+  max_logging.log(f"{hf_probabilities=}")
 
   kl_div = jax.numpy.sum(jax.scipy.special.kl_div(hf_probabilities, maxtext_probabilities), axis=-1)
   max_logging.log(f"KL divergence = {kl_div}, max KL divergence = {jax.numpy.max(kl_div)}")

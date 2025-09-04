@@ -703,7 +703,7 @@ class Attention(nnx.Module):
           fprop_dtype=self.dtype,
           rngs=self.rngs,
       )
-    elif rope_type.startswith("gpt_oss"):
+    elif rope_type.startswith("gpt"):
       rotary_embedding = GptOssRotaryEmbedding(
           max_position_embeddings=self.config.max_position_embeddings,
           original_max_position_embeddings=self.config.original_max_position_embeddings,
