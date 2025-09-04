@@ -225,9 +225,6 @@ def setup_train_loop(config, recorder, devices=None):
         )
     )
 
-    # Materialize the state to concrete values.
-    state = jax.device_put(state)
-
     # TODO(aireenmei, hengtaoguo): support sharding in vit for multimodal
     if not config.using_pipeline_parallelism and not config.use_multimodal:
       # The vocab tensor(s) of shape [vocab, embed] (and transpose) are not sharded by stage

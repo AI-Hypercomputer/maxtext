@@ -376,6 +376,7 @@ def train_loop(config, recorder, state=None):
   )
 
   with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+    state = jax.device_put(state, state_mesh_shardings)
     shaped_batch = maxtext_utils.get_shaped_batch(config)
     compiled = p_train_step.lower(state, shaped_batch, init_rng).compile()
     compiled_stats = compiled.memory_analysis()
