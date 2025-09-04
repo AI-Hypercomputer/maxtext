@@ -54,6 +54,7 @@ class ConvHParams:
 
 def load_checkpoint(model: MaxTextModel, checkpoint_path: str):
     model.tuning_params["load_full_state_path"] = checkpoint_path
+    model.tuning_params["enable_checkpointing"] = checkpoint_path
 
 
 def setup_dataset(model: MaxTextModel, params: DatasetHParams):
@@ -93,11 +94,13 @@ def setup_convergence_configs(model, params: ConvHParams, num_devices: int, glob
     model.tuning_params["data_shuffle_seed"] = params.seeds
 
 def _setup_model_convergence_(
-    maxtext_model: MaxTextModel, dataset: DatasetHParams, convergence_configs: ConvHParams, num_devices: int, global_batch_size: int,
+    maxtext_model: MaxTextModel, dataset: DatasetHParams, convergence_configs: ConvHParams, num_devices: int, global_batch_size: int, checkpoint: str=None,
 ) -> MaxTextModel:
   convergence_model = dataclasses.replace(maxtext_model)
   setup_dataset(convergence_model, dataset)
   setup_convergence_configs(convergence_model, convergence_configs, num_devices, global_batch_size)
   convergence_model.model_name = convergence_model.model_name + "-" + dataset.name
+  if not checkpoint is None:
+    load_checkpoint(convergence_model, checkpoint)
 
   return convergence_model
