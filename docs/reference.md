@@ -19,6 +19,7 @@
 ```{toctree}
 :maxdepth: 1
 
-reference/terminology.md
-reference/alternatives.md
+reference/api
+reference/terminology
+reference/alternatives
 ```
