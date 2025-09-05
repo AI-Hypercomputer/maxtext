@@ -1441,3 +1441,211 @@ def all_gather_over_fsdp(variables, sharding_info, mesh, logical_axis_rules):
   # Apply the constraint to the model's current variables. This tells JAX to
   # gather the weights into this layout.
   return jax.lax.with_sharding_constraint(variables, physical_constraint_no_fsdp)
+
+
+# Vocab Tiling Helper Functions
+def compute_loss_nnx(logits, data, config, model, is_train):
+  if config.num_vocab_tiling > 1:
+    # hidden_states = model.hidden_states
+    # total_loss = get_vocab_tiling_loss_nnx(hidden_states, data, config, model, is_train)
+    raise ValueError("We currently don't support vocab tiling on NNX module.")
+  else:
+    one_hot_targets = jax.nn.one_hot(data["targets"], config.vocab_size)
+    xent, _ = max_utils.cross_entropy_with_logits(logits, one_hot_targets, 0.0)
+    xent = nn.with_logical_constraint(xent, ("activation_embed_and_logits_batch", "activation_length"))
+    # Mask out paddings at the end of each example.
+    xent = xent * (data["targets_segmentation"] != 0)
+    total_loss = jnp.sum(xent)
+  return total_loss
+
+
+def get_vocab_tiling_loss_nnx(
+    hidden_states,
+    data,
+    config,
+    model,
+    is_train,
+):
+  labels = data["targets"]
+  batch_size, seq_len, emb_dim = hidden_states.shape
+  assert (batch_size * seq_len) % config.num_vocab_tiling == 0, "Per device batch size times sequence length should be divisible by the number of vocab tiles."
+  vocab_tile_size = (batch_size * seq_len) // config.num_vocab_tiling
+  deterministic = not config.enable_dropout if is_train else True
+
+  reshaped_hidden_states = hidden_states.reshape(
+      (config.num_vocab_tiling, vocab_tile_size, 1, emb_dim)
+  )
+  reshaped_labels = labels.reshape(
+      (config.num_vocab_tiling, vocab_tile_size, 1)
+  )
+  reshaped_segmentation = data["targets_segmentation"].reshape(
+      (config.num_vocab_tiling, vocab_tile_size, 1)
+  )
+
+  def fwd_scan_body(loss_accumulator, chunk_data):
+    hidden_chunk, label_chunk, segmentation_chunk = chunk_data
+    
+    # Calculate logits for the current chunk
+    chunk_logits = model.logits_from_hidden_states(
+      hidden_chunk,
+      deterministic=deterministic,
+    )
+    one_hot_label_chunk = jax.nn.one_hot(label_chunk, config.vocab_size)
+    chunk_xent, _ = max_utils.cross_entropy_with_logits(chunk_logits, one_hot_label_chunk, 0.0)
+    masked_xent = jnp.sum(chunk_xent * (segmentation_chunk != 0))
+    loss_accumulator += masked_xent
+    return loss_accumulator, None
+
+  initial_loss = 0.0
+  total_loss, _ = jax.lax.scan(
+      fwd_scan_body,
+      initial_loss,
+      (reshaped_hidden_states, reshaped_labels, reshaped_segmentation)
+  )
+
+  return total_loss
+
+
+def compute_loss_linen(intermediate_outputs, logits, data, config, model, params, is_train):
+  if config.num_vocab_tiling > 1:
+    nested_key = ("intermediates", "decoder", "hidden_states")
+    hidden_states = get_nested_value(intermediate_outputs, nested_key)[0]
+    total_loss = get_vocab_tiling_loss_linen(hidden_states, data, config, model, params, is_train)
+  else:
+    one_hot_targets = jax.nn.one_hot(data["targets"], config.vocab_size)
+    xent, _ = max_utils.cross_entropy_with_logits(logits, one_hot_targets, 0.0)
+    xent = nn.with_logical_constraint(xent, ("activation_embed_and_logits_batch", "activation_length"))
+    # Mask out paddings at the end of each example.
+    xent = xent * (data["targets_segmentation"] != 0)
+    total_loss = jnp.sum(xent)
+  return total_loss
+
+
+def get_vocab_tiling_loss_linen(
+    hidden_states,
+    data,
+    config,
+    model,
+    params,
+    is_train,
+):
+  labels = data["targets"]
+  batch_size, seq_len, emb_dim = hidden_states.shape
+  assert (batch_size * seq_len) % config.num_vocab_tiling == 0, "Per device batch size times sequence length should be divisible by the number of vocab tiles."
+  vocab_tile_size = (batch_size * seq_len) // config.num_vocab_tiling
+  deterministic = not config.enable_dropout if is_train else True
+
+  reshaped_hidden_states = hidden_states.reshape(
+      (config.num_vocab_tiling, vocab_tile_size, 1, emb_dim)
+  )
+  reshaped_labels = labels.reshape(
+      (config.num_vocab_tiling, vocab_tile_size, 1)
+  )
+  reshaped_segmentation = data["targets_segmentation"].reshape(
+      (config.num_vocab_tiling, vocab_tile_size, 1)
+  )
+
+  param_spec= nn.get_partition_spec(params) 
+
+# Customized forward and backward maps for the embedding tiling
+  @jax.custom_vjp
+  def chunked_cross_entropy_loss(params, reshaped_hidden_states, reshaped_labels, reshaped_segmentation):
+      """
+      Calculates the total cross-entropy loss using lax.scan
+      """
+      def fwd_scan_body(loss_accumulator, chunk_data):
+          hidden_chunk, label_chunk, segmentation_chunk = chunk_data
+
+          # Calculate logits for the current chunk
+          chunk_logits = model.apply(
+              {'params': params['params']},
+              hidden_chunk,
+              deterministic=deterministic,
+              method='logits_from_hidden_states'
+          )
+          one_hot_label_chunk = jax.nn.one_hot(label_chunk, config.vocab_size)
+          chunk_xent, _ = max_utils.cross_entropy_with_logits(chunk_logits, one_hot_label_chunk, 0.0)
+          masked_xent = jnp.sum(chunk_xent * (segmentation_chunk != 0))
+          loss_accumulator += masked_xent
+          return loss_accumulator, None
+
+      initial_loss = 0.0
+      total_loss, _ = jax.lax.scan(
+          fwd_scan_body,
+          initial_loss,
+          (reshaped_hidden_states, reshaped_labels, reshaped_segmentation)
+      )
+      return total_loss
+
+
+  def chunked_cross_entropy_loss_fwd(params, reshaped_hidden_states, reshaped_labels, reshaped_segmentation):
+      gathered_params = all_gather_over_fsdp(
+          params, param_spec, model.mesh, config.logical_axis_rules
+      )
+      total_loss = chunked_cross_entropy_loss(gathered_params, reshaped_hidden_states, reshaped_labels, reshaped_segmentation)
+      residuals = (gathered_params, reshaped_hidden_states, reshaped_labels, reshaped_segmentation)
+      return total_loss, residuals
+
+  def chunked_cross_entropy_loss_bwd(residuals, loss_cotangent):
+      gathered_params, reshaped_hidden_states, reshaped_labels, reshaped_segmentation = residuals
+
+      physical_sharding_constraint = nn.logical_to_mesh_sharding(
+        param_spec, model.mesh, config.logical_axis_rules,
+      )
+
+      def bwd_scan_body(carry, chunk_data):
+          grad_params_acc = carry
+          hidden_chunk, label_chunk, segmentation_chunk = chunk_data
+
+          def single_chunk_loss_fn(p, h):
+              chunk_logits = model.apply(
+                  {'params': p['params']},
+                  h,
+                  deterministic=deterministic,
+                  method='logits_from_hidden_states'
+              )
+              one_hot_label_chunk = jax.nn.one_hot(label_chunk, config.vocab_size)
+              xent, _ = max_utils.cross_entropy_with_logits(chunk_logits, one_hot_label_chunk, 0.0)
+              return jnp.sum(xent * (segmentation_chunk != 0))
+
+          # Get the vector-Jacobian product function
+          _, vjp_fn = jax.vjp(single_chunk_loss_fn, gathered_params, hidden_chunk)
+          # 1.0 since total_loss is sum of all individual chunked loss
+          (grad_params_update, grad_hidden_chunk) = vjp_fn(1.0)
+          grad_params_acc = jax.tree_util.tree_map(
+              lambda acc, update: acc + update, grad_params_acc, grad_params_update,
+          )
+          return grad_params_acc, grad_hidden_chunk
+
+      initial_carry = jax.tree_util.tree_map(jnp.zeros_like, gathered_params)
+
+      # The scan now returns the total gradients for the params in the final carry
+      grad_params, grad_reshaped_hidden_states = jax.lax.scan(
+          bwd_scan_body,
+          initial_carry,
+          (reshaped_hidden_states, reshaped_labels, reshaped_segmentation)
+      )
+      # Convert grad_params to bf16
+      grad_params = jax.tree_util.tree_map(lambda x, y: y.astype(x.dtype), gathered_params, grad_params)
+      # Chain-rule to accumulate gradients
+      grad_params = jax.tree_util.tree_map(lambda g: g * loss_cotangent, grad_params)
+      # Give back sharding constraint
+      grad_params = jax.lax.with_sharding_constraint(grad_params, physical_sharding_constraint)
+
+      return (
+        grad_params, # grad for params
+        grad_reshaped_hidden_states.astype(reshaped_hidden_states.dtype),
+        None, # grad for reshaped_labels
+        None, # grad for reshaped_segmentation
+      )
+
+  chunked_cross_entropy_loss.defvjp(chunked_cross_entropy_loss_fwd, chunked_cross_entropy_loss_bwd)
+
+  total_loss = chunked_cross_entropy_loss(
+    params=params,
+    reshaped_hidden_states=reshaped_hidden_states,
+    reshaped_labels=reshaped_labels,
+    reshaped_segmentation=reshaped_segmentation,
+  )
+
+  return total_loss
