@@ -27,8 +27,8 @@ import numpy as np
 
 from flax import linen as nn
 from flax.core.scope import FrozenVariableDict
-from flax.linen import Dense
 from flax.training import train_state
+from flax import nnx
 
 import optax
 
@@ -155,19 +155,22 @@ class MaxUtilsInitState(unittest.TestCase):
     )
 
 
-class ModelWithMultipleCollections(nn.Module):
+class SpecialVariables(nnx.Variable):
+  pass
+
+
+class ModelWithMultipleCollections(nnx.Module):
   """
   A simple model that has variables in multiple collections - "params" and "special_variables"
   """
 
-  dense: Dense = nn.Dense(4)
+  def __init__(self, input_dim: int, rngs: nnx.Rngs | None = None):
+    self.dense = nnx.Linear(input_dim, 4, rngs=rngs)
+    self.my_first_kernel = SpecialVariables(jnp.ones((4, 5)))
 
-  def setup(self):
-    self.kernel = self.variable("special_variables", "my_first_kernel", lambda: jnp.ones((4, 5)))
-
-  def __call__(self, x, y, encoder_images=None, nnx_method=None):
+  def __call__(self, x, y, encoder_images=None):
     x = self.dense(x)
-    x = x @ self.kernel.value
+    x = x @ self.my_first_kernel
     return x
 
 
@@ -176,16 +179,23 @@ class MaxUtilsInitStateWithMultipleCollections(unittest.TestCase):
 
   def setUp(self):
     self.config = pyconfig.initialize([None, os.path.join(PKG_DIR, "configs", "base.yml")], enable_checkpointing=False)
-    self.model = ModelWithMultipleCollections()
-    self.key1, self.key2, self.key3 = random.split(random.key(0), num=3)
-    self.input = random.normal(self.key1, (self.config.global_batch_size_to_load, self.config.max_target_length))
-    self.params = self.model.init(self.key2, self.input, self.input)
+    self.model = ModelWithMultipleCollections(self.config.max_target_length, nnx.Rngs(0))
+    self.key = random.key(0)
     self.tx = optax.adam(learning_rate=0.001)
 
   def _test_init_initial_state_driver(self, is_training):
     """test initiating of the initial state driver"""
-    state_under_test = maxtext_utils.init_initial_state(self.model, self.tx, self.config, is_training, self.key3)
-    self.assertEqual(state_under_test.apply_fn, self.model.apply)
+    if is_training:
+      self.model.train()
+    else:
+      self.model.eval()
+
+    graphdef, params, other_variables = nnx.split(self.model, nnx.Param, ...)
+
+    state_under_test = maxtext_utils.init_initial_state_nnx(
+        graphdef, params, other_variables, self.tx, is_training
+    )
+    self.assertEqual(state_under_test.apply_fn, graphdef.apply)
     if is_training:
       self.assertEqual(state_under_test.tx, self.tx)
       self.assertNotEqual(state_under_test.opt_state, {})
@@ -194,11 +204,11 @@ class MaxUtilsInitStateWithMultipleCollections(unittest.TestCase):
       self.assertEqual(state_under_test.opt_state, {})
     self.assertEqual(
         max_utils.calculate_num_params_from_pytree(state_under_test.params),
-        max_utils.calculate_num_params_from_pytree(self.params),
+        max_utils.calculate_num_params_from_pytree(params),
     )
-    self.assertEqual(len(self.params), len(state_under_test.params))
-    self.assertIn("special_variables", state_under_test.params)
-    self.assertIn("params", state_under_test.params)
+    self.assertEqual(len(params), len(state_under_test.params))
+    self.assertIsInstance(state_under_test.other_variables["my_first_kernel"], SpecialVariables)
+    self.assertTrue(hasattr(state_under_test, "params"))
 
   def test_initial_train_state(self):
     self._test_init_initial_state_driver(True)
@@ -423,6 +433,7 @@ class TestPromptLogprobsFromPrefill(unittest.TestCase):
   """
   Test suite for the inference utility function 'prompt_logprobs_from_prefill'.
   """
+
   def test_shift_and_masking(self):
     # B=1, S=5, V=4
     B, S, V = 1, 5, 4
@@ -465,6 +476,7 @@ class TestPromptLogprobsFromPackedPrefill(unittest.TestCase):
   """
   Test suite for the inference utility function 'prompt_logprobs_from_packed_prefill'.
   """
+
   def test_respects_segments_and_masking(self):
     # Build a packed sequence of two prompts.
     # Global S=8, V=5
@@ -476,12 +488,12 @@ class TestPromptLogprobsFromPackedPrefill(unittest.TestCase):
     start1, L1 = 4, 3
 
     # Tokens per segment (last token of seg1 padding at pos 7)
-    toks = np.array([1, 2, 3, 1,   4, 0, 2, 0], dtype=np.int32)  # shape [S]
+    toks = np.array([1, 2, 3, 1, 4, 0, 2, 0], dtype=np.int32)  # shape [S]
     input_tokens = jnp.asarray(toks)[None, :]  # [B, S]
 
     # decoder_positions within each segment
-    pos0 = np.arange(0, L0)                  # [0,1,2,3]
-    pos1 = np.array([0, 1, 2, 3])            # last is padding for seg1
+    pos0 = np.arange(0, L0)  # [0,1,2,3]
+    pos1 = np.array([0, 1, 2, 3])  # last is padding for seg1
     decoder_positions = jnp.asarray(np.concatenate([pos0, pos1])[None, :])  # [B, S]
 
     # segment ids: 0 for first 4, 1 for next 4

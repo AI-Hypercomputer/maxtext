@@ -20,6 +20,7 @@ import re
 from typing import Tuple, Sequence
 from dataclasses import dataclass
 
+from MaxText.layers import nnx_wrappers
 from aqt.jax.v2 import config as aqt_config
 from aqt.jax.v2 import aqt_tensor
 from aqt.jax.v2.flax import aqt_flax
@@ -35,6 +36,7 @@ from jax.tree_util import tree_flatten_with_path, tree_unflatten
 from flax.linen import fp8_ops
 from flax.linen import initializers as flax_initializers
 import flax.linen as nn
+from flax import nnx
 
 from MaxText.common_types import DType, Config
 from MaxText.inference.kvcache import KVQuant
@@ -156,8 +158,6 @@ class AqtQuantization:
     rhs_axis_metadata_wrapper = self._get_rhs_axis_metadata_wrapper(
         mesh_axes, is_tiled, replicate_scale=self.replicate_scale
     )
-    # module_path = "/".join(nn.module._context.module_stack[-1].path)
-    # print(f"quant_dg: {quant_dg}, is_tiled: {is_tiled}, module_path: {module_path}")
     aqt_dg_cls = functools.partial(
         aqt_flax.AqtDotGeneral,
         quant_dg,
@@ -169,6 +169,28 @@ class AqtQuantization:
         tiling_fn=tiling_fn,
     )
     return aqt_dg_cls
+
+  def dot_general_nnx(self, mesh_axes: Tuple[str, ...] = ()):
+    """Returns dot_general configured with aqt params."""
+    if isinstance(self.quant_dg, dict):
+      quant_dg, is_tiled, tiling_fn = self._get_mixed_precision_cfg()
+    else:
+      quant_dg, is_tiled, tiling_fn = self.quant_dg, False, None
+    rhs_axis_metadata_wrapper = self._get_rhs_axis_metadata_wrapper(
+        mesh_axes, is_tiled, replicate_scale=self.replicate_scale
+    )
+    aqt_dg_cls = aqt_flax.AqtDotGeneral(
+        quant_dg,
+        rhs_quant_mode=self.quant_mode,
+        lhs_freeze_mode=aqt_flax.FreezerMode.NONE,
+        rhs_freeze_mode=aqt_flax.FreezerMode.CALIBRATION_AND_VALUE,
+        rhs_axis_metadata_wrapper=rhs_axis_metadata_wrapper,
+        use_legacy_freezer=False,
+        tiling_fn=tiling_fn,
+    )
+    aqt_dg_cls_nnx = nnx_wrappers.ToNNX(aqt_dg_cls, rngs=nnx.Rngs(params=0))
+
+    return aqt_dg_cls_nnx
 
   def einsum(self, mesh_axes: Tuple[str, ...] = ()):
     """Returns einsum configured with aqt params."""
@@ -192,6 +214,29 @@ class AqtQuantization:
         )
     )
     return aqt_einsum
+
+  def einsum_nnx(self, mesh_axes: Tuple[str, ...] = ()):
+    """Returns einsum configured with aqt params."""
+    if isinstance(self.quant_dg, dict):
+      quant_dg, is_tiled, tiling_fn = self._get_mixed_precision_cfg()
+    else:
+      quant_dg, is_tiled, tiling_fn = self.quant_dg, False, None
+
+    rhs_axis_metadata_wrapper = self._get_rhs_axis_metadata_wrapper(
+        mesh_axes, is_tiled, replicate_scale=self.replicate_scale
+    )
+    aqt_einsum = aqt_flax.AqtEinsum(
+        cfg=quant_dg,
+        rhs_quant_mode=self.quant_mode,
+        lhs_freeze_mode=aqt_flax.FreezerMode.NONE,
+        rhs_freeze_mode=aqt_flax.FreezerMode.CALIBRATION_AND_VALUE,
+        rhs_axis_metadata_wrapper=rhs_axis_metadata_wrapper,
+        use_legacy_freezer=False,
+        tiling_fn=tiling_fn,
+    )
+    aqt_einsum_nnx = nnx_wrappers.ToNNX(aqt_einsum, rngs=nnx.Rngs(params=0))
+
+    return aqt_einsum_nnx
 
 
 @dataclass
@@ -666,16 +711,16 @@ def get_quantization_rule(config: Config):
           act_qtype=jnp.float8_e4m3fn,
           bwd_qtype=jnp.float8_e5m2,
           bwd_use_original_residuals=True,
-          disable_channelwise_axes=True, # per_tensor calibration
+          disable_channelwise_axes=True,  # per_tensor calibration
           weight_calibration_method=config.quantization_calibration_method,
           act_calibration_method=config.quantization_calibration_method,
           bwd_calibration_method=config.quantization_calibration_method,
           op_names=("dot_general",),
           additional_qt_config={
-            "dlhs_lhs_qtype": jnp.float8_e5m2,
-            "dlhs_rhs_qtype": jnp.float8_e4m3fn,
-            "drhs_lhs_qtype": jnp.float8_e4m3fn,
-            "drhs_rhs_qtype": jnp.float8_e5m2,
+              "dlhs_lhs_qtype": jnp.float8_e5m2,
+              "dlhs_rhs_qtype": jnp.float8_e4m3fn,
+              "drhs_lhs_qtype": jnp.float8_e4m3fn,
+              "drhs_rhs_qtype": jnp.float8_e5m2,
           },
       )
     case "fp8_gpu":

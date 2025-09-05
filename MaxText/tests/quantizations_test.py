@@ -13,6 +13,7 @@
 # limitations under the License.
 
 """ Tests for the quantizations """
+from typing import Any
 import unittest
 import os.path
 import sys
@@ -26,6 +27,7 @@ from jax import random, lax
 from jax.sharding import Mesh
 
 from flax import linen as nn
+from flax import nnx
 
 from aqt.jax.v2 import aqt_tensor
 
@@ -41,22 +43,25 @@ _QUERY_REGEX = ".*/query"
 _VALUE_REGEX = ".*/value"
 
 
-class QuantTestModule(nn.Module):
+class QuantTestModule(nnx.Module):
   """Test module for einsum."""
 
-  quantization: quantizations.AqtQuantization
+  def __init__(self, quantization: quantizations.AqtQuantization, data_type: Any, rngs: nnx.Rngs):
+    self.quantization = quantization
+    self.identity = jnp.identity(2, dtype=data_type)
+    self.einsum = None
+    self.dot_general = None
 
-  @nn.compact
-  def __call__(self, inputs):
-    identity = jnp.identity(2, dtype=inputs.dtype)
-    einsum = jnp.einsum
-    dot_general = lax.dot_general
     if self.quantization:
-      einsum = self.quantization.einsum()
-      dot_general_cls = self.quantization.dot_general_cls()
-      dot_general = dot_general_cls()
-    res_einsum = einsum("bc,ab->ac", inputs, identity)
-    res_dg = dot_general(inputs, inputs, (((), ()), ((), ())), precision=None)
+      self.einsum = self.quantization.einsum_nnx()
+      self.dot_general = self.quantization.dot_general_nnx()
+    else:
+      self.einsum = jnp.einsum
+      self.dot_general = lax.dot_general
+
+  def __call__(self, inputs):
+    res_einsum = self.einsum("bc,ab->ac", inputs, self.identity)
+    res_dg = self.dot_general(inputs, inputs, (((), ()), ((), ())), precision=None)
     return res_einsum, res_dg
 
 
@@ -73,12 +78,12 @@ def _configure_quantization(quant_str="", quant_cfg_path="", mode_str="train", r
 
 
 def _apply(quant_str=""):
-  quant = _configure_quantization(quant_str)
-  test_module = QuantTestModule(quant)
-  rng = random.PRNGKey(0)
-  variables = test_module.init({"params": rng}, jnp.ones((2, 2)))
+  rngs = nnx.Rngs(params=0)
   inputs = jnp.ones((2, 2))
-  res_einsum, res_dg = test_module.apply(variables, inputs, rngs={"params": random.PRNGKey(0)})
+  data_type = inputs.dtype
+  quant = _configure_quantization(quant_str)
+  test_module = QuantTestModule(quant, data_type, rngs)
+  res_einsum, res_dg = test_module(inputs)
   return inputs, res_einsum, res_dg
 
 
@@ -191,32 +196,24 @@ class QuantizationTest(unittest.TestCase):
                 "mlp": {
                     "wi_0": {
                         "AqtDotGeneral_0": {
-                            "qrhs": {
-                                "frozen": aqt_tensor.QTensor(qvalue=[1.1, 1.0], scale=[1.0], scale_t=[1.0], bias=1.0)
-                            }
+                            "qrhs": {"frozen": aqt_tensor.QTensor(qvalue=[1.1, 1.0], scale=[1.0], scale_t=[1.0], bias=1.0)}
                         }
                     },
                     "wi_1": {
                         "AqtDotGeneral_0": {
-                            "qrhs": {
-                                "frozen": aqt_tensor.QTensor(qvalue=[1.1, 1.0], scale=[1.0], scale_t=[1.0], bias=1.0)
-                            }
+                            "qrhs": {"frozen": aqt_tensor.QTensor(qvalue=[1.1, 1.0], scale=[1.0], scale_t=[1.0], bias=1.0)}
                         }
                     },
                     "wo": {
                         "AqtDotGeneral_0": {
-                            "qrhs": {
-                                "frozen": aqt_tensor.QTensor(qvalue=[1.1, 1.0], scale=[1.0], scale_t=[1.0], bias=1.0)
-                            }
+                            "qrhs": {"frozen": aqt_tensor.QTensor(qvalue=[1.1, 1.0], scale=[1.0], scale_t=[1.0], bias=1.0)}
                         }
                     },
                 },
                 "self_attention": {
                     "key": {
                         "AqtDotGeneral_0": {
-                            "qrhs": {
-                                "frozen": aqt_tensor.QTensor(qvalue=[1.1, 1.0], scale=[1.0], scale_t=[1.0], bias=1.0)
-                            }
+                            "qrhs": {"frozen": aqt_tensor.QTensor(qvalue=[1.1, 1.0], scale=[1.0], scale_t=[1.0], bias=1.0)}
                         }
                     }
                 },
