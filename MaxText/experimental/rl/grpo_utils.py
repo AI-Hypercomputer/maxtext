@@ -110,22 +110,18 @@ def generate_offline_completions(config, tokenizer_model, inference_engine, data
     The input `data` dictionary updated with the generated completions,
     segmentations, positions, and log-probabilities.
   """
-  data[config.train_data_columns] = np.asarray(
-      jnp.repeat(data[config.train_data_columns], config.num_generations, axis=0)
-  )
-  data[f"{config.train_data_columns}_true_length"] = np.asarray(
-      jnp.repeat(data[f"{config.train_data_columns}_true_length"], config.num_generations, axis=0)
-  )
+  data[config.train_data_columns] = jnp.repeat(data[config.train_data_columns], config.num_generations, axis=0)
+  data[f"{config.train_data_columns}_true_length"] = jnp.repeat(data[f"{config.train_data_columns}_true_length"], config.num_generations, axis=0)
   input_data = []
   for i, d in enumerate(data[config.train_data_columns]):
     input_data.append(
         InputData(
-            id=f"input_{i}",
-            tokens=np.array(d),
-            true_length=np.array(data[f"{config.train_data_columns}_true_length"][i])[0],
+            id=i,
+            tokens=d,
+            true_length=data[f"{config.train_data_columns}_true_length"][i][0],
         )
     )
-
+  
   results = inference_engine.batch_inference(input_data)
 
   prompt_completions_segmentation = []
@@ -133,11 +129,11 @@ def generate_offline_completions(config, tokenizer_model, inference_engine, data
   prompt_completions = []
   prompt_completions_logprobs = []
   for i, r in enumerate(results):
-    indices = np.arange(r.token_ids.shape[0])
-    completion_mask = (indices >= np.array(data[f"{config.train_data_columns}_true_length"][i])[0]).astype(jnp.int32)
+    indices = jnp.arange(r.token_ids.shape[0])
+    completion_mask = (indices >= jnp.array(data[f"{config.train_data_columns}_true_length"][i])[0]).astype(jnp.int32)
     completion_segmentation.append(completion_mask)
     prompt_completions.append(r.token_ids)
-    prompt_completions_segmentation.append(np.full((r.token_ids.shape[0],), 1))
+    prompt_completions_segmentation.append(jnp.full((r.token_ids.shape[0],), 1))
     prompt_completions_logprobs.append(r.logprobs)
 
   prompt_completions = pad_or_trim(prompt_completions, config.max_target_length, 0)  # assume 0 for pad_token_id
@@ -288,9 +284,9 @@ def pad_or_trim(arr, max_target_length, pad_token):
   Returns:
     A 2D numpy array of shape `(len(arr), max_target_length)`.
   """
-  padded = np.array(
+  padded = jnp.array(
       [
-          np.pad(seq[:max_target_length], (0, max(0, max_target_length - len(seq))), constant_values=pad_token)
+          jnp.pad(seq[:max_target_length], (0, max(0, max_target_length - len(seq))), constant_values=pad_token)
           for seq in arr
       ]
   )

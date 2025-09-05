@@ -617,15 +617,16 @@ def generate_completions(
     thread_example_batch_trimmed = jax.tree_util.tree_map(
         lambda arr: arr[
             : int(
-                worker_config_inference.per_device_batch_size
+                (worker_config_inference.per_device_batch_size // worker_config_inference.num_generations)
                 * worker_config_train.inference_replicas
                 * worker_config_train.inference_devices_per_replica
             )
         ],
         thread_example_batch,
     )
+    # with jax.transfer_guard_host_to_device("disallow_explicit") and jax.transfer_guard_device_to_host("disallow_explicit"):
     processed_batch = grpo_utils.generate_offline_completions(
-        worker_config_inference, worker_tokenizer_model, worker_inference_engine, thread_example_batch_trimmed
+      worker_config_inference, worker_tokenizer_model, worker_inference_engine, thread_example_batch_trimmed
     )
     processed_batch = jax.device_put(processed_batch, worker_input_data_shardings)
   with worker_data_buffer_lock:
