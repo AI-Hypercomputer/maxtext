@@ -1,4 +1,4 @@
-## Xprof User Guide for Maxtext Developers
+# Xprof User Guide for Maxtext Developers
 
 
 ## Introduction to Xprof
@@ -14,6 +14,7 @@ Xprof supports profiling Jax models, which is crucial for Maxtext developers wor
 
 *   **Sampling Mode:** This mode allows for continuous profiling by sampling data during model execution.
 *   **Programmatic Mode:** This provides more granular control over when and what to profile, allowing you to instrument your code with specific profiling markers. This method is integrated with Maxtext code.
+
 
 Below is an example of how programmatic Xprof works with Python code.
 
@@ -41,28 +42,18 @@ The Xprof User Interface (UI) offers several key features to help you analyze yo
      Visualize the execution timeline of your model, allowing you to see the duration of different operations and identify sequential dependencies.
 
 
-    At the XLA Operations level, you can click on each HLO operation to view its shape, wall-duration, and timing statistics. An example is shown below.
-
-
-    <b>>>>>>GDCALERT:inline image link here (to images/image1.png). Store image on your image server and adjust path/filename/extension if necessary.>>>>></b>
-![alt_text](images/image1.png "image_tooltip")
+    At the XLA Operations level, you can click on each HLO operation to view its shape, wall-duration, and timing statistics.
 
 
 *   Graph Viewer
 
-A High-Level Optimizer (HLO) graph browser tool. It enables a graph view to visualize HLOs with their input and output compute flow.
-
-<b>>>>>>GDCALERT:inline image link here (to images/image2.png). Store image on your image server and adjust path/filename/extension if necessary.>>>>></b>
-![alt_text](images/image2.png "image_tooltip")
-
+    A High-Level Optimizer (HLO) graph browser tool. It enables a graph view to visualize HLOs with their input and output compute flow.
 
 
 
 *   HLO Profile
 
      
-
-
     Provides insights into the HLO operations, including their costs and execution times.
 
 
@@ -70,12 +61,6 @@ A High-Level Optimizer (HLO) graph browser tool. It enables a graph view to visu
 
 
     You can click each individual ops, which shows individual op flops utilization and HBM utilization.
-
-
-    <b>>>>>>GDCALERT:inline image link here (to images/image3.png). Store image on your image server and adjust path/filename/extension if necessary.>>>>></b>
-![alt_text](images/image3.png "image_tooltip")
-
-
 
     	
 
@@ -88,14 +73,10 @@ A High-Level Optimizer (HLO) graph browser tool. It enables a graph view to visu
     You can view both Program-Level Analysis and operation-level analysis
 
 
-    achievable FLOP/s = min(peak FLOP/s, peak BW \* operational intensity)
+    `achievable FLOP/s = min(peak FLOP/s, peak BW \* operational intensity)`
 
 
-operational intensity = FLOPs / bytes
-
-<b>>>>>>GDCALERT:inline image link here (to images/image4.png). Store image on your image server and adjust path/filename/extension if necessary.>>>>></b>
-![alt_text](images/image4.png "image_tooltip")
-
+    `operational intensity = FLOPs / bytes`
 
 
     For each HLO operation, you can view FLOPs rate, HBM rate, and roofline efficiency. It also indicates whether the operation is HBM or compute-bound based on these calculations.
@@ -106,10 +87,7 @@ operational intensity = FLOPs / bytes
 
     Analyze memory usage patterns during model training, crucial for optimizing memory-intensive operations.
 
+    From this tab, you can view each buffer allocation's source code, shape, and spanned time frame.
 
-From this tab, you can view each buffer allocation's source code, shape, and spanned time frame.
 
-
-    <b>>>>>>GDCALERT:inline image link here (to images/image5.png). Store image on your image server and adjust path/filename/extension if necessary.>>>>></b>
-![alt_text](images/image5.png "image_tooltip")
 
