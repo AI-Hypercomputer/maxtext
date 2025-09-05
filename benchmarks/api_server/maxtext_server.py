@@ -29,6 +29,11 @@ from benchmarks.api_server.server_models import (
     ChatMessage,
 )
 from benchmarks.api_server import server_utils
+from openai_harmony import (
+    load_harmony_encoding,
+    HarmonyEncodingName,
+    Role,
+)
 
 # ----------------------------
 # Init
@@ -46,6 +51,15 @@ rank = jax.process_index()
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO) # Ensure our logger passes INFO messages.
 logger.info("MaxTextGenerator initialization complete.")
+
+harmony_enc = None
+try:
+    harmony_enc = load_harmony_encoding(HarmonyEncodingName.HARMONY_GPT_OSS)
+    logger.info("Harmony encoding for gpt-oss loaded successfully.")
+except ImportError:
+    logger.warning("openai_harmony not installed. GPT-OSS Harmony format will not be available.")
+except Exception as e:
+    logger.error(f"Failed to load Harmony encoding: {e}")
 
 
 app = FastAPI()
@@ -117,7 +131,22 @@ def _create_response(request, completions, prompts, is_chat, llm, formatted_prom
     """Creates either a CompletionResponse or ChatCompletionResponse."""
     if is_chat:
         result = completions[0]
-        text_out, _, finish_reason = server_utils.apply_stops_to_text_and_logprobs(result.text, None, request.stop)
+        text_out = result.text
+        if "gpt-oss" in request.model and harmony_enc:
+            try:
+                parsed_messages = harmony_enc.parse_messages_from_completion_tokens(result.tokens, role=Role.ASSISTANT)
+                user_visible = "".join(
+                    m.content for m in parsed_messages 
+                    if m.role == Role.ASSISTANT and m.channel == "final"
+                )
+                if user_visible:
+                    text_out = user_visible
+                else:
+                    logger.warning("Harmony parsing for gpt-oss did not yield content in the 'final' channel. Falling back to raw text.")
+            except Exception as e:
+                logger.error(f"Harmony parsing failed for gpt-oss: {e}. Falling back to raw text.")
+        
+        text_out, _, finish_reason = server_utils.apply_stops_to_text_and_logprobs(text_out, None, request.stop)
         if finish_reason is None:
             finish_reason = result.finish_reason
 
@@ -211,7 +240,7 @@ def main_loop():
                 if is_chat:
                     messages = [m.model_dump() for m in req.messages]
                     formatted_prompt = llm.tokenizer.tokenizer.apply_chat_template(
-                        messages, tokenize=False, add_generation_prompt=True
+                        messages, tokenize=False, add_generation_prompt=True, reasoning_effort="low"
                     )
                     prompts_for_req = [formatted_prompt]
                 else:

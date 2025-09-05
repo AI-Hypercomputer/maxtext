@@ -30,6 +30,7 @@ class LogProbs:
 class Completion:
     index: int
     text: str
+    tokens: List[int]
     logprobs: Optional[LogProbs]
     finish_reason: str = "stop"
     prompt_token_count: int = 0
@@ -110,7 +111,10 @@ class MaxTextGenerator:
 
         self.metadata = self.engine.get_tokenizer()
         self.tokenizer = self.engine.build_tokenizer(self.metadata)
-        self.eos_id = self.tokenizer.eos_id
+        eos_id = self.tokenizer.eos_id
+        if not isinstance(eos_id, list):
+            eos_id = [eos_id]
+        self.eos_ids = eos_id
         try:
             self.has_chat_template = getattr(self.tokenizer.tokenizer, "chat_template", False)
         except AttributeError:
@@ -194,17 +198,21 @@ class MaxTextGenerator:
         """Orchestrates the generation process for a single chunk of prompts."""
         start_time = time.time()
 
-        # Reset the state to handle the new batch while reusing memory.
-        self.decode_state = self._jitted_reset_state(self.decode_state)
+        for prompt in prompts:
+            print("--------------------------------------------------")
+            print(prompt)
+            print("--------------------------------------------------")
 
         initialize_start_time = time.time()
+        # Reset the state to handle the new batch while reusing memory.
+        self.decode_state = self._jitted_reset_state(self.decode_state)
         streams, rng = self._initialize_streams_and_state(prompts, image_paths, seed)
         initialize_end_time = time.time()
         self.logger.info(f"Initialize step took {initialize_end_time - initialize_start_time:.2f}s.")
 
         if max_tokens is not None and max_tokens <= 0:
             self.logger.warning("max_tokens <= 0, returning empty completions.")
-            return [Completion(index=i, text="", logprobs=None) for i in range(len(streams))]
+            return [Completion(index=i, text="", tokens=[], logprobs=None) for i in range(len(streams))]
 
         prefill_start_time = time.time()
         self.decode_state, rng = self._run_prefill_step(streams, self.decode_state, rng, logprobs, echo, temperature, top_k, top_p)
@@ -353,7 +361,7 @@ class MaxTextGenerator:
                 # Check for finish conditions
                 current_len = stream.true_length + 1 + step
                 is_max_len = current_len >= target_length
-                is_eos = tok_id == self.eos_id
+                is_eos = tok_id in self.eos_ids
                 stop_sequence_found = False
 
                 if stop_sequences:
@@ -388,7 +396,7 @@ class MaxTextGenerator:
             gen_ids_for_text = stream.generated_ids[:]
             gen_logps_for_text = stream.generated_logprobs[:]
 
-            if gen_ids_for_text and gen_ids_for_text[-1] == self.eos_id:
+            if gen_ids_for_text and gen_ids_for_text[-1] in self.eos_ids:
                 gen_ids_for_text = gen_ids_for_text[:-1]
                 if len(gen_logps_for_text) >= len(stream.generated_ids):
                     gen_logps_for_text = gen_logps_for_text[:-1]
@@ -415,6 +423,7 @@ class MaxTextGenerator:
                 Completion(
                     index=i,
                     text=text,
+                    tokens=tokens_for_text,
                     logprobs=lp_payload,
                     finish_reason=stream.finish_reason,
                     prompt_token_count=len(stream.prompt_ids),
