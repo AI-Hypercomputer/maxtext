@@ -34,6 +34,9 @@ original_max_position_embeddings: 4096
 rope_factor: 32
 beta_fast: 32
 beta_slow: 1
+rope_interleave: False
+rope_truncate: False
+rope_attention_scaling: True
 
 # MLP
 base_mlp_dim: 2880

@@ -250,7 +250,7 @@ def main(config, test_args):  # pylint: disable=W0621
     max_logging.log(f"loaded {len(golden_data)} golden data points")
     all_data_to_save = []
     for golden_data_index, golden_data_point in enumerate(golden_data):
-      max_logging.log(f"--- Comparing forward pass for golden data index: {golden_data_index} ---")
+      max_logging.log(f"\n--- Comparing forward pass for golden data index: {golden_data_index} ---")
       ids, decoder_segment_ids, decoder_positions, golden_logits, seq_len, images = get_data(golden_data_point, config)
       max_logging.log("maxtext forward pass")
       full_train_logits = model.apply(
@@ -321,12 +321,16 @@ def main(config, test_args):  # pylint: disable=W0621
         all_data_to_save.append(data_to_save)
 
       if test_args.max_kl_div is not None:
-        max_logging.log("Checking KL Divergence between train distribution and " "golden distribution")
+        max_logging.log(
+            f"Checking KL Divergence between train distribution and golden distribution against theshold {test_args.max_kl_div}."
+        )
         assert jax.numpy.all(
             kl_div < test_args.max_kl_div,
         ), f"KL divergence values exceed the specified threshold of {test_args.max_kl_div}. Max divergence: {jax.numpy.max(kl_div)}"
 
-      max_logging.log("Checking Numerical Differences between train logits and golden logits against the provided atol, rtol.")  # pylint: disable=C0301
+      max_logging.log(
+          f"Checking Numerical Differences between train logits and golden logits against atol={test_args.rtol} rtol={test_args.atol}."
+      )
       rtol_val = float(test_args.rtol)
       atol_val = float(test_args.atol)
       assert jax.numpy.allclose(
