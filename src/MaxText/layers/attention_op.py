@@ -1140,6 +1140,7 @@ class AttentionOp(nnx.Module):
       # generate attn_mask
       mask_type = "padding_causal"  # only padding_causal mask type can take a created mask
       attn_mask = self.generate_attention_mask(query, key, decoder_segment_ids, model_mode)
+      attn_mask = attn_mask.astype(jnp.uint8)  # TE requires uint8/boolean mask
 
     dpa_layer = DotProductAttention(
         head_dim=head_dim,
