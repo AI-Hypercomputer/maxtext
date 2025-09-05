@@ -1,23 +1,26 @@
 #!/bin/bash
 
-# This file contains an end-to-end Airflow nightly test, designed to run once a day on a v4-8, along with documentation to guide users in getting started with Gemma3-4B.
+# This script is both an end-to-end test that runs once a day on a v4-8 and documentation for how to get started with Gemma3-4B.
 
-# The flow of this file is as follows:
-# 1. Convert the checkpoint downloaded from Hugging Face to make it compatible with MaxText
-# 2. Run a forward pass logits check to compare with the original HF golden model
-# 2. Run decoding, finetuning of Gemma3-4B. with the converted checkpoint.
-# 3. Run decoding from the finetuned checkpoint from step 2
+# The flow of this script is as follows:
+# 1. Convert the checkpoint downloaded from Hugging Face to make it compatible with MaxText.
+# 2. Run a forward pass logits check to compare with the original HF golden model.
+# 3. Run decoding, finetuning of Gemma3-4B. with the converted checkpoint.
+# 4. Run decoding from the finetuned checkpoint from step 3.
+
+# Pre-requisites:
+# 1. Set HF_TOKEN environment variable to your Hugging Face access token with read permissions
+# export HF_TOKEN=<Hugging Face access token>
 
 
 set -ex
 idx=$(date +%Y-%m-%d-%H-%M)
 MODEL_NAME='gemma3-4b'
 export MODEL_VARIATION='4b'
-HF_TOKEN='' # Important!!! Save your hf access token here
 HF_GOLDEN_MODEL='google/gemma-3-4b-it'
 TOKENIZER_PATH="${MAXTEXT_ASSETS_ROOT:-${MAXTEXT_REPO_ROOT:-$PWD}/assets}"'/tokenizer.gemma3'
 # To convert the multimodal model, make sure the use_multimodal is set to be true
-USE_MULTIMODAL=true
+USE_MULTIMODAL=false
 
 # Installing torch for deps in forward_pass_logit_checker.py
 python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
@@ -33,18 +36,18 @@ python3 -m MaxText.utils.ckpt_conversion.to_maxtext "${MAXTEXT_PKG_DIR:-${MAXTEX
     hf_access_token=${HF_TOKEN} \
     base_output_directory=${MODEL_BUCKET}/${MODEL_VARIATION}/unscanned/${idx} \
     use_multimodal=${USE_MULTIMODAL} \
-    scan_layers=false 
+    scan_layers=false
 
 export UNSCANNED_CKPT_PATH=${MODEL_BUCKET}/${MODEL_VARIATION}/unscanned/${idx}/0/items
 
-# # To get scanned ckpt, flip the scan_layers. 
+# # To get scanned ckpt, flip the scan_layers.
 # ToDo: gemma3 multimodal scanned ckpt
 # python3 -m MaxText.utils.ckpt_conversion.to_maxtext src/MaxText/configs/base.yml \
 #     model_name=${MODEL_NAME} \
 #     hf_access_token=${HF_TOKEN} \
 #     base_output_directory=${MODEL_BUCKET}/${MODEL_VARIATION}/scanned/${idx} \
 #     use_multimodal=${USE_MULTIMODAL} \
-#     scan_layers=true 
+#     scan_layers=true
 
 # export SCANNED_CKPT_PATH=${MODEL_BUCKET}/${MODEL_VARIATION}/scanned/${idx}/0/items
 
@@ -53,14 +56,14 @@ export UNSCANNED_CKPT_PATH=${MODEL_BUCKET}/${MODEL_VARIATION}/unscanned/${idx}/0
 
 # ToDo: improve forward_pass_logit_checker to test multi-modal prompt
 python3 -m tests.forward_pass_logit_checker "${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText}/"configs/base.yml \
-    tokenizer_path==${TOKENIZER_PATH}  \
+    tokenizer_path=${TOKENIZER_PATH}  \
     load_parameters_path=${UNSCANNED_CKPT_PATH} \
     model_name=${MODEL_NAME} \
     use_multimodal=${USE_MULTIMODAL} \
     scan_layers=false \
     --hf_model_path=${HF_GOLDEN_MODEL} \
     --max_kl_div=0.015 \
-    --run_hf_model=true 
+    --run_hf_model=true
 
 # We can run decoding for unscanned checkpoints.
 if [ ${USE_MULTIMODAL} == true ]; then

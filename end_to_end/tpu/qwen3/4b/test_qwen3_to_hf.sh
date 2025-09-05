@@ -1,17 +1,20 @@
 #!/bin/bash
 
-# This file is both an integration test that runs once a day on a v4-8 and documentation for how to get started with Qwen3-4B.
+# This script is both an end-to-end test that runs once a day on a v4-8 and documentation for how to get started with Qwen3-4B.
 
-# The flow of this file is as follows:
-# 1. Convert the checkpoint downloaded from Hugging Face to make it compatible with MaxText
-# 2. Run a forward pass check to compare the logits and KL divergence between the converted ckpt and orginal golden HF model
+# The flow of this script is as follows:
+# 1. Convert a MaxText checkpoint to a Hugging Face model checkpoint.
+# 2. Run a forward pass check to compare the logits and KL divergence between the converted ckpt and orginal golden HF model.
+
+# Pre-requisites:
+# 1. Set HF_TOKEN environment variable to your Hugging Face access token with read permissions
+# export HF_TOKEN=<Hugging Face access token>
 
 
 set -ex
 idx=$(date +%Y-%m-%d-%H-%M)
 MODEL_NAME='qwen3-4b'
 export MODEL_VARIATION='4b'
-HF_TOKEN='' # Important!!! Save your hf access token here
 
 # Installing torch for deps in forward_pass_logit_checker.py
 python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
@@ -32,7 +35,7 @@ python3 -m MaxText.utils.ckpt_conversion.to_huggingface "${MAXTEXT_PKG_DIR:-${MA
     hf_access_token=${HF_TOKEN} \
     load_parameters_path=${CKPT_PATH} \
     base_output_directory=${LOCAL_PATH} \
-    scan_layers=false 
+    scan_layers=false
 
 # Alternatively, if uploaded the converted ckpt, HF requires local storage of model
 # mkdir -p "${LOCAL_PATH}"
@@ -47,4 +50,4 @@ python3 -m tests.forward_pass_logit_checker "${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_R
     scan_layers=false \
     --hf_model_path=${LOCAL_PATH} \
     --max_kl_div=0.015 \
-    --run_hf_model=true 
+    --run_hf_model=true
