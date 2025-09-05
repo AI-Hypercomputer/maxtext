@@ -26,7 +26,7 @@ from flax import nnx
 
 from MaxText import max_logging
 from MaxText import max_utils
-from MaxText.common_types import MODEL_MODE_PREFILL, MODEL_MODE_TRAIN, Array, Config, DType
+from MaxText.common_types import MODEL_MODE_PREFILL, MODEL_MODE_TRAIN, Array, Config, DType, DecoderBlockType
 from MaxText.layers import nnx_wrappers
 from MaxText.layers.initializers import Initializer, default_embed_init, variable_to_logically_partitioned
 
@@ -503,6 +503,9 @@ def yarn_rotary_embedding_as_linen(
     cast_as_fprop_dtype: bool = True,
     fprop_dtype: DType = jnp.bfloat16,
     name: str | None = None,
+    interleave: bool = True,
+    truncate: bool = True,
+    attention_scaling: bool = False,
 ):
   """Initializes the YarnRotaryEmbedding module and returns it as a Linen module.
 
@@ -531,6 +534,9 @@ def yarn_rotary_embedding_as_linen(
       fprop_dtype=fprop_dtype,
       metadata_fn=variable_to_logically_partitioned,
       name=name,
+      interleave=interleave,
+      truncate=truncate,
+      attention_scaling=attention_scaling,
   )
 
 
@@ -565,6 +571,9 @@ class YarnRotaryEmbedding(nnx.Module):
       rope_factor: float = 40,
       cast_as_fprop_dtype: bool = True,
       fprop_dtype: DType = jnp.bfloat16,
+      interleave=True,
+      truncate=True,
+      attention_scaling=False,
       # Not used in YarnRotaryEmbedding but passed in by nnx.bridge.to_linen.
       # TODO: Remove when bridge no longer needed
       rngs: nnx.Rngs = None,
@@ -579,6 +588,9 @@ class YarnRotaryEmbedding(nnx.Module):
     self.rope_factor = rope_factor
     self.cast_as_fprop_dtype = cast_as_fprop_dtype
     self.fprop_dtype = fprop_dtype
+    self.interleave = interleave
+    self.truncate = truncate
+    self.attention_scaling = attention_scaling
 
     if self.embedding_dims % 2:
       raise ValueError("Embedding dim for rotary position embedding must be a multiple of 2.")
@@ -592,7 +604,12 @@ class YarnRotaryEmbedding(nnx.Module):
     freqs = 1.0 / (self.rope_theta ** (2.0 * jnp.arange(0, half_dim, dtype=jnp.float32) / self.embedding_dims))
 
     low, high = self._find_correction_range(
-        self.beta_fast, self.beta_slow, self.embedding_dims, self.rope_theta, self.original_max_position_embeddings
+        self.beta_fast,
+        self.beta_slow,
+        self.embedding_dims,
+        self.rope_theta,
+        self.original_max_position_embeddings,
+        self.truncate,
     )
     smooth = 1 - self._linear_ramp_factor(low, high, half_dim)
     # The corrected frequency is a weighted mix of the scaled and base values.
@@ -610,7 +627,9 @@ class YarnRotaryEmbedding(nnx.Module):
     """Compute the correction dimension for a given number of rotations."""
     return dim * math.log(max_position_embeddings / (num_rotations * 2 * math.pi)) / (2 * math.log(base))
 
-  def _find_correction_range(self, low_rot: float, high_rot: float, dim: int, base: float, max_position_embeddings: int):
+  def _find_correction_range(
+      self, low_rot: float, high_rot: float, dim: int, base: float, max_position_embeddings: int, truncate: bool
+  ):
     """Computes the range of correction dimensions for rotary positional embeddings.
 
     Args:
@@ -619,12 +638,16 @@ class YarnRotaryEmbedding(nnx.Module):
         dim (int): Dimensionality of the embedding space.
         base (float): Base value for the exponential computation.
         max_position_embeddings (int): Maximum sequence length.
+        truncate (bool): Whether to round the correction range.
 
     Returns:
         tuple[int, int]: The range of correction dimensions (low, high), clamped to valid indices.
     """
-    low = math.floor(self._find_correction_dim(low_rot, dim, base, max_position_embeddings))
-    high = math.ceil(self._find_correction_dim(high_rot, dim, base, max_position_embeddings))
+    low = self._find_correction_dim(low_rot, dim, base, max_position_embeddings)
+    high = self._find_correction_dim(high_rot, dim, base, max_position_embeddings)
+    if truncate:
+      low = math.floor(low)
+      high = math.ceil(high)
     low = max(low, 0)
     high = min(high, dim - 1)
     return low, high
@@ -661,28 +684,36 @@ class YarnRotaryEmbedding(nnx.Module):
     else:
       position = position.astype(jnp.int32)
 
-    B, S, N, H = inputs.shape
-    half_dim = H // 2
-
-    # Convert the last dimension into a complex representation.
-    # First reshape so that each pair of numbers represents the real and imaginary parts.
-    inputs_reshaped = inputs.reshape(B, S, N, half_dim, 2)
-    inputs_complex = inputs_reshaped[..., 0] + 1j * inputs_reshaped[..., 1]  # shape: [B, S, N, half_dim]
-
     # Lookup the precomputed frequencies using the position indices.
     # self.freqs_cis has shape [max_position_embeddings, half_dim] so we use jnp.take along axis 0.
     # After indexing, shape becomes [B, S, half_dim]; we then add an axis for the heads.
     freqs = jnp.take(self.freqs_cis, position, axis=0)  # shape: [B, S, half_dim]
     freqs = freqs[:, :, jnp.newaxis, :]  # shape: [B, S, 1, half_dim]
 
+    if self.interleave:
+      # Inputs with interleaved format [real1, img1, real2, img2, ...] at last dimension
+      # Convert the last dimension into a complex representation.
+      # First reshape so that each pair of numbers represents the real and imaginary parts.
+      B, S, N, H = inputs.shape
+      half_dim = H // 2
+      inputs_reshaped = inputs.reshape(B, S, N, half_dim, 2)
+      first_half, second_half = inputs_reshaped[..., 0], inputs_reshaped[..., 1]
+    else:
+      # Inputs with concatenated format [real1, real2, ..., img1, img2, ...] at last dimension
+      first_half, second_half = jnp.split(inputs, 2, axis=-1)
+
+    inputs_complex = first_half + 1j * second_half  # shape: [B, S, N, half_dim]
     # Apply the rotary transformation via complex multiplication.
     rotated = inputs_complex * freqs  # shape: [B, S, N, half_dim]
-
     # Convert the complex result back to a real tensor.
     # Split the complex number into its real and imaginary parts.
-    rotated_real = jnp.stack([jnp.real(rotated), jnp.imag(rotated)], axis=-2)  # shape: [B, S, N, 2, half_dim]
-    # [sin1, sin2, sin3, ..., cos1, cos2, ...] at last dimension
-    output = rotated_real.reshape(B, S, N, H)
+    # [real1, real2, ..., img1, img2, ...]
+    output = jnp.concatenate([jnp.real(rotated), jnp.imag(rotated)], axis=-1)
+
+    if self.attention_scaling:
+      attention_scaling = 1.0 if self.rope_factor <= 1 else (0.1 * math.log(self.rope_factor) + 1.0)
+      output = output * attention_scaling
+
     if self.cast_as_fprop_dtype:
       output = output.astype(self.fprop_dtype)
     return output
@@ -760,25 +791,34 @@ class GptOssRotaryEmbedding(YarnRotaryEmbedding):
       rope_factor: float = 32,
       cast_as_fprop_dtype: bool = True,
       fprop_dtype: DType = jnp.bfloat16,
+      truncate=True,
       rngs: nnx.Rngs = None,
   ):
     """Initializes the GptOssRotaryEmbedding module."""
     super().__init__(
-      embedding_dims=embedding_dims,
-      max_position_embeddings=max_position_embeddings,
-      original_max_position_embeddings=original_max_position_embeddings, 
-      beta_fast=beta_fast,
-      beta_slow=beta_slow,
-      rope_theta=rope_theta,
-      rope_factor=rope_factor,
-      cast_as_fprop_dtype=cast_as_fprop_dtype,
-      fprop_dtype=fprop_dtype,
-      rngs=rngs,
+        embedding_dims=embedding_dims,
+        max_position_embeddings=max_position_embeddings,
+        original_max_position_embeddings=original_max_position_embeddings,
+        beta_fast=beta_fast,
+        beta_slow=beta_slow,
+        rope_theta=rope_theta,
+        rope_factor=rope_factor,
+        cast_as_fprop_dtype=cast_as_fprop_dtype,
+        fprop_dtype=fprop_dtype,
+        truncate=truncate,
+        rngs=rngs,
     )
 
   def _generate_pos_embeddings(self, positions: jax.Array) -> tuple[jax.Array, jax.Array]:
-    
-    low, high = self._find_correction_range(self.beta_fast, self.beta_slow, self.embedding_dims, self.rope_theta, self.original_max_position_embeddings)
+
+    low, high = self._find_correction_range(
+        self.beta_fast,
+        self.beta_slow,
+        self.embedding_dims,
+        self.rope_theta,
+        self.original_max_position_embeddings,
+        self.truncate,
+    )
     interp_factor = 1 - self._linear_ramp_factor(low, high, self.embedding_dims // 2)
 
     timescale = self.rope_theta ** (jnp.arange(0, self.embedding_dims, 2, dtype=jnp.float32) / self.embedding_dims)

@@ -701,6 +701,9 @@ class Attention(nnx.Module):
           rope_factor=self.config.rope_factor,
           embedding_dims=rope_embedding_dims,
           fprop_dtype=self.dtype,
+          interleave=self.config.rope_interleave,
+          truncate=self.config.rope_truncate,
+          attention_scaling=self.config.rope_attention_scaling,
           rngs=self.rngs,
       )
     elif rope_type.startswith("gpt"):
