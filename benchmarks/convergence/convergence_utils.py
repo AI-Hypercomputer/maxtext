@@ -53,7 +53,7 @@ class ConvHParams:
 
 
 def load_checkpoint(model: MaxTextModel, checkpoint_path: str):
-    model.tuning_params["load_full_state_path"] = checkpoint_path
+    model.tuning_params["load_parameters_path"] = checkpoint_path
     model.tuning_params["enable_checkpointing"] = True
 
 

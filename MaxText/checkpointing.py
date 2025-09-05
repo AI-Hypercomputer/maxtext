@@ -460,8 +460,8 @@ def load_params_from_path(
   restored = ckptr.restore(
       epath.Path(load_parameters_from_path),
       item={"params": abstract_unboxed_params},
-      transforms={},
       restore_args={"params": restore_args},
+      partial_restore=True,
   )
   return restored["params"]
 

@@ -425,6 +425,7 @@ def build_user_command(
       'export ENABLE_PATHWAYS_PERSISTENCE=1 &&',
       f'export JAX_PLATFORMS={jax_platforms} &&',
       'export ENABLE_PJRT_COMPATIBILITY=true &&',
+      'export TENSORSTORE_GCS_BACKEND=gcs_grpc &&',
       f'{hlo_dump} python3 -m MaxText.train {os.path.join("MaxText", "configs", "base.yml")}',
       f'{config_tuning_params}',
       f'steps={wl_config.num_steps}',
