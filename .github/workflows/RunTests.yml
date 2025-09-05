@@ -158,6 +158,6 @@ jobs:
     steps:
     - name: Check whether one of the jobs failed
       if: ${{ contains(needs.*.result, 'failure') && github.event.pull_request == null && github.event_name != 'workflow_dispatch' }}
-      uses: jayqi/failed-build-issue-action@1a893bbf43ef1c2a8705e2b115cd4f0fe3c5649b  # v1.2.0
+      uses: jayqi/failed-build-issue-action@v1.2
       with:
         github-token: ${{ secrets.GITHUB_TOKEN }}
