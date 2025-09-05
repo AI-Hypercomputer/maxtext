@@ -28,7 +28,7 @@ bash preflight.sh PLATFORM=$PLATFORM
 
 # Train
 export LIBTPU_INIT_ARGS="--xla_tpu_enable_data_parallel_all_reduce_opt=true --xla_tpu_data_parallel_opt_different_sized_ops=true --xla_tpu_enable_async_collective_fusion=true --xla_tpu_enable_async_collective_fusion_fuse_all_gather=true --xla_tpu_enable_async_collective_fusion_multiple_steps=true --xla_tpu_overlap_compute_collective_tc=true --xla_enable_async_all_gather=true"
-python3 -m MaxText.train MaxText/configs/base.yml run_name=$RUN_NAME\
+python3 -m MaxText.train "${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText}"/configs/base.yml run_name=$RUN_NAME\
     steps=150 per_device_batch_size=4 enable_checkpointing=false remat_policy=full\
     max_target_length=2048 metrics_file='metrics.txt' base_output_directory=$OUTPUT_PATH\
     dataset_path=$DATASET_PATH log_period=150 global_parameter_scale=32

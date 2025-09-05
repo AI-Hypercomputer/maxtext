@@ -63,6 +63,7 @@ if ! python3 -c 'import sys; assert sys.version_info >= (3, 12)' 2>/dev/null; th
         fi
         echo "Creating virtual environment '$venv_name' with Python 3.12..."
         uv venv --python 3.12 "$venv_name" --seed
+        printf '%s\n' "$(realpath -- "$venv_name")" >> /tmp/venv_created
         echo -e "\n\e[32mVirtual environment '$venv_name' created successfully!\e[0m"
         echo "To activate it, run the following command:"
         echo -e "\e[33m  source ~/$venv_name/bin/activate\e[0m"
@@ -141,6 +142,11 @@ if [[ "$MODE" == "pinned" ]]; then
     python3 -m pip install --no-cache-dir -U -r requirements.txt -c constraints_gpu.txt
 else
     python3 -m pip install --no-cache-dir -U -r requirements.txt
+fi
+
+# Install maxtext package
+if [ -f 'pyproject.toml' ]; then
+  python3 -m pip install -e . --no-dependencies
 fi
 
 # Uninstall existing jax, jaxlib and  libtpu-nightly
