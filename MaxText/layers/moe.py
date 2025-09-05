@@ -761,7 +761,7 @@ class RoutedMoE(nnx.Module):
     # TODO: previous code had a check for batch size, for inference case, setting batch back to not sharding by exp
     #       this should be replicated in inference sharding rules
 
-    tp_t_active = self.get_tensor_transpose_parallelism_size():
+    tp_t_active = self.get_tensor_transpose_parallelism_size()
     input_partition_pspec = self.sharding(
       t="sparse_inputs", a=(("batch", "norm_length", "embed")),
       tt=TensorType.Activation,

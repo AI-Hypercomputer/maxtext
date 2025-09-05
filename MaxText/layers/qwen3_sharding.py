@@ -9,6 +9,8 @@ from MaxText.sharding import MeshSharding, TensorType as TT, assert_matches_logi
 dp, fsdp, tp, pp, sp, cp, cp_ar, tp_s, ep, ar, tp_t, fsdp_t = Axis
 
 
+# NOTE: a few rules are currently missing since we have not yet migrated attention_op (e.g. attention_q_length)
+#
 class Qwen3ShardingTrainingV2(MeshSharding):
   def __init__(self, config):
     super().__init__()
@@ -19,6 +21,7 @@ class Qwen3ShardingTrainingV2(MeshSharding):
     tensor_name = kwargs["t"]
     tensor_type = kwargs.get("tensor_type", TT.Weight)
     ep_attn_type = self.config.expert_shard_attention_option
+    # TODO: we could get this from config or the mesh
     tp_t_active = kwargs.get("tp_t_active", False)
 
     if self.config.ici_context_autoregressive_parallelism > 1:
@@ -41,8 +44,7 @@ class Qwen3ShardingTrainingV2(MeshSharding):
                                                         axis_mappings.append(ep)
                                                       mesh_axes.append(tuple(axis_mappings))
         case "embed", TT.Activation:
-                                                      # TODO: this feels fragile. perhaps there's a better way
-                                                      if "tensor_name" == "sparse_inputs" and not tp_t_active:
+                                                      if tensor_name == "sparse_inputs" and not tp_t_active:
                                                         mesh_axes.append(())
                                                       else:
                                                         mesh_axes.append((tp, tp_t))
@@ -94,8 +96,7 @@ class Qwen3ShardingTrainingV2(MeshSharding):
     return PartitionSpec(*mesh_axes)
 
   def is_batch_sharded_by_expert(self):
-    ep_attn_type = self.config.expert_shard_attention_option
-    return ep_attn_type == "batch"
+    return True
 
 
 class ModelMode(enum.Enum):
