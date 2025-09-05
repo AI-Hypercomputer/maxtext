@@ -43,7 +43,6 @@ Within the root directory of the cloned repo, install dependencies and the pre-c
 python3.12 -m venv ~/venv-maxtext
 source ~/venv-maxtext/bin/activate
 bash setup.sh DEVICE={tpu|gpu}
-pre-commit install
 ```
 
 ### Run a Test Training Job
@@ -57,7 +56,7 @@ python3 -m MaxText.train MaxText/configs/base.yml \
   steps=10
 ```
 
-**Optional**: If you want to try training on a real dataset, see [Data Input Pipeline](https://github.com/google/maxtext/blob/main/getting_started/Data_Input_Pipeline.md) for data input options from sources like HuggingFace, Grain, and TFDS.
+**Optional**: If you want to try training on a real dataset, see [Data Input Pipeline](https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/guides/data_input_pipeline.md) for data input options from sources like HuggingFace, Grain, and TFDS.
 
 ### Generate Sample Output (Decoding)
 

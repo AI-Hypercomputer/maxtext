@@ -17,12 +17,12 @@ This document provides an opinionated view on *why* MaxText uses these specific 
 
 ## Flax: For Functional Model Definition
 
-**What is it?** Flax is a high-performance neural network library for JAX that is designed to be flexible and explicit.
+**What is it?** Flax is a high-performance neural network library for JAX that is designed to be flexible, explicit, and easy to use. 
 
-At its core, a JAX program is a set of pure functions that transform data. Flax embraces this paradigm for defining models, which leads to several key advantages:
+With its latest generation API, NNX, Flax provides a modern, object-oriented (OOP) approach that makes defining and managing models more intuitive and Pythonic.
 
 1.  **Explicit State Management**: Unlike stateful frameworks where parameters are hidden attributes of an object, Flax treats model parameters (`params`, `batch_stats`, etc.) as explicit arguments to its functions. This transparency is crucial for debugging and managing distributed state.
-2.  **Functional Purity Aligns with JAX**: Because Flax models are stateless functions, they integrate seamlessly with JAX's transformations like `jax.grad`, `jax.pmap`, and `jax.jit`, simplifying parallelism.
+2.  **Deep JAX Integration**: Flax's NNX is designed from the ground up to work seamlessly with JAX's powerful transformations like `jax.jit` and `jax.grad`. This enables high performance and scalability without sacrificing ease of use.
 3.  **Flexibility through PyTrees**: All model state is stored in standard JAX PyTrees (nested dictionaries), making it trivial to inspect and manipulate any part of the model.
 
 For more information on using Flax, please refer to https://github.com/google/flax
@@ -83,11 +83,11 @@ For more information on how to quantize your model using Qwix, please refer to h
 
 **Why does MaxText use it?**
 
-MaxText 2.0 leverages Tunix as its core library for post-training, offering a unified and high-performance platform for adapting base models.
+MaxText leverages Tunix as its core library for post-training, offering a unified and high-performance platform for adapting base models.
 
 1.  **Unified Post-Training Framework**: Tunix provides a consistent API and infrastructure for various post-training techniques, reducing the need for separate implementations for SFT, RL, and PEFT.
 2.  **State-of-the-Art RL Integration**: Tunix integrates with vLLM for efficient RL sampling, enabling advanced algorithms like Group Relative Policy Optimization (GRPO). This allows for fine-tuning models based on complex reward signals.
-3.  **NNX Compatibility**: Tunix is designed to work with NNX, the latest generation of Flax, aligning with MaxText's migration to NNX for leveraging the newest JAX features and a more modern API.
+3.  **NNX Compatibility**: Tunix is designed to work with NNX, the latest generation of Flax, allowing it to leverage the newest JAX features and a more modern API.
 4.  **Modularity for PEFT**: While offering full fine-tuning, Tunix also maintains strong support for PEFT methods. Techniques like LoRA are implemented as composable Flax/NNX modules, allowing easy application to existing models without altering their core structure.
 
 We chose Tunix because it provides a **comprehensive, performant, and JAX-native solution for the entire post-training lifecycle**. Its integration with libraries like vLLM and its alignment with the NNX ecosystem make it a powerful tool for both full model adaptation and parameter-efficient tuning. 
