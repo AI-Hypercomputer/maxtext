@@ -684,9 +684,6 @@ class YarnRotaryEmbedding(nnx.Module):
     else:
       position = position.astype(jnp.int32)
 
-    B, S, N, H = inputs.shape
-    half_dim = H // 2
-
     # Lookup the precomputed frequencies using the position indices.
     # self.freqs_cis has shape [max_position_embeddings, half_dim] so we use jnp.take along axis 0.
     # After indexing, shape becomes [B, S, half_dim]; we then add an axis for the heads.
@@ -697,27 +694,21 @@ class YarnRotaryEmbedding(nnx.Module):
       # Inputs with interleaved format [real1, img1, real2, img2, ...] at last dimension
       # Convert the last dimension into a complex representation.
       # First reshape so that each pair of numbers represents the real and imaginary parts.
+      B, S, N, H = inputs.shape
+      half_dim = H // 2
       inputs_reshaped = inputs.reshape(B, S, N, half_dim, 2)
-      first_half = inputs_reshaped[..., 0]
-      second_half = inputs_reshaped[..., 1]
-      inputs_complex = first_half + 1j * second_half  # shape: [B, S, N, half_dim]
-      # Apply the rotary transformation via complex multiplication.
-      rotated = inputs_complex * freqs  # shape: [B, S, N, half_dim]
-      # Convert the complex result back to a real tensor.
-      # Split the complex number into its real and imaginary parts.
-      # TODO(shuningjin): The next two line is the same as concat at axis=-1? We can move everything outside?
-      # [[real1, real2, ...], [img1, img2, ...]]
-      rotated_real = jnp.stack([jnp.real(rotated), jnp.imag(rotated)], axis=-2)  # shape: [B, S, N, 2, half_dim]
-      # [real1, real2, ..., img1, img2, ...]
-      output = rotated_real.reshape(B, S, N, H)
+      first_half, second_half = inputs_reshaped[..., 0], inputs_reshaped[..., 1]
     else:
       # Inputs with concatenated format [real1, real2, ..., img1, img2, ...] at last dimension
-      first_half = inputs[..., :half_dim]
-      second_half = inputs[..., half_dim:]
-      inputs_complex = first_half + 1j * second_half
-      rotated = inputs_complex * freqs
-      # [real1, real2, ..., img1, img2, ...]
-      output = jnp.concatenate([jnp.real(rotated), jnp.imag(rotated)], axis=-1)
+      first_half, second_half = jnp.split(inputs, 2, axis=-1)
+
+    inputs_complex = first_half + 1j * second_half  # shape: [B, S, N, half_dim]
+    # Apply the rotary transformation via complex multiplication.
+    rotated = inputs_complex * freqs  # shape: [B, S, N, half_dim]
+    # Convert the complex result back to a real tensor.
+    # Split the complex number into its real and imaginary parts.
+    # [real1, real2, ..., img1, img2, ...]
+    output = jnp.concatenate([jnp.real(rotated), jnp.imag(rotated)], axis=-1)
 
     if self.attention_scaling:
       attention_scaling = 1.0 if self.rope_factor <= 1 else (0.1 * math.log(self.rope_factor) + 1.0)
