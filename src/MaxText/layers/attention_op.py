@@ -902,6 +902,7 @@ class AttentionOp(nnx.Module):
     value = jnp.transpose(value, axes=(0, 2, 1, 3))
     segment_axis_names_q = None
     segment_axis_names_kv = None
+    sink_axis_names = nn.logical_to_mesh_axes((HEAD,))
     if decoder_segment_ids is not None:
       if self.config.expert_shard_attention_option == EP_AS_CONTEXT:
         segment_axis_names_q = nn.logical_to_mesh_axes((BATCH_NO_EXP, Q_LENGTH))
@@ -1042,7 +1043,7 @@ class AttentionOp(nnx.Module):
             segment_axis_names_splash_kernel,
             None,  # no sharding for cp_size
             None,  # no sharding for load_balanced_context_parallel
-            None,  # no sharding for sinks
+            sink_axis_names,  # sharding align with query heads
         ),
         out_specs=axis_names_q,
         check_rep=False,
