@@ -65,7 +65,6 @@ from MaxText.layers.embeddings import (
     LlamaVisionRotaryEmbedding,
     RotaryEmbedding,
     YarnRotaryEmbedding,
-    GptOssRotaryEmbedding,
 )
 from MaxText.layers.initializers import nd_dense_init, NdInitializer, variable_to_logically_partitioned, default_bias_init
 from MaxText.layers.linears import DenseGeneral, canonicalize_tuple, normalize_axes
@@ -706,18 +705,6 @@ class Attention(nnx.Module):
           attention_scaling=self.config.rope_attention_scaling,
           rngs=self.rngs,
       )
-    elif rope_type.startswith("gpt"):
-      rotary_embedding = GptOssRotaryEmbedding(
-          max_position_embeddings=self.config.max_position_embeddings,
-          original_max_position_embeddings=self.config.original_max_position_embeddings,
-          beta_fast=self.config.beta_fast,
-          beta_slow=self.config.beta_slow,
-          rope_theta=self.config.rope_max_timescale,
-          rope_factor=self.config.rope_factor,
-          embedding_dims=rope_embedding_dims,
-          fprop_dtype=self.dtype,
-          rngs=self.rngs,
-      )      
     else:
       max_timescale = self.config.rope_max_timescale
       # For local attention use local_rope_max_timescale if it's is positive

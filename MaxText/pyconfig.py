@@ -143,7 +143,7 @@ def validate_prefill_and_target_lengths(max_prefill_length: int, max_target_leng
 
 
 def validate_rope_type(rope_type: str) -> None:
-  valid_rope_types = ("default", "yarn", "llama3.1", "gpt")
+  valid_rope_types = ("default", "yarn", "llama3.1")
   if rope_type not in valid_rope_types:
     raise ValueError(f"Invalid RoPE type was passed. Got: {rope_type}. Valid options: {valid_rope_types}")
 

@@ -16,7 +16,7 @@
 
 Example cmd:
 
-python3 -m MaxText.convert_gpt_oss_unscanned_ckpt --base-model-path <path/to/TODO/ckpt> \
+python3 -m MaxText.convert_gpt_oss_unscanned_ckpt --base-model-path <path/to/hf/ckpt> \
     --maxtext-model-path <GCS/path/to/save/new/maxtext/ckpt> --model-size gpt-oss-20b
 """
 
@@ -63,79 +63,23 @@ def _pt_to_np(pt_weight, cast_dtype=None, transpose=False):
 
 MODEL_PARAMS_DICT = {
     "gpt-oss-20b": {
-        # Attention
         "base_emb_dim": 2880,
         "base_num_query_heads": 64,
         "base_num_kv_heads": 8,
         "head_dim": 64,
-        # sliding_window_size: 128
-        # attention_bias: True
-        # attention_sink: True
-        # # RoPE
-        # rope_type: "yarn"
-        # rope_max_timescale: 150_000
-        # max_position_embeddings: 131072
-        # original_max_position_embeddings: 4096
-        # rope_factor: 32
-        # beta_fast: 32
-        # beta_slow: 1
-        # # MLP
-        # "base_mlp_dim": 2880,
-        # base_moe_mlp_dim: 2880
-        # mlp_activations: ["sigmoid","linear"]
-        # mlp_activations_limit: 7.0
-        # routed_bias: True
-        # mlp_bias: True
-        # "num_experts": 32,
-        # num_experts_per_tok: 4
-        # # General
         "base_num_decoder_layers": 24,
-        # "vocab_size": 201088,
-        # normalization_layer_epsilon: 1.0e-5
-        # enable_dropout: False
-        # logits_via_embedding: False
-        # decoder_block: "gpt_oss"
-        # "inhomogeneous_layer_cycle_interval": 2,
     },
     "gpt-oss-120b": {
-        # # Attention
         "base_emb_dim": 2880,
         "base_num_query_heads": 64,
         "base_num_kv_heads": 8,
         "head_dim": 64,
-        # sliding_window_size: 128
-        # attention_bias: True
-        # attention_sink: True
-        # # RoPE
-        # rope_type: "yarn"
-        # rope_max_timescale: 150_000
-        # max_position_embeddings: 131072
-        # original_max_position_embeddings: 4096
-        # rope_factor: 32
-        # beta_fast: 32
-        # beta_slow: 1
-        # # MLP
-        # base_mlp_dim: 2880
-        # base_moe_mlp_dim: 2880
-        # mlp_activations: ["sigmoid","linear"]
-        # mlp_activations_limit: 7.0
-        # routed_bias: True
-        # mlp_bias: True
-        # num_experts: 128
-        # num_experts_per_tok: 4
-        # # General
         "base_num_decoder_layers": 36,
-        # vocab_size: 201088
-        # normalization_layer_epsilon: 1.0e-5
-        # enable_dropout: False
-        # logits_via_embedding: False
-        # decoder_block: "gpt_oss"
-        # inhomogeneous_layer_cycle_interval: 2
     },
 }
 
 
-def _hf_to_maxtext_mapping(layer_idx: int = -1, expert_idx: int = -1) -> dict:
+def _hf_to_maxtext_mapping(layer_idx: int = -1) -> dict:
   """
   Returns a mapping from HuggingFace model weight names to MaxText model weight names.
 
@@ -192,7 +136,6 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
     with safe_open(ckpt_path, framework="pt", device="cpu") as f:
       for key in f.keys():
         parts = key.split(".")
-        # TODO: check
         layer = int(parts[2]) if "layers" in key else 0
         mapped_key = _hf_to_maxtext_mapping(layer)[key]
         chkpt_vars[mapped_key] = f.get_tensor(key)
@@ -207,8 +150,8 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
           "logits_dense": {"kernel": None},
       },
   }
-  for i in range(base_num_decoder_layers):
-    jax_weights["decoder"][f"layers_{i}"] = {
+  for layer_idx in range(base_num_decoder_layers):
+    jax_weights["decoder"][f"layers_{layer_idx}"] = {
         "pre_self_attention_layer_norm": {"scale": None},
         "post_self_attention_layer_norm": {"scale": None},
         "GptOssAttention": {
@@ -249,15 +192,6 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
 
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
 
-  # f"model.layers.{layer_idx}.self_attn.q_proj.weight": f"layers.{layer_idx}.attention.wq.weight",
-  # f"model.layers.{layer_idx}.self_attn.k_proj.weight": f"layers.{layer_idx}.attention.wk.weight",
-  # f"model.layers.{layer_idx}.self_attn.v_proj.weight": f"layers.{layer_idx}.attention.wv.weight",
-  # f"model.layers.{layer_idx}.self_attn.o_proj.weight": f"layers.{layer_idx}.attention.wo.weight",
-  # f"model.layers.{layer_idx}.self_attn.q_proj.bias": f"layers.{layer_idx}.attention.wq.bias",
-  # f"model.layers.{layer_idx}.self_attn.k_proj.bias": f"layers.{layer_idx}.attention.wk.bias",
-  # f"model.layers.{layer_idx}.self_attn.v_proj.bias": f"layers.{layer_idx}.attention.wv.bias",
-  # f"model.layers.{layer_idx}.self_attn.o_proj.bias": f"layers.{layer_idx}.attention.wo.bias",
-  # f"model.layers.{layer_idx}.self_attn.sinks": f"layers.{layer_idx}.attention.sinks",
   # self attention ###############################################
   max_logging.log("Processing self attention")
   for layer_idx in tqdm(range(base_num_decoder_layers), desc="layers", leave=False):
@@ -276,9 +210,7 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
     self_attention["key"]["kernel"] = wk.transpose().reshape([base_emb_dim, base_num_kv_heads, head_dim])
     # [embed, kv, head_dim]
     self_attention["value"]["kernel"] = wv.transpose().reshape([base_emb_dim, base_num_kv_heads, head_dim])
-    # (hidden_size, num_attention_heads * head_dim) -> (hidden_size, num_attention_heads, head_dim) -> (num_attention_heads, head_dim, hidden_size)
-    # TODO: double check
-    # w_post = w_post.reshape([base_emb_dim, base_num_query_heads, head_dim]).tranpose(1, 2, 0)
+    # (hidden_size, num_attention_heads * head_dim) -> (num_attention_heads * head_dim, hidden_size) -> (num_attention_heads, head_dim, hidden_size)
     # [q, head_dim, embed]
     self_attention["out"]["kernel"] = w_post.transpose().reshape([base_num_query_heads, head_dim, base_emb_dim])
 
@@ -308,12 +240,6 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
 
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
 
-  # f"model.layers.{layer_idx}.mlp.router.weight": f"layers.{layer_idx}.feed_forward.gate.weight",
-  # f"model.layers.{layer_idx}.mlp.router.bias": f"layers.{layer_idx}.feed_forward.gate.bias",
-  # f"model.layers.{layer_idx}.mlp.experts.gate_up_proj": f"layers.{layer_idx}.feed_forward.experts.gate_up_proj",
-  # f"model.layers.{layer_idx}.mlp.experts.gate_up_proj_bias": f"layers.{layer_idx}.feed_forward.experts.gate_up_proj_bias",
-  # f"model.layers.{layer_idx}.mlp.experts.down_proj": f"layers.{layer_idx}.feed_forward.experts.down_proj",
-  # f"model.layers.{layer_idx}.mlp.experts.down_proj_bias": f"layers.{layer_idx}.feed_forward.experts.down_proj_bias",
   # layer weights ################################################
   max_logging.log("Processing layer weights")
 

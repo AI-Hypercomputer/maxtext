@@ -26,7 +26,7 @@ from flax import nnx
 
 from MaxText import max_logging
 from MaxText import max_utils
-from MaxText.common_types import MODEL_MODE_PREFILL, MODEL_MODE_TRAIN, Array, Config, DType, DecoderBlockType
+from MaxText.common_types import MODEL_MODE_PREFILL, MODEL_MODE_TRAIN, Array, Config, DType
 from MaxText.layers import nnx_wrappers
 from MaxText.layers.initializers import Initializer, default_embed_init, variable_to_logically_partitioned
 
@@ -714,136 +714,6 @@ class YarnRotaryEmbedding(nnx.Module):
       attention_scaling = 1.0 if self.rope_factor <= 1 else (0.1 * math.log(self.rope_factor) + 1.0)
       output = output * attention_scaling
 
-    if self.cast_as_fprop_dtype:
-      output = output.astype(self.fprop_dtype)
-    return output
-
-
-def gpt_oss_rotary_embedding_as_linen(
-    *,
-    embedding_dims: int,
-    max_position_embeddings: int = 4096 * 4,
-    original_max_position_embeddings: int = 4096,
-    beta_fast: float = 32,
-    beta_slow: float = 1,
-    rope_theta: float = 10000.0,
-    rope_factor: float = 40,
-    cast_as_fprop_dtype: bool = True,
-    fprop_dtype: DType = jnp.bfloat16,
-    name: str | None = None,
-):
-  """Initializes the YarnRotaryEmbedding module and returns it as a Linen module.
-
-  Args:
-    embedding_dims: The dimension of the embeddings.
-    max_position_embeddings: The maximum number of positions.
-    original_max_position_embeddings: The original maximum number of positions.
-    beta_fast: The fast beta parameter for YaRN.
-    beta_slow: The slow beta parameter for YaRN.
-    rope_theta: The base for the rotary frequencies.
-    rope_factor: The scaling factor for RoPE.
-    cast_as_fprop_dtype: Whether to cast the output to `fprop_dtype`.
-    fprop_dtype: The forward pass dtype.
-    name: The name of the module.
-  """
-  return nnx_wrappers.to_linen(
-      GptOssRotaryEmbedding,
-      embedding_dims=embedding_dims,
-      max_position_embeddings=max_position_embeddings,
-      original_max_position_embeddings=original_max_position_embeddings,
-      beta_fast=beta_fast,
-      beta_slow=beta_slow,
-      rope_theta=rope_theta,
-      rope_factor=rope_factor,
-      cast_as_fprop_dtype=cast_as_fprop_dtype,
-      fprop_dtype=fprop_dtype,
-      metadata_fn=variable_to_logically_partitioned,
-      name=name,
-  )
-
-class GptOssRotaryEmbedding(YarnRotaryEmbedding):
-  """GPT oss rotary embedding.
-
-  This implementation uses gpt-oss PyTorch as reference
-  https://github.com/huggingface/transformers/blob/afd1393df1f53bdebd6cf2778130c1d30d05d845/src/transformers/models/gpt_oss/modeling_gpt_oss.py#L169
-
-  Attributes:
-    embedding_dims: Dimension of the embedding to be generated.
-    max_position_embeddings: The maximum sequence length that will be encountered.
-    original_max_position_embeddings: The sequence length for which the base frequencies were defined.
-    beta_fast: Lower bound parameter for correction.
-    beta_slow: Upper bound parameter for correction.
-    rope_theta: The base theta value for the frequency computation.
-    rope_factor: Factor applied to adjust the frequencies.
-    cast_as_fprop_dtype: Whether to cast the output to `fprop_dtype`.
-    fprop_dtype: The forward pass dtype.
-    rngs: rng keys passed in by nnx.bridge.to_linen.
-  """
-
-  def __init__(
-      self,
-      embedding_dims: int,
-      max_position_embeddings: int = 4096 * 4,
-      original_max_position_embeddings: int = 4096,
-      beta_fast: float = 32,
-      beta_slow: float = 1,
-      rope_theta: float = 150000.0,
-      rope_factor: float = 32,
-      cast_as_fprop_dtype: bool = True,
-      fprop_dtype: DType = jnp.bfloat16,
-      truncate=True,
-      rngs: nnx.Rngs = None,
-  ):
-    """Initializes the GptOssRotaryEmbedding module."""
-    super().__init__(
-        embedding_dims=embedding_dims,
-        max_position_embeddings=max_position_embeddings,
-        original_max_position_embeddings=original_max_position_embeddings,
-        beta_fast=beta_fast,
-        beta_slow=beta_slow,
-        rope_theta=rope_theta,
-        rope_factor=rope_factor,
-        cast_as_fprop_dtype=cast_as_fprop_dtype,
-        fprop_dtype=fprop_dtype,
-        truncate=truncate,
-        rngs=rngs,
-    )
-
-  def _generate_pos_embeddings(self, positions: jax.Array) -> tuple[jax.Array, jax.Array]:
-
-    low, high = self._find_correction_range(
-        self.beta_fast,
-        self.beta_slow,
-        self.embedding_dims,
-        self.rope_theta,
-        self.original_max_position_embeddings,
-        self.truncate,
-    )
-    interp_factor = 1 - self._linear_ramp_factor(low, high, self.embedding_dims // 2)
-
-    timescale = self.rope_theta ** (jnp.arange(0, self.embedding_dims, 2, dtype=jnp.float32) / self.embedding_dims)
-    rot_freq_extra, rot_freq_inter = 1.0 / timescale, 1.0 / (self.rope_factor * timescale)
-    rotational_frequency = rot_freq_inter * (1 - interp_factor) + rot_freq_extra * interp_factor
-
-    sinusoid_inp = jnp.einsum(
-      "BT,k->BTk",
-      positions,
-      rotational_frequency,
-      precision=jax.lax.Precision.HIGHEST,
-      )
-
-    m_scale = 1.0
-    attention_scaling = 1.0 if self.rope_factor <= 1 else (0.1 * m_scale * math.log(self.rope_factor) + 1.0)
-    return jnp.sin(sinusoid_inp) * attention_scaling, jnp.cos(sinusoid_inp) * attention_scaling
-
-  def __call__(self, inputs: Array, position: None | Array = None) -> Array:
-    sin, cos = self._generate_pos_embeddings(position)
-    sin = sin[:, :, jnp.newaxis, :]
-    cos = cos[:, :, jnp.newaxis, :]
-    first_half, second_half = jnp.split(inputs, 2, axis=-1)
-    first_part = first_half * cos - second_half * sin
-    second_part = second_half * cos + first_half * sin
-    output = jnp.concatenate([first_part, second_part], axis=-1)
     if self.cast_as_fprop_dtype:
       output = output.astype(self.fprop_dtype)
     return output
