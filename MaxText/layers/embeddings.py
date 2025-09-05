@@ -571,6 +571,7 @@ class YarnRotaryEmbedding(nnx.Module):
       # Not used in YarnRotaryEmbedding but passed in by nnx.bridge.to_linen.
       # TODO: Remove when bridge no longer needed
       rngs: nnx.Rngs = None,
+      truncate=True,
   ):
     """Initializes the YarnRotaryEmbedding module."""
     self.embedding_dims = embedding_dims
@@ -583,6 +584,7 @@ class YarnRotaryEmbedding(nnx.Module):
     self.cast_as_fprop_dtype = cast_as_fprop_dtype
     self.fprop_dtype = fprop_dtype
     self.decoder_blcok = decoder_block
+    self.truncate = truncate
 
     if self.embedding_dims % 2:
       raise ValueError("Embedding dim for rotary position embedding must be a multiple of 2.")
@@ -627,8 +629,13 @@ class YarnRotaryEmbedding(nnx.Module):
     Returns:
         tuple[int, int]: The range of correction dimensions (low, high), clamped to valid indices.
     """
-    low = math.floor(self._find_correction_dim(low_rot, dim, base, max_position_embeddings))
-    high = math.ceil(self._find_correction_dim(high_rot, dim, base, max_position_embeddings))
+    low = self._find_correction_dim(low_rot, dim, base, max_position_embeddings)
+    high = self._find_correction_dim(high_rot, dim, base, max_position_embeddings)
+    if self.truncate:
+      low = math.floor(low)
+      high = math.ceil(high)
+    else:
+      print("not truncate")
     low = max(low, 0)
     high = min(high, dim - 1)
     return low, high
@@ -668,35 +675,50 @@ class YarnRotaryEmbedding(nnx.Module):
     B, S, N, H = inputs.shape
     half_dim = H // 2
 
-    # Convert the last dimension into a complex representation.
-    # First reshape so that each pair of numbers represents the real and imaginary parts.
-    inputs_reshaped = inputs.reshape(B, S, N, half_dim, 2)
-    inputs_complex = inputs_reshaped[..., 0] + 1j * inputs_reshaped[..., 1]  # shape: [B, S, N, half_dim]
-
     # Lookup the precomputed frequencies using the position indices.
     # self.freqs_cis has shape [max_position_embeddings, half_dim] so we use jnp.take along axis 0.
     # After indexing, shape becomes [B, S, half_dim]; we then add an axis for the heads.
     freqs = jnp.take(self.freqs_cis, position, axis=0)  # shape: [B, S, half_dim]
     freqs = freqs[:, :, jnp.newaxis, :]  # shape: [B, S, 1, half_dim]
 
-    # Apply the rotary transformation via complex multiplication.
-    rotated = inputs_complex * freqs  # shape: [B, S, N, half_dim]
+    if self.decoder_blcok != DecoderBlockType.GPT_OSS:
+      # Convert the last dimension into a complex representation.
+      # First reshape so that each pair of numbers represents the real and imaginary parts.
+      inputs_reshaped = inputs.reshape(B, S, N, half_dim, 2)
+      inputs_complex = inputs_reshaped[..., 0] + 1j * inputs_reshaped[..., 1]  # shape: [B, S, N, half_dim]
 
-    # Convert the complex result back to a real tensor.
-    # Split the complex number into its real and imaginary parts.
-    rotated_real = jnp.stack([jnp.real(rotated), jnp.imag(rotated)], axis=-2)  # shape: [B, S, N, 2, half_dim]
-    # # [sin1, sin2, sin3, ..., cos1, cos2, ...] at last dimension
+      # Apply the rotary transformation via complex multiplication.
+      rotated = inputs_complex * freqs  # shape: [B, S, N, half_dim]
+
+      # Convert the complex result back to a real tensor.
+      # Split the complex number into its real and imaginary parts.
+      rotated_real = jnp.stack([jnp.real(rotated), jnp.imag(rotated)], axis=-2)  # shape: [B, S, N, 2, half_dim]
+      # # [sin1, sin2, sin3, ..., cos1, cos2, ...] at last dimension
+      output = rotated_real.reshape(B, S, N, H)
 
     if self.decoder_blcok == DecoderBlockType.GPT_OSS:
       jax.debug.print("insdie of block.....")
       # swap the order and apply scaling
-      output = jnp.swapaxes(rotated_real, -2, -1)
-      m_scale = 1.0
-      attention_scaling = 1.0 if self.rope_factor <= 1 else (0.1 * m_scale * math.log(self.rope_factor) + 1.0)
+      # output = jnp.swapaxes(rotated_real, -2, -1)
+      # m_scale = 1.0
+      # attention_scaling = 1.0 if self.rope_factor <= 1 else (0.1 * m_scale * math.log(self.rope_factor) + 1.0)
+      # output = output * attention_scaling
+      # 1. CHANGE: Handle "concatenated" format instead of "interleaved"
+      # Split the last dimension into two halves.
+      first_half = inputs[..., :half_dim]
+      second_half = inputs[..., half_dim:]
+
+      # Create the complex representation from the two halves.
+      inputs_complex = first_half + 1j * second_half
+      rotated = inputs_complex * freqs
+      output = jnp.concatenate([jnp.real(rotated), jnp.imag(rotated)], axis=-1)
+      # 2. CHANGE: Add the explicit attention scaling factor
+      attention_scaling = 1.0 if self.rope_factor <= 1 else (0.1 * math.log(self.rope_factor) + 1.0)
+      jax.debug.print(attention_scaling)
       output = output * attention_scaling
 
     jax.debug.print("output of block.....")
-    output = output.reshape(B, S, N, H)
+
     if self.cast_as_fprop_dtype:
       output = output.astype(self.fprop_dtype)
     return output
@@ -775,23 +797,25 @@ class GptOssRotaryEmbedding(YarnRotaryEmbedding):
       cast_as_fprop_dtype: bool = True,
       fprop_dtype: DType = jnp.bfloat16,
       rngs: nnx.Rngs = None,
+      truncate=True,
   ):
     """Initializes the GptOssRotaryEmbedding module."""
     super().__init__(
-      embedding_dims=embedding_dims,
-      max_position_embeddings=max_position_embeddings,
-      original_max_position_embeddings=original_max_position_embeddings, 
-      beta_fast=beta_fast,
-      beta_slow=beta_slow,
-      rope_theta=rope_theta,
-      rope_factor=rope_factor,
-      cast_as_fprop_dtype=cast_as_fprop_dtype,
-      fprop_dtype=fprop_dtype,
-      rngs=rngs,
+        embedding_dims=embedding_dims,
+        max_position_embeddings=max_position_embeddings,
+        original_max_position_embeddings=original_max_position_embeddings,
+        beta_fast=beta_fast,
+        beta_slow=beta_slow,
+        rope_theta=rope_theta,
+        rope_factor=rope_factor,
+        cast_as_fprop_dtype=cast_as_fprop_dtype,
+        fprop_dtype=fprop_dtype,
+        rngs=rngs,
+        truncate=truncate,
     )
 
   def _generate_pos_embeddings(self, positions: jax.Array) -> tuple[jax.Array, jax.Array]:
-    
+
     low, high = self._find_correction_range(self.beta_fast, self.beta_slow, self.embedding_dims, self.rope_theta, self.original_max_position_embeddings)
     interp_factor = 1 - self._linear_ramp_factor(low, high, self.embedding_dims // 2)
 
