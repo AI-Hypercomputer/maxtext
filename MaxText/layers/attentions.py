@@ -468,6 +468,11 @@ class Attention(nnx.Module):
           rngs=self.rngs,
       )
 
+    self.out = self.init_out_w(output_dim=inputs_q_shape[-1])
+
+    if self.config.attention_type == AttentionType.MLA.value:
+      return  # MLA attention creates its own projections.
+
     if self.config.fused_qkv:
       self.qkv_proj = self.init_qkv_w(inputs_shape=inputs_q_shape)
     else:
@@ -475,7 +480,7 @@ class Attention(nnx.Module):
       self.key = self.init_kv_w(inputs_kv_shape=inputs_kv_shape)
       self.value = self.init_kv_w(inputs_kv_shape=inputs_kv_shape)
 
-    self.out = self.init_out_w(output_dim=inputs_q_shape[-1])
+    #self.out = self.init_out_w(output_dim=inputs_q_shape[-1])
 
     if self.config.attention_sink:
       self.sinks = nnx.Param(

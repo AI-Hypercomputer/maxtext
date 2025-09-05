@@ -81,7 +81,7 @@ def mla_as_linen(
     float32_logits: bool = False,  # cast logits in float32 for stability.
     quant: Optional[Quant] = None,
     kv_quant: Optional[KVQuant] = None,
-    attention_type: AttentionType = AttentionType.GLOBAL,  # Default to global attention
+    attention_type: AttentionType = AttentionType.MLA,  # Default to global attention
     attn_logits_soft_cap: float | None = None,
     sliding_window_size: int | None = None,
     use_ragged_attention: bool = False,
@@ -229,7 +229,7 @@ class MLA(Attention):
       float32_logits: bool = False,  # cast logits in float32 for stability.
       quant: Optional[Quant] = None,
       kv_quant: Optional[KVQuant] = None,
-      attention_type: AttentionType = AttentionType.GLOBAL,  # Default to global attention
+      attention_type: AttentionType = AttentionType.MLA,  # Default to global attention
       attn_logits_soft_cap: float | None = None,
       sliding_window_size: int | None = None,
       use_ragged_attention: bool = False,
