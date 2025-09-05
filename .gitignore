@@ -75,6 +75,9 @@ instance/
 # Sphinx documentation
 docs/_build/
 
+# src/MaxText/experimental/agent/integrative_rag_agent
+*.db
+
 # PyBuilder
 target/
 
@@ -121,8 +124,9 @@ venv.bak/
 # Rope project settings
 .ropeproject
 
-# mkdocs documentation
-/site
+# docs
+out
+docs/reference/api_generated
 
 # mypy
 .mypy_cache/

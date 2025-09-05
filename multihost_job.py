@@ -43,7 +43,7 @@ import subprocess
 from datetime import datetime
 import os
 import shutil
-from inference_utils import str2bool
+from MaxText.inference_utils import str2bool
 
 
 
@@ -99,7 +99,7 @@ def move_script_dir_to_gcs(script_dir, tmp_dir, zip_name, bucket_path):
   subprocess.run(command, check=True)
 
   # Move zip file to GCS
-  zip_in_gcs_path = os.path.join(bucket_path, zip_name)
+  zip_in_gcs_path = "/".join((bucket_path, zip_name))
   command = ["gsutil", "mv", zip_path, zip_in_gcs_path]
   captured_output = subprocess.run(command, check=True, capture_output=True)
 
@@ -249,7 +249,7 @@ def google_cloud_logging_single_host_url(run_name, project):
   return f"https://console.cloud.google.com/logs/query;query=resource.type%3D%22gce_instance%22%20AND%0Alog_id%2528%22{run_name}_log%22%2529%20AND%0Alabels.%22agent.googleapis.com%2Flog_file_path%22%3D%20%22%2F{run_name}%2Fmain_command_log_slice_0_worker_0%22;?project={project}"
 
 def gcs_bucket_url(bucket_name, bucket_dir, project):
-  bucket_path = os.path.join(bucket_name, bucket_dir)
+  bucket_path = "/".join((bucket_name, bucket_dir))
   return f"https://console.cloud.google.com/storage/browser/{bucket_path}?project={project}"
 
 ################### Main ###################
@@ -306,7 +306,7 @@ def main(raw_args=None) -> None:
   tmp_dir = os.path.join(args.SCRIPT_DIR, tmp_dir_relative_to_script)
   zip_name = f"script_dir_zip_{args.RUN_NAME}.tar.gz"
   bucket_dir = os.path.join(args.BUCKET_DIR, args.RUN_NAME)
-  bucket_path = os.path.join(f"gs://{args.BUCKET_NAME}", bucket_dir)
+  bucket_path = f"gs://{args.BUCKET_NAME}/{bucket_dir}"
   startup_script_file = os.path.join(tmp_dir, "startup_script.txt")
 
   print(f"Moving {args.SCRIPT_DIR} to {bucket_path}...")

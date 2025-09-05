@@ -9,7 +9,7 @@
 # Example Usage: export BASE_OUTPUT_PATH=/path/to/GCS/bucket; export MODEL_VARIATION=llama4-17b-[16e/128e]; bash end_to_end/tpu/llama4/1_test_llama4.sh
 # Use the same BASE_OUTPUT_PATH and MODEL_VARIATION for both 1_test_llama4.sh & 1_test_llama4.sh.
 
-# In order to generate the Llama4 golden logits, please see this script: MaxText/scratch_code/golden_llama4_17b_16e_128e_export.ipynb
+# In order to generate the Llama4 golden logits, please see this script: src/MaxText/scratch_code/golden_llama4_17b_16e_128e_export.ipynb
 
 set -ex
 idx=$(date +%Y-%m-%d)
