@@ -29,6 +29,11 @@ from benchmarks.api_server.server_models import (
     ChatMessage,
 )
 from benchmarks.api_server import server_utils
+from openai_harmony import (
+    load_harmony_encoding,
+    HarmonyEncodingName,
+    Role,
+)
 
 # ----------------------------
 # Init
@@ -46,6 +51,15 @@ rank = jax.process_index()
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO) # Ensure our logger passes INFO messages.
 logger.info("MaxTextGenerator initialization complete.")
+
+harmony_enc = None
+try:
+    harmony_enc = load_harmony_encoding(HarmonyEncodingName.HARMONY_GPT_OSS)
+    logger.info("Harmony encoding for gpt-oss loaded successfully.")
+except ImportError:
+    logger.warning("openai_harmony not installed. GPT-OSS Harmony format will not be available.")
+except Exception as e:
+    logger.error(f"Failed to load Harmony encoding: {e}")
 
 
 app = FastAPI()
@@ -117,7 +131,25 @@ def _create_response(request, completions, prompts, is_chat, llm, formatted_prom
     """Creates either a CompletionResponse or ChatCompletionResponse."""
     if is_chat:
         result = completions[0]
-        text_out, _, finish_reason = server_utils.apply_stops_to_text_and_logprobs(result.text, None, request.stop)
+        text_out = result.text
+        if "gpt-oss" in request.model and harmony_enc:
+            try:
+                parsed_messages = harmony_enc.parse_messages_from_completion_tokens(result.tokens, role=Role.ASSISTANT)
+                user_visible = "".join(
+                    m.content for m in parsed_messages 
+                    if m.role == Role.ASSISTANT and m.channel == "final"
+                )
+                if user_visible:
+                    text_out = user_visible
+                else:
+                    logger.warning("Harmony parsing for gpt-oss did not yield content in the 'final' channel. Falling back to raw text.")
+            except Exception as e:
+                logger.error(f"Harmony parsing failed for gpt-oss: {e}. Falling back to raw text.")
+        
+        lp_payload = server_utils.to_openai_logprobs(
+            getattr(result, "logprobs", None), llm, want_top=(request.top_logprobs or 0) > 0 if isinstance(request, ChatCompletionRequest) else (request.logprobs or 0) > 0
+        )
+        text_out, lp_payload, finish_reason = server_utils.apply_stops_to_text_and_logprobs(text_out, lp_payload, request.stop)
         if finish_reason is None:
             finish_reason = result.finish_reason
 
@@ -133,6 +165,7 @@ def _create_response(request, completions, prompts, is_chat, llm, formatted_prom
                     index=0,
                     message=ChatMessage(role="assistant", content=text_out),
                     finish_reason=finish_reason,
+                    logprobs=lp_payload,
                 )
             ],
             usage=usage,
@@ -194,9 +227,18 @@ def main_loop():
         if jax.process_index() == 0 and batched_items_rank_0:
             first_request_id, first_request = batched_items_rank_0[0]
 
+            logprobs_param = None
+            if isinstance(first_request, ChatCompletionRequest):
+                if first_request.logprobs:
+                    # If logprobs are enabled, we need to pass an integer to the generator.
+                    # We'll use top_logprobs if provided, otherwise default to 1 to just get the sampled token's logprob.
+                    logprobs_param = first_request.top_logprobs if first_request.top_logprobs is not None else 1
+            else:  # CompletionRequest
+                logprobs_param = first_request.logprobs
+
             params = {
                 "max_tokens": first_request.max_tokens,
-                "logprobs": getattr(first_request, "logprobs", None) or getattr(first_request, "top_logprobs", None),
+                "logprobs": logprobs_param,
                 "echo": getattr(first_request, "echo", False),
                 "stop": first_request.stop,
                 "temperature": first_request.temperature,
