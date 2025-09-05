@@ -15,7 +15,7 @@
 import argparse
 import os
 
-from benchmarks.xpk_configs import XpkClusterConfig
+from MaxText.benchmarks.xpk_configs import XpkClusterConfig
 
 # Constants for defining supported actions
 DELETE = "delete"

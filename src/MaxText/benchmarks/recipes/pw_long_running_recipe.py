@@ -13,13 +13,16 @@
 # limitations under the License.
 
 import datetime
-import sys
 import os
 
-import benchmarks.recipes.args_helper as helper
-import benchmarks.maxtext_trillium_model_configs as model_configs
-import benchmarks.maxtext_xpk_runner as mxr
-from benchmarks.xpk_configs import XpkClusterConfig
+from MaxText.benchmarks.recipes import args_helper as helper
+from MaxText.benchmarks import maxtext_trillium_model_configs as model_configs
+from MaxText.benchmarks import maxtext_xpk_runner as mxr
+from MaxText.benchmarks.xpk_configs import XpkClusterConfig
+
+PROXY_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server"
+SERVER_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server"
+RUNNER = "us-docker.pkg.dev/path/to/maxtext_runner"
 
 # Cluster Params
 CLUSTER = "v6e-256-cluster"
@@ -30,13 +33,11 @@ COUNTRY = "us"
 DEVICE_TYPE = "v6e-256"
 
 # Other parameters (MUST BE SET BY USER)
-XPK_PATH = os.path.join("~", "xpk")
+XPK_PATH = os.path.join("~", "xpk")  # We're running this script from the maxtext directory
 USER = os.environ["USER"]
 BASE_OUTPUT_DIRECTORY = (
-    f"gs://{USER}-{PROJECT}-{COUNTRY}/mcjax_long_run/"
+    f"gs://{USER}-{PROJECT}-{COUNTRY}/pw_long_run/"
 )
-# Generate your own runner image from MaxText repo.
-RUNNER = f"gcr.io/{PROJECT}/{USER}_latest"
 
 MAX_RESTARTS = 10_000
 BENCHMARK_STEPS=10_000_000
@@ -62,9 +63,25 @@ def main() -> int:
   model_list = [
       # model_configs.llama3_1_70b_8192_pw_lr_real_data,
       # model_configs.llama3_1_8b_8192,
-      model_configs.llama3_1_70b_8192_iter_synth_data_and_checkpointing,
+      # model_configs.llama3_1_70b_8192_iter_synth_data_and_checkpointing,
       # model_configs.llama3_1_70b_8192_iter_real_data_and_checkpointing_tfds,
+      model_configs.llama3_1_70b_8192_iter_synthetic,
   ]
+
+  pathways_config = mxr.PathwaysConfig(
+      server_image=SERVER_IMAGE,
+      proxy_server_image=PROXY_IMAGE,
+      runner_image=RUNNER,
+
+      # User can add additional flags here.
+      server_flags="--enable_metrics_collection=true",
+      proxy_flags="--enable_metrics_collection=true",
+      worker_flags="--enable_metrics_collection=true",
+
+      # server_flags="--enable_metrics_collection=false",
+      # proxy_flags="--enable_metrics_collection=false",
+      # worker_flags="--enable_metrics_collection=false",
+  )
   num_slices_list = [
       2
   ]
@@ -83,6 +100,7 @@ def main() -> int:
       model.tuning_params["use_vertex_tensorboard"] = True
       model.tuning_params["vertex_tensorboard_project"] = PROJECT
       model.tuning_params["vertex_tensorboard_region"] = REGION
+      model.tuning_params["profiler"] = "xplane"
 
       # Run workloads in the following slice configurations
       for num_slices in num_slices_list:
@@ -92,9 +110,10 @@ def main() -> int:
             device_type=cluster_config.device_type,
             base_output_directory=BASE_OUTPUT_DIRECTORY,
             max_restarts=MAX_RESTARTS,
-            libtpu_type=mxr.LibTpuType.MAXTEXT,
+            libtpu_type=None,
             libtpu_nightly_version="",
-            base_docker_image=RUNNER,
+            base_docker_image=None,
+            pathways_config=pathways_config,
             xpk_path=XPK_PATH,
             num_steps=BENCHMARK_STEPS,
             priority="medium",

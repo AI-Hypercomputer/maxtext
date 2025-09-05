@@ -13,11 +13,11 @@
 # limitations under the License.
 
 import os
-import args_helper as helper
 
-from benchmarks import maxtext_trillium_model_configs as model_configs
-from benchmarks import maxtext_xpk_runner as mxr
-from benchmarks.xpk_configs import XpkClusterConfig
+from MaxText.benchmarks.recipes import args_helper as helper
+from MaxText.benchmarks import maxtext_trillium_model_configs as model_configs
+from MaxText.benchmarks import maxtext_xpk_runner as mxr
+from MaxText.benchmarks.xpk_configs import XpkClusterConfig
 
 
 def main() -> int:
@@ -98,6 +98,7 @@ def main() -> int:
         print(f"XPK command to be used is: {command} \n")
         xpk_workload_cmds.append(command)
 
+  return_code = 0
   for xpk_workload_name, xpk_workload_cmd in zip(
       xpk_workload_names, xpk_workload_cmds
   ):
@@ -106,6 +107,7 @@ def main() -> int:
     )
     if return_code != 0:
       print(f"Unable to run xpk workload: {xpk_workload_name}")
+  return return_code
 
 
 if __name__ == "__main__":

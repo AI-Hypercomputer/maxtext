@@ -16,12 +16,12 @@ from collections import defaultdict
 import threading
 from typing import List
 
-from benchmarks.disruption_management.disruption_handler import create_disruption_handler
-from benchmarks.disruption_management.disruption_handler import DisruptionConfig
-from benchmarks.disruption_management.disruption_handler import DisruptionHandler
-from benchmarks.disruption_management.monitor import create_monitor
-from benchmarks.disruption_management.monitor import Monitor
-from benchmarks.xpk_configs import XpkClusterConfig
+from MaxText.benchmarks.disruption_management.disruption_handler import create_disruption_handler
+from MaxText.benchmarks.disruption_management.disruption_handler import DisruptionConfig
+from MaxText.benchmarks.disruption_management.disruption_handler import DisruptionHandler
+from MaxText.benchmarks.disruption_management.monitor import create_monitor
+from MaxText.benchmarks.disruption_management.monitor import Monitor
+from MaxText.benchmarks.xpk_configs import XpkClusterConfig
 
 
 class DisruptionManager:

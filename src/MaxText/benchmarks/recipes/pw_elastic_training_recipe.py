@@ -14,19 +14,18 @@
 
 import os
 
-import args_helper as helper
-
-from benchmarks.disruption_management.disruption_handler import DisruptionConfig
-from benchmarks.disruption_management.disruption_handler import DisruptionMethod
-from benchmarks.disruption_management.disruption_handler import MCJAX_STANDARD_TARGET_POD_REGEX_SUFFIX
-from benchmarks.disruption_management.disruption_handler import MCJAX_WORKER_CONTAINER_NAME
-from benchmarks.disruption_management.disruption_handler import PATHWAYS_STANDARD_TARGET_POD_REGEX_SUFFIX
-from benchmarks.disruption_management.disruption_handler import PATHWAYS_WORKER_CONTAINER_NAME
-from benchmarks.disruption_management.disruption_handler import TriggerType
-from benchmarks.maxtext_trillium_model_configs import MaxTextModel
-from benchmarks import maxtext_v5e_model_configs as v5e_model_configs
-from benchmarks import maxtext_xpk_runner as mxr
-from benchmarks.xpk_configs import XpkClusterConfig
+from MaxText.benchmarks.recipes import args_helper as helper
+from MaxText.benchmarks.disruption_management.disruption_handler import DisruptionConfig
+from MaxText.benchmarks.disruption_management.disruption_handler import DisruptionMethod
+from MaxText.benchmarks.disruption_management.disruption_handler import MCJAX_STANDARD_TARGET_POD_REGEX_SUFFIX
+from MaxText.benchmarks.disruption_management.disruption_handler import MCJAX_WORKER_CONTAINER_NAME
+from MaxText.benchmarks.disruption_management.disruption_handler import PATHWAYS_STANDARD_TARGET_POD_REGEX_SUFFIX
+from MaxText.benchmarks.disruption_management.disruption_handler import PATHWAYS_WORKER_CONTAINER_NAME
+from MaxText.benchmarks.disruption_management.disruption_handler import TriggerType
+from MaxText.benchmarks.maxtext_trillium_model_configs import MaxTextModel
+from MaxText.benchmarks import maxtext_v5e_model_configs as v5e_model_configs
+from MaxText.benchmarks import maxtext_xpk_runner as mxr
+from MaxText.benchmarks.xpk_configs import XpkClusterConfig
 
 PROXY_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server"
 SERVER_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server"

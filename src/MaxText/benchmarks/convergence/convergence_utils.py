@@ -24,7 +24,8 @@ new_config = _setup_model_convergence_(
 """
 import dataclasses
 import math
-from benchmarks.benchmark_utils import _add_to_model_dictionary, MaxTextModel
+
+from MaxText.benchmarks.benchmark_utils import MaxTextModel
 
 @dataclasses.dataclass
 class DatasetHParams:

@@ -16,8 +16,8 @@
 
 import os
 
-import maxtext_xpk_runner as mxr
-from xpk_configs import XpkClusterConfig
+from MaxText.benchmarks import maxtext_xpk_runner as mxr
+from MaxText.benchmarks.xpk_configs import XpkClusterConfig
 
 cluster_config = XpkClusterConfig(
     cluster_name="test-v5e-32-cluster",

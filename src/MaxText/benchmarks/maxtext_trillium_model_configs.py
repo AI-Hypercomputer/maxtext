@@ -15,9 +15,10 @@
 
 import os.path
 from tempfile import gettempdir
-from benchmarks.benchmark_utils import MaxTextModel, _add_to_model_dictionary
-from benchmarks import xla_flags_library
-from benchmarks.globals import MAXTEXT_ASSETS_ROOT
+
+from MaxText.benchmarks.benchmark_utils import MaxTextModel, _add_to_model_dictionary
+from MaxText.benchmarks import xla_flags_library
+from MaxText.globals import MAXTEXT_ASSETS_ROOT
 
 # TODO(vbarr@) Abstract software features like checkpointing,
 # real data / synthetic data out of this config
@@ -104,8 +105,8 @@ default_32 = _add_to_model_dictionary(
             "sa_block_q_dq": 2048,
         },
         xla_flags=(
-            xla_flags_library.DENSE_VMEM_LIMIT_FLAG
-            + xla_flags_library.CF_FOR_ALL_GATHER
+                xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+                + xla_flags_library.CF_FOR_ALL_GATHER
         ),
     ),
 )
@@ -134,8 +135,8 @@ default_64 = _add_to_model_dictionary(
             "sa_block_q_dq": 2048,
         },
         xla_flags=(
-            xla_flags_library.DENSE_VMEM_LIMIT_FLAG
-            + xla_flags_library.CF_FOR_ALL_GATHER
+                xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+                + xla_flags_library.CF_FOR_ALL_GATHER
         ),
     ),
 )
@@ -164,8 +165,8 @@ default_128 = _add_to_model_dictionary(
             "sa_block_q_dq": 2048,
         },
         xla_flags=(
-            xla_flags_library.DENSE_VMEM_LIMIT_FLAG
-            + xla_flags_library.CF_FOR_ALL_GATHER
+                xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+                + xla_flags_library.CF_FOR_ALL_GATHER
         ),
     ),
 )
@@ -196,8 +197,8 @@ default_256 = _add_to_model_dictionary(
             "sa_block_q_dq": 2048,
         },
         xla_flags=(
-            xla_flags_library.DENSE_VMEM_LIMIT_FLAG
-            + xla_flags_library.CF_FOR_ALL_GATHER
+                xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+                + xla_flags_library.CF_FOR_ALL_GATHER
         ),
     ),
 )
@@ -229,8 +230,8 @@ default_512 = _add_to_model_dictionary(
             "sa_block_q_dq": 2048,
         },
         xla_flags=(
-            xla_flags_library.DENSE_VMEM_LIMIT_FLAG
-            + xla_flags_library.CF_FOR_ALL_GATHER
+                xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+                + xla_flags_library.CF_FOR_ALL_GATHER
         ),
     ),
 )
@@ -257,10 +258,10 @@ gpt_3_175b = _add_to_model_dictionary(
             "sa_block_q_dq": 2048,
         },
         xla_flags=(
-            xla_flags_library.DENSE_VMEM_LIMIT_FLAG
-            + xla_flags_library.CF_FOR_ALL_GATHER
-            + xla_flags_library.DATA_PARALLEL_OVERLAP
-            + xla_flags_library.DISABLE_BUNDLE_AWARE_COST_MODEL
+                xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+                + xla_flags_library.CF_FOR_ALL_GATHER
+                + xla_flags_library.DATA_PARALLEL_OVERLAP
+                + xla_flags_library.DISABLE_BUNDLE_AWARE_COST_MODEL
         ),
     ),
 )
@@ -285,10 +286,10 @@ gpt_3_175b_bf16 = _add_to_model_dictionary(
             "sa_block_q_dq": 2048,
         },
         xla_flags=(
-            xla_flags_library.DENSE_VMEM_LIMIT_FLAG
-            + xla_flags_library.CF_FOR_ALL_GATHER
-            + xla_flags_library.DATA_PARALLEL_OVERLAP
-            + xla_flags_library.DISABLE_BUNDLE_AWARE_COST_MODEL
+                xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+                + xla_flags_library.CF_FOR_ALL_GATHER
+                + xla_flags_library.DATA_PARALLEL_OVERLAP
+                + xla_flags_library.DISABLE_BUNDLE_AWARE_COST_MODEL
         ),
     ),
 )
@@ -317,8 +318,8 @@ llama2_7b_4096 = _add_to_model_dictionary(
             "sa_block_q_dq": 2048,
         },
         xla_flags=(
-            xla_flags_library.DENSE_VMEM_LIMIT_FLAG
-            + xla_flags_library.CF_FOR_ALL_GATHER
+                xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+                + xla_flags_library.CF_FOR_ALL_GATHER
         ),
     ),
 )
@@ -349,8 +350,8 @@ llama2_70b_4096 = _add_to_model_dictionary(
             "sa_block_q_dq": 2048,
         },
         xla_flags=(
-            xla_flags_library.DENSE_VMEM_LIMIT_FLAG
-            + xla_flags_library.CF_FOR_ALL_GATHER
+                xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+                + xla_flags_library.CF_FOR_ALL_GATHER
         ),
     ),
 )
@@ -380,8 +381,8 @@ llama2_70b_4096_optimized = _add_to_model_dictionary(
             "sa_block_q_dq": 2048,
         },
         xla_flags=(
-            xla_flags_library.DENSE_VMEM_LIMIT_FLAG
-            + xla_flags_library.CF_FOR_ALL_GATHER
+                xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+                + xla_flags_library.CF_FOR_ALL_GATHER
         ),
     ),
 )
@@ -412,9 +413,9 @@ llama2_70b_4096_sc = _add_to_model_dictionary(
             "sa_block_q_dq": 2048,
         },
         xla_flags=(
-            xla_flags_library.DENSE_VMEM_LIMIT_FLAG
-            + xla_flags_library.CF_FOR_ALL_GATHER
-            + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_REDUCE
+                xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+                + xla_flags_library.CF_FOR_ALL_GATHER
+                + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_REDUCE
         ),
         pathways_xla_flag_options={
             xla_flags_library.REMOVE: [
@@ -457,9 +458,9 @@ llama2_70b_4096_sc_real_data_tfds = _add_to_model_dictionary(
             "sa_block_q_dq": 2048,
         },
         xla_flags=(
-            xla_flags_library.DENSE_VMEM_LIMIT_FLAG
-            + xla_flags_library.CF_FOR_ALL_GATHER
-            + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_REDUCE
+                xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+                + xla_flags_library.CF_FOR_ALL_GATHER
+                + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_REDUCE
         ),
         pathways_xla_flag_options={
             xla_flags_library.REMOVE: [
@@ -512,9 +513,9 @@ llama2_70b_4096_sc_real_data_grain = _add_to_model_dictionary(
         },
         pathways_tuning_params=PATHWAYS_LONG_RUN_CHECKPOINTING_TUNING_PARAMS,
         xla_flags=(
-            xla_flags_library.DENSE_VMEM_LIMIT_FLAG
-            + xla_flags_library.CF_FOR_ALL_GATHER
-            + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_REDUCE
+                xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+                + xla_flags_library.CF_FOR_ALL_GATHER
+                + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_REDUCE
         ),
         pathways_xla_flag_options={
             xla_flags_library.REMOVE: [
@@ -568,9 +569,9 @@ llama2_70b_4096_sc_real_data_grain_checkpoint = _add_to_model_dictionary(
         },
         pathways_tuning_params=PATHWAYS_LONG_RUN_CHECKPOINTING_TUNING_PARAMS,
         xla_flags=(
-            xla_flags_library.DENSE_VMEM_LIMIT_FLAG
-            + xla_flags_library.CF_FOR_ALL_GATHER
-            + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_REDUCE
+                xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+                + xla_flags_library.CF_FOR_ALL_GATHER
+                + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_REDUCE
         ),
         pathways_xla_flag_options={
             xla_flags_library.REMOVE: [
@@ -613,8 +614,8 @@ llama2_70b_4096_real_data_long_run = _add_to_model_dictionary(
         },
         pathways_tuning_params=PATHWAYS_LONG_RUN_CHECKPOINTING_TUNING_PARAMS,
         xla_flags=(
-            xla_flags_library.DENSE_VMEM_LIMIT_FLAG
-            + xla_flags_library.CF_FOR_ALL_GATHER
+                xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+                + xla_flags_library.CF_FOR_ALL_GATHER
         ),
         pathways_xla_flag_options={
             xla_flags_library.ADD_SERVER: (
@@ -654,8 +655,8 @@ llama3_8b_8192 = _add_to_model_dictionary(
             "sa_block_q_dq": 2048,
         },
         xla_flags=(
-            xla_flags_library.DENSE_VMEM_LIMIT_FLAG
-            + xla_flags_library.CF_FOR_ALL_GATHER
+                xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+                + xla_flags_library.CF_FOR_ALL_GATHER
         ),
         pathways_xla_flag_options={
             xla_flags_library.ADD_SERVER: (
@@ -697,10 +698,10 @@ llama3_70b_8192 = _add_to_model_dictionary(
             "sa_block_q_dq": 2048,
         },
         xla_flags=(
-            xla_flags_library.DENSE_VMEM_LIMIT_FLAG
-            + xla_flags_library.CF_FOR_ALL_GATHER
-            + xla_flags_library.HOST_OFFLOAD_FLAGS
-            + " --xla_tpu_scheduler_percent_shared_memory_limit=90"
+                xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+                + xla_flags_library.CF_FOR_ALL_GATHER
+                + xla_flags_library.HOST_OFFLOAD_FLAGS
+                + " --xla_tpu_scheduler_percent_shared_memory_limit=90"
         ),
         pathways_xla_flag_options={
             xla_flags_library.REMOVE: [
@@ -752,9 +753,9 @@ llama3_1_405b_8192_fsdp_dcn = _add_to_model_dictionary(
             "sa_block_q_dq": 2048,
         },
         xla_flags=(
-            xla_flags_library.DENSE_VMEM_LIMIT_FLAG
-            + xla_flags_library.CF_FOR_ALL_GATHER
-            + xla_flags_library.HOST_OFFLOAD_FLAGS
+                xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+                + xla_flags_library.CF_FOR_ALL_GATHER
+                + xla_flags_library.HOST_OFFLOAD_FLAGS
         ),
         pathways_xla_flag_options={
             xla_flags_library.REMOVE: [
@@ -799,9 +800,9 @@ llama3_1_405b_8192_pure_fsdp_ici = _add_to_model_dictionary(
         "sa_block_q_dq": 2048,
     },
     xla_flags=(
-        xla_flags_library.DENSE_VMEM_LIMIT_FLAG
-        + xla_flags_library.CF_FOR_ALL_GATHER
-        + xla_flags_library.HOST_OFFLOAD_FLAGS
+            xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+            + xla_flags_library.CF_FOR_ALL_GATHER
+            + xla_flags_library.HOST_OFFLOAD_FLAGS
     ),
   )
 )
@@ -840,12 +841,12 @@ llama3_1_8b_8192 = _add_to_model_dictionary(
             "profiler_steps": 5,
         },
         xla_flags=(
-            xla_flags_library.DENSE_VMEM_LIMIT_FLAG
-            + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
-            + xla_flags_library.DATA_PARALLEL_OVERLAP
-            + xla_flags_library.CF_FOR_ALL_GATHER
-            + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_REDUCE
-            + xla_flags_library.HOST_OFFLOAD_FLAGS
+                xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+                + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
+                + xla_flags_library.DATA_PARALLEL_OVERLAP
+                + xla_flags_library.CF_FOR_ALL_GATHER
+                + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_REDUCE
+                + xla_flags_library.HOST_OFFLOAD_FLAGS
         ),
         pathways_xla_flag_options={
             xla_flags_library.REMOVE: [
@@ -899,12 +900,12 @@ llama3_1_8b_8192_bs5 = _add_to_model_dictionary(
             "profiler_steps": 5,
         },
         xla_flags=(
-            xla_flags_library.DENSE_VMEM_LIMIT_FLAG
-            + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
-            + xla_flags_library.DATA_PARALLEL_OVERLAP
-            + xla_flags_library.CF_FOR_ALL_GATHER
-            + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_REDUCE
-            + xla_flags_library.HOST_OFFLOAD_FLAGS
+                xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+                + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
+                + xla_flags_library.DATA_PARALLEL_OVERLAP
+                + xla_flags_library.CF_FOR_ALL_GATHER
+                + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_REDUCE
+                + xla_flags_library.HOST_OFFLOAD_FLAGS
         ),
     ),
 )
@@ -944,13 +945,13 @@ llama3_1_8b_8192_no_collective_matmul = _add_to_model_dictionary(
         "profiler_steps": 5,
     },
     xla_flags=(
-        xla_flags_library.DENSE_VMEM_LIMIT_FLAG
-        + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
-        + xla_flags_library.DATA_PARALLEL_OVERLAP
-        + xla_flags_library.CF_FOR_ALL_GATHER
-        + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_REDUCE
-        + xla_flags_library.HOST_OFFLOAD_FLAGS
-        + xla_flags_library.DISABLE_COLLECTIVE_MATMUL
+            xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+            + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
+            + xla_flags_library.DATA_PARALLEL_OVERLAP
+            + xla_flags_library.CF_FOR_ALL_GATHER
+            + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_REDUCE
+            + xla_flags_library.HOST_OFFLOAD_FLAGS
+            + xla_flags_library.DISABLE_COLLECTIVE_MATMUL
     ),
   )
 )
@@ -989,11 +990,11 @@ llama3_1_70b_8192 = _add_to_model_dictionary(
             "profiler_steps": 5,
         },
         xla_flags=(
-            xla_flags_library.DENSE_VMEM_LIMIT_FLAG
-            + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
-            + xla_flags_library.DATA_PARALLEL_OVERLAP
-            + xla_flags_library.CF_FOR_ALL_GATHER
-            + xla_flags_library.HOST_OFFLOAD_FLAGS
+                xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+                + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
+                + xla_flags_library.DATA_PARALLEL_OVERLAP
+                + xla_flags_library.CF_FOR_ALL_GATHER
+                + xla_flags_library.HOST_OFFLOAD_FLAGS
         ),
     ),
 )
@@ -1032,11 +1033,11 @@ llama3_1_70b_8192_bs2 = _add_to_model_dictionary(
             "profiler_steps": 5,
         },
         xla_flags=(
-            xla_flags_library.DENSE_VMEM_LIMIT_FLAG
-            + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
-            + xla_flags_library.DATA_PARALLEL_OVERLAP
-            + xla_flags_library.CF_FOR_ALL_GATHER
-            + xla_flags_library.HOST_OFFLOAD_FLAGS
+                xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+                + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
+                + xla_flags_library.DATA_PARALLEL_OVERLAP
+                + xla_flags_library.CF_FOR_ALL_GATHER
+                + xla_flags_library.HOST_OFFLOAD_FLAGS
         ),
     ),
 )
@@ -1076,12 +1077,12 @@ llama3_1_70b_8192_bs2_bfloat16_no_collective_matmul = _add_to_model_dictionary(
             "weight_dtype": "bfloat16",
         },
         xla_flags=(
-            xla_flags_library.DENSE_VMEM_LIMIT_FLAG
-            + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
-            + xla_flags_library.DATA_PARALLEL_OVERLAP
-            + xla_flags_library.CF_FOR_ALL_GATHER
-            + xla_flags_library.HOST_OFFLOAD_FLAGS
-            + xla_flags_library.DISABLE_COLLECTIVE_MATMUL
+                xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+                + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
+                + xla_flags_library.DATA_PARALLEL_OVERLAP
+                + xla_flags_library.CF_FOR_ALL_GATHER
+                + xla_flags_library.HOST_OFFLOAD_FLAGS
+                + xla_flags_library.DISABLE_COLLECTIVE_MATMUL
         ),
     ),
 )
@@ -1120,11 +1121,11 @@ llama3_1_70b_8192_bs4 = _add_to_model_dictionary(
             "profiler_steps": 5,
         },
         xla_flags=(
-            xla_flags_library.DENSE_VMEM_LIMIT_FLAG
-            + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
-            + xla_flags_library.DATA_PARALLEL_OVERLAP
-            + xla_flags_library.CF_FOR_ALL_GATHER
-            + xla_flags_library.HOST_OFFLOAD_FLAGS
+                xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+                + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
+                + xla_flags_library.DATA_PARALLEL_OVERLAP
+                + xla_flags_library.CF_FOR_ALL_GATHER
+                + xla_flags_library.HOST_OFFLOAD_FLAGS
         ),
     ),
 )
@@ -1158,13 +1159,13 @@ llama3_1_70b_8192_iter_synthetic = _add_to_model_dictionary(
         "sa_use_fused_bwd_kernel": True,
     },
     xla_flags=(
-        xla_flags_library.DENSE_VMEM_LIMIT_FLAG
-        + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
-        + xla_flags_library.DATA_PARALLEL_OVERLAP
-        + xla_flags_library.CF_FOR_ALL_GATHER
-        + xla_flags_library.HOST_OFFLOAD_FLAGS
-        + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_REDUCE
-        +  " --xla_tpu_iova_dma_chunk_size_bytes=104857"
+            xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+            + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
+            + xla_flags_library.DATA_PARALLEL_OVERLAP
+            + xla_flags_library.CF_FOR_ALL_GATHER
+            + xla_flags_library.HOST_OFFLOAD_FLAGS
+            + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_REDUCE
+            + " --xla_tpu_iova_dma_chunk_size_bytes=104857"
     ),
   )
 )
@@ -1201,13 +1202,13 @@ llama3_1_70b_8192_iter_real_data_grain = _add_to_model_dictionary(
         "sa_use_fused_bwd_kernel": True,
     },
     xla_flags=(
-        xla_flags_library.DENSE_VMEM_LIMIT_FLAG
-        + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
-        + xla_flags_library.DATA_PARALLEL_OVERLAP
-        + xla_flags_library.CF_FOR_ALL_GATHER
-        + xla_flags_library.HOST_OFFLOAD_FLAGS
-        + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_REDUCE
-        +  " --xla_tpu_iova_dma_chunk_size_bytes=104857"
+            xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+            + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
+            + xla_flags_library.DATA_PARALLEL_OVERLAP
+            + xla_flags_library.CF_FOR_ALL_GATHER
+            + xla_flags_library.HOST_OFFLOAD_FLAGS
+            + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_REDUCE
+            + " --xla_tpu_iova_dma_chunk_size_bytes=104857"
     ),
   )
 )
@@ -1243,13 +1244,13 @@ llama3_1_70b_8192_iter_synthetic_ckpt = _add_to_model_dictionary(
         "sa_use_fused_bwd_kernel": True,
     },
     xla_flags=(
-        xla_flags_library.DENSE_VMEM_LIMIT_FLAG
-        + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
-        + xla_flags_library.DATA_PARALLEL_OVERLAP
-        + xla_flags_library.CF_FOR_ALL_GATHER
-        + xla_flags_library.HOST_OFFLOAD_FLAGS
-        + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_REDUCE
-        +  " --xla_tpu_iova_dma_chunk_size_bytes=104857"
+            xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+            + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
+            + xla_flags_library.DATA_PARALLEL_OVERLAP
+            + xla_flags_library.CF_FOR_ALL_GATHER
+            + xla_flags_library.HOST_OFFLOAD_FLAGS
+            + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_REDUCE
+            + " --xla_tpu_iova_dma_chunk_size_bytes=104857"
     ),
   )
 )
@@ -1288,13 +1289,13 @@ llama3_1_70b_8192_iter_real_data_and_checkpointing = _add_to_model_dictionary(
         "sa_use_fused_bwd_kernel": True,
     },
     xla_flags=(
-        xla_flags_library.DENSE_VMEM_LIMIT_FLAG
-        + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
-        + xla_flags_library.DATA_PARALLEL_OVERLAP
-        + xla_flags_library.CF_FOR_ALL_GATHER
-        + xla_flags_library.HOST_OFFLOAD_FLAGS
-        + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_REDUCE
-        +  " --xla_tpu_iova_dma_chunk_size_bytes=104857"
+            xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+            + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
+            + xla_flags_library.DATA_PARALLEL_OVERLAP
+            + xla_flags_library.CF_FOR_ALL_GATHER
+            + xla_flags_library.HOST_OFFLOAD_FLAGS
+            + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_REDUCE
+            + " --xla_tpu_iova_dma_chunk_size_bytes=104857"
     ),
   )
 )
@@ -1333,11 +1334,11 @@ llama3_1_70b_8192_lr_real_data = _add_to_model_dictionary(
         },
         pathways_tuning_params=PATHWAYS_LONG_RUN_CHECKPOINTING_TUNING_PARAMS,
         xla_flags=(
-            xla_flags_library.DENSE_VMEM_LIMIT_FLAG
-            + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
-            + xla_flags_library.DATA_PARALLEL_OVERLAP
-            + xla_flags_library.CF_FOR_ALL_GATHER
-            + xla_flags_library.HOST_OFFLOAD_FLAGS
+                xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+                + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
+                + xla_flags_library.DATA_PARALLEL_OVERLAP
+                + xla_flags_library.CF_FOR_ALL_GATHER
+                + xla_flags_library.HOST_OFFLOAD_FLAGS
         ),
         pathways_xla_flag_options={
             xla_flags_library.REMOVE: [
@@ -1395,13 +1396,13 @@ llama3_1_70b_8192_iter_real_data_and_checkpointing_tfds = _add_to_model_dictiona
             "tokenizer_path": os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizer_llama3.tiktoken"),
         },
         xla_flags=(
-            xla_flags_library.DENSE_VMEM_LIMIT_FLAG
-            + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
-            + xla_flags_library.DATA_PARALLEL_OVERLAP
-            + xla_flags_library.CF_FOR_ALL_GATHER
-            + xla_flags_library.HOST_OFFLOAD_FLAGS
-            + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_REDUCE
-            + " --xla_tpu_iova_dma_chunk_size_bytes=104857"
+                xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+                + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
+                + xla_flags_library.DATA_PARALLEL_OVERLAP
+                + xla_flags_library.CF_FOR_ALL_GATHER
+                + xla_flags_library.HOST_OFFLOAD_FLAGS
+                + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_REDUCE
+                + " --xla_tpu_iova_dma_chunk_size_bytes=104857"
         ),
         pathways_xla_flag_options={
             xla_flags_library.REMOVE: [
@@ -1459,13 +1460,13 @@ llama3_1_70b_8192_iter_synth_data_and_checkpointing = _add_to_model_dictionary(
             "tokenizer_path": os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizer_llama3.tiktoken"),
         },
         xla_flags=(
-            xla_flags_library.DENSE_VMEM_LIMIT_FLAG
-            + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
-            + xla_flags_library.DATA_PARALLEL_OVERLAP
-            + xla_flags_library.CF_FOR_ALL_GATHER
-            + xla_flags_library.HOST_OFFLOAD_FLAGS
-            + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_REDUCE
-            + " --xla_tpu_iova_dma_chunk_size_bytes=104857"
+                xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+                + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
+                + xla_flags_library.DATA_PARALLEL_OVERLAP
+                + xla_flags_library.CF_FOR_ALL_GATHER
+                + xla_flags_library.HOST_OFFLOAD_FLAGS
+                + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_REDUCE
+                + " --xla_tpu_iova_dma_chunk_size_bytes=104857"
         ),
         pathways_xla_flag_options={
             xla_flags_library.REMOVE: [
@@ -1521,11 +1522,11 @@ llama3_1_70b_129024 = _add_to_model_dictionary(
             "custom_mesh": "hybrid_ring_32x8",
         },
         xla_flags=(
-            xla_flags_library.DENSE_VMEM_LIMIT_FLAG
-            + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
-            + xla_flags_library.DATA_PARALLEL_OVERLAP
-            + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_GATHER
-            + xla_flags_library.HOST_OFFLOAD_FLAGS
+                xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+                + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
+                + xla_flags_library.DATA_PARALLEL_OVERLAP
+                + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_GATHER
+                + xla_flags_library.HOST_OFFLOAD_FLAGS
         ),
         pathways_xla_flag_options={
             xla_flags_library.REMOVE: [
@@ -1579,13 +1580,13 @@ mistral_7b = _add_to_model_dictionary(
         "profiler_steps": 5,
     },
     xla_flags=(
-        xla_flags_library.DENSE_VMEM_LIMIT_FLAG
-        + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
-        + xla_flags_library.DATA_PARALLEL_OVERLAP
-        + xla_flags_library.CF_FOR_ALL_GATHER
-        + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_REDUCE
-        + xla_flags_library.HOST_OFFLOAD_FLAGS
-        + xla_flags_library.DISABLE_COLLECTIVE_MATMUL
+            xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+            + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
+            + xla_flags_library.DATA_PARALLEL_OVERLAP
+            + xla_flags_library.CF_FOR_ALL_GATHER
+            + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_REDUCE
+            + xla_flags_library.HOST_OFFLOAD_FLAGS
+            + xla_flags_library.DISABLE_COLLECTIVE_MATMUL
     ),
   )
 )
@@ -1616,9 +1617,9 @@ mixtral_8x7b_dropless = _add_to_model_dictionary(
             "sparse_matmul": True,
         },
         xla_flags=(
-            xla_flags_library.MOE_VMEM_LIMIT_FLAG
-            + xla_flags_library.CF_FOR_ALL_GATHER
-            + xla_flags_library.DATA_PARALLEL_OVERLAP
+                xla_flags_library.MOE_VMEM_LIMIT_FLAG
+                + xla_flags_library.CF_FOR_ALL_GATHER
+                + xla_flags_library.DATA_PARALLEL_OVERLAP
         ),
     ),
 )
@@ -1656,9 +1657,9 @@ mixtral_8x7b_dropped = _add_to_model_dictionary(
             "tokenizer_path": os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizer.mistral-v1"),
         },
         xla_flags=(
-            xla_flags_library.MOE_VMEM_LIMIT_FLAG
-            + xla_flags_library.CF_FOR_ALL_GATHER
-            + xla_flags_library.DATA_PARALLEL_OVERLAP
+                xla_flags_library.MOE_VMEM_LIMIT_FLAG
+                + xla_flags_library.CF_FOR_ALL_GATHER
+                + xla_flags_library.DATA_PARALLEL_OVERLAP
         ),
     ),
 )
@@ -1691,9 +1692,9 @@ mixtral_8x7b_dropped_int8 = _add_to_model_dictionary(
             "tokenizer_path": os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizer.mistral-v1"),
         },
         xla_flags=(
-            xla_flags_library.MOE_VMEM_LIMIT_FLAG
-            + xla_flags_library.CF_FOR_ALL_GATHER
-            + xla_flags_library.DATA_PARALLEL_OVERLAP
+                xla_flags_library.MOE_VMEM_LIMIT_FLAG
+                + xla_flags_library.CF_FOR_ALL_GATHER
+                + xla_flags_library.DATA_PARALLEL_OVERLAP
         ),
     ),
 )
@@ -1736,9 +1737,9 @@ mixtral_8x22b_dropped = _add_to_model_dictionary(
             "custom_mesh": "hybrid_ring_64x4",
         },
         xla_flags=(
-            xla_flags_library.MOE_VMEM_LIMIT_FLAG
-            + xla_flags_library.CF_FOR_ALL_GATHER
-            + xla_flags_library.DATA_PARALLEL_OVERLAP
+                xla_flags_library.MOE_VMEM_LIMIT_FLAG
+                + xla_flags_library.CF_FOR_ALL_GATHER
+                + xla_flags_library.DATA_PARALLEL_OVERLAP
         ),
     ),
 )
@@ -1777,9 +1778,9 @@ deepseek_v3_ep16 = _add_to_model_dictionary(
             "attention": "flash",
         },
         xla_flags=(
-            xla_flags_library.MOE_VMEM_LIMIT_FLAG
-            + xla_flags_library.CF_FOR_ALL_GATHER
-            + xla_flags_library.DATA_PARALLEL_OVERLAP
+                xla_flags_library.MOE_VMEM_LIMIT_FLAG
+                + xla_flags_library.CF_FOR_ALL_GATHER
+                + xla_flags_library.DATA_PARALLEL_OVERLAP
         ),
     ),
 )
@@ -1809,10 +1810,10 @@ gemma2_9b_8192 = _add_to_model_dictionary(
             "sa_block_q_dq": 2048,
         },
         xla_flags=(
-            xla_flags_library.CUSTOM_VMEM_LIMIT_FLAG(vmem_limit=114688)
-            + xla_flags_library.REDUCE_SCATTER_FUSION
-            + xla_flags_library.CF_FOR_ALL_GATHER
-            + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
+                xla_flags_library.CUSTOM_VMEM_LIMIT_FLAG(vmem_limit=114688)
+                + xla_flags_library.REDUCE_SCATTER_FUSION
+                + xla_flags_library.CF_FOR_ALL_GATHER
+                + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
         ),
     ),
 )
@@ -1842,10 +1843,10 @@ gemma2_27b_8192 = _add_to_model_dictionary(
         "sa_block_q_dq": 2048,
     },
     xla_flags=(
-        xla_flags_library.CUSTOM_VMEM_LIMIT_FLAG(vmem_limit=122880)
-        + xla_flags_library.REDUCE_SCATTER_FUSION
-        + xla_flags_library.CF_FOR_ALL_GATHER
-        + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
+            xla_flags_library.CUSTOM_VMEM_LIMIT_FLAG(vmem_limit=122880)
+            + xla_flags_library.REDUCE_SCATTER_FUSION
+            + xla_flags_library.CF_FOR_ALL_GATHER
+            + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
     ),
     )
 )
@@ -1889,12 +1890,12 @@ llama3_1_70b_131072 = _add_to_model_dictionary(
         "packing": False,
     },
     xla_flags=(xla_flags_library.DENSE_VMEM_LIMIT_FLAG
-        + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
-        + xla_flags_library.DATA_PARALLEL_OVERLAP
-        + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_RS_AG_AR
-        + xla_flags_library.HOST_OFFLOAD_FLAGS
-        
-    ),
+               + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
+               + xla_flags_library.DATA_PARALLEL_OVERLAP
+               + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_RS_AG_AR
+               + xla_flags_library.HOST_OFFLOAD_FLAGS
+
+               ),
     pathways_xla_flag_options={
         xla_flags_library.REMOVE: [
             "--2a886c8_chip_config_name=megachip_tccontrol"
@@ -1965,11 +1966,11 @@ custom_moe_700b = _add_to_model_dictionary(
             "attention": "flash",
         },
         xla_flags=(
-            xla_flags_library.MOE_VMEM_LIMIT_FLAG
-            + xla_flags_library.CF_FOR_ALL_GATHER
-            + xla_flags_library.DATA_PARALLEL_OVERLAP
-            + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
-            + xla_flags_library.HOST_OFFLOAD_FLAGS
+                xla_flags_library.MOE_VMEM_LIMIT_FLAG
+                + xla_flags_library.CF_FOR_ALL_GATHER
+                + xla_flags_library.DATA_PARALLEL_OVERLAP
+                + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
+                + xla_flags_library.HOST_OFFLOAD_FLAGS
         ),
     ),
 )

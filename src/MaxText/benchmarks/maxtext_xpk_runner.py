@@ -34,13 +34,13 @@ from typing import Optional, List
 
 import omegaconf
 
-import benchmarks.maxtext_trillium_model_configs as model_configs
-from benchmarks.globals import MAXTEXT_PKG_DIR
-from benchmarks.command_utils import run_command_with_updates
-import benchmarks.xla_flags_library as xla_flags
-from benchmarks.disruption_management.disruption_handler import DisruptionConfig
-from benchmarks.disruption_management.disruption_manager import DisruptionManager
-from benchmarks.xpk_configs import XpkClusterConfig
+from MaxText.globals import MAXTEXT_PKG_DIR
+import MaxText.benchmarks.maxtext_trillium_model_configs as model_configs
+from MaxText.benchmarks.command_utils import run_command_with_updates
+from MaxText.benchmarks.disruption_management.disruption_handler import DisruptionConfig
+from MaxText.benchmarks.disruption_management.disruption_manager import DisruptionManager
+from MaxText.benchmarks.xpk_configs import XpkClusterConfig
+from MaxText.benchmarks import xla_flags_library as xla_flags
 
 
 # Assumes you built maxtext dep image.
@@ -652,7 +652,7 @@ def generate_xpk_workload_cmd(
     args_str = ""
     for k,v in args.items():
       args_str += f'--{k}={v} '
-    upload_metrics_to_bq_cmd = f"&& python3 -m benchmarks.upload_metrics_to_bq {args_str}"
+    upload_metrics_to_bq_cmd = f"&& python3 -m MaxText.benchmarks.upload_metrics_to_bq {args_str}"
 
   print(f'User command: {user_command}')
   all_xpk_storage = ""

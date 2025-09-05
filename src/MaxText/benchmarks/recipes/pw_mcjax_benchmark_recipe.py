@@ -16,11 +16,11 @@
 
 import datetime
 import os
-import args_helper as helper
 
-import benchmarks.maxtext_trillium_model_configs as model_configs
-import benchmarks.maxtext_xpk_runner as mxr
-from benchmarks.xpk_configs import XpkClusterConfig
+from MaxText.benchmarks.recipes import args_helper as helper
+import MaxText.benchmarks.maxtext_trillium_model_configs as model_configs
+from MaxText import benchmarks as mxr
+from MaxText.benchmarks.xpk_configs import XpkClusterConfig
 
 
 PROXY_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server"

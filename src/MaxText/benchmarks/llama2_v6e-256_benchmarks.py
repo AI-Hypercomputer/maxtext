@@ -11,7 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import maxtext_trillium_model_configs as model_configs
+
+from MaxText.benchmarks import maxtext_trillium_model_configs as model_configs
 from maxtext_xpk_runner import BenchmarkRunner
 from maxtext_xpk_runner import HWConfig
 from maxtext_xpk_runner import SWconfig

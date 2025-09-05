@@ -12,12 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
-import sys
-
-import benchmarks.recipes.args_helper as helper
-import maxtext_xpk_runner as mxr
-from recipes.user_configs import cluster_config, xpk_path, pathways_config, base_output_directory, headless_workload_name
+from MaxText.benchmarks import maxtext_xpk_runner as mxr
+from MaxText.benchmarks.recipes import args_helper as helper
+from MaxText.benchmarks.recipes.user_configs import cluster_config, xpk_path, pathways_config, base_output_directory, headless_workload_name
 
 
 def main() -> int:
@@ -56,6 +53,7 @@ def main() -> int:
   return_code = mxr.run_command_with_updates(command, name)
   if return_code != 0:
     print(f"Unable to run xpk workload: {name}")
+  return return_code
 
 
 if __name__ == "__main__":

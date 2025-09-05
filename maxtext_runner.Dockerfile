@@ -13,7 +13,7 @@ ENV MAXTEXT_REPO_ROOT=/deps
 WORKDIR /deps
 
 # Copy assets separately
-COPY assets assets/
+COPY src/MaxText/assets assets/
 COPY src/MaxText/test_assets src/MaxText/test_assets/
 
 # Copy all files except assets from local workspace into docker container

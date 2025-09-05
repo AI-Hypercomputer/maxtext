@@ -17,10 +17,9 @@ import re
 import subprocess
 import time
 
-from benchmarks.disruption_management.disruption_utils import wait_for_pod_to_start
-
-from benchmarks.disruption_management.disruption_handler import DisruptionConfig
-from benchmarks.disruption_management.disruption_handler import TriggerType
+from MaxText.benchmarks.disruption_management.disruption_utils import wait_for_pod_to_start
+from MaxText.benchmarks.disruption_management.disruption_handler import DisruptionConfig
+from MaxText.benchmarks.disruption_management.disruption_handler import TriggerType
 
 STANDARD_STEP_LOG_REGEX = r".*completed step: (\d+), .*"
 

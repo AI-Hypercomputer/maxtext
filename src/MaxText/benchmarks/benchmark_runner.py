@@ -24,17 +24,17 @@ import argparse
 import os
 import time
 
-from benchmarks.benchmark_utils import str2bool
-from benchmarks.maxtext_trillium_model_configs import trillium_model_dict
-from benchmarks.maxtext_v5p_model_configs import v5p_model_dict
-from benchmarks.maxtext_v5e_model_configs import v5e_model_dict
-from benchmarks.convergence.c4_exp import c4_pretrain_model_dict
-from benchmarks.maxtext_xpk_runner import PathwaysConfig
-from benchmarks.maxtext_xpk_runner import WorkloadConfig
-from benchmarks.maxtext_xpk_runner import xpk_benchmark_runner
-from benchmarks.maxtext_xpk_runner import on_device_benchmark_runner
-from benchmarks.xpk_configs import XpkClusterConfig
-from benchmarks.maxtext_xpk_runner import LibTpuType
+from MaxText.benchmarks.maxtext_trillium_model_configs import trillium_model_dict
+from MaxText.benchmarks.maxtext_v5p_model_configs import v5p_model_dict
+from MaxText.benchmarks.maxtext_v5e_model_configs import v5e_model_dict
+from MaxText.benchmarks.convergence.c4_exp import c4_pretrain_model_dict
+from MaxText.benchmarks.maxtext_xpk_runner import PathwaysConfig
+from MaxText.benchmarks.maxtext_xpk_runner import WorkloadConfig
+from MaxText.benchmarks.maxtext_xpk_runner import xpk_benchmark_runner
+from MaxText.benchmarks.maxtext_xpk_runner import on_device_benchmark_runner
+from MaxText.benchmarks.xpk_configs import XpkClusterConfig
+from MaxText.benchmarks.maxtext_xpk_runner import LibTpuType
+from MaxText.inference_utils import str2bool
 
 def add_pathways_arguments(parser: argparse.ArgumentParser):
   """Add pathways arguments to arg parsers that need it.

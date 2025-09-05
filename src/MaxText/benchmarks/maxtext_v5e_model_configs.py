@@ -16,9 +16,9 @@
 
 import os.path
 
-from benchmarks import xla_flags_library
-from benchmarks.benchmark_utils import MaxTextModel, _add_to_model_dictionary
-from benchmarks.globals import MAXTEXT_ASSETS_ROOT
+from MaxText.benchmarks import xla_flags_library
+from MaxText.benchmarks.benchmark_utils import MaxTextModel, _add_to_model_dictionary
+from MaxText.globals import MAXTEXT_ASSETS_ROOT
 
 
 v5e_model_dict = {}
@@ -42,8 +42,8 @@ default_16b_v5e_256 = _add_to_model_dictionary(
         "profiler": "xplane",
     },
     xla_flags=(
-        xla_flags_library.DATA_PARALLEL_OVERLAP
-        + xla_flags_library.CF_FOR_ALL_GATHER
+            xla_flags_library.DATA_PARALLEL_OVERLAP
+            + xla_flags_library.CF_FOR_ALL_GATHER
     ),
 	)
 )
@@ -68,8 +68,8 @@ default_32b_v5e_256 = _add_to_model_dictionary(
         "profiler": "xplane",
     },
     xla_flags=(
-        xla_flags_library.DATA_PARALLEL_OVERLAP
-        + xla_flags_library.CF_FOR_ALL_GATHER
+            xla_flags_library.DATA_PARALLEL_OVERLAP
+            + xla_flags_library.CF_FOR_ALL_GATHER
     ),
 	)
 )
@@ -94,8 +94,8 @@ default_64b_v5e_256 = _add_to_model_dictionary(
         "profiler": "xplane",
     },
     xla_flags=(
-        xla_flags_library.DATA_PARALLEL_OVERLAP
-        + xla_flags_library.CF_FOR_ALL_GATHER
+            xla_flags_library.DATA_PARALLEL_OVERLAP
+            + xla_flags_library.CF_FOR_ALL_GATHER
     ),
 	)
 )
@@ -123,8 +123,8 @@ default_128b_v5e_256 = _add_to_model_dictionary(
         "profiler": "xplane",
     },
     xla_flags=(
-        xla_flags_library.DATA_PARALLEL_OVERLAP
-        + xla_flags_library.CF_FOR_ALL_GATHER
+            xla_flags_library.DATA_PARALLEL_OVERLAP
+            + xla_flags_library.CF_FOR_ALL_GATHER
     ),
 	)
 )
@@ -147,8 +147,8 @@ gpt_3_175b_v5e_256 = _add_to_model_dictionary(
         "profiler": "xplane",
     },
     xla_flags=(
-        xla_flags_library.DATA_PARALLEL_OVERLAP
-        + xla_flags_library.CF_FOR_ALL_GATHER
+            xla_flags_library.DATA_PARALLEL_OVERLAP
+            + xla_flags_library.CF_FOR_ALL_GATHER
     ),
 	)
 )
@@ -172,8 +172,8 @@ llama2_7b_v5e_256 = _add_to_model_dictionary(
         "profiler": "xplane",
     },
     xla_flags=(
-        xla_flags_library.DATA_PARALLEL_OVERLAP
-        + xla_flags_library.CF_FOR_ALL_GATHER
+            xla_flags_library.DATA_PARALLEL_OVERLAP
+            + xla_flags_library.CF_FOR_ALL_GATHER
     ),
 	)
 )
@@ -197,8 +197,8 @@ llama2_13b_v5e_256 = _add_to_model_dictionary(
         "profiler": "xplane",
     },
     xla_flags=(
-        xla_flags_library.DATA_PARALLEL_OVERLAP
-        + xla_flags_library.CF_FOR_ALL_GATHER
+            xla_flags_library.DATA_PARALLEL_OVERLAP
+            + xla_flags_library.CF_FOR_ALL_GATHER
     ),
 	)
 )
@@ -221,8 +221,8 @@ llama2_70b_v5e_256 = _add_to_model_dictionary(
         "profiler": "xplane",
     },
     xla_flags=(
-        xla_flags_library.DATA_PARALLEL_OVERLAP
-        + xla_flags_library.CF_FOR_ALL_GATHER
+            xla_flags_library.DATA_PARALLEL_OVERLAP
+            + xla_flags_library.CF_FOR_ALL_GATHER
     ),
 	)
 )
@@ -262,12 +262,12 @@ llama3_1_8b_8192_v5e_256 = _add_to_model_dictionary(
             "profiler_steps": 5,
         },
         xla_flags=(
-            xla_flags_library.DENSE_VMEM_LIMIT_FLAG
-            + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
-            + xla_flags_library.DATA_PARALLEL_OVERLAP
-            + xla_flags_library.CF_FOR_ALL_GATHER
-            + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_REDUCE
-            + xla_flags_library.HOST_OFFLOAD_FLAGS
+                xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+                + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
+                + xla_flags_library.DATA_PARALLEL_OVERLAP
+                + xla_flags_library.CF_FOR_ALL_GATHER
+                + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_REDUCE
+                + xla_flags_library.HOST_OFFLOAD_FLAGS
         ),
         pathways_xla_flag_options={
             xla_flags_library.REMOVE: [

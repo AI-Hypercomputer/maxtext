@@ -23,13 +23,12 @@ from statistics import median
 
 import omegaconf
 
-from benchmarks.command_utils import run_command_with_updates
-from benchmarks.benchmark_db_utils import write_run
-from benchmarks.benchmark_db_utils import DEFAULT_LOCAL_DIR
-from benchmarks.benchmark_db_utils import recover_tuning_params
-from benchmarks.benchmark_db_utils import Metrics
-from benchmarks.benchmark_utils import str2bool
-
+from MaxText.benchmarks.benchmark_db_utils import write_run
+from MaxText.benchmarks.benchmark_db_utils import DEFAULT_LOCAL_DIR
+from MaxText.benchmarks.benchmark_db_utils import recover_tuning_params
+from MaxText.benchmarks.benchmark_db_utils import Metrics
+from MaxText.benchmarks.command_utils import run_command_with_updates
+from MaxText.inference_utils import str2bool
 
 hardware_id_to_bf16_tflops = {"v4": 275,
                               "v5e": 197,

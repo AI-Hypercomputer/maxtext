@@ -16,9 +16,9 @@ import abc
 import dataclasses
 import enum
 
-from benchmarks.disruption_management.disruption_utils import execute_command_as_subprocess
-from benchmarks.disruption_management.disruption_utils import get_pod_name_from_regex
-from benchmarks.xpk_configs import XpkClusterConfig
+from MaxText.benchmarks.disruption_management.disruption_utils import execute_command_as_subprocess
+from MaxText.benchmarks.disruption_management.disruption_utils import get_pod_name_from_regex
+from MaxText.benchmarks.xpk_configs import XpkClusterConfig
 
 
 MCJAX_STANDARD_TARGET_POD_REGEX_SUFFIX = ".*slice-job-0-0.*"

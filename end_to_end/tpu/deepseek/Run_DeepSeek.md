@@ -201,7 +201,7 @@ python3 -m tests.forward_pass_logit_checker \
     --golden_logits_path=${PWD}/golden_DeepSeek-V2-Lite.jsonl
 ```
 
-To run MMLU benchmarks and validate the model's performance, follow the instructions provided [here](../../../benchmarks/mmlu/mmlu_eval.py).
+To run MMLU benchmarks and validate the model's performance, follow the instructions provided [here](../../../src/MaxText/benchmarks/mmlu/mmlu_eval.py).
 
 ## Supported MoE strategy
 * Dropless
