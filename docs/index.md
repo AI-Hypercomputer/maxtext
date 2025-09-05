@@ -74,6 +74,22 @@ Maxtext today only supports Pre-training and Full Fine Tuning of the models. It 
 
 {material-regular}`rocket_launch;2em` First run
 :::
+
+:::{grid-item-card}
+:link: reference/api
+:link-type: doc
+:class-card: sd-text-black sd-bg-light
+
+{material-regular}`api;2em` API Reference
+:::
+
+:::{grid-item-card}
+:link: grpo
+:link-type: doc
+:class-card: sd-text-black sd-bg-light
+
+{material-regular}`model_training;2em` Train with GRPO
+:::
 ::::
 
 ## Code repository

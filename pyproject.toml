@@ -37,5 +37,8 @@ allow-direct-references = true
 #gpu = ["requirements-gpu.txt"]
 #tpu = ["requirements-tpu.txt"]
 
+[tool.hatch.metadata.hooks.requirements_txt.optional-dependencies]
+docs = ["requirements_docs.txt"]
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/MaxText"]
