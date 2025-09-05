@@ -14,6 +14,7 @@
 
 """MLA Attention Layer."""
 
+import math
 from typing import Any, Optional, Tuple
 
 from jax.ad_checkpoint import checkpoint_name
@@ -463,7 +464,7 @@ class MLA(Attention):
     # Set softmax scaling.
     self.softmax_scale = self.qk_head_dim**-0.5
     if self.max_position_embeddings > self.original_max_position_embeddings:
-      mscale = 0.1 * self.mscale * jnp.log(self.rope_factor) + 1.0
+      mscale = 0.1 * self.mscale * math.log(self.rope_factor) + 1.0
       self.softmax_scale = self.softmax_scale * mscale * mscale
 
     # Setup paged attention op
@@ -497,7 +498,7 @@ class MLA(Attention):
     self.qk_head_dim = self.qk_nope_head_dim + self.qk_rope_head_dim
     self.softmax_scale = self.qk_head_dim**-0.5
     if self.max_position_embeddings > self.original_max_position_embeddings:
-      mscale = 0.1 * self.mscale * jnp.log(self.rope_factor) + 1.0
+      mscale = 0.1 * self.mscale * math.log(self.rope_factor) + 1.0
       self.softmax_scale = self.softmax_scale * mscale * mscale
 
     if self.q_lora_rank == 0:
