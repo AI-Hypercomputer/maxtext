@@ -51,3 +51,6 @@ max_position_embeddings: 163840
 original_max_position_embeddings: 4096
 rope_factor: 40
 beta_fast: 32
+rope_interleave: True
+rope_truncate: True
+rope_attention_scaling: False

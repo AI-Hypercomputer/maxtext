@@ -85,7 +85,6 @@ def _hf_to_maxtext_mapping(layer_idx: int = -1) -> dict:
 
   Args:
     layer_idx (int): Layer index.
-    expert_idx (int): Expert index.
 
   Returns:
     dict [str, str]: Mapping from HuggingFace model weight names to MaxText model weight names.
