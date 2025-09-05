@@ -148,7 +148,6 @@ def jit_train_and_eval_step(
     state_mesh_shardings,
     train_step,
     eval_step=None,
-    eval_data_iterator=None,
 ):
   """Returns a JIT-compiled train and eval step function."""
   data_sharding = maxtext_utils.get_input_data_sharding(config, mesh)
@@ -156,7 +155,7 @@ def jit_train_and_eval_step(
       config, model, state, state_mesh_shardings, data_sharding, train_step
   )
   p_eval_step = None
-  if eval_data_iterator:
+  if config.eval_interval > 0:
     p_eval_step = jit_eval_step(
         config, model, state_mesh_shardings, data_sharding, eval_step
     )
