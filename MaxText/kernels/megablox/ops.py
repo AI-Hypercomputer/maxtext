@@ -30,14 +30,8 @@ from MaxText.kernels.megablox import gmm as backend
 
 gmm = jax.custom_vjp(
     backend.gmm,
-    nondiff_argnums=(3, 4, 7, 8, 9, 10, 11),
+    nondiff_argnums=(3, 4, 7, 8, 9, 10, 11, 12, 13, 14),
 )
-
-def _get_current_rule(op_name: str):
-  rule = qpl.get_current_rule(op_name)
-  if rule is not None and not isinstance(rule, qwix.QtRule):
-    rule = qwix.QtRule(**dataclasses.asdict(rule))
-  return rule
 
 def _gmm_fwd(
     lhs: jnp.ndarray,
@@ -51,6 +45,9 @@ def _gmm_fwd(
     interpret: bool = False,
     lhs_quantize_dtype: Literal[jnp.int4, jnp.int8] | None = None,
     rhs_quantize_dtype: Literal[jnp.int4, jnp.int8] | None = None,
+    lhs_calibration_method: str = "absmax",
+    rhs_calibration_method: str = "absmax",
+    quantization_rule: qwix.QtRule | None = None,
     use_qwix_quantization: bool = False,
 ) -> tuple[
     jnp.ndarray,
@@ -65,10 +62,11 @@ def _gmm_fwd(
   """Forward function for GMM VJP."""
   if use_qwix_quantization:
     lhs_quantize_dtype, rhs_quantize_dtype = None, None
-    rule = _get_current_rule("dot_general")
-    if rule is not None:
-      lhs_quantize_dtype = rule.act_qtype
-      rhs_quantize_dtype = rule.weight_qtype
+    if quantization_rule is not None:
+      lhs_quantize_dtype = quantization_rule.act_qtype
+      rhs_quantize_dtype = quantization_rule.weight_qtype
+      lhs_calibration_method = quantization_rule.act_calibration_method
+      rhs_calibration_method = quantization_rule.weight_calibration_method
   out = backend.gmm(
       lhs,
       rhs,
@@ -81,6 +79,8 @@ def _gmm_fwd(
       interpret=interpret,
       lhs_quantize_dtype=lhs_quantize_dtype,
       rhs_quantize_dtype=rhs_quantize_dtype,
+      lhs_calibration_method=lhs_calibration_method,
+      rhs_calibration_method=rhs_calibration_method,
       use_qwix_quantization=use_qwix_quantization,
   )
   return out, (lhs, rhs, group_sizes, group_offset, rhs.shape[0])
@@ -93,6 +93,9 @@ def _gmm_bwd(
     interpret: bool,
     lhs_quantize_dtype: Literal[jnp.int4, jnp.int8] | None,
     rhs_quantize_dtype: Literal[jnp.int4, jnp.int8] | None,
+    lhs_calibration_method: str,
+    rhs_calibration_method: str,
+    quantization_rule: qwix.QtRule | None,
     use_qwix_quantization: bool,
     residual: tuple[
         jnp.ndarray,
@@ -106,14 +109,15 @@ def _gmm_bwd(
   """Backward function for throughput GMM VJP."""
   if use_qwix_quantization:
     lhs_quantize_dtype, rhs_quantize_dtype = None, None
-    rule = _get_current_rule("dot_general")
-    if rule is not None:
-      if rule.additional_qt_config is not None:
-        lhs_quantize_dtype = rule.additional_qt_config["dlhs_lhs_qtype"]
-        rhs_quantize_dtype = rule.additional_qt_config["dlhs_rhs_qtype"]
+    if quantization_rule is not None:
+      if quantization_rule.additional_qt_config is not None:
+        lhs_quantize_dtype = quantization_rule.additional_qt_config["dlhs_lhs_qtype"]
+        rhs_quantize_dtype = quantization_rule.additional_qt_config["dlhs_rhs_qtype"]
       else:
-        lhs_quantize_dtype = rule.act_qtype
-        rhs_quantize_dtype = rule.bwd_qtype
+        lhs_quantize_dtype = quantization_rule.act_qtype
+        rhs_quantize_dtype = quantization_rule.bwd_qtype
+      lhs_calibration_method = quantization_rule.additional_qt_config["dlhs_lhs_calibration_method"]
+      rhs_calibration_method = quantization_rule.additional_qt_config["dlhs_rhs_calibration_method"]
   del preferred_element_type
   lhs, rhs, group_sizes, group_offset, num_actual_groups = residual
   grad_lhs = backend.gmm(
@@ -127,18 +131,21 @@ def _gmm_bwd(
       interpret=interpret,
       lhs_quantize_dtype=lhs_quantize_dtype,
       rhs_quantize_dtype=rhs_quantize_dtype,
-      use_qwix_quantization=use_qwix_quantization,
+      lhs_calibration_method=lhs_calibration_method,
+      rhs_calibration_method=rhs_calibration_method,
+      use_qwix_quantization=use_qwix_quantization,  
   )
   if use_qwix_quantization:
     lhs_quantize_dtype, rhs_quantize_dtype = None, None
-    rule = _get_current_rule("dot_general")
-    if rule is not None:
-      if rule.additional_qt_config is not None:
-        lhs_quantize_dtype = rule.additional_qt_config["drhs_lhs_qtype"]
-        rhs_quantize_dtype = rule.additional_qt_config["drhs_rhs_qtype"]
+    if quantization_rule is not None:
+      if quantization_rule.additional_qt_config is not None:
+        lhs_quantize_dtype = quantization_rule.additional_qt_config["drhs_lhs_qtype"]
+        rhs_quantize_dtype = quantization_rule.additional_qt_config["drhs_rhs_qtype"]
       else:
-        lhs_quantize_dtype = rule.bwd_qtype
-        rhs_quantize_dtype = rule.act_qtype
+        lhs_quantize_dtype = quantization_rule.bwd_qtype
+        rhs_quantize_dtype = quantization_rule.act_qtype
+      lhs_calibration_method = quantization_rule.additional_qt_config["drhs_lhs_calibration_method"]
+      rhs_calibration_method = quantization_rule.additional_qt_config["drhs_rhs_calibration_method"]
   grad_rhs = backend.tgmm(
       lhs.swapaxes(0, 1),
       grad,
@@ -150,6 +157,8 @@ def _gmm_bwd(
       interpret=interpret,
       lhs_quantize_dtype=lhs_quantize_dtype,
       rhs_quantize_dtype=rhs_quantize_dtype,
+      lhs_calibration_method=lhs_calibration_method,
+      rhs_calibration_method=rhs_calibration_method,
       use_qwix_quantization=use_qwix_quantization,
   )
 
