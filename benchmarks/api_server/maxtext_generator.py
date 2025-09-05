@@ -122,6 +122,9 @@ class MaxTextGenerator:
 
         self.rng, rng_init_decode = jax.random.split(self.rng)
         self.decode_state = self.engine.init_decode_state(rng=rng_init_decode)
+        self._jitted_reset_state = jax.jit(
+            lambda state: jax.tree_util.tree_map(lambda x: jnp.zeros_like(x), state)
+        )
 
         end_time = time.time()
         self.logger.info(f"Initialization complete in {end_time - start_time:.2f} seconds. Max batch size: {self.batch_size}")
@@ -190,6 +193,9 @@ class MaxTextGenerator:
     ) -> List[Completion]:
         """Orchestrates the generation process for a single chunk of prompts."""
         start_time = time.time()
+
+        # Reset the state to handle the new batch while reusing memory.
+        self.decode_state = self._jitted_reset_state(self.decode_state)
 
         initialize_start_time = time.time()
         streams, rng = self._initialize_streams_and_state(prompts, image_paths, seed)
@@ -474,6 +480,33 @@ if __name__ == "__main__":
     import sys
     import time
 
+    def dump_completion(i, comp):
+        print(f"\n=== Completion {i} ===")
+        print(f"index: {comp.index}")
+        print(f"text: {repr(comp.text)}")
+
+
+        if comp.logprobs is None:
+            print("logprobs: None")
+            return
+
+        lp = comp.logprobs
+        # lengths should match: one logprob/offset per token
+        if not (len(lp.tokens) == len(lp.token_logprobs) == len(lp.text_offset)):
+            print(f"[warn] mismatched lengths: tokens={len(lp.tokens)}, "
+                  f"logps={len(lp.token_logprobs)}, offsets={len(lp.text_offset)}")
+
+        print("logprobs:")
+        print(f"  tokens (ids): {lp.tokens}")
+        print(f"  token_logprobs: {[round(x, 6) for x in lp.token_logprobs]}")
+        print(f"  text_offset: {lp.text_offset}")
+        print(f"  top_logprobs: {lp.top_logprobs}")
+
+        print("  tokens (decoded, id, logprob, offset):")
+        for tid, logp, off in zip(lp.tokens, lp.token_logprobs, lp.text_offset):
+            piece = llm.tokenizer.decode([int(tid)])
+            print(f"    {repr(piece):>12s}  id={int(tid):>6d}  logp={logp:>10.6f}  offset={off}")
+
     # When running standalone, basic logging is automatically configured.
     # For server use, the server configures logging.
     logging.basicConfig(level=logging.INFO)
@@ -502,7 +535,6 @@ if __name__ == "__main__":
         f"(max_tokens={max_tokens}, echo={echo}) ---"
     )
 
-
     completions = llm.generate_batch(
         prompts=prompts_to_run,
         image_paths=None,
@@ -514,6 +546,9 @@ if __name__ == "__main__":
         top_p=top_p,
         top_k=top_k
     )
+
+    for i, comp in enumerate(completions):
+        dump_completion(i, comp)
 
     start = time.time()
 
@@ -531,32 +566,6 @@ if __name__ == "__main__":
 
     print("--- Batch Generation Complete ---")
 
-    def dump_completion(i, comp):
-        print(f"\n=== Completion {i} ===")
-        print(f"index: {comp.index}")
-        print(f"text: {repr(comp.text)}")
-
-
-        if comp.logprobs is None:
-            print("logprobs: None")
-            return
-
-        lp = comp.logprobs
-        # lengths should match: one logprob/offset per token
-        if not (len(lp.tokens) == len(lp.token_logprobs) == len(lp.text_offset)):
-            print(f"[warn] mismatched lengths: tokens={len(lp.tokens)}, "
-                  f"logps={len(lp.token_logprobs)}, offsets={len(lp.text_offset)}")
-
-        print("logprobs:")
-        print(f"  tokens (ids): {lp.tokens}")
-        print(f"  token_logprobs: {[round(x, 6) for x in lp.token_logprobs]}")
-        print(f"  text_offset: {lp.text_offset}")
-        print(f"  top_logprobs: {lp.top_logprobs}")
-
-        print("  tokens (decoded, id, logprob, offset):")
-        for tid, logp, off in zip(lp.tokens, lp.token_logprobs, lp.text_offset):
-            piece = llm.tokenizer.decode([int(tid)])
-            print(f"    {repr(piece):>12s}  id={int(tid):>6d}  logp={logp:>10.6f}  offset={off}")
 
     for i, comp in enumerate(completions):
         dump_completion(i, comp)
