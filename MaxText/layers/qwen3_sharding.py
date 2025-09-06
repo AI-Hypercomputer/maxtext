@@ -59,9 +59,9 @@ class Qwen3ShardingTrainingV2(MeshSharding):
                                                       mesh_axes.append(tuple(axis_mappings))
         case "mlp", TT.Activation:
                                                       mesh_axes.append((tp, tp_t, tp_s))
-        case "vocab", TT.Weight, _:
+        case "vocab", TT.Weight:
                                                       mesh_axes.append((tp, tp_t, tp_s, ar))
-        case "norm", TT.Weight, _:
+        case "norm", TT.Weight:
                                                       mesh_axes.append((tp, tp_t, tp_s))
         case "length", TT.Activation:
                                                       axis_mappings = [sp, cp]
@@ -70,7 +70,7 @@ class Qwen3ShardingTrainingV2(MeshSharding):
                                                       mesh_axes.append(tuple(axis_mappings))
         case "norm_length", TT.Activation:
                                                       mesh_axes.append((tp_s, sp, cp))
-        case "kv", TT.Activation, _:
+        case "kv", TT.Activation:
                                                       mesh_axes.append((tp, tp_s))
         case "kv_batch", TT.Activation:
                                                       axis_mappings = [dp, fsdp, fsdp_t]
@@ -79,7 +79,7 @@ class Qwen3ShardingTrainingV2(MeshSharding):
                                                       mesh_axes.append(tuple(axis_mappings))
         case ("kv_heads" | "heads"), TT.Activation, _:
                                                       mesh_axes.append((tp, tp_t, sp, tp_s))
-        case "kv_head_dim", TT.Activation, _:
+        case "kv_head_dim", TT.Activation:
                                                       mesh_axes.append((tp, tp_t, tp_s))
         case  ("heads" | "q_heads" | "kv_heads"), TT.Weight, _:
                                                       mesh_axes.append((tp, tp_t, tp_s))
@@ -89,7 +89,7 @@ class Qwen3ShardingTrainingV2(MeshSharding):
                                                       mesh_axes.append((ep,))
         case "embed_tensor_transpose", TT.Weight:
                                                       mesh_axes.append((tp_t))
-        case _, _, _:
+        case _, _:
                                                       assert False, "Unexpected logical axis name for sharding"
 
     self.maybe_check_valid_mesh_axes(mesh_axes)
@@ -117,25 +117,22 @@ class Qwen3ShardingInferenceV2(MeshSharding):
     tensor_type = kwargs.get("tensor_type", TT.Weight)
     mode = kwargs.get("mode", MODEL_MODE_TRAINING)
     ep_attn_type = self.config.expert_shard_attention_option
-    tensor_transpose, fsdp_transpose = self.config.tensor_transpose, self.config.fsdp_transpose
     context_ar = self.config.ici_context_autoregressive_parallelism > 1
 
     mesh_axes = []
     for axis in axes:
       match tensor_name, axis, tensor_type, mode:
-        case _, "embed_and_logits_batch", TT.Activation, _:
-          mesh_axes.append((dp, pp, fsdp))
         case _, "length", TT.Activation, TT.Prefill:
-          # actually resolves to the same as for Decode but was at least intended to be mapped separately in current code
           mesh_axes.append((sp, cp))
         case _, "length", TT.Activation, TT.Decode:
-          mesh_axes.append((sp, cp))
+          mesh_axes.append((sp))
+        case _, "embed_and_logits_batch", TT.Activation, _:
+          mesh_axes.append((dp, pp, fsdp))
         case _, "embed", TT.Activation, _:
           mesh_axes.append((tp))
         case _, "mlp", TT.Activation:
           mesh_axes.append((tp, tp_s))
         case _, "embed", TT.Weight, _:
-          # NOTE: here we fix a bug in the original code where sharding still happened in qkv in context_ar unlike kv
           mesh_axes.append((tp) if not context_ar and tensor_name not in ("query", "kv", "qkv", "out") else ())
         case _, "q_heads", TT.Weight, _:
           mesh_axes.append((tp, tp_s, ar) if not context_ar and tensor_name not in ("query", "kv", "qkv", "out") else ())
@@ -151,20 +148,3 @@ class Qwen3ShardingInferenceV2(MeshSharding):
           if ep_attn_type == "batch":
             axis_mappings.append(ep)
           mesh_axes.append(tuple(axis_mappings))
-        # TODO: support these cases
-        # prefill_input_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, EMBED),
-        # decode_input_axis_names: AxisNames = (DECODE_BATCH, DECODE_LENGTH, EMBED),
-
-        # prefill_query_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, KV_HEAD, KV_HEAD_DIM),
-        # decode:  query = self.sharding.shard(query, t="query", a=(DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV))
-
-        # prefill_key_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, KV_HEAD, KV_HEAD_DIM),
-        # decode:  key = self.sharding.shard(key, t="key", a=(DECODE_BATCH, DECODE_LENGTH, KV_HEAD, D_KV))
-
-        # prefill_value_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, KV_HEAD, KV_HEAD_DIM),
-        # decode:  value = self.sharding.shard(value, t="value", a=(DECODE_BATCH, DECODE_LENGTH, KV_HEAD, D_KV))
-
-        # prefill_out_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, HEAD, D_KV),
-        # decode_out_axis_names: AxisNames = (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV),
-        #
-        # TODO: more code here:

@@ -2,7 +2,7 @@ from typing import Any
 
 from jax.sharding import PartitionSpec
 
-from MaxText.sharding import MeshSharding, TensorType as TT, assert_matches_logical_axis_rules, Axis
+from MaxText.sharding import MeshSharding, TensorType as TT, Axis
 dp, fsdp, tp, pp, sp, cp, cp_ar, tp_s, ep, ar, tp_t, fsdp_t = Axis
 
 
