@@ -265,131 +265,39 @@ class Qwen3ShardingTraining(MeshSharding):
     mesh_axes = []
     for axis in axes:
       match axis, tensor_type:
-        case "activation_batch", TT.Activation:
-          axis_mapping = (dp, fsdp, fsdp_t, ep)
-        case "activation_batch_no_exp", TT.Activation:
-          axis_mapping = (dp, fsdp, fsdp_t)
-        case "activation_embed_and_logits_batch", TT.Activation:
-          axis_mapping = (dp, pp, fsdp, fsdp_t, ep)
-        case "activation_embed", TT.Activation:
-          axis_mapping = (tp, tp_t)
-        case "embed", TT.Weight:
-          axis_mapping = (fsdp, fsdp_t, sp, cp, ep)
-        case "vocab", TT.Weight:
-          axis_mapping = (tp, tp_t, tp_s, ar)
-        case "norm", TT.Weight:
-          axis_mapping = (tp, tp_t, tp_s)
-        case "activation_norm_length", TT.Activation:
-          axis_mapping = (tp_s, cp, sp)
-        case "activation_length", TT.Activation:
-          axis_mapping = ()
-        case "activation_length_no_exp", TT.Activation:
-          axis_mapping = (sp, cp) if tensor_name not in ("query", "key", "value", "out") else (cp,)
-        case "activation_kv", TT.Activation:
-          axis_mapping = ()
-        case "activation_kv_batch", TT.Activation:
-          axis_mapping = (dp, fsdp, fsdp_t, ep)
-        case "activation_kv_batch_no_exp", TT.Activation:
-          axis_mapping = (dp, fsdp, fsdp_t)
-        case "activation_kv_heads", TT.Activation:
-          axis_mapping = (tp, tp_t, sp,tp_s)
-        case "activation_kv_head_dim", TT.Activation:
-          axis_mapping = ()
-        case "activation_heads", TT.Activation:
-          axis_mapping = (tp, tp_t, sp,tp_s,ar)
-        case  ("heads" | "q_heads" | "kv_heads"), TT.Weight:
-          axis_mapping = (tp, tp_t, tp_s, ar)
-        case ("kv", "kv_head_dim", "qkv", "num_activations"), TT.Weight:
-          axis_mapping = ()
-        case "mlp", TT.Weight:
-          axis_mapping = (fsdp_t, tp, tp_s, ar)
-        case "exp", TT.Weight:
-          axis_mapping = (ep,)
-        case "embed_no_exp", TT.Weight:
-          axis_mapping = (fsdp, fsdp_t, sp, tp_t, cp)
-        case "activation_exp", TT.Activation:
-          axis_mapping = (ep,)
-        case "activation_mlp", TT.Activation:
-          axis_mapping = (tp, tp_t, tp_s)
-        case "embed_tensor_transpose", TT.Weight:
-          axis_mapping = (tp_t,)
+        case "activation_batch", TT.Activation:                   axis_mapping = (dp, fsdp, fsdp_t, ep)
+        case "activation_batch_no_exp", TT.Activation:            axis_mapping = (dp, fsdp, fsdp_t)
+        case "activation_embed_and_logits_batch", TT.Activation:  axis_mapping = (dp, pp, fsdp, fsdp_t, ep)
+        case "activation_embed", TT.Activation:                   axis_mapping = (tp, tp_t)
+        case "embed", TT.Weight:                                  axis_mapping = (fsdp, fsdp_t, sp, cp, ep)
+        case "vocab", TT.Weight:                                  axis_mapping = (tp, tp_t, tp_s, ar)
+        case "norm", TT.Weight:                                   axis_mapping = (tp, tp_t, tp_s)
+        case "activation_norm_length", TT.Activation:             axis_mapping = (tp_s, cp, sp)
+        case "activation_length", TT.Activation:                  axis_mapping = ()
+        case "activation_length_no_exp", TT.Activation:           axis_mapping = (sp, cp) if tensor_name not in ("query", "key", "value", "out") else (cp,)
+        case "activation_kv", TT.Activation:                      axis_mapping = ()
+        case "activation_kv_batch", TT.Activation:                axis_mapping = (dp, fsdp, fsdp_t, ep)
+        case "activation_kv_batch_no_exp", TT.Activation:         axis_mapping = (dp, fsdp, fsdp_t)
+        case "activation_kv_heads", TT.Activation:                axis_mapping = (tp, tp_t, sp,tp_s)
+        case "activation_kv_head_dim", TT.Activation:             axis_mapping = ()
+        case "activation_heads", TT.Activation:                   axis_mapping = (tp, tp_t, sp,tp_s,ar)
+        case  ("heads" | "q_heads" | "kv_heads"), TT.Weight:      axis_mapping = (tp, tp_t, tp_s, ar)
+        case ("kv", "kv_head_dim", "qkv"), TT.Weight:             axis_mapping = ()
+        case "num_activations", TT.Weight:                        axis_mapping = ()
+        case "mlp", TT.Weight:                                    axis_mapping = (fsdp_t, tp, tp_s, ar)
+        case "exp", TT.Weight:                                    axis_mapping = (ep,)
+        case "embed_no_exp", TT.Weight:                           axis_mapping = (fsdp, fsdp_t, sp, tp_t, cp)
+        case "activation_exp", TT.Activation:                     axis_mapping = (ep,)
+        case "activation_mlp", TT.Activation:                     axis_mapping = (tp, tp_t, tp_s)
+        case "embed_tensor_transpose", TT.Weight:                 axis_mapping = (tp_t,)
         case _, _:
-          assert False, "Unexpected logical axis name for sharding"
-          axis_mapping = None
+                                                                  assert False, "Unexpected logical axis name for sharding"
+                                                                  axis_mapping = None
 
       axis_mapping_values = [axis.value for axis in axis_mapping]
       mesh_axes.append(axis_mapping_values)
 
     # NOTE: this has to be done on all axes at once as they're not mapped independently
     assert_matches_logical_axis_rules(mesh_axes, axes)
-    self.maybe_check_valid_mesh_axes(mesh_axes)
-    return PartitionSpec(*mesh_axes)
-
-
-class Qwen3ShardingTrainingV2(MeshSharding):
-  def __init__(self):
-    super().__init__()
-
-  def __call__(self, *args: Any, **kwargs) -> PartitionSpec:
-    axes = kwargs["a"]
-    tensor_name = kwargs["t"]
-    tensor_type = kwargs.get("tensor_type", TT.Weight)
-    ep_attn_type = self.config.expert_shard_attention_option
-    tensor_transpose, fsdp_transpose = self.config.tensor_transpose, self.config.fsdp_transpose
-
-    mesh_axes = []
-    for axis in axes:
-      match axis, tensor_type:
-        case "batch", TT.Activation, :
-          axis_mappings = [dp, fsdp, fsdp_t, ep]
-          if ep_attn_type == "batch":
-            axis_mappings.append(ep)
-          mesh_axes.append(tuple(axis_mappings))
-        case "embed_and_logits_batch", TT.Activation:
-          axis_mappings = [dp, pp, fsdp, fsdp_t]
-          if ep_attn_type == "batch":
-            axis_mappings.append(ep)
-          mesh_axes.append(tuple(axis_mappings))
-        case "embed", TT.Activation:
-          mesh_axes.append((tp, tp_t))
-        case "embed", TT.Weight:
-          axis_mappings = [fsdp, sp, cp, ep]
-          if tensor_name in ("mlp_wi_fused", "mlp_wi_unfused", "mlp_wo") and tensor_transpose:
-            axis_mappings.append(tp)
-          mesh_axes.append(tuple(axis_mappings))
-        case "mlp", TT.Weight:
-          axis_mappings = [tp, tp_s, ar]
-          if tensor_name in ("mlp_wi_fused", "mlp_wi_unfused", "mlp_wo") and fsdp_transpose:
-            axis_mappings.append(fsdp)
-          mesh_axes.append(tuple(axis_mappings))
-        case "vocab", TT.Weight, _:
-          mesh_axes.append((tp, tp_t, tp_s, ar))
-        case "norm", TT.Weight, _:
-          mesh_axes.append((tp, tp_t, tp_s))
-        case ("length" | "norm_length"), TT.Activation:
-          axis_mappings = [sp, cp]
-          if ep_attn_type == "context":
-            axis_mappings.append(ep)
-          mesh_axes.append(tuple(axis_mappings))
-        case "kv", TT.Activation, _:
-          mesh_axes.append((tp, tp_t, tp_s))
-        case "kv_batch", TT.Activation:
-          axis_mappings = [dp, fsdp, fsdp_t]
-          if ep_attn_type == "batch":
-            axis_mappings.append(ep)
-          mesh_axes.append(tuple(axis_mappings))
-        case "kv_heads", TT.Activation, _:
-          mesh_axes.append((tp, tp_t, sp,tp_s))
-        case "kv_head_dim", TT.Activation, _:
-          mesh_axes.append((tp, tp_t, tp_s))
-        case "heads", TT.Activation, _:
-          mesh_axes.append((tp, tp_t, sp,tp_s,ar))
-        case  ("heads" | "q_heads" | "kv_heads"), TT.Weight, _:
-          mesh_axes.append((tp, tp_t, tp_s, ar))
-        case ("kv", "kv_head_dim", "qkv", "num_activations"), TT.Weight, _:
-          mesh_axes.append((None,))
-        case _, _, _:
-          assert False, "Unexpected logical axis name for sharding"
-
     self.maybe_check_valid_mesh_axes(mesh_axes)
     return PartitionSpec(*mesh_axes)
