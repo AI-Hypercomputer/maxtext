@@ -13,7 +13,8 @@ class Llama2hardingTrainingV2(MeshSharding):
 
   def __call__(self, *args: Any, **kwargs) -> PartitionSpec:
     axes = kwargs["a"]
-    tensor_type = kwargs.get("tensor_type", TT.Weight)
+    tensor_name = kwargs["t"]
+    tensor_type = kwargs.get("tt", TT.Weight)
 
     mesh_axes = []
     for axis in axes:
@@ -26,17 +27,18 @@ class Llama2hardingTrainingV2(MeshSharding):
         case "mlp", TT.Activation:                          mesh_axes.append((tp, tp_t, tp_s))
         case "vocab", TT.Weight:                            mesh_axes.append((tp, tp_s, ar))
         case "norm", TT.Weight:                             mesh_axes.append((tp, tp_s))
-        case "length", TT.Activation:                       mesh_axes.append((sp, cp))
+        case "length", TT.Activation:                       mesh_axes.append((sp, cp)) if tensor_name != "mlp_pre_out" else ()
         case "norm_length", TT.Activation:                  mesh_axes.append((tp_s, sp, cp))
-        case "kv", TT.Activation:                           mesh_axes.append((tp, tp_s))
+        case "kv", TT.Activation:                           mesh_axes.append((tp, tp_s))  if tensor_name != "out" else ()
         case "kv_batch", TT.Activation:                     mesh_axes.append((dp, fsdp, fsdp_t))
         case ("kv_heads" | "heads"), TT.Activation:         mesh_axes.append((tp, tp_t, sp, tp_s))
-        case "kv_head_dim", TT.Activation:                  mesh_axes.append((tp, tp_t, tp_s))
+        case "kv_head_dim", TT.Activation:                  mesh_axes.append((tp, tp_t, tp_s) if tensor_name not in ("query", "key", "value") else ())
         case ("heads" | "q_heads" | "kv_heads"), TT.Weight: mesh_axes.append((tp, tp_t, tp_s))
-        case ("kv", "kv_head_dim", "qkv"), TT.Weight:       mesh_axes.append((None,))
-        case "num_activations", TT.Weight:                  mesh_axes.append((None,))
+        case ("kv", "kv_head_dim", "qkv"), TT.Weight:       mesh_axes.append(())
+        case "num_activations", TT.Weight:                  mesh_axes.append(())
         case _, _, _:
                                                             assert False, "Unexpected logical axis name for sharding"
+                                                            mesh_axes.append(())
 
     self.maybe_check_valid_mesh_axes(mesh_axes)
     return PartitionSpec(*mesh_axes)
