@@ -3,7 +3,7 @@ from typing import Any
 from jax.sharding import PartitionSpec
 
 from MaxText.sharding import MeshSharding, TensorType as TT, assert_matches_logical_axis_rules, Axis
-dp, fsdp, tp, pp, sp, cp, cp_ar, tp_s, ep, ar = Axis
+dp, fsdp, tp, pp, sp, cp, cp_ar, tp_s, ep, ar, tp_t, fsdp_t = Axis
 
 
 class Llama2hardingTrainingV2(MeshSharding):
@@ -22,55 +22,39 @@ class Llama2hardingTrainingV2(MeshSharding):
     for axis in axes:
       match axis, tensor_type:
         case "batch", TT.Activation:
-          axis_mappings = [dp, fsdp]
-          if ep_attn_type == "batch":
-            axis_mappings.append(ep)
-          mesh_axes.append(tuple(axis_mappings))
+                                                        mesh_axes.append((dp, fsdp))
         case "embed_and_logits_batch", TT.Activation:
-          axis_mappings = [dp, pp, fsdp, ep]
-          if ep_attn_type == "batch":
-            axis_mappings.append(ep)
-          mesh_axes.append(tuple(axis_mappings))
+                                                        mesh_axes.append((dp, pp, fsdp))
         case "embed", TT.Activation:
-          mesh_axes.append((tp))
+                                                        mesh_axes.append((tp, tp_t))
         case "embed", TT.Weight:
-          axis_mappings = [fsdp, sp, cp, ep]
-          if tensor_name in ("mlp_wi_fused", "mlp_wi_unfused", "mlp_wo") and tensor_transpose:
-            axis_mappings.append(tp)
-          mesh_axes.append(tuple(axis_mappings))
+                                                        mesh_axes.append((fsdp, fsdp_t, sp, cp))
         case "mlp", TT.Weight:
-          axis_mappings = [tp, tp_s, ar]
-          if tensor_name in ("mlp_wi_fused", "mlp_wi_unfused", "mlp_wo") and fsdp_transpose:
-            axis_mappings.append(fsdp)
-          mesh_axes.append(tuple(axis_mappings))
+                                                      mesh_axes.append((fsdp_t, tp, tp_s))
+        case "mlp", TT.Activation:
+                                                      mesh_axes.append((tp, tp_t, tp_s))
         case "vocab", TT.Weight:
-          mesh_axes.append((tp, tp_s, ar))
+                                                      mesh_axes.append((tp, tp_s, ar))
         case "norm", TT.Weight:
-          mesh_axes.append((tp, tp_s))
-        case ("length" | "norm_length"), TT.Activation:
-          axis_mappings = [sp, cp]
-          if ep_attn_type == "context":
-            axis_mappings.append(ep)
-          mesh_axes.append(tuple(axis_mappings))
+                                                      mesh_axes.append((tp, tp_s))
+        case "length", TT.Activation:
+                                                      mesh_axes.append((sp, cp))
+        case "norm_length", TT.Activation:
+                                                      mesh_axes.append((tp_s, sp, cp))
         case "kv", TT.Activation:
-          mesh_axes.append((tp, tp_s))
+                                                      mesh_axes.append((tp, tp_s))
         case "kv_batch", TT.Activation:
-          axis_mappings = [dp, fsdp]
-          if ep_attn_type == "batch":
-            axis_mappings.append(ep)
-          mesh_axes.append(tuple(axis_mappings))
-        case "kv_heads", TT.Activation:
-          mesh_axes.append((tp, sp,tp_s))
+                                                      mesh_axes.append((dp, fsdp, fsdp_t))
+        case ("kv_heads" | "heads"), TT.Activation:
+                                                      mesh_axes.append((tp, tp_t, sp, tp_s))
         case "kv_head_dim", TT.Activation:
-          mesh_axes.append((tp, tp_s))
-        case "heads", TT.Activation:
-          mesh_axes.append((tp, sp,tp_s,ar))
+                                                      mesh_axes.append((tp, tp_t, tp_s))
         case  ("heads" | "q_heads" | "kv_heads"), TT.Weight:
-          mesh_axes.append((tp, tp_s, ar))
+                                                      mesh_axes.append((tp, tp_t, tp_s))
         case ("kv", "kv_head_dim", "qkv", "num_activations"), TT.Weight:
-          mesh_axes.append((None))
+                                                      mesh_axes.append((None,))
         case _, _, _:
-          assert False, "Unexpected logical axis name for sharding"
+                                                    assert False, "Unexpected logical axis name for sharding"
 
     self.maybe_check_valid_mesh_axes(mesh_axes)
     return PartitionSpec(*mesh_axes)
