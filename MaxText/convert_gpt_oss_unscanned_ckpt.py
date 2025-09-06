@@ -68,6 +68,7 @@ MODEL_PARAMS_DICT = {
         "base_num_kv_heads": 8,
         "head_dim": 64,
         "base_num_decoder_layers": 24,
+        "inhomogeneous_layer_cycle_interval": 2,
     },
     "gpt-oss-120b": {
         "base_emb_dim": 2880,
@@ -75,6 +76,7 @@ MODEL_PARAMS_DICT = {
         "base_num_kv_heads": 8,
         "head_dim": 64,
         "base_num_decoder_layers": 36,
+        "inhomogeneous_layer_cycle_interval": 2,
     },
 }
 
@@ -118,6 +120,17 @@ def _hf_to_maxtext_mapping(layer_idx: int = -1) -> dict:
 
 
 def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, model_params: dict, mem_info: psutil.Process):
+  """Convert a Huggingface Checkpoint to a dictionary of Numpy arrays representing the weights.
+
+  Args:
+    base_model_path (str): Path to the base model checkpoint.
+    model_size (str): Size of the base model.
+    model_params (dict): Dictionary containing model parameters.
+    mem_info (psutil.Process): Process object to track memory usage.
+
+  Returns:
+    jax_weights (dict): Dictionary containing the converted weights.
+  """
   # model params
   base_num_decoder_layers = model_params["base_num_decoder_layers"]
   base_emb_dim = model_params["base_emb_dim"]

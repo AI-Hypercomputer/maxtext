@@ -619,7 +619,7 @@ beta_fast: 32
 beta_slow: 1
 mscale: 1.0
 rope_interleave: True # Complex representation is interleaved or concatenated
-rope_truncate: True # Round correction range
+rope_truncate: True # Floor lower bound and ceil upper bound for correction range
 rope_attention_scaling: False # Scale the rotary embedding output
 
 # Ahead of time Compilation (aka AOT)

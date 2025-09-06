@@ -557,6 +557,9 @@ class YarnRotaryEmbedding(nnx.Module):
     rope_factor: Factor applied to adjust the frequencies.
     cast_as_fprop_dtype: Whether to cast the output to `fprop_dtype`.
     fprop_dtype: The forward pass dtype.
+    rope_interleave: Whether complex representation is interleaved or concatenated.
+    rope_truncate: Whether or not to floor lower bound and ceil upper bound for correction range.
+    rope_attention_scaling: Whether or not to scale the rotary embedding output.
     rngs: rng keys passed in by nnx.bridge.to_linen.
   """
 
@@ -638,7 +641,7 @@ class YarnRotaryEmbedding(nnx.Module):
         dim (int): Dimensionality of the embedding space.
         base (float): Base value for the exponential computation.
         max_position_embeddings (int): Maximum sequence length.
-        truncate (bool): Whether to round the correction range.
+        truncate (bool): Whether to floor lower bound and ceil upper bound.
 
     Returns:
         tuple[int, int]: The range of correction dimensions (low, high), clamped to valid indices.
