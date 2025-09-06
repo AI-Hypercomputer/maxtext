@@ -97,10 +97,38 @@ def calculate_total_params_per_chip(params):
   return total_parameters_per_chip
 
 
+def _bytes_of(x):
+  """Return the number of bytes used by a single leaf in a pytree.
+  Handles concrete arrays (NumPy/JAX), abstract shapes, scalars, and None.
+  Unknown types default to 0.
+  """
+  # Abstract JAX values: compute bytes from shape × dtype size.
+  if isinstance(x, jax.ShapeDtypeStruct):
+    # jnp.dtype() normalizes to a consistent dtype object (e.g., handles bfloat16)
+    return int(np.prod(x.shape)) * int(jnp.dtype(x.dtype).itemsize)
+
+  # Concrete arrays (NumPy, JAX): rely on their native nbytes property.
+  if hasattr(x, "nbytes"):
+    return int(x.nbytes)
+
+  # Python scalars (int, float, bool): convert to a NumPy array to measure size.
+  if isinstance(x, (int, float, bool)):
+    return int(np.array(x).nbytes)
+
+  # None or unsupported leaf types: count as zero bytes.
+  if x is not None:
+    max_logging.log(f"Unsupported leaf type in calculate_bytes_from_pytree: {type(x)}")
+  
+  return 0
+
+
 def calculate_bytes_from_pytree(params):
-  params_bytes = jax.tree_util.tree_map(lambda x: x.nbytes, params)
-  total_bytes = jax.tree_util.tree_reduce(lambda x, y: x + y, params_bytes)
-  return total_bytes
+  """Return the total memory footprint (in bytes) of all leaves in a pytree.
+
+  Each leaf is measured using `_bytes_of`. Non-array or unsupported types
+  contribute 0 unless they are scalars.
+  """
+  return sum(map(_bytes_of, jax.tree_util.tree_leaves(params)))
 
 
 def summarize_size_from_pytree(params):
