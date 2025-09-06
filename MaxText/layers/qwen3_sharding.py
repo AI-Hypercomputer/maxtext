@@ -90,7 +90,7 @@ class Qwen3ShardingTrainingV2(MeshSharding):
         case "embed_tensor_transpose", TT.Weight:
                                                       mesh_axes.append((tp_t))
         case _, _, _:
-          assert False, "Unexpected logical axis name for sharding"
+                                                      assert False, "Unexpected logical axis name for sharding"
 
     self.maybe_check_valid_mesh_axes(mesh_axes)
     return PartitionSpec(*mesh_axes)
