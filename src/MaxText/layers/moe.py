@@ -747,9 +747,10 @@ class RoutedMoE(nnx.Module):
       # pad length is the 1st dimension of tiling size in gmm call
       if inputs.shape[0] != expert_assignments.shape[0]:
         raise ValueError("The number of input tokens must match the number of expert" " assignments!")
+      padding_amount = 0
       if hs_shape[0] % pad_length:
-        pad_length = pad_length - hs_shape[0] % pad_length
-        inputs = jax.lax.pad(inputs.astype(jnp.float32), 0.0, [(0, pad_length, 0), (0, 0, 0)])
+        padding_amount = pad_length - hs_shape[0] % pad_length
+        inputs = jax.lax.pad(inputs, jnp.array(0.0, dtype=inputs.dtype), [(0, padding_amount, 0), (0, 0, 0)])
 
       inputs = inputs.astype(self.dtype)
       kernel = kernel.astype(self.dtype)
@@ -797,14 +798,14 @@ class RoutedMoE(nnx.Module):
         if isinstance(kernel, aqt.QTensor):
           # Multiply outputs by the kernely scale
           scales = jnp.take(kernel.scale[0].squeeze(), indices=expert_assignments, axis=0)
-          if hs_shape[0] % pad_length:
+          if padding_amount > 0:
             scales = jax.lax.pad(
                 scales,
                 jnp.array(0.0, dtype=scales.dtype),
-                [(0, pad_length, 0), (0, 0, 0)],
+                [(0, padding_amount, 0), (0, 0, 0)],
             )
           output *= scales
-      if hs_shape[0] % pad_length:
+      if padding_amount > 0:
         output = output[: hs_shape[0]]
       return output
 
@@ -945,17 +946,17 @@ class RoutedMoE(nnx.Module):
         w0_bias, w1_bias, wo_bias = self.transform_bias(selected_experts, w0_bias, w1_bias, wo_bias)
 
       layer_w0 = gmm(x, w0, group_sizes, selected_experts)
-      if self.config.mlp_bias:
-        layer_w0 = layer_w0 + w0_bias
       if self.get_tensor_transpose_parallelism_size() > 1:
         layer_w0 = jax.lax.psum(layer_w0, "tensor_transpose")
+      if self.config.mlp_bias:
+        layer_w0 = layer_w0 + w0_bias
       layer_w0 = adc.checkpoint_name(layer_w0, "mlpwi_0")
 
       layer_w1 = gmm(x, w1, group_sizes, selected_experts)
-      if self.config.mlp_bias:
-        layer_w1 = layer_w1 + w1_bias
       if self.get_tensor_transpose_parallelism_size() > 1:
         layer_w1 = jax.lax.psum(layer_w1, "tensor_transpose")
+      if self.config.mlp_bias:
+        layer_w1 = layer_w1 + w1_bias
       layer_w1 = adc.checkpoint_name(layer_w1, "mlpwi_1")
       # pylint: disable=protected-access
 
@@ -970,12 +971,11 @@ class RoutedMoE(nnx.Module):
         intermediate_layer = jnp.multiply(layer_act, layer_w1)
 
       intermediate_output = gmm(intermediate_layer, wo, group_sizes, selected_experts)
+      if self.get_tensor_parallelism_size() > 1:
+        intermediate_output = jax.lax.psum_scatter(intermediate_output, "tensor", scatter_dimension=1, tiled=True)
       if self.config.mlp_bias:
         intermediate_output = intermediate_output + wo_bias
       intermediate_output = adc.checkpoint_name(intermediate_output, "mlpwo")
-
-      if self.get_tensor_parallelism_size() > 1:
-        intermediate_output = jax.lax.psum_scatter(intermediate_output, "tensor", scatter_dimension=1, tiled=True)
 
       if num_expert_parallelism > 1:
         original_inputs_first_dim = batch_size * sequence_length * self.config.num_experts_per_tok
