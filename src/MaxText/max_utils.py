@@ -116,6 +116,9 @@ def _bytes_of(x):
     return int(np.array(x).nbytes)
 
   # None or unsupported leaf types: count as zero bytes.
+  if x is not None:
+    max_logging.log(f"Unsupported leaf type in calculate_bytes_from_pytree: {type(x)}")
+  
   return 0
 
 
