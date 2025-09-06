@@ -35,6 +35,7 @@ class DataLoader:
   def __init__(self, config, mesh, data_iterator, goodput_recorder):
     self.config = config
     self.goodput_recorder = goodput_recorder
+    data_iterator.reset()
     self.data_iterator = data_iterator
     self.last_batch = None
     self.input_data_shardings = maxtext_utils.get_input_data_sharding(config, mesh)
@@ -51,10 +52,10 @@ class DataLoader:
         self.last_batch = jax.lax.with_sharding_constraint(example_batch, self.input_data_shardings)
         self.check_example_batch()
       except Exception as e:  # pylint: disable=broad-except
-        if "StopIteration" in str(e):
-          raise exceptions.StopTraining("You may have run out of training data.")
+        if isinstance(e, StopIteration):
+          raise exceptions.StopTraining(f"Received {type(e)} exception: ({e}), You may have run out of training data.")
         else:
-          raise exceptions.StopTraining(f"`load_next_batch()` failed ({e}).")
+          raise exceptions.StopTraining(f"`load_next_batch()` failed with {type(e)} exception: ({e}).")
     return self.last_batch
 
   def check_example_batch(self):

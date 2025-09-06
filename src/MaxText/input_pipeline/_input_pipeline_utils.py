@@ -157,9 +157,7 @@ def apply_chat_template(example, tokenizer_model, data_column_name):
     for message in example[data_column_name]:
       if message["role"] == "user":
         prompt = message
-        prompt_in_chat_template = tokenizer_model.apply_chat_template(
-            [prompt], add_generation_prompt=False, tokenize=False
-        )
+        prompt_in_chat_template = tokenizer_model.apply_chat_template([prompt], add_generation_prompt=False, tokenize=False)
         messages.append(prompt_in_chat_template)
         is_prompt.append(True)
       elif message["role"] == "assistant":
@@ -266,7 +264,6 @@ class HFDataSource(grain.RandomAccessDataSource):
       dataloading_host_index: int,
       dataloading_host_count: int,
       num_threads: int,
-      generate_padding_example: bool,
       max_target_length: int,
       data_column_names: list[str],
   ):
@@ -274,7 +271,6 @@ class HFDataSource(grain.RandomAccessDataSource):
     self.num_threads = num_threads
     self.dataloading_host_count = dataloading_host_count
     self.dataloading_host_index = dataloading_host_index
-    self.generate_padding_example = generate_padding_example
     self.max_target_lenth = max_target_length
     self.data_column_names = data_column_names
     if hasattr(dataset, "n_shards"):
@@ -285,7 +281,6 @@ class HFDataSource(grain.RandomAccessDataSource):
     self.dataset_shards = [dataloading_host_index * self.num_threads + i for i in range(self.num_threads)]
     self.datasets = [split_dataset_by_node(dataset, world_size=self.n_shards, rank=x) for x in self.dataset_shards]
     self.data_iters = []
-    self.out_of_data = False
 
   def _check_shard_count(self):
     if self.n_shards < (self.dataloading_host_count * self.num_threads):
@@ -300,20 +295,13 @@ class HFDataSource(grain.RandomAccessDataSource):
     """update shard"""
     new_shard = self.dataset_shards[idx] + self.dataloading_host_count * self.num_threads
     if new_shard < self.n_shards:
-      max_logging.log(
-          f"Updating host {self.dataloading_host_index} dataset {idx}, was on shard {self.dataset_shards[idx]}"
-      )
+      max_logging.log(f"Updating host {self.dataloading_host_index} dataset {idx}, was on shard {self.dataset_shards[idx]}")
       max_logging.log(f"New shard is {new_shard}")
       self.dataset_shards[idx] = new_shard
       self.datasets[idx] = split_dataset_by_node(self.dataset, world_size=self.n_shards, rank=self.dataset_shards[idx])
       self.data_iters[idx] = iter(self.datasets[idx])
     else:
-      max_logging.log(f"Run out of shards on host {self.dataloading_host_index}, shard {new_shard} is not available")
-      self.out_of_data = True
-      if self.generate_padding_example:
-        max_logging.log(
-            f"Host {self.dataloading_host_index} will start generating all-0 padding examples until step number is met."
-        )
+      raise StopIteration(f"Run out of shards on host {self.dataloading_host_index}, shard {new_shard} is not available")
 
   def __len__(self):
     """Return length of the HF dataset. Since HuggingFace IterableDataset does not have length,
@@ -329,20 +317,10 @@ class HFDataSource(grain.RandomAccessDataSource):
 
     while True:
       try:
-        if self.out_of_data:
-          if self.generate_padding_example:
-            return {
-                column_name: np.zeros(self.max_target_lenth, dtype=np.int32) for column_name in self.data_column_names
-            }
-          else:
-            raise StopIteration("Running out of data")
         data = next(self.data_iters[idx])
         return data
-      except StopIteration as e:
-        if not self.out_of_data:
-          self._update_shard(idx)
-        else:
-          raise e
+      except StopIteration:
+        self._update_shard(idx)
 
 
 ########## Functions used by Grain pipeline

@@ -372,7 +372,7 @@ def train_loop(config, recorder, state=None):
     state_mesh_shardings = _merge_dpo_state(state_mesh_shardings, state_mesh_shardings.params["params"])
 
   p_train_step, p_eval_step = train_utils.jit_train_and_eval_step(
-      config, model, mesh, state, state_mesh_shardings, train_step, eval_step, eval_data_iterator
+      config, model, mesh, state, state_mesh_shardings, train_step, eval_step
   )
 
   with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
@@ -420,8 +420,8 @@ def train_loop(config, recorder, state=None):
 
       if config.eval_interval > 0 and step > start_step and (step + 1) % config.eval_interval == 0:
         assert eval_data_iterator
-
-        # Explicitly reset the eval counters before starting the eval loop
+        # Explicitly reset the eval iterator and counters before starting the eval loop
+        eval_data_iterator.reset()
         metric_logger.reset_eval_metrics()
 
         eval_step_count = 0
