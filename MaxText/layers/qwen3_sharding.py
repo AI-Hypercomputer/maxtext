@@ -61,8 +61,7 @@ class Qwen3ShardingTrainingV2(MeshSharding):
                                                       axis_mappings.append(ep)
                                                     return tuple(axis_mappings)
       case "mlp", TT.Weight:
-                                                    axis_mappings = [fsdp_t, tp, tp_s]
-                                                    return tuple(axis_mappings)
+                                                    return (fsdp_t, tp, tp_s)
       case "mlp", TT.Activation:
                                                     return (tp, tp_t, tp_s)
       case "vocab", TT.Weight:
