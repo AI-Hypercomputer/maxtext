@@ -19,7 +19,7 @@ class Qwen3ShardingTrainingV2(MeshSharding):
   def __call__(self, *args: Any, **kwargs) -> PartitionSpec:
     axes = kwargs["a"]
     tensor_name = kwargs["t"]
-    tensor_type = kwargs.get("tensor_type", TT.Weight)
+    tensor_type = kwargs.get("tt", TT.Weight)
     ep_attn_type = self.config.expert_shard_attention_option
     # TODO: we could get this from config or the mesh
     tp_t_active = kwargs.get("tp_t_active", False)
@@ -29,74 +29,102 @@ class Qwen3ShardingTrainingV2(MeshSharding):
 
     mesh_axes = []
     for axis in axes:
-      match axis, tensor_type:
-        case "batch", TT.Activation:
-                                                      axis_mappings = [dp, fsdp, fsdp_t]
-                                                      # for attention, we re-use the ep axis
-                                                      if (ep_attn_type == "batch" and
-                                                          tensor_name not in ("dispatch", "layer_w0", "layer_w1",
-                                                                              "intermediate_layer")):
-                                                        axis_mappings.append(ep)
-                                                      mesh_axes.append(tuple(axis_mappings))
-        case "embed_and_logits_batch", TT.Activation:
-                                                      axis_mappings = [dp, pp, fsdp, fsdp_t]
-                                                      if ep_attn_type == "batch":
-                                                        axis_mappings.append(ep)
-                                                      mesh_axes.append(tuple(axis_mappings))
-        case "embed", TT.Activation:
-                                                      if tensor_name == "sparse_inputs" and not tp_t_active:
-                                                        mesh_axes.append(())
-                                                      else:
-                                                        mesh_axes.append((tp, tp_t))
-        case "embed", TT.Weight:
-                                                      axis_mappings = [fsdp, fsdp_t, sp, cp]
-                                                      # for attention, we re-use the ep axis
-                                                      if tensor_name not in ("moe_wi_0", "moe_wi_1", "moe_wo"):
-                                                        axis_mappings.append(ep)
-                                                      mesh_axes.append(tuple(axis_mappings))
-        case "mlp", TT.Weight:
-                                                      axis_mappings = [fsdp_t, tp, tp_s]
-                                                      mesh_axes.append(tuple(axis_mappings))
-        case "mlp", TT.Activation:
-                                                      mesh_axes.append((tp, tp_t, tp_s))
-        case "vocab", TT.Weight:
-                                                      mesh_axes.append((tp, tp_t, tp_s, ar))
-        case "norm", TT.Weight:
-                                                      mesh_axes.append((tp, tp_t, tp_s))
-        case "length", TT.Activation:
-                                                      axis_mappings = [sp, cp]
-                                                      if ep_attn_type == "context":
-                                                        axis_mappings.append(ep)
-                                                      mesh_axes.append(tuple(axis_mappings))
-        case "norm_length", TT.Activation:
-                                                      mesh_axes.append((tp_s, sp, cp))
-        case "kv", TT.Activation:
-                                                      mesh_axes.append((tp, tp_s))
-        case "kv_batch", TT.Activation:
-                                                      axis_mappings = [dp, fsdp, fsdp_t]
-                                                      if ep_attn_type == "batch":
-                                                        axis_mappings.append(ep)
-                                                      mesh_axes.append(tuple(axis_mappings))
-        case ("kv_heads" | "heads"), TT.Activation, _:
-                                                      mesh_axes.append((tp, tp_t, sp, tp_s))
-        case "kv_head_dim", TT.Activation:
-                                                      mesh_axes.append((tp, tp_t, tp_s))
-        case  ("heads" | "q_heads" | "kv_heads"), TT.Weight, _:
-                                                      mesh_axes.append((tp, tp_t, tp_s))
-        case ("kv", "kv_head_dim", "qkv", "num_activations"), TT.Weight, _:
-                                                      mesh_axes.append((None,))
-        case "exp", _:
-                                                      mesh_axes.append((ep,))
-        case "embed_tensor_transpose", TT.Weight:
-                                                      mesh_axes.append((tp_t))
-        case _, _:
-                                                      assert False, "Unexpected logical axis name for sharding"
+     mesh_axes.append(self.map_axis(axis, tensor_type, ep_attn_type, tp_t_active))
 
     self.maybe_check_valid_mesh_axes(mesh_axes)
     return PartitionSpec(*mesh_axes)
 
+  def map_axis(axis, tensor_type, ep_attn_type, tp_t_active):
+    match axis, tensor_type:
+      case "batch", TT.Activation:
+                                                    axis_mappings = [dp, fsdp, fsdp_t]
+                                                    # for attention, we re-use the ep axis
+                                                    if (ep_attn_type == "batch" and
+                                                        tensor_name not in ("dispatch", "layer_w0", "layer_w1",
+                                                                            "intermediate_layer")):
+                                                      axis_mappings.append(ep)
+                                                    return axis_mappings
+      case "embed_and_logits_batch", TT.Activation:
+                                                    axis_mappings = [dp, pp, fsdp, fsdp_t]
+                                                    if ep_attn_type == "batch":
+                                                      axis_mappings.append(ep)
+                                                    return tuple(axis_mappings)
+      case "embed", TT.Activation:
+                                                    if tensor_name == "sparse_inputs" and not tp_t_active:
+                                                      return ()
+                                                    else:
+                                                      return (tp, tp_t)
+      case "embed", TT.Weight:
+                                                    axis_mappings = [fsdp, fsdp_t, sp, cp]
+                                                    # for attention, we re-use the ep axis
+                                                    if tensor_name not in ("moe_wi_0", "moe_wi_1", "moe_wo"):
+                                                      axis_mappings.append(ep)
+                                                    return tuple(axis_mappings)
+      case "mlp", TT.Weight:
+                                                    axis_mappings = [fsdp_t, tp, tp_s]
+                                                    return tuple(axis_mappings)
+      case "mlp", TT.Activation:
+                                                    return (tp, tp_t, tp_s)
+      case "vocab", TT.Weight:
+                                                    return (tp, tp_t, tp_s, ar)
+      case "norm", TT.Weight:
+                                                    return (tp, tp_t, tp_s)
+      case "length", TT.Activation:
+                                                    axis_mappings = [sp, cp]
+                                                    if ep_attn_type == "context":
+                                                      axis_mappings.append(ep)
+                                                    return tuple(axis_mappings)
+      case "norm_length", TT.Activation:
+                                                    return (tp_s, sp, cp)
+      case "kv", TT.Activation:
+                                                    return (tp, tp_s)
+      case "kv_batch", TT.Activation:
+                                                    axis_mappings = [dp, fsdp, fsdp_t]
+                                                    if ep_attn_type == "batch":
+                                                      axis_mappings.append(ep)
+                                                    return tuple(axis_mappings)
+      case ("kv_heads" | "heads"), TT.Activation, _:
+                                                    return (tp, tp_t, sp, tp_s)
+      case "kv_head_dim", TT.Activation:
+                                                    return (tp, tp_t, tp_s)
+      case  ("heads" | "q_heads" | "kv_heads"), TT.Weight, _:
+                                                    return (tp, tp_t, tp_s)
+      case ("kv", "kv_head_dim", "qkv", "num_activations"), TT.Weight, _:
+                                                    return (None,)
+      case "exp", _:
+                                                    return (ep,)
+      case "embed_tensor_transpose", TT.Weight:
+                                                    return (tp_t)
+      case _, _:
+                                                    assert False, "Unexpected logical axis name for sharding"
+                                                    return (())
+
   def is_batch_sharded_by_expert(self):
     return True
+
+
+class Qwen3VariantTrainingSharding(MeshSharding):
+  def __init__(self, config):
+    super().__init__()
+    self.qwen3_sharding = Qwen3ShardingTrainingV2(config)
+
+  def __call__(self, *args: Any, **kwargs) -> PartitionSpec:
+    axes = kwargs["a"]
+    tensor_name = kwargs["t"]
+    tensor_type = kwargs.get("tt", TT.Weight)
+    ep_attn_type = self.config.expert_shard_attention_option
+    # TODO: we could get this from config or the mesh
+    tp_t_active = kwargs.get("tp_t_active", False)
+
+    mesh_axes = []
+    for axis in axes:
+      match axis, tensor_type:
+        case "length", TT.Activation: mesh_axes.append(())
+        case _, _:
+          mesh_axes.append(self.qwen3_sharding.map_axis(axis, tensor_name, tensor_type, ep_attn_type, tp_t_active))
+
+    self.maybe_check_valid_mesh_axes(mesh_axes)
+    return PartitionSpec(*mesh_axes)
 
 
 class ModelMode(enum.Enum):
@@ -114,7 +142,7 @@ class Qwen3ShardingInferenceV2(MeshSharding):
   def __call__(self, *args: Any, **kwargs) -> PartitionSpec:
     axes = kwargs["a"]
     tensor_name = kwargs["t"]
-    tensor_type = kwargs.get("tensor_type", TT.Weight)
+    tensor_type = kwargs.get("tt", TT.Weight)
     mode = kwargs.get("mode", MODEL_MODE_TRAINING)
     ep_attn_type = self.config.expert_shard_attention_option
     context_ar = self.config.ici_context_autoregressive_parallelism > 1
