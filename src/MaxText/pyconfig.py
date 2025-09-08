@@ -155,6 +155,17 @@ def validate_expert_shard_attention_option(expert_shard_attention_option: str) -
     raise ValueError(
         f"Invalid expert_shard_attention_option was passed. Got: {expert_shard_attention_option}. Valid options: {valid_expert_shard_attention_option}"
     )
+    
+    
+def validate_vocab_tiling(num_vocab_tiling: int, per_device_batch_size: int, max_target_length: int, enable_nnx: bool):
+  if (per_device_batch_size * max_target_length) % num_vocab_tiling != 0:
+    raise ValueError(
+      "Per device batch size times sequence length should be divisible by the number of vocab tiles."
+    )
+  if num_vocab_tiling > 1 and enable_nnx: #TODO (chengnuojin) enable vocab tiling on NNX after NNX migration
+    raise ValueError(
+      "We currently don't support vocab tiling on NNX module."
+    )
 
 
 def validate_keys(keys):
@@ -170,6 +181,7 @@ def validate_keys(keys):
   validate_model_call_mode(keys["model_call_mode"])
   validate_prefill_and_target_lengths(keys["max_prefill_predict_length"], keys["max_target_length"])
   validate_rope_type(keys["rope_type"])
+  validate_vocab_tiling(keys["num_vocab_tiling"], keys["per_device_batch_size"], keys["max_target_length"], keys["enable_nnx"])
 
   # TODO remove after b/435512699 resolved
   if keys["context_parallel_size"] > 1 and keys["context_parallel_load_balance"] and keys["attention_type"] == "chunk":
