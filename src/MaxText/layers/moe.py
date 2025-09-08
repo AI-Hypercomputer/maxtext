@@ -295,6 +295,7 @@ class RoutedMoE(nnx.Module):
     self.weight_dtype = weight_dtype
     self.dtype = dtype
     self.quant = quant
+    self.rngs = rngs
 
     self.wi_kernel_axes = ("exp", "embed_no_exp", "mlp")
     self.wo_kernel_axes = ("exp", "mlp", "embed_no_exp")
@@ -311,7 +312,7 @@ class RoutedMoE(nnx.Module):
         use_bias=self.config.routed_bias,
         score_func=self.config.routed_score_func,
         matmul_precision=self.config.matmul_precision,
-        rngs=rngs,
+        rngs=self.rngs,
     )
 
     # pylint: disable=protected-access
@@ -332,7 +333,7 @@ class RoutedMoE(nnx.Module):
     else:
       self.wi_0 = nnx.Param(
           self.kernel_init(
-              rngs.params(),
+              self.rngs.params(),
               (num_experts, self.config.emb_dim, intermediate_dim),
               weight_dtype,
               kernel_in_axis,
@@ -342,7 +343,7 @@ class RoutedMoE(nnx.Module):
       )
       self.wi_1 = nnx.Param(
           self.kernel_init(
-              rngs.params(),
+              self.rngs.params(),
               (num_experts, self.config.emb_dim, intermediate_dim),
               weight_dtype,
               kernel_in_axis,
@@ -352,7 +353,7 @@ class RoutedMoE(nnx.Module):
       )
       self.wo = nnx.Param(
           self.kernel_init(
-              rngs.params(),
+              self.rngs.params(),
               (self.num_experts, self.intermediate_dim, self.config.emb_dim),
               self.weight_dtype,
               kernel_in_axis,
@@ -367,15 +368,15 @@ class RoutedMoE(nnx.Module):
       wi_bias_shape = (self.num_experts, self.intermediate_dim)
       wo_bias_shape = (self.num_experts, self.config.emb_dim)
       self.wi_0_bias = nnx.Param(
-          default_bias_init(rngs.params(), wi_bias_shape, self.weight_dtype),
+          default_bias_init(self.rngs.params(), wi_bias_shape, self.weight_dtype),
           sharding=wi_bias_axes,
       )
       self.wi_1_bias = nnx.Param(
-          default_bias_init(rngs.params(), wi_bias_shape, self.weight_dtype),
+          default_bias_init(self.rngs.params(), wi_bias_shape, self.weight_dtype),
           sharding=wi_bias_axes,
       )
       self.wo_bias = nnx.Param(
-          default_bias_init(rngs.params(), wo_bias_shape, self.weight_dtype),
+          default_bias_init(self.rngs.params(), wo_bias_shape, self.weight_dtype),
           sharding=wo_bias_axes,
       )
     else:
@@ -395,12 +396,15 @@ class RoutedMoE(nnx.Module):
   def get_context_autoregressive_parallelism_size(self):
     return self.mesh.shape["context_autoregressive"]
 
-  def get_topk(self, gate_logits, pre_bias_logits):
+  def get_topk(self, gate_logits, pre_bias_logits, rngs=None):
     """get topk."""
     # shape of top_k_weights & top_k_indices:
     # (batch, sequence, num_experts_per_tok).
     if self.config.use_random_routing:
-      rng = self.make_rng("random_routing")
+      if rngs is None:
+        raise ValueError("The random key cannot be None for random routing.")
+      # Re-use the 'dropout' RNG stream to ensure random routing
+      rng = rngs.dropout()
       top_k_weights, top_k_indices = random_routing(rng, gate_logits, self.num_experts_per_tok)
       return top_k_weights, top_k_indices
 
@@ -508,13 +512,13 @@ class RoutedMoE(nnx.Module):
         intermediate_layer = jnp.multiply(layer_act, layer_w1)
       return intermediate_layer.astype(self.dtype)
   
-  def permute(self, inputs, gate_logits, pre_bias_logits, use_custom_sort_vjp=True):
+  def permute(self, inputs, gate_logits, pre_bias_logits, use_custom_sort_vjp=True, rngs=None):
     """Permute tokens to group by expert to fit gmm call."""
     # reshape inputs (batch, sequence, emb) to (batch * sequence, emb)
     inputs_shape = inputs.shape
     bsz_times_seq_len = inputs_shape[0] * inputs_shape[1]
     inputs_2d = jnp.reshape(inputs, (bsz_times_seq_len, inputs_shape[2]))
-    weights, selected_experts = self.get_topk(gate_logits, pre_bias_logits)
+    weights, selected_experts = self.get_topk(gate_logits, pre_bias_logits, rngs)
 
     if self.config.decoder_block == ctypes.DecoderBlockType.LLAMA4:
       # weights will be of shape (batch_size, seq_len, num_experts_per_tok)
@@ -917,11 +921,12 @@ class RoutedMoE(nnx.Module):
             w0_bias_pspec,
             w1_bias_pspec,
             wo_bias_pspec,
+            None,
         ),
         out_specs=(nn.logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", "activation_embed"))),
         check_rep=False,
     )
-    def wrapper(x, logits, pre_bias_logits, w0, w1, wo, w0_bias, w1_bias, wo_bias):
+    def wrapper(x, logits, pre_bias_logits, w0, w1, wo, w0_bias, w1_bias, wo_bias, rngs):
       batch_size, sequence_length, _ = x.shape
       expert_axis_name = "expert"
       expert_shard_id = jax.lax.axis_index(expert_axis_name)
@@ -955,7 +960,7 @@ class RoutedMoE(nnx.Module):
       else:
         num_tokens_to_skip = None
         x, sorted_selected_experts, weights, group_sizes, selected_experts = self.permute(
-            x, logits, pre_bias_logits, self.config.use_custom_sort_vjp)
+            x, logits, pre_bias_logits, self.config.use_custom_sort_vjp, rngs)
 
         if num_expert_parallelism > 1:
           batch_axis = "expert" if is_batch_sharded_by_expert else "data"
@@ -1153,7 +1158,7 @@ class RoutedMoE(nnx.Module):
       w1_kernel = nn.with_logical_constraint(w1_kernel, ("exp", "embed_tensor_transpose", "mlp_no_fsdp"))
       wo_kernel = nn.with_logical_constraint(wo_kernel, ("exp", "mlp_no_fsdp", "embed_tensor_transpose"))
 
-    return wrapper(inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel, w0_bias, w1_bias, wo_bias)
+    return wrapper(inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel, w0_bias, w1_bias, wo_bias, self.rngs)
 
   def reshape_and_update_weights(self, weights, indices):
     """reshape and update weights."""
@@ -1414,7 +1419,7 @@ class RoutedMoE(nnx.Module):
     if self.config.model_name.startswith("deepseek3"):
       # pre_bias_logits is None for non-DeepSeek v3 models
       pre_bias_logits = nn.with_logical_constraint(pre_bias_logits, ("activation_batch", "activation_norm_length", None))
-    top_k_weights, top_k_indices = self.get_topk(gate_logits, pre_bias_logits)
+    top_k_weights, top_k_indices = self.get_topk(gate_logits, pre_bias_logits, self.rngs)
     is_llama4_decoder_layer = self.config.decoder_block == ctypes.DecoderBlockType.LLAMA4
     if is_llama4_decoder_layer:
       router_scores = jax.nn.sigmoid(top_k_weights.astype(jnp.float32)).astype(self.dtype)
