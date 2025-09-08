@@ -42,22 +42,26 @@ deepseek_v3_fsdp_v5p_512_nocapp = _add_to_model_dictionary(
             "skip_first_n_steps_for_profiler": 5,
             "profiler_steps": 5,
             "profiler": "xplane",
-            "sa_block_q": 2048,
-            "sa_block_q_dkv": 2048,
-            "sa_block_q_dq": 2048,
+            "sa_block_q":2048,
+            "sa_block_kv":2048,
+            "sa_block_kv_compute":2048,
+            "sa_block_q_dkv":2048,
+            "sa_block_kv_dkv":2048,
+            "sa_block_kv_dkv_compute":2048,
+            "sa_block_q_dq":2048,
+            "sa_block_kv_dq":2048,
+            "opt_type":"adamw",
+            "mu_dtype":"bfloat16",
+            "sa_use_fused_bwd_kernel":"true",
             "megablox": True,
             "sparse_matmul": True,
             "capacity_factor": 1.0,
-            "tokenizer_type": "huggingface",
-            "tokenizer_path": "deepseek-ai/DeepSeek-V3",
+            "tokenizer_path": "assets/tokenizer.mistral-v1",
             "dtype": "bfloat16",
-            "opt_type": "adam_pax",
             "attention": "flash",
         },
         xla_flags=(
-            xla_flags_library.MOE_VMEM_LIMIT_FLAG
-            + xla_flags_library.CF_FOR_ALL_GATHER
-            + xla_flags_library.DATA_PARALLEL_OVERLAP
+            xla_flags_library.GF_FLAGS
         ),
     ),
 )
