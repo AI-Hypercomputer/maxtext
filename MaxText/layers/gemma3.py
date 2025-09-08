@@ -334,7 +334,7 @@ class Encoder1DBlock(nn.Module):
   def __call__(self, x: jax.Array, deterministic: bool = True) -> jax.Array:
     y = nn.LayerNorm()(x)
 
-    # # Original flax linen attention
+    # # Original flax linen attention (max KL divergence = 0.8480151891708374)
     # y = nn.MultiHeadDotProductAttention(
     #     num_heads=self.num_heads,
     #     kernel_init=nn.initializers.xavier_uniform(),
@@ -343,7 +343,7 @@ class Encoder1DBlock(nn.Module):
     #     dtype=self.dtype_mm,
     # )(y, y)
 
-    # MaxText layers
+    # MaxText layers (max KL divergence = 8.728078842163086)
     y = attention_as_linen(
         config=self.config,
         num_query_heads=self.config.num_attention_heads_for_vit,
