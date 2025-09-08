@@ -277,6 +277,7 @@ def _posemb_sincos_2d(
     width: int,
     temperature: float = 10_000.0,
     dtype: jnp.dtype = jnp.float32,
+    precision: str = "default",
 ):
   """Follows the MoCo v3 logic."""
   y, x = jnp.mgrid[:h, :w]  # pylint: disable=unpacking-non-sequence
@@ -284,8 +285,8 @@ def _posemb_sincos_2d(
   assert width % 4 == 0, "Width must be mult of 4 for sincos posemb"
   omega = jnp.arange(width // 4) / (width // 4 - 1)
   omega = 1.0 / (temperature**omega)
-  y = jnp.einsum("m,d->md", y.flatten(), omega)
-  x = jnp.einsum("m,d->md", x.flatten(), omega)
+  y = jnp.einsum("m,d->md", y.flatten(), omega, precision=jax.lax.Precision(precision))
+  x = jnp.einsum("m,d->md", x.flatten(), omega, precision=jax.lax.Precision(precision))
   pe = jnp.concatenate([jnp.sin(x), jnp.cos(x), jnp.sin(y), jnp.cos(y)], axis=1)
   return jnp.asarray(pe, dtype)[None, :, :]
 
@@ -334,36 +335,36 @@ class Encoder1DBlock(nn.Module):
   def __call__(self, x: jax.Array, deterministic: bool = True) -> jax.Array:
     y = nn.LayerNorm()(x)
 
-    # # Original flax linen attention (max KL divergence = 0.8480151891708374)
-    # y = nn.MultiHeadDotProductAttention(
-    #     num_heads=self.num_heads,
-    #     kernel_init=nn.initializers.xavier_uniform(),
-    #     precision=jax.lax.Precision(self.precision),
-    #     deterministic=deterministic,
-    #     dtype=self.dtype_mm,
-    # )(y, y)
+    # Original flax linen attention (max KL divergence = 0.8480151891708374)
+    y = nn.MultiHeadDotProductAttention(
+        num_heads=self.num_heads,
+        kernel_init=nn.initializers.xavier_uniform(),
+        precision=jax.lax.Precision(self.precision),
+        deterministic=deterministic,
+        dtype=self.dtype_mm,
+    )(y, y)
 
     # MaxText layers (max KL divergence = 8.728078842163086)
-    y = attention_as_linen(
-        config=self.config,
-        num_query_heads=self.config.num_attention_heads_for_vit,
-        num_kv_heads=self.config.num_attention_heads_for_vit,
-        head_dim=self.config.hidden_size_for_vit // self.config.num_attention_heads_for_vit,
-        max_target_length=self.seq_len,
-        mesh=self.mesh,
-        attention_kernel="dot_product",
-        inputs_q_shape=(self.config.per_device_batch_size, self.seq_len, self.config.hidden_size_for_vit),
-        inputs_kv_shape=(self.config.per_device_batch_size, self.seq_len, self.config.hidden_size_for_vit),
-        dropout_rate=0,
-        is_nope_layer=True,
-        use_bias_in_projections=True,
-        attention_type=AttentionType.FULL,
-        use_qk_norm=False,
-        query_pre_attn_scalar=1 / (self.config.hidden_size_for_vit // self.config.num_attention_heads_for_vit) ** 0.5,
-        model_mode="train",
-        is_vision=True,
-        name="MultiHeadDotProductAttention_0",
-    )(y, y, deterministic=deterministic)
+    # y = attention_as_linen(
+    #     config=self.config,
+    #     num_query_heads=self.config.num_attention_heads_for_vit,
+    #     num_kv_heads=self.config.num_attention_heads_for_vit,
+    #     head_dim=self.config.hidden_size_for_vit // self.config.num_attention_heads_for_vit,
+    #     max_target_length=self.seq_len,
+    #     mesh=self.mesh,
+    #     attention_kernel="dot_product",
+    #     inputs_q_shape=(self.config.per_device_batch_size, self.seq_len, self.config.hidden_size_for_vit),
+    #     inputs_kv_shape=(self.config.per_device_batch_size, self.seq_len, self.config.hidden_size_for_vit),
+    #     dropout_rate=0,
+    #     is_nope_layer=True,
+    #     use_bias_in_projections=True,
+    #     attention_type=AttentionType.FULL,
+    #     use_qk_norm=False,
+    #     query_pre_attn_scalar=1 / (self.config.hidden_size_for_vit // self.config.num_attention_heads_for_vit) ** 0.5,
+    #     model_mode="train",
+    #     is_vision=True,
+    #     name="MultiHeadDotProductAttention_0",
+    # )(y, y, deterministic=deterministic)
 
     y = nn.Dropout(rate=self.dropout)(y, deterministic)
     x = x + y
