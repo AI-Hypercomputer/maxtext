@@ -320,24 +320,51 @@ class MlpBlockViT(nn.Module):
 class Encoder1DBlock(nn.Module):
   """Single transformer encoder block (MHSA + MLP)."""
 
+  config: Config
+  mesh: Mesh
   block_id: int
   dtype_mm: str
   mlp_dim: int | None = None  # Defaults to 4x input dim
   num_heads: int = 12
   dropout: float = 0.0
   precision: str = "default"
+  seq_len: int = 4096
 
   @nn.compact
   def __call__(self, x: jax.Array, deterministic: bool = True) -> jax.Array:
     y = nn.LayerNorm()(x)
 
-    y = nn.MultiHeadDotProductAttention(
-        num_heads=self.num_heads,
-        kernel_init=nn.initializers.xavier_uniform(),
-        precision=jax.lax.Precision(self.precision),
-        deterministic=deterministic,
-        dtype=self.dtype_mm,
-    )(y, y)
+    # # Original flax linen attention
+    # y = nn.MultiHeadDotProductAttention(
+    #     num_heads=self.num_heads,
+    #     kernel_init=nn.initializers.xavier_uniform(),
+    #     precision=jax.lax.Precision(self.precision),
+    #     deterministic=deterministic,
+    #     dtype=self.dtype_mm,
+    # )(y, y)
+
+    # MaxText layers
+    y = attention_as_linen(
+        config=self.config,
+        num_query_heads=self.config.num_attention_heads_for_vit,
+        num_kv_heads=self.config.num_attention_heads_for_vit,
+        head_dim=self.config.hidden_size_for_vit // self.config.num_attention_heads_for_vit,
+        max_target_length=self.seq_len,
+        mesh=self.mesh,
+        attention_kernel="dot_product",
+        inputs_q_shape=(self.config.per_device_batch_size, self.seq_len, self.config.hidden_size_for_vit),
+        inputs_kv_shape=(self.config.per_device_batch_size, self.seq_len, self.config.hidden_size_for_vit),
+        dropout_rate=0,
+        is_nope_layer=True,
+        use_bias_in_projections=True,
+        attention_type=AttentionType.FULL,
+        use_qk_norm=False,
+        query_pre_attn_scalar=1 / (self.config.hidden_size_for_vit // self.config.num_attention_heads_for_vit) ** 0.5,
+        model_mode="train",
+        is_vision=True,
+        name="MultiHeadDotProductAttention_0",
+    )(y, y, deterministic=deterministic)
+
     y = nn.Dropout(rate=self.dropout)(y, deterministic)
     x = x + y
 
@@ -357,6 +384,8 @@ class Encoder1DBlock(nn.Module):
 class Encoder(nn.Module):
   """Transformer Model Encoder for sequence to sequence translation."""
 
+  config: Config
+  mesh: Mesh
   depth: int
   dtype_mm: str
   remat_policy: str
@@ -396,6 +425,8 @@ class Encoder(nn.Module):
       # Input Encoder
       for lyr in range(self.depth):
         block_cur = Encoder1DBlock(
+            config=self.config,
+            mesh=self.mesh,
             block_id=lyr,
             name=f"encoderblock_{lyr}",
             dtype_mm=self.dtype_mm,
@@ -552,6 +583,8 @@ class Gemma3VisionEncoderLayer(nn.Module):
 
     # Transformer encoder to extract image features.
     x = Encoder(
+        config=self.config,
+        mesh=self.mesh,
         depth=self.depth,
         mlp_dim=self.mlp_dim,
         num_heads=self.num_heads,
