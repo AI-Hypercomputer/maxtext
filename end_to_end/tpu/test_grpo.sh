@@ -48,6 +48,6 @@ per_device_batch_size=${INFERENCE_PER_DEVICE_BATCH_SIZE} \
 ici_data_parallelism=${NUM_SAMPLERS} ici_tensor_parallelism=${DEVICES_PER_SAMPLER}"
 
 JAX_PLATFORMS=proxy JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 ENABLE_PATHWAYS_PERSISTENCE='1' \
-    python3 -m MaxText.experimental.rl.grpo_trainer MaxText/experimental/rl/grpo.yml  \
-    ${COMMON_ARGS} ${TRAINING_ARGS} MaxText/experimental/rl/grpo_inference.yml \
+    python3 -m MaxText.experimental.rl.grpo_trainer "${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText}"/experimental/rl/grpo.yml  \
+    ${COMMON_ARGS} ${TRAINING_ARGS} ${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText}/experimental/rl/grpo_inference.yml \
     ${COMMON_ARGS} ${INFERENCE_ARGS}
