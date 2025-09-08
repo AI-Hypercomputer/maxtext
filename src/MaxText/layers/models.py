@@ -94,6 +94,20 @@ class TransformerLinenPure(nn.Module):
           config=self.config, mesh=self.mesh, name="mtp_block", transformer_layer_module=mtp_layer, decoder=self.decoder
       )
 
+  def logits_from_hidden_states(self, hidden_states, deterministic):
+    """
+    A pure function to compute logits from hidden states (tiled).
+    Designed to be safely used within other transformations like lax.scan.
+    """
+    # Since this method is called via apply, the submodules are already initialized.
+    # We can safely call the internal _apply_output_head method.
+    logits = self.decoder._apply_output_head(
+        shared_embedding=self.shared_embedding,
+        y=hidden_states,
+        deterministic=deterministic,
+    )
+    return logits
+
   def __call__(
       self,
       decoder_input_tokens: jnp.ndarray,
@@ -249,7 +263,7 @@ class Transformer(nnx.Module):
 
     decoder_linen = Decoder(config=cfg, mesh=mesh, quant=self.quant, model_mode=self.model_mode)
     self.decoder = nnx_wrappers.ToNNX(decoder_linen, rngs=rngs)
-
+    self.hidden_states = None
     if self.model_mode == MODEL_MODE_PREFILL:
       seq_len = cfg.max_prefill_predict_length
     elif self.model_mode == MODEL_MODE_AUTOREGRESSIVE:
@@ -296,6 +310,19 @@ class Transformer(nnx.Module):
 
   def init_cache(self, cache_size: int, batch_size: int, dtype=jnp.float32):
     return True
+
+  def logits_from_hidden_states(self, hidden_states, deterministic):
+    """
+    A method only run the last embedding layer with given hidden states (tiled)
+    """
+    # Since this method is called via apply, the submodules are already initialized.
+    # We can safely call the internal _apply_output_head method.
+    logits = self.decoder._apply_output_head(
+        shared_embedding=self.shared_embedding,
+        y=hidden_states,
+        deterministic=deterministic,
+    )
+    return logits
 
   def __call__(
       self,
@@ -348,6 +375,10 @@ class Transformer(nnx.Module):
         bidirectional_mask=bidirectional_mask,
         image_embeddings=image_embeddings,
     )
+
+    # Materialize hidden state when vocab tiling is enabled
+    if self.config.num_vocab_tiling > 1:
+      self.hidden_states = hidden_state
 
     # If we are initializing the model AND MTP is enabled, we must create
     # dummy target tensors. This allows Flax to trace the MTPBlock and create
@@ -409,6 +440,20 @@ class ZeroOneTransformer(nn.Module):
 
   def setup(self):
     self.model = transformer_as_linen(self.config, self.mesh, self.quant, self.model_mode)
+
+  def logits_from_hidden_states(self, hidden_states, deterministic):
+    """
+    A pure function to compute logits from hidden states (tiled).
+    Designed to be safely used within other transformations like lax.scan.
+    """
+    # Since this method is called via apply, the submodules are already initialized.
+    # We can safely call the internal _apply_output_head method.
+    logits = self.decoder._apply_output_head(
+        shared_embedding=self.shared_embedding,
+        y=hidden_states,
+        deterministic=deterministic,
+    )
+    return logits
 
   def __call__(
       self,
