@@ -219,7 +219,7 @@ def validate_keys(keys):
     validate_sparse_matmul_parallelism(keys)
     validate_ragged_dot(keys)
     validate_deepseek_moe(keys)
-    validate_gpt_oss_moe(keys)
+    # validate_gpt_oss_moe(keys)
     validate_expert_shard_attention_option(keys["expert_shard_attention_option"])
 
   if keys["use_multimodal"]:

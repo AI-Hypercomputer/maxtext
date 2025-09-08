@@ -483,6 +483,20 @@ class RoutedMoE(nnx.Module):
     inputs_2d = jnp.reshape(inputs, (bsz_times_seq_len, inputs_shape[2]))
     weights, selected_experts = self.get_topk(gate_logits, pre_bias_logits)
 
+    # re_weights = self.reshape_and_update_weights(weights, selected_experts)
+    # re_weights = re_weights.reshape(184, 8)
+
+    # jax.debug.print("re_weights.shape={x}", x=re_weights.shape)
+    # jax.debug.print("re_weights={x}", x=re_weights)
+    # weights_mean = jnp.mean(re_weights)
+    # weights_std = jnp.std(re_weights)
+    # jax.debug.print("weights_mean={x}", x=weights_mean)
+    # jax.debug.print("weights_std={x}", x=weights_std)
+
+    # re_selected_experts = selected_experts.reshape(184, 2)
+    # jax.debug.print("re_selected_experts.shape={x}", x=re_selected_experts.shape)
+    # jax.debug.print("re_selected_experts={x}", x=re_selected_experts)  
+
     if self.config.decoder_block == ctypes.DecoderBlockType.LLAMA4:
       # weights will be of shape (batch_size, seq_len, num_experts_per_tok)
       router_scores = jax.nn.sigmoid(weights.astype(jnp.float32))  # weights are top_k_weights here
@@ -747,9 +761,10 @@ class RoutedMoE(nnx.Module):
       # pad length is the 1st dimension of tiling size in gmm call
       if inputs.shape[0] != expert_assignments.shape[0]:
         raise ValueError("The number of input tokens must match the number of expert" " assignments!")
+      amount = 0
       if hs_shape[0] % pad_length:
-        pad_length = pad_length - hs_shape[0] % pad_length
-        inputs = jax.lax.pad(inputs.astype(jnp.float32), 0.0, [(0, pad_length, 0), (0, 0, 0)])
+        amount = pad_length - hs_shape[0] % pad_length
+        inputs = jax.lax.pad(inputs, jnp.array(0.0, dtype=inputs.dtype), [(0, amount, 0), (0, 0, 0)])
 
       inputs = inputs.astype(self.dtype)
       kernel = kernel.astype(self.dtype)
@@ -797,14 +812,14 @@ class RoutedMoE(nnx.Module):
         if isinstance(kernel, aqt.QTensor):
           # Multiply outputs by the kernely scale
           scales = jnp.take(kernel.scale[0].squeeze(), indices=expert_assignments, axis=0)
-          if hs_shape[0] % pad_length:
+          if amount > 0:
             scales = jax.lax.pad(
                 scales,
                 jnp.array(0.0, dtype=scales.dtype),
-                [(0, pad_length, 0), (0, 0, 0)],
+                [(0, amount, 0), (0, 0, 0)],
             )
           output *= scales
-      if hs_shape[0] % pad_length:
+      if amount > 0:
         output = output[: hs_shape[0]]
       return output
 
@@ -945,11 +960,25 @@ class RoutedMoE(nnx.Module):
         w0_bias, w1_bias, wo_bias = self.transform_bias(selected_experts, w0_bias, w1_bias, wo_bias)
 
       layer_w0 = gmm(x, w0, group_sizes, selected_experts)
+      jax.debug.print("layer_w0.shape={x}", x=layer_w0.shape)
+      jax.debug.print("layer_w0={x}", x=layer_w0)
+      layer_w0_mean = jnp.mean(layer_w0)
+      layer_w0_std = jnp.std(layer_w0)
+      jax.debug.print("layer_w0_mean={x}", x=layer_w0_mean)
+      jax.debug.print("layer_w0_std={x}", x=layer_w0_std)
+    
       if self.config.mlp_bias:
         layer_w0 = layer_w0 + w0_bias
       if self.get_tensor_transpose_parallelism_size() > 1:
         layer_w0 = jax.lax.psum(layer_w0, "tensor_transpose")
       layer_w0 = adc.checkpoint_name(layer_w0, "mlpwi_0")
+
+      jax.debug.print("bias layer_w0.shape={x}", x=layer_w0.shape)
+      jax.debug.print("bias layer_w0={x}", x=layer_w0)
+      layer_w0_mean = jnp.mean(layer_w0)
+      layer_w0_std = jnp.std(layer_w0)
+      jax.debug.print("bias layer_w0_mean={x}", x=layer_w0_mean)
+      jax.debug.print("bias layer_w0_std={x}", x=layer_w0_std)
 
       layer_w1 = gmm(x, w1, group_sizes, selected_experts)
       if self.config.mlp_bias:
@@ -970,12 +999,11 @@ class RoutedMoE(nnx.Module):
         intermediate_layer = jnp.multiply(layer_act, layer_w1)
 
       intermediate_output = gmm(intermediate_layer, wo, group_sizes, selected_experts)
+      if self.get_tensor_parallelism_size() > 1:
+        intermediate_output = jax.lax.psum_scatter(intermediate_output, "tensor", scatter_dimension=1, tiled=True)
       if self.config.mlp_bias:
         intermediate_output = intermediate_output + wo_bias
       intermediate_output = adc.checkpoint_name(intermediate_output, "mlpwo")
-
-      if self.get_tensor_parallelism_size() > 1:
-        intermediate_output = jax.lax.psum_scatter(intermediate_output, "tensor", scatter_dimension=1, tiled=True)
 
       if num_expert_parallelism > 1:
         original_inputs_first_dim = batch_size * sequence_length * self.config.num_experts_per_tok
@@ -1036,7 +1064,17 @@ class RoutedMoE(nnx.Module):
 
       return output, None
 
-    return wrapper(inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel, w0_bias, w1_bias, wo_bias)
+
+    output, _ = wrapper(inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel, w0_bias, w1_bias, wo_bias)
+    re_output = output.reshape(4, -1, 16)
+    jax.debug.print("re_output.shape={x}", x=re_output.shape)
+    jax.debug.print("re_output={x}", x=re_output)
+    re_output_mean = jnp.mean(re_output)
+    re_output_std = jnp.std(re_output)
+    jax.debug.print("re_output_mean={x}", x=re_output_mean)
+    jax.debug.print("re_output_std={x}", x=re_output_std) 
+
+    return output, None
 
   def reshape_and_update_weights(self, weights, indices):
     """reshape and update weights."""
@@ -1517,8 +1555,33 @@ class RoutedMoE(nnx.Module):
         layer_w0 = self.get_einsum(rhs_mesh_axes=self.wi_kernel_axes)(
             "BSM,EMH -> BSEH", inputs, w0_kernel, precision=matmul_precision
         )
+
+        re_layer_w0 = self.get_einsum(rhs_mesh_axes=self.wi_kernel_axes)(
+              "BSM,EMH -> EBSH", inputs, w0_kernel, precision=matmul_precision
+          )
+        re_layer_w0 = re_layer_w0.reshape(8, -1, 16)
+        jax.debug.print("re_layer_w0.shape={x}", x=re_layer_w0.shape)
+        jax.debug.print("re_layer_w0={x}", x=re_layer_w0)
+        re_layer_w0_mean = jnp.mean(re_layer_w0)
+        re_layer_w0_std = jnp.std(re_layer_w0)
+        jax.debug.print("re_layer_w0_mean={x}", x=re_layer_w0_mean)
+        jax.debug.print("re_layer_w0_std={x}", x=re_layer_w0_std) 
+
         if self.config.mlp_bias:
-          layer_w0 = layer_w0 + w0_bias
+          print(f"checking layer_w0.shape: {layer_w0.shape}")
+          print(f"checking w0_bias.shape: {w0_bias.shape}")
+          layer_w0 = layer_w0 + w0_bias[None, None, :, :]
+
+        bias_layer_w0 = jnp.transpose(layer_w0, axes=(2, 0, 1, 3)).reshape(8, -1, 1024)
+        print(f"transpose shape: {jnp.transpose(layer_w0, axes=(2, 0, 1, 3))}")
+        print(f"transpose shape: {jnp.transpose(layer_w0, axes=(2, 0, 1, 3)).reshape(8, -1, 16)}")
+        jax.debug.print("bias_layer_w0.shape={x}", x=bias_layer_w0.shape)
+        jax.debug.print("bias_layer_w0={x}", x=bias_layer_w0)
+        bias_layer_w0_mean = jnp.mean(bias_layer_w0)
+        bias_layer_w0_std = jnp.std(bias_layer_w0)
+        jax.debug.print("bias_layer_w0_mean={x}", x=bias_layer_w0_mean)
+        jax.debug.print("bias_layer_w0_std={x}", x=bias_layer_w0_std) 
+
         if self.config.activations_in_float32:
           layer_w0 = layer_w0.astype(jnp.float32)
         layer_w0 = adc.checkpoint_name(layer_w0, "mlpwi_0")
@@ -1527,13 +1590,25 @@ class RoutedMoE(nnx.Module):
             "BSM,EMH -> BSEH", inputs, w1_kernel, precision=matmul_precision
         )
         if self.config.mlp_bias:
-          layer_w1 = layer_w1 + w1_bias
+          layer_w1 = layer_w1 + w1_bias[None, None, :, :]
         if self.config.activations_in_float32:
           layer_w1 = layer_w1.astype(jnp.float32)
         layer_w1 = adc.checkpoint_name(layer_w1, "mlpwi_1")
       # pylint: disable=protected-access
-      layer_w0_act = linears._convert_to_activation_function(self.config.mlp_activations[0])(layer_w0)
-      layer_multiply = jnp.multiply(layer_w0_act, layer_w1).astype(self.dtype)
+      # layer_w0_act = linears._convert_to_activation_function(self.config.mlp_activations[0])(layer_w0)
+      # layer_multiply = jnp.multiply(layer_w0_act, layer_w1).astype(self.dtype)
+
+      if self.config.decoder_block == ctypes.DecoderBlockType.GPT_OSS:
+        jax.debug.print(".....inside....")
+        layer_w0 = jnp.clip(layer_w0, a_min=None, a_max=self.config.mlp_activations_limit)
+        layer_w1 = jnp.clip(layer_w1, a_min=-self.config.mlp_activations_limit, a_max=self.config.mlp_activations_limit)
+        layer_act = linears._convert_to_activation_function(self.config.mlp_activations[0])(layer_w0 * 1.702)
+        glu = jnp.multiply(layer_w0, layer_act)
+        layer_multiply = jnp.multiply(glu, (layer_w1 + 1))
+      else:
+        layer_w0_act = linears._convert_to_activation_function(self.config.mlp_activations[0])(layer_w0)
+        layer_multiply = jnp.multiply(layer_w0_act, layer_w1).astype(self.dtype)
+
       with jax.named_scope("wo"):
         intermediate_layer = self.get_einsum(rhs_mesh_axes=self.wo_kernel_axes)(
             "BSEH,EHM -> BSEM",
@@ -1542,18 +1617,46 @@ class RoutedMoE(nnx.Module):
             precision=matmul_precision,
         )
         if self.config.mlp_bias:
-          intermediate_layer = intermediate_layer + wo_bias
+          intermediate_layer = intermediate_layer + wo_bias[None, None, :, :]
         if self.config.activations_in_float32:
           intermediate_layer = intermediate_layer.astype(jnp.float32)
         intermediate_layer = adc.checkpoint_name(intermediate_layer, "mlpwo")
+
+        re_intermediate_layer = jnp.transpose(intermediate_layer, (2, 0, 1, 3))
+        jax.debug.print("wo intermediate_layer.shape={x}", x=re_intermediate_layer.shape)
+        jax.debug.print("wo intermediate_layer={x}", x=re_intermediate_layer)
+        wo_mean = jnp.mean(re_intermediate_layer)
+        wo_std = jnp.std(re_intermediate_layer)
+        jax.debug.print("jax wo_mean={x}", x=wo_mean)
+        jax.debug.print("jax wo_std={x}", x=wo_std)
+
+      jax.debug.print("jax weights.shape={x}", x=weights.shape)
+      jax.debug.print("jax weights={x}", x=weights)
+      jax_weights_mean = jnp.mean(weights)
+      jax_weights_std = jnp.std(weights)
+      jax.debug.print("jax jax_weights_mean={x}", x=jax_weights_mean)
+      jax.debug.print("jax jax_weights_std={x}", x=jax_weights_std) 
+  
       with jax.named_scope("w_sum"):
         if is_llama4_decoder_layer:
           weights = self.reshape_and_update_weights(jnp.ones_like(top_k_weights), top_k_indices)
         output = jnp.einsum(
             "BSEM,BSE -> BSM",
-            intermediate_layer,
-            weights,  # pylint: disable=undefined-variable,possibly-used-before-assignment
+            intermediate_layer.astype(jnp.float32),
+            weights.astype(jnp.float32),  # pylint: disable=undefined-variable,possibly-used-before-assignment
+            precision=matmul_precision,
         ).astype(self.dtype)
+
+      # broadcastable_weights = weights[:, :, :, None]
+      # weighted_states = intermediate_layer * broadcastable_weights
+      # output = weighted_states.astype(jnp.float32).sum(axis=2)
+
+      jax.debug.print("jax output.shape={x}", x=output.shape)
+      jax.debug.print("jax output={x}", x=output)
+      output_mean = jnp.mean(output)
+      output_std = jnp.std(output)
+      jax.debug.print("jax output_mean={x}", x=output_mean)
+      jax.debug.print("jax output_std={x}", x=output_std) 
       return output, None
 
   def retrieve_quantized_weight(
@@ -1612,6 +1715,11 @@ class RoutedMoE(nnx.Module):
             w1_bias,
             wo_bias,
         )
+      jax.debug.print("inputs={x}", x=inputs)
+      inputs_mean = jnp.mean(inputs)
+      inputs_std = jnp.std(inputs)
+      jax.debug.print("inputs_mean={x}", x=inputs_mean)
+      jax.debug.print("inputs_std={x}", x=inputs_std)
       return self.sparse_matmul(
           inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel, w0_bias, w1_bias, wo_bias
       )

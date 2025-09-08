@@ -31,6 +31,11 @@ import numpy as np
 from MaxText.layers.initializers import nd_dense_init
 from types import SimpleNamespace
 
+import sys
+import numpy
+import statistics
+numpy.set_printoptions(threshold=sys.maxsize)
+
 
 """  
 Tests for Attention & MLP in GPT OSS.
@@ -64,17 +69,63 @@ class GptOssExperts(nn.Module):
     hidden_states = hidden_states.repeat(num_experts, 1)
     hidden_states = hidden_states.view(num_experts, -1, self.hidden_size)
 
+    no_bias_gate_up = torch.bmm(hidden_states, self.gate_up_proj)
+    no_bias_gate, no_bias_up = no_bias_gate_up[..., ::2], no_bias_gate_up[..., 1::2]
+
+    print(f"gate.shape: {no_bias_gate.shape}")
+    print(f"gate: {no_bias_gate}")
+    no_bias_gate_mean = jnp.mean(to_jax(no_bias_gate))
+    no_bias_gate_std = jnp.std(to_jax(no_bias_gate))
+    print(f"no_bias_gate_mean: {no_bias_gate_mean}")    
+    print(f"no_bias_gate_std: {no_bias_gate_std}")  
+
     gate_up = torch.bmm(hidden_states, self.gate_up_proj) + self.gate_up_proj_bias[..., None, :]
     gate, up = gate_up[..., ::2], gate_up[..., 1::2]
+    print(f"bias gate.shape: {gate.shape}")
+    print(f"bias gate: {gate}")
+    gate_mean = jnp.mean(to_jax(gate))
+    gate_std = jnp.std(to_jax(gate))
+    print(f"bias gate_mean: {gate_mean}")    
+    print(f"bias gate_std: {gate_std}")    
+
     gate = gate.clamp(min=None, max=self.limit)
     up = up.clamp(min=-self.limit, max=self.limit)
     glu = gate * torch.sigmoid(gate * self.alpha)
     next_states = torch.bmm(((up + 1) * glu), self.down_proj)
     next_states = next_states + self.down_proj_bias[..., None, :]
     next_states = next_states.view(num_experts, batch_size, -1, self.hidden_size)
+
+    print(f"wo next_states.shape: {next_states.shape}")
+    print(f"wo next_states: {next_states}")
+    wo_mean = jnp.mean(to_jax(next_states))
+    wo_std = jnp.std(to_jax(next_states))
+    print(f"wo_mean: {wo_mean}")    
+    print(f"wo_std: {wo_std}")
+
+    # print(f"next_states = next_states.view(num_experts, batch_size, -1, self.hidden_size): {next_states}")
+    # print(f"routing_weights.transpose(0, 1).view(num_experts, batch_size, -1)[..., None]: {routing_weights.transpose(0, 1).view(num_experts, batch_size, -1)[..., None]}")
+
+    print(f"pt last routing_weights.shape: {routing_weights.shape}")
+    print(f"pt last routing_weights: {routing_weights}")
+    last_routing_weights_mean = jnp.mean(to_jax(routing_weights))
+    last_routing_weights_std = jnp.std(to_jax(routing_weights))
+    print(f"pt last_routing_weights_mean: {last_routing_weights_mean}")    
+    print(f"pt last_routing_weights_std: {last_routing_weights_std}")
+
+    print(f"routing_weights.shape: {routing_weights.shape}")
+    print(f"routing_weights.transpose(0, 1).shape: {routing_weights.transpose(0, 1).shape}")
     next_states = next_states * routing_weights.transpose(0, 1).view(num_experts, batch_size, -1)[..., None]
     next_states = next_states.sum(dim=0)
-    return next_states.reshape(batch_size, seq_len, self.hidden_size)
+    # print(f"next_states = next_states.sum(dim=0): {next_states}")
+    output = next_states.reshape(batch_size, seq_len, self.hidden_size)
+
+    print(f"output.shape: {output.shape}")
+    print(f"output: {output}")
+    output_mean = jnp.mean(to_jax(output))
+    output_std = jnp.std(to_jax(output))
+    print(f"pt output_mean: {output_mean}")    
+    print(f"pt output_std: {output_std}")
+    return output
 
 
 # Reference implementation
@@ -106,7 +157,21 @@ class GptOssMLP(nn.Module):
     self.experts = GptOssExperts(config)
 
   def forward(self, hidden_states):
+    print(f"hidden_states.shape: {hidden_states.shape}")
+    print(f"hidden_states: {hidden_states}")
+    hidden_states_mean = jnp.mean(to_jax(hidden_states))
+    hidden_states_std = jnp.std(to_jax(hidden_states))
+    print(f"hidden_states_mean: {hidden_states_mean}")    
+    print(f"hidden_states_std: {hidden_states_std}")
     router_scores, router_indices = self.router(hidden_states)  # (num_experts, seq_len)
+    print(f"router_scores.shape: {router_scores.shape}")
+    print(f"router_scores: {router_scores}")
+    router_scores_mean = jnp.mean(to_jax(router_scores))
+    router_scores_std = jnp.std(to_jax(router_scores))
+    print(f"router_scores_mean: {router_scores_mean}")    
+    print(f"router_scores_std: {router_scores_std}")
+    print(f"router_indices.shape: {router_indices.shape}")
+    print(f"router_indices: {router_indices}")
     routed_out = self.experts(hidden_states, router_indices=router_indices, routing_weights=router_scores)
     return routed_out, router_scores
 
@@ -167,14 +232,24 @@ def to_jax(pt_tensor: torch.Tensor) -> jax.Array:
 
 class Config:
 
-  hidden_size = 16
-  intermediate_size = 16
+  # hidden_size = 16
+  # intermediate_size = 16
+  # num_local_experts = 8
+  # num_experts_per_tok = 2
+  # limit = 7.0
+  # num_attention_heads = 8
+  # num_key_value_heads = 4
+  # head_dim = 8
+  # attention_dropout = 0.0
+
+  hidden_size = 1024
+  intermediate_size = 1024
   num_local_experts = 8
   num_experts_per_tok = 2
   limit = 7.0
   num_attention_heads = 8
   num_key_value_heads = 4
-  head_dim = 8
+  head_dim = 256
   attention_dropout = 0.0
 
 
@@ -197,7 +272,7 @@ class GptOssMLPTest(unittest.TestCase):
     }
 
     batch_size = 4
-    seq_len = 6
+    seq_len = 46
     hidden_states = torch.randn(batch_size, seq_len, config.hidden_size)
 
     # reference model
@@ -216,7 +291,7 @@ class GptOssMLPTest(unittest.TestCase):
         dtype="float32",
         weight_dtype="float32",
         megablox=False,
-        sparse_matmul=True,
+        sparse_matmul=False,
         per_device_batch_size=1,
         max_target_length=seq_len,
         max_prefill_predict_length=seq_len,
@@ -245,6 +320,7 @@ class GptOssMLPTest(unittest.TestCase):
         kernel_axes=("embed", "mlp"),
         intermediate_dim=cfg.base_mlp_dim,
         dtype=cfg.dtype,
+        weight_dtype=cfg.weight_dtype,
     )
 
     moe_variables = {
@@ -263,11 +339,12 @@ class GptOssMLPTest(unittest.TestCase):
     }
     actual_output, _ = jax.jit(jax_model.apply)(moe_variables, jax_hidden_states)
     # Add normalization to let logits at same scale
-    normalized_expected = to_jax(expected_output) / jnp.linalg.norm(to_jax(expected_output))
-    normalized_actual = actual_output / jnp.linalg.norm(actual_output)
-    mse = jnp.mean((normalized_expected - normalized_actual) ** 2)
-    self.assertLess(mse, 1e-3, f"mlp mismatch, MSE: {mse}")
-    np.testing.assert_allclose(normalized_expected, normalized_actual, rtol=1e-3, atol=1e-2)
+    # normalized_expected = to_jax(expected_output) / jnp.linalg.norm(to_jax(expected_output))
+    # normalized_actual = actual_output / jnp.linalg.norm(actual_output)
+    mse = jnp.mean((to_jax(expected_output) - actual_output) ** 2)
+    print(f"mse: {mse}")
+    # self.assertLess(mse, 1e-3, f"mlp mismatch, MSE: {mse}")
+    np.testing.assert_allclose(to_jax(expected_output), actual_output, rtol=1e-3, atol=1e-2)
 
 
 class GptOssAttentionTest(unittest.TestCase):

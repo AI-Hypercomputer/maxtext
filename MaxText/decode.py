@@ -98,6 +98,18 @@ def main(argv: Sequence[str]) -> None:
   prof = profiler.Profiler(config)
 
   text = config.prompt
+#   text = f"""<|start|>system<|message|>You are ChatGPT, a large language model trained by OpenAI.
+# Knowledge cutoff: 2024-06
+# Current date: 2025-09-05
+
+# Reasoning: high
+
+# # Valid channels: analysis, commentary, final. Channel must be included for every message.<|end|><|start|>developer<|message|># Instructions
+
+# You are a helpful assistant.
+
+# <|end|><|start|>user<|message|>{config.prompt}<|end|><|start|>assistant"""
+
   prefill_length = config.max_prefill_predict_length
   processor_output = multimodal_utils.PreprocessorOutput()
   if config.use_multimodal:
@@ -112,6 +124,7 @@ def main(argv: Sequence[str]) -> None:
   metadata = engine.get_tokenizer()
   tokenizer_model = engine.build_tokenizer(metadata)
   try:
+    print(f"chat_template: {config.use_chat_template}")
     # TODO: update jetstream.engine.tokenizer_api.Tokenizer to maintain tokenizer state.
     has_chat_template = getattr(tokenizer_model.tokenizer, "chat_template", False)  # pytype: disable=attribute-error
   except AttributeError as _:
@@ -181,7 +194,8 @@ def main(argv: Sequence[str]) -> None:
   for i in range(_NUM_STREAMS):
     results = [t.get_result_at_slot(i).tokens.item() for t in sampled_tokens_list]
     output = tokenizer_model.decode(results)
-    print(f"Input `{text}` -> `{output}`")
+    print(f"Input `{text}` ->")
+    print(output)
 
   assert output.startswith(
       config.autoregressive_decode_assert
