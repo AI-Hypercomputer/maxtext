@@ -48,6 +48,7 @@ import re
 import sys
 
 from flax import nnx
+from flax.linen import partitioning as nn_partitioning
 import grain
 import humanize
 import jax
@@ -87,7 +88,7 @@ sys.path.insert(0, project_root)
 
 from MaxText import model_creation_utils
 from MaxText import pyconfig
-from maxtext.integration.tunix.tunix_adapter import TunixMaxTextAdapter
+from MaxText.integration.tunix.tunix_adapter import TunixMaxTextAdapter
 
 # This is for running the script in a colab or notebook environment.
 # import nest_asyncio
@@ -364,9 +365,7 @@ def get_ref_maxtext_model(config):
 
   model, mesh = model_creation_utils.create_nnx_model(config)
   with mesh:
-    tunix_model = TunixMaxTextAdapter(
-        base_model=model,
-    )
+    tunix_model = TunixMaxTextAdapter(base_model=model,)
 
     model_config = llama3_lib.ModelConfig.llama3_1_8b()
     tunix_model.config = model_config
@@ -977,7 +976,7 @@ print(f"Pre GRPO Training: {corr=}, {total=}, {accuracy=}%, {partial_accuracy=}%
 #
 
 jax.profiler.start_trace(PROFILE_DIR)
-with mesh:
+with mesh, nn_partitioning.axis_rules(config_policy.logical_axis_rules):
   grpo_trainer.train(dataset)
 jax.profiler.stop_trace()
 
