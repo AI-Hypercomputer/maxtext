@@ -93,6 +93,18 @@ class TransformerLinenPure(nn.Module):
           config=self.config, mesh=self.mesh, name="mtp_block", transformer_layer_module=mtp_layer, decoder=self.decoder
       )
 
+  def logits_from_hidden_states(self, hidden_states, deterministic):
+    """
+    Compute logits from hidden states (wrapping decoder._apply_output_head).
+    This function is only used for vocabulary tiling.
+    """
+    logits = self.decoder._apply_output_head(
+        shared_embedding=self.shared_embedding,
+        y=hidden_states,
+        deterministic=deterministic,
+    )
+    return logits
+
   def __call__(
       self,
       decoder_input_tokens: jnp.ndarray,
@@ -252,7 +264,7 @@ class Transformer(nnx.Module):
 
     decoder_linen = Decoder(config=cfg, mesh=mesh, quant=self.quant, model_mode=self.model_mode)
     self.decoder = nnx_wrappers.ToNNX(decoder_linen, rngs=rngs)
-
+    self.hidden_states = None
     if self.model_mode == MODEL_MODE_PREFILL:
       seq_len = cfg.max_prefill_predict_length
     elif self.model_mode == MODEL_MODE_AUTOREGRESSIVE:
@@ -353,6 +365,10 @@ class Transformer(nnx.Module):
         image_embeddings=image_embeddings,
         image_masks=encoder_image_masks,
     )
+
+    # Materialize hidden state when vocab tiling is enabled
+    if self.config.num_vocab_tiling > 1:
+      self.hidden_states = hidden_state
 
     # If we are initializing the model AND MTP is enabled, we must create
     # dummy target tensors. This allows Flax to trace the MTPBlock and create
