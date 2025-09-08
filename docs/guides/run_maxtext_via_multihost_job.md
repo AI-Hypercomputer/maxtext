@@ -64,7 +64,7 @@ either be a TPUVM or not. If your runner machine is a TPUVM, it needs service ac
     ```
     ```
     RUN_NAME=$YOUR_JOB_NAME # You may set this to any unique name for a fresh run.
-    python3 multihost_job.py --NUM_SLICES=$NODE_COUNT --RUN_NAME=$RUN_NAME --BUCKET_NAME=$BUCKET_NAME --CQR_EXTRA_ARGS="--reserved" --COMMAND="bash setup.sh && python3 -m MaxText.train MaxText/configs/base.yml run_name=$RUN_NAME"
+    python3 multihost_job.py --NUM_SLICES=$NODE_COUNT --RUN_NAME=$RUN_NAME --BUCKET_NAME=$BUCKET_NAME --CQR_EXTRA_ARGS="--reserved" --COMMAND="bash setup.sh && python3 -m MaxText.train src/MaxText/configs/base.yml run_name=$RUN_NAME"
     ```
 
     We tell `multihost_job` to target the `reserved` pool by  by including `--reserved` as extra arguments to the CQR request, but you may instead target the `on-demand` pool by removing the `--CQR_EXTRA_ARGS` flag (on-demand is default), or the pre-emptible pool with `--CQR_EXTRA_ARGS="--best-effort"`, which may be necessary if your reservation is full.

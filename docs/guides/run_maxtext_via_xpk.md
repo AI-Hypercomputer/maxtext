@@ -143,9 +143,7 @@ This guide focuses on submitting workloads to an existing cluster. Cluster creat
     gcloud config set compute/zone $ZONE
     ```
 
-
 ```{admonition} A Note on Multi-Slice and Multi-Node Runs
-
 The examples below run on a single TPU slice (`--num-slices=1`) or a small number of GPU nodes (`--num-nodes=2`). To scale your job to a larger, multi-host configuration, you simply increase these values.
 
 For instance, to run a job across **four TPU slices**, you would change `--num-slices=1` to `--num-slices=4`. This tells XPK to allocate four slices and orchestrate the training job across all of them as a single workload. Because `--tpu-type` is set to `v5litepod-256`, it allocates a total of `256*4 = 1,024` chips. Similarly, for GPUs, you would increase the `--num-nodes` value.
@@ -162,7 +160,7 @@ For instance, to run a job across **four TPU slices**, you would change `--num-s
         --base-docker-image maxtext_base_image\
         --tpu-type v5litepod-256\
         --num-slices 1\
-        --command "python3 -m MaxText.train MaxText/configs/base.yml run_name=${USER}-tpu-job base_output_directory=${BASE_OUTPUT_DIR} dataset_path=${DATASET_PATH} steps=100"
+        --command "python3 -m MaxText.train src/MaxText/configs/base.yml run_name=${USER}-tpu-job base_output_directory=${BASE_OUTPUT_DIR} dataset_path=${DATASET_PATH} steps=100"
     ```
 
   - **On your GPU Cluster:**
@@ -174,7 +172,7 @@ For instance, to run a job across **four TPU slices**, you would change `--num-s
         --base-docker-image maxtext_base_image\
         --device-type h100-80gb-8\
         --num-nodes 2\
-        --command "python3 -m MaxText.train MaxText/configs/base.yml run_name=${USER}-gpu-job base_output_directory=${BASE_OUTPUT_DIR} dataset_path=${DATASET_PATH} steps=100"
+        --command "python3 -m MaxText.train src/MaxText/configs/base.yml run_name=${USER}-gpu-job base_output_directory=${BASE_OUTPUT_DIR} dataset_path=${DATASET_PATH} steps=100"
     ```
 
 ## 6. Managing and Monitoring Your Job
