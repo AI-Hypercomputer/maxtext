@@ -357,7 +357,7 @@ show_hbm_usage()
 # ### Load MaxText model
 
 # TODO: @mazumdera: create a installation script for GRPO
-# ! pip install -r ../../maxtext/requirements.txt
+# ! uv pip install -r ../../maxtext/requirements.txt
 
 
 def get_ref_maxtext_model(config):
