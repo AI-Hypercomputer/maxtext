@@ -419,6 +419,7 @@ def validate_and_assign_remat_tensors(keys):
       "key_proj",
       "value_proj",
       "out_proj",
+      "splash"
   ]
   assert keys["decoder_layer_input"] != "remat", "Cannot remeterialize this tensor with scan_layers=True"
   tensors_on_device = []

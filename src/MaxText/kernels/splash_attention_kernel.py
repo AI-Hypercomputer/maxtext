@@ -204,7 +204,8 @@ def _attention_reference_default(
 
   logsumexp = m + jnp.log(l)
   if save_residuals:
-    return o, (logsumexp,)
+    breakpoint()
+    return o, (logsumexp,) # logsumpexp is [batch, head, query]?
   return o
 
 
@@ -344,7 +345,7 @@ def attention_reference_custom(
 def make_attention_reference(
     mask: mask_lib.Mask | np.ndarray,
     is_mqa: bool,
-    backward_impl: str = "vanilla",
+    backward_impl: str = "im not vanilla", # rawr this was vanilla before
     **params: Any,
 ) -> Callable:
   """Returns a function that computes reference attention."""
@@ -2317,6 +2318,7 @@ class SplashAttentionKernel:
     )
 
 
+# rawr
 def _make_splash_attention(
     mask: np.ndarray | jax.Array | mask_lib.MultiHeadMask,
     *,
