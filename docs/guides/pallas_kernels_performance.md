@@ -192,7 +192,7 @@ def tile_add(x: jax.Array, y: jax.Array) -> jax.Array:
 
 ## **⏩ Pipelining Best Practices (TPU)**
 
-Prefer pl.pallas\_call with scratch buffers allocated in the appropriate memory space (VMEM/SMEM) and use multi-buffering to overlap HBM loads with compute. Advanced pipelining to consider: custom prefetch block order via a scalar prefetch grid, which lets you control block execution order based on runtime values.
+Prefer pl.pallas\_call with scratch buffers allocated in the appropriate memory space (VMEM/SMEM) and use multi-buffering to overlap HBM loads with compute. Advanced pipelining to consider: custom prefetch block order via a scalar prefetch grid (for details see [here](https://docs.jax.dev/en/latest/pallas/tpu/sparse.html) ), which lets you control block execution order based on runtime values.
 
 
 ## **🌐 Distributed Execution**
