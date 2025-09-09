@@ -871,6 +871,10 @@ class Attention(nnx.Module):
       key = self.kv_projection(inputs_kv, proj_name="key")
       value = self.kv_projection(inputs_kv, proj_name="value")
 
+    jax.debug.print("q_proj_pre_rope\nmean={mean}\nshape={shape}\n{x}", x=query, mean=query.mean(), shape=query.shape)
+    jax.debug.print("k_proj_pre_rope\nmean={mean}\nshape={shape}\n{x}", x=key, mean=key.mean(), shape=key.shape)
+    jax.debug.print("v_proj_pre_rope\nmean={mean}\nshape={shape}\n{x}", x=value, mean=value.mean(), shape=value.shape)
+
     is_llama4_decoder_block = self.config.decoder_block == DecoderBlockType.LLAMA4
     # NOTE: llama 4 does L2 normalization after RoPE
     if self.use_qk_norm and not is_llama4_decoder_block:
@@ -884,6 +888,9 @@ class Attention(nnx.Module):
     if use_rope:
       query = self.apply_rotary_embedding(query, inputs_positions=inputs_positions)
       key = self.apply_rotary_embedding(key, inputs_positions=inputs_positions)
+      jax.debug.print("inputs_positions\nshape={shape}\n{x}", x=inputs_positions, shape=inputs_positions.shape)
+      jax.debug.print("q_after_rope\nmean={mean}\nshape={shape}\n{x}", x=query, mean=query.mean(), shape=query.shape)
+      jax.debug.print("k_after_rope\nmean={mean}\nshape={shape}\n{x}", x=key, mean=key.mean(), shape=key.shape)
 
     if use_qk_norm and is_llama4_decoder_block:
       l2_norm = L2Norm(eps=self.config.normalization_layer_epsilon)
@@ -937,6 +944,7 @@ class Attention(nnx.Module):
       out = self.attention_op(
           query, key, value, decoder_segment_ids, model_mode, cached_values, previous_chunk, bidirectional_mask, self.sinks
       )
+      jax.debug.print("attention_op_out\nmean={mean}\nshape={shape}\n{x}", x=out, mean=out.mean(), shape=out.shape)
 
     if model_mode == MODEL_MODE_PREFILL:
       out = nn.with_logical_constraint(out, self.prefill_out_axis_names)
