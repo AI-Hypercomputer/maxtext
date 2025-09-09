@@ -144,6 +144,7 @@ python3 -m uv pip install --no-cache-dir -U -r requirements.txt
 # Install maxtext package
 if [ -f 'pyproject.toml' ]; then
   python3 -m uv pip install -e . --no-deps --resolution=lowest
+  install_maxtext_github_deps
 fi
 
 # Uninstall existing jax, jaxlib and  libtpu-nightly
