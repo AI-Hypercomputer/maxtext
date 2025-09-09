@@ -215,6 +215,7 @@ def validate_keys(keys):
 
   validate_multiple_slices(keys)
   if keys["num_experts"] > 1:
+    validate_quantization_checkpoint(keys)
     validate_mlp_dim(keys)
     validate_sparse_matmul_parallelism(keys)
     validate_ragged_dot(keys)
@@ -991,6 +992,13 @@ def validate_deepseek_moe(raw_keys):
       raise ValueError(
           f'config num_experts: {raw_keys["num_experts"]} must be divisible by n_routing_groups: {raw_keys["n_routing_groups"]}'
       )
+
+
+def validate_quantization_checkpoint(raw_keys):
+  """Validates quantization settings when loading a checkpoint."""
+  if raw_keys["quantization"] and raw_keys["load_parameters_path"] and not raw_keys["use_qwix_quantization"]:
+    raise ValueError("Please set `use_qwix_quantization=True` to load checkpoint using Qwix instead of AQT.")
+
 
 def validate_mlp_dim(raw_keys):
   """Validates that MLP dimensions are consistent for fully MoE models."""
