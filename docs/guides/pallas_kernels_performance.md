@@ -97,7 +97,7 @@ For hard cases, inspect compiler dumps (e.g., LLO) to understand schedules, memo
 
 ### **3\. Systematic Tuning**
 
-Performance is a function of interacting hyperparameters, chiefly block shapes (via BlockSpec), buffering, and preload distance. Build a small test script (a "harness") to systematically run the kernel with many different hyperparameter settings, such as various block sizes and buffering strategies. **Record the throughput and latency** for each run, and let data, not rules of thumb, pick the winners.
+Performance is a function of interacting hyperparameters, chiefly block shapes (via BlockSpec). Build a small test script (a "harness") to systematically run the kernel with different block sizes. **Record the throughput and latency** for each run, and let data, not rules of thumb, pick the winners.
 
 
 ## **⚙️ Understanding TPU Memory & Compute**
@@ -176,6 +176,7 @@ def tile_add(x: jax.Array, y: jax.Array) -> jax.Array:
 
   # Grid is implied by data & block shape.
   grid = ((x.shape[0] + B0 - 1) // B0,)
+  # Note: grid size can also be computed dynamically at runtime.
 
   return pl.pallas_call(
       tile_add_kernel,
@@ -186,22 +187,22 @@ def tile_add(x: jax.Array, y: jax.Array) -> jax.Array:
   )(x, y)
 ```
 
-**Tip:** In practice, you’ll sweep (B0, B1) and buffering choices. Focus tuning on block shapes, buffering, and prefetch distance; treat grid as derived.
+**Tip:** In practice, you’ll sweep (B0, B1). Focus tuning on block shapes; treat grid as derived.
 
 
 ## **⏩ Pipelining Best Practices (TPU)**
 
-Prefer pl.pallas\_call with scratch buffers allocated in the appropriate memory space (VMEM/SMEM) and use multi-buffering to overlap HBM loads with compute. Only reach for advanced pipeline controls (e.g., explicit semaphores) when traces show you need them.
+Prefer pl.pallas\_call with scratch buffers allocated in the appropriate memory space (VMEM/SMEM) and use multi-buffering to overlap HBM loads with compute. Advanced pipelining to consider: custom prefetch block order via a scalar prefetch grid, which lets you control block execution order based on runtime values.
 
 
 ## **🌐 Distributed Execution**
 
-Compose kernels across devices with jax.experimental.shard\_map. It’s usually simpler and more maintainable than in-kernel cross-device communication. While Pallas supports low-level comms, shard\_map is the right first choice for multi-device parallelism.
+Compose kernels across devices with jax.shard\_map. It’s usually simpler and more maintainable than in-kernel cross-device communication. While Pallas supports low-level comms, shard\_map is the right first choice for multi-device parallelism.
 
 
 ## **🐞 Debugging Tips**
 
-* Use interpret=True in pallas\_call for CPU emulation to debug kernel logic without compiling.  
+* Use interpret=True in pallas\_call to run the kernel body in a Python interpreter backend, simulating device execution on CPU without lowering through XLA.
 * Start with a tiny problem size and assert on invariants inside the kernel.  
 * Add jax.named\_scope liberally so kernels are easy to spot in performance traces.
 
@@ -209,10 +210,11 @@ Compose kernels across devices with jax.experimental.shard\_map. It’s usually 
 ## **✅ Putting It All Together (Checklist)**
 
 1. **Profile** the baseline using named\_scope and block\_until\_ready.  
-2. If the op is bandwidth-limited or irregular, **prototype** a Pallas tile.  
-3. Build a **sweep harness** for block shapes, buffering, and prefetch distance.  
+2. **Tile arrays into smaller chunks using BlockSpecs** (virtually always necessary, even for simple kernels). 
+3. Build a **sweep harness** for block shapes (and optionally scalar prefetch grid choices).  
 4. **Validate** end-to-end performance in the model, not just microbenchmarks.  
 5. Consider **maintainability** and guard the new kernel with tests.
+6. Consider applying **jax.vmap** to a Pallas kernel to simplify implementation; think of it as prepending grid dimensions automatically.
 
 
 ## 📚 References
