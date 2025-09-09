@@ -1014,7 +1014,7 @@ class AttentionOp(nnx.Module):
           q_seq_shards=cp_size,  # axis for sequence sharding
           block_sizes=block_sizes,
           attn_logits_soft_cap=attn_logits_soft_cap,
-          save_residuals=True,
+          save_residuals=False, #rawr, keep this False
           residual_checkpoint_name="splash",
       )
       return splash_kernel
@@ -1049,10 +1049,11 @@ class AttentionOp(nnx.Module):
             None,  # no sharding for load_balanced_context_parallel
             sink_axis_names,  # sharding align with query heads
         ),
-        out_specs=(
-          axis_names_q,
-          axis_names_lse,
-        ),
+        out_specs=axis_names_q,
+        # out_specs=(
+        #   axis_names_q,
+        #   axis_names_lse,
+        # ),
         check_rep=False,
     )
     def wrap_flash_attention(
@@ -1097,8 +1098,8 @@ class AttentionOp(nnx.Module):
         )
       return attention_output
 
-    # rawr
-    x, _ = wrap_flash_attention(
+    # rawr x, _ or x
+    x = wrap_flash_attention(
         query,
         key,
         value,
