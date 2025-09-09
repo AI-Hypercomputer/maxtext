@@ -170,7 +170,7 @@ rich==13.9.3
 rsa==4.9
 safetensors==0.4.5
 scipy==1.14.1
-sentencepiece==0.1.97
+sentencepiece==0.2.0
 seqio==0.0.19
 shapely==2.0.6
 shortuuid==1.0.13
