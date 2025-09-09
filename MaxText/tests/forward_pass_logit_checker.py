@@ -60,7 +60,7 @@ from MaxText.layers import quantizations
 import sys
 import numpy
 
-numpy.set_printoptions(threshold=sys.maxsize)
+# numpy.set_printoptions(threshold=sys.maxsize)
 
 
 def upload_blob(bucket_name, source_file_name, destination_blob_name):
@@ -185,10 +185,10 @@ def check_kl_divergence(model_logits, golden_logits, atol=0.02):
   assert max_kl_div < atol, f"KL divergence values {max_kl_div.item():.6f} exceed the threshold {atol}"
 
 
-def get_data(golden_data_point, config):
+def get_data(golden_data_point, config, global_batch_size_to_train_on=1):
   """Get the golden data for the test indexed at golden_data_index"""
 
-  max_logging.log(f"config.global_batch_size_to_train_on={config.global_batch_size_to_train_on}")
+  max_logging.log(f"global_batch_size_to_train_on={global_batch_size_to_train_on}")
   if config.use_multimodal:
     assert "pixel_values" in golden_data_point, "no image found in golden data while use_multimodal=True"
     pixel_values = np.asarray(golden_data_point["pixel_values"], dtype=np.float32)
@@ -198,7 +198,7 @@ def get_data(golden_data_point, config):
       pixel_values = np.transpose(pixel_values, (1, 2, 0))
     elif model_prefix in ["llama4"]:
       pixel_values = pixel_values[None, :]
-    pixel_values = np.stack([pixel_values for _ in range(config.global_batch_size_to_train_on)])
+    pixel_values = np.stack([pixel_values for _ in range(global_batch_size_to_train_on)])
   else:
     pixel_values = None
 
@@ -210,11 +210,11 @@ def get_data(golden_data_point, config):
         f"Golden data sequence length ({seq_len}) is greater than max_target_length ({config.max_target_length})"
     )
 
-  s = (config.global_batch_size_to_train_on, config.max_target_length)
+  s = (global_batch_size_to_train_on, config.max_target_length)
 
   # Pad ids to max_target_length. MaxText expects 0 for padding.
   padded_ids = np.pad(original_ids, (0, config.max_target_length - seq_len), "constant", constant_values=0)
-  ids = np.stack([padded_ids for _ in range(config.global_batch_size_to_train_on)])
+  ids = np.stack([padded_ids for _ in range(global_batch_size_to_train_on)])
 
   logits = np.asarray(golden_data_point["logits"], dtype=np.float32)
   if "formatted_prompt" in golden_data_point:
@@ -226,7 +226,7 @@ def get_data(golden_data_point, config):
   decoder_segment_ids = np.zeros(s, dtype=np.int32)
   decoder_segment_ids[:, :seq_len] = DECODING_ACTIVE_SEQUENCE_INDICATOR
   decoder_positions = np.stack(
-      [np.arange(config.max_target_length, dtype=np.int32) for _ in range(config.global_batch_size_to_train_on)]
+      [np.arange(config.max_target_length, dtype=np.int32) for _ in range(global_batch_size_to_train_on)]
   )
   return ids, decoder_segment_ids, decoder_positions, logits, seq_len, pixel_values
 
@@ -266,7 +266,14 @@ def main(config, test_args):  # pylint: disable=W0621
 
   if test_args.hf_model_path == "":
     raise ValueError
-  hf_model = AutoModelForCausalLM.from_pretrained(test_args.hf_model_path, torch_dtype=torch.bfloat16)
+  # hf_model = AutoModelForCausalLM.from_pretrained(test_args.hf_model_path, torch_dtype=torch.bfloat16)
+
+  hf_model = AutoModelForCausalLM.from_pretrained(
+      test_args.hf_model_path,
+      torch_dtype=torch.float32,
+      trust_remote_code=True,
+  )
+
   tokenizer = AutoTokenizer.from_pretrained(test_args.model_id)
   if "Llama-3.1" in test_args.hf_model_path:
     tokenizer.pad_token = tokenizer.eos_token
@@ -274,19 +281,29 @@ def main(config, test_args):  # pylint: disable=W0621
   # prompts = ["I love to"]
   # prompts = [config.prompt]
   # prompts = [test_args.prompts]
-  prompts = [
-      "The dominant sequence transduction models are based on complex recurrent or convolutional neural networks that include an encoder and a decoder. The best performing models also connect the encoder and decoder through an attention mechanism. We propose a new simple network architecture, the Transformer, based solely on attention mechanisms, dispensing with recurrence and convolutions entirely. Experiments on two machine translation tasks show these models to be superior in quality while being more parallelizable and requiring significantly less time to train. Our model achieves 28.4 BLEU on the WMT 2014 English-to-German translation task, improving over the existing best results, including ensembles, by over 2 BLEU. On the WMT 2014 English-to-French translation task, our model establishes a new single-model state-of-the-art BLEU score of 41.8 after training for 3.5 days on eight GPUs, a small fraction of the training costs of the best models from the literature. We show that the Transformer generalizes well to other tasks by applying it successfully to English constituency parsing both with large and limited training data."
-  ]
+  # prompts = [
+  #     "The dominant sequence transduction models are based on complex recurrent or convolutional neural networks that include an encoder and a decoder. The best performing models also connect the encoder and decoder through an attention mechanism. We propose a new simple network architecture, the Transformer, based solely on attention mechanisms, dispensing with recurrence and convolutions entirely. Experiments on two machine translation tasks show these models to be superior in quality while being more parallelizable and requiring significantly less time to train. Our model achieves 28.4 BLEU on the WMT 2014 English-to-German translation task, improving over the existing best results, including ensembles, by over 2 BLEU. On the WMT 2014 English-to-French translation task, our model establishes a new single-model state-of-the-art BLEU score of 41.8 after training for 3.5 days on eight GPUs, a small fraction of the training costs of the best models from the literature. We show that the Transformer generalizes well to other tasks by applying it successfully to English constituency parsing both with large and limited training data."
+  # ]
+  prompts = [test_args.prompts]
   golden_data = []
   for input_text in prompts:
     max_logging.log(f"\n--- Prompt: {input_text} ---")
     # Tokenize for HF
-    inputs = tokenizer(input_text, return_tensors="pt", padding=True, max_length=config.max_target_length, truncation=True)
+    inputs = tokenizer(
+        input_text, return_tensors="pt", padding="max_length", max_length=config.max_target_length, truncation=True
+    )
+    print(inputs)
     # actual_seq_len = inputs["input_ids"].shape[1]
+    print("huggingface")
     with torch.no_grad():
       hf_logits_torch = hf_model(**inputs).logits
 
-    data = {"tokens": inputs, "logits": hf_logits_torch}
+    data = {
+        "prompt": input_text,
+        "tokens": inputs["input_ids"].tolist()[0],
+        "logits": hf_logits_torch.cpu().numpy().astype("float32").tolist()[0],
+    }
+    print(data["prompt"], data["tokens"])
     golden_data.append(data)
 
   """Comparing maxtext/huggingface model with pre-loaded golden logitis"""
@@ -329,6 +346,10 @@ def main(config, test_args):  # pylint: disable=W0621
   for golden_data_index, golden_data_point in enumerate(golden_data):
     max_logging.log(f"\n--- Comparing forward pass for golden data index: {golden_data_index} ---")
     ids, decoder_segment_ids, decoder_positions, golden_logits, seq_len, images = get_data(golden_data_point, config)
+    print(ids)
+    print(decoder_segment_ids)
+    print(decoder_positions)
+    print(seq_len)
     max_logging.log("maxtext forward pass")
     full_train_logits = model.apply(
         state.params,
@@ -654,6 +675,7 @@ if __name__ == "__main__":
     model_args = [s for s in model_args if not s.startswith(arg)]
 
   cfg = pyconfig.initialize(model_args)
+
   if cfg.use_multimodal:
     assert (
         not test_args.run_hf_model
