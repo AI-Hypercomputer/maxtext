@@ -46,17 +46,22 @@ DISPATCH = "dispatch"
 COMBINE = "combine"
 
 
-@jax.custom_vjp
-def _sort_activations(inputs: jax.Array, sort_indices: jax.Array) -> jax.Array:
+def _sort_activations(
+    inputs: jax.Array,
+    sort_indices: jax.Array,
+    use_custom_vjp: bool,
+) -> jax.Array:
   """Sort activations by `sort_indices`.
 
-  Critially, we assume that the backward-pass gradient is computed by the 
-  unsort operation which simply has `jnp.argsort(sort_indices)` as its sort
-  indices. 
+  If `use_custom_vjp` is True, then we use a custom backward pass that
+  reverses the sort order. Specifically, this unsort operation is simply a sort
+  with `jnp.argsort(sort_indices)` as the sort indices. This is only needed in
+  the case where the compiler generates a less efficient backward pass op.
  
   Args:
     inputs: `(tokens, ...)`-shaped array of input activations to sort.
     sort_indices: `(tokens,)`-shaped array containing the sort order.
+    use_custom_vjp: Whether to use the explicit backward pass.
 
   Returns:
     `(tokens, ...)`-shaped array of input activations sorted by `sort_indices`.
@@ -64,22 +69,31 @@ def _sort_activations(inputs: jax.Array, sort_indices: jax.Array) -> jax.Array:
   assert inputs.shape[0] == sort_indices.shape[0]
 
   with jax.named_scope("sort_activations"):
+    if use_custom_vjp:
+      return _sort_activations_custom(inputs, sort_indices)
     return inputs[sort_indices, ...]
 
 
-def _sort_activations_fwd(inputs: jax.Array, sort_indices: jax.Array
+@jax.custom_vjp
+def _sort_activations_custom(inputs: jax.Array, sort_indices: jax.Array) -> jax.Array:
+  """Sort functions with custom vjp."""
+  return inputs[sort_indices, ...]
+
+
+def _sort_activations_custom_fwd(inputs: jax.Array, sort_indices: jax.Array
 ) -> tuple[jax.Array, jax.Array]:
   """Forward pass of the custom vjp for `_sort_activations()`."""
-  return _sort_activations(inputs, sort_indices), sort_indices
+  return _sort_activations_custom(inputs, sort_indices), sort_indices
 
 
-def _sort_activations_bwd(residuals: jax.Array, grads: jax.Array
+def _sort_activations_custom_bwd(residuals: jax.Array, grads: jax.Array
 ) -> tuple[jax.Array, None]:
   """Backward pass of the custom vjp for `_sort_activations()`."""
   sort_indices = residuals
-  return _sort_activations(grads, jnp.argsort(sort_indices)), None
+  return _sort_activations_custom(grads, jnp.argsort(sort_indices)), None
 
-_sort_activations.defvjp(_sort_activations_fwd, _sort_activations_bwd)
+_sort_activations_custom.defvjp(
+    _sort_activations_custom_fwd, _sort_activations_custom_bwd)
 
 
 def random_routing(rng_key, gate_logits, num_experts_per_tok):
@@ -496,7 +510,7 @@ class RoutedMoE(nnx.Module):
     replicated_inputs_2d = jnp.reshape(
         jnp.broadcast_to(inputs_2d[None, ...], (self.num_experts_per_tok, *inputs_2d.shape)), 
         (self.num_experts_per_tok * inputs_2d.shape[0], inputs_2d.shape[1]))
-    sorted_inputs = _sort_activations(replicated_inputs_2d, sorted_indices).astype(self.dtype)
+    sorted_inputs = _sort_activations(replicated_inputs_2d, sorted_indices, False).astype(self.dtype)
     group_size = jnp.bincount(flatten_selected_experts, length=self.num_experts)
     # Return the experts for each sorted input.
     expert_indices = jnp.arange(self.num_experts)
@@ -523,7 +537,7 @@ class RoutedMoE(nnx.Module):
   ):
     """Unpermute tokens to original order and combine weights."""
 
-    unsort_intermediate = _sort_activations(intermediate, jnp.argsort(sorted_selected_experts))
+    unsort_intermediate = _sort_activations(intermediate, jnp.argsort(sorted_selected_experts), False)
     reshaped_weights = jnp.reshape(weights, (-1, self.num_experts_per_tok))
     reshaped_intermediate = jnp.reshape(
         unsort_intermediate,
