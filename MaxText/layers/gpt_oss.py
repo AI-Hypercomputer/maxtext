@@ -37,6 +37,7 @@ from MaxText.layers import quantizations
 from MaxText.layers.attentions import attention_as_linen
 from MaxText.layers.quantizations import AqtQuantization as Quant
 from MaxText.layers.normalizations import rms_norm
+import jax
 
 
 # -----------------------------------------
@@ -145,6 +146,13 @@ class GptOssDecoderLayer(nn.Module):
         hidden_states, ("activation_batch", "activation_norm_length", "activation_embed")
     )
 
+    jax.debug.print(
+        "post_self_attention_layer_norm\nmean={mean}\nshape={shape}\n{x}",
+        x=hidden_states,
+        mean=hidden_states.mean(),
+        shape=hidden_states.shape,
+    )
+
     load_balance_loss = None
     mlp_lnx, load_balance_loss = moe.get_routed_moe(
         name="GptOssMlp",
@@ -160,6 +168,7 @@ class GptOssDecoderLayer(nn.Module):
         quant=self.quant,
     )(hidden_states)
     mlp_lnx = nn.with_logical_constraint(mlp_lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
+    jax.debug.print("GptOssMlp\nmean={mean}\nshape={shape}\n{x}", x=mlp_lnx, mean=mlp_lnx.mean(), shape=mlp_lnx.shape)
 
     layer_output = mlp_lnx + intermediate_inputs
     layer_output = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(layer_output, deterministic=deterministic)
