@@ -77,6 +77,7 @@ def self_attention_with_norm(
       max_target_length=cfg.max_target_length,
       max_prefill_predict_length=cfg.max_prefill_predict_length,
       attention_kernel=cfg.attention,
+      attention_type=cfg.attention_type,
       inputs_q_shape=lnx.shape,
       inputs_kv_shape=lnx.shape,
       mesh=mesh,
