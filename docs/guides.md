@@ -21,6 +21,7 @@
 
 guides/checkpoints.md
 guides/custom_model.md
+guides/run_maxtext_localhost.md
 guides/run_maxtext_via_xpk.md
 guides/run_maxtext_via_pathways.md
 guides/data_input_pipeline.md
@@ -35,4 +36,5 @@ guides/understand_logs_and_metrics.md
 guides/checkpointing_solutions/gcs_checkpointing.md
 guides/checkpointing_solutions/emergency_checkpointing.md
 guides/checkpointing_solutions/multi_tier_checkpointing.md
+guides/jax_ai_libraries_chosen.md
 ```
