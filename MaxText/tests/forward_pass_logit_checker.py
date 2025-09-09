@@ -263,7 +263,7 @@ def main(config, test_args):  # pylint: disable=W0621
         input_text, return_tensors="pt", padding="max_length", max_length=config.max_target_length, truncation=True
     )
     print(inputs)
-    print(input["attention_mask"].sum())
+    print(inputs["attention_mask"].sum())
     # actual_seq_len = inputs["input_ids"].shape[1]
     print("huggingface")
     with torch.no_grad():
