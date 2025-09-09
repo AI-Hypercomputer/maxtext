@@ -27,6 +27,8 @@
 # works with any custom wheels.
 # bash docker_build_dependency_image.sh MODE=custom_wheels
 
+# bash docker_build_dependency_image.sh MODE=grpo
+
 # Enable "exit immediately if any command fails" option
 set -e
 
@@ -54,11 +56,19 @@ fi
 if [[ -z ${MODE} ]]; then
   export MODE=stable
   echo "Default MODE=${MODE}"
+  export CUSTOM_JAX=0
+  export INSTALL_GRPO=0
 elif [[ ${MODE} == "custom_wheels" ]] ; then
   export MODE=nightly
   export CUSTOM_JAX=1
+  export INSTALL_GRPO=0
+elif [[ ${MODE} == "grpo" ]] ; then
+  export MODE=stable
+  export INSTALL_GRPO=1
+  export CUSTOM_JAX=0
 else
   export CUSTOM_JAX=0
+  export INSTALL_GRPO=0
 fi
 
 if [[ -z ${DEVICE} ]]; then
@@ -111,6 +121,47 @@ if [[ -z ${LIBTPU_GCS_PATH+x} ]] ; then
 else
   docker build --network host --build-arg MODE=${MODE} --build-arg JAX_VERSION=$JAX_VERSION --build-arg LIBTPU_GCS_PATH=$LIBTPU_GCS_PATH -f ./maxtext_dependencies.Dockerfile -t ${LOCAL_IMAGE_NAME} .
   docker build --network host --build-arg CUSTOM_LIBTPU=true -f ./maxtext_libtpu_path.Dockerfile -t ${LOCAL_IMAGE_NAME} .
+fi
+
+if [[ ${INSTALL_GRPO} -eq 1 ]] ; then
+  if [[ ${DEVICE} != "tpu" ]] ; then
+    echo "Error: MODE=grpo is only supported for DEVICE=tpu"
+    exit 1
+  fi
+  echo "Installing GRPO dependencies (vLLM, tpu-commons)"
+  docker build --network host -t ${LOCAL_IMAGE_NAME} -f- . <<EOF
+  FROM ${LOCAL_IMAGE_NAME}
+
+  RUN pip uninstall -y jax jaxlib libtpu
+
+  RUN pip install aiohttp==3.12.15
+
+  # Install Python packages that enable pip to authenticate with Google Artifact Registry automatically.
+  RUN pip install keyring keyrings.google-artifactregistry-auth
+
+  # Install vLLM for Jax and TPUs from the artifact registry
+  RUN VLLM_TARGET_DEVICE="tpu" pip install --no-cache-dir --pre \
+      --index-url https://us-python.pkg.dev/cloud-tpu-images/maxtext-rl/simple/ \
+      --extra-index-url https://pypi.org/simple/ \
+      --extra-index-url https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/ \
+      --extra-index-url https://download.pytorch.org/whl/nightly/cpu \
+      --find-links https://storage.googleapis.com/jax-releases/libtpu_releases.html \
+      --find-links https://storage.googleapis.com/libtpu-wheels/index.html \
+      --find-links https://storage.googleapis.com/libtpu-releases/index.html \
+      --find-links https://storage.googleapis.com/jax-releases/jax_nightly_releases.html \
+      --find-links https://storage.googleapis.com/jax-releases/jaxlib_nightly_releases.html \
+      vllm==0.10.1rc2.dev129+g800349c2a.tpu
+
+  # Install tpu-commons from the artifact registry
+  RUN pip install --no-cache-dir --pre \
+      --index-url https://us-python.pkg.dev/cloud-tpu-images/maxtext-rl/simple/ \
+      --extra-index-url https://pypi.org/simple/ \
+      --extra-index-url https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/ \
+      --find-links https://storage.googleapis.com/jax-releases/libtpu_releases.html \
+      tpu-commons==0.1.0
+
+  RUN pip install numba==0.61.2
+EOF
 fi
 
 if [[ ${CUSTOM_JAX} -eq 1 ]] ; then
