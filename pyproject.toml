@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 path = "src/MaxText/__init__.py"
 
 [project]
-name = "MaxText"
+name = "maxtext"
 description = "MaxText is a simple, performant and scalable Jax LLM!"
 dynamic = ["version"]
 requires-python = ">=3.12"
