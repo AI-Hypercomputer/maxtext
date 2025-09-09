@@ -33,6 +33,9 @@ Think in **roofline** terms and in terms of **structure the compiler can’t see
 
 **When maintainability wins.** Pallas kernels are lower-level and harder to debug. If gains are small, prefer the simpler path.
 
+**Autodiff note.** Pallas kernels require writing the autodiff rule manually (e.g., with `jax.custom_vjp`), since unlike other transforms such as `shard_map`,
+it is very difficult to automatically infer the dual of the memory pipeline.
+
 
 ## **💡 Use Cases**
 
@@ -168,14 +171,16 @@ def tile_add(x: jax.Array, y: jax.Array) -> jax.Array:
   B0 = min(128, x.shape[0])  # Example choice; tune this with a sweep
   B1 = x.shape[1]            # Full width tile (for illustration)
 
-  # Map program id -> tile origin in the global arrays.
+  # Map program id (tile index) -> tile origin in the full (HBM) array.
+  # NOTE: The runtime advances origins by `block_shape`, so `i` is already a tile
+  # index. Do NOT multiply by B0 here.
   in_out_spec = pl.BlockSpec(
       block_shape=(B0, B1),
-      index_map=lambda i: (i * B0, 0),
+      index_map=lambda i: (i, 0),
   )
 
-  # Grid is implied by data & block shape.
-  grid = ((x.shape[0] + B0 - 1) // B0,)
+  # Grid is implied by data & block shape (use ceiling-division helper).
+  grid = (pl.cdiv(x.shape[0], B0),)
   # Note: grid size can also be computed dynamically at runtime.
 
   return pl.pallas_call(
@@ -197,7 +202,7 @@ Prefer pl.pallas\_call with scratch buffers allocated in the appropriate memory 
 
 ## **🌐 Distributed Execution**
 
-Compose kernels across devices with jax.shard\_map. It’s usually simpler and more maintainable than in-kernel cross-device communication. While Pallas supports low-level comms, shard\_map is the right first choice for multi-device parallelism.
+Dispatch a kernel on multiple devices with `jax.shard_map`. It’s usually simpler and more maintainable than in-kernel cross-device communication. While Pallas supports low-level comms, `shard_map` is the right first choice for multi-device parallelism, and you can **communicate with `shard_map` collectives** when needed.
 
 
 ## **🐞 Debugging Tips**
