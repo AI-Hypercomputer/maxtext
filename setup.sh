@@ -139,11 +139,7 @@ run_name_folder_path=$(pwd)
 
 # Install dependencies from requirements.txt
 cd "$run_name_folder_path" && python3 -m uv pip install --upgrade pip
-if [[ "$MODE" == "pinned" ]]; then
-    python3 -m uv pip install --no-cache-dir -U -r requirements.txt -c constraints_gpu.txt
-else
-    python3 -m uv pip install --no-cache-dir -U -r requirements.txt
-fi
+python3 -m uv pip install --no-cache-dir -U -r requirements.txt
 
 # Install maxtext package
 if [ -f 'pyproject.toml' ]; then
@@ -159,15 +155,6 @@ python3 -m uv pip show libtpu-nightly && python3 -m uv pip uninstall libtpu-nigh
 if [ -e "$libtpu_path" ]; then
     rm "$libtpu_path"
 fi
-
-if [[ "$MODE" == "pinned" ]]; then
-  if [[ "$DEVICE" != "gpu" ]]; then
-    echo "pinned mode is supported for GPU builds only."
-    exit 1
-  fi
-  echo "Installing Jax and Transformer Engine."
-  python3 -m uv pip install "jax[cuda12]" -c constraints_gpu.txt
-  python3 -m uv pip install transformer-engine[jax]==1.13.0
 
 elif [[ "$MODE" == "stable" || ! -v MODE ]]; then
 # Stable mode

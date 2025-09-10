@@ -37,7 +37,6 @@ comments, or questions by creating a new
 │   │   ├── maxtext_libtpu_path.Dockerfile
 │   │   └── maxtext_runner.Dockerfile
 │   ├── requirements/
-│   │   ├── constraints_gpu.txt
 │   │   └── requirements.txt
 │   │   └── ...
 │   └── scripts/
