@@ -29,7 +29,7 @@ Think in **roofline** terms ([All About Rooflines](https://jax-ml.github.io/scal
 * **Roofline framing.** Is your op **compute-limited** (MXU at or near peak) or **bandwidth-limited** (HBM↔on-chip transfers dominate)? Pallas tends to shine when you can reduce bandwidth pressure or avoid wasted work via better tiling and scheduling.  
 * **Compiler invisibles.** Irregular sparsity, ragged batch shapes, non-contiguous memory access, and domain-specific invariants are all signals that a custom kernel could help.
 
-**Know when XLA is enough.** Before writing a custom kernel, always [profile your baseline](#high-level-profiling). If a standard operation (like a dense [`jnp.matmul`](https://docs.jax.dev/en/latest/_autosummary/jax.numpy.matmul.html)) is already performing well, the XLA compiler is doing its job. In these cases, a Pallas kernel will increase code complexity and maintenance burden with minimal performance improvement.
+**Know when XLA is enough.** Before writing a custom kernel, always [profile your baseline](#1-high-level-profiling). If a standard operation (like a dense [`jnp.matmul`](https://docs.jax.dev/en/latest/_autosummary/jax.numpy.matmul.html)) is already performing well, the XLA compiler is doing its job. In these cases, a Pallas kernel will increase code complexity and maintenance burden with minimal performance improvement.
 
 **When maintainability wins.** Pallas kernels are lower-level and harder to debug. If gains are small, prefer the simpler path.
 
@@ -74,7 +74,7 @@ To maximize performance, MaxText uses custom Pallas kernels for memory-bandwidth
 
 ## **🔧 The Pallas Optimization Workflow: Code → Profile → Tune → Repeat**
 
-### 1\. High-Level Profiling {#high-level-profiling}
+### 1. High-Level Profiling
 
 Give the kernel a clear name in traces and capture a profile. Always use [`jax.block_until_ready()`](https://docs.jax.dev/en/latest/_autosummary/jax.block_until_ready.html) when timing your operations.
 
