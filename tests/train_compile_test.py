@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-""" Tests for the common Max Utils """
 
 import unittest
 import os.path
@@ -83,6 +82,22 @@ class TrainCompile(unittest.TestCase):
             "remat_policy=minimal_offloaded",
             "use_iota_embed=true",
             "global_parameter_scale=128",
+        )
+    )
+
+  @pytest.mark.cpu_only
+  def test_save_flash(self):
+    compiled_trainstep_file = "/tmp/test_save_flash"
+    train_compile_main(
+        (
+            "",
+            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-256",
+            "compile_topology_num_slices=1",
+            "per_device_batch_size=1",
+            "remat_policy=custom",
+            "context=device" # Context is our name for the splash attention output for both TPU and GPU kernels.      
         )
     )
 

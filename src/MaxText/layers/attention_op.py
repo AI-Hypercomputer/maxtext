@@ -1012,6 +1012,7 @@ class AttentionOp(nnx.Module):
           q_seq_shards=cp_size,  # axis for sequence sharding
           block_sizes=block_sizes,
           attn_logits_soft_cap=attn_logits_soft_cap,
+          residual_checkpoint_name="context",
       )
       return splash_kernel
 
