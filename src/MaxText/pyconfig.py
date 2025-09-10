@@ -217,6 +217,7 @@ def validate_keys(keys):
   if keys["num_experts"] > 1:
     validate_mlp_dim(keys)
     validate_sparse_matmul_parallelism(keys)
+    validate_ring_of_experts_parallelism(keys)
     validate_ragged_dot(keys)
     validate_deepseek_moe(keys)
     validate_gpt_oss_moe(keys)
@@ -1035,6 +1036,11 @@ def validate_sparse_matmul_parallelism(raw_keys):
     raise ValueError(
         f"The expert dimension {raw_keys['num_experts']} is not divisible by expert parallelism setting {expert_parallelism}."
     )
+
+
+def validate_ring_of_experts_parallelism(raw_keys):
+  if raw_keys["use_ring_of_experts"] and not using_expert_parallelism(raw_keys):
+    raise ValueError("Ring-of-experts requires expert-parallelism to be enabled.")
 
 
 def validate_ragged_dot(raw_keys):
