@@ -24,10 +24,22 @@ from MaxText.layers import models
 from MaxText.common_types import MODEL_MODE_TRAIN
 
 
-prompt_text = "An attention function can be described as mapping a query and a set of key-value pairs to an output, where the query, keys, values, and outputs are all vectors. The output is"
+"""
+export HF_TOKEN=$HF_TOKEN
+export MODEL_ID="openai/gpt-oss-20b"
+export HF_MODEL_PATH="$HOME/gpt-oss-20b/gpt-oss-20b-bf16-v2"
+"""
+
+HF_TOKEN = os.environ["HF_TOKEN"]
+MODEL_ID = os.environ["MODEL_ID"]
+HF_MODEL_PATH = os.environ["HF_MODEL_PATH"]
+
+# prompt_text = "An attention function can be described as mapping a query and a set of key-value pairs to an output, where the query, keys, values, and outputs are all vectors. The output is"
+
+PROMPT_TEXT = "The dominant sequence transduction models are based on complex recurrent or convolutional neural networks that include an encoder and a decoder. The best performing models also connect the encoder and decoder through an attention mechanism. We propose a new simple network architecture, the Transformer, based solely on attention mechanisms, dispensing with recurrence and convolutions entirely. Experiments on two machine translation tasks show these models to be superior in quality while being more parallelizable and requiring significantly less time to train. Our model achieves 28.4 BLEU on the WMT 2014 English-to-German translation task, improving over the existing best results, including ensembles, by over 2 BLEU. On the WMT 2014 English-to-French translation task, our model establishes a new single-model state-of-the-art BLEU score of 41.8 after training for 3.5 days on eight GPUs, a small fraction of the training costs of the best models from the literature. We show that the Transformer generalizes well to other tasks by applying it successfully to English constituency parsing both with large and limited training data."
 
 
-def get_data_hf(config, prompt_text, hf_token, model_id="openai/gpt-oss-20b"):
+def get_data_hf(config, prompt_text, hf_token, model_id, hf_model_path):
   from huggingface_hub import login
   from transformers import AutoTokenizer, AutoModelForCausalLM
   import jax.numpy as jnp
@@ -35,28 +47,27 @@ def get_data_hf(config, prompt_text, hf_token, model_id="openai/gpt-oss-20b"):
   import torch
   """Get data (tokens, logits) from a Hugging Face model for the test at hf_data_index"""
   login(token=hf_token)
-  
+
   tokenizer = AutoTokenizer.from_pretrained(model_id)
-  hf_model_path = "/home/ranran_google_com/gpt_20b/gpt-oss-20b-bf16-v2"
   hf_model = AutoModelForCausalLM.from_pretrained(
       hf_model_path,
       trust_remote_code=True,
       torch_dtype=getattr(torch, config.dtype.name)
   )
-  
+
   input_ids = tokenizer.encode(prompt_text, return_tensors="pt")[:, :config.max_target_length]
 
   # Get the logits for the prompt + completion using Hugging Face model
   with torch.no_grad():
-      outputs = hf_model(input_ids)
-      logits = outputs.logits.cpu().numpy().astype("float32")
+    outputs = hf_model(input_ids)
+    logits = outputs.logits.cpu().numpy().astype("float32")
 
   # Prepare tokens and logits
   tokens = input_ids.tolist()[0]
   print(f"tokens: {tokens}")
-  
+
   max_logging.log(f"config.global_batch_size_to_train_on={config.global_batch_size_to_train_on}")
-  
+
   ids = np.asarray(tokens, dtype=np.int32)
 
   # Use Hugging Face logits
@@ -90,7 +101,9 @@ def main(argv):
   model = models.transformer_as_linen(config, mesh=mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
   state, _ = maxtext_utils.setup_decode_state(model, config, rng1, mesh, None)
 
-  ids, decoder_segment_ids, decoder_positions, logits_hf = get_data_hf(config, prompt_text, hf_token="")
+  ids, decoder_segment_ids, decoder_positions, logits_hf = get_data_hf(
+      config, prompt_text=PROMPT_TEXT, hf_token=HF_TOKEN, model_id=MODEL_ID, hf_model_path=HF_MODEL_PATH
+  )
   full_train_logits = model.apply(
       state.params,
       ids,
@@ -111,10 +124,10 @@ def main(argv):
 
   max_logging.log(f"{logits_maxtext=}")
   max_logging.log(f"{logits_hf=}")
-  
+
   maxtext_probabilities = jax.nn.softmax(logits_maxtext, axis=-1)
   hf_probabilities = jax.nn.softmax(logits_hf, axis=-1)
-  
+
   max_logging.log(f"{maxtext_probabilities=}")
   max_logging.log(f"{hf_probabilities=}")
 
