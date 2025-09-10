@@ -173,11 +173,22 @@ class Config:
   num_local_experts = 8
   num_experts_per_tok = 2
   limit = 7.0
+  # attention
   num_attention_heads = 8
   num_key_value_heads = 4
   head_dim = 8
   attention_dropout = 0.0
-
+  # rope
+  rope_type = "yarn"
+  rope_max_timescale = 150_000
+  max_position_embeddings = 131072
+  original_max_position_embeddings = 4096
+  rope_factor = 32
+  beta_fast = 32
+  beta_slow = 1
+  rope_interleave = False
+  rope_truncate = False
+  rope_attention_scaling = True
 
 class GptOssMLPTest(unittest.TestCase):
 
@@ -562,25 +573,6 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
   return q_embed, k_embed
 
 
-class Config:
-  dtype = "float32"
-  # attention
-  num_attention_heads = 8
-  num_key_value_heads = 4
-  head_dim = 8
-  # rope
-  rope_type = "yarn"
-  rope_max_timescale = 150_000
-  max_position_embeddings = 131072
-  original_max_position_embeddings = 4096
-  rope_factor = 32
-  beta_fast = 32
-  beta_slow = 1
-  rope_interleave = False
-  rope_truncate = False
-  rope_attention_scaling = True
-
-
 class GptOssYarnTest(unittest.TestCase):
   """Test for the GptOss Yarn RoPE implementation."""
 
@@ -593,10 +585,11 @@ class GptOssYarnTest(unittest.TestCase):
     # data, test long context
     self.batch_size = 1
     self.seq_len = 4096
+    self.dtype = "float32"
     # torch tensors
     self.query = torch.randn(self.batch_size, self.config.num_attention_heads, self.seq_len, self.config.head_dim)
     self.key = torch.randn(self.batch_size, self.config.num_key_value_heads, self.seq_len, self.config.head_dim)
-    self.positions = torch.arange(self.seq_len).unsqueeze(0).repeat(self.batch_size, 1)
+    self.positions = torch.arange(self.seq_len).unsqueeze(0)
     # torch config
     pt_config = {
         "head_dim": self.config.head_dim,
@@ -616,7 +609,7 @@ class GptOssYarnTest(unittest.TestCase):
     }
     self.pt_config = SimpleNamespace(**pt_config)
 
-  def test_yarn_rotary_embedding(self):
+  def test_yarn(self):
     # HF Yarn RoPE
     torch_embedding = GptOssRotaryEmbedding(self.pt_config)
     cos, sin = torch_embedding(self.query, self.positions)
@@ -630,7 +623,7 @@ class GptOssYarnTest(unittest.TestCase):
         rope_theta=self.config.rope_max_timescale,
         rope_factor=self.config.rope_factor,
         embedding_dims=self.config.head_dim,
-        fprop_dtype=self.config.dtype,
+        fprop_dtype=self.dtype,
         interleave=self.config.rope_interleave,
         truncate=self.config.rope_truncate,
         attention_scaling=self.config.rope_attention_scaling,
