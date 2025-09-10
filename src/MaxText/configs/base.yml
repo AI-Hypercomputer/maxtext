@@ -171,6 +171,7 @@ capacity_factor: -1.0 # a factor to decide expert capacity for token dropping, a
 load_balance_loss_weight: 0.01 # weight for the load balance loss
 use_random_routing: False # whether to use random routing for debug/test purpose
 use_custom_sort_vjp: True # whether to use a custom sort vjp for sparse matmul ops
+use_ring_of_experts: False # whether to use ring of experts for sparse matmul expert parallelism
 # Tunable tiling dimensions used for Megablox
 tile_batch_seq: 512
 tile_activation_dim: 1024
@@ -793,6 +794,7 @@ remat_policy_for_vit: "minimal"  # Remat policy for multimodal model's vision en
 image_size_for_vit: 896 # Default for Gemma3, and should be overwritten by model's config
 image_path: "" # Local image path used for decoding
 image_placeholder: "<|image|>"
+posemb_type_for_vit: "learn"
 
 ### llama4 multi modal configs
 hidden_size_for_vit: 1408
@@ -801,6 +803,7 @@ num_attention_heads_for_vit: 16
 num_channels_for_vit: 3
 tile_size_for_vit: 336
 patch_size_for_vit: 14
+conv_stride_for_vit: 14
 num_hidden_layers_for_vit: 34
 projector_input_dim_for_vit: 4096
 projector_output_dim_for_vit: 4096
