@@ -71,7 +71,7 @@ class GptOssExperts(nn.Module):
     gate, up = gate_up[..., ::2], gate_up[..., 1::2]
 
     v = torch.bmm(hidden_states, self.gate_up_proj)[..., ::2]
-    print(f"gate before bias (hf)\nmean={v.mean()}\nshape={v.shape}")
+    print(f"gate before bias (hf)\nmean={v.mean()}\nshape={v.shape}\n{v}")
     v = torch.bmm(hidden_states, self.gate_up_proj)[..., 1::2]
     print(f"up before bias (hf)\nmean={v.mean()}\nshape={v.shape}")
 
@@ -120,6 +120,10 @@ class GptOssTopKRouter(nn.Module):
     router_top_value, router_indices = torch.topk(router_logits, self.top_k, dim=-1)  # (seq_len, top_k)
     router_top_value = torch.nn.functional.softmax(router_top_value, dim=1, dtype=router_top_value.dtype)
     router_scores = torch.zeros_like(router_logits).scatter_(1, router_indices, router_top_value)
+    print(f"rounter_indices (hf)\n{router_indices}")
+    # print(f"rounter_scores\n{router_scores}")
+    selected_scores = torch.gather(router_scores, dim=1, index=router_indices)
+    print(f"rounter_scores (hf)\n{selected_scores}")
     return router_scores, router_indices
 
 
@@ -194,7 +198,7 @@ def to_jax(pt_tensor: torch.Tensor) -> jax.Array:
 class Config:
 
   hidden_size = 16
-  intermediate_size = 16
+  intermediate_size = 15
   num_local_experts = 8
   num_experts_per_tok = 2
   limit = 7.0
@@ -222,8 +226,9 @@ class GptOssMLPTest(unittest.TestCase):
         "experts.down_proj_bias": torch.randn(config.num_local_experts, config.hidden_size),
     }
 
-    batch_size = 4
-    seq_len = 6
+    print()
+    batch_size = 1
+    seq_len = 3
     hidden_states = torch.randn(batch_size, seq_len, config.hidden_size)
 
     # reference model

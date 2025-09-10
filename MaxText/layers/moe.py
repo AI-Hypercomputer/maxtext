@@ -482,6 +482,8 @@ class RoutedMoE(nnx.Module):
     bsz_times_seq_len = inputs_shape[0] * inputs_shape[1]
     inputs_2d = jnp.reshape(inputs, (bsz_times_seq_len, inputs_shape[2]))
     weights, selected_experts = self.get_topk(gate_logits, pre_bias_logits)
+    jax.debug.print("rounter_indices\n{x}", x=selected_experts)
+    jax.debug.print("router_scores\n{x}", x=weights)
 
     if self.config.decoder_block == ctypes.DecoderBlockType.LLAMA4:
       # weights will be of shape (batch_size, seq_len, num_experts_per_tok)
@@ -954,8 +956,8 @@ class RoutedMoE(nnx.Module):
       layer_w0 = gmm(x, w0, group_sizes, selected_experts)
 
       jax.debug.print(
-          "gate before bias\nmean={mean}\n{shape}",
-          # x=intermediate_layer,
+          "gate before bias\nmean={mean}\n{shape}\n{x}",
+          x=layer_w0,
           mean=layer_w0.mean(),
           shape=layer_w0.shape,
       )
