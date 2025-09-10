@@ -35,6 +35,42 @@ import sys
 import numpy
 import statistics
 numpy.set_printoptions(threshold=sys.maxsize)
+import os
+
+
+debug_dir = os.path.join(os.environ["HOME"], "debug-oss")
+os.makedirs(debug_dir, exist_ok=True)
+
+debug_jax = os.path.join(debug_dir, "jax")
+os.makedirs(debug_jax, exist_ok=True)
+
+debug_pt = os.path.join(debug_dir, "pt")
+os.makedirs(debug_pt, exist_ok=True)
+
+
+def to_jax(pt_tensor: torch.Tensor) -> jax.Array:
+  return jnp.asarray(pt_tensor.detach().numpy())
+
+
+SAVE = False
+
+
+# Inside of jiited
+# debug.callback(save_with_jit, logits)
+def save_jax(x, name="logits"):
+  if not SAVE:
+    return
+
+  def save_with_jit(x):
+    jnp.save(os.path.join(debug_jax, name + ".npy"), x)
+
+  jax.debug.callback(save_with_jit, x)
+
+
+def save_pt(x, name="logits"):
+  if not SAVE:
+    return
+  jnp.save(os.path.join(debug_pt, name + ".npy"), to_jax(x))
 
 
 """  
@@ -78,6 +114,7 @@ class GptOssExperts(nn.Module):
     no_bias_gate_std = jnp.std(to_jax(no_bias_gate))
     print(f"no_bias_gate_mean: {no_bias_gate_mean}")    
     print(f"no_bias_gate_std: {no_bias_gate_std}")  
+    save_pt(no_bias_gate, "no_bias_gate")
 
     gate_up = torch.bmm(hidden_states, self.gate_up_proj) + self.gate_up_proj_bias[..., None, :]
     gate, up = gate_up[..., ::2], gate_up[..., 1::2]
@@ -87,6 +124,7 @@ class GptOssExperts(nn.Module):
     gate_std = jnp.std(to_jax(gate))
     print(f"bias gate_mean: {gate_mean}")    
     print(f"bias gate_std: {gate_std}")    
+    save_pt(gate, "bias gate")
 
     gate = gate.clamp(min=None, max=self.limit)
     up = up.clamp(min=-self.limit, max=self.limit)
@@ -226,10 +264,6 @@ def eager_attention_forward(
   return attn_output, attn_weights
 
 
-def to_jax(pt_tensor: torch.Tensor) -> jax.Array:
-  return jnp.asarray(pt_tensor.detach().numpy())
-
-
 class Config:
 
   # hidden_size = 16
@@ -291,7 +325,7 @@ class GptOssMLPTest(unittest.TestCase):
         dtype="float32",
         weight_dtype="float32",
         megablox=False,
-        sparse_matmul=False,
+        sparse_matmul=True,
         per_device_batch_size=1,
         max_target_length=seq_len,
         max_prefill_predict_length=seq_len,

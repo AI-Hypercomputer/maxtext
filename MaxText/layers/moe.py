@@ -39,6 +39,18 @@ from MaxText.layers.initializers import NdInitializer, nd_dense_init, default_bi
 
 import qwix.pallas as qpl
 
+from MaxText.tests.check_gpt_vs_reference import save_jax
+
+
+# , debug_jax
+# import os
+
+
+# def save_with_jit(x, name="logits"):
+#   jax.debug.print("save")
+#   jnp.save(os.path.join(debug_jax, name + ".npy"), x)
+
+
 set_xla_metadata = xla_metadata.set_xla_metadata
 
 
@@ -495,7 +507,7 @@ class RoutedMoE(nnx.Module):
 
     # re_selected_experts = selected_experts.reshape(184, 2)
     # jax.debug.print("re_selected_experts.shape={x}", x=re_selected_experts.shape)
-    # jax.debug.print("re_selected_experts={x}", x=re_selected_experts)  
+    # jax.debug.print("re_selected_experts={x}", x=re_selected_experts)
 
     if self.config.decoder_block == ctypes.DecoderBlockType.LLAMA4:
       # weights will be of shape (batch_size, seq_len, num_experts_per_tok)
@@ -966,7 +978,7 @@ class RoutedMoE(nnx.Module):
       layer_w0_std = jnp.std(layer_w0)
       jax.debug.print("layer_w0_mean={x}", x=layer_w0_mean)
       jax.debug.print("layer_w0_std={x}", x=layer_w0_std)
-    
+
       if self.config.mlp_bias:
         layer_w0 = layer_w0 + w0_bias
       if self.get_tensor_transpose_parallelism_size() > 1:
@@ -1063,7 +1075,6 @@ class RoutedMoE(nnx.Module):
       )
 
       return output, None
-
 
     output, _ = wrapper(inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel, w0_bias, w1_bias, wo_bias)
     re_output = output.reshape(4, -1, 16)
@@ -1566,6 +1577,7 @@ class RoutedMoE(nnx.Module):
         re_layer_w0_std = jnp.std(re_layer_w0)
         jax.debug.print("re_layer_w0_mean={x}", x=re_layer_w0_mean)
         jax.debug.print("re_layer_w0_std={x}", x=re_layer_w0_std) 
+        save_jax(re_layer_w0, "re_layer_w0")
 
         if self.config.mlp_bias:
           print(f"checking layer_w0.shape: {layer_w0.shape}")
@@ -1581,6 +1593,7 @@ class RoutedMoE(nnx.Module):
         bias_layer_w0_std = jnp.std(bias_layer_w0)
         jax.debug.print("bias_layer_w0_mean={x}", x=bias_layer_w0_mean)
         jax.debug.print("bias_layer_w0_std={x}", x=bias_layer_w0_std) 
+        save_jax(bias_layer_w0, "bias_layer_w0")
 
         if self.config.activations_in_float32:
           layer_w0 = layer_w0.astype(jnp.float32)
@@ -1636,7 +1649,7 @@ class RoutedMoE(nnx.Module):
       jax_weights_std = jnp.std(weights)
       jax.debug.print("jax jax_weights_mean={x}", x=jax_weights_mean)
       jax.debug.print("jax jax_weights_std={x}", x=jax_weights_std) 
-  
+
       with jax.named_scope("w_sum"):
         if is_llama4_decoder_layer:
           weights = self.reshape_and_update_weights(jnp.ones_like(top_k_weights), top_k_indices)
