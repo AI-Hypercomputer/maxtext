@@ -266,7 +266,11 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
   total_weights = aux["total_weights"]
   moe_lb_loss = aux["moe_lb_loss"]
   mtp_loss = aux["mtp_loss"]
-
+  
+  raw_grads =jax.tree_util.tree_map(
+    lambda x: x.astype(jnp.bfloat16) if x.dtype == jnp.float32 else x,
+    raw_grads
+  )
   if config.gradient_clipping_threshold > 0:
     grads = maxtext_utils.apply_gradient_clipping(raw_grads, state, config.gradient_clipping_threshold)
   else:

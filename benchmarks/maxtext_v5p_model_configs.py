@@ -23,6 +23,51 @@ from benchmarks.globals import MAXTEXT_ASSETS_ROOT
 
 v5p_model_dict = {}
 
+deepseek_v3_fsdp_v5p_512_nocapp = _add_to_model_dictionary(
+    v5p_model_dict,
+    MaxTextModel(
+        model_name="deepseek_v3_fsdp_v5p_512_nocapp",
+        model_type="deepseek3-671b",
+        tuning_params={
+            "per_device_batch_size": 8,
+            "max_target_length": 4096,
+            "ici_fsdp_parallelism": -1,
+            "ici_expert_parallelism": 1,
+            "remat_policy": "custom",
+            "decoder_layer_input": "offload",
+            "gcs_metrics": True,
+            "use_iota_embed": True,
+            "dataset_path": "gs://max-datasets-rogue",
+            "dataset_type": "synthetic",
+            "reuse_example_batch": 1,
+            "enable_checkpointing": False,
+            "skip_first_n_steps_for_profiler": 5,
+            "profiler_steps": 5,
+            "profiler": "xplane",
+            "sa_block_q":2048,
+            "sa_block_kv":2048,
+            "sa_block_kv_compute":2048,
+            "sa_block_q_dkv":2048,
+            "sa_block_kv_dkv":2048,
+            "sa_block_kv_dkv_compute":2048,
+            "sa_block_q_dq":2048,
+            "sa_block_kv_dq":2048,
+            "opt_type":"adamw",
+            "mu_dtype":"bfloat16",
+            "sa_use_fused_bwd_kernel":"true",
+            "megablox": True,
+            "sparse_matmul": True,
+            "capacity_factor": 1.0,
+            "tokenizer_path": "assets/tokenizer.mistral-v1",
+            "dtype": "bfloat16",
+            "attention": "flash",
+        },
+        xla_flags=(
+            xla_flags_library.GF_FLAGS
+        ),
+    ),
+)
+
 deepseek_v3_ep_256_v5p_512 = _add_to_model_dictionary(
     v5p_model_dict,
     MaxTextModel(
@@ -94,6 +139,7 @@ llama4_scout_dropless_v5p_256 = _add_to_model_dictionary(
             "sa_block_kv_dkv_compute": 2048,
             "sa_block_q_dq": 2048,
             "sa_block_kv_dq": 2048,
+            "use-hf-tokenizer": True,
             "tokenizer_path": "meta-llama/Llama-4-Scout-17B-16E",
         },
         xla_flags=(

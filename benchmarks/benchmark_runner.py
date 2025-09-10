@@ -69,7 +69,7 @@ def add_pathways_arguments(parser: argparse.ArgumentParser):
   )
   parser.add_argument(
       '--use_pathways',
-      type=str2bool,
+      type=bool,
       default=False,
       help='whether to use pathways or not.',
   )

@@ -62,7 +62,7 @@ checkpoint_storage_use_ocdbt: True
 checkpoint_storage_use_zarr3: True
 # larger models requires higher concurrent GB for I/O
 # default concurrent gb for PytreeCheckpointHandler is 96GB
-checkpoint_storage_concurrent_gb: 96
+checkpoint_storage_concurrent_gb: 900
 
 # Bool flag for enabling Orbax v1.
 enable_orbax_v1: False

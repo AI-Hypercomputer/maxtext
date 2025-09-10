@@ -51,6 +51,11 @@ def _sort_activations(
     sort_indices: jax.Array,
     use_custom_vjp: bool,
 ) -> jax.Array:
+def _sort_activations(
+    inputs: jax.Array,
+    sort_indices: jax.Array,
+    use_custom_vjp: bool,
+) -> jax.Array:
   """Sort activations by `sort_indices`.
 
   If `use_custom_vjp` is True, then we use a custom backward pass that
@@ -62,6 +67,7 @@ def _sort_activations(
     inputs: `(tokens, ...)`-shaped array of input activations to sort.
     sort_indices: `(tokens,)`-shaped array containing the sort order.
     use_custom_vjp: Whether to use the explicit backward pass.
+    use_custom_vjp: Whether to use the explicit backward pass.
 
   Returns:
     `(tokens, ...)`-shaped array of input activations sorted by `sort_indices`.
@@ -69,6 +75,8 @@ def _sort_activations(
   assert inputs.shape[0] == sort_indices.shape[0]
 
   with jax.named_scope("sort_activations"):
+    if use_custom_vjp:
+      return _sort_activations_custom(inputs, sort_indices)
     if use_custom_vjp:
       return _sort_activations_custom(inputs, sort_indices)
     return inputs[sort_indices, ...]
@@ -81,17 +89,29 @@ def _sort_activations_custom(inputs: jax.Array, sort_indices: jax.Array) -> jax.
 
 
 def _sort_activations_custom_fwd(inputs: jax.Array, sort_indices: jax.Array
+@jax.custom_vjp
+def _sort_activations_custom(inputs: jax.Array, sort_indices: jax.Array) -> jax.Array:
+  """Sort functions with custom vjp."""
+  return inputs[sort_indices, ...]
+
+
+def _sort_activations_custom_fwd(inputs: jax.Array, sort_indices: jax.Array
 ) -> tuple[jax.Array, jax.Array]:
   """Forward pass of the custom vjp for `_sort_activations()`."""
   return _sort_activations_custom(inputs, sort_indices), sort_indices
+  return _sort_activations_custom(inputs, sort_indices), sort_indices
 
 
+def _sort_activations_custom_bwd(residuals: jax.Array, grads: jax.Array
 def _sort_activations_custom_bwd(residuals: jax.Array, grads: jax.Array
 ) -> tuple[jax.Array, None]:
   """Backward pass of the custom vjp for `_sort_activations()`."""
   sort_indices = residuals
   return _sort_activations_custom(grads, jnp.argsort(sort_indices)), None
+  return _sort_activations_custom(grads, jnp.argsort(sort_indices)), None
 
+_sort_activations_custom.defvjp(
+    _sort_activations_custom_fwd, _sort_activations_custom_bwd)
 _sort_activations_custom.defvjp(
     _sort_activations_custom_fwd, _sort_activations_custom_bwd)
 

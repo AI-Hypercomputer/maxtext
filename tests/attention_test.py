@@ -733,6 +733,7 @@ class AttentionTest(parameterized.TestCase):
       self.assertTrue(attention_w_layout_full_this_idx.shape == attention_w_layout_idx.shape)
       self.assertTrue(
           jax.numpy.allclose(attention_w_layout_full_this_idx, attention_w_layout_idx, rtol=rtol, atol=atol, equal_nan=False)
+          jax.numpy.allclose(attention_w_layout_full_this_idx, attention_w_layout_idx, rtol=rtol, atol=atol, equal_nan=False)
       )
 
   @pytest.mark.tpu_only
