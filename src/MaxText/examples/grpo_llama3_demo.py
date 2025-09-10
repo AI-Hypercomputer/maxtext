@@ -381,7 +381,7 @@ model_config = llama3_lib.ModelConfig.llama3_1_8b()
 config_ref = pyconfig.initialize(
     [
         "",
-        f"{HOME}/maxtext/src/MaxText/configs/base.yml",
+        f"/deps/src/MaxText/configs/base.yml",
     ],
     base_output_directory="dummy",  # This is not used in Tunix.
     run_name="test-tunix-maxtext-llama3.1-8b",
@@ -440,7 +440,7 @@ show_hbm_usage()
 config_policy = pyconfig.initialize(
     [
         "",
-        f"{HOME}/maxtext/src/MaxText/configs/base.yml",
+        f"/deps/src/MaxText/configs/base.yml",
     ],
     base_output_directory="dummy",  # This is not used in Tunix.
     run_name="test-tunix-maxtext-llama3.1-8b",  # This is not used in Tunix.
