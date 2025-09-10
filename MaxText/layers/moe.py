@@ -944,7 +944,22 @@ class RoutedMoE(nnx.Module):
       if self.config.mlp_bias:
         w0_bias, w1_bias, wo_bias = self.transform_bias(selected_experts, w0_bias, w1_bias, wo_bias)
 
+      jax.debug.print(
+          "before gate\nmean={mean}\n{shape}",
+          # x=x,
+          mean=x.mean(),
+          shape=x.shape,
+      )
+
       layer_w0 = gmm(x, w0, group_sizes, selected_experts)
+
+      jax.debug.print(
+          "gate before bias\nmean={mean}\n{shape}",
+          # x=intermediate_layer,
+          mean=layer_w0.mean(),
+          shape=layer_w0.shape,
+      )
+
       if self.config.mlp_bias:
         layer_w0 = layer_w0 + w0_bias
       if self.get_tensor_transpose_parallelism_size() > 1:
@@ -952,6 +967,14 @@ class RoutedMoE(nnx.Module):
       layer_w0 = adc.checkpoint_name(layer_w0, "mlpwi_0")
 
       layer_w1 = gmm(x, w1, group_sizes, selected_experts)
+
+      jax.debug.print(
+          "up before bias\nmean={mean}\n{shape}",
+          # x=intermediate_layer,
+          mean=layer_w1.mean(),
+          shape=layer_w1.shape,
+      )
+
       if self.config.mlp_bias:
         layer_w1 = layer_w1 + w1_bias
       if self.get_tensor_transpose_parallelism_size() > 1:
@@ -959,17 +982,60 @@ class RoutedMoE(nnx.Module):
       layer_w1 = adc.checkpoint_name(layer_w1, "mlpwi_1")
       # pylint: disable=protected-access
 
+      jax.debug.print(
+          "gate before clip\nmean={mean}\n{shape}",
+          # x=intermediate_layer,
+          mean=layer_w0.mean(),
+          shape=layer_w0.shape,
+      )
+
+      jax.debug.print(
+          "up before clip\nmean={mean}\n{shape}",
+          # x=intermediate_layer,
+          mean=layer_w1.mean(),
+          shape=layer_w1.shape,
+      )
+
       if self.config.decoder_block == ctypes.DecoderBlockType.GPT_OSS:
+        # gate
         layer_w0 = jnp.clip(layer_w0, a_min=None, a_max=self.config.mlp_activations_limit)
+        jax.debug.print(
+            "gate after clip\nmean={mean}\n{shape}",
+            # x=intermediate_layer,
+            mean=layer_w0.mean(),
+            shape=layer_w0.shape,
+        )
+        # up
         layer_w1 = jnp.clip(layer_w1, a_min=-self.config.mlp_activations_limit, a_max=self.config.mlp_activations_limit)
+        jax.debug.print(
+            "up after clip\nmean={mean}\n{shape}",
+            # x=intermediate_layer,
+            mean=layer_w1.mean(),
+            shape=layer_w1.shape,
+        )
         layer_act = linears._convert_to_activation_function(self.config.mlp_activations[0])(layer_w0 * 1.702)
         glu = jnp.multiply(layer_w0, layer_act)
         intermediate_layer = jnp.multiply(glu, (layer_w1 + 1))
+
+        jax.debug.print(
+            "after gate\nmean={mean}\n{shape}",
+            # x=intermediate_layer,
+            mean=intermediate_layer.mean(),
+            shape=intermediate_layer.shape,
+        )
       else:
         layer_act = linears._convert_to_activation_function(self.config.mlp_activations[0])(layer_w0)
         intermediate_layer = jnp.multiply(layer_act, layer_w1)
 
       intermediate_output = gmm(intermediate_layer, wo, group_sizes, selected_experts)
+
+      # jax.debug.print(
+      #     "after gate\nmean={mean}\n{shape}\n{x}",
+      #     x=intermediate_output,
+      #     mean=intermediate_output.mean(),
+      #     shape=intermediate_output.shape,
+      # )
+
       if self.config.mlp_bias:
         intermediate_output = intermediate_output + wo_bias
       intermediate_output = adc.checkpoint_name(intermediate_output, "mlpwo")

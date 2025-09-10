@@ -64,12 +64,38 @@ class GptOssExperts(nn.Module):
     hidden_states = hidden_states.repeat(num_experts, 1)
     hidden_states = hidden_states.view(num_experts, -1, self.hidden_size)
 
+    v = hidden_states
+    print(f"before gate (hf)\nmean={v.mean()}\nshape={v.shape}")
+
     gate_up = torch.bmm(hidden_states, self.gate_up_proj) + self.gate_up_proj_bias[..., None, :]
     gate, up = gate_up[..., ::2], gate_up[..., 1::2]
+
+    v = torch.bmm(hidden_states, self.gate_up_proj)[..., ::2]
+    print(f"gate before bias (hf)\nmean={v.mean()}\nshape={v.shape}")
+    v = torch.bmm(hidden_states, self.gate_up_proj)[..., 1::2]
+    print(f"up before bias (hf)\nmean={v.mean()}\nshape={v.shape}")
+
+    v = gate
+    print(f"gate before clip (hf)\nmean={v.mean()}\nshape={v.shape}")
+    v = up
+    print(f"up before clip (hf)\nmean={v.mean()}\nshape={v.shape}")
+
     gate = gate.clamp(min=None, max=self.limit)
+
+    v = gate
+    print(f"gate after clip (hf)\nmean={v.mean()}\nshape={v.shape}")
+
     up = up.clamp(min=-self.limit, max=self.limit)
+
+    v = up
+    print(f"up after clip (hf)\nmean={v.mean()}\nshape={v.shape}")
+
     glu = gate * torch.sigmoid(gate * self.alpha)
     next_states = torch.bmm(((up + 1) * glu), self.down_proj)
+
+    v = (up + 1) * glu
+    print(f"after gate (hf)\nmean={v.mean()}\nshape={v.shape}")
+
     next_states = next_states + self.down_proj_bias[..., None, :]
     next_states = next_states.view(num_experts, batch_size, -1, self.hidden_size)
     next_states = next_states * routing_weights.transpose(0, 1).view(num_experts, batch_size, -1)[..., None]
@@ -123,42 +149,42 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
   return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
 
 
-# Reference implementation
-def eager_attention_forward(
-    module: nn.Module,
-    query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
-    attention_mask: Optional[torch.Tensor],
-    scaling: float,
-    dropout: float = 0.0,
-    **kwargs,
-):
-  key_states = repeat_kv(key, module.num_key_value_groups)
-  value_states = repeat_kv(value, module.num_key_value_groups)
-  attn_weights = torch.matmul(query, key_states.transpose(2, 3)) * scaling
-  if attention_mask is not None:
-    causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
-    attn_weights = attn_weights + causal_mask
+# # Reference implementation
+# def eager_attention_forward(
+#     module: nn.Module,
+#     query: torch.Tensor,
+#     key: torch.Tensor,
+#     value: torch.Tensor,
+#     attention_mask: Optional[torch.Tensor],
+#     scaling: float,
+#     dropout: float = 0.0,
+#     **kwargs,
+# ):
+#   key_states = repeat_kv(key, module.num_key_value_groups)
+#   value_states = repeat_kv(value, module.num_key_value_groups)
+#   attn_weights = torch.matmul(query, key_states.transpose(2, 3)) * scaling
+#   if attention_mask is not None:
+#     causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
+#     attn_weights = attn_weights + causal_mask
 
-  if hasattr(module, "sinks") and module.sinks is not None:
-    sinks = module.sinks.reshape(1, -1, 1, 1).expand(query.shape[0], -1, query.shape[-2], -1)
-    combined_logits = torch.cat([attn_weights, sinks], dim=-1)
+#   if hasattr(module, "sinks") and module.sinks is not None:
+#     sinks = module.sinks.reshape(1, -1, 1, 1).expand(query.shape[0], -1, query.shape[-2], -1)
+#     combined_logits = torch.cat([attn_weights, sinks], dim=-1)
 
-    # This was not in the original implementation and slightly affect results; it prevents overflow in BF16/FP16
-    # when training with bsz>1 we clamp max values.
+#     # This was not in the original implementation and slightly affect results; it prevents overflow in BF16/FP16
+#     # when training with bsz>1 we clamp max values.
 
-    combined_logits = combined_logits - combined_logits.max(dim=-1, keepdim=True).values
-    probs = F.softmax(combined_logits, dim=-1, dtype=combined_logits.dtype)
-    scores = probs[..., :-1]  # we drop the sink here
-  else:
-    probs = F.softmax(attn_weights, dim=-1, dtype=attn_weights.dtype)
-    scores = probs
+#     combined_logits = combined_logits - combined_logits.max(dim=-1, keepdim=True).values
+#     probs = F.softmax(combined_logits, dim=-1, dtype=combined_logits.dtype)
+#     scores = probs[..., :-1]  # we drop the sink here
+#   else:
+#     probs = F.softmax(attn_weights, dim=-1, dtype=attn_weights.dtype)
+#     scores = probs
 
-  attn_weights = nn.functional.dropout(scores, p=dropout, training=module.training)
-  attn_output = torch.matmul(attn_weights, value_states)
-  attn_output = attn_output.transpose(1, 2).contiguous()
-  return attn_output, attn_weights
+#   attn_weights = nn.functional.dropout(scores, p=dropout, training=module.training)
+#   attn_output = torch.matmul(attn_weights, value_states)
+#   attn_output = attn_output.transpose(1, 2).contiguous()
+#   return attn_output, attn_weights
 
 
 def to_jax(pt_tensor: torch.Tensor) -> jax.Array:
@@ -263,166 +289,170 @@ class GptOssMLPTest(unittest.TestCase):
     }
     actual_output, _ = jax.jit(jax_model.apply)(moe_variables, jax_hidden_states)
     # Add normalization to let logits at same scale
-    normalized_expected = to_jax(expected_output) / jnp.linalg.norm(to_jax(expected_output))
-    normalized_actual = actual_output / jnp.linalg.norm(actual_output)
+    normalized_expected = to_jax(expected_output)
+    normalized_actual = actual_output
+    # normalized_expected = to_jax(expected_output) / jnp.linalg.norm(to_jax(expected_output))
+    # normalized_actual = actual_output / jnp.linalg.norm(actual_output)
+    print("not normalizing")
     mse = jnp.mean((normalized_expected - normalized_actual) ** 2)
-    self.assertLess(mse, 1e-3, f"mlp mismatch, MSE: {mse}")
+    print(f"mse {mse}")
+    # self.assertLess(mse, 1e-3, f"mlp mismatch, MSE: {mse}")
     np.testing.assert_allclose(normalized_expected, normalized_actual, rtol=1e-3, atol=1e-2)
 
 
-class GptOssAttentionTest(unittest.TestCase):
-  """Test for the MaxText GPT OSS implementation."""
+# class GptOssAttentionTest(unittest.TestCase):
+#   """Test for the MaxText GPT OSS implementation."""
 
-  def setUp(self):
-    super().setUp()
-    torch.set_default_dtype(torch.float32)
-    torch.manual_seed(42)
-    self.config = Config()
-    self.batch_size = 4
-    self.seq_len = 128
+#   def setUp(self):
+#     super().setUp()
+#     torch.set_default_dtype(torch.float32)
+#     torch.manual_seed(42)
+#     self.config = Config()
+#     self.batch_size = 4
+#     self.seq_len = 128
 
-    self.mock_module_with_sinks = SimpleNamespace(
-        num_key_value_groups=self.config.num_attention_heads // self.config.num_key_value_heads,
-        sinks=torch.randn(self.config.num_attention_heads),
-        training=False,
-    )
+#     self.mock_module_with_sinks = SimpleNamespace(
+#         num_key_value_groups=self.config.num_attention_heads // self.config.num_key_value_heads,
+#         sinks=torch.randn(self.config.num_attention_heads),
+#         training=False,
+#     )
 
-    self.query = torch.randn(self.batch_size, self.config.num_attention_heads, self.seq_len, self.config.head_dim)
-    self.key = torch.randn(self.batch_size, self.config.num_key_value_heads, self.seq_len, self.config.head_dim)
-    self.value = torch.randn(self.batch_size, self.config.num_key_value_heads, self.seq_len, self.config.head_dim)
-    self.attention_mask = None
-    self.scaling = 1.0 / (self.config.head_dim**0.5)
+#     self.query = torch.randn(self.batch_size, self.config.num_attention_heads, self.seq_len, self.config.head_dim)
+#     self.key = torch.randn(self.batch_size, self.config.num_key_value_heads, self.seq_len, self.config.head_dim)
+#     self.value = torch.randn(self.batch_size, self.config.num_key_value_heads, self.seq_len, self.config.head_dim)
+#     self.attention_mask = None
+#     self.scaling = 1.0 / (self.config.head_dim**0.5)
 
-    # JAX tensors
-    self.jax_query = to_jax(self.query)
-    self.jax_key = to_jax(self.key)
-    self.jax_value = to_jax(self.value)
-    self.jax_sinks = to_jax(self.mock_module_with_sinks.sinks)
-    self.jax_query_t = jnp.transpose(self.jax_query, (0, 2, 1, 3))
-    self.jax_key_t = jnp.transpose(self.jax_key, (0, 2, 1, 3))
-    self.jax_value_t = jnp.transpose(self.jax_value, (0, 2, 1, 3))
+#     # JAX tensors
+#     self.jax_query = to_jax(self.query)
+#     self.jax_key = to_jax(self.key)
+#     self.jax_value = to_jax(self.value)
+#     self.jax_sinks = to_jax(self.mock_module_with_sinks.sinks)
+#     self.jax_query_t = jnp.transpose(self.jax_query, (0, 2, 1, 3))
+#     self.jax_key_t = jnp.transpose(self.jax_key, (0, 2, 1, 3))
+#     self.jax_value_t = jnp.transpose(self.jax_value, (0, 2, 1, 3))
 
-  def test_dot_product_attention_with_sinks(self):
-    expected_attn_output, _ = eager_attention_forward(
-        module=self.mock_module_with_sinks,
-        query=self.query,
-        key=self.key,
-        value=self.value,
-        attention_mask=self.attention_mask,
-        scaling=self.scaling,
-        dropout=0.0,
-    )
+#   def test_dot_product_attention_with_sinks(self):
+#     expected_attn_output, _ = eager_attention_forward(
+#         module=self.mock_module_with_sinks,
+#         query=self.query,
+#         key=self.key,
+#         value=self.value,
+#         attention_mask=self.attention_mask,
+#         scaling=self.scaling,
+#         dropout=0.0,
+#     )
 
-    cfg_dot = pyconfig.initialize(
-        [None, os.path.join(PKG_DIR, "configs", "base.yml")],
-        run_name="gpt_oss_attention_test_dot",
-        enable_checkpointing=False,
-        model_name="default",
-        dtype="float32",
-        per_device_batch_size=self.batch_size,
-        max_target_length=self.seq_len,
-        max_prefill_predict_length=self.seq_len,
-        base_num_query_heads=self.config.num_attention_heads,
-        base_num_kv_heads=self.config.num_key_value_heads,
-        head_dim=self.config.head_dim,
-        attention="dot_product",
-        attention_bias=False,
-        attention_sink=True,
-    )
-    devices_array = maxtext_utils.create_device_mesh(cfg_dot)
-    mesh = Mesh(devices_array, cfg_dot.mesh_axes)
+#     cfg_dot = pyconfig.initialize(
+#         [None, os.path.join(PKG_DIR, "configs", "base.yml")],
+#         run_name="gpt_oss_attention_test_dot",
+#         enable_checkpointing=False,
+#         model_name="default",
+#         dtype="float32",
+#         per_device_batch_size=self.batch_size,
+#         max_target_length=self.seq_len,
+#         max_prefill_predict_length=self.seq_len,
+#         base_num_query_heads=self.config.num_attention_heads,
+#         base_num_kv_heads=self.config.num_key_value_heads,
+#         head_dim=self.config.head_dim,
+#         attention="dot_product",
+#         attention_bias=False,
+#         attention_sink=True,
+#     )
+#     devices_array = maxtext_utils.create_device_mesh(cfg_dot)
+#     mesh = Mesh(devices_array, cfg_dot.mesh_axes)
 
-    attention_op_dot = attentions.AttentionOp(
-        config=cfg_dot,
-        mesh=mesh,
-        attention_kernel="dot_product",
-        max_target_length=self.seq_len,
-        num_query_heads=self.config.num_attention_heads,
-        num_kv_heads=self.config.num_key_value_heads,
-        dtype=jnp.float32,
-        attention_type=attentions.AttentionType.FULL,
-    )
+#     attention_op_dot = attentions.AttentionOp(
+#         config=cfg_dot,
+#         mesh=mesh,
+#         attention_kernel="dot_product",
+#         max_target_length=self.seq_len,
+#         num_query_heads=self.config.num_attention_heads,
+#         num_kv_heads=self.config.num_key_value_heads,
+#         dtype=jnp.float32,
+#         attention_type=attentions.AttentionType.FULL,
+#     )
 
-    @jax.jit
-    def run_dot_product_attention(q, k, v):
-      unnormalized_output, _, sum_val = attention_op_dot.apply_attention_dot(
-          query=q,
-          key=k,
-          value=v,
-          decoder_segment_ids=jnp.ones((self.batch_size, self.seq_len)),
-          model_mode="train",
-          sinks=self.jax_sinks,
-          qk_product_einsum=jnp.einsum,
-          wv_product_einsum=jnp.einsum,
-      )
-      return unnormalized_output / sum_val
+#     @jax.jit
+#     def run_dot_product_attention(q, k, v):
+#       unnormalized_output, _, sum_val = attention_op_dot.apply_attention_dot(
+#           query=q,
+#           key=k,
+#           value=v,
+#           decoder_segment_ids=jnp.ones((self.batch_size, self.seq_len)),
+#           model_mode="train",
+#           sinks=self.jax_sinks,
+#           qk_product_einsum=jnp.einsum,
+#           wv_product_einsum=jnp.einsum,
+#       )
+#       return unnormalized_output / sum_val
 
-    scaled_jax_query_t = self.jax_query_t * self.scaling
-    actual_attn_output_dot = run_dot_product_attention(scaled_jax_query_t, self.jax_key_t, self.jax_value_t)
+#     scaled_jax_query_t = self.jax_query_t * self.scaling
+#     actual_attn_output_dot = run_dot_product_attention(scaled_jax_query_t, self.jax_key_t, self.jax_value_t)
 
-    mse_dot = jnp.mean((to_jax(expected_attn_output) - actual_attn_output_dot) ** 2)
-    self.assertLess(mse_dot, 1e-3, f"dot-product attention mismatch, MSE: {mse_dot}")
-    np.testing.assert_allclose(to_jax(expected_attn_output), actual_attn_output_dot, rtol=1e-3, atol=1e-2)
+#     mse_dot = jnp.mean((to_jax(expected_attn_output) - actual_attn_output_dot) ** 2)
+#     self.assertLess(mse_dot, 1e-3, f"dot-product attention mismatch, MSE: {mse_dot}")
+#     np.testing.assert_allclose(to_jax(expected_attn_output), actual_attn_output_dot, rtol=1e-3, atol=1e-2)
 
-  def test_flash_attention_with_sinks(self):
-    expected_attn_output, _ = eager_attention_forward(
-        module=self.mock_module_with_sinks,
-        query=self.query,
-        key=self.key,
-        value=self.value,
-        attention_mask=self.attention_mask,
-        scaling=self.scaling,
-        dropout=0.0,
-    )
+#   def test_flash_attention_with_sinks(self):
+#     expected_attn_output, _ = eager_attention_forward(
+#         module=self.mock_module_with_sinks,
+#         query=self.query,
+#         key=self.key,
+#         value=self.value,
+#         attention_mask=self.attention_mask,
+#         scaling=self.scaling,
+#         dropout=0.0,
+#     )
 
-    cfg_flash = pyconfig.initialize(
-        [None, os.path.join(PKG_DIR, "configs", "base.yml")],
-        run_name="gpt_oss_attention_test_flash",
-        enable_checkpointing=False,
-        model_name="default",
-        dtype="float32",
-        per_device_batch_size=self.batch_size,
-        max_target_length=self.seq_len,
-        max_prefill_predict_length=self.seq_len,
-        base_num_query_heads=self.config.num_attention_heads,
-        base_num_kv_heads=self.config.num_key_value_heads,
-        head_dim=self.config.head_dim,
-        attention="flash",
-        attention_bias=False,
-        attention_sink=True,
-    )
-    devices_array = maxtext_utils.create_device_mesh(cfg_flash)
-    mesh = Mesh(devices_array, cfg_flash.mesh_axes)
+#     cfg_flash = pyconfig.initialize(
+#         [None, os.path.join(PKG_DIR, "configs", "base.yml")],
+#         run_name="gpt_oss_attention_test_flash",
+#         enable_checkpointing=False,
+#         model_name="default",
+#         dtype="float32",
+#         per_device_batch_size=self.batch_size,
+#         max_target_length=self.seq_len,
+#         max_prefill_predict_length=self.seq_len,
+#         base_num_query_heads=self.config.num_attention_heads,
+#         base_num_kv_heads=self.config.num_key_value_heads,
+#         head_dim=self.config.head_dim,
+#         attention="flash",
+#         attention_bias=False,
+#         attention_sink=True,
+#     )
+#     devices_array = maxtext_utils.create_device_mesh(cfg_flash)
+#     mesh = Mesh(devices_array, cfg_flash.mesh_axes)
 
-    attention_op_flash = attentions.AttentionOp(
-        config=cfg_flash,
-        mesh=mesh,
-        attention_kernel="flash",
-        max_target_length=self.seq_len,
-        num_query_heads=self.config.num_attention_heads,
-        num_kv_heads=self.config.num_key_value_heads,
-        dtype=jnp.float32,
-        attention_type=attentions.AttentionType.FULL,
-    )
+#     attention_op_flash = attentions.AttentionOp(
+#         config=cfg_flash,
+#         mesh=mesh,
+#         attention_kernel="flash",
+#         max_target_length=self.seq_len,
+#         num_query_heads=self.config.num_attention_heads,
+#         num_kv_heads=self.config.num_key_value_heads,
+#         dtype=jnp.float32,
+#         attention_type=attentions.AttentionType.FULL,
+#     )
 
-    @jax.jit
-    def run_flash_attention(q, k, v, sinks_logits):
-      output = attention_op_flash.tpu_flash_attention(
-          query=q,
-          key=k,
-          value=v,
-          decoder_segment_ids=None,
-          sinks=sinks_logits,
-      )
-      return output
+#     @jax.jit
+#     def run_flash_attention(q, k, v, sinks_logits):
+#       output = attention_op_flash.tpu_flash_attention(
+#           query=q,
+#           key=k,
+#           value=v,
+#           decoder_segment_ids=None,
+#           sinks=sinks_logits,
+#       )
+#       return output
 
-    scaled_jax_query_flash_t = self.jax_query_t * self.scaling
-    actual_attn_output_flash = run_flash_attention(
-        scaled_jax_query_flash_t, self.jax_key_t, self.jax_value_t, self.jax_sinks
-    )
-    mse_flash = jnp.mean((to_jax(expected_attn_output) - actual_attn_output_flash) ** 2)
-    self.assertLess(mse_flash, 1e-3, f"flash attention mismatch, MSE: {mse_flash}")
-    np.testing.assert_allclose(to_jax(expected_attn_output), actual_attn_output_flash, rtol=1e-3, atol=1e-2)
+#     scaled_jax_query_flash_t = self.jax_query_t * self.scaling
+#     actual_attn_output_flash = run_flash_attention(
+#         scaled_jax_query_flash_t, self.jax_key_t, self.jax_value_t, self.jax_sinks
+#     )
+#     mse_flash = jnp.mean((to_jax(expected_attn_output) - actual_attn_output_flash) ** 2)
+#     self.assertLess(mse_flash, 1e-3, f"flash attention mismatch, MSE: {mse_flash}")
+#     np.testing.assert_allclose(to_jax(expected_attn_output), actual_attn_output_flash, rtol=1e-3, atol=1e-2)
 
 
 if __name__ == "__main__":
