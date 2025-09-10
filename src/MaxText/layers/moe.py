@@ -1363,7 +1363,6 @@ class RoutedMoE(nnx.Module):
             scaling_mode=ScalingMode.CURRENT_TENSOR_SCALING,
             fwd_dtype=jnp.float8_e4m3fn,
             bwd_dtype=jnp.float8_e5m2,
-            is_2x2x=True,
             n_groups=group_size
         )
       else:
@@ -1546,6 +1545,7 @@ class RoutedMoE(nnx.Module):
                                             out_specs=layer_w0w1_psepc,
                                             w_fsdp_axis="fsdp", w_fsdp_dim=1)
         else:
+          # TODO(ranran): check if None should be replaced by "embed_no_exp" for performance.
           w0_kernel_axes = ("exp", None, "mlp")
           w0_kernel = self.maybe_all_gather_kernel_weight_in_expert_parallelism(w0_kernel, w0_kernel_axes)
           layer_w0 = self.get_einsum(rhs_mesh_axes=w0_kernel_axes)(
@@ -1570,6 +1570,7 @@ class RoutedMoE(nnx.Module):
                                               out_specs=layer_w0w1_psepc,
                                               w_fsdp_axis="fsdp", w_fsdp_dim=1)
         else:
+          # TODO(ranran): check if None should be replaced by "embed_no_exp" for performance.
           w1_kernel_axes = ("exp", None, "mlp")
           w1_kernel = self.maybe_all_gather_kernel_weight_in_expert_parallelism(w1_kernel, w1_kernel_axes)
           layer_w1 = self.get_einsum(rhs_mesh_axes=w1_kernel_axes)(
@@ -1601,6 +1602,7 @@ class RoutedMoE(nnx.Module):
                                                         out_specs=intermediate_layer_psepc,
                                                         w_fsdp_axis="fsdp", w_fsdp_dim=2)
         else:
+          # TODO(ranran): check if None should be replaced by "embed_no_exp" for performance.
           wo_kernel_axes = ("exp", "mlp", None)
           wo_kernel = self.maybe_all_gather_kernel_weight_in_expert_parallelism(wo_kernel, wo_kernel_axes)
           intermediate_layer = self.get_einsum(rhs_mesh_axes=wo_kernel_axes)(
