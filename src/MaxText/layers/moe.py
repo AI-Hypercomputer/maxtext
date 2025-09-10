@@ -314,6 +314,11 @@ class RoutedMoE(nnx.Module):
         rngs=rngs,
     )
 
+    # pylint: disable=protected-access
+    self.activation_fn = linears._convert_to_activation_function(
+        self.config.mlp_activations[0]
+    )
+
     kernel_in_axis = np.arange(1)
     kernel_out_axis = np.arange(1, 2)
 
@@ -489,6 +494,20 @@ class RoutedMoE(nnx.Module):
     top_k_weights = jnp.take_along_axis(pre_bias_logits, top_k_indices, axis=-1)
     return top_k_weights, top_k_indices
 
+  def apply_ffn_activation(self, layer_w0, layer_w1):
+    """Applies FFN activation function."""
+    with jax.named_scope("ffn_act"):
+      if self.config.decoder_block == ctypes.DecoderBlockType.GPT_OSS:
+        layer_w0 = jnp.clip(layer_w0, a_min=None, a_max=self.config.mlp_activations_limit)
+        layer_w1 = jnp.clip(layer_w1, a_min=-self.config.mlp_activations_limit, a_max=self.config.mlp_activations_limit)
+        layer_act = self.activation_fn(layer_w0 * 1.702)
+        glu = jnp.multiply(layer_w0, layer_act)
+        intermediate_layer = jnp.multiply(glu, (layer_w1 + 1))
+      else:
+        layer_act = self.activation_fn(layer_w0)
+        intermediate_layer = jnp.multiply(layer_act, layer_w1)
+      return intermediate_layer.astype(self.dtype)
+  
   def permute(self, inputs, gate_logits, pre_bias_logits, use_custom_sort_vjp=True):
     """Permute tokens to group by expert to fit gmm call."""
     # reshape inputs (batch, sequence, emb) to (batch * sequence, emb)
@@ -1018,17 +1037,7 @@ class RoutedMoE(nnx.Module):
       if self.config.mlp_bias:
         layer_w1 = layer_w1 + w1_bias
       layer_w1 = adc.checkpoint_name(layer_w1, "mlpwi_1")
-      # pylint: disable=protected-access
-
-      if self.config.decoder_block == ctypes.DecoderBlockType.GPT_OSS:
-        layer_w0 = jnp.clip(layer_w0, a_min=None, a_max=self.config.mlp_activations_limit)
-        layer_w1 = jnp.clip(layer_w1, a_min=-self.config.mlp_activations_limit, a_max=self.config.mlp_activations_limit)
-        layer_act = linears._convert_to_activation_function(self.config.mlp_activations[0])(layer_w0 * 1.702)
-        glu = jnp.multiply(layer_w0, layer_act)
-        intermediate_layer = jnp.multiply(glu, (layer_w1 + 1))
-      else:
-        layer_act = linears._convert_to_activation_function(self.config.mlp_activations[0])(layer_w0)
-        intermediate_layer = jnp.multiply(layer_act, layer_w1)
+      intermediate_layer = self.apply_ffn_activation(layer_w0, layer_w1)
 
       intermediate_output = gmm_fn(intermediate_layer, wo)
       if self.get_tensor_parallelism_size() > 1:
@@ -1573,9 +1582,7 @@ class RoutedMoE(nnx.Module):
             mlp_axis,
         )
         layer_w1 = adc.checkpoint_name(layer_w1, "mlpwi_1")
-      # pylint: disable=protected-access
-      layer_w0_act = linears._convert_to_activation_function(self.config.mlp_activations[0])(layer_w0)
-      layer_multiply = jnp.multiply(layer_w0_act, layer_w1).astype(self.dtype)
+      layer_multiply = self.apply_ffn_activation(layer_w0, layer_w1)
       with jax.named_scope("wo"):
         wo_kernel_axes = ("exp", "mlp", None)
         wo_kernel = self.maybe_all_gather_kernel_weight_in_expert_parallelism(wo_kernel, wo_kernel_axes)
@@ -1626,7 +1633,7 @@ class RoutedMoE(nnx.Module):
             "BSM,EMH -> BSEH", inputs, w0_kernel, precision=matmul_precision
         )
         if self.config.mlp_bias:
-          layer_w0 = layer_w0 + w0_bias
+          layer_w0 = layer_w0 + w0_bias[None, None, :, :]
         if self.config.activations_in_float32:
           layer_w0 = layer_w0.astype(jnp.float32)
         layer_w0 = adc.checkpoint_name(layer_w0, "mlpwi_0")
@@ -1635,13 +1642,12 @@ class RoutedMoE(nnx.Module):
             "BSM,EMH -> BSEH", inputs, w1_kernel, precision=matmul_precision
         )
         if self.config.mlp_bias:
-          layer_w1 = layer_w1 + w1_bias
+          layer_w1 = layer_w1 + w1_bias[None, None, :, :]
         if self.config.activations_in_float32:
           layer_w1 = layer_w1.astype(jnp.float32)
         layer_w1 = adc.checkpoint_name(layer_w1, "mlpwi_1")
-      # pylint: disable=protected-access
-      layer_w0_act = linears._convert_to_activation_function(self.config.mlp_activations[0])(layer_w0)
-      layer_multiply = jnp.multiply(layer_w0_act, layer_w1).astype(self.dtype)
+      layer_multiply = self.apply_ffn_activation(layer_w0, layer_w1)
+
       with jax.named_scope("wo"):
         intermediate_layer = self.get_einsum(rhs_mesh_axes=self.wo_kernel_axes)(
             "BSEH,EHM -> BSEM",
@@ -1650,17 +1656,19 @@ class RoutedMoE(nnx.Module):
             precision=matmul_precision,
         )
         if self.config.mlp_bias:
-          intermediate_layer = intermediate_layer + wo_bias
+          intermediate_layer = intermediate_layer + wo_bias[None, None, :, :]
         if self.config.activations_in_float32:
           intermediate_layer = intermediate_layer.astype(jnp.float32)
         intermediate_layer = adc.checkpoint_name(intermediate_layer, "mlpwo")
       with jax.named_scope("w_sum"):
         if is_llama4_decoder_layer:
           weights = self.reshape_and_update_weights(jnp.ones_like(top_k_weights), top_k_indices)
+        # cast to f32 for sum up in einsum op
         output = jnp.einsum(
             "BSEM,BSE -> BSM",
-            intermediate_layer,
-            weights,  # pylint: disable=undefined-variable,possibly-used-before-assignment
+            intermediate_layer.astype(jnp.float32),
+            weights.astype(jnp.float32),  # pylint: disable=undefined-variable,possibly-used-before-assignment
+            precision=matmul_precision,
         ).astype(self.dtype)
       return output, None
 
