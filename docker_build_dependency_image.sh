@@ -32,6 +32,16 @@
 # Enable "exit immediately if any command fails" option
 set -e
 
+# Check for docker permissions
+if ! docker info > /dev/null 2>&1; then
+  echo "ERROR: Permission denied while trying to connect to the Docker daemon." >&2
+  echo "You can fix this by:" >&2
+  echo "1. Running this script with sudo: 'sudo bash $0 $@'" >&2
+  echo "2. Adding your user to the 'docker' group: 'sudo usermod -aG docker \${USER}' (requires a new login session)." >&2
+  echo "3. Running `newgrp docker` in your current terminal." >&2
+  exit 1
+fi
+
 export LOCAL_IMAGE_NAME=maxtext_base_image
 echo "Building to $LOCAL_IMAGE_NAME"
 
@@ -140,7 +150,7 @@ if [[ ${INSTALL_GRPO} -eq 1 ]] ; then
   RUN pip install keyring keyrings.google-artifactregistry-auth
 
   # Install vLLM for Jax and TPUs from the artifact registry
-  RUN VLLM_TARGET_DEVICE="tpu" pip install --no-cache-dir --pre \
+  RUN VLLM_TARGET_DEVICE="tpu" pip install vllm==0.10.1rc2.dev129+g800349c2a.tpu --no-cache-dir --pre \
       --index-url https://us-python.pkg.dev/cloud-tpu-images/maxtext-rl/simple/ \
       --extra-index-url https://pypi.org/simple/ \
       --extra-index-url https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/ \
@@ -149,16 +159,14 @@ if [[ ${INSTALL_GRPO} -eq 1 ]] ; then
       --find-links https://storage.googleapis.com/libtpu-wheels/index.html \
       --find-links https://storage.googleapis.com/libtpu-releases/index.html \
       --find-links https://storage.googleapis.com/jax-releases/jax_nightly_releases.html \
-      --find-links https://storage.googleapis.com/jax-releases/jaxlib_nightly_releases.html \
-      vllm==0.10.1rc2.dev129+g800349c2a.tpu
+      --find-links https://storage.googleapis.com/jax-releases/jaxlib_nightly_releases.html
 
   # Install tpu-commons from the artifact registry
-  RUN pip install --no-cache-dir --pre \
+  RUN pip install tpu-commons==0.1.0 --no-cache-dir --pre \
       --index-url https://us-python.pkg.dev/cloud-tpu-images/maxtext-rl/simple/ \
       --extra-index-url https://pypi.org/simple/ \
       --extra-index-url https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/ \
-      --find-links https://storage.googleapis.com/jax-releases/libtpu_releases.html \
-      tpu-commons==0.1.0
+      --find-links https://storage.googleapis.com/jax-releases/libtpu_releases.html
 
   RUN pip install numba==0.61.2
 EOF

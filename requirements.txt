@@ -8,7 +8,8 @@ gcsfs
 google-api-python-client
 google-cloud-aiplatform
 google-cloud-monitoring
-grain[parquet]
+# google-jetstream@git+https://github.com/AI-Hypercomputer/JetStream.git
+grain[parquet]>=0.2.6
 huggingface_hub
 jax<0.7.1
 jaxlib<0.7.1
