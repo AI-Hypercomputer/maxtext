@@ -88,7 +88,7 @@ sys.path.insert(0, project_root)
 
 from MaxText import model_creation_utils
 from MaxText import pyconfig
-from maxtext.src.maxtext.integration.tunix.tunix_adapter import TunixMaxTextAdapter
+from MaxText.integration.tunix.tunix_adapter import TunixMaxTextAdapter
 
 # This is for running the script in a colab or notebook environment.
 # import nest_asyncio
@@ -381,7 +381,7 @@ model_config = llama3_lib.ModelConfig.llama3_1_8b()
 config_ref = pyconfig.initialize(
     [
         "",
-        f"{HOME}/maxtext/MaxText/configs/base.yml",
+        f"{HOME}/maxtext/src/MaxText/configs/base.yml",
     ],
     base_output_directory="dummy",  # This is not used in Tunix.
     run_name="test-tunix-maxtext-llama3.1-8b",
@@ -440,7 +440,7 @@ show_hbm_usage()
 config_policy = pyconfig.initialize(
     [
         "",
-        f"{HOME}/maxtext/MaxText/configs/base.yml",
+        f"{HOME}/maxtext/src/MaxText/configs/base.yml",
     ],
     base_output_directory="dummy",  # This is not used in Tunix.
     run_name="test-tunix-maxtext-llama3.1-8b",  # This is not used in Tunix.
