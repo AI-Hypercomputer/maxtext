@@ -668,6 +668,7 @@ class _HyperParameters:
 
     # Type conversions
     raw_keys["dtype"] = jax.numpy.dtype(raw_keys["dtype"])
+    raw_keys["grad_dtype"] = jax.numpy.dtype(raw_keys["grad_dtype"])
     raw_keys["weight_dtype"] = jax.numpy.dtype(raw_keys["weight_dtype"])
     raw_keys["mu_dtype"] = set_mu_dtype(raw_keys)
     raw_keys["logical_axis_rules"] = _lists_to_tuples(raw_keys["logical_axis_rules"])

@@ -83,6 +83,9 @@ gcs_metrics: False
 # If true save config to GCS in {base_output_directory}/{run_name}/
 save_config_to_gcs: False
 
+# Gradient dtype
+grad_dtype: "bfloat16"
+
 # Activation dtypes.
 dtype: "bfloat16"
 # Used to configure quantization in the transformer layers, defaults to null implying bf16.
