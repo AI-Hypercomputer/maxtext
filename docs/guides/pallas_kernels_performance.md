@@ -24,7 +24,7 @@ This guide explains **when** to consider Pallas, a **workflow** for developing a
 
 ## **🧠 The Pallas Mindset: When to Write a Custom Kernel**
 
-Think in **roofline** terms and in terms of **structure the compiler can’t see**:
+Think in **roofline** terms ([All About Rooflines](https://jax-ml.github.io/scaling-book/roofline/)) and in terms of **structure the compiler can’t see**::
 
 * **Roofline framing.** Is your op **compute-limited** (MXU at or near peak) or **bandwidth-limited** (HBM↔on-chip transfers dominate)? Pallas tends to shine when you can reduce bandwidth pressure or avoid wasted work via better tiling and scheduling.  
 * **Compiler invisibles.** Irregular sparsity, ragged batch shapes, non-contiguous memory access, and domain-specific invariants are all signals that a custom kernel could help.
@@ -41,9 +41,11 @@ it is very difficult to automatically infer the dual of the memory pipeline.
 
 ### **1\. Irregular Compute (MoE, ragged activations)**
 
-For dense, regular GEMMs, XLA’s libraries are hard to beat. The exception is Mixture-of-Experts (MoE) MLPs with ragged token-to-expert layouts. Zero-padding to make dense tensors wastes FLOPs; a custom kernel can operate only on the actually-selected tokens.
+For dense, regular GEMMs, XLA’s libraries are hard to beat. The exception is **Mixture-of-Experts (MoE)** MLPs with **ragged token→expert layouts** (some tokens routed to different experts; shapes are irregular). Zero-padding to make dense tensors wastes FLOPs; a custom kernel can operate only on the actually-selected tokens.
 
-* In MaxText, we use Grouped Matrix Multiplication (GMM) via MegaBlox to compute per-expert matmuls on ragged batches. Precomputed metadata (e.g., token→expert indices and ranges) guides the grouped computation and avoids work on padded regions.
+* In MaxText, we use Grouped Matrix Multiplication (GMM) via **Megablox** to compute per-expert matmuls on ragged batches. Precomputed metadata (e.g., token→expert indices and ranges) guides the grouped computation and avoids work on padded regions.
+
+**Note:** *Megablox* is an efficient, non-capped MoE implementation in JAX. *Megablocks* refers to the equivalent PyTorch implementation. See [arXiv:2211.15841](https://arxiv.org/abs/2211.15841) for more details.
 
 ### **2\. Memory-Access-Bound Work (Attention)**
 
@@ -78,7 +80,7 @@ To maximize performance, MaxText uses custom Pallas kernels for memory-bandwidth
 Give the kernel a clear name in traces and capture a profile. Always use [`jax.block_until_ready()`](https://docs.jax.dev/en/latest/_autosummary/jax.block_until_ready.html) when timing your operations.
 
 
-``` Python
+``` python
 import jax  
 from jax import profiler
 
@@ -101,7 +103,7 @@ For hard cases, inspect compiler dumps (e.g., LLO) to understand schedules, memo
 
 ### **3\. Systematic Tuning**
 
-Performance is a function of interacting hyperparameters, chiefly block shapes (via BlockSpec). Build a small test script (a "harness") to systematically run the kernel with different block sizes. **Record the throughput and latency** for each run, and let data, not rules of thumb, pick the winners.
+Performance is a function of interacting hyperparameters, chiefly block shapes (via [`BlockSpec`](https://docs.jax.dev/en/latest/_autosummary/jax.experimental.pallas.BlockSpec.html)). Build a small test script (a "harness") to systematically run the kernel with different block sizes. **Record the throughput and latency** for each run, and let data, not rules of thumb, pick the winners.
 
 
 ## **⚙️ Understanding TPU Memory & Compute**
@@ -135,7 +137,7 @@ A Pallas kernel is a Python function that operates on Refs (references to array 
 
 ### **Example 1: Minimal Elementwise Add**
 
-This is a simple example to show the basic structure.
+Shows the kernel/ref pattern used by `pallas_call`.
 
 
 ```python
@@ -193,12 +195,12 @@ def tile_add(x: jax.Array, y: jax.Array) -> jax.Array:
   )(x, y)
 ```
 
-**Tip:** In practice, you’ll sweep (B0, B1). Focus tuning on block shapes; treat grid as derived.
+**Tip:** In practice, you’ll **sweep** `(B0, B1)`-i.e., try a small grid of tile sizes and pick the fastest. Focus tuning on block shapes; treat grid as derived.
 
 
 ## **⏩ Pipelining Best Practices (TPU)**
 
-Prefer `pl.pallas_call` with scratch buffers allocated in the appropriate memory space (VMEM/SMEM) and use multi-buffering to overlap HBM loads with compute. Advanced pipelining to consider: custom prefetch block order via a scalar prefetch grid (for details see [here](https://docs.jax.dev/en/latest/pallas/tpu/sparse.html) ), which lets you control block execution order based on runtime values.
+Prefer `pl.pallas_call` with scratch buffers allocated in the appropriate memory space (VMEM/SMEM) and use multi-buffering to overlap HBM loads with compute. Advanced pipelining to consider: custom prefetch block order via a scalar prefetch grid (for details see [here](https://docs.jax.dev/en/latest/pallas/tpu/sparse.html)), which lets you control block execution order based on runtime values.
 
 
 ## **🌐 Distributed Execution**
