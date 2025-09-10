@@ -24,12 +24,12 @@ This guide explains **when** to consider Pallas, a **workflow** for developing a
 
 ## **🧠 The Pallas Mindset: When to Write a Custom Kernel**
 
-Think in **roofline** terms ([All About Rooflines](https://jax-ml.github.io/scaling-book/roofline/)) and in terms of **structure the compiler can’t see**::
+Think in **roofline** terms ([All About Rooflines](https://jax-ml.github.io/scaling-book/roofline/)) and in terms of **structure the compiler can’t see**:
 
 * **Roofline framing.** Is your op **compute-limited** (MXU at or near peak) or **bandwidth-limited** (HBM↔on-chip transfers dominate)? Pallas tends to shine when you can reduce bandwidth pressure or avoid wasted work via better tiling and scheduling.  
 * **Compiler invisibles.** Irregular sparsity, ragged batch shapes, non-contiguous memory access, and domain-specific invariants are all signals that a custom kernel could help.
 
-**Know when XLA is enough.** Before writing a custom kernel, always [profile your baseline](high-level-profiling). If a standard operation (like a dense [`jnp.matmul`](https://docs.jax.dev/en/latest/_autosummary/jax.numpy.matmul.html)) is already performing well, the XLA compiler is doing its job. In these cases, a Pallas kernel will increase code complexity and maintenance burden with minimal performance improvement.
+**Know when XLA is enough.** Before writing a custom kernel, always [profile your baseline](#high-level-profiling). If a standard operation (like a dense [`jnp.matmul`](https://docs.jax.dev/en/latest/_autosummary/jax.numpy.matmul.html)) is already performing well, the XLA compiler is doing its job. In these cases, a Pallas kernel will increase code complexity and maintenance burden with minimal performance improvement.
 
 **When maintainability wins.** Pallas kernels are lower-level and harder to debug. If gains are small, prefer the simpler path.
 
@@ -63,19 +63,18 @@ To maximize performance, MaxText uses custom Pallas kernels for memory-bandwidth
 * **Serving Attention (Paged & Ragged):** For high-throughput inference, this kernel efficiently fetches non-contiguous "pages" of the KV cache from memory. It is a key optimization for our serving stack and is used for models running on MaxText's inference engine.
   * [`src/MaxText/inference/paged_attention.py`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/inference/paged_attention.py)  
   * [`src/MaxText/inference/paged_attention_kernel_v2.py`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/inference/paged_attention_kernel_v2.py)  
-* **MoE Grouped Matmul (MegaBlox GMM):** Sparse/irregular grouped GEMMs driven by host-built metadata. 
+* **MoE Grouped Matmul (Megablox GMM):** Sparse/irregular grouped GEMMs driven by host-built metadata. 
 
-  >  This is an efficient computation method for Mixture-of-Experts (MoE) models like DeepSeek, Llama 4, Mixtral and Qwen-MoE.  In MoE, each token is processed by only a few "experts," which is inefficient for standard matrix multiplication. MegaBlox solves this by having the CPU (**host**) first create a routing plan (**metadata**) that assigns tokens to experts. The accelerator (**device**) then uses this plan to perform many small, dense matrix multiplications in parallel (**Grouped Matrix Multiplication**), avoiding wasted work on unused experts.
+  >  This is an efficient computation method for Mixture-of-Experts (MoE) models like DeepSeek, Llama 4, Mixtral and Qwen-MoE.  In MoE, each token is processed by only a few "experts," which is inefficient for standard matrix multiplication. Megablox solves this by having the CPU (**host**) first create a routing plan (**metadata**) that assigns tokens to experts. The accelerator (**device**) then uses this plan to perform many small, dense matrix multiplications in parallel (**Grouped Matrix Multiplication**), avoiding wasted work on unused experts.
   * [`src/MaxText/kernels/megablox/gmm.py`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/kernels/megablox/gmm.py)
  
-  **Note:** MegaBlox accelerates the grouped **matmul**; **routing/gating** is separate code ([`src/MaxText/layers/moe.py`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/layers/moe.py)).
+  **Note:** Megablox accelerates the grouped **matmul**; **routing/gating** is separate code ([`src/MaxText/layers/moe.py`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/layers/moe.py)).
 
 
 
 ## **🔧 The Pallas Optimization Workflow: Code → Profile → Tune → Repeat**
 
-(high-level-profiling)=
-### **1\. High-Level Profiling**
+### 1\. High-Level Profiling {#high-level-profiling}
 
 Give the kernel a clear name in traces and capture a profile. Always use [`jax.block_until_ready()`](https://docs.jax.dev/en/latest/_autosummary/jax.block_until_ready.html) when timing your operations.
 
@@ -104,6 +103,7 @@ For hard cases, inspect compiler dumps (e.g., LLO) to understand schedules, memo
 ### **3\. Systematic Tuning**
 
 Performance is a function of interacting hyperparameters, chiefly block shapes (via [`BlockSpec`](https://docs.jax.dev/en/latest/_autosummary/jax.experimental.pallas.BlockSpec.html)). Build a small test script (a "harness") to systematically run the kernel with different block sizes. **Record the throughput and latency** for each run, and let data, not rules of thumb, pick the winners.
+For a more automated approach, consider using libraries like [tune-jax](https://github.com/rdyro/tune-jax).
 
 
 ## **⚙️ Understanding TPU Memory & Compute**
