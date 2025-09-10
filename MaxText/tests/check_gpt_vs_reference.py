@@ -426,94 +426,159 @@ class GptOssAttentionTest(unittest.TestCase):
     np.testing.assert_allclose(to_jax(expected_attn_output), actual_attn_output_flash, rtol=1e-3, atol=1e-2)
 
 
-# https://github.com/openai/gpt-oss/blob/152fc0ce3b500752214c8d59440ef3a909e1e556/gpt_oss/torch/model.py#L50-L150
+class GptOssRotaryEmbedding(nn.Module):
+  """
+  https://github.com/huggingface/transformers/blob/b9282355bea846b54ed850a066901496b19da654/src/transformers/models/gpt_oss/modeling_gpt_oss.py#L169
+  """
+
+  inv_freq: torch.Tensor  # fix linting for `register_buffer`
+
+  def __init__(self, config, device=None):
+    super().__init__()
+    # BC: "rope_type" was originally "type"
+    if hasattr(config, "rope_scaling") and isinstance(config.rope_scaling, dict):
+      self.rope_type = config.rope_scaling.get("rope_type", config.rope_scaling.get("type"))
+    else:
+      self.rope_type = "default"
+    self.max_seq_len_cached = config.max_position_embeddings
+    self.original_max_seq_len = config.max_position_embeddings
+
+    self.config = config
+    self.rope_init_fn = ROPE_INIT_FUNCTIONS[self.rope_type]
+
+    inv_freq, self.attention_scaling = self.rope_init_fn(self.config, device)
+    self.register_buffer("inv_freq", inv_freq, persistent=False)
+    self.original_inv_freq = self.inv_freq
+
+  @torch.no_grad()
+  # @dynamic_rope_update  # power user: used with advanced RoPE types (e.g. dynamic rope)
+  def forward(self, x, position_ids):
+    inv_freq_expanded = self.inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1).to(x.device)
+    position_ids_expanded = position_ids[:, None, :].float()
+
+    device_type = x.device.type if isinstance(x.device.type, str) and x.device.type != "mps" else "cpu"
+    with torch.autocast(device_type=device_type, enabled=False):  # Force float32
+      freqs = (inv_freq_expanded.float() @ position_ids_expanded.float()).transpose(1, 2)
+      emb = freqs
+      cos = emb.cos() * self.attention_scaling
+      sin = emb.sin() * self.attention_scaling
+
+    return cos.to(x.dtype), sin.to(x.dtype)
+
+
+def _compute_yarn_parameters(config, device: "torch.device", seq_len: Optional[int] = None) -> tuple["torch.Tensor", float]:
+  """
+  https://github.com/huggingface/transformers/blob/b9282355bea846b54ed850a066901496b19da654/src/transformers/modeling_rope_utils.py#L197C1-L281C38
+  """
+
+  base = config.rope_theta
+  partial_rotary_factor = config.partial_rotary_factor if hasattr(config, "partial_rotary_factor") else 1.0
+  head_dim = getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)
+  dim = int(head_dim * partial_rotary_factor)
+  factor = config.rope_scaling["factor"]
+  attention_factor = config.rope_scaling.get("attention_factor")
+  mscale = config.rope_scaling.get("mscale")
+  mscale_all_dim = config.rope_scaling.get("mscale_all_dim")
+  original_max_position_embeddings = (
+      config.rope_scaling.get("original_max_position_embeddings") or config.max_position_embeddings
+  )
+
+  def get_mscale(scale, mscale=1):
+    if scale <= 1:
+      return 1.0
+    return 0.1 * mscale * math.log(scale) + 1.0
+
+  # Sets the attention factor as suggested in the paper
+  if attention_factor is None:
+    if mscale and mscale_all_dim:
+      attention_factor = float(get_mscale(factor, mscale) / get_mscale(factor, mscale_all_dim))
+    else:
+      attention_factor = get_mscale(factor)
+
+  # Optional config options
+  # beta_fast/beta_slow: as suggested in the paper, default to 32/1 (correspondingly)
+  beta_fast = config.rope_scaling.get("beta_fast") or 32
+  beta_slow = config.rope_scaling.get("beta_slow") or 1
+
+  # Compute the inverse frequencies
+  def find_correction_dim(num_rotations, dim, base, max_position_embeddings):
+    """Inverse dimension formula to find the dimension based on the number of rotations"""
+    return (dim * math.log(max_position_embeddings / (num_rotations * 2 * math.pi))) / (2 * math.log(base))
+
+  def find_correction_range(low_rot, high_rot, dim, base, max_position_embeddings, truncate):
+    """Find dimension range bounds based on rotations"""
+    low = find_correction_dim(low_rot, dim, base, max_position_embeddings)
+    high = find_correction_dim(high_rot, dim, base, max_position_embeddings)
+    if truncate:
+      low = math.floor(low)
+      high = math.ceil(high)
+    return max(low, 0), min(high, dim - 1)
+
+  def linear_ramp_factor(min, max, dim):
+    if min == max:
+      max += 0.001  # Prevent singularity
+
+    linear_func = (torch.arange(dim, dtype=torch.float32) - min) / (max - min)
+    ramp_func = torch.clamp(linear_func, 0, 1)
+    return ramp_func
+
+  # Note on variable naming: "interpolation" comes from the original technique, where we interpolate the position IDs
+  # to expand the possible context length. In other words, interpolation = apply scaling factor.
+  pos_freqs = base ** (torch.arange(0, dim, 2).to(device=device, dtype=torch.float) / dim)
+  inv_freq_extrapolation = 1.0 / pos_freqs
+  inv_freq_interpolation = 1.0 / (factor * pos_freqs)
+
+  truncate = config.rope_scaling.get("truncate", True)
+  low, high = find_correction_range(beta_fast, beta_slow, dim, base, original_max_position_embeddings, truncate)
+
+  # Get n-dimensional rotational scaling corrected for extrapolation
+  inv_freq_extrapolation_factor = 1 - linear_ramp_factor(low, high, dim // 2).to(device=device, dtype=torch.float)
+  inv_freq = (
+      inv_freq_interpolation * (1 - inv_freq_extrapolation_factor) + inv_freq_extrapolation * inv_freq_extrapolation_factor
+  )
+  return inv_freq, attention_factor
+
+
+ROPE_INIT_FUNCTIONS = {"yarn": _compute_yarn_parameters}
+
+
+# https://github.com/huggingface/transformers/blob/b9282355bea846b54ed850a066901496b19da654/src/transformers/models/gpt_oss/modeling_gpt_oss.py#L217C1-L233C28
 def _apply_rotary_emb(
     x: torch.Tensor,
     cos: torch.Tensor,
     sin: torch.Tensor,
 ) -> torch.Tensor:
-  cos = cos.unsqueeze(-2).to(x.dtype)
-  sin = sin.unsqueeze(-2).to(x.dtype)
-  x1, x2 = torch.chunk(x, 2, dim=-1)
-  o1 = x1 * cos - x2 * sin
-  o2 = x2 * cos + x1 * sin
-  return torch.cat((o1, o2), dim=-1)
+  first_half, second_half = torch.chunk(x, 2, dim=-1)
+  first_ = first_half * cos - second_half * sin
+  second_ = second_half * cos + first_half * sin
+  return torch.cat((first_, second_), dim=-1)
 
 
-class RotaryEmbedding(torch.nn.Module):
+def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
+  cos = cos.unsqueeze(unsqueeze_dim)
+  sin = sin.unsqueeze(unsqueeze_dim)
+  q_embed = _apply_rotary_emb(q, cos, sin)
+  k_embed = _apply_rotary_emb(k, cos, sin)
+  return q_embed, k_embed
 
-  def __init__(
-      self,
-      head_dim: int,
-      base: int,
-      dtype: torch.dtype,
-      initial_context_length: int = 4096,
-      scaling_factor: float = 1.0,
-      ntk_alpha: float = 1.0,
-      ntk_beta: float = 32.0,
-      device: torch.device | None = None,
-  ) -> None:
-    super().__init__()
-    self.head_dim = head_dim
-    self.base = base
-    self.dtype = dtype
-    self.initial_context_length = initial_context_length
-    self.scaling_factor = scaling_factor
-    self.ntk_alpha = ntk_alpha
-    self.ntk_beta = ntk_beta
-    self.device = device
 
-  def _compute_concentration_and_inv_freq(self) -> torch.Tensor:
-    """See YaRN paper: https://arxiv.org/abs/2309.00071"""
-    freq = self.base ** (torch.arange(0, self.head_dim, 2, dtype=torch.float, device=self.device) / self.head_dim)
-    if self.scaling_factor > 1.0:
-      concentration = 0.1 * math.log(self.scaling_factor) + 1.0  # YaRN concentration
-
-      d_half = self.head_dim / 2
-      # NTK by parts
-      low = d_half * math.log(self.initial_context_length / (self.ntk_beta * 2 * math.pi)) / math.log(self.base)
-      high = d_half * math.log(self.initial_context_length / (self.ntk_alpha * 2 * math.pi)) / math.log(self.base)
-      assert 0 < low < high < d_half - 1
-
-      interpolation = 1.0 / (self.scaling_factor * freq)
-      extrapolation = 1.0 / freq
-
-      ramp = (torch.arange(d_half, dtype=torch.float32, device=freq.device) - low) / (high - low)
-      mask = 1 - ramp.clamp(0, 1)
-
-      inv_freq = interpolation * (1 - mask) + extrapolation * mask
-    else:
-      concentration = 1.0
-      inv_freq = 1.0 / freq
-
-    return concentration, inv_freq
-
-  def _compute_cos_sin(self, num_tokens: int):
-    concentration, inv_freq = self._compute_concentration_and_inv_freq()
-    t = torch.arange(num_tokens, dtype=torch.float32, device=self.device)
-    freqs = torch.einsum("i,j->ij", t, inv_freq)
-    cos = freqs.cos() * concentration
-    sin = freqs.sin() * concentration
-    return cos, sin
-
-  def forward(
-      self,
-      query: torch.Tensor,
-      key: torch.Tensor,
-  ) -> tuple[torch.Tensor, torch.Tensor]:
-    num_tokens = query.shape[0]
-    cos, sin = self._compute_cos_sin(num_tokens)
-
-    query_shape = query.shape
-    query = query.view(num_tokens, -1, self.head_dim)
-    query = _apply_rotary_emb(query, cos, sin)
-    query = query.reshape(query_shape)
-
-    key_shape = key.shape
-    key = key.view(num_tokens, -1, self.head_dim)
-    key = _apply_rotary_emb(key, cos, sin)
-    key = key.reshape(key_shape)
-    return query, key
+class Config:
+  dtype = "float32"
+  # attention
+  num_attention_heads = 8
+  num_key_value_heads = 4
+  head_dim = 8
+  # rope
+  rope_type = "yarn"
+  rope_max_timescale = 150_000
+  max_position_embeddings = 131072
+  original_max_position_embeddings = 4096
+  rope_factor = 32
+  beta_fast = 32
+  beta_slow = 1
+  rope_interleave = False
+  rope_truncate = False
+  rope_attention_scaling = True
 
 
 class GptOssYarnTest(unittest.TestCase):
@@ -523,84 +588,59 @@ class GptOssYarnTest(unittest.TestCase):
     super().setUp()
     torch.set_default_dtype(torch.float32)
     torch.manual_seed(42)
-    self.dtype = "float32"
-    # attention
-    self.num_attention_heads = 8
-    self.num_key_value_heads = 4
-    self.head_dim = 8
-    # rope
-    self.rope_max_timescale = 150_000
-    self.max_position_embeddings = 131072
-    self.original_max_position_embeddings = 4096
-    self.rope_factor = 32
-    self.beta_fast = 32
-    self.beta_slow = 1
-    # data
+    # jax config
+    self.config = Config()
+    # data, test long context
     self.batch_size = 1
-    self.seq_len = 512
-    # Torch tensors
-    self.query = torch.randn(self.batch_size, self.num_attention_heads, self.seq_len, self.head_dim)
-    self.key = torch.randn(self.batch_size, self.num_key_value_heads, self.seq_len, self.head_dim)
+    self.seq_len = 4096
+    # torch tensors
+    self.query = torch.randn(self.batch_size, self.config.num_attention_heads, self.seq_len, self.config.head_dim)
+    self.key = torch.randn(self.batch_size, self.config.num_key_value_heads, self.seq_len, self.config.head_dim)
     self.positions = torch.arange(self.seq_len).unsqueeze(0).repeat(self.batch_size, 1)
-    # JAX tensors
-    self.jax_query = to_jax(self.query)
-    self.jax_key = to_jax(self.key)
-    self.jax_positions = to_jax(self.positions)
+    # torch config
+    pt_config = {
+        "head_dim": self.config.head_dim,
+        "max_position_embeddings": self.config.max_position_embeddings,
+        "rope_scaling": {
+            "beta_fast": self.config.beta_fast,
+            "beta_slow": self.config.beta_slow,
+            "factor": self.config.rope_factor,
+            "original_max_position_embeddings": self.config.original_max_position_embeddings,
+            "rope_type": self.config.rope_type,
+            "truncate": self.config.rope_truncate,
+        },
+        "rope_theta": self.config.rope_max_timescale,
+        # placeholder, to get past `getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)`
+        "hidden_size": float("inf"),
+        "num_attention_heads": float("inf"),
+    }
+    self.pt_config = SimpleNamespace(**pt_config)
 
   def test_yarn_rotary_embedding(self):
-
-    # Create and initialize the torch Yarn RoPE
-    torch_embedding = RotaryEmbedding(
-        self.head_dim,
-        base=self.rope_max_timescale,
-        dtype=self.dtype,
-        initial_context_length=self.original_max_position_embeddings,
-        scaling_factor=self.rope_factor,
-        ntk_alpha=self.beta_slow,
-        ntk_beta=self.beta_fast,
-    )
-    # Apply RoPE using the PyTorch implementation
-    # q_rope_pt, k_rope_pt = torch_embedding(self.query, self.key)
-
-    # CRITICAL: Reshape tensors for the PyTorch model's expected input format.
-    # From (B, S, N, H) -> (S, B * N, H)
-    q_pt_reshaped = self.query.permute(1, 0, 2, 3).reshape(self.seq_len, -1, self.head_dim)
-    k_pt_reshaped = self.key.permute(1, 0, 2, 3).reshape(self.seq_len, -1, self.head_dim)
-
-    # Apply RoPE using the PyTorch implementation
-    q_rope_pt_reshaped, k_rope_pt_reshaped = torch_embedding(q_pt_reshaped, k_pt_reshaped)
-
-    # CRITICAL: Reshape the output back to the original format for comparison.
-    # From (S, B * N, H) -> (B, S, N, H)
-    q_rope_pt = q_rope_pt_reshaped.view(self.seq_len, self.batch_size, self.num_attention_heads, self.head_dim).permute(
-        1, 0, 2, 3
-    )
-    k_rope_pt = k_rope_pt_reshaped.view(self.seq_len, self.batch_size, self.num_key_value_heads, self.head_dim).permute(
-        1, 0, 2, 3
-    )
-
-    # Create and initialize the JAX Yarn RoPE
+    # HF Yarn RoPE
+    torch_embedding = GptOssRotaryEmbedding(self.pt_config)
+    cos, sin = torch_embedding(self.query, self.positions)
+    q_rope_pt, k_rope_pt = apply_rotary_pos_emb(self.query, self.key, cos, sin)
+    # JAX Yarn RoPE
     model_jax = embeddings.YarnRotaryEmbedding(
-        max_position_embeddings=self.max_position_embeddings,
-        original_max_position_embeddings=self.original_max_position_embeddings,
-        beta_fast=self.beta_fast,
-        beta_slow=self.beta_slow,
-        rope_theta=self.rope_max_timescale,
-        rope_factor=self.rope_factor,
-        embedding_dims=self.head_dim,
-        fprop_dtype=self.dtype,
-        interleave=False,
-        truncate=True,
-        attention_scaling=True,
-        # rngs=self.rngs,
+        max_position_embeddings=self.config.max_position_embeddings,
+        original_max_position_embeddings=self.config.original_max_position_embeddings,
+        beta_fast=self.config.beta_fast,
+        beta_slow=self.config.beta_slow,
+        rope_theta=self.config.rope_max_timescale,
+        rope_factor=self.config.rope_factor,
+        embedding_dims=self.config.head_dim,
+        fprop_dtype=self.config.dtype,
+        interleave=self.config.rope_interleave,
+        truncate=self.config.rope_truncate,
+        attention_scaling=self.config.rope_attention_scaling,
     )
-    # # Apply the JAX RoPE
-    q_rope_jax = model_jax(self.jax_query, self.jax_positions)
-    k_rope_jax = model_jax(self.jax_key, self.jax_positions)
-
-    # Compare outputs from the PyTorch and JAX implementations
-    np.testing.assert_allclose(to_jax(q_rope_pt), q_rope_jax, rtol=1e-3, atol=0.05)
-    np.testing.assert_allclose(to_jax(k_rope_pt), k_rope_jax, rtol=1e-3, atol=0.05)
+    jax_positions = to_jax(self.positions)
+    q_rope_jax = model_jax(to_jax(self.query).transpose(0, 2, 1, 3), jax_positions)
+    k_rope_jax = model_jax(to_jax(self.key).transpose(0, 2, 1, 3), jax_positions)
+    # Compare outputs from the HF and JAX implementations
+    np.testing.assert_allclose(to_jax(q_rope_pt).transpose(0, 2, 1, 3), q_rope_jax, rtol=1e-6, atol=1e-6)
+    np.testing.assert_allclose(to_jax(k_rope_pt).transpose(0, 2, 1, 3), k_rope_jax, rtol=1e-6, atol=1e-6)
 
 
 if __name__ == "__main__":
