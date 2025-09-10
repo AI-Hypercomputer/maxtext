@@ -183,6 +183,9 @@ norm_topk_prob: False # Boolean to enable the top-k probability normalization. Q
 # "context" (ep acts as context parallelism, training only)
 expert_shard_attention_option: "fsdp"
 
+# When MoE weight matrices are sharded on both FSDP and FSDP-transpose axes, use two separate All-Gather calls
+moe_fsdp_use_two_stage_all_gather: False
+
 # deepseek moe
 base_moe_mlp_dim: 7168 # intermediate dimension at MoE layer. For a fully MoE model, base_mlp_dim must be equal to base_moe_mlp_dim.
 first_num_dense_layers: 0 # number of initial dense layers in the model
@@ -367,6 +370,7 @@ logical_axis_rules: [
                       ['decode_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
                       ['decode_length', ['sequence']],
                       ['mlp', ['fsdp_transpose', 'tensor', 'tensor_sequence', 'autoregressive']],
+                      ['mlp_no_fsdp', ['tensor', 'tensor_sequence', 'autoregressive']],
                       ['vocab', ['tensor', 'tensor_transpose', 'tensor_sequence', 'autoregressive']],
                       ['heads', ['tensor', 'tensor_transpose', 'tensor_sequence', 'autoregressive']],
                       ['q_heads', ['tensor', 'tensor_transpose', 'tensor_sequence', 'autoregressive']],

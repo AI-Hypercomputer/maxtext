@@ -892,9 +892,12 @@ class RoutedMoE(nnx.Module):
     else:
       # pre_bias_logits is None for non-DeepSeek v3 models
       pre_bias_logits_pspec = None
-    w0_pspec = nn.logical_to_mesh_axes(("exp", "embed_tensor_transpose", "mlp"))
-    w1_pspec = nn.logical_to_mesh_axes(("exp", "embed_tensor_transpose", "mlp"))
-    wo_pspec = nn.logical_to_mesh_axes(("exp", "mlp", "embed_tensor_transpose"))
+
+    # w0, w1, wo needs to be un sharded on fsdp / fsdp_transpose axis, so use
+    # mlp_no_fsdp axis
+    w0_pspec = nn.logical_to_mesh_axes(("exp", "embed_tensor_transpose", "mlp_no_fsdp"))
+    w1_pspec = nn.logical_to_mesh_axes(("exp", "embed_tensor_transpose", "mlp_no_fsdp"))
+    wo_pspec = nn.logical_to_mesh_axes(("exp", "mlp_no_fsdp", "embed_tensor_transpose"))
     if isinstance(w0_kernel, aqt.QTensor):
       w0_pspec = aqt.partition_spec(w0_pspec, (1,), w0_kernel.dtype, use_bias=False)
     if isinstance(w1_kernel, aqt.QTensor):
@@ -1141,6 +1144,25 @@ class RoutedMoE(nnx.Module):
         )
 
       return output, None
+
+    if self.config.moe_fsdp_use_two_stage_all_gather:
+      # Unshard on fsdp axis
+      w0_kernel = nn.with_logical_constraint(w0_kernel, ("exp", "embed_tensor_transpose", "mlp"))
+      w1_kernel = nn.with_logical_constraint(w1_kernel, ("exp", "embed_tensor_transpose", "mlp"))
+
+      # Unshard on fsdp_transpose axis
+      wo_kernel = nn.with_logical_constraint(wo_kernel, ("exp", "mlp", "embed_tensor_transpose"))
+
+      # Make sure XLA does not optimize by combining above All-Gather to unshard
+      # on FSDP axis and the subsequent unshard on fsdp_transpose axis
+      w0_kernel = jax.lax.optimization_barrier(w0_kernel)
+      w1_kernel = jax.lax.optimization_barrier(w1_kernel)
+      wo_kernel = jax.lax.optimization_barrier(wo_kernel)
+
+      # Unshard on both fsdp and fsdp_transpose transpose
+      w0_kernel = nn.with_logical_constraint(w0_kernel, ("exp", "embed_tensor_transpose", "mlp_no_fsdp"))
+      w1_kernel = nn.with_logical_constraint(w1_kernel, ("exp", "embed_tensor_transpose", "mlp_no_fsdp"))
+      wo_kernel = nn.with_logical_constraint(wo_kernel, ("exp", "mlp_no_fsdp", "embed_tensor_transpose"))
 
     return wrapper(inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel, w0_bias, w1_bias, wo_bias)
 
