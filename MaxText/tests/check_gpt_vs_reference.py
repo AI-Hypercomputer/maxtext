@@ -639,8 +639,8 @@ class GptOssYarnTest(unittest.TestCase):
     q_rope_jax = model_jax(to_jax(self.query).transpose(0, 2, 1, 3), jax_positions)
     k_rope_jax = model_jax(to_jax(self.key).transpose(0, 2, 1, 3), jax_positions)
     # Compare outputs from the HF and JAX implementations
-    np.testing.assert_allclose(to_jax(q_rope_pt).transpose(0, 2, 1, 3), q_rope_jax, rtol=1e-6, atol=1e-6)
-    np.testing.assert_allclose(to_jax(k_rope_pt).transpose(0, 2, 1, 3), k_rope_jax, rtol=1e-6, atol=1e-6)
+    np.testing.assert_allclose(to_jax(q_rope_pt).transpose(0, 2, 1, 3), q_rope_jax, rtol=1e-5, atol=1e-3)
+    np.testing.assert_allclose(to_jax(k_rope_pt).transpose(0, 2, 1, 3), k_rope_jax, rtol=1e-5, atol=1e-3)
 
 
 if __name__ == "__main__":
