@@ -27,6 +27,7 @@ import gc
 import os
 import pathlib
 
+import ml_dtypes
 import numpy as np
 import torch
 from safetensors import safe_open
@@ -34,6 +35,14 @@ from tqdm import tqdm
 
 from MaxText import llama_or_mistral_ckpt, max_logging
 from MaxText.inference_utils import str2bool
+
+CAST_DTYPE = ml_dtypes.bfloat16
+
+
+def _pt_to_np(pt_weight, cast_dtype=CAST_DTYPE):
+  """Helper function to convert a PyTorch tensor to a NumPy array with a specified dtype."""
+  return pt_weight.to(torch.float32).numpy().astype(cast_dtype)
+
 
 # Static model parameters dictionary for Qwen3 dense models
 MODEL_PARAMS_DICT = {
@@ -127,14 +136,13 @@ def convert_hf_to_maxtext(base_model_path: str, model_params: dict) -> dict:
                 },
             },
             "decoder_norm": {"scale": None},
-            "logits_dense": {"kernel": None},
         },
         "token_embedder": {"embedding": None},
     }
 
     max_logging.log("Populating non-layer weights...")
-    maxtext_weights["token_embedder"]["embedding"] = chkpt_vars["token_embedder.embedding"].to(torch.float16).numpy()
-    maxtext_weights["decoder"]["decoder_norm"]["scale"] = chkpt_vars["decoder.decoder_norm.scale"].to(torch.float16).numpy()
+    maxtext_weights["token_embedder"]["embedding"] = _pt_to_np(chkpt_vars["token_embedder.embedding"])
+    maxtext_weights["decoder"]["decoder_norm"]["scale"] = _pt_to_np(chkpt_vars["decoder.decoder_norm.scale"])
 
     max_logging.log("Allocating and stacking layer weights...")
     ln = maxtext_weights["decoder"]["layers"]
@@ -142,53 +150,53 @@ def convert_hf_to_maxtext(base_model_path: str, model_params: dict) -> dict:
     mlp = ln["mlp"]
 
     # Pre-allocate stacked arrays with the 'layer' dimension first for efficiency
-    ln["pre_self_attention_layer_norm"]["scale"] = np.zeros((num_layers, hidden_size), dtype=np.float16)
-    ln["post_self_attention_layer_norm"]["scale"] = np.zeros((num_layers, hidden_size), dtype=np.float16)
-    s_attn["query"]["kernel"] = np.zeros((num_layers, hidden_size, num_heads, head_dim), dtype=np.float16)
-    s_attn["key"]["kernel"] = np.zeros((num_layers, hidden_size, num_kv_heads, head_dim), dtype=np.float16)
-    s_attn["value"]["kernel"] = np.zeros((num_layers, hidden_size, num_kv_heads, head_dim), dtype=np.float16)
-    s_attn["out"]["kernel"] = np.zeros((num_layers, num_heads, head_dim, hidden_size), dtype=np.float16)
-    s_attn["query_norm"]["scale"] = np.zeros((num_layers, head_dim), dtype=np.float16)
-    s_attn["key_norm"]["scale"] = np.zeros((num_layers, head_dim), dtype=np.float16)
-    mlp["wi_0"]["kernel"] = np.zeros((num_layers, hidden_size, intermediate_size), dtype=np.float16)
-    mlp["wi_1"]["kernel"] = np.zeros((num_layers, hidden_size, intermediate_size), dtype=np.float16)
-    mlp["wo"]["kernel"] = np.zeros((num_layers, intermediate_size, hidden_size), dtype=np.float16)
+    ln["pre_self_attention_layer_norm"]["scale"] = np.zeros((num_layers, hidden_size), dtype=CAST_DTYPE)
+    ln["post_self_attention_layer_norm"]["scale"] = np.zeros((num_layers, hidden_size), dtype=CAST_DTYPE)
+    s_attn["query"]["kernel"] = np.zeros((num_layers, hidden_size, num_heads, head_dim), dtype=CAST_DTYPE)
+    s_attn["key"]["kernel"] = np.zeros((num_layers, hidden_size, num_kv_heads, head_dim), dtype=CAST_DTYPE)
+    s_attn["value"]["kernel"] = np.zeros((num_layers, hidden_size, num_kv_heads, head_dim), dtype=CAST_DTYPE)
+    s_attn["out"]["kernel"] = np.zeros((num_layers, num_heads, head_dim, hidden_size), dtype=CAST_DTYPE)
+    s_attn["query_norm"]["scale"] = np.zeros((num_layers, head_dim), dtype=CAST_DTYPE)
+    s_attn["key_norm"]["scale"] = np.zeros((num_layers, head_dim), dtype=CAST_DTYPE)
+    mlp["wi_0"]["kernel"] = np.zeros((num_layers, hidden_size, intermediate_size), dtype=CAST_DTYPE)
+    mlp["wi_1"]["kernel"] = np.zeros((num_layers, hidden_size, intermediate_size), dtype=CAST_DTYPE)
+    mlp["wo"]["kernel"] = np.zeros((num_layers, intermediate_size, hidden_size), dtype=CAST_DTYPE)
 
     # Loop through layers and populate the stacked arrays
     for l in tqdm(range(num_layers), desc="Stacking layer weights"):
-        ln["pre_self_attention_layer_norm"]["scale"][l, :] = (
-            chkpt_vars[f"decoder.layers.{l}.pre_self_attention_layer_norm.scale"].to(torch.float16).numpy()
+        ln["pre_self_attention_layer_norm"]["scale"][l, :] = _pt_to_np(
+            chkpt_vars[f"decoder.layers.{l}.pre_self_attention_layer_norm.scale"]
         )
-        ln["post_self_attention_layer_norm"]["scale"][l, :] = (
-            chkpt_vars[f"decoder.layers.{l}.post_self_attention_layer_norm.scale"].to(torch.float16).numpy()
+        ln["post_self_attention_layer_norm"]["scale"][l, :] = _pt_to_np(
+            chkpt_vars[f"decoder.layers.{l}.post_self_attention_layer_norm.scale"]
         )
-        s_attn["query_norm"]["scale"][l, :] = (
-            chkpt_vars[f"decoder.layers.{l}.self_attention.query_norm.scale"].to(torch.float16).numpy()
+        s_attn["query_norm"]["scale"][l, :] = _pt_to_np(
+            chkpt_vars[f"decoder.layers.{l}.self_attention.query_norm.scale"]
         )
-        s_attn["key_norm"]["scale"][l, :] = (
-            chkpt_vars[f"decoder.layers.{l}.self_attention.key_norm.scale"].to(torch.float16).numpy()
-        )
-        
-        s_attn["query"]["kernel"][l, ...] = (
-            chkpt_vars[f"decoder.layers.{l}.self_attention.query.kernel"]
-            .to(torch.float16).numpy().T.reshape(hidden_size, num_heads, head_dim)
-        )
-        s_attn["key"]["kernel"][l, ...] = (
-            chkpt_vars[f"decoder.layers.{l}.self_attention.key.kernel"]
-            .to(torch.float16).numpy().T.reshape(hidden_size, num_kv_heads, head_dim)
-        )
-        s_attn["value"]["kernel"][l, ...] = (
-            chkpt_vars[f"decoder.layers.{l}.self_attention.value.kernel"]
-            .to(torch.float16).numpy().T.reshape(hidden_size, num_kv_heads, head_dim)
-        )
-        s_attn["out"]["kernel"][l, ...] = (
-            chkpt_vars[f"decoder.layers.{l}.self_attention.out.kernel"]
-            .to(torch.float16).numpy().T.reshape(num_heads, head_dim, hidden_size)
+        s_attn["key_norm"]["scale"][l, :] = _pt_to_np(
+            chkpt_vars[f"decoder.layers.{l}.self_attention.key_norm.scale"]
         )
 
-        mlp["wi_0"]["kernel"][l, ...] = chkpt_vars[f"decoder.layers.{l}.mlp.wi_0.kernel"].to(torch.float16).numpy().T
-        mlp["wi_1"]["kernel"][l, ...] = chkpt_vars[f"decoder.layers.{l}.mlp.wi_1.kernel"].to(torch.float16).numpy().T
-        mlp["wo"]["kernel"][l, ...] = chkpt_vars[f"decoder.layers.{l}.mlp.wo.kernel"].to(torch.float16).numpy().T
+        s_attn["query"]["kernel"][l, ...] = (
+            _pt_to_np(chkpt_vars[f"decoder.layers.{l}.self_attention.query.kernel"])
+            .T.reshape(hidden_size, num_heads, head_dim)
+        )
+        s_attn["key"]["kernel"][l, ...] = (
+            _pt_to_np(chkpt_vars[f"decoder.layers.{l}.self_attention.key.kernel"])
+            .T.reshape(hidden_size, num_kv_heads, head_dim)
+        )
+        s_attn["value"]["kernel"][l, ...] = (
+            _pt_to_np(chkpt_vars[f"decoder.layers.{l}.self_attention.value.kernel"])
+            .T.reshape(hidden_size, num_kv_heads, head_dim)
+        )
+        s_attn["out"]["kernel"][l, ...] = (
+            _pt_to_np(chkpt_vars[f"decoder.layers.{l}.self_attention.out.kernel"])
+            .T.reshape(num_heads, head_dim, hidden_size)
+        )
+
+        mlp["wi_0"]["kernel"][l, ...] = _pt_to_np(chkpt_vars[f"decoder.layers.{l}.mlp.wi_0.kernel"]).T
+        mlp["wi_1"]["kernel"][l, ...] = _pt_to_np(chkpt_vars[f"decoder.layers.{l}.mlp.wi_1.kernel"]).T
+        mlp["wo"]["kernel"][l, ...] = _pt_to_np(chkpt_vars[f"decoder.layers.{l}.mlp.wo.kernel"]).T
 
 
     # Final transformations for scanned weights (swap layer and feature axes)
@@ -210,41 +218,3 @@ def convert_hf_to_maxtext(base_model_path: str, model_params: dict) -> dict:
 
     gc.collect()
     return maxtext_weights
-
-
-def main(args):
-    """Main function to run the conversion."""
-    # Set up JAX simulated environment for checkpoint saving
-    os.environ["JAX_PLATFORMS"] = "cpu"
-    os.environ["XLA_FLAGS"] = f"--xla_force_host_platform_device_count={args.simulated_cpu_devices_count}"
-
-    if args.model_size not in MODEL_PARAMS_DICT:
-        raise ValueError(f"Model size '{args.model_size}' not found in MODEL_PARAMS_DICT.")
-
-    model_params = MODEL_PARAMS_DICT[args.model_size]
-    max_logging.log(f"Starting conversion for Qwen3 dense model size: {args.model_size}")
-    jax_weights = convert_hf_to_maxtext(args.base_model_path, model_params)
-    max_logging.log(f"Conversion complete. Saving MaxText checkpoint to {args.maxtext_model_path}")
-    llama_or_mistral_ckpt.save_weights_to_checkpoint(
-        args.maxtext_model_path, jax_weights, args.simulated_cpu_devices_count, args.use_ocdbt, args.use_zarr3
-    )
-    max_logging.log("Checkpoint saved successfully.")
-
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Convert Qwen3 dense HF weights to MaxText.")
-    parser.add_argument("--base_model_path", type=str, required=True, help="Path to the HF Qwen3 checkpoint files.")
-    parser.add_argument(
-        "--maxtext_model_path", type=str, required=True, help="Path to save the MaxText checkpoint (local or GCS)."
-    )
-    parser.add_argument(
-        "--model_size", type=str, required=True, choices=MODEL_PARAMS_DICT.keys(), help="The model size to convert."
-    )
-    parser.add_argument(
-        "--simulated_cpu_devices_count", type=int, default=16, help="Number of simulated CPU devices for saving."
-    )
-    parser.add_argument("--use-ocdbt", type=str2bool, default=True, help="Use OCDBT format for saving.")
-    parser.add_argument("--use-zarr3", type=str2bool, default=True, help="Use Zarr3 format for saving.")
-
-    parsed_args = parser.parse_args()
-    main(parsed_args)
