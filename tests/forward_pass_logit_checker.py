@@ -67,8 +67,12 @@ def upload_blob(bucket_name, source_file_name, destination_blob_name):
   blob.upload_from_filename(source_file_name)
 
 
-def get_top_k_tokens_scores(logits_tensor, tokenizer_instance, k=10, description=""):
-  """Get the top-k tokens and their scores from a given logits tensor."""
+def get_top_k_tokens_scores(logits_tensor: torch.Tensor, tokenizer_instance, k=10, description=""):
+  """Get the top-k tokens and their scores from a given logits tensor.
+  
+  Args:
+    logits_tensor: B x V, get top-k for batch 0
+  """
   max_logging.log(f"\n--- {description} top {k} tokens ---")
   collected_tokens = []
   tokens = []
@@ -95,7 +99,7 @@ def compare_top_tokens(converted_tokens, golden_tokens):
 
   Args:
       converted_tokens: top tokens from the converted model.
-      golden_tokens:  top tokens from the golden model.
+      golden_tokens: top tokens from the golden model.
   """
   # Extract the sets of token IDs for comparison
   converted_ids = {token["id"] for token in converted_tokens}
@@ -131,12 +135,12 @@ def compare_top_tokens(converted_tokens, golden_tokens):
   max_logging.log(table_str)
 
 
-def check_kl_divergence(model_logits, golden_logits, atol=0.02):
+def check_kl_divergence(model_logits: torch.Tensor, golden_logits: torch.Tensor, atol=0.02):
   """
   Calculates KL divergence D_KL(P_golden || Q_model) over a batch of sequences.
 
   Args:
-      model_logits: Logits from the converted model (Batch, SeqLen, VocabSize).
+      model_logits: Logits from the converted model (Batch, SeqLen, VocabSize)
       golden_logits: Logits from the golden model (Batch, SeqLen, VocabSize).
       token_size: The number of vocabulary entries to consider for the comparison.
                   (Effectively vocab_size_to_compare).
@@ -263,12 +267,13 @@ def main(config, test_args):  # pylint: disable=W0621
           rngs={"aqt": init_rng},
       )
 
+      # stack the output at index 0
       full_train_logits = jax.experimental.multihost_utils.process_allgather(full_train_logits)
       # if full_train_logits shape is [num_hosts, batch_size, seq_len, vocab_size]
       if full_train_logits.ndim == 4:
         full_train_logits = jnp.reshape(full_train_logits, (-1, config.max_target_length, config.vocab_size))
       # Slice to original sequence length
-      full_train_logits = full_train_logits[:, :seq_len, :]
+      full_train_logits = full_train_logits[:, :seq_len, :] # B x T x V
 
       token_size = int(test_args.token_size) if test_args.token_size else seq_len
       if full_train_logits.shape[-1] != golden_logits.shape[-1]:
@@ -278,10 +283,21 @@ def main(config, test_args):  # pylint: disable=W0621
             "Comparing up to the smaller vocab size."
         )
       min_vocab_size = min(full_train_logits.shape[-1], golden_logits.shape[-1])
-      train_logits_slice = full_train_logits[0, :token_size, :min_vocab_size]
-      golden_logits_slice = golden_logits[:token_size, :min_vocab_size]
+      train_logits_slice = full_train_logits[0, :token_size, :min_vocab_size] # T x V, jnp
+      golden_logits_slice = golden_logits[:token_size, :min_vocab_size] # T x V, np
+      max_logging.log("\n=== logits: token 2 ===")
       max_logging.log(f"{golden_logits_slice[2]=}")
       max_logging.log(f"{train_logits_slice[2]=}")
+
+      # --- Compare logits for the last token prediction ---
+      if test_args.hf_model_path and config.hf_access_token:
+        max_logging.log("\n=== prediction: last token ===")
+        tokenizer = AutoTokenizer.from_pretrained(test_args.hf_model_path, token=config.hf_access_token)
+        hf_last_token_logits = convert_jax_weight_to_torch(golden_logits_slice[-1, :]).unsqueeze(0) # 1 x V, torch
+        mt_last_token_logits = convert_jax_weight_to_torch(train_logits_slice[-1, :]).unsqueeze(0) # 1 x V, torch
+        tokens_maxtext = get_top_k_tokens_scores(mt_last_token_logits, tokenizer, k=10, description="MaxText model")
+        tokens_hf = get_top_k_tokens_scores(hf_last_token_logits, tokenizer, k=10, description="HF model")
+        compare_top_tokens(converted_tokens=tokens_maxtext, golden_tokens=tokens_hf)
 
       # Calculate absolute and relative differences for detailed reporting
       abs_diff = jnp.abs(train_logits_slice - golden_logits_slice)
@@ -295,7 +311,7 @@ def main(config, test_args):  # pylint: disable=W0621
 
       max_abs_diff_val = abs_diff[max_abs_diff_idx]
       max_rel_diff_val = rel_diff[max_rel_diff_idx]
-      msg = (
+      msg = ( "\n=== numerical difference ===\n"
           f"Max absolute difference: {max_abs_diff_val:.6f} at index {max_abs_diff_idx}\n"
           f"  (Train: {train_logits_slice[max_abs_diff_idx]:.6f}, Golden: {golden_logits_slice[max_abs_diff_idx]:.6f})\n"
           f"Max relative difference: {max_rel_diff_val:.6f} at index {max_rel_diff_idx}\n"
@@ -306,11 +322,13 @@ def main(config, test_args):  # pylint: disable=W0621
       model_probabilities = jax.nn.softmax(train_logits_slice, axis=-1)
       golden_probabilities = jax.nn.softmax(golden_logits_slice, axis=-1)
 
+      max_logging.log("\n=== probability: token 1 ===")
       max_logging.log(f"{golden_probabilities[1]=}")
       max_logging.log(f"{model_probabilities[1]=}")
 
+      max_logging.log("\n=== KL divergence ===")
       kl_div = jax.numpy.sum(jax.scipy.special.kl_div(golden_probabilities, model_probabilities), axis=-1)
-      max_logging.log(f"KL divergence = {kl_div}, max KL divergence = {jax.numpy.max(kl_div)}")
+      max_logging.log(f"max KL divergence = {jax.numpy.max(kl_div)}\nKL divergence = {kl_div}")
 
       if jax.process_index() == 0 and test_args.output_logits_path:
         data_to_save = {
@@ -320,6 +338,7 @@ def main(config, test_args):  # pylint: disable=W0621
         }
         all_data_to_save.append(data_to_save)
 
+      max_logging.log("\n=== test criteria ===")
       if test_args.max_kl_div is not None:
         max_logging.log(
             f"Checking KL Divergence between train distribution and golden distribution against theshold {test_args.max_kl_div}."
