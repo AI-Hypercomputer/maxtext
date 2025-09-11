@@ -156,7 +156,7 @@ if [ -e "$libtpu_path" ]; then
     rm "$libtpu_path"
 fi
 
-elif [[ "$MODE" == "stable" || ! -v MODE ]]; then
+if [[ "$MODE" == "stable" || ! -v MODE ]]; then
 # Stable mode
     if [[ $DEVICE == "tpu" ]]; then
         echo "Installing stable jax, jaxlib for tpu"
