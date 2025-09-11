@@ -815,7 +815,7 @@ class RoutedMoE(nnx.Module):
             lhs=inputs,
             rhs=kernel,
             group_sizes=group_sizes,
-            preferred_element_type=jnp.bfloat16,
+            preferred_element_type=jnp.float32,
             tiling=tiling,
             lhs_quantize_dtype=lhs_quantize_dtype,
             rhs_quantize_dtype=rhs_quantize_dtype,
@@ -832,7 +832,7 @@ class RoutedMoE(nnx.Module):
               lhs=inputs,
               rhs=rhs_inputs,
               group_sizes=group_sizes,
-              preferred_element_type=jnp.bfloat16,
+              preferred_element_type=jnp.float32,
           )
         if isinstance(kernel, aqt.QTensor):
           # Multiply outputs by the kernely scale
