@@ -473,7 +473,6 @@ nnx.display(llama3_1_8b_policy)
 if DEBUG:
   print("Model initialized successfully")
   print(f"Model mesh shape: {mesh_policy.shape}")
-  print(f"Model config: {model_config_policy}")
 
   # Sanity check that weights are loaded correctly
   _maxtext_state_flatten = nnx.state(llama3_1_8b_policy).flat_state()
@@ -954,7 +953,7 @@ if DEBUG:
   # verify if vllm sampler works
   output = rl_cluster.rollout.generate(
       ["The capital of France is"],
-      rollout_config=RolloutConfig(n=1, max_tokens_to_generate=64, temperature=0.1),
+      rollout_config=RolloutConfig(max_tokens_to_generate=64, temperature=0.1),
   )
 
   print(f"Output: {output}")
