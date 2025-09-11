@@ -70,6 +70,7 @@ from etils import epath
 
 from tunix.rl.rollout.base_rollout import RolloutConfig
 
+from MaxText.globals import MAXTEXT_ASSETS_ROOT
 
 # for vLLM we can skip JAX precompilation with this flag, it makes startup faster
 os.environ["SKIP_JAX_PRECOMPILE"] = "1"
@@ -386,7 +387,7 @@ config_ref = pyconfig.initialize(
     base_output_directory="dummy",  # This is not used in Tunix.
     run_name="test-tunix-maxtext-llama3.1-8b",
     tokenizer_type="tiktoken",
-    tokenizer_path="assets/tokenizer_llama3.tiktoken",
+    tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizer_llama3.tiktoken"),
     load_parameters_path="gs://yixuannwang-maxtext-logs/llama3.1-8b-Instruct/scanned/0/items",
     # load_parameters_path="path/to/scanned/checkpoint",
     per_device_batch_size=1,
@@ -445,7 +446,7 @@ config_policy = pyconfig.initialize(
     base_output_directory="dummy",  # This is not used in Tunix.
     run_name="test-tunix-maxtext-llama3.1-8b",  # This is not used in Tunix.
     tokenizer_type="tiktoken",
-    tokenizer_path="assets/tokenizer_llama3.tiktoken",
+    tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizer_llama3.tiktoken"),
     load_parameters_path="gs://yixuannwang-maxtext-logs/llama3.1-8b-Instruct/scanned/0/items",
     # load_parameters_path="path/to/scanned/checkpoint",
     per_device_batch_size=1,

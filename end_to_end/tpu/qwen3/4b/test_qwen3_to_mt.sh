@@ -17,7 +17,7 @@ idx=$(date +%Y-%m-%d-%H-%M)
 MODEL_NAME='qwen3-4b'
 export MODEL_VARIATION='4b'
 HF_GOLDEN_MODEL='Qwen/Qwen3-4B'
-TOKENIZER_PATH="${MAXTEXT_ASSETS_ROOT:-${MAXTEXT_REPO_ROOT:-$PWD}/assets}"'/qwen3-tokenizer'
+TOKENIZER_PATH="${MAXTEXT_ASSETS_ROOT:-${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText/assets}}"'/qwen3-tokenizer'
 
 # Installing torch for deps in forward_pass_logit_checker.py
 python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu

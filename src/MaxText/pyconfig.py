@@ -32,6 +32,7 @@ from MaxText import accelerator_to_spec_map
 from MaxText import max_logging
 from MaxText import max_utils
 from MaxText.common_types import DecoderBlockType
+from MaxText.globals import MAXTEXT_ASSETS_ROOT, MAXTEXT_REPO_ROOT, MAXTEXT_PKG_DIR
 from MaxText.layers.attentions import AttentionType
 from MaxText.utils import gcs_utils
 
@@ -569,13 +570,22 @@ class _HyperParameters:
 
     if not os.path.isfile(raw_keys["tokenizer_path"]):
       # Try and find the tokenizer path relative to the config file.
-      tokenizer_path = os.path.join(
-          os.path.dirname(config_name),
-          raw_keys["tokenizer_path"],
-      )
+      for search_root in (
+          MAXTEXT_ASSETS_ROOT,
+          os.path.dirname(MAXTEXT_ASSETS_ROOT),
+          os.path.join(MAXTEXT_REPO_ROOT, "assets"),
+          MAXTEXT_REPO_ROOT,
+          os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText"),
+          MAXTEXT_PKG_DIR,
+      ):
+        tokenizer_path = os.path.join(
+            search_root,
+            raw_keys["tokenizer_path"],
+        )
 
-      if os.path.isfile(tokenizer_path):
-        raw_keys["tokenizer_path"] = tokenizer_path
+        if os.path.isfile(tokenizer_path):
+          raw_keys["tokenizer_path"] = tokenizer_path
+          break
 
     self.keys = raw_keys
     keys = [k for k in raw_keys]  # pylint: disable=unnecessary-comprehension

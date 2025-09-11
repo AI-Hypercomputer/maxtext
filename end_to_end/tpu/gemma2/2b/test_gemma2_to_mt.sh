@@ -18,7 +18,7 @@ idx=$(date +%Y-%m-%d-%H-%M)
 MODEL_NAME='gemma2-2b'
 export MODEL_VARIATION='2b'
 HF_GOLDEN_MODEL='google/gemma-2-2b'
-TOKENIZER_PATH="${MAXTEXT_ASSETS_ROOT:-${MAXTEXT_REPO_ROOT:-$PWD}/assets}"'/tokenizer.gemma'
+TOKENIZER_PATH="${MAXTEXT_ASSETS_ROOT:-${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText/assets}}"'/tokenizer.gemma'
 
 # Installing torch for deps in forward_pass_logit_checker.py
 python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
