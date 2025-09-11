@@ -19,6 +19,7 @@ import typing as tp
 from typing import Any
 import warnings
 
+from flax import config as flax_config
 from flax import linen
 from flax import core
 from flax import nnx
@@ -35,6 +36,10 @@ from jax import tree_util as jtu
 import qwix
 
 M = tp.TypeVar("M", bound=Module)
+
+
+if hasattr(flax_config, "flax_always_shard_variable"):
+  flax_config.update("flax_always_shard_variable", False)
 
 
 def is_vanilla_variable(vs: variablelib.VariableState) -> bool:
