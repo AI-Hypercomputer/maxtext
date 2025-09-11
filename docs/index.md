@@ -14,45 +14,9 @@
  limitations under the License.
  -->
 
-# MaxText
+```{include} ../README.md
 
-## Overview
-
-MaxText is a a Google initiated open source project for **high performance**, **highly scalable**, **open-source** LLM written in pure Python/[JAX](https://jax.readthedocs.io/en/latest/index.html) and targeting Google Cloud TPUs and GPUs for **training** and **inference**. MaxText achieves [high MFUs](https://github.com/AI-Hypercomputer/maxtext/blob/main/README.md#runtime-performance-results) and scales from single host to very large clusters while staying simple and "optimization-free" thanks to the power of Jax and the XLA compiler.
-
-MaxText achieves very high MFUs (Model Flop Utilization) and scales from single host to very large clusters while staying simple and "optimization-free".
-
-MaxText aims to be a launching off point for ambitious LLM projects both in research and production. We encourage users to start by experimenting with MaxText out of the box and then fork and modify MaxText to meet their needs.
-
-We have used MaxText to [demonstrate high-performance, well-converging training in int8](https://cloud.google.com/blog/products/compute/accurate-quantized-training-aqt-for-tpu-v5e) and [scale training to ~51K chips](https://cloud.google.com/blog/products/compute/the-worlds-largest-distributed-llm-training-job-on-tpu-v5e).
-
-Key supported features:
-- TPUs and GPUs (in preview)
-- Training and Inference (in preview)
-
-MaxText additionally provides an highly optimized reference implementations for popular Open Source models like:
-
-- Llama 2, 3 and 3.1
-- Mistral and Mixtral
-- Gemma and Gemma2
-- GPT
-
-These reference implementations support pre-training and full fine tuning. Maxtext also allows you to create various sized models for benchmarking purposes.
-
-The key value proposition of using MaxText for pre-training or full fine tuning is:
-
-- Very high performance of average of 50% MFU
-- [Open code base](https://github.com/AI-Hypercomputer/maxtext)
-- Easy to understand: MaxText is purely written in JAX and Python, which makes it accessible to ML developers interested in inspecting the implementation or stepping through it. It is written at the [block-by-block](https://github.com/AI-Hypercomputer/maxtext/tree/main/MaxText/layers) level, with code for Embeddings, Attention, Normalization etc. Different Attention mechanisms like MQA and GQA are all present. For quantization, it uses the [JAX AQT](https://github.com/google/aqt) library. The implementation is suitable for both GPUs and TPUs.
-
-```{note}
-Maxtext today only supports Pre-training and Full Fine Tuning of the models. It does not support PEFT/LoRA, Supervised Fine Tuning or RLHF.
 ```
-
-## Who are the target users of MaxText?
-
-- Any individual or a company that is interested in forking maxtext and seeing it as a reference implementation of a high performance Large Language Models and wants to build their own LLMs on TPUs or GPUs.
-- Any individual or a company that is interested in performing a pre-training or Full Fine Tuning of the supported open source models, can use Maxtext as a blackbox to perform full fine tuning. Maxtext attains an extremely high MFU, resulting in large savings in training costs.
 
 ## Learn more
 
