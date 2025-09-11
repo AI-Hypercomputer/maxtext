@@ -49,6 +49,7 @@ from collections import defaultdict
 import time
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec
@@ -381,6 +382,18 @@ class InferenceWorker:
     start_time_decode_state = time.time()
     self.generate_fn = self.engine.generate
     self.decode_state = self.engine.init_decode_state(self.rng)
+    
+    self.batch_prefill_fn = jax.jit(
+      InferenceWorker._prefill_vmap,
+      donate_argnums=(1,),
+      static_argnums=(0,),
+    )
+    self.decode_steps_jitted = jax.jit(
+      self._decode_steps,  
+      static_argnums=(0,3,),
+      donate_argnums=(2,),
+    )
+    
 
     if self.debug:
       max_logging.log(f"time taken to initialize decode_state: {time.time() - start_time_decode_state} seconds")
@@ -470,34 +483,33 @@ class InferenceWorker:
     self.true_lengths = {input.id: input.true_length for input in data}
     self.running = True
 
-    
+    with jax.profiler.TraceAnnotation("run_inference.continuous_batching"):
+      self._run_continuous_batching(data)
 
-    self._run_continuous_batching(data)
+    # return self._build_final_outputs(data)
+    return []
 
-    return self._build_final_outputs(data)
-
-  def _prefill_vmap(self, data: list[InputData]) -> tuple[jax.Array, jax.Array]:
+  @staticmethod
+  def _prefill_vmap(engine, decode_state, params, tokens, true_lengths, rng) -> tuple[jax.Array, jax.Array]:
     """Prefills all inputs in a batch using jax.vmap.
 
     Returns: first_tokens, first_token_logprobs, prompt_logps
     """
-    num_inputs = len(data)
+    num_inputs = tokens.shape[0]
     if num_inputs == 0:
       return
 
     # 1. Prepare inputs for vmap
-    tokens = jax.numpy.stack([d.tokens for d in data])
-    true_lengths = jax.numpy.array([d.true_length for d in data])
     slots = jax.numpy.arange(num_inputs)
-    rngs = jax.random.split(self.rng, num_inputs)
-    self.rng = rngs[-1]  # Update main rng
+    rngs = jax.random.split(rng, num_inputs)
+    rng = rngs[-1]  # Update main rng
 
     # 2. Vmap the prefill function
     def prefill_vmap_fn(padded_tokens, true_length, rng):
       # We don't pass slot here because prefill doesn't need it.
       # The slot is used during the insert phase.
-      return self.engine.prefill(
-          params=self.params,
+      return engine.prefill(
+          params=params,
           padded_tokens=padded_tokens,
           true_length=true_length,
           rng=rng,
@@ -507,18 +519,15 @@ class InferenceWorker:
     vmapped_prefill = jax.vmap(prefill_vmap_fn, in_axes=(0, 0, 0))
     prefixes, result_tokens = vmapped_prefill(tokens, true_lengths, rngs)
 
-    # 3. Separate prompt_logps and insert prefixes
-    prefixes_for_insert = {k: v for k, v in prefixes.items() if k != "prompt_logp"}
-
     def insert_loop_body(i, current_decode_state):
-      prefix_i = jax.tree_util.tree_map(lambda x: x[i], prefixes_for_insert)
+      prefix_i = jax.tree_util.tree_map(lambda x: x[i], prefixes)
       slot_i = slots[i]
-      new_decode_state = self.engine.insert(prefix_i, current_decode_state, slot_i)
+      new_decode_state = engine.insert(prefix_i, current_decode_state, slot_i)
       return new_decode_state
 
-    self.decode_state = jax.lax.fori_loop(0, num_inputs, insert_loop_body, self.decode_state)
+    decode_state = jax.lax.fori_loop(0, num_inputs, insert_loop_body, decode_state)
     # 4. Process results
-    return result_tokens.data[:, 0, 0], result_tokens.log_prob.squeeze()
+    return decode_state, result_tokens.data[:, 0, 0], result_tokens.log_prob.squeeze()
 
   def _run_continuous_batching(
       self,
@@ -535,41 +544,47 @@ class InferenceWorker:
     initial_batch_size = min(len(data), self.decode_batch_size)
     initial_batch = [next(data_iterator) for _ in range(initial_batch_size)]
     if initial_batch:
-      first_tokens, first_tokens_logprob = self._prefill_vmap(initial_batch)
-    breakpoint()
+      tokens = jnp.stack([d.tokens for d in initial_batch])
+      true_lengths = jnp.array([d.true_length for d in initial_batch])
+      tokens = jax.device_put(tokens, jax.sharding.NamedSharding(self.mesh, PartitionSpec(*self.config.data_sharding)))
+      true_lengths = jax.device_put(true_lengths, jax.sharding.NamedSharding(self.mesh, PartitionSpec(*self.config.data_sharding)))
+      self.decode_state, first_tokens, first_tokens_logprob = self.batch_prefill_fn(self.engine, self.decode_state, self.params, tokens, true_lengths, self.rng)
+    self.decode_state, self.rng, all_tokens, all_log_probs = self.decode_steps_jitted(
+        self.engine, self.params, self.decode_state, self.min_decode_steps, self.rng
+    )
     max_logging.log("Continuous batching started")
-    i = 0
-    # Process each input
-    while True:
-      # 1. Check for and process any newly available prefill slots
-      while self.empty_decode_slots:
-        try:
-          row = next(data_iterator)
-          # 2. Get an available slot
-          slot = self.empty_decode_slots.pop()
-          # 3. Prefill and insert kv cache
-          self.prefill_helper.process(
-              model_params=self.params,
-              decode_state=self.decode_state,
-              decode_slot=slot,
-              input_id=row.id,
-              input_tokens_padded=row.tokens,
-              input_true_length=row.true_length,
-              prefill_done=self.prefill_done,
-          )
-        except StopIteration:
-          # All inputs have been prefilled
-          break
+    # i = 0
+    # # Process each input
+    # while True:
+    #   # 1. Check for and process any newly available prefill slots
+    #   while self.empty_decode_slots:
+    #     try:
+    #       row = next(data_iterator)
+    #       # 2. Get an available slot
+    #       slot = self.empty_decode_slots.pop()
+    #       # 3. Prefill and insert kv cache
+    #       self.prefill_helper.process(
+    #           model_params=self.params,
+    #           decode_state=self.decode_state,
+    #           decode_slot=slot,
+    #           input_id=row.id,
+    #           input_tokens_padded=row.tokens,
+    #           input_true_length=row.true_length,
+    #           prefill_done=self.prefill_done,
+    #       )
+    #     except StopIteration:
+    #       # All inputs have been prefilled
+    #       break
 
-      # 4. Flush any pending inputs in batch prefill mode
-      self.prefill_helper.finalize(self.params, self.decode_state, self.prefill_done)
-      # 5. If there are active sequences, decode
-      if len(self.empty_decode_slots) < self.decode_batch_size:
-        self.decode(i)
-        i += 1
-      else:
-        # No active sequences, so we're done
-        break
+    #   # 4. Flush any pending inputs in batch prefill mode
+    #   self.prefill_helper.finalize(self.params, self.decode_state, self.prefill_done)
+    #   # 5. If there are active sequences, decode
+    #   if len(self.empty_decode_slots) < self.decode_batch_size:
+    #     self.decode(i)
+    #     i += 1
+    #   else:
+    #     # No active sequences, so we're done
+    #     break
 
     self.running = False
     max_logging.log("Inference worker: continuous batching finished")
@@ -649,40 +664,43 @@ class InferenceWorker:
       self.slot_to_id[slot] = None
       self.empty_decode_slots.add(slot)
 
-  @functools.partial(jax.jit, static_argnums=(0,), donate_argnums=(2,))
-  def _jitted_decode_steps(self, params, decode_state, rng):
+  @staticmethod
+  def _decode_steps(engine, params, decode_state, min_decode_steps, rng):
     """Runs `min_decode_steps` of decoding in a single JIT-ted function."""
-
+    
+    @functools.partial(jax.jit, static_argnums=(0,), donate_argnums=(2,))
+    def _jitted_generate_fn(engine, params, decode_state, rng):
+      decode_state, result_tokens = engine.generate(params, decode_state, rng=rng)
+      return decode_state, result_tokens.data[:, 0], result_tokens.log_prob
+    
+    
     def loop_body(carry, _):
       decode_state, rng = carry
       rng, step_rng = jax.random.split(rng)
-      prompt_logp = decode_state["prompt_logp"]
-      generate_decode_state = {k: v for k, v in decode_state.items() if k != "prompt_logp"}
-      new_decode_state, result_tokens, log_prob = self._jitted_generate_fn(
-          params, generate_decode_state, step_rng
+      new_decode_state, result_tokens, log_prob = _jitted_generate_fn(
+          engine, params, decode_state, step_rng
       )
-      new_decode_state["prompt_logp"] = prompt_logp
       return (new_decode_state, rng), (result_tokens, log_prob)
 
     (final_decode_state, final_rng), (all_tokens, all_log_probs) = jax.lax.scan(
-        loop_body, (decode_state, rng), xs=None, length=self.min_decode_steps
+        loop_body, (decode_state, rng), xs=None, length=min_decode_steps
     )
     return final_decode_state, final_rng, all_tokens, all_log_probs
 
-  def decode(self, step):
-    """Run decode steps on current decoder state.
+  # def decode(self, step):
+  #   """Run decode steps on current decoder state.
 
-    Performs `self.min_decode_steps` decode operations
-    and processes the results.
-    """
-    self.decode_state, self.rng, all_tokens, all_log_probs = self._jitted_decode_steps(
-        self.params, self.decode_state, self.rng
-    )
-    jax.block_until_ready(all_tokens)
-    max_logging.log(f"Decode step for {step} completed")
-    # Process decode results step by step
-    for i in range(self.min_decode_steps):
-      self._process_decode_results(all_tokens[i], all_log_probs[i])
+  #   Performs `self.min_decode_steps` decode operations
+  #   and processes the results.
+  #   """
+  #   self.decode_state, self.rng, all_tokens, all_log_probs = self._jitted_decode_steps(
+  #       self.params, self.decode_state, self.rng
+  #   )
+  #   jax.block_until_ready(all_tokens)
+  #   max_logging.log(f"Decode step for {step} completed")
+  #   # Process decode results step by step
+  #   for i in range(self.min_decode_steps):
+  #     self._process_decode_results(all_tokens[i], all_log_probs[i])
 
   def _process_decode_results(self, result_tokens, log_prob):
     """Process the results of a decode step."""
@@ -707,45 +725,42 @@ class InferenceWorker:
       self.slot_to_id[slot] = None
       self.empty_decode_slots.add(slot)
 
-  @functools.partial(jax.jit, static_argnums=(0,), donate_argnums=(2,))
-  def _jitted_generate_fn(self, params, decode_state, rng):
-    decode_state, result_tokens = self.engine.generate(params, decode_state, rng=rng)
-    return decode_state, result_tokens.data[:, 0], result_tokens.log_prob
 
-  def emit_token(
-      self,
-      prompt_id,
-      result_token: jax.Array,
-      log_prob: jax.Array,
-      prompt_logp: np.ndarray | jax.Array = None,
-  ) -> bool:
-    """Adds the token to the results for the specified prompt ID.
 
-    Args:
-        prompt_id: ID of the prompt
-        result_token: Token to emit (as a JAX scalar array)
-        log_prob: Log probability of the token (as a JAX scalar array)
-        prompt_logp: Log probabilities for the prompt tokens
-    """
-    # Skip if sequence already completed
-    if prompt_id in self.completed_sequences:
-      return True
+  # def emit_token(
+  #     self,
+  #     prompt_id,
+  #     result_token: jax.Array,
+  #     log_prob: jax.Array,
+  #     prompt_logp: np.ndarray | jax.Array = None,
+  # ) -> bool:
+  #   """Adds the token to the results for the specified prompt ID.
 
-    if prompt_logp is not None:
-      self.prompt_logprobs_by_id[prompt_id] = [prompt_logp]
+  #   Args:
+  #       prompt_id: ID of the prompt
+  #       result_token: Token to emit (as a JAX scalar array)
+  #       log_prob: Log probability of the token (as a JAX scalar array)
+  #       prompt_logp: Log probabilities for the prompt tokens
+  #   """
+  #   # Skip if sequence already completed
+  #   if prompt_id in self.completed_sequences:
+  #     return True
 
-    self.completion_tokens_by_id[prompt_id].append(TokenOutput(result_token, log_prob))
+  #   if prompt_logp is not None:
+  #     self.prompt_logprobs_by_id[prompt_id] = [prompt_logp]
 
-    # Check for EOS
-    is_eos = np.isin(result_token, np.array(self.eos_ids))
-    # Check for max decode length
-    max_length_reached = len(self.completion_tokens_by_id[prompt_id]) >= self.max_decode_length
+  #   self.completion_tokens_by_id[prompt_id].append(TokenOutput(result_token, log_prob))
 
-    if is_eos or max_length_reached:
-      self.completed_sequences.add(prompt_id)
-      return True
+  #   # Check for EOS
+  #   is_eos = np.isin(result_token, np.array(self.eos_ids))
+  #   # Check for max decode length
+  #   max_length_reached = len(self.completion_tokens_by_id[prompt_id]) >= self.max_decode_length
 
-    return False
+  #   if is_eos or max_length_reached:
+  #     self.completed_sequences.add(prompt_id)
+  #     return True
+
+  #   return False
 
 
 class ContinuousBatchingEngine:
@@ -870,15 +885,10 @@ class ContinuousBatchingEngine:
     Returns:
         list of CompletionOutput objects, one for each input in data
     """
-    data = self.prepare_data(data)
+    # data = self.prepare_data(data)
 
-    # Convert all tokens to JAX arrays with specified sharding
-    with jax.profiler.TraceAnnotation("offline_engine.batch_inference.put_data_on_devices"):
-      sharding = jax.sharding.NamedSharding(self.mesh, PartitionSpec(*self.config.data_sharding))
-      for item in data:
-        item.tokens = jax.device_put(item.tokens, sharding)
-
-    return self.worker.run_inference(data, rng)
+    output_batch = self.worker.run_inference(data, rng)
+    return output_batch
 
   def prepare_data(self, data: list[InputData | jax.Array | np.ndarray]) -> list[InputData]:
     """Pad and if batch prefill is enabled, sort data by length.

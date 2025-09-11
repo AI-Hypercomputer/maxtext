@@ -77,13 +77,13 @@ max_logging.log("initialized pyconfig")
 random.seed(42)
 
 data = [np.arange(1,129) for _ in range(config.global_batch_size_to_train_on)]
-true_lengths = [config.max_prefill_predict_length for _ in range(config.global_batch_size_to_train_on)]
+true_lengths = jnp.array([config.max_prefill_predict_length for _ in range(config.global_batch_size_to_train_on)])
 input_data = []
 for i, d in enumerate(data):
     input_data.append(
         InputData(
             id=int(i),
-            tokens=np.array(d),
+            tokens=jnp.array(d),
             true_length=true_lengths[i],
         )
     )
@@ -138,6 +138,6 @@ def run(
 
 
 run(
-    profile=False,
-    profile_path=f"gs://runner-maxtext-logs/mohitkhatwani_offline_benchmark/app_1/0908/{time.strftime('%Y%m%d-%H%M%S')}/",
+    profile=True,
+    profile_path=f"gs://runner-maxtext-logs/mohitkhatwani_offline_benchmark/app_trial/0911/{time.strftime('%Y%m%d-%H%M%S')}/",
 )
