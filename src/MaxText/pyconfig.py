@@ -220,7 +220,6 @@ def validate_keys(keys):
     validate_ring_of_experts_parallelism(keys)
     validate_ragged_dot(keys)
     validate_deepseek_moe(keys)
-    validate_gpt_oss_moe(keys)
     validate_expert_shard_attention_option(keys["expert_shard_attention_option"])
 
   if keys["use_multimodal"]:
@@ -1000,11 +999,6 @@ def validate_mlp_dim(raw_keys):
   base_moe_mlp_dim = raw_keys["base_moe_mlp_dim"]
   if is_fully_moe_model and (base_mlp_dim != base_moe_mlp_dim):
       raise ValueError(f'For a fully MoE model, base_mlp_dim must be equal to base_moe_mlp_dim. Received base_mlp_dim={base_mlp_dim} and base_moe_mlp_dim={base_moe_mlp_dim}.')
-
-
-def validate_gpt_oss_moe(raw_keys):
-  if raw_keys["decoder_block"] == "gpt_oss" and not raw_keys["sparse_matmul"]:
-    raise ValueError(f"GPT OSS model only supports sparse matmul. Please set sparse_matmul=True.")
 
 
 def validate_sparse_matmul_parallelism(raw_keys):
