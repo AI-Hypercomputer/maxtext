@@ -23,77 +23,33 @@ from optax.contrib import MuonDimensionNumbers as mdn
 
 
 
-# muon_weight_specs = {
-#     "params": {
-#         "token_embedder": {
-#             # Standard 2D matrix (102400, 2048)
-#             # "embedding": MuonWeightSpec(reduction_axes=(-2,), output_axes=(-1,))#None
-#             "embedding": optax.MaskedNode()
-#         },
-#         "decoder": {
-#             "decoder_norm": {
-#                 # 1D tensor, not a matrix. Fallback to Adam.
-#                 "scale": optax.MaskedNode()
-#             },
-#             "dense_layers": {
-#                 "mlp": {
-#                     # Shape (2048, 1, 10944) -> Matrix(2048, 10944), Batch(1,)
-#                     "wi_0": {"kernel": MuonWeightSpec(reduction_axes=(0,), output_axes=(2,))},
-#                     "wi_1": {"kernel": MuonWeightSpec(reduction_axes=(0,), output_axes=(2,))},
-#                     # Shape (10944, 1, 2048) -> Matrix(10944, 2048), Batch(1,)
-#                     "wo": {"kernel": MuonWeightSpec(reduction_axes=(0,), output_axes=(2,))},
-#                 },
-#                 "post_self_attention_layer_norm": {"scale": optax.MaskedNode()},
-#                 "pre_self_attention_layer_norm": {"scale": optax.MaskedNode()},
-#                 "self_attention": {
-#                     # 4D tensors. Treat last two dims as the matrix, first two as batch.
-#                     # Shape (2048, 1, 16, 128) -> Matrix(16, 128), Batch(2048, 1)
-#                     "key": {"kernel": MuonWeightSpec(reduction_axes=(-2,), output_axes=(-1,))},
-#                     "kv_norm": {"scale": optax.MaskedNode()},
-#                     # Shape (16, 1, 128, 2048) -> Matrix(128, 2048), Batch(16, 1)
-#                     "out": {"kernel": MuonWeightSpec(reduction_axes=(-2,), output_axes=(-1,))},
-#                     "query": {"kernel": MuonWeightSpec(reduction_axes=(-2,), output_axes=(-1,))},
-#                     "value": {"kernel": MuonWeightSpec(reduction_axes=(-2,), output_axes=(-1,))},
-#                     # 3D tensor -> Matrix(2048, 576), Batch(1,)
-#                     "wkv_a": {"kernel": MuonWeightSpec(reduction_axes=(0,), output_axes=(2,))},
-#                     "wkv_b": {"kernel": MuonWeightSpec(reduction_axes=(-2,), output_axes=(-1,))},
-#                 },
-#             },
-#             "logits_dense": {
-#                 # Standard 2D matrix (2048, 102400)
-#                 "kernel": optax.MaskedNode()  # MuonWeightSpec(reduction_axes=(0,), output_axes=(1,))
-#             },
-#             "moe_layers": {
-#                 "DeepSeekMoeBlock_0": {
-#                     "MoeBlock_0": {
-#                         # Shape (2048, 26, 64) -> Matrix(2048, 64), Batch(26,)
-#                         "gate": {"kernel": MuonWeightSpec(reduction_axes=(0,), output_axes=(2,))},
-#                         # 4D MoE weights -> Matrix(2048, 1408), Batch(64, 26)
-#                         "wi_0": MuonWeightSpec(reduction_axes=(-2,), output_axes=(-1,)),
-#                         "wi_1": MuonWeightSpec(reduction_axes=(-2,), output_axes=(-1,)),
-#                         "wo": MuonWeightSpec(reduction_axes=(-2,), output_axes=(-1,)),
-#                     },
-#                     "shared_experts": {
-#                         "wi_0": {"kernel": MuonWeightSpec(reduction_axes=(0,), output_axes=(2,))},
-#                         "wi_1": {"kernel": MuonWeightSpec(reduction_axes=(0,), output_axes=(2,))},
-#                         "wo": {"kernel": MuonWeightSpec(reduction_axes=(0,), output_axes=(2,))},
-#                     },
-#                 },
-#                 "post_self_attention_layer_norm": {"scale": optax.MaskedNode()},
-#                 "pre_self_attention_layer_norm": {"scale":optax.MaskedNode()},
-#                 "self_attention": {
-#                     "key": {"kernel": MuonWeightSpec(reduction_axes=(-2,), output_axes=(-1,))},
-#                     "kv_norm": {"scale": optax.MaskedNode()},
-#                     "out": {"kernel": MuonWeightSpec(reduction_axes=(-2,), output_axes=(-1,))},
-#                     "query": {"kernel": MuonWeightSpec(reduction_axes=(-2,), output_axes=(-1,))},
-#                     "value": {"kernel": MuonWeightSpec(reduction_axes=(-2,), output_axes=(-1,))},
-#                     "wkv_a": {"kernel": MuonWeightSpec(reduction_axes=(0,), output_axes=(2,))},
-#                     "wkv_b": {"kernel": MuonWeightSpec(reduction_axes=(-2,), output_axes=(-1,))},
-#                 },
-#             },
-#         },
-#     }
-# }
+# muon_weight_dimension_numbers
+#
+# {'decoder': {'dense_layers': {'mlp': {'wi_0': {'kernel': ((0,), (-1,))},
+#     'wi_1': {'kernel': ((0,), (-1,))},
+#     'wo': {'kernel': ((0,), (-1,))}},
+#    'self_attention': {'kv_norm': {'scale': None},
+#     'wkv_a': {'kernel': ((0,), (-1,))},
+#     'wkv_b': {'kernel': ((0,), (-2, -1))},
+#     'out': {'kernel': ((0, -2), (-1,))}},
+#    'pre_self_attention_layer_norm': {'scale': None},
+#    'post_self_attention_layer_norm': {'scale': None}},
+#   'moe_layers': {'DeepSeekMoeBlock_0': {'MoeBlock_0': {'wi_0': ((-2,), (-1,)),
+#      'wi_1': ((-2,), (-1,)),
+#      'wo': ((-2,), (-1,)),
+#      'gate': {'kernel': ((0,), (-1,))}},
+#     'shared_experts': {'wi_0': {'kernel': ((-2,), (-1,))},
+#      'wi_1': {'kernel': ((-2,), (-1,))},
+#      'wo': {'kernel': ((-2,), (-1,))}}},
+#    'self_attention': {'kv_norm': {'scale': None},
+#     'wkv_a': {'kernel': ((0,), (-1,))},
+#     'wkv_b': {'kernel': ((0,), (-2, -1))},
+#     'out': {'kernel': ((0, -2), (-1,))}},
+#    'pre_self_attention_layer_norm': {'scale': None},
+#    'post_self_attention_layer_norm': {'scale': None}},
+#   'decoder_norm': {'scale': None},
+#   'logits_dense': {'kernel': None}},
+#  'token_embedder': {'embedding': None}}
 
 
 
@@ -131,12 +87,13 @@ def get_optimizer(config, learning_rate_schedule):
         # Muon-specific parameters: "ns_coeffs", "ns_steps", "weight_decay_mask", "adaptive" uses default
         "beta": config.muon_beta,
         "weight_decay": config.muon_weight_decay,
+        # TODO(how to get this number)
+        "muon_weight_dimension_numbers": None, 
         # AdamW-specific parameters
         "adam_b1": config.adam_b1,
         "adam_b2": config.adam_b2,
         "adam_eps_root": config.adam_eps_root,
         "adam_weight_decay": config.adam_weight_decay,
-        # TODO: spec
     }
     return optax.contrib.muon(**muon_kwargs)
   else:
