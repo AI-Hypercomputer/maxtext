@@ -18,7 +18,7 @@ idx=$(date +%Y-%m-%d-%H-%M)
 MODEL_NAME='gemma3-4b'
 export MODEL_VARIATION='4b'
 HF_GOLDEN_MODEL='google/gemma-3-4b-it'
-TOKENIZER_PATH="${MAXTEXT_ASSETS_ROOT:-${MAXTEXT_REPO_ROOT:-$PWD}/assets}"'/tokenizer.gemma3'
+TOKENIZER_PATH="${MAXTEXT_ASSETS_ROOT:-${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText/assets}}"'/tokenizer.gemma3'
 # To convert the multimodal model, make sure the use_multimodal is set to be true
 USE_MULTIMODAL=false
 

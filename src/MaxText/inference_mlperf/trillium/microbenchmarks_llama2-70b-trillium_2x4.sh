@@ -57,7 +57,7 @@ echo
 echo "LIBTPU_INIT_ARGS:${LIBTPU_INIT_ARGS}"
 echo "XLA_FLAGS:${XLA_FLAGS}"
 echo
-export TOKENIZER_PATH="${MAXTEXT_ASSETS_ROOT:-${MAXTEXT_REPO_ROOT:-$PWD}/assets}"/tokenizer.llama2
+export TOKENIZER_PATH="${MAXTEXT_ASSETS_ROOT:-${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText/assets}}"/tokenizer.llama2
 export LOAD_PARAMETERS_PATH=gs://${USER}-bkt/checkpoints/quant_llama2-70b-chat/prod/int8_
 export MAX_PREFILL_PREDICT_LENGTH=1024
 export MAX_TARGET_LENGTH=2048
