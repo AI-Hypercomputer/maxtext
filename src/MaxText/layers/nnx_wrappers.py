@@ -29,7 +29,7 @@ from flax.nnx import graph
 from flax.nnx import variablelib
 from flax.nnx.bridge import module as bdg_module
 from flax.nnx.module import Module
-from flax.nnx import Object
+from flax.nnx import Pytree
 from flax.nnx.rnglib import Rngs
 import jax
 from jax import tree_util as jtu
@@ -140,7 +140,7 @@ def nnx_attrs_to_linen_vars(nnx_attrs: dict) -> dict:
 
 def _set_initializing(module: Module, initializing: bool):
   for _, value in graph.iter_graph(module):
-    if isinstance(value, Object):
+    if isinstance(value, Pytree):
       value._object__state._initializing = initializing  # pylint: disable=protected-access
 
 
