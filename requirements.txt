@@ -37,7 +37,7 @@ tensorflow-text
 tensorflow
 tiktoken
 transformers
-tunix @ https://github.com/google/tunix/archive/d770659621eb16ef6588268e26fa687fa068df20.zip
+tunix @ git+https://github.com/google/tunix.git
 google-jetstream @ https://github.com/AI-Hypercomputer/JetStream/archive/daedc21c393f23449fb54ddc4f75fca34348ea9c.zip
 mlperf-logging @ https://github.com/mlcommons/logging/archive/38ab22670527888c8eb7825a4ece176fcc36a95d.zip
 # datasets 0.4.0 is not compatible with fsspec==2025.7.0. It will be updated in the next datasets release.

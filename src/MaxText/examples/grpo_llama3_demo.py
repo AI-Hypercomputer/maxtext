@@ -71,6 +71,8 @@ from etils import epath
 from tunix.rl.rollout.base_rollout import RolloutConfig
 
 from MaxText.globals import MAXTEXT_ASSETS_ROOT
+import pathwaysutils
+pathwaysutils.initialize()
 
 # for vLLM we can skip JAX precompilation with this flag, it makes startup faster
 os.environ["SKIP_JAX_PRECOMPILE"] = "1"
@@ -96,12 +98,25 @@ from MaxText.integration.tunix.tunix_adapter import TunixMaxTextAdapter
 # nest_asyncio.apply()  # To fix "This event loop is already running" error in Colab
 # Run `pip install nest_asyncio` if not already installed.
 
-jax.devices()
+print(f"JAX devices: {jax.devices()}")
 
 DEBUG = False  # set to True to run in debug mode, for more print statements
 
 HOME = os.path.expanduser("~") + "/"
 print(f"Home directory (from Python): {HOME}")
+
+# Look for base.yml in two possible locations.
+path1 = os.path.join(HOME, "maxtext/src/MaxText/configs/base.yml")
+path2 = "/deps/src/MaxText/configs/base.yml"
+if os.path.exists(path1):
+  BASE_YAML_PATH = path1
+elif os.path.exists(path2):
+  BASE_YAML_PATH = path2
+else:
+  raise FileNotFoundError(
+      "Could not find base.yml in the expected locations: "
+      f"{path1} or {path2}"
+  )
 
 # ## Hyperparameters
 #
@@ -382,7 +397,7 @@ model_config = llama3_lib.ModelConfig.llama3_1_8b()
 config_ref = pyconfig.initialize(
     [
         "",
-        f"/deps/src/MaxText/configs/base.yml",
+        BASE_YAML_PATH,
     ],
     base_output_directory="dummy",  # This is not used in Tunix.
     run_name="test-tunix-maxtext-llama3.1-8b",
@@ -441,7 +456,7 @@ show_hbm_usage()
 config_policy = pyconfig.initialize(
     [
         "",
-        f"/deps/src/MaxText/configs/base.yml",
+        BASE_YAML_PATH,
     ],
     base_output_directory="dummy",  # This is not used in Tunix.
     run_name="test-tunix-maxtext-llama3.1-8b",  # This is not used in Tunix.

@@ -139,6 +139,14 @@ if [[ ${INSTALL_GRPO} -eq 1 ]] ; then
     exit 1
   fi
   echo "Installing GRPO dependencies (vLLM, tpu-commons)"
+
+  # To install tpu_commons from a local path, we copy it into the build context.
+  # This assumes tpu_commons is a sibling directory to the current one (maxtext).
+  cp -r ../tpu_commons .
+
+  # The cleanup is set to run even if the build fails.
+  trap "rm -rf ./tpu_commons" EXIT
+
   docker build --network host -t ${LOCAL_IMAGE_NAME} -f- . <<EOF
   FROM ${LOCAL_IMAGE_NAME}
 
@@ -150,7 +158,7 @@ if [[ ${INSTALL_GRPO} -eq 1 ]] ; then
   RUN pip install keyring keyrings.google-artifactregistry-auth
 
   # Install vLLM for Jax and TPUs from the artifact registry
-  RUN VLLM_TARGET_DEVICE="tpu" pip install vllm==0.10.1rc2.dev129+g800349c2a.tpu --no-cache-dir --pre \
+  RUN VLLM_TARGET_DEVICE="tpu" pip install --no-cache-dir --pre \
       --index-url https://us-python.pkg.dev/cloud-tpu-images/maxtext-rl/simple/ \
       --extra-index-url https://pypi.org/simple/ \
       --extra-index-url https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/ \
@@ -159,10 +167,20 @@ if [[ ${INSTALL_GRPO} -eq 1 ]] ; then
       --find-links https://storage.googleapis.com/libtpu-wheels/index.html \
       --find-links https://storage.googleapis.com/libtpu-releases/index.html \
       --find-links https://storage.googleapis.com/jax-releases/jax_nightly_releases.html \
-      --find-links https://storage.googleapis.com/jax-releases/jaxlib_nightly_releases.html
+      --find-links https://storage.googleapis.com/jax-releases/jaxlib_nightly_releases.html \
+      vllm==0.10.2rc2.dev59+gdcb28a332.tpu
 
+  #TODO: Anisha: remove this and install from whl
   # Install tpu-commons from the artifact registry
-  RUN pip install tpu-commons==0.1.0 --no-cache-dir --pre \
+  # RUN pip install tpu-commons==0.1.1 --no-cache-dir --pre \
+  #     --index-url https://us-python.pkg.dev/cloud-tpu-images/maxtext-rl/simple/ \
+  #     --extra-index-url https://pypi.org/simple/ \
+  #     --extra-index-url https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/ \
+  #     --find-links https://storage.googleapis.com/jax-releases/libtpu_releases.html
+  # RUN pip install jax==0.7.1.dev20250813 jaxlib==0.7.1.dev20250813
+
+  COPY tpu_commons /tpu_commons
+  RUN pip install -e /tpu_commons --no-cache-dir --pre \
       --index-url https://us-python.pkg.dev/cloud-tpu-images/maxtext-rl/simple/ \
       --extra-index-url https://pypi.org/simple/ \
       --extra-index-url https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/ \
