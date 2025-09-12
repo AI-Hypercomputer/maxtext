@@ -121,7 +121,7 @@ class AotHloIdenticalTest(unittest.TestCase):
     train_argv = (None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")) + tuple(shared_args)
     topology = self.get_device_user_facing_name()
     aot_args = [f"compile_topology={topology}", "compile_topology_num_slices=1"]
-    compile_argv = (None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")) + tuple(shared_args) + tuple(aot_args)
+    compile_argv = train_argv + tuple(aot_args)
     compile_dump_dir = os.path.join(temp_dir, "compile_test_xla_dump", test_name, "aot", "")
 
     # Cleanup directories before use
@@ -150,10 +150,12 @@ class AotHloIdenticalTest(unittest.TestCase):
 
     self.delete_dir(self.dump_dir, compile_dump_dir, train_dump_dir)
 
-    print("AOT Compiled and train HLO files are identical for test {test_name}!")
+    print(f"AOT Compiled and train HLO files are identical for test {test_name}!")
 
   @pytest.mark.tpu_only
   def test_default_hlo_match(self):
+    self.assert_compile_and_real_match_hlo("default_run_2d_mesh", "ici_parallelism=2", "dcn_parallelism=1")
+    self.assert_compile_and_real_match_hlo("default_run_1d_mesh", "ici_parallelism=1", "dcn_parallelism=1")
     self.assert_compile_and_real_match_hlo("default_run")
 
   @pytest.mark.tpu_only
