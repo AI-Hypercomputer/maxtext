@@ -19,7 +19,7 @@
 ```{toctree}
 :maxdepth: 1
 
-reference/terminology.md
-reference/alternatives.md
-reference/benchmark_and_performance.md
+reference/terminology
+reference/alternatives
+reference/benchmark_and_performance
 ```
