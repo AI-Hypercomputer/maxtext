@@ -155,6 +155,20 @@ def check_kl_divergence(model_logits, golden_logits, atol=0.02):
   golden_probabilities = F.softmax(golden_logits_reshaped, dim=-1)
   model_log_probabilities = F.log_softmax(model_logits_reshaped, dim=-1)
 
+  try:
+    # Sum all probabilities along the vocabulary dimension
+    golden_probs_sum = golden_probabilities.sum(dim=-1)
+    
+    # Print the sum of the first 5 token distributions as a sample
+    print("\n--- DEBUG: Sum of golden probabilities (first 5 tokens) ---")
+    print(golden_probs_sum[:5])
+    
+    # Print the min and max sum found across the entire batch
+    print(f"\n--- DEBUG: Min sum: {golden_probs_sum.min().item()}, Max sum: {golden_probs_sum.max().item()} ---")
+        
+  except Exception as e:
+    print(f"Could not print debug sums: {e}")
+
   # 4. Calculate avg KL divergence for all token distributions.
   # use 'batchmean'; the sum of the KL divergences for each token in the batch
   # and then divides by the number of tokens (b * s)
