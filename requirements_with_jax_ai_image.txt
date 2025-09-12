@@ -19,7 +19,7 @@ pylint
 pytest
 pytype
 qwix@git+https://github.com/google/qwix.git
-sentencepiece==0.1.97
+sentencepiece>=0.2.0
 tensorflow-datasets
 tensorflow-text>=2.17.0
 tiktoken
