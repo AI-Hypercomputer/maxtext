@@ -127,6 +127,7 @@ class TestModel(unittest.TestCase):
     quant = quantizations.configure_quantization(self.cfg)
     train_model = models.transformer_as_linen(config=self.cfg, mesh=mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
     prefill_model = models.transformer_as_linen(config=self.cfg, mesh=mesh, quant=quant, model_mode=MODEL_MODE_PREFILL)
+    autoregressive_model = models.transformer_as_linen(config=self.cfg, mesh=mesh, quant=quant, model_mode=MODEL_MODE_AUTOREGRESSIVE)
 
     ids, decoder_segment_ids, decoder_positions = self.get_data()
 
@@ -139,6 +140,14 @@ class TestModel(unittest.TestCase):
     )
 
     prefill_transformer_vars = prefill_model.init(
+        {"params": self.rng, "aqt": self.rng},
+        ids,
+        decoder_positions,
+        decoder_segment_ids,
+        enable_dropout=False,
+    )
+
+    autoregress_transformer_vars = autoregressive_model.init(
         {"params": self.rng, "aqt": self.rng},
         ids,
         decoder_positions,
@@ -174,9 +183,9 @@ class TestModel(unittest.TestCase):
     for idx in range(PREFILL_RANGE, self.cfg.max_target_length):
       ids_idx = ids[:, idx : idx + 1]
       decoder_positions_idx = decoder_positions[:, idx : idx + 1]
-      prefill_transformer_vars.update(partial_cache)
-      ar_logits, partial_cache = prefill_model.apply(
-          prefill_transformer_vars,
+      autoregress_transformer_vars.update(partial_cache)
+      ar_logits, partial_cache = autoregressive_model.apply(
+          autoregress_transformer_vars,
           ids_idx,
           decoder_positions_idx,
           enable_dropout=False,
@@ -184,6 +193,7 @@ class TestModel(unittest.TestCase):
           rngs={"aqt": self.rng},
           mutable=["cache"],
       )
+      autoregress_transformer_vars.update(partial_cache)
 
       full_train_logits_idx = full_train_logits[:, idx : idx + 1, :]
       self.assertTrue(full_train_logits_idx.shape == ar_logits.shape)

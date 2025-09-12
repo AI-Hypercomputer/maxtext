@@ -257,7 +257,7 @@ class Transformer(nnx.Module):
     else:
       seq_len = cfg.max_target_length
 
-    batch_size = cfg.micro_batch_size_to_train_on
+    batch_size = 1 if self.model_mode == MODEL_MODE_PREFILL else cfg.micro_batch_size_to_train_on
     dummy_decoder_input_tokens = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
     dummy_decoder_positions = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
 
