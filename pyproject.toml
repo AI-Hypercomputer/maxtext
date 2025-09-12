@@ -236,7 +236,7 @@ dependencies = [
     "tqdm>=4.67.1",
     "transformers>=4.56.1",
     "treescope>=0.1.10",
-    "tunix @ https://github.com/google/tunix/archive/4c5561be36d8a2f1f0858c2685554ca4e1a65fd2.zip",
+    "tunix @ https://github.com/google/tunix/archive/d770659621eb16ef6588268e26fa687fa068df20.zip",
     "typing-extensions>=4.14.1",
     "typing-inspection>=0.4.1",
     "tzdata>=2025.2",
