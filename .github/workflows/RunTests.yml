@@ -18,7 +18,8 @@
 name: Tests
 
 on:
-  pull_request:
+  # DO NOT SUBMIT THIS LINE
+  # pull_request:
   workflow_dispatch:
   schedule:
     # Run the job every 4 hours

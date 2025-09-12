@@ -1,0 +1,46 @@
+absl-py
+aqtp
+array-record
+cloud-accelerator-diagnostics
+cloud-tpu-diagnostics
+flax
+gcsfs
+google-api-python-client
+google-cloud-aiplatform
+google-cloud-monitoring
+grain[parquet]
+huggingface_hub
+jax<0.7.1
+jaxlib<0.7.1
+jaxtyping
+jsonlines
+ml-collections
+ml-goodput-measurement
+numpy
+omegaconf
+optax
+orbax-checkpoint
+pathwaysutils
+pillow
+pre-commit
+protobuf
+pyink
+pylint
+pytest
+pytype
+sentencepiece
+tensorboard-plugin-profile
+tensorboardx
+tensorflow-datasets
+tensorflow-text
+tensorflow
+transformer-engine[jax]
+tiktoken
+transformers
+tunix @ https://github.com/google/tunix/archive/ee3229a43362fc1209cd477352309c86ca3496b0.zip
+google-jetstream @ https://github.com/AI-Hypercomputer/JetStream/archive/daedc21c393f23449fb54ddc4f75fca34348ea9c.zip
+mlperf-logging @ https://github.com/mlcommons/logging/archive/909ca852015cbc204f8f6d39555dc3f257378818.zip
+qwix @ https://github.com/google/qwix/archive/f17dfb74a2a9964fa268cfb02365afa6dd67bd2b.zip
+# datasets 0.4.0 is not compatible with fsspec==2025.7.0. It will be updated in the next datasets release.
+datasets @ https://github.com/huggingface/datasets/archive/6790e138c00b87a1ddc72184f89e7814cf784360.zip
+seqio @ https://github.com/kanglant/seqio/archive/638c9323d7f23ef16549882cce2a2bcd2d559bb5.zip
