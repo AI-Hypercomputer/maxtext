@@ -312,6 +312,9 @@ def validate_data_input(keys):
         "WARNING: 'sharding_tolerance: allowed percentage of non-sharded parameters' should be between 0.0 and 1.0"
     )
 
+  if keys["eval_interval"] > 0 and keys["generate_padding_batch_eval"]:
+    assert keys["eval_steps"] > 0, "eval_steps must be > 0 when generate_padding_batch_eval is True"
+
 
 def validate_llama4_config(keys: dict):
   """

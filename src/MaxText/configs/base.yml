@@ -470,6 +470,8 @@ eval_data_columns: ['text'] # for DPO dataset containing "chosen" and "rejected"
 eval_image_column: 'image'
 packing: True
 num_epoch: 1  # only grain and tfds pipeline supports num_epoch > 1
+generate_padding_batch_train: False
+generate_padding_batch_eval: False
 
 # direct preference optimization (DPO)
 use_dpo: False

@@ -4,7 +4,7 @@ datasets
 flax>=0.11.0
 google-api-python-client
 google-jetstream@git+https://github.com/AI-Hypercomputer/JetStream.git
-grain[parquet]>=0.2.6
+grain[parquet]>=0.2.12
 jaxtyping
 jsonlines
 mlperf-logging@git+https://github.com/mlperf/logging.git
@@ -13,12 +13,12 @@ orbax-checkpoint>=0.11.22
 pathwaysutils>=0.1.1
 pillow>=11.1.0
 pre-commit
-protobuf==3.20.3
+protobuf>=5.29.5
 pyink
 pylint
 pytest
 pytype
-sentencepiece==0.1.97
+sentencepiece>=0.2.0
 tensorflow-datasets
 tensorflow-text>=2.17.0
 tiktoken
