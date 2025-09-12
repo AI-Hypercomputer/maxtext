@@ -41,7 +41,8 @@ import orbax.checkpoint.experimental.emergency.replicator_checkpoint_manager as 
 from MaxText import checkpointing
 from MaxText import max_logging
 from MaxText import max_utils
-from MaxText.common_types import DecoderBlockType, MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE
+from MaxText import multimodal_utils
+from MaxText.common_types import DecoderBlockType, MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_TRAIN
 from MaxText.inference.page_manager import PageState
 
 OVERWRITE_WITH_GRADIENT = "_overwrite_with_gradient"
@@ -902,6 +903,7 @@ def init_initial_state(model, tx, config, is_training, key):
       {"params": key, "dropout": key, "aqt": key},
       np.ones(input_shape, dtype=jnp.int32),
       np.ones(input_shape, dtype=jnp.int32),
+      model_mode=MODEL_MODE_TRAIN,
       encoder_images=np.ones(image_shape, dtype=jnp.int32) if config.use_multimodal else None,
       # nnx_method="no_op",
   )

@@ -27,6 +27,7 @@ from MaxText.layers import initializers
 from MaxText.common_types import MODEL_MODE_PREFILL, DecoderBlockType, Config, MODEL_MODE_TRAIN, MODEL_MODE_AUTOREGRESSIVE, DECODING_ACTIVE_SEQUENCE_INDICATOR
 from MaxText.inference import page_manager
 from MaxText import multimodal_utils
+from MaxText import max_utils
 from MaxText.layers import nnx_wrappers
 from MaxText.layers.decoders import Decoder
 from MaxText.layers.embeddings import Embed, embed_as_linen
@@ -58,11 +59,13 @@ class TransformerLinenPure(nn.Module):
   def init(self, *args, model_mode: str = MODEL_MODE_TRAIN, **kwargs):
     """Initializes the model."""
     module = self.clone(model_mode=model_mode)
+    kwargs["model_mode"] = model_mode
     return nn.Module.init(module, *args, **kwargs)
 
   def apply(self, *args, model_mode: str = MODEL_MODE_TRAIN, **kwargs):
     """Applies the model."""
     module = self.clone(model_mode=model_mode)
+    kwargs["model_mode"] = model_mode
     return nn.Module.apply(module, *args, **kwargs)
 
   def setup(self):
@@ -101,6 +104,7 @@ class TransformerLinenPure(nn.Module):
       decoder_segment_ids=None,
       encoder_images: None | jnp.ndarray = None,
       enable_dropout=True,
+      model_mode=MODEL_MODE_TRAIN,
       previous_chunk=None,
       true_length: None | int = None,
       slot: None | int = None,
@@ -117,7 +121,7 @@ class TransformerLinenPure(nn.Module):
         for this request.
     """
 
-    if decoder_segment_ids is not None and self.model_mode == MODEL_MODE_AUTOREGRESSIVE:
+    if decoder_segment_ids is not None and model_mode == MODEL_MODE_AUTOREGRESSIVE:
       raise ValueError(
           f"During autoregressive decoding we assume the tokens are in the active sequence"
           f" which is always {DECODING_ACTIVE_SEQUENCE_INDICATOR}."
@@ -139,6 +143,7 @@ class TransformerLinenPure(nn.Module):
         decoder_positions=decoder_positions,
         decoder_segment_ids=decoder_segment_ids,
         deterministic=not enable_dropout,
+        model_mode=model_mode,
         previous_chunk=previous_chunk,
         slot=slot,
         page_state=page_state,
@@ -175,6 +180,7 @@ class TransformerLinenPure(nn.Module):
           position_ids=decoder_positions,
           decoder_segment_ids=decoder_segment_ids,
           deterministic=not enable_dropout,
+          model_mode=model_mode,
       )
 
     return logits
@@ -213,12 +219,14 @@ class TransformerLinen(nnx_wrappers.ToLinen):
     """Initializes the model."""
     model_kwargs = self.kwargs.copy({"model_mode": model_mode})  # type: ignore[wrong-arg-types]
     module = self.clone(kwargs=model_kwargs)
+    kwargs["model_mode"] = model_mode
     return nnx_wrappers.ToLinen.init(module, *args, **kwargs)
 
   def apply(self, *args, model_mode: str = MODEL_MODE_TRAIN, **kwargs):
     """Applies the model."""
     model_kwargs = self.kwargs.copy({"model_mode": model_mode})  # type: ignore[wrong-arg-types]
     module = self.clone(kwargs=model_kwargs)
+    kwargs["model_mode"] = model_mode
     return nnx_wrappers.ToLinen.apply(module, *args, **kwargs)
 
 class Transformer(nnx.Module):
@@ -250,14 +258,7 @@ class Transformer(nnx.Module):
     decoder_linen = Decoder(config=cfg, mesh=mesh, quant=self.quant, model_mode=self.model_mode)
     self.decoder = nnx_wrappers.ToNNX(decoder_linen, rngs=rngs)
 
-    if self.model_mode == MODEL_MODE_PREFILL:
-      seq_len = cfg.max_prefill_predict_length
-    elif self.model_mode == MODEL_MODE_AUTOREGRESSIVE:
-      seq_len = 1
-    else:
-      seq_len = cfg.max_target_length
-
-    batch_size = cfg.micro_batch_size_to_train_on
+    batch_size, seq_len = max_utils.get_batch_seq_len_for_mode(config=cfg, model_mode=model_mode)
     dummy_decoder_input_tokens = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
     dummy_decoder_positions = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
 
@@ -305,6 +306,7 @@ class Transformer(nnx.Module):
       cache=None,
       encoder_images: jax.Array | None = None,
       enable_dropout=True,
+      model_mode=MODEL_MODE_TRAIN,
       previous_chunk=None,
       true_length: int | None = None,
       slot: int | None = None,
@@ -320,7 +322,7 @@ class Transformer(nnx.Module):
         for this request.
     """
 
-    if decoder_segment_ids is not None and self.model_mode == MODEL_MODE_AUTOREGRESSIVE:
+    if decoder_segment_ids is not None and model_mode == MODEL_MODE_AUTOREGRESSIVE:
       raise ValueError(
           f"During autoregressive decoding we assume the tokens are in the active sequence"
           f" which is always {DECODING_ACTIVE_SEQUENCE_INDICATOR}."
@@ -342,6 +344,7 @@ class Transformer(nnx.Module):
         decoder_positions=decoder_positions,
         decoder_segment_ids=decoder_segment_ids,
         deterministic=not enable_dropout,
+        model_mode=model_mode,
         previous_chunk=previous_chunk,
         slot=slot,
         page_state=page_state,
@@ -378,6 +381,7 @@ class Transformer(nnx.Module):
           position_ids=decoder_positions,
           decoder_segment_ids=decoder_segment_ids,
           deterministic=not enable_dropout,
+          model_mode=model_mode,
       )
 
     return logits
@@ -417,6 +421,7 @@ class ZeroOneTransformer(nn.Module):
       decoder_segment_ids=None,
       encoder_images: None | jnp.ndarray = None,
       enable_dropout=True,
+      model_mode=MODEL_MODE_TRAIN,
       previous_chunk=None,
       true_length: None | int = None,
       slot: None | int = None,
@@ -433,6 +438,7 @@ class ZeroOneTransformer(nn.Module):
           decoder_segment_ids=decoder_segment_ids,
           encoder_images=encoder_images,
           enable_dropout=enable_dropout,
+          model_mode=model_mode,
           previous_chunk=previous_chunk,
           true_length=true_length,
           slot=slot,
@@ -449,7 +455,7 @@ class ZeroOneTransformer(nn.Module):
         decoder_segment_ids=decoder_segment_ids,
         encoder_images=encoder_images,
         enable_dropout=enable_dropout,
-        model_mode=self.model_mode,
+        model_mode=model_mode,
         previous_chunk=previous_chunk,
         true_length=true_length,
         slot=slot,
