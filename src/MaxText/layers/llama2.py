@@ -25,7 +25,7 @@ from flax import nnx
 
 from MaxText.inference import page_manager
 from MaxText.common_types import Config
-from MaxText.layers.linears import MlpBlock
+from MaxText.layers.linears import Dropout, MlpBlock
 from MaxText.layers import initializers
 from MaxText.layers import nnx_wrappers
 from MaxText.layers import quantizations
@@ -56,8 +56,7 @@ class LlamaDecoderLayer(nnx.Module):
     self.mesh = mesh
     self.quant = quant
 
-    #batch_size = config.micro_batch_size_to_train_on
-    batch_size = 1 if model_mode == MODEL_MODE_PREFILL else config.micro_batch_size_to_train_on
+    batch_size = config.micro_batch_size_to_train_on
 
     if model_mode == MODEL_MODE_PREFILL:
       seq_len = config.max_prefill_predict_length
@@ -127,7 +126,7 @@ class LlamaDecoderLayer(nnx.Module):
         rngs=rngs,
     )
 
-    self.dropout = nnx.Dropout(rate=config.dropout_rate, broadcast_dims=(-2,), rngs=rngs)
+    self.dropout = Dropout(rate=config.dropout_rate, broadcast_dims=(-2,), rngs=rngs)
 
     if model_mode == MODEL_MODE_PREFILL:
       self.activation_axis_names = ("activation_batch", "prefill_activation_norm_length", "activation_embed")

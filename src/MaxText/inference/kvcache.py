@@ -36,6 +36,7 @@ from MaxText.common_types import CACHE_BATCH, CACHE_SEQUENCE, CACHE_HEADS, CACHE
 MAX_INT8 = 127.5
 MAX_INT4 = 7.5
 E4M3_MAX = jnp.finfo(jnp.float8_e4m3fn).max.astype(jnp.float32)
+PREFILL_BATCH_SIZE = 1
 
 
 def reverse_transpose(transposed_array, transpose_axis_order):
@@ -333,12 +334,12 @@ class KVCache(nnx.Module):
   def _get_cached_kv_dtype(self):
     return self.kv_quant.dtype if self.kv_quant else self.dtype
 
-  def _get_cache_scale_logical_shape(self, heads, cache_length):
+  def _get_cache_scale_logical_shape(self, heads, cache_length, batch):
     assert self.kv_quant
     if self.kv_quant.axis_cfg == "dkv":
-      return (self.batch, cache_length, heads, 1)
+      return (batch, cache_length, heads, 1)
     if self.kv_quant.axis_cfg == "heads_and_dkv":
-      return (self.batch, cache_length, 1, 1)
+      return (batch, cache_length, 1, 1)
     raise ValueError(f"Invalid config for kv_quant_axis:{self.kv_quant.axis_cfg}")
 
   def _initialize_prefill_caches(self, model_mode):
@@ -353,10 +354,10 @@ class KVCache(nnx.Module):
       cache_logical_axis_names = self.cache_logical_axis_names
     cache_axis_names = transpose_tuple(cache_logical_axis_names, self.prefill_cache_axis_order)
 
-    cache_logical_shape = (self.batch, cache_length, self.key_heads, self.key_head_size)
+    cache_logical_shape = (PREFILL_BATCH_SIZE, cache_length, self.key_heads, self.key_head_size)
     cache_shape_key = transpose_tuple(cache_logical_shape, self.prefill_cache_axis_order)
 
-    cache_logical_shape = (self.batch, cache_length, self.value_heads, self.value_head_size)
+    cache_logical_shape = (PREFILL_BATCH_SIZE, cache_length, self.value_heads, self.value_head_size)
     cache_shape_value = transpose_tuple(cache_logical_shape, self.prefill_cache_axis_order)
 
     self.cached_prefill_key = nnx.Cache(
@@ -381,10 +382,10 @@ class KVCache(nnx.Module):
     if self.kv_quant:
       cache_scale_axis_names = transpose_tuple(self.cache_scale_logical_axis_names, self.prefill_cache_axis_order)
 
-      cache_scale_logical_shape = self._get_cache_scale_logical_shape(self.key_heads, cache_length)
+      cache_scale_logical_shape = self._get_cache_scale_logical_shape(self.key_heads, cache_length, batch=PREFILL_BATCH_SIZE)
       cache_key_scale_shape = transpose_tuple(cache_scale_logical_shape, self.prefill_cache_axis_order)
 
-      cache_scale_logical_shape = self._get_cache_scale_logical_shape(self.value_heads, cache_length)
+      cache_scale_logical_shape = self._get_cache_scale_logical_shape(self.value_heads, cache_length, batch=PREFILL_BATCH_SIZE)
       cache_value_scale_shape = transpose_tuple(cache_scale_logical_shape, self.prefill_cache_axis_order)
 
       self.cached_prefill_key_scale = nnx.Cache(
@@ -461,10 +462,10 @@ class KVCache(nnx.Module):
     if self.kv_quant:
       cache_scale_axis_names = transpose_tuple(self.cache_scale_logical_axis_names, self.ar_cache_axis_order)
 
-      cache_scale_logical_shape = self._get_cache_scale_logical_shape(self.key_heads, cache_length)
+      cache_scale_logical_shape = self._get_cache_scale_logical_shape(self.key_heads, cache_length, batch=self.batch)
       cache_key_scale_shape = transpose_tuple(cache_scale_logical_shape, self.ar_cache_axis_order)
 
-      cache_scale_logical_shape = self._get_cache_scale_logical_shape(self.value_heads, cache_length)
+      cache_scale_logical_shape = self._get_cache_scale_logical_shape(self.value_heads, cache_length, batch=self.batch)
       cache_value_scale_shape = transpose_tuple(cache_scale_logical_shape, self.ar_cache_axis_order)
 
       self.cached_ar_key_scale = nnx.Cache(
@@ -511,7 +512,7 @@ class KVCache(nnx.Module):
 
     assert not self.kv_quant, "Not support kv_quant now."
     if decoder_segment_ids is not None:
-      self.batch, segment_id_seq_len = decoder_segment_ids.shape
+      _, segment_id_seq_len = decoder_segment_ids.shape
       assert self.key_seq_len == segment_id_seq_len, f"{self.key_seq_len=}, {segment_id_seq_len=} should match."
 
     assert key.dtype == value.dtype, "Key and Value Dtypes should match."

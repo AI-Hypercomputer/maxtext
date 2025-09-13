@@ -471,6 +471,7 @@ class MlpBlock(nnx.Module):
     x = functools.reduce(operator.mul, activations).astype(self.dtype)
     # Apply dropout and final dense output projection.
     x = self.dropout(x, deterministic=deterministic)  # Broadcast along length.
+    # TODO: Where should this model_mode come from now?
     if self.model_mode == MODEL_MODE_PREFILL:
       x = nn.with_logical_constraint(x, ("activation_batch", "prefill_activation_length", "activation_mlp"))
     else:
