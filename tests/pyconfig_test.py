@@ -17,7 +17,7 @@ import os.path
 
 from MaxText import pyconfig
 from MaxText.globals import MAXTEXT_PKG_DIR
-from MaxText.pyconfig import resolve_config_path
+from MaxText.pyconfig_og import resolve_config_path
 
 
 class PyconfigTest(unittest.TestCase):
