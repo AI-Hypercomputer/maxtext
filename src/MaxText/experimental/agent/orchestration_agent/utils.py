@@ -247,7 +247,7 @@ def remove_local_imports(source_code, filepath=None):
         try:
           import_tree = ast.parse(import_block)
           import_node = import_tree.body[0]
-        except Exception:
+        except (IndentationError, SyntaxError):
           import_node = node  # fallback
 
         remove = False

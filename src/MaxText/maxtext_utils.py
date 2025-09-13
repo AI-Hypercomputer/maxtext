@@ -531,7 +531,7 @@ def calculate_tflops_training_per_device(config, log=True):
         config, total_ffn_flops, qkv_flops, projection_flops, embedding_flops
     )
   elif config.decoder_block == DecoderBlockType.GEMMA3:
-    attention_tflops, learnable_weight_tflops = calculate_mixed_attention_model_tflops_training_per_device (
+    attention_tflops, learnable_weight_tflops = calculate_mixed_attention_model_tflops_training_per_device(
         config, total_ffn_flops, qkv_flops, projection_flops, embedding_flops, attention_pattern_length=6
     )
   elif config.decoder_block == DecoderBlockType.GPT_OSS:
