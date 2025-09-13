@@ -68,6 +68,7 @@ jobs:
       - name: Install the maxtext wheel
         run: |
           python3 -m uv pip install maxtext-*-py3-none-any.whl --resolution=lowest --system
+          install_maxtext_github_deps
           python3 --version
           python3 -m pip freeze
       - name: Copy test assets files
