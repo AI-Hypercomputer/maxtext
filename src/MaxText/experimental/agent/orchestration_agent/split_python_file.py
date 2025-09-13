@@ -175,7 +175,7 @@ class DependencyAnalyzer:
     Raises:
         FileNotFoundError: When the remote file does not exist or a local
             path is missing.
-        Exception: When a remote file exists but cannot be read.
+        IOError: When a remote file exists but cannot be read.
     """
     source_code = ""
     if self.file_path.startswith("https"):
@@ -184,7 +184,7 @@ class DependencyAnalyzer:
         exists, _ = check_github_file_exists(self.file_path)
         if exists:
           print("not able to read seems have some issue in file", self.file_path, source_code)
-          raise Exception(source_code)
+          raise IOError(f"Could not read remote file content: {source_code}")
         else:
           print("Unable to read file: does not exist", self.file_path)
           raise FileNotFoundError(self.file_path)
@@ -625,7 +625,7 @@ def get_modules_from_file(file_path, module, project_root="transformers", add_ex
     logger.info("--- Analyzing '%s' for %s ---\n", file_path, module)
     analyzer = DependencyAnalyzer(file_path, project_root, add_external_dependencies=add_external_dependencies)
     return analyzer.get_module_code(module), analyzer.source_code
-  except Exception as e:
+  except (FileNotFoundError, IOError, KeyError) as e:
     logger.error("Unable to find module %s from %s due to %s", module, file_path, e)
     if analyzer is None:
       return None, None

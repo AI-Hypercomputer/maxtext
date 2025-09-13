@@ -772,7 +772,11 @@ class MaxEngine(engine_api.Engine):
         "tokens": first_generated_tokens,
     }, result
 
-  @functools.partial(jax.jit, static_argnums=(0,), static_argnames=("num_prompts", "return_prompt_logp", "algorithm", "topk", "nucleus_topp"))
+  @functools.partial(
+      jax.jit,
+      static_argnums=(0,),
+      static_argnames=("num_prompts", "return_prompt_logp", "algorithm", "topk", "nucleus_topp"),
+  )
   def prefill_concat(
       self,
       *,
@@ -837,11 +841,7 @@ class MaxEngine(engine_api.Engine):
     cache = self._maybe_stack_prefill_result_cache(cache)
     if return_prompt_logp:
       prompt_logp = inference_utils.prompt_logprobs_from_packed_prefill(
-          flat_logits,
-          input_tokens,
-          decoder_positions,
-          decoder_segment_ids,
-          true_lengths
+          flat_logits, input_tokens, decoder_positions, decoder_segment_ids, true_lengths
       )
     else:
       prompt_logp = None
@@ -940,7 +940,9 @@ class MaxEngine(engine_api.Engine):
 
     return max_utils.unbox_logicallypartioned(new_state), result
 
-  @functools.partial(jax.jit, static_argnums=(0,), donate_argnums=(2,), static_argnames=("algorithm", "topk", "nucleus_topp"))
+  @functools.partial(
+      jax.jit, static_argnums=(0,), donate_argnums=(2,), static_argnames=("algorithm", "topk", "nucleus_topp")
+  )
   def _generate_jit(
       self,
       params: Params,
@@ -1566,7 +1568,7 @@ class MaxEngine(engine_api.Engine):
           "next_pos": next_pos,
           "generated_tokens": generated_tokens,
           "tokens": tokens,
-          "token_logp": token_logp
+          "token_logp": token_logp,
       }
 
     with nn_partitioning.axis_rules(self.config.logical_axis_rules):

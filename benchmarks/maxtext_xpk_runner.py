@@ -30,7 +30,6 @@ import string
 import subprocess
 import threading
 import time
-from typing import Optional, List
 
 import omegaconf
 
@@ -108,8 +107,8 @@ class WorkloadConfig:
   db_dataset: str = ""
   db_is_test: bool = True
   disruption_configs: DisruptionConfig = None
-  xpk_storage: Optional[List[str]] = None
-  hlo_dump: Optional[bool] = None
+  xpk_storage: None | list[str] = None
+  hlo_dump: None | bool = None
 
   def __post_init__(self):
     """Initializes num_devices_per_slice and topology for recording the run into BigQuery"""
@@ -200,7 +199,7 @@ def wait_for_xpk_workloads_completion_async(
     workload_names: List of workload names to wait for.
     xpk_path: Path to the xpk.py script.
   Yields:
-    Tuple[workload_name, return_code]: The name of the workload that has just
+    tuple[workload_name, return_code]: The name of the workload that has just
       completed and its return code.
   """
   threads = []
