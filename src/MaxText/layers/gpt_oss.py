@@ -26,7 +26,6 @@ from jax.sharding import Mesh
 import jax.numpy as jnp
 
 from flax import linen as nn
-from flax import nnx
 
 from MaxText.common_types import AttentionType
 from MaxText.layers import initializers

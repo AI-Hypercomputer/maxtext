@@ -938,7 +938,15 @@ class Attention(nnx.Module):
       if model_mode != MODEL_MODE_TRAIN:
         cached_values = self.update_kv_caches(key, value, decoder_segment_ids, model_mode, previous_chunk)
       out = self.attention_op(
-          query, key, value, decoder_segment_ids, model_mode, cached_values, previous_chunk, bidirectional_mask, self.sinks
+          query,
+          key,
+          value,
+          decoder_segment_ids,
+          model_mode,
+          cached_values,
+          previous_chunk,
+          bidirectional_mask,
+          self.sinks,
       )
 
     if model_mode == MODEL_MODE_PREFILL:

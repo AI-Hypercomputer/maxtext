@@ -291,7 +291,7 @@ def _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info,
       },
       "token_embedder": {"embedding": None},
   }
-  
+
   # decoder norm scale ###########################################
   max_logging.log("Processing decoder norm scale")
   jax_weights["decoder"]["decoder_norm"]["scale"] = chkpt_vars["decoder_norm.scale"].to(torch.float16).numpy()
@@ -589,7 +589,9 @@ def _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info,
       mtp_attn_block.update({"query": {"kernel": None}})
     if q_lora_rank != 0:
       mtp_attn_block["q_norm"]["scale"] = (
-          chkpt_vars["mtp_block.mtp_layer_1.mtp_1_transformer_layer.self_attention.q_norm.scale"].to(torch.float16).numpy()
+          chkpt_vars["mtp_block.mtp_layer_1.mtp_1_transformer_layer.self_attention.q_norm.scale"]
+          .to(torch.float16)
+          .numpy()
       )
       mtp_attn_block["wq_a"]["kernel"] = (
           chkpt_vars["mtp_block.mtp_layer_1.mtp_1_transformer_layer.self_attention.wq_a.kernel"]
