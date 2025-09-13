@@ -258,7 +258,7 @@ Repository = "https://github.com/AI-Hypercomputer/maxtext.git"
 allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/MaxText", "src/MaxText_extra_deps"]
+packages = ["src/MaxText", "src/install_maxtext_extra_deps"]
 
 [project.scripts]
-install_maxtext_github_deps = "maxtext_extra_deps.install_github_deps:main"
+install_maxtext_github_deps = "install_maxtext_extra_deps.install_github_deps:main"
