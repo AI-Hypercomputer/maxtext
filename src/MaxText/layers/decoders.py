@@ -374,7 +374,7 @@ class Decoder(nn.Module):
       case DecoderBlockType.DEFAULT:
         return [DecoderLayer]
       case DecoderBlockType.LLAMA2:
-        return [llama2.LlamaDecoderLayer]
+        return [llama2.LlamaDecoderLayerToLinen]
       case DecoderBlockType.MISTRAL:
         # TODO(ranran): update to Mistral with sliding window attention
         return [mistral.MistralDecoderLayer]
