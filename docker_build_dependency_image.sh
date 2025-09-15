@@ -140,12 +140,15 @@ if [[ ${INSTALL_GRPO} -eq 1 ]] ; then
   fi
   echo "Installing GRPO dependencies (vLLM, tpu-commons)"
 
-  # To install tpu_commons from a local path, we copy it into the build context.
+  # To install tpu_commons from a local path, we copy it into the build context, excluding __pycache__.
   # This assumes tpu_commons is a sibling directory to the current one (maxtext).
-  cp -r ../tpu_commons .
+  rsync -a --exclude='__pycache__' ../tpu_commons .
+  # To install vllm from a local path, we copy it into the build context, excluding __pycache__.
+  # This assumes vllm is a sibling directory to the current one (maxtext).
+  rsync -a --exclude='__pycache__' ../vllm .
 
   # The cleanup is set to run even if the build fails to remove the copied directory.
-  trap "rm -rf ./tpu_commons" EXIT INT TERM
+  trap "rm -rf ./tpu_commons ./vllm" EXIT INT TERM
 
   docker build \
     --network host \
