@@ -24,7 +24,7 @@ else
     cmd=''
 fi
 
-export TOKENIZER_PATH="${MAXTEXT_ASSETS_ROOT:-${MAXTEXT_REPO_ROOT:-$PWD}/assets}"/tokenizer.llama2
+export TOKENIZER_PATH="${MAXTEXT_ASSETS_ROOT:-${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText/assets}}"/tokenizer.llama2
 export MAX_PREFILL_PREDICT_LENGTH=128
 export MAX_TARGET_LENGTH=256
 export MODEL_NAME=${model}

@@ -1012,6 +1012,7 @@ class AttentionOp(nnx.Module):
           q_seq_shards=cp_size,  # axis for sequence sharding
           block_sizes=block_sizes,
           attn_logits_soft_cap=attn_logits_soft_cap,
+          residual_checkpoint_name="context",
       )
       return splash_kernel
 
@@ -1369,18 +1370,19 @@ class AttentionOp(nnx.Module):
     b, t, n, d = query.shape
     n_kv = key.shape[-2]
     assert n_kv == self.num_kv_heads
+    precision_kwargs = {"precision": self.config.matmul_precision} if einsum is jnp.einsum else {}
     if model_mode == MODEL_MODE_TRAIN or self.compute_axis_order == (0, 1, 2, 3):
       query = jnp.reshape(query, (b, t, n_kv, n // n_kv, d))
       if self.reshape_q and q_seq_len == 1:
         query = jnp.broadcast_to(query, (b, 2, n_kv, n // n_kv, d))
-      result = einsum("btkgd,bskd->bkgts", query, key)
+      result = einsum("btkgd,bskd->bkgts", query, key, **precision_kwargs)
     elif self.compute_axis_order == (0, 2, 1, 3):
       query = jnp.transpose(query, axes=self.compute_axis_order)
       key = jax.tree.map(lambda x: jnp.transpose(x, axes=self.compute_axis_order), key)
       query = jnp.reshape(query, (b, n_kv, n // n_kv, t, d))
       if self.reshape_q and q_seq_len == 1:
         query = jnp.broadcast_to(query, (b, n_kv, n // n_kv, 2, d))
-      result = einsum("bkgtd,bksd->bkgts", query, key)
+      result = einsum("bkgtd,bksd->bkgts", query, key, **precision_kwargs)
     else:
       raise NotImplementedError(self.compute_axis_order)
     return result
@@ -1407,17 +1409,18 @@ class AttentionOp(nnx.Module):
       n // n_kv: number of group for query, sometimes annotated with g
     """
 
+    precision_kwargs = {"precision": self.config.matmul_precision} if einsum is jnp.einsum else {}
     if self.kv_quant:
       # manually cast to bf16 to avoid the fp32 XLA ops for speedup
       if isinstance(value, KVTensor) and self.kv_quant.dtype == jnp.float8_e4m3fn:
         value.qvalue = value.qvalue.astype(jnp.bfloat16)
     if model_mode == MODEL_MODE_TRAIN or self.compute_axis_order == (0, 1, 2, 3):
-      out = einsum("bkgts,bskd->btkgd", attn_weights, value)
+      out = einsum("bkgts,bskd->btkgd", attn_weights, value, **precision_kwargs)
       b, t, n_kv, g, d = out.shape
       result = jnp.reshape(out, (b, t, n_kv * g, d))
     elif self.compute_axis_order == (0, 2, 1, 3):
       value = jax.tree.map(lambda x: jnp.transpose(x, axes=self.compute_axis_order), value)
-      out = einsum("bkgts,bksd->bkgtd", attn_weights, value)
+      out = einsum("bkgts,bksd->bkgtd", attn_weights, value, **precision_kwargs)
       b, n_kv, g, t, d = out.shape
       result = jnp.reshape(out, (b, n_kv * g, t, d))
       result = self.reverse_transepose(result, self.compute_axis_order)

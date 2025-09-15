@@ -18,7 +18,6 @@ pyink
 pylint
 pytest
 pytype
-qwix@git+https://github.com/google/qwix.git
 sentencepiece==0.1.97
 tensorflow-datasets
 tensorflow-text>=2.17.0
