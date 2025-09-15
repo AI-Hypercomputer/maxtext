@@ -259,7 +259,7 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
     (loss, aux), raw_grads = grad_func(model, config, data, dropout_rng, state.params, *extra_dpo_args, is_train=True)
   
   raw_grads =jax.tree_util.tree_map(
-    lambda x: x.astype(config.),
+    lambda x: x.astype(config.grad_dtype),
     raw_grads
   )
   intermediate_outputs = aux["intermediate_outputs"]
@@ -267,10 +267,6 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
   moe_lb_loss = aux["moe_lb_loss"]
   mtp_loss = aux["mtp_loss"]
   
-  raw_grads =jax.tree_util.tree_map(
-    lambda x: x.astype(jnp.bfloat16) if x.dtype == jnp.float32 else x,
-    raw_grads
-  )
   if config.gradient_clipping_threshold > 0:
     grads = maxtext_utils.apply_gradient_clipping(raw_grads, state, config.gradient_clipping_threshold)
   else:
