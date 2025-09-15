@@ -15,7 +15,7 @@ import dataclasses
 from benchmarks.benchmark_utils import MaxTextModel, _add_to_model_dictionary
 from benchmarks.convergence.convergence_utils import DatasetHParams, ConvHParams, _setup_model_convergence_
 
-from benchmarks.maxtext_v5p_model_configs import v5p_model_dict, deepseek_v3_ep_256_v5p_512, deepseek_v3_fsdp_v5p_512_nocapp, llama4_scout_dropless_v5p_256
+from benchmarks.maxtext_v5p_model_configs import v5p_model_dict, deepseek_v3_ep_256_v5p_512, deepseek_v3_fsdp_v5p_512_nocapp, llama4_scout_dropless_v5p_256, deepseek_v3_fsdp_v5p_512_nocapp_ring, deepseek_v3_fsdp_v5p_512_nocapp_2d_AG
 
 c4_pretrain_model_dict = {}
 
@@ -99,11 +99,34 @@ deepseek_v3_fsdp_v5p_512_nocapp_gbs_1024 = _add_to_model_dictionary(
     c4_mlperf_hp,
     deepseek_671b_hp,
     global_batch_size=1024,
+    num_devices=512,
+    checkpoint="gs://maxtext-model-checkpoints/deepseek3-671b/0/items",
+    )
+)
+
+deepseek_v3_fsdp_v5p_512_ring_gbs_512 = _add_to_model_dictionary(
+    c4_pretrain_model_dict,
+    _setup_model_convergence_(
+    deepseek_v3_fsdp_v5p_512_nocapp_ring,
+    c4_mlperf_hp,
+    deepseek_671b_hp,
+    global_batch_size=512,
     num_devices=256,
     checkpoint="gs://maxtext-model-checkpoints/deepseek3-671b/0/items",
     )
 )
 
+deepseek_v3_fsdp_v5p_512_nocapp_2d_AG_gbs512 = _add_to_model_dictionary(
+    c4_pretrain_model_dict,
+    _setup_model_convergence_(
+    deepseek_v3_fsdp_v5p_512_nocapp_2d_AG,
+    c4_mlperf_hp,
+    deepseek_671b_hp,
+    global_batch_size=1024,
+    num_devices=256,
+    checkpoint="gs://maxtext-model-checkpoints/deepseek3-671b/0/items",
+    )
+)
 llama4_scout_dropless_v5p_256_gbs_2048 = _add_to_model_dictionary(
     c4_pretrain_model_dict,
     _setup_model_convergence_(
