@@ -170,6 +170,7 @@ capacity_factor: -1.0 # a factor to decide expert capacity for token dropping, a
 load_balance_loss_weight: 0.01 # weight for the load balance loss
 use_random_routing: False # whether to use random routing for debug/test purpose
 use_custom_sort_vjp: True # whether to use a custom sort vjp for sparse matmul ops
+use_ring_of_experts: False # whether to use ring of experts for sparse matmul expert parallelism
 # Tunable tiling dimensions used for Megablox
 tile_batch_seq: 512
 tile_activation_dim: 1024
@@ -180,6 +181,9 @@ norm_topk_prob: False # Boolean to enable the top-k probability normalization. Q
 # "fsdp" (ep acts as fsdp parallelism)
 # "context" (ep acts as context parallelism, training only)
 expert_shard_attention_option: "fsdp"
+
+# When MoE weight matrices are sharded on both FSDP and FSDP-transpose axes, use two separate All-Gather calls
+moe_fsdp_use_two_stage_all_gather: False
 
 # deepseek moe
 base_moe_mlp_dim: 7168 # intermediate dimension at MoE layer. For a fully MoE model, base_mlp_dim must be equal to base_moe_mlp_dim.
@@ -365,6 +369,7 @@ logical_axis_rules: [
                       ['decode_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
                       ['decode_length', ['sequence']],
                       ['mlp', ['fsdp_transpose', 'tensor', 'tensor_sequence', 'autoregressive']],
+                      ['mlp_no_fsdp', ['tensor', 'tensor_sequence', 'autoregressive']],
                       ['vocab', ['tensor', 'tensor_transpose', 'tensor_sequence', 'autoregressive']],
                       ['heads', ['tensor', 'tensor_transpose', 'tensor_sequence', 'autoregressive']],
                       ['q_heads', ['tensor', 'tensor_transpose', 'tensor_sequence', 'autoregressive']],
@@ -445,7 +450,7 @@ num_slices: -1
 
 # Tokenizer
 vocab_size: 32_000 # powers of 2 for sharding
-tokenizer_path: "assets/tokenizer.llama2"
+tokenizer_path: "src/MaxText/assets/tokenizer.llama2"
 # tfds pipeline supports tokenizer_type: sentencepiece, huggingface, tiktoken
 # grain pipeline supports tokenizer_type: sentencepiece, huggingface
 # hf pipeline only supports huggingface type, and will ignore tokenizer_type flag
@@ -621,6 +626,9 @@ rope_factor: 40
 beta_fast: 32
 beta_slow: 1
 mscale: 1.0
+rope_interleave: True # RoPE with sin/cos interleaved vs concatenated
+rope_truncate: True # Floor lower bound and ceil upper bound for correction range
+rope_attention_scaling: False # Scale the rotary embedding output
 
 # Ahead of time Compilation (aka AOT)
 # Only set these arguments if you are running train_compile or loading a compiled train step.
@@ -792,6 +800,7 @@ remat_policy_for_vit: "minimal"  # Remat policy for multimodal model's vision en
 image_size_for_vit: 896 # Default for Gemma3, and should be overwritten by model's config
 image_path: "" # Local image path used for decoding
 image_placeholder: "<|image|>"
+posemb_type_for_vit: "learn"
 
 ### llama4 multi modal configs
 hidden_size_for_vit: 1408
@@ -800,6 +809,7 @@ num_attention_heads_for_vit: 16
 num_channels_for_vit: 3
 tile_size_for_vit: 336
 patch_size_for_vit: 14
+conv_stride_for_vit: 14
 num_hidden_layers_for_vit: 34
 projector_input_dim_for_vit: 4096
 projector_output_dim_for_vit: 4096

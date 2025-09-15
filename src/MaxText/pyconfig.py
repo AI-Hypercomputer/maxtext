@@ -32,6 +32,7 @@ from MaxText import accelerator_to_spec_map
 from MaxText import max_logging
 from MaxText import max_utils
 from MaxText.common_types import DecoderBlockType
+from MaxText.globals import MAXTEXT_ASSETS_ROOT, MAXTEXT_REPO_ROOT, MAXTEXT_PKG_DIR
 from MaxText.layers.attentions import AttentionType
 from MaxText.utils import gcs_utils
 
@@ -217,9 +218,9 @@ def validate_keys(keys):
   if keys["num_experts"] > 1:
     validate_mlp_dim(keys)
     validate_sparse_matmul_parallelism(keys)
+    validate_ring_of_experts_parallelism(keys)
     validate_ragged_dot(keys)
     validate_deepseek_moe(keys)
-    validate_gpt_oss_moe(keys)
     validate_expert_shard_attention_option(keys["expert_shard_attention_option"])
 
   if keys["use_multimodal"]:
@@ -569,13 +570,22 @@ class _HyperParameters:
 
     if not os.path.isfile(raw_keys["tokenizer_path"]):
       # Try and find the tokenizer path relative to the config file.
-      tokenizer_path = os.path.join(
-          os.path.dirname(config_name),
-          raw_keys["tokenizer_path"],
-      )
+      for search_root in (
+          MAXTEXT_ASSETS_ROOT,
+          os.path.dirname(MAXTEXT_ASSETS_ROOT),
+          os.path.join(MAXTEXT_REPO_ROOT, "assets"),
+          MAXTEXT_REPO_ROOT,
+          os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText"),
+          MAXTEXT_PKG_DIR,
+      ):
+        tokenizer_path = os.path.join(
+            search_root,
+            raw_keys["tokenizer_path"],
+        )
 
-      if os.path.isfile(tokenizer_path):
-        raw_keys["tokenizer_path"] = tokenizer_path
+        if os.path.isfile(tokenizer_path):
+          raw_keys["tokenizer_path"] = tokenizer_path
+          break
 
     self.keys = raw_keys
     keys = [k for k in raw_keys]  # pylint: disable=unnecessary-comprehension
@@ -1001,11 +1011,6 @@ def validate_mlp_dim(raw_keys):
       raise ValueError(f'For a fully MoE model, base_mlp_dim must be equal to base_moe_mlp_dim. Received base_mlp_dim={base_mlp_dim} and base_moe_mlp_dim={base_moe_mlp_dim}.')
 
 
-def validate_gpt_oss_moe(raw_keys):
-  if raw_keys["decoder_block"] == "gpt_oss" and not raw_keys["sparse_matmul"]:
-    raise ValueError(f"GPT OSS model only supports sparse matmul. Please set sparse_matmul=True.")
-
-
 def validate_sparse_matmul_parallelism(raw_keys):
   # TODO: remove once b/434699033 resolved
   if raw_keys["sparse_matmul"] and (using_expert_parallelism(raw_keys) and using_pipeline_parallelism(raw_keys)):
@@ -1035,6 +1040,11 @@ def validate_sparse_matmul_parallelism(raw_keys):
     raise ValueError(
         f"The expert dimension {raw_keys['num_experts']} is not divisible by expert parallelism setting {expert_parallelism}."
     )
+
+
+def validate_ring_of_experts_parallelism(raw_keys):
+  if raw_keys["use_ring_of_experts"] and not using_expert_parallelism(raw_keys):
+    raise ValueError("Ring-of-experts requires expert-parallelism to be enabled.")
 
 
 def validate_ragged_dot(raw_keys):

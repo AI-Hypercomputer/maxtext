@@ -1,21 +1,24 @@
 #!/bin/bash
 
-# This file contains an end-to-end Airflow nightly test, designed to run once a day on a v4-8, along with documentation to guide users in getting started with Gemma2-2B.
+# This script is both an end-to-end test that runs once a day on a v4-8 and documentation for how to get started with Gemma2-2B.
 
-# The flow of this file is as follows:
-# 1. Convert the checkpoint downloaded from Hugging Face to make it compatible with MaxText
-# 2. Run a forward pass logits check to compare with the original HF golden model
-# 2. Run decoding, finetuning of Gemma2-2B. with the converted checkpoint.
-# 3. Run decoding from the finetuned checkpoint from step 2
+# The flow of this script is as follows:
+# 1. Convert the checkpoint downloaded from Hugging Face to make it compatible with MaxText.
+# 2. Run a forward pass logits check to compare with the original HF golden model.
+# 3. Run decoding, finetuning of Gemma2-2B. with the converted checkpoint.
+# 4. Run decoding from the finetuned checkpoint from step 3.
+
+# Pre-requisites:
+# 1. Set HF_TOKEN environment variable to your Hugging Face access token with read permissions
+# export HF_TOKEN=<Hugging Face access token>
 
 
 set -ex
 idx=$(date +%Y-%m-%d-%H-%M)
 MODEL_NAME='gemma2-2b'
 export MODEL_VARIATION='2b'
-HF_TOKEN='' # Important!!! Save your hf access token here
 HF_GOLDEN_MODEL='google/gemma-2-2b'
-TOKENIZER_PATH="${MAXTEXT_ASSETS_ROOT:-${MAXTEXT_REPO_ROOT:-$PWD}/assets}"'/tokenizer.gemma'
+TOKENIZER_PATH="${MAXTEXT_ASSETS_ROOT:-${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText/assets}}"'/tokenizer.gemma'
 
 # Installing torch for deps in forward_pass_logit_checker.py
 python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu

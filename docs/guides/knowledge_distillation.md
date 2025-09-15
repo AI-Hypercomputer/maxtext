@@ -52,7 +52,7 @@ git clone https://github.com/AI-Hypercomputer/maxtext.git
 python3 -m venv ~/venv-maxtext
 source ~/venv-maxtext/bin/activate
 cd maxtext
-pip install -r requirements.txt
+uv pip install -r requirements.txt
 ```
 
 ### 1. Obtain and Prepare the Teacher Model
