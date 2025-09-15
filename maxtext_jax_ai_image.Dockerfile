@@ -55,7 +55,7 @@ RUN ls .
 ARG TEST_TYPE
 # Copy over test assets if building image for end-to-end tests or unit tests
 RUN if [ "$TEST_TYPE" = "xlml" ] || [ "$TEST_TYPE" = "unit_test" ]; then \
-      if ! gcloud storage cp -r gs://maxtext-test-assets/* "${MAXTEXT_TEST_ASSETS_DIR}"; then \
+      if ! gcloud storage cp -r gs://maxtext-test-assets/* "${MAXTEXT_TEST_ASSETS_ROOT}"; then \
         echo "WARNING: Failed to download test assets from GCS. These files are only used for end-to-end tests; you may not have access to the bucket."; \
       fi; \
     fi
