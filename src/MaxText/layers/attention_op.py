@@ -692,11 +692,11 @@ class AttentionOp(nnx.Module):
         key_gate_weight = jnp.zeros((0, n_kv_heads, head_dim), dtype=jnp.float32)
       else:
         block_ids = jnp.arange(kv_len, dtype=jnp.int32) // moba_chunk_size
-        key_gate_weight_sum = jax.lax.segment_sum(
-            k_item.astype(jnp.float32), block_ids, num_block
+        key_gate_weight_sum = jax.ops.segment_sum(
+            k_item.astype(jnp.float32), block_ids, num_segments=num_block
         )
-        block_counts = jax.lax.segment_sum(
-            jnp.ones((kv_len,), dtype=jnp.float32), block_ids, num_block
+        block_counts = jax.ops.segment_sum(
+            jnp.ones((kv_len,), dtype=jnp.float32), block_ids, num_segments=num_block
         )
         key_gate_weight = key_gate_weight_sum / block_counts[:, None, None]
 
@@ -1673,8 +1673,8 @@ class AttentionOp(nnx.Module):
       key_gate_weight = jnp.zeros((0, n_kv_heads, head_dim), dtype=jnp.float32)
     else:
       block_ids = jnp.arange(kv_seq_len, dtype=jnp.int32) // moba_chunk_size
-      key_gate_weight_sum = jax.lax.segment_sum(k_item.astype(jnp.float32), block_ids, num_block)
-      block_counts = jax.lax.segment_sum(jnp.ones((kv_seq_len,), dtype=jnp.float32), block_ids, num_block)
+      key_gate_weight_sum = jax.ops.segment_sum(k_item.astype(jnp.float32), block_ids, num_segments=num_block)
+      block_counts = jax.ops.segment_sum(jnp.ones((kv_seq_len,), dtype=jnp.float32), block_ids, num_segments=num_block)
       key_gate_weight = key_gate_weight_sum / block_counts[:, None, None]
 
     gate = jnp.einsum("skgd,Nkd->kgsN", q_item_f32, key_gate_weight)

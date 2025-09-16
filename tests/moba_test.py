@@ -27,8 +27,8 @@ class MobaTest(unittest.TestCase):
     self.batch = 1
     self.num_q_heads = 4
     self.num_kv_heads = 4
-    self.seq_len = 1024
-    self.head_dim = 128
+    self.seq_len = 2048
+    self.head_dim = 256
     self.moba_chunk_size = 128
     self.moba_topk = 2
     self.dtype_torch = torch.bfloat16
