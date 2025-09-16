@@ -52,9 +52,10 @@ echo "Starting to build your docker image. This will take a few minutes but the 
 
 # Set environment variables
 for ARGUMENT in "$@"; do
-    IFS='=' read -r KEY VALUE <<< "$ARGUMENT"
+    IFS='=' read -r RAW_KEY VALUE <<< "$ARGUMENT"
+    KEY=$(echo "$RAW_KEY" | tr '[:lower:]' '[:upper:]')
     export "$KEY"="$VALUE"
-    echo "$KEY"="$VALUE"
+    echo "$KEY=$VALUE"
 done
 
 

@@ -30,9 +30,10 @@ export PROJECT="tpu-prod-env-multipod" # $(gcloud config get-value project)
 
 # Set environment variables
 for ARGUMENT in "$@"; do
-    IFS='=' read -r KEY VALUE <<< "$ARGUMENT"
+    IFS='=' read -r RAW_KEY VALUE <<< "$ARGUMENT"
+    KEY=$(echo "$RAW_KEY" | tr '[:lower:]' '[:upper:]')
     export "$KEY"="$VALUE"
-    echo "$KEY"="$VALUE"
+    echo "$KEY=$VALUE"
 done
 
 export LOCAL_IMAGE_NAME_RUNNER=${LOCAL_IMAGE_NAME}__runner

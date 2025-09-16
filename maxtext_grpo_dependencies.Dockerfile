@@ -44,7 +44,7 @@ RUN pip install -e /tpu_commons --no-cache-dir --pre \
     --find-links https://storage.googleapis.com/jax-releases/libtpu_releases.html
 
 COPY vllm /vllm
-RUN pip install -e /vllm --no-cache-dir --pre \
+RUN VLLM_TARGET_DEVICE="tpu" pip install -e /vllm --no-cache-dir --pre \
     --index-url https://us-python.pkg.dev/cloud-tpu-images/maxtext-rl/simple/ \
     --extra-index-url https://pypi.org/simple/ \
     --extra-index-url https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/ \
