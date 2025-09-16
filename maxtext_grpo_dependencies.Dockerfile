@@ -48,6 +48,11 @@ RUN VLLM_TARGET_DEVICE="tpu" pip install -e /vllm --no-cache-dir --pre \
     --index-url https://us-python.pkg.dev/cloud-tpu-images/maxtext-rl/simple/ \
     --extra-index-url https://pypi.org/simple/ \
     --extra-index-url https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/ \
-    --find-links https://storage.googleapis.com/jax-releases/libtpu_releases.html
+    --extra-index-url https://download.pytorch.org/whl/nightly/cpu \
+    --find-links https://storage.googleapis.com/jax-releases/libtpu_releases.html \
+    --find-links https://storage.googleapis.com/libtpu-wheels/index.html \
+    --find-links https://storage.googleapis.com/libtpu-releases/index.html \
+    --find-links https://storage.googleapis.com/jax-releases/jax_nightly_releases.html \
+    --find-links https://storage.googleapis.com/jax-releases/jaxlib_nightly_releases.html 
 
 RUN pip install numba==0.61.2

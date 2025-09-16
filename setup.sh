@@ -94,8 +94,7 @@ python3 -m pip install -U setuptools wheel uv
 
 # Set environment variables
 for ARGUMENT in "$@"; do
-    IFS='=' read -r RAW_KEY VALUE <<< "$ARGUMENT"
-    KEY=$(echo "$RAW_KEY" | tr '[:lower:]' '[:upper:]')
+    IFS='=' read -r KEY VALUE <<< "$ARGUMENT"
     export "$KEY"="$VALUE"
 done
 
@@ -135,6 +134,19 @@ if [[ $DEVICE == "tpu" ]]; then
     fi
 fi
 
+# Save the script folder path of maxtext
+run_name_folder_path=$(pwd)
+
+# Install dependencies from requirements.txt
+cd "$run_name_folder_path" && python3 -m uv pip install --upgrade pip
+python3 -m uv pip install --no-cache-dir -U -r requirements.txt
+
+# Install maxtext package
+if [ -f 'pyproject.toml' ]; then
+  python3 -m uv pip install -e . --no-deps --resolution=lowest
+  install_maxtext_github_deps
+fi
+
 # Uninstall existing jax, jaxlib and  libtpu-nightly
 python3 -m uv pip show jax && python3 -m uv pip uninstall jax
 python3 -m uv pip show jaxlib && python3 -m uv pip uninstall jaxlib
@@ -145,16 +157,7 @@ if [ -e "$libtpu_path" ]; then
     rm "$libtpu_path"
 fi
 
-if [[ "$MODE" == "pinned" ]]; then
-  if [[ "$DEVICE" != "gpu" ]]; then
-    echo "pinned mode is supported for GPU builds only."
-    exit 1
-  fi
-  echo "Installing Jax and Transformer Engine."
-  python3 -m uv pip install "jax[cuda12]" -c constraints_gpu.txt
-  python3 -m uv pip install transformer-engine[jax]==1.13.0
-
-elif [[ "$MODE" == "stable" || ! -v MODE ]]; then
+if [[ "$MODE" == "stable" || ! -v MODE ]]; then
 # Stable mode
     if [[ $DEVICE == "tpu" ]]; then
         echo "Installing stable jax, jaxlib for tpu"
@@ -239,20 +242,4 @@ elif [[ $MODE == "nightly" ]]; then
 else
     echo -e "\n\nError: You can only set MODE to [stable,nightly,libtpu-only].\n\n"
     exit 1
-fi
-
-# Save the script folder path of maxtext
-run_name_folder_path=$(pwd)
-
-# Install dependencies from requirements.txt
-cd "$run_name_folder_path" && python3 -m uv pip install --upgrade pip
-if [[ "$MODE" == "pinned" ]]; then
-    python3 -m uv pip install --no-cache-dir -U -r requirements.txt -c constraints_gpu.txt
-else
-    python3 -m uv pip install --no-cache-dir -U -r requirements.txt
-fi
-
-# Install maxtext package
-if [ -f 'pyproject.toml' ]; then
-  python3 -m uv pip install -e . --no-deps --resolution=lowest
 fi
