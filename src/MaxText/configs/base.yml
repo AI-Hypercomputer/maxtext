@@ -146,6 +146,7 @@ logits_dot_in_fp32: False  # whether to use fp32 in logits_dense or shared_embed
 cast_logits_to_fp32: True # whether to cast the logits to fp32. The higher precision is generally beneficial, but it can vary slightly.
 float32_qk_product: False # in dot_product attention, whether to cast to fp32 the inputs to qk product
 float32_logits: False # in dot_product attention, whether to cast to fp32 the inputs to softmax
+z_loss_weight: 0.0 # z-loss regularization weight, 0.0 to disable
 
 # Multi-Token Prediction Configs
 # The number of auxiliary prediction layers to use for MTP.
