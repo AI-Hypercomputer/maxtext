@@ -389,7 +389,7 @@ class InferenceWorker:
       static_argnums=(0,),
     )
     self.decode_steps_jitted = jax.jit(
-      self._decode_steps,  
+      InferenceWorker._decode_steps,  
       static_argnums=(0,3,),
       donate_argnums=(2,),
     )
