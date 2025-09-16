@@ -51,6 +51,11 @@ from flax import nnx
 from flax.linen import partitioning as nn_partitioning
 import grain
 import humanize
+
+
+import pathwaysutils
+pathwaysutils.initialize()
+
 import jax
 import optax
 from orbax import checkpoint as ocp
@@ -71,6 +76,8 @@ from etils import epath
 from tunix.rl.rollout.base_rollout import RolloutConfig
 
 from MaxText.globals import MAXTEXT_ASSETS_ROOT
+import pathwaysutils
+pathwaysutils.initialize()
 
 # for vLLM we can skip JAX precompilation with this flag, it makes startup faster
 os.environ["SKIP_JAX_PRECOMPILE"] = "1"
@@ -96,12 +103,25 @@ from MaxText.integration.tunix.tunix_adapter import TunixMaxTextAdapter
 # nest_asyncio.apply()  # To fix "This event loop is already running" error in Colab
 # Run `pip install nest_asyncio` if not already installed.
 
-jax.devices()
+print(f"JAX devices: {jax.devices()}")
 
 DEBUG = False  # set to True to run in debug mode, for more print statements
 
 HOME = os.path.expanduser("~") + "/"
 print(f"Home directory (from Python): {HOME}")
+
+# Look for base.yml in two possible locations.
+path1 = os.path.join(HOME, "maxtext/src/MaxText/configs/base.yml")
+path2 = "/deps/src/MaxText/configs/base.yml"
+if os.path.exists(path1):
+  BASE_YAML_PATH = path1
+elif os.path.exists(path2):
+  BASE_YAML_PATH = path2
+else:
+  raise FileNotFoundError(
+      "Could not find base.yml in the expected locations: "
+      f"{path1} or {path2}"
+  )
 
 # ## Hyperparameters
 #
@@ -202,7 +222,7 @@ MAX_GRAD_NORM = 0.1
 # ====== Inference ======
 GENERATION_CONFIGS = {
     # greedy search
-    "greedy": {"temperature": 1e-4, "top_k": 1, "top_p": 1.0},
+    "greedy": {"temperature": 0.01, "top_k": 1, "top_p": 1.0},
     # some randomness
     "standard": {"temperature": 0.7, "top_k": 50, "top_p": 0.95},
     # liberal
@@ -353,7 +373,7 @@ if DEBUG:
 
 
 print("HBM usage before loading model:")
-show_hbm_usage()
+# show_hbm_usage()
 
 
 # ### Load MaxText model
@@ -382,13 +402,13 @@ model_config = llama3_lib.ModelConfig.llama3_1_8b()
 config_ref = pyconfig.initialize(
     [
         "",
-        f"{HOME}/maxtext/src/MaxText/configs/base.yml",
+        BASE_YAML_PATH,
     ],
     base_output_directory="dummy",  # This is not used in Tunix.
     run_name="test-tunix-maxtext-llama3.1-8b",
     tokenizer_type="tiktoken",
     tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizer_llama3.tiktoken"),
-    load_parameters_path="gs://yixuannwang-maxtext-logs/llama3.1-8b-Instruct/scanned/0/items",
+    load_parameters_path="gs://yixuannwang-maxtext-logs/llama3.1-8b-Instruct/scanned-pathways/0/items",
     # load_parameters_path="path/to/scanned/checkpoint",
     per_device_batch_size=1,
     max_prefill_predict_length=4,
@@ -429,7 +449,7 @@ if DEBUG:
 
 # See the memory use after loading the reference model:
 print("HBM usage after loading ref model:")
-show_hbm_usage()
+# show_hbm_usage()
 
 
 # Load the policy model
@@ -441,13 +461,13 @@ show_hbm_usage()
 config_policy = pyconfig.initialize(
     [
         "",
-        f"{HOME}/maxtext/src/MaxText/configs/base.yml",
+        BASE_YAML_PATH,
     ],
     base_output_directory="dummy",  # This is not used in Tunix.
     run_name="test-tunix-maxtext-llama3.1-8b",  # This is not used in Tunix.
     tokenizer_type="tiktoken",
     tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizer_llama3.tiktoken"),
-    load_parameters_path="gs://yixuannwang-maxtext-logs/llama3.1-8b-Instruct/scanned/0/items",
+    load_parameters_path="gs://yixuannwang-maxtext-logs/llama3.1-8b-Instruct/scanned-pathways/0/items",
     # load_parameters_path="path/to/scanned/checkpoint",
     per_device_batch_size=1,
     max_prefill_predict_length=4,
@@ -484,7 +504,7 @@ if DEBUG:
 
 # See memory usage after loading the policy model:
 print("HBM usage after loading policy model:")
-show_hbm_usage()
+# show_hbm_usage()
 
 
 # ## Define reward functions
@@ -981,7 +1001,7 @@ with mesh, nn_partitioning.axis_rules(config_policy.logical_axis_rules):
 jax.profiler.stop_trace()
 
 print("HBM usage after training:")
-show_hbm_usage()
+# show_hbm_usage()
 
 # ## Evaluate
 #
