@@ -22,4 +22,5 @@
 reference/terminology.md
 reference/alternatives.md
 reference/benchmark_and_performance.md
+reference/architecture_overview.md
 ```
