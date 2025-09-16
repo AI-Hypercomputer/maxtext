@@ -222,7 +222,7 @@ MAX_GRAD_NORM = 0.1
 # ====== Inference ======
 GENERATION_CONFIGS = {
     # greedy search
-    "greedy": {"temperature": 1e-4, "top_k": 1, "top_p": 1.0},
+    "greedy": {"temperature": 0.01, "top_k": 1, "top_p": 1.0},
     # some randomness
     "standard": {"temperature": 0.7, "top_k": 50, "top_p": 0.95},
     # liberal
