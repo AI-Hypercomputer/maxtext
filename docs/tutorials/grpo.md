@@ -45,7 +45,7 @@ Next, run the following bash script to get all the necessary installations insid
 This will take few minutes. Follow along the installation logs and look out for any issues!
 
 ```
-bash ~/maxtext/MaxText/examples/install_tunix_vllm_requirement.sh
+bash ~/maxtext/src/MaxText/examples/install_tunix_vllm_requirement.sh
 ```
 
 1. It installs `pip install keyring keyrings.google-artifactregistry-auth` which enables pip to authenticate with Google Artifact Registry automatically.
