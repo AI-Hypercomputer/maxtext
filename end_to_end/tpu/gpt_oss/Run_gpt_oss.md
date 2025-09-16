@@ -14,14 +14,54 @@
 # limitations under the License.
  -->
 
-# DeepSeek
+# GPT-OSS
 
-DeepSeek is a novel family of open-weights sparse MoE models by DeepSeek AI. DeepSeek-V3 features advanced techniques, including Multi-Head Latent Attention (MLA), finer-grained and shared experts, Multi-Token Prediction (MTP), and FP8 mixed precision designed for enhanced efficiency and performance. The currently supported models are DeepSeek V3 (671B) and DeepSeek V2-Lite (16B).
+The [gpt-oss models](https://openai.com/index/introducing-gpt-oss/) are OpenAI's first open-weight language models since GPT‑2, released in August 2025. They leverage mixture-of-experts (MoE) architecture.
 
-Please note:
-* FP8 mixed precision is not supported yet.
-* To leverage MLA with Flash Attention, ensure you have the latest JAX version.
-* The provided TPU configurations are examples and not mandatory.
+<!-- 
+is a family of state-of-the-art open-weight language models that deliver strong real-world performance at low cost by OpenAI. DeepSeek-V3 features advanced techniques, including attnetion with sink.  -->
+
+
+The currently supported models are 
+
+- [gpt-oss-20b](https://huggingface.co/openai/gpt-oss-20b)
+- [gpt-oss-120b](https://huggingface.co/openai/gpt-oss-120b)
+
+
+
+## Checkpoint conversion
+
+For finetuning, supervised finetuning, or decoding, we need convert the checkpoint from HuggingFace.
+
+
+1. To get started, follow the instructions at HuggingFace to download the model. For [faster download](https://huggingface.co/docs/huggingface_hub/en/guides/download#faster-downloads), you may use `hf_xet` or `hf_transfer`.
+
+```
+huggingface-cli download [openai/gpt-oss-20b|openai/gpt-oss-120b] --local-dir <local_mxfp4_path> --token $HF_TOKEN
+```
+
+
+2. Please convert it from MXFP4 to BF16 using script [dequantize_mxfp4.py](../../../src/MaxText/scratch_code/dequantize_mxfp4.py) on gpu.
+
+```
+python3 dequantize_mxfp4.py --input-path=<local_mxfp4_path> --output-path=<local_bf16_path> --dtype-str=bf16
+```
+
+
+3. Once downloaded and converted to BF16:
+* run [convert_gpt_oss_ckpt.py](../../../src/MaxText/convert_gpt_oss_ckpt.py) to convert the checkpoint for MaxText compatibility in [Orbax](https://orbax.readthedocs.io/en/latest/guides/checkpoint/orbax_checkpoint_101.html) for training and fine-tuning. 
+
+```
+python3 -m MaxText.convert_gpt_oss_ckpt --base-model-path <local_bf16_path> \
+    --maxtext-model-path <GCS/path/to/scanned/maxtext/ckpt> --model-size [gpt-oss-20b|gpt-oss-120b]
+```
+
+* run [convert_gpt_oss_unscanned_ckpt.py](../../../src/MaxText/convert_gpt_oss_unscanned_ckpt.py) to convert the checkpoint to unscanned version in Orbax for decoding.
+
+```
+python3 -m MaxText.convert_gpt_oss_unscanned_ckpt --base-model-path <local_bf16_path> \
+    --maxtext-model-path <GCS/path/to/unscanned/maxtext/ckpt> --model-size [gpt-oss-20b|gpt-oss-120b]
+```
 
 
 ## Pre-training
@@ -48,11 +88,6 @@ python3 -m MaxText.train src/MaxText/configs/base.yml \
     dataset_type=synthetic
 ```
 
-
-## Checkpoint conversion
-To get started, follow the instructions at HuggingFace ([V3](https://huggingface.co/deepseek-ai/DeepSeek-V3), [V2-Lite](https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite)) to download the model. Currently, for V3, please convert it from FP8 to BF16 using script [here](https://github.com/deepseek-ai/DeepSeek-V3/blob/a878eada08ea6913f5a2ae80a43afeffdef082ef/inference/fp8_cast_bf16.py). Once downloaded and converted to BF16:
-* run [convert_deepseek_family_ckpt.py](../../../src/MaxText/convert_deepseek_family_ckpt.py) to convert the checkpoint for MaxText compatibility in [Orbax](https://orbax.readthedocs.io/en/latest/guides/checkpoint/orbax_checkpoint_101.html) for training and fine-tuning. When converting a checkpoint with MTP layers (like DeepSeek-V3), be sure to add the `--enable_mtp` flag to process them correctly.
-* run [convert_deepseek_family_unscanned_ckpt.py](../../../src/MaxText/convert_deepseek_family_unscanned_ckpt.py) to convert the checkpoint to unscanned version in Orbax for decoding.
 
 
 ## Fine-tuning
@@ -82,27 +117,6 @@ python3 -m MaxText.train src/MaxText/configs/base.yml \
     enable_checkpointing=true \
     ici_expert_parallelism=128 \
     ici_fsdp_parallelism=1
-```
-
-Fine-tuning with MTP on v5p-256
-
-```sh
-python3 -m MaxText.train src/MaxText/configs/base.yml \
-    base_output_directory=gs://your-output-bucket/ \
-    dataset_path=gs://your-dataset-bucket/ \
-    load_parameters_path=gs://your-bucket/deepseek-v3/0/items \
-    run_name=deepseek_mtp_finetuning \
-    per_device_batch_size=4 \
-    model_name=deepseek3-671b \
-    steps=10000 \
-    max_target_length=2048 \
-    ici_fsdp_parallelism=128 \
-    attention=flash \
-    tokenizer_type=huggingface \
-    tokenizer_path=deepseek-ai/DeepSeek-V3 \
-    # MTP-specific flags
-    mtp_num_layers=1 \
-    mtp_loss_scaling_factor=0.1
 ```
 
 One example command to run supervised finetuning with V3 on v5p-256. Supervised fine-tuning is only working with HuggingFace conversational datasets. And, you can customize the dataset path using the `hf_path` config and provide your access token with `hf_access_token` config.
@@ -157,17 +171,14 @@ python3 -m MaxText.decode src/MaxText/configs/base.yml \
 ```
 
 ## Correctness
-To verify the correctness of the model implementation, we perform two primary checks:
-
-* **Logit Comparison**: We compare the logits generated by our implementation against those from a HuggingFace implementation for a set of given prompts.
-* **MMLU Score Validation**: We validate the MMLU score against established benchmarks.
+To verify the correctness of the model implementation, we perform **Logit Comparison**. We compare the logits generated by our implementation against those from a HuggingFace implementation for a set of given prompts.
 
 One example command to generate golden logits from HuggingFace for V2-Lite.
 
 ```sh
 python3 -m MaxText.scratch_code.generate_hf_golden_logits \
-    --model-id=deepseek-ai/DeepSeek-V2-Lite \
-    --output-path=golden_DeepSeek-V2-Lite.jsonl \
+    --model-id=openai/gpt-oss-20b \
+    --output-path=golden_gpt-oss-20b.jsonl \
     --prompts='I love to;Today is a;What is the'
 ```
 
@@ -183,8 +194,6 @@ Run command below to compare logits between HuggingFace and MaxText.
 ```sh
 python3 -m tests.forward_pass_logit_checker \
     src/MaxText/configs/base.yml \
-    tokenizer_type=huggingface \
-    tokenizer_path=deepseek-ai/DeepSeek-V2-Lite \
     load_parameters_path=${CONVERTED_CHECKPOINT} \
     run_name=forward_pass_test_deepseek2-16b \
     per_device_batch_size=1 \
@@ -201,13 +210,15 @@ python3 -m tests.forward_pass_logit_checker \
     --golden_logits_path=${PWD}/golden_DeepSeek-V2-Lite.jsonl
 ```
 
-To run MMLU benchmarks and validate the model's performance, follow the instructions provided [here](../../../benchmarks/mmlu/mmlu_eval.py).
 
 ## Supported MoE strategy
+
 * Dropless
   * [MegaBlocks](https://arxiv.org/abs/2211.15841) implementation with flag `sparse_matmul=True megablox=True`.
   * [JAX ragged_dot](https://github.com/jax-ml/jax/blob/a8fb0e01f8d083fff337d3c26375bb1b77344a99/jax/_src/lax/lax.py#L2415) implementation with flag `sparse_matmul=True megablox=False`.
   * General dense matmul implementation with flag `sparse_matmul=False capacity_factor=-1`.
-* Dropping implementation with flag `sparse_matmul=False` and reasonable `capacity_factor`, commonly used from 1 to 1.25.
+
+
+Note: Dropping implementation is not supported. You should avoid using flag `sparse_matmul=False` and `capacity_factor != -1`.
 
 See more examples in scripts for [V3](v3-671b/test_deepseek.sh) and [V2-Lite](v2-16b/test_deepseek.sh).

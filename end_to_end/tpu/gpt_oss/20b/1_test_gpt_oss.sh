@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # This file, combined with step 2 in the same directory, runs on daily basis and demonstrates:
-# 1. Converts the Mixtral PyTorch checkpoint to MaxText(orbax) format using a CPU VM.
+# 1. Converts the Mistral PyTorch checkpoint to MaxText(orbax) format using a CPU VM.
 # 2. Takes the MaxText(orbax) checkpoint to run inference, fine-tuning, and pre-training on a TPU VM.
 
 # The flow of this file is to convert the Mistral PyTorch checkpoint to MaxText (orbax) format using a CPU VM.
@@ -18,14 +18,12 @@ if [ -z "${BASE_OUTPUT_PATH}" ]; then
     echo "BASE_OUTPUT_PATH is not set, using BASE_OUTPUT_PATH = ${BASE_OUTPUT_PATH}"
 fi
 
+
+python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+
 # Download checkpoint
-python3 -m pip install torch
 MODEL_NAME="mixtral-8x7B-v0.1-Instruct"
-PARAM_DIR="$HOME/tempdisk"
-mkdir -p "$PARAM_DIR"
-[[ ! -z $(ls "$PARAM_DIR") ]] && fusermount -u "$PARAM_DIR"
-gcsfuse --implicit-dirs maxtext-external "$PARAM_DIR"
-# alternatively: gcloud storage cp -r "gs://maxtext-external/$MODEL_NAME" /tmp
+gcloud storage cp -r "gs://maxtext-external/$MODEL_NAME" /tmp
 
 # Convert it to MaxText(orbax) format - scanned ckpt
 JAX_PLATFORMS=cpu python3 -m MaxText.llama_or_mistral_ckpt --base-model-path="$PARAM_DIR/$MODEL_NAME" --model-size=mixtral-8x7b --maxtext-model-path=${BASE_OUTPUT_PATH}/${MODEL_VARIATION}/scanned_ckpt/
