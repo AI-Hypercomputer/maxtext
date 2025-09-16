@@ -62,7 +62,6 @@ class TokenizerTest(unittest.TestCase):
   def tearDownClass(cls):
     os.remove(cls.tokenizer_path)
 
-  @pytest.mark.skip(reason="mohitkhatwani@ will fix this")
   @pytest.mark.tpu_only
   def test_tokenize(self):
     text = "This is a test"
@@ -70,7 +69,7 @@ class TokenizerTest(unittest.TestCase):
 
   @pytest.mark.tpu_only
   def test_detokenize(self):
-    tokens = [66, 12, 10, 698]
+    tokens = [66, 12, 10, 702]
     self.assertEqual(np.asarray(self.source_tokenizer.decode(tokens)), np.asarray(self.test_tokenizer.decode(tokens)))
 
 

@@ -102,7 +102,6 @@ def vision_sft_preprocessing_pipeline(
       dataloading_host_index=dataloading_host_index,
       dataloading_host_count=dataloading_host_count,
       num_threads=1,
-      generate_padding_example=True,
       max_target_length=config.max_target_length,
       data_column_names=text_columns,
   )
@@ -162,8 +161,8 @@ def preprocessing_pipeline(
     packing=True,
     shift=True,
     num_threads=1,
-    drop_remainder=False,
-    generate_padding_example=False,
+    drop_remainder=True,
+    generate_padding_batch=False,
     use_dpo=None,
     use_sft=None,
     sft_train_on_completion_only=True,
@@ -239,7 +238,6 @@ def preprocessing_pipeline(
       dataloading_host_index,
       dataloading_host_count,
       num_threads,
-      generate_padding_example,
       max_target_length,
       data_column_names,
   )
@@ -304,7 +302,7 @@ def preprocessing_pipeline(
       read_options=grain.ReadOptions(num_threads=num_threads, prefetch_buffer_size=128),
   )
 
-  multihost_gen = multihost_dataloading.MultiHostDataLoadIterator(dataloader, global_mesh)
+  multihost_gen = multihost_dataloading.MultiHostDataLoadIterator(dataloader, global_mesh, generate_padding_batch)
 
   # Return multi-host jax.Array prep iterator
   return multihost_gen
@@ -352,7 +350,7 @@ def make_hf_train_iterator(
         add_bos=config.add_bos,
         add_eos=config.add_eos,
         packing=config.packing,
-        generate_padding_example=False,
+        generate_padding_batch=config.generate_padding_batch_train,
         use_dpo=config.use_dpo,
         use_sft=config.use_sft,
         sft_train_on_completion_only=config.sft_train_on_completion_only,
@@ -374,8 +372,6 @@ def make_hf_eval_iterator(
       streaming=True,
       token=config.hf_access_token,
   )
-
-  eval_generate_padding_example = config.eval_steps > 0
   if config.use_sft and config.use_multimodal:
     eval_iter = vision_sft_preprocessing_pipeline(
         dataset=eval_ds,
@@ -404,7 +400,7 @@ def make_hf_eval_iterator(
         add_bos=config.add_bos,
         add_eos=config.add_eos,
         packing=config.packing,
-        generate_padding_example=eval_generate_padding_example,
+        generate_padding_batch=config.generate_padding_batch_eval,
         use_dpo=config.use_dpo,
         use_sft=config.use_sft,
         sft_train_on_completion_only=config.sft_train_on_completion_only,
