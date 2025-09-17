@@ -18,8 +18,9 @@
 Adapted from Sholto's:
 https://github.com/sholtodouglas/multihost_dataloading
 """
+import itertools
 from functools import partial
-from typing import Union, Sequence
+from typing import Union, Sequence, Optional
 from collections.abc import Iterator, Iterable
 import time
 
@@ -68,18 +69,13 @@ def _form_global_array(path, array: np.ndarray, global_mesh: Mesh) -> jax.Array:
 class MultiHostDataLoadIterator:
   """fold get_next_batch_sharded into a iterator class"""
 
-  def __init__(self, dataloader: tf.data.Dataset | Iterable, global_mesh: Mesh, generate_padding_batch: bool = False):
+  def __init__(self, dataloader: tf.data.Dataset | Iterable, global_mesh: Mesh, generate_padding_batch: bool = False, microbatch_size_to_run: Optional[int]=None, input_data_sharding=None):
     self.global_mesh = global_mesh
     self.dataloader = dataloader
-    if isinstance(self.dataloader, tf.data.Dataset):
-      self.local_iterator = self.dataloader.as_numpy_iterator()
-    elif isinstance(self.dataloader, Iterable):
-      self.local_iterator = iter(self.dataloader)
-    else:
-      raise ValueError("Type error: dataloader should be either tf.data.Dataset or Iterable.")
-    self.out_of_data = False
-    self.last_local_data = None
     self.generate_padding_batch = generate_padding_batch
+    self.microbatch_size_to_run = microbatch_size_to_run
+    self.input_data_sharding = input_data_sharding
+    self.reset()
 
   def reset(self):
     if isinstance(self.dataloader, tf.data.Dataset):
@@ -91,12 +87,39 @@ class MultiHostDataLoadIterator:
     self.out_of_data = False
     self.last_local_data = None
 
+    sharded_iter = self._base_iter()
+    if self.microbatch_size_to_run:
+       self.local_iterator = itertools.chain.from_iterable(
+         self.explode_to_micro(b) for b in sharded_iter
+       )
+    else:
+       self.local_iterator = sharded_iter
+
   def __iter__(self):
     self.reset()
     return self
 
   def __next__(self):
-    return self._get_next_batch_sharded()
+    return next(self.local_iterator)
+
+  def _base_iter(self):
+    while True:
+      yield self._get_next_batch_sharded()
+
+  def explode_to_micro(self, batch):
+    """Splits larger batch into smaller equally sized batches"""
+    mb = self.microbatch_size_to_run
+    # `batch` is a dict-like PyTree of jax.Arrays
+    k0 = next(iter(batch))
+    B = batch[k0].shape[0]
+    assert B % mb == 0, f"global batch {B} not divisible by microbatch {mb}"
+    M = B // mb
+    reshaped = {k: v.reshape((M, mb) + v.shape[1:]) for k, v in batch.items()}
+    for i in range(M):
+      microbatch = {k: reshaped[k][i] for k in reshaped}
+      if self.input_data_sharding is not None:
+        microbatch = jax.lax.with_sharding_constraint(microbatch, self.input_data_sharding)
+      yield microbatch
 
   def _get_next_batch_sharded(self) -> jax.Array:
     """Splits the host loaded data equally over all devices."""
