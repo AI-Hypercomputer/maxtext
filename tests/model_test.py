@@ -186,6 +186,10 @@ class TestModel(unittest.TestCase):
       )
 
       full_train_logits_idx = full_train_logits[:, idx : idx + 1, :]
+      print(f"full_train_logits_idx.shape: {full_train_logits_idx.shape}")
+      print(f"full_train_logits_idx: {full_train_logits_idx}")
+      print(f"ar_logits.shape: {ar_logits.shape}")
+      print(f"ar_logits: {ar_logits}")
       self.assertTrue(full_train_logits_idx.shape == ar_logits.shape)
       np.testing.assert_allclose(full_train_logits_idx, ar_logits, rtol=1e-01, atol=1e-01, equal_nan=False)
 

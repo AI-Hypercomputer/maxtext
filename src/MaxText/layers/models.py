@@ -63,6 +63,7 @@ class TransformerLinenPure(nn.Module):
   def apply(self, *args, model_mode: str = MODEL_MODE_TRAIN, **kwargs):
     """Applies the model."""
     module = self.clone(model_mode=model_mode)
+    kwargs["model_mode"] = model_mode
     return nn.Module.apply(module, *args, **kwargs)
 
   def setup(self):
@@ -222,6 +223,7 @@ class TransformerLinen(nnx_wrappers.ToLinen):
     """Applies the model."""
     model_kwargs = self.kwargs.copy({"model_mode": model_mode})  # type: ignore[wrong-arg-types]
     module = self.clone(kwargs=model_kwargs)
+    kwargs["model_mode"] = model_mode
     return nnx_wrappers.ToLinen.apply(module, *args, **kwargs)
 
 class Transformer(nnx.Module):
