@@ -624,6 +624,8 @@ class KVCache(nnx.Module):
 
     if decoder_segment_ids is not None:
       cached_prefill_segment_id_var.value = decoder_segment_ids
+
+    print("kv_cache_prefill")
     return key, value, decoder_segment_ids
 
   def update_ar_key_value(
@@ -823,6 +825,7 @@ class KVCache(nnx.Module):
       two tuples of (k, v, decoder_segments) -- either can be Nones
 
     """
+    print(f"KVCache call: {model_mode}")
     if model_mode == MODEL_MODE_PREFILL:
       if self.use_chunked_prefill:
         return self.kv_cache_chunked_prefill(key, value, decoder_segment_ids, previous_chunk), None

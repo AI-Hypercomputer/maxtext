@@ -935,7 +935,9 @@ class Attention(nnx.Module):
       out = unnormalized_out / (exp_sum + 1e-9) if exp_sum is not None else unnormalized_out
     else:
       cached_values = [None, None]
+      print(f"before update_kv_caches {model_mode}")
       if model_mode != MODEL_MODE_TRAIN:
+        print("update_kv_caches")
         cached_values = self.update_kv_caches(key, value, decoder_segment_ids, model_mode, previous_chunk)
       out = self.attention_op(
           query, key, value, decoder_segment_ids, model_mode, cached_values, previous_chunk, bidirectional_mask, self.sinks

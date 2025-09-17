@@ -56,12 +56,14 @@ class TransformerLinenPure(nn.Module):
   # pylint: enable=attribute-defined-outside-init
 
   def init(self, *args, model_mode: str = MODEL_MODE_TRAIN, **kwargs):
+    print(f"TransformerLinenPure init: {model_mode}")
     """Initializes the model."""
     module = self.clone(model_mode=model_mode)
     return nn.Module.init(module, *args, **kwargs)
 
   def apply(self, *args, model_mode: str = MODEL_MODE_TRAIN, **kwargs):
     """Applies the model."""
+    print(f"TransformerLinenPure apply: {model_mode}")
     module = self.clone(model_mode=model_mode)
     return nn.Module.apply(module, *args, **kwargs)
 
@@ -117,6 +119,8 @@ class TransformerLinenPure(nn.Module):
       slot: (Optional) An integer representing the decode batch index selected
         for this request.
     """
+    # model_mode = MODEL_MODE_PREFILL
+    print(f"TransformerLinenPure call: {model_mode}")
 
     if decoder_segment_ids is not None and model_mode == MODEL_MODE_AUTOREGRESSIVE:
       raise ValueError(
@@ -205,6 +209,7 @@ def transformer_as_linen(
       name=name,
   )
   else:
+    print("TransformerLinenPure")
     return TransformerLinenPure(
       config, mesh, quant, model_mode=model_mode, name=name
     )

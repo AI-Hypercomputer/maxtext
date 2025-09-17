@@ -125,20 +125,13 @@ class TestModel(unittest.TestCase):
     devices_array = maxtext_utils.create_device_mesh(self.cfg)
     mesh = Mesh(devices_array, self.cfg.mesh_axes)
     quant = quantizations.configure_quantization(self.cfg)
-    train_model = models.transformer_as_linen(config=self.cfg, mesh=mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
-    prefill_model = models.transformer_as_linen(config=self.cfg, mesh=mesh, quant=quant, model_mode=MODEL_MODE_PREFILL)
 
     ids, decoder_segment_ids, decoder_positions = self.get_data()
 
-    train_transformer_vars = train_model.init(
-        {"params": self.rng, "aqt": self.rng},
-        ids,
-        decoder_positions,
-        decoder_segment_ids,
-        enable_dropout=False,
-    )
 
-    prefill_transformer_vars = prefill_model.init(
+    print("== train ==")
+    train_model = models.transformer_as_linen(config=self.cfg, mesh=mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
+    train_transformer_vars = train_model.init(
         {"params": self.rng, "aqt": self.rng},
         ids,
         decoder_positions,
@@ -156,6 +149,22 @@ class TestModel(unittest.TestCase):
         rngs={"aqt": self.rng},
     )
 
+
+    print("== test train vs. prefill ==")
+
+    prefill_model = models.transformer_as_linen(config=self.cfg, mesh=mesh, quant=quant, model_mode=MODEL_MODE_PREFILL)
+
+
+    prefill_transformer_vars = prefill_model.init(
+        {"params": self.rng, "aqt": self.rng},
+        ids,
+        decoder_positions,
+        decoder_segment_ids,
+        enable_dropout=False,
+        # add this line
+        # model_mode=MODEL_MODE_PREFILL,
+    )
+
     partial_prefill_logits, partial_cache = prefill_model.apply(
         prefill_transformer_vars,
         ids[:, :PREFILL_RANGE],
@@ -166,11 +175,14 @@ class TestModel(unittest.TestCase):
         rngs={"aqt": self.rng},
         mutable=["cache"],
     )
+   
+    #print(partial_cache)
 
     np.testing.assert_allclose(
         full_train_logits[:, :PREFILL_RANGE, :], partial_prefill_logits, rtol=1e-01, atol=1e-01, equal_nan=False
     )
 
+    print(f"==test train vs. autoregress==")
     for idx in range(PREFILL_RANGE, self.cfg.max_target_length):
       ids_idx = ids[:, idx : idx + 1]
       decoder_positions_idx = decoder_positions[:, idx : idx + 1]
@@ -184,6 +196,8 @@ class TestModel(unittest.TestCase):
           rngs={"aqt": self.rng},
           mutable=["cache"],
       )
+      print(f"test train vs. autoregress {idx}")
+      #print(partial_cache)
 
       full_train_logits_idx = full_train_logits[:, idx : idx + 1, :]
       self.assertTrue(full_train_logits_idx.shape == ar_logits.shape)
