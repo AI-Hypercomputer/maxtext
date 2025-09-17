@@ -1695,15 +1695,33 @@ class AttentionOp(nnx.Module):
     k_for_topk = min(moba_topk, num_block)
     if k_for_topk <= 0:
       need_attend = jnp.zeros_like(gate, dtype=jnp.bool_)
+      # Return dummy values that match the expected shapes
+      gate_top_k_val = jnp.zeros_like(gate[..., :k_for_topk])
+      gate_top_k_idx = jnp.zeros_like(gate[..., :k_for_topk], dtype=jnp.int32)
+      gate_top_k_val_min = jnp.zeros_like(gate[..., :1])
+      need_attend_threshold_mask = jnp.zeros_like(gate, dtype=jnp.bool_)
+      gate_idx_mask = jnp.zeros_like(gate, dtype=jnp.bool_)
     else:
       gate_top_k_val, gate_top_k_idx = jax.lax.top_k(gate, k=k_for_topk)
       gate_top_k_val_min = jnp.min(gate_top_k_val, axis=-1, keepdims=True)
-      need_attend = gate >= gate_top_k_val_min
+      need_attend_threshold_mask = gate >= gate_top_k_val_min
 
-      gate_idx_mask = jnp.sum(jax.nn.one_hot(gate_top_k_idx, num_block, dtype=jnp.bool_), axis=-2)
-      need_attend = jnp.logical_and(need_attend, gate_idx_mask)
+      gate_idx_mask = jnp.sum(
+          jax.nn.one_hot(gate_top_k_idx, num_block, dtype=jnp.bool_), axis=-2
+      )
+      need_attend = jnp.logical_and(need_attend_threshold_mask, gate_idx_mask)
 
-    return key_gate_weight, gate_before_masking, gate_after_masking, need_attend
+    return (
+        key_gate_weight,
+        gate_before_masking,
+        gate_after_masking,
+        gate_top_k_val,
+        gate_top_k_idx,
+        gate_top_k_val_min,
+        need_attend_threshold_mask,
+        gate_idx_mask,
+        need_attend,
+    )
 
 
 # pylint: disable=protected-access
