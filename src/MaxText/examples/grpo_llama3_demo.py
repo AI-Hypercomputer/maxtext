@@ -408,7 +408,7 @@ config_ref = pyconfig.initialize(
     run_name="test-tunix-maxtext-llama3.1-8b",
     tokenizer_type="tiktoken",
     tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizer_llama3.tiktoken"),
-    load_parameters_path="gs://yixuannwang-maxtext-logs/llama3.1-8b-Instruct/scanned-pathways/0/items",
+    load_parameters_path="gs://mazumdera-test-bucket-europe-west4/llama3.1-8b-Instruct/scanned-pathways/0/items",
     # load_parameters_path="path/to/scanned/checkpoint",
     per_device_batch_size=1,
     max_prefill_predict_length=4,
@@ -425,6 +425,8 @@ config_ref = pyconfig.initialize(
     query_proj="offload",
     key_proj="offload",
     value_proj="offload",
+    checkpoint_storage_use_ocdbt="false",
+    checkpoint_storage_use_zarr3="false",
 )
 
 llama3_1_8b, mesh = get_ref_maxtext_model(config_ref)
@@ -467,7 +469,7 @@ config_policy = pyconfig.initialize(
     run_name="test-tunix-maxtext-llama3.1-8b",  # This is not used in Tunix.
     tokenizer_type="tiktoken",
     tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizer_llama3.tiktoken"),
-    load_parameters_path="gs://yixuannwang-maxtext-logs/llama3.1-8b-Instruct/scanned-pathways/0/items",
+    load_parameters_path="gs://mazumdera-test-bucket-europe-west4/llama3.1-8b-Instruct/scanned-pathways/0/items",
     # load_parameters_path="path/to/scanned/checkpoint",
     per_device_batch_size=1,
     max_prefill_predict_length=4,
@@ -484,6 +486,8 @@ config_policy = pyconfig.initialize(
     query_proj="offload",
     key_proj="offload",
     value_proj="offload",
+    checkpoint_storage_use_ocdbt="false",
+    checkpoint_storage_use_zarr3="false",
 )
 llama3_1_8b_policy, mesh_policy = get_ref_maxtext_model(config_policy)
 

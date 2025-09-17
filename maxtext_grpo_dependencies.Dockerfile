@@ -15,6 +15,10 @@
 ARG BASEIMAGE
 FROM ${BASEIMAGE}
 
+RUN pip uninstall -y tunix
+COPY tunix /tunix
+RUN pip install -e /tunix --no-cache-dir 
+
 # Uninstall existing jax to avoid conflicts
 RUN pip uninstall -y jax jaxlib libtpu
 
