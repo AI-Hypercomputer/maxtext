@@ -36,7 +36,7 @@ from MaxText.common_types import CACHE_BATCH, CACHE_SEQUENCE, CACHE_HEADS, CACHE
 MAX_INT8 = 127.5
 MAX_INT4 = 7.5
 E4M3_MAX = jnp.finfo(jnp.float8_e4m3fn).max.astype(jnp.float32)
-PREFILL_BATCH_SIZE = 1
+
 
 
 def reverse_transpose(transposed_array, transpose_axis_order):
@@ -348,16 +348,13 @@ class KVCache(nnx.Module):
     cache_length = self.max_prefill_length
     dtype = self._get_cached_kv_dtype()
 
-    if model_mode == MODEL_MODE_PREFILL:
-      cache_logical_axis_names = self.prefill_cache_logical_axis_names
-    else:
-      cache_logical_axis_names = self.cache_logical_axis_names
+    cache_logical_axis_names = self.prefill_cache_logical_axis_names
     cache_axis_names = transpose_tuple(cache_logical_axis_names, self.prefill_cache_axis_order)
 
-    cache_logical_shape = (PREFILL_BATCH_SIZE, cache_length, self.key_heads, self.key_head_size)
+    cache_logical_shape = (self.batch, cache_length, self.key_heads, self.key_head_size)
     cache_shape_key = transpose_tuple(cache_logical_shape, self.prefill_cache_axis_order)
 
-    cache_logical_shape = (PREFILL_BATCH_SIZE, cache_length, self.value_heads, self.value_head_size)
+    cache_logical_shape = (self.batch, cache_length, self.value_heads, self.value_head_size)
     cache_shape_value = transpose_tuple(cache_logical_shape, self.prefill_cache_axis_order)
 
     self.cached_prefill_key = nnx.Cache(
@@ -369,10 +366,7 @@ class KVCache(nnx.Module):
         sharding=cache_axis_names,
     )
 
-    if model_mode == MODEL_MODE_PREFILL:
-      segment_id_axis_names = (CACHE_BATCH_PREFILL, CACHE_SEQUENCE)
-    else:
-      segment_id_axis_names = (CACHE_BATCH, CACHE_SEQUENCE)
+    segment_id_axis_names = (CACHE_BATCH, CACHE_SEQUENCE)
 
     self.cache_prefill_segment_id = nnx.Cache(
         jnp.zeros((cache_logical_shape[0], cache_length), dtype=jnp.int32),
@@ -382,10 +376,10 @@ class KVCache(nnx.Module):
     if self.kv_quant:
       cache_scale_axis_names = transpose_tuple(self.cache_scale_logical_axis_names, self.prefill_cache_axis_order)
 
-      cache_scale_logical_shape = self._get_cache_scale_logical_shape(self.key_heads, cache_length, batch=PREFILL_BATCH_SIZE)
+      cache_scale_logical_shape = self._get_cache_scale_logical_shape(self.key_heads, cache_length, batch=self.batch)
       cache_key_scale_shape = transpose_tuple(cache_scale_logical_shape, self.prefill_cache_axis_order)
 
-      cache_scale_logical_shape = self._get_cache_scale_logical_shape(self.value_heads, cache_length, batch=PREFILL_BATCH_SIZE)
+      cache_scale_logical_shape = self._get_cache_scale_logical_shape(self.value_heads, cache_length, batch=self.batch)
       cache_value_scale_shape = transpose_tuple(cache_scale_logical_shape, self.prefill_cache_axis_order)
 
       self.cached_prefill_key_scale = nnx.Cache(
@@ -414,11 +408,7 @@ class KVCache(nnx.Module):
       )
     cache_length = self.max_target_length - self.max_prefill_length
 
-    if model_mode == MODEL_MODE_PREFILL:
-      cache_logical_axis_names = self.prefill_cache_logical_axis_names
-    else:
-      cache_logical_axis_names = self.cache_logical_axis_names
-    cache_axis_names = transpose_tuple(cache_logical_axis_names, self.ar_cache_axis_order)
+    cache_axis_names = transpose_tuple(self.cache_logical_axis_names, self.ar_cache_axis_order)
 
     cache_logical_shape = (self.batch, cache_length, self.key_heads, self.key_head_size)
     cache_shape_key = transpose_tuple(cache_logical_shape, self.ar_cache_axis_order)
@@ -445,10 +435,7 @@ class KVCache(nnx.Module):
         cache_axis_names,
     )
 
-    if model_mode == MODEL_MODE_PREFILL:
-      segment_id_axis_names = (CACHE_BATCH_PREFILL, CACHE_SEQUENCE)
-    else:
-      segment_id_axis_names = (CACHE_BATCH, CACHE_SEQUENCE)
+    segment_id_axis_names = (CACHE_BATCH, CACHE_SEQUENCE)
     self.cache_ar_segment_id = nnx.Cache(
         jnp.zeros((cache_logical_shape[0], cache_length), dtype=jnp.int32),
         sharding=segment_id_axis_names,
@@ -624,7 +611,13 @@ class KVCache(nnx.Module):
 
     if decoder_segment_ids is not None:
       cached_prefill_segment_id_var.value = decoder_segment_ids
-    return key, value, decoder_segment_ids
+
+    cached_prefill = (
+        self.get_cached_values(cached_prefill_key_vars, key.dtype, self.prefill_cache_axis_order),
+        self.get_cached_values(cached_prefill_value_vars, value.dtype, self.prefill_cache_axis_order),
+        cached_prefill_segment_id_var.value,
+    )
+    return cached_prefill
 
   def update_ar_key_value(
       self,

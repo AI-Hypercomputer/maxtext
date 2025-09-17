@@ -63,6 +63,7 @@ class TransformerLinenPure(nn.Module):
   def apply(self, *args, model_mode: str = MODEL_MODE_TRAIN, **kwargs):
     """Applies the model."""
     module = self.clone(model_mode=model_mode)
+    kwargs["model_mode"] = model_mode
     return nn.Module.apply(module, *args, **kwargs)
 
   def setup(self):
@@ -222,6 +223,7 @@ class TransformerLinen(nnx_wrappers.ToLinen):
     """Applies the model."""
     model_kwargs = self.kwargs.copy({"model_mode": model_mode})  # type: ignore[wrong-arg-types]
     module = self.clone(kwargs=model_kwargs)
+    kwargs["model_mode"] = model_mode
     return nnx_wrappers.ToLinen.apply(module, *args, **kwargs)
 
 class Transformer(nnx.Module):
@@ -261,7 +263,7 @@ class Transformer(nnx.Module):
     else:
       seq_len = cfg.max_target_length
 
-    batch_size = 1 if self.model_mode == MODEL_MODE_PREFILL else cfg.micro_batch_size_to_train_on
+    batch_size = cfg.micro_batch_size_to_train_on
     dummy_decoder_input_tokens = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
     dummy_decoder_positions = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
 

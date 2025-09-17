@@ -1076,6 +1076,8 @@ class MaxEngine(engine_api.Engine):
       batch_idx = -1
       if "cache_batch" in annotations:
         batch_idx = annotations.index("cache_batch")
+      elif "cache_batch_prefill" in annotations:
+        batch_idx = annotations.index("cache_batch_prefill")
       elif "cache_scale_batch" in annotations:
         batch_idx = annotations.index("cache_scale_batch")
 
@@ -1189,6 +1191,8 @@ class MaxEngine(engine_api.Engine):
       batch_idx = -1
       if "cache_batch" in annotations:
         batch_idx = annotations.index("cache_batch")
+      elif "cache_batch_prefill" in annotations:
+        batch_idx = annotations.index("cache_batch_prefill")
       elif "cache_scale_batch" in annotations:
         batch_idx = annotations.index("cache_scale_batch")
 
@@ -1362,6 +1366,8 @@ class MaxEngine(engine_api.Engine):
       batch_idx = -1
       if "cache_batch" in annotations:
         batch_idx = annotations.index("cache_batch")
+      elif "cache_batch_prefill" in annotations:
+        batch_idx = annotations.index("cache_batch_prefill")
       elif "cache_scale_batch" in annotations:
         batch_idx = annotations.index("cache_scale_batch")
 
