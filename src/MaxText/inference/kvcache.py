@@ -348,7 +348,10 @@ class KVCache(nnx.Module):
     cache_length = self.max_prefill_length
     dtype = self._get_cached_kv_dtype()
 
-    cache_logical_axis_names = self.prefill_cache_logical_axis_names
+    if model_mode == MODEL_MODE_PREFILL:
+      cache_logical_axis_names = self.prefill_cache_logical_axis_names
+    else:
+      cache_logical_axis_names = self.cache_logical_axis_names
     cache_axis_names = transpose_tuple(cache_logical_axis_names, self.prefill_cache_axis_order)
 
     cache_logical_shape = (self.batch, cache_length, self.key_heads, self.key_head_size)
@@ -366,7 +369,10 @@ class KVCache(nnx.Module):
         sharding=cache_axis_names,
     )
 
-    segment_id_axis_names = (CACHE_BATCH, CACHE_SEQUENCE)
+    if model_mode == MODEL_MODE_PREFILL:
+      segment_id_axis_names = (CACHE_BATCH_PREFILL, CACHE_SEQUENCE)
+    else:
+      segment_id_axis_names = (CACHE_BATCH, CACHE_SEQUENCE)
 
     self.cache_prefill_segment_id = nnx.Cache(
         jnp.zeros((cache_logical_shape[0], cache_length), dtype=jnp.int32),
@@ -408,7 +414,11 @@ class KVCache(nnx.Module):
       )
     cache_length = self.max_target_length - self.max_prefill_length
 
-    cache_axis_names = transpose_tuple(self.cache_logical_axis_names, self.ar_cache_axis_order)
+    if model_mode == MODEL_MODE_PREFILL:
+      cache_logical_axis_names = self.prefill_cache_logical_axis_names
+    else:
+      cache_logical_axis_names = self.cache_logical_axis_names
+    cache_axis_names = transpose_tuple(cache_logical_axis_names, self.ar_cache_axis_order)
 
     cache_logical_shape = (self.batch, cache_length, self.key_heads, self.key_head_size)
     cache_shape_key = transpose_tuple(cache_logical_shape, self.ar_cache_axis_order)
@@ -435,7 +445,10 @@ class KVCache(nnx.Module):
         cache_axis_names,
     )
 
-    segment_id_axis_names = (CACHE_BATCH, CACHE_SEQUENCE)
+    if model_mode == MODEL_MODE_PREFILL:
+      segment_id_axis_names = (CACHE_BATCH_PREFILL, CACHE_SEQUENCE)
+    else:
+      segment_id_axis_names = (CACHE_BATCH, CACHE_SEQUENCE)
     self.cache_ar_segment_id = nnx.Cache(
         jnp.zeros((cache_logical_shape[0], cache_length), dtype=jnp.int32),
         sharding=segment_id_axis_names,
@@ -611,13 +624,7 @@ class KVCache(nnx.Module):
 
     if decoder_segment_ids is not None:
       cached_prefill_segment_id_var.value = decoder_segment_ids
-
-    cached_prefill = (
-        self.get_cached_values(cached_prefill_key_vars, key.dtype, self.prefill_cache_axis_order),
-        self.get_cached_values(cached_prefill_value_vars, value.dtype, self.prefill_cache_axis_order),
-        cached_prefill_segment_id_var.value,
-    )
-    return cached_prefill
+    return key, value, decoder_segment_ids
 
   def update_ar_key_value(
       self,
