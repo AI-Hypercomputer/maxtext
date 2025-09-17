@@ -803,6 +803,7 @@ class RoutedMoE(nnx.Module):
         quant_dg = self.quant.quant_dg
         lhs_quantize_dtype = quant_dg.fwd.dg_quantizer.lhs.numerics.get_dtype()
         rhs_quantize_dtype = quant_dg.fwd.dg_quantizer.rhs.numerics.get_dtype()
+      quantization_rule = None
       if self.config.use_qwix_quantization:
         quantization_rule = qpl.get_current_rule("dot_general")
         if quantization_rule is not None:
@@ -823,6 +824,7 @@ class RoutedMoE(nnx.Module):
             tiling=tiling,
             lhs_quantize_dtype=lhs_quantize_dtype,
             rhs_quantize_dtype=rhs_quantize_dtype,
+            quantization_rule=quantization_rule,
             use_qwix_quantization=self.config.use_qwix_quantization,
         )
       else:

@@ -17,58 +17,67 @@
 # pylint: disable=too-many-positional-arguments
 
 from typing import Literal
-import dataclasses
 import jax
 import jax.numpy as jnp
-
 from aqt.jax.v2 import aqt_tensor
-
 import qwix
-import qwix.pallas as qpl
+from qwix.pallas import QArray
 
 from MaxText.kernels.megablox import gmm as backend
-
-gmm = jax.custom_vjp(
-    backend.gmm,
-    nondiff_argnums=(3, 4, 7, 8, 9, 10, 11),
+from MaxText.kernels.megablox.quantization_config import (
+  QuantizationManager,
+  QuantizationConfig,
 )
 
-def _get_current_rule(op_name: str):
-  rule = qpl.get_current_rule(op_name)
-  if rule is not None and not isinstance(rule, qwix.QtRule):
-    rule = qwix.QtRule(**dataclasses.asdict(rule))
-  return rule
+gmm = jax.custom_vjp(
+  backend.gmm,
+  nondiff_argnums=(3, 4, 7, 8, 9, 10, 11, 12, 13, 14),
+)
+
 
 def _gmm_fwd(
-    lhs: jnp.ndarray,
-    rhs: jnp.ndarray | aqt_tensor.QTensor,
-    group_sizes: jnp.ndarray,
-    preferred_element_type: jnp.dtype = jnp.float32,
-    tiling: tuple[int, int, int] = (128, 128, 128),
-    group_offset: jnp.ndarray | None = None,
-    existing_out: jnp.ndarray | None = None,
-    transpose_rhs: bool = False,
-    interpret: bool = False,
-    lhs_quantize_dtype: Literal[jnp.int4, jnp.int8] | None = None,
-    rhs_quantize_dtype: Literal[jnp.int4, jnp.int8] | None = None,
-    use_qwix_quantization: bool = False,
+  lhs: jnp.ndarray,
+  rhs: jnp.ndarray | aqt_tensor.QTensor,
+  group_sizes: jnp.ndarray,
+  preferred_element_type: jnp.dtype = jnp.float32,
+  tiling: tuple[int, int, int] = (128, 128, 128),
+  group_offset: jnp.ndarray | None = None,
+  existing_out: jnp.ndarray | None = None,
+  transpose_rhs: bool = False,
+  interpret: bool = False,
+  # Kwargs for non-qwix quantization, which also serve as the fallback.
+  lhs_quantize_dtype: jnp.dtype | None = None,
+  rhs_quantize_dtype: jnp.dtype | None = None,
+  lhs_calibration_method: str = "absmax",
+  rhs_calibration_method: str = "absmax",
+  # Qwix-specific quantization rule.
+  quantization_rule: qwix.QtRule | None = None,
+  use_qwix_quantization: bool = False,
 ) -> tuple[
     jnp.ndarray,
     tuple[
         jnp.ndarray,
-        jnp.ndarray | aqt_tensor.QTensor,
+        jnp.ndarray | aqt_tensor.QTensor | QArray,
         jnp.ndarray,
         jnp.ndarray | None,
         int,
     ],
 ]:
   """Forward function for GMM VJP."""
-  if use_qwix_quantization:
-    lhs_quantize_dtype, rhs_quantize_dtype = None, None
-    rule = _get_current_rule("dot_general")
-    if rule is not None:
-      lhs_quantize_dtype = rule.act_qtype
-      rhs_quantize_dtype = rule.weight_qtype
+  # Create the fallback config from the function's default arguments.
+  fallback_config = QuantizationConfig(
+      lhs_quantize_dtype=lhs_quantize_dtype,
+      rhs_quantize_dtype=rhs_quantize_dtype,
+      lhs_calibration_method=lhs_calibration_method,
+      rhs_calibration_method=rhs_calibration_method,
+  )
+
+  # Instantiate the quantization manager. It will resolve the correct config internally.
+  manager = QuantizationManager(
+      quantization_rule=quantization_rule,
+      use_qwix_quantization=use_qwix_quantization,
+      fallback=fallback_config,
+  )
   out = backend.gmm(
       lhs,
       rhs,
@@ -79,66 +88,65 @@ def _gmm_fwd(
       existing_out,
       transpose_rhs=transpose_rhs,
       interpret=interpret,
-      lhs_quantize_dtype=lhs_quantize_dtype,
-      rhs_quantize_dtype=rhs_quantize_dtype,
       use_qwix_quantization=use_qwix_quantization,
+      **manager.as_kwargs("fwd"),
   )
-  return out, (lhs, rhs, group_sizes, group_offset, rhs.shape[0])
+  # Pass the manager to the backward pass.
+  residual = (lhs, rhs, group_sizes, group_offset, rhs.shape[0])
+  return out, residual
 
 
 def _gmm_bwd(
-    preferred_element_type: jnp.dtype,
-    tiling: tuple[int, int, int],
-    transpose_rhs: bool,
-    interpret: bool,
-    lhs_quantize_dtype: Literal[jnp.int4, jnp.int8] | None,
-    rhs_quantize_dtype: Literal[jnp.int4, jnp.int8] | None,
-    use_qwix_quantization: bool,
-    residual: tuple[
-        jnp.ndarray,
-        jnp.ndarray | aqt_tensor.QTensor,
-        jnp.ndarray,
-        jnp.ndarray | None,
-        int,
-    ],
-    grad: jnp.ndarray,
+  # Non-diff args passed from fwd
+  preferred_element_type: jnp.dtype,
+  tiling: tuple[int, int, int],
+  transpose_rhs: bool,
+  interpret: bool,
+  # These args are now handled by the manager but must be kept in the
+  # signature to match the VJP rule.
+  lhs_quantize_dtype: Literal["int8", "int4"] | None,
+  rhs_quantize_dtype: Literal["int8", "int4"] | None,
+  lhs_calibration_method: str,
+  rhs_calibration_method: str,
+  quantization_rule: qwix.QtRule | None,
+  use_qwix_quantization: bool,
+  # Residuals from fwd pass
+  residual: tuple,
+  grad: jnp.ndarray,
 ) -> tuple[jnp.ndarray, jnp.ndarray, None, None, jnp.ndarray]:
   """Backward function for throughput GMM VJP."""
-  if use_qwix_quantization:
-    lhs_quantize_dtype, rhs_quantize_dtype = None, None
-    rule = _get_current_rule("dot_general")
-    if rule is not None:
-      if rule.additional_qt_config is not None:
-        lhs_quantize_dtype = rule.additional_qt_config["dlhs_lhs_qtype"]
-        rhs_quantize_dtype = rule.additional_qt_config["dlhs_rhs_qtype"]
-      else:
-        lhs_quantize_dtype = rule.act_qtype
-        rhs_quantize_dtype = rule.bwd_qtype
-  del preferred_element_type
+  del preferred_element_type  # Not needed in bwd pass.
   lhs, rhs, group_sizes, group_offset, num_actual_groups = residual
+
+  fallback_config = QuantizationConfig(
+      lhs_quantize_dtype=lhs_quantize_dtype,
+      rhs_quantize_dtype=rhs_quantize_dtype,
+      lhs_calibration_method=lhs_calibration_method,
+      rhs_calibration_method=rhs_calibration_method,
+  )
+
+  # Instantiate the quantization manager. It will resolve the correct config internally.
+  manager = QuantizationManager(
+      quantization_rule=quantization_rule,
+      use_qwix_quantization=use_qwix_quantization,
+      fallback=fallback_config,
+  )
+  
+  # Calculate grad_lhs using the config for the 'dlhs' phase.
   grad_lhs = backend.gmm(
       grad,
       rhs,
       group_sizes,
-      lhs[0].dtype,
+      lhs.dtype,
       tiling,
       group_offset,
       transpose_rhs=not transpose_rhs,
       interpret=interpret,
-      lhs_quantize_dtype=lhs_quantize_dtype,
-      rhs_quantize_dtype=rhs_quantize_dtype,
       use_qwix_quantization=use_qwix_quantization,
+      **manager.as_kwargs("dlhs"),
   )
-  if use_qwix_quantization:
-    lhs_quantize_dtype, rhs_quantize_dtype = None, None
-    rule = _get_current_rule("dot_general")
-    if rule is not None:
-      if rule.additional_qt_config is not None:
-        lhs_quantize_dtype = rule.additional_qt_config["drhs_lhs_qtype"]
-        rhs_quantize_dtype = rule.additional_qt_config["drhs_rhs_qtype"]
-      else:
-        lhs_quantize_dtype = rule.bwd_qtype
-        rhs_quantize_dtype = rule.act_qtype
+
+  # Calculate grad_rhs using the config for the 'drhs' phase.
   grad_rhs = backend.tgmm(
       lhs.swapaxes(0, 1),
       grad,
@@ -148,17 +156,14 @@ def _gmm_bwd(
       group_offset,
       num_actual_groups,
       interpret=interpret,
-      lhs_quantize_dtype=lhs_quantize_dtype,
-      rhs_quantize_dtype=rhs_quantize_dtype,
       use_qwix_quantization=use_qwix_quantization,
+      **manager.as_kwargs("drhs"),
   )
 
-  # NOTE: If the rhs transposition is fused into the forward pass we need to
-  # return the transpose of the rhs gradient that we calculated above.
-  #
-  # TODO(tgale, enriqueps, apaske): Fuse this transposition into the tgmm.
   grad_rhs = grad_rhs.swapaxes(1, 2) if transpose_rhs else grad_rhs
-  return grad_lhs, grad_rhs, None, None, grad
+  # Gradients for non-tensor inputs are None.
+  return (grad_lhs, grad_rhs, None, None, grad)
 
 
 gmm.defvjp(_gmm_fwd, _gmm_bwd)
+ 

@@ -35,6 +35,7 @@ from jax.tree_util import tree_flatten_with_path, tree_unflatten
 from flax.linen import fp8_ops
 from flax.linen import initializers as flax_initializers
 import flax.linen as nn
+from flax.core import FrozenDict
 
 from MaxText.common_types import DType, Config
 from MaxText.inference.kvcache import KVQuant
@@ -667,16 +668,19 @@ def get_quantization_rule(config: Config):
           bwd_qtype=jnp.float8_e5m2,
           bwd_use_original_residuals=True,
           disable_channelwise_axes=True, # per_tensor calibration
-          weight_calibration_method=config.quantization_calibration_method,
-          act_calibration_method=config.quantization_calibration_method,
-          bwd_calibration_method=config.quantization_calibration_method,
+          weight_calibration_method=config.fwd_weight_calibration_method,
+          act_calibration_method=config.fwd_act_calibration_method,
           op_names=("dot_general",),
-          additional_qt_config={
+          additional_qt_config=FrozenDict({
             "dlhs_lhs_qtype": jnp.float8_e5m2,
             "dlhs_rhs_qtype": jnp.float8_e4m3fn,
             "drhs_lhs_qtype": jnp.float8_e4m3fn,
             "drhs_rhs_qtype": jnp.float8_e5m2,
-          },
+            "dlhs_lhs_calibration_method": config.dlhs_lhs_calibration_method,
+            "dlhs_rhs_calibration_method": config.dlhs_rhs_calibration_method,
+            "drhs_lhs_calibration_method": config.drhs_lhs_calibration_method,
+            "drhs_rhs_calibration_method": config.drhs_rhs_calibration_method,
+          }),
       )
     case "fp8_gpu":
       return qwix.QtRule(

@@ -34,7 +34,8 @@ from MaxText import pyconfig
 from MaxText.layers import quantizations
 from MaxText import maxtext_utils
 from MaxText import model_creation_utils
-from MaxText.kernels.megablox.gmm import gmm
+from MaxText.kernels.megablox.gmm import gmm, tgmm
+import qwix
 from MaxText.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR
 
 _QUERY_REGEX = ".*/query"
@@ -428,6 +429,110 @@ def test_gmm_kernel(group_sizes, k, n, tiling, dtype):
   ).block_until_ready()
 
   assert jnp.abs(quant_out - base_out).mean() / jnp.abs(base_out).mean() < 2e-1
+
+
+
+
+class MegabloxQuantizationTest(unittest.TestCase):
+  """Tests for megablox quantization."""
+
+  def test_gmm_quantization(self):
+    """Test gmm quantization."""
+    key = jax.random.key(0)
+    k1, k2 = jax.random.split(key, 2)
+    lhs = jax.random.normal(k1, (8, 6), dtype=jnp.float32)
+    rhs = jax.random.normal(k2, (2, 6, 4), dtype=jnp.float32)
+    group_sizes = jnp.array([3, 5], dtype=jnp.int32)
+    tiling = (1,1,1)
+
+    # No quantization
+    unquantized_out = gmm(lhs, rhs, group_sizes, tiling=tiling, interpret=True)
+
+    # AQT quantization
+    aqt_out = gmm(
+        lhs,
+        rhs,
+        group_sizes,
+        tiling=tiling,
+        interpret=True,
+        lhs_quantize_dtype=jnp.int8,
+        rhs_quantize_dtype=jnp.int8,
+    )
+    # Qwix quantization
+    quantization_rule = qwix.QtRule(
+        module_path=".",
+        weight_qtype=jnp.int8,
+        act_qtype=jnp.int8,
+        bwd_qtype=jnp.int8,
+        op_names=("dot_general",),
+    )
+    qwix_out = gmm(
+        lhs,
+        rhs,
+        group_sizes,
+        tiling=tiling,
+        interpret=True,
+        quantization_rule=quantization_rule,
+        use_qwix_quantization=True,
+    )
+
+    self.assertTrue(
+        jnp.allclose(unquantized_out, aqt_out, atol=1e-1),
+        msg=f"Max difference: {jnp.max(abs(unquantized_out - aqt_out))} > 1e-1",
+    )
+    self.assertTrue(
+        jnp.allclose(unquantized_out, qwix_out, atol=1e-1),
+        msg=f"Max difference: {jnp.max(abs(unquantized_out - qwix_out))} > 1e-1",
+    )
+
+  def test_tgmm_quantization(self):
+    """Test tgmm quantization."""
+    key = jax.random.key(0)
+    k1, k2 = jax.random.split(key, 2)
+    lhs = jax.random.normal(k1, (6, 8), dtype=jnp.float32)
+    rhs = jax.random.normal(k2, (8, 4), dtype=jnp.float32)
+    group_sizes = jnp.array([3, 5], dtype=jnp.int32)
+    tiling = (1,1,1)
+
+    # No quantization
+    unquantized_out = tgmm(lhs, rhs, group_sizes, tiling=tiling, interpret=True)
+
+    # AQT quantization
+    aqt_out = tgmm(
+        lhs,
+        rhs,
+        group_sizes,
+        tiling=tiling,
+        interpret=True,
+        lhs_quantize_dtype=jnp.int8,
+        rhs_quantize_dtype=jnp.int8,
+    )
+    # Qwix quantization
+    quantization_rule = qwix.QtRule(
+        module_path=".",
+        weight_qtype=jnp.int8,
+        act_qtype=jnp.int8,
+        bwd_qtype=jnp.int8,
+        op_names=("dot_general",),
+    )
+    qwix_out = tgmm(
+        lhs,
+        rhs,
+        group_sizes,
+        tiling=tiling,
+        interpret=True,
+        quantization_rule=quantization_rule,
+        use_qwix_quantization=True,
+    )
+
+    self.assertTrue(
+        jnp.allclose(unquantized_out, aqt_out, atol=1e-1),
+        msg=f"Max difference: {jnp.max(abs(unquantized_out - aqt_out))} > 1e-1",
+    )
+    self.assertTrue(
+        jnp.allclose(unquantized_out, qwix_out, atol=1e-1),
+        msg=f"Max difference: {jnp.max(abs(unquantized_out - qwix_out))} > 1e-1",
+    )
 
 
 if __name__ == "__main__":
