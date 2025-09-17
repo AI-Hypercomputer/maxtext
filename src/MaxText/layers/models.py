@@ -59,13 +59,17 @@ class TransformerLinenPure(nn.Module):
     print(f"TransformerLinenPure init: {model_mode}")
     """Initializes the model."""
     module = self.clone(model_mode=model_mode)
-    return nn.Module.init(module, *args, **kwargs)
+    # kwargs["model_mode"] = model_mode
+    return nn.Module.init(module, *args, model_mode=model_mode, **kwargs)
+    #return nn.Module.init(module, *args, **kwargs)
 
   def apply(self, *args, model_mode: str = MODEL_MODE_TRAIN, **kwargs):
     """Applies the model."""
     print(f"TransformerLinenPure apply: {model_mode}")
     module = self.clone(model_mode=model_mode)
-    return nn.Module.apply(module, *args, **kwargs)
+    #kwargs["model_mode"] = model_mode
+    return nn.Module.apply(module, *args, model_mode=model_mode, **kwargs)
+    #return nn.Module.apply(module, *args, **kwargs)
 
   def setup(self):
     """Initialize shared_embedding & decoder layers."""

@@ -345,6 +345,8 @@ class KVCache(nnx.Module):
   def _initialize_prefill_caches(self, model_mode):
     """Get a shaped abstraction of the state"""
 
+    print(f"initialize_prefill_caches: {model_mode}")
+
     cache_length = self.max_prefill_length
     dtype = self._get_cached_kv_dtype()
 
@@ -405,6 +407,8 @@ class KVCache(nnx.Module):
 
   def _initialize_ar_cache_vars(self, model_mode):
     """get ar cache vars"""
+    
+    print(f"_initialize_ar_cache_vars {model_mode}")
 
     dtype = self._get_cached_kv_dtype()
     if self.max_target_length <= self.max_prefill_length:
