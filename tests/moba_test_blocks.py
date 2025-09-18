@@ -28,9 +28,9 @@ class MobaBlockTest(unittest.TestCase):
     self.num_q_heads = 4
     self.num_kv_heads = 4
     self.seq_len = 2048
-    self.head_dim = 128
+    self.head_dim = 256
     self.moba_chunk_size = 256
-    self.moba_topk = 2
+    self.moba_topk = 4
     self.dtype_torch = torch.bfloat16
     self.dtype_jax = jnp.bfloat16
     self.rtol = 1e-2
@@ -74,6 +74,10 @@ class MobaBlockTest(unittest.TestCase):
     q_ = q.squeeze(0)
     k_ = k.squeeze(0)
 
+    # The following logic is adapted from moba_naive.py to be nearly identical,
+    # while capturing intermediate values for testing.
+
+    # calc key gate weight
     key_gate_weight = []
     batch_size = self.seq_len
     num_block = math.ceil(batch_size / self.moba_chunk_size)
@@ -81,45 +85,59 @@ class MobaBlockTest(unittest.TestCase):
       block_start = block_idx * self.moba_chunk_size
       block_end = min(batch_size, block_start + self.moba_chunk_size)
       key_gate_weight.append(k_[block_start:block_end].mean(dim=0, keepdim=True))
-    key_gate_weight = torch.cat(key_gate_weight, dim=0)
+    key_gate_weight = torch.cat(key_gate_weight, dim=0)  # [ N, H, D ]
 
+    # calc & mask gate
+    # use fp32 to avoid precision issue in bf16
     q_f32 = q_.type(torch.float32)
     key_gate_weight_f32 = key_gate_weight.type(torch.float32)
-    gate = torch.einsum("shd,nhd->hsn", q_f32, key_gate_weight_f32)
+    gate = torch.einsum("shd,nhd->hsn", q_f32, key_gate_weight_f32)  # [ H, S, N ]
     gate_before_masking = gate.clone()
 
     for i in range(num_block):
+      # select the future Qs that can attend to KV chunk i
       gate[:, : (i + 1) * self.moba_chunk_size, i] = float("-inf")
       gate[:, i * self.moba_chunk_size : (i + 1) * self.moba_chunk_size, i] = float("inf")
     gate_after_masking = gate.clone()
 
     k_for_topk = min(self.moba_topk, num_block)
     if k_for_topk <= 0:
+        # Handle case where topk is 0 or negative
         need_attend = torch.zeros_like(gate, dtype=torch.bool)
-        gate_top_k_val = torch.zeros_like(gate[..., :k_for_topk])
+        gate_top_k_val_for_test = torch.zeros_like(gate[..., :k_for_topk])
         gate_top_k_idx = torch.zeros_like(gate[..., :k_for_topk], dtype=torch.int64)
-        gate_top_k_val_min = torch.zeros_like(gate[..., :1])
+        gate_top_k_val_min_for_test = torch.zeros_like(gate[..., :1])
         need_attend_threshold_mask = torch.zeros_like(gate, dtype=torch.bool)
         gate_idx_mask = torch.zeros_like(gate, dtype=torch.bool)
     else:
+        # gate_top_k_idx = gate_top_k_val = [ H S K ]
         gate_top_k_val, gate_top_k_idx = torch.topk(
             gate, k=k_for_topk, dim=-1, largest=True, sorted=False
         )
-        gate_top_k_val_min, _ = gate_top_k_val.min(dim=-1, keepdim=True)
-        need_attend_threshold_mask = gate >= gate_top_k_val_min
+        # Preserve the original top-k values for the test case
+        gate_top_k_val_for_test = gate_top_k_val.clone()
 
-        gate_idx_mask = torch.zeros_like(gate, dtype=torch.bool).scatter_(
-            -1, gate_top_k_idx, True
-        )
-        need_attend = torch.logical_and(need_attend_threshold_mask, gate_idx_mask)
+        gate_top_k_val, _ = gate_top_k_val.min(dim=-1)  # [ H, S ]
+
+        need_attend = gate >= gate_top_k_val.unsqueeze(-1)
+        # Preserve the threshold mask for the test case
+        need_attend_threshold_mask = need_attend.clone()
+
+        # add gate_idx_mask in case of there is cornercases of same topk val been selected
+        gate_idx_mask = torch.zeros(need_attend.shape, dtype=torch.bool, device=q.device)
+        gate_idx_mask = gate_idx_mask.scatter_(dim=-1, index=gate_top_k_idx, value=True)
+        need_attend = torch.logical_and(need_attend, gate_idx_mask)
+
+        # This is the threshold value used for the >= comparison
+        gate_top_k_val_min_for_test = gate_top_k_val.unsqueeze(-1)
 
     return (
         key_gate_weight,
         gate_before_masking,
         gate_after_masking,
-        gate_top_k_val,
+        gate_top_k_val_for_test,
         gate_top_k_idx,
-        gate_top_k_val_min,
+        gate_top_k_val_min_for_test,
         need_attend_threshold_mask,
         gate_idx_mask,
         need_attend,
@@ -267,42 +285,66 @@ class MobaBlockTest(unittest.TestCase):
 
   def test_gate_top_k_idx(self):
     """
-    Tests the 'gate_top_k_idx' intermediate tensor, allowing for
-    differences in indices if the corresponding gate value is -inf.
+    Tests the 'gate_top_k_idx' intermediate tensor.
+    This test accounts for differences in tie-breaking between JAX and PyTorch's
+    top_k implementations. A mismatch in indices is considered acceptable only if
+    the corresponding gate values are tied at the threshold (the k-th value).
     """
-    _, _, torch_gate, _, torch_idx, *_ = self.get_torch_intermediates()
-    _, _, _, _, jax_idx, *_ = self.get_jax_intermediates()
+    (
+        _,
+        _,  # gate_before_masking
+        torch_gate,  # gate_after_masking
+        _,
+        torch_idx,
+        torch_min_val,  # The threshold value
+        *_,
+    ) = self.get_torch_intermediates()
+    (
+        _,
+        _,
+        _,
+        _,
+        jax_idx,
+        jax_min_val,  # The threshold value
+        *_,
+    ) = self.get_jax_intermediates()
 
     k, g, s, n_k = jax_idx.shape
     h = k * g
     jax_idx_reshaped = jax_idx.reshape(h, s, n_k)
 
-    # Sort both index arrays to make them comparable
-    torch_idx_sorted = torch.sort(torch_idx, dim=-1)[0].numpy()
-    jax_idx_sorted = np.sort(np.array(jax_idx_reshaped), axis=-1)
+    # Reshape threshold tensors
+    torch_min_val_reshaped = torch_min_val.numpy().reshape(h, s)
 
-    # Find where the sorted indices still don't match
-    mismatched_indices = np.where(torch_idx_sorted != jax_idx_sorted)
+    # Iterate over every query's top-k result
+    for h_idx in range(h):
+      for s_idx in range(s):
+        torch_indices_for_query = set(torch_idx[h_idx, s_idx, :].numpy())
+        jax_indices_for_query = set(np.array(jax_idx_reshaped[h_idx, s_idx, :]).tolist())
 
-    if mismatched_indices[0].size > 0:
-      # Check the gate values at the first point of divergence
-      h_idx, s_idx, _ = (idx[0] for idx in mismatched_indices)
-      
-      # Get the top-k indices for this specific query from both frameworks
-      torch_indices_for_query = set(torch_idx[h_idx, s_idx, :].numpy())
-      jax_indices_for_query = set(np.array(jax_idx_reshaped[h_idx, s_idx, :]).tolist())
-      
-      # Find the specific block indices that differ
-      differing_indices = torch_indices_for_query.symmetric_difference(jax_indices_for_query)
+        if torch_indices_for_query == jax_indices_for_query:
+          continue
 
-      for block_idx in differing_indices:
-        gate_val = torch_gate[h_idx, s_idx, block_idx].item()
-        if gate_val != -np.inf:
-          self.fail(
-              "Intermediate tensor 'gate_top_k_idx' has a critical mismatch.\n" 
-              f"Mismatch for query at (head={h_idx}, seq_pos={s_idx}). " 
-              f"Differing block index was {block_idx}, but its gate value was {gate_val}, not -inf."
-          )
+        # If the sets of indices differ, find the indices that are not in common
+        differing_indices = torch_indices_for_query.symmetric_difference(jax_indices_for_query)
+
+        threshold = torch_min_val_reshaped[h_idx, s_idx]
+
+        # For each differing index, the gate value must be equal to the threshold
+        for block_idx in differing_indices:
+          gate_val = torch_gate[h_idx, s_idx, block_idx].item()
+
+          is_close = np.isclose(gate_val, threshold, atol=self.atol, rtol=self.rtol)
+          is_inf = gate_val == -np.inf and threshold == -np.inf
+
+          if not (is_close or is_inf):
+            self.fail(
+                "Intermediate tensor 'gate_top_k_idx' has a critical mismatch.\n"
+                f"Mismatch for query at (head={h_idx}, seq_pos={s_idx}).\n"
+                f"Index sets were {torch_indices_for_query} (torch) and {jax_indices_for_query} (jax).\n"
+                f"Differing block index {block_idx} has gate value {gate_val}, "
+                f"which is not equal to the threshold {threshold}."
+            )
 
   def test_gate_top_k_val_min(self):
     """Tests the 'gate_top_k_val_min' intermediate tensor."""
@@ -370,11 +412,33 @@ class MobaBlockTest(unittest.TestCase):
 
   def test_gate_idx_mask(self):
     """
-    Tests the 'gate_idx_mask' intermediate tensor, ignoring mismatches
-    where the gate value is -inf.
+    Tests the 'gate_idx_mask' intermediate tensor.
+    This test accounts for differences in tie-breaking between JAX and PyTorch's
+    top_k implementations. A mismatch in the mask is considered acceptable only if
+    the corresponding gate value is tied at the threshold (the k-th value).
     """
-    _, _, torch_gate, *_, torch_mask, _ = self.get_torch_intermediates()
-    _, _, _, *_, jax_mask, _ = self.get_jax_intermediates()
+    (
+        _,
+        _,  # gate_before_masking
+        torch_gate,  # gate_after_masking
+        _,
+        _,
+        torch_min_val,  # The threshold value
+        _,
+        torch_mask,
+        _,
+    ) = self.get_torch_intermediates()
+    (
+        _,
+        _,
+        _,
+        _,
+        _,
+        jax_min_val,  # The threshold value
+        _,
+        jax_mask,
+        _,
+    ) = self.get_jax_intermediates()
 
     k, g, s, n = jax_mask.shape
     h = k * g
@@ -383,45 +447,103 @@ class MobaBlockTest(unittest.TestCase):
     mismatched_indices = np.where(torch_mask.numpy() != np.array(jax_mask_reshaped))
 
     if mismatched_indices[0].size > 0:
+      h_coords, s_coords, _ = mismatched_indices
       mismatched_gate_values = torch_gate[mismatched_indices].numpy()
-      non_inf_mismatches = np.where(mismatched_gate_values != -np.inf)[0]
 
-      if non_inf_mismatches.size > 0:
-        first_bad_index = tuple(idx[non_inf_mismatches[0]] for idx in mismatched_indices)
-        first_bad_gate_val = mismatched_gate_values[non_inf_mismatches[0]]
+      # Get the thresholds for the mismatched positions
+      mismatched_thresholds = torch_min_val.numpy()[h_coords, s_coords, 0]
+
+      # A mismatch is only valid if the gate value is equal to the threshold
+      is_tie = np.isclose(mismatched_gate_values, mismatched_thresholds, atol=self.atol, rtol=self.rtol)
+
+      # Or if both are -inf (a tie between non-selectable blocks)
+      are_both_inf = (mismatched_gate_values == -np.inf) & (mismatched_thresholds == -np.inf)
+
+      is_valid_mismatch = np.logical_or(is_tie, are_both_inf)
+
+      if not np.all(is_valid_mismatch):
+        first_bad_mismatch_idx = np.where(~is_valid_mismatch)[0][0]
+
+        bad_h = h_coords[first_bad_mismatch_idx]
+        bad_s = s_coords[first_bad_mismatch_idx]
+        bad_n = mismatched_indices[2][first_bad_mismatch_idx]
+
+        bad_index = (bad_h, bad_s, bad_n)
+        bad_gate_val = mismatched_gate_values[first_bad_mismatch_idx]
+        bad_threshold = mismatched_thresholds[first_bad_mismatch_idx]
+
         self.fail(
-            "Intermediate tensor 'gate_idx_mask' has a critical mismatch.\n" 
-            f"Mismatch at index {first_bad_index} where gate value was {first_bad_gate_val}, not -inf."
+            "Intermediate tensor 'gate_idx_mask' has a critical mismatch.\n"
+            f"Mismatch at index {bad_index} is not due to a tie at the threshold.\n"
+            f"Gate value was {bad_gate_val}, but threshold was {bad_threshold}."
         )
 
   def test_need_attend_mask(self):
     """
-    Tests the final 'need_attend' boolean mask, ignoring mismatches
-    where the gate value is -inf due to top-k implementation differences.
+    Tests the final 'need_attend' boolean mask.
+    This test accounts for differences in tie-breaking between JAX and PyTorch's
+    top_k implementations. A mismatch in the mask is considered acceptable only if
+    the corresponding gate value is tied at the threshold (the k-th value).
     """
-    _, _, torch_gate, *_, torch_mask = self.get_torch_intermediates()
-    _, _, _, *_, jax_mask = self.get_jax_intermediates()
+    (
+        _,
+        _,  # gate_before_masking
+        torch_gate,  # gate_after_masking
+        _,
+        _,
+        torch_min_val,  # The threshold value
+        _,
+        _,
+        torch_mask,
+    ) = self.get_torch_intermediates()
+    (
+        _,
+        _,
+        _,
+        _,
+        _,
+        jax_min_val,  # The threshold value
+        _,
+        _,
+        jax_mask,
+    ) = self.get_jax_intermediates()
 
     k, g, s, n = jax_mask.shape
     h = k * g
     jax_mask_reshaped = jax_mask.reshape(h, s, n)
 
-    # Find where the masks disagree
     mismatched_indices = np.where(torch_mask.numpy() != np.array(jax_mask_reshaped))
 
     if mismatched_indices[0].size > 0:
-      # For every mismatch, check if the gate value was -inf.
-      # A mismatch is acceptable in this case because the choice between
-      # different -inf blocks is arbitrary and doesn't affect the outcome.
+      h_coords, s_coords, _ = mismatched_indices
       mismatched_gate_values = torch_gate[mismatched_indices].numpy()
-      non_inf_mismatches = np.where(mismatched_gate_values != -np.inf)[0]
 
-      if non_inf_mismatches.size > 0:
-        first_bad_index = tuple(idx[non_inf_mismatches[0]] for idx in mismatched_indices)
-        first_bad_gate_val = mismatched_gate_values[non_inf_mismatches[0]]
+      # Get the thresholds for the mismatched positions
+      mismatched_thresholds = torch_min_val.numpy()[h_coords, s_coords, 0]
+
+      # A mismatch is only valid if the gate value is equal to the threshold
+      is_tie = np.isclose(mismatched_gate_values, mismatched_thresholds, atol=self.atol, rtol=self.rtol)
+
+      # Or if both are -inf (a tie between non-selectable blocks)
+      are_both_inf = (mismatched_gate_values == -np.inf) & (mismatched_thresholds == -np.inf)
+
+      is_valid_mismatch = np.logical_or(is_tie, are_both_inf)
+
+      if not np.all(is_valid_mismatch):
+        first_bad_mismatch_idx = np.where(~is_valid_mismatch)[0][0]
+
+        bad_h = h_coords[first_bad_mismatch_idx]
+        bad_s = s_coords[first_bad_mismatch_idx]
+        bad_n = mismatched_indices[2][first_bad_mismatch_idx]
+
+        bad_index = (bad_h, bad_s, bad_n)
+        bad_gate_val = mismatched_gate_values[first_bad_mismatch_idx]
+        bad_threshold = mismatched_thresholds[first_bad_mismatch_idx]
+
         self.fail(
-            "Intermediate tensor 'need_attend' mask has a critical mismatch.\n" 
-            f"Mismatch at index {first_bad_index} where gate value was {first_bad_gate_val}, not -inf."
+            "Intermediate tensor 'need_attend' mask has a critical mismatch.\n"
+            f"Mismatch at index {bad_index} is not due to a tie at the threshold.\n"
+            f"Gate value was {bad_gate_val}, but threshold was {bad_threshold}."
         )
 
 

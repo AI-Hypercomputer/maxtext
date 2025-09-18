@@ -29,15 +29,24 @@ class MobaTest(unittest.TestCase):
     self.num_kv_heads = 4
     self.seq_len = 2048
     self.head_dim = 256
-    self.moba_chunk_size = 128
-    self.moba_topk = 2
+    self.moba_chunk_size = 256
+    self.moba_topk = 3
     self.dtype_torch = torch.bfloat16
     self.dtype_jax = jnp.bfloat16
 
-    # Generate random inputs using NumPy to ensure they are identical for both frameworks
+    # Generate deterministic, non-repeating inputs for Q and K to prevent ties
+    # in the gate values, which can cause non-deterministic top-k behavior.
+    total_q_elements = self.batch * self.seq_len * self.num_q_heads * self.head_dim
+    total_kv_elements = self.batch * self.seq_len * self.num_kv_heads * self.head_dim
+
+    q_flat = (np.arange(total_q_elements, dtype=np.float32) / total_q_elements) * 0.5
+    k_flat = (np.arange(total_kv_elements, dtype=np.float32) / total_kv_elements) * 0.5
+
+    self.q_np = q_flat.reshape(self.batch, self.seq_len, self.num_q_heads, self.head_dim)
+    self.k_np = k_flat.reshape(self.batch, self.seq_len, self.num_kv_heads, self.head_dim)
+
+    # The V tensor does not affect gate selection, so it can remain random.
     np.random.seed(42)
-    self.q_np = np.random.randn(self.batch, self.seq_len, self.num_q_heads, self.head_dim).astype(np.float32)
-    self.k_np = np.random.randn(self.batch, self.seq_len, self.num_kv_heads, self.head_dim).astype(np.float32)
     self.v_np = np.random.randn(self.batch, self.seq_len, self.num_kv_heads, self.head_dim).astype(np.float32)
 
   def moba_attn_varlen_naive_torch(self, q, k, v, moba_chunk_size, moba_topk):
