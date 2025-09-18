@@ -17,57 +17,80 @@
 from jax import numpy as jnp
 from jax.sharding import Mesh
 
-from flax import linen as nn
-
+from flax import nnx
 from MaxText.common_types import Config
-from MaxText.layers import quantizations
+from MaxText.layers import quantizations, nnx_wrappers
+from MaxText.layers.initializers import variable_to_logically_partitioned
+from MaxText.layers.quantizations import AqtQuantization as Quant
+from MaxText import max_logging
 
+from typing import Any, Optional
 # pytype: disable=attribute-error
 
-
-class SimpleDecoderLayer(nn.Module):
+class SimpleDecoderLayer(nnx.Module):
   """Decoder layer consisting of a single [embed, embed] weight matrix."""
 
-  config: Config
-  mesh: Mesh
-  model_mode: str
-  quant: None | quantizations.AqtQuantization = None
+  def __init__(
+      self,
+      config: Config,
+      mesh: Mesh,
+      model_mode: str,
+      quant: Optional[quantizations.AqtQuantization] = None,
+      rngs: Optional[nnx.Rngs] = None,
+      weight_dtype: Any = jnp.float32,
+  ) -> None:
 
-  def setup(self):
-    self.weight_mat = self.param(
-        "weights",
-        nn.with_logical_partitioning(nn.initializers.lecun_normal(), ("embed", "mlp")),
-        (self.config.emb_dim, self.config.emb_dim),
-    )
+    self.config = config
+    self.mesh = mesh
+    self.quant = quant
+    self.weight_dtype = weight_dtype
+    self.model_mode = model_mode
+    self.rngs = rngs if rngs is not None else nnx.Rngs(0)
+
+    init_fn = nnx.with_partitioning(nnx.initializers.lecun_normal(), sharding=("embed", "mlp"), mesh=self.mesh)
+
+    self.weights = nnx.Param(init_fn(self.rngs.params(), (self.config.emb_dim, self.config.emb_dim), self.weight_dtype), )
 
   def __call__(
       self, inputs: jnp.ndarray, positions, segmentation, deterministic, model_mode, previous_chunk=None, page_state=None
   ):
     if self.config.scan_layers:
-      return inputs @ self.weight_mat.astype(inputs.dtype), None
-    else:
-      return inputs @ self.weight_mat.astype(inputs.dtype)
+      return inputs @ self.weights.astype(inputs.dtype), None
+    return inputs @ self.weights.astype(inputs.dtype)
 
+SimpleDecoderLayerToLinen = nnx_wrappers.to_linen_class(
+    SimpleDecoderLayer,
+    base_metadata_fn=variable_to_logically_partitioned,
+)
 
-class SimpleMlpDecoderLayer(nn.Module):
+class SimpleMlpDecoderLayer(nnx.Module):
   """Decoder layer consisting of [embed,mlp] followed by an [mlp,embed] matmul."""
 
-  config: Config
-  mesh: Mesh
-  model_mode: str
-  quant: None | quantizations.AqtQuantization = None
+  def __init__(
+      self,
+      config: Config,
+      mesh: Mesh,
+      model_mode: str,
+      quant: Optional[quantizations.AqtQuantization] = None,
+      rngs: Optional[nnx.Rngs] = None,
+      weight_dtype: Any = jnp.float32,
+  ) -> None:
 
-  def setup(self):
-    self.ff_1 = self.param(
-        "ff_1",
-        nn.with_logical_partitioning(nn.initializers.lecun_normal(), ("embed", "mlp")),
-        (self.config.emb_dim, self.config.mlp_dim),
-    )
-    self.ff_2 = self.param(
-        "ff_2",
-        nn.with_logical_partitioning(nn.initializers.lecun_normal(), ("mlp", "embed")),
-        (self.config.mlp_dim, self.config.emb_dim),
-    )
+    self.config = config
+    self.mesh = mesh
+    self.quant = quant
+    self.weight_dtype = weight_dtype
+    self.rngs = rngs if rngs is not None else nnx.Rngs(0)
+    self.model_mode = model_mode
+
+    init_ff1_fn = nnx.with_partitioning(nnx.initializers.lecun_normal(), sharding=("embed", "mlp"), mesh=self.mesh)
+
+    self.ff_1 = nnx.Param(init_ff1_fn(self.rngs.params(), (self.config.emb_dim, self.config.mlp_dim), self.weight_dtype), )
+
+    init_ff2_fn = nnx.with_partitioning(nnx.initializers.lecun_normal(), sharding=("mlp", "embed"), mesh=self.mesh)
+
+    self.ff_2 = nnx.Param(init_ff2_fn(self.rngs.params(), (self.config.mlp_dim, self.config.emb_dim), self.weight_dtype), )
+
 
   def __call__(
       self,
@@ -86,3 +109,8 @@ class SimpleMlpDecoderLayer(nn.Module):
       return output, None
     else:
       return output
+
+SimpleMlpDecoderLayerToLinen = nnx_wrappers.to_linen_class(
+    SimpleMlpDecoderLayer,
+    base_metadata_fn=variable_to_logically_partitioned,
+)
