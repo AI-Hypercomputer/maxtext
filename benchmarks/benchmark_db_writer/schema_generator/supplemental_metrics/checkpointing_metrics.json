@@ -1,0 +1,198 @@
+[
+    {
+        "name": "run_id",
+        "mode": "REQUIRED",
+        "type": "STRING",
+        "description": "",
+        "fields": []
+    },
+    {
+        "name": "restore_time_p50",
+        "mode": "NULLABLE",
+        "type": "FLOAT",
+        "description": "",
+        "fields": []
+    },
+    {
+        "name": "restore_time_p90",
+        "mode": "NULLABLE",
+        "type": "FLOAT",
+        "description": "",
+        "fields": []
+    },
+    {
+        "name": "restore_time_p99",
+        "mode": "NULLABLE",
+        "type": "FLOAT",
+        "description": "",
+        "fields": []
+    },
+    {
+        "name": "restore_time_p100",
+        "mode": "NULLABLE",
+        "type": "FLOAT",
+        "description": "",
+        "fields": []
+    },
+    {
+        "name": "restore_time_max",
+        "mode": "NULLABLE",
+        "type": "FLOAT",
+        "description": "",
+        "fields": []
+    },
+    {
+        "name": "restore_time_min",
+        "mode": "NULLABLE",
+        "type": "FLOAT",
+        "description": "",
+        "fields": []
+    },
+    {
+        "name": "restore_time_avg",
+        "mode": "NULLABLE",
+        "type": "FLOAT",
+        "description": "",
+        "fields": []
+    },
+    {
+      "name": "restore_time_stddev",
+      "mode": "NULLABLE",
+      "type": "FLOAT",
+      "description": "",
+      "fields": []
+    },
+    {
+      "name": "restore_time_initial",
+      "mode": "NULLABLE",
+      "type": "FLOAT",
+      "description": "",
+      "fields": []
+    },
+    {
+        "name": "write_time_p50",
+        "mode": "NULLABLE",
+        "type": "FLOAT",
+        "description": "",
+        "fields": []
+    },
+    {
+        "name": "write_time_p90",
+        "mode": "NULLABLE",
+        "type": "FLOAT",
+        "description": "",
+        "fields": []
+    },
+    {
+        "name": "write_time_p99",
+        "mode": "NULLABLE",
+        "type": "FLOAT",
+        "description": "",
+        "fields": []
+    },
+    {
+        "name": "write_time_p100",
+        "mode": "NULLABLE",
+        "type": "FLOAT",
+        "description": "",
+        "fields": []
+    },
+    {
+        "name": "write_time_max",
+        "mode": "NULLABLE",
+        "type": "FLOAT",
+        "description": "",
+        "fields": []
+    },
+    {
+        "name": "write_time_min",
+        "mode": "NULLABLE",
+        "type": "FLOAT",
+        "description": "",
+        "fields": []
+    },
+    {
+        "name": "write_time_avg",
+        "mode": "NULLABLE",
+        "type": "FLOAT",
+        "description": "",
+        "fields": []
+    },
+    {
+      "name": "write_time_stddev",
+      "mode": "NULLABLE",
+      "type": "FLOAT",
+      "description": "",
+      "fields": []
+    },
+    {
+        "name": "accelerator_to_cpu_time_max",
+        "mode": "NULLABLE",
+        "type": "FLOAT",
+        "description": "",
+        "fields": []
+    },
+    {
+        "name": "accelerator_to_cpu_time_min",
+        "mode": "NULLABLE",
+        "type": "FLOAT",
+        "description": "",
+        "fields": []
+    },
+    {
+        "name": "accelerator_to_cpu_time_avg",
+        "mode": "NULLABLE",
+        "type": "FLOAT",
+        "description": "",
+        "fields": []
+    },
+    {
+        "name": "storage_save_time_max",
+        "mode": "NULLABLE",
+        "type": "FLOAT",
+        "description": "",
+        "fields": []
+    },
+    {
+        "name": "storage_save_time_min",
+        "mode": "NULLABLE",
+        "type": "FLOAT",
+        "description": "",
+        "fields": []
+    },
+    {
+        "name": "storage_save_time_avg",
+        "mode": "NULLABLE",
+        "type": "FLOAT",
+        "description": "",
+        "fields": []
+    },
+    {
+        "name": "num_restore_datapoints",
+        "mode": "NULLABLE",
+        "type": "INTEGER",
+        "description": "",
+        "fields": []
+    },
+    {
+        "name": "num_write_datapoints",
+        "mode": "NULLABLE",
+        "type": "INTEGER",
+        "description": "",
+        "fields": []
+    },
+    {
+        "name": "update_timestamp",
+        "mode": "NULLABLE",
+        "type": "TIMESTAMP",
+        "description": "",
+        "fields": []
+    },
+    {
+        "name": "additional_metrics",
+        "mode": "NULLABLE",
+        "type": "JSON",
+        "description": "",
+        "fields": []
+    }
+]

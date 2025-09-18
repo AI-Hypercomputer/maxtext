@@ -139,10 +139,10 @@ def write_run(
 
   # pylint: disable=import-outside-toplevel
 
-  from benchmark_db_writer import bq_writer_utils
-  from benchmark_db_writer import dataclass_bigquery_writer
-  from benchmark_db_writer.run_summary_writer import sample_run_summary_writer
-  from benchmark_db_writer.schema.workload_benchmark_v2 import workload_benchmark_v2_schema
+  from benchmarks.benchmark_db_writer import bq_writer_utils
+  from benchmarks.benchmark_db_writer import dataclass_bigquery_writer
+  from benchmarks.benchmark_db_writer.run_summary_writer import run_summary_writer
+  from benchmarks.benchmark_db_writer.schema.workload_benchmark_v2 import workload_benchmark_v2_schema
 
   def get_db_client(
       project: str, dataset: str, table: str, dataclass_type: Type, is_test: bool = False
@@ -168,9 +168,9 @@ def write_run(
   print(options.model_id)
 
   if (
-      sample_run_summary_writer.validate_model_id(options.model_id, options.is_test)
-      and sample_run_summary_writer.validate_hardware_id(options.hardware_id, options.is_test)
-      and sample_run_summary_writer.validate_software_id(options.software_id, options.is_test)
+      run_summary_writer.validate_model_id(options.model_id, options.is_test)
+      and run_summary_writer.validate_hardware_id(options.hardware_id, options.is_test)
+      and run_summary_writer.validate_software_id(options.software_id, options.is_test)
   ):
     summary = workload_benchmark_v2_schema.WorkloadBenchmarkV2Schema(
         run_id=f"run-{uuid.uuid4()}",
@@ -179,6 +179,7 @@ def write_run(
         hardware_id=options.hardware_id,
         hardware_num_chips=number_of_chips,
         hardware_num_nodes=number_of_nodes,
+        hardware_num_slices=options.hardware_num_slices,
         result_success=run_success,
         configs_framework=framework_config_in_json,
         configs_env=env_variables,
