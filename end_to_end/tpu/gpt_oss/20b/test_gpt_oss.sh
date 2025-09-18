@@ -29,7 +29,7 @@ python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 export CHKPT_BUCKET=gs://maxtext-model-checkpoints/gpt-oss-20b/hf-bf16
 
 # 1.2 Convert checkpoint to `unscanned` format, more suitable for decoding
-JAX_PLATFORMS=cpu python3 -m MaxText.convert_gpt_oss_unscanned_ckpt --base_model_path ${CHKPT_BUCKET} --maxtext_model_path ${BASE_OUTPUT_PATH}/unscanned --model_size ${MODEL_NAME}
+JAX_PLATFORMS=cpu python3 -m MaxText.convert_gpt_oss_unscanned_ckpt --base-model-path ${CHKPT_BUCKET} --maxtext-model-path ${BASE_OUTPUT_PATH}/unscanned --model-size ${MODEL_NAME}
 
 # Test whether the forward pass logits match the golden logits
 # default golden_logits_path=/deps/src/MaxText/test_assets/golden_data_{model_name}.jsonl, copied from gs://maxtext-test-assets/golden_data_{model_name}.jsonl
@@ -40,7 +40,7 @@ attention=dot_product sparse_matmul=True megablox=True per_device_batch_size=1 m
 #--golden_logits_path=${GOLD}
 
 # 1.1 Convert checkpoint to `scanned` format, more suitable for training 
-JAX_PLATFORMS=cpu python3 -m MaxText.convert_gpt_oss_ckpt --base_model_path ${CHKPT_BUCKET} --maxtext_model_path ${BASE_OUTPUT_PATH}/scanned --model_size ${MODEL_NAME}
+JAX_PLATFORMS=cpu python3 -m MaxText.convert_gpt_oss_ckpt --base-model-path ${CHKPT_BUCKET} --maxtext-model-path ${BASE_OUTPUT_PATH}/scanned --model-size ${MODEL_NAME}
 
 # Step 2: 
 # We define the checkpoint paths. This way it is easier to use these paths in the `train.py` and `decode.py` commands
