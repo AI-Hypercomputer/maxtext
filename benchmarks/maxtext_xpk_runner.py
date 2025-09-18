@@ -158,6 +158,9 @@ class WorkloadConfig:
     else:
       self.num_devices_per_slice = int(self.device_type.split("-")[1]) / 2
       self.topology = ""
+    self.hardware_id = self.device_type.split("-")[0]
+    if self.hardware_id == "v5litepod":
+      self.hardware_id = "v5e"
 
 
 def wait_for_xpk_workload_completion(cluster_config: XpkClusterConfig, workload_name, xpk_path) -> int:
@@ -341,6 +344,7 @@ def _build_args_from_config(wl_config: WorkloadConfig) -> dict:
       "model_id": wl_config.model.model_type,
       "hardware_id": wl_config.hardware_id,
       "software_id": "jax_maxtext",
+      "hardware_num_slices": wl_config.num_slices,
       "number_of_chips": wl_config.num_devices_per_slice * wl_config.num_slices,
       "container_image_name": wl_config.base_docker_image,
       "global_batch_size": per_device_batch_size * wl_config.num_devices_per_slice * wl_config.num_slices,
@@ -445,7 +449,8 @@ def build_user_command(
           f"base_output_directory={wl_config.base_output_directory}",
           f"{vertex_tensorboard}",
           f"{run_name_command}",
-          f"{enable_metrics_cmd}" f"{upload_hlo_dump}",
+          f"{enable_metrics_cmd}",
+          f"{upload_hlo_dump}",
       ]
   )
   return command

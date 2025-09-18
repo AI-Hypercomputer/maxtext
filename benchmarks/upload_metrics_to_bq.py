@@ -186,6 +186,12 @@ def add_parser_arguments(parser: argparse.ArgumentParser):
       default=True,
       help="Whether to use the testing project or production project",
   )
+  parser.add_argument(
+      "--hardware_num_slices",
+      type=int,
+      required=False,
+      help="hardware slice number",
+  )
 
 
 def download_metrics_file_locally(metrics_gcs_file: str, local_file: str) -> int:
