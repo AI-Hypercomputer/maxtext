@@ -425,8 +425,6 @@ config_ref = pyconfig.initialize(
     query_proj="offload",
     key_proj="offload",
     value_proj="offload",
-    checkpoint_storage_use_ocdbt="false",
-    checkpoint_storage_use_zarr3="false",
 )
 
 llama3_1_8b, mesh = get_ref_maxtext_model(config_ref)
@@ -486,8 +484,6 @@ config_policy = pyconfig.initialize(
     query_proj="offload",
     key_proj="offload",
     value_proj="offload",
-    checkpoint_storage_use_ocdbt="false",
-    checkpoint_storage_use_zarr3="false",
 )
 llama3_1_8b_policy, mesh_policy = get_ref_maxtext_model(config_policy)
 
@@ -929,6 +925,8 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         # checkpoint saving
         checkpoint_root_directory=CKPT_DIR,
         checkpointing_options=checkpointing_options,
+        checkpoint_storage_use_ocdbt=False,
+        checkpoint_storage_use_zarr3=False,
     ),
     rollout_config=base_rollout.RolloutConfig(
         max_tokens_to_generate=TOTAL_GENERATION_STEPS,
