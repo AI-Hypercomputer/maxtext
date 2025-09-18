@@ -3,7 +3,7 @@
 # This file is documentation for how to get started with gpt-oss-20b on v5p-8.
 
 # The flow of this file is as follows:
-# 1. Convert the HuggingFace checkpoint to MaxText-compatible checkpoint: 
+# 1. Convert the HuggingFace checkpoint (bf16) to MaxText-compatible checkpoint (bf16): 
 #    Scanned format is better for training; unscanned format is better for decoding.
 # 2. Run pre-training, fine-tuning, and decoding.
 
