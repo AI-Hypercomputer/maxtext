@@ -1113,12 +1113,15 @@ def get_kv_cache_annotations(model, config, rng, mesh, page_state: None | PageSt
     input_shape = (config.micro_batch_size_to_train_on, 1)
     image_shape = get_dummy_image_shape_for_init(config)
 
+    print("get_kv_cache_annotations")
+
     model_vars = model.init(
         {"params": rng, "dropout": rng, "aqt": rng},
         jnp.ones(input_shape),
         jnp.ones(input_shape),
         encoder_images=jnp.ones(image_shape) if config.use_multimodal else None,
-        model_mode=MODEL_MODE_AUTOREGRESSIVE,
+        #model_mode=MODEL_MODE_AUTOREGRESSIVE,
+        model_mode=MODEL_MODE_PREFILL,
         slot=0,
         page_state=page_state,
     )

@@ -141,6 +141,7 @@ def main(argv: Sequence[str]) -> None:
   prof.activate(optional_postfix="trace")
 
   # Prefill
+  print("== decode: prefill ==")
   rng, rng_prefill = jax.random.split(rng)  # Split RNG before calling prefill
   for i in range(_NUM_STREAMS):
     with jax.profiler.StepTraceAnnotation("prefill", stream=i):
@@ -156,12 +157,14 @@ def main(argv: Sequence[str]) -> None:
     first_token_list.append(first_token)
 
   # Insert
+  print("== decode: insert ==")
   rng, rng_init_decode = jax.random.split(rng)
   decode_state = engine.init_decode_state(rng_init_decode)
   for i in range(_NUM_STREAMS):
     decode_state = engine.insert(prefill_result_list[i], decode_state, slot=i)
 
   # Generate
+  print("== decode: generate ==")
   prof_deactivated = False
   steps = range(config.max_prefill_predict_length, config.max_target_length)
   sampled_tokens_list.append(_batch_first_result_token(first_token_list, batch_size))

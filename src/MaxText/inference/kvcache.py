@@ -36,7 +36,7 @@ from MaxText.common_types import CACHE_BATCH, CACHE_SEQUENCE, CACHE_HEADS, CACHE
 MAX_INT8 = 127.5
 MAX_INT4 = 7.5
 E4M3_MAX = jnp.finfo(jnp.float8_e4m3fn).max.astype(jnp.float32)
-PREFILL_BATCH_SIZE = 1
+PREFILL_BATCH_SIZE = 7
 
 
 def reverse_transpose(transposed_array, transpose_axis_order):
@@ -366,6 +366,7 @@ class KVCache(nnx.Module):
         jnp.zeros(cache_shape_key, dtype=dtype),
         sharding=cache_axis_names,
     )
+    print(f"cached_prefill_key shape {cache_shape_key}")
     self.cached_prefill_value = nnx.Cache(
         jnp.zeros(cache_shape_value, dtype=dtype),
         sharding=cache_axis_names,
@@ -629,7 +630,7 @@ class KVCache(nnx.Module):
     if decoder_segment_ids is not None:
       cached_prefill_segment_id_var.value = decoder_segment_ids
 
-    print("kv_cache_prefill")
+    # print("kv_cache_prefill")
     return key, value, decoder_segment_ids
 
   def update_ar_key_value(

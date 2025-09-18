@@ -33,8 +33,21 @@ from MaxText.globals import MAXTEXT_PKG_DIR
 from MaxText.layers import models
 from MaxText.layers import quantizations
 
-MAX_PREFILL_PREDICT_LENGTH = 4
+MAX_PREFILL_PREDICT_LENGTH = 3
 
+def print_shape(path, leaf):
+  """Prints the full path and shape of an array."""
+  # Formats the path from a list of keys into a readable string
+  path_str = ".".join(str(k.key) if hasattr(k, 'key') else str(k) for k in path)
+  # Check if the leaf is an array (which has a .shape)
+  if hasattr(leaf, 'shape'):
+    print(f"{path_str}: {leaf.shape}")
+
+# Assuming 'decode_state' is the variable holding your cache
+# (e.g., after engine.init_decode_state())
+# print("--- KVCache Shapes ---")
+# jax.tree_util.tree_map_with_path(print_shape, decode_state['cache'])
+# print("----------------------")
 
 class TestModel(unittest.TestCase):
   """Test the Whole Model."""
@@ -49,16 +62,16 @@ class TestModel(unittest.TestCase):
     """Init pyconfig."""
     config = pyconfig.initialize(
         [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
-        per_device_batch_size=1.0,
+        per_device_batch_size=2,
         run_name="test",
         enable_checkpointing=False,
-        base_num_decoder_layers=2,
+        base_num_decoder_layers=1,
         attention="dot_product",
-        max_target_length=16,
+        max_target_length=5,
         base_emb_dim=256,
         base_num_query_heads=2,
         base_num_kv_heads=2,
-        max_prefill_predict_length=4,
+        max_prefill_predict_length=MAX_PREFILL_PREDICT_LENGTH,
         **kwargs,
     )
     return config
@@ -67,6 +80,7 @@ class TestModel(unittest.TestCase):
     """Get data."""
     s = (self.cfg.global_batch_size_to_train_on, self.cfg.max_target_length)
     ids = jax.random.randint(self.rng, s, 0, self.cfg.vocab_size)
+    print("global batch", self.cfg.global_batch_size_to_train_on)
 
     decoder_segment_ids = jax.numpy.zeros(s) + DECODING_ACTIVE_SEQUENCE_INDICATOR
     decoder_positions = jnp.stack(
@@ -162,7 +176,7 @@ class TestModel(unittest.TestCase):
         decoder_segment_ids,
         enable_dropout=False,
         # add this line
-        # model_mode=MODEL_MODE_PREFILL,
+        model_mode=MODEL_MODE_PREFILL,
     )
 
     partial_prefill_logits, partial_cache = prefill_model.apply(
@@ -177,6 +191,7 @@ class TestModel(unittest.TestCase):
     )
    
     #print(partial_cache)
+    jax.tree_util.tree_map_with_path(print_shape, partial_cache)
 
     np.testing.assert_allclose(
         full_train_logits[:, :PREFILL_RANGE, :], partial_prefill_logits, rtol=1e-01, atol=1e-01, equal_nan=False
