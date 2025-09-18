@@ -37,7 +37,7 @@ JAX_PLATFORMS=cpu python3 -m MaxText.convert_gpt_oss_unscanned_ckpt --base-model
 
 # Test whether the forward pass logits match the golden logits
 # default golden_logits_path=/deps/src/MaxText/test_assets/golden_data_{model_name}.jsonl, copied from gs://maxtext-test-assets/golden_data_{model_name}.jsonl
-python3 -m MaxText.tests.forward_pass_logit_checker "${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText}/"configs/base.yml base_output_directory=${BASE_OUTPUT_PATH} run_name=forward_logits_check model_name=${MODEL_NAME} \
+python3 -m tests.forward_pass_logit_checker "${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText}/"configs/base.yml base_output_directory=${BASE_OUTPUT_PATH} run_name=forward_logits_check model_name=${MODEL_NAME} \
 load_parameters_path=${UNSCANNED_CKPT_PATH} scan_layers=false \
 attention=dot_product sparse_matmul=True megablox=True per_device_batch_size=1 max_target_length=4 dtype=float32 \
 --atol=0.1 --rtol=0.1 --max_kl_div=3e-4 
