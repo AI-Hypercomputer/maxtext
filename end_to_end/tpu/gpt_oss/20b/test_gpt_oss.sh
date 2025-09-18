@@ -15,7 +15,7 @@ export MODEL_NAME='gpt-oss-20b'
 export TOKENIZER_PATH='openai/gpt-oss-20b'
 
 if [ -z "${BASE_OUTPUT_PATH}" ]; then
-    # Non-Googlers please remember to point BASE_OUTPUT_PATH to GCS buckets that you own, this script uses internal buckets for testing.
+    # Non-Googlers please remember to point `BASE_OUTPUT_PATH` to GCS buckets that you own, this script uses internal buckets for testing.
     export BASE_OUTPUT_PATH=gs://runner-maxtext-logs/$(date +%Y-%m-%d-%H-%M)
     echo "BASE_OUTPUT_PATH is not set, using BASE_OUTPUT_PATH = ${BASE_OUTPUT_PATH}"
 fi
@@ -24,11 +24,14 @@ fi
 python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 
 # Step 1: Checkpoint conversion
-# Assume HF checkpoints are uploaded to GCS bucket at $CKPT_BUCKET 
+# Assume HF checkpoints are uploaded to GCS bucket at CKPT_BUCKET 
+# Non-Googlers please remember to point `CKPT_BUCKET` to GCS buckets that you own
 # Copying the HF checkpoint into a local directory `/tmp` -- you are free to use a different directory
-export CKPT_BUCKET=gs://maxtext-model-checkpoints/gpt-oss-20b/hf-bf16
-gcloud storage cp -r ${CKPT_BUCKET} /tmp
-export CKPT_DISK_LOCATION=/tmp/hf-bf16
+if [ -z "${CKPT_DISK_LOCATION}" ]; then
+  export CKPT_BUCKET=gs://maxtext-model-checkpoints/gpt-oss-20b/hf-bf16
+  gcloud storage cp -r ${CKPT_BUCKET} /tmp
+  export CKPT_DISK_LOCATION=/tmp/hf-bf16
+fi
 # 1.2 Convert checkpoint to `unscanned` format, more suitable for decoding
 JAX_PLATFORMS=cpu python3 -m MaxText.convert_gpt_oss_unscanned_ckpt --base-model-path ${CKPT_DISK_LOCATION} --maxtext-model-path ${BASE_OUTPUT_PATH}/unscanned --model-size ${MODEL_NAME}
 
