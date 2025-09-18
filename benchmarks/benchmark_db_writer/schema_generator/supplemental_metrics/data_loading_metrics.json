@@ -1,0 +1,48 @@
+[
+      {
+        "mode": "REQUIRED",
+        "name": "run_id",
+        "type": "STRING"
+      },
+      {
+        "mode": "NULLABLE",
+        "name": "data_loading_tokens_per_sec_p50",
+        "type": "FLOAT"
+      },
+      {
+        "mode": "NULLABLE",
+        "name": "data_loading_tokens_per_sec_p90",
+        "type": "FLOAT"
+      },
+      {
+        "mode": "NULLABLE",
+        "name": "data_loading_tokens_per_sec_p99",
+        "type": "FLOAT"
+      },
+      {
+        "mode": "NULLABLE",
+        "name": "data_loading_tokens_per_sec_p100",
+        "type": "FLOAT"
+      },
+      {
+        "mode": "NULLABLE",
+        "name": "accelerator_blocked_time",
+        "type": "FLOAT"
+      },
+      {
+        "mode": "NULLABLE",
+        "name": "accelerator_blocked_percent",
+        "type": "FLOAT"
+      },
+      {
+        "mode": "NULLABLE",
+        "name": "update_timestamp",
+        "type": "TIMESTAMP"
+      },
+      {
+        "mode": "NULLABLE",
+        "name": "additional_metrics",
+        "type": "JSON"
+      }
+]
+

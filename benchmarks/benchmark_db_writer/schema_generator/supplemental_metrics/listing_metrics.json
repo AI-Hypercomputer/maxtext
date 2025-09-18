@@ -1,0 +1,219 @@
+[
+  {
+    "name": "run_id",
+    "mode": "REQUIRED",
+    "type": "STRING",
+    "description": "",
+    "fields": []
+  },
+  {
+      "name": "first_iteration_metrics_gcs_list_time_avg",
+      "mode": "NULLABLE",
+      "type": "FLOAT",
+      "description": "",
+      "fields": []
+  },
+  {
+      "name": "first_iteration_metrics_fuse_list_time_avg",
+      "mode": "NULLABLE",
+      "type": "FLOAT",
+      "description": "",
+      "fields": []
+  },
+  {
+      "name": "first_iteration_metrics_gcs_subdir_list_time_avg",
+      "mode": "NULLABLE",
+      "type": "FLOAT",
+      "description": "",
+      "fields": []
+  },
+    {
+      "name": "first_iteration_metrics_gcs_list_time_p50",
+      "mode": "NULLABLE",
+      "type": "FLOAT",
+      "description": "",
+      "fields": []
+  },
+  {
+      "name": "first_iteration_metrics_fuse_list_time_p50",
+      "mode": "NULLABLE",
+      "type": "FLOAT",
+      "description": "",
+      "fields": []
+  },
+  {
+      "name": "first_iteration_metrics_gcs_subdir_list_time_p50",
+      "mode": "NULLABLE",
+      "type": "FLOAT",
+      "description": "",
+      "fields": []
+  },
+  {
+      "name": "first_iteration_metrics_gcs_list_time_p90",
+      "mode": "NULLABLE",
+      "type": "FLOAT",
+      "description": "",
+      "fields": []
+  },
+  {
+      "name": "first_iteration_metrics_fuse_list_time_p90",
+      "mode": "NULLABLE",
+      "type": "FLOAT",
+      "description": "",
+      "fields": []
+  },
+  {
+      "name": "first_iteration_metrics_gcs_subdir_list_time_p90",
+      "mode": "NULLABLE",
+      "type": "FLOAT",
+      "description": "",
+      "fields": []
+  },
+  {
+      "name": "first_iteration_metrics_gcs_list_time_p99",
+      "mode": "NULLABLE",
+      "type": "FLOAT",
+      "description": "",
+      "fields": []
+  },
+  {
+      "name": "first_iteration_metrics_fuse_list_time_p99",
+      "mode": "NULLABLE",
+      "type": "FLOAT",
+      "description": "",
+      "fields": []
+  },
+  {
+      "name": "first_iteration_metrics_gcs_subdir_list_time_p99",
+      "mode": "NULLABLE",
+      "type": "FLOAT",
+      "description": "",
+      "fields": []
+  },
+  {
+      "name": "first_iteration_metrics_gcs_list_time_p100",
+      "mode": "NULLABLE",
+      "type": "FLOAT",
+      "description": "",
+      "fields": []
+  },
+  {
+      "name": "first_iteration_metrics_fuse_list_time_p100",
+      "mode": "NULLABLE",
+      "type": "FLOAT",
+      "description": "",
+      "fields": []
+  },
+  {
+      "name": "first_iteration_metrics_gcs_subdir_list_time_p100",
+      "mode": "NULLABLE",
+      "type": "FLOAT",
+      "description": "",
+      "fields": []
+  },
+  {
+      "name": "subsq_iteration_metrics_gcs_list_time_avg",
+      "mode": "NULLABLE",
+      "type": "FLOAT",
+      "description": "",
+      "fields": []
+  },
+  {
+      "name": "subsq_iteration_metrics_fuse_list_time_avg",
+      "mode": "NULLABLE",
+      "type": "FLOAT",
+      "description": "",
+      "fields": []
+  },
+  {
+      "name": "subsq_iteration_metrics_gcs_subdir_list_time_avg",
+      "mode": "NULLABLE",
+      "type": "FLOAT",
+      "description": "",
+      "fields": []
+  },
+    {
+      "name": "subsq_iteration_metrics_gcs_list_time_p50",
+      "mode": "NULLABLE",
+      "type": "FLOAT",
+      "description": "",
+      "fields": []
+  },
+  {
+      "name": "subsq_iteration_metrics_fuse_list_time_p50",
+      "mode": "NULLABLE",
+      "type": "FLOAT",
+      "description": "",
+      "fields": []
+  },
+  {
+      "name": "subsq_iteration_metrics_gcs_subdir_list_time_p50",
+      "mode": "NULLABLE",
+      "type": "FLOAT",
+      "description": "",
+      "fields": []
+  },
+  {
+      "name": "subsq_iteration_metrics_gcs_list_time_p90",
+      "mode": "NULLABLE",
+      "type": "FLOAT",
+      "description": "",
+      "fields": []
+  },
+  {
+      "name": "subsq_iteration_metrics_fuse_list_time_p90",
+      "mode": "NULLABLE",
+      "type": "FLOAT",
+      "description": "",
+      "fields": []
+  },
+  {
+      "name": "subsq_iteration_metrics_gcs_subdir_list_time_p90",
+      "mode": "NULLABLE",
+      "type": "FLOAT",
+      "description": "",
+      "fields": []
+  },
+  {
+      "name": "subsq_iteration_metrics_gcs_list_time_p99",
+      "mode": "NULLABLE",
+      "type": "FLOAT",
+      "description": "",
+      "fields": []
+  },
+  {
+      "name": "subsq_iteration_metrics_fuse_list_time_p99",
+      "mode": "NULLABLE",
+      "type": "FLOAT",
+      "description": "",
+      "fields": []
+  },
+  {
+      "name": "subsq_iteration_metrics_gcs_subdir_list_time_p99",
+      "mode": "NULLABLE",
+      "type": "FLOAT",
+      "description": "",
+      "fields": []
+  },
+  {
+      "name": "subsq_iteration_metrics_gcs_list_time_p100",
+      "mode": "NULLABLE",
+      "type": "FLOAT",
+      "description": "",
+      "fields": []
+  },
+  {
+      "name": "subsq_iteration_metrics_fuse_list_time_p100",
+      "mode": "NULLABLE",
+      "type": "FLOAT",
+      "description": "",
+      "fields": []
+  },
+  {
+      "name": "subsq_iteration_metrics_gcs_subdir_list_time_p100",
+      "mode": "NULLABLE",
+      "type": "FLOAT",
+      "description": "",
+      "fields": []
+  }
+]

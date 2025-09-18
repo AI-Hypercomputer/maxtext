@@ -1,0 +1,39 @@
+[
+  {
+    "name": "workload_id",
+    "mode": "REQUIRED",
+    "type": "STRING",
+    "description": "",
+    "fields": []
+  },
+  {
+      "name": "description",
+      "mode": "NULLABLE",
+      "type": "STRING",
+      "description": "",
+      "fields": []
+  },
+  {
+      "name": "update_person_ldap",
+      "mode": "NULLABLE",
+      "type": "STRING",
+      "description": "",
+      "fields": [],
+      "defaultValueExpression": "SESSION_USER()"
+  },
+  {
+      "name": "update_timestamp",
+      "mode": "NULLABLE",
+      "type": "TIMESTAMP",
+      "description": "",
+      "fields": [],
+      "defaultValueExpression": "CURRENT_TIMESTAMP()"
+  },
+  {
+      "name": "display_name",
+      "mode": "NULLABLE",
+      "type": "STRING",
+      "description": "",
+      "fields": []
+  }
+]
