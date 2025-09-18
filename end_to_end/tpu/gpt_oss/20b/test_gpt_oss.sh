@@ -24,12 +24,14 @@ fi
 python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 
 # Step 1: Checkpoint conversion
-# After downloading checkpoints, copy them to GCS bucket at $CHKPT_BUCKET 
+# After downloading HF checkpoints, copy them to GCS bucket at $CKPT_BUCKET 
 # Non-Googlers please remember to point these variables to GCS buckets that you own, this script uses internal buckets for testing.
-export CHKPT_BUCKET=gs://maxtext-model-checkpoints/gpt-oss-20b/hf-bf16
-
+export CKPT_BUCKET=gs://maxtext-model-checkpoints/gpt-oss-20b/hf-bf16
+# In the following command, we are copying the HF checkpoint into a local directory `tmp` -- you are free to use a different local directory than /tmp/
+gcloud storage cp -r ${CKPT_BUCKET} /tmp
+export CKPT_DISK_LOCATION=/tmp/hf-checkpoint
 # 1.2 Convert checkpoint to `unscanned` format, more suitable for decoding
-JAX_PLATFORMS=cpu python3 -m MaxText.convert_gpt_oss_unscanned_ckpt --base-model-path ${CHKPT_BUCKET} --maxtext-model-path ${BASE_OUTPUT_PATH}/unscanned --model-size ${MODEL_NAME}
+JAX_PLATFORMS=cpu python3 -m MaxText.convert_gpt_oss_unscanned_ckpt --base-model-path ${CKPT_DISK_LOCATION} --maxtext-model-path ${BASE_OUTPUT_PATH}/unscanned --model-size ${MODEL_NAME}
 
 # Test whether the forward pass logits match the golden logits
 # default golden_logits_path=/deps/src/MaxText/test_assets/golden_data_{model_name}.jsonl, copied from gs://maxtext-test-assets/golden_data_{model_name}.jsonl
@@ -40,7 +42,7 @@ attention=dot_product sparse_matmul=True megablox=True per_device_batch_size=1 m
 #--golden_logits_path=${GOLD}
 
 # 1.1 Convert checkpoint to `scanned` format, more suitable for training 
-JAX_PLATFORMS=cpu python3 -m MaxText.convert_gpt_oss_ckpt --base-model-path ${CHKPT_BUCKET} --maxtext-model-path ${BASE_OUTPUT_PATH}/scanned --model-size ${MODEL_NAME}
+JAX_PLATFORMS=cpu python3 -m MaxText.convert_gpt_oss_ckpt --base-model-path ${CKPT_DISK_LOCATION} --maxtext-model-path ${BASE_OUTPUT_PATH}/scanned --model-size ${MODEL_NAME}
 
 # Step 2: 
 # We define the checkpoint paths. This way it is easier to use these paths in the `train.py` and `decode.py` commands
