@@ -24,12 +24,11 @@ fi
 python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 
 # Step 1: Checkpoint conversion
-# After downloading HF checkpoints, copy them to GCS bucket at $CKPT_BUCKET 
-# Non-Googlers please remember to point these variables to GCS buckets that you own, this script uses internal buckets for testing.
+# Assume HF checkpoints are uploaded to GCS bucket at $CKPT_BUCKET 
+# Copying the HF checkpoint into a local directory `/tmp` -- you are free to use a different directory
 export CKPT_BUCKET=gs://maxtext-model-checkpoints/gpt-oss-20b/hf-bf16
-# In the following command, we are copying the HF checkpoint into a local directory `tmp` -- you are free to use a different local directory than /tmp/
 gcloud storage cp -r ${CKPT_BUCKET} /tmp
-export CKPT_DISK_LOCATION=/tmp/hf-checkpoint
+export CKPT_DISK_LOCATION=/tmp/hf-bf16
 # 1.2 Convert checkpoint to `unscanned` format, more suitable for decoding
 JAX_PLATFORMS=cpu python3 -m MaxText.convert_gpt_oss_unscanned_ckpt --base-model-path ${CKPT_DISK_LOCATION} --maxtext-model-path ${BASE_OUTPUT_PATH}/unscanned --model-size ${MODEL_NAME}
 
