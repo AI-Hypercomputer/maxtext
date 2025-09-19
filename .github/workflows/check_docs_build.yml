@@ -1,0 +1,29 @@
+name: Check the Documentation Build
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-docs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip' # caching pip dependencies
+
+      - name: Install dependencies
+        run: pip install -r requirements_docs.txt
+
+      - name: Build documentation
+        run: |
+          sphinx-build -b html docs/ docs/_build/html
