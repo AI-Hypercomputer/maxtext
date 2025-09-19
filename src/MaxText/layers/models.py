@@ -258,12 +258,14 @@ class Transformer(nnx.Module):
     # TODO: this will need to be updated since MODEL_MODE_AUTOREGRESSIVE is not used in __init__f
     if self.model_mode == MODEL_MODE_PREFILL:
       seq_len = cfg.max_prefill_predict_length
+      batch_size = 1
     elif self.model_mode == MODEL_MODE_AUTOREGRESSIVE:
       seq_len = 1
+      batch_size = cfg.micro_batch_size_to_train_on
     else:
       seq_len = cfg.max_target_length
+      batch_size = cfg.micro_batch_size_to_train_on
 
-    batch_size = cfg.micro_batch_size_to_train_on
     dummy_decoder_input_tokens = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
     dummy_decoder_positions = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
 

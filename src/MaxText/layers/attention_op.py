@@ -1495,6 +1495,9 @@ class AttentionOp(nnx.Module):
     if model_mode != MODEL_MODE_TRAIN:
       assert prefill_kv_cache
       key, value, decoder_segment_ids = prefill_kv_cache
+      # print(f"query shape: {query.shape}")
+      # print(f"key shape: {key.shape}")
+      # print(f"value shape: {value.shape}")
 
     prefill_unnormalized_output, prefill_exponentials_max, prefill_exponentials_sum = self.apply_attention(
         query=query,
@@ -1513,11 +1516,16 @@ class AttentionOp(nnx.Module):
 
     # Return the "prefill" cache if it actually the combined prefill+ar kv cache
     if ar_kv_cache is None:
+      # print(f"ar_kv_cache is None")
       if prefill_exponentials_sum is not None:
         return prefill_unnormalized_output / prefill_exponentials_sum
       return prefill_unnormalized_output
 
     key, value, decoder_segment_ids, lengths = ar_kv_cache
+
+    # print(f"ar query shape: {query.shape}")
+    # print(f"ar key shape: {key.shape}")
+    # print(f"ar value shape: {value.shape}")
     ar_unnormalized_output, ar_exponentials_max, ar_exponentials_sum = self.apply_attention(
         query=query,
         key=key,

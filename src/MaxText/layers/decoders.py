@@ -713,6 +713,7 @@ class Decoder(nn.Module):
             )(y, *broadcast_args)
     else:
       if cfg.scan_layers:
+        # jax.debug.print("scan_layers: {x}",x=cfg.scan_layers)
         if cfg.decoder_block == DecoderBlockType.DEEPSEEK:
           assert len(RemattedBlockLayers) == 2, "Scanned layers must have a length of 2 using deepseek."
           layer_call_kwargs = {

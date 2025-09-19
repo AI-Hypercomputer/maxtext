@@ -753,6 +753,7 @@ class Attention(nnx.Module):
 
     """
     batch_size, _, _ = inputs_kv_shape
+    # jax.debug.print("init_kv_caches - batch_size: {x}", x=batch_size)
     # During initialization, seq_len of inputs_kv is max_target_length,
     # which is not always correct for some functions in KVCache.
     # However, KVCache internal cache shapes are based on max_prefill_length
@@ -799,6 +800,8 @@ class Attention(nnx.Module):
       - The prefill key-value cache, or None.
       - The autoregressive key-value cache, or None.
     """
+    # print(f"self.KVCache_0 key: {key.shape}")
+    # print(f"self.KVCache_0 value: {value.shape}")
     prefill_kv_cache, ar_kv_cache = self.KVCache_0(
         key=key,
         value=value,
@@ -807,6 +810,9 @@ class Attention(nnx.Module):
         use_ragged_attention=self.use_ragged_attention,
         previous_chunk=previous_chunk,
     )
+    # if ar_kv_cache is not None:
+      # print("ar_kv_cache not none")
+      # print(f"ar_kv_cache = {ar_kv_cache}")
     return [prefill_kv_cache, ar_kv_cache]
 
   def __call__(

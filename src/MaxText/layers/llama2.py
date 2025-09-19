@@ -60,12 +60,13 @@ class LlamaDecoderLayer(nnx.Module):
 
     if model_mode == MODEL_MODE_PREFILL:
       seq_len = config.max_prefill_predict_length
+      dummy_inputs_shape = (1, seq_len, config.emb_dim)
     elif model_mode == MODEL_MODE_AUTOREGRESSIVE:
       seq_len = 1
+      dummy_inputs_shape = (batch_size, seq_len, config.emb_dim)
     else:
       seq_len = config.max_target_length
-
-    dummy_inputs_shape = (batch_size, seq_len, config.emb_dim)
+      dummy_inputs_shape = (batch_size, seq_len, config.emb_dim)
 
     self.pre_self_attention_layer_norm = RMSNorm(
         num_features=config.emb_dim,

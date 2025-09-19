@@ -334,12 +334,12 @@ class KVCache(nnx.Module):
   def _get_cached_kv_dtype(self):
     return self.kv_quant.dtype if self.kv_quant else self.dtype
 
-  def _get_cache_scale_logical_shape(self, heads, cache_length, batch):
+  def _get_cache_scale_logical_shape(self, heads, cache_length):
     assert self.kv_quant
     if self.kv_quant.axis_cfg == "dkv":
-      return (batch, cache_length, heads, 1)
+      return (self.batch, cache_length, heads, 1)
     if self.kv_quant.axis_cfg == "heads_and_dkv":
-      return (batch, cache_length, 1, 1)
+      return (self.batch, cache_length, 1, 1)
     raise ValueError(f"Invalid config for kv_quant_axis:{self.kv_quant.axis_cfg}")
 
   def _initialize_prefill_caches(self, model_mode):
@@ -347,9 +347,12 @@ class KVCache(nnx.Module):
 
     cache_length = self.max_prefill_length
     dtype = self._get_cached_kv_dtype()
+    # jax.debug.print("_initialize_prefill_caches - model_mode:{x}", x=model_mode)
+    # jax.debug.print("_initialize_prefill_caches - batch:{x}", x=self.batch)
 
     if model_mode == MODEL_MODE_PREFILL:
       cache_logical_axis_names = self.prefill_cache_logical_axis_names
+      # jax.debug.print("_initialize_prefill_caches - cache_logical_axis_names:{x}", x=cache_logical_axis_names)
     else:
       cache_logical_axis_names = self.cache_logical_axis_names
     cache_axis_names = transpose_tuple(cache_logical_axis_names, self.prefill_cache_axis_order)
@@ -364,6 +367,7 @@ class KVCache(nnx.Module):
         jnp.zeros(cache_shape_key, dtype=dtype),
         sharding=cache_axis_names,
     )
+    # jax.debug.print("self.cached_prefill_key:{x}", x=self.cached_prefill_key.value.shape)
     self.cached_prefill_value = nnx.Cache(
         jnp.zeros(cache_shape_value, dtype=dtype),
         sharding=cache_axis_names,
@@ -382,10 +386,10 @@ class KVCache(nnx.Module):
     if self.kv_quant:
       cache_scale_axis_names = transpose_tuple(self.cache_scale_logical_axis_names, self.prefill_cache_axis_order)
 
-      cache_scale_logical_shape = self._get_cache_scale_logical_shape(self.key_heads, cache_length, batch=self.batch)
+      cache_scale_logical_shape = self._get_cache_scale_logical_shape(self.key_heads, cache_length)
       cache_key_scale_shape = transpose_tuple(cache_scale_logical_shape, self.prefill_cache_axis_order)
 
-      cache_scale_logical_shape = self._get_cache_scale_logical_shape(self.value_heads, cache_length, batch=self.batch)
+      cache_scale_logical_shape = self._get_cache_scale_logical_shape(self.value_heads, cache_length)
       cache_value_scale_shape = transpose_tuple(cache_scale_logical_shape, self.prefill_cache_axis_order)
 
       self.cached_prefill_key_scale = nnx.Cache(
@@ -462,10 +466,10 @@ class KVCache(nnx.Module):
     if self.kv_quant:
       cache_scale_axis_names = transpose_tuple(self.cache_scale_logical_axis_names, self.ar_cache_axis_order)
 
-      cache_scale_logical_shape = self._get_cache_scale_logical_shape(self.key_heads, cache_length, batch=self.batch)
+      cache_scale_logical_shape = self._get_cache_scale_logical_shape(self.key_heads, cache_length)
       cache_key_scale_shape = transpose_tuple(cache_scale_logical_shape, self.ar_cache_axis_order)
 
-      cache_scale_logical_shape = self._get_cache_scale_logical_shape(self.value_heads, cache_length, batch=self.batch)
+      cache_scale_logical_shape = self._get_cache_scale_logical_shape(self.value_heads, cache_length)
       cache_value_scale_shape = transpose_tuple(cache_scale_logical_shape, self.ar_cache_axis_order)
 
       self.cached_ar_key_scale = nnx.Cache(
@@ -651,6 +655,8 @@ class KVCache(nnx.Module):
 
     cached_key, cached_key_scale = key_caches
     cached_value, cached_value_scale = value_caches
+    # print(f"cached_value----: {cached_value}")
+    # print(f"cached_value_scale----: {cached_value_scale}")
 
     # In order to update the key, value caches with the current key and
     # value, we reshape the one_token_key and one_token_value
@@ -696,6 +702,16 @@ class KVCache(nnx.Module):
 
     else:
       one_hot_indices = one_hot_indices.astype(int)
+      # print(f"operand cached_key.value = {cached_key.value.shape}")
+      # print(f"update one_token_key_shaped_for_cache = {one_token_key_shaped_for_cache.shape}")
+
+      # workaround?
+      if cached_key.value.shape[2] != one_token_key_shaped_for_cache.shape[2]:
+        cached_key.value = jnp.repeat(cached_key.value, one_token_key_shaped_for_cache.shape[2], axis=2)
+        cached_value.value = jnp.repeat(cached_value.value, one_token_value_shaped_for_cache.shape[2], axis=2)
+        # print(f"after operand cached_key.value = {cached_key.value.shape}")
+        # print(f"after update one_token_key_shaped_for_cache = {one_token_key_shaped_for_cache.shape}")
+
       cached_key.value = jax.lax.dynamic_update_index_in_dim(
           cached_key.value, one_token_key_shaped_for_cache, ar_cache_update_idx, ar_cache_update_axis
       )
@@ -757,6 +773,9 @@ class KVCache(nnx.Module):
     Raises:
       ValueError: when key/value shape is not [batch, 1, num_heads, heads_dim].
     """
+
+    # print("kv_cache_autoregressive - key: {key.shape}")
+    # print("kv_cache_autoregressive - value: {value.shape}")
     _, sequence, _, _ = value.shape
     if sequence != 1:
       raise ValueError(f"Sequence length should be 1 during autoregression, got {sequence=}")
@@ -764,6 +783,9 @@ class KVCache(nnx.Module):
     cached_ar_key_vars, cached_ar_value_vars, cached_ar_segment_id_var, cache_ar_index_var, cache_ar_lengths_var = (
         self._get_ar_cache_vars()
     )
+
+    # print(f"before update kv_cache_autoregressive - cached_ar_key_vars: {cached_ar_key_vars}")
+    # print(f"before update kv_cache_autoregressive - cached_ar_value_vars: {cached_ar_value_vars}")
 
     self.update_ar_key_value(
         key,
@@ -774,7 +796,17 @@ class KVCache(nnx.Module):
         cache_ar_lengths_var.value,
         use_ragged_attention,
     )
+  
+    # print(f"after update kv_cache_autoregressive - cached_ar_key_vars: {cached_ar_key_vars}")
+    # print(f"after update kv_cache_autoregressive - cached_ar_value_vars: {cached_ar_value_vars}")
     active_indicator = jnp.zeros((self.batch, 1), dtype=jnp.int32) + DECODING_ACTIVE_SEQUENCE_INDICATOR
+    
+    # workaround?
+    if cached_ar_segment_id_var.value.shape[0] != active_indicator.shape[0]:
+      cached_ar_segment_id_var.value = jnp.repeat(cached_ar_segment_id_var.value, active_indicator.shape[0], axis=0)
+      # print(f"after operand cached_ar_segment_id_var.value = {cached_ar_segment_id_var.value.shape}")
+      # print(f"after update active_indicator = {active_indicator.shape}")
+
     cached_ar_segment_id_var.value = jax.lax.dynamic_update_index_in_dim(
         cached_ar_segment_id_var.value, active_indicator, jnp.squeeze(cache_ar_index_var.value), 1
     )
@@ -795,6 +827,13 @@ class KVCache(nnx.Module):
         cached_ar_segment_id_var.value,
         cache_ar_lengths_var.value,
     )
+
+    # print(f"kv_cache_autoregressive - key: {key.shape}")
+    # print(f"kv_cache_autoregressive - value: {value.shape}")
+    # print(f"kv_cache_autoregressive - cached_ar_key_vars: {cached_ar_key_vars}")
+    # print(f"kv_cache_autoregressive - cached_ar_value_vars: {cached_ar_value_vars}")
+    # print(f"kv_cache_autoregressive - cached_prefill: {cached_prefill}")
+    # print(f"kv_cache_autoregressive - cached_ar: {cached_ar}")
     return cached_prefill, cached_ar
 
   def __call__(
