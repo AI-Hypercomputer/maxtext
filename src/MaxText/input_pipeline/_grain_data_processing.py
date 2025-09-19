@@ -124,7 +124,9 @@ def pretrain_preprocessing_pipeline(dataset, config, data_columns, tokenize, gra
   batch_size = config.global_batch_size_to_load // jax.process_count()
   if config.packing:
     length_struct = {col: config.max_target_length for col in data_columns}
-    dataset = grain.experimental.FirstFitPackIterDataset(dataset, length_struct=length_struct, num_packing_bins=batch_size)
+    dataset = grain.experimental.FirstFitPackIterDataset(
+        dataset, length_struct=length_struct, num_packing_bins=batch_size
+    )
     rekey_dict = {
         "targets_segmentation": "targets_segment_ids",
         "inputs_segmentation": "inputs_segment_ids",
@@ -288,7 +290,9 @@ def make_grain_eval_iterator(
           tokenize=config.tokenize_eval_data,
           grain_worker_count=config.grain_worker_count_eval,
       )
-    return multihost_dataloading.MultiHostDataLoadIterator(eval_dataloader, global_mesh, config.generate_padding_batch_eval)
+    return multihost_dataloading.MultiHostDataLoadIterator(
+        eval_dataloader, global_mesh, config.generate_padding_batch_eval
+    )
   else:
     get_ds_fn = functools.partial(
         get_datasets,

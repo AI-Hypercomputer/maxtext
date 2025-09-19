@@ -26,6 +26,7 @@ from MaxText.utils.goodput_utils import (
     maybe_record_goodput,
 )
 
+
 class DataLoader:
   """
   Loads preprocessed data for training.

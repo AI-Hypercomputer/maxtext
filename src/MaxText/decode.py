@@ -108,7 +108,9 @@ def main(argv: Sequence[str]) -> None:
         [multimodal_utils.get_image_offsets(config.model_name, processor_output=po) for po in processor_outputs]
     )
     prefill_length -= image_offsets
-    text = multimodal_utils.reformat_prompt(text, image_placeholder=config.image_placeholder, model_name=config.model_name, num_images=len(images))
+    text = multimodal_utils.reformat_prompt(
+        text, image_placeholder=config.image_placeholder, model_name=config.model_name, num_images=len(images)
+    )
 
   metadata = engine.get_tokenizer()
   tokenizer_model = engine.build_tokenizer(metadata)

@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Generates golden logit data from a Llama2-70b model for comparison."""
+
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
 import jsonlines
