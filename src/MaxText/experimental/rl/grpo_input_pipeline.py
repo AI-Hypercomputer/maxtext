@@ -169,7 +169,7 @@ def preprocessing_pipeline(
 
   operations = [
       grain.MapOperation(lists2array),
-      _input_pipeline_utils.PadOrTrimToMaxLength(max_target_length),
+      _input_pipeline_utils.PadOrTrimToMaxLength(max_target_length, add_true_length=True),
       grain.Batch(batch_size=global_batch_size // jax.process_count(), drop_remainder=drop_remainder),
   ]
 

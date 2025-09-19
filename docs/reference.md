@@ -20,6 +20,7 @@
 :maxdepth: 1
 
 reference/terminology
+reference/supported_models_and_architectures
 reference/alternatives
 reference/benchmark_and_performance
 reference/architecture_overview

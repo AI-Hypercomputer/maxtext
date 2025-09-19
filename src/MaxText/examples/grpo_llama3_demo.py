@@ -75,8 +75,8 @@ from MaxText.globals import MAXTEXT_ASSETS_ROOT
 # for vLLM we can skip JAX precompilation with this flag, it makes startup faster
 os.environ["SKIP_JAX_PRECOMPILE"] = "1"
 
-# add the parent directory (two levels up to say ~/HOME/maxtext) to sys.path if currenlt runnig from
-# ~/HOME/maxtext/MaxText/examples
+# add the parent directory (two levels up to say ~/HOME/maxtext/src) to sys.path if currenlt runnig from
+# ~/HOME/maxtext/src/MaxText/examples
 
 # Get the directory of the current script
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -377,8 +377,8 @@ def get_ref_maxtext_model(config):
 model_config = llama3_lib.ModelConfig.llama3_1_8b()
 
 # Load the reference model
-# Note: pass the path to your scanned checkpoint for "load_parameters_path". To generate a scanned checkpoint, you can use the `scanned_checkpoint.py` script in MaxText.
-# To create a scanned checkpoint, you can use /maxtext/MaxText/utils/ckpt_conversion/to_maxtext.py
+# Note: pass the path to your scanned checkpoint for "load_parameters_path". 
+# To create a scanned checkpoint, you can use /maxtext/src/MaxText/utils/ckpt_conversion/to_maxtext.py
 config_ref = pyconfig.initialize(
     [
         "",
@@ -433,8 +433,8 @@ show_hbm_usage()
 
 
 # Load the policy model
-# Note: pass the path to your scanned checkpoint for "load_parameters_path". To generate a scanned checkpoint, you can use the `scanned_checkpoint.py` script in MaxText.
-# To create a scanned checkpoint, you can use /maxtext/MaxText/utils/ckpt_conversion/to_maxtext.py
+# Note: pass the path to your scanned checkpoint for "load_parameters_path".
+# To create a scanned checkpoint, you can use /maxtext/src/MaxText/utils/ckpt_conversion/to_maxtext.py
 
 # TODO: @mazumdera: change this to use lora
 
@@ -874,7 +874,6 @@ optimizer = optax.adamw(
     b2=B2,
     weight_decay=WEIGHT_DECAY,
 )
-# TODO: @mazumdera: try optimizer offloading with adamw
 
 if MAX_GRAD_NORM is not None:
   optimizer = optax.chain(
