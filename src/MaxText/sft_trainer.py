@@ -23,7 +23,8 @@ from absl import app
 import numpy as np
 
 import tensorflow as tf
-
+import pathwaysutils
+pathwaysutils.initialize()
 import jax
 
 from flax.linen import partitioning as nn_partitioning

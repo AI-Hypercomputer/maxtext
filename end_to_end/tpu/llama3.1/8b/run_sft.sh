@@ -62,7 +62,7 @@ python3 -m MaxText.sft.sft_trainer "${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD
     model_name=${PRE_TRAINED_MODEL} load_parameters_path=${PRE_TRAINED_MODEL_CKPT_PATH} \
     hf_access_token=$HF_TOKEN tokenizer_path=${PRE_TRAINED_MODEL_TOKENIZER} \
     per_device_batch_size=${PER_DEVICE_BATCH_SIZE} steps=${STEPS} \
-    profiler=xplane max_target_length=1024 weight_dtype=bfloat16
+    profiler=xplane max_target_length=1024 weight_dtype=bfloat16 skip_jax_distributed_system=true
 
 # Get the latest fine-tuned model checkpoint
 CHECKPOINTS_PATH=${BASE_OUTPUT_DIRECTORY}/${PRE_TRAINED_MODEL}/${RUN_NAME}/checkpoints

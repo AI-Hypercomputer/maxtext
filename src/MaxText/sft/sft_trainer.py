@@ -39,7 +39,8 @@ from typing import Sequence
 
 from absl import app
 import os
-
+import pathwaysutils
+pathwaysutils.initialize()
 import jax
 
 from flax.linen import partitioning as nn_partitioning
