@@ -300,8 +300,8 @@ class RoutedMoE(nnx.Module):
     self.quant = quant
     self.rngs = rngs
 
-    self.wi_kernel_axes = ("exp", "embed_no_exp", "mlp")
-    self.wo_kernel_axes = ("exp", "mlp", "embed_no_exp")
+    self.wi_kernel_axes = ("embed_no_exp", "exp", "mlp")
+    self.wo_kernel_axes = ("embed_no_exp", "mlp", "exp")
 
     self.gate = GateLogit(
         in_features_shape=self.config.emb_dim,
@@ -900,9 +900,9 @@ class RoutedMoE(nnx.Module):
 
     # w0, w1, wo needs to be un sharded on fsdp / fsdp_transpose axis, so use
     # mlp_no_fsdp axis
-    w0_pspec = nn.logical_to_mesh_axes(("exp", "embed_tensor_transpose", "mlp_no_fsdp"))
-    w1_pspec = nn.logical_to_mesh_axes(("exp", "embed_tensor_transpose", "mlp_no_fsdp"))
-    wo_pspec = nn.logical_to_mesh_axes(("exp", "mlp_no_fsdp", "embed_tensor_transpose"))
+    w0_pspec = nn.logical_to_mesh_axes(("embed_tensor_transpose", "exp", "mlp_no_fsdp"))
+    w1_pspec = nn.logical_to_mesh_axes(("embed_tensor_transpose", "exp", "mlp_no_fsdp"))
+    wo_pspec = nn.logical_to_mesh_axes(("embed_tensor_transpose", "mlp_no_fsdp", "exp"))
     if isinstance(w0_kernel, aqt.QTensor):
       w0_pspec = aqt.partition_spec(w0_pspec, (1,), w0_kernel.dtype, use_bias=False)
     if isinstance(w1_kernel, aqt.QTensor):
