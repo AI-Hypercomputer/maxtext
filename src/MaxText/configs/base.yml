@@ -798,9 +798,13 @@ freeze_vision_encoder_params: True
 dtype_mm: "float32"  # Data type for multimodal model's vision encoder
 remat_policy_for_vit: "minimal"  # Remat policy for multimodal model's vision encoder. Check `remat_policy` for options.
 image_size_for_vit: 896 # Default for Gemma3, and should be overwritten by model's config
-image_path: "" # Local image path used for decoding
+image_path: "" # Local image path used for decoding, can be multiple paths separated by comma, exp "/path/image1.jpg,/path/image2.jpg"
 image_placeholder: "<|image|>"
 posemb_type_for_vit: "learn"
+# max_num_images_per_example only applies for training when your image column is a list of images.
+# -1 means no limit, and will pad to the max possible number of images determined by sequence length.
+# Set it to avoid unnecessary padding if you know the maximum number of images per example.
+max_num_images_per_example: -1
 
 ### llama4 multi modal configs
 hidden_size_for_vit: 1408

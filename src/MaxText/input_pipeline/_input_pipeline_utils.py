@@ -68,7 +68,11 @@ def add_segmentation_and_position(x, data_columns, padding_token=0):
 
 def reformat_prompt(example, column, image_placeholder, model_name):
   """reformat prompt for multimodal SFT"""
-  example[column] = multimodal_utils.reformat_prompt(example[column], image_placeholder, model_name)
+  if isinstance(example["images"], list):
+    num_images = len(example["images"])
+  else:
+    num_images = 1
+  example[column] = multimodal_utils.reformat_prompt(example[column], image_placeholder, model_name, num_images)
   return example
 
 
@@ -80,11 +84,19 @@ def reformat_response(example, column, model_name):
 
 def pre_process_image_sft(example, image_column, model_name):
   """pre-process image for multimodal SFT"""
-  image = multimodal_utils.convert_to_RGB(example[image_column])
-  # TODO(aireenmei, hengtaoguo): add support for different image sizes
-  image = multimodal_utils.resize_image(image, model_name)
-  image = np.array(image)
-  example[image_column] = multimodal_utils.pre_process_image(image, model_name)
+
+  def _process_image_fn(image):
+    image = multimodal_utils.convert_to_RGB(image)
+    # TODO(aireenmei, hengtaoguo): add support for different image sizes
+    image = multimodal_utils.resize_image(image, model_name)
+    image = np.array(image)
+    image = multimodal_utils.pre_process_image(image, model_name)
+    return image
+
+  if isinstance(example[image_column], list):
+    example[image_column] = [_process_image_fn(img) for img in example[image_column]]
+  else:
+    example[image_column] = _process_image_fn(example[image_column])
   return example
 
 
@@ -93,7 +105,10 @@ def prepare_text_for_image_fusion(example, column_name, model_name):
   example[column_name] = multimodal_utils.prepare_text_for_image_fusion(
       example[column_name], model_name, processor_output=example["images"]
   )
-  example["images"] = example["images"].pixel_values
+  if isinstance(example["images"], list):
+    example["images"] = [image.pixel_values for image in example["images"]]
+  else:
+    example["images"] = example["images"].pixel_values
   return example
 
 
@@ -400,58 +415,58 @@ class ReformatPacking(grain.MapTransform):
 
 @dataclasses.dataclass
 class PadOrTrimToMaxLength(grain.MapTransform):
-  """Pads/Trims each input to the specified length
-  and returns true_length of input
-  """
+  """Pads or trims each input to the specified length.
+  And optionally add true length for the input."""
 
-  def __init__(self, max_length):
-    self.max_length = max_length
-
-  def map(self, element: dict[str, np.ndarray]):
-    """map to each element"""
-
-    def _pad(x, max_length):
-      pad_amount = max(max_length - x.shape[0], 0)
-      pad_amount = [(0, pad_amount)] + [(0, 0)] * (len(x.shape) - 1)
-      return np.pad(x, pad_amount)[:max_length]
-
-    data_columns = list(element.keys())
-    for data_column in data_columns:
-      element[f"{data_column}_segmentation"] = (element[data_column] != 0).astype(np.int32)
-      element[f"{data_column}_position"] = np.arange(element[data_column].shape[0], dtype=np.int32)
-      element[f"{data_column}_true_length"] = np.array([element[data_column].shape[0]], dtype=np.int32)
-    for key, _ in element.items():
-      if "true_length" not in key:
-        element[key] = _pad(element[key], self.max_length)
-    # for data_column in data_columns:
-    #   data[f"{data_column}_true_length"] = _max_true_length(data[data_column], 0)
-    return element
-
-
-@dataclasses.dataclass
-class PadToMaxLength(grain.MapTransform):
-  """Pads each input to the specified length"""
-
-  def __init__(self, max_length, pad_id):
+  def __init__(self, max_length, pad_id=0, model_name=None, add_true_length=False, max_num_images_per_example=-1):
     self.max_length = max_length
     self.pad_id = pad_id
+    self.model_name = model_name
+    self.add_true_length = add_true_length
+    self.max_num_images_per_example = max_num_images_per_example
+
+  def _pad_text(self, x, max_length, pad_id):
+    pad_amount = max(max_length - x.shape[0], 0)
+    pad_amount = [(0, pad_amount)] + [(0, 0)] * (len(x.shape) - 1)
+    return np.pad(x, pad_amount, constant_values=pad_id)[: self.max_length]
+
+  def _pad_image(self, images):
+    image_offsets = multimodal_utils.get_image_offsets(self.model_name, None)
+    max_num_images = (self.max_length // image_offsets) -1  # -1 to reserve space for at least one text token
+    if self.max_num_images_per_example > 0:
+      max_num_images = min(self.max_num_images_per_example, max_num_images)
+    image_shape = multimodal_utils.get_dummy_image_shape_for_init(self.model_name)[2:]
+    assert (
+        images.shape[0] <= max_num_images
+    ), f"Number of images {images.shape[0]} exceeds the maximum allowed {max_num_images}"
+    if images.shape[0] < max_num_images:
+      pad_size = max_num_images - images.shape[0]
+      pad_shape = (pad_size,) + image_shape
+      pad_images = np.zeros(pad_shape, dtype=images.dtype)
+      if images is not None and images.size > 0:
+        images = np.concatenate([images, pad_images], axis=0)
+      else:
+        images = pad_images
+    return images
 
   def map(self, element: dict[str, np.ndarray]):
     """map to each element"""
-
-    def _pad(x, max_length, pad_id):
-      pad_amount = max(max_length - x.shape[0], 0)
-      pad_amount = [(0, pad_amount)] + [(0, 0)] * (len(x.shape) - 1)
-      return np.pad(x, pad_amount, constant_values=pad_id)
-
     data_columns = list(element.keys())
     for data_column in data_columns:
       if data_column != "images":
         element[f"{data_column}_segmentation"] = (element[data_column] != self.pad_id).astype(np.int32)
         element[f"{data_column}_position"] = np.arange(element[data_column].shape[0], dtype=np.int32)
+        if self.add_true_length:
+          element[f"{data_column}_true_length"] = np.array([element[data_column].shape[0]], dtype=np.int32)
     for key, _ in element.items():
-      if key != "images":
-        element[key] = _pad(element[key], self.max_length, self.pad_id)
+      if key == "images":
+        if isinstance(element["images"], list):
+          assert self.model_name is not None, "model_name must be provided when padding images"
+          element["images"] = self._pad_image(np.asarray(element["images"]))
+        else:
+          element["images"] = np.asarray(element["images"])[None, ...]
+      elif "true_length" not in key:
+        element[key] = self._pad_text(element[key], self.max_length, self.pad_id)
     return element
 
 
