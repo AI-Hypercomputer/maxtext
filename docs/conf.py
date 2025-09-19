@@ -20,6 +20,7 @@
 
 # -- Path setup --------------------------------------------------------------
 import os.path
+import os
 import sys
 
 REPO_ROOT = os.path.abspath(os.path.dirname(os.path.dirname(__file__)))
@@ -30,8 +31,8 @@ sys.path.insert(0, os.path.join(REPO_ROOT, "src"))
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#project-information
 
 project = "MaxText"
-copyright = "2025, MaxText developers"
-author = "MaxText developers"
+copyright = "2025, Google LLC"
+author = "Google LLC"
 
 # -- General configuration ---------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#general-configuration
@@ -81,30 +82,47 @@ exclude_patterns = [
 # This function automatically runs sphinx-apidoc to generate API documentation
 # from the docstrings in the source code.
 def run_apidoc(_):
-  from sphinx.ext import apidoc
+    # Use subprocess to run sphinx-apidoc. This is safer than calling main()
+    # directly within the Sphinx process, especially on macOS, as it avoids
+    # potential multiprocessing/forking issues like the "mutex lock failed" error.
+    import subprocess
+    import sys
 
-  pkg_path = os.path.join(REPO_ROOT, "src", "MaxText")
-  # The path where the generated RST files will be stored
-  output_path = os.path.join(REPO_ROOT, "docs", "reference", "api_generated")
+    os.environ['OBJC_DISABLE_INITIALIZE_FORK_SAFETY'] = '1'
 
-  # sphinx-apidoc options
-  # --module-first: Put module documentation before submodule list
-  # --force: Overwrite existing files
-  # --no-toc: Don't create a table of contents file (modules.rst)
-  # --separate: Create a separate file for each module
-  options = [
-      "--module-first",
-      "--force",
-      "--separate",
-      "--output-dir",
-      output_path,
-      pkg_path,
-      os.path.join("*", "tests", "*"),
-      os.path.join("*", "MaxText", "experimental", "*"),
-  ]
-  apidoc.main(options)
+    pkg_path = os.path.join(REPO_ROOT, "src", "MaxText")
+    # The path where the generated RST files will be stored
+    output_path = os.path.join(REPO_ROOT, "docs", "reference", "api_generated")
+
+    # Command to run sphinx-apidoc
+    # Note: We use `sys.executable -m sphinx.ext.apidoc` to ensure we're using
+    # the apidoc from the same Python environment as Sphinx.
+    command = [
+        sys.executable,
+        "-m",
+        "sphinx.ext.apidoc",
+        "--module-first",
+        "--force",
+        "--separate",
+        "--output-dir",
+        output_path,
+        pkg_path,
+        # Paths to exclude
+        os.path.join(REPO_ROOT, "tests"),
+        os.path.join(REPO_ROOT, "src", "MaxText", "experimental"),
+    ]
+
+    # Run the command and check for errors
+    try:
+        print("Running sphinx-apidoc...")
+        subprocess.check_call(command, env={**os.environ, **{'OBJC_DISABLE_INITIALIZE_FORK_SAFETY': '1'}})
+    except subprocess.CalledProcessError as e:
+        print(f"sphinx-apidoc failed with error: {e}", file=sys.stderr)
+        sys.exit(1)
 
 
 # Connect the apidoc generation to the Sphinx build process
 def setup(app):
-  app.connect("builder-inited", run_apidoc)
+  run_apidoc(None)
+  print('running:', app)
+  #app.connect("builder-inited", run_apidoc)
