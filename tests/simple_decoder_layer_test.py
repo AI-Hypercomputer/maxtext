@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Tests for the simple decoder layer."""
+
 import unittest
 import os.path
 import pytest
