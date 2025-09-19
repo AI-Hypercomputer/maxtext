@@ -25,6 +25,9 @@
 
 set -e
 
+DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+MAXTEXT_REPO_ROOT="${MAXTEXT_REPO_ROOT:-$(cd "${DIR}"/../../ && pwd)}"
+
 export LOCAL_IMAGE_NAME=maxtext_base_image
 export PROJECT=$(gcloud config get-value project)
 
@@ -49,7 +52,7 @@ if ! gcloud storage cp gs://maxtext-test-assets/* "${MAXTEXT_TEST_ASSETS_ROOT:-$
   echo "WARNING: Failed to download test assets from GCS. These files are only used for end-to-end tests; you may not have access to the bucket."
 fi
 
-docker build --build-arg BASEIMAGE=${LOCAL_IMAGE_NAME} -f ./maxtext_runner.Dockerfile -t ${LOCAL_IMAGE_NAME_RUNNER} .
+docker build --build-arg BASEIMAGE=${LOCAL_IMAGE_NAME} -f "${MAXTEXT_REPO_ROOT}"/dependencies/dockerfiles/maxtext_runner.Dockerfile -t ${LOCAL_IMAGE_NAME_RUNNER} .
 
 docker tag ${LOCAL_IMAGE_NAME_RUNNER} gcr.io/$PROJECT/${CLOUD_IMAGE_NAME}:latest
 docker push gcr.io/$PROJECT/${CLOUD_IMAGE_NAME}:latest
