@@ -300,8 +300,13 @@ class RoutedMoE(nnx.Module):
     self.quant = quant
     self.rngs = rngs
 
-    self.wi_kernel_axes = ("embed_no_exp", "exp", "mlp")
-    self.wo_kernel_axes = ("embed_no_exp", "mlp", "exp")
+    # special sharding for dsv3
+    if self.config.num_experts == 256:
+      self.wi_kernel_axes = ("embed_no_exp", "exp", "mlp")
+      self.wo_kernel_axes = ("embed_no_exp", "mlp", "exp")
+    else:
+      self.wi_kernel_axes = ("exp", "embed_no_exp", "mlp")
+      self.wo_kernel_axes = ("exp", "mlp", "embed_no_exp")
 
     self.gate = GateLogit(
         in_features_shape=self.config.emb_dim,
@@ -900,9 +905,15 @@ class RoutedMoE(nnx.Module):
 
     # w0, w1, wo needs to be un sharded on fsdp / fsdp_transpose axis, so use
     # mlp_no_fsdp axis
-    w0_pspec = nn.logical_to_mesh_axes(("embed_tensor_transpose", "exp", "mlp_no_fsdp"))
-    w1_pspec = nn.logical_to_mesh_axes(("embed_tensor_transpose", "exp", "mlp_no_fsdp"))
-    wo_pspec = nn.logical_to_mesh_axes(("embed_tensor_transpose", "mlp_no_fsdp", "exp"))
+    # special sharding for dsv3 to remove overhead between gmm/AG
+    if self.config.num_experts == 256:
+      w0_pspec = nn.logical_to_mesh_axes(("embed_tensor_transpose", "exp", "mlp_no_fsdp"))
+      w1_pspec = nn.logical_to_mesh_axes(("embed_tensor_transpose", "exp", "mlp_no_fsdp"))
+      wo_pspec = nn.logical_to_mesh_axes(("embed_tensor_transpose", "mlp_no_fsdp", "exp"))
+    else:
+      w0_pspec = nn.logical_to_mesh_axes(("exp", "embed_tensor_transpose", "mlp_no_fsdp"))
+      w1_pspec = nn.logical_to_mesh_axes(("exp", "embed_tensor_transpose", "mlp_no_fsdp"))
+      wo_pspec = nn.logical_to_mesh_axes(("exp", "mlp_no_fsdp", "embed_tensor_transpose"))
     if isinstance(w0_kernel, aqt.QTensor):
       w0_pspec = aqt.partition_spec(w0_pspec, (1,), w0_kernel.dtype, use_bias=False)
     if isinstance(w1_kernel, aqt.QTensor):
