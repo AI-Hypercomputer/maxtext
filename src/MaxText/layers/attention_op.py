@@ -673,88 +673,111 @@ class AttentionOp(nnx.Module):
 
     return jnp.where(output_mask, 0.0, DEFAULT_MASK_VALUE) if output_mask is not None else None
 
+  def _calculate_moba_gate_logic(self, q_item, k_item, q_pos_item):
+    """Calculates the core MoBA gating logic for a single batch item."""
+    q_len, n_q_heads, head_dim = q_item.shape
+    kv_len, n_kv_heads, _ = k_item.shape
+    g = n_q_heads // n_kv_heads
+
+    q_item_f32 = q_item.astype(jnp.float32).reshape(q_len, n_kv_heads, g, head_dim)
+
+    moba_chunk_size = self.config.moba_chunk_size
+    moba_topk = self.config.moba_topk
+
+    num_block = math.ceil(kv_len / moba_chunk_size)
+
+    if kv_len == 0:
+      key_gate_weight = jnp.zeros((0, n_kv_heads, head_dim), dtype=jnp.float32)
+    else:
+      block_ids = jnp.arange(kv_len, dtype=jnp.int32) // moba_chunk_size
+      key_gate_weight_sum = jax.ops.segment_sum(k_item.astype(jnp.float32), block_ids, num_segments=num_block)
+      block_counts = jax.ops.segment_sum(jnp.ones((kv_len,), dtype=jnp.float32), block_ids, num_segments=num_block)
+      # Avoid division by zero for empty blocks.
+      key_gate_weight = key_gate_weight_sum / jnp.maximum(block_counts[:, None, None], 1)
+
+    gate = jnp.einsum("skgd,Nkd->kgsN", q_item_f32, key_gate_weight)
+    gate_before_masking = gate
+
+    q_block_idx = q_pos_item // moba_chunk_size
+    block_indices = jnp.arange(num_block)
+
+    q_block_idx_b = jnp.expand_dims(q_block_idx, axis=-1)
+    block_indices_b = jnp.expand_dims(block_indices, axis=0)
+
+    # Block-causal masking: a query can't attend to future key blocks,
+    # and must attend to its own key block.
+    mask_future = q_block_idx_b > block_indices_b
+    gate = jnp.where(mask_future, gate, -float("inf"))
+    mask_diag = q_block_idx_b == block_indices_b
+    gate = jnp.where(mask_diag, float("inf"), gate)
+    gate_after_masking = gate
+
+    k_for_topk = min(moba_topk, num_block)
+    if k_for_topk <= 0:
+      need_attend = jnp.zeros_like(gate, dtype=jnp.bool_)
+      # Return dummy values that match the expected shapes for intermediates
+      gate_top_k_val = jnp.zeros_like(gate[..., :k_for_topk])
+      gate_top_k_idx = jnp.zeros_like(gate[..., :k_for_topk], dtype=jnp.int32)
+      gate_top_k_val_min = jnp.zeros_like(gate[..., :1])
+      need_attend_threshold_mask = jnp.zeros_like(gate, dtype=jnp.bool_)
+      gate_idx_mask = jnp.zeros_like(gate, dtype=jnp.bool_)
+    else:
+      gate_top_k_val, gate_top_k_idx = jax.lax.top_k(gate, k=k_for_topk)
+      gate_top_k_val_min = jnp.min(gate_top_k_val, axis=-1, keepdims=True)
+      need_attend_threshold_mask = gate >= gate_top_k_val_min
+
+      # Tie-breaking: if multiple blocks have the same gate value as the k-th
+      # block, we only select the ones that appear in the top-k indices.
+      gate_idx_mask = jnp.sum(jax.nn.one_hot(gate_top_k_idx, num_block, dtype=jnp.bool_), axis=-2)
+      need_attend = jnp.logical_and(need_attend_threshold_mask, gate_idx_mask)
+
+    return (
+        key_gate_weight,
+        gate_before_masking,
+        gate_after_masking,
+        gate_top_k_val,
+        gate_top_k_idx,
+        gate_top_k_val_min,
+        need_attend_threshold_mask,
+        gate_idx_mask,
+        need_attend,
+    )
+
   def _generate_moba_mask(self, query: Array, key: Array, q_positions: Array) -> Array:
-    """Generates a MoBA mask."""
+    """Generates a MoBA mask by vmapping the core logic over the batch."""
 
-    def _generate_mask_single_item(q_item, k_item, q_pos_item):
-      q_len, n_q_heads, head_dim = q_item.shape
-      kv_len, n_kv_heads, _ = k_item.shape
-      g = n_q_heads // n_kv_heads
-
-      q_item_f32 = q_item.astype(jnp.float32).reshape(q_len, n_kv_heads, g, head_dim)
-
+    def _generate_mask_single_item(q_item, k_item):
+      q_len, _, _ = q_item.shape
+      kv_len, _, _ = k_item.shape
       moba_chunk_size = self.config.moba_chunk_size
-      moba_topk = self.config.moba_topk
 
-      num_block = math.ceil(kv_len / moba_chunk_size)
-
+      # When kv_len is 0, no blocks are selected. Fallback to a standard causal mask.
       if kv_len == 0:
-        key_gate_weight = jnp.zeros((0, n_kv_heads, head_dim), dtype=jnp.float32)
-      else:
-        block_ids = jnp.arange(kv_len, dtype=jnp.int32) // moba_chunk_size
-        key_gate_weight_sum = jax.ops.segment_sum(
-            k_item.astype(jnp.float32), block_ids, num_segments=num_block
-        )
-        block_counts = jax.ops.segment_sum(
-            jnp.ones((kv_len,), dtype=jnp.float32), block_ids, num_segments=num_block
-        )
-        key_gate_weight = key_gate_weight_sum / block_counts[:, None, None]
-
-      gate = jnp.einsum("skgd,Nkd->kgsN", q_item_f32, key_gate_weight)
-
-      q_block_idx = q_pos_item // moba_chunk_size
-      block_indices = jnp.arange(num_block)
-
-      # This section implements the following logic from the reference implementation:
-      # For a given key block `i`:
-      # - Queries in blocks 0 to i are masked (-inf).
-      # - Then, queries in block i are given max score (inf).
-      # This results in queries in blocks 0 to i-1 being masked, queries in
-      # block i having max score, and queries in blocks i+1 onwards keeping
-      # their original gate score.
-      q_block_idx_b = jnp.expand_dims(q_block_idx, axis=-1)
-      block_indices_b = jnp.expand_dims(block_indices, axis=0)
-
-      # The reference implementation is equivalent to the following:
-      mask_future = q_block_idx_b > block_indices_b
-      gate = jnp.where(mask_future, gate, -float("inf"))
-      mask_diag = q_block_idx_b == block_indices_b
-      gate = jnp.where(mask_diag, float("inf"), gate)
-
-      k_for_topk = min(moba_topk, num_block)
-      if k_for_topk <= 0:
-        # This can happen if num_block is 0, i.e., kv_len is 0.
-        # Return a causal mask in this case.
-        gate = jnp.zeros((n_kv_heads, g, q_len, kv_len), dtype=query.dtype)
         causal_mask_shape = (q_len, kv_len)
         k_indices = jax.lax.broadcasted_iota(jnp.int32, causal_mask_shape, 1)
         q_indices = jax.lax.broadcasted_iota(jnp.int32, causal_mask_shape, 0)
         causal_mask = q_indices >= k_indices
         return jnp.where(causal_mask, 0.0, DEFAULT_MASK_VALUE)
 
+      *_, need_attend = self._calculate_moba_gate_logic(q_item, k_item, q_positions)
 
-      gate_top_k_val, gate_top_k_idx = jax.lax.top_k(gate, k=k_for_topk)
-      gate_top_k_val_min = jnp.min(gate_top_k_val, axis=-1, keepdims=True)
-      need_attend = gate >= gate_top_k_val_min
-
-      gate_idx_mask = jnp.sum(jax.nn.one_hot(gate_top_k_idx, num_block, dtype=jnp.bool_), axis=-2)
-      need_attend = jnp.logical_and(need_attend, gate_idx_mask)
-
+      # Convert the boolean `need_attend` mask to float mask values.
       gate = jnp.where(need_attend, 0.0, -float("inf"))
 
+      # Expand the block-level mask to a token-level mask.
       gate = jnp.repeat(gate, moba_chunk_size, axis=-1)
       gate = gate[:, :, :, :kv_len]
 
-      # Final per-token causal mask
+      # Apply a final per-token causal mask to ensure causality within chunks.
       k_indices = jax.lax.broadcasted_iota(jnp.int32, (q_len, kv_len), 1)
-      q_indices = q_pos_item[:, None]
+      q_indices = q_positions[:, None]
       causal_mask = q_indices >= k_indices
       gate = jnp.where(causal_mask, gate, -float("inf"))
 
       return gate
 
-    # vmap over batch dimension
-    moba_mask = jax.vmap(_generate_mask_single_item, in_axes=(0, 0, None))(query, key, q_positions)
+    # vmap over the batch dimension of query and key. q_positions is constant across the batch.
+    moba_mask = jax.vmap(_generate_mask_single_item)(query, key)
     return moba_mask
 
   def apply_attention(
@@ -1419,22 +1442,29 @@ class AttentionOp(nnx.Module):
     # Casting softmaxt computation for float32 for model stability.
     if self.float32_logits:
       attn_weights = attn_weights.astype(jnp.float32)
+
+    # `moba_naive` is a temporary flag for a custom MoBA implementation.
     if hasattr(self.config, "moba_naive") and self.config.moba_naive:
       kv_seq_len = key.shape[1]
+      # This logic for `next_pos` is duplicated from `generate_attention_mask`.
+      # It determines the starting position of the query sequence.
       next_pos = 0
       if previous_chunk is not None:
         next_pos = previous_chunk.shape[1]
       elif model_mode == MODEL_MODE_AUTOREGRESSIVE and q_seq_len == 1:
-        # In autoregression, the query position is the last position in the KV sequence.
         next_pos = kv_seq_len - 1
       q_positions = jnp.arange(next_pos, next_pos + q_seq_len)
+
       scaling = self.config.head_dim ** (-0.5)
-      moba_mask = self._generate_moba_mask(query / scaling, key, q_positions)
-      # Un-scale attn_weights to add the mask to raw logits, then re-scale.
-      # This matches the reference implementation's order of operations without
-      # altering the standard attention path.
-      attn_weights = (attn_weights / scaling) + moba_mask
-      attn_weights = attn_weights * scaling
+      # The gate calculation in MoBA uses the unscaled query.
+      unscaled_query = query / scaling
+      moba_mask = self._generate_moba_mask(unscaled_query, key, q_positions)
+
+      # To match the reference implementation, we add the mask to the raw logits.
+      # We un-scale the attention weights to get raw logits, add the mask,
+      # and then re-scale.
+      unscaled_attn_weights = attn_weights / scaling
+      attn_weights = (unscaled_attn_weights + moba_mask) * scaling
     else:
       attn_mask = self.generate_attention_mask(
           query, key, decoder_segment_ids, model_mode, previous_chunk, bidirectional_mask
@@ -1646,82 +1676,6 @@ class AttentionOp(nnx.Module):
     else:
       return prefill_unnormalized_output / prefill_exponentials_sum
 
-  def _debug_moba_intermediates(self, query: Array, key: Array):
-    """A helper function for testing that returns intermediate MoBA tensors."""
-    q_seq_len = query.shape[1]
-    kv_seq_len = key.shape[1]
-    q_positions = jnp.arange(q_seq_len)  # Assuming test runs from position 0
-
-    # This is a simplified, single-batch version of the logic in _generate_moba_mask
-    # It's designed to be called directly from a test.
-    q_item = query[0]
-    k_item = key[0]
-    q_pos_item = q_positions
-
-    q_len, n_q_heads, head_dim = q_item.shape
-    _, n_kv_heads, _ = k_item.shape
-    g = n_q_heads // n_kv_heads
-
-    q_item_f32 = q_item.astype(jnp.float32).reshape(q_len, n_kv_heads, g, head_dim)
-
-    moba_chunk_size = self.config.moba_chunk_size
-    moba_topk = self.config.moba_topk
-
-    num_block = math.ceil(kv_seq_len / moba_chunk_size)
-
-    if kv_seq_len == 0:
-      key_gate_weight = jnp.zeros((0, n_kv_heads, head_dim), dtype=jnp.float32)
-    else:
-      block_ids = jnp.arange(kv_seq_len, dtype=jnp.int32) // moba_chunk_size
-      key_gate_weight_sum = jax.ops.segment_sum(k_item.astype(jnp.float32), block_ids, num_segments=num_block)
-      block_counts = jax.ops.segment_sum(jnp.ones((kv_seq_len,), dtype=jnp.float32), block_ids, num_segments=num_block)
-      key_gate_weight = key_gate_weight_sum / block_counts[:, None, None]
-
-    gate = jnp.einsum("skgd,Nkd->kgsN", q_item_f32, key_gate_weight)
-    gate_before_masking = gate
-
-    q_block_idx = q_pos_item // moba_chunk_size
-    block_indices = jnp.arange(num_block)
-
-    q_block_idx_b = jnp.expand_dims(q_block_idx, axis=-1)
-    block_indices_b = jnp.expand_dims(block_indices, axis=0)
-
-    mask_future = q_block_idx_b > block_indices_b
-    gate = jnp.where(mask_future, gate, -float("inf"))
-    mask_diag = q_block_idx_b == block_indices_b
-    gate = jnp.where(mask_diag, float("inf"), gate)
-    gate_after_masking = gate
-
-    k_for_topk = min(moba_topk, num_block)
-    if k_for_topk <= 0:
-      need_attend = jnp.zeros_like(gate, dtype=jnp.bool_)
-      # Return dummy values that match the expected shapes
-      gate_top_k_val = jnp.zeros_like(gate[..., :k_for_topk])
-      gate_top_k_idx = jnp.zeros_like(gate[..., :k_for_topk], dtype=jnp.int32)
-      gate_top_k_val_min = jnp.zeros_like(gate[..., :1])
-      need_attend_threshold_mask = jnp.zeros_like(gate, dtype=jnp.bool_)
-      gate_idx_mask = jnp.zeros_like(gate, dtype=jnp.bool_)
-    else:
-      gate_top_k_val, gate_top_k_idx = jax.lax.top_k(gate, k=k_for_topk)
-      gate_top_k_val_min = jnp.min(gate_top_k_val, axis=-1, keepdims=True)
-      need_attend_threshold_mask = gate >= gate_top_k_val_min
-
-      gate_idx_mask = jnp.sum(
-          jax.nn.one_hot(gate_top_k_idx, num_block, dtype=jnp.bool_), axis=-2
-      )
-      need_attend = jnp.logical_and(need_attend_threshold_mask, gate_idx_mask)
-
-    return (
-        key_gate_weight,
-        gate_before_masking,
-        gate_after_masking,
-        gate_top_k_val,
-        gate_top_k_idx,
-        gate_top_k_val_min,
-        need_attend_threshold_mask,
-        gate_idx_mask,
-        need_attend,
-    )
 
 
 # pylint: disable=protected-access
