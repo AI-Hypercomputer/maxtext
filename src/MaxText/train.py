@@ -69,6 +69,7 @@ from MaxText.train_utils import validate_train_config
 from MaxText.metric_logger import record_activation_metrics
 # pylint: disable=too-many-positional-arguments
 
+# rawr here is a comment
 
 def get_first_step(state):
   return int(state.step)
