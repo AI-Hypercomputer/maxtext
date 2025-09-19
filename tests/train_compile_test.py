@@ -493,7 +493,7 @@ class TrainCompile(unittest.TestCase):
             "megablox=False",
             "per_device_batch_size=2",
             "max_target_length=1024",
-            "attention=dot_product",  # Change to flash attention once it works for MLA
+            "attention=flash",
             "dtype=bfloat16",
             "weight_dtype=bfloat16",
             "scan_layers=True",
@@ -518,7 +518,7 @@ class TrainCompile(unittest.TestCase):
             "megablox=False",
             "per_device_batch_size=1",
             "max_target_length=1024",
-            "attention=dot_product",  # Change to flash attention once it works for MLA
+            "attention=flash",
             "dtype=bfloat16",
             "weight_dtype=bfloat16",
             "scan_layers=False",
@@ -541,7 +541,7 @@ class TrainCompile(unittest.TestCase):
             "megablox=False",
             "per_device_batch_size=1",
             "max_target_length=1024",
-            "attention=dot_product",  # Change to flash attention once it works for MLA
+            "attention=flash",
             "dtype=bfloat16",
             "weight_dtype=bfloat16",
             "n_routing_groups=8",
@@ -565,7 +565,7 @@ class TrainCompile(unittest.TestCase):
             "megablox=False",
             "per_device_batch_size=1",
             "max_target_length=1024",
-            "attention=dot_product",  # Change to flash attention once it works for MLA
+            "attention=flash",
             "dtype=bfloat16",
             "weight_dtype=bfloat16",
             "n_routing_groups=-1",
@@ -585,7 +585,7 @@ class TrainCompile(unittest.TestCase):
             "compile_topology_num_slices=8",
             "use_iota_embed=true",
             "model_name=deepseek3-671b",
-            "megablox=False",  # dropless not yet supported (b/418313093)
+            "megablox=True",
             "sparse_matmul=False",
             "capacity_factor=1",
             "per_device_batch_size=1",
