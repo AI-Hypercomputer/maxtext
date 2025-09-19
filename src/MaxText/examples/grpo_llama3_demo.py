@@ -47,6 +47,7 @@ from pprint import pprint
 import re
 import sys
 
+from datetime import datetime
 from flax import nnx
 from flax.linen import partitioning as nn_partitioning
 import grain
@@ -107,6 +108,8 @@ print(f"JAX devices: {jax.devices()}")
 
 DEBUG = False  # set to True to run in debug mode, for more print statements
 
+run_id = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
+
 HOME = os.path.expanduser("~") + "/"
 print(f"Home directory (from Python): {HOME}")
 
@@ -146,15 +149,15 @@ if not os.path.exists(LOG_DIR):
   os.makedirs(LOG_DIR)
 
 # ===== Profiling =====
-PROFILE_DIR = f"{HOME}/content/jax_traces/grpo/profiles_llama3/"
-if not os.path.exists(PROFILE_DIR):
-  os.makedirs(PROFILE_DIR)
+PROFILE_DIR = f"gs://mazumdera-test-bucket-europe-west4/rl-tuning/grpo/{run_id}/profiles_llama3/"
+if not epath.Path(PROFILE_DIR).exists():
+  epath.Path(PROFILE_DIR).mkdir(parents=True)
 
 # ====== Checkpoint saving ======
-CKPT_DIR = f"{HOME}/content/ckpts_llama3/"
+CKPT_DIR = f"gs://mazumdera-test-bucket-europe-west4/rl-tuning/grpo/{run_id}/ckpts_llama3/"
 
-if not os.path.exists(CKPT_DIR):
-  os.makedirs(CKPT_DIR)
+if not epath.Path(CKPT_DIR).exists():
+  epath.Path(CKPT_DIR).mkdir(parents=True)
 
 SAVE_INTERVAL_STEPS = 500
 MAX_TO_KEEP = 4
