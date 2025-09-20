@@ -39,6 +39,7 @@ from MaxText.maxtext_utils import all_gather_over_fsdp
 # The network: Transformer Definitions
 # ------------------------------------------------------------------------------
 
+
 class TransformerLinenPure(nn.Module):
   """An autoregressive transformer model."""
 
@@ -80,9 +81,7 @@ class TransformerLinenPure(nn.Module):
         config=cfg,
     )
     self.vision_encoder = VisionEncoder(config=cfg, mesh=mesh) if cfg.use_multimodal else None
-    self.decoder = Decoder(
-        config=cfg, mesh=mesh, quant=self.quant, model_mode=self.model_mode
-    )
+    self.decoder = Decoder(config=cfg, mesh=mesh, quant=self.quant, model_mode=self.model_mode)
     # If MTP is enabled via config, set up the MTP block.
     if self.config.mtp_num_layers > 0:
       # Get the list of layer blueprints for the current model.
@@ -192,19 +191,20 @@ def transformer_as_linen(
     return TransformerLinen(
         Transformer,
         args=(),
-        kwargs=nn.FrozenDict({
-          "mesh": mesh,
-        "config": config,
-        "quant": quant,
-        "model_mode": model_mode,
-      }),
-      metadata_fn=initializers.variable_to_logically_partitioned,
-      name=name,
-  )
-  else:
-    return TransformerLinenPure(
-      config, mesh, quant, model_mode=model_mode, name=name
+        kwargs=nn.FrozenDict(
+            {
+                "mesh": mesh,
+                "config": config,
+                "quant": quant,
+                "model_mode": model_mode,
+            }
+        ),
+        metadata_fn=initializers.variable_to_logically_partitioned,
+        name=name,
     )
+  else:
+    return TransformerLinenPure(config, mesh, quant, model_mode=model_mode, name=name)
+
 
 class TransformerLinen(nnx_wrappers.ToLinen):
   """Transformer model as a linen module."""
@@ -220,6 +220,7 @@ class TransformerLinen(nnx_wrappers.ToLinen):
     model_kwargs = self.kwargs.copy({"model_mode": model_mode})  # type: ignore[wrong-arg-types]
     module = self.clone(kwargs=model_kwargs)
     return nnx_wrappers.ToLinen.apply(module, *args, **kwargs)
+
 
 class Transformer(nnx.Module):
   """An autoregressive transformer model."""
@@ -243,7 +244,7 @@ class Transformer(nnx.Module):
         attend_dtype=jnp.float32 if cfg.logits_dot_in_fp32 else cfg.dtype,  # for logit training stability
         embedding_init=nn.initializers.normal(stddev=1.0),
         config=cfg,
-        rngs=rngs
+        rngs=rngs,
     )
     self.vision_encoder = VisionEncoder(config=cfg, mesh=mesh) if cfg.use_multimodal else None
 
@@ -262,9 +263,9 @@ class Transformer(nnx.Module):
     dummy_decoder_positions = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
 
     self.decoder.lazy_init(
-      shared_embedding=self.token_embedder,
-      decoder_input_tokens=dummy_decoder_input_tokens,
-      decoder_positions=dummy_decoder_positions,
+        shared_embedding=self.token_embedder,
+        decoder_input_tokens=dummy_decoder_input_tokens,
+        decoder_positions=dummy_decoder_positions,
     )
 
     # If MTP is enabled via config, set up the MTP block.
@@ -280,14 +281,14 @@ class Transformer(nnx.Module):
       self.mtp_block = nnx_wrappers.ToNNX(mtp_block_linen, rngs=rngs)
 
       self.mtp_block.lazy_init(
-        shared_embedding=self.token_embedder,
-        main_hidden_state=jnp.ones((1, 1, self.config.emb_dim), dtype=self.config.dtype),
-        input_ids=jnp.ones((1, 1), dtype=jnp.int32),
-        target_ids=jnp.ones((1, 1), dtype=jnp.int32),
-        target_mask=jnp.ones((1, 1), dtype=jnp.int32),
-        position_ids=jnp.ones((1, 1), dtype=jnp.int32),
-        decoder_segment_ids=jnp.ones((1, 1), dtype=jnp.int32),
-        deterministic=True,
+          shared_embedding=self.token_embedder,
+          main_hidden_state=jnp.ones((1, 1, self.config.emb_dim), dtype=self.config.dtype),
+          input_ids=jnp.ones((1, 1), dtype=jnp.int32),
+          target_ids=jnp.ones((1, 1), dtype=jnp.int32),
+          target_mask=jnp.ones((1, 1), dtype=jnp.int32),
+          position_ids=jnp.ones((1, 1), dtype=jnp.int32),
+          decoder_segment_ids=jnp.ones((1, 1), dtype=jnp.int32),
+          deterministic=True,
       )
 
   def no_op(self, *args, **kwargs):
@@ -295,6 +296,16 @@ class Transformer(nnx.Module):
     return
 
   def init_cache(self, cache_size: int, batch_size: int, dtype=jnp.float32):
+    """Initializes the KV cache for the Transformer.
+
+    Args:
+      cache_size: The maximum size of the KV cache.
+      batch_size: The batch size for which the cache is initialized.
+      dtype: Data type for the cache. Defaults to `jnp.float32`.
+
+    Returns:
+      True if the cache is successfully initialized.
+    """
     return True
 
   def __call__(
@@ -312,14 +323,29 @@ class Transformer(nnx.Module):
       decoder_target_tokens: jax.Array | None = None,
       decoder_target_mask: jax.Array | None = None,
   ):
-    """Applies Transformer decoder-branch on encoded-input and target.
+    """Applies the Zero-1 FSDP wrapped Transformer model.
+
+    This method handles the all-gather operation for model weights before
+    applying the underlying Transformer model, and then releases them.
 
     Args:
-      true_length: (Optional) Prompt length before padding
-      slot: (Optional) An integer representing the decode batch index selected
-        for this request.
-    """
+      decoder_input_tokens: Input tokens for the decoder.
+      decoder_positions: Positional encodings for the decoder inputs.
+      decoder_segment_ids: Segment IDs for the decoder inputs (optional).
+      encoder_images: Encoder images for multimodal models (optional).
+      enable_dropout: Whether to enable dropout. Defaults to True.
+      previous_chunk: Previous chunk for incremental decoding (optional).
+      true_length: True length of the prompt before padding (optional).
+      slot: An integer representing the decode batch index selected for this request (optional).
+      page_state: Page state for paged attention (optional).
+      partition_spec: Partition specification for FSDP all-gather.
+      decoder_target_tokens: Target tokens for the decoder (optional, used in MTP).
+      decoder_target_mask: Target mask for the decoder (optional, used in MTP).
+      nnx_method: Method to call on the NNX module (optional).
 
+    Returns:
+      Logits from the Transformer model.
+    """
     if decoder_segment_ids is not None and self.model_mode == MODEL_MODE_AUTOREGRESSIVE:
       raise ValueError(
           f"During autoregressive decoding we assume the tokens are in the active sequence"
@@ -382,6 +408,7 @@ class Transformer(nnx.Module):
 
     return logits
 
+
 class ZeroOneTransformer(nn.Module):
   """
   A wrapper for the base Transformer model designed to implement the Zero-1
@@ -408,6 +435,11 @@ class ZeroOneTransformer(nn.Module):
   model_mode: str = MODEL_MODE_TRAIN  # May be different than the model_mode passed to __call__
 
   def setup(self):
+    """Sets up the underlying Transformer model.
+
+    This method initializes the `self.model` attribute by calling the
+    `transformer_as_linen` factory function.
+    """
     self.model = transformer_as_linen(self.config, self.mesh, self.quant, self.model_mode)
 
   def __call__(
@@ -426,6 +458,31 @@ class ZeroOneTransformer(nn.Module):
       decoder_target_mask: None | jnp.ndarray = None,
       nnx_method: str | None = None,
   ):
+    """Applies the Zero-1 FSDP wrapped Transformer model.
+
+    This method handles the all-gather operation for model weights before
+    applying the underlying Transformer model, and then releases them.
+
+    Args:
+      decoder_input_tokens: Input tokens for the decoder.
+      decoder_positions: Positional encodings for the decoder inputs.
+      decoder_segment_ids: Segment IDs for the decoder inputs (optional).
+      encoder_images: Encoder images for multimodal models (optional).
+      enable_dropout: Whether to enable dropout. Defaults to True.
+      previous_chunk: Previous chunk for incremental decoding (optional).
+      true_length: True length of the prompt before padding (optional).
+      slot: An integer representing the decode batch index selected for this
+        request (optional).
+      page_state: Page state for paged attention (optional).
+      partition_spec: Partition specification for FSDP all-gather.
+      decoder_target_tokens: Target tokens for the decoder (optional, used in
+        MTP).
+      decoder_target_mask: Target mask for the decoder (optional, used in MTP).
+      nnx_method: Method to call on the NNX module (optional).
+
+    Returns:
+      Logits from the Transformer model.
+    """
     if self.is_initializing():
       return self.model(
           decoder_input_tokens=decoder_input_tokens,

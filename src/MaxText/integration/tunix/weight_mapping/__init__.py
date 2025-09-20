@@ -22,7 +22,7 @@ class VLLM_WEIGHT_MAPPING:
     if name.startswith("llama3.1"):
       return LLAMA3_VLLM_MAPPING
     else:
-      raise ValueError("{} vLLM weight mapping not found.".format(name))
+      raise ValueError(f"{name} vLLM weight mapping not found.")
 
   def __getitem__(self, key):
     return getattr(self, key)
