@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-requirements-txt"]
 build-backend = "hatchling.build"
 
 [tool.hatch.version]
@@ -8,7 +8,7 @@ path = "src/MaxText/__init__.py"
 [project]
 name = "maxtext"
 description = "MaxText is a simple, performant and scalable Jax LLM!"
-dynamic = ["version"]
+dynamic = ["optional-dependencies", "version"]
 requires-python = ">=3.12"
 readme = "README.md"
 license = "Apache-2.0"
@@ -254,8 +254,18 @@ dependencies = [
 Repository = "https://github.com/AI-Hypercomputer/maxtext.git"
 "Bug Tracker" = "https://github.com/AI-Hypercomputer/maxtext/issues"
 
+#[tool.hatch.metadata.hooks.requirements_txt]
+#files = ["requirements.txt"]
+
 [tool.hatch.metadata]
 allow-direct-references = true
+
+#[tool.hatch.metadata.hooks.requirements_txt.optional-dependencies]
+#gpu = ["requirements-gpu.txt"]
+#tpu = ["requirements-tpu.txt"]
+
+[tool.hatch.metadata.hooks.requirements_txt.optional-dependencies]
+docs = ["requirements_docs.txt"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/MaxText", "src/install_maxtext_extra_deps"]
