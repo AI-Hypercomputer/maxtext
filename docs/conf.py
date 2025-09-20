@@ -28,10 +28,7 @@ author = "MaxText developers"
 # -- General configuration ---------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#general-configuration
 
-extensions = [
-    "myst_nb",
-    "sphinx_design",
-]
+extensions = ["myst_nb", "sphinx_design", "sphinx_copybutton"]
 
 templates_path = ["_templates"]
 source_suffix = [".rst", ".ipynb", ".md"]
