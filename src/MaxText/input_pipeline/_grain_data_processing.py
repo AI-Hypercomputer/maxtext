@@ -95,9 +95,7 @@ def pretrain_preprocessing_pipeline(dataset, config, data_columns, tokenize, gra
     dataset = dataset.map(_input_pipeline_utils.NormalizeFeatures(data_columns, tokenize))
 
   assert len(data_columns) == 1
-  rekey_dict = {"inputs": "text", "targets": "text"}
-  dataset = dataset.map(_input_pipeline_utils.Rekey(rekey_dict))
-  data_columns = ("inputs", "targets")
+  text_column = data_columns[0]
 
   tokenizer_model = tokenizer.build_tokenizer(
       config.tokenizer_path,
@@ -115,11 +113,23 @@ def pretrain_preprocessing_pipeline(dataset, config, data_columns, tokenize, gra
     pad_id = -1
 
   if tokenize:
-    dataset = dataset.map(
-        _grain_tokenizer.TokenizeAndTrim(
-            data_columns, config.max_target_length, config.add_bos, config.add_eos, tokenizer_model
-        )
-    )
+    if config.use_truncation:
+      dataset = dataset.map(
+          _grain_tokenizer.TokenizeAndTrim(
+              text_column, config.max_target_length, config.add_bos, config.add_eos, tokenizer_model
+          )
+      )
+    else:
+      dataset = dataset.apply(
+          _grain_tokenizer.TokenizeAndChunk(
+              text_column, config.max_target_length, config.add_bos, config.add_eos, tokenizer_model
+          )
+      )
+
+  data_columns = ("inputs", "targets")
+  rekey_dict = {col: text_column for col in data_columns}
+  dataset = dataset.map(_input_pipeline_utils.Rekey(rekey_dict))
+
   # Pack and Batch examples.
   batch_size = config.global_batch_size_to_load // jax.process_count()
   if config.packing:
