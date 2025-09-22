@@ -139,11 +139,8 @@ class LlamaDecoderLayer(nnx.Module):
   ):
     cfg = self.config
 
-    inputs = nn.with_logical_constraint(inputs, self.activation_axis_names)
     inputs = checkpoint_name(inputs, "decoder_layer_input")
     lnx = self.pre_self_attention_layer_norm(inputs)
-
-    lnx = nn.with_logical_constraint(lnx, self.activation_axis_names)
 
     # Self-attention block
     attention_lnx = self.self_attention(
@@ -158,20 +155,16 @@ class LlamaDecoderLayer(nnx.Module):
         previous_chunk=previous_chunk,
     )
 
-    attention_lnx = nn.with_logical_constraint(attention_lnx, self.activation_axis_names)
     intermediate_inputs = inputs + attention_lnx
 
     # Fully Connected
     hidden_states = self.post_self_attention_layer_norm(intermediate_inputs)
-    hidden_states = nn.with_logical_constraint(hidden_states, self.activation_axis_names)
 
     # MLP block.
     mlp_lnx = self.mlp(hidden_states, deterministic=deterministic)
-    mlp_lnx = nn.with_logical_constraint(mlp_lnx, self.activation_axis_names)
 
     layer_output = mlp_lnx + intermediate_inputs
     layer_output = self.dropout(layer_output, deterministic=deterministic)
-    layer_output = nn.with_logical_constraint(layer_output, self.activation_axis_names)
 
     if cfg.record_internal_nn_metrics:
       self.sow("intermediates", "activation_mean", jnp.mean(layer_output))
