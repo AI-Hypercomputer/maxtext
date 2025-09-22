@@ -1,26 +1,27 @@
 # Requirements for Building the MaxText Docker Image
 # These requirements are additional to the dependencies present in the JAX AI base image.
-datasets
+datasets @ https://github.com/huggingface/datasets/archive/6790e138c00b87a1ddc72184f89e7814cf784360.zip
 flax>=0.11.0
 google-api-python-client
-google-jetstream@git+https://github.com/AI-Hypercomputer/JetStream.git
-grain[parquet]>=0.2.6
+google-jetstream @ https://github.com/AI-Hypercomputer/JetStream/archive/daedc21c393f23449fb54ddc4f75fca34348ea9c.zip
+grain[parquet]>=0.2.12
 jaxtyping
 jsonlines
-mlperf-logging@git+https://github.com/mlperf/logging.git
+mlperf-logging @ https://github.com/mlcommons/logging/archive/38ab22670527888c8eb7825a4ece176fcc36a95d.zip
 omegaconf
 orbax-checkpoint>=0.11.22
 pathwaysutils>=0.1.1
 pillow>=11.1.0
 pre-commit
-protobuf==3.20.3
+protobuf>=5.29.5
 pyink
 pylint
 pytest
 pytype
-sentencepiece==0.1.97
+sentencepiece>=0.2.0
 tensorflow-datasets
 tensorflow-text>=2.17.0
 tiktoken
 transformers
-tunix@git+https://github.com/google/tunix.git
+tunix @ https://github.com/google/tunix/archive/d770659621eb16ef6588268e26fa687fa068df20.zip
+qwix @ https://github.com/google/qwix/archive/f2fd7b9114ff8d09e5b0131a453351578502da8a.zip

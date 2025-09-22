@@ -26,7 +26,7 @@ from absl.testing import parameterized
 
 import numpy as np
 
-from jax.sharding import Mesh
+from jax.sharding import Mesh, NamedSharding, PartitionSpec
 import jax
 import jax.numpy as jnp
 
@@ -1383,6 +1383,21 @@ def _forward_with_context_expert_parallelism(cfg_cp, mesh_cp, attention_cp, lnx,
     decoder_positions = reordered_batch["inputs_position"]
   # apply attention with sharding
   with mesh_cp, nn_partitioning.axis_rules(cfg_cp.logical_axis_rules):
+    lnx_spec = nn_partitioning.logical_to_mesh_axes(
+        ('activation_batch_no_exp', 'activation_length_no_exp', 'activation_embed'),
+          nn_partitioning.get_axis_rules()
+    )
+    pos_spec = nn_partitioning.logical_to_mesh_axes(
+        ('activation_batch_no_exp', 'activation_length_no_exp'),
+        nn_partitioning.get_axis_rules()
+    )
+    lnx_sharding = NamedSharding(mesh_cp, lnx_spec)
+    pos_sharding = NamedSharding(mesh_cp, pos_spec)
+
+    lnx = jax.device_put(lnx, lnx_sharding)
+    decoder_segment_ids = jax.device_put(decoder_segment_ids, pos_sharding)
+    decoder_positions = jax.device_put(decoder_positions, pos_sharding)
+
     attention_cp_output = attention_cp(
         lnx,
         lnx,

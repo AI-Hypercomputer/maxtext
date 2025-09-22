@@ -46,6 +46,7 @@ from jetstream.engine.tokenizer_pb2 import TokenizerType
 from MaxText import inference_utils
 from MaxText import max_utils
 from MaxText import maxtext_utils
+from MaxText import multimodal_utils
 from MaxText import pyconfig
 from MaxText.common_types import MODEL_MODE_PREFILL, DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_AUTOREGRESSIVE
 from MaxText.globals import MAXTEXT_PKG_DIR
@@ -331,7 +332,7 @@ class MaxEngine(engine_api.Engine):
           jnp.ones((1, self.config.max_prefill_predict_length), dtype=jnp.int32),
           jnp.ones((1, self.config.max_prefill_predict_length), dtype=jnp.int32),
           encoder_images=jnp.ones(
-              maxtext_utils.get_dummy_image_shape_for_init(self.config),
+              multimodal_utils.get_dummy_image_shape_for_init(self.config.model_name, batch_size=self.config.micro_batch_size_to_train_on),
               dtype=jnp.float32,
           )
           if self.config.use_multimodal
@@ -474,10 +475,12 @@ class MaxEngine(engine_api.Engine):
 
     input_images = None
     if self.config.use_multimodal and images is not None:
-      if self.config.model_name.startswith("gemma3"):
-        input_images = images[jnp.newaxis, jnp.newaxis, ...]  # Add batch and sequence dimension [B, N, H, W, C]
-      elif self.config.model_name.startswith("llama4"):
-        input_images = images[jnp.newaxis, ...]  # Add batch dimension [B, T, C, H, W]
+      if images.ndim == 3:
+        # For Gemma3 single image, add batch and image count dimensions
+        input_images = images[jnp.newaxis, jnp.newaxis, ...]
+      elif images.ndim == 4:
+        # add batch dimension
+        input_images = images[jnp.newaxis, ...]
 
     # sequence_indicator will be concatenated to existing_prefix decoder_segment_ids
     start_to_n = jnp.arange(start_position, start_position + input_tokens.shape[1])
@@ -1524,7 +1527,7 @@ class MaxEngine(engine_api.Engine):
           (int(self.config.per_device_batch_size * self.mesh.size), 1),
           dtype=jnp.int32,
       )
-      dummy_image = jnp.ones(maxtext_utils.get_dummy_image_shape_for_init(self.config), dtype=jnp.int32)
+      dummy_image = jnp.ones(multimodal_utils.get_dummy_image_shape_for_init(self.config.model_name, batch_size=self.config.micro_batch_size_to_train_on), dtype=jnp.int32)
       _, cache = self.model.apply(
           abstract_params,
           x,

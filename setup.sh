@@ -139,11 +139,32 @@ run_name_folder_path=$(pwd)
 
 # Install dependencies from requirements.txt
 cd "$run_name_folder_path" && python3 -m uv pip install --upgrade pip
-python3 -m uv pip install --no-cache-dir -U -r requirements.txt
+if [[ "$MODE" == "nightly" ]]; then
+    echo "Nightly mode: Installing requirements.txt, stripping commit pins from git+ repos."
+    cp requirements.txt requirements.txt.nightly-temp
+    # Create a temp file, strip commit pins from git+ repos in requirements.txt
+    # Remove/update this section based on the pinned github repo commit in requirements.txt
+    sed -i -E \
+      -e 's|^mlperf-logging @ https?://github.com/mlcommons/logging/archive/.*\.zip$|mlperf-logging@git+https://github.com/mlperf/logging.git|' \
+      -e 's|^([^ ]*) @ https?://github.com/([^/]*\/[^/]*)/archive/.*\.zip$|\1@git+https://github.com/\2.git|' \
+      requirements.txt.nightly-temp
+
+    echo "--- Installing modified nightly requirements: ---"
+    cat requirements.txt.nightly-temp
+    echo "-------------------------------------------------"
+    
+    python3 -m uv pip install --no-cache-dir -U -r requirements.txt.nightly-temp
+    rm requirements.txt.nightly-temp
+else
+    # stable or stable_stack mode: Install with pinned commits
+    echo "Installing requirements.txt with pinned commits."
+    python3 -m uv pip install --no-cache-dir -U -r requirements.txt
+fi
 
 # Install maxtext package
 if [ -f 'pyproject.toml' ]; then
   python3 -m uv pip install -e . --no-deps --resolution=lowest
+  install_maxtext_github_deps
 fi
 
 # Uninstall existing jax, jaxlib and  libtpu-nightly

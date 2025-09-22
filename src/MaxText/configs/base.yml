@@ -167,7 +167,7 @@ sparse_matmul: True
 capacity_factor: -1.0 # a factor to decide expert capacity for token dropping, and no dropping by default
 load_balance_loss_weight: 0.01 # weight for the load balance loss
 use_random_routing: False # whether to use random routing for debug/test purpose
-use_custom_sort_vjp: True # whether to use a custom sort vjp for sparse matmul ops
+use_custom_sort_vjp: False # whether to use a custom sort vjp for sparse matmul ops
 use_ring_of_experts: False # whether to use ring of experts for sparse matmul expert parallelism
 # Tunable tiling dimensions used for Megablox
 tile_batch_seq: 512
@@ -385,10 +385,12 @@ logical_axis_rules: [
                       ['q_lora', ['fsdp', 'sequence', 'context', 'tensor_transpose', 'expert']],
                       ['q_lora', ['fsdp', 'fsdp_transpose', 'sequence', 'context', 'expert']],
                       ['q_lora', ['fsdp', 'sequence', 'context', 'expert']],
+                      ["q_lora_up_proj",[]],
                       ['kv_lora', ['fsdp', 'fsdp_transpose', 'sequence', 'context', 'tensor_transpose', 'expert']],
                       ['kv_lora', ['fsdp', 'sequence', 'context', 'tensor_transpose', 'expert']],
                       ['kv_lora', ['fsdp', 'fsdp_transpose', 'sequence', 'context', 'expert']],
                       ['kv_lora', ['fsdp', 'sequence', 'context', 'expert']],
+                      ["kv_lora_up_proj",[]],
                       ['norm', ['tensor', 'tensor_transpose']],
                       ['layers', 'stage'],
                       ['kv', []],
@@ -405,6 +407,8 @@ logical_axis_rules: [
                       ['num_pages', []],
                       ['tokens_per_page', []],
                       ['paged_kv_head_dim_size', []],
+                      ['dense_layers', []],
+                      ['moe_layers', []],
                     ]
 # Axes used for DCN must be earlier in this list than ICI, see (b/339009148) for details
 data_sharding: [['data', 'stage', 'fsdp', 'fsdp_transpose', 'sequence', 'context', 'context_autoregressive', 'tensor', 'tensor_transpose', 'tensor_sequence', 'expert', 'autoregressive']]
@@ -470,6 +474,8 @@ eval_data_columns: ['text'] # for DPO dataset containing "chosen" and "rejected"
 eval_image_column: 'image'
 packing: True
 num_epoch: 1  # only grain and tfds pipeline supports num_epoch > 1
+generate_padding_batch_train: False
+generate_padding_batch_eval: False
 
 # direct preference optimization (DPO)
 use_dpo: False
@@ -796,9 +802,13 @@ freeze_vision_encoder_params: True
 dtype_mm: "float32"  # Data type for multimodal model's vision encoder
 remat_policy_for_vit: "minimal"  # Remat policy for multimodal model's vision encoder. Check `remat_policy` for options.
 image_size_for_vit: 896 # Default for Gemma3, and should be overwritten by model's config
-image_path: "" # Local image path used for decoding
+image_path: "" # Local image path used for decoding, can be multiple paths separated by comma, exp "/path/image1.jpg,/path/image2.jpg"
 image_placeholder: "<|image|>"
 posemb_type_for_vit: "learn"
+# max_num_images_per_example only applies for training when your image column is a list of images.
+# -1 means no limit, and will pad to the max possible number of images determined by sequence length.
+# Set it to avoid unnecessary padding if you know the maximum number of images per example.
+max_num_images_per_example: -1
 
 ### llama4 multi modal configs
 hidden_size_for_vit: 1408

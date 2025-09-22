@@ -53,11 +53,14 @@ def _sort_activations(
 ) -> jax.Array:
   """Sort activations by `sort_indices`.
 
-  If `use_custom_vjp` is True, then we use a custom backward pass that
+  If `use_custom_vjp=True`, then we use a custom backward pass that
   reverses the sort order. Specifically, this unsort operation is simply a sort
   with `jnp.argsort(sort_indices)` as the sort indices. This is only needed in
   the case where the compiler generates a less efficient backward pass op.
- 
+
+  Note that `use_custom_vjp=True` assumes that `sort_indices` is a permutation
+  of `jnp.arange(inputs.shape[0])`.
+
   Args:
     inputs: `(tokens, ...)`-shaped array of input activations to sort.
     sort_indices: `(tokens,)`-shaped array containing the sort order.
@@ -511,8 +514,8 @@ class RoutedMoE(nnx.Module):
         layer_act = self.activation_fn(layer_w0)
         intermediate_layer = jnp.multiply(layer_act, layer_w1)
       return intermediate_layer.astype(self.dtype)
-  
-  def permute(self, inputs, gate_logits, pre_bias_logits, use_custom_sort_vjp=True, rngs=None):
+
+  def permute(self, inputs, gate_logits, pre_bias_logits, use_custom_sort_vjp=True, rngs=None, roll_to_expert_id=None):
     """Permute tokens to group by expert to fit gmm call."""
     # reshape inputs (batch, sequence, emb) to (batch * sequence, emb)
     inputs_shape = inputs.shape
@@ -527,13 +530,12 @@ class RoutedMoE(nnx.Module):
       inputs_2d = inputs_2d * router_scores.reshape(bsz_times_seq_len, -1)
 
     flatten_selected_experts = jnp.ravel(selected_experts)
+    if roll_to_expert_id is not None:
+      flatten_selected_experts = (flatten_selected_experts - roll_to_expert_id) % self.num_experts
     sorted_selected_experts = jnp.argsort(flatten_selected_experts)
-    sorted_indices = sorted_selected_experts // self.num_experts_per_tok
     # sort inputs for number of selected experts
-    replicated_inputs_2d = jnp.reshape(
-        jnp.broadcast_to(inputs_2d[None, ...], (self.num_experts_per_tok, *inputs_2d.shape)), 
-        (self.num_experts_per_tok * inputs_2d.shape[0], inputs_2d.shape[1]))
-    sorted_inputs = _sort_activations(replicated_inputs_2d, sorted_indices, use_custom_sort_vjp).astype(self.dtype)
+    replicated_inputs_2d = jnp.repeat(inputs_2d, self.num_experts_per_tok, axis=0)
+    sorted_inputs = _sort_activations(replicated_inputs_2d, sorted_selected_experts, use_custom_sort_vjp).astype(self.dtype)
     group_size = jnp.bincount(flatten_selected_experts, length=self.num_experts)
     # Return the experts for each sorted input.
     expert_indices = jnp.arange(self.num_experts)
@@ -942,23 +944,17 @@ class RoutedMoE(nnx.Module):
         )
 
         # "Route" tokens within each shard.
-        x, sorted_selected_experts, weights, full_group_sizes, selected_experts = self.permute(
-            x, logits, pre_bias_logits, self.config.use_custom_sort_vjp)
+        num_experts_per_shard = self.config.num_experts // num_expert_parallelism
+        x, sorted_selected_experts, weights, group_sizes, selected_experts = self.permute(
+            x, logits, pre_bias_logits, self.config.use_custom_sort_vjp,
+            roll_to_expert_id=num_experts_per_shard * expert_shard_id)
 
         # Filter down to the group sizes that apply to only the experts in the
         # current shard.
-        full_group_sizes = jnp.reshape(full_group_sizes, (num_expert_parallelism, -1))
-        group_sizes = full_group_sizes[expert_shard_id]
-
-        # Move the tokens for the experts in the current shard to the start of
-        # the inputs array.
-        num_tokens_to_skip = (
-            jnp.cumsum(jnp.sum(full_group_sizes, axis=-1))[expert_shard_id] -
-            jnp.sum(full_group_sizes[expert_shard_id])
-          )
-        x = jnp.roll(x, shift=-num_tokens_to_skip, axis=0)
+        group_sizes = group_sizes[:num_experts_per_shard]
+        mask = jnp.arange(x.shape[0]) < jnp.sum(group_sizes)
+        x = jnp.where(mask[:, None], x, 0)
       else:
-        num_tokens_to_skip = None
         x, sorted_selected_experts, weights, group_sizes, selected_experts = self.permute(
             x, logits, pre_bias_logits, self.config.use_custom_sort_vjp, rngs)
 
@@ -1055,9 +1051,6 @@ class RoutedMoE(nnx.Module):
         # Set the outputs of tokens which were not processed to 0.
         mask = jnp.arange(intermediate_output.shape[0]) < jnp.sum(group_sizes)
         intermediate_output = jnp.where(mask[:, None], intermediate_output, 0)
-
-        # Move the tokens back to their original positions.
-        intermediate_output = jnp.roll(intermediate_output, shift=num_tokens_to_skip, axis=0)
 
         # Unsort and deduplicate the outputs locally.
         output = self.unpermute(
