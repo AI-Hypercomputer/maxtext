@@ -82,7 +82,7 @@ def create_training_tools(config, model, mesh):
 
 
 def jit_train_step(
-    config, model, state, state_mesh_shardings, data_sharding, train_step
+    config, model, state, state_mesh_shardings, data_sharding, train_step, params_shardings=None,
 ):
   """Returns a JIT-compiled train step function, which is loaded from a file if specified in the config."""
   (
@@ -92,7 +92,7 @@ def jit_train_step(
       static_argnums,
       donate_argnums,
   ) = maxtext_utils.get_functional_train_with_signature(
-      train_step, data_sharding, state_mesh_shardings, model, config
+      train_step, data_sharding, state_mesh_shardings, model, config, params_shardings,
   )
 
   # Define the compilation of functional_train, either by loading the compiled version or wrapping a new one in a jit
@@ -149,16 +149,17 @@ def jit_train_and_eval_step(
     train_step,
     eval_step=None,
     eval_data_iterator=None,
+    params_shardings=None,
 ):
   """Returns a JIT-compiled train and eval step function."""
   data_sharding = maxtext_utils.get_input_data_sharding(config, mesh)
   p_train_step = jit_train_step(
-      config, model, state, state_mesh_shardings, data_sharding, train_step
+      config, model, state, state_mesh_shardings, data_sharding, train_step, params_shardings,
   )
   p_eval_step = None
   if eval_data_iterator:
     p_eval_step = jit_eval_step(
-        config, model, state_mesh_shardings, data_sharding, eval_step
+        config, model, state_mesh_shardings, data_sharding, eval_step,
     )
 
   return p_train_step, p_eval_step
