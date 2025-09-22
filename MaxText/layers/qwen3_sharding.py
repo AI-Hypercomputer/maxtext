@@ -11,7 +11,7 @@ dp, fsdp, tp, pp, sp, cp, cp_ar, tp_s, ep, ar, tp_t, fsdp_t = Axis
 
 # NOTE: a few rules are currently missing since we have not yet migrated attention_op (e.g. attention_q_length)
 #
-class Qwen3ShardingTrainingV2(MeshSharding):
+class MoEShardingTrainingV2(MeshSharding):
   def __init__(self, config):
     super().__init__()
     self.config = config
@@ -29,12 +29,12 @@ class Qwen3ShardingTrainingV2(MeshSharding):
 
     mesh_axes = []
     for axis in axes:
-     mesh_axes.append(self.map_axis(axis, tensor_type, ep_attn_type, tp_t_active))
+     mesh_axes.append(self.map_axis(axis, tensor_name, tensor_type, ep_attn_type, tp_t_active))
 
     self.maybe_check_valid_mesh_axes(mesh_axes)
     return PartitionSpec(*mesh_axes)
 
-  def map_axis(axis, tensor_type, ep_attn_type, tp_t_active):
+  def map_axis(axis, tensor_name, tensor_type, ep_attn_type, tp_t_active):
     match axis, tensor_type:
       case "batch", TT.Activation:
                                                     axis_mappings = [dp, fsdp, fsdp_t]
@@ -98,11 +98,46 @@ class Qwen3ShardingTrainingV2(MeshSharding):
                                                     assert False, "Unexpected logical axis name for sharding"
                                                     return (())
 
+  def map_axis_juan(axis, tensor_name, tensor_type, ep_attn_type, tp_t_active):
+    moe_tensors = ("dispatch", "layer_w0", "layer_w1", "intermediate_layer", "moe_wi_0", "moe_wi_1", "moe_wo", "sparse_inputs")
+    moe_tensor = "moe" if tensor_name in moe_tensors else "non-moe"
+    tp_t = "tp_t" if tp_t_active else "non-tp_t"
+    class C: elb = "embed_and_logits_batch"
+
+    match axis, moe_tensor, ep_attn_type, tp_t_active, tensor_type:
+      case "batch", "non-moe", "batch", _, TT.Activation:                           return (dp, fsdp, fsdp_t, ep)
+      case "batch", _, _, _, TT.Activation:                                         return (dp, fsdp, fsdp_t)
+      case C.elb, _, "batch", _, TT.Activation:                                     return (dp, pp, fsdp, fsdp_t, ep)
+      case C.elb, _, "context", _, TT.Activation:                                   return (dp, pp, fsdp, fsdp_t)
+      case "embed", "moe", _, "non-tp_t", TT.Activation:                            return ()
+      case "embed", _, _, _, TT.Activation:                                         return (tp, tp_t)
+      case "embed", "moe", _, _, TT.Weight:                                         return (fsdp, fsdp_t, sp, cp)
+      case "embed", _, _, _, TT.Weight:                                             return (fsdp, fsdp_t, sp, cp, ep)
+      case "mlp", _, _, _, TT.Weight:                                               return (fsdp_t, tp, tp_s)
+      case "mlp", _, _, _, TT.Activation:                                           return (tp, tp_t, tp_s)
+      case "vocab", _, _, _, TT.Weight:                                             return (tp, tp_t, tp_s, ar)
+      case "norm", _, _, _, TT.Weight:                                              return (tp, tp_t, tp_s)
+      case "length", _, "context", _, TT.Activation:                                return (sp, cp, ep)
+      case "length", _, _, _, TT.Activation:                                        return (sp, cp)
+      case "norm_length", _, _, _, TT.Activation:                                   return (tp_s, sp, cp)
+      case "kv", _, _, _, TT.Activation:                                            return (tp, tp_s)
+      case "kv_batch", _, "batch", _, TT.Activation:                                return (dp, fsdp, fsdp_t, ep)
+      case "kv_batch", _, _, _, TT.Activation:                                      return (dp, fsdp, fsdp_t)
+      case ("kv_heads" | "heads"), TT.Activation, _:                                return (tp, tp_t, sp, tp_s)
+      case "kv_head_dim", TT.Activation:                                            return (tp, tp_t, tp_s)
+      case  ("heads" | "q_heads" | "kv_heads"), _, _, _, TT.Weight, _:              return (tp, tp_t, tp_s)
+      case ("kv", "kv_head_dim", "qkv", "num_activations"), _, _, _, TT.Weight, _:  return ()
+      case "exp", _, _, _, _:                                                       return (ep,)
+      case "embed_tensor_transpose", _, _, _, TT.Weight:                            return (tp_t)
+      case _, __, _, _, :
+        assert False, "Unexpected logical axis name for sharding"
+        return (())
+
   def is_batch_sharded_by_expert(self):
     return True
 
 
-class Qwen3VariantTrainingSharding(MeshSharding):
+class Qwen3VariantTrainingSharding(MeshSharding):b
   def __init__(self, config):
     super().__init__()
     self.qwen3_sharding = Qwen3ShardingTrainingV2(config)
