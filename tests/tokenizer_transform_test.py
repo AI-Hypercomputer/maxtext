@@ -43,7 +43,7 @@ class TokenizerTransformTest(unittest.TestCase):
     self.max_len = 5
     self.pad_length = 7
     self.pad_id = 0
-    self.text_column = "text"
+    self.feature_names = "text"
     self.mock_tokenizer = MockTokenizer()
     self.source_data = [
         {"text": "a b c"},
@@ -56,7 +56,7 @@ class TokenizerTransformTest(unittest.TestCase):
   def test_tokenize_and_trim(self):
     """Tests the 1:1 MapTransform (truncation) logic."""
     trim_op = _grain_tokenizer.TokenizeAndTrim(
-        text_column=self.text_column,
+        feature_names=self.feature_names,
         sequence_length=self.max_len,
         add_bos=False,
         add_eos=False,
@@ -79,7 +79,7 @@ class TokenizerTransformTest(unittest.TestCase):
   def test_tokenize_and_chunk(self):
     """Tests the 1:N FlatMapTransform (chunking) logic."""
     chunk_op = _grain_tokenizer.TokenizeAndChunk(
-        text_column=self.text_column,
+        feature_names=self.feature_names,
         sequence_length=self.max_len,
         add_bos=False,
         add_eos=False,
@@ -103,7 +103,7 @@ class TokenizerTransformTest(unittest.TestCase):
   def test_trim_and_pad_chaining(self):
     """Tests chaining TokenizeAndTrim.map() -> PadToMaxLength.map()"""
     trim_op = _grain_tokenizer.TokenizeAndTrim(
-        text_column=self.text_column,
+        feature_names=self.feature_names,
         sequence_length=self.max_len,
         add_bos=False,
         add_eos=False,
@@ -130,7 +130,7 @@ class TokenizerTransformTest(unittest.TestCase):
   def test_chunk_and_pad_chaining(self):
     """Tests chaining TokenizeAndChunk.apply() -> PadToMaxLength.map()"""
     chunk_op = _grain_tokenizer.TokenizeAndChunk(
-        text_column=self.text_column,
+        feature_names=self.feature_names,
         sequence_length=self.max_len,
         add_bos=False,
         add_eos=False,
