@@ -580,6 +580,7 @@ class _HyperParameters:
           MAXTEXT_REPO_ROOT,
           os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText"),
           MAXTEXT_PKG_DIR,
+          os.path.dirname(config_name)
       ):
         tokenizer_path = os.path.join(
             search_root,
