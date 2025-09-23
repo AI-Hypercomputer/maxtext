@@ -43,11 +43,14 @@ def vision_sft_preprocessing_pipeline(
   """pipeline for multimodal SFT with HF dataset"""
 
   assert len(text_columns) == 2, f"Need two text_columns for query and response, received {text_columns=}"
-
+  batch_size = global_batch_size // jax.process_count()
   if config.enable_data_shuffling:
     dataset = dataset.shuffle(seed=config.data_shuffle_seed)
 
   dataset = dataset.select_columns(text_columns + [image_column])
+  if image_column != "images":
+    dataset = dataset.rename_column(image_column, "images")
+  
   dataset = dataset.map(
       _input_pipeline_utils.reformat_prompt,
       fn_kwargs={
@@ -60,8 +63,6 @@ def vision_sft_preprocessing_pipeline(
       _input_pipeline_utils.reformat_response,
       fn_kwargs={"column": text_columns[1], "model_name": config.model_name},
   )
-  if image_column != "images":
-    dataset = dataset.rename_column(image_column, "images")
 
   dataset = dataset.map(
       _input_pipeline_utils.pre_process_image_sft,
@@ -85,6 +86,7 @@ def vision_sft_preprocessing_pipeline(
   dataset = dataset.map(
       _input_pipeline_utils.tokenization,
       batched=True,
+      batch_size=global_batch_size,
       fn_kwargs={
           "hf_tokenizer": tokenizer,
           "truncation": False,
@@ -115,8 +117,15 @@ def vision_sft_preprocessing_pipeline(
       )
   )
   # TODO(aireenmei, hengtaoguo): support packing
-  operations.append(_input_pipeline_utils.PadToMaxLength(config.max_target_length, pad_id))
-  operations.append(grain.Batch(batch_size=global_batch_size // jax.process_count(), drop_remainder=True))
+  operations.append(
+      _input_pipeline_utils.PadOrTrimToMaxLength(
+          config.max_target_length,
+          pad_id,
+          model_name=config.model_name,
+          max_num_images_per_example=config.max_num_images_per_example,
+      )
+  )
+  operations.append(grain.Batch(batch_size=batch_size, drop_remainder=True))
   operations.append(_input_pipeline_utils.ShiftData(ignored_ids=[pad_id], axis=1))
   dummy_index_sampler = grain.IndexSampler(
       num_records=len(dataset),
@@ -134,7 +143,7 @@ def vision_sft_preprocessing_pipeline(
       sampler=dummy_index_sampler,
       worker_count=1,  # only supports <=1 for now, more workers results in duplicated data
       worker_buffer_size=1,
-      read_options=grain.ReadOptions(num_threads=1, prefetch_buffer_size=128),
+      read_options=grain.ReadOptions(num_threads=1, prefetch_buffer_size=batch_size * 4),
   )
 
   multihost_gen = multihost_dataloading.MultiHostDataLoadIterator(dataloader, global_mesh)
@@ -274,7 +283,7 @@ def preprocessing_pipeline(
     )
     operations.append(_input_pipeline_utils.ReformatPacking(data_column_names))
   else:
-    operations.append(_input_pipeline_utils.PadToMaxLength(max_target_length, pad_id))
+    operations.append(_input_pipeline_utils.PadOrTrimToMaxLength(max_target_length, pad_id))
     operations.append(grain.Batch(batch_size=global_batch_size // jax.process_count(), drop_remainder=drop_remainder))
 
   if shift and not use_dpo:
