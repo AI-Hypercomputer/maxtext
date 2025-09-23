@@ -64,7 +64,7 @@ python3 -m MaxText.train src/MaxText/configs/base.yml\
 Decoding
 --------
 
-To generate text with a trained model, use the `decode` command. The command below is an example for fine-tuning on a v5p-512 slice.
+To generate text with a trained model, use the `decode` command. The command below is an example for decoding on a v5p-512 slice.
 
 ```
 python3 -m MaxText.decode src/MaxText/configs/base.yml\
