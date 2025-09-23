@@ -47,30 +47,26 @@ from pprint import pprint
 import re
 import sys
 
+from etils import epath
+from flax import linen as nn
 from flax import nnx
 from flax.linen import partitioning as nn_partitioning
 import grain
 import humanize
 import jax
+from MaxText.globals import MAXTEXT_ASSETS_ROOT
+import numpy as np
 import optax
 from orbax import checkpoint as ocp
 import tensorflow_datasets as tfds
 from tqdm.auto import tqdm
-from tunix.rl import rl_cluster as rl_cluster_lib
-from tunix.rl.rollout import base_rollout
-from tunix.rl.grpo.grpo_learner import GrpoConfig, GrpoLearner
-from tunix.sft import metrics_logger
-
 from transformers import AutoTokenizer
-
-from flax import linen as nn
 from tunix.models.llama3 import model as llama3_lib
-import numpy as np
-from etils import epath
-
+from tunix.rl import rl_cluster as rl_cluster_lib
+from tunix.rl.grpo.grpo_learner import GRPOConfig, GRPOLearner
+from tunix.rl.rollout import base_rollout
 from tunix.rl.rollout.base_rollout import RolloutConfig
-
-from MaxText.globals import MAXTEXT_ASSETS_ROOT
+from tunix.sft import metrics_logger
 
 # for vLLM we can skip JAX precompilation with this flag, it makes startup faster
 os.environ["SKIP_JAX_PRECOMPILE"] = "1"
@@ -377,7 +373,7 @@ def get_ref_maxtext_model(config):
 model_config = llama3_lib.ModelConfig.llama3_1_8b()
 
 # Load the reference model
-# Note: pass the path to your scanned checkpoint for "load_parameters_path". 
+# Note: pass the path to your scanned checkpoint for "load_parameters_path".
 # To create a scanned checkpoint, you can use /maxtext/src/MaxText/utils/ckpt_conversion/to_maxtext.py
 config_ref = pyconfig.initialize(
     [
@@ -918,7 +914,7 @@ cluster_config = rl_cluster_lib.ClusterConfig(
     rollout_vllm_tpu_backend_type="jax",
 )
 
-grpo_config = GrpoConfig(
+grpo_config = GRPOConfig(
     num_generations=NUM_GENERATIONS,
     num_iterations=NUM_ITERATIONS,
     beta=BETA,
@@ -937,7 +933,7 @@ rl_cluster = rl_cluster_lib.RLCluster(
 )
 
 # GRPO Trainer
-grpo_trainer = GrpoLearner(
+grpo_trainer = GRPOLearner(
     rl_cluster=rl_cluster,
     reward_fns=[
         match_format_exactly,
