@@ -172,7 +172,13 @@ echo ""
 echo "Built your base docker image and named it ${LOCAL_IMAGE_NAME}.
 It only has the dependencies installed. Assuming you're on a TPUVM, to run the
 docker image locally and mirror your local working directory run:"
-echo "docker run -v $(pwd):/deps --rm -it --privileged --entrypoint bash ${LOCAL_IMAGE_NAME}"
+if [[ ${INSTALL_GRPO} -eq 1 ]] ; then
+  echo "For GRPO mode, to enable live editing of 'tunix', run:"
+  echo "docker run -v $(pwd):/deps -v ../tunix:/tunix --rm -it --privileged --entrypoint bash ${LOCAL_IMAGE_NAME}"
+  echo "This mounts your local '../tunix' directory into the container."
+else
+  echo "docker run -v $(pwd):/deps --rm -it --privileged --entrypoint bash ${LOCAL_IMAGE_NAME}"
+fi
 echo ""
 echo "You can run MaxText and your development tests inside of the docker image. Changes to your workspace will automatically
 be reflected inside the docker container."
