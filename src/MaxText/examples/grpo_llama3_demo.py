@@ -1003,7 +1003,7 @@ print(f"Pre GRPO Training: {corr=}, {total=}, {accuracy=}%, {partial_accuracy=}%
 jax.profiler.start_trace(PROFILE_DIR)
 with mesh, nn_partitioning.axis_rules(config_policy.logical_axis_rules):
   grpo_trainer.train(dataset)
-jax.profiler.stop_trace()
+# jax.profiler.stop_trace()
 
 print("HBM usage after training:")
 # show_hbm_usage()
