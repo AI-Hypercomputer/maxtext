@@ -51,7 +51,7 @@ jobs:
       device_name: v4-8
       cloud_runner: linux-x86-n2-16-buildkit
       build_mode: jax_ai_image
-      base_image: us-docker.pkg.dev/tpu-prod-env-multipod/jax-stable-stack/candidate/tpu:jax0.7.2_uv_rev1
+      base_image: us-docker.pkg.dev/tpu-prod-env-multipod/jax-stable-stack/candidate/tpu:jax0.7.2_rev1
 
   gpu_image:
     needs: prelim
@@ -61,7 +61,7 @@ jobs:
       device_name: a100-40gb-4
       cloud_runner: linux-x86-n2-16-buildkit
       build_mode: jax_ai_image
-      base_image: us-docker.pkg.dev/tpu-prod-env-multipod/jax-stable-stack/candidate/gpu:jax0.7.2_cuda13local_rev1
+      base_image: us-docker.pkg.dev/tpu-prod-env-multipod/jax-stable-stack/candidate/gpu:jax0.7.2_cuda12local_rev1
 
   cpu_unit_tests:
     needs: tpu_image

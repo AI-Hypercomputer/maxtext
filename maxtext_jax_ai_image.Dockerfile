@@ -61,7 +61,7 @@ RUN if [ "$TEST_TYPE" = "xlml" ] || [ "$TEST_TYPE" = "unit_test" ]; then \
     fi
 
 # Run the script available in JAX AI base image to generate the manifest file
-RUN bash /jax-ai-image/generate_manifest.sh PREFIX=maxtext COMMIT_HASH=$COMMIT_HASH
+RUN bash /jax-stable-atack/generate_manifest.sh PREFIX=maxtext COMMIT_HASH=$COMMIT_HASH
 
 # Install (editable) MaxText
 RUN test -f '/tmp/venv_created' && "$(tail -n1 /tmp/venv_created)"/bin/activate ; pip install --no-dependencies -e .
