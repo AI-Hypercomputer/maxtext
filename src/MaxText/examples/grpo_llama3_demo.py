@@ -106,7 +106,7 @@ from MaxText.integration.tunix.tunix_adapter import TunixMaxTextAdapter
 
 print(f"JAX devices: {jax.devices()}")
 
-DEBUG = False  # set to True to run in debug mode, for more print statements
+DEBUG = True  # set to True to run in debug mode, for more print statements
 
 run_id = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
 
