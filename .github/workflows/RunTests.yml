@@ -96,7 +96,8 @@ jobs:
     with:
       device_type: tpu
       device_name: v4-8
-      cloud_runner: linux-x86-ct4p-240-4tpu
+      # cloud_runner: linux-x86-ct4p-240-4tpu
+      cloud_runner: linux-x86-ct5lp-112-4tpu-test
       pytest_marker: 'not cpu_only and not gpu_only and not integration_test'
       xla_python_client_mem_fraction: 0.75
       tf_force_gpu_allow_growth: false
