@@ -101,7 +101,7 @@ class TokenizerTransformTest(unittest.TestCase):
       assert_array_equal(res, exp)
 
   def test_trim_and_pad_chaining(self):
-    """Tests chaining TokenizeAndTrim.map() -> PadToMaxLength.map()"""
+    """Tests chaining TokenizeAndTrim.map() -> PadOrTrimToMaxLength.map()"""
     trim_op = _grain_tokenizer.TokenizeAndTrim(
         feature_names=self.feature_names,
         sequence_length=self.max_len,
@@ -109,7 +109,7 @@ class TokenizerTransformTest(unittest.TestCase):
         add_eos=False,
         tokenizer=self.mock_tokenizer
     )
-    pad_op = _input_pipeline_utils.PadToMaxLength(
+    pad_op = _input_pipeline_utils.PadOrTrimToMaxLength(
         max_length=self.pad_length,
         pad_id=self.pad_id
     )
@@ -128,7 +128,7 @@ class TokenizerTransformTest(unittest.TestCase):
       assert_array_equal(res, exp)
 
   def test_chunk_and_pad_chaining(self):
-    """Tests chaining TokenizeAndChunk.apply() -> PadToMaxLength.map()"""
+    """Tests chaining TokenizeAndChunk.apply() -> PadOrTrimToMaxLength.map()"""
     chunk_op = _grain_tokenizer.TokenizeAndChunk(
         feature_names=self.feature_names,
         sequence_length=self.max_len,
@@ -136,7 +136,7 @@ class TokenizerTransformTest(unittest.TestCase):
         add_eos=False,
         tokenizer=self.mock_tokenizer
     )
-    pad_op = _input_pipeline_utils.PadToMaxLength(
+    pad_op = _input_pipeline_utils.PadOrTrimToMaxLength(
         max_length=self.pad_length,
         pad_id=self.pad_id
     )
