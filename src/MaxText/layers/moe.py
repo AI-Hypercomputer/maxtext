@@ -33,7 +33,8 @@ import numpy as np
 from MaxText import common_types as ctypes
 from MaxText import max_logging
 from MaxText import max_utils
-from MaxText.kernels import megablox as mblx
+# from MaxText.kernels import megablox as mblx
+from tokamax._src.ops.ragged_dot import pallas_mosaic_tpu
 from MaxText.layers import attentions, linears, quantizations, nnx_wrappers
 from MaxText.layers.initializers import NdInitializer, nd_dense_init, default_bias_init, variable_to_logically_partitioned
 
@@ -817,16 +818,24 @@ class RoutedMoE(nnx.Module):
           min(tile_size[2], n),
       )
       if self.config.megablox:
-        output = mblx.gmm(
-            lhs=inputs,
-            rhs=kernel,
-            group_sizes=group_sizes,
-            preferred_element_type=self.dtype,
-            tiling=tiling,
-            lhs_quantize_dtype=lhs_quantize_dtype,
-            rhs_quantize_dtype=rhs_quantize_dtype,
-            use_qwix_quantization=self.config.use_qwix_quantization,
+        tiling_config = pallas_mosaic_tpu.Config(gmm_tiling=tiling)
+        output = pallas_mosaic_tpu.PallasMosaicTpuRaggedDot(config=tiling_config)(
+          lhs=inputs,
+          rhs=kernel,
+          group_sizes=group_sizes,
+          precision=jax.lax.Precision.DEFAULT,
+          preferred_element_type=self.dtype,
         )
+        # output = mblx.gmm(
+        #     lhs=inputs,
+        #     rhs=kernel,
+        #     group_sizes=group_sizes,
+        #     preferred_element_type=self.dtype,
+        #     tiling=tiling,
+        #     lhs_quantize_dtype=lhs_quantize_dtype,
+        #     rhs_quantize_dtype=rhs_quantize_dtype,
+        #     use_qwix_quantization=self.config.use_qwix_quantization,
+        # )
       else:
         rhs_inputs = kernel
         if isinstance(kernel, aqt.QTensor):

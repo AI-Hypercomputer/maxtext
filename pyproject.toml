@@ -9,7 +9,7 @@ path = "src/MaxText/__init__.py"
 name = "maxtext"
 description = "MaxText is a simple, performant and scalable Jax LLM!"
 dynamic = ["version"]
-requires-python = ">=3.12"
+requires-python = ">=3.11"
 readme = "README.md"
 license = "Apache-2.0"
 keywords = ["llm", "jax", "llama", "mistral", "mixtral", "gemma", "deepseek"]
