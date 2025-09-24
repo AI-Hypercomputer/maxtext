@@ -23,5 +23,4 @@ tensorflow-datasets
 tensorflow-text>=2.17.0
 tiktoken
 transformers
-google-tunix @ https://github.com/google/tunix/archive/e03f154edd2abfddd6b9babb72a3d0d3c4d81bb2.zip
 qwix @ https://github.com/google/qwix/archive/f2fd7b9114ff8d09e5b0131a453351578502da8a.zip
