@@ -169,7 +169,7 @@ SEED = 42
 # ====== GRPO ======
 # === Generation during GRPO training ===
 MAX_PROMPT_LENGTH = 256
-TOTAL_GENERATION_STEPS = 2 # 768
+TOTAL_GENERATION_STEPS = 768
 # Important to keep a high-ish temperature for varied, diverse responses during
 # training.
 TEMPERATURE = 0.9
