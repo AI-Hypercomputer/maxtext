@@ -102,13 +102,13 @@ class MoEShardingTrainingV2(MeshSharding):
     moe_tensors = ("dispatch", "layer_w0", "layer_w1", "intermediate_layer", "moe_wi_0", "moe_wi_1", "moe_wo", "sparse_inputs")
     moe_tensor = "moe" if tensor_name in moe_tensors else "non-moe"
     tp_t = "tp_t" if tp_t_active else "non-tp_t"
-    class C: elb = "embed_and_logits_batch"
+    # TODO: rename embed_and_logits batch (but not to elb as below)
 
     match axis, tensor_type, moe_tensor, ep_attn_type, tp_t_active:
       case "batch",                                           TT.Activation, "non-moe", "batch", _: return (dp, fsdp, fsdp_t, ep)
       case "batch",                                           TT.Activation, _, _, _:               return (dp, fsdp, fsdp_t)
-      case C.elb, _,                                          TT.Activation, "batch", _:            return (dp, pp, fsdp, fsdp_t, ep)
-      case C.elb,                                             TT.Activation, _, "context", _:       return (dp, pp, fsdp, fsdp_t)
+      case "elb",                                             TT.Activation, _, "batch", _:         return (dp, pp, fsdp, fsdp_t, ep)
+      case "elb",                                             TT.Activation, _, "context", _:       return (dp, pp, fsdp, fsdp_t)
       case "embed",                                           TT.Activation, "moe", _, "non-tp_t":  return ()
       case "embed",                                           TT.Activation, _, _, _:               return (tp, tp_t)
       case "embed",                                           TT.Weight,     "moe", _, _:           return (fsdp, fsdp_t, sp, cp)
