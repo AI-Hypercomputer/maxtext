@@ -105,7 +105,6 @@ class MoEShardingTrainingV2(MeshSharding):
     class C: elb = "embed_and_logits_batch"
 
     match axis, tensor_type, moe_tensor, ep_attn_type, tp_t_active:
-
       case "batch",                                           TT.Activation, "non-moe", "batch", _: return (dp, fsdp, fsdp_t, ep)
       case "batch",                                           TT.Activation, _, _, _:               return (dp, fsdp, fsdp_t)
       case C.elb, _,                                          TT.Activation, "batch", _:            return (dp, pp, fsdp, fsdp_t, ep)
