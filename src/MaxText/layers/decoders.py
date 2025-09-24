@@ -254,11 +254,25 @@ class Decoder(nn.Module):
     self.decoder_layer = self.get_decoder_layers()
     self.norm_layer = self.get_norm_layer(num_features=self.config.emb_dim)
     if self.config.using_pipeline_parallelism:
-      pipeline_stage_module = self.get_pipeline_stage_module(self.decoder_layer)
-      remat_policy = self.get_remat_policy()
-      self.pipeline_module = pipeline.Pipeline(
-          config=self.config, mesh=self.mesh, layers=pipeline_stage_module, remat_policy=remat_policy
+       self.initialize_pipeline_module()
+
+  def initialize_pipeline_module(self):
+    remat_policy = self.get_remat_policy()
+    pipeline_stage_module = self.get_pipeline_stage_module(self.decoder_layer)
+    if self.config.num_successive_pipelines > 1:
+      initializing = self.is_mutable_collection("params")
+      self.pipeline_module = pipeline.get_successive_pipelines(self.config, remat_policy, self.mesh, pipeline_stage_module, initializing)
+    else:
+      rematted_pipeline = nn.remat(
+        pipeline.Pipeline,
+        prevent_cse=False, # This will get scanned
+        policy=remat_policy,
+        static_argnums=(4, 5, 6),  # Deterministic, model mode, and sharding_specs are static arguments.
       )
+      self.pipeline_module = rematted_pipeline(
+        config=self.config, mesh=self.mesh, layers=pipeline_stage_module, remat_policy=remat_policy
+      )
+    self.pipeline_module_for_sharding = pipeline.Pipeline(config=self.config, mesh=self.mesh, layers=pipeline_stage_module, remat_policy=remat_policy)
 
   def minimal_policy(self, with_context=False):
     """Helper for creating minimal checkpoint policies."""
@@ -659,8 +673,8 @@ class Decoder(nn.Module):
     )
     if cfg.using_pipeline_parallelism:
       if cfg.pipeline_fsdp_ag_once:
-        partition_spec = self.pipeline_module.get_weight_sharding(
-            y, decoder_segment_ids, decoder_positions, deterministic, self.model_mode
+        partition_spec = self.pipeline_module_for_sharding.get_weight_sharding(
+            y, decoder_segment_ids, decoder_positions, deterministic, self.model_mode, None
         )
       else:
         partition_spec = None  # This partition spec is only used for the fsdp_ag_once feature.
@@ -690,9 +704,14 @@ class Decoder(nn.Module):
                 mesh,
                 in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
             )(y, *broadcast_args)
-        y = self.pipeline_module(y, *broadcast_args, partition_spec=partition_spec)
+        y = self.pipeline_module(y, *broadcast_args, partition_spec) # TODO: support 1 or two outputs (done maybe below?)
+        if self.config.num_successive_pipelines > 1:
+          y = y[0]
       else:  # Not DeepSeek
-        y = self.pipeline_module(y, *broadcast_args, partition_spec=partition_spec)
+        #y = self.pipeline_module(y, *broadcast_args, partition_spec=partition_spec) # TODO- maintain support for both? unsure what this refers to now =(
+        y = self.pipeline_module(y, *broadcast_args, partition_spec)
+        if self.config.num_successive_pipelines > 1:
+          y = y[0]
         remaining_layers = self.config.num_decoder_layers - self.config.pipeline_parallel_layers
         if remaining_layers > 0:
           logical_axis_rules_pp_as_dp = maxtext_utils.logical_axis_rules_pp_act_as_dp(self.config.logical_axis_rules)
