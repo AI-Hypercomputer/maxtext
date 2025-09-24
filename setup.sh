@@ -146,7 +146,7 @@ if [[ "$MODE" == "nightly" ]]; then
     # Remove/update this section based on the pinned github repo commit in requirements.txt
     sed -i -E \
       -e 's|^mlperf-logging @ https?://github.com/mlcommons/logging/archive/.*\.zip$|mlperf-logging@git+https://github.com/mlperf/logging.git|' \
-      -e 's|^([^ ]*) @ https?://github.com/([^/]*\/[^/]*)/archive/.*\.zip$|\1@git+https://github.com/\2.git|' \
+      -e '/^tunix/!s|^([^ ]*) @ https?://github.com/([^/]*\/[^/]*)/archive/.*\.zip$|\1@git+https://github.com/\2.git|' \
       requirements.txt.nightly-temp
 
     echo "--- Installing modified nightly requirements: ---"
