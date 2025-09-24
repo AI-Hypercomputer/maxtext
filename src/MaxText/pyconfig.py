@@ -962,16 +962,16 @@ def set_and_validate_pipeline_config(raw_keys):
 
     if raw_keys["num_pipeline_repeats"] == -1:
       num_pipeline_repeats, remainder = divmod(
-          raw_keys["pipeline_parallel_layers"], num_stages * raw_keys["num_layers_per_pipeline_stage"]
+        raw_keys["pipeline_parallel_layers"], num_stages * raw_keys["num_layers_per_pipeline_stage"] * raw_keys["num_successive_pipelines"]
       )
       assert (
           not remainder
-      ), f"The number of layers per stage ({raw_keys['num_layers_per_pipeline_stage']}) times the number of stages ({num_stages}) must divide the number of pipeline_parallel_layers which defaults to decoder layers  ({raw_keys['pipeline_parallel_layers']}) "
+      ), f"The number of layers per stage ({raw_keys['num_layers_per_pipeline_stage']}) times the number of stages ({num_stages}) times the number of successive pipelines ({raw_keys['num_successive_pipelines']}) must divide the number of pipeline_parallel_layers which defaults to decoder layers  ({raw_keys['pipeline_parallel_layers']}) "
       raw_keys["num_pipeline_repeats"] = num_pipeline_repeats
     assert (
-        num_stages * raw_keys["num_pipeline_repeats"] * raw_keys["num_layers_per_pipeline_stage"]
+        num_stages * raw_keys["num_pipeline_repeats"] * raw_keys["num_layers_per_pipeline_stage"] * raw_keys["num_successive_pipelines"]
         == raw_keys["pipeline_parallel_layers"]
-    ), f"The product of pipeline stages ({num_stages}), repeats ({raw_keys['num_pipeline_repeats']}), and layers per stage ({raw_keys['num_layers_per_pipeline_stage']}) must be equal to pipeline_parallel_layers which defaults to decoder layers ({raw_keys['pipeline_parallel_layers']})"
+    ), f"The product of pipeline stages ({num_stages}), repeats ({raw_keys['num_pipeline_repeats']}), layers per stage ({raw_keys['num_layers_per_pipeline_stage']}), and successive pipelines ({raw_keys['num_successive_pipelines']}) must be equal to pipeline_parallel_layers which defaults to decoder layers ({raw_keys['pipeline_parallel_layers']})"
     if raw_keys["num_pipeline_microbatches"] == -1:
       if raw_keys["pipeline_delay_activation_forwarding"]:
         raw_keys["num_pipeline_microbatches"] = 2 * num_stages

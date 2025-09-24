@@ -209,7 +209,11 @@ inhomogeneous_layer_cycle_interval: 1
 # perform the circular transfer (last stage to first) asynchronously.
 # The bubble fraction is (num_stages - 1) / (num_pipeline_repeats * num_pipeline_microbatches + num_stages - 1)
 num_layers_per_pipeline_stage: 1
-# The number of repeats will be set to num_decoder_layers / (num_pipeline_stages * num_layers_per_pipeline_stage)
+# To save memory, you can run "successive" pipelines (e.g. a pipeline that runs layers 1-8, followed by another that runs layer 9-16).
+# The weights only need to be all-gathered for one pipeline at a time. This feature is generally needed when running large models with only
+# a mix of FSDP and PP in conjunction with pipeline_fsdp_ag_once=True.
+num_successive_pipelines: 1
+# By default number of repeats will be set to num_decoder_layers / (num_pipeline_stages * num_layers_per_pipeline_stage * num_successive_pipelines)
 num_pipeline_repeats: -1
 pipeline_parallel_layers: -1 # Pipeline only this number of layers - for the remaining layers the "stage" mesh axes will act like data parallelism.
 # This option helps when the number of layers does not have friendly divisors since SPMD pipelining requires that the
