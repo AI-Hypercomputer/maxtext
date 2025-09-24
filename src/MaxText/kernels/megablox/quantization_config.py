@@ -79,59 +79,59 @@ class QuantizationManager:
             # If not using qwix, apply the same fallback config to all phases.
             self._fwd = self._dlhs = self._drhs = fallback
             return
+        if quantization_rule is not None:
+            rule = quantization_rule
+            add = rule.additional_qt_config
 
-        rule = quantization_rule
-        add = rule.additional_qt_config
-
-        # Forward pass: (activation × weight)
-        self._fwd = QuantizationConfig(
-            lhs_quantize_dtype=rule.act_qtype,
-            rhs_quantize_dtype=rule.weight_qtype,
-            lhs_calibration_method=rule.act_calibration_method,
-            rhs_calibration_method=rule.weight_calibration_method,
-        )
-
-        # Backward pass for inputs (dlhs): (grad × weight_T)
-        # Prefers per-phase overrides; otherwise defaults to (act × bwd).
-        if add:
-            self._dlhs = QuantizationConfig(
-                lhs_quantize_dtype=_require(add, "dlhs_lhs_qtype", "dlhs"),
-                rhs_quantize_dtype=_require(add, "dlhs_rhs_qtype", "dlhs"),
-                lhs_calibration_method=_require(
-                    add, "dlhs_lhs_calibration_method", "dlhs"
-                ),
-                rhs_calibration_method=_require(
-                    add, "dlhs_rhs_calibration_method", "dlhs"
-                ),
-            )
-        else:
-            self._dlhs = QuantizationConfig(
+            # Forward pass: (activation × weight)
+            self._fwd = QuantizationConfig(
                 lhs_quantize_dtype=rule.act_qtype,
-                rhs_quantize_dtype=rule.bwd_qtype,
+                rhs_quantize_dtype=rule.weight_qtype,
                 lhs_calibration_method=rule.act_calibration_method,
                 rhs_calibration_method=rule.weight_calibration_method,
             )
 
-        # Backward pass for weights (drhs): (activation_T × grad)
-        # Prefers per-phase overrides; otherwise defaults to (bwd × act).
-        if add:
-            self._drhs = QuantizationConfig(
-                lhs_quantize_dtype=_require(add, "drhs_lhs_qtype", "drhs"),
-                rhs_quantize_dtype=_require(add, "drhs_rhs_qtype", "drhs"),
-                lhs_calibration_method=_require(
-                    add, "drhs_lhs_calibration_method", "drhs"
-                ),
-                rhs_calibration_method=_require(
-                    add, "drhs_rhs_calibration_method", "drhs"
-                ),
-            )
-        else:
-            self._drhs = QuantizationConfig(
-                lhs_quantize_dtype=rule.bwd_qtype,
-                rhs_quantize_dtype=rule.act_qtype,
-                lhs_calibration_method=rule.weight_calibration_method,
-                rhs_calibration_method=rule.act_calibration_method,
-            )
+            # Backward pass for inputs (dlhs): (grad × weight_T)
+            # Prefers per-phase overrides; otherwise defaults to (act × bwd).
+            if add:
+                self._dlhs = QuantizationConfig(
+                    lhs_quantize_dtype=_require(add, "dlhs_lhs_qtype", "dlhs"),
+                    rhs_quantize_dtype=_require(add, "dlhs_rhs_qtype", "dlhs"),
+                    lhs_calibration_method=_require(
+                        add, "dlhs_lhs_calibration_method", "dlhs"
+                    ),
+                    rhs_calibration_method=_require(
+                        add, "dlhs_rhs_calibration_method", "dlhs"
+                    ),
+                )
+            else:
+                self._dlhs = QuantizationConfig(
+                    lhs_quantize_dtype=rule.act_qtype,
+                    rhs_quantize_dtype=rule.bwd_qtype,
+                    lhs_calibration_method=rule.act_calibration_method,
+                    rhs_calibration_method=rule.weight_calibration_method,
+                )
+
+            # Backward pass for weights (drhs): (activation_T × grad)
+            # Prefers per-phase overrides; otherwise defaults to (bwd × act).
+            if add:
+                self._drhs = QuantizationConfig(
+                    lhs_quantize_dtype=_require(add, "drhs_lhs_qtype", "drhs"),
+                    rhs_quantize_dtype=_require(add, "drhs_rhs_qtype", "drhs"),
+                    lhs_calibration_method=_require(
+                        add, "drhs_lhs_calibration_method", "drhs"
+                    ),
+                    rhs_calibration_method=_require(
+                        add, "drhs_rhs_calibration_method", "drhs"
+                    ),
+                )
+            else:
+                self._drhs = QuantizationConfig(
+                    lhs_quantize_dtype=rule.bwd_qtype,
+                    rhs_quantize_dtype=rule.act_qtype,
+                    lhs_calibration_method=rule.weight_calibration_method,
+                    rhs_calibration_method=rule.act_calibration_method,
+                )
 
     def for_phase(self, phase: Phase) -> QuantizationConfig:
         """Simple accessor to retrieve the config for a specific phase."""
