@@ -11,8 +11,41 @@ class DenseShardingTrainingV2(MeshSharding):
     super().__init__()
     self.config = config
 
+  def __map_axis_tensor_sequence__(self, axis, tensor_type, tensor_name):
+    tensor_seq = self.config.tensor_sequence
+    tp_type = "tp" if tensor_seq else "tp_s"
+
+    match axis, tensor_name, tp_type, tensor_type:
+      case "batch",                            _,                            _,      TT.Activation: return (dp, fsdp)
+      case "elb",                              _,                            _,      TT.Activation: return (dp, pp, fsdp)
+      case "embed",                            _,                            "tp_s", TT.Activation: return ()
+      case "embed",                            _,                            "tp",   TT.Activation: return (tp, tp_t)
+      case "embed",                            _,                            _,      TT.Weight:     return (fsdp, fsdp_t, sp, cp)
+      case "mlp",                              _,                            _,      TT.Weight:     return (fsdp_t, tp)
+      case "mlp",                              _,                            _,      TT.Activation: return (tp, tp_t)
+      case "vocab",                            _,                            _,      TT.Weight:     return (tp, ar)
+      case "vocab",                            _,                            _,      TT.Activation: return (tp, tp_t, sp)
+      case "norm",                             _,                            _,      TT.Weight:     return (tp)
+      case "length",                           "mlp_pre_out",                _,      TT.Activation: return ()
+      case "length",                           _,                            _,      TT.Activation: return (sp, cp)
+      case "norm_length",                      _,                            "tp_s", TT.Activation: return (tp, sp, cp)
+      case "norm_length",                      _,                            "tp",   TT.Activation: return (sp, cp)
+      case "kv",                               "out",                        _,      TT.Activation: return ()
+      case "kv",                               _,                            _,      TT.Activation: return (tp)
+      case "kv_batch",                         _,                            _,      TT.Activation: return (dp, fsdp, fsdp_t)
+      case ("kv_heads" | "heads"),             _,                            _,      TT.Activation: return (tp, tp_t, sp)
+      case "kv_head_dim",                      ("query" | "key" | "value"),  _,      TT.Activation: return ()
+      case "kv_head_dim",                      _,                            _,      TT.Activation: return (tp, tp_t, tp_s)
+      case ("heads" | "q_heads" | "kv_heads"), _,                            _,      TT.Weight:     return (tp, tp_t)
+      case ("kv" | "kv_head_dim" | "qkv"),     _,                            _,      TT.Weight:     return ()
+      case "num_activations",                  _,                            _,      TT.Weight:     return ()
+      case _, _, _:
+        assert False, "Unexpected logical axis name for sharding"
+        return ()
+
   def __map_axis_juan__(self, axis, tensor_type, tensor_name):
 
+    # TODO: activation_vocab is missing
     match axis, tensor_name, tensor_type:
       case "batch",                            _,                            TT.Activation: return (dp, fsdp)
       case "elb",                              _,                            TT.Activation: return (dp, pp, fsdp)
