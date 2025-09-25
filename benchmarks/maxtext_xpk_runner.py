@@ -1,18 +1,16 @@
-"""
- Copyright 2024 Google LLC
-
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
-
-      https://www.apache.org/licenses/LICENSE-2.0
-
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
- """
+# Copyright 2023–2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """  This file contains data classes and runner logic to execute the XPK runs triggered by benchmarks.benchmark_runner"
 
@@ -37,6 +35,7 @@ from typing import Optional, List
 import omegaconf
 
 import benchmarks.maxtext_trillium_model_configs as model_configs
+from benchmarks.globals import MAXTEXT_PKG_DIR
 from benchmarks.command_utils import run_command_with_updates
 import benchmarks.xla_flags_library as xla_flags
 from benchmarks.disruption_management.disruption_handler import DisruptionConfig
@@ -102,7 +101,7 @@ class WorkloadConfig:
   generate_metrics_and_upload_to_big_query: bool = True
   hardware_id: str = 'v6e'
   metrics_gcs_file: str = ''
-  base_config: str = os.path.join("MaxText", "configs", "base.yml")
+  base_config: str = os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")
   topology: str = dataclasses.field(init=False)
   num_devices_per_slice: int = dataclasses.field(init=False)
   db_project: str = ""
@@ -353,7 +352,7 @@ def _build_args_from_config(wl_config: WorkloadConfig) -> dict:
           "xla_flags": f"'{xla_flags_str}'",
           "dataset": dataset,
           "run_type": "maxtext-xpk",
-          "config_file": os.path.join("MaxText", "configs", "base.yml"),
+          "config_file": os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
           "topology": wl_config.topology,
           "tuning_params": f"'{tuning_params_str}'",
           "db_project": wl_config.db_project,
@@ -427,7 +426,8 @@ def build_user_command(
       'export ENABLE_PATHWAYS_PERSISTENCE=1 &&',
       f'export JAX_PLATFORMS={jax_platforms} &&',
       'export ENABLE_PJRT_COMPATIBILITY=true &&',
-      f'{hlo_dump} python3 -m MaxText.train {os.path.join("MaxText", "configs", "base.yml")}',
+      'export MAXTEXT_ASSETS_ROOT=/deps/src/MaxText/assets MAXTEXT_PKG_DIR=/deps/src/MaxText MAXTEXT_REPO_ROOT=/deps &&'
+      f'{hlo_dump} python3 -m MaxText.train {os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")}',
       f'{config_tuning_params}',
       f'steps={wl_config.num_steps}',
       f'model_name={wl_config.model.model_type}',
@@ -643,7 +643,7 @@ def generate_xpk_workload_cmd(
         f'--docker-image={pw_config.runner_image}'
     )
   else:
-    docker_image_flag = f'--docker-image="{wl_config.base_docker_image}"'
+    docker_image_flag = f'--base-docker-image="{wl_config.base_docker_image}"'
 
   upload_metrics_to_bq_cmd = ""
   if wl_config.generate_metrics_and_upload_to_big_query and not is_pathways_headless_enabled:
@@ -658,10 +658,10 @@ def generate_xpk_workload_cmd(
   all_xpk_storage = ""
   if wl_config.xpk_storage:
     all_xpk_storage = " ".join(f"--storage={storage_test}" for storage_test in wl_config.xpk_storage)
-  
-  hlo_dump = "" 
+
+  hlo_dump = ""
   if wl_config.hlo_dump:
-    # HLO dump gets saved in a subdirectory called "hlo_dump" of the base output directory. 
+    # HLO dump gets saved in a subdirectory called "hlo_dump" of the base output directory.
     hlo_dump = f'--debug-dump-gcs={wl_config.base_output_directory}/{wl_config.run_name}/hlo_dump'
 
   return (
@@ -755,7 +755,7 @@ def xpk_benchmark_runner(
       # If the workload fails to start, remove it from the disruption manager.
       # No-op if disruption manager does not contain the workload name.
       disruption_manager.remove_workload(xpk_workload_name)
-      print('Unable to run xpk workload: {xpk_workload_name}')
+      print(f"Unable to run xpk workload: {xpk_workload_name}")
 
   return disruption_manager
 
@@ -864,7 +864,7 @@ def main() -> int:
   for xpk_workload_name, xpk_workload_cmd in zip(xpk_workload_names, xpk_workload_cmds):
     return_code = run_command_with_updates(xpk_workload_cmd, xpk_workload_name)
     if return_code != 0:
-      print('Unable to run xpk workload: {xpk_workload_name}')
+      print(f"Unable to run xpk workload: {xpk_workload_name}")
 
   # Support Batch workloads one day. Note that this doesn't show the xpk logs per workload.
   # They are saved to file instead.

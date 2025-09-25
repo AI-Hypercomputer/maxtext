@@ -1,0 +1,41 @@
+# This config is used for loading the inference model for GRPO. Note that base_config is set to "rl.yml" 
+# to inherit the necessary sharding rules for GRPO inference.
+base_config: "rl.yml"
+
+use_grpo: True
+train_data_columns: 'prompt'
+
+attention: 'dot_product'
+
+max_prefill_predict_length: 512
+max_target_length: 1024
+
+dataset_type: hf # we currently only support Huggingface input pipeline with GRPO.
+
+num_generations: 4
+grpo_beta: 0.04
+inference_rollouts: 1
+
+decode_sampling_strategy: "weighted"
+decode_sampling_temperature: 0.9
+async_checkpointing: false
+
+return_log_prob: True
+
+add_bos: False
+add_eos: False
+
+### Splash attention block sizes
+# These values are tuned for small sequence lengths used in the grpo test script.
+sa_block_q: 128
+sa_block_kv: 128
+sa_block_kv_compute: 128
+sa_block_q_dkv: 128
+sa_block_kv_dkv: 128
+sa_block_kv_dkv_compute: 128
+sa_block_q_dq: 128
+sa_block_kv_dq: 128
+sa_use_fused_bwd_kernel: False
+sa_q_layout: "HEAD_DIM_MINOR"
+sa_k_layout: "HEAD_DIM_MINOR"
+sa_v_layout: "HEAD_DIM_MINOR"

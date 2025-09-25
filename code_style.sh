@@ -1,10 +1,10 @@
-# Copyright 2023 Google LLC
+# Copyright 2023–2025 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#      http://www.apache.org/licenses/LICENSE-2.0
+#    https://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -17,7 +17,8 @@
 
 set -e # Exit immediately if any command fails
 
-FOLDERS_TO_FORMAT=("MaxText" "pedagogical_examples")
+REPO_ROOT="${MAXTEXT_REPO_ROOT:-$PWD}"
+FOLDERS_TO_FORMAT=("${MAXTEXT_PKG_DIR:-${REPO_ROOT}/src/MaxText}" "${REPO_ROOT}/pedagogical_examples")
 LINE_LENGTH=$(grep -E "^max-line-length=" pylintrc | cut -d '=' -f 2)
 
 # Check for --check flag
@@ -34,7 +35,7 @@ done
 for folder in "${FOLDERS_TO_FORMAT[@]}"
 do
   # pylint doesn't change files, only reports errors.
-  pylint --disable R0401,R0917,W0201,W0613 "./$folder"
+  pylint --disable C0114,R0401,R0917,W0201,W0613 "./$folder"
 done
 
 echo "Successfully clean up all codes."

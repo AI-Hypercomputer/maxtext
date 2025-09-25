@@ -1,18 +1,16 @@
-"""
- Copyright 2024 Google LLC
-
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
-
-      https://www.apache.org/licenses/LICENSE-2.0
-
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
- """
+# Copyright 2023–2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """ Script to run a benchmark/benchmarks on existing xpk or QR nodes (to be implemented)
                           ***** IMPORTANT *****
@@ -26,7 +24,7 @@ import argparse
 import os
 import time
 
-from MaxText.inference_utils import str2bool
+from benchmarks.benchmark_utils import str2bool
 from benchmarks.maxtext_trillium_model_configs import trillium_model_dict
 from benchmarks.maxtext_v5p_model_configs import v5p_model_dict
 from benchmarks.maxtext_v5e_model_configs import v5e_model_dict
@@ -228,37 +226,71 @@ def add_on_device_runner_arguments(custom_parser: argparse.ArgumentParser):
       help='Number of steps to run the workload for.',
   )
 
+def add_healthscan_runner_arguments(custom_parser: argparse.ArgumentParser):
+  """Add arguments to the healthscan runner parser.
+
+  Args:
+    custom_parser: parser to add shared arguments to.
+  """
+  custom_parser.add_argument(
+      '--base_output_directory',
+      type=str,
+      default=None, required=True,
+      help='gcloud bucket to store artifacts.',
+  )
+  custom_parser.add_argument(
+      '--device_type',
+      type=str,
+      default=None, required=True,
+      help='tpu device type command.',
+  )
+  custom_parser.add_argument(
+      '--run_name',
+      type=str,
+      default=None,
+      help='run_name for model run',
+  )
+  custom_parser.add_argument(
+      '--num_steps',
+      type=int,
+      default=20,
+      help='Number of steps to run the workload for.',
+  )
+
 def main() -> None:
   parser = argparse.ArgumentParser(
       prog='benchmark runner', usage='%(prog)s [options]'
   )
+
   subparsers = parser.add_subparsers(help="", dest="runner")
   xpk_runner_parser = subparsers.add_parser("xpk")
   on_device_runner_parser = subparsers.add_parser("on-device")
+  healthscan_runner_parser = subparsers.add_parser("healthscan")
   add_xpk_runner_arguments(xpk_runner_parser)
   add_on_device_runner_arguments(on_device_runner_parser)
   add_pathways_arguments(parser)
+  add_healthscan_runner_arguments(healthscan_runner_parser)
   options = parser.parse_args()
 
   # Check that there are no duplicate model configs
   duplicates = (trillium_model_dict.keys() & v5p_model_dict.keys() & v5e_model_dict.keys() & c4_pretrain_model_dict.keys())
   assert len(duplicates) == 0 , f'Found duplicate model config {duplicates}'
 
-  model = trillium_model_dict.get(options.model_name)
-  if model is None:
-    model = v5e_model_dict.get(options.model_name)
-  if model is None:
-    model = v5p_model_dict.get(options.model_name)
-  if model is None:
-    model = c4_pretrain_model_dict.get(options.model_name)
-  libtpu_type = None
-  match options.libtpu_type:
-    case LibTpuType.NIGHTLY.value:
-      libtpu_type = LibTpuType.NIGHTLY
-    case LibTpuType.CUSTOM.value:
-      libtpu_type = LibTpuType.CUSTOM
-    case LibTpuType.MAXTEXT.value:
-      libtpu_type = LibTpuType.MAXTEXT
+  if options.runner != "healthscan":
+    model = (
+      trillium_model_dict.get(options.model_name)
+      or v5e_model_dict.get(options.model_name)
+      or v5p_model_dict.get(options.model_name)
+      or c4_pretrain_model_dict.get(options.model_name)
+    )
+    libtpu_type = None
+    match options.libtpu_type:
+      case LibTpuType.NIGHTLY.value:
+        libtpu_type = LibTpuType.NIGHTLY
+      case LibTpuType.CUSTOM.value:
+        libtpu_type = LibTpuType.CUSTOM
+      case LibTpuType.MAXTEXT.value:
+        libtpu_type = LibTpuType.MAXTEXT
 
   # Set up pathways configs
   pw_config = None
@@ -322,6 +354,41 @@ def main() -> None:
       generate_metrics_and_upload_to_big_query=False,
     )
     on_device_benchmark_runner(workload_configs=[workload_config])
+  elif options.runner == "healthscan":
+
+    # Pick a model to run based on device_type to stress test
+    models = {
+        "v5p-128" : v5p_model_dict.llama2_70b_v5p_128,
+        "v5p-256" : v5p_model_dict.llama4_scout_dropless_v5p_256,
+        "v5p-512" : v5p_model_dict.deepseek_v3_ep_256_v5p_512,
+        "v5p-1024" : v5p_model_dict.deepseek_v3_ep_256_v5p_512,
+        "v5p-2048" : v5p_model_dict.deepseek_v3_ep_256_v5p_512,
+
+        "v6e-8" :   trillium_model_dict.llama2_7b_4096,
+        "v6e-16" :  trillium_model_dict.llama2_7b_4096,
+        "v6e-32" :  trillium_model_dict.llama2_7b_4096,
+        "v6e-64" :  trillium_model_dict.llama2_7b_4096,
+        "v6e-128" : trillium_model_dict.llama2_70b_4096,
+        "v6e-256" : trillium_model_dict.llama2_70b_4096,
+    }
+
+    curr_date = time.strftime('%Y%m%d')
+    workload_config = WorkloadConfig(
+      model=models[options.device_type],
+      num_slices=None,
+      device_type=options.device_type,
+      libtpu_type=LibTpuType.MAXTEXT,
+      base_docker_image=None,
+      num_steps=options.num_steps,
+      base_output_directory=options.base_output_directory,
+      run_name=f'{curr_date}-health-test',
+      # Internal only support, not for customers
+      generate_metrics_and_upload_to_big_query=False,
+    )
+
+    workload_config.model.tuning_params["gcs_metrics"] = False
+    on_device_benchmark_runner(workload_configs=[workload_config])
+
 
 
 if __name__ == '__main__':

@@ -12,11 +12,11 @@ RUN curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key --keyri
 # Install the Google Cloud SDK
 RUN apt-get update && apt-get install -y google-cloud-sdk
 
-# Set the default Python version to 3.10
-RUN update-alternatives --install /usr/bin/python3 python3 /usr/local/bin/python3.10 1
+# Set the default Python version to 3.12
+RUN update-alternatives --install /usr/bin/python3 python3 /usr/local/bin/python3.12 1
 
-# Set environment variables for Google Cloud SDK and Python 3.10
-ENV PATH="/usr/local/google-cloud-sdk/bin:/usr/local/bin/python3.10:${PATH}"
+# Set environment variables for Google Cloud SDK and Python 3.12
+ENV PATH="/usr/local/google-cloud-sdk/bin:/usr/local/bin/python3.12:${PATH}"
 
 # Set environment variables via build arguments
 ARG MODE
@@ -31,14 +31,17 @@ ENV ENV_LIBTPU_GCS_PATH=$LIBTPU_GCS_PATH
 ARG DEVICE
 ENV ENV_DEVICE=$DEVICE
 
-RUN mkdir -p /deps
+ENV MAXTEXT_ASSETS_ROOT=/deps/src/MaxText/assets
+ENV MAXTEXT_TEST_ASSETS_ROOT=/deps/src/MaxText/test_assets
+ENV MAXTEXT_PKG_DIR=/deps/src/MaxText
+ENV MAXTEXT_REPO_ROOT=/deps
 
 # Set the working directory in the container
 WORKDIR /deps
 
 # Copy setup files and dependency files separately for better caching
 COPY setup.sh ./
-COPY constraints_gpu.txt requirements.txt requirements_with_jax_ai_image.txt ./
+COPY requirements.txt requirements_with_jax_ai_image.txt ./
 
 # Install dependencies - these steps are cached unless the copied files change
 RUN echo "Running command: bash setup.sh MODE=$ENV_MODE JAX_VERSION=$ENV_JAX_VERSION LIBTPU_GCS_PATH=${ENV_LIBTPU_GCS_PATH} DEVICE=${ENV_DEVICE}"
@@ -46,3 +49,6 @@ RUN --mount=type=cache,target=/root/.cache/pip bash setup.sh MODE=${ENV_MODE} JA
 
 # Now copy the remaining code (source files that may change frequently)
 COPY . .
+
+# Install (editable) MaxText
+RUN test -f '/tmp/venv_created' && "$(tail -n1 /tmp/venv_created)"/bin/activate ; pip install --no-dependencies -e .

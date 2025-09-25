@@ -1,21 +1,17 @@
-"""
- Copyright 2025 Google LLC
-
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
-
-      https://www.apache.org/licenses/LICENSE-2.0
-
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
- """
+# Copyright 2023–2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 import argparse
-import dataclasses
-import getpass
 import json
 import os
 import sys
@@ -32,8 +28,7 @@ from benchmarks.benchmark_db_utils import write_run
 from benchmarks.benchmark_db_utils import DEFAULT_LOCAL_DIR
 from benchmarks.benchmark_db_utils import recover_tuning_params
 from benchmarks.benchmark_db_utils import Metrics
-
-from MaxText.inference_utils import str2bool
+from benchmarks.benchmark_utils import str2bool
 
 
 hardware_id_to_bf16_tflops = {"v4": 275,
@@ -253,7 +248,7 @@ def main(argv: Sequence[str]) -> None:
   options = parser.parse_args()
 
   print(f"BigQuery metrics uploader got: {options}")
-  
+
   local_dir = DEFAULT_LOCAL_DIR
 
   # Download metrics from the GCS Bucket
