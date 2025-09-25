@@ -20,7 +20,7 @@ from collections import defaultdict
 import jax
 import jax.numpy as jnp
 
-from MaxText.metric_logger import MetricLogger
+from MaxText.metric_logger import MetricLogger, MetadataKey
 from MaxText.utils import gcs_utils
 from MaxText import exceptions
 from MaxText import maxtext_utils
@@ -59,6 +59,8 @@ class SFTTrainingHooks(TrainingHooks):
       maxtext_utils.assert_params_sufficiently_sharded(params, self.mesh, self.config.sharding_tolerance)
 
     self.metric_logger.write_setup_info_to_tensorboard(params)
+    if MetadataKey.PER_DEVICE_TFLOPS in self.metric_logger.metadata:
+      train_ctx.flops_measured = True
 
     if self.config.dump_hlo:
       jax.block_until_ready(state)  # Ensure compilation has finished
