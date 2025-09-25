@@ -22,6 +22,7 @@ new_config = _setup_model_convergence_(
     num_devices: int,                # The number of devices available for training
 )
 """
+import copy
 import dataclasses
 import math
 from benchmarks.benchmark_utils import _add_to_model_dictionary, MaxTextModel
@@ -96,7 +97,7 @@ def setup_convergence_configs(model, params: ConvHParams, num_devices: int, glob
 def _setup_model_convergence_(
     maxtext_model: MaxTextModel, dataset: DatasetHParams, convergence_configs: ConvHParams, num_devices: int, global_batch_size: int, checkpoint: str=None,
 ) -> MaxTextModel:
-  convergence_model = dataclasses.replace(maxtext_model)
+  convergence_model = copy.deepcopy(maxtext_model)
   setup_dataset(convergence_model, dataset)
   setup_convergence_configs(convergence_model, convergence_configs, num_devices, global_batch_size)
   convergence_model.model_name = convergence_model.model_name + "-" + dataset.name
