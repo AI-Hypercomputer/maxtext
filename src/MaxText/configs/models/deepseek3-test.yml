@@ -16,13 +16,13 @@
 # TODO(b/428227645): Remove this model once a smaller deepseek is supported
 # with the deepseek block
 
-base_emb_dim: 512
+base_emb_dim: 7168
 base_num_query_heads: 128
 base_num_kv_heads: 128
-base_mlp_dim: 18432
-base_moe_mlp_dim: 512
-base_num_decoder_layers: 61
-first_num_dense_layers: 3
+base_mlp_dim: 2048
+base_moe_mlp_dim: 2048
+base_num_decoder_layers: 1
+first_num_dense_layers: 0
 mlp_activations: ["silu","linear"]
 vocab_size: 129280
 enable_dropout: False
