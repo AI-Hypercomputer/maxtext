@@ -43,7 +43,6 @@ jobs:
         TPU_SKIP_MDS_QUERY: true
         JAX_PLATFORMS: "proxy"
         JAX_BACKEND_TARGET: "grpc://proxy:29000"
-      options: ${{ inputs.container_resource_option }}
     steps:
       - uses: actions/checkout@v4
       - name: Run Server
