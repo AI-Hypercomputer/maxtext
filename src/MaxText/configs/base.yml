@@ -317,6 +317,11 @@ enable_multi_tier_checkpointing: False
 # It should be a positive number when enabling multi-tier checkpointing.
 multi_tier_checkpointing_backup_interval_minutes: 0
 
+# Number of identical pipelines in job, should be equal to ICI data parallelism * DCN data parallelism.
+# It should be a positive number when enabling multi-tier checkpointing. If set to 0, it will be set to num of slices.
+mtc_data_parallelism: 0
+
+
 # Whether to enable emergency checkpoint. If True, `local_checkpoint_directory` and a non-zero `local_checkpoint_period` must also be specified.
 # Emergency checkpoint is an experimental Orbax feature that: periodically saves to persistent storage and, with a larger invertal, saves to a local directory.
 # During restore, if a local copy is available in any slice, it will be broadcast to other slices without having to fetch from persistent storage.
