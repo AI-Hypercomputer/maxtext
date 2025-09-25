@@ -19,9 +19,11 @@
 ```{toctree}
 :maxdepth: 1
 
-explanations/steps_model.md
+explanations/jax_ai_libraries_chosen.md
+explanations/alternatives.md
+explanations/checkpoints.md
 explanations/quantization.md
 explanations/sharding.md
-explanations/data_pipeline_perf.md
 explanations/tiling.md
+explanations/performance_metrics.md
 ```

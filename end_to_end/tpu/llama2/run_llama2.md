@@ -14,7 +14,6 @@
  limitations under the License.
  -->
 
-(run-llama2)=
 # About Llama2
 
 MaxText supports [Llama2](https://llama.meta.com/llama2) pretraining, finetuning and decoding for its 7B and 70B flavors. To get started on decoding and finetuning of Llama2, you will first need to download weights along with its tokenizer from [Meta](https://llama.meta.com/llama-downloads). 

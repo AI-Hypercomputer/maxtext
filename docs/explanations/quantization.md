@@ -35,8 +35,6 @@ You can turn on the quantization by adding the following flag `--quantization` a
 - 'intmp' for mixed precision weight only quantization based on config file
 - 'fp8' for 8-bit floating-point GeMMs on NVIDIA GPUs.
 
-
-
 ## How QAT works with Qwix
 
 The core idea behind QAT is to insert "fake quantization" operations into the model's computation graph. During the training forward pass, these operations simulate the effect of quantizing weights and activations to a lower precision. For the backward pass, Qwix uses the Straight-Through Estimator (STE) to approximate the gradients, allowing the model to learn effectively despite the non-differentiable nature of quantization.
