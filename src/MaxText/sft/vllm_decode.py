@@ -39,7 +39,6 @@ from MaxText.integration.tunix.tunix_adapter import TunixMaxTextAdapter
 from tunix.rl.rollout import base_rollout
 from tunix.rl.rollout.vllm_rollout import VllmRollout
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.getcwd(), "../../maxtext")))
 os.environ["SKIP_JAX_PRECOMPILE"] = "1"
 
 
@@ -47,7 +46,6 @@ def decode(
     config: Config,
     model: Any,
     mesh: jax.sharding.Mesh,
-    max_tokens_to_generate: int = 64,
 ) -> None:
   """Decode using vLLM with a MaxText model."""
   # Wrap the model for Tunix
@@ -74,7 +72,7 @@ def decode(
 
   # Create vLLM rollout for inference
   rollout_config = base_rollout.RolloutConfig(
-      max_tokens_to_generate=max_tokens_to_generate,
+      max_tokens_to_generate=config.max_target_length-config.max_prefill_predict_length,
       max_prompt_length=config.max_prefill_predict_length,
       temperature=config.decode_sampling_temperature,
       top_p=config.decode_sampling_nucleus_p,
@@ -83,7 +81,7 @@ def decode(
   vllm_rollout = VllmRollout(
       model=tunix_model,
       tokenizer=model_tokenizer,
-      cache_config_or_size=1024,  # Max sequence length
+      cache_config_or_size=config.max_target_length,  # Max sequence length
       mesh=mesh,
       model_version=config.tokenizer_path,
       hbm_utilization=0.8,
