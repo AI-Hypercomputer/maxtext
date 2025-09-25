@@ -69,6 +69,7 @@ jobs:
           - "8080:8080"
         options:
           --entrypoint=[/usr/pathways/run/cloud_pathways_server_sanitized, --server_port=29005, --resource_manager_address=localhost:29001, --gcs_scratch_location=gs://cloud-pathways-staging/tmp]
+          --tpu=4
       
       proxy:
         image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server:latest
