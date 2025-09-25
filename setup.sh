@@ -232,7 +232,7 @@ elif [[ $MODE == "nightly" ]]; then
         # Install jax-nightly
         python3 -m uv pip install --pre -U jax -i https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/
         # Install jaxlib-nightly
-        python3 -m uv pip install --pre -U jaxlib -i https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/
+        python3 -m uv pip install --pre -U jaxlib==0.8.0.dev20250923 -i https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/
 
         if [[ -n "$LIBTPU_GCS_PATH" ]]; then
             # Install custom libtpu
@@ -244,7 +244,14 @@ elif [[ $MODE == "nightly" ]]; then
         else
             # Install libtpu-nightly
             echo "Installing libtpu-nightly"
-            python3 -m uv pip install -U --pre libtpu -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
+            echo "Installing libtpu-night from v7x"
+            python3 -m uv pip install -U crcmod
+            DATE='dev20250918'
+            libtpu="libtpu-0.0.24.${DATE}+tpu7x-cp314-cp314t-manylinux_2_31_x86_64.whl"
+            echo $libtpu
+            #gsutil -m cp gs://libtpu-tpu7x-releases/wheels/libtpu/${libtpu} .
+            echo "done download libtpu-nighlty from gcs"
+            python3 -m uv pip install -U ./$libtpu
         fi
         echo "Installing nightly tensorboard plugin profile"
         python3 -m uv pip install tbp-nightly --upgrade

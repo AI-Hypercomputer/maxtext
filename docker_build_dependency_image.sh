@@ -17,7 +17,7 @@
 # Example command:
 # bash docker_build_dependency_image.sh MODE=stable
 # bash docker_build_dependency_image.sh DEVICE={{gpu|tpu}} MODE=stable_stack BASEIMAGE={{JAX_STABLE_STACK BASEIMAGE FROM ARTIFACT REGISTRY}}
-# bash docker_build_dependency_image.sh MODE=nightly
+# bash docker_build_dependency_image.sh MODE=nightly LIBTPU_GCS_PATH=gs://libtpu-tpu7x-releases/wheels/libtpu/libtpu-0.0.24.dev20250925+tpu7x-cp314-cp314t-manylinux_2_31_x86_64.whl
 # bash docker_build_dependency_image.sh MODE=stable JAX_VERSION=0.4.13
 # Nightly build with JAX_VERSION for GPUs. Available versions listed at https://us-python.pkg.dev/ml-oss-artifacts-published/jax-public-nightly-artifacts-registry/simple/jax:
 # bash docker_build_dependency_image.sh DEVICE=gpu MODE=nightly JAX_VERSION=0.4.36.dev20241109 # Note: this sets both jax-nightly and jaxlib-nightly 
@@ -30,7 +30,7 @@
 # Enable "exit immediately if any command fails" option
 set -e
 
-export LOCAL_IMAGE_NAME=maxtext_base_image
+export LOCAL_IMAGE_NAME=maxtext_base_image_gfc_nightly
 echo "Building to $LOCAL_IMAGE_NAME"
 
 # Use Docker BuildKit so we can cache pip packages.

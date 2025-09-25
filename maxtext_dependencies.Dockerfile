@@ -40,6 +40,7 @@ RUN mkdir -p /deps
 # Set the working directory in the container
 WORKDIR /deps
 
+COPY libtpu-0.0.24.dev20250918+tpu7x-cp314-cp314t-manylinux_2_31_x86_64.whl ./
 # Copy setup files and dependency files separately for better caching
 COPY setup.sh ./
 COPY constraints_gpu.txt requirements.txt requirements_with_jax_ai_image.txt ./
