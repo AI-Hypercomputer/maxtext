@@ -15,7 +15,7 @@
 -->
 
 (run-pathways)=
-# Guide: Running MaxText via Pathways
+# Running MaxText via Pathways
 
 This guide provides a comprehensive walkthrough for running MaxText workloads on a Google Kubernetes Engine (GKE) cluster using Pathways. Pathways acts as a powerful orchestrator for large-scale JAX jobs on AI Hypercomputer infrastructure.
 
@@ -68,11 +68,11 @@ export RUN_NAME="maxtext-run-1"
 export DOCKER_IMAGE="gcr.io/${PROJECT}/${USER}_runner"
 ```
 
-## 3. Running a Batch workload
+## 3. Running a batch workload
 
 A batch workload runs entirely within the GKE cluster. You submit the job definition, and Pathways manages its execution.
 
-### Submit the Batch Workload
+### Submit the batch workload
 
 Use the `xpk workload create-pathways` command to start the job.
 
@@ -133,7 +133,7 @@ kubectl port-forward \
   29000:29000 &> /dev/null &
 ```
 
-### Step 3: Run Your MaxText script locally
+### Step 3: Run your MaxText script locally
 
 With the port forward active, you can now run your MaxText script. The JAX environment variables direct it to connect to the TPUs through the tunnel.
 
@@ -155,7 +155,7 @@ The output streams directly to your terminal, just as if you were running on a l
 
 ## Troubleshooting
 
-*   **Permission Denied errors for Cloud Storage Bucket**: Check that the service account used by your GKE nodes has "Storage Object Admin" permissions on your GCS bucket.
+*   **Permission denied errors for Cloud Storage bucket**: Check that the service account used by your GKE nodes has "Storage Object Admin" permissions on your GCS bucket.
 *   **`Image not found` or `ImagePullBackOff`**:
     *   Verify your `DOCKER_IMAGE` variable is correct.
     *   Ensure you have successfully pushed the image to your project's Artifact Registry.
