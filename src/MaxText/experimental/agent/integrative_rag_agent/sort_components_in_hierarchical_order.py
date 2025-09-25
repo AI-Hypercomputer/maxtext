@@ -373,9 +373,7 @@ def sort_and_search_dependency(base_path, file_path, module):
         with open(dependency_list_file, "a", encoding="utf-8") as f:
           f.write(f"--- Dependency for {comp_name}\n")
           f.write(
-              json.dumps(
-                  list(filter(lambda x: x not in processed_comp_ids, analysis["component_dependencies"][comp_name]))
-              )
+              json.dumps(list(filter(lambda x: x not in processed_comp_ids, analysis["component_dependencies"][comp_name])))
               + "\n"
           )
           f.write("\n\n\n\n\n")
@@ -419,9 +417,7 @@ def sort_and_search_dependency(base_path, file_path, module):
         else:
           jax_found_dependencies[comp_name][dependency] = dependencies
           jax_dependencies_list.append(dependency)
-          logger.info(
-              "🌟🌟Dependency Found Check for %s, at %s", dependency, os.path.join(similar_block_folder, comp_name)
-          )
+          logger.info("🌟🌟Dependency Found Check for %s, at %s", dependency, os.path.join(similar_block_folder, comp_name))
       logger.info("Re added %s %s", relative_file_path, comp_name)
       if len(analysis["component_dependencies"][comp_name]) > 0:
         if (relative_file_path, comp_name) not in q:

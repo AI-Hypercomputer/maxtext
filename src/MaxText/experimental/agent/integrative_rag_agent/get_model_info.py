@@ -67,9 +67,7 @@ def parse_args():
       argparse.Namespace: The parsed command-line arguments.
   """
   parser = argparse.ArgumentParser(description="Get model info from HuggingFace model id")
-  parser.add_argument(
-      "--model-id", type=str, default="Qwen/Qwen3-235B-A22B-Thinking-2507-FP8", help="HuggingFace model id"
-  )
+  parser.add_argument("--model-id", type=str, default="Qwen/Qwen3-235B-A22B-Thinking-2507-FP8", help="HuggingFace model id")
   return parser.parse_args()
 
 

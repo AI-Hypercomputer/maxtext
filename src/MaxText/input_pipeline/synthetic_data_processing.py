@@ -52,9 +52,7 @@ class SyntheticDataIterator:
     )
 
     sequence_positions = jnp.arange(0, config.max_target_length + 1, dtype=jnp.int32).reshape(1, -1)
-    batch_positions = jnp.broadcast_to(
-        sequence_positions, (config.global_batch_size_to_load, config.max_target_length + 1)
-    )
+    batch_positions = jnp.broadcast_to(sequence_positions, (config.global_batch_size_to_load, config.max_target_length + 1))
     segmentation = jnp.ones((config.global_batch_size_to_load, config.max_target_length), dtype=jnp.int32)
     self.data = (tokens, batch_positions, segmentation)
 
@@ -98,18 +96,14 @@ class PlaceHolderDataIterator:
   def get_place_holder_synthetic_data(config: pyconfig.HyperParameters):
     """fill negative value in synthetic data"""
     output = {}
-    output["inputs"] = tf.data.Dataset.from_tensor_slices(
-        np.full((1, config.max_target_length), -1, dtype=jax.numpy.int32)
-    )
+    output["inputs"] = tf.data.Dataset.from_tensor_slices(np.full((1, config.max_target_length), -1, dtype=jax.numpy.int32))
     output["inputs_position"] = tf.data.Dataset.from_tensor_slices(
         np.full((1, config.max_target_length), -1, dtype=jax.numpy.int32)
     )
     output["inputs_segmentation"] = tf.data.Dataset.from_tensor_slices(
         np.full((1, config.max_target_length), -1, dtype=jax.numpy.int32)
     )
-    output["targets"] = tf.data.Dataset.from_tensor_slices(
-        np.full((1, config.max_target_length), -1, dtype=jax.numpy.int32)
-    )
+    output["targets"] = tf.data.Dataset.from_tensor_slices(np.full((1, config.max_target_length), -1, dtype=jax.numpy.int32))
     output["targets_position"] = tf.data.Dataset.from_tensor_slices(
         np.full((1, config.max_target_length), -1, dtype=jax.numpy.int32)
     )

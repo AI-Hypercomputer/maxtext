@@ -108,7 +108,9 @@ def main(argv: Sequence[str]) -> None:
         [multimodal_utils.get_image_offsets(config.model_name, processor_output=po) for po in processor_outputs]
     )
     prefill_length -= image_offsets
-    text = multimodal_utils.reformat_prompt(text, image_placeholder=config.image_placeholder, model_name=config.model_name, num_images=len(images))
+    text = multimodal_utils.reformat_prompt(
+        text, image_placeholder=config.image_placeholder, model_name=config.model_name, num_images=len(images)
+    )
 
   metadata = engine.get_tokenizer()
   tokenizer_model = engine.build_tokenizer(metadata)
@@ -131,9 +133,7 @@ def main(argv: Sequence[str]) -> None:
   assert config.quantization != "nanoo_fp8", "NANOO fp8 on AMD MI300/MI325 GPUs is not supported in decode.py yet"
 
   batch_size = int(config.per_device_batch_size * jax.device_count())
-  assert (
-      0 < _NUM_STREAMS <= batch_size
-  ), f"The number of streams {_NUM_STREAMS} must be > 0 and <= batch size {batch_size}"
+  assert 0 < _NUM_STREAMS <= batch_size, f"The number of streams {_NUM_STREAMS} must be > 0 and <= batch size {batch_size}"
 
   prefill_result_list = []
   first_token_list = []
@@ -197,8 +197,7 @@ def main(argv: Sequence[str]) -> None:
 
 def _validate_config(config):
   assert config.load_full_state_path == "", (
-      "Decode doesn't operate on full states! Convert to parameter checkpoint first."
-      "Using generate_param_only_checkpoint."
+      "Decode doesn't operate on full states! Convert to parameter checkpoint first." "Using generate_param_only_checkpoint."
   )
 
 

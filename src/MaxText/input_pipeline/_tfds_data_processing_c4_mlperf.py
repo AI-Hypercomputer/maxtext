@@ -186,8 +186,7 @@ def _pad_to_batch_size(
   pad_num = num_batches * batch_size - local_num
   assert pad_num >= 0
   max_logging.log(
-      f"Eval data has {local_num} local entries, padding now with "
-      f"{pad_num} extra entries to get {num_batches} batches."
+      f"Eval data has {local_num} local entries, padding now with " f"{pad_num} extra entries to get {num_batches} batches."
   )
 
   # Repeat a random example to make the last batch full.

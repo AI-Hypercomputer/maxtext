@@ -156,9 +156,7 @@ def main(argv: Sequence[str]) -> None:
   tf.config.set_visible_devices([], "GPU")
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
   if "xla_tpu_spmd_rng_bit_generator_unsafe" not in os.environ.get("LIBTPU_INIT_ARGS", ""):
-    os.environ["LIBTPU_INIT_ARGS"] = (
-        os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
-    )
+    os.environ["LIBTPU_INIT_ARGS"] = os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
   config = pyconfig.initialize(argv)
   jax.config.update("jax_use_shardy_partitioner", config.shardy)
   max_utils.print_system_information()

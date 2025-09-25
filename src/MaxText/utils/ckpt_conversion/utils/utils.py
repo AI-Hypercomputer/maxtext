@@ -446,9 +446,7 @@ def save_weight_files(
         future.result()
 
     # Save index file
-    save_index_file(
-        index, local_dir_to_save_to, output_dir_final, SAFE_TENSORS_INDEX_FILE, remove_local_copy_after_upload
-    )
+    save_index_file(index, local_dir_to_save_to, output_dir_final, SAFE_TENSORS_INDEX_FILE, remove_local_copy_after_upload)
 
 
 @contextlib.contextmanager

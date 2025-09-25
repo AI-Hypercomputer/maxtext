@@ -647,9 +647,7 @@ class InferenceWorker:
 
       # Get next item from queue with timeout
       try:
-        result_tokens, log_prob, is_first_token, row_id, slot, prompt_logp = self.generated_token_backlog.get(
-            timeout=0.01
-        )
+        result_tokens, log_prob, is_first_token, row_id, slot, prompt_logp = self.generated_token_backlog.get(timeout=0.01)
       except queue.Empty:
         if not self.running:
           break

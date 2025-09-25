@@ -39,6 +39,7 @@ from MaxText.maxtext_utils import all_gather_over_fsdp
 # The network: Transformer Definitions
 # ------------------------------------------------------------------------------
 
+
 class TransformerLinenPure(nn.Module):
   """An autoregressive transformer model."""
 
@@ -80,9 +81,7 @@ class TransformerLinenPure(nn.Module):
         config=cfg,
     )
     self.vision_encoder = VisionEncoder(config=cfg, mesh=mesh) if cfg.use_multimodal else None
-    self.decoder = Decoder(
-        config=cfg, mesh=mesh, quant=self.quant, model_mode=self.model_mode
-    )
+    self.decoder = Decoder(config=cfg, mesh=mesh, quant=self.quant, model_mode=self.model_mode)
     # If MTP is enabled via config, set up the MTP block.
     if self.config.mtp_num_layers > 0:
       # Get the list of layer blueprints for the current model.
@@ -192,19 +191,20 @@ def transformer_as_linen(
     return TransformerLinen(
         Transformer,
         args=(),
-        kwargs=nn.FrozenDict({
-          "mesh": mesh,
-        "config": config,
-        "quant": quant,
-        "model_mode": model_mode,
-      }),
-      metadata_fn=initializers.variable_to_logically_partitioned,
-      name=name,
-  )
-  else:
-    return TransformerLinenPure(
-      config, mesh, quant, model_mode=model_mode, name=name
+        kwargs=nn.FrozenDict(
+            {
+                "mesh": mesh,
+                "config": config,
+                "quant": quant,
+                "model_mode": model_mode,
+            }
+        ),
+        metadata_fn=initializers.variable_to_logically_partitioned,
+        name=name,
     )
+  else:
+    return TransformerLinenPure(config, mesh, quant, model_mode=model_mode, name=name)
+
 
 class TransformerLinen(nnx_wrappers.ToLinen):
   """Transformer model as a linen module."""
@@ -220,6 +220,7 @@ class TransformerLinen(nnx_wrappers.ToLinen):
     model_kwargs = self.kwargs.copy({"model_mode": model_mode})  # type: ignore[wrong-arg-types]
     module = self.clone(kwargs=model_kwargs)
     return nnx_wrappers.ToLinen.apply(module, *args, **kwargs)
+
 
 class Transformer(nnx.Module):
   """An autoregressive transformer model."""
@@ -243,7 +244,7 @@ class Transformer(nnx.Module):
         attend_dtype=jnp.float32 if cfg.logits_dot_in_fp32 else cfg.dtype,  # for logit training stability
         embedding_init=nn.initializers.normal(stddev=1.0),
         config=cfg,
-        rngs=rngs
+        rngs=rngs,
     )
     self.vision_encoder = VisionEncoder(config=cfg, mesh=mesh) if cfg.use_multimodal else None
 
@@ -262,9 +263,9 @@ class Transformer(nnx.Module):
     dummy_decoder_positions = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
 
     self.decoder.lazy_init(
-      shared_embedding=self.token_embedder,
-      decoder_input_tokens=dummy_decoder_input_tokens,
-      decoder_positions=dummy_decoder_positions,
+        shared_embedding=self.token_embedder,
+        decoder_input_tokens=dummy_decoder_input_tokens,
+        decoder_positions=dummy_decoder_positions,
     )
 
     # If MTP is enabled via config, set up the MTP block.
@@ -280,14 +281,14 @@ class Transformer(nnx.Module):
       self.mtp_block = nnx_wrappers.ToNNX(mtp_block_linen, rngs=rngs)
 
       self.mtp_block.lazy_init(
-        shared_embedding=self.token_embedder,
-        main_hidden_state=jnp.ones((1, 1, self.config.emb_dim), dtype=self.config.dtype),
-        input_ids=jnp.ones((1, 1), dtype=jnp.int32),
-        target_ids=jnp.ones((1, 1), dtype=jnp.int32),
-        target_mask=jnp.ones((1, 1), dtype=jnp.int32),
-        position_ids=jnp.ones((1, 1), dtype=jnp.int32),
-        decoder_segment_ids=jnp.ones((1, 1), dtype=jnp.int32),
-        deterministic=True,
+          shared_embedding=self.token_embedder,
+          main_hidden_state=jnp.ones((1, 1, self.config.emb_dim), dtype=self.config.dtype),
+          input_ids=jnp.ones((1, 1), dtype=jnp.int32),
+          target_ids=jnp.ones((1, 1), dtype=jnp.int32),
+          target_mask=jnp.ones((1, 1), dtype=jnp.int32),
+          position_ids=jnp.ones((1, 1), dtype=jnp.int32),
+          decoder_segment_ids=jnp.ones((1, 1), dtype=jnp.int32),
+          deterministic=True,
       )
 
   def no_op(self, *args, **kwargs):
@@ -381,6 +382,7 @@ class Transformer(nnx.Module):
       )
 
     return logits
+
 
 class ZeroOneTransformer(nn.Module):
   """

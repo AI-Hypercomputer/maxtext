@@ -608,9 +608,7 @@ class KVCache(nnx.Module):
 
     if self.kv_quant:
       prefill_key_axis_names = transpose_tuple(self.cache_logical_axis_names, self.prefill_cache_axis_order)
-      key_shaped_for_cache, key_scale_shaped_for_cache = self.kv_quant.quantize(
-          key_shaped_for_cache, prefill_key_axis_names
-      )
+      key_shaped_for_cache, key_scale_shaped_for_cache = self.kv_quant.quantize(key_shaped_for_cache, prefill_key_axis_names)
       value_shaped_for_cache, value_scale_shaped_for_cache = self.kv_quant.quantize(
           value_shaped_for_cache, prefill_key_axis_names
       )
@@ -685,9 +683,7 @@ class KVCache(nnx.Module):
         new_token_locations[ar_cache_batch_axis] = i
         return val.at[tuple(cache_locations)].set(one_token_value_shaped_for_cache[tuple(new_token_locations)])
 
-      cached_key.value = jax.lax.fori_loop(
-          0, one_token_key_shaped_for_cache.shape[0], key_body, cached_key.value, unroll=8
-      )
+      cached_key.value = jax.lax.fori_loop(0, one_token_key_shaped_for_cache.shape[0], key_body, cached_key.value, unroll=8)
       cached_value.value = jax.lax.fori_loop(
           0, one_token_value_shaped_for_cache.shape[0], value_body, cached_value.value, unroll=8
       )

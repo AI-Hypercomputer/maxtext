@@ -432,7 +432,7 @@ class PadOrTrimToMaxLength(grain.MapTransform):
 
   def _pad_image(self, images):
     image_offsets = multimodal_utils.get_image_offsets(self.model_name, None)
-    max_num_images = (self.max_length // image_offsets) -1  # -1 to reserve space for at least one text token
+    max_num_images = (self.max_length // image_offsets) - 1  # -1 to reserve space for at least one text token
     if self.max_num_images_per_example > 0:
       max_num_images = min(self.max_num_images_per_example, max_num_images)
     image_shape = multimodal_utils.get_dummy_image_shape_for_init(self.model_name)[2:]

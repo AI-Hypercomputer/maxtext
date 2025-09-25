@@ -52,11 +52,11 @@ def str2bool(v: str) -> bool:
 
 @jax.jit
 def prompt_logprobs_from_packed_prefill(
-    logits: jax.Array,               # [B, S, V] predicts token t+1 at position t
-    input_tokens: jax.Array,         # [B, S]
-    decoder_positions: jax.Array,    # [B, S] position within its own prompt
+    logits: jax.Array,  # [B, S, V] predicts token t+1 at position t
+    input_tokens: jax.Array,  # [B, S]
+    decoder_positions: jax.Array,  # [B, S] position within its own prompt
     decoder_segment_ids: jax.Array,  # [B, S] which prompt each token belongs to
-    true_lengths: jax.Array          # [num_prompts] true lengths per prompt
+    true_lengths: jax.Array,  # [num_prompts] true lengths per prompt
 ) -> jax.Array:
   """
   Returns [B, S] where out[b, t] = log P(token[t] | tokens[:t] of its prompt).
@@ -66,28 +66,28 @@ def prompt_logprobs_from_packed_prefill(
   B, _, _ = logits.shape  # B, S, V
 
   # Compute next-token logprobs
-  logps   = jax.nn.log_softmax(logits[:, :-1, :], axis=-1)               # [B, S-1, V]
-  targets = input_tokens[:, 1:]                                          # [B, S-1]
-  scored  = jnp.take_along_axis(logps, targets[..., None], axis=-1)[..., 0]  # [B, S-1]
+  logps = jax.nn.log_softmax(logits[:, :-1, :], axis=-1)  # [B, S-1, V]
+  targets = input_tokens[:, 1:]  # [B, S-1]
+  scored = jnp.take_along_axis(logps, targets[..., None], axis=-1)[..., 0]  # [B, S-1]
 
   # Shift so index matches token position (pad NaN at t=0)
-  pad = jnp.full((B, 1), jnp.nan, dtype=logits.dtype)                     # [B, 1]
-  shifted = jnp.concatenate([pad, scored], axis=1)                        # [B, S]
+  pad = jnp.full((B, 1), jnp.nan, dtype=logits.dtype)  # [B, 1]
+  shifted = jnp.concatenate([pad, scored], axis=1)  # [B, S]
 
   # Get per-token true length by segment
-  tl_tokens = jnp.take(true_lengths, decoder_segment_ids, mode="clip")    # [B, S]
+  tl_tokens = jnp.take(true_lengths, decoder_segment_ids, mode="clip")  # [B, S]
 
   # Valid if not the first token in its segment and before true length
-  valid = (decoder_positions > 0) & (decoder_positions < tl_tokens)      # [B, S]
+  valid = (decoder_positions > 0) & (decoder_positions < tl_tokens)  # [B, S]
 
   return jnp.where(valid, shifted, jnp.nan)
 
 
 @jax.jit
 def prompt_logprobs_from_prefill(
-    logits: jax.Array,       # [B, S, V]  predicts token t+1 at position t
-    input_tokens: jax.Array, # [B, S]
-    true_length              # int or jax.Array with shape [] or [B]
+    logits: jax.Array,  # [B, S, V]  predicts token t+1 at position t
+    input_tokens: jax.Array,  # [B, S]
+    true_length,  # int or jax.Array with shape [] or [B]
 ) -> jax.Array:
   """
   Returns [B, S] where out[:, t] = log P(token[t] | tokens[:t]).
@@ -97,19 +97,19 @@ def prompt_logprobs_from_prefill(
   B, S = input_tokens.shape
 
   # Next-token logprobs for steps 0..S-2
-  logps   = jax.nn.log_softmax(logits[:, :-1, :], axis=-1)        # [B, S-1, V]
-  targets = input_tokens[:, 1:]                                    # [B, S-1]
-  scored  = jnp.take_along_axis(logps, targets[..., None], -1)[..., 0]  # [B, S-1]
+  logps = jax.nn.log_softmax(logits[:, :-1, :], axis=-1)  # [B, S-1, V]
+  targets = input_tokens[:, 1:]  # [B, S-1]
+  scored = jnp.take_along_axis(logps, targets[..., None], -1)[..., 0]  # [B, S-1]
 
   # Align to token positions (pad NaN at t=0)
-  pad = jnp.full((B, 1), jnp.nan, dtype=logps.dtype)               # [B, 1]
-  out = jnp.concatenate([pad, scored], axis=1)                      # [B, S]
+  pad = jnp.full((B, 1), jnp.nan, dtype=logps.dtype)  # [B, 1]
+  out = jnp.concatenate([pad, scored], axis=1)  # [B, S]
 
   # Mask padding (and keep t>0)
   tl = jnp.asarray(true_length)
-  tl = jnp.broadcast_to(tl, (B,)) if tl.ndim == 0 else tl          # [B]
-  pos = jnp.arange(S)[None, :]                                     # [1, S]
-  valid = (pos < tl[:, None]) & (pos > 0)                          # [B, S]
+  tl = jnp.broadcast_to(tl, (B,)) if tl.ndim == 0 else tl  # [B]
+  pos = jnp.arange(S)[None, :]  # [1, S]
+  valid = (pos < tl[:, None]) & (pos > 0)  # [B, S]
   out = jnp.where(valid, out, jnp.nan)
 
   return out
@@ -224,27 +224,24 @@ def sample_topk_topp_weighted(logits, topk, nucleus_topp, temperature, rng):
   # `jnp.sum(sorted_cum_probs < nucleus_topp)` gives the index of the last element
   # strictly within the nucleus. We need to include the next element that crosses the threshold.
   cutoff_index = jnp.sum(sorted_cum_probs < nucleus_topp, axis=-1, keepdims=True)
-  
+
   # Create a mask that is True for indices we want to keep.
   # We keep all indices up to and including the cutoff_index.
   indices = jnp.arange(topk_logits.shape[-1])
   mask = indices <= cutoff_index
 
   # Apply the mask to filter the logits.
-  filtered_topk_logits = jnp.where(
-      mask, topk_logits, jnp.full_like(topk_logits, NEG_INF)
-  )
+  filtered_topk_logits = jnp.where(mask, topk_logits, jnp.full_like(topk_logits, NEG_INF))
 
   # 3. Apply temperature
-  scaled_logits = filtered_topk_logits / jnp.maximum(temperature, 1e-6) # add epsilon for stability
+  scaled_logits = filtered_topk_logits / jnp.maximum(temperature, 1e-6)  # add epsilon for stability
 
   # 4. Sample
   sampled_topk_index = jax.random.categorical(rng, scaled_logits).astype(jnp.int32)
 
   # Map the index back to the original vocabulary
   sampled_token = jnp.squeeze(
-      jnp.take_along_axis(topk_idxs, jnp.expand_dims(sampled_topk_index, axis=-1), axis=-1),
-      axis=-1
+      jnp.take_along_axis(topk_idxs, jnp.expand_dims(sampled_topk_index, axis=-1), axis=-1), axis=-1
   ).astype(jnp.int32)
 
   return sampled_token

@@ -66,89 +66,86 @@ from MaxText.utils.ckpt_conversion.utils.utils import apply_hook_fns, HF_IDS
 
 jax.config.update("jax_platform_name", "cpu")
 
+
 def _build_multi_axis_stacked_tensor(
-    hf_source_keys: List[List[str]],
-    hf_state_dict: Dict[str, np.ndarray],
-    hook_fns: Any
+    hf_source_keys: List[List[str]], hf_state_dict: Dict[str, np.ndarray], hook_fns: Any
 ) -> np.ndarray:
-    """Builds a MaxText tensor by stacking HF weights along two axes (experts and layers).
+  """Builds a MaxText tensor by stacking HF weights along two axes (experts and layers).
 
-    This function handles the complex case for scanned MoE layers, producing a tensor
-    with the shape (num_experts, num_layers, ...).
+  This function handles the complex case for scanned MoE layers, producing a tensor
+  with the shape (num_experts, num_layers, ...).
 
-    Args:
-        hf_source_keys: A nested (2D) list of Hugging Face parameter names.
-                        Outer list iterates experts, inner list iterates layers.
-        hf_state_dict: The dictionary of loaded Hugging Face weights.
-        hook_fns: The hook function(s) to apply to each individual weight.
+  Args:
+      hf_source_keys: A nested (2D) list of Hugging Face parameter names.
+                      Outer list iterates experts, inner list iterates layers.
+      hf_state_dict: The dictionary of loaded Hugging Face weights.
+      hook_fns: The hook function(s) to apply to each individual weight.
 
-    Returns:
-        The final, assembled NumPy array for the MaxText parameter.
-    """
-    all_expert_tensors = []
-    # Outer loop iterates through experts
-    for layer_keys_for_expert in hf_source_keys:
-        layer_tensors_for_expert = []
-        # Inner loop iterates through layers for the current expert
-        for hf_key_single in layer_keys_for_expert:
-            if hf_key_single not in hf_state_dict:
-                raise ValueError(f"HuggingFace key {hf_key_single} not found in state_dict.")
-            hf_tensor_numpy = hf_state_dict[hf_key_single]
-            # For this case, the hook function does not require the target_shape.
-            processed_hf_tensor = apply_hook_fns(hf_tensor_numpy, None, hook_fns)
-            layer_tensors_for_expert.append(processed_hf_tensor)
+  Returns:
+      The final, assembled NumPy array for the MaxText parameter.
+  """
+  all_expert_tensors = []
+  # Outer loop iterates through experts
+  for layer_keys_for_expert in hf_source_keys:
+    layer_tensors_for_expert = []
+    # Inner loop iterates through layers for the current expert
+    for hf_key_single in layer_keys_for_expert:
+      if hf_key_single not in hf_state_dict:
+        raise ValueError(f"HuggingFace key {hf_key_single} not found in state_dict.")
+      hf_tensor_numpy = hf_state_dict[hf_key_single]
+      # For this case, the hook function does not require the target_shape.
+      processed_hf_tensor = apply_hook_fns(hf_tensor_numpy, None, hook_fns)
+      layer_tensors_for_expert.append(processed_hf_tensor)
 
-        # First, stack all layers for the current expert. This creates the 'layer' axis.
-        stacked_expert_tensor = np.stack(layer_tensors_for_expert, axis=0)
-        all_expert_tensors.append(stacked_expert_tensor)
+    # First, stack all layers for the current expert. This creates the 'layer' axis.
+    stacked_expert_tensor = np.stack(layer_tensors_for_expert, axis=0)
+    all_expert_tensors.append(stacked_expert_tensor)
 
-    # Second, stack all the expert tensors. This creates the 'expert' axis.
-    return np.stack(all_expert_tensors, axis=0)
+  # Second, stack all the expert tensors. This creates the 'expert' axis.
+  return np.stack(all_expert_tensors, axis=0)
+
 
 def _build_single_axis_stacked_tensor(
-    hf_source_keys: List[str],
-    hf_state_dict: Dict[str, np.ndarray],
-    hook_fns: Any,
-    target_shape: tuple,
-    config
+    hf_source_keys: List[str], hf_state_dict: Dict[str, np.ndarray], hook_fns: Any, target_shape: tuple, config
 ) -> np.ndarray:
-    """Builds a MaxText tensor by stacking HF weights along a single axis.
+  """Builds a MaxText tensor by stacking HF weights along a single axis.
 
-    This function handles both standard scanned layers (e.g., attention) and
-    unscanned MoE layers (which are stacked along the expert axis).
+  This function handles both standard scanned layers (e.g., attention) and
+  unscanned MoE layers (which are stacked along the expert axis).
 
-    Args:
-        hf_source_keys: A 1D list of Hugging Face parameter names.
-        hf_state_dict: The dictionary of loaded Hugging Face weights.
-        hook_fns: The hook function(s) to apply to each individual weight.
-        target_shape: The final shape of the target MaxText tensor.
-        config: The MaxText pyconfig object.
+  Args:
+      hf_source_keys: A 1D list of Hugging Face parameter names.
+      hf_state_dict: The dictionary of loaded Hugging Face weights.
+      hook_fns: The hook function(s) to apply to each individual weight.
+      target_shape: The final shape of the target MaxText tensor.
+      config: The MaxText pyconfig object.
 
-    Returns:
-        The final, assembled NumPy array for the MaxText parameter.
-    """
-    tensors_to_stack = []
-    # Heuristic to determine if we are stacking layers or experts.
-    # If the number of items to stack equals the number of layers, it's a standard
-    # scanned layer, and we use the configured param_scan_axis. Otherwise, it's
-    # an unscanned MoE layer, and we stack along the expert axis (0).
-    axis_to_stack = config.param_scan_axis if len(hf_source_keys) == config.base_num_decoder_layers else 0
+  Returns:
+      The final, assembled NumPy array for the MaxText parameter.
+  """
+  tensors_to_stack = []
+  # Heuristic to determine if we are stacking layers or experts.
+  # If the number of items to stack equals the number of layers, it's a standard
+  # scanned layer, and we use the configured param_scan_axis. Otherwise, it's
+  # an unscanned MoE layer, and we stack along the expert axis (0).
+  axis_to_stack = config.param_scan_axis if len(hf_source_keys) == config.base_num_decoder_layers else 0
 
-    # The hook function needs the shape of an individual slice, not the full stacked tensor.
-    # We calculate it by removing the stacking dimension from the final target shape.
-    mt_slice_shape_list = list(target_shape)
-    del mt_slice_shape_list[axis_to_stack]
-    mt_slice_shape = tuple(mt_slice_shape_list)
+  # The hook function needs the shape of an individual slice, not the full stacked tensor.
+  # We calculate it by removing the stacking dimension from the final target shape.
+  mt_slice_shape_list = list(target_shape)
+  del mt_slice_shape_list[axis_to_stack]
+  mt_slice_shape = tuple(mt_slice_shape_list)
 
-    for hf_key_single in hf_source_keys:
-        if hf_key_single not in hf_state_dict:
-            raise ValueError(f"HuggingFace key {hf_key_single} not found in state_dict.")
-        hf_tensor_numpy = hf_state_dict[hf_key_single]
-        processed_hf_tensor = apply_hook_fns(hf_tensor_numpy, mt_slice_shape, hook_fns)
-        tensors_to_stack.append(processed_hf_tensor)
+  for hf_key_single in hf_source_keys:
+    if hf_key_single not in hf_state_dict:
+      raise ValueError(f"HuggingFace key {hf_key_single} not found in state_dict.")
+    hf_tensor_numpy = hf_state_dict[hf_key_single]
+    processed_hf_tensor = apply_hook_fns(hf_tensor_numpy, mt_slice_shape, hook_fns)
+    tensors_to_stack.append(processed_hf_tensor)
 
-    # Stack all processed tensors along the determined axis.
-    return np.stack(tensors_to_stack, axis=axis_to_stack)
+  # Stack all processed tensors along the determined axis.
+  return np.stack(tensors_to_stack, axis=axis_to_stack)
+
 
 def main(argv: Sequence[str]) -> None:
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
@@ -239,39 +236,39 @@ def main(argv: Sequence[str]) -> None:
 
     hf_source_keys_or_key = param_map_mt_to_hf.get(mt_param_key)
     if hf_source_keys_or_key is None:
-        raise ValueError(f"MaxText parameter {mt_param_key} not found in mapping.")
+      raise ValueError(f"MaxText parameter {mt_param_key} not found in mapping.")
 
     hook_fn_list_or_fn = hook_fn_map_mt.get(mt_param_key)
     final_mt_tensor_numpy = None
 
     if not isinstance(hf_source_keys_or_key, list):
-        # Case 1: Simple 1-to-1 mapping
-        hf_key_single = hf_source_keys_or_key
-        if hf_key_single not in hf_state_dict_numpy:
-            raise ValueError(f"HuggingFace key {hf_key_single} not found in state_dict.")
-        hf_tensor_numpy = hf_state_dict_numpy[hf_key_single]
-        final_mt_tensor_numpy = apply_hook_fns(hf_tensor_numpy, mt_target_shape_final, hook_fn_list_or_fn)
+      # Case 1: Simple 1-to-1 mapping
+      hf_key_single = hf_source_keys_or_key
+      if hf_key_single not in hf_state_dict_numpy:
+        raise ValueError(f"HuggingFace key {hf_key_single} not found in state_dict.")
+      hf_tensor_numpy = hf_state_dict_numpy[hf_key_single]
+      final_mt_tensor_numpy = apply_hook_fns(hf_tensor_numpy, mt_target_shape_final, hook_fn_list_or_fn)
     else:
-        # It's a stacked parameter, so dispatch to a helper function.
-        is_multi_axis_stacked = isinstance(hf_source_keys_or_key[0], list)
+      # It's a stacked parameter, so dispatch to a helper function.
+      is_multi_axis_stacked = isinstance(hf_source_keys_or_key[0], list)
 
-        if is_multi_axis_stacked:
-            # Case 2: Multi-Axis Stacked (Scanned MoE)
-            final_mt_tensor_numpy = _build_multi_axis_stacked_tensor(
-                hf_source_keys_or_key, hf_state_dict_numpy, hook_fn_list_or_fn
-            )
-        else:
-            # Case 3: Single-Axis Stacked (Standard Scanned or Unscanned MoE)
-            final_mt_tensor_numpy = _build_single_axis_stacked_tensor(
-                hf_source_keys_or_key, hf_state_dict_numpy, hook_fn_list_or_fn, mt_target_shape_final, config
-            )
+      if is_multi_axis_stacked:
+        # Case 2: Multi-Axis Stacked (Scanned MoE)
+        final_mt_tensor_numpy = _build_multi_axis_stacked_tensor(
+            hf_source_keys_or_key, hf_state_dict_numpy, hook_fn_list_or_fn
+        )
+      else:
+        # Case 3: Single-Axis Stacked (Standard Scanned or Unscanned MoE)
+        final_mt_tensor_numpy = _build_single_axis_stacked_tensor(
+            hf_source_keys_or_key, hf_state_dict_numpy, hook_fn_list_or_fn, mt_target_shape_final, config
+        )
 
     if final_mt_tensor_numpy.shape != mt_target_shape_final:
-        raise ValueError(
-            f"Shape mismatch for {mt_param_key}: "
-            f"Expected {mt_target_shape_final}, got {final_mt_tensor_numpy.shape} "
-            f"from HF key(s) {hf_source_keys_or_key} after hooks."
-        )
+      raise ValueError(
+          f"Shape mismatch for {mt_param_key}: "
+          f"Expected {mt_target_shape_final}, got {final_mt_tensor_numpy.shape} "
+          f"from HF key(s) {hf_source_keys_or_key} after hooks."
+      )
     final_mt_weights.append(final_mt_tensor_numpy)
 
   del abstract_params_flat, hf_state_dict_numpy

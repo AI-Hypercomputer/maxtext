@@ -39,9 +39,7 @@ class prompt_chaining_agent(BaseAgent):
   def run_chain(self, max_retries=3):
     """Run chain"""
     # Load context data
-    with open(
-        os.path.join(self.dir_path, "context", self.target_model, "maxtext_params.json"), "rt", encoding="utf8"
-    ) as f:
+    with open(os.path.join(self.dir_path, "context", self.target_model, "maxtext_params.json"), "rt", encoding="utf8") as f:
       maxtext_params = json.load(f)
     with open(os.path.join(self.dir_path, "context", self.target_model, "hf_params.json"), "rt", encoding="utf8") as f:
       hf_params = json.load(f)

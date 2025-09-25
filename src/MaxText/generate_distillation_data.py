@@ -283,9 +283,7 @@ if __name__ == "__main__":
   upload_to_gcs_parser.add_argument(
       "--gcs-bucket", type=str, required=True, help="Name of GCS bucket to upload generated dataset."
   )
-  upload_to_gcs_parser.add_argument(
-      "--gcs-data-path", type=str, required=True, help="Path to store dataset in GCS bucket."
-  )
+  upload_to_gcs_parser.add_argument("--gcs-data-path", type=str, required=True, help="Path to store dataset in GCS bucket.")
 
   # Subparser to upload dataset to Hugging Face
   upload_to_hf_parser = subparsers.add_parser(

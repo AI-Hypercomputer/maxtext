@@ -369,9 +369,7 @@ def main(argv: Sequence[str]) -> None:
   tf.config.set_visible_devices([], "GPU")
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
   if "xla_tpu_spmd_rng_bit_generator_unsafe" not in os.environ.get("LIBTPU_INIT_ARGS", ""):
-    os.environ["LIBTPU_INIT_ARGS"] = (
-        os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
-    )
+    os.environ["LIBTPU_INIT_ARGS"] = os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
 
   elastic_manager = elastic_initialize(jax.devices())
 

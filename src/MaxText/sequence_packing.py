@@ -93,9 +93,7 @@ def pack_dataset(
   return dataset.map(my_fn, num_parallel_calls=AUTOTUNE)
 
 
-def _pack_with_tf_ops(
-    dataset: tf.data.Dataset, keys: list[str], key2length: dict[str, int], pad_id: int
-) -> tf.data.Dataset:
+def _pack_with_tf_ops(dataset: tf.data.Dataset, keys: list[str], key2length: dict[str, int], pad_id: int) -> tf.data.Dataset:
   """Helper-function for packing a dataset which has already been batched.
   Helper for pack_dataset()  Uses tf.while_loop.
   Args:
@@ -156,9 +154,7 @@ def _pack_with_tf_ops(
         val = val[: tf.reduce_sum(tf.cast(tf.not_equal(val, -1), tf.int32))]
         one_example[k] = val
       for k in keys:
-        can_append = tf.logical_and(
-            can_append, tf.less_equal(tf.size(partial[k]) + tf.size(one_example[k]), key2length[k])
-        )
+        can_append = tf.logical_and(can_append, tf.less_equal(tf.size(partial[k]) + tf.size(one_example[k]), key2length[k]))
 
       def false_fn():
         return write_packed_example(partial, outputs)

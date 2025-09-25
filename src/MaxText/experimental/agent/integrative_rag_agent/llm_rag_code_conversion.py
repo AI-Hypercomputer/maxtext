@@ -121,9 +121,7 @@ def find_existing_agent_files():
           rel_path = os.path.relpath(os.path.join(root, file), agent_dir)
           # Remove .py extension for display
           module_name = rel_path.replace(".py", "").replace(os.path.sep, "_")
-          existing_files.append(
-              {"file_path": rel_path, "module_name": module_name, "full_path": os.path.join(root, file)}
-          )
+          existing_files.append({"file_path": rel_path, "module_name": module_name, "full_path": os.path.join(root, file)})
 
   return existing_files
 

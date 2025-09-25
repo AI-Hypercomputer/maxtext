@@ -169,6 +169,7 @@ def current_linen_module() -> linen.Module | None:
     return linen.module._context.module_stack[-1]  # pylint: disable=W0212
   return None
 
+
 class ToNNX(Module):
   """A wrapper to turn any Linen module into an NNX module.
 
@@ -229,12 +230,12 @@ class ToNNX(Module):
     return super().__getattribute__(name)
 
   def __call__(
-    self,
-    *args: Any,
-    rngs: Rngs | jax.Array | None = None,
-    method: tp.Callable[..., Any] | str | None = None,
-    mutable: tp.Any = None,
-    **kwargs: Any,
+      self,
+      *args: Any,
+      rngs: Rngs | jax.Array | None = None,
+      method: tp.Callable[..., Any] | str | None = None,
+      mutable: tp.Any = None,
+      **kwargs: Any,
   ) -> Any:
     # Shape-based lazy init of the flax variables
     if rngs is None:
@@ -270,9 +271,7 @@ class ToNNX(Module):
       else:
         mutable = False
 
-      out = self.to_nnx__module.apply(
-        variables, *args, rngs=_rngs, method=method, mutable=mutable, **kwargs
-      )
+      out = self.to_nnx__module.apply(variables, *args, rngs=_rngs, method=method, mutable=mutable, **kwargs)
 
       # Split out the updates if `mutable` is passed into the Flax module
       if mutable is not False:
@@ -419,9 +418,7 @@ class ToLinen(linen.Module):
   metadata_fn: tp.Callable[[variablelib.VariableState], tp.Any] | None = to_linen_var
 
   @linen.compact
-  def __call__(
-    self, *args, nnx_method: tp.Callable[..., Any] | str | None = None, **kwargs
-  ):
+  def __call__(self, *args, nnx_method: tp.Callable[..., Any] | str | None = None, **kwargs):
     def _module_kwargs():
       maybe_add_default = not self.is_initializing()
       module_kwargs = dict(self.kwargs)
