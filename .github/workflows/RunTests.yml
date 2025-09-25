@@ -35,116 +35,22 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  prelim:
-    runs-on: ["self-hosted"]
+  run:
+    runs-on: linux-x86-ct5lp-112-4tpu-test
+    container:
+      image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:latest
+      env:
+        HOST_ADDRESS: resource_manager
+        TPU_SKIP_MDS_QUERY: true
     steps:
-    - name: Test gsutil installation
-      run: which gsutil >/dev/null 2>&1 || { echo >&2 "gsutil is required but not installed. Aborting"; exit 24;}
-    - name: Cleanup old docker images
-      run: docker system prune --all --force
+      # Downloads a copy of the code in your repository before running CI tests
+      - name: Check out repository code
+        uses: actions/checkout@v5
 
-  tpu_image:
-    needs: prelim
-    uses: ./.github/workflows/build_upload_internal.yml
-    with:
-      device_type: tpu
-      device_name: v4-8
-      cloud_runner: linux-x86-n2-16-buildkit
-      build_mode: jax_ai_image
-      base_image: us-docker.pkg.dev/tpu-prod-env-multipod/jax-stable-stack/candidate/tpu:latest
-
-  gpu_image:
-    needs: prelim
-    uses: ./.github/workflows/build_upload_internal.yml
-    with:
-      device_type: gpu
-      device_name: a100-40gb-4
-      cloud_runner: linux-x86-n2-16-buildkit
-      build_mode: jax_ai_image
-      base_image: us-docker.pkg.dev/tpu-prod-env-multipod/jax-stable-stack/candidate/gpu:latest
-
-  cpu_unit_tests:
-    needs: tpu_image
-    uses: ./.github/workflows/run_tests_internal.yml
-    with:
-      device_type: cpu
-      device_name: X64
-      cloud_runner: linux-x86-n2-16
-      image_type: tpu
-      pytest_marker: 'cpu_only'
-      xla_python_client_mem_fraction: 0.75
-      tf_force_gpu_allow_growth: false
-      container_resource_option: "--privileged"
-
-  tpu_unit_tests:
-    needs: tpu_image
-    uses: ./.github/workflows/run_tests_internal.yml
-    with:
-      device_type: tpu
-      device_name: v4-8
-      cloud_runner: linux-x86-ct4p-240-4tpu
-      pytest_marker: 'not cpu_only and not gpu_only and not integration_test'
-      xla_python_client_mem_fraction: 0.75
-      tf_force_gpu_allow_growth: false
-      container_resource_option: "--privileged"
-
-  tpu_integration_tests:
-    needs: tpu_image
-    uses: ./.github/workflows/run_tests_internal.yml
-    with:
-      device_type: tpu
-      device_name: v4-8
-      cloud_runner: linux-x86-ct4p-240-4tpu
-      pytest_marker: 'not cpu_only and not gpu_only and integration_test'
-      xla_python_client_mem_fraction: 0.75
-      tf_force_gpu_allow_growth: false
-      container_resource_option: "--privileged"
-
-  gpu_unit_tests:
-    needs: gpu_image
-    uses: ./.github/workflows/run_tests_internal.yml
-    with:
-      device_type: gpu
-      device_name: a100-40gb-4
-      cloud_runner: linux-x86-a2-48-a100-4gpu
-      pytest_marker: 'not cpu_only and not tpu_only and not integration_test'
-      xla_python_client_mem_fraction: 0.65
-      tf_force_gpu_allow_growth: true
-      container_resource_option: "--shm-size 2g --runtime=nvidia --gpus all --privileged"
-
-  gpu_integration_tests:
-    needs: gpu_image
-    uses: ./.github/workflows/run_tests_internal.yml
-    with:
-      device_type: gpu
-      device_name: a100-40gb-4
-      cloud_runner: linux-x86-a2-48-a100-4gpu
-      pytest_marker: 'not cpu_only and not tpu_only and integration_test'
-      xla_python_client_mem_fraction: 0.65
-      tf_force_gpu_allow_growth: true
-      container_resource_option: "--shm-size 2g --runtime=nvidia --gpus all --privileged"
-
-  clean_up:
-    if: ${{ always() }}  # always execute, regardless of previous jobs or steps.
-    needs: [cpu_unit_tests, gpu_unit_tests, gpu_integration_tests, tpu_unit_tests, tpu_integration_tests]
-    name: "Clean up"
-    runs-on: ["self-hosted"]
-    permissions:
-      contents: read
-      issues: write  # for failed-build-issue
-    steps:
-    - name: Authenticate gcloud
-      continue-on-error: true
-      run: |
-          # configure registries as root and as runner
-          sudo gcloud auth configure-docker --quiet
-          gcloud auth configure-docker --quiet
-          sudo gcloud auth configure-docker us-docker.pkg.dev --quiet
-          gcloud auth configure-docker us-docker.pkg.dev --quiet
-    - name: Delete GPU image
-      run: gcloud container images delete gcr.io/tpu-prod-env-multipod/maxtext_${{ github.run_id }}:gpu --force-delete-tags --quiet
-    - name: Delete TPU image
-      run: gcloud container images delete gcr.io/tpu-prod-env-multipod/maxtext_${{ github.run_id }}:tpu --force-delete-tags --quiet
+      # Performs a clean installation of all dependencies in the `package.json` file
+      # For more information, see https://docs.npmjs.com/cli/ci.html
+      - name: Sleep
+        run: sleep 100000
 
   notify:
     if: ${{ always() }}
