@@ -14,7 +14,7 @@
  limitations under the License.
  -->
 
-# Enable GCP Workload Observabiltiy
+# Enable GCP workload observabiltiy
 This guide provides an overview on how to enable GCP workload observability for your MaxText workload.
 
 ## Overview
@@ -27,10 +27,10 @@ Users should work with their Customer Engineer (CE) and the Google team to defin
 
 This guide layouts how to enable the feature for your MaxText workload.
 
-## Enabling GCP Workload Observabiltiy
+## Enabling GCP workload observabiltiy
 User can control which metric they want to report via config:
 
-### Heartbeat metric 
+### Heartbeat metric
 - This metric will be a boolean flag.
 - To turn on this metric, set `report_heartbeat_metric_for_gcp_monitoring` to `True`
 - To control the frequency of heartbeat reporting (default is every 5 seconds), set `heartbeat_reporting_interval_in_seconds` to your desired value.

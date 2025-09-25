@@ -7,7 +7,7 @@ the training in sync with rest of the workers, then the model's state is
 asynchronously serialized and written over the network to the specified GCS
 bucket.
 
-## Checkpoint Loading Priority
+## Checkpoint loading priority
 
 The system follows a specific order when deciding which checkpoint to load at startup. The first valid condition met is the one executed:
 
@@ -21,7 +21,7 @@ The system follows a specific order when deciding which checkpoint to load at st
     * **Note**: These two options are mutually exclusive and will cause an error if both are set.
 3.  **Initialize from Scratch**: We don't load a checkpoint and initialize state instead.
 
-### MaxText Configuration
+### MaxText configuration
 
 | Flag | Description | Type | Default |
 | :--- | :--- | :--- | :--- |
@@ -34,7 +34,7 @@ The system follows a specific order when deciding which checkpoint to load at st
 | `lora_input_adapters_path` | Specifies a parent directory containing LoRA (Low-Rank Adaptation) adapters. | `string` | `""` (disabled) |
 | `force_unroll` | If `True`, unrolls the loop when generating a parameter-only checkpoint. | `boolean` | `False` |
 
-## Storage and Format Configuration
+## Storage and format configuration
 
 These settings control the underlying storage mechanism ([Orbax](https://orbax.readthedocs.io)) for performance and compatibility.
 

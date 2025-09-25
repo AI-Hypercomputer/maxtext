@@ -1,4 +1,4 @@
-# The JAX Ecosystem in MaxText: An Opinionated Guide
+# The JAX ecosystem in MaxText: an opinionated guide
 
 MaxText is built on a curated stack of JAX libraries, each chosen for a specific purpose. This document provides an opinionated view on *why* MaxText uses the following key components of the JAX ecosystem:
 
@@ -11,11 +11,9 @@ MaxText is built on a curated stack of JAX libraries, each chosen for a specific
 
 This stack isn't just a random collection of tools; it represents a design philosophy centered around **explicitness, composability, and performance at scale**.
 
-
 This document provides an opinionated view on *why* MaxText uses these specific libraries, explaining the design decisions that make them ideal for building and training large-scale models.
 
-
-## Flax: For Functional Model Definition
+## Flax: For functional model definition
 
 **What is it?** Flax is a high-performance neural network library for JAX that is designed to be flexible, explicit, and easy to use. 
 
@@ -27,8 +25,7 @@ With its latest generation API, NNX, Flax provides a modern, object-oriented (OO
 
 For more information on using Flax, please refer to https://github.com/google/flax
 
-
-## Optax: For Composable Optimization
+## Optax: For composable optimization
 
 **What is it?** Optax is a gradient processing and optimization library for JAX. It reimagines the optimizer as a series of composable functional transformations.
 
@@ -38,8 +35,7 @@ For more information on using Flax, please refer to https://github.com/google/fl
 
 For more information on using Optax, please refer to https://github.com/google-deepmind/optax
 
-
-## Orbax: For Robust Checkpointing
+## Orbax: For robust checkpointing
 
 **What is it?** Orbax is a library for checkpointing JAX programs, designed for large-scale, potentially unreliable environments.
 
@@ -54,8 +50,7 @@ For massive models, saving and loading state is a critical part of the training 
 
 For more information on using Orbax, please refer to https://github.com/google/orbax
 
-
-## Grain: For Deterministic, Multi-Host Data Loading
+## Grain: For deterministic, multi-host data loading
 
 **What is it?** Grain is a high-performance data loading library designed for deterministic, global shuffle and multi-host data loading.
 
@@ -67,8 +62,7 @@ Its APIs are explicitly designed for the multi-host paradigm, simplifying the pr
 
 For more information on using Grain, please refer to https://github.com/google/grain and the grain guide in maxtext located at https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/guides/data_input_grain.md 
 
-
-## Qwix: For Native JAX Quantization
+## Qwix: For native JAX quantization
 
 **What is it?** Qwix is a Jax quantization library supporting Quantization-Aware Training (QAT) and Post-Training Quantization (PTQ)
 
@@ -79,8 +73,7 @@ We chose Qwix because it provides the necessary primitives **natively within the
 
 For more information on how to quantize your model using Qwix, please refer to https://github.com/google/qwix
 
-
-## Tunix: For Comprehensive Post-Training
+## Tunix: For comprehensive post-training
 
 **What is it?** Tunix is a JAX-based library designed for a wide range of post-training tasks, including Supervised Fine-Tuning (SFT), Reinforcement Learning (RL), and Parameter-Efficient Fine-Tuning (PEFT) methods like LoRA.
 
