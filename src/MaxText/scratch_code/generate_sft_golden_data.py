@@ -193,9 +193,7 @@ def test_with_trl_and_save_golden_data(config):
 if __name__ == "__main__":
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
   if "xla_tpu_spmd_rng_bit_generator_unsafe" not in os.environ.get("LIBTPU_INIT_ARGS", ""):
-    os.environ["LIBTPU_INIT_ARGS"] = (
-        os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
-    )
+    os.environ["LIBTPU_INIT_ARGS"] = os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
 
   parser = argparse.ArgumentParser()
   parser.add_argument("--model-name", type=str, required=False, default="llama2-7b")

@@ -92,7 +92,7 @@ class SFTTrainingHooks(TrainingHooks):
     total_weights = jnp.sum(train_ctx.data_hooks.train_batch["targets_segmentation"] != 0)
 
     self.train_metadata[train_ctx.train_steps] = {
-      "total_weights": total_weights,
+        "total_weights": total_weights,
     }
 
   @override

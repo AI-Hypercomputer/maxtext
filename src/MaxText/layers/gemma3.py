@@ -463,7 +463,9 @@ class VisionEmbedder(nnx.Module):
         kernel_axes=("norm",),
         rngs=self.rngs,
     )
-    self.mm_input_projection = Einsum(shape=(self.config.hidden_size_for_vit, self.config.emb_dim), precision=self.config.matmul_precision, rngs=self.rngs)
+    self.mm_input_projection = Einsum(
+        shape=(self.config.hidden_size_for_vit, self.config.emb_dim), precision=self.config.matmul_precision, rngs=self.rngs
+    )
 
   def __call__(self, x: jax.Array, eqn: str = "...tm,md->...td") -> jax.Array:
     x = self.mm_soft_embedding_norm(x)

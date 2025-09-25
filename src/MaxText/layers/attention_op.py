@@ -273,9 +273,7 @@ def _make_bidirectional_block_mask(bidirectional_mask):
   """
   q_block_indices = _make_block_mask_indices(bidirectional_mask)
   kv_block_indices = q_block_indices
-  bidirectional_block_mask = (kv_block_indices[:, None, :] == q_block_indices[..., None]) & (
-      q_block_indices[..., None] > 0
-  )
+  bidirectional_block_mask = (kv_block_indices[:, None, :] == q_block_indices[..., None]) & (q_block_indices[..., None] > 0)
   return bidirectional_block_mask
 
 
@@ -656,9 +654,7 @@ class AttentionOp(nnx.Module):
 
       row_ids_sliding = jax.lax.broadcasted_iota(jnp.int32, (q_seq_len, 1), 0) + next_pos
       col_ids_sliding = jax.lax.broadcasted_iota(jnp.int32, (1, kv_seq_len), 1)
-      sliding_mask = (col_ids_sliding > (row_ids_sliding - self.sliding_window_size)) & (
-          col_ids_sliding <= row_ids_sliding
-      )
+      sliding_mask = (col_ids_sliding > (row_ids_sliding - self.sliding_window_size)) & (col_ids_sliding <= row_ids_sliding)
       output_mask = sliding_mask * output_mask
     elif self.attention_type == AttentionType.CHUNK and output_mask is not None:
       mask_shape = (q_seq_len, kv_seq_len)
@@ -814,9 +810,7 @@ class AttentionOp(nnx.Module):
         out_specs=(bnd, bn, bn),
         check_rep=False,
     )
-    def wrap_ragged_attention(
-        q: Array, k: Array, v: Array, lengths: Array, block_size: int
-    ) -> Tuple[Array, Array, Array]:
+    def wrap_ragged_attention(q: Array, k: Array, v: Array, lengths: Array, block_size: int) -> Tuple[Array, Array, Array]:
       # Use the original gqa function to get the attention output
       """
       Wraps the GQA function with appropriate sharding.
@@ -1335,9 +1329,7 @@ class AttentionOp(nnx.Module):
     # Casting softmaxt computation for float32 for model stability.
     if self.float32_logits:
       attn_weights = attn_weights.astype(jnp.float32)
-    attn_mask = self.generate_attention_mask(
-        query, key, decoder_segment_ids, model_mode, previous_chunk, bidirectional_mask
-    )
+    attn_mask = self.generate_attention_mask(query, key, decoder_segment_ids, model_mode, previous_chunk, bidirectional_mask)
     if self.is_partition_in_decode(q_seq_len):
       attn_mask = partitioning.with_sharding_constraint(attn_mask, (KV_LENGTH, HEAD, None, None, None))
     elif model_mode == MODEL_MODE_PREFILL:
@@ -1387,9 +1379,7 @@ class AttentionOp(nnx.Module):
       raise NotImplementedError(self.compute_axis_order)
     return result
 
-  def wv_product(
-      self, attn_weights: Array, value: Array | KVTensor, model_mode: str, einsum: Callable[..., Array]
-  ) -> Array:
+  def wv_product(self, attn_weights: Array, value: Array | KVTensor, model_mode: str, einsum: Callable[..., Array]) -> Array:
     """weighted value product.
 
     Args:

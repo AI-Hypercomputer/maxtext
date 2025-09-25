@@ -192,10 +192,12 @@ def validate_keys(keys):
   ), "At most one of `load_parameters_path` or `load_full_state_path` should be set"
 
   if keys["enable_multi_tier_checkpointing"]:
+    assert keys[
+        "local_checkpoint_directory"
+    ], "A local checkpoint directory must be specified when using multi-tier checkpointing"
     assert (
-        keys["local_checkpoint_directory"]
-    ), "A local checkpoint directory must be specified when using multi-tier checkpointing"
-    assert (keys["local_checkpoint_period"] > 0), "A positive local checkpoint period must be specified when using multi-tier checkpointing"
+        keys["local_checkpoint_period"] > 0
+    ), "A positive local checkpoint period must be specified when using multi-tier checkpointing"
     assert (
         keys["multi_tier_checkpointing_backup_interval_minutes"] > 0
     ), "A positive multi-tier checkpointing backup interval minutes must be specified when using multi-tier checkpointing"
@@ -255,16 +257,11 @@ def validate_constant_bound(keys):
 
 
 def validate_quantization_methods(keys):
-  """Validate quantization methods
-  """
-  valid_quant_methods = (
-    "", "int8", "fp8", "fp8_full", "fp8_gpu", "fp8_nanoo"
-  )
+  """Validate quantization methods"""
+  valid_quant_methods = ("", "int8", "fp8", "fp8_full", "fp8_gpu", "fp8_nanoo")
   if keys["use_qwix_quantization"]:
     if keys["quantization"] not in valid_quant_methods:
-      raise ValueError(
-          f"Invalid quantization method {keys['quantization']}. Valid options are {valid_quant_methods}"
-      )
+      raise ValueError(f"Invalid quantization method {keys['quantization']}. Valid options are {valid_quant_methods}")
 
 
 def validate_data_input(keys):
@@ -326,9 +323,7 @@ def validate_llama4_config(keys: dict):
 
   """
   if keys["capacity_factor"] >= 0:
-    raise ValueError(
-        "Llama4 decoder has not been tested with capacity_factor >= 0 -- please set that value to -1 for now!"
-    )
+    raise ValueError("Llama4 decoder has not been tested with capacity_factor >= 0 -- please set that value to -1 for now!")
   if keys["num_experts_per_tok"] > 1:
     raise ValueError("Only top-1 routing is supported for Llama4 for now!")
   if keys["base_num_decoder_layers"] % keys["interleave_moe_layer_step"] != 0:
@@ -446,9 +441,9 @@ def _lists_to_tuples(l: list[Any]) -> tuple[Any] | list[Any]:
 
 # TODO: remove in future when MaxText commands are no longer used
 def resolve_config_path(param: str) -> str:
-    """Resolve config path to auto rewrite to use new src folder.
-    This ensures backwards compatibility with older versions of MaxText."""
-    return param if os.path.isfile(param) else os.path.join("src", param)
+  """Resolve config path to auto rewrite to use new src folder.
+  This ensures backwards compatibility with older versions of MaxText."""
+  return param if os.path.isfile(param) else os.path.join("src", param)
 
 
 class _HyperParameters:
@@ -581,7 +576,7 @@ class _HyperParameters:
           MAXTEXT_REPO_ROOT,
           os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText"),
           MAXTEXT_PKG_DIR,
-          os.path.dirname(config_name)
+          os.path.dirname(config_name),
       ):
         tokenizer_path = os.path.join(
             search_root,
@@ -1007,13 +1002,16 @@ def validate_deepseek_moe(raw_keys):
           f'config num_experts: {raw_keys["num_experts"]} must be divisible by n_routing_groups: {raw_keys["n_routing_groups"]}'
       )
 
+
 def validate_mlp_dim(raw_keys):
   """Validates that MLP dimensions are consistent for fully MoE models."""
-  is_fully_moe_model = (raw_keys["interleave_moe_layer_step"] == 1 and raw_keys["first_num_dense_layers"] == 0)
+  is_fully_moe_model = raw_keys["interleave_moe_layer_step"] == 1 and raw_keys["first_num_dense_layers"] == 0
   base_mlp_dim = raw_keys["base_mlp_dim"]
   base_moe_mlp_dim = raw_keys["base_moe_mlp_dim"]
   if is_fully_moe_model and (base_mlp_dim != base_moe_mlp_dim):
-      raise ValueError(f'For a fully MoE model, base_mlp_dim must be equal to base_moe_mlp_dim. Received base_mlp_dim={base_mlp_dim} and base_moe_mlp_dim={base_moe_mlp_dim}.')
+    raise ValueError(
+        f"For a fully MoE model, base_mlp_dim must be equal to base_moe_mlp_dim. Received base_mlp_dim={base_mlp_dim} and base_moe_mlp_dim={base_moe_mlp_dim}."
+    )
 
 
 def validate_sparse_matmul_parallelism(raw_keys):
@@ -1051,11 +1049,15 @@ def validate_ring_of_experts_parallelism(raw_keys):
   if raw_keys["use_ring_of_experts"] and not using_expert_parallelism(raw_keys):
     raise ValueError("Ring-of-experts requires expert-parallelism to be enabled.")
 
+
 def validate_shard_fsdp_on_expert_parallelism(raw_keys):
-  if raw_keys["fsdp_shard_on_exp"] and raw_keys["num_experts"] % raw_keys["ici_fsdp_parallelism"]!=0: 
+  if raw_keys["fsdp_shard_on_exp"] and raw_keys["num_experts"] % raw_keys["ici_fsdp_parallelism"] != 0:
     raise ValueError("fsdp_shard_on_exp requires num_experts is divisiable by ici_fsdp_parallelism.")
-  if raw_keys["fsdp_shard_on_exp"] and (using_tensor_parallelism(raw_keys) or useing_expert_parallelism(raw_keys)): 
-    raise ValueError("fsdp_shard_on_exp requires ici_expert_parallelism = 1 and ici_tensor_parallelism/ici_tensor_transpose_parallelism = 1.")
+  if raw_keys["fsdp_shard_on_exp"] and (using_tensor_parallelism(raw_keys) or useing_expert_parallelism(raw_keys)):
+    raise ValueError(
+        "fsdp_shard_on_exp requires ici_expert_parallelism = 1 and ici_tensor_parallelism/ici_tensor_transpose_parallelism = 1."
+    )
+
 
 def validate_ragged_dot(raw_keys):
   if raw_keys["sparse_matmul"] and not raw_keys["megablox"]:
@@ -1214,6 +1216,7 @@ def using_fsdp_and_transpose_parallelism(raw_keys) -> bool:
       or int(raw_keys["dcn_fsdp_transpose_parallelism"]) > 1
   )
 
+
 @register_pytree_node_class
 class HyperParameters:
   """Wrapper class to expose the configuration in a read-only manner."""
@@ -1233,7 +1236,6 @@ class HyperParameters:
 
   def get_keys(self):
     return self._config.keys
-  
 
   def tree_flatten(self):
     return (), self

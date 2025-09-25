@@ -310,9 +310,7 @@ class PagedAttentionOp(nnx.Module):
         num_seqs=num_seqs,
         num_kv_pages_per_block=self.pages_per_compute_block,
     )
-    return jnp.expand_dims(
-        result, axis=1
-    )  # [batch_size, n_kv_head, head_dim] to [batch_size, seq_len, n_kv_head, head_dim]
+    return jnp.expand_dims(result, axis=1)  # [batch_size, n_kv_head, head_dim] to [batch_size, seq_len, n_kv_head, head_dim]
 
   # v1 kernel has around 20% performance gain than v2 kernel in decode only task
   def paged_attention_v1_decode(

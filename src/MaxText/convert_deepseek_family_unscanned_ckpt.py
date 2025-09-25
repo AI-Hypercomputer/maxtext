@@ -89,9 +89,7 @@ def _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info)
 
   # logits dense #################################################
   max_logging.log("Processing logits dense")
-  jax_weights["decoder"]["logits_dense"]["kernel"] = (
-      chkpt_vars["logits_dense.kernel"].to(torch.float16).numpy().transpose()
-  )
+  jax_weights["decoder"]["logits_dense"]["kernel"] = chkpt_vars["logits_dense.kernel"].to(torch.float16).numpy().transpose()
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
 
   # token embedding ##############################################

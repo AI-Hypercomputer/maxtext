@@ -74,9 +74,7 @@ def main():
     print(f"prefill_cache_axis_order {prefill_cache_axis_order}")
     print(f"ar_cache_axis_order {ar_cache_axis_order}")
 
-    run_tag = (
-        f"{two_axis_order_product_id}-{prefill_cache_axis_order.replace(',','')}-{ar_cache_axis_order.replace(',','')}"
-    )
+    run_tag = f"{two_axis_order_product_id}-{prefill_cache_axis_order.replace(',','')}-{ar_cache_axis_order.replace(',','')}"
     run_name = f"{base_run_name}/{run_tag}"
 
     tensorboard_dir = os.path.join(config.base_output_directory, run_name, "tensorboard", "")

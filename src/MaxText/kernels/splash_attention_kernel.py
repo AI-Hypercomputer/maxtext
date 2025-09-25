@@ -430,9 +430,7 @@ def make_attention_reference(
       def reshape_activations(activations):
         if activations.ndim == 4:  # pytype: disable=attribute-error
           kv_heads, q_heads_per_kv_head, q_seq_len, head_dim = activations.shape  # pytype: disable=attribute-error
-          return activations.reshape(
-              kv_heads * q_heads_per_kv_head, q_seq_len, head_dim
-          )  # pytype: disable=attribute-error
+          return activations.reshape(kv_heads * q_heads_per_kv_head, q_seq_len, head_dim)  # pytype: disable=attribute-error
         return activations
 
       def reshape_residuals(residuals):

@@ -238,9 +238,7 @@ class MaxEngine(engine_api.Engine):
       state = maxtext_utils.init_decode_state(None, params)
       state = max_utils.unbox_logicallypartioned(state)
     else:
-      state, self.state_mesh_annotations = maxtext_utils.setup_decode_state(
-          self.model, self.config, rng1, self._mesh, None
-      )
+      state, self.state_mesh_annotations = maxtext_utils.setup_decode_state(self.model, self.config, rng1, self._mesh, None)
     # pylint: disable=isinstance-second-argument-not-valid-type
     self.abstract_params = jax.tree_util.tree_map(
         lambda x: jax.ShapeDtypeStruct(shape=x.shape, dtype=x.dtype, sharding=x.sharding)
@@ -332,7 +330,9 @@ class MaxEngine(engine_api.Engine):
           jnp.ones((1, self.config.max_prefill_predict_length), dtype=jnp.int32),
           jnp.ones((1, self.config.max_prefill_predict_length), dtype=jnp.int32),
           encoder_images=jnp.ones(
-              multimodal_utils.get_dummy_image_shape_for_init(self.config.model_name, batch_size=self.config.micro_batch_size_to_train_on),
+              multimodal_utils.get_dummy_image_shape_for_init(
+                  self.config.model_name, batch_size=self.config.micro_batch_size_to_train_on
+              ),
               dtype=jnp.float32,
           )
           if self.config.use_multimodal
@@ -775,7 +775,11 @@ class MaxEngine(engine_api.Engine):
         "tokens": first_generated_tokens,
     }, result
 
-  @functools.partial(jax.jit, static_argnums=(0,), static_argnames=("num_prompts", "return_prompt_logp", "algorithm", "topk", "nucleus_topp"))
+  @functools.partial(
+      jax.jit,
+      static_argnums=(0,),
+      static_argnames=("num_prompts", "return_prompt_logp", "algorithm", "topk", "nucleus_topp"),
+  )
   def prefill_concat(
       self,
       *,
@@ -840,11 +844,7 @@ class MaxEngine(engine_api.Engine):
     cache = self._maybe_stack_prefill_result_cache(cache)
     if return_prompt_logp:
       prompt_logp = inference_utils.prompt_logprobs_from_packed_prefill(
-          flat_logits,
-          input_tokens,
-          decoder_positions,
-          decoder_segment_ids,
-          true_lengths
+          flat_logits, input_tokens, decoder_positions, decoder_segment_ids, true_lengths
       )
     else:
       prompt_logp = None
@@ -943,7 +943,9 @@ class MaxEngine(engine_api.Engine):
 
     return max_utils.unbox_logicallypartioned(new_state), result
 
-  @functools.partial(jax.jit, static_argnums=(0,), donate_argnums=(2,), static_argnames=("algorithm", "topk", "nucleus_topp"))
+  @functools.partial(
+      jax.jit, static_argnums=(0,), donate_argnums=(2,), static_argnames=("algorithm", "topk", "nucleus_topp")
+  )
   def _generate_jit(
       self,
       params: Params,
@@ -1122,9 +1124,7 @@ class MaxEngine(engine_api.Engine):
     )
 
     for i, slot in enumerate(slots):
-      decode_state["logits"] = jax.lax.dynamic_update_index_in_dim(
-          decode_state["logits"], unboxed_prefix["logits"], slot, 0
-      )
+      decode_state["logits"] = jax.lax.dynamic_update_index_in_dim(decode_state["logits"], unboxed_prefix["logits"], slot, 0)
       decode_state["next_pos"] = jax.lax.dynamic_update_index_in_dim(
           decode_state["next_pos"], unboxed_prefix["next_pos"], slot, 0
       )
@@ -1148,9 +1148,7 @@ class MaxEngine(engine_api.Engine):
       )
 
     inserted_logits = jax.lax.with_sharding_constraint(decode_state["logits"], self.replicated_sharding)
-    inserted_generated_tokens = jax.lax.with_sharding_constraint(
-        decode_state["generated_tokens"], self.replicated_sharding
-    )
+    inserted_generated_tokens = jax.lax.with_sharding_constraint(decode_state["generated_tokens"], self.replicated_sharding)
     inserted_next_pos = jax.lax.with_sharding_constraint(decode_state["next_pos"], self.replicated_sharding)
     inserted_tokens = jax.lax.with_sharding_constraint(decode_state["tokens"], self.replicated_sharding)
     inserted_cache = jax.lax.with_sharding_constraint(inserted_cache, self.kv_cache_shardings)
@@ -1236,9 +1234,7 @@ class MaxEngine(engine_api.Engine):
             decode_state_pages, prefix_pages, current_page_map = state
             prefix_page = jax.lax.dynamic_index_in_dim(prefix_pages, prefix_page_idx, axis=1)
             dest_page_idx = current_page_map[prefix_page_idx]
-            decode_state_pages = jax.lax.dynamic_update_slice_in_dim(
-                decode_state_pages, prefix_page, dest_page_idx, axis=1
-            )
+            decode_state_pages = jax.lax.dynamic_update_slice_in_dim(decode_state_pages, prefix_page, dest_page_idx, axis=1)
             return decode_state_pages, prefix_pages, current_page_map
 
           decode_state_cache, _, _ = jax.lax.fori_loop(
@@ -1423,13 +1419,9 @@ class MaxEngine(engine_api.Engine):
     for i in range(num_prompts):
       start_idx = start_indices[i]
       slot = slots[i]
-      inserted_cache = jax.tree_util.tree_map_with_path(
-          copy, cache_unboxed, inserted_cache, self.kv_cache_annotations_named
-      )
+      inserted_cache = jax.tree_util.tree_map_with_path(copy, cache_unboxed, inserted_cache, self.kv_cache_annotations_named)
       inserted_logits = jax.lax.dynamic_update_index_in_dim(inserted_logits, unboxed_prefix["logits"][i, ...], slot, 0)
-      inserted_next_pos = jax.lax.dynamic_update_index_in_dim(
-          inserted_next_pos, unboxed_prefix["next_pos"][i, ...], slot, 0
-      )
+      inserted_next_pos = jax.lax.dynamic_update_index_in_dim(inserted_next_pos, unboxed_prefix["next_pos"][i, ...], slot, 0)
       inserted_generated_tokens = jax.lax.dynamic_update_index_in_dim(
           inserted_generated_tokens,
           unboxed_prefix["generated_tokens"][i, ...],
@@ -1527,7 +1519,12 @@ class MaxEngine(engine_api.Engine):
           (int(self.config.per_device_batch_size * self.mesh.size), 1),
           dtype=jnp.int32,
       )
-      dummy_image = jnp.ones(multimodal_utils.get_dummy_image_shape_for_init(self.config.model_name, batch_size=self.config.micro_batch_size_to_train_on), dtype=jnp.int32)
+      dummy_image = jnp.ones(
+          multimodal_utils.get_dummy_image_shape_for_init(
+              self.config.model_name, batch_size=self.config.micro_batch_size_to_train_on
+          ),
+          dtype=jnp.int32,
+      )
       _, cache = self.model.apply(
           abstract_params,
           x,
@@ -1569,7 +1566,7 @@ class MaxEngine(engine_api.Engine):
           "next_pos": next_pos,
           "generated_tokens": generated_tokens,
           "tokens": tokens,
-          "token_logp": token_logp
+          "token_logp": token_logp,
       }
 
     with nn_partitioning.axis_rules(self.config.logical_axis_rules):

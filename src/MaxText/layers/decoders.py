@@ -285,7 +285,7 @@ class Decoder(nn.Module):
       if cfg.remat_policy in ("minimal_with_context", "minimal_flash"):
         # save all
         if cfg.remat_policy == "minimal_flash":
-            max_logging.log("WARNING: 'minimal_flash' will be deprecated soon, please use 'minimal_with_context' instead.")
+          max_logging.log("WARNING: 'minimal_flash' will be deprecated soon, please use 'minimal_with_context' instead.")
         policy = self.minimal_policy(with_context=True)
       elif cfg.remat_policy == "minimal":
         # save all except context
@@ -640,12 +640,7 @@ class Decoder(nn.Module):
 
     # [batch, length] -> [batch, length, emb_dim]
     y = self._apply_embedding(
-        shared_embedding,
-        decoder_input_tokens,
-        decoder_positions,
-        deterministic,
-        image_embeddings,
-        bidirectional_mask
+        shared_embedding, decoder_input_tokens, decoder_positions, deterministic, image_embeddings, bidirectional_mask
     )
 
     policy = self.get_remat_policy()

@@ -130,8 +130,7 @@ def check_predicted_tokens_match(logits_a, logits_b, tolerance=0.1):
 
   if disagreement_rate > tolerance:
     raise AssertionError(
-        f"Token prediction mismatch: {disagreement_rate:.1%} of tokens disagree "
-        f"(exceeds tolerance of {tolerance:.1%})"
+        f"Token prediction mismatch: {disagreement_rate:.1%} of tokens disagree " f"(exceeds tolerance of {tolerance:.1%})"
     )
 
 

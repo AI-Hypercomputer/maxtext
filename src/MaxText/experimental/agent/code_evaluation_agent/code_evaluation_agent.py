@@ -133,10 +133,7 @@ def make_test_case_and_run(args, python_file, jax_file):
           + python_code
       )
       jax_code = (
-          "from "
-          + ".".join(jax_file.split(os.path.sep)[1:]).replace(".py", " import " + entry_module)
-          + "\n\n"
-          + jax_code
+          "from " + ".".join(jax_file.split(os.path.sep)[1:]).replace(".py", " import " + entry_module) + "\n\n" + jax_code
       )
       prompt = prompt.replace("<module.path.to.pytorch_code>", python_code)
       prompt = prompt.replace("<module.path.to.jax_code>", jax_code)

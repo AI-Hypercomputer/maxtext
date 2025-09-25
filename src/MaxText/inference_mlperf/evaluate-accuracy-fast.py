@@ -175,9 +175,7 @@ def main():
   # Parallel postprocessing of texts
   print("Post-processing texts...")
   with Pool(num_workers) as pool:
-    processed_pairs = list(
-        tqdm.tqdm(pool.starmap(postprocess_text, zip(all_preds, target_required)), total=len(all_preds))
-    )
+    processed_pairs = list(tqdm.tqdm(pool.starmap(postprocess_text, zip(all_preds, target_required)), total=len(all_preds)))
   preds, refs = zip(*processed_pairs)
 
   # Split data into chunks for parallel ROUGE computation

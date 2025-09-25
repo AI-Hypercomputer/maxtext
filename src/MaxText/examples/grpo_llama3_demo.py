@@ -366,7 +366,9 @@ def get_ref_maxtext_model(config):
 
   model, mesh = model_creation_utils.create_nnx_model(config)
   with mesh:
-    tunix_model = TunixMaxTextAdapter(base_model=model,)
+    tunix_model = TunixMaxTextAdapter(
+        base_model=model,
+    )
 
     model_config = llama3_lib.ModelConfig.llama3_1_8b()
     tunix_model.config = model_config
@@ -377,7 +379,7 @@ def get_ref_maxtext_model(config):
 model_config = llama3_lib.ModelConfig.llama3_1_8b()
 
 # Load the reference model
-# Note: pass the path to your scanned checkpoint for "load_parameters_path". 
+# Note: pass the path to your scanned checkpoint for "load_parameters_path".
 # To create a scanned checkpoint, you can use /maxtext/src/MaxText/utils/ckpt_conversion/to_maxtext.py
 config_ref = pyconfig.initialize(
     [

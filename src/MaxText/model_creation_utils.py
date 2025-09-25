@@ -38,7 +38,10 @@ def from_config(
     devices: Sequence[jax.Device] | None = None,
     *,
     model_mode: str = MODEL_MODE_TRAIN,
-) -> nn.Module: ...
+) -> nn.Module:
+  ...
+
+
 @overload
 def from_config(
     config: pyconfig.HyperParameters,
@@ -46,7 +49,10 @@ def from_config(
     *,
     model_mode: str = MODEL_MODE_TRAIN,
     rngs: nnx.Rngs,
-) -> models.Transformer: ...
+) -> models.Transformer:
+  ...
+
+
 def from_config(
     config: pyconfig.HyperParameters,
     devices: Sequence[jax.Device] | None = None,
@@ -75,6 +81,7 @@ def from_config(
 
   # Return only the model
   return model
+
 
 def get_transformer_model(config, mesh, quant, model_mode: str = MODEL_MODE_TRAIN, rngs: nnx.Rngs | None = None):
   """Returns the transformer model based on the configuration."""

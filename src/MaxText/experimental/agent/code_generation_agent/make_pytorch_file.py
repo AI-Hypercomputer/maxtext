@@ -190,9 +190,7 @@ def extract_python_independent_modules(filepath, base_path):
 
   # Separate global and local imports
   global_imports, removed_imports = remove_local_imports(analysis_result["sorted_modules"].get("imports", ""), filepath)
-  conditional_imports, _ = remove_local_imports(
-      analysis_result["sorted_modules"].get("conditional_imports", ""), filepath
-  )
+  conditional_imports, _ = remove_local_imports(analysis_result["sorted_modules"].get("conditional_imports", ""), filepath)
 
   all_global_imports = global_imports + "\n" + conditional_imports
 

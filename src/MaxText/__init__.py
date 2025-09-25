@@ -32,4 +32,3 @@ from MaxText.model_creation_utils import from_config
 
 Transformer = models.Transformer
 transformer_as_linen = models.transformer_as_linen
-

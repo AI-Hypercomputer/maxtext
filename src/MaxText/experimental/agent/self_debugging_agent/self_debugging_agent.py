@@ -220,10 +220,7 @@ def code_debugging(args, python_file, jax_file, test_file_path, last_output, cod
             + python_code
         )
         jax_code = (
-            "from "
-            + ".".join(jax_file.split(os.path.sep)[1:]).replace(".py", " import " + entry_module)
-            + "\n\n"
-            + jax_code
+            "from " + ".".join(jax_file.split(os.path.sep)[1:]).replace(".py", " import " + entry_module) + "\n\n" + jax_code
         )
         prompt = prompt.replace("<module.path.to.pytorch_code>", python_code)
         prompt = prompt.replace("<module.path.to.jax_code>", jax_code)
@@ -242,9 +239,7 @@ def code_debugging(args, python_file, jax_file, test_file_path, last_output, cod
         jax_code = json_code["jax_code"]
       if len(json_code["test_code"]) > 5 and json_code["jax_code"] != "NOTESTCASE":
         test_case_code = json_code["test_code"]
-      last_output, exit_code, _, passed, failed = save_and_run_test_case(
-          jax_code, test_case_code, jax_file, test_file_path
-      )
+      last_output, exit_code, _, passed, failed = save_and_run_test_case(jax_code, test_case_code, jax_file, test_file_path)
       code_history.append({"passed": passed, "failed": failed, "jax_code": jax_code, "test_case_code": test_case_code})
       if passed > 0 and failed == 0:
         logger.info("Code Debugger able to solve the bugs in %s in %d Try ", args.jax_path, try_count)
@@ -324,9 +319,7 @@ def make_code_and_debug(args, python_file, jax_file):
         with open(jax_file, "rt", encoding="utf-8") as f:
           jax_code = f.read()
       if base_try > 0 or not os.path.exists(test_file_path):
-        test_case_code = generate_test_case(
-            python_file, entry_module, python_code, args.jax_code, jax_file, test_file_path
-        )
+        test_case_code = generate_test_case(python_file, entry_module, python_code, args.jax_code, jax_file, test_file_path)
         if test_case_code == "NOTESTCASE":
           logger.info("Test case is not possible")
           return 1, 0

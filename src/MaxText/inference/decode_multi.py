@@ -32,8 +32,7 @@ _INITIAL_PREFILL_STREAMS = 2  # Example: Start generating after 2 streams are re
 def _validate_config(config):
   """Validate configuration settings."""
   assert config.load_full_state_path == "", (
-      "Decode doesn't operate on full states! Convert to parameter checkpoint first."
-      "Using generate_param_only_checkpoint."
+      "Decode doesn't operate on full states! Convert to parameter checkpoint first." "Using generate_param_only_checkpoint."
   )
   assert (
       0 < _INITIAL_PREFILL_STREAMS <= _NUM_STREAMS
@@ -61,9 +60,7 @@ def main(argv: Sequence[str]) -> None:
   assert true_length <= config.max_prefill_predict_length, "Prompt too long for prefill length"
 
   batch_size = int(config.per_device_batch_size * jax.device_count())
-  assert (
-      0 < _NUM_STREAMS <= batch_size
-  ), f"The number of streams {_NUM_STREAMS} must be > 0 and <= batch size {batch_size}"
+  assert 0 < _NUM_STREAMS <= batch_size, f"The number of streams {_NUM_STREAMS} must be > 0 and <= batch size {batch_size}"
 
   # Initialize decode state
   rng, rng_init_decode = jax.random.split(rng)

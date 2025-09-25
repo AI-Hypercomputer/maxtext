@@ -69,9 +69,7 @@ def prefill_benchmark(config, engine_prefill, params, tokens, true_length, num_m
   print(f"Prefill benchmark results for length {tokens.size}:\n")
   time_in_s = prefill_benchmark_loop(engine_prefill, params, tokens, true_length, iters)
   prefill_average_ms = 1000 * time_in_s / iters
-  prefill_tflops_per_device, _, _ = maxtext_utils.calculate_prefill_tflops_per_device(
-      num_model_params, tokens.size, config
-  )
+  prefill_tflops_per_device, _, _ = maxtext_utils.calculate_prefill_tflops_per_device(num_model_params, tokens.size, config)
   tflops_per_sec_per_device = prefill_tflops_per_device / prefill_average_ms * 1000.0
   print(
       f"\tPrefill step average time: {prefill_average_ms:.3f} ms\n"
@@ -103,8 +101,7 @@ def prefill_multisampling_benchmark(config, engine_prefill_multisampling, params
     time_in_s = prefill_benchmark_loop(engine_prefill_multisampling, params, tokens, true_length, iters, num_samples)
     multisampling_prefill_average_ms = 1000 * time_in_s / iters
     print(
-        f"\nNum samples: {num_samples}\n"
-        f"\tPrefill step average time: {multisampling_prefill_average_ms:.3f} ms\n\n\n\n"
+        f"\nNum samples: {num_samples}\n" f"\tPrefill step average time: {multisampling_prefill_average_ms:.3f} ms\n\n\n\n"
     )
     result_dict[num_samples] = {
         "time_in_ms": multisampling_prefill_average_ms,
