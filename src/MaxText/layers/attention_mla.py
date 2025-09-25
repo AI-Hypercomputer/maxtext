@@ -721,4 +721,5 @@ class MLA(Attention):
       out = nn.with_logical_constraint(out, self.out_axis_names)
 
     out = self.out_projection(out)
+    out = checkpoint_name(out, "out_proj")
     return out
