@@ -36,7 +36,7 @@ concurrency:
 
 jobs:
   run:
-    runs-on: ubuntu-latest
+    runs-on: linux-x86-ct5lp-112-4tpu-test
     container:
       image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:latest
       env:
