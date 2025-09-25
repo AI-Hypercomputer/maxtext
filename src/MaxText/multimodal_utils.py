@@ -70,6 +70,8 @@ class PreprocessorOutput:
                   The shape and format depend on the specific model and
                   preprocessing steps (e.g., [H, W, C] for Gemma3 or
                   [NUM_TILES, C, TILE_SIZE, TILE_SIZE] for Llama4).
+    pixel_mask: An optional JAX array of shape (NUM_TILES,) indicating valid
+                tiles in the image.
     aspect_ratios: An optional JAX array of shape (batch_size, 2) representing
                    the aspect ratio [ratio_h, ratio_w] of the processed image(s).
                    This is particularly relevant for models like Llama4 that handle
@@ -77,15 +79,13 @@ class PreprocessorOutput:
   """
 
   pixel_values: None | np.ndarray = None
+  pixel_mask: None | np.ndarray = None
   aspect_ratios: None | np.ndarray = None
 
 
 def resize_image(image, model_name):
   """resize image if needed"""
-  image_sizes = {
-      # resize for vanilla llama4 support, will be removed once size support is added to multimodal llama4
-      "llama4": (LLAMA4_TILE_SIZE, LLAMA4_TILE_SIZE),
-  }
+  image_sizes = {}
   model_prefix = model_name.split("-")[0]
   if model_prefix in image_sizes:
     target_size = image_sizes[model_prefix]
@@ -145,26 +145,30 @@ def get_factors(dividend: int):
   return factors_set
 
 
-def find_supported_resolutions(max_num_chunks=LLAMA4_TILES_NUM, patch_size=LLAMA4_TILE_SIZE):
+def find_supported_resolutions(
+    max_num_tiles: int = LLAMA4_TILES_NUM, tile_size: int = LLAMA4_TILE_SIZE
+) -> list[tuple[int, int]]:
   """Find all possible resolutions for the image based on the number of chunks."""
   asp_dict = defaultdict(list)
-  for chunk_size in range(max_num_chunks, 0, -1):
-    _factors = sorted(get_factors(chunk_size))
-    _asp_ratios = [(factor, chunk_size // factor) for factor in _factors]
+  for num_tiles in range(max_num_tiles, 0, -1):
+    _factors = sorted(get_factors(num_tiles))
+    _asp_ratios = [(factor, num_tiles // factor) for factor in _factors]
     for height, width in _asp_ratios:
       ratio_float = height / width
       asp_dict[ratio_float].append((height, width))
 
-  # Get the resolutions multiplied by the patch_size
+  # Get the resolutions multiplied by the tile_size
   possible_resolutions = []
   for _, value in asp_dict.items():
     for height, depth in value:
-      possible_resolutions.append((height * patch_size, depth * patch_size))
+      possible_resolutions.append((height * tile_size, depth * tile_size))
 
   return possible_resolutions
 
 
-def get_best_resolution(img_height, image_width, possible_resolutions, resize_to_max_canvas=False):
+def get_best_resolution(
+    img_height: int, image_width: int, possible_resolutions: list[tuple[int, int]], resize_to_max_canvas: bool = False
+) -> tuple[int, int]:
   """
   Get the best resolution for the image based on the possible resolutions.
   Args:
@@ -263,6 +267,38 @@ def pad_to_best_fit_jax(
   return padded_output
 
 
+def pad_to_max_tiles(
+    images: np.ndarray,
+    max_num_tiles: int = LLAMA4_TILES_NUM,
+) -> tuple[np.ndarray, np.ndarray]:
+  """
+  Pads the image tiles to the maximum number of tiles using JAX.
+
+  Args:
+      images: The input image tiles with shape (num_tiles, C, H, W).
+      max_num_tiles: The maximum number of tiles to pad to.
+
+  Returns:
+      The padded image tiles with shape (max_num_tiles, C, H, W).
+      The mask indicating valid tiles with shape (max_num_tiles,).
+  """
+  num_tiles, num_channels, height, width = images.shape
+  if num_tiles > max_num_tiles:
+    raise ValueError(f"Number of tiles {num_tiles} exceeds max_num_tiles {max_num_tiles}")
+
+  # Create a new array filled with zeros for padding
+  padded_tiles = np.zeros((max_num_tiles, num_channels, height, width), dtype=images.dtype)
+
+  # Copy the original tiles into the new array
+  padded_tiles[:num_tiles] = images
+
+  # Create a mask indicating valid tiles in encoder input
+  mask = np.zeros((max_num_tiles,), dtype=np.int32)
+  mask[:num_tiles] = 1
+
+  return padded_tiles, mask
+
+
 def split_to_tiles(images: np.ndarray, num_tiles_height: int, num_tiles_width: int) -> np.ndarray:
   """
   Splits an image tensor into tiles using JAX.
@@ -343,7 +379,7 @@ def pre_process_llama4_image(image):
     Additional global tile of (336, 336) is added, and the final output image_tiles is (5, 3, 336, 336).
   """
   # Find the best resolution canvas for the image
-  possible_resolutions = find_supported_resolutions(max_num_chunks=LLAMA4_TILES_NUM, patch_size=LLAMA4_TILE_SIZE)
+  possible_resolutions = find_supported_resolutions(max_num_tiles=LLAMA4_TILES_NUM, tile_size=LLAMA4_TILE_SIZE)
   best_resolution = get_best_resolution(
       img_height=image.shape[0],
       image_width=image.shape[1],
@@ -382,10 +418,14 @@ def pre_process_llama4_image(image):
     global_tiles = np.expand_dims(global_tiles, axis=0)
     image_tiles = np.concatenate((image_tiles, global_tiles), axis=0)
 
+  # Pad the tiles to the maximum number of tiles
+  image_tiles, image_mask = pad_to_max_tiles(image_tiles, max_num_tiles=LLAMA4_TILES_NUM)
+
   # TODO(hengtaoguo): Add support for multiple images with aspect ratios size of [num_images, 2]
   aspect_ratios_array = np.array([[ratio_h, ratio_w]], dtype=np.int32)
   processor_output = PreprocessorOutput(
       pixel_values=image_tiles,
+      pixel_mask=image_mask,
       aspect_ratios=aspect_ratios_array,
   )
   return processor_output
@@ -453,22 +493,18 @@ def get_image_offsets(model_name, processor_output: PreprocessorOutput | None):
     assert processor_output.aspect_ratios is not None, "Aspect ratio must be provided for Llama4 image fusion."
     image_height, image_width = LLAMA4_TILE_SIZE, LLAMA4_TILE_SIZE
     downsample_ratio = int(round(1.0 / (LLAMA4_PIXEL_SHUFFLE_RATIO**2)))
-    num_patches_per_chunk = int(
-        (image_height // LLAMA4_PATCH_SIZE) * (image_width // LLAMA4_PATCH_SIZE) // downsample_ratio
-    )
+    num_patches_per_chunk = int((image_height // LLAMA4_PATCH_SIZE) * (image_width // LLAMA4_PATCH_SIZE) // downsample_ratio)
     num_images = processor_output.aspect_ratios.shape[0]
     image_tokens_count = 0
     for image_index in range(num_images):
-      image_tokens_count += get_num_tokens_for_this_image(
-          processor_output.aspect_ratios[image_index], num_patches_per_chunk
-      )
+      image_tokens_count += get_num_tokens_for_this_image(processor_output.aspect_ratios[image_index], num_patches_per_chunk)
     images_offsets = image_tokens_count - num_images
     return images_offsets  # -num_images because replacing every <|image|> tokens.
   else:
     return 0
 
 
-def get_dummy_image_shape_for_init(model_name, batch_size=1, num_image_per_sequence=1, num_tiles_per_image=1):
+def get_dummy_image_shape_for_init(model_name, batch_size=1, num_image_per_sequence=1, num_tiles_per_image=16):
   """Return the shape of the dummy image for specific model's initialization."""
   image_shape = ()
   if model_name.startswith("gemma3"):
@@ -481,7 +517,8 @@ def get_dummy_image_shape_for_init(model_name, batch_size=1, num_image_per_seque
     )
   elif model_name.startswith("llama4"):
     image_shape = (
-        batch_size * num_image_per_sequence,
+        batch_size,
+        num_image_per_sequence,
         num_tiles_per_image,
         NUM_IMAGE_CHANNELS,
         LLAMA4_TILE_SIZE,
@@ -519,9 +556,7 @@ def add_extra_tokens_for_images_llama4(tokens, processor_output: PreprocessorOut
 
   image_height, image_width = LLAMA4_TILE_SIZE, LLAMA4_TILE_SIZE
   downsample_ratio = int(round(1.0 / (LLAMA4_PIXEL_SHUFFLE_RATIO**2)))
-  num_patches_per_chunk = int(
-      (image_height // LLAMA4_PATCH_SIZE) * (image_width // LLAMA4_PATCH_SIZE) // downsample_ratio
-  )
+  num_patches_per_chunk = int((image_height // LLAMA4_PATCH_SIZE) * (image_width // LLAMA4_PATCH_SIZE) // downsample_ratio)
 
   image_index = 0
   for local_image_index, split_part in enumerate(sublists):
@@ -783,25 +818,52 @@ def merge_mm_embeddings(
     text_embeddings: np.ndarray | jnp.ndarray,
     vision_embeddings: np.ndarray | jnp.ndarray,
     mask,
+    image_masks: np.ndarray | jnp.ndarray | None = None,
 ) -> np.ndarray | jnp.ndarray:
   """Merge the text and MM tokens.
 
   Args:
-    tokens: The text tokens.
-    mm_tokens: The MM tokens.
+    text_embeddings: [seq_len, d] array of text embeddings.
+    vision_embeddings: [num_images * num_tiles, num_toks_per_image, d] array of
+      vision embeddings.
+    mask: [seq_len] boolean or integer array where non-zero positions
+      indicate where vision embeddings should be placed.
+    image_masks: (Optional) [num_images, num_tiles] integer
+      array indicating which tiles are valid (1) vs. padded (0). If
+      None, valid vision embeddings are detected by checking for
+      non-zero vectors.
 
   Returns:
-    The merged tokens.
+    A [seq_len, d] array of merged embeddings.
   """
-  return jax.vmap(_merge_mm_embeddings_inner, in_axes=(0, 0, 0))(text_embeddings, vision_embeddings, mask)
+  return jax.vmap(_merge_mm_embeddings_inner, in_axes=(0, 0, 0, 0))(text_embeddings, vision_embeddings, mask, image_masks)
 
 
-def _merge_mm_embeddings_inner(text_embeddings, vision_embeddings, mask):
+def _merge_mm_embeddings_inner(text_embeddings, vision_embeddings, mask, image_mask):
   """`merge_embeddings` without batch dimension."""
 
   # Rearrange the vision embeddings from [num_images, num_toks_per_image, d] to [num_images * num_toks_per_image, d]
+  # Note that num_images corresponds to total number of tiles including padding tiles if image tiling is used.
   num_images, num_toks_per_image, d = vision_embeddings.shape
   vision_embeddings = jnp.reshape(vision_embeddings, (num_images * num_toks_per_image, d))
+
+  if image_mask is not None:
+    _, num_tiles = image_mask.shape
+
+    # Expand image_masks to match the token-level granularity
+    # (num_images, num_tiles) -> (num_images, num_toks_per_image
+    num_tokens_per_tile = num_toks_per_image // num_tiles
+    token_mask_2d = jnp.repeat(image_mask, repeats=num_tokens_per_tile, axis=1)
+
+    # Flatten the token-level mask to match vision_embeddings
+    # (num_images, num_toks_per_image) -> (num_images * num_toks_per_image,)
+    token_mask_flat = jnp.reshape(token_mask_2d, -1)
+
+    # Create indices to sort by the mask (True values first)
+    sort_indices = jnp.argsort(-token_mask_flat)
+
+    # Shuffle the embeddings. Shape is unchanged: [num_images * num_toks_per_image, d]
+    vision_embeddings = vision_embeddings[sort_indices]
 
   # len(vision_embeddings) == max_num_images * num_tokens_per_image
   target_pos = jnp.nonzero(mask, size=len(vision_embeddings))
