@@ -60,6 +60,8 @@ Upload notebooks or mount your GitHub repo
 2. Try:
    - `sft_qwen3_demo.ipynb`
    - `sft_llama3_demo.ipynb`
+   - `grpo_llama3_demo.ipynb`
+
 
 > ⚡ **Tip:** If Colab disconnects, re-enable TPU and re-run setup cells. Save checkpoints to GCS or Drive.
 
@@ -89,10 +91,6 @@ gcloud compute tpus tpu-vm ssh maxtext-tpu-node --zone=YOUR_ZONE
 sudo apt update && sudo apt upgrade -y
 sudo apt install python3-pip python3-dev git -y
 pip3 install jupyterlab
-git clone https://github.com/AI-Hypercomputer/maxtext.git
-cd maxtext
-chmod +x setup.sh
-./setup.sh
 ```
 
 ### Step 4: Start Jupyter Lab
@@ -113,38 +111,11 @@ gcloud compute tpus tpu-vm ssh maxtext-tpu-node --zone=YOUR_ZONE -- -L 8888:loca
 
 Then open → `http://localhost:8888`
 
-#### Option B: Direct IP (Less Secure)
-
-1. Open `http://<VM_PUBLIC_IP>:8888`
-2. Use token for login
 
 ## Method 3: Colab + Local Jupyter Lab Hybrid
 
-This lets you develop locally but train on Colab TPU.
-
-### Step 1: Local Dev Setup
-
-```bash
-git clone https://github.com/AI-Hypercomputer/maxtext.git
-cd maxtext
-python3 -m venv maxtext_env
-source maxtext_env/bin/activate
-pip install jupyterlab -r requirements.txt
-jupyter lab
-```
-
-Open → `http://localhost:8888`
-
-### Step 2: Upload to Colab
-
-1. **File** → **Upload notebook**
-2. Enable TPU runtime in Colab
-3. Run on Colab TPU
-
-### Step 3: Sync Changes
-
-1. Download `.ipynb` from Colab after edits
-2. Replace local version → continue dev
+Set up Jupyter Lab as in step 2.
+Use the link for Jupyter Lab as a link for "Connect to a local runtime" in Collab - at the dropdown where you select the runtime.
 
 ## Available Examples
 
