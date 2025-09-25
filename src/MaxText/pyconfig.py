@@ -1058,7 +1058,7 @@ def validate_ring_of_experts_parallelism(raw_keys):
 def validate_shard_fsdp_on_expert_parallelism(raw_keys):
   if raw_keys["fsdp_shard_on_exp"] and raw_keys["num_experts"] % raw_keys["ici_fsdp_parallelism"]!=0: 
     raise ValueError("fsdp_shard_on_exp requires num_experts is divisiable by ici_fsdp_parallelism.")
-  if raw_keys["fsdp_shard_on_exp"] and (using_tensor_parallelism(raw_keys) or useing_expert_parallelism(raw_keys)): 
+  if raw_keys["fsdp_shard_on_exp"] and (using_tensor_parallelism(raw_keys) or using_expert_parallelism(raw_keys)): 
     raise ValueError("fsdp_shard_on_exp requires ici_expert_parallelism = 1 and ici_tensor_parallelism/ici_tensor_transpose_parallelism = 1.")
 
 def validate_ragged_dot(raw_keys):
