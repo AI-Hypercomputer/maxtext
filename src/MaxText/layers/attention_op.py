@@ -919,7 +919,8 @@ class AttentionOp(nnx.Module):
       axis_names_splash_kernel = nn.logical_to_mesh_axes(self.flash_axis_names_splash_kernel)
       axis_names_q = nn.logical_to_mesh_axes(self.flash_axis_names_q)
       axis_names_kv = nn.logical_to_mesh_axes(self.flash_axis_names_kv)
-
+    
+    axis_names_lse = nn.logical_to_mesh_axes(("activation_batch", None, None)) # rawr
     global global_block_q, global_block_kv, global_block_kv_compute, global_block_q_dkv, global_block_kv_dkv
     global global_block_kv_dkv_compute, global_block_q_dq, global_block_kv_dq, global_use_fused_bwd_kernel
     global global_q_layout, global_k_layout, global_v_layout
@@ -1012,7 +1013,8 @@ class AttentionOp(nnx.Module):
           q_seq_shards=cp_size,  # axis for sequence sharding
           block_sizes=block_sizes,
           attn_logits_soft_cap=attn_logits_soft_cap,
-          residual_checkpoint_name="context",
+          save_residuals=False, #rawr, keep this False
+          residual_checkpoint_name="splash",
       )
       return splash_kernel
 

@@ -267,6 +267,8 @@ key_proj: 'remat'
 value_proj: 'remat'
 qkv_proj: 'remat'
 out_proj: 'remat'
+splash: 'device'
+
 
 optimizer_memory_host_offload: False
 parameter_memory_host_offload: False
