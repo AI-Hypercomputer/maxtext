@@ -20,6 +20,7 @@ import args_helper as helper
 
 import benchmarks.maxtext_trillium_model_configs as model_configs
 import benchmarks.maxtext_xpk_runner as mxr
+from benchmarks.benchmark_utils import get_xpk_path
 from benchmarks.xpk_configs import XpkClusterConfig
 
 
@@ -36,7 +37,7 @@ COUNTRY = "us"
 DEVICE_TYPE = "v6e-256"
 
 # Other parameters (MUST BE SET BY USER)
-XPK_PATH = os.path.join("~", "xpk")  # We're running this script from the maxtext directory
+XPK_PATH = get_xpk_path()
 USER = os.environ["USER"]
 BASE_OUTPUT_DIRECTORY = (
     f"gs://{USER}-{PROJECT}-{COUNTRY}/pw_mcjax_benchmarking/"

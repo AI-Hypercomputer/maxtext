@@ -13,7 +13,9 @@
 # limitations under the License.
 
 import dataclasses
+import logging
 import math
+import os
 import typing
 
 
@@ -61,3 +63,12 @@ class MaxTextModel:
 def _add_to_model_dictionary(model_dictionary: dict[str, MaxTextModel], maxtext_model: MaxTextModel) -> MaxTextModel:
   model_dictionary[maxtext_model.model_name.replace("-", "_")] = maxtext_model
   return maxtext_model
+
+
+def get_xpk_path():
+  """Get XPK path. Defaults to `"$HOME/xpk"`."""
+  xpk_path = os.path.join(os.path.expanduser("~"), "xpk")
+  if not os.path.isdir(xpk_path):
+    logging.error("Could not find %s. Please install or move XPK to %s", xpk_path, xpk_path)
+    raise SystemExit(1)
+  return xpk_path
