@@ -45,9 +45,10 @@ jobs:
         JAX_BACKEND_TARGET: "grpc://proxy:29000"
     steps:
       - uses: actions/checkout@v4
-      - name: Run Server
+      - name: Run Tests
         run: |
-          sleep 100000
+          python3 -m pip install -e . --no-dependencies &&
+          python3 -m pytest -v -m "${FINAL_PYTEST_MARKER}" --durations=0
     
     services:
       resource_manager:
