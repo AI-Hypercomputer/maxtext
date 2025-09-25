@@ -39,6 +39,7 @@ jobs:
     runs-on: linux-x86-ct5lp-112-4tpu-test
     container:
       image: gcr.io/tpu-prod-env-multipod/maxtext-unit-test-tpu:py312
+
       env:
         TPU_SKIP_MDS_QUERY: true
         JAX_PLATFORMS: "proxy"
