@@ -15,4 +15,4 @@ steps=10 \
 scan_layers=false \
 model_name=llama2-7b \
 weight_dtype=bfloat16 \
-tokenizer_path="${MAXTEXT_ASSETS_ROOT:-${MAXTEXT_REPO_ROOT:-$PWD}/assets}"/tokenizer.llama2
+tokenizer_path="${MAXTEXT_ASSETS_ROOT:-${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText/assets}}"/tokenizer.llama2

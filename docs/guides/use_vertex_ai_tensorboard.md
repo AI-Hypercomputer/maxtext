@@ -14,6 +14,7 @@
  limitations under the License.
 -->
 
+(vertex-ai-tensorboard)=
 # Use Vertex AI Tensorboard
 
 MaxText supports automatic upload of logs collected in a directory to a Tensorboard instance in Vertex AI. For more information on how MaxText supports this feature, visit [cloud-accelerator-diagnostics](https://pypi.org/project/cloud-accelerator-diagnostics) PyPI package documentation.

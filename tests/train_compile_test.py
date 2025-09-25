@@ -493,7 +493,7 @@ class TrainCompile(unittest.TestCase):
             "megablox=False",
             "per_device_batch_size=2",
             "max_target_length=1024",
-            "attention=dot_product",  # Change to flash attention once it works for MLA
+            "attention=flash",
             "dtype=bfloat16",
             "weight_dtype=bfloat16",
             "scan_layers=True",
@@ -518,7 +518,7 @@ class TrainCompile(unittest.TestCase):
             "megablox=False",
             "per_device_batch_size=1",
             "max_target_length=1024",
-            "attention=dot_product",  # Change to flash attention once it works for MLA
+            "attention=flash",
             "dtype=bfloat16",
             "weight_dtype=bfloat16",
             "scan_layers=False",
@@ -541,7 +541,7 @@ class TrainCompile(unittest.TestCase):
             "megablox=False",
             "per_device_batch_size=1",
             "max_target_length=1024",
-            "attention=dot_product",  # Change to flash attention once it works for MLA
+            "attention=flash",
             "dtype=bfloat16",
             "weight_dtype=bfloat16",
             "n_routing_groups=8",
@@ -565,7 +565,7 @@ class TrainCompile(unittest.TestCase):
             "megablox=False",
             "per_device_batch_size=1",
             "max_target_length=1024",
-            "attention=dot_product",  # Change to flash attention once it works for MLA
+            "attention=flash",
             "dtype=bfloat16",
             "weight_dtype=bfloat16",
             "n_routing_groups=-1",
@@ -585,7 +585,7 @@ class TrainCompile(unittest.TestCase):
             "compile_topology_num_slices=8",
             "use_iota_embed=true",
             "model_name=deepseek3-671b",
-            "megablox=False",  # dropless not yet supported (b/418313093)
+            "megablox=True",
             "sparse_matmul=False",
             "capacity_factor=1",
             "per_device_batch_size=1",
@@ -634,6 +634,50 @@ class TrainCompile(unittest.TestCase):
             "scan_layers=True",
             "ici_fsdp_parallelism=32",
             "ici_tensor_parallelism=4",
+        )
+    )
+
+  @pytest.mark.cpu_only
+  def test_moe_gpt_oss_20b_sparse_matmul(self):
+    compiled_trainstep_file = "/tmp/test_moe_gpt_oss_20b_sparse_matmul.pickle"
+    train_compile_main(
+        (
+            "",
+            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-64",
+            "compile_topology_num_slices=1",
+            "model_name=gpt-oss-20b",
+            "per_device_batch_size=1",
+            "max_target_length=1024",
+            "dtype=bfloat16",
+            "weight_dtype=bfloat16",
+            "scan_layers=True",
+            "sparse_matmul=True",
+            "megablox=True",
+            "attention=dot_product", # flash attention: need JAX version >= 0.7.2.dev20250824
+        )
+    )
+
+  @pytest.mark.cpu_only
+  def test_moe_gpt_oss_20b_dense_matmul(self):
+    compiled_trainstep_file = "/tmp/test_moe_gpt_oss_20b_dense_matmul.pickle"
+    train_compile_main(
+        (
+            "",
+            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-64",
+            "compile_topology_num_slices=1",
+            "model_name=gpt-oss-20b",
+            "per_device_batch_size=1",
+            "max_target_length=1024",
+            "dtype=bfloat16",
+            "weight_dtype=bfloat16",
+            "scan_layers=True",
+            "sparse_matmul=False",
+            "capacity_factor=-1",
+            "attention=dot_product", # flash attention: need JAX version >= 0.7.2.dev20250824
         )
     )
 

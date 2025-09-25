@@ -3,6 +3,7 @@ aqtp
 array-record
 cloud-accelerator-diagnostics
 cloud-tpu-diagnostics
+datasets
 flax
 gcsfs
 google-api-python-client
@@ -10,8 +11,8 @@ google-cloud-aiplatform
 google-cloud-monitoring
 grain[parquet]
 huggingface_hub
-jax<0.7.1
-jaxlib<0.7.1
+jax!=0.7.1
+jaxlib!=0.7.1
 jaxtyping
 jsonlines
 ml-collections
@@ -36,9 +37,7 @@ tensorflow-text
 tensorflow
 tiktoken
 transformers
-tunix @ https://github.com/google/tunix/archive/4c5561be36d8a2f1f0858c2685554ca4e1a65fd2.zip
+google-tunix @ https://github.com/google/tunix/archive/e03f154edd2abfddd6b9babb72a3d0d3c4d81bb2.zip
 google-jetstream @ https://github.com/AI-Hypercomputer/JetStream/archive/daedc21c393f23449fb54ddc4f75fca34348ea9c.zip
 mlperf-logging @ https://github.com/mlcommons/logging/archive/38ab22670527888c8eb7825a4ece176fcc36a95d.zip
 qwix @ https://github.com/google/qwix/archive/f2fd7b9114ff8d09e5b0131a453351578502da8a.zip
-# datasets 0.4.0 is not compatible with fsspec==2025.7.0. It will be updated in the next datasets release.
-datasets @ https://github.com/huggingface/datasets/archive/6790e138c00b87a1ddc72184f89e7814cf784360.zip

@@ -26,7 +26,7 @@ Arithmetic intensity is calculated as the ratio of floating-point operations (FL
 
 This metric helps determine whether a computation is MXU-bound (high arithmetic intensity) or memory-bound/communication-bound (low arithmetic intensity).
 
-[This sharding document](docs/explanations/sharding.md) illustrates various sharding strategies and their roofline analysis, through AI analysis.
+[This sharding document](sharding) illustrates various sharding strategies and their roofline analysis, through AI analysis.
 
 
 ## Metrics for Benchmark Analysis

@@ -144,3 +144,7 @@ dmypy.json
 
 # Intellij IDEA setting folder
 .idea
+
+# Gemini CLI
+.gemini/
+gha-creds-*.json

@@ -53,11 +53,14 @@ def _sort_activations(
 ) -> jax.Array:
   """Sort activations by `sort_indices`.
 
-  If `use_custom_vjp` is True, then we use a custom backward pass that
+  If `use_custom_vjp=True`, then we use a custom backward pass that
   reverses the sort order. Specifically, this unsort operation is simply a sort
   with `jnp.argsort(sort_indices)` as the sort indices. This is only needed in
   the case where the compiler generates a less efficient backward pass op.
- 
+
+  Note that `use_custom_vjp=True` assumes that `sort_indices` is a permutation
+  of `jnp.arange(inputs.shape[0])`.
+
   Args:
     inputs: `(tokens, ...)`-shaped array of input activations to sort.
     sort_indices: `(tokens,)`-shaped array containing the sort order.
@@ -295,9 +298,15 @@ class RoutedMoE(nnx.Module):
     self.weight_dtype = weight_dtype
     self.dtype = dtype
     self.quant = quant
+    self.rngs = rngs
 
-    self.wi_kernel_axes = ("exp", "embed_no_exp", "mlp")
-    self.wo_kernel_axes = ("exp", "mlp", "embed_no_exp")
+    if self.config.fsdp_shard_on_exp:
+    # special sharding for dsv3
+      self.wi_kernel_axes = ("embed_no_exp", None, "mlp")
+      self.wo_kernel_axes = ("embed_no_exp", "mlp", None)
+    else:
+      self.wi_kernel_axes = ("exp", "embed_no_exp", "mlp")
+      self.wo_kernel_axes = ("exp", "mlp", "embed_no_exp")
 
     self.gate = GateLogit(
         in_features_shape=self.config.emb_dim,
@@ -311,7 +320,12 @@ class RoutedMoE(nnx.Module):
         use_bias=self.config.routed_bias,
         score_func=self.config.routed_score_func,
         matmul_precision=self.config.matmul_precision,
-        rngs=rngs,
+        rngs=self.rngs,
+    )
+
+    # pylint: disable=protected-access
+    self.activation_fn = linears._convert_to_activation_function(
+        self.config.mlp_activations[0]
     )
 
     kernel_in_axis = np.arange(1)
@@ -327,7 +341,7 @@ class RoutedMoE(nnx.Module):
     else:
       self.wi_0 = nnx.Param(
           self.kernel_init(
-              rngs.params(),
+              self.rngs.params(),
               (num_experts, self.config.emb_dim, intermediate_dim),
               weight_dtype,
               kernel_in_axis,
@@ -337,7 +351,7 @@ class RoutedMoE(nnx.Module):
       )
       self.wi_1 = nnx.Param(
           self.kernel_init(
-              rngs.params(),
+              self.rngs.params(),
               (num_experts, self.config.emb_dim, intermediate_dim),
               weight_dtype,
               kernel_in_axis,
@@ -347,7 +361,7 @@ class RoutedMoE(nnx.Module):
       )
       self.wo = nnx.Param(
           self.kernel_init(
-              rngs.params(),
+              self.rngs.params(),
               (self.num_experts, self.intermediate_dim, self.config.emb_dim),
               self.weight_dtype,
               kernel_in_axis,
@@ -362,15 +376,15 @@ class RoutedMoE(nnx.Module):
       wi_bias_shape = (self.num_experts, self.intermediate_dim)
       wo_bias_shape = (self.num_experts, self.config.emb_dim)
       self.wi_0_bias = nnx.Param(
-          default_bias_init(rngs.params(), wi_bias_shape, self.weight_dtype),
+          default_bias_init(self.rngs.params(), wi_bias_shape, self.weight_dtype),
           sharding=wi_bias_axes,
       )
       self.wi_1_bias = nnx.Param(
-          default_bias_init(rngs.params(), wi_bias_shape, self.weight_dtype),
+          default_bias_init(self.rngs.params(), wi_bias_shape, self.weight_dtype),
           sharding=wi_bias_axes,
       )
       self.wo_bias = nnx.Param(
-          default_bias_init(rngs.params(), wo_bias_shape, self.weight_dtype),
+          default_bias_init(self.rngs.params(), wo_bias_shape, self.weight_dtype),
           sharding=wo_bias_axes,
       )
     else:
@@ -390,12 +404,15 @@ class RoutedMoE(nnx.Module):
   def get_context_autoregressive_parallelism_size(self):
     return self.mesh.shape["context_autoregressive"]
 
-  def get_topk(self, gate_logits, pre_bias_logits):
+  def get_topk(self, gate_logits, pre_bias_logits, rngs=None):
     """get topk."""
     # shape of top_k_weights & top_k_indices:
     # (batch, sequence, num_experts_per_tok).
     if self.config.use_random_routing:
-      rng = self.make_rng("random_routing")
+      if rngs is None:
+        raise ValueError("The random key cannot be None for random routing.")
+      # Re-use the 'dropout' RNG stream to ensure random routing
+      rng = rngs.dropout()
       top_k_weights, top_k_indices = random_routing(rng, gate_logits, self.num_experts_per_tok)
       return top_k_weights, top_k_indices
 
@@ -415,6 +432,7 @@ class RoutedMoE(nnx.Module):
 
     return top_k_weights, top_k_indices
 
+    
   def deepseek_scale_weights(self, weights):
     """Scales weights according to DeepSeek's v3 reference implementation."""
     # https://github.com/deepseek-ai/DeepSeek-V3/blob/2f7b80eecebf3d1c84da5a0d465f6639ea175012/inference/model.py#L592-L594.
@@ -489,13 +507,27 @@ class RoutedMoE(nnx.Module):
     top_k_weights = jnp.take_along_axis(pre_bias_logits, top_k_indices, axis=-1)
     return top_k_weights, top_k_indices
 
-  def permute(self, inputs, gate_logits, pre_bias_logits, use_custom_sort_vjp=True):
+  def apply_ffn_activation(self, layer_w0, layer_w1):
+    """Applies FFN activation function."""
+    with jax.named_scope("ffn_act"):
+      if self.config.decoder_block == ctypes.DecoderBlockType.GPT_OSS:
+        layer_w0 = jnp.clip(layer_w0, a_min=None, a_max=self.config.mlp_activations_limit)
+        layer_w1 = jnp.clip(layer_w1, a_min=-self.config.mlp_activations_limit, a_max=self.config.mlp_activations_limit)
+        layer_act = self.activation_fn(layer_w0 * 1.702)
+        glu = jnp.multiply(layer_w0, layer_act)
+        intermediate_layer = jnp.multiply(glu, (layer_w1 + 1))
+      else:
+        layer_act = self.activation_fn(layer_w0)
+        intermediate_layer = jnp.multiply(layer_act, layer_w1)
+      return intermediate_layer.astype(self.dtype)
+
+  def permute(self, inputs, gate_logits, pre_bias_logits, use_custom_sort_vjp=True, rngs=None, roll_to_expert_id=None):
     """Permute tokens to group by expert to fit gmm call."""
     # reshape inputs (batch, sequence, emb) to (batch * sequence, emb)
     inputs_shape = inputs.shape
     bsz_times_seq_len = inputs_shape[0] * inputs_shape[1]
     inputs_2d = jnp.reshape(inputs, (bsz_times_seq_len, inputs_shape[2]))
-    weights, selected_experts = self.get_topk(gate_logits, pre_bias_logits)
+    weights, selected_experts = self.get_topk(gate_logits, pre_bias_logits, rngs)
 
     if self.config.decoder_block == ctypes.DecoderBlockType.LLAMA4:
       # weights will be of shape (batch_size, seq_len, num_experts_per_tok)
@@ -504,13 +536,12 @@ class RoutedMoE(nnx.Module):
       inputs_2d = inputs_2d * router_scores.reshape(bsz_times_seq_len, -1)
 
     flatten_selected_experts = jnp.ravel(selected_experts)
+    if roll_to_expert_id is not None:
+      flatten_selected_experts = (flatten_selected_experts - roll_to_expert_id) % self.num_experts
     sorted_selected_experts = jnp.argsort(flatten_selected_experts)
-    sorted_indices = sorted_selected_experts // self.num_experts_per_tok
     # sort inputs for number of selected experts
-    replicated_inputs_2d = jnp.reshape(
-        jnp.broadcast_to(inputs_2d[None, ...], (self.num_experts_per_tok, *inputs_2d.shape)), 
-        (self.num_experts_per_tok * inputs_2d.shape[0], inputs_2d.shape[1]))
-    sorted_inputs = _sort_activations(replicated_inputs_2d, sorted_indices, use_custom_sort_vjp).astype(self.dtype)
+    replicated_inputs_2d = jnp.repeat(inputs_2d, self.num_experts_per_tok, axis=0)
+    sorted_inputs = _sort_activations(replicated_inputs_2d, sorted_selected_experts, use_custom_sort_vjp).astype(self.dtype)
     group_size = jnp.bincount(flatten_selected_experts, length=self.num_experts)
     # Return the experts for each sorted input.
     expert_indices = jnp.arange(self.num_experts)
@@ -796,7 +827,7 @@ class RoutedMoE(nnx.Module):
             lhs=inputs,
             rhs=kernel,
             group_sizes=group_sizes,
-            preferred_element_type=jnp.bfloat16,
+            preferred_element_type=self.dtype,
             tiling=tiling,
             lhs_quantize_dtype=lhs_quantize_dtype,
             rhs_quantize_dtype=rhs_quantize_dtype,
@@ -813,7 +844,7 @@ class RoutedMoE(nnx.Module):
               lhs=inputs,
               rhs=rhs_inputs,
               group_sizes=group_sizes,
-              preferred_element_type=jnp.bfloat16,
+              preferred_element_type=self.dtype,
           )
         if isinstance(kernel, aqt.QTensor):
           # Multiply outputs by the kernely scale
@@ -875,9 +906,15 @@ class RoutedMoE(nnx.Module):
 
     # w0, w1, wo needs to be un sharded on fsdp / fsdp_transpose axis, so use
     # mlp_no_fsdp axis
-    w0_pspec = nn.logical_to_mesh_axes(("exp", "embed_tensor_transpose", "mlp_no_fsdp"))
-    w1_pspec = nn.logical_to_mesh_axes(("exp", "embed_tensor_transpose", "mlp_no_fsdp"))
-    wo_pspec = nn.logical_to_mesh_axes(("exp", "mlp_no_fsdp", "embed_tensor_transpose"))
+    if self.config.fsdp_shard_on_exp:
+    # special sharding for dsv3 to remove overhead between gmm/AG
+      w0_pspec = nn.logical_to_mesh_axes(("embed_tensor_transpose", None, "mlp_no_fsdp"))
+      w1_pspec = nn.logical_to_mesh_axes(("embed_tensor_transpose", None, "mlp_no_fsdp"))
+      wo_pspec = nn.logical_to_mesh_axes(("embed_tensor_transpose", "mlp_no_fsdp", None))
+    else:
+      w0_pspec = nn.logical_to_mesh_axes(("exp", "embed_tensor_transpose", "mlp_no_fsdp"))
+      w1_pspec = nn.logical_to_mesh_axes(("exp", "embed_tensor_transpose", "mlp_no_fsdp"))
+      wo_pspec = nn.logical_to_mesh_axes(("exp", "mlp_no_fsdp", "embed_tensor_transpose"))
     if isinstance(w0_kernel, aqt.QTensor):
       w0_pspec = aqt.partition_spec(w0_pspec, (1,), w0_kernel.dtype, use_bias=False)
     if isinstance(w1_kernel, aqt.QTensor):
@@ -898,11 +935,12 @@ class RoutedMoE(nnx.Module):
             w0_bias_pspec,
             w1_bias_pspec,
             wo_bias_pspec,
+            None,
         ),
         out_specs=(nn.logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", "activation_embed"))),
         check_rep=False,
     )
-    def wrapper(x, logits, pre_bias_logits, w0, w1, wo, w0_bias, w1_bias, wo_bias):
+    def wrapper(x, logits, pre_bias_logits, w0, w1, wo, w0_bias, w1_bias, wo_bias, rngs):
       batch_size, sequence_length, _ = x.shape
       expert_axis_name = "expert"
       expert_shard_id = jax.lax.axis_index(expert_axis_name)
@@ -918,25 +956,19 @@ class RoutedMoE(nnx.Module):
         )
 
         # "Route" tokens within each shard.
-        x, sorted_selected_experts, weights, full_group_sizes, selected_experts = self.permute(
-            x, logits, pre_bias_logits, self.config.use_custom_sort_vjp)
+        num_experts_per_shard = self.config.num_experts // num_expert_parallelism
+        x, sorted_selected_experts, weights, group_sizes, selected_experts = self.permute(
+            x, logits, pre_bias_logits, self.config.use_custom_sort_vjp,
+            roll_to_expert_id=num_experts_per_shard * expert_shard_id)
 
         # Filter down to the group sizes that apply to only the experts in the
         # current shard.
-        full_group_sizes = jnp.reshape(full_group_sizes, (num_expert_parallelism, -1))
-        group_sizes = full_group_sizes[expert_shard_id]
-
-        # Move the tokens for the experts in the current shard to the start of
-        # the inputs array.
-        num_tokens_to_skip = (
-            jnp.cumsum(jnp.sum(full_group_sizes, axis=-1))[expert_shard_id] -
-            jnp.sum(full_group_sizes[expert_shard_id])
-          )
-        x = jnp.roll(x, shift=-num_tokens_to_skip, axis=0)
+        group_sizes = group_sizes[:num_experts_per_shard]
+        mask = jnp.arange(x.shape[0]) < jnp.sum(group_sizes)
+        x = jnp.where(mask[:, None], x, 0)
       else:
-        num_tokens_to_skip = None
         x, sorted_selected_experts, weights, group_sizes, selected_experts = self.permute(
-            x, logits, pre_bias_logits, self.config.use_custom_sort_vjp)
+            x, logits, pre_bias_logits, self.config.use_custom_sort_vjp, rngs)
 
         if num_expert_parallelism > 1:
           batch_axis = "expert" if is_batch_sharded_by_expert else "data"
@@ -1018,17 +1050,7 @@ class RoutedMoE(nnx.Module):
       if self.config.mlp_bias:
         layer_w1 = layer_w1 + w1_bias
       layer_w1 = adc.checkpoint_name(layer_w1, "mlpwi_1")
-      # pylint: disable=protected-access
-
-      if self.config.decoder_block == ctypes.DecoderBlockType.GPT_OSS:
-        layer_w0 = jnp.clip(layer_w0, a_min=None, a_max=self.config.mlp_activations_limit)
-        layer_w1 = jnp.clip(layer_w1, a_min=-self.config.mlp_activations_limit, a_max=self.config.mlp_activations_limit)
-        layer_act = linears._convert_to_activation_function(self.config.mlp_activations[0])(layer_w0 * 1.702)
-        glu = jnp.multiply(layer_w0, layer_act)
-        intermediate_layer = jnp.multiply(glu, (layer_w1 + 1))
-      else:
-        layer_act = linears._convert_to_activation_function(self.config.mlp_activations[0])(layer_w0)
-        intermediate_layer = jnp.multiply(layer_act, layer_w1)
+      intermediate_layer = self.apply_ffn_activation(layer_w0, layer_w1)
 
       intermediate_output = gmm_fn(intermediate_layer, wo)
       if self.get_tensor_parallelism_size() > 1:
@@ -1041,9 +1063,6 @@ class RoutedMoE(nnx.Module):
         # Set the outputs of tokens which were not processed to 0.
         mask = jnp.arange(intermediate_output.shape[0]) < jnp.sum(group_sizes)
         intermediate_output = jnp.where(mask[:, None], intermediate_output, 0)
-
-        # Move the tokens back to their original positions.
-        intermediate_output = jnp.roll(intermediate_output, shift=num_tokens_to_skip, axis=0)
 
         # Unsort and deduplicate the outputs locally.
         output = self.unpermute(
@@ -1144,7 +1163,7 @@ class RoutedMoE(nnx.Module):
       w1_kernel = nn.with_logical_constraint(w1_kernel, ("exp", "embed_tensor_transpose", "mlp_no_fsdp"))
       wo_kernel = nn.with_logical_constraint(wo_kernel, ("exp", "mlp_no_fsdp", "embed_tensor_transpose"))
 
-    return wrapper(inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel, w0_bias, w1_bias, wo_bias)
+    return wrapper(inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel, w0_bias, w1_bias, wo_bias, self.rngs)
 
   def reshape_and_update_weights(self, weights, indices):
     """reshape and update weights."""
@@ -1405,10 +1424,10 @@ class RoutedMoE(nnx.Module):
     if self.config.model_name.startswith("deepseek3"):
       # pre_bias_logits is None for non-DeepSeek v3 models
       pre_bias_logits = nn.with_logical_constraint(pre_bias_logits, ("activation_batch", "activation_norm_length", None))
-    top_k_weights, top_k_indices = self.get_topk(gate_logits, pre_bias_logits)
+    top_k_weights, top_k_indices = self.get_topk(gate_logits, pre_bias_logits, self.rngs)
     is_llama4_decoder_layer = self.config.decoder_block == ctypes.DecoderBlockType.LLAMA4
     if is_llama4_decoder_layer:
-      router_scores = jax.nn.sigmoid(top_k_weights.astype(jnp.float32)).astype(jnp.bfloat16)
+      router_scores = jax.nn.sigmoid(top_k_weights.astype(jnp.float32)).astype(self.dtype)
       inputs = inputs * router_scores
     else:
       weights = self.reshape_and_update_weights(top_k_weights, top_k_indices)
@@ -1573,9 +1592,7 @@ class RoutedMoE(nnx.Module):
             mlp_axis,
         )
         layer_w1 = adc.checkpoint_name(layer_w1, "mlpwi_1")
-      # pylint: disable=protected-access
-      layer_w0_act = linears._convert_to_activation_function(self.config.mlp_activations[0])(layer_w0)
-      layer_multiply = jnp.multiply(layer_w0_act, layer_w1).astype(self.dtype)
+      layer_multiply = self.apply_ffn_activation(layer_w0, layer_w1)
       with jax.named_scope("wo"):
         wo_kernel_axes = ("exp", "mlp", None)
         wo_kernel = self.maybe_all_gather_kernel_weight_in_expert_parallelism(wo_kernel, wo_kernel_axes)
@@ -1626,7 +1643,7 @@ class RoutedMoE(nnx.Module):
             "BSM,EMH -> BSEH", inputs, w0_kernel, precision=matmul_precision
         )
         if self.config.mlp_bias:
-          layer_w0 = layer_w0 + w0_bias
+          layer_w0 = layer_w0 + w0_bias[None, None, :, :]
         if self.config.activations_in_float32:
           layer_w0 = layer_w0.astype(jnp.float32)
         layer_w0 = adc.checkpoint_name(layer_w0, "mlpwi_0")
@@ -1635,13 +1652,12 @@ class RoutedMoE(nnx.Module):
             "BSM,EMH -> BSEH", inputs, w1_kernel, precision=matmul_precision
         )
         if self.config.mlp_bias:
-          layer_w1 = layer_w1 + w1_bias
+          layer_w1 = layer_w1 + w1_bias[None, None, :, :]
         if self.config.activations_in_float32:
           layer_w1 = layer_w1.astype(jnp.float32)
         layer_w1 = adc.checkpoint_name(layer_w1, "mlpwi_1")
-      # pylint: disable=protected-access
-      layer_w0_act = linears._convert_to_activation_function(self.config.mlp_activations[0])(layer_w0)
-      layer_multiply = jnp.multiply(layer_w0_act, layer_w1).astype(self.dtype)
+      layer_multiply = self.apply_ffn_activation(layer_w0, layer_w1)
+
       with jax.named_scope("wo"):
         intermediate_layer = self.get_einsum(rhs_mesh_axes=self.wo_kernel_axes)(
             "BSEH,EHM -> BSEM",
@@ -1650,17 +1666,19 @@ class RoutedMoE(nnx.Module):
             precision=matmul_precision,
         )
         if self.config.mlp_bias:
-          intermediate_layer = intermediate_layer + wo_bias
+          intermediate_layer = intermediate_layer + wo_bias[None, None, :, :]
         if self.config.activations_in_float32:
           intermediate_layer = intermediate_layer.astype(jnp.float32)
         intermediate_layer = adc.checkpoint_name(intermediate_layer, "mlpwo")
       with jax.named_scope("w_sum"):
         if is_llama4_decoder_layer:
           weights = self.reshape_and_update_weights(jnp.ones_like(top_k_weights), top_k_indices)
+        # cast to f32 for sum up in einsum op
         output = jnp.einsum(
             "BSEM,BSE -> BSM",
-            intermediate_layer,
-            weights,  # pylint: disable=undefined-variable,possibly-used-before-assignment
+            intermediate_layer.astype(jnp.float32),
+            weights.astype(jnp.float32),  # pylint: disable=undefined-variable,possibly-used-before-assignment
+            precision=matmul_precision,
         ).astype(self.dtype)
       return output, None
 

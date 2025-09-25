@@ -1,0 +1,6 @@
+datasets @ https://github.com/huggingface/datasets/archive/6790e138c00b87a1ddc72184f89e7814cf784360.zip
+google-jetstream @ https://github.com/AI-Hypercomputer/JetStream/archive/daedc21c393f23449fb54ddc4f75fca34348ea9c.zip
+mlperf-logging @ https://github.com/mlcommons/logging/archive/38ab22670527888c8eb7825a4ece176fcc36a95d.zip
+qwix @ https://github.com/google/qwix/archive/f2fd7b9114ff8d09e5b0131a453351578502da8a.zip
+google-tunix @ https://github.com/google/tunix/archive/e03f154edd2abfddd6b9babb72a3d0d3c4d81bb2.zip
+

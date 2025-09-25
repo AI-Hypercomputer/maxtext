@@ -123,8 +123,8 @@ def adam_pax(
       # `bias_corrected_dacay` is calculated as calculating `jnp.power(decay, t)` in low
       # precision can result in it being rounded to 1 and subsequently a
       # "division by zero" error.
-      beta1_decay = bias_corrected_decay(count, beta1).astype(update)
-      beta2_decay = bias_corrected_decay(count, beta2).astype(update)
+      beta1_decay = bias_corrected_decay(count, beta1).astype(update.dtype)
+      beta2_decay = bias_corrected_decay(count, beta2).astype(update.dtype)
       mu = (1.0 - beta1_decay) * update + beta1_decay * mu
       nu = (1.0 - beta2_decay) * (update**2) + beta2_decay * nu
       return _slot_opt_state(mu=mu, nu=nu)

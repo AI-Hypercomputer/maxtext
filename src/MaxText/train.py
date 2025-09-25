@@ -425,8 +425,8 @@ def train_loop(config, recorder, state=None):
 
       if config.eval_interval > 0 and step > start_step and (step + 1) % config.eval_interval == 0:
         assert eval_data_iterator
-
-        # Explicitly reset the eval counters before starting the eval loop
+        # Explicitly reset the eval iterator and counters before starting the eval loop
+        eval_data_iterator.reset()
         metric_logger.reset_eval_metrics()
 
         eval_step_count = 0

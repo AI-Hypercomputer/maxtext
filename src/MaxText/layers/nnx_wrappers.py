@@ -19,6 +19,7 @@ import typing as tp
 from typing import Any
 import warnings
 
+from flax import config as flax_config
 from flax import linen
 from flax import core
 from flax import nnx
@@ -28,13 +29,17 @@ from flax.nnx import graph
 from flax.nnx import variablelib
 from flax.nnx.bridge import module as bdg_module
 from flax.nnx.module import Module
-from flax.nnx import Object
+from flax.nnx import Pytree
 from flax.nnx.rnglib import Rngs
 import jax
 from jax import tree_util as jtu
 import qwix
 
 M = tp.TypeVar("M", bound=Module)
+
+
+if hasattr(flax_config, "flax_always_shard_variable"):
+  flax_config.update("flax_always_shard_variable", False)
 
 
 def is_vanilla_variable(vs: variablelib.VariableState) -> bool:
@@ -135,7 +140,7 @@ def nnx_attrs_to_linen_vars(nnx_attrs: dict) -> dict:
 
 def _set_initializing(module: Module, initializing: bool):
   for _, value in graph.iter_graph(module):
-    if isinstance(value, Object):
+    if isinstance(value, Pytree):
       value._object__state._initializing = initializing  # pylint: disable=protected-access
 
 

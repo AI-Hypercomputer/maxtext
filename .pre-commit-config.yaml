@@ -4,4 +4,4 @@ repos:
     hooks:
     - id: codespell
       name: Running codespell for typos
-      entry: codespell -w --skip="*.txt,pylintrc,.*,assets/*" .
+      entry: codespell -w --skip="*.txt,pylintrc,.*,src/MaxText/assets/*" .

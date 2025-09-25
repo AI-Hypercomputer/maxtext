@@ -65,7 +65,6 @@ def data_load_loop(config, state=None):
 
 
 def main(argv: Sequence[str]) -> None:
-  jax.config.update("jax_cpu_enable_gloo_collectives", True)
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
   config = pyconfig.initialize(argv)
   validate_train_config(config)

@@ -70,12 +70,13 @@ from etils import epath
 
 from tunix.rl.rollout.base_rollout import RolloutConfig
 
+from MaxText.globals import MAXTEXT_ASSETS_ROOT
 
 # for vLLM we can skip JAX precompilation with this flag, it makes startup faster
 os.environ["SKIP_JAX_PRECOMPILE"] = "1"
 
-# add the parent directory (two levels up to say ~/HOME/maxtext) to sys.path if currenlt runnig from
-# ~/HOME/maxtext/MaxText/examples
+# add the parent directory (two levels up to say ~/HOME/maxtext/src) to sys.path if currenlt runnig from
+# ~/HOME/maxtext/src/MaxText/examples
 
 # Get the directory of the current script
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -376,8 +377,8 @@ def get_ref_maxtext_model(config):
 model_config = llama3_lib.ModelConfig.llama3_1_8b()
 
 # Load the reference model
-# Note: pass the path to your scanned checkpoint for "load_parameters_path". To generate a scanned checkpoint, you can use the `scanned_checkpoint.py` script in MaxText.
-# To create a scanned checkpoint, you can use /maxtext/MaxText/utils/ckpt_conversion/to_maxtext.py
+# Note: pass the path to your scanned checkpoint for "load_parameters_path". 
+# To create a scanned checkpoint, you can use /maxtext/src/MaxText/utils/ckpt_conversion/to_maxtext.py
 config_ref = pyconfig.initialize(
     [
         "",
@@ -386,7 +387,7 @@ config_ref = pyconfig.initialize(
     base_output_directory="dummy",  # This is not used in Tunix.
     run_name="test-tunix-maxtext-llama3.1-8b",
     tokenizer_type="tiktoken",
-    tokenizer_path="assets/tokenizer_llama3.tiktoken",
+    tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizer_llama3.tiktoken"),
     load_parameters_path="gs://yixuannwang-maxtext-logs/llama3.1-8b-Instruct/scanned/0/items",
     # load_parameters_path="path/to/scanned/checkpoint",
     per_device_batch_size=1,
@@ -432,8 +433,8 @@ show_hbm_usage()
 
 
 # Load the policy model
-# Note: pass the path to your scanned checkpoint for "load_parameters_path". To generate a scanned checkpoint, you can use the `scanned_checkpoint.py` script in MaxText.
-# To create a scanned checkpoint, you can use /maxtext/MaxText/utils/ckpt_conversion/to_maxtext.py
+# Note: pass the path to your scanned checkpoint for "load_parameters_path".
+# To create a scanned checkpoint, you can use /maxtext/src/MaxText/utils/ckpt_conversion/to_maxtext.py
 
 # TODO: @mazumdera: change this to use lora
 
@@ -445,7 +446,7 @@ config_policy = pyconfig.initialize(
     base_output_directory="dummy",  # This is not used in Tunix.
     run_name="test-tunix-maxtext-llama3.1-8b",  # This is not used in Tunix.
     tokenizer_type="tiktoken",
-    tokenizer_path="assets/tokenizer_llama3.tiktoken",
+    tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizer_llama3.tiktoken"),
     load_parameters_path="gs://yixuannwang-maxtext-logs/llama3.1-8b-Instruct/scanned/0/items",
     # load_parameters_path="path/to/scanned/checkpoint",
     per_device_batch_size=1,
@@ -473,7 +474,6 @@ nnx.display(llama3_1_8b_policy)
 if DEBUG:
   print("Model initialized successfully")
   print(f"Model mesh shape: {mesh_policy.shape}")
-  print(f"Model config: {model_config_policy}")
 
   # Sanity check that weights are loaded correctly
   _maxtext_state_flatten = nnx.state(llama3_1_8b_policy).flat_state()
@@ -874,7 +874,6 @@ optimizer = optax.adamw(
     b2=B2,
     weight_decay=WEIGHT_DECAY,
 )
-# TODO: @mazumdera: try optimizer offloading with adamw
 
 if MAX_GRAD_NORM is not None:
   optimizer = optax.chain(
@@ -954,7 +953,7 @@ if DEBUG:
   # verify if vllm sampler works
   output = rl_cluster.rollout.generate(
       ["The capital of France is"],
-      rollout_config=RolloutConfig(n=1, max_tokens_to_generate=64, temperature=0.1),
+      rollout_config=RolloutConfig(max_tokens_to_generate=64, temperature=0.1),
   )
 
   print(f"Output: {output}")

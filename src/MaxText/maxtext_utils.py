@@ -41,15 +41,11 @@ import orbax.checkpoint.experimental.emergency.replicator_checkpoint_manager as 
 from MaxText import checkpointing
 from MaxText import max_logging
 from MaxText import max_utils
+from MaxText import multimodal_utils
 from MaxText.common_types import DecoderBlockType, MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE
 from MaxText.inference.page_manager import PageState
 
 OVERWRITE_WITH_GRADIENT = "_overwrite_with_gradient"
-
-# Multimodal constants
-NUM_IMAGES_PER_SEQUENCE = 1
-NUM_IMAGE_CHANNELS = 3
-NUM_TILES_PER_IMAGE = 1  # Fake number of tiles for llama4, init purpose
 
 
 def get_input_data_sharding(config, mesh):
@@ -91,31 +87,9 @@ def get_shaped_batch(config):
   shaped_batch["targets_position"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
   shaped_batch["targets_segmentation"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
   if config.use_multimodal:
-    image_shape = get_dummy_image_shape_for_init(config)
+    image_shape = multimodal_utils.get_dummy_image_shape_for_init(config.model_name, batch_size=config.micro_batch_size_to_train_on)
     shaped_batch["images"] = jax.ShapeDtypeStruct(image_shape, jnp.int32)
   return shaped_batch
-
-
-def get_dummy_image_shape_for_init(config):
-  """Return the shape of the dummy image for specific model's initialization."""
-  image_shape = ()
-  if config.model_name.startswith("gemma3"):
-    image_shape = (
-        config.micro_batch_size_to_train_on,
-        NUM_IMAGES_PER_SEQUENCE,
-        config.image_size_for_vit,
-        config.image_size_for_vit,
-        NUM_IMAGE_CHANNELS,
-    )
-  elif config.model_name.startswith("llama4"):
-    image_shape = (
-        config.micro_batch_size_to_train_on,
-        NUM_TILES_PER_IMAGE,
-        NUM_IMAGE_CHANNELS,
-        config.tile_size_for_vit,
-        config.tile_size_for_vit,
-    )
-  return image_shape
 
 
 def load_compiled(config, partial_train, state):
@@ -897,7 +871,7 @@ def init_initial_state(model, tx, config, is_training, key):
   Args: model, tx, config, is_training, key
   """
   input_shape = (config.micro_batch_size_to_train_on, config.max_target_length)
-  image_shape = get_dummy_image_shape_for_init(config)
+  image_shape = multimodal_utils.get_dummy_image_shape_for_init(config.model_name, batch_size=config.micro_batch_size_to_train_on)
   model_vars = model.init(
       {"params": key, "dropout": key, "aqt": key},
       np.ones(input_shape, dtype=jnp.int32),
@@ -1084,7 +1058,7 @@ def get_prefill_kv_cache_annotations(model, config, rng, mesh, page_state: None 
         config.micro_batch_size_to_train_on,
         config.max_prefill_predict_length,
     )
-    image_shape = get_dummy_image_shape_for_init(config)
+    image_shape = multimodal_utils.get_dummy_image_shape_for_init(config.model_name, batch_size=config.micro_batch_size_to_train_on)
 
     model_vars = model.init(
         {"params": rng, "dropout": rng, "aqt": rng},
@@ -1111,7 +1085,7 @@ def get_kv_cache_annotations(model, config, rng, mesh, page_state: None | PageSt
 
   def init_kv_cache(model, config):
     input_shape = (config.micro_batch_size_to_train_on, 1)
-    image_shape = get_dummy_image_shape_for_init(config)
+    image_shape = multimodal_utils.get_dummy_image_shape_for_init(config.model_name, batch_size=config.micro_batch_size_to_train_on)
 
     model_vars = model.init(
         {"params": rng, "dropout": rng, "aqt": rng},

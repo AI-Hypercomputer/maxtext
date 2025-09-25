@@ -407,20 +407,22 @@ def pre_process_image(image, model_name):
     raise ValueError(f"Model {model_name} does not support multimodal inference.")
 
 
-def reformat_prompt(prompt, image_placeholder, model_name):
+def reformat_prompt(prompt, image_placeholder, model_name, num_images):
   """Reformat prompt for different models."""
   if model_name in ["gemma3-4b", "gemma3-12b", "gemma3-27b"]:
     if image_placeholder in prompt:
       prompt = prompt.replace(image_placeholder, GEMMA_IMAGE_PLACEHOLDER_IN_PROMPT)
-    if not GEMMA_IMAGE_PLACEHOLDER_IN_PROMPT in prompt:
-      prompt = GEMMA_IMAGE_PLACEHOLDER_IN_PROMPT + prompt
+    image_placeholder_count = prompt.count(GEMMA_IMAGE_PLACEHOLDER_IN_PROMPT)
+    if image_placeholder_count < num_images:
+      prompt = GEMMA_IMAGE_PLACEHOLDER_IN_PROMPT * (num_images - image_placeholder_count) + prompt
     formatted_prompt = f"<start_of_turn>user\n{prompt}<end_of_turn>\n<start_of_turn>model\n"
     return formatted_prompt
   elif model_name in ["llama4-17b-16e", "llama4-17b-128e"]:
     if image_placeholder in prompt:
       prompt = prompt.replace(image_placeholder, LLAMA4_IMAGE_PLACEHOLDER_IN_PROMPT)
-    if not LLAMA4_IMAGE_PLACEHOLDER_IN_PROMPT in prompt:
-      prompt = LLAMA4_IMAGE_PLACEHOLDER_IN_PROMPT + prompt
+    image_placeholder_count = prompt.count(LLAMA4_IMAGE_PLACEHOLDER_IN_PROMPT)
+    if image_placeholder_count < num_images:
+      prompt = LLAMA4_IMAGE_PLACEHOLDER_IN_PROMPT * (num_images - image_placeholder_count) + prompt
     formatted_prompt = (
         f"<|begin_of_text|><|header_start|>user<|header_end|>\n\n"
         f"{prompt}<|eot|><|header_start|>assistant<|header_end|>\n\n"
@@ -466,9 +468,32 @@ def get_image_offsets(model_name, processor_output: PreprocessorOutput | None):
     return 0
 
 
+def get_dummy_image_shape_for_init(model_name, batch_size=1, num_image_per_sequence=1, num_tiles_per_image=1):
+  """Return the shape of the dummy image for specific model's initialization."""
+  image_shape = ()
+  if model_name.startswith("gemma3"):
+    image_shape = (
+        batch_size,
+        num_image_per_sequence,
+        GEMMA_DEFAULT_IMAGE_SIZE,
+        GEMMA_DEFAULT_IMAGE_SIZE,
+        NUM_IMAGE_CHANNELS,
+    )
+  elif model_name.startswith("llama4"):
+    image_shape = (
+        batch_size * num_image_per_sequence,
+        num_tiles_per_image,
+        NUM_IMAGE_CHANNELS,
+        LLAMA4_TILE_SIZE,
+        LLAMA4_TILE_SIZE,
+    )
+  return image_shape
+
+
 def prepare_text_for_image_fusion(texts, model_name, processor_output=None):
   if model_name in ["gemma3-4b", "gemma3-12b", "gemma3-27b"]:
-    return add_extra_tokens_for_images_gemma3(texts)
+    num_images = len(processor_output) if isinstance(processor_output, list) else 1
+    return add_extra_tokens_for_images_gemma3(texts, max_num_images=num_images)
   if model_name in ["llama4-17b-16e", "llama4-17b-128e"]:
     return add_extra_tokens_for_images_llama4(texts, processor_output)
   else:

@@ -32,6 +32,7 @@ from MaxText import accelerator_to_spec_map
 from MaxText import max_logging
 from MaxText import max_utils
 from MaxText.common_types import DecoderBlockType
+from MaxText.globals import MAXTEXT_ASSETS_ROOT, MAXTEXT_REPO_ROOT, MAXTEXT_PKG_DIR
 from MaxText.layers.attentions import AttentionType
 from MaxText.utils import gcs_utils
 
@@ -218,6 +219,7 @@ def validate_keys(keys):
     validate_mlp_dim(keys)
     validate_sparse_matmul_parallelism(keys)
     validate_ring_of_experts_parallelism(keys)
+    validate_shard_fsdp_on_expert_parallelism(keys)
     validate_ragged_dot(keys)
     validate_deepseek_moe(keys)
     validate_gpt_oss_moe(keys)
@@ -311,6 +313,9 @@ def validate_data_input(keys):
     max_logging.log(
         "WARNING: 'sharding_tolerance: allowed percentage of non-sharded parameters' should be between 0.0 and 1.0"
     )
+
+  if keys["eval_interval"] > 0 and keys["generate_padding_batch_eval"]:
+    assert keys["eval_steps"] > 0, "eval_steps must be > 0 when generate_padding_batch_eval is True"
 
 
 def validate_llama4_config(keys: dict):
@@ -570,13 +575,23 @@ class _HyperParameters:
 
     if not os.path.isfile(raw_keys["tokenizer_path"]):
       # Try and find the tokenizer path relative to the config file.
-      tokenizer_path = os.path.join(
-          os.path.dirname(config_name),
-          raw_keys["tokenizer_path"],
-      )
+      for search_root in (
+          MAXTEXT_ASSETS_ROOT,
+          os.path.dirname(MAXTEXT_ASSETS_ROOT),
+          os.path.join(MAXTEXT_REPO_ROOT, "assets"),
+          MAXTEXT_REPO_ROOT,
+          os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText"),
+          MAXTEXT_PKG_DIR,
+          os.path.dirname(config_name)
+      ):
+        tokenizer_path = os.path.join(
+            search_root,
+            raw_keys["tokenizer_path"],
+        )
 
-      if os.path.isfile(tokenizer_path):
-        raw_keys["tokenizer_path"] = tokenizer_path
+        if os.path.isfile(tokenizer_path):
+          raw_keys["tokenizer_path"] = tokenizer_path
+          break
 
     self.keys = raw_keys
     keys = [k for k in raw_keys]  # pylint: disable=unnecessary-comprehension
@@ -1002,11 +1017,9 @@ def validate_mlp_dim(raw_keys):
   if is_fully_moe_model and (base_mlp_dim != base_moe_mlp_dim):
       raise ValueError(f'For a fully MoE model, base_mlp_dim must be equal to base_moe_mlp_dim. Received base_mlp_dim={base_mlp_dim} and base_moe_mlp_dim={base_moe_mlp_dim}.')
 
-
 def validate_gpt_oss_moe(raw_keys):
-  if raw_keys["decoder_block"] == "gpt_oss" and not raw_keys["sparse_matmul"]:
-    raise ValueError(f"GPT OSS model only supports sparse matmul. Please set sparse_matmul=True.")
-
+  if raw_keys["decoder_block"] == "gpt_oss" and not raw_keys["sparse_matmul"] and raw_keys["capacity_factor"] != -1:
+    raise ValueError(f"GPT OSS model only supports dropless MoE. Please use dense matmul with capacity_factor=-1 or sparse matmul.")
 
 def validate_sparse_matmul_parallelism(raw_keys):
   # TODO: remove once b/434699033 resolved
@@ -1043,6 +1056,11 @@ def validate_ring_of_experts_parallelism(raw_keys):
   if raw_keys["use_ring_of_experts"] and not using_expert_parallelism(raw_keys):
     raise ValueError("Ring-of-experts requires expert-parallelism to be enabled.")
 
+def validate_shard_fsdp_on_expert_parallelism(raw_keys):
+  if raw_keys["fsdp_shard_on_exp"] and raw_keys["num_experts"] % raw_keys["ici_fsdp_parallelism"]!=0: 
+    raise ValueError("fsdp_shard_on_exp requires num_experts is divisiable by ici_fsdp_parallelism.")
+  if raw_keys["fsdp_shard_on_exp"] and (using_tensor_parallelism(raw_keys) or useing_expert_parallelism(raw_keys)): 
+    raise ValueError("fsdp_shard_on_exp requires ici_expert_parallelism = 1 and ici_tensor_parallelism/ici_tensor_transpose_parallelism = 1.")
 
 def validate_ragged_dot(raw_keys):
   if raw_keys["sparse_matmul"] and not raw_keys["megablox"]:
@@ -1184,12 +1202,12 @@ def using_tensor_parallelism(raw_keys) -> bool:
 
 
 def using_sequence_parallelism(raw_keys) -> bool:
-  if int(raw_keys["ici_expert_parallelism"]) > 1 and int(raw_keys["dcn_expert_parallelism"]) > 1:
-    raise ValueError("Expert parallelism can only be enabled on ICI or DCN, not both.")
   return int(raw_keys["ici_sequence_parallelism"]) > 1 or int(raw_keys["dcn_sequence_parallelism"]) > 1
 
 
 def using_expert_parallelism(raw_keys) -> bool:
+  if int(raw_keys["ici_expert_parallelism"]) > 1 and int(raw_keys["dcn_expert_parallelism"]) > 1:
+    raise ValueError("Expert parallelism can only be enabled on ICI or DCN, not both.")
   return int(raw_keys["ici_expert_parallelism"]) > 1 or int(raw_keys["dcn_expert_parallelism"]) > 1
 
 
