@@ -1,5 +1,5 @@
 <!--
- Copyright 2024 Google LLC
+ Copyright 2024-2025 Google LLC
 
  Licensed under the Apache License, Version 2.0 (the "License");
  you may not use this file except in compliance with the License.
@@ -14,86 +14,48 @@
  limitations under the License.
  -->
 
-(quantization)=
-# Quantization
+## What is quantization?
+Quantization in deep learning is the process of reducing the precision of numbers used to represent a model's weights and/or activations. Instead of using higher-precision floating-point formats like 32-bit floats (fp32) or 16-bit brain floats (bfloat16), quantization maps these values to lower-precision numerical formats, most commonly 8-bit integers (int8).
 
-MaxText supports quantization via both the [AQT](https://github.com/google/aqt) and [Qwix](https://github.com/google/qwix) libraries. Qwix is the recommended approach, providing a non-intrusive way to apply various quantization techniques, including Quantization-Aware Training (QAT) and Post-Training Quantization (PTQ).
+The core idea is to represent the wide range of floating-point numbers using a smaller set of discrete integer values. This conversion typically involves:
 
-## Why quantize?
+* Scaling: Determining a scale factor to map the original range of floating-point values to the target integer range (e.g., -128 to 127 for INT8).
+* Zero-Point: Finding an integer value that maps to the real value 0.0.
+* Rounding: Converting the scaled floating-point numbers to the nearest integers.
+The relationship can be expressed as: `real_value = scale * (quantized_value - zero_point)`.
 
-*   **Reduced model size**: Lower precision numbers require less storage, making models easier to store and deploy.
-*   **Faster inference**: Operations on lower-precision data are computationally less expensive, which can lead to faster inference times.
-*   **Lower memory usage**: Reduced precision for weights and activations decreases the memory footprint, allowing for the deployment of larger models on hardware with limited memory.
+## Why use quantization? 
 
-## Quantizing using AQT
+### Primary benefits
+The drive to use lower-precision formats like INT8 stems from significant performance advantages:
 
-Jax supports AQT. You can read more about AQT on this [Google Cloud blog](https://cloud.google.com/blog/products/compute/accurate-quantized-training-aqt-for-tpu-v5e).
-You can turn on the quantization by adding the following flag `--quantization` and passing one of the following values:
+**Faster computation**: Hardware accelerators like TPUs and GPUs often have specialized instructions for integer arithmetic. Operations on INT8 data can be significantly faster than on BF16 or FP32. For example, INT8 matrix multiplications can often be 2x or more faster on hardware supporting native INT8 tensor cores.
 
-- 'int8' for dynamic range quantization using 8-bits
-- 'int8w' for weights only quantization using 8-bits
-- 'int4w' for weights only quantization using 4-bits
-- 'intmp' for mixed precision weight only quantization based on config file
-- 'fp8' for 8-bit floating-point GeMMs on NVIDIA GPUs.
+**Reduced memory footprint**: Storing weights and activations in INT8 requires 2x less memory compared to BF16. This reduces:
+- **HBM usage**: Less memory is needed on the accelerator itself.
+- **Communication costs**: Transferring data between memory and compute units, or across devices in distributed training, becomes faster and consumes less bandwidth.
 
+### Potential challenges: Trade offs
 
+The primary trade-off with quantization is a potential loss of model accuracy or issues with training convergence:
 
-## How QAT works with Qwix
+* Reduced Dynamic Range & Precision: INT8 can represent a much smaller range of values and with less precision than BF16. This can be problematic for models with wide distributions of weights or activations, potentially clipping large values or losing fine-grained details.
+* Impact on Gradients: Gradients during backpropagation can have very different, often wider, distributions than weights or activations, making them more sensitive to quantization errors (INT8 versus FP8 comparison).
+* Convergence Issues: The approximations introduced by quantization can sometimes hinder the model's ability to converge during training.
 
-The core idea behind QAT is to insert "fake quantization" operations into the model's computation graph. During the training forward pass, these operations simulate the effect of quantizing weights and activations to a lower precision. For the backward pass, Qwix uses the Straight-Through Estimator (STE) to approximate the gradients, allowing the model to learn effectively despite the non-differentiable nature of quantization.
+### Mitigating Trade-offs: Techniques in AQT & Qwix
 
-## Using Qwix in MaxText
+Google's Accurate Quantized Training (AQT) library and the newer Qwix library (which MaxText is moving to) employ several techniques to minimize accuracy loss and ensure stable training:
 
-You can enable quantization in MaxText by setting flags in your configuration file (e.g., `base.yml`) or via the command line.
+**Quantization Aware Training (QAT)**: Instead of just quantizing a model after training (Post-Training Quantization - PTQ), QAT simulates the effect of quantization during the training process. "Fake quantization" operations are inserted into the model graph, so the model learns to be robust to the precision loss. Qwix uses this approach, employing a Straight-Through Estimator (STE) for backpropagation (MaxText <-> Qwix Integration).
 
-### Configuration flags
+**Per-axis / per-tensor scaling**: Instead of using a single scale factor for an entire tensor, AQT and Qwix can use different scale factors for different parts of a tensor. For example, per-channel scaling for weights allows for a much tighter range for each output channel, better accommodating variations in magnitude.
 
-*   `use_qwix_quantization`: Must be set to `True` to enable quantization using the Qwix library.
-*   `quantization`: Specifies the type of quantization to apply. Common options include:
-    *   `"int8"`: 8-bit integer quantization.
-    *   `"fp8"`: 8-bit floating-point quantization.
-    *   `"fp8_full"`: FP8 quantization with static scaling.
-    *   `"fp8_gpu"`: FP8 for NVIDIA GPUs.
-    *   `"fp8_nanoo"`: FP8 for AMD MI300/MI325 GPUs.
-*   `quantization_calibration_method`: The calibration method for weights and activations (e.g., `"absmax"`).
+**Calibration**: Before or during training, a calibration process can be used to determine the optimal range (min/max values) for quantization, often using a representative dataset to minimize information loss (Intro to Quantization).
 
-### Example command
+**Stochastic rounding**: Particularly important for gradients, stochastic rounding rounds a value up or down probabilistically based on its fractional part. This helps to maintain an unbiased representation on average, which can be critical for backpropagation, especially in INT8 (INT8 versus FP8 comparison).
 
-Here is an example of how to run a training job with int8 quantization enabled via Qwix:
+**Flexible configuration**: AQT and Qwix allow fine-grained control over what gets quantized, to what precision (INT8, FP8, etc.), and whether to quantize the forward pass, backward pass (gradients), or both (AQT : Accurate Quantized Training). This allows for mixed-precision training where sensitive parts remain in higher precision.
 
-```bash
-python3 -m MaxText.train src/MaxText/configs/base.yml ... use_qwix_quantization=True quantization='int8'
-```
+**Sub-channel / tiled quantization**: For even finer control, quantization can be applied to blocks or tiles within a tensor, as seen in DeepSeek-V3's approach, which uses 1x128 tiling for activations and 128x128 for weights (MaxText: DeepSeek style Quantization Recipe). Qwix also supports sub-channel quantization.
 
-## The Qwix interception API
-
-MaxText integrates Qwix using its powerful and non-intrusive Interception API. This approach allows you to enable QAT for your models without modifying the original model source code. You don't need to manually replace `nn.Dense` with `QuantizedDense` or other quantized layer types.
-
-Instead, you define a set of quantization rules externally. Qwix then uses a context manager to "intercept" the creation of standard Flax/NNX layers during model initialization and dynamically replaces the layers with their QAT-enabled versions on the fly.
-
-A quantization rule can be defined as follows:
-
-```python
-rule = [qwix.QtRule(
-          module_path="decoder/.*layers.*",
-          weight_qtype=jnp.int8,
-          act_qtype=jnp.int8,
-          bwd_qtype=jnp.int8,
-          bwd_weight_grad_tile_size=1 / config.quantization_local_shard_count,
-          op_names=("dot_general",),
-     )]
-```
-
-**`QtRule` parameters**:
-
-*   `module_path`: A regex to match the layers to which this rule should be applied.
-*   `weight_qtype`: The target quantization type for weights (e.g., `jnp.int8`).
-*   `act_qtype`: The target quantization type for activations.
-*   `bwd_qtype`: The quantization type for the backward pass.
-*   `op_names`: The operations to be quantized (e.g., `"dot_general"`).
-
-This rule is then used within a `QtProvider` to quantize the model automatically:
-
-```python
-model = qwix.quantize_model(model, qwix.QtProvider(rule))
-```
