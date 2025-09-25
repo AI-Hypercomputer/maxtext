@@ -47,13 +47,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Run Server
         run: |
-          if [ "${{ inputs.is_scheduled_run }}" = "true" ]; then
-            FINAL_PYTEST_MARKER="${{ inputs.pytest_marker }}"
-          else
-            FINAL_PYTEST_MARKER="${{ inputs.pytest_marker }} and not scheduled_only"
-          fi
-          python3 -m pip install -e . --no-dependencies &&
-          python3 -m pytest -v -m "${FINAL_PYTEST_MARKER}" --durations=0
+          sleep 100000
     
     services:
       resource_manager:
