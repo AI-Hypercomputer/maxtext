@@ -47,6 +47,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Run Tests
         run: |
+          python3 -m pip install pytest
           python3 -m pip install -e . --no-dependencies &&
           python3 -m pytest -v -m "${FINAL_PYTEST_MARKER}" --durations=0
     
