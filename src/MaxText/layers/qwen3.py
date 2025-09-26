@@ -21,6 +21,7 @@ from jax.sharding import Mesh
 import jax.numpy as jnp
 
 from flax import linen as nn
+from flax import nnx
 
 from MaxText.common_types import Config
 from MaxText.layers import attentions
@@ -60,7 +61,7 @@ def self_attention_with_norm(
       epsilon=cfg.normalization_layer_epsilon,
       kernel_axes=("norm",),
   )(inputs_checkpoint)
-  lnx = nn.with_logical_constraint(lnx, ("activation_batch", "activation_length", "activation_embed"))
+  lnx = nn.with_logical_constraint(lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
 
   # Self-attention block
   attention_layer = attentions.attention_as_linen(
@@ -94,7 +95,7 @@ def self_attention_with_norm(
       model_mode=model_mode,
   )
   attention_output = nn.with_logical_constraint(
-      attention_output, ("activation_batch", "activation_length", "activation_embed")
+      attention_output, ("activation_batch", "activation_norm_length", "activation_embed")
   )
 
   # Residual connection after attention
@@ -109,7 +110,7 @@ def self_attention_with_norm(
       epsilon=cfg.normalization_layer_epsilon,
       kernel_axes=("norm",),
   )(residual_after_attention)
-  hidden_states = nn.with_logical_constraint(hidden_states, ("activation_batch", "activation_length", "activation_embed"))
+  hidden_states = nn.with_logical_constraint(hidden_states, ("activation_batch", "activation_norm_length", "activation_embed"))
 
   return hidden_states, residual_after_attention
 
@@ -117,7 +118,7 @@ def self_attention_with_norm(
 # -----------------------------------------
 # The Dense Decoder Layer for Qwen3
 # -----------------------------------------
-class Qwen3DecoderLayer(nn.Module):
+class Qwen3DecoderLayer(nnx.Module):
   """Qwen3 Transformer decoder layer (dense)."""
 
   config: Config
@@ -167,7 +168,7 @@ class Qwen3DecoderLayer(nn.Module):
     layer_output = residual_after_attention + mlp_output
     layer_output = nn.with_logical_constraint(
         layer_output,
-        ("activation_batch", "activation_length", "activation_embed"),
+        ("activation_batch", "activation_norm_length", "activation_embed"),
     )
 
     if cfg.scan_layers:
@@ -230,13 +231,13 @@ class Qwen3MoeDecoderLayer(nn.Module):
     if load_balance_loss is not None:
       self.sow("intermediates", "moe_lb_loss", load_balance_loss)
 
-    mlp_output = nn.with_logical_constraint(mlp_output, ("activation_batch", "activation_length", "activation_embed"))
+    mlp_output = nn.with_logical_constraint(mlp_output, ("activation_batch", "activation_norm_length", "activation_embed"))
 
     # Final residual connection
     layer_output = residual_after_attention + mlp_output
     layer_output = nn.with_logical_constraint(
         layer_output,
-        ("activation_batch", "activation_length", "activation_embed"),
+        ("activation_batch", "activation_norm_length", "activation_embed"),
     )
 
     if cfg.scan_layers:
