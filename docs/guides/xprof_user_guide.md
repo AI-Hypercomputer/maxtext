@@ -3,7 +3,7 @@
 
 ## Introduction to XProf
 
-XProf is a powerful tool designed for profiling and analyzing the training performance of AI models. For MaxText developers, understanding and utilizing XProf can significantly help in optimizing model performance, identifying bottlenecks, and improving training efficiency.
+You can use XProf to profile and analyze the training performance of AI models. XProf helps you understand how to optimize model performance, identify bottlenecks, and improve training efficiency.
 
 
 ## Profiling in JAX 
@@ -12,7 +12,7 @@ XProf supports profiling JAX models, which is crucial for MaxText developers wor
 
 
 
-*   **Sampling Mode:** This mode allows for continuous profiling by sampling data during model execution.
+*   **Sampling Mode** This mode allows for continuous profiling by sampling data during model execution.
 *   **Programmatic Mode:** This provides more granular control over when and what to profile, allowing you to instrument your code with specific profiling markers. This method is integrated with MaxText code.
 
 
