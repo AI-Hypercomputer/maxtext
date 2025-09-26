@@ -56,7 +56,7 @@ if ! gcloud storage cp gs://maxtext-test-assets/* "${MAXTEXT_TEST_ASSETS_ROOT:-$
 fi
 
 # Build then upload "dependencies + code" image
-docker build --build-arg BASEIMAGE=${LOCAL_IMAGE_NAME} -f ./maxtext_runner.Dockerfile -t ${LOCAL_IMAGE_NAME}_runner .
+docker build --build-arg BASEIMAGE=${LOCAL_IMAGE_NAME} -f ./dependencies/dockerfiles/maxtext_runner.Dockerfile -t ${LOCAL_IMAGE_NAME}_runner .
 docker tag ${LOCAL_IMAGE_NAME}_runner gcr.io/$PROJECT/${CLOUD_IMAGE_NAME}:latest
 docker push gcr.io/$PROJECT/${CLOUD_IMAGE_NAME}:latest
 docker tag ${LOCAL_IMAGE_NAME}_runner gcr.io/$PROJECT/${CLOUD_IMAGE_NAME}:${image_date}

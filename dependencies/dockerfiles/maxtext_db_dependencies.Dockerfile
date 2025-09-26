@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:experimental
-# Use Python 3.12 as the base image
-FROM python:3.12-slim-bullseye
+# Copy benchmark-db
+FROM gcr.io/tpu-prod-env-one-vm/benchmark-db:2025-02-14
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y curl gnupg
@@ -40,8 +40,10 @@ ENV MAXTEXT_REPO_ROOT=/deps
 WORKDIR /deps
 
 # Copy setup files and dependency files separately for better caching
-COPY setup.sh ./
-COPY requirements.txt requirements_with_jax_ai_image.txt ./
+COPY ./tools/setup/setup.sh ./
+COPY ./dependencies/requirements/requirements.txt \
+     ./dependencies/requirements/requirements_with_jax_ai_image.txt \
+     ./
 
 # Install dependencies - these steps are cached unless the copied files change
 RUN echo "Running command: bash setup.sh MODE=$ENV_MODE JAX_VERSION=$ENV_JAX_VERSION LIBTPU_GCS_PATH=${ENV_LIBTPU_GCS_PATH} DEVICE=${ENV_DEVICE}"

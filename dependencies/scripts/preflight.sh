@@ -9,6 +9,8 @@ echo "Running preflight.sh"
 # For any dependencies, please add them into `setup.sh` or `maxtext_dependencies.Dockerfile`. 
 # You should not install any dependencies in this file.
 
+DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+
 # Stop execution if any command exits with error
 set -e
 
@@ -24,11 +26,11 @@ if command -v sudo >/dev/null 2>&1; then
     echo "running rto_setup.sh with sudo"
 
     # apply network settings.
-    sudo bash rto_setup.sh
+    sudo bash "${DIR}"'/rto_setup.sh'
 else
     # sudo is not available, run the script without sudo
     echo "running rto_setup.sh without sudo"
 
     # apply network settings.
-    bash rto_setup.sh
+    bash "${DIR}"'/rto_setup.sh'
 fi

@@ -30,6 +30,9 @@
 # Enable "exit immediately if any command fails" option
 set -e
 
+DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+MAXTEXT_REPO_ROOT="${MAXTEXT_REPO_ROOT:-$(cd "${DIR}"/../../ && pwd)}"
+
 export LOCAL_IMAGE_NAME=maxtext_base_image
 echo "Building to $LOCAL_IMAGE_NAME"
 
@@ -73,7 +76,7 @@ build_ai_image() {
         exit 1
     fi
     COMMIT_HASH=$(git rev-parse --short HEAD)
-    echo "Building JAX AI MaxText Imageat commit hash ${COMMIT_HASH}..."
+    echo "Building JAX AI MaxText Image at commit hash ${COMMIT_HASH}..."
 
     docker build \
         --build-arg JAX_AI_IMAGE_BASEIMAGE=${BASEIMAGE} \
@@ -81,7 +84,7 @@ build_ai_image() {
         --build-arg DEVICE="$DEVICE" \
         --network=host \
         -t ${LOCAL_IMAGE_NAME} \
-        -f ./maxtext_jax_ai_image.Dockerfile .
+        -f "${MAXTEXT_REPO_ROOT}"'/dependencies/dockerfiles/maxtext_jax_ai_image.Dockerfile' .
 }
 
 if [[ -z ${LIBTPU_GCS_PATH+x} ]] ; then
@@ -96,26 +99,26 @@ if [[ -z ${LIBTPU_GCS_PATH+x} ]] ; then
       else
         export BASEIMAGE=ghcr.io/nvidia/jax:base
       fi
-      docker build --network host --build-arg MODE=${MODE} --build-arg JAX_VERSION=$JAX_VERSION --build-arg DEVICE=$DEVICE --build-arg BASEIMAGE=$BASEIMAGE -f ./maxtext_gpu_dependencies.Dockerfile -t ${LOCAL_IMAGE_NAME} .
+      docker build --network host --build-arg MODE=${MODE} --build-arg JAX_VERSION=$JAX_VERSION --build-arg DEVICE=$DEVICE --build-arg BASEIMAGE=$BASEIMAGE -f "${MAXTEXT_REPO_ROOT}"'/dependencies/dockerfiles/maxtext_gpu_dependencies.Dockerfile' -t ${LOCAL_IMAGE_NAME} .
     fi
   else
     if [[ ${MODE} == "stable_stack" || ${MODE} == "jax_ai_image" ]]; then
       build_ai_image
     elif [[ ${MANTARAY} == "true" ]]; then
       echo "Building with benchmark-db"
-      docker build --network host --build-arg MODE=${MODE} --build-arg JAX_VERSION=$JAX_VERSION --build-arg LIBTPU_GCS_PATH=$LIBTPU_GCS_PATH --build-arg DEVICE=$DEVICE -f ./maxtext_db_dependencies.Dockerfile -t ${LOCAL_IMAGE_NAME} .
+      docker build --network host --build-arg MODE=${MODE} --build-arg JAX_VERSION=$JAX_VERSION --build-arg LIBTPU_GCS_PATH=$LIBTPU_GCS_PATH --build-arg DEVICE=$DEVICE -f "${MAXTEXT_REPO_ROOT}"'/dependencies/dockerfiles/maxtext_db_dependencies.Dockerfile' -t ${LOCAL_IMAGE_NAME} .
     else
-      docker build --network host --build-arg MODE=${MODE} --build-arg JAX_VERSION=$JAX_VERSION --build-arg LIBTPU_GCS_PATH=$LIBTPU_GCS_PATH --build-arg DEVICE=$DEVICE -f ./maxtext_dependencies.Dockerfile -t ${LOCAL_IMAGE_NAME} .
+      docker build --network host --build-arg MODE=${MODE} --build-arg JAX_VERSION=$JAX_VERSION --build-arg LIBTPU_GCS_PATH=$LIBTPU_GCS_PATH --build-arg DEVICE=$DEVICE -f "${MAXTEXT_REPO_ROOT}"'/dependencies/dockerfiles/maxtext_dependencies.Dockerfile' -t ${LOCAL_IMAGE_NAME} .
     fi
   fi
 else
-  docker build --network host --build-arg MODE=${MODE} --build-arg JAX_VERSION=$JAX_VERSION --build-arg LIBTPU_GCS_PATH=$LIBTPU_GCS_PATH -f ./maxtext_dependencies.Dockerfile -t ${LOCAL_IMAGE_NAME} .
-  docker build --network host --build-arg CUSTOM_LIBTPU=true -f ./maxtext_libtpu_path.Dockerfile -t ${LOCAL_IMAGE_NAME} .
+  docker build --network host --build-arg MODE=${MODE} --build-arg JAX_VERSION=$JAX_VERSION --build-arg LIBTPU_GCS_PATH=$LIBTPU_GCS_PATH -f "${MAXTEXT_REPO_ROOT}"'/dependencies/dockerfiles/maxtext_dependencies.Dockerfile' -t ${LOCAL_IMAGE_NAME} .
+  docker build --network host --build-arg CUSTOM_LIBTPU=true -f "${MAXTEXT_REPO_ROOT}"'/dependencies/dockerfiles/maxtext_libtpu_path.Dockerfile' -t ${LOCAL_IMAGE_NAME} .
 fi
 
 if [[ ${CUSTOM_JAX} -eq 1 ]] ; then
   echo "Installing custom jax and jaxlib"
-  docker build --network host -f ./maxtext_custom_wheels.Dockerfile -t ${LOCAL_IMAGE_NAME} .
+  docker build --network host -f "${MAXTEXT_REPO_ROOT}"'/dependencies/dockerfiles/maxtext_custom_wheels.Dockerfile' -t ${LOCAL_IMAGE_NAME} .
 fi
 
 echo ""
@@ -125,7 +128,7 @@ echo ""
 echo "Built your base docker image and named it ${LOCAL_IMAGE_NAME}.
 It only has the dependencies installed. Assuming you're on a TPUVM, to run the
 docker image locally and mirror your local working directory run:"
-echo "docker run -v $(pwd):/deps --rm -it --privileged --entrypoint bash ${LOCAL_IMAGE_NAME}"
+echo "docker run -v ${MAXTEXT_REPO_ROOT}:/deps --rm -it --privileged --entrypoint bash ${LOCAL_IMAGE_NAME}"
 echo ""
 echo "You can run MaxText and your development tests inside of the docker image. Changes to your workspace will automatically
 be reflected inside the docker container."
