@@ -69,39 +69,25 @@ def _load_full_state_from_path(
 
   if enable_orbax_v1:
     if source_checkpoint_layout == "orbax":
-      context = ocp_v1.Context(
-          checkpoint_layout=ocp_v1.options.CheckpointLayout.ORBAX
-      )
+      context = ocp_v1.Context(checkpoint_layout=ocp_v1.options.CheckpointLayout.ORBAX)
       with context:
         return ocp_v1.load_pytree(path, abstract_unboxed_pre_state)
     elif source_checkpoint_layout == "safetensors":
-      context = ocp_v1.Context(
-          checkpoint_layout=ocp_v1.options.CheckpointLayout.SAFETENSORS
-      )
+      context = ocp_v1.Context(checkpoint_layout=ocp_v1.options.CheckpointLayout.SAFETENSORS)
       with context:
         metadata = ocp_v1.pytree_metadata(path)
         simple_abstract_state = metadata.metadata
-        shardings = sharding_utils.construct_maximal_shardings(
-            simple_abstract_state
-        )
+        shardings = sharding_utils.construct_maximal_shardings(simple_abstract_state)
 
         def combine_sharding(sds, shardings):
-          return jax.ShapeDtypeStruct(
-              shape=sds.shape, dtype=sds.dtype, sharding=shardings
-          )
+          return jax.ShapeDtypeStruct(shape=sds.shape, dtype=sds.dtype, sharding=shardings)
 
-        sharded_abstract_state = jax.tree.map(
-            combine_sharding, simple_abstract_state, shardings
-        )
-        pre_transformed_state = ocp_v1.load_pytree(
-            path, sharded_abstract_state
-        )
+        sharded_abstract_state = jax.tree.map(combine_sharding, simple_abstract_state, shardings)
+        pre_transformed_state = ocp_v1.load_pytree(path, sharded_abstract_state)
       state = checkpoint_conversion_fn(pre_transformed_state)
       return state
     else:
-      raise ocp_v1.errors.InvalidLayoutError(
-          f"Unknown checkpoint layout: {source_checkpoint_layout}"
-      )
+      raise ocp_v1.errors.InvalidLayoutError(f"Unknown checkpoint layout: {source_checkpoint_layout}")
   else:
     # Original v0 logic.
     p = epath.Path(path)
@@ -223,9 +209,7 @@ def replicator_error_handler(config: Any):
     # if the replicator.failed file exists, then we have a fatal error
     is_fatal = process_replicator_error_file(replicator_failed_file)
     if is_fatal:
-      raise ValueError(
-          "Replicator fatal error found in replicator.failed file."
-      )
+      raise ValueError("Replicator fatal error found in replicator.failed file.")
 
 
 def process_replicator_error_file(error_file: str) -> bool:
@@ -321,7 +305,7 @@ def load_state_if_possible(
     checkpoint_storage_concurrent_gb: concurrent GB for checkpoint byte I/O.
     enable_orbax_v1: bool flag for enabling Orbax v1.
     checkpoint_conversion_fn: function for converting checkpoint to Orbax v1.
-    source_checkpoint_layout: Optional checkpoint context to use for loading, 
+    source_checkpoint_layout: Optional checkpoint context to use for loading,
     provided in string format with the default being "orbax".
 
   Returns:
@@ -374,9 +358,7 @@ def load_state_if_possible(
             (EmergencyCheckpointManager, EmergencyReplicatorCheckpointManager),
         ):
           return (
-              checkpoint_manager.restore(
-                  step, args=Composite(state=checkpoint_args)
-              ).state,
+              checkpoint_manager.restore(step, args=Composite(state=checkpoint_args)).state,
               None,
           )
         # Case 2: Matches if dataset type is "grain" and a specific checkpoint file exits for the iterator

@@ -291,14 +291,15 @@ def dense_general(
 
 class Dropout(nnx.Dropout):
   """Forked nnx.Dropout that is easier to use with bridge"""
-  def __init__( # pylint: disable=super-init-not-called
-    self,
-    rate: float,
-    *,
-    broadcast_dims: Sequence[int] = (),
-    deterministic: bool = False,
-    rng_collection: str = 'dropout',
-    rngs: nnx.Rngs| None = None,
+
+  def __init__(  # pylint: disable=super-init-not-called
+      self,
+      rate: float,
+      *,
+      broadcast_dims: Sequence[int] = (),
+      deterministic: bool = False,
+      rng_collection: str = "dropout",
+      rngs: nnx.Rngs | None = None,
   ):
     self.rate = rate
     self.broadcast_dims = broadcast_dims
@@ -306,11 +307,10 @@ class Dropout(nnx.Dropout):
     self.rng_collection = rng_collection
 
     if isinstance(rngs, nnx.Rngs):
-      self.rngs = rngs.fork() if hasattr(type(rngs), 'fork') else rngs
+      self.rngs = rngs.fork() if hasattr(type(rngs), "fork") else rngs
     else:
-      raise TypeError(
-        f'rngs must be a Rngs, RngStream or None, but got {type(rngs)}.'
-      )
+      raise TypeError(f"rngs must be a Rngs, RngStream or None, but got {type(rngs)}.")
+
 
 class MlpBlock(nnx.Module):
   """Transformer MLP / feed-forward block."""

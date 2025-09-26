@@ -64,8 +64,9 @@ Relevant Files:
 """
 
 import argparse
-import os
+import json
 import logging
+import os
 
 from MaxText.experimental.agent.code_generation_agent.llm_agent import GeminiAgent
 from MaxText.experimental.agent.code_evaluation_agent.prompt_code_evaluation import CodeEvaluation
@@ -250,7 +251,7 @@ def code_debugging(args, python_file, jax_file, test_file_path, last_output, cod
         logger.info("Code Debugger able to solve the bugs in %s in %d Try ", args.jax_path, try_count)
         return exit_code, passed, failed, code_history
     return 1, passed, failed, code_history
-  except Exception as e:
+  except (IOError, KeyError, AttributeError, json.JSONDecodeError) as e:
     print(f"Exception in code debugging {e}")
     return 1, 0, args.error_penalty, code_history
 
@@ -367,7 +368,7 @@ def make_code_and_debug(args, python_file, jax_file):
       f.write(best_code["test_case_code"])
     return best_code["passed"], best_code["failed"]
 
-  except Exception as e:
+  except (IOError, KeyError, AttributeError, json.JSONDecodeError) as e:
     logger.error("Exception in code generation %s", e)
     logger.error("The code file is %s", python_file.split(os.path.sep)[-1])
     # Penalty in case of Exception

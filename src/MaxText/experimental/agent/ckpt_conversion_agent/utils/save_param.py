@@ -96,8 +96,9 @@ def main(parsed_args: argparse.Namespace, unknown_pyconfig_args: List[str]) -> N
     hf_params_info[name] = list(tensor.shape)
 
   if not config.base_output_directory:
-    output_directory = os.path.join(MAXTEXT_PKG_DIR, "experimental", "agent",
-                                    "ckpt_conversion_agent", "context", config.model_name)
+    output_directory = os.path.join(
+        MAXTEXT_PKG_DIR, "experimental", "agent", "ckpt_conversion_agent", "context", config.model_name
+    )
   else:
     output_directory = config.base_output_directory
   os.makedirs(output_directory, exist_ok=True)  # Ensure output directory exists

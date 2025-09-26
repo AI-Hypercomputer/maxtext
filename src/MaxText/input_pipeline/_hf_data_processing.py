@@ -50,7 +50,7 @@ def vision_sft_preprocessing_pipeline(
   dataset = dataset.select_columns(text_columns + [image_column])
   if image_column != "images":
     dataset = dataset.rename_column(image_column, "images")
-  
+
   dataset = dataset.map(
       _input_pipeline_utils.reformat_prompt,
       fn_kwargs={

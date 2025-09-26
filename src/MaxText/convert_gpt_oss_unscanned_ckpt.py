@@ -26,13 +26,10 @@ import gc
 import logging
 import os
 import pathlib
-import re
-from dataclasses import dataclass
 
 os.environ["JAX_PLATFORMS"] = "cpu"
 
 import ml_dtypes
-import numpy as np
 import psutil
 from safetensors import safe_open
 import torch
@@ -119,7 +116,9 @@ def _hf_to_maxtext_mapping(layer_idx: int = -1) -> dict:
   }
 
 
-def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, model_params: dict, mem_info: psutil.Process):
+def _convert_huggingface_to_jax_weights(
+    base_model_path: str, model_size: str, model_params: dict, mem_info: psutil.Process
+):
   """Convert a Huggingface Checkpoint to a dictionary of Numpy arrays representing the weights.
 
   Args:
@@ -215,14 +214,16 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
     w_post = _pt_to_np(chkpt_vars[f"layers.{layer_idx}.attention.wo.weight"], cast_dtype=CAST_DTYPE)
 
     # NOTE: not scale the query weights in checkpoint, but apply query_pre_attn_scalar=1/np.sqrt(head_dim) for attention
-    # (num_attention_heads * head_dim, hidden_size) -> (hidden_size, num_attention_heads * head_dim) -> (hidden_size, num_attention_heads, head_dim)
+    # (num_attention_heads * head_dim, hidden_size) -> (hidden_size, num_attention_heads * head_dim) ->
+    #   (hidden_size, num_attention_heads, head_dim)
     # [embed, q, head_dim]
     self_attention["query"]["kernel"] = wq.transpose().reshape([base_emb_dim, base_num_query_heads, head_dim])
     # [embed, kv, head_dim]
     self_attention["key"]["kernel"] = wk.transpose().reshape([base_emb_dim, base_num_kv_heads, head_dim])
     # [embed, kv, head_dim]
     self_attention["value"]["kernel"] = wv.transpose().reshape([base_emb_dim, base_num_kv_heads, head_dim])
-    # (hidden_size, num_attention_heads * head_dim) -> (num_attention_heads * head_dim, hidden_size) -> (num_attention_heads, head_dim, hidden_size)
+    # (hidden_size, num_attention_heads * head_dim) -> (num_attention_heads * head_dim, hidden_size) ->
+    #     (num_attention_heads, head_dim, hidden_size)
     # [q, head_dim, embed]
     self_attention["out"]["kernel"] = w_post.transpose().reshape([base_num_query_heads, head_dim, base_emb_dim])
 
@@ -244,7 +245,9 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
   max_logging.log("Processing pre and post self attention norms")
   for layer_idx in tqdm(range(base_num_decoder_layers), desc="layers", leave=False):
     layer_weight = jax_weights["decoder"][f"layers_{layer_idx}"]
-    pre_self_attention_layernorm = _pt_to_np(chkpt_vars[f"layers.{layer_idx}.attention_norm.weight"], cast_dtype=CAST_DTYPE)
+    pre_self_attention_layernorm = _pt_to_np(
+        chkpt_vars[f"layers.{layer_idx}.attention_norm.weight"], cast_dtype=CAST_DTYPE
+    )
     post_self_attention_layernorm = _pt_to_np(chkpt_vars[f"layers.{layer_idx}.ffn_norm.weight"], cast_dtype=CAST_DTYPE)
 
     layer_weight["pre_self_attention_layer_norm"]["scale"] = pre_self_attention_layernorm  # pylint: disable=E1137
@@ -261,7 +264,9 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
     gate = _pt_to_np(chkpt_vars[f"layers.{layer_idx}.feed_forward.gate.weight"], cast_dtype=CAST_DTYPE)
     gate_bias = _pt_to_np(chkpt_vars[f"layers.{layer_idx}.feed_forward.gate.bias"], cast_dtype=CAST_DTYPE)
     wi_0_1 = _pt_to_np(chkpt_vars[f"layers.{layer_idx}.feed_forward.experts.gate_up_proj"], cast_dtype=CAST_DTYPE)
-    wi_0_1_bias = _pt_to_np(chkpt_vars[f"layers.{layer_idx}.feed_forward.experts.gate_up_proj_bias"], cast_dtype=CAST_DTYPE)
+    wi_0_1_bias = _pt_to_np(
+        chkpt_vars[f"layers.{layer_idx}.feed_forward.experts.gate_up_proj_bias"], cast_dtype=CAST_DTYPE
+    )
     wo = _pt_to_np(chkpt_vars[f"layers.{layer_idx}.feed_forward.experts.down_proj"], cast_dtype=CAST_DTYPE)
     wo_bias = _pt_to_np(chkpt_vars[f"layers.{layer_idx}.feed_forward.experts.down_proj_bias"], cast_dtype=CAST_DTYPE)
 

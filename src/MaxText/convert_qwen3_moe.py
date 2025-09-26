@@ -57,21 +57,23 @@ def hf_to_maxtext_mapping(layer_idx: int, num_experts: int) -> dict:
       "lm_head.weight": "decoder.logits_dense.kernel",
   }
   # Layer-specific mappings for a pure MoE/scanned model
-  mapping.update({
-      f"model.layers.{layer_idx}.input_layernorm.weight": (
-          f"decoder.layers.{layer_idx}.pre_self_attention_layer_norm.scale"
-      ),
-      f"model.layers.{layer_idx}.post_attention_layernorm.weight": (
-          f"decoder.layers.{layer_idx}.post_self_attention_layer_norm.scale"
-      ),
-      f"model.layers.{layer_idx}.self_attn.q_proj.weight": f"decoder.layers.{layer_idx}.self_attention.query.kernel",
-      f"model.layers.{layer_idx}.self_attn.k_proj.weight": f"decoder.layers.{layer_idx}.self_attention.key.kernel",
-      f"model.layers.{layer_idx}.self_attn.v_proj.weight": f"decoder.layers.{layer_idx}.self_attention.value.kernel",
-      f"model.layers.{layer_idx}.self_attn.o_proj.weight": f"decoder.layers.{layer_idx}.self_attention.out.kernel",
-      f"model.layers.{layer_idx}.self_attn.q_norm.weight": f"decoder.layers.{layer_idx}.self_attention.query_norm.scale",
-      f"model.layers.{layer_idx}.self_attn.k_norm.weight": f"decoder.layers.{layer_idx}.self_attention.key_norm.scale",
-      f"model.layers.{layer_idx}.mlp.gate.weight": f"decoder.layers.{layer_idx}.moe_block.gate.kernel",
-  })
+  mapping.update(
+      {
+          f"model.layers.{layer_idx}.input_layernorm.weight": (
+              f"decoder.layers.{layer_idx}.pre_self_attention_layer_norm.scale"
+          ),
+          f"model.layers.{layer_idx}.post_attention_layernorm.weight": (
+              f"decoder.layers.{layer_idx}.post_self_attention_layer_norm.scale"
+          ),
+          f"model.layers.{layer_idx}.self_attn.q_proj.weight": f"decoder.layers.{layer_idx}.self_attention.query.kernel",
+          f"model.layers.{layer_idx}.self_attn.k_proj.weight": f"decoder.layers.{layer_idx}.self_attention.key.kernel",
+          f"model.layers.{layer_idx}.self_attn.v_proj.weight": f"decoder.layers.{layer_idx}.self_attention.value.kernel",
+          f"model.layers.{layer_idx}.self_attn.o_proj.weight": f"decoder.layers.{layer_idx}.self_attention.out.kernel",
+          f"model.layers.{layer_idx}.self_attn.q_norm.weight": f"decoder.layers.{layer_idx}.self_attention.query_norm.scale",
+          f"model.layers.{layer_idx}.self_attn.k_norm.weight": f"decoder.layers.{layer_idx}.self_attention.key_norm.scale",
+          f"model.layers.{layer_idx}.mlp.gate.weight": f"decoder.layers.{layer_idx}.moe_block.gate.kernel",
+      }
+  )
 
   # MoE expert mappings
   for i in range(num_experts):

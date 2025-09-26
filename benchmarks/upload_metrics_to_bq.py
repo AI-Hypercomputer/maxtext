@@ -15,7 +15,7 @@ import argparse
 import json
 import os
 import sys
-from typing import Any, Dict, Sequence
+from typing import Any, Sequence
 
 import fnmatch
 
@@ -224,7 +224,7 @@ def parse_metrics(local_metrics_file, total_steps, last_n_steps=10) -> Metrics:
 
 
 def update_config_with_tuning_params(base_config: omegaconf.DictConfig,
-                                     tuning_params: Dict[str, Any]):
+                                     tuning_params: dict[str, Any]):
   """Updates base_config with key-value pairs from tuning_params."""
   if tuning_params:
     for key, value in tuning_params.items():
