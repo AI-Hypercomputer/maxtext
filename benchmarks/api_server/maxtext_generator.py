@@ -581,6 +581,7 @@ if __name__ == "__main__":
 
     prompts_to_run = [
         "The capital of France is ",
+        "Elon Musk is "
         ]
 
     max_tokens = 32

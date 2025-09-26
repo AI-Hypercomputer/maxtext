@@ -285,6 +285,10 @@ use_post_attn_norm: False
 use_post_ffw_norm: False
 mla_naive_kvcache: True
 
+moba_naive: False
+moba_chunk_size: 1024
+moba_topk: 8
+
 # MLA parameters
 q_lora_rank: 0
 kv_lora_rank: 512
