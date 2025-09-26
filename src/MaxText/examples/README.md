@@ -63,6 +63,7 @@ Upload notebooks or mount your GitHub repo
 
 
 > ⚡ **Tip:** If Colab disconnects, re-enable TPU and re-run setup cells. Save checkpoints to GCS or Drive.
+> ⚡ **Tip:** If Colab asks to restart session - do it and continue to run cells
 
 ## Method 2: Local Jupyter Lab with TPU
 
@@ -120,8 +121,8 @@ Use the link for Jupyter Lab as a link for "Connect to a local runtime" in Colla
 
 ### Supervised Fine-Tuning (SFT)
 
-- **`sft_qwen3_demo.ipynb`** → Qwen3-0.6B with ultrachat_200k
-- **`sft_llama3_demo.ipynb`** → Llama3 with ultrachat_200k
+- **`sft_qwen3_demo.ipynb`** → Qwen3-0.6B with Hugging Face ultrachat_200k dataset
+- **`sft_llama3_demo.ipynb`** → Llama3.1-8B with Hugging Face ultrachat_200k dataset
 
 ### GRPO Training
 
