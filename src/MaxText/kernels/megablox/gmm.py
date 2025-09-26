@@ -33,6 +33,7 @@ from aqt.jax.v2.aqt_tensor import QTensor
 
 from qwix.pallas import QArray
 import qwix.pallas as qpl
+import qwix
 
 from MaxText.kernels.megablox import common
 
@@ -305,6 +306,9 @@ LutFn = Callable[[int, int, int], Optional[tuple[int, int, int]]]
         "interpret",
         "lhs_quantize_dtype",
         "rhs_quantize_dtype",
+        "lhs_calibration_method",
+        "rhs_calibration_method",
+        "quantization_rule",
         "use_qwix_quantization",
     ],
 )
@@ -320,6 +324,9 @@ def gmm(
     interpret: bool = False,
     lhs_quantize_dtype: Literal[jnp.int4, jnp.int8] | None = None,
     rhs_quantize_dtype: Literal[jnp.int4, jnp.int8] | None = None,
+    lhs_calibration_method: str = "absmax",
+    rhs_calibration_method: str = "absmax",
+    quantization_rule: qwix.QtRule | None = None,
     use_qwix_quantization: bool = False,
 ) -> jnp.ndarray:
   """Compute lhs[sizes[i-1]:sizes[i], :] @ rhs for each group 'i'.
@@ -604,7 +611,7 @@ def gmm(
 
   if lhs_quantize_dtype is not None:
     if use_qwix_quantization:
-      lhs = qpl.quantize(lhs, qtype=lhs_quantize_dtype, channelwise_axes=[0], scale_dtype=jnp.float32)
+      lhs = qpl.quantize(lhs, qtype=lhs_quantize_dtype, channelwise_axes=[0], scale_dtype=jnp.float32, calibration_method=lhs_calibration_method)
     else:
       lhs_quantize_bits = 4 if lhs_quantize_dtype == jnp.int4 else 8
       lhs = aqt_pl.quant(lhs, lhs_quantize_bits, lhs_contracting_axis)
@@ -613,7 +620,7 @@ def gmm(
     # Use per-channel scales for non-contracting axes, i.e., num_groups, m, n but not k.
     if use_qwix_quantization:
       rhs = qpl.quantize(
-          rhs, qtype=rhs_quantize_dtype, channelwise_axes=[0, 1 if transpose_rhs else 2], scale_dtype=jnp.float32
+          rhs, qtype=rhs_quantize_dtype, channelwise_axes=[0, 1 if transpose_rhs else 2], scale_dtype=jnp.float32, calibration_method=rhs_calibration_method
       )
     else:
       rhs_quantize_bits = 4 if rhs_quantize_dtype == jnp.int4 else 8
@@ -645,6 +652,9 @@ def gmm(
         "interpret",
         "lhs_quantize_dtype",
         "rhs_quantize_dtype",
+        "lhs_calibration_method",
+        "rhs_calibration_method",
+        "quantization_rule",
         "use_qwix_quantization",
     ],
 )
@@ -660,6 +670,9 @@ def tgmm(
     interpret: bool = False,
     lhs_quantize_dtype=None,
     rhs_quantize_dtype=None,
+    lhs_calibration_method: str = "absmax",
+    rhs_calibration_method: str = "absmax",
+    quantization_rule: qwix.QtRule | None = None,
     use_qwix_quantization: bool = False,
 ) -> jnp.ndarray:
   """Compute lhs[:, sizes[i-1]:sizes[i]] @ rhs[sizes[i-1]:sizes[i], :].
@@ -780,7 +793,7 @@ def tgmm(
         qvalue = lax.select(
             rhs_mask[...],
             rhs.qvalue[...],
-            jnp.zeros_like(rhs.qvalue, lhs.qvalue.dtype),
+            jnp.zeros_like(rhs.qvalue, rhs.qvalue.dtype),
         )
         loaded_rhs = dataclasses.replace(loaded_rhs, qvalue=qvalue)
       else:
@@ -878,11 +891,11 @@ def tgmm(
   )
 
   if use_qwix_quantization and lhs_quantize_dtype is not None:
-    lhs = qpl.quantize(lhs, qtype=lhs_quantize_dtype, scale_dtype=jnp.float32)
+    lhs = qpl.quantize(lhs, qtype=lhs_quantize_dtype, scale_dtype=jnp.float32, calibration_method=lhs_calibration_method)
 
   if use_qwix_quantization and rhs_quantize_dtype is not None:
     # Use per-channel scales for non-contracting axes, i.e., num_groups, m, n but not k.
-    rhs = qpl.quantize(rhs, qtype=rhs_quantize_dtype, scale_dtype=jnp.float32)
+    rhs = qpl.quantize(rhs, qtype=rhs_quantize_dtype, scale_dtype=jnp.float32, calibration_method=rhs_calibration_method)
 
   out = call_gmm(
       group_metadata,
