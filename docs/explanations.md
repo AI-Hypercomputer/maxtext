@@ -22,4 +22,5 @@
 explanations/steps_model.md
 explanations/quantization.md
 explanations/sharding.md
+explanations/data_pipeline_perf.md
 ```
