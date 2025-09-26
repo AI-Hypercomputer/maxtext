@@ -49,7 +49,7 @@ RUN if [ "$DEVICE" = "tpu" ] && [ "$JAX_STABLE_STACK_BASEIMAGE" = "us-docker.pkg
 
 # Install tunix at a pinned commit for TPU devices, skip for GPU
 RUN if [ "$DEVICE" = "tpu" ]; then \
-        python3 -m pip install 'google-tunix @ https://github.com/google/tunix/archive/e03f154edd2abfddd6b9babb72a3d0d3c4d81bb2.zip'; \
+        python3 -m pip install 'google-tunix @ https://github.com/google/tunix/archive/6c2a613217ed6bb1c9d60088d6e3c67184821c69.zip'; \
   fi
 
 # Now copy the remaining code (source files that may change frequently)
