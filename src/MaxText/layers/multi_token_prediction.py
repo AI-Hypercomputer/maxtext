@@ -215,11 +215,7 @@ class MultiTokenPredictionBlock(nn.Module):
 
       # Embed the k-th future input tokens using the shared embedding module
       target_token_embedding = self.decoder._apply_embedding(
-        shared_embedding,
-        rolled_input_ids,
-        rolled_position_id,
-        deterministic,
-        self.decoder.model_mode
+          shared_embedding, rolled_input_ids, rolled_position_id, deterministic, self.decoder.model_mode
       )
 
       # Instantiate and apply the MTP layer for this step
@@ -232,7 +228,12 @@ class MultiTokenPredictionBlock(nn.Module):
       )
 
       next_mtp_hidden_state = mtp_layer(
-          mtp_hidden_state, target_token_embedding, position_ids, decoder_segment_ids, deterministic, self.decoder.model_mode
+          mtp_hidden_state,
+          target_token_embedding,
+          position_ids,
+          decoder_segment_ids,
+          deterministic,
+          self.decoder.model_mode,
       )
 
       # Project to logits using the shared embedding transpose

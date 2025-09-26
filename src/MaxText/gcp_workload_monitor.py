@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""A utility for reporting workload metrics to Google Cloud Monitoring."""
+
 import datetime
 import os
 import time

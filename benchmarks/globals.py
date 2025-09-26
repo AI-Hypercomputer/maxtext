@@ -20,9 +20,7 @@ MAXTEXT_PKG_DIR = os.environ.get("MAXTEXT_PKG_DIR", "MaxText")
 # This is the maxtext repo root: with ".git" folder; "README.md"; "pyproject.toml"; &etc.
 MAXTEXT_REPO_ROOT = os.environ.get(
     "MAXTEXT_REPO_ROOT",
-    (lambda r: r if os.path.isdir(os.path.join(r, ".git")) else MAXTEXT_PKG_DIR)(
-        os.path.dirname(os.path.dirname(__file__))
-    ),
+    r if os.path.isdir(os.path.join(r := os.path.dirname(os.path.dirname(__file__)), ".git")) else MAXTEXT_PKG_DIR,
 )
 
 # This is the assets root: with "tokenizer.gemma3"; &etc.

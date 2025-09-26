@@ -201,6 +201,28 @@ def transformer_as_linen(
     *,
     name: str | None = None,
 ) -> nnx_wrappers.ToLinen | TransformerLinenPure:
+  """Constructs a Transformer model as a Linen or NNX module.
+
+  This function returns an autoregressive Transformer model as either a Linen module
+  or an NNX-wrapped module, depending on the `config.enable_nnx` flag. The returned module
+  is suitable for training, evaluation, or decoding.
+
+  If `config.enable_nnx` is True, returns a `TransformerLinen` that wraps the NNX-style
+  Transformer for integration with NNX-specific APIs and workflows.
+  Otherwise, returns a pure Flax Linen implementation (`TransformerLinenPure`).
+
+  Args:
+    config (Config): The configuration object specifying model hyperparameters and options.
+    mesh (Mesh): The JAX sharding mesh for device partitioning.
+    quant (Quant): The quantization module or configuration to use.
+    model_mode (str, optional): The operational mode for the model, e.g.
+      training, prefill, or autoregressive. Defaults to `MODEL_MODE_TRAIN`.
+    name (str, optional): Optional module name for Linen/NNX construction.
+
+  Returns:
+    nnx_wrappers.ToLinen | TransformerLinenPure:
+      A constructed Transformer model compatible with the specified framework (Linen or NNX).
+  """
   if config.enable_nnx:
     return TransformerLinen(
         Transformer,
@@ -310,6 +332,16 @@ class Transformer(nnx.Module):
     return
 
   def init_cache(self, cache_size: int, batch_size: int, dtype=jnp.float32):
+    """Initializes the KV cache for the Transformer.
+
+    Args:
+      cache_size: The maximum size of the KV cache.
+      batch_size: The batch size for which the cache is initialized.
+      dtype: Data type for the cache. Defaults to `jnp.float32`.
+
+    Returns:
+      True if the cache is successfully initialized.
+    """
     return True
 
   def __call__(
@@ -328,14 +360,29 @@ class Transformer(nnx.Module):
       decoder_target_tokens: jax.Array | None = None,
       decoder_target_mask: jax.Array | None = None,
   ):
-    """Applies Transformer decoder-branch on encoded-input and target.
+    """Applies the Zero-1 FSDP wrapped Transformer model.
+
+    This method handles the all-gather operation for model weights before
+    applying the underlying Transformer model, and then releases them.
 
     Args:
-      true_length: (Optional) Prompt length before padding
-      slot: (Optional) An integer representing the decode batch index selected
-        for this request.
-    """
+      decoder_input_tokens: Input tokens for the decoder.
+      decoder_positions: Positional encodings for the decoder inputs.
+      decoder_segment_ids: Segment IDs for the decoder inputs (optional).
+      encoder_images: Encoder images for multimodal models (optional).
+      enable_dropout: Whether to enable dropout. Defaults to True.
+      previous_chunk: Previous chunk for incremental decoding (optional).
+      true_length: True length of the prompt before padding (optional).
+      slot: An integer representing the decode batch index selected for this request (optional).
+      page_state: Page state for paged attention (optional).
+      partition_spec: Partition specification for FSDP all-gather.
+      decoder_target_tokens: Target tokens for the decoder (optional, used in MTP).
+      decoder_target_mask: Target mask for the decoder (optional, used in MTP).
+      nnx_method: Method to call on the NNX module (optional).
 
+    Returns:
+      Logits from the Transformer model.
+    """
     if decoder_segment_ids is not None and self.model_mode == MODEL_MODE_AUTOREGRESSIVE:
       raise ValueError(
           f"During autoregressive decoding we assume the tokens are in the active sequence"
@@ -430,6 +477,11 @@ class ZeroOneTransformer(nn.Module):
   model_mode: str = MODEL_MODE_TRAIN  # May be different than the model_mode passed to __call__
 
   def setup(self):
+    """Sets up the underlying Transformer model.
+
+    This method initializes the `self.model` attribute by calling the
+    `transformer_as_linen` factory function.
+    """
     self.model = transformer_as_linen(self.config, self.mesh, self.quant, self.model_mode)
 
   def __call__(
@@ -449,6 +501,31 @@ class ZeroOneTransformer(nn.Module):
       decoder_target_mask: None | jnp.ndarray = None,
       nnx_method: str | None = None,
   ):
+    """Applies the Zero-1 FSDP wrapped Transformer model.
+
+    This method handles the all-gather operation for model weights before
+    applying the underlying Transformer model, and then releases them.
+
+    Args:
+      decoder_input_tokens: Input tokens for the decoder.
+      decoder_positions: Positional encodings for the decoder inputs.
+      decoder_segment_ids: Segment IDs for the decoder inputs (optional).
+      encoder_images: Encoder images for multimodal models (optional).
+      enable_dropout: Whether to enable dropout. Defaults to True.
+      previous_chunk: Previous chunk for incremental decoding (optional).
+      true_length: True length of the prompt before padding (optional).
+      slot: An integer representing the decode batch index selected for this
+        request (optional).
+      page_state: Page state for paged attention (optional).
+      partition_spec: Partition specification for FSDP all-gather.
+      decoder_target_tokens: Target tokens for the decoder (optional, used in
+        MTP).
+      decoder_target_mask: Target mask for the decoder (optional, used in MTP).
+      nnx_method: Method to call on the NNX module (optional).
+
+    Returns:
+      Logits from the Transformer model.
+    """
     if self.is_initializing():
       return self.model(
           decoder_input_tokens=decoder_input_tokens,

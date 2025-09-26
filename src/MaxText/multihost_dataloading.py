@@ -126,9 +126,7 @@ class MultiHostDataLoadIterator:
           else:
             raise e
       else:
-        raise TimeoutError(
-            f"Failed to load data after {MAX_DATA_LOAD_ATTEMPTS} retry attempts."
-        )
+        raise TimeoutError(f"Failed to load data after {MAX_DATA_LOAD_ATTEMPTS} retry attempts.")
 
       self.last_local_data = local_data
     input_gdas = jtu.tree_map_with_path(partial(_form_global_array, global_mesh=self.global_mesh), local_data)

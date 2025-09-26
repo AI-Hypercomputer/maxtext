@@ -87,7 +87,9 @@ def get_shaped_batch(config):
   shaped_batch["targets_position"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
   shaped_batch["targets_segmentation"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
   if config.use_multimodal:
-    image_shape = multimodal_utils.get_dummy_image_shape_for_init(config.model_name, batch_size=config.micro_batch_size_to_train_on)
+    image_shape = multimodal_utils.get_dummy_image_shape_for_init(
+        config.model_name, batch_size=config.micro_batch_size_to_train_on
+    )
     shaped_batch["images"] = jax.ShapeDtypeStruct(image_shape, jnp.int32)
     shaped_batch["image_masks"] = jax.ShapeDtypeStruct(image_shape[:3], jnp.int32)
   return shaped_batch
@@ -506,7 +508,7 @@ def calculate_tflops_training_per_device(config, log=True):
         config, total_ffn_flops, qkv_flops, projection_flops, embedding_flops
     )
   elif config.decoder_block == DecoderBlockType.GEMMA3:
-    attention_tflops, learnable_weight_tflops = calculate_mixed_attention_model_tflops_training_per_device (
+    attention_tflops, learnable_weight_tflops = calculate_mixed_attention_model_tflops_training_per_device(
         config, total_ffn_flops, qkv_flops, projection_flops, embedding_flops, attention_pattern_length=6
     )
   elif config.decoder_block == DecoderBlockType.GPT_OSS:
@@ -872,7 +874,9 @@ def init_initial_state(model, tx, config, is_training, key):
   Args: model, tx, config, is_training, key
   """
   input_shape = (config.micro_batch_size_to_train_on, config.max_target_length)
-  image_shape = multimodal_utils.get_dummy_image_shape_for_init(config.model_name, batch_size=config.micro_batch_size_to_train_on)
+  image_shape = multimodal_utils.get_dummy_image_shape_for_init(
+      config.model_name, batch_size=config.micro_batch_size_to_train_on
+  )
   model_vars = model.init(
       {"params": key, "dropout": key, "aqt": key},
       np.ones(input_shape, dtype=jnp.int32),
@@ -1059,7 +1063,9 @@ def get_prefill_kv_cache_annotations(model, config, rng, mesh, page_state: None 
         config.micro_batch_size_to_train_on,
         config.max_prefill_predict_length,
     )
-    image_shape = multimodal_utils.get_dummy_image_shape_for_init(config.model_name, batch_size=config.micro_batch_size_to_train_on)
+    image_shape = multimodal_utils.get_dummy_image_shape_for_init(
+        config.model_name, batch_size=config.micro_batch_size_to_train_on
+    )
 
     model_vars = model.init(
         {"params": rng, "dropout": rng, "aqt": rng},
@@ -1086,7 +1092,9 @@ def get_kv_cache_annotations(model, config, rng, mesh, page_state: None | PageSt
 
   def init_kv_cache(model, config):
     input_shape = (config.micro_batch_size_to_train_on, 1)
-    image_shape = multimodal_utils.get_dummy_image_shape_for_init(config.model_name, batch_size=config.micro_batch_size_to_train_on)
+    image_shape = multimodal_utils.get_dummy_image_shape_for_init(
+        config.model_name, batch_size=config.micro_batch_size_to_train_on
+    )
 
     model_vars = model.init(
         {"params": rng, "dropout": rng, "aqt": rng},

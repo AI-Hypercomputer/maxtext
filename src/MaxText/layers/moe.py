@@ -83,20 +83,18 @@ def _sort_activations_custom(inputs: jax.Array, sort_indices: jax.Array) -> jax.
   return inputs[sort_indices, ...]
 
 
-def _sort_activations_custom_fwd(inputs: jax.Array, sort_indices: jax.Array
-) -> tuple[jax.Array, jax.Array]:
+def _sort_activations_custom_fwd(inputs: jax.Array, sort_indices: jax.Array) -> tuple[jax.Array, jax.Array]:
   """Forward pass of the custom vjp for `_sort_activations()`."""
   return _sort_activations_custom(inputs, sort_indices), sort_indices
 
 
-def _sort_activations_custom_bwd(residuals: jax.Array, grads: jax.Array
-) -> tuple[jax.Array, None]:
+def _sort_activations_custom_bwd(residuals: jax.Array, grads: jax.Array) -> tuple[jax.Array, None]:
   """Backward pass of the custom vjp for `_sort_activations()`."""
   sort_indices = residuals
   return _sort_activations_custom(grads, jnp.argsort(sort_indices)), None
 
-_sort_activations_custom.defvjp(
-    _sort_activations_custom_fwd, _sort_activations_custom_bwd)
+
+_sort_activations_custom.defvjp(_sort_activations_custom_fwd, _sort_activations_custom_bwd)
 
 
 def random_routing(rng_key, gate_logits, num_experts_per_tok):
@@ -301,7 +299,7 @@ class RoutedMoE(nnx.Module):
     self.rngs = rngs
 
     if self.config.fsdp_shard_on_exp:
-    # special sharding for dsv3
+      # special sharding for dsv3
       self.wi_kernel_axes = ("embed_no_exp", None, "mlp")
       self.wo_kernel_axes = ("embed_no_exp", "mlp", None)
     else:
@@ -324,9 +322,7 @@ class RoutedMoE(nnx.Module):
     )
 
     # pylint: disable=protected-access
-    self.activation_fn = linears._convert_to_activation_function(
-        self.config.mlp_activations[0]
-    )
+    self.activation_fn = linears._convert_to_activation_function(self.config.mlp_activations[0])
 
     kernel_in_axis = np.arange(1)
     kernel_out_axis = np.arange(1, 2)
@@ -432,7 +428,6 @@ class RoutedMoE(nnx.Module):
 
     return top_k_weights, top_k_indices
 
-    
   def deepseek_scale_weights(self, weights):
     """Scales weights according to DeepSeek's v3 reference implementation."""
     # https://github.com/deepseek-ai/DeepSeek-V3/blob/2f7b80eecebf3d1c84da5a0d465f6639ea175012/inference/model.py#L592-L594.
@@ -541,7 +536,9 @@ class RoutedMoE(nnx.Module):
     sorted_selected_experts = jnp.argsort(flatten_selected_experts)
     # sort inputs for number of selected experts
     replicated_inputs_2d = jnp.repeat(inputs_2d, self.num_experts_per_tok, axis=0)
-    sorted_inputs = _sort_activations(replicated_inputs_2d, sorted_selected_experts, use_custom_sort_vjp).astype(self.dtype)
+    sorted_inputs = _sort_activations(replicated_inputs_2d, sorted_selected_experts, use_custom_sort_vjp).astype(
+        self.dtype
+    )
     group_size = jnp.bincount(flatten_selected_experts, length=self.num_experts)
     # Return the experts for each sorted input.
     expert_indices = jnp.arange(self.num_experts)
@@ -907,7 +904,7 @@ class RoutedMoE(nnx.Module):
     # w0, w1, wo needs to be un sharded on fsdp / fsdp_transpose axis, so use
     # mlp_no_fsdp axis
     if self.config.fsdp_shard_on_exp:
-    # special sharding for dsv3 to remove overhead between gmm/AG
+      # special sharding for dsv3 to remove overhead between gmm/AG
       w0_pspec = nn.logical_to_mesh_axes(("embed_tensor_transpose", None, "mlp_no_fsdp"))
       w1_pspec = nn.logical_to_mesh_axes(("embed_tensor_transpose", None, "mlp_no_fsdp"))
       wo_pspec = nn.logical_to_mesh_axes(("embed_tensor_transpose", "mlp_no_fsdp", None))
@@ -951,15 +948,18 @@ class RoutedMoE(nnx.Module):
 
         # Duplicate inputs to all expert shards.
         x, logits, pre_bias_logits = tuple(
-            jax.lax.all_gather(z, axis_name=expert_axis_name, tiled=True)
-            for z in (x, logits, pre_bias_logits)
+            jax.lax.all_gather(z, axis_name=expert_axis_name, tiled=True) for z in (x, logits, pre_bias_logits)
         )
 
         # "Route" tokens within each shard.
         num_experts_per_shard = self.config.num_experts // num_expert_parallelism
         x, sorted_selected_experts, weights, group_sizes, selected_experts = self.permute(
-            x, logits, pre_bias_logits, self.config.use_custom_sort_vjp,
-            roll_to_expert_id=num_experts_per_shard * expert_shard_id)
+            x,
+            logits,
+            pre_bias_logits,
+            self.config.use_custom_sort_vjp,
+            roll_to_expert_id=num_experts_per_shard * expert_shard_id,
+        )
 
         # Filter down to the group sizes that apply to only the experts in the
         # current shard.
@@ -968,7 +968,8 @@ class RoutedMoE(nnx.Module):
         x = jnp.where(mask[:, None], x, 0)
       else:
         x, sorted_selected_experts, weights, group_sizes, selected_experts = self.permute(
-            x, logits, pre_bias_logits, self.config.use_custom_sort_vjp, rngs)
+            x, logits, pre_bias_logits, self.config.use_custom_sort_vjp, rngs
+        )
 
         if num_expert_parallelism > 1:
           batch_axis = "expert" if is_batch_sharded_by_expert else "data"
@@ -1076,8 +1077,7 @@ class RoutedMoE(nnx.Module):
 
         # Sum up the partial outputs across the expert shards.
         output = jnp.reshape(output, (-1, sequence_length, self.config.emb_dim))
-        output = jax.lax.psum_scatter(
-            output, expert_axis_name, scatter_dimension=0, tiled=True)
+        output = jax.lax.psum_scatter(output, expert_axis_name, scatter_dimension=0, tiled=True)
 
       else:
         if num_expert_parallelism > 1:
@@ -1163,7 +1163,9 @@ class RoutedMoE(nnx.Module):
       w1_kernel = nn.with_logical_constraint(w1_kernel, ("exp", "embed_tensor_transpose", "mlp_no_fsdp"))
       wo_kernel = nn.with_logical_constraint(wo_kernel, ("exp", "mlp_no_fsdp", "embed_tensor_transpose"))
 
-    return wrapper(inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel, w0_bias, w1_bias, wo_bias, self.rngs)
+    return wrapper(
+        inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel, w0_bias, w1_bias, wo_bias, self.rngs
+    )
 
   def reshape_and_update_weights(self, weights, indices):
     """reshape and update weights."""
@@ -1698,7 +1700,9 @@ class RoutedMoE(nnx.Module):
     # This is called only during tracing. This is to invoke creation of
     # quantized tensor inside AqtEinsum.  After jit, this will become no-op and
     # will not affect performance.
-    _ = self.dense_matmul(inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel, w0_bias, w1_bias, wo_bias)
+    _ = self.dense_matmul(
+        inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel, w0_bias, w1_bias, wo_bias
+    )
 
     w0_kernel = self.variables["aqt"]["AqtEinsum_0"]["AqtDotGeneral_0"]["qrhs"]["frozen"]
     w1_kernel = self.variables["aqt"]["AqtEinsum_1"]["AqtDotGeneral_0"]["qrhs"]["frozen"]

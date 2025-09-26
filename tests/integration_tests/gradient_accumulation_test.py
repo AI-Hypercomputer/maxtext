@@ -12,9 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Integration tests for gradient accumulation."""
+
 import tempfile
 
-# pylint: disable=missing-module-docstring, missing-function-docstring
 import numpy as np
 import json
 import unittest
