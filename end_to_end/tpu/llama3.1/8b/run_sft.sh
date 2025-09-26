@@ -78,13 +78,3 @@ sorted_dirs=($(printf '%s\n' "${integer_dirs[@]}" | sort -n))
 largest_dir="${sorted_dirs[-1]}"
 FINE_TUNED_MODEL_CKPT_PATH=${CHECKPOINTS_PATH}/${largest_dir}
 echo "Fine-tuned model checkpoint: ${FINE_TUNED_MODEL_CKPT_PATH}"
-
-# Convert the fine-tuned MaxText checkpoint to Hugging Face checkpoint
-export LOCAL_PATH=./tmp/hf/${PRE_TRAINED_MODEL}/${RUN_NAME}
-python3 -m MaxText.utils.ckpt_conversion.to_huggingface "${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText}"/configs/base.yml \
-    model_name=${PRE_TRAINED_MODEL} \
-    hf_access_token=${HF_TOKEN} \
-    load_parameters_path=${FINE_TUNED_MODEL_CKPT_PATH}/model_params \
-    base_output_directory=${LOCAL_PATH} \
-    scan_layers=False
-echo "Converted Hugging Face checkpoint saved to: ${LOCAL_PATH}"

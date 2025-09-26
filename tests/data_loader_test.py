@@ -115,7 +115,7 @@ class DataLoaderTest(unittest.TestCase):
     data_loader = DataLoader(self.config, self.mesh, self.mock_data_iterator, None)
     with self.assertRaises(exceptions.StopTraining) as e:
       _ = data_loader.load_next_batch()
-    self.assertEqual(str(e.exception), "You may have run out of training data.")
+    self.assertTrue(str(e.exception).startswith("You may have run out of training data."))
 
 
 if __name__ == "__main__":

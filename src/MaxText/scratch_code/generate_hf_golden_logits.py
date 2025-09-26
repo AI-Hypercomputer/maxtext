@@ -59,7 +59,7 @@ def save_golden_logits(model_id, output_path, prompt_texts, apply_chat_template,
   """save golden logits"""
   if hf_model_path is None:
     hf_model_path = model_id
-  tokenizer = AutoTokenizer.from_pretrained(hf_model_path)
+  tokenizer = AutoTokenizer.from_pretrained(model_id)
   model = AutoModelForCausalLM.from_pretrained(
       hf_model_path,
       torch_dtype=torch.float32,

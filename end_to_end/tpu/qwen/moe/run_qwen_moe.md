@@ -55,7 +55,7 @@ python3 -m MaxText.train src/MaxText/configs/base.yml\
     max_target_length=8192\
     ici_fsdp_parallelism=256\
     tokenizer_type=huggingface\
-    tokenizer_path=assets/qwen3-tokenizer
+    tokenizer_path=src/MaxText/assets/qwen3-tokenizer
 
 ```
 
@@ -64,13 +64,13 @@ python3 -m MaxText.train src/MaxText/configs/base.yml\
 Decoding
 --------
 
-To generate text with a trained model, use the `decode` command. The command below is an example for fine-tuning on a v5p-512 slice.
+To generate text with a trained model, use the `decode` command. The command below is an example for decoding on a v5p-512 slice.
 
 ```
 python3 -m MaxText.decode src/MaxText/configs/base.yml\
     load_parameters_path=gs://your-gcs-bucket/qwen3_maxtext_ckpt/0/items\
     tokenizer_type=huggingface\
-    tokenizer_path=assets/qwen3-tokenizer\
+    tokenizer_path=src/MaxText/assets/qwen3-tokenizer\
     prompt="Today is a beautiful day to"\
     model_name=<qwen3-30b-a3b|qwen3-235b-a22b|qwen3-480b-a35b>\
     per_device_batch_size=1\

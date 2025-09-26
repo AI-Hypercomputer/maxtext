@@ -65,36 +65,10 @@ def _form_global_array(path, array: np.ndarray, global_mesh: Mesh) -> jax.Array:
   return jax.make_array_from_single_device_arrays(global_shape, sharding, local_device_buffers)
 
 
-def get_next_batch_sharded(local_iterator: Iterator, global_mesh: Mesh) -> jax.Array:
-  """Splits the host loaded data equally over all devices."""
-
-  SLEEP_TIME = 10
-  MAX_DATA_LOAD_ATTEMPTS = 30
-
-  data_load_attempts = 0
-  loaded_data_success = False
-  while not loaded_data_success and data_load_attempts < MAX_DATA_LOAD_ATTEMPTS:
-    data_load_attempts += 1
-    try:
-      local_data = next(local_iterator)
-      loaded_data_success = True
-    except tf.errors.FailedPreconditionError:
-      max_logging.log("Failed to get next data batch, retrying")
-      time.sleep(SLEEP_TIME)
-
-  # Try one last time, if this fails we will see the full stack trace.
-  if not loaded_data_success:
-    local_data = next(local_iterator)
-
-  input_gdas = jtu.tree_map_with_path(partial(_form_global_array, global_mesh=global_mesh), local_data)
-
-  return input_gdas
-
-
 class MultiHostDataLoadIterator:
   """fold get_next_batch_sharded into a iterator class"""
 
-  def __init__(self, dataloader: tf.data.Dataset | Iterable, global_mesh: Mesh):
+  def __init__(self, dataloader: tf.data.Dataset | Iterable, global_mesh: Mesh, generate_padding_batch: bool = False):
     self.global_mesh = global_mesh
     self.dataloader = dataloader
     if isinstance(self.dataloader, tf.data.Dataset):
@@ -103,6 +77,9 @@ class MultiHostDataLoadIterator:
       self.local_iterator = iter(self.dataloader)
     else:
       raise ValueError("Type error: dataloader should be either tf.data.Dataset or Iterable.")
+    self.out_of_data = False
+    self.last_local_data = None
+    self.generate_padding_batch = generate_padding_batch
 
   def reset(self):
     if isinstance(self.dataloader, tf.data.Dataset):
@@ -110,14 +87,58 @@ class MultiHostDataLoadIterator:
     elif isinstance(self.dataloader, Iterable):
       self.local_iterator = iter(self.dataloader)
     else:
-      raise ValueError("Type error: dataloader should be either tf.data.Dataset or grain.DataLoader.")
+      raise ValueError("Type error: dataloader should be either tf.data.Dataset or Iterable.")
+    self.out_of_data = False
+    self.last_local_data = None
 
   def __iter__(self):
     self.reset()
     return self
 
   def __next__(self):
-    return get_next_batch_sharded(self.local_iterator, self.global_mesh)
+    return self._get_next_batch_sharded()
+
+  def _get_next_batch_sharded(self) -> jax.Array:
+    """Splits the host loaded data equally over all devices."""
+    if self.out_of_data and self.generate_padding_batch:
+      local_data = self._make_padding_batch()
+
+    else:
+      SLEEP_TIME = 10
+      MAX_DATA_LOAD_ATTEMPTS = 30
+
+      for _ in range(MAX_DATA_LOAD_ATTEMPTS):
+        try:
+          local_data = next(self.local_iterator)
+          break  # exit the loop on success
+        except tf.errors.FailedPreconditionError as e:
+          max_logging.log(f"Failed to get next data batch due to {e}, retrying")
+          time.sleep(SLEEP_TIME)
+        except Exception as e:
+          if isinstance(e, StopIteration) or "StopIteration" in str(e):
+            if self.generate_padding_batch:
+              max_logging.log(
+                  f"MultiHostDataLoadIterator: host {jax.process_index()} failed to load data with {type(e)} error: ({e}). It may reach the end of data, generating padding batch as generate_padding_batch=True."
+              )
+              self.out_of_data = True
+              local_data = self._make_padding_batch()
+              break
+          else:
+            raise e
+      else:
+        raise TimeoutError(
+            f"Failed to load data after {MAX_DATA_LOAD_ATTEMPTS} retry attempts."
+        )
+
+      self.last_local_data = local_data
+    input_gdas = jtu.tree_map_with_path(partial(_form_global_array, global_mesh=self.global_mesh), local_data)
+
+    return input_gdas
+
+  def _make_padding_batch(self):
+    if self.last_local_data is None:
+      raise ValueError("last_local_data is None, cannot make padding batch.")
+    return jtu.tree_map(lambda x: jnp.full_like(x, 0), self.last_local_data)
 
 
 @colocated_python.colocated_python

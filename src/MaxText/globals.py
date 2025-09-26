@@ -26,7 +26,7 @@ MAXTEXT_REPO_ROOT = os.environ.get(
 )
 
 # This is the assets root: with "tokenizer.gemma3"; &etc.
-MAXTEXT_ASSETS_ROOT = os.environ.get("MAXTEXT_ASSETS_ROOT", os.path.join(MAXTEXT_REPO_ROOT, "assets"))
+MAXTEXT_ASSETS_ROOT = os.environ.get("MAXTEXT_ASSETS_ROOT", os.path.join(MAXTEXT_PKG_DIR, "assets"))
 
 # This is the test assets root: with "test_image.jpg"; &etc.
 MAXTEXT_TEST_ASSETS_ROOT = os.environ.get("MAXTEXT_TEST_ASSETS_ROOT", os.path.join(MAXTEXT_PKG_DIR, "test_assets"))

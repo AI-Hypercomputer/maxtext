@@ -114,6 +114,7 @@ class GptOssDecoderLayer(nn.Module):
         use_bias_in_projections=cfg.attention_bias,
         attention_type=self.attention_type,
         sliding_window_size=cfg.sliding_window_size,
+        query_pre_attn_scalar=(cfg.head_dim**-0.5),
         model_mode=model_mode,
     )
 

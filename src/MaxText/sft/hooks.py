@@ -103,26 +103,29 @@ class SFTTrainingHooks(TrainingHooks):
       train_loss: float,
       step_time: float,
   ):
-    """Called at the end of training step."""
-    assert train_step in self.train_metadata, (
-        "SFTTrainingHooks.on_train_step_start() must be called before"
-        " SFTTrainingHooks.on_train_step_end()"
+    """Called at the end of training step.
+    This hook is called by Tunix after the step counter has been incremented for logging purposes.
+    Therefore, using `train_step - 1` to refer to the state of the previous step counter.
+    However, we will use the current `train_step` value to record metrics in this hook to be
+    consistent with Tunix's metric logging convention.
+    """
+
+    assert train_step - 1 in self.train_metadata, (
+        "SFTTrainingHooks.on_train_step_start() must be called before" " SFTTrainingHooks.on_train_step_end()"
     )
 
-    if self.metadata["first_train_step"] == train_step:
+    if self.metadata["first_train_step"] == train_step - 1:
       max_utils.print_mem_stats("After params initialized")
 
     metrics = {
         "scalar": {
             "learning/loss": train_loss,
-            "learning/total_weights": self.train_metadata[train_step][
-                "total_weights"
-            ],
+            "learning/total_weights": self.train_metadata[train_step - 1]["total_weights"],
         }
     }
     self.metric_logger.record_train_metrics(metrics, train_step, step_time)
     self.metric_logger.write_metrics(metrics, train_step)
-    del self.train_metadata[train_step]
+    del self.train_metadata[train_step - 1]
 
   @override
   def on_eval_step_start(self, train_ctx: peft_trainer.PeftTrainer):

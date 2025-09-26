@@ -250,7 +250,7 @@ def main(config, test_args):  # pylint: disable=W0621
     max_logging.log(f"loaded {len(golden_data)} golden data points")
     all_data_to_save = []
     for golden_data_index, golden_data_point in enumerate(golden_data):
-      max_logging.log(f"--- Comparing forward pass for golden data index: {golden_data_index} ---")
+      max_logging.log(f"\n--- Comparing forward pass for golden data index: {golden_data_index} ---")
       ids, decoder_segment_ids, decoder_positions, golden_logits, seq_len, images = get_data(golden_data_point, config)
       max_logging.log("maxtext forward pass")
       full_train_logits = model.apply(
@@ -267,7 +267,7 @@ def main(config, test_args):  # pylint: disable=W0621
       # if full_train_logits shape is [num_hosts, batch_size, seq_len, vocab_size]
       if full_train_logits.ndim == 4:
         full_train_logits = jnp.reshape(full_train_logits, (-1, config.max_target_length, config.vocab_size))
-      # Slice to original sequence length
+      # Slice to original sequence length, [num_hosts * batch_size, seq_len, vocab_size]
       full_train_logits = full_train_logits[:, :seq_len, :]
 
       token_size = int(test_args.token_size) if test_args.token_size else seq_len
@@ -278,8 +278,10 @@ def main(config, test_args):  # pylint: disable=W0621
             "Comparing up to the smaller vocab size."
         )
       min_vocab_size = min(full_train_logits.shape[-1], golden_logits.shape[-1])
+      # shape [seq_len, vocab_size]
       train_logits_slice = full_train_logits[0, :token_size, :min_vocab_size]
       golden_logits_slice = golden_logits[:token_size, :min_vocab_size]
+      max_logging.log("\n[logits: token 2]")
       max_logging.log(f"{golden_logits_slice[2]=}")
       max_logging.log(f"{train_logits_slice[2]=}")
 
@@ -296,6 +298,7 @@ def main(config, test_args):  # pylint: disable=W0621
       max_abs_diff_val = abs_diff[max_abs_diff_idx]
       max_rel_diff_val = rel_diff[max_rel_diff_idx]
       msg = (
+          "\n[numerical difference]\n"
           f"Max absolute difference: {max_abs_diff_val:.6f} at index {max_abs_diff_idx}\n"
           f"  (Train: {train_logits_slice[max_abs_diff_idx]:.6f}, Golden: {golden_logits_slice[max_abs_diff_idx]:.6f})\n"
           f"Max relative difference: {max_rel_diff_val:.6f} at index {max_rel_diff_idx}\n"
@@ -306,11 +309,12 @@ def main(config, test_args):  # pylint: disable=W0621
       model_probabilities = jax.nn.softmax(train_logits_slice, axis=-1)
       golden_probabilities = jax.nn.softmax(golden_logits_slice, axis=-1)
 
+      max_logging.log("\n[probability: token 1]")
       max_logging.log(f"{golden_probabilities[1]=}")
       max_logging.log(f"{model_probabilities[1]=}")
 
       kl_div = jax.numpy.sum(jax.scipy.special.kl_div(golden_probabilities, model_probabilities), axis=-1)
-      max_logging.log(f"KL divergence = {kl_div}, max KL divergence = {jax.numpy.max(kl_div)}")
+      max_logging.log(f"\n[KL divergence]\nmax KL divergence = {jax.numpy.max(kl_div)}\nKL divergence = {kl_div}")
 
       if jax.process_index() == 0 and test_args.output_logits_path:
         data_to_save = {
@@ -320,18 +324,23 @@ def main(config, test_args):  # pylint: disable=W0621
         }
         all_data_to_save.append(data_to_save)
 
-      if test_args.max_kl_div is not None:
-        max_logging.log("Checking KL Divergence between train distribution and " "golden distribution")
-        assert jax.numpy.all(
-            kl_div < test_args.max_kl_div,
-        ), f"KL divergence values exceed the specified threshold of {test_args.max_kl_div}. Max divergence: {jax.numpy.max(kl_div)}"
-
-      max_logging.log("Checking Numerical Differences between train logits and golden logits against the provided atol, rtol.")  # pylint: disable=C0301
+      max_logging.log("\n[test criteria]")
+      max_logging.log(
+          f"Checking Numerical Differences between train logits and golden logits against atol={test_args.rtol} rtol={test_args.atol}."
+      )
       rtol_val = float(test_args.rtol)
       atol_val = float(test_args.atol)
       assert jax.numpy.allclose(
           train_logits_slice, golden_logits_slice, rtol=rtol_val, atol=atol_val, equal_nan=False
       ), f"Logits do not match closely enough. Required rtol={test_args.rtol}, atol={test_args.atol}."
+
+      if test_args.max_kl_div is not None:
+        max_logging.log(
+            f"Checking KL Divergence between train distribution and golden distribution against theshold {test_args.max_kl_div}."
+        )
+        assert jax.numpy.all(
+            kl_div < test_args.max_kl_div,
+        ), f"KL divergence values exceed the specified threshold of {test_args.max_kl_div}. Max divergence: {jax.numpy.max(kl_div)}"
 
   else:
     """Comparing maxtext model with HF model on-the-fly"""
