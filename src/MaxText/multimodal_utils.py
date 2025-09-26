@@ -532,6 +532,8 @@ def prepare_text_for_image_fusion(texts, model_name, processor_output=None):
     num_images = len(processor_output) if isinstance(processor_output, list) else 1
     return add_extra_tokens_for_images_gemma3(texts, max_num_images=num_images)
   if model_name in ["llama4-17b-16e", "llama4-17b-128e"]:
+    # TODO(nicogrande): support multiple images
+    processor_output = processor_output[0] if isinstance(processor_output, list) else processor_output
     return add_extra_tokens_for_images_llama4(texts, processor_output)
   else:
     raise ValueError(f"Model {model_name} does not support multimodal inference.")
