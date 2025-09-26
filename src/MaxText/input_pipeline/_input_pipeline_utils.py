@@ -106,8 +106,10 @@ def prepare_text_for_image_fusion(example, column_name, model_name):
       example[column_name], model_name, processor_output=example["images"]
   )
   if isinstance(example["images"], list):
+    example["image_masks"] = [image.pixel_mask for image in example["images"]]
     example["images"] = [image.pixel_values for image in example["images"]]
   else:
+    example["image_masks"] = example["images"].pixel_mask
     example["images"] = example["images"].pixel_values
   return example
 
@@ -253,6 +255,7 @@ class SFTPromptMaskingVision(grain.MapTransform):
         "inputs": np.asarray(inputs[: self.max_target_length], dtype=np.int32),
         "targets": np.asarray(targets[: self.max_target_length], dtype=np.int32),
         "images": element["images"],
+        "image_masks": element["image_masks"],
     }
 
 
@@ -430,9 +433,27 @@ class PadOrTrimToMaxLength(grain.MapTransform):
     pad_amount = [(0, pad_amount)] + [(0, 0)] * (len(x.shape) - 1)
     return np.pad(x, pad_amount, constant_values=pad_id)[: self.max_length]
 
+  def _pad_image_mask(self, image_masks):
+    image_offsets = multimodal_utils.get_image_offsets(self.model_name, None)
+    max_num_images = (self.max_length // image_offsets) - 1  # -1 to reserve space for at least one text token
+    if self.max_num_images_per_example > 0:
+      max_num_images = min(self.max_num_images_per_example, max_num_images)
+    assert (
+        image_masks.shape[0] <= max_num_images
+    ), f"Number of image masks {image_masks.shape[0]} exceeds the maximum allowed {max_num_images}"
+    if image_masks.shape[0] < max_num_images:
+      pad_size = max_num_images - image_masks.shape[0]
+      pad_shape = (pad_size,)
+      pad_image_masks = np.zeros(pad_shape, dtype=image_masks.dtype)
+      if image_masks is not None and image_masks.size > 0:
+        image_masks = np.concatenate([image_masks, pad_image_masks], axis=0)
+      else:
+        image_masks = pad_image_masks
+    return image_masks
+
   def _pad_image(self, images):
     image_offsets = multimodal_utils.get_image_offsets(self.model_name, None)
-    max_num_images = (self.max_length // image_offsets) -1  # -1 to reserve space for at least one text token
+    max_num_images = (self.max_length // image_offsets) - 1  # -1 to reserve space for at least one text token
     if self.max_num_images_per_example > 0:
       max_num_images = min(self.max_num_images_per_example, max_num_images)
     image_shape = multimodal_utils.get_dummy_image_shape_for_init(self.model_name)[2:]
@@ -458,13 +479,24 @@ class PadOrTrimToMaxLength(grain.MapTransform):
         element[f"{data_column}_position"] = np.arange(element[data_column].shape[0], dtype=np.int32)
         if self.add_true_length:
           element[f"{data_column}_true_length"] = np.array([element[data_column].shape[0]], dtype=np.int32)
+
     for key, _ in element.items():
       if key == "images":
-        if isinstance(element["images"], list):
-          assert self.model_name is not None, "model_name must be provided when padding images"
+        if isinstance(element["images"], list) and self.model_name is None:
+          raise ValueError("model_name must be provided when padding images")
+        elif isinstance(element["images"], list):
           element["images"] = self._pad_image(np.asarray(element["images"]))
         else:
           element["images"] = np.asarray(element["images"])[None, ...]
+
+      elif key == "image_masks" and element["image_masks"] is not None:
+        if isinstance(element["image_masks"], list) and self.model_name is None:
+          raise ValueError("model_name must be provided when padding image masks")
+        elif isinstance(element["image_masks"], list):
+          element["image_masks"] = self._pad_image_mask(np.asarray(element["image_masks"]))
+        else:
+          element["image_masks"] = np.asarray(element["image_masks"])[None, ...]
+
       elif "true_length" not in key:
         element[key] = self._pad_text(element[key], self.max_length, self.pad_id)
     return element

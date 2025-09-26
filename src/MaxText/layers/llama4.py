@@ -295,8 +295,12 @@ class Llama4MultiModalProjector(nn.Module):
       Tensor of shape [batch_size, num_patches, (pixel_shuffle_ratio**2), vision_hidden_size]
     """
     b, t, c, d = image_features.shape
+
+    # Reshape image_features to [b * t, c, d] and project to text hidden dimension
     image_features = image_features.reshape(b * t, c, d)
     hidden_states = self.linear(image_features)
+
+    # Reshape hidden states back to [b, t, c, d]
     _, c, d = hidden_states.shape
     hidden_states = hidden_states.reshape(b, t, c, d)
     return hidden_states
@@ -754,17 +758,18 @@ class Llama4VisionModel(nn.Module):
     """Forward pass of the Llama4 vision model.
 
     Args:
-      inputs: Input tensor of shape [batch_size, num_tiles, num_channels_for_vit, tile_size_for_vit, tile_size_for_vit]
+      inputs: Input tensor of shape [batch_size, num_images, num_tiles, num_channels_for_vit, tile_size_for_vit, tile_size_for_vit]
       deterministic: Whether to use deterministic mode (disables dropout)
 
     Returns:
-      Final hidden states from the vision encoder of shape [batch_size, num_tiles, num_patches, vision_output_dim_for_vit]
+      Final hidden states from the vision encoder of shape [batch_size * num_images, num_tiles, num_patches, vision_output_dim_for_vit]
     """
     cfg = self.config
     mesh = self.mesh
 
-    b, t, c, h, w = pixel_values.shape
-    pixel_values = jnp.reshape(pixel_values, [b * t, c, h, w])
+    # Reshape pixel values to combine batch, num_images, and num_tiles dimensions
+    b, n, t, c, h, w = pixel_values.shape
+    pixel_values = jnp.reshape(pixel_values, [b * n * t, c, h, w])
 
     # Unfold convolution to extract patches
     hidden_states = Llama4UnfoldConvolution(config=cfg)(pixel_values)
@@ -787,6 +792,6 @@ class Llama4VisionModel(nn.Module):
 
     # Reshape hidden states
     _, patch_num, patch_dim = hidden_states.shape
-    hidden_states = jnp.reshape(hidden_states, [b, t, patch_num, patch_dim])
+    hidden_states = jnp.reshape(hidden_states, [b * n, t, patch_num, patch_dim])
 
     return hidden_states
