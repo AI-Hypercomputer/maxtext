@@ -410,6 +410,7 @@ class MaxEngine(engine_api.Engine):
       existing_prefix: ExistingPrefix | None = None,
       padded_tokens: jax.Array,
       images: jax.Array | None = None,
+      image_masks: jax.Array | None = None,
       true_length: int,
       sampler: Callable[[Any], Any] | None = None,  # pylint: disable=unused-argument
       rng: PRNGKeyType | None = None,
@@ -474,6 +475,7 @@ class MaxEngine(engine_api.Engine):
     positions = jnp.expand_dims(jnp.arange(start_position, start_position + input_tokens.shape[1]), 0)
 
     input_images = None
+    input_image_masks = None
     if self.config.use_multimodal and images is not None:
       if images.ndim == 3:
         # For Gemma3 single image, add batch and image count dimensions
@@ -481,6 +483,7 @@ class MaxEngine(engine_api.Engine):
       elif images.ndim == 4:
         # add batch dimension
         input_images = images[jnp.newaxis, ...]
+        input_image_masks = image_masks[jnp.newaxis, ...] if image_masks is not None else None
 
     # sequence_indicator will be concatenated to existing_prefix decoder_segment_ids
     start_to_n = jnp.arange(start_position, start_position + input_tokens.shape[1])
@@ -495,6 +498,7 @@ class MaxEngine(engine_api.Engine):
           input_tokens,
           positions,
           encoder_images=input_images,
+          encoder_image_masks=input_image_masks,
           decoder_segment_ids=sequence_indicator,
           enable_dropout=False,
           model_mode=MODEL_MODE_PREFILL,
@@ -569,6 +573,7 @@ class MaxEngine(engine_api.Engine):
       existing_prefix: ExistingPrefix | None = None,
       padded_tokens: jax.Array,
       images: jax.Array | None = None,
+      image_masks: jax.Array | None = None,
       true_length: int,
       sampler: Callable[[Any], Any] | None = None,  # pylint: disable=unused-argument
       rng: PRNGKeyType | None = None,
@@ -601,6 +606,7 @@ class MaxEngine(engine_api.Engine):
         existing_prefix=existing_prefix,
         padded_tokens=padded_tokens,
         images=images,
+        image_masks=image_masks,
         sampler=sampler,
         true_length=true_length,
         page_state=self.page_state,  # Pass current page state
