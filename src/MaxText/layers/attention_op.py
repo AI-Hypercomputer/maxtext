@@ -821,6 +821,61 @@ class AttentionOp(nnx.Module):
     moba_mask = jax.vmap(self._generate_moba_mask_single_item, in_axes=(0, 0, None))(query, key, q_positions)
     return moba_mask
 
+  def _moba_flash_attention_single_item(
+    self,
+    query_item: Array, # Shape [num_q_heads, q_len, head_dim]
+    key_item: Array,   # Shape [num_kv_heads, kv_len, head_dim]
+    value_item: Array, # Shape [num_kv_heads, kv_len, head_dim]
+    q_positions: Array # Shape [q_len]
+  ):
+    """Performs MoBA Flash Attention for a single batch item."""
+    q_len = query_item.shape[1]
+    kv_len = key_item.shape[1]
+    num_q_heads = self.num_query_heads
+
+    # The MoBA mask generation expects query and key with shape [l, h, d].
+    q_for_moba = jnp.transpose(query_item, (1, 0, 2))
+    k_for_moba = jnp.transpose(key_item, (1, 0, 2))
+
+    # The gate calculation in MoBA uses the unscaled query.
+    scaling = self.config.head_dim ** (-0.5)
+    unscaled_query = q_for_moba / scaling
+    additive_mask = self._generate_moba_mask_single_item(unscaled_query, k_for_moba, q_positions)
+
+    # Convert additive mask to boolean and reshape for splash attention.
+    boolean_mask = additive_mask > (DEFAULT_MASK_VALUE * 0.5)
+    b, n_kv, g, q_len, kv_len = boolean_mask.shape
+    multi_head_mask = boolean_mask.reshape(b, n_kv * g, q_len, kv_len)
+
+    global global_block_q, global_block_kv, global_block_kv_compute, global_block_q_dkv, global_block_kv_dkv
+    global global_block_kv_dkv_compute, global_block_q_dq, global_block_kv_dq, global_use_fused_bwd_kernel
+    global global_q_layout, global_k_layout, global_v_layout
+
+    block_sizes = splash_attention_kernel.BlockSizes(
+        block_q=min(global_block_q, q_len),
+        block_kv=min(global_block_kv, kv_len),
+        block_kv_compute=min(global_block_kv_compute, kv_len),
+        block_q_dkv=min(global_block_q_dkv, q_len),
+        block_kv_dkv=min(global_block_kv_dkv, kv_len),
+        block_kv_dkv_compute=min(global_block_kv_dkv_compute, kv_len),
+        block_q_dq=None if global_use_fused_bwd_kernel else min(global_block_q_dq, q_len),
+        block_kv_dq=None if global_use_fused_bwd_kernel else min(global_block_kv_dq, kv_len),
+        use_fused_bwd_kernel=global_use_fused_bwd_kernel,
+        q_layout=splash_attention_kernel.QKVLayout[global_q_layout],
+        k_layout=splash_attention_kernel.QKVLayout[global_k_layout],
+        v_layout=splash_attention_kernel.QKVLayout[global_v_layout],
+    )
+
+    splash_kernel = splash_attention_kernel.make_splash_mha(
+        mask=multi_head_mask,
+        head_shards=1,
+        q_seq_shards=1,
+        block_sizes=block_sizes,
+        attn_logits_soft_cap=self.attn_logits_soft_cap,
+        residual_checkpoint_name="context",
+    )
+
+    return splash_kernel(query_item, key_item, value_item)
 
   def apply_attention(
       self,
@@ -1041,6 +1096,28 @@ class AttentionOp(nnx.Module):
       sinks: Array | None = None,
   ) -> Array:
     """TPU Flash Attention."""
+    if hasattr(self.config, "moba_naive") and self.config.moba_naive:
+      # Transpose to ('batch', 'heads', 'length', 'kv')
+      query = jnp.transpose(query, axes=(0, 2, 1, 3))
+      key = jnp.transpose(key, axes=(0, 2, 1, 3))
+      value = jnp.transpose(value, axes=(0, 2, 1, 3))
+
+      # Determine q_positions
+      q_seq_len = query.shape[2]
+      q_positions = jnp.arange(q_seq_len)
+
+      # Vmap the single-item helper over the batch dimension
+      vmapped_moba_flash = jax.vmap(
+          self._moba_flash_attention_single_item,
+          in_axes=(0, 0, 0, None) # vmap over q,k,v; broadcast q_positions
+      )
+
+      # Execute the vmapped function
+      x = vmapped_moba_flash(query, key, value, q_positions)
+
+      # Transpose back to ('batch', 'length', 'heads', 'kv')
+      x = jnp.transpose(x, axes=(0, 2, 1, 3))
+      return x
 
     cp_size = self.config.context_parallel_size
     load_balanced_context_parallel = self.config.context_parallel_load_balance
