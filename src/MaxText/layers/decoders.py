@@ -611,7 +611,7 @@ class Decoder(nn.Module):
       )  # We do not quantize the logits matmul.
     if model_mode in (MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE):
       logits = nn.with_logical_constraint(logits, (None, None, "activation_vocab"))
-    else:
+    elif cfg.num_vocab_tiling == 1:
       logits = nn.with_logical_constraint(
           logits, ("activation_embed_and_logits_batch", "activation_length_no_exp", "activation_vocab")
       )
@@ -835,7 +835,13 @@ class Decoder(nn.Module):
     # After the final transformer layer, `y` holds the raw, un-normalized hidden state.
     hidden_state = y
 
-    logits = self._apply_output_head(shared_embedding, hidden_state, deterministic, model_mode)
+    # When vocab tiling is enabled in training mode, full logits won't generate to reduce memory
+    # Instead, we keep track on the hidden states, which has smaller size compared to full logits
+    if cfg.num_vocab_tiling > 1 and self.model_mode == MODEL_MODE_TRAIN:
+      logits = None
+      self.sow('intermediates', 'hidden_states', hidden_state)
+    else:
+      logits = self._apply_output_head(shared_embedding, hidden_state, deterministic, model_mode)
 
     # The API of the Decoder is now a tuple, providing both the main output
     # and the raw hidden state needed for auxiliary tasks.

@@ -155,6 +155,17 @@ def validate_expert_shard_attention_option(expert_shard_attention_option: str) -
     raise ValueError(
         f"Invalid expert_shard_attention_option was passed. Got: {expert_shard_attention_option}. Valid options: {valid_expert_shard_attention_option}"
     )
+    
+    
+def validate_vocab_tiling(num_vocab_tiling: int, per_device_batch_size: int, max_target_length: int, enable_nnx: bool):
+  if (per_device_batch_size * max_target_length) % num_vocab_tiling != 0:
+    raise ValueError(
+      "Per device batch size times sequence length should be divisible by the number of vocab tiles."
+    )
+  if num_vocab_tiling > 1 and enable_nnx: #TODO (chengnuojin) enable vocab tiling on NNX after NNX migration
+    raise ValueError(
+      "We currently don't support vocab tiling on NNX module."
+    )
 
 
 def validate_keys(keys):
@@ -170,6 +181,7 @@ def validate_keys(keys):
   validate_model_call_mode(keys["model_call_mode"])
   validate_prefill_and_target_lengths(keys["max_prefill_predict_length"], keys["max_target_length"])
   validate_rope_type(keys["rope_type"])
+  validate_vocab_tiling(keys["num_vocab_tiling"], keys["per_device_batch_size"], keys["max_target_length"], keys["enable_nnx"])
 
   # TODO remove after b/435512699 resolved
   if keys["context_parallel_size"] > 1 and keys["context_parallel_load_balance"] and keys["attention_type"] == "chunk":
@@ -219,8 +231,10 @@ def validate_keys(keys):
     validate_mlp_dim(keys)
     validate_sparse_matmul_parallelism(keys)
     validate_ring_of_experts_parallelism(keys)
+    validate_shard_fsdp_on_expert_parallelism(keys)
     validate_ragged_dot(keys)
     validate_deepseek_moe(keys)
+    validate_gpt_oss_moe(keys)
     validate_expert_shard_attention_option(keys["expert_shard_attention_option"])
 
   if keys["use_multimodal"]:
@@ -1014,6 +1028,9 @@ def validate_mlp_dim(raw_keys):
   if is_fully_moe_model and (base_mlp_dim != base_moe_mlp_dim):
       raise ValueError(f'For a fully MoE model, base_mlp_dim must be equal to base_moe_mlp_dim. Received base_mlp_dim={base_mlp_dim} and base_moe_mlp_dim={base_moe_mlp_dim}.')
 
+def validate_gpt_oss_moe(raw_keys):
+  if raw_keys["decoder_block"] == "gpt_oss" and not raw_keys["sparse_matmul"] and raw_keys["capacity_factor"] != -1:
+    raise ValueError(f"GPT OSS model only supports dropless MoE. Please use dense matmul with capacity_factor=-1 or sparse matmul.")
 
 def validate_sparse_matmul_parallelism(raw_keys):
   # TODO: remove once b/434699033 resolved
@@ -1050,6 +1067,11 @@ def validate_ring_of_experts_parallelism(raw_keys):
   if raw_keys["use_ring_of_experts"] and not using_expert_parallelism(raw_keys):
     raise ValueError("Ring-of-experts requires expert-parallelism to be enabled.")
 
+def validate_shard_fsdp_on_expert_parallelism(raw_keys):
+  if raw_keys["fsdp_shard_on_exp"] and raw_keys["num_experts"] % raw_keys["ici_fsdp_parallelism"]!=0: 
+    raise ValueError("fsdp_shard_on_exp requires num_experts is divisiable by ici_fsdp_parallelism.")
+  if raw_keys["fsdp_shard_on_exp"] and (using_tensor_parallelism(raw_keys) or using_expert_parallelism(raw_keys)): 
+    raise ValueError("fsdp_shard_on_exp requires ici_expert_parallelism = 1 and ici_tensor_parallelism/ici_tensor_transpose_parallelism = 1.")
 
 def validate_ragged_dot(raw_keys):
   if raw_keys["sparse_matmul"] and not raw_keys["megablox"]:
@@ -1191,12 +1213,12 @@ def using_tensor_parallelism(raw_keys) -> bool:
 
 
 def using_sequence_parallelism(raw_keys) -> bool:
-  if int(raw_keys["ici_expert_parallelism"]) > 1 and int(raw_keys["dcn_expert_parallelism"]) > 1:
-    raise ValueError("Expert parallelism can only be enabled on ICI or DCN, not both.")
   return int(raw_keys["ici_sequence_parallelism"]) > 1 or int(raw_keys["dcn_sequence_parallelism"]) > 1
 
 
 def using_expert_parallelism(raw_keys) -> bool:
+  if int(raw_keys["ici_expert_parallelism"]) > 1 and int(raw_keys["dcn_expert_parallelism"]) > 1:
+    raise ValueError("Expert parallelism can only be enabled on ICI or DCN, not both.")
   return int(raw_keys["ici_expert_parallelism"]) > 1 or int(raw_keys["dcn_expert_parallelism"]) > 1
 
 

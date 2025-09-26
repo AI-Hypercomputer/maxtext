@@ -64,6 +64,7 @@ from MaxText.utils.goodput_utils import (
 from MaxText.vertex_tensorboard import VertexTensorboardManager
 # Placeholder: internal
 
+from MaxText.maxtext_utils import compute_loss_nnx, compute_loss_linen
 from MaxText.dpo_utils import _merge_dpo_state, _split_dpo_state, dpo_loss_fn
 from MaxText.train_utils import validate_train_config
 from MaxText.metric_logger import record_activation_metrics
@@ -129,6 +130,8 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
         decoder_target_tokens=data["targets"],
         decoder_target_mask=data["targets_segmentation"],
     )
+    
+    total_loss = compute_loss_linen(intermediate_outputs, logits, data, config, model, params, is_train)
   else:
     # Flax NNX model
     logits = model(
@@ -141,13 +144,8 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
         decoder_target_mask=data["targets_segmentation"],
     )
     intermediate_outputs = {}
+    total_loss = compute_loss_nnx(intermediate_outputs, logits, data, config, model, params, is_train)
 
-  one_hot_targets = jax.nn.one_hot(data["targets"], config.vocab_size)
-  xent, _ = max_utils.cross_entropy_with_logits(logits, one_hot_targets, 0.0)
-  xent = nn.with_logical_constraint(xent, ("activation_embed_and_logits_batch", "activation_length"))
-  # Mask out paddings at the end of each example.
-  xent = xent * (data["targets_segmentation"] != 0)
-  total_loss = jnp.sum(xent)
   total_weights = jnp.sum(data["targets_segmentation"] != 0)
   # If gradient accumulation is enabled, we don't need to divide total_loss
   # by total_weights and then multiply the computed gradient by total_weights,
