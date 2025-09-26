@@ -182,6 +182,8 @@ expert_shard_attention_option: "fsdp"
 
 # When MoE weight matrices are sharded on both FSDP and FSDP-transpose axes, use two separate All-Gather calls
 moe_fsdp_use_two_stage_all_gather: False
+# shard the moe weights on num_expert_dim. this can be performanct when num_expert % fdsp_parallisum
+fsdp_shard_on_exp: False
 
 # deepseek moe
 base_moe_mlp_dim: 7168 # intermediate dimension at MoE layer. For a fully MoE model, base_mlp_dim must be equal to base_moe_mlp_dim.
