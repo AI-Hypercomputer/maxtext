@@ -1,4 +1,4 @@
-# MaxText Examples - TPU Setup Guide
+# MaxText Examples - Setting the Jupyter Lab or Collab to run them on TPU
 
 This guide provides comprehensive instructions for setting up Jupyter Lab on TPU and connecting it to Google Colab for running MaxText examples.
 
@@ -51,7 +51,6 @@ Upload notebooks or mount your GitHub repo
 ```python
 !git clone https://github.com/AI-Hypercomputer/maxtext.git
 %cd maxtext
-!pip install -r requirements.txt
 ```
 
 ### Step 4: Run Examples
