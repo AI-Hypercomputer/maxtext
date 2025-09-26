@@ -13,9 +13,6 @@
 # limitations under the License.
 
 """Tests for training and data loading hooks for SFT"""
-import pytest
-
-pytestmark = pytest.mark.tpu_only
 
 import jax
 

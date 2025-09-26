@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # This file, combined with step 1 in the same directory, runs on daily basis and demonstrates:
-# 1. Converts the Mixtral PyTorch checkpoint to MaxText(orbax) format using a CPU VM.
+# 1. Converts the Mistral PyTorch checkpoint to MaxText(orbax) format using a CPU VM.
 # 2. Takes the MaxText(orbax) checkpoint to run inference, fine-tuning, and pre-training on a TPU VM.
 
 # The flow of this file is to take the MaxText(orbax) checkpoint to run inference, fine-tuning, and pre-training on a TPU VM.

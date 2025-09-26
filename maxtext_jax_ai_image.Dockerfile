@@ -47,11 +47,6 @@ RUN if [ "$DEVICE" = "tpu" ] && [ "$JAX_STABLE_STACK_BASEIMAGE" = "us-docker.pkg
         python3 -m pip install -r /deps/requirements_with_jax_ai_image.txt; \
   fi
 
-# Install tunix at a pinned commit for TPU devices, skip for GPU
-RUN if [ "$DEVICE" = "tpu" ]; then \
-        python3 -m pip install 'google-tunix @ https://github.com/google/tunix/archive/e03f154edd2abfddd6b9babb72a3d0d3c4d81bb2.zip'; \
-  fi
-
 # Now copy the remaining code (source files that may change frequently)
 COPY . .
 
@@ -66,7 +61,7 @@ RUN if [ "$TEST_TYPE" = "xlml" ] || [ "$TEST_TYPE" = "unit_test" ]; then \
     fi
 
 # Run the script available in JAX AI base image to generate the manifest file
-RUN bash /jax-ai-image/generate_manifest.sh PREFIX=maxtext COMMIT_HASH=$COMMIT_HASH
+RUN bash /jax-stable-stack/generate_manifest.sh PREFIX=maxtext COMMIT_HASH=$COMMIT_HASH
 
 # Install (editable) MaxText
 RUN test -f '/tmp/venv_created' && "$(tail -n1 /tmp/venv_created)"/bin/activate ; pip install --no-dependencies -e .

@@ -111,7 +111,6 @@ jobs:
       device_name: a100-40gb-4
       cloud_runner: linux-x86-a2-48-a100-4gpu
       pytest_marker: 'not cpu_only and not tpu_only and not integration_test'
-      pytest_addopts: '--ignore=tests/sft_hooks_test.py'
       xla_python_client_mem_fraction: 0.65
       tf_force_gpu_allow_growth: true
       container_resource_option: "--shm-size 2g --runtime=nvidia --gpus all --privileged"
@@ -125,7 +124,6 @@ jobs:
       device_name: a100-40gb-4
       cloud_runner: linux-x86-a2-48-a100-4gpu
       pytest_marker: 'not cpu_only and not tpu_only and integration_test'
-      pytest_addopts: '--ignore=tests/sft_hooks_test.py'
       xla_python_client_mem_fraction: 0.65
       tf_force_gpu_allow_growth: true
       container_resource_option: "--shm-size 2g --runtime=nvidia --gpus all --privileged"
