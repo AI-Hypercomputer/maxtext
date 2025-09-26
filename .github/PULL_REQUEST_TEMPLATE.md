@@ -27,7 +27,7 @@ commands to reproduce.
 # Checklist
 
 Before submitting this PR, please make sure (put X in square brackets):
-- [ ] I have performed a self-review of my code. For an optional AI review, add the `gemini-review` label.
+- [ ] I have performed a self-review of my code.
 - [ ] I have necessary comments in my code, particularly in hard-to-understand areas.
 - [ ] I have run end-to-end tests tests and provided workload links above if applicable.
 - [ ] I have made or will make corresponding changes to the doc if needed.

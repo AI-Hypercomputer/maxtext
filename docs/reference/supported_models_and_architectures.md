@@ -49,11 +49,6 @@ MaxText is an open-source, high-performance LLM framework written in Python/JAX.
 * **Variants**: Dense (0.6B–32B); MoE (30B-A3B, 235B-A22B, 480B Coder)
 * **Notes**: **QK-Norm**, GQA, SwiGLU, RMSNorm, RoPE.
 
-### GPT-OSS
-
-* **Variants**: 20B, 120B
-* **Notes**: Local–Global interleaved attention, GQA, attention sink; YaRN-style scaling; MoE.
-
 ## Parallelism Building Blocks
 
 MaxText supports a wide range of parallelism strategies for scaling training and inference across TPUs and GPUs:
@@ -87,8 +82,6 @@ The following summarizes observed runtime efficiency and scaling behaviors of Ma
     * **Mixtral**: [Guide](https://github.com/AI-Hypercomputer/maxtext/blob/main/end_to_end/tpu/mixtral/Run_Mixtral.md) | [Mixtral Source](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/layers/mixtral.py) | [Mistral Source](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/layers/mistral.py)
     * **DeepSeek**: [Guide](https://github.com/AI-Hypercomputer/maxtext/blob/main/end_to_end/tpu/deepseek/Run_DeepSeek.md) | [DeepSeek Source](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/layers/deepseek.py)
     * **Qwen3**: [Guide](https://github.com/AI-Hypercomputer/maxtext/blob/main/end_to_end/tpu/qwen/moe/run_qwen_moe.md) | [Qwen3 Source](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/layers/qwen3.py)
-    * **GPT-OSS**: [Guide](https://github.com/AI-Hypercomputer/maxtext/blob/main/end_to_end/tpu/gpt_oss/run_gpt_oss.md) | [GPT-OSS Source](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/layers/gpt_oss.py)
-
 
 * **Technical Explanations:**
     * [Parallelism & Sharding](https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/explanations/sharding.md)
