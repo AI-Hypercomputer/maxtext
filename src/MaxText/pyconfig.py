@@ -353,6 +353,7 @@ def validate_model_name(s: str) -> bool:
       "mistral-7b",
       "mixtral-8x7b",
       "mixtral-8x22b",
+      "mixtral-200b",
       "deepseek2-16b",
       "deepseek2-236b",
       "deepseek3-671b",
