@@ -426,7 +426,7 @@ def build_user_command(
       'export ENABLE_PATHWAYS_PERSISTENCE=1 &&',
       f'export JAX_PLATFORMS={jax_platforms} &&',
       'export ENABLE_PJRT_COMPATIBILITY=true &&',
-      'export MAXTEXT_ASSETS_ROOT=/deps/src/MaxText/assets MAXTEXT_PKG_DIR=/deps/src/MaxText MAXTEXT_REPO_ROOT=/deps &&'
+      'export MAXTEXT_ASSETS_ROOT=/deps/assets MAXTEXT_PKG_DIR=/deps/src/MaxText MAXTEXT_REPO_ROOT=/deps &&'
       f'{hlo_dump} python3 -m src.MaxText.train {os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")}',
       f'{config_tuning_params}',
       f'steps={wl_config.num_steps}',

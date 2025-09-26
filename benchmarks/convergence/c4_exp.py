@@ -98,8 +98,8 @@ deepseek_v3_fsdp_v5p_512_nocapp_gbs_1024 = _add_to_model_dictionary(
     deepseek_v3_fsdp_v5p_512_nocapp,
     c4_mlperf_hp,
     deepseek_671b_hp,
-    global_batch_size=1024,
-    num_devices=512,
+    global_batch_size=2048,
+    num_devices=256,
     checkpoint="gs://maxtext-model-checkpoints/deepseek3-671b/0/items",
     )
 )
