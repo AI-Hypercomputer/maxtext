@@ -307,6 +307,7 @@ class Transformer(nnx.Module):
       decoder_segment_ids=None,
       cache=None,
       encoder_images: jax.Array | None = None,
+      encoder_image_masks: jax.Array | None = None,
       enable_dropout=True,
       previous_chunk=None,
       true_length: int | None = None,
@@ -350,6 +351,7 @@ class Transformer(nnx.Module):
         page_state=page_state,
         bidirectional_mask=bidirectional_mask,
         image_embeddings=image_embeddings,
+        image_masks=encoder_image_masks,
     )
 
     # If we are initializing the model AND MTP is enabled, we must create
@@ -420,6 +422,7 @@ class ZeroOneTransformer(nn.Module):
       decoder_positions: jnp.ndarray,
       decoder_segment_ids=None,
       encoder_images: None | jnp.ndarray = None,
+      encoder_image_masks: None | jnp.ndarray = None,
       enable_dropout=True,
       previous_chunk=None,
       true_length: None | int = None,
@@ -436,6 +439,7 @@ class ZeroOneTransformer(nn.Module):
           decoder_positions=decoder_positions,
           decoder_segment_ids=decoder_segment_ids,
           encoder_images=encoder_images,
+          encoder_image_masks=encoder_image_masks,
           enable_dropout=enable_dropout,
           previous_chunk=previous_chunk,
           true_length=true_length,
@@ -452,6 +456,7 @@ class ZeroOneTransformer(nn.Module):
         decoder_positions=decoder_positions,
         decoder_segment_ids=decoder_segment_ids,
         encoder_images=encoder_images,
+        encoder_image_masks=encoder_image_masks,
         enable_dropout=enable_dropout,
         model_mode=self.model_mode,
         previous_chunk=previous_chunk,
