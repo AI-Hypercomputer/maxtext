@@ -33,7 +33,6 @@ import ml_dtypes
 import numpy as np
 import psutil
 from safetensors import safe_open
-import torch
 from tqdm import tqdm
 
 from MaxText import max_logging

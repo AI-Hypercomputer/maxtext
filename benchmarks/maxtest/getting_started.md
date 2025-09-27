@@ -42,7 +42,7 @@ Job End: Thu Jul 31 09:48:56 UTC 2025
 EXIT_CODE=0
 ```
 
--   maxtest.sh will generate a YAML file in the directory that is passed to kubectl. This file can be modified and re-used by running `kubectl apply -f maxtest.yaml`
+-   maxtest.sh will generate a YAML file in the directory that is passed to kubectl. This file can be modified and reused by running `kubectl apply -f maxtest.yaml`
 
 ### Debugging common job errors ###
 
@@ -64,7 +64,7 @@ A `SLICE_FAILURE_CHIP_DRIVER_ERROR` indicates a problem with one of the TPU work
 ```
 I0511 18:18:30.779521     915 session_master.cc:211] Worker Address: tpu-job-jax-v6e-8-5-53.headless-svc:8471                                                                                                                                        
 I0511 18:18:30.779522     915 session_master.cc:211] Worker Address: tpu-job-jax-v6e-8-5-38.headless-svc:8471                                                                                                                                        
-W0511 18:18:50.796322     914 session_master.cc:539] The task with address tpu-job-jax-v6e-8-5-38.headless-svc:8471 missed 1 health checks.The most recent health check failed with the following error: UNAVAILABLE: failed to connect to all addres
+W0511 18:18:50.796322     914 session_master.cc:539] The task with address tpu-job-jax-v6e-8-5-38.headless-svc:8471 missed 1 health checks.The most recent health check failed with the following error: UNAVAILABLE: failed to connect to all address
 ses; last error: UNKNOWN: ipv4:10.200.16.4:8471: Failed to connect to remote host: Timeout occurred: FD Shutdown                                                                                                                                     
 === Source Location Trace: ===                                                                                                                                                                                                                       
 third_party/grpc/include/grpcpp/impl/status.h:112                                                                                                                                                                                                    

@@ -21,9 +21,7 @@ from benchmarks.xpk_configs import XpkClusterConfig
 DELETE = "delete"
 
 
-def _handle_delete(
-    cluster_config: XpkClusterConfig, user: str, **kwargs
-) -> int:
+def _handle_delete(cluster_config: XpkClusterConfig, user: str, **kwargs) -> int:
   """Handles the deletion of workloads.
 
   Args:
@@ -38,16 +36,11 @@ def _handle_delete(
       f"--project={cluster_config.project} --cluster={cluster_config.cluster_name}"
       f" --filter-by-job={first_three_chars} --zone={cluster_config.zone}"
   )
-  print(
-      f"Deleting workloads starting with: {first_three_chars} using command:"
-      f" {delete_command}"
-  )
+  print(f"Deleting workloads starting with: {first_three_chars} using command:" f" {delete_command}")
   os.system(delete_command)
 
 
-def handle_delete_specific_workload(
-    cluster_config: XpkClusterConfig, workload_name: str, **kwargs
-) -> int:
+def handle_delete_specific_workload(cluster_config: XpkClusterConfig, workload_name: str, **kwargs) -> int:
   """Handles the deletion of workloads with a specific name.
 
   Args:
@@ -61,16 +54,11 @@ def handle_delete_specific_workload(
       f"--project={cluster_config.project} --cluster={cluster_config.cluster_name}"
       f" --filter-by-job={workload_name} --zone={cluster_config.zone}"
   )
-  print(
-      f"Deleting workload: {workload_name} using command:"
-      f" {delete_command}"
-  )
+  print(f"Deleting workload: {workload_name} using command:" f" {delete_command}")
   os.system(f"yes | {delete_command}")
 
 
-def handle_cmd_args(
-    cluster_config: XpkClusterConfig, *actions: str, **kwargs
-) -> bool:
+def handle_cmd_args(cluster_config: XpkClusterConfig, *actions: str, **kwargs) -> bool:
   """Parses command-line arguments and executes the specified actions.
 
   Args:

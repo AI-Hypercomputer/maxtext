@@ -4,7 +4,7 @@
 
 # The flow of this script is as follows:
 # 1. Convert a MaxText checkpoint to a Hugging Face model checkpoint.
-# 2. Run a forward pass check to compare the logits and KL divergence between the converted ckpt and orginal golden HF model.
+# 2. Run a forward pass check to compare the logits and KL divergence between the converted ckpt and original golden HF model.
 
 # Pre-requisites:
 # 1. Set HF_TOKEN environment variable to your Hugging Face access token with read permissions

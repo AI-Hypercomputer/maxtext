@@ -16,12 +16,13 @@
 
 import datetime
 import logging
-from .. import maxtext_xpk_runner as mxr
-import maxtext_trillium_model_configs as model_configs
 import sys
 
+from .. import maxtext_xpk_runner as mxr
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+
 
 def generate_and_run_workloads(user_config, num_slices_list, num_steps, priority="medium"):
   """
@@ -38,7 +39,7 @@ def generate_and_run_workloads(user_config, num_slices_list, num_steps, priority
 
   for framework, model_list in user_config.models.items():
     if not model_list:
-      logging.info(f"Skipping empty model list for infrastructure: {framework}")
+      logging.info("Skipping empty model list for infrastructure: %s", framework)
       continue
 
     for model in model_list:
@@ -55,7 +56,7 @@ def generate_and_run_workloads(user_config, num_slices_list, num_steps, priority
               base_output_directory=(
                   f"{user_config.base_output_directory}{framework}_{num_slices}_slice_"
                   f"{user_config.device_type}_{model.model_name}/"
-              ),                    
+              ),
               max_restarts=user_config.max_restarts,
               libtpu_type=None,
               libtpu_nightly_version="",
@@ -67,22 +68,19 @@ def generate_and_run_workloads(user_config, num_slices_list, num_steps, priority
           )
 
           # Generate XPK command
-          command, name = mxr.generate_xpk_workload_cmd(
-              cluster_config=user_config.cluster_config, wl_config=wl_config
-          )
+          command, name = mxr.generate_xpk_workload_cmd(cluster_config=user_config.cluster_config, wl_config=wl_config)
 
-          logging.info(f"Generated workload: {name}")
-          logging.info(f"Generated command: {command}")
+          logging.info("Generated workload: %s", name)
+          logging.info("Generated command: %s", command)
           xpk_workload_names.append(name)
           xpk_workload_cmds.append(command)
 
   # Execute all generated workloads
   for xpk_workload_name, xpk_workload_cmd in zip(xpk_workload_names, xpk_workload_cmds):
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    logging.info(f"[{timestamp}] Running workload: {xpk_workload_name}")
+    logging.info("[%s] Running workload: %s", timestamp, xpk_workload_name)
     return_code = mxr.run_command_with_updates(xpk_workload_cmd, xpk_workload_name)
     if return_code != 0:
-      logging.error(f"Failed to run xpk workload: {xpk_workload_name}.")
+      logging.error("Failed to run xpk workload: %s.", xpk_workload_name)
       sys.exit(return_code)
   return 0
-

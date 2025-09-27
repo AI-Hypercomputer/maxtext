@@ -174,7 +174,7 @@ Per train step:
 
 In this example, given `model=deepseek2-16b`, `per_device_batch_size=24`, `max_target_length=2048`, and no gradient accumulation, we have $\text{model tflop per device} \approx 764.67$. 
 - 94.54% of the TFLOPs are attributed to learnable weight and 5.46% are attributed to attention. 
-- As you will see next, this number is important for calculating performace metrics, such as TFLOP/s/device and Model FLOPs Utilization (MFU).
+- As you will see next, this number is important for calculating performance metrics, such as TFLOP/s/device and Model FLOPs Utilization (MFU).
 
 You can find more information about model FLOPs and MFU in the [Performance Metrics](https://github.com/AI-Hypercomputer/maxtext/blob/ffb0d49adcc457e8cbe2872864b4034b21d43326/docs/guides/performance_metrics.md) topic.
 
@@ -219,7 +219,7 @@ $$\text{tflop/s/device} = \frac{\text{model tflop per device}}{\text{measured st
   
 $$\text{MFU} = \frac{\text{tflop/s/device}}{\text{peak hardware tflop/s}}$$
   
-  For TPU v5p, $\text{peak hardware tflop/s}=459$. Thus, $134.924 / 459 = 29.40$%. Note this is an example for explaination with small batch size and sequence length, so the MFU is not optimal.
+  For TPU v5p, $\text{peak hardware tflop/s}=459$. Thus, $134.924 / 459 = 29.40$%. Note this is an example for explanation with small batch size and sequence length, so the MFU is not optimal.
 
 **Tokens per second per device (throughput)**
 
