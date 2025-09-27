@@ -75,7 +75,7 @@ from MaxText.globals import MAXTEXT_ASSETS_ROOT
 # for vLLM we can skip JAX precompilation with this flag, it makes startup faster
 os.environ["SKIP_JAX_PRECOMPILE"] = "1"
 
-# add the parent directory (two levels up to say ~/HOME/maxtext/src) to sys.path if currenlt runnig from
+# add the parent directory (two levels up to say ~/HOME/maxtext) to sys.path if currently running from
 # ~/HOME/maxtext/src/MaxText/examples
 
 # Get the directory of the current script
@@ -366,7 +366,9 @@ def get_ref_maxtext_model(config):
 
   model, mesh = model_creation_utils.create_nnx_model(config)
   with mesh:
-    tunix_model = TunixMaxTextAdapter(base_model=model,)
+    tunix_model = TunixMaxTextAdapter(
+        base_model=model,
+    )
 
     model_config = llama3_lib.ModelConfig.llama3_1_8b()
     tunix_model.config = model_config
@@ -377,7 +379,7 @@ def get_ref_maxtext_model(config):
 model_config = llama3_lib.ModelConfig.llama3_1_8b()
 
 # Load the reference model
-# Note: pass the path to your scanned checkpoint for "load_parameters_path". 
+# Note: pass the path to your scanned checkpoint for "load_parameters_path".
 # To create a scanned checkpoint, you can use /maxtext/src/MaxText/utils/ckpt_conversion/to_maxtext.py
 config_ref = pyconfig.initialize(
     [

@@ -167,7 +167,7 @@ def process_single_file(input_path):
     with open(input_path, "rt", encoding="utf-8") as f:
       code = f.read()
 
-    converted_code, _ = convert_code_from_torch_to_jax(code)
+    converted_code, _ = convert_code_from_torch_to_jax(code, [])
 
     output_dir = Path(JAX_OUTPUT_DIR)
     output_dir.mkdir(exist_ok=True)
@@ -179,7 +179,7 @@ def process_single_file(input_path):
     logger.info("Converted code written to %s", output_file)
   except FileNotFoundError:
     logger.error("File not found at %s", input_path)
-  except Exception as e:
+  except IOError as e:
     logger.error("An error occurred while processing %s: %s", input_path, e)
 
 

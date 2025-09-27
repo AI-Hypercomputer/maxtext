@@ -180,15 +180,15 @@ def get_code_description_with_gemini(code_block, full_code_context, user_prompt=
       None | dict: A dictionary containing the structured analysis, or an error message and return `None`.
   """
   llm_agent = GeminiAgent(system_instruction=Description_Prompt)
+  resp = None
   for _ in range(5):
-    resp = None
     try:
       resp = llm_agent(user_prompt.replace("{code_block}", code_block).replace("{full_code_context}", full_code_context))
       return json.loads(resp.text.removeprefix("```json").removesuffix("```"))
-    except Exception as e:
+    except (json.JSONDecodeError, AttributeError) as e:
       print("Exception in analyze_code_with_gemini", e)
       print("Response", resp)
-  return None
+  return resp
 
 
 def save_analysis_blocks(scraped_blocks):

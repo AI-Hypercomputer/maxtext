@@ -38,7 +38,10 @@ def from_config(
     devices: Sequence[jax.Device] | None = None,
     *,
     model_mode: str = MODEL_MODE_TRAIN,
-) -> nn.Module: ...
+) -> nn.Module:
+  ...
+
+
 @overload
 def from_config(
     config: pyconfig.HyperParameters,
@@ -46,7 +49,10 @@ def from_config(
     *,
     model_mode: str = MODEL_MODE_TRAIN,
     rngs: nnx.Rngs,
-) -> models.Transformer: ...
+) -> models.Transformer:
+  ...
+
+
 def from_config(
     config: pyconfig.HyperParameters,
     devices: Sequence[jax.Device] | None = None,
@@ -76,6 +82,7 @@ def from_config(
   # Return only the model
   return model
 
+
 def get_transformer_model(config, mesh, quant, model_mode: str = MODEL_MODE_TRAIN, rngs: nnx.Rngs | None = None):
   """Returns the transformer model based on the configuration."""
   if config.model_fsdp_ag_once:
@@ -102,11 +109,11 @@ def create_model(config, mesh, model_mode: str = MODEL_MODE_TRAIN, rngs: nnx.Rng
 def create_nnx_model(config):
   """Creates a NNX model with sharded parameters, possibly loading from a checkpoint."""
 
-  def create_model():
+  def _create_model():
     init_rng = jax.random.PRNGKey(config.init_weights_seed)
     return from_config(config, rngs=nnx.Rngs(params=init_rng, dropout=1))
 
-  abstract_model = nnx.eval_shape(create_model)
+  abstract_model = nnx.eval_shape(_create_model)
   graphdef, abstract_state = nnx.split(abstract_model)
   specs = nnx.get_partition_spec(abstract_state)
   mesh = abstract_model.mesh
@@ -121,7 +128,7 @@ def create_nnx_model(config):
   def create_sharded_state():
     # This will be JIT-compiled. JAX knows the output sharding and can
     # initialize the parameters directly on the target devices in a sharded way.
-    model = create_model()
+    model = _create_model()
     return nnx.state(model)
 
   with mesh:
@@ -162,6 +169,6 @@ def create_nnx_model(config):
           nnx.update(model, checkpoint)
 
       except Exception as e:
-        raise ValueError(f"Checkpoint loading failed: {e}")
+        raise ValueError(f"Checkpoint loading failed: {e}") from e
 
     return model, mesh

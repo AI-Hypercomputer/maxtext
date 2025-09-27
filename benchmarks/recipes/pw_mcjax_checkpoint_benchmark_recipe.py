@@ -160,7 +160,7 @@ def _run_workloads_async(xpk_workloads, cluster_config, run_type="Initial"):
     run_type: String to indicate if it's "Initial" or "Restore" run for logging.
 
   Yields:
-    Tuple[workload_name, return_code, wl_config]: The name of the workload, its
+    tuple[workload_name, return_code, wl_config]: The name of the workload, its
       return code, and its workload config as it completes.
   """
   print(f"\nStarting {run_type} Workloads (Asynchronously)...\n")
