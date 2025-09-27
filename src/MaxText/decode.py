@@ -99,7 +99,7 @@ def main(argv: Sequence[str]) -> None:
 
   text = config.prompt
   prefill_length = config.max_prefill_predict_length
-  processor_output = multimodal_utils.PreprocessorOutput()
+  # processor_output = multimodal_utils.PreprocessorOutput()
   if config.use_multimodal:
     image_path = config.image_path.split(",")
     images = [multimodal_utils.load_image_from_path(p) for p in image_path]

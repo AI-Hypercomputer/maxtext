@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import dataclasses
-import math
 import typing
 
 
@@ -41,8 +40,23 @@ def str2bool(v: str) -> bool:
   else:
     raise ValueError(f"Invalid value '{v}'!")
 
+
 @dataclasses.dataclass
 class MaxTextModel:
+  """A dataclass for representing a MaxText model configuration for benchmarking.
+
+  Attributes:
+    model_name: The user-facing name of the model configuration.
+    model_type: The specific model variant to be run (e.g., '7b', '13b').
+    tuning_params: A dictionary of hyperparameters and settings to override
+      the base configuration.
+    xla_flags: A string of XLA flags to be used for the model compilation.
+    pathways_tuning_params: An optional dictionary of tuning parameters specific
+      to Pathways execution.
+    pathways_xla_flag_options: An optional dictionary to customize XLA flags
+      for Pathways, allowing for additions or removals.
+  """
+
   model_name: str
   model_type: str
   tuning_params: dict[str, typing.Any]

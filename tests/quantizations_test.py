@@ -127,7 +127,8 @@ class QuantizationTest(unittest.TestCase):
 
   def test_mixed_precision_config_int8w(self):
     quant = _configure_quantization(
-        quant_str="intmp", quant_cfg_path=os.path.join(MAXTEXT_PKG_DIR, "configs", "quantization", "int8_weight_only.json")
+        quant_str="intmp",
+        quant_cfg_path=os.path.join(MAXTEXT_PKG_DIR, "configs", "quantization", "int8_weight_only.json"),
     )
     self.assertTrue(isinstance(quant.quant_dg, dict) and len(quant.quant_dg) == 1)
     # pylint: disable=unsupported-membership-test
@@ -153,7 +154,8 @@ class QuantizationTest(unittest.TestCase):
 
   def test_mixed_precision_config_subchannel(self):
     quant = _configure_quantization(
-        quant_str="intmp", quant_cfg_path=os.path.join(MAXTEXT_PKG_DIR, "configs", "quantization", "dense_llm_subchannel.json")
+        quant_str="intmp",
+        quant_cfg_path=os.path.join(MAXTEXT_PKG_DIR, "configs", "quantization", "dense_llm_subchannel.json"),
     )
     self.assertTrue(isinstance(quant.quant_dg, dict) and len(quant.quant_dg) == 7)
     # pylint: disable=unsupported-membership-test

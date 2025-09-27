@@ -28,7 +28,7 @@ WORKDIR /maxtext
 # Arguments
 ARG DEVICE
 
-# Enviroment variables
+# Environment variables
 ENV DEVICE=$DEVICE
 ENV PYTHON_VERSION=${PYTHON_VERSION}
 ENV PIP_NO_CACHE_DIR=1

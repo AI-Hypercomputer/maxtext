@@ -25,7 +25,7 @@ import tensorflow as tf
 import tensorflow_datasets as tfds
 
 from MaxText import pyconfig
-from MaxText.globals import MAXTEXT_ASSETS_ROOT, MAXTEXT_PKG_DIR, MAXTEXT_REPO_ROOT
+from MaxText.globals import MAXTEXT_ASSETS_ROOT, MAXTEXT_PKG_DIR
 from MaxText.input_pipeline import _tfds_data_processing
 from MaxText.input_pipeline import input_pipeline_interface
 

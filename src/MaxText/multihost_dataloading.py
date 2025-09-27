@@ -107,6 +107,7 @@ class MultiHostDataLoadIterator:
       SLEEP_TIME = 10
       MAX_DATA_LOAD_ATTEMPTS = 30
 
+      local_data = None
       for _ in range(MAX_DATA_LOAD_ATTEMPTS):
         try:
           local_data = next(self.local_iterator)
@@ -114,15 +115,15 @@ class MultiHostDataLoadIterator:
         except tf.errors.FailedPreconditionError as e:
           max_logging.log(f"Failed to get next data batch due to {e}, retrying")
           time.sleep(SLEEP_TIME)
-        except Exception as e:
-          if isinstance(e, StopIteration) or "StopIteration" in str(e):
-            if self.generate_padding_batch:
-              max_logging.log(
-                  f"MultiHostDataLoadIterator: host {jax.process_index()} failed to load data with {type(e)} error: ({e}). It may reach the end of data, generating padding batch as generate_padding_batch=True."
-              )
-              self.out_of_data = True
-              local_data = self._make_padding_batch()
-              break
+        except StopIteration as e:
+          if self.generate_padding_batch:
+            max_logging.log(
+                f"MultiHostDataLoadIterator: host {jax.process_index()} failed to load data with {type(e)} error: ({e}). "
+                "It may have reached the end of the data. Generating a padding batch as generate_padding_batch=True."
+            )
+            self.out_of_data = True
+            local_data = self._make_padding_batch()
+            break
           else:
             raise e
       else:
