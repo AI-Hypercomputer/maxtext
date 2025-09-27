@@ -31,3 +31,4 @@ Before submitting this PR, please make sure (put X in square brackets):
 - [ ] I have necessary comments in my code, particularly in hard-to-understand areas.
 - [ ] I have run end-to-end tests tests and provided workload links above if applicable.
 - [ ] I have made or will make corresponding changes to the doc if needed.
+- [ ] I have added any new documentation pages to [the relevant toctree](https://maxtext.readthedocs.io/en/latest/development.html#adding-new-documentation-files).

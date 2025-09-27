@@ -43,4 +43,5 @@ tutorials/full_finetuning.md
 tutorials/run_llama2.md
 tutorials/grpo.md
 tutorials/sft.md
+tutorials/sft_on_multi_host.md
 ```
