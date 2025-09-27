@@ -30,6 +30,7 @@ from jax.experimental import xla_metadata
 import jax.numpy as jnp
 import numpy as np
 
+import qwix
 from MaxText import common_types as ctypes
 from MaxText import max_logging
 from MaxText import max_utils
@@ -44,6 +45,46 @@ set_xla_metadata = xla_metadata.set_xla_metadata
 
 DISPATCH = "dispatch"
 COMBINE = "combine"
+
+
+def _ragged_dot_qwix(
+    lhs, rhs, group_sizes, preferred_element_type, lhs_qtype, rhs_qtype
+):
+  """Performs a ragged dot product with QWix quantization.
+
+  This function quantizes both the left-hand side (lhs) and right-hand side
+  (rhs) tensors using QWix's quantization, and then performs a ragged dot
+  product.
+
+  Args:
+    lhs: The left-hand side tensor of the dot product.
+    rhs: The right-hand side tensor of the dot product.
+    group_sizes: An array indicating the sizes of the groups for the ragged dot
+      product.
+    preferred_element_type: The preferred output element type.
+    lhs_qtype: The quantization type for the lhs tensor.
+    rhs_qtype: The quantization type for the rhs tensor.
+
+  Returns:
+    The result of the ragged dot product after quantizing lhs and rhs.
+  """
+  lhs_how = qwix.qarray.HowToQuantize(
+      qtype=lhs_qtype,
+      channelwise_axes=[0],
+      calibration_method="absmax",
+  )
+  q_lhs = qwix.qarray.quantize(lhs, how=lhs_how)
+  rhs_how = qwix.qarray.HowToQuantize(
+      qtype=rhs_qtype,
+      channelwise_axes=[0, 2],
+      calibration_method="absmax",
+  )
+  q_rhs = qwix.qarray.quantize(rhs, how=rhs_how)
+  return qwix.ragged_dot.ragged_dot(
+      q_lhs, q_rhs, group_sizes,
+      jax.lax.Precision.DEFAULT,
+      preferred_element_type,
+  )
 
 
 def _sort_activations(
@@ -432,7 +473,7 @@ class RoutedMoE(nnx.Module):
 
     return top_k_weights, top_k_indices
 
-    
+
   def deepseek_scale_weights(self, weights):
     """Scales weights according to DeepSeek's v3 reference implementation."""
     # https://github.com/deepseek-ai/DeepSeek-V3/blob/2f7b80eecebf3d1c84da5a0d465f6639ea175012/inference/model.py#L592-L594.
@@ -816,6 +857,7 @@ class RoutedMoE(nnx.Module):
         if quantization_rule is not None:
           lhs_quantize_dtype = quantization_rule.act_qtype
           rhs_quantize_dtype = quantization_rule.weight_qtype
+      print("PIOTR ", self.config)
       m, k, n = inputs.shape[0], inputs.shape[1], kernel.shape[2]
       tiling = (
           min(tile_size[0], m),
@@ -834,28 +876,39 @@ class RoutedMoE(nnx.Module):
             use_qwix_quantization=self.config.use_qwix_quantization,
         )
       else:
-        rhs_inputs = kernel
-        if isinstance(kernel, aqt.QTensor):
-          if kernel.bias or kernel.sparsity_mask or len(kernel.scale) > 1:
-            raise ValueError("Unsupported usecase for ragged_dot with quantized kernel.")
-          rhs_inputs = kernel.qvalue
-        with set_xla_metadata(ragged_dot_tiling=",".join([str(t) for t in tiling])):
-          output = jax.lax.ragged_dot(
-              lhs=inputs,
-              rhs=rhs_inputs,
-              group_sizes=group_sizes,
-              preferred_element_type=self.dtype,
+        if self.config.use_qwix_quantization:
+          print("PIOTR qwix")
+          output = _ragged_dot_qwix(
+              inputs,
+              kernel,
+              group_sizes,
+              self.dtype,
+              lhs_quantize_dtype,
+              rhs_quantize_dtype,
           )
-        if isinstance(kernel, aqt.QTensor):
-          # Multiply outputs by the kernely scale
-          scales = jnp.take(kernel.scale[0].squeeze(), indices=expert_assignments, axis=0)
-          if padding_amount > 0:
-            scales = jax.lax.pad(
-                scales,
-                jnp.array(0.0, dtype=scales.dtype),
-                [(0, padding_amount, 0), (0, 0, 0)],
+        else:
+          rhs_inputs = kernel
+          if isinstance(kernel, aqt.QTensor):
+            if kernel.bias or kernel.sparsity_mask or len(kernel.scale) > 1:
+              raise ValueError("Unsupported usecase for ragged_dot with quantized kernel.")
+            rhs_inputs = kernel.qvalue
+          with set_xla_metadata(ragged_dot_tiling=",".join([str(t) for t in tiling])):
+            output = jax.lax.ragged_dot(
+                lhs=inputs,
+                rhs=rhs_inputs,
+                group_sizes=group_sizes,
+                preferred_element_type=self.dtype,
             )
-          output *= scales
+          if isinstance(kernel, aqt.QTensor):
+            # Multiply outputs by the kernely scale
+            scales = jnp.take(kernel.scale[0].squeeze(), indices=expert_assignments, axis=0)
+            if padding_amount > 0:
+              scales = jax.lax.pad(
+                  scales,
+                  jnp.array(0.0, dtype=scales.dtype),
+                  [(0, padding_amount, 0), (0, 0, 0)],
+              )
+            output *= scales
       if padding_amount > 0:
         output = output[: hs_shape[0]]
       return output

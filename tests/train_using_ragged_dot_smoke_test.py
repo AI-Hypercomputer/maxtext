@@ -13,22 +13,24 @@
 # limitations under the License.
 
 import os
-import unittest
-from tempfile import gettempdir
+import tempfile
 
 from absl.testing import absltest
+from absl.testing import parameterized
+from MaxText import globals as maxtext_globals
+from MaxText import train
 
-from MaxText.globals import MAXTEXT_PKG_DIR
-from MaxText.train import main as train_main
+gettempdir = tempfile.gettempdir
+MAXTEXT_PKG_DIR = maxtext_globals.MAXTEXT_PKG_DIR
 
 
-class Train(unittest.TestCase):
+class Train(parameterized.TestCase):
   """Smoke test for MoE using ragged_dot in G3 only."""
 
-  def test_tiny_config(self):
+  def _train(self, quantization: str, use_qwix_quantization: bool):
     test_tmpdir = os.environ.get("TEST_TMPDIR", gettempdir())
     outputs_dir = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", test_tmpdir)
-    train_main(
+    train.main(
         [
             None,
             os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
@@ -50,10 +52,12 @@ class Train(unittest.TestCase):
             "sparse_matmul=True",
             # Enable ragged_dot.
             "megablox=False",
+            f"quantization={quantization}",
+            f"use_qwix_quantization={use_qwix_quantization}",
             "per_device_batch_size=2",
             "max_target_length=1024",
             "dataset_type=synthetic",
-            "steps=10",
+            "steps=2",
             "enable_checkpointing=False",
             "enable_goodput_recording=False",
             "enable_checkpoint_cloud_logger=False",
@@ -61,6 +65,13 @@ class Train(unittest.TestCase):
             f"metrics_file={os.path.join(outputs_dir, 'metrics.json')}",
         ]
     )
+
+  @parameterized.named_parameters(
+      ("no_quantization", "", False),
+      ("int8_qwix_quantization", "int8", True),
+  )
+  def test_tiny_config(self, quantization: str, use_qwix_quantization: bool):
+    self._train(quantization, use_qwix_quantization)
 
 
 if __name__ == "__main__":
