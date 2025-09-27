@@ -97,7 +97,7 @@ class TransformerLinenPure(nn.Module):
           config=self.config, mesh=self.mesh, name="mtp_block", transformer_layer_module=mtp_layer, decoder=self.decoder
       )
 
-  def logits_from_hidden_states(self, hidden_states, deterministic):
+  def logits_from_hidden_states(self, hidden_states, deterministic, model_mode):
     """
     Compute logits from hidden states (wrapping decoder._apply_output_head).
     This function is only used for vocabulary tiling.
@@ -106,6 +106,7 @@ class TransformerLinenPure(nn.Module):
         shared_embedding=self.shared_embedding,
         y=hidden_states,
         deterministic=deterministic,
+        model_mode=model_mode,
     )
     return logits
 
