@@ -59,6 +59,7 @@ class TransformerLinenPure(nn.Module):
 
   def init(self, *args, model_mode: str = MODEL_MODE_TRAIN, **kwargs):
     """Initializes the model."""
+    assert model_mode == self.model_mode
     module = self.clone(model_mode=model_mode)
     kwargs["model_mode"] = model_mode
     return nn.Module.init(module, *args, **kwargs)
