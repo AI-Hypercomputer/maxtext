@@ -154,7 +154,7 @@ def make_test_case_and_run(args, python_file, jax_file):
     file = python_file.split(os.path.sep)[-1]
     _, _, _, passed, failed = run_pytest_capture_output(file, code_folder=args.testcase_path)
     return passed, failed
-  except Exception as e:
+  except (IOError, AttributeError, KeyError) as e:
     logger.error("Exception in code generation %s", e)
     logger.error("The code file is %s", python_file.split(os.path.sep)[-1])
     logger.error("The generated Code is %s", response)

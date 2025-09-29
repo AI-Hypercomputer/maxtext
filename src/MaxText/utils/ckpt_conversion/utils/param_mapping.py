@@ -182,7 +182,9 @@ def GEMMA3_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, scan_layers=False, saving_to_hf=F
 
     # Handle padding/truncation
     if source_vocab_size > target_vocab_size:
-      warnings.warn(f"source vocab={source_vocab_size} > target vocab={target_vocab_size}, truncate output layer for MaxText.")
+      warnings.warn(
+          f"source vocab={source_vocab_size} > target vocab={target_vocab_size}, truncate output layer for MaxText."
+      )
       output_tensor = scaled_tensor[:target_vocab_size, :]
     elif source_vocab_size < target_vocab_size:
       warnings.warn(f"source vocab={source_vocab_size} < target vocab={target_vocab_size}, pad output layer for MaxText.")
@@ -656,15 +658,20 @@ def QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING(config, scan_layers=False):
       # This follows the (experts, layers, ...) tensor layout.
       mapping.update(
           {
-              "params-decoder-layers-moe_block-gate-kernel": [f"model.layers.{i}.mlp.gate.weight" for i in range(n_layers)],
+              "params-decoder-layers-moe_block-gate-kernel": [
+                  f"model.layers.{i}.mlp.gate.weight" for i in range(n_layers)
+              ],
               "params-decoder-layers-moe_block-wi_0": [
-                  [f"model.layers.{l}.mlp.experts.{e}.gate_proj.weight" for l in range(n_layers)] for e in range(num_experts)
+                  [f"model.layers.{l}.mlp.experts.{e}.gate_proj.weight" for l in range(n_layers)]
+                  for e in range(num_experts)
               ],
               "params-decoder-layers-moe_block-wi_1": [
-                  [f"model.layers.{l}.mlp.experts.{e}.up_proj.weight" for l in range(n_layers)] for e in range(num_experts)
+                  [f"model.layers.{l}.mlp.experts.{e}.up_proj.weight" for l in range(n_layers)]
+                  for e in range(num_experts)
               ],
               "params-decoder-layers-moe_block-wo": [
-                  [f"model.layers.{l}.mlp.experts.{e}.down_proj.weight" for l in range(n_layers)] for e in range(num_experts)
+                  [f"model.layers.{l}.mlp.experts.{e}.down_proj.weight" for l in range(n_layers)]
+                  for e in range(num_experts)
               ],
           }
       )

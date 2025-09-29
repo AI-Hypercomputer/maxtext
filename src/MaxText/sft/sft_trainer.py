@@ -64,6 +64,14 @@ from MaxText.utils.goodput_utils import (
 
 
 def get_tunix_config(mt_config):
+  """Gets the Tunix training configurations from the MaxText config.
+
+  Args:
+    mt_config: MaxText config.
+
+  Returns:
+    A Tunix `TrainingConfig` object.
+  """
   # Checkpointing configurations
   checkpointing_options = ocp.CheckpointManagerOptions(
       save_interval_steps=mt_config.checkpoint_period,
@@ -94,6 +102,19 @@ def get_tunix_config(mt_config):
 
 
 def use_maxtext_loss_function(trainer, mt_config):
+  """Configures the trainer to use MaxText's loss function.
+
+  This function creates a wrapper around MaxText's `loss_fn` to make it
+  compatible with the Tunix trainer's expected loss function signature.
+
+  Args:
+    trainer: The PeftTrainer instance.
+    mt_config: MaxText config.
+
+  Returns:
+    The trainer configured with the MaxText loss function.
+  """
+
   def loss_func(model, inputs, inputs_position, inputs_segmentation, targets, targets_position, targets_segmentation):
     data = {
         "inputs": inputs,
@@ -110,6 +131,12 @@ def use_maxtext_loss_function(trainer, mt_config):
 
 
 def train(mt_config, goodput_recorder=None):
+  """Runs the SFT training loop.
+
+  Args:
+    mt_config: MaxText config.
+    goodput_recorder: An optional GoodputRecorder to record performance metrics.
+  """
   tunix_config = get_tunix_config(mt_config)
 
   with maybe_record_goodput(goodput_recorder, GoodputEvent.TPU_INIT):
@@ -131,10 +158,17 @@ def train(mt_config, goodput_recorder=None):
 
 
 def main(argv: Sequence[str]) -> None:
+  """Main function to run SFT training.
+
+  Args:
+    argv: Command-line arguments.
+  """
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
   if "xla_tpu_spmd_rng_bit_generator_unsafe" not in os.environ.get("LIBTPU_INIT_ARGS", ""):
-    os.environ["LIBTPU_INIT_ARGS"] = os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
+    os.environ["LIBTPU_INIT_ARGS"] = (
+        os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
+    )
 
   mt_config = pyconfig.initialize(argv)
   max_utils.print_system_information()

@@ -21,6 +21,7 @@ from flax import nnx
 from MaxText.layers.models import Transformer
 from MaxText.integration.tunix.weight_mapping import VLLM_WEIGHT_MAPPING
 
+
 class TunixMaxTextAdapter(nnx.Module):
   """Adapter exposing Tunix Trainer call signature over a Transformer model."""
 
