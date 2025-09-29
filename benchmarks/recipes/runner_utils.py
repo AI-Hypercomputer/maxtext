@@ -19,6 +19,7 @@ import logging
 import sys
 
 from .. import maxtext_xpk_runner as mxr
+from benchmarks.disruption_management.disruption_manager import construct_disruption_configs
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -83,4 +84,63 @@ def generate_and_run_workloads(user_config, num_slices_list, num_steps, priority
     if return_code != 0:
       logging.error("Failed to run xpk workload: %s.", xpk_workload_name)
       sys.exit(return_code)
+  return 0
+
+
+def generate_and_run_workloads_with_disruptions(
+    user_config, num_slices_list, num_steps, priority="medium", disruption_method="", disruptions=None
+):
+  """
+  Generates and executes XPK workloads based on the given configuration.
+
+  Args:
+    user_config: A UserConfig object containing all necessary configurations.
+    models: A dictionary where keys are "mcjax" or "pathways" and values are lists of model settings.
+    num_slices_list: A list of the number of slices to be executed.
+    num_steps: The number of steps for each workload.
+  """
+  if disruptions is None:
+    disruptions = {}
+  xpk_wl_configs = []
+
+  for framework, model_list in user_config.models.items():
+    if not model_list:
+      logging.info("Skipping empty model list for infrastructure: %s", framework)
+      continue
+    for model in model_list:
+      # Run workloads on the below clusters
+      for user_config.cluster_config in [
+          user_config.cluster_config,
+      ]:
+        # Run workloads in the following slice configurations
+        for num_slices in num_slices_list:
+          wl_config = mxr.WorkloadConfig(
+              model=model,
+              num_slices=num_slices,
+              device_type=user_config.cluster_config.device_type,
+              base_output_directory=(
+                  f"{user_config.base_output_directory}{framework}_{num_slices}_slice_"
+                  f"{user_config.device_type}_{model.model_name}/"
+              ),
+              max_restarts=user_config.max_restarts,
+              libtpu_type=None,
+              libtpu_nightly_version="",
+              base_docker_image=user_config.runner if framework == "mcjax" else None,
+              pathways_config=user_config.pathways_config if framework == "pathways" else None,
+              xpk_path=user_config.xpk_path,
+              num_steps=num_steps,
+              priority=priority,
+              disruption_configs=construct_disruption_configs(framework, disruption_method, disruptions),
+          )
+          xpk_wl_configs.append(wl_config)
+
+  disruption_manager = mxr.xpk_benchmark_runner(
+      cluster_config=user_config.cluster_config,
+      workload_configs=xpk_wl_configs,
+  )
+
+  # Wait for disruptions to complete
+  disruption_manager.start_disruptions_and_wait_for_completion()
+
+  print("Benchmark recipe disruptions completed. Please check logs for results.")
   return 0
