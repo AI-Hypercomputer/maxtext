@@ -28,6 +28,8 @@ from MaxText.globals import MAXTEXT_PKG_DIR
 from MaxText.layers.decoders import Decoder, DecoderLayer
 from MaxText.layers import multi_token_prediction  # The class under test
 from MaxText.layers import embeddings
+from MaxText.common_types import MODEL_MODE_TRAIN
+
 
 TEST_LAYER_NUM = 1
 
@@ -146,7 +148,7 @@ class MTPBlockTestModel(nn.Module):
     )
 
   def __call__(
-      self, main_hidden_state, input_ids, target_ids, target_mask, position_ids, decoder_segment_ids, deterministic
+      self, main_hidden_state, input_ids, target_ids, target_mask, position_ids, decoder_segment_ids, model_mode, deterministic
   ):
     return self.mtp_block(
         self.shared_embedding,
@@ -156,6 +158,7 @@ class MTPBlockTestModel(nn.Module):
         target_mask,
         position_ids,
         decoder_segment_ids,
+        model_mode,
         deterministic,
     )
 
@@ -194,6 +197,7 @@ class MultiTokenPredictionBlockTest(unittest.TestCase):
         self.target_mask,
         self.position_ids,
         self.decoder_segment_ids,
+        model_mode=MODEL_MODE_TRAIN,
         deterministic=True,
     )
 
@@ -208,6 +212,7 @@ class MultiTokenPredictionBlockTest(unittest.TestCase):
         self.position_ids,
         self.decoder_segment_ids,
         deterministic=True,
+        model_mode=MODEL_MODE_TRAIN,
         mutable=["mtp_losses"],
     )
     self.assertIn("mtp_losses", captured_vars)
@@ -237,6 +242,7 @@ class MultiTokenPredictionBlockTest(unittest.TestCase):
         self.decoder_segment_ids,
         deterministic=False,
         mutable=["mtp_losses"],
+        model_mode=MODEL_MODE_TRAIN,
         rngs={"dropout": self.rng},
     )
 
