@@ -126,7 +126,7 @@ def construct_prompt(parsed_dataset_example: ParsedDatasetExample, config, syste
     question=parsed_dataset_example.question
   )
   # Add extra model-specific formatting such as user/model/assistant tags
-  prompt = multimodal_utils.reformat_prompt(prompt, image_placeholder, config.model_name)
+  prompt = multimodal_utils.reformat_prompt(prompt, image_placeholder, config.model_name, num_images=1 if config.use_multimodal else 0)
   prompt = system_message + "\n\n" + prompt if system_message else prompt
   return prompt
 
