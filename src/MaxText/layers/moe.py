@@ -787,12 +787,7 @@ class RoutedMoE(nnx.Module):
   ):
     """Perform sparse matrix multiplication of inputs and Experts."""
 
-    def gmm(inputs, kernel, group_sizes, expert_assignments):
-      tile_size = (
-          self.config.tile_batch_seq,
-          self.config.tile_activation_dim,
-          self.config.tile_weight_dim,
-      )
+    def gmm(inputs, kernel, tiling, group_sizes, expert_assignments):
       pad_length = self.config.tile_batch_seq
       hs_shape = inputs.shape
       # pad length is the 1st dimension of tiling size in gmm call
@@ -818,9 +813,9 @@ class RoutedMoE(nnx.Module):
           rhs_quantize_dtype = quantization_rule.weight_qtype
       m, k, n = inputs.shape[0], inputs.shape[1], kernel.shape[2]
       tiling = (
-          min(tile_size[0], m),
-          min(tile_size[1], k),
-          min(tile_size[2], n),
+          min(tiling[0], m),
+          min(tiling[1], k),
+          min(tiling[2], n),
       )
       if self.config.megablox:
         output = mblx.gmm(
@@ -1037,14 +1032,24 @@ class RoutedMoE(nnx.Module):
           group_sizes=group_sizes,
           expert_assignments=selected_experts,
       )
-      layer_w0 = gmm_fn(x, w0)
+      w0_tile_size = (
+          self.config.tile_batch_seq,
+          self.config.tile_activation_dim,
+          self.config.tile_weight_dim,
+      )
+      w_out_tile_size = (
+          self.config.tile_batch_seq,
+          self.config.tile_weight_dim,
+          self.config.tile_activation_dim,
+      )
+      layer_w0 = gmm_fn(x, w0,tiling=w0_tile_size)
       if self.get_tensor_transpose_parallelism_size() > 1:
         layer_w0 = jax.lax.psum(layer_w0, "tensor_transpose")
       if self.config.mlp_bias:
         layer_w0 = layer_w0 + w0_bias
       layer_w0 = adc.checkpoint_name(layer_w0, "mlpwi_0")
 
-      layer_w1 = gmm_fn(x, w1)
+      layer_w1 = gmm_fn(x, w1, tiling=w0_tile_size)
       if self.get_tensor_transpose_parallelism_size() > 1:
         layer_w1 = jax.lax.psum(layer_w1, "tensor_transpose")
       if self.config.mlp_bias:
@@ -1052,7 +1057,7 @@ class RoutedMoE(nnx.Module):
       layer_w1 = adc.checkpoint_name(layer_w1, "mlpwi_1")
       intermediate_layer = self.apply_ffn_activation(layer_w0, layer_w1)
 
-      intermediate_output = gmm_fn(intermediate_layer, wo)
+      intermediate_output = gmm_fn(intermediate_layer, wo, tiling=w_out_tile_size)
       if self.get_tensor_parallelism_size() > 1:
         intermediate_output = jax.lax.psum_scatter(intermediate_output, "tensor", scatter_dimension=1, tiled=True)
       if self.config.mlp_bias:
