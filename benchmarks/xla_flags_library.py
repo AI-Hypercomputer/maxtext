@@ -35,6 +35,7 @@ MOE_VMEM_LIMIT_FLAG = f" --xla_tpu_scoped_vmem_limit_kib={_MOE_VMEM_LIMIT}"
 CUSTOM_VMEM_LIMIT_FLAG = "--xla_tpu_scoped_vmem_limit_kib={vmem_limit}".format
 
 GF_FLAGS = (
+  "--xla_tpu_dvfs_p_state=7"
   " --xla_tpu_scoped_vmem_limit_kib=65536"
   " --xla_tpu_impure_enable_packed_bf16_math_ops=true"
   " --xla_tpu_enable_sparse_core_reduce_scatter_v2=true"
@@ -48,6 +49,8 @@ GF_FLAGS = (
   " --xla_tpu_prefer_async_allgather_to_allreduce=true"
   " --xla_tpu_enable_sparse_core_collective_offload_all_reduce=true"
   " --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=true"
+  " --xla_tpu_enable_sparse_core_collective_offload_3d_all_gather=true"
+  " --xla_tpu_use_single_sparse_core_for_all_gather_offload=true"
 )
 # Continuation Fusion (CF) for All Gather Collectives
 # Continuation Fusion is a form of parallelizing compute work with collectives.

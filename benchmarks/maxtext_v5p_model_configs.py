@@ -56,13 +56,16 @@ deepseek_v3_fsdp_v5p_512_nocapp = _add_to_model_dictionary(
             "sa_block_kv_dq":2048,
             "opt_type":"adamw",
             "mu_dtype":"bfloat16",
-            "sa_use_fused_bwd_kernel":"true",
+            "sa_use_fused_bwd_kernel":True,
             "megablox": True,
             "sparse_matmul": True,
             "capacity_factor": 1.0,
-            "tokenizer_path": os.path.join("/deps/assets","tokenizer.mistral-v1"),
+            "tokenizer_path": "assets/tokenizer.mistral-v1",
             "dtype": "bfloat16",
             "attention": "flash",
+            "tile_batch_seq": 512,
+            "tile_activation_dim": 1024, 
+            "tile_weight_dim": 2048,
         },
         xla_flags=(
             xla_flags_library.GF_FLAGS
