@@ -1,7 +1,54 @@
+---
+files: ^(.*\.(py|md|sh|yaml|yml|in|cfg|txt|rst|toml|precommit-toml|wordlist))$
+exclude: ^(\.[^/]*(cache|assets|uv|venv)/.*)$
 repos:
   - repo: https://github.com/codespell-project/codespell
-    rev: v2.2.4
+    rev: v2.4.1
     hooks:
-    - id: codespell
-      name: Running codespell for typos
-      entry: codespell -w --skip="*.txt,pylintrc,.*,src/MaxText/assets/*" .
+      - id: codespell
+        args:
+          - '-w'
+          - '--skip="*.txt,pylintrc,.*,src/MaxText/assets/*"'
+          - '-L ND,nd,sems,TE,ROUGE,rouge,astroid'
+          - '.'
+        additional_dependencies:
+          - tomli
+
+  #   - repo: https://github.com/abravalheri/validate-pyproject
+  #     rev: v0.24.1
+  #     hooks:
+  #       - id: validate-pyproject
+  #         name: Validate pyproject.toml
+  #         language: python
+  #         files: '^pyproject\.toml$'
+  #         entry: python
+
+  - repo: https://github.com/pylint-dev/pylint
+    rev: v3.3.8
+    hooks:
+      - id: pylint
+        args:
+          - '--disable=R0401,R0917,W0201,W0613'
+          - "--ignore-patterns='.pytype,.*pyi$'"
+          - 'benchmarks'
+          - 'end_to_end'
+          - 'src'
+          - 'tests'
+
+  #  - repo: https://github.com/google/pytype
+  #    rev: 2024.10.11
+  #    hooks:
+  #      - id: pytype
+  #        args:
+  #          - '--jobs=auto'
+  #          - '--keep-going'
+  #          - 'src/MaxText/'
+
+  - repo: https://github.com/google/pyink
+    rev: 24.10.1
+    hooks:
+      - id: pyink
+        args:
+          - '--pyink-indentation=2'
+          - '--line-length=122'
+          - '--check'

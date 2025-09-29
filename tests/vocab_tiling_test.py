@@ -20,7 +20,6 @@ import os
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
-from flax.core import freeze
 
 from MaxText import maxtext_utils
 from MaxText.maxtext_utils import compute_loss_linen
@@ -64,11 +63,10 @@ class LossAndGradientCorrectnessTest(unittest.TestCase):
             train_params,
             decoder_input_tokens=self.dummy_inputs,
             decoder_positions=self.dummy_inputs,
-            mutable=['intermediates']
+            mutable=["intermediates"],
         )
-        return compute_loss_linen(
-            intermediate_outputs, logits, d, cfg, model, train_params, is_train=True
-        )
+        return compute_loss_linen(intermediate_outputs, logits, d, cfg, model, train_params, is_train=True)
+
       return jax.value_and_grad(loss_fn)(p)
 
     return grad_fn(params, data)
@@ -87,15 +85,17 @@ class LossAndGradientCorrectnessTest(unittest.TestCase):
         per_device_batch_size=self.batch_size,
         logits_via_embedding=False,
         base_num_decoder_layers=0,
-        dtype='float32',
-        matmul_precision='high',
+        dtype="float32",
+        matmul_precision="high",
         num_vocab_tiling=1,
     )
     quant_non_tiling = quantizations.configure_quantization(cfg_non_tiling)
     devices_array_non_tiling = maxtext_utils.create_device_mesh(cfg_non_tiling)
     mesh_non_tiling = Mesh(devices_array_non_tiling, cfg_non_tiling.mesh_axes)
-    model_non_tiling = models.transformer_as_linen(cfg_non_tiling, mesh=mesh_non_tiling, quant=quant_non_tiling, model_mode=MODEL_MODE_TRAIN)
-    
+    model_non_tiling = models.transformer_as_linen(
+        cfg_non_tiling, mesh=mesh_non_tiling, quant=quant_non_tiling, model_mode=MODEL_MODE_TRAIN
+    )
+
     rng_model, rng_targets = jax.random.split(self.rng)
 
     params = model_non_tiling.init(
@@ -120,23 +120,19 @@ class LossAndGradientCorrectnessTest(unittest.TestCase):
         per_device_batch_size=self.batch_size,
         logits_via_embedding=False,
         base_num_decoder_layers=0,
-        dtype='float32',
-        matmul_precision='high',
+        dtype="float32",
+        matmul_precision="high",
         num_vocab_tiling=4,
     )
     loss_tiling, grads_tiling = self.get_grads(cfg_tiling, params, data)
     # Loss correctness test
-    assert jnp.allclose(
-      loss_non_tiling,
-      loss_tiling,
-      rtol=self.rtol
-    ), "Losses do not match for non-tied embeddings."
+    assert jnp.allclose(loss_non_tiling, loss_tiling, rtol=self.rtol), "Losses do not match for non-tied embeddings."
 
     # Gradient correctness test
     assert jnp.allclose(
-        grads_non_tiling['params']['decoder']['logits_dense']['kernel'].unbox(),
-        grads_tiling['params']['decoder']['logits_dense']['kernel'].unbox(),
-        rtol=self.rtol
+        grads_non_tiling["params"]["decoder"]["logits_dense"]["kernel"].unbox(),
+        grads_tiling["params"]["decoder"]["logits_dense"]["kernel"].unbox(),
+        rtol=self.rtol,
     ), "Gradients of embedding table do not match for non-tied embeddings."
 
   @pytest.mark.tpu_only
@@ -152,15 +148,17 @@ class LossAndGradientCorrectnessTest(unittest.TestCase):
         per_device_batch_size=self.batch_size,
         logits_via_embedding=True,
         base_num_decoder_layers=0,
-        dtype='float32',
-        matmul_precision='high',
+        dtype="float32",
+        matmul_precision="high",
         num_vocab_tiling=1,
     )
 
     quant_non_tiling = quantizations.configure_quantization(cfg_non_tiling)
     devices_array_non_tiling = maxtext_utils.create_device_mesh(cfg_non_tiling)
     mesh_non_tiling = Mesh(devices_array_non_tiling, cfg_non_tiling.mesh_axes)
-    model_non_tiling = models.transformer_as_linen(cfg_non_tiling, mesh=mesh_non_tiling, quant=quant_non_tiling, model_mode=MODEL_MODE_TRAIN)
+    model_non_tiling = models.transformer_as_linen(
+        cfg_non_tiling, mesh=mesh_non_tiling, quant=quant_non_tiling, model_mode=MODEL_MODE_TRAIN
+    )
 
     rng_model, rng_targets = jax.random.split(self.rng)
 
@@ -185,24 +183,19 @@ class LossAndGradientCorrectnessTest(unittest.TestCase):
         per_device_batch_size=self.batch_size,
         logits_via_embedding=True,
         base_num_decoder_layers=0,
-        dtype='float32',
-        matmul_precision='high',
+        dtype="float32",
+        matmul_precision="high",
         num_vocab_tiling=4,
     )
     loss_tiling, grads_tiling = self.get_grads(cfg_tiling, params, data)
 
-    assert jnp.allclose(
-      loss_non_tiling,
-      loss_tiling,
-      rtol=self.rtol
-    ), "Losses do not match for tied embeddings."
+    assert jnp.allclose(loss_non_tiling, loss_tiling, rtol=self.rtol), "Losses do not match for tied embeddings."
 
     assert jnp.allclose(
-        grads_non_tiling['params']['token_embedder']['embedding'].unbox(),
-        grads_tiling['params']['token_embedder']['embedding'].unbox(),
-        rtol=self.rtol
+        grads_non_tiling["params"]["token_embedder"]["embedding"].unbox(),
+        grads_tiling["params"]["token_embedder"]["embedding"].unbox(),
+        rtol=self.rtol,
     ), "Gradients of embedding table do not match for tied embeddings."
-
 
   @pytest.mark.tpu_only
   def test_tiling_gradient_data_parallelism(self):
@@ -218,15 +211,17 @@ class LossAndGradientCorrectnessTest(unittest.TestCase):
         per_device_batch_size=self.batch_size,
         ici_data_parallelism=4,
         base_num_decoder_layers=0,
-        dtype='float32',
-        matmul_precision='high',
+        dtype="float32",
+        matmul_precision="high",
         num_vocab_tiling=1,
     )
     quant_non_tiling = quantizations.configure_quantization(cfg_non_tiling)
     devices_array_non_tiling = maxtext_utils.create_device_mesh(cfg_non_tiling)
     mesh_non_tiling = Mesh(devices_array_non_tiling, cfg_non_tiling.mesh_axes)
-    model_non_tiling = models.transformer_as_linen(cfg_non_tiling, mesh=mesh_non_tiling, quant=quant_non_tiling, model_mode=MODEL_MODE_TRAIN)
-    
+    model_non_tiling = models.transformer_as_linen(
+        cfg_non_tiling, mesh=mesh_non_tiling, quant=quant_non_tiling, model_mode=MODEL_MODE_TRAIN
+    )
+
     rng_model, rng_targets = jax.random.split(self.rng)
 
     params = model_non_tiling.init(
@@ -251,26 +246,21 @@ class LossAndGradientCorrectnessTest(unittest.TestCase):
         per_device_batch_size=self.batch_size,
         logits_via_embedding=False,
         base_num_decoder_layers=0,
-        dtype='float32',
-        matmul_precision='high',
+        dtype="float32",
+        matmul_precision="high",
         ici_data_parallelism=4,
         num_vocab_tiling=4,
     )
     loss_tiling, grads_tiling = self.get_grads(cfg_tiling, params, data)
     # Loss correctness test
-    assert jnp.allclose(
-      loss_non_tiling,
-      loss_tiling,
-      rtol=self.rtol
-    ), "Losses do not match for data parallelism."
+    assert jnp.allclose(loss_non_tiling, loss_tiling, rtol=self.rtol), "Losses do not match for data parallelism."
 
     # Gradient correctness test
     assert jnp.allclose(
-        grads_non_tiling['params']['decoder']['logits_dense']['kernel'].unbox(),
-        grads_tiling['params']['decoder']['logits_dense']['kernel'].unbox(),
-        rtol=self.rtol
+        grads_non_tiling["params"]["decoder"]["logits_dense"]["kernel"].unbox(),
+        grads_tiling["params"]["decoder"]["logits_dense"]["kernel"].unbox(),
+        rtol=self.rtol,
     ), "Gradients of embedding table do not match for data parallelism."
-
 
   @pytest.mark.tpu_only
   def test_tiling_gradient_tensor_parallelism(self):
@@ -286,15 +276,17 @@ class LossAndGradientCorrectnessTest(unittest.TestCase):
         per_device_batch_size=self.batch_size,
         ici_tensor_parallelism=4,
         base_num_decoder_layers=0,
-        dtype='float32',
-        matmul_precision='high',
+        dtype="float32",
+        matmul_precision="high",
         num_vocab_tiling=1,
     )
     quant_non_tiling = quantizations.configure_quantization(cfg_non_tiling)
     devices_array_non_tiling = maxtext_utils.create_device_mesh(cfg_non_tiling)
     mesh_non_tiling = Mesh(devices_array_non_tiling, cfg_non_tiling.mesh_axes)
-    model_non_tiling = models.transformer_as_linen(cfg_non_tiling, mesh=mesh_non_tiling, quant=quant_non_tiling, model_mode=MODEL_MODE_TRAIN)
-    
+    model_non_tiling = models.transformer_as_linen(
+        cfg_non_tiling, mesh=mesh_non_tiling, quant=quant_non_tiling, model_mode=MODEL_MODE_TRAIN
+    )
+
     rng_model, rng_targets = jax.random.split(self.rng)
 
     params = model_non_tiling.init(
@@ -319,24 +311,20 @@ class LossAndGradientCorrectnessTest(unittest.TestCase):
         per_device_batch_size=self.batch_size,
         logits_via_embedding=False,
         base_num_decoder_layers=0,
-        dtype='float32',
-        matmul_precision='high',
+        dtype="float32",
+        matmul_precision="high",
         ici_tensor_parallelism=4,
         num_vocab_tiling=4,
     )
     loss_tiling, grads_tiling = self.get_grads(cfg_tiling, params, data)
     # Loss correctness test
-    assert jnp.allclose(
-      loss_non_tiling,
-      loss_tiling,
-      rtol=self.rtol
-    ), "Losses do not match for tensor parallelism."
+    assert jnp.allclose(loss_non_tiling, loss_tiling, rtol=self.rtol), "Losses do not match for tensor parallelism."
 
     # Gradient correctness test
     assert jnp.allclose(
-        grads_non_tiling['params']['decoder']['logits_dense']['kernel'].unbox(),
-        grads_tiling['params']['decoder']['logits_dense']['kernel'].unbox(),
-        rtol=self.rtol
+        grads_non_tiling["params"]["decoder"]["logits_dense"]["kernel"].unbox(),
+        grads_tiling["params"]["decoder"]["logits_dense"]["kernel"].unbox(),
+        rtol=self.rtol,
     ), "Gradients of embedding table do not match for tensor parallelism."
 
   @pytest.mark.tpu_only
@@ -353,17 +341,19 @@ class LossAndGradientCorrectnessTest(unittest.TestCase):
         per_device_batch_size=self.batch_size,
         ici_context_parallelism=4,
         base_num_decoder_layers=0,
-        dataset_type='synthetic',
+        dataset_type="synthetic",
         packing=False,
-        dtype='float32',
-        matmul_precision='high',
+        dtype="float32",
+        matmul_precision="high",
         num_vocab_tiling=1,
     )
     quant_non_tiling = quantizations.configure_quantization(cfg_non_tiling)
     devices_array_non_tiling = maxtext_utils.create_device_mesh(cfg_non_tiling)
     mesh_non_tiling = Mesh(devices_array_non_tiling, cfg_non_tiling.mesh_axes)
-    model_non_tiling = models.transformer_as_linen(cfg_non_tiling, mesh=mesh_non_tiling, quant=quant_non_tiling, model_mode=MODEL_MODE_TRAIN)
-    
+    model_non_tiling = models.transformer_as_linen(
+        cfg_non_tiling, mesh=mesh_non_tiling, quant=quant_non_tiling, model_mode=MODEL_MODE_TRAIN
+    )
+
     rng_model, rng_targets = jax.random.split(self.rng)
 
     params = model_non_tiling.init(
@@ -389,24 +379,20 @@ class LossAndGradientCorrectnessTest(unittest.TestCase):
         logits_via_embedding=False,
         base_num_decoder_layers=0,
         ici_context_parallelism=4,
-        dataset_type='synthetic',
+        dataset_type="synthetic",
         packing=False,
-        dtype='float32',
-        matmul_precision='high',
+        dtype="float32",
+        matmul_precision="high",
         num_vocab_tiling=4,
     )
     loss_tiling, grads_tiling = self.get_grads(cfg_tiling, params, data)
 
     # Loss correctness test
-    assert jnp.allclose(
-      loss_non_tiling,
-      loss_tiling,
-      rtol=self.rtol
-    ), "Losses do not match for context parallelism."
+    assert jnp.allclose(loss_non_tiling, loss_tiling, rtol=self.rtol), "Losses do not match for context parallelism."
 
     # Gradient correctness test
     assert jnp.allclose(
-        grads_non_tiling['params']['decoder']['logits_dense']['kernel'].unbox(),
-        grads_tiling['params']['decoder']['logits_dense']['kernel'].unbox(),
-        rtol=self.rtol
+        grads_non_tiling["params"]["decoder"]["logits_dense"]["kernel"].unbox(),
+        grads_tiling["params"]["decoder"]["logits_dense"]["kernel"].unbox(),
+        rtol=self.rtol,
     ), "Gradients of embedding table do not match for context parallelism."

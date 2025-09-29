@@ -134,9 +134,7 @@ class MTPBlockTestModel(nn.Module):
         config=self.config,
         name="shared_embedding",
     )
-    self.decoder = Decoder(
-        config=self.config, mesh=self.mesh, name="decoder_for_mtp"
-    )
+    self.decoder = Decoder(config=self.config, mesh=self.mesh, name="decoder_for_mtp")
     self.mtp_block = multi_token_prediction.MultiTokenPredictionBlock(
         config=self.config,
         mesh=self.mesh,

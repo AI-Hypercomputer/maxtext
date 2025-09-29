@@ -46,7 +46,7 @@ MFU = \frac{\text{theoretically optimal step time}}
            {\text{measured step time}}
 $$
 
-Finally, we can also look at througput utilization. In each training step, the model processes $(batch_size x seq_length)$ tokens. Since the (optimal or measured) number of tokens per second is just the number of tokens per step divided by step time (optimal or measured, respectively), we get that:
+Finally, we can also look at throughput utilization. In each training step, the model processes $(batch_size x seq_length)$ tokens. Since the (optimal or measured) number of tokens per second is just the number of tokens per step divided by step time (optimal or measured, respectively), we get that:
 
 $$
 MFU = \frac{\text{theoretically optimal step time}}
@@ -100,4 +100,4 @@ This shows any of step time, tokens/s or MFU can be used to determine how long t
 
 ## Why not Hardware Flops?
 
-Hardware (e.g., XLA reported) FLOPs do not accurately reflect computation efficiency as they depend on the program / implementation, not just on the model and its inherent computations (higher hardware FLOPs does not necessarily mean less room for improvement). For example, they include remat and potentially auxilliary operations (such as reshaping for dropping moe [here](https://github.com/AI-Hypercomputer/maxtext/blob/4b6142950aff5d9ba42d830efc5ce4c4ac9d4135/MaxText/layers/moe.py#L1267)), which are an implementation detail and not part of the model. In addition, XLA reported FLOPs may not be accurate with pallas kernels. Hardware flops utilization is not (inversely) proportional to step time as opposed to MFU, since hardware flops can change with implementation details like remat policies.
+Hardware (e.g., XLA reported) FLOPs do not accurately reflect computation efficiency as they depend on the program / implementation, not just on the model and its inherent computations (higher hardware FLOPs does not necessarily mean less room for improvement). For example, they include remat and potentially auxiliary operations (such as reshaping for dropping moe [here](https://github.com/AI-Hypercomputer/maxtext/blob/4b6142950aff5d9ba42d830efc5ce4c4ac9d4135/MaxText/layers/moe.py#L1267)), which are an implementation detail and not part of the model. In addition, XLA reported FLOPs may not be accurate with pallas kernels. Hardware flops utilization is not (inversely) proportional to step time as opposed to MFU, since hardware flops can change with implementation details like remat policies.

@@ -187,9 +187,7 @@ def maybe_initialize_jax_distributed_system(raw_keys):
         local_checkpoint_directory=raw_keys["local_checkpoint_directory"],
         backup_interval_minutes=raw_keys["multi_tier_checkpointing_backup_interval_minutes"],
         run_name=raw_keys["run_name"],
-        jax_initialization_timeout_seconds=raw_keys[
-            "jax_distributed_initialization_timeout"
-        ],
+        jax_initialization_timeout_seconds=raw_keys["jax_distributed_initialization_timeout"],
         data_parallelism=raw_keys["mtc_data_parallelism"],
     )
     max_logging.log("Jax distributed system initialized for multi-tier checkpointing!")

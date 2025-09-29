@@ -12,25 +12,60 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Tests for the Gemma3 Rotary Positional Embedding (RoPE) implementation.
+
+This module validates the correctness of MaxText's JAX-based RoPE layer
+against a reference PyTorch implementation from the Hugging Face `transformers`
+library. It specifically tests the linear scaling variant of RoPE used in
+Gemma3.
+"""
+
+import unittest
+
 import torch
 from torch import nn
+
 import jax
-import unittest
 import jax.numpy as jnp
+
 import numpy as np
-from MaxText.layers import embeddings
+
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
+
+from MaxText.layers import embeddings
 
 
 def to_jax(pt_tensor: torch.Tensor) -> jax.Array:
+  """Converts a PyTorch tensor to a JAX array.
+
+  Args:
+    pt_tensor: The PyTorch tensor to convert.
+
+  Returns:
+    The equivalent JAX array.
+  """
   return jnp.asarray(pt_tensor.detach().numpy())
 
 
 ### original Pytorch Reference implementation
 class Gemma3RotaryEmbedding(nn.Module):
+  """PyTorch reference implementation of Gemma3's Rotary Positional Embedding.
+
+  This class is a reference implementation taken from the Hugging Face
+  transformers library to validate the correctness of the MaxText RoPE
+  implementation.
+  """
+
   inv_freq: torch.Tensor  # fix linting for `register_buffer`
 
   def __init__(self, config, device=None):
+    """Initializes the rotary embedding module.
+
+    Args:
+      config: A configuration object containing RoPE parameters like
+        `rope_scaling`, `max_position_embeddings`, etc.
+      device: The device to place tensors on.
+    """
     super().__init__()
     # BC: "rope_type" was originally "type"
     if hasattr(config, "rope_scaling") and isinstance(config.rope_scaling, dict):
@@ -49,6 +84,15 @@ class Gemma3RotaryEmbedding(nn.Module):
 
   @torch.no_grad()
   def forward(self, x, position_ids):
+    """Computes the cosine and sine components for rotary embeddings.
+
+    Args:
+      x: The input tensor, used to determine the device and dtype.
+      position_ids: The 1D tensor of token positions.
+
+    Returns:
+      A tuple of (cos, sin) tensors for the rotary embedding.
+    """
     inv_freq_expanded = self.inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1).to(x.device)
     position_ids_expanded = position_ids[:, None, :].float()
 
@@ -100,6 +144,7 @@ class Gemma3RotaryEmbeddingTest(unittest.TestCase):
   """Test for Gemma3 RoPE implementation with linear scaling."""
 
   def test_rope_compare_pytorch_and_jax(self):
+    """Validates the MaxText RoPE implementation against the PyTorch reference."""
     # Config parameters
     batch_size = 4
     seq_len = 128
@@ -116,8 +161,16 @@ class Gemma3RotaryEmbeddingTest(unittest.TestCase):
 
     # PyTorch reference implementation
     class DummyConfig:
+      """A dummy config class to hold RoPE parameters for the reference implementation."""
 
       def __init__(self, rope_theta, head_dim, max_position_embeddings):
+        """Initializes the dummy configuration.
+
+        Args:
+          rope_theta: The base for the rotary frequency.
+          head_dim: The dimension of each attention head.
+          max_position_embeddings: The maximum sequence length.
+        """
         self.rope_theta = rope_theta
         self.head_dim = head_dim
         self.max_position_embeddings = max_position_embeddings
