@@ -24,9 +24,18 @@ process, and wait for all disruptions to complete.
 from collections import defaultdict
 import threading
 
+from benchmarks.benchmark_utils import Framework
 from benchmarks.disruption_management.disruption_handler import create_disruption_handler
 from benchmarks.disruption_management.disruption_handler import DisruptionConfig
 from benchmarks.disruption_management.disruption_handler import DisruptionHandler
+from benchmarks.disruption_management.disruption_handler import DisruptionMethod
+from benchmarks.disruption_management.disruption_handler import MCJAX_STANDARD_TARGET_POD_REGEX_SUFFIX
+from benchmarks.disruption_management.disruption_handler import MCJAX_STANDARD_STEP_POD_REGEX_SUFFIX
+from benchmarks.disruption_management.disruption_handler import MCJAX_WORKER_CONTAINER_NAME
+from benchmarks.disruption_management.disruption_handler import PATHWAYS_STANDARD_TARGET_POD_REGEX_SUFFIX
+from benchmarks.disruption_management.disruption_handler import PATHWAYS_STANDARD_STEP_POD_REGEX_SUFFIX
+from benchmarks.disruption_management.disruption_handler import PATHWAYS_WORKER_CONTAINER_NAME
+from benchmarks.disruption_management.disruption_handler import TriggerType
 from benchmarks.disruption_management.monitor import create_monitor
 from benchmarks.disruption_management.monitor import Monitor
 from benchmarks.xpk_configs import XpkClusterConfig
@@ -131,3 +140,36 @@ class DisruptionManager:
   def _monitor_recovery(self) -> None:
     """Monitors for recovery trigger and initiates recovery."""
     raise NotImplementedError("Recovery not implemented yet.")
+
+
+def construct_disruption_configs(
+    framework: str,
+    disruption_method: DisruptionMethod,
+    disruptions,
+) -> list[DisruptionConfig]:
+  """Constructs the disruption configs for the benchmark."""
+
+  if Framework(framework) == Framework.PATHWAYS:
+    target_pod_regex = PATHWAYS_STANDARD_TARGET_POD_REGEX_SUFFIX
+    step_pod_regex = PATHWAYS_STANDARD_STEP_POD_REGEX_SUFFIX
+    worker_container_name = PATHWAYS_WORKER_CONTAINER_NAME
+  else:
+    target_pod_regex = MCJAX_STANDARD_TARGET_POD_REGEX_SUFFIX
+    step_pod_regex = MCJAX_STANDARD_STEP_POD_REGEX_SUFFIX
+    worker_container_name = MCJAX_WORKER_CONTAINER_NAME
+
+  disruption_config_list = []
+  for trigger_type, trigger_values in disruptions.items():
+    for trigger_value in trigger_values:
+      disruption_config_list.append(
+          DisruptionConfig(
+              name="_".join([str(trigger_value), trigger_type]),
+              trigger_type=TriggerType.TIME_SECONDS if trigger_type == "time_seconds" else TriggerType.STEP,
+              trigger_value=trigger_value,
+              disruption_method=disruption_method,
+              target_pod_regex=target_pod_regex,
+              step_pod_regex=step_pod_regex,
+              worker_container_name=worker_container_name,
+          )
+      )
+  return disruption_config_list
