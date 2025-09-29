@@ -977,7 +977,7 @@ def get_batch_seq_len_for_mode(config, model_mode):
     batch_size = config.micro_batch_size_to_train_on
     seq_len = 1
     
-  elif model_mode == MODEL_MODE_TRAIN: # Assuming the 'else' was for training
+  elif model_mode == MODEL_MODE_TRAIN:
     # Training mode: Process a full batch of full-length sequences.
     batch_size = config.micro_batch_size_to_train_on
     seq_len = config.max_target_length
