@@ -52,7 +52,7 @@ if "$enable_profiler"; then
 fi
 
 if [ -z "$TOKENIZER_PATH" ]; then
-  TOKENIZER_PATH="${MAXTEXT_ASSETS_ROOT:-${MAXTEXT_REPO_ROOT:-$PWD}/assets}"/tokenizer.mistral-v1
+  TOKENIZER_PATH="${MAXTEXT_ASSETS_ROOT:-${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText/assets}}"/tokenizer.mistral-v1
 fi
 
 BATCH_STR=""

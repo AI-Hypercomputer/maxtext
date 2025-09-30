@@ -82,7 +82,7 @@ def mla_as_linen(
     float32_logits: bool = False,  # cast logits in float32 for stability.
     quant: Optional[Quant] = None,
     kv_quant: Optional[KVQuant] = None,
-    attention_type: AttentionType = AttentionType.GLOBAL,  # Default to global attention
+    attention_type: AttentionType = AttentionType.MLA,  # Default to MLA attention
     attn_logits_soft_cap: float | None = None,
     sliding_window_size: int | None = None,
     use_ragged_attention: bool = False,
@@ -230,7 +230,7 @@ class MLA(Attention):
       float32_logits: bool = False,  # cast logits in float32 for stability.
       quant: Optional[Quant] = None,
       kv_quant: Optional[KVQuant] = None,
-      attention_type: AttentionType = AttentionType.GLOBAL,  # Default to global attention
+      attention_type: AttentionType = AttentionType.MLA,  # Default to MLA attention
       attn_logits_soft_cap: float | None = None,
       sliding_window_size: int | None = None,
       use_ragged_attention: bool = False,
@@ -364,6 +364,8 @@ class MLA(Attention):
     # Module attribute names must match names previously passed to Linen for checkpointing
     self.MlaKVCache_0 = self.init_mla_kv_caches(inputs_kv_shape) if model_mode != MODEL_MODE_TRAIN else None
 
+  def _init_projections(self, inputs_q_shape: Tuple, inputs_kv_shape: Tuple) -> None:
+    """Initializes the MLA-specific projections."""
     # Assert required configuration parameters for MLA attention.
     assert (
         self.config.attention_type == AttentionType.MLA.value
@@ -396,7 +398,7 @@ class MLA(Attention):
           out_features_shape=self.q_lora_rank,
           axis=-1,
           kernel_init=self.kernel_init,
-          kernel_axes=("embed", "q_lora"),
+          kernel_axes=("embed", "q_lora_up_proj"),
           dtype=self.dtype,
           weight_dtype=self.weight_dtype,
           quant=self.quant,
@@ -430,7 +432,7 @@ class MLA(Attention):
         out_features_shape=self.kv_lora_rank + self.qk_rope_head_dim,
         axis=-1,
         kernel_init=self.kernel_init,
-        kernel_axes=("embed", "kv_lora"),
+        kernel_axes=("embed", "kv_lora_up_proj"),
         dtype=self.dtype,
         weight_dtype=self.weight_dtype,
         quant=self.quant,
@@ -466,6 +468,8 @@ class MLA(Attention):
     if self.max_position_embeddings > self.original_max_position_embeddings:
       mscale = 0.1 * self.mscale * math.log(self.rope_factor) + 1.0
       self.softmax_scale = self.softmax_scale * mscale * mscale
+
+    self.out = self.init_out_w(output_dim=inputs_q_shape[-1])
 
     # Setup paged attention op
     if self.config.attention == "paged":
@@ -719,4 +723,5 @@ class MLA(Attention):
       out = nn.with_logical_constraint(out, self.out_axis_names)
 
     out = self.out_projection(out)
+    out = checkpoint_name(out, "out_proj")
     return out

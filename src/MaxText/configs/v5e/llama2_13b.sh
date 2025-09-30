@@ -43,5 +43,5 @@ export LIBTPU_INIT_ARGS="--xla_tpu_enable_data_parallel_all_reduce_opt=true --xl
 
 python3 -m MaxText.$EXECUTABLE "${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText}/"configs/base.yml model_name=llama2-13b\
   base_output_directory=$OUTPUT_PATH dataset_path=${DATASET_PATH}\
-  tokenizer_path="${MAXTEXT_ASSETS_ROOT:-${MAXTEXT_REPO_ROOT:-$PWD}/assets}"/tokenizer.llama2 per_device_batch_size=8 remat_policy=qkv_proj_offloaded\
+  tokenizer_path="${MAXTEXT_ASSETS_ROOT:-${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText/assets}}"/tokenizer.llama2 per_device_batch_size=8 remat_policy=qkv_proj_offloaded\
   steps=15 enable_checkpointing=false use_iota_embed=true

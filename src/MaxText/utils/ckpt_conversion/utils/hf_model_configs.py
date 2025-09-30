@@ -466,7 +466,7 @@ qwen3_coder_480b_a35b_config = transformers.Qwen3MoeConfig(
     use_cache=True,
     use_qk_norm=True,
     use_sliding_window=False,
-    vocab_size=151936
+    vocab_size=151936,
 )
 
 HF_MODEL_CONFIGS = {

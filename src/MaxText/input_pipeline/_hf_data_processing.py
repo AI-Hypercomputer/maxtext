@@ -43,11 +43,14 @@ def vision_sft_preprocessing_pipeline(
   """pipeline for multimodal SFT with HF dataset"""
 
   assert len(text_columns) == 2, f"Need two text_columns for query and response, received {text_columns=}"
-
+  batch_size = global_batch_size // jax.process_count()
   if config.enable_data_shuffling:
     dataset = dataset.shuffle(seed=config.data_shuffle_seed)
 
   dataset = dataset.select_columns(text_columns + [image_column])
+  if image_column != "images":
+    dataset = dataset.rename_column(image_column, "images")
+
   dataset = dataset.map(
       _input_pipeline_utils.reformat_prompt,
       fn_kwargs={
@@ -60,8 +63,6 @@ def vision_sft_preprocessing_pipeline(
       _input_pipeline_utils.reformat_response,
       fn_kwargs={"column": text_columns[1], "model_name": config.model_name},
   )
-  if image_column != "images":
-    dataset = dataset.rename_column(image_column, "images")
 
   dataset = dataset.map(
       _input_pipeline_utils.pre_process_image_sft,
@@ -85,6 +86,7 @@ def vision_sft_preprocessing_pipeline(
   dataset = dataset.map(
       _input_pipeline_utils.tokenization,
       batched=True,
+      batch_size=global_batch_size,
       fn_kwargs={
           "hf_tokenizer": tokenizer,
           "truncation": False,
@@ -102,7 +104,6 @@ def vision_sft_preprocessing_pipeline(
       dataloading_host_index=dataloading_host_index,
       dataloading_host_count=dataloading_host_count,
       num_threads=1,
-      generate_padding_example=True,
       max_target_length=config.max_target_length,
       data_column_names=text_columns,
   )
@@ -116,8 +117,15 @@ def vision_sft_preprocessing_pipeline(
       )
   )
   # TODO(aireenmei, hengtaoguo): support packing
-  operations.append(_input_pipeline_utils.PadToMaxLength(config.max_target_length, pad_id))
-  operations.append(grain.Batch(batch_size=global_batch_size // jax.process_count(), drop_remainder=True))
+  operations.append(
+      _input_pipeline_utils.PadOrTrimToMaxLength(
+          config.max_target_length,
+          pad_id,
+          model_name=config.model_name,
+          max_num_images_per_example=config.max_num_images_per_example,
+      )
+  )
+  operations.append(grain.Batch(batch_size=batch_size, drop_remainder=True))
   operations.append(_input_pipeline_utils.ShiftData(ignored_ids=[pad_id], axis=1))
   dummy_index_sampler = grain.IndexSampler(
       num_records=len(dataset),
@@ -135,7 +143,7 @@ def vision_sft_preprocessing_pipeline(
       sampler=dummy_index_sampler,
       worker_count=1,  # only supports <=1 for now, more workers results in duplicated data
       worker_buffer_size=1,
-      read_options=grain.ReadOptions(num_threads=1, prefetch_buffer_size=128),
+      read_options=grain.ReadOptions(num_threads=1, prefetch_buffer_size=batch_size * 4),
   )
 
   multihost_gen = multihost_dataloading.MultiHostDataLoadIterator(dataloader, global_mesh)
@@ -162,8 +170,8 @@ def preprocessing_pipeline(
     packing=True,
     shift=True,
     num_threads=1,
-    drop_remainder=False,
-    generate_padding_example=False,
+    drop_remainder=True,
+    generate_padding_batch=False,
     use_dpo=None,
     use_sft=None,
     sft_train_on_completion_only=True,
@@ -239,7 +247,6 @@ def preprocessing_pipeline(
       dataloading_host_index,
       dataloading_host_count,
       num_threads,
-      generate_padding_example,
       max_target_length,
       data_column_names,
   )
@@ -276,7 +283,7 @@ def preprocessing_pipeline(
     )
     operations.append(_input_pipeline_utils.ReformatPacking(data_column_names))
   else:
-    operations.append(_input_pipeline_utils.PadToMaxLength(max_target_length, pad_id))
+    operations.append(_input_pipeline_utils.PadOrTrimToMaxLength(max_target_length, pad_id))
     operations.append(grain.Batch(batch_size=global_batch_size // jax.process_count(), drop_remainder=drop_remainder))
 
   if shift and not use_dpo:
@@ -304,7 +311,7 @@ def preprocessing_pipeline(
       read_options=grain.ReadOptions(num_threads=num_threads, prefetch_buffer_size=128),
   )
 
-  multihost_gen = multihost_dataloading.MultiHostDataLoadIterator(dataloader, global_mesh)
+  multihost_gen = multihost_dataloading.MultiHostDataLoadIterator(dataloader, global_mesh, generate_padding_batch)
 
   # Return multi-host jax.Array prep iterator
   return multihost_gen
@@ -352,7 +359,7 @@ def make_hf_train_iterator(
         add_bos=config.add_bos,
         add_eos=config.add_eos,
         packing=config.packing,
-        generate_padding_example=False,
+        generate_padding_batch=config.generate_padding_batch_train,
         use_dpo=config.use_dpo,
         use_sft=config.use_sft,
         sft_train_on_completion_only=config.sft_train_on_completion_only,
@@ -374,8 +381,6 @@ def make_hf_eval_iterator(
       streaming=True,
       token=config.hf_access_token,
   )
-
-  eval_generate_padding_example = config.eval_steps > 0
   if config.use_sft and config.use_multimodal:
     eval_iter = vision_sft_preprocessing_pipeline(
         dataset=eval_ds,
@@ -404,7 +409,7 @@ def make_hf_eval_iterator(
         add_bos=config.add_bos,
         add_eos=config.add_eos,
         packing=config.packing,
-        generate_padding_example=eval_generate_padding_example,
+        generate_padding_batch=config.generate_padding_batch_eval,
         use_dpo=config.use_dpo,
         use_sft=config.use_sft,
         sft_train_on_completion_only=config.sft_train_on_completion_only,

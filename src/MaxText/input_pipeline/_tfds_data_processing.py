@@ -200,7 +200,9 @@ def make_tfds_train_iterator(
         use_dpo=config.use_dpo,
         hf_access_token=config.hf_access_token,
     )
-    return multihost_dataloading.MultiHostDataLoadIterator(train_dataloader, global_mesh)
+    return multihost_dataloading.MultiHostDataLoadIterator(
+        train_dataloader, global_mesh, config.generate_padding_batch_train
+    )
   else:
     get_ds_fn = functools.partial(
         get_datasets,
@@ -265,7 +267,9 @@ def make_tfds_eval_iterator(
         use_dpo=config.use_dpo,
         hf_access_token=config.hf_access_token,
     )
-    return multihost_dataloading.MultiHostDataLoadIterator(eval_dataloader, global_mesh)
+    return multihost_dataloading.MultiHostDataLoadIterator(
+        eval_dataloader, global_mesh, config.generate_padding_batch_eval
+    )
   else:
     get_ds_fn = functools.partial(
         get_datasets,

@@ -39,7 +39,7 @@ class VisionEncoder(nn.Module):
     if self.config.model_name in ["gemma3-4b", "gemma3-12b", "gemma3-27b"]:
       from MaxText.layers import gemma3  # pylint: disable=import-outside-toplevel
 
-      return [gemma3.Gemma3VisionEncoderLayer, gemma3.VisionEmbedder]
+      return [gemma3.gemma3visionencoder_as_linen, gemma3.visionembedder_as_linen]
     elif self.config.model_name in ["llama4-17b-16e", "llama4-17b-128e"]:
       from MaxText.layers import llama4  # pylint: disable=import-outside-toplevel
 

@@ -736,7 +736,11 @@ class AttentionOp(nnx.Module):
               """Decode not supported with flash attention.
                               Use `dot_product` instead."""
           )
-        return self.tpu_flash_attention(query, key, value, decoder_segment_ids, self.attn_logits_soft_cap, sinks), None, None
+        return (
+            self.tpu_flash_attention(query, key, value, decoder_segment_ids, self.attn_logits_soft_cap, sinks),
+            None,
+            None,
+        )
       else:
         validate_flash_attention_with_sinks_on_gpu(sinks)
         if model_mode == MODEL_MODE_AUTOREGRESSIVE:
@@ -902,6 +906,7 @@ class AttentionOp(nnx.Module):
     value = jnp.transpose(value, axes=(0, 2, 1, 3))
     segment_axis_names_q = None
     segment_axis_names_kv = None
+    sink_axis_names = nn.logical_to_mesh_axes((HEAD,))
     if decoder_segment_ids is not None:
       if self.config.expert_shard_attention_option == EP_AS_CONTEXT:
         segment_axis_names_q = nn.logical_to_mesh_axes((BATCH_NO_EXP, Q_LENGTH))
@@ -978,20 +983,11 @@ class AttentionOp(nnx.Module):
           window_size=(self.sliding_window_size, self.sliding_window_size),
           offset=0,
       )
-      # Apply local masking if local sliding attention is enabled.
-      if self.attention_type == AttentionType.LOCAL_SLIDING:
-        if self.sliding_window_size is None:
-          raise ValueError("Sliding_window_size must be set for Local Sliding attention type")
-        mask &= splash_attention_mask.LocalMask(
-            shape=(query.shape[2], key.shape[2]),
-            window_size=(self.sliding_window_size, self.sliding_window_size),
-            offset=0,
-        )
-      elif self.attention_type == AttentionType.CHUNK:
-        if self.chunk_attn_window_size is None:
-          raise ValueError("chunk_attn_window_size must be set for chunk attention type")
+    elif self.attention_type == AttentionType.CHUNK:
+      if self.chunk_attn_window_size is None:
+        raise ValueError("chunk_attn_window_size must be set for chunk attention type")
 
-        mask &= ChunkedCausalMask(shape=(query.shape[2], key.shape[2]), chunk_size=self.chunk_attn_window_size)
+      mask &= ChunkedCausalMask(shape=(query.shape[2], key.shape[2]), chunk_size=self.chunk_attn_window_size)
 
     # Create multi-head mask
     multi_head_mask = splash_attention_mask.MultiHeadMask(masks=(mask,) * query.shape[1])
@@ -1011,6 +1007,7 @@ class AttentionOp(nnx.Module):
           q_seq_shards=cp_size,  # axis for sequence sharding
           block_sizes=block_sizes,
           attn_logits_soft_cap=attn_logits_soft_cap,
+          residual_checkpoint_name="context",
       )
       return splash_kernel
 
@@ -1042,7 +1039,7 @@ class AttentionOp(nnx.Module):
             segment_axis_names_splash_kernel,
             None,  # no sharding for cp_size
             None,  # no sharding for load_balanced_context_parallel
-            None,  # no sharding for sinks
+            sink_axis_names,  # sharding align with query heads
         ),
         out_specs=axis_names_q,
         check_rep=False,
@@ -1368,18 +1365,19 @@ class AttentionOp(nnx.Module):
     b, t, n, d = query.shape
     n_kv = key.shape[-2]
     assert n_kv == self.num_kv_heads
+    precision_kwargs = {"precision": self.config.matmul_precision} if einsum is jnp.einsum else {}
     if model_mode == MODEL_MODE_TRAIN or self.compute_axis_order == (0, 1, 2, 3):
       query = jnp.reshape(query, (b, t, n_kv, n // n_kv, d))
       if self.reshape_q and q_seq_len == 1:
         query = jnp.broadcast_to(query, (b, 2, n_kv, n // n_kv, d))
-      result = einsum("btkgd,bskd->bkgts", query, key)
+      result = einsum("btkgd,bskd->bkgts", query, key, **precision_kwargs)
     elif self.compute_axis_order == (0, 2, 1, 3):
       query = jnp.transpose(query, axes=self.compute_axis_order)
       key = jax.tree.map(lambda x: jnp.transpose(x, axes=self.compute_axis_order), key)
       query = jnp.reshape(query, (b, n_kv, n // n_kv, t, d))
       if self.reshape_q and q_seq_len == 1:
         query = jnp.broadcast_to(query, (b, n_kv, n // n_kv, 2, d))
-      result = einsum("bkgtd,bksd->bkgts", query, key)
+      result = einsum("bkgtd,bksd->bkgts", query, key, **precision_kwargs)
     else:
       raise NotImplementedError(self.compute_axis_order)
     return result
@@ -1406,17 +1404,18 @@ class AttentionOp(nnx.Module):
       n // n_kv: number of group for query, sometimes annotated with g
     """
 
+    precision_kwargs = {"precision": self.config.matmul_precision} if einsum is jnp.einsum else {}
     if self.kv_quant:
       # manually cast to bf16 to avoid the fp32 XLA ops for speedup
       if isinstance(value, KVTensor) and self.kv_quant.dtype == jnp.float8_e4m3fn:
         value.qvalue = value.qvalue.astype(jnp.bfloat16)
     if model_mode == MODEL_MODE_TRAIN or self.compute_axis_order == (0, 1, 2, 3):
-      out = einsum("bkgts,bskd->btkgd", attn_weights, value)
+      out = einsum("bkgts,bskd->btkgd", attn_weights, value, **precision_kwargs)
       b, t, n_kv, g, d = out.shape
       result = jnp.reshape(out, (b, t, n_kv * g, d))
     elif self.compute_axis_order == (0, 2, 1, 3):
       value = jax.tree.map(lambda x: jnp.transpose(x, axes=self.compute_axis_order), value)
-      out = einsum("bkgts,bksd->bkgtd", attn_weights, value)
+      out = einsum("bkgts,bksd->bkgtd", attn_weights, value, **precision_kwargs)
       b, n_kv, g, t, d = out.shape
       result = jnp.reshape(out, (b, n_kv * g, t, d))
       result = self.reverse_transepose(result, self.compute_axis_order)

@@ -1,0 +1,52 @@
+# Copyright 2025 Google LLC
+
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+
+#     https://www.apache.org/licenses/LICENSE-2.0
+
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# This file defines a module for building and uploading a maxtext pacakge
+# based on the pyproject.toml at the current github workspace.
+
+name: Build and Upload MaxText Package
+
+on:
+  workflow_call:
+    inputs:
+      device_type:
+        required: true
+        type: string
+      device_name:
+        required: true
+        type: string
+      cloud_runner:
+        required: false
+        type: string
+
+permissions:
+  contents: read
+jobs:
+  build_and_upload:
+    name: Build and upload maxtext package (${{ inputs.device_name }})
+    runs-on: ${{ inputs.cloud_runner != '' && inputs.cloud_runner || fromJson(format('["self-hosted", "{0}", "{1}"]', inputs.device_type, inputs.device_name)) }}
+    container: python:3.12.3-slim-bullseye
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install build tools
+        run: |
+          python -m pip install --upgrade pip build uv
+      - name: Build maxtext wheel
+        run: |
+          uv build --wheel
+      - name: Upload the built maxtext wheel
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: maxtext-wheel
+          path: dist/*

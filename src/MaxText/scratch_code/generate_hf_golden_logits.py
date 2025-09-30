@@ -59,7 +59,7 @@ def save_golden_logits(model_id, output_path, prompt_texts, apply_chat_template,
   """save golden logits"""
   if hf_model_path is None:
     hf_model_path = model_id
-  tokenizer = AutoTokenizer.from_pretrained(hf_model_path)
+  tokenizer = AutoTokenizer.from_pretrained(model_id)
   model = AutoModelForCausalLM.from_pretrained(
       hf_model_path,
       torch_dtype=torch.float32,
@@ -148,7 +148,9 @@ def main(raw_args=None) -> None:
   parser.add_argument(
       "--gcs-bucket", type=str, required=False, default=None, help="A GCS bucket to store logits, without gs://."
   )
-  parser.add_argument("--hf-model-path", type=str, required=False, default=None, help="local path to checkpoint if exists.")
+  parser.add_argument(
+      "--hf-model-path", type=str, required=False, default=None, help="local path to checkpoint if exists."
+  )
   parser.add_argument(
       "--image-paths", type=str, required=False, default=None, help="A semicolon-separated list of image_paths."
   )

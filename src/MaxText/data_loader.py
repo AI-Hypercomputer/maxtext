@@ -51,10 +51,10 @@ class DataLoader:
         self.last_batch = jax.lax.with_sharding_constraint(example_batch, self.input_data_shardings)
         self.check_example_batch()
       except Exception as e:  # pylint: disable=broad-except
-        if "StopIteration" in str(e):
-          raise exceptions.StopTraining("You may have run out of training data.")
+        if isinstance(e, StopIteration):
+          raise exceptions.StopTraining(f"You may have run out of training data. Received {type(e)} exception: ({e})")
         else:
-          raise exceptions.StopTraining(f"`load_next_batch()` failed ({e}).")
+          raise exceptions.StopTraining(f"`load_next_batch()` failed with {type(e)} exception: ({e}).")
     return self.last_batch
 
   def check_example_batch(self):

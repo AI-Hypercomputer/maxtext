@@ -126,7 +126,8 @@ def main(input_path: str, output_path: str, target_dtype: torch.dtype, cache_siz
         weight_prefix = weight_name.removesuffix(block_suffix)
         scale = get_tensor(weight_prefix + scale_suffix)
         dequantized_weight = dequantize_mxfp4(weight, scale, target_dtype)
-        new_state_dict[weight_prefix] = dequantized_weight
+        # permute
+        new_state_dict[weight_prefix] = dequantized_weight.permute(0, 2, 1).contiguous()
         print(f"{weight_name}: Dequantized weight type is {dequantized_weight.dtype}")
       elif weight_name.endswith(scale_suffix):
         print(f"{weight_name}: Skip scale conversion as expected")

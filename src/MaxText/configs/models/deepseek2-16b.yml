@@ -48,3 +48,6 @@ original_max_position_embeddings: 4096
 rope_factor: 40
 beta_fast: 32
 mscale: 0.707
+rope_interleave: True
+rope_truncate: True
+rope_attention_scaling: False
