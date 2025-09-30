@@ -165,7 +165,7 @@ class ModelWithMultipleCollections(nn.Module):
   def setup(self):
     self.kernel = self.variable("special_variables", "my_first_kernel", lambda: jnp.ones((4, 5)))
 
-  def __call__(self, x, y, encoder_images=None, nnx_method=None):
+  def __call__(self, x, y, encoder_images=None, nnx_method=None, model_mode=None):
     x = self.dense(x)
     x = x @ self.kernel.value
     return x
