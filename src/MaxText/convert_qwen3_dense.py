@@ -300,7 +300,7 @@ if __name__ == "__main__":
         "--simulated_cpu_devices_count", type=int, default=16, help="Number of simulated CPU devices for saving."
     )
     parser.add_argument("--use-ocdbt", type=str2bool, default=True, help="Use OCDBT format for saving.")
-    parser.add_argument("--use-zarr3", type=str2bool, default=True, help="Use Zarr3 format for saving.")
+    parser.add_argument("--use-zarr3", type=str2bool, default=True, hselp="Use Zarr3 format for saving.")
 
     parsed_args = parser.parse_args()
     main(parsed_args)
