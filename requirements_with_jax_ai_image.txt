@@ -1,6 +1,7 @@
 # Requirements for Building the MaxText Docker Image
 # These requirements are additional to the dependencies present in the JAX AI base image.
 datasets @ https://github.com/huggingface/datasets/archive/6790e138c00b87a1ddc72184f89e7814cf784360.zip
+drjax>=0.1.3
 flax>=0.11.0
 google-api-python-client
 google-jetstream @ https://github.com/AI-Hypercomputer/JetStream/archive/daedc21c393f23449fb54ddc4f75fca34348ea9c.zip
