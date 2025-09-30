@@ -78,14 +78,12 @@ class DecoderLayer(nnx.Module):
     self.quant = quant
     self.model_mode = model_mode
     self.rngs = rngs if rngs is not None else nnx.Rngs(0)
-    inputs_shape = (
-      int(self.config.per_device_batch_size),
-      int(self.config.max_target_length),
-      int(self.config.emb_dim),
-    )
+
+    batch_size, sequence_length = max_utils.get_batch_seq_len_for_mode(self.config, model_mode)
+    dummy_inputs_shape = (batch_size, sequence_length, self.config.emb_dim)
 
     self.mlp = linears.MlpBlock(
-      in_features=inputs_shape[-1],
+      in_features=dummy_inputs_shape[-1],
       intermediate_dim=self.config.mlp_dim,
       activations=self.config.mlp_activations,
       intermediate_dropout_rate=self.config.dropout_rate,
@@ -100,7 +98,7 @@ class DecoderLayer(nnx.Module):
     self.drop_out = nnx.Dropout(rate=self.config.dropout_rate, broadcast_dims=(-2,),rngs=self.rngs)
 
     self.pre_self_attention_norm = RMSNorm(
-      num_features=inputs_shape[-1],
+      num_features=dummy_inputs_shape[-1],
       dtype=self.config.dtype,
       weight_dtype=self.config.weight_dtype,
       kernel_axes=("norm", ),
@@ -116,8 +114,8 @@ class DecoderLayer(nnx.Module):
         max_target_length=self.config.max_target_length,
         max_prefill_predict_length=self.config.max_prefill_predict_length,
         attention_kernel=self.config.attention,
-        inputs_q_shape=inputs_shape,
-        inputs_kv_shape=inputs_shape,
+        inputs_q_shape=dummy_inputs_shape,
+        inputs_kv_shape=dummy_inputs_shape,
         mesh=mesh,
         dtype=self.config.dtype,
         weight_dtype=self.config.weight_dtype,
@@ -166,7 +164,7 @@ class DecoderLayer(nnx.Module):
         decoder_positions,
         decoder_segment_ids=decoder_segment_ids,
         deterministic=deterministic,
-        model_mode=model_mode,
+        model_mode=self.model_mode,
     )
     attention_lnx = nn.with_logical_constraint(attention_lnx, logical_axis_names)
 
@@ -208,7 +206,18 @@ class SequentialBlockDecoderLayers(nnx.Module):
     self.model_mode = model_mode
     self.rngs = rngs if rngs is not None else nnx.Rngs(0)
     self.num_decoder_layers = num_decoder_layers
-    self.decoder_layer = decoder_layer
+    for lyr in range(self.num_decoder_layers):
+      setattr(
+        self,
+        f"layers_{lyr}", 
+        decoder_layer(
+            config=self.config,
+            mesh=self.mesh, 
+            name=f"layers_{lyr}",
+            quant=self.quant,
+            model_mode=self.model_mode
+        )
+      )
 
   def __call__(
       self,
@@ -221,9 +230,8 @@ class SequentialBlockDecoderLayers(nnx.Module):
       page_state: page_manager.PageState | None = None,
   ) -> Union[Array, tuple[Array, None]]:
     for lyr in range(self.num_decoder_layers):
-      inputs = self.decoder_layer(
-          config=self.config, mesh=self.mesh, name=f"layers_{lyr}", quant=self.quant, model_mode=model_mode
-      )(
+      current_layer = getattr(self,f"layers_{lyr}")
+      inputs = current_layer(
           inputs,
           decoder_segment_ids,
           decoder_positions,
@@ -247,14 +255,12 @@ class Decoder(nnx.Module):
   def __init__(
       self,
       config: Config,
-      shared_embedding: nn.Module,
       mesh: Mesh,
       quant: Quant | None=None,
       model_mode: str = MODEL_MODE_TRAIN,
       rngs : nnx.Rngs | None = None,
   ):
     self.config = config
-    self.shared_embedding = shared_embedding
     self.mesh = mesh
     self.quant = quant
     self.model_mode = model_mode
@@ -302,14 +308,11 @@ class Decoder(nnx.Module):
     elif model_mode == MODEL_MODE_AUTOREGRESSIVE:
       sequence_length = 1
 
-    inputs_shape = (
-      int(config.micro_batch_size_to_train_on),
-      sequence_length,
-      int(self.config.emb_dim),
-    )
+    batch_size, sequence_length = max_utils.get_batch_seq_len_for_mode(self.config, model_mode)
+    dummy_inputs_shape = (batch_size, sequence_length, self.config.emb_dim)
 
     self.logits_dense = linears.dense_general(
-          inputs_shape=inputs_shape,
+          inputs_shape=dummy_inputs_shape,
           out_features_shape=self.config.vocab_size,
           weight_dtype=self.config.weight_dtype,
           dtype=jnp.float32 if self.config.logits_dot_in_fp32 else self.config.dtype,
@@ -339,6 +342,23 @@ class Decoder(nnx.Module):
             rngs=self.rngs,
         )
 
+  def minimal_policy(self, with_context=False):
+    """Helper for creating minimal checkpoint policies."""
+    names = [
+        "query_proj",
+        "value_proj",
+        "key_proj",
+        "qkv_proj",
+        "out_proj",
+        "mlpwi_0",
+        "mlpwi_1",
+        "mlpwi",
+        "mlpwo",
+    ]
+    if with_context:
+      names.append("context")
+    return jax.checkpoint_policies.save_only_these_names(*names)
+
   def get_remat_policy(self)-> Callable[..., bool]|None:
     cfg = self.config
     policy_name = cfg.remat_policy
@@ -347,7 +367,9 @@ class Decoder(nnx.Module):
       return None
     
     static_policies : dict[str,Any] = {
-        "minimal": jax.checkpoint_policies.checkpoint_dots_with_no_batch_dims,
+        "minimal_with_context": self.minimal_policy(with_context=True),
+        "minimal_flash": self.minimal_policy(with_context=True),
+        "minimal": self.minimal_policy(with_context=False),
         "save_dot_with_context_except_mlp": jax.checkpoint_policies.save_only_these_names(
             "query_proj", "value_proj", "key_proj", "qkv_proj", "context", "out_proj"
         ),
@@ -361,10 +383,6 @@ class Decoder(nnx.Module):
             "query_proj", "value_proj", "key_proj", "qkv_proj"
         ),
         "save_out_proj": jax.checkpoint_policies.save_only_these_names("out_proj"),
-        "minimal_flash": jax.checkpoint_policies.save_from_both_policies(
-            jax.checkpoint_policies.checkpoint_dots_with_no_batch_dims,
-            jax.checkpoint_policies.save_only_these_names("context")
-        ),
     }
 
     dynamic_policies : dict[str,Callable] = {
@@ -374,9 +392,21 @@ class Decoder(nnx.Module):
             offload_src="device",
             offload_dst="pinned_host"
         ),
-        "minimal_offloaded": lambda: jax.checkpoint_policies.offload_dot_with_no_batch_dims(
+        "minimal_offloaded": lambda: jax.checkpoint_policies.save_and_offload_only_these_names(
+            names_which_can_be_saved=[],
+            names_which_can_be_offloaded=[
+                "query_proj",
+                "value_proj",
+                "key_proj",
+                "qkv_proj",
+                "out_proj",
+                "mlpwi_0",
+                "mlpwi_1",
+                "mlpwi",
+                "mlpwo",
+            ],
             offload_src="device",
-            offload_dst="pinned_host"
+            offload_dst="pinned_host",
         ),
         "custom": lambda: jax.checkpoint_policies.save_and_offload_only_these_names(
             names_which_can_be_saved=cfg.tensors_on_device,
@@ -386,6 +416,8 @@ class Decoder(nnx.Module):
         ),
     }
 
+    if policy_name == "minimal_flash":
+      max_logging.log("WARNING: 'minimal_flash' will be deprecated soon, please use 'minimal_with_context' instead.")
     if policy_name in static_policies:
       return static_policies[policy_name]
     elif policy_name in dynamic_policies:
@@ -405,6 +437,7 @@ class Decoder(nnx.Module):
         DecoderBlockType.GEMMA3: [gemma3.Gemma3DecoderLayer],
         DecoderBlockType.GPT3: [gpt3.Gpt3DecoderLayer],
         DecoderBlockType.QWEN3: [qwen3.Qwen3DecoderLayer],
+        DecoderBlockType.QWEN3_MOE: [qwen3.Qwen3MoeDecoderLayer],
         DecoderBlockType.SIMPLE: [simple_layer.SimpleDecoderLayer],
         DecoderBlockType.SIMPLE_MLP: [simple_layer.SimpleMlpDecoderLayer],
         DecoderBlockType.GPT_OSS:[gpt_oss.GptOssScannableBlock] if self.config.scan_layers else [gpt_oss.GptOssDecoderLayer],
@@ -485,7 +518,7 @@ class Decoder(nnx.Module):
       in_axes_tuple = (nn.broadcast,) * self.BROADCAST_ARGS_LENGTH
       return self.scan_decoder_layers(
           cfg, layer_ctor_or_fn, length, name, mesh, in_axes_tuple,
-          model_mode=self.model_mode, **layer_kwargs
+          **layer_kwargs
       )
 
     scan_fn = build_scan_fn()
@@ -540,7 +573,7 @@ class Decoder(nnx.Module):
 
       # Optionally compute weight sharding once (shape-dependent)
       partition_spec = self._calculate_partition_spec(
-        y, decoder_segment_ids, decoder_positions, deterministic, model_mode)
+        y, decoder_segment_ids, decoder_positions, deterministic, self.model_mode)
 
       # Pipeline proper (stage module was built in __init__)
       y = self.pipeline_module(y, decoder_segment_ids, decoder_positions, deterministic, model_mode,
@@ -567,7 +600,7 @@ class Decoder(nnx.Module):
       
       # Optionally compute weight sharding once (shape-dependent)
       partition_spec = self._calculate_partition_spec(
-        y, decoder_segment_ids, decoder_positions, deterministic, model_mode)
+        y, decoder_segment_ids, decoder_positions, deterministic, self.model_mode)
 
       y = self.pipeline_module(y, decoder_segment_ids, decoder_positions, deterministic, model_mode,
                                partition_spec=partition_spec)
@@ -711,6 +744,8 @@ class Decoder(nnx.Module):
               "is_nope_layer": llama4.determine_is_nope_layer(idx, cfg.nope_layer_interval),
               "is_moe_layer": llama4.determine_is_moe_layer(idx, cfg.interleave_moe_layer_step),
           }
+        elif cfg.decoder_block == DecoderBlockType.GPT_OSS:
+          layer_kwargs = {"attention_type": gpt_oss.get_attention_type(layer_id=idx)}
         self._unscanned_layers.append(
           base_cls(config=cfg, mesh=mesh, name=f"layers_{idx}", quant=self.quant, model_mode=self.model_mode, **layer_kwargs)
         )
@@ -726,7 +761,11 @@ class Decoder(nnx.Module):
 
     self._exec = exec_run
 
-  def scan_decoder_layers(self, cfg:Config, decoder_layer: Callable, length:int, metadata_axis_name:str, mesh:Mesh, in_axes_tuple:Any, model_mode:str, **kwargs):
+  def scan_decoder_layers(
+      self, cfg:Config, decoder_layer: Callable, length:int,
+      metadata_axis_name:str, mesh:Mesh, in_axes_tuple:Any, **kwargs
+  ):
+    """scan decoder layers, calls `flax.linen.transforms.scan`"""
     params_spec = cfg.param_scan_axis
     cache_spec = 0
     scan_fn = nn.scan(
@@ -752,7 +791,7 @@ class Decoder(nnx.Module):
         mesh=mesh,
         name=metadata_axis_name,
         quant=self.quant,
-        model_mode=model_mode,
+        model_mode=self.model_mode,
         **kwargs
     )
 
@@ -781,7 +820,6 @@ class Decoder(nnx.Module):
           "layers_per_stage",
           self.mesh,
           in_axes_tuple=(nn.broadcast,) * self.BROADCAST_ARGS_LENGTH,
-          model_mode=self.model_mode,
       )
     else:
       stage_module = SequentialBlockDecoderLayers(
@@ -796,6 +834,7 @@ class Decoder(nnx.Module):
   
   def _apply_embedding(
       self,
+      shared_embedding: nn.Module | nnx.Module,
       decoder_input_tokens:Array,
       decoder_positions:Array,
       deterministic:bool,
@@ -805,7 +844,7 @@ class Decoder(nnx.Module):
   )->Array:
     cfg = self.config
 
-    y = self.shared_embedding(decoder_input_tokens.astype("int32"), model_mode=model_mode)
+    y = shared_embedding(decoder_input_tokens.astype("int32"), model_mode=model_mode)
     
     # Merge the image embeddings with the text embeddings for multimodal models
     if image_embeddings is not None and cfg.use_multimodal:
@@ -829,7 +868,7 @@ class Decoder(nnx.Module):
       y += self.position_embedder(decoder_positions, model_mode=model_mode)
     return y
 
-  def _apply_output_head(self, y:Array, deterministic:bool, model_mode:str)->Array:
+  def _apply_output_head(self, shared_embedding: nn.Module | nnx.Module, y:Array, deterministic:bool, model_mode: str)->Array:
     cfg = self.config
 
     # Use the pre-instantiated norm layer
@@ -838,10 +877,10 @@ class Decoder(nnx.Module):
 
     if cfg.logits_via_embedding:
       # Use the transpose of embedding matrix for logit transform.
-      if isinstance(self.shared_embedding, nnx.Module):
-        embedding_table = self.shared_embedding.embedding.value
+      if isinstance(shared_embedding, nnx.Module):
+        embedding_table = shared_embedding.embedding.value
       else:
-        embedding_table = self.shared_embedding.variables["params"]["embedding"]
+        embedding_table = shared_embedding.variables["params"]["embedding"]
       if isinstance(embedding_table, nn.spmd.LogicallyPartitioned):
         embedding_table = embedding_table.unbox()
       attend_dtype = jnp.float32 if cfg.logits_dot_in_fp32 else cfg.dtype
@@ -854,13 +893,13 @@ class Decoder(nnx.Module):
     else:
       logits = self.logits_dense(y)
 
-    logical_axis_resource = (
-       (None, None, "activation_vocab") 
-       if model_mode in {MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE} 
-       else ("activation_embed_and_logits_batch", "activation_length", "activation_vocab")
-    )
-    logits = nn.with_logical_constraint(logits, logical_axis_resource)
-
+    if model_mode in (MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE):
+      logits = nn.with_logical_constraint(logits, (None, None, "activation_vocab"))
+    elif cfg.num_vocab_tiling == 1:
+      logits = nn.with_logical_constraint(
+          logits, ("activation_embed_and_logits_batch", "activation_length_no_exp", "activation_vocab")
+      )
+    
     if self.config.cast_logits_to_fp32:
       logits = logits.astype(jnp.float32)
 
@@ -868,6 +907,7 @@ class Decoder(nnx.Module):
 
   def __call__(
       self,
+      shared_embedding: nn.Module | nnx.Module,
       decoder_input_tokens: Array,
       decoder_positions: Array,
       decoder_segment_ids: Array|None=None,
@@ -887,6 +927,7 @@ class Decoder(nnx.Module):
       )
 
     y = self._apply_embedding(
+        shared_embedding,
         decoder_input_tokens,
         decoder_positions,
         deterministic,
@@ -911,7 +952,15 @@ class Decoder(nnx.Module):
       raise TypeError(f"Expected `y` to be a jax.Array, but got {type(y).__name__}.")
 
     hidden_state = y
-    logits = self._apply_output_head(hidden_state, deterministic, model_mode)
+
+    # When vocab tiling is enabled in training mode, full logits won't generate to reduce memory
+    # Instead, we keep track on the hidden states, which has smaller size compared to full logits
+    if self.config.num_vocab_tiling > 1 and self.model_mode == MODEL_MODE_TRAIN:
+      logits = None
+      self.sow(nnx.Intermediate, "hidden_states", hidden_state)
+    else:
+      logits = self._apply_output_head(shared_embedding, hidden_state, deterministic, model_mode)
+
     return logits, hidden_state
 
   @property
