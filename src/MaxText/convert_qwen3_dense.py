@@ -28,7 +28,6 @@ import os
 import pathlib
 import sys  # Added for exception hook
 
-import ml_dtypes
 import numpy as np
 import torch
 from safetensors import safe_open
@@ -39,7 +38,7 @@ from MaxText.inference_utils import str2bool
 
 max_logging.log("Script imports complete. Defining globals.")
 
-CAST_DTYPE = ml_dtypes.bfloat16
+CAST_DTYPE = np.float16
 
 
 def _pt_to_np(pt_weight, cast_dtype=CAST_DTYPE):
