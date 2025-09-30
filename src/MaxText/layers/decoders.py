@@ -381,7 +381,7 @@ class Decoder(nn.Module):
         # TODO(ranran): update to Mistral with sliding window attention
         return [mistral.MistralDecoderLayerToLinen]
       case DecoderBlockType.MIXTRAL:
-        return [mixtral.MixtralDecoderLayer]
+        return [mixtral.MixtralDecoderLayerToLinen]
       case DecoderBlockType.DEEPSEEK:
         if self.config.use_batch_split_schedule:
           return [deepseek_batchsplit.DeepSeekDenseLayer, deepseek_batchsplit.DeepSeekMoELayer]
