@@ -725,22 +725,6 @@ class YarnRotaryEmbedding(nnx.Module):
       output = output.astype(self.fprop_dtype)
     return output
 
-
-def positional_embedding_as_linen(*, embedding_dims: int, max_wavelength: int = _MAX_WAVELENGTH):
-  """Initializes the PositionalEmbedding module and returns it as a Linen module.
-
-  Args:
-    embedding_dims: The dimension of the embeddings.
-    max_wavelength: The maximum wavelength for the sinusoidal positional embeddings.
-  """
-  return nnx_wrappers.to_linen(
-      PositionalEmbedding,
-      embedding_dims=embedding_dims,
-      max_wavelength=max_wavelength,
-      metadata_fn=variable_to_logically_partitioned,
-  )
-
-
 @dataclasses.dataclass(repr=False)
 class PositionalEmbedding(nnx.Module):
   """A layer that adds sinusoidal positional embeddings to the input.
