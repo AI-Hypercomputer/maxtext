@@ -101,6 +101,7 @@ class TransformerLinenPure(nn.Module):
     Compute logits from hidden states (wrapping decoder._apply_output_head).
     This function is only used for vocabulary tiling.
     """
+    # pylint: disable=protected-access
     logits = self.decoder._apply_output_head(
         shared_embedding=self.shared_embedding,
         y=hidden_states,

@@ -37,7 +37,7 @@ from MaxText import max_utils
 from MaxText import maxtext_utils
 from MaxText.data_loader import DataLoader
 from MaxText.input_pipeline.input_pipeline_interface import create_data_iterator
-from MaxText.metric_logger import MetricLogger
+from MaxText.metric_logger import MetricLogger, MetadataKey
 from MaxText.utils import gcs_utils
 from MaxText.utils.goodput_utils import GoodputEvent, record_goodput
 
@@ -64,6 +64,8 @@ class SFTTrainingHooks(TrainingHooks):
       maxtext_utils.assert_params_sufficiently_sharded(params, self.mesh, self.config.sharding_tolerance)
 
     self.metric_logger.write_setup_info_to_tensorboard(params)
+    if MetadataKey.PER_DEVICE_TFLOPS in self.metric_logger.metadata:
+      train_ctx._flops_measured = True
 
     if self.config.dump_hlo:
       jax.block_until_ready(state)  # Ensure compilation has finished

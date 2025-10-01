@@ -127,7 +127,7 @@ MaxText aims to provide you with the best OSS models, whether as a reference imp
   * Mixtral (8x7B, 8x22B)  
   * Mistral (7B)  
 * Diffusion Models  
-  * See [MaxDiffusion](https://github.com/AI-Hypercomputer/maxdiffusion) (Wan 2.1, Flux, SDXL, etc)
+  * See [MaxDiffusion](https://github.com/AI-Hypercomputer/maxdiffusion) (LTXV, Wan 2.1, Flux, SDXL, etc)
 
 ## Get involved
 

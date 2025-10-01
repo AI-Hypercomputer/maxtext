@@ -407,7 +407,7 @@ class RoutedMoE(nnx.Module):
     if self.config.use_random_routing:
       if rngs is None:
         raise ValueError("The random key cannot be None for random routing.")
-      # Re-use the 'dropout' RNG stream to ensure random routing
+      # Reuse the 'dropout' RNG stream to ensure random routing
       rng = rngs.dropout()
       top_k_weights, top_k_indices = random_routing(rng, gate_logits, self.num_experts_per_tok)
       return top_k_weights, top_k_indices

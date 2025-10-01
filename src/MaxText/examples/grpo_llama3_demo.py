@@ -41,51 +41,40 @@ This tutorial demonstrates training the Llama3.1 8B-IT model on
 
 # ## Imports
 
+from pprint import pprint
 import functools
 import os
-from pprint import pprint
 import re
-import sys
+
+from tqdm.auto import tqdm
+
+import grain
+
+import humanize
+
+import jax
 
 from flax import nnx
 from flax.linen import partitioning as nn_partitioning
-import grain
-import humanize
-import jax
+
 import optax
 from orbax import checkpoint as ocp
+
 import tensorflow_datasets as tfds
-from tqdm.auto import tqdm
+
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl.rollout import base_rollout
 from tunix.rl.grpo.grpo_learner import GrpoConfig, GrpoLearner
 from tunix.sft import metrics_logger
+from tunix.models.llama3 import model as llama3_lib
+from tunix.rl.rollout.base_rollout import RolloutConfig
 
 from transformers import AutoTokenizer
 
-from flax import linen as nn
-from tunix.models.llama3 import model as llama3_lib
-import numpy as np
-from etils import epath
-
-from tunix.rl.rollout.base_rollout import RolloutConfig
-
-from MaxText.globals import MAXTEXT_ASSETS_ROOT
+from MaxText.globals import MAXTEXT_ASSETS_ROOT, MAXTEXT_PKG_DIR
 
 # for vLLM we can skip JAX precompilation with this flag, it makes startup faster
 os.environ["SKIP_JAX_PRECOMPILE"] = "1"
-
-# add the parent directory (two levels up to say ~/HOME/maxtext) to sys.path if currently running from
-# ~/HOME/maxtext/src/MaxText/examples
-
-# Get the directory of the current script
-script_dir = os.path.dirname(os.path.abspath(__file__))
-
-# Go up two levels to get the project root
-project_root = os.path.abspath(os.path.join(script_dir, "..", ".."))
-
-# Add the project root to the Python path
-sys.path.insert(0, project_root)
 
 from MaxText import model_creation_utils
 from MaxText import pyconfig
@@ -100,7 +89,7 @@ jax.devices()
 
 DEBUG = False  # set to True to run in debug mode, for more print statements
 
-HOME = os.path.expanduser("~") + "/"
+HOME = os.path.join(os.path.expanduser("~"), "")
 print(f"Home directory (from Python): {HOME}")
 
 # ## Hyperparameters
@@ -111,8 +100,8 @@ print(f"Home directory (from Python): {HOME}")
 
 
 # ====== Data ======
-TRAIN_DATA_DIR = f"{HOME}/data/train"
-TEST_DATA_DIR = f"{HOME}/data/test"
+TRAIN_DATA_DIR = os.path.join(HOME, "data", "train")
+TEST_DATA_DIR = os.path.join(HOME, "data", "test")
 if not os.path.exists(TRAIN_DATA_DIR):
   os.makedirs(TRAIN_DATA_DIR)
 if not os.path.exists(TEST_DATA_DIR):
@@ -121,17 +110,17 @@ TRAIN_FRACTION = 1.0
 
 
 # ====== Checkpoint directory =====
-LOG_DIR = f"{HOME}/content/tensorboard/grpo/logs_llama3/"
+LOG_DIR = os.path.join(HOME, "content", "tensorboard", "grpo", "logs_llama3", "")
 if not os.path.exists(LOG_DIR):
   os.makedirs(LOG_DIR)
 
 # ===== Profiling =====
-PROFILE_DIR = f"{HOME}/content/jax_traces/grpo/profiles_llama3/"
+PROFILE_DIR = os.path.join(HOME, "content", "jax_traces", "grpo", "profiles_llama3", "")
 if not os.path.exists(PROFILE_DIR):
   os.makedirs(PROFILE_DIR)
 
 # ====== Checkpoint saving ======
-CKPT_DIR = f"{HOME}/content/ckpts_llama3/"
+CKPT_DIR = os.path.join(HOME, "content", "ckpts_llama3", "")
 
 if not os.path.exists(CKPT_DIR):
   os.makedirs(CKPT_DIR)
@@ -266,6 +255,14 @@ TEMPLATE = """<start_of_turn>user
 
 
 def extract_hash_answer(text: str) -> str | None:
+  """Extracts the answer from a string that contains '####'.
+
+  Args:
+    text: The string to extract the answer from.
+
+  Returns:
+    The extracted answer as a string, or None if '####' is not found.
+  """
   if DEBUG:
     print(f"Extracting answer from: {text}")
   if "####" not in text:
@@ -274,6 +271,15 @@ def extract_hash_answer(text: str) -> str | None:
 
 
 def get_dataset(data_dir, split="train") -> grain.MapDataset:
+  """Gets and preprocesses the GSM8K dataset.
+
+  Args:
+    data_dir: The directory to download and store the dataset.
+    split: The dataset split to use (e.g., 'train', 'test').
+
+  Returns:
+    A grain.MapDataset containing the preprocessed data.
+  """
   # Download data
   if not os.path.exists(data_dir):
     os.makedirs(data_dir)
@@ -315,16 +321,16 @@ def get_dataset(data_dir, split="train") -> grain.MapDataset:
   return loaded_dataset
 
 
-dataset = get_dataset(TRAIN_DATA_DIR, "train").batch(BATCH_SIZE)[:NUM_BATCHES]
+DATASET = get_dataset(TRAIN_DATA_DIR, "train").batch(BATCH_SIZE)[:NUM_BATCHES]
 
 if TRAIN_FRACTION == 1.0:
-  train_dataset = dataset.repeat(NUM_EPOCHS)
+  train_dataset = DATASET.repeat(NUM_EPOCHS)
   val_dataset = None
 else:
-  train_dataset = dataset[: int(len(dataset) * TRAIN_FRACTION)]
+  train_dataset = DATASET[: int(len(DATASET) * TRAIN_FRACTION)]
   train_dataset = train_dataset.repeat(NUM_EPOCHS)
 
-  val_dataset = dataset[int(len(dataset) * TRAIN_FRACTION) :].repeat(NUM_EPOCHS)
+  val_dataset = DATASET[int(len(DATASET) * TRAIN_FRACTION) :].repeat(NUM_EPOCHS)
 
 test_dataset = get_dataset(TEST_DATA_DIR, "test").batch(BATCH_SIZE)[:NUM_TEST_BATCHES]
 
@@ -363,17 +369,25 @@ show_hbm_usage()
 
 
 def get_ref_maxtext_model(config):
+  """Creates and returns a TunixMaxTextAdapter model and mesh.
 
-  model, mesh = model_creation_utils.create_nnx_model(config)
-  with mesh:
+  Args:
+    config: The model configuration.
+
+  Returns:
+    A tuple containing the TunixMaxTextAdapter model and the mesh.
+  """
+
+  model, this_mesh = model_creation_utils.create_nnx_model(config)
+  with this_mesh:
     tunix_model = TunixMaxTextAdapter(
         base_model=model,
     )
 
-    model_config = llama3_lib.ModelConfig.llama3_1_8b()
-    tunix_model.config = model_config
+    this_model_config = llama3_lib.ModelConfig.llama3_1_8b()
+    tunix_model.config = this_model_config
 
-  return tunix_model, mesh
+  return tunix_model, this_mesh
 
 
 model_config = llama3_lib.ModelConfig.llama3_1_8b()
@@ -425,7 +439,8 @@ if DEBUG:
   _maxtext_state_flatten = nnx.state(llama3_1_8b).flat_state()
   maxtext_state_flatten = {".".join(str(key) for key in keys): v for keys, v in _maxtext_state_flatten}
   print(
-      f"maxtext_state_flatten[base.token_embedder.embedding].value={maxtext_state_flatten['base.token_embedder.embedding'].value}"
+      f"maxtext_state_flatten[base.token_embedder.embedding].value="
+      f"{maxtext_state_flatten['base.token_embedder.embedding'].value}"
   )
 
 
@@ -443,7 +458,7 @@ show_hbm_usage()
 config_policy = pyconfig.initialize(
     [
         "",
-        f"{HOME}/maxtext/src/MaxText/configs/base.yml",
+        os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
     ],
     base_output_directory="dummy",  # This is not used in Tunix.
     run_name="test-tunix-maxtext-llama3.1-8b",  # This is not used in Tunix.
@@ -481,7 +496,8 @@ if DEBUG:
   _maxtext_state_flatten = nnx.state(llama3_1_8b_policy).flat_state()
   maxtext_state_flatten = {".".join(str(key) for key in keys): v for keys, v in _maxtext_state_flatten}
   print(
-      f"maxtext_state_flatten[base.token_embedder.embedding].value={maxtext_state_flatten['base.token_embedder.embedding'].value}"
+      f"maxtext_state_flatten[base.token_embedder.embedding].value="
+      f"{maxtext_state_flatten['base.token_embedder.embedding'].value}"
   )
 
 # See memory usage after loading the policy model:
@@ -521,6 +537,16 @@ match_format.search(
 
 
 def match_format_exactly(prompts, completions, **kargs):
+  """Rewards completions that exactly match the specified format.
+
+  Args:
+    prompts: The prompts used to generate completions.
+    completions: The generated completions.
+    **kargs: Additional keyword arguments.
+
+  Returns:
+    A list of scores for each completion.
+  """
   scores = []
   for completion in completions:
     score = 0
@@ -536,6 +562,16 @@ def match_format_exactly(prompts, completions, **kargs):
 
 
 def match_format_approximately(prompts, completions, **kargs):
+  """Rewards completions that approximately match the specified format.
+
+  Args:
+    prompts: The prompts used to generate completions.
+    completions: The generated completions.
+    **kargs: Additional keyword arguments.
+
+  Returns:
+    A list of scores for each completion.
+  """
   scores = []
 
   for completion in completions:
@@ -557,6 +593,17 @@ def match_format_approximately(prompts, completions, **kargs):
 
 
 def check_answer(prompts, completions, answer, **kargs):
+  """Checks if the answer in the completion is correct and rewards accordingly.
+
+  Args:
+    prompts: The prompts used to generate completions.
+    completions: The generated completions.
+    answer: The ground truth answers.
+    **kargs: Additional keyword arguments.
+
+  Returns:
+    A list of scores for each completion.
+  """
   responses = completions
 
   extracted_responses = [guess.group(1) if (guess := match_format.search(r)) is not None else None for r in responses]
@@ -578,13 +625,13 @@ def check_answer(prompts, completions, answer, **kargs):
       # Ie if the answer is within some range, reward it!
       try:
         ratio = float(guess) / float(true_answer)
-        if ratio >= 0.9 and ratio <= 1.1:
+        if 0.9 <= ratio <= 1.1:
           score += REWARD_RATIO_GUESS_TO_ANSWER_HIGH
-        elif ratio >= 0.8 and ratio <= 1.2:
+        elif 0.8 <= ratio <= 1.2:
           score += REWARD_RATIO_GUESS_TO_ANSWER_LOW
         else:
           score += PENALTY_INCORRECT_ANSWER  # Penalize wrong answers
-      except:
+      except (ValueError, TypeError, ZeroDivisionError):
         score += PENALTY_INCORRECT_FORMAT  # Penalize
     scores.append(score)
   return scores
@@ -599,6 +646,17 @@ match_numbers.findall(f"{solution_start}  0.34  {solution_end}")
 
 
 def check_numbers(prompts, completions, answer, **kargs):
+  """Extracts numbers from completions and rewards if they match the answer.
+
+  Args:
+    prompts: The prompts used to generate completions.
+    completions: The generated completions.
+    answer: The ground truth answers.
+    **kargs: Additional keyword arguments.
+
+  Returns:
+    A list of scores for each completion.
+  """
   question = kargs["question"]
   responses = completions
 
@@ -621,7 +679,7 @@ def check_numbers(prompts, completions, answer, **kargs):
       true_answer = float(true_answer.strip())
       guess = float(guess.strip())
       scores.append(1.5 if guess == true_answer else 0.0)
-    except:
+    except (ValueError, TypeError):
       scores.append(0)
       continue
   return scores
@@ -736,7 +794,7 @@ def score_responses(question, responses, answer):
       ratio = float(extracted_response.strip()) / float(answer.strip())
       if 0.9 <= ratio <= 1.1:
         is_partially_correct = True
-    except Exception as e:
+    except (ValueError, TypeError, ZeroDivisionError) as e:
       if DEBUG:
         print(f"Evaluation Exception: {e}")
         print("SKIPPED")
@@ -849,149 +907,143 @@ def evaluate(
 #
 # Let's set up all the configs first - checkpointing, metric logging and training.
 # We then train the model.
+def main():
+  # Ckpt saving
+  checkpointing_options = ocp.CheckpointManagerOptions(save_interval_steps=SAVE_INTERVAL_STEPS, max_to_keep=MAX_TO_KEEP)
 
+  # Metrics logger
+  metrics_logging_options = metrics_logger.MetricsLoggerOptions(log_dir=LOG_DIR, flush_every_n_steps=20)
 
-# Ckpt saving
-checkpointing_options = ocp.CheckpointManagerOptions(save_interval_steps=SAVE_INTERVAL_STEPS, max_to_keep=MAX_TO_KEEP)
+  # Logs
+  print(f"TensorBoard logs directory: {LOG_DIR}")
+  print(f"tensorboard --logdir {LOG_DIR} --port=8086")
 
-# Metrics logger
-metrics_logging_options = metrics_logger.MetricsLoggerOptions(log_dir=LOG_DIR, flush_every_n_steps=20)
-
-
-# Logs
-print(f"TensorBoard logs directory: {LOG_DIR}")
-print(f"tensorboard --logdir {LOG_DIR} --port=8086")
-
-
-# Optimizer, learning rate scheduler, gradient clipping
-optimizer = optax.adamw(
-    learning_rate=optax.schedules.warmup_cosine_decay_schedule(
-        init_value=0.0,
-        peak_value=LEARNING_RATE,
-        warmup_steps=WARMUP_STEPS,
-        decay_steps=MAX_STEPS,
-        end_value=0.0,
-    ),
-    b1=B1,
-    b2=B2,
-    weight_decay=WEIGHT_DECAY,
-)
-
-if MAX_GRAD_NORM is not None:
-  optimizer = optax.chain(
-      optax.clip_by_global_norm(max_norm=MAX_GRAD_NORM),
-      optimizer,
+  # Optimizer, learning rate scheduler, gradient clipping
+  optimizer = optax.adamw(
+      learning_rate=optax.schedules.warmup_cosine_decay_schedule(
+          init_value=0.0,
+          peak_value=LEARNING_RATE,
+          warmup_steps=WARMUP_STEPS,
+          decay_steps=MAX_STEPS,
+          end_value=0.0,
+      ),
+      b1=B1,
+      b2=B2,
+      weight_decay=WEIGHT_DECAY,
   )
 
+  if MAX_GRAD_NORM is not None:
+    optimizer = optax.chain(
+        optax.clip_by_global_norm(max_norm=MAX_GRAD_NORM),
+        optimizer,
+    )
 
-# RL Cluster config
-# Note that we use vLLM as the rollout engine.
-# and we are using Tensor Parallelism for rollout
-
-cluster_config = rl_cluster_lib.ClusterConfig(
-    role_to_mesh={
-        rl_cluster_lib.Role.ACTOR: mesh,
-        rl_cluster_lib.Role.REFERENCE: mesh,
-        rl_cluster_lib.Role.ROLLOUT: mesh,
-    },
-    rollout_engine="vllm",
-    offload_to_cpu=False,
-    training_config=rl_cluster_lib.RLTrainingConfig(
-        actor_optimizer=optimizer,
-        eval_every_n_steps=EVAL_EVERY_N_STEPS,
-        max_steps=MAX_STEPS,
-        gradient_accumulation_steps=1,
-        # metrics logging
-        metrics_logging_options=metrics_logging_options,
-        # checkpoint saving
-        checkpoint_root_directory=CKPT_DIR,
-        checkpointing_options=checkpointing_options,
-    ),
-    rollout_config=base_rollout.RolloutConfig(
-        max_tokens_to_generate=TOTAL_GENERATION_STEPS,
-        max_prompt_length=MAX_PROMPT_LENGTH,
-        kv_cache_size=MAX_PROMPT_LENGTH + TOTAL_GENERATION_STEPS + 256,
-        temperature=TEMPERATURE,
-        top_p=TOP_P,
-        top_k=TOP_K,
-    ),
-    rollout_vllm_model_version="meta-llama/Meta-Llama-3.1-8B-Instruct",
-    rollout_vllm_hbm_utilization=0.2,
-    rollout_vllm_tpu_backend_type="jax",
-)
-
-grpo_config = GrpoConfig(
-    num_generations=NUM_GENERATIONS,
-    num_iterations=NUM_ITERATIONS,
-    beta=BETA,
-    epsilon=EPSILON,
-)
-
-
-# RL cluster
-
-
-rl_cluster = rl_cluster_lib.RLCluster(
-    actor=llama3_1_8b_policy,
-    reference=llama3_1_8b,
-    tokenizer=model_tokenizer,
-    cluster_config=cluster_config,
-)
-
-# GRPO Trainer
-grpo_trainer = GrpoLearner(
-    rl_cluster=rl_cluster,
-    reward_fns=[
-        match_format_exactly,
-        match_format_approximately,
-        check_answer,
-        check_numbers,
-    ],
-    grpo_config=grpo_config,
-)
-
-
-if DEBUG:
-  # verify if vllm sampler works
-  output = rl_cluster.rollout.generate(
-      ["The capital of France is"],
-      rollout_config=RolloutConfig(max_tokens_to_generate=64, temperature=0.1),
+  # RL Cluster config
+  # Note that we use vLLM as the rollout engine.
+  # and we are using Tensor Parallelism for rollout
+  cluster_config = rl_cluster_lib.ClusterConfig(
+      role_to_mesh={
+          rl_cluster_lib.Role.ACTOR: mesh,
+          rl_cluster_lib.Role.REFERENCE: mesh,
+          rl_cluster_lib.Role.ROLLOUT: mesh,
+      },
+      rollout_engine="vllm",
+      offload_to_cpu=False,
+      training_config=rl_cluster_lib.RLTrainingConfig(
+          actor_optimizer=optimizer,
+          eval_every_n_steps=EVAL_EVERY_N_STEPS,
+          max_steps=MAX_STEPS,
+          gradient_accumulation_steps=1,
+          # metrics logging
+          metrics_logging_options=metrics_logging_options,
+          # checkpoint saving
+          checkpoint_root_directory=CKPT_DIR,
+          checkpointing_options=checkpointing_options,
+      ),
+      rollout_config=base_rollout.RolloutConfig(
+          max_tokens_to_generate=TOTAL_GENERATION_STEPS,
+          max_prompt_length=MAX_PROMPT_LENGTH,
+          kv_cache_size=MAX_PROMPT_LENGTH + TOTAL_GENERATION_STEPS + 256,
+          temperature=TEMPERATURE,
+          top_p=TOP_P,
+          top_k=TOP_K,
+      ),
+      rollout_vllm_model_version="meta-llama/Meta-Llama-3.1-8B-Instruct",
+      rollout_vllm_hbm_utilization=0.2,
+      rollout_vllm_tpu_backend_type="jax",
   )
 
-  print(f"Output: {output}")
+  grpo_config = GrpoConfig(
+      num_generations=NUM_GENERATIONS,
+      num_iterations=NUM_ITERATIONS,
+      beta=BETA,
+      epsilon=EPSILON,
+  )
+
+  # RL cluster
+
+  rl_cluster = rl_cluster_lib.RLCluster(
+      actor=llama3_1_8b_policy,
+      reference=llama3_1_8b,
+      tokenizer=model_tokenizer,
+      cluster_config=cluster_config,
+  )
+
+  # GRPO Trainer
+  grpo_trainer = GrpoLearner(
+      rl_cluster=rl_cluster,
+      reward_fns=[
+          match_format_exactly,
+          match_format_approximately,
+          check_answer,
+          check_numbers,
+      ],
+      grpo_config=grpo_config,
+  )
+
+  if DEBUG:
+    # verify if vllm sampler works
+    output = rl_cluster.rollout.generate(
+        ["The capital of France is"],
+        rollout_config=RolloutConfig(max_tokens_to_generate=64, temperature=0.1),
+    )
+
+    print(f"Output: {output}")
+
+  # ## Evaluate before training
+  #
+
+  # pylint: disable=unbalanced-tuple-unpacking
+  (corr, total, accuracy, partial_accuracy, format_accuracy) = evaluate(
+      test_dataset,
+      rl_cluster,
+      **GENERATION_CONFIGS["greedy"],
+  )
+  print(f"Pre GRPO Training: {corr=}, {total=}, {accuracy=}%, {partial_accuracy=}%," f" {format_accuracy=}%")
+
+  # ## Start training
+  #
+
+  jax.profiler.start_trace(PROFILE_DIR)
+  with mesh, nn_partitioning.axis_rules(config_policy.logical_axis_rules):
+    grpo_trainer.train(DATASET)
+  jax.profiler.stop_trace()
+
+  print("HBM usage after training:")
+  show_hbm_usage()
+
+  # ## Evaluate
+  #
+  # Let's evaluate our model!
+
+  # pylint: disable=unbalanced-tuple-unpacking
+  (corr, total, accuracy, partial_accuracy, format_accuracy) = evaluate(
+      test_dataset,
+      rl_cluster,
+      **GENERATION_CONFIGS["greedy"],
+  )
+  print(f"Post GRPO Training: {corr=}, {total=}, {accuracy=}%, {partial_accuracy=}%," f" {format_accuracy=}%")
 
 
-# ## Evaluate before training
-#
-
-
-(corr, total, accuracy, partial_accuracy, format_accuracy) = evaluate(
-    test_dataset,
-    rl_cluster,
-    **GENERATION_CONFIGS["greedy"],
-)
-print(f"Pre GRPO Training: {corr=}, {total=}, {accuracy=}%, {partial_accuracy=}%," f" {format_accuracy=}%")
-
-
-# ## Start training
-#
-
-jax.profiler.start_trace(PROFILE_DIR)
-with mesh, nn_partitioning.axis_rules(config_policy.logical_axis_rules):
-  grpo_trainer.train(dataset)
-jax.profiler.stop_trace()
-
-print("HBM usage after training:")
-show_hbm_usage()
-
-# ## Evaluate
-#
-# Let's evaluate our model!
-
-
-(corr, total, accuracy, partial_accuracy, format_accuracy) = evaluate(
-    test_dataset,
-    rl_cluster,
-    **GENERATION_CONFIGS["greedy"],
-)
-print(f"Post GRPO Training: {corr=}, {total=}, {accuracy=}%, {partial_accuracy=}%," f" {format_accuracy=}%")
+if __name__ == "__main__":
+  main()

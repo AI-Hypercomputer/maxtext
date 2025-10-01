@@ -158,7 +158,6 @@ def preprocessing_pipeline(
       dataloading_host_index,
       dataloading_host_count,
       num_threads,
-      False,
       max_target_length,
       data_column_names,
   )
