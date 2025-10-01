@@ -71,6 +71,7 @@ def create_training_tools(config, model, mesh):
         logger,
         use_ocdbt,
         use_zarr3,
+        config.max_to_keep,
     )
 
   return init_rng, checkpoint_manager, learning_rate_schedule, tx
@@ -269,11 +270,15 @@ def validate_train_config(config):
     )
 
   # Check if GPU Flash Attention is being used with sequence packing
-  if config.attention == "cudnn_flash_te" and config.packing and config.dataset_type != "synthetic":
-    raise ValueError(
-        "cudnn_flash_te only supports BSHD format. The THD (seq packing)"
-        " support is going to be available in Transformer Engine 2.0 release."
-        " Please disable sequence packing (set packing=False) or use a"
-        " different attention mechanism. With synthetic data, the format is not"
-        " important as packing is not applied."
-    )
+  # if (
+  #     config.attention == "cudnn_flash_te"
+  #     and config.packing
+  #     and config.dataset_type != "synthetic"
+  # ):
+  #   raise ValueError(
+  #       "cudnn_flash_te only supports BSHD format. The THD (seq packing)"
+  #       " support is going to be available in Transformer Engine 2.0 release."
+  #       " Please disable sequence packing (set packing=False) or use a"
+  #       " different attention mechanism. With synthetic data, the format is not"
+  #       " important as packing is not applied."
+  #   )

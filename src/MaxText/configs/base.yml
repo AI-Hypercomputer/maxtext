@@ -503,6 +503,7 @@ train_image_column: 'image'
 eval_data_columns: ['text'] # for DPO dataset containing "chosen" and "rejected"
 eval_image_column: 'image'
 packing: True
+max_sequences_per_bin: 32
 num_epoch: 1  # only grain and tfds pipeline supports num_epoch > 1
 generate_padding_batch_train: False
 generate_padding_batch_eval: False
@@ -884,3 +885,6 @@ use_qk_norm_in_gdn: True
 
 # Use tokamax library for gmm kernel implementation
 use_tokamax_gmm: false
+
+expert_balance: False
+max_to_keep: 5

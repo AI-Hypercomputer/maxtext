@@ -189,6 +189,7 @@ def preprocessing_pipeline(
     use_sft=None,
     sft_train_on_completion_only=True,
     grain_worker_count=1,  # only support 0 or 1
+    max_sequences_per_bin = 1, # max segments per sequence
 ):
   """pipeline for preprocessing HF dataset"""
 
@@ -289,10 +290,11 @@ def preprocessing_pipeline(
   if packing and not use_dpo:
     length_struct = {col: max_target_length for col in data_column_names}
     operations.append(
-        grain.experimental.PackAndBatchOperation(
-            batch_size=global_batch_size // jax.process_count(),
-            length_struct=length_struct,
-        )
+      grain.experimental.PackAndBatchOperation(
+        batch_size=global_batch_size // jax.process_count(),
+        length_struct=length_struct,
+        max_sequences_per_bin=max_sequences_per_bin,
+      )
     )
     operations.append(_input_pipeline_utils.ReformatPacking(data_column_names))
   else:
@@ -376,6 +378,7 @@ def make_hf_train_iterator(
         use_dpo=config.use_dpo,
         use_sft=config.use_sft,
         sft_train_on_completion_only=config.sft_train_on_completion_only,
+        max_sequences_per_bin=config.max_sequences_per_bin,
     )
   return train_iter
 
@@ -426,5 +429,6 @@ def make_hf_eval_iterator(
         use_dpo=config.use_dpo,
         use_sft=config.use_sft,
         sft_train_on_completion_only=config.sft_train_on_completion_only,
+        max_sequences_per_bin=config.max_sequences_per_bin,
     )
   return eval_iter

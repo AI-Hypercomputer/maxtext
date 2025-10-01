@@ -1344,16 +1344,23 @@ class AttentionOp(nnx.Module):
       raise AssertionError("Sliding window attention is not supported when context parallelism is enabled")
 
     sliding_window_size = None
+    mask_type = "padding_causal"
+    qkv_layout = "BSHD_BSHD_BSHD"  # 'BS3HD', 'BSHD_BS2HD' or 'BSHD_BSHD_BSHD'
+    max_segments_per_seq = 1  # max number of segments per sequence; for non-packed its 1
 
-    if self.attention_type == AttentionType.LOCAL_SLIDING or not self.config.enable_padding_causal_mask:
+    if self.attention_type == AttentionType.LOCAL_SLIDING:
       sliding_window_size = [self.sliding_window_size, 0]
 
-    if self.attention_type == AttentionType.LOCAL_SLIDING or using_context_parallelism:
-      mask_type = "causal"  # SWA and Context Parallelism only work with causal masking
+    if self.config.packing and self.config.dataset_type != "synthetic":
+      if decoder_segment_ids is None:
+        decoder_segment_ids = jnp.ones(shape=query.shape[:2], dtype=jnp.int32)
+      attn_mask = SequenceDescriptor.from_segment_ids_and_pos(segment_ids=decoder_segment_ids, segment_pos=None)
+      qkv_layout = "THD_THD_THD"  # 'T3HD', 'THD_T2HD' or 'THD_THD_THD'
+      max_segments_per_seq = 32
+    elif using_context_parallelism or self.config.dataset_type == "synthetic":  # context parallelism currently only supports causal masking and no packing
       attn_mask = None
+      mask_type = "causal"
     else:
-      # generate attn_mask
-      mask_type = "padding_causal"  # only padding_causal mask type can take a created mask
       attn_mask = self.generate_attention_mask(query, key, decoder_segment_ids, model_mode)
 
     dpa_layer = DotProductAttention(
@@ -1366,12 +1373,13 @@ class AttentionOp(nnx.Module):
         dropout_rng_name="aqt",
         dtype=self.dtype,
         float32_logits=self.float32_logits,
-        qkv_layout="BSHD_BSHD_BSHD",  # 'BS3HD', 'BSHD_BS2HD' or 'BSHD_BSHD_BSHD'
-        scale_factor=1.0,
+        qkv_layout=qkv_layout,
+        # scale_factor=1.0,
         transpose_batch_sequence=False,
         window_size=sliding_window_size,
         context_parallel_causal_load_balanced=self.config.context_parallel_load_balance,
         context_parallel_axis="context",
+        max_segments_per_seq=max_segments_per_seq,
     )
     return dpa_layer(query, key, value, mask=attn_mask)
 

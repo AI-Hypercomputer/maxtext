@@ -409,6 +409,7 @@ def train_loop(config, recorder, state=None):
             if config.shard_optimizer_over_data:
               state = jax.lax.with_sharding_constraint(state, state_mesh_shardings)
             state, metrics = p_train_step(state, example_batch, nextrng)
+          jax.block_until_ready(state)
 
       step_time_delta = datetime.datetime.now() - last_step_completion
       last_step_completion = datetime.datetime.now()
