@@ -14,16 +14,16 @@
 
 """Compare expected sharding of models with actual sharding of models."""
 
-
 import hashlib
+import json
+import os
+import pytest
 
 from MaxText.globals import MAXTEXT_PKG_DIR
 from MaxText.train_compile import get_shaped_inputs, get_topology_mesh, validate_config
-from tests.sharding_dump import named_shardings_to_json, load_named_sharding_json, TEST_CASES
 from MaxText import pyconfig
-import pytest
-import os
-import json
+
+from tests.sharding_dump import named_shardings_to_json, load_named_sharding_json, TEST_CASES
 
 
 def compute_checksum(d: dict) -> str:

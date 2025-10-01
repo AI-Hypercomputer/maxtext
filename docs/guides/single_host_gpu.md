@@ -117,7 +117,7 @@ We will Run the next commands from inside the docker for convenience.
 sudo docker run --runtime=nvidia --gpus all -it maxtext_base_image:latest  bash
 ```
 
-If you do not wish to ssh execute the next set of commands by pre-pending the following:
+If you do not wish to ssh execute the next set of commands by prepending the following:
 
 ```bash
 sudo docker run --runtime=nvidia --gpus all -it maxtext_base_image:latest ....

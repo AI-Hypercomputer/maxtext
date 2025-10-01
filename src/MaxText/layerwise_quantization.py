@@ -74,7 +74,9 @@ class LayerwiseQuantization:
 
     # Model and quantization config
     self.quant = quantizations.configure_quantization(config)
-    model = models.transformer_as_linen(config, mesh=self._mesh, quant=self.quant, model_mode=common_types.MODEL_MODE_TRAIN)
+    model = models.transformer_as_linen(
+        config, mesh=self._mesh, quant=self.quant, model_mode=common_types.MODEL_MODE_TRAIN
+    )
     rng = jax.random.PRNGKey(1234)
     self.unboxed_abstract_state, _, _ = maxtext_utils.get_abstract_state(model, None, self.config, rng, self._mesh, False)
 

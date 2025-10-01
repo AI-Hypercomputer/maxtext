@@ -11,7 +11,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Defines and runs Llama2 benchmarks on a v6e-256 cluster.
+
+This script configures benchmark runs for Llama2-7B and Llama2-70B models
+on a specific v6e-256 hardware setup using the XPK runner.
+"""
+
 import maxtext_trillium_model_configs as model_configs
+
 from maxtext_xpk_runner import BenchmarkRunner
 from maxtext_xpk_runner import HWConfig
 from maxtext_xpk_runner import SWconfig
@@ -19,19 +26,17 @@ from maxtext_xpk_runner import xpk_benchmark_runner
 from maxtext_xpk_runner import XpkConfig
 
 
-DATE = '20241009'
-BASE_DOCKER_IMAGE = 'maxtext_base_image'
+DATE = "20241009"
+BASE_DOCKER_IMAGE = "maxtext_base_image"
 
-ZONE = 'europe-west4'
-PROJECT = 'tpu-prod-env-multipod'
-CLUSTER_NAME = 'mlperf-v6e-256'
-DEVICE_TYPE = 'v6e-256'
+ZONE = "europe-west4"
+PROJECT = "tpu-prod-env-multipod"
+CLUSTER_NAME = "mlperf-v6e-256"
+DEVICE_TYPE = "v6e-256"
 NUM_SLICES = 1
-BASE_OUTPUT_DIR = 'gs://maxtext-experiments-tpem/'
+BASE_OUTPUT_DIR = "gs://maxtext-experiments-tpem/"
 
-v6e_env_configs = SWconfig(
-    base_docker_image=BASE_DOCKER_IMAGE, libtpu_version=DATE
-)
+v6e_env_configs = SWconfig(base_docker_image=BASE_DOCKER_IMAGE, libtpu_version=DATE)
 v6e_256_configs = HWConfig(num_slices=NUM_SLICES, device_type=DEVICE_TYPE)
 
 llama2_70b_4096 = BenchmarkRunner(
@@ -60,5 +65,5 @@ def main() -> None:
   xpk_benchmark_runner(cluster_config, [llama2_7b_4096, llama2_70b_4096])
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
   main()

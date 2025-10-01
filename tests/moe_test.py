@@ -270,7 +270,6 @@ class MoeLoopBlock(nnx.Module):
   This is not included anymore in our repo, due to a limitation of for-loop implementation in sharding.
   """
 
-
   def __init__(
       self,
       config: Config,
@@ -719,7 +718,12 @@ class RoutedMoeTest(unittest.TestCase):
 
       # Get the actual local_permute outputs.
       sorted_inputs, sorted_indices, local_group_size, sorted_experts_ids = moe.RoutedMoE.local_permute(
-          inputs_shard, global_group_sizes[None, :], experts_per_shard, shard_index, use_custom_sort_vjp=False, is_offset=False
+          inputs_shard,
+          global_group_sizes[None, :],
+          experts_per_shard,
+          shard_index,
+          use_custom_sort_vjp=False,
+          is_offset=False,
       )
 
       # Calculate expected outputs for the current shard
