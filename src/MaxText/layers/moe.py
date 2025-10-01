@@ -1037,7 +1037,7 @@ class RoutedMoE(nnx.Module):
           self.config.tile_activation_dim,
           self.config.tile_weight_dim,
       )
-      wo_out_tile_size = (
+      wo_tile_size = (
           self.config.tile_batch_seq,
           self.config.tile_weight_dim,
           self.config.tile_activation_dim,
@@ -1057,7 +1057,7 @@ class RoutedMoE(nnx.Module):
       layer_w1 = adc.checkpoint_name(layer_w1, "mlpwi_1")
       intermediate_layer = self.apply_ffn_activation(layer_w0, layer_w1)
 
-      intermediate_output = gmm_fn(intermediate_layer, wo, tiling=wo_out_tile_size)
+      intermediate_output = gmm_fn(intermediate_layer, wo, tiling=wo_tile_size)
       if self.get_tensor_parallelism_size() > 1:
         intermediate_output = jax.lax.psum_scatter(intermediate_output, "tensor", scatter_dimension=1, tiled=True)
       if self.config.mlp_bias:
