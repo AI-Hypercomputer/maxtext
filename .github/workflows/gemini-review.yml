@@ -42,7 +42,7 @@ jobs:
         github.event_name == 'pull_request' &&
         contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.pull_request.author_association) &&
         github.event.action == 'labeled' &&
-        github.event.label.name == 'gemini-review'
+        contains(github.event.label.name, 'gemini-review')
       )
     runs-on: 'ubuntu-latest'
     timeout-minutes: 10
