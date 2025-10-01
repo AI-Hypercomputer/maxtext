@@ -77,8 +77,6 @@ from etils import epath
 from tunix.rl.rollout.base_rollout import RolloutConfig
 
 from MaxText.globals import MAXTEXT_ASSETS_ROOT
-import pathwaysutils
-pathwaysutils.initialize()
 
 # for vLLM we can skip JAX precompilation with this flag, it makes startup faster
 os.environ["SKIP_JAX_PRECOMPILE"] = "1"
@@ -169,7 +167,7 @@ SEED = 42
 # ====== GRPO ======
 # === Generation during GRPO training ===
 MAX_PROMPT_LENGTH = 256
-TOTAL_GENERATION_STEPS = 2 # 768
+TOTAL_GENERATION_STEPS = 768
 # Important to keep a high-ish temperature for varied, diverse responses during
 # training.
 TEMPERATURE = 0.9
@@ -385,9 +383,9 @@ print("HBM usage before loading model:")
 # ! uv pip install -r ../../maxtext/requirements.txt
 
 
-def get_ref_maxtext_model(config):
+def get_ref_maxtext_model(config, devices):
 
-  model, mesh = model_creation_utils.create_nnx_model(config)
+  model, mesh = model_creation_utils.create_nnx_model(config, devices)
   with mesh:
     tunix_model = TunixMaxTextAdapter(base_model=model,)
 
@@ -430,7 +428,27 @@ config_ref = pyconfig.initialize(
     value_proj="offload",
 )
 
-llama3_1_8b, mesh = get_ref_maxtext_model(config_ref)
+devices = jax.devices()
+CHIPS_PER_VM = 4
+num_vms = len(devices) // CHIPS_PER_VM
+
+if num_vms >= 2:
+  print(f"{num_vms} VMs detected, separating trainer and sampler devices")
+  trainer_devices = devices[:len(devices) // 2]
+  sampler_devices = devices[len(devices) // 2 :]
+
+  print("Creating reference and rollout models/meshes from the sampler devices.")
+  llama3_1_8b, ref_mesh = get_ref_maxtext_model(config_ref, sampler_devices)
+  llama3_1_8b_rollout, rollout_mesh = get_ref_maxtext_model(config_ref, sampler_devices)
+
+  reference_mesh = ref_mesh
+  mesh = ref_mesh
+else:
+  llama3_1_8b, mesh = get_ref_maxtext_model(config_ref, devices)
+  actor_mesh = mesh
+  reference_mesh = mesh
+  rollout_mesh = mesh
+
 
 llama3_1_8b.config = model_config
 
@@ -488,7 +506,14 @@ config_policy = pyconfig.initialize(
     key_proj="offload",
     value_proj="offload",
 )
-llama3_1_8b_policy, mesh_policy = get_ref_maxtext_model(config_policy)
+if num_vms >= 2:
+  # For the policy model, override the config to create a 4-device mesh.
+  print("Creating policy model on trainer mesh")
+  llama3_1_8b_policy, policy_mesh = get_ref_maxtext_model(config_policy, trainer_devices)
+  actor_mesh = policy_mesh
+else:
+  llama3_1_8b_policy, mesh_policy = get_ref_maxtext_model(config_policy, devices)
+
 
 llama3_1_8b_policy.config = model_config
 
@@ -496,7 +521,6 @@ nnx.display(llama3_1_8b_policy)
 
 if DEBUG:
   print("Model initialized successfully")
-  print(f"Model mesh shape: {mesh_policy.shape}")
 
   # Sanity check that weights are loaded correctly
   _maxtext_state_flatten = nnx.state(llama3_1_8b_policy).flat_state()
@@ -912,9 +936,9 @@ if MAX_GRAD_NORM is not None:
 
 cluster_config = rl_cluster_lib.ClusterConfig(
     role_to_mesh={
-        rl_cluster_lib.Role.ACTOR: mesh,
-        rl_cluster_lib.Role.REFERENCE: mesh,
-        rl_cluster_lib.Role.ROLLOUT: mesh,
+        rl_cluster_lib.Role.ACTOR: actor_mesh,
+        rl_cluster_lib.Role.REFERENCE: reference_mesh,
+        rl_cluster_lib.Role.ROLLOUT: rollout_mesh,
     },
     rollout_engine="vllm",
     offload_to_cpu=False,
@@ -926,10 +950,10 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         # metrics logging
         metrics_logging_options=metrics_logging_options,
         # checkpoint saving
-        checkpoint_root_directory=CKPT_DIR,
-        checkpointing_options=checkpointing_options,
-        checkpoint_storage_use_ocdbt=False,
-        checkpoint_storage_use_zarr3=False,
+        # checkpoint_root_directory=CKPT_DIR,
+        # checkpointing_options=checkpointing_options,
+        # checkpoint_storage_use_ocdbt=False,
+        # checkpoint_storage_use_zarr3=False,
     ),
     rollout_config=base_rollout.RolloutConfig(
         max_tokens_to_generate=TOTAL_GENERATION_STEPS,
@@ -954,13 +978,14 @@ grpo_config = GrpoConfig(
 
 # RL cluster
 
-
-rl_cluster = rl_cluster_lib.RLCluster(
-    actor=llama3_1_8b_policy,
-    reference=llama3_1_8b,
-    tokenizer=model_tokenizer,
-    cluster_config=cluster_config,
-)
+with nn_partitioning.axis_rules(config_policy.logical_axis_rules):
+  rl_cluster = rl_cluster_lib.RLCluster(
+      actor=llama3_1_8b_policy,
+      reference=llama3_1_8b,
+      rollout=llama3_1_8b_rollout,
+      tokenizer=model_tokenizer,
+      cluster_config=cluster_config,
+  )
 
 # GRPO Trainer
 grpo_trainer = GrpoLearner(
