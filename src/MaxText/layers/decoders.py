@@ -648,7 +648,7 @@ class Decoder(nn.Module):
         deterministic,
         model_mode,
         image_embeddings,
-        bidirectional_mask
+        bidirectional_mask,
     )
 
     policy = self.get_remat_policy()
