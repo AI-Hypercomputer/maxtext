@@ -683,6 +683,7 @@ class Attention(nnx.Module):
           num_attention_heads=self.config.num_attention_heads_for_vit,
           rope_theta=self.config.rope_theta_for_vit,
           rngs=self.rngs,
+          fprop_dtype=self.dtype,
       )
     elif self.config.model_name.startswith("llama3.1") or rope_type.startswith("llama3.1"):
       rotary_embedding = LLaMARotaryEmbedding(

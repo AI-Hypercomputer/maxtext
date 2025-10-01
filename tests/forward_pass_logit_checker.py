@@ -234,6 +234,7 @@ def get_data(golden_data_point, config):
 
 def main(config, test_args):  # pylint: disable=W0621
   """Test the Whole Model of model_name"""
+  # jax.config.update('jax_enable_x64', True)
   if not test_args.run_hf_model:
     """Comparing maxtext/huggingface model with pre-loaded golden logitis"""
     max_logging.log("Initializing MaxText model")
@@ -249,9 +250,16 @@ def main(config, test_args):  # pylint: disable=W0621
       input_golden_data_path = os.path.join(MAXTEXT_TEST_ASSETS_ROOT, f"golden_data_{config.model_name}.jsonl")
     else:
       input_golden_data_path = test_args.golden_logits_path
-    max_logging.log("loading hf goldens from jsonl file")
-    with jsonlines.open(input_golden_data_path, "r") as f:
-      golden_data = list(f)
+    if test_args.golden_logits_path.endswith(".jsonl"):
+      max_logging.log("loading hf goldens from jsonl file")
+      import jsonlines
+      with jsonlines.open(input_golden_data_path, "r") as f:
+        golden_data = list(f)
+    elif test_args.golden_logits_path.endswith(".pickle") or test_args.golden_logits_path.endswith(".pkl"):
+      max_logging.log("loading hf goldens from pickle file")
+      import pickle
+      with open(input_golden_data_path, "rb") as f:
+        golden_data = pickle.load(f)
     max_logging.log(f"loaded {len(golden_data)} golden data points")
     all_data_to_save = []
     for golden_data_index, golden_data_point in enumerate(golden_data):
@@ -311,15 +319,18 @@ def main(config, test_args):  # pylint: disable=W0621
       )
       max_logging.log(msg)
 
-      model_probabilities = jax.nn.softmax(train_logits_slice, axis=-1)
-      golden_probabilities = jax.nn.softmax(golden_logits_slice, axis=-1)
+      epsilon = 1e-8
+      model_probabilities = jnp.clip(jax.nn.softmax(train_logits_slice, axis=-1), a_min=epsilon)
+      golden_probabilities = jnp.clip(jax.nn.softmax(golden_logits_slice, axis=-1), a_min=epsilon)
 
       max_logging.log("\n[probability: token 1]")
       max_logging.log(f"{golden_probabilities[1]=}")
       max_logging.log(f"{model_probabilities[1]=}")
 
       kl_div = jax.numpy.sum(jax.scipy.special.kl_div(golden_probabilities, model_probabilities), axis=-1)
-      max_logging.log(f"\n[KL divergence]\nmax KL divergence = {jax.numpy.max(kl_div)}\nKL divergence = {kl_div}")
+      max_kl_div_val = jax.numpy.max(kl_div)
+      max_kl_div_idx = jax.numpy.argmax(kl_div)
+      max_logging.log(f"KL divergence = {kl_div}, max KL divergence = {max_kl_div_val} at index {max_kl_div_idx}, the corresponding token id is {ids[0, max_kl_div_idx]}")
 
       if jax.process_index() == 0 and test_args.output_logits_path:
         data_to_save = {

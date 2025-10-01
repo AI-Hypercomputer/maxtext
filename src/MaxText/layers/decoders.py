@@ -646,7 +646,7 @@ class Decoder(nn.Module):
   ):
     cfg = self.config
     mesh = self.mesh
-    assert decoder_input_tokens.ndim == 2  # [batch, len]
+    assert decoder_input_tokens.ndim == 2, f"expected decoder_input_tokens to have 2 dimensions, got {decoder_input_tokens.ndim}"  # [batch, len]
 
     # [batch, length] -> [batch, length, emb_dim]
     y = self._apply_embedding(

@@ -64,7 +64,7 @@ SIMULATED_CPU_DEVICES_COUNT = 16
 # NOTE: it's incredibly silly but you can't directly cast from
 # a torch tensor of type bfloat16 to a numpy array of type bfloat16
 # so we have to cast to float32 first
-CAST_DTYPE = ml_dtypes.bfloat16
+CAST_DTYPE = np.float32  # using float32
 
 
 def _pytorch_to_maxtext_mapping(layer_idx: int = -1, expert_idx: int = -1, model_size="") -> dict:
