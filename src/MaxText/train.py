@@ -130,7 +130,7 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
         decoder_target_tokens=data["targets"],
         decoder_target_mask=data["targets_segmentation"],
     )
-    
+
     total_loss = compute_loss_linen(intermediate_outputs, logits, data, config, model, params, is_train)
   else:
     # Flax NNX model

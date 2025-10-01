@@ -12,8 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
-import sys
+"""
+This recipe demonstrates how to launch a Pathways workload in headless mode.
+
+In headless mode, the XPK workload starts the Pathways server and proxy
+components but does not run a user command. This is useful for setting up a
+persistent training environment that can be connected to later by a separate
+runner process.
+"""
 
 import benchmarks.recipes.args_helper as helper
 import maxtext_xpk_runner as mxr
@@ -22,9 +28,7 @@ from recipes.user_configs import cluster_config, xpk_path, pathways_config, base
 
 def main() -> int:
   # Handle command line arguments using args_helper
-  should_continue = helper.handle_cmd_args(
-      cluster_config, helper.DELETE, xpk_path=xpk_path
-  )
+  should_continue = helper.handle_cmd_args(cluster_config, helper.DELETE, xpk_path=xpk_path)
 
   if not should_continue:
     return 0
@@ -56,6 +60,8 @@ def main() -> int:
   return_code = mxr.run_command_with_updates(command, name)
   if return_code != 0:
     print(f"Unable to run xpk workload: {name}")
+
+  return return_code
 
 
 if __name__ == "__main__":
