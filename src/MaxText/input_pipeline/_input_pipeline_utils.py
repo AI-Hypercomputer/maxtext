@@ -515,8 +515,11 @@ class PadOrTrimToMaxLength(grain.MapTransform):
           raise ValueError("model_name must be provided when padding images")
         elif isinstance(element["images"], list):
           element["images"] = self._pad_image(np.asarray(element["images"]))
-        else:
+        elif element["images"].ndim == 3:
           element["images"] = np.asarray(element["images"])[None, ...]
+        else:
+          # Do not add extra image dimension for image tiling case
+          element["images"] = np.asarray(element["images"])
 
       elif key == "image_masks" and element["image_masks"] is not None:
         if isinstance(element["image_masks"], list) and self.model_name is None:
@@ -524,7 +527,7 @@ class PadOrTrimToMaxLength(grain.MapTransform):
         elif isinstance(element["image_masks"], list):
           element["image_masks"] = self._pad_image_mask(np.asarray(element["image_masks"]))
         else:
-          element["image_masks"] = np.asarray(element["image_masks"])[None, ...]
+          element["image_masks"] = np.asarray(element["image_masks"])
 
       elif "true_length" not in key:
         element[key] = self._pad_text(element[key], self.max_length, self.pad_id)

@@ -758,7 +758,7 @@ class Llama4VisionModel(nn.Module):
     """Forward pass of the Llama4 vision model.
 
     Args:
-      inputs: Input tensor of shape [batch_size, num_images, num_tiles, num_channels_for_vit, tile_size_for_vit, tile_size_for_vit]
+      inputs: Input tensor of shape [batch_size * num_images, num_tiles, num_channels_for_vit, tile_size_for_vit, tile_size_for_vit]
       deterministic: Whether to use deterministic mode (disables dropout)
 
     Returns:
@@ -767,9 +767,9 @@ class Llama4VisionModel(nn.Module):
     cfg = self.config
     mesh = self.mesh
 
-    # Reshape pixel values to combine batch, num_images, and num_tiles dimensions
-    b, n, t, c, h, w = pixel_values.shape
-    pixel_values = jnp.reshape(pixel_values, [b * n * t, c, h, w])
+    # Reshape pixel values to combine batch and num_tiles dimensions
+    b, t, c, h, w = pixel_values.shape
+    pixel_values = jnp.reshape(pixel_values, [b * t, c, h, w])
 
     # Unfold convolution to extract patches
     hidden_states = Llama4UnfoldConvolution(config=cfg)(pixel_values)
@@ -792,6 +792,6 @@ class Llama4VisionModel(nn.Module):
 
     # Reshape hidden states
     _, patch_num, patch_dim = hidden_states.shape
-    hidden_states = jnp.reshape(hidden_states, [b * n, t, patch_num, patch_dim])
+    hidden_states = jnp.reshape(hidden_states, [b, t, patch_num, patch_dim])
 
     return hidden_states

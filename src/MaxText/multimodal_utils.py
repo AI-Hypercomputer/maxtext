@@ -517,8 +517,7 @@ def get_dummy_image_shape_for_init(model_name, batch_size=1, num_image_per_seque
     )
   elif model_name.startswith("llama4"):
     image_shape = (
-        batch_size,
-        num_image_per_sequence,
+        batch_size * num_image_per_sequence,
         num_tiles_per_image,
         NUM_IMAGE_CHANNELS,
         LLAMA4_TILE_SIZE,
@@ -830,7 +829,7 @@ def merge_mm_embeddings(
       vision embeddings.
     mask: [seq_len] boolean or integer array where non-zero positions
       indicate where vision embeddings should be placed.
-    image_masks: (Optional) [num_images, num_tiles] integer
+    image_masks: (Optional) [num_images * num_tiles, ] integer
       array indicating which tiles are valid (1) vs. padded (0). If
       None, valid vision embeddings are detected by checking for
       non-zero vectors.
@@ -838,7 +837,9 @@ def merge_mm_embeddings(
   Returns:
     A [seq_len, d] array of merged embeddings.
   """
-  return jax.vmap(_merge_mm_embeddings_inner, in_axes=(0, 0, 0, 0))(text_embeddings, vision_embeddings, mask, image_masks)
+  return jax.vmap(_merge_mm_embeddings_inner, in_axes=(0, 0, 0, None if image_masks is None else 0))(
+      text_embeddings, vision_embeddings, mask, image_masks
+  )
 
 
 def _merge_mm_embeddings_inner(text_embeddings, vision_embeddings, mask, image_mask):
@@ -850,19 +851,12 @@ def _merge_mm_embeddings_inner(text_embeddings, vision_embeddings, mask, image_m
   vision_embeddings = jnp.reshape(vision_embeddings, (num_images * num_toks_per_image, d))
 
   if image_mask is not None:
-    _, num_tiles = image_mask.shape
-
     # Expand image_masks to match the token-level granularity
-    # (num_images, num_tiles) -> (num_images, num_toks_per_image
-    num_tokens_per_tile = num_toks_per_image // num_tiles
-    token_mask_2d = jnp.repeat(image_mask, repeats=num_tokens_per_tile, axis=1)
-
-    # Flatten the token-level mask to match vision_embeddings
-    # (num_images, num_toks_per_image) -> (num_images * num_toks_per_image,)
-    token_mask_flat = jnp.reshape(token_mask_2d, -1)
+    # (num_image * num_tiles,) -> (num_image * num_tiles * num_toks_per_image,)
+    token_mask = jnp.repeat(image_mask, repeats=num_toks_per_image, axis=0)
 
     # Create indices to sort by the mask (True values first)
-    sort_indices = jnp.argsort(-token_mask_flat)
+    sort_indices = jnp.argsort(-token_mask)
 
     # Shuffle the embeddings. Shape is unchanged: [num_images * num_toks_per_image, d]
     vision_embeddings = vision_embeddings[sort_indices]

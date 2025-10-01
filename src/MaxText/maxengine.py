@@ -327,17 +327,18 @@ class MaxEngine(engine_api.Engine):
 
     @jax.jit
     def model_apply(_p, _rng):
+      image_shape = multimodal_utils.get_dummy_image_shape_for_init(
+        self.config.model_name, batch_size=self.config.micro_batch_size_to_train_on
+      )
       return self.model.apply(
           _p | {"aqt": {}},
           jnp.ones((1, self.config.max_prefill_predict_length), dtype=jnp.int32),
           jnp.ones((1, self.config.max_prefill_predict_length), dtype=jnp.int32),
-          encoder_images=jnp.ones(
-              multimodal_utils.get_dummy_image_shape_for_init(
-                  self.config.model_name, batch_size=self.config.micro_batch_size_to_train_on
-              ),
-              dtype=jnp.float32,
-          )
+          encoder_images=jnp.ones(image_shape, dtype=jnp.float32)
           if self.config.use_multimodal
+          else None,
+          encoder_image_masks=jnp.ones(image_shape[:2], dtype=jnp.int32)
+          if self.config.use_multimodal and "llama4" in self.config.model_name
           else None,
           decoder_segment_ids=jnp.zeros((1, self.config.max_prefill_predict_length), dtype=jnp.int32),
           enable_dropout=False,

@@ -196,34 +196,35 @@ class TestLlama4PostProcessing(unittest.TestCase):
     self.assertEqual(post_processed_tokens.shape[0], dummy_tokens.shape[0] + image_offsets)
   
   def test_merge_mm_embeddings(self):
-    # Setup: batch_size=1, seq_len=8, d=4
+    # Setup dummy data
     batch_size = 1
-    seq_len = 8
+    seq_len = 64
     d = 4
     num_images = 2
-    num_toks_per_image = 2
+    num_tiles = 4
+    num_toks_per_image = 8
 
-    # text_embeddings: [batch_size, seq_len, d]
+    # text_embeddings: (batch_size, seq_len, d)
     text_embeddings = np.arange(batch_size * seq_len * d).reshape(batch_size, seq_len, d)
 
-    # vision_embeddings: [batch_size, num_images, num_toks_per_image, d]
-    vision_embeddings = np.arange(batch_size * num_images * num_toks_per_image * d).reshape(batch_size, num_images, num_toks_per_image, d) + 1000
+    # vision_embeddings: (batch_size, num_images, num_toks_per_image, d)
+    vision_embeddings = np.arange(batch_size * num_images * num_tiles * num_toks_per_image * d).reshape(batch_size, num_images * num_tiles, num_toks_per_image, d) + 1000
 
-    # mask: [batch_size, seq_len] - place vision embeddings at positions 2, 5, 6
+    # mask: (batch_size, seq_len)
     mask = np.zeros((batch_size, seq_len), dtype=np.int32)
-    mask[:, 2] = 1  # first image
-    mask[:, 5:7] = 1  # second image
+    mask[:, 2:10] = 1  # first image
+    mask[:, 20:36] = 1  # second image
 
-    # image_masks: [batch_size, num_images, num_toks_per_image] - only some valid (only first token of each image)
-    image_masks = np.zeros((batch_size, num_images, num_toks_per_image), dtype=np.int32)
-    image_masks[0, 0, 0] = 1  # Only the first token of the first image is valid
-    image_masks[0, 1, 0] = 1  # Both tokens of the second image are valid
-    image_masks[0, 1, 1] = 1 
+    # image_masks: (batch_size, num_images * num_tiles)
+    image_masks = np.zeros((batch_size, num_images * num_tiles), dtype=np.int32)
+    image_masks[0, 0] = 1  # Only the first tile of the first image is valid
+    image_masks[0, 4] = 1  # First two tiles of the second image are valid
+    image_masks[0, 5] = 1 
 
     # Call the function with image_masks (should only insert valid vision embeddings)
     merged = multimodal_utils.merge_mm_embeddings(text_embeddings, vision_embeddings, mask, image_masks)
 
-    # Image mask is null - all vision embeddings are valid
+    # Image mask is null (all vision embeddings including padded tiles are valid)
     merged_null = multimodal_utils.merge_mm_embeddings(text_embeddings, vision_embeddings, mask, None)
 
     # The results should be different
@@ -231,22 +232,21 @@ class TestLlama4PostProcessing(unittest.TestCase):
       np.testing.assert_array_equal(merged, merged_null)
 
     # For merged: only valid vision embeddings should be inserted, others remain as text_embeddings
-    # The valid vision embeddings (after mask sorting) are vision_embeddings[0,0,0] and vision_embeddings[0,1,0]
-    self.assertTrue(np.all(merged[0,2] == vision_embeddings[0,0,0]))
-    self.assertTrue(np.all(merged[0,5] == vision_embeddings[0,1,0]))
-    self.assertTrue(np.all(merged[0,6] == vision_embeddings[0,1,1]))
+    np.testing.assert_array_equal(merged[0, 2:10], vision_embeddings[0, 0, :])
+    np.testing.assert_array_equal(merged[0, 20:28], vision_embeddings[0, 4, :])
+    np.testing.assert_array_equal(merged[0, 28:36], vision_embeddings[0, 5, :])
     
     # The other masked positions should not match the original vision_embeddings (since they are not valid)
-    self.assertFalse(np.all(merged[0,3] == vision_embeddings[0,0,1]))
+    self.assertFalse(np.all(merged[0, 10] == vision_embeddings[0, 1, 1]))
 
-    # For merged_null all vision embeddings should be inserted in order (last embedding will be trucated)
-    np.testing.assert_array_equal(merged_null[0,2], vision_embeddings[0,0,0])
-    np.testing.assert_array_equal(merged_null[0,5], vision_embeddings[0,0,1])
-    np.testing.assert_array_equal(merged_null[0,6], vision_embeddings[0,1,0])
+    # For merged_null all vision embeddings should be inserted in order
+    np.testing.assert_array_equal(merged_null[0, 2:10], vision_embeddings[0, 0, :])
+    np.testing.assert_array_equal(merged_null[0, 20:28], vision_embeddings[0, 1, :])
+    np.testing.assert_array_equal(merged_null[0, 28:36], vision_embeddings[0, 2, :])
     
     # The first position should always be preserved
-    np.testing.assert_array_equal(merged[0,0], text_embeddings[0,0])
-    np.testing.assert_array_equal(merged_null[0,0], text_embeddings[0,0])
+    np.testing.assert_array_equal(merged[0, 0], text_embeddings[0, 0])
+    np.testing.assert_array_equal(merged_null[0, 0], text_embeddings[0, 0])
 
 
 if __name__ == "__main__":
