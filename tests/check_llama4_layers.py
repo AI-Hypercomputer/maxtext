@@ -606,6 +606,9 @@ class Llama4VisionAttentionTest(unittest.TestCase):
       "enable_checkpointing": False,
       "model_name": "llama4-17b-16e",
       "scan_layers": False,
+      "dtype_mm": "float32",
+      "float32_qk_product": True,
+      "float32_logits": True,
   }
 
   def setUp(self):
@@ -653,11 +656,14 @@ class Llama4VisionAttentionTest(unittest.TestCase):
         attention_kernel="dot_product",  # TODO aireenmei: support flash attention
         inputs_q_shape=lnx.shape,
         inputs_kv_shape=lnx.shape,
+        float32_qk_product=self.config.float32_qk_product,
+        float32_logits=self.config.float32_logits,
+        dtype=self.config.dtype_mm,
         mesh=self.mesh,
         dropout_rate=0,
         name="self_attention_vision",
         attention_type=AttentionType.FULL,
-        is_nope_layer=False,
+        is_nope_layer=True, #False,
         use_bias_in_projections=True,
         is_vision=True,
         use_qk_norm=False,
@@ -875,7 +881,7 @@ class Llama4VisionEncoderTest(unittest.TestCase):
       "enable_checkpointing": False,
       "model_name": "llama4-17b-16e",
       "scan_layers": False,
-      "num_hidden_layers_for_vit": 31,
+      "num_hidden_layers_for_vit": 34,
       "dtype": "float32",
       "matmul_precision": "float32",
       "float32_qk_product": True,
@@ -915,8 +921,19 @@ class Llama4VisionEncoderTest(unittest.TestCase):
 
     # Create test input using config dimensions
     batch_size = 4
-    inputs = jnp.ones((batch_size, self.seq_len_for_vit, self.cfg.hidden_size_for_vit), dtype=jnp.float32)
-    inputs /= 10
+    # Generate random numbers in (-1, 1)
+    key = jax.random.PRNGKey(0)
+    inputs = jax.random.uniform(
+      key,
+      (batch_size, self.seq_len_for_vit, self.cfg.hidden_size_for_vit),
+      minval=-0.1,
+      maxval=0.1,
+      dtype=jnp.float32,
+    )
+    #inputs = np.load("/home/aireenmei_google_com/golden/llama4_pre_vision_encoder_image_only_randomw_mx.npy")
+    print(f"Input shape: {inputs.shape}")
+    print(f"Input mean: {np.mean(inputs)}")
+    print(f"Input: {inputs}")
 
     # Initialize JAX parameters
     params = jax_model.init(self.rng, inputs, deterministic=True)
@@ -939,9 +956,18 @@ class Llama4VisionEncoderTest(unittest.TestCase):
 
     # Forward pass through JAX model
     jax_outputs = jax_model.apply(params, inputs, deterministic=True)
-
+    print(f"pt mean: {torch.mean(pt_outputs)}")
+    print(f"{pt_outputs=}")
+    print(f"jax mean: {np.mean(jax_outputs)}")
+    print(f"{jax_outputs=}")  
     # Compare outputs
-    np.testing.assert_allclose(jax_outputs, to_jax(pt_outputs), rtol=0.01, atol=0.05)
+    diff = np.abs(jax_outputs - to_jax(pt_outputs))
+    actual_atol = np.max(diff)
+    eps = 1e-8
+    actual_rtol = np.max(diff / (np.maximum(np.abs(to_jax(pt_outputs)), eps)))
+    print(f"Actual atol: {actual_atol}")
+    print(f"Actual rtol: {actual_rtol}")
+    np.testing.assert_allclose(jax_outputs, to_jax(pt_outputs), rtol=0.05, atol=1e-3)
 
 
 if __name__ == "__main__":

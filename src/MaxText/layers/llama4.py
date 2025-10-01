@@ -17,6 +17,7 @@
 
 import math
 
+import jax
 import jax.numpy as jnp
 from jax import lax
 from jax.ad_checkpoint import checkpoint_name
@@ -88,6 +89,8 @@ class Llama4UnfoldConvolution(nn.Module):
         window_strides=[cfg.patch_size_for_vit, cfg.patch_size_for_vit],
         padding="VALID",
         dimension_numbers=("NCHW", "HWIO", "NCHW"),
+        precision=lax.Precision(cfg.matmul_precision),
+        preferred_element_type=cfg.dtype_mm,
     )
 
     # reshape patches to [batch_size, num_patches, num_channels * patch_size * patch_size]
@@ -443,7 +446,7 @@ class Llama4DecoderLayer(nn.Module):
         slot=slot,
         page_state=page_state,
         previous_chunk=previous_chunk,
-        bidirectional_mask=bidirectional_mask,
+        #bidirectional_mask=bidirectional_mask,
     )
 
     attention_lnx = nn.with_logical_constraint(
@@ -582,7 +585,7 @@ class Llama4ScannableBlock(nn.Module):
           previous_chunk=previous_chunk,
           page_state=page_state,
           slot=slot,
-          bidirectional_mask=bidirectional_mask,
+          #bidirectional_mask=bidirectional_mask,
       )
       if cfg.scan_layers:
         y = y[0]
@@ -617,7 +620,7 @@ class Llama4VisionEncoderLayer(nn.Module):
     residual = hidden_states
 
     # Input layer norm
-    hidden_states = nn.LayerNorm(name="input_layer_norm", epsilon=1e-5)(hidden_states)
+    hidden_states = nn.LayerNorm(name="input_layer_norm", epsilon=self.config.normalization_layer_epsilon)(hidden_states)
 
     # Self attention
     attention_layer = attentions.attention_as_linen(
@@ -631,6 +634,7 @@ class Llama4VisionEncoderLayer(nn.Module):
         inputs_kv_shape=hidden_states.shape,
         float32_qk_product=self.config.float32_qk_product,
         float32_logits=self.config.float32_logits,
+        dtype=self.config.dtype_mm,
         mesh=self.mesh,
         dropout_rate=0,
         name="self_attention_vision",
@@ -710,6 +714,7 @@ class Llama4VisionEncoder(nn.Module):
           hidden_states=hidden_states,
           deterministic=deterministic,
       )
+      jax.debug.print("After Layer {layer_idx}, mean: {x}", layer_idx=layer_idx, x=jnp.mean(hidden_states[0, ...]))
 
     return hidden_states
 
@@ -765,26 +770,82 @@ class Llama4VisionModel(nn.Module):
 
     b, t, c, h, w = pixel_values.shape
     pixel_values = jnp.reshape(pixel_values, [b * t, c, h, w])
-
+    # import numpy as np
+    # def calculate_diff(x, y):
+    #     diff = np.array(x[0, ...]) - np.array(y[0, ...])
+    #     atol = np.max(np.abs(diff))
+    #     rtol = np.max(np.abs(diff / np.clip(y[0, ...], a_min=1e-8, a_max=None)))
+    #     mean_abs_diff = np.mean(np.abs(diff))
+    #     rmse = np.sqrt(np.mean(diff ** 2))
+    #     print(f"atol: {atol}")
+    #     print(f"rtol: {rtol}")
+    #     print(f"mean absolute difference: {mean_abs_diff}")
+    #     print(f"RMSE: {rmse}")
     # Unfold convolution to extract patches
-    hidden_states = Llama4UnfoldConvolution(config=cfg)(pixel_values)
 
+    hidden_states = Llama4UnfoldConvolution(config=cfg)(pixel_values)
+    # if not isinstance(hidden_states, jax.core.Tracer):
+      # jax.debug.print("After UnfoldConv mean: {x}", x=jnp.mean(hidden_states[0, ...]))
+      # jax.debug.print("After UnfoldConv: {x}", x=hidden_states[0, ...])
+      # jax.debug.print("maxtext hidden_states shape: {x}", x=hidden_states.shape)
+      # hf_hidden_states = np.load("/home/aireenmei_google_com/hidden_states_hf/1.npy")
+      # jax.debug.print("hf_hidden_states shape: {x}", x=hf_hidden_states.shape)
+      # calculate_diff(hidden_states, hf_hidden_states)
+      # print("Using hf_hidden_states")
+      # hidden_states = hf_hidden_states
     # Add class embedding to the beginning of the sequence
     class_embedding_expanded = jnp.expand_dims(jnp.expand_dims(self.class_embedding, axis=0), axis=0)
     class_embedding = jnp.broadcast_to(class_embedding_expanded, (hidden_states.shape[0], 1, cfg.hidden_size_for_vit))
-    hidden_states = jnp.concatenate([class_embedding, hidden_states], axis=1)
+    # jax.debug.print("class_embedding: {x}", x=class_embedding[0, ...])
+    hidden_states = jnp.concatenate([hidden_states, class_embedding], axis=1)
+    #if not isinstance(hidden_states, jax.core.Tracer):
+      #jax.debug.print("After adding class token mean: {x}", x=jnp.mean(hidden_states[0, ...]))
+      #jax.debug.print("After adding class token: {x}", x=hidden_states[0, ...])
 
     # Add positional embedding
     hidden_states += self.positional_embedding_vlm
-
+    # if not isinstance(hidden_states, jax.core.Tracer):
+    #   jax.debug.print("After adding positional embedding mean: {x}", x=jnp.mean(hidden_states[0, ...]))
+    #   jax.debug.print("After adding positional embedding: {x}", x=hidden_states[0, ...])
+    #   hf_hidden_states = np.load("/home/aireenmei_google_com/hidden_states_hf/2.npy")
+    #   calculate_diff(hidden_states, hf_hidden_states) 
     # Transformation layers
-    hidden_states = nn.LayerNorm(name="layernorm_pre")(hidden_states)
+    hidden_states = nn.LayerNorm(name="layernorm_pre", epsilon=cfg.normalization_layer_epsilon)(hidden_states)
+
+    # if not isinstance(hidden_states, jax.core.Tracer):
+    #   import numpy as np
+    #   path_to_save = f"/home/aireenmei_google_com/golden/llama4_pre_vision_encoder_image_only_randomw_mx.npy"
+    #   hidden_states_np = jax.device_get(hidden_states)
+    #   np.save(path_to_save, hidden_states_np)
+    #   jax.debug.print("Saving hidden_states to {path}", path=path_to_save)
+      
+    #   jax.debug.print("After layernorm_pre mean: {x}", x=jnp.mean(hidden_states[0, ...]))
+    #   jax.debug.print("After layernorm_pre: {x}", x=hidden_states[0, ...])
+    #   hf_hidden_states = np.load("/home/aireenmei_google_com/hidden_states_hf/3.npy")
+    #   calculate_diff(hidden_states, hf_hidden_states) 
+      
     hidden_states = Llama4VisionEncoder(config=cfg, mesh=mesh)(hidden_states)
-    hidden_states = nn.LayerNorm(name="layernorm_post")(hidden_states)
+    # if not isinstance(hidden_states, jax.core.Tracer):
+    #   jax.debug.print("After VisionEncoder mean: {x}", x=jnp.mean(hidden_states[0, ...]))
+    #   jax.debug.print("After VisionEncoder: {x}", x=hidden_states[0, ...])
+    #   hf_hidden_states = np.load("/home/aireenmei_google_com/hidden_states_hf/4.npy")
+    #   calculate_diff(hidden_states, hf_hidden_states)
+
+    hidden_states = nn.LayerNorm(name="layernorm_post", epsilon=cfg.normalization_layer_epsilon)(hidden_states)
+    # if not isinstance(hidden_states, jax.core.Tracer):
+    #   jax.debug.print("After layernorm_post mean: {x}", x=jnp.mean(hidden_states[0, ...]))
+    #   jax.debug.print("After layernorm_post: {x}", x=hidden_states[0, ...])
+    #   hf_hidden_states = np.load("/home/aireenmei_google_com/hidden_states_hf/5.npy")
+    #   calculate_diff(hidden_states, hf_hidden_states)
+    
     hidden_states = hidden_states[:, :-1, :]
 
     hidden_states = Llama4VisionPixelShuffleMLP(config=cfg)(hidden_states)
-
+    # if not isinstance(hidden_states, jax.core.Tracer):
+    #   jax.debug.print("After PixelShuffleMLP mean: {x}", x=jnp.mean(hidden_states[0, ...]))
+    #   jax.debug.print("After PixelShuffleMLP: {x}", x=hidden_states[0, ...])
+    #   hf_hidden_states = np.load("/home/aireenmei_google_com/hidden_states_hf/6.npy")
+    #   calculate_diff(hidden_states, hf_hidden_states)
     # Reshape hidden states
     _, patch_num, patch_dim = hidden_states.shape
     hidden_states = jnp.reshape(hidden_states, [b, t, patch_num, patch_dim])
