@@ -503,7 +503,15 @@ def create_device_mesh(config, devices=None):
   multi_slice_env = num_slices > 1
 
   dcn_parallelism = [
-      config.dcn_diloco_parallelism,
+  ]
+  ici_parallelism = [
+  ]
+
+  if config.diloco_enabled:
+    dcn_parallelism.append(config.dcn_diloco_parallelism)
+    ici_parallelism.append(config.ici_diloco_parallelism)
+
+  dcn_parallelism.extend([
       config.dcn_data_parallelism,
       config.dcn_pipeline_parallelism,
       config.dcn_fsdp_parallelism,
@@ -512,9 +520,8 @@ def create_device_mesh(config, devices=None):
       config.dcn_tensor_parallelism,
       config.dcn_expert_parallelism,
       config.dcn_autoregressive_parallelism,
-  ]
-  ici_parallelism = [
-      config.ici_diloco_parallelism,
+  ])
+  ici_parallelism.extend([
       config.ici_data_parallelism,
       config.ici_pipeline_parallelism,
       config.ici_fsdp_parallelism,
@@ -523,7 +530,7 @@ def create_device_mesh(config, devices=None):
       config.ici_tensor_parallelism,
       config.ici_expert_parallelism,
       config.ici_autoregressive_parallelism,
-  ]
+  ])
 
   # Find possible unspecified parallelisms
   ici_parallelism = fill_unspecified_mesh_axes(config.ici_parallelism.copy(), num_devices_per_slice, "ICI")

@@ -769,8 +769,14 @@ class _HyperParameters:
 
 
 def create_parallelisms_list(raw_keys):
-  ici_parallelism = [
-      raw_keys["ici_diloco_parallelism"],
+  ici_parallelism = []
+  dcn_parallelism = []
+
+  if raw_keys["diloco_enabled"] :
+    ici_parallelism.append(raw_keys["ici_diloco_parallelism"])
+    dcn_parallelism.append(raw_keys["dcn_diloco_parallelism"])
+  
+  ici_parallelism.extend([
       raw_keys["ici_data_parallelism"],
       raw_keys["ici_pipeline_parallelism"],
       raw_keys["ici_fsdp_parallelism"],
@@ -783,9 +789,8 @@ def create_parallelisms_list(raw_keys):
       raw_keys["ici_tensor_sequence_parallelism"],
       raw_keys["ici_expert_parallelism"],
       raw_keys["ici_autoregressive_parallelism"],
-  ]
-  dcn_parallelism = [
-      raw_keys["dcn_diloco_parallelism"],
+  ])
+  dcn_parallelism.extend([
       raw_keys["dcn_data_parallelism"],
       raw_keys["dcn_pipeline_parallelism"],
       raw_keys["dcn_fsdp_parallelism"],
@@ -798,10 +803,13 @@ def create_parallelisms_list(raw_keys):
       raw_keys["dcn_tensor_sequence_parallelism"],
       raw_keys["dcn_expert_parallelism"],
       raw_keys["dcn_autoregressive_parallelism"],
-  ]
+  ])
   raw_keys["ici_parallelism"] = ici_parallelism
   raw_keys["dcn_parallelism"] = dcn_parallelism
-  raw_keys["num_diloco_replicas"] = int(raw_keys["ici_diloco_parallelism"] * raw_keys["dcn_diloco_parallelism"])
+  if raw_keys["diloco_enabled"] :
+    raw_keys["num_diloco_replicas"] = int(raw_keys["ici_diloco_parallelism"] * raw_keys["dcn_diloco_parallelism"])
+  else:
+    raw_keys["num_diloco_replicas"] = 1
   return raw_keys
 
 

@@ -370,12 +370,21 @@ def train_loop(config, recorder, state=None):
       state = _merge_dpo_state(state, reference_params)
     state_mesh_shardings = _merge_dpo_state(state_mesh_shardings, state_mesh_shardings.params["params"])
 
-  p_train_step, p_eval_step = train_utils.jit_train_and_eval_step(
-      config, model, mesh, state, state_mesh_shardings, train_step, eval_step, eval_data_iterator
-  )
+  if config.diloco_enabled:
+    state = diloco.build_diloco_state(config, lambda: state)
+    diloco_train_step = diloco.build_diloco_train_step(config, train_step)
+    p_train_step, p_eval_step = train_utils.jit_train_and_eval_step(
+        config, model, mesh, state, state_mesh_shardings, diloco_train_step, eval_step, eval_data_iterator
+    )
+  else:
+    p_train_step, p_eval_step = train_utils.jit_train_and_eval_step(
+        config, model, mesh, state, state_mesh_shardings, train_step, eval_step, eval_data_iterator
+    )
 
   with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
     shaped_batch = maxtext_utils.get_shaped_batch(config)
+    if config.diloco_enabled:
+      shaped_batch = diloco.reshape_first_axis_with_diloco(config.num_diloco_replicas, shaped_batch)
     compiled = p_train_step.lower(state, shaped_batch, init_rng).compile()
     compiled_stats = compiled.memory_analysis()
     max_utils.print_compiled_memory_stats(compiled_stats)
@@ -386,7 +395,10 @@ def train_loop(config, recorder, state=None):
   metric_logger = MetricLogger(config=config, learning_rate_schedule=learning_rate_schedule)
 
   # Write train config params, num model params, and XLA flags to tensorboard
-  metric_logger.write_setup_info_to_tensorboard(state.params)
+  if config.diloco_enabled:
+    metric_logger.write_setup_info_to_tensorboard(state.outer_params)
+  else:
+    metric_logger.write_setup_info_to_tensorboard(state.params)
 
   try:
     last_step_completion = datetime.datetime.now()
@@ -395,6 +407,8 @@ def train_loop(config, recorder, state=None):
 
       with jax.profiler.StepTraceAnnotation("train", step_num=step):
         example_batch = data_loader.load_next_batch()
+        if config.diloco_enabled:
+          example_batch = diloco.reshape_first_axis_with_diloco(config.num_diloco_replicas, example_batch)
         # pylint: disable=not-callable
         nextrng = jax.jit(jax.random.fold_in)(init_rng, step)
         with maybe_record_goodput(recorder, GoodputEvent.STEP, step):
@@ -405,7 +419,10 @@ def train_loop(config, recorder, state=None):
       last_step_completion = datetime.datetime.now()
 
       state_to_save = state if not config.use_dpo else _split_dpo_state(state)[0]
-      checkpointing.maybe_save_checkpoint(checkpoint_manager, state_to_save, config, data_iterator, step)
+      if config.diloco_enabled:
+        checkpointing.maybe_save_checkpoint(checkpoint_manager, state_to_save.inner_state, config, data_iterator, step)
+      else:
+        checkpointing.maybe_save_checkpoint(checkpoint_manager, state_to_save, config, data_iterator, step)
 
       if config.dump_hlo and step == (config.dump_step if config.dump_step >= 0 else start_step):
         jax.block_until_ready(state)  # Ensure compilation has finished.
@@ -447,7 +464,10 @@ def train_loop(config, recorder, state=None):
 
     if config.save_checkpoint_on_completion:
       state_to_save = state if not config.use_dpo else _split_dpo_state(state)[0]
-      checkpointing.maybe_save_checkpoint(checkpoint_manager, state_to_save, config, data_iterator)
+      if config.diloco_enabled:
+        checkpointing.maybe_save_checkpoint(checkpoint_manager, state_to_save.inner_state, config, data_iterator)
+      else:
+        checkpointing.maybe_save_checkpoint(checkpoint_manager, state_to_save, config, data_iterator)
   except exceptions.StopTraining as e:
     max_logging.log(f"Training stopped: {str(e)}")
   finally:

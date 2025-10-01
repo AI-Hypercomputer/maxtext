@@ -51,7 +51,7 @@ OVERWRITE_WITH_GRADIENT = "_overwrite_with_gradient"
 def get_input_data_sharding(config, mesh):
   """Get the input data sharding for the model"""
   data_sharding = nn.logical_to_mesh_sharding(P(*config.input_data_sharding_logical_axes), mesh, config.logical_axis_rules)
-  if config.num_diloco_replicas > 1:
+  if config.diloco_enabled and config.num_diloco_replicas > 1:
     def _transform_pspec(pspec):
       # Pull the DiLoCo axis out into its own, to shard the first axis of the the arrays.
       return P("diloco", config.data_sharding[0][1:])
