@@ -40,7 +40,7 @@ jobs:
     if: |- 
       (
         github.event_name == 'pull_request' &&
-        github.event.pull_request.head.repo.fork == false &&
+        contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.pull_request.author_association) &&
         github.event.action == 'labeled' &&
         github.event.label.name == 'gemini-review'
       )
