@@ -35,7 +35,6 @@ from MaxText.globals import MAXTEXT_REPO_ROOT
 
 @pytest.mark.integration_test
 @pytest.mark.tpu_only
-@pytest.mark.scheduled_only
 def test_grpo_llama3_demo():
   """
   Test the GRPO Llama3 demo script with minimal configuration.
