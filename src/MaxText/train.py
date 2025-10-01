@@ -257,7 +257,7 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
     (loss, aux), raw_grads = grad_func(model, config, data, dropout_rng, state.params, *extra_dpo_args, is_train=True)
   
   raw_grads =jax.tree_util.tree_map(
-    lambda x: x.astype(config.),
+    lambda x: x.astype(config.grad_dtype),
     raw_grads
   )
   intermediate_outputs = aux["intermediate_outputs"]
