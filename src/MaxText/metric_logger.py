@@ -19,6 +19,7 @@
 import json
 import os
 import queue
+import enum
 
 import numpy as np
 
@@ -60,6 +61,11 @@ def record_activation_metrics(output_metrics, intermediate_outputs, config):
       output_metrics["scalar"][f"activ_fraction_zero/layer_{layer_num:03d}"] = layer["activation_fraction_zero"][0]
       output_metrics["scalar"][f"activ_mean/layer_{layer_num:03d}"] = layer["activation_mean"][0]
       output_metrics["scalar"][f"activ_stdev/layer_{layer_num:03d}"] = layer["activation_stdev"][0]
+
+
+class MetadataKey(enum.Enum):
+  PER_DEVICE_TFLOPS = "per_device_tflops"
+  PER_DEVICE_TOKENS = "per_device_tokens"
 
 
 class MetricLogger:
@@ -171,8 +177,8 @@ class MetricLogger:
   def write_setup_info_to_tensorboard(self, params):
     """Writes setup information like train config params, num model params, and XLA flags to TensorBoard."""
     num_model_parameters = max_utils.calculate_num_params_from_pytree(params)
-    self.metadata["per_device_tflops"], _, _ = maxtext_utils.calculate_tflops_training_per_device(self.config)
-    self.metadata["per_device_tokens"] = maxtext_utils.calculate_tokens_training_per_device(self.config)
+    self.metadata[MetadataKey.PER_DEVICE_TFLOPS], _, _ = maxtext_utils.calculate_tflops_training_per_device(self.config)
+    self.metadata[MetadataKey.PER_DEVICE_TOKENS] = maxtext_utils.calculate_tokens_training_per_device(self.config)
     max_logging.log(f"number parameters: {num_model_parameters/1e9:.3f} billion")
     max_utils.add_text_to_summary_writer("num_model_parameters", str(num_model_parameters), self.writer)
     max_utils.add_text_to_summary_writer("libtpu_init_args", os.environ["LIBTPU_INIT_ARGS"], self.writer)
@@ -207,11 +213,25 @@ class MetricLogger:
   def record_train_metrics(self, metrics, step, step_time):
     """Records training metrics for the current step."""
     metrics["scalar"].update({"perf/step_time_seconds": step_time})
-    metrics["scalar"].update({"perf/per_device_tflops": self.metadata["per_device_tflops"]})
-    metrics["scalar"].update({"perf/per_device_tflops_per_sec": self.metadata["per_device_tflops"] / step_time})
-    metrics["scalar"].update({"perf/per_device_tokens": self.metadata["per_device_tokens"]})
-    metrics["scalar"].update({"perf/per_device_tokens_per_sec": self.metadata["per_device_tokens"] / step_time})
-    metrics["scalar"].update({"learning/current_learning_rate": self.learning_rate_schedule(step)})
+    metrics["scalar"].update(
+        {"perf/per_device_tflops": self.metadata[MetadataKey.PER_DEVICE_TFLOPS]}
+    )
+    metrics["scalar"].update({
+        "perf/per_device_tflops_per_sec": (
+            self.metadata[MetadataKey.PER_DEVICE_TFLOPS] / step_time
+        )
+    })
+    metrics["scalar"].update(
+        {"perf/per_device_tokens": self.metadata[MetadataKey.PER_DEVICE_TOKENS]}
+    )
+    metrics["scalar"].update({
+        "perf/per_device_tokens_per_sec": (
+            self.metadata[MetadataKey.PER_DEVICE_TOKENS] / step_time
+        )
+    })
+    metrics["scalar"].update(
+        {"learning/current_learning_rate": self.learning_rate_schedule(step)}
+    )
     if self.performance_metric_queue:
       self.performance_metric_queue.put(step_time)
 
