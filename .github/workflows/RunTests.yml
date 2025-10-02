@@ -133,7 +133,7 @@ jobs:
 
   clean_up:
     if: ${{ always() }}
-    needs: [cpu_unit_tests, gpu_unit_tests, gpu_integration_tests, tpu_unit_tests, tpu_integration_tests, tpu_grpo_integration_test]
+    needs: [cpu_unit_tests, gpu_unit_tests, gpu_integration_tests, tpu_unit_tests, tpu_integration_tests]
     name: "Clean up"
     runs-on: ["self-hosted"]
     permissions:
@@ -152,7 +152,7 @@ jobs:
 
   notify_failure:
     name: Notify failed build # creates an issue or modifies last open existing issue for failed build
-    needs: [cpu_unit_tests, gpu_unit_tests, gpu_integration_tests, tpu_unit_tests, tpu_integration_tests, tpu_grpo_integration_test]
+    needs: [cpu_unit_tests, gpu_unit_tests, gpu_integration_tests, tpu_unit_tests, tpu_integration_tests]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     permissions:
@@ -184,7 +184,7 @@ jobs:
       name: Close issue after 3 successful builds
       # This job runs only if all the preceding test jobs succeeded
       if: ${{ success() && github.event.pull_request == null && github.event_name != 'workflow_dispatch' }}
-      needs: [cpu_unit_tests, gpu_unit_tests, gpu_integration_tests, tpu_unit_tests, tpu_integration_tests, tpu_grpo_integration_test]
+      needs: [cpu_unit_tests, gpu_unit_tests, gpu_integration_tests, tpu_unit_tests, tpu_integration_tests]
       runs-on: ubuntu-latest
       permissions:
         issues: write
