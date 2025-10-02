@@ -371,23 +371,47 @@ def train_loop(config, recorder, state=None):
     state_mesh_shardings = _merge_dpo_state(state_mesh_shardings, state_mesh_shardings.params["params"])
 
   if config.enable_diloco:
+    # init_diloco_state_partial = functools.partial(diloco.build_diloco_state, config, lambda: state)
+    train_step_partial = functools.partial(train_step, model, config, state_mesh_shardings)
     state = diloco.build_diloco_state(config, lambda: state)
-    diloco_train_step = diloco.build_diloco_train_step(config, train_step)
+    
+    # create state_mesh_shardings for the DilocoState
+    def add_diloco_to_sharding(pytree):
+      """
+      Recursively traverses a PyTree and prepends 'diloco' to the PartitionSpec
+      of any NamedSharding object that doesn't have an empty PartitionSpec.
+      """
+      def map_fn(leaf):
+        if isinstance(leaf, jax.sharding.NamedSharding) and leaf.spec != jax.sharding.PartitionSpec():
+          new_spec = jax.sharding.PartitionSpec('diloco', *leaf.spec)
+          return jax.sharding.NamedSharding(mesh=leaf.mesh, spec=new_spec)
+        return leaf
+
+      return jax.tree_util.tree_map(map_fn, pytree)
+    inner_state_shardings = add_diloco_to_sharding(state_mesh_shardings)
+    diloco_state_shardings = diloco.DiLoCoTrainState(
+      inner_state_shardings,
+      state_mesh_shardings.params,
+      None,
+      state_mesh_shardings.step,
+    )
+    
+    diloco_train_step = diloco.build_diloco_train_step(config, train_step_partial)
     p_train_step, p_eval_step = train_utils.jit_train_and_eval_step(
-        config, model, mesh, state, state_mesh_shardings, diloco_train_step, eval_step, eval_data_iterator
+        config, model, mesh, state, diloco_state_shardings, diloco_train_step, eval_step, eval_data_iterator
     )
   else:
     p_train_step, p_eval_step = train_utils.jit_train_and_eval_step(
         config, model, mesh, state, state_mesh_shardings, train_step, eval_step, eval_data_iterator
     )
 
-  with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-    shaped_batch = maxtext_utils.get_shaped_batch(config)
-    if config.enable_diloco:
-      shaped_batch = diloco.reshape_first_axis_with_diloco(config.num_diloco_replicas, shaped_batch)
-    compiled = p_train_step.lower(state, shaped_batch, init_rng).compile()
-    compiled_stats = compiled.memory_analysis()
-    max_utils.print_compiled_memory_stats(compiled_stats)
+  # with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+  #   shaped_batch = maxtext_utils.get_shaped_batch(config)
+  #   if config.enable_diloco:
+  #     shaped_batch = diloco.reshape_first_axis_with_diloco(config.num_diloco_replicas, shaped_batch)
+  #   compiled = p_train_step.lower(state, shaped_batch, init_rng).compile()
+  #   compiled_stats = compiled.memory_analysis()
+  #   max_utils.print_compiled_memory_stats(compiled_stats)
 
   start_step = get_first_step(state)  # this is the start_step for training
   prof = profiler.Profiler(config, offset_step=start_step)
@@ -407,8 +431,6 @@ def train_loop(config, recorder, state=None):
 
       with jax.profiler.StepTraceAnnotation("train", step_num=step):
         example_batch = data_loader.load_next_batch()
-        if config.enable_diloco:
-          example_batch = diloco.reshape_first_axis_with_diloco(config.num_diloco_replicas, example_batch)
         # pylint: disable=not-callable
         nextrng = jax.jit(jax.random.fold_in)(init_rng, step)
         with maybe_record_goodput(recorder, GoodputEvent.STEP, step):

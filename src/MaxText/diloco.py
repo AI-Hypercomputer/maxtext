@@ -30,6 +30,7 @@ from flax import struct
 from flax.training import train_state
 import jax
 import jax.numpy as jnp
+from jax.sharding import Mesh
 from jaxtyping import Array, Int32, Key, PyTree, UInt32
 import optax
 
@@ -67,19 +68,36 @@ class DiLoCoTrainState(struct.PyTreeNode):
 def reshape_first_axis_with_diloco(num_diloco_replicas: int, pytree: PyTree) -> PyTree:
   """Reshapses the first dimension of each array int he PyTree to include a DiLoCo axis."""
 
-  def extend_pspec(pspec: jax.sharding.PartitionSpec | Sequence[str | Sequence[str]] = ()) -> jax.sharding.PartitionSpec:
-    if "diloco" == pspec[0][0]:
-      pspec = pspec[0][1:]
-    return jax.sharding.PartitionSpec("diloco", pspec)
-
   def reshape_for_diloco(arr):
-    batch_dim, *example_shape = arr.shape
-    diloco_shape = (num_diloco_replicas, batch_dim // num_diloco_replicas, *example_shape)
-    s = arr.sharding
-    s = jax.sharding.NamedSharding(mesh=s.mesh, spec=extend_pspec(s.spec))
-    return jax.lax.with_sharding_constraint(jnp.reshape(arr, shape=diloco_shape), s)
+    if isinstance(arr, jax.ShapeDtypeStruct):
+      batch_dim, *example_shape = arr.shape
+      diloco_shape = (
+          num_diloco_replicas,
+          batch_dim // num_diloco_replicas,
+          *example_shape,
+      )
+      return jax.ShapeDtypeStruct(shape=diloco_shape, dtype=arr.dtype)
 
-  return jax.tree.map(reshape_for_diloco, pytree)
+  #   def extend_pspec(pspec):
+  #     if pspec and pspec[0] == "diloco":
+  #       return pspec
+  #     return ("diloco",) + tuple(pspec)
+
+  #   batch_dim, *example_shape = arr.shape
+  #   diloco_shape = (
+  #       num_diloco_replicas,
+  #       batch_dim // num_diloco_replicas,
+  #       *example_shape,
+  #   )
+  #   s = data_sharding
+  #   s = jax.sharding.NamedSharding(
+  #       mesh=s.mesh, spec=jax.sharding.PartitionSpec(*extend_pspec(s.spec))
+  #   )
+  #   return jax.lax.with_sharding_constraint(
+  #       jnp.reshape(arr, shape=diloco_shape), s
+  #   )
+
+  # return jax.tree.map(reshape_for_diloco, pytree)
 
 
 def build_diloco_state(

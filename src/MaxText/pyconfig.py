@@ -772,11 +772,13 @@ def create_parallelisms_list(raw_keys):
   ici_parallelism = []
   dcn_parallelism = []
 
-  if raw_keys["enable_diloco"] :
-    ici_parallelism.append(raw_keys["ici_diloco_parallelism"])
-    dcn_parallelism.append(raw_keys["dcn_diloco_parallelism"])
+  # if raw_keys["enable_diloco"] :
+  #   ici_parallelism.append(raw_keys["ici_diloco_parallelism"])
+  #   dcn_parallelism.append(raw_keys["dcn_diloco_parallelism"])
+  #   raw_keys['mesh_axes'] = ['diloco'] + raw_keys['mesh_axes']
   
   ici_parallelism.extend([
+      raw_keys["ici_diloco_parallelism"],
       raw_keys["ici_data_parallelism"],
       raw_keys["ici_pipeline_parallelism"],
       raw_keys["ici_fsdp_parallelism"],
@@ -791,6 +793,7 @@ def create_parallelisms_list(raw_keys):
       raw_keys["ici_autoregressive_parallelism"],
   ])
   dcn_parallelism.extend([
+      raw_keys["dcn_diloco_parallelism"],
       raw_keys["dcn_data_parallelism"],
       raw_keys["dcn_pipeline_parallelism"],
       raw_keys["dcn_fsdp_parallelism"],
