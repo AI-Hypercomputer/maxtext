@@ -38,34 +38,34 @@ from MaxText.globals import MAXTEXT_REPO_ROOT
 def test_grpo_llama3_demo():
   """
   Test the GRPO Llama3 demo script with minimal configuration.
-  
+
   This test verifies that the demo can:
   1. Load the dataset
   2. Initialize the model
   3. Run a few training steps
   4. Complete evaluation
   """
-  
+
   # Create a temporary directory for outputs
   with tempfile.TemporaryDirectory() as temp_dir:
     # Set environment variables for the test
     env = os.environ.copy()
     env["HOME"] = temp_dir
     env["SKIP_JAX_PRECOMPILE"] = "1"
-    
+
     # Build the command to run the demo
     demo_script = os.path.join(
-        MAXTEXT_REPO_ROOT, 
+        MAXTEXT_REPO_ROOT,
         "src/MaxText/examples/grpo_llama3_demo.py"
     )
-    
+
     # We'll modify the script to run with minimal steps for testing
     # by setting environment variables that the script can read
     env["GRPO_TEST_MODE"] = "1"
     env["GRPO_NUM_BATCHES"] = "2"  # Minimal batches for testing
     env["GRPO_NUM_TEST_BATCHES"] = "2"  # Minimal test batches
     env["GRPO_MAX_STEPS"] = "2"  # Minimal training steps
-    
+
     # Run the demo script
     result = subprocess.run(
         [sys.executable, demo_script],
@@ -73,8 +73,9 @@ def test_grpo_llama3_demo():
         capture_output=True,
         text=True,
         timeout=600,  # 10 minute timeout
+        check=False,
     )
-    
+
     # Check if the script executed successfully
     if result.returncode != 0:
       print("STDOUT:", result.stdout)
@@ -82,7 +83,7 @@ def test_grpo_llama3_demo():
       raise AssertionError(
           f"GRPO Llama3 demo failed with return code {result.returncode}"
       )
-    
+
     # Verify expected outputs in the logs
     assert "HBM usage before loading model:" in result.stdout, \
         "Model initialization not found in output"
@@ -94,7 +95,7 @@ def test_grpo_llama3_demo():
         "Pre-training evaluation not found in output"
     assert "Post GRPO Training:" in result.stdout, \
         "Post-training evaluation not found in output"
-    
+
     print("GRPO Llama3 demo test passed successfully!")
 
 
