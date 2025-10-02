@@ -37,8 +37,6 @@ from MaxText.kernels import megablox as mblx
 from MaxText.layers import attentions, linears, quantizations, nnx_wrappers
 from MaxText.layers.initializers import NdInitializer, nd_dense_init, default_bias_init, variable_to_logically_partitioned
 
-import qwix.pallas as qpl
-
 set_xla_metadata = xla_metadata.set_xla_metadata
 
 
@@ -808,11 +806,6 @@ class RoutedMoE(nnx.Module):
         quant_dg = self.quant.quant_dg
         lhs_quantize_dtype = quant_dg.fwd.dg_quantizer.lhs.numerics.get_dtype()
         rhs_quantize_dtype = quant_dg.fwd.dg_quantizer.rhs.numerics.get_dtype()
-      if self.config.use_qwix_quantization:
-        quantization_rule = qpl.get_current_rule("dot_general")
-        if quantization_rule is not None:
-          lhs_quantize_dtype = quantization_rule.act_qtype
-          rhs_quantize_dtype = quantization_rule.weight_qtype
       m, k, n = inputs.shape[0], inputs.shape[1], kernel.shape[2]
       tiling = (
           min(tile_size[0], m),
