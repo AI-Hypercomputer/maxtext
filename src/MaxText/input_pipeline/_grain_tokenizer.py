@@ -30,8 +30,6 @@ class TokenizerTransformBase:
   # pylint: disable=attribute-defined-outside-init
   feature_names: str | Sequence[str]
   sequence_length: int | Sequence[int]
-  add_bos: bool
-  add_eos: bool
   tokenizer: tokenizer.SentencePieceTokenizerGrain | tokenizer.HFTokenizer
 
   def __post_init__(self):

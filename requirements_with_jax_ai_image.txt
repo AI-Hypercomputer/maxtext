@@ -4,7 +4,7 @@ datasets @ https://github.com/huggingface/datasets/archive/6790e138c00b87a1ddc72
 flax>=0.11.0
 google-api-python-client
 google-jetstream @ https://github.com/AI-Hypercomputer/JetStream/archive/daedc21c393f23449fb54ddc4f75fca34348ea9c.zip
-grain[parquet] @ https://github.com/google/grain/archive/bab58eabf0c94d16002b5d82dda8d8320edd3c7b.zip
+grain[parquet]
 jaxtyping
 jsonlines
 mlperf-logging @ https://github.com/mlcommons/logging/archive/38ab22670527888c8eb7825a4ece176fcc36a95d.zip

@@ -58,8 +58,6 @@ class TokenizerTransformTest(unittest.TestCase):
     trim_op = _grain_tokenizer.TokenizeAndTrim(
         feature_names=self.feature_names,
         sequence_length=self.max_len,
-        add_bos=False,
-        add_eos=False,
         tokenizer=self.mock_tokenizer
     )
     trim_ds = self.base_ds.map(trim_op)
@@ -105,8 +103,6 @@ class TokenizerTransformTest(unittest.TestCase):
     trim_op = _grain_tokenizer.TokenizeAndTrim(
         feature_names=self.feature_names,
         sequence_length=self.max_len,
-        add_bos=False,
-        add_eos=False,
         tokenizer=self.mock_tokenizer
     )
     pad_op = _input_pipeline_utils.PadOrTrimToMaxLength(

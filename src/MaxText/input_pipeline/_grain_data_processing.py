@@ -115,15 +115,20 @@ def pretrain_preprocessing_pipeline(dataset, config, data_columns, tokenize, gra
   if tokenize:
     if config.use_truncation:
       dataset = dataset.map(
-          _grain_tokenizer.TokenizeAndTrim(
-              text_column, config.max_target_length, config.add_bos, config.add_eos, tokenizer_model
-          )
+        _grain_tokenizer.TokenizeAndTrim(
+          text_column, config.max_target_length, tokenizer_model
+        )
       )
     else:
-      dataset = dataset.apply(
+      dataset = grain.experimental.WithOptionsIterDataset(
+        dataset,
+        options=grain.experimental.DatasetOptions()
+      )
+      dataset = grain.experimental.apply_transformations(
+          dataset,
           _grain_tokenizer.TokenizeAndChunk(
-              text_column, config.max_target_length, config.add_bos, config.add_eos, tokenizer_model
-          )
+              text_column, config.max_target_length, tokenizer_model
+        )
       )
 
   data_columns = ("inputs", "targets")
@@ -183,7 +188,7 @@ def dpo_preprocessing_pipeline(dataset, config, data_columns, tokenize, grain_wo
   if tokenize:
     dataset = dataset.map(
         _grain_tokenizer.TokenizeAndTrim(
-            data_columns, config.max_target_length, config.add_bos, config.add_eos, tokenizer_model
+            data_columns, config.max_target_length, tokenizer_model
         )
     )
 
