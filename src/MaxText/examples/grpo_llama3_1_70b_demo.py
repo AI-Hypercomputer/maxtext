@@ -14,12 +14,12 @@
 
 # pylint: disable=bare-except, consider-using-generator
 """ 
-This tutorial demonstrates training the Llama3.1 8B-IT model on
+This tutorial demonstrates training the Llama3.1 70B-IT model on
  the GSM8K math reasoning benchmark using Group Relative Policy Optimization (GRPO).
    GRPO can enhance your model's problem-solving skills on mathematical word problems,
      coding problems, etc. """
 
-# This tutorial demonstrates training the Llama3.1 8B-IT model on the GSM8K math
+# This tutorial demonstrates training the Llama3.1 70B-IT model on the GSM8K math
 # reasoning benchmark using Group Relative Policy Optimization (GRPO). GRPO can
 # enhance your model's problem-solving skills on mathematical word problems,
 # coding problems, etc.
@@ -77,7 +77,6 @@ from etils import epath
 from tunix.rl.rollout.base_rollout import RolloutConfig
 
 from MaxText.globals import MAXTEXT_ASSETS_ROOT
-from grpo_llama3_demo import get_ref_maxtext_model
 import pathwaysutils
 pathwaysutils.initialize()
 
@@ -265,7 +264,7 @@ def show_hbm_usage():
 # `</answer>` tokens.
 
 # model_tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.1-8B")
-model_tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.1-8B-Instruct")
+model_tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.1-70B-Instruct")
 
 
 reasoning_start = "<reasoning>"
@@ -386,16 +385,18 @@ print("HBM usage before loading model:")
 # ! uv pip install -r ../../maxtext/requirements.txt
 
 
-# def get_ref_maxtext_model(config):
 
-#   model, mesh = model_creation_utils.create_nnx_model(config)
-#   with mesh:
-#     tunix_model = TunixMaxTextAdapter(base_model=model,)
+def get_ref_maxtext_model(config, devices=None):
 
-#     model_config = llama3_lib.ModelConfig.llama3_1_8b()
-#     tunix_model.config = model_config
+  model, mesh = model_creation_utils.create_nnx_model(config, devices)
+  with mesh:
+    tunix_model = TunixMaxTextAdapter(base_model=model,)
 
-#   return tunix_model, mesh
+    model_config = None
+    tunix_model.config = model_config
+
+  return tunix_model, mesh
+
 
 
 # Load the reference model
@@ -440,21 +441,21 @@ if num_vms >= 2:
   sampler_devices = devices[len(devices) // 2 :]
 
   print("Creating reference and rollout models/meshes from the sampler devices.")
-  llama3_1_8b, ref_mesh = get_ref_maxtext_model(config_ref, sampler_devices)
-  llama3_1_8b_rollout, rollout_mesh = get_ref_maxtext_model(config_ref, sampler_devices)
+  llama3_1_70b, ref_mesh = get_ref_maxtext_model(config_ref, sampler_devices)
+  llama3_1_70b_rollout, rollout_mesh = get_ref_maxtext_model(config_ref, sampler_devices)
 
   reference_mesh = ref_mesh
   mesh = ref_mesh
 else:
-  llama3_1_8b, mesh = get_ref_maxtext_model(config_ref, devices)
+  llama3_1_70b, mesh = get_ref_maxtext_model(config_ref, devices)
   actor_mesh = mesh
   reference_mesh = mesh
   rollout_mesh = mesh
 
 
-llama3_1_8b.config = None
+llama3_1_70b.config = None
 
-nnx.display(llama3_1_8b)
+nnx.display(llama3_1_70b)
 
 
 if DEBUG:
@@ -462,7 +463,7 @@ if DEBUG:
   print(f"Model mesh shape: {mesh.shape}")
 
   # Sanity check that weights are loaded correctly
-  _maxtext_state_flatten = nnx.state(llama3_1_8b).flat_state()
+  _maxtext_state_flatten = nnx.state(llama3_1_70b).flat_state()
   maxtext_state_flatten = {".".join(str(key) for key in keys): v for keys, v in _maxtext_state_flatten}
   print(
       f"maxtext_state_flatten[base.token_embedder.embedding].value={maxtext_state_flatten['base.token_embedder.embedding'].value}"
@@ -511,21 +512,21 @@ config_policy = pyconfig.initialize(
 if num_vms >= 2:
   # For the policy model, override the config to create a 4-device mesh.
   print("Creating policy model on trainer mesh")
-  llama3_1_8b_policy, policy_mesh = get_ref_maxtext_model(config_policy, trainer_devices)
+  llama3_1_70b_policy, policy_mesh = get_ref_maxtext_model(config_policy, trainer_devices)
   actor_mesh = policy_mesh
 else:
-  llama3_1_8b_policy, mesh_policy = get_ref_maxtext_model(config_policy, devices)
+  llama3_1_70b_policy, mesh_policy = get_ref_maxtext_model(config_policy, devices)
 
-llama3_1_8b_policy.config = None
+llama3_1_70b_policy.config = None
 
-nnx.display(llama3_1_8b_policy)
+nnx.display(llama3_1_70b_policy)
 
 if DEBUG:
   print("Model initialized successfully")
   print(f"Model mesh shape: {mesh_policy.shape}")
 
   # Sanity check that weights are loaded correctly
-  _maxtext_state_flatten = nnx.state(llama3_1_8b_policy).flat_state()
+  _maxtext_state_flatten = nnx.state(llama3_1_70b_policy).flat_state()
   maxtext_state_flatten = {".".join(str(key) for key in keys): v for keys, v in _maxtext_state_flatten}
   print(
       f"maxtext_state_flatten[base.token_embedder.embedding].value={maxtext_state_flatten['base.token_embedder.embedding'].value}"
@@ -965,7 +966,7 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         top_p=TOP_P,
         top_k=TOP_K,
     ),
-    rollout_vllm_model_version="meta-llama/Meta-Llama-3.1-8B-Instruct",
+    rollout_vllm_model_version="meta-llama/Llama-3.1-70B-Instruct",
     rollout_vllm_hbm_utilization=0.2,
     rollout_vllm_tpu_backend_type="jax",
 )
@@ -983,9 +984,9 @@ grpo_config = GrpoConfig(
 
 with nn_partitioning.axis_rules(config_policy.logical_axis_rules):
   rl_cluster = rl_cluster_lib.RLCluster(
-      actor=llama3_1_8b_policy,
-      reference=llama3_1_8b,
-      rollout=llama3_1_8b_rollout,
+      actor=llama3_1_70b_policy,
+      reference=llama3_1_70b,
+      rollout=llama3_1_70b_rollout,
       tokenizer=model_tokenizer,
       cluster_config=cluster_config,
   )

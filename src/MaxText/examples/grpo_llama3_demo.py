@@ -451,7 +451,7 @@ else:
   rollout_mesh = mesh
 
 
-llama3_1_8b.config = model_config
+llama3_1_8b.config = None
 
 nnx.display(llama3_1_8b)
 
@@ -459,7 +459,7 @@ nnx.display(llama3_1_8b)
 if DEBUG:
   print("Model initialized successfully")
   print(f"Model mesh shape: {mesh.shape}")
-  print(f"Model config: {model_config}")
+  print(f"Model config: {None}")
 
   # Sanity check that weights are loaded correctly
   _maxtext_state_flatten = nnx.state(llama3_1_8b).flat_state()
@@ -511,13 +511,13 @@ config_policy = pyconfig.initialize(
 if num_vms >= 2:
   # For the policy model, override the config to create a 4-device mesh.
   print("Creating policy model on trainer mesh")
-  llama3_1_8b_policy, policy_mesh = get_ref_maxtext_model(config_policy, trainer_devices)
-  actor_mesh = policy_mesh
+  llama3_1_8b_policy, mesh_policy = get_ref_maxtext_model(config_policy, trainer_devices)
+  actor_mesh = mesh_policy
 else:
   llama3_1_8b_policy, mesh_policy = get_ref_maxtext_model(config_policy, devices)
 
 
-llama3_1_8b_policy.config = model_config
+llama3_1_8b_policy.config = None
 
 nnx.display(llama3_1_8b_policy)
 
