@@ -99,12 +99,12 @@ def create_model(config, mesh, model_mode: str = MODEL_MODE_TRAIN, rngs: nnx.Rng
   return model
 
 
-def create_nnx_model(config):
+def create_nnx_model(config, devices=None):
   """Creates a NNX model with sharded parameters, possibly loading from a checkpoint."""
 
   def create_model():
     init_rng = jax.random.PRNGKey(config.init_weights_seed)
-    return from_config(config, rngs=nnx.Rngs(params=init_rng, dropout=1))
+    return from_config(config, devices, rngs=nnx.Rngs(params=init_rng, dropout=1))
 
   abstract_model = nnx.eval_shape(create_model)
   graphdef, abstract_state = nnx.split(abstract_model)
