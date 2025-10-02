@@ -69,35 +69,23 @@ def reshape_first_axis_with_diloco(num_diloco_replicas: int, pytree: PyTree) -> 
   """Reshapses the first dimension of each array int he PyTree to include a DiLoCo axis."""
 
   def reshape_for_diloco(arr):
-    if isinstance(arr, jax.ShapeDtypeStruct):
-      batch_dim, *example_shape = arr.shape
-      diloco_shape = (
-          num_diloco_replicas,
-          batch_dim // num_diloco_replicas,
-          *example_shape,
+    batch_dim, *example_shape = arr.shape
+    if batch_dim % num_diloco_replicas != 0:
+      raise ValueError(
+          "The first dimension of the array must be divisible by the"
+          f" number of diloco replicas, but got shape {arr.shape} and"
+          f" {num_diloco_replicas=}"
       )
+    diloco_shape = (
+        num_diloco_replicas,
+        batch_dim // num_diloco_replicas,
+        *example_shape,
+    )
+    if isinstance(arr, jax.ShapeDtypeStruct):
       return jax.ShapeDtypeStruct(shape=diloco_shape, dtype=arr.dtype)
+    return jnp.reshape(arr, diloco_shape)
 
-  #   def extend_pspec(pspec):
-  #     if pspec and pspec[0] == "diloco":
-  #       return pspec
-  #     return ("diloco",) + tuple(pspec)
-
-  #   batch_dim, *example_shape = arr.shape
-  #   diloco_shape = (
-  #       num_diloco_replicas,
-  #       batch_dim // num_diloco_replicas,
-  #       *example_shape,
-  #   )
-  #   s = data_sharding
-  #   s = jax.sharding.NamedSharding(
-  #       mesh=s.mesh, spec=jax.sharding.PartitionSpec(*extend_pspec(s.spec))
-  #   )
-  #   return jax.lax.with_sharding_constraint(
-  #       jnp.reshape(arr, shape=diloco_shape), s
-  #   )
-
-  # return jax.tree.map(reshape_for_diloco, pytree)
+  return jax.tree.map(reshape_for_diloco, pytree)
 
 
 def build_diloco_state(
