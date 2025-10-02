@@ -270,6 +270,9 @@ def pad_to_best_fit_jax(
 def pad_to_max_tiles(
     images: np.ndarray,
     max_num_tiles: int = LLAMA4_TILES_NUM,
+    mean_values: tuple[float, float, float] = LLAMA4_IMAGE_MEAN,
+    std_values: tuple[float, float, float] = LLAMA4_IMAGE_STD,
+    pixel_value_rescale_factor: float = LLAMA4_PIXEL_VALUE_RESCALE_FACTOR,
 ) -> tuple[np.ndarray, np.ndarray]:
   """
   Pads the image tiles to the maximum number of tiles using JAX.
@@ -288,6 +291,13 @@ def pad_to_max_tiles(
 
   # Create a new array filled with zeros for padding
   padded_tiles = np.zeros((max_num_tiles, num_channels, height, width), dtype=images.dtype)
+  mean_array = np.array(mean_values, dtype=images.dtype).reshape((1, num_channels, 1, 1))
+  std_array = np.array(std_values, dtype=images.dtype).reshape((1, num_channels, 1, 1))
+
+  # Normalize the tile padding to zero mean and unit variance
+  padded_tiles *= pixel_value_rescale_factor
+  padded_tiles -= mean_array
+  padded_tiles /= std_array
 
   # Copy the original tiles into the new array
   padded_tiles[:num_tiles] = images
