@@ -79,8 +79,6 @@ class TokenizerTransformTest(unittest.TestCase):
     chunk_op = _grain_tokenizer.TokenizeAndChunk(
         feature_names=self.feature_names,
         sequence_length=self.max_len,
-        add_bos=False,
-        add_eos=False,
         tokenizer=self.mock_tokenizer
     )
     chunk_ds = self.base_ds.apply(chunk_op)
@@ -128,8 +126,6 @@ class TokenizerTransformTest(unittest.TestCase):
     chunk_op = _grain_tokenizer.TokenizeAndChunk(
         feature_names=self.feature_names,
         sequence_length=self.max_len,
-        add_bos=False,
-        add_eos=False,
         tokenizer=self.mock_tokenizer
     )
     pad_op = _input_pipeline_utils.PadOrTrimToMaxLength(
