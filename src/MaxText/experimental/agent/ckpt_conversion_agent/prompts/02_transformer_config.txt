@@ -21,7 +21,7 @@ create a `transformers` configuration object for the '{target_model}' model base
 -The output must be exclusively raw Python code.
 -Do not include any introductory text, explanations, or Markdown code block delimiters (e.g., ```python or ` ```).
 
-**EAMPLE OUTPUT:**
+**EXAMPLE OUTPUT:**
 gemma2_9b_config = transformers.Gemma2Config(
     num_hidden_layers=42,
     num_attention_heads=16,

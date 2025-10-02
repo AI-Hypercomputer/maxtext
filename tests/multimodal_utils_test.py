@@ -34,7 +34,7 @@ class TestTextImageFusionGemma3(unittest.TestCase):
         at=self.BEGIN_IMAGE_TOKEN, sequence=self.mm_tokens, tokens=tokens, max_num_images=num_images
     )
     np.testing.assert_array_equal(new_tokens, tokens)
-  
+
   def test_add_single_image(self):
     tokens = np.asarray([1, 2, 3, self.BEGIN_IMAGE_TOKEN, 5, 6])
     num_images = 1

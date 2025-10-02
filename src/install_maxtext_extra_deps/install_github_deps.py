@@ -12,6 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Installs extra dependencies from a requirements file using uv.
+
+This script is designed to be run to install dependencies specified in
+'extra_deps_from_github.txt', which is expected to be in the same directory.
+It first ensures 'uv' is installed and then uses it to install the packages
+listed in the requirements file.
+"""
+
 import subprocess
 import sys
 from pathlib import Path
@@ -74,8 +82,8 @@ def main():
     print("--- Stdout ---")
     print(e.stdout)
     sys.exit(e.returncode)
-  except Exception as e:
-    print(f"An unexpected error occurred: {e}")
+  except (OSError, FileNotFoundError) as e:
+    print(f"An OS-level error occurred while trying to run uv: {e}")
     sys.exit(1)
 
 

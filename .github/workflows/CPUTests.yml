@@ -34,20 +34,9 @@ jobs:
     - name: Typecheck the code with pytype
       run: |
         pytype --jobs auto --disable 'import-error,late-directive,wrong-arg-types,module-attr,unsupported-operands' src/MaxText/ || true
-    - name: Analysing the code with pylint in Maxtext/
+    - name: pylint
       run: |
-         pylint --verbose --msg-template='[{abspath}] {msg_id}:{line:3d},{column}: {obj}: {msg}' --disable C0114,R0401,R0917,W0201,W0613 src/MaxText/ || true
-    - name: Analysing the code with pylint in pedagogical_examples/
+         pylint --disable=R0401,R0917,W0201,W0613 --ignore-patterns='.pytype,.*pyi$' benchmarks end_to_end src tests
+    - name: pyink
       run: |
-         pylint pedagogical_examples/ && \
-         echo 'PyLint check on pedagogical_examples/ is successful' || { echo \
-         'PyLint check has failed. Please run bash code_style.sh to fix issues'; exit 20; }
-    - name: Analysing the code with pyink in Maxtext/
-      run: |
-        pyink src/MaxText --check --diff --color --pyink-indentation=2 --line-length=125 || true
-    - name: Analysing the code with pyink in pedagogical_examples/
-      run: |
-        pyink pedagogical_examples --check --diff --color --pyink-indentation=2 --line-length=125
-
-
-
+        pyink --pyink-indentation=2 --line-length=122 --check .

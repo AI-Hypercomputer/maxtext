@@ -197,7 +197,7 @@ python3 -m tests.forward_pass_logit_checker \
     dtype=float32 \
     --atol=0.1 --rtol=0.1 \
     --max_kl_div=3e-4 \
-    --golden_logits_path=${PWD}/golden_gpt-oss-20b.jsonl
+    --golden_logits_path=${PWD}/golden_data_gpt-oss-20b.jsonl
 ```
 This is to check unscanned checkpoint. To check scanned checkpoint, you can use `load_parameters_path=${SCANNED_CKPT_PATH} scan_layers=true`.
 

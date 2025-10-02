@@ -12,15 +12,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""
+This module provides utility functions for Pathways-related benchmark recipes.
+
+It includes helpers for building lists of model configurations based on user
+selections and for generating `XpkClusterConfig` and `PathwaysConfig` objects.
+"""
+
 import typing
+
 import maxtext_xpk_runner as mxr
 
+
 def build_user_models(
-  selected_model_framework: typing.List[str],
-  selected_model_names: typing.List[str],
-  device_base_type: str,
-  available_model_frameworks: typing.List[str],
-  available_models: typing.Dict
+    selected_model_framework: typing.List[str],
+    selected_model_names: typing.List[str],
+    device_base_type: str,
+    available_model_frameworks: typing.List[str],
+    available_models: typing.Dict,
 ) -> typing.Dict:
   """
   Validates user-selected model frameworks and names, then builds the final models dictionary.
@@ -42,33 +51,31 @@ def build_user_models(
   for model_framework in selected_model_framework:
     if model_framework not in available_model_frameworks:
       raise ValueError(
-        f"Model framework '{model_framework}' not available. "
-        f"Available model frameworks are: {list(available_model_frameworks)}"
+          f"Model framework '{model_framework}' not available. "
+          f"Available model frameworks are: {list(available_model_frameworks)}"
       )
-  
+
   # Initialize the model_set list to store the user's selected model configurations
   if device_base_type not in available_models:
-    raise ValueError(
-      f"Unknown device base type: {device_base_type}. "
-      f"Original device type was: {device_base_type}"
-    )
+    raise ValueError(f"Unknown device base type: {device_base_type}. " f"Original device type was: {device_base_type}")
 
   # Iterate through the list of user-selected model names, validating each one
   for model_name in selected_model_names:
     if model_name not in available_models[device_base_type]:
       raise ValueError(
-        f"Model name '{model_name}' not available for device type '{device_base_type}'. "
-        f"Available model names are: {list(available_models[device_base_type].keys())}"
+          f"Model name '{model_name}' not available for device type '{device_base_type}'. "
+          f"Available model names are: {list(available_models[device_base_type].keys())}"
       )
-  
+
   # Build the model configuration
   models = {}
   for model_framework in selected_model_framework:
     models[model_framework] = []
     for model_name in selected_model_names:
       models[model_framework].append(available_models[device_base_type][model_name])
-      
+
   return models
+
 
 def get_cluster_config(cluster_name, project, zone, device_type):
   """
@@ -83,7 +90,10 @@ def get_cluster_config(cluster_name, project, zone, device_type):
 
   return cluster_config
 
-def get_pathways_config(server_image, proxy_image, runner, colocated_python_image, headless, server_flags="", proxy_flags="", worker_flags=""):
+
+def get_pathways_config(
+    server_image, proxy_image, runner, colocated_python_image, headless, server_flags="", proxy_flags="", worker_flags=""
+):
   """
   Generates Pathways configuration objects from a UserConfig.
   """

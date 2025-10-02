@@ -38,13 +38,18 @@
 import argparse
 import os
 import sys
+
+import jsonlines
+
 import numpy as np
 import jax
 import jax.numpy as jnp
-import jsonlines
+
 import torch.nn.functional as F
-from google.cloud import storage
 import torch
+
+from google.cloud import storage
+
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from MaxText.utils.ckpt_conversion.utils.hf_utils import (
@@ -326,7 +331,8 @@ def main(config, test_args):  # pylint: disable=W0621
 
       max_logging.log("\n[test criteria]")
       max_logging.log(
-          f"Checking Numerical Differences between train logits and golden logits against atol={test_args.rtol} rtol={test_args.atol}."
+          f"Checking Numerical Differences between train logits and golden logits against "
+          f"atol={test_args.rtol} rtol={test_args.atol}."
       )
       rtol_val = float(test_args.rtol)
       atol_val = float(test_args.atol)
@@ -336,11 +342,15 @@ def main(config, test_args):  # pylint: disable=W0621
 
       if test_args.max_kl_div is not None:
         max_logging.log(
-            f"Checking KL Divergence between train distribution and golden distribution against theshold {test_args.max_kl_div}."
+            f"Checking KL Divergence between train distribution and golden distribution against "
+            f"threshold {test_args.max_kl_div}."
         )
         assert jax.numpy.all(
             kl_div < test_args.max_kl_div,
-        ), f"KL divergence values exceed the specified threshold of {test_args.max_kl_div}. Max divergence: {jax.numpy.max(kl_div)}"
+        ), (
+            f"KL divergence values exceed the specified threshold of {test_args.max_kl_div}. "
+            f"Max divergence: {jax.numpy.max(kl_div)}"
+        )
 
   else:
     """Comparing maxtext model with HF model on-the-fly"""
@@ -365,7 +375,9 @@ def main(config, test_args):  # pylint: disable=W0621
       max_logging.log(f"\n--- Prompt: {input_text} ---")
 
       # Tokenize for HF
-      inputs = tokenizer(input_text, return_tensors="pt", padding=True, max_length=config.max_target_length, truncation=True)
+      inputs = tokenizer(
+          input_text, return_tensors="pt", padding=True, max_length=config.max_target_length, truncation=True
+      )
       actual_seq_len = inputs["input_ids"].shape[1]
 
       # Tokenize for MaxText
@@ -468,7 +480,8 @@ if __name__ == "__main__":
 
   cfg = pyconfig.initialize(model_args)
   if cfg.use_multimodal:
-    assert (
-        not test_args.run_hf_model
-    ), "Multimodal does not support running hf model on-the-fly, please generate hf golden logits using generate_hf_golden_logits.py"
+    assert not test_args.run_hf_model, (
+        "Multimodal does not support running hf model on-the-fly, please generate hf golden logits "
+        "using generate_hf_golden_logits.py"
+    )
   main(cfg, test_args)

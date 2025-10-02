@@ -603,13 +603,13 @@ def to_linen_class(
     if not isinstance(name, _Missing):
       linen_kwargs["name"] = name
     ToLinen.__init__(
-      self,
-      nnx_class=nnx_class or base_nnx_class,
-      args=args or (),
-      metadata_fn=metadata_fn or base_metadata_fn,
-      skip_rng=skip_rng or base_skip_rng,
-      kwargs=FrozenDict({**partial_kwargs, **(kwargs or {}), **other_kwargs}),
-      **linen_kwargs,
+        self,
+        nnx_class=nnx_class or base_nnx_class,
+        args=args or (),
+        metadata_fn=metadata_fn or base_metadata_fn,
+        skip_rng=skip_rng or base_skip_rng,
+        kwargs=FrozenDict({**partial_kwargs, **(kwargs or {}), **other_kwargs}),
+        **linen_kwargs,
     )
 
   class ToLinenPartial(ToLinen):

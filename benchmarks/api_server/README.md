@@ -291,7 +291,7 @@ python -m eval.eval \
     --output_path logs
 ```
 
-An example benchmark outpus will be like:
+An example benchmark outputs will be like:
 
 <img src="./images/mmlu_example.png" alt="MMLU Example" width="894"/>
 

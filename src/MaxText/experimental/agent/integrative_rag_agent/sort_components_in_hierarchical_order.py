@@ -301,6 +301,7 @@ def sort_and_search_dependency(base_path, file_path, module):
   project_root = file_path.split(os.path.sep)[0]
 
   if os.path.exists(progress_status_file):
+    # pylint: disable=unbalanced-tuple-unpacking
     (
         q,
         processed_components,

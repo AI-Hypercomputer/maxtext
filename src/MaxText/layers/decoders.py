@@ -648,7 +648,7 @@ class Decoder(nn.Module):
         deterministic,
         model_mode,
         image_embeddings,
-        bidirectional_mask
+        bidirectional_mask,
     )
 
     policy = self.get_remat_policy()
@@ -841,7 +841,7 @@ class Decoder(nn.Module):
     # Instead, we keep track on the hidden states, which has smaller size compared to full logits
     if cfg.num_vocab_tiling > 1 and self.model_mode == MODEL_MODE_TRAIN:
       logits = None
-      self.sow('intermediates', 'hidden_states', hidden_state)
+      self.sow("intermediates", "hidden_states", hidden_state)
     else:
       logits = self._apply_output_head(shared_embedding, hidden_state, deterministic, model_mode)
 

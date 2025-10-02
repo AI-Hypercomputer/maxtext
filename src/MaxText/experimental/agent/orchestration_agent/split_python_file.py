@@ -247,18 +247,28 @@ class DependencyAnalyzer:
         scode = ast.get_source_segment(self.source_code, node)
         absimports = get_absolute_imports(scode, self.file_path, project_root=self.project_root)
         if absimports is not None:
-          for absimport in absimports.split("\n"):
-            if absimport.startswith("from " + self.project_root):
-              self.git_dependencies.update(self.convert_package_to_path(absimport))
+          deque(
+              (
+                  self.git_dependencies.update(self.convert_package_to_path(absimport))
+                  for absimport in absimports.split("\n")
+                  if absimport.startswith(f"from {self.project_root}")
+              ),
+              maxlen=0,
+          )
 
       for node in self.conditional_imports:
         for snode in node[1].body:
           scode = ast.get_source_segment(self.source_code, snode)
           absimports = get_absolute_imports(scode, self.file_path, project_root=self.project_root)
           if absimports is not None:
-            for absimport in absimports.split("\n"):
-              if absimport.startswith("from " + self.project_root):
-                self.git_dependencies.update(self.convert_package_to_path(absimport))
+            deque(
+                (
+                    self.git_dependencies.update(self.convert_package_to_path(absimport))
+                    for absimport in absimports.split("\n")
+                    if absimport.startswith(f"from {self.project_root}")
+                ),
+                maxlen=0,
+            )
 
     # --- Pass 2: Find dependencies and build graph ---
     self.defined_names = set(self.definitions.keys()).union(set(self.git_dependencies.keys()))

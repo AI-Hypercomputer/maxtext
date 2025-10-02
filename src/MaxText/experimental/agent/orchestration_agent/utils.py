@@ -11,10 +11,19 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import sys
+
+"""A collection of utility functions for the orchestration agent.
+
+This module provides tools for file and code manipulation, including:
+- Fetching file content from GitHub URLs and local paths.
+- Parsing and analyzing Python source code (e.g., resolving imports).
+- Detecting cyclical dependencies in graphs.
+"""
+
 from urllib.parse import urlparse, urljoin
 import ast
 import os
+import sys
 
 import requests  # if this is not available, please try ``pip install requests``
 
@@ -234,75 +243,86 @@ def remove_local_imports(source_code, filepath=None):
     line = lines[i]
     node = import_nodes.get(i + 1, None)
     if node:
-      # Detect multi-line import (parenthesis)
-      if "(" in line.strip() and ")" not in line:
-        # Detect multi-line import (parenthesis)
-        # Find the closing parenthesis, even if comments are present
-        start = i
-        while i < len(lines) and not lines[i].strip().endswith(")"):
-          i += 1
-        i += 1  # include the closing parenthesis line
-        import_block = "\n".join(lines[start:i])
-        # Parse the import block to check if it should be removed
-        try:
-          import_tree = ast.parse(import_block)
-          import_node = import_tree.body[0]
-        except (IndentationError, SyntaxError):
-          import_node = node  # fallback
-
-        remove = False
-        import_names = []
-        if isinstance(import_node, ast.ImportFrom):
-          # Remove relative imports
-          if import_node.level > 0:
-            remove = True
-          # Remove imports from basemodule
-          elif import_node.module and import_node.module.split(".")[0] == basemodule:
-            remove = True
-          if remove:
-            import_names = [alias.name for alias in import_node.names]
-        elif isinstance(import_node, ast.Import):
-          for alias in import_node.names:
-            if alias.name.split(".")[0] == basemodule:
-              remove = True
-              import_names.append(alias.name)
-          # Only add names if remove is True
-          if not remove:
-            import_names = []
-        if remove:
-          removed_imports.extend(import_names)
-        else:
-          new_lines.extend(lines[start:i])
-        # increment i to avoid infinite loop
-        continue  # already incremented i
-      else:
-        remove = False
-        import_names = []
-        if isinstance(node, ast.ImportFrom):
-          if node.level > 0:
-            remove = True
-          elif node.module and node.module.split(".")[0] == basemodule:
-            remove = True
-          if remove:
-            import_names = [alias.name for alias in node.names]
-        elif isinstance(node, ast.Import):
-          for alias in node.names:
-            if alias.name.split(".")[0] == basemodule:
-              remove = True
-              import_names.append(alias.name)
-          if not remove:
-            import_names = []
-        if remove:
-          removed_imports.extend(import_names)
-        else:
-          new_lines.append(line)
-        i += 1
-        continue
+      i = _process_node(basemodule, i, line, lines, new_lines, node, removed_imports)
     else:
       new_lines.append(line)
       i += 1
 
   return "\n".join(new_lines), "\n".join(removed_imports)
+
+
+def _process_node(
+    basemodule: str,
+    i: int,
+    line: str,
+    lines: list[str],
+    new_lines: list[str],
+    node: ast.Import | ast.ImportFrom,
+    removed_imports: list[ast.Import | ast.ImportFrom],
+) -> int:
+  """Process node in order to remove local imports. Private, for use by `remove_local_imports`."""
+  # Detect multi-line import (parenthesis)
+  if "(" in line.strip() and ")" not in line:
+    # Detect multi-line import (parenthesis)
+    # Find the closing parenthesis, even if comments are present
+    start = i
+    while i < len(lines) and not lines[i].strip().endswith(")"):
+      i += 1
+    i += 1  # include the closing parenthesis line
+    import_block = "\n".join(lines[start:i])
+    # Parse the import block to check if it should be removed
+    try:
+      import_tree = ast.parse(import_block)
+      import_node = import_tree.body[0]
+    except (IndentationError, SyntaxError):
+      import_node = node  # fallback
+
+    remove = False
+    import_names = []
+    if isinstance(import_node, ast.ImportFrom):
+      # Remove relative imports
+      if import_node.level > 0:
+        remove = True
+      # Remove imports from basemodule
+      elif import_node.module and import_node.module.split(".")[0] == basemodule:
+        remove = True
+      if remove:
+        import_names = [alias.name for alias in import_node.names]
+    elif isinstance(import_node, ast.Import):
+      for alias in import_node.names:
+        if alias.name.split(".")[0] == basemodule:
+          remove = True
+          import_names.append(alias.name)
+      # Only add names if remove is True
+      if not remove:
+        import_names = []
+    if remove:
+      removed_imports.extend(import_names)
+    else:
+      new_lines.extend(lines[start:i])
+  else:
+    remove = False
+    import_names = []
+    if isinstance(node, ast.ImportFrom):
+      if node.level > 0:
+        remove = True
+      elif node.module and node.module.split(".")[0] == basemodule:
+        remove = True
+      if remove:
+        import_names = [alias.name for alias in node.names]
+    elif isinstance(node, ast.Import):
+      for alias in node.names:
+        if alias.name.split(".")[0] == basemodule:
+          remove = True
+          import_names.append(alias.name)
+      if not remove:
+        import_names = []
+    if remove:
+      removed_imports.extend(import_names)
+    else:
+      new_lines.append(line)
+    i += 1
+  return i
 
 
 def parse_python_code(code):

@@ -12,6 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Defines the weight mapping from MaxText's Llama3 model to a vLLM-compatible format.
+
+This module provides the `LLAMA3_VLLM_MAPPING` dataclass, which contains all the
+necessary configurations to convert MaxText's Llama3 model weights into a
+format that can be loaded by HuggingFace's vLLM. This includes:
+- A direct mapping of parameter names.
+- Sharding specifications for distributed environments.
+- Hook functions for complex transformations (e.g., RoPE reordering).
+"""
+
 from dataclasses import dataclass
 
 import numpy as np
