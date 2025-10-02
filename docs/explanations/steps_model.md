@@ -14,7 +14,6 @@
  limitations under the License.
  -->
 
-(steps-model)=
 # Steps to build a Model
 
 ```{figure} ../_static/build_model.png
