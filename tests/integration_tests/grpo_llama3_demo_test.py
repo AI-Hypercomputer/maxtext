@@ -54,10 +54,7 @@ def test_grpo_llama3_demo():
     env["SKIP_JAX_PRECOMPILE"] = "1"
 
     # Build the command to run the demo
-    demo_script = os.path.join(
-        MAXTEXT_REPO_ROOT,
-        "src/MaxText/examples/grpo_llama3_demo.py"
-    )
+    demo_script = os.path.join(MAXTEXT_REPO_ROOT, "src/MaxText/examples/grpo_llama3_demo.py")
 
     # We'll modify the script to run with minimal steps for testing
     # by setting environment variables that the script can read
@@ -80,21 +77,14 @@ def test_grpo_llama3_demo():
     if result.returncode != 0:
       print("STDOUT:", result.stdout)
       print("STDERR:", result.stderr)
-      raise AssertionError(
-          f"GRPO Llama3 demo failed with return code {result.returncode}"
-      )
+      raise AssertionError(f"GRPO Llama3 demo failed with return code {result.returncode}")
 
     # Verify expected outputs in the logs
-    assert "HBM usage before loading model:" in result.stdout, \
-        "Model initialization not found in output"
-    assert "HBM usage after loading ref model:" in result.stdout, \
-        "Reference model loading not found in output"
-    assert "HBM usage after loading policy model:" in result.stdout, \
-        "Policy model loading not found in output"
-    assert "Pre GRPO Training:" in result.stdout, \
-        "Pre-training evaluation not found in output"
-    assert "Post GRPO Training:" in result.stdout, \
-        "Post-training evaluation not found in output"
+    assert "HBM usage before loading model:" in result.stdout, "Model initialization not found in output"
+    assert "HBM usage after loading ref model:" in result.stdout, "Reference model loading not found in output"
+    assert "HBM usage after loading policy model:" in result.stdout, "Policy model loading not found in output"
+    assert "Pre GRPO Training:" in result.stdout, "Pre-training evaluation not found in output"
+    assert "Post GRPO Training:" in result.stdout, "Post-training evaluation not found in output"
 
     print("GRPO Llama3 demo test passed successfully!")
 
