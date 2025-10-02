@@ -387,7 +387,7 @@ class Decoder(nn.Module):
       case DecoderBlockType.GEMMA2:
         return [gemma2.Gemma2DecoderLayer]
       case DecoderBlockType.GEMMA3:
-        return [gemma3.Gemma3DecoderLayer]
+        return [gemma3.Gemma3DecoderLayerToLinen]
       case DecoderBlockType.GPT3:
         return [gpt3.Gpt3DecoderLayer]
       case DecoderBlockType.GPT_OSS:
@@ -871,7 +871,7 @@ class Decoder(nn.Module):
     scan_length = cfg.num_decoder_layers // attention_pattern_length
 
     policy = self.get_remat_policy()
-    RemattedGemma3Block = self.set_remat_policy([gemma3.Gemma3ScannableBlock], policy)[0]
+    RemattedGemma3Block = self.set_remat_policy([gemma3.Gemma3ScannableBlockToLinen], policy)[0]
 
     layer_call_kwargs = {"bidirectional_mask": bidirectional_mask}
     layer_kwargs = {"num_of_layers": attention_pattern_length}
