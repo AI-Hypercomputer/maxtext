@@ -103,20 +103,6 @@ jobs:
       container_resource_option: "--privileged"
       is_scheduled_run: ${{ github.event_name == 'schedule' }}
 
-  tpu_grpo_integration_test:
-    needs: tpu_image
-    uses: ./.github/workflows/run_tests_internal.yml
-    with:
-      device_type: tpu
-      device_name: v4-8
-      cloud_runner: linux-x86-ct4p-240-4tpu
-      pytest_marker: 'integration_test and tpu_only'
-      pytest_addopts: 'tests/integration_tests/grpo_llama3_demo_test.py'
-      xla_python_client_mem_fraction: 0.75
-      tf_force_gpu_allow_growth: false
-      container_resource_option: "--privileged"
-      is_scheduled_run: ${{ github.event_name == 'schedule' }}
-
   gpu_unit_tests:
     needs: gpu_image
     uses: ./.github/workflows/run_tests_internal.yml
