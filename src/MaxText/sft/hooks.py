@@ -15,26 +15,31 @@
 
 """Training and data loading hooks for SFT"""
 
-from flax import nnx
 from collections import defaultdict
+from sys import version_info
+
+if version_info >= (3, 12):
+  from typing import override
+else:
+  from typing_extensions import override
+
 import jax
 import jax.numpy as jnp
 
-from MaxText.metric_logger import MetricLogger
-from MaxText.utils import gcs_utils
-from MaxText import exceptions
-from MaxText import maxtext_utils
-from MaxText import max_logging
-from MaxText import max_utils
-from MaxText.data_loader import DataLoader
-from MaxText.input_pipeline.input_pipeline_interface import create_data_iterator
+from flax import nnx
+
 from tunix.sft import peft_trainer
 from tunix.sft.hooks import DataHooks, TrainingHooks
-from typing_extensions import override
-from MaxText.utils.goodput_utils import (
-    GoodputEvent,
-    record_goodput,
-)
+
+from MaxText import exceptions
+from MaxText import max_logging
+from MaxText import max_utils
+from MaxText import maxtext_utils
+from MaxText.data_loader import DataLoader
+from MaxText.input_pipeline.input_pipeline_interface import create_data_iterator
+from MaxText.metric_logger import MetricLogger, MetadataKey
+from MaxText.utils import gcs_utils
+from MaxText.utils.goodput_utils import GoodputEvent, record_goodput
 
 
 class SFTTrainingHooks(TrainingHooks):
@@ -59,6 +64,8 @@ class SFTTrainingHooks(TrainingHooks):
       maxtext_utils.assert_params_sufficiently_sharded(params, self.mesh, self.config.sharding_tolerance)
 
     self.metric_logger.write_setup_info_to_tensorboard(params)
+    if MetadataKey.PER_DEVICE_TFLOPS in self.metric_logger.metadata:
+      train_ctx._flops_measured = True  # pylint: disable=protected-access
 
     if self.config.dump_hlo:
       jax.block_until_ready(state)  # Ensure compilation has finished
@@ -92,7 +99,7 @@ class SFTTrainingHooks(TrainingHooks):
     total_weights = jnp.sum(train_ctx.data_hooks.train_batch["targets_segmentation"] != 0)
 
     self.train_metadata[train_ctx.train_steps] = {
-      "total_weights": total_weights,
+        "total_weights": total_weights,
     }
 
   @override
@@ -181,7 +188,10 @@ class SFTDataHooks(DataHooks):
     """Loads the next batch of data for evaluation."""
     try:
       # Run evaluation only for `config.eval_steps` steps.
-      if self.config.eval_steps > 0 and train_ctx.training_hooks.eval_metadata["eval_step_count"] >= self.config.eval_steps:
+      if (
+          self.config.eval_steps > 0
+          and train_ctx.training_hooks.eval_metadata["eval_step_count"] >= self.config.eval_steps
+      ):
         self.eval_batch = None
       else:
         self.eval_batch = next(self.eval_data_iterator)

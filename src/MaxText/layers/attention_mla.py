@@ -651,7 +651,9 @@ class MLA(Attention):
       if self.config.mla_naive_kvcache:
         cached_values = self.update_kv_caches(key, value, decoder_segment_ids, model_mode, previous_chunk)
       else:
-        cached_values = self.update_mla_kv_caches(low_rank_main, key_rope, decoder_segment_ids, model_mode, previous_chunk)
+        cached_values = self.update_mla_kv_caches(
+            low_rank_main, key_rope, decoder_segment_ids, model_mode, previous_chunk
+        )
 
     return key, value, cached_values
 
@@ -721,4 +723,5 @@ class MLA(Attention):
       out = nn.with_logical_constraint(out, self.out_axis_names)
 
     out = self.out_projection(out)
+    out = checkpoint_name(out, "out_proj")
     return out

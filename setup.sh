@@ -189,14 +189,10 @@ if [[ "$MODE" == "stable" || ! -v MODE ]]; then
             python3 -m uv pip install 'jax[tpu]>0.4' -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
         fi
 
-        if [[ -n "$LIBTPU_GCS_PATH" ]]; then
-            # Install custom libtpu
-            echo "Installing libtpu.so from $LIBTPU_GCS_PATH to $libtpu_path"
-            # Install required dependency
-            python3 -m uv pip install -U crcmod
-            # Copy libtpu.so from GCS path
-            gsutil cp "$LIBTPU_GCS_PATH" "$libtpu_path"
-        fi
+        # TODO: Once tunix has support for GPUs, move it from here to requirements.txt
+        echo "Installing tunix for stable TPU environment"
+        python3 -m uv pip install 'google-tunix @ https://github.com/google/tunix/archive/6c2a613217ed6bb1c9d60088d6e3c67184821c69.zip'
+
         if [[ -n "$LIBTPU_GCS_PATH" ]]; then
             # Install custom libtpu
             echo "Installing libtpu.so from $LIBTPU_GCS_PATH to $libtpu_path"
@@ -256,6 +252,8 @@ elif [[ $MODE == "nightly" ]]; then
         fi
         echo "Installing nightly tensorboard plugin profile"
         python3 -m uv pip install tbp-nightly --upgrade
+        # Installing tunix
+        python3 -m uv pip install 'git+https://github.com/google/tunix.git'
     fi
     echo "Installing nightly tensorboard plugin profile"
     python3 -m uv pip install tbp-nightly --upgrade

@@ -172,7 +172,9 @@ def apply_chat_template(example, tokenizer_model, data_column_name):
     for message in example[data_column_name]:
       if message["role"] == "user":
         prompt = message
-        prompt_in_chat_template = tokenizer_model.apply_chat_template([prompt], add_generation_prompt=False, tokenize=False)
+        prompt_in_chat_template = tokenizer_model.apply_chat_template(
+            [prompt], add_generation_prompt=False, tokenize=False
+        )
         messages.append(prompt_in_chat_template)
         is_prompt.append(True)
       elif message["role"] == "assistant":
@@ -310,7 +312,9 @@ class HFDataSource(grain.RandomAccessDataSource):
     """update shard"""
     new_shard = self.dataset_shards[idx] + self.dataloading_host_count * self.num_threads
     if new_shard < self.n_shards:
-      max_logging.log(f"Updating host {self.dataloading_host_index} dataset {idx}, was on shard {self.dataset_shards[idx]}")
+      max_logging.log(
+          f"Updating host {self.dataloading_host_index} dataset {idx}, was on shard {self.dataset_shards[idx]}"
+      )
       max_logging.log(f"New shard is {new_shard}")
       self.dataset_shards[idx] = new_shard
       self.datasets[idx] = split_dataset_by_node(self.dataset, world_size=self.n_shards, rank=self.dataset_shards[idx])
@@ -431,8 +435,33 @@ class PadOrTrimToMaxLength(grain.MapTransform):
     return np.pad(x, pad_amount, constant_values=pad_id)[: self.max_length]
 
   def _pad_image(self, images):
+    """Pads the input images array to match the maximum required number of images per example.
+
+    The function computes the maximum number of allowed images either based on model constraints
+    (determined by model name and maximum sequence length) or the value provided in
+    `self.max_num_images_per_example` (if positive), whichever is smaller. If the provided
+    `images` array contains fewer images than the desired maximum, it pads the array with
+    zeros (dummy images) to meet the requirement.
+
+    Args:
+      images (np.ndarray): A numpy array of image data. The expected shape is
+          (num_images, height, width, channels), where num_images <= maximum allowed images.
+
+    Returns:
+      np.ndarray: An array of images padded with zero images (if necessary) such that its
+      first dimension equals the computed maximum number of images.
+
+    Raises:
+      AssertionError: If the number of images in the input exceeds the allowed maximum.
+
+    Notes:
+      - The computation of maximum images ensures that space is reserved in the sequence
+        for at least one text token.
+      - The dummy images used for padding are based on the image shape for initialization
+        of this model (ignoring batch size).
+    """
     image_offsets = multimodal_utils.get_image_offsets(self.model_name, None)
-    max_num_images = (self.max_length // image_offsets) -1  # -1 to reserve space for at least one text token
+    max_num_images = (self.max_length // image_offsets) - 1  # -1 to reserve space for at least one text token
     if self.max_num_images_per_example > 0:
       max_num_images = min(self.max_num_images_per_example, max_num_images)
     image_shape = multimodal_utils.get_dummy_image_shape_for_init(self.model_name)[2:]

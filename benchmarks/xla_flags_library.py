@@ -81,11 +81,9 @@ ENABLE_SPARSECORE_OFFLOADING_FOR_RS_AG_AR = (
     " --xla_tpu_enable_async_collective_fusion_fuse_all_gather=false"
     " --xla_tpu_enable_async_collective_fusion_fuse_all_reduce=false"
     " --xla_tpu_enable_async_collective_fusion_fuse_reduce_scatter=false"
-
     " --xla_tpu_enable_sparse_core_collective_offload_all_gather=true"
     " --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=true"
     " --xla_tpu_enable_sparse_core_collective_offload_all_reduce=true"
-
     " --xla_tpu_enable_all_gather_offload_tracing=true"
     " --xla_tpu_enable_reduce_scatter_offload_tracing=true"
     " --xla_tpu_enable_all_reduce_offload_tracing=true"
@@ -136,16 +134,13 @@ REDUCE_SCATTER_FUSION = (
 # xla_tpu_enable_data_parallel_all_reduce_opt:
 #   optimize DCN all-reduces used for data parallel sharding
 DATA_PARALLEL_OVERLAP = (
-    " --xla_tpu_enable_data_parallel_all_reduce_opt=true"
-    " --xla_tpu_data_parallel_opt_different_sized_ops=true"
+    " --xla_tpu_enable_data_parallel_all_reduce_opt=true" " --xla_tpu_data_parallel_opt_different_sized_ops=true"
 )
 
 # Enable Enhanced Launch Barrier.
 # Gracefully handle dispatch failures on TPU workers. For Pathways is required
 # for error propagation and out-of-order execution detection.
-ENHANCED_LAUNCH_BARRIER = (
-    " --xla_tpu_use_enhanced_launch_barrier=true"
-)
+ENHANCED_LAUNCH_BARRIER = " --xla_tpu_use_enhanced_launch_barrier=true"
 
 # Host offloading Flags. These are optimizations recommended when using host
 # offloading.
@@ -164,15 +159,11 @@ HOST_OFFLOAD_FLAGS = (
 )
 
 # Flags to optimize pipeline parallelism over DCN with large host offloading.
-PIPELINING_FLAGS = (
-    " --xla_tpu_iova_dma_chunk_size_bytes=16777216" # breaks DMA to/from host into 16M chunks
-)
+PIPELINING_FLAGS = " --xla_tpu_iova_dma_chunk_size_bytes=16777216"  # breaks DMA to/from host into 16M chunks
 
 # Disable bundle-aware CostModel which was causing worse perf b/357103386.
 # Some fusions in the backward pass of the model were 3x slower without this.
-DISABLE_BUNDLE_AWARE_COST_MODEL = (
-    " --xla_tpu_use_bundle_aware_cost_model_for_fusions=false"
-)
+DISABLE_BUNDLE_AWARE_COST_MODEL = " --xla_tpu_use_bundle_aware_cost_model_for_fusions=false"
 
 # Enable Silent Data Corruption (SDC) Checker
 # SDC Checker will check for chip / ici / hardware corruption events.
@@ -199,6 +190,4 @@ DEBUG_LOGS = {
 }
 
 # Disables collective matmul operations.
-DISABLE_COLLECTIVE_MATMUL = (
-    " --xla_jf_spmd_threshold_for_windowed_einsum_mib=1000000"
-)
+DISABLE_COLLECTIVE_MATMUL = " --xla_jf_spmd_threshold_for_windowed_einsum_mib=1000000"

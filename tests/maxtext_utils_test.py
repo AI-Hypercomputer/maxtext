@@ -165,7 +165,7 @@ class ModelWithMultipleCollections(nn.Module):
   def setup(self):
     self.kernel = self.variable("special_variables", "my_first_kernel", lambda: jnp.ones((4, 5)))
 
-  def __call__(self, x, y, encoder_images=None, nnx_method=None):
+  def __call__(self, x, y, encoder_images=None, nnx_method=None, model_mode=None):
     x = self.dense(x)
     x = x @ self.kernel.value
     return x
@@ -175,7 +175,9 @@ class MaxUtilsInitStateWithMultipleCollections(unittest.TestCase):
   """test class for multiple collection state in maxutils"""
 
   def setUp(self):
-    self.config = pyconfig.initialize([None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")], enable_checkpointing=False)
+    self.config = pyconfig.initialize(
+        [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")], enable_checkpointing=False
+    )
     self.model = ModelWithMultipleCollections()
     self.key1, self.key2, self.key3 = random.split(random.key(0), num=3)
     self.input = random.normal(self.key1, (self.config.global_batch_size_to_load, self.config.max_target_length))
@@ -211,7 +213,9 @@ class MaxUtilsInitTransformerState(unittest.TestCase):
   """Tests initialization of transformer states in max_utils.py"""
 
   def setUp(self):
-    self.config = pyconfig.initialize([None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")], enable_checkpointing=False)
+    self.config = pyconfig.initialize(
+        [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")], enable_checkpointing=False
+    )
     devices_array = maxtext_utils.create_device_mesh(self.config)
     self.mesh = Mesh(devices_array, self.config.mesh_axes)
     quant = quantizations.configure_quantization(self.config)
@@ -478,12 +482,12 @@ class TestPromptLogprobsFromPackedPrefill(unittest.TestCase):
     start1, L1 = 4, 3
 
     # Tokens per segment (last token of seg1 padding at pos 7)
-    toks = np.array([1, 2, 3, 1,   4, 0, 2, 0], dtype=np.int32)  # shape [S]
+    toks = np.array([1, 2, 3, 1, 4, 0, 2, 0], dtype=np.int32)  # shape [S]
     input_tokens = jnp.asarray(toks)[None, :]  # [B, S]
 
     # decoder_positions within each segment
-    pos0 = np.arange(0, L0)                  # [0,1,2,3]
-    pos1 = np.array([0, 1, 2, 3])            # last is padding for seg1
+    pos0 = np.arange(0, L0)  # [0,1,2,3]
+    pos1 = np.array([0, 1, 2, 3])  # last is padding for seg1
     decoder_positions = jnp.asarray(np.concatenate([pos0, pos1])[None, :])  # [B, S]
 
     # segment ids: 0 for first 4, 1 for next 4
@@ -553,9 +557,7 @@ class TestSamplingFunctions(unittest.TestCase):
     rngs = jax.random.split(self.rng, 100)
 
     for r in rngs:
-      token = inference_utils.sample_topk_topp_weighted(
-          self.logits, topk=topk, nucleus_topp=1.0, temperature=1.0, rng=r
-      )
+      token = inference_utils.sample_topk_topp_weighted(self.logits, topk=topk, nucleus_topp=1.0, temperature=1.0, rng=r)
       self.assertIn(token.item(), top_k_indices)
 
   def test_topp_filtering(self):
@@ -602,21 +604,13 @@ class TestSamplingFunctions(unittest.TestCase):
   def test_invalid_args_raise_error(self):
     """Tests that invalid arguments for topk and nucleus_topp raise errors."""
     with self.assertRaises(ValueError):
-      inference_utils.sample_topk_topp_weighted(
-          self.logits, topk=0, nucleus_topp=1.0, temperature=1.0, rng=self.rng
-      )
+      inference_utils.sample_topk_topp_weighted(self.logits, topk=0, nucleus_topp=1.0, temperature=1.0, rng=self.rng)
     with self.assertRaises(ValueError):
-      inference_utils.sample_topk_topp_weighted(
-          self.logits, topk=-1, nucleus_topp=1.0, temperature=1.0, rng=self.rng
-      )
+      inference_utils.sample_topk_topp_weighted(self.logits, topk=-1, nucleus_topp=1.0, temperature=1.0, rng=self.rng)
     with self.assertRaises(ValueError):
-      inference_utils.sample_topk_topp_weighted(
-          self.logits, topk=10, nucleus_topp=0.0, temperature=1.0, rng=self.rng
-      )
+      inference_utils.sample_topk_topp_weighted(self.logits, topk=10, nucleus_topp=0.0, temperature=1.0, rng=self.rng)
     with self.assertRaises(ValueError):
-      inference_utils.sample_topk_topp_weighted(
-          self.logits, topk=10, nucleus_topp=1.1, temperature=1.0, rng=self.rng
-      )
+      inference_utils.sample_topk_topp_weighted(self.logits, topk=10, nucleus_topp=1.1, temperature=1.0, rng=self.rng)
 
   def test_batch_dimension(self):
     """Tests that the function handles a batch of logits correctly."""
@@ -629,17 +623,13 @@ class TestSamplingFunctions(unittest.TestCase):
     # CORRECTED: Use vmap to handle batching for JAX's random functions.
     # We map over the first axis (0) of logits and rngs.
     # Other arguments (topk, nucleus_topp, temperature) are fixed (None).
-    vmapped_sample = vmap(
-        inference_utils.sample_topk_topp_weighted,
-        in_axes=(0, None, None, None, 0),
-        out_axes=0
-    )
+    vmapped_sample = vmap(inference_utils.sample_topk_topp_weighted, in_axes=(0, None, None, None, 0), out_axes=0)
 
     tokens = vmapped_sample(batched_logits, topk, 1.0, 1.0, rngs)
 
     self.assertEqual(tokens.shape, (batch_size,))
     for token in tokens:
-        self.assertIn(token.item(), top_k_indices)
+      self.assertIn(token.item(), top_k_indices)
 
 
 class TestCalculateBytesFromPytree(unittest.TestCase):
@@ -648,8 +638,8 @@ class TestCalculateBytesFromPytree(unittest.TestCase):
   def test_bytes_from_pytree_arrays(self):
     """Tests byte calculation with standard JAX and NumPy arrays."""
     params = {
-        "a": jnp.zeros((2, 3), jnp.float32), # 2 * 3 * 4 = 24 bytes
-        "b": np.zeros((5,), np.int32)        # 5 * 4 = 20 bytes
+        "a": jnp.zeros((2, 3), jnp.float32),  # 2 * 3 * 4 = 24 bytes
+        "b": np.zeros((5,), np.int32),  # 5 * 4 = 20 bytes
     }
     expected_total_bytes = 44
     self.assertEqual(max_utils.calculate_bytes_from_pytree(params), expected_total_bytes)
@@ -665,10 +655,10 @@ class TestCalculateBytesFromPytree(unittest.TestCase):
   def test_bytes_from_pytree_mixed_and_none(self):
     """Tests a heterogeneous pytree with mixed types including None and scalars."""
     params = {
-        "a": None,                               # 0 bytes
-        "b": 3,                                  # 8 bytes (int64)
-        "c": 1.0,                                # 8 bytes (float64)
-        "d": jax.ShapeDtypeStruct((4,), jnp.int8) # 4 * 1 = 4 bytes
+        "a": None,  # 0 bytes
+        "b": 3,  # 8 bytes (int64)
+        "c": 1.0,  # 8 bytes (float64)
+        "d": jax.ShapeDtypeStruct((4,), jnp.int8),  # 4 * 1 = 4 bytes
     }
     expected_total_bytes = 20
     self.assertEqual(max_utils.calculate_bytes_from_pytree(params), expected_total_bytes)
@@ -680,4 +670,3 @@ class TestCalculateBytesFromPytree(unittest.TestCase):
 
 if __name__ == "__main__":
   unittest.main()
-

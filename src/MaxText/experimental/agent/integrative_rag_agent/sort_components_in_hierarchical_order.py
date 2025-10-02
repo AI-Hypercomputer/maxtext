@@ -301,6 +301,7 @@ def sort_and_search_dependency(base_path, file_path, module):
   project_root = file_path.split(os.path.sep)[0]
 
   if os.path.exists(progress_status_file):
+    # pylint: disable=unbalanced-tuple-unpacking
     (
         q,
         processed_components,
@@ -350,10 +351,10 @@ def sort_and_search_dependency(base_path, file_path, module):
           file_analysis_cache[comp_id] = get_file_components(
               file_url, module=comp_name, project_root=project_root, add_external_dependencies=True
           )
-        except Exception as e:
+        except (FileNotFoundError, IOError, KeyError) as e:
           logger.error("Could not analyze file with subcompnenet %s. Error: %s", file_url, e)
           continue  # Skip this file if it cannot be analyzed
-      except Exception as e:
+      except (IOError, KeyError) as e:
         logger.error("Could not analyze file %s. Error: %s", file_url, e)
         continue  # Skip this file if it cannot be analyzed
     else:

@@ -148,7 +148,9 @@ def main(raw_args=None) -> None:
   parser.add_argument(
       "--gcs-bucket", type=str, required=False, default=None, help="A GCS bucket to store logits, without gs://."
   )
-  parser.add_argument("--hf-model-path", type=str, required=False, default=None, help="local path to checkpoint if exists.")
+  parser.add_argument(
+      "--hf-model-path", type=str, required=False, default=None, help="local path to checkpoint if exists."
+  )
   parser.add_argument(
       "--image-paths", type=str, required=False, default=None, help="A semicolon-separated list of image_paths."
   )

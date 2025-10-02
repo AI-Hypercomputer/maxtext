@@ -12,6 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Tests for the Ahead-of-Time (AOT) compilation script.
+
+This module contains unit tests for `train_compile.py`, ensuring that various
+model configurations and parallelism strategies can be successfully compiled
+for different hardware topologies.
+"""
 
 import unittest
 import os.path
@@ -97,7 +103,7 @@ class TrainCompile(unittest.TestCase):
             "compile_topology_num_slices=1",
             "per_device_batch_size=1",
             "remat_policy=custom",
-            "context=device" # Context is our name for the splash attention output for both TPU and GPU kernels.      
+            "context=device",  # Context is our name for the splash attention output for both TPU and GPU kernels.
         )
     )
 
@@ -655,7 +661,7 @@ class TrainCompile(unittest.TestCase):
             "scan_layers=True",
             "sparse_matmul=True",
             "megablox=True",
-            "attention=dot_product", # flash attention: need JAX version >= 0.7.2.dev20250824
+            "attention=dot_product",  # flash attention: need JAX version >= 0.7.2.dev20250824
         )
     )
 
@@ -677,7 +683,7 @@ class TrainCompile(unittest.TestCase):
             "scan_layers=True",
             "sparse_matmul=False",
             "capacity_factor=-1",
-            "attention=dot_product", # flash attention: need JAX version >= 0.7.2.dev20250824
+            "attention=dot_product",  # flash attention: need JAX version >= 0.7.2.dev20250824
         )
     )
 

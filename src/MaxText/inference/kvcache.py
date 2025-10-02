@@ -310,8 +310,9 @@ class KVCache(nnx.Module):
     self.model_mode = model_mode
     self.use_chunked_prefill = use_chunked_prefill
 
-    self._initialize_prefill_caches(model_mode)
-    self._initialize_ar_cache_vars(model_mode)
+    if model_mode in (MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE):
+      self._initialize_prefill_caches(model_mode)
+      self._initialize_ar_cache_vars(model_mode)
 
   @property
   def prefill_key_vars(self):
@@ -510,7 +511,7 @@ class KVCache(nnx.Module):
 
     assert not self.kv_quant, "Not support kv_quant now."
     if decoder_segment_ids is not None:
-      self.batch, segment_id_seq_len = decoder_segment_ids.shape
+      _, segment_id_seq_len = decoder_segment_ids.shape
       assert self.key_seq_len == segment_id_seq_len, f"{self.key_seq_len=}, {segment_id_seq_len=} should match."
 
     assert key.dtype == value.dtype, "Key and Value Dtypes should match."
@@ -694,6 +695,12 @@ class KVCache(nnx.Module):
 
     else:
       one_hot_indices = one_hot_indices.astype(int)
+
+      # Align batch size for cache with new token in decoding
+      if cached_key.value.shape[2] != one_token_key_shaped_for_cache.shape[2]:
+        cached_key.value = jnp.repeat(cached_key.value, one_token_key_shaped_for_cache.shape[2], axis=2)
+        cached_value.value = jnp.repeat(cached_value.value, one_token_value_shaped_for_cache.shape[2], axis=2)
+
       cached_key.value = jax.lax.dynamic_update_index_in_dim(
           cached_key.value, one_token_key_shaped_for_cache, ar_cache_update_idx, ar_cache_update_axis
       )
@@ -773,6 +780,11 @@ class KVCache(nnx.Module):
         use_ragged_attention,
     )
     active_indicator = jnp.zeros((self.batch, 1), dtype=jnp.int32) + DECODING_ACTIVE_SEQUENCE_INDICATOR
+
+    # Align batch size for cached segment IDs with indicator in decoding
+    if cached_ar_segment_id_var.value.shape[0] != active_indicator.shape[0]:
+      cached_ar_segment_id_var.value = jnp.repeat(cached_ar_segment_id_var.value, active_indicator.shape[0], axis=0)
+
     cached_ar_segment_id_var.value = jax.lax.dynamic_update_index_in_dim(
         cached_ar_segment_id_var.value, active_indicator, jnp.squeeze(cache_ar_index_var.value), 1
     )

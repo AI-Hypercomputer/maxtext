@@ -1,0 +1,78 @@
+# Copyright 2023–2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+
+#!/bin/bash
+set -e
+
+# ==============================================================================
+# 1. User-Configurable Variables
+# ==============================================================================
+
+# -- GKE Cluster Configuration --
+# (<your_gke_cluster>, <your_gcp_project>, <your_gcp_zone>)
+export CLUSTER="<your-gke-cluster>"
+export DEVICE_TYPE="v5p-16"
+export PROJECT="<your-gcp-project>"
+export ZONE="<your-gcp-zone>"
+
+# -- XPK Workload Configuration --
+# (<YYYY-MM-DD>, <your_hugging_face_token>)
+export RUNNAME="my-server-$(date +%Y-%m-%d-%H-%M-%S)"
+export DOCKER_IMAGE="gcr.io/tpu-prod-env-multipod/maxtext_jax_nightly:<YYYY-MM-DD>"
+export HF_TOKEN="<your_hugging_face_token>" # Optional: if your tokenizer is private
+
+# -- Model Configuration --
+# IMPORTANT: Replace these with your model's details.
+# (<your_model_name>, <path_or_name_to_your_tokenizer>, <path_to_your_checkpoint>)
+export MODEL_NAME="qwen3-30b-a3b"
+export TOKENIZER_PATH="Qwen/Qwen3-30B-A3B-Thinking-2507"
+export LOAD_PARAMETERS_PATH="<path_to_your_checkpoint>"
+export PER_DEVICE_BATCH_SIZE=4
+# Parallelism settings should match the number of chips on your device.
+# For a v5p-16 (8 chips), the product of parallelism values should be 8.
+export ICI_TENSOR_PARALLELISM=4
+export ICI_EXPERT_PARALLELISM=2
+
+# ==============================================================================
+# 2. Define the Command to Run on the Cluster
+# ==============================================================================
+# This command installs dependencies and then starts the server.
+CMD="export HF_TOKEN=${HF_TOKEN} && \
+     pip install --upgrade pip && \
+     pip install -r benchmarks/api_server/requirements.txt && \
+     bash benchmarks/api_server/start_server.sh \
+        MaxText/configs/base.yml \
+        model_name=\"${MODEL_NAME}\" \
+        tokenizer_path=\"${TOKENIZER_PATH}\" \
+        load_parameters_path=\"${LOAD_PARAMETERS_PATH}\" \
+        per_device_batch_size=${PER_DEVICE_BATCH_SIZE} \
+        ici_tensor_parallelism=${ICI_TENSOR_PARALLELISM} \
+        ici_expert_parallelism=${ICI_EXPERT_PARALLELISM} \
+        tokenizer_type=\"huggingface\" \
+        return_log_prob=True"
+
+# ==============================================================================
+# 3. Launch the Workload
+# ==============================================================================
+echo "Launching workload ${RUNNAME}..."
+xpk workload create --workload "${RUNNAME}" \
+  --base-docker-image "${DOCKER_IMAGE}" \
+  --command "${CMD}" \
+  --num-slices=1  \
+  --cluster "${CLUSTER}" --device-type "${DEVICE_TYPE}" --project "${PROJECT}" --zone "${ZONE}"
+
+echo "Workload ${RUNNAME} created."
+echo "Use the following command to connect:"
+echo "bash benchmarks/api_server/port_forward_xpk.sh job_name=${RUNNAME} project=${PROJECT} zone=${ZONE} cluster=${CLUSTER}"
