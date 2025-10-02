@@ -493,9 +493,9 @@ def initialize(argv: Sequence[str]) -> tuple[pyconfig.HyperParameters, Any, Any]
   # TODO: mazumdera@ : ensure missing mandatory fields in base.yml are filled in in argv,
   # or fill in here
   config = pyconfig.initialize(argv)
-  jax.config.update("jax_use_shardy_partitioner", config.shardy)
   max_utils.print_system_information()
   validate_train_config(config)
+  jax.config.update("jax_use_shardy_partitioner", config.shardy)
   os.environ["TFDS_DATA_DIR"] = config.dataset_path or ""
   vertex_tensorboard_manager = VertexTensorboardManager()
   if config.use_vertex_tensorboard or os.environ.get("UPLOAD_DATA_TO_TENSORBOARD"):
