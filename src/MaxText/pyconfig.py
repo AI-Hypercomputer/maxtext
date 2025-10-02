@@ -772,7 +772,7 @@ def create_parallelisms_list(raw_keys):
   ici_parallelism = []
   dcn_parallelism = []
 
-  if raw_keys["diloco_enabled"] :
+  if raw_keys["enable_diloco"] :
     ici_parallelism.append(raw_keys["ici_diloco_parallelism"])
     dcn_parallelism.append(raw_keys["dcn_diloco_parallelism"])
   
@@ -806,7 +806,7 @@ def create_parallelisms_list(raw_keys):
   ])
   raw_keys["ici_parallelism"] = ici_parallelism
   raw_keys["dcn_parallelism"] = dcn_parallelism
-  if raw_keys["diloco_enabled"] :
+  if raw_keys["enable_diloco"] :
     raw_keys["num_diloco_replicas"] = int(raw_keys["ici_diloco_parallelism"] * raw_keys["dcn_diloco_parallelism"])
   else:
     raw_keys["num_diloco_replicas"] = 1

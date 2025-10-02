@@ -507,7 +507,7 @@ def create_device_mesh(config, devices=None):
   ici_parallelism = [
   ]
 
-  if config.diloco_enabled:
+  if config.enable_diloco:
     dcn_parallelism.append(config.dcn_diloco_parallelism)
     ici_parallelism.append(config.ici_diloco_parallelism)
 
