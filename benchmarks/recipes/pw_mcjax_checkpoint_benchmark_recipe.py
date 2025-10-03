@@ -23,6 +23,7 @@ import datetime
 import dataclasses
 import os
 import args_helper as helper
+from benchmarks.benchmark_utils import get_xpk_path
 
 from benchmarks import maxtext_trillium_model_configs as model_configs
 import benchmarks.maxtext_xpk_runner as mxr
@@ -40,7 +41,7 @@ COUNTRY = "us"
 DEVICE_TYPE = "v6e-256"
 
 # Other parameters (MUST BE SET BY USER)
-XPK_PATH = os.path.join("~", "xpk")  # We're running this script from the maxtext directory
+XPK_PATH = get_xpk_path()
 USER = os.environ["USER"]
 BASE_OUTPUT_DIRECTORY = f"gs://{USER}-{PROJECT}-{COUNTRY}/pw_mcjax_benchmarking/"
 # This needs to be set to True to test restore and if you want to restore from
