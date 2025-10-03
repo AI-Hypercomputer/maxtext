@@ -824,6 +824,7 @@ posemb_type_for_vit: "learn"
 # -1 means no limit, and will pad to the max possible number of images determined by sequence length.
 # Set it to avoid unnecessary padding if you know the maximum number of images per example.
 max_num_images_per_example: -1
+image_resize: -1 # Resize image to this size, -1 means no resize. Helps simplify llama4 multimodal decoding w.r.t no tiling needed
 
 ### llama4 multi modal configs
 hidden_size_for_vit: 1408
