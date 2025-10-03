@@ -107,9 +107,10 @@ def build_diloco_state(
     # Outer state retains a single copy of the model parameters and optimizer state.
     outer_params = state.params
     outer_opt_state = outer_optimizer.init(outer_params)
+    outer_opt_state_sharding = jax.tree_util.tree_map(lambda x: x.sharding, outer_opt_state)
     return DiLoCoTrainState(
         inner_state=inner_state, outer_params=outer_params, outer_opt_state=outer_opt_state, step=state.step
-    )
+    ), outer_opt_state_sharding
 
   return init_diloco_state()
 

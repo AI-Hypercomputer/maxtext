@@ -373,7 +373,7 @@ def train_loop(config, recorder, state=None):
   if config.enable_diloco:
     # init_diloco_state_partial = functools.partial(diloco.build_diloco_state, config, lambda: state)
     train_step_partial = functools.partial(train_step, model, config, state_mesh_shardings)
-    state = diloco.build_diloco_state(config, lambda: state)
+    state, outer_opt_state_sharding = diloco.build_diloco_state(config, lambda: state)
     
     # create state_mesh_shardings for the DilocoState
     def add_diloco_to_sharding(pytree):
@@ -392,7 +392,7 @@ def train_loop(config, recorder, state=None):
     diloco_state_shardings = diloco.DiLoCoTrainState(
       inner_state_shardings,
       state_mesh_shardings.params,
-      None,
+      outer_opt_state_sharding,
       state_mesh_shardings.step,
     )
     
