@@ -398,7 +398,7 @@ model_config = llama3_lib.ModelConfig.llama3_1_8b()
 config_ref = pyconfig.initialize(
     [
         "",
-        os.path.join(MAXTEXT_ASSETS_ROOT, "configs", "base.yml"),
+        os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
     ],
     base_output_directory="dummy",  # This is not used in Tunix.
     run_name="test-tunix-maxtext-llama3.1-8b",
