@@ -64,8 +64,8 @@ deepseek_v3_fsdp_v5p_512_nocapp = _add_to_model_dictionary(
             "dtype": "bfloat16",
             "attention": "flash",
             "tile_batch_seq": 512,
-            "tile_activation_dim": 1024, 
-            "tile_weight_dim": 2048,
+            "tile_embed_dim": 1024, 
+            "tile_mlp_dim": 2048,
         },
         xla_flags=(
             xla_flags_library.GF_FLAGS
