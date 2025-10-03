@@ -76,7 +76,9 @@ def create_training_tools(config, model, mesh):
   return init_rng, checkpoint_manager, learning_rate_schedule, tx
 
 
-def jit_train_step(config, model, state, state_mesh_shardings, data_sharding, train_step):
+def jit_train_step(
+    config, model, state, state_mesh_shardings, data_sharding, train_step, params_shardings
+):
   """Returns a JIT-compiled train step function, which is loaded from a file if specified in the config."""
   (
       functional_train,
@@ -84,7 +86,9 @@ def jit_train_step(config, model, state, state_mesh_shardings, data_sharding, tr
       out_shardings,
       static_argnums,
       donate_argnums,
-  ) = maxtext_utils.get_functional_train_with_signature(train_step, data_sharding, state_mesh_shardings, model, config)
+  ) = maxtext_utils.get_functional_train_with_signature(
+      train_step, data_sharding, state_mesh_shardings, model, config, params_shardings
+  )
 
   # Define the compilation of functional_train, either by loading the compiled version or wrapping a new one in a jit
   if config.compiled_trainstep_file != "":
@@ -136,10 +140,13 @@ def jit_train_and_eval_step(
     train_step,
     eval_step=None,
     eval_data_iterator=None,
+    params_shardings=None,
 ):
   """Returns a JIT-compiled train and eval step function."""
   data_sharding = maxtext_utils.get_input_data_sharding(config, mesh)
-  p_train_step = jit_train_step(config, model, state, state_mesh_shardings, data_sharding, train_step)
+  p_train_step = jit_train_step(
+      config, model, state, state_mesh_shardings, data_sharding, train_step, params_shardings
+  )
   p_eval_step = None
   if eval_data_iterator:
     p_eval_step = jit_eval_step(config, model, state_mesh_shardings, data_sharding, eval_step)
@@ -274,3 +281,13 @@ def validate_train_config(config):
         " different attention mechanism. With synthetic data, the format is not"
         " important as packing is not applied."
     )
+
+  # Automatically disable shardy when gradient accumulation is enabled
+  if config.gradient_accumulation_steps > 1 and config.shardy:
+    max_logging.log(
+        "WARNING: Automatically setting shardy=False because"
+        f" gradient_accumulation_steps={config.gradient_accumulation_steps} > 1."
+        " Shardy is not compatible with gradient accumulation."
+    )
+    # Access internal config dictionary to modify the value
+    object.__getattribute__(config, "_config").keys["shardy"] = False
