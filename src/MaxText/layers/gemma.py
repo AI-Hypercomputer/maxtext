@@ -14,22 +14,27 @@
 
 """Specialised layers for Gemma."""
 
+from typing import Optional
+
+from flax import linen as nn
+from flax import nnx
 from jax.ad_checkpoint import checkpoint_name
 from jax.sharding import Mesh
 import jax.numpy as jnp
 
-from flax import linen as nn
-
+from MaxText import max_utils
 from MaxText.common_types import Config
+from MaxText.layers import initializers
+from MaxText.layers import nnx_wrappers
 from MaxText.layers import quantizations
-from MaxText.layers.attentions import attention_as_linen
-from MaxText.layers.linears import mlp_block
-from MaxText.layers.normalizations import rms_norm
+from MaxText.layers.attentions import Attention
+from MaxText.layers.linears import Dropout, MlpBlock
+from MaxText.layers.normalizations import RMSNorm
 from MaxText.layers.quantizations import AqtQuantization as Quant
 
 
 # Decoder and Model definitions
-class GemmaDecoderLayer(nn.Module):
+class GemmaDecoderLayer(nnx.Module):
   """Transformer decoder layer that attends to the encoder."""
 
   config: Config
@@ -37,7 +42,81 @@ class GemmaDecoderLayer(nn.Module):
   model_mode: str
   quant: None | Quant = None
 
-  @nn.compact
+  def __init__(
+      self,
+      config: Config,
+      mesh: Mesh,
+      model_mode: str,
+      quant: Optional[Quant] = None,
+      *,
+      rngs: nnx.Rngs,
+  ):
+    self.config = config
+    self.mesh = mesh
+    self.model_mode = model_mode
+    self.quant = quant
+    self.rngs = rngs
+
+    batch_size, seq_len = max_utils.get_batch_seq_len_for_mode(config, model_mode)
+    dummy_inputs_shape = (batch_size, seq_len, config.emb_dim)
+
+    self.pre_self_attention_norm = RMSNorm(
+        num_features=config.emb_dim,
+        dtype=config.dtype,
+        weight_dtype=config.weight_dtype,
+        kernel_axes=("norm",),
+        rngs=self.rngs,
+    )
+
+    self.self_attention = Attention(
+        config=config,
+        num_query_heads=config.num_query_heads,
+        num_kv_heads=config.num_kv_heads,
+        head_dim=config.head_dim,
+        max_target_length=config.max_target_length,
+        max_prefill_predict_length=config.max_prefill_predict_length,
+        attention_kernel=config.attention,
+        inputs_q_shape=dummy_inputs_shape,
+        inputs_kv_shape=dummy_inputs_shape,
+        mesh=self.mesh,
+        dtype=config.dtype,
+        weight_dtype=config.weight_dtype,
+        dropout_rate=config.dropout_rate,
+        float32_qk_product=config.float32_qk_product,
+        float32_logits=config.float32_logits,
+        quant=self.quant,
+        kv_quant=quantizations.configure_kv_quant(config),
+        use_ragged_attention=config.use_ragged_attention,
+        ragged_block_size=config.ragged_block_size,
+        model_mode=self.model_mode,
+        rngs=self.rngs,
+    )
+
+    self.pre_ffw_norm = RMSNorm(
+        num_features=config.emb_dim,
+        dtype=config.dtype,
+        weight_dtype=config.weight_dtype,
+        kernel_axes=("norm",),
+        rngs=self.rngs,
+    )
+
+    self.mlp = MlpBlock(
+        config=config,
+        in_features=config.emb_dim,
+        intermediate_dim=config.mlp_dim,
+        activations=config.mlp_activations,
+        intermediate_dropout_rate=config.dropout_rate,
+        dtype=config.dtype,
+        weight_dtype=config.weight_dtype,
+        quant=self.quant,
+        model_mode=self.model_mode,
+        rngs=self.rngs,
+    )
+
+    self.dropout = Dropout(rate=config.dropout_rate, broadcast_dims=(-2,), rngs=self.rngs)
+
+    self.activation_axis_names = ("activation_batch", "activation_norm_length", "activation_embed")
+
   def __call__(
       self,
       inputs,
@@ -50,46 +129,14 @@ class GemmaDecoderLayer(nn.Module):
       page_state=None,
       slot=None,
   ):
-    cfg = self.config
-    mesh = self.mesh
-    inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
+    inputs = nn.with_logical_constraint(inputs, self.activation_axis_names)
     inputs = checkpoint_name(inputs, "decoder_layer_input")
     # inputs: embedded inputs to the decoder with shape [batch, length, emb_dim]
-    lnx = rms_norm(
-        num_features=inputs.shape[-1],
-        dtype=cfg.dtype,
-        weight_dtype=cfg.weight_dtype,
-        name="pre_self_attention_norm",
-        kernel_axes=("norm",),
-    )(inputs)
+    lnx = self.pre_self_attention_norm(inputs)
 
-    lnx = nn.with_logical_constraint(lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
+    lnx = nn.with_logical_constraint(lnx, self.activation_axis_names)
 
-    attention_layer = attention_as_linen(
-        config=cfg,
-        num_query_heads=cfg.num_query_heads,
-        num_kv_heads=cfg.num_kv_heads,
-        head_dim=cfg.head_dim,
-        max_target_length=cfg.max_target_length,
-        max_prefill_predict_length=cfg.max_prefill_predict_length,
-        attention_kernel=cfg.attention,
-        inputs_q_shape=lnx.shape,
-        inputs_kv_shape=lnx.shape,
-        mesh=mesh,
-        dtype=cfg.dtype,
-        weight_dtype=cfg.weight_dtype,
-        dropout_rate=cfg.dropout_rate,
-        name="self_attention",
-        float32_qk_product=cfg.float32_qk_product,
-        float32_logits=cfg.float32_logits,
-        quant=self.quant,
-        kv_quant=quantizations.configure_kv_quant(cfg),
-        use_ragged_attention=cfg.use_ragged_attention,
-        ragged_block_size=cfg.ragged_block_size,
-        model_mode=model_mode,
-    )
-
-    attention_lnx = attention_layer(
+    attention_lnx = self.self_attention(
         lnx,
         lnx,
         decoder_positions,
@@ -98,46 +145,26 @@ class GemmaDecoderLayer(nn.Module):
         model_mode=model_mode,
     )
 
-    attention_lnx = nn.with_logical_constraint(
-        attention_lnx, ("activation_batch", "activation_norm_length", "activation_embed")
-    )
+    attention_lnx = nn.with_logical_constraint(attention_lnx, self.activation_axis_names)
     attention_lnx += inputs
     residual = attention_lnx
-    attn_output = rms_norm(
-        num_features=attention_lnx.shape[-1],
-        dtype=cfg.dtype,
-        weight_dtype=cfg.weight_dtype,
-        name="pre_ffw_norm",
-        kernel_axes=("norm",),
-    )(attention_lnx)
 
-    # MLP block.
-    mlp_lnx = mlp_block(
-        in_features=attn_output.shape[-1],
-        intermediate_dim=cfg.mlp_dim,
-        activations=cfg.mlp_activations,
-        intermediate_dropout_rate=cfg.dropout_rate,
-        dtype=cfg.dtype,
-        weight_dtype=cfg.weight_dtype,
-        name="mlp",
-        config=cfg,
-        quant=self.quant,
-    )(attn_output, deterministic=deterministic)
-    mlp_lnx = nn.with_logical_constraint(mlp_lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
+    attn_output = self.pre_ffw_norm(attention_lnx)
+
+    mlp_lnx = self.mlp(attn_output, deterministic=deterministic)
+    mlp_lnx = nn.with_logical_constraint(mlp_lnx, self.activation_axis_names)
 
     next_layer_addition = mlp_lnx + residual
 
-    next_layer_addition_dropped_out = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(
-        next_layer_addition, deterministic=deterministic
-    )
+    next_layer_addition_dropped_out = self.dropout(next_layer_addition, deterministic=deterministic)
 
     layer_output = next_layer_addition_dropped_out
     layer_output = nn.with_logical_constraint(
         layer_output,
-        ("activation_batch", "activation_norm_length", "activation_embed"),
+        self.activation_axis_names,
     )
 
-    if cfg.record_internal_nn_metrics:
+    if self.config.record_internal_nn_metrics:
       self.sow("intermediates", "activation_mean", jnp.mean(layer_output))
       self.sow("intermediates", "activation_stdev", jnp.std(layer_output))
       self.sow(
@@ -146,7 +173,13 @@ class GemmaDecoderLayer(nn.Module):
           jnp.sum(layer_output == 0) / jnp.size(layer_output),
       )
 
-    if cfg.scan_layers:
+    if self.config.scan_layers:
       return layer_output, None
     else:
       return layer_output
+
+
+GemmaDecoderLayerToLinen = nnx_wrappers.to_linen_class(
+    GemmaDecoderLayer,
+    base_metadata_fn=initializers.variable_to_logically_partitioned,
+)
