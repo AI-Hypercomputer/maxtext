@@ -853,18 +853,6 @@ class Attention(nnx.Module):
     Returns:
       output of shape `[batch, length, q_features]`.
     """
-    if model_mode == MODEL_MODE_PREFILL:
-      inputs_q = nn.with_logical_constraint(inputs_q, self.prefill_input_axis_names)
-      inputs_kv = nn.with_logical_constraint(inputs_kv, self.prefill_input_axis_names)
-    elif model_mode == MODEL_MODE_TRAIN and self.config.expert_shard_attention_option == EP_AS_CONTEXT:
-      inputs_q = nn.with_logical_constraint(inputs_q, self.ep_input_axis_names)
-      inputs_kv = nn.with_logical_constraint(inputs_kv, self.ep_input_axis_names)
-    elif model_mode == MODEL_MODE_TRAIN:
-      inputs_q = nn.with_logical_constraint(inputs_q, self.input_axis_names)
-      inputs_kv = nn.with_logical_constraint(inputs_kv, self.input_axis_names)
-    else:
-      inputs_q = nn.with_logical_constraint(inputs_q, self.decode_input_axis_names)
-      inputs_kv = nn.with_logical_constraint(inputs_kv, self.decode_input_axis_names)
 
     # apply projection.
     if self.config.fused_qkv:
@@ -905,23 +893,6 @@ class Attention(nnx.Module):
       )
       query = (query * attn_scales[:, :, jnp.newaxis, jnp.newaxis]).astype(self.dtype)
 
-    if model_mode == MODEL_MODE_PREFILL:
-      query = nn.with_logical_constraint(query, self.prefill_query_axis_names)
-      key = nn.with_logical_constraint(key, self.prefill_key_axis_names)
-      value = nn.with_logical_constraint(value, self.prefill_value_axis_names)
-    elif model_mode == MODEL_MODE_AUTOREGRESSIVE:
-      query = nn.with_logical_constraint(query, (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV))
-      key = nn.with_logical_constraint(key, (DECODE_BATCH, DECODE_LENGTH, KV_HEAD, D_KV))
-      value = nn.with_logical_constraint(value, (DECODE_BATCH, DECODE_LENGTH, KV_HEAD, D_KV))
-    elif model_mode == MODEL_MODE_TRAIN and self.config.expert_shard_attention_option == EP_AS_CONTEXT:
-      query = nn.with_logical_constraint(query, self.ep_query_axis_names)
-      key = nn.with_logical_constraint(key, self.ep_key_axis_names)
-      value = nn.with_logical_constraint(value, self.ep_value_axis_names)
-    else:
-      query = nn.with_logical_constraint(query, self.query_axis_names)
-      key = nn.with_logical_constraint(key, self.key_axis_names)
-      value = nn.with_logical_constraint(value, self.value_axis_names)
-
     query = checkpoint_name(query, "query_proj")
     key = checkpoint_name(key, "key_proj")
     value = checkpoint_name(value, "value_proj")
@@ -949,14 +920,6 @@ class Attention(nnx.Module):
           self.sinks,
       )
 
-    if model_mode == MODEL_MODE_PREFILL:
-      out = nn.with_logical_constraint(out, self.prefill_out_axis_names)
-    elif model_mode == MODEL_MODE_TRAIN and self.config.expert_shard_attention_option == EP_AS_CONTEXT:
-      out = nn.with_logical_constraint(out, self.ep_out_axis_names)
-    elif model_mode == MODEL_MODE_TRAIN:
-      out = nn.with_logical_constraint(out, self.out_axis_names)
-    else:
-      out = nn.with_logical_constraint(out, self.decode_out_axis_names)
     out = self.out_projection(out)
     out = checkpoint_name(out, "out_proj")
     return out

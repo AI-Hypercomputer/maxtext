@@ -151,13 +151,6 @@ class Embed(nnx.Module):
     else:
       output = jnp.asarray(embedding, self.dtype)[inputs]
 
-    output_prefill_axis_names = ("activation_embed_and_logits_batch", "prefill_activation_length", "activation_embed")
-    output_default_axis_names = ("activation_embed_and_logits_batch", "activation_length_no_exp", "activation_embed")
-
-    if model_mode == MODEL_MODE_PREFILL:
-      output = nn.with_logical_constraint(output, output_prefill_axis_names)
-    else:
-      output = nn.with_logical_constraint(output, output_default_axis_names)
     return output
 
   def attend(self, query: Array) -> Array:

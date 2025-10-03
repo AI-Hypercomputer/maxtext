@@ -847,3 +847,6 @@ subslice_shape: ""
 
 # NNX
 enable_nnx: false
+
+# ZeRO-1 Sharding
+shard_optimizer_over_data: False
