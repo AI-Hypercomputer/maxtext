@@ -479,7 +479,7 @@ class MaxEngine(engine_api.Engine):
       if images.ndim == 3:
         # For Gemma3 single image, add batch and image count dimensions
         images = images[jnp.newaxis, jnp.newaxis, ...]
-        image_masks = image_masks[jnp.newaxis, ...] if image_masks is not None else None
+        image_masks = image_masks[jnp.newaxis, jnp.newaxis, ...] if image_masks is not None else None
       elif images.ndim == 4:
         # add batch dimension
         images = images[jnp.newaxis, ...]
