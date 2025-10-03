@@ -373,7 +373,8 @@ def train_loop(config, recorder, state=None):
   if config.enable_diloco:
     # init_diloco_state_partial = functools.partial(diloco.build_diloco_state, config, lambda: state)
     train_step_partial = functools.partial(train_step, model, config, state_mesh_shardings)
-    state, outer_opt_state_sharding = diloco.build_diloco_state(config, lambda: state)
+    with mesh:
+      state, outer_opt_state_sharding = diloco.build_diloco_state(config, lambda: state)
     
     # create state_mesh_shardings for the DilocoState
     def add_diloco_to_sharding(pytree):
@@ -382,7 +383,7 @@ def train_loop(config, recorder, state=None):
       of any NamedSharding object that doesn't have an empty PartitionSpec.
       """
       def map_fn(leaf):
-        if isinstance(leaf, jax.sharding.NamedSharding) and leaf.spec != jax.sharding.PartitionSpec():
+        if isinstance(leaf, jax.sharding.NamedSharding):
           new_spec = jax.sharding.PartitionSpec('diloco', *leaf.spec)
           return jax.sharding.NamedSharding(mesh=leaf.mesh, spec=new_spec)
         return leaf
@@ -393,7 +394,7 @@ def train_loop(config, recorder, state=None):
       inner_state_shardings,
       state_mesh_shardings.params,
       outer_opt_state_sharding,
-      state_mesh_shardings.step,
+      jax.sharding.NamedSharding(mesh=state_mesh_shardings.step.mesh, spec=jax.sharding.PartitionSpec()),
     )
     
     diloco_train_step = diloco.build_diloco_train_step(config, train_step_partial)
