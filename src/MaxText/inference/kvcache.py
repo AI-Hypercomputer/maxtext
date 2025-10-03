@@ -780,7 +780,7 @@ class KVCache(nnx.Module):
         use_ragged_attention,
     )
     active_indicator = jnp.zeros((self.batch, 1), dtype=jnp.int32) + DECODING_ACTIVE_SEQUENCE_INDICATOR
-    
+
     # Align batch size for cached segment IDs with indicator in decoding
     if cached_ar_segment_id_var.value.shape[0] != active_indicator.shape[0]:
       cached_ar_segment_id_var.value = jnp.repeat(cached_ar_segment_id_var.value, active_indicator.shape[0], axis=0)

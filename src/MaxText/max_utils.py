@@ -30,12 +30,13 @@ import flax
 import jax
 from jax.experimental import mesh_utils
 import jax.numpy as jnp
-from MaxText import max_logging
 import numpy as np
 import orbax.checkpoint as ocp
 from orbax.checkpoint.experimental.emergency.multi_tier_checkpointing import initialization
 import psutil
 from tensorboardX import writer
+
+from MaxText import max_logging
 from MaxText.common_types import MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_TRAIN
 
 initialize_multi_tier_checkpointing = initialization.initialize_multi_tier_checkpointing
@@ -959,7 +960,7 @@ def get_batch_seq_len_for_mode(config, model_mode):
 
   Args:
     config: A configuration object with model parameters.
-    model_mode: The current operational mode 
+    model_mode: The current operational mode
                 (e.g., PREFILL, AUTOREGRESSIVE, TRAIN).
 
   Returns:
@@ -969,19 +970,19 @@ def get_batch_seq_len_for_mode(config, model_mode):
     # Prefill mode: Process one full-length prompt.
     batch_size = 1
     seq_len = config.max_prefill_predict_length
-    
+
   elif model_mode == MODEL_MODE_AUTOREGRESSIVE:
     # Autoregressive/decode mode: Generate one token at a time for a batch.
     batch_size = config.micro_batch_size_to_train_on
     seq_len = 1
-    
+
   elif model_mode == MODEL_MODE_TRAIN:
     # Training mode: Process a full batch of full-length sequences.
     batch_size = config.micro_batch_size_to_train_on
     seq_len = config.max_target_length
-    
+
   else:
     # Explicitly handle unknown modes instead of falling back to a default.
     raise ValueError(f"Unknown model_mode: {model_mode}")
-  
+
   return batch_size, seq_len

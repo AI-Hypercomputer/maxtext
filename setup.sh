@@ -190,8 +190,8 @@ if [[ "$MODE" == "stable" || ! -v MODE ]]; then
         fi
 
         # TODO: Once tunix has support for GPUs, move it from here to requirements.txt
-        echo "Installing tunix for stable TPU environment"
-        python3 -m uv pip install 'google-tunix @ https://github.com/google/tunix/archive/6c2a613217ed6bb1c9d60088d6e3c67184821c69.zip'
+        echo "Installing google-tunix for stable TPU environment"
+        python3 -m uv pip install 'google-tunix>=0.1.0'
 
         if [[ -n "$LIBTPU_GCS_PATH" ]]; then
             # Install custom libtpu

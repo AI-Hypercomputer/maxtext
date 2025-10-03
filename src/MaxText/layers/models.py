@@ -24,7 +24,7 @@ from flax import linen as nn
 from flax import nnx
 from MaxText.layers import initializers
 
-from MaxText.common_types import MODEL_MODE_PREFILL, DecoderBlockType, Config, MODEL_MODE_TRAIN, MODEL_MODE_AUTOREGRESSIVE, DECODING_ACTIVE_SEQUENCE_INDICATOR
+from MaxText.common_types import DecoderBlockType, Config, MODEL_MODE_TRAIN, MODEL_MODE_AUTOREGRESSIVE, DECODING_ACTIVE_SEQUENCE_INDICATOR
 from MaxText.inference import page_manager
 from MaxText import multimodal_utils
 from MaxText import max_utils
@@ -297,7 +297,7 @@ class Transformer(nnx.Module):
     decoder_linen = Decoder(config=cfg, mesh=mesh, quant=self.quant, model_mode=self.model_mode)
     self.decoder = nnx_wrappers.ToNNX(decoder_linen, rngs=rngs)
     self.hidden_states = None
-    
+
     batch_size, seq_len = max_utils.get_batch_seq_len_for_mode(config=cfg, model_mode=model_mode)
     dummy_decoder_input_tokens = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
     dummy_decoder_positions = jnp.ones((batch_size, seq_len), dtype=jnp.int32)

@@ -213,25 +213,15 @@ class MetricLogger:
   def record_train_metrics(self, metrics, step, step_time):
     """Records training metrics for the current step."""
     metrics["scalar"].update({"perf/step_time_seconds": step_time})
+    metrics["scalar"].update({"perf/per_device_tflops": self.metadata[MetadataKey.PER_DEVICE_TFLOPS]})
     metrics["scalar"].update(
-        {"perf/per_device_tflops": self.metadata[MetadataKey.PER_DEVICE_TFLOPS]}
+        {"perf/per_device_tflops_per_sec": (self.metadata[MetadataKey.PER_DEVICE_TFLOPS] / step_time)}
     )
-    metrics["scalar"].update({
-        "perf/per_device_tflops_per_sec": (
-            self.metadata[MetadataKey.PER_DEVICE_TFLOPS] / step_time
-        )
-    })
+    metrics["scalar"].update({"perf/per_device_tokens": self.metadata[MetadataKey.PER_DEVICE_TOKENS]})
     metrics["scalar"].update(
-        {"perf/per_device_tokens": self.metadata[MetadataKey.PER_DEVICE_TOKENS]}
+        {"perf/per_device_tokens_per_sec": (self.metadata[MetadataKey.PER_DEVICE_TOKENS] / step_time)}
     )
-    metrics["scalar"].update({
-        "perf/per_device_tokens_per_sec": (
-            self.metadata[MetadataKey.PER_DEVICE_TOKENS] / step_time
-        )
-    })
-    metrics["scalar"].update(
-        {"learning/current_learning_rate": self.learning_rate_schedule(step)}
-    )
+    metrics["scalar"].update({"learning/current_learning_rate": self.learning_rate_schedule(step)})
     if self.performance_metric_queue:
       self.performance_metric_queue.put(step_time)
 

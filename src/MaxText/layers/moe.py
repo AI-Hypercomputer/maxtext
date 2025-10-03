@@ -37,8 +37,6 @@ from MaxText.kernels import megablox as mblx
 from MaxText.layers import attentions, linears, quantizations, nnx_wrappers
 from MaxText.layers.initializers import NdInitializer, nd_dense_init, default_bias_init, variable_to_logically_partitioned
 
-import qwix.pallas as qpl
-
 set_xla_metadata = xla_metadata.set_xla_metadata
 
 
@@ -784,12 +782,7 @@ class RoutedMoE(nnx.Module):
   ):
     """Perform sparse matrix multiplication of inputs and Experts."""
 
-    def gmm(inputs, kernel, group_sizes, expert_assignments):
-      tile_size = (
-          self.config.tile_batch_seq,
-          self.config.tile_activation_dim,
-          self.config.tile_weight_dim,
-      )
+    def gmm(inputs, kernel, tiling, group_sizes, expert_assignments):
       pad_length = self.config.tile_batch_seq
       hs_shape = inputs.shape
       # pad length is the 1st dimension of tiling size in gmm call
@@ -808,16 +801,11 @@ class RoutedMoE(nnx.Module):
         quant_dg = self.quant.quant_dg
         lhs_quantize_dtype = quant_dg.fwd.dg_quantizer.lhs.numerics.get_dtype()
         rhs_quantize_dtype = quant_dg.fwd.dg_quantizer.rhs.numerics.get_dtype()
-      if self.config.use_qwix_quantization:
-        quantization_rule = qpl.get_current_rule("dot_general")
-        if quantization_rule is not None:
-          lhs_quantize_dtype = quantization_rule.act_qtype
-          rhs_quantize_dtype = quantization_rule.weight_qtype
       m, k, n = inputs.shape[0], inputs.shape[1], kernel.shape[2]
       tiling = (
-          min(tile_size[0], m),
-          min(tile_size[1], k),
-          min(tile_size[2], n),
+          min(tiling[0], m),
+          min(tiling[1], k),
+          min(tiling[2], n),
       )
       if self.config.megablox:
         output = mblx.gmm(
@@ -1038,14 +1026,24 @@ class RoutedMoE(nnx.Module):
           group_sizes=group_sizes,
           expert_assignments=selected_experts,
       )
-      layer_w0 = gmm_fn(x, w0)
+      wi_tile_size = (
+          self.config.tile_batch_seq,
+          self.config.tile_embed_dim,
+          self.config.tile_mlp_dim,
+      )
+      wo_tile_size = (
+          self.config.tile_batch_seq,
+          self.config.tile_mlp_dim,
+          self.config.tile_embed_dim,
+      )
+      layer_w0 = gmm_fn(x, w0, tiling=wi_tile_size)
       if self.get_tensor_transpose_parallelism_size() > 1:
         layer_w0 = jax.lax.psum(layer_w0, "tensor_transpose")
       if self.config.mlp_bias:
         layer_w0 = layer_w0 + w0_bias
       layer_w0 = adc.checkpoint_name(layer_w0, "mlpwi_0")
 
-      layer_w1 = gmm_fn(x, w1)
+      layer_w1 = gmm_fn(x, w1, tiling=wi_tile_size)
       if self.get_tensor_transpose_parallelism_size() > 1:
         layer_w1 = jax.lax.psum(layer_w1, "tensor_transpose")
       if self.config.mlp_bias:
@@ -1053,7 +1051,7 @@ class RoutedMoE(nnx.Module):
       layer_w1 = adc.checkpoint_name(layer_w1, "mlpwi_1")
       intermediate_layer = self.apply_ffn_activation(layer_w0, layer_w1)
 
-      intermediate_output = gmm_fn(intermediate_layer, wo)
+      intermediate_output = gmm_fn(intermediate_layer, wo, tiling=wo_tile_size)
       if self.get_tensor_parallelism_size() > 1:
         intermediate_output = jax.lax.psum_scatter(intermediate_output, "tensor", scatter_dimension=1, tiled=True)
       if self.config.mlp_bias:

@@ -146,7 +146,15 @@ class MTPBlockTestModel(nn.Module):
     )
 
   def __call__(
-      self, main_hidden_state, input_ids, target_ids, target_mask, position_ids, decoder_segment_ids, model_mode, deterministic
+      self,
+      main_hidden_state,
+      input_ids,
+      target_ids,
+      target_mask,
+      position_ids,
+      decoder_segment_ids,
+      model_mode,
+      deterministic,
   ):
     return self.mtp_block(
         self.shared_embedding,
