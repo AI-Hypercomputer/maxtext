@@ -304,7 +304,7 @@ class HFDataSource(grain.RandomAccessDataSource):
       warnings.warn(
           f"WARNING: Inefficient dataloading. Your train or eval dataset contains {self.n_shards} shards, "
           "smaller than number of host loading data. This is known to lead to inefficient dataloading. See"
-          "github.com/google/maxtext/blob/main/getting_started/Data_Input_Pipeline.md#multihost-dataloading-best-practice"
+          "https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/guides/data_input_pipeline.md#multihost-dataloading-best-practice"
       )
       self.n_shards = self.dataloading_host_count * self.num_threads
 
