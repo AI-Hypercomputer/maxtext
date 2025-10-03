@@ -487,6 +487,10 @@ class MaxEngine(engine_api.Engine):
         # add batch dimension
         input_images = images[jnp.newaxis, ...]
         input_image_masks = image_masks[jnp.newaxis, ...] if image_masks is not None else None
+      elif images.ndim == 5:
+        # Batch dim already present, copy image as is
+        input_images = images
+        input_image_masks = image_masks if image_masks is not None else None
 
     # sequence_indicator will be concatenated to existing_prefix decoder_segment_ids
     start_to_n = jnp.arange(start_position, start_position + input_tokens.shape[1])

@@ -831,54 +831,103 @@ def merge_mm_embeddings(
     mask,
     image_masks: np.ndarray | jnp.ndarray | None = None,
 ) -> np.ndarray | jnp.ndarray:
-  """Merge the text and MM tokens.
+  """Merges text and vision embeddings based on a mask.
+
+  This function handles two primary formats for vision embeddings:
+  1. Tiled Format (e.g., Llama4): Vision embeddings are provided as a batch of
+     images and their tiles, with shape (B * N, T, K, D). These are flattened 
+     into a single sequence of vision tokens per batch item.
+  2. Simple Format (e.g., Gemma3): Vision embeddings are provided as
+     (B, N, K, D) and are flattened into a sequence of vision tokens.
 
   Args:
-    text_embeddings: [seq_len, d] array of text embeddings.
-    vision_embeddings: [num_images * num_tiles, num_toks_per_image, d] array of
-      vision embeddings.
-    mask: [seq_len] boolean or integer array where non-zero positions
+    text_embeddings: (B, S, D) array of text embeddings.
+    vision_embeddings: Vision embeddings in one of two formats:
+      - (B * N, T, K, D) for tiled inputs.
+      - (B, N, K, D) for simple inputs.
+      (B=batch_size, S=seq_len, D=embedding_dim, N=num_images,
+       T=num_tiles, K=toks_per_image)
+    mask: (B, S) boolean or integer array where non-zero positions
       indicate where vision embeddings should be placed.
-    image_masks: (Optional) [num_images * num_tiles, ] integer
-      array indicating which tiles are valid (1) vs. padded (0). If
-      None, valid vision embeddings are detected by checking for
-      non-zero vectors.
+    image_masks: (Optional) A mask for the vision tokens.
+      - (B * N, T) for tiled inputs, indicating valid tiles.
+      - If None, all vision embeddings are assumed to be valid.
 
   Returns:
-    A [seq_len, d] array of merged embeddings.
+    A (B, S, D) array of merged embeddings.
   """
-  return jax.vmap(_merge_mm_embeddings_inner, in_axes=(0, 0, 0, None if image_masks is None else 0))(
-      text_embeddings, vision_embeddings, mask, image_masks
-  )
+  # Input Validation and Shape Unpacking
+  batch_size, _, d_model = text_embeddings.shape
+  # The number of tokens per image/tile is the second to last dimension.
+  num_toks_per_image = vision_embeddings.shape[-2]
+
+  if d_model != vision_embeddings.shape[-1]:
+    raise ValueError(
+        "Embedding dimension mismatch between text and vision embeddings:"
+        f" {d_model} vs {vision_embeddings.shape[-1]}"
+    )
+
+  # Reshape Vision Embeddings to a unified (B, S_vision, D) format
+  # This single reshape robustly handles both documented cases:
+  # Case 1: (B * N, T, K, D) -> (B, N*T*K, D)
+  # Case 2: (B, N, K, D) -> (B, N*K, D)
+  flat_vision_embeddings = vision_embeddings.reshape(batch_size, -1, d_model)
+
+  # Process Optional Image Masks
+  flat_image_token_masks = None
+  if image_masks is not None:
+    # Handle the tiled case where image_masks batch dimension is (B * N)
+    if image_masks.shape[0] != batch_size:
+      if image_masks.shape[0] % batch_size != 0:
+        raise ValueError(
+            "Batch dimension of image_masks must be a multiple of the text"
+            f" batch size. Got {image_masks.shape[0]} and {batch_size}."
+        )
+      # Reshape from (B * N, T) to (B, N * T)
+      flat_image_tile_masks = image_masks.reshape(batch_size, -1)
+    else:
+      # This handles cases where image_masks is already (B, ...)
+      flat_image_tile_masks = image_masks.reshape(batch_size, -1)
+
+    # Expand the tile-level mask to a token-level mask to match the embeddings.
+    # A mask of shape (B, N*T) becomes (B, N*T*K) by repeating each element K times.
+    flat_image_token_masks = jnp.repeat(
+        flat_image_tile_masks, repeats=num_toks_per_image, axis=1
+    )
+
+  # Vmap the inner merge function over the batch dimension
+  return jax.vmap(
+      _merge_mm_embeddings_inner, # Assumes this function is defined elsewhere
+      in_axes=(0, 0, 0, None if flat_image_token_masks is None else 0)
+  )(text_embeddings, flat_vision_embeddings, mask, flat_image_token_masks)
 
 
-def _merge_mm_embeddings_inner(text_embeddings, vision_embeddings, mask, image_mask):
-  """`merge_embeddings` without batch dimension."""
+def _merge_mm_embeddings_inner(
+    text_embeddings: jnp.ndarray, 
+    vision_embeddings: jnp.ndarray, 
+    mask: jnp.ndarray,
+    token_mask: jnp.ndarray | None = None
+) -> jnp.ndarray:
+  """`merge_mm_embeddings` without batch dimension."""
 
-  # Rearrange the vision embeddings from [num_images, num_toks_per_image, d] to [num_images * num_toks_per_image, d]
-  # Note that num_images corresponds to total number of tiles including padding tiles if image tiling is used.
-  num_images, num_toks_per_image, d = vision_embeddings.shape
-  vision_embeddings = jnp.reshape(vision_embeddings, (num_images * num_toks_per_image, d))
-
-  if image_mask is not None:
-    # Expand image_masks to match the token-level granularity
-    # (num_image * num_tiles,) -> (num_image * num_tiles * num_toks_per_image,)
-    token_mask = jnp.repeat(image_mask, repeats=num_toks_per_image, axis=0)
-
-    # Create indices to sort by the mask (True values first)
-    sort_indices = jnp.argsort(-token_mask)
-
-    # Shuffle the embeddings. Shape is unchanged: [num_images * num_toks_per_image, d]
+  if token_mask is not None:
+    # This logic packs valid vision tokens to the front of the array.
+    # It correctly handles cases where some vision tokens are just padding.
+    sort_indices = jnp.argsort(-token_mask) # Sorts descending, putting 1s first
     vision_embeddings = vision_embeddings[sort_indices]
 
-  # len(vision_embeddings) == max_num_images * num_tokens_per_image
+  # Find positions in the text sequence to place the vision embeddings.
+  # The `size` argument ensures a fixed shape for JIT compilation.
   target_pos = jnp.nonzero(mask, size=len(vision_embeddings))
+  target_pos = target_pos[0] # jnp.nonzero returns a tuple of arrays
 
-  # Save and restore the first position overwritten if there's no MM tokens.
-  first_pos = text_embeddings[0]
+  # Save the embedding at the first position.
+  first_pos_embedding = text_embeddings[0]
 
+  # Perform the insertion.
   merged = text_embeddings.at[target_pos, :].set(vision_embeddings)
 
-  merged = merged.at[0].set(first_pos)
+  # Restore the first position's embedding, in case it was overwritten.
+  merged = merged.at[0].set(first_pos_embedding)
 
   return merged
