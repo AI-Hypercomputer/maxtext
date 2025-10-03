@@ -98,9 +98,47 @@ jobs:
       container_resource_option: "--privileged"
       is_scheduled_run: ${{ github.event_name == 'schedule' }}
 
+  maxtext_gpu_unit_tests:
+    needs: build_and_upload_maxtext_package
+    uses: ./.github/workflows/run_tests_against_package.yml
+    strategy:
+        fail-fast: false
+        matrix:
+          image_type: ["py312"]
+    with:
+      device_type: gpu
+      device_name: a100-40gb-4
+      image_type: ${{ matrix.image_type }}
+      cloud_runner: linux-x86-a2-48-a100-4gpu
+      pytest_marker: 'not cpu_only and not tpu_only and not integration_test'
+      pytest_addopts: '--ignore=tests/sft_hooks_test.py'
+      xla_python_client_mem_fraction: 0.65
+      tf_force_gpu_allow_growth: true
+      container_resource_option: "--shm-size 2g --runtime=nvidia --gpus all --privileged"
+      is_scheduled_run: ${{ github.event_name == 'schedule' }}
+
+  maxtext_gpu_integration_tests:
+    needs: build_and_upload_maxtext_package
+    uses: ./.github/workflows/run_tests_against_package.yml
+    strategy:
+        fail-fast: false
+        matrix:
+          image_type: ["py312"]
+    with:
+      device_type: gpu
+      device_name: a100-40gb-4
+      image_type: ${{ matrix.image_type }}
+      cloud_runner: linux-x86-a2-48-a100-4gpu
+      pytest_marker: 'not cpu_only and not tpu_only and integration_test'
+      pytest_addopts: '--ignore=tests/sft_hooks_test.py'
+      xla_python_client_mem_fraction: 0.65
+      tf_force_gpu_allow_growth: true
+      container_resource_option: "--shm-size 2g --runtime=nvidia --gpus all --privileged"
+      is_scheduled_run: ${{ github.event_name == 'schedule' }}
+
   notify_failure:
     name: Notify failed build # creates an issue or modifies last open existing issue for failed build
-    needs: [maxtext_cpu_unit_tests, maxtext_tpu_unit_tests, maxtext_tpu_integration_tests]
+    needs: [maxtext_cpu_unit_tests, maxtext_tpu_unit_tests, maxtext_tpu_integration_tests, maxtext_gpu_unit_tests, maxtext_gpu_integration_tests]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     permissions:
