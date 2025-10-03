@@ -57,7 +57,10 @@ cd maxtext
 
 # 2. Install dependencies in editable mode
 pip install uv
-uv pip install -e . --resolution=lowest
+# install the tpu version
+uv pip install -e .[tpu] --resolution=lowest
+# or install the gpu version by running the following line
+# uv pip install -e .[cuda12] --resolution=lowest
 install_maxtext_github_deps
 ```
 
