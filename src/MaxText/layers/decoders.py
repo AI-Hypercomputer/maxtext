@@ -397,9 +397,9 @@ class Decoder(nn.Module):
       case DecoderBlockType.QWEN3_MOE:
         return [qwen3.Qwen3MoeDecoderLayer]
       case DecoderBlockType.SIMPLE:
-        return [simple_layer.SimpleDecoderLayer]
+        return [simple_layer.SimpleDecoderLayerToLinen]
       case DecoderBlockType.SIMPLE_MLP:
-        return [simple_layer.SimpleMlpDecoderLayer]
+        return [simple_layer.SimpleMlpDecoderLayerToLinen]
       case DecoderBlockType.LLAMA4:
         return [llama4.Llama4ScannableBlock] if self.config.scan_layers else [llama4.Llama4DecoderLayer]
       case _:
@@ -788,9 +788,7 @@ class Decoder(nn.Module):
           # Iterate over the two layer groups (dense and MoE) and apply layer transformation
           for layer, num_layers, layer_prefix in zip(layers, num_layers_list, layer_prefixes):
             for index in range(num_layers):
-              y = layer(
-                  config=cfg, mesh=mesh, name=f"{layer_prefix}_{index}", quant=self.quant, model_mode=self.model_mode
-              )(
+              y = layer(config=cfg, mesh=mesh, name=f"{layer_prefix}_{index}", quant=self.quant, model_mode=self.model_mode)(
                   y,
                   decoder_segment_ids,
                   decoder_positions,
