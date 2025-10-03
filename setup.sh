@@ -155,15 +155,16 @@ if [[ "$MODE" == "nightly" ]]; then
     
     python3 -m uv pip install --no-cache-dir -U -r requirements.txt.nightly-temp
     rm requirements.txt.nightly-temp
-else
-    # stable or stable_stack mode: Install with pinned commits
-    echo "Installing requirements.txt with pinned commits."
-    python3 -m uv pip install --no-cache-dir -U -r requirements.txt
+fi
+
+EXTRA_PIP_INSTALL_ARGS=()
+if [ "$MODE" != 'stable' ]; then
+  EXTRA_PIP_INSTALL_ARGS+=(--no-deps)
 fi
 
 # Install maxtext package
 if [ -f 'pyproject.toml' ]; then
-  python3 -m uv pip install -e . --no-deps --resolution=lowest
+  python3 -m uv pip install -e . "${EXTRA_PIP_INSTALL_ARGS[@]}" --resolution=lowest
   install_maxtext_github_deps
 fi
 
