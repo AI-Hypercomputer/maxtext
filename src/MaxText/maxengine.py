@@ -475,20 +475,15 @@ class MaxEngine(engine_api.Engine):
     input_tokens = jnp.expand_dims(padded_tokens, 0)  # [BATCH, SEQUENCE]
     positions = jnp.expand_dims(jnp.arange(start_position, start_position + input_tokens.shape[1]), 0)
 
-    input_images = None
-    input_image_masks = None
     if self.config.use_multimodal and images is not None:
       if images.ndim == 3:
         # For Gemma3 single image, add batch and image count dimensions
-        input_images = images[jnp.newaxis, jnp.newaxis, ...]
+        images = images[jnp.newaxis, jnp.newaxis, ...]
+        image_masks = image_masks[jnp.newaxis, ...] if image_masks is not None else None
       elif images.ndim == 4:
         # add batch dimension
-        input_images = images[jnp.newaxis, ...]
-        input_image_masks = image_masks[jnp.newaxis, ...] if image_masks is not None else None
-      elif images.ndim == 5:
-        # Batch dim already present, copy image as is
-        input_images = images
-        input_image_masks = image_masks if image_masks is not None else None
+        images = images[jnp.newaxis, ...]
+        image_masks = image_masks[jnp.newaxis, ...] if image_masks is not None else None
 
     # sequence_indicator will be concatenated to existing_prefix decoder_segment_ids
     start_to_n = jnp.arange(start_position, start_position + input_tokens.shape[1])
@@ -502,8 +497,8 @@ class MaxEngine(engine_api.Engine):
           input_params,
           input_tokens,
           positions,
-          encoder_images=input_images,
-          encoder_image_masks=input_image_masks,
+          encoder_images=images,
+          encoder_image_masks=image_masks,
           decoder_segment_ids=sequence_indicator,
           enable_dropout=False,
           model_mode=MODEL_MODE_PREFILL,
