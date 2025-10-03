@@ -835,7 +835,7 @@ def merge_mm_embeddings(
 
   This function handles two primary formats for vision embeddings:
   1. Tiled Format (e.g., Llama4): Vision embeddings are provided as a batch of
-     images and their tiles, with shape (B * N, T, K, D). These are flattened 
+     images and their tiles, with shape (B * N, T, K, D). These are flattened
      into a single sequence of vision tokens per batch item.
   2. Simple Format (e.g., Gemma3): Vision embeddings are provided as
      (B, N, K, D) and are flattened into a sequence of vision tokens.
@@ -863,8 +863,7 @@ def merge_mm_embeddings(
 
   if d_model != vision_embeddings.shape[-1]:
     raise ValueError(
-        "Embedding dimension mismatch between text and vision embeddings:"
-        f" {d_model} vs {vision_embeddings.shape[-1]}"
+        "Embedding dimension mismatch between text and vision embeddings:" f" {d_model} vs {vision_embeddings.shape[-1]}"
     )
 
   # Reshape Vision Embeddings to a unified (B, S_vision, D) format
@@ -891,35 +890,30 @@ def merge_mm_embeddings(
 
     # Expand the tile-level mask to a token-level mask to match the embeddings.
     # A mask of shape (B, N*T) becomes (B, N*T*K) by repeating each element K times.
-    flat_image_token_masks = jnp.repeat(
-        flat_image_tile_masks, repeats=num_toks_per_image, axis=1
-    )
+    flat_image_token_masks = jnp.repeat(flat_image_tile_masks, repeats=num_toks_per_image, axis=1)
 
   # Vmap the inner merge function over the batch dimension
   return jax.vmap(
-      _merge_mm_embeddings_inner, # Assumes this function is defined elsewhere
-      in_axes=(0, 0, 0, None if flat_image_token_masks is None else 0)
+      _merge_mm_embeddings_inner,  # Assumes this function is defined elsewhere
+      in_axes=(0, 0, 0, None if flat_image_token_masks is None else 0),
   )(text_embeddings, flat_vision_embeddings, mask, flat_image_token_masks)
 
 
 def _merge_mm_embeddings_inner(
-    text_embeddings: jnp.ndarray, 
-    vision_embeddings: jnp.ndarray, 
-    mask: jnp.ndarray,
-    token_mask: jnp.ndarray | None = None
+    text_embeddings: jnp.ndarray, vision_embeddings: jnp.ndarray, mask: jnp.ndarray, token_mask: jnp.ndarray | None = None
 ) -> jnp.ndarray:
   """`merge_mm_embeddings` without batch dimension."""
 
   if token_mask is not None:
     # This logic packs valid vision tokens to the front of the array.
     # It correctly handles cases where some vision tokens are just padding.
-    sort_indices = jnp.argsort(-token_mask) # Sorts descending, putting 1s first
+    sort_indices = jnp.argsort(-token_mask)  # Sorts descending, putting 1s first
     vision_embeddings = vision_embeddings[sort_indices]
 
   # Find positions in the text sequence to place the vision embeddings.
   # The `size` argument ensures a fixed shape for JIT compilation.
   target_pos = jnp.nonzero(mask, size=len(vision_embeddings))
-  target_pos = target_pos[0] # jnp.nonzero returns a tuple of arrays
+  target_pos = target_pos[0]  # jnp.nonzero returns a tuple of arrays
 
   # Save the embedding at the first position.
   first_pos_embedding = text_embeddings[0]

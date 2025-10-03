@@ -119,11 +119,13 @@ class TestLlama4ImageProcessing(unittest.TestCase):
     self.assertEqual(
         image_tiles.shape, (ratio_h * ratio_w, self.NUM_IMAGE_CHANNELS, self.LLAMA4_TILE_SIZE, self.LLAMA4_TILE_SIZE)
     )
-  
+
   def test_pad_to_max_tiles(self):
     image = np.ones((5, self.NUM_IMAGE_CHANNELS, self.LLAMA4_TILE_SIZE, self.LLAMA4_TILE_SIZE))
     padded_image, image_mask = multimodal_utils.pad_to_max_tiles(image, self.LLAMA4_TILES_NUM)
-    self.assertEqual(padded_image.shape, (self.LLAMA4_TILES_NUM, self.NUM_IMAGE_CHANNELS, self.LLAMA4_TILE_SIZE, self.LLAMA4_TILE_SIZE))
+    self.assertEqual(
+        padded_image.shape, (self.LLAMA4_TILES_NUM, self.NUM_IMAGE_CHANNELS, self.LLAMA4_TILE_SIZE, self.LLAMA4_TILE_SIZE)
+    )
     self.assertEqual(image_mask.shape, (self.LLAMA4_TILES_NUM,))
     self.assertEqual(np.sum(image_mask), 5)
     np.testing.assert_array_equal(padded_image[5], padded_image[6])
@@ -194,7 +196,7 @@ class TestLlama4PostProcessing(unittest.TestCase):
     image_offsets = multimodal_utils.get_image_offsets(model_name=self.model_name, processor_output=processor_output)
     post_processed_tokens = multimodal_utils.add_extra_tokens_for_images_llama4(dummy_tokens, processor_output)
     self.assertEqual(post_processed_tokens.shape[0], dummy_tokens.shape[0] + image_offsets)
-  
+
   def test_merge_mm_embeddings(self):
     # Setup Dummy Data
     batch_size = 1
@@ -205,21 +207,21 @@ class TestLlama4PostProcessing(unittest.TestCase):
     num_toks_per_image = 8
 
     # text_embeddings: (B, S, D) -> (1, 64, 4)
-    text_embeddings = np.arange(
-        batch_size * seq_len * d, dtype=np.float32
-    ).reshape(batch_size, seq_len, d)
+    text_embeddings = np.arange(batch_size * seq_len * d, dtype=np.float32).reshape(batch_size, seq_len, d)
 
     # vision_embeddings: (B * N, T, K, D) -> (2, 4, 8, 4)
-    vision_embeddings = np.arange(
-        batch_size * num_images * num_tiles * num_toks_per_image * d,
-        dtype=np.float32
-    ).reshape(batch_size * num_images, num_tiles, num_toks_per_image, d) + 1000
+    vision_embeddings = (
+        np.arange(batch_size * num_images * num_tiles * num_toks_per_image * d, dtype=np.float32).reshape(
+            batch_size * num_images, num_tiles, num_toks_per_image, d
+        )
+        + 1000
+    )
 
     # mask: (B, S) -> (1, 64)
     # Total of 8 + 16 = 24 token slots available for images.
     mask = np.zeros((batch_size, seq_len), dtype=np.int32)
     mask[:, 2:10] = 1  # 8 slots for the first image's valid tiles
-    mask[:, 20:36] = 1 # 16 slots for the second image's valid tiles
+    mask[:, 20:36] = 1  # 16 slots for the second image's valid tiles
 
     # image_masks: (B * N, T) -> (2, 4)
     # Specifies which tiles are valid.
@@ -232,21 +234,17 @@ class TestLlama4PostProcessing(unittest.TestCase):
     # Total valid tokens = 8 + 16 = 24. This matches the mask slots.
 
     # Case 1: Use the image_mask to filter for valid tiles.
-    merged = multimodal_utils.merge_mm_embeddings(
-        text_embeddings, vision_embeddings, mask, image_masks
-    )
+    merged = multimodal_utils.merge_mm_embeddings(text_embeddings, vision_embeddings, mask, image_masks)
 
     # Case 2: No image_mask, so all vision tokens are used in order.
-    merged_null = multimodal_utils.merge_mm_embeddings(
-        text_embeddings, vision_embeddings, mask, None
-    )
+    merged_null = multimodal_utils.merge_mm_embeddings(text_embeddings, vision_embeddings, mask, None)
 
     # The results should be different since one is masked and one is not.
     self.assertFalse(np.array_equal(merged, merged_null))
 
     # The code gathers all valid tiles first and then inserts them sequentially.
     # Valid tiles are: vision_embeddings[0, 0], vision_embeddings[1, 0], vision_embeddings[1, 1]
-    
+
     # The first 8 slots (2:10) should be filled by the first valid tile's tokens.
     first_valid_tile = vision_embeddings[0, 0, :, :]
     np.testing.assert_array_equal(merged[0, 2:10], first_valid_tile)

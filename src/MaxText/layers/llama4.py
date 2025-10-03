@@ -758,11 +758,13 @@ class Llama4VisionModel(nn.Module):
     """Forward pass of the Llama4 vision model.
 
     Args:
-      inputs: Input tensor of shape [batch_size * num_images, num_tiles, num_channels_for_vit, tile_size_for_vit, tile_size_for_vit]
+      inputs: Input tensor of shape:
+              [batch_size * num_images, num_tiles, num_channels_for_vit, tile_size_for_vit, tile_size_for_vit]
       deterministic: Whether to use deterministic mode (disables dropout)
 
     Returns:
-      Final hidden states from the vision encoder of shape [batch_size * num_images, num_tiles, num_patches, vision_output_dim_for_vit]
+      Final hidden states from the vision encoder of shape:
+      [batch_size * num_images, num_tiles, num_patches, vision_output_dim_for_vit]
     """
     cfg = self.config
     mesh = self.mesh
