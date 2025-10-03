@@ -169,6 +169,7 @@ def current_linen_module() -> linen.Module | None:
     return linen.module._context.module_stack[-1]  # pylint: disable=W0212
   return None
 
+
 class ToNNX(Module):
   """A wrapper to turn any Linen module into an NNX module.
 
@@ -229,12 +230,12 @@ class ToNNX(Module):
     return super().__getattribute__(name)
 
   def __call__(
-    self,
-    *args: Any,
-    rngs: Rngs | jax.Array | None = None,
-    method: tp.Callable[..., Any] | str | None = None,
-    mutable: tp.Any = None,
-    **kwargs: Any,
+      self,
+      *args: Any,
+      rngs: Rngs | jax.Array | None = None,
+      method: tp.Callable[..., Any] | str | None = None,
+      mutable: tp.Any = None,
+      **kwargs: Any,
   ) -> Any:
     # Shape-based lazy init of the flax variables
     if rngs is None:
@@ -270,9 +271,7 @@ class ToNNX(Module):
       else:
         mutable = False
 
-      out = self.to_nnx__module.apply(
-        variables, *args, rngs=_rngs, method=method, mutable=mutable, **kwargs
-      )
+      out = self.to_nnx__module.apply(variables, *args, rngs=_rngs, method=method, mutable=mutable, **kwargs)
 
       # Split out the updates if `mutable` is passed into the Flax module
       if mutable is not False:
@@ -285,7 +284,7 @@ class ToNNX(Module):
       nnx_attrs = linen_vars_to_nnx_attrs(updates)
       # nnx.update(self, nnx_attrs)
       # TODO(cgarciae): ideally we just do an update but currently dictionaries don't allow
-      # insertion of new keys, we need to enable this in NNX to simplify the code bellow
+      # insertion of new keys, we need to enable this in NNX to simplify the code below
       # to the simple nnx.update(self, nnx_attrs) above.
       for attr_name, value in nnx_attrs.items():
         if hasattr(self, attr_name) and isinstance(value, dict):
@@ -419,9 +418,7 @@ class ToLinen(linen.Module):
   metadata_fn: tp.Callable[[variablelib.VariableState], tp.Any] | None = to_linen_var
 
   @linen.compact
-  def __call__(
-    self, *args, nnx_method: tp.Callable[..., Any] | str | None = None, **kwargs
-  ):
+  def __call__(self, *args, nnx_method: tp.Callable[..., Any] | str | None = None, **kwargs):
     def _module_kwargs():
       maybe_add_default = not self.is_initializing()
       module_kwargs = dict(self.kwargs)
@@ -558,69 +555,70 @@ def to_linen_class(
     base_skip_rng: bool = False,
     **partial_kwargs: tp.Any,
 ) -> type[ToLinen]:
-  """Dynamically wraps an NNX module class into a Flax Linen module class."""
+  """A dynamically created Linen Module that wraps a specific NNX Module.
+
+  This class is not meant to be used directly. Instead, it is created and
+  returned by the `to_linen_class` function. It acts as a "partially applied"
+  version of the `ToLinen` wrapper, where the NNX module to be wrapped and
+  its default arguments are pre-configured.
+
+  When you instantiate this class, it behaves like a standard Linen module.
+  The arguments you provide during instantiation can override the defaults
+  that were set when this class was created by `to_linen_class`.
+
+  For example:
+    >>> from flax import linen as nn, nnx
+    >>> from MaxText.layers import linears
+    >>> # Create a specialized Linen wrapper for linears.DenseGeneral
+    >>> LinenDenseGeneral = to_linen_class(linears.DenseGeneral)
+    >>> # Now, LinenDenseGeneral can be used like a regular Linen module
+    >>> class MyModel(nn.Module):
+    ...   def setup(self):
+    ...     # Instantiate the wrapped linears.DenseGeneral with its arguments
+    ...     self.dense = LinenDenseGeneral(
+    ...         in_features_shape=10, out_features_shape=5
+    ...     )
+    ...   def __call__(self, x):
+    ...     return self.dense(x)
+
+  Attributes:
+    (The attributes are dynamically set by the `ToLinen` parent class based
+      on the arguments provided during instantiation.)
+  """
+
+  def __init__(
+      self,
+      args=None,
+      kwargs=None,
+      nnx_class=None,
+      skip_rng=None,
+      metadata_fn=None,
+      name=_MISSING,
+      parent=_MISSING,
+      **other_kwargs,
+  ):
+    linen_kwargs = {}
+    if not isinstance(parent, _Missing):
+      linen_kwargs["parent"] = parent
+    if not isinstance(name, _Missing):
+      linen_kwargs["name"] = name
+    ToLinen.__init__(
+        self,
+        nnx_class=nnx_class or base_nnx_class,
+        args=args or (),
+        metadata_fn=metadata_fn or base_metadata_fn,
+        skip_rng=skip_rng or base_skip_rng,
+        kwargs=FrozenDict({**partial_kwargs, **(kwargs or {}), **other_kwargs}),
+        **linen_kwargs,
+    )
 
   class ToLinenPartial(ToLinen):
-    """A dynamically created Linen Module that wraps a specific NNX Module.
-
-    This class is not meant to be used directly. Instead, it is created and
-    returned by the `to_linen_class` function. It acts as a "partially applied"
-    version of the `ToLinen` wrapper, where the NNX module to be wrapped and
-    its default arguments are pre-configured.
-
-    When you instantiate this class, it behaves like a standard Linen module.
-    The arguments you provide during instantiation can override the defaults
-    that were set when this class was created by `to_linen_class`.
-
-    For example:
-      >>> from flax import linen as nn, nnx
-      >>> from MaxText.layers import linears
-      >>> # Create a specialized Linen wrapper for linears.DenseGeneral
-      >>> LinenDenseGeneral = to_linen_class(linears.DenseGeneral)
-      >>> # Now, LinenDenseGeneral can be used like a regular Linen module
-      >>> class MyModel(nn.Module):
-      ...   def setup(self):
-      ...     # Instantiate the wrapped linears.DenseGeneral with its arguments
-      ...     self.dense = LinenDenseGeneral(
-      ...         in_features_shape=10, out_features_shape=5
-      ...     )
-      ...   def __call__(self, x):
-      ...     return self.dense(x)
-
-    Attributes:
-      (The attributes are dynamically set by the `ToLinen` parent class based
-       on the arguments provided during instantiation.)
-    """
+    """A dynamically created Linen Module that wraps a specific NNX Module."""
 
     def __init_subclass__(cls, **kwargs):
       super().__init_subclass__(**kwargs)
-
-      def __init__(
-          self,
-          args=None,
-          kwargs=None,
-          nnx_class=None,
-          skip_rng=None,
-          metadata_fn=None,
-          name=_MISSING,
-          parent=_MISSING,
-          **other_kwargs,
-      ):
-        linen_kwargs = {}
-        if not isinstance(parent, _Missing):
-          linen_kwargs["parent"] = parent
-        if not isinstance(name, _Missing):
-          linen_kwargs["name"] = name
-        ToLinen.__init__(
-            self,
-            nnx_class=nnx_class or base_nnx_class,
-            args=args or (),
-            metadata_fn=metadata_fn or base_metadata_fn,
-            skip_rng=skip_rng or base_skip_rng,
-            kwargs=FrozenDict({**partial_kwargs, **(kwargs or {}), **other_kwargs}),
-            **linen_kwargs,
-        )
-
       cls.__init__ = __init__
+
+  ToLinenPartial.__init__ = __init__
 
   return ToLinenPartial

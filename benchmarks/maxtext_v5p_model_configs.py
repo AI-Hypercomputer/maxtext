@@ -313,10 +313,7 @@ llama2_70b_v5p_128 = _add_to_model_dictionary(
             "enable_checkpointing": False,
             "profiler": "xplane",
         },
-        xla_flags=(
-            xla_flags_library.DATA_PARALLEL_OVERLAP
-            + xla_flags_library.CF_FOR_ALL_GATHER
-        ),
+        xla_flags=(xla_flags_library.DATA_PARALLEL_OVERLAP + xla_flags_library.CF_FOR_ALL_GATHER),
     ),
 )
 
@@ -338,10 +335,7 @@ llama2_7b_v5p_128 = _add_to_model_dictionary(
             "enable_checkpointing": False,
             "profiler": "xplane",
         },
-        xla_flags=(
-            xla_flags_library.DATA_PARALLEL_OVERLAP
-            + xla_flags_library.CF_FOR_ALL_GATHER
-        ),
+        xla_flags=(xla_flags_library.DATA_PARALLEL_OVERLAP + xla_flags_library.CF_FOR_ALL_GATHER),
     ),
 )
 
@@ -363,10 +357,7 @@ gpt_3_175b_v5p_128 = _add_to_model_dictionary(
             "enable_checkpointing": False,
             "profiler": "xplane",
         },
-        xla_flags=(
-            xla_flags_library.DATA_PARALLEL_OVERLAP
-            + xla_flags_library.CF_FOR_ALL_GATHER
-        ),
+        xla_flags=(xla_flags_library.DATA_PARALLEL_OVERLAP + xla_flags_library.CF_FOR_ALL_GATHER),
     ),
 )
 
@@ -389,8 +380,7 @@ gpt_3_175b_v5p_128_sc = _add_to_model_dictionary(
             "profiler": "xplane",
         },
         xla_flags=(
-            xla_flags_library.DATA_PARALLEL_OVERLAP
-            + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_GATHER
+            xla_flags_library.DATA_PARALLEL_OVERLAP + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_GATHER
         ),
     ),
 )

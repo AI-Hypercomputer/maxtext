@@ -12,6 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""
+This module defines the core components for handling workload disruptions.
+
+It includes enums for trigger types and disruption methods, a `DisruptionConfig`
+dataclass to specify disruption parameters, and an abstract `DisruptionHandler`
+base class with concrete implementations for different disruption signals
+(e.g., SIGILL, SIGTERM).
+"""
+
 import abc
 import dataclasses
 import enum
@@ -47,6 +56,7 @@ class RecoverMethod(enum.Enum):
 @dataclasses.dataclass
 class DisruptionConfig:
   """Configuration for workload disruptions and recovery."""
+
   name: str  # Name of the disruption config
   trigger_type: TriggerType  # Trigger for disruption (Time_Seconds or Step)
   trigger_value: int  # Value for disruption trigger (seconds or steps)
@@ -59,9 +69,7 @@ class DisruptionConfig:
   # node. To recover from this, a recovery method to remove the node metadata.
   recover_trigger_type: TriggerType = None  # Trigger for recovery
   recover_trigger_value: int = None  # Value for recovery trigger
-  recover_method: RecoverMethod = (
-      None  # Recovery method (SIGTERM_METADATA_REMOVE)
-  )
+  recover_method: RecoverMethod = None  # Recovery method (SIGTERM_METADATA_REMOVE)
 
   # Target pod regex needed for triggering disruption.
   target_pod_regex: str = MCJAX_STANDARD_TARGET_POD_REGEX_SUFFIX
@@ -75,15 +83,13 @@ class DisruptionHandler(abc.ABC):
 
   @abc.abstractmethod
   def trigger_disruption(
-      self, workload_name: str, cluster_config: XpkClusterConfig,
-      disruption_config, target_pod_regex: str
+      self, workload_name: str, cluster_config: XpkClusterConfig, disruption_config, target_pod_regex: str
   ) -> None:
     """Triggers the workload disruption."""
     raise NotImplementedError("Subclasses must implement this method.")
 
   def trigger_recovery(
-      self, workload_name: str, cluster_config: XpkClusterConfig,
-      disruption_config, target_pod_regex: str
+      self, workload_name: str, cluster_config: XpkClusterConfig, disruption_config, target_pod_regex: str
   ) -> None:
     """Triggers workload recovery. Subclasses may implement this method."""
 
@@ -92,24 +98,17 @@ class SIGILLHandler(DisruptionHandler):
   """Handles SIGILL disruption by sending a SIGILL signal to the pod."""
 
   def trigger_disruption(
-      self, workload_name: str, cluster_config: XpkClusterConfig,
-      disruption_config, target_pod_regex: str
+      self, workload_name: str, cluster_config: XpkClusterConfig, disruption_config, target_pod_regex: str
   ) -> None:
     """Triggers SIGILL disruption by executing kill -s SIGILL 1 in the pod."""
-    print(
-        f"🔥🔥🔥 Beginning SIGILL for workload: {workload_name} with pod regex:"
-        f" {target_pod_regex} 🔥🔥🔥"
-    )
+    print(f"🔥🔥🔥 Beginning SIGILL for workload: {workload_name} with pod regex:" f" {target_pod_regex} 🔥🔥🔥")
     container_name = disruption_config.worker_container_name
 
     pod_name = get_pod_name_from_regex(workload_name, target_pod_regex)
     if not pod_name:
       return
 
-    kill_command = (
-        f"kubectl exec -it {pod_name} -c {container_name} -- /bin/sh -c "
-        f'"kill -s SIGILL 1"'
-    )
+    kill_command = f"kubectl exec -it {pod_name} -c {container_name} -- /bin/sh -c " f'"kill -s SIGILL 1"'
     print(f"🔥🔥🔥 Executing command in pod: {kill_command} 🔥🔥🔥")
     execute_command_as_subprocess(kill_command)
 
@@ -118,24 +117,17 @@ class SIGTERMHandler(DisruptionHandler):
   """Handles SIGTERM disruption by sending a SIGTERM signal to the pod."""
 
   def trigger_disruption(
-      self, workload_name: str, cluster_config: XpkClusterConfig,
-      disruption_config, target_pod_regex: str
+      self, workload_name: str, cluster_config: XpkClusterConfig, disruption_config, target_pod_regex: str
   ) -> None:
     """Triggers SIGTERM disruption by executing kill -s SIGTERM 1 in the pod."""
-    print(
-        f"🔥🔥🔥 Beginning SIGTERM for workload: {workload_name} with pod regex:"
-        f" {target_pod_regex} 🔥🔥🔥"
-    )
+    print(f"🔥🔥🔥 Beginning SIGTERM for workload: {workload_name} with pod regex:" f" {target_pod_regex} 🔥🔥🔥")
     container_name = disruption_config.worker_container_name
 
     pod_name = get_pod_name_from_regex(workload_name, target_pod_regex)
     if not pod_name:
       return
 
-    kill_command = (
-        f"kubectl exec -it {pod_name} -c {container_name} -- /bin/sh -c "
-        f'"kill -s SIGTERM 1"'
-    )
+    kill_command = f"kubectl exec -it {pod_name} -c {container_name} -- /bin/sh -c " f'"kill -s SIGTERM 1"'
     print(f"🔥🔥🔥 Executing command in pod: {kill_command} 🔥🔥🔥")
     execute_command_as_subprocess(kill_command)
 
@@ -147,6 +139,4 @@ def create_disruption_handler(disruption_config):
   elif disruption_config.disruption_method == DisruptionMethod.SIGILL:
     return SIGILLHandler()
   else:
-    raise ValueError(
-        f"Unsupported disruption method: {disruption_config.disruption_method}"
-    )
+    raise ValueError(f"Unsupported disruption method: {disruption_config.disruption_method}")

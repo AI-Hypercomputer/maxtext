@@ -94,7 +94,7 @@ class FlopCalculation(unittest.TestCase):
     # The factor of 2 is 1 for QK^T and 1 for SV.
     # 3 for forward plus backward pass
     # This accounts for causal masking.
-    attention_flops = 2 * 3 * B * (N/2 * S**2 + N/2 * W**2) * H_q * D_head
+    attention_flops = 2 * 3 * B * (N / 2 * S**2 + N / 2 * W**2) * H_q * D_head
 
     return attention_flops / 1e12  # return tflops
 

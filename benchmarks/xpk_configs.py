@@ -12,13 +12,27 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Defines the XpkClusterConfig dataclass.
+
+This file is separated to prevent circular dependencies between modules that
+both need to reference cluster configuration details (e.g., maxtext_xpk_runner
+and disruption_manager).
+"""
+
 import dataclasses
 
 
 # This is needed to prevent circular imports.
 @dataclasses.dataclass
 class XpkClusterConfig:
-  """Holds details related to a XPK cluster to run workloads on."""
+  """Holds details for an XPK cluster to run workloads on.
+
+  Attributes:
+    cluster_name: The name of the GKE cluster.
+    project: The Google Cloud project where the cluster is located.
+    zone: The zone where the cluster is located.
+    device_type: The type of TPU device in the cluster (e.g., 'v5litepod-256').
+  """
 
   cluster_name: str
   project: str

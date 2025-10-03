@@ -12,8 +12,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Defines the weight mapping from MaxText's Llama3 model to a vLLM-compatible format.
+
+This module provides the `LLAMA3_VLLM_MAPPING` dataclass, which contains all the
+necessary configurations to convert MaxText's Llama3 model weights into a
+format that can be loaded by HuggingFace's vLLM. This includes:
+- A direct mapping of parameter names.
+- Sharding specifications for distributed environments.
+- Hook functions for complex transformations (e.g., RoPE reordering).
+"""
+
 from dataclasses import dataclass
+
 import numpy as np
+
 import jax
 
 
@@ -21,14 +33,50 @@ import jax
 class LLAMA3_VLLM_MAPPING:
   """Mapping MaxText Llama 2 and Llama 3 weights to vLLM's Llama 2 and Llama 3 weights."""
 
+  @staticmethod
   def to_hf_hook_fns():
+    """Defines and returns hook functions for weight transformations.
+
+    These hooks are applied to specific weights during the conversion
+    from MaxText to a HuggingFace-compatible format. They handle
+    transformations like RoPE reordering and query scaling that are not
+    simple re-mappings.
+
+    Returns:
+      A dictionary where keys are MaxText parameter names and values are
+      the corresponding transformation functions.
+    """
 
     def reorder_rope(arr):
+      """Reorders Rotary Position Embedding (RoPE) weights.
+
+      This function is necessary because MaxText and HuggingFace's vLLM
+      implementations may have different orderings for RoPE dimensions.
+      It splits the last dimension into even and odd indices and
+      concatenates them.
+
+      Args:
+        arr: The input weight array.
+
+      Returns:
+        The reordered weight array.
+      """
       evens = arr[..., ::2]
       odds = arr[..., 1::2]
       return jax.numpy.concatenate((evens, odds), axis=arr.ndim - 1)
 
     def transform_query_kernel(arr):
+      """Transforms the query kernel.
+
+      This involves scaling the kernel by the square root of the head
+      dimension and then applying RoPE reordering.
+
+      Args:
+        arr: The query kernel weight array.
+
+      Returns:
+        The transformed query kernel array.
+      """
       head_dim = arr.shape[-1]
       depth_scale = np.dtype("float32").type(np.sqrt(head_dim))
       arr = arr * depth_scale
@@ -40,16 +88,30 @@ class LLAMA3_VLLM_MAPPING:
     }
     return hook_fns
 
+  @staticmethod
   def to_hf_transpose_keys():
+    """Returns a list of keys for weights that need to be transposed.
+
+    Returns:
+      An empty dictionary, as no keys require transposition for this mapping.
+    """
     return {}
 
+  @staticmethod
   def lora_to_hf_mappings():
+    """Provides the mapping for LoRA (Low-Rank Adaptation) weights.
+
+    Returns:
+      None, as LoRA mappings are not defined for this model.
+    """
     return None
 
+  @staticmethod
   def to_hf_mapping():
     """
     Mapping from MaxText model to HuggingFace vLLM model.
-    Currently the param mapping conforms to the Tunix API, which combines the param name and sharding in one dictionary.
+
+    Currently, the param mapping conforms to the Tunix API, which combines the param name & sharding in one dictionary.
     This is subject to change in the future where we can decouple the two.
     """
     return {

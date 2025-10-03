@@ -19,7 +19,7 @@ including collective matmul operations and FP8 GEMM operations.
 """
 
 from absl import app
-from typing import Sequence, Tuple
+from typing import Sequence
 
 import numpy as np
 import re

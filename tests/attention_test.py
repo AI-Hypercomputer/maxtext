@@ -26,7 +26,7 @@ from absl.testing import parameterized
 
 import numpy as np
 
-from jax.sharding import Mesh, NamedSharding, PartitionSpec
+from jax.sharding import Mesh, NamedSharding
 import jax
 import jax.numpy as jnp
 
@@ -732,8 +732,9 @@ class AttentionTest(parameterized.TestCase):
       attention_w_layout_full_this_idx = attention_w_layout_full[:, idx : idx + 1, :]
       self.assertTrue(attention_w_layout_full_this_idx.shape == attention_w_layout_idx.shape)
       self.assertTrue(
-          jax.numpy.allclose(attention_w_layout_full_this_idx, attention_w_layout_idx, rtol=rtol, atol=atol, equal_nan=False)
-          jax.numpy.allclose(attention_w_layout_full_this_idx, attention_w_layout_idx, rtol=rtol, atol=atol, equal_nan=False)
+          jax.numpy.allclose(
+              attention_w_layout_full_this_idx, attention_w_layout_idx, rtol=rtol, atol=atol, equal_nan=False
+          )
       )
 
   @pytest.mark.tpu_only
@@ -850,7 +851,9 @@ class AttentionTest(parameterized.TestCase):
         model_mode=MODEL_MODE_PREFILL,
     )
     self.assertTrue(
-        jax.numpy.allclose(attention_w_reshape_q_full[:, :prefill_length, :], attention_w_reshape_q_prefill, equal_nan=False)
+        jax.numpy.allclose(
+            attention_w_reshape_q_full[:, :prefill_length, :], attention_w_reshape_q_prefill, equal_nan=False
+        )
     )
 
     self.assertTrue(jax.numpy.allclose(attention_wo_reshape_q_prefill, attention_w_reshape_q_prefill, equal_nan=False))
@@ -1223,7 +1226,7 @@ class MLATest(parameterized.TestCase):
     self.assertTrue(hasattr(base_attention, "out"), "Base Attention should have 'out' projection.")
 
     # 3. Initialize the MLA layer
-    mla_cfg, mla_layer = self.init_mla(self.config_arguments, rope_type="default")
+    _, mla_layer = self.init_mla(self.config_arguments, rope_type="default")
 
     # 4. Assert that the MLA layer DOES NOT HAVE the base projections
     self.assertFalse(hasattr(mla_layer, "query"), "MLA should not have 'query' projection.")
@@ -1385,12 +1388,10 @@ def _forward_with_context_expert_parallelism(cfg_cp, mesh_cp, attention_cp, lnx,
   # apply attention with sharding
   with mesh_cp, nn_partitioning.axis_rules(cfg_cp.logical_axis_rules):
     lnx_spec = nn_partitioning.logical_to_mesh_axes(
-        ('activation_batch_no_exp', 'activation_length_no_exp', 'activation_embed'),
-          nn_partitioning.get_axis_rules()
+        ("activation_batch_no_exp", "activation_length_no_exp", "activation_embed"), nn_partitioning.get_axis_rules()
     )
     pos_spec = nn_partitioning.logical_to_mesh_axes(
-        ('activation_batch_no_exp', 'activation_length_no_exp'),
-        nn_partitioning.get_axis_rules()
+        ("activation_batch_no_exp", "activation_length_no_exp"), nn_partitioning.get_axis_rules()
     )
     lnx_sharding = NamedSharding(mesh_cp, lnx_spec)
     pos_sharding = NamedSharding(mesh_cp, pos_spec)
