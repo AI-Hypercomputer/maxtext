@@ -31,14 +31,17 @@ ENV ENV_LIBTPU_GCS_PATH=$LIBTPU_GCS_PATH
 ARG DEVICE
 ENV ENV_DEVICE=$DEVICE
 
-RUN mkdir -p /deps
+ENV MAXTEXT_ASSETS_ROOT=/deps/src/MaxText/assets
+ENV MAXTEXT_TEST_ASSETS_ROOT=/deps/src/MaxText/test_assets
+ENV MAXTEXT_PKG_DIR=/deps/src/MaxText
+ENV MAXTEXT_REPO_ROOT=/deps
 
 # Set the working directory in the container
 WORKDIR /deps
 
 # Copy setup files and dependency files separately for better caching
 COPY setup.sh ./
-COPY constraints_gpu.txt requirements.txt requirements_with_jax_ai_image.txt ./
+COPY requirements.txt requirements_with_jax_ai_image.txt ./
 
 # Install dependencies - these steps are cached unless the copied files change
 RUN echo "Running command: bash setup.sh MODE=$ENV_MODE JAX_VERSION=$ENV_JAX_VERSION LIBTPU_GCS_PATH=${ENV_LIBTPU_GCS_PATH} DEVICE=${ENV_DEVICE}"
@@ -46,3 +49,6 @@ RUN --mount=type=cache,target=/root/.cache/pip bash setup.sh MODE=${ENV_MODE} JA
 
 # Now copy the remaining code (source files that may change frequently)
 COPY . .
+
+# Install (editable) MaxText
+RUN test -f '/tmp/venv_created' && "$(tail -n1 /tmp/venv_created)"/bin/activate ; pip install --no-dependencies -e .

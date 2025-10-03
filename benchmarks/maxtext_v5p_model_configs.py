@@ -15,8 +15,10 @@
 """Shared Benchmark config for v6e orchestrations."""
 
 import os.path
+
 from benchmarks import xla_flags_library
 from benchmarks.benchmark_utils import MaxTextModel, _add_to_model_dictionary
+from benchmarks.globals import MAXTEXT_ASSETS_ROOT
 
 
 v5p_model_dict = {}
@@ -168,10 +170,7 @@ llama2_70b_v5p_128 = _add_to_model_dictionary(
             "enable_checkpointing": False,
             "profiler": "xplane",
         },
-        xla_flags=(
-            xla_flags_library.DATA_PARALLEL_OVERLAP
-            + xla_flags_library.CF_FOR_ALL_GATHER
-        ),
+        xla_flags=(xla_flags_library.DATA_PARALLEL_OVERLAP + xla_flags_library.CF_FOR_ALL_GATHER),
     ),
 )
 
@@ -186,17 +185,14 @@ llama2_7b_v5p_128 = _add_to_model_dictionary(
             "remat_policy": "minimal",
             "max_target_length": 4096,
             "use_iota_embed": True,
-            "tokenizer_path": os.path.join("assets", "tokenizer.llama2"),
+            "tokenizer_path": os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizer.llama2"),
             "dataset_path": "gs://max-datasets-rogue",
             "dataset_type": "synthetic",
             "reuse_example_batch": 1,
             "enable_checkpointing": False,
             "profiler": "xplane",
         },
-        xla_flags=(
-            xla_flags_library.DATA_PARALLEL_OVERLAP
-            + xla_flags_library.CF_FOR_ALL_GATHER
-        ),
+        xla_flags=(xla_flags_library.DATA_PARALLEL_OVERLAP + xla_flags_library.CF_FOR_ALL_GATHER),
     ),
 )
 
@@ -218,10 +214,7 @@ gpt_3_175b_v5p_128 = _add_to_model_dictionary(
             "enable_checkpointing": False,
             "profiler": "xplane",
         },
-        xla_flags=(
-            xla_flags_library.DATA_PARALLEL_OVERLAP
-            + xla_flags_library.CF_FOR_ALL_GATHER
-        ),
+        xla_flags=(xla_flags_library.DATA_PARALLEL_OVERLAP + xla_flags_library.CF_FOR_ALL_GATHER),
     ),
 )
 
@@ -244,8 +237,7 @@ gpt_3_175b_v5p_128_sc = _add_to_model_dictionary(
             "profiler": "xplane",
         },
         xla_flags=(
-            xla_flags_library.DATA_PARALLEL_OVERLAP
-            + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_GATHER
+            xla_flags_library.DATA_PARALLEL_OVERLAP + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_GATHER
         ),
     ),
 )

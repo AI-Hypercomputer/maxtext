@@ -12,21 +12,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""
+This module defines the DisruptionManager class, which orchestrates the
+entire disruption process for one or more workloads.
+
+It manages a collection of monitoring threads, one for each configured
+disruption. It provides an interface to add workloads, start the monitoring
+process, and wait for all disruptions to complete.
+"""
+
 from collections import defaultdict
-import os
-import sys
 import threading
-from typing import List
 
-parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-sys.path.append(parent_dir)
-
-from disruption_management.disruption_handler import create_disruption_handler
-from disruption_management.disruption_handler import DisruptionConfig
-from disruption_management.disruption_handler import DisruptionHandler
-from disruption_management.monitor import create_monitor
-from disruption_management.monitor import Monitor
-from xpk_configs import XpkClusterConfig
+from benchmarks.disruption_management.disruption_handler import create_disruption_handler
+from benchmarks.disruption_management.disruption_handler import DisruptionConfig
+from benchmarks.disruption_management.disruption_handler import DisruptionHandler
+from benchmarks.disruption_management.monitor import create_monitor
+from benchmarks.disruption_management.monitor import Monitor
+from benchmarks.xpk_configs import XpkClusterConfig
 
 
 class DisruptionManager:
@@ -34,15 +37,13 @@ class DisruptionManager:
 
   def __init__(self) -> None:
     """Initializes the DisruptionManager."""
-    self.threads_to_monitor: defaultdict[str, List[threading.Thread]] = (
-        defaultdict(list)
-    )
+    self.threads_to_monitor: defaultdict[str, list[threading.Thread]] = defaultdict(list)
 
   def add_workload(
       self,
       workload_name: str,
       cluster_config: XpkClusterConfig,
-      disruption_configs: List[DisruptionConfig],
+      disruption_configs: list[DisruptionConfig],
   ) -> None:
     """Adds a workload and starts monitoring for disruptions & recovery.
 
@@ -64,10 +65,7 @@ class DisruptionManager:
           daemon=True,
       )
       self.threads_to_monitor[workload_name].append(thread)
-    print(
-        f"Added {len(disruption_configs)} disruption configs for workload:"
-        f" {workload_name}"
-    )
+    print(f"Added {len(disruption_configs)} disruption configs for workload:" f" {workload_name}")
 
   def remove_workload(self, workload_name: str) -> None:
     """Removes a workload from the disruption manager.
@@ -117,21 +115,15 @@ class DisruptionManager:
     step_pod_regex = f"{workload_name}{disruption_config.step_pod_regex}"
 
     # Create Monitor based on trigger type
-    monitor: Monitor = create_monitor(
-        workload_name, disruption_config, step_pod_regex
-    )
-    disruption_handler: DisruptionHandler = create_disruption_handler(
-        disruption_config
-    )
+    monitor: Monitor = create_monitor(workload_name, disruption_config, step_pod_regex)
+    disruption_handler: DisruptionHandler = create_disruption_handler(disruption_config)
 
     if monitor.monitor_and_detect_trigger():
       print(
           f"🔥🔥🔥 Trigger detected for workload: {workload_name}, triggering"
           f" {disruption_config.disruption_method} 🔥🔥🔥"
       )
-      disruption_handler.trigger_disruption(
-          workload_name, cluster_config, disruption_config, target_pod_regex
-      )
+      disruption_handler.trigger_disruption(workload_name, cluster_config, disruption_config, target_pod_regex)
     else:
       print(f"Monitoring for workload: {workload_name} exited without trigger.")
 

@@ -1,20 +1,23 @@
 #!/bin/bash
 
-# This file contains an end-to-end Airflow nightly test, designed to run once a day on a v4-8, along with documentation to guide users in getting started with Gemma2-2B.
+# This script is both an end-to-end test that runs once a day on a v4-8 and documentation for how to get started with Qwen3-4B.
 
-# The flow of this file is as follows:
-# 1. Convert the checkpoint downloaded from Hugging Face to make it compatible with MaxText
-# 2. Run a forward pass logits check to compare with the original HF golden model
-# 2. Run decoding, finetuning of Qwen3-4B. with the converted checkpoint.
-# 3. Run decoding from the finetuned checkpoint from step 2
+# The flow of this script is as follows:
+# 1. Convert the checkpoint downloaded from Hugging Face to make it compatible with MaxText.
+# 2. Run a forward pass logits check to compare with the original HF golden model.
+# 3. Run decoding, finetuning of Qwen3-4B. with the converted checkpoint.
+# 4. Run decoding from the finetuned checkpoint from step 3.
+
+# Pre-requisites:
+# 1. Set HF_TOKEN environment variable to your Hugging Face access token with read permissions
+# export HF_TOKEN=<Hugging Face access token>
 
 set -ex
 idx=$(date +%Y-%m-%d-%H-%M)
 MODEL_NAME='qwen3-4b'
 export MODEL_VARIATION='4b'
-HF_TOKEN='' # Important!!! Save your hf access token here
 HF_GOLDEN_MODEL='Qwen/Qwen3-4B'
-TOKENIZER_PATH='assets/qwen3-tokenizer'
+TOKENIZER_PATH="${MAXTEXT_ASSETS_ROOT:-${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText/assets}}"'/qwen3-tokenizer'
 
 # Installing torch for deps in forward_pass_logit_checker.py
 python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
@@ -25,27 +28,27 @@ python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 export MODEL_BUCKET=gs://maxtext-qwen/qwen3
 
 # To get unscanned ckpt:
-python -m MaxText.utils.ckpt_conversion.to_maxtext MaxText/configs/base.yml \
+python -m MaxText.utils.ckpt_conversion.to_maxtext "${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText}/"configs/base.yml \
     model_name=${MODEL_NAME} \
     hf_access_token=${HF_TOKEN} \
     base_output_directory=${MODEL_BUCKET}/${MODEL_VARIATION}/unscanned/${idx} \
-    scan_layers=false 
+    scan_layers=false
 
 export UNSCANNED_CKPT_PATH=${MODEL_BUCKET}/${MODEL_VARIATION}/unscanned/${idx}/0/items
 
 # We also test whether the forward pass logits match the original HF model
 # to get higher precision (eg. float32) run on CPU with `JAX_PLATFORMS=cpu`
-python3 -m MaxText.tests.forward_pass_logit_checker MaxText/configs/base.yml \
-    tokenizer_path==${TOKENIZER_PATH}\
+python3 -m tests.forward_pass_logit_checker "${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText}/"configs/base.yml \
+    tokenizer_path=${TOKENIZER_PATH}\
     load_parameters_path=${UNSCANNED_CKPT_PATH} \
     model_name=${MODEL_NAME} \
     scan_layers=false \
     --hf_model_path=${HF_GOLDEN_MODEL} \
     --max_kl_div=0.015 \
-    --run_hf_model=True 
+    --run_hf_model=True
 
 # We can run decoding for unscanned checkpoints.
-python3 -m MaxText.decode MaxText/configs/base.yml tokenizer_path==${TOKENIZER_PATH} load_parameters_path=${UNSCANNED_CKPT_PATH} per_device_batch_size=1 run_name=runner_$(date +%Y-%m-%d-%H-%M) max_prefill_predict_length=8 max_target_length=16 dataset_type=synthetic steps=10 async_checkpointing=false scan_layers=false model_name=${MODEL_NAME} prompt="I love to"
+python3 -m MaxText.decode "${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText}/"configs/base.yml tokenizer_path=${TOKENIZER_PATH} load_parameters_path=${UNSCANNED_CKPT_PATH} per_device_batch_size=1 run_name=runner_$(date +%Y-%m-%d-%H-%M) max_prefill_predict_length=8 max_target_length=16 dataset_type=synthetic steps=10 async_checkpointing=false scan_layers=false model_name=${MODEL_NAME} prompt="I love to"
 
 # # Non-Googlers please remember to point `DATASET_PATH` to the GCS bucket where you have your training data
 export DATASET_PATH=gs://maxtext-dataset
@@ -55,7 +58,7 @@ export BASE_OUTPUT_DIRECTORY=gs://runner-maxtext-logs
 # We can also run finetuning by using the scanned converted checkpoint.
 # Note that scanned checkpoint helps with efficient finetuning
 export FINETUNE_RUN_NAME=runner_finetune_${idx}
-python3 -m MaxText.train MaxText/configs/base.yml base_output_directory=${BASE_OUTPUT_DIRECTORY} dataset_path=${DATASET_PATH} tokenizer_path==${TOKENIZER_PATH} load_parameters_path=${UNSCANNED_CKPT_PATH} per_device_batch_size=1 run_name=${FINETUNE_RUN_NAME} max_target_length=8192 steps=10 async_checkpointing=false scan_layers=false model_name=${MODEL_NAME} checkpoint_period=5
+python3 -m MaxText.train "${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText}/"configs/base.yml base_output_directory=${BASE_OUTPUT_DIRECTORY} dataset_path=${DATASET_PATH} tokenizer_path=${TOKENIZER_PATH} load_parameters_path=${UNSCANNED_CKPT_PATH} per_device_batch_size=1 run_name=${FINETUNE_RUN_NAME} max_target_length=8192 steps=10 async_checkpointing=false scan_layers=false model_name=${MODEL_NAME} checkpoint_period=5
 
 # Now, run decoding on the checkpoint generated from our finetune run.
-python3 -m MaxText.decode MaxText/configs/base.yml tokenizer_path==${TOKENIZER_PATH} load_parameters_path=${BASE_OUTPUT_DIRECTORY}/${FINETUNE_RUN_NAME}/checkpoints/0/items per_device_batch_size=1 run_name=runner_$(date +%Y-%m-%d-%H-%M) max_prefill_predict_length=8 max_target_length=16 dataset_type=synthetic steps=10 async_checkpointing=false scan_layers=false model_name=${MODEL_NAME} prompt="I love to"
+python3 -m MaxText.decode "${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText}/"configs/base.yml tokenizer_path=${TOKENIZER_PATH} load_parameters_path=${BASE_OUTPUT_DIRECTORY}/${FINETUNE_RUN_NAME}/checkpoints/0/items per_device_batch_size=1 run_name=runner_$(date +%Y-%m-%d-%H-%M) max_prefill_predict_length=8 max_target_length=16 dataset_type=synthetic steps=10 async_checkpointing=false scan_layers=false model_name=${MODEL_NAME} prompt="I love to"

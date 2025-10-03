@@ -31,6 +31,10 @@ on:
       pytest_marker:
         required: true
         type: string
+      pytest_addopts:
+        required: false
+        type: string
+        default: ''
       is_scheduled_run:
         required: true
         type: string
@@ -61,10 +65,10 @@ jobs:
       - uses: actions/checkout@v5
       - name: Run Tests
         run: |
-          if [ "${{ inputs.is_scheduled_run }}" == "true" ]; then
+          if [ "${{ inputs.is_scheduled_run }}" = "true" ]; then
             FINAL_PYTEST_MARKER="${{ inputs.pytest_marker }}"
           else
             FINAL_PYTEST_MARKER="${{ inputs.pytest_marker }} and not scheduled_only"
           fi
           python3 -m pip install -e . --no-dependencies &&
-          python3 -m pytest -v --pyargs MaxText.tests -m "${FINAL_PYTEST_MARKER}" --durations=0
+          LIBTPU_INIT_ARGS='--xla_tpu_scoped_vmem_limit_kib=65536' python3 -m pytest ${{ inputs.pytest_addopts }} -v -m "${FINAL_PYTEST_MARKER}" --durations=0

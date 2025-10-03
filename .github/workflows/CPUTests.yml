@@ -1,17 +1,3 @@
-# Copyright 2023–2025 Google LLC
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#    https://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
 name: Linter
 
 on:
@@ -36,9 +22,9 @@ jobs:
         os: [ubuntu-24.04]
         python-version: ['3.12']
     steps:
-    - uses: actions/checkout@v5
+    - uses: actions/checkout@v3
     - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v5
+      uses: actions/setup-python@v4
       with:
         python-version: ${{ matrix.python-version }}
     - name: Install Dependencies
@@ -47,35 +33,10 @@ jobs:
         python3 -m pip install pylint pyink pytype==2024.2.27
     - name: Typecheck the code with pytype
       run: |
-        pytype --jobs auto --disable 'import-error,late-directive,wrong-arg-types,module-attr,unsupported-operands' MaxText/ || true
-    - name: Analysing the code with pylint in Maxtext/
+        pytype --jobs auto --disable 'import-error,late-directive,wrong-arg-types,module-attr,unsupported-operands' src/MaxText/ || true
+    - name: pylint
       run: |
-         pylint --verbose --msg-template='[{abspath}] {msg_id}:{line:3d},{column}: {obj}: {msg}' --disable C0114,R0401,R0917,W0201,W0613 MaxText/ || true
-    - name: Analysing the code with pylint in pedagogical_examples/
+         pylint --disable=R0401,R0917,W0201,W0613 --ignore-patterns='.pytype,.*pyi$' benchmarks end_to_end src tests
+    - name: pyink
       run: |
-         pylint pedagogical_examples/ && \
-         echo 'PyLint check on pedagogical_examples/ is successful' || { echo \
-         'PyLint check has failed. Please run bash code_style.sh to fix issues'; exit 20; }
-    - name: Analysing the code with pyink in Maxtext/
-      run: |
-        pyink MaxText --check --diff --color --pyink-indentation=2 --line-length=125 || true
-    - name: Analysing the code with pyink in pedagogical_examples/
-      run: |
-        pyink pedagogical_examples --check --diff --color --pyink-indentation=2 --line-length=125
-#    - name: Comment on PR with a quality report
-#      uses: actions/github-script@v7
-#      with:
-#        script: |
-#          pyink pedagogical_examples --check --diff --color --pyink-indentation=2 --line-length=125
-#          const script = require('./.github/workflows/utils/qa_issue_comment.js')
-#          console.log(script({github, context}))
-    - name: Prepare quality report
-      run: .github/workflows/utils/qa_markdown.sh > /tmp/qa.md
-    - name: Comment on PR with a quality report
-      uses: thollander/actions-comment-pull-request@v3
-      with:
-        file-path: /tmp/qa.md
-        message: |
-          ## QA checker result # _(execution **${{ github.run_id }}** / attempt **${{ github.run_attempt }}**)_
-
-        comment-tag: execution
+        pyink --pyink-indentation=2 --line-length=122 --check .

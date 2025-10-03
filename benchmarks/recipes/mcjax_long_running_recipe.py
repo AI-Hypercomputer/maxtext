@@ -12,17 +12,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""A recipe for running a long-running MaxText benchmark using McJAX.
+
+This script is designed for stability and long-duration runs. It configures
+and launches a workload on a GKE cluster using XPK, with a high number of
+restarts enabled. It defines the cluster, Docker image, and model
+configurations for a McJAX-based run.
+"""
+
 import datetime
-import sys
 import os
 
-parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-sys.path.append(parent_dir)
-
-import recipes.args_helper as helper
-import maxtext_trillium_model_configs as model_configs
-import maxtext_xpk_runner as mxr
-from xpk_configs import XpkClusterConfig
+import benchmarks.recipes.args_helper as helper
+import benchmarks.maxtext_trillium_model_configs as model_configs
+import benchmarks.maxtext_xpk_runner as mxr
+from benchmarks.xpk_configs import XpkClusterConfig
 
 # Cluster Params
 CLUSTER = "v6e-256-cluster"
@@ -35,17 +39,15 @@ DEVICE_TYPE = "v6e-256"
 # Other parameters (MUST BE SET BY USER)
 XPK_PATH = os.path.join("~", "xpk")
 USER = os.environ["USER"]
-BASE_OUTPUT_DIRECTORY = (
-    f"gs://{USER}-{PROJECT}-{COUNTRY}/mcjax_long_run/"
-)
+BASE_OUTPUT_DIRECTORY = f"gs://{USER}-{PROJECT}-{COUNTRY}/mcjax_long_run/"
 # Generate your own runner image from MaxText repo.
 RUNNER = f"gcr.io/{PROJECT}/{USER}_latest"
 
 MAX_RESTARTS = 10_000
-BENCHMARK_STEPS=10_000_000
+BENCHMARK_STEPS = 10_000_000
 
 
-def main() -> int:
+def main() -> None:
   # V6e cluster config
   cluster_config = XpkClusterConfig(
       cluster_name=CLUSTER,
@@ -55,12 +57,10 @@ def main() -> int:
   )
 
   # Handle command line arguments using args_helper
-  should_continue = helper.handle_cmd_args(
-      cluster_config, helper.DELETE, xpk_path=XPK_PATH
-  )
+  should_continue = helper.handle_cmd_args(cluster_config, helper.DELETE, xpk_path=XPK_PATH)
 
   if not should_continue:
-    return 0
+    return
 
   model_list = [
       # model_configs.llama3_1_70b_8192_pw_lr_real_data,
@@ -68,9 +68,7 @@ def main() -> int:
       model_configs.llama3_1_70b_8192_iter_synth_data_and_checkpointing,
       # model_configs.llama3_1_70b_8192_iter_real_data_and_checkpointing_tfds,
   ]
-  num_slices_list = [
-      2
-  ]
+  num_slices_list = [2]
 
   xpk_workload_cmds = []
   xpk_workload_names = []
@@ -102,9 +100,7 @@ def main() -> int:
             num_steps=BENCHMARK_STEPS,
             priority="medium",
         )
-        command, name = mxr.generate_xpk_workload_cmd(
-            cluster_config=cluster_config, wl_config=wl_config
-        )
+        command, name = mxr.generate_xpk_workload_cmd(cluster_config=cluster_config, wl_config=wl_config)
 
         print(f"Name of the workload is: {name} \n")
         xpk_workload_names.append(name)
@@ -112,17 +108,10 @@ def main() -> int:
         print(f"XPK command to be used is: {command} \n")
         xpk_workload_cmds.append(command)
 
-  for xpk_workload_name, xpk_workload_cmd in zip(
-      xpk_workload_names, xpk_workload_cmds
-  ):
+  for xpk_workload_name, xpk_workload_cmd in zip(xpk_workload_names, xpk_workload_cmds):
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(
-        f"[{timestamp}] Running workload: {xpk_workload_name} with command:"
-        f" {xpk_workload_cmd}"
-    )
-    return_code = mxr.run_command_with_updates(
-        xpk_workload_cmd, xpk_workload_name
-    )
+    print(f"[{timestamp}] Running workload: {xpk_workload_name} with command:" f" {xpk_workload_cmd}")
+    return_code = mxr.run_command_with_updates(xpk_workload_cmd, xpk_workload_name)
     if return_code != 0:
       print(f"Unable to run xpk workload: {xpk_workload_name}")
 

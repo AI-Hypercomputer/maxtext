@@ -12,7 +12,7 @@
 # # (Optional) Override the default HF model
 # export HF_MODEL_PATH=MyCustom/Qwen3-variant
 #
-# bash end_to_end/tpu/qwen3/validate_qwen3_ckpt.sh
+# bash end_to_end/tpu/qwen/moe/qwen3-235b-a22b/1_test_qwen3_235b_a22b.sh
 # ---
 
 set -ex
@@ -40,8 +40,9 @@ echo "Validating MaxText checkpoint at ${MAXTEXT_CHECKPOINT_PATH}"
 echo "Against original HF model: ${HF_MODEL_PATH}"
 
 # This command runs the core validation logic.
-JAX_PLATFORMS=cpu python3 -m MaxText.tests.forward_pass_logit_checker MaxText/configs/base.yml \
-  tokenizer_path=assets/qwen3-tokenizer \
+JAX_PLATFORMS=cpu python3 -m tests.forward_pass_logit_checker "${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText}/"configs/base.yml \
+  tokenizer_type=huggingface \
+  tokenizer_path="${MAXTEXT_ASSETS_ROOT:-${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText/assets}}"/qwen3-tokenizer \
   megablox=False \
   sparse_matmul=False \
   load_parameters_path=${MAXTEXT_CHECKPOINT_PATH} \
