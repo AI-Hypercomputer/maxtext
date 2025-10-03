@@ -84,7 +84,7 @@ gcs_metrics: False
 save_config_to_gcs: False
 
 # Gradient dtype
-grad_dtype: "bfloat16"
+grad_dtype: "float32"
 
 # Activation dtypes.
 dtype: "bfloat16"
