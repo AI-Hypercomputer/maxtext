@@ -401,7 +401,7 @@ class Decoder(nn.Module):
       case DecoderBlockType.SIMPLE_MLP:
         return [simple_layer.SimpleMlpDecoderLayer]
       case DecoderBlockType.LLAMA4:
-        return [llama4.Llama4ScannableBlock] if self.config.scan_layers else [llama4.Llama4DecoderLayer]
+        return [llama4.Llama4ScannableBlockToLinen] if self.config.scan_layers else [llama4.Llama4DecoderLayerToLinen]
       case _:
         # Default case to handle any unknown decoder block types.
         raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block.value=}")
