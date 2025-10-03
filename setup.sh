@@ -180,6 +180,15 @@ fi
 if [[ "$MODE" == "stable" || ! -v MODE ]]; then
 # Stable mode
     if [[ $DEVICE == "tpu" ]]; then
+        echo "Installing stable jax, jaxlib for tpu"
+        if [[ -n "$JAX_VERSION" ]]; then
+            echo "Installing stable jax, jaxlib, libtpu version ${JAX_VERSION}"
+            python3 -m uv pip install jax[tpu]==${JAX_VERSION} -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
+        else
+            echo "Installing stable jax, jaxlib, libtpu for tpu"
+            python3 -m uv pip install 'jax[tpu]>0.4' -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
+        fi
+
         # TODO: Once tunix has support for GPUs, move it from here to requirements.txt
         echo "Installing google-tunix for stable TPU environment"
         python3 -m uv pip install 'google-tunix>=0.1.0'
@@ -191,14 +200,6 @@ if [[ "$MODE" == "stable" || ! -v MODE ]]; then
             python3 -m uv pip install -U crcmod
             # Copy libtpu.so from GCS path
             gsutil cp "$LIBTPU_GCS_PATH" "$libtpu_path"
-        fi
-        echo "Installing stable jax, jaxlib for tpu"
-        if [[ -n "$JAX_VERSION" ]]; then
-            echo "Installing stable jax, jaxlib, libtpu version ${JAX_VERSION}"
-            python3 -m uv pip install jax[tpu]==${JAX_VERSION} -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
-        else
-            echo "Installing stable jax, jaxlib, libtpu for tpu"
-            python3 -m uv pip install 'jax[tpu]>0.4' -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
         fi
     elif [[ $DEVICE == "gpu" ]]; then
         echo "Installing stable jax, jaxlib for NVIDIA gpu"
@@ -231,10 +232,12 @@ elif [[ $MODE == "nightly" ]]; then
         export NVTE_FRAMEWORK=jax
         python3 -m uv pip install https://github.com/NVIDIA/TransformerEngine/archive/9d031f.zip
     elif [[ $DEVICE == "tpu" ]]; then
-        echo "Installing nightly tensorboard plugin profile"
-        python3 -m uv pip install tbp-nightly --upgrade
-        # Installing tunix
-        python3 -m uv pip install 'git+https://github.com/google/tunix.git'
+        echo "Installing jax-nightly, jaxlib-nightly"
+        # Install jax-nightly
+        python3 -m uv pip install --pre -U jax -i https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/
+        # Install jaxlib-nightly
+        python3 -m uv pip install --pre -U jaxlib -i https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/
+
         if [[ -n "$LIBTPU_GCS_PATH" ]]; then
             # Install custom libtpu
             echo "Installing libtpu.so from $LIBTPU_GCS_PATH to $libtpu_path"
@@ -247,11 +250,10 @@ elif [[ $MODE == "nightly" ]]; then
             echo "Installing libtpu-nightly"
             python3 -m uv pip install -U --pre libtpu -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
         fi
-        echo "Installing jax-nightly, jaxlib-nightly"
-        # Install jax-nightly
-        python3 -m uv pip install --pre -U jax -i https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/
-        # Install jaxlib-nightly
-        python3 -m uv pip install --pre -U jaxlib -i https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/
+        echo "Installing nightly tensorboard plugin profile"
+        python3 -m uv pip install tbp-nightly --upgrade
+        # Installing tunix
+        python3 -m uv pip install 'git+https://github.com/google/tunix.git'
     fi
     echo "Installing nightly tensorboard plugin profile"
     python3 -m uv pip install tbp-nightly --upgrade
