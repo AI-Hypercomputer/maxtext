@@ -195,6 +195,7 @@ routed_bias: False # a flag if a learnable bias is added for routing
 mlp_bias: False # a flag if a learnable bias is added for MLP matmul
 n_routing_groups: -1 # number of groups for routing, disabled by default
 topk_routing_group: -1 # number of top groups to route inputs. For EP,
+use_batch_split_schedule: False # whether to use batch split schedule
 # sending activations to a maximum of topk_routing_group distinct devices can yield performance benefits.
 
 # For complex architectures like llama4 there are repeated sets of
