@@ -475,14 +475,13 @@ class MaxEngine(engine_api.Engine):
     input_tokens = jnp.expand_dims(padded_tokens, 0)  # [BATCH, SEQUENCE]
     positions = jnp.expand_dims(jnp.arange(start_position, start_position + input_tokens.shape[1]), 0)
 
-    input_images = None
     if self.config.use_multimodal and images is not None:
       if images.ndim == 3:
         # For Gemma3 single image, add batch and image count dimensions
-        input_images = images[jnp.newaxis, jnp.newaxis, ...]
+        images = images[jnp.newaxis, jnp.newaxis, ...]
       elif images.ndim == 4:
         # add batch dimension
-        input_images = images[jnp.newaxis, ...]
+        images = images[jnp.newaxis, ...]
 
     # sequence_indicator will be concatenated to existing_prefix decoder_segment_ids
     start_to_n = jnp.arange(start_position, start_position + input_tokens.shape[1])
@@ -496,7 +495,7 @@ class MaxEngine(engine_api.Engine):
           input_params,
           input_tokens,
           positions,
-          encoder_images=input_images,
+          encoder_images=images,
           decoder_segment_ids=sequence_indicator,
           enable_dropout=False,
           model_mode=MODEL_MODE_PREFILL,
