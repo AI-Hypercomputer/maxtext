@@ -847,3 +847,13 @@ subslice_shape: ""
 
 # NNX
 enable_nnx: false
+
+# Qwen3-Next specific parameters
+layer_types: [] # A list of strings, one for each layer: "full_attention" or "linear_attention"
+linear_num_value_heads: 32
+linear_num_key_heads: 4
+linear_key_head_dim: 128
+linear_value_head_dim: 128
+linear_conv_kernel_dim: 4
+decoder_sparse_step: 1
+mlp_only_layers: []

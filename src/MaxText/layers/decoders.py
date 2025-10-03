@@ -396,6 +396,8 @@ class Decoder(nn.Module):
         return [qwen3.Qwen3DecoderLayer]
       case DecoderBlockType.QWEN3_MOE:
         return [qwen3.Qwen3MoeDecoderLayer]
+      case DecoderBlockType.QWEN3_NEXT:
+        return [qwen3.Qwen3NextDecoderLayer]
       case DecoderBlockType.SIMPLE:
         return [simple_layer.SimpleDecoderLayer]
       case DecoderBlockType.SIMPLE_MLP:
@@ -447,6 +449,7 @@ class Decoder(nn.Module):
         DecoderBlockType.GEMMA3,
         DecoderBlockType.QWEN3,
         DecoderBlockType.QWEN3_MOE,
+        DecoderBlockType.QWEN3_NEXT,
         DecoderBlockType.GPT_OSS,
         DecoderBlockType.SIMPLE,
         DecoderBlockType.SIMPLE_MLP,
