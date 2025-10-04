@@ -23,6 +23,56 @@ from benchmarks.globals import MAXTEXT_ASSETS_ROOT
 
 v5p_model_dict = {}
 
+llama3_1_405b_8192_v5p_512 = _add_to_model_dictionary(
+    v5p_model_dict,
+    MaxTextModel(
+        model_name="llama3-1-405b-8192-v5p-512",
+        model_type="llama3.1-405b",
+        tuning_params={
+            "per_device_batch_size": 1,
+            "ici_fsdp_parallelism": 256,
+            "max_target_length": 8192,
+            "attention": "flash",
+            "gcs_metrics": True,
+            "use_iota_embed": True,
+            "dataset_path": "gs://max-datasets-rogue",
+            "dataset_type": "synthetic",
+            "reuse_example_batch": 1,
+            "enable_checkpointing": False,
+            "profiler": "xplane",
+            "sa_block_q": 1024,
+            "sa_block_q_dkv": 2048,
+            "sa_block_q_dq": 2048,
+        },
+        xla_flags=(
+            xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+            + xla_flags_library.CF_FOR_ALL_GATHER
+            + xla_flags_library.HOST_OFFLOAD_FLAGS
+        ),
+    ),
+)
+
+llama3_1_70b_v5p_128 = _add_to_model_dictionary(
+    v5p_model_dict,
+    MaxTextModel(
+        model_name="llama3.1_70b_v5p_128",
+        model_type="llama3.1-70b",
+        tuning_params={
+            "ici_fsdp_parallelism": -1,
+            "per_device_batch_size": 4,
+            "remat_policy": "save_dot_except_mlpwi",
+            "max_target_length": 4096,
+            "use_iota_embed": True,
+            "dataset_path": "gs://max-datasets-rogue",
+            "dataset_type": "synthetic",
+            "reuse_example_batch": 1,
+            "enable_checkpointing": False,
+            "profiler": "xplane",
+        },
+        xla_flags=(xla_flags_library.DATA_PARALLEL_OVERLAP + xla_flags_library.CF_FOR_ALL_GATHER),
+    ),
+)
+
 deepseek_v3_ep_256_v5p_512 = _add_to_model_dictionary(
     v5p_model_dict,
     MaxTextModel(
