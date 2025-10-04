@@ -65,6 +65,9 @@ def generate_and_run_workloads(user_config, num_slices_list, num_steps, priority
               xpk_path=user_config.xpk_path,
               num_steps=num_steps,
               priority=priority,
+              generate_metrics_and_upload_to_big_query=user_config.bq_enable,
+              db_project=user_config.bq_db_project,
+              db_dataset=user_config.bq_db_dataset,
           )
 
           # Generate XPK command
