@@ -62,7 +62,7 @@ jobs:
         TPU_SKIP_MDS_QUERY: ${{ inputs.image_type == 'tpu' && inputs.device_type != 'tpu' && '1' || '' }}
       options: ${{ inputs.container_resource_option }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Run Tests
         run: |
           if [ "${{ inputs.is_scheduled_run }}" = "true" ]; then
