@@ -23,6 +23,7 @@ checkpoint, and later resume training.
 import os
 
 import args_helper as helper
+from benchmarks.benchmark_utils import get_xpk_path
 
 from benchmarks.disruption_management.disruption_handler import DisruptionConfig
 from benchmarks.disruption_management.disruption_handler import DisruptionMethod
@@ -47,7 +48,7 @@ COUNTRY = "us"
 DEVICE_TYPE = "v6e-256"
 
 # Other parameters (MUST BE SET BY USER)
-XPK_PATH = "../xpk"  # We're running this script from the maxtext directory
+XPK_PATH = get_xpk_path()
 USER = os.environ["USER"]
 BASE_OUTPUT_DIRECTORY = f"gs://{USER}-{PROJECT}-{COUNTRY}/disruption_management/"
 MAX_RESTARTS = 0
