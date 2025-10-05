@@ -65,7 +65,7 @@ After installation, you can verify the package is available with `python3 -c "im
 
 ## 🔥 Latest news 🔥
 
-* \[September 26, 2025\] Vocabulary tiling ([PR](https://github.com/AI-Hypercomputer/maxtext/pull/2242)) is now supported in MaxText! Adjust config `num_vocab_tiling` to unlock more efficient memory usage, see [doc](https://maxtext.readthedocs.io/en/latest/explanations/tiling.html).
+* \[September 26, 2025\] Vocabulary tiling ([PR](https://github.com/AI-Hypercomputer/maxtext/pull/2242)) is now supported in MaxText! Adjust config `num_vocab_tiling` to unlock more efficient memory usage.
 * \[September 24, 2025\] The GPT-OSS family of models (20B, 120B) is now supported.
 * \[September 5, 2025\] MaxText has moved to an `src` layout as part of [RESTRUCTURE.md](RESTRUCTURE.md). For existing environments, please run `pip install -e .` from MaxText root.
 * \[August 13, 2025\] The Qwen3 2507 MoE family of models is now supported: MoEs: 235B Thinking & 280B Coder as well as existing dense models: 0.6B, 4B, 8B, 14B, and 32B.  
