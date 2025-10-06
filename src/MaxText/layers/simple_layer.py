@@ -15,58 +15,118 @@
 """ Simple decoder layers for testing and debugging purposes."""
 
 from jax import numpy as jnp
-from jax.sharding import Mesh
+from jax.sharding import Mesh, NamedSharding
 
-from flax import linen as nn
+from flax import nnx, linen as nn
 
 from MaxText.common_types import Config
-from MaxText.layers import quantizations
+from MaxText.layers import nnx_wrappers
+from MaxText.layers import initializers
+from MaxText.layers.linears import DenseGeneral
 
 # pytype: disable=attribute-error
 
 
-class SimpleDecoderLayer(nn.Module):
-  """Decoder layer consisting of a single [embed, embed] weight matrix."""
+class SimpleDecoderLayer(nnx.Module):
+  """Decoder layer consisting of simple matmul."""
 
-  config: Config
-  mesh: Mesh
-  model_mode: str
-  quant: None | quantizations.AqtQuantization = None
+  def __init__(
+      self,
+      config: Config,
+      mesh: Mesh,
+      model_mode: str,
+      quant: None = None,
+      *,
+      rngs: nnx.Rngs, # NNX modules require rngs in __init__
+  ):
+    self.config = config
+    self.mesh = mesh
+    self.model_mode = model_mode
+    self.quant = quant
 
-  def setup(self):
-    self.weight_mat = self.param(
-        "weights",
-        nn.with_logical_partitioning(nn.initializers.lecun_normal(), ("embed", "mlp")),
-        (self.config.emb_dim, self.config.emb_dim),
+    activation_axis_names = ("activation_batch", "activation_norm_length", "activation_embed")
+    self.out_sharding = NamedSharding(self.mesh, nn.logical_to_mesh_axes(activation_axis_names))
+
+    self.linear = DenseGeneral(
+        in_features_shape=config.emb_dim,
+        out_features_shape=config.emb_dim,
+        kernel_axes=('embed', 'mlp'),
+        dtype=config.dtype,
+        weight_dtype=config.weight_dtype,
+        quant=self.quant,
+        out_sharding=self.out_sharding,
+        shard_mode=config.shard_mode,
+        rngs=rngs,
     )
+
 
   def __call__(
-      self, inputs: jnp.ndarray, positions, segmentation, deterministic, model_mode, previous_chunk=None, page_state=None
+      self,
+      inputs: jnp.ndarray,
+      positions,
+      segmentation,
+      deterministic,
+      model_mode,
+      slot=None,
+      previous_chunk=None,
+      page_state=None,
   ):
+    output = self.linear(inputs)
+
     if self.config.scan_layers:
-      return inputs @ self.weight_mat.astype(inputs.dtype), None
+      return output, None
     else:
-      return inputs @ self.weight_mat.astype(inputs.dtype)
+      return output
+
+SimpleDecoderLayerToLinen = nnx_wrappers.to_linen_class(
+  SimpleDecoderLayer,
+  base_metadata_fn=initializers.variable_to_logically_partitioned,
+)
 
 
-class SimpleMlpDecoderLayer(nn.Module):
+class SimpleMlpDecoderLayer(nnx.Module):
   """Decoder layer consisting of [embed,mlp] followed by an [mlp,embed] matmul."""
 
-  config: Config
-  mesh: Mesh
-  model_mode: str
-  quant: None | quantizations.AqtQuantization = None
+  def __init__(
+      self,
+      config: Config,
+      mesh: Mesh,
+      model_mode: str,
+      quant: None = None,
+      *,
+      rngs: nnx.Rngs, # NNX modules require rngs in __init__
+  ):
+    self.config = config
+    self.mesh = mesh
+    self.model_mode = model_mode
+    self.quant = quant
+    activation_axes_names = ("activation_batch", "activation_norm_length", "activation_embed")
+    activation_sharding = NamedSharding(mesh, nn.logical_to_mesh_axes(activation_axes_names))
+    mlp_axes_names = ("activation_batch", "activation_norm_length", "activation_mlp")
+    mlp_sharding = NamedSharding(mesh, nn.logical_to_mesh_axes(mlp_axes_names))
 
-  def setup(self):
-    self.ff_1 = self.param(
-        "ff_1",
-        nn.with_logical_partitioning(nn.initializers.lecun_normal(), ("embed", "mlp")),
-        (self.config.emb_dim, self.config.mlp_dim),
+    self.ff_1 = DenseGeneral(
+        in_features_shape=config.emb_dim,
+        out_features_shape=config.mlp_dim,
+        kernel_axes=('embed', 'mlp'),
+        dtype=config.dtype,
+        weight_dtype=config.weight_dtype,
+        quant=self.quant,
+        shard_mode=config.shard_mode,
+        out_sharding=mlp_sharding,
+        rngs=rngs,
     )
-    self.ff_2 = self.param(
-        "ff_2",
-        nn.with_logical_partitioning(nn.initializers.lecun_normal(), ("mlp", "embed")),
-        (self.config.mlp_dim, self.config.emb_dim),
+
+    self.ff_2 = DenseGeneral(
+        in_features_shape=config.mlp_dim,
+        out_features_shape=config.emb_dim,
+        kernel_axes=('mlp', 'embed'),
+        dtype=config.dtype,
+        weight_dtype=config.weight_dtype,
+        quant=self.quant,
+        shard_mode=config.shard_mode,
+        out_sharding=activation_sharding,
+        rngs=rngs,
     )
 
   def __call__(
@@ -80,9 +140,14 @@ class SimpleMlpDecoderLayer(nn.Module):
       page_state=None,
       slot=0,
   ):
-    intermediate = inputs @ self.ff_1.astype(inputs.dtype)
-    output = intermediate @ self.ff_2.astype(inputs.dtype)
+    intermediate = self.ff_1(inputs)
+    output = self.ff_2(intermediate)
     if self.config.scan_layers:
       return output, None
     else:
       return output
+
+SimpleMlpDecoderLayerToLinen = nnx_wrappers.to_linen_class(
+  SimpleMlpDecoderLayer,
+  base_metadata_fn=initializers.variable_to_logically_partitioned,
+)

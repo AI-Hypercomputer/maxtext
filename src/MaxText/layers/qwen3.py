@@ -154,6 +154,7 @@ class Qwen3DecoderLayer(AttentionWithNorm):
   ):
     super().__init__(config, mesh, model_mode, quant, rngs)
     self.mlp = MlpBlock(
+        mesh=self.mesh,
         in_features=config.emb_dim,
         intermediate_dim=config.mlp_dim,
         activations=config.mlp_activations,

@@ -20,6 +20,7 @@ import math
 import jax
 from jax import lax
 import jax.numpy as jnp
+from jax.sharding import Mesh, NamedSharding
 
 from flax import linen as nn
 from flax import nnx
@@ -46,6 +47,7 @@ def embed_as_linen(
     num_embeddings: int,
     num_features: int,
     config: Config,
+    mesh: Mesh,
     cast_input_dtype: None | DType = None,
     dtype: DType = jnp.float32,
     attend_dtype: None | DType = None,
@@ -76,6 +78,7 @@ def embed_as_linen(
       num_embeddings=num_embeddings,
       num_features=num_features,
       config=config,
+      mesh=mesh,
       cast_input_dtype=cast_input_dtype,
       dtype=dtype,
       attend_dtype=attend_dtype,
@@ -93,6 +96,7 @@ class Embed(nnx.Module):
       num_embeddings: int,
       num_features: int,
       config: Config,
+      mesh: Mesh,
       cast_input_dtype: None | DType = None,
       dtype: DType = jnp.float32,
       attend_dtype: None | DType = None,
@@ -117,6 +121,7 @@ class Embed(nnx.Module):
     self.num_embeddings = num_embeddings
     self.num_features = num_features
     self.config = config
+    self.mesh = mesh
     self.cast_input_dtype = cast_input_dtype
     self.dtype = dtype
     self.attend_dtype = attend_dtype
@@ -144,21 +149,29 @@ class Embed(nnx.Module):
 
     embedding = _maybe_move_embedding_to_device(self.embedding.value, self.config)
 
+    output_prefill_axis_names = ("activation_embed_and_logits_batch", "prefill_activation_length", "activation_embed")
+    output_default_axis_names = ("activation_embed_and_logits_batch", "activation_length_no_exp", "activation_embed")
+
+    if model_mode == MODEL_MODE_PREFILL:
+      output_sharding = nn.logical_to_mesh_axes(output_prefill_axis_names)
+    else:
+      output_sharding = nn.logical_to_mesh_axes(output_default_axis_names)
+
     if cfg.use_iota_embed:
       iota = lax.iota(jnp.int32, self.num_embeddings)
       one_hot = jnp.array(inputs[..., jnp.newaxis] == iota, dtype=self.dtype)
       output = jnp.dot(one_hot, jnp.asarray(embedding, self.dtype))
     else:
-      output = jnp.asarray(embedding, self.dtype)[inputs]
+      if self.config.shard_mode == 'auto':
+        output = jnp.asarray(embedding, self.dtype)[inputs]
+      else:
+        output = jnp.asarray(embedding, self.dtype).at[inputs].get(
+          out_sharding=NamedSharding(self.mesh, output_sharding)
+        )
 
-    output_prefill_axis_names = ("activation_embed_and_logits_batch", "prefill_activation_length", "activation_embed")
-    output_default_axis_names = ("activation_embed_and_logits_batch", "activation_length_no_exp", "activation_embed")
-
-    if model_mode == MODEL_MODE_PREFILL:
-      output = nn.with_logical_constraint(output, output_prefill_axis_names)
-    else:
-      output = nn.with_logical_constraint(output, output_default_axis_names)
     return output
+
+
 
   def attend(self, query: Array) -> Array:
     """Attend over the embedding using a query array.

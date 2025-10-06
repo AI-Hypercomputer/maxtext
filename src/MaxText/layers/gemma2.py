@@ -113,6 +113,7 @@ class Gemma2DecoderLayer(nnx.Module):
 
     self.mlp_local = MlpBlock(
         config=config,
+        mesh=self.mesh,
         in_features=config.emb_dim,
         intermediate_dim=config.mlp_dim,
         activations=config.mlp_activations,
@@ -186,6 +187,7 @@ class Gemma2DecoderLayer(nnx.Module):
 
     self.mlp_global = MlpBlock(
         config=config,
+        mesh=self.mesh,
         in_features=config.emb_dim,
         intermediate_dim=config.mlp_dim,
         activations=config.mlp_activations,

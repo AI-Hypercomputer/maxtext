@@ -165,6 +165,7 @@ class Gemma3DecoderLayer(nn.Module):
         weight_dtype=cfg.weight_dtype,
         name="mlp",
         config=cfg,
+        mesh=self.mesh,
         quant=self.quant,
     )(attn_output, deterministic=deterministic)
 

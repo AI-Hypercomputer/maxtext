@@ -22,13 +22,13 @@ import functools
 import jax
 import jax.numpy as jnp
 from jax.ad_checkpoint import checkpoint_name
-from jax.sharding import Mesh
+from jax.sharding import Mesh, NamedSharding
 
 from flax import linen as nn
 from flax import nnx
 from flax.linen.partitioning import ScanIn
 
-from MaxText.common_types import DecoderBlockType, Config, MODEL_MODE_TRAIN, MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE
+from MaxText.common_types import DecoderBlockType, Config, MODEL_MODE_TRAIN, MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE, EP_AS_CONTEXT
 from MaxText import max_logging
 from MaxText import max_utils
 from MaxText.inference import page_manager
@@ -88,10 +88,13 @@ class DecoderLayer(nn.Module):
   ):
     cfg = self.config
     mesh = self.mesh
-    if model_mode == MODEL_MODE_PREFILL:
+      
+    if self.model_mode == MODEL_MODE_PREFILL:
       logical_axis_names = ("activation_batch", "prefill_activation_length", "activation_embed")
+    elif self.config.expert_shard_attention_option == EP_AS_CONTEXT and self.model_mode == MODEL_MODE_TRAIN:
+      logical_axis_names = ("activation_batch_no_exp", "activation_length", "activation_embed")
     else:
-      logical_axis_names = ("activation_batch", "activation_length", "activation_embed")
+      logical_axis_names = ("activation_batch", "activation_length_no_exp", "activation_embed")
 
     if model_mode == MODEL_MODE_PREFILL:
       inputs = nn.with_logical_constraint(inputs, logical_axis_names)
@@ -165,6 +168,7 @@ class DecoderLayer(nn.Module):
         model_mode=model_mode,
         config=cfg,
         quant=self.quant,
+        mesh=self.mesh,
     )(lnx, deterministic=deterministic)
     if model_mode == MODEL_MODE_PREFILL:
       mlp_lnx = nn.with_logical_constraint(mlp_lnx, logical_axis_names)
@@ -402,9 +406,9 @@ class Decoder(nn.Module):
       case DecoderBlockType.QWEN3_MOE:
         return [qwen3.Qwen3MoeDecoderLayerToLinen]
       case DecoderBlockType.SIMPLE:
-        return [simple_layer.SimpleDecoderLayer]
+        return [simple_layer.SimpleDecoderLayerToLinen]
       case DecoderBlockType.SIMPLE_MLP:
-        return [simple_layer.SimpleMlpDecoderLayer]
+        return [simple_layer.SimpleMlpDecoderLayerToLinen]
       case DecoderBlockType.LLAMA4:
         return [llama4.Llama4ScannableBlockToLinen] if self.config.scan_layers else [llama4.Llama4DecoderLayerToLinen]
       case _:
@@ -567,6 +571,7 @@ class Decoder(nn.Module):
           embedding_init=nn.initializers.normal(stddev=1.0),
           name="position_embedder",
           config=cfg,
+          mesh=self.mesh,
       )(decoder_positions, model_mode=model_mode)
     return y
 
@@ -584,6 +589,15 @@ class Decoder(nn.Module):
         parameter_memory_host_offload=cfg.parameter_memory_host_offload,
     )(y)
     y = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(y, deterministic=deterministic)
+
+    if model_mode in (MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE):
+      out_sharding = NamedSharding(self.mesh, nn.logical_to_mesh_axes((None, None, "activation_vocab")))
+    elif cfg.num_vocab_tiling == 1:
+      out_sharding = NamedSharding(self.mesh, nn.logical_to_mesh_axes((
+        "activation_embed_and_logits_batch", "activation_length_no_exp", "activation_vocab",
+      )))
+    else:
+      out_sharding = None
 
     # [batch, length, emb_dim] -> [batch, length, vocab_size]
     if cfg.logits_via_embedding:
@@ -613,15 +627,11 @@ class Decoder(nn.Module):
           name="logits_dense",
           matmul_precision=self.config.matmul_precision,
           parameter_memory_host_offload=cfg.parameter_memory_host_offload,
+          shard_mode=self.config.shard_mode,
+          out_sharding=out_sharding,
       )(
           y
       )  # We do not quantize the logits matmul.
-    if model_mode in (MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE):
-      logits = nn.with_logical_constraint(logits, (None, None, "activation_vocab"))
-    elif cfg.num_vocab_tiling == 1:
-      logits = nn.with_logical_constraint(
-          logits, ("activation_embed_and_logits_batch", "activation_length_no_exp", "activation_vocab")
-      )
 
     if self.config.cast_logits_to_fp32:
       logits = logits.astype(jnp.float32)
