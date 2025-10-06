@@ -71,10 +71,18 @@ jobs:
         with:
           name: maxtext-wheel
       - name: Install the maxtext wheel
+        shell: bash
         run: |
           maxtext_wheel=$(ls maxtext-*-py3-none-any.whl 2>/dev/null)
           python3 -m uv pip install ${maxtext_wheel}[${MAXTEXT_PACKAGE_EXTRA}] --resolution=lowest --system
           install_maxtext_github_deps
+          if [ "${{ inputs.device_type }}" == "gpu" ]; then
+            echo "Installing Transformer Engine for GPU"
+            python3 -m pip install transformer-engine-cu12>=2.7.0 transformer-engine-jax>=2.7.0 transformer-engine>=2.7.0
+            echo "Transformer Engine version: $(python3 -c 'import transformer_engine; print(transformer_engine.__version__)')"
+            echo "Transformer Engine Jax version: $(python3 -c 'import jax; print(jax.__version__)')"
+            # echo "Transformer Engine PyTorch version: $(python3 -c 'import torch; import transformer_engine.pytorch as te; print(torch.__version__, te.__version__)')"
+          fi
           python3 --version
           python3 -m pip freeze
       - name: Copy test assets files
