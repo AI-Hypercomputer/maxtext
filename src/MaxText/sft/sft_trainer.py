@@ -49,6 +49,7 @@ from orbax import checkpoint as ocp
 from tunix.sft import peft_trainer, profiler
 
 from MaxText import max_utils
+from MaxText import max_logging
 from MaxText import maxtext_utils
 from MaxText import optimizers
 from MaxText import pyconfig
@@ -84,10 +85,15 @@ def get_tunix_config(mt_config):
   # Profiler configurations
   profiler_options = None
   if mt_config.profiler:
+    set_profile_options = True
+    if jax.extend.backend.get_backend().platform_version == "Pathways":
+      max_logging.log("Pathways backend detected. Disabling setting profile options.")
+      set_profile_options = False
     profiler_options = profiler.ProfilerOptions(
         log_dir=mt_config.tensorboard_dir,
         skip_first_n_steps=mt_config.skip_first_n_steps_for_profiler,
         profiler_steps=mt_config.profiler_steps,
+        set_profile_options=set_profile_options,
     )
 
   return peft_trainer.TrainingConfig(
