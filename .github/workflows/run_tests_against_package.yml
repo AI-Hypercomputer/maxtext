@@ -79,9 +79,8 @@ jobs:
           maxtext_wheel=$(ls maxtext-*-py3-none-any.whl 2>/dev/null)
           uv pip install ${maxtext_wheel}[${MAXTEXT_PACKAGE_EXTRA}] --resolution=lowest
           install_maxtext_github_deps
-          python3 --version
-          python3 -m pip freeze
           if [ "${{ inputs.device_type }}" == "gpu" ]; then
+            export NVTE_FRAMEWORK=jax && uv pip install --no-build-isolation transformer_engine[jax]
             echo "Verifying GPU setup"
             # Check the CUDA compiler version
             nvcc --version
@@ -95,6 +94,8 @@ jobs:
             echo "ls /usr/local/"
             ls /usr/local/
           fi
+          python3 --version
+          python3 -m pip freeze
       - name: Copy test assets files
         run : gcloud storage cp gs://maxtext-test-assets/* src/MaxText/test_assets
       - name: Display contents of workspace # TODO: Remove
@@ -117,6 +118,7 @@ jobs:
             export CUDA_PATH=/usr/local/cuda
             export LD_LIBRARY_PATH=/path/to/cuda/lib64:$LD_LIBRARY_PATH
             echo "Complete CUDA and LD_LIBRARY_PATH setup for GPU tests: ${CUDA_PATH} and ${LD_LIBRARY_PATH}"
+            export NVTE_FRAMEWORK=jax
           fi
           # TODO: Fix the skipped tests and remove the deselect flags
           LIBTPU_INIT_ARGS='--xla_tpu_scoped_vmem_limit_kib=65536' .venv/bin/python3 -m pytest ${{ inputs.pytest_addopts }} -v -m "${FINAL_PYTEST_MARKER}" --durations=0 --deselect "tests/aot_hlo_identical_test.py::AotHloIdenticalTest::test_default_hlo_match" --deselect "tests/tokenizer_test.py::TokenizerTest::test_detokenize"
