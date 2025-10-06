@@ -21,6 +21,7 @@ from flax import nnx
 from jax import lax
 import jax
 import jax.numpy as jnp
+from jax.sharding import NamedSharding
 from MaxText import max_logging
 from MaxText import max_utils
 from MaxText.layers import nnx_wrappers
@@ -37,6 +38,7 @@ class RMSNorm(nnx.Module):
       epsilon: float = 1e-6,
       dtype: Any = jnp.float32,
       weight_dtype: Any = jnp.float32,
+      out_sharding: NamedSharding | None = None,
       kernel_axes: tuple[None | str, ...] = (),
       scale_init: Initializer = nn.initializers.ones,
       parameter_memory_host_offload: bool = False,
@@ -47,6 +49,7 @@ class RMSNorm(nnx.Module):
     self.epsilon = epsilon
     self.dtype = dtype
     self.weight_dtype = weight_dtype
+    self.out_sharding = out_sharding
     self.kernel_axes = kernel_axes
     self.scale_init = scale_init
     self.parameter_memory_host_offload = parameter_memory_host_offload
@@ -67,7 +70,7 @@ class RMSNorm(nnx.Module):
       scale = jax.device_put(scale, max_utils.device_space())
 
     scale = jnp.asarray(scale, self.dtype)
-    return y * scale
+    return jnp.einsum("i...k,...k->i...k", y, scale, out_sharding=self.out_sharding)
 
 
 def rms_norm(
@@ -75,6 +78,7 @@ def rms_norm(
     epsilon: float = 1e-6,
     dtype: Any = jnp.float32,
     weight_dtype: Any = jnp.float32,
+    out_sharding: NamedSharding | None = None,
     kernel_axes: tuple[None | str, ...] = (),
     scale_init: Initializer = nn.initializers.ones,
     name: None | str = None,
@@ -87,6 +91,7 @@ def rms_norm(
       epsilon=epsilon,
       dtype=dtype,
       weight_dtype=weight_dtype,
+      out_sharding=out_sharding,
       kernel_axes=kernel_axes,
       scale_init=scale_init,
       parameter_memory_host_offload=parameter_memory_host_offload,

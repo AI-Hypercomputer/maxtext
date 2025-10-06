@@ -662,6 +662,7 @@ class Qwen3NextSparseMoeBlock(nnx.Module):
     # 2. Instantiate and apply the shared expert.
     self.shared_expert = linears.MlpBlock(
         config=cfg,
+        mesh=mesh,
         in_features=cfg.emb_dim,
         intermediate_dim=cfg.moe_mlp_dim,
         activations=cfg.mlp_activations,
@@ -1042,6 +1043,7 @@ class Qwen3DecoderLayer(AttentionWithNorm):
         dtype=config.dtype,
         weight_dtype=config.weight_dtype,
         config=config,
+        mesh=mesh,
         quant=quant,
         model_mode=model_mode,
         rngs=rngs,
