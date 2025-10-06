@@ -31,7 +31,7 @@ import omegaconf
 from MaxText import accelerator_to_spec_map
 from MaxText import max_logging
 from MaxText import max_utils
-from MaxText.common_types import DecoderBlockType
+from MaxText.common_types import DecoderBlockType, ShardMode
 from MaxText.globals import MAXTEXT_ASSETS_ROOT, MAXTEXT_REPO_ROOT, MAXTEXT_PKG_DIR
 from MaxText.layers.attentions import AttentionType
 from MaxText.utils import gcs_utils
@@ -64,6 +64,31 @@ def validate_compute_axis_order(s: str) -> None:
   valid_compute_axis_order = ("0,1,2,3", "0,2,1,3")
   if s not in valid_compute_axis_order:  # currently supported compute_axis_order
     raise ValueError("Invalid compute_axis_order was passed. Valid options are ", valid_compute_axis_order)
+
+
+def validate_shard_mode(
+    shard_mode: str,
+    decoder_block: str,
+    quantization: str,
+) -> None:
+  """Validates sharding settings, raising ValueError for incompatible combinations."""
+  if shard_mode not in {"auto", "explicit"}:
+    raise ValueError(f"Invalid shard_mode '{shard_mode}'. Choose 'auto' or 'explicit'.")
+
+  if shard_mode == "explicit":
+    max_logging.log("Warning: explicit shard mode is an experimental feature.")
+
+    # Check for unsupported decoder blocks
+    supported_decoders = {"simple", "simple_mlp", "llama2"}
+    if decoder_block not in supported_decoders:
+      raise ValueError(
+          f"Decoder '{decoder_block}' is not supported with 'explicit' sharding. "
+          f"Supported options are: {list(supported_decoders)}."
+      )
+
+    # Check for unsupported quantization
+    if quantization:  # More Pythonic check for non-empty string
+      raise ValueError("Quantization is not supported with 'explicit' sharding.")
 
 
 def validate_kv_quant_axis(s: str, quantize_kvcache: bool) -> None:
@@ -179,6 +204,7 @@ def validate_keys(keys):
   validate_profiler_type(keys["profiler"])
   validate_periodic_profiler(keys["profiler"], keys["profile_periodically_period"], keys["profiler_steps"])
   validate_compute_axis_order(keys["compute_axis_order"])
+  validate_shard_mode(keys["shard_mode"], keys["decoder_block"], keys["quantization"])
   validate_kv_quant_axis(keys["kv_quant_axis"], keys["quantize_kvcache"])
   validate_model_call_mode(keys["model_call_mode"])
   validate_prefill_and_target_lengths(keys["max_prefill_predict_length"], keys["max_target_length"])
@@ -746,6 +772,7 @@ class _HyperParameters:
     validate_tokamax_usage(raw_keys)
 
     raw_keys["decoder_block"] = DecoderBlockType(raw_keys["decoder_block"])
+    raw_keys["shard_mode"] = ShardMode(raw_keys["shard_mode"])
 
   @staticmethod
   def configure_gpt3_task(raw_keys):

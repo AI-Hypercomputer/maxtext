@@ -1811,6 +1811,7 @@ class RoutedAndSharedMoE(nnx.Module):
         rngs=self.rngs,
     )
     self.shared_experts = linears.MlpBlock(
+        mesh=self.mesh,
         in_features=self.config.emb_dim,
         intermediate_dim=self.config.shared_experts * self.config.moe_mlp_dim,
         activations=self.config.mlp_activations,

@@ -19,7 +19,6 @@ import os
 import jax
 from MaxText import checkpointing
 from MaxText import max_logging
-from MaxText import max_utils
 from MaxText import maxtext_utils
 from MaxText import optimizers
 from MaxText.dpo_utils import _merge_dpo_state
@@ -190,10 +189,10 @@ def setup_train_loop(config, recorder, devices=None):
     # Apply reordering wrapper to data iterators if context parallelism is enabled
     with mesh:
       if context_parallel_size > 1 and config.context_parallel_load_balance:
-        data_iterator = map(max_utils.get_reorder_callable(context_parallel_size), data_iterator)
+        data_iterator = map(maxtext_utils.get_reorder_callable(context_parallel_size, config.shard_mode), data_iterator)
         if eval_data_iterator:
           eval_data_iterator = map(
-              max_utils.get_reorder_callable(context_parallel_size),
+              maxtext_utils.get_reorder_callable(context_parallel_size, config.shard_mode),
               eval_data_iterator,
           )
 

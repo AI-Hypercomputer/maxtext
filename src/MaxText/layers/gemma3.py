@@ -157,6 +157,7 @@ class Gemma3DecoderLayer(nnx.Module):
         config=config,
         quant=self.quant,
         model_mode=model_mode,
+        mesh=mesh,
         rngs=self.rngs,
     )
 

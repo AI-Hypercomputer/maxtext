@@ -21,11 +21,11 @@ from typing import overload
 from flax import nnx
 import flax.linen as nn
 import jax
-from jax.sharding import Mesh
+from jax.sharding import Mesh, AxisType
 from MaxText import maxtext_utils
 from MaxText import pyconfig
 from MaxText.layers import quantizations
-from MaxText.common_types import MODEL_MODE_TRAIN
+from MaxText.common_types import MODEL_MODE_TRAIN, ShardMode
 from MaxText.layers import models
 from orbax import checkpoint as ocp
 from functools import partial
@@ -76,7 +76,13 @@ def from_config(
       model = from_config(config)
   """
   devices_array = maxtext_utils.create_device_mesh(config, devices)
-  mesh = Mesh(devices_array, config.mesh_axes)
+
+  if config.shard_mode == ShardMode.EXPLICIT:
+    axis_types = tuple([AxisType.Explicit] * len(config.mesh_axes))
+  else:
+    axis_types = tuple([AxisType.Auto] * len(config.mesh_axes))
+
+  mesh = Mesh(devices_array, config.mesh_axes, axis_types=axis_types)
   model = create_model(config, mesh, model_mode=model_mode, rngs=rngs)
 
   # Return only the model

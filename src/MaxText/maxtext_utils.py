@@ -27,7 +27,7 @@ import numpy as np
 from collections.abc import Iterable
 from jax.experimental import mesh_utils
 from jax.experimental.serialize_executable import deserialize_and_load
-from jax.sharding import PartitionSpec as P
+from jax.sharding import PartitionSpec as P, NamedSharding, reshard
 
 import jax
 import jax.numpy as jnp
@@ -42,7 +42,7 @@ from MaxText import checkpointing
 from MaxText import max_logging
 from MaxText import max_utils
 from MaxText import multimodal_utils
-from MaxText.common_types import DecoderBlockType, MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE
+from MaxText.common_types import DecoderBlockType, ShardMode, MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE
 from MaxText.inference.page_manager import PageState
 
 OVERWRITE_WITH_GRADIENT = "_overwrite_with_gradient"
@@ -51,6 +51,25 @@ OVERWRITE_WITH_GRADIENT = "_overwrite_with_gradient"
 def get_input_data_sharding(config, mesh):
   """Get the input data sharding for the model"""
   return nn.logical_to_mesh_sharding(P(*config.input_data_sharding_logical_axes), mesh, config.logical_axis_rules)
+
+
+def maybe_shard_with_name(inputs, named_sharding, shard_mode):
+  """
+  In auto shardmode, this function hints inputs follow given named_sharding.
+  In explicit shardmode, this function enforces inputs following named_sharding.
+  """
+  if shard_mode == ShardMode.EXPLICIT:
+    return reshard(inputs, named_sharding)
+  else:
+    return jax.lax.with_sharding_constraint(inputs, named_sharding)
+
+
+def maybe_shard_with_logical(inputs, logical_axes, mesh, shard_mode):
+  """
+  A wrapper of maybe_shard_with_name when logical axes are inputs
+  """
+  named_sharding = NamedSharding(mesh, nn.logical_to_mesh_axes(logical_axes))
+  return maybe_shard_with_name(inputs, named_sharding, shard_mode)
 
 
 def get_functional_train_with_signature(
@@ -75,6 +94,21 @@ def get_functional_eval_with_signature(eval_step, data_sharding, state_mesh_shar
   static_argnums = ()  # We partial out the static argnums of model, config
   donate_argnums = ()  # state will be kept instead of being donated in eval_step
   return functional_eval, in_shardings, out_shardings, static_argnums, donate_argnums
+
+
+def shard_reorder_causal_load_balanced(batch, cp_size, shard_mode):
+  """Shard the output of the reordered sequence."""
+  reordered = max_utils.reorder_causal_load_balanced(batch, cp_size)
+  for _, v in batch.items():
+    if isinstance(v, jax.Array):
+      reordered = maybe_shard_with_name(reordered, v.sharding, shard_mode)
+      break
+  return reordered
+
+
+def get_reorder_callable(cp_size, shard_mode):
+  """Creates a callable that can be used with map() to reorder batches."""
+  return functools.partial(shard_reorder_causal_load_balanced, cp_size=cp_size, shard_mode=shard_mode)
 
 
 def get_shaped_batch(config):
