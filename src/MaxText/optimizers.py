@@ -20,38 +20,59 @@ import jax.numpy as jnp
 
 import optax
 from optax.contrib import MuonDimensionNumbers as mdn
+# from optax.contrib import muon
+from MaxText import muon
 
 
-
-# muon_weight_dimension_numbers
-#
-# {'decoder': {'dense_layers': {'mlp': {'wi_0': {'kernel': ((0,), (-1,))},
-#     'wi_1': {'kernel': ((0,), (-1,))},
-#     'wo': {'kernel': ((0,), (-1,))}},
-#    'self_attention': {'kv_norm': {'scale': None},
-#     'wkv_a': {'kernel': ((0,), (-1,))},
-#     'wkv_b': {'kernel': ((0,), (-2, -1))},
-#     'out': {'kernel': ((0, -2), (-1,))}},
-#    'pre_self_attention_layer_norm': {'scale': None},
-#    'post_self_attention_layer_norm': {'scale': None}},
-#   'moe_layers': {'DeepSeekMoeBlock_0': {'MoeBlock_0': {'wi_0': ((-2,), (-1,)),
-#      'wi_1': ((-2,), (-1,)),
-#      'wo': ((-2,), (-1,)),
-#      'gate': {'kernel': ((0,), (-1,))}},
-#     'shared_experts': {'wi_0': {'kernel': ((-2,), (-1,))},
-#      'wi_1': {'kernel': ((-2,), (-1,))},
-#      'wo': {'kernel': ((-2,), (-1,))}}},
-#    'self_attention': {'kv_norm': {'scale': None},
-#     'wkv_a': {'kernel': ((0,), (-1,))},
-#     'wkv_b': {'kernel': ((0,), (-2, -1))},
-#     'out': {'kernel': ((0, -2), (-1,))}},
-#    'pre_self_attention_layer_norm': {'scale': None},
-#    'post_self_attention_layer_norm': {'scale': None}},
-#   'decoder_norm': {'scale': None},
-#   'logits_dense': {'kernel': None}},
-#  'token_embedder': {'embedding': None}}
-
-
+muon_weight_dimension_numbers = {
+    "params": {
+        "decoder": {
+            "dense_layers": {
+                "mlp": {
+                    "wi_0": {"kernel": ((0,), (-1,))},
+                    "wi_1": {"kernel": ((0,), (-1,))},
+                    "wo": {"kernel": ((0,), (-1,))},
+                },
+                "self_attention": {
+                    "kv_norm": {"scale": None},
+                    "wkv_a": {"kernel": ((0,), (-1,))},
+                    "wkv_b": {"kernel": ((0,), (-2, -1))},
+                    "out": {"kernel": ((0, -2), (-1,))},
+                    "query": {"kernel": ((0), (-2, -1))},
+                },
+                "pre_self_attention_layer_norm": {"scale": None},
+                "post_self_attention_layer_norm": {"scale": None},
+            },
+            "moe_layers": {
+                "DeepSeekMoeBlock_0": {
+                    "MoeBlock_0": {
+                        "wi_0": ((-2,), (-1,)),
+                        "wi_1": ((-2,), (-1,)),
+                        "wo": ((-2,), (-1,)),
+                        "gate": {"kernel": ((0,), (-1,))},
+                    },
+                    "shared_experts": {
+                        "wi_0": {"kernel": ((-2,), (-1,))},
+                        "wi_1": {"kernel": ((-2,), (-1,))},
+                        "wo": {"kernel": ((-2,), (-1,))},
+                    },
+                },
+                "self_attention": {
+                    "kv_norm": {"scale": None},
+                    "wkv_a": {"kernel": ((0,), (-1,))},
+                    "wkv_b": {"kernel": ((0,), (-2, -1))},
+                    "out": {"kernel": ((0, -2), (-1,))},
+                    "query": {"kernel": ((0), (-2, -1))},
+                },
+                "pre_self_attention_layer_norm": {"scale": None},
+                "post_self_attention_layer_norm": {"scale": None},
+            },
+            "decoder_norm": {"scale": None},
+            "logits_dense": {"kernel": None},
+        },
+        "token_embedder": {"embedding": None},
+    }
+}
 
 
 def get_optimizer(config, learning_rate_schedule):
@@ -87,8 +108,8 @@ def get_optimizer(config, learning_rate_schedule):
         # Muon-specific parameters: "ns_coeffs", "ns_steps", "weight_decay_mask", "adaptive" uses default
         "beta": config.muon_beta,
         "weight_decay": config.muon_weight_decay,
-        # TODO(how to get this number)
-        "muon_weight_dimension_numbers": None, 
+        # For preliminary test, hardcode this number
+        "muon_weight_dimension_numbers": muon_weight_dimension_numbers,
         # AdamW-specific parameters
         "adam_b1": config.adam_b1,
         "adam_b2": config.adam_b2,
