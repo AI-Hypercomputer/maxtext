@@ -30,7 +30,7 @@
 # Enable "exit immediately if any command fails" option
 set -e
 
-export LOCAL_IMAGE_NAME=maxtext_base_image_gfc_nightly_0929
+export LOCAL_IMAGE_NAME=maxtext_base_image_gfc_nightly_1003
 echo "Building to $LOCAL_IMAGE_NAME"
 
 # Use Docker BuildKit so we can cache pip packages.

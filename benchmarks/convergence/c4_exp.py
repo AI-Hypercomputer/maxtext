@@ -44,7 +44,7 @@ c4_mlperf_hp = DatasetHParams(
 c4_en_hp = DatasetHParams(
     name="c4en",
     dataset_path="gs://maxtext-dataset",
-    dataset_name="c4/en:3.0.1",
+    dataset_name="c4/en:3.1.0",
     dataset_type="tfds",
     train_split="train",
     eval_split="validation",
@@ -88,6 +88,18 @@ deepseek_671b_hp = ConvHParams(
     eval_interval=377487360,
 )
 
+# [todo] reuse 405b convergence benchmark hp for now. not tuned yet
+deepseek_671b_hp_c10 = ConvHParams(
+    global_batch_size=2048,
+    warmup_samples=61440,
+    decay_end_samples=614400.0,
+    total_tokens_to_train=2.64e9,
+    training_scaleing_factor=1.0,
+    learning_rate=1.46e-08,
+    eval_tokens=47185920,
+    eval_interval=377487360,
+)
+
 
 def load_checkpoint(model: MaxTextModel, checkpoint_path: str):
   model.tuning_params["load_full_state_path"] = checkpoint_path
@@ -110,8 +122,8 @@ deepseek_v3_fsdp_v5p_512_nocapp_gbs_1024 = _add_to_model_dictionary(
     c4_pretrain_model_dict,
     _setup_model_convergence_(
     deepseek_v3_fsdp_v5p_512_nocapp,
-    c4_mlperf_hp,
-    deepseek_671b_hp,
+    c4_en_hp,
+    deepseek_671b_hp_c10,
     global_batch_size=2048,
     num_devices=256,
     checkpoint="gs://maxtext-model-checkpoints/deepseek3-671b/0/items",
