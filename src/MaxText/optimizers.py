@@ -19,26 +19,27 @@ import jax
 import jax.numpy as jnp
 
 import optax
-from optax.contrib import MuonDimensionNumbers as mdn
+# from optax.contrib import MuonDimensionNumbers as mdn
 # from optax.contrib import muon
-from MaxText import muon
 
+from MaxText import muon
+from MaxText.muon import MuonDimensionNumbers as mdn
 
 muon_weight_dimension_numbers = {
     "params": {
         "decoder": {
             "dense_layers": {
                 "mlp": {
-                    "wi_0": {"kernel": ((0,), (-1,))},
-                    "wi_1": {"kernel": ((0,), (-1,))},
-                    "wo": {"kernel": ((0,), (-1,))},
+                    "wi_0": {"kernel": mdn((0,), (-1,))},
+                    "wi_1": {"kernel": mdn((0,), (-1,))},
+                    "wo": {"kernel": mdn((0,), (-1,))},
                 },
                 "self_attention": {
                     "kv_norm": {"scale": None},
-                    "wkv_a": {"kernel": ((0,), (-1,))},
-                    "wkv_b": {"kernel": ((0,), (-2, -1))},
-                    "out": {"kernel": ((0, -2), (-1,))},
-                    "query": {"kernel": ((0), (-2, -1))},
+                    "wkv_a": {"kernel": mdn((0,), (-1,))},
+                    "wkv_b": {"kernel": mdn((0,), (-2, -1))},
+                    "out": {"kernel": mdn((0, -2), (-1,))},
+                    "query": {"kernel": mdn((0), (-2, -1))},
                 },
                 "pre_self_attention_layer_norm": {"scale": None},
                 "post_self_attention_layer_norm": {"scale": None},
@@ -46,23 +47,23 @@ muon_weight_dimension_numbers = {
             "moe_layers": {
                 "DeepSeekMoeBlock_0": {
                     "MoeBlock_0": {
-                        "wi_0": ((-2,), (-1,)),
-                        "wi_1": ((-2,), (-1,)),
-                        "wo": ((-2,), (-1,)),
-                        "gate": {"kernel": ((0,), (-1,))},
+                        "wi_0": mdn((-2,), (-1,)),
+                        "wi_1": mdn((-2,), (-1,)),
+                        "wo": mdn((-2,), (-1,)),
+                        "gate": {"kernel": mdn((0,), (-1,))},
                     },
                     "shared_experts": {
-                        "wi_0": {"kernel": ((-2,), (-1,))},
-                        "wi_1": {"kernel": ((-2,), (-1,))},
-                        "wo": {"kernel": ((-2,), (-1,))},
+                        "wi_0": {"kernel": mdn((-2,), (-1,))},
+                        "wi_1": {"kernel": mdn((-2,), (-1,))},
+                        "wo": {"kernel": mdn((-2,), (-1,))},
                     },
                 },
                 "self_attention": {
                     "kv_norm": {"scale": None},
-                    "wkv_a": {"kernel": ((0,), (-1,))},
-                    "wkv_b": {"kernel": ((0,), (-2, -1))},
-                    "out": {"kernel": ((0, -2), (-1,))},
-                    "query": {"kernel": ((0), (-2, -1))},
+                    "wkv_a": {"kernel": mdn((0,), (-1,))},
+                    "wkv_b": {"kernel": mdn((0,), (-2, -1))},
+                    "out": {"kernel": mdn((0, -2), (-1,))},
+                    "query": {"kernel": mdn((0), (-2, -1))},
                 },
                 "pre_self_attention_layer_norm": {"scale": None},
                 "post_self_attention_layer_norm": {"scale": None},
@@ -116,7 +117,7 @@ def get_optimizer(config, learning_rate_schedule):
         "adam_eps_root": config.adam_eps_root,
         "adam_weight_decay": config.adam_weight_decay,
     }
-    return optax.contrib.muon(**muon_kwargs)
+    return muon.muon(**muon_kwargs)
   else:
     raise ValueError(f"{config.opt_type=} is not a supported.")
 
