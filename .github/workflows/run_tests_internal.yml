@@ -64,11 +64,29 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Run Tests
+        shell: bash
         run: |
           if [ "${{ inputs.is_scheduled_run }}" = "true" ]; then
             FINAL_PYTEST_MARKER="${{ inputs.pytest_marker }}"
           else
             FINAL_PYTEST_MARKER="${{ inputs.pytest_marker }} and not scheduled_only"
+          fi
+          if [ "${{ inputs.device_type }}" == "gpu" ]; then
+            pip freeze | grep 'transformer-engine'
+            echo "Verifying GPU setup"
+            # Check the CUDA compiler version
+            nvcc --version
+            # Check the NVIDIA System Management Interface
+            nvidia-smi
+            # Check if nvidia.__file__ returns a valid path
+            echo "nvidia.__file__: from system python"
+            python3 -c "import nvidia; print(nvidia.__file__)"
+            echo "nvidia.__file__: from virtual env python"
+            .venv/bin/python3 -c "import nvidia; print(nvidia.__file__)"
+            echo "ls /usr/local/"
+            ls /usr/local/
+            echo "ls /usr/local/nvidia"
+            ls /usr/local/nvidia
           fi
           python3 -m pip install -e . --no-dependencies &&
           LIBTPU_INIT_ARGS='--xla_tpu_scoped_vmem_limit_kib=65536' python3 -m pytest ${{ inputs.pytest_addopts }} -v -m "${FINAL_PYTEST_MARKER}" --durations=0

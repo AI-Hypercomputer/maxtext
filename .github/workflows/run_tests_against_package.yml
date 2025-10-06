@@ -80,7 +80,7 @@ jobs:
           uv pip install ${maxtext_wheel}[${MAXTEXT_PACKAGE_EXTRA}] --resolution=lowest
           install_maxtext_github_deps
           if [ "${{ inputs.device_type }}" == "gpu" ]; then
-            export NVTE_FRAMEWORK=jax && uv pip install --no-build-isolation transformer_engine[jax]
+            export NVTE_FRAMEWORK=jax && uv pip install transformer_engine[jax]
             echo "Verifying GPU setup"
             # Check the CUDA compiler version
             nvcc --version
