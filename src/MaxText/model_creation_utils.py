@@ -146,10 +146,10 @@ def create_nnx_model(config):
       try:
         ckptr = ocp.Checkpointer(
             ocp.PyTreeCheckpointHandler(
-                restore_concurrent_gb=None,
-                save_concurrent_gb=None,
-                use_ocdbt=True,
-                use_zarr3=True,
+                restore_concurrent_gb=config.checkpoint_storage_concurrent_gb,
+                save_concurrent_gb=config.checkpoint_storage_concurrent_gb,
+                use_ocdbt=config.checkpoint_storage_use_ocdbt,
+                use_zarr3=config.checkpoint_storage_use_zarr3,
             )
         )
         # This is a memory optimization. We don't want to restore the entire checkpoint - only the params.
