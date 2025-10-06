@@ -81,6 +81,20 @@ jobs:
           install_maxtext_github_deps
           python3 --version
           python3 -m pip freeze
+          if [ "${{ inputs.device_type }}" == "gpu" ]; then
+            echo "Verifying GPU setup"
+            # Check the CUDA compiler version
+            nvcc --version
+            # Check the NVIDIA System Management Interface
+            nvidia-smi
+            # Check if nvidia.__file__ returns a valid path
+            echo "nvidia.__file__: from system python"
+            python3 -c "import nvidia; print(nvidia.__file__)"
+            echo "nvidia.__file__: from virtual env python"
+            .venv/bin/python3 -c "import nvidia; print(nvidia.__file__)"
+            echo "ls /usr/local/"
+            ls /usr/local/
+          fi
       - name: Copy test assets files
         run : gcloud storage cp gs://maxtext-test-assets/* src/MaxText/test_assets
       - name: Display contents of workspace # TODO: Remove
@@ -93,11 +107,16 @@ jobs:
           else
             FINAL_PYTEST_MARKER="${{ inputs.pytest_marker }} and not scheduled_only"
           fi
-          source .venv/bin/activate
           # TODO: Use package data for testing and remove the env vars
           export MAXTEXT_REPO_ROOT=$(pwd)
           export MAXTEXT_ASSETS_ROOT=$(pwd)/src/MaxText/assets
           export MAXTEXT_TEST_ASSETS_ROOT=$(pwd)/src/MaxText/test_assets
           export MAXTEXT_PKG_DIR=$(pwd)/src/MaxText
+          if [ "${{ inputs.device_type }}" == "gpu" ]; then
+            echo "CUDA and LD_LIBRARY_PATH setup for GPU tests: ${CUDA_PATH} and ${LD_LIBRARY_PATH}"
+            export CUDA_PATH=/usr/local/cuda
+            export LD_LIBRARY_PATH=/path/to/cuda/lib64:$LD_LIBRARY_PATH
+            echo "Complete CUDA and LD_LIBRARY_PATH setup for GPU tests: ${CUDA_PATH} and ${LD_LIBRARY_PATH}"
+          fi
           # TODO: Fix the skipped tests and remove the deselect flags
-          LIBTPU_INIT_ARGS='--xla_tpu_scoped_vmem_limit_kib=65536' python3 -m pytest ${{ inputs.pytest_addopts }} -v -m "${FINAL_PYTEST_MARKER}" --durations=0 --deselect "tests/aot_hlo_identical_test.py::AotHloIdenticalTest::test_default_hlo_match" --deselect "tests/tokenizer_test.py::TokenizerTest::test_detokenize"
+          LIBTPU_INIT_ARGS='--xla_tpu_scoped_vmem_limit_kib=65536' .venv/bin/python3 -m pytest ${{ inputs.pytest_addopts }} -v -m "${FINAL_PYTEST_MARKER}" --durations=0 --deselect "tests/aot_hlo_identical_test.py::AotHloIdenticalTest::test_default_hlo_match" --deselect "tests/tokenizer_test.py::TokenizerTest::test_detokenize"
