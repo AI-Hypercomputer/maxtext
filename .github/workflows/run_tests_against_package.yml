@@ -80,7 +80,7 @@ jobs:
           uv pip install ${maxtext_wheel}[${MAXTEXT_PACKAGE_EXTRA}] --resolution=lowest
           install_maxtext_github_deps
           python3 --version
-          python3 -m uv pip freeze
+          python3 -m pip freeze
       - name: Copy test assets files
         run : gcloud storage cp gs://maxtext-test-assets/* src/MaxText/test_assets
       - name: Display contents of workspace # TODO: Remove
@@ -93,10 +93,11 @@ jobs:
           else
             FINAL_PYTEST_MARKER="${{ inputs.pytest_marker }} and not scheduled_only"
           fi
+          source .venv/bin/activate
           # TODO: Use package data for testing and remove the env vars
           export MAXTEXT_REPO_ROOT=$(pwd)
           export MAXTEXT_ASSETS_ROOT=$(pwd)/src/MaxText/assets
           export MAXTEXT_TEST_ASSETS_ROOT=$(pwd)/src/MaxText/test_assets
           export MAXTEXT_PKG_DIR=$(pwd)/src/MaxText
           # TODO: Fix the skipped tests and remove the deselect flags
-          LIBTPU_INIT_ARGS='--xla_tpu_scoped_vmem_limit_kib=65536' pytest ${{ inputs.pytest_addopts }} -v -m "${FINAL_PYTEST_MARKER}" --durations=0 --deselect "tests/aot_hlo_identical_test.py::AotHloIdenticalTest::test_default_hlo_match" --deselect "tests/tokenizer_test.py::TokenizerTest::test_detokenize"
+          LIBTPU_INIT_ARGS='--xla_tpu_scoped_vmem_limit_kib=65536' python3 -m pytest ${{ inputs.pytest_addopts }} -v -m "${FINAL_PYTEST_MARKER}" --durations=0 --deselect "tests/aot_hlo_identical_test.py::AotHloIdenticalTest::test_default_hlo_match" --deselect "tests/tokenizer_test.py::TokenizerTest::test_detokenize"
