@@ -41,4 +41,14 @@ temperature_tuning: True
 # Chunk attention is used on all RoPE layers
 # otherwise, on NoPE layers, use global attention
 chunk_attn_window_size: 8192
-image_size_for_vit: 336 
+
+# Multimodal flags (need to set use_multimodal=true)
+image_size_for_vit: 336
+num_channels_for_vit: 3
+patch_size_for_vit: 14
+hidden_size_for_vit: 1408
+intermediate_size_for_vit: 5632
+num_hidden_layers_for_vit: 34
+num_attention_heads_for_vit: 16
+image_placeholder: "<|image|>"
+
