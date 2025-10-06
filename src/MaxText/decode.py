@@ -151,7 +151,8 @@ def main(argv: Sequence[str]) -> None:
           params=params,
           padded_tokens=tokens,
           images=np.stack([po.pixel_values for po in processor_outputs]) if config.use_multimodal else None,
-          image_masks=np.stack([po.pixel_mask for po in processor_outputs]) if config.use_multimodal else None,
+          image_masks=np.stack([po.pixel_mask for po in processor_outputs])
+          if config.use_multimodal and "llama4" in config.model_name else None,
           true_length=true_length,
           rng=rng_prefill,
           slot=i,

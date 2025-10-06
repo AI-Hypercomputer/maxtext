@@ -437,44 +437,32 @@ class PadOrTrimToMaxLength(grain.MapTransform):
     pad_amount = [(0, pad_amount)] + [(0, 0)] * (len(x.shape) - 1)
     return np.pad(x, pad_amount, constant_values=pad_id)[: self.max_length]
 
-  def _pad_image_mask(self, image_masks):
-    """Pads the input image_masks array to match the maximum required number of images per example."""
-    image_offsets = multimodal_utils.get_image_offsets(self.model_name, None)
-    max_num_images = (self.max_length // image_offsets) - 1  # -1 to reserve space for at least one text token
-    if self.max_num_images_per_example > 0:
-      max_num_images = min(self.max_num_images_per_example, max_num_images)
-    assert (
-        image_masks.shape[0] <= max_num_images
-    ), f"Number of image masks {image_masks.shape[0]} exceeds the maximum allowed {max_num_images}"
-    if image_masks.shape[0] < max_num_images:
-      pad_size = max_num_images - image_masks.shape[0]
-      pad_shape = (pad_size,)
-      pad_image_masks = np.zeros(pad_shape, dtype=image_masks.dtype)
-      if image_masks is not None and image_masks.size > 0:
-        image_masks = np.concatenate([image_masks, pad_image_masks], axis=0)
-      else:
-        image_masks = pad_image_masks
-    return image_masks
+  def _pad_image_or_mask(self, tensor: np.ndarray) -> np.ndarray:
+    """Pads an input tensor (image or mask) to a maximum number of items.
 
-  def _pad_image(self, images):
-    """Pads the input images array to match the maximum required number of images per example.
+    This function unifies padding logic for image tensors (standard or tiled) and
+    mask tensors. It determines the tensor type based on its dimensions and applies
+    the appropriate padding along the first axis.
 
-    The function computes the maximum number of allowed images either based on model constraints
-    (determined by model name and maximum sequence length) or the value provided in
-    `self.max_num_images_per_example` (if positive), whichever is smaller. If the provided
-    `images` array contains fewer images than the desired maximum, it pads the array with
-    zeros (dummy images) to meet the requirement.
+    The maximum number of items is calculated based on model constraints or a
+    user-defined limit, ensuring that sequence length limits are respected while
+    reserving space for at least one text token. If the input tensor has fewer
+    items than this maximum, it is padded with zeros.
 
     Args:
-      images (np.ndarray): A numpy array of image data. The expected shape is
-          (num_images, height, width, channels), where num_images <= maximum allowed images.
+        tensor (np.ndarray): The input numpy array to pad.
+            - For masks, the expected shape is (num_masks, num_tiles).
+            - For standard images, the shape is (num_images, H, W, C).
+            - For tiled images, the shape is (num_images, num_tiles, H, W, C).
 
     Returns:
-      np.ndarray: An array of images padded with zero images (if necessary) such that its
-      first dimension equals the computed maximum number of images.
+        np.ndarray: The tensor, padded with zeros up to the maximum number of
+        items along the first axis.
 
     Raises:
-      AssertionError: If the number of images in the input exceeds the allowed maximum.
+        ValueError: If the input tensor's dimension is not 2, 4, or 5.
+        ValueError: If the number of items in the input tensor exceeds the
+        allowed maximum.
 
     Notes:
       - The computation of maximum images ensures that space is reserved in the sequence
@@ -482,23 +470,44 @@ class PadOrTrimToMaxLength(grain.MapTransform):
       - The dummy images used for padding are based on the image shape for initialization
         of this model (ignoring batch size).
     """
+    if not isinstance(tensor, np.ndarray):
+      raise TypeError(f"Input must be a numpy array, but got {type(tensor)}")
+
+    # Determine the maximum number of images/masks allowed.
     image_offsets = multimodal_utils.get_image_offsets(self.model_name, None)
-    max_num_images = (self.max_length // image_offsets) - 1  # -1 to reserve space for at least one text token
+    # Reserve space for at least one text token.
+    max_num_items = (self.max_length // image_offsets) - 1
     if self.max_num_images_per_example > 0:
-      max_num_images = min(self.max_num_images_per_example, max_num_images)
-    image_shape = multimodal_utils.get_dummy_image_shape_for_init(self.model_name)[2:]
-    assert (
-        images.shape[0] <= max_num_images
-    ), f"Number of images {images.shape[0]} exceeds the maximum allowed {max_num_images}"
-    if images.shape[0] < max_num_images:
-      pad_size = max_num_images - images.shape[0]
-      pad_shape = (pad_size,) + image_shape
-      pad_images = np.zeros(pad_shape, dtype=images.dtype)
-      if images is not None and images.size > 0:
-        images = np.concatenate([images, pad_images], axis=0)
+      max_num_items = min(self.max_num_images_per_example, max_num_items)
+
+    # Validate tensor dimensions.
+    if tensor.ndim in (4, 5):  # Standard or Tiled Image
+      tensor_type = "images"
+    elif tensor.ndim == 2:  # Mask
+      tensor_type = "masks"
+    else:
+      raise ValueError(
+          "Input tensor must be 2D (mask), 4D (image), or 5D (tiled image), " f"but got {tensor.ndim} dimensions."
+      )
+
+    # Assert that the input tensor does not exceed the maximum size.
+    if tensor.shape[0] > max_num_items:
+      raise ValueError(f"Number of {tensor_type} ({tensor.shape[0]}) exceeds the maximum allowed ({max_num_items}).")
+
+    # Apply padding if the tensor is smaller than the maximum size.
+    if tensor.shape[0] < max_num_items:
+      pad_size = max_num_items - tensor.shape[0]
+      pad_shape_suffix = tensor.shape[1:]
+      pad_shape = (pad_size,) + pad_shape_suffix
+      pad_tensor = np.zeros(pad_shape, dtype=tensor.dtype)
+
+      if tensor.size > 0:
+        tensor = np.concatenate([tensor, pad_tensor], axis=0)
       else:
-        images = pad_images
-    return images
+        # If the input tensor is empty, the result is just the padding.
+        tensor = pad_tensor
+
+    return tensor
 
   def map(self, element: dict[str, np.ndarray]):
     """map to each element"""
@@ -515,7 +524,7 @@ class PadOrTrimToMaxLength(grain.MapTransform):
         if isinstance(element["images"], list) and self.model_name is None:
           raise ValueError("model_name must be provided when padding images")
         elif isinstance(element["images"], list):
-          element["images"] = self._pad_image(np.asarray(element["images"]))
+          element["images"] = self._pad_image_or_mask(np.asarray(element["images"]))
         elif element["images"].ndim == 3:
           element["images"] = np.asarray(element["images"])[None, ...]
         else:
@@ -526,7 +535,7 @@ class PadOrTrimToMaxLength(grain.MapTransform):
         if isinstance(element["image_masks"], list) and self.model_name is None:
           raise ValueError("model_name must be provided when padding image masks")
         elif isinstance(element["image_masks"], list):
-          element["image_masks"] = self._pad_image_mask(np.asarray(element["image_masks"]))
+          element["image_masks"] = self._pad_image_or_mask(np.asarray(element["image_masks"]))
         else:
           element["image_masks"] = np.asarray(element["image_masks"])
 

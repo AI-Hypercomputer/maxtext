@@ -335,6 +335,7 @@ class MaxEngine(engine_api.Engine):
           jnp.ones((1, self.config.max_prefill_predict_length), dtype=jnp.int32),
           jnp.ones((1, self.config.max_prefill_predict_length), dtype=jnp.int32),
           encoder_images=jnp.ones(image_shape, dtype=jnp.float32) if self.config.use_multimodal else None,
+          # encoder_image_masks indicates valid tiles if image tiling + padding is used in vision encoder input.
           encoder_image_masks=jnp.ones(image_shape[:2], dtype=jnp.int32)
           if self.config.use_multimodal and "llama4" in self.config.model_name
           else None,
