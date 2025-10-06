@@ -87,15 +87,6 @@ class DecoderLayer(nn.Module):
   ):
     cfg = self.config
     mesh = self.mesh
-    if model_mode == MODEL_MODE_PREFILL:
-      logical_axis_names = ("activation_batch", "prefill_activation_length", "activation_embed")
-    else:
-      logical_axis_names = ("activation_batch", "activation_length", "activation_embed")
-
-    if model_mode == MODEL_MODE_PREFILL:
-      inputs = nn.with_logical_constraint(inputs, logical_axis_names)
-    else:
-      inputs = nn.with_logical_constraint(inputs, logical_axis_names)
 
     inputs = checkpoint_name(inputs, "decoder_layer_input")
     # inputs: embedded inputs to the decoder with shape [batch, length, emb_dim]
@@ -107,10 +98,6 @@ class DecoderLayer(nn.Module):
         epsilon=cfg.normalization_layer_epsilon,
         kernel_axes=("norm",),
     )(inputs)
-    if model_mode == MODEL_MODE_PREFILL:
-      lnx = nn.with_logical_constraint(lnx, logical_axis_names)
-    else:
-      lnx = nn.with_logical_constraint(lnx, logical_axis_names)
 
     attention_layer = attention_as_linen(
         config=self.config,
@@ -147,11 +134,6 @@ class DecoderLayer(nn.Module):
         model_mode=model_mode,
     )
 
-    if model_mode == MODEL_MODE_PREFILL:
-      attention_lnx = nn.with_logical_constraint(attention_lnx, logical_axis_names)
-    else:
-      attention_lnx = nn.with_logical_constraint(attention_lnx, logical_axis_names)
-
     # MLP block.
     mlp_lnx = linears.mlp_block(
         in_features=lnx.shape[-1],
@@ -165,10 +147,6 @@ class DecoderLayer(nn.Module):
         config=cfg,
         quant=self.quant,
     )(lnx, deterministic=deterministic)
-    if model_mode == MODEL_MODE_PREFILL:
-      mlp_lnx = nn.with_logical_constraint(mlp_lnx, logical_axis_names)
-    else:
-      mlp_lnx = nn.with_logical_constraint(mlp_lnx, logical_axis_names)
 
     next_layer_addition = mlp_lnx + attention_lnx
 
@@ -177,16 +155,6 @@ class DecoderLayer(nn.Module):
     )
 
     layer_output = next_layer_addition_dropped_out + inputs
-    if model_mode == MODEL_MODE_PREFILL:
-      layer_output = nn.with_logical_constraint(
-          layer_output,
-          logical_axis_names,
-      )
-    else:
-      layer_output = nn.with_logical_constraint(
-          layer_output,
-          logical_axis_names,
-      )
 
     if cfg.record_internal_nn_metrics:
       self.sow("intermediates", "activation_mean", jnp.mean(layer_output))
@@ -427,7 +395,7 @@ class Decoder(nn.Module):
       # Apply remat policy to layer
       layer = nn.remat(
           block_layer,
-          prevent_cse=not self.config.scan_layers,
+          prevent_cse=(not self.config.scan_layers or self.config.gradient_accumulation_steps > 1),
           policy=policy,
           static_argnums=(4, 5),  # Deterministic and model mode are static arguments.
       )
@@ -609,12 +577,6 @@ class Decoder(nn.Module):
       )(
           y
       )  # We do not quantize the logits matmul.
-    if model_mode in (MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE):
-      logits = nn.with_logical_constraint(logits, (None, None, "activation_vocab"))
-    elif cfg.num_vocab_tiling == 1:
-      logits = nn.with_logical_constraint(
-          logits, ("activation_embed_and_logits_batch", "activation_length_no_exp", "activation_vocab")
-      )
 
     if self.config.cast_logits_to_fp32:
       logits = logits.astype(jnp.float32)
