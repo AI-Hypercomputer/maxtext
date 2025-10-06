@@ -22,7 +22,7 @@ import jax
 from jax import lax
 import jax.numpy as jnp
 from jax.ad_checkpoint import checkpoint_name
-from jax.sharding import Mesh
+from jax.sharding import Mesh, NamedSharding
 
 from flax import linen as nn
 from flax import nnx
@@ -81,7 +81,7 @@ class Gpt3LayerNorm(nnx.Module):
     else:
       self.bias = None
 
-  def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
+  def __call__(self, x: jnp.ndarray, out_sharding: NamedSharding | None = None) -> jnp.ndarray:
     """Applies layer normalization on the input."""
     if self.reductions_in_fp32:
       x = jnp.asarray(x, jnp.float32)
@@ -98,7 +98,12 @@ class Gpt3LayerNorm(nnx.Module):
       scale = jax.device_put(scale, max_utils.device_space())
 
     scale = jnp.asarray(scale, self.dtype)
-    output = normed_inputs * (scale + 1)
+    output = jnp.einsum(
+        "i...k,...k->i...k",
+        normed_inputs,
+        scale + 1,
+        out_sharding=out_sharding,
+    )
 
     if self.bias is not None:
       bias = self.bias.value
@@ -397,6 +402,7 @@ class Gpt3DecoderLayer(nn.Module):
         use_pre_norm=True,
         config=cfg,
         quant=self.quant,
+        mesh=self.mesh,
     )(attention_lnx, deterministic=deterministic)
     mlp_lnx = nn.with_logical_constraint(mlp_lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
 

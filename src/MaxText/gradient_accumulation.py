@@ -17,6 +17,8 @@
 import jax
 import jax.numpy as jnp
 
+from MaxText.maxtext_utils import maybe_shard_with_name
+
 
 def gradient_accumulation_loss_and_grad(
     _loss_fn,
@@ -58,6 +60,12 @@ def gradient_accumulation_loss_and_grad(
       - final_aux (PyTree): Auxiliary outputs, summed across microbatches.
       - raw_grads (PyTree): The accumulated and averaged gradients.
   """
+
+  def _maybe_shard_with_name(inputs, sharding_names):
+    """Wrapper of maybe_shard_with_name with fixed shard_mode"""
+    return maybe_shard_with_name(inputs, sharding_names, config.shard_mode)
+
+  ga_params_shardings = grad_shardings = params_shardings
   # When using Zero-1 optimizer sharding, cast params to lower precision and apply sharding constraints
   # so that all-gather is done once in the lower precision before the gradient accumulation loop
   if config.shard_optimizer_over_data:
@@ -68,15 +76,14 @@ def gradient_accumulation_loss_and_grad(
       return param
 
     ga_params = jax.tree_util.tree_map(convert_to_bf16, params)
-    ga_params = jax.tree.map(jax.lax.with_sharding_constraint, ga_params, params_shardings)
   else:
     ga_params = params
 
+  ga_params = jax.tree.map(_maybe_shard_with_name, ga_params, ga_params_shardings)
   grad_func = jax.value_and_grad(_loss_fn, argnums=4, has_aux=True)
 
   def accumulate_gradient(acc_grad_and_loss, data):
     ga_params = acc_grad_and_loss["ga_params"]
-
     (_, aux), cur_batch_gradient = grad_func(model, config, data, dropout_rng, ga_params, *extra_dpo_args, is_train=True)
     acc_grad_and_loss["loss"] += aux["total_loss"]
     acc_grad_and_loss["moe_lb_loss"] += aux["moe_lb_loss"]
@@ -94,7 +101,7 @@ def gradient_accumulation_loss_and_grad(
 
   data = jax.tree_util.tree_map(reshape_to_microbatch_accumulations, data)
   init_grad = jax.tree_util.tree_map(jnp.zeros_like, ga_params)
-  init_grad = jax.tree.map(jax.lax.with_sharding_constraint, init_grad, params_shardings)
+  init_grad = jax.tree.map(_maybe_shard_with_name, init_grad, grad_shardings)
   init_grad_and_loss = {
       "loss": 0.0,
       "grad": init_grad,
@@ -113,8 +120,7 @@ def gradient_accumulation_loss_and_grad(
       + grad_and_loss["mtp_loss"] / config.gradient_accumulation_steps
   )
   raw_grads = grad_and_loss["grad"]
-  if config.shard_optimizer_over_data:
-    raw_grads = jax.tree.map(jax.lax.with_sharding_constraint, raw_grads, params_shardings)
+  raw_grads = jax.tree.map(_maybe_shard_with_name, raw_grads, params_shardings)
   raw_grads = jax.tree_util.tree_map(lambda arr: arr / grad_and_loss["total_weights"], raw_grads)
   aux = jax.tree.map(lambda x: jnp.sum(x, axis=0), aux)  # pytype: disable=module-attr
 

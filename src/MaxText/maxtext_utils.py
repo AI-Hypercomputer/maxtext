@@ -27,7 +27,7 @@ import numpy as np
 from collections.abc import Iterable
 from jax.experimental import mesh_utils
 from jax.experimental.serialize_executable import deserialize_and_load
-from jax.sharding import PartitionSpec as P
+from jax.sharding import PartitionSpec as P, NamedSharding, reshard
 
 import jax
 import jax.numpy as jnp
@@ -51,6 +51,25 @@ OVERWRITE_WITH_GRADIENT = "_overwrite_with_gradient"
 def get_input_data_sharding(config, mesh):
   """Get the input data sharding for the model"""
   return nn.logical_to_mesh_sharding(P(*config.input_data_sharding_logical_axes), mesh, config.logical_axis_rules)
+
+
+def maybe_shard_with_name(inputs, named_sharding, shard_mode):
+  """
+  In auto shardmode, this function hints inputs follow given named_sharding.
+  In explicit shardmode, this function enforces inputs following named_sharding.
+  """
+  if shard_mode == "explicit":
+    return reshard(inputs, named_sharding)
+  else:
+    return jax.lax.with_sharding_constraint(inputs, named_sharding)
+
+
+def maybe_shard_with_logical(inputs, logical_axes, mesh, shard_mode):
+  """
+  A wrapper of maybe_shard_with_name when logical axes are inputs
+  """
+  named_sharding = NamedSharding(mesh, nn.logical_to_mesh_axes(logical_axes))
+  return maybe_shard_with_name(inputs, named_sharding, shard_mode)
 
 
 def get_functional_train_with_signature(

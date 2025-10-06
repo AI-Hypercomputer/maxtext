@@ -140,7 +140,12 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
     else:
       one_hot_targets = jax.nn.one_hot(data["targets"], config.vocab_size)
       xent, _ = max_utils.cross_entropy_with_logits(logits, one_hot_targets)
-      xent = nn.with_logical_constraint(xent, ("activation_embed_and_logits_batch", "activation_length"))
+      xent = maxtext_utils.maybe_shard_with_logical(
+          xent,
+          ("activation_embed_and_logits_batch", "activation_length"),
+          model.mesh,
+          config.shard_mode,
+      )
       # Mask out paddings at the end of each example.
       xent = xent * (data["targets_segmentation"] != 0)
       total_loss = jnp.sum(xent)
@@ -371,9 +376,6 @@ def train_loop(config, recorder, state=None):
   params_shardings, state_mesh_shardings = maxtext_utils.maybe_update_params_sharding_with_opt(
       config, state_mesh_shardings
   )
-  params_shardings, state_mesh_shardings = maxtext_utils.maybe_update_params_sharding_with_opt(
-      config, state_mesh_shardings
-  )
 
   p_train_step, p_eval_step = train_utils.jit_train_and_eval_step(
       config, model, mesh, state, state_mesh_shardings, train_step, eval_step, eval_data_iterator, params_shardings
@@ -382,7 +384,7 @@ def train_loop(config, recorder, state=None):
   with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
     shaped_batch = maxtext_utils.get_shaped_batch(config)
     if config.shard_optimizer_over_data:
-      state = jax.lax.with_sharding_constraint(state, state_mesh_shardings)
+      state = maxtext_utils.maybe_shard_with_name(state, state_mesh_shardings, config.shard_mode)
     compiled = p_train_step.lower(state, shaped_batch, init_rng).compile()
     compiled_stats = compiled.memory_analysis()
     max_utils.print_compiled_memory_stats(compiled_stats)
@@ -407,7 +409,7 @@ def train_loop(config, recorder, state=None):
         with maybe_record_goodput(recorder, GoodputEvent.STEP, step):
           with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
             if config.shard_optimizer_over_data:
-              state = jax.lax.with_sharding_constraint(state, state_mesh_shardings)
+              state = maxtext_utils.maybe_shard_with_name(state, state_mesh_shardings, config.shard_mode)
             state, metrics = p_train_step(state, example_batch, nextrng)
 
       step_time_delta = datetime.datetime.now() - last_step_completion
@@ -469,6 +471,7 @@ def initialize(argv: Sequence[str]) -> tuple[pyconfig.HyperParameters, Any, Any]
   """Initialization of hyperparameters and utilities"""
   pathwaysutils.initialize()
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
+  jax.config.update("jax_remove_size_one_mesh_axis_from_type", True)
   # TF allocates extraneous GPU memory when using TFDS data
   # this leads to CUDA OOMs. WAR for now is to hide GPUs from TF
   tf.config.set_visible_devices([], "GPU")

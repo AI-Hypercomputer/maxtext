@@ -48,7 +48,11 @@ class DataLoader:
         else:
           example_batch = next(self.data_iterator)
         # Reshard data from loaded sharding to performant activation sharding
-        self.last_batch = jax.lax.with_sharding_constraint(example_batch, self.input_data_shardings)
+        self.last_batch = maxtext_utils.maybe_shard_with_name(
+            example_batch,
+            self.input_data_shardings,
+            self.config.shard_mode,
+        )
         self.check_example_batch()
       except Exception as e:  # pylint: disable=broad-except
         if isinstance(e, StopIteration):

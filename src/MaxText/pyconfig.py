@@ -66,6 +66,31 @@ def validate_compute_axis_order(s: str) -> None:
     raise ValueError("Invalid compute_axis_order was passed. Valid options are ", valid_compute_axis_order)
 
 
+def validate_shard_mode(
+    shard_mode: str,
+    decoder_block: str,
+    quantization: str,
+) -> None:
+  """Validates sharding settings, raising ValueError for incompatible combinations."""
+  if shard_mode not in {"auto", "explicit"}:
+    raise ValueError(f"Invalid shard_mode '{shard_mode}'. Choose 'auto' or 'explicit'.")
+
+  if shard_mode == "explicit":
+    max_logging.log("Warning: 'explicit' sharding is an experimental feature.")
+
+    # Check for unsupported decoder blocks
+    supported_decoders = {"simple", "simple_mlp", "llama2"}
+    if decoder_block not in supported_decoders:
+      raise ValueError(
+          f"Decoder '{decoder_block}' is not supported with 'explicit' sharding. "
+          f"Supported options are: {list(supported_decoders)}."
+      )
+
+    # Check for unsupported quantization
+    if quantization:  # More Pythonic check for non-empty string
+      raise ValueError("Quantization is not supported with 'explicit' sharding.")
+
+
 def validate_kv_quant_axis(s: str, quantize_kvcache: bool) -> None:
   valid_kv_quant_axis = ("", "dkv", "heads_and_dkv")
   if s not in valid_kv_quant_axis:  # currently supported kv_quant_axis
@@ -179,6 +204,7 @@ def validate_keys(keys):
   validate_profiler_type(keys["profiler"])
   validate_periodic_profiler(keys["profiler"], keys["profile_periodically_period"], keys["profiler_steps"])
   validate_compute_axis_order(keys["compute_axis_order"])
+  validate_shard_mode(keys["shard_mode"], keys["decoder_block"], keys["quantization"])
   validate_kv_quant_axis(keys["kv_quant_axis"], keys["quantize_kvcache"])
   validate_model_call_mode(keys["model_call_mode"])
   validate_prefill_and_target_lengths(keys["max_prefill_predict_length"], keys["max_target_length"])
