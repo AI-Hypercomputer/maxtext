@@ -43,9 +43,12 @@ WORKDIR /deps
 COPY setup.sh ./
 COPY requirements.txt requirements_with_jax_ai_image.txt ./
 
+# Copy tpu7x libtpu wheel file
+COPY $LIBTPU_WHL_NAME ./
+
 # Install dependencies - these steps are cached unless the copied files change
 RUN echo "Running command: bash setup.sh MODE=$ENV_MODE JAX_VERSION=$ENV_JAX_VERSION LIBTPU_GCS_PATH=${ENV_LIBTPU_GCS_PATH} DEVICE=${ENV_DEVICE}"
-RUN --mount=type=cache,target=/root/.cache/pip bash setup.sh MODE=${ENV_MODE} JAX_VERSION=${ENV_JAX_VERSION} LIBTPU_GCS_PATH=${ENV_LIBTPU_GCS_PATH} DEVICE=${ENV_DEVICE}
+RUN --mount=type=cache,target=/root/.cache/pip bash setup.sh MODE=${ENV_MODE} JAX_VERSION=${ENV_JAX_VERSION} LIBTPU_GCS_PATH=${ENV_LIBTPU_GCS_PATH} DEVICE=${ENV_DEVICE} LIBTPU_WHL_NAME=/deps/${LIBTPU_WHL_NAME}
 
 # Now copy the remaining code (source files that may change frequently)
 COPY . .
