@@ -1381,7 +1381,7 @@ def _forward_with_context_expert_parallelism(cfg_cp, mesh_cp, attention_cp, lnx,
   if context_parallel_size > 1 and cfg_cp.context_parallel_load_balance:
     batch = {"inputs": lnx, "inputs_segmentation": decoder_segment_ids, "inputs_position": decoder_positions}
     with mesh_cp:
-      reordered_batch = max_utils.get_reorder_callable(context_parallel_size)(batch)
+      reordered_batch = max_utils.get_reorder_callable(context_parallel_size, "auto")(batch)
     lnx = reordered_batch["inputs"]
     decoder_segment_ids = reordered_batch["inputs_segmentation"]
     decoder_positions = reordered_batch["inputs_position"]

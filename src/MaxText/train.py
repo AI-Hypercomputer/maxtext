@@ -247,9 +247,10 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
 
     def reshape_to_microbatch_accumulations(batch_arr):
       """Reshape global batch to microbatches, assuming batch axis is leading."""
-      microbatches = config.gradient_accumulation_steps
-      microbatch_shape = (microbatches, batch_arr.shape[0] // microbatches) + batch_arr.shape[1:]
-      return jnp.reshape(batch_arr, microbatch_shape)
+      num_microbatches = config.gradient_accumulation_steps
+      microbatch_shape = (batch_arr.shape[0] // num_microbatches, num_microbatches) + batch_arr.shape[1:]
+      reshaped_batch_arr = jnp.reshape(batch_arr, microbatch_shape)
+      return jnp.swapaxes(reshaped_batch_arr, 0, 1)
 
     data = jax.tree_util.tree_map(reshape_to_microbatch_accumulations, data)
     init_grad = jax.tree_util.tree_map(jnp.zeros_like, ga_params)
@@ -413,7 +414,7 @@ def train_loop(config, recorder, state=None):
 
   with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
     shaped_batch = maxtext_utils.get_shaped_batch(config)
-    state = jax.lax.with_sharding_constraint(state, state_mesh_shardings)
+    state = maxtext_utils.maybe_shard(state, state_mesh_shardings, config.shard_mode)
     compiled = p_train_step.lower(state, shaped_batch, init_rng).compile()
     compiled_stats = compiled.memory_analysis()
     max_utils.print_compiled_memory_stats(compiled_stats)
@@ -437,7 +438,7 @@ def train_loop(config, recorder, state=None):
         nextrng = jax.jit(jax.random.fold_in)(init_rng, step)
         with maybe_record_goodput(recorder, GoodputEvent.STEP, step):
           with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-            state = jax.lax.with_sharding_constraint(state, state_mesh_shardings)
+            state = maxtext_utils.maybe_shard(state, state_mesh_shardings, config.shard_mode)
             state, metrics = p_train_step(state, example_batch, nextrng)
 
       step_time_delta = datetime.datetime.now() - last_step_completion
@@ -499,6 +500,7 @@ def initialize(argv: Sequence[str]) -> tuple[pyconfig.HyperParameters, Any, Any]
   """Initialization of hyperparameters and utilities"""
   pathwaysutils.initialize()
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
+  jax.config.update("jax_remove_size_one_mesh_axis_from_type", True)
   # TF allocates extraneous GPU memory when using TFDS data
   # this leads to CUDA OOMs. WAR for now is to hide GPUs from TF
   tf.config.set_visible_devices([], "GPU")
