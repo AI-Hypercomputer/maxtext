@@ -179,6 +179,9 @@ def main(argv: Sequence[str]) -> None:
         os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
     )
 
+  print("TPU_PROCESS_ADDRESS:", os.environ.get("TPU_PROCESS_ADDRESS"))
+  print("TPU_WORKER_HOSTNAMES:", os.environ.get("TPU_WORKER_HOSTNAMES"))
+
   mt_config = pyconfig.initialize(argv)
   max_utils.print_system_information()
 

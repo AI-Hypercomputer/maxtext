@@ -248,22 +248,24 @@ elif [[ $MODE == "nightly" ]]; then
         # Installing tunix
         python3 -m uv pip install 'git+https://github.com/google/tunix.git'
         echo "Installing jax-nightly, jaxlib-nightly"
+        python3 -m uv pip install -U --pre jax==0.8.1.dev20251016 jaxlib==0.8.1.dev20251016 libtpu==0.0.26.dev20251022+nightly requests -i https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/ -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
+        
         # Install jax-nightly
-        python3 -m uv pip install --pre -U jax -i https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/
+        #python3 -m uv pip install --pre -U jax -i https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/
         # Install jaxlib-nightly
-        python3 -m uv pip install --pre -U jaxlib -i https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/
-        if [[ -n "$LIBTPU_GCS_PATH" ]]; then
-            # Install custom libtpu
-            echo "Installing libtpu.so from $LIBTPU_GCS_PATH to $libtpu_path"
-            # Install required dependency
-            python3 -m uv pip install -U crcmod
-            # Copy libtpu.so from GCS path
-            gsutil cp "$LIBTPU_GCS_PATH" "$libtpu_path"
-        else
-            # Install libtpu-nightly
-            echo "Installing libtpu-nightly"
-            python3 -m uv pip install -U --pre libtpu -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
-        fi
+        #python3 -m uv pip install --pre -U jaxlib -i https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/
+        #if [[ -n "$LIBTPU_GCS_PATH" ]]; then
+        #    # Install custom libtpu
+        #    echo "Installing libtpu.so from $LIBTPU_GCS_PATH to $libtpu_path"
+        #    # Install required dependency
+        #    python3 -m uv pip install -U crcmod
+        #    # Copy libtpu.so from GCS path
+        #    gsutil cp "$LIBTPU_GCS_PATH" "$libtpu_path"
+        #else
+        #    # Install libtpu-nightly
+        #    echo "Installing libtpu-nightly"
+        #    python3 -m uv pip install -U --pre libtpu -f https://storage.googleapis.com/libtpu-wheels/index.html
+        #fi
     fi
     echo "Installing nightly tensorboard plugin profile"
     python3 -m uv pip install tbp-nightly --upgrade
