@@ -57,7 +57,7 @@ jobs:
   run:
     runs-on: ${{ inputs.cloud_runner != '' && inputs.cloud_runner || fromJson(format('["self-hosted", "{0}", "{1}"]', inputs.device_type, inputs.device_name)) }}
     container:
-      image: gcr.io/tpu-prod-env-multipod/maxtext-unit-test-${{ inputs.device_type == 'cpu' && 'tpu' || inputs.device_type == 'gpu' && 'tpu' || inputs.device_type }}:${{ inputs.image_type != '' && inputs.image_type }}
+      image: gcr.io/tpu-prod-env-multipod/maxtext-unit-test-${{ inputs.device_type == 'cpu' && 'tpu' || inputs.device_type }}:${{ inputs.image_type != '' && inputs.image_type }}
       env:
         XLA_PYTHON_CLIENT_MEM_FRACTION: ${{ inputs.xla_python_client_mem_fraction }}
         TF_FORCE_GPU_ALLOW_GROWTH: ${{ inputs.tf_force_gpu_allow_growth }}
@@ -73,23 +73,20 @@ jobs:
       - name: Install the maxtext wheel
         shell: bash
         run: |
+          # create and activate a python env
+          python3 -m uv venv --seed
+          source .venv/bin/activate
           maxtext_wheel=$(ls maxtext-*-py3-none-any.whl 2>/dev/null)
-          python3 -m uv pip install ${maxtext_wheel}[${MAXTEXT_PACKAGE_EXTRA}] --resolution=lowest --system
+          uv pip install ${maxtext_wheel}[${MAXTEXT_PACKAGE_EXTRA}] --resolution=lowest
           install_maxtext_github_deps
-          if [ "${{ inputs.device_type }}" == "gpu" ]; then
-            echo "Installing Transformer Engine for GPU"
-            python3 -m pip install transformer-engine-cu12>=2.7.0 transformer-engine-jax>=2.7.0 transformer-engine>=2.7.0
-            echo "Transformer Engine version: $(python3 -c 'import transformer_engine; print(transformer_engine.__version__)')"
-            echo "Transformer Engine Jax version: $(python3 -c 'import jax; print(jax.__version__)')"
-            # echo "Transformer Engine PyTorch version: $(python3 -c 'import torch; import transformer_engine.pytorch as te; print(torch.__version__, te.__version__)')"
-          fi
           python3 --version
-          python3 -m pip freeze
+          python3 -m uv pip freeze
       - name: Copy test assets files
         run : gcloud storage cp gs://maxtext-test-assets/* src/MaxText/test_assets
       - name: Display contents of workspace # TODO: Remove
         run: ls -R
       - name: Run Tests
+        shell: bash
         run: |
           if [ "${{ inputs.is_scheduled_run }}" == "true" ]; then
             FINAL_PYTEST_MARKER="${{ inputs.pytest_marker }}"
@@ -102,4 +99,4 @@ jobs:
           export MAXTEXT_TEST_ASSETS_ROOT=$(pwd)/src/MaxText/test_assets
           export MAXTEXT_PKG_DIR=$(pwd)/src/MaxText
           # TODO: Fix the skipped tests and remove the deselect flags
-          LIBTPU_INIT_ARGS='--xla_tpu_scoped_vmem_limit_kib=65536' python3 -m pytest ${{ inputs.pytest_addopts }} -v -m "${FINAL_PYTEST_MARKER}" --durations=0 --deselect "tests/aot_hlo_identical_test.py::AotHloIdenticalTest::test_default_hlo_match" --deselect "tests/tokenizer_test.py::TokenizerTest::test_detokenize"
+          LIBTPU_INIT_ARGS='--xla_tpu_scoped_vmem_limit_kib=65536' pytest ${{ inputs.pytest_addopts }} -v -m "${FINAL_PYTEST_MARKER}" --durations=0 --deselect "tests/aot_hlo_identical_test.py::AotHloIdenticalTest::test_default_hlo_match" --deselect "tests/tokenizer_test.py::TokenizerTest::test_detokenize"
