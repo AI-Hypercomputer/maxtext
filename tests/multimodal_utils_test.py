@@ -128,7 +128,7 @@ class TestLlama4ImageProcessing(unittest.TestCase):
     )
     self.assertEqual(image_mask.shape, (self.LLAMA4_TILES_NUM,))
     self.assertEqual(np.sum(image_mask), 5)
-    np.testing.assert_array_equal(padded_image[5], padded_image[6])
+    self.assertEqual(np.sum(padded_image[5:]), 0)
 
 
 class TestLlama4PostProcessing(unittest.TestCase):
