@@ -377,15 +377,15 @@ class Decoder(nn.Module):
         return [llama2.LlamaDecoderLayerToLinen]
       case DecoderBlockType.MISTRAL:
         # TODO(ranran): update to Mistral with sliding window attention
-        return [mistral.MistralDecoderLayer]
+        return [mistral.MistralDecoderLayerToLinen]
       case DecoderBlockType.MIXTRAL:
         return [mixtral.MixtralDecoderLayer]
       case DecoderBlockType.DEEPSEEK:
         return [deepseek.DeepSeekDenseLayer, deepseek.DeepSeekMoELayer]
       case DecoderBlockType.GEMMA:
-        return [gemma.GemmaDecoderLayer]
+        return [gemma.GemmaDecoderLayerToLinen]
       case DecoderBlockType.GEMMA2:
-        return [gemma2.Gemma2DecoderLayer]
+        return [gemma2.Gemma2DecoderLayerToLinen]
       case DecoderBlockType.GEMMA3:
         return [gemma3.Gemma3DecoderLayer]
       case DecoderBlockType.GPT3:
