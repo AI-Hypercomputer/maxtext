@@ -21,8 +21,8 @@ base_num_query_heads: 128
 base_num_kv_heads: 128
 base_mlp_dim: 18432
 base_moe_mlp_dim: 512
-base_num_decoder_layers: 61
-first_num_dense_layers: 3
+base_num_decoder_layers: 4
+first_num_dense_layers: 2
 mlp_activations: ["silu","linear"]
 vocab_size: 129280
 enable_dropout: False
