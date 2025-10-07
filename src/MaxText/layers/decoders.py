@@ -43,6 +43,7 @@ from MaxText.layers.embeddings import attend_on_embedding, embed_as_linen, posit
 from MaxText.layers.quantizations import AqtQuantization as Quant
 from MaxText.layers import (
     deepseek,
+    deepseek_batchsplit,
     gemma,
     gemma2,
     gemma3,
@@ -382,7 +383,10 @@ class Decoder(nn.Module):
       case DecoderBlockType.MIXTRAL:
         return [mixtral.MixtralDecoderLayer]
       case DecoderBlockType.DEEPSEEK:
-        return [deepseek.DeepSeekDenseLayer, deepseek.DeepSeekMoELayer]
+        if self.config.use_batch_split_schedule:
+          return [deepseek_batchsplit.DeepSeekDenseLayer, deepseek_batchsplit.DeepSeekMoELayer]
+        else:
+          return [deepseek.DeepSeekDenseLayer, deepseek.DeepSeekMoELayer]
       case DecoderBlockType.GEMMA:
         return [gemma.GemmaDecoderLayerToLinen]
       case DecoderBlockType.GEMMA2:

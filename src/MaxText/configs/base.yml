@@ -170,7 +170,7 @@ sparse_matmul: True
 capacity_factor: -1.0 # a factor to decide expert capacity for token dropping, and no dropping by default
 load_balance_loss_weight: 0.01 # weight for the load balance loss
 use_random_routing: False # whether to use random routing for debug/test purpose
-use_custom_sort_vjp: False # whether to use a custom sort vjp for sparse matmul ops
+use_custom_sort_vjp: True # whether to use a custom sort vjp for sparse matmul ops
 use_ring_of_experts: False # whether to use ring of experts for sparse matmul expert parallelism
 # Tunable tiling dimensions used for Megablox
 tile_batch_seq: 512
@@ -198,6 +198,9 @@ routed_bias: False # a flag if a learnable bias is added for routing
 mlp_bias: False # a flag if a learnable bias is added for MLP matmul
 n_routing_groups: -1 # number of groups for routing, disabled by default
 topk_routing_group: -1 # number of top groups to route inputs. For EP,
+# Splits the batch to allow for better scheduling when using expert parallelism by overlapping the
+# all-to-all communication with compute. Currently only implemented with DeepSeek sparse layers.
+use_batch_split_schedule: False # whether to use batch split schedule
 # sending activations to a maximum of topk_routing_group distinct devices can yield performance benefits.
 
 # For complex architectures like llama4 there are repeated sets of
