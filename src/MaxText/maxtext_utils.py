@@ -27,7 +27,7 @@ import numpy as np
 from collections.abc import Iterable
 from jax.experimental import mesh_utils
 from jax.experimental.serialize_executable import deserialize_and_load
-from jax.sharding import PartitionSpec as P
+from jax.sharding import PartitionSpec as P, reshard
 
 import jax
 import jax.numpy as jnp

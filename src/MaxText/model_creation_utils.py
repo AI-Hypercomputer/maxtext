@@ -21,7 +21,7 @@ from typing import overload
 from flax import nnx
 import flax.linen as nn
 import jax
-from jax.sharding import Mesh
+from jax.sharding import Mesh, AxisType
 from MaxText import maxtext_utils
 from MaxText import pyconfig
 from MaxText.layers import quantizations
@@ -76,7 +76,10 @@ def from_config(
       model = from_config(config)
   """
   devices_array = maxtext_utils.create_device_mesh(config, devices)
-  mesh = Mesh(devices_array, config.mesh_axes)
+  if config.shard_mode == 'auto':
+    mesh = Mesh(devices_array, config.mesh_axes, axis_types=tuple([AxisType.Auto] * len(config.mesh_axes)))
+  elif config.shard_mode == 'explicit':
+    mesh = Mesh(devices_array, config.mesh_axes, axis_types=tuple([AxisType.Explicit] * len(config.mesh_axes)))
   model = create_model(config, mesh, model_mode=model_mode, rngs=rngs)
 
   # Return only the model

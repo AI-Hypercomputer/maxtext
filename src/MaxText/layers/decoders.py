@@ -87,6 +87,15 @@ class DecoderLayer(nn.Module):
   ):
     cfg = self.config
     mesh = self.mesh
+    if model_mode == MODEL_MODE_PREFILL:
+      logical_axis_names = ("activation_batch", "prefill_activation_length", "activation_embed")
+    else:
+      logical_axis_names = ("activation_batch", "activation_length", "activation_embed")
+
+    if model_mode == MODEL_MODE_PREFILL:
+      inputs = nn.with_logical_constraint(inputs, logical_axis_names)
+    else:
+      inputs = nn.with_logical_constraint(inputs, logical_axis_names)
 
     inputs = checkpoint_name(inputs, "decoder_layer_input")
     # inputs: embedded inputs to the decoder with shape [batch, length, emb_dim]
@@ -98,6 +107,10 @@ class DecoderLayer(nn.Module):
         epsilon=cfg.normalization_layer_epsilon,
         kernel_axes=("norm",),
     )(inputs)
+    if model_mode == MODEL_MODE_PREFILL:
+      lnx = nn.with_logical_constraint(lnx, logical_axis_names)
+    else:
+      lnx = nn.with_logical_constraint(lnx, logical_axis_names)
 
     attention_layer = attention_as_linen(
         config=self.config,
@@ -134,6 +147,11 @@ class DecoderLayer(nn.Module):
         model_mode=model_mode,
     )
 
+    if model_mode == MODEL_MODE_PREFILL:
+      attention_lnx = nn.with_logical_constraint(attention_lnx, logical_axis_names)
+    else:
+      attention_lnx = nn.with_logical_constraint(attention_lnx, logical_axis_names)
+
     # MLP block.
     mlp_lnx = linears.mlp_block(
         in_features=lnx.shape[-1],
@@ -147,6 +165,10 @@ class DecoderLayer(nn.Module):
         config=cfg,
         quant=self.quant,
     )(lnx, deterministic=deterministic)
+    if model_mode == MODEL_MODE_PREFILL:
+      mlp_lnx = nn.with_logical_constraint(mlp_lnx, logical_axis_names)
+    else:
+      mlp_lnx = nn.with_logical_constraint(mlp_lnx, logical_axis_names)
 
     next_layer_addition = mlp_lnx + attention_lnx
 
@@ -155,6 +177,16 @@ class DecoderLayer(nn.Module):
     )
 
     layer_output = next_layer_addition_dropped_out + inputs
+    if model_mode == MODEL_MODE_PREFILL:
+      layer_output = nn.with_logical_constraint(
+          layer_output,
+          logical_axis_names,
+      )
+    else:
+      layer_output = nn.with_logical_constraint(
+          layer_output,
+          logical_axis_names,
+      )
 
     if cfg.record_internal_nn_metrics:
       self.sow("intermediates", "activation_mean", jnp.mean(layer_output))
@@ -254,6 +286,7 @@ class Decoder(nn.Module):
         # save all
         if cfg.remat_policy == "minimal_flash":
           max_logging.log("WARNING: 'minimal_flash' will be deprecated soon, please use 'minimal_with_context' instead.")
+          max_logging.log("WARNING: 'minimal_flash' will be deprecated soon, please use 'minimal_with_context' instead.")
         policy = self.minimal_policy(with_context=True)
       elif cfg.remat_policy == "minimal":
         # save all except context
@@ -345,15 +378,15 @@ class Decoder(nn.Module):
         return [llama2.LlamaDecoderLayerToLinen]
       case DecoderBlockType.MISTRAL:
         # TODO(ranran): update to Mistral with sliding window attention
-        return [mistral.MistralDecoderLayer]
+        return [mistral.MistralDecoderLayerToLinen]
       case DecoderBlockType.MIXTRAL:
         return [mixtral.MixtralDecoderLayer]
       case DecoderBlockType.DEEPSEEK:
         return [deepseek.DeepSeekDenseLayer, deepseek.DeepSeekMoELayer]
       case DecoderBlockType.GEMMA:
-        return [gemma.GemmaDecoderLayer]
+        return [gemma.GemmaDecoderLayerToLinen]
       case DecoderBlockType.GEMMA2:
-        return [gemma2.Gemma2DecoderLayer]
+        return [gemma2.Gemma2DecoderLayerToLinen]
       case DecoderBlockType.GEMMA3:
         return [gemma3.Gemma3DecoderLayer]
       case DecoderBlockType.GPT3:
@@ -365,11 +398,11 @@ class Decoder(nn.Module):
       case DecoderBlockType.QWEN3_MOE:
         return [qwen3.Qwen3MoeDecoderLayer]
       case DecoderBlockType.SIMPLE:
-        return [simple_layer.SimpleDecoderLayer]
+        return [simple_layer.SimpleDecoderLayerToLinen]
       case DecoderBlockType.SIMPLE_MLP:
         return [simple_layer.SimpleMlpDecoderLayer]
       case DecoderBlockType.LLAMA4:
-        return [llama4.Llama4ScannableBlock] if self.config.scan_layers else [llama4.Llama4DecoderLayer]
+        return [llama4.Llama4ScannableBlockToLinen] if self.config.scan_layers else [llama4.Llama4DecoderLayerToLinen]
       case _:
         # Default case to handle any unknown decoder block types.
         raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block.value=}")
@@ -395,7 +428,7 @@ class Decoder(nn.Module):
       # Apply remat policy to layer
       layer = nn.remat(
           block_layer,
-          prevent_cse=(not self.config.scan_layers or self.config.gradient_accumulation_steps > 1),
+          prevent_cse=not self.config.scan_layers or self.config.gradient_accumulation_steps > 1,
           policy=policy,
           static_argnums=(4, 5),  # Deterministic and model mode are static arguments.
       )
@@ -496,6 +529,7 @@ class Decoder(nn.Module):
       model_mode,
       image_embeddings=None,
       bidirectional_mask=None,
+      image_masks=None,
   ):
     """Applies token and positional embeddings to the input tokens."""
     cfg = self.config
@@ -509,6 +543,7 @@ class Decoder(nn.Module):
             text_embeddings=y,
             vision_embeddings=image_embeddings,
             mask=bidirectional_mask,
+            image_masks=image_masks,
         )
       # TODO(hengtaoguo): Add support for other multimodal models such as Llama4, refactor if needed
       else:
@@ -536,14 +571,14 @@ class Decoder(nn.Module):
     """Applies final normalization and projects hidden states to logits."""
 
     cfg = self.config
-    y = self.get_norm_layer(num_features=y.shape[-1])(
-        dtype=cfg.dtype,
-        weight_dtype=cfg.weight_dtype,
-        name="decoder_norm",
-        epsilon=cfg.normalization_layer_epsilon,
-        kernel_axes=("norm",),
-        parameter_memory_host_offload=cfg.parameter_memory_host_offload,
-    )(y)
+    # y = self.get_norm_layer(num_features=y.shape[-1])(
+    #     dtype=cfg.dtype,
+    #     weight_dtype=cfg.weight_dtype,
+    #     name="decoder_norm",
+    #     epsilon=cfg.normalization_layer_epsilon,
+    #     kernel_axes=("norm",),
+    #     parameter_memory_host_offload=cfg.parameter_memory_host_offload,
+    # )(y)
     y = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(y, deterministic=deterministic)
 
     # [batch, length, emb_dim] -> [batch, length, vocab_size]
@@ -577,6 +612,12 @@ class Decoder(nn.Module):
       )(
           y
       )  # We do not quantize the logits matmul.
+    if model_mode in (MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE):
+      logits = nn.with_logical_constraint(logits, (None, None, "activation_vocab"))
+    elif cfg.num_vocab_tiling == 1:
+      logits = nn.with_logical_constraint(
+          logits, ("activation_embed_and_logits_batch", "activation_length_no_exp", "activation_vocab")
+      )
 
     if self.config.cast_logits_to_fp32:
       logits = logits.astype(jnp.float32)
@@ -597,6 +638,7 @@ class Decoder(nn.Module):
       page_state: None | page_manager.PageState = None,
       bidirectional_mask: None | Any = None,
       image_embeddings: None | jnp.ndarray = None,
+      image_masks: None | jnp.ndarray = None,
   ):
     cfg = self.config
     mesh = self.mesh
@@ -611,6 +653,7 @@ class Decoder(nn.Module):
         model_mode,
         image_embeddings,
         bidirectional_mask,
+        image_masks,
     )
 
     policy = self.get_remat_policy()

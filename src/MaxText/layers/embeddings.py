@@ -20,6 +20,7 @@ import math
 import jax
 from jax import lax
 import jax.numpy as jnp
+from jax.sharding import PartitionSpec as P, reshard, Mesh, NamedSharding
 
 from flax import linen as nn
 from flax import nnx
@@ -46,6 +47,7 @@ def embed_as_linen(
     num_embeddings: int,
     num_features: int,
     config: Config,
+    mesh: Mesh,
     cast_input_dtype: None | DType = None,
     dtype: DType = jnp.float32,
     attend_dtype: None | DType = None,
@@ -80,6 +82,7 @@ def embed_as_linen(
       dtype=dtype,
       attend_dtype=attend_dtype,
       embedding_init=embedding_init,
+      mesh=mesh,
       metadata_fn=variable_to_logically_partitioned,
       name=name,
   )
@@ -93,6 +96,7 @@ class Embed(nnx.Module):
       num_embeddings: int,
       num_features: int,
       config: Config,
+      mesh: Mesh,
       cast_input_dtype: None | DType = None,
       dtype: DType = jnp.float32,
       attend_dtype: None | DType = None,
@@ -120,6 +124,7 @@ class Embed(nnx.Module):
     self.cast_input_dtype = cast_input_dtype
     self.dtype = dtype
     self.attend_dtype = attend_dtype
+    self.mesh = mesh
 
     self.embedding = nnx.Param(
         embedding_init(rngs.params(), (self.num_embeddings, self.num_features), self.config.weight_dtype),
@@ -149,7 +154,11 @@ class Embed(nnx.Module):
       one_hot = jnp.array(inputs[..., jnp.newaxis] == iota, dtype=self.dtype)
       output = jnp.dot(one_hot, jnp.asarray(embedding, self.dtype))
     else:
-      output = jnp.asarray(embedding, self.dtype)[inputs]
+      output_spec = NamedSharding(
+        self.mesh,
+        P('data', None, None),
+      )
+      output = jnp.asarray(embedding, self.dtype).at[inputs].get(out_sharding=output_spec)
 
     return output
 

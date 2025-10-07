@@ -32,8 +32,9 @@ import pathwaysutils  # pylint: disable=unused-import
 import tensorflow as tf
 
 import jax
+jax.config.update('jax_remove_size_one_mesh_axis_from_type', True)
 import jax.numpy as jnp
-from jax.sharding import PartitionSpec as P
+from jax.sharding import PartitionSpec as P, explicit_axes, reshard, NamedSharding
 
 from flax import linen as nn
 from flax.linen import partitioning as nn_partitioning
@@ -223,13 +224,17 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
     # Cast params to bf16 and unshard before gradient accumulation loop so that 
     # all-gather is done once in bf16 
     params_bf16 = jax.tree_util.tree_map(convert_to_bf16, params)
-    params_bf16 = jax.tree.map(jax.lax.with_sharding_constraint, params_bf16, params_shardings)
+    params_bf16 = jax.tree.map(reshard, params_bf16, params_shardings)
 
     def accumulate_gradient(acc_grad_and_loss, data):
       params_bf16 = acc_grad_and_loss["params_bf16"]
       grad_func = jax.value_and_grad(_loss_fn, argnums=4, has_aux=True)
       (_, aux), cur_batch_gradient = grad_func(
           model, config, data, dropout_rng, params_bf16, *extra_dpo_args, is_train=True
+      )
+      cur_batch_gradient = reshard(
+        cur_batch_gradient, 
+        NamedSharding(model.mesh, P(unreduced={'data'})),
       )
       acc_grad_and_loss["loss"] += aux["total_loss"]
       acc_grad_and_loss["moe_lb_loss"] += aux["moe_lb_loss"]
@@ -246,50 +251,53 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
       microbatch_shape = (microbatches, batch_arr.shape[0] // microbatches) + batch_arr.shape[1:]
       return jnp.reshape(batch_arr, microbatch_shape)
     
+    @functools.partial(explicit_axes, axes=tuple(config.mesh_axes))
     def gradient_accumulation_func(gathered_params, reshaped_data):
       init_grad = jax.tree_util.tree_map(jnp.zeros_like, gathered_params)
-      vma_axes = ('context', 'stage', 'tensor_sequence', 'fsdp', 'sequence', 'autoregressive', 'fsdp_transpose', 'expert', 'tensor', 'tensor_transpose')
+      # Reshard init_grad and params
+      init_grad = reshard(init_grad, NamedSharding(model.mesh, P(unreduced={'data'})))
+      gathered_params = jax.tree.map(
+        lambda p: reshard(p, NamedSharding(model.mesh, P(reduced={'data'}))),
+        gathered_params,  
+      )
       init_grad_and_loss = {
-          "loss": jax.lax.pvary(jnp.float32(0.0), vma_axes),
+          "loss": jnp.float32(0.0),
           "grad": init_grad,
-          "total_weights": jax.lax.pvary(jnp.int32(0.0), vma_axes),
-          "moe_lb_loss": jax.lax.pvary(jnp.float32(0.0), vma_axes),
-          "mtp_loss": jax.lax.pvary(jnp.float32(0.0), vma_axes),
-          "params_bf16": gathered_params
+          "total_weights": jnp.int32(0.0),
+          "moe_lb_loss": jnp.float32(0.0),
+          "mtp_loss": jnp.float32(0.0),
+          "params_bf16": gathered_params,
       }
 
       grad_and_loss, aux = jax.lax.scan(
           accumulate_gradient, init_grad_and_loss, reshaped_data, length=config.gradient_accumulation_steps
       )
       raw_grads = grad_and_loss["grad"]
-      all_reduce_keys = ["loss", "total_weights", "moe_lb_loss", "mtp_loss"]
-      grad_and_loss = {k: jax.lax.psum(grad_and_loss[k], axis_name='data') for k in all_reduce_keys}
+      raw_grads = reshard(raw_grads, NamedSharding(model.mesh, P()))
+      #all_reduce_keys = ["loss", "total_weights", "moe_lb_loss", "mtp_loss"]
+      #grad_and_loss = {k: jax.lax.psum(grad_and_loss[k], axis_name='data') for k in all_reduce_keys}
       loss = (
           grad_and_loss["loss"] / grad_and_loss["total_weights"]
           + grad_and_loss["moe_lb_loss"] / config.gradient_accumulation_steps
           + grad_and_loss["mtp_loss"] / config.gradient_accumulation_steps
       )
       raw_grads = jax.tree_util.tree_map(lambda arr: arr / grad_and_loss["total_weights"], raw_grads)
-      raw_grads = jax.lax.psum(raw_grads, axis_name='data')
       aux = jax.tree.map(lambda x: jnp.sum(x, axis=0), aux)  # pytype: disable=module-attr
-      aux = jax.lax.psum(aux, axis_name='data')
       return loss, raw_grads, aux
     data = jax.tree_util.tree_map(reshape_to_microbatch_accumulations, data)
     in_specs_params = jax.tree.map(lambda x: x.spec, params_shardings)
     in_specs_data = jax.tree.map(lambda x: P(None, 'data', None), data)
-    out_specs_loss = P()
-    out_specs_grads = in_specs_params
-    abstract_aux, _ = jax.eval_shape(lambda: _loss_fn(model, config, jax.tree.map(lambda x: x[0], data), dropout_rng, params_bf16, *extra_dpo_args, is_train=True))
-    out_specs_aux = jax.tree.map(lambda x: P(), abstract_aux)
+    # out_specs_loss = P()
+    # out_specs_grads = in_specs_params
+    # abstract_aux, _ = jax.eval_shape(lambda: _loss_fn(model, config, jax.tree.map(lambda x: x[0], data), dropout_rng, params_bf16, *extra_dpo_args, is_train=True))
+    # out_specs_aux = jax.tree.map(lambda x: P(), abstract_aux)
     
-    ga_func_shardmap = jax.shard_map(
-      gradient_accumulation_func,
-      mesh=model.mesh,
-      in_specs=(in_specs_params, in_specs_data),
-      out_specs=(out_specs_loss, out_specs_grads, out_specs_aux),
-      check_vma=False,
+    loss, raw_grads, aux = gradient_accumulation_func(
+      params_bf16, data,
+      in_sharding=(in_specs_params, in_specs_data),
+      #out_sharding=(out_specs_loss, out_specs_grads, out_specs_aux),
     )
-    loss, raw_grads, aux = ga_func_shardmap(params_bf16, data)
+
   else:
     if config.optimizer_memory_host_offload:
       if config.use_dpo:
@@ -408,6 +416,8 @@ def train_loop(config, recorder, state=None):
       eval_data_iterator,
       state,
   ) = train_utils.setup_train_loop(config, recorder)
+  
+  jax.set_mesh(mesh)
 
   if config.use_dpo:
     if "reference_params" not in state.params:
@@ -423,7 +433,7 @@ def train_loop(config, recorder, state=None):
 
   with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
     shaped_batch = maxtext_utils.get_shaped_batch(config)
-    state = jax.lax.with_sharding_constraint(state, state_mesh_shardings)
+    state = reshard(state, state_mesh_shardings)
     compiled = p_train_step.lower(state, shaped_batch, init_rng).compile()
     compiled_stats = compiled.memory_analysis()
     max_utils.print_compiled_memory_stats(compiled_stats)
@@ -447,7 +457,7 @@ def train_loop(config, recorder, state=None):
         nextrng = jax.jit(jax.random.fold_in)(init_rng, step)
         with maybe_record_goodput(recorder, GoodputEvent.STEP, step):
           with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-            state = jax.lax.with_sharding_constraint(state, state_mesh_shardings)
+            #state = jax.lax.with_sharding_constraint(state, state_mesh_shardings)
             state, metrics = p_train_step(state, example_batch, nextrng)
 
       step_time_delta = datetime.datetime.now() - last_step_completion
