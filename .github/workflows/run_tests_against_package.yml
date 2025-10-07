@@ -58,6 +58,7 @@ jobs:
         XLA_PYTHON_CLIENT_MEM_FRACTION: ${{ inputs.xla_python_client_mem_fraction }}
         TF_FORCE_GPU_ALLOW_GROWTH: ${{ inputs.tf_force_gpu_allow_growth }}
         TPU_SKIP_MDS_QUERY: ${{ inputs.device_type == 'cpu' && '1' || '' }}
+        MAXTEXT_PACKAGE_EXTRA: ${{ inputs.device_type == 'cpu' && 'tpu' || inputs.device_type }}
       options: ${{ inputs.container_resource_option }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -66,8 +67,12 @@ jobs:
         with:
           name: maxtext-wheel
       - name: Install the maxtext wheel
+        shell: bash
         run: |
-          python3 -m uv pip install maxtext-*-py3-none-any.whl --resolution=lowest --system
+          python3 -m uv venv --seed
+          source .venv/bin/activate
+          maxtext_wheel=$(ls maxtext-*-py3-none-any.whl 2>/dev/null)
+          uv pip install ${maxtext_wheel}[${MAXTEXT_PACKAGE_EXTRA}] --resolution=lowest
           install_maxtext_github_deps
           python3 --version
           python3 -m pip freeze
@@ -76,6 +81,7 @@ jobs:
       - name: Display contents of workspace # TODO: Remove
         run: ls -R
       - name: Run Tests
+        shell: bash
         run: |
           if [ "${{ inputs.is_scheduled_run }}" == "true" ]; then
             FINAL_PYTEST_MARKER="${{ inputs.pytest_marker }}"
@@ -88,4 +94,4 @@ jobs:
           export MAXTEXT_TEST_ASSETS_ROOT=$(pwd)/src/MaxText/test_assets
           export MAXTEXT_PKG_DIR=$(pwd)/src/MaxText
           # TODO: Fix the skipped tests and remove the deselect flags
-          python3 -m pytest -v -m "${FINAL_PYTEST_MARKER}" --durations=0 --deselect "tests/aot_hlo_identical_test.py::AotHloIdenticalTest::test_default_hlo_match" --deselect "tests/tokenizer_test.py::TokenizerTest::test_detokenize"
+          .venv/bin/python3 -m pytest -v -m "${FINAL_PYTEST_MARKER}" --durations=0 --deselect "tests/aot_hlo_identical_test.py::AotHloIdenticalTest::test_default_hlo_match" --deselect "tests/tokenizer_test.py::TokenizerTest::test_detokenize"

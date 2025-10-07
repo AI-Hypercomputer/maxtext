@@ -57,7 +57,7 @@ cd maxtext
 
 # 2. Install dependencies in editable mode
 pip install uv
-uv pip install -e . --resolution=lowest
+uv pip install -e .[tpu] --resolution=lowest
 install_maxtext_github_deps
 ```
 
