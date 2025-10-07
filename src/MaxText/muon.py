@@ -1,3 +1,5 @@
+# copy from https://github.com/google-deepmind/optax/blob/5bd909532d9814667c188ac09b675183118e76eb/optax/contrib/_muon.py
+
 # Copyright 2025 DeepMind Technologies Limited. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -37,6 +39,18 @@ from optax.transforms import _masking
 import optax.tree
 
 ReshapeFn = Callable[[jax.Array], jax.Array]
+
+
+def debug_sharding(array, prefix=""):
+  global_shape = array.shape
+  jax.debug.inspect_array_sharding(
+      array,
+      callback=lambda sharding_obj: print(
+          prefix + f"\tGlobal Shape: {global_shape}\n"
+          f"\tLocal Shape: {sharding_obj.shard_shape(global_shape)}\n"
+          f"\tSharding Object: {sharding_obj}\n"
+      ),
+  )
 
 
 class MuonDimensionNumbers(NamedTuple):
@@ -265,6 +279,7 @@ def scale_by_muon(
     )
 
   def update_fn(updates, state, params=None):
+    debug_sharding(updates["params"]["decoder"]["dense_layers"]["mlp"]["wi_0"]["kernel"])
     del params
     # TODO(rdyro): extend to _masking._mask_callable
     if callable(weight_dimension_numbers):
