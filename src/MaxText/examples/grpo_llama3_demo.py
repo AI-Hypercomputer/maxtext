@@ -931,6 +931,7 @@ def evaluate(
 def main():
   # Create a mock config object for goodput monitoring
   class MockConfig:
+
     def __init__(self):
       self.monitor_goodput = MONITOR_GOODPUT
       self.enable_goodput_recording = ENABLE_GOODPUT_RECORDING
@@ -945,13 +946,13 @@ def main():
       self.report_performance_metric_for_gcp_monitoring = False
 
   config = MockConfig()
-  
+
   # Initialize goodput monitoring
   maybe_monitor_goodput(config)
   recorder = create_goodput_recorder(config)
-  
+
   max_logging.log("GRPO training with goodput monitoring started")
-  
+
   # Ckpt saving
   checkpointing_options = ocp.CheckpointManagerOptions(save_interval_steps=SAVE_INTERVAL_STEPS, max_to_keep=MAX_TO_KEEP)
 
@@ -1057,7 +1058,7 @@ def main():
   # ## Evaluate before training
   #
   max_logging.log("Starting pre-training evaluation...")
-  
+
   with maybe_record_goodput(recorder, GoodputEvent.DATA_LOADING):
     # pylint: disable=unbalanced-tuple-unpacking
     (corr, total, accuracy, partial_accuracy, format_accuracy) = evaluate(
@@ -1066,24 +1067,24 @@ def main():
         **GENERATION_CONFIGS["greedy"],
     )
   print(f"Pre GRPO Training: {corr=}, {total=}, {accuracy=}%, {partial_accuracy=}%," f" {format_accuracy=}%")
-  
+
   max_logging.log(f"Pre-training evaluation completed: {accuracy}% accuracy")
 
   # ## Start training
   #
   max_logging.log("Starting GRPO training with goodput monitoring...")
-  
+
   jax.profiler.start_trace(PROFILE_DIR)
   with mesh, nn_partitioning.axis_rules(config_policy.logical_axis_rules):
     with maybe_record_goodput(recorder, GoodputEvent.TRAINING_PREPARATION):
       max_logging.log("Training preparation phase recorded")
-    
+
     # Record the main training phase
     with maybe_record_goodput(recorder, GoodputEvent.STEP):
       grpo_trainer.train(DATASET)
-      
+
   jax.profiler.stop_trace()
-  
+
   max_logging.log("GRPO training completed")
 
   print("HBM usage after training:")
@@ -1093,7 +1094,7 @@ def main():
   #
   # Let's evaluate our model!
   max_logging.log("Starting post-training evaluation...")
-  
+
   with maybe_record_goodput(recorder, GoodputEvent.DATA_LOADING):
     # pylint: disable=unbalanced-tuple-unpacking
     (corr, total, accuracy, partial_accuracy, format_accuracy) = evaluate(
@@ -1102,7 +1103,7 @@ def main():
         **GENERATION_CONFIGS["greedy"],
     )
   print(f"Post GRPO Training: {corr=}, {total=}, {accuracy=}%, {partial_accuracy=}%," f" {format_accuracy=}%")
-  
+
   max_logging.log(f"Post-training evaluation completed: {accuracy}% accuracy")
   max_logging.log("GRPO training with goodput monitoring finished successfully")
 
