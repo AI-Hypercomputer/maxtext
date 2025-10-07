@@ -79,22 +79,6 @@ jobs:
           maxtext_wheel=$(ls maxtext-*-py3-none-any.whl 2>/dev/null)
           uv pip install ${maxtext_wheel}[${MAXTEXT_PACKAGE_EXTRA}] --resolution=lowest
           install_maxtext_github_deps
-          if [ "${{ inputs.device_type }}" == "gpu" ]; then
-            export NVTE_FRAMEWORK=jax && uv pip install git+https://github.com/NVIDIA/TransformerEngine.git
-            # export NVTE_FRAMEWORK=jax && uv pip install transformer_engine[jax]
-            echo "Verifying GPU setup"
-            # Check the CUDA compiler version
-            nvcc --version
-            # Check the NVIDIA System Management Interface
-            nvidia-smi
-            # Check if nvidia.__file__ returns a valid path
-            echo "nvidia.__file__: from system python"
-            python3 -c "import nvidia; print(nvidia.__file__)"
-            echo "nvidia.__file__: from virtual env python"
-            .venv/bin/python3 -c "import nvidia; print(nvidia.__file__)"
-            echo "ls /usr/local/"
-            ls /usr/local/
-          fi
           python3 --version
           python3 -m pip freeze
       - name: Copy test assets files
