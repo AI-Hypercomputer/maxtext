@@ -22,6 +22,7 @@ new_config = _setup_model_convergence_(
     num_devices: int,                # The number of devices available for training
 )
 """
+import copy
 import dataclasses
 import math
 
@@ -94,13 +95,8 @@ class ConvHParams:
 
 
 def load_checkpoint(model: MaxTextModel, checkpoint_path: str):
-  """Sets the full state checkpoint path on a model configuration.
-
-  Args:
-    model: The model configuration object to be modified.
-    checkpoint_path: The path to the full state checkpoint to load.
-  """
-  model.tuning_params["load_full_state_path"] = checkpoint_path
+    model.tuning_params["load_parameters_path"] = checkpoint_path
+    model.tuning_params["enable_checkpointing"] = True
 
 
 def setup_dataset(model: MaxTextModel, params: DatasetHParams):
@@ -168,11 +164,7 @@ def setup_convergence_configs(model, params: ConvHParams, num_devices: int, glob
 
 
 def _setup_model_convergence_(
-    maxtext_model: MaxTextModel,
-    dataset: DatasetHParams,
-    convergence_configs: ConvHParams,
-    num_devices: int,
-    global_batch_size: int,
+    maxtext_model: MaxTextModel, dataset: DatasetHParams, convergence_configs: ConvHParams, num_devices: int, global_batch_size: int, checkpoint: str=None,
 ) -> MaxTextModel:
   """Sets up a MaxText model configuration for a convergence test.
 
@@ -193,9 +185,11 @@ def _setup_model_convergence_(
   Returns:
     A new `MaxTextModel` instance configured for the specified convergence test.
   """
-  convergence_model = dataclasses.replace(maxtext_model)
+  convergence_model = copy.deepcopy(maxtext_model)
   setup_dataset(convergence_model, dataset)
   setup_convergence_configs(convergence_model, convergence_configs, num_devices, global_batch_size)
   convergence_model.model_name = convergence_model.model_name + "-" + dataset.name
+  if not checkpoint is None:
+    load_checkpoint(convergence_model, checkpoint)
 
   return convergence_model

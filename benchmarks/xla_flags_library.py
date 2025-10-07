@@ -34,6 +34,24 @@ DENSE_VMEM_LIMIT_FLAG = f" --xla_tpu_scoped_vmem_limit_kib={_DENSE_VMEM_LIMIT}"
 MOE_VMEM_LIMIT_FLAG = f" --xla_tpu_scoped_vmem_limit_kib={_MOE_VMEM_LIMIT}"
 CUSTOM_VMEM_LIMIT_FLAG = "--xla_tpu_scoped_vmem_limit_kib={vmem_limit}".format
 
+GF_FLAGS = (
+  "--xla_tpu_dvfs_p_state=7"
+  " --xla_tpu_scoped_vmem_limit_kib=65536"
+  " --xla_tpu_impure_enable_packed_bf16_math_ops=true"
+  " --xla_tpu_enable_sparse_core_reduce_scatter_v2=true"
+  " --xla_tpu_enable_sparse_core_collective_offload_all_gather=true"
+  " --xla_tpu_enable_sparse_core_collective_offload_2d_all_gather=true"
+  " --xla_tpu_enable_all_gather_offload_tracing=true"
+  " --xla_tpu_use_tc_device_shape_on_sc=True"
+  " --xla_sc_disable_megacore_partitioning=True"
+  " --xla_tpu_enable_async_collective_fusion_fuse_all_gather=false"
+  " --xla_enable_async_all_gather=true"
+  " --xla_tpu_prefer_async_allgather_to_allreduce=true"
+  " --xla_tpu_enable_sparse_core_collective_offload_all_reduce=true"
+  " --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=true"
+  " --xla_tpu_enable_sparse_core_collective_offload_3d_all_gather=true"
+  " --xla_tpu_use_single_sparse_core_for_all_gather_offload=true"
+)
 # Continuation Fusion (CF) for All Gather Collectives
 # Continuation Fusion is a form of parallelizing compute work with collectives.
 CF_FOR_ALL_GATHER = (
