@@ -30,7 +30,7 @@ src/MaxText/inference_mlperf @vipannalla @mitalisi @gpolovets1 @mailvijayasingh 
 *.md @jacoguzo @bvandermoon @richjames0 @shralex @gobbleturk @RissyRan @gagika @A9isha @jiangjy1982 @vipannalla
 
 # Workflow files
-.github/workflows @gobbleturk @khatwanimohit @shralex @parambole @richjames0
+.github/workflows @gobbleturk @khatwanimohit @shralex @parambole @richjames0 @bvandermoon
 
 # Benchmarking/Recipes
 benchmarks @SujeethJinesh @bvandermoon @richjames0 @shralex @vipannalla @mitalisi @RissyRan @shauryagup @NuojCheng @gobbleturk @khatwanimohit
