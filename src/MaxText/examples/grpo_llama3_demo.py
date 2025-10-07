@@ -434,8 +434,8 @@ num_vms = len(devices) // CHIPS_PER_VM
 
 if num_vms >= 2:
   print(f"{num_vms} VMs detected, separating trainer and sampler devices")
-  trainer_devices = devices[:len(devices) // 2]
-  sampler_devices = devices[len(devices) // 2 :]
+  trainer_devices = devices[:16]
+  sampler_devices = devices[24:]
 
   print("Creating reference and rollout models/meshes from the sampler devices.")
   llama3_1_8b, ref_mesh = get_ref_maxtext_model(config_ref, sampler_devices)
@@ -982,7 +982,7 @@ with nn_partitioning.axis_rules(config_policy.logical_axis_rules):
   rl_cluster = rl_cluster_lib.RLCluster(
       actor=llama3_1_8b_policy,
       reference=llama3_1_8b,
-      rollout=llama3_1_8b_rollout,
+      # rollout=llama3_1_8b_rollout,
       tokenizer=model_tokenizer,
       cluster_config=cluster_config,
   )

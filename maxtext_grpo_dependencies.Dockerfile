@@ -56,5 +56,8 @@ RUN pip install -e /tpu_commons --no-cache-dir --pre \
     --extra-index-url https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/ \
     --find-links https://storage.googleapis.com/jax-releases/libtpu_releases.html
 
+RUN pip uninstall -y jax jaxlib libtpu && \
+    pip install --pre -U jax jaxlib -i https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/ && \
+    pip install -U --pre libtpu -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
 
 RUN pip install numba==0.61.2
