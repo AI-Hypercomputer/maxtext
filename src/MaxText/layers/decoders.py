@@ -286,6 +286,7 @@ class Decoder(nn.Module):
         # save all
         if cfg.remat_policy == "minimal_flash":
           max_logging.log("WARNING: 'minimal_flash' will be deprecated soon, please use 'minimal_with_context' instead.")
+          max_logging.log("WARNING: 'minimal_flash' will be deprecated soon, please use 'minimal_with_context' instead.")
         policy = self.minimal_policy(with_context=True)
       elif cfg.remat_policy == "minimal":
         # save all except context
@@ -528,6 +529,7 @@ class Decoder(nn.Module):
       model_mode,
       image_embeddings=None,
       bidirectional_mask=None,
+      image_masks=None,
   ):
     """Applies token and positional embeddings to the input tokens."""
     cfg = self.config
@@ -541,6 +543,7 @@ class Decoder(nn.Module):
             text_embeddings=y,
             vision_embeddings=image_embeddings,
             mask=bidirectional_mask,
+            image_masks=image_masks,
         )
       # TODO(hengtaoguo): Add support for other multimodal models such as Llama4, refactor if needed
       else:
@@ -635,6 +638,7 @@ class Decoder(nn.Module):
       page_state: None | page_manager.PageState = None,
       bidirectional_mask: None | Any = None,
       image_embeddings: None | jnp.ndarray = None,
+      image_masks: None | jnp.ndarray = None,
   ):
     cfg = self.config
     mesh = self.mesh
@@ -649,6 +653,7 @@ class Decoder(nn.Module):
         model_mode,
         image_embeddings,
         bidirectional_mask,
+        image_masks,
     )
 
     policy = self.get_remat_policy()
