@@ -91,7 +91,6 @@ def get_shaped_batch(config):
         config.model_name, batch_size=config.micro_batch_size_to_train_on
     )
     shaped_batch["images"] = jax.ShapeDtypeStruct(image_shape, jnp.int32)
-    shaped_batch["image_masks"] = jax.ShapeDtypeStruct(image_shape[:2], jnp.int32)
   return shaped_batch
 
 

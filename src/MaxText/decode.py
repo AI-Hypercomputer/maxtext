@@ -99,7 +99,7 @@ def main(argv: Sequence[str]) -> None:
 
   text = config.prompt
   prefill_length = config.max_prefill_predict_length
-  processor_outputs = multimodal_utils.PreprocessorOutput()
+  # processor_output = multimodal_utils.PreprocessorOutput()
   if config.use_multimodal:
     image_path = config.image_path.split(",")
     images = [multimodal_utils.load_image_from_path(p) for p in image_path]
@@ -151,9 +151,6 @@ def main(argv: Sequence[str]) -> None:
           params=params,
           padded_tokens=tokens,
           images=np.stack([po.pixel_values for po in processor_outputs]) if config.use_multimodal else None,
-          image_masks=np.stack([po.pixel_mask for po in processor_outputs])
-          if config.use_multimodal and "llama4" in config.model_name
-          else None,
           true_length=true_length,
           rng=rng_prefill,
           slot=i,
