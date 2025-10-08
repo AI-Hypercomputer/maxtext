@@ -29,7 +29,7 @@ pip install aiohttp==3.12.15
 pip install keyring keyrings.google-artifactregistry-auth
 
 # Install vLLM for Jax and TPUs from the artifact registry
-VLLM_TARGET_DEVICE="tpu" pip install --no-cache-dir --pre \
+RUN VLLM_TARGET_DEVICE="tpu" pip install --no-cache-dir --pre \
     --index-url https://us-python.pkg.dev/cloud-tpu-images/maxtext-rl/simple/ \
     --extra-index-url https://pypi.org/simple/ \
     --extra-index-url https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/ \
@@ -39,14 +39,14 @@ VLLM_TARGET_DEVICE="tpu" pip install --no-cache-dir --pre \
     --find-links https://storage.googleapis.com/libtpu-releases/index.html \
     --find-links https://storage.googleapis.com/jax-releases/jax_nightly_releases.html \
     --find-links https://storage.googleapis.com/jax-releases/jaxlib_nightly_releases.html \
-    vllm==0.10.2rc2.dev59+gdcb28a332.tpu
+    vllm==0.11.1rc1.dev292+g1b86bd8e1.tpu
 
 # Install tpu-commons from the artifact registry
-pip install --no-cache-dir --pre \
+RUN pip install --no-cache-dir --pre \
     --index-url https://us-python.pkg.dev/cloud-tpu-images/maxtext-rl/simple/ \
     --extra-index-url https://pypi.org/simple/ \
     --extra-index-url https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/ \
     --find-links https://storage.googleapis.com/jax-releases/libtpu_releases.html \
-    tpu-commons==0.1.1
+    tpu-commons==0.1.2
 
 pip install numba==0.61.2

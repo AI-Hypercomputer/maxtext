@@ -442,7 +442,6 @@ if num_vms >= 2:
 
   print("Creating reference and rollout models/meshes from the sampler devices.")
   llama3_1_8b, ref_mesh = get_ref_maxtext_model(config_ref, sampler_devices)
-  llama3_1_8b_rollout, rollout_mesh = get_ref_maxtext_model(config_ref, sampler_devices)
 
   reference_mesh = ref_mesh
   mesh = ref_mesh
@@ -908,7 +907,11 @@ checkpointing_options = ocp.CheckpointManagerOptions(save_interval_steps=SAVE_IN
 metrics_logging_options = metrics_logger.MetricsLoggerOptions(log_dir=LOG_DIR, flush_every_n_steps=20)
 
 # Profiler
-profiler_options = profiler.ProfilerOptions(log_dir=PROFILE_DIR, set_profile_options=False)
+# profiler_options = profiler.ProfilerOptions(log_dir=PROFILE_DIR, 
+#                                             skip_first_n_steps = 2,
+#                                             profiler_steps=2,
+#                                             set_profile_options=False)
+profiler_options = None
 
 # Logs
 print(f"TensorBoard logs directory: {LOG_DIR}")
@@ -953,7 +956,6 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         actor_optimizer=optimizer,
         eval_every_n_steps=EVAL_EVERY_N_STEPS,
         max_steps=MAX_STEPS,
-        gradient_accumulation_steps=1,
         # metrics logging
         metrics_logging_options=metrics_logging_options,
         # profiling
@@ -990,7 +992,6 @@ with nn_partitioning.axis_rules(config_policy.logical_axis_rules):
   rl_cluster = rl_cluster_lib.RLCluster(
       actor=llama3_1_8b_policy,
       reference=llama3_1_8b,
-      rollout=llama3_1_8b_rollout,
       tokenizer=model_tokenizer,
       cluster_config=cluster_config,
   )
@@ -1033,7 +1034,7 @@ print(f"Pre GRPO Training: {corr=}, {total=}, {accuracy=}%, {partial_accuracy=}%
 # ## Start training
 #
 
-jax.profiler.start_trace(PROFILE_DIR)
+# jax.profiler.start_trace(PROFILE_DIR)
 with mesh, nn_partitioning.axis_rules(config_policy.logical_axis_rules):
   grpo_trainer.train(dataset)
 # jax.profiler.stop_trace()
