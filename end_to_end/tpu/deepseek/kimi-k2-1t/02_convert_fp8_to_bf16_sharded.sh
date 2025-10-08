@@ -9,7 +9,7 @@ mount_gcs() {
 
   if mountpoint -q "$mount_path"; then
     echo "[gcsfuse] unmounting existing $mount_path"
-    gcsfuse -unmount "$mount_path" 2>/dev/null || fusermount -u "$mount_path" 2>/dev/null || true
+    gcsfuse -u "$mount_path" 2>/dev/null || true
   fi
 
   mkdir -p "$mount_path"
@@ -22,7 +22,7 @@ unmount_gcs() {
   local mount_path="$1"
   if mountpoint -q "$mount_path"; then
     echo "[gcsfuse] unmounting $mount_path"
-    gcsfuse -unmount "$mount_path" 2>/dev/null || fusermount -u "$mount_path" 2>/dev/null || true
+    gcsfuse -u "$mount_path" 2>/dev/null || true
   fi
 }
 
@@ -47,3 +47,5 @@ python3 -m MaxText.deepseek_fp8_to_bf16 \
   --cache-file-num 1
 
 echo "[INFO] BF16 written to ${CHKPT_BUCKET}"
+
+unmount_gcs "${BUCKET_URI}" "${MOUNT_PATH}"
