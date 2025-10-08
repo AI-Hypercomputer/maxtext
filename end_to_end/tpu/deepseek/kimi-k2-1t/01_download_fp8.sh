@@ -5,7 +5,7 @@ source ./pipeline.env
 python3 -m pip install -q --disable-pip-version-check huggingface_hub hf_transfer || true
 export HF_HUB_ENABLE_HF_TRANSFER=1
 
-mkdir -p "$HF_HOME" "$HF_HUB_CACHE" "$TRANSFORMERS_CACHE" "$FP8_DIR"
+mkdir -p "$FP8_DIR"
 
 echo "[INFO] Downloading ${TOKENIZER_PATH} to ${FP8_DIR} (FP8)"
 huggingface-cli download "${TOKENIZER_PATH}" \
