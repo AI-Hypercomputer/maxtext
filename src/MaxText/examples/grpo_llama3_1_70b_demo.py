@@ -460,7 +460,7 @@ nnx.display(llama3_1_70b)
 
 if DEBUG:
   print("Model initialized successfully")
-  print(f"Model mesh shape: {mesh.shape}")
+  # print(f"Model mesh shape: {mesh.shape}")
 
   # Sanity check that weights are loaded correctly
   _maxtext_state_flatten = nnx.state(llama3_1_70b).flat_state()
@@ -523,7 +523,7 @@ nnx.display(llama3_1_70b_policy)
 
 if DEBUG:
   print("Model initialized successfully")
-  print(f"Model mesh shape: {mesh_policy.shape}")
+  # print(f"Model mesh shape: {mesh_policy.shape}")
 
   # Sanity check that weights are loaded correctly
   _maxtext_state_flatten = nnx.state(llama3_1_70b_policy).flat_state()
@@ -953,10 +953,10 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         # metrics logging
         metrics_logging_options=metrics_logging_options,
         # checkpoint saving
-        # checkpoint_root_directory=CKPT_DIR,
-        # checkpointing_options=checkpointing_options,
-        # checkpoint_storage_use_ocdbt=False,
-        # checkpoint_storage_use_zarr3=False,
+        checkpoint_root_directory=CKPT_DIR,
+        checkpointing_options=checkpointing_options,
+        checkpoint_storage_use_ocdbt=False,
+        checkpoint_storage_use_zarr3=False,
     ),
     rollout_config=base_rollout.RolloutConfig(
         max_tokens_to_generate=TOTAL_GENERATION_STEPS,
@@ -969,6 +969,7 @@ cluster_config = rl_cluster_lib.ClusterConfig(
     rollout_vllm_model_version="meta-llama/Llama-3.1-70B-Instruct",
     rollout_vllm_hbm_utilization=0.2,
     rollout_vllm_tpu_backend_type="jax",
+    rollout_vllm_swap_space_size_gb=2,
 )
 
 grpo_config = GrpoConfig(
@@ -1032,7 +1033,7 @@ print(f"Pre GRPO Training: {corr=}, {total=}, {accuracy=}%, {partial_accuracy=}%
 jax.profiler.start_trace(PROFILE_DIR)
 with mesh, nn_partitioning.axis_rules(config_policy.logical_axis_rules):
   grpo_trainer.train(dataset)
-# jax.profiler.stop_trace()
+jax.profiler.stop_trace()
 
 print("HBM usage after training:")
 # show_hbm_usage()

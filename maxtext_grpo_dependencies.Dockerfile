@@ -15,32 +15,19 @@
 ARG BASEIMAGE
 FROM ${BASEIMAGE}
 
-RUN pip uninstall -y tunix
-COPY tunix /tunix
-RUN pip install -e /tunix --no-cache-dir 
-
 # Uninstall existing jax to avoid conflicts
 RUN pip uninstall -y jax jaxlib libtpu
 
-# Install GRPO dependencies that are less likely to change
-RUN pip install aiohttp==3.12.15 keyring keyrings.google-artifactregistry-auth
+RUN pip install aiohttp==3.12.15
 
-# # Install vLLM for Jax and TPUs from the artifact registry
-# RUN VLLM_TARGET_DEVICE="tpu" pip install --no-cache-dir --pre \
-#     --index-url https://us-python.pkg.dev/cloud-tpu-images/maxtext-rl/simple/ \
-#     --extra-index-url https://pypi.org/simple/ \
-#     --extra-index-url https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/ \
-#     --extra-index-url https://download.pytorch.org/whl/nightly/cpu \
-#     --find-links https://storage.googleapis.com/jax-releases/libtpu_releases.html \
-#     --find-links https://storage.googleapis.com/libtpu-wheels/index.html \
-#     --find-links https://storage.googleapis.com/libtpu-releases/index.html \
-#     --find-links https://storage.googleapis.com/jax-releases/jax_nightly_releases.html \
-#     --find-links https://storage.googleapis.com/jax-releases/jaxlib_nightly_releases.html \
-#     vllm==0.10.2rc3.dev87+g45bfa49cb.tpu
-    # vllm==0.10.2rc2.dev59+gdcb28a332.tpu
+# Install Python packages that enable pip to authenticate with Google Artifact Registry automatically.
+RUN pip install keyring keyrings.google-artifactregistry-auth
 
-COPY vllm /vllm
-RUN VLLM_TARGET_DEVICE="tpu" pip install -e /vllm --no-cache-dir --pre \
+RUN pip install numba==0.61.2
+
+# Install vLLM for Jax and TPUs from the artifact registry
+RUN VLLM_TARGET_DEVICE="tpu" pip install --no-cache-dir --pre \
+    --index-url https://us-python.pkg.dev/cloud-tpu-images/maxtext-rl/simple/ \
     --extra-index-url https://pypi.org/simple/ \
     --extra-index-url https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/ \
     --extra-index-url https://download.pytorch.org/whl/nightly/cpu \
@@ -48,14 +35,20 @@ RUN VLLM_TARGET_DEVICE="tpu" pip install -e /vllm --no-cache-dir --pre \
     --find-links https://storage.googleapis.com/libtpu-wheels/index.html \
     --find-links https://storage.googleapis.com/libtpu-releases/index.html \
     --find-links https://storage.googleapis.com/jax-releases/jax_nightly_releases.html \
-    --find-links https://storage.googleapis.com/jax-releases/jaxlib_nightly_releases.html 
+    --find-links https://storage.googleapis.com/jax-releases/jaxlib_nightly_releases.html \
+    vllm==0.11.1rc1.dev292+g1b86bd8e1.tpu
 
-# Install tpu-commons from local source
-COPY tpu_commons /tpu_commons
-RUN pip install -e /tpu_commons --no-cache-dir --pre \
+# Install tpu-commons from the artifact registry
+RUN pip install --no-cache-dir --pre \
+    --index-url https://us-python.pkg.dev/cloud-tpu-images/maxtext-rl/simple/ \
     --extra-index-url https://pypi.org/simple/ \
     --extra-index-url https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/ \
-    --find-links https://storage.googleapis.com/jax-releases/libtpu_releases.html
+    --find-links https://storage.googleapis.com/jax-releases/libtpu_releases.html \
+    tpu-commons==0.1.2
+
+COPY tunix ./tunix/
 
 
-RUN pip install numba==0.61.2
+
+RUN pip install --no-cache-dir --no-deps \
+    ./tunix 

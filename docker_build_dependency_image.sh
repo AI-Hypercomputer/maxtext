@@ -176,6 +176,8 @@ if [[ ${INSTALL_GRPO} -eq 1 ]] ; then
   echo "For GRPO mode, to enable live editing of 'tunix', run:"
   echo "docker run -v $(pwd):/deps -v ../tunix:/tunix --rm -it --privileged --entrypoint bash ${LOCAL_IMAGE_NAME}"
   echo "This mounts your local '../tunix' directory into the container."
+  echo "For GRPO mode, run:"
+  echo "docker run --rm -it --privileged --entrypoint bash ${LOCAL_IMAGE_NAME}"
 else
   echo "docker run -v $(pwd):/deps --rm -it --privileged --entrypoint bash ${LOCAL_IMAGE_NAME}"
 fi
