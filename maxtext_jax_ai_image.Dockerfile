@@ -50,6 +50,8 @@ RUN if [ "$DEVICE" = "tpu" ] && [ "$JAX_STABLE_STACK_BASEIMAGE" = "us-docker.pkg
 # Install google-tunix for TPU devices, skip for GPU
 RUN if [ "$DEVICE" = "tpu" ]; then \
         python3 -m pip install 'google-tunix>=0.1.0'; \
+        # TODO: Once tunix stopped pinning jax 0.7.1, we should remove our 0.7.0 version pin (b/450286600)
+        python3 -m pip install 'jax==0.7.0' 'jaxlib==0.7.0'; \
   fi
 
 # Now copy the remaining code (source files that may change frequently)
