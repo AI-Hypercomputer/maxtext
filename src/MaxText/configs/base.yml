@@ -780,6 +780,7 @@ sa_use_fused_bwd_kernel: False
 sa_q_layout: "HEAD_DIM_MINOR"
 sa_k_layout: "HEAD_DIM_MINOR"
 sa_v_layout: "HEAD_DIM_MINOR"
+use_max_logit_estimate: 30 # -1 means no estimate, any > 0 value will be used as max logit estimate
 
 ### Determine if we want to use load balance for context parallelism
 context_parallel_load_balance: True
