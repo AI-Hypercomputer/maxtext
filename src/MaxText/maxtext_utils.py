@@ -573,9 +573,13 @@ def calculate_tflops_training_per_device(config, log=True):
 
 
 # https://arxiv.org/pdf/2204.02311.pdf Appendix B
-def calculate_prefill_tflops_per_device(num_model_parameters, prefill_length, config, log=True):
+def calculate_prefill_tflops_per_device(num_model_parameters, prefill_length, config, mesh=None, log=True):
   """Calculate training TFLOP"""
-  learnable_weight_tflops = 2 * num_model_parameters * prefill_length / jax.device_count() / 1e12
+  if not mesh:
+    devices = jax.device_count()
+  else:
+    devices = mesh.devices.size
+  learnable_weight_tflops = 2 * num_model_parameters * prefill_length / devices / 1e12
   noncausal_attention_flops = (
       4
       * config.num_query_heads
@@ -598,6 +602,37 @@ def calculate_prefill_tflops_per_device(num_model_parameters, prefill_length, co
         f"({100 * causal_attention_tflops/total_tflops:.2f})% of Total",
     )
   return total_tflops, learnable_weight_tflops, causal_attention_tflops
+
+
+def calculate_autoregressive_tflops_per_device(num_model_parameters, sequence_length, config, mesh=None, log=True):
+  if not mesh:
+    devices = jax.device_count()
+  else:
+    devices = mesh.devices.size
+  """Calculate TFLOPs for a single autoregressive step."""
+  # The "2" is for the forward pass, which includes a matmul and a bias add.
+  learnable_weight_tflops = 2 * num_model_parameters / devices / 1e12
+  # The "4" is for the two matmuls in the attention mechanism (one for QK^T and one for AV).
+  attention_tflops = (
+      4
+      * config.num_query_heads
+      * config.num_decoder_layers
+      * config.head_dim
+      * sequence_length
+      / jax.device_count()
+      / 1e12
+  )
+  total_tflops = learnable_weight_tflops + attention_tflops
+  if log:
+    print(
+        "Per autoregressive step per device: \n",
+        f"\tTotal TFLOPs: {total_tflops:.2f} \n",
+        f"\t\tLearnable weight TFLOPs: {learnable_weight_tflops:.2f} ",
+        f"({100 * learnable_weight_tflops/total_tflops:.2f})% of Total\n",
+        f"\t\tAttention TFLOPs: {attention_tflops:.2f} ",
+        f"({100 * attention_tflops/total_tflops:.2f})% of Total",
+    )
+  return total_tflops, learnable_weight_tflops, attention_tflops
 
 
 def get_mesh_axes_used_by_tensor_spec(tensor_sharding_spec):

@@ -615,15 +615,16 @@ def generate_completions(
     thread_example_batch_trimmed = jax.tree_util.tree_map(
         lambda arr: arr[
             : int(
-                worker_config_inference.per_device_batch_size
+                (worker_config_inference.per_device_batch_size // worker_config_inference.num_generations)
                 * worker_config_train.inference_replicas
                 * worker_config_train.inference_devices_per_replica
             )
         ],
         thread_example_batch,
     )
+    # with jax.transfer_guard_host_to_device("disallow_explicit") and jax.transfer_guard_device_to_host("disallow_explicit"):
     processed_batch = grpo_utils.generate_offline_completions(
-        worker_config_inference, worker_tokenizer_model, worker_inference_engine, thread_example_batch_trimmed
+      worker_config_inference, worker_tokenizer_model, worker_inference_engine, thread_example_batch_trimmed
     )
     processed_batch = jax.device_put(processed_batch, worker_input_data_shardings)
   with worker_data_buffer_lock:
@@ -721,6 +722,8 @@ def train_loop(config, config_inference, recorder, state=None):
       worker_input_data_shardings,
       engine_lock,
       stop_event,
+      worker_profiler,
+      start_step,
   ):
     """The target function for the data generation worker thread.
 
@@ -738,10 +741,14 @@ def train_loop(config, config_inference, recorder, state=None):
       worker_input_data_shardings: Sharding specs for the generated data.
       engine_lock: A lock for thread-safe inference engine access.
       stop_event: A threading.Event to signal when the worker should stop.
+      worker_profiler: The profiler object.
+      start_step: The starting step number.
     """
+    worker_step = start_step
     while not stop_event.is_set():
       try:
-        with jax.profiler.StepTraceAnnotation("inference"):
+        worker_profiler.maybe_activate_profiler(worker_step, state=None)
+        with jax.profiler.StepTraceAnnotation("inference", step_num=worker_step):
           generate_completions(
               data_loader,
               worker_inference_engine,
@@ -759,6 +766,9 @@ def train_loop(config, config_inference, recorder, state=None):
       except Exception as e:  # pylint: disable=broad-except
         max_logging.log(f"Error in generation worker: {e}")
         break
+      finally:
+        worker_profiler.maybe_deactivate_profiler(worker_step, state=None)
+      worker_step += 1
     max_logging.log("Generation worker thread finished.")
 
   stop_event = threading.Event()
@@ -790,6 +800,8 @@ def train_loop(config, config_inference, recorder, state=None):
           data_sharding,  # Sharding for the data put into the buffer
           inference_engine_lock,
           stop_event,
+          prof,
+          start_step,
       ),
       daemon=True,  # So it exits when the main thread exits
   )

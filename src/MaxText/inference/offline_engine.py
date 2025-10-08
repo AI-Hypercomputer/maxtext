@@ -49,6 +49,8 @@ from collections import defaultdict
 import time
 
 import jax
+from jax.sharding import PartitionSpec as P
+import jax.numpy as jnp
 import numpy as np
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec
@@ -200,6 +202,38 @@ class PrefillHelper:
         decode_state["prompt_logp"],
     )
 
+  @staticmethod
+  def _batched_prefill(
+      engine, params, tokens, true_lengths, decode_state, rng
+  ) -> tuple[jax.Array, DecodeState, jax.Array]:
+    """Prefill a batch of inputs."""
+    num_sequences = tokens.shape[0]
+    slots = jnp.arange(num_sequences)
+
+    def prefill_vmap_fn(padded_tokens, true_length, slot):
+        return engine.prefill(
+            params=params, padded_tokens=padded_tokens, true_length=true_length,
+            slot=slot, rng=rng, return_prompt_logp=True
+        )
+
+    vmapped_prefill = jax.vmap(prefill_vmap_fn, in_axes=(0, 0, 0))
+    prefixes, result_tokens = vmapped_prefill(tokens, true_lengths, slots)
+
+    # Separate prompt_logps and the rest of the prefixes to maintain a consistent
+    # decode_state structure for the decode phase.
+    prompt_logps = prefixes['prompt_logp'].squeeze(axis=1)
+    prefixes_for_insert = {k: v for k, v in prefixes.items() if k != 'prompt_logp'}
+
+    def insert_loop_body(i, current_decode_state):
+        prefix_i = jax.tree_util.tree_map(lambda x: x[i], prefixes_for_insert)
+        slot_i = slots[i]
+        new_decode_state = engine.insert(prefix_i, current_decode_state, slot_i)
+        return new_decode_state
+
+    final_decode_state = jax.lax.fori_loop(0, num_sequences, insert_loop_body, decode_state)
+
+    return result_tokens, final_decode_state, prompt_logps
+
   def process(
       self,
       model_params: Params,
@@ -324,6 +358,7 @@ class InferenceWorker:
       rng: jax.random.PRNGKey = None,
       mesh: Mesh = None,
       debug: bool = False,
+      continous_batching: bool = True,
   ):
     """
     Args:
@@ -359,6 +394,7 @@ class InferenceWorker:
     self.mesh = mesh
     self.rng = jax.random.PRNGKey(0) if rng is None else rng
     self.debug = debug
+    self.continous_batching = continous_batching
 
     # Inference state (initialized later)
     self.running = False
@@ -373,7 +409,6 @@ class InferenceWorker:
     self.engine = None
     self.decode_batch_size = None
     self.prefill_helper = None
-    self.generate_fn = None
 
     start_time = time.time()
     # Initialize MaxEngine(s)
@@ -392,8 +427,35 @@ class InferenceWorker:
 
     # Initialize decode state
     start_time_decode_state = time.time()
-    self.generate_fn = self.engine.generate
     self.decode_state = self.engine.init_decode_state(self.rng)
+
+    # JIT compile functions with sharding specs
+    batch_sharding = jax.sharding.NamedSharding(self.mesh, P(*self.config.data_sharding))
+    # The params and decode_state are already sharded on the devices, so we don't need to specify a sharding.
+    # JAX will see they are DeviceArrays and handle them correctly.
+    prefill_fn = jax.jit(
+        PrefillHelper._batched_prefill,
+        static_argnums=(0,),
+        donate_argnames=("decode_state",),
+    )
+    generate_fn = jax.jit(
+        InferenceWorker._generate_func, static_argnums=(0,), donate_argnames=("decode_state",)
+    )
+    decode_fn = jax.jit(
+        functools.partial(InferenceWorker._decode, generate_fn=generate_fn),
+        static_argnums=(0, 1),
+        donate_argnames=("decode_state",),
+    )
+    self._run_inference_jitted_fn = jax.jit(
+        functools.partial(
+            InferenceWorker._run_inference_jitted,
+            prefill_fn=prefill_fn,
+            decode_fn=decode_fn,
+        ),
+        static_argnums=(0, 1),
+        in_shardings=(None, None, batch_sharding, batch_sharding, None, None),
+        out_shardings=(batch_sharding, batch_sharding),
+    )
 
     if self.debug:
       max_logging.log(f"time taken to initialize decode_state: {time.time() - start_time_decode_state} seconds")
@@ -462,12 +524,173 @@ class InferenceWorker:
     self.slot_to_id = {}
     self.running = True
     self.true_lengths = {input.id: input.true_length for input in data}
+    self.current_index = {input.id: 0 for input in data}
+    self.eos_reached = jnp.array([False for _ in data])
+    self.result_tokens = {input.id: jnp.zeros((self.config.max_target_length,), dtype=jnp.int32) for input in data}
+    self.result_logprobs = {input.id: jnp.zeros((self.config.max_target_length,), dtype=jnp.float32) for input in data}
+    
+    if self.continous_batching:
+      self._run_continous_batching(data)
+      return self._build_final_outputs(data)
+    else:
+      if not data:
+        return []
 
-    max_logging.log("Continuous batching started")
+      all_result_tokens = []
+      all_result_logprobs = []
+      num_inputs = len(data)
+      max_slots = self.decode_batch_size
+      for i in range(0, num_inputs, max_slots):
+        chunk_data = data[i : i + max_slots]
+        # Pad and batch data for JIT processing
+        batched_tokens = jnp.array([d.tokens for d in chunk_data])
+        batched_true_lengths = jnp.array([d.true_length for d in chunk_data])
 
-    self._run_continous_batching(data)
+        # Explicitly shard the input data across devices for performance.
+        # This prevents the default behavior of replicating the entire batch to each device.
+        data_sharding = jax.sharding.NamedSharding(self.mesh, P(*self.config.data_sharding))
+        batched_tokens = jax.device_put(batched_tokens, data_sharding)
+        batched_true_lengths = jax.device_put(batched_true_lengths, data_sharding)
 
-    return self._build_final_outputs(data)
+        # Run the unified, JIT-compiled inference function
+        eos_ids = jnp.array(self.eos_ids)
+        with jax.transfer_guard_host_to_device("disallow_explicit") and jax.transfer_guard_device_to_host(
+            "disallow_explicit"
+        ):
+          result_tokens, result_logprobs = self._run_inference_jitted_fn(
+              self.config,
+              self.engine,
+              self.params,
+              self.decode_state,
+              batched_tokens,
+              batched_true_lengths,
+              self.rng,
+              eos_ids,
+          )
+
+        result_tokens = result_tokens.block_until_ready()
+        result_logprobs = result_logprobs.block_until_ready()
+        all_result_tokens.append(result_tokens)
+        all_result_logprobs.append(result_logprobs)
+
+      final_result_tokens = jnp.concatenate(all_result_tokens, axis=0)
+      final_result_logprobs = jnp.concatenate(all_result_logprobs, axis=0)
+      return self._build_outputs(final_result_tokens, final_result_logprobs, data)
+
+  @staticmethod
+  def _run_inference_jitted(config, engine, params, decode_state, batched_tokens, batched_true_lengths, rng, eos_ids, prefill_fn, decode_fn):
+    """Runs the entire inference process (prefill and decode) in a single JIT-compiled function."""
+
+    num_sequences = batched_tokens.shape[0]
+
+    # 1. Batched Prefill Phase
+    first_tokens, updated_decode_state, prompt_logps = prefill_fn(
+        engine, params, batched_tokens, batched_true_lengths, decode_state, rng
+    )
+
+    # Initialize result arrays
+    result_tokens = jnp.zeros((num_sequences, config.max_target_length), dtype=jnp.int32)
+    result_logprobs = jnp.zeros((num_sequences, config.max_target_length), dtype=jnp.float32)
+
+    # Store initial prompt tokens
+    result_tokens = jax.lax.dynamic_update_slice(
+        result_tokens, batched_tokens, (0, 0)
+    )
+
+    # Store prompt log probabilities
+    result_logprobs = jax.lax.dynamic_update_slice(
+        result_logprobs, prompt_logps, (0, 0)
+    )
+
+    # Store the first generated token and its logprob
+    current_indices = batched_true_lengths
+    result_tokens = result_tokens.at[jnp.arange(num_sequences), current_indices].set(first_tokens.data[:, 0, 0])
+    result_logprobs = result_logprobs.at[jnp.arange(num_sequences), current_indices].set(first_tokens.log_prob.squeeze())
+
+    current_indices += 1
+
+    # Check for EOS after the first token
+    eos_reached = (first_tokens.data[:, 0] == eos_ids).any(axis=-1)
+
+    # 2. Decode Phase using jax.lax.while_loop
+    updated_decode_state['tokens'] = updated_decode_state['tokens'].reshape(num_sequences, -1)
+    final_tokens, final_logprobs, _ = decode_fn(
+        config, engine, params, updated_decode_state, result_tokens, result_logprobs, eos_reached, current_indices, eos_ids, rng
+    )
+
+    return final_tokens, final_logprobs
+
+  @staticmethod
+  def _decode(config, engine, params, decode_state, result_tokens, result_logprobs, eos_reached, current_index, eos_ids, rng, generate_fn):
+    """A pure, function for the decoding loop."""
+    def cond_fn(state):
+      _, _, _, eos_reached, _, i = state
+      return jnp.logical_and(i < config.max_target_length - 2, jnp.logical_not(jnp.all(eos_reached)))
+
+    def body_fn(state):
+      decode_state, result_tokens, result_logprobs, eos_reached, current_indices, i = state
+
+      # Generate next tokens for the entire batch at once.
+      updated_decode_state, next_tokens_all, log_probs_all = generate_fn(
+          engine, params, decode_state, rng
+      )
+
+      # Slice to get tokens relevant to the current batch size.
+      batch_size = result_tokens.shape[0]
+      next_tokens = next_tokens_all[:batch_size]
+      log_probs = log_probs_all[:batch_size]
+
+      # Create a mask for sequences that are still active.
+      active_mask = ~eos_reached & (current_indices < config.max_target_length)
+
+      # Update the result arrays directly without a nested vmap update function
+      updated_result_tokens = result_tokens.at[jnp.arange(batch_size), current_indices].set(next_tokens.squeeze())
+      updated_result_logprobs = result_logprobs.at[jnp.arange(batch_size), current_indices].set(log_probs.squeeze())
+
+      # Check for newly completed sequences.
+      # A sequence is finished if it hits an EOS token OR it's full.
+      newly_finished_by_eos = (next_tokens == eos_ids).any(axis=-1)
+      is_full = (current_indices + 1) >= config.max_target_length
+      newly_finished = (newly_finished_by_eos | is_full) & active_mask
+      updated_eos_reached = (eos_reached | newly_finished).astype(jnp.bool_)
+
+      # Increment indices only for active sequences.
+      updated_current_indices = current_indices + active_mask.astype(jnp.int32)
+
+      return (
+          updated_decode_state,
+          updated_result_tokens,
+          updated_result_logprobs,
+          updated_eos_reached,
+          updated_current_indices,
+          i + 1,
+      )
+
+    # The loop state now contains all arrays that will be modified.
+    initial_state = (decode_state, result_tokens, result_logprobs, eos_reached, current_index, 0)
+    _, final_tokens, final_logprobs, _, final_indices, _ = jax.lax.while_loop(cond_fn, body_fn, initial_state)
+    return final_tokens, final_logprobs, final_indices
+
+  @staticmethod
+  def _generate_func(engine, params, decode_state, rng):
+    """A function for a single decode step."""
+    decode_state, result_tokens = engine.generate(params, decode_state, rng=rng)
+    return decode_state, result_tokens.data[:, 0], result_tokens.log_prob
+
+
+  def _build_outputs(self, result_tokens, result_logprobs, data):
+    # result_tokens, result_logprobs = jax.device_get((result_tokens, result_logprobs))
+    completion_outputs = []
+    for i, d in enumerate(data):
+      completion_outputs.append(
+          CompletionOutput(
+              index=i,
+              prompt_length=d.true_length,
+              token_ids=result_tokens[i],
+              logprobs=result_logprobs[i],
+          )
+      )
+    return completion_outputs
 
   def _run_continous_batching(
       self,
@@ -543,7 +766,7 @@ class InferenceWorker:
         if isinstance(self.prompt_logprobs_by_id[input_id], np.ndarray):
           prompt_logprobs = cast(np.ndarray, self.prompt_logprobs_by_id[input_id]).flatten()
         else:
-          prompt_logprobs = self.prompt_logprobs_by_id[input_id]
+          prompt_logprobs = np.array(self.prompt_logprobs_by_id[input_id])
         completion_outputs.append(
             CompletionOutput(
                 index=str(input_id),
@@ -727,6 +950,7 @@ class OfflineEngine:
       config: Any,
       params: None | Params = None,
       enable_batch_prefill: bool = False,
+      is_data_padded: bool = True,
       min_decode_steps: int = 10,
       tokenizer: Any = None,
       eos_ids: list[int] | None = None,
@@ -735,6 +959,7 @@ class OfflineEngine:
       mesh: Mesh = None,
       rng: jax.random.PRNGKey = None,
       debug: bool = False,
+      continous_batching: bool = False,
   ):
     """Initialize the OfflineEngine.
 
@@ -769,6 +994,7 @@ class OfflineEngine:
     self.params = params
     self.min_decode_steps = min_decode_steps
     self.enable_batch_prefill = enable_batch_prefill
+    self.is_data_padded = is_data_padded
     self.mesh = mesh
     self.tokenizer = tokenizer
     self.eos_ids = eos_ids
@@ -778,6 +1004,7 @@ class OfflineEngine:
     self.max_decode_length = self.config.max_target_length - self.max_prefill_length
     self.rng = jax.random.PRNGKey(0) if rng is None else rng
     self.debug = debug
+    self.continous_batching = continous_batching
     self._validate_config()
 
     # Create prefill buckets: [0, 64], (64, 128], (128, 256], ..., [max_length//2, max_length]
@@ -804,6 +1031,7 @@ class OfflineEngine:
         batch_prefill_max_batch_size=self.batch_prefill_max_batch_size,
         rng=self.rng,
         debug=self.debug,
+        continous_batching=self.continous_batching,
     )
 
     self.tokenizer = self.worker.tokenizer
@@ -870,7 +1098,8 @@ class OfflineEngine:
     if len(data) != len({item.id for item in data}):
       raise ValueError("All data ids must be unique")
 
-    data = self.pad_data(data)
+    if not self.is_data_padded:
+      data = self.pad_data(data)
 
     if self.enable_batch_prefill:
       return sorted(data, key=lambda x: x.tokens.shape[0])

@@ -15,6 +15,7 @@
 """CLI utility for running inference on a single/multi stream(s)."""
 
 import os
+import time
 from typing import Sequence
 import numpy as np
 import jax
@@ -143,7 +144,14 @@ def main(argv: Sequence[str]) -> None:
 
   prof.activate(optional_postfix="trace")
 
+  # TFLOPs calculation
+  num_model_params = engine.get_model_params_count()
+  prefill_tflops, _, _ = max_utils.calculate_prefill_tflops_per_device(
+      num_model_params, true_length, config, log=False
+  )
+
   # Prefill
+  start_time = time.time()
   rng, rng_prefill = jax.random.split(rng)  # Split RNG before calling prefill
   for i in range(_NUM_STREAMS):
     with jax.profiler.StepTraceAnnotation("prefill", stream=i):
@@ -160,6 +168,8 @@ def main(argv: Sequence[str]) -> None:
       )
     prefill_result_list.append(prefill_result)
     first_token_list.append(first_token)
+  jax.block_until_ready(first_token_list)
+  prefill_time = time.time() - start_time
 
   # Insert
   rng, rng_init_decode = jax.random.split(rng)
@@ -171,10 +181,18 @@ def main(argv: Sequence[str]) -> None:
   prof_deactivated = False
   steps = range(config.max_prefill_predict_length, config.max_target_length)
   sampled_tokens_list.append(_batch_first_result_token(first_token_list, batch_size))
+  
+  total_generate_tflops = 0
+  start_time = time.time()
   for i in steps:
     rng, rng_generate = jax.random.split(rng)
     with jax.profiler.StepTraceAnnotation("generate", step=i):
       decode_state, sampled_tokens = engine.generate(params, decode_state, rng=rng_generate)
+    
+    generate_tflops, _, _ = max_utils.calculate_autoregressive_tflops_per_device(
+        num_model_params, i, config, log=False
+    )
+    total_generate_tflops += generate_tflops
 
     # Automatically deactivate profiler after profiler_steps steps
     if i > config.max_prefill_predict_length + config.profiler_steps:
@@ -182,6 +200,18 @@ def main(argv: Sequence[str]) -> None:
       prof_deactivated = True
 
     sampled_tokens_list.append(sampled_tokens)
+  jax.block_until_ready(sampled_tokens_list)
+  generate_time = time.time() - start_time
+
+  # TFLOPs summary
+  total_inference_tflops = prefill_tflops + total_generate_tflops
+  prefill_tflops_per_sec = prefill_tflops / prefill_time
+  generate_tflops_per_sec = total_generate_tflops / generate_time
+  total_inference_tflops_per_sec = total_inference_tflops / (prefill_time + generate_time)
+
+  print(f"Prefill TFLOPs/s/device: {prefill_tflops_per_sec:.2f}")
+  print(f"Generate TFLOPs/s/device: {generate_tflops_per_sec:.2f}")
+  print(f"Total Inference TFLOPs/s/device: {total_inference_tflops_per_sec:.2f}")
 
   # Get results
   for i in range(_NUM_STREAMS):

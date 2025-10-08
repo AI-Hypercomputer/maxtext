@@ -23,9 +23,11 @@ JAX_BACKEND_TARGET=grpc://127.0.0.1:29000
 ENABLE_PATHWAYS_PERSISTENCE='1'
 HF_TOKEN=${HF_TOKEN}
 
-MAX_PREFILL_LENGTH=128
-MAX_TARGET_LENGTH=256
+MAX_PREFILL_LENGTH=${MAX_PREFILL_LENGTH:-128}
+MAX_TARGET_LENGTH=${MAX_TARGET_LENGTH:-256}
 NUM_GENERATIONS=2
+
+INFERENCE_PER_DEVICE_BS=$((${INFERENCE_PER_DEVICE_BATCH_SIZE} * ${NUM_GENERATIONS}))
 
 
 COMMON_ARGS="model_name=${MODEL} base_output_directory=${BASE_OUTPUT_DIRECTORY} \
@@ -36,16 +38,16 @@ dataset_type=hf hf_path='trl-lib/tldr' \
 enable_single_controller=true \
 dtype=bfloat16 weight_dtype=bfloat16 \
 allow_split_physical_axes=true enable_goodput_recording=false monitor_goodput=false \
-profiler=xplane skip_first_n_steps_for_profiler=10 profiler_steps=5"
+profiler=xplane profiler_steps=3 skip_first_n_steps_for_profiler=10"
 
 TRAINING_ARGS="run_name=${RUN_NAME} scan_layers=true \
 inference_replicas=${NUM_SAMPLERS} inference_devices_per_replica=${DEVICES_PER_SAMPLER} \
 inference_rollouts=5 \
-per_device_batch_size=${TRAINING_PER_DEVICE_BATCH_SIZE} num_generations=${NUM_GENERATIONS} steps=${STEPS}"
+per_device_batch_size=${TRAINING_PER_DEVICE_BATCH_SIZE} steps=${STEPS}"
 
 INFERENCE_ARGS="run_name=grpo scan_layers=false \
-per_device_batch_size=${INFERENCE_PER_DEVICE_BATCH_SIZE} \
-ici_data_parallelism=${NUM_SAMPLERS} ici_tensor_parallelism=${DEVICES_PER_SAMPLER}"
+per_device_batch_size=${INFERENCE_PER_DEVICE_BS} \
+ici_data_parallelism=${NUM_SAMPLERS} ici_tensor_parallelism=${DEVICES_PER_SAMPLER} num_generations=${NUM_GENERATIONS}"
 
 JAX_PLATFORMS=proxy JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 ENABLE_PATHWAYS_PERSISTENCE='1' \
     python3 -m MaxText.experimental.rl.grpo_trainer "${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText}"/experimental/rl/grpo.yml  \
