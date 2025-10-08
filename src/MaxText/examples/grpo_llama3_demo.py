@@ -55,6 +55,8 @@ import humanize
 
 
 import pathwaysutils
+
+from tunix.tunix.sft import profiler
 pathwaysutils.initialize()
 
 import jax
@@ -905,6 +907,8 @@ checkpointing_options = ocp.CheckpointManagerOptions(save_interval_steps=SAVE_IN
 # Metrics logger
 metrics_logging_options = metrics_logger.MetricsLoggerOptions(log_dir=LOG_DIR, flush_every_n_steps=20)
 
+# Profiler
+profiler_options = profiler.ProfilerOptions(log_dir=PROFILE_DIR, set_profile_options=False)
 
 # Logs
 print(f"TensorBoard logs directory: {LOG_DIR}")
@@ -952,11 +956,11 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         gradient_accumulation_steps=1,
         # metrics logging
         metrics_logging_options=metrics_logging_options,
+        # profiling
+        profiler_options=profiler_options,
         # checkpoint saving
-        # checkpoint_root_directory=CKPT_DIR,
-        # checkpointing_options=checkpointing_options,
-        # checkpoint_storage_use_ocdbt=False,
-        # checkpoint_storage_use_zarr3=False,
+        checkpoint_root_directory=CKPT_DIR,
+        checkpointing_options=checkpointing_options,
     ),
     rollout_config=base_rollout.RolloutConfig(
         max_tokens_to_generate=TOTAL_GENERATION_STEPS,
