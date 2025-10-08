@@ -293,6 +293,12 @@ use_post_attn_norm: False
 use_post_ffw_norm: False
 mla_naive_kvcache: True
 
+
+# Adding Mixture of Block Attention Support (MoBA): https://github.com/MoonshotAI/MoBA/blob/master/MoBA_Tech_Report.pdf
+moba: False
+moba_chunk_size: 1024
+moba_topk: 8
+
 # MLA parameters
 q_lora_rank: 0
 kv_lora_rank: 512
