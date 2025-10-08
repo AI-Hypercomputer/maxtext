@@ -54,10 +54,8 @@ import grain
 import humanize
 
 
-import pathwaysutils
-pathwaysutils.initialize()
-
 import jax
+from jax.sharding import Mesh
 import optax
 from orbax import checkpoint as ocp
 import tensorflow_datasets as tfds
@@ -66,12 +64,11 @@ from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl.rollout import base_rollout
 from tunix.rl.grpo.grpo_learner import GrpoConfig, GrpoLearner
 from tunix.sft import metrics_logger
-from tunix.sft import profiler
+
 
 from transformers import AutoTokenizer
 
 from flax import linen as nn
-from tunix.models.llama3 import model as llama3_lib
 import numpy as np
 from etils import epath
 
@@ -96,7 +93,7 @@ project_root = os.path.abspath(os.path.join(script_dir, "..", ".."))
 # Add the project root to the Python path
 sys.path.insert(0, project_root)
 
-from MaxText import model_creation_utils
+from MaxText import maxtext_utils, model_creation_utils
 from MaxText import pyconfig
 from MaxText.integration.tunix.tunix_adapter import TunixMaxTextAdapter
 
@@ -441,8 +438,10 @@ if num_vms >= 2:
   trainer_devices = devices[:len(devices) // 2]
   sampler_devices = devices[len(devices) // 2 :]
 
-  print("Creating reference and rollout models/meshes from the sampler devices.")
-  llama3_1_70b, ref_mesh = get_ref_maxtext_model(config_ref, sampler_devices)
+  print("Creating reference model and also meshes for reference and rollout")
+  llama3_1_70b, ref_mesh = get_ref_maxtext_model(config_ref, trainer_devices)
+  devices_array = maxtext_utils.create_device_mesh(config_ref, sampler_devices)
+  rollout_mesh = Mesh(devices_array, config_ref.mesh_axes)
 
   reference_mesh = ref_mesh
   mesh = ref_mesh
