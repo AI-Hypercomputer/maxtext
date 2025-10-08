@@ -281,13 +281,3 @@ def validate_train_config(config):
         " different attention mechanism. With synthetic data, the format is not"
         " important as packing is not applied."
     )
-
-  # Automatically disable shardy when gradient accumulation is enabled
-  if config.gradient_accumulation_steps > 1 and config.shardy:
-    max_logging.log(
-        "WARNING: Automatically setting shardy=False because"
-        f" gradient_accumulation_steps={config.gradient_accumulation_steps} > 1."
-        " Shardy is not compatible with gradient accumulation."
-    )
-    # Access internal config dictionary to modify the value
-    object.__getattribute__(config, "_config").keys["shardy"] = False

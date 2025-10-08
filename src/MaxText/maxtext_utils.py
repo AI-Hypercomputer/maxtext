@@ -94,6 +94,28 @@ def get_shaped_batch(config):
   return shaped_batch
 
 
+def should_prevent_cse_in_remat(config):
+  """Determines whether to prevent common subexpression elimination (CSE) in remat.
+  
+  CSE should not be prevented when:
+  1. Layers are being scanned (scan_layers=True), OR
+  2. Gradient accumulation is enabled (gradient_accumulation_steps > 1) on GPU hardware
+  
+  Args:
+    config: Configuration object with scan_layers, gradient_accumulation_steps, and hardware
+  
+  Returns:
+    bool: True if CSE should be prevented, False otherwise
+  """
+  if config.scan_layers:
+    return False
+  
+  if config.gradient_accumulation_steps > 1 and config.hardware in ("gpu", "gpu_multiprocess"):
+    return False
+  
+  return True
+
+
 def load_compiled(config, partial_train, state):
   """# Loading a serialized compiled train step function."""
 
@@ -975,11 +997,27 @@ def add_data_to_sharding(mesh, path, aval, sharding):
       added_component = ('data',) + partition
       new_pspec = jax.sharding.PartitionSpec(*(pspec[:idx] + (added_component,) + pspec[idx+1:]))
       new_sharding = jax.sharding.NamedSharding(sharding.mesh, new_pspec)
-      # return sharding.with_spec(new_pspec)
       return new_sharding
   return sharding
 
 def maybe_update_params_sharding_with_opt(config, state_mesh_shardings):
+  """Updates parameter sharding configuration when optimizer state sharding is enabled.
+  
+  When shard_optimizer_over_data is enabled (Zero-1 style sharding), this function
+  extracts the optimizer state shardings from the Adam optimizer's first moment (mu)
+  and merges them with the parameter shardings. This ensures parameter sharding is
+  consistent with how the optimizer state is distributed across the compute mesh.
+  
+  Args:
+    config: Configuration object with shard_optimizer_over_data flag
+    state_mesh_shardings: Train state mesh shardings containing params and opt_state
+  
+  Returns:
+    A tuple of (prev_params_shardings, updated_state_mesh_shardings):
+      - prev_params_shardings: Original parameter shardings before the update
+      - updated_state_mesh_shardings: State mesh shardings with updated params field
+        (unchanged if shard_optimizer_over_data is False)
+  """
   prev_params_shardings = state_mesh_shardings.params
   if config.shard_optimizer_over_data:
     if isinstance(state_mesh_shardings.opt_state, optax.ScaleByAdamState):

@@ -213,21 +213,24 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
   params = state.params
 
   if config.gradient_accumulation_steps > 1:
-    def convert_to_bf16(param):
-      if param.dtype == jnp.float32:
-        return param.astype(jnp.bfloat16)
-      else:
-        return param
-    # Cast params to bf16 and unshard before gradient accumulation loop so that 
-    # all-gather is done once in bf16 
-    params_bf16 = jax.tree_util.tree_map(convert_to_bf16, params)
-    params_bf16 = jax.tree.map(jax.lax.with_sharding_constraint, params_bf16, params_shardings)
+    # When using Zero-1 optimizer sharding, cast params to lower precision and apply sharding constraints
+    # so that all-gather is done once in the lower precision before the gradient accumulation loop
+    if config.shard_optimizer_over_data:
+      def convert_to_bf16(param):
+        if param.dtype == jnp.float32:
+          return param.astype(jnp.bfloat16)
+        else:
+          return param
+      ga_params = jax.tree_util.tree_map(convert_to_bf16, params)
+      ga_params = jax.tree.map(jax.lax.with_sharding_constraint, ga_params, params_shardings)
+    else:
+      ga_params = params
 
     def accumulate_gradient(acc_grad_and_loss, data):
-      params_bf16 = acc_grad_and_loss["params_bf16"]
+      ga_params = acc_grad_and_loss["ga_params"]
       grad_func = jax.value_and_grad(_loss_fn, argnums=4, has_aux=True)
       (_, aux), cur_batch_gradient = grad_func(
-          model, config, data, dropout_rng, params_bf16, *extra_dpo_args, is_train=True
+          model, config, data, dropout_rng, ga_params, *extra_dpo_args, is_train=True
       )
       acc_grad_and_loss["loss"] += aux["total_loss"]
       acc_grad_and_loss["moe_lb_loss"] += aux["moe_lb_loss"]
@@ -245,9 +248,9 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
       return jnp.reshape(batch_arr, microbatch_shape)
 
     data = jax.tree_util.tree_map(reshape_to_microbatch_accumulations, data)
-    init_grad = jax.tree_util.tree_map(jnp.zeros_like, params_bf16)
+    init_grad = jax.tree_util.tree_map(jnp.zeros_like, ga_params)
     init_grad = jax.tree.map(jax.lax.with_sharding_constraint, init_grad, params_shardings)
-    init_grad_and_loss = {"loss": 0.0, "grad": init_grad, "total_weights": 0, "moe_lb_loss": 0.0, "mtp_loss": 0.0, "params_bf16": params_bf16}
+    init_grad_and_loss = {"loss": 0.0, "grad": init_grad, "total_weights": 0, "moe_lb_loss": 0.0, "mtp_loss": 0.0, "ga_params": ga_params}
 
     grad_and_loss, aux = jax.lax.scan(
         accumulate_gradient, init_grad_and_loss, data, length=config.gradient_accumulation_steps
@@ -258,7 +261,8 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
         + grad_and_loss["mtp_loss"] / config.gradient_accumulation_steps
     )
     raw_grads = grad_and_loss["grad"]
-    raw_grads = jax.tree.map(jax.lax.with_sharding_constraint, raw_grads, params_shardings)
+    if config.shard_optimizer_over_data:
+      raw_grads = jax.tree.map(jax.lax.with_sharding_constraint, raw_grads, params_shardings)
     raw_grads = jax.tree_util.tree_map(lambda arr: arr / grad_and_loss["total_weights"], raw_grads)
     aux = jax.tree.map(lambda x: jnp.sum(x, axis=0), aux)  # pytype: disable=module-attr
   else:
