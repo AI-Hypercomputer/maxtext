@@ -184,7 +184,7 @@ if [[ "$MODE" == "stable" || ! -v MODE ]]; then
 
         # TODO: Once tunix has support for GPUs, move it from here to requirements.txt
         echo "Installing google-tunix for stable TPU environment"
-        python3 -m uv pip install 'google-tunix>=0.1.0'
+        python3 -m uv pip install 'google-tunix>=0.1.2'
         echo "Installing stable jax, jaxlib for tpu"
         if [[ -n "$JAX_VERSION" ]]; then
             echo "Installing stable jax, jaxlib, libtpu version ${JAX_VERSION}"
