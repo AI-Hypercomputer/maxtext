@@ -398,9 +398,9 @@ class Decoder(nn.Module):
       case DecoderBlockType.GPT_OSS:
         return [gpt_oss.GptOssScannableBlock] if self.config.scan_layers else [gpt_oss.GptOssDecoderLayer]
       case DecoderBlockType.QWEN3:
-        return [qwen3.Qwen3DecoderLayer]
+        return [qwen3.Qwen3DecoderLayerToLinen]
       case DecoderBlockType.QWEN3_MOE:
-        return [qwen3.Qwen3MoeDecoderLayer]
+        return [qwen3.Qwen3MoeDecoderLayerToLinen]
       case DecoderBlockType.SIMPLE:
         return [simple_layer.SimpleDecoderLayer]
       case DecoderBlockType.SIMPLE_MLP:
