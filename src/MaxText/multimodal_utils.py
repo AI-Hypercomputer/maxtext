@@ -83,16 +83,6 @@ class PreprocessorOutput:
   aspect_ratios: None | np.ndarray = None
 
 
-def resize_image(image, model_name):
-  """resize image if needed"""
-  image_sizes = {}
-  model_prefix = model_name.split("-")[0]
-  if model_prefix in image_sizes:
-    target_size = image_sizes[model_prefix]
-    image = image.resize(target_size)
-  return image
-
-
 def convert_to_RGB(image):
   if image.mode != "RGB":
     image = image.convert("RGB")
@@ -346,81 +336,113 @@ def split_to_tiles(images: np.ndarray, num_tiles_height: int, num_tiles_width: i
   return tiled_images
 
 
-def pre_process_gemma3_image(image):
+def pre_process_gemma3_image(image: np.ndarray) -> PreprocessorOutput:
   """Performs a bi-linear resize (with anti-aliasing) and normalizes the image."""
   target_size = (GEMMA_DEFAULT_IMAGE_SIZE, GEMMA_DEFAULT_IMAGE_SIZE)
-  pil_img = Image.fromarray(image)
-  resample_method = Image.Resampling.BILINEAR
-  # Use a higher quality downsampling filter to approximate antialias=True
-  if pil_img.size[0] > target_size[0] or pil_img.size[1] > target_size[1]:
-    resample_method = Image.Resampling.LANCZOS
-  resized_pil_img = pil_img.resize(target_size, resample=resample_method)
-  image = np.asarray(resized_pil_img, dtype=np.float32)
-  image = _normalize_images(image, mean=GEMMA_IMAGE_MEAN, std=GEMMA_IMAGE_STD)
-  image = np.clip(image, -1, 1)
+
+  if image.ndim == 3:
+    images_arr = np.expand_dims(image, axis=0)  # Add image dimension if single image
+  else:
+    images_arr = image
+
+  images_out = []
+  for i in range(images_arr.shape[0]):
+    image = images_arr[i, ...]
+    pil_img = Image.fromarray(image)
+    resample_method = Image.Resampling.BILINEAR
+
+    # Use a higher quality downsampling filter to approximate antialias=True
+    if pil_img.size[0] > target_size[0] or pil_img.size[1] > target_size[1]:
+      resample_method = Image.Resampling.LANCZOS
+
+    resized_pil_img = pil_img.resize(target_size, resample=resample_method)
+    image = np.asarray(resized_pil_img, dtype=np.float32)
+    image = _normalize_images(image, mean=GEMMA_IMAGE_MEAN, std=GEMMA_IMAGE_STD)
+    image = np.clip(image, -1, 1)
+    images_out.append(image)
+
+  image = np.stack(images_out, axis=0).astype(np.float32)  # (N, H, W, C)
   processor_output = PreprocessorOutput(
       pixel_values=image,
   )
   return processor_output
 
 
-def pre_process_llama4_image(image):
+def pre_process_llama4_image(image: np.ndarray) -> PreprocessorOutput:
   """
   Pre-process image for Llama4 model. Find best resolution and split into tiles with an additional global tile.
   Original implementation from image_processing_llama4.py: http://shortn/_VXLgQ1lmkz
   Args:
-    image: The np.array image [H, W, C] to pre-process.
+    image: The np.array image [H, W, C] or images [N, H, W, C] to pre-process.
   Returns:
-    The pre-processed image in np.array [NUM_TILES, C, TILE_SIZE, TILE_SIZE].
+    The pre-processed image in np.array [N, NUM_TILES, C, TILE_SIZE, TILE_SIZE].
   Example:
     image of (536, 640, 3), its best_resolution = (672, 672), image split into 4 tiles of (336, 336)
-    Additional global tile of (336, 336) is added, and the final output image_tiles is (5, 3, 336, 336).
+    Additional global tile of (336, 336) is added, and the final output image_tiles is (1, 5, 3, 336, 336).
   """
-  # Find the best resolution canvas for the image
-  possible_resolutions = find_supported_resolutions(max_num_tiles=LLAMA4_TILES_NUM, tile_size=LLAMA4_TILE_SIZE)
-  best_resolution = get_best_resolution(
-      img_height=image.shape[0],
-      image_width=image.shape[1],
-      possible_resolutions=possible_resolutions,
-      resize_to_max_canvas=False,
-  )
+  if image.ndim == 3:
+    images_arr = np.expand_dims(image, axis=0)  # Add image dimension if single image
+  else:
+    images_arr = image
 
-  # Pad the image to the best resolution and normalize it
-  image_padded = pad_to_best_fit_jax(image, best_resolution)
-  image_normalized = _normalize_images(
-      images=image_padded * LLAMA4_PIXEL_VALUE_RESCALE_FACTOR,
-      mean=LLAMA4_IMAGE_MEAN,
-      std=LLAMA4_IMAGE_STD,
-  )
+  images_out = []
+  masks_out = []
+  aspect_ratios_out = []
 
-  # Split the image into tiles
-  ratio_h, ratio_w = (
-      best_resolution[0] // LLAMA4_TILE_SIZE,
-      best_resolution[1] // LLAMA4_TILE_SIZE,
-  )
-  image_tiles = split_to_tiles(image_normalized, ratio_h, ratio_w)
+  for i in range(images_arr.shape[0]):
+    image = images_arr[i, ...]
 
-  # If more than one tile, add a global tile by resizing the image to the tile size
-  if ratio_h * ratio_w > 1:
-    pil_img = Image.fromarray(image)
-    resample_method = Image.Resampling.BILINEAR
-    # Use a higher quality downsampling filter to approximate antialias=True
-    if pil_img.size[0] > LLAMA4_TILE_SIZE or pil_img.size[1] > LLAMA4_TILE_SIZE:
-      resample_method = Image.Resampling.LANCZOS
-    global_tiles_pil = pil_img.resize((LLAMA4_TILE_SIZE, LLAMA4_TILE_SIZE), resample=resample_method)
-    global_tiles = np.array(global_tiles_pil)
-    global_tiles = _normalize_images(
-        global_tiles * LLAMA4_PIXEL_VALUE_RESCALE_FACTOR, mean=LLAMA4_IMAGE_MEAN, std=LLAMA4_IMAGE_STD
+    # Find the best resolution canvas for the image
+    possible_resolutions = find_supported_resolutions(max_num_tiles=LLAMA4_TILES_NUM, tile_size=LLAMA4_TILE_SIZE)
+    best_resolution = get_best_resolution(
+        img_height=image.shape[0],
+        image_width=image.shape[1],
+        possible_resolutions=possible_resolutions,
+        resize_to_max_canvas=False,
     )
-    global_tiles = np.transpose(global_tiles, (2, 0, 1))
-    global_tiles = np.expand_dims(global_tiles, axis=0)
-    image_tiles = np.concatenate((image_tiles, global_tiles), axis=0)
 
-  # Pad the tiles to the maximum number of tiles
-  image_tiles, image_mask = pad_to_max_tiles(image_tiles, max_num_tiles=LLAMA4_TILES_NUM)
+    # Pad the image to the best resolution and normalize it
+    image_padded = pad_to_best_fit_jax(image, best_resolution)
+    image_normalized = _normalize_images(
+        images=image_padded * LLAMA4_PIXEL_VALUE_RESCALE_FACTOR,
+        mean=LLAMA4_IMAGE_MEAN,
+        std=LLAMA4_IMAGE_STD,
+    )
 
-  # TODO(hengtaoguo): Add support for multiple images with aspect ratios size of [num_images, 2]
-  aspect_ratios_array = np.array([[ratio_h, ratio_w]], dtype=np.int32)
+    # Split the image into tiles
+    ratio_h, ratio_w = (
+        best_resolution[0] // LLAMA4_TILE_SIZE,
+        best_resolution[1] // LLAMA4_TILE_SIZE,
+    )
+    image_tiles = split_to_tiles(image_normalized, ratio_h, ratio_w)
+
+    # If more than one tile, add a global tile by resizing the image to the tile size
+    if ratio_h * ratio_w > 1:
+      pil_img = Image.fromarray(image)
+      resample_method = Image.Resampling.BILINEAR
+      # Use a higher quality downsampling filter to approximate antialias=True
+      if pil_img.size[0] > LLAMA4_TILE_SIZE or pil_img.size[1] > LLAMA4_TILE_SIZE:
+        resample_method = Image.Resampling.LANCZOS
+      global_tiles_pil = pil_img.resize((LLAMA4_TILE_SIZE, LLAMA4_TILE_SIZE), resample=resample_method)
+      global_tiles = np.array(global_tiles_pil)
+      global_tiles = _normalize_images(
+          global_tiles * LLAMA4_PIXEL_VALUE_RESCALE_FACTOR, mean=LLAMA4_IMAGE_MEAN, std=LLAMA4_IMAGE_STD
+      )
+      global_tiles = np.transpose(global_tiles, (2, 0, 1))
+      global_tiles = np.expand_dims(global_tiles, axis=0)
+      image_tiles = np.concatenate((image_tiles, global_tiles), axis=0)
+
+      # Pad the tiles to the maximum number of tiles
+      image_tiles, image_mask = pad_to_max_tiles(image_tiles, max_num_tiles=LLAMA4_TILES_NUM)
+
+    images_out.append(image_tiles)
+    masks_out.append(image_mask)
+    aspect_ratios_out.append([ratio_h, ratio_w])
+
+  image_tiles = np.stack(images_out, axis=0).astype(np.float32)  # (N, NUM_TILES, C, TILE_SIZE, TILE_SIZE)
+  image_mask = np.stack(masks_out, axis=0).astype(np.int32)  # (N, NUM_TILES)
+  aspect_ratios_array = np.array(aspect_ratios_out, dtype=np.int32)  # (N, 2)
+
   processor_output = PreprocessorOutput(
       pixel_values=image_tiles,
       pixel_mask=image_mask,
@@ -432,10 +454,10 @@ def pre_process_llama4_image(image):
 def pre_process_image(image, model_name):
   """Pre-process image according to different model's requirements.
   Args:
-    image: The np.array image [H, W, C] to pre-process.
+    image: The np.array image [H, W, C] or images [N, H, W, C] to pre-process.
     model_name: The config.model_name that specifies the image preprocess ways.
   Returns:
-    The pre-processed image in np.array [H, W, C].
+    The PreprocessorOutput instance containing image in np.array [H, W, C] or [N, H, W, C].
   """
   if model_name in ["gemma3-4b", "gemma3-12b", "gemma3-27b"]:
     return pre_process_gemma3_image(image)
@@ -485,7 +507,10 @@ def reformat_response(response, model_name):
 def get_image_offsets(model_name, processor_output: PreprocessorOutput | None):
   """Get the increase in total token count after inserting image token placeholders"""
   if model_name in ["gemma3-4b", "gemma3-12b", "gemma3-27b"]:
-    return GEMMA_NUM_TOKENS_PER_MEDIA - 1  # -1 because <start_of_image> is already present in the input tokens.
+    num_images = processor_output.pixel_values.shape[0] if processor_output else 1
+    return (
+        GEMMA_NUM_TOKENS_PER_MEDIA - 1
+    ) * num_images  # -1 because <start_of_image> is already present in the input tokens.
   if model_name in ["llama4-17b-16e", "llama4-17b-128e"]:
     assert processor_output is not None, "Processor output must be provided for Llama4 image fusion."
     assert processor_output.aspect_ratios is not None, "Aspect ratio must be provided for Llama4 image fusion."
@@ -530,11 +555,9 @@ def get_dummy_image_shape_for_init(model_name, batch_size=1, num_image_per_seque
 
 def prepare_text_for_image_fusion(texts, model_name, processor_output=None):
   if model_name in ["gemma3-4b", "gemma3-12b", "gemma3-27b"]:
-    num_images = len(processor_output) if isinstance(processor_output, list) else 1
+    num_images = processor_output.pixel_values.shape[0] if processor_output else 1
     return add_extra_tokens_for_images_gemma3(texts, max_num_images=num_images)
   if model_name in ["llama4-17b-16e", "llama4-17b-128e"]:
-    # TODO(nicogrande): support multiple images
-    processor_output = processor_output[0] if isinstance(processor_output, list) else processor_output
     return add_extra_tokens_for_images_llama4(texts, processor_output)
   else:
     raise ValueError(f"Model {model_name} does not support multimodal inference.")
