@@ -74,7 +74,7 @@ source_checkpoint_layout: "orbax"
 
 
 reuse_example_batch: 0 # for testing TPU performance, this options repeated uses the same batch.
-
+use_max_logit_estimate: 30
 
 metrics_file: "" # for testing, local file that stores scalar metrics. If empty, no metrics are written.
 # If true save metrics such as loss and TFLOPS to GCS in {base_output_directory}/{run_name}/metrics/
