@@ -859,3 +859,6 @@ subslice_shape: ""
 
 # NNX
 enable_nnx: false
+
+# Use tokamax library for kernel implementations
+use_tokamax: false
