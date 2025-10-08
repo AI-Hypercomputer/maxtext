@@ -23,17 +23,23 @@ from jax.ad_checkpoint import checkpoint_name
 from jax.sharding import Mesh
 
 from flax import linen as nn
+from flax import nnx
 
 from MaxText.common_types import Config, Array, MODEL_MODE_TRAIN, AttentionType
+from MaxText import max_utils
 from MaxText.inference import page_manager
 from MaxText.layers import initializers
-from MaxText.layers.linears import mlp_block
+from MaxText.layers import nnx_wrappers
 from MaxText.layers import linears
-from MaxText.layers import moe
 from MaxText.layers import quantizations
 from MaxText.layers import attentions
 from MaxText.layers.quantizations import AqtQuantization as Quant
-from MaxText.layers.normalizations import rms_norm
+from MaxText.layers.normalizations import RMSNorm
+from MaxText.layers.attentions import Attention
+from MaxText.layers.linears import MlpBlock
+from MaxText.layers.linears import Dropout
+from MaxText.layers.moe import RoutedAndSharedMoE
+from MaxText.common_types import MODEL_MODE_PREFILL
 
 
 #### Multi modal model implementation
@@ -295,8 +301,12 @@ class Llama4MultiModalProjector(nn.Module):
       Tensor of shape [batch_size, num_patches, (pixel_shuffle_ratio**2), vision_hidden_size]
     """
     b, t, c, d = image_features.shape
+
+    # Reshape image_features to [b * t, c, d] and project to text hidden dimension
     image_features = image_features.reshape(b * t, c, d)
     hidden_states = self.linear(image_features)
+
+    # Reshape hidden states back to [b, t, c, d]
     _, c, d = hidden_states.shape
     hidden_states = hidden_states.reshape(b, t, c, d)
     return hidden_states
@@ -343,25 +353,135 @@ def determine_is_moe_layer(layer_id: int, interleave_moe_layer_step: int) -> boo
 # -----------------------------------------
 
 
-class Llama4DecoderLayer(nn.Module):
-  """Transformer decoder layer for Llama4.
+class Llama4DecoderLayer(nnx.Module):
+  """Transformer decoder layer for Llama4."""
 
-  Attributes:
-    config: Config, MaxText model config
-    mesh: Mesh, JAX device mesh (used for sharding)
-    quant: None | Quant, quantization config
-    is_nope_layer: bool, whether to use RoPE or not on this layer
-    is_moe_layer: bool, whether this layer operates as a MoE layer
-  """
+  def __init__(
+      self,
+      config: Config,
+      mesh: Mesh,
+      model_mode: str,
+      rngs: nnx.Rngs,
+      quant: None | Quant = None,
+      is_nope_layer: bool = False,
+      is_moe_layer: bool = False,
+  ):
+    """Initializes the Llama4 decoder layer.
 
-  config: Config
-  mesh: Mesh
-  model_mode: str
-  quant: None | Quant = None
-  is_nope_layer: bool = False
-  is_moe_layer: bool = False
+    Args:
+      config: The main model configuration object.
+      mesh: The device mesh used for sharding parameters and activations.
+      model_mode: One of MODEL_MODE_TRAIN, MODEL_MODE_PREFILL, or MODEL_MODE_AUTOREGRESSIVE.
+      rngs: An `nnx.Rngs` object to provide random numbers.
+      quant: An optional configuration for quantization. Defaults to None.
+      is_nope_layer: If True, this layer will be configured as No Position Embeddings layer. Defaults to False.
+      is_moe_layer: If True, this layer will use a MoE block. Defaults to False as Dense.
+    """
 
-  @nn.compact
+    self.config = config
+    self.mesh = mesh
+    self.quant = quant
+    self.rngs = rngs
+    self.is_nope_layer = is_nope_layer
+    self.is_moe_layer = is_moe_layer
+
+    batch_size, seq_len = max_utils.get_batch_seq_len_for_mode(config, model_mode)
+    dummy_inputs_shape = (batch_size, seq_len, config.emb_dim)
+
+    self.pre_self_attention_layer_norm = RMSNorm(
+        num_features=config.emb_dim,
+        dtype=config.dtype,
+        weight_dtype=config.weight_dtype,
+        kernel_axes=("norm",),
+        epsilon=config.normalization_layer_epsilon,
+        rngs=rngs,
+    )
+
+    # Instead of scaling the query values in the checkpoint conversion (`llama_or_mistral_ckpt`)
+    # we'll do it dynamically in the forward pass of Attention
+    query_pre_attn_scalar = config.head_dim**-0.5
+    self.self_attention = Attention(
+        config=config,
+        num_query_heads=config.num_query_heads,
+        num_kv_heads=config.num_kv_heads,
+        head_dim=config.head_dim,
+        max_target_length=config.max_target_length,
+        max_prefill_predict_length=config.max_prefill_predict_length,
+        attention_kernel=config.attention,
+        inputs_q_shape=dummy_inputs_shape,
+        inputs_kv_shape=dummy_inputs_shape,
+        mesh=mesh,
+        dtype=config.dtype,
+        weight_dtype=config.weight_dtype,
+        dropout_rate=config.dropout_rate,
+        float32_qk_product=config.float32_qk_product,
+        float32_logits=config.float32_logits,
+        quant=self.quant,
+        kv_quant=quantizations.configure_kv_quant(config),
+        prefill_cache_axis_order=tuple(map(int, config.prefill_cache_axis_order.split(","))),
+        ar_cache_axis_order=tuple(map(int, config.ar_cache_axis_order.split(","))),
+        compute_axis_order=tuple(map(int, config.compute_axis_order.split(","))),
+        reshape_q=config.reshape_q,
+        use_ragged_attention=config.use_ragged_attention,
+        ragged_block_size=config.ragged_block_size,
+        is_nope_layer=self.is_nope_layer,
+        use_qk_norm=config.use_qk_norm,
+        query_pre_attn_scalar=query_pre_attn_scalar,
+        temperature_tuning=config.temperature_tuning,
+        temperature_tuning_scale=0.1,
+        temperature_tuning_floor_scale=8192.0,
+        # note: chunk_attn_window_size is set in the config
+        attention_type=AttentionType.GLOBAL if self.is_nope_layer else AttentionType.CHUNK,
+        model_mode=model_mode,
+        rngs=rngs,
+    )
+
+    self.post_self_attention_layer_norm = RMSNorm(
+        num_features=config.emb_dim,
+        dtype=config.dtype,
+        weight_dtype=config.weight_dtype,
+        kernel_axes=("norm",),
+        epsilon=config.normalization_layer_epsilon,
+        rngs=self.rngs,
+    )
+
+    if self.is_moe_layer:
+      # NOTE: the name Llama4MoEBlock_0 is to ensure reverse compatibility with
+      # existing checkpoints for MoE block.
+      self.Llama4MoEBlock_0 = RoutedAndSharedMoE(
+          config=config,
+          mesh=self.mesh,
+          kernel_init=initializers.nd_dense_init(1.0, "fan_in", "truncated_normal"),
+          kernel_axes=("embed", None),
+          dtype=config.dtype,
+          weight_dtype=config.weight_dtype,
+          quant=self.quant,
+          rngs=self.rngs,
+      )
+    else:
+      self.mlp = MlpBlock(
+          in_features=config.emb_dim,
+          intermediate_dim=config.mlp_dim,
+          activations=config.mlp_activations,
+          intermediate_dropout_rate=config.dropout_rate,
+          dtype=config.dtype,
+          weight_dtype=config.weight_dtype,
+          config=config,
+          quant=self.quant,
+          model_mode=model_mode,
+          rngs=self.rngs,
+      )
+
+    self.dropout = Dropout(rate=config.dropout_rate, broadcast_dims=(-2,), rngs=self.rngs)
+    if model_mode == MODEL_MODE_PREFILL:
+      self.activation_axis_names = ("activation_batch", "prefill_activation_norm_length", "activation_embed")
+    else:
+      self.activation_axis_names = ("activation_batch", "activation_norm_length", "activation_embed")
+
+  @property
+  def moe_block(self):
+    return self.Llama4MoEBlock_0
+
   def __call__(
       self,
       inputs,
@@ -375,65 +495,16 @@ class Llama4DecoderLayer(nn.Module):
       previous_chunk=None,
   ):
     cfg = self.config
-    mesh = self.mesh
-
     assert cfg.num_experts >= 1, "Expected the Llama4 config to have `num_experts > 1`."
 
-    inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
+    inputs = nn.with_logical_constraint(inputs, self.activation_axis_names)
     inputs = checkpoint_name(inputs, "decoder_layer_input")
-    lnx_rms = rms_norm(
-        num_features=inputs.shape[-1],
-        dtype=cfg.dtype,
-        weight_dtype=cfg.weight_dtype,
-        name="pre_self_attention_layer_norm",
-        kernel_axes=("norm",),
-        epsilon=cfg.normalization_layer_epsilon,
-    )
-    lnx = lnx_rms(inputs)
 
-    lnx = nn.with_logical_constraint(lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
-    # Instead of scaling the query values in the checkpoint conversion (`llama_or_mistral_ckpt`)
-    # we'll do it dynamically in the forward pass of Attention
-    query_pre_attn_scalar = cfg.head_dim**-0.5
+    lnx = self.pre_self_attention_layer_norm(inputs)
+    lnx = nn.with_logical_constraint(lnx, self.activation_axis_names)
 
     # Self-attention block
-    attention_layer = attentions.attention_as_linen(
-        config=cfg,
-        num_query_heads=cfg.num_query_heads,
-        num_kv_heads=cfg.num_kv_heads,
-        head_dim=cfg.head_dim,
-        max_target_length=cfg.max_target_length,
-        max_prefill_predict_length=cfg.max_prefill_predict_length,
-        attention_kernel=cfg.attention,
-        inputs_q_shape=lnx.shape,
-        inputs_kv_shape=lnx.shape,
-        mesh=mesh,
-        dtype=cfg.dtype,
-        weight_dtype=cfg.weight_dtype,
-        dropout_rate=cfg.dropout_rate,
-        name="self_attention",
-        float32_qk_product=cfg.float32_qk_product,
-        float32_logits=cfg.float32_logits,
-        quant=self.quant,
-        kv_quant=quantizations.configure_kv_quant(cfg),
-        prefill_cache_axis_order=tuple(map(int, cfg.prefill_cache_axis_order.split(","))),
-        ar_cache_axis_order=tuple(map(int, cfg.ar_cache_axis_order.split(","))),
-        compute_axis_order=tuple(map(int, cfg.compute_axis_order.split(","))),
-        reshape_q=cfg.reshape_q,
-        use_ragged_attention=cfg.use_ragged_attention,
-        ragged_block_size=cfg.ragged_block_size,
-        is_nope_layer=self.is_nope_layer,
-        use_qk_norm=cfg.use_qk_norm,
-        query_pre_attn_scalar=query_pre_attn_scalar,
-        temperature_tuning=cfg.temperature_tuning,
-        temperature_tuning_scale=0.1,
-        temperature_tuning_floor_scale=8192.0,
-        # note: chunk_attn_window_size is set in the config
-        attention_type=AttentionType.GLOBAL if self.is_nope_layer else AttentionType.CHUNK,
-        model_mode=model_mode,
-    )
-
-    attention_lnx = attention_layer(
+    attention_lnx = self.self_attention(
         lnx,
         lnx,
         decoder_positions,
@@ -445,66 +516,22 @@ class Llama4DecoderLayer(nn.Module):
         previous_chunk=previous_chunk,
         bidirectional_mask=bidirectional_mask,
     )
-
-    attention_lnx = nn.with_logical_constraint(
-        attention_lnx, ("activation_batch", "activation_norm_length", "activation_embed")
-    )
+    attention_lnx = nn.with_logical_constraint(attention_lnx, self.activation_axis_names)
     intermediate_inputs = inputs + attention_lnx
 
     # Fully Connected
-    hidden_states = rms_norm(
-        num_features=intermediate_inputs.shape[-1],
-        dtype=cfg.dtype,
-        weight_dtype=cfg.weight_dtype,
-        name="post_self_attention_layer_norm",
-        kernel_axes=("norm",),
-        epsilon=cfg.normalization_layer_epsilon,
-    )(intermediate_inputs)
-    hidden_states = nn.with_logical_constraint(
-        hidden_states, ("activation_batch", "activation_norm_length", "activation_embed")
-    )
+    hidden_states = self.post_self_attention_layer_norm(intermediate_inputs)
+    hidden_states = nn.with_logical_constraint(hidden_states, self.activation_axis_names)
 
-    load_balance_loss = None
     if self.is_moe_layer:
-      # NOTE: the naming mismatch here is to ensure reverse compatibility with existing checkpoints.
-      # The `name` represents the weight name in JAX/checkpoints and so the class name
-      # is just for readability.
-      mlp_lnx = moe.get_routed_and_shared_moe(
-          name="Llama4MoEBlock_0",
-          config=cfg,
-          mesh=self.mesh,
-          kernel_init=initializers.nd_dense_init(1.0, "fan_in", "truncated_normal"),
-          kernel_axes=("embed", None),
-          dtype=cfg.dtype,
-          weight_dtype=cfg.weight_dtype,
-          quant=self.quant,
-      )(hidden_states)
+      mlp_lnx = self.moe_block(hidden_states)
     else:
-      mlp_lnx = mlp_block(
-          in_features=hidden_states.shape[-1],
-          intermediate_dim=cfg.mlp_dim,
-          activations=cfg.mlp_activations,
-          intermediate_dropout_rate=cfg.dropout_rate,
-          dtype=cfg.dtype,
-          weight_dtype=cfg.weight_dtype,
-          name="mlp",
-          config=cfg,
-          quant=self.quant,
-      )(hidden_states, deterministic=deterministic)
-    mlp_lnx = nn.with_logical_constraint(mlp_lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
+      mlp_lnx = self.mlp(hidden_states, deterministic=deterministic)
+    mlp_lnx = nn.with_logical_constraint(mlp_lnx, self.activation_axis_names)
 
     layer_output = mlp_lnx + intermediate_inputs
-
-    layer_output = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(layer_output, deterministic=deterministic)
-
-    layer_output = nn.with_logical_constraint(
-        layer_output,
-        ("activation_batch", "activation_norm_length", "activation_embed"),
-    )
-
-    # NOTE: this is only needed for dropping MoE
-    if load_balance_loss is not None:
-      self.sow("intermediates", "moe_lb_loss", load_balance_loss)
+    layer_output = self.dropout(layer_output, deterministic=deterministic)
+    layer_output = nn.with_logical_constraint(layer_output, self.activation_axis_names)
 
     if cfg.record_internal_nn_metrics:
       self.sow("intermediates", "activation_mean", jnp.mean(layer_output))
@@ -521,27 +548,59 @@ class Llama4DecoderLayer(nn.Module):
       return layer_output
 
 
-class Llama4ScannableBlock(nn.Module):
-  '''
-  A repeatable block given nope_layer_interval and interleave_moe_layer_step
+Llama4DecoderLayerToLinen = nnx_wrappers.to_linen_class(
+    Llama4DecoderLayer,
+    base_metadata_fn=initializers.variable_to_logically_partitioned,
+)
 
-  Attributes:
-    config: Config, MaxText model config
-    mesh: Mesh, JAX device mesh (used for sharding)
-    quant: None | Quant, quantization config
-    nope_layer_interval: int, the interval at which layers should use NoPE.
-    interleave_moe_layer_step: int, the interval or stride for placing MoE layers.
-  """
-  '''
 
-  config: Config
-  mesh: Mesh
-  model_mode: str
-  quant: None | Quant = None
-  nope_layer_interval: int = 1
-  interleave_moe_layer_step: int = 1
+class Llama4ScannableBlock(nnx.Module):
+  """A repeatable block given nope_layer_interval and interleave_moe_layer_step."""
 
-  @nn.compact
+  def __init__(
+      self,
+      config: Config,
+      mesh: Mesh,
+      model_mode: str,
+      rngs: nnx.Rngs,
+      quant: None | Quant = None,
+      nope_layer_interval: int = 1,
+      interleave_moe_layer_step: int = 1,
+  ):
+    """Initializes the scannable block.
+
+    Args:
+      config: The main model configuration object.
+      mesh: The device mesh used for sharding parameters and activations.
+      model_mode: One of MODEL_MODE_TRAIN, MODEL_MODE_PREFILL, or MODEL_MODE_AUTOREGRESSIVE.
+      rngs: An `nnx.Rngs` object to provide random numbers for initialization.
+      quant: An optional configuration for quantization. Defaults to None.
+      nope_layer_interval: Specifies the interval for inserting a NoPE layer.
+      interleave_moe_layer_step: Specifies the interval for inserting a MoE layer.
+    """
+    self.config = config
+    self.mesh = mesh
+    self.model_mode = model_mode
+    self.quant = quant
+    self.rngs = rngs
+    self.nope_layer_interval = nope_layer_interval
+    self.interleave_moe_layer_step = interleave_moe_layer_step
+
+    for layer_id in range(self.config.inhomogeneous_layer_cycle_interval):
+      nope_layer = determine_is_nope_layer(layer_id, self.nope_layer_interval)
+      moe_layer = determine_is_moe_layer(layer_id, self.interleave_moe_layer_step)
+      layer_name = f"layers_{layer_id}"
+      layer = Llama4DecoderLayer(
+          config=self.config,
+          mesh=self.mesh,
+          model_mode=self.model_mode,
+          rngs=self.rngs,
+          quant=self.quant,
+          is_nope_layer=nope_layer,
+          is_moe_layer=moe_layer,
+      )
+      setattr(self, layer_name, layer)
+
   def __call__(
       self,
       inputs,
@@ -556,24 +615,12 @@ class Llama4ScannableBlock(nn.Module):
   ):
 
     cfg = self.config
-    mesh = self.mesh
 
     inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
     inputs = checkpoint_name(inputs, "decoder_layer_input")
     y = inputs
     for layer_id in range(cfg.inhomogeneous_layer_cycle_interval):
-      nope_layer = determine_is_nope_layer(layer_id, self.nope_layer_interval)
-      moe_layer = determine_is_moe_layer(layer_id, self.interleave_moe_layer_step)
-      layer = Llama4DecoderLayer(
-          config=cfg,
-          mesh=mesh,
-          name=f"layers_{layer_id}",
-          quant=self.quant,
-          model_mode=model_mode,
-          is_nope_layer=nope_layer,
-          is_moe_layer=moe_layer,
-      )
-      y = layer(
+      y = getattr(self, f"layers_{layer_id}")(
           y,
           decoder_segment_ids,
           decoder_positions,
@@ -590,6 +637,12 @@ class Llama4ScannableBlock(nn.Module):
       return y, None
     else:
       return y
+
+
+Llama4ScannableBlockToLinen = nnx_wrappers.to_linen_class(
+    Llama4ScannableBlock,
+    base_metadata_fn=initializers.variable_to_logically_partitioned,
+)
 
 
 class Llama4VisionEncoderLayer(nn.Module):
@@ -754,15 +807,18 @@ class Llama4VisionModel(nn.Module):
     """Forward pass of the Llama4 vision model.
 
     Args:
-      inputs: Input tensor of shape [batch_size, num_tiles, num_channels_for_vit, tile_size_for_vit, tile_size_for_vit]
+      inputs: Input tensor of shape:
+              [batch_size * num_images, num_tiles, num_channels_for_vit, tile_size_for_vit, tile_size_for_vit]
       deterministic: Whether to use deterministic mode (disables dropout)
 
     Returns:
-      Final hidden states from the vision encoder of shape [batch_size, num_tiles, num_patches, vision_output_dim_for_vit]
+      Final hidden states from the vision encoder of shape:
+      [batch_size * num_images, num_tiles, num_patches, vision_output_dim_for_vit]
     """
     cfg = self.config
     mesh = self.mesh
 
+    # Reshape pixel values to combine batch and num_tiles dimensions
     b, t, c, h, w = pixel_values.shape
     pixel_values = jnp.reshape(pixel_values, [b * t, c, h, w])
 

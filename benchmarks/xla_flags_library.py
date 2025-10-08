@@ -209,3 +209,7 @@ DEBUG_LOGS = {
 
 # Disables collective matmul operations.
 DISABLE_COLLECTIVE_MATMUL = " --xla_jf_spmd_threshold_for_windowed_einsum_mib=1000000"
+# Disable "megacore fusion allow ags".
+DISABLE_MEGACORE_FUSION_ALLOW_AGS = " --xla_tpu_megacore_fusion_allow_ags=false"
+# Enable async collective permute.
+ENABLE_ASYNC_COLLECTIVE_PERMUTE = " --xla_enable_async_collective_permute=true"

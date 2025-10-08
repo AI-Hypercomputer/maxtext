@@ -86,6 +86,11 @@ def validate_attention_type(s: str) -> None:
     raise ValueError("Invalid attention type was passed. Valid options ", valid_attention_types)
 
 
+def validate_moba_attention(moba, attention) -> None:
+  if moba and attention in ("autoselected", "flash", "cudnn_flash_te", "cudnn_flash_jax", "paged"):
+    raise ValueError("MoBA is only supported dot_product attention")
+
+
 def validate_attention_window_params(
     attention_type: str,
     chunk_attn_window_size: int,
@@ -167,6 +172,7 @@ def validate_vocab_tiling(num_vocab_tiling: int, per_device_batch_size: int, max
 def validate_keys(keys):
   validate_attention_kernel(keys["attention"])
   validate_attention_type(keys["attention_type"])
+  validate_moba_attention(keys["moba"], keys["attention"])
   validate_attention_window_params(
       keys["attention_type"], keys.get("chunk_attn_window_size"), keys.get("sliding_window_size")
   )

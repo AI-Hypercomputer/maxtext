@@ -23,6 +23,46 @@ from benchmarks.globals import MAXTEXT_ASSETS_ROOT
 
 v5p_model_dict = {}
 
+llama3_1_405b_8192_v5p_1024 = _add_to_model_dictionary(
+    v5p_model_dict,
+    MaxTextModel(
+        model_name="llama3-1-405b-8192-v5p-1024",
+        model_type="llama3.1-405b",
+        tuning_params={
+            "per_device_batch_size": 2,
+            "ici_fsdp_parallelism": -1,
+            "max_target_length": 8192,
+            "attention": "flash",
+            "gcs_metrics": True,
+            "use_iota_embed": True,
+            "remat_policy": "custom",
+            "context": "offload",
+            "mlpwo": "offload",
+            "num_vocab_tiling": 4,
+            "sa_block_q": 2048,
+            "sa_block_kv": 2048,
+            "sa_block_kv_compute": 2048,
+            "sa_block_q_dkv": 2048,
+            "sa_block_kv_dkv": 2048,
+            "sa_block_kv_dkv_compute": 2048,
+            "sa_block_q_dq": 2048,
+            "sa_block_kv_dq": 2048,
+            "dataset_path": "gs://max-datasets-rogue",
+            "dataset_type": "synthetic",
+            "reuse_example_batch": 1,
+            "enable_checkpointing": False,
+            "profiler": "xplane",
+            "skip_first_n_steps_for_profiler": 5,
+            "profiler_steps": 5,
+        },
+        xla_flags=(
+            xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+            + xla_flags_library.CF_FOR_ALL_GATHER
+            + xla_flags_library.HOST_OFFLOAD_FLAGS
+        ),
+    ),
+)
+
 deepseek_v3_fsdp_v5p_512_nocapp = _add_to_model_dictionary(
     v5p_model_dict,
     MaxTextModel(
@@ -206,6 +246,8 @@ deepseek_v3_ep_256_v5p_512 = _add_to_model_dictionary(
     ),
 )
 
+# llama4_scout_dropless_v5p_1024 should be tested with the same configuration
+# as the following llama4_scout_dropless_v5p_256 config.
 llama4_scout_dropless_v5p_256 = _add_to_model_dictionary(
     v5p_model_dict,
     MaxTextModel(
@@ -381,6 +423,55 @@ gpt_3_175b_v5p_128_sc = _add_to_model_dictionary(
         },
         xla_flags=(
             xla_flags_library.DATA_PARALLEL_OVERLAP + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_GATHER
+        ),
+    ),
+)
+
+deepseek3_671b_v5p_1024 = _add_to_model_dictionary(
+    v5p_model_dict,
+    MaxTextModel(
+        model_name="deepseek3_671b_v5p_1024",
+        model_type="deepseek3-671b",
+        tuning_params={
+            "ici_fsdp_parallelism": -1,
+            "ici_tensor_parallelism": 1,
+            "per_device_batch_size": 6,
+            "max_target_length": 8192,
+            "dtype": "bfloat16",
+            "weight_dtype": "float32",
+            "megablox": True,
+            "sparse_matmul": True,
+            "scan_layers": True,
+            "use_custom_sort_vjp": True,
+            "sa_block_q": 2048,
+            "sa_block_kv": 2048,
+            "sa_block_kv_compute": 2048,
+            "sa_block_q_dkv": 2048,
+            "sa_block_kv_dkv": 2048,
+            "sa_block_kv_dkv_compute": 2048,
+            "sa_block_q_dq": 2048,
+            "sa_block_kv_dq": 2048,
+            "remat_policy": "custom",
+            "decoder_layer_input": "offload",
+            "out_proj": "offload",
+            "tile_batch_seq": 512,
+            "tile_embed_dim": 1024,
+            "tile_mlp_dim": 1024,
+            "sa_use_fused_bwd_kernel": False,
+            "dataset_type": "synthetic",
+            "enable_checkpointing": False,
+            "profiler": "xplane",
+            "skip_first_n_steps_for_profiler": 5,
+            "profiler_steps": 5,
+        },
+        xla_flags=(
+            xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_RS_AG_AR
+            + xla_flags_library.HOST_OFFLOAD_FLAGS
+            + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
+            + xla_flags_library.DATA_PARALLEL_OVERLAP
+            + xla_flags_library.MOE_VMEM_LIMIT_FLAG
+            + xla_flags_library.DISABLE_MEGACORE_FUSION_ALLOW_AGS
+            + xla_flags_library.ENABLE_ASYNC_COLLECTIVE_PERMUTE
         ),
     ),
 )
