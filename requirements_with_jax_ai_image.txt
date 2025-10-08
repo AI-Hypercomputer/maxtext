@@ -23,5 +23,5 @@ sentencepiece>=0.2.0
 tensorflow-datasets
 tensorflow-text>=2.17.0
 tiktoken
-tokamax>=0.0.3
+tokamax>=0.0.4
 transformers
