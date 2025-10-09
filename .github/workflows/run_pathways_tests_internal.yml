@@ -51,7 +51,7 @@ jobs:
   run:
     runs-on: ${{ inputs.cloud_runner != '' && inputs.cloud_runner || fromJson(format('["self-hosted", "{0}", "{1}"]', inputs.device_type, inputs.device_name)) }}
     container:
-      image: gcr.io/cloud-tpu-multipod-dev/wstcliyu_latest:pathways-init
+      image: gcr.io/cloud-tpu-multipod-dev/wstcliyu_latest@sha256:9789cb0fcf6496e0987c8228096a62897bfb5d59babbffd27d9e8f2017f4dc0b
       # image: us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/maxtext_jax_stable:latest
       env:
         XLA_PYTHON_CLIENT_MEM_FRACTION: ${{ inputs.xla_python_client_mem_fraction }}
