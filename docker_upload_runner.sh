@@ -22,6 +22,7 @@
 
 # Example command:
 # bash docker_upload_runner.sh CLOUD_IMAGE_NAME=${USER}_runner
+# This script needs bash version >= 4.2 to execute correctly.
 
 set -e
 
