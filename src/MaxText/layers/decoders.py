@@ -43,7 +43,6 @@ from MaxText.layers.embeddings import attend_on_embedding, embed_as_linen, posit
 from MaxText.layers.quantizations import AqtQuantization as Quant
 from MaxText.layers import (
     deepseek,
-    deepseek_batchsplit,
     gemma,
     gemma2,
     gemma3,
@@ -381,12 +380,9 @@ class Decoder(nn.Module):
         # TODO(ranran): update to Mistral with sliding window attention
         return [mistral.MistralDecoderLayerToLinen]
       case DecoderBlockType.MIXTRAL:
-        return [mixtral.MixtralDecoderLayerToLinen]
+        return [mixtral.MixtralDecoderLayer]
       case DecoderBlockType.DEEPSEEK:
-        if self.config.use_batch_split_schedule:
-          return [deepseek_batchsplit.DeepSeekDenseLayer, deepseek_batchsplit.DeepSeekMoELayer]
-        else:
-          return [deepseek.DeepSeekDenseLayer, deepseek.DeepSeekMoELayer]
+        return [deepseek.DeepSeekDenseLayer, deepseek.DeepSeekMoELayer]
       case DecoderBlockType.GEMMA:
         return [gemma.GemmaDecoderLayerToLinen]
       case DecoderBlockType.GEMMA2:
@@ -398,15 +394,15 @@ class Decoder(nn.Module):
       case DecoderBlockType.GPT_OSS:
         return [gpt_oss.GptOssScannableBlock] if self.config.scan_layers else [gpt_oss.GptOssDecoderLayer]
       case DecoderBlockType.QWEN3:
-        return [qwen3.Qwen3DecoderLayerToLinen]
+        return [qwen3.Qwen3DecoderLayer]
       case DecoderBlockType.QWEN3_MOE:
-        return [qwen3.Qwen3MoeDecoderLayerToLinen]
+        return [qwen3.Qwen3MoeDecoderLayer]
       case DecoderBlockType.SIMPLE:
         return [simple_layer.SimpleDecoderLayer]
       case DecoderBlockType.SIMPLE_MLP:
         return [simple_layer.SimpleMlpDecoderLayer]
       case DecoderBlockType.LLAMA4:
-        return [llama4.Llama4ScannableBlockToLinen] if self.config.scan_layers else [llama4.Llama4DecoderLayerToLinen]
+        return [llama4.Llama4ScannableBlock] if self.config.scan_layers else [llama4.Llama4DecoderLayer]
       case _:
         # Default case to handle any unknown decoder block types.
         raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block.value=}")
