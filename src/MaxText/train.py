@@ -1,4 +1,5 @@
 # Copyright 2023–2025 Google LLC
+# Copyright (c) 2025, NVIDIA CORPORATION & AFFILIATES
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -18,7 +19,8 @@
 # Calling jax.device_count here prevents a "TPU platform already registered" error.
 # See github.com/google/maxtext/issues/20 for more
 
-from typing import Any, Sequence
+from typing import Any, Sequence, Tuple
+from contextlib import contextmanager
 import datetime
 import functools
 import os
@@ -504,10 +506,28 @@ def run(config, recorder, diagnostic_config):
     with maybe_record_goodput(recorder, GoodputEvent.JOB):
       train_loop(config, recorder)
 
+@contextmanager
+def transformer_engine_context():
+  """ If TransformerEngine is available, this context manager will provide the library with MaxText-specific details needed for correcct operation. """
+  try:
+    from transformer_engine.jax.sharding import global_shard_guard, MeshResource
+    # Inform TransformerEngine of MaxText's physical mesh resources.
+    mesh_resource = MeshResource(
+      dp_resource = "data",
+      tp_resource = "tensor",
+      fsdp_resource = "fsdp",
+      pp_resource = None,
+      cp_resource = "context",
+    )
+    with global_shard_guard(mesh_resource):
+      yield
+  except ImportError:
+    yield
 
 def main(argv: Sequence[str]) -> None:
-  config, recorder, diagnostic_config = initialize(argv)
-  run(config, recorder, diagnostic_config)
+  with transformer_engine_context():
+    config, recorder, diagnostic_config = initialize(argv)
+    run(config, recorder, diagnostic_config)
 
 
 if __name__ == "__main__":
