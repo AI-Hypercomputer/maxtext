@@ -21,7 +21,6 @@ import jax.numpy as jnp
 from jax import lax
 from jax.ad_checkpoint import checkpoint_name
 from jax.sharding import Mesh
-from typing import Optional
 
 from flax import linen as nn
 from flax import nnx
@@ -33,8 +32,6 @@ from MaxText.layers import initializers
 from MaxText.layers import nnx_wrappers
 from MaxText.layers import linears
 from MaxText.layers import quantizations
-from MaxText.layers import attentions
-from MaxText.layers import nnx_wrappers
 from MaxText.layers.quantizations import AqtQuantization as Quant
 from MaxText.layers.normalizations import RMSNorm
 from MaxText.layers.attentions import Attention
@@ -57,7 +54,7 @@ class Llama4UnfoldConvolution(nnx.Module):
     config: Config containing model parameters
   """
 
-  def __init__(self, config: Config, *, rngs: Optional[nnx.Rngs] = None):
+  def __init__(self, config: Config, *, rngs: nnx.Rngs):
     self.config = config
     self.rngs = rngs
     self.vit_unfold_linear = linears.DenseGeneral(
@@ -128,7 +125,7 @@ class Llama4VisionMLP(nnx.Module):
     config: Config containing model parameters
   """
 
-  def __init__(self, config: Config, *, rngs: Optional[nnx.Rngs] = None):
+  def __init__(self, config: Config, *, rngs: nnx.Rngs):
     self.config = config
     self.rngs = rngs
     self.vit_encoder_layer_mlp_fc1 = linears.DenseGeneral(
@@ -162,7 +159,7 @@ class Llama4VisionMLP2(nnx.Module):
     config: Config containing model parameters
   """
 
-  def __init__(self, config: Config, *, rngs: Optional[nnx.Rngs] = None):
+  def __init__(self, config: Config, *, rngs: nnx.Rngs):
     self.config = config
     self.rngs = rngs
     self.vit_pixel_shuffle_mlp_fc1 = linears.DenseGeneral(
@@ -201,7 +198,7 @@ class Llama4VisionPixelShuffleMLP(nnx.Module):
     config: Config containing model parameters
   """
 
-  def __init__(self, config: Config, *, rngs: Optional[nnx.Rngs] = None):
+  def __init__(self, config: Config, *, rngs: nnx.Rngs):
     self.config = config
     self.rngs = rngs
     self.pixel_shuffle_ratio = self.config.pixel_shuffle_ratio_for_vit
@@ -226,7 +223,7 @@ class Llama4MultiModalProjector(nnx.Module):
     config: Config containing model parameters
   """
 
-  def __init__(self, config: Config, mesh: Mesh, *, rngs: Optional[nnx.Rngs] = None):
+  def __init__(self, config: Config, mesh: Mesh, *, rngs: nnx.Rngs):
     self.config = config
     self.mesh = mesh
     self.rngs = rngs
@@ -605,7 +602,7 @@ Llama4ScannableBlockToLinen = nnx_wrappers.to_linen_class(
 class Llama4VisionEncoderLayer(nnx.Module):
   """Transformer encoder layer for Llama4 vision model."""
 
-  def __init__(self, config: Config, mesh: Mesh, *, rngs: Optional[nnx.Rngs] = None):
+  def __init__(self, config: Config, mesh: Mesh, *, rngs: nnx.Rngs):
     self.config = config
     self.mesh = mesh
     self.rngs = rngs
@@ -616,7 +613,7 @@ class Llama4VisionEncoderLayer(nnx.Module):
     )
 
     self.input_layer_norm = nnx.LayerNorm(num_features=self.config.hidden_size_for_vit, epsilon=1e-5, rngs=self.rngs)
-    self.self_attention_vision = attentions.Attention(
+    self.self_attention_vision = Attention(
         config=self.config,
         num_query_heads=self.config.num_attention_heads_for_vit,
         num_kv_heads=self.config.num_attention_heads_for_vit,
@@ -679,7 +676,7 @@ class Llama4VisionEncoder(nnx.Module):
     mesh: Mesh, JAX device mesh (used for sharding)
   """
 
-  def __init__(self, config: Config, mesh: Mesh, *, rngs: Optional[nnx.Rngs] = None):
+  def __init__(self, config: Config, mesh: Mesh, *, rngs: nnx.Rngs):
     self.config = config
     self.mesh = mesh
     self.rngs = rngs
@@ -711,7 +708,7 @@ class Llama4VisionModel(nnx.Module):
     mesh: Mesh, JAX device mesh (used for sharding)
   """
 
-  def __init__(self, config: Config, mesh: Mesh, *, rngs: nnx.Rngs = None):
+  def __init__(self, config: Config, mesh: Mesh, *, rngs: nnx.Rngs):
     self.config = config
     self.mesh = mesh
     self.rngs = rngs
