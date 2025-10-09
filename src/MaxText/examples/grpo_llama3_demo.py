@@ -458,7 +458,7 @@ show_hbm_usage()
 config_policy = pyconfig.initialize(
     [
         "",
-        os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+        f"{HOME}/maxtext/src/MaxText/configs/base.yml",
     ],
     base_output_directory="dummy",  # This is not used in Tunix.
     run_name="test-tunix-maxtext-llama3.1-8b",  # This is not used in Tunix.
