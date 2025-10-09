@@ -7,15 +7,15 @@ src/MaxText/utils/ckpt_conversion @parambole @shuningjin @RissyRan @suexu1025 @j
 src/MaxText/layers @parambole @shuningjin @RissyRan @suexu1025 @jiangjy1982 @gobbleturk @bvandermoon @gagika @shralex @richjames0
 
 # Features
-src/MaxText/experimental/rl @A9isha @khatwanimohit @xuefgu @gagika @richjames0 @shralex
-src/MaxText/input_pipeline @aireenmei @SurbhiJainUSC @richjames0 @shralex
-src/MaxText/kernels/megablox @RissyRan @michelle-yooh @gagika @richjames0 @shralex
-src/MaxText/kernels/ragged_attention.py @patemotter @vipannalla @richjames0 @shralex
-src/MaxText/layers/pipeline.py @gobbleturk @richjames0 @shralex
-src/MaxText/layers/moe.py @RissyRan @michelle-yooh @gagika @richjames0 @shralex
-src/MaxText/layers/multi_token_prediction.py @parambole @RissyRan @gagika @richjames0 @shralex
-src/MaxText/elastic_train.py @lukebaumann @shauryagup @richjames0 @shralex
-src/MaxText/layers/quantizations.py @khatwanimohit @jshin1394 @liudangyi @richjames0 @shralex
+src/MaxText/experimental/rl @A9isha @khatwanimohit @xuefgu @gagika @richjames0
+src/MaxText/input_pipeline @aireenmei @SurbhiJainUSC @richjames0
+src/MaxText/kernels/megablox @RissyRan @michelle-yooh @gagika @richjames0
+src/MaxText/kernels/ragged_attention.py @patemotter @vipannalla @richjames0
+src/MaxText/layers/pipeline.py @gobbleturk @richjames0
+src/MaxText/layers/moe.py @RissyRan @michelle-yooh @gagika @richjames0
+src/MaxText/layers/multi_token_prediction.py @parambole @RissyRan @gagika @richjames0
+src/MaxText/elastic_train.py @lukebaumann @shauryagup @RoshaniN
+src/MaxText/layers/quantizations.py @khatwanimohit @jshin1394 @liudangyi @richjames0
 
 # Inference
 src/MaxText/tests/inference @vipannalla @mitalisi @gpolovets1 @mailvijayasingh @jrplatin @patemotter @lumosis @richjames0
