@@ -17,16 +17,7 @@
 This tutorial demonstrates training the Llama3.1 8B-IT model on
  the GSM8K math reasoning benchmark using Group Relative Policy Optimization (GRPO).
    GRPO can enhance your model's problem-solving skills on mathematical word problems,
-     coding problems, etc. 
-
-GOODPUT MONITORING FEATURES:
-- Automatic goodput measurement and tracking
-- Badput breakdown analysis (non-productive time tracking)
-- Step time deviation monitoring
-- TensorBoard and Google Cloud Monitoring integration
-- Performance metrics upload to GCM
-- Real-time training efficiency monitoring
-"""
+     coding problems, etc. """
 
 # This tutorial demonstrates training the Llama3.1 8B-IT model on the GSM8K math
 # reasoning benchmark using Group Relative Policy Optimization (GRPO). GRPO can
@@ -89,10 +80,6 @@ from MaxText import model_creation_utils
 from MaxText import pyconfig
 from MaxText.integration.tunix.tunix_adapter import TunixMaxTextAdapter
 
-# MaxText goodput monitoring imports
-from MaxText.utils.goodput_utils import maybe_monitor_goodput, create_goodput_recorder, maybe_record_goodput, GoodputEvent
-from MaxText import max_logging
-
 # This is for running the script in a colab or notebook environment.
 # import nest_asyncio
 # nest_asyncio.apply()  # To fix "This event loop is already running" error in Colab
@@ -143,14 +130,6 @@ MAX_TO_KEEP = 4
 
 # ====== Reproducibility ======
 SEED = 42
-
-# ====== Goodput Monitoring ======
-# Enable goodput monitoring for performance tracking
-ENABLE_GOODPUT_RECORDING = True
-MONITOR_GOODPUT = True
-ENABLE_GCP_GOODPUT_METRICS = True
-ENABLE_GCP_STEP_DEVIATION_METRICS = True
-GOODPUT_UPLOAD_INTERVAL_SECONDS = 30
 
 
 # ====== GRPO ======
@@ -929,30 +908,6 @@ def evaluate(
 # Let's set up all the configs first - checkpointing, metric logging and training.
 # We then train the model.
 def main():
-  # Create a mock config object for goodput monitoring
-  class MockConfig:
-
-    def __init__(self):
-      self.monitor_goodput = MONITOR_GOODPUT
-      self.enable_goodput_recording = ENABLE_GOODPUT_RECORDING
-      self.enable_gcp_goodput_metrics = ENABLE_GCP_GOODPUT_METRICS
-      self.enable_gcp_step_deviation_metrics = ENABLE_GCP_STEP_DEVIATION_METRICS
-      self.goodput_upload_interval_seconds = GOODPUT_UPLOAD_INTERVAL_SECONDS
-      self.run_name = "grpo_llama3_demo"
-      self.tensorboard_dir = LOG_DIR
-      self.enable_pathways_goodput = False
-      self.monitor_step_time_deviation = True
-      self.step_deviation_interval_seconds = 60
-      self.report_performance_metric_for_gcp_monitoring = False
-
-  config = MockConfig()
-
-  # Initialize goodput monitoring
-  maybe_monitor_goodput(config)
-  recorder = create_goodput_recorder(config)
-
-  max_logging.log("GRPO training with goodput monitoring started")
-
   # Ckpt saving
   checkpointing_options = ocp.CheckpointManagerOptions(save_interval_steps=SAVE_INTERVAL_STEPS, max_to_keep=MAX_TO_KEEP)
 
@@ -1057,35 +1012,22 @@ def main():
 
   # ## Evaluate before training
   #
-  max_logging.log("Starting pre-training evaluation...")
 
-  with maybe_record_goodput(recorder, GoodputEvent.DATA_LOADING):
-    # pylint: disable=unbalanced-tuple-unpacking
-    (corr, total, accuracy, partial_accuracy, format_accuracy) = evaluate(
-        test_dataset,
-        rl_cluster,
-        **GENERATION_CONFIGS["greedy"],
-    )
+  # pylint: disable=unbalanced-tuple-unpacking
+  (corr, total, accuracy, partial_accuracy, format_accuracy) = evaluate(
+      test_dataset,
+      rl_cluster,
+      **GENERATION_CONFIGS["greedy"],
+  )
   print(f"Pre GRPO Training: {corr=}, {total=}, {accuracy=}%, {partial_accuracy=}%," f" {format_accuracy=}%")
-
-  max_logging.log(f"Pre-training evaluation completed: {accuracy}% accuracy")
 
   # ## Start training
   #
-  max_logging.log("Starting GRPO training with goodput monitoring...")
 
   jax.profiler.start_trace(PROFILE_DIR)
   with mesh, nn_partitioning.axis_rules(config_policy.logical_axis_rules):
-    with maybe_record_goodput(recorder, GoodputEvent.TRAINING_PREPARATION):
-      max_logging.log("Training preparation phase recorded")
-
-    # Record the main training phase
-    with maybe_record_goodput(recorder, GoodputEvent.STEP):
-      grpo_trainer.train(DATASET)
-
+    grpo_trainer.train(DATASET)
   jax.profiler.stop_trace()
-
-  max_logging.log("GRPO training completed")
 
   print("HBM usage after training:")
   show_hbm_usage()
@@ -1093,19 +1035,14 @@ def main():
   # ## Evaluate
   #
   # Let's evaluate our model!
-  max_logging.log("Starting post-training evaluation...")
 
-  with maybe_record_goodput(recorder, GoodputEvent.DATA_LOADING):
-    # pylint: disable=unbalanced-tuple-unpacking
-    (corr, total, accuracy, partial_accuracy, format_accuracy) = evaluate(
-        test_dataset,
-        rl_cluster,
-        **GENERATION_CONFIGS["greedy"],
-    )
+  # pylint: disable=unbalanced-tuple-unpacking
+  (corr, total, accuracy, partial_accuracy, format_accuracy) = evaluate(
+      test_dataset,
+      rl_cluster,
+      **GENERATION_CONFIGS["greedy"],
+  )
   print(f"Post GRPO Training: {corr=}, {total=}, {accuracy=}%, {partial_accuracy=}%," f" {format_accuracy=}%")
-
-  max_logging.log(f"Post-training evaluation completed: {accuracy}% accuracy")
-  max_logging.log("GRPO training with goodput monitoring finished successfully")
 
 
 if __name__ == "__main__":
