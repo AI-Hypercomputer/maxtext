@@ -137,33 +137,64 @@ def create_nnx_model(config):
     model = nnx.merge(graphdef, sharded_state)
 
     if config.load_parameters_path:
-      target_for_restore = jax.tree.map(
-          lambda v: v.value,
-          sharded_state,
-          is_leaf=lambda n: isinstance(n, nnx.Variable),
-      )
-
       try:
         ckptr = ocp.Checkpointer(
             ocp.PyTreeCheckpointHandler(
-                restore_concurrent_gb=None,
-                save_concurrent_gb=None,
-                use_ocdbt=True,
-                use_zarr3=True,
+                restore_concurrent_gb=config.checkpoint_storage_concurrent_gb,
+                save_concurrent_gb=config.checkpoint_storage_concurrent_gb,
+                use_ocdbt=config.checkpoint_storage_use_ocdbt,
+                use_zarr3=config.checkpoint_storage_use_zarr3,
             )
         )
+
         # This is a memory optimization. We don't want to restore the entire checkpoint - only the params.
         # Rather than passing the entire abstract state, which could unnecessarily restore opt_state and
         # waste memory, we instead restore the params field of the checkpoint (which itself may be a dictionary
         #  containing a key named 'params').
-        restore_args = ocp.checkpoint_utils.construct_restore_args(target_for_restore)
+
+        # Get the structure of checkpoint in `config.load_parameters_path`
+        metadata = ckptr.metadata(config.load_parameters_path)
+
+        is_nnx_checkpoint = True
+        if (
+            "params" in metadata.item_metadata.tree.keys()
+            and "params" in metadata.item_metadata.tree.get("params", {}).keys()
+        ):
+          # structure of linen checkpoint: {'params': {'params': {'decoder': ...}}}
+          is_nnx_checkpoint = False
+          target_for_restore = jax.tree.map(
+              lambda v: v.value,
+              sharded_state,
+              is_leaf=lambda n: hasattr(n, "value"),
+          )
+
+          item_to_restore = {"params": {"params": target_for_restore}}
+          restore_args = {"params": {"params": ocp.checkpoint_utils.construct_restore_args(target_for_restore)}}
+        else:
+          # structure of nnx checkpoint: {'decoder': {'value': ...}}
+          target_for_restore = jax.tree.map(
+              lambda v: {"value": v.value},
+              sharded_state,
+              is_leaf=lambda n: isinstance(n, nnx.Variable),
+          )
+          item_to_restore = target_for_restore
+          restore_args = ocp.checkpoint_utils.construct_restore_args(target_for_restore)
+
         restored = ckptr.restore(
             epath.Path(config.load_parameters_path),
-            item={"params": {"params": target_for_restore}},
+            item=item_to_restore,
             transforms={},
-            restore_args={"params": {"params": restore_args}},
+            restore_args=restore_args,
         )
-        checkpoint = restored["params"]["params"]
+
+        if is_nnx_checkpoint:
+          checkpoint = jax.tree.map(
+              lambda v: v["value"],
+              restored,
+              is_leaf=lambda x: isinstance(x, dict) and "value" in x and not isinstance(x.get("value"), dict),
+          )
+        else:
+          checkpoint = restored["params"]["params"]
 
         if checkpoint:
           nnx.update(model, checkpoint)
