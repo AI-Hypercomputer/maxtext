@@ -310,7 +310,18 @@ def validate_constant_bound(keys):
 
 def validate_quantization_methods(keys):
   """Validate quantization methods"""
-  valid_quant_methods = ("", "int8", "fp8", "fp8_full", "fp8_gpu", "fp8_nanoo")
+  valid_quant_methods = (
+      "",
+      "int8",
+      "fp8",
+      "fp8_full",
+      "fp8_gpu",
+      "fp8_nanoo",
+      "te_fp8_delayedscaling",
+      "te_fp8_currentscaling",
+      "te_mxfp8",
+      "te_nvfp4",
+  )
   if keys["use_qwix_quantization"]:
     if keys["quantization"] not in valid_quant_methods:
       raise ValueError(f"Invalid quantization method {keys['quantization']}. Valid options are {valid_quant_methods}")
