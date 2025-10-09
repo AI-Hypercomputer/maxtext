@@ -23,14 +23,11 @@ src/MaxText/inference @vipannalla @mitalisi @gpolovets1 @mailvijayasingh @jrplat
 src/MaxText/inference_mlperf @vipannalla @mitalisi @gpolovets1 @mailvijayasingh @jrplatin @patemotter @lumosis @richjames0
 
 # Dockerfiles and dependencies
-*.Dockerfile @bvandermoon @parambole @richjames0 @shralex
-*.txt @bvandermoon @parambole @richjames0 @shralex
-
-# Docs
-*.md @jacoguzo @bvandermoon @richjames0 @shralex @gobbleturk @RissyRan @gagika @A9isha @jiangjy1982 @vipannalla
+*.Dockerfile @bvandermoon @parambole @richjames0
+*.txt @bvandermoon @parambole @richjames0
 
 # Workflow files
-.github/workflows @gobbleturk @khatwanimohit @shralex @parambole @bvandermoon @richjames0
+.github/workflows @gobbleturk @khatwanimohit @shralex @parambole @richjames0
 
 # Benchmarking/Recipes
-benchmarks @SujeethJinesh @bvandermoon @richjames0 @shralex @vipannalla @mitalisi @RissyRan @shauryagup @NuojCheng @gobbleturk @khatwanimohit
+benchmarks @SujeethJinesh @bvandermoon @richjames0 @shralex @vipannalla @mitalisi @RissyRan @shauryagup
