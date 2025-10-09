@@ -706,7 +706,6 @@ def train_loop(config, config_inference, recorder, state=None):
 
   start_step = get_first_step(state)  # this is the start_step for training
   prof = profiler.Profiler(config, offset_step=start_step)
-  data_loader = DataLoader(config_inference, inference_mesh, data_iterator, recorder)
   metric_logger = MetricLogger(config=config, learning_rate_schedule=learning_rate_schedule)
 
   # Initialize GRPO training hooks
@@ -715,9 +714,11 @@ def train_loop(config, config_inference, recorder, state=None):
   )
 
   # Initialize GRPO data hooks with multi-host data pipeline
-  # Note: This provides an alternative to the current data loading approach
-  # and can be integrated for improved multi-host data loading performance
+  # This replaces the old DataLoader with improved multi-host data loading
   data_hooks = GRPODataHooks(config=config, mesh=mesh, goodput_recorder=recorder)
+
+  # Use the data_hooks' train_data_loader for loading prompts
+  data_loader = data_hooks.train_data_loader
 
   # Write train config params, num model params, and XLA flags to tensorboard
   metric_logger.write_setup_info_to_tensorboard(state.params["params"])

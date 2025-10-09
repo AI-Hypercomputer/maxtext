@@ -25,6 +25,8 @@ from MaxText import exceptions
 from MaxText import max_logging
 from MaxText import max_utils
 from MaxText import maxtext_utils
+from MaxText.data_loader import DataLoader
+from MaxText.experimental.rl import grpo_input_pipeline
 from MaxText.metric_logger import MetricLogger
 from MaxText.utils import gcs_utils
 from MaxText.utils.goodput_utils import GoodputEvent, record_goodput
@@ -317,12 +319,8 @@ class GRPODataHooks:
     self.train_batch = None
     self.eval_batch = None
 
-    # Import here to avoid circular dependencies
-    from MaxText.experimental.rl.grpo_input_pipeline import create_data_iterator
-    from MaxText.data_loader import DataLoader
-
     # Create multi-host data iterator using GRPO's input pipeline
-    self.train_data_iterator = create_data_iterator(config, mesh)
+    self.train_data_iterator = grpo_input_pipeline.create_data_iterator(config, mesh)
     self.eval_data_iterator = None  # GRPO doesn't support eval yet
 
     # Wrap train iterator with DataLoader for goodput tracking
@@ -365,4 +363,3 @@ class GRPODataHooks:
       None, as GRPO doesn't support eval data yet.
     """
     max_logging.log(f"GRPO eval data not supported yet at step {step}")
-    return None

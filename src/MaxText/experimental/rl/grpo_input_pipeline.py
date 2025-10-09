@@ -36,7 +36,7 @@ import grain.python as grain
 
 from MaxText.input_pipeline import input_pipeline_interface
 from MaxText.input_pipeline import _input_pipeline_utils
-from MaxText.input_pipeline import multihost_dataloading
+from MaxText import multihost_dataloading
 
 
 class SingleHostDataLoader:
