@@ -49,6 +49,14 @@ def get_optimizer(config, learning_rate_schedule):
   elif config.opt_type == "sgd":
     return optax.sgd(learning_rate_schedule)
   elif config.opt_type == "muon":
+    # For preliminary test, hardcode this number
+    muon_weight_dimension_numbers = None
+    if config.model_name.startswith("deepseek2"):
+      muon_weight_dimension_numbers = DEEPSEEK2_DIMENSION_NUMBER
+    elif config.model_name.startswith("deepseek3"):
+      muon_weight_dimension_numbers = DEEPSEEK3_DIMENSION_NUMBER
+    else:
+      raise NotImplementedError
     muon_kwargs = {
         # Shared parameters: "nesterov" uses default
         "learning_rate": learning_rate_schedule,
@@ -57,8 +65,7 @@ def get_optimizer(config, learning_rate_schedule):
         # Muon-specific parameters: "ns_coeffs", "ns_steps", "weight_decay_mask", "adaptive" uses default
         "beta": config.muon_beta,
         "weight_decay": config.muon_weight_decay,
-        # For preliminary test, hardcode this number
-        "muon_weight_dimension_numbers": DEEPSEEK3_DIMENSION_NUMBER,
+        "muon_weight_dimension_numbers": muon_weight_dimension_numbers,
         # AdamW-specific parameters
         "adam_b1": config.adam_b1,
         "adam_b2": config.adam_b2,
