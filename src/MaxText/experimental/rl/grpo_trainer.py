@@ -76,7 +76,6 @@ from MaxText import pyconfig
 from MaxText.checkpointing import CheckpointManager
 from MaxText.utils import gcs_utils
 from MaxText.inference import offline_engine
-from MaxText.data_loader import DataLoader
 from MaxText.experimental.rl import grpo_input_pipeline
 from MaxText.experimental.rl import grpo_utils
 from MaxText.experimental.rl.hooks import GRPOTrainingHooks, GRPODataHooks
