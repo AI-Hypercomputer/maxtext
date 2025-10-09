@@ -102,11 +102,10 @@ def main(argv: Sequence[str]) -> None:
   processor_outputs = multimodal_utils.PreprocessorOutput()
   if config.use_multimodal:
     image_path = config.image_path.split(",")
-    images = [multimodal_utils.load_image_from_path(p) for p in image_path]
-    processor_outputs = [multimodal_utils.pre_process_image(img, model_name=config.model_name) for img in images]
-    image_offsets = sum(
-        multimodal_utils.get_image_offsets(config.model_name, processor_output=po) for po in processor_outputs
-    )
+    images = np.stack([multimodal_utils.load_image_from_path(p) for p in image_path])
+    processor_outputs = multimodal_utils.pre_process_image(images, model_name=config.model_name)
+    image_offsets = multimodal_utils.get_image_offsets(config.model_name, processor_output=processor_outputs)
+
     prefill_length -= image_offsets
     text = multimodal_utils.reformat_prompt(
         text, image_placeholder=config.image_placeholder, model_name=config.model_name, num_images=len(images)
@@ -150,10 +149,8 @@ def main(argv: Sequence[str]) -> None:
       prefill_result, first_token = engine.prefill(
           params=params,
           padded_tokens=tokens,
-          images=np.stack([po.pixel_values for po in processor_outputs]) if config.use_multimodal else None,
-          image_masks=np.stack([po.pixel_mask for po in processor_outputs])
-          if config.use_multimodal and "llama4" in config.model_name
-          else None,
+          images=processor_outputs.pixel_values if config.use_multimodal else None,
+          image_masks=processor_outputs.pixel_mask if config.use_multimodal and "llama4" in config.model_name else None,
           true_length=true_length,
           rng=rng_prefill,
           slot=i,
