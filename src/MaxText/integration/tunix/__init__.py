@@ -11,3 +11,25 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from MaxText.integration.tunix.weight_mapping.llama3 import LLAMA3_VLLM_MAPPING
+from MaxText.integration.tunix.weight_mapping.qwen3 import QWEN3_VLLM_MAPPING
+
+
+class VLLM_WEIGHT_MAPPING:
+  """Mapping MaxText model weights to vLLM's model weights"""
+
+  def __getattr__(self, name):
+    if name.startswith("llama3.1"):
+      return LLAMA3_VLLM_MAPPING
+    elif name.startswith("qwen3"):
+      return QWEN3_VLLM_MAPPING
+    else:
+      raise ValueError(f"{name} vLLM weight mapping not found.")
+
+  def __getitem__(self, key):
+    return getattr(self, key)
+
+  @classmethod
+  def __class_getitem__(cls, key):
+    instance = cls()
+    return instance[key]

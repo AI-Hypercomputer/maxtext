@@ -17,7 +17,7 @@ FROM ${BASEIMAGE}
 
 RUN pip uninstall -y tunix
 COPY tunix /tunix
-RUN pip install -e /tunix --no-cache-dir 
+RUN pip install -e /tunix 
 
 # Uninstall existing jax to avoid conflicts
 RUN pip uninstall -y jax jaxlib libtpu
@@ -40,7 +40,7 @@ RUN pip install aiohttp==3.12.15 keyring keyrings.google-artifactregistry-auth
     # vllm==0.10.2rc2.dev59+gdcb28a332.tpu
 
 COPY vllm /vllm
-RUN VLLM_TARGET_DEVICE="tpu" pip install -e /vllm --no-cache-dir --pre \
+RUN VLLM_TARGET_DEVICE="tpu" pip install -e /vllm --pre \
     --extra-index-url https://pypi.org/simple/ \
     --extra-index-url https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/ \
     --extra-index-url https://download.pytorch.org/whl/nightly/cpu \

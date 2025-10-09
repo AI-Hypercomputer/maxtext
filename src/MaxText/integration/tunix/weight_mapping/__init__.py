@@ -13,6 +13,8 @@
 # limitations under the License.
 
 from MaxText.integration.tunix.weight_mapping.llama3 import LLAMA3_VLLM_MAPPING
+from MaxText.integration.tunix.weight_mapping.qwen3 import QWEN3_VLLM_MAPPING
+
 
 
 class VLLM_WEIGHT_MAPPING:
@@ -21,6 +23,8 @@ class VLLM_WEIGHT_MAPPING:
   def __getattr__(self, name):
     if name.startswith("llama3.1"):
       return LLAMA3_VLLM_MAPPING
+    elif name.startswith("qwen3"):
+      return QWEN3_VLLM_MAPPING
     else:
       raise ValueError("{} vLLM weight mapping not found.".format(name))
 

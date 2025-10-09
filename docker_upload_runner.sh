@@ -26,7 +26,7 @@
 set -e
 
 export LOCAL_IMAGE_NAME=maxtext_base_image
-export PROJECT="tpu-prod-env-multipod" # $(gcloud config get-value project)
+export PROJECT="cloud-tpu-multipod-dev" # $(gcloud config get-value project)
 
 # Set environment variables
 for ARGUMENT in "$@"; do
