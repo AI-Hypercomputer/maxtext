@@ -1,7 +1,10 @@
 # from optax.contrib import MuonDimensionNumbers as mdn
 from MaxText.muon import MuonDimensionNumbers as mdn
+import jax
+import jax.numpy as jnp
 
-# deepseek2, scanned
+# deepseek2-16b, scanned, q_lora_rank=0
+# NOTE: not compatible with deepseek2-236b (q_lora_rank: 1536)
 DEEPSEEK2_DIMENSION_NUMBER = {
     "params": {
         "decoder": {
@@ -112,7 +115,7 @@ DEEPSEEK3_DIMENSION_NUMBER = {
 def transform_logic(x, path):
   """
   with scan in mind, but should work with unscan
-  works for deepseek, could extend other models
+  work for deepseek, could extend other models
   """
   path_str = "/".join(path)
   # [0, L, -2, -1], yellow
@@ -139,7 +142,60 @@ def get_transform_tree(tree, path=()):
     return transform_logic(tree, path)
 
 
-if __name__ == "__main__":
-  # python -m MaxText.muon_dimension_number
+def get_abstract_param(model, config):
+  key = jax.random.PRNGKey(0)
+  # we only need the parameter structure, input size is irrelavent so use smallest
+  input_shape = (1, 1)  # (batch, length)
+  if config.use_multimodal:
+    image_shape = (1, 1, 1, 1, 1)
+    encoder_images = jnp.ones(image_shape, dtype=jnp.int32)
+  else:
+    encoder_images = None
+  abstract_vars = jax.eval_shape(
+      model.init,
+      {"params": key, "dropout": key, "aqt": key},
+      jnp.ones(input_shape, dtype=jnp.int32),
+      jnp.ones(input_shape, dtype=jnp.int32),
+      encoder_images=encoder_images,
+  )
+  return abstract_vars
+
+
+def test1():
   assert get_transform_tree(DEEPSEEK2_DIMENSION_NUMBER) == DEEPSEEK2_DIMENSION_NUMBER
   assert get_transform_tree(DEEPSEEK3_DIMENSION_NUMBER) == DEEPSEEK3_DIMENSION_NUMBER
+
+
+def test2():
+  from MaxText import pyconfig, maxtext_utils
+  from MaxText.globals import MAXTEXT_PKG_DIR
+  from MaxText.layers import models, quantizations
+  import os
+
+  Transformer = models.transformer_as_linen
+
+  def _test2(model_name):
+    # init model
+    argv = [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"), f"model_name={model_name}"]
+    config = pyconfig.initialize(argv)
+    rng = jax.random.PRNGKey(0)
+    devices_array = maxtext_utils.create_device_mesh(config)
+    mesh = jax.sharding.Mesh(devices_array, config.mesh_axes)
+    quant = quantizations.configure_quantization(config)
+    model = Transformer(config, mesh=mesh, quant=quant)
+    # quickly get param structure without materialization
+    abstract_param = get_abstract_param(model, config)
+    print(abstract_param)
+    # get muon dimension number
+    transform_tree = get_transform_tree(abstract_param)
+    return transform_tree
+
+  assert _test2("deepseek2-16b") == DEEPSEEK2_DIMENSION_NUMBER
+  assert _test2("deepseek3-test") == DEEPSEEK3_DIMENSION_NUMBER
+  assert _test2("deepseek3-671b") == DEEPSEEK3_DIMENSION_NUMBER
+
+
+if __name__ == "__main__":
+  # python -m MaxText.muon_dimension_number
+  test1()
+  test2()

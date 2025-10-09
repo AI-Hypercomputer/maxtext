@@ -22,9 +22,10 @@ import optax
 # from optax.contrib import muon
 from MaxText import muon
 from MaxText.muon_dimension_number import DEEPSEEK2_DIMENSION_NUMBER, DEEPSEEK3_DIMENSION_NUMBER
+from MaxText.muon_dimension_number import get_abstract_param, get_transform_tree
 
 
-def get_optimizer(config, learning_rate_schedule):
+def get_optimizer(config, learning_rate_schedule, model=None):
   """Create optimizer."""
   if config.opt_type == "adamw":
     # Create AdamW Optimizer following Llama2's training details, see https://arxiv.org/pdf/2307.09288.pdf section 2.2
@@ -50,13 +51,15 @@ def get_optimizer(config, learning_rate_schedule):
     return optax.sgd(learning_rate_schedule)
   elif config.opt_type == "muon":
     # For preliminary test, hardcode this number
-    muon_weight_dimension_numbers = None
-    if config.model_name.startswith("deepseek2"):
-      muon_weight_dimension_numbers = DEEPSEEK2_DIMENSION_NUMBER
-    elif config.model_name.startswith("deepseek3"):
-      muon_weight_dimension_numbers = DEEPSEEK3_DIMENSION_NUMBER
-    else:
-      raise NotImplementedError
+    # muon_weight_dimension_numbers = None
+    # if config.model_name.startswith("deepseek2"):
+    #   muon_weight_dimension_numbers = DEEPSEEK2_DIMENSION_NUMBER
+    # elif config.model_name.startswith("deepseek3"):
+    #   muon_weight_dimension_numbers = DEEPSEEK3_DIMENSION_NUMBER
+    # else:
+    #   raise NotImplementedError
+    abstract_param = get_abstract_param(model, config)
+    muon_weight_dimension_numbers = get_transform_tree(abstract_param)
     muon_kwargs = {
         # Shared parameters: "nesterov" uses default
         "learning_rate": learning_rate_schedule,
