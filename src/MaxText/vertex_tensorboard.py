@@ -53,7 +53,7 @@ class VertexTensorboardManager:
     # Create Vertex Tensorboard instance
     vertex_tensorboard_name = os.environ.get("TENSORBOARD_NAME")
     instance_id = tensorboard.create_instance(
-        project=vertex_tensorboard_project, location=vertex_tensorboard_region, tensorboard_name=vertex_tensorboard_name
+      project=vertex_tensorboard_project, location=vertex_tensorboard_region, tensorboard_name=vertex_tensorboard_name
     )
     # Failed to create Vertex Tensorboard instance
     if instance_id is None:
@@ -62,10 +62,10 @@ class VertexTensorboardManager:
     # Create Vertex Experiment
     vertex_experiment_name = os.environ.get("EXPERIMENT_NAME")
     _, tensorboard_url = tensorboard.create_experiment(
-        project=vertex_tensorboard_project,
-        location=vertex_tensorboard_region,
-        experiment_name=vertex_experiment_name,
-        tensorboard_name=vertex_tensorboard_name,
+      project=vertex_tensorboard_project,
+      location=vertex_tensorboard_region,
+      experiment_name=vertex_experiment_name,
+      tensorboard_name=vertex_tensorboard_name,
     )
     return tensorboard_url
 
@@ -85,15 +85,15 @@ class VertexTensorboardManager:
       self.uploader_flag = False
 
     max_logging.log(
-        f"Data will be uploaded to Vertex Tensorboard instance: {tensorboard_name} "
-        f"and Experiment: {experiment_name} in {tensorboard_region}."
+      f"Data will be uploaded to Vertex Tensorboard instance: {tensorboard_name} "
+      f"and Experiment: {experiment_name} in {tensorboard_region}."
     )
     uploader.start_upload_to_tensorboard(
-        project=tensorboard_project,
-        location=tensorboard_region,
-        experiment_name=experiment_name,
-        tensorboard_name=tensorboard_name,
-        logdir=tensorboard_dir,
+      project=tensorboard_project,
+      location=tensorboard_region,
+      experiment_name=experiment_name,
+      tensorboard_name=tensorboard_name,
+      logdir=tensorboard_dir,
     )
     self.uploader_flag = True
 

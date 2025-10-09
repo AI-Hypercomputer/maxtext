@@ -12,7 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-""" Tests for the common Max Utils """
+"""Tests for the common Max Utils"""
+
 import unittest
 
 import jax
@@ -46,11 +47,11 @@ class MaxUtilsPytree(unittest.TestCase):
 
   def test_calculate_num_params_from_pytree(self):
     example_tree = [
-        [1, "a", object()],
-        (1, (2, 3), ()),
-        [1, {"k1": 2, "k2": (3, 4)}, 5],
-        {"a": 2, "b": (2, 3)},
-        jnp.array([1, 2, 3]),
+      [1, "a", object()],
+      (1, (2, 3), ()),
+      [1, {"k1": 2, "k2": (3, 4)}, 5],
+      {"a": 2, "b": (2, 3)},
+      jnp.array([1, 2, 3]),
     ]
     self.assertEqual(max_utils.calculate_num_params_from_pytree(example_tree), 17)
     # Model params

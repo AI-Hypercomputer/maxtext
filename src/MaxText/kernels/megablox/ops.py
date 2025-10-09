@@ -26,18 +26,18 @@ import qwix.pallas as qpl
 
 
 def gmm(
-    lhs: jnp.ndarray,
-    rhs: jnp.ndarray,
-    group_sizes: jnp.ndarray,
-    preferred_element_type: jnp.dtype = jnp.float32,
-    tiling: tuple[int, int, int] = (128, 128, 128),
-    group_offset: jnp.ndarray | None = None,
-    existing_out: jnp.ndarray | None = None,
-    transpose_rhs: bool = False,
-    interpret: bool = False,
-    lhs_quantize_dtype: Literal[jnp.int4, jnp.int8] | None = None,
-    rhs_quantize_dtype: Literal[jnp.int4, jnp.int8] | None = None,
-    use_qwix_quantization: bool = False,
+  lhs: jnp.ndarray,
+  rhs: jnp.ndarray,
+  group_sizes: jnp.ndarray,
+  preferred_element_type: jnp.dtype = jnp.float32,
+  tiling: tuple[int, int, int] = (128, 128, 128),
+  group_offset: jnp.ndarray | None = None,
+  existing_out: jnp.ndarray | None = None,
+  transpose_rhs: bool = False,
+  interpret: bool = False,
+  lhs_quantize_dtype: Literal[jnp.int4, jnp.int8] | None = None,
+  rhs_quantize_dtype: Literal[jnp.int4, jnp.int8] | None = None,
+  use_qwix_quantization: bool = False,
 ):
   """Grouped matrix multiplication operation."""
   quantization_rule = None
@@ -50,100 +50,100 @@ def gmm(
     # Handcraft a rule that matches the AQT's behavior.
     if lhs_quantize_dtype or rhs_quantize_dtype:
       quantization_rule = qwix.QtRule(
-          weight_qtype=rhs_quantize_dtype,
-          weight_calibration_method="absmax",
-          act_qtype=lhs_quantize_dtype,
-          act_calibration_method="absmax",
+        weight_qtype=rhs_quantize_dtype,
+        weight_calibration_method="absmax",
+        act_qtype=lhs_quantize_dtype,
+        act_calibration_method="absmax",
       )
 
   gmm_fwd_bwd = lambda *args: _gmm_fwd(*args)[0]  # pylint: disable=C3001
   gmm_fwd_bwd = jax.custom_vjp(gmm_fwd_bwd, nondiff_argnums=(3, 4, 7, 8, 9))
   gmm_fwd_bwd.defvjp(_gmm_fwd, functools.partial(_gmm_bwd, lhs.dtype, rhs.dtype))
   return gmm_fwd_bwd(
-      lhs,
-      rhs,
-      group_sizes,
-      preferred_element_type,
-      tiling,
-      group_offset,
-      existing_out,
-      transpose_rhs,
-      interpret,
-      quantization_rule,
+    lhs,
+    rhs,
+    group_sizes,
+    preferred_element_type,
+    tiling,
+    group_offset,
+    existing_out,
+    transpose_rhs,
+    interpret,
+    quantization_rule,
   )
 
 
 def _gmm_fwd(
-    lhs: jnp.ndarray,
-    rhs: jnp.ndarray,
-    group_sizes: jnp.ndarray,
-    preferred_element_type: jnp.dtype = jnp.float32,
-    tiling: tuple[int, int, int] = (128, 128, 128),
-    group_offset: jnp.ndarray | None = None,
-    existing_out: jnp.ndarray | None = None,
-    transpose_rhs: bool = False,
-    interpret: bool = False,
-    quantization_rule: qwix.QtRule | None = None,
+  lhs: jnp.ndarray,
+  rhs: jnp.ndarray,
+  group_sizes: jnp.ndarray,
+  preferred_element_type: jnp.dtype = jnp.float32,
+  tiling: tuple[int, int, int] = (128, 128, 128),
+  group_offset: jnp.ndarray | None = None,
+  existing_out: jnp.ndarray | None = None,
+  transpose_rhs: bool = False,
+  interpret: bool = False,
+  quantization_rule: qwix.QtRule | None = None,
 ) -> tuple[
+  jnp.ndarray,
+  tuple[
+    jnp.ndarray | qpl.QArray,
+    jnp.ndarray | qpl.QArray,
     jnp.ndarray,
-    tuple[
-        jnp.ndarray | qpl.QArray,
-        jnp.ndarray | qpl.QArray,
-        jnp.ndarray,
-        jnp.ndarray | None,
-    ],
+    jnp.ndarray | None,
+  ],
 ]:
   """Forward function for GMM VJP."""
   if quantization_rule:
     if quantization_rule.act_qtype:
       lhs = qpl.quantize(
-          lhs,
-          quantization_rule.act_qtype,
-          channelwise_axes=[] if quantization_rule.disable_channelwise_axes else [0],
-          calibration_method=quantization_rule.act_calibration_method,
-          scale_dtype=jnp.float32,
+        lhs,
+        quantization_rule.act_qtype,
+        channelwise_axes=[] if quantization_rule.disable_channelwise_axes else [0],
+        calibration_method=quantization_rule.act_calibration_method,
+        scale_dtype=jnp.float32,
       )
     if quantization_rule.weight_qtype:
       rhs = qpl.quantize(
-          rhs,
-          quantization_rule.weight_qtype,
-          # If only considering the fwd pass, we could also enable channelwise
-          # axes for the group axis, i.e., [0, 1 or 2]. However, this makes the
-          # bwd pass unable to reuse the scale easily.
-          channelwise_axes=[] if quantization_rule.disable_channelwise_axes else ([1] if transpose_rhs else [2]),
-          calibration_method=quantization_rule.weight_calibration_method,
-          scale_dtype=jnp.float32,
+        rhs,
+        quantization_rule.weight_qtype,
+        # If only considering the fwd pass, we could also enable channelwise
+        # axes for the group axis, i.e., [0, 1 or 2]. However, this makes the
+        # bwd pass unable to reuse the scale easily.
+        channelwise_axes=[] if quantization_rule.disable_channelwise_axes else ([1] if transpose_rhs else [2]),
+        calibration_method=quantization_rule.weight_calibration_method,
+        scale_dtype=jnp.float32,
       )
 
   out = backend.gmm(
-      lhs,
-      rhs,
-      group_sizes,
-      preferred_element_type,
-      tiling,
-      group_offset,
-      existing_out,
-      transpose_rhs=transpose_rhs,
-      interpret=interpret,
+    lhs,
+    rhs,
+    group_sizes,
+    preferred_element_type,
+    tiling,
+    group_offset,
+    existing_out,
+    transpose_rhs=transpose_rhs,
+    interpret=interpret,
   )
   return out, (lhs, rhs, group_sizes, group_offset)
 
 
 def _gmm_bwd(
-    lhs_dtype: jax.typing.DTypeLike,
-    rhs_dtype: jax.typing.DTypeLike,
-    preferred_element_type: jnp.dtype,
-    tiling: tuple[int, int, int],
-    transpose_rhs: bool,
-    interpret: bool,
-    quantization_rule: qwix.QtRule | None,
-    residual: tuple[
-        jnp.ndarray | qpl.QArray,
-        jnp.ndarray | qpl.QArray,
-        jnp.ndarray,
-        jnp.ndarray | None,
-    ],
-    grad: jnp.ndarray,
+  lhs_dtype: jax.typing.DTypeLike,
+  rhs_dtype: jax.typing.DTypeLike,
+  preferred_element_type: jnp.dtype,
+  tiling: tuple[int, int, int],
+  transpose_rhs: bool,
+  interpret: bool,
+  quantization_rule: qwix.QtRule | None,
+  residual: tuple[
+    jnp.ndarray | qpl.QArray,
+    jnp.ndarray | qpl.QArray,
+    jnp.ndarray,
+    jnp.ndarray | None,
+  ],
+  grad: jnp.ndarray,
 ) -> tuple[jnp.ndarray, jnp.ndarray, None, None, jnp.ndarray]:
   """Backward function for throughput GMM VJP."""
   del preferred_element_type
@@ -153,7 +153,7 @@ def _gmm_bwd(
   # Jargon used here:
   #  - lhs: input activation in forward pass, possibly quantized.
   #  - rhs: weight in forward pass, possibly quantized.
-  #  - dout (or grad): the incoming gradient in the backward pass.
+  #  - doubt (or grad): the incoming gradient in the backward pass.
   #  - dlhs: gradient of the lhs in the backward pass, what we want to compute.
   #  - drhs: gradient of the rhs in the backward pass, what we want to compute.
   #  - dlhs_dout: the incoming gradient used to calculate dlhs.
@@ -174,39 +174,39 @@ def _gmm_bwd(
   if quantization_rule and quantization_rule.bwd_qtype:
     # Enable backward pass quantization
     dlhs_dout = qpl.quantize(
-        dlhs_dout,
-        quantization_rule.bwd_qtype,
-        channelwise_axes=[] if quantization_rule.disable_channelwise_axes else [0],
-        calibration_method=quantization_rule.bwd_calibration_method,
-        scale_dtype=jnp.float32,
+      dlhs_dout,
+      quantization_rule.bwd_qtype,
+      channelwise_axes=[] if quantization_rule.disable_channelwise_axes else [0],
+      calibration_method=quantization_rule.bwd_calibration_method,
+      scale_dtype=jnp.float32,
     )
     drhs_dout = qpl.quantize(
-        drhs_dout,
-        quantization_rule.bwd_qtype,
-        channelwise_axes=[] if quantization_rule.disable_channelwise_axes else [1],
-        calibration_method=quantization_rule.bwd_calibration_method,
-        scale_dtype=jnp.float32,
+      drhs_dout,
+      quantization_rule.bwd_qtype,
+      channelwise_axes=[] if quantization_rule.disable_channelwise_axes else [1],
+      calibration_method=quantization_rule.bwd_calibration_method,
+      scale_dtype=jnp.float32,
     )
 
   dlhs = backend.gmm(
-      dlhs_dout,
-      rhs,
-      group_sizes,
-      lhs_dtype,
-      tiling,
-      group_offset,
-      transpose_rhs=not transpose_rhs,
-      interpret=interpret,
+    dlhs_dout,
+    rhs,
+    group_sizes,
+    lhs_dtype,
+    tiling,
+    group_offset,
+    transpose_rhs=not transpose_rhs,
+    interpret=interpret,
   )
   drhs = backend.tgmm(
-      lhs.swapaxes(0, 1),
-      drhs_dout,
-      group_sizes,
-      rhs_dtype,
-      tiling,
-      group_offset,
-      num_actual_groups,
-      interpret=interpret,
+    lhs.swapaxes(0, 1),
+    drhs_dout,
+    group_sizes,
+    rhs_dtype,
+    tiling,
+    group_offset,
+    num_actual_groups,
+    interpret=interpret,
   )
 
   # NOTE: If the rhs transposition is fused into the forward pass we need to

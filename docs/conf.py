@@ -34,8 +34,8 @@ author = "MaxText developers"
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#general-configuration
 
 extensions = [
-    "myst_nb",
-    "sphinx_design",
+  "myst_nb",
+  "sphinx_design",
 ]
 
 templates_path = ["_templates"]
@@ -51,15 +51,15 @@ html_static_path = []
 # -- Options for myst ----------------------------------------------
 myst_heading_anchors = 3  # auto-generate 3 levels of heading anchors
 myst_enable_extensions = [
-    "dollarmath",
-    "linkify",
-    "colon_fence",
+  "dollarmath",
+  "linkify",
+  "colon_fence",
 ]
 myst_linkify_fuzzy_links = False
 
 # Remove specific documents from ToC
 exclude_patterns = [
-    "guides/run_maxtext_via_multihost_job.md",
-    "guides/run_maxtext_via_multihost_runner.md",
-    "guides/llm_calculator.ipynb",
+  "guides/run_maxtext_via_multihost_job.md",
+  "guides/run_maxtext_via_multihost_runner.md",
+  "guides/llm_calculator.ipynb",
 ]

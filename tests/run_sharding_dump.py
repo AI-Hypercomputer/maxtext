@@ -12,8 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-""" Run script to dump sharding of various combination of model and topology. """
-
+"""Run script to dump sharding of various combination of model and topology."""
 
 from typing import Sequence
 
@@ -27,16 +26,16 @@ from absl import app
 def run_single_dump(model_name: str, topology: str, num_slice: str) -> None:
   """Generate sharding json file for one specific model, topology and slice."""
   subprocess.run(
-      [
-          "python3",
-          "-m",
-          "tests.sharding_dump",
-          os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
-          f"compile_topology={topology}",
-          f"compile_topology_num_slices={num_slice}",
-          f"model_name={model_name}",
-      ],
-      check=True,
+    [
+      "python3",
+      "-m",
+      "tests.sharding_dump",
+      os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+      f"compile_topology={topology}",
+      f"compile_topology_num_slices={num_slice}",
+      f"model_name={model_name}",
+    ],
+    check=True,
   )
 
 

@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-""" inference mlperf offline_mode module """
+"""inference mlperf offline_mode module"""
 
 import array
 import contextlib
@@ -50,141 +50,141 @@ log.setLevel(os.getenv("LOGLEVEL", "INFO"))
 FLAGS = flags.FLAGS
 
 flags.DEFINE_string(
-    "mlperf_test_mode",
-    "performance",
-    "performance, accuracy, submission",
+  "mlperf_test_mode",
+  "performance",
+  "performance, accuracy, submission",
 )
 flags.DEFINE_string("api_url", None, "published model path.", required=False)
 flags.DEFINE_string("dataset_path", None, "", required=False)
 flags.DEFINE_bool("is_stream", False, "", required=False)
 flags.DEFINE_string(
-    "input_mode",
-    "tokenized",
-    "Input mode",
+  "input_mode",
+  "tokenized",
+  "Input mode",
 )
 flags.DEFINE_string(
-    "output_mode",
-    "tokenized",
-    "Output mode",
+  "output_mode",
+  "tokenized",
+  "Output mode",
 )
 
 flags.DEFINE_string(
-    "audit_conf",
-    "audit.conf",
-    "audit config for LoadGen settings during compliance runs",
-    required=False,
+  "audit_conf",
+  "audit.conf",
+  "audit config for LoadGen settings during compliance runs",
+  required=False,
 )
 flags.DEFINE_string(
-    "mlperf_conf",
-    "mlperf.conf",
-    "mlperf rules config",
-    required=False,
+  "mlperf_conf",
+  "mlperf.conf",
+  "mlperf rules config",
+  required=False,
 )
 flags.DEFINE_string(
-    "user_conf",
-    "user.conf",
-    "user config for user LoadGen settings such as target QPS",
-    required=False,
+  "user_conf",
+  "user.conf",
+  "user config for user LoadGen settings such as target QPS",
+  required=False,
 )
 flags.DEFINE_integer(
-    "total_sample_count",
-    24576,
-    "Number of samples to use in benchmark.",
-    required=False,
+  "total_sample_count",
+  24576,
+  "Number of samples to use in benchmark.",
+  required=False,
 )
 flags.DEFINE_integer(
-    "perf_count_override",
-    None,
-    "Overwrite number of samples to use in benchmark.",
-    required=False,
+  "perf_count_override",
+  None,
+  "Overwrite number of samples to use in benchmark.",
+  required=False,
 )
 flags.DEFINE_string(
-    "output_log_dir",
-    "output-logs",
-    "Where logs are saved.",
-    required=False,
+  "output_log_dir",
+  "output-logs",
+  "Where logs are saved.",
+  required=False,
 )
 flags.DEFINE_bool(
-    "enable_log_trace",
-    False,
-    "Enable log tracing. This file can become quite large",
-    required=False,
+  "enable_log_trace",
+  False,
+  "Enable log tracing. This file can become quite large",
+  required=False,
 )
 flags.DEFINE_string(
-    "prefill_lengths_and_per_device_batch_sizes",
-    "256,80|512,40|1024,20",
-    "list of prefill lengths and batch sizes to use for each engine. Format len_1,bs_1|len_2,bs_2|..",
-    required=False,
+  "prefill_lengths_and_per_device_batch_sizes",
+  "256,80|512,40|1024,20",
+  "list of prefill lengths and batch sizes to use for each engine. Format len_1,bs_1|len_2,bs_2|..",
+  required=False,
 )
 
 flags.DEFINE_string(
-    "maxengine_args",
-    "",
-    "Additional arguments to maxtext engine, space separated <name>=<value> pairs",
-    required=False,
+  "maxengine_args",
+  "",
+  "Additional arguments to maxtext engine, space separated <name>=<value> pairs",
+  required=False,
 )
 
 flags.DEFINE_integer(
-    "jax_profiler_port",
-    9999,
-    "If set, the jax.profiler port to use.",
-    required=False,
+  "jax_profiler_port",
+  9999,
+  "If set, the jax.profiler port to use.",
+  required=False,
 )
 
 flags.DEFINE_bool(
-    "enable_profile",
-    False,
-    "If set, enable jax profiling.",
-    required=False,
+  "enable_profile",
+  False,
+  "If set, enable jax profiling.",
+  required=False,
 )
 
 flags.DEFINE_bool(
-    "enable_batch_prefill",
-    False,
-    "If set, enable batch prefilling.",
-    required=False,
+  "enable_batch_prefill",
+  False,
+  "If set, enable batch prefilling.",
+  required=False,
 )
 
 flags.DEFINE_bool(
-    "skip_warmup",
-    False,
-    "Skip warmup",
-    required=False,
+  "skip_warmup",
+  False,
+  "Skip warmup",
+  required=False,
 )
 
 flags.DEFINE_float(
-    "tok_outlen_multiplier",
-    3.0,
-    "Multiplier for estimating max predicted output len",
-    required=False,
+  "tok_outlen_multiplier",
+  3.0,
+  "Multiplier for estimating max predicted output len",
+  required=False,
 )
 
 flags.DEFINE_bool(
-    "allow_skipping_queries",
-    False,
-    "Allow skipping queries which have target len greater than 2x configured max prefill len",
-    required=False,
+  "allow_skipping_queries",
+  False,
+  "Allow skipping queries which have target len greater than 2x configured max prefill len",
+  required=False,
 )
 
 flags.DEFINE_string(
-    "rename_dataset_cols",
-    "",
-    "Rename some of the dataset columns to what's expected by code. For example, "
-    "mixtral dataset uses ref_token_length instead of ref_token_len. Format is a string dict "
-    'eg. {"tok_input_len": "tok_input_length"}',
-    required=False,
+  "rename_dataset_cols",
+  "",
+  "Rename some of the dataset columns to what's expected by code. For example, "
+  "mixtral dataset uses ref_token_length instead of ref_token_len. Format is a string dict "
+  'eg. {"tok_input_len": "tok_input_length"}',
+  required=False,
 )
 
 flags.DEFINE_string(
-    "maxengine_config_filepath",
-    None,
-    "Base config filepath for initializing MaxEngine.",
-    required=False,
+  "maxengine_config_filepath",
+  None,
+  "Base config filepath for initializing MaxEngine.",
+  required=False,
 )
 
 scenario_map = {
-    "offline": lg.TestScenario.Offline,
-    "server": lg.TestScenario.Server,
+  "offline": lg.TestScenario.Offline,
+  "server": lg.TestScenario.Server,
 }
 
 
@@ -265,14 +265,14 @@ def get_warmup_samples(dataset):
     query_batches[group_idx].append(input_)
 
   interesting_buckets = [
-      0,
-      16,
-      32,
-      64,
-      128,
-      256,
-      512,
-      1024,
+    0,
+    16,
+    32,
+    64,
+    128,
+    256,
+    512,
+    1024,
   ]
   warmup_samples = _init_query_batches()
 
@@ -285,11 +285,11 @@ def get_warmup_samples(dataset):
         if start < sample.true_length <= end:
           warmup_samples[group_idx].append(sample)
           log.debug(
-              "Added warmup sample of length %d for (%d, %d) bucket for group %d",
-              sample.true_length,
-              start,
-              end,
-              group_idx,
+            "Added warmup sample of length %d for (%d, %d) bucket for group %d",
+            sample.true_length,
+            start,
+            end,
+            group_idx,
           )
           break
     warmup_samples[group_idx].extend(group_val[:50])
@@ -338,15 +338,15 @@ class SUT:
         self._query_batches[group_idx].append(input_data)
     num_grouped_queries = list(map(len, self._query_batches.values()))
     log.info(
-        "Issue %d queries - classified queries %s num_skipped %d",
-        num_queries,
-        str(num_grouped_queries),
-        num_skipped_queries,
+      "Issue %d queries - classified queries %s num_skipped %d",
+      num_queries,
+      str(num_grouped_queries),
+      num_skipped_queries,
     )
 
-    assert len(self._queries) - num_skipped_queries == sum(
-        num_grouped_queries
-    ), f"num_queries {num_queries} does not match num_grouped_queries {num_grouped_queries}"
+    assert len(self._queries) - num_skipped_queries == sum(num_grouped_queries), (
+      f"num_queries {num_queries} does not match num_grouped_queries {num_grouped_queries}"
+    )
     # At this point _processed_data is ready
     log.info("Issue queries end")
 
@@ -476,11 +476,11 @@ def main(argv):
     target_length = 2 * length
     log.info("Using batch size: %d and length: %d", batch, length)
     engine = create_engine_from_config_flags(
-        maxengine_config_filepath=FLAGS.maxengine_config_filepath,
-        batch_size=batch,
-        max_prefill_predict_length=length,
-        max_target_length=target_length,
-        args_str=FLAGS.maxengine_args,
+      maxengine_config_filepath=FLAGS.maxengine_config_filepath,
+      batch_size=batch,
+      max_prefill_predict_length=length,
+      max_target_length=target_length,
+      args_str=FLAGS.maxengine_args,
     )
     offline_inf = offline_inference.OfflineInference(engine, params, base_engine, FLAGS.enable_batch_prefill)
     if params is None and offline_inf.params is not None:
@@ -522,10 +522,10 @@ def main(argv):
 
   lgSUT = lg.ConstructSUT(sut.issue_queries, sut.flush_queries)
   qsl = lg.ConstructQSL(
-      len(dataset),
-      FLAGS.total_sample_count,
-      sut.LoadSamplesToRam,
-      sut.UnloadSamplesFromRam,
+    len(dataset),
+    FLAGS.total_sample_count,
+    sut.LoadSamplesToRam,
+    sut.UnloadSamplesFromRam,
   )
   log.info("Starting Benchmark run")
   lg.StartTestWithLogSettings(lgSUT, qsl, settings, log_settings, FLAGS.audit_conf)

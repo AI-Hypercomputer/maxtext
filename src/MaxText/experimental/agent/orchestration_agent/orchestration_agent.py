@@ -28,6 +28,7 @@ python orchestration_agent.py \
   --entry-file-path "https://github.com/huggingface/transformers/blob/main/src/transformers/models/llama/modeling_llama.py" \
   --no-exclude-conditional-imports
 """
+
 import json
 import os.path
 import argparse
@@ -39,9 +40,9 @@ from MaxText.experimental.agent.orchestration_agent.split_python_file import get
 
 # Set up basic configuration
 logging.basicConfig(
-    level=logging.INFO,  # You can use DEBUG, INFO, WARNING, ERROR, CRITICAL
-    format="%(asctime)s - %(name)s.%(funcName)s - %(levelname)s - %(message)s",
-    datefmt="%H:%M:%S",
+  level=logging.INFO,  # You can use DEBUG, INFO, WARNING, ERROR, CRITICAL
+  format="%(asctime)s - %(name)s.%(funcName)s - %(levelname)s - %(message)s",
+  datefmt="%H:%M:%S",
 )
 logger = logging.getLogger(__name__)
 
@@ -50,22 +51,22 @@ def arg_parser():
   """Parses command-line arguments."""
   parser = argparse.ArgumentParser(description="Dependency sorter for Python files on GitHub.")
   parser.add_argument(
-      "--base-path",
-      type=str,
-      default="https://github.com/huggingface/transformers/blob/main/src/",
-      help="Root URL of the source directory on GitHub (default: %(default)s)",
+    "--base-path",
+    type=str,
+    default="https://github.com/huggingface/transformers/blob/main/src/",
+    help="Root URL of the source directory on GitHub (default: %(default)s)",
   )
   parser.add_argument(
-      "--entry-file-path",
-      type=str,
-      default="https://github.com/huggingface/transformers/blob/main/src/transformers/models/llama/modeling_llama.py",
-      help="Full GitHub URL for the entry Python file to analyze (default: %(default)s)",
+    "--entry-file-path",
+    type=str,
+    default="https://github.com/huggingface/transformers/blob/main/src/transformers/models/llama/modeling_llama.py",
+    help="Full GitHub URL for the entry Python file to analyze (default: %(default)s)",
   )
   parser.add_argument(
-      "--exclude-conditional-imports",
-      action=argparse.BooleanOptionalAction,
-      default=True,
-      help="Exclude imports inside functions/classes (use --no-exclude-conditional-imports to disable)",
+    "--exclude-conditional-imports",
+    action=argparse.BooleanOptionalAction,
+    default=True,
+    help="Exclude imports inside functions/classes (use --no-exclude-conditional-imports to disable)",
   )
   args = parser.parse_args()
   if not args.entry_file_path.startswith(args.base_path):
@@ -86,7 +87,7 @@ def save_file_with_components(args, sorted_files, dependencies, basepath, out_fi
   """
   standalone_modules = [mod for mod in sorted_files if mod not in dependencies or len(dependencies[mod]) == 0]
   dependent_sorted_modules = {
-      mod: dependencies[mod] for mod in sorted_files if mod in dependencies and len(dependencies[mod]) > 0
+    mod: dependencies[mod] for mod in sorted_files if mod in dependencies and len(dependencies[mod]) > 0
   }
   with open(out_file, "wt", encoding="utf-8") as f:
     f.write(f"BasePath {args.base_path}\n")
@@ -97,9 +98,9 @@ def save_file_with_components(args, sorted_files, dependencies, basepath, out_fi
     result = get_modules_in_order(basepath + m)
     standalone_modules = [mod for mod in result["sorted_modules"].keys() if mod not in result["component_dependencies"]]
     dependent_sorted_files = {
-        mod: result["component_dependencies"][mod]
-        for mod in result["sorted_modules"].keys()
-        if mod in result["component_dependencies"]
+      mod: result["component_dependencies"][mod]
+      for mod in result["sorted_modules"].keys()
+      if mod in result["component_dependencies"]
     }
     with open(out_file, "a", encoding="utf-8") as f:
       f.write(f"\nComponents for {m}\n")
@@ -109,9 +110,9 @@ def save_file_with_components(args, sorted_files, dependencies, basepath, out_fi
     result = get_modules_in_order(basepath + m)
     standalone_modules = [mod for mod in result["sorted_modules"].keys() if mod not in result["component_dependencies"]]
     dependent_sorted_modules = {
-        mod: result["component_dependencies"][mod]
-        for mod in result["sorted_modules"].keys()
-        if mod in result["component_dependencies"]
+      mod: result["component_dependencies"][mod]
+      for mod in result["sorted_modules"].keys()
+      if mod in result["component_dependencies"]
     }
     with open(out_file, "a", encoding="utf-8") as f:
       f.write(f"\nComponents for {m}\n")
@@ -146,7 +147,7 @@ def main():
           logger.info("---> Reading Files order from all Files.json You can delete this if have some update in code. ")
     if not modules_found:
       sorted_files, dependencies = get_dependency_sorted_files(
-          ENTRY_FILE_PATH, BASE_PATH, EXCLUDE_CONDITIONAL_IMPORTS, returnDependencies=True
+        ENTRY_FILE_PATH, BASE_PATH, EXCLUDE_CONDITIONAL_IMPORTS, returnDependencies=True
       )
       with open(all_files_info, "wt", encoding="utf-8") as f:
         json.dump({"entry_file": ENTRY_FILE_PATH, "sorted_files": sorted_files, "dependencies": dependencies}, f)

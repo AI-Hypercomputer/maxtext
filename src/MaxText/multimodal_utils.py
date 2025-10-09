@@ -146,7 +146,7 @@ def get_factors(dividend: int):
 
 
 def find_supported_resolutions(
-    max_num_tiles: int = LLAMA4_TILES_NUM, tile_size: int = LLAMA4_TILE_SIZE
+  max_num_tiles: int = LLAMA4_TILES_NUM, tile_size: int = LLAMA4_TILE_SIZE
 ) -> list[tuple[int, int]]:
   """Find all possible resolutions for the image based on the number of chunks."""
   asp_dict = defaultdict(list)
@@ -167,7 +167,7 @@ def find_supported_resolutions(
 
 
 def get_best_resolution(
-    img_height: int, image_width: int, possible_resolutions: list[tuple[int, int]], resize_to_max_canvas: bool = False
+  img_height: int, image_width: int, possible_resolutions: list[tuple[int, int]], resize_to_max_canvas: bool = False
 ) -> tuple[int, int]:
   """
   Get the best resolution for the image based on the possible resolutions.
@@ -187,9 +187,9 @@ def get_best_resolution(
 
 
 def pad_to_best_fit_jax(
-    images: np.ndarray,
-    target_size: tuple[int, int],
-    background_color: int | tuple[int, ...] = 0,
+  images: np.ndarray,
+  target_size: tuple[int, int],
+  background_color: int | tuple[int, ...] = 0,
 ) -> np.ndarray:
   """
   Pads and/or crops an image or batch of images to a target size using JAX.
@@ -227,7 +227,7 @@ def pad_to_best_fit_jax(
   elif isinstance(background_color, (tuple, list)):
     if len(background_color) != num_channels:
       raise ValueError(
-          f"background_color tuple/list length {len(background_color)} " f"must match number of channels {num_channels}"
+        f"background_color tuple/list length {len(background_color)} must match number of channels {num_channels}"
       )
     background_color_array = np.array(background_color, dtype=images.dtype)
   else:
@@ -319,14 +319,14 @@ def split_to_tiles(images: np.ndarray, num_tiles_height: int, num_tiles_width: i
 
   # Reshape to introduce tile dimensions
   reshaped = np.reshape(
-      images,
-      (
-          num_channels,
-          num_tiles_height,
-          height // num_tiles_height,
-          num_tiles_width,
-          width // num_tiles_width,
-      ),
+    images,
+    (
+      num_channels,
+      num_tiles_height,
+      height // num_tiles_height,
+      num_tiles_width,
+      width // num_tiles_width,
+    ),
   )
 
   # Permute dimensions to group tiles together
@@ -334,13 +334,13 @@ def split_to_tiles(images: np.ndarray, num_tiles_height: int, num_tiles_width: i
 
   # Reshape to combine batch and tile dimensions
   tiled_images = np.reshape(
-      permuted,
-      (
-          num_tiles_height * num_tiles_width,
-          num_channels,
-          height // num_tiles_height,
-          width // num_tiles_width,
-      ),
+    permuted,
+    (
+      num_tiles_height * num_tiles_width,
+      num_channels,
+      height // num_tiles_height,
+      width // num_tiles_width,
+    ),
   )
 
   return tiled_images
@@ -359,7 +359,7 @@ def pre_process_gemma3_image(image):
   image = _normalize_images(image, mean=GEMMA_IMAGE_MEAN, std=GEMMA_IMAGE_STD)
   image = np.clip(image, -1, 1)
   processor_output = PreprocessorOutput(
-      pixel_values=image,
+    pixel_values=image,
   )
   return processor_output
 
@@ -379,24 +379,24 @@ def pre_process_llama4_image(image):
   # Find the best resolution canvas for the image
   possible_resolutions = find_supported_resolutions(max_num_tiles=LLAMA4_TILES_NUM, tile_size=LLAMA4_TILE_SIZE)
   best_resolution = get_best_resolution(
-      img_height=image.shape[0],
-      image_width=image.shape[1],
-      possible_resolutions=possible_resolutions,
-      resize_to_max_canvas=False,
+    img_height=image.shape[0],
+    image_width=image.shape[1],
+    possible_resolutions=possible_resolutions,
+    resize_to_max_canvas=False,
   )
 
   # Pad the image to the best resolution and normalize it
   image_padded = pad_to_best_fit_jax(image, best_resolution)
   image_normalized = _normalize_images(
-      images=image_padded * LLAMA4_PIXEL_VALUE_RESCALE_FACTOR,
-      mean=LLAMA4_IMAGE_MEAN,
-      std=LLAMA4_IMAGE_STD,
+    images=image_padded * LLAMA4_PIXEL_VALUE_RESCALE_FACTOR,
+    mean=LLAMA4_IMAGE_MEAN,
+    std=LLAMA4_IMAGE_STD,
   )
 
   # Split the image into tiles
   ratio_h, ratio_w = (
-      best_resolution[0] // LLAMA4_TILE_SIZE,
-      best_resolution[1] // LLAMA4_TILE_SIZE,
+    best_resolution[0] // LLAMA4_TILE_SIZE,
+    best_resolution[1] // LLAMA4_TILE_SIZE,
   )
   image_tiles = split_to_tiles(image_normalized, ratio_h, ratio_w)
 
@@ -410,7 +410,7 @@ def pre_process_llama4_image(image):
     global_tiles_pil = pil_img.resize((LLAMA4_TILE_SIZE, LLAMA4_TILE_SIZE), resample=resample_method)
     global_tiles = np.array(global_tiles_pil)
     global_tiles = _normalize_images(
-        global_tiles * LLAMA4_PIXEL_VALUE_RESCALE_FACTOR, mean=LLAMA4_IMAGE_MEAN, std=LLAMA4_IMAGE_STD
+      global_tiles * LLAMA4_PIXEL_VALUE_RESCALE_FACTOR, mean=LLAMA4_IMAGE_MEAN, std=LLAMA4_IMAGE_STD
     )
     global_tiles = np.transpose(global_tiles, (2, 0, 1))
     global_tiles = np.expand_dims(global_tiles, axis=0)
@@ -422,9 +422,9 @@ def pre_process_llama4_image(image):
   # TODO(hengtaoguo): Add support for multiple images with aspect ratios size of [num_images, 2]
   aspect_ratios_array = np.array([[ratio_h, ratio_w]], dtype=np.int32)
   processor_output = PreprocessorOutput(
-      pixel_values=image_tiles,
-      pixel_mask=image_mask,
-      aspect_ratios=aspect_ratios_array,
+    pixel_values=image_tiles,
+    pixel_mask=image_mask,
+    aspect_ratios=aspect_ratios_array,
   )
   return processor_output
 
@@ -462,8 +462,7 @@ def reformat_prompt(prompt, image_placeholder, model_name, num_images):
     if image_placeholder_count < num_images:
       prompt = LLAMA4_IMAGE_PLACEHOLDER_IN_PROMPT * (num_images - image_placeholder_count) + prompt
     formatted_prompt = (
-        f"<|begin_of_text|><|header_start|>user<|header_end|>\n\n"
-        f"{prompt}<|eot|><|header_start|>assistant<|header_end|>\n\n"
+      f"<|begin_of_text|><|header_start|>user<|header_end|>\n\n{prompt}<|eot|><|header_start|>assistant<|header_end|>\n\n"
     )
     return formatted_prompt
   else:
@@ -492,13 +491,13 @@ def get_image_offsets(model_name, processor_output: PreprocessorOutput | None):
     image_height, image_width = LLAMA4_TILE_SIZE, LLAMA4_TILE_SIZE
     downsample_ratio = int(round(1.0 / (LLAMA4_PIXEL_SHUFFLE_RATIO**2)))
     num_patches_per_chunk = int(
-        (image_height // LLAMA4_PATCH_SIZE) * (image_width // LLAMA4_PATCH_SIZE) // downsample_ratio
+      (image_height // LLAMA4_PATCH_SIZE) * (image_width // LLAMA4_PATCH_SIZE) // downsample_ratio
     )
     num_images = processor_output.aspect_ratios.shape[0]
     image_tokens_count = 0
     for image_index in range(num_images):
       image_tokens_count += get_num_tokens_for_this_image(
-          processor_output.aspect_ratios[image_index], num_patches_per_chunk
+        processor_output.aspect_ratios[image_index], num_patches_per_chunk
       )
     images_offsets = image_tokens_count - num_images
     return images_offsets  # -num_images because replacing every <|image|> tokens.
@@ -511,19 +510,19 @@ def get_dummy_image_shape_for_init(model_name, batch_size=1, num_image_per_seque
   image_shape = ()
   if model_name.startswith("gemma3"):
     image_shape = (
-        batch_size,
-        num_image_per_sequence,
-        GEMMA_DEFAULT_IMAGE_SIZE,
-        GEMMA_DEFAULT_IMAGE_SIZE,
-        NUM_IMAGE_CHANNELS,
+      batch_size,
+      num_image_per_sequence,
+      GEMMA_DEFAULT_IMAGE_SIZE,
+      GEMMA_DEFAULT_IMAGE_SIZE,
+      NUM_IMAGE_CHANNELS,
     )
   elif model_name.startswith("llama4"):
     image_shape = (
-        batch_size * num_image_per_sequence,
-        num_tiles_per_image,
-        NUM_IMAGE_CHANNELS,
-        LLAMA4_TILE_SIZE,
-        LLAMA4_TILE_SIZE,
+      batch_size * num_image_per_sequence,
+      num_tiles_per_image,
+      NUM_IMAGE_CHANNELS,
+      LLAMA4_TILE_SIZE,
+      LLAMA4_TILE_SIZE,
     )
   return image_shape
 
@@ -560,7 +559,7 @@ def add_extra_tokens_for_images_llama4(tokens, processor_output: PreprocessorOut
   image_height, image_width = LLAMA4_TILE_SIZE, LLAMA4_TILE_SIZE
   downsample_ratio = int(round(1.0 / (LLAMA4_PIXEL_SHUFFLE_RATIO**2)))
   num_patches_per_chunk = int(
-      (image_height // LLAMA4_PATCH_SIZE) * (image_width // LLAMA4_PATCH_SIZE) // downsample_ratio
+    (image_height // LLAMA4_PATCH_SIZE) * (image_width // LLAMA4_PATCH_SIZE) // downsample_ratio
   )
 
   image_index = 0
@@ -663,9 +662,9 @@ def get_num_tokens_for_this_image(this_aspect_ratio, num_patches_per_chunk):
 
 
 def add_extra_tokens_for_images_gemma3(
-    tokens: np.ndarray | list,
-    *,
-    max_num_images: int = 1,
+  tokens: np.ndarray | list,
+  *,
+  max_num_images: int = 1,
 ):  # -> Int['B L+(max_num_images * (num_tokens_per_image + 3))']:
   r"""Add the extra image tokens to the text tokens.
 
@@ -696,28 +695,28 @@ def add_extra_tokens_for_images_gemma3(
 
   # New tokens which will be inserted for each image.
   mm_tokens = [
-      GEMMA_NEW_LINE_TOKEN,
-      GEMMA_BEGIN_IMAGE_TOKEN,
-      *[GEMMA_TOKEN_PLACEHOLDER] * GEMMA_NUM_PLACEHOLDER_TOKENS_PER_IMAGE,
-      GEMMA_END_IMAGE_TOKEN,
-      GEMMA_NEW_LINE_TOKEN,
+    GEMMA_NEW_LINE_TOKEN,
+    GEMMA_BEGIN_IMAGE_TOKEN,
+    *[GEMMA_TOKEN_PLACEHOLDER] * GEMMA_NUM_PLACEHOLDER_TOKENS_PER_IMAGE,
+    GEMMA_END_IMAGE_TOKEN,
+    GEMMA_NEW_LINE_TOKEN,
   ]
   if not isinstance(tokens, np.ndarray):
     tokens = np.asarray(tokens)
   return insert_sequence(
-      at=GEMMA_BEGIN_IMAGE_TOKEN,
-      sequence=mm_tokens,
-      tokens=tokens,
-      max_num_images=max_num_images,
+    at=GEMMA_BEGIN_IMAGE_TOKEN,
+    sequence=mm_tokens,
+    tokens=tokens,
+    max_num_images=max_num_images,
   )
 
 
 def insert_sequence(
-    tokens: np.ndarray,
-    *,
-    at: int,
-    sequence: list[int],
-    max_num_images: int,
+  tokens: np.ndarray,
+  *,
+  at: int,
+  sequence: list[int],
+  max_num_images: int,
 ) -> np.ndarray:
   """
   Inserts a sequence of tokens at all occurrences of a specific token `at`.
@@ -795,9 +794,9 @@ def insert_sequence(
 
 
 def _get_new_text_positions(
-    *,
-    offset_on: np.ndarray,
-    offset_by: int,
+  *,
+  offset_on: np.ndarray,
+  offset_by: int,
 ) -> np.ndarray:
   """Create the positions of the new tokens.
 
@@ -820,10 +819,10 @@ def _get_new_text_positions(
 
 
 def merge_mm_embeddings(
-    text_embeddings: np.ndarray | jnp.ndarray,
-    vision_embeddings: np.ndarray | jnp.ndarray,
-    mask,
-    image_masks: np.ndarray | jnp.ndarray | None = None,
+  text_embeddings: np.ndarray | jnp.ndarray,
+  vision_embeddings: np.ndarray | jnp.ndarray,
+  mask,
+  image_masks: np.ndarray | jnp.ndarray | None = None,
 ) -> np.ndarray | jnp.ndarray:
   """Merges text and vision embeddings based on a mask.
 
@@ -857,7 +856,7 @@ def merge_mm_embeddings(
 
   if d_model != vision_embeddings.shape[-1]:
     raise ValueError(
-        "Embedding dimension mismatch between text and vision embeddings:" f" {d_model} vs {vision_embeddings.shape[-1]}"
+      f"Embedding dimension mismatch between text and vision embeddings: {d_model} vs {vision_embeddings.shape[-1]}"
     )
 
   # Reshape Vision Embeddings to a unified (B, S_vision, D) format
@@ -873,8 +872,8 @@ def merge_mm_embeddings(
     if image_masks.shape[0] != batch_size:
       if image_masks.shape[0] % batch_size != 0:
         raise ValueError(
-            "Batch dimension of image_masks must be a multiple of the text"
-            f" batch size. Got {image_masks.shape[0]} and {batch_size}."
+          "Batch dimension of image_masks must be a multiple of the text"
+          f" batch size. Got {image_masks.shape[0]} and {batch_size}."
         )
       # Reshape from (B * N, T) to (B, N * T)
       flat_image_tile_masks = image_masks.reshape(batch_size, -1)
@@ -888,13 +887,13 @@ def merge_mm_embeddings(
 
   # Vmap the inner merge function over the batch dimension
   return jax.vmap(
-      _merge_mm_embeddings_inner,  # Assumes this function is defined elsewhere
-      in_axes=(0, 0, 0, None if flat_image_token_masks is None else 0),
+    _merge_mm_embeddings_inner,  # Assumes this function is defined elsewhere
+    in_axes=(0, 0, 0, None if flat_image_token_masks is None else 0),
   )(text_embeddings, flat_vision_embeddings, mask, flat_image_token_masks)
 
 
 def _merge_mm_embeddings_inner(
-    text_embeddings: jnp.ndarray, vision_embeddings: jnp.ndarray, mask: jnp.ndarray, token_mask: jnp.ndarray | None = None
+  text_embeddings: jnp.ndarray, vision_embeddings: jnp.ndarray, mask: jnp.ndarray, token_mask: jnp.ndarray | None = None
 ) -> jnp.ndarray:
   """`merge_mm_embeddings` without batch dimension."""
 

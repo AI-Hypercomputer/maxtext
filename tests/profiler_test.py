@@ -13,6 +13,7 @@
 # limitations under the License.
 
 """Profiler tests."""
+
 import sys
 import unittest
 import pytest
@@ -30,13 +31,13 @@ class ProfilerTest(unittest.TestCase):
   @pytest.mark.tpu_only
   def test_periodic_profiler_third_period_starts(self):
     config = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
-        enable_checkpointing=False,
-        run_name="test_periodic_profiler_starts_after_regular_profile",
-        profiler="xplane",
-        skip_first_n_steps_for_profiler=7,
-        profiler_steps=4,
-        profile_periodically_period=5,
+      [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+      enable_checkpointing=False,
+      run_name="test_periodic_profiler_starts_after_regular_profile",
+      profiler="xplane",
+      skip_first_n_steps_for_profiler=7,
+      profiler_steps=4,
+      profile_periodically_period=5,
     )
     prof = profiler.Profiler(config, offset_step=2)
 
@@ -46,13 +47,13 @@ class ProfilerTest(unittest.TestCase):
   @pytest.mark.tpu_only
   def test_periodic_profiler_not_start_middle_period(self):
     config = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
-        enable_checkpointing=False,
-        run_name="test_periodic_profiler_starts_after_regular_profile",
-        profiler="xplane",
-        skip_first_n_steps_for_profiler=7,
-        profiler_steps=4,
-        profile_periodically_period=5,
+      [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+      enable_checkpointing=False,
+      run_name="test_periodic_profiler_starts_after_regular_profile",
+      profiler="xplane",
+      skip_first_n_steps_for_profiler=7,
+      profiler_steps=4,
+      profile_periodically_period=5,
     )
     prof = profiler.Profiler(config, offset_step=2)
 
@@ -62,13 +63,13 @@ class ProfilerTest(unittest.TestCase):
   @pytest.mark.tpu_only
   def test_periodic_profiler_third_period_ends(self):
     config = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
-        enable_checkpointing=False,
-        run_name="test_periodic_profiler_starts_after_regular_profile",
-        profiler="xplane",
-        skip_first_n_steps_for_profiler=7,
-        profiler_steps=4,
-        profile_periodically_period=5,
+      [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+      enable_checkpointing=False,
+      run_name="test_periodic_profiler_starts_after_regular_profile",
+      profiler="xplane",
+      skip_first_n_steps_for_profiler=7,
+      profiler_steps=4,
+      profile_periodically_period=5,
     )
     prof = profiler.Profiler(config, offset_step=2)
 
@@ -78,13 +79,13 @@ class ProfilerTest(unittest.TestCase):
   @pytest.mark.tpu_only
   def test_periodic_profiler_third_period_middle_not_end(self):
     config = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
-        enable_checkpointing=False,
-        run_name="test_periodic_profiler_starts_after_regular_profile",
-        profiler="xplane",
-        skip_first_n_steps_for_profiler=7,
-        profiler_steps=4,
-        profile_periodically_period=5,
+      [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+      enable_checkpointing=False,
+      run_name="test_periodic_profiler_starts_after_regular_profile",
+      profiler="xplane",
+      skip_first_n_steps_for_profiler=7,
+      profiler_steps=4,
+      profile_periodically_period=5,
     )
     prof = profiler.Profiler(config, offset_step=2)
 

@@ -13,7 +13,7 @@
 # limitations under the License.
 
 # pylint: disable=bare-except, consider-using-generator
-""" Utils that are only interesting for creating a model in MaxText. """
+"""Utils that are only interesting for creating a model in MaxText."""
 
 from collections.abc import Sequence
 from typing import overload
@@ -34,31 +34,29 @@ from etils import epath
 
 @overload
 def from_config(
-    config: pyconfig.HyperParameters,
-    devices: Sequence[jax.Device] | None = None,
-    *,
-    model_mode: str = MODEL_MODE_TRAIN,
-) -> nn.Module:
-  ...
+  config: pyconfig.HyperParameters,
+  devices: Sequence[jax.Device] | None = None,
+  *,
+  model_mode: str = MODEL_MODE_TRAIN,
+) -> nn.Module: ...
 
 
 @overload
 def from_config(
-    config: pyconfig.HyperParameters,
-    devices: Sequence[jax.Device] | None = None,
-    *,
-    model_mode: str = MODEL_MODE_TRAIN,
-    rngs: nnx.Rngs,
-) -> models.Transformer:
-  ...
+  config: pyconfig.HyperParameters,
+  devices: Sequence[jax.Device] | None = None,
+  *,
+  model_mode: str = MODEL_MODE_TRAIN,
+  rngs: nnx.Rngs,
+) -> models.Transformer: ...
 
 
 def from_config(
-    config: pyconfig.HyperParameters,
-    devices: Sequence[jax.Device] | None = None,
-    *,
-    model_mode: str = MODEL_MODE_TRAIN,
-    rngs: nnx.Rngs | None = None,
+  config: pyconfig.HyperParameters,
+  devices: Sequence[jax.Device] | None = None,
+  *,
+  model_mode: str = MODEL_MODE_TRAIN,
+  rngs: nnx.Rngs | None = None,
 ) -> nn.Module | models.Transformer:
   """Load a pretrained MaxText model from checkpoint.
 
@@ -138,19 +136,19 @@ def create_nnx_model(config):
 
     if config.load_parameters_path:
       target_for_restore = jax.tree.map(
-          lambda v: v.value,
-          sharded_state,
-          is_leaf=lambda n: isinstance(n, nnx.Variable),
+        lambda v: v.value,
+        sharded_state,
+        is_leaf=lambda n: isinstance(n, nnx.Variable),
       )
 
       try:
         ckptr = ocp.Checkpointer(
-            ocp.PyTreeCheckpointHandler(
-                restore_concurrent_gb=None,
-                save_concurrent_gb=None,
-                use_ocdbt=True,
-                use_zarr3=True,
-            )
+          ocp.PyTreeCheckpointHandler(
+            restore_concurrent_gb=None,
+            save_concurrent_gb=None,
+            use_ocdbt=True,
+            use_zarr3=True,
+          )
         )
         # This is a memory optimization. We don't want to restore the entire checkpoint - only the params.
         # Rather than passing the entire abstract state, which could unnecessarily restore opt_state and
@@ -158,10 +156,10 @@ def create_nnx_model(config):
         #  containing a key named 'params').
         restore_args = ocp.checkpoint_utils.construct_restore_args(target_for_restore)
         restored = ckptr.restore(
-            epath.Path(config.load_parameters_path),
-            item={"params": {"params": target_for_restore}},
-            transforms={},
-            restore_args={"params": {"params": restore_args}},
+          epath.Path(config.load_parameters_path),
+          item={"params": {"params": target_for_restore}},
+          transforms={},
+          restore_args={"params": {"params": restore_args}},
         )
         checkpoint = restored["params"]["params"]
 

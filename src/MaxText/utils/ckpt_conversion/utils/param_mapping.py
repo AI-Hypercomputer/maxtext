@@ -68,37 +68,37 @@ def GEMMA3_MAXTEXT_TO_HF_PARAM_MAPPING(config, scan_layers=False):
 
   # pylint: disable=line-too-long
   mapping = {
-      # Embedding & final norm
-      "params-token_embedder-embedding": "model.language_model.embed_tokens.weight",
-      "params-decoder-decoder_norm-scale": "model.language_model.norm.weight",
-      # Vision embed & pos
-      "params-vision_encoder-Gemma3VisionEncoderLayer_0-embedding-kernel": "model.vision_tower.vision_model.embeddings.patch_embedding.weight",
-      "params-vision_encoder-Gemma3VisionEncoderLayer_0-embedding-bias": "model.vision_tower.vision_model.embeddings.patch_embedding.bias",
-      "params-vision_encoder-Gemma3VisionEncoderLayer_0-pos_embedding": "model.vision_tower.vision_model.embeddings.position_embedding.weight",
-      "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoder_norm-scale": "model.vision_tower.vision_model.post_layernorm.weight",
-      "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoder_norm-bias": "model.vision_tower.vision_model.post_layernorm.bias",
-      # Multi-modal projector
-      "params-vision_encoder-VisionEmbedder_0-mm_input_projection-w": "model.multi_modal_projector.mm_input_projection_weight",
-      "params-vision_encoder-VisionEmbedder_0-mm_soft_embedding_norm-scale": "model.multi_modal_projector.mm_soft_emb_norm.weight",
+    # Embedding & final norm
+    "params-token_embedder-embedding": "model.language_model.embed_tokens.weight",
+    "params-decoder-decoder_norm-scale": "model.language_model.norm.weight",
+    # Vision embed & pos
+    "params-vision_encoder-Gemma3VisionEncoderLayer_0-embedding-kernel": "model.vision_tower.vision_model.embeddings.patch_embedding.weight",
+    "params-vision_encoder-Gemma3VisionEncoderLayer_0-embedding-bias": "model.vision_tower.vision_model.embeddings.patch_embedding.bias",
+    "params-vision_encoder-Gemma3VisionEncoderLayer_0-pos_embedding": "model.vision_tower.vision_model.embeddings.position_embedding.weight",
+    "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoder_norm-scale": "model.vision_tower.vision_model.post_layernorm.weight",
+    "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoder_norm-bias": "model.vision_tower.vision_model.post_layernorm.bias",
+    # Multi-modal projector
+    "params-vision_encoder-VisionEmbedder_0-mm_input_projection-w": "model.multi_modal_projector.mm_input_projection_weight",
+    "params-vision_encoder-VisionEmbedder_0-mm_soft_embedding_norm-scale": "model.multi_modal_projector.mm_soft_emb_norm.weight",
   }
 
   vision_params = [
-      ("LayerNorm_0-scale", "layer_norm1.weight"),
-      ("LayerNorm_0-bias", "layer_norm1.bias"),
-      ("LayerNorm_1-scale", "layer_norm2.weight"),
-      ("LayerNorm_1-bias", "layer_norm2.bias"),
-      ("MultiHeadDotProductAttention_0-query-kernel", "self_attn.q_proj.weight"),
-      ("MultiHeadDotProductAttention_0-query-bias", "self_attn.q_proj.bias"),
-      ("MultiHeadDotProductAttention_0-key-kernel", "self_attn.k_proj.weight"),
-      ("MultiHeadDotProductAttention_0-key-bias", "self_attn.k_proj.bias"),
-      ("MultiHeadDotProductAttention_0-value-kernel", "self_attn.v_proj.weight"),
-      ("MultiHeadDotProductAttention_0-value-bias", "self_attn.v_proj.bias"),
-      ("MultiHeadDotProductAttention_0-out-kernel", "self_attn.out_proj.weight"),
-      ("MultiHeadDotProductAttention_0-out-bias", "self_attn.out_proj.bias"),
-      ("MlpBlockViT_0-Dense_0-kernel", "mlp.fc1.weight"),
-      ("MlpBlockViT_0-Dense_0-bias", "mlp.fc1.bias"),
-      ("MlpBlockViT_0-Dense_1-kernel", "mlp.fc2.weight"),
-      ("MlpBlockViT_0-Dense_1-bias", "mlp.fc2.bias"),
+    ("LayerNorm_0-scale", "layer_norm1.weight"),
+    ("LayerNorm_0-bias", "layer_norm1.bias"),
+    ("LayerNorm_1-scale", "layer_norm2.weight"),
+    ("LayerNorm_1-bias", "layer_norm2.bias"),
+    ("MultiHeadDotProductAttention_0-query-kernel", "self_attn.q_proj.weight"),
+    ("MultiHeadDotProductAttention_0-query-bias", "self_attn.q_proj.bias"),
+    ("MultiHeadDotProductAttention_0-key-kernel", "self_attn.k_proj.weight"),
+    ("MultiHeadDotProductAttention_0-key-bias", "self_attn.k_proj.bias"),
+    ("MultiHeadDotProductAttention_0-value-kernel", "self_attn.v_proj.weight"),
+    ("MultiHeadDotProductAttention_0-value-bias", "self_attn.v_proj.bias"),
+    ("MultiHeadDotProductAttention_0-out-kernel", "self_attn.out_proj.weight"),
+    ("MultiHeadDotProductAttention_0-out-bias", "self_attn.out_proj.bias"),
+    ("MlpBlockViT_0-Dense_0-kernel", "mlp.fc1.weight"),
+    ("MlpBlockViT_0-Dense_0-bias", "mlp.fc1.bias"),
+    ("MlpBlockViT_0-Dense_1-kernel", "mlp.fc2.weight"),
+    ("MlpBlockViT_0-Dense_1-bias", "mlp.fc2.bias"),
   ]
 
   # Vision layers mapping
@@ -115,19 +115,19 @@ def GEMMA3_MAXTEXT_TO_HF_PARAM_MAPPING(config, scan_layers=False):
 
   # Text decoder mapping
   text_params = [
-      ("pre_self_attention_norm-scale", "input_layernorm.weight"),
-      ("post_self_attention_norm-scale", "post_attention_layernorm.weight"),
-      ("self_attention-query_norm-scale", "self_attn.q_norm.weight"),
-      ("self_attention-key_norm-scale", "self_attn.k_norm.weight"),
-      ("pre_ffw_norm-scale", "pre_feedforward_layernorm.weight"),
-      ("post_ffw_norm-scale", "post_feedforward_layernorm.weight"),
-      ("self_attention-query-kernel", "self_attn.q_proj.weight"),
-      ("self_attention-key-kernel", "self_attn.k_proj.weight"),
-      ("self_attention-value-kernel", "self_attn.v_proj.weight"),
-      ("self_attention-out-kernel", "self_attn.o_proj.weight"),
-      ("mlp-wi_0-kernel", "mlp.gate_proj.weight"),
-      ("mlp-wi_1-kernel", "mlp.up_proj.weight"),
-      ("mlp-wo-kernel", "mlp.down_proj.weight"),
+    ("pre_self_attention_norm-scale", "input_layernorm.weight"),
+    ("post_self_attention_norm-scale", "post_attention_layernorm.weight"),
+    ("self_attention-query_norm-scale", "self_attn.q_norm.weight"),
+    ("self_attention-key_norm-scale", "self_attn.k_norm.weight"),
+    ("pre_ffw_norm-scale", "pre_feedforward_layernorm.weight"),
+    ("post_ffw_norm-scale", "post_feedforward_layernorm.weight"),
+    ("self_attention-query-kernel", "self_attn.q_proj.weight"),
+    ("self_attention-key-kernel", "self_attn.k_proj.weight"),
+    ("self_attention-value-kernel", "self_attn.v_proj.weight"),
+    ("self_attention-out-kernel", "self_attn.o_proj.weight"),
+    ("mlp-wi_0-kernel", "mlp.gate_proj.weight"),
+    ("mlp-wi_1-kernel", "mlp.up_proj.weight"),
+    ("mlp-wo-kernel", "mlp.down_proj.weight"),
   ]
 
   if scan_layers:
@@ -183,7 +183,7 @@ def GEMMA3_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, scan_layers=False, saving_to_hf=F
     # Handle padding/truncation
     if source_vocab_size > target_vocab_size:
       warnings.warn(
-          f"source vocab={source_vocab_size} > target vocab={target_vocab_size}, truncate output layer for MaxText."
+        f"source vocab={source_vocab_size} > target vocab={target_vocab_size}, truncate output layer for MaxText."
       )
       output_tensor = scaled_tensor[:target_vocab_size, :]
     elif source_vocab_size < target_vocab_size:
@@ -191,14 +191,14 @@ def GEMMA3_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, scan_layers=False, saving_to_hf=F
       padding_shape = (target_vocab_size - source_vocab_size, target_hidden_size)
       # Use jnp.zeros for JAX arrays, np.zeros for numpy arrays
       padding = (
-          jnp.zeros(padding_shape, dtype=scaled_tensor.dtype)
-          if isinstance(scaled_tensor, jax.Array)
-          else np.zeros(padding_shape, dtype=scaled_tensor.dtype)
+        jnp.zeros(padding_shape, dtype=scaled_tensor.dtype)
+        if isinstance(scaled_tensor, jax.Array)
+        else np.zeros(padding_shape, dtype=scaled_tensor.dtype)
       )
       output_tensor = (
-          jnp.concatenate([scaled_tensor, padding], axis=0)
-          if isinstance(scaled_tensor, jax.Array)
-          else np.concatenate([scaled_tensor, padding], axis=0)
+        jnp.concatenate([scaled_tensor, padding], axis=0)
+        if isinstance(scaled_tensor, jax.Array)
+        else np.concatenate([scaled_tensor, padding], axis=0)
       )
     else:  # Vocab sizes match
       output_tensor = scaled_tensor
@@ -261,12 +261,12 @@ def GEMMA3_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, scan_layers=False, saving_to_hf=F
     hooks[pref + "self_attention-out-kernel"] = reshape_kernel
     # Norm scales
     for nm in [
-        "pre_self_attention_norm-scale",
-        "post_self_attention_norm-scale",
-        "self_attention-query_norm-scale",
-        "self_attention-key_norm-scale",
-        "pre_ffw_norm-scale",
-        "post_ffw_norm-scale",
+      "pre_self_attention_norm-scale",
+      "post_self_attention_norm-scale",
+      "self_attention-query_norm-scale",
+      "self_attention-key_norm-scale",
+      "pre_ffw_norm-scale",
+      "post_ffw_norm-scale",
     ]:
       hooks[pref + nm] = scale_rmsnorm
     # MLP
@@ -280,9 +280,9 @@ def GEMMA3_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, scan_layers=False, saving_to_hf=F
   vision_layer_ids = [None] if scan_layers else list(range(nvis))
   for i in vision_layer_ids:
     base = (
-        f"params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_{i}-"
-        if i is not None
-        else "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock-"
+      f"params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_{i}-"
+      if i is not None
+      else "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock-"
     )
     # Attention kernels & biases
     for qkv in ["query", "key", "value"]:
@@ -324,78 +324,78 @@ def GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING(config, scan_layers=False):
 
   nlayers = config["num_hidden_layers"]
   mapping = {
-      "params-token_embedder-embedding": "model.embed_tokens.weight",
-      "params-decoder-decoder_norm-scale": "model.norm.weight",
+    "params-token_embedder-embedding": "model.embed_tokens.weight",
+    "params-decoder-decoder_norm-scale": "model.norm.weight",
   }
   if scan_layers:
     mapping = {
-        **mapping,
-        "params-decoder-layers-pre_self_attention_norm_global-scale": [
-            f"model.layers.{i}.input_layernorm.weight" for i in range(1, nlayers, 2)
-        ],
-        "params-decoder-layers-mlp_global-wo-kernel": [
-            f"model.layers.{i}.mlp.down_proj.weight" for i in range(1, nlayers, 2)
-        ],
-        "params-decoder-layers-mlp_global-wi_1-kernel": [
-            f"model.layers.{i}.mlp.up_proj.weight" for i in range(1, nlayers, 2)
-        ],
-        "params-decoder-layers-mlp_global-wi_0-kernel": [
-            f"model.layers.{i}.mlp.gate_proj.weight" for i in range(1, nlayers, 2)
-        ],
-        "params-decoder-layers-post_self_attention_norm_global-scale": [
-            f"model.layers.{i}.post_attention_layernorm.weight" for i in range(1, nlayers, 2)
-        ],
-        "params-decoder-layers-post_ffw_norm_global-scale": [
-            f"model.layers.{i}.post_feedforward_layernorm.weight" for i in range(1, nlayers, 2)
-        ],
-        "params-decoder-layers-pre_ffw_norm_global-scale": [
-            f"model.layers.{i}.pre_feedforward_layernorm.weight" for i in range(1, nlayers, 2)
-        ],
-        "params-decoder-layers-self_attention_global-key-kernel": [
-            f"model.layers.{i}.self_attn.k_proj.weight" for i in range(1, nlayers, 2)
-        ],
-        "params-decoder-layers-self_attention_global-out-kernel": [
-            f"model.layers.{i}.self_attn.o_proj.weight" for i in range(1, nlayers, 2)
-        ],
-        "params-decoder-layers-self_attention_global-query-kernel": [
-            f"model.layers.{i}.self_attn.q_proj.weight" for i in range(1, nlayers, 2)
-        ],
-        "params-decoder-layers-self_attention_global-value-kernel": [
-            f"model.layers.{i}.self_attn.v_proj.weight" for i in range(1, nlayers, 2)
-        ],
-        "params-decoder-layers-pre_self_attention_norm_local-scale": [
-            f"model.layers.{i}.input_layernorm.weight" for i in range(0, nlayers, 2)
-        ],
-        "params-decoder-layers-mlp_local-wo-kernel": [
-            f"model.layers.{i}.mlp.down_proj.weight" for i in range(0, nlayers, 2)
-        ],
-        "params-decoder-layers-mlp_local-wi_1-kernel": [
-            f"model.layers.{i}.mlp.up_proj.weight" for i in range(0, nlayers, 2)
-        ],
-        "params-decoder-layers-mlp_local-wi_0-kernel": [
-            f"model.layers.{i}.mlp.gate_proj.weight" for i in range(0, nlayers, 2)
-        ],
-        "params-decoder-layers-post_self_attention_norm_local-scale": [
-            f"model.layers.{i}.post_attention_layernorm.weight" for i in range(0, nlayers, 2)
-        ],
-        "params-decoder-layers-post_ffw_norm_local-scale": [
-            f"model.layers.{i}.post_feedforward_layernorm.weight" for i in range(0, nlayers, 2)
-        ],
-        "params-decoder-layers-pre_ffw_norm_local-scale": [
-            f"model.layers.{i}.pre_feedforward_layernorm.weight" for i in range(0, nlayers, 2)
-        ],
-        "params-decoder-layers-self_attention_local-key-kernel": [
-            f"model.layers.{i}.self_attn.k_proj.weight" for i in range(0, nlayers, 2)
-        ],
-        "params-decoder-layers-self_attention_local-out-kernel": [
-            f"model.layers.{i}.self_attn.o_proj.weight" for i in range(0, nlayers, 2)
-        ],
-        "params-decoder-layers-self_attention_local-query-kernel": [
-            f"model.layers.{i}.self_attn.q_proj.weight" for i in range(0, nlayers, 2)
-        ],
-        "params-decoder-layers-self_attention_local-value-kernel": [
-            f"model.layers.{i}.self_attn.v_proj.weight" for i in range(0, nlayers, 2)
-        ],
+      **mapping,
+      "params-decoder-layers-pre_self_attention_norm_global-scale": [
+        f"model.layers.{i}.input_layernorm.weight" for i in range(1, nlayers, 2)
+      ],
+      "params-decoder-layers-mlp_global-wo-kernel": [
+        f"model.layers.{i}.mlp.down_proj.weight" for i in range(1, nlayers, 2)
+      ],
+      "params-decoder-layers-mlp_global-wi_1-kernel": [
+        f"model.layers.{i}.mlp.up_proj.weight" for i in range(1, nlayers, 2)
+      ],
+      "params-decoder-layers-mlp_global-wi_0-kernel": [
+        f"model.layers.{i}.mlp.gate_proj.weight" for i in range(1, nlayers, 2)
+      ],
+      "params-decoder-layers-post_self_attention_norm_global-scale": [
+        f"model.layers.{i}.post_attention_layernorm.weight" for i in range(1, nlayers, 2)
+      ],
+      "params-decoder-layers-post_ffw_norm_global-scale": [
+        f"model.layers.{i}.post_feedforward_layernorm.weight" for i in range(1, nlayers, 2)
+      ],
+      "params-decoder-layers-pre_ffw_norm_global-scale": [
+        f"model.layers.{i}.pre_feedforward_layernorm.weight" for i in range(1, nlayers, 2)
+      ],
+      "params-decoder-layers-self_attention_global-key-kernel": [
+        f"model.layers.{i}.self_attn.k_proj.weight" for i in range(1, nlayers, 2)
+      ],
+      "params-decoder-layers-self_attention_global-out-kernel": [
+        f"model.layers.{i}.self_attn.o_proj.weight" for i in range(1, nlayers, 2)
+      ],
+      "params-decoder-layers-self_attention_global-query-kernel": [
+        f"model.layers.{i}.self_attn.q_proj.weight" for i in range(1, nlayers, 2)
+      ],
+      "params-decoder-layers-self_attention_global-value-kernel": [
+        f"model.layers.{i}.self_attn.v_proj.weight" for i in range(1, nlayers, 2)
+      ],
+      "params-decoder-layers-pre_self_attention_norm_local-scale": [
+        f"model.layers.{i}.input_layernorm.weight" for i in range(0, nlayers, 2)
+      ],
+      "params-decoder-layers-mlp_local-wo-kernel": [
+        f"model.layers.{i}.mlp.down_proj.weight" for i in range(0, nlayers, 2)
+      ],
+      "params-decoder-layers-mlp_local-wi_1-kernel": [
+        f"model.layers.{i}.mlp.up_proj.weight" for i in range(0, nlayers, 2)
+      ],
+      "params-decoder-layers-mlp_local-wi_0-kernel": [
+        f"model.layers.{i}.mlp.gate_proj.weight" for i in range(0, nlayers, 2)
+      ],
+      "params-decoder-layers-post_self_attention_norm_local-scale": [
+        f"model.layers.{i}.post_attention_layernorm.weight" for i in range(0, nlayers, 2)
+      ],
+      "params-decoder-layers-post_ffw_norm_local-scale": [
+        f"model.layers.{i}.post_feedforward_layernorm.weight" for i in range(0, nlayers, 2)
+      ],
+      "params-decoder-layers-pre_ffw_norm_local-scale": [
+        f"model.layers.{i}.pre_feedforward_layernorm.weight" for i in range(0, nlayers, 2)
+      ],
+      "params-decoder-layers-self_attention_local-key-kernel": [
+        f"model.layers.{i}.self_attn.k_proj.weight" for i in range(0, nlayers, 2)
+      ],
+      "params-decoder-layers-self_attention_local-out-kernel": [
+        f"model.layers.{i}.self_attn.o_proj.weight" for i in range(0, nlayers, 2)
+      ],
+      "params-decoder-layers-self_attention_local-query-kernel": [
+        f"model.layers.{i}.self_attn.q_proj.weight" for i in range(0, nlayers, 2)
+      ],
+      "params-decoder-layers-self_attention_local-value-kernel": [
+        f"model.layers.{i}.self_attn.v_proj.weight" for i in range(0, nlayers, 2)
+      ],
     }
   # Case 2: scan_layer=False
   else:
@@ -404,28 +404,28 @@ def GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING(config, scan_layers=False):
       global_layer_idx = maxtext_layer_idx * 2 + 1
       # pylint: disable=line-too-long
       layer_mapping = {
-          f"params-decoder-layers_{maxtext_layer_idx}-pre_self_attention_norm_global-scale": f"model.layers.{global_layer_idx}.input_layernorm.weight",
-          f"params-decoder-layers_{maxtext_layer_idx}-mlp_global-wo-kernel": f"model.layers.{global_layer_idx}.mlp.down_proj.weight",
-          f"params-decoder-layers_{maxtext_layer_idx}-mlp_global-wi_1-kernel": f"model.layers.{global_layer_idx}.mlp.up_proj.weight",
-          f"params-decoder-layers_{maxtext_layer_idx}-mlp_global-wi_0-kernel": f"model.layers.{global_layer_idx}.mlp.gate_proj.weight",
-          f"params-decoder-layers_{maxtext_layer_idx}-post_self_attention_norm_global-scale": f"model.layers.{global_layer_idx}.post_attention_layernorm.weight",
-          f"params-decoder-layers_{maxtext_layer_idx}-post_ffw_norm_global-scale": f"model.layers.{global_layer_idx}.post_feedforward_layernorm.weight",
-          f"params-decoder-layers_{maxtext_layer_idx}-pre_ffw_norm_global-scale": f"model.layers.{global_layer_idx}.pre_feedforward_layernorm.weight",
-          f"params-decoder-layers_{maxtext_layer_idx}-self_attention_global-key-kernel": f"model.layers.{global_layer_idx}.self_attn.k_proj.weight",
-          f"params-decoder-layers_{maxtext_layer_idx}-self_attention_global-out-kernel": f"model.layers.{global_layer_idx}.self_attn.o_proj.weight",
-          f"params-decoder-layers_{maxtext_layer_idx}-self_attention_global-query-kernel": f"model.layers.{global_layer_idx}.self_attn.q_proj.weight",
-          f"params-decoder-layers_{maxtext_layer_idx}-self_attention_global-value-kernel": f"model.layers.{global_layer_idx}.self_attn.v_proj.weight",
-          f"params-decoder-layers_{maxtext_layer_idx}-pre_self_attention_norm_local-scale": f"model.layers.{local_layer_idx}.input_layernorm.weight",
-          f"params-decoder-layers_{maxtext_layer_idx}-mlp_local-wo-kernel": f"model.layers.{local_layer_idx}.mlp.down_proj.weight",
-          f"params-decoder-layers_{maxtext_layer_idx}-mlp_local-wi_1-kernel": f"model.layers.{local_layer_idx}.mlp.up_proj.weight",
-          f"params-decoder-layers_{maxtext_layer_idx}-mlp_local-wi_0-kernel": f"model.layers.{local_layer_idx}.mlp.gate_proj.weight",
-          f"params-decoder-layers_{maxtext_layer_idx}-post_self_attention_norm_local-scale": f"model.layers.{local_layer_idx}.post_attention_layernorm.weight",
-          f"params-decoder-layers_{maxtext_layer_idx}-post_ffw_norm_local-scale": f"model.layers.{local_layer_idx}.post_feedforward_layernorm.weight",
-          f"params-decoder-layers_{maxtext_layer_idx}-pre_ffw_norm_local-scale": f"model.layers.{local_layer_idx}.pre_feedforward_layernorm.weight",
-          f"params-decoder-layers_{maxtext_layer_idx}-self_attention_local-key-kernel": f"model.layers.{local_layer_idx}.self_attn.k_proj.weight",
-          f"params-decoder-layers_{maxtext_layer_idx}-self_attention_local-out-kernel": f"model.layers.{local_layer_idx}.self_attn.o_proj.weight",
-          f"params-decoder-layers_{maxtext_layer_idx}-self_attention_local-query-kernel": f"model.layers.{local_layer_idx}.self_attn.q_proj.weight",
-          f"params-decoder-layers_{maxtext_layer_idx}-self_attention_local-value-kernel": f"model.layers.{local_layer_idx}.self_attn.v_proj.weight",
+        f"params-decoder-layers_{maxtext_layer_idx}-pre_self_attention_norm_global-scale": f"model.layers.{global_layer_idx}.input_layernorm.weight",
+        f"params-decoder-layers_{maxtext_layer_idx}-mlp_global-wo-kernel": f"model.layers.{global_layer_idx}.mlp.down_proj.weight",
+        f"params-decoder-layers_{maxtext_layer_idx}-mlp_global-wi_1-kernel": f"model.layers.{global_layer_idx}.mlp.up_proj.weight",
+        f"params-decoder-layers_{maxtext_layer_idx}-mlp_global-wi_0-kernel": f"model.layers.{global_layer_idx}.mlp.gate_proj.weight",
+        f"params-decoder-layers_{maxtext_layer_idx}-post_self_attention_norm_global-scale": f"model.layers.{global_layer_idx}.post_attention_layernorm.weight",
+        f"params-decoder-layers_{maxtext_layer_idx}-post_ffw_norm_global-scale": f"model.layers.{global_layer_idx}.post_feedforward_layernorm.weight",
+        f"params-decoder-layers_{maxtext_layer_idx}-pre_ffw_norm_global-scale": f"model.layers.{global_layer_idx}.pre_feedforward_layernorm.weight",
+        f"params-decoder-layers_{maxtext_layer_idx}-self_attention_global-key-kernel": f"model.layers.{global_layer_idx}.self_attn.k_proj.weight",
+        f"params-decoder-layers_{maxtext_layer_idx}-self_attention_global-out-kernel": f"model.layers.{global_layer_idx}.self_attn.o_proj.weight",
+        f"params-decoder-layers_{maxtext_layer_idx}-self_attention_global-query-kernel": f"model.layers.{global_layer_idx}.self_attn.q_proj.weight",
+        f"params-decoder-layers_{maxtext_layer_idx}-self_attention_global-value-kernel": f"model.layers.{global_layer_idx}.self_attn.v_proj.weight",
+        f"params-decoder-layers_{maxtext_layer_idx}-pre_self_attention_norm_local-scale": f"model.layers.{local_layer_idx}.input_layernorm.weight",
+        f"params-decoder-layers_{maxtext_layer_idx}-mlp_local-wo-kernel": f"model.layers.{local_layer_idx}.mlp.down_proj.weight",
+        f"params-decoder-layers_{maxtext_layer_idx}-mlp_local-wi_1-kernel": f"model.layers.{local_layer_idx}.mlp.up_proj.weight",
+        f"params-decoder-layers_{maxtext_layer_idx}-mlp_local-wi_0-kernel": f"model.layers.{local_layer_idx}.mlp.gate_proj.weight",
+        f"params-decoder-layers_{maxtext_layer_idx}-post_self_attention_norm_local-scale": f"model.layers.{local_layer_idx}.post_attention_layernorm.weight",
+        f"params-decoder-layers_{maxtext_layer_idx}-post_ffw_norm_local-scale": f"model.layers.{local_layer_idx}.post_feedforward_layernorm.weight",
+        f"params-decoder-layers_{maxtext_layer_idx}-pre_ffw_norm_local-scale": f"model.layers.{local_layer_idx}.pre_feedforward_layernorm.weight",
+        f"params-decoder-layers_{maxtext_layer_idx}-self_attention_local-key-kernel": f"model.layers.{local_layer_idx}.self_attn.k_proj.weight",
+        f"params-decoder-layers_{maxtext_layer_idx}-self_attention_local-out-kernel": f"model.layers.{local_layer_idx}.self_attn.o_proj.weight",
+        f"params-decoder-layers_{maxtext_layer_idx}-self_attention_local-query-kernel": f"model.layers.{local_layer_idx}.self_attn.q_proj.weight",
+        f"params-decoder-layers_{maxtext_layer_idx}-self_attention_local-value-kernel": f"model.layers.{local_layer_idx}.self_attn.v_proj.weight",
       }
       mapping = {**mapping, **layer_mapping}
   return mapping
@@ -525,73 +525,73 @@ def GEMMA2_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, scan_layers=False, saving_to_hf=F
       return from_hf()
 
   mapping = {
-      "params-token_embedder-embedding": pad_hf_embedding_layer,
-      "params-decoder-decoder_norm-scale": scale_rmsnorm_layer,
+    "params-token_embedder-embedding": pad_hf_embedding_layer,
+    "params-decoder-decoder_norm-scale": scale_rmsnorm_layer,
   }
   if scan_layers:
     mapping = {
-        **mapping,
-        "params-decoder-layers-self_attention_global-query-kernel": [
-            reshape_kernel,
-            scale_query_layer,
-        ],
-        "params-decoder-layers-self_attention_local-query-kernel": [
-            reshape_kernel,
-            scale_query_layer,
-        ],
-        "params-decoder-layers-self_attention_global-key-kernel": reshape_kernel,
-        "params-decoder-layers-self_attention_local-key-kernel": reshape_kernel,
-        "params-decoder-layers-self_attention_global-value-kernel": reshape_kernel,
-        "params-decoder-layers-self_attention_local-value-kernel": reshape_kernel,
-        "params-decoder-layers-mlp_global-wo-kernel": reshape_kernel,
-        "params-decoder-layers-mlp_global-wi_1-kernel": reshape_kernel,
-        "params-decoder-layers-mlp_global-wi_0-kernel": reshape_kernel,
-        "params-decoder-layers-self_attention_global-out-kernel": reshape_kernel,
-        "params-decoder-layers-mlp_local-wo-kernel": reshape_kernel,
-        "params-decoder-layers-mlp_local-wi_1-kernel": reshape_kernel,
-        "params-decoder-layers-mlp_local-wi_0-kernel": reshape_kernel,
-        "params-decoder-layers-self_attention_local-out-kernel": reshape_kernel,
-        "params-decoder-layers-pre_self_attention_norm_global-scale": scale_rmsnorm_layer,
-        "params-decoder-layers-post_self_attention_norm_global-scale": scale_rmsnorm_layer,
-        "params-decoder-layers-post_ffw_norm_global-scale": scale_rmsnorm_layer,
-        "params-decoder-layers-pre_ffw_norm_global-scale": scale_rmsnorm_layer,
-        "params-decoder-layers-pre_self_attention_norm_local-scale": scale_rmsnorm_layer,
-        "params-decoder-layers-post_self_attention_norm_local-scale": scale_rmsnorm_layer,
-        "params-decoder-layers-post_ffw_norm_local-scale": scale_rmsnorm_layer,
-        "params-decoder-layers-pre_ffw_norm_local-scale": scale_rmsnorm_layer,
+      **mapping,
+      "params-decoder-layers-self_attention_global-query-kernel": [
+        reshape_kernel,
+        scale_query_layer,
+      ],
+      "params-decoder-layers-self_attention_local-query-kernel": [
+        reshape_kernel,
+        scale_query_layer,
+      ],
+      "params-decoder-layers-self_attention_global-key-kernel": reshape_kernel,
+      "params-decoder-layers-self_attention_local-key-kernel": reshape_kernel,
+      "params-decoder-layers-self_attention_global-value-kernel": reshape_kernel,
+      "params-decoder-layers-self_attention_local-value-kernel": reshape_kernel,
+      "params-decoder-layers-mlp_global-wo-kernel": reshape_kernel,
+      "params-decoder-layers-mlp_global-wi_1-kernel": reshape_kernel,
+      "params-decoder-layers-mlp_global-wi_0-kernel": reshape_kernel,
+      "params-decoder-layers-self_attention_global-out-kernel": reshape_kernel,
+      "params-decoder-layers-mlp_local-wo-kernel": reshape_kernel,
+      "params-decoder-layers-mlp_local-wi_1-kernel": reshape_kernel,
+      "params-decoder-layers-mlp_local-wi_0-kernel": reshape_kernel,
+      "params-decoder-layers-self_attention_local-out-kernel": reshape_kernel,
+      "params-decoder-layers-pre_self_attention_norm_global-scale": scale_rmsnorm_layer,
+      "params-decoder-layers-post_self_attention_norm_global-scale": scale_rmsnorm_layer,
+      "params-decoder-layers-post_ffw_norm_global-scale": scale_rmsnorm_layer,
+      "params-decoder-layers-pre_ffw_norm_global-scale": scale_rmsnorm_layer,
+      "params-decoder-layers-pre_self_attention_norm_local-scale": scale_rmsnorm_layer,
+      "params-decoder-layers-post_self_attention_norm_local-scale": scale_rmsnorm_layer,
+      "params-decoder-layers-post_ffw_norm_local-scale": scale_rmsnorm_layer,
+      "params-decoder-layers-pre_ffw_norm_local-scale": scale_rmsnorm_layer,
     }
   else:
     for maxtext_layer_idx in range(nlayers // 2):
       mapping = {
-          **mapping,
-          f"params-decoder-layers_{maxtext_layer_idx}-self_attention_global-query-kernel": [
-              reshape_kernel,
-              scale_query_layer,
-          ],
-          f"params-decoder-layers_{maxtext_layer_idx}-self_attention_local-query-kernel": [
-              reshape_kernel,
-              scale_query_layer,
-          ],
-          f"params-decoder-layers_{maxtext_layer_idx}-self_attention_global-key-kernel": reshape_kernel,
-          f"params-decoder-layers_{maxtext_layer_idx}-self_attention_local-key-kernel": reshape_kernel,
-          f"params-decoder-layers_{maxtext_layer_idx}-self_attention_global-value-kernel": reshape_kernel,
-          f"params-decoder-layers_{maxtext_layer_idx}-self_attention_local-value-kernel": reshape_kernel,
-          f"params-decoder-layers_{maxtext_layer_idx}-mlp_global-wo-kernel": reshape_kernel,
-          f"params-decoder-layers_{maxtext_layer_idx}-mlp_global-wi_1-kernel": reshape_kernel,
-          f"params-decoder-layers_{maxtext_layer_idx}-mlp_global-wi_0-kernel": reshape_kernel,
-          f"params-decoder-layers_{maxtext_layer_idx}-self_attention_global-out-kernel": reshape_kernel,
-          f"params-decoder-layers_{maxtext_layer_idx}-mlp_local-wo-kernel": reshape_kernel,
-          f"params-decoder-layers_{maxtext_layer_idx}-mlp_local-wi_1-kernel": reshape_kernel,
-          f"params-decoder-layers_{maxtext_layer_idx}-mlp_local-wi_0-kernel": reshape_kernel,
-          f"params-decoder-layers_{maxtext_layer_idx}-self_attention_local-out-kernel": reshape_kernel,
-          f"params-decoder-layers_{maxtext_layer_idx}-pre_self_attention_norm_global-scale": scale_rmsnorm_layer,
-          f"params-decoder-layers_{maxtext_layer_idx}-post_self_attention_norm_global-scale": scale_rmsnorm_layer,
-          f"params-decoder-layers_{maxtext_layer_idx}-post_ffw_norm_global-scale": scale_rmsnorm_layer,
-          f"params-decoder-layers_{maxtext_layer_idx}-pre_ffw_norm_global-scale": scale_rmsnorm_layer,
-          f"params-decoder-layers_{maxtext_layer_idx}-pre_self_attention_norm_local-scale": scale_rmsnorm_layer,
-          f"params-decoder-layers_{maxtext_layer_idx}-post_self_attention_norm_local-scale": scale_rmsnorm_layer,
-          f"params-decoder-layers_{maxtext_layer_idx}-post_ffw_norm_local-scale": scale_rmsnorm_layer,
-          f"params-decoder-layers_{maxtext_layer_idx}-pre_ffw_norm_local-scale": scale_rmsnorm_layer,
+        **mapping,
+        f"params-decoder-layers_{maxtext_layer_idx}-self_attention_global-query-kernel": [
+          reshape_kernel,
+          scale_query_layer,
+        ],
+        f"params-decoder-layers_{maxtext_layer_idx}-self_attention_local-query-kernel": [
+          reshape_kernel,
+          scale_query_layer,
+        ],
+        f"params-decoder-layers_{maxtext_layer_idx}-self_attention_global-key-kernel": reshape_kernel,
+        f"params-decoder-layers_{maxtext_layer_idx}-self_attention_local-key-kernel": reshape_kernel,
+        f"params-decoder-layers_{maxtext_layer_idx}-self_attention_global-value-kernel": reshape_kernel,
+        f"params-decoder-layers_{maxtext_layer_idx}-self_attention_local-value-kernel": reshape_kernel,
+        f"params-decoder-layers_{maxtext_layer_idx}-mlp_global-wo-kernel": reshape_kernel,
+        f"params-decoder-layers_{maxtext_layer_idx}-mlp_global-wi_1-kernel": reshape_kernel,
+        f"params-decoder-layers_{maxtext_layer_idx}-mlp_global-wi_0-kernel": reshape_kernel,
+        f"params-decoder-layers_{maxtext_layer_idx}-self_attention_global-out-kernel": reshape_kernel,
+        f"params-decoder-layers_{maxtext_layer_idx}-mlp_local-wo-kernel": reshape_kernel,
+        f"params-decoder-layers_{maxtext_layer_idx}-mlp_local-wi_1-kernel": reshape_kernel,
+        f"params-decoder-layers_{maxtext_layer_idx}-mlp_local-wi_0-kernel": reshape_kernel,
+        f"params-decoder-layers_{maxtext_layer_idx}-self_attention_local-out-kernel": reshape_kernel,
+        f"params-decoder-layers_{maxtext_layer_idx}-pre_self_attention_norm_global-scale": scale_rmsnorm_layer,
+        f"params-decoder-layers_{maxtext_layer_idx}-post_self_attention_norm_global-scale": scale_rmsnorm_layer,
+        f"params-decoder-layers_{maxtext_layer_idx}-post_ffw_norm_global-scale": scale_rmsnorm_layer,
+        f"params-decoder-layers_{maxtext_layer_idx}-pre_ffw_norm_global-scale": scale_rmsnorm_layer,
+        f"params-decoder-layers_{maxtext_layer_idx}-pre_self_attention_norm_local-scale": scale_rmsnorm_layer,
+        f"params-decoder-layers_{maxtext_layer_idx}-post_self_attention_norm_local-scale": scale_rmsnorm_layer,
+        f"params-decoder-layers_{maxtext_layer_idx}-post_ffw_norm_local-scale": scale_rmsnorm_layer,
+        f"params-decoder-layers_{maxtext_layer_idx}-pre_ffw_norm_local-scale": scale_rmsnorm_layer,
       }
   return mapping
 
@@ -618,113 +618,106 @@ def QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING(config, scan_layers=False):
   num_experts = config.get("num_experts", 0)
 
   mapping = {
-      "params-token_embedder-embedding": "model.embed_tokens.weight",
-      "params-decoder-decoder_norm-scale": "model.norm.weight",
-      "params-decoder-logits_dense-kernel": "lm_head.weight",
+    "params-token_embedder-embedding": "model.embed_tokens.weight",
+    "params-decoder-decoder_norm-scale": "model.norm.weight",
+    "params-decoder-logits_dense-kernel": "lm_head.weight",
   }
 
   if scan_layers:
     # This block handles scanned layers for both dense and MoE models.
     mapping.update(
-        {
-            "params-decoder-layers-pre_self_attention_layer_norm-scale": [
-                f"model.layers.{i}.input_layernorm.weight" for i in range(n_layers)
-            ],
-            "params-decoder-layers-self_attention-query-kernel": [
-                f"model.layers.{i}.self_attn.q_proj.weight" for i in range(n_layers)
-            ],
-            "params-decoder-layers-self_attention-key-kernel": [
-                f"model.layers.{i}.self_attn.k_proj.weight" for i in range(n_layers)
-            ],
-            "params-decoder-layers-self_attention-value-kernel": [
-                f"model.layers.{i}.self_attn.v_proj.weight" for i in range(n_layers)
-            ],
-            "params-decoder-layers-self_attention-out-kernel": [
-                f"model.layers.{i}.self_attn.o_proj.weight" for i in range(n_layers)
-            ],
-            "params-decoder-layers-self_attention-query_norm-scale": [
-                f"model.layers.{i}.self_attn.q_norm.weight" for i in range(n_layers)
-            ],
-            "params-decoder-layers-self_attention-key_norm-scale": [
-                f"model.layers.{i}.self_attn.k_norm.weight" for i in range(n_layers)
-            ],
-            "params-decoder-layers-post_self_attention_layer_norm-scale": [
-                f"model.layers.{i}.post_attention_layernorm.weight" for i in range(n_layers)
-            ],
-        }
+      {
+        "params-decoder-layers-pre_self_attention_layer_norm-scale": [
+          f"model.layers.{i}.input_layernorm.weight" for i in range(n_layers)
+        ],
+        "params-decoder-layers-self_attention-query-kernel": [
+          f"model.layers.{i}.self_attn.q_proj.weight" for i in range(n_layers)
+        ],
+        "params-decoder-layers-self_attention-key-kernel": [
+          f"model.layers.{i}.self_attn.k_proj.weight" for i in range(n_layers)
+        ],
+        "params-decoder-layers-self_attention-value-kernel": [
+          f"model.layers.{i}.self_attn.v_proj.weight" for i in range(n_layers)
+        ],
+        "params-decoder-layers-self_attention-out-kernel": [
+          f"model.layers.{i}.self_attn.o_proj.weight" for i in range(n_layers)
+        ],
+        "params-decoder-layers-self_attention-query_norm-scale": [
+          f"model.layers.{i}.self_attn.q_norm.weight" for i in range(n_layers)
+        ],
+        "params-decoder-layers-self_attention-key_norm-scale": [
+          f"model.layers.{i}.self_attn.k_norm.weight" for i in range(n_layers)
+        ],
+        "params-decoder-layers-post_self_attention_layer_norm-scale": [
+          f"model.layers.{i}.post_attention_layernorm.weight" for i in range(n_layers)
+        ],
+      }
     )
     if num_experts > 1:
       # For scanned MoE, we create a nested list: [[e0_l0, e0_l1..], [e1_l0, e1_l1..]..]
       # This follows the (experts, layers, ...) tensor layout.
       mapping.update(
-          {
-              "params-decoder-layers-moe_block-gate-kernel": [
-                  f"model.layers.{i}.mlp.gate.weight" for i in range(n_layers)
-              ],
-              "params-decoder-layers-moe_block-wi_0": [
-                  [f"model.layers.{l}.mlp.experts.{e}.gate_proj.weight" for l in range(n_layers)]
-                  for e in range(num_experts)
-              ],
-              "params-decoder-layers-moe_block-wi_1": [
-                  [f"model.layers.{l}.mlp.experts.{e}.up_proj.weight" for l in range(n_layers)]
-                  for e in range(num_experts)
-              ],
-              "params-decoder-layers-moe_block-wo": [
-                  [f"model.layers.{l}.mlp.experts.{e}.down_proj.weight" for l in range(n_layers)]
-                  for e in range(num_experts)
-              ],
-          }
+        {
+          "params-decoder-layers-moe_block-gate-kernel": [f"model.layers.{i}.mlp.gate.weight" for i in range(n_layers)],
+          "params-decoder-layers-moe_block-wi_0": [
+            [f"model.layers.{l}.mlp.experts.{e}.gate_proj.weight" for l in range(n_layers)] for e in range(num_experts)
+          ],
+          "params-decoder-layers-moe_block-wi_1": [
+            [f"model.layers.{l}.mlp.experts.{e}.up_proj.weight" for l in range(n_layers)] for e in range(num_experts)
+          ],
+          "params-decoder-layers-moe_block-wo": [
+            [f"model.layers.{l}.mlp.experts.{e}.down_proj.weight" for l in range(n_layers)] for e in range(num_experts)
+          ],
+        }
       )
     else:  # Dense MLP
       mapping.update(
-          {
-              "params-decoder-layers-mlp-wi_0-kernel": [
-                  f"model.layers.{i}.mlp.gate_proj.weight" for i in range(n_layers)
-              ],
-              "params-decoder-layers-mlp-wi_1-kernel": [f"model.layers.{i}.mlp.up_proj.weight" for i in range(n_layers)],
-              "params-decoder-layers-mlp-wo-kernel": [f"model.layers.{i}.mlp.down_proj.weight" for i in range(n_layers)],
-          }
+        {
+          "params-decoder-layers-mlp-wi_0-kernel": [f"model.layers.{i}.mlp.gate_proj.weight" for i in range(n_layers)],
+          "params-decoder-layers-mlp-wi_1-kernel": [f"model.layers.{i}.mlp.up_proj.weight" for i in range(n_layers)],
+          "params-decoder-layers-mlp-wo-kernel": [f"model.layers.{i}.mlp.down_proj.weight" for i in range(n_layers)],
+        }
       )
   else:  # unscanned layers
     for i in range(n_layers):
       # Common Attention and Norms
       # pylint: disable=line-too-long
       mapping.update(
-          {
-              f"params-decoder-layers_{i}-pre_self_attention_layer_norm-scale": f"model.layers.{i}.input_layernorm.weight",
-              f"params-decoder-layers_{i}-self_attention-query-kernel": f"model.layers.{i}.self_attn.q_proj.weight",
-              f"params-decoder-layers_{i}-self_attention-key-kernel": f"model.layers.{i}.self_attn.k_proj.weight",
-              f"params-decoder-layers_{i}-self_attention-value-kernel": f"model.layers.{i}.self_attn.v_proj.weight",
-              f"params-decoder-layers_{i}-self_attention-out-kernel": f"model.layers.{i}.self_attn.o_proj.weight",
-              f"params-decoder-layers_{i}-self_attention-query_norm-scale": f"model.layers.{i}.self_attn.q_norm.weight",
-              f"params-decoder-layers_{i}-self_attention-key_norm-scale": f"model.layers.{i}.self_attn.k_norm.weight",
-              f"params-decoder-layers_{i}-post_self_attention_layer_norm-scale": f"model.layers.{i}.post_attention_layernorm.weight",
-              f"params-decoder-layers_{i}-post_self_attention_layer_norm-scale": f"model.layers.{i}.post_attention_layernorm.weight",
-          }
+        {
+          f"params-decoder-layers_{i}-pre_self_attention_layer_norm-scale": f"model.layers.{i}.input_layernorm.weight",
+          f"params-decoder-layers_{i}-self_attention-query-kernel": f"model.layers.{i}.self_attn.q_proj.weight",
+          f"params-decoder-layers_{i}-self_attention-key-kernel": f"model.layers.{i}.self_attn.k_proj.weight",
+          f"params-decoder-layers_{i}-self_attention-value-kernel": f"model.layers.{i}.self_attn.v_proj.weight",
+          f"params-decoder-layers_{i}-self_attention-out-kernel": f"model.layers.{i}.self_attn.o_proj.weight",
+          f"params-decoder-layers_{i}-self_attention-query_norm-scale": f"model.layers.{i}.self_attn.q_norm.weight",
+          f"params-decoder-layers_{i}-self_attention-key_norm-scale": f"model.layers.{i}.self_attn.k_norm.weight",
+          f"params-decoder-layers_{i}-post_self_attention_layer_norm-scale": f"model.layers.{i}.post_attention_layernorm.weight",
+          f"params-decoder-layers_{i}-post_self_attention_layer_norm-scale": f"model.layers.{i}.post_attention_layernorm.weight",
+        }
       )
       if num_experts > 1:
         # For each unscanned MoE layer, map the MaxText parameter to a 1D list of all expert weights for that layer.
         mapping.update(
-            {
-                f"params-decoder-layers_{i}-moe_block-gate-kernel": f"model.layers.{i}.mlp.gate.weight",
-                f"params-decoder-layers_{i}-moe_block-wi_0": [
-                    f"model.layers.{i}.mlp.experts.{j}.gate_proj.weight" for j in range(num_experts)
-                ],
-                f"params-decoder-layers_{i}-moe_block-wi_1": [
-                    f"model.layers.{i}.mlp.experts.{j}.up_proj.weight" for j in range(num_experts)
-                ],
-                f"params-decoder-layers_{i}-moe_block-wo": [
-                    f"model.layers.{i}.mlp.experts.{j}.down_proj.weight" for j in range(num_experts)
-                ],
-            }
+          {
+            f"params-decoder-layers_{i}-moe_block-gate-kernel": f"model.layers.{i}.mlp.gate.weight",
+            f"params-decoder-layers_{i}-moe_block-wi_0": [
+              f"model.layers.{i}.mlp.experts.{j}.gate_proj.weight" for j in range(num_experts)
+            ],
+            f"params-decoder-layers_{i}-moe_block-wi_1": [
+              f"model.layers.{i}.mlp.experts.{j}.up_proj.weight" for j in range(num_experts)
+            ],
+            f"params-decoder-layers_{i}-moe_block-wo": [
+              f"model.layers.{i}.mlp.experts.{j}.down_proj.weight" for j in range(num_experts)
+            ],
+          }
         )
       else:  # Dense MLP
         mapping.update(
-            {
-                f"params-decoder-layers_{i}-mlp-wi_0-kernel": f"model.layers.{i}.mlp.gate_proj.weight",
-                f"params-decoder-layers_{i}-mlp-wi_1-kernel": f"model.layers.{i}.mlp.up_proj.weight",
-                f"params-decoder-layers_{i}-mlp-wo-kernel": f"model.layers.{i}.mlp.down_proj.weight",
-            }
+          {
+            f"params-decoder-layers_{i}-mlp-wi_0-kernel": f"model.layers.{i}.mlp.gate_proj.weight",
+            f"params-decoder-layers_{i}-mlp-wi_1-kernel": f"model.layers.{i}.mlp.up_proj.weight",
+            f"params-decoder-layers_{i}-mlp-wo-kernel": f"model.layers.{i}.mlp.down_proj.weight",
+          }
         )
   return mapping
 
@@ -775,27 +768,27 @@ def QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, scan_layers=False, saving_to_hf=Fa
       return input_tensor.T.reshape(target_shape)
 
   mapping = {
-      "params-token_embedder-embedding": pad_embedding_layer,
-      "params-decoder-logits_dense-kernel": reshape_kernel,
+    "params-token_embedder-embedding": pad_embedding_layer,
+    "params-decoder-logits_dense-kernel": reshape_kernel,
   }
 
   kernel_hooks = [
-      "self_attention-query-kernel",
-      "self_attention-key-kernel",
-      "self_attention-value-kernel",
-      "self_attention-out-kernel",
-      "mlp-wi_0-kernel",
-      "mlp-wi_1-kernel",
-      "mlp-wo-kernel",
+    "self_attention-query-kernel",
+    "self_attention-key-kernel",
+    "self_attention-value-kernel",
+    "self_attention-out-kernel",
+    "mlp-wi_0-kernel",
+    "mlp-wi_1-kernel",
+    "mlp-wo-kernel",
   ]
   moe_kernel_hooks = [
-      "moe_block-gate-kernel",
-      "moe_block-wi_0-kernel",
-      "moe_block-wi_1-kernel",
-      "moe_block-wo-kernel",
-      "moe_block-wi_0",
-      "moe_block-wi_1",
-      "moe_block-wo",
+    "moe_block-gate-kernel",
+    "moe_block-wi_0-kernel",
+    "moe_block-wi_1-kernel",
+    "moe_block-wo-kernel",
+    "moe_block-wi_0",
+    "moe_block-wi_1",
+    "moe_block-wo",
   ]
 
   if scan_layers:
@@ -832,61 +825,61 @@ def LLAMA31_MAXTEXT_TO_HF_PARAM_MAPPING(config, scan_layers=False):
   n_layers = config["num_hidden_layers"]
 
   mapping = {
-      "params-token_embedder-embedding": "model.embed_tokens.weight",
-      "params-decoder-logits_dense-kernel": "lm_head.weight",
-      "params-decoder-decoder_norm-scale": "model.norm.weight",
+    "params-token_embedder-embedding": "model.embed_tokens.weight",
+    "params-decoder-logits_dense-kernel": "lm_head.weight",
+    "params-decoder-decoder_norm-scale": "model.norm.weight",
   }
 
   if scan_layers:
     mapping["params-decoder-layers-self_attention-query-kernel"] = [
-        f"model.layers.{layer_idx}.self_attn.q_proj.weight" for layer_idx in range(n_layers)
+      f"model.layers.{layer_idx}.self_attn.q_proj.weight" for layer_idx in range(n_layers)
     ]
     mapping["params-decoder-layers-self_attention-key-kernel"] = [
-        f"model.layers.{layer_idx}.self_attn.k_proj.weight" for layer_idx in range(n_layers)
+      f"model.layers.{layer_idx}.self_attn.k_proj.weight" for layer_idx in range(n_layers)
     ]
     mapping["params-decoder-layers-self_attention-value-kernel"] = [
-        f"model.layers.{layer_idx}.self_attn.v_proj.weight" for layer_idx in range(n_layers)
+      f"model.layers.{layer_idx}.self_attn.v_proj.weight" for layer_idx in range(n_layers)
     ]
     mapping["params-decoder-layers-self_attention-out-kernel"] = [
-        f"model.layers.{layer_idx}.self_attn.o_proj.weight" for layer_idx in range(n_layers)
+      f"model.layers.{layer_idx}.self_attn.o_proj.weight" for layer_idx in range(n_layers)
     ]
     mapping["params-decoder-layers-mlp-wi_0-kernel"] = [
-        f"model.layers.{layer_idx}.mlp.gate_proj.weight" for layer_idx in range(n_layers)
+      f"model.layers.{layer_idx}.mlp.gate_proj.weight" for layer_idx in range(n_layers)
     ]
     mapping["params-decoder-layers-mlp-wi_1-kernel"] = [
-        f"model.layers.{layer_idx}.mlp.up_proj.weight" for layer_idx in range(n_layers)
+      f"model.layers.{layer_idx}.mlp.up_proj.weight" for layer_idx in range(n_layers)
     ]
     mapping["params-decoder-layers-mlp-wo-kernel"] = [
-        f"model.layers.{layer_idx}.mlp.down_proj.weight" for layer_idx in range(n_layers)
+      f"model.layers.{layer_idx}.mlp.down_proj.weight" for layer_idx in range(n_layers)
     ]
     mapping["params-decoder-layers-pre_self_attention_layer_norm-scale"] = [
-        f"model.layers.{layer_idx}.input_layernorm.weight" for layer_idx in range(n_layers)
+      f"model.layers.{layer_idx}.input_layernorm.weight" for layer_idx in range(n_layers)
     ]
     mapping["params-decoder-layers-post_self_attention_layer_norm-scale"] = [
-        f"model.layers.{layer_idx}.post_attention_layernorm.weight" for layer_idx in range(n_layers)
+      f"model.layers.{layer_idx}.post_attention_layernorm.weight" for layer_idx in range(n_layers)
     ]
   else:
     for layer_idx in range(n_layers):
       mapping[f"params-decoder-layers_{layer_idx}-self_attention-query-kernel"] = (
-          f"model.layers.{layer_idx}.self_attn.q_proj.weight"
+        f"model.layers.{layer_idx}.self_attn.q_proj.weight"
       )
       mapping[f"params-decoder-layers_{layer_idx}-self_attention-key-kernel"] = (
-          f"model.layers.{layer_idx}.self_attn.k_proj.weight"
+        f"model.layers.{layer_idx}.self_attn.k_proj.weight"
       )
       mapping[f"params-decoder-layers_{layer_idx}-self_attention-value-kernel"] = (
-          f"model.layers.{layer_idx}.self_attn.v_proj.weight"
+        f"model.layers.{layer_idx}.self_attn.v_proj.weight"
       )
       mapping[f"params-decoder-layers_{layer_idx}-self_attention-out-kernel"] = (
-          f"model.layers.{layer_idx}.self_attn.o_proj.weight"
+        f"model.layers.{layer_idx}.self_attn.o_proj.weight"
       )
       mapping[f"params-decoder-layers_{layer_idx}-mlp-wi_0-kernel"] = f"model.layers.{layer_idx}.mlp.gate_proj.weight"
       mapping[f"params-decoder-layers_{layer_idx}-mlp-wi_1-kernel"] = f"model.layers.{layer_idx}.mlp.up_proj.weight"
       mapping[f"params-decoder-layers_{layer_idx}-mlp-wo-kernel"] = f"model.layers.{layer_idx}.mlp.down_proj.weight"
       mapping[f"params-decoder-layers_{layer_idx}-pre_self_attention_layer_norm-scale"] = (
-          f"model.layers.{layer_idx}.input_layernorm.weight"
+        f"model.layers.{layer_idx}.input_layernorm.weight"
       )
       mapping[f"params-decoder-layers_{layer_idx}-post_self_attention_layer_norm-scale"] = (
-          f"model.layers.{layer_idx}.post_attention_layernorm.weight"
+        f"model.layers.{layer_idx}.post_attention_layernorm.weight"
       )
 
   return mapping
@@ -967,14 +960,14 @@ def LLAMA31_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, scan_layers=False, saving_to_hf=
 
   if scan_layers:
     hook_fns = {
-        **hook_fns,
-        "params-decoder-layers-self_attention-query-kernel": query_hooks,
-        "params-decoder-layers-self_attention-key-kernel": key_hooks,
-        "params-decoder-layers-self_attention-value-kernel": reshape_kernel,
-        "params-decoder-layers-self_attention-out-kernel": reshape_kernel,
-        "params-decoder-layers-mlp-wi_0-kernel": reshape_kernel,
-        "params-decoder-layers-mlp-wi_1-kernel": reshape_kernel,
-        "params-decoder-layers-mlp-wo-kernel": reshape_kernel,
+      **hook_fns,
+      "params-decoder-layers-self_attention-query-kernel": query_hooks,
+      "params-decoder-layers-self_attention-key-kernel": key_hooks,
+      "params-decoder-layers-self_attention-value-kernel": reshape_kernel,
+      "params-decoder-layers-self_attention-out-kernel": reshape_kernel,
+      "params-decoder-layers-mlp-wi_0-kernel": reshape_kernel,
+      "params-decoder-layers-mlp-wi_1-kernel": reshape_kernel,
+      "params-decoder-layers-mlp-wo-kernel": reshape_kernel,
     }
   else:
     for layer_idx in range(nlayers):
@@ -989,41 +982,41 @@ def LLAMA31_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, scan_layers=False, saving_to_hf=
 
 
 PARAM_MAPPING = {
-    "gemma2-2b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
-    "gemma2-9b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
-    "gemma2-27b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
-    "gemma3-4b": GEMMA3_MAXTEXT_TO_HF_PARAM_MAPPING,
-    "gemma3-12b": GEMMA3_MAXTEXT_TO_HF_PARAM_MAPPING,
-    "gemma3-27b": GEMMA3_MAXTEXT_TO_HF_PARAM_MAPPING,
-    "qwen3-0.6b": QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING,
-    "qwen3-4b": QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING,
-    "qwen3-8b": QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING,
-    "qwen3-14b": QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING,
-    "qwen3-32b": QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING,
-    "llama3.1-8b": LLAMA31_MAXTEXT_TO_HF_PARAM_MAPPING,
-    "llama3.1-70b": LLAMA31_MAXTEXT_TO_HF_PARAM_MAPPING,
-    "llama3.1-405b": LLAMA31_MAXTEXT_TO_HF_PARAM_MAPPING,
-    "qwen3-30b-a3b": QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING,
-    "qwen3-235b-a22b": QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING,
-    "qwen3-coder-480b-a35b": QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING,
+  "gemma2-2b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
+  "gemma2-9b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
+  "gemma2-27b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
+  "gemma3-4b": GEMMA3_MAXTEXT_TO_HF_PARAM_MAPPING,
+  "gemma3-12b": GEMMA3_MAXTEXT_TO_HF_PARAM_MAPPING,
+  "gemma3-27b": GEMMA3_MAXTEXT_TO_HF_PARAM_MAPPING,
+  "qwen3-0.6b": QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING,
+  "qwen3-4b": QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING,
+  "qwen3-8b": QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING,
+  "qwen3-14b": QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING,
+  "qwen3-32b": QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING,
+  "llama3.1-8b": LLAMA31_MAXTEXT_TO_HF_PARAM_MAPPING,
+  "llama3.1-70b": LLAMA31_MAXTEXT_TO_HF_PARAM_MAPPING,
+  "llama3.1-405b": LLAMA31_MAXTEXT_TO_HF_PARAM_MAPPING,
+  "qwen3-30b-a3b": QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING,
+  "qwen3-235b-a22b": QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING,
+  "qwen3-coder-480b-a35b": QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING,
 }
 
 HOOK_FNS = {
-    "gemma2-2b": GEMMA2_MAXTEXT_TO_HF_PARAM_HOOK_FN,
-    "gemma2-9b": GEMMA2_MAXTEXT_TO_HF_PARAM_HOOK_FN,
-    "gemma2-27b": GEMMA2_MAXTEXT_TO_HF_PARAM_HOOK_FN,
-    "gemma3-4b": GEMMA3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
-    "gemma3-12b": GEMMA3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
-    "gemma3-27b": GEMMA3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
-    "qwen3-0.6b": QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
-    "qwen3-4b": QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
-    "qwen3-8b": QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
-    "qwen3-14b": QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
-    "qwen3-32b": QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
-    "llama3.1-8b": LLAMA31_MAXTEXT_TO_HF_PARAM_HOOK_FN,
-    "llama3.1-70b": LLAMA31_MAXTEXT_TO_HF_PARAM_HOOK_FN,
-    "llama3.1-405b": LLAMA31_MAXTEXT_TO_HF_PARAM_HOOK_FN,
-    "qwen3-30b-a3b": QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
-    "qwen3-235b-a22b": QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
-    "qwen3-coder-480b-a35b": QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+  "gemma2-2b": GEMMA2_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+  "gemma2-9b": GEMMA2_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+  "gemma2-27b": GEMMA2_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+  "gemma3-4b": GEMMA3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+  "gemma3-12b": GEMMA3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+  "gemma3-27b": GEMMA3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+  "qwen3-0.6b": QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+  "qwen3-4b": QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+  "qwen3-8b": QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+  "qwen3-14b": QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+  "qwen3-32b": QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+  "llama3.1-8b": LLAMA31_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+  "llama3.1-70b": LLAMA31_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+  "llama3.1-405b": LLAMA31_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+  "qwen3-30b-a3b": QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+  "qwen3-235b-a22b": QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+  "qwen3-coder-480b-a35b": QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
 }
