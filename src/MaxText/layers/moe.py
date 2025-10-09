@@ -812,12 +812,13 @@ class RoutedMoE(nnx.Module):
       if self.config.megablox:
         if self.config.use_tokamax:
           # tiling_config = pallas_mosaic_tpu.Config(gmm_tiling=tiling)
-          output = api.ragged_dot(implemetation="mosaic")(
+          output = api.ragged_dot(
             lhs=inputs,
             rhs=kernel,
             group_sizes=group_sizes,
             precision=jax.lax.Precision.DEFAULT,
             preferred_element_type=self.dtype,
+            implementation="mosaic"
           )
         else:
           output = mblx.gmm(
