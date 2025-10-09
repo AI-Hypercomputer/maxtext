@@ -16,13 +16,7 @@
 """Training and data loading hooks for GRPO/RL training"""
 
 from collections import defaultdict
-from sys import version_info
 from typing import Any, Dict, Optional
-
-if version_info >= (3, 12):
-  from typing import override
-else:
-  from typing_extensions import override
 
 import jax
 import jax.numpy as jnp
@@ -31,7 +25,7 @@ from MaxText import exceptions
 from MaxText import max_logging
 from MaxText import max_utils
 from MaxText import maxtext_utils
-from MaxText.metric_logger import MetricLogger, MetadataKey
+from MaxText.metric_logger import MetricLogger
 from MaxText.utils import gcs_utils
 from MaxText.utils.goodput_utils import GoodputEvent, record_goodput
 
@@ -305,25 +299,44 @@ class GRPODataHooks:
   """Data hooks for GRPO/RL training.
 
   This class provides hooks for data loading during GRPO training,
-  handling both prompt loading and completion generation.
+  handling both prompt loading and completion generation using GRPO's
+  multi-host data pipeline infrastructure.
   """
 
-  def __init__(self, config, data_iterator, eval_data_iterator=None):
-    """Initialize GRPO data hooks.
+  def __init__(self, config, mesh, goodput_recorder=None):
+    """Initialize GRPO data hooks with multi-host data pipeline.
 
     Args:
       config: Training configuration object.
-      data_iterator: Iterator for training data (prompts).
-      eval_data_iterator: Optional iterator for evaluation data.
+      mesh: JAX mesh for distributed training.
+      goodput_recorder: Optional goodput recorder for performance tracking.
     """
     self.config = config
-    self.data_iterator = data_iterator
-    self.eval_data_iterator = eval_data_iterator
-    self.current_batch = None
+    self.mesh = mesh
+    self.goodput_recorder = goodput_recorder
+    self.train_batch = None
     self.eval_batch = None
 
+    # Import here to avoid circular dependencies
+    from MaxText.experimental.rl.grpo_input_pipeline import create_data_iterator
+    from MaxText.data_loader import DataLoader
+
+    # Create multi-host data iterator using GRPO's input pipeline
+    self.train_data_iterator = create_data_iterator(config, mesh)
+    self.eval_data_iterator = None  # GRPO doesn't support eval yet
+
+    # Wrap train iterator with DataLoader for goodput tracking
+    self.train_data_loader = DataLoader(config, mesh, self.train_data_iterator, goodput_recorder=goodput_recorder)
+
+    max_logging.log("GRPO data hooks initialized with multi-host data pipeline")
+
   def load_next_train_batch(self, step: int) -> Optional[Dict[str, Any]]:
-    """Loads the next batch of training data.
+    """Loads the next batch of training data using multi-host data pipeline.
+
+    This method uses MaxText's DataLoader which handles:
+    - Multi-host data loading and sharding
+    - Goodput tracking for data loading time
+    - Proper error handling and logging
 
     Args:
       step: Current training step.
@@ -332,31 +345,24 @@ class GRPODataHooks:
       Dictionary containing the batch data, or None if loading failed.
     """
     try:
-      self.current_batch = next(self.data_iterator)
-      return self.current_batch
+      self.train_batch = self.train_data_loader.load_next_batch()
+      return self.train_batch
     except Exception as e:  # pylint: disable=broad-exception-caught
       max_logging.log(f"Exception in load_next_train_batch at step {step}: {str(e)}")
-      self.current_batch = None
+      self.train_batch = None
       return None
 
   def load_next_eval_batch(self, step: int, eval_step_count: int) -> Optional[Dict[str, Any]]:
     """Loads the next batch of evaluation data.
+
+    Note: GRPO input pipeline does not currently support evaluation data.
 
     Args:
       step: Current training step.
       eval_step_count: Current evaluation step count.
 
     Returns:
-      Dictionary containing the batch data, or None if loading failed or eval is complete.
+      None, as GRPO doesn't support eval data yet.
     """
-    try:
-      # Run evaluation only for `config.eval_steps` steps.
-      if self.config.eval_steps > 0 and eval_step_count >= self.config.eval_steps:
-        self.eval_batch = None
-      else:
-        self.eval_batch = next(self.eval_data_iterator)
-      return self.eval_batch
-    except Exception as e:  # pylint: disable=broad-exception-caught
-      max_logging.log(f"Exception in load_next_eval_batch at step {step}: {str(e)}")
-      self.eval_batch = None
-      return None
+    max_logging.log(f"GRPO eval data not supported yet at step {step}")
+    return None

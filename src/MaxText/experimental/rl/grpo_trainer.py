@@ -713,7 +713,11 @@ def train_loop(config, config_inference, recorder, state=None):
   training_hooks = GRPOTrainingHooks(
       config=config, mesh=mesh, learning_rate_schedule=learning_rate_schedule, goodput_recorder=recorder
   )
-  data_hooks = GRPODataHooks(config=config, data_iterator=data_iterator, eval_data_iterator=eval_data_iterator)
+
+  # Initialize GRPO data hooks with multi-host data pipeline
+  # Note: This provides an alternative to the current data loading approach
+  # and can be integrated for improved multi-host data loading performance
+  data_hooks = GRPODataHooks(config=config, mesh=mesh, goodput_recorder=recorder)
 
   # Write train config params, num model params, and XLA flags to tensorboard
   metric_logger.write_setup_info_to_tensorboard(state.params["params"])
@@ -814,6 +818,7 @@ def train_loop(config, config_inference, recorder, state=None):
 
   try:
     last_step_completion = datetime.datetime.now()
+    step = start_step  # Initialize step variable
     for step in np.arange(start_step, config.steps):
       # Call on_train_step_start hook
       training_hooks.on_train_step_start(step)
@@ -857,10 +862,9 @@ def train_loop(config, config_inference, recorder, state=None):
       last_step_completion = datetime.datetime.now()
 
       state_to_save = _split_grpo_state(state)[0]
-      checkpoint_saved = checkpointing.maybe_save_checkpoint(
-          checkpoint_manager, state_to_save, config, data_iterator, step
-      )
-      if checkpoint_saved:
+      checkpointing.maybe_save_checkpoint(checkpoint_manager, state_to_save, config, data_iterator, step)
+      # Note: maybe_save_checkpoint doesn't return a value, so we check if it's a checkpoint step
+      if step % config.checkpoint_period == 0:
         training_hooks.on_checkpoint_save(step, config.checkpoint_dir)
 
       if config.dump_hlo and step == start_step:

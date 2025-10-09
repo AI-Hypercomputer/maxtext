@@ -36,6 +36,7 @@ import grain.python as grain
 
 from MaxText.input_pipeline import input_pipeline_interface
 from MaxText.input_pipeline import _input_pipeline_utils
+from MaxText.input_pipeline import multihost_dataloading
 
 
 class SingleHostDataLoader:
@@ -194,8 +195,8 @@ def preprocessing_pipeline(
       read_options=grain.ReadOptions(num_threads=num_threads, prefetch_buffer_size=128),
   )
 
-  # single_host_gen = SingleHostDataLoader(dataloader, global_mesh)
-  return iter(dataloader)
+  # Return multi-host data iterator for proper multi-host data loading
+  return multihost_dataloading.MultiHostDataLoadIterator(dataloader, global_mesh)
 
 
 def make_hf_train_iterator(
