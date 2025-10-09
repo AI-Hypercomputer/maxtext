@@ -14,14 +14,17 @@
 
 """Create an Orbax CheckpointManager with specified (Async or not) Checkpointer."""
 
+import os
 import time
-from typing import Any
+from typing import Any, Optional, Union
+import datetime
 
 from absl import flags
 from etils import epath
 from flax.training import train_state
 import grain.python as grain
 import jax
+import cloudpickle
 from MaxText import exceptions
 from MaxText import max_logging
 from MaxText.globals import DEFAULT_OCDBT_TARGET_DATA_FILE_SIZE
@@ -133,6 +136,13 @@ def create_orbax_checkpoint_manager(
       ),
       logger=orbax_logger,
   )
+
+  if os.environ.get('JAX_PLATFORMS') == 'proxy':
+    print("******* JAX_PLATFORMS is 'proxy'. Setting up pathways colocated python checkpointing.")
+    print(f"******* Using jax version {jax.__version__} and cloudpickle version {cloudpickle.__version__}")
+
+    array_handler = ocp.type_handlers.ColocatedPythonArrayHandler()
+    ocp.type_handlers.register_type_handler(jax.Array, array_handler, override=True)
 
   max_logging.log("Checkpoint manager created!")
   return manager
@@ -338,6 +348,14 @@ def load_state_if_possible(
             global_shape=data.shape,
             dtype=data.dtype,
         )
+
+      if os.environ.get('JAX_PLATFORMS') == 'proxy':
+        print("JAX_PLATFORMS is 'proxy'. Setting up pathways colocated python checkpointing.")
+
+        array_handler = ocp.type_handlers.ColocatedPythonArrayHandler(
+            read_timeout=datetime.timedelta(hours=1),
+        )
+        ocp.type_handlers.register_type_handler(jax.Array, array_handler, override=True)
 
       if enable_single_replica_ckpt_restoring:
         array_handler = ocp.type_handlers.SingleReplicaArrayHandler(
