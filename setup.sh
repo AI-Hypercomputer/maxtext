@@ -163,7 +163,7 @@ fi
 
 # Install maxtext package
 if [ -f 'pyproject.toml' ]; then
-  python3 -m uv pip install -e . --no-deps --resolution=lowest
+  python3 -m uv pip install -e .[tpu] --no-deps --resolution=lowest
   install_maxtext_github_deps
 fi
 
