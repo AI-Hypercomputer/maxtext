@@ -105,7 +105,7 @@ jobs:
       is_scheduled_run: ${{ github.event_name == 'schedule' }}
 
   tpu_integration_tests:
-    needs: tpu_image
+    # needs: tpu_image
     uses: ./.github/workflows/run_tests_internal.yml
     with:
       device_type: tpu

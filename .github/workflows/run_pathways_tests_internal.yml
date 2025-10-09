@@ -57,8 +57,8 @@ jobs:
         XLA_PYTHON_CLIENT_MEM_FRACTION: ${{ inputs.xla_python_client_mem_fraction }}
         TF_FORCE_GPU_ALLOW_GROWTH: ${{ inputs.tf_force_gpu_allow_growth }}
         TPU_SKIP_MDS_QUERY: ${{ inputs.image_type == 'tpu' && inputs.device_type != 'tpu' && '1' || '' }}
-        JAX_PLATFORMS: "proxy"
-        JAX_BACKEND_TARGET: "grpc://localhost:29008"
+        # JAX_PLATFORMS: "proxy"
+        # JAX_BACKEND_TARGET: "grpc://localhost:29008"
       options: ${{ inputs.container_resource_option }}
     steps:
       - uses: actions/checkout@v4
