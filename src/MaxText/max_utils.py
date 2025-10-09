@@ -954,7 +954,7 @@ def rescan_train_state_params(params, source_shardings, scan_axis, layer_groups)
     decoder[layer_name] = scanned
 
 
-def get_batch_seq_len_for_mode(config, model_mode):
+def get_batch_seq_len_for_mode(config, mesh, model_mode):
   """
   Resolves the batch size and sequence length based on the model's operational mode.
 
@@ -973,12 +973,12 @@ def get_batch_seq_len_for_mode(config, model_mode):
 
   elif model_mode == MODEL_MODE_AUTOREGRESSIVE:
     # Autoregressive/decode mode: Generate one token at a time for a batch.
-    batch_size = config.micro_batch_size_to_train_on
+    batch_size = int(config.per_device_batch_size * mesh.size)
     seq_len = 1
 
   elif model_mode == MODEL_MODE_TRAIN:
     # Training mode: Process a full batch of full-length sequences.
-    batch_size = config.micro_batch_size_to_train_on
+    batch_size = int(config.per_device_batch_size * mesh.size)
     seq_len = config.max_target_length
 
   else:

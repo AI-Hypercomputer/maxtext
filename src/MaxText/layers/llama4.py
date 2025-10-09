@@ -385,7 +385,7 @@ class Llama4DecoderLayer(nnx.Module):
     self.is_nope_layer = is_nope_layer
     self.is_moe_layer = is_moe_layer
 
-    batch_size, seq_len = max_utils.get_batch_seq_len_for_mode(config, model_mode)
+    batch_size, seq_len = max_utils.get_batch_seq_len_for_mode(config, mesh, model_mode)
     dummy_inputs_shape = (batch_size, seq_len, config.emb_dim)
 
     self.pre_self_attention_layer_norm = RMSNorm(

@@ -298,7 +298,7 @@ class Transformer(nnx.Module):
     self.decoder = nnx_wrappers.ToNNX(decoder_linen, rngs=rngs)
     self.hidden_states = None
 
-    batch_size, seq_len = max_utils.get_batch_seq_len_for_mode(config=cfg, model_mode=model_mode)
+    batch_size, seq_len = max_utils.get_batch_seq_len_for_mode(config=cfg, mesh=mesh, model_mode=model_mode)
     dummy_decoder_input_tokens = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
     dummy_decoder_positions = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
 

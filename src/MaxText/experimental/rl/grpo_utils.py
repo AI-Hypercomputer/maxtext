@@ -127,7 +127,6 @@ def generate_offline_completions(config, tokenizer_model, inference_engine, data
     )
 
   results = inference_engine.batch_inference(input_data)
-
   prompt_completions_segmentation = []
   completion_segmentation = []
   prompt_completions = []

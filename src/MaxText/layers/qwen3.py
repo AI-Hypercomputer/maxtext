@@ -54,7 +54,7 @@ class AttentionWithNorm(nnx.Module):
     self.mesh = mesh
     self.quant = quant
 
-    batch_size, seq_len = max_utils.get_batch_seq_len_for_mode(config, model_mode)
+    batch_size, seq_len = max_utils.get_batch_seq_len_for_mode(config, mesh, model_mode)
     dummy_inputs_shape = (batch_size, seq_len, config.emb_dim)
     self.activation_axis_names = ("activation_batch", "activation_norm_length", "activation_embed")
 
