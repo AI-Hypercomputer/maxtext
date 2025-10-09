@@ -25,11 +25,11 @@ import maxtext_xpk_runner as mxr
 
 
 def build_user_models(
-    selected_model_framework: typing.List[str],
-    selected_model_names: typing.List[str],
-    device_base_type: str,
-    available_model_frameworks: typing.List[str],
-    available_models: typing.Dict,
+  selected_model_framework: typing.List[str],
+  selected_model_names: typing.List[str],
+  device_base_type: str,
+  available_model_frameworks: typing.List[str],
+  available_models: typing.Dict,
 ) -> typing.Dict:
   """
   Validates user-selected model frameworks and names, then builds the final models dictionary.
@@ -51,20 +51,20 @@ def build_user_models(
   for model_framework in selected_model_framework:
     if model_framework not in available_model_frameworks:
       raise ValueError(
-          f"Model framework '{model_framework}' not available. "
-          f"Available model frameworks are: {list(available_model_frameworks)}"
+        f"Model framework '{model_framework}' not available. "
+        f"Available model frameworks are: {list(available_model_frameworks)}"
       )
 
   # Initialize the model_set list to store the user's selected model configurations
   if device_base_type not in available_models:
-    raise ValueError(f"Unknown device base type: {device_base_type}. " f"Original device type was: {device_base_type}")
+    raise ValueError(f"Unknown device base type: {device_base_type}. Original device type was: {device_base_type}")
 
   # Iterate through the list of user-selected model names, validating each one
   for model_name in selected_model_names:
     if model_name not in available_models[device_base_type]:
       raise ValueError(
-          f"Model name '{model_name}' not available for device type '{device_base_type}'. "
-          f"Available model names are: {list(available_models[device_base_type].keys())}"
+        f"Model name '{model_name}' not available for device type '{device_base_type}'. "
+        f"Available model names are: {list(available_models[device_base_type].keys())}"
       )
 
   # Build the model configuration
@@ -82,29 +82,29 @@ def get_cluster_config(cluster_name, project, zone, device_type):
   Generates Cluster configuration objects from a UserConfig.
   """
   cluster_config = mxr.XpkClusterConfig(
-      cluster_name=cluster_name,
-      project=project,
-      zone=zone,
-      device_type=device_type,
+    cluster_name=cluster_name,
+    project=project,
+    zone=zone,
+    device_type=device_type,
   )
 
   return cluster_config
 
 
 def get_pathways_config(
-    server_image, proxy_image, runner, colocated_python_image, headless, server_flags="", proxy_flags="", worker_flags=""
+  server_image, proxy_image, runner, colocated_python_image, headless, server_flags="", proxy_flags="", worker_flags=""
 ):
   """
   Generates Pathways configuration objects from a UserConfig.
   """
   pathways_config = mxr.PathwaysConfig(
-      server_image=server_image,
-      proxy_server_image=proxy_image,
-      runner_image=runner,
-      colocated_python_sidecar_image=colocated_python_image,
-      headless=headless,
-      server_flags=server_flags,
-      proxy_flags=proxy_flags,
-      worker_flags=worker_flags,
+    server_image=server_image,
+    proxy_server_image=proxy_image,
+    runner_image=runner,
+    colocated_python_sidecar_image=colocated_python_image,
+    headless=headless,
+    server_flags=server_flags,
+    proxy_flags=proxy_flags,
+    worker_flags=worker_flags,
   )
   return pathways_config

@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-""" multi_token_prediction_test """
+"""multi_token_prediction_test"""
 
 import os.path
 import unittest
@@ -40,9 +40,9 @@ class MultiTokenPredictionLayerTest(unittest.TestCase):
   def setUp(self):
     super().setUp()
     self.cfg = pyconfig.initialize(
-        [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
-        run_name="multi_token_prediction_layer_test",
-        skip_jax_distributed_system=True,
+      [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+      run_name="multi_token_prediction_layer_test",
+      skip_jax_distributed_system=True,
     )
     self.rng = jax.random.PRNGKey(42)  # Base RNG for setup
     devices_array = maxtext_utils.create_device_mesh(self.cfg)
@@ -50,10 +50,10 @@ class MultiTokenPredictionLayerTest(unittest.TestCase):
 
     # Instantiate the Layer
     self.mtp_layer = multi_token_prediction.MultiTokenPredictionLayer(
-        config=self.cfg,
-        mesh=self.mesh,
-        layer_number=TEST_LAYER_NUM,
-        transformer_layer_module=DecoderLayer,
+      config=self.cfg,
+      mesh=self.mesh,
+      layer_number=TEST_LAYER_NUM,
+      transformer_layer_module=DecoderLayer,
     )
 
     # Dimensions directly from the config object
@@ -75,12 +75,12 @@ class MultiTokenPredictionLayerTest(unittest.TestCase):
     # Initialize Layer Parameters
     init_rngs = {"params": init_rng, "dropout": init_rng}
     self.variables = self.mtp_layer.init(
-        init_rngs,
-        self.prev_hidden_state,
-        self.target_token_embedding,
-        self.position_ids,
-        self.decoder_segment_ids,
-        deterministic=True,
+      init_rngs,
+      self.prev_hidden_state,
+      self.target_token_embedding,
+      self.position_ids,
+      self.decoder_segment_ids,
+      deterministic=True,
     )
     max_logging.log("Setup complete.")
 
@@ -88,28 +88,28 @@ class MultiTokenPredictionLayerTest(unittest.TestCase):
     """Tests the basic forward pass and output shape of MultiTokenPredictionLayer."""
 
     output_hidden_state = self.mtp_layer.apply(
-        self.variables,
-        self.prev_hidden_state,
-        self.target_token_embedding,
-        self.position_ids,
-        decoder_segment_ids=self.decoder_segment_ids,
-        deterministic=True,
+      self.variables,
+      self.prev_hidden_state,
+      self.target_token_embedding,
+      self.position_ids,
+      decoder_segment_ids=self.decoder_segment_ids,
+      deterministic=True,
     )
     # Assertions using unittest methods
     expected_output_shape = (self.batch_size, self.seq_len, self.embed_dim)
 
     # Check shape
     self.assertEqual(
-        output_hidden_state.shape,
-        expected_output_shape,
-        f"Expected output shape {expected_output_shape}, but got {output_hidden_state.shape}",
+      output_hidden_state.shape,
+      expected_output_shape,
+      f"Expected output shape {expected_output_shape}, but got {output_hidden_state.shape}",
     )
     # TODO(@parambole) to check the fixed inputs in the unit test with expected values
     # Check dtype
     self.assertEqual(
-        output_hidden_state.dtype,
-        self.cfg.dtype,
-        f"Expected output dtype {self.cfg.dtype}, but got {output_hidden_state.dtype}",
+      output_hidden_state.dtype,
+      self.cfg.dtype,
+      f"Expected output dtype {self.cfg.dtype}, but got {output_hidden_state.dtype}",
     )
 
     # Check for NaNs/Infs
@@ -131,22 +131,33 @@ class MTPBlockTestModel(nn.Module):
   def setup(self):
     """Initializes the MTP block and its dependencies for the test."""
     self.shared_embedding = embeddings.embed_as_linen(
-        num_embeddings=self.config.vocab_size,
-        num_features=self.config.base_emb_dim,
-        config=self.config,
-        name="shared_embedding",
+      num_embeddings=self.config.vocab_size,
+      num_features=self.config.base_emb_dim,
+      config=self.config,
+      name="shared_embedding",
     )
     self.decoder = Decoder(config=self.config, mesh=self.mesh, name="decoder_for_mtp")
     self.mtp_block = multi_token_prediction.MultiTokenPredictionBlock(
-        config=self.config,
-        mesh=self.mesh,
-        name="mtp_block",
-        transformer_layer_module=DecoderLayer,
-        decoder=self.decoder,
+      config=self.config,
+      mesh=self.mesh,
+      name="mtp_block",
+      transformer_layer_module=DecoderLayer,
+      decoder=self.decoder,
     )
 
   def __call__(
-      self,
+    self,
+    main_hidden_state,
+    input_ids,
+    target_ids,
+    target_mask,
+    position_ids,
+    decoder_segment_ids,
+    model_mode,
+    deterministic,
+  ):
+    return self.mtp_block(
+      self.shared_embedding,
       main_hidden_state,
       input_ids,
       target_ids,
@@ -155,17 +166,6 @@ class MTPBlockTestModel(nn.Module):
       decoder_segment_ids,
       model_mode,
       deterministic,
-  ):
-    return self.mtp_block(
-        self.shared_embedding,
-        main_hidden_state,
-        input_ids,
-        target_ids,
-        target_mask,
-        position_ids,
-        decoder_segment_ids,
-        model_mode,
-        deterministic,
     )
 
 
@@ -175,10 +175,10 @@ class MultiTokenPredictionBlockTest(unittest.TestCase):
   def setUp(self):
     super().setUp()
     self.cfg = pyconfig.initialize(
-        [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
-        run_name="mtp_block_test",
-        skip_jax_distributed_system=True,
-        mtp_num_layers=2,
+      [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+      run_name="mtp_block_test",
+      skip_jax_distributed_system=True,
+      mtp_num_layers=2,
     )
     self.rng = jax.random.PRNGKey(43)
     devices_array = maxtext_utils.create_device_mesh(self.cfg)
@@ -196,30 +196,30 @@ class MultiTokenPredictionBlockTest(unittest.TestCase):
 
     self.test_model = MTPBlockTestModel(config=self.cfg, mesh=self.mesh)
     self.variables = self.test_model.init(
-        {"params": self.init_rng, "dropout": self.init_rng},
-        self.main_hidden_state,
-        self.input_ids,
-        self.target_ids,
-        self.target_mask,
-        self.position_ids,
-        self.decoder_segment_ids,
-        model_mode=MODEL_MODE_TRAIN,
-        deterministic=True,
+      {"params": self.init_rng, "dropout": self.init_rng},
+      self.main_hidden_state,
+      self.input_ids,
+      self.target_ids,
+      self.target_mask,
+      self.position_ids,
+      self.decoder_segment_ids,
+      model_mode=MODEL_MODE_TRAIN,
+      deterministic=True,
     )
 
   def test_sow_functionality(self):
     """Verifies that the block correctly sows losses and weights."""
     _, captured_vars = self.test_model.apply(
-        self.variables,
-        self.main_hidden_state,
-        self.input_ids,
-        self.target_ids,
-        self.target_mask,
-        self.position_ids,
-        self.decoder_segment_ids,
-        deterministic=True,
-        model_mode=MODEL_MODE_TRAIN,
-        mutable=["mtp_losses"],
+      self.variables,
+      self.main_hidden_state,
+      self.input_ids,
+      self.target_ids,
+      self.target_mask,
+      self.position_ids,
+      self.decoder_segment_ids,
+      deterministic=True,
+      model_mode=MODEL_MODE_TRAIN,
+      mutable=["mtp_losses"],
     )
     self.assertIn("mtp_losses", captured_vars)
     sown_data = maxtext_utils.get_nested_value(captured_vars, ("mtp_losses", "mtp_block"), {})
@@ -239,17 +239,17 @@ class MultiTokenPredictionBlockTest(unittest.TestCase):
     """
     # 1. Run the forward pass and capture the sown variables.
     _, captured_vars = self.test_model.apply(
-        self.variables,
-        self.main_hidden_state,
-        self.input_ids,
-        self.target_ids,
-        self.target_mask,
-        self.position_ids,
-        self.decoder_segment_ids,
-        deterministic=False,
-        mutable=["mtp_losses"],
-        model_mode=MODEL_MODE_TRAIN,
-        rngs={"dropout": self.rng},
+      self.variables,
+      self.main_hidden_state,
+      self.input_ids,
+      self.target_ids,
+      self.target_mask,
+      self.position_ids,
+      self.decoder_segment_ids,
+      deterministic=False,
+      mutable=["mtp_losses"],
+      model_mode=MODEL_MODE_TRAIN,
+      rngs={"dropout": self.rng},
     )
 
     # This section of the test now *becomes* the logic from train.py
@@ -311,13 +311,13 @@ class TestRollAndMask(unittest.TestCase):
 
     # Manually construct the expected output using jnp
     expected_1 = jnp.array(
-        [
-            [1, 2, 3, 4, 5, 6, 7, 0],  # First row rolled left, last element masked
-            [9, 10, 11, 12, 13, 14, 15, 0],  # Second row rolled left
-            [17, 18, 19, 20, 21, 22, 23, 0],
-            [25, 26, 27, 28, 29, 30, 31, 0],
-        ],
-        dtype=jnp.int32,
+      [
+        [1, 2, 3, 4, 5, 6, 7, 0],  # First row rolled left, last element masked
+        [9, 10, 11, 12, 13, 14, 15, 0],  # Second row rolled left
+        [17, 18, 19, 20, 21, 22, 23, 0],
+        [25, 26, 27, 28, 29, 30, 31, 0],
+      ],
+      dtype=jnp.int32,
     )
 
     self.assertEqual(rolled_by_1.shape, (batch_size, seq_len), "Shape should be preserved after rolling.")
@@ -329,13 +329,13 @@ class TestRollAndMask(unittest.TestCase):
 
     # Manually construct the expected output using jnp
     expected_3 = jnp.array(
-        [
-            [3, 4, 5, 6, 7, 0, 0, 0],  # First row rolled left by 3, last 3 masked
-            [11, 12, 13, 14, 15, 0, 0, 0],
-            [19, 20, 21, 22, 23, 0, 0, 0],
-            [27, 28, 29, 30, 31, 0, 0, 0],
-        ],
-        dtype=jnp.int32,
+      [
+        [3, 4, 5, 6, 7, 0, 0, 0],  # First row rolled left by 3, last 3 masked
+        [11, 12, 13, 14, 15, 0, 0, 0],
+        [19, 20, 21, 22, 23, 0, 0, 0],
+        [27, 28, 29, 30, 31, 0, 0, 0],
+      ],
+      dtype=jnp.int32,
     )
     self.assertEqual(rolled_by_3.shape, (batch_size, seq_len), "Shape should be preserved after rolling.")
     self.assertTrue(jnp.array_equal(rolled_by_3, expected_3), "Array content is incorrect after shift by -3.")

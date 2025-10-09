@@ -33,12 +33,12 @@ from MaxText.layers.initializers import variable_to_logically_partitioned
 
 
 GEMMA3_ATTENTION_PATTERN = (
-    AttentionType.LOCAL_SLIDING,
-    AttentionType.LOCAL_SLIDING,
-    AttentionType.LOCAL_SLIDING,
-    AttentionType.LOCAL_SLIDING,
-    AttentionType.LOCAL_SLIDING,
-    AttentionType.GLOBAL,
+  AttentionType.LOCAL_SLIDING,
+  AttentionType.LOCAL_SLIDING,
+  AttentionType.LOCAL_SLIDING,
+  AttentionType.LOCAL_SLIDING,
+  AttentionType.LOCAL_SLIDING,
+  AttentionType.GLOBAL,
 )
 
 
@@ -69,16 +69,16 @@ class Gemma3DecoderLayer(nn.Module):
 
   @nn.compact
   def __call__(
-      self,
-      inputs,
-      decoder_segment_ids,
-      decoder_positions,
-      deterministic,
-      model_mode,
-      previous_chunk=None,
-      page_state=None,
-      slot=None,
-      bidirectional_mask=None,
+    self,
+    inputs,
+    decoder_segment_ids,
+    decoder_positions,
+    deterministic,
+    model_mode,
+    previous_chunk=None,
+    page_state=None,
+    slot=None,
+    bidirectional_mask=None,
   ):
     cfg = self.config
     mesh = self.mesh
@@ -86,116 +86,116 @@ class Gemma3DecoderLayer(nn.Module):
     inputs = checkpoint_name(inputs, "decoder_layer_input")
     # inputs: embedded inputs to the decoder with shape [batch, length, emb_dim]
     lnx = rms_norm(
-        num_features=inputs.shape[-1],
-        dtype=cfg.dtype,
-        weight_dtype=cfg.weight_dtype,
-        name="pre_self_attention_norm",
-        kernel_axes=("norm",),
+      num_features=inputs.shape[-1],
+      dtype=cfg.dtype,
+      weight_dtype=cfg.weight_dtype,
+      name="pre_self_attention_norm",
+      kernel_axes=("norm",),
     )(inputs)
 
     lnx = nn.with_logical_constraint(lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
     query_pre_attn_scalar = get_query_pre_attn_scalar(cfg)
 
     attention_layer = attention_as_linen(
-        config=cfg,
-        num_query_heads=cfg.num_query_heads,
-        num_kv_heads=cfg.num_kv_heads,
-        head_dim=cfg.head_dim,
-        max_target_length=cfg.max_target_length,
-        max_prefill_predict_length=cfg.max_prefill_predict_length,
-        attention_kernel=cfg.attention,
-        inputs_q_shape=lnx.shape,
-        inputs_kv_shape=lnx.shape,
-        mesh=mesh,
-        dtype=cfg.dtype,
-        weight_dtype=cfg.weight_dtype,
-        dropout_rate=cfg.dropout_rate,
-        name="self_attention",
-        float32_qk_product=cfg.float32_qk_product,
-        float32_logits=cfg.float32_logits,
-        quant=self.quant,
-        kv_quant=quantizations.configure_kv_quant(cfg),
-        attention_type=self.attention_type,
-        sliding_window_size=cfg.sliding_window_size,
-        attn_logits_soft_cap=cfg.attn_logits_soft_cap,
-        use_qk_norm=True,  # Gemma 3 models use query, key normalizations
-        query_pre_attn_scalar=query_pre_attn_scalar,
-        model_mode=model_mode,
+      config=cfg,
+      num_query_heads=cfg.num_query_heads,
+      num_kv_heads=cfg.num_kv_heads,
+      head_dim=cfg.head_dim,
+      max_target_length=cfg.max_target_length,
+      max_prefill_predict_length=cfg.max_prefill_predict_length,
+      attention_kernel=cfg.attention,
+      inputs_q_shape=lnx.shape,
+      inputs_kv_shape=lnx.shape,
+      mesh=mesh,
+      dtype=cfg.dtype,
+      weight_dtype=cfg.weight_dtype,
+      dropout_rate=cfg.dropout_rate,
+      name="self_attention",
+      float32_qk_product=cfg.float32_qk_product,
+      float32_logits=cfg.float32_logits,
+      quant=self.quant,
+      kv_quant=quantizations.configure_kv_quant(cfg),
+      attention_type=self.attention_type,
+      sliding_window_size=cfg.sliding_window_size,
+      attn_logits_soft_cap=cfg.attn_logits_soft_cap,
+      use_qk_norm=True,  # Gemma 3 models use query, key normalizations
+      query_pre_attn_scalar=query_pre_attn_scalar,
+      model_mode=model_mode,
     )
 
     attention_lnx = attention_layer(
-        lnx,
-        lnx,
-        decoder_positions,
-        decoder_segment_ids=decoder_segment_ids,
-        deterministic=deterministic,
-        model_mode=model_mode,
-        bidirectional_mask=bidirectional_mask,
+      lnx,
+      lnx,
+      decoder_positions,
+      decoder_segment_ids=decoder_segment_ids,
+      deterministic=deterministic,
+      model_mode=model_mode,
+      bidirectional_mask=bidirectional_mask,
     )
     if cfg.use_post_attn_norm:
       attention_lnx = rms_norm(
-          num_features=attention_lnx.shape[-1],
-          dtype=cfg.dtype,
-          weight_dtype=cfg.weight_dtype,
-          name="post_self_attention_norm",
-          kernel_axes=("norm",),
+        num_features=attention_lnx.shape[-1],
+        dtype=cfg.dtype,
+        weight_dtype=cfg.weight_dtype,
+        name="post_self_attention_norm",
+        kernel_axes=("norm",),
       )(attention_lnx)
 
     attention_lnx = nn.with_logical_constraint(
-        attention_lnx, ("activation_batch", "activation_norm_length", "activation_embed")
+      attention_lnx, ("activation_batch", "activation_norm_length", "activation_embed")
     )
     attention_lnx += inputs
     residual = attention_lnx
 
     attn_output = rms_norm(
-        num_features=attention_lnx.shape[-1],
-        dtype=cfg.dtype,
-        weight_dtype=cfg.weight_dtype,
-        name="pre_ffw_norm",
-        kernel_axes=("norm",),
+      num_features=attention_lnx.shape[-1],
+      dtype=cfg.dtype,
+      weight_dtype=cfg.weight_dtype,
+      name="pre_ffw_norm",
+      kernel_axes=("norm",),
     )(attention_lnx)
 
     # MLP block.
     mlp_lnx = mlp_block(
-        in_features=attn_output.shape[-1],
-        intermediate_dim=cfg.mlp_dim,
-        activations=cfg.mlp_activations,
-        intermediate_dropout_rate=cfg.dropout_rate,
-        dtype=cfg.dtype,
-        weight_dtype=cfg.weight_dtype,
-        name="mlp",
-        config=cfg,
-        quant=self.quant,
+      in_features=attn_output.shape[-1],
+      intermediate_dim=cfg.mlp_dim,
+      activations=cfg.mlp_activations,
+      intermediate_dropout_rate=cfg.dropout_rate,
+      dtype=cfg.dtype,
+      weight_dtype=cfg.weight_dtype,
+      name="mlp",
+      config=cfg,
+      quant=self.quant,
     )(attn_output, deterministic=deterministic)
 
     if cfg.use_post_ffw_norm:
       mlp_lnx = rms_norm(
-          num_features=mlp_lnx.shape[-1],
-          dtype=cfg.dtype,
-          weight_dtype=cfg.weight_dtype,
-          name="post_ffw_norm",
-          kernel_axes=("norm",),
+        num_features=mlp_lnx.shape[-1],
+        dtype=cfg.dtype,
+        weight_dtype=cfg.weight_dtype,
+        name="post_ffw_norm",
+        kernel_axes=("norm",),
       )(mlp_lnx)
 
     mlp_lnx = nn.with_logical_constraint(mlp_lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
     next_layer_addition = mlp_lnx + residual
     next_layer_addition_dropped_out = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(
-        next_layer_addition, deterministic=deterministic
+      next_layer_addition, deterministic=deterministic
     )
 
     layer_output = next_layer_addition_dropped_out
     layer_output = nn.with_logical_constraint(
-        layer_output,
-        ("activation_batch", "activation_norm_length", "activation_embed"),
+      layer_output,
+      ("activation_batch", "activation_norm_length", "activation_embed"),
     )
 
     if cfg.record_internal_nn_metrics:
       self.sow("intermediates", "activation_mean", jnp.mean(layer_output))
       self.sow("intermediates", "activation_stdev", jnp.std(layer_output))
       self.sow(
-          "intermediates",
-          "activation_fraction_zero",
-          jnp.sum(layer_output == 0) / jnp.size(layer_output),
+        "intermediates",
+        "activation_fraction_zero",
+        jnp.sum(layer_output == 0) / jnp.size(layer_output),
       )
 
     if cfg.scan_layers:
@@ -226,18 +226,17 @@ class Gemma3ScannableBlock(nn.Module):
 
   @nn.compact
   def __call__(
-      self,
-      inputs,
-      decoder_segment_ids,
-      decoder_positions,
-      deterministic,
-      model_mode,
-      slot=None,
-      page_state=None,
-      previous_chunk=None,
-      bidirectional_mask=None,
+    self,
+    inputs,
+    decoder_segment_ids,
+    decoder_positions,
+    deterministic,
+    model_mode,
+    slot=None,
+    page_state=None,
+    previous_chunk=None,
+    bidirectional_mask=None,
   ):
-
     cfg = self.config
     mesh = self.mesh
 
@@ -247,23 +246,23 @@ class Gemma3ScannableBlock(nn.Module):
     for layer_id in range(self.num_of_layers):
       attention_type = get_attention_type(layer_id)
       layer = Gemma3DecoderLayer(
-          config=cfg,
-          mesh=mesh,
-          model_mode=model_mode,
-          name=f"layers_{layer_id}",
-          quant=self.quant,
-          attention_type=attention_type,
+        config=cfg,
+        mesh=mesh,
+        model_mode=model_mode,
+        name=f"layers_{layer_id}",
+        quant=self.quant,
+        attention_type=attention_type,
       )
       y = layer(
-          y,
-          decoder_segment_ids,
-          decoder_positions,
-          deterministic,
-          model_mode,
-          previous_chunk=previous_chunk,
-          page_state=page_state,
-          slot=slot,
-          bidirectional_mask=bidirectional_mask,
+        y,
+        decoder_segment_ids,
+        decoder_positions,
+        deterministic,
+        model_mode,
+        previous_chunk=previous_chunk,
+        page_state=page_state,
+        slot=slot,
+        bidirectional_mask=bidirectional_mask,
       )
       if cfg.scan_layers:
         y = y[0]
@@ -274,13 +273,13 @@ class Gemma3ScannableBlock(nn.Module):
 
 
 def _posemb_sincos_2d(
-    h: int,
-    w: int,
-    *,
-    width: int,
-    temperature: float = 10_000.0,
-    precision: str = "default",
-    dtype: jnp.dtype = jnp.float32,
+  h: int,
+  w: int,
+  *,
+  width: int,
+  temperature: float = 10_000.0,
+  precision: str = "default",
+  dtype: jnp.dtype = jnp.float32,
 ):
   """Follows the MoCo v3 logic."""
   y, x = jnp.mgrid[:h, :w]  # pylint: disable=unpacking-non-sequence
@@ -298,32 +297,32 @@ class MlpBlockViT(nnx.Module):
   """NNX version of Transformer MLP / feed-forward block."""
 
   def __init__(
-      self,
-      config: Config,
-      block_id: int,
-      *,
-      rngs: nnx.Rngs,
+    self,
+    config: Config,
+    block_id: int,
+    *,
+    rngs: nnx.Rngs,
   ):
     self.config = config
     self.block_id = block_id
     self.rngs = rngs
 
     self.Dense_0 = DenseGeneral(
-        in_features_shape=self.config.hidden_size_for_vit,
-        out_features_shape=self.config.intermediate_size_for_vit,
-        dtype=self.config.dtype_mm,
-        use_bias=True,
-        matmul_precision=self.config.matmul_precision,
-        rngs=self.rngs,
+      in_features_shape=self.config.hidden_size_for_vit,
+      out_features_shape=self.config.intermediate_size_for_vit,
+      dtype=self.config.dtype_mm,
+      use_bias=True,
+      matmul_precision=self.config.matmul_precision,
+      rngs=self.rngs,
     )
     self.Dropout_0 = nnx.Dropout(rate=self.config.dropout_rate)
     self.Dense_1 = DenseGeneral(
-        in_features_shape=self.config.intermediate_size_for_vit,
-        out_features_shape=self.config.hidden_size_for_vit,
-        dtype=self.config.dtype_mm,
-        use_bias=True,
-        matmul_precision=self.config.matmul_precision,
-        rngs=self.rngs,
+      in_features_shape=self.config.intermediate_size_for_vit,
+      out_features_shape=self.config.hidden_size_for_vit,
+      dtype=self.config.dtype_mm,
+      use_bias=True,
+      matmul_precision=self.config.matmul_precision,
+      rngs=self.rngs,
     )
 
   def __call__(self, x: jax.Array, deterministic: bool = True) -> jax.Array:
@@ -339,12 +338,12 @@ class Encoder1DBlock(nnx.Module):
   """Single transformer encoder block (MHSA + MLP)."""
 
   def __init__(
-      self,
-      config: Config,
-      mesh: Mesh,
-      block_id: int,
-      *,
-      rngs: nnx.Rngs,
+    self,
+    config: Config,
+    mesh: Mesh,
+    block_id: int,
+    *,
+    rngs: nnx.Rngs,
   ):
     self.block_id = block_id
     self.config = config
@@ -354,30 +353,30 @@ class Encoder1DBlock(nnx.Module):
 
     self.LayerNorm_0 = nnx.LayerNorm(num_features=self.config.hidden_size_for_vit, rngs=self.rngs)
     self.MultiHeadDotProductAttention_0 = Attention(
-        config=self.config,
-        num_query_heads=self.config.num_attention_heads_for_vit,
-        num_kv_heads=self.config.num_attention_heads_for_vit,
-        head_dim=self.config.hidden_size_for_vit // self.config.num_attention_heads_for_vit,
-        max_target_length=self.seq_len,
-        mesh=self.mesh,
-        attention_kernel="dot_product",
-        inputs_q_shape=(self.config.per_device_batch_size, self.seq_len, self.config.hidden_size_for_vit),
-        inputs_kv_shape=(self.config.per_device_batch_size, self.seq_len, self.config.hidden_size_for_vit),
-        dropout_rate=0,
-        is_nope_layer=True,
-        use_bias_in_projections=True,
-        attention_type=AttentionType.FULL,
-        use_qk_norm=False,
-        query_pre_attn_scalar=1 / (self.config.hidden_size_for_vit // self.config.num_attention_heads_for_vit) ** 0.5,
-        model_mode="train",
-        is_vision=True,
-        rngs=self.rngs,
+      config=self.config,
+      num_query_heads=self.config.num_attention_heads_for_vit,
+      num_kv_heads=self.config.num_attention_heads_for_vit,
+      head_dim=self.config.hidden_size_for_vit // self.config.num_attention_heads_for_vit,
+      max_target_length=self.seq_len,
+      mesh=self.mesh,
+      attention_kernel="dot_product",
+      inputs_q_shape=(self.config.per_device_batch_size, self.seq_len, self.config.hidden_size_for_vit),
+      inputs_kv_shape=(self.config.per_device_batch_size, self.seq_len, self.config.hidden_size_for_vit),
+      dropout_rate=0,
+      is_nope_layer=True,
+      use_bias_in_projections=True,
+      attention_type=AttentionType.FULL,
+      use_qk_norm=False,
+      query_pre_attn_scalar=1 / (self.config.hidden_size_for_vit // self.config.num_attention_heads_for_vit) ** 0.5,
+      model_mode="train",
+      is_vision=True,
+      rngs=self.rngs,
     )
     self.LayerNorm_1 = nnx.LayerNorm(num_features=self.config.hidden_size_for_vit, rngs=self.rngs)
     self.MlpBlockViT_0 = MlpBlockViT(
-        block_id=self.block_id,
-        config=self.config,
-        rngs=self.rngs,
+      block_id=self.block_id,
+      config=self.config,
+      rngs=self.rngs,
     )
     self.Dropout_0 = nnx.Dropout(self.config.dropout_rate, rngs=self.rngs)
 
@@ -399,11 +398,11 @@ class Encoder(nnx.Module):
   """Transformer Model Encoder for sequence to sequence translation."""
 
   def __init__(
-      self,
-      config: Config,
-      mesh: Mesh,
-      *,
-      rngs: nnx.Rngs,
+    self,
+    config: Config,
+    mesh: Mesh,
+    *,
+    rngs: nnx.Rngs,
   ):
     self.config = config
     self.mesh = mesh
@@ -412,10 +411,10 @@ class Encoder(nnx.Module):
     for lyr in range(self.config.num_hidden_layers_for_vit):
       layer_name = f"encoderblock_{lyr}"
       layer = Encoder1DBlock(
-          block_id=lyr,
-          config=self.config,
-          mesh=self.mesh,
-          rngs=self.rngs,
+        block_id=lyr,
+        config=self.config,
+        mesh=self.mesh,
+        rngs=self.rngs,
       )
       setattr(self, layer_name, layer)
     self.encoder_norm = nnx.LayerNorm(num_features=self.config.hidden_size_for_vit, rngs=self.rngs)
@@ -432,13 +431,13 @@ class Einsum(nnx.Module):
   """Einsum is a convenience module for parameterized tensor multiplication."""
 
   def __init__(
-      self,
-      shape: tuple[int, ...],
-      initializer: nnx.initializers.Initializer = nnx.initializers.normal(),
-      dtype: jnp.dtype | None = None,
-      precision: str = "default",
-      *,
-      rngs: nnx.Rngs,
+    self,
+    shape: tuple[int, ...],
+    initializer: nnx.initializers.Initializer = nnx.initializers.normal(),
+    dtype: jnp.dtype | None = None,
+    precision: str = "default",
+    *,
+    rngs: nnx.Rngs,
   ):
     self.precision = precision
     self.w = nnx.Param(initializer(rngs.params(), shape, dtype))
@@ -456,17 +455,17 @@ class VisionEmbedder(nnx.Module):
     self.rngs = rngs
 
     self.mm_soft_embedding_norm = RMSNorm(
-        num_features=self.config.hidden_size_for_vit,
-        dtype=self.config.dtype_mm,
-        weight_dtype=self.config.weight_dtype,
-        epsilon=self.config.normalization_layer_epsilon,
-        kernel_axes=("norm",),
-        rngs=self.rngs,
+      num_features=self.config.hidden_size_for_vit,
+      dtype=self.config.dtype_mm,
+      weight_dtype=self.config.weight_dtype,
+      epsilon=self.config.normalization_layer_epsilon,
+      kernel_axes=("norm",),
+      rngs=self.rngs,
     )
     self.mm_input_projection = Einsum(
-        shape=(self.config.hidden_size_for_vit, self.config.emb_dim),
-        precision=self.config.matmul_precision,
-        rngs=self.rngs,
+      shape=(self.config.hidden_size_for_vit, self.config.emb_dim),
+      precision=self.config.matmul_precision,
+      rngs=self.rngs,
     )
 
   def __call__(self, x: jax.Array, eqn: str = "...tm,md->...td") -> jax.Array:
@@ -476,17 +475,17 @@ class VisionEmbedder(nnx.Module):
 
 
 def visionembedder_as_linen(
-    config: Config,
-    mesh: Mesh,
+  config: Config,
+  mesh: Mesh,
 ):
   """Creates a VisionEmbedder module."""
   return nnx_wrappers.to_linen(
-      VisionEmbedder,
-      config,
-      mesh=mesh,
-      name="VisionEmbedder_0",
-      abstract_init=False,
-      metadata_fn=variable_to_logically_partitioned,
+    VisionEmbedder,
+    config,
+    mesh=mesh,
+    name="VisionEmbedder_0",
+    abstract_init=False,
+    metadata_fn=variable_to_logically_partitioned,
   )
 
 
@@ -531,49 +530,49 @@ class Gemma3VisionEncoderLayer(nnx.Module):
   """gemma 3 vision encoder layer"""
 
   def __init__(
-      self,
-      config: Config,
-      mesh: Mesh,
-      *,
-      rngs: nnx.Rngs,
+    self,
+    config: Config,
+    mesh: Mesh,
+    *,
+    rngs: nnx.Rngs,
   ):
     self.config = config
     self.mesh = mesh
     self.rngs = rngs
 
     self.embedding = nnx.Conv(
-        in_features=self.config.num_channels_for_vit,
-        out_features=self.config.hidden_size_for_vit,
-        kernel_size=(self.config.patch_size_for_vit, self.config.patch_size_for_vit),
-        strides=self.config.conv_stride_for_vit,
-        padding="VALID",
-        precision=self.config.matmul_precision,
-        rngs=self.rngs,
+      in_features=self.config.num_channels_for_vit,
+      out_features=self.config.hidden_size_for_vit,
+      kernel_size=(self.config.patch_size_for_vit, self.config.patch_size_for_vit),
+      strides=self.config.conv_stride_for_vit,
+      padding="VALID",
+      precision=self.config.matmul_precision,
+      rngs=self.rngs,
     )
     self.pos_embedding = self._get_posemb(
-        self.config.posemb_type_for_vit,
-        seqshape=(
-            self.config.image_size_for_vit // self.config.patch_size_for_vit,
-            self.config.image_size_for_vit // self.config.patch_size_for_vit,
-        ),
-        width=self.config.hidden_size_for_vit,
-        dtype=self.config.dtype_mm,
+      self.config.posemb_type_for_vit,
+      seqshape=(
+        self.config.image_size_for_vit // self.config.patch_size_for_vit,
+        self.config.image_size_for_vit // self.config.patch_size_for_vit,
+      ),
+      width=self.config.hidden_size_for_vit,
+      dtype=self.config.dtype_mm,
     )
     self.Dropout_0 = nnx.Dropout(self.config.dropout_rate, rngs=self.rngs)
     self.Transformer = Encoder(
-        config=self.config,
-        mesh=self.mesh,
-        rngs=self.rngs,
+      config=self.config,
+      mesh=self.mesh,
+      rngs=self.rngs,
     )
     self.VisionExit = VisionExit(output_length=256, rngs=self.rngs)
 
   def _get_posemb(
-      self,
-      typ: str,
-      *,
-      seqshape: tuple[int, int],
-      width: int,
-      dtype: jnp.dtype = jnp.float32,
+    self,
+    typ: str,
+    *,
+    seqshape: tuple[int, int],
+    width: int,
+    dtype: jnp.dtype = jnp.float32,
   ):
     """Returns the position embedding."""
     if typ == "learn":
@@ -616,16 +615,16 @@ class Gemma3VisionEncoderLayer(nnx.Module):
 
 
 def gemma3visionencoder_as_linen(
-    config: Config,
-    mesh: Mesh,
+  config: Config,
+  mesh: Mesh,
 ):
   """Creates a Gemma3VisionEncoder module."""
   module = nnx_wrappers.to_linen(
-      Gemma3VisionEncoderLayer,
-      config=config,
-      mesh=mesh,
-      name="Gemma3VisionEncoderLayer_0",
-      abstract_init=False,
-      metadata_fn=variable_to_logically_partitioned,
+    Gemma3VisionEncoderLayer,
+    config=config,
+    mesh=mesh,
+    name="Gemma3VisionEncoderLayer_0",
+    abstract_init=False,
+    metadata_fn=variable_to_logically_partitioned,
   )
   return module

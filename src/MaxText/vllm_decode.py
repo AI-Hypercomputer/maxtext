@@ -42,9 +42,9 @@ os.environ["SKIP_JAX_PRECOMPILE"] = "1"
 
 
 def decode(
-    config: Config,
-    model: Any,
-    mesh: jax.sharding.Mesh,
+  config: Config,
+  model: Any,
+  mesh: jax.sharding.Mesh,
 ) -> None:
   """Decode using vLLM with a MaxText model."""
   # Wrap the model for Tunix
@@ -58,34 +58,34 @@ def decode(
   prompts = [config.prompt]
   if config.use_chat_template:
     messages = [
-        {"role": "user", "content": config.prompt},
+      {"role": "user", "content": config.prompt},
     ]
     formatted_prompt_string = model_tokenizer.apply_chat_template(
-        messages,
-        tokenize=False,  # Set to False to get the string
-        add_generation_prompt=True,
-        add_special_tokens=False,  # Prevent adding special tokens
+      messages,
+      tokenize=False,  # Set to False to get the string
+      add_generation_prompt=True,
+      add_special_tokens=False,  # Prevent adding special tokens
     )
     print("Formatted prompt string:", formatted_prompt_string)
     prompts = [formatted_prompt_string]
 
   # Create vLLM rollout for inference
   rollout_config = base_rollout.RolloutConfig(
-      max_tokens_to_generate=config.max_target_length - config.max_prefill_predict_length,
-      max_prompt_length=config.max_prefill_predict_length,
-      temperature=config.decode_sampling_temperature,
-      top_p=config.decode_sampling_nucleus_p,
-      top_k=config.decode_sampling_top_k,
+    max_tokens_to_generate=config.max_target_length - config.max_prefill_predict_length,
+    max_prompt_length=config.max_prefill_predict_length,
+    temperature=config.decode_sampling_temperature,
+    top_p=config.decode_sampling_nucleus_p,
+    top_k=config.decode_sampling_top_k,
   )
   vllm_rollout = VllmRollout(
-      model=tunix_model,
-      tokenizer=model_tokenizer,
-      cache_config_or_size=config.max_target_length,  # Max sequence length
-      mesh=mesh,
-      model_version=config.tokenizer_path,
-      hbm_utilization=0.8,
-      init_with_random_weights=True,  # Use random weights
-      tpu_backend_type="jax",
+    model=tunix_model,
+    tokenizer=model_tokenizer,
+    cache_config_or_size=config.max_target_length,  # Max sequence length
+    mesh=mesh,
+    model_version=config.tokenizer_path,
+    hbm_utilization=0.8,
+    init_with_random_weights=True,  # Use random weights
+    tpu_backend_type="jax",
   )
 
   # Generate text
@@ -99,7 +99,7 @@ def main(argv: Sequence[str]) -> None:
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
   if "xla_tpu_spmd_rng_bit_generator_unsafe" not in os.environ.get("LIBTPU_INIT_ARGS", ""):
     os.environ["LIBTPU_INIT_ARGS"] = (
-        os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
+      os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
     )
 
   config = pyconfig.initialize(argv)

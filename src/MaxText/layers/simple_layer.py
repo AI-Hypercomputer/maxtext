@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-""" Simple decoder layers for testing and debugging purposes."""
+"""Simple decoder layers for testing and debugging purposes."""
 
 from jax import numpy as jnp
 from jax.sharding import Mesh
@@ -35,13 +35,13 @@ class SimpleDecoderLayer(nn.Module):
 
   def setup(self):
     self.weight_mat = self.param(
-        "weights",
-        nn.with_logical_partitioning(nn.initializers.lecun_normal(), ("embed", "mlp")),
-        (self.config.emb_dim, self.config.emb_dim),
+      "weights",
+      nn.with_logical_partitioning(nn.initializers.lecun_normal(), ("embed", "mlp")),
+      (self.config.emb_dim, self.config.emb_dim),
     )
 
   def __call__(
-      self, inputs: jnp.ndarray, positions, segmentation, deterministic, model_mode, previous_chunk=None, page_state=None
+    self, inputs: jnp.ndarray, positions, segmentation, deterministic, model_mode, previous_chunk=None, page_state=None
   ):
     if self.config.scan_layers:
       return inputs @ self.weight_mat.astype(inputs.dtype), None
@@ -59,26 +59,26 @@ class SimpleMlpDecoderLayer(nn.Module):
 
   def setup(self):
     self.ff_1 = self.param(
-        "ff_1",
-        nn.with_logical_partitioning(nn.initializers.lecun_normal(), ("embed", "mlp")),
-        (self.config.emb_dim, self.config.mlp_dim),
+      "ff_1",
+      nn.with_logical_partitioning(nn.initializers.lecun_normal(), ("embed", "mlp")),
+      (self.config.emb_dim, self.config.mlp_dim),
     )
     self.ff_2 = self.param(
-        "ff_2",
-        nn.with_logical_partitioning(nn.initializers.lecun_normal(), ("mlp", "embed")),
-        (self.config.mlp_dim, self.config.emb_dim),
+      "ff_2",
+      nn.with_logical_partitioning(nn.initializers.lecun_normal(), ("mlp", "embed")),
+      (self.config.mlp_dim, self.config.emb_dim),
     )
 
   def __call__(
-      self,
-      inputs: jnp.ndarray,
-      positions,
-      segmentation,
-      deterministic,
-      model_mode,
-      previous_chunk=None,
-      page_state=None,
-      slot=0,
+    self,
+    inputs: jnp.ndarray,
+    positions,
+    segmentation,
+    deterministic,
+    model_mode,
+    previous_chunk=None,
+    page_state=None,
+    slot=0,
   ):
     intermediate = inputs @ self.ff_1.astype(inputs.dtype)
     output = intermediate @ self.ff_2.astype(inputs.dtype)

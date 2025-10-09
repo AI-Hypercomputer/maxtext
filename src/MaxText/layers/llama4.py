@@ -65,12 +65,12 @@ class Llama4UnfoldConvolution(nn.Module):
     # patches sent to dense_general with shape:
     # [batch_size, num_patches, num_channels * patch_size * patch_size]
     self.linear = linears.dense_general(
-        in_features_shape=(cfg.num_channels_for_vit * cfg.patch_size_for_vit * cfg.patch_size_for_vit),
-        out_features_shape=cfg.hidden_size_for_vit,
-        dtype=cfg.dtype_mm,
-        name="vit_unfold_linear",
-        use_bias=False,
-        matmul_precision=cfg.matmul_precision,
+      in_features_shape=(cfg.num_channels_for_vit * cfg.patch_size_for_vit * cfg.patch_size_for_vit),
+      out_features_shape=cfg.hidden_size_for_vit,
+      dtype=cfg.dtype_mm,
+      name="vit_unfold_linear",
+      use_bias=False,
+      matmul_precision=cfg.matmul_precision,
     )
 
   def __call__(self, inputs: Array) -> Array:
@@ -89,11 +89,11 @@ class Llama4UnfoldConvolution(nn.Module):
 
     # Extract patches using conv_general_dilated_patches
     patches = lax.conv_general_dilated_patches(
-        inputs,
-        filter_shape=[cfg.patch_size_for_vit, cfg.patch_size_for_vit],
-        window_strides=[cfg.patch_size_for_vit, cfg.patch_size_for_vit],
-        padding="VALID",
-        dimension_numbers=("NCHW", "HWIO", "NCHW"),
+      inputs,
+      filter_shape=[cfg.patch_size_for_vit, cfg.patch_size_for_vit],
+      window_strides=[cfg.patch_size_for_vit, cfg.patch_size_for_vit],
+      padding="VALID",
+      dimension_numbers=("NCHW", "HWIO", "NCHW"),
     )
 
     # reshape patches to [batch_size, num_patches, num_channels * patch_size * patch_size]
@@ -125,7 +125,7 @@ def pixel_shuffle(input_tensor: Array, shuffle_ratio: float) -> Array:
 
   # Reshape to [batch_size, height * shuffle_ratio, width * shuffle_ratio, channels / (shuffle_ratio^2)]
   reshaped_tensor = reshaped_tensor.reshape(
-      batch_size, int(height * shuffle_ratio), int(width * shuffle_ratio), int(channels / (shuffle_ratio**2))
+    batch_size, int(height * shuffle_ratio), int(width * shuffle_ratio), int(channels / (shuffle_ratio**2))
   )
 
   # Transpose to [batch_size, width * shuffle_ratio, height * shuffle_ratio, channels / (shuffle_ratio^2)]
@@ -148,20 +148,20 @@ class Llama4VisionMLP(nn.Module):
   def setup(self):
     cfg = self.config
     self.fc1 = linears.dense_general(
-        in_features_shape=cfg.hidden_size_for_vit,
-        out_features_shape=cfg.intermediate_size_for_vit,
-        dtype=cfg.dtype_mm,
-        name="vit_encoder_layer_mlp_fc1",
-        use_bias=True,
-        matmul_precision=cfg.matmul_precision,
+      in_features_shape=cfg.hidden_size_for_vit,
+      out_features_shape=cfg.intermediate_size_for_vit,
+      dtype=cfg.dtype_mm,
+      name="vit_encoder_layer_mlp_fc1",
+      use_bias=True,
+      matmul_precision=cfg.matmul_precision,
     )
     self.fc2 = linears.dense_general(
-        in_features_shape=cfg.intermediate_size_for_vit,
-        out_features_shape=cfg.hidden_size_for_vit,
-        dtype=cfg.dtype_mm,
-        name="vit_encoder_layer_mlp_fc2",
-        use_bias=True,
-        matmul_precision=cfg.matmul_precision,
+      in_features_shape=cfg.intermediate_size_for_vit,
+      out_features_shape=cfg.hidden_size_for_vit,
+      dtype=cfg.dtype_mm,
+      name="vit_encoder_layer_mlp_fc2",
+      use_bias=True,
+      matmul_precision=cfg.matmul_precision,
     )
 
   def __call__(self, hidden_states: Array) -> Array:
@@ -194,20 +194,20 @@ class Llama4VisionMLP2(nn.Module):
     """
     cfg = self.config
     self.fc1 = linears.dense_general(
-        in_features_shape=cfg.intermediate_size_for_vit,
-        out_features_shape=cfg.projector_input_dim_for_vit,
-        dtype=cfg.dtype_mm,
-        name="vit_pixel_shuffle_mlp_fc1",
-        use_bias=False,
-        matmul_precision=cfg.matmul_precision,
+      in_features_shape=cfg.intermediate_size_for_vit,
+      out_features_shape=cfg.projector_input_dim_for_vit,
+      dtype=cfg.dtype_mm,
+      name="vit_pixel_shuffle_mlp_fc1",
+      use_bias=False,
+      matmul_precision=cfg.matmul_precision,
     )
     self.fc2 = linears.dense_general(
-        in_features_shape=cfg.projector_input_dim_for_vit,
-        out_features_shape=cfg.projector_output_dim_for_vit,
-        dtype=cfg.dtype_mm,
-        name="vit_pixel_shuffle_mlp_fc2",
-        use_bias=False,
-        matmul_precision=cfg.matmul_precision,
+      in_features_shape=cfg.projector_input_dim_for_vit,
+      out_features_shape=cfg.projector_output_dim_for_vit,
+      dtype=cfg.dtype_mm,
+      name="vit_pixel_shuffle_mlp_fc2",
+      use_bias=False,
+      matmul_precision=cfg.matmul_precision,
     )
     self.dropout = nn.Dropout(rate=cfg.projector_dropout_for_vit)
 
@@ -283,12 +283,12 @@ class Llama4MultiModalProjector(nn.Module):
   def setup(self):
     cfg = self.config
     self.linear = linears.dense_general(
-        in_features_shape=cfg.vision_output_dim_for_vit,
-        out_features_shape=cfg.base_emb_dim,
-        dtype=cfg.dtype_mm,
-        name="vit_multi_modal_projector",
-        use_bias=False,
-        matmul_precision=cfg.matmul_precision,
+      in_features_shape=cfg.vision_output_dim_for_vit,
+      out_features_shape=cfg.base_emb_dim,
+      dtype=cfg.dtype_mm,
+      name="vit_multi_modal_projector",
+      use_bias=False,
+      matmul_precision=cfg.matmul_precision,
     )
 
   def __call__(self, image_features: Array) -> Array:
@@ -342,9 +342,9 @@ def determine_is_moe_layer(layer_id: int, interleave_moe_layer_step: int) -> boo
     True if the layer is MoE layer, False otherwise.
   """
   return (
-      interleave_moe_layer_step is not None
-      and interleave_moe_layer_step > 0
-      and (layer_id + 1) % interleave_moe_layer_step == 0
+    interleave_moe_layer_step is not None
+    and interleave_moe_layer_step > 0
+    and (layer_id + 1) % interleave_moe_layer_step == 0
   )
 
 
@@ -357,14 +357,14 @@ class Llama4DecoderLayer(nnx.Module):
   """Transformer decoder layer for Llama4."""
 
   def __init__(
-      self,
-      config: Config,
-      mesh: Mesh,
-      model_mode: str,
-      rngs: nnx.Rngs,
-      quant: None | Quant = None,
-      is_nope_layer: bool = False,
-      is_moe_layer: bool = False,
+    self,
+    config: Config,
+    mesh: Mesh,
+    model_mode: str,
+    rngs: nnx.Rngs,
+    quant: None | Quant = None,
+    is_nope_layer: bool = False,
+    is_moe_layer: bool = False,
   ):
     """Initializes the Llama4 decoder layer.
 
@@ -389,87 +389,87 @@ class Llama4DecoderLayer(nnx.Module):
     dummy_inputs_shape = (batch_size, seq_len, config.emb_dim)
 
     self.pre_self_attention_layer_norm = RMSNorm(
-        num_features=config.emb_dim,
-        dtype=config.dtype,
-        weight_dtype=config.weight_dtype,
-        kernel_axes=("norm",),
-        epsilon=config.normalization_layer_epsilon,
-        rngs=rngs,
+      num_features=config.emb_dim,
+      dtype=config.dtype,
+      weight_dtype=config.weight_dtype,
+      kernel_axes=("norm",),
+      epsilon=config.normalization_layer_epsilon,
+      rngs=rngs,
     )
 
     # Instead of scaling the query values in the checkpoint conversion (`llama_or_mistral_ckpt`)
     # we'll do it dynamically in the forward pass of Attention
     query_pre_attn_scalar = config.head_dim**-0.5
     self.self_attention = Attention(
-        config=config,
-        num_query_heads=config.num_query_heads,
-        num_kv_heads=config.num_kv_heads,
-        head_dim=config.head_dim,
-        max_target_length=config.max_target_length,
-        max_prefill_predict_length=config.max_prefill_predict_length,
-        attention_kernel=config.attention,
-        inputs_q_shape=dummy_inputs_shape,
-        inputs_kv_shape=dummy_inputs_shape,
-        mesh=mesh,
-        dtype=config.dtype,
-        weight_dtype=config.weight_dtype,
-        dropout_rate=config.dropout_rate,
-        float32_qk_product=config.float32_qk_product,
-        float32_logits=config.float32_logits,
-        quant=self.quant,
-        kv_quant=quantizations.configure_kv_quant(config),
-        prefill_cache_axis_order=tuple(map(int, config.prefill_cache_axis_order.split(","))),
-        ar_cache_axis_order=tuple(map(int, config.ar_cache_axis_order.split(","))),
-        compute_axis_order=tuple(map(int, config.compute_axis_order.split(","))),
-        reshape_q=config.reshape_q,
-        use_ragged_attention=config.use_ragged_attention,
-        ragged_block_size=config.ragged_block_size,
-        is_nope_layer=self.is_nope_layer,
-        use_qk_norm=config.use_qk_norm,
-        query_pre_attn_scalar=query_pre_attn_scalar,
-        temperature_tuning=config.temperature_tuning,
-        temperature_tuning_scale=0.1,
-        temperature_tuning_floor_scale=8192.0,
-        # note: chunk_attn_window_size is set in the config
-        attention_type=AttentionType.GLOBAL if self.is_nope_layer else AttentionType.CHUNK,
-        model_mode=model_mode,
-        rngs=rngs,
+      config=config,
+      num_query_heads=config.num_query_heads,
+      num_kv_heads=config.num_kv_heads,
+      head_dim=config.head_dim,
+      max_target_length=config.max_target_length,
+      max_prefill_predict_length=config.max_prefill_predict_length,
+      attention_kernel=config.attention,
+      inputs_q_shape=dummy_inputs_shape,
+      inputs_kv_shape=dummy_inputs_shape,
+      mesh=mesh,
+      dtype=config.dtype,
+      weight_dtype=config.weight_dtype,
+      dropout_rate=config.dropout_rate,
+      float32_qk_product=config.float32_qk_product,
+      float32_logits=config.float32_logits,
+      quant=self.quant,
+      kv_quant=quantizations.configure_kv_quant(config),
+      prefill_cache_axis_order=tuple(map(int, config.prefill_cache_axis_order.split(","))),
+      ar_cache_axis_order=tuple(map(int, config.ar_cache_axis_order.split(","))),
+      compute_axis_order=tuple(map(int, config.compute_axis_order.split(","))),
+      reshape_q=config.reshape_q,
+      use_ragged_attention=config.use_ragged_attention,
+      ragged_block_size=config.ragged_block_size,
+      is_nope_layer=self.is_nope_layer,
+      use_qk_norm=config.use_qk_norm,
+      query_pre_attn_scalar=query_pre_attn_scalar,
+      temperature_tuning=config.temperature_tuning,
+      temperature_tuning_scale=0.1,
+      temperature_tuning_floor_scale=8192.0,
+      # note: chunk_attn_window_size is set in the config
+      attention_type=AttentionType.GLOBAL if self.is_nope_layer else AttentionType.CHUNK,
+      model_mode=model_mode,
+      rngs=rngs,
     )
 
     self.post_self_attention_layer_norm = RMSNorm(
-        num_features=config.emb_dim,
-        dtype=config.dtype,
-        weight_dtype=config.weight_dtype,
-        kernel_axes=("norm",),
-        epsilon=config.normalization_layer_epsilon,
-        rngs=self.rngs,
+      num_features=config.emb_dim,
+      dtype=config.dtype,
+      weight_dtype=config.weight_dtype,
+      kernel_axes=("norm",),
+      epsilon=config.normalization_layer_epsilon,
+      rngs=self.rngs,
     )
 
     if self.is_moe_layer:
       # NOTE: the name Llama4MoEBlock_0 is to ensure reverse compatibility with
       # existing checkpoints for MoE block.
       self.Llama4MoEBlock_0 = RoutedAndSharedMoE(
-          config=config,
-          mesh=self.mesh,
-          kernel_init=initializers.nd_dense_init(1.0, "fan_in", "truncated_normal"),
-          kernel_axes=("embed", None),
-          dtype=config.dtype,
-          weight_dtype=config.weight_dtype,
-          quant=self.quant,
-          rngs=self.rngs,
+        config=config,
+        mesh=self.mesh,
+        kernel_init=initializers.nd_dense_init(1.0, "fan_in", "truncated_normal"),
+        kernel_axes=("embed", None),
+        dtype=config.dtype,
+        weight_dtype=config.weight_dtype,
+        quant=self.quant,
+        rngs=self.rngs,
       )
     else:
       self.mlp = MlpBlock(
-          in_features=config.emb_dim,
-          intermediate_dim=config.mlp_dim,
-          activations=config.mlp_activations,
-          intermediate_dropout_rate=config.dropout_rate,
-          dtype=config.dtype,
-          weight_dtype=config.weight_dtype,
-          config=config,
-          quant=self.quant,
-          model_mode=model_mode,
-          rngs=self.rngs,
+        in_features=config.emb_dim,
+        intermediate_dim=config.mlp_dim,
+        activations=config.mlp_activations,
+        intermediate_dropout_rate=config.dropout_rate,
+        dtype=config.dtype,
+        weight_dtype=config.weight_dtype,
+        config=config,
+        quant=self.quant,
+        model_mode=model_mode,
+        rngs=self.rngs,
       )
 
     self.dropout = Dropout(rate=config.dropout_rate, broadcast_dims=(-2,), rngs=self.rngs)
@@ -483,16 +483,16 @@ class Llama4DecoderLayer(nnx.Module):
     return self.Llama4MoEBlock_0
 
   def __call__(
-      self,
-      inputs,
-      decoder_segment_ids,
-      decoder_positions,
-      deterministic,
-      model_mode,
-      bidirectional_mask=None,
-      slot: None | int = None,
-      page_state: None | page_manager.PageState = None,
-      previous_chunk=None,
+    self,
+    inputs,
+    decoder_segment_ids,
+    decoder_positions,
+    deterministic,
+    model_mode,
+    bidirectional_mask=None,
+    slot: None | int = None,
+    page_state: None | page_manager.PageState = None,
+    previous_chunk=None,
   ):
     cfg = self.config
     assert cfg.num_experts >= 1, "Expected the Llama4 config to have `num_experts > 1`."
@@ -505,16 +505,16 @@ class Llama4DecoderLayer(nnx.Module):
 
     # Self-attention block
     attention_lnx = self.self_attention(
-        lnx,
-        lnx,
-        decoder_positions,
-        decoder_segment_ids=decoder_segment_ids,
-        deterministic=deterministic,
-        model_mode=model_mode,
-        slot=slot,
-        page_state=page_state,
-        previous_chunk=previous_chunk,
-        bidirectional_mask=bidirectional_mask,
+      lnx,
+      lnx,
+      decoder_positions,
+      decoder_segment_ids=decoder_segment_ids,
+      deterministic=deterministic,
+      model_mode=model_mode,
+      slot=slot,
+      page_state=page_state,
+      previous_chunk=previous_chunk,
+      bidirectional_mask=bidirectional_mask,
     )
     attention_lnx = nn.with_logical_constraint(attention_lnx, self.activation_axis_names)
     intermediate_inputs = inputs + attention_lnx
@@ -537,9 +537,9 @@ class Llama4DecoderLayer(nnx.Module):
       self.sow("intermediates", "activation_mean", jnp.mean(layer_output))
       self.sow("intermediates", "activation_stdev", jnp.std(layer_output))
       self.sow(
-          "intermediates",
-          "activation_fraction_zero",
-          jnp.sum(layer_output == 0) / jnp.size(layer_output),
+        "intermediates",
+        "activation_fraction_zero",
+        jnp.sum(layer_output == 0) / jnp.size(layer_output),
       )
 
     if cfg.scan_layers:
@@ -549,8 +549,8 @@ class Llama4DecoderLayer(nnx.Module):
 
 
 Llama4DecoderLayerToLinen = nnx_wrappers.to_linen_class(
-    Llama4DecoderLayer,
-    base_metadata_fn=initializers.variable_to_logically_partitioned,
+  Llama4DecoderLayer,
+  base_metadata_fn=initializers.variable_to_logically_partitioned,
 )
 
 
@@ -558,14 +558,14 @@ class Llama4ScannableBlock(nnx.Module):
   """A repeatable block given nope_layer_interval and interleave_moe_layer_step."""
 
   def __init__(
-      self,
-      config: Config,
-      mesh: Mesh,
-      model_mode: str,
-      rngs: nnx.Rngs,
-      quant: None | Quant = None,
-      nope_layer_interval: int = 1,
-      interleave_moe_layer_step: int = 1,
+    self,
+    config: Config,
+    mesh: Mesh,
+    model_mode: str,
+    rngs: nnx.Rngs,
+    quant: None | Quant = None,
+    nope_layer_interval: int = 1,
+    interleave_moe_layer_step: int = 1,
   ):
     """Initializes the scannable block.
 
@@ -591,29 +591,28 @@ class Llama4ScannableBlock(nnx.Module):
       moe_layer = determine_is_moe_layer(layer_id, self.interleave_moe_layer_step)
       layer_name = f"layers_{layer_id}"
       layer = Llama4DecoderLayer(
-          config=self.config,
-          mesh=self.mesh,
-          model_mode=self.model_mode,
-          rngs=self.rngs,
-          quant=self.quant,
-          is_nope_layer=nope_layer,
-          is_moe_layer=moe_layer,
+        config=self.config,
+        mesh=self.mesh,
+        model_mode=self.model_mode,
+        rngs=self.rngs,
+        quant=self.quant,
+        is_nope_layer=nope_layer,
+        is_moe_layer=moe_layer,
       )
       setattr(self, layer_name, layer)
 
   def __call__(
-      self,
-      inputs,
-      decoder_segment_ids,
-      decoder_positions,
-      deterministic,
-      model_mode,
-      bidirectional_mask=None,
-      slot: None | int = None,
-      page_state: None | page_manager.PageState = None,
-      previous_chunk=None,
+    self,
+    inputs,
+    decoder_segment_ids,
+    decoder_positions,
+    deterministic,
+    model_mode,
+    bidirectional_mask=None,
+    slot: None | int = None,
+    page_state: None | page_manager.PageState = None,
+    previous_chunk=None,
   ):
-
     cfg = self.config
 
     inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
@@ -621,15 +620,15 @@ class Llama4ScannableBlock(nnx.Module):
     y = inputs
     for layer_id in range(cfg.inhomogeneous_layer_cycle_interval):
       y = getattr(self, f"layers_{layer_id}")(
-          y,
-          decoder_segment_ids,
-          decoder_positions,
-          deterministic,
-          model_mode,
-          previous_chunk=previous_chunk,
-          page_state=page_state,
-          slot=slot,
-          bidirectional_mask=bidirectional_mask,
+        y,
+        decoder_segment_ids,
+        decoder_positions,
+        deterministic,
+        model_mode,
+        previous_chunk=previous_chunk,
+        page_state=page_state,
+        slot=slot,
+        bidirectional_mask=bidirectional_mask,
       )
       if cfg.scan_layers:
         y = y[0]
@@ -640,8 +639,8 @@ class Llama4ScannableBlock(nnx.Module):
 
 
 Llama4ScannableBlockToLinen = nnx_wrappers.to_linen_class(
-    Llama4ScannableBlock,
-    base_metadata_fn=initializers.variable_to_logically_partitioned,
+  Llama4ScannableBlock,
+  base_metadata_fn=initializers.variable_to_logically_partitioned,
 )
 
 
@@ -653,9 +652,9 @@ class Llama4VisionEncoderLayer(nn.Module):
 
   @nn.compact
   def __call__(
-      self,
-      hidden_states: Array,
-      deterministic: bool = False,
+    self,
+    hidden_states: Array,
+    deterministic: bool = False,
   ) -> Array:
     """Forward pass of the vision encoder layer.
 
@@ -674,36 +673,36 @@ class Llama4VisionEncoderLayer(nn.Module):
 
     # Self attention
     attention_layer = attentions.attention_as_linen(
-        config=self.config,
-        num_query_heads=self.config.num_attention_heads_for_vit,
-        num_kv_heads=self.config.num_attention_heads_for_vit,
-        head_dim=self.config.hidden_size_for_vit // self.config.num_attention_heads_for_vit,
-        max_target_length=(self.config.image_size_for_vit // self.config.patch_size_for_vit) ** 2 + 1,
-        attention_kernel="dot_product",
-        inputs_q_shape=hidden_states.shape,
-        inputs_kv_shape=hidden_states.shape,
-        float32_qk_product=self.config.float32_qk_product,
-        float32_logits=self.config.float32_logits,
-        mesh=self.mesh,
-        dropout_rate=0,
-        name="self_attention_vision",
-        attention_type=AttentionType.FULL,
-        is_nope_layer=False,
-        use_bias_in_projections=True,
-        is_vision=True,
-        use_qk_norm=False,
-        query_pre_attn_scalar=1 / math.sqrt(self.config.hidden_size_for_vit // self.config.num_attention_heads_for_vit),
-        # The vision encoder processes an image in a single forward pass to produce
-        # embeddings. It doesn't have the concept of "prefill" and "autoregressive"
-        # steps that a text decoder has. Therefore, it doesn't need a KV cache for
-        # its self-attention mechanism.
-        model_mode=MODEL_MODE_TRAIN,
+      config=self.config,
+      num_query_heads=self.config.num_attention_heads_for_vit,
+      num_kv_heads=self.config.num_attention_heads_for_vit,
+      head_dim=self.config.hidden_size_for_vit // self.config.num_attention_heads_for_vit,
+      max_target_length=(self.config.image_size_for_vit // self.config.patch_size_for_vit) ** 2 + 1,
+      attention_kernel="dot_product",
+      inputs_q_shape=hidden_states.shape,
+      inputs_kv_shape=hidden_states.shape,
+      float32_qk_product=self.config.float32_qk_product,
+      float32_logits=self.config.float32_logits,
+      mesh=self.mesh,
+      dropout_rate=0,
+      name="self_attention_vision",
+      attention_type=AttentionType.FULL,
+      is_nope_layer=False,
+      use_bias_in_projections=True,
+      is_vision=True,
+      use_qk_norm=False,
+      query_pre_attn_scalar=1 / math.sqrt(self.config.hidden_size_for_vit // self.config.num_attention_heads_for_vit),
+      # The vision encoder processes an image in a single forward pass to produce
+      # embeddings. It doesn't have the concept of "prefill" and "autoregressive"
+      # steps that a text decoder has. Therefore, it doesn't need a KV cache for
+      # its self-attention mechanism.
+      model_mode=MODEL_MODE_TRAIN,
     )
 
     hidden_states = attention_layer(
-        inputs_q=hidden_states,
-        inputs_kv=hidden_states,
-        deterministic=deterministic,
+      inputs_q=hidden_states,
+      inputs_kv=hidden_states,
+      deterministic=deterministic,
     )
 
     hidden_states = residual + hidden_states
@@ -738,9 +737,9 @@ class Llama4VisionEncoder(nn.Module):
 
   @nn.compact
   def __call__(
-      self,
-      hidden_states: Array,
-      deterministic: bool = False,
+    self,
+    hidden_states: Array,
+    deterministic: bool = False,
   ) -> Array:
     """Forward pass of the vision encoder.
 
@@ -755,13 +754,12 @@ class Llama4VisionEncoder(nn.Module):
 
     # Iterate through encoder layers (non-scan version)
     for layer_idx in range(cfg.num_hidden_layers_for_vit):
-
       # TODO： add scan version
       layer = Llama4VisionEncoderLayer(config=cfg, mesh=self.mesh, name=f"layers_{layer_idx}")
 
       hidden_states = layer(
-          hidden_states=hidden_states,
-          deterministic=deterministic,
+        hidden_states=hidden_states,
+        deterministic=deterministic,
       )
 
     return hidden_states
@@ -785,24 +783,24 @@ class Llama4VisionModel(nn.Module):
     self.scale = self.config.hidden_size_for_vit**-0.5
     self.num_patches = (self.config.tile_size_for_vit // self.config.patch_size_for_vit) ** 2 + 1
     self.class_embedding = self.param(
-        "class_embedding",
-        nn.initializers.normal(stddev=self.scale, dtype=self.config.dtype_mm),
-        (self.config.hidden_size_for_vit,),
+      "class_embedding",
+      nn.initializers.normal(stddev=self.scale, dtype=self.config.dtype_mm),
+      (self.config.hidden_size_for_vit,),
     )
     self.positional_embedding_vlm = self.param(
-        "positional_embedding_vlm",
-        nn.initializers.normal(stddev=self.scale, dtype=self.config.dtype_mm),
-        (self.num_patches, self.config.hidden_size_for_vit),
+      "positional_embedding_vlm",
+      nn.initializers.normal(stddev=self.scale, dtype=self.config.dtype_mm),
+      (self.num_patches, self.config.hidden_size_for_vit),
     )
 
   @nn.compact
   def __call__(
-      self,
-      pixel_values: Array,
-      output_attentions: None | bool = None,
-      output_hidden_states: None | bool = None,
-      return_dict: None | bool = None,
-      deterministic: None | bool = False,
+    self,
+    pixel_values: Array,
+    output_attentions: None | bool = None,
+    output_hidden_states: None | bool = None,
+    return_dict: None | bool = None,
+    deterministic: None | bool = False,
   ) -> Array:
     """Forward pass of the Llama4 vision model.
 

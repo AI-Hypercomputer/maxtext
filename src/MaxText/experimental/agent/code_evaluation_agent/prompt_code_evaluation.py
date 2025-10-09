@@ -17,7 +17,7 @@ This file contains the prompt templates used by the code evaluation agent.
 """
 
 CodeEvaluation = {
-    "SystemPrompt": """You are an expert machine learning engineer and automated testing specialist with deep
+  "SystemPrompt": """You are an expert machine learning engineer and automated testing specialist with deep
    knowledge of Python, NumPy, PyTorch, JAX (Including libraries such as Flax, Flax.nnx and Optax).
 
   You can:
@@ -41,7 +41,7 @@ CodeEvaluation = {
         - Output validity (no errors or exceptions)
         - Output comparison (`np.allclose`)
     """,
-    "TESTCASE": """#torch_path
+  "TESTCASE": """#torch_path
     <module.path.to.pytorch_code>
 
     #jax_path

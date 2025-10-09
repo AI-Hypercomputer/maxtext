@@ -34,20 +34,19 @@ from MaxText.globals import MAXTEXT_PKG_DIR
 
 
 class MultihostDataloadingTest(unittest.TestCase):
-
   def setUp(self):
     super().setUp()
     batch_size = 4
     config = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
-        per_device_batch_size=1,
-        run_name="test",
-        mesh_axes=["data"],
-        logical_axis_rules=[["batch", "data"]],
-        data_sharding=["data"],
-        base_output_directory="gs://max-experiments/",
-        dataset_path="gs://maxtext-dataset/",
-        enable_checkpointing=False,
+      [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+      per_device_batch_size=1,
+      run_name="test",
+      mesh_axes=["data"],
+      logical_axis_rules=[["batch", "data"]],
+      data_sharding=["data"],
+      base_output_directory="gs://max-experiments/",
+      dataset_path="gs://maxtext-dataset/",
+      enable_checkpointing=False,
     )
     global_data_shape = PartitionSpec(batch_size, config.max_target_length)
     mesh_shape_1d = (len(jax.devices()),)
