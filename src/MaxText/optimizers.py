@@ -17,6 +17,7 @@
 
 import jax
 import jax.numpy as jnp
+from flax.linen import partitioning as nn_partitioning
 
 import optax
 # from optax.contrib import muon
@@ -58,7 +59,8 @@ def get_optimizer(config, learning_rate_schedule, model=None):
     #   muon_weight_dimension_numbers = DEEPSEEK3_DIMENSION_NUMBER
     # else:
     #   raise NotImplementedError
-    abstract_param = get_abstract_param(model, config)
+    with model.mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+      abstract_param = get_abstract_param(model, config)
     muon_weight_dimension_numbers = get_transform_tree(abstract_param)
     muon_kwargs = {
         # Shared parameters: "nesterov" uses default
