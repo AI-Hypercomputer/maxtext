@@ -393,12 +393,13 @@ model_config = qwen3_lib.ModelConfig.qwen3_8b()
 # Load the reference model
 # Note: pass the path to your scanned checkpoint for "load_parameters_path".
 # To create a scanned checkpoint, you can use /maxtext/src/maxtext/utils/ckpt_conversion/to_maxtext.py
+# deps/src/MaxText/configs
 config_ref = pyconfig.initialize(
     [
         "",
-        f"{HOME}/maxtext/src/maxtext/configs/base.yml",
+        os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
     ],
-    base_output_directory="dummy",  # This is not used in Tunix.
+    base_output_directory="gs://abhinavsing_bucket/",  # This is not used in Tunix.
     run_name="test-tunix-maxtext-qwen3-8b",
     tokenizer_type="huggingface",
     tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "qwen3-tokenizer"),

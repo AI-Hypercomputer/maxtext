@@ -17,7 +17,7 @@
 run_name: ""
 
 model_name: "default" # override config settings to match a specific model. other than the override, nothing should use this!
-override_model_config: False # When set to true allows overriding model parameters via CLI for the purpose of debugging/testing.
+override_model_config: True # When set to true allows overriding model parameters via CLI for the purpose of debugging/testing.
 normalization_layer_epsilon: 1.e-05
 
 ################################## CHECKPOINTING ##################################
