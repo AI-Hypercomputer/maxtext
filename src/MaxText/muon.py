@@ -127,10 +127,14 @@ def _compute_muon_reshape(x: jax.Array, dim_nums: MuonDimensionNumbers
   return reshape_fn, inverse_fn
 
 
+# def _shape_factor(x: jax.Array, dim_nums: MuonDimensionNumbers) -> float:
+#   reduction_axes, output_axes = _normalize_axes(x, dim_nums)
+#   return math.prod(x.shape[ax] for ax in output_axes) / math.prod(
+#       x.shape[ax] for ax in reduction_axes)
+
 def _shape_factor(x: jax.Array, dim_nums: MuonDimensionNumbers) -> float:
   reduction_axes, output_axes = _normalize_axes(x, dim_nums)
-  return math.prod(x.shape[ax] for ax in output_axes) / math.prod(
-      x.shape[ax] for ax in reduction_axes)
+  return max(math.prod(x.shape[ax] for ax in output_axes), math.prod(x.shape[ax] for ax in reduction_axes)) * 0.2
 
 
 def _newton_schulz_iterator(x: jax.Array, coeffs: jax.Array) -> jax.Array:
@@ -141,9 +145,7 @@ def _newton_schulz_iterator(x: jax.Array, coeffs: jax.Array) -> jax.Array:
   # when rows > cols for effciency.
   a = x @ x.T
   b = coeffs[1] * a + coeffs[2] * a @ a
-  out = coeffs[0] * x + b @ x
-  rms_adj = 0.2 * math.sqrt(max(x.shape))
-  return out * rms_adj
+  return coeffs[0] * x + b @ x
 
 
 def orthogonalize_via_newton_schulz(
