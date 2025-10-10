@@ -394,7 +394,7 @@ class Decoder(nn.Module):
       case DecoderBlockType.GEMMA3:
         return [gemma3.Gemma3DecoderLayer]
       case DecoderBlockType.GPT3:
-        return [gpt3.Gpt3DecoderLayer]
+        return [gpt3.Gpt3DecoderLayerToLinen]
       case DecoderBlockType.GPT_OSS:
         return [gpt_oss.GptOssScannableBlock] if self.config.scan_layers else [gpt_oss.GptOssDecoderLayer]
       case DecoderBlockType.QWEN3:
