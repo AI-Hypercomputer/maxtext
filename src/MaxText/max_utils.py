@@ -46,6 +46,7 @@ HYBRID_RING_32X8 = "hybrid_ring_32x8"
 # pylint: disable=too-many-positional-arguments
 
 
+
 def with_memory_kind(t, memory_kind):
   return jax.tree_util.tree_map(lambda x: x.with_memory_kind(kind=memory_kind), t)
 
