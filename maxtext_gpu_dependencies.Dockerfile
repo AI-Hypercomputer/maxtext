@@ -34,16 +34,20 @@ ARG DEVICE
 ENV ENV_DEVICE=$DEVICE
 
 ENV MAXTEXT_ASSETS_ROOT=/deps/src/MaxText/assets
-ENV MAXTEXT_TEST_ASSETS_ROOT=/deps/src/MaxText/test_assets
 ENV MAXTEXT_PKG_DIR=/deps/src/MaxText
 ENV MAXTEXT_REPO_ROOT=/deps
+ENV MAXTEXT_TEST_ASSETS_ROOT=/deps/src/MaxText/test_assets
+ENV MAXTEXT_VENV=/deps/venvs/maxtext_venv
+
+ENV VIRTUAL_ENV="${MAXTEXT_VENV}"
+ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 
 # Set the working directory in the container
 WORKDIR /deps
 
 # Copy setup files and dependency files separately for better caching
 COPY setup.sh ./
-COPY requirements.txt requirements_with_jax_ai_image.txt ./
+COPY requirements.txt requirements_with_jax_ai_image.txt generated_requirements ./
 
 # Install dependencies - these steps are cached unless the copied files change
 RUN echo "Running command: bash setup.sh MODE=$ENV_MODE JAX_VERSION=$ENV_JAX_VERSION DEVICE=${ENV_DEVICE}"
@@ -53,4 +57,4 @@ RUN --mount=type=cache,target=/root/.cache/pip bash setup.sh MODE=${ENV_MODE} JA
 COPY . .
 
 # Install (editable) MaxText
-RUN test -f '/tmp/venv_created' && "$(tail -n1 /tmp/venv_created)"/bin/activate ; pip install --no-dependencies -e .
+RUN test -f '/tmp/venv_created' && "$(tail -n1 /tmp/venv_created)"/bin/activate || test -f "${MAXTEXT_VENV}"/bin/activate && . "${MAXTEXT_VENV}"/bin/activate ; pip install --no-dependencies -e .
