@@ -15,6 +15,7 @@
 """Global variable constants used throughout the codebase"""
 
 import os.path
+import sys
 
 # This is the MaxText root: with "max_utils.py"; &etc. TODO: Replace `os.path.basename` with `os.path.abspath`
 MAXTEXT_PKG_DIR = os.environ.get("MAXTEXT_PKG_DIR", os.path.basename(os.path.dirname(__file__)))
@@ -33,6 +34,11 @@ MAXTEXT_ASSETS_ROOT = os.environ.get("MAXTEXT_ASSETS_ROOT", os.path.join(MAXTEXT
 # This is the test assets root: with "test_image.jpg"; &etc.
 MAXTEXT_TEST_ASSETS_ROOT = os.environ.get("MAXTEXT_TEST_ASSETS_ROOT", os.path.join(MAXTEXT_PKG_DIR, "test_assets"))
 
+# This is the current Python virtualenv root path
+MAXTEXT_VENV = os.environ.get(
+    "MAXTEXT_VENV", os.environ.get("VIRTUAL_ENV", os.path.dirname(os.path.dirname(sys.executable)))
+)
+
 EPS = 1e-8  # Epsilon to calculate loss
 DEFAULT_OCDBT_TARGET_DATA_FILE_SIZE = 2 * 1024**3  # Default checkpoint file size
 
@@ -43,4 +49,5 @@ __all__ = [
     "MAXTEXT_PKG_DIR",
     "MAXTEXT_REPO_ROOT",
     "MAXTEXT_TEST_ASSETS_ROOT",
+    "MAXTEXT_VENV",
 ]

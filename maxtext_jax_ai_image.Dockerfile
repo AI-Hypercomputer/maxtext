@@ -8,16 +8,20 @@ ARG COMMIT_HASH
 ENV COMMIT_HASH=$COMMIT_HASH
 
 ENV MAXTEXT_ASSETS_ROOT=/deps/src/MaxText/assets
-ENV MAXTEXT_TEST_ASSETS_ROOT=/deps/src/MaxText/test_assets
 ENV MAXTEXT_PKG_DIR=/deps/src/MaxText
 ENV MAXTEXT_REPO_ROOT=/deps
+ENV MAXTEXT_TEST_ASSETS_ROOT=/deps/src/MaxText/test_assets
+ENV MAXTEXT_VENV=/deps/venvs/maxtext_venv
+
+ENV VIRTUAL_ENV="${MAXTEXT_VENV}"
+ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 
 # Set the working directory in the container
 WORKDIR /deps
 
 # Copy setup files and dependency files separately for better caching
 COPY setup.sh ./
-COPY requirements.txt requirements_with_jax_ai_image.txt requirements_with_jax_stable_stack_0_6_1_pipreqs.txt ./
+COPY requirements.txt requirements_with_jax_ai_image.txt requirements_with_jax_stable_stack_0_6_1_pipreqs.txt generated_requirements ./
 
 
 # For JAX AI tpu training images 0.4.37 AND 0.4.35
@@ -57,8 +61,6 @@ RUN if [ "$DEVICE" = "tpu" ]; then \
 # Now copy the remaining code (source files that may change frequently)
 COPY . .
 
-RUN ls .
-
 ARG TEST_TYPE
 # Copy over test assets if building image for end-to-end tests or unit tests
 RUN if [ "$TEST_TYPE" = "xlml" ] || [ "$TEST_TYPE" = "unit_test" ]; then \
@@ -71,4 +73,4 @@ RUN if [ "$TEST_TYPE" = "xlml" ] || [ "$TEST_TYPE" = "unit_test" ]; then \
 RUN bash /jax-ai-image/generate_manifest.sh PREFIX=maxtext COMMIT_HASH=$COMMIT_HASH
 
 # Install (editable) MaxText
-RUN test -f '/tmp/venv_created' && "$(tail -n1 /tmp/venv_created)"/bin/activate ; pip install --no-dependencies -e .
+RUN test -f '/tmp/venv_created' && "$(tail -n1 /tmp/venv_created)"/bin/activate || test -f "${MAXTEXT_VENV}"/bin/activate && . "${MAXTEXT_VENV}"/bin/activate ; pip install --no-dependencies -e .
