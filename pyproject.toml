@@ -26,7 +26,7 @@ classifiers = [
 dependencies = []
 
 [tool.hatch.metadata.hooks.requirements_txt.optional-dependencies]
-tpu = ["generated_requirements/tpu-requirements.txt"]
+tpu = ["dependencies/requirements/tpu-requirements.txt"]
 
 [project.urls]
 Repository = "https://github.com/AI-Hypercomputer/maxtext.git"
