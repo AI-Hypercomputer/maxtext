@@ -615,7 +615,7 @@ def generate_completions(
     thread_example_batch_trimmed = jax.tree_util.tree_map(
         lambda arr: arr[
             : int(
-                worker_config_inference.per_device_batch_size
+                (worker_config_inference.per_device_batch_size // worker_config_inference.num_generations)
                 * worker_config_train.inference_replicas
                 * worker_config_train.inference_devices_per_replica
             )
@@ -923,6 +923,7 @@ def main(argv: Sequence[str]) -> None:
         f"with {jax.device_count()} devices"
     )
   config_inference = pyconfig.initialize(configs_argv[1])
+
   if config.per_device_batch_size < 1.0 or config_inference.per_device_batch_size < 1.0:
     raise ValueError("GRPO does not support setting per_device_batch_size < 1.0")
   jax.config.update("jax_use_shardy_partitioner", config.shardy)
