@@ -578,11 +578,11 @@ class _HyperParameters:
 
     # Initialize JAX distributed system using resource manager
     from MaxText import resource_manager
-    
+
     program_name = raw_keys.get("run_name", "unknown")
     if program_name:
       max_logging.log(f"Initializing resources for program: {program_name}")
-    
+
     resource_manager.initialize_for_config(raw_keys, program_name=program_name)
 
     if raw_keys["jax_cache_dir"]:

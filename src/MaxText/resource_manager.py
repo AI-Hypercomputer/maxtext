@@ -33,7 +33,6 @@ import os
 import gc
 import json
 import socket
-import subprocess
 import sys
 import threading
 import time
@@ -95,7 +94,7 @@ def _read_resource_state():
     return None
 
   try:
-    with open(_STATE_FILE, "r") as f:
+    with open(_STATE_FILE, "r", encoding="utf-8") as f:
       state = json.load(f)
       # Check if the process is still alive
       if "pid" in state and not _is_process_alive(state["pid"]):
@@ -114,7 +113,7 @@ def _write_resource_state(state):
     state: Dictionary containing resource state.
   """
   _ensure_lock_dir()
-  with open(_STATE_FILE, "w") as f:
+  with open(_STATE_FILE, "w", encoding="utf-8") as f:
     json.dump(state, f, indent=2)
 
 
@@ -128,7 +127,7 @@ def _acquire_resource_lock(timeout=0):
     file object or None: Lock file handle if acquired, None otherwise.
   """
   _ensure_lock_dir()
-  lock_file = open(_LOCK_FILE, "w")
+  lock_file = open(_LOCK_FILE, "w", encoding="utf-8")
 
   start_time = time.time()
   while True:
@@ -370,18 +369,18 @@ def initialize_jax_for_gpu(raw_keys, program_name=None):
     coordinator_address = f"{coordinator_ip}:{coordinator_port}"
     jax.distributed.initialize(
         coordinator_address=coordinator_address,
-        num_processes=int(os.getenv("NNODES")),
-        process_id=int(os.getenv("NODE_RANK")),
+        num_processes=int(os.getenv("NNODES", "1")),
+        process_id=int(os.getenv("NODE_RANK", "0")),
         initialization_timeout=raw_keys["jax_distributed_initialization_timeout"],
     )
     max_logging.log(f"JAX global devices: {jax.devices()}")
-    
+
     # Update metadata with program name
     _update_metadata(
         backend="gpu",
         coordinator_address=coordinator_address,
-        num_processes=int(os.getenv("NNODES")),
-        process_id=int(os.getenv("NODE_RANK")),
+        num_processes=int(os.getenv("NNODES", "1")),
+        process_id=int(os.getenv("NODE_RANK", "0")),
         program_name=program_name,
     )
 
@@ -391,24 +390,24 @@ def initialize_jax_for_cpu(raw_keys, program_name=None):
   coordinator_ip_address = get_coordinator_ip_address()
   coordinator_address = coordinator_ip_address + ":1234"  # JAX coordinator port used in XPK
   # Env variables to be set in XPK or otherwise
-  job_index = int(os.environ.get("JOB_INDEX"))
-  job_completion_index = int(os.environ.get("JOB_COMPLETION_INDEX"))
-  processes_in_job = int(os.environ.get("PROCESSES_IN_JOB"))
+  job_index = int(os.environ.get("JOB_INDEX", "0"))
+  job_completion_index = int(os.environ.get("JOB_COMPLETION_INDEX", "0"))
+  processes_in_job = int(os.environ.get("PROCESSES_IN_JOB", "1"))
   pid = job_index * processes_in_job + job_completion_index
   max_logging.log(f" Jax process id is {pid} ")
   # Explicit initialize is needed only for CPUs
   jax.distributed.initialize(
       coordinator_address=coordinator_address,
       process_id=pid,
-      num_processes=int(os.environ.get("JAX_PROCESS_COUNT")),
+      num_processes=int(os.environ.get("JAX_PROCESS_COUNT", "1")),
       initialization_timeout=raw_keys["jax_distributed_initialization_timeout"],
   )
-  
+
   # Update metadata with program name
   _update_metadata(
       backend="cpu",
       coordinator_address=coordinator_address,
-      num_processes=int(os.environ.get("JAX_PROCESS_COUNT")),
+      num_processes=int(os.environ.get("JAX_PROCESS_COUNT", "1")),
       process_id=pid,
       program_name=program_name,
   )
@@ -435,7 +434,7 @@ def initialize_jax_for_tpu_with_emergency_checkpointing(raw_keys, program_name=N
 
     ocp.multihost.initialize_runtime_to_distributed_ids()
     ocp.multihost.initialize_distributed_to_device_ids()
-    
+
     # Update metadata with program name
     _update_metadata(
         backend="tpu",
@@ -447,17 +446,19 @@ def initialize_jax_for_tpu_with_emergency_checkpointing(raw_keys, program_name=N
 
 def maybe_initialize_jax_distributed_system(raw_keys, program_name=None):
   """The best recipe to initialize the JAX Distributed System has varied over time.
-  
+
   This is the main initialization function that handles all backends (TPU/GPU/CPU).
-  
+
   Args:
     raw_keys: Configuration dictionary.
     program_name: Optional name for the program (e.g., run_name). Used for tracking.
   """
   # Import here to avoid circular dependency
-  from orbax.checkpoint.experimental.emergency.multi_tier_checkpointing import initialization
+  from orbax.checkpoint.experimental.emergency.multi_tier_checkpointing import (
+      initialization,
+  )
   initialize_multi_tier_checkpointing = initialization.initialize_multi_tier_checkpointing
-  
+
   if raw_keys.get("skip_jax_distributed_system"):
     max_logging.log("Skipping jax distributed system due to skip_jax_distributed_system=True flag.")
     return
@@ -475,11 +476,11 @@ def maybe_initialize_jax_distributed_system(raw_keys, program_name=None):
   if raw_keys.get("compile_topology"):
     # Don't initialize jax distributed with AOT compilation
     return
-    
+
   # Store program name for logging
   prog_name = program_name or raw_keys.get("run_name", "unknown")
   max_logging.log(f"Initializing JAX distributed system for program: {prog_name}")
-  
+
   if is_gpu_backend(raw_keys):
     max_logging.log("Attempting to initialize the jax distributed system for GPU backend...")
     initialize_jax_for_gpu(raw_keys, program_name)
@@ -518,7 +519,9 @@ def maybe_initialize_jax_distributed_system(raw_keys, program_name=None):
     max_logging.log("Jax distributed system initialized!")
 
 
-def initialize_jax_for_backend(coordinator_address=None, num_processes=None, process_id=None, timeout=300, program_name=None):
+def initialize_jax_for_backend(
+    coordinator_address=None, num_processes=None, process_id=None, timeout=300, program_name=None
+):
   """Initialize JAX distributed system for any accelerator (TPU/GPU/CPU).
 
   This function initializes the JAX distributed system if it's not already initialized.
@@ -584,10 +587,10 @@ def initialize_jax_for_backend(coordinator_address=None, num_processes=None, pro
         coordinator_address = f"{coordinator_ip}:{coordinator_port}"
 
       if num_processes is None:
-        num_processes = int(os.getenv("NNODES", 1))
+        num_processes = int(os.getenv("NNODES", "1"))
 
       if process_id is None:
-        process_id = int(os.getenv("NODE_RANK", 0))
+        process_id = int(os.getenv("NODE_RANK", "0"))
 
       jax.distributed.initialize(
           coordinator_address=coordinator_address,
@@ -603,13 +606,13 @@ def initialize_jax_for_backend(coordinator_address=None, num_processes=None, pro
         coordinator_address = f"{coordinator_ip}:1234"
 
       if process_id is None:
-        job_index = int(os.getenv("JOB_INDEX", 0))
-        job_completion_index = int(os.getenv("JOB_COMPLETION_INDEX", 0))
-        processes_in_job = int(os.getenv("PROCESSES_IN_JOB", 1))
+        job_index = int(os.getenv("JOB_INDEX", "0"))
+        job_completion_index = int(os.getenv("JOB_COMPLETION_INDEX", "0"))
+        processes_in_job = int(os.getenv("PROCESSES_IN_JOB", "1"))
         process_id = job_index * processes_in_job + job_completion_index
 
       if num_processes is None:
-        num_processes = int(os.getenv("JAX_PROCESS_COUNT", 1))
+        num_processes = int(os.getenv("JAX_PROCESS_COUNT", "1"))
 
       jax.distributed.initialize(
           coordinator_address=coordinator_address,
@@ -618,7 +621,7 @@ def initialize_jax_for_backend(coordinator_address=None, num_processes=None, pro
           initialization_timeout=timeout,
       )
 
-    max_logging.log(f"JAX distributed system initialized successfully!")
+    max_logging.log("JAX distributed system initialized successfully!")
     max_logging.log(f"JAX process index: {jax.process_index()}")
     max_logging.log(f"JAX process count: {jax.process_count()}")
     max_logging.log(f"JAX local devices: {jax.local_devices()}")
@@ -807,7 +810,7 @@ def print_resource_status():
 
   if not status["resource_available"] and "resource_holder" in status:
     holder = status["resource_holder"]
-    print(f"\nResource held by:")
+    print("\nResource held by:")
     print(f"  Program: {holder.get('program_name', 'unknown')}")
     print(f"  PID: {holder.get('pid')}")
     print(f"  Host: {holder.get('hostname')}")
@@ -828,7 +831,7 @@ def print_resource_status():
     # Print tracked metadata
     if metadata.get("initialization_time"):
       uptime = time.time() - metadata["initialization_time"]
-      print(f"\nTracked Metadata:")
+      print("\nTracked Metadata:")
       print(f"  Coordinator: {metadata.get('coordinator_address', 'auto-detected')}")
       print(f"  Uptime: {uptime:.2f} seconds")
 

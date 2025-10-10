@@ -20,26 +20,19 @@ from collections.abc import Sequence
 import functools
 from functools import partial
 import os
-import socket
 import subprocess
-import time
 from typing import Any
 
-from etils import epath
 import flax
 import jax
 from jax.experimental import mesh_utils
 import jax.numpy as jnp
 import numpy as np
-import orbax.checkpoint as ocp
-from orbax.checkpoint.experimental.emergency.multi_tier_checkpointing import initialization
 import psutil
 from tensorboardX import writer
 
 from MaxText import max_logging
 from MaxText.common_types import MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_TRAIN
-
-initialize_multi_tier_checkpointing = initialization.initialize_multi_tier_checkpointing
 HYBRID_RING_64X4 = "hybrid_ring_64x4"
 HYBRID_RING_32X8 = "hybrid_ring_32x8"
 
