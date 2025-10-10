@@ -397,6 +397,7 @@ class Gpt3DecoderLayer(nn.Module):
         use_pre_norm=True,
         config=cfg,
         quant=self.quant,
+        mesh=self.mesh,
     )(attention_lnx, deterministic=deterministic)
     mlp_lnx = nn.with_logical_constraint(mlp_lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
 

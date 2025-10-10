@@ -63,7 +63,7 @@ class PipelineParallelismTest(unittest.TestCase):
     mesh = Mesh(devices_array, config.mesh_axes)
     model_mode = MODEL_MODE_TRAIN
     if single_pipeline_stage_class is None:
-      single_pipeline_stage = simple_layer.SimpleDecoderLayer(config=config, mesh=mesh, model_mode=model_mode)
+      single_pipeline_stage = simple_layer.SimpleDecoderLayerToLinen(config=config, mesh=mesh, model_mode=model_mode)
     else:
       single_pipeline_stage = single_pipeline_stage_class(config=config, mesh=mesh, model_mode=model_mode)
 
@@ -76,10 +76,10 @@ class PipelineParallelismTest(unittest.TestCase):
           segmentations: [batch_size, segmentation]
       """
       input_shape = [batch_size, sequence, features]
-      inputs = jax.random.normal(jax.random.PRNGKey(2), input_shape, dtype=jnp.float32)
+      inputs = jax.random.normal(jax.random.PRNGKey(2), input_shape, dtype=config.dtype)
 
       # dummy targets same shape as inputs to use for a dummy loss function to check gradient correctness
-      dummy_targets = jax.random.normal(jax.random.PRNGKey(3), input_shape, dtype=jnp.float32)
+      dummy_targets = jax.random.normal(jax.random.PRNGKey(3), input_shape, dtype=config.dtype)
 
       inputs_position = jnp.array([jnp.arange(sequence, dtype=jnp.int32) for _ in range(batch_size)], dtype=jnp.int32)
       inputs_segmentation = jnp.ones((batch_size, sequence), dtype=jnp.int32)
@@ -90,7 +90,7 @@ class PipelineParallelismTest(unittest.TestCase):
     )
     deterministic = True
     # We use a simpler single matmul decoder layer for fast compilation in these tests.
-    single_pipeline_stage = simple_layer.SimpleDecoderLayer(config=config, mesh=mesh, model_mode=model_mode)
+    single_pipeline_stage = simple_layer.SimpleDecoderLayerToLinen(config=config, mesh=mesh, model_mode=model_mode)
     my_pipeline = pipeline.Pipeline(config=config, layers=single_pipeline_stage, mesh=mesh)
     init_pipeline_params = my_pipeline.init(
         jax.random.PRNGKey(0), inputs, inputs_position, inputs_segmentation, deterministic, model_mode
@@ -184,6 +184,7 @@ class PipelineParallelismTest(unittest.TestCase):
         base_num_decoder_layers=8,
         num_pipeline_microbatches=4,
         per_device_batch_size=4,
+        dtype="float32",
     )
     self.assert_pipeline_same_output_and_grad(config)
 
@@ -201,6 +202,7 @@ class PipelineParallelismTest(unittest.TestCase):
         base_num_decoder_layers=8,
         num_pipeline_microbatches=8,
         per_device_batch_size=4,
+        dtype="float32",
     )
     self.assert_pipeline_same_output_and_grad(config)
 
@@ -224,6 +226,7 @@ class PipelineParallelismTest(unittest.TestCase):
         sparse_matmul=False,
         capacity_factor=1,
         decoder_block="deepseek",
+        dtype="float32",
     )
     self.assert_pipeline_same_output_and_grad(config, single_pipeline_stage_class=deepseek.DeepSeekMoELayer)
 
@@ -242,6 +245,7 @@ class PipelineParallelismTest(unittest.TestCase):
         num_pipeline_microbatches=8,
         per_device_batch_size=4,
         pipeline_fsdp_ag_once=True,
+        dtype="float32",
     )
     self.assert_pipeline_same_output_and_grad(config)
 
@@ -258,6 +262,7 @@ class PipelineParallelismTest(unittest.TestCase):
         base_num_decoder_layers=4,
         num_pipeline_microbatches=4,
         per_device_batch_size=4,
+        dtype="float32",
     )
     self.assert_pipeline_same_output_and_grad(config)
 
@@ -308,6 +313,7 @@ class PipelineParallelismTest(unittest.TestCase):
         num_pipeline_microbatches=8,
         per_device_batch_size=4,
         pipeline_delay_activation_forwarding=True,
+        dtype="float32",
     )
     self.assert_pipeline_same_output_and_grad(config)
 

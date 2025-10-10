@@ -230,9 +230,10 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
 
     def reshape_to_microbatch_accumulations(batch_arr):
       """Reshape global batch to microbatches, assuming batch axis is leading."""
-      microbatches = config.gradient_accumulation_steps
-      microbatch_shape = (microbatches, batch_arr.shape[0] // microbatches) + batch_arr.shape[1:]
-      return jnp.reshape(batch_arr, microbatch_shape)
+      num_microbatches = config.gradient_accumulation_steps
+      microbatch_shape = (batch_arr.shape[0] // num_microbatches, num_microbatches) + batch_arr.shape[1:]
+      reshaped_batch_arr = jnp.reshape(batch_arr, microbatch_shape)
+      return jnp.swapaxes(reshaped_batch_arr, 0, 1)
 
     data = jax.tree_util.tree_map(reshape_to_microbatch_accumulations, data)
     init_grad = jax.tree_util.tree_map(jnp.zeros_like, state.params)
@@ -463,6 +464,7 @@ def initialize(argv: Sequence[str]) -> tuple[pyconfig.HyperParameters, Any, Any]
   """Initialization of hyperparameters and utilities"""
   pathwaysutils.initialize()
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
+  jax.config.update('jax_remove_size_one_mesh_axis_from_type', True)
   # TF allocates extraneous GPU memory when using TFDS data
   # this leads to CUDA OOMs. WAR for now is to hide GPUs from TF
   tf.config.set_visible_devices([], "GPU")

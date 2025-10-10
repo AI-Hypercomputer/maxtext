@@ -18,7 +18,7 @@ import dataclasses
 from typing import Any, Iterable, Optional, Tuple, Union
 
 from jax.ad_checkpoint import checkpoint_name
-from jax.sharding import Mesh
+from jax.sharding import Mesh, NamedSharding
 import jax
 import jax.numpy as jnp
 
@@ -54,6 +54,7 @@ from MaxText.common_types import (
     EP_AS_CONTEXT,
     AttentionType,
 )
+from MaxText.maxtext_utils import maybe_shard
 from MaxText.inference import kvcache
 from MaxText.inference import page_manager
 from MaxText.inference import paged_attention
@@ -121,6 +122,7 @@ def attention_as_linen(
     float32_logits: bool = False,  # cast logits in float32 for stability.
     quant: Optional[Quant] = None,
     kv_quant: Optional[KVQuant] = None,
+    out_sharding: NamedSharding | None = None,
     attention_type: AttentionType = AttentionType.GLOBAL,  # Default to global attention
     attn_logits_soft_cap: float | None = None,
     sliding_window_size: int | None = None,
@@ -179,6 +181,7 @@ def attention_as_linen(
       inputs_q_shape=inputs_q_shape,
       inputs_kv_shape=inputs_kv_shape,
       dtype=dtype,
+      out_sharding=out_sharding,
       weight_dtype=weight_dtype,
       max_prefill_predict_length=max_prefill_predict_length,
       dropout_rate=dropout_rate,
@@ -276,6 +279,7 @@ class Attention(nnx.Module):
       max_prefill_predict_length: int = -1,
       dropout_rate: float = 0.0,
       kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "normal"),
+      out_sharding: NamedSharding | None = None,
       float32_qk_product: bool = False,  # computes logits in float32 for stability.
       float32_logits: bool = False,  # cast logits in float32 for stability.
       quant: Optional[Quant] = None,
@@ -340,6 +344,7 @@ class Attention(nnx.Module):
       max_prefill_predict_length: Maximum length for prefill.
       dropout_rate: The dropout rate.
       kernel_init: Initializer for the kernel of the dense layers.
+      out_sharding: the named sharding of the attention output tensor
       float32_qk_product: If True, compute query-key product in float32.
       float32_logits: If True, cast logits to float32 before softmax.
       quant: Quantization configuration.
@@ -378,6 +383,7 @@ class Attention(nnx.Module):
     self.float32_qk_product = float32_qk_product
     self.float32_logits = float32_logits
     self.quant = quant
+    self.out_sharding = out_sharding
     self.kv_quant = kv_quant
     self.attention_type = attention_type
     self.attn_logits_soft_cap = attn_logits_soft_cap
@@ -510,6 +516,10 @@ class Attention(nnx.Module):
       self.value = self.init_kv_w(inputs_kv_shape=inputs_kv_shape)
     self.out = self.init_out_w(output_dim=inputs_q_shape[-1])
 
+  def _maybe_shard(self, inputs, logical_axes):
+    named_sharding = NamedSharding(self.mesh, nn.logical_to_mesh_axes(logical_axes))
+    return maybe_shard(inputs, named_sharding, self.config.shard_mode)
+
   def init_query_w(self, inputs_q_shape: Tuple) -> nnx.Module:
     """Query projection initialization."""
 
@@ -539,6 +549,8 @@ class Attention(nnx.Module):
         dtype=self.dtype,
         weight_dtype=self.weight_dtype,
         quant=self.quant,
+        shard_mode=self.config.shard_mode,
+        out_sharding=self.out_sharding,
         matmul_precision=self.config.matmul_precision,
         use_bias=self.use_bias_in_projections,
         rngs=self.rngs,
@@ -579,6 +591,8 @@ class Attention(nnx.Module):
         dtype=self.dtype,
         weight_dtype=self.weight_dtype,
         quant=self.quant,
+        shard_mode=self.config.shard_mode,
+        out_sharding=self.out_sharding,
         matmul_precision=self.config.matmul_precision,
         use_bias=self.use_bias_in_projections,
         rngs=self.rngs,
@@ -616,6 +630,8 @@ class Attention(nnx.Module):
         dtype=self.dtype,
         weight_dtype=self.weight_dtype,
         quant=self.quant,
+        shard_mode=self.config.shard_mode,
+        out_sharding=self.out_sharding,
         matmul_precision=self.config.matmul_precision,
         use_bias=self.use_bias_in_projections,
         rngs=self.rngs,
@@ -643,6 +659,8 @@ class Attention(nnx.Module):
         dtype=self.dtype,
         weight_dtype=self.weight_dtype,
         quant=self.quant,
+        shard_mode=self.config.shard_mode,
+        out_sharding=self.out_sharding,
         matmul_precision=self.config.matmul_precision,
         use_bias=self.use_bias_in_projections,
         rngs=self.rngs,
@@ -650,7 +668,6 @@ class Attention(nnx.Module):
 
   def out_projection(self, out: Array) -> Array:
     """out projection"""
-
     return self.out(out)
 
   def convert_dense_general_inputs_shape(
@@ -854,17 +871,17 @@ class Attention(nnx.Module):
       output of shape `[batch, length, q_features]`.
     """
     if model_mode == MODEL_MODE_PREFILL:
-      inputs_q = nn.with_logical_constraint(inputs_q, self.prefill_input_axis_names)
-      inputs_kv = nn.with_logical_constraint(inputs_kv, self.prefill_input_axis_names)
+      inputs_q = self._maybe_shard(inputs_q, self.prefill_input_axis_names)
+      inputs_kv = self._maybe_shard(inputs_kv, self.prefill_input_axis_names)
     elif model_mode == MODEL_MODE_TRAIN and self.config.expert_shard_attention_option == EP_AS_CONTEXT:
-      inputs_q = nn.with_logical_constraint(inputs_q, self.ep_input_axis_names)
-      inputs_kv = nn.with_logical_constraint(inputs_kv, self.ep_input_axis_names)
+      inputs_q = self._maybe_shard(inputs_q, self.ep_input_axis_names)
+      inputs_kv = self._maybe_shard(inputs_kv, self.ep_input_axis_names)
     elif model_mode == MODEL_MODE_TRAIN:
-      inputs_q = nn.with_logical_constraint(inputs_q, self.input_axis_names)
-      inputs_kv = nn.with_logical_constraint(inputs_kv, self.input_axis_names)
+      inputs_q = self._maybe_shard(inputs_q, self.input_axis_names)
+      inputs_kv = self._maybe_shard(inputs_kv, self.input_axis_names)
     else:
-      inputs_q = nn.with_logical_constraint(inputs_q, self.decode_input_axis_names)
-      inputs_kv = nn.with_logical_constraint(inputs_kv, self.decode_input_axis_names)
+      inputs_q = self._maybe_shard(inputs_q, self.decode_input_axis_names)
+      inputs_kv = self._maybe_shard(inputs_kv, self.decode_input_axis_names)
 
     # apply projection.
     if self.config.fused_qkv:
@@ -906,21 +923,21 @@ class Attention(nnx.Module):
       query = (query * attn_scales[:, :, jnp.newaxis, jnp.newaxis]).astype(self.dtype)
 
     if model_mode == MODEL_MODE_PREFILL:
-      query = nn.with_logical_constraint(query, self.prefill_query_axis_names)
-      key = nn.with_logical_constraint(key, self.prefill_key_axis_names)
-      value = nn.with_logical_constraint(value, self.prefill_value_axis_names)
+      query = self._maybe_shard(query, self.prefill_query_axis_names)
+      key = self._maybe_shard(key, self.prefill_key_axis_names)
+      value = self._maybe_shard(value, self.prefill_value_axis_names)
     elif model_mode == MODEL_MODE_AUTOREGRESSIVE:
-      query = nn.with_logical_constraint(query, (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV))
-      key = nn.with_logical_constraint(key, (DECODE_BATCH, DECODE_LENGTH, KV_HEAD, D_KV))
-      value = nn.with_logical_constraint(value, (DECODE_BATCH, DECODE_LENGTH, KV_HEAD, D_KV))
+      query = self._maybe_shard(query, (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV))
+      key = self._maybe_shard(key, (DECODE_BATCH, DECODE_LENGTH, KV_HEAD, D_KV))
+      value = self._maybe_shard(value, (DECODE_BATCH, DECODE_LENGTH, KV_HEAD, D_KV))
     elif model_mode == MODEL_MODE_TRAIN and self.config.expert_shard_attention_option == EP_AS_CONTEXT:
-      query = nn.with_logical_constraint(query, self.ep_query_axis_names)
-      key = nn.with_logical_constraint(key, self.ep_key_axis_names)
-      value = nn.with_logical_constraint(value, self.ep_value_axis_names)
+      query = self._maybe_shard(query, self.ep_query_axis_names)
+      key = self._maybe_shard(key, self.ep_key_axis_names)
+      value = self._maybe_shard(value, self.ep_value_axis_names)
     else:
-      query = nn.with_logical_constraint(query, self.query_axis_names)
-      key = nn.with_logical_constraint(key, self.key_axis_names)
-      value = nn.with_logical_constraint(value, self.value_axis_names)
+      query = self._maybe_shard(query, self.query_axis_names)
+      key = self._maybe_shard(key, self.key_axis_names)
+      value = self._maybe_shard(value, self.value_axis_names)
 
     query = checkpoint_name(query, "query_proj")
     key = checkpoint_name(key, "key_proj")
@@ -950,13 +967,13 @@ class Attention(nnx.Module):
       )
 
     if model_mode == MODEL_MODE_PREFILL:
-      out = nn.with_logical_constraint(out, self.prefill_out_axis_names)
+      out = self._maybe_shard(out, self.prefill_out_axis_names)
     elif model_mode == MODEL_MODE_TRAIN and self.config.expert_shard_attention_option == EP_AS_CONTEXT:
-      out = nn.with_logical_constraint(out, self.ep_out_axis_names)
+      out = self._maybe_shard(out, self.ep_out_axis_names)
     elif model_mode == MODEL_MODE_TRAIN:
-      out = nn.with_logical_constraint(out, self.out_axis_names)
+      out = self._maybe_shard(out, self.out_axis_names)
     else:
-      out = nn.with_logical_constraint(out, self.decode_out_axis_names)
+      out = self._maybe_shard(out, self.decode_out_axis_names)
     out = self.out_projection(out)
     out = checkpoint_name(out, "out_proj")
     return out
