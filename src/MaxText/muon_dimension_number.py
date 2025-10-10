@@ -144,19 +144,14 @@ def get_transform_tree(tree, path=()):
 
 def get_abstract_param(model, config):
   key = jax.random.PRNGKey(0)
-  # we only need the parameter structure, input size is irrelavent so use smallest
-  input_shape = (1, 1)  # (batch, length)
-  if config.use_multimodal:
-    image_shape = (1, 1, 1, 1, 1)
-    encoder_images = jnp.ones(image_shape, dtype=jnp.int32)
-  else:
-    encoder_images = None
+  # input_shape = (1, 1)  # (batch, length)
+  input_shape = (config.micro_batch_size_to_train_on, config.max_target_length)
   abstract_vars = jax.eval_shape(
       model.init,
       {"params": key, "dropout": key, "aqt": key},
       jnp.ones(input_shape, dtype=jnp.int32),
       jnp.ones(input_shape, dtype=jnp.int32),
-      encoder_images=encoder_images,
+      encoder_images=None,
   )
   return abstract_vars
 
