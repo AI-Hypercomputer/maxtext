@@ -50,7 +50,6 @@ class DataIter:
     return lnx, decoder_segment_ids, decoder_positions
 
 
-
 """
 get model
 """
@@ -71,8 +70,6 @@ devices_array = maxtext_utils.create_device_mesh(config)
 mesh = jax.sharding.Mesh(devices_array, config.mesh_axes)
 quant = quantizations.configure_quantization(config)
 model = Transformer(config, mesh=mesh, quant=quant)
-
-
 
 
 """
@@ -160,7 +157,40 @@ print("\n3", train_state)
 # dict_keys(['step', 'apply_fn', 'params', 'tx', 'opt_state'])
 print(train_state.__dict__.keys())
 
+data_sharding = maxtext_utils.get_input_data_sharding(config, mesh)
 
+from MaxText.train import loss_fn
+from MaxText.train_utils import jit_train_step
+
+
+def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
+  _loss_fn = loss_fn
+  extra_dpo_args = []
+  grad_func = jax.value_and_grad(_loss_fn, argnums=4, has_aux=True)
+  (loss, aux), raw_grads = grad_func(model, config, data, dropout_rng, state.params, *extra_dpo_args, is_train=True)
+  raw_grads = jax.tree_util.tree_map(lambda x: x.astype(config.grad_dtype) if x.dtype == jnp.float32 else x, raw_grads)
+  grads = raw_grads
+  new_state = state.apply_gradients(grads=grads)
+  metrics = None
+  return new_state, metrics
+
+
+from MaxText.data_loader import DataLoader
+
+from MaxText.input_pipeline.synthetic_data_processing import SyntheticDataIterator
+
+data_iterator = config, mesh
+
+p_train_step = jit_train_step(config, model, state, state_mesh_shardings, data_sharding, train_step)
+
+
+data_loader = DataLoader(config, mesh, data_iterator, None)
+init_rng = rng
+for step in range(10):
+  nextrng = jax.jit(jax.random.fold_in)(init_rng, step)
+  example_batch = data_loader.load_next_batch()
+  with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+    state, metrics = p_train_step(state, example_batch, nextrng)
 
 # """
 # start opt
@@ -188,5 +218,4 @@ print(train_state.__dict__.keys())
 # for step in range(5):
 #   print(step)
 #   grad = jax.grad(f)(model_vars)
-#   updates, opt_state = optimizer.update(grad, opt_state, model_vars)  
-
+#   updates, opt_state = optimizer.update(grad, opt_state, model_vars)

@@ -141,7 +141,9 @@ def _newton_schulz_iterator(x: jax.Array, coeffs: jax.Array) -> jax.Array:
   # when rows > cols for effciency.
   a = x @ x.T
   b = coeffs[1] * a + coeffs[2] * a @ a
-  return coeffs[0] * x + b @ x
+  out = coeffs[0] * x + b @ x
+  rms_adj = 0.2 * math.sqrt(max(x.shape))
+  return out * rms_adj
 
 
 def orthogonalize_via_newton_schulz(
