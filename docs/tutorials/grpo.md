@@ -32,7 +32,7 @@ In this tutorial we use a single host TPUVM such as `v6e-8/v5p-8`. Let's get sta
 bash setup.sh
 ```
 
-### Activate your virtual environment
+### Activate your virtual environment (Skip if you have already done this for running `bash setup.sh` )
 ```
 # Replace with your virtual environment name if not using this default name
 venv_name="maxtext_venv"
@@ -60,7 +60,7 @@ We use the scheduler code from vLLM, and the model runner code from `tpu_commons
 
 Finally, run the script
 
-`python ~/maxtext/MaxText/examples/grpo_llama3_demo.py`
+`python ~/maxtext/src/MaxText/examples/grpo_llama3_1_8b_demo.py`
 
 The overview of the demo script is as follows:
 
