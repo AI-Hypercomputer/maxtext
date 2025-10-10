@@ -572,9 +572,18 @@ class _HyperParameters:
     raw_keys = validate_and_set_hlo_dump_defaults(raw_keys)
 
     # We initialize the jax distributed system here because it must be done before device backend is initialized.
+    # This can be controlled via skip_jax_distributed_system flag.
     if raw_keys["jax_debug_log_modules"]:
       jax.config.update("jax_debug_log_modules", raw_keys["jax_debug_log_modules"])
-    max_utils.maybe_initialize_jax_distributed_system(raw_keys)
+
+    # Initialize JAX distributed system using resource manager
+    from MaxText import resource_manager
+    
+    program_name = raw_keys.get("run_name", "unknown")
+    if program_name:
+      max_logging.log(f"Initializing resources for program: {program_name}")
+    
+    resource_manager.initialize_for_config(raw_keys, program_name=program_name)
 
     if raw_keys["jax_cache_dir"]:
       compilation_cache.set_cache_dir(os.path.expanduser(raw_keys["jax_cache_dir"]))
