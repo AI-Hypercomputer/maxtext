@@ -555,7 +555,7 @@ jax_debug_log_modules: "" # Set this to "jax" to enable jax verbose logging such
 skip_jax_distributed_system: False # If True we will not initialize the jax distributed system.
 # Currently the jax distributed is needed on cloud TPUs for async checkpointing.
 # However when run on google internal TPUs the coordination service is started automatically
-# and we should set this to True so we won't try to initialize a second time manually.
+# and we should set skip_jax_distributed_system to True so we won't try to initialize a second time manually.
 
 # We take inspiration from Llama2's learning rate (LR) schedule, see https://arxiv.org/pdf/2307.09288.pdf section 2.2
 # Learning rate schedule has either two or three parts:
