@@ -40,6 +40,7 @@ from typing import Sequence
 from absl import app
 import os
 import jax
+import pathwaysutils
 
 from flax.linen import partitioning as nn_partitioning
 
@@ -170,6 +171,7 @@ def main(argv: Sequence[str]) -> None:
   Args:
     argv: Command-line arguments.
   """
+  pathwaysutils.initialize()
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
   if "xla_tpu_spmd_rng_bit_generator_unsafe" not in os.environ.get("LIBTPU_INIT_ARGS", ""):
