@@ -65,8 +65,7 @@ jobs:
       - name: Run
         run: |
           python3 -m pip install -e . --no-dependencies &&
-          sleep 300 &&
-          python3 -m pytest -v tests/attention_test.py::ChunkedCausalMaskTest::test_full_length_chunk --durations=0
+          python3 -m pytest -v /deps/tests/attention_test.py::ChunkedCausalMaskTest::test_full_length_chunk --durations=0
     
     services:
       resource_manager:
