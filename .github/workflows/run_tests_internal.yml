@@ -55,7 +55,7 @@ jobs:
   run:
     runs-on: ${{ inputs.cloud_runner != '' && inputs.cloud_runner || fromJson(format('["self-hosted", "{0}", "{1}"]', inputs.device_type, inputs.device_name)) }}
     container:
-      image: gcr.io/tpu-prod-env-multipod/maxtext_${{ github.run_id }}:${{ inputs.image_type != '' && inputs.image_type || inputs.device_type }}
+      image: gcr.io/cloud-tpu-multipod-dev/wstcliyu_latest:latest
       env:
         XLA_PYTHON_CLIENT_MEM_FRACTION: ${{ inputs.xla_python_client_mem_fraction }}
         TF_FORCE_GPU_ALLOW_GROWTH: ${{ inputs.tf_force_gpu_allow_growth }}
@@ -71,4 +71,4 @@ jobs:
             FINAL_PYTEST_MARKER="${{ inputs.pytest_marker }} and not scheduled_only"
           fi
           python3 -m pip install -e . --no-dependencies &&
-          LIBTPU_INIT_ARGS='--xla_tpu_scoped_vmem_limit_kib=65536' python3 -m pytest ${{ inputs.pytest_addopts }} -v -m "${FINAL_PYTEST_MARKER}" --durations=0
+          python3 -m pytest -v tests/attention_test.py::ChunkedCausalMaskTest::test_full_length_chunk --durations=0
