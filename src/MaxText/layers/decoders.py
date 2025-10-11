@@ -401,6 +401,8 @@ class Decoder(nn.Module):
         return [qwen3.Qwen3DecoderLayerToLinen]
       case DecoderBlockType.QWEN3_MOE:
         return [qwen3.Qwen3MoeDecoderLayerToLinen]
+      case DecoderBlockType.QWEN3_NEXT:
+        return [qwen3.Qwen3NextDecoderLayer]
       case DecoderBlockType.SIMPLE:
         return [simple_layer.SimpleDecoderLayer]
       case DecoderBlockType.SIMPLE_MLP:
@@ -452,6 +454,7 @@ class Decoder(nn.Module):
         DecoderBlockType.GEMMA3,
         DecoderBlockType.QWEN3,
         DecoderBlockType.QWEN3_MOE,
+        DecoderBlockType.QWEN3_NEXT,
         DecoderBlockType.GPT_OSS,
         DecoderBlockType.SIMPLE,
         DecoderBlockType.SIMPLE_MLP,
@@ -764,6 +767,18 @@ class Decoder(nn.Module):
               page_state,
               slot,
           )
+        elif cfg.decoder_block == DecoderBlockType.QWEN3_NEXT:
+          y = self._apply_qwen3_next_scanned_blocks(
+              y,
+              policy,
+              decoder_segment_ids,
+              decoder_positions,
+              deterministic,
+              model_mode,
+              previous_chunk,
+              page_state,
+              slot,
+          )
         else:
           RemattedBlockLayer = RemattedBlockLayers[0]
           scan_length = int(cfg.num_decoder_layers / cfg.inhomogeneous_layer_cycle_interval)
@@ -797,9 +812,7 @@ class Decoder(nn.Module):
           # Iterate over the two layer groups (dense and MoE) and apply layer transformation
           for layer, num_layers, layer_prefix in zip(layers, num_layers_list, layer_prefixes):
             for index in range(num_layers):
-              y = layer(
-                  config=cfg, mesh=mesh, name=f"{layer_prefix}_{index}", quant=self.quant, model_mode=self.model_mode
-              )(
+              y = layer(config=cfg, mesh=mesh, name=f"{layer_prefix}_{index}", quant=self.quant, model_mode=self.model_mode)(
                   y,
                   decoder_segment_ids,
                   decoder_positions,
@@ -824,6 +837,8 @@ class Decoder(nn.Module):
                   "is_moe_layer": llama4.determine_is_moe_layer(lyr, self.config.interleave_moe_layer_step),
               }
               layer_call_kwargs = {"bidirectional_mask": bidirectional_mask}
+            if cfg.decoder_block == DecoderBlockType.QWEN3_NEXT:
+              layer_kwargs = {"layer_idx": lyr}
             if cfg.decoder_block == DecoderBlockType.GPT_OSS:
               layer_kwargs = {"attention_type": gpt_oss.get_attention_type(layer_id=lyr)}
             layer = RemattedBlockLayer(
@@ -923,4 +938,51 @@ class Decoder(nn.Module):
           slot=slot,
           **layer_call_kwargs,
       )
+    return y
+
+  def _apply_qwen3_next_scanned_blocks(
+      self,
+      y,
+      policy,
+      decoder_segment_ids,
+      decoder_positions,
+      deterministic,
+      model_mode,
+      previous_chunk,
+      page_state,
+      slot,
+  ):
+    """Applies Qwen3-Next scanned decoder blocks."""
+    cfg = self.config
+    mesh = self.mesh
+
+    if cfg.num_decoder_layers % cfg.full_attention_interval != 0:
+      raise ValueError(
+          f"For Qwen3-Next with scan_layers=True, num_decoder_layers ({cfg.num_decoder_layers}) "
+          f"must be divisible by full_attention_interval ({cfg.full_attention_interval})."
+      )
+    scan_length = cfg.num_decoder_layers // cfg.full_attention_interval
+
+    broadcast_args = (
+        decoder_segment_ids,
+        decoder_positions,
+        deterministic,
+        model_mode,
+        previous_chunk,
+        page_state,
+        slot,
+    )
+
+    RemattedBlockLayer = self.set_remat_policy([qwen3.Qwen3NextScannableBlock], policy)[0]
+
+    scanned_block = self.scan_decoder_layers(
+        cfg,
+        RemattedBlockLayer,
+        scan_length,
+        "layers",
+        mesh,
+        in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
+        model_mode=model_mode,
+    )
+    y, _ = scanned_block(y, *broadcast_args)
     return y

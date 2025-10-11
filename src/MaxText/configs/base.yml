@@ -859,3 +859,21 @@ subslice_shape: ""
 
 # NNX
 enable_nnx: false
+
+################################## Qwen3-Next Specific Configs ##################################
+# The interval for using full attention. e.g., 4 means every 4th layer is full attention.
+full_attention_interval: 4
+# Kernel size for the 1D convolution in the Gated Delta Net
+linear_conv_kernel_dim: 4
+# Head dimension for the key/query in the Gated Delta Net
+linear_key_head_dim: 128
+# Head dimension for the value in the Gated Delta Net
+linear_value_head_dim: 128
+# Number of key/query heads in the Gated Delta Net
+linear_num_key_heads: 16
+# Number of value heads in the Gated Delta Net
+linear_num_value_heads: 32
+# Chunk size for the parallel scan algorithm in the Gated Delta Net.
+linear_chunk_size: 64
+# Whether to apply L2 normalization to query and key tensors inside the Gated Delta Rule kernel.
+use_qk_l2norm_in_kernel: True
