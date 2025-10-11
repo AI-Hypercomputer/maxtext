@@ -1060,7 +1060,7 @@ def get_prefill_kv_cache_annotations(model, config, rng, mesh, page_state: None 
 
   def init_kv_cache(model, config):
     input_shape = (
-        config.micro_batch_size_to_train_on,
+        int(config.per_device_batch_size * mesh.size),
         config.max_prefill_predict_length,
     )
     image_shape = multimodal_utils.get_dummy_image_shape_for_init(
@@ -1091,7 +1091,7 @@ def get_kv_cache_annotations(model, config, rng, mesh, page_state: None | PageSt
   """Get a shaped abstraction of the state (including optimizer)"""
 
   def init_kv_cache(model, config):
-    input_shape = (config.micro_batch_size_to_train_on, 1)
+    input_shape = (int(config.per_device_batch_size * mesh.size), 1)
     image_shape = multimodal_utils.get_dummy_image_shape_for_init(
         config.model_name, batch_size=config.micro_batch_size_to_train_on
     )

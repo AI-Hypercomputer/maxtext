@@ -18,9 +18,7 @@ import unittest
 import jax
 from jax import numpy as jnp
 from jax import random
-
 from flax import linen as nn
-
 import optax
 
 from MaxText import max_utils
