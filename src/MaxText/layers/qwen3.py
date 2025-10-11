@@ -509,7 +509,7 @@ class Qwen3NextGatedDeltaNet(nn.Module):
     # TODO(parambole): Pass and update cache state for jax_chunk_gated_delta_rule
     # core_attn_out shape: (B, S, H_v, D_v)
     core_attn_out, _ = jax_chunk_gated_delta_rule(
-        query, key, value, g, beta, chunk_size=cfg.linear_chunk_size, use_qk_l2norm_in_kernel=True
+        query, key, value, g, beta, chunk_size=cfg.linear_chunk_size, use_qk_l2norm_in_kernel=cfg.use_qk_l2norm_in_kernel
     )
 
     # =========================================================================
