@@ -485,7 +485,9 @@ class Decoder(nn.Module):
         length=length,
         metadata_params={nn.PARTITION_NAME: metadata_axis_name},
     )
-    return scan_fn(config=cfg, mesh=mesh, name=metadata_axis_name, quant=self.quant, **kwargs)  # pytype: disable=wrong-keyword-args
+    return scan_fn(
+        config=cfg, mesh=mesh, name=metadata_axis_name, quant=self.quant, **kwargs
+    )  # pytype: disable=wrong-keyword-args
 
   def get_pipeline_stage_module(self, decoder_blocks):
     """get pipeline stage module"""
