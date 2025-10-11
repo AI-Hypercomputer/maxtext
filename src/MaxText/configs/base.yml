@@ -875,3 +875,5 @@ linear_num_key_heads: 16
 linear_num_value_heads: 32
 # Chunk size for the parallel scan algorithm in the Gated Delta Net.
 linear_chunk_size: 64
+# Whether to apply L2 normalization to query and key tensors inside the Gated Delta Rule kernel.
+use_qk_l2norm_in_kernel: True
