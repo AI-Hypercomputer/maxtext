@@ -50,5 +50,3 @@ sparse_matmul: False
 
 # General Model Settings
 enable_dropout: False
-
-tokenizer_type: "huggingface"
