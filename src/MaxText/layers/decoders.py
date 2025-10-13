@@ -392,7 +392,7 @@ class Decoder(nn.Module):
       case DecoderBlockType.GEMMA2:
         return [gemma2.Gemma2DecoderLayerToLinen]
       case DecoderBlockType.GEMMA3:
-        return [gemma3.Gemma3DecoderLayer]
+        return [gemma3.Gemma3DecoderLayerToLinen]
       case DecoderBlockType.GPT3:
         return [gpt3.Gpt3DecoderLayer]
       case DecoderBlockType.GPT_OSS:
@@ -485,7 +485,7 @@ class Decoder(nn.Module):
         length=length,
         metadata_params={nn.PARTITION_NAME: metadata_axis_name},
     )
-    return scan_fn(config=cfg, mesh=mesh, name=metadata_axis_name, quant=self.quant, **kwargs)
+    return scan_fn(config=cfg, mesh=mesh, name=metadata_axis_name, quant=self.quant, **kwargs)  # pytype: disable=wrong-keyword-args
 
   def get_pipeline_stage_module(self, decoder_blocks):
     """get pipeline stage module"""
@@ -880,7 +880,7 @@ class Decoder(nn.Module):
     scan_length = cfg.num_decoder_layers // attention_pattern_length
 
     policy = self.get_remat_policy()
-    RemattedGemma3Block = self.set_remat_policy([gemma3.Gemma3ScannableBlock], policy)[0]
+    RemattedGemma3Block = self.set_remat_policy([gemma3.Gemma3ScannableBlockToLinen], policy)[0]
 
     layer_call_kwargs = {"bidirectional_mask": bidirectional_mask}
     layer_kwargs = {"num_of_layers": attention_pattern_length}
@@ -909,6 +909,7 @@ class Decoder(nn.Module):
     if num_remaining_layers > 0:
       # We name the remainder block with a 'remainder' suffix to avoid parameter name collisions
       rem_layer_kwargs = {"num_of_layers": num_remaining_layers}
+      # pytype: disable=wrong-keyword-args
       layer = RemattedGemma3Block(
           config=cfg, mesh=mesh, quant=self.quant, model_mode=self.model_mode, name="layers_remainder", **rem_layer_kwargs
       )
