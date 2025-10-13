@@ -100,7 +100,7 @@ def get_maxtext_model(config, devices=None):
   # Please ensure that you pass the full path ending in `/0/items` for load_parameters_path to train_rl.py i.e.,
   # load_parameters_path=/path/to/your/output/directory/0/items
   """
-  model, mesh = model_creation_utils.create_nnx_model(config, devices)
+  model, mesh = model_creation_utils.create_nnx_model(config, devices=devices)
   with mesh:
     tunix_model = TunixMaxTextAdapter(base_model=model)
     tunix_model.config = None
@@ -238,7 +238,7 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
       trainer_config.num_batches
       * trainer_config.num_iterations
       * trainer_config.train_fraction
-      * trainer_config.num_epochs
+      * trainer_config.num_epoch
   )
 
   # ====== Data ======
@@ -260,10 +260,10 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
   )[: trainer_config.num_batches]
 
   if trainer_config.train_fraction == 1.0:
-    train_dataset = dataset.repeat(trainer_config.num_epochs)
+    train_dataset = dataset.repeat(trainer_config.num_epoch)
   else:
     train_dataset = dataset[: int(len(dataset) * trainer_config.train_fraction)]
-    train_dataset = train_dataset.repeat(trainer_config.num_epochs)
+    train_dataset = train_dataset.repeat(trainer_config.num_epoch)
 
   test_dataset = get_dataset(model_tokenizer, trainer_config, test_data_dir, trainer_config.eval_split).batch(
       trainer_config.batch_size
@@ -416,7 +416,7 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
           lambda **kwargs: utils_rl.check_answer(tmvp_config=trainer_config, **kwargs),
           lambda **kwargs: utils_rl.check_numbers(tmvp_config=trainer_config, **kwargs),
       ],
-      grpo_config=grpo_config,
+      algo_config=grpo_config,
   )
 
   # Before we train the model, let's evaluate the model on the test set so we can

@@ -19,7 +19,7 @@
 set -e
 set -x
 
-uv pip uninstall -y jax jaxlib libtpu
+uv pip uninstall jax jaxlib libtpu
 
 uv pip install aiohttp==3.12.15
 
@@ -28,6 +28,4 @@ uv pip install vllm-tpu
 
 uv pip install numba==0.61.2
 
-uv pip install qwix==0.1.1
-
-uv pip install flax==0.11.1
+uv pip install --no-deps qwix==0.1.4

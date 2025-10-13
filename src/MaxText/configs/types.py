@@ -19,7 +19,7 @@
 from enum import Enum
 from math import prod
 from tempfile import gettempdir
-from typing import Any, NewType, Literal
+from typing import Any, NewType, Literal, Optional
 import datetime
 import logging
 import math
@@ -814,9 +814,9 @@ class HfDataset(BaseModel):
 
   hf_path: str = Field("", description="Path or name of the Hugging Face dataset.")
   hf_data_dir: PathStr = Field("", description="Data directory for the HF dataset.")
-  hf_train_files: str = Field("", description="Files for the HF training split.")
+  hf_train_files: Optional[str] = Field(None, description="Files for the HF training split.")
   hf_eval_split: str = Field("", description="Name of the HF evaluation split.")
-  hf_eval_files: str = Field("", description="Files for the HF evaluation split.")
+  hf_eval_files: Optional[str] = Field(None, description="Files for the HF evaluation split.")
   hf_access_token: None | str = Field(None, description="Hugging Face API access token.")
 
 
