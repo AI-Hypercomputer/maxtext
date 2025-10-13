@@ -26,6 +26,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from jax.sharding import Mesh
+from flax import nnx
 
 from MaxText import pyconfig
 from MaxText.layers import qwen3, linears, moe
@@ -348,10 +349,13 @@ class TestQwen3Next(unittest.TestCase):
         self.mesh = Mesh(devices.reshape(mesh_shape), self.cfg.mesh_axes)
         torch.manual_seed(0)
         np.random.seed(0)
-        print("test_rms_norm_gated passed!")
+        self.rng = jax.random.PRNGKey(0)
+        self.nnx_rngs = nnx.Rngs(self.rng)
+        print("setUp complete!")
 
     def test_rms_norm_gated(self):
         """Tests the Qwen3NextRMSNormGated layer."""
+        print("Running test_rms_norm_gated...")
         hidden_states_pt = torch.randn(self.batch_size, self.seq_len, self.hidden_size)
         gate_pt = torch.randn(self.batch_size, self.seq_len, self.hidden_size)
         weight_pt = torch.rand(self.hidden_size)
@@ -364,16 +368,17 @@ class TestQwen3Next(unittest.TestCase):
             expected_output = pt_model(hidden_states_pt, gate_pt)
 
         # JAX implementation
-        jax_model = qwen3.Qwen3NextRMSNormGated(num_features=self.hidden_size, eps=self.cfg.normalization_layer_epsilon, dtype=self.cfg.dtype, weight_dtype=self.cfg.weight_dtype) 
-        params = {'params': {'weight': jnp.array(weight_pt.numpy())}}
+        jax_model = qwen3.Qwen3NextRMSNormGated(num_features=self.hidden_size, eps=self.cfg.normalization_layer_epsilon, dtype=self.cfg.dtype, weight_dtype=self.cfg.weight_dtype, rngs=self.nnx_rngs) 
+        params = {'weight': nnx.Param(jnp.array(weight_pt.numpy()))}
+        nnx.update(jax_model, params)
         hidden_states_jax = jnp.array(hidden_states_pt.numpy())
         gate_jax = jnp.array(gate_pt.numpy())
 
         @jax.jit
-        def run_jax(params, hidden_states, gate):
-            return jax_model.apply(params, hidden_states, gate)
+        def run_jax(hidden_states, gate):
+            return jax_model(hidden_states, gate)
 
-        actual_output = run_jax(params, hidden_states_jax, gate_jax)
+        actual_output = run_jax(hidden_states_jax, gate_jax)
 
         np.testing.assert_allclose(
             expected_output.numpy(),
@@ -385,6 +390,7 @@ class TestQwen3Next(unittest.TestCase):
 
     def test_l2norm(self):
         """Tests the l2norm function."""
+        print("Running test_l2norm...")
         x_pt = torch.randn(self.batch_size, self.seq_len, self.cfg.linear_num_value_heads, self.cfg.linear_key_head_dim)
         expected_output = l2norm_torch(x_pt)
         actual_output = qwen3.l2norm(jnp.array(x_pt.numpy()))
@@ -400,6 +406,7 @@ class TestQwen3Next(unittest.TestCase):
         """
         Directly tests the `jax_chunk_gated_delta_rule` against the original PyTorch reference.
         """
+        print("Running test_chunk_gated_delta_rule_logic...")
         num_heads = self.cfg.linear_num_value_heads
         k_head_dim = self.cfg.linear_key_head_dim
         v_head_dim = self.cfg.linear_value_head_dim
@@ -459,17 +466,18 @@ class TestQwen3Next(unittest.TestCase):
             err_msg=f"JAX and PyTorch outputs are NOT close with L2Norm within atol={target_atol}, rtol={target_rtol}!"
         )
         print(f"JAX and PyTorch outputs are close with L2Norm within atol={target_atol}, rtol={target_rtol}!")
+        print("test_chunk_gated_delta_rule_logic passed!")
 
     def test_gated_delta_net_structure(self):
         """Tests the structure and output shape of Qwen3NextGatedDeltaNet."""
+        print("Running test_gated_delta_net_structure...")
         hidden_states_jax = jnp.ones((self.batch_size, self.seq_len, self.hidden_size), dtype=self.cfg.dtype)
 
-        jax_model = qwen3.Qwen3NextGatedDeltaNet(config=self.cfg)
+        jax_model = qwen3.Qwen3NextGatedDeltaNet(config=self.cfg, rngs=self.nnx_rngs)
 
         @jax.jit
         def run_jax(hidden_states):
-            params = jax_model.init(jax.random.PRNGKey(0), hidden_states, deterministic=True)
-            return jax_model.apply(params, hidden_states, deterministic=True)
+            return jax_model(hidden_states, deterministic=True)
 
         output_jax = run_jax(hidden_states_jax)
 
@@ -480,6 +488,7 @@ class TestQwen3Next(unittest.TestCase):
 
     def test_qwen3_next_rms_norm(self):
         """Tests the custom Qwen3NextRMSNorm layer against its PyTorch reference."""
+        print("Running test_qwen3_next_rms_norm...")
         # 1. Set up the PyTorch reference model and inputs.
         hidden_states_pt = torch.randn(self.batch_size, self.seq_len, self.hidden_size)
         weight_pt = torch.rand(self.hidden_size)
@@ -496,17 +505,19 @@ class TestQwen3Next(unittest.TestCase):
             num_features=self.hidden_size,
             eps=self.cfg.normalization_layer_epsilon,
             dtype=jnp.float32,
-            weight_dtype=jnp.float32
+            weight_dtype=jnp.float32,
+            rngs=self.nnx_rngs
         )
         
-        params = {'params': {'weight': jnp.array(weight_pt.numpy())}}
+        params = {'weight': nnx.Param(jnp.array(weight_pt.numpy()))}
+        nnx.update(jax_model, params)
         hidden_states_jax = jnp.array(hidden_states_pt.numpy())
 
         @jax.jit
-        def run_jax(p, x):
-            return jax_model.apply(p, x)
+        def run_jax(x):
+            return jax_model(x)
 
-        actual_output = run_jax(params, hidden_states_jax)
+        actual_output = run_jax(hidden_states_jax)
 
         # 3. Compare the outputs.
         np.testing.assert_allclose(
@@ -524,6 +535,7 @@ class TestQwen3Next(unittest.TestCase):
         This test passes by setting `sparse_matmul=False` in the config, which forces the
         underlying `RoutedMoE` module to use its `dense_matmul` implementation.
         """
+        print("Running test_qwen3_next_sparse_moe_block...")
         # 1. Create a config for the PyTorch model from our main self.cfg
         pt_config = SimpleNamespace(
             hidden_size=self.cfg.emb_dim,
@@ -547,41 +559,50 @@ class TestQwen3Next(unittest.TestCase):
         stacked_gate_proj = torch.stack([expert.gate_proj.weight.T for expert in pt_experts])
         stacked_up_proj = torch.stack([expert.up_proj.weight.T for expert in pt_experts])
         stacked_down_proj = torch.stack([expert.down_proj.weight.T for expert in pt_experts])
-        params = {
-            'params': {
-                'mlp': {
-                    'experts': {
-                        'gate': {'kernel': jnp.array(pt_model.gate.weight.T.detach().numpy())},
-                        'wi_0': jnp.array(stacked_gate_proj.detach().numpy()),
-                        'wi_1': jnp.array(stacked_up_proj.detach().numpy()),
-                        'wo': jnp.array(stacked_down_proj.detach().numpy())
-                    },
-                    'shared_expert': {
-                        'wi_0': {'kernel': jnp.array(pt_model.shared_expert.gate_proj.weight.T.detach().numpy())},
-                        'wi_1': {'kernel': jnp.array(pt_model.shared_expert.up_proj.weight.T.detach().numpy())},
-                        'wo': {'kernel': jnp.array(pt_model.shared_expert.down_proj.weight.T.detach().numpy())}
-                    },
-                    'shared_expert_gate': {
-                        'kernel': jnp.array(pt_model.shared_expert_gate.weight.T.detach().numpy())
-                    }
-                }
+        
+        # Map PyTorch weights to JAX NNX module attributes
+        jax_params = {
+            "routed_experts": {
+                "gate": {"kernel": nnx.Param(jnp.array(pt_model.gate.weight.T.detach().numpy()))},
+                "wi_0": nnx.Param(jnp.array(stacked_gate_proj.detach().numpy())),
+                "wi_1": nnx.Param(jnp.array(stacked_up_proj.detach().numpy())),
+                "wo": nnx.Param(jnp.array(stacked_down_proj.detach().numpy())),
+            },
+            "shared_expert": {
+                "wi": { # Assuming fused_mlp=True in config for shared_expert
+                   "0": {'kernel': nnx.Param(jnp.array(pt_model.shared_expert.gate_proj.weight.T.detach().numpy()))},
+                   "1": {'kernel': nnx.Param(jnp.array(pt_model.shared_expert.up_proj.weight.T.detach().numpy()))},
+                },
+                "wo": {'kernel': nnx.Param(jnp.array(pt_model.shared_expert.down_proj.weight.T.detach().numpy()))},
+            },
+            "shared_expert_gate": {
+                'kernel': nnx.Param(jnp.array(pt_model.shared_expert_gate.weight.T.detach().numpy()))
             }
         }
+        # Adjust shared_expert structure if not fused
+        if not self.cfg.fused_mlp:
+             jax_params["shared_expert"] = {
+                'wi_0': {'kernel': nnx.Param(jnp.array(pt_model.shared_expert.gate_proj.weight.T.detach().numpy()))},
+                'wi_1': {'kernel': nnx.Param(jnp.array(pt_model.shared_expert.up_proj.weight.T.detach().numpy()))},
+                'wo': {'kernel': nnx.Param(jnp.array(pt_model.shared_expert.down_proj.weight.T.detach().numpy()))}
+            }
 
         # 4. Set up and run the full JAX Qwen3NextSparseMoeBlock
         jax_model = qwen3.Qwen3NextSparseMoeBlock(
             config=self.cfg,
             mesh=self.mesh,
-            quant=None
+            quant=None,
+            rngs=self.nnx_rngs
         )
+        nnx.update(jax_model, jax_params)
         hidden_states_jax = jnp.array(hidden_states_pt.numpy())
 
         @jax.jit
-        def run_jax(p, x):
-            output, _ = jax_model.apply({'params': p}, x, deterministic=True)
+        def run_jax(x):
+            output, _ = jax_model(x, deterministic=True)
             return output
 
-        actual_output = run_jax(params['params']['mlp'], hidden_states_jax)
+        actual_output = run_jax(hidden_states_jax)
 
         # 5. Compare the outputs
         np.testing.assert_allclose(
@@ -594,6 +615,7 @@ class TestQwen3Next(unittest.TestCase):
 
     def test_gated_delta_net_full(self):
         """Tests the full Qwen3NextGatedDeltaNet layer for numerical correctness."""
+        print("Running test_gated_delta_net_full...")
         # 1. Setup PyTorch reference model
         pt_config = SimpleNamespace(
             hidden_size=self.cfg.emb_dim,
@@ -611,29 +633,28 @@ class TestQwen3Next(unittest.TestCase):
             expected_output = pt_model(hidden_states_pt)
 
         # 2. Setup JAX model and map weights
-        jax_model = qwen3.Qwen3NextGatedDeltaNet(config=self.cfg, dtype=jnp.float32)
+        jax_model = qwen3.Qwen3NextGatedDeltaNet(config=self.cfg, dtype=jnp.float32, rngs=self.nnx_rngs)
         
         conv1d_weight_pt = pt_model.conv1d.weight.detach().numpy()
         conv1d_weight_jax = np.transpose(conv1d_weight_pt, (2, 1, 0))
 
         params = {
-            'params': {
-                'in_proj_qkvz': {'kernel': jnp.array(pt_model.in_proj_qkvz.weight.T.detach().numpy())},
-                'in_proj_ba': {'kernel': jnp.array(pt_model.in_proj_ba.weight.T.detach().numpy())},
-                'conv1d': {'kernel': jnp.array(conv1d_weight_jax)},
-                'A_log': jnp.array(pt_model.A_log.detach().numpy()),
-                'dt_bias': jnp.array(pt_model.dt_bias.detach().numpy()),
-                'norm': {'weight': jnp.array(pt_model.norm.weight.detach().numpy())},
-                'out_proj': {'kernel': jnp.array(pt_model.out_proj.weight.T.detach().numpy())},
-            }
+            'in_proj_qkvz': {'kernel': nnx.Param(jnp.array(pt_model.in_proj_qkvz.weight.T.detach().numpy()))},
+            'in_proj_ba': {'kernel': nnx.Param(jnp.array(pt_model.in_proj_ba.weight.T.detach().numpy()))},
+            'conv1d': {'kernel': nnx.Param(jnp.array(conv1d_weight_jax))},
+            'A_log': nnx.Param(jnp.array(pt_model.A_log.detach().numpy())),
+            'dt_bias': nnx.Param(jnp.array(pt_model.dt_bias.detach().numpy())),
+            'norm': {'weight': nnx.Param(jnp.array(pt_model.norm.weight.detach().numpy()))},
+            'out_proj': {'kernel': nnx.Param(jnp.array(pt_model.out_proj.weight.T.detach().numpy()))},
         }
+        nnx.update(jax_model, params)
         hidden_states_jax = jnp.array(hidden_states_pt.numpy())
         
         @jax.jit
-        def run_jax(p, x):
-            return jax_model.apply(p, x, deterministic=True)
+        def run_jax(x):
+            return jax_model(x, deterministic=True)
         
-        actual_output = run_jax(params, hidden_states_jax)
+        actual_output = run_jax(hidden_states_jax)
 
         # 3. Compare outputs
         np.testing.assert_allclose(

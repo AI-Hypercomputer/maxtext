@@ -402,7 +402,7 @@ class Decoder(nn.Module):
       case DecoderBlockType.QWEN3_MOE:
         return [qwen3.Qwen3MoeDecoderLayerToLinen]
       case DecoderBlockType.QWEN3_NEXT:
-        return [qwen3.Qwen3NextDecoderLayer]
+        return [qwen3.Qwen3NextDecoderLayerLinen]
       case DecoderBlockType.SIMPLE:
         return [simple_layer.SimpleDecoderLayer]
       case DecoderBlockType.SIMPLE_MLP:
@@ -973,7 +973,7 @@ class Decoder(nn.Module):
         slot,
     )
 
-    RemattedBlockLayer = self.set_remat_policy([qwen3.Qwen3NextScannableBlock], policy)[0]
+    RemattedBlockLayer = self.set_remat_policy([qwen3.Qwen3NextScannableBlockLinen], policy)[0]
 
     scanned_block = self.scan_decoder_layers(
         cfg,
