@@ -28,7 +28,8 @@ from flax import linen as nn
 from flax import nnx
 from flax.linen.partitioning import ScanIn
 
-from MaxText.common_types import DecoderBlockType, Config, MODEL_MODE_TRAIN, MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE
+from MaxText.common_types import DecoderBlockType, Config, EP_AS_CONTEXT
+from MaxText.common_types import MODEL_MODE_TRAIN, MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE
 from MaxText import max_logging
 from MaxText import max_utils
 from MaxText.inference import page_manager
@@ -88,15 +89,14 @@ class DecoderLayer(nn.Module):
   ):
     cfg = self.config
     mesh = self.mesh
-    if model_mode == MODEL_MODE_PREFILL:
-      logical_axis_names = ("activation_batch", "prefill_activation_length", "activation_embed")
-    else:
-      logical_axis_names = ("activation_batch", "activation_length", "activation_embed")
 
-    if model_mode == MODEL_MODE_PREFILL:
-      inputs = nn.with_logical_constraint(inputs, logical_axis_names)
+    if self.model_mode == MODEL_MODE_PREFILL:
+      logical_axis_names = ("activation_batch", "prefill_activation_length", "activation_mlp")
+    elif cfg.expert_shard_attention_option == EP_AS_CONTEXT and self.model_mode == MODEL_MODE_TRAIN:
+      logical_axis_names = ("activation_batch_no_exp", "activation_length", "activation_mlp")
     else:
-      inputs = nn.with_logical_constraint(inputs, logical_axis_names)
+      logical_axis_names = ("activation_batch", "activation_length_no_exp", "activation_mlp")
+    inputs = nn.with_logical_constraint(inputs, logical_axis_names)
 
     inputs = checkpoint_name(inputs, "decoder_layer_input")
     # inputs: embedded inputs to the decoder with shape [batch, length, emb_dim]
@@ -485,7 +485,9 @@ class Decoder(nn.Module):
         length=length,
         metadata_params={nn.PARTITION_NAME: metadata_axis_name},
     )
-    return scan_fn(config=cfg, mesh=mesh, name=metadata_axis_name, quant=self.quant, **kwargs)  # pytype: disable=wrong-keyword-args
+    return scan_fn(
+        config=cfg, mesh=mesh, name=metadata_axis_name, quant=self.quant, **kwargs  # pytype: disable=wrong-keyword-args
+    )
 
   def get_pipeline_stage_module(self, decoder_blocks):
     """get pipeline stage module"""
