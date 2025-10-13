@@ -27,6 +27,7 @@ import grain.python as grain
 import numpy as np
 
 from MaxText.input_pipeline import _input_pipeline_utils
+from MaxText.input_pipeline import translation_data_processing
 from MaxText import multihost_dataloading
 
 
@@ -195,10 +196,14 @@ def preprocessing_pipeline(
   if use_sft:
     dataset = dataset.select_columns(data_column_names)
 
-    supported_columns = [["prompt", "completion"], ["messages"]]
+    supported_columns = [["prompt", "completion"], ["messages"], ["translation"]]
     assert any(
         set(data_column_names) == set(supported) for supported in supported_columns
     ), f"Dataset column names mismatch. Expected columns to match one of {supported_columns}, but got {data_column_names}"
+
+    # convert translation dataset to conversational format
+    dataset, data_column_names = translation_data_processing.convert_to_conversational_format(dataset=dataset, data_column="translation")
+
     assert _input_pipeline_utils.is_conversational(
         dataset.features, data_column_names
     ), "Dataset is not in conversational format."
