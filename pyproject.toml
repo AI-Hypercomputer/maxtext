@@ -6,36 +6,37 @@ build-backend = "hatchling.build"
 path = "src/MaxText/__init__.py"
 
 [project]
-name = "MaxText"
+name = "maxtext"
 description = "MaxText is a simple, performant and scalable Jax LLM!"
-dynamic = ["dependencies", "optional-dependencies", "version"]
-requires-python = ">=3.10"
+dynamic = ["version", "optional-dependencies"]
+requires-python = ">=3.12"
 readme = "README.md"
 license = "Apache-2.0"
 keywords = ["llm", "jax", "llama", "mistral", "mixtral", "gemma", "deepseek"]
 classifiers = [
     "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
     "Programming Language :: Python",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: ML",
-    "Environment :: GPU"
+    "Environment :: GPU :: NVIDIA CUDA :: 12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
+dependencies = []
+
+[tool.hatch.metadata.hooks.requirements_txt.optional-dependencies]
+tpu = ["generated_requirements/tpu-requirements.txt"]
 
 [project.urls]
 Repository = "https://github.com/AI-Hypercomputer/maxtext.git"
 "Bug Tracker" = "https://github.com/AI-Hypercomputer/maxtext/issues"
 
-#[tool.hatch.metadata.hooks.requirements_txt]
-#files = ["requirements.txt"]
-
 [tool.hatch.metadata]
 allow-direct-references = true
 
-#[tool.hatch.metadata.hooks.requirements_txt.optional-dependencies]
-#gpu = ["requirements-gpu.txt"]
-#tpu = ["requirements-tpu.txt"]
-
 [tool.hatch.build.targets.wheel]
-packages = ["src/MaxText"]
+packages = ["src/MaxText", "src/install_maxtext_extra_deps"]
+
+[project.scripts]
+install_maxtext_github_deps = "install_maxtext_extra_deps.install_github_deps:main"

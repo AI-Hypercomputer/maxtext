@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Global variable constants used throughout the codebase"""
+
 import os.path
 
 # This is the MaxText root: with "max_utils.py"; &etc. TODO: Replace `os.path.basename` with `os.path.abspath`
@@ -20,13 +22,13 @@ MAXTEXT_PKG_DIR = os.environ.get("MAXTEXT_PKG_DIR", os.path.basename(os.path.dir
 # This is the maxtext repo root: with ".git" folder; "README.md"; "pyproject.toml"; &etc.
 MAXTEXT_REPO_ROOT = os.environ.get(
     "MAXTEXT_REPO_ROOT",
-    (lambda r: r if os.path.isdir(os.path.join(r, ".git")) else MAXTEXT_PKG_DIR)(
-        os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-    ),
+    r
+    if os.path.isdir(os.path.join(r := os.path.dirname(os.path.dirname(os.path.dirname(__file__))), ".git"))
+    else MAXTEXT_PKG_DIR,
 )
 
 # This is the assets root: with "tokenizer.gemma3"; &etc.
-MAXTEXT_ASSETS_ROOT = os.environ.get("MAXTEXT_ASSETS_ROOT", os.path.join(MAXTEXT_REPO_ROOT, "assets"))
+MAXTEXT_ASSETS_ROOT = os.environ.get("MAXTEXT_ASSETS_ROOT", os.path.join(MAXTEXT_PKG_DIR, "assets"))
 
 # This is the test assets root: with "test_image.jpg"; &etc.
 MAXTEXT_TEST_ASSETS_ROOT = os.environ.get("MAXTEXT_TEST_ASSETS_ROOT", os.path.join(MAXTEXT_PKG_DIR, "test_assets"))

@@ -39,7 +39,7 @@ VLLM_TARGET_DEVICE="tpu" pip install --no-cache-dir --pre \
     --find-links https://storage.googleapis.com/libtpu-releases/index.html \
     --find-links https://storage.googleapis.com/jax-releases/jax_nightly_releases.html \
     --find-links https://storage.googleapis.com/jax-releases/jaxlib_nightly_releases.html \
-    vllm==0.10.1rc2.dev129+g800349c2a.tpu
+    vllm==0.11.1rc1.dev292+g1b86bd8e1.tpu
 
 # Install tpu-commons from the artifact registry
 pip install --no-cache-dir --pre \
@@ -47,6 +47,6 @@ pip install --no-cache-dir --pre \
     --extra-index-url https://pypi.org/simple/ \
     --extra-index-url https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/ \
     --find-links https://storage.googleapis.com/jax-releases/libtpu_releases.html \
-    tpu-commons==0.1.0
+    tpu-commons==0.1.2
 
 pip install numba==0.61.2

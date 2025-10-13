@@ -468,14 +468,7 @@ class Attention(nnx.Module):
           rngs=self.rngs,
       )
 
-    if self.config.fused_qkv:
-      self.qkv_proj = self.init_qkv_w(inputs_shape=inputs_q_shape)
-    else:
-      self.query = self.init_query_w(inputs_q_shape=inputs_q_shape)
-      self.key = self.init_kv_w(inputs_kv_shape=inputs_kv_shape)
-      self.value = self.init_kv_w(inputs_kv_shape=inputs_kv_shape)
-
-    self.out = self.init_out_w(output_dim=inputs_q_shape[-1])
+    self._init_projections(inputs_q_shape, inputs_kv_shape)
 
     if self.config.attention_sink:
       self.sinks = nnx.Param(
@@ -506,6 +499,16 @@ class Attention(nnx.Module):
     else:
       self.query_norm = None
       self.key_norm = None
+
+  def _init_projections(self, inputs_q_shape: Tuple, inputs_kv_shape: Tuple) -> None:
+    """Initializes the query, key, value, and output projections."""
+    if self.config.fused_qkv:
+      self.qkv_proj = self.init_qkv_w(inputs_shape=inputs_q_shape)
+    else:
+      self.query = self.init_query_w(inputs_q_shape=inputs_q_shape)
+      self.key = self.init_kv_w(inputs_kv_shape=inputs_kv_shape)
+      self.value = self.init_kv_w(inputs_kv_shape=inputs_kv_shape)
+    self.out = self.init_out_w(output_dim=inputs_q_shape[-1])
 
   def init_query_w(self, inputs_q_shape: Tuple) -> nnx.Module:
     """Query projection initialization."""
@@ -700,6 +703,9 @@ class Attention(nnx.Module):
           rope_factor=self.config.rope_factor,
           embedding_dims=rope_embedding_dims,
           fprop_dtype=self.dtype,
+          interleave=self.config.rope_interleave,
+          truncate=self.config.rope_truncate,
+          attention_scaling=self.config.rope_attention_scaling,
           rngs=self.rngs,
       )
     else:
@@ -932,7 +938,15 @@ class Attention(nnx.Module):
       if model_mode != MODEL_MODE_TRAIN:
         cached_values = self.update_kv_caches(key, value, decoder_segment_ids, model_mode, previous_chunk)
       out = self.attention_op(
-          query, key, value, decoder_segment_ids, model_mode, cached_values, previous_chunk, bidirectional_mask, self.sinks
+          query,
+          key,
+          value,
+          decoder_segment_ids,
+          model_mode,
+          cached_values,
+          previous_chunk,
+          bidirectional_mask,
+          self.sinks,
       )
 
     if model_mode == MODEL_MODE_PREFILL:

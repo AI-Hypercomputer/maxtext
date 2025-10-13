@@ -32,7 +32,7 @@ In this tutorial we use a single host TPUVM such as `v6e-8/v5p-8`. Let's get sta
 bash setup.sh
 ```
 
-### Activate your virtual environment
+### Activate your virtual environment (Skip if you have already done this for running `bash setup.sh` )
 ```
 # Replace with your virtual environment name if not using this default name
 venv_name="maxtext_venv"
@@ -45,7 +45,7 @@ Next, run the following bash script to get all the necessary installations insid
 This will take few minutes. Follow along the installation logs and look out for any issues!
 
 ```
-bash ~/maxtext/MaxText/examples/install_tunix_vllm_requirement.sh
+bash ~/maxtext/src/MaxText/examples/install_tunix_vllm_requirement.sh
 ```
 
 1. It installs `pip install keyring keyrings.google-artifactregistry-auth` which enables pip to authenticate with Google Artifact Registry automatically.
@@ -60,7 +60,7 @@ We use the scheduler code from vLLM, and the model runner code from `tpu_commons
 
 Finally, run the script
 
-`python ~/maxtext/MaxText/examples/grpo_llama3_demo.py`
+`python ~/maxtext/src/MaxText/examples/grpo_llama3_1_8b_demo.py`
 
 The overview of the demo script is as follows:
 

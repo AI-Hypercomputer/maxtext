@@ -46,10 +46,7 @@ def execute_command_as_subprocess(
 
 def get_pod_name_from_regex(workload_name: str, pod_regex: str) -> str | None:
   """Returns the name of the first pod matching the regex."""
-  print(
-      f"Workload '{workload_name}': Getting pod name matching"
-      f" '{pod_regex}'..."
-  )
+  print(f"Workload '{workload_name}': Getting pod name matching" f" '{pod_regex}'...")
   pod_name_command = [
       "kubectl",
       "get",
@@ -74,23 +71,15 @@ def get_pod_name_from_regex(workload_name: str, pod_regex: str) -> str | None:
       print(f"Workload '{workload_name}': Found pod: {pod_name}")
       return pod_name
     else:
-      print(
-          f"Workload '{workload_name}': No pod found matching"
-          f" regex '{pod_regex}'."
-      )
+      print(f"Workload '{workload_name}': No pod found matching" f" regex '{pod_regex}'.")
   except subprocess.CalledProcessError as e:
-    print(
-        f"Workload '{workload_name}': Error getting pod information:"
-        f" {e}"
-    )
+    print(f"Workload '{workload_name}': Error getting pod information:" f" {e}")
   return None
 
 
 def get_pod_status(workload_name: str, pod_name: str) -> str | None:
   """Returns the status of the pod."""
-  print(
-      f"Workload '{workload_name}': Getting status of pod '{pod_name}'..."
-  )
+  print(f"Workload '{workload_name}': Getting status of pod '{pod_name}'...")
   pod_status_command = [
       "kubectl",
       "get",
@@ -107,33 +96,23 @@ def get_pod_status(workload_name: str, pod_name: str) -> str | None:
       text=True,
   )
   pod_status = status_process.stdout.strip()
-  print(
-      f"Workload '{workload_name}': Pod '{pod_name}' is in '{pod_status}'"
-      " state."
-  )
+  print(f"Workload '{workload_name}': Pod '{pod_name}' is in '{pod_status}'" " state.")
   return pod_status
 
 
 def wait_for_pod_to_start(workload_name: str, pod_regex: str) -> str | None:
   """Waits for the step pod to be in 'Running' state and returns its name."""
-  print(
-      f"Workload '{workload_name}': Waiting for pod matching"
-      f" '{pod_regex}' to be in 'Running' state..."
-  )
+  print(f"Workload '{workload_name}': Waiting for pod matching" f" '{pod_regex}' to be in 'Running' state...")
   while True:
     pod_name = get_pod_name_from_regex(workload_name, pod_regex)
     if pod_name:
       pod_status = get_pod_status(workload_name, pod_name)
       if pod_status == "Running":
-        print(
-            f"Workload '{workload_name}': Step pod '{pod_name}'"
-            f" is now in 'Running' state."
-        )
+        print(f"Workload '{workload_name}': Step pod '{pod_name}'" f" is now in 'Running' state.")
         return pod_name
     time.sleep(POLLING_INTERVAL_SECONDS)
 
   print(
-      f"Workload '{workload_name}': Timed out waiting for step pod"
-      f" matching '{pod_regex}' to reach 'Running' state."
+      f"Workload '{workload_name}': Timed out waiting for step pod" f" matching '{pod_regex}' to reach 'Running' state."
   )
   return None

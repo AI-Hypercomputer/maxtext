@@ -64,6 +64,7 @@ from MaxText.utils.goodput_utils import (
 from MaxText.vertex_tensorboard import VertexTensorboardManager
 # Placeholder: internal
 
+from MaxText.maxtext_utils import compute_loss_nnx, compute_loss_linen
 from MaxText.dpo_utils import _merge_dpo_state, _split_dpo_state, dpo_loss_fn
 from MaxText.train_utils import validate_train_config
 from MaxText.metric_logger import record_activation_metrics
@@ -123,12 +124,15 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
         data["inputs_position"],
         decoder_segment_ids=data["inputs_segmentation"],
         encoder_images=data["images"] if config.use_multimodal else None,
+        encoder_image_masks=data["image_masks"] if config.use_multimodal else None,
         enable_dropout=config.enable_dropout if is_train else False,
         rngs={"dropout": rng1, "params": aqt_rng},
         mutable=mutable_collections,
         decoder_target_tokens=data["targets"],
         decoder_target_mask=data["targets_segmentation"],
     )
+
+    total_loss = compute_loss_linen(intermediate_outputs, logits, data, config, model, params, is_train)
   else:
     # Flax NNX model
     logits = model(
@@ -136,18 +140,14 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
         decoder_positions=data["inputs_position"],
         decoder_segment_ids=data["inputs_segmentation"],
         encoder_images=data["images"] if config.use_multimodal else None,
+        encoder_image_masks=data["image_masks"] if config.use_multimodal else None,
         enable_dropout=config.enable_dropout if is_train else False,
         decoder_target_tokens=data["targets"],
         decoder_target_mask=data["targets_segmentation"],
     )
     intermediate_outputs = {}
+    total_loss = compute_loss_nnx(intermediate_outputs, logits, data, config, model, params, is_train)
 
-  one_hot_targets = jax.nn.one_hot(data["targets"], config.vocab_size)
-  xent, _ = max_utils.cross_entropy_with_logits(logits, one_hot_targets, 0.0)
-  xent = nn.with_logical_constraint(xent, ("activation_embed_and_logits_batch", "activation_length"))
-  # Mask out paddings at the end of each example.
-  xent = xent * (data["targets_segmentation"] != 0)
-  total_loss = jnp.sum(xent)
   total_weights = jnp.sum(data["targets_segmentation"] != 0)
   # If gradient accumulation is enabled, we don't need to divide total_loss
   # by total_weights and then multiply the computed gradient by total_weights,
@@ -257,6 +257,8 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
         extra_dpo_args = [reference_params]
     grad_func = jax.value_and_grad(_loss_fn, argnums=4, has_aux=True)
     (loss, aux), raw_grads = grad_func(model, config, data, dropout_rng, state.params, *extra_dpo_args, is_train=True)
+
+  raw_grads = jax.tree_util.tree_map(lambda x: x.astype(config.grad_dtype) if x.dtype == jnp.float32 else x, raw_grads)
   intermediate_outputs = aux["intermediate_outputs"]
   total_weights = aux["total_weights"]
   moe_lb_loss = aux["moe_lb_loss"]
@@ -420,8 +422,8 @@ def train_loop(config, recorder, state=None):
 
       if config.eval_interval > 0 and step > start_step and (step + 1) % config.eval_interval == 0:
         assert eval_data_iterator
-
-        # Explicitly reset the eval counters before starting the eval loop
+        # Explicitly reset the eval iterator and counters before starting the eval loop
+        eval_data_iterator.reset()
         metric_logger.reset_eval_metrics()
 
         eval_step_count = 0

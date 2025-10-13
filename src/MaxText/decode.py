@@ -16,7 +16,7 @@
 
 import os
 from typing import Sequence
-
+import numpy as np
 import jax
 import jax.numpy as jnp
 
@@ -99,15 +99,18 @@ def main(argv: Sequence[str]) -> None:
 
   text = config.prompt
   prefill_length = config.max_prefill_predict_length
-  processor_output = multimodal_utils.PreprocessorOutput()
+  processor_outputs = multimodal_utils.PreprocessorOutput()
   if config.use_multimodal:
-    text = multimodal_utils.reformat_prompt(
-        text, image_placeholder=config.image_placeholder, model_name=config.model_name
+    image_path = config.image_path.split(",")
+    images = [multimodal_utils.load_image_from_path(p) for p in image_path]
+    processor_outputs = [multimodal_utils.pre_process_image(img, model_name=config.model_name) for img in images]
+    image_offsets = sum(
+        multimodal_utils.get_image_offsets(config.model_name, processor_output=po) for po in processor_outputs
     )
-    # TODO(hengtaoguo): Support multiple images as input.
-    images = multimodal_utils.load_image_from_path(config.image_path)
-    processor_output = multimodal_utils.pre_process_image(images, model_name=config.model_name)
-    prefill_length -= multimodal_utils.get_image_offsets(config.model_name, processor_output=processor_output)
+    prefill_length -= image_offsets
+    text = multimodal_utils.reformat_prompt(
+        text, image_placeholder=config.image_placeholder, model_name=config.model_name, num_images=len(images)
+    )
 
   metadata = engine.get_tokenizer()
   tokenizer_model = engine.build_tokenizer(metadata)
@@ -119,9 +122,9 @@ def main(argv: Sequence[str]) -> None:
   tokens, true_length = tokenizer_model.encode(text, is_bos=not has_chat_template, prefill_lengths=[prefill_length])
   if config.use_multimodal:
     tokens = multimodal_utils.prepare_text_for_image_fusion(
-        tokens, model_name=config.model_name, processor_output=processor_output
+        tokens, model_name=config.model_name, processor_output=processor_outputs
     )
-    true_length += multimodal_utils.get_image_offsets(config.model_name, processor_output=processor_output)
+    true_length += image_offsets
 
   assert (
       true_length <= config.max_prefill_predict_length
@@ -147,7 +150,10 @@ def main(argv: Sequence[str]) -> None:
       prefill_result, first_token = engine.prefill(
           params=params,
           padded_tokens=tokens,
-          images=processor_output.pixel_values,
+          images=np.stack([po.pixel_values for po in processor_outputs]) if config.use_multimodal else None,
+          image_masks=np.stack([po.pixel_mask for po in processor_outputs])
+          if config.use_multimodal and "llama4" in config.model_name
+          else None,
           true_length=true_length,
           rng=rng_prefill,
           slot=i,

@@ -46,6 +46,7 @@ from jetstream.engine.tokenizer_pb2 import TokenizerType
 from MaxText import inference_utils
 from MaxText import max_utils
 from MaxText import maxtext_utils
+from MaxText import multimodal_utils
 from MaxText import pyconfig
 from MaxText.common_types import MODEL_MODE_PREFILL, DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_AUTOREGRESSIVE
 from MaxText.globals import MAXTEXT_PKG_DIR
@@ -326,15 +327,17 @@ class MaxEngine(engine_api.Engine):
 
     @jax.jit
     def model_apply(_p, _rng):
+      image_shape = multimodal_utils.get_dummy_image_shape_for_init(
+          self.config.model_name, batch_size=self.config.micro_batch_size_to_train_on
+      )
       return self.model.apply(
           _p | {"aqt": {}},
           jnp.ones((1, self.config.max_prefill_predict_length), dtype=jnp.int32),
           jnp.ones((1, self.config.max_prefill_predict_length), dtype=jnp.int32),
-          encoder_images=jnp.ones(
-              maxtext_utils.get_dummy_image_shape_for_init(self.config),
-              dtype=jnp.float32,
-          )
-          if self.config.use_multimodal
+          encoder_images=jnp.ones(image_shape, dtype=jnp.float32) if self.config.use_multimodal else None,
+          # encoder_image_masks indicates valid tiles if image tiling + padding is used in vision encoder input.
+          encoder_image_masks=jnp.ones(image_shape[:2], dtype=jnp.int32)
+          if self.config.use_multimodal and "llama4" in self.config.model_name
           else None,
           decoder_segment_ids=jnp.zeros((1, self.config.max_prefill_predict_length), dtype=jnp.int32),
           enable_dropout=False,
@@ -409,6 +412,7 @@ class MaxEngine(engine_api.Engine):
       existing_prefix: ExistingPrefix | None = None,
       padded_tokens: jax.Array,
       images: jax.Array | None = None,
+      image_masks: jax.Array | None = None,
       true_length: int,
       sampler: Callable[[Any], Any] | None = None,  # pylint: disable=unused-argument
       rng: PRNGKeyType | None = None,
@@ -472,12 +476,15 @@ class MaxEngine(engine_api.Engine):
     input_tokens = jnp.expand_dims(padded_tokens, 0)  # [BATCH, SEQUENCE]
     positions = jnp.expand_dims(jnp.arange(start_position, start_position + input_tokens.shape[1]), 0)
 
-    input_images = None
     if self.config.use_multimodal and images is not None:
-      if self.config.model_name.startswith("gemma3"):
-        input_images = images[jnp.newaxis, jnp.newaxis, ...]  # Add batch and sequence dimension [B, N, H, W, C]
-      elif self.config.model_name.startswith("llama4"):
-        input_images = images[jnp.newaxis, ...]  # Add batch dimension [B, T, C, H, W]
+      if images.ndim == 3:
+        # For Gemma3 single image, add batch and image count dimensions
+        images = images[jnp.newaxis, jnp.newaxis, ...]
+        image_masks = image_masks[jnp.newaxis, jnp.newaxis, ...] if image_masks is not None else None
+      elif images.ndim == 4:
+        # add batch dimension
+        images = images[jnp.newaxis, ...]
+        image_masks = image_masks[jnp.newaxis, ...] if image_masks is not None else None
 
     # sequence_indicator will be concatenated to existing_prefix decoder_segment_ids
     start_to_n = jnp.arange(start_position, start_position + input_tokens.shape[1])
@@ -491,7 +498,8 @@ class MaxEngine(engine_api.Engine):
           input_params,
           input_tokens,
           positions,
-          encoder_images=input_images,
+          encoder_images=images,
+          encoder_image_masks=image_masks,
           decoder_segment_ids=sequence_indicator,
           enable_dropout=False,
           model_mode=MODEL_MODE_PREFILL,
@@ -566,6 +574,7 @@ class MaxEngine(engine_api.Engine):
       existing_prefix: ExistingPrefix | None = None,
       padded_tokens: jax.Array,
       images: jax.Array | None = None,
+      image_masks: jax.Array | None = None,
       true_length: int,
       sampler: Callable[[Any], Any] | None = None,  # pylint: disable=unused-argument
       rng: PRNGKeyType | None = None,
@@ -598,6 +607,7 @@ class MaxEngine(engine_api.Engine):
         existing_prefix=existing_prefix,
         padded_tokens=padded_tokens,
         images=images,
+        image_masks=image_masks,
         sampler=sampler,
         true_length=true_length,
         page_state=self.page_state,  # Pass current page state
@@ -772,7 +782,11 @@ class MaxEngine(engine_api.Engine):
         "tokens": first_generated_tokens,
     }, result
 
-  @functools.partial(jax.jit, static_argnums=(0,), static_argnames=("num_prompts", "return_prompt_logp", "algorithm", "topk", "nucleus_topp"))
+  @functools.partial(
+      jax.jit,
+      static_argnums=(0,),
+      static_argnames=("num_prompts", "return_prompt_logp", "algorithm", "topk", "nucleus_topp"),
+  )
   def prefill_concat(
       self,
       *,
@@ -837,11 +851,7 @@ class MaxEngine(engine_api.Engine):
     cache = self._maybe_stack_prefill_result_cache(cache)
     if return_prompt_logp:
       prompt_logp = inference_utils.prompt_logprobs_from_packed_prefill(
-          flat_logits,
-          input_tokens,
-          decoder_positions,
-          decoder_segment_ids,
-          true_lengths
+          flat_logits, input_tokens, decoder_positions, decoder_segment_ids, true_lengths
       )
     else:
       prompt_logp = None
@@ -940,7 +950,9 @@ class MaxEngine(engine_api.Engine):
 
     return max_utils.unbox_logicallypartioned(new_state), result
 
-  @functools.partial(jax.jit, static_argnums=(0,), donate_argnums=(2,), static_argnames=("algorithm", "topk", "nucleus_topp"))
+  @functools.partial(
+      jax.jit, static_argnums=(0,), donate_argnums=(2,), static_argnames=("algorithm", "topk", "nucleus_topp")
+  )
   def _generate_jit(
       self,
       params: Params,
@@ -1524,7 +1536,12 @@ class MaxEngine(engine_api.Engine):
           (int(self.config.per_device_batch_size * self.mesh.size), 1),
           dtype=jnp.int32,
       )
-      dummy_image = jnp.ones(maxtext_utils.get_dummy_image_shape_for_init(self.config), dtype=jnp.int32)
+      dummy_image = jnp.ones(
+          multimodal_utils.get_dummy_image_shape_for_init(
+              self.config.model_name, batch_size=self.config.micro_batch_size_to_train_on
+          ),
+          dtype=jnp.int32,
+      )
       _, cache = self.model.apply(
           abstract_params,
           x,
@@ -1566,7 +1583,7 @@ class MaxEngine(engine_api.Engine):
           "next_pos": next_pos,
           "generated_tokens": generated_tokens,
           "tokens": tokens,
-          "token_logp": token_logp
+          "token_logp": token_logp,
       }
 
     with nn_partitioning.axis_rules(self.config.logical_axis_rules):

@@ -12,17 +12,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Configuration file for the Sphinx documentation builder for MaxText.
 
-# Configuration file for the Sphinx documentation builder.
-#
-# For the full list of built-in configuration values, see the documentation:
-# https://www.sphinx-doc.org/en/master/usage/configuration.html
+This file configures the Sphinx build process for the MaxText project
+documentation. It sets project information, specifies extensions, defines HTML
+output options, and configures MyST parser settings.
+
+For more information on Sphinx configuration, see the official documentation:
+https://www.sphinx-doc.org/en/master/usage/configuration.html
+"""
 
 # -- Project information -----------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#project-information
 
 project = "MaxText"
-copyright = "2025, MaxText developers"
+# pylint: disable=redefined-builtin
+copyright = "2025, Google LLC"
 author = "MaxText developers"
 
 # -- General configuration ---------------------------------------------------

@@ -1,3 +1,19 @@
+<!--
+ Copyright 2023–2025 Google LLC
+
+ Licensed under the Apache License, Version 2.0 (the "License");
+ you may not use this file except in compliance with the License.
+ You may obtain a copy of the License at
+
+    https://www.apache.org/licenses/LICENSE-2.0
+
+ Unless required by applicable law or agreed to in writing, software
+ distributed under the License is distributed on an "AS IS" BASIS,
+ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ See the License for the specific language governing permissions and
+ limitations under the License.
+-->
+
 # Understand Logs and Metrics
 
 When you run a training job, MaxText produces detailed output logs. This guide shows you how to interpret these logs to understand your configuration and monitor performance.
@@ -217,8 +233,8 @@ $$\text{tflop/s/device} = \frac{\text{model tflop per device}}{\text{measured st
 - Further, we can calculate **Model FLOPs Utilization (MFU)** from this:
 
 $$\text{MFU} = \frac{\text{tflop/s/device}}{\text{peak hardware tflop/s}}$$
-
-  For TPU v5p, $\text{peak hardware tflop/s}=459$. Thus, $134.924 / 459 = 29.40$%. Note this is an example for explaination with small batch size and sequence length, so the MFU is not optimal.
+  
+  For TPU v5p, $\text{peak hardware tflop/s}=459$. Thus, $134.924 / 459 = 29.40$%. Note this is an example for explanation with small batch size and sequence length, so the MFU is not optimal.
 
 **Tokens per second per device (throughput)**
 

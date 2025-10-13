@@ -15,26 +15,31 @@
 
 """Training and data loading hooks for SFT"""
 
-from flax import nnx
 from collections import defaultdict
+from sys import version_info
+
+if version_info >= (3, 12):
+  from typing import override
+else:
+  from typing_extensions import override
+
 import jax
 import jax.numpy as jnp
 
-from MaxText.metric_logger import MetricLogger
-from MaxText.utils import gcs_utils
-from MaxText import exceptions
-from MaxText import maxtext_utils
-from MaxText import max_logging
-from MaxText import max_utils
-from MaxText.data_loader import DataLoader
-from MaxText.input_pipeline.input_pipeline_interface import create_data_iterator
+from flax import nnx
+
 from tunix.sft import peft_trainer
 from tunix.sft.hooks import DataHooks, TrainingHooks
-from typing_extensions import override
-from MaxText.utils.goodput_utils import (
-    GoodputEvent,
-    record_goodput,
-)
+
+from MaxText import exceptions
+from MaxText import max_logging
+from MaxText import max_utils
+from MaxText import maxtext_utils
+from MaxText.data_loader import DataLoader
+from MaxText.input_pipeline.input_pipeline_interface import create_data_iterator
+from MaxText.metric_logger import MetricLogger, MetadataKey
+from MaxText.utils import gcs_utils
+from MaxText.utils.goodput_utils import GoodputEvent, record_goodput
 
 
 class SFTTrainingHooks(TrainingHooks):
@@ -59,6 +64,8 @@ class SFTTrainingHooks(TrainingHooks):
       maxtext_utils.assert_params_sufficiently_sharded(params, self.mesh, self.config.sharding_tolerance)
 
     self.metric_logger.write_setup_info_to_tensorboard(params)
+    if MetadataKey.PER_DEVICE_TFLOPS in self.metric_logger.metadata:
+      train_ctx._flops_measured = True  # pylint: disable=protected-access
 
     if self.config.dump_hlo:
       jax.block_until_ready(state)  # Ensure compilation has finished
@@ -92,7 +99,7 @@ class SFTTrainingHooks(TrainingHooks):
     total_weights = jnp.sum(train_ctx.data_hooks.train_batch["targets_segmentation"] != 0)
 
     self.train_metadata[train_ctx.train_steps] = {
-      "total_weights": total_weights,
+        "total_weights": total_weights,
     }
 
   @override
@@ -103,26 +110,29 @@ class SFTTrainingHooks(TrainingHooks):
       train_loss: float,
       step_time: float,
   ):
-    """Called at the end of training step."""
-    assert train_step in self.train_metadata, (
-        "SFTTrainingHooks.on_train_step_start() must be called before"
-        " SFTTrainingHooks.on_train_step_end()"
+    """Called at the end of training step.
+    This hook is called by Tunix after the step counter has been incremented for logging purposes.
+    Therefore, using `train_step - 1` to refer to the state of the previous step counter.
+    However, we will use the current `train_step` value to record metrics in this hook to be
+    consistent with Tunix's metric logging convention.
+    """
+
+    assert train_step - 1 in self.train_metadata, (
+        "SFTTrainingHooks.on_train_step_start() must be called before" " SFTTrainingHooks.on_train_step_end()"
     )
 
-    if self.metadata["first_train_step"] == train_step:
+    if self.metadata["first_train_step"] == train_step - 1:
       max_utils.print_mem_stats("After params initialized")
 
     metrics = {
         "scalar": {
             "learning/loss": train_loss,
-            "learning/total_weights": self.train_metadata[train_step][
-                "total_weights"
-            ],
+            "learning/total_weights": self.train_metadata[train_step - 1]["total_weights"],
         }
     }
     self.metric_logger.record_train_metrics(metrics, train_step, step_time)
     self.metric_logger.write_metrics(metrics, train_step)
-    del self.train_metadata[train_step]
+    del self.train_metadata[train_step - 1]
 
   @override
   def on_eval_step_start(self, train_ctx: peft_trainer.PeftTrainer):
@@ -178,7 +188,10 @@ class SFTDataHooks(DataHooks):
     """Loads the next batch of data for evaluation."""
     try:
       # Run evaluation only for `config.eval_steps` steps.
-      if self.config.eval_steps > 0 and train_ctx.training_hooks.eval_metadata["eval_step_count"] >= self.config.eval_steps:
+      if (
+          self.config.eval_steps > 0
+          and train_ctx.training_hooks.eval_metadata["eval_step_count"] >= self.config.eval_steps
+      ):
         self.eval_batch = None
       else:
         self.eval_batch = next(self.eval_data_iterator)

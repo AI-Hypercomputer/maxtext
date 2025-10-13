@@ -12,6 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Adapter for integrating MaxText Transformer models with Tunix.
+
+This module provides the `TunixMaxTextAdapter` class, which wraps a MaxText
+Transformer model to expose a call signature compatible with Tunix Trainers.
+It also handles weight mapping for compatibility with Hugging Face models.
+"""
+
 from __future__ import annotations
 
 from typing import Optional, Tuple, Any
@@ -20,6 +27,7 @@ from jax import Array
 from flax import nnx
 from MaxText.layers.models import Transformer
 from MaxText.integration.tunix.weight_mapping import VLLM_WEIGHT_MAPPING
+
 
 class TunixMaxTextAdapter(nnx.Module):
   """Adapter exposing Tunix Trainer call signature over a Transformer model."""

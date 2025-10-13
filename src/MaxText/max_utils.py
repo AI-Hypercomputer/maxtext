@@ -30,16 +30,16 @@ import flax
 import jax
 from jax.experimental import mesh_utils
 import jax.numpy as jnp
-from MaxText import max_logging
 import numpy as np
 import orbax.checkpoint as ocp
 from orbax.checkpoint.experimental.emergency.multi_tier_checkpointing import initialization
 import psutil
 from tensorboardX import writer
 
-initialize_multi_tier_checkpointing = (
-    initialization.initialize_multi_tier_checkpointing
-)
+from MaxText import max_logging
+from MaxText.common_types import MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_TRAIN
+
+initialize_multi_tier_checkpointing = initialization.initialize_multi_tier_checkpointing
 HYBRID_RING_64X4 = "hybrid_ring_64x4"
 HYBRID_RING_32X8 = "hybrid_ring_32x8"
 
@@ -81,8 +81,7 @@ def device_space():
   if jax.__version__ >= "0.7.1":
     return jax.memory.Space.Device  # pytype: disable=module-attr
   else:
-    # pytype: disable=module-attr
-    return jax._src.sharding_impls.TransferToMemoryKind("device")  # pylint: disable=protected-access
+    return jax._src.sharding_impls.TransferToMemoryKind("device")  # pylint: disable=protected-access # pytype: disable=module-attr
 
 
 def calculate_total_params_per_chip(params):
@@ -97,10 +96,38 @@ def calculate_total_params_per_chip(params):
   return total_parameters_per_chip
 
 
+def _bytes_of(x):
+  """Return the number of bytes used by a single leaf in a pytree.
+  Handles concrete arrays (NumPy/JAX), abstract shapes, scalars, and None.
+  Unknown types default to 0.
+  """
+  # Abstract JAX values: compute bytes from shape × dtype size.
+  if isinstance(x, jax.ShapeDtypeStruct):
+    # jnp.dtype() normalizes to a consistent dtype object (e.g., handles bfloat16)
+    return int(np.prod(x.shape)) * int(jnp.dtype(x.dtype).itemsize)
+
+  # Concrete arrays (NumPy, JAX): rely on their native nbytes property.
+  if hasattr(x, "nbytes"):
+    return int(x.nbytes)
+
+  # Python scalars (int, float, bool): convert to a NumPy array to measure size.
+  if isinstance(x, (int, float, bool)):
+    return int(np.array(x).nbytes)
+
+  # None or unsupported leaf types: count as zero bytes.
+  if x is not None:
+    max_logging.log(f"Unsupported leaf type in calculate_bytes_from_pytree: {type(x)}")
+
+  return 0
+
+
 def calculate_bytes_from_pytree(params):
-  params_bytes = jax.tree_util.tree_map(lambda x: x.nbytes, params)
-  total_bytes = jax.tree_util.tree_reduce(lambda x, y: x + y, params_bytes)
-  return total_bytes
+  """Return the total memory footprint (in bytes) of all leaves in a pytree.
+
+  Each leaf is measured using `_bytes_of`. Non-array or unsupported types
+  contribute 0 unless they are scalars.
+  """
+  return sum(map(_bytes_of, jax.tree_util.tree_leaves(params)))
 
 
 def summarize_size_from_pytree(params):
@@ -149,57 +176,33 @@ def maybe_initialize_jax_distributed_system(raw_keys):
     # Don't initialize jax distributed with AOT compilation
     return
   if is_gpu_backend(raw_keys):
-    max_logging.log(
-        "Attempting to initialize the jax distributed system for GPU backend..."
-    )
+    max_logging.log("Attempting to initialize the jax distributed system for GPU backend...")
     initialize_jax_for_gpu(raw_keys)
     max_logging.log("Jax distributed system initialized on GPU!")
   elif is_cpu_backend(raw_keys):
-    max_logging.log(
-        "Attempting to initialize the jax distributed system for CPU backend..."
-    )
+    max_logging.log("Attempting to initialize the jax distributed system for CPU backend...")
     initialize_jax_for_cpu(raw_keys)
     max_logging.log("Jax distributed system initialized on CPUs!")
   elif raw_keys["enable_multi_tier_checkpointing"]:
-    max_logging.log(
-        "Attempting to initialize the jax distributed system for multi-tier "
-        "checkpointing..."
-    )
+    max_logging.log("Attempting to initialize the jax distributed system for multi-tier " "checkpointing...")
     initialize_multi_tier_checkpointing(
         local_checkpoint_directory=raw_keys["local_checkpoint_directory"],
-        backup_interval_minutes=raw_keys[
-            "multi_tier_checkpointing_backup_interval_minutes"
-        ],
+        backup_interval_minutes=raw_keys["multi_tier_checkpointing_backup_interval_minutes"],
         run_name=raw_keys["run_name"],
-        jax_initialization_timeout_seconds=raw_keys[
-            "jax_distributed_initialization_timeout"
-        ],
+        jax_initialization_timeout_seconds=raw_keys["jax_distributed_initialization_timeout"],
+        data_parallelism=raw_keys["mtc_data_parallelism"],
     )
-    max_logging.log(
-        "Jax distributed system initialized for multi-tier checkpointing!"
-    )
-  elif (
-      raw_keys["enable_checkpointing"]
-      and raw_keys["compile_topology_num_slices"] == -1
-  ) or raw_keys["hardware"] == "gpu_multiprocess":
+    max_logging.log("Jax distributed system initialized for multi-tier checkpointing!")
+  elif (raw_keys["enable_checkpointing"] and raw_keys["compile_topology_num_slices"] == -1) or raw_keys[
+      "hardware"
+  ] == "gpu_multiprocess":
     max_logging.log("Attempting to initialize the jax distributed system...")
     if not raw_keys["enable_emergency_checkpoint"]:
-      jax.distributed.initialize(
-          initialization_timeout=raw_keys[
-              "jax_distributed_initialization_timeout"
-          ]
-      )
+      jax.distributed.initialize(initialization_timeout=raw_keys["jax_distributed_initialization_timeout"])
     else:
       if raw_keys["hardware"] == "gpu_multiprocess":
-        max_logging.log(
-            "Initializing jax distribtued to support local checkpointing with"
-            " GPUs..."
-        )
-        jax.distributed.initialize(
-            initialization_timeout=raw_keys[
-                "jax_distributed_initialization_timeout"
-            ]
-        )
+        max_logging.log("Initializing jax distribtued to support local checkpointing with" " GPUs...")
+        jax.distributed.initialize(initialization_timeout=raw_keys["jax_distributed_initialization_timeout"])
         ocp.multihost.initialize_runtime_to_distributed_ids()
         ocp.multihost.initialize_distributed_to_device_ids()
       else:
@@ -261,6 +264,7 @@ def initialize_jax_for_tpu_with_emergency_checkpointing(raw_keys):
 
     ocp.multihost.initialize_runtime_to_distributed_ids()
     ocp.multihost.initialize_distributed_to_device_ids()
+
 
 def _retrieve_jax_init_info(raw_keys):
   """Retrieve JAX init info from a local file."""
@@ -948,3 +952,37 @@ def rescan_train_state_params(params, source_shardings, scan_axis, layer_groups)
 
     # Store result and clear temporary memory
     decoder[layer_name] = scanned
+
+
+def get_batch_seq_len_for_mode(config, model_mode):
+  """
+  Resolves the batch size and sequence length based on the model's operational mode.
+
+  Args:
+    config: A configuration object with model parameters.
+    model_mode: The current operational mode
+                (e.g., PREFILL, AUTOREGRESSIVE, TRAIN).
+
+  Returns:
+    A tuple of (batch_size, seq_len).
+  """
+  if model_mode == MODEL_MODE_PREFILL:
+    # Prefill mode: Process one full-length prompt.
+    batch_size = 1
+    seq_len = config.max_prefill_predict_length
+
+  elif model_mode == MODEL_MODE_AUTOREGRESSIVE:
+    # Autoregressive/decode mode: Generate one token at a time for a batch.
+    batch_size = config.micro_batch_size_to_train_on
+    seq_len = 1
+
+  elif model_mode == MODEL_MODE_TRAIN:
+    # Training mode: Process a full batch of full-length sequences.
+    batch_size = config.micro_batch_size_to_train_on
+    seq_len = config.max_target_length
+
+  else:
+    # Explicitly handle unknown modes instead of falling back to a default.
+    raise ValueError(f"Unknown model_mode: {model_mode}")
+
+  return batch_size, seq_len

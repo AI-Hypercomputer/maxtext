@@ -31,7 +31,7 @@ from MaxText import max_logging
 from MaxText import pyconfig
 from MaxText.data_loader import DataLoader
 from MaxText.train import get_first_step
-from MaxText.train_utils import validate_train_config,setup_train_loop
+from MaxText.train_utils import validate_train_config, setup_train_loop
 
 
 def data_load_loop(config, state=None):
@@ -65,7 +65,6 @@ def data_load_loop(config, state=None):
 
 
 def main(argv: Sequence[str]) -> None:
-  jax.config.update("jax_cpu_enable_gloo_collectives", True)
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
   config = pyconfig.initialize(argv)
   validate_train_config(config)

@@ -1,49 +1,57 @@
+# Copyright 2023–2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """
-Copyright 2025 Google LLC
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-     https://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-"""
-
-from typing import Optional
-import os.path
-import torch
-from torch import nn
-import torch.nn.functional as F
-import jax
-import unittest
-import jax.numpy as jnp
-from jax.sharding import Mesh
-from MaxText.globals import MAXTEXT_PKG_DIR
-from MaxText import pyconfig
-from MaxText import maxtext_utils
-from MaxText.layers import attentions, moe
-import numpy as np
-from MaxText.layers.initializers import nd_dense_init
-from types import SimpleNamespace
-
-
-"""  
 Tests for Attention & MLP in GPT OSS.
 
 GPT OSS PyTorch implementation at:
 https://github.com/huggingface/transformers/blob/31ab7168ff7e07f61c90134e5238c4d97606aa70/src/transformers/models/gpt_oss/modular_gpt_oss.py
 """
 
+from types import SimpleNamespace
+from typing import Optional
+import math
+import os.path
+import unittest
+
+import numpy as np
+
+import torch
+from torch import nn
+import torch.nn.functional as F
+
+from jax.sharding import Mesh
+import jax
+import jax.numpy as jnp
+
+from MaxText.globals import MAXTEXT_PKG_DIR
+from MaxText import pyconfig
+from MaxText import maxtext_utils
+from MaxText.layers import attentions, moe, embeddings
+from MaxText.layers.initializers import nd_dense_init
+
 
 # Reference implementation
 class GptOssExperts(nn.Module):
+  """PyTorch reference implementation for GPT-OSS Experts layer."""
 
   def __init__(self, config):
+    """Initializes the GptOssExperts module.
+
+    Args:
+      config: A configuration object with model hyperparameters.
+    """
     super().__init__()
     self.intermediate_size = config.intermediate_size
     self.num_experts = config.num_local_experts
@@ -57,6 +65,16 @@ class GptOssExperts(nn.Module):
     self.limit = config.limit
 
   def forward(self, hidden_states: torch.Tensor, router_indices=None, routing_weights=None) -> torch.Tensor:
+    """Forward pass for the GptOssExperts module.
+
+    Args:
+      hidden_states: The input tensor.
+      router_indices: Indices of the selected experts (not used in this simplified forward pass).
+      routing_weights: Weights for combining expert outputs.
+
+    Returns:
+      The output tensor after processing by the experts.
+    """
     batch_size = hidden_states.shape[0]
     seq_len = hidden_states.shape[1]
     hidden_states = hidden_states.reshape(-1, self.hidden_size)  # (num_tokens, hidden_size)
@@ -79,8 +97,14 @@ class GptOssExperts(nn.Module):
 
 # Reference implementation
 class GptOssTopKRouter(nn.Module):
+  """PyTorch reference implementation for GPT-OSS Top-K Router."""
 
   def __init__(self, config):
+    """Initializes the GptOssTopKRouter module.
+
+    Args:
+      config: A configuration object with model hyperparameters.
+    """
     super().__init__()
     self.top_k = config.num_experts_per_tok
     self.num_experts = config.num_local_experts
@@ -89,6 +113,14 @@ class GptOssTopKRouter(nn.Module):
     self.bias = nn.Parameter(torch.empty(self.num_experts))
 
   def forward(self, hidden_states):
+    """Forward pass for the GptOssTopKRouter module.
+
+    Args:
+      hidden_states: The input tensor.
+
+    Returns:
+      A tuple containing the router scores and the indices of the top-k experts.
+    """
     hidden_states = hidden_states.reshape(-1, self.hidden_dim)
     router_logits = F.linear(hidden_states, self.weight, self.bias)  # (seq_len, num_experts)
     router_top_value, router_indices = torch.topk(router_logits, self.top_k, dim=-1)  # (seq_len, top_k)
@@ -99,13 +131,27 @@ class GptOssTopKRouter(nn.Module):
 
 # Reference implementation
 class GptOssMLP(nn.Module):
+  """PyTorch reference implementation for the complete GPT-OSS MLP block."""
 
   def __init__(self, config):
+    """Initializes the GptOssMLP module.
+
+    Args:
+      config: A configuration object with model hyperparameters.
+    """
     super().__init__()
     self.router = GptOssTopKRouter(config)
     self.experts = GptOssExperts(config)
 
   def forward(self, hidden_states):
+    """Forward pass for the GptOssMLP module.
+
+    Args:
+      hidden_states: The input tensor.
+
+    Returns:
+      A tuple containing the output of the MoE block and the router scores.
+    """
     router_scores, router_indices = self.router(hidden_states)  # (num_experts, seq_len)
     routed_out = self.experts(hidden_states, router_indices=router_indices, routing_weights=router_scores)
     return routed_out, router_scores
@@ -134,6 +180,23 @@ def eager_attention_forward(
     dropout: float = 0.0,
     **kwargs,
 ):
+  """PyTorch reference implementation for eager attention.
+
+  This function computes attention, including support for attention sinks,
+  and is used as a reference to validate the MaxText implementation.
+
+  Args:
+    module: A module-like object containing configuration (e.g., sinks).
+    query: The query tensor.
+    key: The key tensor.
+    value: The value tensor.
+    attention_mask: An optional mask to apply to the attention weights.
+    scaling: The scaling factor for the attention scores.
+    dropout: The dropout rate.
+
+  Returns:
+    A tuple containing the attention output and the attention weights.
+  """
   key_states = repeat_kv(key, module.num_key_value_groups)
   value_states = repeat_kv(value, module.num_key_value_groups)
   attn_weights = torch.matmul(query, key_states.transpose(2, 3)) * scaling
@@ -162,25 +225,48 @@ def eager_attention_forward(
 
 
 def to_jax(pt_tensor: torch.Tensor) -> jax.Array:
+  """Converts a PyTorch tensor to a JAX array.
+
+  Args:
+    pt_tensor: The PyTorch tensor to convert.
+
+  Returns:
+    The equivalent JAX array.
+  """
   return jnp.asarray(pt_tensor.detach().numpy())
 
 
 class Config:
+  """A configuration class for holding hyperparameters for the tests."""
 
   hidden_size = 16
   intermediate_size = 16
   num_local_experts = 8
   num_experts_per_tok = 2
   limit = 7.0
+  # attention
   num_attention_heads = 8
   num_key_value_heads = 4
   head_dim = 8
   attention_dropout = 0.0
+  # rope
+  rope_type = "yarn"
+  rope_max_timescale = 150_000
+  max_position_embeddings = 131072
+  original_max_position_embeddings = 4096
+  rope_factor = 32
+  beta_fast = 32
+  beta_slow = 1
+  rope_interleave = False
+  rope_truncate = False
+  rope_attention_scaling = True
 
 
 class GptOssMLPTest(unittest.TestCase):
+  """Tests for the MaxText GPT-OSS MLP implementation against a PyTorch reference."""
 
   def test_mlp_block(self):
+    """Validates the MaxText MoE MLP block against the PyTorch reference."""
     torch.set_default_dtype(torch.float32)
     torch.manual_seed(42)
     config = Config()
@@ -271,9 +357,10 @@ class GptOssMLPTest(unittest.TestCase):
 
 
 class GptOssAttentionTest(unittest.TestCase):
-  """Test for the MaxText GPT OSS implementation."""
+  """Tests for the MaxText GPT-OSS attention implementation."""
 
   def setUp(self):
+    """Sets up the test environment, preparing tensors and configurations."""
     super().setUp()
     torch.set_default_dtype(torch.float32)
     torch.manual_seed(42)
@@ -303,6 +390,7 @@ class GptOssAttentionTest(unittest.TestCase):
     self.jax_value_t = jnp.transpose(self.jax_value, (0, 2, 1, 3))
 
   def test_dot_product_attention_with_sinks(self):
+    """Validates dot-product attention with sinks against the reference."""
     expected_attn_output, _ = eager_attention_forward(
         module=self.mock_module_with_sinks,
         query=self.query,
@@ -365,6 +453,7 @@ class GptOssAttentionTest(unittest.TestCase):
     np.testing.assert_allclose(to_jax(expected_attn_output), actual_attn_output_dot, rtol=1e-3, atol=1e-2)
 
   def test_flash_attention_with_sinks(self):
+    """Validates flash attention with sinks against the reference."""
     expected_attn_output, _ = eager_attention_forward(
         module=self.mock_module_with_sinks,
         query=self.query,
@@ -423,6 +512,248 @@ class GptOssAttentionTest(unittest.TestCase):
     mse_flash = jnp.mean((to_jax(expected_attn_output) - actual_attn_output_flash) ** 2)
     self.assertLess(mse_flash, 1e-3, f"flash attention mismatch, MSE: {mse_flash}")
     np.testing.assert_allclose(to_jax(expected_attn_output), actual_attn_output_flash, rtol=1e-3, atol=1e-2)
+
+
+class GptOssRotaryEmbedding(nn.Module):
+  """
+  https://github.com/huggingface/transformers/blob/b9282355bea846b54ed850a066901496b19da654/src/transformers/models/gpt_oss/modeling_gpt_oss.py#L169
+  """
+
+  inv_freq: torch.Tensor  # fix linting for `register_buffer`
+
+  def __init__(self, config, device=None):
+    super().__init__()
+    # BC: "rope_type" was originally "type"
+    if hasattr(config, "rope_scaling") and isinstance(config.rope_scaling, dict):
+      self.rope_type = config.rope_scaling.get("rope_type", config.rope_scaling.get("type"))
+    else:
+      self.rope_type = "default"
+    self.max_seq_len_cached = config.max_position_embeddings
+    self.original_max_seq_len = config.max_position_embeddings
+
+    self.config = config
+    self.rope_init_fn = ROPE_INIT_FUNCTIONS[self.rope_type]
+
+    inv_freq, self.attention_scaling = self.rope_init_fn(self.config, device)
+    self.register_buffer("inv_freq", inv_freq, persistent=False)
+    self.original_inv_freq = self.inv_freq
+
+  @torch.no_grad()
+  # @dynamic_rope_update  # power user: used with advanced RoPE types (e.g. dynamic rope)
+  def forward(self, x: torch.Tensor, position_ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Computes the rotary positional embeddings for the given positions.
+
+    This method calculates the cosine and sine values for RoPE based on the
+    input positions. These values are then applied to the query and key
+    tensors in the attention mechanism.
+
+    Args:
+      x: The input tensor, used to determine the device and dtype for the
+        output. Shape is not used otherwise.
+      position_ids: A 1D tensor of token positions for which to compute the
+        embeddings.
+
+    Returns:
+      A tuple containing the cosine and sine components of the rotary embeddings.
+    """
+    inv_freq_expanded = self.inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1).to(x.device)
+    position_ids_expanded = position_ids[:, None, :].float()
+
+    device_type = x.device.type if isinstance(x.device.type, str) and x.device.type != "mps" else "cpu"
+    with torch.autocast(device_type=device_type, enabled=False):  # Force float32
+      freqs = (inv_freq_expanded.float() @ position_ids_expanded.float()).transpose(1, 2)
+      emb = freqs
+      cos = emb.cos() * self.attention_scaling
+      sin = emb.sin() * self.attention_scaling
+
+    return cos.to(x.dtype), sin.to(x.dtype)
+
+
+def _compute_yarn_parameters(
+    config, device: "torch.device", seq_len: Optional[int] = None
+) -> tuple["torch.Tensor", float]:
+  """
+  https://github.com/huggingface/transformers/blob/b9282355bea846b54ed850a066901496b19da654/src/transformers/modeling_rope_utils.py#L197C1-L281C38
+  """
+
+  base = config.rope_theta
+  partial_rotary_factor = config.partial_rotary_factor if hasattr(config, "partial_rotary_factor") else 1.0
+  head_dim = getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)
+  dim = int(head_dim * partial_rotary_factor)
+  factor = config.rope_scaling["factor"]
+  attention_factor = config.rope_scaling.get("attention_factor")
+  mscale = config.rope_scaling.get("mscale")
+  mscale_all_dim = config.rope_scaling.get("mscale_all_dim")
+  original_max_position_embeddings = (
+      config.rope_scaling.get("original_max_position_embeddings") or config.max_position_embeddings
+  )
+
+  def get_mscale(scale, mscale=1):
+    if scale <= 1:
+      return 1.0
+    return 0.1 * mscale * math.log(scale) + 1.0
+
+  # Sets the attention factor as suggested in the paper
+  if attention_factor is None:
+    if mscale and mscale_all_dim:
+      attention_factor = float(get_mscale(factor, mscale) / get_mscale(factor, mscale_all_dim))
+    else:
+      attention_factor = get_mscale(factor)
+
+  # Optional config options
+  # beta_fast/beta_slow: as suggested in the paper, default to 32/1 (correspondingly)
+  beta_fast = config.rope_scaling.get("beta_fast") or 32
+  beta_slow = config.rope_scaling.get("beta_slow") or 1
+
+  # Compute the inverse frequencies
+  def find_correction_dim(num_rotations, dim, base, max_position_embeddings):
+    """Inverse dimension formula to find the dimension based on the number of rotations"""
+    return (dim * math.log(max_position_embeddings / (num_rotations * 2 * math.pi))) / (2 * math.log(base))
+
+  def find_correction_range(low_rot, high_rot, dim, base, max_position_embeddings, truncate):
+    """Find dimension range bounds based on rotations"""
+    low = find_correction_dim(low_rot, dim, base, max_position_embeddings)
+    high = find_correction_dim(high_rot, dim, base, max_position_embeddings)
+    if truncate:
+      low = math.floor(low)
+      high = math.ceil(high)
+    return max(low, 0), min(high, dim - 1)
+
+  def linear_ramp_factor(minimum, maximum, dimensions):
+    if minimum == maximum:
+      maximum += 0.001  # Prevent singularity
+
+    linear_func = (torch.arange(dimensions, dtype=torch.float32) - minimum) / (maximum - minimum)
+    ramp_func = torch.clamp(linear_func, 0, 1)
+    return ramp_func
+
+  # Note on variable naming: "interpolation" comes from the original technique, where we interpolate the position IDs
+  # to expand the possible context length. In other words, interpolation = apply scaling factor.
+  pos_freqs = base ** (torch.arange(0, dim, 2).to(device=device, dtype=torch.float) / dim)
+  inv_freq_extrapolation = 1.0 / pos_freqs
+  inv_freq_interpolation = 1.0 / (factor * pos_freqs)
+
+  truncate = config.rope_scaling.get("truncate", True)
+  low, high = find_correction_range(beta_fast, beta_slow, dim, base, original_max_position_embeddings, truncate)
+
+  # Get n-dimensional rotational scaling corrected for extrapolation
+  inv_freq_extrapolation_factor = 1 - linear_ramp_factor(low, high, dim // 2).to(device=device, dtype=torch.float)
+  inv_freq = (
+      inv_freq_interpolation * (1 - inv_freq_extrapolation_factor)
+      + inv_freq_extrapolation * inv_freq_extrapolation_factor
+  )
+  return inv_freq, attention_factor
+
+
+ROPE_INIT_FUNCTIONS = {"yarn": _compute_yarn_parameters}
+
+
+# https://github.com/huggingface/transformers/blob/b9282355bea846b54ed850a066901496b19da654/src/transformers/models/gpt_oss/modeling_gpt_oss.py#L217C1-L233C28
+def _apply_rotary_emb(
+    x: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+) -> torch.Tensor:
+  """Applies rotary embedding to a tensor.
+
+  Args:
+    x: The input tensor.
+    cos: The cosine part of the rotary embedding.
+    sin: The sine part of the rotary embedding.
+
+  Returns:
+    The tensor with rotary embeddings applied.
+  """
+  first_half, second_half = torch.chunk(x, 2, dim=-1)
+  first_ = first_half * cos - second_half * sin
+  second_ = second_half * cos + first_half * sin
+  return torch.cat((first_, second_), dim=-1)
+
+
+def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
+  """Applies rotary positional embedding to query and key tensors.
+
+  Args:
+    q: The query tensor.
+    k: The key tensor.
+    cos: The cosine part of the rotary embedding.
+    sin: The sine part of the rotary embedding.
+    position_ids: Optional position IDs.
+    unsqueeze_dim: The dimension to unsqueeze cos and sin.
+
+  Returns:
+    A tuple containing the query and key tensors with rotary embeddings applied.
+  """
+  cos = cos.unsqueeze(unsqueeze_dim)
+  sin = sin.unsqueeze(unsqueeze_dim)
+  q_embed = _apply_rotary_emb(q, cos, sin)
+  k_embed = _apply_rotary_emb(k, cos, sin)
+  return q_embed, k_embed
+
+
+class GptOssYarnTest(unittest.TestCase):
+  """Tests for the MaxText GPT-OSS Yarn RoPE implementation."""
+
+  def setUp(self):
+    """Sets up the test environment for Yarn RoPE validation."""
+    super().setUp()
+    torch.set_default_dtype(torch.float32)
+    torch.manual_seed(42)
+    # jax config
+    self.config = Config()
+    # data, test long context
+    self.batch_size = 1
+    self.seq_len = 4096
+    self.dtype = "float32"
+    # torch tensors
+    self.query = torch.randn(self.batch_size, self.config.num_attention_heads, self.seq_len, self.config.head_dim)
+    self.key = torch.randn(self.batch_size, self.config.num_key_value_heads, self.seq_len, self.config.head_dim)
+    self.positions = torch.arange(self.seq_len).unsqueeze(0)
+    # torch config
+    pt_config = {
+        "head_dim": self.config.head_dim,
+        "max_position_embeddings": self.config.max_position_embeddings,
+        "rope_scaling": {
+            "beta_fast": self.config.beta_fast,
+            "beta_slow": self.config.beta_slow,
+            "factor": self.config.rope_factor,
+            "original_max_position_embeddings": self.config.original_max_position_embeddings,
+            "rope_type": self.config.rope_type,
+            "truncate": self.config.rope_truncate,
+        },
+        "rope_theta": self.config.rope_max_timescale,
+        # placeholder, to get past `getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)`
+        "hidden_size": float("inf"),
+        "num_attention_heads": float("inf"),
+    }
+    self.pt_config = SimpleNamespace(**pt_config)
+
+  def test_yarn(self):
+    """Validates the JAX Yarn RoPE implementation against the HF reference."""
+    # HF Yarn RoPE
+    torch_embedding = GptOssRotaryEmbedding(self.pt_config)
+    cos, sin = torch_embedding(self.query, self.positions)
+    q_rope_pt, k_rope_pt = apply_rotary_pos_emb(self.query, self.key, cos, sin)
+    # JAX Yarn RoPE
+    model_jax = embeddings.YarnRotaryEmbedding(
+        max_position_embeddings=self.config.max_position_embeddings,
+        original_max_position_embeddings=self.config.original_max_position_embeddings,
+        beta_fast=self.config.beta_fast,
+        beta_slow=self.config.beta_slow,
+        rope_theta=self.config.rope_max_timescale,
+        rope_factor=self.config.rope_factor,
+        embedding_dims=self.config.head_dim,
+        fprop_dtype=self.dtype,
+        interleave=self.config.rope_interleave,
+        truncate=self.config.rope_truncate,
+        attention_scaling=self.config.rope_attention_scaling,
+    )
+    jax_positions = to_jax(self.positions)
+    q_rope_jax = model_jax(to_jax(self.query).transpose(0, 2, 1, 3), jax_positions)
+    k_rope_jax = model_jax(to_jax(self.key).transpose(0, 2, 1, 3), jax_positions)
+    # Compare outputs from the HF and JAX implementations
+    np.testing.assert_allclose(to_jax(q_rope_pt).transpose(0, 2, 1, 3), q_rope_jax, rtol=1e-5, atol=1e-3)
+    np.testing.assert_allclose(to_jax(k_rope_pt).transpose(0, 2, 1, 3), k_rope_jax, rtol=1e-5, atol=1e-3)
 
 
 if __name__ == "__main__":

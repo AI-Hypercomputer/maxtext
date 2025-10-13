@@ -12,6 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Provides a centralized access point for vLLM weight mappings.
+
+This module defines the `VLLM_WEIGHT_MAPPING` class, which acts as a
+dispatcher to retrieve the correct weight mapping configuration for a given
+model name. This allows for easy extension to support new models.
+"""
+
 from MaxText.integration.tunix.weight_mapping.llama3 import LLAMA3_VLLM_MAPPING
 
 
@@ -22,7 +29,7 @@ class VLLM_WEIGHT_MAPPING:
     if name.startswith("llama3.1"):
       return LLAMA3_VLLM_MAPPING
     else:
-      raise ValueError("{} vLLM weight mapping not found.".format(name))
+      raise ValueError(f"{name} vLLM weight mapping not found.")
 
   def __getitem__(self, key):
     return getattr(self, key)

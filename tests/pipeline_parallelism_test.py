@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Tests for pipeline parallelism."""
+
 import functools
 import os.path
 import sys

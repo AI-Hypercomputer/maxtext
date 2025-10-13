@@ -43,6 +43,7 @@ from MaxText.layers.embeddings import attend_on_embedding, embed_as_linen, posit
 from MaxText.layers.quantizations import AqtQuantization as Quant
 from MaxText.layers import (
     deepseek,
+    deepseek_batchsplit,
     gemma,
     gemma2,
     gemma3,
@@ -135,7 +136,7 @@ class DecoderLayer(nn.Module):
         ar_cache_axis_order=tuple(map(int, cfg.ar_cache_axis_order.split(","))),
         compute_axis_order=tuple(map(int, cfg.compute_axis_order.split(","))),
         reshape_q=cfg.reshape_q,
-        model_mode=self.model_mode,
+        model_mode=model_mode,
     )
 
     attention_lnx = attention_layer(
@@ -144,7 +145,7 @@ class DecoderLayer(nn.Module):
         decoder_positions,
         decoder_segment_ids=decoder_segment_ids,
         deterministic=deterministic,
-        model_mode=self.model_mode,
+        model_mode=model_mode,
     )
 
     if model_mode == MODEL_MODE_PREFILL:
@@ -161,7 +162,7 @@ class DecoderLayer(nn.Module):
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
         name="mlp",
-        model_mode=self.model_mode,
+        model_mode=model_mode,
         config=cfg,
         quant=self.quant,
     )(lnx, deterministic=deterministic)
@@ -223,7 +224,7 @@ class SequentialBlockDecoderLayers(nn.Module):
   ) -> jnp.ndarray:
     for lyr in range(self.num_decoder_layers):
       inputs = self.decoder_layer(
-          config=self.config, mesh=self.mesh, name=f"layers_{lyr}", quant=self.quant, model_mode=self.model_mode
+          config=self.config, mesh=self.mesh, name=f"layers_{lyr}", quant=self.quant, model_mode=model_mode
       )(
           inputs,
           decoder_segment_ids,
@@ -285,7 +286,8 @@ class Decoder(nn.Module):
       if cfg.remat_policy in ("minimal_with_context", "minimal_flash"):
         # save all
         if cfg.remat_policy == "minimal_flash":
-            max_logging.log("WARNING: 'minimal_flash' will be deprecated soon, please use 'minimal_with_context' instead.")
+          max_logging.log("WARNING: 'minimal_flash' will be deprecated soon, please use 'minimal_with_context' instead.")
+          max_logging.log("WARNING: 'minimal_flash' will be deprecated soon, please use 'minimal_with_context' instead.")
         policy = self.minimal_policy(with_context=True)
       elif cfg.remat_policy == "minimal":
         # save all except context
@@ -374,18 +376,21 @@ class Decoder(nn.Module):
       case DecoderBlockType.DEFAULT:
         return [DecoderLayer]
       case DecoderBlockType.LLAMA2:
-        return [llama2.LlamaDecoderLayer]
+        return [llama2.LlamaDecoderLayerToLinen]
       case DecoderBlockType.MISTRAL:
         # TODO(ranran): update to Mistral with sliding window attention
-        return [mistral.MistralDecoderLayer]
+        return [mistral.MistralDecoderLayerToLinen]
       case DecoderBlockType.MIXTRAL:
-        return [mixtral.MixtralDecoderLayer]
+        return [mixtral.MixtralDecoderLayerToLinen]
       case DecoderBlockType.DEEPSEEK:
-        return [deepseek.DeepSeekDenseLayer, deepseek.DeepSeekMoELayer]
+        if self.config.use_batch_split_schedule:
+          return [deepseek_batchsplit.DeepSeekDenseLayer, deepseek_batchsplit.DeepSeekMoELayer]
+        else:
+          return [deepseek.DeepSeekDenseLayer, deepseek.DeepSeekMoELayer]
       case DecoderBlockType.GEMMA:
-        return [gemma.GemmaDecoderLayer]
+        return [gemma.GemmaDecoderLayerToLinen]
       case DecoderBlockType.GEMMA2:
-        return [gemma2.Gemma2DecoderLayer]
+        return [gemma2.Gemma2DecoderLayerToLinen]
       case DecoderBlockType.GEMMA3:
         return [gemma3.Gemma3DecoderLayer]
       case DecoderBlockType.GPT3:
@@ -393,15 +398,15 @@ class Decoder(nn.Module):
       case DecoderBlockType.GPT_OSS:
         return [gpt_oss.GptOssScannableBlock] if self.config.scan_layers else [gpt_oss.GptOssDecoderLayer]
       case DecoderBlockType.QWEN3:
-        return [qwen3.Qwen3DecoderLayer]
+        return [qwen3.Qwen3DecoderLayerToLinen]
       case DecoderBlockType.QWEN3_MOE:
-        return [qwen3.Qwen3MoeDecoderLayer]
+        return [qwen3.Qwen3MoeDecoderLayerToLinen]
       case DecoderBlockType.SIMPLE:
         return [simple_layer.SimpleDecoderLayer]
       case DecoderBlockType.SIMPLE_MLP:
         return [simple_layer.SimpleMlpDecoderLayer]
       case DecoderBlockType.LLAMA4:
-        return [llama4.Llama4ScannableBlock] if self.config.scan_layers else [llama4.Llama4DecoderLayer]
+        return [llama4.Llama4ScannableBlockToLinen] if self.config.scan_layers else [llama4.Llama4DecoderLayerToLinen]
       case _:
         # Default case to handle any unknown decoder block types.
         raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block.value=}")
@@ -480,7 +485,7 @@ class Decoder(nn.Module):
         length=length,
         metadata_params={nn.PARTITION_NAME: metadata_axis_name},
     )
-    return scan_fn(config=cfg, mesh=mesh, name=metadata_axis_name, quant=self.quant, model_mode=self.model_mode, **kwargs)
+    return scan_fn(config=cfg, mesh=mesh, name=metadata_axis_name, quant=self.quant, **kwargs)
 
   def get_pipeline_stage_module(self, decoder_blocks):
     """get pipeline stage module"""
@@ -525,13 +530,15 @@ class Decoder(nn.Module):
       decoder_input_tokens,
       decoder_positions,
       deterministic,
+      model_mode,
       image_embeddings=None,
       bidirectional_mask=None,
+      image_masks=None,
   ):
     """Applies token and positional embeddings to the input tokens."""
     cfg = self.config
 
-    y = shared_embedding(decoder_input_tokens.astype("int32"), model_mode=self.model_mode)
+    y = shared_embedding(decoder_input_tokens.astype("int32"), model_mode=model_mode)
 
     # Merge the image embeddings with the text embeddings for multimodal models
     if image_embeddings is not None and cfg.use_multimodal:
@@ -540,6 +547,7 @@ class Decoder(nn.Module):
             text_embeddings=y,
             vision_embeddings=image_embeddings,
             mask=bidirectional_mask,
+            image_masks=image_masks,
         )
       # TODO(hengtaoguo): Add support for other multimodal models such as Llama4, refactor if needed
       else:
@@ -559,11 +567,11 @@ class Decoder(nn.Module):
           embedding_init=nn.initializers.normal(stddev=1.0),
           name="position_embedder",
           config=cfg,
-      )(decoder_positions, model_mode=self.model_mode)
+      )(decoder_positions, model_mode=model_mode)
     return y
 
   @nn.compact
-  def _apply_output_head(self, shared_embedding: nn.Module | nnx.Module, y, deterministic):
+  def _apply_output_head(self, shared_embedding: nn.Module | nnx.Module, y, deterministic, model_mode):
     """Applies final normalization and projects hidden states to logits."""
 
     cfg = self.config
@@ -608,11 +616,11 @@ class Decoder(nn.Module):
       )(
           y
       )  # We do not quantize the logits matmul.
-    if self.model_mode in (MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE):
+    if model_mode in (MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE):
       logits = nn.with_logical_constraint(logits, (None, None, "activation_vocab"))
-    else:
+    elif cfg.num_vocab_tiling == 1:
       logits = nn.with_logical_constraint(
-          logits, ("activation_embed_and_logits_batch", "activation_length", "activation_vocab")
+          logits, ("activation_embed_and_logits_batch", "activation_length_no_exp", "activation_vocab")
       )
 
     if self.config.cast_logits_to_fp32:
@@ -628,11 +636,13 @@ class Decoder(nn.Module):
       decoder_positions,
       decoder_segment_ids=None,
       deterministic=False,
+      model_mode=MODEL_MODE_TRAIN,
       previous_chunk=None,
       slot: None | int = None,
       page_state: None | page_manager.PageState = None,
       bidirectional_mask: None | Any = None,
       image_embeddings: None | jnp.ndarray = None,
+      image_masks: None | jnp.ndarray = None,
   ):
     cfg = self.config
     mesh = self.mesh
@@ -644,8 +654,10 @@ class Decoder(nn.Module):
         decoder_input_tokens,
         decoder_positions,
         deterministic,
+        model_mode,
         image_embeddings,
-        bidirectional_mask
+        bidirectional_mask,
+        image_masks,
     )
 
     policy = self.get_remat_policy()
@@ -655,12 +667,12 @@ class Decoder(nn.Module):
         decoder_segment_ids,
         decoder_positions,
         deterministic,
-        self.model_mode,
+        model_mode,
     )
     if cfg.using_pipeline_parallelism:
       if cfg.pipeline_fsdp_ag_once:
         partition_spec = self.pipeline_module.get_weight_sharding(
-            y, decoder_segment_ids, decoder_positions, deterministic, self.model_mode
+            y, decoder_segment_ids, decoder_positions, deterministic, model_mode
         )
       else:
         partition_spec = None  # This partition spec is only used for the fsdp_ag_once feature.
@@ -680,6 +692,7 @@ class Decoder(nn.Module):
               "dense_layers",
               mesh,
               in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
+              model_mode=model_mode,
           )(y, *broadcast_args)
           if num_moe_layers_outside_pp > 0:
             y, _ = self.scan_decoder_layers(
@@ -689,6 +702,7 @@ class Decoder(nn.Module):
                 "moe_layers",
                 mesh,
                 in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
+                model_mode=model_mode,
             )(y, *broadcast_args)
         y = self.pipeline_module(y, *broadcast_args, partition_spec=partition_spec)
       else:  # Not DeepSeek
@@ -704,6 +718,7 @@ class Decoder(nn.Module):
                 "layers_outside_pipeline",
                 mesh,
                 in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
+                model_mode=model_mode,
             )(y, *broadcast_args)
     else:
       if cfg.scan_layers:
@@ -723,6 +738,7 @@ class Decoder(nn.Module):
               "dense_layers",
               mesh,
               in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
+              model_mode=model_mode,
           )(y, *broadcast_args)
           moe_layer = RemattedBlockLayers[1]
           moe_layer.__call__ = functools.partial(moe_layer.__call__, **layer_call_kwargs)
@@ -734,6 +750,7 @@ class Decoder(nn.Module):
               "moe_layers",
               mesh,
               in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
+              model_mode=model_mode,
           )(y, *broadcast_args)
         elif cfg.decoder_block == DecoderBlockType.GEMMA3:
           y = self._apply_gemma3_scanned_blocks(
@@ -741,6 +758,7 @@ class Decoder(nn.Module):
               decoder_segment_ids,
               decoder_positions,
               deterministic,
+              model_mode,
               bidirectional_mask,
               previous_chunk,
               page_state,
@@ -763,6 +781,7 @@ class Decoder(nn.Module):
               "layers",
               mesh,
               in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
+              model_mode=model_mode,
               **layer_kwargs,
           )(y, *broadcast_args)
       else:
@@ -778,12 +797,14 @@ class Decoder(nn.Module):
           # Iterate over the two layer groups (dense and MoE) and apply layer transformation
           for layer, num_layers, layer_prefix in zip(layers, num_layers_list, layer_prefixes):
             for index in range(num_layers):
-              y = layer(config=cfg, mesh=mesh, name=f"{layer_prefix}_{index}", quant=self.quant, model_mode=self.model_mode)(
+              y = layer(
+                  config=cfg, mesh=mesh, name=f"{layer_prefix}_{index}", quant=self.quant, model_mode=self.model_mode
+              )(
                   y,
                   decoder_segment_ids,
                   decoder_positions,
                   deterministic,
-                  self.model_mode,
+                  model_mode,
                   previous_chunk=previous_chunk,
                   page_state=page_state,
                   slot=slot,
@@ -813,7 +834,7 @@ class Decoder(nn.Module):
                 decoder_segment_ids,
                 decoder_positions,
                 deterministic,
-                self.model_mode,
+                model_mode,
                 previous_chunk=previous_chunk,
                 page_state=page_state,
                 slot=slot,
@@ -825,7 +846,13 @@ class Decoder(nn.Module):
     # After the final transformer layer, `y` holds the raw, un-normalized hidden state.
     hidden_state = y
 
-    logits = self._apply_output_head(shared_embedding, hidden_state, deterministic)
+    # When vocab tiling is enabled in training mode, full logits won't generate to reduce memory
+    # Instead, we keep track on the hidden states, which has smaller size compared to full logits
+    if cfg.num_vocab_tiling > 1 and self.model_mode == MODEL_MODE_TRAIN:
+      logits = None
+      self.sow("intermediates", "hidden_states", hidden_state)
+    else:
+      logits = self._apply_output_head(shared_embedding, hidden_state, deterministic, model_mode)
 
     # The API of the Decoder is now a tuple, providing both the main output
     # and the raw hidden state needed for auxiliary tasks.
@@ -837,6 +864,7 @@ class Decoder(nn.Module):
       decoder_segment_ids,
       decoder_positions,
       deterministic,
+      model_mode,
       bidirectional_mask,
       previous_chunk,
       page_state,
@@ -863,7 +891,7 @@ class Decoder(nn.Module):
           decoder_segment_ids,
           decoder_positions,
           deterministic,
-          self.model_mode,
+          model_mode,
       )
       y, _ = self.scan_decoder_layers(
           cfg,
@@ -872,6 +900,7 @@ class Decoder(nn.Module):
           "layers",
           mesh,
           in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
+          model_mode=self.model_mode,
           **layer_kwargs,
       )(y, *broadcast_args, **layer_call_kwargs)
 
@@ -888,7 +917,7 @@ class Decoder(nn.Module):
           decoder_segment_ids,
           decoder_positions,
           deterministic,
-          self.model_mode,
+          model_mode,
           previous_chunk=previous_chunk,
           page_state=page_state,
           slot=slot,

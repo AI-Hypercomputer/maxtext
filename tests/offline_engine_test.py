@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Tests for the offline inference engine."""
+
 import sys
 import unittest
 import os.path
@@ -71,23 +73,6 @@ class OfflineEngineTest(unittest.TestCase):
     input_data = [
         InputData(id=f"input_{i}", tokens=np.arange(length), true_length=length) for i, length in enumerate(input_lengths)
     ]
-
-    results = inference_engine.batch_inference(input_data)
-
-    completion_length = config.max_target_length - config.max_prefill_predict_length
-    for result, length in zip(results, input_lengths):
-      assert isinstance(result, CompletionOutput)
-      assert isinstance(result.token_ids, np.ndarray)
-      assert result.token_ids.shape == (length + completion_length,)
-      assert isinstance(result.logprobs, np.ndarray)
-      assert result.logprobs.shape == (length + completion_length,)
-
-  def test_mcjax_tp_batch_prefill(self):
-    config = self.cfg
-    rng = jax.random.PRNGKey(0)
-    inference_engine = OfflineEngine(config=config, params=None, enable_batch_prefill=True, rng=rng, eos_ids=[])
-    input_lengths = list(range(10, 600, 100))
-    input_data = [np.arange(length) for length in input_lengths]
 
     results = inference_engine.batch_inference(input_data)
 

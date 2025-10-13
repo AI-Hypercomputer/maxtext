@@ -26,7 +26,7 @@ from absl.testing import parameterized
 
 import numpy as np
 
-from jax.sharding import Mesh
+from jax.sharding import Mesh, NamedSharding
 import jax
 import jax.numpy as jnp
 
@@ -1047,8 +1047,16 @@ class MLATest(parameterized.TestCase):
 
   def setUp(self):
     """Initializes the configuration for each test"""
+    super().setUp()
+    config = pyconfig.initialize(
+        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        **self.config_arguments,
+    )
+    self.cfg = config
     self.rng = jax.random.PRNGKey(0)
     self.nnx_rng = nnx.Rngs(params=0, dropout=jax.random.PRNGKey(42))
+    devices_array = maxtext_utils.create_device_mesh(self.cfg)
+    self.mesh = Mesh(devices_array, self.cfg.mesh_axes)
 
   def init_mla(self, config_arguments, rope_type):
     """Helper function to initialize MLA with different model names."""
@@ -1178,6 +1186,61 @@ class MLATest(parameterized.TestCase):
       self.assertEqual(mla_full_this_idx.shape, mla_idx.shape)
       # TODO (b/394626702) uncomment last check when decode and kv_cache are implemented for MLA
       # self.assertTrue(jax.numpy.allclose(mla_full_this_idx, mla_idx, rtol=1e-02, atol=1e-02, equal_nan=False))
+
+  def test_projection_initialization(self):
+    """Tests that MLA and Attention layers initialize the correct projection weights."""
+    # 1. Initialize a standard Attention layer for comparison
+    # Create a copy of the arguments and override the attention_type for the base model
+    attention_config_args = self.config_arguments.copy()
+    attention_config_args["attention_type"] = AttentionType.GLOBAL.value
+    attention_cfg = pyconfig.initialize(
+        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        **attention_config_args,
+    )
+    dummy_inputs_q = jnp.ones(
+        (attention_cfg.global_batch_size_to_train_on, attention_cfg.max_target_length, attention_cfg.base_emb_dim)
+    )
+    dummy_inputs_kv = jnp.ones(
+        (attention_cfg.global_batch_size_to_train_on, attention_cfg.max_target_length, attention_cfg.base_emb_dim)
+    )
+
+    base_attention = Attention(
+        config=attention_cfg,
+        num_query_heads=attention_cfg.num_query_heads,
+        num_kv_heads=attention_cfg.num_kv_heads,
+        head_dim=attention_cfg.head_dim,
+        max_target_length=attention_cfg.max_target_length,
+        max_prefill_predict_length=attention_cfg.max_prefill_predict_length,
+        inputs_q_shape=dummy_inputs_q.shape,
+        inputs_kv_shape=dummy_inputs_kv.shape,
+        mesh=self.mesh,
+        attention_kernel="dot_product",
+        dtype=attention_cfg.dtype,
+        rngs=self.nnx_rng,
+    )
+
+    # 2. Assert that the base Attention layer HAS all its standard projections
+    self.assertTrue(hasattr(base_attention, "query"), "Base Attention should have 'query' projection.")
+    self.assertTrue(hasattr(base_attention, "key"), "Base Attention should have 'key' projection.")
+    self.assertTrue(hasattr(base_attention, "value"), "Base Attention should have 'value' projection.")
+    self.assertTrue(hasattr(base_attention, "out"), "Base Attention should have 'out' projection.")
+
+    # 3. Initialize the MLA layer
+    _, mla_layer = self.init_mla(self.config_arguments, rope_type="default")
+
+    # 4. Assert that the MLA layer DOES NOT HAVE the base projections
+    self.assertFalse(hasattr(mla_layer, "query"), "MLA should not have 'query' projection.")
+    self.assertFalse(hasattr(mla_layer, "key"), "MLA should not have 'key' projection.")
+    self.assertFalse(hasattr(mla_layer, "value"), "MLA should not have 'value' projection.")
+
+    # 5. Assert that the MLA layer HAS all of its own specific projections AND the common 'out' projection
+    self.assertTrue(hasattr(mla_layer, "wq_a"), "MLA should have 'wq_a' projection.")
+    self.assertTrue(hasattr(mla_layer, "wq_b"), "MLA should have 'wq_b' projection.")
+    self.assertTrue(hasattr(mla_layer, "wkv_a"), "MLA should have 'wkv_a' projection.")
+    self.assertTrue(hasattr(mla_layer, "wkv_b"), "MLA should have 'wkv_b' projection.")
+    self.assertTrue(hasattr(mla_layer, "q_norm"), "MLA should have 'q_norm' projection.")
+    self.assertTrue(hasattr(mla_layer, "kv_norm"), "MLA should have 'kv_norm' projection.")
+    self.assertTrue(hasattr(mla_layer, "out"), "MLA should have 'out' projection.")
 
   @parameterized.named_parameters(
       {
@@ -1324,6 +1387,19 @@ def _forward_with_context_expert_parallelism(cfg_cp, mesh_cp, attention_cp, lnx,
     decoder_positions = reordered_batch["inputs_position"]
   # apply attention with sharding
   with mesh_cp, nn_partitioning.axis_rules(cfg_cp.logical_axis_rules):
+    lnx_spec = nn_partitioning.logical_to_mesh_axes(
+        ("activation_batch_no_exp", "activation_length_no_exp", "activation_embed"), nn_partitioning.get_axis_rules()
+    )
+    pos_spec = nn_partitioning.logical_to_mesh_axes(
+        ("activation_batch_no_exp", "activation_length_no_exp"), nn_partitioning.get_axis_rules()
+    )
+    lnx_sharding = NamedSharding(mesh_cp, lnx_spec)
+    pos_sharding = NamedSharding(mesh_cp, pos_spec)
+
+    lnx = jax.device_put(lnx, lnx_sharding)
+    decoder_segment_ids = jax.device_put(decoder_segment_ids, pos_sharding)
+    decoder_positions = jax.device_put(decoder_positions, pos_sharding)
+
     attention_cp_output = attention_cp(
         lnx,
         lnx,

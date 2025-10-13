@@ -68,7 +68,11 @@ def add_segmentation_and_position(x, data_columns, padding_token=0):
 
 def reformat_prompt(example, column, image_placeholder, model_name):
   """reformat prompt for multimodal SFT"""
-  example[column] = multimodal_utils.reformat_prompt(example[column], image_placeholder, model_name)
+  if isinstance(example["images"], list):
+    num_images = len(example["images"])
+  else:
+    num_images = 1
+  example[column] = multimodal_utils.reformat_prompt(example[column], image_placeholder, model_name, num_images)
   return example
 
 
@@ -80,11 +84,19 @@ def reformat_response(example, column, model_name):
 
 def pre_process_image_sft(example, image_column, model_name):
   """pre-process image for multimodal SFT"""
-  image = multimodal_utils.convert_to_RGB(example[image_column])
-  # TODO(aireenmei, hengtaoguo): add support for different image sizes
-  image = multimodal_utils.resize_image(image, model_name)
-  image = np.array(image)
-  example[image_column] = multimodal_utils.pre_process_image(image, model_name)
+
+  def _process_image_fn(image):
+    image = multimodal_utils.convert_to_RGB(image)
+    # TODO(aireenmei, hengtaoguo): add support for different image sizes
+    image = multimodal_utils.resize_image(image, model_name)
+    image = np.array(image)
+    image = multimodal_utils.pre_process_image(image, model_name)
+    return image
+
+  if isinstance(example[image_column], list):
+    example[image_column] = [_process_image_fn(img) for img in example[image_column]]
+  else:
+    example[image_column] = _process_image_fn(example[image_column])
   return example
 
 
@@ -93,7 +105,12 @@ def prepare_text_for_image_fusion(example, column_name, model_name):
   example[column_name] = multimodal_utils.prepare_text_for_image_fusion(
       example[column_name], model_name, processor_output=example["images"]
   )
-  example["images"] = example["images"].pixel_values
+  if isinstance(example["images"], list):
+    example["image_masks"] = [image.pixel_mask for image in example["images"]]
+    example["images"] = [image.pixel_values for image in example["images"]]
+  else:
+    example["image_masks"] = example["images"].pixel_mask
+    example["images"] = example["images"].pixel_values
   return example
 
 
@@ -240,6 +257,7 @@ class SFTPromptMaskingVision(grain.MapTransform):
         "inputs": np.asarray(inputs[: self.max_target_length], dtype=np.int32),
         "targets": np.asarray(targets[: self.max_target_length], dtype=np.int32),
         "images": element["images"],
+        "image_masks": element["image_masks"],
     }
 
 
@@ -266,7 +284,6 @@ class HFDataSource(grain.RandomAccessDataSource):
       dataloading_host_index: int,
       dataloading_host_count: int,
       num_threads: int,
-      generate_padding_example: bool,
       max_target_length: int,
       data_column_names: list[str],
   ):
@@ -274,7 +291,6 @@ class HFDataSource(grain.RandomAccessDataSource):
     self.num_threads = num_threads
     self.dataloading_host_count = dataloading_host_count
     self.dataloading_host_index = dataloading_host_index
-    self.generate_padding_example = generate_padding_example
     self.max_target_lenth = max_target_length
     self.data_column_names = data_column_names
     if hasattr(dataset, "n_shards"):
@@ -285,7 +301,6 @@ class HFDataSource(grain.RandomAccessDataSource):
     self.dataset_shards = [dataloading_host_index * self.num_threads + i for i in range(self.num_threads)]
     self.datasets = [split_dataset_by_node(dataset, world_size=self.n_shards, rank=x) for x in self.dataset_shards]
     self.data_iters = []
-    self.out_of_data = False
 
   def _check_shard_count(self):
     if self.n_shards < (self.dataloading_host_count * self.num_threads):
@@ -308,12 +323,7 @@ class HFDataSource(grain.RandomAccessDataSource):
       self.datasets[idx] = split_dataset_by_node(self.dataset, world_size=self.n_shards, rank=self.dataset_shards[idx])
       self.data_iters[idx] = iter(self.datasets[idx])
     else:
-      max_logging.log(f"Run out of shards on host {self.dataloading_host_index}, shard {new_shard} is not available")
-      self.out_of_data = True
-      if self.generate_padding_example:
-        max_logging.log(
-            f"Host {self.dataloading_host_index} will start generating all-0 padding examples until step number is met."
-        )
+      raise StopIteration(f"Run out of shards on host {self.dataloading_host_index}, shard {new_shard} is not available")
 
   def __len__(self):
     """Return length of the HF dataset. Since HuggingFace IterableDataset does not have length,
@@ -329,20 +339,10 @@ class HFDataSource(grain.RandomAccessDataSource):
 
     while True:
       try:
-        if self.out_of_data:
-          if self.generate_padding_example:
-            return {
-                column_name: np.zeros(self.max_target_lenth, dtype=np.int32) for column_name in self.data_column_names
-            }
-          else:
-            raise StopIteration("Running out of data")
         data = next(self.data_iters[idx])
         return data
-      except StopIteration as e:
-        if not self.out_of_data:
-          self._update_shard(idx)
-        else:
-          raise e
+      except StopIteration:
+        self._update_shard(idx)
 
 
 ########## Functions used by Grain pipeline
@@ -422,58 +422,125 @@ class ReformatPacking(grain.MapTransform):
 
 @dataclasses.dataclass
 class PadOrTrimToMaxLength(grain.MapTransform):
-  """Pads/Trims each input to the specified length
-  and returns true_length of input
-  """
+  """Pads or trims each input to the specified length.
+  And optionally add true length for the input."""
 
-  def __init__(self, max_length):
-    self.max_length = max_length
-
-  def map(self, element: dict[str, np.ndarray]):
-    """map to each element"""
-
-    def _pad(x, max_length):
-      pad_amount = max(max_length - x.shape[0], 0)
-      pad_amount = [(0, pad_amount)] + [(0, 0)] * (len(x.shape) - 1)
-      return np.pad(x, pad_amount)[:max_length]
-
-    data_columns = list(element.keys())
-    for data_column in data_columns:
-      element[f"{data_column}_segmentation"] = (element[data_column] != 0).astype(np.int32)
-      element[f"{data_column}_position"] = np.arange(element[data_column].shape[0], dtype=np.int32)
-      element[f"{data_column}_true_length"] = np.array([element[data_column].shape[0]], dtype=np.int32)
-    for key, _ in element.items():
-      if "true_length" not in key:
-        element[key] = _pad(element[key], self.max_length)
-    # for data_column in data_columns:
-    #   data[f"{data_column}_true_length"] = _max_true_length(data[data_column], 0)
-    return element
-
-
-@dataclasses.dataclass
-class PadToMaxLength(grain.MapTransform):
-  """Pads each input to the specified length"""
-
-  def __init__(self, max_length, pad_id):
+  def __init__(self, max_length, pad_id=0, model_name=None, add_true_length=False, max_num_images_per_example=-1):
     self.max_length = max_length
     self.pad_id = pad_id
+    self.model_name = model_name
+    self.add_true_length = add_true_length
+    self.max_num_images_per_example = max_num_images_per_example
+
+  def _pad_text(self, x, max_length, pad_id):
+    pad_amount = max(max_length - x.shape[0], 0)
+    pad_amount = [(0, pad_amount)] + [(0, 0)] * (len(x.shape) - 1)
+    return np.pad(x, pad_amount, constant_values=pad_id)[: self.max_length]
+
+  def _pad_image_or_mask(self, tensor: np.ndarray) -> np.ndarray:
+    """Pads an input tensor (image or mask) to a maximum number of items.
+
+    This function unifies padding logic for image tensors (standard or tiled) and
+    mask tensors. It determines the tensor type based on its dimensions and applies
+    the appropriate padding along the first axis.
+
+    The maximum number of items is calculated based on model constraints or a
+    user-defined limit, ensuring that sequence length limits are respected while
+    reserving space for at least one text token. If the input tensor has fewer
+    items than this maximum, it is padded with zeros.
+
+    Args:
+        tensor (np.ndarray): The input numpy array to pad.
+            - For masks, the expected shape is (num_masks, num_tiles).
+            - For standard images, the shape is (num_images, H, W, C).
+            - For tiled images, the shape is (num_images, num_tiles, H, W, C).
+
+    Returns:
+        np.ndarray: The tensor, padded with zeros up to the maximum number of
+        items along the first axis.
+
+    Raises:
+        ValueError: If the input tensor's dimension is not 2, 4, or 5.
+        ValueError: If the number of items in the input tensor exceeds the
+        allowed maximum.
+
+    Notes:
+      - The computation of maximum images ensures that space is reserved in the sequence
+        for at least one text token.
+      - The dummy images used for padding are based on the image shape for initialization
+        of this model (ignoring batch size).
+    """
+    if not isinstance(tensor, np.ndarray):
+      raise TypeError(f"Input must be a numpy array, but got {type(tensor)}")
+
+    # Determine the maximum number of images/masks allowed.
+    image_offsets = multimodal_utils.get_image_offsets(self.model_name, None)
+    # Reserve space for at least one text token.
+    max_num_items = (self.max_length // image_offsets) - 1
+    if self.max_num_images_per_example > 0:
+      max_num_items = min(self.max_num_images_per_example, max_num_items)
+
+    # Validate tensor dimensions.
+    if tensor.ndim in (4, 5):  # Standard or Tiled Image
+      tensor_type = "images"
+    elif tensor.ndim == 2:  # Mask
+      tensor_type = "masks"
+    else:
+      raise ValueError(
+          "Input tensor must be 2D (mask), 4D (image), or 5D (tiled image), " f"but got {tensor.ndim} dimensions."
+      )
+
+    # Assert that the input tensor does not exceed the maximum size.
+    if tensor.shape[0] > max_num_items:
+      raise ValueError(f"Number of {tensor_type} ({tensor.shape[0]}) exceeds the maximum allowed ({max_num_items}).")
+
+    # Apply padding if the tensor is smaller than the maximum size.
+    if tensor.shape[0] < max_num_items:
+      pad_size = max_num_items - tensor.shape[0]
+      pad_shape_suffix = tensor.shape[1:]
+      pad_shape = (pad_size,) + pad_shape_suffix
+      pad_tensor = np.zeros(pad_shape, dtype=tensor.dtype)
+
+      if tensor.size > 0:
+        tensor = np.concatenate([tensor, pad_tensor], axis=0)
+      else:
+        # If the input tensor is empty, the result is just the padding.
+        tensor = pad_tensor
+
+    return tensor
 
   def map(self, element: dict[str, np.ndarray]):
     """map to each element"""
-
-    def _pad(x, max_length, pad_id):
-      pad_amount = max(max_length - x.shape[0], 0)
-      pad_amount = [(0, pad_amount)] + [(0, 0)] * (len(x.shape) - 1)
-      return np.pad(x, pad_amount, constant_values=pad_id)
-
     data_columns = list(element.keys())
     for data_column in data_columns:
       if data_column != "images":
         element[f"{data_column}_segmentation"] = (element[data_column] != self.pad_id).astype(np.int32)
         element[f"{data_column}_position"] = np.arange(element[data_column].shape[0], dtype=np.int32)
+        if self.add_true_length:
+          element[f"{data_column}_true_length"] = np.array([element[data_column].shape[0]], dtype=np.int32)
+
     for key, _ in element.items():
-      if key != "images":
-        element[key] = _pad(element[key], self.max_length, self.pad_id)
+      if key == "images":
+        if isinstance(element["images"], list) and self.model_name is None:
+          raise ValueError("model_name must be provided when padding images")
+        elif isinstance(element["images"], list):
+          element["images"] = self._pad_image_or_mask(np.asarray(element["images"]))
+        elif element["images"].ndim == 3:
+          element["images"] = np.asarray(element["images"])[None, ...]
+        else:
+          # Do not add extra image dimension for image tiling case
+          element["images"] = np.asarray(element["images"])
+
+      elif key == "image_masks" and element["image_masks"] is not None:
+        if isinstance(element["image_masks"], list) and self.model_name is None:
+          raise ValueError("model_name must be provided when padding image masks")
+        elif isinstance(element["image_masks"], list):
+          element["image_masks"] = self._pad_image_or_mask(np.asarray(element["image_masks"]))
+        else:
+          element["image_masks"] = np.asarray(element["image_masks"])
+
+      elif "true_length" not in key:
+        element[key] = self._pad_text(element[key], self.max_length, self.pad_id)
     return element
 
 

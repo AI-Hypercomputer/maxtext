@@ -55,7 +55,6 @@ Choose the scenario that matches your workflow and follow the corresponding inst
 ### Run SFT on Hugging Face checkpoint
 * The script will first convert a Hugging Face checkpoint to a MaxText checkpoint.
 * It then runs SFT on this converted checkpoint.
-* After fine-tuning, the script converts the resulting checkpoint back to the Hugging Face format.
 
 #### Setup environment variables
 ```
@@ -75,7 +74,6 @@ bash ~/maxtext/end_to_end/tpu/llama3.1/8b/run_sft.sh
 
 ### Run SFT on MaxText checkpoint
 * The script directly runs SFT on MaxText checkpoint.
-* After fine-tuning, the script converts the resulting checkpoint back to the Hugging Face format.
 
 #### Setup environment variables
 ```
