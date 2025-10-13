@@ -995,8 +995,8 @@ class AttentionOp(nnx.Module):
     single_head_mask = mask # tokamax now just uses a single mask and assumes broadcast to all heads?
     #multi_head_mask = splash_attention_mask.MultiHeadMask(masks=(mask,) * query.shape[1])
     # tokamax now just uses a single mask and assumes broadcast to all heads
-    max_logit_value, max_val = None, None
-    if self.config.use_max_logit_estimate > 0:
+    max_logit_value, max_val = None, self.config.use_max_logit_estimate
+    if max_val > 0:
       use_max_logit_estimate = "const"
       if use_max_logit_estimate == "const":
         sa_config = dataclasses.replace(sa_config, max_logit_const=max_val)
@@ -1004,7 +1004,6 @@ class AttentionOp(nnx.Module):
         max_logit_value = max_val * jnp.ones((1,), dtype=jnp.bfloat16)
       elif use_max_logit_estimate == "value_2d":
         max_logit_value = max_val * jnp.ones((self.config.num_q_heads,), dtype=jnp.bfloat16)
-      
     # Create the splash attention kernel object separately, jit it for performance
     @partial(
         jax.jit,
@@ -1091,7 +1090,10 @@ class AttentionOp(nnx.Module):
       if version.parse(jax.__version__) < version.parse("0.7.2.dev20250824"):
         attention_output = jax.vmap(splash_kernel)(query, key, value, decoder_segment_ids_tuple)
       else:
-        attention_output = jax.vmap(partial(splash_kernel, max_logit_value=max_logit_value))(query, key, value, decoder_segment_ids_tuple)
+        if max_logit_value is not None:
+          attention_output = jax.vmap(partial(splash_kernel, max_logit_value=max_logit_value))(query, key, value, decoder_segment_ids_tuple)
+        else:
+          attention_output = jax.vmap(splash_kernel)(query, key, value, decoder_segment_ids_tuple)
       return attention_output
 
     x = wrap_flash_attention(
