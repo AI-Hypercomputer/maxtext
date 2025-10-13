@@ -57,6 +57,7 @@ def vision_sft_preprocessing_pipeline(
         },
         remove_columns=image_column,  # Drop the original image columns
     )
+    image_column = "images"
 
   dataset = dataset.select_columns(text_columns + [image_column])
   if image_column != "images":
