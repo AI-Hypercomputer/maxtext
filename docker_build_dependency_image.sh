@@ -64,6 +64,7 @@ if [[ -z ${JAX_VERSION+x} ]] ; then
   echo "Default JAX_VERSION=${JAX_VERSION}"
 fi
 
+export INSTALL_JAX_NIGHTLY=0
 if [[ -z ${MODE} ]]; then
   export MODE=stable
   echo "Default MODE=${MODE}"
@@ -77,6 +78,12 @@ elif [[ ${MODE} == "grpo" ]] ; then
   export MODE=stable
   export INSTALL_GRPO=1
   export CUSTOM_JAX=0
+  export INSTALL_JAX_NIGHTLY=0
+elif [[ ${MODE} == "grpo_nightly" ]] ; then
+  export MODE=stable
+  export INSTALL_GRPO=1
+  export CUSTOM_JAX=0
+  export INSTALL_JAX_NIGHTLY=1
 else
   export CUSTOM_JAX=0
   export INSTALL_GRPO=0
@@ -153,9 +160,11 @@ if [[ ${INSTALL_GRPO} -eq 1 ]] ; then
   # The cleanup is set to run even if the build fails to remove the copied directory.
   trap "rm -rf ./tpu_commons ./vllm ./tunix" EXIT INT TERM
 
+  echo "Debug: Calling docker build with INSTALL_JAX_NIGHTLY=${INSTALL_JAX_NIGHTLY}"
   docker build \
     --network host \
     --build-arg BASEIMAGE=${LOCAL_IMAGE_NAME} \
+    --build-arg INSTALL_JAX_NIGHTLY=${INSTALL_JAX_NIGHTLY} \
     -f ./maxtext_grpo_dependencies.Dockerfile \
     -t ${LOCAL_IMAGE_NAME} .
 fi
