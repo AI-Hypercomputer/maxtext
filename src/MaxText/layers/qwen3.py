@@ -46,100 +46,6 @@ from MaxText.layers.moe import RoutedMoE
 # Qwen3-Next Layer Implementations
 # -----------------------------------------
 
-
-class Qwen3NextRMSNorm(nnx.Module):
-  """
-  Used for input and post attention layernorms
-  in Qwen3NextDecoderLayer.
-
-  This normalization layer is specific to Qwen3-Next. Key characteristics:
-  1.  The learnable scale parameter `weight` is initialized to ZEROS.
-  2.  The scale is applied as `(1.0 + self.weight)`, making the initial scale effectively 1.0.
-      This matches the PyTorch implementation of Qwen3NextRMSNorm.
-  3.  It is NOT a zero-centered normalization (as in the blog); it still uses the root mean square of the inputs.
-      The standard `MaxText.layers.normalizations.RMSNorm` also does not center the data.
-  4.  This differs from the standard MaxText `RMSNorm`
-      (MaxText.layers.normalizations.RMSNorm) which initializes its scale to ONES
-      and applies it multiplicatively (`y * scale`).
-  """
-
-  def __init__(self, num_features: int, eps: float, dtype: DType, weight_dtype: DType, *, rngs: nnx.Rngs):
-    self.num_features = num_features
-    self.eps = eps
-    self.dtype = dtype
-    self.weight_dtype = weight_dtype
-
-    self.weight = nnx.Param(linen_initializers.zeros(rngs.params(), (self.num_features,), self.weight_dtype))
-
-  def __call__(self, x: Array) -> Array:
-    """Applies RMSNorm to the input tensor."""
-    weight = self.weight.value
-    x_dtype = x.dtype
-    x = x.astype(jnp.float32)
-    variance = jnp.mean(jnp.square(x), axis=-1, keepdims=True)
-    x = x * jax.lax.rsqrt(variance + self.eps)
-    # Add 1.0 to the learnable weight
-    x = x * (1.0 + weight.astype(jnp.float32))
-    return x.astype(x_dtype)
-
-# Linen-compatible wrapper
-Qwen3NextRMSNormLinen = nnx_wrappers.to_linen_class(
-    Qwen3NextRMSNorm,
-    base_metadata_fn=max_initializers.variable_to_logically_partitioned,
-)
-
-class Qwen3NextRMSNormGated(nnx.Module):
-  """
-  This applies RMS Normalization and then a gated activation function (SiLU).
-  This is used within the Qwen3NextGatedDeltaNet.
-
-  Attributes:
-    num_features: The number of features in the input.
-    eps: A small epsilon value to prevent division by zero in RMSNorm.
-    dtype: The datatype of the computation.
-    weight_dtype: The datatype of the weights.
-  """
-
-  def __init__(self, num_features: int, eps: float, dtype: DType, weight_dtype: DType, *, rngs: nnx.Rngs):
-    self.num_features = num_features
-    self.eps = eps
-    self.dtype = dtype
-    self.weight_dtype = weight_dtype
-
-    self.weight = nnx.Param(nnx.initializers.ones(rngs.params(), (self.num_features,), self.weight_dtype))
-
-  def __call__(self, hidden_states: Array, gate: Array) -> Array:
-    """
-    Applies RMSNorm and then a SiLU gate.
-
-    Args:
-      hidden_states: The input array to be normalized (o). Shape: (..., F)
-      gate: The gating array for the activation (z). Shape: (..., F)
-            where F is num_features.
-
-    Returns:
-      The normalized and gated output array. Shape: (..., F)
-    """
-    weight = self.weight.value
-
-    # RMS Normalization logic
-    hidden_states_f32 = hidden_states.astype(jnp.float32)
-    variance = jnp.mean(jnp.square(hidden_states_f32), axis=-1, keepdims=True)
-    normalized_states = hidden_states_f32 * jax.lax.rsqrt(variance + self.eps)
-    normalized_states = normalized_states * weight.astype(jnp.float32)
-
-    # Gated Activation using SiLU (Sigmoid-weighted Linear Unit)
-    gated_states = normalized_states * nn.silu(gate.astype(jnp.float32))
-
-    return gated_states.astype(self.dtype)
-
-# Linen-compatible wrapper
-Qwen3NextRMSNormGatedLinen = nnx_wrappers.to_linen_class(
-    Qwen3NextRMSNormGated,
-    base_metadata_fn=max_initializers.variable_to_logically_partitioned,
-)
-
-
 def l2norm(x: Array, dim: int = -1, eps: float = 1e-6) -> Array:
   """L2 normalization function. Normalizes a vector to have a length of 1.
 
@@ -387,6 +293,85 @@ def jax_chunk_gated_delta_rule(
 
   return core_attn_out, final_state if output_final_state else None
 
+class Qwen3NextRMSNorm(nnx.Module):
+  """
+  Used for input and post attention layernorms
+  in Qwen3NextDecoderLayer.
+
+  This normalization layer is specific to Qwen3-Next. Key characteristics:
+  1.  The learnable scale parameter `weight` is initialized to ZEROS.
+  2.  The scale is applied as `(1.0 + self.weight)`, making the initial scale effectively 1.0.
+      This matches the PyTorch implementation of Qwen3NextRMSNorm.
+  3.  It is NOT a zero-centered normalization (as in the blog); it still uses the root mean square of the inputs.
+      The standard `MaxText.layers.normalizations.RMSNorm` also does not center the data.
+  4.  This differs from the standard MaxText `RMSNorm`
+      (MaxText.layers.normalizations.RMSNorm) which initializes its scale to ONES
+      and applies it multiplicatively (`y * scale`).
+  """
+
+  def __init__(self, num_features: int, eps: float, dtype: DType, weight_dtype: DType, *, rngs: nnx.Rngs):
+    self.num_features = num_features
+    self.eps = eps
+    self.dtype = dtype
+    self.weight_dtype = weight_dtype
+
+    self.weight = nnx.Param(linen_initializers.zeros(rngs.params(), (self.num_features,), self.weight_dtype))
+
+  def __call__(self, x: Array) -> Array:
+    """Applies RMSNorm to the input tensor."""
+    weight = self.weight.value
+    x_dtype = x.dtype
+    x = x.astype(jnp.float32)
+    variance = jnp.mean(jnp.square(x), axis=-1, keepdims=True)
+    x = x * jax.lax.rsqrt(variance + self.eps)
+    # Add 1.0 to the learnable weight
+    x = x * (1.0 + weight.astype(jnp.float32))
+    return x.astype(x_dtype)
+
+class Qwen3NextRMSNormGated(nnx.Module):
+  """
+  This applies RMS Normalization and then a gated activation function (SiLU).
+  This is used within the Qwen3NextGatedDeltaNet.
+
+  Attributes:
+    num_features: The number of features in the input.
+    eps: A small epsilon value to prevent division by zero in RMSNorm.
+    dtype: The datatype of the computation.
+    weight_dtype: The datatype of the weights.
+  """
+
+  def __init__(self, num_features: int, eps: float, dtype: DType, weight_dtype: DType, *, rngs: nnx.Rngs):
+    self.num_features = num_features
+    self.eps = eps
+    self.dtype = dtype
+    self.weight_dtype = weight_dtype
+
+    self.weight = nnx.Param(nnx.initializers.ones(rngs.params(), (self.num_features,), self.weight_dtype))
+
+  def __call__(self, hidden_states: Array, gate: Array) -> Array:
+    """
+    Applies RMSNorm and then a SiLU gate.
+
+    Args:
+      hidden_states: The input array to be normalized (o). Shape: (..., F)
+      gate: The gating array for the activation (z). Shape: (..., F)
+            where F is num_features.
+
+    Returns:
+      The normalized and gated output array. Shape: (..., F)
+    """
+    weight = self.weight.value
+
+    # RMS Normalization logic
+    hidden_states_f32 = hidden_states.astype(jnp.float32)
+    variance = jnp.mean(jnp.square(hidden_states_f32), axis=-1, keepdims=True)
+    normalized_states = hidden_states_f32 * jax.lax.rsqrt(variance + self.eps)
+    normalized_states = normalized_states * weight.astype(jnp.float32)
+
+    # Gated Activation using SiLU (Sigmoid-weighted Linear Unit)
+    gated_states = normalized_states * nn.silu(gate.astype(jnp.float32))
+
+    return gated_states.astype(self.dtype)
 
 class Qwen3NextGatedDeltaNet(nnx.Module):
   """
@@ -573,13 +558,6 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
 
     return output
 
-# Linen-compatible wrapper
-Qwen3NextGatedDeltaNetLinen = nnx_wrappers.to_linen_class(
-    Qwen3NextGatedDeltaNet,
-    base_metadata_fn=max_initializers.variable_to_logically_partitioned,
-)
-
-
 class Qwen3NextFullAttention(nnx.Module):
   """Placeholder for Qwen3-Next full attention."""
 
@@ -651,12 +629,6 @@ class Qwen3NextFullAttention(nnx.Module):
         model_mode=model_mode,
     )
     return attention_output
-
-# Linen-compatible wrapper
-Qwen3NextFullAttentionLinen = nnx_wrappers.to_linen_class(
-    Qwen3NextFullAttention,
-    base_metadata_fn=max_initializers.variable_to_logically_partitioned,
-)
 
 class Qwen3NextSparseMoeBlock(nnx.Module):
   """
@@ -744,12 +716,6 @@ class Qwen3NextSparseMoeBlock(nnx.Module):
 
     return final_output, load_balance_loss
 
-# Linen-compatible wrapper
-Qwen3NextSparseMoeBlockLinen = nnx_wrappers.to_linen_class(
-    Qwen3NextSparseMoeBlock,
-    base_metadata_fn=max_initializers.variable_to_logically_partitioned,
-)
-
 class Qwen3NextScannableBlock(nnx.Module):
   """A scannable block of Qwen3-Next decoder layers.
 
@@ -828,14 +794,6 @@ class Qwen3NextScannableBlock(nnx.Module):
     # The output of the block is the carry for the next scan iteration.
     return x, None
 
-# Linen-compatible wrapper
-Qwen3NextScannableBlockLinen = nnx_wrappers.to_linen_class(
-    Qwen3NextScannableBlock,
-    base_metadata_fn=max_initializers.variable_to_logically_partitioned,
-)
-
-
-
 class Qwen3NextDecoderLayer(nnx.Module):
   """
   This layer is a hybrid, capable of functioning as either:
@@ -863,7 +821,7 @@ class Qwen3NextDecoderLayer(nnx.Module):
     cfg = self.config
 
     # First LayerNorm, applied before the attention block.
-    self.input_layernorm = Qwen3NextRMSNormLinen(
+    self.input_layernorm = Qwen3NextRMSNorm(
         num_features=cfg.emb_dim,
         eps=cfg.normalization_layer_epsilon,
         dtype=cfg.dtype,
@@ -876,14 +834,14 @@ class Qwen3NextDecoderLayer(nnx.Module):
 
     # Conditionally instantiate either the Linear Attention or Full Attention block.
     if is_full_attention_layer:
-      self.attention = Qwen3NextFullAttentionLinen(
+      self.attention = Qwen3NextFullAttention(
           config=cfg, mesh=self.mesh, quant=self.quant, model_mode=model_mode, layer_idx=self.layer_idx, rngs=rngs,
       )
     else:
-      self.attention = Qwen3NextGatedDeltaNetLinen(config=cfg, dtype=cfg.dtype, rngs=rngs)
+      self.attention = Qwen3NextGatedDeltaNet(config=cfg, dtype=cfg.dtype, rngs=rngs)
 
     # Second LayerNorm, applied before the MoE block.
-    self.post_attention_layernorm = Qwen3NextRMSNormLinen(
+    self.post_attention_layernorm = Qwen3NextRMSNorm(
         num_features=cfg.emb_dim,
         eps=cfg.normalization_layer_epsilon,
         dtype=cfg.dtype,
@@ -892,7 +850,7 @@ class Qwen3NextDecoderLayer(nnx.Module):
     )
 
     # Instantiate our `Qwen3NextSparseMoeBlock`.
-    self.mlp = Qwen3NextSparseMoeBlockLinen(config=cfg, mesh=self.mesh, quant=self.quant, rngs=rngs)
+    self.mlp = Qwen3NextSparseMoeBlock(config=cfg, mesh=self.mesh, quant=self.quant, rngs=rngs)
 
   def __call__(
       self,
@@ -912,7 +870,7 @@ class Qwen3NextDecoderLayer(nnx.Module):
     hidden_states = nn.with_logical_constraint(hidden_states, ("activation_batch", "activation_length", "activation_embed"))
 
     # Conditionally apply either the Linear Attention or Full Attention block.
-    if isinstance(self.attention, Qwen3NextFullAttentionLinen):
+    if isinstance(self.attention, Qwen3NextFullAttention):
       attention_output = self.attention(
           hidden_states,
           decoder_segment_ids,
@@ -920,7 +878,7 @@ class Qwen3NextDecoderLayer(nnx.Module):
           deterministic,
           model_mode,
       )
-    else: # Qwen3NextGatedDeltaNetLinen
+    else: # Qwen3NextGatedDeltaNet
       attention_output = self.attention(
           hidden_states, deterministic=deterministic
       )
@@ -954,13 +912,6 @@ class Qwen3NextDecoderLayer(nnx.Module):
     )
 
     return layer_output
-
-# Linen-compatible wrapper
-Qwen3NextDecoderLayerLinen = nnx_wrappers.to_linen_class(
-    Qwen3NextDecoderLayer,
-    base_metadata_fn=max_initializers.variable_to_logically_partitioned,
-)
-
 
 # -----------------------------------------
 # The Base Decoder Layer for Qwen3
@@ -1184,5 +1135,40 @@ Qwen3DecoderLayerToLinen = nnx_wrappers.to_linen_class(
 
 Qwen3MoeDecoderLayerToLinen = nnx_wrappers.to_linen_class(
     Qwen3MoeDecoderLayer,
+    base_metadata_fn=max_initializers.variable_to_logically_partitioned,
+)
+
+Qwen3NextSparseMoeBlockLinen = nnx_wrappers.to_linen_class(
+    Qwen3NextSparseMoeBlock,
+    base_metadata_fn=max_initializers.variable_to_logically_partitioned,
+)
+
+Qwen3NextFullAttentionLinen = nnx_wrappers.to_linen_class(
+    Qwen3NextFullAttention,
+    base_metadata_fn=max_initializers.variable_to_logically_partitioned,
+)
+
+Qwen3NextGatedDeltaNetLinen = nnx_wrappers.to_linen_class(
+    Qwen3NextGatedDeltaNet,
+    base_metadata_fn=max_initializers.variable_to_logically_partitioned,
+)
+
+Qwen3NextRMSNormGatedLinen = nnx_wrappers.to_linen_class(
+    Qwen3NextRMSNormGated,
+    base_metadata_fn=max_initializers.variable_to_logically_partitioned,
+)
+
+Qwen3NextRMSNormLinen = nnx_wrappers.to_linen_class(
+    Qwen3NextRMSNorm,
+    base_metadata_fn=max_initializers.variable_to_logically_partitioned,
+)
+
+Qwen3NextDecoderLayerLinen = nnx_wrappers.to_linen_class(
+    Qwen3NextDecoderLayer,
+    base_metadata_fn=max_initializers.variable_to_logically_partitioned,
+)
+
+Qwen3NextScannableBlockLinen = nnx_wrappers.to_linen_class(
+    Qwen3NextScannableBlock,
     base_metadata_fn=max_initializers.variable_to_logically_partitioned,
 )
