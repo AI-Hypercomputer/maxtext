@@ -46,6 +46,7 @@ from MaxText.layers.moe import RoutedMoE
 # Qwen3-Next Layer Implementations
 # -----------------------------------------
 
+
 def l2norm(x: Array, dim: int = -1, eps: float = 1e-6) -> Array:
   """L2 normalization function. Normalizes a vector to have a length of 1.
 
@@ -293,6 +294,7 @@ def jax_chunk_gated_delta_rule(
 
   return core_attn_out, final_state if output_final_state else None
 
+
 class Qwen3NextRMSNorm(nnx.Module):
   """
   Used for input and post attention layernorms
@@ -327,6 +329,7 @@ class Qwen3NextRMSNorm(nnx.Module):
     # Add 1.0 to the learnable weight
     x = x * (1.0 + weight.astype(jnp.float32))
     return x.astype(x_dtype)
+
 
 class Qwen3NextRMSNormGated(nnx.Module):
   """
@@ -372,6 +375,7 @@ class Qwen3NextRMSNormGated(nnx.Module):
     gated_states = normalized_states * nn.silu(gate.astype(jnp.float32))
 
     return gated_states.astype(self.dtype)
+
 
 class Qwen3NextGatedDeltaNet(nnx.Module):
   """
@@ -558,10 +562,13 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
 
     return output
 
+
 class Qwen3NextFullAttention(nnx.Module):
   """Placeholder for Qwen3-Next full attention."""
 
-  def __init__(self, config: Config, mesh: Mesh, model_mode: str, layer_idx: int, quant: None | Quant = None, *, rngs: nnx.Rngs):
+  def __init__(
+      self, config: Config, mesh: Mesh, model_mode: str, layer_idx: int, quant: None | Quant = None, *, rngs: nnx.Rngs
+  ):
     self.config = config
     self.mesh = mesh
     self.model_mode = model_mode
@@ -629,6 +636,7 @@ class Qwen3NextFullAttention(nnx.Module):
         model_mode=model_mode,
     )
     return attention_output
+
 
 class Qwen3NextSparseMoeBlock(nnx.Module):
   """
@@ -716,6 +724,7 @@ class Qwen3NextSparseMoeBlock(nnx.Module):
 
     return final_output, load_balance_loss
 
+
 class Qwen3NextScannableBlock(nnx.Module):
   """A scannable block of Qwen3-Next decoder layers.
 
@@ -741,7 +750,7 @@ class Qwen3NextScannableBlock(nnx.Module):
 
     # Instantiate each layer within the block in __init__
     for i in range(cfg.full_attention_interval):
-      layer_rngs = self.rngs.fork() # Fork RNGs for each layer
+      layer_rngs = self.rngs.fork()  # Fork RNGs for each layer
       layer_name = f"layer_{i}"
       layer = Qwen3NextDecoderLayer(
           config=self.config,
@@ -794,6 +803,7 @@ class Qwen3NextScannableBlock(nnx.Module):
     # The output of the block is the carry for the next scan iteration.
     return x, None
 
+
 class Qwen3NextDecoderLayer(nnx.Module):
   """
   This layer is a hybrid, capable of functioning as either:
@@ -812,7 +822,9 @@ class Qwen3NextDecoderLayer(nnx.Module):
     quant: Optional quantization configuration.
   """
 
-  def __init__(self, config: Config, mesh: Mesh, model_mode: str, layer_idx: int, quant: None | Quant = None, *, rngs: nnx.Rngs):
+  def __init__(
+      self, config: Config, mesh: Mesh, model_mode: str, layer_idx: int, quant: None | Quant = None, *, rngs: nnx.Rngs
+  ):
     self.config = config
     self.mesh = mesh
     self.model_mode = model_mode
@@ -835,7 +847,12 @@ class Qwen3NextDecoderLayer(nnx.Module):
     # Conditionally instantiate either the Linear Attention or Full Attention block.
     if is_full_attention_layer:
       self.attention = Qwen3NextFullAttention(
-          config=cfg, mesh=self.mesh, quant=self.quant, model_mode=model_mode, layer_idx=self.layer_idx, rngs=rngs,
+          config=cfg,
+          mesh=self.mesh,
+          quant=self.quant,
+          model_mode=model_mode,
+          layer_idx=self.layer_idx,
+          rngs=rngs,
       )
     else:
       self.attention = Qwen3NextGatedDeltaNet(config=cfg, dtype=cfg.dtype, rngs=rngs)
@@ -878,10 +895,8 @@ class Qwen3NextDecoderLayer(nnx.Module):
           deterministic,
           model_mode,
       )
-    else: # Qwen3NextGatedDeltaNet
-      attention_output = self.attention(
-          hidden_states, deterministic=deterministic
-      )
+    else:  # Qwen3NextGatedDeltaNet
+      attention_output = self.attention(hidden_states, deterministic=deterministic)
 
     # First residual connection after attention
     hidden_states = residual + attention_output
@@ -895,9 +910,7 @@ class Qwen3NextDecoderLayer(nnx.Module):
     hidden_states = nn.with_logical_constraint(hidden_states, ("activation_batch", "activation_length", "activation_embed"))
 
     # Instantiate and call our `Qwen3NextSparseMoeBlock`.
-    mlp_output, load_balance_loss = self.mlp(
-        hidden_states, deterministic=deterministic
-    )
+    mlp_output, load_balance_loss = self.mlp(hidden_states, deterministic=deterministic)
 
     # We sow the load balancing loss so it can be collected and added to the total loss
     # during training.
@@ -912,6 +925,7 @@ class Qwen3NextDecoderLayer(nnx.Module):
     )
 
     return layer_output
+
 
 # -----------------------------------------
 # The Base Decoder Layer for Qwen3
