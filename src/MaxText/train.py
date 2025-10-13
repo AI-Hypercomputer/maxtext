@@ -521,6 +521,7 @@ def transformer_engine_context():
     mesh_resource = MeshResource(
       dp_resource = "data",
       tp_resource = "tensor",
+      tpsp_resource = "tensor_sequence",
       fsdp_resource = "fsdp",
       pp_resource = None,
       cp_resource = "context",
