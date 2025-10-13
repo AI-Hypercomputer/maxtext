@@ -86,7 +86,8 @@ def get_tunix_config(mt_config):
   profiler_options = None
   if mt_config.profiler:
     set_profile_options = True
-    if jax.extend.backend.get_backend().platform_version == "Pathways":
+    platform_version = jax.extend.backend.get_backend().platform_version.strip()
+    if platform_version.startswith("Pathways"):
       max_logging.log("Pathways backend detected. Disabling setting profile options.")
       set_profile_options = False
     profiler_options = profiler.ProfilerOptions(
