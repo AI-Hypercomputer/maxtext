@@ -20,19 +20,18 @@ ENV MODE=$MODE
 
 RUN echo "Installing Post-Training dependencies (vLLM, tpu-common, tunix) with MODE=${MODE}"
 
-
 # Uninstall existing jax to avoid conflicts
-RUN uv pip uninstall -y jax jaxlib libtpu
+RUN pip uninstall -y jax jaxlib libtpu
 
-RUN uv pip install aiohttp==3.12.15
+RUN pip install aiohttp==3.12.15
 
-RUN uv pip install numba==0.61.2
+RUN pip install numba==0.61.2
 
 # Install vLLM for Jax and TPUs
-RUN uv pip install vllm-tpu
+RUN pip install vllm-tpu
 
 RUN if [ "$MODE" = "post-training-experimental" ]; then \
-    uv pip uninstall -y jax jaxlib libtpu && \
-    uv pip install --pre -U jax jaxlib -i https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/ && \
-    uv pip install -U --pre libtpu -f https://storage.googleapis.com/jax-releases/libtpu_releases.html; \
+    pip uninstall -y jax jaxlib libtpu && \
+    pip install --pre -U jax jaxlib -i https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/ && \
+    pip install -U --pre libtpu -f https://storage.googleapis.com/jax-releases/libtpu_releases.html; \
     fi

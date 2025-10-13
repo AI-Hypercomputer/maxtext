@@ -150,7 +150,7 @@ if [[ -z ${LIBTPU_GCS_PATH+x} ]] ; then
                    -f "$MAXTEXT_REPO_ROOT"'/dependencies/dockerfiles/maxtext_db_dependencies.Dockerfile' \
                    -t ${LOCAL_IMAGE_NAME} .
     elif [[ ${INSTALL_POST_TRAINING} -eq 1 && ${DEVICE} == "tpu" ]]; then
-      echo "Installing MaxText stable mode dependencies for GRPO"
+      echo "Installing MaxText stable mode dependencies for post-training"
       docker build --network host --build-arg MODE=stable --build-arg JAX_VERSION=$JAX_VERSION \
                    --build-arg LIBTPU_GCS_PATH=$LIBTPU_GCS_PATH --build-arg DEVICE=$DEVICE \
                    -f "$MAXTEXT_REPO_ROOT"'/dependencies/dockerfiles/maxtext_dependencies.Dockerfile' \
