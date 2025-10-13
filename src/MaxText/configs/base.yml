@@ -488,6 +488,7 @@ tokenizer_path: "src/MaxText/assets/tokenizer.llama2"
 # hf pipeline only supports huggingface type, and will ignore tokenizer_type flag
 tokenizer_type: "sentencepiece" # Currently supporting: "tiktoken", "sentencepiece", "huggingface"
 use_chat_template: False
+chat_template_path: "" # path to chat template json file
 tokenize_train_data: True  # False if the dataset is pre-tokenized
 tokenize_eval_data: True  # False if the dataset is pre-tokenized
 add_bos: True
