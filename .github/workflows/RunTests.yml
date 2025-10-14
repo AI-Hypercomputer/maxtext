@@ -34,6 +34,9 @@ concurrency:
     }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   prelim:
     runs-on: ["self-hosted"]
@@ -102,6 +105,53 @@ jobs:
       tf_force_gpu_allow_growth: false
       container_resource_option: "--privileged"
       is_scheduled_run: ${{ github.event_name == 'schedule' }}
+
+  tpu_e2e_grpo_test:
+    needs: tpu_image
+    runs-on: linux-x86-ct4p-240-4tpu
+    container:
+      image: gcr.io/tpu-prod-env-multipod/maxtext_${{ github.run_id }}:tpu
+      env:
+        XLA_PYTHON_CLIENT_MEM_FRACTION: 0.75
+        TF_FORCE_GPU_ALLOW_GROWTH: false
+        HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        MAXTEXT_CHECKPOINT_PATH: gs://maxtext-model-checkpoints/llama3.1-8b/2025-01-23-19-04/scanned/0/items
+      options: "--privileged"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Tunix vLLM Requirements
+        run: |
+          bash src/MaxText/examples/install_tunix_vllm_requirement.sh
+      - name: Run GRPO Llama3.1 8B Demo
+        run: |
+          python3 -m pip install -e . --no-dependencies &&
+          python3 src/MaxText/examples/grpo_llama3_1_8b_demo.py
+
+  tpu_e2e_sft_test:
+    needs: tpu_image
+    runs-on: linux-x86-ct4p-240-4tpu
+    container:
+      image: gcr.io/tpu-prod-env-multipod/maxtext_${{ github.run_id }}:tpu
+      env:
+        XLA_PYTHON_CLIENT_MEM_FRACTION: 0.75
+        TF_FORCE_GPU_ALLOW_GROWTH: false
+        HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        MODEL_CHECKPOINT_PATH: gs://maxtext-model-checkpoints/llama3.1-8b/2025-01-23-19-04/scanned/0/items
+        STEPS: 10
+      options: "--privileged"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Dependencies
+        run: |
+          python3 -m pip install -e . --no-dependencies
+      - name: Install Tunix vLLM Requirements
+        run: |
+          bash src/MaxText/examples/install_tunix_vllm_requirement.sh
+      - name: Run SFT Llama3.1 8B Demo
+        run: |
+          python3 src/MaxText/examples/sft_llama3_demo.py \
+            --skip_checkpoint_download \
+            --model_checkpoint_path=${MODEL_CHECKPOINT_PATH}
 
   gpu_unit_tests:
     needs: gpu_image
