@@ -134,6 +134,6 @@ python -m MaxText.sft_trainer MaxText/configs/sft-vision-chartqa.yml \
 ## Other Recommendations
 - **Setting appropriate prefill length**: To prevent truncation and ensure your full input (text + image) is processed, the prefill length should be set longer than the total combined length of your text tokens and image tokens. This combined length makes up the final sequence fed to the decoder. We recommend to estimate the combined sequence length from your full input and then add a buffer when setting your `max_prefill_predict_length` for decoding. Token estimation rules:
     - For text tokens, a good estimate is $\text{Text Tokens} \approx 1.3 \times \text{Number of Words in Prompt}$.
-    - For Gemma3, each image is resized to 896*896 and contributes 144 tokens. $\text{Total Tokens} \approx \text{Text Tokens} + \text{Number of Images} * 144$.
-    - For Llama4 models, each image is dynamically tiled based on its size, with each resulting tile contributing 256 tokens. $\text{Total Tokens} \approx \text{Text Tokens} + \text{Number of Tiles of Image 1} * 256 + ... + \text{Number of Tiles of Image N} * 256$.
+    - For Gemma3, each image is resized to 896*896 and contributes 256 tokens. $\text{Total Tokens} \approx \text{Text Tokens} + \text{Number of Images} * 256$.
+    - For Llama4 models, each image is dynamically tiled based on its size, with each resulting tile contributing 144 tokens. $\text{Total Tokens} \approx \text{Text Tokens} + \text{Number of Tiles of Image1} * 144 + ... + \text{Number of Tiles of ImageN} * 144$.
 
