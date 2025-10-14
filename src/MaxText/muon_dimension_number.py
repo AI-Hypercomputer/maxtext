@@ -3,6 +3,14 @@ from MaxText.muon import MuonDimensionNumbers as mdn
 import jax
 import jax.numpy as jnp
 
+from MaxText import pyconfig, maxtext_utils
+from MaxText.globals import MAXTEXT_PKG_DIR
+from MaxText.layers import models, quantizations
+import os
+
+Transformer = models.transformer_as_linen
+
+
 # deepseek2-16b, scanned, q_lora_rank=0
 # NOTE: not compatible with deepseek2-236b (q_lora_rank: 1536)
 DEEPSEEK2_DIMENSION_NUMBER = {
@@ -162,12 +170,6 @@ def test1():
 
 
 def test2():
-  from MaxText import pyconfig, maxtext_utils
-  from MaxText.globals import MAXTEXT_PKG_DIR
-  from MaxText.layers import models, quantizations
-  import os
-
-  Transformer = models.transformer_as_linen
 
   def _test2(model_name):
     # init model
