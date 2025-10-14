@@ -41,7 +41,8 @@ profiler=xplane skip_first_n_steps_for_profiler=10 profiler_steps=5"
 TRAINING_ARGS="run_name=${RUN_NAME} scan_layers=true \
 inference_replicas=${NUM_SAMPLERS} inference_devices_per_replica=${DEVICES_PER_SAMPLER} \
 inference_rollouts=5 \
-per_device_batch_size=${TRAINING_PER_DEVICE_BATCH_SIZE} num_generations=${NUM_GENERATIONS} steps=${STEPS}"
+per_device_batch_size=${TRAINING_PER_DEVICE_BATCH_SIZE} num_generations=${NUM_GENERATIONS} steps=${STEPS} \
+block_for_accurate_timing=true"
 
 INFERENCE_ARGS="run_name=grpo scan_layers=false \
 per_device_batch_size=${INFERENCE_PER_DEVICE_BATCH_SIZE} \

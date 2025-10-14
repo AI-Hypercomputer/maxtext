@@ -609,6 +609,8 @@ def generate_completions(
     worker_input_data_shardings: Sharding specifications for the data.
     engine_lock: A lock to ensure thread-safe use of the inference engine.
   """
+  t1_rollout_generation_starts = datetime.datetime.now()
+  max_logging.log(f"t1_rollout_generation_starts: {t1_rollout_generation_starts}")
   with engine_lock:
     thread_example_batch = worker_data_loader.load_next_batch()
     # Trim data for inference processing
@@ -811,6 +813,8 @@ def train_loop(config, config_inference, recorder, state=None):
               if example_batch[config.train_data_columns].shape[0] >= required_batch_size:
                 example_batch = jax.tree_util.tree_map(lambda arr: arr[:required_batch_size], data_buffer[0])
                 data_buffer[0] = jax.tree_util.tree_map(lambda arr: arr[required_batch_size:], data_buffer[0])
+                t2_transfer_rollout_responses_starts = datetime.datetime.now()
+                max_logging.log(f"step={step}, t2_transfer_rollout_responses_starts: {t2_transfer_rollout_responses_starts}")
                 break
               else:
                 time.sleep(0.1)
@@ -820,10 +824,20 @@ def train_loop(config, config_inference, recorder, state=None):
               continue
         train_rng, rng = random.split(init_rng)
         example_batch = jax.device_put(example_batch, data_sharding)
+        if config.block_for_accurate_timing:
+          jax.block_until_ready(example_batch)
         with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+          t3_training_step_starts = datetime.datetime.now()
+          max_logging.log(f"step={step}, t3_training_step_starts: {t3_training_step_starts}")
           state, metrics = p_train_step(state, example_batch, train_rng)
+          if config.block_for_accurate_timing:
+            jax.block_until_ready((state, metrics))
+          t4_training_step_finishes = datetime.datetime.now()
+          max_logging.log(f"step={step}, t4_training_step_finishes: {t4_training_step_finishes}")
       with jax.profiler.StepTraceAnnotation("transfer data", step_num=step):
         if step != 0 and step % config.inference_rollouts == 0:
+          t4_weight_transfer_starts = datetime.datetime.now()
+          max_logging.log(f"step={step}, t4_weight_transfer_starts: {t4_weight_transfer_starts}")
           grpo_utils.pathways_reshard(
               config_inference,
               inference_engine,
@@ -832,6 +846,10 @@ def train_loop(config, config_inference, recorder, state=None):
               mesh,
               inference_state_mesh_shardings,
           )
+          if config.block_for_accurate_timing:
+            jax.block_until_ready(inference_engine.params)
+          t6_weight_transfer_finishes = datetime.datetime.now()
+          max_logging.log(f"step={step}, t6_weight_transfer_finishes: {t6_weight_transfer_finishes}")
 
       step_time_delta = datetime.datetime.now() - last_step_completion
       last_step_completion = datetime.datetime.now()
@@ -895,6 +913,8 @@ def main(argv: Sequence[str]) -> None:
   training and inference, sets up system environment variables, and launches
   the `train_loop`.
   """
+  t0_workload_launch = datetime.datetime.now()
+  max_logging.log(f"t0_workload_launch: {t0_workload_launch}")
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
   # TF allocates extraneous GPU memory when using TFDS data
   # this leads to CUDA OOMs. WAR for now is to hide GPUs from TF
