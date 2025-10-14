@@ -107,15 +107,21 @@ if not os.path.exists(MODEL_CHECKPOINT_PATH):
   print(f"Converting checkpoint from HuggingFace to MaxText format at {MODEL_CHECKPOINT_PATH}")
   os.makedirs(MODEL_CHECKPOINT_PATH, exist_ok=True)
   import subprocess
-  result = subprocess.run([
-      "python3", "-m", "MaxText.utils.ckpt_conversion.to_maxtext",
-      os.path.join(MAXTEXT_ROOT, "src/MaxText/configs/base.yml"),
-      f"model_name={MODEL_NAME}",
-      f"base_output_directory={MODEL_CHECKPOINT_PATH}",
-      f"hf_access_token={os.environ.get('HF_TOKEN', '')}",
-      "use_multimodal=false",
-      "scan_layers=false"
-  ], check=True)
+
+  result = subprocess.run(
+      [
+          "python3",
+          "-m",
+          "MaxText.utils.ckpt_conversion.to_maxtext",
+          os.path.join(MAXTEXT_ROOT, "src/MaxText/configs/base.yml"),
+          f"model_name={MODEL_NAME}",
+          f"base_output_directory={MODEL_CHECKPOINT_PATH}",
+          f"hf_access_token={os.environ.get('HF_TOKEN', '')}",
+          "use_multimodal=false",
+          "scan_layers=false",
+      ],
+      check=True,
+  )
   print("Checkpoint conversion completed successfully")
 else:
   print(f"Using existing checkpoint at {MODEL_CHECKPOINT_PATH}")
@@ -979,7 +985,7 @@ def main():
       },
       rollout_engine="vllm",
       offload_to_cpu=False,
-        training_config=rl_cluster_lib.RLTrainingConfig(
+      training_config=rl_cluster_lib.RLTrainingConfig(
           actor_optimizer=optimizer,
           eval_every_n_steps=EVAL_EVERY_N_STEPS,
           max_steps=MAX_STEPS,
