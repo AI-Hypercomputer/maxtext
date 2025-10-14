@@ -208,6 +208,10 @@ def GEMMA2_HF_WEIGHTS_TO_SHAPE(config):
   return mapping
 
 
+def DEEPSEEK_HF_WEIGHTS_TO_SHAPE(config):
+  pass
+
+
 def QWEN3_HF_WEIGHTS_TO_SHAPE(config):
   """Returns mapping between HuggingFace Qwen3 weights path and the HuggingFace weights shape.
 
@@ -381,4 +385,5 @@ HF_SHAPE = {
     "qwen3-30b-a3b": QWEN3_HF_WEIGHTS_TO_SHAPE,
     "qwen3-235b-a22b": QWEN3_HF_WEIGHTS_TO_SHAPE,
     "qwen3-480b-a35b": QWEN3_HF_WEIGHTS_TO_SHAPE,
+    "deepseek": DEEPSEEK_HF_WEIGHTS_TO_SHAPE,
 }

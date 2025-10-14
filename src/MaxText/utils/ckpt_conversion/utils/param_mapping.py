@@ -988,6 +988,14 @@ def LLAMA31_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, scan_layers=False, saving_to_hf=
   return hook_fns
 
 
+def DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING(config, scan_layers=False, saving_to_hf=False):
+  pass
+
+
+def DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, scan_layers=False, saving_to_hf=False):
+  pass
+
+
 PARAM_MAPPING = {
     "gemma2-2b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gemma2-9b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
@@ -1007,6 +1015,7 @@ PARAM_MAPPING = {
     "qwen3-30b-a3b": QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING,
     "qwen3-235b-a22b": QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING,
     "qwen3-coder-480b-a35b": QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "deepseek": DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING,
 }
 
 HOOK_FNS = {
@@ -1028,4 +1037,5 @@ HOOK_FNS = {
     "qwen3-30b-a3b": QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "qwen3-235b-a22b": QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "qwen3-coder-480b-a35b": QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "deepseek": DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN,
 }

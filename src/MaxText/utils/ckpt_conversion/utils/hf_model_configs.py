@@ -469,6 +469,8 @@ qwen3_coder_480b_a35b_config = transformers.Qwen3MoeConfig(
     vocab_size=151936,
 )
 
+deepseek_config = transformers.DeepseekV2Config(architectures=["DeepseekV2ForCausalLM"])
+
 HF_MODEL_CONFIGS = {
     "gemma2-2b": gemma2_2b_config,
     "gemma2-9b": gemma2_9b_config,
@@ -489,4 +491,5 @@ HF_MODEL_CONFIGS = {
     "qwen3-30b-a3b": qwen3_30b_a3b_thinking_2507_config,
     "qwen3-235b-a22b": qwen3_235b_a22b_thinking_2507_config,
     "qwen3-480b-a35b": qwen3_coder_480b_a35b_config,
+    "deepseek": deepseek_config,
 }
