@@ -45,7 +45,8 @@ from MaxText import maxengine
 from MaxText import maxtext_utils
 from MaxText import pyconfig
 from MaxText.common_types import MODEL_MODE_TRAIN
-from MaxText.experimental.rl.grpo_trainer import grpo_loss_fn, _merge_grpo_state, setup_train_loop
+from MaxText.experimental.rl.grpo_trainer import grpo_loss_fn, _merge_grpo_state#, setup_train_loop
+from MaxText.train_utils import setup_train_loop
 from MaxText.experimental.rl.grpo_utils import compute_log_probs
 from MaxText.inference import offline_engine
 from MaxText.globals import MAXTEXT_PKG_DIR, MAXTEXT_ASSETS_ROOT, MAXTEXT_TEST_ASSETS_ROOT
@@ -242,29 +243,40 @@ class ReshardingTest(unittest.TestCase):
         "tokenizer_type": "huggingface",
         "tokenizer_path": "google/gemma-2-2b-it",
         "attention": "dot_product",
-        "model_name": "gemma2-2b",
+        "model_name": "llama3.1-70b",
     } | kwargs
     config = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "experimental", "rl", config_file)],
+        # [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "experimental", "rl", config_file)],
+        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", config_file)],
         **init_kwargs,
     )
     return config
 
-  @pytest.mark.skip(reason="This test only runs on multihost cluster with pathways backend")
+  # @pytest.mark.skip(reason="This test only runs on multihost cluster with pathways backend")
   @pytest.mark.tpu_only
   def test_pw_reshard_pytree(self):
     """Test that reshard_pytree correctly reshards a PyTree."""
     # Create a mesh of 16 devices, laid out as 16x1.
     source_config = self.init_pyconfig(
-        "grpo.yml", ici_fsdp_parallelism=16, inference_replicas=4, inference_devices_per_replica=4
+        "base.yml", ici_fsdp_parallelism=16, subslice_shape='2,8' #inference_replicas=1, inference_devices_per_replica=8, 
     )
-
+    devices_array = maxtext_utils.create_device_mesh(source_config)
+    mesh = Mesh(devices_array, source_config.mesh_axes)
     # Create a second mesh of 16 devices for inference
-    dst_config = self.init_pyconfig("grpo_inference.yml", ici_data_parallelism=4, ici_tensor_parallelism=4)
-
-    _, _, _, dest_sharding, *_, state = setup_train_loop(source_config, dst_config, None)
+    dst_config = self.init_pyconfig("base.yml", ici_data_parallelism=1, ici_tensor_parallelism=8, subslice_shape='1,8')
+    breakpoint()
+    (
+      _,
+      _,
+      state_mesh_shardings,
+      model,
+      mesh,
+      *_,
+      state,
+    ) = setup_train_loop(source_config, None)
+    # _, _, _, dest_sharding, *_, state = setup_train_loop(source_config, dst_config, None)
     pytree = state.params
-
+    breakpoint()
     # Reshard the PyTree from the source to the destination sharding.
     # Applying transfer guards to prevent implicit transfers through controller.
     with (
