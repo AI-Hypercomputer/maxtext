@@ -34,7 +34,7 @@ from MaxText import max_utils
 from MaxText.inference import page_manager
 from MaxText.layers import linears
 from MaxText.layers import quantizations
-from MaxText.layers import pipeline
+from MaxText.layers import pipeline_nnx
 from MaxText import maxtext_utils
 from MaxText import multimodal_utils
 from MaxText.layers.attentions import attention_as_linen
@@ -257,8 +257,11 @@ class Decoder(nn.Module):
     if self.config.using_pipeline_parallelism:
       pipeline_stage_module = self.get_pipeline_stage_module(self.decoder_layer)
       remat_policy = self.get_remat_policy()
-      self.pipeline_module = pipeline.Pipeline(
-          config=self.config, mesh=self.mesh, layers=pipeline_stage_module, remat_policy=remat_policy
+      self.pipeline_module = pipeline_nnx.PipelineToLinen(
+          config=self.config,
+          mesh=self.mesh,
+          decoder_layer_factory=lambda: pipeline_stage_module,
+          remat_policy=remat_policy,
       )
 
   def minimal_policy(self, with_context=False):
