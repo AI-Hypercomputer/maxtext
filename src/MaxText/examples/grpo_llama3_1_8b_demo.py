@@ -999,7 +999,7 @@ def main():
           top_k=TOP_K,
       ),
       rollout_vllm_model_version="meta-llama/Meta-Llama-3.1-8B-Instruct",
-      rollout_vllm_hbm_utilization=0.2,
+      rollout_vllm_hbm_utilization=0.5,  # Increased from 0.2 to allow vLLM to use more memory
       rollout_vllm_tpu_backend_type="jax",
   )
 
