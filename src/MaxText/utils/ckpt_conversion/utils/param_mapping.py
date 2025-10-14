@@ -818,12 +818,13 @@ def DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING(config, scan_layers=True):
   """Returns mapping from MaxText to HuggingFace Deepseek weight paths using f-strings."""
   if not scan_layers:
     raise ValueError("This conversion only supports scanned MaxText models.")
+  print(config)
 
-  # Extract model configuration parameters
-  num_main_layers = config["num_layers"]
-  first_num_dense_layers = config["first_num_dense_layers"]
-  num_experts = config.get("num_experts", 0)
-  has_mtp = config.get("has_mtp", False)
+  # Extract hf configuration parameters
+  num_main_layers = config["num_hidden_layers"]
+  first_num_dense_layers = config["first_k_dense_replace"]
+  num_experts = config.get("n_routed_experts", 0)
+  # has_mtp = config.get("has_mtp", False)
 
   # Mapping for non-layer-specific weights
   mapping = {
@@ -846,7 +847,7 @@ def DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING(config, scan_layers=True):
   }
 
   # Scanned Dense Layers
-  dense_layer_keys = attention_keys + {
+  dense_layer_keys = attention_keys | {
       "mlp-wi_0-kernel": "mlp.gate_proj.weight",
       "mlp-wi_1-kernel": "mlp.up_proj.weight",
       "mlp-wo-kernel": "mlp.down_proj.weight",
@@ -857,7 +858,7 @@ def DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING(config, scan_layers=True):
     ]
 
   # Scanned MoE Layers
-  moe_layer_keys = attention_keys + {
+  moe_layer_keys = attention_keys | {
       "DeepSeekMoeBlock_0-shared_experts-wi_0-kernel": "mlp.shared_experts.gate_proj.weight",
       "DeepSeekMoeBlock_0-shared_experts-wi_1-kernel": "mlp.shared_experts.up_proj.weight",
       "DeepSeekMoeBlock_0-shared_experts-wo-kernel": "mlp.shared_experts.down_proj.weight",
@@ -1126,7 +1127,7 @@ PARAM_MAPPING = {
     "qwen3-30b-a3b": QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING,
     "qwen3-235b-a22b": QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING,
     "qwen3-coder-480b-a35b": QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING,
-    "deepseek": DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "deepseek3-test": DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING,
 }
 
 HOOK_FNS = {
@@ -1148,5 +1149,5 @@ HOOK_FNS = {
     "qwen3-30b-a3b": QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "qwen3-235b-a22b": QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "qwen3-coder-480b-a35b": QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
-    "deepseek": DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "deepseek3-test": DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN,
 }
