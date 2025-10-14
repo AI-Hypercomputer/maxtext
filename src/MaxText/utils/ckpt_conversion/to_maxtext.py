@@ -129,7 +129,9 @@ def _build_single_axis_stacked_tensor(
   # If the number of items to stack equals the number of layers, it's a standard
   # scanned layer, and we use the configured param_scan_axis. Otherwise, it's
   # an unscanned MoE layer, and we stack along the expert axis (0).
+  # TODO(shuningjin)
   axis_to_stack = config.param_scan_axis if len(hf_source_keys) == config.base_num_decoder_layers else 0
+  axis_to_stack = config.param_scan_axis
 
   # The hook function needs the shape of an individual slice, not the full stacked tensor.
   # We calculate it by removing the stacking dimension from the final target shape.
@@ -253,6 +255,8 @@ def main(argv: Sequence[str]) -> None:
     key_parts = [k.key for k in path_tuple[:-1]]
     mt_param_key = "-".join(key_parts)
     mt_target_shape_final = abstract_leaf_value.shape
+    print(mt_param_key)
+    print(mt_target_shape_final)
 
     # key_parts = [k.key for k in path_tuple]
     # mt_param_key = "params-" + "-".join(key_parts)

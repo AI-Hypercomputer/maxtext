@@ -894,6 +894,7 @@ def DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, scan_layers=True, saving_to_hf=
       flipped_target_shape = np.flip(np.array(target_shape))
       return input_tensor.reshape(flipped_target_shape).T
     else:
+      print(input_tensor.shape)
       return input_tensor.T.reshape(target_shape)
 
   mapping = {
