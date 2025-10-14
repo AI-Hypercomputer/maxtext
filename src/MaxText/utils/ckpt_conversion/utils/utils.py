@@ -74,6 +74,7 @@ HF_IDS = {
     "qwen3-480b-a35b": "Qwen/Qwen3-Coder-480B-A35B-Instruct",
     "deepseek2-16b": "deepseek-ai/DeepSeek-V2-Lite",
     "deepseek3-671b": "deepseek-ai/DeepSeek-V3",
+    "deepseek3-test": "/home/shuningjin/deepseek3-671b/hf-v3-custom-small",
 }
 
 
