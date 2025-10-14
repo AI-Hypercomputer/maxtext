@@ -96,15 +96,6 @@ jobs:
           else
             FINAL_PYTEST_MARKER="${{ inputs.pytest_marker }} and not scheduled_only"
           fi
-          # TODO: Use package data for testing and remove the env vars
-          export MAXTEXT_REPO_ROOT=$(pwd)
-          export MAXTEXT_ASSETS_ROOT=$(pwd)/src/MaxText/assets
-          export MAXTEXT_TEST_ASSETS_ROOT=$(pwd)/src/MaxText/test_assets
-          export MAXTEXT_PKG_DIR=$(pwd)/src/MaxText
-          # TODO: Fix the skipped tests and remove the deselect flags
-          if [ "${{ inputs.total_workers }}" -gt 1 ]; then
-            .venv/bin/python3 -m pip install pytest-split &&
-            .venv/bin/python3 -m pytest -v -m "${FINAL_PYTEST_MARKER}" --durations=0 --deselect "tests/aot_hlo_identical_test.py::AotHloIdenticalTest::test_default_hlo_match" --deselect "tests/tokenizer_test.py::TokenizerTest::test_detokenize" --splits ${{ inputs.total_workers }} --group ${{ inputs.worker_group }}
-          else
-            .venv/bin/python3 -m pytest -v -m "${FINAL_PYTEST_MARKER}" --durations=0 --deselect "tests/aot_hlo_identical_test.py::AotHloIdenticalTest::test_default_hlo_match" --deselect "tests/tokenizer_test.py::TokenizerTest::test_detokenize"
-          fi
+          export MAXTEXT_REPO_ROOT=$(pwd) MAXTEXT_ASSETS_ROOT=$(pwd)/src/MaxText/assets MAXTEXT_TEST_ASSETS_ROOT=$(pwd)/src/MaxText/test_assets MAXTEXT_PKG_DIR=$(pwd)/src/MaxText
+          [ "${{ inputs.total_workers }}" -gt 1 ] && .venv/bin/python3 -m pip install --quiet pytest-split && SPLIT_ARGS="--splits ${{ inputs.total_workers }} --group ${{ inputs.worker_group }}" || SPLIT_ARGS=""
+          .venv/bin/python3 -m pytest -v -m "${FINAL_PYTEST_MARKER}" --durations=0 --deselect "tests/aot_hlo_identical_test.py::AotHloIdenticalTest::test_default_hlo_match" --deselect "tests/tokenizer_test.py::TokenizerTest::test_detokenize" $SPLIT_ARGS

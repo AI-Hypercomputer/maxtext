@@ -68,7 +68,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        worker_group: [1, 2]
+        worker_group: [1, 2, 3, 4]
     uses: ./.github/workflows/run_tests_internal.yml
     with:
       device_type: cpu
@@ -80,7 +80,7 @@ jobs:
       container_resource_option: "--privileged"
       is_scheduled_run: ${{ github.event_name == 'schedule' }}
       worker_group: ${{ matrix.worker_group }}
-      total_workers: 2
+      total_workers: 4
 
   tpu_unit_tests:
     needs: tpu_image
