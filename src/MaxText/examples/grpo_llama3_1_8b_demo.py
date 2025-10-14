@@ -92,6 +92,14 @@ DEBUG = False  # set to True to run in debug mode, for more print statements
 HOME = os.path.join(os.path.expanduser("~"), "")
 print(f"Home directory (from Python): {HOME}")
 
+# Determine MaxText repo root - use environment variable if set, otherwise derive from script location
+if "MAXTEXT_REPO_ROOT" in os.environ:
+  MAXTEXT_ROOT = os.environ["MAXTEXT_REPO_ROOT"]
+else:
+  # This script is in src/MaxText/examples/, so go up 3 levels to get repo root
+  MAXTEXT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+print(f"MaxText repo root: {MAXTEXT_ROOT}")
+
 # ## Hyperparameters
 #
 # Let's define the configuration we are going to use. Note that this is by no
@@ -401,7 +409,7 @@ model_config = llama3_lib.ModelConfig.llama3_1_8b()
 config_ref = pyconfig.initialize(
     [
         "",
-        f"{HOME}/maxtext/src/MaxText/configs/base.yml",
+        os.path.join(MAXTEXT_ROOT, "src/MaxText/configs/base.yml"),
     ],
     base_output_directory="dummy",  # This is not used in Tunix.
     run_name="test-tunix-maxtext-llama3.1-8b",
@@ -460,7 +468,7 @@ show_hbm_usage()
 config_policy = pyconfig.initialize(
     [
         "",
-        f"{HOME}/maxtext/src/MaxText/configs/base.yml",
+        os.path.join(MAXTEXT_ROOT, "src/MaxText/configs/base.yml"),
     ],
     base_output_directory="dummy",  # This is not used in Tunix.
     run_name="test-tunix-maxtext-llama3.1-8b",  # This is not used in Tunix.
