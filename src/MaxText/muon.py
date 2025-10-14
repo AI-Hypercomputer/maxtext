@@ -1,4 +1,5 @@
 # copy from https://github.com/google-deepmind/optax/blob/5bd909532d9814667c188ac09b675183118e76eb/optax/contrib/_muon.py
+# add rms norm matching
 
 # Copyright 2025 DeepMind Technologies Limited. All Rights Reserved.
 #
@@ -41,6 +42,7 @@ import optax.tree
 ReshapeFn = Callable[[jax.Array], jax.Array]
 
 
+# CHANGE
 def debug_sharding(array, prefix=""):
   global_shape = array.shape
   jax.debug.inspect_array_sharding(
@@ -132,9 +134,10 @@ def _compute_muon_reshape(x: jax.Array, dim_nums: MuonDimensionNumbers
 #   return math.prod(x.shape[ax] for ax in output_axes) / math.prod(
 #       x.shape[ax] for ax in reduction_axes)
 
+# CHANGE: rms norm adjustment
 def _shape_factor(x: jax.Array, dim_nums: MuonDimensionNumbers) -> float:
   reduction_axes, output_axes = _normalize_axes(x, dim_nums)
-  return max(math.prod(x.shape[ax] for ax in output_axes), math.prod(x.shape[ax] for ax in reduction_axes)) * 0.2
+  return 0.2 * max(math.prod(x.shape[ax] for ax in output_axes), math.prod(x.shape[ax] for ax in reduction_axes))
 
 
 def _newton_schulz_iterator(x: jax.Array, coeffs: jax.Array) -> jax.Array:
@@ -283,6 +286,7 @@ def scale_by_muon(
     )
 
   def update_fn(updates, state, params=None):
+    # CHANGE: check local sharding shape
     debug_sharding(updates["params"]["decoder"]["dense_layers"]["mlp"]["wi_0"]["kernel"])
     del params
     # TODO(rdyro): extend to _masking._mask_callable
