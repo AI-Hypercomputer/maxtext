@@ -17,7 +17,7 @@ WORKDIR /deps
 
 # Copy setup files and dependency files separately for better caching
 COPY setup.sh ./
-COPY requirements.txt requirements_with_jax_ai_image.txt requirements_with_jax_stable_stack_0_6_1_pipreqs.txt ./
+COPY requirements.txt requirements_with_jax_ai_image.txt requirements_with_jax_stable_stack_0_6_1_pipreqs.txt generated_requirements ./
 
 
 # For JAX AI tpu training images 0.4.37 AND 0.4.35
