@@ -51,15 +51,12 @@ import time
 import jax
 import numpy as np
 from jax.sharding import Mesh
-from jax.sharding import PartitionSpec
 from jax.experimental import mesh_utils
 
 from MaxText.maxengine import MaxEngine
 from MaxText import max_utils
 from MaxText.prefill_packing import PrefillProcessor, BatchedPrefillProcessor
 from MaxText import max_logging
-
-from pathwaysutils.experimental import reshard as pathways_reshard
 
 DecodeState = Any
 Params = Any
@@ -446,18 +443,9 @@ class InferenceWorker:
   def update_params(
       self,
       params: Params,
-      destination_sharding: jax.sharding.NamedSharding,
-      is_pw_reshard: bool,
   ):
     """Update the model parameters"""
-    if is_pw_reshard:
-      with (
-          jax.transfer_guard_device_to_host("disallow_explicit"),
-          jax.transfer_guard_host_to_device("disallow_explicit"),
-      ):
-        self.params = pathways_reshard.reshard(params, destination_sharding, cache_resharding_plans=True)
-    else:
-      self.params = jax.device_put(params, destination_sharding)
+    self.params = params
 
   def reset_state(self):
     """Reset all worker state for a new inference run.
@@ -855,18 +843,9 @@ class OfflineEngine:
   def update_params(
       self,
       params: Params,
-      parition_spec: PartitionSpec,
-      is_pw_reshard: bool,
   ):
     """Update model weights."""
-    self.worker.update_params(
-        params,
-        jax.tree_util.tree_map(
-            lambda ps: jax.sharding.NamedSharding(self.mesh, ps),
-            parition_spec,
-        ),
-        is_pw_reshard,
-    )
+    self.worker.update_params(params)
 
   def batch_inference(
       self,
