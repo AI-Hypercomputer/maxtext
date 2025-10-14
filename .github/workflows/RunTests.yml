@@ -73,7 +73,6 @@ jobs:
     with:
       device_type: cpu
       device_name: X64
-      cloud_runner: linux-x86-n2-16
       image_type: tpu
       pytest_marker: 'cpu_only'
       xla_python_client_mem_fraction: 0.75
