@@ -98,7 +98,7 @@ python -m MaxText.decode \
     MaxText/configs/base.yml \
     model_name=gemma3-4b \
     ... \
-    image_path=/mnt/disks/pd2/maxtext/dog.jpg,/mnt/disks/pd2/maxtext/src/MaxText/test_assets/test_image.jpg \
+    image_path=/path/to/image1.jpg,/path/to/image2.jpg \
     prompt="Describe each image in a short sentence." # <start_of_image> will be added to prompt if not provided
     # or prompt="Describe each image in a short sentence: <start_of_image> and <start_of_image>"
 ```
