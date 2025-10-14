@@ -105,7 +105,7 @@ jobs:
 
   tpu_e2e_grpo_test:
     needs: tpu_image
-    runs-on: ["self-hosted", "tpu", "v4-8"]
+    runs-on: linux-x86-ct4p-240-4tpu
     container:
       image: gcr.io/tpu-prod-env-multipod/maxtext_${{ github.run_id }}:tpu
       env:
