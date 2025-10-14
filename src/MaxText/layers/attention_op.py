@@ -527,7 +527,9 @@ class AttentionOp(nnx.Module):
     """Check attention inputs."""
 
     assert key.ndim == value.ndim, f"k (dim {key.ndim}), v (dim {value.ndim}) must have same rank."
-    assert query.shape[:-3] == key.shape[:-3] == value.shape[:-3], "q, k, v batch dims must match."
+    assert (
+        query.shape[:-3] == key.shape[:-3] == value.shape[:-3]
+    ), f"{query.shape[:-3]=}, {key.shape[:-3]=}, {value.shape[:-3]=} batch dims must match."
     assert key.shape[-2] == value.shape[-2], "k, v num_kv_heads must match."
     assert key.shape[-3] == value.shape[-3], "k, v lengths must match."
     assert query.shape[-1] == key.shape[-1], "q, k depths must match."
