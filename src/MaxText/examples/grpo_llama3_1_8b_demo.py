@@ -85,8 +85,6 @@ from MaxText.integration.tunix.tunix_adapter import TunixMaxTextAdapter
 # nest_asyncio.apply()  # To fix "This event loop is already running" error in Colab
 # Run `pip install nest_asyncio` if not already installed.
 
-jax.devices()
-
 DEBUG = False  # set to True to run in debug mode, for more print statements
 
 HOME = os.path.join(os.path.expanduser("~"), "")
@@ -99,6 +97,31 @@ else:
   # This script is in src/MaxText/examples/, so go up 3 levels to get repo root
   MAXTEXT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 print(f"MaxText repo root: {MAXTEXT_ROOT}")
+
+# Convert checkpoint from HuggingFace to MaxText format BEFORE any JAX initialization
+# This must happen early to avoid TPU conflicts
+MODEL_NAME = "llama3.1-8b"
+MODEL_CHECKPOINT_PATH = os.path.join(os.path.expanduser("~"), "checkpoints", MODEL_NAME)
+
+if not os.path.exists(MODEL_CHECKPOINT_PATH):
+  print(f"Converting checkpoint from HuggingFace to MaxText format at {MODEL_CHECKPOINT_PATH}")
+  os.makedirs(MODEL_CHECKPOINT_PATH, exist_ok=True)
+  import subprocess
+  result = subprocess.run([
+      "python3", "-m", "MaxText.utils.ckpt_conversion.to_maxtext",
+      os.path.join(MAXTEXT_ROOT, "src/MaxText/configs/base.yml"),
+      f"model_name={MODEL_NAME}",
+      f"base_output_directory={MODEL_CHECKPOINT_PATH}",
+      f"hf_access_token={os.environ.get('HF_TOKEN', '')}",
+      "use_multimodal=false",
+      "scan_layers=false"
+  ], check=True)
+  print("Checkpoint conversion completed successfully")
+else:
+  print(f"Using existing checkpoint at {MODEL_CHECKPOINT_PATH}")
+
+# Initialize JAX/TPU after checkpoint conversion
+jax.devices()
 
 # ## Hyperparameters
 #
@@ -403,29 +426,8 @@ def get_ref_maxtext_model(config):
 
 model_config = llama3_lib.ModelConfig.llama3_1_8b()
 
-# Convert checkpoint from HuggingFace to MaxText format
-MODEL_NAME = "llama3.1-8b"
-MODEL_CHECKPOINT_PATH = os.path.join(HOME, "checkpoints", MODEL_NAME)
-
-if not os.path.exists(MODEL_CHECKPOINT_PATH):
-  print(f"Converting checkpoint from HuggingFace to MaxText format at {MODEL_CHECKPOINT_PATH}")
-  os.makedirs(MODEL_CHECKPOINT_PATH, exist_ok=True)
-  import subprocess
-  result = subprocess.run([
-      "python3", "-m", "MaxText.utils.ckpt_conversion.to_maxtext",
-      os.path.join(MAXTEXT_ROOT, "src/MaxText/configs/base.yml"),
-      f"model_name={MODEL_NAME}",
-      f"base_output_directory={MODEL_CHECKPOINT_PATH}",
-      f"hf_access_token={os.environ.get('HF_TOKEN', '')}",
-      "use_multimodal=false",
-      "scan_layers=false"
-  ], check=True)
-  print("Checkpoint conversion completed successfully")
-else:
-  print(f"Using existing checkpoint at {MODEL_CHECKPOINT_PATH}")
-
 # Load the reference model
-# Note: Model checkpoint will be loaded from converted HuggingFace weights
+# Note: Model checkpoint was already converted earlier in the script
 config_ref = pyconfig.initialize(
     [
         "",
