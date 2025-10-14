@@ -403,8 +403,29 @@ def get_ref_maxtext_model(config):
 
 model_config = llama3_lib.ModelConfig.llama3_1_8b()
 
+# Convert checkpoint from HuggingFace to MaxText format
+MODEL_NAME = "llama3.1-8b"
+MODEL_CHECKPOINT_PATH = os.path.join(HOME, "checkpoints", MODEL_NAME)
+
+if not os.path.exists(MODEL_CHECKPOINT_PATH):
+  print(f"Converting checkpoint from HuggingFace to MaxText format at {MODEL_CHECKPOINT_PATH}")
+  os.makedirs(MODEL_CHECKPOINT_PATH, exist_ok=True)
+  import subprocess
+  result = subprocess.run([
+      "python3", "-m", "MaxText.utils.ckpt_conversion.to_maxtext",
+      os.path.join(MAXTEXT_ROOT, "src/MaxText/configs/base.yml"),
+      f"model_name={MODEL_NAME}",
+      f"base_output_directory={MODEL_CHECKPOINT_PATH}",
+      f"hf_access_token={os.environ.get('HF_TOKEN', '')}",
+      "use_multimodal=false",
+      "scan_layers=false"
+  ], check=True)
+  print("Checkpoint conversion completed successfully")
+else:
+  print(f"Using existing checkpoint at {MODEL_CHECKPOINT_PATH}")
+
 # Load the reference model
-# Note: Model will be initialized from HuggingFace (no checkpoint loading)
+# Note: Model checkpoint will be loaded from converted HuggingFace weights
 config_ref = pyconfig.initialize(
     [
         "",
@@ -459,7 +480,7 @@ show_hbm_usage()
 
 
 # Load the policy model
-# Note: Model will be initialized from HuggingFace (no checkpoint loading)
+# Note: Model checkpoint will be loaded from converted HuggingFace weights
 
 # TODO: @mazumdera: change this to use lora
 
@@ -956,11 +977,11 @@ def main():
       },
       rollout_engine="vllm",
       offload_to_cpu=False,
-      training_config=rl_cluster_lib.RLTrainingConfig(
+        training_config=rl_cluster_lib.RLTrainingConfig(
           actor_optimizer=optimizer,
           eval_every_n_steps=EVAL_EVERY_N_STEPS,
           max_steps=MAX_STEPS,
-          gradient_accumulation_steps=1,
+          # gradient_accumulation_steps is automatically derived for RL training
           # metrics logging
           metrics_logging_options=metrics_logging_options,
           # checkpoint saving
