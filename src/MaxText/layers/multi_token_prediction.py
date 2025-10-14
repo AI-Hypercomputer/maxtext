@@ -25,7 +25,7 @@ from flax import nnx
 from MaxText.common_types import Config, MODEL_MODE_TRAIN
 from MaxText.layers.linears import DenseGeneral
 from MaxText.layers.normalizations import RMSNorm
-from MaxText.layers.decoders import Decoder, DecoderLayer
+from MaxText.layers.decoders import DecoderLayer
 from MaxText.layers import nnx_wrappers
 from MaxText import max_utils
 from MaxText import maxtext_utils
@@ -122,6 +122,7 @@ class MultiTokenPredictionLayer(nnx.Module):
       self,
       prev_hidden_state: jnp.ndarray,
       target_token_embedding: jnp.ndarray,
+      *,
       position_ids: jnp.ndarray,
       decoder_segment_ids: None | jnp.ndarray,
       deterministic: bool,
@@ -159,7 +160,7 @@ class MultiTokenPredictionLayer(nnx.Module):
     concatenated_features = jnp.concatenate([embedding_norm, hidden_state_norm], axis=-1)
 
     # --- 3. Project Concatenated Features ---
-    # Projects from 2*H back down to H    
+    # Projects from 2*H back down to H
     # Shape: [B, S, H]
     projected_features = self.projection_layer(concatenated_features)
 
@@ -219,6 +220,7 @@ class MultiTokenPredictionBlock(nnx.Module):
       input_ids,
       target_ids,
       target_mask,
+      *,
       position_ids,
       decoder_segment_ids,
       model_mode,
@@ -245,19 +247,23 @@ class MultiTokenPredictionBlock(nnx.Module):
 
       # Embed the k-th future input tokens using the shared embedding module
       target_token_embedding = self.decoder._apply_embedding(
-          shared_embedding, rolled_input_ids, rolled_position_id, deterministic, self.decoder.model_mode
+          shared_embedding,
+          rolled_input_ids,
+          rolled_position_id,
+          deterministic,
+          model_mode=self.decoder.model_mode
       )
 
       # Instantiate and apply the MTP layer for this step
       mtp_layer = self.mtp_layers[k - 1]
 
       next_mtp_hidden_state = mtp_layer(
-          mtp_hidden_state,
-          target_token_embedding,
-          position_ids,
-          decoder_segment_ids,
-          deterministic,
-          self.decoder.model_mode,
+          prev_hidden_state=mtp_hidden_state,
+          target_token_embedding=target_token_embedding,
+          position_ids=position_ids,
+          decoder_segment_ids=decoder_segment_ids,
+          deterministic=deterministic,
+          model_mode=self.decoder.model_mode,
       )
 
       # Project to logits using the shared embedding transpose

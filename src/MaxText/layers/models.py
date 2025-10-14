@@ -192,7 +192,7 @@ class TransformerLinenPure(nn.Module):
     # Its only effect is to "sow" these losses; it does not alter the primary logits output.
     if self.config.mtp_num_layers > 0:
       self.mtp_block(
-          # shared_embedding=self.shared_embedding,
+          shared_embedding=self.shared_embedding,
           main_hidden_state=hidden_state,
           input_ids=decoder_input_tokens,
           target_ids=decoder_target_tokens,
