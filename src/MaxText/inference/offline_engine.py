@@ -453,7 +453,8 @@ class InferenceWorker:
     This allows reusing the same InferenceWorker instance across multiple
     batch_inference calls without recreating the expensive engine components.
     """
-    max_logging.log("Resetting InferenceWorker state")
+    if self.debug:
+      max_logging.log("Resetting InferenceWorker state")
 
     # Reset inference state
     self.running = False
@@ -491,7 +492,7 @@ class InferenceWorker:
     max_logging.log("Continuous batching started")
 
     self._run_continuous_batching(data)
-
+    self.decode_state = jax.block_until_ready(self.decode_state)
     return self._build_final_outputs(data)
 
   def _run_continuous_batching(
@@ -538,7 +539,7 @@ class InferenceWorker:
 
     # Wait for detokenization to complete
     self.running = False
-    max_logging.log("Inference worker: joining detokenization thread")
+
     start_time = time.time()
 
     with jax.profiler.TraceAnnotation("Flushing detokenization thread"):
@@ -649,7 +650,6 @@ class InferenceWorker:
     This thread processes DetokenizationTask objects from the queue,
     performs the numpy conversions, emits tokens, and manages decode slots.
     """
-    max_logging.log("Inference worker: starting detokenization thread")
 
     while True:
       try:

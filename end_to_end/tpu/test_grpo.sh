@@ -52,8 +52,8 @@ profiler=xplane skip_first_n_steps_for_profiler=5 profiler_steps=3"
 # Set a small number for profiler_steps during inference as the profiles turn out large in size
 INFERENCE_ARGS="run_name=grpo scan_layers=false \
 per_device_batch_size=${INFERENCE_PER_DEVICE_BS} num_generations=${NUM_GENERATIONS} \
-ici_data_parallelism=${NUM_SAMPLERS} ici_tensor_parallelism=${DEVICES_PER_SAMPLER} subslice_shape=${INFERENCE_SUBSLICE} \
-profiler=xplane skip_first_n_steps_for_profiler=10 profiler_steps=2"
+ici_data_parallelism=${NUM_SAMPLERS} ici_tensor_parallelism=${DEVICES_PER_SAMPLER} subslice_shape=${INFERENCE_SUBSLICE}"
+# profiler=xplane skip_first_n_steps_for_profiler=10 profiler_steps=2"
 
 JAX_PLATFORMS=proxy JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 ENABLE_PATHWAYS_PERSISTENCE='1' \
     python3 src/MaxText/experimental/rl/grpo_trainer.py "${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText}"/experimental/rl/grpo.yml  \

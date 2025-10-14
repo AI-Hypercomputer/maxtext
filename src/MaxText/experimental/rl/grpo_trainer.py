@@ -728,6 +728,7 @@ def train_loop(config, config_inference, recorder, state=None):
           profiler_object.deactivate()
           is_profiling = False
         with jax.profiler.StepTraceAnnotation("inference", step_num=worker_step):
+          start_time = time.time()
           processed_batch = generate_completions(
               data_loader,
               worker_inference_engine,
@@ -738,6 +739,8 @@ def train_loop(config, config_inference, recorder, state=None):
               engine_lock,
           )
           jax.block_until_ready(processed_batch)
+          inference_time = time.time() - start_time
+          max_logging.log(f"completed inference step: {worker_step}, seconds: {inference_time:.3f}")
 
         with worker_data_buffer_lock:
           if not worker_data_buffer:
@@ -797,17 +800,19 @@ def train_loop(config, config_inference, recorder, state=None):
                 data_buffer[0] = jax.tree_util.tree_map(lambda arr: arr[required_batch_size:], data_buffer[0])
                 break
               else:
-                time.sleep(0.1)
+                time.sleep(0.01)
                 continue
             else:
-              time.sleep(0.1)
+              time.sleep(0.01)
               continue
         train_rng, rng = random.split(init_rng)
         example_batch = jax.device_put(example_batch, data_sharding)
         with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
           state, metrics = p_train_step(state, example_batch, train_rng)
-      with jax.profiler.StepTraceAnnotation("transfer data", step_num=step):
-        if step != 0 and step % config.inference_rollouts == 0:
+      if step != 0 and step % config.inference_rollouts == 0:
+        # block on state.params
+        state = jax.block_until_ready(state)
+        with inference_engine_lock, jax.profiler.StepTraceAnnotation("transfer data", step_num=step):
           grpo_utils.pathways_reshard(
               config_inference,
               inference_engine,
