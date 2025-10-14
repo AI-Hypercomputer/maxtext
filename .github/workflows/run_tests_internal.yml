@@ -50,10 +50,10 @@ on:
       cloud_runner:
         required: false
         type: string
-      worker_index:
+      worker_group:
         required: false
         type: number
-        default: 0
+        default: 1
       total_workers:
         required: false
         type: number
@@ -81,7 +81,7 @@ jobs:
           python3 -m pip install -e . --no-dependencies &&
           if [ "${{ inputs.total_workers }}" -gt 1 ]; then
             python3 -m pip install pytest-split &&
-            LIBTPU_INIT_ARGS='--xla_tpu_scoped_vmem_limit_kib=65536' python3 -m pytest ${{ inputs.pytest_addopts }} -v -m "${FINAL_PYTEST_MARKER}" --durations=0 --splits ${{ inputs.total_workers }} --group ${{ inputs.worker_index + 1 }}
+            LIBTPU_INIT_ARGS='--xla_tpu_scoped_vmem_limit_kib=65536' python3 -m pytest ${{ inputs.pytest_addopts }} -v -m "${FINAL_PYTEST_MARKER}" --durations=0 --splits ${{ inputs.total_workers }} --group ${{ inputs.worker_group }}
           else
             LIBTPU_INIT_ARGS='--xla_tpu_scoped_vmem_limit_kib=65536' python3 -m pytest ${{ inputs.pytest_addopts }} -v -m "${FINAL_PYTEST_MARKER}" --durations=0
           fi

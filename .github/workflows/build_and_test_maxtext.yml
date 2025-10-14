@@ -51,7 +51,7 @@ jobs:
         fail-fast: false # don't cancel all jobs on failure
         matrix:
           image_type: ["py312"]
-          worker_index: [0, 1]
+          worker_group: [1, 2]
     with:
       device_type: cpu
       device_name: X64
@@ -62,7 +62,7 @@ jobs:
       tf_force_gpu_allow_growth: false
       container_resource_option: "--privileged"
       is_scheduled_run: ${{ github.event_name == 'schedule' }}
-      worker_index: ${{ matrix.worker_index }}
+      worker_group: ${{ matrix.worker_group }}
       total_workers: 2
 
   maxtext_tpu_unit_tests:

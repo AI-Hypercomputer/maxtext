@@ -29,14 +29,12 @@ concurrency:
 
 jobs:
   cpu:
-    name: "CPU tests - ${{ matrix.test-group }}"
+    name: "CPU tests"
     runs-on: ubuntu-latest
     strategy:
-      fail-fast: false
       matrix:
         os: [ubuntu-24.04]
         python-version: ['3.12']
-        test-group: ['group1', 'group2']
     steps:
     - uses: actions/checkout@v5
     - name: Set up Python ${{ matrix.python-version }}
@@ -48,14 +46,11 @@ jobs:
         python3 -m pip install --upgrade pip
         python3 -m pip install pylint pyink pytype==2024.2.27
     - name: Typecheck the code with pytype
-      if: matrix.test-group == 'group1'
       run: |
         pytype --jobs auto --disable 'import-error,late-directive,wrong-arg-types,module-attr,unsupported-operands' src/MaxText/ || true
     - name: pylint
-      if: matrix.test-group == 'group1'
       run: |
          pylint --disable=R0401,R0917,W0201,W0613 --ignore-patterns='.pytype,.*pyi$' benchmarks end_to_end src tests
     - name: pyink
-      if: matrix.test-group == 'group2'
       run: |
         pyink --pyink-indentation=2 --line-length=122 --check .
