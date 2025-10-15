@@ -71,7 +71,7 @@ from tunix.rl.rollout.base_rollout import RolloutConfig
 
 from transformers import AutoTokenizer
 
-from MaxText.globals import MAXTEXT_ASSETS_ROOT, MAXTEXT_PKG_DIR
+from MaxText.globals import MAXTEXT_ASSETS_ROOT
 
 # for vLLM we can skip JAX precompilation with this flag, it makes startup faster
 os.environ["SKIP_JAX_PRECOMPILE"] = "1"

@@ -41,48 +41,49 @@ This tutorial demonstrates training the Llama3.1 8B-IT model on
 
 # ## Imports
 
-import functools
-import os
+from datetime import datetime
 from pprint import pprint
+import os
 import re
 import sys
 
-from datetime import datetime
 from flax import nnx
 from flax.linen import partitioning as nn_partitioning
-import grain
-import humanize
 
+import grain
 
 import jax
 from jax.sharding import Mesh
+
 import optax
+
 from orbax import checkpoint as ocp
+
 import tensorflow_datasets as tfds
+
 from tqdm.auto import tqdm
+
+from tunix.models.llama3 import model as llama3_lib
 from tunix.rl import rl_cluster as rl_cluster_lib
-from tunix.rl.rollout import base_rollout
 from tunix.rl.grpo.grpo_learner import GrpoConfig, GrpoLearner
+from tunix.rl.rollout import base_rollout
+from tunix.rl.rollout.base_rollout import RolloutConfig
 from tunix.sft import metrics_logger
 
 from transformers import AutoTokenizer
 
-from flax import linen as nn
-from tunix.models.llama3 import model as llama3_lib
-import numpy as np
 from etils import epath
 
-from tunix.rl.rollout.base_rollout import RolloutConfig
-
-from MaxText.globals import MAXTEXT_ASSETS_ROOT
 import pathwaysutils
+
+from benchmarks.globals import MAXTEXT_PKG_DIR
 
 pathwaysutils.initialize()
 
 # for vLLM we can skip JAX precompilation with this flag, it makes startup faster
 os.environ["SKIP_JAX_PRECOMPILE"] = "1"
 
-# add the parent directory (two levels up to say ~/HOME/maxtext) to sys.path if currenlt runnig from
+# add the parent directory (two levels up to say ~/HOME/maxtext) to sys.path if current running from
 # ~/HOME/maxtext/MaxText/examples
 
 # Get the directory of the current script
@@ -97,6 +98,7 @@ sys.path.insert(0, project_root)
 from MaxText import maxtext_utils, model_creation_utils
 from MaxText import pyconfig
 from MaxText.integration.tunix.tunix_adapter import TunixMaxTextAdapter
+from MaxText.globals import MAXTEXT_ASSETS_ROOT
 
 # This is for running the script in a colab or notebook environment.
 # import nest_asyncio
@@ -112,15 +114,17 @@ run_id = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
 HOME = os.path.expanduser("~") + "/"
 print(f"Home directory (from Python): {HOME}")
 
-# Look for base.yml in two possible locations.
-path1 = os.path.join(HOME, "maxtext/src/MaxText/configs/base.yml")
+# Look for base.yml in three possible locations.
+path1 = os.path.join(HOME, "maxtext", "src", "MaxText", "configs", "base.yml")
 path2 = "/deps/src/MaxText/configs/base.yml"
-if os.path.exists(path1):
-  BASE_YAML_PATH = path1
-elif os.path.exists(path2):
-  BASE_YAML_PATH = path2
-else:
-  raise FileNotFoundError("Could not find base.yml in the expected locations: " f"{path1} or {path2}")
+search_paths = path1, path2, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")
+BASE_YAML_PATH = None
+for p in search_paths:
+  if os.path.exists(path1):
+    BASE_YAML_PATH = p
+    break
+if BASE_YAML_PATH is None:
+  raise FileNotFoundError(f"Could not find base.yml in the expected locations: {search_paths}")
 
 # ## Hyperparameters
 #
@@ -276,6 +280,14 @@ TEMPLATE = """<start_of_turn>user
 
 
 def extract_hash_answer(text: str) -> str | None:
+  """Extracts the answer from a string that contains '####'.
+
+  Args:
+    text: The string to extract the answer from.
+
+  Returns:
+    The extracted answer as a string, or None if '####' is not found.
+  """
   if DEBUG:
     print(f"Extracting answer from: {text}")
   if "####" not in text:
@@ -284,6 +296,15 @@ def extract_hash_answer(text: str) -> str | None:
 
 
 def get_dataset(data_dir, split="train") -> grain.MapDataset:
+  """Gets the GSM8K dataset, preprocesses it, and returns a grain.MapDataset.
+
+  Args:
+    data_dir: The directory to download and store the data.
+    split: The dataset split to use (e.g., "train", "test").
+
+  Returns:
+    A grain.MapDataset object containing the preprocessed data.
+  """
   # Download data
   if not os.path.exists(data_dir):
     os.makedirs(data_dir)
@@ -325,16 +346,16 @@ def get_dataset(data_dir, split="train") -> grain.MapDataset:
   return loaded_dataset
 
 
-dataset = get_dataset(TRAIN_DATA_DIR, "train").batch(BATCH_SIZE)[:NUM_BATCHES]
+DATASET = get_dataset(TRAIN_DATA_DIR, "train").batch(BATCH_SIZE)[:NUM_BATCHES]
 
 if TRAIN_FRACTION == 1.0:
-  train_dataset = dataset.repeat(NUM_EPOCHS)
+  train_dataset = DATASET.repeat(NUM_EPOCHS)
   val_dataset = None
 else:
-  train_dataset = dataset[: int(len(dataset) * TRAIN_FRACTION)]
+  train_dataset = DATASET[: int(len(DATASET) * TRAIN_FRACTION)]
   train_dataset = train_dataset.repeat(NUM_EPOCHS)
 
-  val_dataset = dataset[int(len(dataset) * TRAIN_FRACTION) :].repeat(NUM_EPOCHS)
+  val_dataset = DATASET[int(len(DATASET) * TRAIN_FRACTION) :].repeat(NUM_EPOCHS)
 
 test_dataset = get_dataset(TEST_DATA_DIR, "test").batch(BATCH_SIZE)[:NUM_TEST_BATCHES]
 
@@ -369,9 +390,19 @@ if DEBUG:
 
 
 def get_ref_maxtext_model(config, devices=None):
+  """Creates a MaxText model wrapped in a Tunix adapter.
 
-  model, mesh = model_creation_utils.create_nnx_model(config, devices)
-  with mesh:
+  Args:
+    config: The MaxText configuration object.
+    devices: A list of JAX devices to use for model placement.
+
+  Returns:
+    A tuple containing the TunixMaxTextAdapter-wrapped model and the device
+    mesh.
+  """
+
+  model, the_mesh = model_creation_utils.create_nnx_model(config, devices)
+  with the_mesh:
     tunix_model = TunixMaxTextAdapter(
         base_model=model,
     )
@@ -379,11 +410,12 @@ def get_ref_maxtext_model(config, devices=None):
     model_config = llama3_lib.ModelConfig.llama3_1_8b()
     tunix_model.config = model_config
 
-  return tunix_model, mesh
+  return tunix_model, the_mesh
 
 
 # Load the reference model
-# Note: pass the path to your scanned checkpoint for "load_parameters_path". To generate a scanned checkpoint, you can use the `scanned_checkpoint.py` script in MaxText.
+# Note: pass the path to your scanned checkpoint for "load_parameters_path". To generate a scanned checkpoint, you can use
+# the `scanned_checkpoint.py` script in MaxText.
 # To create a scanned checkpoint, you can use /maxtext/MaxText/utils/ckpt_conversion/to_maxtext.py
 config_ref = pyconfig.initialize(
     [
@@ -413,16 +445,17 @@ config_ref = pyconfig.initialize(
     value_proj="offload",
 )
 
-devices = jax.devices()
-num_vms = len(devices) // CHIPS_PER_VM
+jax_devices = jax.devices()
+num_vms = len(jax_devices) // CHIPS_PER_VM
+actor_mesh = None
 
 if num_vms >= 2:
   print(f"{num_vms} VMs detected, allocating trainer and sampler devices")
-  num_devices = len(devices)
+  num_devices = len(jax_devices)
   num_trainer_devices = int(num_devices * TRAINER_DEVICES_FRACTION)
   num_sampler_devices = int(num_devices * SAMPLER_DEVICES_FRACTION)
-  trainer_devices = devices[:num_trainer_devices]
-  sampler_devices = devices[num_devices - num_sampler_devices :]
+  trainer_devices = jax_devices[:num_trainer_devices]
+  sampler_devices = jax_devices[num_devices - num_sampler_devices :]
 
   print("Creating reference model and also meshes for reference and rollout")
   llama3_1_8b, reference_mesh = get_ref_maxtext_model(config_ref, trainer_devices)
@@ -430,7 +463,7 @@ if num_vms >= 2:
   rollout_mesh = Mesh(devices_array, config_ref.mesh_axes)
   mesh = reference_mesh
 else:
-  llama3_1_8b, mesh = get_ref_maxtext_model(config_ref, devices)
+  llama3_1_8b, mesh = get_ref_maxtext_model(config_ref, jax_devices)
   actor_mesh = mesh
   reference_mesh = mesh
   rollout_mesh = mesh
@@ -450,12 +483,14 @@ if DEBUG:
   _maxtext_state_flatten = nnx.state(llama3_1_8b).flat_state()
   maxtext_state_flatten = {".".join(str(key) for key in keys): v for keys, v in _maxtext_state_flatten}
   print(
-      f"maxtext_state_flatten[base.token_embedder.embedding].value={maxtext_state_flatten['base.token_embedder.embedding'].value}"
+      f"maxtext_state_flatten[base.token_embedder.embedding].value="
+      f"{maxtext_state_flatten['base.token_embedder.embedding'].value}"
   )
 
 
 # Load the policy model
-# Note: pass the path to your scanned checkpoint for "load_parameters_path". To generate a scanned checkpoint, you can use the `scanned_checkpoint.py` script in MaxText.
+# Note: pass the path to your scanned checkpoint for "load_parameters_path". To generate a scanned checkpoint, you can use
+# the `scanned_checkpoint.py` script in MaxText.
 # To create a scanned checkpoint, you can use /maxtext/MaxText/utils/ckpt_conversion/to_maxtext.py
 
 # TODO: @mazumdera: change this to use lora
@@ -494,7 +529,7 @@ if num_vms >= 2:
   llama3_1_8b_policy, policy_mesh = get_ref_maxtext_model(config_policy, trainer_devices)
   actor_mesh = policy_mesh
 else:
-  llama3_1_8b_policy, policy_mesh = get_ref_maxtext_model(config_policy, devices)
+  llama3_1_8b_policy, policy_mesh = get_ref_maxtext_model(config_policy, jax_devices)
 
 
 llama3_1_8b_policy.config = None
@@ -509,7 +544,8 @@ if DEBUG:
   _maxtext_state_flatten = nnx.state(llama3_1_8b_policy).flat_state()
   maxtext_state_flatten = {".".join(str(key) for key in keys): v for keys, v in _maxtext_state_flatten}
   print(
-      f"maxtext_state_flatten[base.token_embedder.embedding].value={maxtext_state_flatten['base.token_embedder.embedding'].value}"
+      f"maxtext_state_flatten[base.token_embedder.embedding].value"
+      f"={maxtext_state_flatten['base.token_embedder.embedding'].value}"
   )
 
 
@@ -542,8 +578,15 @@ match_format.search(
 
 
 def match_format_exactly(prompts, completions, **kargs):
-  """
-  Give the model a reward of REWARD_EXACT_FORMAT_MATCH points if the format matches exactly.
+  """Rewards the model if the output format matches the expected format exactly.
+
+  Args:
+    prompts: The input prompts.
+    completions: The model's generated completions.
+    **kargs: Additional keyword arguments.
+
+  Returns:
+    A list of scores, one for each completion.
   """
   scores = []
   for completion in completions:
@@ -557,8 +600,15 @@ def match_format_exactly(prompts, completions, **kargs):
 
 
 def match_format_approximately(prompts, completions, **kargs):
-  """
-  We also reward the model if the format of the output matches partially.
+  """Rewards the model if the output format partially matches the expected format.
+
+  Args:
+    prompts: The input prompts.
+    completions: The model's generated completions.
+    **kargs: Additional keyword arguments.
+
+  Returns:
+    A list of scores, one for each completion.
   """
   scores = []
 
@@ -576,10 +626,17 @@ def match_format_approximately(prompts, completions, **kargs):
 
 
 def check_answer(prompts, completions, answer, **kargs):
-  """
-  Reward the model if the answer is correct. A reward is also given if the answer
-  does not match exactly, i.e., based on how close the answer is to the correct
-  value.
+  """Rewards the model for correct or partially correct answers.
+
+  This function checks if the extracted answer from the completion matches the
+  true answer. It provides rewards for exact matches, matches with different
+  whitespace, and answers that are numerically close to the true answer.
+
+  Args:
+    prompts: The input prompts.
+    completions: The model's generated completions.
+    answer: The ground truth answers.
+    **kargs: Additional keyword arguments.
   """
   responses = completions
 
@@ -602,9 +659,9 @@ def check_answer(prompts, completions, answer, **kargs):
       # Ie if the answer is within some range, reward it!
       try:
         ratio = float(guess) / float(true_answer)
-        if ratio >= 0.9 and ratio <= 1.1:
+        if 0.9 <= ratio <= 1.1:
           score += REWARD_RATIO_GUESS_TO_ANSWER_HIGH
-        elif ratio >= 0.8 and ratio <= 1.2:
+        elif 0.8 <= ratio <= 1.2:
           score += REWARD_RATIO_GUESS_TO_ANSWER_LOW
         else:
           score += PENALTY_INCORRECT_ANSWER  # Penalize wrong answers
@@ -623,8 +680,16 @@ match_numbers.findall(f"{solution_start}  0.34  {solution_end}")
 
 
 def check_numbers(prompts, completions, answer, **kargs):
-  """
-  Reward the model if the answer is correct.
+  """Rewards the model if the extracted numerical answer is correct.
+
+  This function extracts a number from the model's completion and compares it to
+  the true answer.
+
+  Args:
+    prompts: The input prompts.
+    completions: The model's generated completions.
+    answer: The ground truth answers.
+    **kargs: Additional keyword arguments.
   """
   question = kargs["question"]
   responses = completions
@@ -703,7 +768,7 @@ def generate_responses(
   """
   multiple_call_responses = [[] for _ in range(len(prompts))]
 
-  for p in range(num_passes):
+  for pass_num in range(num_passes):
     responses = rl_cluster.rollout.generate(
         prompts,
         rollout_config=RolloutConfig(
@@ -716,7 +781,7 @@ def generate_responses(
     responses = responses.text
 
     if DEBUG:
-      print(f"Pass {p+1}/{num_passes}, responses: {responses}")
+      print(f"Pass {p+1}/{pass_num}, responses: {responses}")
 
     for idx, response in enumerate(responses):
       multiple_call_responses[idx].append(response)
@@ -763,7 +828,7 @@ def score_responses(question, responses, answer):
       ratio = float(extracted_response.strip()) / float(answer.strip())
       if 0.9 <= ratio <= 1.1:
         is_partially_correct = True
-    except Exception as e:
+    except (ValueError, ZeroDivisionError, TypeError, AttributeError) as e:
       if DEBUG:
         print(f"Evaluation Exception: {e}")
         print("SKIPPED")
@@ -963,7 +1028,7 @@ grpo_config = GrpoConfig(
 
 
 with nn_partitioning.axis_rules(config_policy.logical_axis_rules):
-  rl_cluster = rl_cluster_lib.RLCluster(
+  RL_CLUSTER = rl_cluster_lib.RLCluster(
       actor=llama3_1_8b_policy,
       reference=llama3_1_8b,
       tokenizer=model_tokenizer,
@@ -972,7 +1037,7 @@ with nn_partitioning.axis_rules(config_policy.logical_axis_rules):
 
 # GRPO Trainer
 grpo_trainer = GrpoLearner(
-    rl_cluster=rl_cluster,
+    rl_cluster=RL_CLUSTER,
     reward_fns=[
         match_format_exactly,
         match_format_approximately,
@@ -985,7 +1050,7 @@ grpo_trainer = GrpoLearner(
 
 if DEBUG:
   # verify if vllm sampler works
-  output = rl_cluster.rollout.generate(
+  output = RL_CLUSTER.rollout.generate(
       ["The capital of France is"],
       rollout_config=RolloutConfig(max_tokens_to_generate=64, temperature=0.1),
   )
@@ -997,12 +1062,13 @@ if DEBUG:
 #
 
 
-(corr, total, accuracy, partial_accuracy, format_accuracy) = evaluate(
+# pylint: disable=unbalanced-tuple-unpacking
+(CORR, TOTAL, ACCURACY, PARTIAL_ACCURACY, FORMAT_ACCURACY) = evaluate(
     test_dataset,
-    rl_cluster,
+    RL_CLUSTER,
     **GENERATION_CONFIGS["greedy"],
 )
-print(f"Pre GRPO Training: {corr=}, {total=}, {accuracy=}%, {partial_accuracy=}%," f" {format_accuracy=}%")
+print(f"Pre GRPO Training: {CORR=}, {TOTAL=}, {ACCURACY=}%, {PARTIAL_ACCURACY=}%," f" {FORMAT_ACCURACY=}%")
 
 
 # ## Start training
@@ -1010,17 +1076,17 @@ print(f"Pre GRPO Training: {corr=}, {total=}, {accuracy=}%, {partial_accuracy=}%
 
 # jax.profiler.start_trace(PROFILE_DIR)
 with mesh, nn_partitioning.axis_rules(config_policy.logical_axis_rules):
-  grpo_trainer.train(dataset)
+  grpo_trainer.train(DATASET)
 # jax.profiler.stop_trace()
 
 # ## Evaluate
 #
 # Let's evaluate our model!
 
-
-(corr, total, accuracy, partial_accuracy, format_accuracy) = evaluate(
+# pylint: disable=unbalanced-tuple-unpacking
+(CORR, TOTAL, ACCURACY, PARTIAL_ACCURACY, FORMAT_ACCURACY) = evaluate(
     test_dataset,
-    rl_cluster,
+    RL_CLUSTER,
     **GENERATION_CONFIGS["greedy"],
 )
-print(f"Post GRPO Training: {corr=}, {total=}, {accuracy=}%, {partial_accuracy=}%," f" {format_accuracy=}%")
+print(f"Post GRPO Training: {CORR=}, {TOTAL=}, {ACCURACY=}%, {PARTIAL_ACCURACY=}%," f" {FORMAT_ACCURACY=}%")
