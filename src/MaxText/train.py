@@ -190,7 +190,7 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
   return loss, aux
 
 
-def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
+def train_step(model, config, state_mesh_shardings, params_shardings, state, data, dropout_rng):
   """
 
   Args:
@@ -212,12 +212,27 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
     extra_dpo_args = [reference_params]
     _loss_fn = dpo_loss_fn
 
+  params = state.params
+
   if config.gradient_accumulation_steps > 1:
+    # When using Zero-1 optimizer sharding, cast params to lower precision and apply sharding constraints
+    # so that all-gather is done once in the lower precision before the gradient accumulation loop
+    if config.shard_optimizer_over_data:
+      def convert_to_bf16(param):
+        if param.dtype == jnp.float32:
+          return param.astype(jnp.bfloat16)
+        else:
+          return param
+      ga_params = jax.tree_util.tree_map(convert_to_bf16, params)
+      ga_params = jax.tree.map(jax.lax.with_sharding_constraint, ga_params, params_shardings)
+    else:
+      ga_params = params
 
     def accumulate_gradient(acc_grad_and_loss, data):
+      ga_params = acc_grad_and_loss["ga_params"]
       grad_func = jax.value_and_grad(_loss_fn, argnums=4, has_aux=True)
       (_, aux), cur_batch_gradient = grad_func(
-          model, config, data, dropout_rng, state.params, *extra_dpo_args, is_train=True
+          model, config, data, dropout_rng, ga_params, *extra_dpo_args, is_train=True
       )
       acc_grad_and_loss["loss"] += aux["total_loss"]
       acc_grad_and_loss["moe_lb_loss"] += aux["moe_lb_loss"]
@@ -235,8 +250,16 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
       return jnp.reshape(batch_arr, microbatch_shape)
 
     data = jax.tree_util.tree_map(reshape_to_microbatch_accumulations, data)
-    init_grad = jax.tree_util.tree_map(jnp.zeros_like, state.params)
-    init_grad_and_loss = {"loss": 0.0, "grad": init_grad, "total_weights": 0, "moe_lb_loss": 0.0, "mtp_loss": 0.0}
+    init_grad = jax.tree_util.tree_map(jnp.zeros_like, ga_params)
+    init_grad = jax.tree.map(jax.lax.with_sharding_constraint, init_grad, params_shardings)
+    init_grad_and_loss = {
+        "loss": 0.0,
+        "grad": init_grad,
+        "total_weights": 0,
+        "moe_lb_loss": 0.0,
+        "mtp_loss": 0.0,
+        "ga_params": ga_params,
+    }
 
     grad_and_loss, aux = jax.lax.scan(
         accumulate_gradient, init_grad_and_loss, data, length=config.gradient_accumulation_steps
@@ -246,7 +269,10 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
         + grad_and_loss["moe_lb_loss"] / config.gradient_accumulation_steps
         + grad_and_loss["mtp_loss"] / config.gradient_accumulation_steps
     )
-    raw_grads = jax.tree_util.tree_map(lambda arr: arr / grad_and_loss["total_weights"], grad_and_loss["grad"])
+    raw_grads = grad_and_loss["grad"]
+    if config.shard_optimizer_over_data:
+      raw_grads = jax.tree.map(jax.lax.with_sharding_constraint, raw_grads, params_shardings)
+    raw_grads = jax.tree_util.tree_map(lambda arr: arr / grad_and_loss["total_weights"], raw_grads)
     aux = jax.tree.map(lambda x: jnp.sum(x, axis=0), aux)  # pytype: disable=module-attr
   else:
     if config.optimizer_memory_host_offload:
@@ -255,8 +281,10 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
             reference_params, max_utils.with_memory_kind(reference_params_sharding, "device")
         )
         extra_dpo_args = [reference_params]
+    if config.shard_optimizer_over_data:
+      params = jax.tree.map(jax.lax.with_sharding_constraint, params, params_shardings)
     grad_func = jax.value_and_grad(_loss_fn, argnums=4, has_aux=True)
-    (loss, aux), raw_grads = grad_func(model, config, data, dropout_rng, state.params, *extra_dpo_args, is_train=True)
+    (loss, aux), raw_grads = grad_func(model, config, data, dropout_rng, params, *extra_dpo_args, is_train=True)
 
   raw_grads = jax.tree_util.tree_map(lambda x: x.astype(config.grad_dtype) if x.dtype == jnp.float32 else x, raw_grads)
   intermediate_outputs = aux["intermediate_outputs"]
@@ -373,12 +401,15 @@ def train_loop(config, recorder, state=None):
       state = _merge_dpo_state(state, reference_params)
     state_mesh_shardings = _merge_dpo_state(state_mesh_shardings, state_mesh_shardings.params["params"])
 
+  params_shardings, state_mesh_shardings = maxtext_utils.maybe_update_params_sharding_with_opt(config, state_mesh_shardings)
+
   p_train_step, p_eval_step = train_utils.jit_train_and_eval_step(
-      config, model, mesh, state, state_mesh_shardings, train_step, eval_step, eval_data_iterator
+      config, model, mesh, state, state_mesh_shardings, train_step, eval_step, eval_data_iterator, params_shardings
   )
 
   with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
     shaped_batch = maxtext_utils.get_shaped_batch(config)
+    state = jax.lax.with_sharding_constraint(state, state_mesh_shardings)
     compiled = p_train_step.lower(state, shaped_batch, init_rng).compile()
     compiled_stats = compiled.memory_analysis()
     max_utils.print_compiled_memory_stats(compiled_stats)
@@ -402,6 +433,7 @@ def train_loop(config, recorder, state=None):
         nextrng = jax.jit(jax.random.fold_in)(init_rng, step)
         with maybe_record_goodput(recorder, GoodputEvent.STEP, step):
           with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+            state = jax.lax.with_sharding_constraint(state, state_mesh_shardings)
             state, metrics = p_train_step(state, example_batch, nextrng)
 
       step_time_delta = datetime.datetime.now() - last_step_completion
@@ -474,9 +506,9 @@ def initialize(argv: Sequence[str]) -> tuple[pyconfig.HyperParameters, Any, Any]
   # TODO: mazumdera@ : ensure missing mandatory fields in base.yml are filled in in argv,
   # or fill in here
   config = pyconfig.initialize(argv)
-  jax.config.update("jax_use_shardy_partitioner", config.shardy)
   max_utils.print_system_information()
   validate_train_config(config)
+  jax.config.update("jax_use_shardy_partitioner", config.shardy)
   os.environ["TFDS_DATA_DIR"] = config.dataset_path or ""
   vertex_tensorboard_manager = VertexTensorboardManager()
   if config.use_vertex_tensorboard or os.environ.get("UPLOAD_DATA_TO_TENSORBOARD"):

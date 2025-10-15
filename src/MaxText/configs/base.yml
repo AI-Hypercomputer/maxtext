@@ -859,3 +859,4 @@ subslice_shape: ""
 
 # NNX
 enable_nnx: false
+shard_optimizer_over_data: False
