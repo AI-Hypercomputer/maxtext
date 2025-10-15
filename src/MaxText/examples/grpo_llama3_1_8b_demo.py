@@ -100,7 +100,7 @@ print(f"MaxText repo root: {MAXTEXT_ROOT}")
 
 # Convert checkpoint from HuggingFace to MaxText format BEFORE any JAX initialization
 # This must happen early to avoid TPU conflicts
-MODEL_NAME = "llama3.1-8b"
+MODEL_NAME = "llama3.1-8b-Instruct"  # Use Instruct version for GRPO
 MODEL_CHECKPOINT_PATH = os.path.join(os.path.expanduser("~"), "checkpoints", MODEL_NAME)
 
 if not os.path.exists(MODEL_CHECKPOINT_PATH):
@@ -324,12 +324,14 @@ def get_dataset(data_dir, split="train") -> grain.MapDataset:
   if not os.path.exists(data_dir):
     os.makedirs(data_dir)
 
+  # Use try_gcs=True to leverage Google's cached datasets and avoid slow downloads
   data = tfds.data_source(
       "gsm8k",
       split=split,
       data_dir=data_dir,
       builder_kwargs={"file_format": tfds.core.FileFormat.ARRAY_RECORD},
       download=True,
+      try_gcs=True,  # Use GCS cached version if available for faster loading
   )
 
   loaded_dataset = (
