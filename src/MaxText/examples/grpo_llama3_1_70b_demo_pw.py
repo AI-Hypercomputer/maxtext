@@ -141,18 +141,21 @@ if not os.path.exists(TEST_DATA_DIR):
 TRAIN_FRACTION = 1.0
 
 
+# ====== Input Checkpoint directory =====
+MODEL_CHECKPOINT_PATH = "/path/to/scanned/model/ckpt_load_dir/"
+
 # ====== Checkpoint directory =====
 LOG_DIR = f"{HOME}/content/tensorboard/grpo/logs_llama3/"
 if not os.path.exists(LOG_DIR):
   os.makedirs(LOG_DIR)
 
 # ===== Profiling =====
-PROFILE_DIR = f"gs://mazumdera-test-bucket-europe-west4/rl-tuning/grpo/anisha-{run_id}/profiles_llama3/"
+PROFILE_DIR = f"/path/to/profile_dir/{run_id}/profiles_llama3/"
 if not epath.Path(PROFILE_DIR).exists():
   epath.Path(PROFILE_DIR).mkdir(parents=True)
 
 # ====== Checkpoint saving ======
-CKPT_DIR = f"gs://mazumdera-test-bucket-europe-west4/rl-tuning/grpo/anisha-{run_id}/ckpts_llama3/"
+CKPT_DIR = f"/path/to/ckpt_save_dir/{run_id}/ckpts_llama3/"
 
 if not epath.Path(CKPT_DIR).exists():
   epath.Path(CKPT_DIR).mkdir(parents=True)
@@ -396,8 +399,7 @@ config_ref = pyconfig.initialize(
     run_name="test-tunix-maxtext-llama3.1-70b",
     tokenizer_type="tiktoken",
     tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizer_llama3.tiktoken"),
-    load_parameters_path="gs://mazumdera-test-bucket-europe-west4/llama3.1-70b-Instruct/scanned-pathways/0/items",
-    # load_parameters_path="path/to/scanned/checkpoint",
+    load_parameters_path=MODEL_CHECKPOINT_PATH,
     per_device_batch_size=1,
     max_prefill_predict_length=4,
     max_target_length=1024,
@@ -470,8 +472,7 @@ config_policy = pyconfig.initialize(
     run_name="test-tunix-maxtext-llama3.1-70b",  # This is not used in Tunix.
     tokenizer_type="tiktoken",
     tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizer_llama3.tiktoken"),
-    load_parameters_path="gs://mazumdera-test-bucket-europe-west4/llama3.1-70b-Instruct/scanned-pathways/0/items",
-    # load_parameters_path="path/to/scanned/checkpoint",
+    load_parameters_path=MODEL_CHECKPOINT_PATH,
     per_device_batch_size=1,
     max_prefill_predict_length=4,
     max_target_length=1024,
