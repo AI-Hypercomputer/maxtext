@@ -31,6 +31,10 @@ on:
       pytest_marker:
         required: true
         type: string
+      pytest_addopts:
+        required: false
+        type: string
+        default: ''
       is_scheduled_run:
         required: true
         type: string
@@ -51,7 +55,7 @@ permissions:
   contents: read
 jobs:
   run:
-    runs-on: ${{ inputs.cloud_runner != '' && inputs.cloud_runner || fromJson(format('["self-hosted", "{0}", "{1}"]', inputs.device_type, inputs.device_name)) }}
+    runs-on: ${{ inputs.cloud_runner }}
     container:
       image: gcr.io/tpu-prod-env-multipod/maxtext-unit-test-${{ inputs.device_type == 'cpu' && 'tpu' || inputs.device_type }}:${{ inputs.image_type != '' && inputs.image_type }}
       env:
@@ -94,4 +98,4 @@ jobs:
           export MAXTEXT_TEST_ASSETS_ROOT=$(pwd)/src/MaxText/test_assets
           export MAXTEXT_PKG_DIR=$(pwd)/src/MaxText
           # TODO: Fix the skipped tests and remove the deselect flags
-          .venv/bin/python3 -m pytest -v -m "${FINAL_PYTEST_MARKER}" --durations=0 --deselect "tests/aot_hlo_identical_test.py::AotHloIdenticalTest::test_default_hlo_match" --deselect "tests/tokenizer_test.py::TokenizerTest::test_detokenize"
+          .venv/bin/python3 -m pytest ${{ inputs.pytest_addopts }} -v -m "${FINAL_PYTEST_MARKER}" --durations=0 --deselect "tests/aot_hlo_identical_test.py::AotHloIdenticalTest::test_default_hlo_match" --deselect "tests/tokenizer_test.py::TokenizerTest::test_detokenize"
