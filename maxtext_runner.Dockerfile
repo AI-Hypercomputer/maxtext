@@ -15,7 +15,8 @@ WORKDIR /deps
 
 # Copy assets separately
 COPY src/MaxText/assets/ "${MAXTEXT_ASSETS_ROOT}"
-COPY src/MaxText/test_assets/ "${MAXTEXT_TEST_ASSETS_ROOT}" 
+COPY src/MaxText/test_assets/ "${MAXTEXT_TEST_ASSETS_ROOT}"
+COPY generated_requirements .
 
 # Copy all files except assets from local workspace into docker container
 COPY --exclude="${MAXTEXT_ASSETS_ROOT}" --exclude="${MAXTEXT_TEST_ASSETS_ROOT}" . .
