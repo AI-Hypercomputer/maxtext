@@ -61,7 +61,9 @@ def get_optimizer(config, learning_rate_schedule, model=None):
     #   raise NotImplementedError
     with model.mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
       abstract_param = get_abstract_param(model, config)
+    print(abstract_param)
     muon_weight_dimension_numbers = get_transform_tree(abstract_param)
+    print("dimension number:", muon_weight_dimension_numbers)
     muon_kwargs = {
         # Shared parameters: "nesterov" uses default
         "learning_rate": learning_rate_schedule,

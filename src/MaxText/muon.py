@@ -283,7 +283,7 @@ def scale_by_muon(
     )
 
   def update_fn(updates, state, params=None):
-    debug_sharding(updates["params"]["decoder"]["dense_layers"]["mlp"]["wi_0"]["kernel"])
+    # debug_sharding(updates["params"]["decoder"]["dense_layers"]["mlp"]["wi_0"]["kernel"])
     del params
     # TODO(rdyro): extend to _masking._mask_callable
     if callable(weight_dimension_numbers):

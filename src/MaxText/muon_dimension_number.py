@@ -117,7 +117,8 @@ def transform_logic(x, path):
   with scan in mind, but should work with unscan
   work for deepseek, could extend other models
   """
-  path_str = "/".join(path)
+  # path_str = "/".join(path)
+  path_str = path
   # [0, L, -2, -1], yellow
   if "MoeBlock_0" in path_str and ("wo" in path_str or "wi_0" in path_str or "wi_1" in path_str):
     return mdn((-2,), (-1,))
@@ -125,7 +126,9 @@ def transform_logic(x, path):
   elif "self_attention" in path_str and "out" in path_str:
     return mdn((0, -2), (-1,))
   # [0, L, -2, -1], query for ds2, wq_b for ds3, yellow
-  elif "self_attention" in path_str and ("wkv_b" in path_str or "query" in path_str or "wq_b" in path_str):
+  elif "self_attention" in path_str and (
+      "wkv_b" in path_str or "query" in path_str or "wq_b" in path_str or "key" in path_str or "value" in path_str
+  ):
     return mdn((0,), (-2, -1))
   # gray, do not apply muon: scalar, embedding, unembedding
   elif "scale" in path_str or "bias" in path_str or "embedding" in path_str or "logits_dense" in path_str:

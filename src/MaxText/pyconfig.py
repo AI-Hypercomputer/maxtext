@@ -392,8 +392,8 @@ def validate_model_name(s: str) -> bool:
       "llama4-17b-16e",
       "llama4-17b-128e",
   )
-  if s not in valid_model_names:
-    raise ValueError(f"Invalid model name was passed. Got {s}, Valid options {valid_model_names}")
+  # if s not in valid_model_names:
+  #   raise ValueError(f"Invalid model name was passed. Got {s}, Valid options {valid_model_names}")
 
 
 def validate_multimodal_model_name(s: str) -> bool:
