@@ -404,8 +404,7 @@ def get_ref_maxtext_model(config):
 model_config = llama3_lib.ModelConfig.llama3_1_8b()
 
 # Load the reference model
-# Note: pass the path to your scanned checkpoint for "load_parameters_path".
-# To create a scanned checkpoint, you can use /maxtext/src/MaxText/utils/ckpt_conversion/to_maxtext.py
+# Note: Model will be initialized from HuggingFace (no checkpoint loading)
 config_ref = pyconfig.initialize(
     [
         "",
@@ -415,7 +414,7 @@ config_ref = pyconfig.initialize(
     run_name="test-tunix-maxtext-llama3.1-8b",
     tokenizer_type="tiktoken",
     tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizer_llama3.tiktoken"),
-    load_parameters_path=MODEL_CHECKPOINT_PATH,
+    load_parameters_path=os.path.join(MODEL_CHECKPOINT_PATH, "0", "items"),
     per_device_batch_size=1,
     max_prefill_predict_length=4,
     max_target_length=1024,
@@ -460,8 +459,7 @@ show_hbm_usage()
 
 
 # Load the policy model
-# Note: pass the path to your scanned checkpoint for "load_parameters_path".
-# To create a scanned checkpoint, you can use /maxtext/src/MaxText/utils/ckpt_conversion/to_maxtext.py
+# Note: Model will be initialized from HuggingFace (no checkpoint loading)
 
 # TODO: @mazumdera: change this to use lora
 
@@ -474,7 +472,7 @@ config_policy = pyconfig.initialize(
     run_name="test-tunix-maxtext-llama3.1-8b",  # This is not used in Tunix.
     tokenizer_type="tiktoken",
     tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizer_llama3.tiktoken"),
-    load_parameters_path=MODEL_CHECKPOINT_PATH,
+    load_parameters_path=os.path.join(MODEL_CHECKPOINT_PATH, "0", "items"),
     per_device_batch_size=1,
     max_prefill_predict_length=4,
     max_target_length=1024,
