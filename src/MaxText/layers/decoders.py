@@ -775,7 +775,6 @@ class Decoder(nn.Module):
                 "nope_layer_interval": self.config.nope_layer_interval,
                 "interleave_moe_layer_step": self.config.interleave_moe_layer_step,
             }
-            broadcast_args += (bidirectional_mask,)
           y, _ = self.scan_decoder_layers(
               cfg,
               RemattedBlockLayer,
@@ -825,7 +824,6 @@ class Decoder(nn.Module):
                   "is_nope_layer": llama4.determine_is_nope_layer(lyr, self.config.nope_layer_interval),
                   "is_moe_layer": llama4.determine_is_moe_layer(lyr, self.config.interleave_moe_layer_step),
               }
-              layer_call_kwargs = {"bidirectional_mask": bidirectional_mask}
             if cfg.decoder_block == DecoderBlockType.GPT_OSS:
               layer_kwargs = {"attention_type": gpt_oss.get_attention_type(layer_id=lyr)}
             layer = RemattedBlockLayer(

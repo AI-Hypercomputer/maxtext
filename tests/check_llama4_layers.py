@@ -606,6 +606,10 @@ class Llama4VisionAttentionTest(unittest.TestCase):
       "enable_checkpointing": False,
       "model_name": "llama4-17b-16e",
       "scan_layers": False,
+      "dtype_mm": "float32",
+      "weight_dtype": "float32",
+      "float32_qk_product": True,
+      "float32_logits": True,
   }
 
   def setUp(self):
@@ -653,6 +657,10 @@ class Llama4VisionAttentionTest(unittest.TestCase):
         attention_kernel="dot_product",  # TODO aireenmei: support flash attention
         inputs_q_shape=lnx.shape,
         inputs_kv_shape=lnx.shape,
+        float32_qk_product=self.cfg.float32_qk_product,
+        float32_logits=self.cfg.float32_logits,
+        dtype=self.cfg.dtype_mm,
+        weight_dtype=self.cfg.weight_dtype,
         mesh=self.mesh,
         dropout_rate=0,
         name="self_attention_vision",
@@ -869,17 +877,18 @@ class Llama4VisionEncoderTest(unittest.TestCase):
     num_hidden_layers: int
     attention_dropout: int = 0
 
-  # Llama4 has 34 ViT layers, but test currently passes with a maximum of 31 layers
   config_arguments = {
       "run_name": "test",
       "enable_checkpointing": False,
       "model_name": "llama4-17b-16e",
       "scan_layers": False,
-      "num_hidden_layers_for_vit": 31,
       "dtype": "float32",
+      "dtype_mm": "float32",
+      "weight_dtype": "float32",
       "matmul_precision": "float32",
       "float32_qk_product": True,
       "float32_logits": True,
+      "activations_in_float32": True,
   }
 
   def setUp(self):
@@ -915,11 +924,19 @@ class Llama4VisionEncoderTest(unittest.TestCase):
 
     # Create test input using config dimensions
     batch_size = 4
-    inputs = jnp.ones((batch_size, self.seq_len_for_vit, self.cfg.hidden_size_for_vit), dtype=jnp.float32)
-    inputs /= 10
 
-    # Initialize JAX parameters
-    params = jax_model.init(self.rng, inputs, deterministic=True)
+    # Generate random numbers in (-1, 1) as input
+    key = jax.random.PRNGKey(0)
+    inputs = jax.random.uniform(
+        key,
+        (batch_size, self.seq_len_for_vit, self.cfg.hidden_size_for_vit),
+        minval=-1.0,
+        maxval=1.0,
+        dtype=jnp.float32,
+    )
+
+    # Initialize JAX parameters using Linen's init method
+    params = jax_model.init({"params": self.rng}, inputs, deterministic=True)
 
     # Copy weights from PyTorch to JAX
     params = self._copy_weights(pt_model, params, self.cfg.hidden_size_for_vit, self.cfg.num_attention_heads_for_vit)
@@ -941,6 +958,12 @@ class Llama4VisionEncoderTest(unittest.TestCase):
     jax_outputs = jax_model.apply(params, inputs, deterministic=True)
 
     # Compare outputs
+    diff = np.abs(jax_outputs - to_jax(pt_outputs))
+    actual_atol = np.max(diff)
+    eps = 1e-8
+    actual_rtol = np.max(diff / (np.maximum(np.abs(to_jax(pt_outputs)), eps)))
+    print(f"Actual atol: {actual_atol}")
+    print(f"Actual rtol: {actual_rtol}")
     np.testing.assert_allclose(jax_outputs, to_jax(pt_outputs), rtol=0.01, atol=0.05)
 
 
