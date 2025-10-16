@@ -4,7 +4,7 @@ Cloud TPU Multislice environments are composed of multiple TPU slices that commu
 
 ## Hangs
 
-A Megascale *hang* occurs when a worker has waited on a Megascale communication operation for a set timeout period. In this situation, you will see a Megascale `HANG_DETECTED` message in your Cloud TPU logs. Because Megascale is responsible for communicating over DCN, the hang is generally first detected and reported by Megascale. However, this does not mean the error has anything to do with Megascale. Most often, hang detection is a symptom of a problem in another part of the system (e.g. unexpected job restarts, hardware errors, executable mismatches).
+A Megascale *hang* occurs when a worker has waited on a Megascale communication operation for a set timeout period. In this situation, you will see a Megascale `HANG_DETECTED` message in your Cloud TPU logs. Because Megascale is responsible for communicating over DCN, the hang is generally first detected and reported by Megascale. However, this does not mean the error has anything to do with Megascale. Most often, hang detection is a symptom of a problem in another part of the system.
 
 In this way, we can think of the Megascale `HANG_DETECTED` message as a catch-all indication that your workload is not progressing properly. This could be caused by Customer-owned software, Google-owned software, or an issue with the hardware itself. This guide will help you determine which layer is causing the workload issue.
 
@@ -47,7 +47,7 @@ Full error digest:
     <host_name>: <fingerprint>
 ```
 
-If multiple TPU programs are detected across the workers, then it might be an issue with JAX tracing or the XLA compiler. If you see this log, we need to inspect the HLO dumps. Send these to Google using the following [steps](https://openxla.org/xla/hlo_dumps).
+If you see this log, we need to inspect the HLO dumps. Use the following steps to [collect HLO dumps](https://openxla.org/xla/hlo_dumps), and then send them to Google.
 
 ### 2. Bad TPU Chip or Data Pipeline Stall
 
@@ -91,6 +91,15 @@ If your checkpoint file sizes are too small and frequent, there is a risk of GCS
 Training code might use [MXLA collectives](https://openxla.org/xla) as a global barrier to sync across devices.
 
 In case one of the hosts is taking more than the time set in `--megascale_graph_hang_threshold` (default is 5 minutes) then MXLA timeout will expire. Depending on the setting, MXLA will either block the training or will crash and restart it. If the latter, then a series of restarts will occur until the I/O operation completes within the timeout period.
+
+For example, use
+
+```python
+jax._src.distributed.global_state.client.wait_at_barrier("<barrier_id>")
+multihost_utils.sync_global_devices(...)
+```
+
+for worker synchronization.
 
 ## Share HLO Dump for debugging purposes
 
