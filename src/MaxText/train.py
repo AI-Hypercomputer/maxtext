@@ -218,11 +218,13 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
     # When using Zero-1 optimizer sharding, cast params to lower precision and apply sharding constraints
     # so that all-gather is done once in the lower precision before the gradient accumulation loop
     if config.shard_optimizer_over_data:
+
       def convert_to_bf16(param):
         if param.dtype == jnp.float32:
           return param.astype(jnp.bfloat16)
         else:
           return param
+
       ga_params = jax.tree_util.tree_map(convert_to_bf16, params)
       ga_params = jax.tree.map(jax.lax.with_sharding_constraint, ga_params, params_shardings)
     else:
@@ -401,7 +403,9 @@ def train_loop(config, recorder, state=None):
       state = _merge_dpo_state(state, reference_params)
     state_mesh_shardings = _merge_dpo_state(state_mesh_shardings, state_mesh_shardings.params["params"])
 
-  params_shardings, state_mesh_shardings = maxtext_utils.maybe_update_params_sharding_with_opt(config, state_mesh_shardings)
+  params_shardings, state_mesh_shardings = maxtext_utils.maybe_update_params_sharding_with_opt(
+      config, state_mesh_shardings
+  )
 
   p_train_step, p_eval_step = train_utils.jit_train_and_eval_step(
       config, model, mesh, state, state_mesh_shardings, train_step, eval_step, eval_data_iterator, params_shardings
