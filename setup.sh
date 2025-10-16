@@ -49,7 +49,7 @@ fi
 PY_VERSION=${PY_VERSION##* }
 PY_VERSION=${PY_VERSION%.*}
 # shellcheck disable=SC2072
-if [ "$PYTHON_VERSION" \< '3.12' ]; then
+if [[ '3.12' > "$PY_VERSION" ]]; then
     echo -e "\n\e[31mERROR: Outdated Python Version! You are currently using ${PY_VERSION}.*, but MaxText requires Python version 3.12 or higher.\e[0m"
     # Ask the user if they want to create a virtual environment with uv
     read -p "Would you like to create a Python 3.12 virtual environment using uv? (y/n) " -n 1 -r
