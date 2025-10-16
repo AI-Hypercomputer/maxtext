@@ -13,7 +13,7 @@
 #  limitations under the License.
 
 """Attentions Ops Layers."""
-
+import dataclasses
 import functools
 from typing import Any, Callable, Optional, Tuple
 from functools import partial
@@ -26,8 +26,8 @@ from jax import lax
 from jax.ad_checkpoint import checkpoint_name
 from jax.experimental.pallas.ops.gpu import attention as gpu_pallas_attention
 from jax.experimental.pallas.ops.gpu import decode_attention as gpu_pallas_decode_attention
-from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_kernel
-from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask
+from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_kernel
+from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_mask
 from jax.experimental.shard_map import shard_map
 from jax.sharding import Mesh
 import jax
@@ -673,138 +673,6 @@ class AttentionOp(nnx.Module):
 
     return jnp.where(output_mask, 0.0, DEFAULT_MASK_VALUE) if output_mask is not None else None
 
-  def calculate_moba_gate_logic(self, q_item, k_item, q_pos_item):
-    """Computes the block-level MoBA gating intermediates for one batch item.
-
-    Args:
-      q_item: Query tensor shaped `[q_len, n_q_heads, head_dim]`.
-      k_item: Key tensor shaped `[kv_len, n_kv_heads, head_dim]`.
-      q_pos_item: Absolute query positions shaped `[q_len]`, used to derive the
-        chunk index for each query.
-        For example, during prefill after 128 tokens
-        have been processed `q_pos_item` is `jnp.arange(128, 128 + q_len)`,
-        while in autoregressive decode with a single query token it is
-        `jnp.array([kv_len - 1])`.
-
-    Returns:
-      `need_attend`, a boolean mask of shape `[n_kv_heads, g, q_len, num_block]`
-      indicating which key blocks each query should attend to. The additional
-      values in the returned tuple are debug intermediates used for logging and
-      diagnostics when inspecting the gating behaviour.
-    """
-    q_len, n_q_heads, head_dim = q_item.shape
-    kv_len, n_kv_heads, _ = k_item.shape
-    g = n_q_heads // n_kv_heads
-
-    q_item_f32 = q_item.astype(jnp.float32).reshape(q_len, n_kv_heads, g, head_dim)  # grouped-query attention (GQA)
-
-    moba_chunk_size = self.config.moba_chunk_size
-    moba_topk = self.config.moba_topk
-
-    num_block = math.ceil(kv_len / moba_chunk_size)
-
-    block_ids = jnp.arange(kv_len, dtype=jnp.int32) // moba_chunk_size  # chunk index for each key position
-    # Sum key vectors per chunk so we can later average within each block.
-    key_gate_weight_sum = jax.ops.segment_sum(
-        k_item.astype(jnp.float32), block_ids, num_segments=num_block
-    )  # [num_block, n_kv_heads, head_dim]
-    # Count how many tokens end up in each chunk so we can take the mean.
-    block_counts = jax.ops.segment_sum(
-        jnp.ones((kv_len,), dtype=jnp.float32), block_ids, num_segments=num_block
-    )  # [num_block]
-    # Mean Pooling, Avoid division by zero for empty blocks.
-    key_gate_weight = key_gate_weight_sum / jnp.maximum(
-        block_counts[:, None, None], 1
-    )  # [num_block, n_kv_heads, head_dim]
-
-    # Take the dot product between each query and every key chunk to get a score.
-    gate = jnp.einsum("skgd,Nkd->kgsN", q_item_f32, key_gate_weight)  # [n_kv_heads, g, q_len, num_block]
-    gate_before_masking = gate
-
-    q_block_idx = q_pos_item // moba_chunk_size  # chunk id for each query
-    block_indices = jnp.arange(num_block)  # list every key chunk index
-
-    q_block_idx_b = jnp.expand_dims(q_block_idx, axis=-1)  # [q_len, 1]
-    block_indices_b = jnp.expand_dims(block_indices, axis=0)  # [1, num_block]
-
-    # Block-causal masking: a query can't attend to future key blocks,
-    # and must attend to its own key block.
-    mask_future = q_block_idx_b > block_indices_b
-    gate = jnp.where(mask_future, gate, -float("inf"))
-    mask_diag = q_block_idx_b == block_indices_b
-    gate = jnp.where(mask_diag, float("inf"), gate)
-    gate_after_masking = gate
-
-    k_for_topk = min(moba_topk, num_block)
-    gate_top_k_val, gate_top_k_idx = jax.lax.top_k(gate, k=k_for_topk)  # [n_kv_heads, g, q_len, k_for_topk]
-    gate_top_k_val_min = jnp.min(gate_top_k_val, axis=-1, keepdims=True)  # [n_kv_heads, g, q_len, 1]
-    need_attend_threshold_mask = gate >= gate_top_k_val_min  # [n_kv_heads, g, q_len, num_block]
-
-    # Tie-breaking: if multiple blocks have the same gate value as the k-th
-    # block, we only select the ones that appear in the top-k indices.
-    gate_idx_mask = jnp.sum(
-        jax.nn.one_hot(gate_top_k_idx, num_block, dtype=jnp.bool_), axis=-2
-    )  # [n_kv_heads, g, q_len, num_block]
-    need_attend = jnp.logical_and(need_attend_threshold_mask, gate_idx_mask)  # [n_kv_heads, g, q_len, num_block]
-
-    return (
-        key_gate_weight,
-        gate_before_masking,
-        gate_after_masking,
-        gate_top_k_val,
-        gate_top_k_idx,
-        gate_top_k_val_min,
-        need_attend_threshold_mask,
-        gate_idx_mask,
-        need_attend,  # [n_kv_heads, g, q_len, num_block]
-    )
-
-  def generate_moba_mask_single_item(self, q_item, k_item, q_positions):
-    """Generates the token-level MoBA additive mask for a single batch item."""
-    q_len, _, _ = q_item.shape
-    kv_len, _, _ = k_item.shape
-    moba_chunk_size = self.config.moba_chunk_size
-
-    # Run the gating logic to find which key blocks this query cares about.
-    *_, need_attend = self.calculate_moba_gate_logic(q_item, k_item, q_positions)
-
-    # Expand the block-level `need_attend` mask to a token-level mask.
-    k_block_indices = jnp.arange(kv_len, dtype=jnp.int32) // moba_chunk_size
-    token_level_need_attend = need_attend[..., k_block_indices]
-
-    # Convert the boolean mask to float mask values.
-    gate = jnp.where(token_level_need_attend, 0.0, -float("inf"))
-
-    # Apply a final per-token causal mask to ensure causality within chunks.
-    k_indices = jax.lax.broadcasted_iota(jnp.int32, (q_len, kv_len), 1)
-    q_indices = q_positions[:, None]
-    causal_mask = q_indices >= k_indices
-    gate = jnp.where(causal_mask, gate, -float("inf"))
-
-    # Return the additive mask for this batch item.
-    return gate
-
-  def _generate_moba_mask(self, query: Array, key: Array, q_positions: Array) -> Array:
-    """Builds the token-level MoBA additive mask for the whole batch.
-
-    Args:
-      query: Query tensor shaped `[batch, q_len, n_q_heads, head_dim]`.
-      key: Key tensor shaped `[batch, kv_len, n_kv_heads, head_dim]`.
-      q_positions: Absolute query positions shaped `[q_len]`, shared across the
-        batch, identifying the starting offset of each query token.
-        For example, in prefill after 128 tokens we pass
-        `jnp.arange(128, 128 + q_len)`, while in autoregressive decode with a
-        single new token the vector is `[kv_len - 1]` for each batch element.
-
-    Returns:
-      Additive attention mask with shape
-      `[batch, n_kv_heads, n_q_heads // n_kv_heads, q_len, kv_len]` containing
-      `0.` for permitted positions and `-inf` for masked ones.
-    """
-    # vmap over the batch dimension of query and key. q_positions is constant across the batch.
-    moba_mask = jax.vmap(self.generate_moba_mask_single_item, in_axes=(0, 0, None))(query, key, q_positions)
-    return moba_mask
-
   def apply_attention(
       self,
       query: Array,
@@ -1080,7 +948,7 @@ class AttentionOp(nnx.Module):
     )
 
     # create_splash_attention kernel
-    block_sizes = splash_attention_kernel.BlockSizes(
+    sa_config = splash_attention_kernel.SplashConfig(
         block_q=min(global_block_q, query.shape[2]),
         block_kv=min(global_block_kv, key.shape[2]),
         block_kv_compute=min(global_block_kv_compute, key.shape[2]),
@@ -1093,6 +961,8 @@ class AttentionOp(nnx.Module):
         q_layout=splash_attention_kernel.QKVLayout[global_q_layout],
         k_layout=splash_attention_kernel.QKVLayout[global_k_layout],
         v_layout=splash_attention_kernel.QKVLayout[global_v_layout],
+        attn_logits_soft_cap=attn_logits_soft_cap,
+        residual_checkpoint_name="context",
     )
 
     mask_shape = (query.shape[2], key.shape[2])  # (q_seq_len, kv_seq_len)
@@ -1121,25 +991,32 @@ class AttentionOp(nnx.Module):
 
       mask &= ChunkedCausalMask(shape=(query.shape[2], key.shape[2]), chunk_size=self.chunk_attn_window_size)
 
-    # Create multi-head mask
-    multi_head_mask = splash_attention_mask.MultiHeadMask(masks=(mask,) * query.shape[1])
-
+    # Create mask - tokmax now just uses a single mask and assumes broadcast to all heads
+    single_head_mask = mask # tokamax now just uses a single mask and assumes broadcast to all heads?
+    #multi_head_mask = splash_attention_mask.MultiHeadMask(masks=(mask,) * query.shape[1])
+    # tokamax now just uses a single mask and assumes broadcast to all heads
+    max_logit_value, max_val = None, self.config.use_max_logit_estimate
+    if max_val > 0:
+      use_max_logit_estimate = "const"
+      if use_max_logit_estimate == "const":
+        sa_config = dataclasses.replace(sa_config, max_logit_const=max_val)
+      elif use_max_logit_estimate == "value_1d":
+        max_logit_value = max_val * jnp.ones((1,), dtype=jnp.bfloat16)
+      elif use_max_logit_estimate == "value_2d":
+        max_logit_value = max_val * jnp.ones((self.config.num_q_heads,), dtype=jnp.bfloat16)
     # Create the splash attention kernel object separately, jit it for performance
     @partial(
         jax.jit,
         static_argnames=[
-            "multi_head_mask",
+            "single_head_mask",
             "shard_head_size",
         ],
     )
-    def wrap_splash_kernel(multi_head_mask, shard_head_size=1):
+    def wrap_splash_kernel(single_head_mask, shard_head_size=1):
       splash_kernel = splash_attention_kernel.make_splash_mha(
-          mask=multi_head_mask,
-          head_shards=shard_head_size,  # the size of the axis if sharding over heads
-          q_seq_shards=cp_size,  # axis for sequence sharding
-          block_sizes=block_sizes,
-          attn_logits_soft_cap=attn_logits_soft_cap,
-          residual_checkpoint_name="context",
+          mask=single_head_mask,
+          config=sa_config,
+          q_seq_shards=cp_size,  # axis for sequence sharding,
       )
       return splash_kernel
 
@@ -1147,9 +1024,9 @@ class AttentionOp(nnx.Module):
         [self.mesh.shape[physical_axes] for physical_axes in dict(self.config.logical_axis_rules)[HEAD]]
     )
     shard_head_size = np.prod(logical_axis_rules_head)
-    splash_kernel = wrap_splash_kernel(multi_head_mask, int(shard_head_size))
-    named_sharding = jax.sharding.NamedSharding(self.mesh, axis_names_splash_kernel)
-    segment_axis_names_splash_kernel = splash_kernel.manual_sharding_spec(named_sharding)
+    splash_kernel = wrap_splash_kernel(single_head_mask, int(shard_head_size))
+    segment_axis_names_splash_kernel = nn.logical_to_mesh_axes((Q_LENGTH_NO_EXP,))
+    #segment_axis_names_splash_kernel = nn.logical_to_mesh_axes((HEAD, Q_LENGTH_NO_EXP))
 
     # Now call the function wrap_flash_attention which does the actual computation.
     # The splash kernel is passed as a parameter to the function. Since we have the shard map
@@ -1213,9 +1090,10 @@ class AttentionOp(nnx.Module):
       if version.parse(jax.__version__) < version.parse("0.7.2.dev20250824"):
         attention_output = jax.vmap(splash_kernel)(query, key, value, decoder_segment_ids_tuple)
       else:
-        attention_output = jax.vmap(splash_kernel, in_axes=(0, 0, 0, 0, None))(
-            query, key, value, decoder_segment_ids_tuple, sinks
-        )
+        if max_logit_value is not None:
+          attention_output = jax.vmap(partial(splash_kernel, max_logit_value=max_logit_value))(query, key, value, decoder_segment_ids_tuple)
+        else:
+          attention_output = jax.vmap(splash_kernel)(query, key, value, decoder_segment_ids_tuple)
       return attention_output
 
     x = wrap_flash_attention(
@@ -1462,27 +1340,9 @@ class AttentionOp(nnx.Module):
     # Casting softmaxt computation for float32 for model stability.
     if self.float32_logits:
       attn_weights = attn_weights.astype(jnp.float32)
-
     attn_mask = self.generate_attention_mask(
         query, key, decoder_segment_ids, model_mode, previous_chunk, bidirectional_mask
     )
-    if self.config.moba:
-      kv_seq_len = key.shape[1]
-      # This logic for `next_pos` is duplicated from `generate_attention_mask`.
-      # It determines the starting position of the query sequence.
-      next_pos = 0
-      if previous_chunk is not None:
-        next_pos = previous_chunk.shape[1]
-      elif model_mode == MODEL_MODE_AUTOREGRESSIVE and q_seq_len == 1:
-        next_pos = kv_seq_len - 1
-      q_positions = jnp.arange(next_pos, next_pos + q_seq_len)
-
-      # The gate calculation in MoBA uses the unscaled query.
-      # With scaled query, the gate values are scaled, but since the top-k selection
-      # is scale-invariant, we can use the scaled query directly.
-      moba_mask = self._generate_moba_mask(query, key, q_positions)
-      attn_weights += moba_mask
-
     if self.is_partition_in_decode(q_seq_len):
       attn_mask = partitioning.with_sharding_constraint(attn_mask, (KV_LENGTH, HEAD, None, None, None))
     elif model_mode == MODEL_MODE_PREFILL:
@@ -1744,3 +1604,4 @@ class LoadBalancedCausalMask(splash_attention_mask._ComputableMask):
             self.q_sequence.tobytes() if self.q_sequence is not None else None,
         )
     )
+  
