@@ -31,10 +31,6 @@ on:
       pytest_marker:
         required: true
         type: string
-      pytest_addopts:
-        required: false
-        type: string
-        default: ''
       is_scheduled_run:
         required: true
         type: string
@@ -50,12 +46,20 @@ on:
       cloud_runner:
         required: false
         type: string
+      worker_group:
+        required: false
+        type: number
+        default: 1
+      total_workers:
+        required: false
+        type: number
+        default: 1
 
 permissions:
   contents: read
 jobs:
   run:
-    runs-on: ${{ inputs.cloud_runner }}
+    runs-on: ${{ inputs.cloud_runner != '' && inputs.cloud_runner || fromJson(format('["self-hosted", "{0}", "{1}"]', inputs.device_type, inputs.device_name)) }}
     container:
       image: gcr.io/tpu-prod-env-multipod/maxtext-unit-test-${{ inputs.device_type == 'cpu' && 'tpu' || inputs.device_type }}:${{ inputs.image_type != '' && inputs.image_type }}
       env:
@@ -102,4 +106,5 @@ jobs:
             export LIBTPU_INIT_ARGS='--xla_tpu_scoped_vmem_limit_kib=65536'
           fi
           # TODO: Fix the skipped tests and remove the deselect flags
-          .venv/bin/python3 -m pytest ${{ inputs.pytest_addopts }} -v -m "${FINAL_PYTEST_MARKER}" --durations=0 --deselect "tests/aot_hlo_identical_test.py::AotHloIdenticalTest::test_default_hlo_match" --deselect "tests/tokenizer_test.py::TokenizerTest::test_detokenize"
+          [ "${{ inputs.total_workers }}" -gt 1 ] && .venv/bin/python3 -m pip install --quiet pytest-split && SPLIT_ARGS="--splits ${{ inputs.total_workers }} --group ${{ inputs.worker_group }}" || SPLIT_ARGS=""
+          .venv/bin/python3 -m pytest -v -m "${FINAL_PYTEST_MARKER}" --durations=0 --deselect "tests/aot_hlo_identical_test.py::AotHloIdenticalTest::test_default_hlo_match" --deselect "tests/tokenizer_test.py::TokenizerTest::test_detokenize" $SPLIT_ARGS
