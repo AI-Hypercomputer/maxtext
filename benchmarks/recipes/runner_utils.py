@@ -68,7 +68,9 @@ def generate_and_run_workloads(user_config, num_slices_list, num_steps, priority
           )
 
           # Generate XPK command
-          command, name = mxr.generate_xpk_workload_cmd(cluster_config=user_config.cluster_config, wl_config=wl_config)
+          command, name = mxr.generate_xpk_workload_cmd(
+              cluster_config=user_config.cluster_config, wl_config=wl_config, user=user_config.user, temp_key=user_config.temp_key
+          )
 
           logging.info("Generated workload: %s", name)
           logging.info("Generated command: %s", command)
