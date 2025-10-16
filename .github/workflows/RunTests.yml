@@ -112,7 +112,7 @@ jobs:
         XLA_PYTHON_CLIENT_MEM_FRACTION: 0.75
         TF_FORCE_GPU_ALLOW_GROWTH: false
         HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        MAXTEXT_CHECKPOINT_PATH: gs://yixuannwang-maxtext-logs/llama3.1-8b-Instruct/scanned/0/items
+        MAXTEXT_CHECKPOINT_PATH: gs://maxtext-model-checkpoints/llama3.1-8b/2025-01-23-19-04/scanned/0/items
       options: "--privileged"
     steps:
       - uses: actions/checkout@v4
