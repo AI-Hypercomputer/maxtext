@@ -98,33 +98,41 @@ else:
   MAXTEXT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 print(f"MaxText repo root: {MAXTEXT_ROOT}")
 
-# Convert checkpoint from HuggingFace to MaxText format BEFORE any JAX initialization
-# This must happen early to avoid TPU conflicts
-MODEL_NAME = "llama3.1-8b-Instruct"  # Use Instruct version for GRPO
-MODEL_CHECKPOINT_PATH = os.path.join(os.path.expanduser("~"), "checkpoints", MODEL_NAME)
-
-if not os.path.exists(MODEL_CHECKPOINT_PATH):
-  print(f"Converting checkpoint from HuggingFace to MaxText format at {MODEL_CHECKPOINT_PATH}")
-  os.makedirs(MODEL_CHECKPOINT_PATH, exist_ok=True)
-  import subprocess
-
-  result = subprocess.run(
-      [
-          "python3",
-          "-m",
-          "MaxText.utils.ckpt_conversion.to_maxtext",
-          os.path.join(MAXTEXT_ROOT, "src/MaxText/configs/base.yml"),
-          f"model_name={MODEL_NAME}",
-          f"base_output_directory={MODEL_CHECKPOINT_PATH}",
-          f"hf_access_token={os.environ.get('HF_TOKEN', '')}",
-          "use_multimodal=false",
-          "scan_layers=true",
-      ],
-      check=True,
-  )
-  print("Checkpoint conversion completed successfully")
+# Use pre-existing checkpoint from env var or convert from HuggingFace
+# Check for MAXTEXT_CHECKPOINT_PATH env var first (for CI/testing)
+if "MAXTEXT_CHECKPOINT_PATH" in os.environ:
+  CHECKPOINT_LOAD_PATH = os.environ["MAXTEXT_CHECKPOINT_PATH"]
+  print(f"Using checkpoint from environment variable: {CHECKPOINT_LOAD_PATH}")
 else:
-  print(f"Using existing checkpoint at {MODEL_CHECKPOINT_PATH}")
+  # Convert checkpoint from HuggingFace to MaxText format BEFORE any JAX initialization
+  # This must happen early to avoid TPU conflicts
+  MODEL_NAME = "llama3.1-8b-Instruct"  # Use Instruct version for GRPO
+  MODEL_CHECKPOINT_PATH = os.path.join(os.path.expanduser("~"), "checkpoints", MODEL_NAME)
+
+  if not os.path.exists(MODEL_CHECKPOINT_PATH):
+    print(f"Converting checkpoint from HuggingFace to MaxText format at {MODEL_CHECKPOINT_PATH}")
+    os.makedirs(MODEL_CHECKPOINT_PATH, exist_ok=True)
+    import subprocess
+
+    result = subprocess.run(
+        [
+            "python3",
+            "-m",
+            "MaxText.utils.ckpt_conversion.to_maxtext",
+            os.path.join(MAXTEXT_ROOT, "src/MaxText/configs/base.yml"),
+            f"model_name={MODEL_NAME}",
+            f"base_output_directory={MODEL_CHECKPOINT_PATH}",
+            f"hf_access_token={os.environ.get('HF_TOKEN', '')}",
+            "use_multimodal=false",
+            "scan_layers=true",
+        ],
+        check=True,
+    )
+    print("Checkpoint conversion completed successfully")
+  else:
+    print(f"Using existing checkpoint at {MODEL_CHECKPOINT_PATH}")
+
+  CHECKPOINT_LOAD_PATH = os.path.join(MODEL_CHECKPOINT_PATH, "0", "items")
 
 # Initialize JAX/TPU after checkpoint conversion
 jax.devices()
@@ -435,7 +443,7 @@ def get_ref_maxtext_model(config):
 model_config = llama3_lib.ModelConfig.llama3_1_8b()
 
 # Load the reference model
-# Note: Model checkpoint was already converted earlier in the script
+print(f"Loading reference model checkpoint from: {CHECKPOINT_LOAD_PATH}")
 config_ref = pyconfig.initialize(
     [
         "",
@@ -445,7 +453,7 @@ config_ref = pyconfig.initialize(
     run_name="test-tunix-maxtext-llama3.1-8b",
     tokenizer_type="tiktoken",
     tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizer_llama3.tiktoken"),
-    load_parameters_path=os.path.join(MODEL_CHECKPOINT_PATH, "0", "items"),
+    load_parameters_path=CHECKPOINT_LOAD_PATH,
     per_device_batch_size=1,
     max_prefill_predict_length=4,
     max_target_length=1024,
@@ -503,7 +511,7 @@ config_policy = pyconfig.initialize(
     run_name="test-tunix-maxtext-llama3.1-8b",  # This is not used in Tunix.
     tokenizer_type="tiktoken",
     tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizer_llama3.tiktoken"),
-    load_parameters_path=os.path.join(MODEL_CHECKPOINT_PATH, "0", "items"),
+    load_parameters_path=CHECKPOINT_LOAD_PATH,
     per_device_batch_size=1,
     max_prefill_predict_length=4,
     max_target_length=1024,
