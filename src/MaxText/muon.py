@@ -134,7 +134,7 @@ def _compute_muon_reshape(x: jax.Array, dim_nums: MuonDimensionNumbers
 
 def _shape_factor(x: jax.Array, dim_nums: MuonDimensionNumbers) -> float:
   reduction_axes, output_axes = _normalize_axes(x, dim_nums)
-  return max(math.prod(x.shape[ax] for ax in output_axes), math.prod(x.shape[ax] for ax in reduction_axes)) * 0.2
+  return max(math.prod(x.shape[ax] for ax in output_axes), math.prod(x.shape[ax] for ax in reduction_axes))
 
 
 def _newton_schulz_iterator(x: jax.Array, coeffs: jax.Array) -> jax.Array:
@@ -318,10 +318,11 @@ def scale_by_muon(
       )
     factors = jax.tree.map(_shape_factor, updates, resolved_weight_dim_nums,
                            is_leaf=_is_weight_dim_nums)
-    updates = jax.tree.map(
-        lambda x, factor: jnp.sqrt(jnp.maximum(1, factor)) * x,
-        updates, factors
-    )
+    # updates = jax.tree.map(
+    #     lambda x, factor: jnp.sqrt(jnp.maximum(1, factor)) * x,
+    #     updates, factors
+    # )
+    updates = jax.tree.map(lambda x, factor: jnp.sqrt(factor) * 0.2 * x, updates, factors)
     mu = optax.tree.cast(mu, mu_dtype)
     return updates, MuonState(
         count=count_inc,
