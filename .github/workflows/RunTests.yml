@@ -65,6 +65,10 @@ jobs:
 
   cpu_unit_tests:
     needs: tpu_image
+    strategy:
+      fail-fast: false
+      matrix:
+        worker_index: [0, 1]
     uses: ./.github/workflows/run_tests_internal.yml
     with:
       device_type: cpu
@@ -76,6 +80,8 @@ jobs:
       tf_force_gpu_allow_growth: false
       container_resource_option: "--privileged"
       is_scheduled_run: ${{ github.event_name == 'schedule' }}
+      worker_index: ${{ matrix.worker_index }}
+      total_workers: 2
 
   tpu_unit_tests:
     needs: tpu_image

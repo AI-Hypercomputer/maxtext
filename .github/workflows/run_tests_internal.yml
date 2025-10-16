@@ -50,6 +50,14 @@ on:
       cloud_runner:
         required: false
         type: string
+      worker_index:
+        required: false
+        type: number
+        default: 0
+      total_workers:
+        required: false
+        type: number
+        default: 1
 
 jobs:
   run:
@@ -71,4 +79,9 @@ jobs:
             FINAL_PYTEST_MARKER="${{ inputs.pytest_marker }} and not scheduled_only"
           fi
           python3 -m pip install -e . --no-dependencies &&
-          LIBTPU_INIT_ARGS='--xla_tpu_scoped_vmem_limit_kib=65536' python3 -m pytest ${{ inputs.pytest_addopts }} -v -m "${FINAL_PYTEST_MARKER}" --durations=0
+          if [ "${{ inputs.total_workers }}" -gt 1 ]; then
+            python3 -m pip install pytest-split &&
+            LIBTPU_INIT_ARGS='--xla_tpu_scoped_vmem_limit_kib=65536' python3 -m pytest ${{ inputs.pytest_addopts }} -v -m "${FINAL_PYTEST_MARKER}" --durations=0 --splits ${{ inputs.total_workers }} --group ${{ inputs.worker_index + 1 }}
+          else
+            LIBTPU_INIT_ARGS='--xla_tpu_scoped_vmem_limit_kib=65536' python3 -m pytest ${{ inputs.pytest_addopts }} -v -m "${FINAL_PYTEST_MARKER}" --durations=0
+          fi
