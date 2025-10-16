@@ -50,13 +50,15 @@ RUN if [ "$DEVICE" = "tpu" ] && [ "$JAX_STABLE_STACK_BASEIMAGE" = "us-docker.pkg
 # Install google-tunix for TPU devices, skip for GPU
 RUN if [ "$DEVICE" = "tpu" ]; then \
         python3 -m pip install 'google-tunix>=0.1.2'; \
-        echo "tunix installed, MODE is $MODE"; \
-        echo $MODE; \
         echo $JAX_AI_IMAGE_BASEIMAGE; \
         # TODO: Once tunix stopped pinning jax 0.7.1, we should remove our 0.7.0 version pin (b/450286600)
-        if [ "$MODE" = "stable_stack" ]; then \
-          python3 -m pip install 'jax==0.7.0' 'jaxlib==0.7.0' 'libtpu==0.0.19'; \
-        fi; \
+        if [[ "$JAX_AI_IMAGE_BASEIMAGE" == *"nightly"* ]]; then \
+            echo "Nightly image detected"; \
+            python3 -m pip install --upgrade jax jaxlib; \
+        else \
+            echo "Non-nightly image"; \
+            python3 -m pip install 'jax==0.7.0' 'jaxlib==0.7.0' 'libtpu==0.0.19'; \
+        fi
   fi
 
 # Now copy the remaining code (source files that may change frequently)
