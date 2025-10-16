@@ -1,0 +1,485 @@
+[
+  {
+    "name": "run_id",
+    "mode": "REQUIRED",
+    "type": "STRING",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "model_id",
+    "mode": "REQUIRED",
+    "type": "STRING",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "workload_gbs",
+    "mode": "NULLABLE",
+    "type": "INTEGER",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "workload_precision",
+    "mode": "NULLABLE",
+    "type": "STRING",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "workload_optimizer",
+    "mode": "NULLABLE",
+    "type": "STRING",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "workload_others",
+    "mode": "NULLABLE",
+    "type": "STRING",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "workload_manager",
+    "mode": "NULLABLE",
+    "type": "STRING",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "software_id",
+    "mode": "REQUIRED",
+    "type": "STRING",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "hardware_id",
+    "mode": "REQUIRED",
+    "type": "STRING",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "hardware_num_chips",
+    "mode": "REQUIRED",
+    "type": "INTEGER",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "hardware_num_nodes",
+    "mode": "NULLABLE",
+    "type": "INTEGER",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "result_success",
+    "mode": "REQUIRED",
+    "type": "BOOLEAN",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "metrics_step_time",
+    "mode": "NULLABLE",
+    "type": "FLOAT",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "metrics_mfu",
+    "mode": "NULLABLE",
+    "type": "FLOAT",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "metrics_tokens_per_second",
+    "mode": "NULLABLE",
+    "type": "FLOAT",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "metrics_e2e_time",
+    "mode": "NULLABLE",
+    "type": "FLOAT",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "metrics_num_steps",
+    "mode": "NULLABLE",
+    "type": "INTEGER",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "metrics_other",
+    "mode": "NULLABLE",
+    "type": "STRING",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "configs_framework",
+    "mode": "NULLABLE",
+    "type": "STRING",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "configs_env",
+    "mode": "NULLABLE",
+    "type": "STRING",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "configs_container_version",
+    "mode": "NULLABLE",
+    "type": "STRING",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "logs_artifact_directory",
+    "mode": "NULLABLE",
+    "type": "STRING",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "update_person_ldap",
+    "mode": "REQUIRED",
+    "type": "STRING",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "run_source",
+    "mode": "REQUIRED",
+    "type": "STRING",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "is_run_externally_visible",
+    "mode": "REQUIRED",
+    "type": "BOOLEAN",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "run_type",
+    "mode": "REQUIRED",
+    "type": "STRING",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "workload_type",
+    "mode": "REQUIRED",
+    "type": "STRING",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "workload_sequence_length",
+    "mode": "NULLABLE",
+    "type": "INTEGER",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "hardware_num_superblocks",
+    "mode": "NULLABLE",
+    "type": "STRING",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "hardware_num_slices",
+    "mode": "NULLABLE",
+    "type": "STRING",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "hardware_topology",
+    "mode": "NULLABLE",
+    "type": "STRING",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "hardware_num_cores",
+    "mode": "NULLABLE",
+    "type": "INTEGER",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "result_error",
+    "mode": "NULLABLE",
+    "type": "STRING",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "hardware_nccl_driver_nickname",
+    "mode": "NULLABLE",
+    "type": "STRING",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "configs_xla_flags",
+    "mode": "NULLABLE",
+    "type": "STRING",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "configs_dataset",
+    "mode": "NULLABLE",
+    "type": "STRING",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "configs_reviewer",
+    "mode": "NULLABLE",
+    "type": "STRING",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "configs_other",
+    "mode": "NULLABLE",
+    "type": "STRING",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "logs_profile",
+    "mode": "NULLABLE",
+    "type": "STRING",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "logs_cloud_logs",
+    "mode": "NULLABLE",
+    "type": "STRING",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "logs_comments",
+    "mode": "NULLABLE",
+    "type": "STRING",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "logs_other",
+    "mode": "NULLABLE",
+    "type": "STRING",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "reviewer_ldap",
+    "mode": "NULLABLE",
+    "type": "STRING",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "run_release_status",
+    "mode": "NULLABLE",
+    "type": "STRING",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "experiment_id",
+    "mode": "NULLABLE",
+    "type": "STRING",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "update_timestamp",
+    "mode": "",
+    "type": "TIMESTAMP",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "storage_id",
+    "mode": "NULLABLE",
+    "type": "STRING",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "benchmark_type",
+    "mode": "NULLABLE",
+    "type": "STRING",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "gcs_metrics_bucket",
+    "mode": "NULLABLE",
+    "type": "STRING",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "cloud_region",
+    "mode": "NULLABLE",
+    "type": "STRING",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "source_bucket",
+    "mode": "NULLABLE",
+    "type": "STRING",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "cluster_name",
+    "mode": "NULLABLE",
+    "type": "STRING",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "checkpointing_async",
+    "mode": "NULLABLE",
+    "type": "BOOLEAN",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "checkpointing_interval_every_n_steps",
+    "mode": "NULLABLE",
+    "type": "INTEGER",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "checkpointing_size_in_gibs",
+    "mode": "NULLABLE",
+    "type": "FLOAT",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "checkpointing_individual_file_size",
+    "mode": "NULLABLE",
+    "type": "INTEGER",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "checkpointing_file_format",
+    "mode": "NULLABLE",
+    "type": "STRING",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "start_time",
+    "mode": "NULLABLE",
+    "type": "TIMESTAMP",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "end_time",
+    "mode": "NULLABLE",
+    "type": "TIMESTAMP",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "k8_jobset_yaml_file_path",
+    "mode": "NULLABLE",
+    "type": "STRING",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "workload_mbs",
+    "mode": "NULLABLE",
+    "type": "INTEGER",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "max_epochs",
+    "mode": "NULLABLE",
+    "type": "INTEGER",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "max_steps",
+    "mode": "NULLABLE",
+    "type": "INTEGER",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "training_dataset_samples",
+    "mode": "NULLABLE",
+    "type": "INTEGER",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "data_loader_num_workers",
+    "mode": "NULLABLE",
+    "type": "INTEGER",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "data_loader_prefetch_factor",
+    "mode": "NULLABLE",
+    "type": "INTEGER",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "training_dataset_file_format",
+    "mode": "NULLABLE",
+    "type": "STRING",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "gcsfuse_csi_driver",
+    "mode": "NULLABLE",
+    "type": "STRING",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "metrics_tflops_per_second",
+    "mode": "NULLABLE",
+    "type": "FLOAT",
+    "description": "",
+    "fields": []
+  }
+]
