@@ -118,7 +118,7 @@ if not os.path.exists(MODEL_CHECKPOINT_PATH):
           f"base_output_directory={MODEL_CHECKPOINT_PATH}",
           f"hf_access_token={os.environ.get('HF_TOKEN', '')}",
           "use_multimodal=false",
-          "scan_layers=false",
+          "scan_layers=true",
       ],
       check=True,
   )
