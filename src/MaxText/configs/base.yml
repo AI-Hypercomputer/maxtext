@@ -378,7 +378,7 @@ logical_axis_rules: [
                       ['activation_kv_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
                       ['activation_kv_batch_no_exp', ['data', 'fsdp', 'fsdp_transpose']],
                       ['activation_kv_head_dim', ['tensor', 'tensor_transpose', 'tensor_sequence']],
-                      ['activation_vocab', ['tensor', 'tensor_transpose', 'sequence', 'tensor_sequence']],
+                      ['activation_vocab', ['tensor', 'tensor_transpose', 'tensor_sequence']],
                       ['activation_vocab', ['tensor', 'tensor_transpose']],
                       ['activation_vocab', 'tensor_sequence'],
                       ['activation_vocab', ['sequence','context']],
