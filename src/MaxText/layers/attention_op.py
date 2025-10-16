@@ -13,65 +13,58 @@
 #  limitations under the License.
 
 """Attentions Ops Layers."""
-
+import dataclasses
 import functools
-from typing import Any, Callable, Optional, Tuple
 from functools import partial
 import math
-
-import numpy as np
-from packaging import version
-
-from jax import lax
-from jax.ad_checkpoint import checkpoint_name
-from jax.experimental.pallas.ops.gpu import attention as gpu_pallas_attention
-from jax.experimental.pallas.ops.gpu import decode_attention as gpu_pallas_decode_attention
-from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_kernel
-from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask
-from jax.experimental.shard_map import shard_map
-from jax.sharding import Mesh
-import jax
-import jax.numpy as jnp
+from typing import Any, Callable, Optional, Tuple
 
 from flax import linen as nn
 from flax import nnx
 from flax.linen import partitioning
-
+import jax
+from jax import lax
+from jax.ad_checkpoint import checkpoint_name
+from jax.experimental.pallas.ops.gpu import attention as gpu_pallas_attention
+from jax.experimental.pallas.ops.gpu import decode_attention as gpu_pallas_decode_attention
+from jax.experimental.shard_map import shard_map
+import jax.numpy as jnp
+from jax.sharding import Mesh
 from MaxText import max_utils
 from MaxText.common_types import (
-    DEFAULT_MASK_VALUE,
+    Array,
+    AttentionType,
+    AxisIdxes,
+    AxisNames,
     BATCH,
     BATCH_NO_EXP,
-    HEAD,
-    KV_LENGTH,
-    PREFILL_LENGTH,
-    D_KV,
-    CACHE_BATCH_PREFILL,
-    CACHE_SEQUENCE,
-    AxisNames,
     CACHE_BATCH,
+    CACHE_BATCH_PREFILL,
     CACHE_HEADS,
-    CACHE_SCALE_BATCH,
     CACHE_KV,
-    CACHE_SCALE_SEQUENCE,
+    CACHE_SCALE_BATCH,
     CACHE_SCALE_HEADS,
     CACHE_SCALE_KV,
-    AxisIdxes,
+    CACHE_SCALE_SEQUENCE,
+    CACHE_SEQUENCE,
+    Config,
+    DECODE_BATCH,
+    DECODE_LENGTH,
+    DECODING_ACTIVE_SEQUENCE_INDICATOR,
+    DEFAULT_MASK_VALUE,
+    DType,
+    D_KV,
+    EP_AS_CONTEXT,
+    HEAD,
+    KV_LENGTH,
     LENGTH,
     LENGTH_NO_EXP,
-    DType,
-    Config,
-    Array,
+    MODEL_MODE_AUTOREGRESSIVE,
+    MODEL_MODE_PREFILL,
+    MODEL_MODE_TRAIN,
+    PREFILL_LENGTH,
     Q_LENGTH,
     Q_LENGTH_NO_EXP,
-    DECODE_LENGTH,
-    DECODE_BATCH,
-    MODEL_MODE_AUTOREGRESSIVE,
-    DECODING_ACTIVE_SEQUENCE_INDICATOR,
-    MODEL_MODE_TRAIN,
-    MODEL_MODE_PREFILL,
-    EP_AS_CONTEXT,
-    AttentionType,
 )
 from MaxText.inference import page_manager
 from MaxText.inference.kvcache import KVQuant, KVTensor
@@ -80,6 +73,10 @@ from MaxText.kernels.ragged_attention import ragged_mha
 from MaxText.layers import nnx_wrappers
 from MaxText.layers.initializers import variable_to_logically_partitioned
 from MaxText.layers.quantizations import AqtQuantization as Quant
+import numpy as np
+from packaging import version
+from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_kernel
+from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_mask
 
 # pylint: disable=line-too-long, g-doc-args, g-doc-return-or-yield, bad-continuation, g-inconsistent-quotes
 # pytype: disable=attribute-error
@@ -1080,19 +1077,25 @@ class AttentionOp(nnx.Module):
     )
 
     # create_splash_attention kernel
-    block_sizes = splash_attention_kernel.BlockSizes(
+    sa_config = splash_attention_kernel.SplashConfig(
         block_q=min(global_block_q, query.shape[2]),
         block_kv=min(global_block_kv, key.shape[2]),
         block_kv_compute=min(global_block_kv_compute, key.shape[2]),
         block_q_dkv=min(global_block_q_dkv, query.shape[2]),
         block_kv_dkv=min(global_block_kv_dkv, key.shape[2]),
         block_kv_dkv_compute=min(global_block_kv_dkv_compute, query.shape[2]),
-        block_q_dq=None if global_use_fused_bwd_kernel else min(global_block_q_dq, query.shape[2]),
-        block_kv_dq=None if global_use_fused_bwd_kernel else min(global_block_kv_dq, query.shape[2]),
+        block_q_dq=None
+        if global_use_fused_bwd_kernel
+        else min(global_block_q_dq, query.shape[2]),
+        block_kv_dq=None
+        if global_use_fused_bwd_kernel
+        else min(global_block_kv_dq, query.shape[2]),
         use_fused_bwd_kernel=global_use_fused_bwd_kernel,
         q_layout=splash_attention_kernel.QKVLayout[global_q_layout],
         k_layout=splash_attention_kernel.QKVLayout[global_k_layout],
         v_layout=splash_attention_kernel.QKVLayout[global_v_layout],
+        attn_logits_soft_cap=attn_logits_soft_cap,
+        residual_checkpoint_name="context",
     )
 
     mask_shape = (query.shape[2], key.shape[2])  # (q_seq_len, kv_seq_len)
@@ -1121,25 +1124,37 @@ class AttentionOp(nnx.Module):
 
       mask &= ChunkedCausalMask(shape=(query.shape[2], key.shape[2]), chunk_size=self.chunk_attn_window_size)
 
-    # Create multi-head mask
-    multi_head_mask = splash_attention_mask.MultiHeadMask(masks=(mask,) * query.shape[1])
+    # Create mask - tokmax now just uses a single mask and assumes broadcast to all heads
+    single_head_mask = mask  # tokamax now just uses a single mask and assumes broadcast to all heads?
+
+    # multi_head_mask = splash_attention_mask.MultiHeadMask(masks=(mask,) * query.shape[1])
+    # tokamax now just uses a single mask and assumes broadcast to all heads
+
+    max_logit_value, max_val = None, self.config.use_max_logit_estimate
+    if self.config.use_max_logit_estimate is not None:
+      use_max_logit_estimate = "const"
+      if use_max_logit_estimate == "const":
+        sa_config = dataclasses.replace(sa_config, max_logit_const=max_val)
+      elif use_max_logit_estimate == "value_1d":
+        max_logit_value = max_val * jnp.ones((1,), dtype=jnp.bfloat16)
+      elif use_max_logit_estimate == "value_2d":
+        max_logit_value = max_val * jnp.ones(
+            (self.config.num_q_heads,), dtype=jnp.bfloat16
+        )
 
     # Create the splash attention kernel object separately, jit it for performance
     @partial(
         jax.jit,
         static_argnames=[
-            "multi_head_mask",
+            "single_head_mask",
             "shard_head_size",
         ],
     )
-    def wrap_splash_kernel(multi_head_mask, shard_head_size=1):
+    def wrap_splash_kernel(single_head_mask, shard_head_size=1):
       splash_kernel = splash_attention_kernel.make_splash_mha(
-          mask=multi_head_mask,
-          head_shards=shard_head_size,  # the size of the axis if sharding over heads
-          q_seq_shards=cp_size,  # axis for sequence sharding
-          block_sizes=block_sizes,
-          attn_logits_soft_cap=attn_logits_soft_cap,
-          residual_checkpoint_name="context",
+          mask=single_head_mask,
+          config=sa_config,
+          q_seq_shards=cp_size,  # axis for sequence sharding,
       )
       return splash_kernel
 
@@ -1147,9 +1162,11 @@ class AttentionOp(nnx.Module):
         [self.mesh.shape[physical_axes] for physical_axes in dict(self.config.logical_axis_rules)[HEAD]]
     )
     shard_head_size = np.prod(logical_axis_rules_head)
-    splash_kernel = wrap_splash_kernel(multi_head_mask, int(shard_head_size))
-    named_sharding = jax.sharding.NamedSharding(self.mesh, axis_names_splash_kernel)
-    segment_axis_names_splash_kernel = splash_kernel.manual_sharding_spec(named_sharding)
+    splash_kernel = wrap_splash_kernel(single_head_mask, int(shard_head_size))
+    segment_axis_names_splash_kernel = nn.logical_to_mesh_axes((
+        Q_LENGTH_NO_EXP,
+    ))
+    # segment_axis_names_splash_kernel = nn.logical_to_mesh_axes((HEAD, Q_LENGTH_NO_EXP))
 
     # Now call the function wrap_flash_attention which does the actual computation.
     # The splash kernel is passed as a parameter to the function. Since we have the shard map
@@ -1209,13 +1226,19 @@ class AttentionOp(nnx.Module):
           decoder_segment_ids_tuple = splash_attention_kernel.SegmentIds(decoder_segment_ids_q, decoder_segment_ids_kv)
       else:
         decoder_segment_ids_tuple = None
+
       # TODO(ranran): remove if/else branch once b/441336842 is fixed
       if version.parse(jax.__version__) < version.parse("0.7.2.dev20250824"):
         attention_output = jax.vmap(splash_kernel)(query, key, value, decoder_segment_ids_tuple)
       else:
-        attention_output = jax.vmap(splash_kernel, in_axes=(0, 0, 0, 0, None))(
-            query, key, value, decoder_segment_ids_tuple, sinks
-        )
+        if max_logit_value is not None:
+          attention_output = jax.vmap(
+              partial(splash_kernel, max_logit_value=max_logit_value)
+          )(query, key, value, decoder_segment_ids_tuple)
+        else:
+          attention_output = jax.vmap(splash_kernel)(
+              query, key, value, decoder_segment_ids_tuple
+          )
       return attention_output
 
     x = wrap_flash_attention(
