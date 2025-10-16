@@ -120,12 +120,7 @@ def pretrain_preprocessing_pipeline(dataset, config, data_columns, tokenize, gra
         )
       )
     else:
-      dataset = grain.experimental.WithOptionsIterDataset(
-        dataset,
-        options=grain.experimental.DatasetOptions()
-      )
-      dataset = grain.experimental.apply_transformations(
-          dataset,
+      dataset = dataset.apply(
           _grain_tokenizer.TokenizeAndChunk(
               text_column, config.max_target_length, tokenizer_model
         )
