@@ -9,6 +9,7 @@ gcsfs
 google-api-python-client
 google-cloud-aiplatform
 google-cloud-monitoring
+google-jetstream @ https://github.com/AI-Hypercomputer/JetStream/archive/daedc21c393f23449fb54ddc4f75fca34348ea9c.zip
 grain[parquet]
 huggingface_hub
 jax!=0.7.1
@@ -17,6 +18,7 @@ jaxtyping
 jsonlines
 ml-collections
 ml-goodput-measurement
+mlperf-logging @ https://github.com/mlcommons/logging/archive/38ab22670527888c8eb7825a4ece176fcc36a95d.zip
 numpy
 omegaconf
 optax
@@ -33,10 +35,8 @@ qwix
 sentencepiece
 tensorboard-plugin-profile
 tensorboardx
+tensorflow
 tensorflow-datasets
 tensorflow-text
-tensorflow
 tiktoken
 transformers
-google-jetstream @ https://github.com/AI-Hypercomputer/JetStream/archive/daedc21c393f23449fb54ddc4f75fca34348ea9c.zip
-mlperf-logging @ https://github.com/mlcommons/logging/archive/38ab22670527888c8eb7825a4ece176fcc36a95d.zip
