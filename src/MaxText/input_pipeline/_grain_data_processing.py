@@ -146,16 +146,15 @@ def pretrain_preprocessing_pipeline(dataset, config, data_columns, tokenize, gra
           axis=1,
       )
   )
-  if grain_worker_count == -1:
-    performance_config = grain.experimental.pick_performance_config(
+  multiprocessing_options = (
+      grain.experimental.pick_performance_config(
           ds=dataset,
           ram_budget_mb=1024,
-          max_workers=None,
-          max_buffer_size=None
-      )
-    dataset = dataset.mp_prefetch(performance_config.multiprocessing_options)
-  else:
-    dataset = dataset.mp_prefetch(grain.MultiprocessingOptions(num_workers=grain_worker_count))
+          max_workers=None, max_buffer_size=None).multiprocessing_options
+      if grain_worker_count == -1
+      else grain.MultiprocessingOptions(num_workers=grain_worker_count)
+  )
+  dataset = dataset.mp_prefetch(multiprocessing_options)
   return dataset
 
 
@@ -190,16 +189,15 @@ def dpo_preprocessing_pipeline(dataset, config, data_columns, tokenize, grain_wo
   batch_size = config.global_batch_size_to_load // jax.process_count()
   batch_fn = functools.partial(grain.experimental.batch_and_pad, batch_size=batch_size, pad_value=pad_id)
   dataset = dataset.batch(batch_size, batch_fn=batch_fn)
-  if grain_worker_count == -1:
-    performance_config = grain.experimental.pick_performance_config(
+  multiprocessing_options = (
+      grain.experimental.pick_performance_config(
           ds=dataset,
           ram_budget_mb=1024,
-          max_workers=None,
-          max_buffer_size=None
-      )
-    dataset = dataset.mp_prefetch(performance_config.multiprocessing_options)
-  else:
-    dataset = dataset.mp_prefetch(grain.MultiprocessingOptions(num_workers=grain_worker_count))
+          max_workers=None, max_buffer_size=None).multiprocessing_options
+      if grain_worker_count == -1
+      else grain.MultiprocessingOptions(num_workers=grain_worker_count)
+  )
+  dataset = dataset.mp_prefetch(multiprocessing_options)
   return dataset
 
 
