@@ -112,17 +112,12 @@ class MultiTokenPredictionLayerTest(unittest.TestCase):
     max_logging.log(f"  Config Batch: {self.batch_size}, SeqLen: {self.seq_len}, EmbedDim: {self.embed_dim}")
     max_logging.log(f"  Output shape: {output_hidden_state.shape}")
 
+
 # A lightweight wrapper model for robustly testing the MTPBlock.
 class MTPBlockTestModel(nnx.Module):
   """A lightweight wrapper model for testing the MTPBlock."""
 
-  def __init__(
-      self,
-      config: Config,
-      mesh: Mesh,
-      *,
-      rngs: nnx.Rngs
-    ):
+  def __init__(self, config: Config, mesh: Mesh, *, rngs: nnx.Rngs):
     """Initializes the MTP block and its dependencies for the test."""
     self.config = config
     self.mesh = mesh
@@ -136,30 +131,18 @@ class MTPBlockTestModel(nnx.Module):
 
     class MockDecoderForMTP:
       """A mock decoder that simulates the behavior needed by MTPBlock."""
+
       def __init__(self, config: Config):
         self.config = config
         self.model_mode = MODEL_MODE_TRAIN
 
-      def _apply_embedding(
-          self,
-          _shared_embedding,
-          input_ids,
-          _position_ids,
-          _deterministic,
-          model_mode
-        ):
+      def _apply_embedding(self, _shared_embedding, input_ids, _position_ids, _deterministic, model_mode):
         """Returns a zero tensor with the correct embedding shape."""
         batch_size, seq_len = input_ids.shape
         embed_dim = self.config.base_emb_dim
         return jnp.zeros((batch_size, seq_len, embed_dim), dtype=self.config.dtype)
 
-      def _apply_output_head(
-          self,
-          _shared_embedding,
-          hidden_state,
-          _deterministic,
-          model_mode
-        ):
+      def _apply_output_head(self, _shared_embedding, hidden_state, _deterministic, model_mode):
         """Returns a zero tensor with the correct logit shape."""
         batch_size, seq_len, _ = hidden_state.shape
         return jnp.zeros((batch_size, seq_len, self.config.vocab_size), dtype=self.config.dtype)
@@ -202,6 +185,7 @@ class MTPBlockTestModel(nnx.Module):
     """Returns the shared embedding."""
     return self._shared_embedding
 
+
 class MultiTokenPredictionBlockTest(unittest.TestCase):
   """Unit tests for the MultiTokenPredictionBlock."""
 
@@ -230,9 +214,9 @@ class MultiTokenPredictionBlockTest(unittest.TestCase):
     self.decoder_segment_ids = jnp.ones((self.batch_size, self.seq_len), dtype=jnp.int32)
 
     self.test_model = MTPBlockTestModel(
-      config=self.cfg,
-      mesh=self.mesh,
-      rngs=self.rngs,
+        config=self.cfg,
+        mesh=self.mesh,
+        rngs=self.rngs,
     )
 
   def test_no_sow_during_init(self):
@@ -240,8 +224,8 @@ class MultiTokenPredictionBlockTest(unittest.TestCase):
     # `self.variables` was created by `.init()`. We inspect it to ensure
     # our `if not self.is_initializing()` check worked.
     initial_state = nnx.state(self.test_model)
-    self.assertFalse(hasattr(initial_state.mtp_block, 'losses'))
-    self.assertFalse(hasattr(initial_state.mtp_block, 'weights'))
+    self.assertFalse(hasattr(initial_state.mtp_block, "losses"))
+    self.assertFalse(hasattr(initial_state.mtp_block, "weights"))
 
   def test_sow_functionality(self):
     """Verifies that the block correctly sows losses and weights."""
@@ -258,8 +242,8 @@ class MultiTokenPredictionBlockTest(unittest.TestCase):
     state = nnx.state(self.test_model)
 
     # Check for the existence of the 'losses' and 'weights' attributes.
-    self.assertTrue(hasattr(state.mtp_block, 'losses'))
-    self.assertTrue(hasattr(state.mtp_block, 'weights'))
+    self.assertTrue(hasattr(state.mtp_block, "losses"))
+    self.assertTrue(hasattr(state.mtp_block, "weights"))
 
     # Access the actual data tuple inside the .value attribute.
     losses_val = state.mtp_block.losses.value

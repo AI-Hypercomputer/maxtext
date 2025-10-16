@@ -93,23 +93,22 @@ class TransformerLinenPure(nn.Module):
       # By convention, this is the last layer in the list.
       mtp_layer = layer_types[-1]
       mtp_block = nnx_wrappers.to_linen_class(
-        base_nnx_class=MultiTokenPredictionBlock,
-        base_metadata_fn=initializers.variable_to_logically_partitioned,
+          base_nnx_class=MultiTokenPredictionBlock,
+          base_metadata_fn=initializers.variable_to_logically_partitioned,
       )
       self.mtp_block = mtp_block(
-        config=self.config,
-        mesh=self.mesh,
-        transformer_layer_module=mtp_layer,
-        decoder=self.decoder,
+          config=self.config,
+          mesh=self.mesh,
+          transformer_layer_module=mtp_layer,
+          decoder=self.decoder,
       )
-
 
   def logits_from_hidden_states(self, hidden_states, deterministic, model_mode):
     """
     Compute logits from hidden states (wrapping decoder._apply_output_head).
     This function is only used for vocabulary tiling.
     """
-    logits = self.decoder._apply_output_head( # pylint: disable=protected-access
+    logits = self.decoder._apply_output_head(  # pylint: disable=protected-access
         shared_embedding=self.shared_embedding,
         y=hidden_states,
         deterministic=deterministic,
@@ -321,11 +320,11 @@ class Transformer(nnx.Module):
       # By convention, this is the last layer in the list.
       mtp_layer = layer_types[-1]
       self.mtp_block = MultiTokenPredictionBlock(
-        config=self.config,
-        mesh=self.mesh,
-        transformer_layer_module=mtp_layer,
-        decoder=self.decoder,
-        rngs=rngs,
+          config=self.config,
+          mesh=self.mesh,
+          transformer_layer_module=mtp_layer,
+          decoder=self.decoder,
+          rngs=rngs,
       )
 
       self.mtp_block.lazy_init(

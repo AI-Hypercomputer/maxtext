@@ -203,11 +203,11 @@ class MultiTokenPredictionBlock(nnx.Module):
     self.rngs = rngs if rngs is not None else nnx.Rngs(0)
     for k in range(1, config.mtp_num_layers + 1):
       layer = MultiTokenPredictionLayer(
-        config=config,
-        mesh=mesh,
-        layer_number=k,
-        transformer_layer_module=transformer_layer_module,
-        rngs=rngs,
+          config=config,
+          mesh=mesh,
+          layer_number=k,
+          transformer_layer_module=transformer_layer_module,
+          rngs=rngs,
       )
       setattr(self, f"mtp_layer_{k}", layer)
 
@@ -245,11 +245,7 @@ class MultiTokenPredictionBlock(nnx.Module):
 
       # Embed the k-th future input tokens using the shared embedding module
       target_token_embedding = self.decoder._apply_embedding(
-          shared_embedding,
-          rolled_input_ids,
-          rolled_position_id,
-          deterministic,
-          model_mode=self.decoder.model_mode
+          shared_embedding, rolled_input_ids, rolled_position_id, deterministic, model_mode=self.decoder.model_mode
       )
 
       # Instantiate and apply the MTP layer for this step
