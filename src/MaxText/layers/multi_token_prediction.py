@@ -201,7 +201,6 @@ class MultiTokenPredictionBlock(nnx.Module):
     self.transformer_layer_module = transformer_layer_module
     self.decoder = decoder
     self.rngs = rngs if rngs is not None else nnx.Rngs(0)
-    self.mtp_layers = nnx.List([])
     for k in range(1, config.mtp_num_layers + 1):
       layer = MultiTokenPredictionLayer(
         config=config,
@@ -211,7 +210,6 @@ class MultiTokenPredictionBlock(nnx.Module):
         rngs=rngs,
       )
       setattr(self, f"mtp_layer_{k}", layer)
-      self.mtp_layers.append(layer)
 
   def __call__(
       self,
@@ -255,7 +253,7 @@ class MultiTokenPredictionBlock(nnx.Module):
       )
 
       # Instantiate and apply the MTP layer for this step
-      mtp_layer = self.mtp_layers[k - 1]
+      mtp_layer = getattr(self, f"mtp_layer_{k}")
 
       next_mtp_hidden_state = mtp_layer(
           prev_hidden_state=mtp_hidden_state,
