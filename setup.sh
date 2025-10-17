@@ -137,11 +137,6 @@ if [[ $DEVICE == "tpu" ]]; then
     fi
 fi
 
-# Save the script folder path of maxtext
-run_name_folder_path=$(pwd)
-
-# Install dependencies from requirements.txt
-cd "$run_name_folder_path" && python3 -m uv pip install --upgrade pip
 if [[ "$MODE" == "nightly" ]]; then
     echo "Nightly mode: Installing requirements.txt, stripping commit pins from git+ repos."
     cp requirements.txt requirements.txt.nightly-temp
@@ -162,7 +157,7 @@ else
     # stable or stable_stack mode: Install with pinned commits
     echo "Installing tpu-requirements.txt with pinned commits."
     tpu_requirements_txt=
-    for candidate in 'generated_requirements' "${MAXTEXT_REPO_ROOT}"'/generated_requirements' "$PWD"; do
+    for candidate in 'generated_requirements' "${MAXTEXT_REPO_ROOT?}"'/generated_requirements' "$PWD"; do
       if [ -f "$candidate"'/tpu-requirements.txt' ]; then
         tpu_requirements_txt="$candidate"'/tpu-requirements.txt'
         break
@@ -177,6 +172,8 @@ else
       python3 -m uv pip install --resolution=lowest -r "$tpu_requirements_txt"
     fi
 fi
+
+uv pip install -r "${MAXTEXT_REPO_ROOT?}"'/extra_deps_from_github.txt'
 
 # Install maxtext package
 if [ -f 'pyproject.toml' ]; then
