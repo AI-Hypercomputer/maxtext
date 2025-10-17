@@ -114,8 +114,8 @@ if [[ $LIBTPU_GCS_PATH == NONE ]]; then
 fi
 
 if [[ -n $JAX_VERSION && ! ($MODE == "stable" || -z $MODE || ($MODE == "nightly" && $DEVICE == "gpu")) ]]; then
-     echo -e "\n\nError: You can only specify a JAX_VERSION with stable mode (plus nightly mode on GPU).\n\n"
-     exit 1
+    echo -e "\n\nError: You can only specify a JAX_VERSION with stable mode (plus nightly mode on GPU).\n\n"
+    exit 1
 fi
 
 if [[ $DEVICE == "tpu" ]]; then
@@ -129,7 +129,6 @@ if [[ $DEVICE == "tpu" ]]; then
             python3 -m uv pip install -U crcmod
             # Copy libtpu.so from GCS path
             gsutil cp "$LIBTPU_GCS_PATH" "$libtpu_path"
-            exit 0
         else
             echo -e "\n\nError: You must provide a custom libtpu for libtpu-only mode.\n\n"
             exit 1
@@ -143,44 +142,63 @@ run_name_folder_path=$(pwd)
 # Install dependencies from requirements.txt
 cd "$run_name_folder_path" && python3 -m uv pip install --upgrade pip
 if [[ "$MODE" == "nightly" ]]; then
-    echo "Nightly mode: Installing requirements.txt, stripping commit pins from git+ repos."
-    cp requirements.txt requirements.txt.nightly-temp
+    if [ "$DEVICE" = "gpu" ]; then
+        dep_name='dependencies/requirements/cuda12-requirements.txt'
+    else
+        dep_name='dependencies/requirements/'"${DEVICE?}"'-requirements.txt'
+    fi
+    printf 'Nightly mode: Installing "%s", stripping commit pins from git+ repos.\n' "$dep_name"
+    nightly_txt="${dep_name##*/}"
+    nightly_txt="${nightly_txt%.txt}"'-nightly-temp.txt'
+    cp -v "$dep_name" "$nightly_txt"
     # Create a temp file, strip commit pins from git+ repos in requirements.txt
     # Remove/update this section based on the pinned github repo commit in requirements.txt
     sed -i -E \
       -e 's|^mlperf-logging @ https?://github.com/mlcommons/logging/archive/.*\.zip$|mlperf-logging@git+https://github.com/mlperf/logging.git|' \
       -e 's|^([^ ]*) @ https?://github.com/([^/]*\/[^/]*)/archive/.*\.zip$|\1@git+https://github.com/\2.git|' \
-      requirements.txt.nightly-temp
+      "$nightly_txt"
 
     echo "--- Installing modified nightly requirements: ---"
-    cat requirements.txt.nightly-temp
+    cat -- "$nightly_txt"
     echo "-------------------------------------------------"
     
-    python3 -m uv pip install --no-cache-dir -U -r requirements.txt.nightly-temp
-    rm requirements.txt.nightly-temp
+    python3 -m uv pip install --no-cache-dir -U -r "$nightly_txt"
+    rm -f -- "$nightly_txt"
 else
     # stable or stable_stack mode: Install with pinned commits
+    if [ "$DEVICE" = "gpu" ]; then
+        dep_basename='cuda12-requirements.txt'
+    else
+        dep_basename="${DEVICE?}"'-requirements.txt'
+    fi
     echo "Installing tpu-requirements.txt with pinned commits."
-    tpu_requirements_txt=
-    for candidate in 'generated_requirements' "${MAXTEXT_REPO_ROOT}"'/generated_requirements' "$PWD"; do
-      if [ -f "$candidate"'/tpu-requirements.txt' ]; then
-        tpu_requirements_txt="$candidate"'/tpu-requirements.txt'
+    requirements_txt=
+    for candidate in 'dependencies/requirements' "${MAXTEXT_REPO_ROOT}"'/dependencies/requirements' "$PWD"; do
+      if [ -f "$candidate"'/'"$dep_basename" ]; then
+        requirements_txt="$candidate"'/'"$dep_basename"
         break
       else
         searched="$searched"':'
       fi
     done
-    if [ -z "${tpu_requirements_txt}" ]; then
+    if [ -z "${requirements_txt}" ]; then
       >&2 printf 'Could not find "tpu-requirements.txt", looked in: %s\n' "${searched%?}"
       exit 2
     else
-      python3 -m uv pip install --resolution=lowest -r "$tpu_requirements_txt"
+      python3 -m uv pip install --resolution=lowest -r "$requirements_txt"
     fi
 fi
 
 # Install maxtext package
 if [ -f 'pyproject.toml' ]; then
-  python3 -m uv pip install -e .[tpu] --no-deps --resolution=lowest
+  case "$DEVICE" in
+      'gpu') python3 -m uv pip install -e .[tpu] --no-deps --resolution=lowest ;;
+      'tpu') python3 -m uv pip install -e .[cuda12] --no-deps --resolution=lowest ;;
+      *)
+          >&2 printf 'Unsupported device\n'
+          exit 2
+          ;;
+  esac
   install_maxtext_github_deps
 fi
 
