@@ -255,6 +255,12 @@ def validate_keys(keys):
   if keys["decoder_block"] == "llama4":
     validate_llama4_config(keys)
 
+  if keys["decoder_block"] == "qwen3_next":
+    if keys["sparse_matmul"]:
+      raise ValueError(
+          "For Qwen3-Next, sparse_matmul must be False for now. The dense path has been verified against reference."
+      )
+
 
 def validate_tokenizer(keys):
   assert keys[

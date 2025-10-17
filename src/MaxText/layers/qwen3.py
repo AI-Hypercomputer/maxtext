@@ -17,6 +17,7 @@
 # pylint: disable=no-name-in-module
 
 import jax
+import jax.nn
 from jax.ad_checkpoint import checkpoint_name
 from jax.sharding import Mesh
 import jax.numpy as jnp
@@ -33,8 +34,7 @@ from MaxText.layers import linears
 from MaxText.layers import moe
 from MaxText.layers import nnx_wrappers
 from MaxText.layers import quantizations
-from MaxText.layers.normalizations import rms_norm
-from MaxText.layers.normalizations import RMSNorm
+from MaxText.layers.normalizations import RMSNorm, l2norm
 from MaxText.layers.quantizations import AqtQuantization as Quant
 from MaxText.inference import page_manager
 from MaxText.layers.attentions import Attention
@@ -47,21 +47,6 @@ from MaxText.layers.moe import RoutedMoE
 # -----------------------------------------
 
 
-def l2norm(x: Array, dim: int = -1, eps: float = 1e-6) -> Array:
-  """L2 normalization function. Normalizes a vector to have a length of 1.
-
-  Args:
-    x: Input array.
-    dim: The axis or axes along which to normalize. Defaults to the last axis.
-    eps: Small epsilon to prevent division by zero.
-
-  Returns:
-    L2 normalized array with the same shape as x.
-  """
-  inv_norm = jax.lax.rsqrt((x * x).sum(axis=dim, keepdims=True) + jnp.array(eps, dtype=x.dtype))
-  return x * inv_norm
-
-
 def jax_chunk_gated_delta_rule(
     query: Array,
     key: Array,
@@ -70,7 +55,7 @@ def jax_chunk_gated_delta_rule(
     beta: Array,
     chunk_size: int = 64,
     initial_state: None | Array = None,
-    use_qk_l2norm_in_kernel: bool = False,
+    use_qk_norm_in_gdn: bool = False,
 ) -> tuple[Array, None | Array]:
   """
   A JAX implementation of the chunked Gated Delta Rule, a parallel scan algorithm.
@@ -91,7 +76,7 @@ def jax_chunk_gated_delta_rule(
     beta: Gate tensor. Shape (B, S, H)
     chunk_size: The size of each chunk for processing.
     initial_state: Optional initial state for the recurrence. Shape (B, H, D_k, D_v)
-    use_qk_l2norm_in_kernel: Whether to apply L2 normalization to query and key.
+    use_qk_norm_in_gdn: Whether to apply L2 normalization to query and key.
 
   Returns:
     Output tensor. Shape (B, S, H, D_v)
@@ -102,7 +87,7 @@ def jax_chunk_gated_delta_rule(
   # STAGE 1: PREPARATION & PADDING
   # =========================================================================
   initial_dtype = query.dtype
-  if use_qk_l2norm_in_kernel:
+  if use_qk_norm_in_gdn:
     query = l2norm(query, dim=-1, eps=1e-6)
     key = l2norm(key, dim=-1, eps=1e-6)
 
@@ -167,6 +152,7 @@ def jax_chunk_gated_delta_rule(
   decay_mask = g_diff_exp
 
   # --- Precompute within-chunk attention ---
+  # NOTE: Precision set to HIGHEST for numerical accuracy.
   prec = jax.lax.Precision.HIGHEST
   # attn shape: (B, H, N, C, C)
   attn = -jnp.matmul(k_beta_c, jnp.swapaxes(key_c, -1, -2), precision=prec) * decay_mask
@@ -372,7 +358,7 @@ class Qwen3NextRMSNormGated(nnx.Module):
     normalized_states = normalized_states * weight.astype(jnp.float32)
 
     # Gated Activation using SiLU (Sigmoid-weighted Linear Unit)
-    gated_states = normalized_states * nn.silu(gate.astype(jnp.float32))
+    gated_states = normalized_states * jax.nn.silu(gate.astype(jnp.float32))
 
     return gated_states.astype(self.dtype)
 
@@ -411,14 +397,14 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     cfg = self.config
 
     in_features = cfg.emb_dim
-    self.num_v_heads = cfg.linear_num_value_heads
-    self.num_k_heads = cfg.linear_num_key_heads
-    self.head_k_dim = cfg.linear_key_head_dim
-    self.head_v_dim = cfg.linear_value_head_dim
+    self.num_v_heads = cfg.gdn_num_value_heads
+    self.num_k_heads = cfg.gdn_num_key_heads
+    self.head_k_dim = cfg.gdn_key_head_dim
+    self.head_v_dim = cfg.gdn_value_head_dim
     self.key_dim = self.head_k_dim * self.num_k_heads
     self.value_dim = self.head_v_dim * self.num_v_heads
     conv_dim = self.key_dim * 2 + self.value_dim
-    conv_kernel_size = cfg.linear_conv_kernel_dim
+    conv_kernel_size = cfg.gdn_conv_kernel_dim
 
     # Submodule instantiations
     self.in_proj_qkvz = linears.DenseGeneral(
@@ -442,7 +428,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
         in_features=conv_dim,
         out_features=conv_dim,
         kernel_size=(conv_kernel_size,),
-        feature_group_count=conv_dim,  # Depthwise-like
+        feature_group_count=conv_dim,  # Depthwise
         padding="CAUSAL",
         use_bias=False,
         dtype=cfg.dtype,
@@ -502,7 +488,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
 
     # Input to conv_layer should be (B, S, C)
     # qkv_conv shape: (B, S, conv_dim)
-    qkv_conv = nn.silu(self.conv1d(qkv).astype(jnp.float32)).astype(cfg.dtype)
+    qkv_conv = jax.nn.silu(self.conv1d(qkv).astype(jnp.float32)).astype(cfg.dtype)
     # q_conv shape: (B, S, key_dim), k_conv shape: (B, S, key_dim), v_conv shape: (B, S, value_dim)
     q_conv, k_conv, v_conv = jnp.split(qkv_conv, [self.key_dim, 2 * self.key_dim], axis=-1)
 
@@ -521,9 +507,9 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     A_log = self.A_log.value
     dt_bias = self.dt_bias.value
     # beta shape: (B, S, H_v)
-    beta = nn.sigmoid(b)
+    beta = jax.nn.sigmoid(b)
     # g shape: (B, S, H_v)
-    g = -jnp.exp(A_log.astype(jnp.float32)) * nn.softplus(a.astype(jnp.float32) + dt_bias.astype(jnp.float32))
+    g = -jnp.exp(A_log.astype(jnp.float32)) * jax.nn.softplus(a.astype(jnp.float32) + dt_bias.astype(jnp.float32))
     g = g.astype(cfg.dtype)
 
     if self.num_v_heads > self.num_k_heads and self.num_v_heads % self.num_k_heads == 0:
@@ -539,7 +525,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     # TODO(parambole): Pass and update cache state for jax_chunk_gated_delta_rule
     # core_attn_out shape: (B, S, H_v, D_v)
     core_attn_out, _ = jax_chunk_gated_delta_rule(
-        query, key, value, g, beta, chunk_size=cfg.linear_chunk_size, use_qk_l2norm_in_kernel=cfg.use_qk_l2norm_in_kernel
+        query, key, value, g, beta, chunk_size=cfg.gdn_chunk_size, use_qk_norm_in_gdn=cfg.use_qk_norm_in_gdn
     )
 
     # =========================================================================
@@ -720,7 +706,7 @@ class Qwen3NextSparseMoeBlock(nnx.Module):
     shared_gate_output = self.shared_expert_gate(hidden_states)
 
     # 4. Combine the outputs.
-    final_output = routed_output + nn.sigmoid(shared_gate_output) * shared_expert_output
+    final_output = routed_output + jax.nn.sigmoid(shared_gate_output) * shared_expert_output
 
     return final_output, load_balance_loss
 
@@ -729,7 +715,7 @@ class Qwen3NextScannableBlock(nnx.Module):
   """A scannable block of Qwen3-Next decoder layers.
 
   This module contains a fixed number of heterogeneous decoder layers that form
-  a repeating pattern, as defined by `config.full_attention_interval`. It is
+  a repeating pattern, as defined by `config.inhomogeneous_layer_cycle_interval`. It is
   intended to be the body of an `nn.scan` transformation to construct the full
   decoder stack efficiently.
 
@@ -749,7 +735,7 @@ class Qwen3NextScannableBlock(nnx.Module):
     cfg = self.config
 
     # Instantiate each layer within the block in __init__
-    for i in range(cfg.full_attention_interval):
+    for i in range(cfg.inhomogeneous_layer_cycle_interval):
       layer_rngs = self.rngs.fork()  # Fork RNGs for each layer
       layer_name = f"layer_{i}"
       layer = Qwen3NextDecoderLayer(
@@ -787,7 +773,7 @@ class Qwen3NextScannableBlock(nnx.Module):
     x = carry
 
     # Loop over the number of sub-layers that make up one repeating pattern.
-    for i in range(cfg.full_attention_interval):
+    for i in range(cfg.inhomogeneous_layer_cycle_interval):
       layer = getattr(self, f"layer_{i}")
       x = layer(
           x,
@@ -831,6 +817,7 @@ class Qwen3NextDecoderLayer(nnx.Module):
     self.layer_idx = layer_idx
     self.quant = quant
     cfg = self.config
+    self.activation_axis_names = ("activation_batch", "activation_norm_length", "activation_embed")
 
     # First LayerNorm, applied before the attention block.
     self.input_layernorm = Qwen3NextRMSNorm(
@@ -842,7 +829,7 @@ class Qwen3NextDecoderLayer(nnx.Module):
     )
 
     # Determine the type of attention mechanism for the current layer.
-    is_full_attention_layer = (self.layer_idx + 1) % cfg.full_attention_interval == 0
+    is_full_attention_layer = (self.layer_idx + 1) % cfg.inhomogeneous_layer_cycle_interval == 0
 
     # Conditionally instantiate either the Linear Attention or Full Attention block.
     if is_full_attention_layer:
@@ -884,7 +871,7 @@ class Qwen3NextDecoderLayer(nnx.Module):
 
     # First LayerNorm, applied before the attention block.
     hidden_states = self.input_layernorm(inputs)
-    hidden_states = nn.with_logical_constraint(hidden_states, ("activation_batch", "activation_length", "activation_embed"))
+    hidden_states = nn.with_logical_constraint(hidden_states, self.activation_axis_names)
 
     # Conditionally apply either the Linear Attention or Full Attention block.
     if isinstance(self.attention, Qwen3NextFullAttention):
@@ -900,14 +887,14 @@ class Qwen3NextDecoderLayer(nnx.Module):
 
     # First residual connection after attention
     hidden_states = residual + attention_output
-    hidden_states = nn.with_logical_constraint(hidden_states, ("activation_batch", "activation_length", "activation_embed"))
+    hidden_states = nn.with_logical_constraint(hidden_states, self.activation_axis_names)
 
     # Prepare for the MoE block by capturing the new residual
     residual = hidden_states
 
     # Second LayerNorm, applied before the MoE block.
     hidden_states = self.post_attention_layernorm(hidden_states)
-    hidden_states = nn.with_logical_constraint(hidden_states, ("activation_batch", "activation_length", "activation_embed"))
+    hidden_states = nn.with_logical_constraint(hidden_states, self.activation_axis_names)
 
     # Instantiate and call our `Qwen3NextSparseMoeBlock`.
     mlp_output, load_balance_loss = self.mlp(hidden_states, deterministic=deterministic)
@@ -921,7 +908,7 @@ class Qwen3NextDecoderLayer(nnx.Module):
     layer_output = residual + mlp_output
     layer_output = nn.with_logical_constraint(
         layer_output,
-        ("activation_batch", "activation_length", "activation_embed"),
+        self.activation_axis_names,
     )
 
     return layer_output
@@ -1152,37 +1139,12 @@ Qwen3MoeDecoderLayerToLinen = nnx_wrappers.to_linen_class(
     base_metadata_fn=max_initializers.variable_to_logically_partitioned,
 )
 
-Qwen3NextSparseMoeBlockLinen = nnx_wrappers.to_linen_class(
-    Qwen3NextSparseMoeBlock,
-    base_metadata_fn=max_initializers.variable_to_logically_partitioned,
-)
-
-Qwen3NextFullAttentionLinen = nnx_wrappers.to_linen_class(
-    Qwen3NextFullAttention,
-    base_metadata_fn=max_initializers.variable_to_logically_partitioned,
-)
-
-Qwen3NextGatedDeltaNetLinen = nnx_wrappers.to_linen_class(
-    Qwen3NextGatedDeltaNet,
-    base_metadata_fn=max_initializers.variable_to_logically_partitioned,
-)
-
-Qwen3NextRMSNormGatedLinen = nnx_wrappers.to_linen_class(
-    Qwen3NextRMSNormGated,
-    base_metadata_fn=max_initializers.variable_to_logically_partitioned,
-)
-
-Qwen3NextRMSNormLinen = nnx_wrappers.to_linen_class(
-    Qwen3NextRMSNorm,
-    base_metadata_fn=max_initializers.variable_to_logically_partitioned,
-)
-
-Qwen3NextDecoderLayerLinen = nnx_wrappers.to_linen_class(
+Qwen3NextDecoderLayerToLinen = nnx_wrappers.to_linen_class(
     Qwen3NextDecoderLayer,
     base_metadata_fn=max_initializers.variable_to_logically_partitioned,
 )
 
-Qwen3NextScannableBlockLinen = nnx_wrappers.to_linen_class(
+Qwen3NextScannableBlockToLinen = nnx_wrappers.to_linen_class(
     Qwen3NextScannableBlock,
     base_metadata_fn=max_initializers.variable_to_logically_partitioned,
 )

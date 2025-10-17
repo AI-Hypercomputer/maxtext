@@ -402,7 +402,7 @@ class Decoder(nn.Module):
       case DecoderBlockType.QWEN3_MOE:
         return [qwen3.Qwen3MoeDecoderLayerToLinen]
       case DecoderBlockType.QWEN3_NEXT:
-        return [qwen3.Qwen3NextDecoderLayerLinen]
+        return [qwen3.Qwen3NextScannableBlockToLinen] if self.config.scan_layers else [qwen3.Qwen3NextDecoderLayerToLinen]
       case DecoderBlockType.SIMPLE:
         return [simple_layer.SimpleDecoderLayer]
       case DecoderBlockType.SIMPLE_MLP:
@@ -767,18 +767,6 @@ class Decoder(nn.Module):
               page_state,
               slot,
           )
-        elif cfg.decoder_block == DecoderBlockType.QWEN3_NEXT:
-          y = self._apply_qwen3_next_scanned_blocks(
-              y,
-              policy,
-              decoder_segment_ids,
-              decoder_positions,
-              deterministic,
-              model_mode,
-              previous_chunk,
-              page_state,
-              slot,
-          )
         else:
           RemattedBlockLayer = RemattedBlockLayers[0]
           scan_length = int(cfg.num_decoder_layers / cfg.inhomogeneous_layer_cycle_interval)
@@ -938,51 +926,4 @@ class Decoder(nn.Module):
           slot=slot,
           **layer_call_kwargs,
       )
-    return y
-
-  def _apply_qwen3_next_scanned_blocks(
-      self,
-      y,
-      policy,
-      decoder_segment_ids,
-      decoder_positions,
-      deterministic,
-      model_mode,
-      previous_chunk,
-      page_state,
-      slot,
-  ):
-    """Applies Qwen3-Next scanned decoder blocks."""
-    cfg = self.config
-    mesh = self.mesh
-
-    if cfg.num_decoder_layers % cfg.full_attention_interval != 0:
-      raise ValueError(
-          f"For Qwen3-Next with scan_layers=True, num_decoder_layers ({cfg.num_decoder_layers}) "
-          f"must be divisible by full_attention_interval ({cfg.full_attention_interval})."
-      )
-    scan_length = cfg.num_decoder_layers // cfg.full_attention_interval
-
-    broadcast_args = (
-        decoder_segment_ids,
-        decoder_positions,
-        deterministic,
-        model_mode,
-        previous_chunk,
-        page_state,
-        slot,
-    )
-
-    RemattedBlockLayer = self.set_remat_policy([qwen3.Qwen3NextScannableBlockLinen], policy)[0]
-
-    scanned_block = self.scan_decoder_layers(
-        cfg,
-        RemattedBlockLayer,
-        scan_length,
-        "layers",
-        mesh,
-        in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
-        model_mode=model_mode,
-    )
-    y, _ = scanned_block(y, *broadcast_args)
     return y
