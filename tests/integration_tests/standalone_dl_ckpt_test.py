@@ -15,8 +15,8 @@
 """ Tests for the standalone_checkpointer.py """
 import unittest
 import pytest
-from MaxText.standalone_checkpointer import main as sckpt_main
-from MaxText.standalone_dataloader import main as sdl_main
+from tools.gcs_benchmarks.standalone_checkpointer import main as sckpt_main
+from tools.gcs_benchmarks.standalone_dataloader import main as sdl_main
 from MaxText.globals import MAXTEXT_PKG_DIR, MAXTEXT_ASSETS_ROOT
 from datetime import datetime
 import random
