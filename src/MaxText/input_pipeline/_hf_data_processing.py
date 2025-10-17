@@ -47,6 +47,28 @@ def vision_sft_preprocessing_pipeline(
   if config.enable_data_shuffling:
     dataset = dataset.shuffle(seed=config.data_shuffle_seed)
 
+  # If multiple image columns are provided, merge them into a single 'images' column.
+  if isinstance(image_column, list):
+    # First, truncate the list of image columns if it exceeds the configured max.
+    if config.max_num_images_per_example > 0 and len(image_column) > config.max_num_images_per_example:
+      image_column = image_column[: config.max_num_images_per_example]
+
+    # Define a mapping function that accepts the list of columns as an argument.
+    def merge_image_columns(example, column_names):
+      """Merges specified image columns from an example into a single list."""
+      images_list = [example[col] for col in column_names]
+      return {"images": images_list}
+
+    # Apply the function using fn_kwargs to pass the column names cleanly.
+    dataset = dataset.map(
+        merge_image_columns,
+        fn_kwargs={"column_names": image_column},  # Pass image_column list
+        remove_columns=image_column,  # Drop the original image columns
+    )
+
+    # After merging, the single image column is now named 'images'.
+    image_column = "images"
+
   dataset = dataset.select_columns(text_columns + [image_column])
   if image_column != "images":
     dataset = dataset.rename_column(image_column, "images")
@@ -125,7 +147,9 @@ def vision_sft_preprocessing_pipeline(
           max_num_images_per_example=config.max_num_images_per_example,
       )
   )
+  operations.append(_input_pipeline_utils.ExtractImagesAndMasks())
   operations.append(grain.Batch(batch_size=batch_size, drop_remainder=True))
+  operations.append(_input_pipeline_utils.FoldImagesIntoBatch(model_name=config.model_name))
   operations.append(_input_pipeline_utils.ShiftData(ignored_ids=[pad_id], axis=1))
   dummy_index_sampler = grain.IndexSampler(
       num_records=len(dataset),
