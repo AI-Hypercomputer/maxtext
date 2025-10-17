@@ -1,4 +1,5 @@
 # Copyright 2023–2025 Google LLC
+# Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -275,7 +276,8 @@ def validate_constant_bound(keys):
 
 def validate_quantization_methods(keys):
   """Validate quantization methods"""
-  valid_quant_methods = ("", "int8", "fp8", "fp8_full", "fp8_gpu", "fp8_nanoo")
+  valid_quant_methods = ("", "int8", "fp8", "fp8_full", "fp8_gpu", "fp8_nanoo",
+                         "te_fp8_delayedscaling", "te_fp8_currentscaling", "te_mxfp8")
   if keys["use_qwix_quantization"]:
     if keys["quantization"] not in valid_quant_methods:
       raise ValueError(f"Invalid quantization method {keys['quantization']}. Valid options are {valid_quant_methods}")
