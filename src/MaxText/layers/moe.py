@@ -579,8 +579,8 @@ class RoutedMoE(nnx.Module):
       if self.config.decoder_block == ctypes.DecoderBlockType.LLAMA4:
         # For Llama4, combine using weights of 1 for selected experts
         reshaped_weights = jnp.ones_like(reshaped_weights)
-      if config.weight_sum_fp32:
-        reshaped_intermediate = reshaped_intermediate.astype(jnp.float32) 
+      if self.config.weight_sum_fp32:
+        reshaped_intermediate = reshaped_intermediate.astype(jnp.float32)
         reshaped_weights = reshaped_weights.astype(jnp.float32)
       output = jnp.einsum(
           "BKE,BK -> BE",
