@@ -15,7 +15,7 @@
  -->
 
 (first-run)=
-# Getting Started: First Run
+# Getting started: First run
 
 This topic provides a basic introduction to get your MaxText workload up and running on single host and multihost environments using Cloud TPUs or NVIDIA GPUs. To help you get familiar with MaxText, we recommend starting with a single host first and then moving to multihost.
 
@@ -27,7 +27,7 @@ This topic provides a basic introduction to get your MaxText workload up and run
 ## Local development for single host
 This procedure describes how to run MaxText on a single GPU or TPU host.
 
-### Run MaxText on Cloud TPUs
+### Run MaxText on cloud TPUs
 Local development is a convenient way to run MaxText on a single host. It doesn't scale to
 multiple hosts but is a good way to learn about MaxText.
 
@@ -60,13 +60,11 @@ python3 -m MaxText.decode src/MaxText/configs/base.yml \
 This command uses a model with randomly initialized weights, so the outputs are also random. To get high quality output you need pass in a checkpoint, typically via the `load_parameters_path` argument.
 
 
-### Run MaxText via Notebook
+### Run MaxText via notebook
 In the same TPU VM where you just installed all the dependencies of MaxText, You can also run training and decoding in MaxText via Notebook (for e.g., via Jupyter or Colab). 
 
-#### Decoding in MaxText via Notebook
+#### Decoding in MaxText via notebook
 You can use [demo_decoding.ipynb](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/examples/demo_decoding.ipynb) to try out decoding on MaxText's `Llama3.1-8b` model implementation. In this notebook, we give `"I love to"` as the prompt, and the greedily sampled first output token is `" cook"`. Please remember to provide the path to your `Llama3.1-8b` checkpoint for the `load_parameters_path` argument in the config inside the notebook. You can use [to_maxtext.py](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/utils/ckpt_conversion/to_maxtext.py) to create a MaxText/Orbax checkpoint from a Huggingface checkpoint.
-
-
 
 ### Run MaxText on NVIDIA GPUs
 1. Use `bash docker_build_dependency_image.sh DEVICE=gpu` to build a container with the required dependencies.
@@ -96,6 +94,6 @@ Failed to execute XLA Runtime executable: run time error: custom call 'xla.gpu.a
 
 Google Kubernetes Engine (GKE) is the recommended way to run MaxText on multiple hosts. It provides a managed environment for deploying and scaling containerized applications, including those that require TPUs or GPUs. See [Running Maxtext with XPK](run-xpk) for details.
 
-## Next steps: Preflight optimizations
+## Next steps: preflight optimizations
 
 After you get workloads running, there are optimizations you can apply to improve performance. For more information, see [PREFLIGHT.md](https://github.com/google/maxtext/blob/main/PREFLIGHT.md).

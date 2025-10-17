@@ -1,4 +1,4 @@
-# Emergency Checkpointing
+# Emergency checkpointing
 
 Emergency checkpointing is a vital feature for large-scale, multi-slice training. It enables rapid saving and restoration of model state from local, in-memory checkpoints in response to hardware failures, host errors, or preemptions. This feature becomes increasingly critical as the number of hosts and devices grows, which raises the probability of a failure.
 
@@ -11,10 +11,9 @@ Emergency checkpointing is a vital feature for large-scale, multi-slice training
 * **Ramdisk Mounted via Jobset**: Each workload pod must have a [ramdisk directory mounted by Jobset](https://cloud.google.com/kubernetes-engine/docs/how-to/machine-learning/training/multi-tier-checkpointing#update-jobset) using the Multi-Tier Checkpointing CSI driver. This provides a high-speed, in-memory storage location for checkpoints.
 * **Supported TPU types**: [v4](https://cloud.google.com/tpu/docs/v4), [v5e](https://cloud.google.com/tpu/docs/v5e), [v5p](https://cloud.google.com/tpu/docs/v5p), and [v6e](https://cloud.google.com/tpu/docs/v6e)
 
-## Cluster Creation using XPK
+## Cluster creation using XPK
 
 To run workloads with Emergency Checkpointing, you need a Google Kubernetes Engine (GKE) cluster with the necessary drivers and features enabled. You can create a properly configured cluster using the **XPK** or by setting it up manually with `gcloud` commands following [Google Cloud Checkpointing Documentation](https://cloud.google.com/kubernetes-engine/docs/how-to/machine-learning/training/multi-tier-checkpointing).
-
 
 The `xpk` script provides a streamlined way to create a GKE cluster with all the required MTC settings. The key flags used are:
 
@@ -23,8 +22,7 @@ The `xpk` script provides a streamlined way to create a GKE cluster with all the
 * `--mtc-ramdisk-size`: Allocates an in-memory ramdisk on each node for fast, local checkpoints.
 * `--mtc-gcs-bucket`: Specifies the GCS bucket. It is not utilized in emergency checkpointing, but is needed to deploy checkpointing configurations.
 
-
-### Calculating Ramdisk Size Per Host 
+### Calculating ramdisk size per host
 
 The total size of a full training checkpoint (including model weights and optimizer state) can be estimated based on the number of model parameters.
 A good rule of thumb:
@@ -39,7 +37,7 @@ The formula is:
 
 It's a good practice to add a **10-15% buffer** .
 
-### Example Calculation
+### Example calculation
 
 Let's walk through an example for a large model.
 
@@ -97,14 +95,13 @@ In this scenario, you should configure each pod in that slice with a ramdisk of 
     --gke-version=${GKE_VERSION}
     ```
 
-## MaxText Configuration
+## MaxText configuration
 
 MaxText provides a set of configuration flags to control checkpointing options. This configuration manages a `two-tiered checkpointing` system designed for both durability and rapid recovery.
 
 * **Local Emergency Checkpoints**: It saves checkpoints much more frequently to a fast, local directory on each host (i.e. a ramdisk). If a preemption or failure occurs, the job can restore from this recent local copy, minimizing lost work without needing to download from slower persistent storage. This feature is enabled by setting `enable_checkpointing`, `enable_emergency_checkpoint`, `local_checkpoint_directory` and a non-zero `local_checkpoint_period`.
 
 * **Persistent Checkpoints**: These are standard checkpoints saved periodically and much more rarely to durable storage(i.e. GCS bucket). They ensure that you can recover your training state even after a complete cluster failure. This is controlled by `enable_checkpointing`, and `checkpoint_period`.
-
 
 | Flag | Description | Type | Default |
 | :--- | :--- | :--- | :--- |
@@ -116,7 +113,7 @@ MaxText provides a set of configuration flags to control checkpointing options. 
 | `checkpoint_period` | The interval, in training steps, for how often a checkpoint is saved to **persistent storage**. | `integer` | `10000` |
 | `enable_single_replica_ckpt_restoring` | If `True`, one replica reads the checkpoint from storage and then broadcasts it to all other replicas. This can significantly speed up restoration on multi-host systems by reducing redundant reads from storage. | `boolean` | `False` |
 
-## Workload Creation using XPK
+## Workload creation using XPK
 
 The flags below would give the user access to the ramdisk in their workload:
 
@@ -124,7 +121,6 @@ The flags below would give the user access to the ramdisk in their workload:
 | :--- | :--- |
 | `--mtc-enabled` | Enables the Multi-Tier Checkpointing feature, by mounting ramdisk to the workload pods, using csi drivers. |
 | `--ramdisk-directory` | Specifies the mount path inside each pod where the high-speed ramdisk will be accessible. Your training application should write its local, emergency checkpoints to this path. |
-
 
 ### Example XPK workload creation command
 

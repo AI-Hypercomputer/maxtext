@@ -15,7 +15,6 @@ The practical application of this principle is evident throughout the codebase, 
 For example, the functional training step in [`train.py`](https://github.com/AI-Hypercomputer/maxtext/blob/01c7137d4e13878e38baae44dc99e588eaa50a70/src/MaxText/train.py#L193) is compiled using `jax.jit` before being executed in the main training loop.
 
 ```py
-
 # A simplified representation of the JIT compilation in MaxText/train.py
 p_train_step = jax.jit(
   functional_train,
@@ -24,7 +23,6 @@ p_train_step = jax.jit(
   static_argnums=static_argnums_train,
   donate_argnums=donate_argnums_train,
 )
-
 ```
 
 This code snippet demonstrates how much of the complexity of optimizing a training step, including forward pass, loss calculation, and gradient computation, is handed off to the compiler. The developer works with high-level Python and JAX primitives, while the compiler manages the low-level performance details. This strategic decision to trade the fine-grained control of custom kernels for the automated optimization and hardware portability of a compiler is central to MaxText's identity. It shifts the cognitive load from the end-user (the ML engineer) to the compiler development team, making high-performance computing more accessible to a broader audience proficient in Python.
@@ -33,7 +31,7 @@ This code snippet demonstrates how much of the complexity of optimizing a traini
 
 The control plane of MaxText provides a structured yet flexible interface for users to define, configure, and launch training and inference jobs. It is designed to scale with the user's needs, offering simple command-line execution for local development and sophisticated orchestration tools for production-level runs on large-scale clusters. This system is centered around a primary YAML configuration file and a tiered set of execution scripts.
 
-### base.yml: the central configuration hub
+### `base.yml`: the central configuration hub
 
 Every MaxText job is governed by the same base YAML configuration file ([`src/MaxText/configs/base.yml`](https://github.com/AI-Hypercomputer/maxtext/blob/01c7137d4e13878e38baae44dc99e588eaa50a70/src/MaxText/configs/base.yml)) with model-specific details and overrides passed through a second config (e.g. [`src/MaxText/configs/models/deepseek3-671b.yml`](https://github.com/AI-Hypercomputer/maxtext/blob/01c7137d4e13878e38baae44dc99e588eaa50a70/src/MaxText/configs/models/deepseek3-671b.yml)). Finally, experiment-specific settings are passed on the command line. The contents of these together comprise all the hyperparameters and settings that define a run:
 
@@ -91,9 +89,9 @@ While the base model implementations are typically simple, MaxText is equipped t
 
 The modularity of this design is clearly demonstrated by third-party extensions. For instance, the NVIDIA maxtext-jaxpp fork was able to add support for pipeline parallelism by inserting jaxpp.pipeline\_enter\_stage hooks directly into the \_\_call\_\_ method of the Decoder class, a testament to the codebase's modularity and extensibility.
 
-### Data ingestion (input\_pipeline.py)
+### Data ingestion (`input_pipeline.py`)
 
-[The data ingestion pipeline](https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/guides/data_input_pipeline.md) is a critical component for performance at scale. In MaxText, the main training loop interfaces with the data pipeline through the create\_data\_iterator function, which is called from train.py. This function acts as a facade, abstracting the specific data loading implementation from the rest of the training logic.
+[The data ingestion pipeline](data-input-pipeline) is a critical component for performance at scale. In MaxText, the main training loop interfaces with the data pipeline through the create\_data\_iterator function, which is called from train.py. This function acts as a facade, abstracting the specific data loading implementation from the rest of the training logic.
 
 MaxText supports three primary data loading backends:
 
@@ -104,7 +102,7 @@ MaxText supports three primary data loading backends:
 
 While all three are supported, MaxText recommends the use of Grain, particularly for multi-host training scenarios. The rationale stems from performance and determinism considerations, at which Grain excels. Grain uses a data format called ArrayRecord, which supports efficient random access by index. This allows for true global shuffling of data across all hosts and eliminates the performance bottleneck associated with sequential reading.
 
-### State management and persistence (checkpointing.py)
+### State management and persistence (`checkpointing.py`)
 
 MaxText's state management and persistence layer is built on [Orbax](https://orbax.readthedocs.io/en/latest/), a flexible and powerful open-source checkpointing library for JAX applications. The core logic is encapsulated within the
 checkpointing.py module, which provides a comprehensive suite of tools for saving and loading training state with high performance and resilience.
@@ -112,7 +110,7 @@ checkpointing.py module, which provides a comprehensive suite of tools for savin
 The central function is create\_orbax\_checkpoint\_manager, which configures and returns an Orbax CheckpointManager instance. This manager handles the core checkpointing operations and is configured with several key features:
 
 * Asynchronous checkpointing: By setting the `async_checkpointing` flag to true, users can enable non-blocking checkpoint saves. This is a critical performance optimization. The training loop can proceed with the next step on the accelerators while the CPU on each host handles the process of serializing the previous step's state and writing it to Google Cloud Storage. This effectively hides the I/O latency of checkpointing and maximizes accelerator utilization.
-* Flexible state restoration: The load\_state\_if\_possible function implements a sophisticated, prioritized logic for resuming a run. When a job starts, it first attempts to find and load a full checkpoint from the current run's output directory. If that fails, it checks if a path to a full state checkpoint from a different run has been provided via the `load_full_state_from_path` argument. If that also fails, it looks for a parameter-only checkpoint (without training/optimizer state) specified by `load_parameters_from_path`.
+* Flexible state restoration: The `load_state_if_possible` function implements a sophisticated, prioritized logic for resuming a run. When a job starts, it first attempts to find and load a full checkpoint from the current run's output directory. If that fails, it checks if a path to a full state checkpoint from a different run has been provided via the `load_full_state_from_path` argument. If that also fails, it looks for a parameter-only checkpoint (without training/optimizer state) specified by `load_parameters_from_path`.
 * Emergency and replicated checkpointing: For maximum resilience and rapid job resumption in large-scale, production environments like GKE, the module includes support for advanced Orbax features.
 
 
@@ -123,7 +121,7 @@ A fundamental aspect of the MaxText workflow is the conversion of checkpoints be
 * There also exist conversion scripts to convert weights to Hugging Face, e.g. `llama_mistral_mixtral_orbax_to_hf.py`
 
 
-### Utilities and distributed setup (max\_utils.py)
+### Utilities and distributed setup (`max_utils.py`)
 
 The `max_utils.py` module serves as a collection of common helper functions used across the MaxText codebase, but its most critical function is to abstract away the initialization of the JAX distributed environment.
 
@@ -155,7 +153,7 @@ This logical mesh abstraction enables the implementation of the standard paralle
 
 In MaxText, these strategies are implemented by annotating the model's PyTrees (the nested Python structures of arrays that hold the parameters and state) with sharding specifications. This is done using Flax's partitioning utilities, such as nn\_partitioning. These annotations provide requirements and hints to the compiler, telling it how each tensor should be distributed across the axes of the device mesh. The compiler then generates the appropriate collective communication operations (e.g., all-reduce, all-gather) needed to execute the parallel computation correctly and efficiently.
 
-For more information on sharding see [our sharding documentation](https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/explanations/sharding.md).
+For more information on sharding see [our sharding documentation](sharding).
 
 ### Hardware abstraction and performance via XLA
 
