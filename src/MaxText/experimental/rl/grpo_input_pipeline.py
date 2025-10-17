@@ -225,12 +225,13 @@ def make_hf_train_iterator(
       streaming=True,
       token=config.hf_access_token,
   )
+  data_column_names = list(train_ds.features)
   local_iter = preprocessing_pipeline(
       dataloading_host_index=process_indices_train.index(jax.process_index()),
       dataloading_host_count=len(process_indices_train),
       global_mesh=global_mesh,
       dataset=train_ds,
-      data_column_names=[config.train_data_columns],
+      data_column_names=data_column_names,
       tokenize=config.tokenize_train_data,
       tokenizer_path=config.tokenizer_path,
       hf_access_token=config.hf_access_token,

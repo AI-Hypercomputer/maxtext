@@ -14,6 +14,7 @@
 
 """Utility functions for GRPO (Generative Rejection-based Policy Optimization)."""
 
+import re
 import math
 import numpy as np
 import jax
@@ -36,6 +37,32 @@ def _identity(x):
 
 INTERMEDIATE_SPLIT_SUFFIX = "_intermediate_split"
 INTERMEDIATE_REPLICA_SUFFIX = "_intermediate_replica"
+
+# global variables for reward functions
+reasoning_start = "<reasoning>"
+reasoning_end = "</reasoning>"
+solution_start = "<answer>"
+solution_end = "</answer>"
+
+SYSTEM_PROMPT = f"""You are given a problem. Think about the problem and \
+provide your reasoning. Place it between {reasoning_start} and \
+{reasoning_end}. Then, provide the final answer (i.e., just one numerical \
+value) between {solution_start} and {solution_end}."""
+
+TEMPLATE = """<start_of_turn>user
+{system_prompt}
+
+{question}<end_of_turn>
+<start_of_turn>model"""
+
+# ====== Reward Values ======
+REWARD_EXACT_FORMAT_MATCH = 3.0
+REWARD_WHITE_SPACE_FORMAT_MATCH = 1.5
+REWARD_PARTIAL_FORMAT_MATCH = 0.5
+REWARD_RATIO_GUESS_TO_ANSWER_HIGH = 0.5
+REWARD_RATIO_GUESS_TO_ANSWER_LOW = 0.25
+PENALTY_INCORRECT_FORMAT = -0.5
+PENALTY_INCORRECT_ANSWER = -1.0
 
 
 def compute_log_probs(
@@ -232,6 +259,143 @@ def dummy_reward_len(valid_seq_mask):
   # adding a 1 because valid_seq_mask is actually one less than the number of valid tokens
   reward = -abs(20 - (1 + jnp.sum(valid_seq_mask, axis=-1)))  # [BxG]
   return reward
+
+# reward functions inspired from https://gist.github.com/willccbb/4676755236bb08cab5f4e54a0475d6fb and Tunix
+match_format = re.compile(
+    rf"^[\s]{{0,}}" rf"{reasoning_start}.+?{reasoning_end}.*?" rf"{solution_start}(.+?){solution_end}" rf"[\s]{{0,}}$",
+    flags=re.MULTILINE | re.DOTALL,
+)
+
+match_format.search(
+    f"{reasoning_start}Let me" f" think!{reasoning_end}{solution_start}2{solution_end}",
+)
+
+
+def match_format_exactly(prompts, completions, **kwargs):
+  """
+  Give the model a reward of REWARD_EXACT_FORMAT_MATCH points if the format matches exactly.
+  """
+  scores = []
+  for completion in completions:
+    score = 0
+    response = completion
+    # Match if format is seen exactly!
+    if match_format.search(response) is not None:
+      score += REWARD_EXACT_FORMAT_MATCH
+    scores.append(score)
+  return scores
+
+
+def match_format_approximately(prompts, completions, **kwargs):
+  """
+  We also reward the model if the format of the output matches partially.
+  """
+  scores = []
+
+  for completion in completions:
+    score = 0
+    response = completion
+    # Count how many keywords are seen - we penalize if too many!
+    # If we see 1, then plus some points!
+    score += REWARD_PARTIAL_FORMAT_MATCH if response.count(reasoning_start) == 1 else PENALTY_INCORRECT_FORMAT
+    score += REWARD_PARTIAL_FORMAT_MATCH if response.count(reasoning_end) == 1 else PENALTY_INCORRECT_FORMAT
+    score += REWARD_PARTIAL_FORMAT_MATCH if response.count(solution_start) == 1 else PENALTY_INCORRECT_FORMAT
+    score += REWARD_PARTIAL_FORMAT_MATCH if response.count(solution_end) == 1 else PENALTY_INCORRECT_FORMAT
+    scores.append(score)
+  return scores
+
+
+def check_answer(prompts, completions, answer, **kwargs):
+  """
+  Reward the model if the answer is correct. A reward is also given if the answer
+  does not match exactly, i.e., based on how close the answer is to the correct
+  value.
+  """
+  responses = completions
+
+  extracted_responses = [guess.group(1) if (guess := match_format.search(r)) is not None else None for r in responses]
+
+  scores = []
+  for guess, true_answer in zip(extracted_responses, answer):
+    score = 0
+    if guess is None:
+      scores.append(0)
+      continue
+    # Correct answer gets 3 points!
+    if guess == true_answer:
+      score += REWARD_EXACT_FORMAT_MATCH
+    # Match if spaces are seen
+    elif guess.strip() == true_answer.strip():
+      score += REWARD_WHITE_SPACE_FORMAT_MATCH
+    else:
+      # We also reward it if the answer is close via ratios!
+      # Ie if the answer is within some range, reward it!
+      try:
+        ratio = float(guess) / float(true_answer)
+        if ratio >= 0.9 and ratio <= 1.1:
+          score += REWARD_RATIO_GUESS_TO_ANSWER_HIGH
+        elif ratio >= 0.8 and ratio <= 1.2:
+          score += REWARD_RATIO_GUESS_TO_ANSWER_LOW
+        else:
+          score += PENALTY_INCORRECT_ANSWER  # Penalize wrong answers
+      except:
+        score += PENALTY_INCORRECT_FORMAT  # Penalize
+    scores.append(score)
+  return scores
+
+
+# Sometimes, the text between `<answer>` and `</answer>` might not be one
+# number; it can be a sentence. So, we extract the number and compare the answer.
+
+
+match_numbers = re.compile(rf"{solution_start}.*?([\d\.]{{1,}})", flags=re.MULTILINE | re.DOTALL)
+match_numbers.findall(f"{solution_start}  0.34  {solution_end}")
+
+
+def check_numbers(prompts, completions, answer, **kwargs):
+  """
+  Reward the model if the answer is correct.
+  """
+  responses = completions
+
+  extracted_responses = [guess.group(1) if (guess := match_numbers.search(r)) is not None else None for r in responses]
+
+  scores = []
+  for guess, true_answer in zip(extracted_responses, answer):
+    if guess is None:
+      scores.append(0)
+      continue
+    # Convert to numbers
+    try:
+      true_answer = float(true_answer.strip())
+      guess = float(guess.strip())
+      scores.append(1.5 if guess == true_answer else 0.0)
+    except:
+      scores.append(0)
+      continue
+  return scores
+
+
+# main reward function called in grpo_trainer.py
+def compute_rewards(prompts, completions, answer, reward_fns):
+  """Computes rewards for a batch of completions using specified reward functions.
+
+  This function iterates over a list of reward functions, applying each to the
+  provided prompts and completions. It aggregates the rewards from all functions
+  to produce a final reward for each completion.
+
+  Args:
+    prompts: A list of input prompts.
+    completions: A list of generated completions corresponding to the prompts.
+    answer: A list of correct answers corresponding to the prompts.
+    reward_fns: A list of reward functions to apply. Each function should take
+      `prompts`, `completions`, and `answer` as arguments and return a list of
+      rewards.
+  """
+  rewards = []
+  for fn in reward_fns:
+    rewards.append(fn(prompts, completions, answer))
+  return rewards
 
 
 def concatenate_prompt_with_completions(config, tokenizer_model, data, completions):

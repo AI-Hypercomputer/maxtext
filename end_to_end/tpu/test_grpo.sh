@@ -37,10 +37,10 @@ COMMON_ARGS="model_name=${MODEL} base_output_directory=${BASE_OUTPUT_DIRECTORY} 
 max_prefill_predict_length=${MAX_PREFILL_LENGTH} max_target_length=${MAX_TARGET_LENGTH} \
 enable_checkpointing=false async_checkpointing=false \
 tokenizer_type=huggingface tokenizer_path=${TOKENIZER} \
-dataset_type=hf hf_path='trl-lib/tldr' \
+dataset_type=hf hf_path='openai/gsm8k' hf_data_dir='main' train_data_columns='question' \
 enable_single_controller=true \
 dtype=bfloat16 weight_dtype=bfloat16 \
-allow_split_physical_axes=true enable_goodput_recording=false monitor_goodput=false"
+allow_split_physical_axes=true enable_goodput_recording=false monitor_goodput=false reuse_example_batch=true"
 
 TRAINING_ARGS="run_name=${RUN_NAME} scan_layers=true \
 inference_replicas=${NUM_SAMPLERS} inference_devices_per_replica=${DEVICES_PER_SAMPLER} subslice_shape=${TRAINING_SUBSLICE} \

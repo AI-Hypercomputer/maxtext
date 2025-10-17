@@ -340,7 +340,7 @@ def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_
 # -----------------------------------------------------------------------------
 
 
-def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
+def train_step(model, config, state_mesh_shardings, params_shardings, state, data, dropout_rng):
   """Performs a single training step of the GRPO algorithm.
 
   This function computes the GRPO loss, calculates gradients, and updates the
@@ -755,7 +755,18 @@ def train_loop(config, config_inference, recorder, state=None):
               engine_lock,
           )
           jax.block_until_ready(processed_batch)
-
+          # calculate rewards on the processed batch from sampler
+          # detokenize question, completion and answer
+          # TODO(mohitkhatwani): detokenize here
+          # list of reward_fn
+          reward_fn_list = [
+            grpo_utils.match_format_exactly,
+            grpo_utils.match_format_approximately,
+            grpo_utils.check_answer,
+            grpo_utils.check_numbers,
+          ]
+          rewards = grpo_utils.compute_rewards(question, completions, answers, reward_fn_list)
+          processed_batch['rewards'] = rewards
         with worker_data_buffer_lock:
           if not worker_data_buffer:
             worker_data_buffer.append(processed_batch)
@@ -821,6 +832,7 @@ def train_loop(config, config_inference, recorder, state=None):
               continue
         train_rng, rng = random.split(init_rng)
         example_batch = jax.device_put(example_batch, data_sharding)
+        breakpoint()
         with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
           state, metrics = p_train_step(state, example_batch, train_rng)
       with jax.profiler.StepTraceAnnotation("transfer data", step_num=step):
