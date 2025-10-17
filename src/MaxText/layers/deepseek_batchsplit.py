@@ -16,7 +16,7 @@
 
 """Alternative DeepSeek model definition with batch-split schedule."""
 
-from flax import linen as nnx
+from flax import linen as nn
 import jax
 import jax.numpy as jnp
 from MaxText import common_types
@@ -29,7 +29,7 @@ from MaxText.layers import normalizations
 from MaxText.layers import quantizations
 
 
-class DeepSeekGenericLayer(nnx.Module):
+class DeepSeekGenericLayer(nn.Module):
   """Generic DeepSeek layer with Multi-Head Latent Attention.
 
   This is to be used as a base class for DeepSeek layers with dense/sparse MLPs.
@@ -101,7 +101,7 @@ class DeepSeekGenericLayer(nnx.Module):
       )
 
   def with_logical_constraint(self, x):
-    return nnx.with_logical_constraint(x, self.logical_axis_names)
+    return nn.with_logical_constraint(x, self.logical_axis_names)
 
   def rms_norm_layer(self, name):
     return normalizations.rms_norm(
@@ -187,7 +187,7 @@ class DeepSeekGenericLayer(nnx.Module):
     raise NotImplementedError()
 
   def dropout_layer(self):
-    return nnx.Dropout(rate=self.config.dropout_rate, broadcast_dims=(-2,))
+    return nn.Dropout(rate=self.config.dropout_rate, broadcast_dims=(-2,))
 
   def dropout(self, x, deterministic):
     return self.with_logical_constraint(

@@ -23,7 +23,6 @@ from absl import app
 import numpy as np
 
 import tensorflow as tf
-
 import jax
 
 from flax.linen import partitioning as nn_partitioning

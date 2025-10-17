@@ -39,8 +39,8 @@ from typing import Sequence
 
 from absl import app
 import os
-
 import jax
+import pathwaysutils
 
 from flax.linen import partitioning as nn_partitioning
 
@@ -162,6 +162,8 @@ def train(mt_config, goodput_recorder=None):
   with mesh, nn_partitioning.axis_rules(mt_config.logical_axis_rules):
     trainer.train(data_hooks.train_data_iterator, data_hooks.eval_data_iterator)
 
+  return trainer, mesh
+
 
 def main(argv: Sequence[str]) -> None:
   """Main function to run SFT training.
@@ -169,6 +171,7 @@ def main(argv: Sequence[str]) -> None:
   Args:
     argv: Command-line arguments.
   """
+  pathwaysutils.initialize()
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
   if "xla_tpu_spmd_rng_bit_generator_unsafe" not in os.environ.get("LIBTPU_INIT_ARGS", ""):

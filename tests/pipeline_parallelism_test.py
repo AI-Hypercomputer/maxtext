@@ -27,6 +27,7 @@ import jax.numpy as jnp
 
 from flax.core import meta
 from flax import linen as nn
+from flax import nnx
 
 from MaxText import maxtext_utils
 from MaxText import pyconfig
@@ -63,7 +64,10 @@ class PipelineParallelismTest(unittest.TestCase):
     mesh = Mesh(devices_array, config.mesh_axes)
     model_mode = MODEL_MODE_TRAIN
     if single_pipeline_stage_class is None:
-      single_pipeline_stage = simple_layer.SimpleDecoderLayer(config=config, mesh=mesh, model_mode=model_mode)
+      rngs = nnx.Rngs(params=0)
+      single_pipeline_stage = simple_layer.SimpleDecoderLayerToLinen(
+          config=config, mesh=mesh, model_mode=model_mode, rngs=rngs
+      )
     else:
       single_pipeline_stage = single_pipeline_stage_class(config=config, mesh=mesh, model_mode=model_mode)
 
@@ -90,7 +94,10 @@ class PipelineParallelismTest(unittest.TestCase):
     )
     deterministic = True
     # We use a simpler single matmul decoder layer for fast compilation in these tests.
-    single_pipeline_stage = simple_layer.SimpleDecoderLayer(config=config, mesh=mesh, model_mode=model_mode)
+    rngs = nnx.Rngs(params=0)
+    single_pipeline_stage = simple_layer.SimpleDecoderLayerToLinen(
+        config=config, mesh=mesh, model_mode=model_mode, rngs=rngs
+    )
     my_pipeline = pipeline.Pipeline(config=config, layers=single_pipeline_stage, mesh=mesh)
     init_pipeline_params = my_pipeline.init(
         jax.random.PRNGKey(0), inputs, inputs_position, inputs_segmentation, deterministic, model_mode
