@@ -26,8 +26,8 @@ from jax import lax
 from jax.ad_checkpoint import checkpoint_name
 from jax.experimental.pallas.ops.gpu import attention as gpu_pallas_attention
 from jax.experimental.pallas.ops.gpu import decode_attention as gpu_pallas_decode_attention
-from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_kernel
-from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask
+from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_kernel
+from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_mask
 from jax.experimental.shard_map import shard_map
 from jax.sharding import Mesh
 import jax
@@ -1082,7 +1082,7 @@ class AttentionOp(nnx.Module):
     )
 
     # create_splash_attention kernel
-    block_sizes = splash_attention_kernel.BlockSizes(
+    sa_config = splash_attention_kernel.SplashConfig(
         block_q=min(global_block_q, query.shape[2]),
         block_kv=min(global_block_kv, key.shape[2]),
         block_kv_compute=min(global_block_kv_compute, key.shape[2]),
@@ -1095,6 +1095,8 @@ class AttentionOp(nnx.Module):
         q_layout=splash_attention_kernel.QKVLayout[global_q_layout],
         k_layout=splash_attention_kernel.QKVLayout[global_k_layout],
         v_layout=splash_attention_kernel.QKVLayout[global_v_layout],
+        attn_logits_soft_cap=attn_logits_soft_cap,
+        residual_checkpoint_name="context",
     )
 
     mask_shape = (query.shape[2], key.shape[2])  # (q_seq_len, kv_seq_len)
@@ -1124,24 +1126,35 @@ class AttentionOp(nnx.Module):
       mask &= ChunkedCausalMask(shape=(query.shape[2], key.shape[2]), chunk_size=self.chunk_attn_window_size)
 
     # Create multi-head mask
-    multi_head_mask = splash_attention_mask.MultiHeadMask(masks=(mask,) * query.shape[1])
+    # multi_head_mask = splash_attention_mask.MultiHeadMask(masks=(mask,) * query.shape[1])
+    import dataclasses
+    single_head_mask = mask # tokamax now just uses a single mask and assumes broadcast to all heads?
+
+    #multi_head_mask = splash_attention_mask.MultiHeadMask(masks=(mask,) * query.shape[1])
+    # tokamax now just uses a single mask and assumes broadcast to all heads
+    max_logit_value, max_val = None, self.config.use_max_logit_estimate
+    if max_val > 0:
+      use_max_logit_estimate = "const"
+      if use_max_logit_estimate == "const":
+        sa_config = dataclasses.replace(sa_config, max_logit_const=max_val)
+      elif use_max_logit_estimate == "value_1d":
+        max_logit_value = max_val * jnp.ones((1,), dtype=jnp.bfloat16)
+      elif use_max_logit_estimate == "value_2d":
+        max_logit_value = max_val * jnp.ones((self.config.num_q_heads,), dtype=jnp.bfloat16)
 
     # Create the splash attention kernel object separately, jit it for performance
     @partial(
         jax.jit,
         static_argnames=[
-            "multi_head_mask",
+            "single_head_mask",
             "shard_head_size",
         ],
     )
-    def wrap_splash_kernel(multi_head_mask, shard_head_size=1):
+    def wrap_splash_kernel(single_head_mask, shard_head_size=1):
       splash_kernel = splash_attention_kernel.make_splash_mha(
-          mask=multi_head_mask,
-          head_shards=shard_head_size,  # the size of the axis if sharding over heads
-          q_seq_shards=cp_size,  # axis for sequence sharding
-          block_sizes=block_sizes,
-          attn_logits_soft_cap=attn_logits_soft_cap,
-          residual_checkpoint_name="context",
+          mask=single_head_mask,
+          config=sa_config,
+          q_seq_shards=cp_size,  # axis for sequence sharding,
       )
       return splash_kernel
 
@@ -1149,9 +1162,10 @@ class AttentionOp(nnx.Module):
         [self.mesh.shape[physical_axes] for physical_axes in dict(self.config.logical_axis_rules)[HEAD]]
     )
     shard_head_size = np.prod(logical_axis_rules_head)
-    splash_kernel = wrap_splash_kernel(multi_head_mask, int(shard_head_size))
-    named_sharding = jax.sharding.NamedSharding(self.mesh, axis_names_splash_kernel)
-    segment_axis_names_splash_kernel = splash_kernel.manual_sharding_spec(named_sharding)
+    splash_kernel = wrap_splash_kernel(single_head_mask, int(shard_head_size))
+    segment_axis_names_splash_kernel = nn.logical_to_mesh_axes((Q_LENGTH_NO_EXP,))
+    # named_sharding = jax.sharding.NamedSharding(self.mesh, axis_names_splash_kernel)
+    # segment_axis_names_splash_kernel = splash_kernel.manual_sharding_spec(named_sharding)
 
     # Now call the function wrap_flash_attention which does the actual computation.
     # The splash kernel is passed as a parameter to the function. Since we have the shard map
@@ -1215,9 +1229,16 @@ class AttentionOp(nnx.Module):
       if version.parse(jax.__version__) < version.parse("0.7.2.dev20250824"):
         attention_output = jax.vmap(splash_kernel)(query, key, value, decoder_segment_ids_tuple)
       else:
-        attention_output = jax.vmap(splash_kernel, in_axes=(0, 0, 0, 0, None))(
-            query, key, value, decoder_segment_ids_tuple, sinks
-        )
+        if max_logit_value is not None:
+          attention_output = jax.vmap(partial(splash_kernel, max_logit_value=max_logit_value))(query, key, value, decoder_segment_ids_tuple)
+        else:
+          attention_output, (_, max_logits) = jax.vmap(partial(splash_kernel, save_residuals=True))(query, key, value, decoder_segment_ids_tuple)
+          jax.debug.print("max_logits: {x}", x=max_logits.shape)
+          self.sow("intermediates", "max_logits", max_logits)
+
+        # attention_output = jax.vmap(splash_kernel, in_axes=(0, 0, 0, 0, None))(
+        #     query, key, value, decoder_segment_ids_tuple, sinks
+        # )
       return attention_output
 
     x = wrap_flash_attention(

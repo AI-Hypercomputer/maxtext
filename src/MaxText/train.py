@@ -186,6 +186,7 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
       "total_weights": total_weights,
       "moe_lb_loss": moe_lb_loss,
       "mtp_loss": mtp_loss,
+      "max_logits": intermediate_outputs["max_logits"], 
   }
   return loss, aux
 
@@ -294,10 +295,29 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
   moe_lb_loss = aux["moe_lb_loss"]
   mtp_loss = aux["mtp_loss"]
 
+  grads = raw_grads
   if config.gradient_clipping_threshold > 0:
     grads = maxtext_utils.apply_gradient_clipping(raw_grads, state, config.gradient_clipping_threshold)
-  else:
-    grads = raw_grads
+  
+  if config.qk_clip_threshold > 0:
+    # Rescale gradients of QK weights based on max logit values
+    import re
+    max_logits_list = intermediate_outputs.get('intermediates', {}).get('max_logits', [])
+    if max_logits_list:
+        max_qk_per_layer = jnp.array([jnp.max(t) for t in max_logits_list])
+        scales_per_layer = jnp.minimum(1.0, config.qk_clip_threshold / (max_qk_per_layer + EPS))
+
+        def rescale_grads(path, grad):
+            path_str = '/'.join(str(p.key) for p in path)
+            match = re.match(r'.*layers_(\d+)/attention/(query|key)', path_str)
+            if match:
+                layer_index = int(match.group(1))
+                if layer_index < len(scales_per_layer):
+                    return grad * scales_per_layer[layer_index]
+            return grad
+        # Apply rescaling on top of any other gradient transformations like clipping
+        grads = jax.tree_util.tree_map_with_path(rescale_grads, grads)
+
   if config.optimizer_memory_host_offload:
     state = state.replace(
         opt_state=jax.device_put(

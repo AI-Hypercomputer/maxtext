@@ -860,3 +860,9 @@ subslice_shape: ""
 # NNX
 enable_nnx: false
 shard_optimizer_over_data: False
+
+use_max_logit_estimate: 0
+
+# clip
+qk_clip_threshold: 0
+qk_clip_alpha: 0.5
