@@ -57,7 +57,7 @@ jobs:
     container:
       image: gcr.io/tpu-prod-env-multipod/maxtext_${{ github.run_id }}:${{ inputs.image_type != '' && inputs.image_type || inputs.device_type }}
       volumes:
-        - /tmp:/tmp
+        - ${{ github.workspace }}:/tmp
       env:
         XLA_PYTHON_CLIENT_MEM_FRACTION: ${{ inputs.xla_python_client_mem_fraction }}
         TF_FORCE_GPU_ALLOW_GROWTH: ${{ inputs.tf_force_gpu_allow_growth }}
@@ -104,7 +104,7 @@ jobs:
       proxy:
         image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server:latest
         volumes:
-          - /tmp:/tmp
+          - ${{ github.workspace }}:/tmp
         ports:
           - "29000:29000"
         env:
