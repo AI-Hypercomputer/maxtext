@@ -24,7 +24,13 @@ from flax import linen as nn
 from flax import nnx
 from MaxText.layers import initializers
 
-from MaxText.common_types import DecoderBlockType, Config, MODEL_MODE_TRAIN, MODEL_MODE_AUTOREGRESSIVE, DECODING_ACTIVE_SEQUENCE_INDICATOR
+from MaxText.common_types import (
+  DecoderBlockType,
+  Config,
+  MODEL_MODE_TRAIN,
+  MODEL_MODE_AUTOREGRESSIVE,
+  DECODING_ACTIVE_SEQUENCE_INDICATOR,
+)
 from MaxText.inference import page_manager
 from MaxText import multimodal_utils
 from MaxText import max_utils
@@ -75,13 +81,13 @@ class TransformerLinenPure(nn.Module):
     cfg = self.config
     mesh = self.mesh
     self.shared_embedding = embed_as_linen(
-        num_embeddings=cfg.vocab_size,
-        num_features=cfg.emb_dim,
-        dtype=cfg.dtype,
-        attend_dtype=jnp.float32 if cfg.logits_dot_in_fp32 else cfg.dtype,  # for logit training stability
-        embedding_init=nn.initializers.normal(stddev=1.0),
-        name="token_embedder",
-        config=cfg,
+      num_embeddings=cfg.vocab_size,
+      num_features=cfg.emb_dim,
+      dtype=cfg.dtype,
+      attend_dtype=jnp.float32 if cfg.logits_dot_in_fp32 else cfg.dtype,  # for logit training stability
+      embedding_init=nn.initializers.normal(stddev=1.0),
+      name="token_embedder",
+      config=cfg,
     )
     self.vision_encoder = VisionEncoder(config=cfg, mesh=mesh) if cfg.use_multimodal else None
     self.decoder = Decoder(config=cfg, mesh=mesh, quant=self.quant, model_mode=self.model_mode)
@@ -93,7 +99,7 @@ class TransformerLinenPure(nn.Module):
       # By convention, this is the last layer in the list.
       mtp_layer = layer_types[-1]
       self.mtp_block = MultiTokenPredictionBlock(
-          config=self.config, mesh=self.mesh, name="mtp_block", transformer_layer_module=mtp_layer, decoder=self.decoder
+        config=self.config, mesh=self.mesh, name="mtp_block", transformer_layer_module=mtp_layer, decoder=self.decoder
       )
 
   def logits_from_hidden_states(self, hidden_states, deterministic, model_mode):
@@ -103,29 +109,29 @@ class TransformerLinenPure(nn.Module):
     """
     # pylint: disable=protected-access
     logits = self.decoder._apply_output_head(
-        shared_embedding=self.shared_embedding,
-        y=hidden_states,
-        deterministic=deterministic,
-        model_mode=model_mode,
+      shared_embedding=self.shared_embedding,
+      y=hidden_states,
+      deterministic=deterministic,
+      model_mode=model_mode,
     )
     return logits
 
   def __call__(
-      self,
-      decoder_input_tokens: jnp.ndarray,
-      decoder_positions: jnp.ndarray,
-      decoder_segment_ids=None,
-      encoder_images: None | jnp.ndarray = None,
-      encoder_image_masks: None | jnp.ndarray = None,
-      enable_dropout=True,
-      model_mode=MODEL_MODE_TRAIN,
-      previous_chunk=None,
-      true_length: None | int = None,
-      slot: None | int = None,
-      page_state: None | page_manager.PageState = None,
-      decoder_target_tokens: None | jnp.ndarray = None,
-      decoder_target_mask: None | jnp.ndarray = None,
-      nnx_method=None,
+    self,
+    decoder_input_tokens: jnp.ndarray,
+    decoder_positions: jnp.ndarray,
+    decoder_segment_ids=None,
+    encoder_images: None | jnp.ndarray = None,
+    encoder_image_masks: None | jnp.ndarray = None,
+    enable_dropout=True,
+    model_mode=MODEL_MODE_TRAIN,
+    previous_chunk=None,
+    true_length: None | int = None,
+    slot: None | int = None,
+    page_state: None | page_manager.PageState = None,
+    decoder_target_tokens: None | jnp.ndarray = None,
+    decoder_target_mask: None | jnp.ndarray = None,
+    nnx_method=None,
   ):
     """Applies Transformer decoder-branch on encoded-input and target.
 
@@ -137,8 +143,8 @@ class TransformerLinenPure(nn.Module):
 
     if decoder_segment_ids is not None and model_mode == MODEL_MODE_AUTOREGRESSIVE:
       raise ValueError(
-          f"During autoregressive decoding we assume the tokens are in the active sequence"
-          f" which is always {DECODING_ACTIVE_SEQUENCE_INDICATOR}."
+        f"During autoregressive decoding we assume the tokens are in the active sequence"
+        f" which is always {DECODING_ACTIVE_SEQUENCE_INDICATOR}."
       )
 
     bidirectional_mask = None
@@ -152,18 +158,18 @@ class TransformerLinenPure(nn.Module):
         bidirectional_mask = decoder_input_tokens == multimodal_utils.LLAMA4_PATCH_TOKEN
 
     logits, hidden_state = self.decoder(
-        shared_embedding=self.shared_embedding,
-        decoder_input_tokens=decoder_input_tokens,
-        decoder_positions=decoder_positions,
-        decoder_segment_ids=decoder_segment_ids,
-        deterministic=not enable_dropout,
-        model_mode=model_mode,
-        previous_chunk=previous_chunk,
-        slot=slot,
-        page_state=page_state,
-        bidirectional_mask=bidirectional_mask,
-        image_embeddings=image_embeddings,
-        image_masks=encoder_image_masks,
+      shared_embedding=self.shared_embedding,
+      decoder_input_tokens=decoder_input_tokens,
+      decoder_positions=decoder_positions,
+      decoder_segment_ids=decoder_segment_ids,
+      deterministic=not enable_dropout,
+      model_mode=model_mode,
+      previous_chunk=previous_chunk,
+      slot=slot,
+      page_state=page_state,
+      bidirectional_mask=bidirectional_mask,
+      image_embeddings=image_embeddings,
+      image_masks=encoder_image_masks,
     )
 
     # If we are initializing the model AND MTP is enabled, we must create
@@ -187,27 +193,27 @@ class TransformerLinenPure(nn.Module):
     # Its only effect is to "sow" these losses; it does not alter the primary logits output.
     if self.config.mtp_num_layers > 0:
       self.mtp_block(
-          shared_embedding=self.shared_embedding,
-          main_hidden_state=hidden_state,
-          input_ids=decoder_input_tokens,
-          target_ids=decoder_target_tokens,
-          target_mask=decoder_target_mask,
-          position_ids=decoder_positions,
-          decoder_segment_ids=decoder_segment_ids,
-          deterministic=not enable_dropout,
-          model_mode=model_mode,
+        shared_embedding=self.shared_embedding,
+        main_hidden_state=hidden_state,
+        input_ids=decoder_input_tokens,
+        target_ids=decoder_target_tokens,
+        target_mask=decoder_target_mask,
+        position_ids=decoder_positions,
+        decoder_segment_ids=decoder_segment_ids,
+        deterministic=not enable_dropout,
+        model_mode=model_mode,
       )
 
     return logits
 
 
 def transformer_as_linen(
-    config: Config,
-    mesh: Mesh,
-    quant: Quant,
-    model_mode: str = MODEL_MODE_TRAIN,
-    *,
-    name: str | None = None,
+  config: Config,
+  mesh: Mesh,
+  quant: Quant,
+  model_mode: str = MODEL_MODE_TRAIN,
+  *,
+  name: str | None = None,
 ) -> nnx_wrappers.ToLinen | TransformerLinenPure:
   """Constructs a Transformer model as a Linen or NNX module.
 
@@ -233,18 +239,18 @@ def transformer_as_linen(
   """
   if config.enable_nnx:
     return TransformerLinen(
-        Transformer,
-        args=(),
-        kwargs=nn.FrozenDict(
-            {
-                "mesh": mesh,
-                "config": config,
-                "quant": quant,
-                "model_mode": model_mode,
-            }
-        ),
-        metadata_fn=initializers.variable_to_logically_partitioned,
-        name=name,
+      Transformer,
+      args=(),
+      kwargs=nn.FrozenDict(
+        {
+          "mesh": mesh,
+          "config": config,
+          "quant": quant,
+          "model_mode": model_mode,
+        }
+      ),
+      metadata_fn=initializers.variable_to_logically_partitioned,
+      name=name,
     )
   else:
     return TransformerLinenPure(config, mesh, quant, model_mode=model_mode, name=name)
@@ -284,13 +290,13 @@ class Transformer(nnx.Module):
     cfg = self.config
     mesh = self.mesh
     self.token_embedder = Embed(
-        num_embeddings=cfg.vocab_size,
-        num_features=cfg.emb_dim,
-        dtype=cfg.dtype,
-        attend_dtype=jnp.float32 if cfg.logits_dot_in_fp32 else cfg.dtype,  # for logit training stability
-        embedding_init=nn.initializers.normal(stddev=1.0),
-        config=cfg,
-        rngs=rngs,
+      num_embeddings=cfg.vocab_size,
+      num_features=cfg.emb_dim,
+      dtype=cfg.dtype,
+      attend_dtype=jnp.float32 if cfg.logits_dot_in_fp32 else cfg.dtype,  # for logit training stability
+      embedding_init=nn.initializers.normal(stddev=1.0),
+      config=cfg,
+      rngs=rngs,
     )
     self.vision_encoder = VisionEncoder(config=cfg, mesh=mesh) if cfg.use_multimodal else None
 
@@ -303,9 +309,9 @@ class Transformer(nnx.Module):
     dummy_decoder_positions = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
 
     self.decoder.lazy_init(
-        shared_embedding=self.token_embedder,
-        decoder_input_tokens=dummy_decoder_input_tokens,
-        decoder_positions=dummy_decoder_positions,
+      shared_embedding=self.token_embedder,
+      decoder_input_tokens=dummy_decoder_input_tokens,
+      decoder_positions=dummy_decoder_positions,
     )
 
     # If MTP is enabled via config, set up the MTP block.
@@ -316,19 +322,19 @@ class Transformer(nnx.Module):
       # By convention, this is the last layer in the list.
       mtp_layer = layer_types[-1]
       mtp_block_linen = MultiTokenPredictionBlock(
-          config=self.config, mesh=self.mesh, name="mtp_block", transformer_layer_module=mtp_layer, decoder=self.decoder
+        config=self.config, mesh=self.mesh, name="mtp_block", transformer_layer_module=mtp_layer, decoder=self.decoder
       )
       self.mtp_block = nnx_wrappers.ToNNX(mtp_block_linen, rngs=rngs)
 
       self.mtp_block.lazy_init(
-          shared_embedding=self.token_embedder,
-          main_hidden_state=jnp.ones((1, 1, self.config.emb_dim), dtype=self.config.dtype),
-          input_ids=jnp.ones((1, 1), dtype=jnp.int32),
-          target_ids=jnp.ones((1, 1), dtype=jnp.int32),
-          target_mask=jnp.ones((1, 1), dtype=jnp.int32),
-          position_ids=jnp.ones((1, 1), dtype=jnp.int32),
-          decoder_segment_ids=jnp.ones((1, 1), dtype=jnp.int32),
-          deterministic=True,
+        shared_embedding=self.token_embedder,
+        main_hidden_state=jnp.ones((1, 1, self.config.emb_dim), dtype=self.config.dtype),
+        input_ids=jnp.ones((1, 1), dtype=jnp.int32),
+        target_ids=jnp.ones((1, 1), dtype=jnp.int32),
+        target_mask=jnp.ones((1, 1), dtype=jnp.int32),
+        position_ids=jnp.ones((1, 1), dtype=jnp.int32),
+        decoder_segment_ids=jnp.ones((1, 1), dtype=jnp.int32),
+        deterministic=True,
       )
 
   def no_op(self, *args, **kwargs):
@@ -349,21 +355,21 @@ class Transformer(nnx.Module):
     return True
 
   def __call__(
-      self,
-      decoder_input_tokens: jnp.ndarray,
-      decoder_positions: jnp.ndarray,
-      decoder_segment_ids=None,
-      cache=None,
-      encoder_images: jax.Array | None = None,
-      encoder_image_masks: jax.Array | None = None,
-      enable_dropout=True,
-      model_mode=MODEL_MODE_TRAIN,
-      previous_chunk=None,
-      true_length: int | None = None,
-      slot: int | None = None,
-      page_state: page_manager.PageState | None = None,
-      decoder_target_tokens: jax.Array | None = None,
-      decoder_target_mask: jax.Array | None = None,
+    self,
+    decoder_input_tokens: jnp.ndarray,
+    decoder_positions: jnp.ndarray,
+    decoder_segment_ids=None,
+    cache=None,
+    encoder_images: jax.Array | None = None,
+    encoder_image_masks: jax.Array | None = None,
+    enable_dropout=True,
+    model_mode=MODEL_MODE_TRAIN,
+    previous_chunk=None,
+    true_length: int | None = None,
+    slot: int | None = None,
+    page_state: page_manager.PageState | None = None,
+    decoder_target_tokens: jax.Array | None = None,
+    decoder_target_mask: jax.Array | None = None,
   ):
     """Applies the Zero-1 FSDP wrapped Transformer model.
 
@@ -390,8 +396,8 @@ class Transformer(nnx.Module):
     """
     if decoder_segment_ids is not None and model_mode == MODEL_MODE_AUTOREGRESSIVE:
       raise ValueError(
-          f"During autoregressive decoding we assume the tokens are in the active sequence"
-          f" which is always {DECODING_ACTIVE_SEQUENCE_INDICATOR}."
+        f"During autoregressive decoding we assume the tokens are in the active sequence"
+        f" which is always {DECODING_ACTIVE_SEQUENCE_INDICATOR}."
       )
 
     bidirectional_mask = None
@@ -405,18 +411,18 @@ class Transformer(nnx.Module):
         bidirectional_mask = decoder_input_tokens == multimodal_utils.LLAMA4_PATCH_TOKEN
 
     logits, hidden_state = self.decoder(
-        shared_embedding=self.token_embedder,
-        decoder_input_tokens=decoder_input_tokens,
-        decoder_positions=decoder_positions,
-        decoder_segment_ids=decoder_segment_ids,
-        deterministic=not enable_dropout,
-        model_mode=model_mode,
-        previous_chunk=previous_chunk,
-        slot=slot,
-        page_state=page_state,
-        bidirectional_mask=bidirectional_mask,
-        image_embeddings=image_embeddings,
-        image_masks=encoder_image_masks,
+      shared_embedding=self.token_embedder,
+      decoder_input_tokens=decoder_input_tokens,
+      decoder_positions=decoder_positions,
+      decoder_segment_ids=decoder_segment_ids,
+      deterministic=not enable_dropout,
+      model_mode=model_mode,
+      previous_chunk=previous_chunk,
+      slot=slot,
+      page_state=page_state,
+      bidirectional_mask=bidirectional_mask,
+      image_embeddings=image_embeddings,
+      image_masks=encoder_image_masks,
     )
 
     # Materialize hidden state when vocab tiling is enabled
@@ -444,15 +450,15 @@ class Transformer(nnx.Module):
     # Its only effect is to "sow" these losses; it does not alter the primary logits output.
     if self.config.mtp_num_layers > 0:
       self.mtp_block(
-          shared_embedding=self.token_embedder,
-          main_hidden_state=hidden_state,
-          input_ids=decoder_input_tokens,
-          target_ids=decoder_target_tokens,
-          target_mask=decoder_target_mask,
-          position_ids=decoder_positions,
-          decoder_segment_ids=decoder_segment_ids,
-          deterministic=not enable_dropout,
-          model_mode=model_mode,
+        shared_embedding=self.token_embedder,
+        main_hidden_state=hidden_state,
+        input_ids=decoder_input_tokens,
+        target_ids=decoder_target_tokens,
+        target_mask=decoder_target_mask,
+        position_ids=decoder_positions,
+        decoder_segment_ids=decoder_segment_ids,
+        deterministic=not enable_dropout,
+        model_mode=model_mode,
       )
 
     return logits
@@ -492,22 +498,22 @@ class ZeroOneTransformer(nn.Module):
     self.model = transformer_as_linen(self.config, self.mesh, self.quant, self.model_mode)
 
   def __call__(
-      self,
-      decoder_input_tokens: jnp.ndarray,
-      decoder_positions: jnp.ndarray,
-      decoder_segment_ids=None,
-      encoder_images: None | jnp.ndarray = None,
-      encoder_image_masks: None | jnp.ndarray = None,
-      enable_dropout=True,
-      model_mode=MODEL_MODE_TRAIN,
-      previous_chunk=None,
-      true_length: None | int = None,
-      slot: None | int = None,
-      page_state: None | page_manager.PageState = None,
-      partition_spec=None,
-      decoder_target_tokens: None | jnp.ndarray = None,
-      decoder_target_mask: None | jnp.ndarray = None,
-      nnx_method: str | None = None,
+    self,
+    decoder_input_tokens: jnp.ndarray,
+    decoder_positions: jnp.ndarray,
+    decoder_segment_ids=None,
+    encoder_images: None | jnp.ndarray = None,
+    encoder_image_masks: None | jnp.ndarray = None,
+    enable_dropout=True,
+    model_mode=MODEL_MODE_TRAIN,
+    previous_chunk=None,
+    true_length: None | int = None,
+    slot: None | int = None,
+    page_state: None | page_manager.PageState = None,
+    partition_spec=None,
+    decoder_target_tokens: None | jnp.ndarray = None,
+    decoder_target_mask: None | jnp.ndarray = None,
+    nnx_method: str | None = None,
   ):
     """Applies the Zero-1 FSDP wrapped Transformer model.
 
@@ -536,24 +542,6 @@ class ZeroOneTransformer(nn.Module):
     """
     if self.is_initializing():
       return self.model(
-          decoder_input_tokens=decoder_input_tokens,
-          decoder_positions=decoder_positions,
-          decoder_segment_ids=decoder_segment_ids,
-          encoder_images=encoder_images,
-          encoder_image_masks=encoder_image_masks,
-          enable_dropout=enable_dropout,
-          model_mode=model_mode,
-          previous_chunk=previous_chunk,
-          true_length=true_length,
-          slot=slot,
-          page_state=page_state,
-      )
-    all_model_weights = all_gather_over_fsdp(
-        self.model.variables, partition_spec, mesh=self.mesh, logical_axis_rules=self.config.logical_axis_rules
-    )
-
-    return self.model.apply(
-        all_model_weights,
         decoder_input_tokens=decoder_input_tokens,
         decoder_positions=decoder_positions,
         decoder_segment_ids=decoder_segment_ids,
@@ -565,8 +553,26 @@ class ZeroOneTransformer(nn.Module):
         true_length=true_length,
         slot=slot,
         page_state=page_state,
-        mutable=False,
-        decoder_target_tokens=decoder_target_tokens,
-        decoder_target_mask=decoder_target_mask,
-        nnx_method=nnx_method,
+      )
+    all_model_weights = all_gather_over_fsdp(
+      self.model.variables, partition_spec, mesh=self.mesh, logical_axis_rules=self.config.logical_axis_rules
+    )
+
+    return self.model.apply(
+      all_model_weights,
+      decoder_input_tokens=decoder_input_tokens,
+      decoder_positions=decoder_positions,
+      decoder_segment_ids=decoder_segment_ids,
+      encoder_images=encoder_images,
+      encoder_image_masks=encoder_image_masks,
+      enable_dropout=enable_dropout,
+      model_mode=model_mode,
+      previous_chunk=previous_chunk,
+      true_length=true_length,
+      slot=slot,
+      page_state=page_state,
+      mutable=False,
+      decoder_target_tokens=decoder_target_tokens,
+      decoder_target_mask=decoder_target_mask,
+      nnx_method=nnx_method,
     )

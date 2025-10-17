@@ -24,7 +24,6 @@ python3 -m MaxText.deepseek_fp8_to_bf16 --input-fp8-hf-path <path/to/fp8/ckpt> \
     --output-bf16-hf-path <local/path/to/save/new/bf16/ckpt>
 """
 
-
 import os
 import json
 from argparse import ArgumentParser

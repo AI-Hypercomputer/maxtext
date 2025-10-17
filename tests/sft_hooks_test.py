@@ -13,6 +13,7 @@
 # limitations under the License.
 
 """Tests for training and data loading hooks for SFT"""
+
 import pytest
 
 pytestmark = pytest.mark.tpu_only
@@ -33,17 +34,16 @@ from MaxText.sft import hooks
 
 
 class SFTHooksTest(unittest.TestCase):
-
   def setUp(self):
     super().setUp()
     self.config = pyconfig.initialize(
-        [os.path.join(MAXTEXT_PKG_DIR, "sft.hooks"), os.path.join(MAXTEXT_PKG_DIR, "configs", "sft.yml")],
-        per_device_batch_size=1,
-        run_name="test",
-        mesh_axes=["data"],
-        logical_axis_rules=[["batch", "data"]],
-        base_output_directory="test",
-        skip_jax_distributed_system=True,
+      [os.path.join(MAXTEXT_PKG_DIR, "sft.hooks"), os.path.join(MAXTEXT_PKG_DIR, "configs", "sft.yml")],
+      per_device_batch_size=1,
+      run_name="test",
+      mesh_axes=["data"],
+      logical_axis_rules=[["batch", "data"]],
+      base_output_directory="test",
+      skip_jax_distributed_system=True,
     )
     mesh_shape_1d = (len(jax.devices()),)
     self.mesh = Mesh(mesh_utils.create_device_mesh(mesh_shape_1d), self.config.mesh_axes)
@@ -54,8 +54,8 @@ class SFTHooksTest(unittest.TestCase):
 
     expected_shape = [jax.device_count(), self.config.max_target_length]
     self.expected_batch = {
-        "inputs": np.zeros(expected_shape, dtype=int),
-        "targets_segmentation": np.ones(expected_shape, dtype=int),
+      "inputs": np.zeros(expected_shape, dtype=int),
+      "targets_segmentation": np.ones(expected_shape, dtype=int),
     }
     self.mock_data_iterator = MagicMock()
     self.mock_data_iterator.__next__.return_value = self.expected_batch
@@ -92,10 +92,10 @@ class SFTHooksTest(unittest.TestCase):
     self.training_hooks.on_train_step_end(self.mock_train_ctx, train_step=1, train_loss=5.0, step_time=0.004)
 
     expected_metrics = {
-        "scalar": {
-            "learning/loss": 5.0,
-            "learning/total_weights": (jax.device_count() * self.config.max_target_length),
-        }
+      "scalar": {
+        "learning/loss": 5.0,
+        "learning/total_weights": (jax.device_count() * self.config.max_target_length),
+      }
     }
     self.training_hooks.metric_logger.record_train_metrics.assert_called()
     self.training_hooks.metric_logger.write_metrics.assert_called_with(expected_metrics, 1)
@@ -110,11 +110,11 @@ class SFTHooksTest(unittest.TestCase):
     self.training_hooks.on_eval_step_end(self.mock_train_ctx, eval_loss=10.0)
 
     expected_metrics = {
-        "scalar": {
-            "eval/total_loss": 10.0,
-            "eval/avg_loss": 5.0,
-            "eval/total_weights": jax.device_count() * self.config.max_target_length * total_eval_steps,
-        }
+      "scalar": {
+        "eval/total_loss": 10.0,
+        "eval/avg_loss": 5.0,
+        "eval/total_weights": jax.device_count() * self.config.max_target_length * total_eval_steps,
+      }
     }
     self.training_hooks.metric_logger.write_metrics.assert_called_with(expected_metrics, 0, is_training=False)
     self.assertEqual(len(self.training_hooks.eval_metadata), 0)

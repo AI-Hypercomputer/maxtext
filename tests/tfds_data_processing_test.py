@@ -31,35 +31,34 @@ from MaxText.input_pipeline import input_pipeline_interface
 
 
 class TfdsDataProcessingTest(unittest.TestCase):
-
   def setUp(self):
     super().setUp()
     config = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
-        per_device_batch_size=1,
-        run_name="test",
-        mesh_axes=["data"],
-        logical_axis_rules=[["batch", "data"]],
-        data_sharding=["data"],
-        base_output_directory="gs://max-experiments/",
-        dataset_path="gs://maxtext-dataset/",
-        tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizer"),
-        enable_checkpointing=False,
-        eval_interval=10,
+      [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+      per_device_batch_size=1,
+      run_name="test",
+      mesh_axes=["data"],
+      logical_axis_rules=[["batch", "data"]],
+      data_sharding=["data"],
+      base_output_directory="gs://max-experiments/",
+      dataset_path="gs://maxtext-dataset/",
+      tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizer"),
+      enable_checkpointing=False,
+      eval_interval=10,
     )
     os.environ["TFDS_DATA_DIR"] = config.dataset_path
     self.config = config
     self.mesh_shape_1d = (len(jax.devices()),)
     self.mesh = Mesh(mesh_utils.create_device_mesh(self.mesh_shape_1d), self.config.mesh_axes)
     self.process_indices = input_pipeline_interface.get_process_loading_real_data(
-        self.config.data_sharding,
-        self.config.global_batch_size_to_load,
-        self.config.global_batch_size_to_train_on,
-        self.config.max_target_length,
-        self.mesh,
+      self.config.data_sharding,
+      self.config.global_batch_size_to_load,
+      self.config.global_batch_size_to_train_on,
+      self.config.max_target_length,
+      self.mesh,
     )
     self.read_config = tfds.ReadConfig(
-        shuffle_seed=self.config.data_shuffle_seed,
+      shuffle_seed=self.config.data_shuffle_seed,
     )
     self.read_config.add_tfds_id = True
     self.train_ds = self._get_datasets()
@@ -69,11 +68,11 @@ class TfdsDataProcessingTest(unittest.TestCase):
   def _get_datasets(self):
     ds_builder = tfds.builder(self.config.dataset_name)
     self.read_config.input_context = tf.distribute.InputContext(
-        input_pipeline_id=jax.process_index(),
-        num_input_pipelines=jax.process_count(),
+      input_pipeline_id=jax.process_index(),
+      num_input_pipelines=jax.process_count(),
     )
     ds = ds_builder.as_dataset(
-        split="train", read_config=self.read_config, shuffle_files=self.config.enable_data_shuffling
+      split="train", read_config=self.read_config, shuffle_files=self.config.enable_data_shuffling
     )
 
     return ds
@@ -84,15 +83,15 @@ class TfdsDataProcessingTest(unittest.TestCase):
     # *_position and *_segmentation indicate the boundaries.
     batch = next(self.train_iter)
     self.assertEqual(
-        {k: list(v.shape) for k, v in batch.items()},
-        {
-            "inputs": expected_shape,
-            "inputs_position": expected_shape,
-            "inputs_segmentation": expected_shape,
-            "targets": expected_shape,
-            "targets_position": expected_shape,
-            "targets_segmentation": expected_shape,
-        },
+      {k: list(v.shape) for k, v in batch.items()},
+      {
+        "inputs": expected_shape,
+        "inputs_position": expected_shape,
+        "inputs_segmentation": expected_shape,
+        "targets": expected_shape,
+        "targets_position": expected_shape,
+        "targets_segmentation": expected_shape,
+      },
     )
 
   def test_ds_determinism(self):

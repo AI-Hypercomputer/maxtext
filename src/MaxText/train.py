@@ -56,10 +56,10 @@ from MaxText.globals import EPS
 from MaxText.metric_logger import MetricLogger
 from MaxText.utils import gcs_utils
 from MaxText.utils.goodput_utils import (
-    GoodputEvent,
-    create_goodput_recorder,
-    maybe_monitor_goodput,
-    maybe_record_goodput,
+  GoodputEvent,
+  create_goodput_recorder,
+  maybe_monitor_goodput,
+  maybe_record_goodput,
 )
 from MaxText.vertex_tensorboard import VertexTensorboardManager
 # Placeholder: internal
@@ -119,31 +119,31 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
 
     # Flax Linen model
     logits, intermediate_outputs = model.apply(
-        params,
-        data["inputs"],
-        data["inputs_position"],
-        decoder_segment_ids=data["inputs_segmentation"],
-        encoder_images=data["images"] if config.use_multimodal else None,
-        encoder_image_masks=data["image_masks"] if config.use_multimodal else None,
-        enable_dropout=config.enable_dropout if is_train else False,
-        rngs={"dropout": rng1, "params": aqt_rng},
-        mutable=mutable_collections,
-        decoder_target_tokens=data["targets"],
-        decoder_target_mask=data["targets_segmentation"],
+      params,
+      data["inputs"],
+      data["inputs_position"],
+      decoder_segment_ids=data["inputs_segmentation"],
+      encoder_images=data["images"] if config.use_multimodal else None,
+      encoder_image_masks=data["image_masks"] if config.use_multimodal else None,
+      enable_dropout=config.enable_dropout if is_train else False,
+      rngs={"dropout": rng1, "params": aqt_rng},
+      mutable=mutable_collections,
+      decoder_target_tokens=data["targets"],
+      decoder_target_mask=data["targets_segmentation"],
     )
 
     total_loss = compute_loss_linen(intermediate_outputs, logits, data, config, model, params, is_train)
   else:
     # Flax NNX model
     logits = model(
-        decoder_input_tokens=data["inputs"],
-        decoder_positions=data["inputs_position"],
-        decoder_segment_ids=data["inputs_segmentation"],
-        encoder_images=data["images"] if config.use_multimodal else None,
-        encoder_image_masks=data["image_masks"] if config.use_multimodal else None,
-        enable_dropout=config.enable_dropout if is_train else False,
-        decoder_target_tokens=data["targets"],
-        decoder_target_mask=data["targets_segmentation"],
+      decoder_input_tokens=data["inputs"],
+      decoder_positions=data["inputs_position"],
+      decoder_segment_ids=data["inputs_segmentation"],
+      encoder_images=data["images"] if config.use_multimodal else None,
+      encoder_image_masks=data["image_masks"] if config.use_multimodal else None,
+      enable_dropout=config.enable_dropout if is_train else False,
+      decoder_target_tokens=data["targets"],
+      decoder_target_mask=data["targets_segmentation"],
     )
     intermediate_outputs = {}
     total_loss = compute_loss_nnx(intermediate_outputs, logits, data, config, model, params, is_train)
@@ -181,11 +181,11 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
   intermediate_outputs["logits"] = logits
 
   aux = {
-      "intermediate_outputs": intermediate_outputs,
-      "total_loss": total_loss,
-      "total_weights": total_weights,
-      "moe_lb_loss": moe_lb_loss,
-      "mtp_loss": mtp_loss,
+    "intermediate_outputs": intermediate_outputs,
+    "total_loss": total_loss,
+    "total_weights": total_weights,
+    "moe_lb_loss": moe_lb_loss,
+    "mtp_loss": mtp_loss,
   }
   return loss, aux
 
@@ -234,13 +234,13 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
       ga_params = acc_grad_and_loss["ga_params"]
       grad_func = jax.value_and_grad(_loss_fn, argnums=4, has_aux=True)
       (_, aux), cur_batch_gradient = grad_func(
-          model, config, data, dropout_rng, ga_params, *extra_dpo_args, is_train=True
+        model, config, data, dropout_rng, ga_params, *extra_dpo_args, is_train=True
       )
       acc_grad_and_loss["loss"] += aux["total_loss"]
       acc_grad_and_loss["moe_lb_loss"] += aux["moe_lb_loss"]
       acc_grad_and_loss["mtp_loss"] += aux["mtp_loss"]
       acc_grad_and_loss["grad"] = jax.tree_util.tree_map(
-          lambda x, y: x + y, cur_batch_gradient, acc_grad_and_loss["grad"]
+        lambda x, y: x + y, cur_batch_gradient, acc_grad_and_loss["grad"]
       )
       acc_grad_and_loss["total_weights"] += aux["total_weights"]
       return acc_grad_and_loss, aux
@@ -255,21 +255,21 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
     init_grad = jax.tree_util.tree_map(jnp.zeros_like, ga_params)
     init_grad = jax.tree.map(jax.lax.with_sharding_constraint, init_grad, params_shardings)
     init_grad_and_loss = {
-        "loss": 0.0,
-        "grad": init_grad,
-        "total_weights": 0,
-        "moe_lb_loss": 0.0,
-        "mtp_loss": 0.0,
-        "ga_params": ga_params,
+      "loss": 0.0,
+      "grad": init_grad,
+      "total_weights": 0,
+      "moe_lb_loss": 0.0,
+      "mtp_loss": 0.0,
+      "ga_params": ga_params,
     }
 
     grad_and_loss, aux = jax.lax.scan(
-        accumulate_gradient, init_grad_and_loss, data, length=config.gradient_accumulation_steps
+      accumulate_gradient, init_grad_and_loss, data, length=config.gradient_accumulation_steps
     )
     loss = (
-        grad_and_loss["loss"] / grad_and_loss["total_weights"]
-        + grad_and_loss["moe_lb_loss"] / config.gradient_accumulation_steps
-        + grad_and_loss["mtp_loss"] / config.gradient_accumulation_steps
+      grad_and_loss["loss"] / grad_and_loss["total_weights"]
+      + grad_and_loss["moe_lb_loss"] / config.gradient_accumulation_steps
+      + grad_and_loss["mtp_loss"] / config.gradient_accumulation_steps
     )
     raw_grads = grad_and_loss["grad"]
     if config.shard_optimizer_over_data:
@@ -280,7 +280,7 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
     if config.optimizer_memory_host_offload:
       if config.use_dpo:
         reference_params = jax.device_put(
-            reference_params, max_utils.with_memory_kind(reference_params_sharding, "device")
+          reference_params, max_utils.with_memory_kind(reference_params_sharding, "device")
         )
         extra_dpo_args = [reference_params]
     if config.shard_optimizer_over_data:
@@ -300,10 +300,10 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
     grads = raw_grads
   if config.optimizer_memory_host_offload:
     state = state.replace(
-        opt_state=jax.device_put(
-            state.opt_state,
-            jax.tree_util.tree_map(lambda x: x.with_memory_kind(kind="device"), state_mesh_shardings.opt_state),
-        )
+      opt_state=jax.device_put(
+        state.opt_state,
+        jax.tree_util.tree_map(lambda x: x.with_memory_kind(kind="device"), state_mesh_shardings.opt_state),
+      )
     )
   # Move all parameters to device before optimizer update
   if config.parameter_memory_host_offload:
@@ -314,18 +314,18 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
       return value.with_memory_kind(kind="device")
 
     state = state.replace(
-        params=jax.device_put(
-            state.params,
-            jax.tree_util.tree_map_with_path(move, state_mesh_shardings.params),
-        )
+      params=jax.device_put(
+        state.params,
+        jax.tree_util.tree_map_with_path(move, state_mesh_shardings.params),
+      )
     )
   new_state = state.apply_gradients(grads=grads)
 
   scalar_metrics = {
-      "learning/loss": loss,
-      "learning/moe_lb_loss": moe_lb_loss,
-      "learning/mtp_loss": mtp_loss,
-      "learning/total_weights": total_weights,
+    "learning/loss": loss,
+    "learning/moe_lb_loss": moe_lb_loss,
+    "learning/mtp_loss": mtp_loss,
+    "learning/total_weights": total_weights,
   }
   if not config.optimizer_memory_host_offload:
     scalar_metrics["learning/grad_norm"] = max_utils.l2norm_pytree(grads)
@@ -334,8 +334,8 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
   if config.use_dpo:
     scalar_metrics["learning/dpo_reward_accuracy"] = aux["reward_accuracy"]
   metrics = {
-      "scalar": scalar_metrics,
-      "scalars": {},
+    "scalar": scalar_metrics,
+    "scalars": {},
   }
 
   if config.record_internal_nn_metrics:
@@ -368,14 +368,14 @@ def eval_step(model, config, state, data, dropout_rng):
   moe_lb_loss = aux["moe_lb_loss"]
   mtp_loss = aux["mtp_loss"]
   metrics = {
-      "scalar": {
-          "evaluation/loss": loss,
-          "evaluation/total_loss": total_loss,
-          "evaluation/total_weights": total_weights,
-          "evaluation/moe_lb_loss": moe_lb_loss,
-          "evaluation/mtp_loss": mtp_loss,
-          "evaluation/mtp_acceptance_rate_percent": mtp_acceptance_rate,
-      },
+    "scalar": {
+      "evaluation/loss": loss,
+      "evaluation/total_loss": total_loss,
+      "evaluation/total_weights": total_weights,
+      "evaluation/moe_lb_loss": moe_lb_loss,
+      "evaluation/mtp_loss": mtp_loss,
+      "evaluation/mtp_acceptance_rate_percent": mtp_acceptance_rate,
+    },
   }
   if config.use_dpo:
     metrics["scalar"]["evaluation/dpo_reward_accuracy"] = aux["reward_accuracy"]
@@ -386,15 +386,15 @@ def eval_step(model, config, state, data, dropout_rng):
 def train_loop(config, recorder, state=None):
   """Main Training loop."""
   (
-      init_rng,
-      checkpoint_manager,
-      state_mesh_shardings,
-      model,
-      mesh,
-      learning_rate_schedule,
-      data_iterator,
-      eval_data_iterator,
-      state,
+    init_rng,
+    checkpoint_manager,
+    state_mesh_shardings,
+    model,
+    mesh,
+    learning_rate_schedule,
+    data_iterator,
+    eval_data_iterator,
+    state,
   ) = train_utils.setup_train_loop(config, recorder)
 
   if config.use_dpo:
@@ -404,11 +404,11 @@ def train_loop(config, recorder, state=None):
     state_mesh_shardings = _merge_dpo_state(state_mesh_shardings, state_mesh_shardings.params["params"])
 
   params_shardings, state_mesh_shardings = maxtext_utils.maybe_update_params_sharding_with_opt(
-      config, state_mesh_shardings
+    config, state_mesh_shardings
   )
 
   p_train_step, p_eval_step = train_utils.jit_train_and_eval_step(
-      config, model, mesh, state, state_mesh_shardings, train_step, eval_step, eval_data_iterator, params_shardings
+    config, model, mesh, state, state_mesh_shardings, train_step, eval_step, eval_data_iterator, params_shardings
   )
 
   with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
@@ -449,11 +449,11 @@ def train_loop(config, recorder, state=None):
       if config.dump_hlo and step == (config.dump_step if config.dump_step >= 0 else start_step):
         jax.block_until_ready(state)  # Ensure compilation has finished.
         gcs_utils.upload_dump(
-            config.dump_hlo_local_dir,
-            config.dump_hlo_gcs_dir,
-            module_name=config.dump_hlo_module_name,
-            delete_local_after=config.dump_hlo_delete_local_after,
-            all_host_upload=config.dump_hlo_upload_all,
+          config.dump_hlo_local_dir,
+          config.dump_hlo_gcs_dir,
+          module_name=config.dump_hlo_module_name,
+          delete_local_after=config.dump_hlo_delete_local_after,
+          all_host_upload=config.dump_hlo_upload_all,
         )
 
       if config.eval_interval > 0 and step > start_step and (step + 1) % config.eval_interval == 0:
@@ -505,7 +505,7 @@ def initialize(argv: Sequence[str]) -> tuple[pyconfig.HyperParameters, Any, Any]
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
   if "xla_tpu_spmd_rng_bit_generator_unsafe" not in os.environ.get("LIBTPU_INIT_ARGS", ""):
     os.environ["LIBTPU_INIT_ARGS"] = (
-        os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
+      os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
     )
   # TODO: mazumdera@ : ensure missing mandatory fields in base.yml are filled in in argv,
   # or fill in here
@@ -524,11 +524,11 @@ def initialize(argv: Sequence[str]) -> tuple[pyconfig.HyperParameters, Any, Any]
 
   # Stack traces configurations
   debug_config = debug_configuration.DebugConfig(
-      stack_trace_config=stack_trace_configuration.StackTraceConfig(
-          collect_stack_trace=config.collect_stack_trace,
-          stack_trace_to_cloud=config.stack_trace_to_cloud,
-          stack_trace_interval_seconds=config.stack_trace_interval_seconds,
-      )
+    stack_trace_config=stack_trace_configuration.StackTraceConfig(
+      collect_stack_trace=config.collect_stack_trace,
+      stack_trace_to_cloud=config.stack_trace_to_cloud,
+      stack_trace_interval_seconds=config.stack_trace_interval_seconds,
+    )
   )
   diagnostic_config = diagnostic_configuration.DiagnosticConfig(debug_config)
   return config, recorder, diagnostic_config

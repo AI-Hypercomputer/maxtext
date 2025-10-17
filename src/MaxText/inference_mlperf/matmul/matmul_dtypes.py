@@ -13,7 +13,6 @@
 # limitations under the License.
 """matrix multiplication data types"""
 
-
 import jax
 
 from MaxText.inference_mlperf.matmul import timing_util
@@ -35,12 +34,12 @@ f_jit = jax.jit(f)
 num_matmuls, matrix_size = MATMUL_SIZES[0]
 
 for dtypeA, dtypeB in [
-    (_INT4, _INT4),
-    (_INT4, _INT8),
-    (_INT8, _INT4),
-    (_INT8, _INT8),
-    (_INT8, _DEFAULT),
-    (_DEFAULT, _DEFAULT),
+  (_INT4, _INT4),
+  (_INT4, _INT8),
+  (_INT8, _INT4),
+  (_INT8, _INT8),
+  (_INT8, _DEFAULT),
+  (_DEFAULT, _DEFAULT),
 ]:
   A = jax.numpy.ones((num_matmuls, matrix_size, matrix_size), dtype=dtypeA)
   B = jax.numpy.ones((num_matmuls, matrix_size, matrix_size), dtype=dtypeB)

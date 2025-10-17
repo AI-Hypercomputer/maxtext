@@ -31,7 +31,6 @@ from MaxText.globals import MAXTEXT_PKG_DIR
 
 
 class DataLoaderTest(unittest.TestCase):
-
   def setUp(self):
     super().setUp()
     self.config = self.get_test_config(reuse_example_batch=False)
@@ -42,14 +41,14 @@ class DataLoaderTest(unittest.TestCase):
 
   def get_test_config(self, reuse_example_batch):
     return pyconfig.initialize(
-        [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
-        per_device_batch_size=1,
-        run_name="test",
-        mesh_axes=["data"],
-        logical_axis_rules=[["batch", "data"]],
-        data_sharding=["data"],
-        enable_checkpointing=False,
-        reuse_example_batch=reuse_example_batch,
+      [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+      per_device_batch_size=1,
+      run_name="test",
+      mesh_axes=["data"],
+      logical_axis_rules=[["batch", "data"]],
+      data_sharding=["data"],
+      enable_checkpointing=False,
+      reuse_example_batch=reuse_example_batch,
     )
 
   def test_load_next_batch_success(self):
