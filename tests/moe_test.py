@@ -317,13 +317,15 @@ class MoeLoopBlock(nnx.Module):
     weights, selected_experts = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
     weights = jax.nn.softmax(weights.astype(jnp.float32), axis=-1).astype(self.weight_dtype)
     mlp_lnx = jnp.zeros_like(inputs)
-    mlp_lnx = nn.with_logical_constraint(mlp_lnx, ("activation_batch", "activation_length", "activation_embed"))
+    mlp_lnx = nn.with_logical_constraint(mlp_lnx, ("activation_batch", "activation_length_no_exp", "activation_embed"))
 
     for k in range(self.num_experts):
       weights_exp = jnp.sum(jnp.multiply(selected_experts == k, weights), axis=-1)
       getattr(self, f"mlp_{k}")
       mlp_lnx_exp = getattr(self, f"mlp_{k}")(inputs, deterministic=deterministic)
-      mlp_lnx_exp = nn.with_logical_constraint(mlp_lnx_exp, ("activation_batch", "activation_length", "activation_embed"))
+      mlp_lnx_exp = nn.with_logical_constraint(
+          mlp_lnx_exp, ("activation_batch", "activation_length_no_exp", "activation_embed")
+      )
       mlp_lnx_exp = weights_exp[:, :, None] * mlp_lnx_exp
       mlp_lnx += mlp_lnx_exp
 

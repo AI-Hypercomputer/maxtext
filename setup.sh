@@ -39,11 +39,18 @@ else
 fi
 
 echo "Checking Python version..."
-# This command will fail if the Python version is less than 3.12
-if ! python3 -c 'import sys; assert sys.version_info >= (3, 12)' 2>/dev/null; then
-    # If the command fails, print an error
-    CURRENT_VERSION=$(python3 --version 2>&1) # Get the full version string
-    echo -e "\n\e[31mERROR: Outdated Python Version! You are currently using $CURRENT_VERSION, but MaxText requires Python version 3.12 or higher.\e[0m"
+PY_VERSION=$(python3 --version 2>&1)
+if [ -z "$PY_VERSION" ]; then
+  # shellcheck disable=SC2016
+  >&2 printf 'No python3 is installed, installing `uv` from its install script\n'
+  curl -LsSf https://astral.sh/uv/install.sh | sh
+  PY_VERSION='Python 2.7.5'
+fi
+PY_VERSION=${PY_VERSION##* }
+PY_VERSION=${PY_VERSION%.*}
+# shellcheck disable=SC2072
+if [[ '3.12' > "$PY_VERSION" ]]; then
+    echo -e "\n\e[31mERROR: Outdated Python Version! You are currently using ${PY_VERSION}.*, but MaxText requires Python version 3.12 or higher.\e[0m"
     # Ask the user if they want to create a virtual environment with uv
     read -p "Would you like to create a Python 3.12 virtual environment using uv? (y/n) " -n 1 -r
     echo # Move to a new line after input
@@ -52,13 +59,11 @@ if ! python3 -c 'import sys; assert sys.version_info >= (3, 12)' 2>/dev/null; th
         if ! command -v uv &> /dev/null; then
             pip install uv
         fi
-        maxtext_dir=$(pwd)
-        cd
         # Ask for the venv name
-        read -p "Please enter a name for your new virtual environment (default: maxtext_venv): " venv_name
+        read -rp "Please enter a name for your new virtual environment (default: maxtext_venv): " venv_name
         # Use a default name if the user provides no input
         if [ -z "$venv_name" ]; then
-            venv_name="maxtext_venv"
+            venv_name="$HOME"'/maxtext_venv'
             echo "No name provided. Using default name: '$venv_name'"
         fi
         echo "Creating virtual environment '$venv_name' with Python 3.12..."
@@ -66,14 +71,12 @@ if ! python3 -c 'import sys; assert sys.version_info >= (3, 12)' 2>/dev/null; th
         printf '%s\n' "$(realpath -- "$venv_name")" >> /tmp/venv_created
         echo -e "\n\e[32mVirtual environment '$venv_name' created successfully!\e[0m"
         echo "To activate it, run the following command:"
-        echo -e "\e[33m  source ~/$venv_name/bin/activate\e[0m"
-        echo "After activating the environment, please re-run this script."
-        cd $maxtext_dir
+        echo -e "\e[33m  source $venv_name/bin/activate\e[0m"
+        . "$venv_name"/bin/activate
     else
         echo "Exiting. Please upgrade your Python environment to continue."
+        exit 1
     fi
-    # Exit the script since the initial Python check failed
-    exit 1
 fi
 echo "Python version check passed. Continuing with script."
 echo "--------------------------------------------------"
@@ -99,15 +102,15 @@ for ARGUMENT in "$@"; do
 done
 
 if [[ -z "$DEVICE" ]]; then
-        export DEVICE="tpu"
+    export DEVICE="tpu"
 fi
 
 if [[ $JAX_VERSION == NONE ]]; then
-  unset JAX_VERSION
+    unset JAX_VERSION
 fi
 
 if [[ $LIBTPU_GCS_PATH == NONE ]]; then
-  unset LIBTPU_GCS_PATH
+    unset LIBTPU_GCS_PATH
 fi
 
 if [[ -n $JAX_VERSION && ! ($MODE == "stable" || -z $MODE || ($MODE == "nightly" && $DEVICE == "gpu")) ]]; then
@@ -157,41 +160,45 @@ if [[ "$MODE" == "nightly" ]]; then
     rm requirements.txt.nightly-temp
 else
     # stable or stable_stack mode: Install with pinned commits
-    echo "Installing requirements.txt with pinned commits."
-    python3 -m uv pip install --no-cache-dir -U -r requirements.txt
+    echo "Installing tpu-requirements.txt with pinned commits."
+    tpu_requirements_txt=
+    for candidate in 'generated_requirements' "${MAXTEXT_REPO_ROOT}"'/generated_requirements' "$PWD"; do
+      if [ -f "$candidate"'/tpu-requirements.txt' ]; then
+        tpu_requirements_txt="$candidate"'/tpu-requirements.txt'
+        break
+      else
+        searched="$searched"':'
+      fi
+    done
+    if [ -z "${tpu_requirements_txt}" ]; then
+      >&2 printf 'Could not find "tpu-requirements.txt", looked in: %s\n' "${searched%?}"
+      exit 2
+    else
+      python3 -m uv pip install --resolution=lowest -r "$tpu_requirements_txt"
+    fi
 fi
 
 # Install maxtext package
 if [ -f 'pyproject.toml' ]; then
-  python3 -m uv pip install -e . --no-deps --resolution=lowest
+  python3 -m uv pip install -e .[tpu] --no-deps --resolution=lowest
   install_maxtext_github_deps
 fi
 
-# Uninstall existing jax, jaxlib and  libtpu-nightly
-python3 -m uv pip show jax && python3 -m uv pip uninstall jax
-python3 -m uv pip show jaxlib && python3 -m uv pip uninstall jaxlib
-python3 -m uv pip show libtpu-nightly && python3 -m uv pip uninstall libtpu-nightly
-
 # Delete custom libtpu if it exists
 if [ -e "$libtpu_path" ]; then
-    rm "$libtpu_path"
+    rm -v "$libtpu_path"
 fi
 
 if [[ "$MODE" == "stable" || ! -v MODE ]]; then
 # Stable mode
     if [[ $DEVICE == "tpu" ]]; then
-        
-
         # TODO: Once tunix has support for GPUs, move it from here to requirements.txt
         echo "Installing google-tunix for stable TPU environment"
-        python3 -m uv pip install 'google-tunix>=0.1.0'
+        python3 -m uv pip install 'google-tunix>=0.1.2'
         echo "Installing stable jax, jaxlib for tpu"
         if [[ -n "$JAX_VERSION" ]]; then
             echo "Installing stable jax, jaxlib, libtpu version ${JAX_VERSION}"
             python3 -m uv pip install -U jax[tpu]==${JAX_VERSION} -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
-        else
-            echo "Installing stable jax, jaxlib, libtpu for tpu"
-            python3 -m uv pip install -U 'jax[tpu]>0.4' -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
         fi
         if [[ -n "$LIBTPU_GCS_PATH" ]]; then
             # Install custom libtpu
@@ -219,6 +226,12 @@ if [[ "$MODE" == "stable" || ! -v MODE ]]; then
     fi
 elif [[ $MODE == "nightly" ]]; then
 # Nightly mode
+
+    # Uninstall existing jax, jaxlib and  libtpu-nightly
+    python3 -m uv pip show jax && python3 -m uv pip uninstall jax
+    python3 -m uv pip show jaxlib && python3 -m uv pip uninstall jaxlib
+    python3 -m uv pip show libtpu-nightly && python3 -m uv pip uninstall libtpu-nightly
+
     if [[ $DEVICE == "gpu" ]]; then
         # Install jax-nightly
         if [[ -n "$JAX_VERSION" ]]; then

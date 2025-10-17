@@ -478,6 +478,7 @@ HF_MODEL_CONFIGS = {
     "gemma3-27b": gemma3_27b_config,
     "qwen3-0.6b": qwen3_0_6b_config,
     "qwen3-4b": qwen3_4b_config,
+    "qwen3-4b-thinking-2507": qwen3_4b_config,
     "qwen3-8b": qwen3_8b_config,
     "qwen3-14b": qwen3_14b_config,
     "qwen3-32b": qwen3_32b_config,

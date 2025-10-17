@@ -30,9 +30,10 @@ export PROJECT=$(gcloud config get-value project)
 
 # Set environment variables
 for ARGUMENT in "$@"; do
-    IFS='=' read -r KEY VALUE <<< "$ARGUMENT"
+    IFS='=' read -r RAW_KEY VALUE <<< "$ARGUMENT"
+    KEY=$(echo "$RAW_KEY" | tr '[:lower:]' '[:upper:]')
     export "$KEY"="$VALUE"
-    echo "$KEY"="$VALUE"
+    echo "$KEY=$VALUE"
 done
 
 export LOCAL_IMAGE_NAME_RUNNER=${LOCAL_IMAGE_NAME}__runner
@@ -44,9 +45,36 @@ if [[ ! -v CLOUD_IMAGE_NAME ]]; then
   exit 1
 fi
 
+# Check for dangling symbolic links (target does not exist).
+DANGLING_LINKS=$(find -L . -type l)
+if [ -n "$DANGLING_LINKS" ]; then
+  echo "ERROR: Found dangling symbolic links in the build context:"
+  echo "$DANGLING_LINKS"
+  echo "These can cause 'failed to compute cache key' errors during 'docker build'."
+  echo "Please remove or fix them before building the Docker image."
+  exit 1
+fi
+
+# Check for absolute symbolic links, which Docker can't follow outside the build context.
+ABSOLUTE_LINKS=$(find . -type l -lname '/*')
+if [ -n "$ABSOLUTE_LINKS" ]; then
+  echo "ERROR: Found symbolic links with absolute paths in the build context:"
+  echo "$ABSOLUTE_LINKS"
+  echo "Docker cannot follow absolute paths outside of the build context, which can cause 'failed to compute cache key' errors."
+  echo "Please remove these links or convert them to relative paths before building the Docker image."
+  exit 1
+fi
+
 # Download other test assets from GCS into "${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText}"/test_assets
-if ! gcloud storage cp gs://maxtext-test-assets/* "${MAXTEXT_TEST_ASSETS_ROOT:-${MAXTEXT_REPO_ROOT:-$PWD}/test_assets}"; then
-  echo "WARNING: Failed to download test assets from GCS. These files are only used for end-to-end tests; you may not have access to the bucket."
+# if ! gcloud storage cp gs://maxtext-test-assets/* "${MAXTEXT_TEST_ASSETS_ROOT:-${MAXTEXT_REPO_ROOT:-$PWD}/test_assets}"; then
+#   echo "WARNING: Failed to download test assets from GCS. These files are only used for end-to-end tests; you may not have access to the bucket."
+# fi
+
+# Check if the base image exists locally
+if ! docker image inspect "${LOCAL_IMAGE_NAME}" &> /dev/null; then
+  echo "ERROR: Base image '${LOCAL_IMAGE_NAME}' not found locally."
+  echo "Please build it first by running 'bash docker_build_dependency_image.sh'."
+  exit 1
 fi
 
 docker build --build-arg BASEIMAGE=${LOCAL_IMAGE_NAME} -f ./maxtext_runner.Dockerfile -t ${LOCAL_IMAGE_NAME_RUNNER} .
