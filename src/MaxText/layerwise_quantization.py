@@ -39,7 +39,7 @@ import jax.numpy as jnp
 from absl import app
 
 from flax.linen import partitioning as nn_partitioning
-
+from flax import nnx
 
 from MaxText import checkpointing
 from MaxText import max_utils
@@ -93,9 +93,12 @@ class LayerwiseQuantization:
 
     self.quant.quant_mode = quantizations.get_quant_mode("convert")
 
+    model_mode = common_types.MODEL_MODE_PREFILL
+    rngs = nnx.Rngs(0)
+
     layers = [
-        deepseek.DeepSeekDenseLayer(config, mesh=self._mesh, quant=self.quant),
-        deepseek.DeepSeekMoELayer(config, mesh=self._mesh, quant=self.quant),
+        deepseek.DeepSeekDenseLayerToLinen(config, mesh=self._mesh, quant=self.quant, model_mode=model_mode, rngs=rngs),
+        deepseek.DeepSeekMoELayerToLinen(config, mesh=self._mesh, quant=self.quant, model_mode=model_mode, rngs=rngs),
     ]
     layer_prefixes = ["dense_layers", "moe_layers"]
     num_moe_layers = config.num_decoder_layers - config.first_num_dense_layers
@@ -108,7 +111,7 @@ class LayerwiseQuantization:
           None,
           jnp.zeros((1, self.config.max_prefill_predict_length), dtype=jnp.int32),
           True,
-          model_mode=common_types.MODEL_MODE_PREFILL,
+          model_mode=model_mode,
           rngs={"params": _rng},
           mutable=True,
       )

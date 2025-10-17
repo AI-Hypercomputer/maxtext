@@ -69,7 +69,11 @@ class PipelineParallelismTest(unittest.TestCase):
           config=config, mesh=mesh, model_mode=model_mode, rngs=rngs
       )
     else:
-      single_pipeline_stage = single_pipeline_stage_class(config=config, mesh=mesh, model_mode=model_mode)
+      if isinstance(single_pipeline_stage_class, nnx.Module):
+        rngs = nnx.Rngs(params=0)
+        single_pipeline_stage = single_pipeline_stage_class(config=config, mesh=mesh, model_mode=model_mode, rngs=rngs)
+      else:
+        single_pipeline_stage = single_pipeline_stage_class(config=config, mesh=mesh, model_mode=model_mode)
 
     def get_inputs(batch_size, sequence, features):
       """Get random inputs, and random dummy targets
