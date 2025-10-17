@@ -327,17 +327,17 @@ class MaxEngine(engine_api.Engine):
 
     @jax.jit
     def model_apply(_p, _rng):
+      image_shape = multimodal_utils.get_dummy_image_shape_for_init(
+          self.config.model_name, batch_size=self.config.micro_batch_size_to_train_on
+      )
       return self.model.apply(
           _p | {"aqt": {}},
           jnp.ones((1, self.config.max_prefill_predict_length), dtype=jnp.int32),
           jnp.ones((1, self.config.max_prefill_predict_length), dtype=jnp.int32),
-          encoder_images=jnp.ones(
-              multimodal_utils.get_dummy_image_shape_for_init(
-                  self.config.model_name, batch_size=self.config.micro_batch_size_to_train_on
-              ),
-              dtype=jnp.float32,
-          )
-          if self.config.use_multimodal
+          encoder_images=jnp.ones(image_shape, dtype=jnp.float32) if self.config.use_multimodal else None,
+          # encoder_image_masks indicates valid tiles if image tiling + padding is used in vision encoder input.
+          encoder_image_masks=jnp.ones(image_shape[:2], dtype=jnp.int32)
+          if self.config.use_multimodal and "llama4" in self.config.model_name
           else None,
           decoder_segment_ids=jnp.zeros((1, self.config.max_prefill_predict_length), dtype=jnp.int32),
           enable_dropout=False,
@@ -412,6 +412,7 @@ class MaxEngine(engine_api.Engine):
       existing_prefix: ExistingPrefix | None = None,
       padded_tokens: jax.Array,
       images: jax.Array | None = None,
+      image_masks: jax.Array | None = None,
       true_length: int,
       sampler: Callable[[Any], Any] | None = None,  # pylint: disable=unused-argument
       rng: PRNGKeyType | None = None,
@@ -475,14 +476,15 @@ class MaxEngine(engine_api.Engine):
     input_tokens = jnp.expand_dims(padded_tokens, 0)  # [BATCH, SEQUENCE]
     positions = jnp.expand_dims(jnp.arange(start_position, start_position + input_tokens.shape[1]), 0)
 
-    input_images = None
     if self.config.use_multimodal and images is not None:
       if images.ndim == 3:
         # For Gemma3 single image, add batch and image count dimensions
-        input_images = images[jnp.newaxis, jnp.newaxis, ...]
+        images = images[jnp.newaxis, jnp.newaxis, ...]
+        image_masks = image_masks[jnp.newaxis, jnp.newaxis, ...] if image_masks is not None else None
       elif images.ndim == 4:
         # add batch dimension
-        input_images = images[jnp.newaxis, ...]
+        images = images[jnp.newaxis, ...]
+        image_masks = image_masks[jnp.newaxis, ...] if image_masks is not None else None
 
     # sequence_indicator will be concatenated to existing_prefix decoder_segment_ids
     start_to_n = jnp.arange(start_position, start_position + input_tokens.shape[1])
@@ -496,7 +498,8 @@ class MaxEngine(engine_api.Engine):
           input_params,
           input_tokens,
           positions,
-          encoder_images=input_images,
+          encoder_images=images,
+          encoder_image_masks=image_masks,
           decoder_segment_ids=sequence_indicator,
           enable_dropout=False,
           model_mode=MODEL_MODE_PREFILL,
@@ -571,6 +574,7 @@ class MaxEngine(engine_api.Engine):
       existing_prefix: ExistingPrefix | None = None,
       padded_tokens: jax.Array,
       images: jax.Array | None = None,
+      image_masks: jax.Array | None = None,
       true_length: int,
       sampler: Callable[[Any], Any] | None = None,  # pylint: disable=unused-argument
       rng: PRNGKeyType | None = None,
@@ -603,6 +607,7 @@ class MaxEngine(engine_api.Engine):
         existing_prefix=existing_prefix,
         padded_tokens=padded_tokens,
         images=images,
+        image_masks=image_masks,
         sampler=sampler,
         true_length=true_length,
         page_state=self.page_state,  # Pass current page state
@@ -1507,7 +1512,8 @@ class MaxEngine(engine_api.Engine):
         if tokenizer_model.tokenizer.unk_token_id is not None:
           tokenizer_model.tokenizer.pad_token_id = tokenizer_model.tokenizer.unk_token_id
         else:
-          tokenizer_model.tokenizer.pad_token_id = -1
+          print(f"Warning: setting pad_token_id to eos_token_id:{tokenizer_model.tokenizer.eos_token_id}")
+          tokenizer_model.tokenizer.pad_token_id = tokenizer_model.tokenizer.eos_token_id
       return tokenizer_model
     else:
       raise ValueError(f"Unsupported tokenizer type: {metadata.tokenizer_type}")

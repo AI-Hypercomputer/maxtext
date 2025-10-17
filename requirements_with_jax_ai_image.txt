@@ -18,9 +18,9 @@ pyink
 pylint
 pytest
 pytype
+qwix
 sentencepiece>=0.2.0
 tensorflow-datasets
 tensorflow-text>=2.17.0
 tiktoken
 transformers
-qwix @ https://github.com/google/qwix/archive/f2fd7b9114ff8d09e5b0131a453351578502da8a.zip

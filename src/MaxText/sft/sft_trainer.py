@@ -39,8 +39,8 @@ from typing import Sequence
 
 from absl import app
 import os
-
 import jax
+import pathwaysutils
 
 from flax.linen import partitioning as nn_partitioning
 
@@ -49,6 +49,7 @@ from orbax import checkpoint as ocp
 from tunix.sft import peft_trainer, profiler
 
 from MaxText import max_utils
+from MaxText import max_logging
 from MaxText import maxtext_utils
 from MaxText import optimizers
 from MaxText import pyconfig
@@ -84,10 +85,15 @@ def get_tunix_config(mt_config):
   # Profiler configurations
   profiler_options = None
   if mt_config.profiler:
+    set_profile_options = True
+    if jax.extend.backend.get_backend().platform_version == "Pathways":
+      max_logging.log("Pathways backend detected. Disabling setting profile options.")
+      set_profile_options = False
     profiler_options = profiler.ProfilerOptions(
         log_dir=mt_config.tensorboard_dir,
         skip_first_n_steps=mt_config.skip_first_n_steps_for_profiler,
         profiler_steps=mt_config.profiler_steps,
+        set_profile_options=set_profile_options,
     )
 
   return peft_trainer.TrainingConfig(
@@ -156,6 +162,8 @@ def train(mt_config, goodput_recorder=None):
   with mesh, nn_partitioning.axis_rules(mt_config.logical_axis_rules):
     trainer.train(data_hooks.train_data_iterator, data_hooks.eval_data_iterator)
 
+  return trainer, mesh
+
 
 def main(argv: Sequence[str]) -> None:
   """Main function to run SFT training.
@@ -163,6 +171,7 @@ def main(argv: Sequence[str]) -> None:
   Args:
     argv: Command-line arguments.
   """
+  pathwaysutils.initialize()
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
   if "xla_tpu_spmd_rng_bit_generator_unsafe" not in os.environ.get("LIBTPU_INIT_ARGS", ""):

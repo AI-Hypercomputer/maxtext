@@ -665,18 +665,10 @@ def get_quantization_rule(config: Config):
           weight_qtype=jnp.float8_e4m3fn,
           act_qtype=jnp.float8_e4m3fn,
           bwd_qtype=jnp.float8_e5m2,
-          bwd_use_original_residuals=True,
-          disable_channelwise_axes=True,  # per_tensor calibration
           weight_calibration_method=config.quantization_calibration_method,
           act_calibration_method=config.quantization_calibration_method,
           bwd_calibration_method=config.quantization_calibration_method,
-          op_names=("dot_general",),
-          additional_qt_config={
-              "dlhs_lhs_qtype": jnp.float8_e5m2,
-              "dlhs_rhs_qtype": jnp.float8_e4m3fn,
-              "drhs_lhs_qtype": jnp.float8_e4m3fn,
-              "drhs_rhs_qtype": jnp.float8_e5m2,
-          },
+          op_names=("dot_general", "gmm"),
       )
     case "fp8_gpu":
       return qwix.QtRule(
