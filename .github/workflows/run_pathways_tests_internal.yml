@@ -75,7 +75,7 @@ jobs:
           fi
           python3 -m pip install -e . --no-dependencies &&
           python3 -m pip uninstall -y libtpu &&
-          LIBTPU_INIT_ARGS='--xla_tpu_scoped_vmem_limit_kib=65536 --xla_tpu_spmd_rng_bit_generator_unsafe=true' python3 -m pytest ${{ inputs.pytest_addopts }} -v -m "${FINAL_PYTEST_MARKER}" --durations=0
+          python3 -m pytest ${{ inputs.pytest_addopts }} -v -m "${FINAL_PYTEST_MARKER}" --durations=0
     
     services:
       resource_manager:
