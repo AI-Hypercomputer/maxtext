@@ -24,5 +24,6 @@ reference/supported_models_and_architectures.md
 reference/alternatives.md
 reference/benchmark_and_performance.md
 reference/architecture_overview.md
+reference/tiering.md
 reference/jax_xla_and_pallas.md
 ```
