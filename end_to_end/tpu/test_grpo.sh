@@ -19,7 +19,7 @@
 
 set -xe
 
-BASE_OUTPUT_DIRECTORY=gs://runner-maxtext-logs
+BASE_OUTPUT_DIRECTORY=gs://sanbao-bucket/grpo_jetstream
 RUN_NAME=grpo-$(date +%Y-%m-%d-%H-%M-%S)
 
 JAX_PLATFORMS=proxy 

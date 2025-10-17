@@ -1512,7 +1512,8 @@ class MaxEngine(engine_api.Engine):
         if tokenizer_model.tokenizer.unk_token_id is not None:
           tokenizer_model.tokenizer.pad_token_id = tokenizer_model.tokenizer.unk_token_id
         else:
-          tokenizer_model.tokenizer.pad_token_id = -1
+          print(f"Warning: Setting pad_token_id to eos_token_id: {tokenizer_model.tokenizer.eos_token_id}")
+          tokenizer_model.tokenizer.pad_token_id = tokenizer_model.tokenizer.eos_token_id
       return tokenizer_model
     else:
       raise ValueError(f"Unsupported tokenizer type: {metadata.tokenizer_type}")
