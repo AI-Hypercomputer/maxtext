@@ -59,11 +59,11 @@ def _batch_first_result_token(first_tokens: list[engine_api.ResultTokens], batch
     return data
 
   result_tokens = engine_api.ResultTokens(
-      data=_pad_to_batch_size(data, batch_size),
-      tokens_idx=(0, 1),
-      valid_idx=(1, 2),
-      length_idx=(2, 3),
-      samples_per_slot=1,
+    data=_pad_to_batch_size(data, batch_size),
+    tokens_idx=(0, 1),
+    valid_idx=(1, 2),
+    length_idx=(2, 3),
+    samples_per_slot=1,
   )
 
   def _all_equals(elements: Sequence[jax.Array], target: jax.Array):
@@ -105,11 +105,11 @@ def main(argv: Sequence[str]) -> None:
     images = [multimodal_utils.load_image_from_path(p) for p in image_path]
     processor_outputs = [multimodal_utils.pre_process_image(img, model_name=config.model_name) for img in images]
     image_offsets = sum(
-        multimodal_utils.get_image_offsets(config.model_name, processor_output=po) for po in processor_outputs
+      multimodal_utils.get_image_offsets(config.model_name, processor_output=po) for po in processor_outputs
     )
     prefill_length -= image_offsets
     text = multimodal_utils.reformat_prompt(
-        text, image_placeholder=config.image_placeholder, model_name=config.model_name, num_images=len(images)
+      text, image_placeholder=config.image_placeholder, model_name=config.model_name, num_images=len(images)
     )
 
   metadata = engine.get_tokenizer()
@@ -122,20 +122,20 @@ def main(argv: Sequence[str]) -> None:
   tokens, true_length = tokenizer_model.encode(text, is_bos=not has_chat_template, prefill_lengths=[prefill_length])
   if config.use_multimodal:
     tokens = multimodal_utils.prepare_text_for_image_fusion(
-        tokens, model_name=config.model_name, processor_output=processor_outputs
+      tokens, model_name=config.model_name, processor_output=processor_outputs
     )
     true_length += image_offsets
 
-  assert (
-      true_length <= config.max_prefill_predict_length
-  ), f"Input token length {true_length} is longer than {config.max_prefill_predict_length=}"
+  assert true_length <= config.max_prefill_predict_length, (
+    f"Input token length {true_length} is longer than {config.max_prefill_predict_length=}"
+  )
   assert config.quantization != "fp8", "fp8 on NVIDIA GPUs is not supported in decode.py yet"
   assert config.quantization != "nanoo_fp8", "NANOO fp8 on AMD MI300/MI325 GPUs is not supported in decode.py yet"
 
   batch_size = int(config.per_device_batch_size * jax.device_count())
-  assert (
-      0 < _NUM_STREAMS <= batch_size
-  ), f"The number of streams {_NUM_STREAMS} must be > 0 and <= batch size {batch_size}"
+  assert 0 < _NUM_STREAMS <= batch_size, (
+    f"The number of streams {_NUM_STREAMS} must be > 0 and <= batch size {batch_size}"
+  )
 
   prefill_result_list = []
   first_token_list = []
@@ -148,15 +148,15 @@ def main(argv: Sequence[str]) -> None:
   for i in range(_NUM_STREAMS):
     with jax.profiler.StepTraceAnnotation("prefill", stream=i):
       prefill_result, first_token = engine.prefill(
-          params=params,
-          padded_tokens=tokens,
-          images=np.stack([po.pixel_values for po in processor_outputs]) if config.use_multimodal else None,
-          image_masks=np.stack([po.pixel_mask for po in processor_outputs])
-          if config.use_multimodal and "llama4" in config.model_name
-          else None,
-          true_length=true_length,
-          rng=rng_prefill,
-          slot=i,
+        params=params,
+        padded_tokens=tokens,
+        images=np.stack([po.pixel_values for po in processor_outputs]) if config.use_multimodal else None,
+        image_masks=np.stack([po.pixel_mask for po in processor_outputs])
+        if config.use_multimodal and "llama4" in config.model_name
+        else None,
+        true_length=true_length,
+        rng=rng_prefill,
+        slot=i,
       )
     prefill_result_list.append(prefill_result)
     first_token_list.append(first_token)
@@ -189,9 +189,9 @@ def main(argv: Sequence[str]) -> None:
     output = tokenizer_model.decode(results)
     print(f"Input `{text}` -> `{output}`")
 
-  assert output.startswith(
-      config.autoregressive_decode_assert
-  ), f"generated text mismatch {output=}, {config.autoregressive_decode_assert=}"
+  assert output.startswith(config.autoregressive_decode_assert), (
+    f"generated text mismatch {output=}, {config.autoregressive_decode_assert=}"
+  )
 
   # Deactivate profiler
   if not prof_deactivated:
@@ -202,8 +202,7 @@ def main(argv: Sequence[str]) -> None:
 
 def _validate_config(config):
   assert config.load_full_state_path == "", (
-      "Decode doesn't operate on full states! Convert to parameter checkpoint first."
-      "Using generate_param_only_checkpoint."
+    "Decode doesn't operate on full states! Convert to parameter checkpoint first.Using generate_param_only_checkpoint."
   )
 
 

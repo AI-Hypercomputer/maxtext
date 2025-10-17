@@ -90,8 +90,8 @@ def gen_data_fn():
 
 
 data_fn = pjit(
-    gen_data_fn,
-    out_shardings=(P(MESH_FSDP_AXIS, MESH_TENSOR_AXIS, None), P(MESH_FSDP_AXIS, MESH_TENSOR_AXIS, None)),
+  gen_data_fn,
+  out_shardings=(P(MESH_FSDP_AXIS, MESH_TENSOR_AXIS, None), P(MESH_FSDP_AXIS, MESH_TENSOR_AXIS, None)),
 )
 
 
@@ -103,14 +103,14 @@ jit_matmul = pjit(matmul, out_shardings=P(MESH_FSDP_AXIS, None, MESH_TENSOR_AXIS
 
 
 @partial(
-    shard_map,
-    mesh=global_mesh,
-    in_specs=(
-        P(MESH_FSDP_AXIS, MESH_TENSOR_AXIS, None),
-        P(MESH_FSDP_AXIS, MESH_TENSOR_AXIS, None),
-    ),
-    out_specs=P(MESH_FSDP_AXIS, None, MESH_TENSOR_AXIS, None),
-    check_rep=False,
+  shard_map,
+  mesh=global_mesh,
+  in_specs=(
+    P(MESH_FSDP_AXIS, MESH_TENSOR_AXIS, None),
+    P(MESH_FSDP_AXIS, MESH_TENSOR_AXIS, None),
+  ),
+  out_specs=P(MESH_FSDP_AXIS, None, MESH_TENSOR_AXIS, None),
+  check_rep=False,
 )
 def collective_matmul(activations, weights):  # pylint: disable=redefined-outer-name
   """Collective matrix multiply"""
@@ -123,13 +123,13 @@ def collective_matmul(activations, weights):  # pylint: disable=redefined-outer-
   mid_chunk = chunk_size // 2
   # create accum buffer
   accum = jnp.zeros(
-      (
-          activations.shape[0],
-          activations.shape[1] * axis_size,
-          weights.shape[-2],
-          weights.shape[-1],
-      ),
-      dtype=activations.dtype,
+    (
+      activations.shape[0],
+      activations.shape[1] * axis_size,
+      weights.shape[-2],
+      weights.shape[-1],
+    ),
+    dtype=activations.dtype,
   )
 
   # compute first chunk
@@ -138,14 +138,14 @@ def collective_matmul(activations, weights):  # pylint: disable=redefined-outer-
   accum = jax.lax.dynamic_update_slice(accum, update, update_index)
   activation_forward, activation_backward = jnp.split(activations, 2, axis=1)
   activation_forward = jax.lax.ppermute(
-      activation_forward,
-      axis_name=MESH_TENSOR_AXIS,
-      perm=[(j, (j + 1) % axis_size) for j in range(axis_size)],
+    activation_forward,
+    axis_name=MESH_TENSOR_AXIS,
+    perm=[(j, (j + 1) % axis_size) for j in range(axis_size)],
   )
   activation_backward = jax.lax.ppermute(
-      activation_backward,
-      axis_name=MESH_TENSOR_AXIS,
-      perm=[(j, (j - 1) % axis_size) for j in range(axis_size)],
+    activation_backward,
+    axis_name=MESH_TENSOR_AXIS,
+    perm=[(j, (j - 1) % axis_size) for j in range(axis_size)],
   )
 
   # split activations into chunks and send
@@ -155,14 +155,14 @@ def collective_matmul(activations, weights):  # pylint: disable=redefined-outer-
     update_backward = jnp.einsum("bsE,Ehd->bshd", activation_backward, weights)
 
     activation_forward = jax.lax.ppermute(
-        activation_forward,
-        axis_name=MESH_TENSOR_AXIS,
-        perm=[(j, (j + 1) % axis_size) for j in range(axis_size)],
+      activation_forward,
+      axis_name=MESH_TENSOR_AXIS,
+      perm=[(j, (j + 1) % axis_size) for j in range(axis_size)],
     )
     activation_backward = jax.lax.ppermute(
-        activation_backward,
-        axis_name=MESH_TENSOR_AXIS,
-        perm=[(j, (j - 1) % axis_size) for j in range(axis_size)],
+      activation_backward,
+      axis_name=MESH_TENSOR_AXIS,
+      perm=[(j, (j - 1) % axis_size) for j in range(axis_size)],
     )
 
     forward_update_index = ((axis_index - i - 1) % axis_size) * chunk_size

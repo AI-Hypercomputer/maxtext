@@ -61,9 +61,9 @@ def save_golden_logits(model_id, output_path, prompt_texts, apply_chat_template,
     hf_model_path = model_id
   tokenizer = AutoTokenizer.from_pretrained(model_id)
   model = AutoModelForCausalLM.from_pretrained(
-      hf_model_path,
-      torch_dtype=torch.float32,
-      trust_remote_code=True,
+    hf_model_path,
+    torch_dtype=torch.float32,
+    trust_remote_code=True,
   )
 
   all_data_to_save = []
@@ -81,13 +81,13 @@ def save_golden_logits(model_id, output_path, prompt_texts, apply_chat_template,
       processor = AutoProcessor.from_pretrained(model_id, token=True)
       if apply_chat_template:
         messages = [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image"},
-                    {"type": "text", "text": prompt_text},
-                ],
-            },
+          {
+            "role": "user",
+            "content": [
+              {"type": "image"},
+              {"type": "text", "text": prompt_text},
+            ],
+          },
         ]
         formatted_prompt = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         inputs = processor(text=formatted_prompt, images=image, return_tensors="pt")
@@ -99,13 +99,13 @@ def save_golden_logits(model_id, output_path, prompt_texts, apply_chat_template,
         logits = outputs.logits.cpu().numpy().astype("float32")
 
       data_to_save = {
-          "prompt": prompt_text,
-          "formatted_prompt": formatted_prompt,
-          "tokens": inputs["input_ids"].tolist()[0],
-          "attention_mask": inputs["attention_mask"].tolist()[0],
-          "image_path": image_paths[i],
-          "pixel_values": inputs["pixel_values"].tolist()[0],
-          "logits": logits.tolist()[0],
+        "prompt": prompt_text,
+        "formatted_prompt": formatted_prompt,
+        "tokens": inputs["input_ids"].tolist()[0],
+        "attention_mask": inputs["attention_mask"].tolist()[0],
+        "image_path": image_paths[i],
+        "pixel_values": inputs["pixel_values"].tolist()[0],
+        "logits": logits.tolist()[0],
       }
     else:
       input_ids = tokenizer.encode(prompt_text, return_tensors="pt")
@@ -116,9 +116,9 @@ def save_golden_logits(model_id, output_path, prompt_texts, apply_chat_template,
 
       # Prepare data to be saved
       data_to_save = {
-          "prompt": prompt_text,
-          "tokens": input_ids.tolist()[0],
-          "logits": logits.tolist()[0],  # Convert numpy array to list for JSON serialization
+        "prompt": prompt_text,
+        "tokens": input_ids.tolist()[0],
+        "logits": logits.tolist()[0],  # Convert numpy array to list for JSON serialization
       }
     print(f"Token length is {len(data_to_save['tokens'])} for prompt: {prompt_text}")
     print(f"raw ids: {data_to_save['tokens']}")
@@ -139,32 +139,32 @@ def main(raw_args=None) -> None:
   parser.add_argument("--output-path", type=str, required=True, help="The path to save the generated golden logits.")
   parser.add_argument("--prompts", type=str, required=True, help="A semicolon-separated list of prompts.")
   parser.add_argument(
-      "--apply-chat-template",
-      type=bool,
-      required=False,
-      default=False,
-      help="Whether to apply chat template from the HF processor. Used for image+text input.",
+    "--apply-chat-template",
+    type=bool,
+    required=False,
+    default=False,
+    help="Whether to apply chat template from the HF processor. Used for image+text input.",
   )
   parser.add_argument(
-      "--gcs-bucket", type=str, required=False, default=None, help="A GCS bucket to store logits, without gs://."
+    "--gcs-bucket", type=str, required=False, default=None, help="A GCS bucket to store logits, without gs://."
   )
   parser.add_argument(
-      "--hf-model-path", type=str, required=False, default=None, help="local path to checkpoint if exists."
+    "--hf-model-path", type=str, required=False, default=None, help="local path to checkpoint if exists."
   )
   parser.add_argument(
-      "--image-paths", type=str, required=False, default=None, help="A semicolon-separated list of image_paths."
+    "--image-paths", type=str, required=False, default=None, help="A semicolon-separated list of image_paths."
   )
   args = parser.parse_args(raw_args)
   prompts = args.prompts.split(";")
   image_paths = args.image_paths.split(";") if args.image_paths else []
   if image_paths:
-    assert len(image_paths) == len(
-        prompts
-    ), "when image paths are provided, image_paths and prompts must have the same length."
+    assert len(image_paths) == len(prompts), (
+      "when image paths are provided, image_paths and prompts must have the same length."
+    )
   if args.apply_chat_template:
     assert image_paths, "apply_chat_template is only used for image+text input, so image_paths must be provided."
   save_golden_logits(
-      args.model_id, args.output_path, prompts, args.apply_chat_template, args.gcs_bucket, args.hf_model_path, image_paths
+    args.model_id, args.output_path, prompts, args.apply_chat_template, args.gcs_bucket, args.hf_model_path, image_paths
   )
 
 

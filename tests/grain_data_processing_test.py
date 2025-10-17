@@ -31,7 +31,6 @@ from MaxText.globals import MAXTEXT_PKG_DIR, MAXTEXT_ASSETS_ROOT, MAXTEXT_REPO_R
 
 
 class GrainArrayRecordProcessingTest(unittest.TestCase):
-
   @classmethod
   def setUpClass(cls):
     super().setUpClass()
@@ -41,28 +40,26 @@ class GrainArrayRecordProcessingTest(unittest.TestCase):
     super().setUp()
     temp_dir = tempfile.gettempdir()
     self.config = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
-        per_device_batch_size=1,
-        run_name="test",
-        mesh_axes=["data"],
-        logical_axis_rules=[["batch", "data"]],
-        data_sharding=["data"],
-        base_output_directory="gs://max-experiments/",
-        dataset_type="grain",
-        grain_train_files=os.path.join(
-            temp_dir, "gcsfuse", "array-record", "c4", "en", "3.0.1", "c4-train.array_record*"
-        ),
-        tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizer"),
-        enable_checkpointing=False,
+      [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+      per_device_batch_size=1,
+      run_name="test",
+      mesh_axes=["data"],
+      logical_axis_rules=[["batch", "data"]],
+      data_sharding=["data"],
+      base_output_directory="gs://max-experiments/",
+      dataset_type="grain",
+      grain_train_files=os.path.join(temp_dir, "gcsfuse", "array-record", "c4", "en", "3.0.1", "c4-train.array_record*"),
+      tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizer"),
+      enable_checkpointing=False,
     )
     self.mesh_shape_1d = (len(jax.devices()),)
     self.mesh = Mesh(mesh_utils.create_device_mesh(self.mesh_shape_1d), self.config.mesh_axes)
     self.process_indices = input_pipeline_interface.get_process_loading_real_data(
-        self.config.data_sharding,
-        self.config.global_batch_size_to_load,
-        self.config.global_batch_size_to_train_on,
-        self.config.max_target_length,
-        self.mesh,
+      self.config.data_sharding,
+      self.config.global_batch_size_to_load,
+      self.config.global_batch_size_to_train_on,
+      self.config.max_target_length,
+      self.mesh,
     )
     self.train_iter = _grain_data_processing.make_grain_train_iterator(self.config, self.mesh, self.process_indices)
 
@@ -72,15 +69,15 @@ class GrainArrayRecordProcessingTest(unittest.TestCase):
     # *_position and *_segmentation indicate the boundaries.
     batch = next(self.train_iter)
     self.assertEqual(
-        {k: list(v.shape) for k, v in batch.items()},
-        {
-            "inputs": expected_shape,
-            "inputs_position": expected_shape,
-            "inputs_segmentation": expected_shape,
-            "targets": expected_shape,
-            "targets_position": expected_shape,
-            "targets_segmentation": expected_shape,
-        },
+      {k: list(v.shape) for k, v in batch.items()},
+      {
+        "inputs": expected_shape,
+        "inputs_position": expected_shape,
+        "inputs_segmentation": expected_shape,
+        "targets": expected_shape,
+        "targets_position": expected_shape,
+        "targets_segmentation": expected_shape,
+      },
     )
 
   def test_batch_determinism(self):
@@ -108,43 +105,41 @@ class GrainArrayRecordProcessingTest(unittest.TestCase):
 
 
 class GrainArrayRecordProcessingWithMultiSourceBlendingTest(GrainArrayRecordProcessingTest):
-
   def setUp(self):
     super().setUp()
     temp_dir = tempfile.gettempdir()
     # We use the same dataset for testing, but you can use different datasets by changing the file patterns.
     grain_train_files = [
-        f"{temp_dir}/gcsfuse/array-record/c4/en/3.0.1/c4-train.array_record*:0.3",
-        f"{temp_dir}/gcsfuse/array-record/c4/en/3.0.1/c4-train.array_record*:0.7",
+      f"{temp_dir}/gcsfuse/array-record/c4/en/3.0.1/c4-train.array_record*:0.3",
+      f"{temp_dir}/gcsfuse/array-record/c4/en/3.0.1/c4-train.array_record*:0.7",
     ]
     grain_train_files = ";".join(grain_train_files)
     self.config = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
-        per_device_batch_size=1,
-        run_name="test",
-        mesh_axes=["data"],
-        logical_axis_rules=[["batch", "data"]],
-        data_sharding=["data"],
-        base_output_directory="gs://max-experiments/",
-        dataset_type="grain",
-        grain_train_files=grain_train_files,
-        tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizer"),
-        enable_checkpointing=False,
+      [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+      per_device_batch_size=1,
+      run_name="test",
+      mesh_axes=["data"],
+      logical_axis_rules=[["batch", "data"]],
+      data_sharding=["data"],
+      base_output_directory="gs://max-experiments/",
+      dataset_type="grain",
+      grain_train_files=grain_train_files,
+      tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizer"),
+      enable_checkpointing=False,
     )
     self.mesh_shape_1d = (len(jax.devices()),)
     self.mesh = Mesh(mesh_utils.create_device_mesh(self.mesh_shape_1d), self.config.mesh_axes)
     self.process_indices = input_pipeline_interface.get_process_loading_real_data(
-        self.config.data_sharding,
-        self.config.global_batch_size_to_load,
-        self.config.global_batch_size_to_train_on,
-        self.config.max_target_length,
-        self.mesh,
+      self.config.data_sharding,
+      self.config.global_batch_size_to_load,
+      self.config.global_batch_size_to_train_on,
+      self.config.max_target_length,
+      self.mesh,
     )
     self.train_iter = _grain_data_processing.make_grain_train_iterator(self.config, self.mesh, self.process_indices)
 
 
 class GrainParquetProcessingTest(unittest.TestCase):
-
   @classmethod
   def setUpClass(cls):
     super().setUpClass()
@@ -154,28 +149,28 @@ class GrainParquetProcessingTest(unittest.TestCase):
     super().setUp()
     temp_dir = tempfile.gettempdir()
     self.config = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
-        per_device_batch_size=1,
-        run_name="test",
-        mesh_axes=["data"],
-        logical_axis_rules=[["batch", "data"]],
-        data_sharding=["data"],
-        base_output_directory="gs://max-experiments/",
-        dataset_type="grain",
-        grain_file_type="parquet",
-        grain_train_files=os.path.join(temp_dir, "gcsfuse", "hf", "c4", "c4-train-00000-of-01637.parquet"),
-        grain_worker_count=1,
-        tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizer"),
-        enable_checkpointing=False,
+      [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+      per_device_batch_size=1,
+      run_name="test",
+      mesh_axes=["data"],
+      logical_axis_rules=[["batch", "data"]],
+      data_sharding=["data"],
+      base_output_directory="gs://max-experiments/",
+      dataset_type="grain",
+      grain_file_type="parquet",
+      grain_train_files=os.path.join(temp_dir, "gcsfuse", "hf", "c4", "c4-train-00000-of-01637.parquet"),
+      grain_worker_count=1,
+      tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizer"),
+      enable_checkpointing=False,
     )
     self.mesh_shape_1d = (len(jax.devices()),)
     self.mesh = Mesh(mesh_utils.create_device_mesh(self.mesh_shape_1d), self.config.mesh_axes)
     self.process_indices = input_pipeline_interface.get_process_loading_real_data(
-        self.config.data_sharding,
-        self.config.global_batch_size_to_load,
-        self.config.global_batch_size_to_train_on,
-        self.config.max_target_length,
-        self.mesh,
+      self.config.data_sharding,
+      self.config.global_batch_size_to_load,
+      self.config.global_batch_size_to_train_on,
+      self.config.max_target_length,
+      self.mesh,
     )
     self.train_iter = _grain_data_processing.make_grain_train_iterator(self.config, self.mesh, self.process_indices)
 
@@ -185,15 +180,15 @@ class GrainParquetProcessingTest(unittest.TestCase):
     # *_position and *_segmentation indicate the boundaries.
     batch = next(self.train_iter)
     self.assertEqual(
-        {k: list(v.shape) for k, v in batch.items()},
-        {
-            "inputs": expected_shape,
-            "inputs_position": expected_shape,
-            "inputs_segmentation": expected_shape,
-            "targets": expected_shape,
-            "targets_position": expected_shape,
-            "targets_segmentation": expected_shape,
-        },
+      {k: list(v.shape) for k, v in batch.items()},
+      {
+        "inputs": expected_shape,
+        "inputs_position": expected_shape,
+        "inputs_segmentation": expected_shape,
+        "targets": expected_shape,
+        "targets_position": expected_shape,
+        "targets_segmentation": expected_shape,
+      },
     )
 
   def test_batch_determinism(self):
@@ -235,7 +230,7 @@ def mount_gcsfuse():
       raise FileNotFoundError(script_path)
 
     exit_code = subprocess.call(
-        ["bash", script_path, "DATASET_GCS_BUCKET=maxtext-dataset", f"MOUNT_PATH={os.path.join(temp_dir, 'gcsfuse')}"]
+      ["bash", script_path, "DATASET_GCS_BUCKET=maxtext-dataset", f"MOUNT_PATH={os.path.join(temp_dir, 'gcsfuse')}"]
     )
     if exit_code != os.EX_OK:
       raise ValueError(f"Running setup_gcsfuse.sh failed with exit code: {exit_code}")

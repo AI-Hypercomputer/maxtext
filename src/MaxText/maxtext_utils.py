@@ -13,7 +13,7 @@
 # limitations under the License.
 
 # pylint: disable=line-too-long, disable=bare-except, consider-using-generator
-""" Utils that are only interesting to MaxText. """
+"""Utils that are only interesting to MaxText."""
 
 import functools
 import pickle
@@ -54,7 +54,7 @@ def get_input_data_sharding(config, mesh):
 
 
 def get_functional_train_with_signature(
-    train_step, data_sharding, state_mesh_shardings, model, config, params_shardings=None
+  train_step, data_sharding, state_mesh_shardings, model, config, params_shardings=None
 ):
   """Get the shardings (both state and data) for `train_step`."""
   functional_train = functools.partial(train_step, model, config, state_mesh_shardings, params_shardings)
@@ -90,7 +90,7 @@ def get_shaped_batch(config):
   shaped_batch["targets_segmentation"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
   if config.use_multimodal:
     image_shape = multimodal_utils.get_dummy_image_shape_for_init(
-        config.model_name, batch_size=config.micro_batch_size_to_train_on
+      config.model_name, batch_size=config.micro_batch_size_to_train_on
     )
     shaped_batch["images"] = jax.ShapeDtypeStruct(image_shape, jnp.int32)
     shaped_batch["image_masks"] = jax.ShapeDtypeStruct(image_shape[:2], jnp.int32)
@@ -157,30 +157,30 @@ def calculate_gemma2_tflops_training_per_device(config, total_ffn_flops, qkv_flo
   layer and we use sliding window attention in local_attention
   """
   noncausal_attention_flops = (
-      # global attention
-      4 * config.per_device_batch_size * config.max_target_length**2 * config.num_query_heads * config.head_dim
-      +
-      # local attention
-      4
-      * config.per_device_batch_size
-      * config.max_target_length
-      * min(config.sliding_window_size, config.max_target_length)
-      * config.num_query_heads
-      * config.head_dim
+    # global attention
+    4 * config.per_device_batch_size * config.max_target_length**2 * config.num_query_heads * config.head_dim
+    +
+    # local attention
+    4
+    * config.per_device_batch_size
+    * config.max_target_length
+    * min(config.sliding_window_size, config.max_target_length)
+    * config.num_query_heads
+    * config.head_dim
   )
   causal_attention_flops = noncausal_attention_flops / 2
   attention_tflops = causal_attention_flops * config.num_decoder_layers * 3 / 10**12
 
   # multiply num_decoder_layers by 2 because we combine [local_attention, global_attention] into one decoder layer
   learnable_weight_tflops = (
-      ((total_ffn_flops + qkv_flops + projection_flops) * config.num_decoder_layers * 2 + embedding_flops) * 3 / 10**12
+    ((total_ffn_flops + qkv_flops + projection_flops) * config.num_decoder_layers * 2 + embedding_flops) * 3 / 10**12
   )
 
   return attention_tflops, learnable_weight_tflops
 
 
 def calculate_mixed_attention_model_tflops_training_per_device(
-    config, total_ffn_flops, qkv_flops, projection_flops, embedding_flops, attention_pattern_length
+  config, total_ffn_flops, qkv_flops, projection_flops, embedding_flops, attention_pattern_length
 ):
   """
   Calculate training TFLOPs for models with a mixed attention pattern of local
@@ -194,23 +194,23 @@ def calculate_mixed_attention_model_tflops_training_per_device(
   # FLOPs for a single global attention layer (full attention)
   # Formula: 4 * batch_size * seq_len^2 * num_heads * head_dim
   global_attention_flops_per_layer = (
-      4 * config.per_device_batch_size * config.max_target_length**2 * config.num_query_heads * config.head_dim
+    4 * config.per_device_batch_size * config.max_target_length**2 * config.num_query_heads * config.head_dim
   )
 
   # FLOPs for a single local attention layer (sliding window)
   # Formula: 4 * batch_size * seq_len * window_size * num_heads * head_dim
   local_attention_flops_per_layer = (
-      4
-      * config.per_device_batch_size
-      * config.max_target_length
-      * min(config.sliding_window_size, config.max_target_length)
-      * config.num_query_heads
-      * config.head_dim
+    4
+    * config.per_device_batch_size
+    * config.max_target_length
+    * min(config.sliding_window_size, config.max_target_length)
+    * config.num_query_heads
+    * config.head_dim
   )
 
   # Total attention FLOPs = (num_global_layers * FLOPs_per_global) + (num_local_layers * FLOPs_per_local)
   noncausal_attention_flops = (
-      num_global_layers * global_attention_flops_per_layer + num_local_layers * local_attention_flops_per_layer
+    num_global_layers * global_attention_flops_per_layer + num_local_layers * local_attention_flops_per_layer
   )
   causal_attention_flops = noncausal_attention_flops / 2
 
@@ -250,7 +250,7 @@ def calculate_llama4_attention_tflops(config):
 
   # FLOPs for a single global attention layer (full attention, non-causal)
   global_attention_flops_per_layer = (
-      4 * config.per_device_batch_size * seq_len**2 * config.num_query_heads * config.head_dim
+    4 * config.per_device_batch_size * seq_len**2 * config.num_query_heads * config.head_dim
   )
 
   # FLOPs for a single chunked attention layer (non-causal)
@@ -258,7 +258,7 @@ def calculate_llama4_attention_tflops(config):
 
   # Total non-causal attention FLOPs is the sum of all global and all chunked layers
   noncausal_attention_flops = (num_global_layers * global_attention_flops_per_layer) + (
-      num_chunked_layers * chunked_attention_flops_per_layer
+    num_chunked_layers * chunked_attention_flops_per_layer
   )
 
   # Apply causal mask and convert to TFLOPs (multiply by 3 for fwd/bwd pass)
@@ -278,23 +278,23 @@ def calculate_mla_tflops_per_device(config):
   else:
     # calculate query down and up flops
     q_flops = (
-        2
-        * batch_len
-        * (config.emb_dim * config.q_lora_rank + config.q_lora_rank * config.num_query_heads * qk_head_dim_sum)
+      2
+      * batch_len
+      * (config.emb_dim * config.q_lora_rank + config.q_lora_rank * config.num_query_heads * qk_head_dim_sum)
     )
   # calculate mla kv projection with down and up flops
   kv_flops = (
-      2
-      * batch_len
-      * (
-          config.emb_dim * (config.kv_lora_rank + config.qk_rope_head_dim)
-          + config.kv_lora_rank * config.num_query_heads * (config.qk_nope_head_dim + config.v_head_dim)
-      )
+    2
+    * batch_len
+    * (
+      config.emb_dim * (config.kv_lora_rank + config.qk_rope_head_dim)
+      + config.kv_lora_rank * config.num_query_heads * (config.qk_nope_head_dim + config.v_head_dim)
+    )
   )
   qkv_flops = q_flops + kv_flops
 
   attention_flops = (
-      2 * batch_len * config.max_target_length * config.num_query_heads * (qk_head_dim_sum + config.v_head_dim)
+    2 * batch_len * config.max_target_length * config.num_query_heads * (qk_head_dim_sum + config.v_head_dim)
   )
   projection_flops = 2 * batch_len * config.emb_dim * config.num_query_heads * config.v_head_dim
   return qkv_flops, attention_flops, projection_flops
@@ -309,7 +309,7 @@ def calculate_ffn_mamtul_tflops_per_device(config, mlp_dim):
       need to scale by shared_experts or num_experts_per_tok.
   """
   ffn1_flops = (
-      2 * config.per_device_batch_size * config.max_target_length * mlp_dim * config.emb_dim * len(config.mlp_activations)
+    2 * config.per_device_batch_size * config.max_target_length * mlp_dim * config.emb_dim * len(config.mlp_activations)
   )
   ffn2_flops = 2 * config.per_device_batch_size * config.max_target_length * mlp_dim * config.emb_dim
   return ffn1_flops + ffn2_flops
@@ -463,15 +463,15 @@ def calculate_vision_encoder_tflops(config):
   """Calculate vision encoder TFLOPs per prefill step per device."""
   if config.model_name.startswith("gemma3"):
     mm_total_tflops, mm_learnable_weight_tflops, mm_attention_tflops = calculate_gemma3_vision_layers_tflops_per_device(
-        config
+      config
     )
   elif config.model_name.startswith("llama4"):
     mm_total_tflops, mm_learnable_weight_tflops, mm_attention_tflops = calculate_llama4_vision_layers_tflops_per_device(
-        config
+      config
     )
   else:
     max_logging.log(
-        f"Vision encoder TFLOPs calculation not implemented for model {config.model_name}, counting as 0 for now."
+      f"Vision encoder TFLOPs calculation not implemented for model {config.model_name}, counting as 0 for now."
     )
     mm_total_tflops = mm_learnable_weight_tflops = mm_attention_tflops = 0
 
@@ -488,7 +488,7 @@ def calculate_tflops_training_per_device(config, log=True):
     else:
       gate_flops = 2 * config.per_device_batch_size * config.max_target_length * config.emb_dim * config.num_experts
       total_ffn_flops = (
-          gate_flops + calculate_ffn_mamtul_tflops_per_device(config, config.mlp_dim) * config.num_experts_per_tok
+        gate_flops + calculate_ffn_mamtul_tflops_per_device(config, config.mlp_dim) * config.num_experts_per_tok
       )
   else:
     total_ffn_flops = calculate_ffn_mamtul_tflops_per_device(config, config.mlp_dim)
@@ -498,23 +498,23 @@ def calculate_tflops_training_per_device(config, log=True):
     qkv_flops, noncausal_attention_flops, projection_flops = calculate_mla_tflops_per_device(config)
   else:
     qkv_flops = (
-        2
-        * config.per_device_batch_size
-        * config.max_target_length
-        * config.emb_dim
-        * (config.num_query_heads + 2 * config.num_kv_heads)
-        * config.head_dim
+      2
+      * config.per_device_batch_size
+      * config.max_target_length
+      * config.emb_dim
+      * (config.num_query_heads + 2 * config.num_kv_heads)
+      * config.head_dim
     )
     noncausal_attention_flops = (
-        4 * config.per_device_batch_size * config.max_target_length**2 * config.num_query_heads * config.head_dim
+      4 * config.per_device_batch_size * config.max_target_length**2 * config.num_query_heads * config.head_dim
     )
     projection_flops = (
-        2
-        * config.per_device_batch_size
-        * config.max_target_length
-        * config.emb_dim
-        * config.num_query_heads
-        * config.head_dim
+      2
+      * config.per_device_batch_size
+      * config.max_target_length
+      * config.emb_dim
+      * config.num_query_heads
+      * config.head_dim
     )
 
   # Divide attention flops by 2 due to causal mask
@@ -529,32 +529,32 @@ def calculate_tflops_training_per_device(config, log=True):
   # Combine flops with number of decoder layers
   if config.decoder_block == DecoderBlockType.GEMMA2:
     attention_tflops, learnable_weight_tflops = calculate_gemma2_tflops_training_per_device(
-        config, total_ffn_flops, qkv_flops, projection_flops, embedding_flops
+      config, total_ffn_flops, qkv_flops, projection_flops, embedding_flops
     )
   elif config.decoder_block == DecoderBlockType.GEMMA3:
     attention_tflops, learnable_weight_tflops = calculate_mixed_attention_model_tflops_training_per_device(
-        config, total_ffn_flops, qkv_flops, projection_flops, embedding_flops, attention_pattern_length=6
+      config, total_ffn_flops, qkv_flops, projection_flops, embedding_flops, attention_pattern_length=6
     )
   elif config.decoder_block == DecoderBlockType.GPT_OSS:
     attention_tflops, learnable_weight_tflops = calculate_mixed_attention_model_tflops_training_per_device(
-        config, total_ffn_flops, qkv_flops, projection_flops, embedding_flops, attention_pattern_length=2
+      config, total_ffn_flops, qkv_flops, projection_flops, embedding_flops, attention_pattern_length=2
     )
   elif config.decoder_block == DecoderBlockType.LLAMA4:
     # Use the new helper to calculate attention TFLOPs correctly.
     attention_tflops = calculate_llama4_attention_tflops(config)
     # The learnable weight calculation remains the same as it correctly handles Llama4's MoE structure.
     learnable_weight_tflops = (
-        (total_ffn_flops + (qkv_flops + projection_flops) * config.num_decoder_layers + embedding_flops) * 3 / 10**12
+      (total_ffn_flops + (qkv_flops + projection_flops) * config.num_decoder_layers + embedding_flops) * 3 / 10**12
     )
   elif config.decoder_block == DecoderBlockType.DEEPSEEK:
     learnable_weight_tflops = (
-        (total_ffn_flops + (qkv_flops + projection_flops) * config.num_decoder_layers + embedding_flops) * 3 / 10**12
+      (total_ffn_flops + (qkv_flops + projection_flops) * config.num_decoder_layers + embedding_flops) * 3 / 10**12
     )
     attention_tflops = causal_attention_flops * config.num_decoder_layers * 3 / 10**12
   else:
     # multiply by 3 for both feed forward and back propagation flops
     learnable_weight_tflops = (
-        ((total_ffn_flops + qkv_flops + projection_flops) * config.num_decoder_layers + embedding_flops) * 3 / 10**12
+      ((total_ffn_flops + qkv_flops + projection_flops) * config.num_decoder_layers + embedding_flops) * 3 / 10**12
     )
     attention_tflops = causal_attention_flops * config.num_decoder_layers * 3 / 10**12
 
@@ -576,11 +576,11 @@ def calculate_tflops_training_per_device(config, log=True):
     mm_total_tflops, mm_learnable_weight_tflops, mm_attention_tflops = calculate_vision_encoder_tflops(config)
     if log:
       print(
-          f"{config.model_name} vision layers per train step:\n",
-          f"Total TFLOPs: {mm_total_tflops:.2f} \n",
-          f"split as {100 * mm_learnable_weight_tflops/mm_total_tflops:.2f}% learnable weight flops",
-          f"and {100 * mm_attention_tflops/mm_total_tflops:.2f}% attention flops;\n",
-          f"learnable weight {mm_learnable_weight_tflops:.2f} TFLOPs, attention {mm_attention_tflops:.2f} TFLOPs",
+        f"{config.model_name} vision layers per train step:\n",
+        f"Total TFLOPs: {mm_total_tflops:.2f} \n",
+        f"split as {100 * mm_learnable_weight_tflops / mm_total_tflops:.2f}% learnable weight flops",
+        f"and {100 * mm_attention_tflops / mm_total_tflops:.2f}% attention flops;\n",
+        f"learnable weight {mm_learnable_weight_tflops:.2f} TFLOPs, attention {mm_attention_tflops:.2f} TFLOPs",
       )
     total_tflops += mm_total_tflops
     learnable_weight_tflops += mm_learnable_weight_tflops
@@ -588,10 +588,10 @@ def calculate_tflops_training_per_device(config, log=True):
 
   if log:
     print(
-        "Per train step:\n",
-        f"Total TFLOPs: {total_tflops:.2f} \n",
-        f"split as {100 * learnable_weight_tflops/total_tflops:.2f}% learnable weight flops",
-        f"and {100 * attention_tflops/total_tflops:.2f}% attention flops",
+      "Per train step:\n",
+      f"Total TFLOPs: {total_tflops:.2f} \n",
+      f"split as {100 * learnable_weight_tflops / total_tflops:.2f}% learnable weight flops",
+      f"and {100 * attention_tflops / total_tflops:.2f}% attention flops",
     )
   return total_tflops, learnable_weight_tflops, attention_tflops
 
@@ -601,25 +601,25 @@ def calculate_prefill_tflops_per_device(num_model_parameters, prefill_length, co
   """Calculate training TFLOP"""
   learnable_weight_tflops = 2 * num_model_parameters * prefill_length / jax.device_count() / 1e12
   noncausal_attention_flops = (
-      4
-      * config.num_query_heads
-      * config.num_decoder_layers
-      * config.head_dim
-      * prefill_length**2
-      / jax.device_count()
-      / 1e12
+    4
+    * config.num_query_heads
+    * config.num_decoder_layers
+    * config.head_dim
+    * prefill_length**2
+    / jax.device_count()
+    / 1e12
   )
   causal_attention_tflops = noncausal_attention_flops / 2  # due to causality in attention
   total_tflops = learnable_weight_tflops + causal_attention_tflops
 
   if log:
     print(
-        "Per prefill step per device: \n",
-        f"\tTotal TFLOPs: {total_tflops:.2f} \n",
-        f"\t\tLearnable weight TFLOPs: {learnable_weight_tflops:.2f} ",
-        f"({100 * learnable_weight_tflops/total_tflops:.2f})% of Total\n",
-        f"\t\tCausal attention TFLOPs: {causal_attention_tflops:.2f} ",
-        f"({100 * causal_attention_tflops/total_tflops:.2f})% of Total",
+      "Per prefill step per device: \n",
+      f"\tTotal TFLOPs: {total_tflops:.2f} \n",
+      f"\t\tLearnable weight TFLOPs: {learnable_weight_tflops:.2f} ",
+      f"({100 * learnable_weight_tflops / total_tflops:.2f})% of Total\n",
+      f"\t\tCausal attention TFLOPs: {causal_attention_tflops:.2f} ",
+      f"({100 * causal_attention_tflops / total_tflops:.2f})% of Total",
     )
   return total_tflops, learnable_weight_tflops, causal_attention_tflops
 
@@ -643,11 +643,11 @@ def get_mesh_axes_used_by_tensor_spec(tensor_sharding_spec):
   """
   # Flatten the sharding spec, as it can contain nested iterables (e.g., ('data', 'mdl')).
   tensor_sharding_spec = sum(
-      [
-          [axis] if isinstance(axis, str) else list(axis) if isinstance(axis, Iterable) else []
-          for axis in tensor_sharding_spec
-      ],
-      [],
+    [
+      [axis] if isinstance(axis, str) else list(axis) if isinstance(axis, Iterable) else []
+      for axis in tensor_sharding_spec
+    ],
+    [],
   )
   return tensor_sharding_spec
 
@@ -669,16 +669,16 @@ def _get_nontrival_mesh_axes(mesh):
   """
 
   target_sharding_axes_config = [
-      "fsdp",
-      "fsdp_transpose",
-      "sequence",
-      "context",
-      "context_autoregressive",
-      "tensor",
-      "tensor_transpose",
-      "tensor_sequence",
-      "stage",
-      "expert",
+    "fsdp",
+    "fsdp_transpose",
+    "sequence",
+    "context",
+    "context_autoregressive",
+    "tensor",
+    "tensor_transpose",
+    "tensor_sequence",
+    "stage",
+    "expert",
   ]
 
   # Filter the target axes to find those that exist in the current mesh
@@ -719,8 +719,8 @@ def _analyze_sharding(params, mesh, valid_target_mesh_axes):
     sharding = getattr(p_leaf, "sharding", None)
     spec = getattr(sharding, "spec", None)
     assert sharding is not None and spec is not None and isinstance(spec, P), (
-        f"Parameter '{param_name_str}' is missing a valid '.sharding.spec'."
-        "Expected 'p_leaf.sharding.spec' to be a non-null 'partitionspec'."
+      f"Parameter '{param_name_str}' is missing a valid '.sharding.spec'."
+      "Expected 'p_leaf.sharding.spec' to be a non-null 'partitionspec'."
     )
 
     current_sharding_spec = p_leaf.sharding.spec  # Extract the current tensor's sharding spec
@@ -735,14 +735,14 @@ def _analyze_sharding(params, mesh, valid_target_mesh_axes):
       unsharded_axes = set(valid_target_mesh_axes) - set(mesh_axes_used)
       # Add detailed info to list of problematic tensors
       problematic_tensors_details.append(
-          {
-              "name": param_name_str,  # Tensor name
-              "size": p_leaf.size,  # tensor size
-              "shape": p_leaf.shape,  # tensor shape
-              "spec": str(current_sharding_spec),  # Tensor sharding spec as string
-              "available_axes": sorted(list(valid_target_mesh_axes)),  # Axes that could be used for sharding
-              "unsharded_axes": sorted(list(unsharded_axes)),  # Unsharded axes
-          }
+        {
+          "name": param_name_str,  # Tensor name
+          "size": p_leaf.size,  # tensor size
+          "shape": p_leaf.shape,  # tensor shape
+          "spec": str(current_sharding_spec),  # Tensor sharding spec as string
+          "available_axes": sorted(list(valid_target_mesh_axes)),  # Axes that could be used for sharding
+          "unsharded_axes": sorted(list(unsharded_axes)),  # Unsharded axes
+        }
       )
   # Return the total size of unsharded parameters and the list of problematic tensors.
   return unsharded_params_total_size, problematic_tensors_details  # Return results
@@ -778,20 +778,17 @@ def _raise_if_unsharded_exceeds_tolerance(unsharded_size, total_size, tolerance,
     problematic_tensors_details.sort(key=lambda x: x["size"], reverse=True)
 
     # Begin constructing the error message.
-    error_msg_lines = [
-        f"Unsharded parameter percentage ({unsharded_param_perc:.2%})" f"exceeds tolerance ({tolerance:.2%})."
-    ]
+    error_msg_lines = [f"Unsharded parameter percentage ({unsharded_param_perc:.2%})exceeds tolerance ({tolerance:.2%})."]
     # Add a header explaining the issue.
     error_msg_lines.append(
-        "The following large tensors are replicated (unsharded) but could be sharded on at "
-        "least one of the available axes:"
+      "The following large tensors are replicated (unsharded) but could be sharded on at least one of the available axes:"
     )
     # Add details for the top 5 largest problematic tensors.
     for detail in problematic_tensors_details[:5]:  # Show top 5 largest problematic tensors
       error_msg_lines.append(
-          f" - Name: {detail['name']}(Size: {detail['size']}, Shape: {detail['spec']}, Spec: {detail['spec']}) "
-          f" is unsharded on axis: {detail['unsharded_axes']}"
-          f" could be sharded on: {detail['available_axes']}"
+        f" - Name: {detail['name']}(Size: {detail['size']}, Shape: {detail['spec']}, Spec: {detail['spec']}) "
+        f" is unsharded on axis: {detail['unsharded_axes']}"
+        f" could be sharded on: {detail['available_axes']}"
       )
 
     # Raise the assertion error with the combined, formatted message.
@@ -828,7 +825,7 @@ def assert_params_sufficiently_sharded(params, mesh, tolerance):
   # Check if the amount of unsharded parameters is within the tolerance and
   # raise an exception if it is not.
   _raise_if_unsharded_exceeds_tolerance(
-      unsharded_params_total_size, total_num_params, tolerance, problematic_tensors_details
+    unsharded_params_total_size, total_num_params, tolerance, problematic_tensors_details
   )
 
 
@@ -899,14 +896,14 @@ def init_initial_state(model, tx, config, is_training, key):
   """
   input_shape = (config.micro_batch_size_to_train_on, config.max_target_length)
   image_shape = multimodal_utils.get_dummy_image_shape_for_init(
-      config.model_name, batch_size=config.micro_batch_size_to_train_on
+    config.model_name, batch_size=config.micro_batch_size_to_train_on
   )
   model_vars = model.init(
-      {"params": key, "dropout": key, "aqt": key},
-      np.ones(input_shape, dtype=jnp.int32),
-      np.ones(input_shape, dtype=jnp.int32),
-      encoder_images=np.ones(image_shape, dtype=jnp.int32) if config.use_multimodal else None,
-      # nnx_method="no_op",
+    {"params": key, "dropout": key, "aqt": key},
+    np.ones(input_shape, dtype=jnp.int32),
+    np.ones(input_shape, dtype=jnp.int32),
+    encoder_images=np.ones(image_shape, dtype=jnp.int32) if config.use_multimodal else None,
+    # nnx_method="no_op",
   )
   if is_training:
     return init_training_state(model.apply, model_vars, tx)
@@ -930,7 +927,7 @@ def setup_decode_state(model, config, rng, mesh, checkpoint_manager):
     # generate random params
     max_logging.log("No decode checkpoint specified - generating random weights.")
     state, state_mesh_annotations, _, _ = setup_initial_state(
-        model, None, None, config, rng, mesh, checkpoint_manager, False
+      model, None, None, config, rng, mesh, checkpoint_manager, False
     )
   else:
     # Load params from checkpoint
@@ -938,11 +935,11 @@ def setup_decode_state(model, config, rng, mesh, checkpoint_manager):
     unboxed_abstract_state, state_mesh_annotations, _ = get_abstract_state(model, None, config, rng, mesh, False)
     with nn_partitioning.axis_rules(config.logical_axis_rules):
       params = checkpointing.load_params_from_path(
-          config.load_parameters_path,
-          unboxed_abstract_state.params,
-          config.checkpoint_storage_concurrent_gb,
-          config.checkpoint_storage_use_ocdbt,
-          config.checkpoint_storage_use_zarr3,
+        config.load_parameters_path,
+        unboxed_abstract_state.params,
+        config.checkpoint_storage_concurrent_gb,
+        config.checkpoint_storage_use_ocdbt,
+        config.checkpoint_storage_use_zarr3,
       )
     state = init_decode_state(None, params)
 
@@ -953,14 +950,14 @@ def setup_decode_state(model, config, rng, mesh, checkpoint_manager):
 def setup_training_state(model, data_iterator, tx, config, rng, mesh, checkpoint_manager):
   is_training = True
   return setup_initial_state(
-      model,
-      data_iterator,
-      tx,
-      config,
-      rng,
-      mesh,
-      checkpoint_manager,
-      is_training,
+    model,
+    data_iterator,
+    tx,
+    config,
+    rng,
+    mesh,
+    checkpoint_manager,
+    is_training,
   )
 
 
@@ -973,9 +970,9 @@ def unbox_logicallypartioned(boxed_pytree):
     a pytree where all all LogicallyPartitioned leaves have been unboxed.
   """
   return jax.tree_util.tree_map(
-      lambda x: x.unbox() if isinstance(x, nn.spmd.LogicallyPartitioned) else x,
-      boxed_pytree,
-      is_leaf=lambda k: isinstance(k, nn.spmd.LogicallyPartitioned),
+    lambda x: x.unbox() if isinstance(x, nn.spmd.LogicallyPartitioned) else x,
+    boxed_pytree,
+    is_leaf=lambda k: isinstance(k, nn.spmd.LogicallyPartitioned),
   )
 
 
@@ -1005,7 +1002,7 @@ def add_data_to_sharding(mesh, path, aval, sharding):
     sharded_shape = sharding.shard_shape(aval.shape)
   except Exception as e:
     raise AssertionError(
-        f"Could not shard value {jax.tree_util.keystr(path)} of shape={aval.shape} with {sharding=}"
+      f"Could not shard value {jax.tree_util.keystr(path)} of shape={aval.shape} with {sharding=}"
     ) from e
   pspec = sharding.spec
 
@@ -1050,12 +1047,12 @@ def maybe_update_params_sharding_with_opt(config, state_mesh_shardings):
     if isinstance(state_mesh_shardings.opt_state, optax.ScaleByAdamState):
       sharded_fp32_params = state_mesh_shardings.opt_state.mu
     elif isinstance(state_mesh_shardings.opt_state, tuple) and isinstance(
-        state_mesh_shardings.opt_state[0], optax.ScaleByAdamState
+      state_mesh_shardings.opt_state[0], optax.ScaleByAdamState
     ):
       sharded_fp32_params = state_mesh_shardings.opt_state[0].mu
     else:
       raise NotImplementedError(
-          f"Could not find optimizer state shardings from optimizer of type {type(state_mesh_shardings.opt_state)}"
+        f"Could not find optimizer state shardings from optimizer of type {type(state_mesh_shardings.opt_state)}"
       )
     if "params" not in sharded_fp32_params.keys():
       # When quantization=fp8 is enabled the sharded_fp32_params
@@ -1066,14 +1063,14 @@ def maybe_update_params_sharding_with_opt(config, state_mesh_shardings):
 
 
 def setup_initial_state(
-    model,
-    data_iterator,
-    tx,
-    config,
-    rng,
-    mesh,
-    checkpoint_manager,
-    is_training=True,
+  model,
+  data_iterator,
+  tx,
+  config,
+  rng,
+  mesh,
+  checkpoint_manager,
+  is_training=True,
 ):
   """We initialize the model and optimizer state, and optionally load from a
   checkpoint as necessary.
@@ -1093,34 +1090,34 @@ def setup_initial_state(
   """
 
   unboxed_abstract_state, state_mesh_annotations, state_mesh_shardings = get_abstract_state(
-      model, tx, config, rng, mesh, is_training
+    model, tx, config, rng, mesh, is_training
   )
 
   # Initialization
   with nn_partitioning.axis_rules(config.logical_axis_rules):
     restored, raw_params = checkpointing.load_state_if_possible(
-        checkpoint_manager,
-        data_iterator,
-        config.load_parameters_path,
-        config.load_full_state_path,
-        config.checkpoint_storage_concurrent_gb,
-        unboxed_abstract_state,
-        config.enable_single_replica_ckpt_restoring,
-        config.dataset_type,
-        use_ocdbt=config.checkpoint_storage_use_ocdbt,
-        use_zarr3=config.checkpoint_storage_use_zarr3,
-        enable_orbax_v1=config.enable_orbax_v1,
-        checkpoint_conversion_fn=config.checkpoint_conversion_fn,
-        source_checkpoint_layout=config.source_checkpoint_layout,
+      checkpoint_manager,
+      data_iterator,
+      config.load_parameters_path,
+      config.load_full_state_path,
+      config.checkpoint_storage_concurrent_gb,
+      unboxed_abstract_state,
+      config.enable_single_replica_ckpt_restoring,
+      config.dataset_type,
+      use_ocdbt=config.checkpoint_storage_use_ocdbt,
+      use_zarr3=config.checkpoint_storage_use_zarr3,
+      enable_orbax_v1=config.enable_orbax_v1,
+      checkpoint_conversion_fn=config.checkpoint_conversion_fn,
+      source_checkpoint_layout=config.source_checkpoint_layout,
     )
 
     if restored:
       if isinstance(
-          checkpoint_manager,
-          (
-              emergency_checkpoint_manager.CheckpointManager,
-              emergency_replicator_checkpoint_manager.ReplicatorCheckpointManager,
-          ),
+        checkpoint_manager,
+        (
+          emergency_checkpoint_manager.CheckpointManager,
+          emergency_replicator_checkpoint_manager.ReplicatorCheckpointManager,
+        ),
       ):
         state = restored
       else:
@@ -1132,9 +1129,9 @@ def setup_initial_state(
       init_state_partial.__name__ = "initialize_state"
       # pylint: disable=not-callable
       state = jax.jit(
-          init_state_partial,
-          in_shardings=None,
-          out_shardings=state_mesh_shardings,
+        init_state_partial,
+        in_shardings=None,
+        out_shardings=state_mesh_shardings,
       )(rng)
       if raw_params:  # If we loaded a partial state, we need to merge it.
         state = state.replace(params=raw_params)
@@ -1157,11 +1154,11 @@ def get_abstract_state(model, tx, config, rng, mesh, is_training=True):
   if is_training and config.shard_optimizer_over_data:
     # Add data to sharding for optimizer state
     state_mesh_shardings = state_mesh_shardings.replace(
-        opt_state=jax.tree.map_with_path(
-            functools.partial(add_data_to_sharding, mesh),
-            unbox_logicallypartioned(abstract_state).opt_state,
-            state_mesh_shardings.opt_state,
-        )
+      opt_state=jax.tree.map_with_path(
+        functools.partial(add_data_to_sharding, mesh),
+        unbox_logicallypartioned(abstract_state).opt_state,
+        state_mesh_shardings.opt_state,
+      )
     )
   if is_training and config.optimizer_memory_host_offload:
     opt_state = jax.tree_util.tree_map(lambda x: x.with_memory_kind(kind="pinned_host"), state_mesh_shardings.opt_state)
@@ -1183,9 +1180,9 @@ def get_abstract_state(model, tx, config, rng, mesh, is_training=True):
   with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
     state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
   return (
-      unboxed_abstract_sharded_state,
-      state_mesh_annotations,
-      state_mesh_shardings,
+    unboxed_abstract_sharded_state,
+    state_mesh_annotations,
+    state_mesh_shardings,
   )
 
 
@@ -1194,21 +1191,21 @@ def get_prefill_kv_cache_annotations(model, config, rng, mesh, page_state: None 
 
   def init_kv_cache(model, config):
     input_shape = (
-        config.micro_batch_size_to_train_on,
-        config.max_prefill_predict_length,
+      config.micro_batch_size_to_train_on,
+      config.max_prefill_predict_length,
     )
     image_shape = multimodal_utils.get_dummy_image_shape_for_init(
-        config.model_name, batch_size=config.micro_batch_size_to_train_on
+      config.model_name, batch_size=config.micro_batch_size_to_train_on
     )
 
     model_vars = model.init(
-        {"params": rng, "dropout": rng, "aqt": rng},
-        jnp.ones(input_shape),
-        jnp.ones(input_shape),
-        encoder_images=jnp.ones(image_shape) if config.use_multimodal else None,
-        model_mode=MODEL_MODE_PREFILL,
-        slot=0,
-        page_state=page_state,
+      {"params": rng, "dropout": rng, "aqt": rng},
+      jnp.ones(input_shape),
+      jnp.ones(input_shape),
+      encoder_images=jnp.ones(image_shape) if config.use_multimodal else None,
+      model_mode=MODEL_MODE_PREFILL,
+      slot=0,
+      page_state=page_state,
     )
     return model_vars["cache"]
 
@@ -1227,17 +1224,17 @@ def get_kv_cache_annotations(model, config, rng, mesh, page_state: None | PageSt
   def init_kv_cache(model, config):
     input_shape = (config.micro_batch_size_to_train_on, 1)
     image_shape = multimodal_utils.get_dummy_image_shape_for_init(
-        config.model_name, batch_size=config.micro_batch_size_to_train_on
+      config.model_name, batch_size=config.micro_batch_size_to_train_on
     )
 
     model_vars = model.init(
-        {"params": rng, "dropout": rng, "aqt": rng},
-        jnp.ones(input_shape),
-        jnp.ones(input_shape),
-        encoder_images=jnp.ones(image_shape) if config.use_multimodal else None,
-        model_mode=MODEL_MODE_AUTOREGRESSIVE,
-        slot=0,
-        page_state=page_state,
+      {"params": rng, "dropout": rng, "aqt": rng},
+      jnp.ones(input_shape),
+      jnp.ones(input_shape),
+      encoder_images=jnp.ones(image_shape) if config.use_multimodal else None,
+      model_mode=MODEL_MODE_AUTOREGRESSIVE,
+      slot=0,
+      page_state=page_state,
     )
     return model_vars["cache"]
 
@@ -1255,10 +1252,10 @@ def save_quantized_checkpoint_if_configured(config, params):
   assert config.quantization, "quantization must be configured"
   if config.save_quantized_params_path:
     checkpointing.save_params_to_path(
-        checkpoint_dir=config.save_quantized_params_path,
-        params=params,
-        use_ocdbt=config.checkpoint_storage_use_ocdbt,
-        use_zarr3=config.checkpoint_storage_use_zarr3,
+      checkpoint_dir=config.save_quantized_params_path,
+      params=params,
+      use_ocdbt=config.checkpoint_storage_use_ocdbt,
+      use_zarr3=config.checkpoint_storage_use_zarr3,
     )
   else:
     max_logging.log("Skipping saving quantized checkpoint as save_quantized_params_path is null.")
@@ -1326,33 +1323,33 @@ def create_device_mesh(config, devices=None):
       mesh = max_utils.create_custom_device_mesh(ici_parallelism, dcn_parallelism, devices, config.custom_mesh)
     else:
       mesh = mesh_utils.create_hybrid_device_mesh(
-          ici_parallelism,
-          dcn_parallelism,
-          devices,
-          allow_split_physical_axes=allow_split_physical_axes,
+        ici_parallelism,
+        dcn_parallelism,
+        devices,
+        allow_split_physical_axes=allow_split_physical_axes,
       )
   else:
     if allow_split_physical_axes:
       if max_utils.is_valid_custom_mesh(ici_parallelism, config.custom_mesh):
         mesh = mesh_utils.create_device_mesh(
-            [16, 16],
-            devices,
-            contiguous_submeshes=False,
-            allow_split_physical_axes=False,
+          [16, 16],
+          devices,
+          contiguous_submeshes=False,
+          allow_split_physical_axes=False,
         )
         mesh = max_utils.reshape_mesh_to_rings(mesh, config.custom_mesh)
         mesh = np.reshape(mesh, ici_parallelism)
       else:
         mesh = mesh_utils.create_device_mesh(
-            ici_parallelism,
-            devices,
-            contiguous_submeshes=False,
-            allow_split_physical_axes=allow_split_physical_axes,
+          ici_parallelism,
+          devices,
+          contiguous_submeshes=False,
+          allow_split_physical_axes=allow_split_physical_axes,
         )
     else:
       mesh = mesh_utils.create_device_mesh(
-          ici_parallelism,
-          devices,
+        ici_parallelism,
+        devices,
       )
       if config.optimize_mesh_for_tpu_v6e:
         mesh = max_utils.optimize_mesh_for_tpu_v6e(mesh, devices)
@@ -1398,8 +1395,8 @@ def create_learning_rate_schedule(config):
 
   pieces = [warmup_schedule, cos_schedule]
   boundaries = [
-      warmup_steps,
-      warmup_steps + cos_steps,
+    warmup_steps,
+    warmup_steps + cos_steps,
   ]
 
   if constant_zero_steps > 0:
@@ -1468,7 +1465,7 @@ def get_formatted_sharding_annotations(params, mesh=None):
       sharding_desc = "No .sharding attribute found"
 
     # Append the formatted details for the current parameter to our list of lines.
-    annotation_lines.append(f" - Param: {param_name_str}\n" f"   Shape: {shape_str}\n" f"   Sharding: {sharding_desc}")
+    annotation_lines.append(f" - Param: {param_name_str}\n   Shape: {shape_str}\n   Sharding: {sharding_desc}")
   # Join all the collected lines into a single string, separated by newlines.
   return "\n".join(annotation_lines)
 
@@ -1618,12 +1615,12 @@ def compute_loss_linen(intermediate_outputs, logits, data, config, model, params
 
 
 def get_vocab_tiling_loss_linen(
-    hidden_states,
-    data,
-    config,
-    model,
-    params,
-    is_train,
+  hidden_states,
+  data,
+  config,
+  model,
+  params,
+  is_train,
 ):
   """Calculates cross-entropy loss using vocab tiling for Linen models.
 
@@ -1648,26 +1645,26 @@ def get_vocab_tiling_loss_linen(
 
   param_spec = nn.get_partition_spec(params)
   hidden_spec = jax.sharding.NamedSharding(
-      model.mesh,
-      nn.logical_to_mesh_axes(("activation_embed_and_logits_batch", "activation_length_no_exp", "activation_embed")),
+    model.mesh,
+    nn.logical_to_mesh_axes(("activation_embed_and_logits_batch", "activation_length_no_exp", "activation_embed")),
   )
   label_spec = jax.sharding.NamedSharding(
-      model.mesh, nn.logical_to_mesh_axes(("activation_embed_and_logits_batch", "activation_length_no_exp"))
+    model.mesh, nn.logical_to_mesh_axes(("activation_embed_and_logits_batch", "activation_length_no_exp"))
   )
   reshaped_hidden_spec = jax.sharding.NamedSharding(
-      model.mesh, nn.logical_to_mesh_axes(("num_tile", "activation_embed_and_logits_batch_sequence", "activation_embed"))
+    model.mesh, nn.logical_to_mesh_axes(("num_tile", "activation_embed_and_logits_batch_sequence", "activation_embed"))
   )
   reshaped_data_spec = jax.sharding.NamedSharding(
-      model.mesh, nn.logical_to_mesh_axes(("num_tile", "activation_embed_and_logits_batch_sequence"))
+    model.mesh, nn.logical_to_mesh_axes(("num_tile", "activation_embed_and_logits_batch_sequence"))
   )
   chunked_hidden_spec = jax.sharding.NamedSharding(
-      model.mesh, nn.logical_to_mesh_axes(("activation_embed_and_logits_batch_sequence", "activation_embed"))
+    model.mesh, nn.logical_to_mesh_axes(("activation_embed_and_logits_batch_sequence", "activation_embed"))
   )
   chunked_data_spec = jax.sharding.NamedSharding(
-      model.mesh, nn.logical_to_mesh_axes(("activation_embed_and_logits_batch_sequence",))
+    model.mesh, nn.logical_to_mesh_axes(("activation_embed_and_logits_batch_sequence",))
   )
   chunked_logits_spec = jax.sharding.NamedSharding(
-      model.mesh, nn.logical_to_mesh_axes(("activation_embed_and_logits_batch_sequence", "activation_vocab"))
+    model.mesh, nn.logical_to_mesh_axes(("activation_embed_and_logits_batch_sequence", "activation_vocab"))
   )
 
   hidden_states = jax.lax.with_sharding_constraint(hidden_states, hidden_spec)
@@ -1705,10 +1702,10 @@ def get_vocab_tiling_loss_linen(
 
       # Calculate logits for the current chunk
       chunk_logits = model.apply(
-          {"params": gathered_params["params"]},
-          hidden_chunk,
-          deterministic=deterministic,
-          method="logits_from_hidden_states",
+        {"params": gathered_params["params"]},
+        hidden_chunk,
+        deterministic=deterministic,
+        method="logits_from_hidden_states",
       )
       chunk_logits = jax.lax.with_sharding_constraint(chunk_logits, chunked_logits_spec)
       one_hot_label_chunk = jax.nn.one_hot(label_chunk, config.vocab_size)
@@ -1719,31 +1716,31 @@ def get_vocab_tiling_loss_linen(
 
     initial_loss = 0.0
     total_loss, _ = jax.lax.scan(
-        _fwd_scan_body, initial_loss, (reshaped_hidden_states, reshaped_labels, reshaped_segmentation)
+      _fwd_scan_body, initial_loss, (reshaped_hidden_states, reshaped_labels, reshaped_segmentation)
     )
     residuals = (
-        gathered_params,
-        reshaped_hidden_states,
-        reshaped_labels,
-        reshaped_segmentation,
-        batch_size,
-        seq_len,
-        emb_dim,
+      gathered_params,
+      reshaped_hidden_states,
+      reshaped_labels,
+      reshaped_segmentation,
+      batch_size,
+      seq_len,
+      emb_dim,
     )
 
     return total_loss, residuals
 
   def _chunked_cross_entropy_loss_bwd(residuals, loss_cotangent):
     gathered_params, reshaped_hidden_states, reshaped_labels, reshaped_segmentation, batch_size, seq_len, emb_dim = (
-        residuals
+      residuals
     )
 
     def _single_chunk_loss_fn(input_params, input_hidden_chunk, input_label_chunk, input_segmentation_chunk):
       chunk_logits = model.apply(
-          {"params": input_params["params"]},
-          input_hidden_chunk,
-          deterministic=deterministic,
-          method="logits_from_hidden_states",
+        {"params": input_params["params"]},
+        input_hidden_chunk,
+        deterministic=deterministic,
+        method="logits_from_hidden_states",
       )
       chunk_logits = jax.lax.with_sharding_constraint(chunk_logits, chunked_logits_spec)
       one_hot_label_chunk = jax.nn.one_hot(input_label_chunk, config.vocab_size)
@@ -1771,9 +1768,9 @@ def get_vocab_tiling_loss_linen(
       grad_hidden_chunk = jax.lax.with_sharding_constraint(grad_hidden_chunk, chunked_hidden_spec)
 
       grad_params_acc = jax.tree_util.tree_map(
-          lambda acc, update: acc + update,
-          grad_params_acc,
-          grad_params_update,
+        lambda acc, update: acc + update,
+        grad_params_acc,
+        grad_params_update,
       )
       return grad_params_acc, grad_hidden_chunk
 
@@ -1781,7 +1778,7 @@ def get_vocab_tiling_loss_linen(
 
     # The scan now returns the total gradients for the params in the final carry
     grad_params, grad_reshaped_hidden_states = jax.lax.scan(
-        _bwd_scan_body, initial_grad_params_acc, (reshaped_hidden_states, reshaped_labels, reshaped_segmentation)
+      _bwd_scan_body, initial_grad_params_acc, (reshaped_hidden_states, reshaped_labels, reshaped_segmentation)
     )
     grad_reshaped_hidden_states = jax.lax.with_sharding_constraint(grad_reshaped_hidden_states, reshaped_hidden_spec)
     # TODO (chengnuojin): we may want to convert grad_params to bf16 to save memory
@@ -1792,19 +1789,19 @@ def get_vocab_tiling_loss_linen(
     grad_reshaped_hidden_states = grad_reshaped_hidden_states.reshape((batch_size, seq_len, emb_dim))
     grad_reshaped_hidden_states = jax.lax.with_sharding_constraint(grad_reshaped_hidden_states, hidden_spec)
     return (
-        grad_params,  # grad for params
-        grad_reshaped_hidden_states.astype(reshaped_hidden_states.dtype),
-        None,  # grad for reshaped_labels
-        None,  # grad for reshaped_segmentation
+      grad_params,  # grad for params
+      grad_reshaped_hidden_states.astype(reshaped_hidden_states.dtype),
+      None,  # grad for reshaped_labels
+      None,  # grad for reshaped_segmentation
     )
 
   chunked_cross_entropy_loss.defvjp(_chunked_cross_entropy_loss_fwd, _chunked_cross_entropy_loss_bwd)
 
   total_loss = chunked_cross_entropy_loss(
-      gathered_params,
-      hidden_states,
-      labels,
-      segmentation,
+    gathered_params,
+    hidden_states,
+    labels,
+    segmentation,
   )
 
   return total_loss

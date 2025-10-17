@@ -83,10 +83,10 @@ async def send_request(config, request, stub, tokenizer, progress_bar):  # pylin
   actual_completion = request.actual_completion
 
   decode_request = jetstream_pb2.DecodeRequest(
-      token_content=jetstream_pb2.DecodeRequest.TokenContent(token_ids=prompt_token_ids),
-      max_tokens=request.max_output_tokens,
-      num_samples=config.num_generations,  # number of responses to generate for each request
-      has_bos=True,
+    token_content=jetstream_pb2.DecodeRequest.TokenContent(token_ids=prompt_token_ids),
+    max_tokens=request.max_output_tokens,
+    num_samples=config.num_generations,  # number of responses to generate for each request
+    has_bos=True,
   )
 
   response = stub.Decode(decode_request)
@@ -100,11 +100,11 @@ async def send_request(config, request, stub, tokenizer, progress_bar):  # pylin
   for tokens in completion_tokens:
     completion = tokenizer.decode(tokens, skip_special_tokens=True).strip()
     outputs.append(
-        {
-            "prompt": [{"role": "user", "content": prompt}],
-            "completion": [{"role": "assistant", "content": completion}],
-            "actual_completion": [{"role": "assistant", "content": actual_completion}],
-        }
+      {
+        "prompt": [{"role": "user", "content": prompt}],
+        "completion": [{"role": "assistant", "content": completion}],
+        "actual_completion": [{"role": "assistant", "content": actual_completion}],
+      }
     )
   progress_bar.update(1)
   return outputs
@@ -120,20 +120,20 @@ async def run_inference(config, requests, tokenizer):  # pylint: disable=redefin
   options.append(("grpc.keepalive_timeout_ms", _GRPC_KEEPALIVE_TIMEOUT_MS))
   options.append(("grpc.enable_retries", 1))
   service_config_json = json.dumps(
-      {
-          "methodConfig": [
-              {
-                  "name": [{}],
-                  "retryPolicy": {
-                      "maxAttempts": _GRPC_MAX_ATTEMPTS,
-                      "initialBackoff": "0.2s",
-                      "maxBackoff": "1s",
-                      "backoffMultiplier": 2,
-                      "retryableStatusCodes": ["UNAVAILABLE"],
-                  },
-              }
-          ]
-      }
+    {
+      "methodConfig": [
+        {
+          "name": [{}],
+          "retryPolicy": {
+            "maxAttempts": _GRPC_MAX_ATTEMPTS,
+            "initialBackoff": "0.2s",
+            "maxBackoff": "1s",
+            "backoffMultiplier": 2,
+            "retryableStatusCodes": ["UNAVAILABLE"],
+          },
+        }
+      ]
+    }
   )
   options.append(("grpc.service_config", service_config_json))
   tasks = []
@@ -141,15 +141,15 @@ async def run_inference(config, requests, tokenizer):  # pylint: disable=redefin
     stub = jetstream_pb2_grpc.OrchestratorStub(channel)
     async for request in get_request(requests):
       tasks.append(
-          asyncio.create_task(
-              send_request(
-                  config=config,
-                  request=request,
-                  stub=stub,
-                  tokenizer=tokenizer,
-                  progress_bar=progress_bar,
-              )
+        asyncio.create_task(
+          send_request(
+            config=config,
+            request=request,
+            stub=stub,
+            tokenizer=tokenizer,
+            progress_bar=progress_bar,
           )
+        )
       )
     outputs = await asyncio.gather(*tasks)
   progress_bar.close()
@@ -159,11 +159,11 @@ async def run_inference(config, requests, tokenizer):  # pylint: disable=redefin
 def generate_completions(config, requests, tokenizer):  # pylint: disable=redefined-outer-name
   """Generates num_generations of completions for each prompt in request."""
   outputs = asyncio.run(
-      run_inference(
-          config=config,
-          requests=requests,
-          tokenizer=tokenizer,
-      ),
+    run_inference(
+      config=config,
+      requests=requests,
+      tokenizer=tokenizer,
+    ),
   )
   return [output for output_per_prompt_list in outputs for output in output_per_prompt_list]
 
@@ -183,12 +183,12 @@ def upload_data_to_hf(config, parquet_file_name, batch_num):  # pylint: disable=
   max_logging.log(f"Pushing dataset to Hugging Face: https://huggingface.co/datasets/{full_repo_name}")
   try:
     upload_file(
-        repo_id=full_repo_name,
-        repo_type="dataset",
-        path_or_fileobj=parquet_file_name,
-        path_in_repo=f"data/{parquet_file_name}",
-        commit_message=f"Uploading dataset batch number {batch_num}",
-        token=config.hf_access_token,
+      repo_id=full_repo_name,
+      repo_type="dataset",
+      path_or_fileobj=parquet_file_name,
+      path_in_repo=f"data/{parquet_file_name}",
+      commit_message=f"Uploading dataset batch number {batch_num}",
+      token=config.hf_access_token,
     )
     max_logging.log(f"Successfully pushed dataset to Hugging Face: https://huggingface.co/datasets/{full_repo_name}")
   except Exception as e:  # pylint: disable=broad-except
@@ -234,8 +234,8 @@ def generate_data(config):  # pylint: disable=redefined-outer-name
   dataset = _distillation_data_processing.load_dataset(config)
 
   tokenizer = transformers.AutoTokenizer.from_pretrained(
-      config.tokenizer_path,
-      token=config.hf_access_token,
+    config.tokenizer_path,
+    token=config.hf_access_token,
   )
 
   start_idx = 0
@@ -258,21 +258,21 @@ if __name__ == "__main__":
   parser.add_argument("--data-split", type=str, required=True, help="Subset of data to load, eg. train or test.")
   parser.add_argument("--data-columns", nargs="+", required=True, help="Columns names that contain relevant data.")
   parser.add_argument(
-      "--hf-access-token", type=str, required=True, help="Access token used to load a tokenizer from Hugging Face."
+    "--hf-access-token", type=str, required=True, help="Access token used to load a tokenizer from Hugging Face."
   )
   parser.add_argument("--tokenizer-path", type=str, required=True, help="Path to Hugging Face tokenizer.")
   parser.add_argument("--use-chat-template", action="store_true", help="Enable tokenizer to apply a chat template.")
   parser.add_argument("--max-prefill-length", type=int, default=256, help="The maximum prompt length.")
   parser.add_argument(
-      "--max-target-length", type=int, default=2048, help="The maximum prompt length plus the output completion length."
+    "--max-target-length", type=int, default=2048, help="The maximum prompt length plus the output completion length."
   )
   parser.add_argument(
-      "--num-generations", type=int, required=False, default=1, help="Number of samples to generate per prompt."
+    "--num-generations", type=int, required=False, default=1, help="Number of samples to generate per prompt."
   )
   parser.add_argument("--batch-size", type=int, required=True, help="Number of prompts to process in a batch.")
   parser.add_argument("--num-batches", type=int, required=True, help="Total number of batches of prompts to process.")
   parser.add_argument(
-      "--remove-local-dataset-files", action="store_true", help="Set to remove local dataset files after upload."
+    "--remove-local-dataset-files", action="store_true", help="Set to remove local dataset files after upload."
   )
 
   # Subparser for available upload commands (upload to GCS, upload to Hugging Face)
@@ -281,24 +281,24 @@ if __name__ == "__main__":
   # Subparser to upload dataset to Google Cloud Storage
   upload_to_gcs_parser = subparsers.add_parser("upload-to-gcs", help="Upload dataset to Google Cloud Storage.")
   upload_to_gcs_parser.add_argument(
-      "--gcs-bucket", type=str, required=True, help="Name of GCS bucket to upload generated dataset."
+    "--gcs-bucket", type=str, required=True, help="Name of GCS bucket to upload generated dataset."
   )
   upload_to_gcs_parser.add_argument(
-      "--gcs-data-path", type=str, required=True, help="Path to store dataset in GCS bucket."
+    "--gcs-data-path", type=str, required=True, help="Path to store dataset in GCS bucket."
   )
 
   # Subparser to upload dataset to Hugging Face
   upload_to_hf_parser = subparsers.add_parser(
-      "upload-to-hf",
-      help="Upload dataset to Hugging Face.",
+    "upload-to-hf",
+    help="Upload dataset to Hugging Face.",
   )
   upload_to_hf_parser.add_argument(
-      "--hf-repo-id", type=str, required=True, help="Name of Hugging Face repository to upload generated dataset."
+    "--hf-repo-id", type=str, required=True, help="Name of Hugging Face repository to upload generated dataset."
   )
 
   config = parser.parse_args()
 
-  assert (
-      config.max_prefill_length < config.max_target_length
-  ), "Maximum length of prompt should be less than maximum target length."
+  assert config.max_prefill_length < config.max_target_length, (
+    "Maximum length of prompt should be less than maximum target length."
+  )
   generate_data(config)

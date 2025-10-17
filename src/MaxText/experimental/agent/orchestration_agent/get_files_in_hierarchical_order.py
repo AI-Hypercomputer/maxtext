@@ -30,6 +30,7 @@ Example Invocations:
      --no-exclude-conditional-imports \
 --entry-file-path https://github.com/huggingface/transformers/blob/main/src/transformers/models/llama/modeling_llama.py
 """
+
 import argparse
 import ast
 import json
@@ -37,13 +38,18 @@ import logging
 import os.path
 from collections import deque
 
-from MaxText.experimental.agent.orchestration_agent.utils import find_cycle, check_github_file_exists, get_github_file_content, resolve_import_path
+from MaxText.experimental.agent.orchestration_agent.utils import (
+  find_cycle,
+  check_github_file_exists,
+  get_github_file_content,
+  resolve_import_path,
+)
 
 # Set up basic configuration
 logging.basicConfig(
-    level=logging.INFO,  # You can use DEBUG, INFO, WARNING, ERROR, CRITICAL
-    format="%(asctime)s - %(name)s.%(funcName)s - %(levelname)s - %(message)s",
-    datefmt="%H:%M:%S",
+  level=logging.INFO,  # You can use DEBUG, INFO, WARNING, ERROR, CRITICAL
+  format="%(asctime)s - %(name)s.%(funcName)s - %(levelname)s - %(message)s",
+  datefmt="%H:%M:%S",
 )
 logger = logging.getLogger(__name__)
 
@@ -85,10 +91,10 @@ def find_file_dependencies(file_path_url, base_path_url, exclude_conditional_imp
       if isinstance(parent, ast.If):
         test = parent.test
         if (isinstance(test, ast.Name) and test.id == "TYPE_CHECKING") or (
-            isinstance(test, ast.Attribute)
-            and isinstance(test.value, ast.Name)
-            and test.value.id == "typing"
-            and test.attr == "TYPE_CHECKING"
+          isinstance(test, ast.Attribute)
+          and isinstance(test.value, ast.Name)
+          and test.value.id == "typing"
+          and test.attr == "TYPE_CHECKING"
         ):
           return True
       current = parent
@@ -195,7 +201,7 @@ def get_dependency_sorted_files(entry_file_path, base_path, exclude_conditional_
         zero_in_degree_queue.append(dependent_file)
 
   rel_dependency_graph = {
-      k.replace(base_path, ""): [f.replace(base_path, "") for f in v] for k, v in dependency_graph.items()
+    k.replace(base_path, ""): [f.replace(base_path, "") for f in v] for k, v in dependency_graph.items()
   }
 
   if len(sorted_list) == len(all_files_in_graph):
@@ -223,22 +229,22 @@ def parse_args():
   """
   parser = argparse.ArgumentParser(description="Dependency sorter for Python files on GitHub.")
   parser.add_argument(
-      "--base-path",
-      type=str,
-      default="https://github.com/huggingface/transformers/blob/main/src/",
-      help="Root URL of the source directory on GitHub (default: %(default)s)",
+    "--base-path",
+    type=str,
+    default="https://github.com/huggingface/transformers/blob/main/src/",
+    help="Root URL of the source directory on GitHub (default: %(default)s)",
   )
   parser.add_argument(
-      "--entry-file-path",
-      type=str,
-      default="https://github.com/huggingface/transformers/blob/main/src/transformers/models/llama/modeling_llama.py",
-      help="Full GitHub URL for the entry Python file to analyze (default: %(default)s)",
+    "--entry-file-path",
+    type=str,
+    default="https://github.com/huggingface/transformers/blob/main/src/transformers/models/llama/modeling_llama.py",
+    help="Full GitHub URL for the entry Python file to analyze (default: %(default)s)",
   )
   parser.add_argument(
-      "--exclude-conditional-imports",
-      action=argparse.BooleanOptionalAction,
-      default=True,
-      help="Exclude imports inside functions/classes (use --no-exclude-conditional-imports to disable)",
+    "--exclude-conditional-imports",
+    action=argparse.BooleanOptionalAction,
+    default=True,
+    help="Exclude imports inside functions/classes (use --no-exclude-conditional-imports to disable)",
   )
   args = parser.parse_args()
   if not args.entry_file_path.startswith(args.base_path):
@@ -260,13 +266,13 @@ def save_results_in_file(sorted_files, dependencies, args, outFile="FileOrder.tx
     json.dump({"sorted_files": sorted_files, "dependencies": dependencies}, f)
   standalone_module = [mod for mod in sorted_files if mod not in dependencies or len(dependencies[mod]) == 0]
   dependent_sorted_modules = {
-      mod: dependencies[mod] for mod in sorted_files if mod in dependencies and len(dependencies[mod]) > 0
+    mod: dependencies[mod] for mod in sorted_files if mod in dependencies and len(dependencies[mod]) > 0
   }
   with open(outFile, "wt", encoding="utf-8") as f:
     f.write(f"BasePath {args.base_path}\n")
     f.write(f"Entry File {args.entry_file_path}\n")
-    f.write(f"Standalone Files:\n {json.dumps(standalone_module,indent=4)}\n")
-    f.write(f"Dependent Files\n {json.dumps(dependent_sorted_modules,indent=4)}\n")
+    f.write(f"Standalone Files:\n {json.dumps(standalone_module, indent=4)}\n")
+    f.write(f"Dependent Files\n {json.dumps(dependent_sorted_modules, indent=4)}\n")
 
 
 def main():
@@ -285,7 +291,7 @@ def main():
     logger.info("-" * 40)
 
     sorted_files, dependencies = get_dependency_sorted_files(
-        ENTRY_FILE_PATH, BASE_PATH, EXCLUDE_CONDITIONAL_IMPORTS, returnDependencies=True
+      ENTRY_FILE_PATH, BASE_PATH, EXCLUDE_CONDITIONAL_IMPORTS, returnDependencies=True
     )
 
     save_results_in_file(sorted_files, dependencies, args)

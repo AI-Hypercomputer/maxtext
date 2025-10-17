@@ -61,9 +61,9 @@ from MaxText.experimental.agent.code_generation_agent.llm_agent import GeminiAge
 from MaxText.experimental.agent.orchestration_agent.utils import parse_python_code
 
 logging.basicConfig(
-    format="%(asctime)s %(levelname)-8s %(message)s",
-    level=logging.INFO,
-    datefmt="%Y-%m-%d %H:%M:%S",
+  format="%(asctime)s %(levelname)-8s %(message)s",
+  level=logging.INFO,
+  datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger(__name__)
 # logging.raiseExceptions = False
@@ -118,25 +118,22 @@ def make_test_case_and_run(args, python_file, jax_file):
       entry_module = get_last_defined_module(python_code)
       if get_last_defined_module(jax_code) != entry_module:
         logger.error(
-            "It seems inconsistency in %s code PyTorch have %s and JAX have %s as entry Module",
-            python_file,
-            entry_module,
-            get_last_defined_module(jax_code),
+          "It seems inconsistency in %s code PyTorch have %s and JAX have %s as entry Module",
+          python_file,
+          entry_module,
+          get_last_defined_module(jax_code),
         )
         # Penalty in case of Entry point not exist or different from torch
         return 0, args.error_penalty
       prompt = CodeEvaluation["TESTCASE"]
       python_code = (
-          "from "
-          + ".".join(python_file.split(os.path.sep)[1:]).replace(".py", " import " + entry_module)
-          + "\n\n"
-          + python_code
+        "from "
+        + ".".join(python_file.split(os.path.sep)[1:]).replace(".py", " import " + entry_module)
+        + "\n\n"
+        + python_code
       )
       jax_code = (
-          "from "
-          + ".".join(jax_file.split(os.path.sep)[1:]).replace(".py", " import " + entry_module)
-          + "\n\n"
-          + jax_code
+        "from " + ".".join(jax_file.split(os.path.sep)[1:]).replace(".py", " import " + entry_module) + "\n\n" + jax_code
       )
       prompt = prompt.replace("<module.path.to.pytorch_code>", python_code)
       prompt = prompt.replace("<module.path.to.jax_code>", jax_code)
@@ -204,25 +201,25 @@ def parse_args():
   """
   parser = argparse.ArgumentParser(description="Code Evaluation Agent")
   parser.add_argument(
-      "--error_penalty", type=int, default=10, help="Penalty for errors in test case generation or execution."
+    "--error_penalty", type=int, default=10, help="Penalty for errors in test case generation or execution."
   )
   parser.add_argument(
-      "--pytorch_path",
-      type=str,
-      default="../code_generation_agent/dataset/PyTorch/",
-      help="Path to the directory containing PyTorch files.",
+    "--pytorch_path",
+    type=str,
+    default="../code_generation_agent/dataset/PyTorch/",
+    help="Path to the directory containing PyTorch files.",
   )
   parser.add_argument(
-      "--jax_path",
-      type=str,
-      default="../code_generation_agent/dataset/jax_converted/",
-      help="Path to the directory containing JAX files.",
+    "--jax_path",
+    type=str,
+    default="../code_generation_agent/dataset/jax_converted/",
+    help="Path to the directory containing JAX files.",
   )
   parser.add_argument(
-      "--testcase_path",
-      type=str,
-      default="../code_generation_agent/dataset/test_cases/",
-      help="Path to the directory for generated test cases.",
+    "--testcase_path",
+    type=str,
+    default="../code_generation_agent/dataset/test_cases/",
+    help="Path to the directory for generated test cases.",
   )
   parser.add_argument("--overwrite_existing_files", action="store_true", help="Overwrite existing test case files.")
   return parser.parse_args()

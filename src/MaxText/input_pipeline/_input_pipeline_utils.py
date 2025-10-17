@@ -39,7 +39,7 @@ def normalize_features(x, column_name):
 def get_tokenizer(tokenizer_path, tokenizer_type, add_bos, add_eos, hf_access_token=None, dataset_type="tfds"):
   # Load tokenizer
   tokenizer_model = tokenizer.build_tokenizer(
-      tokenizer_path, tokenizer_type, add_bos, add_eos, hf_access_token, dataset_type
+    tokenizer_path, tokenizer_type, add_bos, add_eos, hf_access_token, dataset_type
   )
   return tokenizer_model
 
@@ -58,7 +58,7 @@ def add_segmentation_and_position(x, data_columns, padding_token=0):
   for data_column in data_columns:
     x[f"{data_column}_segmentation"] = tf.cast(x[data_column] != padding_token, tf.int32)
     x[f"{data_column}_position"] = tf.broadcast_to(
-        tf.range(x[data_column].shape[-1], dtype=np.int32)[None, :], x[data_column].shape
+      tf.range(x[data_column].shape[-1], dtype=np.int32)[None, :], x[data_column].shape
     )
   return x
 
@@ -103,7 +103,7 @@ def pre_process_image_sft(example, image_column, model_name):
 def prepare_text_for_image_fusion(example, column_name, model_name):
   """prepare text for image fusion for multimodal SFT"""
   example[column_name] = multimodal_utils.prepare_text_for_image_fusion(
-      example[column_name], model_name, processor_output=example["images"]
+    example[column_name], model_name, processor_output=example["images"]
   )
   if isinstance(example["images"], list):
     example["image_masks"] = [image.pixel_mask for image in example["images"]]
@@ -175,13 +175,13 @@ def apply_chat_template(example, tokenizer_model, data_column_name):
       if message["role"] == "user":
         prompt = message
         prompt_in_chat_template = tokenizer_model.apply_chat_template(
-            [prompt], add_generation_prompt=False, tokenize=False
+          [prompt], add_generation_prompt=False, tokenize=False
         )
         messages.append(prompt_in_chat_template)
         is_prompt.append(True)
       elif message["role"] == "assistant":
         prompt_completion_tokens = tokenizer_model.apply_chat_template(
-            [prompt, message], add_generation_prompt=False, tokenize=True
+          [prompt, message], add_generation_prompt=False, tokenize=True
         )
         prompt_tokens = tokenizer_model.apply_chat_template([prompt], add_generation_prompt=False, tokenize=True)
         completion_tokens = prompt_completion_tokens[len(prompt_tokens) :]
@@ -201,7 +201,7 @@ def tokenization(example, hf_tokenizer, truncation, max_length, column_names):
   for column_name in column_names:
     if isinstance(example[column_name], list):
       example[column_name] = [
-          hf_tokenizer(x, truncation=truncation, max_length=max_length)["input_ids"] for x in example[column_name]
+        hf_tokenizer(x, truncation=truncation, max_length=max_length)["input_ids"] for x in example[column_name]
       ]
     elif isinstance(example[column_name], str):
       example[column_name] = hf_tokenizer(example[column_name], truncation=truncation, max_length=max_length)["input_ids"]
@@ -235,8 +235,8 @@ class SFTPromptMasking(grain.MapTransform):
       inputs += text
       targets += [self.unk_id] * len(text) if self.completion_only and element["is_prompt"][i] else text
     return {
-        "inputs": np.asarray(inputs[: self.max_target_length], dtype=np.int32),
-        "targets": np.asarray(targets[: self.max_target_length], dtype=np.int32),
+      "inputs": np.asarray(inputs[: self.max_target_length], dtype=np.int32),
+      "targets": np.asarray(targets[: self.max_target_length], dtype=np.int32),
     }
 
 
@@ -254,10 +254,10 @@ class SFTPromptMaskingVision(grain.MapTransform):
     inputs = np.concatenate((element[self.query_column], element[self.response_column]))
     targets = np.concatenate((np.asarray([self.unk_id] * len(element[self.query_column])), element[self.response_column]))
     return {
-        "inputs": np.asarray(inputs[: self.max_target_length], dtype=np.int32),
-        "targets": np.asarray(targets[: self.max_target_length], dtype=np.int32),
-        "images": element["images"],
-        "image_masks": element["image_masks"],
+      "inputs": np.asarray(inputs[: self.max_target_length], dtype=np.int32),
+      "targets": np.asarray(targets[: self.max_target_length], dtype=np.int32),
+      "images": element["images"],
+      "image_masks": element["image_masks"],
     }
 
 
@@ -270,8 +270,8 @@ class HFNormalizeFeatures(grain.MapTransform):
 
   def map(self, element):
     return {
-        "inputs": np.asarray(element[self.column_name], dtype=np.int32),
-        "targets": np.asarray(element[self.column_name], dtype=np.int32),
+      "inputs": np.asarray(element[self.column_name], dtype=np.int32),
+      "targets": np.asarray(element[self.column_name], dtype=np.int32),
     }
 
 
@@ -279,13 +279,13 @@ class HFDataSource(grain.RandomAccessDataSource):
   """A class that makes HuggingFace IterableDataset a grain datasource without random access support"""
 
   def __init__(
-      self,
-      dataset: datasets.IterableDataset,
-      dataloading_host_index: int,
-      dataloading_host_count: int,
-      num_threads: int,
-      max_target_length: int,
-      data_column_names: list[str],
+    self,
+    dataset: datasets.IterableDataset,
+    dataloading_host_index: int,
+    dataloading_host_count: int,
+    num_threads: int,
+    max_target_length: int,
+    data_column_names: list[str],
   ):
     self.dataset = dataset
     self.num_threads = num_threads
@@ -305,9 +305,9 @@ class HFDataSource(grain.RandomAccessDataSource):
   def _check_shard_count(self):
     if self.n_shards < (self.dataloading_host_count * self.num_threads):
       warnings.warn(
-          f"WARNING: Inefficient dataloading. Your train or eval dataset contains {self.n_shards} shards, "
-          "smaller than number of host loading data. This is known to lead to inefficient dataloading. See"
-          "github.com/google/maxtext/blob/main/getting_started/Data_Input_Pipeline.md#multihost-dataloading-best-practice"
+        f"WARNING: Inefficient dataloading. Your train or eval dataset contains {self.n_shards} shards, "
+        "smaller than number of host loading data. This is known to lead to inefficient dataloading. See"
+        "github.com/google/maxtext/blob/main/getting_started/Data_Input_Pipeline.md#multihost-dataloading-best-practice"
       )
       self.n_shards = self.dataloading_host_count * self.num_threads
 
@@ -316,7 +316,7 @@ class HFDataSource(grain.RandomAccessDataSource):
     new_shard = self.dataset_shards[idx] + self.dataloading_host_count * self.num_threads
     if new_shard < self.n_shards:
       max_logging.log(
-          f"Updating host {self.dataloading_host_index} dataset {idx}, was on shard {self.dataset_shards[idx]}"
+        f"Updating host {self.dataloading_host_index} dataset {idx}, was on shard {self.dataset_shards[idx]}"
       )
       max_logging.log(f"New shard is {new_shard}")
       self.dataset_shards[idx] = new_shard
@@ -362,8 +362,8 @@ class ParseFeatures(grain.MapTransform):
   def map(self, element):
     def _parse(example):
       parsed = tf.io.parse_example(
-          example,
-          {col: tf.io.FixedLenSequenceFeature([], dtype=self.dtype, allow_missing=True) for col in self.data_columns},
+        example,
+        {col: tf.io.FixedLenSequenceFeature([], dtype=self.dtype, allow_missing=True) for col in self.data_columns},
       )
       return parsed
 
@@ -487,7 +487,7 @@ class PadOrTrimToMaxLength(grain.MapTransform):
       tensor_type = "masks"
     else:
       raise ValueError(
-          "Input tensor must be 2D (mask), 4D (image), or 5D (tiled image), " f"but got {tensor.ndim} dimensions."
+        f"Input tensor must be 2D (mask), 4D (image), or 5D (tiled image), but got {tensor.ndim} dimensions."
       )
 
     # Assert that the input tensor does not exceed the maximum size.
@@ -549,7 +549,7 @@ def shift_right(x, axis=1):
   pad_widths = [(0, 0)] * len(x.shape)
   pad_widths[axis] = (1, 0)
   slices = [
-      slice(None),
+    slice(None),
   ] * len(x.shape)
   slices[axis] = slice(0, -1)
   padded = np.pad(x, pad_widths, mode="constant", constant_values=x.dtype.type(0))
@@ -561,7 +561,7 @@ def shift_left(x, pad_id, axis=1):
   pad_widths = [(0, 0)] * len(x.shape)
   pad_widths[axis] = (0, 1)
   slices = [
-      slice(None),
+    slice(None),
   ] * len(x.shape)
   slices[axis] = slice(1, None)
   padded = np.pad(x, pad_widths, mode="constant", constant_values=x.dtype.type(pad_id))

@@ -22,8 +22,8 @@ from jax.experimental import checkify
 from MaxText import exceptions
 from MaxText import maxtext_utils
 from MaxText.utils.goodput_utils import (
-    GoodputEvent,
-    maybe_record_goodput,
+  GoodputEvent,
+  maybe_record_goodput,
 )
 
 

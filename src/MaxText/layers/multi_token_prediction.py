@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""JAX implementation of the Multi Token Prediction https://arxiv.org/pdf/2412.19437 """
+"""JAX implementation of the Multi Token Prediction https://arxiv.org/pdf/2412.19437"""
 
 from typing import Type
 
@@ -77,13 +77,13 @@ class MultiTokenPredictionLayer(nn.Module):
 
   @nn.compact
   def __call__(
-      self,
-      prev_hidden_state: jnp.ndarray,
-      target_token_embedding: jnp.ndarray,
-      position_ids: jnp.ndarray,
-      decoder_segment_ids: None | jnp.ndarray,
-      deterministic: bool,
-      model_mode: str = MODEL_MODE_TRAIN,
+    self,
+    prev_hidden_state: jnp.ndarray,
+    target_token_embedding: jnp.ndarray,
+    position_ids: jnp.ndarray,
+    decoder_segment_ids: None | jnp.ndarray,
+    deterministic: bool,
+    model_mode: str = MODEL_MODE_TRAIN,
   ) -> jnp.ndarray:
     """
     Applies the MTP combination, projection, and internal transformer processing.
@@ -113,22 +113,22 @@ class MultiTokenPredictionLayer(nn.Module):
 
     # --- 1. Normalize Hidden State and Embedding ---
     embedding_norm_layer = rms_norm(
-        num_features=target_token_embedding.shape[-1],
-        dtype=cfg.dtype,
-        weight_dtype=cfg.weight_dtype,
-        name=f"mtp_{k}_embedding_norm",
-        epsilon=cfg.normalization_layer_epsilon,
-        kernel_axes=("norm",),
+      num_features=target_token_embedding.shape[-1],
+      dtype=cfg.dtype,
+      weight_dtype=cfg.weight_dtype,
+      name=f"mtp_{k}_embedding_norm",
+      epsilon=cfg.normalization_layer_epsilon,
+      kernel_axes=("norm",),
     )
     embedding_norm = embedding_norm_layer(target_token_embedding)
 
     hidden_state_norm_layer = rms_norm(
-        num_features=prev_hidden_state.shape[-1],
-        dtype=cfg.dtype,
-        weight_dtype=cfg.weight_dtype,
-        name=f"mtp_{k}_hidden_state_norm",
-        epsilon=cfg.normalization_layer_epsilon,
-        kernel_axes=("norm",),
+      num_features=prev_hidden_state.shape[-1],
+      dtype=cfg.dtype,
+      weight_dtype=cfg.weight_dtype,
+      name=f"mtp_{k}_hidden_state_norm",
+      epsilon=cfg.normalization_layer_epsilon,
+      kernel_axes=("norm",),
     )
 
     hidden_state_norm = hidden_state_norm_layer(prev_hidden_state)
@@ -140,26 +140,26 @@ class MultiTokenPredictionLayer(nn.Module):
     # --- 3. Project Concatenated Features ---
     # Projects from 2*H back down to H
     projection_layer = dense_general(
-        inputs_shape=concatenated_features.shape,
-        out_features_shape=cfg.base_emb_dim,
-        dtype=cfg.dtype,
-        weight_dtype=cfg.weight_dtype,
-        use_bias=False,
-        kernel_axes=("concat_embed", "embed"),
-        name=f"mtp_{k}_projection",
+      inputs_shape=concatenated_features.shape,
+      out_features_shape=cfg.base_emb_dim,
+      dtype=cfg.dtype,
+      weight_dtype=cfg.weight_dtype,
+      use_bias=False,
+      kernel_axes=("concat_embed", "embed"),
+      name=f"mtp_{k}_projection",
     )
     # Shape: [B, S, H]
     projected_features = projection_layer(concatenated_features)
 
     # --- 4. Pass through MTP Transformer Block ---
     output = self.transformer_layer_module(
-        config=cfg, mesh=mesh, model_mode=model_mode, name=f"mtp_{k}_transformer_layer"
+      config=cfg, mesh=mesh, model_mode=model_mode, name=f"mtp_{k}_transformer_layer"
     )(
-        inputs=projected_features,
-        decoder_segment_ids=decoder_segment_ids,
-        decoder_positions=position_ids,
-        deterministic=deterministic,
-        model_mode=model_mode,
+      inputs=projected_features,
+      decoder_segment_ids=decoder_segment_ids,
+      decoder_positions=position_ids,
+      deterministic=deterministic,
+      model_mode=model_mode,
     )
 
     if isinstance(output, tuple):
@@ -184,16 +184,16 @@ class MultiTokenPredictionBlock(nn.Module):
 
   @nn.compact
   def __call__(
-      self,
-      shared_embedding,
-      main_hidden_state,
-      input_ids,
-      target_ids,
-      target_mask,
-      position_ids,
-      decoder_segment_ids,
-      model_mode,
-      deterministic,
+    self,
+    shared_embedding,
+    main_hidden_state,
+    input_ids,
+    target_ids,
+    target_mask,
+    position_ids,
+    decoder_segment_ids,
+    model_mode,
+    deterministic,
   ):
     cfg = self.config
     # The initial hidden state for the MTP chain is the raw output from the main model.
@@ -216,25 +216,25 @@ class MultiTokenPredictionBlock(nn.Module):
 
       # Embed the k-th future input tokens using the shared embedding module
       target_token_embedding = self.decoder._apply_embedding(
-          shared_embedding, rolled_input_ids, rolled_position_id, deterministic, self.decoder.model_mode
+        shared_embedding, rolled_input_ids, rolled_position_id, deterministic, self.decoder.model_mode
       )
 
       # Instantiate and apply the MTP layer for this step
       mtp_layer = MultiTokenPredictionLayer(
-          config=cfg,
-          mesh=self.mesh,
-          layer_number=k,
-          name=f"mtp_layer_{k}",
-          transformer_layer_module=self.transformer_layer_module,
+        config=cfg,
+        mesh=self.mesh,
+        layer_number=k,
+        name=f"mtp_layer_{k}",
+        transformer_layer_module=self.transformer_layer_module,
       )
 
       next_mtp_hidden_state = mtp_layer(
-          mtp_hidden_state,
-          target_token_embedding,
-          position_ids,
-          decoder_segment_ids,
-          deterministic,
-          self.decoder.model_mode,
+        mtp_hidden_state,
+        target_token_embedding,
+        position_ids,
+        decoder_segment_ids,
+        deterministic,
+        self.decoder.model_mode,
       )
 
       # Project to logits using the shared embedding transpose
@@ -242,7 +242,7 @@ class MultiTokenPredictionBlock(nn.Module):
 
       # Calculate cross-entropy loss for this specific layer's prediction
       mtp_xent, _ = max_utils.cross_entropy_with_logits(
-          mtp_logits, jax.nn.one_hot(rolled_target_ids, cfg.vocab_size), 0.0
+        mtp_logits, jax.nn.one_hot(rolled_target_ids, cfg.vocab_size), 0.0
       )
       mtp_xent_masked = mtp_xent * rolled_target_mask
 

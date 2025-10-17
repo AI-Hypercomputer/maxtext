@@ -43,12 +43,12 @@ class AttentionWithNorm(nnx.Module):
   """Base class with shared common components: self-attention block with normalization."""
 
   def __init__(
-      self,
-      config: Config,
-      mesh: Mesh,
-      model_mode: str,
-      quant: None | Quant,
-      rngs: nnx.Rngs,
+    self,
+    config: Config,
+    mesh: Mesh,
+    model_mode: str,
+    quant: None | Quant,
+    rngs: nnx.Rngs,
   ):
     self.config = config
     self.mesh = mesh
@@ -60,59 +60,59 @@ class AttentionWithNorm(nnx.Module):
 
     # Corresponds to Qwen3's `input_layernorm`
     self.pre_self_attention_layer_norm = RMSNorm(
-        num_features=config.emb_dim,
-        dtype=config.dtype,
-        weight_dtype=config.weight_dtype,
-        kernel_axes=("norm",),
-        epsilon=config.normalization_layer_epsilon,
-        rngs=rngs,
+      num_features=config.emb_dim,
+      dtype=config.dtype,
+      weight_dtype=config.weight_dtype,
+      kernel_axes=("norm",),
+      epsilon=config.normalization_layer_epsilon,
+      rngs=rngs,
     )
 
     # Self-attention block
     query_pre_attn_scalar = config.head_dim**-0.5  # Qwen3 specific scaling
     self.self_attention = Attention(
-        config=config,
-        num_query_heads=config.num_query_heads,
-        num_kv_heads=config.num_kv_heads,
-        head_dim=config.head_dim,
-        max_target_length=config.max_target_length,
-        max_prefill_predict_length=config.max_prefill_predict_length,
-        attention_kernel=config.attention,
-        inputs_q_shape=dummy_inputs_shape,
-        inputs_kv_shape=dummy_inputs_shape,
-        mesh=mesh,
-        dtype=config.dtype,
-        weight_dtype=config.weight_dtype,
-        dropout_rate=config.dropout_rate,
-        float32_qk_product=config.float32_qk_product,
-        float32_logits=config.float32_logits,
-        quant=quant,
-        kv_quant=quantizations.configure_kv_quant(config),
-        use_ragged_attention=config.use_ragged_attention,
-        ragged_block_size=config.ragged_block_size,
-        use_qk_norm=config.use_qk_norm,
-        query_pre_attn_scalar=query_pre_attn_scalar,
-        model_mode=model_mode,
-        rngs=rngs,
+      config=config,
+      num_query_heads=config.num_query_heads,
+      num_kv_heads=config.num_kv_heads,
+      head_dim=config.head_dim,
+      max_target_length=config.max_target_length,
+      max_prefill_predict_length=config.max_prefill_predict_length,
+      attention_kernel=config.attention,
+      inputs_q_shape=dummy_inputs_shape,
+      inputs_kv_shape=dummy_inputs_shape,
+      mesh=mesh,
+      dtype=config.dtype,
+      weight_dtype=config.weight_dtype,
+      dropout_rate=config.dropout_rate,
+      float32_qk_product=config.float32_qk_product,
+      float32_logits=config.float32_logits,
+      quant=quant,
+      kv_quant=quantizations.configure_kv_quant(config),
+      use_ragged_attention=config.use_ragged_attention,
+      ragged_block_size=config.ragged_block_size,
+      use_qk_norm=config.use_qk_norm,
+      query_pre_attn_scalar=query_pre_attn_scalar,
+      model_mode=model_mode,
+      rngs=rngs,
     )
 
     # Post Attention LayerNorm (corresponds to Qwen3's `post_attention_layernorm`)
     self.post_self_attention_layer_norm = RMSNorm(
-        num_features=config.emb_dim,
-        dtype=config.dtype,
-        weight_dtype=config.weight_dtype,
-        kernel_axes=("norm",),
-        epsilon=config.normalization_layer_epsilon,
-        rngs=rngs,
+      num_features=config.emb_dim,
+      dtype=config.dtype,
+      weight_dtype=config.weight_dtype,
+      kernel_axes=("norm",),
+      epsilon=config.normalization_layer_epsilon,
+      rngs=rngs,
     )
 
   def apply_attention_with_norm(
-      self,
-      inputs: jnp.ndarray,
-      decoder_segment_ids: None | jnp.ndarray,
-      decoder_positions: None | jnp.ndarray,
-      deterministic: bool,
-      model_mode: str,
+    self,
+    inputs: jnp.ndarray,
+    decoder_segment_ids: None | jnp.ndarray,
+    decoder_positions: None | jnp.ndarray,
+    deterministic: bool,
+    model_mode: str,
   ):
     """Applies self-attention with pre and post-layer normalization."""
     inputs = nn.with_logical_constraint(inputs, self.activation_axis_names)
@@ -122,12 +122,12 @@ class AttentionWithNorm(nnx.Module):
     lnx = nn.with_logical_constraint(lnx, self.activation_axis_names)
     # Self attention
     attention_lnx = self.self_attention(
-        lnx,
-        lnx,
-        decoder_positions,
-        decoder_segment_ids=decoder_segment_ids,
-        deterministic=deterministic,
-        model_mode=model_mode,
+      lnx,
+      lnx,
+      decoder_positions,
+      decoder_segment_ids=decoder_segment_ids,
+      deterministic=deterministic,
+      model_mode=model_mode,
     )
     attention_lnx = nn.with_logical_constraint(attention_lnx, self.activation_axis_names)
     # Residual connection after attention
@@ -145,40 +145,40 @@ class Qwen3DecoderLayer(AttentionWithNorm):
   """Qwen3 Transformer decoder layer (dense)."""
 
   def __init__(
-      self,
-      config: Config,
-      mesh: Mesh,
-      model_mode: str,
-      quant: None | Quant,
-      rngs: nnx.Rngs,
+    self,
+    config: Config,
+    mesh: Mesh,
+    model_mode: str,
+    quant: None | Quant,
+    rngs: nnx.Rngs,
   ):
     super().__init__(config, mesh, model_mode, quant, rngs)
     self.mlp = MlpBlock(
-        in_features=config.emb_dim,
-        intermediate_dim=config.mlp_dim,
-        activations=config.mlp_activations,
-        intermediate_dropout_rate=config.dropout_rate,
-        dtype=config.dtype,
-        weight_dtype=config.weight_dtype,
-        config=config,
-        quant=quant,
-        model_mode=model_mode,
-        rngs=rngs,
+      in_features=config.emb_dim,
+      intermediate_dim=config.mlp_dim,
+      activations=config.mlp_activations,
+      intermediate_dropout_rate=config.dropout_rate,
+      dtype=config.dtype,
+      weight_dtype=config.weight_dtype,
+      config=config,
+      quant=quant,
+      model_mode=model_mode,
+      rngs=rngs,
     )
 
   def __call__(
-      self,
-      inputs: jnp.ndarray,
-      decoder_segment_ids: None | jnp.ndarray,
-      decoder_positions: None | jnp.ndarray,
-      deterministic: bool,
-      model_mode: str,
-      previous_chunk=None,
-      page_state: None | page_manager.PageState = None,
-      slot: None | int = None,
+    self,
+    inputs: jnp.ndarray,
+    decoder_segment_ids: None | jnp.ndarray,
+    decoder_positions: None | jnp.ndarray,
+    deterministic: bool,
+    model_mode: str,
+    previous_chunk=None,
+    page_state: None | page_manager.PageState = None,
+    slot: None | int = None,
   ):
     hidden_states, intermediate_inputs = self.apply_attention_with_norm(
-        inputs, decoder_segment_ids, decoder_positions, deterministic, model_mode
+      inputs, decoder_segment_ids, decoder_positions, deterministic, model_mode
     )
 
     mlp_lnx = self.mlp(hidden_states, deterministic=deterministic)
@@ -200,41 +200,41 @@ class Qwen3MoeDecoderLayer(AttentionWithNorm):
   """Qwen3 Transformer decoder layer (MoE)."""
 
   def __init__(
-      self,
-      config: Config,
-      mesh: Mesh,
-      model_mode: str,
-      quant: None | Quant,
-      rngs: nnx.Rngs,
+    self,
+    config: Config,
+    mesh: Mesh,
+    model_mode: str,
+    quant: None | Quant,
+    rngs: nnx.Rngs,
   ):
     super().__init__(config, mesh, model_mode, quant, rngs)
     self.moe_block = RoutedMoE(
-        config=config,
-        num_experts=config.num_experts,
-        num_experts_per_tok=config.num_experts_per_tok,
-        mesh=mesh,
-        kernel_init=initializers.nd_dense_init(1.0, "fan_in", "truncated_normal"),
-        kernel_axes=("embed", None),
-        intermediate_dim=config.moe_mlp_dim,  # same as config.mlp_dim
-        dtype=config.dtype,
-        weight_dtype=config.weight_dtype,
-        quant=quant,
-        rngs=rngs,
+      config=config,
+      num_experts=config.num_experts,
+      num_experts_per_tok=config.num_experts_per_tok,
+      mesh=mesh,
+      kernel_init=initializers.nd_dense_init(1.0, "fan_in", "truncated_normal"),
+      kernel_axes=("embed", None),
+      intermediate_dim=config.moe_mlp_dim,  # same as config.mlp_dim
+      dtype=config.dtype,
+      weight_dtype=config.weight_dtype,
+      quant=quant,
+      rngs=rngs,
     )
 
   def __call__(
-      self,
-      inputs: jnp.ndarray,
-      decoder_segment_ids: None | jnp.ndarray,
-      decoder_positions: None | jnp.ndarray,
-      deterministic: bool,
-      model_mode: str,
-      previous_chunk=None,
-      page_state: None | page_manager.PageState = None,
-      slot: None | int = None,
+    self,
+    inputs: jnp.ndarray,
+    decoder_segment_ids: None | jnp.ndarray,
+    decoder_positions: None | jnp.ndarray,
+    deterministic: bool,
+    model_mode: str,
+    previous_chunk=None,
+    page_state: None | page_manager.PageState = None,
+    slot: None | int = None,
   ):
     hidden_states, intermediate_inputs = self.apply_attention_with_norm(
-        inputs, decoder_segment_ids, decoder_positions, deterministic, model_mode
+      inputs, decoder_segment_ids, decoder_positions, deterministic, model_mode
     )
 
     mlp_lnx, load_balance_loss = self.moe_block(hidden_states)
@@ -252,11 +252,11 @@ class Qwen3MoeDecoderLayer(AttentionWithNorm):
 
 
 Qwen3DecoderLayerToLinen = nnx_wrappers.to_linen_class(
-    Qwen3DecoderLayer,
-    base_metadata_fn=initializers.variable_to_logically_partitioned,
+  Qwen3DecoderLayer,
+  base_metadata_fn=initializers.variable_to_logically_partitioned,
 )
 
 Qwen3MoeDecoderLayerToLinen = nnx_wrappers.to_linen_class(
-    Qwen3MoeDecoderLayer,
-    base_metadata_fn=initializers.variable_to_logically_partitioned,
+  Qwen3MoeDecoderLayer,
+  base_metadata_fn=initializers.variable_to_logically_partitioned,
 )
