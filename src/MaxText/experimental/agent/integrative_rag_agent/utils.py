@@ -12,6 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Utility functions for the Integrative RAG Agent.
+
+This module provides helper functions for handling data, such as reading
+and sampling code blocks from files.
+"""
+
 import json
 import random
 

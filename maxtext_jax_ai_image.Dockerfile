@@ -17,7 +17,7 @@ WORKDIR /deps
 
 # Copy setup files and dependency files separately for better caching
 COPY setup.sh ./
-COPY requirements.txt requirements_with_jax_ai_image.txt requirements_with_jax_stable_stack_0_6_1_pipreqs.txt ./
+COPY requirements.txt requirements_with_jax_ai_image.txt requirements_with_jax_stable_stack_0_6_1_pipreqs.txt generated_requirements ./
 
 
 # For JAX AI tpu training images 0.4.37 AND 0.4.35
@@ -47,9 +47,11 @@ RUN if [ "$DEVICE" = "tpu" ] && [ "$JAX_STABLE_STACK_BASEIMAGE" = "us-docker.pkg
         python3 -m pip install -r /deps/requirements_with_jax_ai_image.txt; \
   fi
 
-# Install tunix at a pinned commit for TPU devices, skip for GPU
+# Install google-tunix for TPU devices, skip for GPU
 RUN if [ "$DEVICE" = "tpu" ]; then \
-        python3 -m pip install 'google-tunix @ https://github.com/google/tunix/archive/e03f154edd2abfddd6b9babb72a3d0d3c4d81bb2.zip'; \
+        python3 -m pip install 'google-tunix>=0.1.2'; \
+        # TODO: Once tunix stopped pinning jax 0.7.1, we should remove our 0.7.0 version pin (b/450286600)
+        python3 -m pip install 'jax==0.7.0' 'jaxlib==0.7.0'; \
   fi
 
 # Now copy the remaining code (source files that may change frequently)

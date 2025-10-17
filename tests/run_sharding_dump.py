@@ -46,7 +46,7 @@ def main(argv: Sequence[str]) -> None:
     json_path = f"sharding_info/{model_name}/{topology}/slice_{num_slice}/named_shardings.json"
     if os.path.exists(json_path):
       continue
-    run_single_dump(model_name, topology, num_slice)
+    run_single_dump(model_name, topology, str(num_slice))
 
 
 if __name__ == "__main__":

@@ -258,7 +258,9 @@ def load_named_sharding_json(json_path: str | Path) -> dict:
 def main(argv: Sequence[str]) -> None:
   """Load a config that describes a model with topology and slices to be dumped."""
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
-  os.environ["LIBTPU_INIT_ARGS"] = os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
+  os.environ["LIBTPU_INIT_ARGS"] = (
+      os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
+  )
   print("Starting sharding_tests.py...", flush=True)
 
   config = pyconfig.initialize(argv)

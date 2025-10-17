@@ -27,7 +27,7 @@ import jax.ad_checkpoint
 from flax.core import meta
 from flax import linen as nn
 
-from MaxText.common_types import Config, MODEL_MODE_TRAIN
+from MaxText.common_types import Config, MODEL_MODE_TRAIN, EP_AS_CONTEXT
 from MaxText.maxtext_utils import all_gather_over_fsdp
 
 
@@ -53,13 +53,20 @@ class Pipeline(nn.Module):
   mesh: Mesh
   remat_policy: Any = None
 
-  def setup(self):
+  def setup(self):  # pylint: disable=missing-function-docstring
     self.num_stages = self.config.ici_pipeline_parallelism * self.config.dcn_pipeline_parallelism
     self.forwarding_delay = 2 if self.config.pipeline_delay_activation_forwarding else 1
     self.pipeline_microbatch_size = self.config.micro_batch_size_to_train_on // self.config.num_pipeline_microbatches
     microbatches_per_stage = self.config.num_pipeline_microbatches // self.num_stages
     self.microbatches_per_stage = microbatches_per_stage
     self.use_circ_storage = self.need_circ_storage()
+
+    if self.config.expert_shard_attention_option == EP_AS_CONTEXT:
+      self.batch_axis_name = "activation_batch_no_exp"
+      self.seq_len_axis_name = "activation_length"
+    else:
+      self.batch_axis_name = "activation_batch"
+      self.seq_len_axis_name = "activation_length_no_exp"
 
   def need_circ_storage(self):
     return (
@@ -94,9 +101,10 @@ class Pipeline(nn.Module):
     # Shift is used to rotate the output of each pipeline into the input of the next
     # shift has shape [num_stages, micro_size, sequence, embed]
     shift = jnp.zeros((self.num_stages,) + inputs.shape[1:], dtype=inputs.dtype)
+
     shift = nn.with_logical_constraint(
         shift,
-        ("activation_stage", "activation_batch", "activation_length", "activation_embed"),
+        ("activation_stage", self.batch_axis_name, self.seq_len_axis_name, "activation_embed"),
         rules=self.config.logical_axis_rules,
         mesh=self.mesh,
     )
@@ -106,7 +114,7 @@ class Pipeline(nn.Module):
       prev_outputs = jnp.zeros((self.num_stages,) + inputs.shape[1:], dtype=inputs.dtype)
       prev_outputs = nn.with_logical_constraint(
           prev_outputs,
-          ("activation_stage", "activation_batch", "activation_length", "activation_embed"),
+          ("activation_stage", self.batch_axis_name, self.seq_len_axis_name, "activation_embed"),
           rules=self.config.logical_axis_rules,
           mesh=self.mesh,
       )
@@ -120,7 +128,7 @@ class Pipeline(nn.Module):
     # We shard the pipeline_microbatch_size axis by data/fsdp, not num_microbatches since those are looped over.
     state_io = nn.with_logical_constraint(
         state_io,
-        ("activation_stage", None, "activation_batch", "activation_length", "activation_embed"),
+        ("activation_stage", None, self.batch_axis_name, self.seq_len_axis_name, "activation_embed"),
         rules=self.config.logical_axis_rules,
         mesh=self.mesh,
     )
@@ -196,7 +204,7 @@ class Pipeline(nn.Module):
     stages_in = select_state_or_input(first_stage_in, shift)
     stages_in = nn.with_logical_constraint(
         stages_in,
-        ("activation_stage", "activation_batch", "activation_length", "activation_embed"),
+        ("activation_stage", self.batch_axis_name, self.seq_len_axis_name, "activation_embed"),
         rules=self.config.logical_axis_rules,
         mesh=self.mesh,
     )
@@ -446,12 +454,14 @@ class Pipeline(nn.Module):
     ):
       """nn.vmap requires either a nn.module class or a function whose first argument is a nn.module instance."""
       weights = meta.remove_axis(
-          weights, 0, {
+          weights,
+          0,
+          {
               nn.PARTITION_NAME: "layers",
               "sub_weight_split_dims_mapping": (None,),
               "is_initializing": self.is_initializing(),
               "x_times": self.num_stages,
-          }
+          },
       )
       return body_instance.apply(weights, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode)
 

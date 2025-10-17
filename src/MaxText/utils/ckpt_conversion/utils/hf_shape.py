@@ -14,6 +14,7 @@
 
 """Hugging Face shape checkpoint conversion utils."""
 
+
 def GEMMA3_HF_WEIGHTS_TO_SHAPE(config):
   """Generates a shape mapping for Hugging Face Gemma3 parameters.
 
@@ -370,6 +371,7 @@ HF_SHAPE = {
     "gemma3-27b": GEMMA3_HF_WEIGHTS_TO_SHAPE,
     "qwen3-0.6b": QWEN3_HF_WEIGHTS_TO_SHAPE,
     "qwen3-4b": QWEN3_HF_WEIGHTS_TO_SHAPE,
+    "qwen3-4b-thinking-2507": QWEN3_HF_WEIGHTS_TO_SHAPE,
     "qwen3-8b": QWEN3_HF_WEIGHTS_TO_SHAPE,
     "qwen3-14b": QWEN3_HF_WEIGHTS_TO_SHAPE,
     "qwen3-32b": QWEN3_HF_WEIGHTS_TO_SHAPE,

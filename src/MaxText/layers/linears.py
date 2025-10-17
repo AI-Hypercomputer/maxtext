@@ -30,7 +30,8 @@ import flax.linen as nn
 
 from MaxText import max_logging
 from MaxText import max_utils
-from MaxText.common_types import MODEL_MODE_PREFILL, DecoderBlockType, DType, Array, Config
+from MaxText.common_types import DecoderBlockType, DType, Array, Config
+from MaxText.common_types import MODEL_MODE_TRAIN, MODEL_MODE_PREFILL, EP_AS_CONTEXT
 from MaxText.layers import nnx_wrappers, quantizations
 from MaxText.layers import normalizations
 from MaxText.layers.initializers import NdInitializer, nd_dense_init, default_bias_init, variable_to_logically_partitioned
@@ -291,14 +292,15 @@ def dense_general(
 
 class Dropout(nnx.Dropout):
   """Forked nnx.Dropout that is easier to use with bridge"""
-  def __init__( # pylint: disable=super-init-not-called
-    self,
-    rate: float,
-    *,
-    broadcast_dims: Sequence[int] = (),
-    deterministic: bool = False,
-    rng_collection: str = 'dropout',
-    rngs: nnx.Rngs| None = None,
+
+  def __init__(  # pylint: disable=super-init-not-called
+      self,
+      rate: float,
+      *,
+      broadcast_dims: Sequence[int] = (),
+      deterministic: bool = False,
+      rng_collection: str = "dropout",
+      rngs: nnx.Rngs | None = None,
   ):
     self.rate = rate
     self.broadcast_dims = broadcast_dims
@@ -306,11 +308,10 @@ class Dropout(nnx.Dropout):
     self.rng_collection = rng_collection
 
     if isinstance(rngs, nnx.Rngs):
-      self.rngs = rngs.fork() if hasattr(type(rngs), 'fork') else rngs
+      self.rngs = rngs.fork() if hasattr(type(rngs), "fork") else rngs
     else:
-      raise TypeError(
-        f'rngs must be a Rngs, RngStream or None, but got {type(rngs)}.'
-      )
+      raise TypeError(f"rngs must be a Rngs, RngStream or None, but got {type(rngs)}.")
+
 
 class MlpBlock(nnx.Module):
   """Transformer MLP / feed-forward block."""
@@ -473,8 +474,11 @@ class MlpBlock(nnx.Module):
     x = self.dropout(x, deterministic=deterministic)  # Broadcast along length.
     if self.model_mode == MODEL_MODE_PREFILL:
       x = nn.with_logical_constraint(x, ("activation_batch", "prefill_activation_length", "activation_mlp"))
+    elif cfg.expert_shard_attention_option == EP_AS_CONTEXT and self.model_mode == MODEL_MODE_TRAIN:
+      x = nn.with_logical_constraint(x, ("activation_batch_no_exp", "activation_length", "activation_mlp"))
     else:
-      x = nn.with_logical_constraint(x, ("activation_batch", "activation_length", "activation_mlp"))
+      x = nn.with_logical_constraint(x, ("activation_batch", "activation_length_no_exp", "activation_mlp"))
+
     output = self.wo(x)
 
     output = checkpoint_name(output, "mlpwo")

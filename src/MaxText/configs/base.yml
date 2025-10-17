@@ -83,6 +83,9 @@ gcs_metrics: False
 # If true save config to GCS in {base_output_directory}/{run_name}/
 save_config_to_gcs: False
 
+# Gradient dtype
+grad_dtype: "float32"
+
 # Activation dtypes.
 dtype: "bfloat16"
 # Used to configure quantization in the transformer layers, defaults to null implying bf16.
@@ -167,12 +170,12 @@ sparse_matmul: True
 capacity_factor: -1.0 # a factor to decide expert capacity for token dropping, and no dropping by default
 load_balance_loss_weight: 0.01 # weight for the load balance loss
 use_random_routing: False # whether to use random routing for debug/test purpose
-use_custom_sort_vjp: False # whether to use a custom sort vjp for sparse matmul ops
+use_custom_sort_vjp: True # whether to use a custom sort vjp for sparse matmul ops
 use_ring_of_experts: False # whether to use ring of experts for sparse matmul expert parallelism
 # Tunable tiling dimensions used for Megablox
 tile_batch_seq: 512
-tile_activation_dim: 1024
-tile_weight_dim: 1024
+tile_embed_dim: 1024
+tile_mlp_dim: 1024
 norm_topk_prob: False # Boolean to enable the top-k probability normalization. Qwen3-specific normalization of router weights.
 
 # How the expert axis is used to shard attention weights and activations
@@ -195,6 +198,9 @@ routed_bias: False # a flag if a learnable bias is added for routing
 mlp_bias: False # a flag if a learnable bias is added for MLP matmul
 n_routing_groups: -1 # number of groups for routing, disabled by default
 topk_routing_group: -1 # number of top groups to route inputs. For EP,
+# Splits the batch to allow for better scheduling when using expert parallelism by overlapping the
+# all-to-all communication with compute. Currently only implemented with DeepSeek sparse layers.
+use_batch_split_schedule: False # whether to use batch split schedule
 # sending activations to a maximum of topk_routing_group distinct devices can yield performance benefits.
 
 # For complex architectures like llama4 there are repeated sets of
@@ -287,6 +293,12 @@ use_post_attn_norm: False
 use_post_ffw_norm: False
 mla_naive_kvcache: True
 
+
+# Adding Mixture of Block Attention Support (MoBA): https://github.com/MoonshotAI/MoBA/blob/master/MoBA_Tech_Report.pdf
+moba: False
+moba_chunk_size: 1024
+moba_topk: 8
+
 # MLA parameters
 q_lora_rank: 0
 kv_lora_rank: 512
@@ -317,6 +329,11 @@ enable_multi_tier_checkpointing: False
 # It should be a positive number when enabling multi-tier checkpointing.
 multi_tier_checkpointing_backup_interval_minutes: 0
 
+# Number of identical pipelines in job, should be equal to ICI data parallelism * DCN data parallelism.
+# It should be a positive number when enabling multi-tier checkpointing. If set to 0, it will be set to num of slices.
+mtc_data_parallelism: 0
+
+
 # Whether to enable emergency checkpoint. If True, `local_checkpoint_directory` and a non-zero `local_checkpoint_period` must also be specified.
 # Emergency checkpoint is an experimental Orbax feature that: periodically saves to persistent storage and, with a larger invertal, saves to a local directory.
 # During restore, if a local copy is available in any slice, it will be broadcast to other slices without having to fetch from persistent storage.
@@ -341,6 +358,7 @@ logical_axis_rules: [
                       ['activation_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
                       ['activation_batch_no_exp', ['data', 'fsdp', 'fsdp_transpose']],
                       ['activation_embed_and_logits_batch', ['data', 'stage', 'fsdp', 'fsdp_transpose', 'expert']],
+                      ['activation_embed_and_logits_batch_sequence', ['data', 'stage', 'fsdp', 'fsdp_transpose', 'sequence', 'context', 'expert']],
                       ['activation_heads', ['tensor', 'tensor_transpose', 'sequence','tensor_sequence','autoregressive']],
                       ['activation_kv_heads', ['tensor', 'tensor_transpose', 'sequence','tensor_sequence']],
                       ['activation_length', ['sequence', 'context', 'expert']],
@@ -360,7 +378,7 @@ logical_axis_rules: [
                       ['activation_kv_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
                       ['activation_kv_batch_no_exp', ['data', 'fsdp', 'fsdp_transpose']],
                       ['activation_kv_head_dim', ['tensor', 'tensor_transpose', 'tensor_sequence']],
-                      ['activation_vocab', ['tensor', 'tensor_transpose', 'sequence', 'tensor_sequence']],
+                      ['activation_vocab', ['tensor', 'tensor_transpose', 'tensor_sequence']],
                       ['activation_vocab', ['tensor', 'tensor_transpose']],
                       ['activation_vocab', 'tensor_sequence'],
                       ['activation_vocab', ['sequence','context']],
@@ -451,6 +469,13 @@ ici_expert_parallelism: 1
 # The number of TPU slices is automatically determined, you should not set this explicitly. For ahead of time compilation,
 # you should set compile_toplogy_num_slices, which will in turn set this value. For non-TPU environments this is set to 1.
 num_slices: -1
+
+# Vocab Tiling Configs
+# Enables a memory-saving optimization by computing the cross-entropy loss in chunks.
+# The logits are tiled into `num_vocab_tiling` parts along the batch-sequence axis,
+# reducing peak memory usage. This is highly recommended for models with large
+# vocabularies (e.g., Gemma). Set to a value greater than 1 to enable.
+num_vocab_tiling: 1
 
 # Tokenizer
 vocab_size: 32_000 # powers of 2 for sharding
@@ -834,3 +859,4 @@ subslice_shape: ""
 
 # NNX
 enable_nnx: false
+shard_optimizer_over_data: False

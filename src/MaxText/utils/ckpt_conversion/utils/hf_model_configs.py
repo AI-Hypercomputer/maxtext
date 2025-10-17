@@ -466,7 +466,7 @@ qwen3_coder_480b_a35b_config = transformers.Qwen3MoeConfig(
     use_cache=True,
     use_qk_norm=True,
     use_sliding_window=False,
-    vocab_size=151936
+    vocab_size=151936,
 )
 
 HF_MODEL_CONFIGS = {
@@ -478,6 +478,7 @@ HF_MODEL_CONFIGS = {
     "gemma3-27b": gemma3_27b_config,
     "qwen3-0.6b": qwen3_0_6b_config,
     "qwen3-4b": qwen3_4b_config,
+    "qwen3-4b-thinking-2507": qwen3_4b_config,
     "qwen3-8b": qwen3_8b_config,
     "qwen3-14b": qwen3_14b_config,
     "qwen3-32b": qwen3_32b_config,

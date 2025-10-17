@@ -34,6 +34,7 @@ import numpy as np
 from google.cloud.storage import Client, transfer_manager
 
 from safetensors.numpy import save_file as numpy_save_file
+from safetensors.numpy import save as numpy_save
 from safetensors.flax import save as save_flax_to_bytes
 
 from huggingface_hub import HfApi, repo_exists
@@ -59,11 +60,13 @@ HF_IDS = {
     "gemma3-27b": "google/gemma-3-27b-it",
     "qwen3-0.6b": "Qwen/Qwen3-0.6B",
     "qwen3-4b": "Qwen/Qwen3-4B",
+    "qwen3-4b-thinking-2507": "Qwen/Qwen3-4B-Thinking-2507",
     "qwen3-8b": "Qwen/Qwen3-8B",
     "qwen3-14b": "Qwen/Qwen3-14B",
     "qwen3-32b": "Qwen/Qwen3-32B",
     "llama3.1-8b": "meta-llama/Llama-3.1-8B",
     "llama3.1-8b-Instruct": "meta-llama/Llama-3.1-8B-Instruct",
+    "llama3.1-70b-Instruct": "meta-llama/Llama-3.1-70B-Instruct",
     "llama3.1-70b": "meta-llama/Llama-3.1-70B",
     "llama3.1-405b": "meta-llama/Llama-3.1-405B",
     "qwen3-30b-a3b": "Qwen/Qwen3-30B-A3B-Thinking-2507",
@@ -561,8 +564,8 @@ def upload_state_dict_to_gcs(state_dict: dict, gs_bucket_path: str):
   blob_name = "/".join(blob_path_parts)
 
   # 1. Serialize the state_dict to an in-memory byte buffer
-  buffer = io.BytesIO()
-  np.savez(buffer, **state_dict)
+  data = numpy_save(state_dict, metadata={"format": "pt"})
+  buffer = io.BytesIO(data)
   buffer.seek(0)  # Rewind the buffer to the beginning
 
   # 2. Upload the bytes to GCS

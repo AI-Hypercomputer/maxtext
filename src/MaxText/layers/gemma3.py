@@ -22,12 +22,14 @@ import jax.numpy as jnp
 from flax import linen as nn
 from flax import nnx
 
-from MaxText.common_types import Config, AttentionType
+from MaxText.common_types import Config, AttentionType, MODEL_MODE_PREFILL
+from MaxText import max_utils
 from MaxText.layers import quantizations
 from MaxText.layers import nnx_wrappers
-from MaxText.layers.attentions import attention_as_linen, Attention
-from MaxText.layers.linears import mlp_block, DenseGeneral
-from MaxText.layers.normalizations import rms_norm, RMSNorm
+from MaxText.layers import initializers
+from MaxText.layers.attentions import Attention
+from MaxText.layers.linears import DenseGeneral, MlpBlock, Dropout
+from MaxText.layers.normalizations import RMSNorm
 from MaxText.layers.quantizations import AqtQuantization as Quant
 from MaxText.layers.initializers import variable_to_logically_partitioned
 
@@ -58,16 +60,123 @@ def get_query_pre_attn_scalar(config) -> float:
 
 
 # Gemma3 Decoder Layer
-class Gemma3DecoderLayer(nn.Module):
-  """Transformer decoder layer that attends to the encoder."""
+class Gemma3DecoderLayer(nnx.Module):
+  """Transformer decoder layer for Gemma3."""
 
-  config: Config
-  mesh: Mesh
-  model_mode: str
-  quant: None | Quant = None
-  attention_type: AttentionType = AttentionType.LOCAL_SLIDING
+  def __init__(
+      self,
+      config: Config,
+      mesh: Mesh,
+      model_mode: str,
+      rngs: nnx.Rngs,
+      quant: None | Quant = None,
+      attention_type: AttentionType = AttentionType.LOCAL_SLIDING,
+  ):
+    """Initializes the Gemma3DecoderLayer.
 
-  @nn.compact
+    Args:
+      config: The Config object with model hyperparameters.
+      mesh: The device mesh for distributed training.
+      model_mode: One of MODEL_MODE_TRAIN, MODEL_MODE_PREFILL, or MODEL_MODE_AUTOREGRESSIVE.
+      rngs: The random number generators for initialization.
+      quant: The quantization configuration.
+      attention_type: The type of attention to use.
+    """
+
+    self.config = config
+    self.mesh = mesh
+    self.quant = quant
+    self.rngs = rngs
+    self.attention_type = attention_type
+
+    batch_size, seq_len = max_utils.get_batch_seq_len_for_mode(config, model_mode)
+    dummy_inputs_shape = (batch_size, seq_len, config.emb_dim)
+
+    self.pre_self_attention_norm = RMSNorm(
+        num_features=config.emb_dim,
+        dtype=config.dtype,
+        weight_dtype=config.weight_dtype,
+        kernel_axes=("norm",),
+        rngs=self.rngs,
+    )
+
+    query_pre_attn_scalar = get_query_pre_attn_scalar(config)
+    self.self_attention = Attention(
+        config=config,
+        num_query_heads=config.num_query_heads,
+        num_kv_heads=config.num_kv_heads,
+        head_dim=config.head_dim,
+        max_target_length=config.max_target_length,
+        max_prefill_predict_length=config.max_prefill_predict_length,
+        attention_kernel=config.attention,
+        inputs_q_shape=dummy_inputs_shape,
+        inputs_kv_shape=dummy_inputs_shape,
+        mesh=mesh,
+        dtype=config.dtype,
+        weight_dtype=config.weight_dtype,
+        dropout_rate=config.dropout_rate,
+        float32_qk_product=config.float32_qk_product,
+        float32_logits=config.float32_logits,
+        quant=self.quant,
+        kv_quant=quantizations.configure_kv_quant(config),
+        attention_type=self.attention_type,
+        sliding_window_size=config.sliding_window_size,
+        attn_logits_soft_cap=config.attn_logits_soft_cap,
+        use_qk_norm=True,  # Gemma 3 models use query, key normalizations
+        query_pre_attn_scalar=query_pre_attn_scalar,
+        model_mode=model_mode,
+        rngs=self.rngs,
+    )
+
+    if self.config.use_post_attn_norm:
+      self.post_self_attention_norm = RMSNorm(
+          num_features=config.emb_dim,
+          dtype=config.dtype,
+          weight_dtype=config.weight_dtype,
+          kernel_axes=("norm",),
+          rngs=self.rngs,
+      )
+    else:
+      self.post_self_attention_norm = None
+
+    self.pre_ffw_norm = RMSNorm(
+        num_features=config.emb_dim,
+        dtype=config.dtype,
+        weight_dtype=config.weight_dtype,
+        kernel_axes=("norm",),
+        rngs=self.rngs,
+    )
+
+    self.mlp = MlpBlock(
+        in_features=config.emb_dim,
+        intermediate_dim=config.mlp_dim,
+        activations=config.mlp_activations,
+        intermediate_dropout_rate=config.dropout_rate,
+        dtype=config.dtype,
+        weight_dtype=config.weight_dtype,
+        config=config,
+        quant=self.quant,
+        model_mode=model_mode,
+        rngs=self.rngs,
+    )
+
+    if self.config.use_post_ffw_norm:
+      self.post_ffw_norm = RMSNorm(
+          num_features=config.emb_dim,
+          dtype=config.dtype,
+          weight_dtype=config.weight_dtype,
+          kernel_axes=("norm",),
+          rngs=self.rngs,
+      )
+    else:
+      self.post_ffw_norm = None
+
+    self.dropout = Dropout(rate=config.dropout_rate, broadcast_dims=(-2,), rngs=self.rngs)
+    if model_mode == MODEL_MODE_PREFILL:
+      self.activation_axis_names = ("activation_batch", "prefill_activation_norm_length", "activation_embed")
+    else:
+      self.activation_axis_names = ("activation_batch", "activation_norm_length", "activation_embed")
+
   def __call__(
       self,
       inputs,
@@ -81,49 +190,14 @@ class Gemma3DecoderLayer(nn.Module):
       bidirectional_mask=None,
   ):
     cfg = self.config
-    mesh = self.mesh
-    inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
+    inputs = nn.with_logical_constraint(inputs, self.activation_axis_names)
     inputs = checkpoint_name(inputs, "decoder_layer_input")
-    # inputs: embedded inputs to the decoder with shape [batch, length, emb_dim]
-    lnx = rms_norm(
-        num_features=inputs.shape[-1],
-        dtype=cfg.dtype,
-        weight_dtype=cfg.weight_dtype,
-        name="pre_self_attention_norm",
-        kernel_axes=("norm",),
-    )(inputs)
 
-    lnx = nn.with_logical_constraint(lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
-    query_pre_attn_scalar = get_query_pre_attn_scalar(cfg)
+    lnx = self.pre_self_attention_norm(inputs)
+    lnx = nn.with_logical_constraint(lnx, self.activation_axis_names)
 
-    attention_layer = attention_as_linen(
-        config=cfg,
-        num_query_heads=cfg.num_query_heads,
-        num_kv_heads=cfg.num_kv_heads,
-        head_dim=cfg.head_dim,
-        max_target_length=cfg.max_target_length,
-        max_prefill_predict_length=cfg.max_prefill_predict_length,
-        attention_kernel=cfg.attention,
-        inputs_q_shape=lnx.shape,
-        inputs_kv_shape=lnx.shape,
-        mesh=mesh,
-        dtype=cfg.dtype,
-        weight_dtype=cfg.weight_dtype,
-        dropout_rate=cfg.dropout_rate,
-        name="self_attention",
-        float32_qk_product=cfg.float32_qk_product,
-        float32_logits=cfg.float32_logits,
-        quant=self.quant,
-        kv_quant=quantizations.configure_kv_quant(cfg),
-        attention_type=self.attention_type,
-        sliding_window_size=cfg.sliding_window_size,
-        attn_logits_soft_cap=cfg.attn_logits_soft_cap,
-        use_qk_norm=True,  # Gemma 3 models use query, key normalizations
-        query_pre_attn_scalar=query_pre_attn_scalar,
-        model_mode=model_mode,
-    )
-
-    attention_lnx = attention_layer(
+    # Self-attention block
+    attention_lnx = self.self_attention(
         lnx,
         lnx,
         decoder_positions,
@@ -133,61 +207,25 @@ class Gemma3DecoderLayer(nn.Module):
         bidirectional_mask=bidirectional_mask,
     )
     if cfg.use_post_attn_norm:
-      attention_lnx = rms_norm(
-          num_features=attention_lnx.shape[-1],
-          dtype=cfg.dtype,
-          weight_dtype=cfg.weight_dtype,
-          name="post_self_attention_norm",
-          kernel_axes=("norm",),
-      )(attention_lnx)
+      attention_lnx = self.post_self_attention_norm(attention_lnx)
+    attention_lnx = nn.with_logical_constraint(attention_lnx, self.activation_axis_names)
 
-    attention_lnx = nn.with_logical_constraint(
-        attention_lnx, ("activation_batch", "activation_norm_length", "activation_embed")
-    )
     attention_lnx += inputs
     residual = attention_lnx
 
-    attn_output = rms_norm(
-        num_features=attention_lnx.shape[-1],
-        dtype=cfg.dtype,
-        weight_dtype=cfg.weight_dtype,
-        name="pre_ffw_norm",
-        kernel_axes=("norm",),
-    )(attention_lnx)
+    attn_output = self.pre_ffw_norm(attention_lnx)
 
     # MLP block.
-    mlp_lnx = mlp_block(
-        in_features=attn_output.shape[-1],
-        intermediate_dim=cfg.mlp_dim,
-        activations=cfg.mlp_activations,
-        intermediate_dropout_rate=cfg.dropout_rate,
-        dtype=cfg.dtype,
-        weight_dtype=cfg.weight_dtype,
-        name="mlp",
-        config=cfg,
-        quant=self.quant,
-    )(attn_output, deterministic=deterministic)
-
+    mlp_lnx = self.mlp(attn_output, deterministic=deterministic)
     if cfg.use_post_ffw_norm:
-      mlp_lnx = rms_norm(
-          num_features=mlp_lnx.shape[-1],
-          dtype=cfg.dtype,
-          weight_dtype=cfg.weight_dtype,
-          name="post_ffw_norm",
-          kernel_axes=("norm",),
-      )(mlp_lnx)
+      mlp_lnx = self.post_ffw_norm(mlp_lnx)
+    mlp_lnx = nn.with_logical_constraint(mlp_lnx, self.activation_axis_names)
 
-    mlp_lnx = nn.with_logical_constraint(mlp_lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
     next_layer_addition = mlp_lnx + residual
-    next_layer_addition_dropped_out = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(
-        next_layer_addition, deterministic=deterministic
-    )
+    next_layer_addition_dropped_out = self.dropout(next_layer_addition, deterministic=deterministic)
 
     layer_output = next_layer_addition_dropped_out
-    layer_output = nn.with_logical_constraint(
-        layer_output,
-        ("activation_batch", "activation_norm_length", "activation_embed"),
-    )
+    layer_output = nn.with_logical_constraint(layer_output, self.activation_axis_names)
 
     if cfg.record_internal_nn_metrics:
       self.sow("intermediates", "activation_mean", jnp.mean(layer_output))
@@ -204,27 +242,54 @@ class Gemma3DecoderLayer(nn.Module):
       return layer_output
 
 
-class Gemma3ScannableBlock(nn.Module):
-  """A repeatable block of Gemma3 decoder layers.
+Gemma3DecoderLayerToLinen = nnx_wrappers.to_linen_class(
+    Gemma3DecoderLayer,
+    base_metadata_fn=initializers.variable_to_logically_partitioned,
+)
 
-    This block applies multiple decoder layers sequentially, using the attention
-    pattern defined by GEMMA3_ATTENTION_PATTERN. It's designed to be
-    used with `nn.scan` for efficient compilation.
 
-  Attributes:
-    config: Config, MaxText model config
-    mesh: Mesh, JAX device mesh (used for sharding)
-    quant: None | Quant, quantization config
-    num_of_layers: int, number of decoder layers in the block
-  """
+class Gemma3ScannableBlock(nnx.Module):
+  """A repeatable block of Gemma3 decoder layers."""
 
-  config: Config
-  mesh: Mesh
-  model_mode: str
-  quant: None | Quant = None
-  num_of_layers: int = 1
+  def __init__(
+      self,
+      config: Config,
+      mesh: Mesh,
+      model_mode: str,
+      rngs: nnx.Rngs,
+      quant: None | Quant = None,
+      num_of_layers: int = 1,
+  ):
+    """Initializes the Gemma3ScannableBlock.
 
-  @nn.compact
+    Args:
+      config: The Config object with model hyperparameters.
+      mesh: The device mesh for distributed training.
+      model_mode: One of MODEL_MODE_TRAIN, MODEL_MODE_PREFILL, or MODEL_MODE_AUTOREGRESSIVE.
+      rngs: The random number generators for initialization.
+      quant: The quantization configuration.
+      num_of_layers: The number of layers in the model.
+    """
+    self.config = config
+    self.mesh = mesh
+    self.model_mode = model_mode
+    self.quant = quant
+    self.rngs = rngs
+    self.num_of_layers = num_of_layers
+
+    for layer_id in range(self.num_of_layers):
+      attention_type = get_attention_type(layer_id)
+      layer_name = f"layers_{layer_id}"
+      layer = Gemma3DecoderLayer(
+          config=self.config,
+          mesh=self.mesh,
+          model_mode=self.model_mode,
+          rngs=self.rngs,
+          quant=self.quant,
+          attention_type=attention_type,
+      )
+      setattr(self, layer_name, layer)
+
   def __call__(
       self,
       inputs,
@@ -239,22 +304,12 @@ class Gemma3ScannableBlock(nn.Module):
   ):
 
     cfg = self.config
-    mesh = self.mesh
-
     inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
     inputs = checkpoint_name(inputs, "decoder_layer_input")
     y = inputs
+
     for layer_id in range(self.num_of_layers):
-      attention_type = get_attention_type(layer_id)
-      layer = Gemma3DecoderLayer(
-          config=cfg,
-          mesh=mesh,
-          model_mode=model_mode,
-          name=f"layers_{layer_id}",
-          quant=self.quant,
-          attention_type=attention_type,
-      )
-      y = layer(
+      y = getattr(self, f"layers_{layer_id}")(
           y,
           decoder_segment_ids,
           decoder_positions,
@@ -271,6 +326,12 @@ class Gemma3ScannableBlock(nn.Module):
       return y, None
     else:
       return y
+
+
+Gemma3ScannableBlockToLinen = nnx_wrappers.to_linen_class(
+    Gemma3ScannableBlock,
+    base_metadata_fn=initializers.variable_to_logically_partitioned,
+)
 
 
 def _posemb_sincos_2d(
@@ -463,7 +524,11 @@ class VisionEmbedder(nnx.Module):
         kernel_axes=("norm",),
         rngs=self.rngs,
     )
-    self.mm_input_projection = Einsum(shape=(self.config.hidden_size_for_vit, self.config.emb_dim), precision=self.config.matmul_precision, rngs=self.rngs)
+    self.mm_input_projection = Einsum(
+        shape=(self.config.hidden_size_for_vit, self.config.emb_dim),
+        precision=self.config.matmul_precision,
+        rngs=self.rngs,
+    )
 
   def __call__(self, x: jax.Array, eqn: str = "...tm,md->...td") -> jax.Array:
     x = self.mm_soft_embedding_norm(x)

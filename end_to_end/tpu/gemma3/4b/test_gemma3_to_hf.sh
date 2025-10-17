@@ -4,7 +4,7 @@
 
 # The flow of this script is as follows:
 # 1. Convert a MaxText checkpoint to a Hugging Face model checkpoint.
-# 2. Run a forward pass check to compare the logits and KL divergence between the converted ckpt and orginal golden HF model.
+# 2. Run a forward pass check to compare the logits and KL divergence between the converted ckpt and original golden HF model.
 
 # Pre-requisites:
 # 1. Set HF_TOKEN environment variable to your Hugging Face access token with read permissions
@@ -28,7 +28,7 @@ export MODEL_BUCKET=gs://maxtext-gemma/unified/gemma3/hf
 # Here is an example of qwen3-4b maxtext checkpoint, converted from Qwen/Qwen3-4B
 export CKPT_PATH=gs://maxtext-gemma/unified/gemma3/4b/unscanned/2025-08-05-18-18/0/items
 
-# You can upload to huggingface hub or GCS using the HF_CKPT_PATH as base_output_directory
+# You can upload to huggingface hub or GCS by uncommenting the HF_CKPT_PATH and using it as base_output_directory
 # export HF_CKPT_PATH=${MODEL_BUCKET}/${MODEL_VARIATION}/hf/${idx}
 export LOCAL_PATH=./tmp/hf/${MODEL_NAME}/${idx}
 
@@ -40,9 +40,10 @@ python3 -m MaxText.utils.ckpt_conversion.to_huggingface "${MAXTEXT_PKG_DIR:-${MA
     use_multimodal=${USE_MULTIMODAL} \
     scan_layers=false
 
-# Alternatively, if uploaded the converted ckpt, HF requires local storage of model
+# Alternatively, if uploaded the converted ckpt, HF requires local storage of model and please uncomment below
 # mkdir -p "${LOCAL_PATH}"
-# gcloud storage cp -r ${HF_CKPT_PATH} ${LOCAL_PATH}
+# gcloud storage cp -r ${HF_CKPT_PATH}/** ${LOCAL_PATH}
+# echo "Copied from ${HF_CKPT_PATH} to ${LOCAL_PATH}"
 
 # We also test whether the forward pass logits match the original HF model
 # to get higher precision (eg. float32) run on CPU with `JAX_PLATFORMS=cpu`

@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Tests for pyconfig."""
+
 import unittest
 import os.path
 
@@ -129,8 +131,8 @@ class PyconfigTest(unittest.TestCase):
     self.assertEqual(config.base_mlp_dim, 24576)
 
   def test_resolve_config_path(self):
-      self.assertEqual(resolve_config_path("foo"), os.path.join("src", "foo"))
-      self.assertEqual(resolve_config_path(__file__), __file__)
+    self.assertEqual(resolve_config_path("foo"), os.path.join("src", "foo"))
+    self.assertEqual(resolve_config_path(__file__), __file__)
 
 
 if __name__ == "__main__":

@@ -270,7 +270,6 @@ class MoeLoopBlock(nnx.Module):
   This is not included anymore in our repo, due to a limitation of for-loop implementation in sharding.
   """
 
-
   def __init__(
       self,
       config: Config,
@@ -318,13 +317,15 @@ class MoeLoopBlock(nnx.Module):
     weights, selected_experts = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
     weights = jax.nn.softmax(weights.astype(jnp.float32), axis=-1).astype(self.weight_dtype)
     mlp_lnx = jnp.zeros_like(inputs)
-    mlp_lnx = nn.with_logical_constraint(mlp_lnx, ("activation_batch", "activation_length", "activation_embed"))
+    mlp_lnx = nn.with_logical_constraint(mlp_lnx, ("activation_batch", "activation_length_no_exp", "activation_embed"))
 
     for k in range(self.num_experts):
       weights_exp = jnp.sum(jnp.multiply(selected_experts == k, weights), axis=-1)
       getattr(self, f"mlp_{k}")
       mlp_lnx_exp = getattr(self, f"mlp_{k}")(inputs, deterministic=deterministic)
-      mlp_lnx_exp = nn.with_logical_constraint(mlp_lnx_exp, ("activation_batch", "activation_length", "activation_embed"))
+      mlp_lnx_exp = nn.with_logical_constraint(
+          mlp_lnx_exp, ("activation_batch", "activation_length_no_exp", "activation_embed")
+      )
       mlp_lnx_exp = weights_exp[:, :, None] * mlp_lnx_exp
       mlp_lnx += mlp_lnx_exp
 
@@ -719,7 +720,12 @@ class RoutedMoeTest(unittest.TestCase):
 
       # Get the actual local_permute outputs.
       sorted_inputs, sorted_indices, local_group_size, sorted_experts_ids = moe.RoutedMoE.local_permute(
-          inputs_shard, global_group_sizes[None, :], experts_per_shard, shard_index, use_custom_sort_vjp=False, is_offset=False
+          inputs_shard,
+          global_group_sizes[None, :],
+          experts_per_shard,
+          shard_index,
+          use_custom_sort_vjp=False,
+          is_offset=False,
       )
 
       # Calculate expected outputs for the current shard

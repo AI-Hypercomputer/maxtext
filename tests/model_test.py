@@ -134,7 +134,8 @@ class TestModel(unittest.TestCase):
         {"params": self.rng, "aqt": self.rng},
         ids,
         decoder_positions,
-        decoder_segment_ids,
+        model_mode=MODEL_MODE_TRAIN,
+        decoder_segment_ids=decoder_segment_ids,
         enable_dropout=False,
     )
 
@@ -142,7 +143,8 @@ class TestModel(unittest.TestCase):
         {"params": self.rng, "aqt": self.rng},
         ids,
         decoder_positions,
-        decoder_segment_ids,
+        model_mode=MODEL_MODE_PREFILL,
+        decoder_segment_ids=decoder_segment_ids,
         enable_dropout=False,
     )
 
@@ -150,9 +152,9 @@ class TestModel(unittest.TestCase):
         train_transformer_vars,
         ids,
         decoder_positions,
-        decoder_segment_ids,
-        enable_dropout=False,
         model_mode=MODEL_MODE_TRAIN,
+        decoder_segment_ids=decoder_segment_ids,
+        enable_dropout=False,
         rngs={"aqt": self.rng},
     )
 
@@ -160,9 +162,9 @@ class TestModel(unittest.TestCase):
         prefill_transformer_vars,
         ids[:, :PREFILL_RANGE],
         decoder_positions[:, :PREFILL_RANGE],
+        model_mode=MODEL_MODE_PREFILL,
         decoder_segment_ids=decoder_segment_ids[:, :PREFILL_RANGE],
         enable_dropout=False,
-        model_mode=MODEL_MODE_PREFILL,
         rngs={"aqt": self.rng},
         mutable=["cache"],
     )
@@ -179,8 +181,8 @@ class TestModel(unittest.TestCase):
           prefill_transformer_vars,
           ids_idx,
           decoder_positions_idx,
-          enable_dropout=False,
           model_mode=MODEL_MODE_AUTOREGRESSIVE,
+          enable_dropout=False,
           rngs={"aqt": self.rng},
           mutable=["cache"],
       )

@@ -453,7 +453,9 @@ class LLaMARotaryEmbedding(RotaryEmbedding):
     if len(inputs.shape) != 4:
       raise ValueError("Input is assumed to be a rank 4 tensor of shape [B, S, N, H].")
     if self.embedding_dims != inputs.shape[3]:
-      raise ValueError("The embedding dims of the rotary position embedding must match the hidden dimension of the inputs.")
+      raise ValueError(
+          "The embedding dims of the rotary position embedding must match the hidden dimension of the inputs."
+      )
 
     # Shift the inputs left and right as per LLaMA's specific behavior
     inputs_shifted_left = jnp.concatenate([inputs[..., 1:], inputs[..., :1]], axis=-1)
@@ -678,7 +680,9 @@ class YarnRotaryEmbedding(nnx.Module):
     if len(inputs.shape) != 4:
       raise ValueError("Input is assumed to be a rank 4 tensor of shape [batch, sequence, heads, dims].")
     if self.embedding_dims != inputs.shape[3]:
-      raise ValueError("The embedding dims of the rotary position embedding must match the hidden dimension of the inputs.")
+      raise ValueError(
+          "The embedding dims of the rotary position embedding must match the hidden dimension of the inputs."
+      )
 
     # Determine positions if not provided
     if position is None:
