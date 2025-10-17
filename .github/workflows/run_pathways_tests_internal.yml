@@ -105,6 +105,7 @@ jobs:
           - "29000:29000"
         env:
           IFRT_PROXY_USE_INSECURE_GRPC_CREDENTIALS: true
+          XLA_FLAGS: "--xla_dump_to=/tmp/aot_test_dump --xla_dump_hlo_as_text --xla_dump_hlo_module_re=jit_train_step"
           LIBTPU_INIT_ARGS: "--xla_tpu_scoped_vmem_limit_kib=65536 --xla_tpu_spmd_rng_bit_generator_unsafe=true"
         options:
           --entrypoint=[/usr/pathways/run/cloud_proxy_server_sanitized, --server_port=29000, --resource_manager_address=localhost:29001, --gcs_scratch_location=gs://cloud-pathways-staging/tmp]
