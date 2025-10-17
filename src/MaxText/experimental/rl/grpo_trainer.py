@@ -340,7 +340,7 @@ def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_
 # -----------------------------------------------------------------------------
 
 
-def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
+def train_step(model, config, state_mesh_shardings, params_shardings, state, data, dropout_rng):
   """Performs a single training step of the GRPO algorithm.
 
   This function computes the GRPO loss, calculates gradients, and updates the
@@ -351,6 +351,8 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
     model: The transformer model to be trained.
     config: The training configuration object.
     state_mesh_shardings: Pytree of sharding specifications for the training state.
+    params_shardings: Pytree of sharding specifications for the model parameters.
+                      This argument is not used and is kept to match the signature of other trainers.
     state: The current training state, including parameters and optimizer state.
     data: A batch of training data, including prompts and generated completions.
     dropout_rng: JAX PRNG key for dropout.
