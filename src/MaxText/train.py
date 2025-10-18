@@ -413,7 +413,8 @@ def train_loop(config, recorder, state=None):
 
   with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
     shaped_batch = maxtext_utils.get_shaped_batch(config)
-    state = jax.lax.with_sharding_constraint(state, state_mesh_shardings)
+    if config.shard_optimizer_over_data:
+      state = jax.lax.with_sharding_constraint(state, state_mesh_shardings)
     compiled = p_train_step.lower(state, shaped_batch, init_rng).compile()
     compiled_stats = compiled.memory_analysis()
     max_utils.print_compiled_memory_stats(compiled_stats)
@@ -437,7 +438,8 @@ def train_loop(config, recorder, state=None):
         nextrng = jax.jit(jax.random.fold_in)(init_rng, step)
         with maybe_record_goodput(recorder, GoodputEvent.STEP, step):
           with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-            state = jax.lax.with_sharding_constraint(state, state_mesh_shardings)
+            if config.shard_optimizer_over_data:
+              state = jax.lax.with_sharding_constraint(state, state_mesh_shardings)
             state, metrics = p_train_step(state, example_batch, nextrng)
 
       step_time_delta = datetime.datetime.now() - last_step_completion
