@@ -30,7 +30,6 @@ from flax import nnx
 
 from MaxText import pyconfig
 from MaxText.layers import qwen3, normalizations
-from MaxText.common_types import Config
 from MaxText.globals import MAXTEXT_PKG_DIR
 
 
