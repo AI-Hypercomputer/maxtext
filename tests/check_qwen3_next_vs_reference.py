@@ -29,9 +29,7 @@ from jax.sharding import Mesh
 from flax import nnx
 
 from MaxText import pyconfig
-from MaxText.layers import qwen3, linears, moe, normalizations  # Updated import
-from MaxText.layers import initializers as max_initializers
-from MaxText import maxtext_utils
+from MaxText.layers import qwen3, normalizations
 from MaxText.common_types import Config
 from MaxText.globals import MAXTEXT_PKG_DIR
 
