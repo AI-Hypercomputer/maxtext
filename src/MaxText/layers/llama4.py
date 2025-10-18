@@ -415,6 +415,7 @@ class Llama4DecoderLayer(nnx.Module):
       )
     else:
       self.mlp = MlpBlock(
+          mesh=self.mesh,
           in_features=config.emb_dim,
           intermediate_dim=config.mlp_dim,
           activations=config.mlp_activations,

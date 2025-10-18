@@ -80,10 +80,10 @@ class PipelineParallelismTest(unittest.TestCase):
           segmentations: [batch_size, segmentation]
       """
       input_shape = [batch_size, sequence, features]
-      inputs = jax.random.normal(jax.random.PRNGKey(2), input_shape, dtype=jnp.float32)
+      inputs = jax.random.normal(jax.random.PRNGKey(2), input_shape, dtype=config.dtype)
 
       # dummy targets same shape as inputs to use for a dummy loss function to check gradient correctness
-      dummy_targets = jax.random.normal(jax.random.PRNGKey(3), input_shape, dtype=jnp.float32)
+      dummy_targets = jax.random.normal(jax.random.PRNGKey(3), input_shape, dtype=config.dtype)
 
       inputs_position = jnp.array([jnp.arange(sequence, dtype=jnp.int32) for _ in range(batch_size)], dtype=jnp.int32)
       inputs_segmentation = jnp.ones((batch_size, sequence), dtype=jnp.int32)

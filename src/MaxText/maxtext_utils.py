@@ -27,7 +27,7 @@ import numpy as np
 from collections.abc import Iterable
 from jax.experimental import mesh_utils
 from jax.experimental.serialize_executable import deserialize_and_load
-from jax.sharding import PartitionSpec as P
+from jax.sharding import PartitionSpec as P, NamedSharding, reshard
 
 import jax
 import jax.numpy as jnp
@@ -51,6 +51,25 @@ OVERWRITE_WITH_GRADIENT = "_overwrite_with_gradient"
 def get_input_data_sharding(config, mesh):
   """Get the input data sharding for the model"""
   return nn.logical_to_mesh_sharding(P(*config.input_data_sharding_logical_axes), mesh, config.logical_axis_rules)
+
+
+def maybe_shard(inputs, named_sharding, shard_mode):
+  """
+  In auto shardmode, this function hints inputs follow given named_sharding.
+  In explicit shardmode, this function enforces inputs following named_sharding.
+  """
+  if shard_mode == "auto":
+    return jax.lax.with_sharding_constraint(inputs, named_sharding)
+  else:
+    return reshard(inputs, named_sharding)
+
+
+def maybe_shard_with_logical(inputs, logical_axes, mesh, shard_mode):
+  """
+  A wrapper of maybe_shard when logical axes are inputs
+  """
+  named_sharding = NamedSharding(mesh, nn.logical_to_mesh_axes(logical_axes))
+  return maybe_shard(inputs, named_sharding, shard_mode)
 
 
 def get_functional_train_with_signature(
@@ -1610,7 +1629,8 @@ def compute_loss_linen(intermediate_outputs, logits, data, config, model, params
   else:
     one_hot_targets = jax.nn.one_hot(data["targets"], config.vocab_size)
     xent, _ = max_utils.cross_entropy_with_logits(logits, one_hot_targets, 0.0)
-    xent = nn.with_logical_constraint(xent, ("activation_embed_and_logits_batch", "activation_length"))
+    xent_logical_axes = ("activation_embed_and_logits_batch", "activation_length")
+    xent = maybe_shard(xent, NamedSharding(model.mesh, nn.logical_to_mesh_axes(xent_logical_axes)), config.shard_mode)
     # Mask out paddings at the end of each example.
     xent = xent * (data["targets_segmentation"] != 0)
     total_loss = jnp.sum(xent)
@@ -1670,9 +1690,16 @@ def get_vocab_tiling_loss_linen(
       model.mesh, nn.logical_to_mesh_axes(("activation_embed_and_logits_batch_sequence", "activation_vocab"))
   )
 
-  hidden_states = jax.lax.with_sharding_constraint(hidden_states, hidden_spec)
-  labels = jax.lax.with_sharding_constraint(labels, label_spec)
-  segmentation = jax.lax.with_sharding_constraint(segmentation, label_spec)
+  _maybe_shard = functools.partial(maybe_shard, shard_mode=config.shard_mode)
+
+  def _reshape(inputs, out_shape, out_sharding):
+    reshape_out_sharding = out_sharding if config.shard_mode == "explicit" else None
+    inputs = jax.lax.reshape(inputs, out_shape, out_sharding=reshape_out_sharding)
+    return _maybe_shard(inputs, out_sharding)
+
+  hidden_states = _maybe_shard(hidden_states, hidden_spec)
+  labels = _maybe_shard(labels, label_spec)
+  segmentation = _maybe_shard(segmentation, label_spec)
   # TODO (chengnuojin) all gather only embedding table instead of all params after NNX module is enabled
   gathered_params = all_gather_over_fsdp(params, param_spec, model.mesh, config.logical_axis_rules)
 
@@ -1689,19 +1716,18 @@ def get_vocab_tiling_loss_linen(
     batch_size, seq_len, emb_dim = hidden_states.shape
     vocab_tile_size = (batch_size * seq_len) // config.num_vocab_tiling
 
-    reshaped_hidden_states = hidden_states.reshape((config.num_vocab_tiling, vocab_tile_size, emb_dim))
-    reshaped_hidden_states = jax.lax.with_sharding_constraint(reshaped_hidden_states, reshaped_hidden_spec)
-    reshaped_labels = labels.reshape((config.num_vocab_tiling, vocab_tile_size))
-    reshaped_labels = jax.lax.with_sharding_constraint(reshaped_labels, reshaped_data_spec)
-    reshaped_segmentation = segmentation.reshape((config.num_vocab_tiling, vocab_tile_size))
-    reshaped_segmentation = jax.lax.with_sharding_constraint(reshaped_segmentation, reshaped_data_spec)
+    reshaped_hidden_states = _reshape(
+        hidden_states, (config.num_vocab_tiling, vocab_tile_size, emb_dim), reshaped_hidden_spec
+    )
+    reshaped_labels = _reshape(labels, (config.num_vocab_tiling, vocab_tile_size), reshaped_data_spec)
+    reshaped_segmentation = _reshape(segmentation, (config.num_vocab_tiling, vocab_tile_size), reshaped_data_spec)
 
     # Scan body accumulates loss from each tile given chunked hidden states and labels
     def _fwd_scan_body(loss_accumulator, chunk_data):
       hidden_chunk, label_chunk, segmentation_chunk = chunk_data
-      hidden_chunk = jax.lax.with_sharding_constraint(hidden_chunk, chunked_hidden_spec)
-      label_chunk = jax.lax.with_sharding_constraint(label_chunk, chunked_data_spec)
-      segmentation_chunk = jax.lax.with_sharding_constraint(segmentation_chunk, chunked_data_spec)
+      hidden_chunk = _maybe_shard(hidden_chunk, chunked_hidden_spec)
+      label_chunk = _maybe_shard(label_chunk, chunked_data_spec)
+      segmentation_chunk = _maybe_shard(segmentation_chunk, chunked_data_spec)
 
       # Calculate logits for the current chunk
       chunk_logits = model.apply(
@@ -1710,7 +1736,7 @@ def get_vocab_tiling_loss_linen(
           deterministic=deterministic,
           method="logits_from_hidden_states",
       )
-      chunk_logits = jax.lax.with_sharding_constraint(chunk_logits, chunked_logits_spec)
+      chunk_logits = _maybe_shard(chunk_logits, chunked_logits_spec)
       one_hot_label_chunk = jax.nn.one_hot(label_chunk, config.vocab_size)
       chunk_xent, _ = max_utils.cross_entropy_with_logits(chunk_logits, one_hot_label_chunk, 0.0)
       masked_xent = jnp.sum(chunk_xent * (segmentation_chunk != 0))
@@ -1745,7 +1771,7 @@ def get_vocab_tiling_loss_linen(
           deterministic=deterministic,
           method="logits_from_hidden_states",
       )
-      chunk_logits = jax.lax.with_sharding_constraint(chunk_logits, chunked_logits_spec)
+      chunk_logits = _maybe_shard(chunk_logits, chunked_logits_spec)
       one_hot_label_chunk = jax.nn.one_hot(input_label_chunk, config.vocab_size)
       xent, _ = max_utils.cross_entropy_with_logits(chunk_logits, one_hot_label_chunk, 0.0)
       return jnp.sum(xent * (input_segmentation_chunk != 0))
@@ -1754,9 +1780,9 @@ def get_vocab_tiling_loss_linen(
       hidden_chunk, label_chunk, segmentation_chunk = chunk_data
 
       # Apply sharding constraints to the chunk data
-      hidden_chunk = jax.lax.with_sharding_constraint(hidden_chunk, chunked_hidden_spec)
-      label_chunk = jax.lax.with_sharding_constraint(label_chunk, chunked_data_spec)
-      segmentation_chunk = jax.lax.with_sharding_constraint(segmentation_chunk, chunked_data_spec)
+      hidden_chunk = _maybe_shard(hidden_chunk, chunked_hidden_spec)
+      label_chunk = _maybe_shard(label_chunk, chunked_data_spec)
+      segmentation_chunk = _maybe_shard(segmentation_chunk, chunked_data_spec)
 
       # Create a loss function closure that captures the current chunk's labels and segmentation.
       # This gives `jax.vjp` a function with the required signature: `loss(params, hidden_states)`.
@@ -1768,7 +1794,7 @@ def get_vocab_tiling_loss_linen(
 
       # 1.0 since total_loss is sum of all individual chunked loss
       (grad_params_update, grad_hidden_chunk) = vjp_fn(1.0)
-      grad_hidden_chunk = jax.lax.with_sharding_constraint(grad_hidden_chunk, chunked_hidden_spec)
+      grad_hidden_chunk = _maybe_shard(grad_hidden_chunk, chunked_hidden_spec)
 
       grad_params_acc = jax.tree_util.tree_map(
           lambda acc, update: acc + update,
@@ -1783,14 +1809,13 @@ def get_vocab_tiling_loss_linen(
     grad_params, grad_reshaped_hidden_states = jax.lax.scan(
         _bwd_scan_body, initial_grad_params_acc, (reshaped_hidden_states, reshaped_labels, reshaped_segmentation)
     )
-    grad_reshaped_hidden_states = jax.lax.with_sharding_constraint(grad_reshaped_hidden_states, reshaped_hidden_spec)
+    grad_reshaped_hidden_states = _maybe_shard(grad_reshaped_hidden_states, reshaped_hidden_spec)
     # TODO (chengnuojin): we may want to convert grad_params to bf16 to save memory
     # grad_params = jax.tree_util.tree_map(lambda x, y: y.astype(x.dtype), gathered_params, grad_params)
     # Chain-rule to accumulate gradients
     grad_params = jax.tree_util.tree_map(lambda g: g * loss_cotangent, grad_params)
     # Give back sharding constraint
-    grad_reshaped_hidden_states = grad_reshaped_hidden_states.reshape((batch_size, seq_len, emb_dim))
-    grad_reshaped_hidden_states = jax.lax.with_sharding_constraint(grad_reshaped_hidden_states, hidden_spec)
+    grad_reshaped_hidden_states = _reshape(grad_reshaped_hidden_states, (batch_size, seq_len, emb_dim), hidden_spec)
     return (
         grad_params,  # grad for params
         grad_reshaped_hidden_states.astype(reshaped_hidden_states.dtype),
