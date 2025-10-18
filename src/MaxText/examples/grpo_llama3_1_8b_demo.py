@@ -85,12 +85,57 @@ from MaxText.integration.tunix.tunix_adapter import TunixMaxTextAdapter
 # nest_asyncio.apply()  # To fix "This event loop is already running" error in Colab
 # Run `pip install nest_asyncio` if not already installed.
 
-jax.devices()
-
 DEBUG = False  # set to True to run in debug mode, for more print statements
 
 HOME = os.path.join(os.path.expanduser("~"), "")
 print(f"Home directory (from Python): {HOME}")
+
+# Determine MaxText repo root - use environment variable if set, otherwise derive from script location
+if "MAXTEXT_REPO_ROOT" in os.environ:
+  MAXTEXT_ROOT = os.environ["MAXTEXT_REPO_ROOT"]
+else:
+  # This script is in src/MaxText/examples/, so go up 3 levels to get repo root
+  MAXTEXT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+print(f"MaxText repo root: {MAXTEXT_ROOT}")
+
+# Use pre-existing checkpoint from env var or convert from HuggingFace
+# Check for MAXTEXT_CHECKPOINT_PATH env var first (for CI/testing)
+if "MAXTEXT_CHECKPOINT_PATH" in os.environ:
+  CHECKPOINT_LOAD_PATH = os.environ["MAXTEXT_CHECKPOINT_PATH"]
+  print(f"Using checkpoint from environment variable: {CHECKPOINT_LOAD_PATH}")
+else:
+  # Convert checkpoint from HuggingFace to MaxText format BEFORE any JAX initialization
+  # This must happen early to avoid TPU conflicts
+  MODEL_NAME = "llama3.1-8b-Instruct"  # Use Instruct version for GRPO
+  MODEL_CHECKPOINT_PATH = os.path.join(os.path.expanduser("~"), "checkpoints", MODEL_NAME)
+
+  if not os.path.exists(MODEL_CHECKPOINT_PATH):
+    print(f"Converting checkpoint from HuggingFace to MaxText format at {MODEL_CHECKPOINT_PATH}")
+    os.makedirs(MODEL_CHECKPOINT_PATH, exist_ok=True)
+    import subprocess
+
+    result = subprocess.run(
+        [
+            "python3",
+            "-m",
+            "MaxText.utils.ckpt_conversion.to_maxtext",
+            os.path.join(MAXTEXT_ROOT, "src/MaxText/configs/base.yml"),
+            f"model_name={MODEL_NAME}",
+            f"base_output_directory={MODEL_CHECKPOINT_PATH}",
+            f"hf_access_token={os.environ.get('HF_TOKEN', '')}",
+            "use_multimodal=false",
+            "scan_layers=true",
+        ],
+        check=True,
+    )
+    print("Checkpoint conversion completed successfully")
+  else:
+    print(f"Using existing checkpoint at {MODEL_CHECKPOINT_PATH}")
+
+  CHECKPOINT_LOAD_PATH = os.path.join(MODEL_CHECKPOINT_PATH, "0", "items")
+
+# Initialize JAX/TPU after checkpoint conversion
+jax.devices()
 
 # ## Hyperparameters
 #
@@ -287,12 +332,14 @@ def get_dataset(data_dir, split="train") -> grain.MapDataset:
   if not os.path.exists(data_dir):
     os.makedirs(data_dir)
 
+  # Use try_gcs=True to leverage Google's cached datasets and avoid slow downloads
   data = tfds.data_source(
       "gsm8k",
       split=split,
       data_dir=data_dir,
       builder_kwargs={"file_format": tfds.core.FileFormat.ARRAY_RECORD},
       download=True,
+      try_gcs=True,  # Use GCS cached version if available for faster loading
   )
 
   loaded_dataset = (
@@ -396,18 +443,17 @@ def get_ref_maxtext_model(config):
 model_config = llama3_lib.ModelConfig.llama3_1_8b()
 
 # Load the reference model
-# Note: pass the path to your scanned checkpoint for "load_parameters_path".
-# To create a scanned checkpoint, you can use /maxtext/src/MaxText/utils/ckpt_conversion/to_maxtext.py
+print(f"Loading reference model checkpoint from: {CHECKPOINT_LOAD_PATH}")
 config_ref = pyconfig.initialize(
     [
         "",
-        f"{HOME}/maxtext/src/MaxText/configs/base.yml",
+        os.path.join(MAXTEXT_ROOT, "src/MaxText/configs/base.yml"),
     ],
     base_output_directory="dummy",  # This is not used in Tunix.
     run_name="test-tunix-maxtext-llama3.1-8b",
     tokenizer_type="tiktoken",
     tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizer_llama3.tiktoken"),
-    load_parameters_path=MODEL_CHECKPOINT_PATH,
+    load_parameters_path=CHECKPOINT_LOAD_PATH,
     per_device_batch_size=1,
     max_prefill_predict_length=4,
     max_target_length=1024,
@@ -452,21 +498,20 @@ show_hbm_usage()
 
 
 # Load the policy model
-# Note: pass the path to your scanned checkpoint for "load_parameters_path".
-# To create a scanned checkpoint, you can use /maxtext/src/MaxText/utils/ckpt_conversion/to_maxtext.py
+# Note: Model checkpoint will be loaded from converted HuggingFace weights
 
 # TODO: @mazumdera: change this to use lora
 
 config_policy = pyconfig.initialize(
     [
         "",
-        f"{HOME}/maxtext/src/MaxText/configs/base.yml",
+        os.path.join(MAXTEXT_ROOT, "src/MaxText/configs/base.yml"),
     ],
     base_output_directory="dummy",  # This is not used in Tunix.
     run_name="test-tunix-maxtext-llama3.1-8b",  # This is not used in Tunix.
     tokenizer_type="tiktoken",
     tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizer_llama3.tiktoken"),
-    load_parameters_path=MODEL_CHECKPOINT_PATH,
+    load_parameters_path=CHECKPOINT_LOAD_PATH,
     per_device_batch_size=1,
     max_prefill_predict_length=4,
     max_target_length=1024,
@@ -954,7 +999,7 @@ def main():
           actor_optimizer=optimizer,
           eval_every_n_steps=EVAL_EVERY_N_STEPS,
           max_steps=MAX_STEPS,
-          gradient_accumulation_steps=1,
+          # gradient_accumulation_steps is automatically derived for RL training
           # metrics logging
           metrics_logging_options=metrics_logging_options,
           # checkpoint saving
@@ -970,7 +1015,7 @@ def main():
           top_k=TOP_K,
       ),
       rollout_vllm_model_version="meta-llama/Meta-Llama-3.1-8B-Instruct",
-      rollout_vllm_hbm_utilization=0.2,
+      rollout_vllm_hbm_utilization=0.5,  # Increased from 0.2 to allow vLLM to use more memory
       rollout_vllm_tpu_backend_type="jax",
   )
 
