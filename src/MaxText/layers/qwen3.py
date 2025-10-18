@@ -124,7 +124,6 @@ def jax_chunk_gated_delta_rule(
   # query_c shape: (B, H, N, C, D_k)
   query_c = query.reshape(batch_size, num_heads, num_chunks, chunk_size, k_head_dim)
   key_c = key.reshape(batch_size, num_heads, num_chunks, chunk_size, k_head_dim)
-  value_c = value.reshape(batch_size, num_heads, num_chunks, chunk_size, v_head_dim)
   k_beta_c = k_beta.reshape(batch_size, num_heads, num_chunks, chunk_size, k_head_dim)
   v_beta_c = v_beta.reshape(batch_size, num_heads, num_chunks, chunk_size, v_head_dim)
   g_c = g.reshape(batch_size, num_heads, num_chunks, chunk_size)  # (B, H, N, C)

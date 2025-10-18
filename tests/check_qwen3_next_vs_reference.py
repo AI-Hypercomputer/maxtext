@@ -29,11 +29,12 @@ from jax.sharding import Mesh
 from flax import nnx
 
 from MaxText import pyconfig
-from MaxText.layers import qwen3, linears, moe, normalizations # Updated import
+from MaxText.layers import qwen3, linears, moe, normalizations  # Updated import
 from MaxText.layers import initializers as max_initializers
 from MaxText import maxtext_utils
 from MaxText.common_types import Config
 from MaxText.globals import MAXTEXT_PKG_DIR
+
 
 # ----------------------------------------------------------------------
 # START: Copied PyTorch functions
@@ -56,7 +57,8 @@ def torch_chunk_gated_delta_rule(
     chunk_size=64,
     initial_state=None,
     output_final_state=False,
-    use_qk_l2norm_in_kernel=False, # Keep original HF name in PT func signature for clarity
+    # Keep original HF name in PT func signature for clarity
+    use_qk_l2norm_in_kernel=False,
 ):
     initial_dtype = query.dtype
     if use_qk_l2norm_in_kernel:
@@ -67,9 +69,8 @@ def torch_chunk_gated_delta_rule(
     query, key, value = [
         x.transpose(1, 2).contiguous().to(torch.float32) for x in (query, key, value)
     ]
-    beta, g = [
-        x.transpose(1, 2).contiguous().to(torch.float32) for x in (beta, g)
-    ]
+    beta, g = [x.transpose(1, 2).contiguous().to(torch.float32)
+               for x in (beta, g)]
 
     batch_size, num_heads, sequence_length, k_head_dim = key.shape
     v_head_dim = value.shape[-1]
@@ -89,15 +90,22 @@ def torch_chunk_gated_delta_rule(
     k_beta = key * beta.unsqueeze(-1)
     # reshape to chunks
     query, key, value, k_beta, v_beta = [
-        x.reshape(x.shape[0], x.shape[1], -1, chunk_size, x.shape[-1]) for x in (query, key, value, k_beta, v_beta)
+        x.reshape(x.shape[0], x.shape[1], -1, chunk_size, x.shape[-1])
+        for x in (query, key, value, k_beta, v_beta)
     ]
     g = g.reshape(g.shape[0], g.shape[1], -1, chunk_size)
-    mask = torch.triu(torch.ones(chunk_size, chunk_size, dtype=torch.bool, device=query.device), diagonal=0)
+    mask = torch.triu(
+        torch.ones(chunk_size, chunk_size,
+                   dtype=torch.bool, device=query.device),
+        diagonal=0,
+    )
 
     # chunk decay
     g = g.cumsum(dim=-1)
-    decay_mask = ((g.unsqueeze(-1) - g.unsqueeze(-2)).tril().exp().float()).tril()
-    attn = -((k_beta @ key.transpose(-1, -2)) * decay_mask).masked_fill(mask, 0)
+    decay_mask = ((g.unsqueeze(-1) - g.unsqueeze(-2)
+                   ).tril().exp().float()).tril()
+    attn = -((k_beta @ key.transpose(-1, -2))
+             * decay_mask).masked_fill(mask, 0)
     for i in range(1, chunk_size):
         row = attn[..., i, :i].clone()
         sub = attn[..., :i, :i].clone()
@@ -111,43 +119,56 @@ def torch_chunk_gated_delta_rule(
         else initial_state.to(value)
     )
     core_attn_out = torch.zeros_like(value)
-    mask = torch.triu(torch.ones(chunk_size, chunk_size, dtype=torch.bool, device=query.device), diagonal=1)
+    mask = torch.triu(
+        torch.ones(chunk_size, chunk_size,
+                   dtype=torch.bool, device=query.device),
+        diagonal=1,
+    )
 
     # for each chunk
     for i in range(0, total_sequence_length // chunk_size):
         q_i, k_i, v_i = query[:, :, i], key[:, :, i], value[:, :, i]
-        attn = (q_i @ k_i.transpose(-1, -2) * decay_mask[:, :, i]).masked_fill_(mask, 0)
+        attn = (q_i @ k_i.transpose(-1, -2) *
+                decay_mask[:, :, i]).masked_fill_(mask, 0)
         v_prime = (k_cumdecay[:, :, i]) @ last_recurrent_state
         v_new = v_i - v_prime
         attn_inter = (q_i * g[:, :, i, :, None].exp()) @ last_recurrent_state
         core_attn_out[:, :, i] = attn_inter + attn @ v_new
         last_recurrent_state = (
             last_recurrent_state * g[:, :, i, -1, None, None].exp()
-            + (k_i * (g[:, :, i, -1, None] - g[:, :, i]).exp()[..., None]).transpose(-1, -2) @ v_new
+            + (k_i * (g[:, :, i, -1, None] - g[:, :, i]).exp()[..., None]).transpose(
+                -1, -2
+            )
+            @ v_new
         )
 
     if not output_final_state:
         last_recurrent_state = None
-    core_attn_out = core_attn_out.reshape(core_attn_out.shape[0], core_attn_out.shape[1], -1, core_attn_out.shape[-1])
+    core_attn_out = core_attn_out.reshape(
+        core_attn_out.shape[0], core_attn_out.shape[1], -
+        1, core_attn_out.shape[-1]
+    )
     core_attn_out = core_attn_out[:, :, :sequence_length]
-    core_attn_out = core_attn_out.transpose(1, 2).contiguous().to(initial_dtype)
+    core_attn_out = core_attn_out.transpose(
+        1, 2).contiguous().to(initial_dtype)
     return core_attn_out, last_recurrent_state
 
+
 class Qwen3NextRMSNorm_PT(nn.Module):
-  def __init__(self, dim: int, eps: float = 1e-6):
-      super().__init__()
-      self.eps = eps
-      # The weight is initialized to zeros, matching the real model.
-      self.weight = torch.nn.Parameter(torch.zeros(dim))
+    def __init__(self, dim: int, eps: float = 1e-6):
+        super().__init__()
+        self.eps = eps
+        # The weight is initialized to zeros, matching the real model.
+        self.weight = torch.nn.Parameter(torch.zeros(dim))
 
-  def _norm(self, x):
-      return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+    def _norm(self, x):
+        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
 
-  def forward(self, x):
-      output = self._norm(x.float())
-      # The core Qwen3-Next logic: scaling by (1.0 + weight)
-      output = output * (1.0 + self.weight.float())
-      return output.type_as(x)
+    def forward(self, x):
+        output = self._norm(x.float())
+        # The core Qwen3-Next logic: scaling by (1.0 + weight)
+        output = output * (1.0 + self.weight.float())
+        return output.type_as(x)
 
 
 class Qwen3NextMLP_PT(nn.Module):
@@ -155,47 +176,78 @@ class Qwen3NextMLP_PT(nn.Module):
         super().__init__()
         self.config = config
         self.hidden_size = config.hidden_size
-        self.intermediate_size = config.intermediate_size if intermediate_size is None else intermediate_size
-        self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
-        self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
-        self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
+        self.intermediate_size = (
+            config.intermediate_size if intermediate_size is None else intermediate_size
+        )
+        self.gate_proj = nn.Linear(
+            self.hidden_size, self.intermediate_size, bias=False)
+        self.up_proj = nn.Linear(
+            self.hidden_size, self.intermediate_size, bias=False)
+        self.down_proj = nn.Linear(
+            self.intermediate_size, self.hidden_size, bias=False)
         self.act_fn = F.silu
 
     def forward(self, x):
-        down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+        down_proj = self.down_proj(self.act_fn(
+            self.gate_proj(x)) * self.up_proj(x))
         return down_proj
+
 
 class Qwen3NextExperts_PT(nn.ModuleList):
     def __init__(self, config):
         super().__init__()
         self.num_experts = config.num_experts
         for _ in range(config.num_experts):
-            self.append(Qwen3NextMLP_PT(config, intermediate_size=config.moe_intermediate_size))
+            self.append(
+                Qwen3NextMLP_PT(
+                    config, intermediate_size=config.moe_intermediate_size)
+            )
 
-    def forward(self, hidden_states: torch.Tensor, top_k_index: torch.Tensor, top_k_weights: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        top_k_index: torch.Tensor,
+        top_k_weights: torch.Tensor,
+    ) -> torch.Tensor:
         final_hidden_states = torch.zeros_like(hidden_states)
-        expert_mask = torch.nn.functional.one_hot(top_k_index, num_classes=self.num_experts).permute(2, 1, 0)
+        expert_mask = torch.nn.functional.one_hot(
+            top_k_index, num_classes=self.num_experts
+        ).permute(2, 1, 0)
         expert_hit = torch.greater(expert_mask.sum(dim=(-1, -2)), 0).nonzero()
         for expert_idx in expert_hit:
             idx, top_x = torch.where(expert_mask[expert_idx].squeeze(0))
-            current_state = hidden_states[None, top_x].reshape(-1, hidden_states.shape[-1])
-            current_hidden_states = self[expert_idx](current_state) * top_k_weights[top_x, idx, None]
-            final_hidden_states.index_add_(0, top_x, current_hidden_states.to(hidden_states.dtype))
+            current_state = hidden_states[None, top_x].reshape(
+                -1, hidden_states.shape[-1]
+            )
+            current_hidden_states = (
+                self[expert_idx](current_state) *
+                top_k_weights[top_x, idx, None]
+            )
+            final_hidden_states.index_add_(
+                0, top_x, current_hidden_states.to(hidden_states.dtype)
+            )
         return final_hidden_states
+
 
 class Qwen3NextSparseMoeBlock_PT(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.gate = nn.Linear(config.hidden_size, config.num_experts, bias=False)
+        self.gate = nn.Linear(config.hidden_size,
+                              config.num_experts, bias=False)
         self.experts = Qwen3NextExperts_PT(config)
         self.num_experts_per_tok = config.num_experts_per_tok
         self.norm_topk_prob = config.norm_topk_prob
-        self.shared_expert = Qwen3NextMLP_PT(config, intermediate_size=config.shared_expert_intermediate_size)
-        self.shared_expert_gate = torch.nn.Linear(config.hidden_size, 1, bias=False)
+        self.shared_expert = Qwen3NextMLP_PT(
+            config, intermediate_size=config.shared_expert_intermediate_size
+        )
+        self.shared_expert_gate = torch.nn.Linear(
+            config.hidden_size, 1, bias=False)
 
     def route_tokens_to_experts(self, hidden_states, router_logits):
         routing_weights = F.softmax(router_logits, dim=-1, dtype=torch.float)
-        routing_weights, selected_experts = torch.topk(routing_weights, self.num_experts_per_tok, dim=-1)
+        routing_weights, selected_experts = torch.topk(
+            routing_weights, self.num_experts_per_tok, dim=-1
+        )
         if self.norm_topk_prob:
             routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
         routing_weights = routing_weights.to(hidden_states.dtype)
@@ -206,12 +258,21 @@ class Qwen3NextSparseMoeBlock_PT(nn.Module):
         hidden_states_reshaped = hidden_states.view(-1, hidden_dim)
         shared_expert_output = self.shared_expert(hidden_states_reshaped)
         router_logits = self.gate(hidden_states_reshaped)
-        selected_experts, routing_weights = self.route_tokens_to_experts(hidden_states_reshaped, router_logits)
-        expert_output = self.experts(hidden_states_reshaped, selected_experts, routing_weights)
-        shared_expert_output = F.sigmoid(self.shared_expert_gate(hidden_states_reshaped)) * shared_expert_output
+        selected_experts, routing_weights = self.route_tokens_to_experts(
+            hidden_states_reshaped, router_logits
+        )
+        expert_output = self.experts(
+            hidden_states_reshaped, selected_experts, routing_weights
+        )
+        shared_expert_output = (
+            F.sigmoid(self.shared_expert_gate(hidden_states_reshaped))
+            * shared_expert_output
+        )
         expert_output += shared_expert_output
-        expert_output = expert_output.reshape(batch_size, sequence_length, hidden_dim)
+        expert_output = expert_output.reshape(
+            batch_size, sequence_length, hidden_dim)
         return expert_output, router_logits
+
 
 class Qwen3NextRMSNormGated_PT(nn.Module):
     def __init__(self, hidden_size, eps=1e-6):
@@ -223,11 +284,13 @@ class Qwen3NextRMSNormGated_PT(nn.Module):
         input_dtype = hidden_states.dtype
         hidden_states = hidden_states.to(torch.float32)
         variance = hidden_states.pow(2).mean(-1, keepdim=True)
-        hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
+        hidden_states = hidden_states * \
+            torch.rsqrt(variance + self.variance_epsilon)
         hidden_states = self.weight * hidden_states
         if gate is not None:
-             hidden_states = hidden_states * F.silu(gate.to(torch.float32))
+            hidden_states = hidden_states * F.silu(gate.to(torch.float32))
         return hidden_states.to(input_dtype)
+
 
 class Qwen3NextGatedDeltaNet_PT(nn.Module):
     def __init__(self, config):
@@ -246,20 +309,28 @@ class Qwen3NextGatedDeltaNet_PT(nn.Module):
 
         self.conv_dim = self.key_dim * 2 + self.value_dim
         self.conv1d = nn.Conv1d(
-            in_channels=self.conv_dim, out_channels=self.conv_dim,
-            bias=False, kernel_size=self.conv_kernel_size,
-            groups=self.conv_dim, padding=self.conv_kernel_size - 1,
+            in_channels=self.conv_dim,
+            out_channels=self.conv_dim,
+            bias=False,
+            kernel_size=self.conv_kernel_size,
+            groups=self.conv_dim,
+            padding=self.conv_kernel_size - 1,
         )
 
         projection_size_qkvz = self.key_dim * 2 + self.value_dim * 2
         projection_size_ba = self.num_v_heads * 2
-        self.in_proj_qkvz = nn.Linear(self.hidden_size, projection_size_qkvz, bias=False)
-        self.in_proj_ba = nn.Linear(self.hidden_size, projection_size_ba, bias=False)
+        self.in_proj_qkvz = nn.Linear(
+            self.hidden_size, projection_size_qkvz, bias=False
+        )
+        self.in_proj_ba = nn.Linear(
+            self.hidden_size, projection_size_ba, bias=False)
 
         self.dt_bias = nn.Parameter(torch.ones(self.num_v_heads))
         A = torch.empty(self.num_v_heads).uniform_(0, 16)
         self.A_log = nn.Parameter(torch.log(A))
-        self.norm = Qwen3NextRMSNormGated_PT(self.head_v_dim, eps=self.layer_norm_epsilon)
+        self.norm = Qwen3NextRMSNormGated_PT(
+            self.head_v_dim, eps=self.layer_norm_epsilon
+        )
         self.out_proj = nn.Linear(self.value_dim, self.hidden_size, bias=False)
 
     def forward(self, hidden_states):
@@ -268,34 +339,55 @@ class Qwen3NextGatedDeltaNet_PT(nn.Module):
         projected_states_ba = self.in_proj_ba(hidden_states)
 
         # Simplified split for test where num_v_heads == num_k_heads
-        q, k, v, z = torch.split(projected_states_qkvz, [self.key_dim, self.key_dim, self.value_dim, self.value_dim], dim=-1)
-        b, a = torch.split(projected_states_ba, [self.num_v_heads, self.num_v_heads], dim=-1)
+        q, k, v, z = torch.split(
+            projected_states_qkvz,
+            [self.key_dim, self.key_dim, self.value_dim, self.value_dim],
+            dim=-1,
+        )
+        b, a = torch.split(
+            projected_states_ba, [self.num_v_heads, self.num_v_heads], dim=-1
+        )
 
         mixed_qkv = torch.cat((q, k, v), dim=-1).transpose(1, 2)
-        qkv_conv = F.silu(self.conv1d(mixed_qkv)[:, :, :seq_len]).transpose(1, 2)
-        q_conv, k_conv, v_conv = torch.split(qkv_conv, [self.key_dim, self.key_dim, self.value_dim], dim=-1)
+        qkv_conv = F.silu(self.conv1d(mixed_qkv)[
+                          :, :, :seq_len]).transpose(1, 2)
+        q_conv, k_conv, v_conv = torch.split(
+            qkv_conv, [self.key_dim, self.key_dim, self.value_dim], dim=-1
+        )
 
-        query = q_conv.reshape(batch_size, seq_len, self.num_k_heads, self.head_k_dim)
-        key = k_conv.reshape(batch_size, seq_len, self.num_k_heads, self.head_k_dim)
-        value = v_conv.reshape(batch_size, seq_len, self.num_v_heads, self.head_v_dim)
+        query = q_conv.reshape(batch_size, seq_len,
+                               self.num_k_heads, self.head_k_dim)
+        key = k_conv.reshape(batch_size, seq_len,
+                             self.num_k_heads, self.head_k_dim)
+        value = v_conv.reshape(batch_size, seq_len,
+                               self.num_v_heads, self.head_v_dim)
 
         beta = b.sigmoid()
         g = -self.A_log.float().exp() * F.softplus(a.float() + self.dt_bias.float())
 
         # Use the renamed config flag when calling the reference function internally
         core_attn_out, _ = torch_chunk_gated_delta_rule(
-            query, key, value, g, beta, chunk_size=self.config.gdn_chunk_size, # Use renamed config
-            use_qk_l2norm_in_kernel=self.config.use_qk_norm_in_gdn # Use renamed config
+            query,
+            key,
+            value,
+            g,
+            beta,
+            chunk_size=self.config.gdn_chunk_size,  # Use renamed config
+            use_qk_l2norm_in_kernel=self.config.use_qk_norm_in_gdn,  # Use renamed config
         )
 
-        z_reshaped = z.reshape(batch_size, seq_len, self.num_v_heads, self.head_v_dim)
+        z_reshaped = z.reshape(batch_size, seq_len,
+                               self.num_v_heads, self.head_v_dim)
         gated_output = self.norm(core_attn_out, z_reshaped)
         gated_output = gated_output.reshape(batch_size, seq_len, -1)
         output = self.out_proj(gated_output)
         return output
+
+
 # ----------------------------------------------------------------------
 # END: Copied PyTorch functions
 # ----------------------------------------------------------------------
+
 
 class TestQwen3Next(unittest.TestCase):
     """Main test class for Qwen3-Next layers."""
@@ -304,42 +396,44 @@ class TestQwen3Next(unittest.TestCase):
         """Set up a complete configuration and test environment for all Qwen3-Next tests."""
         super().setUp()
         # This setup now includes all necessary parameters for both linear attention and MoE tests.
-        self.cfg = pyconfig.initialize([
-            None,
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
-            # Base settings for the test
-            "run_name=qwen3_next_test",
-            "dtype=float32",
-            "weight_dtype=float32",
-            "matmul_precision=highest",
-            "decoder_block=qwen3_next",
-            # Model dimensions
-            "base_emb_dim=128",
-            "base_num_query_heads=4",
-            "base_num_kv_heads=4",
-            "head_dim=32",
-            # Gated Delta Net Dims (Using renamed parameters)
-            "gdn_num_value_heads=4",
-            "gdn_num_key_heads=4",
-            "gdn_key_head_dim=32",
-            "gdn_value_head_dim=32",
-            "gdn_conv_kernel_dim=4",
-            "gdn_chunk_size=64",
-            "use_qk_norm_in_gdn=True", # Use renamed parameter
-            "normalization_layer_epsilon=1e-5",
-            # MoE Test Configs (with a small number of experts)
-            "base_mlp_dim=256",
-            "num_experts=8",
-            "num_experts_per_tok=2",
-            "base_moe_mlp_dim=256", # moe_mlp_dim will be calculated from this
-            "norm_topk_prob=True",
-            "fsdp_shard_on_exp=False",
-            "mlp_activations=['silu', 'linear']",
-            "dropout_rate=0.0",
-            # Force the test to use the 'dense_matmul' path in the MoE layer,
-            # as the 'sparse_matmul' path was found to be numerically incorrect compared to the reference.
-            "sparse_matmul=False",
-        ])
+        self.cfg = pyconfig.initialize(
+            [
+                None,
+                os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+                # Base settings for the test
+                "run_name=qwen3_next_test",
+                "dtype=float32",
+                "weight_dtype=float32",
+                "matmul_precision=highest",
+                "decoder_block=qwen3_next",
+                # Model dimensions
+                "base_emb_dim=128",
+                "base_num_query_heads=4",
+                "base_num_kv_heads=4",
+                "head_dim=32",
+                # Gated Delta Net Dims (Using renamed parameters)
+                "gdn_num_value_heads=4",
+                "gdn_num_key_heads=4",
+                "gdn_key_head_dim=32",
+                "gdn_value_head_dim=32",
+                "gdn_conv_kernel_dim=4",
+                "gdn_chunk_size=64",
+                "use_qk_norm_in_gdn=True",  # Use renamed parameter
+                "normalization_layer_epsilon=1e-5",
+                # MoE Test Configs (with a small number of experts)
+                "base_mlp_dim=256",
+                "num_experts=8",
+                "num_experts_per_tok=2",
+                "base_moe_mlp_dim=256",  # moe_mlp_dim will be calculated from this
+                "norm_topk_prob=True",
+                "fsdp_shard_on_exp=False",
+                "mlp_activations=['silu', 'linear']",
+                "dropout_rate=0.0",
+                # Force the test to use the 'dense_matmul' path in the MoE layer,
+                # as the 'sparse_matmul' path was found to be numerically incorrect compared to the reference.
+                "sparse_matmul=False",
+            ]
+        )
         # Update the SimpleNamespace config used by PT models too
         self.pt_internal_cfg = SimpleNamespace(
             hidden_size=self.cfg.emb_dim,
@@ -370,7 +464,7 @@ class TestQwen3Next(unittest.TestCase):
         # Create a mesh shape where the 'data' axis gets all available devices,
         # and all other axes defined in the config have a size of 1.
         mesh_shape = [1] * len(self.cfg.mesh_axes)
-        mesh_shape[self.cfg.mesh_axes.index('data')] = num_devices
+        mesh_shape[self.cfg.mesh_axes.index("data")] = num_devices
 
         # Create the Mesh object with the full list of axis names from the config.
         self.mesh = Mesh(devices.reshape(mesh_shape), self.cfg.mesh_axes)
@@ -383,20 +477,29 @@ class TestQwen3Next(unittest.TestCase):
     def test_rms_norm_gated(self):
         """Tests the Qwen3NextRMSNormGated layer."""
         print("Running test_rms_norm_gated...")
-        hidden_states_pt = torch.randn(self.batch_size, self.seq_len, self.hidden_size)
+        hidden_states_pt = torch.randn(
+            self.batch_size, self.seq_len, self.hidden_size)
         gate_pt = torch.randn(self.batch_size, self.seq_len, self.hidden_size)
         weight_pt = torch.rand(self.hidden_size)
 
         # PyTorch reference
-        pt_model = Qwen3NextRMSNormGated_PT(self.hidden_size, eps=self.cfg.normalization_layer_epsilon)
+        pt_model = Qwen3NextRMSNormGated_PT(
+            self.hidden_size, eps=self.cfg.normalization_layer_epsilon
+        )
         pt_model.weight.data = weight_pt
         pt_model.eval()
         with torch.no_grad():
             expected_output = pt_model(hidden_states_pt, gate_pt)
 
         # JAX implementation
-        jax_model = qwen3.Qwen3NextRMSNormGated(num_features=self.hidden_size, eps=self.cfg.normalization_layer_epsilon, dtype=self.cfg.dtype, weight_dtype=self.cfg.weight_dtype, rngs=self.nnx_rngs)
-        params = {'weight': nnx.Param(jnp.array(weight_pt.numpy()))}
+        jax_model = qwen3.Qwen3NextRMSNormGated(
+            num_features=self.hidden_size,
+            eps=self.cfg.normalization_layer_epsilon,
+            dtype=self.cfg.dtype,
+            weight_dtype=self.cfg.weight_dtype,
+            rngs=self.nnx_rngs,
+        )
+        params = {"weight": nnx.Param(jnp.array(weight_pt.numpy()))}
         nnx.update(jax_model, params)
         hidden_states_jax = jnp.array(hidden_states_pt.numpy())
         gate_jax = jnp.array(gate_pt.numpy())
@@ -410,8 +513,9 @@ class TestQwen3Next(unittest.TestCase):
         np.testing.assert_allclose(
             expected_output.numpy(),
             actual_output,
-            rtol=1e-5, atol=1e-6, # Tight tolerance for this layer
-            err_msg="Qwen3NextRMSNormGated does not match PyTorch reference!"
+            rtol=1e-5,
+            atol=1e-6,  # Tight tolerance for this layer
+            err_msg="Qwen3NextRMSNormGated does not match PyTorch reference!",
         )
         print("test_rms_norm_gated passed!")
 
@@ -419,15 +523,21 @@ class TestQwen3Next(unittest.TestCase):
         """Tests the l2norm function."""
         print("Running test_l2norm...")
         # Use renamed config parameters
-        x_pt = torch.randn(self.batch_size, self.seq_len, self.cfg.gdn_num_value_heads, self.cfg.gdn_key_head_dim)
+        x_pt = torch.randn(
+            self.batch_size,
+            self.seq_len,
+            self.cfg.gdn_num_value_heads,
+            self.cfg.gdn_key_head_dim,
+        )
         expected_output = l2norm_torch(x_pt)
         # Call l2norm from normalizations module now
         actual_output = normalizations.l2norm(jnp.array(x_pt.numpy()))
         np.testing.assert_allclose(
             expected_output.numpy(),
             actual_output,
-            rtol=1e-5, atol=1e-6,
-            err_msg="l2norm does not match PyTorch reference!"
+            rtol=1e-5,
+            atol=1e-6,
+            err_msg="l2norm does not match PyTorch reference!",
         )
         print("test_l2norm passed!")
 
@@ -446,11 +556,41 @@ class TestQwen3Next(unittest.TestCase):
         key_q, key_k, key_v, key_g, key_beta = jax.random.split(key, 5)
 
         # Shapes are (B, S, H, D)
-        q_jax = jax.random.normal(key_q, (self.batch_size, self.seq_len, num_heads, k_head_dim), dtype=jnp.float32) * 0.1
-        k_jax = jax.random.normal(key_k, (self.batch_size, self.seq_len, num_heads, k_head_dim), dtype=jnp.float32) * 0.1
-        v_jax = jax.random.normal(key_v, (self.batch_size, self.seq_len, num_heads, v_head_dim), dtype=jnp.float32) * 0.1
-        g_jax = jax.random.normal(key_g, (self.batch_size, self.seq_len, num_heads), dtype=jnp.float32) * 0.1
-        beta_jax = jax.random.uniform(key_beta, (self.batch_size, self.seq_len, num_heads), dtype=jnp.float32)
+        q_jax = (
+            jax.random.normal(
+                key_q,
+                (self.batch_size, self.seq_len, num_heads, k_head_dim),
+                dtype=jnp.float32,
+            )
+            * 0.1
+        )
+        k_jax = (
+            jax.random.normal(
+                key_k,
+                (self.batch_size, self.seq_len, num_heads, k_head_dim),
+                dtype=jnp.float32,
+            )
+            * 0.1
+        )
+        v_jax = (
+            jax.random.normal(
+                key_v,
+                (self.batch_size, self.seq_len, num_heads, v_head_dim),
+                dtype=jnp.float32,
+            )
+            * 0.1
+        )
+        g_jax = (
+            jax.random.normal(
+                key_g, (self.batch_size, self.seq_len,
+                        num_heads), dtype=jnp.float32
+            )
+            * 0.1
+        )
+        beta_jax = jax.random.uniform(
+            key_beta, (self.batch_size, self.seq_len,
+                       num_heads), dtype=jnp.float32
+        )
 
         q_torch = torch.from_numpy(np.asarray(q_jax).copy())
         k_torch = torch.from_numpy(np.asarray(k_jax).copy())
@@ -463,49 +603,80 @@ class TestQwen3Next(unittest.TestCase):
 
         # Test without L2Norm (pass False using the original PT arg name)
         torch_output, _ = torch_chunk_gated_delta_rule(
-            q_torch.clone(), k_torch.clone(), v_torch.clone(), g_torch.clone(), beta_torch.clone(),
-            chunk_size=chunk_size, output_final_state=False, use_qk_l2norm_in_kernel=False
+            q_torch.clone(),
+            k_torch.clone(),
+            v_torch.clone(),
+            g_torch.clone(),
+            beta_torch.clone(),
+            chunk_size=chunk_size,
+            output_final_state=False,
+            use_qk_l2norm_in_kernel=False,
         )
         # Pass False using the new JAX arg name
         jax_output, _ = qwen3.jax_chunk_gated_delta_rule(
-            q_jax, k_jax, v_jax, g_jax, beta_jax,
-            chunk_size=chunk_size, initial_state=None, use_qk_norm_in_gdn=False
+            q_jax,
+            k_jax,
+            v_jax,
+            g_jax,
+            beta_jax,
+            chunk_size=chunk_size,
+            initial_state=None,
+            use_qk_norm_in_gdn=False,
         )
         np.testing.assert_allclose(
             torch_output.detach().numpy(),
             np.asarray(jax_output),
             atol=target_atol,
             rtol=target_rtol,
-            err_msg=f"JAX and PyTorch outputs are NOT close without L2Norm within atol={target_atol}, rtol={target_rtol}!"
+            err_msg=f"JAX and PyTorch outputs are NOT close without L2Norm within atol={target_atol}, rtol={target_rtol}!",
         )
-        print(f"JAX and PyTorch outputs are close without L2Norm within atol={target_atol}, rtol={target_rtol}!")
+        print(
+            f"JAX and PyTorch outputs are close without L2Norm within atol={target_atol}, rtol={target_rtol}!"
+        )
 
         # Test with L2Norm (pass True using the original PT arg name)
         torch_output_norm, _ = torch_chunk_gated_delta_rule(
-            q_torch.clone(), k_torch.clone(), v_torch.clone(), g_torch.clone(), beta_torch.clone(),
-            chunk_size=chunk_size, output_final_state=False, use_qk_l2norm_in_kernel=True
+            q_torch.clone(),
+            k_torch.clone(),
+            v_torch.clone(),
+            g_torch.clone(),
+            beta_torch.clone(),
+            chunk_size=chunk_size,
+            output_final_state=False,
+            use_qk_l2norm_in_kernel=True,
         )
         # Pass True using the new JAX arg name
         jax_output_norm, _ = qwen3.jax_chunk_gated_delta_rule(
-            q_jax, k_jax, v_jax, g_jax, beta_jax,
-            chunk_size=chunk_size, initial_state=None, use_qk_norm_in_gdn=True
+            q_jax,
+            k_jax,
+            v_jax,
+            g_jax,
+            beta_jax,
+            chunk_size=chunk_size,
+            initial_state=None,
+            use_qk_norm_in_gdn=True,
         )
         np.testing.assert_allclose(
             torch_output_norm.detach().numpy(),
             np.asarray(jax_output_norm),
             atol=target_atol,
             rtol=target_rtol,
-            err_msg=f"JAX and PyTorch outputs are NOT close with L2Norm within atol={target_atol}, rtol={target_rtol}!"
+            err_msg=f"JAX and PyTorch outputs are NOT close with L2Norm within atol={target_atol}, rtol={target_rtol}!",
         )
-        print(f"JAX and PyTorch outputs are close with L2Norm within atol={target_atol}, rtol={target_rtol}!")
+        print(
+            f"JAX and PyTorch outputs are close with L2Norm within atol={target_atol}, rtol={target_rtol}!"
+        )
         print("test_chunk_gated_delta_rule_logic passed!")
 
     def test_gated_delta_net_structure(self):
         """Tests the structure and output shape of Qwen3NextGatedDeltaNet."""
         print("Running test_gated_delta_net_structure...")
-        hidden_states_jax = jnp.ones((self.batch_size, self.seq_len, self.hidden_size), dtype=self.cfg.dtype)
+        hidden_states_jax = jnp.ones(
+            (self.batch_size, self.seq_len, self.hidden_size), dtype=self.cfg.dtype
+        )
 
-        jax_model = qwen3.Qwen3NextGatedDeltaNet(config=self.cfg, rngs=self.nnx_rngs)
+        jax_model = qwen3.Qwen3NextGatedDeltaNet(
+            config=self.cfg, rngs=self.nnx_rngs)
 
         @jax.jit
         def run_jax(hidden_states):
@@ -513,19 +684,23 @@ class TestQwen3Next(unittest.TestCase):
 
         output_jax = run_jax(hidden_states_jax)
 
-        self.assertEqual(output_jax.shape, (self.batch_size, self.seq_len, self.hidden_size))
+        self.assertEqual(
+            output_jax.shape, (self.batch_size, self.seq_len, self.hidden_size)
+        )
 
         print("test_gated_delta_net_structure passed!")
-
 
     def test_qwen3_next_rms_norm(self):
         """Tests the custom Qwen3NextRMSNorm layer against its PyTorch reference."""
         print("Running test_qwen3_next_rms_norm...")
         # 1. Set up the PyTorch reference model and inputs.
-        hidden_states_pt = torch.randn(self.batch_size, self.seq_len, self.hidden_size)
+        hidden_states_pt = torch.randn(
+            self.batch_size, self.seq_len, self.hidden_size)
         weight_pt = torch.rand(self.hidden_size)
 
-        pt_model = Qwen3NextRMSNorm_PT(self.hidden_size, eps=self.cfg.normalization_layer_epsilon)
+        pt_model = Qwen3NextRMSNorm_PT(
+            self.hidden_size, eps=self.cfg.normalization_layer_epsilon
+        )
         pt_model.weight.data = weight_pt
         pt_model.eval()
 
@@ -538,10 +713,10 @@ class TestQwen3Next(unittest.TestCase):
             eps=self.cfg.normalization_layer_epsilon,
             dtype=jnp.float32,
             weight_dtype=jnp.float32,
-            rngs=self.nnx_rngs
+            rngs=self.nnx_rngs,
         )
 
-        params = {'weight': nnx.Param(jnp.array(weight_pt.numpy()))}
+        params = {"weight": nnx.Param(jnp.array(weight_pt.numpy()))}
         nnx.update(jax_model, params)
         hidden_states_jax = jnp.array(hidden_states_pt.numpy())
 
@@ -555,8 +730,9 @@ class TestQwen3Next(unittest.TestCase):
         np.testing.assert_allclose(
             expected_output.numpy(),
             actual_output,
-            rtol=1e-6, atol=1e-6,
-            err_msg="Qwen3NextRMSNorm does not match PyTorch reference!"
+            rtol=1e-6,
+            atol=1e-6,
+            err_msg="Qwen3NextRMSNorm does not match PyTorch reference!",
         )
         print("test_qwen3_next_rms_norm passed!")
 
@@ -574,49 +750,96 @@ class TestQwen3Next(unittest.TestCase):
         # 2. Set up the PyTorch reference model and get the expected output
         pt_model = Qwen3NextSparseMoeBlock_PT(pt_config)
         pt_model.eval()
-        hidden_states_pt = torch.randn(self.batch_size, self.seq_len, self.cfg.emb_dim)
+        hidden_states_pt = torch.randn(
+            self.batch_size, self.seq_len, self.cfg.emb_dim)
         with torch.no_grad():
             expected_output, _ = pt_model(hidden_states_pt)
 
         # 3. Construct the JAX params tree, ensuring weights are correctly transposed
         pt_experts = pt_model.experts
-        stacked_gate_proj = torch.stack([expert.gate_proj.weight.T for expert in pt_experts])
-        stacked_up_proj = torch.stack([expert.up_proj.weight.T for expert in pt_experts])
-        stacked_down_proj = torch.stack([expert.down_proj.weight.T for expert in pt_experts])
+        stacked_gate_proj = torch.stack(
+            [expert.gate_proj.weight.T for expert in pt_experts]
+        )
+        stacked_up_proj = torch.stack(
+            [expert.up_proj.weight.T for expert in pt_experts]
+        )
+        stacked_down_proj = torch.stack(
+            [expert.down_proj.weight.T for expert in pt_experts]
+        )
 
         # Map PyTorch weights to JAX NNX module attributes
         jax_params = {
             "routed_experts": {
-                "gate": {"kernel": nnx.Param(jnp.array(pt_model.gate.weight.T.detach().numpy()))},
+                "gate": {
+                    "kernel": nnx.Param(
+                        jnp.array(pt_model.gate.weight.T.detach().numpy())
+                    )
+                },
                 "wi_0": nnx.Param(jnp.array(stacked_gate_proj.detach().numpy())),
                 "wi_1": nnx.Param(jnp.array(stacked_up_proj.detach().numpy())),
                 "wo": nnx.Param(jnp.array(stacked_down_proj.detach().numpy())),
             },
             "shared_expert": {
-                "wi": { # Assuming fused_mlp=True in config for shared_expert
-                   "0": {'kernel': nnx.Param(jnp.array(pt_model.shared_expert.gate_proj.weight.T.detach().numpy()))},
-                   "1": {'kernel': nnx.Param(jnp.array(pt_model.shared_expert.up_proj.weight.T.detach().numpy()))},
+                "wi": {  # Assuming fused_mlp=True in config for shared_expert
+                    "0": {
+                        "kernel": nnx.Param(
+                            jnp.array(
+                                pt_model.shared_expert.gate_proj.weight.T.detach().numpy()
+                            )
+                        )
+                    },
+                    "1": {
+                        "kernel": nnx.Param(
+                            jnp.array(
+                                pt_model.shared_expert.up_proj.weight.T.detach().numpy()
+                            )
+                        )
+                    },
                 },
-                "wo": {'kernel': nnx.Param(jnp.array(pt_model.shared_expert.down_proj.weight.T.detach().numpy()))},
+                "wo": {
+                    "kernel": nnx.Param(
+                        jnp.array(
+                            pt_model.shared_expert.down_proj.weight.T.detach().numpy()
+                        )
+                    )
+                },
             },
             "shared_expert_gate": {
-                'kernel': nnx.Param(jnp.array(pt_model.shared_expert_gate.weight.T.detach().numpy()))
-            }
+                "kernel": nnx.Param(
+                    jnp.array(
+                        pt_model.shared_expert_gate.weight.T.detach().numpy())
+                )
+            },
         }
         # Adjust shared_expert structure if not fused
         if not self.cfg.fused_mlp:
-             jax_params["shared_expert"] = {
-                'wi_0': {'kernel': nnx.Param(jnp.array(pt_model.shared_expert.gate_proj.weight.T.detach().numpy()))},
-                'wi_1': {'kernel': nnx.Param(jnp.array(pt_model.shared_expert.up_proj.weight.T.detach().numpy()))},
-                'wo': {'kernel': nnx.Param(jnp.array(pt_model.shared_expert.down_proj.weight.T.detach().numpy()))}
+            jax_params["shared_expert"] = {
+                "wi_0": {
+                    "kernel": nnx.Param(
+                        jnp.array(
+                            pt_model.shared_expert.gate_proj.weight.T.detach().numpy()
+                        )
+                    )
+                },
+                "wi_1": {
+                    "kernel": nnx.Param(
+                        jnp.array(
+                            pt_model.shared_expert.up_proj.weight.T.detach().numpy()
+                        )
+                    )
+                },
+                "wo": {
+                    "kernel": nnx.Param(
+                        jnp.array(
+                            pt_model.shared_expert.down_proj.weight.T.detach().numpy()
+                        )
+                    )
+                },
             }
 
         # 4. Set up and run the full JAX Qwen3NextSparseMoeBlock
         jax_model = qwen3.Qwen3NextSparseMoeBlock(
-            config=self.cfg,
-            mesh=self.mesh,
-            quant=None,
-            rngs=self.nnx_rngs
+            config=self.cfg, mesh=self.mesh, quant=None, rngs=self.nnx_rngs
         )
         nnx.update(jax_model, jax_params)
         hidden_states_jax = jnp.array(hidden_states_pt.numpy())
@@ -632,8 +855,9 @@ class TestQwen3Next(unittest.TestCase):
         np.testing.assert_allclose(
             expected_output.detach().numpy(),
             actual_output,
-            rtol=1e-5, atol=1e-5,
-            err_msg="Qwen3NextSparseMoeBlock does not match PyTorch reference!"
+            rtol=1e-5,
+            atol=1e-5,
+            err_msg="Qwen3NextSparseMoeBlock does not match PyTorch reference!",
         )
         print("test_qwen3_next_sparse_moe_block passed!")
 
@@ -647,12 +871,15 @@ class TestQwen3Next(unittest.TestCase):
         # Add MaxText config ref to PT model instance for internal use
         pt_model.config = self.cfg
 
-        hidden_states_pt = torch.randn(self.batch_size, self.seq_len, self.cfg.emb_dim)
+        hidden_states_pt = torch.randn(
+            self.batch_size, self.seq_len, self.cfg.emb_dim)
         with torch.no_grad():
             expected_output = pt_model(hidden_states_pt)
 
         # 2. Setup JAX model and map weights
-        jax_model = qwen3.Qwen3NextGatedDeltaNet(config=self.cfg, dtype=jnp.float32, rngs=self.nnx_rngs)
+        jax_model = qwen3.Qwen3NextGatedDeltaNet(
+            config=self.cfg, dtype=jnp.float32, rngs=self.nnx_rngs
+        )
 
         conv1d_weight_pt = pt_model.conv1d.weight.detach().numpy()
         # Transpose PT (out, in/groups, kw) -> JAX (kw, in/groups, out)
@@ -660,13 +887,27 @@ class TestQwen3Next(unittest.TestCase):
         conv1d_weight_jax = np.transpose(conv1d_weight_pt, (2, 1, 0))
 
         params = {
-            'in_proj_qkvz': {'kernel': nnx.Param(jnp.array(pt_model.in_proj_qkvz.weight.T.detach().numpy()))},
-            'in_proj_ba': {'kernel': nnx.Param(jnp.array(pt_model.in_proj_ba.weight.T.detach().numpy()))},
-            'conv1d': {'kernel': nnx.Param(jnp.array(conv1d_weight_jax))},
-            'A_log': nnx.Param(jnp.array(pt_model.A_log.detach().numpy())),
-            'dt_bias': nnx.Param(jnp.array(pt_model.dt_bias.detach().numpy())),
-            'norm': {'weight': nnx.Param(jnp.array(pt_model.norm.weight.detach().numpy()))},
-            'out_proj': {'kernel': nnx.Param(jnp.array(pt_model.out_proj.weight.T.detach().numpy()))},
+            "in_proj_qkvz": {
+                "kernel": nnx.Param(
+                    jnp.array(pt_model.in_proj_qkvz.weight.T.detach().numpy())
+                )
+            },
+            "in_proj_ba": {
+                "kernel": nnx.Param(
+                    jnp.array(pt_model.in_proj_ba.weight.T.detach().numpy())
+                )
+            },
+            "conv1d": {"kernel": nnx.Param(jnp.array(conv1d_weight_jax))},
+            "A_log": nnx.Param(jnp.array(pt_model.A_log.detach().numpy())),
+            "dt_bias": nnx.Param(jnp.array(pt_model.dt_bias.detach().numpy())),
+            "norm": {
+                "weight": nnx.Param(jnp.array(pt_model.norm.weight.detach().numpy()))
+            },
+            "out_proj": {
+                "kernel": nnx.Param(
+                    jnp.array(pt_model.out_proj.weight.T.detach().numpy())
+                )
+            },
         }
         nnx.update(jax_model, params)
         hidden_states_jax = jnp.array(hidden_states_pt.numpy())
@@ -681,10 +922,12 @@ class TestQwen3Next(unittest.TestCase):
         np.testing.assert_allclose(
             expected_output.numpy(),
             actual_output,
-            rtol=1e-4, atol=1e-4, # Relaxed tolerance slightly for end-to-end layer
-            err_msg="Qwen3NextGatedDeltaNet does not match PyTorch reference!"
+            rtol=1e-4,
+            atol=1e-4,  # Relaxed tolerance slightly for end-to-end layer
+            err_msg="Qwen3NextGatedDeltaNet does not match PyTorch reference!",
         )
         print("test_gated_delta_net_full passed!")
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     unittest.main()
