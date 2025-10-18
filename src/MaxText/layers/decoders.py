@@ -394,7 +394,7 @@ class Decoder(nn.Module):
       case DecoderBlockType.GEMMA3:
         return [gemma3.Gemma3DecoderLayerToLinen]
       case DecoderBlockType.GPT3:
-        return [gpt3.Gpt3DecoderLayer]
+        return [gpt3.Gpt3DecoderLayerToLinen]
       case DecoderBlockType.GPT_OSS:
         return [gpt_oss.GptOssScannableBlock] if self.config.scan_layers else [gpt_oss.GptOssDecoderLayer]
       case DecoderBlockType.QWEN3:
@@ -569,7 +569,7 @@ class Decoder(nn.Module):
           embedding_init=nn.initializers.normal(stddev=1.0),
           name="position_embedder",
           config=cfg,
-      )(decoder_positions, model_mode=model_mode)
+      )(decoder_positions.astype("int32"), model_mode=model_mode)
     return y
 
   @nn.compact
