@@ -63,6 +63,7 @@ jobs:
         TF_FORCE_GPU_ALLOW_GROWTH: ${{ inputs.tf_force_gpu_allow_growth }}
         TPU_SKIP_MDS_QUERY: ${{ inputs.image_type == 'tpu' && inputs.device_type != 'tpu' && '1' || '' }}
         IFRT_PROXY_USE_INSECURE_GRPC_CREDENTIALS: true
+        XLA_FLAGS: "--xla_dump_to=/tmp/aot_test_dump --xla_dump_hlo_as_text --xla_dump_hlo_module_re=jit_train_step"
         JAX_PLATFORMS: "proxy"
         JAX_BACKEND_TARGET: "grpc://localhost:29000"
       options: ${{ inputs.container_resource_option }}
