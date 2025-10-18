@@ -109,6 +109,9 @@ if not os.path.exists(TEST_DATA_DIR):
 TRAIN_FRACTION = 1.0
 
 
+# ====== Input Checkpoint directory =====
+MODEL_CHECKPOINT_PATH = "/path/to/scanned/model/ckpt_load_dir/"
+
 # ====== Checkpoint directory =====
 LOG_DIR = os.path.join(HOME, "content", "tensorboard", "grpo", "logs_llama3", "")
 if not os.path.exists(LOG_DIR):
@@ -404,8 +407,7 @@ config_ref = pyconfig.initialize(
     run_name="test-tunix-maxtext-llama3.1-8b",
     tokenizer_type="tiktoken",
     tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizer_llama3.tiktoken"),
-    load_parameters_path="gs://yixuannwang-maxtext-logs/llama3.1-8b-Instruct/scanned/0/items",
-    # load_parameters_path="path/to/scanned/checkpoint",
+    load_parameters_path=MODEL_CHECKPOINT_PATH,
     per_device_batch_size=1,
     max_prefill_predict_length=4,
     max_target_length=1024,
@@ -464,8 +466,7 @@ config_policy = pyconfig.initialize(
     run_name="test-tunix-maxtext-llama3.1-8b",  # This is not used in Tunix.
     tokenizer_type="tiktoken",
     tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizer_llama3.tiktoken"),
-    load_parameters_path="gs://yixuannwang-maxtext-logs/llama3.1-8b-Instruct/scanned/0/items",
-    # load_parameters_path="path/to/scanned/checkpoint",
+    load_parameters_path=MODEL_CHECKPOINT_PATH,
     per_device_batch_size=1,
     max_prefill_predict_length=4,
     max_target_length=1024,
