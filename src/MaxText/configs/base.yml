@@ -860,3 +860,6 @@ subslice_shape: ""
 # NNX
 enable_nnx: false
 shard_optimizer_over_data: False
+
+# Use tokamax library for kernel implementations
+use_tokamax: false
