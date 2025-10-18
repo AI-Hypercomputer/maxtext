@@ -52,9 +52,9 @@ class DataLoader:
         self.check_example_batch()
       except Exception as e:  # pylint: disable=broad-except
         if isinstance(e, StopIteration):
-          raise exceptions.StopTraining(f"You may have run out of training data. Received {type(e)} exception: ({e})")
+          raise exceptions.StopTraining(f"You may have run out of training data. Received {type(e)} exception: ({e})") from e
         else:
-          raise exceptions.StopTraining(f"`load_next_batch()` failed with {type(e)} exception: ({e}).")
+          raise exceptions.StopTraining(f"`load_next_batch()` failed with {type(e)} exception: ({e}).") from e
     return self.last_batch
 
   def check_example_batch(self):
