@@ -64,7 +64,8 @@ from MaxText.utils.goodput_utils import (
 from MaxText.vertex_tensorboard import VertexTensorboardManager
 # Placeholder: internal
 
-from MaxText.maxtext_utils import compute_loss_nnx, compute_loss_linen
+from MaxText.gradient_accumulation import gradient_accumulation_loss_and_grad
+from MaxText.vocabulary_tiling import vocab_tiling_linen_loss
 from MaxText.dpo_utils import _merge_dpo_state, _split_dpo_state, dpo_loss_fn
 from MaxText.train_utils import validate_train_config
 from MaxText.metric_logger import record_activation_metrics
@@ -132,7 +133,17 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
         decoder_target_mask=data["targets_segmentation"],
     )
 
-    total_loss = compute_loss_linen(intermediate_outputs, logits, data, config, model, params, is_train)
+    if config.num_vocab_tiling > 1:
+      hidden_state_key = ("intermediates", "decoder", "hidden_states")
+      hidden_states = maxtext_utils.get_nested_value(intermediate_outputs, hidden_state_key)[0]
+      total_loss = vocab_tiling_linen_loss(hidden_states, data, config, model, params, is_train)
+    else:
+      one_hot_targets = jax.nn.one_hot(data["targets"], config.vocab_size)
+      xent, _ = max_utils.cross_entropy_with_logits(logits, one_hot_targets)
+      xent = nn.with_logical_constraint(xent, ("activation_embed_and_logits_batch", "activation_length"))
+      # Mask out paddings at the end of each example.
+      xent = xent * (data["targets_segmentation"] != 0)
+      total_loss = jnp.sum(xent)
   else:
     # Flax NNX model
     logits = model(
@@ -146,7 +157,12 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
         decoder_target_mask=data["targets_segmentation"],
     )
     intermediate_outputs = {}
-    total_loss = compute_loss_nnx(intermediate_outputs, logits, data, config, model, params, is_train)
+    one_hot_targets = jax.nn.one_hot(data["targets"], config.vocab_size)
+    xent, _ = max_utils.cross_entropy_with_logits(logits, one_hot_targets)
+    xent = nn.with_logical_constraint(xent, ("activation_embed_and_logits_batch", "activation_length"))
+    # Mask out paddings at the end of each example.
+    xent = xent * (data["targets_segmentation"] != 0)
+    total_loss = jnp.sum(xent)
 
   total_weights = jnp.sum(data["targets_segmentation"] != 0)
   # If gradient accumulation is enabled, we don't need to divide total_loss
@@ -215,67 +231,16 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
   params = state.params
 
   if config.gradient_accumulation_steps > 1:
-    # When using Zero-1 optimizer sharding, cast params to lower precision and apply sharding constraints
-    # so that all-gather is done once in the lower precision before the gradient accumulation loop
-    if config.shard_optimizer_over_data:
-
-      def convert_to_bf16(param):
-        if param.dtype == jnp.float32:
-          return param.astype(jnp.bfloat16)
-        else:
-          return param
-
-      ga_params = jax.tree_util.tree_map(convert_to_bf16, params)
-      ga_params = jax.tree.map(jax.lax.with_sharding_constraint, ga_params, params_shardings)
-    else:
-      ga_params = params
-
-    def accumulate_gradient(acc_grad_and_loss, data):
-      ga_params = acc_grad_and_loss["ga_params"]
-      grad_func = jax.value_and_grad(_loss_fn, argnums=4, has_aux=True)
-      (_, aux), cur_batch_gradient = grad_func(
-          model, config, data, dropout_rng, ga_params, *extra_dpo_args, is_train=True
-      )
-      acc_grad_and_loss["loss"] += aux["total_loss"]
-      acc_grad_and_loss["moe_lb_loss"] += aux["moe_lb_loss"]
-      acc_grad_and_loss["mtp_loss"] += aux["mtp_loss"]
-      acc_grad_and_loss["grad"] = jax.tree_util.tree_map(
-          lambda x, y: x + y, cur_batch_gradient, acc_grad_and_loss["grad"]
-      )
-      acc_grad_and_loss["total_weights"] += aux["total_weights"]
-      return acc_grad_and_loss, aux
-
-    def reshape_to_microbatch_accumulations(batch_arr):
-      """Reshape global batch to microbatches, assuming batch axis is leading."""
-      microbatches = config.gradient_accumulation_steps
-      microbatch_shape = (microbatches, batch_arr.shape[0] // microbatches) + batch_arr.shape[1:]
-      return jnp.reshape(batch_arr, microbatch_shape)
-
-    data = jax.tree_util.tree_map(reshape_to_microbatch_accumulations, data)
-    init_grad = jax.tree_util.tree_map(jnp.zeros_like, ga_params)
-    init_grad = jax.tree.map(jax.lax.with_sharding_constraint, init_grad, params_shardings)
-    init_grad_and_loss = {
-        "loss": 0.0,
-        "grad": init_grad,
-        "total_weights": 0,
-        "moe_lb_loss": 0.0,
-        "mtp_loss": 0.0,
-        "ga_params": ga_params,
-    }
-
-    grad_and_loss, aux = jax.lax.scan(
-        accumulate_gradient, init_grad_and_loss, data, length=config.gradient_accumulation_steps
+    loss, aux, raw_grads = gradient_accumulation_loss_and_grad(
+        _loss_fn,
+        config,
+        model,
+        params,
+        params_shardings,
+        data,
+        dropout_rng,
+        extra_dpo_args,
     )
-    loss = (
-        grad_and_loss["loss"] / grad_and_loss["total_weights"]
-        + grad_and_loss["moe_lb_loss"] / config.gradient_accumulation_steps
-        + grad_and_loss["mtp_loss"] / config.gradient_accumulation_steps
-    )
-    raw_grads = grad_and_loss["grad"]
-    if config.shard_optimizer_over_data:
-      raw_grads = jax.tree.map(jax.lax.with_sharding_constraint, raw_grads, params_shardings)
-    raw_grads = jax.tree_util.tree_map(lambda arr: arr / grad_and_loss["total_weights"], raw_grads)
-    aux = jax.tree.map(lambda x: jnp.sum(x, axis=0), aux)  # pytype: disable=module-attr
   else:
     if config.optimizer_memory_host_offload:
       if config.use_dpo:
@@ -403,6 +368,9 @@ def train_loop(config, recorder, state=None):
       state = _merge_dpo_state(state, reference_params)
     state_mesh_shardings = _merge_dpo_state(state_mesh_shardings, state_mesh_shardings.params["params"])
 
+  params_shardings, state_mesh_shardings = maxtext_utils.maybe_update_params_sharding_with_opt(
+      config, state_mesh_shardings
+  )
   params_shardings, state_mesh_shardings = maxtext_utils.maybe_update_params_sharding_with_opt(
       config, state_mesh_shardings
   )

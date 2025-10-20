@@ -501,7 +501,9 @@ def unbox_logicallypartioned(boxed_pytree):
 # https://github.com/google-research/t5x/blob/ace831eea1e2742b4299cd1a9af7e4f302038351/t5x/losses.py#L25-L101
 @jax.custom_vjp
 def cross_entropy_with_logits(
-    logits: jnp.ndarray, targets: jnp.ndarray, z_loss: float
+    logits: jnp.ndarray,
+    targets: jnp.ndarray,
+    z_loss: float = 0.0,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
   """Computes cross entropy loss with stable custom gradient.
   Computes a stabilized-gradient version of:
