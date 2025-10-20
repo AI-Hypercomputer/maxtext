@@ -14,7 +14,7 @@
  limitations under the License.
  -->
 
-# Maxtext on Single host GPU
+# Running MaxText on single host GPU
 
 This is a short guide to run Maxtext on GPU. For this current set of instructions the GPUs used are A3-high. This is a single node 8 H100 instruction.
 
@@ -61,13 +61,13 @@ https://stackoverflow.com/questions/72932940/failed-to-initialize-nvml-unknown-e
 
 ## Install MaxText
 
-Clone Maxtext:
+Clone MaxText:
 
 ```bash
 git clone https://github.com/AI-Hypercomputer/maxtext.git
 ```
 
-## Build Maxtext Docker Image
+## Build MaxText Docker image
 
 This builds a docker image called `maxtext_base_image`. You can retag to a different name.
 
@@ -81,7 +81,7 @@ cd maxtext
 
 ```bash
 export LOCAL_IMAGE_NAME=<docker_image_name>
-sudo bash docker_build_dependency_image.sh DEVICE=gpu 
+sudo bash docker_build_dependency_image.sh DEVICE=gpu
 docker tag maxtext_base_image $LOCAL_IMAGE_NAME
 docker push $LOCAL_IMAGE_NAME
 ```
@@ -98,7 +98,7 @@ specify it explicitly:
 Test the docker, to see if jax can see all the 8 GPUs
 
 ```bash
-sudo docker run maxtext_base_image:latest  python3 -c "import jax; print(jax.devices())"
+sudo docker run maxtext_base_image:latest python3 -c "import jax; print(jax.devices())"
 ```
 
 You should see the following:
@@ -114,7 +114,7 @@ We will Run the next commands from inside the docker for convenience.
 ## SSH into the docker
 
 ```bash
-sudo docker run --runtime=nvidia --gpus all -it maxtext_base_image:latest  bash
+sudo docker run --runtime=nvidia --gpus all -it maxtext_base_image:latest bash
 ```
 
 If you do not wish to ssh execute the next set of commands by prepending the following:
@@ -147,8 +147,8 @@ Hardware: GPU
 ```
 
 ```bash
-python3 -m MaxText.train src/MaxText/configs/base.yml   run_name=gpu01   base_output_directory=/deps/output  \
-  dataset_type=synthetic   enable_checkpointing=True  steps=10 attention=cudnn_flash_te scan_layers=False \
+python3 -m MaxText.train src/MaxText/configs/base.yml run_name=gpu01 base_output_directory=/deps/output  \
+  dataset_type=synthetic enable_checkpointing=True steps=10 attention=cudnn_flash_te scan_layers=False \
   use_iota_embed=True hardware=gpu per_device_batch_size=12
 ```
 
@@ -156,7 +156,7 @@ python3 -m MaxText.train src/MaxText/configs/base.yml   run_name=gpu01   base_ou
 
 You can find the optimized running of LLama Models for various host configurations here:
 
-https://github.com/AI-Hypercomputer/maxtext/tree/main/MaxText/configs/a3/llama_2_7b
+https://github.com/AI-Hypercomputer/maxtext/tree/main/src/MaxText/configs/a3/llama_2_7b
 
 `1vm.sh` modified script below:
 

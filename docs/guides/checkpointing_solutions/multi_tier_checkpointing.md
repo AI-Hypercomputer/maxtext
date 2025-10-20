@@ -1,15 +1,15 @@
-# Multi-Tier Checkpointing
+# Multi-tier checkpointing
 
 Multi-tier checkpointing is a solution designed to optimize the storage and management of checkpoints for large-scale machine learning (ML) training jobs, particularly those utilizing thousands of nodes. It aims to increase **"Goodput"** (the time spent making progress) and decrease costs by reducing wasted progress and the **mean-time-to-recovery (MTTR)** from failures.
 
-## Purpose and Benefits
+## Purpose and benefits
 
 * **Addresses frequent interruptions**: Large-scale ML training jobs are prone to frequent interruptions (potentially hourly), and recovery from these can be slow.
 * **Improves Goodput**: By saving checkpoints more frequently and efficiently, multi-tier checkpointing reduces the amount of lost progress when a failure occurs, thereby increasing the overall Goodput of the training process.
 * **Reduces MTTR**: The multi-tiered approach allows for faster restoration of training progress after a disruption.
 * **Optimized restore**: During the ML training workload's startup, available checkpoint shards are asynchronously copied to the local ramdisk. These shards are pulled from the fastest available source, whether from local peer nodes or the backup on GCS persistent storage. This process ensures the data is ready to be picked up by Orbax from the ramdisk, minimizing startup delays.
 
-## Architecture and Tiers
+## Architecture and tiers
 
 Multi-tier checkpointing stores checkpoints across multiple tiers of storage:
 
@@ -17,13 +17,13 @@ Multi-tier checkpointing stores checkpoints across multiple tiers of storage:
 * **In-cluster (peer replication)**: Checkpoints are replicated to other nodes or slices within the cluster.
 * **GCS (persistent storage)**: Checkpoints are backed up to GCS for long-term durability and global accessibility. This tier is used for less frequent, but more robust, saves.
 
-## Implementation Details
+## Implementation details
 
 * **GKE Component**: A managed GKE component is involved in handling high-scale checkpointing, including controllers, daemonsets, worker discovery, and rank assignment.
 * **Local Storage**: For multi-tier checkpointing, local storage (such as ramdisk provided by a CSI ephemeral driver) is used for checkpoints, persisting across workload pod deletions.
 * **Replication Service**: A replication service in a managed GKE component replicates checkpoints in-cluster and backs up local checkpoint files to GCS at certain intervals and is responsible for fetching latest checkpoint files to nodes without local checkpoints during restoration.
 
-## Comparison with Other Checkpointing Methods
+## Comparison with other checkpointing methods
 
 * **GCS Checkpointing**: This involves saving the model state directly to durable storage like GCS. However, this can be slow at larger model/cluster scales, blocking training, and leading to redundant data copies.
 * **Emergency/Ramdisk Checkpointing**: While this method uses a low-latency ramdisk for checkpointing, Orbax manages the GCS save and restore operations at the workload level. As a result, saving to GCS blocks the training process during the device-to-host data transfer.
@@ -39,7 +39,7 @@ Multi-tier checkpointing stores checkpoints across multiple tiers of storage:
 * **Supported TPU types**: [v4](https://cloud.google.com/tpu/docs/v4), [v5e](https://cloud.google.com/tpu/docs/v5e), [v5p](https://cloud.google.com/tpu/docs/v5p), and [v6e](https://cloud.google.com/tpu/docs/v6e)
 * **Cluster version**: Gke cluster version needs to be later than [1.32.3-gke.1170000](https://cloud.google.com/kubernetes-engine/docs/how-to/machine-learning/training/multi-tier-checkpointing#existing-cluster).
 
-## Cluster Creation using XPK
+## Cluster creation using XPK
 
 To run workloads with Multi-Tier Checkpointing (MTC), you need a Google Kubernetes Engine (GKE) cluster with the necessary drivers and features enabled. You can create a properly configured cluster using the **XPK** or by setting it up manually with `gcloud` commands following [Google Cloud Checkpointing Documentation](https://cloud.google.com/kubernetes-engine/docs/how-to/machine-learning/training/multi-tier-checkpointing).
 
@@ -53,7 +53,7 @@ The [xpk script](https://github.com/AI-Hypercomputer/xpk/blob/develop/xpk.py) pr
 | `--mtc-gcs-bucket` | Specifies the GCS bucket. |
 
 
-### Calculating Ramdisk Size Per Host 
+### Calculating ramdisk size per host
 
 The total size of a full training checkpoint (including model weights and optimizer state) can be estimated based on the number of model parameters.
 A good rule of thumb:
@@ -68,7 +68,7 @@ The formula is:
 
 It's a good practice to add a **10-15% buffer** .
 
-### Example Calculation
+### Example calculation
 
 Let's walk through an example for a large model.
 
@@ -126,7 +126,7 @@ In this scenario, you should configure each pod in that slice with a ramdisk of 
     --gke-version=${GKE_VERSION}
     ```
 
-## MaxText Configuration
+## MaxText configuration
 
 This configuration manages a `multi-tiered checkpointing` system designed for both durability and rapid recovery.
 
@@ -142,7 +142,7 @@ This configuration manages a `multi-tiered checkpointing` system designed for bo
 | `local_checkpoint_period` | The interval, in training steps, for how often a **Multi-tier checkpoint** is saved in local ramdisks. | `integer` | `0` |
 | `multi_tier_checkpointing_backup_interval_minutes`| The interval, in minutes, for how often a **Multi-tier checkpoint** is saved to backup from local ramdisks. | `integer` | `0` |
 
-### Workload Creation using XPK
+### Workload creation using XPK
 
 The flags below would give the user access to the ramdisk in their workload:
 

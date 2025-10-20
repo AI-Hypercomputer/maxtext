@@ -26,7 +26,7 @@ Ideally, while the accelerator is busy with the current step's computation (e.g.
 
 If data loading is faster than computation, the pipeline is not a bottleneck. Optimizing it further will **not** improve training speed.
 
-```{figure} ../_static/data_input_goal.png
+```{figure} ../../_static/data_input_goal.png
 Status of TPU and CPU during training stages.
 ```
 
@@ -36,7 +36,7 @@ For this overlap to happen, the data pipeline (on the CPU) and the model computa
 * **Good (parallel)**: The trace on the right shows the CPU (bottom tracks) is busy fetching data at the same time the TPU (top track) is computing.
 * **Bad (sequential)**: The trace on the left shows a **gap** in TPU utilization, where the TPU is idle. This gap is often caused by **forcing synchronization** (as explained in the following section), not necessarily a slow pipeline. While speeding up data loading might narrow this gap, only removing the synchronization eliminates the gap and achieves true parallelism.
 
-```{figure} ../_static/data_profile.png
+```{figure} ../../_static/data_profile.png
 Example profiles of sequential (left) vs. parallel (right) data loading with TPU computation.
 ```
 
@@ -55,5 +55,5 @@ You can check if your data pipeline meets the performance goal in two ways:
 ## How to speed up a slow data pipeline
 
 If your profile confirms that data loading is parallel but still slower than computation, then data loading is the bottleneck. Here are a few ways to speed it up:
-1. **Tune Grain**: If you are using the [Grain data pipeline](../guides/data_input_grain.md), start by tuning the `grain_worker_count`. If adjusting the worker count isn't enough, use the [Grain performance and debugging tool](https://google-grain.readthedocs.io/en/latest/tutorials/dataset_debugging_tutorial.html) to find the specific bottleneck.
+1. **Tune Grain**: If you are using the [Grain data pipeline](data_input_grain.md), start by tuning the `grain_worker_count`. If adjusting the worker count isn't enough, use the [Grain performance and debugging tool](https://google-grain.readthedocs.io/en/latest/tutorials/dataset_debugging_tutorial.html) to find the specific bottleneck.
 2. **Pre-process offline**: Perform as much data preparation as possible offline. Apply only light-weight preprocessing during training.

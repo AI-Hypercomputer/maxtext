@@ -29,7 +29,7 @@ To start with, we focus on HuggingFace datasets for convenience.
 We use the HuggingFace dataset [allenai/c4](https://huggingface.co/datasets/allenai/c4), a processed version of Google's C4. This dataset is organized into subsets (e.g., `en`, `es`), and each subset contains data splits (e.g., `train`, `validation`).
 
 
-**Data preparation**: You don't need to download data, as the pipeline can stream data directly from the HuggingFace Hub. Alternatively, it can stream from a Cloud Storage bucket; see the [HuggingFace Pipeline](../guides/data_input_hf.md) page.
+**Data preparation**: You don't need to download data, as the pipeline can stream data directly from the HuggingFace Hub. Alternatively, it can stream from a Cloud Storage bucket; see the [HuggingFace Pipeline](../guides/data_input_pipeline/data_input_hf.md) page.
 
 
 We can use this **command** for pretraining:
@@ -80,10 +80,10 @@ eval metrics after step: 9, loss=9.420, total_weights=75264.0
 
 ## 2. Grain pipeline
 
-Grain is a library for reading data for training and evaluating JAX models. It is the recommended input pipeline for determinism and resilience! It supports data formats like ArrayRecord and Parquet. You can check [Grain pipeline](../guides/data_input_grain.md) for more details.
+Grain is a library for reading data for training and evaluating JAX models. It is the recommended input pipeline for determinism and resilience! It supports data formats like ArrayRecord and Parquet. You can check [Grain pipeline](../guides/data_input_pipeline/data_input_grain.md) for more details.
 
 
-**Data preparation**: You need to download data to a Cloud Storage bucket, and read data via Cloud Storage Fuse with [setup_gcsfuse.sh](https://github.com/AI-Hypercomputer/maxtext/blob/0baff00ac27bb7996c62057f235cc1d2f43d734e/setup_gcsfuse.sh#L18). 
+**Data preparation**: You need to download data to a Cloud Storage bucket, and read data via Cloud Storage Fuse with [setup_gcsfuse.sh](https://github.com/AI-Hypercomputer/maxtext/blob/0baff00ac27bb7996c62057f235cc1d2f43d734e/setup_gcsfuse.sh#L18).
 - For example, we can mount the bucket `gs://maxtext-dataset` on the local path `/tmp/gcsfuse` before training
   ```bash
   bash setup_gcsfuse.sh DATASET_GCS_BUCKET=maxtext-dataset MOUNT_PATH=/tmp/gcsfuse
@@ -122,7 +122,7 @@ tokenizer_type=huggingface tokenizer_path=deepseek-ai/DeepSeek-V2-Lite
 
 ## 3. TFDS pipeline
 
-The TensorFlow Datasets (TFDS) pipeline uses dataset in the TFRecord format. You can check [TFDS Pipeline](../guides/data_input_tfds.md) for more details.
+The TensorFlow Datasets (TFDS) pipeline uses dataset in the TFRecord format. You can check [TFDS Pipeline](../guides/data_input_pipeline/data_input_tfds.md) for more details.
 
 **Data preparation**: You need to download data to a [Cloud Storage bucket](https://cloud.google.com/storage/docs/creating-buckets), and the pipeline streams data from the bucket.
 - To download the AllenAI C4 dataset to your bucket, you can use [download_dataset.sh](https://github.com/AI-Hypercomputer/maxtext/blob/08d9f20329ab55b9b928543fedd28ad173e1cd97/download_dataset.sh#L19): `bash download_dataset.sh <GCS_PROJECT> <GCS_BUCKET_FOR_DATASET>`
