@@ -860,3 +860,19 @@ subslice_shape: ""
 # NNX
 enable_nnx: false
 shard_optimizer_over_data: False
+
+################################## Qwen3-Next Specific Configs ##################################
+# Kernel size for the 1D convolution in the Gated Delta Net
+gdn_conv_kernel_dim: 4
+# Head dimension for the key/query in the Gated Delta Net
+gdn_key_head_dim: 128
+# Head dimension for the value in the Gated Delta Net
+gdn_value_head_dim: 128
+# Number of key/query heads in the Gated Delta Net
+gdn_num_key_heads: 16
+# Number of value heads in the Gated Delta Net
+gdn_num_value_heads: 32
+# Chunk size for the parallel scan algorithm in the Gated Delta Net.
+gdn_chunk_size: 64
+# Whether to apply L2 normalization to query and key tensors inside the Gated Delta Rule kernel.
+use_qk_norm_in_gdn: True
