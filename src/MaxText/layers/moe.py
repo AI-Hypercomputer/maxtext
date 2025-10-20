@@ -25,7 +25,6 @@ import flax.linen as nn
 from flax import nnx
 import jax
 from jax import ad_checkpoint as adc
-from jax.experimental import shard_map
 from jax.experimental import xla_metadata
 import jax.numpy as jnp
 import numpy as np
@@ -908,7 +907,7 @@ class RoutedMoE(nnx.Module):
       wo_pspec = aqt.partition_spec(wo_pspec, (1,), wo_kernel.dtype, use_bias=False)
 
     @functools.partial(
-        shard_map.shard_map,
+        jax.shard_map,
         mesh=self.mesh,
         in_specs=(
             input_partition_pspec,
@@ -923,7 +922,7 @@ class RoutedMoE(nnx.Module):
             None,
         ),
         out_specs=(nn.logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", "activation_embed"))),
-        check_rep=False,
+        check_vma=False,
     )
     def wrapper(x, logits, pre_bias_logits, w0, w1, wo, w0_bias, w1_bias, wo_bias, rngs):
       batch_size, sequence_length, _ = x.shape
