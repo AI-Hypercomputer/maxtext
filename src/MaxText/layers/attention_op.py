@@ -28,7 +28,6 @@ from jax.experimental.pallas.ops.gpu import attention as gpu_pallas_attention
 from jax.experimental.pallas.ops.gpu import decode_attention as gpu_pallas_decode_attention
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_kernel
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask
-from jax.experimental.shard_map import shard_map
 from jax.sharding import Mesh
 import jax
 import jax.numpy as jnp
@@ -946,11 +945,11 @@ class AttentionOp(nnx.Module):
     bn = nn.logical_to_mesh_axes((CACHE_BATCH, CACHE_HEADS))
 
     @functools.partial(
-        shard_map,
+        jax.shard_map,
         mesh=self.mesh,
         in_specs=(bnd, bsnd, bsnd, b, None),
         out_specs=(bnd, bn, bn),
-        check_rep=False,
+        check_vma=False,
     )
     def wrap_ragged_attention(
         q: Array, k: Array, v: Array, lengths: Array, block_size: int
@@ -1000,7 +999,7 @@ class AttentionOp(nnx.Module):
     bsnd = nn.logical_to_mesh_axes(self.cache_logical_axis_names)
 
     @functools.partial(
-        shard_map,
+        jax.shard_map,
         mesh=self.mesh,
         in_specs=(
             bsnd,
@@ -1010,7 +1009,7 @@ class AttentionOp(nnx.Module):
             None,
         ),
         out_specs=bsnd,
-        check_rep=False,
+        check_vma=False,
     )
     def wrap_ragged_attention(query, key, value, lengths, block_size):
       if query.shape[-2] == key.shape[-2]:
@@ -1162,7 +1161,7 @@ class AttentionOp(nnx.Module):
     #  'segment_axis_names_kv' maps to ['activation_kv_length', []] meaning that K and V are not sharded
     # splash_kernel is sharded over (HEAD, LENGTH)
     @functools.partial(
-        shard_map,
+        jax.shard_map,
         mesh=self.mesh,
         in_specs=(
             axis_names_q,
@@ -1176,7 +1175,7 @@ class AttentionOp(nnx.Module):
             sink_axis_names,  # sharding align with query heads
         ),
         out_specs=axis_names_q,
-        check_rep=False,
+        check_vma=False,
     )
     def wrap_flash_attention(
         query,
