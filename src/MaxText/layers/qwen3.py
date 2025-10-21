@@ -551,8 +551,6 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
 
 
 class Qwen3NextFullAttention(nnx.Module):
-  """Placeholder for Qwen3-Next full attention."""
-
   def __init__(
       self, config: Config, mesh: Mesh, model_mode: str, layer_idx: int, quant: None | Quant = None, *, rngs: nnx.Rngs
   ):
@@ -562,66 +560,237 @@ class Qwen3NextFullAttention(nnx.Module):
     self.layer_idx = layer_idx
     self.quant = quant
     cfg = self.config
-
-    # TODO(rbierneni): Implement the actual Qwen3NextAttention logic.
-    # This is a placeholder. The actual Qwen3NextAttention in the PyTorch code has:
-    # 1.  q_proj projection: hidden_size -> num_attention_heads * head_dim * 2.
-    #     This output is chunked to get query_states and a 'gate'.
-    # 2.  Qwen3NextRMSNorm (self.q_norm and self.k_norm) is applied to query_states
-    #     and key_states *before* RoPE. These norms are on the head_dim.
-    # 3.  The final attention output is gated: attn_output = attn_output * torch.sigmoid(gate).
-    # 4.  k_proj and v_proj are standard Linear layers to num_key_value_heads * head_dim.
-    # 5.  RoPE is applied to the normed query and key.
-    # 6.  The o_proj maps from num_attention_heads * head_dim back to hidden_size.
-
-    # Placeholder call to standard MaxText attention
-    # NOTE: This will NOT match the Qwen3Next behavior or weights.
+    self.partial_rotary_factor = 0.25
 
     # Get mode-specific batch size and sequence length for shape
     batch_size, seq_len = max_utils.get_batch_seq_len_for_mode(cfg, model_mode)
     inputs_shape = (batch_size, seq_len, cfg.emb_dim)
 
-    self.attention_layer = attentions.Attention(
-        config=cfg,
-        num_query_heads=cfg.num_query_heads,
-        num_kv_heads=cfg.num_kv_heads,
-        head_dim=cfg.head_dim,
+    # q_proj projection
+    self.q_proj = linears.DenseGeneral(
+      in_features_shape=cfg.emb_dim,
+      out_features_shape=(cfg.num_query_heads, cfg.head_dim * 2),
+      use_bias=cfg.attention_bias,
+      dtype=cfg.dtype,
+      weight_dtype=cfg.weight_dtype,
+      kernel_axes=("embed", "heads", "kv"),
+      quant=self.quant,
+      matmul_precision=cfg.matmul_precision,
+      rngs=rngs,
+    )
+
+    # k_proj projection
+    self.k_proj = linears.DenseGeneral(
+      in_features_shape=cfg.emb_dim,
+      out_features_shape=(cfg.num_kv_heads, cfg.head_dim),
+      use_bias=cfg.attention_bias,
+      dtype=cfg.dtype,
+      weight_dtype=cfg.weight_dtype,
+      kernel_axes=("embed", "kv_heads", "kv_head_dim"),
+      quant=self.quant,
+      matmul_precision=cfg.matmul_precision,
+      rngs=rngs,
+    )
+
+    # v_proj projection
+    self.v_proj = linears.DenseGeneral(
+      in_features_shape=cfg.emb_dim,
+      out_features_shape=(cfg.num_kv_heads, cfg.head_dim),
+      use_bias=cfg.attention_bias,
+      dtype=cfg.dtype,
+      weight_dtype=cfg.weight_dtype,
+      kernel_axes=("embed", "kv_heads", "kv_head_dim"),
+      quant=self.quant,
+      matmul_precision=cfg.matmul_precision,
+      rngs=rngs,
+    )
+
+    # o_proj projection
+    self.o_proj = linears.DenseGeneral(
+      in_features_shape=cfg.emb_dim,
+      out_features_shape=cfg.emb_dim,
+      use_bias=cfg.attention_bias,
+      dtype=cfg.dtype,
+      weight_dtype=cfg.weight_dtype,
+      kernel_axes=("mlp", "embed"),
+      quant=self.quant,
+      matmul_precision=cfg.matmul_precision,
+      rngs=rngs,
+    )
+
+    # QK Normalization using Qwen3NextRMSNorm
+    self.q_norm = Qwen3NextRMSNorm(
+      num_features=cfg.head_dim,
+      eps=cfg.normalization_layer_epsilon,
+      dtype=cfg.dtype,
+      weight_dtype=cfg.weight_dtype,
+      rngs=rngs,
+    )
+
+    self.k_norm = Qwen3NextRMSNorm(
+      num_features=cfg.head_dim,
+      eps=cfg.normalization_layer_epsilon,
+      dtype=cfg.dtype,
+      weight_dtype=cfg.weight_dtype,
+      rngs=rngs,
+    )
+
+    # Rotary Embedding
+    self.rotary_dim = int(cfg.head_dim * self.partial_rotary_factor)
+    if self.rotary_dim > 0:
+      self.rotary_embedding = attentions.RotaryEmbedding(
+        min_timescale=cfg.rope_min_timescale,
+        max_timescale=cfg.rope_max_timescale,
+        embedding_dims=self.rotary_dim,
+        fprop_dtype=cfg.dtype,
+        rngs=rngs,
+      )
+    else:
+      self.rotary_embedding = None
+
+    # Attention Operator
+    self.attention_op = attentions.AttentionOp(
+      config=cfg,
+      mesh=self.mesh,
+      attention_kernel=cfg.attention,
+      max_target_length=cfg.max_target_length,
+      max_prefill_predict_length=cfg.max_prefill_predict_length,
+      float32_qk_product=cfg.float32_qk_product,
+      float32_logits=cfg.float32_logits,
+      quant=self.quant,
+      kv_quant=quantizations.configure_kv_quant(cfg),
+      num_query_heads=cfg.num_query_heads,
+      num_kv_heads=cfg.num_kv_heads,
+      dropout_rate=cfg.dropout_rate,
+      dtype=cfg.dtype,
+      rngs=rngs,
+    )
+
+    # 8. KVCache (if not training)
+    if self.model_mode != "train":
+      self.KVCache_0 = attentions.kvcache.KVCache(
+        max_prefill_length=cfg.max_prefill_predict_length,
         max_target_length=cfg.max_target_length,
-        max_prefill_predict_length=cfg.max_prefill_predict_length,
-        attention_kernel=cfg.attention,
-        inputs_q_shape=inputs_shape,
-        inputs_kv_shape=inputs_shape,
-        mesh=self.mesh,
+        batch=batch_size,
+        key_seq_len=seq_len,
+        value_seq_len=seq_len,
+        key_heads=self.num_kv_heads,
+        value_heads=self.num_kv_heads,
+        key_head_size=self.head_dim,
+        value_head_size=self.head_dim,
         dtype=cfg.dtype,
-        weight_dtype=cfg.weight_dtype,
-        dropout_rate=cfg.dropout_rate,
-        name="self_attention",
-        quant=self.quant,
         kv_quant=quantizations.configure_kv_quant(cfg),
-        use_qk_norm=False,
         model_mode=model_mode,
         rngs=rngs,
-    )
+      )
+    else:
+      self.KVCache_0 = None
 
   def __call__(
-      self,
-      inputs: jnp.ndarray,
-      decoder_segment_ids: None | jnp.ndarray,
-      decoder_positions: None | jnp.ndarray,
-      deterministic: bool,
-      model_mode: str,
-      # TODO(parambole): Add cache arguments
+        self,
+        inputs: jnp.ndarray,
+        decoder_segment_ids: None | jnp.ndarray,
+        decoder_positions: None | jnp.ndarray,
+        deterministic: bool,
+        model_mode: str,
+        previous_chunk=None, # Added for cache update
+        page_state: None | page_manager.PageState = None, # Added
+        slot: None | int = None, # Added
   ):
+    cfg = self.config
+    batch_size, seq_len, _ = inputs.shape
 
-    # TODO(parambole): Add caching in/out
-    attention_output = self.attention_layer(
-        inputs,
-        inputs,
-        decoder_positions,
-        decoder_segment_ids=decoder_segment_ids,
-        deterministic=deterministic,
-        model_mode=model_mode,
+    print(f"inputs: {inputs.shape}") # DEBUG
+
+    # Project and split Query and Gate
+    # q_proj_out shape: (B, S, E * 2)
+    q_proj_out = self.q_proj(inputs)
+    print(f"q_proj_out: {q_proj_out.shape}")
+    # query_states shape: (B, S, E), gate shape: (B, S, E)
+    query_states, gate = jnp.split(q_proj_out, 2, axis=-1)
+    print(f"query_states after split: {query_states.shape}")
+    print(f"gate after split: {gate.shape}")
+
+    # Project Key and Value
+    # key_states shape: (B, S, E)
+    key_states = self.k_proj(inputs)
+    print(f"key_states: {key_states.shape}")
+    # value_states shape: (B, S, E)
+    value_states = self.v_proj(inputs)
+    print(f"value_states: {value_states.shape}")
+
+    # RESHAPE to (B, S, H_q, D) BEFORE norm
+    query_states = query_states.reshape(batch_size, seq_len, cfg.num_query_heads, cfg.head_dim)
+    print(f"query_states after norm reshape: {query_states.shape}")
+    # (B, S, H_q, D)
+    gate = gate.reshape(batch_size, seq_len, cfg.num_query_heads, cfg.head_dim)
+    # (B, S, H_kv, D)
+    key_states = key_states.reshape(batch_size, seq_len, cfg.num_kv_heads, cfg.head_dim)
+    print(f"key_states after norm reshape: {key_states.shape}")
+    # (B, S, H_kv, D)
+    value_states = value_states.reshape(batch_size, seq_len, cfg.num_kv_heads, cfg.head_dim)
+
+    # Apply QK Normalization (per-head)
+    # shape doesnt change stays as (B, S, H_q, D)
+    query_states = self.q_norm(query_states)
+    print(f"query_states after norm: {query_states.shape}")
+    key_states = self.k_norm(key_states)
+
+    # Apply Rotary Embeddings
+    rotary_dim = int(cfg.head_dim * self.partial_rotary_factor)
+
+    if rotary_dim > 0:
+      query_rot, query_pass = jnp.split(query_states, [rotary_dim], axis=-1)
+      key_rot, key_pass = jnp.split(key_states, [rotary_dim], axis=-1)
+
+      query_rot = self.rotary_embedding(query_rot, decoder_positions)
+      key_rot = self.rotary_embedding(key_rot, decoder_positions)
+
+      # shape doesnt change stays as (B, S, H_q, D)
+      query_states = jnp.concatenate([query_rot, query_pass], axis=-1)
+      key_states = jnp.concatenate([key_rot, key_pass], axis=-1)
+
+    # KVCache Update/Lookup
+    cached_values = [None, None]
+    if self.KVCache_0 is not None and model_mode != "train":
+        prefill_kv_cache, ar_kv_cache = self.KVCache_0(
+            key=key_states,
+            value=value_states,
+            decoder_segment_ids=decoder_segment_ids,
+            model_mode=model_mode,
+            previous_chunk=previous_chunk,
+        )
+        cached_values = [prefill_kv_cache, ar_kv_cache]
+    
+    # Compute Attention
+    # Transpose to (B, H, S, D) for attention op
+    # query_states = jnp.transpose(query_states, (0, 2, 1, 3))
+    # key_states = jnp.transpose(key_states, (0, 2, 1, 3))
+    # value_states = jnp.transpose(value_states, (0, 2, 1, 3))
+
+    # (B, S, H_q, D)
+    attention_output = self.attention_op(
+        query_states,
+        key_states,
+        value_states,
+        decoder_segment_ids,
+        model_mode,
+        cached_values,
+        previous_chunk,
     )
+    print(f"attention_output from op: {attention_output.shape}")
+
+    # Apply Gating
+    # gate shape: (B, S, H_q, D)
+    attention_output = attention_output * nn.sigmoid(gate)
+    print(f"attention_output after gate: {attention_output.shape}")
+
+    # Output Projection
+    # attn_output shape after reshape: (B, S, E)
+    attention_output = attention_output.reshape(batch_size, seq_len, cfg.emb_dim)
+    attention_output = self.o_proj(attention_output)
+    print(f"final attention_output: {attention_output.shape}")
+
     return attention_output
 
 
