@@ -260,7 +260,7 @@ class Decoder(nn.Module):
       self.pipeline_module = pipeline_nnx.PipelineToLinen(
           config=self.config,
           mesh=self.mesh,
-          decoder_layer_factory=lambda: pipeline_stage_module,
+          layer_module=lambda: pipeline_stage_module,
           remat_policy=remat_policy,
       )
 
