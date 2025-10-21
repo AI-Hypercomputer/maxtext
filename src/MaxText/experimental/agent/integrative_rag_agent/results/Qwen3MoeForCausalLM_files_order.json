@@ -1,14 +1,5 @@
 [
     {
-        "comp_id": "transformers/modeling_outputs.py#MoeModelOutputWithPast",
-        "filepath": "transformers/modeling_outputs.py",
-        "comp_name": "MoeModelOutputWithPast",
-        "Dependencies": [
-            "transformers/utils.py#ModelOutput"
-        ],
-        "JaxDependencies": {}
-    },
-    {
         "comp_id": "transformers/models/mixtral/modeling_mixtral.py#load_balancing_loss_func",
         "filepath": "transformers/models/mixtral/modeling_mixtral.py",
         "comp_name": "load_balancing_loss_func",
@@ -41,6 +32,16 @@
         "JaxDependencies": {}
     },
     {
+        "comp_id": "transformers/modeling_outputs.py#MoeModelOutputWithPast",
+        "filepath": "transformers/modeling_outputs.py",
+        "comp_name": "MoeModelOutputWithPast",
+        "Dependencies": [
+            "transformers/cache_utils.py#Cache",
+            "transformers/utils.py#ModelOutput"
+        ],
+        "JaxDependencies": {}
+    },
+    {
         "comp_id": "transformers/models/mixtral/modeling_mixtral.py#MixtralRMSNorm",
         "filepath": "transformers/models/mixtral/modeling_mixtral.py",
         "comp_name": "MixtralRMSNorm",
@@ -48,16 +49,30 @@
         "JaxDependencies": {}
     },
     {
-        "comp_id": "transformers/configuration_utils.py#PreTrainedConfig",
-        "filepath": "transformers/configuration_utils.py",
-        "comp_name": "PreTrainedConfig",
+        "comp_id": "transformers/masking_utils.py#causal_mask_function",
+        "filepath": "transformers/masking_utils.py",
+        "comp_name": "causal_mask_function",
         "Dependencies": [],
         "JaxDependencies": {}
     },
     {
-        "comp_id": "transformers/masking_utils.py#causal_mask_function",
+        "comp_id": "transformers/masking_utils.py#and_masks",
         "filepath": "transformers/masking_utils.py",
-        "comp_name": "causal_mask_function",
+        "comp_name": "and_masks",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/masking_utils.py#or_masks",
+        "filepath": "transformers/masking_utils.py",
+        "comp_name": "or_masks",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/masking_utils.py#packed_sequence_mask_function",
+        "filepath": "transformers/masking_utils.py",
+        "comp_name": "packed_sequence_mask_function",
         "Dependencies": [],
         "JaxDependencies": {}
     },
@@ -72,6 +87,20 @@
         "comp_id": "transformers/modeling_rope_utils.py#standardize_rope_params",
         "filepath": "transformers/modeling_rope_utils.py",
         "comp_name": "standardize_rope_params",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/loss/loss_utils.py#LOSS_MAPPING",
+        "filepath": "transformers/loss/loss_utils.py",
+        "comp_name": "LOSS_MAPPING",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_flash_attention_utils.py#lazy_import_flash_attention",
+        "filepath": "transformers/modeling_flash_attention_utils.py",
+        "comp_name": "lazy_import_flash_attention",
         "Dependencies": [],
         "JaxDependencies": {}
     },
@@ -97,6 +126,23 @@
         "JaxDependencies": {}
     },
     {
+        "comp_id": "transformers/configuration_utils.py#SpecificPreTrainedConfigType",
+        "filepath": "transformers/configuration_utils.py",
+        "comp_name": "SpecificPreTrainedConfigType",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/configuration_utils.py#PreTrainedConfig",
+        "filepath": "transformers/configuration_utils.py",
+        "comp_name": "PreTrainedConfig",
+        "Dependencies": [
+            "transformers/configuration_utils.py#SpecificPreTrainedConfigType",
+            "transformers/utils.py#is_torch_available"
+        ],
+        "JaxDependencies": {}
+    },
+    {
         "comp_id": "transformers/masking_utils.py#find_packed_sequence_indices",
         "filepath": "transformers/masking_utils.py",
         "comp_name": "find_packed_sequence_indices",
@@ -108,6 +154,7 @@
         "filepath": "transformers/masking_utils.py",
         "comp_name": "_preprocess_mask_arguments",
         "Dependencies": [
+            "transformers/cache_utils.py#Cache",
             "transformers/configuration_utils.py#PreTrainedConfig",
             "transformers/masking_utils.py#find_packed_sequence_indices"
         ],
@@ -123,13 +170,6 @@
             "transformers/masking_utils.py#_preprocess_mask_arguments",
             "transformers/masking_utils.py#causal_mask_function"
         ],
-        "JaxDependencies": {}
-    },
-    {
-        "comp_id": "transformers/masking_utils.py#and_masks",
-        "filepath": "transformers/masking_utils.py",
-        "comp_name": "and_masks",
-        "Dependencies": [],
         "JaxDependencies": {}
     },
     {
@@ -155,38 +195,13 @@
         "filepath": "transformers/masking_utils.py",
         "comp_name": "create_sliding_window_causal_mask",
         "Dependencies": [
+            "transformers/cache_utils.py#Cache",
             "transformers/configuration_utils.py#PreTrainedConfig",
             "transformers/masking_utils.py#_preprocess_mask_arguments",
+            "transformers/masking_utils.py#and_masks",
+            "transformers/masking_utils.py#or_masks",
+            "transformers/masking_utils.py#packed_sequence_mask_function",
             "transformers/masking_utils.py#sliding_window_causal_mask_function"
-        ],
-        "JaxDependencies": {}
-    },
-    {
-        "comp_id": "transformers/modeling_rope_utils.py#ROPE_VALIDATION_FUNCTIONS",
-        "filepath": "transformers/modeling_rope_utils.py",
-        "comp_name": "ROPE_VALIDATION_FUNCTIONS",
-        "Dependencies": [],
-        "JaxDependencies": {}
-    },
-    {
-        "comp_id": "transformers/modeling_rope_utils.py#rope_config_validation",
-        "filepath": "transformers/modeling_rope_utils.py",
-        "comp_name": "rope_config_validation",
-        "Dependencies": [
-            "transformers/configuration_utils.py#PreTrainedConfig",
-            "transformers/modeling_rope_utils.py#ROPE_VALIDATION_FUNCTIONS"
-        ],
-        "JaxDependencies": {}
-    },
-    {
-        "comp_id": "transformers/models/mixtral/configuration_mixtral.py#MixtralConfig",
-        "filepath": "transformers/models/mixtral/configuration_mixtral.py",
-        "comp_name": "MixtralConfig",
-        "Dependencies": [
-            "transformers/configuration_utils.py#PreTrainedConfig",
-            "transformers/modeling_rope_utils.py#RopeParameters",
-            "transformers/modeling_rope_utils.py#rope_config_validation",
-            "transformers/modeling_rope_utils.py#standardize_rope_params"
         ],
         "JaxDependencies": {}
     },
@@ -263,17 +278,6 @@
         "JaxDependencies": {}
     },
     {
-        "comp_id": "transformers/models/mixtral/modeling_mixtral.py#MixtralRotaryEmbedding",
-        "filepath": "transformers/models/mixtral/modeling_mixtral.py",
-        "comp_name": "MixtralRotaryEmbedding",
-        "Dependencies": [
-            "transformers/modeling_rope_utils.py#ROPE_INIT_FUNCTIONS",
-            "transformers/modeling_rope_utils.py#dynamic_rope_update",
-            "transformers/models/mixtral/configuration_mixtral.py#MixtralConfig"
-        ],
-        "JaxDependencies": {}
-    },
-    {
         "comp_id": "transformers/modeling_utils.py#get_parameter_device",
         "filepath": "transformers/modeling_utils.py",
         "comp_name": "get_parameter_device",
@@ -303,10 +307,19 @@
         "comp_name": "PreTrainedModel",
         "Dependencies": [
             "transformers/configuration_utils.py#PreTrainedConfig",
+            "transformers/integrations/tensor_parallel.py#ALL_PARALLEL_STYLES",
+            "transformers/integrations/tensor_parallel.py#ALL_PARALLEL_STYLES.keys",
+            "transformers/loss/loss_utils.py#LOSS_MAPPING",
+            "transformers/modeling_flash_attention_utils.py#lazy_import_flash_attention",
             "transformers/modeling_utils.py#EmbeddingAccessMixin",
             "transformers/modeling_utils.py#ModuleUtilsMixin",
             "transformers/modeling_utils.py#_init_weights",
-            "transformers/quantizers/quantizers_utils.py#get_module_from_name"
+            "transformers/quantizers/quantizers_utils.py#get_module_from_name",
+            "transformers/utils.py#is_flash_attn_2_available",
+            "transformers/utils.py#is_flash_attn_3_available",
+            "transformers/utils.py#is_torch_flex_attn_available",
+            "transformers/utils.py#is_torch_mlu_available",
+            "transformers/utils.py#is_torch_npu_available"
         ],
         "JaxDependencies": {}
     },
@@ -339,6 +352,117 @@
         "comp_name": "eager_attention_forward",
         "Dependencies": [
             "transformers/models/mixtral/modeling_mixtral.py#repeat_kv"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_rope_utils.py#_validate_llama3_parameters",
+        "filepath": "transformers/modeling_rope_utils.py",
+        "comp_name": "_validate_llama3_parameters",
+        "Dependencies": [
+            "transformers/configuration_utils.py#PreTrainedConfig"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_rope_utils.py#_validate_yarn_parameters",
+        "filepath": "transformers/modeling_rope_utils.py",
+        "comp_name": "_validate_yarn_parameters",
+        "Dependencies": [
+            "transformers/configuration_utils.py#PreTrainedConfig"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_rope_utils.py#_check_received_keys",
+        "filepath": "transformers/modeling_rope_utils.py",
+        "comp_name": "_check_received_keys",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_rope_utils.py#_validate_default_rope_parameters",
+        "filepath": "transformers/modeling_rope_utils.py",
+        "comp_name": "_validate_default_rope_parameters",
+        "Dependencies": [
+            "transformers/modeling_rope_utils.py#_check_received_keys"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_rope_utils.py#_validate_dynamic_scaling_rope_parameters",
+        "filepath": "transformers/modeling_rope_utils.py",
+        "comp_name": "_validate_dynamic_scaling_rope_parameters",
+        "Dependencies": [
+            "transformers/configuration_utils.py#PreTrainedConfig",
+            "transformers/modeling_rope_utils.py#_check_received_keys"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_rope_utils.py#_validate_linear_scaling_rope_parameters",
+        "filepath": "transformers/modeling_rope_utils.py",
+        "comp_name": "_validate_linear_scaling_rope_parameters",
+        "Dependencies": [
+            "transformers/configuration_utils.py#PreTrainedConfig",
+            "transformers/modeling_rope_utils.py#_check_received_keys"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_rope_utils.py#_validate_longrope_parameters",
+        "filepath": "transformers/modeling_rope_utils.py",
+        "comp_name": "_validate_longrope_parameters",
+        "Dependencies": [
+            "transformers/configuration_utils.py#PreTrainedConfig",
+            "transformers/modeling_rope_utils.py#_check_received_keys"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_rope_utils.py#ROPE_VALIDATION_FUNCTIONS",
+        "filepath": "transformers/modeling_rope_utils.py",
+        "comp_name": "ROPE_VALIDATION_FUNCTIONS",
+        "Dependencies": [
+            "transformers/modeling_rope_utils.py#_validate_default_rope_parameters",
+            "transformers/modeling_rope_utils.py#_validate_dynamic_scaling_rope_parameters",
+            "transformers/modeling_rope_utils.py#_validate_linear_scaling_rope_parameters",
+            "transformers/modeling_rope_utils.py#_validate_llama3_parameters",
+            "transformers/modeling_rope_utils.py#_validate_longrope_parameters",
+            "transformers/modeling_rope_utils.py#_validate_yarn_parameters"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_rope_utils.py#rope_config_validation",
+        "filepath": "transformers/modeling_rope_utils.py",
+        "comp_name": "rope_config_validation",
+        "Dependencies": [
+            "transformers/configuration_utils.py#PreTrainedConfig",
+            "transformers/modeling_rope_utils.py#ROPE_VALIDATION_FUNCTIONS"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/models/mixtral/configuration_mixtral.py#MixtralConfig",
+        "filepath": "transformers/models/mixtral/configuration_mixtral.py",
+        "comp_name": "MixtralConfig",
+        "Dependencies": [
+            "transformers/configuration_utils.py#PreTrainedConfig",
+            "transformers/modeling_rope_utils.py#RopeParameters",
+            "transformers/modeling_rope_utils.py#rope_config_validation",
+            "transformers/modeling_rope_utils.py#standardize_rope_params"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/models/mixtral/modeling_mixtral.py#MixtralRotaryEmbedding",
+        "filepath": "transformers/models/mixtral/modeling_mixtral.py",
+        "comp_name": "MixtralRotaryEmbedding",
+        "Dependencies": [
+            "transformers/modeling_rope_utils.py#ROPE_INIT_FUNCTIONS",
+            "transformers/modeling_rope_utils.py#dynamic_rope_update",
+            "transformers/models/mixtral/configuration_mixtral.py#MixtralConfig"
         ],
         "JaxDependencies": {}
     },
@@ -539,7 +663,6 @@
         "filepath": "transformers/models/mixtral/modeling_mixtral.py",
         "comp_name": "MixtralForCausalLM",
         "Dependencies": [
-            "transformers/cache_utils.py#Cache",
             "transformers/modeling_outputs.py#MoeCausalLMOutputWithPast",
             "transformers/modeling_outputs.py#MoeModelOutputWithPast",
             "transformers/models/mixtral/modeling_mixtral.py#MixtralModel",

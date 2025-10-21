@@ -2,72 +2,92 @@
     "data": {
         "q": [],
         "processed_components": [
-            "transformers/modeling_outputs.py#MoeModelOutputWithPast",
-            "transformers/modeling_utils.py#get_parameter_dtype",
-            "transformers/utils.py#ModelOutput",
-            "transformers/cache_utils.py#Cache",
-            "transformers/modeling_rope_utils.py#_compute_longrope_parameters",
-            "transformers/masking_utils.py#create_sliding_window_causal_mask",
-            "transformers/modeling_rope_utils.py#dynamic_rope_update",
-            "transformers/modeling_utils.py#ModuleUtilsMixin",
-            "transformers/activations.py#LinearActivation",
-            "transformers/activations.py#ReLUSquaredActivation",
-            "transformers/models/mixtral/modeling_mixtral.py#load_balancing_loss_func",
-            "transformers/modeling_rope_utils.py#_compute_yarn_parameters",
-            "transformers/models/mixtral/modeling_mixtral.py#MixtralExperts",
-            "transformers/activations.py#ACT2FN",
-            "transformers/models/mixtral/modeling_mixtral.py#MixtralDecoderLayer",
-            "transformers/models/mixtral/modeling_mixtral.py#MixtralMLP",
-            "transformers/models/mixtral/modeling_mixtral.py#MixtralPreTrainedModel",
             "transformers/masking_utils.py#_preprocess_mask_arguments",
-            "transformers/masking_utils.py#and_masks",
+            "transformers/models/mixtral/modeling_mixtral.py#MixtralDecoderLayer",
+            "transformers/activations.py#GELUActivation",
+            "transformers/modeling_utils.py#get_parameter_dtype",
+            "transformers/modeling_rope_utils.py#_compute_yarn_parameters",
             "transformers/configuration_utils.py#PreTrainedConfig",
-            "transformers/activations.py#SiLUActivation",
-            "transformers/models/mixtral/modeling_mixtral.py#MixtralSparseMoeBlock",
-            "transformers/activations.py#LaplaceActivation",
-            "transformers/masking_utils.py#sliding_window_causal_mask_function",
+            "transformers/modeling_flash_attention_utils.py#lazy_import_flash_attention",
             "transformers/models/mixtral/modeling_mixtral.py#apply_rotary_pos_emb",
-            "transformers/masking_utils.py#causal_mask_function",
-            "transformers/models/mixtral/configuration_mixtral.py#MixtralConfig",
+            "transformers/models/qwen3_moe/modular_qwen3_moe.py#Qwen3MoeForCausalLM",
+            "transformers/models/mixtral/modeling_mixtral.py#MixtralSparseMoeBlock",
+            "transformers/activations.py#AccurateGELUActivation",
+            "transformers/modeling_rope_utils.py#_compute_llama3_parameters",
+            "transformers/integrations/tensor_parallel.py#ALL_PARALLEL_STYLES",
+            "transformers/modeling_utils.py#EmbeddingAccessMixin",
+            "transformers/utils.py#is_flash_attn_3_available",
             "transformers/modeling_rope_utils.py#rope_config_validation",
+            "transformers/masking_utils.py#or_masks",
+            "transformers/modeling_rope_utils.py#_validate_linear_scaling_rope_parameters",
+            "transformers/activations.py#QuickGELUActivation",
+            "transformers/activations.py#GELUTanh",
+            "transformers/modeling_rope_utils.py#_validate_default_rope_parameters",
+            "transformers/cache_utils.py#Cache",
+            "transformers/modeling_rope_utils.py#standardize_rope_params",
+            "transformers/utils.py#is_torch_mlu_available",
+            "transformers/models/mixtral/modeling_mixtral.py#MixtralModel",
+            "transformers/masking_utils.py#causal_mask_function",
+            "transformers/modeling_rope_utils.py#_validate_llama3_parameters",
+            "transformers/activations.py#LinearActivation",
+            "transformers/masking_utils.py#packed_sequence_mask_function",
+            "transformers/utils.py#ModelOutput",
+            "transformers/masking_utils.py#find_packed_sequence_indices",
+            "transformers/modeling_rope_utils.py#_compute_linear_scaling_rope_parameters",
+            "transformers/models/mixtral/modeling_mixtral.py#MixtralMLP",
+            "transformers/loss/loss_utils.py#LOSS_MAPPING",
+            "transformers/models/mixtral/modeling_mixtral.py#load_balancing_loss_func",
+            "transformers/modeling_utils.py#_init_weights",
+            "transformers/models/mixtral/configuration_mixtral.py#MixtralConfig",
+            "transformers/models/mixtral/modeling_mixtral.py#MixtralRotaryEmbedding",
+            "transformers/modeling_rope_utils.py#dynamic_rope_update",
+            "transformers/models/mixtral/modeling_mixtral.py#eager_attention_forward",
+            "transformers/masking_utils.py#and_masks",
+            "transformers/modeling_utils.py#get_parameter_device",
+            "transformers/models/mixtral/modeling_mixtral.py#MixtralAttention",
+            "transformers/configuration_utils.py#SpecificPreTrainedConfigType",
+            "transformers/activations.py#NewGELUActivation",
+            "transformers/modeling_outputs.py#MoeModelOutputWithPast",
+            "transformers/modeling_rope_utils.py#_validate_yarn_parameters",
+            "transformers/modeling_utils.py#PreTrainedModel",
+            "transformers/activations.py#FastGELUActivation",
+            "transformers/models/mixtral/modeling_mixtral.py#MixtralForCausalLM",
+            "transformers/models/mixtral/modeling_mixtral.py#MixtralExperts",
+            "transformers/modeling_outputs.py#MoeCausalLMOutputWithPast",
+            "transformers/activations.py#MishActivation",
+            "transformers/modeling_rope_utils.py#_validate_longrope_parameters",
+            "transformers/utils.py#is_torch_flex_attn_available",
+            "transformers/modeling_rope_utils.py#RopeParameters",
+            "transformers/masking_utils.py#sliding_window_causal_mask_function",
+            "transformers/modeling_utils.py#ModuleUtilsMixin",
             "transformers/models/mixtral/modeling_mixtral.py#rotate_half",
             "transformers/masking_utils.py#sliding_window_overlay",
-            "transformers/activations.py#GELUTanh",
-            "transformers/modeling_utils.py#PreTrainedModel",
-            "transformers/activations.py#XIELUActivation",
-            "transformers/models/mixtral/modeling_mixtral.py#eager_attention_forward",
-            "transformers/activations.py#ClassInstantier",
-            "transformers/models/mixtral/modeling_mixtral.py#MixtralAttention",
-            "transformers/modeling_utils.py#_init_weights",
-            "transformers/modeling_rope_utils.py#_compute_llama3_parameters",
-            "transformers/masking_utils.py#create_causal_mask",
-            "transformers/modeling_rope_utils.py#standardize_rope_params",
-            "transformers/activations.py#AccurateGELUActivation",
-            "transformers/modeling_rope_utils.py#_compute_dynamic_ntk_parameters",
             "transformers/models/mixtral/modeling_mixtral.py#MixtralRMSNorm",
-            "transformers/modeling_utils.py#EmbeddingAccessMixin",
-            "transformers/modeling_rope_utils.py#RopeParameters",
-            "transformers/activations.py#FastGELUActivation",
-            "transformers/activations.py#MishActivation",
-            "transformers/models/mixtral/modeling_mixtral.py#MixtralForCausalLM",
-            "transformers/activations.py#GELUActivation",
-            "transformers/modeling_rope_utils.py#ROPE_VALIDATION_FUNCTIONS",
-            "transformers/models/mixtral/modeling_mixtral.py#MixtralRotaryEmbedding",
-            "transformers/models/qwen3_moe/modular_qwen3_moe.py#Qwen3MoeModel",
-            "transformers/models/mixtral/modeling_mixtral.py#repeat_kv",
-            "transformers/modeling_rope_utils.py#_compute_linear_scaling_rope_parameters",
-            "transformers/activations.py#QuickGELUActivation",
-            "transformers/quantizers/quantizers_utils.py#get_module_from_name",
-            "transformers/masking_utils.py#find_packed_sequence_indices",
-            "transformers/modeling_outputs.py#MoeCausalLMOutputWithPast",
-            "transformers/activations.py#NewGELUActivation",
-            "transformers/models/mixtral/modeling_mixtral.py#MixtralModel",
-            "transformers/models/qwen3_moe/modular_qwen3_moe.py#Qwen3MoeForCausalLM",
             "transformers/modeling_rope_utils.py#ROPE_INIT_FUNCTIONS",
-            "transformers/cache_utils.py#CacheLayerMixin",
-            "transformers/modeling_utils.py#get_parameter_device"
+            "transformers/activations.py#XIELUActivation",
+            "transformers/modeling_rope_utils.py#_compute_longrope_parameters",
+            "transformers/integrations/tensor_parallel.py#ALL_PARALLEL_STYLES.keys",
+            "transformers/modeling_rope_utils.py#_compute_dynamic_ntk_parameters",
+            "transformers/models/mixtral/modeling_mixtral.py#repeat_kv",
+            "transformers/activations.py#ReLUSquaredActivation",
+            "transformers/quantizers/quantizers_utils.py#get_module_from_name",
+            "transformers/masking_utils.py#create_sliding_window_causal_mask",
+            "transformers/models/mixtral/modeling_mixtral.py#MixtralPreTrainedModel",
+            "transformers/modeling_rope_utils.py#ROPE_VALIDATION_FUNCTIONS",
+            "transformers/utils.py#is_torch_npu_available",
+            "transformers/activations.py#LaplaceActivation",
+            "transformers/utils.py#is_flash_attn_2_available",
+            "transformers/utils.py#is_torch_available",
+            "transformers/activations.py#ClassInstantier",
+            "transformers/models/qwen3_moe/modular_qwen3_moe.py#Qwen3MoeModel",
+            "transformers/modeling_rope_utils.py#_validate_dynamic_scaling_rope_parameters",
+            "transformers/activations.py#SiLUActivation",
+            "transformers/modeling_rope_utils.py#_check_received_keys",
+            "transformers/masking_utils.py#create_causal_mask",
+            "transformers/activations.py#ACT2FN",
+            "transformers/cache_utils.py#CacheLayerMixin"
         ],
-        "processed_count": 138,
+        "processed_count": 166,
         "file_analysis_cache": {
             "transformers/models/qwen3_moe/modular_qwen3_moe.py#Qwen3MoeForCausalLM": {
                 "sorted_modules": {
@@ -469,6 +489,27 @@
                 "component_dependencies": {},
                 "warning": null
             },
+            "transformers/masking_utils.py#and_masks": {
+                "sorted_modules": {
+                    "and_masks": "\n\ndef and_masks(*mask_functions: Callable) -> Callable:\n    \"\"\"Returns a mask function that is the intersection of provided mask functions\"\"\"\n    if not all(callable(arg) for arg in mask_functions):\n        raise RuntimeError(f\"All inputs should be callable mask_functions: {mask_functions}\")\n\n    def and_mask(batch_idx, head_idx, q_idx, kv_idx):\n        result = q_idx.new_ones((), dtype=torch.bool)\n        for mask in mask_functions:\n            result = result & mask(batch_idx, head_idx, q_idx, kv_idx).to(result.device)\n        return result\n\n    return and_mask"
+                },
+                "component_dependencies": {},
+                "warning": null
+            },
+            "transformers/masking_utils.py#or_masks": {
+                "sorted_modules": {
+                    "or_masks": "\n\ndef or_masks(*mask_functions: Callable) -> Callable:\n    \"\"\"Returns a mask function that is the union of provided mask functions\"\"\"\n    if not all(callable(arg) for arg in mask_functions):\n        raise RuntimeError(f\"All inputs should be callable mask_functions: {mask_functions}\")\n\n    def or_mask(batch_idx, head_idx, q_idx, kv_idx):\n        result = q_idx.new_zeros((), dtype=torch.bool)\n        for mask in mask_functions:\n            result = result | mask(batch_idx, head_idx, q_idx, kv_idx).to(result.device)\n        return result\n\n    return or_mask"
+                },
+                "component_dependencies": {},
+                "warning": null
+            },
+            "transformers/masking_utils.py#packed_sequence_mask_function": {
+                "sorted_modules": {
+                    "packed_sequence_mask_function": "\n\ndef packed_sequence_mask_function(packed_sequence_mask: torch.Tensor) -> Callable:\n    \"\"\"\n    This return the mask_function function corresponding to a 2D packed sequence mask.\n    \"\"\"\n\n    def inner_mask(batch_idx: int, head_idx: int, q_idx: int, kv_idx: int) -> bool:\n        return packed_sequence_mask[batch_idx, q_idx] == packed_sequence_mask[batch_idx, kv_idx]\n\n    return inner_mask"
+                },
+                "component_dependencies": {},
+                "warning": null
+            },
             "transformers/masking_utils.py#sliding_window_causal_mask_function": {
                 "sorted_modules": {
                     "sliding_window_causal_mask_function": "\n\ndef sliding_window_causal_mask_function(sliding_window: int) -> Callable:\n    \"\"\"\n    This return the mask_function function to create a sliding window mask.\n    \"\"\"\n    return and_masks(sliding_window_overlay(sliding_window), causal_mask_function)"
@@ -546,6 +587,45 @@
                 },
                 "warning": null
             },
+            "transformers/loss/loss_utils.py#LOSS_MAPPING": {
+                "sorted_modules": {
+                    "LOSS_MAPPING": "\n\nLOSS_MAPPING = {\n    \"ForCausalLM\": ForCausalLMLoss,\n    \"ForMaskedLM\": ForMaskedLMLoss,\n    \"ForQuestionAnswering\": ForQuestionAnsweringLoss,\n    \"ForSequenceClassification\": ForSequenceClassificationLoss,\n    \"ForImageClassification\": ForSequenceClassificationLoss,\n    \"ForVideoClassification\": ForSequenceClassificationLoss,\n    \"ForAudioClassification\": ForSequenceClassificationLoss,\n    \"ForTokenClassification\": ForTokenClassification,\n    \"ForSegmentation\": ForSegmentationLoss,\n    \"ForObjectDetection\": ForObjectDetectionLoss,\n    \"ForConditionalGeneration\": ForCausalLMLoss,\n    \"DeformableDetrForObjectDetection\": DeformableDetrForObjectDetectionLoss,\n    \"ConditionalDetrForObjectDetection\": DeformableDetrForObjectDetectionLoss,\n    \"DabDetrForObjectDetection\": DeformableDetrForObjectDetectionLoss,\n    \"GroundingDinoForObjectDetection\": GroundingDinoForObjectDetectionLoss,\n    \"MMGroundingDinoForObjectDetection\": GroundingDinoForObjectDetectionLoss,\n    \"ConditionalDetrForSegmentation\": DeformableDetrForSegmentationLoss,\n    \"RTDetrForObjectDetection\": RTDetrForObjectDetectionLoss,\n    \"RTDetrV2ForObjectDetection\": RTDetrForObjectDetectionLoss,\n    \"DFineForObjectDetection\": DFineForObjectDetectionLoss,\n    \"CsmForConditionalGeneration\": ForCausalLMLoss,\n}"
+                },
+                "component_dependencies": {
+                    "LOSS_MAPPING": [
+                        "transformers/loss/loss_d_fine.py#DFineForObjectDetectionLoss",
+                        "transformers/loss/loss_deformable_detr.py#DeformableDetrForObjectDetectionLoss",
+                        "transformers/loss/loss_deformable_detr.py#DeformableDetrForSegmentationLoss",
+                        "transformers/loss/loss_for_object_detection.py#ForObjectDetectionLoss",
+                        "transformers/loss/loss_for_object_detection.py#ForSegmentationLoss",
+                        "transformers/loss/loss_grounding_dino.py#GroundingDinoForObjectDetectionLoss",
+                        "transformers/loss/loss_rt_detr.py#RTDetrForObjectDetectionLoss",
+                        "transformers/loss/loss_utils.py#ForCausalLMLoss",
+                        "transformers/loss/loss_utils.py#ForMaskedLMLoss",
+                        "transformers/loss/loss_utils.py#ForQuestionAnsweringLoss",
+                        "transformers/loss/loss_utils.py#ForSequenceClassificationLoss",
+                        "transformers/loss/loss_utils.py#ForTokenClassification"
+                    ]
+                },
+                "warning": null
+            },
+            "transformers/modeling_flash_attention_utils.py#lazy_import_flash_attention": {
+                "sorted_modules": {
+                    "lazy_import_flash_attention": "\n\ndef lazy_import_flash_attention(implementation: Optional[str], force_import: Optional[bool] = False):\n    \"\"\"\n    Lazily import flash attention and return the respective functions + flags.\n\n    NOTE: For fullgraph, this needs to be called before compile, while no fullgraph can\n    work without preloading. See `load_and_register_attn_kernel` in `integrations.hub_kernels`.\n    \"\"\"\n    global _flash_fn, _flash_varlen_fn, _pad_fn, _unpad_fn\n    if force_import or any(k is None for k in [_flash_fn, _flash_varlen_fn, _pad_fn, _unpad_fn]):\n        _flash_fn, _flash_varlen_fn, _pad_fn, _unpad_fn = _lazy_imports(implementation)\n\n    global _process_flash_kwargs_fn\n    if force_import or _process_flash_kwargs_fn is None:\n        _process_flash_kwargs_fn = _lazy_define_process_function(_flash_varlen_fn)\n\n    return (_flash_fn, _flash_varlen_fn, _pad_fn, _unpad_fn), _process_flash_kwargs_fn"
+                },
+                "component_dependencies": {
+                    "lazy_import_flash_attention": [
+                        "transformers/modeling_flash_attention_utils.py#_flash_fn",
+                        "transformers/modeling_flash_attention_utils.py#_flash_varlen_fn",
+                        "transformers/modeling_flash_attention_utils.py#_lazy_define_process_function",
+                        "transformers/modeling_flash_attention_utils.py#_lazy_imports",
+                        "transformers/modeling_flash_attention_utils.py#_pad_fn",
+                        "transformers/modeling_flash_attention_utils.py#_process_flash_kwargs_fn",
+                        "transformers/modeling_flash_attention_utils.py#_unpad_fn"
+                    ]
+                },
+                "warning": null
+            },
             "transformers/modeling_utils.py#EmbeddingAccessMixin": {
                 "sorted_modules": {
                     "EmbeddingAccessMixin": "\n\nclass EmbeddingAccessMixin:\n    \"\"\"\n    Base utilities to regroup getters and setters for embeddings.\n    Introduces the `input_layer_embed` attribute, which indicates\n    where the input embeddings come from and where they\n    should be set.\n    \"\"\"\n\n    _input_embed_layer = \"embed_tokens\"  # default layer that holds input embeddings.\n\n    def get_input_embeddings(self) -> nn.Module:\n        \"\"\"\n        Returns the model's input embeddings.\n\n        Returns:\n            `nn.Module`: A torch module mapping vocabulary to hidden states.\n        \"\"\"\n\n        # 1) Check if the model has an attribute named 'embed_tokens' (the standard input embedding layer\n        #  for most NLP models), and if so, return it.\n\n        name = getattr(self, \"_input_embed_layer\", \"embed_tokens\")\n\n        if (default_embedding := getattr(self, name, None)) is not None:\n            return default_embedding\n        # 2) encoder/decoder and VLMs like `Gemma3nForConditionalGeneration`\n\n        if hasattr(self, \"model\") and hasattr(self.model, \"embed_tokens\"):\n            return self.model.embed_tokens\n\n        # 3) vanilla decoder\u2011only architectures\n        elif hasattr(self, \"embed_tokens\"):\n            return self.embed_tokens\n        else:\n            base_model = getattr(self, \"base_model_prefix\", None)\n            if base_model is not None:\n                base_model = getattr(self, base_model, None)\n                if base_model is not None and base_model is not self:\n                    return base_model.get_input_embeddings()\n            raise NotImplementedError(\n                f\"`get_input_embeddings` not auto\u2011handled for {self.__class__.__name__}; \"\n                \"please override in the subclass.\"\n            )\n\n    def set_input_embeddings(self, value: nn.Module):\n        \"\"\"Fallback setter that handles **~70%** of models in the code-base.\n\n        Order of attempts:\n        1. `self.model.embed_tokens`\n        2. `self.embed_tokens`\n        3. delegate to the *base model* if one exists\n        4. otherwise raise `NotImplementedError` so subclasses still can (and\n            should) override for exotic layouts.\n        \"\"\"\n\n        # 1) encoder/decoder and VLMs like `Gemma3nForConditionalGeneration`\n        name = getattr(self, \"_input_embed_layer\", \"embed_tokens\")\n        if hasattr(self, \"model\") and hasattr(self.model, name):\n            setattr(self.model, name, value)\n        # 2) as well as vanilla decoder\u2011only architectures\n        elif hasattr(self, name):\n            setattr(self, name, value)\n        # 3) recurse once into the registered *base* model (e.g. for encoder/decoder)\n        elif getattr(self, self.base_model_prefix, self) is not self:\n            base_model = getattr(self, self.base_model_prefix, self)\n            base_model.set_input_embeddings(value)\n        else:\n            raise NotImplementedError(\n                f\"`set_input_embeddings` not auto\u2011handled for {self.__class__.__name__}; please override in the subclass.\"\n            )\n\n    def get_output_embeddings(self):\n        if not hasattr(self, \"lm_head\"):\n            return None\n        try:\n            # Speech / vision backbones raise here, so we return None.\n            # Legit use of get_input_embs?\n            self.get_input_embeddings()\n        except NotImplementedError:\n            return None\n        return self.lm_head\n\n    def set_output_embeddings(self, new_embeddings):\n        \"\"\"\n        Sets the model's output embedding, defaulting to setting new_embeddings to lm_head.\n        \"\"\"\n        if getattr(self, \"lm_head\"):\n            self.lm_head = new_embeddings"
@@ -605,16 +685,16 @@
                 },
                 "warning": null
             },
+            "transformers/configuration_utils.py#SpecificPreTrainedConfigType": {
+                "sorted_modules": {
+                    "SpecificPreTrainedConfigType": "\n\n# type hinting: specifying the type of config class that inherits from PreTrainedConfig\nSpecificPreTrainedConfigType = TypeVar(\"SpecificPreTrainedConfigType\", bound=\"PreTrainedConfig\")"
+                },
+                "component_dependencies": {},
+                "warning": "Warning: Circular dependencies were detected and grouped into single components ending in '_cycle'."
+            },
             "transformers/masking_utils.py#find_packed_sequence_indices": {
                 "sorted_modules": {
                     "find_packed_sequence_indices": "\n\ndef find_packed_sequence_indices(position_ids: torch.Tensor) -> torch.Tensor:\n    \"\"\"\n    Find the indices of the sequence to which each new query token in the sequence belongs when using packed\n    tensor format (i.e. several sequences packed in the same batch dimension).\n\n    Args:\n        position_ids (`torch.Tensor`)\n            A 2D tensor of shape (batch_size, query_length) indicating the positions of each token in the sequences.\n\n    Returns:\n        A 2D tensor where each similar integer indicates that the tokens belong to the same sequence. For example, if we\n        pack 3 sequences of 2, 3 and 1 tokens respectively along a single batch dim, this will return [[0, 0, 1, 1, 1, 2]].\n    \"\"\"\n    # What separate different sequences is when 2 consecutive positions_ids are separated by more than 1. So\n    # taking the diff (by prepending the first value - 1 to keep correct indexing) and applying cumsum to the result\n    # gives exactly the sequence indices\n    # Note that we assume that a single sequence cannot span several batch dimensions, i.e. 1 single sequence\n    # cannot be part of the end of the first batch dim and the start of the 2nd one for example\n    first_dummy_value = position_ids[:, :1] - 1  # We just need the diff on this first value to be 1\n    position_diff = torch.diff(position_ids, prepend=first_dummy_value, dim=-1)\n    packed_sequence_mask = (position_diff != 1).cumsum(-1)\n\n    # Here it would be nice to return None if we did not detect packed sequence format, i.e. if `packed_sequence_mask[:, -1] == 0`\n    # but it causes issues with export\n    return packed_sequence_mask"
-                },
-                "component_dependencies": {},
-                "warning": null
-            },
-            "transformers/masking_utils.py#and_masks": {
-                "sorted_modules": {
-                    "and_masks": "\n\ndef and_masks(*mask_functions: Callable) -> Callable:\n    \"\"\"Returns a mask function that is the intersection of provided mask functions\"\"\"\n    if not all(callable(arg) for arg in mask_functions):\n        raise RuntimeError(f\"All inputs should be callable mask_functions: {mask_functions}\")\n\n    def and_mask(batch_idx, head_idx, q_idx, kv_idx):\n        result = q_idx.new_ones((), dtype=torch.bool)\n        for mask in mask_functions:\n            result = result & mask(batch_idx, head_idx, q_idx, kv_idx).to(result.device)\n        return result\n\n    return and_mask"
                 },
                 "component_dependencies": {},
                 "warning": null
@@ -749,6 +829,83 @@
                 "component_dependencies": {},
                 "warning": null
             },
+            "transformers/modeling_rope_utils.py#_validate_default_rope_parameters": {
+                "sorted_modules": {
+                    "_validate_default_rope_parameters": "\n\ndef _validate_default_rope_parameters(\n    rope_parameters: dict, config: Optional[PreTrainedConfig] = None, ignore_keys: Optional[set] = None\n):\n    required_keys = {\"rope_type\", \"rope_theta\"}\n    received_keys = set(rope_parameters.keys())\n    rope_type = rope_parameters[\"rope_type\"]\n    _check_received_keys(rope_type, received_keys, required_keys, ignore_keys=ignore_keys)"
+                },
+                "component_dependencies": {
+                    "_validate_default_rope_parameters": [
+                        "transformers/configuration_utils.py#PreTrainedConfig",
+                        "transformers/modeling_rope_utils.py#_check_received_keys"
+                    ]
+                },
+                "warning": null
+            },
+            "transformers/modeling_rope_utils.py#_validate_dynamic_scaling_rope_parameters": {
+                "sorted_modules": {
+                    "_validate_dynamic_scaling_rope_parameters": "\n\ndef _validate_dynamic_scaling_rope_parameters(\n    rope_parameters: dict, config: Optional[PreTrainedConfig] = None, ignore_keys: Optional[set] = None\n):\n    # TODO (joao): update logic for the inclusion of `original_max_position_embeddings`\n    optional_keys = {\"original_max_position_embeddings\"}\n    required_keys = {\"rope_type\", \"factor\"}\n    received_keys = set(rope_parameters.keys())\n    rope_type = rope_parameters[\"rope_type\"]\n    _check_received_keys(rope_type, received_keys, required_keys, optional_keys, ignore_keys=ignore_keys)\n\n    factor = rope_parameters[\"factor\"]\n    if factor is None or not isinstance(factor, float) or factor < 1.0:\n        logger.warning(f\"`rope_parameters`'s factor field must be a float >= 1, got {factor}\")"
+                },
+                "component_dependencies": {
+                    "_validate_dynamic_scaling_rope_parameters": [
+                        "transformers/configuration_utils.py#PreTrainedConfig",
+                        "transformers/modeling_rope_utils.py#_check_received_keys",
+                        "transformers/modeling_rope_utils.py#logger"
+                    ]
+                },
+                "warning": null
+            },
+            "transformers/modeling_rope_utils.py#_validate_linear_scaling_rope_parameters": {
+                "sorted_modules": {
+                    "_validate_linear_scaling_rope_parameters": "\n\ndef _validate_linear_scaling_rope_parameters(\n    rope_parameters: dict, config: Optional[PreTrainedConfig] = None, ignore_keys: Optional[set] = None\n):\n    required_keys = {\"rope_type\", \"factor\", \"rope_theta\"}\n    received_keys = set(rope_parameters.keys())\n    rope_type = rope_parameters[\"rope_type\"]\n    _check_received_keys(rope_type, received_keys, required_keys, ignore_keys=ignore_keys)\n\n    factor = rope_parameters[\"factor\"]\n    if factor is None or not isinstance(factor, float) or factor < 1.0:\n        logger.warning(f\"`rope_parameters`'s factor field must be a float >= 1, got {factor}\")"
+                },
+                "component_dependencies": {
+                    "_validate_linear_scaling_rope_parameters": [
+                        "transformers/configuration_utils.py#PreTrainedConfig",
+                        "transformers/modeling_rope_utils.py#_check_received_keys",
+                        "transformers/modeling_rope_utils.py#logger"
+                    ]
+                },
+                "warning": null
+            },
+            "transformers/modeling_rope_utils.py#_validate_llama3_parameters": {
+                "sorted_modules": {
+                    "_validate_llama3_parameters": "\n\ndef _validate_llama3_parameters(rope_parameters: dict, config: PreTrainedConfig, ignore_keys: Optional[set] = None):\n    required_keys = {\n        \"rope_type\",\n        \"factor\",\n        \"original_max_position_embeddings\",\n        \"low_freq_factor\",\n        \"high_freq_factor\",\n        \"rope_theta\",\n    }\n    rope_type = rope_parameters[\"rope_type\"]\n    received_keys = set(rope_parameters.keys())\n    _check_received_keys(rope_type, received_keys, required_keys, ignore_keys=ignore_keys)\n\n    factor = rope_parameters[\"factor\"]\n    if factor is None or not isinstance(factor, float) or factor < 1.0:\n        logger.warning(f\"`rope_parameters`'s factor field must be a float >= 1, got {factor}\")\n\n    low_freq_factor = rope_parameters[\"low_freq_factor\"]\n    high_freq_factor = rope_parameters[\"high_freq_factor\"]\n    if low_freq_factor is None or not isinstance(low_freq_factor, float):\n        logger.warning(f\"`rope_parameters`'s low_freq_factor field must be a float, got {low_freq_factor}\")\n    if high_freq_factor is None or not isinstance(high_freq_factor, float):\n        logger.warning(f\"`rope_parameters`'s high_freq_factor field must be a float, got {high_freq_factor}\")\n    if high_freq_factor <= low_freq_factor:\n        logger.warning(\n            \"`rope_parameters`'s high_freq_factor field must be greater than low_freq_factor, got high_freq_factor=\"\n            f\"{high_freq_factor} and low_freq_factor={low_freq_factor}\"\n        )\n\n    original_max_position_embeddings = rope_parameters[\"original_max_position_embeddings\"]\n    if original_max_position_embeddings is None or not isinstance(original_max_position_embeddings, int):\n        logger.warning(\n            \"`rope_parameters`'s original_max_position_embeddings field must be an integer, got \"\n            f\"{original_max_position_embeddings}\"\n        )\n    if original_max_position_embeddings >= config.max_position_embeddings:\n        logger.warning(\n            \"`rope_parameters`'s original_max_position_embeddings field must be less than max_position_embeddings, got \"\n            f\"{original_max_position_embeddings} and max_position_embeddings={config.max_position_embeddings}\"\n        )"
+                },
+                "component_dependencies": {
+                    "_validate_llama3_parameters": [
+                        "transformers/configuration_utils.py#PreTrainedConfig",
+                        "transformers/modeling_rope_utils.py#_check_received_keys",
+                        "transformers/modeling_rope_utils.py#logger"
+                    ]
+                },
+                "warning": null
+            },
+            "transformers/modeling_rope_utils.py#_validate_longrope_parameters": {
+                "sorted_modules": {
+                    "_validate_longrope_parameters": "\n\ndef _validate_longrope_parameters(rope_parameters: dict, config: PreTrainedConfig, ignore_keys: Optional[set] = None):\n    required_keys = {\"rope_type\", \"short_factor\", \"long_factor\", \"rope_theta\"}\n    # TODO (joao): update logic for the inclusion of `original_max_position_embeddings`\n    optional_keys = {\"attention_factor\", \"factor\", \"original_max_position_embeddings\"}\n    received_keys = set(rope_parameters.keys())\n    rope_type = rope_parameters[\"rope_type\"]\n    _check_received_keys(rope_type, received_keys, required_keys, optional_keys, ignore_keys=ignore_keys)\n\n    partial_rotary_factor = getattr(config, \"partial_rotary_factor\", 1.0)\n    head_dim = getattr(config, \"head_dim\", config.hidden_size // config.num_attention_heads)\n    dim = int(head_dim * partial_rotary_factor)\n\n    short_factor = rope_parameters.get(\"short_factor\")\n    if not isinstance(short_factor, list) and all(isinstance(x, (int, float)) for x in short_factor):\n        logger.warning(f\"`rope_parameters`'s short_factor field must be a list of numbers, got {short_factor}\")\n    if len(short_factor) != dim // 2:\n        logger.warning(f\"`rope_parameters`'s short_factor field must have length {dim // 2}, got {len(short_factor)}\")\n\n    long_factor = rope_parameters.get(\"long_factor\")\n    if not isinstance(long_factor, list) and all(isinstance(x, (int, float)) for x in long_factor):\n        logger.warning(f\"`rope_parameters`'s long_factor field must be a list of numbers, got {long_factor}\")\n    if len(long_factor) != dim // 2:\n        logger.warning(f\"`rope_parameters`'s long_factor field must have length {dim // 2}, got {len(long_factor)}\")\n\n    # Handle Phi3 divergence: prefer the use of `attention_factor` and/or `factor` over\n    # `original_max_position_embeddings` to compute internal variables. The latter lives outside `rope_parameters` and is\n    # unique to longrope (= undesirable)\n    if hasattr(config, \"original_max_position_embeddings\"):\n        logger.warning_once(\n            \"This model has set a `original_max_position_embeddings` field, to be used together with \"\n            \"`max_position_embeddings` to determine a scaling factor. Please set the `factor` field of `rope_parameters`\"\n            \"with this ratio instead -- we recommend the use of this field over `original_max_position_embeddings`, \"\n            \"as it is compatible with most model architectures.\"\n        )\n    else:\n        factor = rope_parameters.get(\"factor\")\n        if factor is None:\n            logger.warning(\"Missing required keys in `rope_parameters`: 'factor'\")\n        elif not isinstance(factor, float) or factor < 1.0:\n            logger.warning(f\"`rope_parameters`'s factor field must be a float >= 1, got {factor}\")\n\n        attention_factor = rope_parameters.get(\"attention_factor\")\n        if attention_factor is not None:\n            if not isinstance(attention_factor, float) or attention_factor < 0.0:\n                logger.warning(\n                    f\"`rope_parameters`'s attention_factor field must be a float greater than 0, got {attention_factor}\"\n                )"
+                },
+                "component_dependencies": {
+                    "_validate_longrope_parameters": [
+                        "transformers/configuration_utils.py#PreTrainedConfig",
+                        "transformers/modeling_rope_utils.py#_check_received_keys",
+                        "transformers/modeling_rope_utils.py#logger"
+                    ]
+                },
+                "warning": null
+            },
+            "transformers/modeling_rope_utils.py#_validate_yarn_parameters": {
+                "sorted_modules": {
+                    "_validate_yarn_parameters": "\n\ndef _validate_yarn_parameters(\n    rope_parameters: dict, config: Optional[PreTrainedConfig] = None, ignore_keys: Optional[set] = None\n):\n    required_keys = {\"rope_type\", \"factor\", \"rope_theta\"}\n    optional_keys = {\n        \"attention_factor\",\n        \"beta_fast\",\n        \"beta_slow\",\n        \"original_max_position_embeddings\",\n        \"mscale\",\n        \"mscale_all_dim\",\n    }\n    received_keys = set(rope_parameters.keys())\n    rope_type = rope_parameters[\"rope_type\"]\n    _check_received_keys(rope_type, received_keys, required_keys, optional_keys, ignore_keys=ignore_keys)\n\n    factor = rope_parameters[\"factor\"]\n    if factor is None or not isinstance(factor, float) or factor < 1.0:\n        logger.warning(f\"`rope_parameters`'s factor field must be a float >= 1, got {factor}\")\n\n    attention_factor = rope_parameters.get(\"attention_factor\")\n    if attention_factor is not None and (not isinstance(attention_factor, float) or attention_factor < 0):\n        logger.warning(\n            f\"`rope_parameters`'s attention_factor field must be a float greater than 0, got {attention_factor}\"\n        )\n    beta_fast = rope_parameters.get(\"beta_fast\")\n    if beta_fast is not None and not isinstance(beta_fast, float):\n        logger.warning(f\"`rope_parameters`'s beta_fast field must be a float, got {beta_fast}\")\n    beta_slow = rope_parameters.get(\"beta_slow\")\n    if beta_slow is not None and not isinstance(beta_slow, float):\n        logger.warning(f\"`rope_parameters`'s beta_slow field must be a float, got {beta_slow}\")\n\n    if (beta_fast or 32) < (beta_slow or 1):\n        logger.warning(\n            f\"`rope_parameters`'s beta_fast field must be greater than beta_slow, got beta_fast={beta_fast} \"\n            f\"(defaults to 32 if None) and beta_slow={beta_slow} (defaults to 1 if None)\"\n        )\n\n    # Models should set `config.rope_parameters[\"original_max_position_embeddings\"]` to their original (pre-yarn) context\n    # length, with `config.max_position_embeddings` corresponding to their post-yarn context length.\n    # However, for BC purposes, we allow the former to be unset.\n    original_max_position_embeddings = config.rope_parameters.get(\"original_max_position_embeddings\")\n    if original_max_position_embeddings is not None:\n        # Double-check: `factor` should be the ratio between the pre-yarn and post-yarn context lengths.\n        implicit_factor = config.max_position_embeddings / original_max_position_embeddings\n        if implicit_factor != factor:\n            logger.warning_once(\n                f\"The explicitly set RoPE scaling factor (config.rope_parameters['factor'] = {factor}) does not match \"\n                \"the ratio implicitly set by other parameters (implicit factor = \"\n                \"post-yarn context length / pre-yarn context length = \"\n                \"config.max_position_embeddings / config.rope_parameters['original_max_position_embeddings'] = \"\n                f\"{implicit_factor}). Using the explicit factor ({factor}) in YaRN. This may cause unexpected \"\n                \"behaviour in model usage, please correct the 'max_position_embeddings' fields in the model config.\"\n            )\n    # No `config.rope_parameters[\"original_max_position_embeddings\"]`. Is `config.max_position_embeddings` the\n    # pre-yarn or the post-yarn context length?\n    # BC: we assume it is the pre-yarn context length.\n    else:\n        logger.warning_once(\n            \"config.rope_parameters['original_max_position_embeddings'], the pre-yarn context length, is unset. We will \"\n            \"**assume** config.max_position_embeddings holds the pre-yarn context length. Some use cases may expect \"\n            \"config.max_position_embeddings to hold the post-yarn context length (pre-yarn context length * \"\n            \"factor) -- we recommend updating both fields for optimal downstream model usage.\"\n        )"
+                },
+                "component_dependencies": {
+                    "_validate_yarn_parameters": [
+                        "transformers/configuration_utils.py#PreTrainedConfig",
+                        "transformers/modeling_rope_utils.py#_check_received_keys",
+                        "transformers/modeling_rope_utils.py#logger"
+                    ]
+                },
+                "warning": null
+            },
             "transformers/models/mixtral/modeling_mixtral.py#MixtralMLP": {
                 "sorted_modules": {
                     "MixtralMLP": "\n\nclass MixtralMLP(nn.Module):\n    def __init__(self, config: MixtralConfig):\n        super().__init__()\n        self.ffn_dim = config.intermediate_size\n        self.hidden_dim = config.hidden_size\n\n        self.w1 = nn.Linear(self.hidden_dim, self.ffn_dim, bias=False)\n        self.w2 = nn.Linear(self.ffn_dim, self.hidden_dim, bias=False)\n        self.w3 = nn.Linear(self.hidden_dim, self.ffn_dim, bias=False)\n\n        self.act_fn = ACT2FN[config.hidden_act]\n\n    def forward(self, hidden_states):\n        current_hidden_states = self.act_fn(self.w1(hidden_states)) * self.w3(hidden_states)\n        current_hidden_states = self.w2(current_hidden_states)\n        return current_hidden_states"
@@ -757,6 +914,17 @@
                     "MixtralMLP": [
                         "transformers/activations.py#ACT2FN",
                         "transformers/models/mixtral/configuration_mixtral.py#MixtralConfig"
+                    ]
+                },
+                "warning": null
+            },
+            "transformers/modeling_rope_utils.py#_check_received_keys": {
+                "sorted_modules": {
+                    "_check_received_keys": "\n\ndef _check_received_keys(\n    rope_type: str,\n    received_keys: set,\n    required_keys: set,\n    optional_keys: Optional[set] = None,\n    ignore_keys: Optional[set] = None,\n):\n    \"\"\"Compare the received keys in `config.rope_parameters` against the expected and optional keys\"\"\"\n    # BC: \"rope_type\" was originally \"type\" -- let's check for \"rope_type\" when \"type\" is present\n    if \"type\" in received_keys:\n        received_keys -= {\"type\"}\n        required_keys.add(\"rope_type\")\n\n    # Some models need to store model-specific keys, and we don't want to throw warning at them\n    if ignore_keys is not None:\n        received_keys -= ignore_keys\n\n    missing_keys = required_keys - received_keys\n    if missing_keys:\n        raise KeyError(f\"Missing required keys in `rope_parameters` for 'rope_type'='{rope_type}': {missing_keys}\")\n\n    if optional_keys is not None:\n        unused_keys = received_keys - required_keys - optional_keys\n    else:\n        unused_keys = received_keys - required_keys\n    if unused_keys:\n        logger.warning(f\"Unrecognized keys in `rope_parameters` for 'rope_type'='{rope_type}': {unused_keys}\")"
+                },
+                "component_dependencies": {
+                    "_check_received_keys": [
+                        "transformers/modeling_rope_utils.py#logger"
                     ]
                 },
                 "warning": null
@@ -907,15 +1075,6 @@
         },
         "files_to_convert": [
             {
-                "comp_id": "transformers/modeling_outputs.py#MoeModelOutputWithPast",
-                "filepath": "transformers/modeling_outputs.py",
-                "comp_name": "MoeModelOutputWithPast",
-                "Dependencies": [
-                    "transformers/utils.py#ModelOutput"
-                ],
-                "JaxDependencies": {}
-            },
-            {
                 "comp_id": "transformers/models/mixtral/modeling_mixtral.py#load_balancing_loss_func",
                 "filepath": "transformers/models/mixtral/modeling_mixtral.py",
                 "comp_name": "load_balancing_loss_func",
@@ -948,6 +1107,16 @@
                 "JaxDependencies": {}
             },
             {
+                "comp_id": "transformers/modeling_outputs.py#MoeModelOutputWithPast",
+                "filepath": "transformers/modeling_outputs.py",
+                "comp_name": "MoeModelOutputWithPast",
+                "Dependencies": [
+                    "transformers/cache_utils.py#Cache",
+                    "transformers/utils.py#ModelOutput"
+                ],
+                "JaxDependencies": {}
+            },
+            {
                 "comp_id": "transformers/models/mixtral/modeling_mixtral.py#MixtralRMSNorm",
                 "filepath": "transformers/models/mixtral/modeling_mixtral.py",
                 "comp_name": "MixtralRMSNorm",
@@ -955,16 +1124,30 @@
                 "JaxDependencies": {}
             },
             {
-                "comp_id": "transformers/configuration_utils.py#PreTrainedConfig",
-                "filepath": "transformers/configuration_utils.py",
-                "comp_name": "PreTrainedConfig",
+                "comp_id": "transformers/masking_utils.py#causal_mask_function",
+                "filepath": "transformers/masking_utils.py",
+                "comp_name": "causal_mask_function",
                 "Dependencies": [],
                 "JaxDependencies": {}
             },
             {
-                "comp_id": "transformers/masking_utils.py#causal_mask_function",
+                "comp_id": "transformers/masking_utils.py#and_masks",
                 "filepath": "transformers/masking_utils.py",
-                "comp_name": "causal_mask_function",
+                "comp_name": "and_masks",
+                "Dependencies": [],
+                "JaxDependencies": {}
+            },
+            {
+                "comp_id": "transformers/masking_utils.py#or_masks",
+                "filepath": "transformers/masking_utils.py",
+                "comp_name": "or_masks",
+                "Dependencies": [],
+                "JaxDependencies": {}
+            },
+            {
+                "comp_id": "transformers/masking_utils.py#packed_sequence_mask_function",
+                "filepath": "transformers/masking_utils.py",
+                "comp_name": "packed_sequence_mask_function",
                 "Dependencies": [],
                 "JaxDependencies": {}
             },
@@ -979,6 +1162,20 @@
                 "comp_id": "transformers/modeling_rope_utils.py#standardize_rope_params",
                 "filepath": "transformers/modeling_rope_utils.py",
                 "comp_name": "standardize_rope_params",
+                "Dependencies": [],
+                "JaxDependencies": {}
+            },
+            {
+                "comp_id": "transformers/loss/loss_utils.py#LOSS_MAPPING",
+                "filepath": "transformers/loss/loss_utils.py",
+                "comp_name": "LOSS_MAPPING",
+                "Dependencies": [],
+                "JaxDependencies": {}
+            },
+            {
+                "comp_id": "transformers/modeling_flash_attention_utils.py#lazy_import_flash_attention",
+                "filepath": "transformers/modeling_flash_attention_utils.py",
+                "comp_name": "lazy_import_flash_attention",
                 "Dependencies": [],
                 "JaxDependencies": {}
             },
@@ -1004,6 +1201,23 @@
                 "JaxDependencies": {}
             },
             {
+                "comp_id": "transformers/configuration_utils.py#SpecificPreTrainedConfigType",
+                "filepath": "transformers/configuration_utils.py",
+                "comp_name": "SpecificPreTrainedConfigType",
+                "Dependencies": [],
+                "JaxDependencies": {}
+            },
+            {
+                "comp_id": "transformers/configuration_utils.py#PreTrainedConfig",
+                "filepath": "transformers/configuration_utils.py",
+                "comp_name": "PreTrainedConfig",
+                "Dependencies": [
+                    "transformers/configuration_utils.py#SpecificPreTrainedConfigType",
+                    "transformers/utils.py#is_torch_available"
+                ],
+                "JaxDependencies": {}
+            },
+            {
                 "comp_id": "transformers/masking_utils.py#find_packed_sequence_indices",
                 "filepath": "transformers/masking_utils.py",
                 "comp_name": "find_packed_sequence_indices",
@@ -1015,6 +1229,7 @@
                 "filepath": "transformers/masking_utils.py",
                 "comp_name": "_preprocess_mask_arguments",
                 "Dependencies": [
+                    "transformers/cache_utils.py#Cache",
                     "transformers/configuration_utils.py#PreTrainedConfig",
                     "transformers/masking_utils.py#find_packed_sequence_indices"
                 ],
@@ -1030,13 +1245,6 @@
                     "transformers/masking_utils.py#_preprocess_mask_arguments",
                     "transformers/masking_utils.py#causal_mask_function"
                 ],
-                "JaxDependencies": {}
-            },
-            {
-                "comp_id": "transformers/masking_utils.py#and_masks",
-                "filepath": "transformers/masking_utils.py",
-                "comp_name": "and_masks",
-                "Dependencies": [],
                 "JaxDependencies": {}
             },
             {
@@ -1062,38 +1270,13 @@
                 "filepath": "transformers/masking_utils.py",
                 "comp_name": "create_sliding_window_causal_mask",
                 "Dependencies": [
+                    "transformers/cache_utils.py#Cache",
                     "transformers/configuration_utils.py#PreTrainedConfig",
                     "transformers/masking_utils.py#_preprocess_mask_arguments",
+                    "transformers/masking_utils.py#and_masks",
+                    "transformers/masking_utils.py#or_masks",
+                    "transformers/masking_utils.py#packed_sequence_mask_function",
                     "transformers/masking_utils.py#sliding_window_causal_mask_function"
-                ],
-                "JaxDependencies": {}
-            },
-            {
-                "comp_id": "transformers/modeling_rope_utils.py#ROPE_VALIDATION_FUNCTIONS",
-                "filepath": "transformers/modeling_rope_utils.py",
-                "comp_name": "ROPE_VALIDATION_FUNCTIONS",
-                "Dependencies": [],
-                "JaxDependencies": {}
-            },
-            {
-                "comp_id": "transformers/modeling_rope_utils.py#rope_config_validation",
-                "filepath": "transformers/modeling_rope_utils.py",
-                "comp_name": "rope_config_validation",
-                "Dependencies": [
-                    "transformers/configuration_utils.py#PreTrainedConfig",
-                    "transformers/modeling_rope_utils.py#ROPE_VALIDATION_FUNCTIONS"
-                ],
-                "JaxDependencies": {}
-            },
-            {
-                "comp_id": "transformers/models/mixtral/configuration_mixtral.py#MixtralConfig",
-                "filepath": "transformers/models/mixtral/configuration_mixtral.py",
-                "comp_name": "MixtralConfig",
-                "Dependencies": [
-                    "transformers/configuration_utils.py#PreTrainedConfig",
-                    "transformers/modeling_rope_utils.py#RopeParameters",
-                    "transformers/modeling_rope_utils.py#rope_config_validation",
-                    "transformers/modeling_rope_utils.py#standardize_rope_params"
                 ],
                 "JaxDependencies": {}
             },
@@ -1170,17 +1353,6 @@
                 "JaxDependencies": {}
             },
             {
-                "comp_id": "transformers/models/mixtral/modeling_mixtral.py#MixtralRotaryEmbedding",
-                "filepath": "transformers/models/mixtral/modeling_mixtral.py",
-                "comp_name": "MixtralRotaryEmbedding",
-                "Dependencies": [
-                    "transformers/modeling_rope_utils.py#ROPE_INIT_FUNCTIONS",
-                    "transformers/modeling_rope_utils.py#dynamic_rope_update",
-                    "transformers/models/mixtral/configuration_mixtral.py#MixtralConfig"
-                ],
-                "JaxDependencies": {}
-            },
-            {
                 "comp_id": "transformers/modeling_utils.py#get_parameter_device",
                 "filepath": "transformers/modeling_utils.py",
                 "comp_name": "get_parameter_device",
@@ -1210,10 +1382,19 @@
                 "comp_name": "PreTrainedModel",
                 "Dependencies": [
                     "transformers/configuration_utils.py#PreTrainedConfig",
+                    "transformers/integrations/tensor_parallel.py#ALL_PARALLEL_STYLES",
+                    "transformers/integrations/tensor_parallel.py#ALL_PARALLEL_STYLES.keys",
+                    "transformers/loss/loss_utils.py#LOSS_MAPPING",
+                    "transformers/modeling_flash_attention_utils.py#lazy_import_flash_attention",
                     "transformers/modeling_utils.py#EmbeddingAccessMixin",
                     "transformers/modeling_utils.py#ModuleUtilsMixin",
                     "transformers/modeling_utils.py#_init_weights",
-                    "transformers/quantizers/quantizers_utils.py#get_module_from_name"
+                    "transformers/quantizers/quantizers_utils.py#get_module_from_name",
+                    "transformers/utils.py#is_flash_attn_2_available",
+                    "transformers/utils.py#is_flash_attn_3_available",
+                    "transformers/utils.py#is_torch_flex_attn_available",
+                    "transformers/utils.py#is_torch_mlu_available",
+                    "transformers/utils.py#is_torch_npu_available"
                 ],
                 "JaxDependencies": {}
             },
@@ -1246,6 +1427,117 @@
                 "comp_name": "eager_attention_forward",
                 "Dependencies": [
                     "transformers/models/mixtral/modeling_mixtral.py#repeat_kv"
+                ],
+                "JaxDependencies": {}
+            },
+            {
+                "comp_id": "transformers/modeling_rope_utils.py#_validate_llama3_parameters",
+                "filepath": "transformers/modeling_rope_utils.py",
+                "comp_name": "_validate_llama3_parameters",
+                "Dependencies": [
+                    "transformers/configuration_utils.py#PreTrainedConfig"
+                ],
+                "JaxDependencies": {}
+            },
+            {
+                "comp_id": "transformers/modeling_rope_utils.py#_validate_yarn_parameters",
+                "filepath": "transformers/modeling_rope_utils.py",
+                "comp_name": "_validate_yarn_parameters",
+                "Dependencies": [
+                    "transformers/configuration_utils.py#PreTrainedConfig"
+                ],
+                "JaxDependencies": {}
+            },
+            {
+                "comp_id": "transformers/modeling_rope_utils.py#_check_received_keys",
+                "filepath": "transformers/modeling_rope_utils.py",
+                "comp_name": "_check_received_keys",
+                "Dependencies": [],
+                "JaxDependencies": {}
+            },
+            {
+                "comp_id": "transformers/modeling_rope_utils.py#_validate_default_rope_parameters",
+                "filepath": "transformers/modeling_rope_utils.py",
+                "comp_name": "_validate_default_rope_parameters",
+                "Dependencies": [
+                    "transformers/modeling_rope_utils.py#_check_received_keys"
+                ],
+                "JaxDependencies": {}
+            },
+            {
+                "comp_id": "transformers/modeling_rope_utils.py#_validate_dynamic_scaling_rope_parameters",
+                "filepath": "transformers/modeling_rope_utils.py",
+                "comp_name": "_validate_dynamic_scaling_rope_parameters",
+                "Dependencies": [
+                    "transformers/configuration_utils.py#PreTrainedConfig",
+                    "transformers/modeling_rope_utils.py#_check_received_keys"
+                ],
+                "JaxDependencies": {}
+            },
+            {
+                "comp_id": "transformers/modeling_rope_utils.py#_validate_linear_scaling_rope_parameters",
+                "filepath": "transformers/modeling_rope_utils.py",
+                "comp_name": "_validate_linear_scaling_rope_parameters",
+                "Dependencies": [
+                    "transformers/configuration_utils.py#PreTrainedConfig",
+                    "transformers/modeling_rope_utils.py#_check_received_keys"
+                ],
+                "JaxDependencies": {}
+            },
+            {
+                "comp_id": "transformers/modeling_rope_utils.py#_validate_longrope_parameters",
+                "filepath": "transformers/modeling_rope_utils.py",
+                "comp_name": "_validate_longrope_parameters",
+                "Dependencies": [
+                    "transformers/configuration_utils.py#PreTrainedConfig",
+                    "transformers/modeling_rope_utils.py#_check_received_keys"
+                ],
+                "JaxDependencies": {}
+            },
+            {
+                "comp_id": "transformers/modeling_rope_utils.py#ROPE_VALIDATION_FUNCTIONS",
+                "filepath": "transformers/modeling_rope_utils.py",
+                "comp_name": "ROPE_VALIDATION_FUNCTIONS",
+                "Dependencies": [
+                    "transformers/modeling_rope_utils.py#_validate_default_rope_parameters",
+                    "transformers/modeling_rope_utils.py#_validate_dynamic_scaling_rope_parameters",
+                    "transformers/modeling_rope_utils.py#_validate_linear_scaling_rope_parameters",
+                    "transformers/modeling_rope_utils.py#_validate_llama3_parameters",
+                    "transformers/modeling_rope_utils.py#_validate_longrope_parameters",
+                    "transformers/modeling_rope_utils.py#_validate_yarn_parameters"
+                ],
+                "JaxDependencies": {}
+            },
+            {
+                "comp_id": "transformers/modeling_rope_utils.py#rope_config_validation",
+                "filepath": "transformers/modeling_rope_utils.py",
+                "comp_name": "rope_config_validation",
+                "Dependencies": [
+                    "transformers/configuration_utils.py#PreTrainedConfig",
+                    "transformers/modeling_rope_utils.py#ROPE_VALIDATION_FUNCTIONS"
+                ],
+                "JaxDependencies": {}
+            },
+            {
+                "comp_id": "transformers/models/mixtral/configuration_mixtral.py#MixtralConfig",
+                "filepath": "transformers/models/mixtral/configuration_mixtral.py",
+                "comp_name": "MixtralConfig",
+                "Dependencies": [
+                    "transformers/configuration_utils.py#PreTrainedConfig",
+                    "transformers/modeling_rope_utils.py#RopeParameters",
+                    "transformers/modeling_rope_utils.py#rope_config_validation",
+                    "transformers/modeling_rope_utils.py#standardize_rope_params"
+                ],
+                "JaxDependencies": {}
+            },
+            {
+                "comp_id": "transformers/models/mixtral/modeling_mixtral.py#MixtralRotaryEmbedding",
+                "filepath": "transformers/models/mixtral/modeling_mixtral.py",
+                "comp_name": "MixtralRotaryEmbedding",
+                "Dependencies": [
+                    "transformers/modeling_rope_utils.py#ROPE_INIT_FUNCTIONS",
+                    "transformers/modeling_rope_utils.py#dynamic_rope_update",
+                    "transformers/models/mixtral/configuration_mixtral.py#MixtralConfig"
                 ],
                 "JaxDependencies": {}
             },
@@ -1446,7 +1738,6 @@
                 "filepath": "transformers/models/mixtral/modeling_mixtral.py",
                 "comp_name": "MixtralForCausalLM",
                 "Dependencies": [
-                    "transformers/cache_utils.py#Cache",
                     "transformers/modeling_outputs.py#MoeCausalLMOutputWithPast",
                     "transformers/modeling_outputs.py#MoeModelOutputWithPast",
                     "transformers/models/mixtral/modeling_mixtral.py#MixtralModel",
@@ -1495,10 +1786,10 @@
                 "transformers/utils.py#ModelOutput"
             ],
             "MoeModelOutputWithPast": [
+                "transformers/cache_utils.py#Cache",
                 "transformers/utils.py#ModelOutput"
             ],
             "MixtralForCausalLM": [
-                "transformers/cache_utils.py#Cache",
                 "transformers/modeling_outputs.py#MoeCausalLMOutputWithPast",
                 "transformers/modeling_outputs.py#MoeModelOutputWithPast",
                 "transformers/models/mixtral/modeling_mixtral.py#MixtralModel",
@@ -1531,8 +1822,12 @@
                 "transformers/masking_utils.py#causal_mask_function"
             ],
             "create_sliding_window_causal_mask": [
+                "transformers/cache_utils.py#Cache",
                 "transformers/configuration_utils.py#PreTrainedConfig",
                 "transformers/masking_utils.py#_preprocess_mask_arguments",
+                "transformers/masking_utils.py#and_masks",
+                "transformers/masking_utils.py#or_masks",
+                "transformers/masking_utils.py#packed_sequence_mask_function",
                 "transformers/masking_utils.py#sliding_window_causal_mask_function"
             ],
             "MixtralConfig": [
@@ -1555,18 +1850,31 @@
             ],
             "PreTrainedModel": [
                 "transformers/configuration_utils.py#PreTrainedConfig",
+                "transformers/integrations/tensor_parallel.py#ALL_PARALLEL_STYLES",
+                "transformers/integrations/tensor_parallel.py#ALL_PARALLEL_STYLES.keys",
+                "transformers/loss/loss_utils.py#LOSS_MAPPING",
+                "transformers/modeling_flash_attention_utils.py#lazy_import_flash_attention",
                 "transformers/modeling_utils.py#EmbeddingAccessMixin",
                 "transformers/modeling_utils.py#ModuleUtilsMixin",
                 "transformers/modeling_utils.py#_init_weights",
-                "transformers/quantizers/quantizers_utils.py#get_module_from_name"
+                "transformers/quantizers/quantizers_utils.py#get_module_from_name",
+                "transformers/utils.py#is_flash_attn_2_available",
+                "transformers/utils.py#is_flash_attn_3_available",
+                "transformers/utils.py#is_torch_flex_attn_available",
+                "transformers/utils.py#is_torch_mlu_available",
+                "transformers/utils.py#is_torch_npu_available"
             ],
             "MixtralAttention": [
                 "transformers/models/mixtral/configuration_mixtral.py#MixtralConfig",
                 "transformers/models/mixtral/modeling_mixtral.py#apply_rotary_pos_emb",
                 "transformers/models/mixtral/modeling_mixtral.py#eager_attention_forward"
             ],
-            "PreTrainedConfig": [],
+            "PreTrainedConfig": [
+                "transformers/configuration_utils.py#SpecificPreTrainedConfigType",
+                "transformers/utils.py#is_torch_available"
+            ],
             "_preprocess_mask_arguments": [
+                "transformers/cache_utils.py#Cache",
                 "transformers/configuration_utils.py#PreTrainedConfig",
                 "transformers/masking_utils.py#find_packed_sequence_indices"
             ],
@@ -1592,6 +1900,8 @@
             "dynamic_rope_update": [
                 "transformers/modeling_rope_utils.py#ROPE_INIT_FUNCTIONS"
             ],
+            "LOSS_MAPPING": [],
+            "lazy_import_flash_attention": [],
             "ModuleUtilsMixin": [
                 "transformers/modeling_utils.py#get_parameter_device",
                 "transformers/modeling_utils.py#get_parameter_dtype"
@@ -1602,7 +1912,14 @@
             "eager_attention_forward": [
                 "transformers/models/mixtral/modeling_mixtral.py#repeat_kv"
             ],
-            "ROPE_VALIDATION_FUNCTIONS": [],
+            "ROPE_VALIDATION_FUNCTIONS": [
+                "transformers/modeling_rope_utils.py#_validate_default_rope_parameters",
+                "transformers/modeling_rope_utils.py#_validate_dynamic_scaling_rope_parameters",
+                "transformers/modeling_rope_utils.py#_validate_linear_scaling_rope_parameters",
+                "transformers/modeling_rope_utils.py#_validate_llama3_parameters",
+                "transformers/modeling_rope_utils.py#_validate_longrope_parameters",
+                "transformers/modeling_rope_utils.py#_validate_yarn_parameters"
+            ],
             "MixtralExperts": [
                 "transformers/models/mixtral/configuration_mixtral.py#MixtralConfig",
                 "transformers/models/mixtral/modeling_mixtral.py#MixtralMLP"
@@ -1628,10 +1945,32 @@
                 "transformers/modeling_rope_utils.py#standardize_rope_params"
             ],
             "get_parameter_dtype": [],
+            "_validate_default_rope_parameters": [
+                "transformers/modeling_rope_utils.py#_check_received_keys"
+            ],
+            "_validate_dynamic_scaling_rope_parameters": [
+                "transformers/configuration_utils.py#PreTrainedConfig",
+                "transformers/modeling_rope_utils.py#_check_received_keys"
+            ],
+            "_validate_linear_scaling_rope_parameters": [
+                "transformers/configuration_utils.py#PreTrainedConfig",
+                "transformers/modeling_rope_utils.py#_check_received_keys"
+            ],
+            "_validate_llama3_parameters": [
+                "transformers/configuration_utils.py#PreTrainedConfig"
+            ],
+            "_validate_longrope_parameters": [
+                "transformers/configuration_utils.py#PreTrainedConfig",
+                "transformers/modeling_rope_utils.py#_check_received_keys"
+            ],
+            "_validate_yarn_parameters": [
+                "transformers/configuration_utils.py#PreTrainedConfig"
+            ],
             "MixtralMLP": [
                 "transformers/activations.py#ACT2FN",
                 "transformers/models/mixtral/configuration_mixtral.py#MixtralConfig"
             ],
+            "_check_received_keys": [],
             "ACT2FN": [
                 "transformers/activations.py#AccurateGELUActivation",
                 "transformers/activations.py#ClassInstantier",
