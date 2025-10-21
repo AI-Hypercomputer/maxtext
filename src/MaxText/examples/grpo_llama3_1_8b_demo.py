@@ -14,6 +14,11 @@
 
 # pylint: disable=bare-except, consider-using-generator
 """ 
+DEPRECATED: This file is deprecated and kept for reference only.
+Please use the new unified CLI interface: grpo_demo.py
+
+See GRPO_README.md for migration guide and usage examples.
+
 This tutorial demonstrates training the Llama3.1 8B-IT model on
  the GSM8K math reasoning benchmark using Group Relative Policy Optimization (GRPO).
    GRPO can enhance your model's problem-solving skills on mathematical word problems,
