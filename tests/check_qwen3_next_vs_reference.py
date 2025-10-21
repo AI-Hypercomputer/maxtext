@@ -39,6 +39,33 @@ from MaxText.globals import MAXTEXT_PKG_DIR
 # https://github.com/huggingface/transformers/blob/a9731a725eb1d7b3b7e11f0ad35a819fa4ee8b20/src/transformers/models/qwen3_next/modeling_qwen3_next.py
 # Note: Some function/class names might be slightly adapted (e.g., _PT suffix) to avoid collisions.
 # ----------------------------------------------------------------------
+def rotate_half(x):
+    """Rotates half the hidden dims of the input."""
+    x1 = x[..., : x.shape[-1] // 2]
+    x2 = x[..., x.shape[-1] // 2 :]
+    return torch.cat((-x2, x1), dim=-1)
+
+
+def apply_rotary_pos_emb(q, k, cos, sin):
+    cos = cos.unsqueeze(1)
+    sin = sin.unsqueeze(1)
+    rotary_dim = cos.shape[-1]
+    q_rot, q_pass = q[..., :rotary_dim], q[..., rotary_dim:]
+    k_rot, k_pass = k[..., :rotary_dim], k[..., rotary_dim:]
+    q_embed = (q_rot * cos) + (rotate_half(q_rot) * sin)
+    k_embed = (k_rot * cos) + (rotate_half(k_rot) * sin)
+    q_embed = torch.cat([q_embed, q_pass], dim=-1)
+    k_embed = torch.cat([k_embed, k_pass], dim=-1)
+    return q_embed, k_embed
+
+
+def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
+    batch, num_key_value_heads, slen, head_dim = hidden_states.shape
+    if n_rep == 1:
+        return hidden_states
+    hidden_states = hidden_states[:, :, None, :, :].expand(batch, num_key_value_heads, n_rep, slen, head_dim)
+    return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
+
 def l2norm_torch(x: torch.FloatTensor, dim: int = -1, eps: float = 1e-6):
   """This function is intended to align with the l2norm implementation in the FLA library."""
   inv_norm = torch.rsqrt((x * x).sum(dim=dim, keepdim=True) + eps)
