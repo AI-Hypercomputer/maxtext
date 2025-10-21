@@ -175,21 +175,21 @@ class MaxTextGenerator:
 
     end_time = time.time()
     self.logger.info(
-        f"Initialization complete in {end_time - start_time:.2f} seconds. Max batch size: %d", self.batch_size
+      f"Initialization complete in {end_time - start_time:.2f} seconds. Max batch size: %d", self.batch_size
     )
 
   def generate_batch(
-      self,
-      prompts: List[str],
-      image_paths: Optional[List[Optional[str]]] = None,
-      max_tokens: int = None,
-      logprobs: int = None,
-      echo: bool = False,
-      stop: Optional[Union[str, List[str]]] = None,
-      temperature: Optional[float] = None,
-      seed: Optional[int] = None,
-      top_k: Optional[int] = None,
-      top_p: Optional[float] = None,
+    self,
+    prompts: List[str],
+    image_paths: Optional[List[Optional[str]]] = None,
+    max_tokens: int = None,
+    logprobs: int = None,
+    echo: bool = False,
+    stop: Optional[Union[str, List[str]]] = None,
+    temperature: Optional[float] = None,
+    seed: Optional[int] = None,
+    top_k: Optional[int] = None,
+    top_p: Optional[float] = None,
   ) -> List[Completion]:
     """
     Generates text for a batch of prompts, handling chunking automatically.
@@ -224,24 +224,24 @@ class MaxTextGenerator:
       # total_chunks = (num_prompts + self.batch_size - 1) // self.batch_size
 
       chunk_results = self._process_chunk(
-          prompt_chunk, image_chunk, max_tokens, logprobs, echo, stop, temperature, seed, top_k, top_p
+        prompt_chunk, image_chunk, max_tokens, logprobs, echo, stop, temperature, seed, top_k, top_p
       )
       all_results.extend(chunk_results)
 
     return all_results
 
   def _process_chunk(
-      self,
-      prompts: List[str],
-      image_paths: List[Optional[str]],
-      max_tokens: int,
-      logprobs: int = None,
-      echo: bool = False,
-      stop: Optional[Union[str, List[str]]] = None,
-      temperature: Optional[float] = None,
-      seed: Optional[int] = None,
-      top_k: Optional[int] = None,
-      top_p: Optional[float] = None,
+    self,
+    prompts: List[str],
+    image_paths: List[Optional[str]],
+    max_tokens: int,
+    logprobs: int = None,
+    echo: bool = False,
+    stop: Optional[Union[str, List[str]]] = None,
+    temperature: Optional[float] = None,
+    seed: Optional[int] = None,
+    top_k: Optional[int] = None,
+    top_p: Optional[float] = None,
   ) -> List[Completion]:
     """Orchestrates the generation process for a single chunk of prompts."""
     start_time = time.time()
@@ -255,9 +255,9 @@ class MaxTextGenerator:
     streams, rng = self._initialize_streams_and_state(prompts, image_paths, seed)
     initialize_end_time = time.time()
     self.logger.info(
-        "Initialization complete in %.2f seconds. Max batch size: %d",
-        initialize_end_time - initialize_start_time,
-        self.batch_size,
+      "Initialization complete in %.2f seconds. Max batch size: %d",
+      initialize_end_time - initialize_start_time,
+      self.batch_size,
     )
 
     if max_tokens is not None and max_tokens <= 0:
@@ -266,14 +266,14 @@ class MaxTextGenerator:
 
     prefill_start_time = time.time()
     self.decode_state, rng = self._run_prefill_step(
-        streams, self.decode_state, rng, logprobs, echo, temperature, top_k, top_p
+      streams, self.decode_state, rng, logprobs, echo, temperature, top_k, top_p
     )
     prefill_end_time = time.time()
     self.logger.info("Prefill step took %.2fs.", prefill_end_time - prefill_start_time)
 
     generation_start_time = time.time()
     self.decode_state = self._run_generation_loop(
-        streams, self.decode_state, rng, max_tokens, stop, temperature, top_k, top_p
+      streams, self.decode_state, rng, max_tokens, stop, temperature, top_k, top_p
     )
     generation_end_time = time.time()
     self.logger.info("Generation loop took %.2fs.", generation_end_time - generation_start_time)
@@ -329,17 +329,17 @@ class MaxTextGenerator:
       want_prompt_logp = logprobs is not None and echo
 
       prefill_result, _ = self.engine.prefill(
-          params=self.params,
-          padded_tokens=stream.tokens,
-          true_length=stream.true_length,
-          images=stream.image,
-          rng=rng_prefill,
-          slot=i,
-          return_prompt_logp=want_prompt_logp,
-          temperature=temperature,
-          algorithm=sampling_algorithm,
-          topk=top_k,
-          nucleus_topp=top_p,
+        params=self.params,
+        padded_tokens=stream.tokens,
+        true_length=stream.true_length,
+        images=stream.image,
+        rng=rng_prefill,
+        slot=i,
+        return_prompt_logp=want_prompt_logp,
+        temperature=temperature,
+        algorithm=sampling_algorithm,
+        topk=top_k,
+        nucleus_topp=top_p,
       )
       prefill_results_to_insert[i] = prefill_result
 
@@ -392,13 +392,13 @@ class MaxTextGenerator:
 
       rng, rng_generate = jax.random.split(rng)
       decode_state, _ = self.engine.generate(
-          self.params,
-          decode_state,
-          rng=rng_generate,
-          temperature=temperature,
-          algorithm=sampling_algorithm,
-          topk=top_k,
-          nucleus_topp=top_p,
+        self.params,
+        decode_state,
+        rng=rng_generate,
+        temperature=temperature,
+        algorithm=sampling_algorithm,
+        topk=top_k,
+        nucleus_topp=top_p,
       )
 
       state_tokens = np.array(decode_state["tokens"])
@@ -429,13 +429,13 @@ class MaxTextGenerator:
             # Use the standard jetstream wrapper for decoding as requested.
             trailing_text = self.tokenizer.decode([int(tid) for tid in trailing_ids])
             stop_sequence_found = next(
-                (
-                    True
-                    for stop_seq in stop_sequences
-                    # Use 'in' for a more robust check.
-                    if stop_seq in trailing_text
-                ),
-                False,
+              (
+                True
+                for stop_seq in stop_sequences
+                # Use 'in' for a more robust check.
+                if stop_seq in trailing_text
+              ),
+              False,
             )
 
         if is_max_len or is_eos or stop_sequence_found:
@@ -471,22 +471,22 @@ class MaxTextGenerator:
           self.logger.warning("[warn] Mismatched token/logprob lengths for stream %d. No logprobs returned.", i)
         else:
           lp_payload = LogProbs(
-              tokens=tokens_for_text,
-              token_logprobs=logps_for_text,
-              top_logprobs=None,
-              text_offset=offsets,
+            tokens=tokens_for_text,
+            token_logprobs=logps_for_text,
+            top_logprobs=None,
+            text_offset=offsets,
           )
 
       completions.append(
-          Completion(
-              index=i,
-              text=text,
-              tokens=tokens_for_text,
-              logprobs=lp_payload,
-              finish_reason=stream.finish_reason,
-              prompt_token_count=len(stream.prompt_ids),
-              completion_token_count=len(gen_ids_for_text),
-          )
+        Completion(
+          index=i,
+          text=text,
+          tokens=tokens_for_text,
+          logprobs=lp_payload,
+          finish_reason=stream.finish_reason,
+          prompt_token_count=len(stream.prompt_ids),
+          completion_token_count=len(gen_ids_for_text),
+        )
       )
     return completions
 
@@ -496,7 +496,7 @@ class MaxTextGenerator:
     images = None
     if self.config.use_multimodal and image_path:
       text = multimodal_utils.reformat_prompt(
-          text, image_placeholder=self.config.image_placeholder, model_name=self.config.model_name, num_images=1
+        text, image_placeholder=self.config.image_placeholder, model_name=self.config.model_name, num_images=1
       )
       loaded_images = multimodal_utils.load_image_from_path(image_path)
       processor_output = multimodal_utils.pre_process_image(loaded_images, model_name=self.config.model_name)
@@ -506,7 +506,7 @@ class MaxTextGenerator:
     tokens, true_length = self.tokenizer.encode(text, is_bos=not self.has_chat_template, prefill_lengths=[prefill_length])
     if self.config.use_multimodal and image_path:
       tokens = multimodal_utils.prepare_text_for_image_fusion(
-          tokens, model_name=self.config.model_name, processor_output=processor_output
+        tokens, model_name=self.config.model_name, processor_output=processor_output
       )
       true_length += multimodal_utils.get_image_offsets(self.config.model_name, processor_output=processor_output)
 
@@ -514,9 +514,9 @@ class MaxTextGenerator:
 
   def _validate_config(self, config):
     """Validates configuration."""
-    assert (
-        config.load_full_state_path == ""
-    ), "Decode doesn't operate on full states! Convert to parameter checkpoint first. Using generate_param_only_checkpoint."
+    assert config.load_full_state_path == "", (
+      "Decode doesn't operate on full states! Convert to parameter checkpoint first. Using generate_param_only_checkpoint."
+    )
     assert config.quantization != "fp8", "fp8 on NVIDIA GPUs is not supported in decode.py yet"
     assert config.quantization != "nanoo_fp8", "NANOO fp8 on AMD MI300/MI325 GPUs is not supported in decode.py yet"
     assert config.per_device_batch_size * jax.device_count() >= 1, "Total batch size must be at least 1."
@@ -564,8 +564,8 @@ def main():
     # lengths should match: one logprob/offset per token
     if not len(lp.tokens) == len(lp.token_logprobs) == len(lp.text_offset):
       max_logging.log(
-          f"[warn] mismatched lengths: tokens={len(lp.tokens)}, "
-          f"logps={len(lp.token_logprobs)}, offsets={len(lp.text_offset)}"
+        f"[warn] mismatched lengths: tokens={len(lp.tokens)}, "
+        f"logps={len(lp.token_logprobs)}, offsets={len(lp.text_offset)}"
       )
 
     max_logging.log("logprobs:")
@@ -587,7 +587,7 @@ def main():
   llm = MaxTextGenerator(sys.argv)
 
   prompts_to_run = [
-      "The capital of France is ",
+    "The capital of France is ",
   ]
 
   max_tokens = 32
@@ -599,19 +599,19 @@ def main():
   top_k = 20
 
   max_logging.log(
-      f"\n--- Starting Batch Generation for {len(prompts_to_run)} Prompts " f"(max_tokens={max_tokens}, echo={echo}) ---"
+    f"\n--- Starting Batch Generation for {len(prompts_to_run)} Prompts (max_tokens={max_tokens}, echo={echo}) ---"
   )
 
   completions = llm.generate_batch(
-      prompts=prompts_to_run,
-      image_paths=None,
-      max_tokens=max_tokens,
-      logprobs=want_logprobs,
-      echo=echo,
-      seed=seed,
-      temperature=temperature,
-      top_p=top_p,
-      top_k=top_k,
+    prompts=prompts_to_run,
+    image_paths=None,
+    max_tokens=max_tokens,
+    logprobs=want_logprobs,
+    echo=echo,
+    seed=seed,
+    temperature=temperature,
+    top_p=top_p,
+    top_k=top_k,
   )
 
   for i, comp in enumerate(completions):
@@ -620,15 +620,15 @@ def main():
   start = time.time()
 
   completions = llm.generate_batch(
-      prompts=prompts_to_run,
-      image_paths=None,
-      max_tokens=max_tokens,
-      logprobs=want_logprobs,
-      echo=echo,
-      seed=seed,
-      temperature=temperature,
-      top_p=top_p,
-      top_k=top_k,
+    prompts=prompts_to_run,
+    image_paths=None,
+    max_tokens=max_tokens,
+    logprobs=want_logprobs,
+    echo=echo,
+    seed=seed,
+    temperature=temperature,
+    top_p=top_p,
+    top_k=top_k,
   )
 
   max_logging.log("--- Batch Generation Complete ---")

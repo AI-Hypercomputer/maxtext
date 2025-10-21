@@ -13,6 +13,7 @@
 # limitations under the License.
 
 """Inference microbenchmark for prefill and autoregressive steps."""
+
 import datetime
 import jax
 import json
@@ -70,18 +71,18 @@ def prefill_benchmark(config, engine_prefill, params, tokens, true_length, num_m
   time_in_s = prefill_benchmark_loop(engine_prefill, params, tokens, true_length, iters)
   prefill_average_ms = 1000 * time_in_s / iters
   prefill_tflops_per_device, _, _ = maxtext_utils.calculate_prefill_tflops_per_device(
-      num_model_params, tokens.size, config
+    num_model_params, tokens.size, config
   )
   tflops_per_sec_per_device = prefill_tflops_per_device / prefill_average_ms * 1000.0
   print(
-      f"\tPrefill step average time: {prefill_average_ms:.3f} ms\n"
-      f"\tPrefill total TFLOPs/device: {prefill_tflops_per_device:.3f}\n"
-      f"\tPrefill TFLOPs/sec/device: {tflops_per_sec_per_device:.3f}\n\n\n\n"
+    f"\tPrefill step average time: {prefill_average_ms:.3f} ms\n"
+    f"\tPrefill total TFLOPs/device: {prefill_tflops_per_device:.3f}\n"
+    f"\tPrefill TFLOPs/sec/device: {tflops_per_sec_per_device:.3f}\n\n\n\n"
   )
   result_dict = {
-      "time_in_ms": prefill_average_ms,
-      "total_tflops_per_device": prefill_tflops_per_device,
-      "tflops_per_sec_per_device": tflops_per_sec_per_device,
+    "time_in_ms": prefill_average_ms,
+    "total_tflops_per_device": prefill_tflops_per_device,
+    "tflops_per_sec_per_device": tflops_per_sec_per_device,
   }
   return result_dict
 
@@ -102,18 +103,15 @@ def prefill_multisampling_benchmark(config, engine_prefill_multisampling, params
   for num_samples in config.inference_microbenchmark_num_samples:
     time_in_s = prefill_benchmark_loop(engine_prefill_multisampling, params, tokens, true_length, iters, num_samples)
     multisampling_prefill_average_ms = 1000 * time_in_s / iters
-    print(
-        f"\nNum samples: {num_samples}\n"
-        f"\tPrefill step average time: {multisampling_prefill_average_ms:.3f} ms\n\n\n\n"
-    )
+    print(f"\nNum samples: {num_samples}\n\tPrefill step average time: {multisampling_prefill_average_ms:.3f} ms\n\n\n\n")
     result_dict[num_samples] = {
-        "time_in_ms": multisampling_prefill_average_ms,
+      "time_in_ms": multisampling_prefill_average_ms,
     }
   return result_dict
 
 
 def prefill_insert_benchmark_loop(
-    config, engine_insert, decode_state, params, total_slots, tokens, true_length, iters, profile_name
+  config, engine_insert, decode_state, params, total_slots, tokens, true_length, iters, profile_name
 ):
   """Inner loop for benchmarking prefill and insert step."""
   prof = profiler.Profiler(config)
@@ -139,15 +137,15 @@ def prefill_insert_benchmark(config, engine_insert, decode_state, params, total_
 
   print(f"Prefill and insert benchmark results for length {tokens.size}:\n")
   time_in_s, decode_state = prefill_insert_benchmark_loop(
-      config,
-      engine_insert,
-      decode_state,
-      params,
-      total_slots,
-      tokens,
-      true_length,
-      iters,
-      f"prefill_insert_{tokens.size}",
+    config,
+    engine_insert,
+    decode_state,
+    params,
+    total_slots,
+    tokens,
+    true_length,
+    iters,
+    f"prefill_insert_{tokens.size}",
   )
   prefill_insert_average_ms = time_in_s / iters * 1000.0
   print(f"\tPrefill + Insert step average time: {prefill_insert_average_ms:.3f} ms\n\n\n\n")
@@ -179,7 +177,7 @@ def ar_benchmark(config, engine_generate, params, decode_state, global_batch_siz
   jax.block_until_ready(decode_state)
 
   time_in_s, decode_state = ar_benchmark_loop(
-      config, engine_generate, params, decode_state, iters, profile_name="autoregress"
+    config, engine_generate, params, decode_state, iters, profile_name="autoregress"
   )
   seconds_per_step = time_in_s / iters
   ar_average_ms = seconds_per_step * 1000
@@ -188,20 +186,20 @@ def ar_benchmark(config, engine_generate, params, decode_state, global_batch_siz
   GB_per_step_per_device = (model_size + cache_size) / 1e9 / jax.device_count()
   bw_per_device = GB_per_step_per_device / seconds_per_step
   print(
-      f"AutoRegressive results:\n"
-      f"\tAR step average time: {ar_average_ms:.3f} ms\n"
-      f"\tAR step average time per seq: {ar_average_ms/global_batch_size:.3f} ms\n"
-      f"\tAR global batch size: {global_batch_size}\n"
-      f"\tAR throughput: {total_throughput:.3f} tokens/second\n"
-      f"\tAR memory bandwidth per device: {bw_per_device:.3f} GB/s\n\n\n"
+    f"AutoRegressive results:\n"
+    f"\tAR step average time: {ar_average_ms:.3f} ms\n"
+    f"\tAR step average time per seq: {ar_average_ms / global_batch_size:.3f} ms\n"
+    f"\tAR global batch size: {global_batch_size}\n"
+    f"\tAR throughput: {total_throughput:.3f} tokens/second\n"
+    f"\tAR memory bandwidth per device: {bw_per_device:.3f} GB/s\n\n\n"
   )
 
   result_dict = {
-      "step_in_ms": ar_average_ms,
-      "step_in_ms_per_seq": ar_average_ms / global_batch_size,
-      "global_batch_size": global_batch_size,
-      "total_throughput_tokens_per_second": total_throughput,
-      "bw_per_device_GB_per_second": bw_per_device,
+    "step_in_ms": ar_average_ms,
+    "step_in_ms_per_seq": ar_average_ms / global_batch_size,
+    "global_batch_size": global_batch_size,
+    "total_throughput_tokens_per_second": total_throughput,
+    "bw_per_device_GB_per_second": bw_per_device,
   }
   return result_dict, decode_state
 
@@ -209,9 +207,9 @@ def ar_benchmark(config, engine_generate, params, decode_state, global_batch_siz
 def collate_results(config, results, model_size, cache_size, num_model_params, incl_config=False):
   """Adds model/cache size info and optionally config info to results."""
   results["sizes"] = {
-      "model_size_in_gb": model_size / 1e9,
-      "cache_size_in_gb": cache_size / 1e9,
-      "model_params_in_billions": num_model_params / 1e9,
+    "model_size_in_gb": model_size / 1e9,
+    "cache_size_in_gb": cache_size / 1e9,
+    "model_params_in_billions": num_model_params / 1e9,
   }
   if incl_config:
     results["config"] = {}
@@ -281,19 +279,19 @@ def summarize_prefill_result(engine_prefill, params, tokens, true_length):
   prefill_result, _ = engine_prefill(params, tokens, true_length, rng)
   jax.block_until_ready(prefill_result)
   num_prefill_logits_params, total_prefill_logits_size, avg_prefill_logits_param_size = max_utils.summarize_pytree_data(
-      prefill_result["logits"], name="Prefill Logits", raw=True
+    prefill_result["logits"], name="Prefill Logits", raw=True
   )
   num_prefill_cache_params, total_prefill_cache_size, avg_prefill_cache_param_size = max_utils.summarize_pytree_data(
-      prefill_result["cache"], name="Prefill Cache"
+    prefill_result["cache"], name="Prefill Cache"
   )
   del prefill_result
   return {
-      "num_logits_params": num_prefill_logits_params,
-      "total_logits_size": total_prefill_logits_size,
-      "avg_logits_param_size": avg_prefill_logits_param_size,
-      "num_cache_params": num_prefill_cache_params,
-      "total_cache_size": total_prefill_cache_size,
-      "avg_cache_param_size": avg_prefill_cache_param_size,
+    "num_logits_params": num_prefill_logits_params,
+    "total_logits_size": total_prefill_logits_size,
+    "avg_logits_param_size": avg_prefill_logits_param_size,
+    "num_cache_params": num_prefill_cache_params,
+    "total_cache_size": total_prefill_cache_size,
+    "avg_cache_param_size": avg_prefill_cache_param_size,
   }
 
 
@@ -333,47 +331,47 @@ def run_benchmarks(config):
 
     for prefill_length in prefill_lengths:
       prefill_tokens[prefill_length], prefill_true_lengths[prefill_length] = tokenizer_model.encode(
-          text, is_bos=True, prefill_lengths=[prefill_length]
+        text, is_bos=True, prefill_lengths=[prefill_length]
       )
 
       key_shape = jax.ShapeDtypeStruct([prefill_length], jax.numpy.dtype("int32"))
       prefill_executable[prefill_length] = (
-          jax.jit(
-              engine.prefill_aot,
-              in_shardings=(engine.param_layouts, None, None, None),
-          ).lower(params, key_shape, i32_scalar, rng_shape)
+        jax.jit(
+          engine.prefill_aot,
+          in_shardings=(engine.param_layouts, None, None, None),
+        ).lower(params, key_shape, i32_scalar, rng_shape)
       ).compile(compiler_options=None)
 
       prefill_insert_executable[prefill_length] = prefill_processor.aot_compile(params, prefill_length)
 
       benchmark_results["prefill-result-sizes"][prefill_length] = summarize_prefill_result(
-          prefill_executable[prefill_length], params, prefill_tokens[prefill_length], prefill_true_lengths[prefill_length]
+        prefill_executable[prefill_length], params, prefill_tokens[prefill_length], prefill_true_lengths[prefill_length]
       )
 
     for prefill_length in prefill_lengths:
       benchmark_results["prefill"][prefill_length] = prefill_benchmark(
-          config,
-          prefill_executable[prefill_length],
-          params,
-          prefill_tokens[prefill_length],
-          prefill_true_lengths[prefill_length],
-          num_model_params,
-          benchmark_loop_iters,
+        config,
+        prefill_executable[prefill_length],
+        params,
+        prefill_tokens[prefill_length],
+        prefill_true_lengths[prefill_length],
+        num_model_params,
+        benchmark_loop_iters,
       )
 
       prefill_insert_time, decode_state = prefill_insert_benchmark(
-          config,
-          prefill_insert_executable[prefill_length],
-          decode_state,
-          params,
-          engine.max_concurrent_decodes,
-          prefill_tokens[prefill_length],
-          prefill_true_lengths[prefill_length],
-          benchmark_loop_iters,
+        config,
+        prefill_insert_executable[prefill_length],
+        decode_state,
+        params,
+        engine.max_concurrent_decodes,
+        prefill_tokens[prefill_length],
+        prefill_true_lengths[prefill_length],
+        benchmark_loop_iters,
       )
       benchmark_results["insert"][prefill_length] = {}
       benchmark_results["insert"][prefill_length]["time_in_ms"] = (
-          prefill_insert_time["time_in_ms"] - benchmark_results["prefill"][prefill_length]["time_in_ms"]
+        prefill_insert_time["time_in_ms"] - benchmark_results["prefill"][prefill_length]["time_in_ms"]
       )
 
   if "prefill-multisampling" in stages_to_benchmark:
@@ -387,49 +385,49 @@ def run_benchmarks(config):
       multisampling_prefill_executable[prefill_length] = {}
       for num_samples in config.inference_microbenchmark_num_samples:
         multisampling_prefill_executable[prefill_length][num_samples] = (
-            jax.jit(
-                engine.prefill_multisampling_aot,
-                in_shardings=(engine.param_layouts, None, None, None, None),
-                static_argnames=("num_samples",),
-            ).lower(params, key_shape, i32_scalar, rng_shape, num_samples, None)
+          jax.jit(
+            engine.prefill_multisampling_aot,
+            in_shardings=(engine.param_layouts, None, None, None, None),
+            static_argnames=("num_samples",),
+          ).lower(params, key_shape, i32_scalar, rng_shape, num_samples, None)
         ).compile(compiler_options=None)
 
     for prefill_length in prefill_lengths:
       benchmark_results["prefill-multisampling"][prefill_length] = prefill_multisampling_benchmark(
-          config,
-          multisampling_prefill_executable[prefill_length],
-          params,
-          prefill_tokens[prefill_length],
-          prefill_true_lengths[prefill_length],
-          benchmark_loop_iters,
+        config,
+        multisampling_prefill_executable[prefill_length],
+        params,
+        prefill_tokens[prefill_length],
+        prefill_true_lengths[prefill_length],
+        benchmark_loop_iters,
       )
 
   if "generate" in stages_to_benchmark:
     benchmark_results["autoregressive"], decode_state = ar_benchmark(
-        config,
-        generate_executable,
-        params,
-        decode_state,
-        engine.max_concurrent_decodes,
-        cache_size,
-        model_size,
-        benchmark_loop_iters,
+      config,
+      generate_executable,
+      params,
+      decode_state,
+      engine.max_concurrent_decodes,
+      cache_size,
+      model_size,
+      benchmark_loop_iters,
     )
 
   results = collate_results(config, benchmark_results, model_size, cache_size, num_model_params)
   print_results_for_analyze(results)
   if config.inference_microbenchmark_log_file_path:
     write_results(
-        results,
-        filename=config.inference_microbenchmark_log_file_path,
-        flatten_microbenchmark_results=_FLATTEN_MICROBENCHMARK_RESULTS,
+      results,
+      filename=config.inference_microbenchmark_log_file_path,
+      flatten_microbenchmark_results=_FLATTEN_MICROBENCHMARK_RESULTS,
     )
   if config.gcs_metrics:
     metrics_filename = f"{config.run_name}_results.txt"
     write_results(
-        results,
-        filename=metrics_filename,
-        flatten_microbenchmark_results=_FLATTEN_MICROBENCHMARK_RESULTS,
+      results,
+      filename=metrics_filename,
+      flatten_microbenchmark_results=_FLATTEN_MICROBENCHMARK_RESULTS,
     )
     gcs_filename = os.path.join(config.base_output_directory, metrics_filename)
     upload_results_to_gcs(metrics_filename, gcs_filename)

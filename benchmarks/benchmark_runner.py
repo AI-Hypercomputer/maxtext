@@ -20,6 +20,7 @@ Example usages:
     --cluster_name=<xpk_cluster_name> --base_output_directory=<output_gcloud_bucket> --device_type=v6e-256 
     --num_slices=1 --model_name="llama2_70b_4096" --libtpu_version=20241009 --base_docker_image=maxtext_base_image
 """
+
 import argparse
 import os
 import time
@@ -45,32 +46,32 @@ def add_pathways_arguments(parser: argparse.ArgumentParser):
   """
   # Add the arguments for each parser.
   parser.add_argument(
-      "--pathways_server_image",
-      type=str,
-      default=("us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server"),
-      help="version of pathways server image to be benchmarked command.",
+    "--pathways_server_image",
+    type=str,
+    default=("us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server"),
+    help="version of pathways server image to be benchmarked command.",
   )
   parser.add_argument(
-      "--pathways_proxy_server_image",
-      type=str,
-      default="us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server",
-      help="version of pathways proxy image to be benchmarked command.",
+    "--pathways_proxy_server_image",
+    type=str,
+    default="us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server",
+    help="version of pathways proxy image to be benchmarked command.",
   )
   parser.add_argument(
-      "--pathways_runner_image",
-      type=str,
-      help="version of pathways runner image to be benchmarked command.",
+    "--pathways_runner_image",
+    type=str,
+    help="version of pathways runner image to be benchmarked command.",
   )
   parser.add_argument(
-      "--colocated_python_sidecar_image",
-      type=str,
-      help="version of colocated python sidecar image to be benchmarked command.",
+    "--colocated_python_sidecar_image",
+    type=str,
+    help="version of colocated python sidecar image to be benchmarked command.",
   )
   parser.add_argument(
-      "--use_pathways",
-      type=str2bool,
-      default=False,
-      help="whether to use pathways or not.",
+    "--use_pathways",
+    type=str2bool,
+    default=False,
+    help="whether to use pathways or not.",
   )
 
 
@@ -81,109 +82,109 @@ def add_xpk_runner_arguments(custom_parser: argparse.ArgumentParser):
     custom_parser: parser to add shared arguments to.
   """
   custom_parser.add_argument(
-      "--project",
-      type=str,
-      default=None,
-      required=True,
-      help='GCE project name, defaults to "gcloud config project."',
+    "--project",
+    type=str,
+    default=None,
+    required=True,
+    help='GCE project name, defaults to "gcloud config project."',
   )
   custom_parser.add_argument(
-      "--zone",
-      type=str,
-      default=None,
-      required=True,
-      help=(
-          'GCE zone, e.g. us-central2-b, defaults to "gcloud config '
-          'compute/zone." Only one of --zone or --region is allowed in a '
-          "command."
-      ),
+    "--zone",
+    type=str,
+    default=None,
+    required=True,
+    help=(
+      'GCE zone, e.g. us-central2-b, defaults to "gcloud config '
+      'compute/zone." Only one of --zone or --region is allowed in a '
+      "command."
+    ),
   )
   custom_parser.add_argument(
-      "--cluster_name",
-      type=str,
-      default=None,
-      required=True,
-      help="cluster name The name of the cluster to run the job on. command.",
+    "--cluster_name",
+    type=str,
+    default=None,
+    required=True,
+    help="cluster name The name of the cluster to run the job on. command.",
   )
   custom_parser.add_argument(
-      "--base_output_directory",
-      type=str,
-      default=None,
-      required=True,
-      help="gcloud bucket to store artifacts.",
+    "--base_output_directory",
+    type=str,
+    default=None,
+    required=True,
+    help="gcloud bucket to store artifacts.",
   )
   custom_parser.add_argument(
-      "--device_type",
-      type=str,
-      default=None,
-      required=True,
-      help="tpu device type command.",
+    "--device_type",
+    type=str,
+    default=None,
+    required=True,
+    help="tpu device type command.",
   )
   custom_parser.add_argument(
-      "--num_slices",
-      type=int,
-      default="1",
-      help="Number of slices for tpu devices command.",
+    "--num_slices",
+    type=int,
+    default="1",
+    help="Number of slices for tpu devices command.",
   )
   custom_parser.add_argument(
-      "--model_name",
-      type=str,
-      choices=list(trillium_model_dict.keys())
-      + list(v5p_model_dict.keys())
-      + list(v5e_model_dict.keys())
-      + list(c4_pretrain_model_dict.keys()),
-      default=list(trillium_model_dict.keys())[0],
-      help="model to be benchmarked, supported models are the command choices.",
+    "--model_name",
+    type=str,
+    choices=list(trillium_model_dict.keys())
+    + list(v5p_model_dict.keys())
+    + list(v5e_model_dict.keys())
+    + list(c4_pretrain_model_dict.keys()),
+    default=list(trillium_model_dict.keys())[0],
+    help="model to be benchmarked, supported models are the command choices.",
   )
   custom_parser.add_argument(
-      "--libtpu_version",
-      type=str,
-      default="",
-      help="version of libtpu-nightly to be benchmarked command.",
+    "--libtpu_version",
+    type=str,
+    default="",
+    help="version of libtpu-nightly to be benchmarked command.",
   )
   custom_parser.add_argument(
-      "--libtpu_type",
-      type=str,
-      choices=[t.value for t in LibTpuType],
-      default="maxtext-docker",
-      help="type of libtpu to be benchmarked command.",
+    "--libtpu_type",
+    type=str,
+    choices=[t.value for t in LibTpuType],
+    default="maxtext-docker",
+    help="type of libtpu to be benchmarked command.",
   )
   custom_parser.add_argument(
-      "--base_docker_image",
-      type=str,
-      default="maxtext_base_image",
-      help="version of base docker image to be benchmarked command.",
+    "--base_docker_image",
+    type=str,
+    default="maxtext_base_image",
+    help="version of base docker image to be benchmarked command.",
   )
   custom_parser.add_argument(
-      "--xpk_path",
-      type=str,
-      default=os.path.join("~", "xpk"),
-      help="path to xpk dir.",
+    "--xpk_path",
+    type=str,
+    default=os.path.join("~", "xpk"),
+    help="path to xpk dir.",
   )
   custom_parser.add_argument(
-      "--priority",
-      type=str,
-      default="medium",
-      help="Priority the XPK workload should run with.",
+    "--priority",
+    type=str,
+    default="medium",
+    help="Priority the XPK workload should run with.",
   )
   custom_parser.add_argument(
-      "--num_steps",
-      type=int,
-      default=20,
-      help="Number of steps to run the workload for.",
+    "--num_steps",
+    type=int,
+    default=20,
+    help="Number of steps to run the workload for.",
   )
   custom_parser.add_argument(
-      "--max_restarts",
-      type=int,
-      default=0,
-      help="Number of restarts to attempt.",
+    "--max_restarts",
+    type=int,
+    default=0,
+    help="Number of restarts to attempt.",
   )
   # To create storage follow https://github.com/AI-Hypercomputer/xpk?tab=readme-ov-file#storage.
   custom_parser.add_argument(
-      "--xpk_storage",
-      default=None,
-      action="append",
-      help="Names of XPK storages the workload uses. Example, --xpk_storage=storage_test1 --xpk_storage=storage_test2",
+    "--xpk_storage",
+    default=None,
+    action="append",
+    help="Names of XPK storages the workload uses. Example, --xpk_storage=storage_test1 --xpk_storage=storage_test2",
   )
 
 
@@ -194,46 +195,46 @@ def add_on_device_runner_arguments(custom_parser: argparse.ArgumentParser):
     custom_parser: parser to add shared arguments to.
   """
   custom_parser.add_argument(
-      "--base_output_directory",
-      type=str,
-      default=None,
-      required=True,
-      help="gcloud bucket to store artifacts.",
+    "--base_output_directory",
+    type=str,
+    default=None,
+    required=True,
+    help="gcloud bucket to store artifacts.",
   )
   custom_parser.add_argument(
-      "--run_name",
-      type=str,
-      default=None,
-      help="run_name for model run",
+    "--run_name",
+    type=str,
+    default=None,
+    help="run_name for model run",
   )
   custom_parser.add_argument(
-      "--model_name",
-      type=str,
-      choices=list(trillium_model_dict.keys())
-      + list(v5p_model_dict.keys())
-      + list(v5e_model_dict.keys())
-      + list(c4_pretrain_model_dict.keys()),
-      default=list(trillium_model_dict.keys())[0],
-      help=("model to be benchmarked, supported models are the command choices."),
+    "--model_name",
+    type=str,
+    choices=list(trillium_model_dict.keys())
+    + list(v5p_model_dict.keys())
+    + list(v5e_model_dict.keys())
+    + list(c4_pretrain_model_dict.keys()),
+    default=list(trillium_model_dict.keys())[0],
+    help=("model to be benchmarked, supported models are the command choices."),
   )
   custom_parser.add_argument(
-      "--libtpu_version",
-      type=str,
-      default="",
-      help="version of libtpu-nightly to be benchmarked command.",
+    "--libtpu_version",
+    type=str,
+    default="",
+    help="version of libtpu-nightly to be benchmarked command.",
   )
   custom_parser.add_argument(
-      "--libtpu_type",
-      type=str,
-      choices=[t.value for t in LibTpuType],
-      default="maxtext-docker",
-      help="type of libtpu to be benchmarked command.",
+    "--libtpu_type",
+    type=str,
+    choices=[t.value for t in LibTpuType],
+    default="maxtext-docker",
+    help="type of libtpu to be benchmarked command.",
   )
   custom_parser.add_argument(
-      "--num_steps",
-      type=int,
-      default=20,
-      help="Number of steps to run the workload for.",
+    "--num_steps",
+    type=int,
+    default=20,
+    help="Number of steps to run the workload for.",
   )
 
 
@@ -244,30 +245,30 @@ def add_healthscan_runner_arguments(custom_parser: argparse.ArgumentParser):
     custom_parser: parser to add shared arguments to.
   """
   custom_parser.add_argument(
-      "--base_output_directory",
-      type=str,
-      default=None,
-      required=True,
-      help="gcloud bucket to store artifacts.",
+    "--base_output_directory",
+    type=str,
+    default=None,
+    required=True,
+    help="gcloud bucket to store artifacts.",
   )
   custom_parser.add_argument(
-      "--device_type",
-      type=str,
-      default=None,
-      required=True,
-      help="tpu device type command.",
+    "--device_type",
+    type=str,
+    default=None,
+    required=True,
+    help="tpu device type command.",
   )
   custom_parser.add_argument(
-      "--run_name",
-      type=str,
-      default=None,
-      help="run_name for model run",
+    "--run_name",
+    type=str,
+    default=None,
+    help="run_name for model run",
   )
   custom_parser.add_argument(
-      "--num_steps",
-      type=int,
-      default=20,
-      help="Number of steps to run the workload for.",
+    "--num_steps",
+    type=int,
+    default=20,
+    help="Number of steps to run the workload for.",
   )
 
 
@@ -292,10 +293,10 @@ def main() -> None:
 
   if options.runner != "healthscan":
     model = (
-        trillium_model_dict.get(options.model_name)
-        or v5e_model_dict.get(options.model_name)
-        or v5p_model_dict.get(options.model_name)
-        or c4_pretrain_model_dict.get(options.model_name)
+      trillium_model_dict.get(options.model_name)
+      or v5e_model_dict.get(options.model_name)
+      or v5p_model_dict.get(options.model_name)
+      or c4_pretrain_model_dict.get(options.model_name)
     )
     match options.libtpu_type:
       case LibTpuType.NIGHTLY.value:
@@ -309,33 +310,33 @@ def main() -> None:
   pw_config = None
   if options.use_pathways:
     pw_config = PathwaysConfig(
-        server_image=options.pathways_server_image,
-        proxy_server_image=options.pathways_proxy_server_image,
-        runner_image=options.pathways_runner_image,
-        colocated_python_sidecar_image=options.colocated_python_sidecar_image,
+      server_image=options.pathways_server_image,
+      proxy_server_image=options.pathways_proxy_server_image,
+      runner_image=options.pathways_runner_image,
+      colocated_python_sidecar_image=options.colocated_python_sidecar_image,
     )
 
   if options.runner == "xpk":
     cluster_config = XpkClusterConfig(
-        cluster_name=options.cluster_name, project=options.project, zone=options.zone, device_type=options.device_type
+      cluster_name=options.cluster_name, project=options.project, zone=options.zone, device_type=options.device_type
     )
 
     workload_config = WorkloadConfig(
-        model=model,
-        num_slices=options.num_slices,
-        num_steps=options.num_steps,
-        device_type=options.device_type,
-        base_output_directory=options.base_output_directory,
-        priority=options.priority,
-        max_restarts=options.max_restarts,
-        libtpu_type=libtpu_type,
-        libtpu_nightly_version=options.libtpu_version,
-        base_docker_image=options.base_docker_image,
-        xpk_path=options.xpk_path,
-        pathways_config=pw_config,
-        # Internal only support, not for customers
-        generate_metrics_and_upload_to_big_query=False,
-        xpk_storage=options.xpk_storage,
+      model=model,
+      num_slices=options.num_slices,
+      num_steps=options.num_steps,
+      device_type=options.device_type,
+      base_output_directory=options.base_output_directory,
+      priority=options.priority,
+      max_restarts=options.max_restarts,
+      libtpu_type=libtpu_type,
+      libtpu_nightly_version=options.libtpu_version,
+      base_docker_image=options.base_docker_image,
+      xpk_path=options.xpk_path,
+      pathways_config=pw_config,
+      # Internal only support, not for customers
+      generate_metrics_and_upload_to_big_query=False,
+      xpk_storage=options.xpk_storage,
     )
 
     xpk_benchmark_runner(cluster_config, [workload_config])
@@ -350,49 +351,48 @@ def main() -> None:
       except KeyError:
         options.run_name = f"{options.model_name}-{curr_date}"
     workload_config = WorkloadConfig(
-        model=model,
-        num_slices=None,
-        device_type=None,
-        base_docker_image=None,
-        num_steps=options.num_steps,
-        base_output_directory=options.base_output_directory,
-        libtpu_type=libtpu_type,
-        libtpu_nightly_version=options.libtpu_version,
-        run_name=options.run_name,
-        pathways_config=pw_config,
-        # Internal only support, not for customers
-        generate_metrics_and_upload_to_big_query=False,
+      model=model,
+      num_slices=None,
+      device_type=None,
+      base_docker_image=None,
+      num_steps=options.num_steps,
+      base_output_directory=options.base_output_directory,
+      libtpu_type=libtpu_type,
+      libtpu_nightly_version=options.libtpu_version,
+      run_name=options.run_name,
+      pathways_config=pw_config,
+      # Internal only support, not for customers
+      generate_metrics_and_upload_to_big_query=False,
     )
     on_device_benchmark_runner(workload_configs=[workload_config])
   elif options.runner == "healthscan":
-
     # Pick a model to run based on device_type to stress test
     models = {
-        "v5p-128": v5p_model_dict.llama2_70b_v5p_128,
-        "v5p-256": v5p_model_dict.llama4_scout_dropless_v5p_256,
-        "v5p-512": v5p_model_dict.deepseek_v3_ep_256_v5p_512,
-        "v5p-1024": v5p_model_dict.deepseek_v3_ep_256_v5p_512,
-        "v5p-2048": v5p_model_dict.deepseek_v3_ep_256_v5p_512,
-        "v6e-8": trillium_model_dict.llama2_7b_4096,
-        "v6e-16": trillium_model_dict.llama2_7b_4096,
-        "v6e-32": trillium_model_dict.llama2_7b_4096,
-        "v6e-64": trillium_model_dict.llama2_7b_4096,
-        "v6e-128": trillium_model_dict.llama2_70b_4096,
-        "v6e-256": trillium_model_dict.llama2_70b_4096,
+      "v5p-128": v5p_model_dict.llama2_70b_v5p_128,
+      "v5p-256": v5p_model_dict.llama4_scout_dropless_v5p_256,
+      "v5p-512": v5p_model_dict.deepseek_v3_ep_256_v5p_512,
+      "v5p-1024": v5p_model_dict.deepseek_v3_ep_256_v5p_512,
+      "v5p-2048": v5p_model_dict.deepseek_v3_ep_256_v5p_512,
+      "v6e-8": trillium_model_dict.llama2_7b_4096,
+      "v6e-16": trillium_model_dict.llama2_7b_4096,
+      "v6e-32": trillium_model_dict.llama2_7b_4096,
+      "v6e-64": trillium_model_dict.llama2_7b_4096,
+      "v6e-128": trillium_model_dict.llama2_70b_4096,
+      "v6e-256": trillium_model_dict.llama2_70b_4096,
     }
 
     curr_date = time.strftime("%Y%m%d")
     workload_config = WorkloadConfig(
-        model=models[options.device_type],
-        num_slices=None,
-        device_type=options.device_type,
-        libtpu_type=LibTpuType.MAXTEXT,
-        base_docker_image=None,
-        num_steps=options.num_steps,
-        base_output_directory=options.base_output_directory,
-        run_name=f"{curr_date}-health-test",
-        # Internal only support, not for customers
-        generate_metrics_and_upload_to_big_query=False,
+      model=models[options.device_type],
+      num_slices=None,
+      device_type=options.device_type,
+      libtpu_type=LibTpuType.MAXTEXT,
+      base_docker_image=None,
+      num_steps=options.num_steps,
+      base_output_directory=options.base_output_directory,
+      run_name=f"{curr_date}-health-test",
+      # Internal only support, not for customers
+      generate_metrics_and_upload_to_big_query=False,
     )
 
     workload_config.model.tuning_params["gcs_metrics"] = False

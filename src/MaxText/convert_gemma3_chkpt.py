@@ -98,26 +98,24 @@ def main(raw_args=None) -> None:
   transpose_gating_einsum = True
 
   jax_weights = {
-      "decoder": {
-          "decoder_norm": {"scale": params["transformer"]["final_norm"]["scale"] + 1},
+    "decoder": {
+      "decoder_norm": {"scale": params["transformer"]["final_norm"]["scale"] + 1},
+    },
+    "token_embedder": {"embedding": params["transformer"]["embedder"]["input_embedding"] * jnp.sqrt(embed_dim)},
+    "vision_encoder": {
+      "Gemma3VisionEncoderLayer_0": {
+        "embedding": {
+          "bias": params["SigLiPFromPatches_0"]["siglip_encoder"]["embedding"]["bias"],
+          "kernel": params["SigLiPFromPatches_0"]["siglip_encoder"]["embedding"]["kernel"],
+        },
+        "pos_embedding": params["SigLiPFromPatches_0"]["siglip_encoder"]["pos_embedding"],
+        "Transformer": params["SigLiPFromPatches_0"]["siglip_encoder"]["Transformer"],
       },
-      "token_embedder": {"embedding": params["transformer"]["embedder"]["input_embedding"] * jnp.sqrt(embed_dim)},
-      "vision_encoder": {
-          "Gemma3VisionEncoderLayer_0": {
-              "embedding": {
-                  "bias": params["SigLiPFromPatches_0"]["siglip_encoder"]["embedding"]["bias"],
-                  "kernel": params["SigLiPFromPatches_0"]["siglip_encoder"]["embedding"]["kernel"],
-              },
-              "pos_embedding": params["SigLiPFromPatches_0"]["siglip_encoder"]["pos_embedding"],
-              "Transformer": params["SigLiPFromPatches_0"]["siglip_encoder"]["Transformer"],
-          },
-          "VisionEmbedder_0": {
-              "mm_input_projection": params["transformer"]["embedder"]["mm_input_projection"],
-              "mm_soft_embedding_norm": {
-                  "scale": params["transformer"]["embedder"]["mm_soft_embedding_norm"]["scale"] + 1
-              },
-          },
+      "VisionEmbedder_0": {
+        "mm_input_projection": params["transformer"]["embedder"]["mm_input_projection"],
+        "mm_soft_embedding_norm": {"scale": params["transformer"]["embedder"]["mm_soft_embedding_norm"]["scale"] + 1},
       },
+    },
   }
   # Rename MlpBlock_0 to MlpBlockViT_0 in vision encoder
   # This is because the gemma3 model has MlpBlock in the vision encoder,
@@ -126,41 +124,41 @@ def main(raw_args=None) -> None:
   vision_encoder_weights = rename_nested_keys(jax_weights["vision_encoder"], "MlpBlock_0", "MlpBlockViT_0")
   jax_weights["vision_encoder"] = vision_encoder_weights
   self_attention = dict(
-      {
-          "query": {"kernel": []},
-          "key": {"kernel": []},
-          "value": {"kernel": []},
-          "out": {"kernel": []},
-          "query_norm": {"scale": []},
-          "key_norm": {"scale": []},
-      }
+    {
+      "query": {"kernel": []},
+      "key": {"kernel": []},
+      "value": {"kernel": []},
+      "out": {"kernel": []},
+      "query_norm": {"scale": []},
+      "key_norm": {"scale": []},
+    }
   )
 
   layer_weight = dict(
-      {
-          "mlp": {
-              "wi_0": {"kernel": []},
-              "wi_1": {"kernel": []},
-              "wo": {"kernel": []},
-          },
-          "pre_self_attention_norm": {"scale": []},
-          "pre_ffw_norm": {"scale": []},
-          "post_self_attention_norm": {"scale": []},
-          "post_ffw_norm": {"scale": []},
-      }
+    {
+      "mlp": {
+        "wi_0": {"kernel": []},
+        "wi_1": {"kernel": []},
+        "wo": {"kernel": []},
+      },
+      "pre_self_attention_norm": {"scale": []},
+      "pre_ffw_norm": {"scale": []},
+      "post_self_attention_norm": {"scale": []},
+      "post_ffw_norm": {"scale": []},
+    }
   )
 
   for layer_idx in range(0, num_layers):
     in_layer_name = "layer_" + str(layer_idx)
 
     self_attention["query"]["kernel"].append(
-        params["transformer"][in_layer_name]["attn"]["q_einsum"]["w"].transpose((1, 0, 2))  # * query_pre_attn_scalar
+      params["transformer"][in_layer_name]["attn"]["q_einsum"]["w"].transpose((1, 0, 2))  # * query_pre_attn_scalar
     )
     self_attention["key"]["kernel"].append(
-        params["transformer"][in_layer_name]["attn"]["kv_einsum"]["w"][0].transpose((1, 0, 2))
+      params["transformer"][in_layer_name]["attn"]["kv_einsum"]["w"][0].transpose((1, 0, 2))
     )
     self_attention["value"]["kernel"].append(
-        params["transformer"][in_layer_name]["attn"]["kv_einsum"]["w"][1].transpose((1, 0, 2))
+      params["transformer"][in_layer_name]["attn"]["kv_einsum"]["w"][1].transpose((1, 0, 2))
     )
     self_attention["out"]["kernel"].append(params["transformer"][in_layer_name]["attn"]["attn_vec_einsum"]["w"])
 
@@ -170,10 +168,10 @@ def main(raw_args=None) -> None:
     # mlp
     if transpose_gating_einsum:
       layer_weight["mlp"]["wi_0"]["kernel"].append(
-          np.transpose(params["transformer"][in_layer_name]["mlp"]["gating_einsum"]["w"][0])
+        np.transpose(params["transformer"][in_layer_name]["mlp"]["gating_einsum"]["w"][0])
       )
       layer_weight["mlp"]["wi_1"]["kernel"].append(
-          np.transpose(params["transformer"][in_layer_name]["mlp"]["gating_einsum"]["w"][1])
+        np.transpose(params["transformer"][in_layer_name]["mlp"]["gating_einsum"]["w"][1])
       )
     else:
       layer_weight["mlp"]["wi_0"]["kernel"].append(params["transformer"][in_layer_name]["mlp"]["gating_einsum"]["w"][0])
@@ -182,12 +180,12 @@ def main(raw_args=None) -> None:
     layer_weight["mlp"]["wo"]["kernel"].append(params["transformer"][in_layer_name]["mlp"]["linear"]["w"])
 
     layer_weight["pre_self_attention_norm"]["scale"].append(
-        params["transformer"][in_layer_name]["pre_attention_norm"]["scale"] + 1
+      params["transformer"][in_layer_name]["pre_attention_norm"]["scale"] + 1
     )
     layer_weight["pre_ffw_norm"]["scale"].append(params["transformer"][in_layer_name]["pre_ffw_norm"]["scale"] + 1)
 
     layer_weight["post_self_attention_norm"]["scale"].append(
-        params["transformer"][in_layer_name]["post_attention_norm"]["scale"] + 1
+      params["transformer"][in_layer_name]["post_attention_norm"]["scale"] + 1
     )
     layer_weight["post_ffw_norm"]["scale"].append(params["transformer"][in_layer_name]["post_ffw_norm"]["scale"] + 1)
 
@@ -203,11 +201,11 @@ def main(raw_args=None) -> None:
   layer_weight["mlp"]["wo"]["kernel"] = np.array(layer_weight["mlp"]["wo"]["kernel"]).transpose((1, 0, 2))
 
   layer_weight["pre_self_attention_norm"]["scale"] = np.array(layer_weight["pre_self_attention_norm"]["scale"]).transpose(
-      (1, 0)
+    (1, 0)
   )
   layer_weight["pre_ffw_norm"]["scale"] = np.array(layer_weight["pre_ffw_norm"]["scale"]).transpose((1, 0))
   layer_weight["post_self_attention_norm"]["scale"] = np.array(
-      layer_weight["post_self_attention_norm"]["scale"]
+    layer_weight["post_self_attention_norm"]["scale"]
   ).transpose((1, 0))
   layer_weight["post_ffw_norm"]["scale"] = np.array(layer_weight["post_ffw_norm"]["scale"]).transpose((1, 0))
 
@@ -229,11 +227,15 @@ def main(raw_args=None) -> None:
   save_interval_steps = 1
 
   checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
-      args.maxtext_model_path, enable_checkpointing, async_checkpointing, save_interval_steps
+    args.maxtext_model_path, enable_checkpointing, async_checkpointing, save_interval_steps
   )
 
   state_new = train_state.TrainState(
-      step=0, apply_fn=None, params={"params": jax_weights}, tx=None, opt_state={}  # type: ignore
+    step=0,
+    apply_fn=None,
+    params={"params": jax_weights},
+    tx=None,
+    opt_state={},  # type: ignore
   )
 
   if checkpoint_manager is not None:

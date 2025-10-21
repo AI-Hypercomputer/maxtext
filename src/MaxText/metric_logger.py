@@ -51,7 +51,7 @@ def record_activation_metrics(output_metrics, intermediate_outputs, config):
 
     for layer_num in range(config.num_decoder_layers):
       output_metrics["scalar"][f"activ_fraction_zero/layer_{layer_num:03d}"] = metrics_dict["activation_fraction_zero"][
-          0
+        0
       ][layer_num]
       output_metrics["scalar"][f"activ_mean/layer_{layer_num:03d}"] = metrics_dict["activation_mean"][0][layer_num]
       output_metrics["scalar"][f"activ_stdev/layer_{layer_num:03d}"] = metrics_dict["activation_stdev"][0][layer_num]
@@ -106,11 +106,11 @@ class MetricLogger:
     if is_training:
       loss = metrics["scalar"]["learning/loss"]
       log_message = (
-          f"completed step: {step}, seconds: {metrics['scalar']['perf/step_time_seconds']:.3f}, "
-          f"TFLOP/s/device: {metrics['scalar']['perf/per_device_tflops_per_sec']:.3f}, "
-          f"Tokens/s/device: {metrics['scalar']['perf/per_device_tokens_per_sec']:.3f}, "
-          f"total_weights: {metrics['scalar']['learning/total_weights']}, "
-          f"loss: {loss:.3f}"
+        f"completed step: {step}, seconds: {metrics['scalar']['perf/step_time_seconds']:.3f}, "
+        f"TFLOP/s/device: {metrics['scalar']['perf/per_device_tflops_per_sec']:.3f}, "
+        f"Tokens/s/device: {metrics['scalar']['perf/per_device_tokens_per_sec']:.3f}, "
+        f"total_weights: {metrics['scalar']['learning/total_weights']}, "
+        f"loss: {loss:.3f}"
       )
 
       if self.config.mtp_num_layers > 0:
@@ -120,15 +120,15 @@ class MetricLogger:
 
     else:
       log_message = (
-          f"eval metrics after step: {step},"
-          f" loss={metrics['scalar']['eval/avg_loss']:.3f},"
-          f" total_weights={metrics['scalar']['eval/total_weights']}"
+        f"eval metrics after step: {step},"
+        f" loss={metrics['scalar']['eval/avg_loss']:.3f},"
+        f" total_weights={metrics['scalar']['eval/total_weights']}"
       )
 
       if self.config.mtp_num_layers > 0:
         log_message += (
-            f", avg_mtp_loss={metrics['scalar']['eval/avg_mtp_loss']:.3f},"
-            f" avg_mtp_acceptance_rate={metrics['scalar']['eval/avg_mtp_acceptance_rate_percent']:.2f}%"
+          f", avg_mtp_loss={metrics['scalar']['eval/avg_mtp_loss']:.3f},"
+          f" avg_mtp_acceptance_rate={metrics['scalar']['eval/avg_mtp_acceptance_rate_percent']:.2f}%"
         )
 
     max_logging.log(log_message)
@@ -179,7 +179,7 @@ class MetricLogger:
     num_model_parameters = max_utils.calculate_num_params_from_pytree(params)
     self.metadata[MetadataKey.PER_DEVICE_TFLOPS], _, _ = maxtext_utils.calculate_tflops_training_per_device(self.config)
     self.metadata[MetadataKey.PER_DEVICE_TOKENS] = maxtext_utils.calculate_tokens_training_per_device(self.config)
-    max_logging.log(f"number parameters: {num_model_parameters/1e9:.3f} billion")
+    max_logging.log(f"number parameters: {num_model_parameters / 1e9:.3f} billion")
     max_utils.add_text_to_summary_writer("num_model_parameters", str(num_model_parameters), self.writer)
     max_utils.add_text_to_summary_writer("libtpu_init_args", os.environ["LIBTPU_INIT_ARGS"], self.writer)
     maxtext_utils.add_config_to_summary_writer(self.config, self.writer)
@@ -215,11 +215,11 @@ class MetricLogger:
     metrics["scalar"].update({"perf/step_time_seconds": step_time})
     metrics["scalar"].update({"perf/per_device_tflops": self.metadata[MetadataKey.PER_DEVICE_TFLOPS]})
     metrics["scalar"].update(
-        {"perf/per_device_tflops_per_sec": (self.metadata[MetadataKey.PER_DEVICE_TFLOPS] / step_time)}
+      {"perf/per_device_tflops_per_sec": (self.metadata[MetadataKey.PER_DEVICE_TFLOPS] / step_time)}
     )
     metrics["scalar"].update({"perf/per_device_tokens": self.metadata[MetadataKey.PER_DEVICE_TOKENS]})
     metrics["scalar"].update(
-        {"perf/per_device_tokens_per_sec": (self.metadata[MetadataKey.PER_DEVICE_TOKENS] / step_time)}
+      {"perf/per_device_tokens_per_sec": (self.metadata[MetadataKey.PER_DEVICE_TOKENS] / step_time)}
     )
     metrics["scalar"].update({"learning/current_learning_rate": self.learning_rate_schedule(step)})
     if self.performance_metric_queue:
@@ -229,40 +229,40 @@ class MetricLogger:
     """Records eval metrics and writes the metrics to GCS and/or to TensorBoard."""
     if metrics:
       self.cumulative_eval_metrics["scalar"]["eval/total_loss"] += float(
-          metrics["scalar"].get("evaluation/total_loss", 0.0)
+        metrics["scalar"].get("evaluation/total_loss", 0.0)
       )
       self.cumulative_eval_metrics["scalar"]["eval/total_weights"] += float(
-          metrics["scalar"].get("evaluation/total_weights", 0.0)
+        metrics["scalar"].get("evaluation/total_weights", 0.0)
       )
       self.cumulative_eval_metrics["scalar"]["eval/moe_lb_loss"] += float(
-          metrics["scalar"].get("evaluation/moe_lb_loss", 0.0)
+        metrics["scalar"].get("evaluation/moe_lb_loss", 0.0)
       )
       self.cumulative_eval_metrics["scalar"]["eval/mtp_loss"] += float(metrics["scalar"].get("evaluation/mtp_loss", 0.0))
       self.cumulative_eval_metrics["scalar"]["eval/mtp_acceptance_rate_percent"] += float(
-          metrics["scalar"].get("evaluation/mtp_acceptance_rate_percent", 0.0)
+        metrics["scalar"].get("evaluation/mtp_acceptance_rate_percent", 0.0)
       )
       if self.config.use_dpo:
         self.cumulative_eval_metrics["scalar"]["eval/dpo_reward_accuracy"] += float(
-            metrics["scalar"].get("evaluation/dpo_reward_accuracy", 0.0)
+          metrics["scalar"].get("evaluation/dpo_reward_accuracy", 0.0)
         )
 
     if eval_step_count:
       eval_loss = self.cumulative_eval_metrics["scalar"]["eval/total_loss"] / (
-          self.cumulative_eval_metrics["scalar"]["eval/total_weights"] + EPS
+        self.cumulative_eval_metrics["scalar"]["eval/total_weights"] + EPS
       )
       self.cumulative_eval_metrics["scalar"]["eval/avg_loss"] = eval_loss
       self.cumulative_eval_metrics["scalar"]["eval/avg_moe_lb_loss"] = (
-          self.cumulative_eval_metrics["scalar"]["eval/moe_lb_loss"] / eval_step_count
+        self.cumulative_eval_metrics["scalar"]["eval/moe_lb_loss"] / eval_step_count
       )
       self.cumulative_eval_metrics["scalar"]["eval/avg_mtp_loss"] = (
-          self.cumulative_eval_metrics["scalar"]["eval/mtp_loss"] / eval_step_count
+        self.cumulative_eval_metrics["scalar"]["eval/mtp_loss"] / eval_step_count
       )
       self.cumulative_eval_metrics["scalar"]["eval/avg_mtp_acceptance_rate_percent"] = (
-          self.cumulative_eval_metrics["scalar"]["eval/mtp_acceptance_rate_percent"] / eval_step_count
+        self.cumulative_eval_metrics["scalar"]["eval/mtp_acceptance_rate_percent"] / eval_step_count
       )
       if self.config.use_dpo:
         self.cumulative_eval_metrics["scalar"]["eval/dpo_reward_accuracy"] = (
-            self.cumulative_eval_metrics["scalar"]["eval/dpo_reward_accuracy"] / eval_step_count
+          self.cumulative_eval_metrics["scalar"]["eval/dpo_reward_accuracy"] / eval_step_count
         )
 
       self.write_metrics(self.cumulative_eval_metrics, step, is_training=False)

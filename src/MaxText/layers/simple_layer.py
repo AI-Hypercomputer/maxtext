@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-""" Simple decoder layers for testing and debugging purposes."""
+"""Simple decoder layers for testing and debugging purposes."""
 
 from jax import numpy as jnp
 from jax.sharding import Mesh
@@ -31,14 +31,13 @@ class SimpleDecoderLayer(nnx.Module):
   """Decoder layer consisting of a single [embed, embed] weight matrix."""
 
   def __init__(
-      self,
-      config: Config,
-      mesh: Mesh,
-      model_mode: str,
-      rngs: nnx.Rngs,
-      quant: Optional[quantizations.AqtQuantization] = None,
+    self,
+    config: Config,
+    mesh: Mesh,
+    model_mode: str,
+    rngs: nnx.Rngs,
+    quant: Optional[quantizations.AqtQuantization] = None,
   ) -> None:
-
     self.config = config
     self.mesh = mesh
     self.model_mode = model_mode
@@ -48,11 +47,11 @@ class SimpleDecoderLayer(nnx.Module):
     init_fn = nnx.with_partitioning(nnx.initializers.lecun_normal(), sharding=("embed", "mlp"), mesh=self.mesh)
 
     self.weights = nnx.Param(
-        init_fn(self.rngs.params(), (self.config.emb_dim, self.config.emb_dim)),
+      init_fn(self.rngs.params(), (self.config.emb_dim, self.config.emb_dim)),
     )
 
   def __call__(
-      self, inputs: jnp.ndarray, positions, segmentation, deterministic, model_mode, previous_chunk=None, page_state=None
+    self, inputs: jnp.ndarray, positions, segmentation, deterministic, model_mode, previous_chunk=None, page_state=None
   ):
     if self.config.scan_layers:
       return inputs @ self.weights.astype(inputs.dtype), None
@@ -60,8 +59,8 @@ class SimpleDecoderLayer(nnx.Module):
 
 
 SimpleDecoderLayerToLinen = nnx_wrappers.to_linen_class(
-    SimpleDecoderLayer,
-    base_metadata_fn=variable_to_logically_partitioned,
+  SimpleDecoderLayer,
+  base_metadata_fn=variable_to_logically_partitioned,
 )
 
 
@@ -69,14 +68,13 @@ class SimpleMlpDecoderLayer(nnx.Module):
   """Decoder layer consisting of [embed,mlp] followed by an [mlp,embed] matmul."""
 
   def __init__(
-      self,
-      config: Config,
-      mesh: Mesh,
-      model_mode: str,
-      rngs: nnx.Rngs,
-      quant: Optional[quantizations.AqtQuantization] = None,
+    self,
+    config: Config,
+    mesh: Mesh,
+    model_mode: str,
+    rngs: nnx.Rngs,
+    quant: Optional[quantizations.AqtQuantization] = None,
   ) -> None:
-
     self.config = config
     self.mesh = mesh
     self.model_mode = model_mode
@@ -86,25 +84,25 @@ class SimpleMlpDecoderLayer(nnx.Module):
     init_ff1_fn = nnx.with_partitioning(nnx.initializers.lecun_normal(), sharding=("embed", "mlp"), mesh=self.mesh)
 
     self.ff_1 = nnx.Param(
-        init_ff1_fn(self.rngs.params(), (self.config.emb_dim, self.config.mlp_dim)),
+      init_ff1_fn(self.rngs.params(), (self.config.emb_dim, self.config.mlp_dim)),
     )
 
     init_ff2_fn = nnx.with_partitioning(nnx.initializers.lecun_normal(), sharding=("mlp", "embed"), mesh=self.mesh)
 
     self.ff_2 = nnx.Param(
-        init_ff2_fn(self.rngs.params(), (self.config.mlp_dim, self.config.emb_dim)),
+      init_ff2_fn(self.rngs.params(), (self.config.mlp_dim, self.config.emb_dim)),
     )
 
   def __call__(
-      self,
-      inputs: jnp.ndarray,
-      positions,
-      segmentation,
-      deterministic,
-      model_mode,
-      previous_chunk=None,
-      page_state=None,
-      slot=0,
+    self,
+    inputs: jnp.ndarray,
+    positions,
+    segmentation,
+    deterministic,
+    model_mode,
+    previous_chunk=None,
+    page_state=None,
+    slot=0,
   ):
     intermediate = inputs @ self.ff_1.astype(inputs.dtype)
     output = intermediate @ self.ff_2.astype(inputs.dtype)
@@ -114,6 +112,6 @@ class SimpleMlpDecoderLayer(nnx.Module):
 
 
 SimpleMlpDecoderLayerToLinen = nnx_wrappers.to_linen_class(
-    SimpleMlpDecoderLayer,
-    base_metadata_fn=variable_to_logically_partitioned,
+  SimpleMlpDecoderLayer,
+  base_metadata_fn=variable_to_logically_partitioned,
 )

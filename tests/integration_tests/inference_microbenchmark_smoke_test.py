@@ -12,7 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-""" Smoke test for inference microbenchmark"""
+"""Smoke test for inference microbenchmark"""
+
 import jax
 import os.path
 import pytest
@@ -32,19 +33,19 @@ class Inference_Microbenchmark(unittest.TestCase):
   def test(self):
     jax.config.update("jax_default_prng_impl", "unsafe_rbg")
     config = pyconfig.initialize(
-        [
-            None,
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "tpu_smoke_test.yml"),
-            rf"tokenizer_path={os.path.join('src', MAXTEXT_ASSETS_ROOT, 'tokenizer.llama2')}",
-            "ici_autoregressive_parallelism=-1",
-            "ici_fsdp_parallelism=1",
-            "max_prefill_predict_length=1024",
-            "max_target_length=2048",
-            "scan_layers=false",
-            "weight_dtype=bfloat16",
-            "attention=dot_product",
-            "skip_jax_distributed_system=True",
-        ]
+      [
+        None,
+        os.path.join(MAXTEXT_PKG_DIR, "configs", "tpu_smoke_test.yml"),
+        rf"tokenizer_path={os.path.join('src', MAXTEXT_ASSETS_ROOT, 'tokenizer.llama2')}",
+        "ici_autoregressive_parallelism=-1",
+        "ici_fsdp_parallelism=1",
+        "max_prefill_predict_length=1024",
+        "max_target_length=2048",
+        "scan_layers=false",
+        "weight_dtype=bfloat16",
+        "attention=dot_product",
+        "skip_jax_distributed_system=True",
+      ]
     )
     run_benchmarks(config)
 
