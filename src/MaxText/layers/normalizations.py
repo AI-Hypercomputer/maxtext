@@ -18,6 +18,7 @@ from typing import Any
 
 from flax import linen as nn
 from flax import nnx
+from flax.linen import initializers as linen_initializers
 from jax import lax
 import jax
 import jax.numpy as jnp
@@ -26,7 +27,7 @@ from MaxText import max_logging
 from MaxText import max_utils
 from MaxText.layers import nnx_wrappers
 from MaxText.layers.initializers import Initializer, variable_to_logically_partitioned
-from MaxText.common_types import Array, ShardMode
+from MaxText.common_types import Array, DType, ShardMode
 
 
 class RMSNorm(nnx.Module):
@@ -72,9 +73,90 @@ class RMSNorm(nnx.Module):
     if self.shard_mode != ShardMode.EXPLICIT:
       out_sharding = None
 
-    scale = jnp.asarray(scale, self.dtype)
+    scale = jnp.asarray(scale, self.dtype)  
     # broadcast 2nd input then element-wise mul
     return jnp.einsum("i...k,...k->i...k", y, scale, out_sharding=out_sharding)
+  
+class Qwen3NextRMSNorm(nnx.Module):
+  """
+  Used for input and post attention layernorms
+  in Qwen3NextDecoderLayer.
+
+  This normalization layer is specific to Qwen3-Next. Key characteristics:
+  1.  The learnable scale parameter `weight` is initialized to ZEROS.
+  2.  The scale is applied as `(1.0 + self.weight)`, making the initial scale effectively 1.0.
+      This matches the PyTorch implementation of Qwen3NextRMSNorm.
+  3.  It is NOT a zero-centered normalization (as in the blog); it still uses the root mean square of the inputs.
+      The standard `MaxText.layers.normalizations.RMSNorm` also does not center the data.
+  4.  This differs from the standard MaxText `RMSNorm`
+      (MaxText.layers.normalizations.RMSNorm) which initializes its scale to ONES
+      and applies it multiplicatively (`y * scale`).
+  """
+
+  def __init__(self, num_features: int, eps: float, dtype: DType, weight_dtype: DType, *, rngs: nnx.Rngs):
+    self.num_features = num_features
+    self.eps = eps
+    self.dtype = dtype
+    self.weight_dtype = weight_dtype
+
+
+    self.scale = nnx.Param(linen_initializers.zeros(rngs.params(), (self.num_features,), self.weight_dtype))
+
+  def __call__(self, x: Array) -> Array:
+    """Applies RMSNorm to the input tensor."""
+    weight = self.scale.value
+    x = x.astype(jnp.float32)
+    variance = jnp.mean(jnp.square(x), axis=-1, keepdims=True)
+    x = x * jax.lax.rsqrt(variance + self.eps)
+    # Add 1.0 to the learnable weight
+    x = x * (1.0 + weight.astype(jnp.float32))
+    return x.astype(self.dtype)
+  
+  
+class Qwen3NextRMSNormGated(nnx.Module):
+  """
+  This applies RMS Normalization and then a gated activation function (SiLU).
+  This is used within the Qwen3NextGatedDeltaNet.
+
+  Attributes:
+    num_features: The number of features in the input.
+    eps: A small epsilon value to prevent division by zero in RMSNorm.
+    dtype: The datatype of the computation.
+    weight_dtype: The datatype of the weights.
+  """
+
+  def __init__(self, num_features: int, eps: float, dtype: DType, weight_dtype: DType, *, rngs: nnx.Rngs):
+    self.num_features = num_features
+    self.eps = eps
+    self.dtype = dtype
+    self.weight_dtype = weight_dtype
+
+    self.scale = nnx.Param(nnx.initializers.ones(rngs.params(), (self.num_features,), self.weight_dtype))
+
+  def __call__(self, hidden_states: Array, gate: Array) -> Array:
+    """
+    Applies RMSNorm and then a SiLU gate.
+
+    Args:
+      hidden_states: The input array to be normalized (o). Shape: (..., F)
+      gate: The gating array for the activation (z). Shape: (..., F)
+            where F is num_features.
+
+    Returns:
+      The normalized and gated output array. Shape: (..., F)
+    """
+    weight = self.scale.value
+
+    # RMS Normalization logic
+    hidden_states_f32 = hidden_states.astype(jnp.float32)
+    variance = jnp.mean(jnp.square(hidden_states_f32), axis=-1, keepdims=True)
+    normalized_states = hidden_states_f32 * jax.lax.rsqrt(variance + self.eps)
+    normalized_states = normalized_states * weight.astype(jnp.float32)
+
+    # Gated Activation using SiLU (Sigmoid-weighted Linear Unit)
+    gated_states = normalized_states * jax.nn.silu(gate.astype(jnp.float32))
+
+    return gated_states.astype(self.dtype)
 
 
 def rms_norm(

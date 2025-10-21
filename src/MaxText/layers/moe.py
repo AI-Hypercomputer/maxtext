@@ -36,7 +36,7 @@ from MaxText.kernels import megablox as mblx
 from MaxText.layers import attentions, linears, quantizations, nnx_wrappers
 from MaxText.layers.initializers import NdInitializer, nd_dense_init, default_bias_init, variable_to_logically_partitioned
 
-from tokamax._src.ops.ragged_dot import api as tokamax_api
+# from tokamax._src.ops.ragged_dot import api as tokamax_api
 
 set_xla_metadata = xla_metadata.set_xla_metadata
 
