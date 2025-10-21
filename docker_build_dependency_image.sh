@@ -126,7 +126,7 @@ if [[ -z ${LIBTPU_GCS_PATH+x} ]] ; then
       docker build --network host --build-arg MODE=${MODE} --build-arg JAX_VERSION=$JAX_VERSION --build-arg LIBTPU_GCS_PATH=$LIBTPU_GCS_PATH --build-arg DEVICE=$DEVICE -f ./maxtext_db_dependencies.Dockerfile -t ${LOCAL_IMAGE_NAME} .
     elif [[ ${INSTALL_GRPO} -eq 1 && ${DEVICE} == "tpu" ]]; then
       echo "Installing MaxText stable mode dependencies for GRPO BASEIMAGE=$BASEIMAGE"
-      docker build --network host --build-arg MODE=stable --build-arg JAX_VERSION=$JAX_VERSION --build-arg LIBTPU_GCS_PATH=$LIBTPU_GCS_PATH --build-arg DEVICE=$DEVICE  --build-arg BASEIMAGE=$BASEIMAGE -f ./maxtext_dependencies.Dockerfile -t ${LOCAL_IMAGE_NAME} .
+      docker build --network host --build-arg MODE=stable --build-arg JAX_VERSION=$JAX_VERSION --build-arg LIBTPU_GCS_PATH=$LIBTPU_GCS_PATH --build-arg DEVICE=$DEVICE  -f ./maxtext_dependencies.Dockerfile -t ${LOCAL_IMAGE_NAME} .
     else
       docker build --network host --build-arg MODE=${MODE} --build-arg JAX_VERSION=$JAX_VERSION --build-arg LIBTPU_GCS_PATH=$LIBTPU_GCS_PATH --build-arg DEVICE=$DEVICE -f ./maxtext_dependencies.Dockerfile -t ${LOCAL_IMAGE_NAME} .
     fi
@@ -142,18 +142,14 @@ if [[ ${INSTALL_GRPO} -eq 1 ]] ; then
     exit 1
   fi
 
-  # To install tpu_commons from a local path, we copy it into the build context, excluding __pycache__.
-  # This assumes vllm, tunix, tpu_commons is a sibling directory to the current one (maxtext).
+  # To install from local paths, we copy vllm and tpu_commons into the build context.
+  # This assumes vllm and tpu_commons are sibling directories to the current one (maxtext).
+  echo "Copying local vllm and tpu_commons directories into the build context..."
   rsync -a --exclude='__pycache__' ../tpu_commons .
-  # To install vllm from a local path, we copy it into the build context, excluding __pycache__.
-  # This assumes vllm is a sibling directory to the current one (maxtext).
   rsync -a --exclude='__pycache__' ../vllm .
 
-  # rsync -a --exclude='__pycache__' ../tunix .
-
-  # The cleanup is set to run even if the build fails to remove the copied directory.
-  # trap "rm -rf ./tpu_commons ./vllm ./tunix" EXIT INT TERM
-  trap "rm -rf ./tpu_commons ./vllm " EXIT INT TERM
+  # The cleanup is set to run even if the build fails to remove the copied directories.
+  trap "echo 'Cleaning up copied directories...' && rm -rf ./tpu_commons ./vllm" EXIT INT TERM
 
   docker build \
     --network host \
