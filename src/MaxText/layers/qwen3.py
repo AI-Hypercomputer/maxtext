@@ -26,17 +26,16 @@ import jax.numpy as jnp
 
 from flax import linen as nn
 from flax import nnx
-from flax.linen import initializers as linen_initializers
 
 from MaxText import max_utils
-from MaxText.common_types import Config, DType, Array
+from MaxText.common_types import Config, DType, Array, BATCH, LENGTH_NO_EXP, EMBED
 from MaxText.layers import attentions
 from MaxText.layers import initializers as max_initializers
 from MaxText.layers import linears
 from MaxText.layers import moe
 from MaxText.layers import nnx_wrappers
 from MaxText.layers import quantizations
-from MaxText.layers.normalizations import RMSNorm, l2norm
+from MaxText.layers.normalizations import RMSNorm, l2norm, Qwen3NextRMSNorm, Qwen3NextRMSNormGated
 from MaxText.layers.quantizations import AqtQuantization as Quant
 from MaxText.inference import page_manager
 from MaxText.layers.attentions import Attention
@@ -282,88 +281,6 @@ def jax_chunk_gated_delta_rule(
   return core_attn_out, final_state if output_final_state else None
 
 
-class Qwen3NextRMSNorm(nnx.Module):
-  """
-  Used for input and post attention layernorms
-  in Qwen3NextDecoderLayer.
-
-  This normalization layer is specific to Qwen3-Next. Key characteristics:
-  1.  The learnable scale parameter `weight` is initialized to ZEROS.
-  2.  The scale is applied as `(1.0 + self.weight)`, making the initial scale effectively 1.0.
-      This matches the PyTorch implementation of Qwen3NextRMSNorm.
-  3.  It is NOT a zero-centered normalization (as in the blog); it still uses the root mean square of the inputs.
-      The standard `MaxText.layers.normalizations.RMSNorm` also does not center the data.
-  4.  This differs from the standard MaxText `RMSNorm`
-      (MaxText.layers.normalizations.RMSNorm) which initializes its scale to ONES
-      and applies it multiplicatively (`y * scale`).
-  """
-
-  def __init__(self, num_features: int, eps: float, dtype: DType, weight_dtype: DType, *, rngs: nnx.Rngs):
-    self.num_features = num_features
-    self.eps = eps
-    self.dtype = dtype
-    self.weight_dtype = weight_dtype
-
-    self.weight = nnx.Param(linen_initializers.zeros(rngs.params(), (self.num_features,), self.weight_dtype))
-
-  def __call__(self, x: Array) -> Array:
-    """Applies RMSNorm to the input tensor."""
-    weight = self.weight.value
-    x_dtype = x.dtype
-    x = x.astype(jnp.float32)
-    variance = jnp.mean(jnp.square(x), axis=-1, keepdims=True)
-    x = x * jax.lax.rsqrt(variance + self.eps)
-    # Add 1.0 to the learnable weight
-    x = x * (1.0 + weight.astype(jnp.float32))
-    return x.astype(x_dtype)
-
-
-class Qwen3NextRMSNormGated(nnx.Module):
-  """
-  This applies RMS Normalization and then a gated activation function (SiLU).
-  This is used within the Qwen3NextGatedDeltaNet.
-
-  Attributes:
-    num_features: The number of features in the input.
-    eps: A small epsilon value to prevent division by zero in RMSNorm.
-    dtype: The datatype of the computation.
-    weight_dtype: The datatype of the weights.
-  """
-
-  def __init__(self, num_features: int, eps: float, dtype: DType, weight_dtype: DType, *, rngs: nnx.Rngs):
-    self.num_features = num_features
-    self.eps = eps
-    self.dtype = dtype
-    self.weight_dtype = weight_dtype
-
-    self.weight = nnx.Param(nnx.initializers.ones(rngs.params(), (self.num_features,), self.weight_dtype))
-
-  def __call__(self, hidden_states: Array, gate: Array) -> Array:
-    """
-    Applies RMSNorm and then a SiLU gate.
-
-    Args:
-      hidden_states: The input array to be normalized (o). Shape: (..., F)
-      gate: The gating array for the activation (z). Shape: (..., F)
-            where F is num_features.
-
-    Returns:
-      The normalized and gated output array. Shape: (..., F)
-    """
-    weight = self.weight.value
-
-    # RMS Normalization logic
-    hidden_states_f32 = hidden_states.astype(jnp.float32)
-    variance = jnp.mean(jnp.square(hidden_states_f32), axis=-1, keepdims=True)
-    normalized_states = hidden_states_f32 * jax.lax.rsqrt(variance + self.eps)
-    normalized_states = normalized_states * weight.astype(jnp.float32)
-
-    # Gated Activation using SiLU (Sigmoid-weighted Linear Unit)
-    gated_states = normalized_states * jax.nn.silu(gate.astype(jnp.float32))
-
-    return gated_states.astype(self.dtype)
-
-
 class Qwen3NextGatedDeltaNet(nnx.Module):
   """
   This module implements the full end-to-end logic of a Gated Delta Network layer.
@@ -551,7 +468,31 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
 
 
 class Qwen3NextFullAttention(nnx.Module):
-  """Placeholder for Qwen3-Next full attention."""
+  """Qwen3-Next Full Attention Layer.
+
+  This module implements the full self-attention mechanism as used in
+  Qwen3-Next models for layers that do not use the Gated Delta Network.
+  It wraps the main `attentions.Attention` class, which handles the core attention operation,
+  including the query, key, value, and output projections.
+
+  Qwen3 Next Attention differs from standard attention by the following features:
+    - Query and Gate splitting from a single q projection.
+    - Application of a sigmoid gate to the attention output.
+    - Usage of `Qwen3NextRMSNorm` for query and key normalization.
+    - Usage of `Qwen3NextRotaryEmbedding` for partial rotary position embeddings.
+      - Partial ROPE is applied to the first 25% of head dimensions
+
+  Attributes:
+    config: MaxText configuration object.
+    mesh: The device mesh for sharding.
+    model_mode: The operational mode (e.g., 'train', 'prefill').
+    layer_idx: The index of the current layer.
+    quant: Optional quantization configuration.
+    attention: An instance of `attentions.Attention` which contains the
+      learnable parameters for query, key, value, and output projections
+      (e.g., `attention.query`, `attention.key`, etc.), and performs
+      the attention calculation.
+  """
 
   def __init__(
       self, config: Config, mesh: Mesh, model_mode: str, layer_idx: int, quant: None | Quant = None, *, rngs: nnx.Rngs
@@ -563,25 +504,11 @@ class Qwen3NextFullAttention(nnx.Module):
     self.quant = quant
     cfg = self.config
 
-    # TODO(rbierneni): Implement the actual Qwen3NextAttention logic.
-    # This is a placeholder. The actual Qwen3NextAttention in the PyTorch code has:
-    # 1.  q_proj projection: hidden_size -> num_attention_heads * head_dim * 2.
-    #     This output is chunked to get query_states and a 'gate'.
-    # 2.  Qwen3NextRMSNorm (self.q_norm and self.k_norm) is applied to query_states
-    #     and key_states *before* RoPE. These norms are on the head_dim.
-    # 3.  The final attention output is gated: attn_output = attn_output * torch.sigmoid(gate).
-    # 4.  k_proj and v_proj are standard Linear layers to num_key_value_heads * head_dim.
-    # 5.  RoPE is applied to the normed query and key.
-    # 6.  The o_proj maps from num_attention_heads * head_dim back to hidden_size.
+    scaling_factor = self.config.head_dim**-0.5
 
-    # Placeholder call to standard MaxText attention
-    # NOTE: This will NOT match the Qwen3Next behavior or weights.
-
-    # Get mode-specific batch size and sequence length for shape
-    batch_size, seq_len = max_utils.get_batch_seq_len_for_mode(cfg, model_mode)
-    inputs_shape = (batch_size, seq_len, cfg.emb_dim)
-
-    self.attention_layer = attentions.Attention(
+    inputs_q_shape = (cfg.per_device_batch_size, cfg.max_target_length, cfg.emb_dim)
+    inputs_kv_shape = (cfg.per_device_batch_size, cfg.max_target_length, cfg.emb_dim)
+    self.attention = attentions.Attention(
         config=cfg,
         num_query_heads=cfg.num_query_heads,
         num_kv_heads=cfg.num_kv_heads,
@@ -589,8 +516,9 @@ class Qwen3NextFullAttention(nnx.Module):
         max_target_length=cfg.max_target_length,
         max_prefill_predict_length=cfg.max_prefill_predict_length,
         attention_kernel=cfg.attention,
-        inputs_q_shape=inputs_shape,
-        inputs_kv_shape=inputs_shape,
+        inputs_q_shape=inputs_q_shape,
+        inputs_kv_shape=inputs_kv_shape,
+        out_axis_names=(BATCH, LENGTH_NO_EXP, EMBED),
         mesh=self.mesh,
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
@@ -598,7 +526,8 @@ class Qwen3NextFullAttention(nnx.Module):
         name="self_attention",
         quant=self.quant,
         kv_quant=quantizations.configure_kv_quant(cfg),
-        use_qk_norm=False,
+        use_qk_norm=cfg.use_qk_norm,
+        query_pre_attn_scalar=scaling_factor,
         model_mode=model_mode,
         rngs=rngs,
     )
@@ -610,14 +539,11 @@ class Qwen3NextFullAttention(nnx.Module):
       decoder_positions: None | jnp.ndarray,
       deterministic: bool,
       model_mode: str,
-      # TODO(parambole): Add cache arguments
   ):
-
-    # TODO(parambole): Add caching in/out
-    attention_output = self.attention_layer(
-        inputs,
-        inputs,
-        decoder_positions,
+    attention_output = self.attention(
+        inputs_q=inputs,
+        inputs_kv=inputs,
+        inputs_positions=decoder_positions,
         decoder_segment_ids=decoder_segment_ids,
         deterministic=deterministic,
         model_mode=model_mode,

@@ -303,10 +303,10 @@ def validate_keys(keys):
     validate_llama4_config(keys)
 
   if keys["decoder_block"] == "qwen3_next":
-    if keys["sparse_matmul"]:
-      raise ValueError(
-          "For Qwen3-Next, sparse_matmul must be False for now. The dense path has been verified against reference."
-      )
+    validate_qwen3_next_config(keys)
+  else:
+    if keys["partial_rotary_factor"] is not None and keys["partial_rotary_factor"] != 1.0:
+      raise ValueError("`partial_rotary_factor` is only effective when `decoder_block` is set to 'qwen3_next'.")
 
   if keys["shard_optimizer_over_data"]:
     validate_optimizer_sharding_over_data(keys)
@@ -411,6 +411,23 @@ def validate_llama4_config(keys: dict):
     raise ValueError(
         f"The number of decoder layers ({keys['base_num_decoder_layers']}) must be divisible by interleave moe layer step ({keys['interleave_moe_layer_step']})"
     )
+
+
+def validate_qwen3_next_config(keys: dict):
+  """
+  Validates the following checks for Qwen3 Next:
+
+  Args:
+    keys: the raw config in dict form
+
+  """
+  if keys["sparse_matmul"]:
+    raise ValueError(
+        "For Qwen3-Next, sparse_matmul must be False for now. The dense path has been verified against reference."
+    )
+  rotary_dim = int(keys["head_dim"] * keys["partial_rotary_factor"])
+  if rotary_dim % 2 != 0:
+    raise ValueError(f"Calculated rotary dimension ({rotary_dim}) must be a multiple of 2.")
 
 
 def validate_model_name(s: str) -> bool:
