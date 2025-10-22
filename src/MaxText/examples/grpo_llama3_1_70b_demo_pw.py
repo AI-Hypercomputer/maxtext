@@ -195,12 +195,12 @@ EPSILON = 0.2
 # ====== Training ======
 BATCH_SIZE = 1
 # Increase `NUM_BATCHES` and `MAX_STEPS` for better results.
-# NUM_BATCHES = 3738
-NUM_BATCHES = 4  # 200
+NUM_BATCHES = 3738
+# NUM_BATCHES = 4  # 200
 # Keep `NUM_TEST_BATCHES` low so that evaluation runs quickly. It can be
 # increased to a max. of 330 (if batch size is 4).
 NUM_TEST_BATCHES = 330
-NUM_TEST_BATCHES = 5  # 200
+# NUM_TEST_BATCHES = 5  # 200
 
 EVAL_EVERY_N_STEPS = 10  # this doesn't matter if `TRAIN_FRACTION = 1.0`.
 NUM_EPOCHS = 1  # can potentially train for more epochs

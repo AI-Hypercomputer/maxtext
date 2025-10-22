@@ -142,7 +142,7 @@ TRAIN_FRACTION = 1.0
 
 
 # ====== Input Checkpoint directory =====
-MODEL_CHECKPOINT_PATH = "/path/to/scanned/model/ckpt_load_dir/"
+MODEL_CHECKPOINT_PATH = "gs://mazumdera-test-bucket-europe-west4/llama3.1-8b-Instruct/scanned-pathways/0/items"
 
 # ====== Checkpoint directory =====
 LOG_DIR = f"{HOME}/content/tensorboard/grpo/logs_llama3/"
@@ -150,12 +150,12 @@ if not os.path.exists(LOG_DIR):
   os.makedirs(LOG_DIR)
 
 # ===== Profiling =====
-PROFILE_DIR = f"/path/to/profile_dir/{run_id}/profiles_llama3/"
+PROFILE_DIR = f"gs://mazumdera-test-bucket-us-central2/grpo/v5p-64/llama3-1-8b/profile_dir/{run_id}/profiles_llama3/"
 if not epath.Path(PROFILE_DIR).exists():
   epath.Path(PROFILE_DIR).mkdir(parents=True)
 
 # ====== Checkpoint saving ======
-CKPT_DIR = f"/path/to/ckpt_save_dir/{run_id}/ckpts_llama3/"
+CKPT_DIR = f"gs://mazumdera-test-bucket-us-central2/grpo/v5p-64/llama3-1-8b/ckpt_save_dir/{run_id}/ckpts_llama3/"
 
 if not epath.Path(CKPT_DIR).exists():
   epath.Path(CKPT_DIR).mkdir(parents=True)
@@ -195,11 +195,12 @@ EPSILON = 0.2
 # ====== Training ======
 BATCH_SIZE = 1
 # Increase `NUM_BATCHES` and `MAX_STEPS` for better results.
-# NUM_BATCHES = 3738
-NUM_BATCHES = 4  # 200
+NUM_BATCHES = 3738
+# NUM_BATCHES = 4  # 200
 # Keep `NUM_TEST_BATCHES` low so that evaluation runs quickly. It can be
 # increased to a max. of 330 (if batch size is 4).
-NUM_TEST_BATCHES = 5  # 200
+NUM_TEST_BATCHES = 330
+# NUM_TEST_BATCHES = 5  # 200
 
 EVAL_EVERY_N_STEPS = 10  # this doesn't matter if `TRAIN_FRACTION = 1.0`.
 NUM_EPOCHS = 1  # can potentially train for more epochs
