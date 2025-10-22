@@ -20,7 +20,6 @@ import jax.numpy as jnp
 from jax.experimental import checkify
 
 from MaxText import exceptions
-from MaxText import maxtext_utils
 from MaxText.utils.goodput_utils import (
     GoodputEvent,
     maybe_record_goodput,
@@ -37,7 +36,6 @@ class DataLoader:
     self.goodput_recorder = goodput_recorder
     self.data_iterator = data_iterator
     self.last_batch = None
-    self.input_data_shardings = maxtext_utils.get_input_data_sharding(config, mesh)
 
   def load_next_batch(self):
     """Loads the next batch. Can keep reusing the same batch for performance reasons."""
@@ -47,8 +45,7 @@ class DataLoader:
           example_batch = self.last_batch
         else:
           example_batch = next(self.data_iterator)
-        # Reshard data from loaded sharding to performant activation sharding
-        self.last_batch = jax.lax.with_sharding_constraint(example_batch, self.input_data_shardings)
+        self.last_batch = example_batch
         self.check_example_batch()
       except Exception as e:  # pylint: disable=broad-except
         if isinstance(e, StopIteration):
@@ -64,3 +61,67 @@ class DataLoader:
       # pylint: disable=not-callable
       err, _ = jax.jit(jittable_f)(self.last_batch["inputs"][: self.config.global_batch_size_to_train_on, :])
       err.throw()
+
+
+class RampUpDataLoader(DataLoader):
+  """
+  A DataLoader that implements batch size ramp-up.
+
+  It dynamically increases the 'global_batch_size_current' in the config
+  object based on the training step. The rest of the training pipeline
+  (including the parent's `check_example_batch` and the training step itself)
+  is assumed to read this config value to determine the logical batch size.
+  """
+
+  def __init__(self, config, mesh, data_iterator, goodput_recorder):
+    # Call parent constructor
+    super().__init__(config, mesh, data_iterator, goodput_recorder)
+
+    # Get ramp-up parameters from config, with safe defaults
+    self.global_batch_size_end = config.global_batch_size_to_load
+    self.global_batch_size_start = config.global_batch_size_to_load_start
+    self.increment = config.global_batch_size_to_load_increment
+    self.samples_per_increment = config.rampup_samples_per_increment_to_load
+
+    # Check if ramp-up is active
+    self.rampup_active = self.global_batch_size_start < self.global_batch_size_end
+
+    # State for tracking ramp-up
+    self.accum_samples = 0
+    self.global_batch_size_current = self.global_batch_size_start
+
+  def load_next_batch(self):
+    """
+    Updates the batch size based on the schedule and then loads the next
+    batch using the parent method.
+    """
+    # If ramp-up is not active, just behave like the parent
+    if not self.rampup_active:
+      return super().load_next_batch()
+
+    # Check if it's time to increment the batch size
+    is_time_to_increment = self.accum_samples >= self.samples_per_increment
+
+    if is_time_to_increment:
+      # Update current batch size and refresh accumulate samples
+      self.global_batch_size_current += self.increment
+      self.accum_samples = 0
+      self.rampup_active = self.global_batch_size_current < self.global_batch_size_end
+
+    def _slice(data):
+      # When rampup batch size is enabled, we take a partial slice of data and throw others
+      return jax.lax.dynamic_slice_in_dim(data, 0, self.global_batch_size_current, axis=0)
+
+    self.accum_samples += self.global_batch_size_current
+
+    return jax.tree.map(_slice, super().load_next_batch())
+
+
+def create_dataloader(config, mesh, data_iterator, goodput_recorder):
+  """
+  Create the dataloader
+  """
+  if config.enable_rampup_batch_size:
+    return RampUpDataLoader(config, mesh, data_iterator, goodput_recorder)
+  else:
+    return DataLoader(config, mesh, data_iterator, goodput_recorder)
