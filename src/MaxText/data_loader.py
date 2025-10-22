@@ -35,9 +35,20 @@ class DataLoader:
   def __init__(self, config, mesh, data_iterator, goodput_recorder):
     self.config = config
     self.goodput_recorder = goodput_recorder
-    self.data_iterator = data_iterator
+    if isinstance(data_iterator, list):
+      self.data_iterator_list = data_iterator
+      self.data_iterator_index = 0
+      self.data_iterator = self.data_iterator_list[self.data_iterator_index]
+    else:
+      self.data_iterator = data_iterator
     self.last_batch = None
     self.input_data_shardings = maxtext_utils.get_input_data_sharding(config, mesh)
+
+  def update_data_iterator(self):
+    """Update to the next data iterator in the list, if applicable."""
+    if hasattr(self, "data_iterator_list"):
+      self.data_iterator_index = (self.data_iterator_index + 1) % len(self.data_iterator_list)
+      self.data_iterator = self.data_iterator_list[self.data_iterator_index]
 
   def load_next_batch(self):
     """Loads the next batch. Can keep reusing the same batch for performance reasons."""
@@ -46,6 +57,7 @@ class DataLoader:
         if self.config.reuse_example_batch and self.last_batch:
           example_batch = self.last_batch
         else:
+          self.update_data_iterator()
           example_batch = next(self.data_iterator)
         # Reshard data from loaded sharding to performant activation sharding
         self.last_batch = jax.lax.with_sharding_constraint(example_batch, self.input_data_shardings)

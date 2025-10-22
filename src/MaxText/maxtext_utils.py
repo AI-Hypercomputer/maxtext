@@ -1124,9 +1124,15 @@ def setup_initial_state(
       ):
         state = restored
       else:
-        if "iter" in restored and restored["iter"] is not None:
-          data_iterator.local_iterator = restored["iter"]
-        state = restored["items"]
+        if isinstance(restored, list):
+        # Handle the case of multiple data iterators
+          for i,x in enumerate(restored):
+            data_iterator[i].local_iterator = x["iter"]
+          state = restored[0]["items"]
+        else:
+          if "iter" in restored and restored["iter"] is not None:
+            data_iterator.local_iterator = restored["iter"]
+          state = restored["items"]
     else:
       init_state_partial = functools.partial(init_initial_state, model, tx, config, is_training)
       init_state_partial.__name__ = "initialize_state"
