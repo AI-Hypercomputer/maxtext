@@ -145,6 +145,18 @@ class TrainTests(unittest.TestCase):
           "enable_goodput_recording=False",
           rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizer.llama2')}",
       ],
+      "te_nvfp4": [  # tests base config with te_nvfp4
+          None,
+          os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+          "base_output_directory=gs://runner-maxtext-logs",
+          "run_name=runner_test",
+          "dataset_path=gs://maxtext-dataset",
+          "quantization=te_nvfp4",
+          "steps=2",
+          "enable_checkpointing=False",
+          "enable_goodput_recording=False",
+          rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizer.llama2')}",
+      ],
       "dropout": [  # tests base config with dropout
           None,
           os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),

@@ -396,6 +396,10 @@ class QuantTest(unittest.TestCase):
   def test_fp8_te_mxfp8_quantization(self):
     self.quantization_config("te_mxfp8", grad_tolerance=1.0)
 
+  @pytest.mark.gpu_only
+  def test_fp8_te_nvfp4_quantization(self):
+    self.quantization_config("te_nvfp4", grad_tolerance=1.0)
+
 
 @pytest.mark.parametrize(
     "group_sizes,k,n,tiling,dtype",
