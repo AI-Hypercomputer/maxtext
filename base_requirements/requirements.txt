@@ -11,8 +11,8 @@ google-cloud-aiplatform
 google-cloud-monitoring
 grain[parquet]
 huggingface_hub
-jax!=0.7.1, !=0.7.2
-jaxlib!=0.7.1, !=0.7.2
+jax
+jaxlib
 jaxtyping
 jsonlines
 ml-collections
@@ -36,6 +36,7 @@ tensorflow-datasets
 tensorflow-text
 tensorflow
 tiktoken
+tokamax
 transformers
 qwix
 google-jetstream @ https://github.com/AI-Hypercomputer/JetStream/archive/29329e8e73820993f77cfc8efe34eb2a73f5de98.zip
