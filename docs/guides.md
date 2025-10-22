@@ -33,4 +33,5 @@ guides/xprof_user_guide.md
 guides/checkpointing_solutions.md
 guides/megascale_hang_playbook.md
 guides/multimodal.md
+guides/update_dependencies.md
 ```
