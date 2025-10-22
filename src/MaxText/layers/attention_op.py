@@ -466,6 +466,7 @@ class AttentionOp(nnx.Module):
     self.chunk_attn_window_size = chunk_attn_window_size
     self.use_ragged_attention = use_ragged_attention
     self.ragged_block_size = ragged_block_size
+    self.rngs = rngs
 
     def maybe_create_nnx(einsum, *args):
       if isinstance(einsum, nn.Module):
@@ -1266,10 +1267,15 @@ class AttentionOp(nnx.Module):
     if self.attention_type == AttentionType.LOCAL_SLIDING or using_context_parallelism:
       mask_type = "causal"  # SWA and Context Parallelism only work with causal masking
       attn_mask = None
+      dummy_attn_mask = None
     else:
       # generate attn_mask
       mask_type = "padding_causal"  # only padding_causal mask type can take a created mask
+      dummy_attn_mask = jnp.zeros((1, 1, 1, self.max_target_length, self.max_target_length), dtype=jnp.uint8)
       attn_mask = self.generate_attention_mask(query, key, decoder_segment_ids, model_mode)
+
+    if attn_mask is not None:
+      attn_mask = jnp.where((attn_mask >= DEFAULT_MASK_VALUE * 0.5), 0, 1).astype(jnp.uint8)
 
     dpa_layer = DotProductAttention(
         head_dim=head_dim,
@@ -1288,6 +1294,17 @@ class AttentionOp(nnx.Module):
         context_parallel_causal_load_balanced=self.config.context_parallel_load_balance,
         context_parallel_axis="context",
     )
+
+    dpa_layer = nnx_wrappers.ToNNX(dpa_layer, rngs=self.rngs)
+    dummy_query_prefill = jnp.zeros(
+        (1, self.max_target_length, self.num_query_heads, self.config.head_dim), dtype=self.dtype
+    )
+    dummy_key_prefill = jnp.zeros((1, self.max_target_length, self.num_kv_heads, self.config.head_dim), dtype=self.dtype)
+    dummy_value_prefill = jnp.zeros(
+        (1, self.max_target_length, self.num_kv_heads, self.config.head_dim), dtype=self.dtype
+    )
+
+    dpa_layer.lazy_init(dummy_query_prefill, dummy_key_prefill, dummy_value_prefill, mask=dummy_attn_mask)
     return dpa_layer(query, key, value, mask=attn_mask)
 
   def cudnn_jax_flash_attention(
