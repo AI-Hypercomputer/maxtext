@@ -172,7 +172,7 @@ else
       exit 2
     else
       python3 -m uv pip install --resolution=lowest -r "$tpu_requirements_txt" \
-                                                    -r "${MAXTEXT_REPO_ROOT?}"'/extra_deps_from_github.txt'
+                                                    -r "${MAXTEXT_REPO_ROOT?}"'/src/install_maxtext_extra_deps/extra_deps_from_github.txt'
     fi
 fi
 
