@@ -242,6 +242,26 @@ class TrainTests(unittest.TestCase):
     train_main(TrainTests.CONFIGS["nanoo_fp8"] + ["attention=dot_product"])
 
   @pytest.mark.integration_test
+  @pytest.mark.gpu_only
+  def test_gpu_te_fp8_delayedscaling(self):
+    train_main(TrainTests.CONFIGS["te_fp8_delayedscaling"] + ["attention=dot_product"])
+
+  @pytest.mark.integration_test
+  @pytest.mark.gpu_only
+  def test_gpu_te_fp8_currentscaling(self):
+    train_main(TrainTests.CONFIGS["te_fp8_currentscaling"] + ["attention=dot_product"])
+
+  @pytest.mark.integration_test
+  @pytest.mark.gpu_only
+  def test_gpu_te_mxfp8(self):
+    train_main(TrainTests.CONFIGS["te_mxfp8"] + ["attention=dot_product"])
+
+  @pytest.mark.integration_test
+  @pytest.mark.gpu_only
+  def test_gpu_te_nvfp4(self):
+    train_main(TrainTests.CONFIGS["te_nvfp4"] + ["attention=dot_product"])
+
+  @pytest.mark.integration_test
   @pytest.mark.tpu_only
   def test_tpu_dropout(self):
     train_main(TrainTests.CONFIGS["dropout"])
