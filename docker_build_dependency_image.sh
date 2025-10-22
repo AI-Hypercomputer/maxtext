@@ -142,14 +142,15 @@ if [[ ${INSTALL_POST_TRAINING} -eq 1 ]] ; then
     exit 1
   fi
 
-  # To install from local paths, we copy vllm and tpu_commons into the build context.
-  # This assumes vllm and tpu_commons are sibling directories to the current one (maxtext).
-  echo "Copying local vllm and tpu_commons directories into the build context..."
-  rsync -a --exclude='__pycache__' ../tpu_commons .
+  # To install from local paths, we copy vllm and tpu-inference into the build context.
+  # This assumes vllm and tpu-inference are sibling directories to the current one (maxtext).
+  echo "Copying local vllm and tpu-inference directories into the build context..."
+  rsync -a --exclude='__pycache__' ../tunix .
+  rsync -a --exclude='__pycache__' ../tpu-inference .
   rsync -a --exclude='__pycache__' ../vllm .
 
   # The cleanup is set to run even if the build fails to remove the copied directories.
-  trap "echo 'Cleaning up copied directories...' && rm -rf ./tpu_commons ./vllm" EXIT INT TERM
+  trap "echo 'Cleaning up copied directories...' && rm -rf ./tpu-inference ./vllm" EXIT INT TERM
 
   docker build \
     --network host \

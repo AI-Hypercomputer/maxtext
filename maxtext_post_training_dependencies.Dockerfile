@@ -28,25 +28,41 @@ RUN echo "Installing Post-Training dependencies (vLLM, tpu-common, tunix) with M
 RUN --mount=type=cache,target=/root/.cache/pip pip install \
     aiohttp==3.12.15\
     keyring \
-    keyrings.google-artifactregistry-auth \
+    keyrings.google-artifactregistry-auth
+
+RUN --mount=type=cache,target=/root/.cache/pip pip install \
     numba==0.61.2
 
+# RUN VLLM_TARGET_DEVICE="tpu" pip install vllm
 # --- STAGE 2: Install Project Dependencies (The Main Cached Layer) ---
 
 # Copy *only* the dependency definition files.
-# This assumes vllm and tpu_commons are in the build context, copied from the parent directory.
+# This assumes vllm and tpu-inference are in the build context, copied from the parent directory.
 COPY vllm/requirements/tpu.txt /tmp/
 COPY vllm/requirements/build.txt /tmp/
 COPY vllm/requirements/common.txt /tmp/
-COPY tpu_commons/requirements.txt /tmp/
+COPY tpu-inference/requirements.txt /tmp/
 
 # Run the full dependency installation.
 # This entire layer is cached and will *only* be rebuilt if
 # these .txt files change.
-RUN --mount=type=cache,target=/root/.cache/pip bash -c ' \
+RUN --mount=type=cache,target=/root/.cache/pip bash -c ' \ 
     # Set the target device so pip installs the right JAX/libtpu
+    # Install tpu-inference dependencies
     export VLLM_TARGET_DEVICE="tpu" && \
     pip install -r /tmp/tpu.txt -r /tmp/build.txt -r /tmp/common.txt -r /tmp/requirements.txt --no-cache-dir --pre \
+        --extra-index-url https://pypi.org/simple/ \
+        --extra-index-url https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/ \
+        --extra-index-url https://download.pytorch.org/whl/nightly/cpu \
+        --find-links https://storage.googleapis.com/jax-releases/libtpu_releases.html \
+        --find-links https://storage.googleapis.com/libtpu-wheels/index.html \
+        --find-links https://storage.googleapis.com/libtpu-releases/index.html \
+        --find-links https://storage.googleapis.com/jax-releases/jax_nightly_releases.html \
+        --find-links https://storage.googleapis.com/jax-releases/jaxlib_nightly_releases.html'
+
+    # Install tpu-inference dependencies
+RUN  --mount=type=cache,target=/root/.cache/pip bash -c ' \
+        pip install -r /tmp/requirements.txt --no-cache-dir --pre \
         --extra-index-url https://pypi.org/simple/ \
         --extra-index-url https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/ \
         --extra-index-url https://download.pytorch.org/whl/nightly/cpu \
@@ -61,11 +77,17 @@ RUN --mount=type=cache,target=/root/.cache/pip bash -c ' \
 # Now, copy the full source code. This invalidates cache frequently,
 # but the next step is fast.
 COPY vllm /vllm/
-COPY tpu_commons /tpu_commons/
+COPY tpu-inference /tpu-inference/
+COPY tunix /tunix
+
 
 # Install in editable mode. This is lightning-fast because all
 # dependencies were installed and cached in STAGE 2.
-RUN --mount=type=cache,target=/root/.cache/pip VLLM_TARGET_DEVICE="tpu" pip install -e /vllm/ -e /tpu_commons/
+RUN --mount=type=cache,target=/root/.cache/pip VLLM_TARGET_DEVICE="tpu" pip install -e /vllm/
+RUN --mount=type=cache,target=/root/.cache/pip pip install -e /tpu-inference/
+
+RUN --mount=type=cache,target=/root/.cache/pip pip install --no-deps /tunix/
+# RUN --mount=type=cache,target=/root/.cache/pip VLLM_TARGET_DEVICE="tpu" pip install -e /tpu-inference/
 
 RUN if [ "$MODE" = "post-training-experimental" ]; then \
     echo "MODE=grpo-experimental: Re-installing JAX/libtpu"; \
