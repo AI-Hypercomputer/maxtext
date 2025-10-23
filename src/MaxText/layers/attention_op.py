@@ -1230,8 +1230,6 @@ class AttentionOp(nnx.Module):
       named_sharding = jax.sharding.NamedSharding(self.mesh, axis_names_splash_kernel)
       segment_axis_names_splash_kernel = splash_kernel.manual_sharding_spec(named_sharding)
 
-    # segment_axis_names_splash_kernel = nn.logical_to_mesh_axes((HEAD, Q_LENGTH_NO_EXP))
-
     # Now call the function wrap_flash_attention which does the actual computation.
     # The splash kernel is passed as a parameter to the function. Since we have the shard map
     # decorating the wrap_flash_attention function, the data will be correctly sharded
