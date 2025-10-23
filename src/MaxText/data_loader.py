@@ -25,6 +25,7 @@ from MaxText.utils.goodput_utils import (
     GoodputEvent,
     maybe_record_goodput,
 )
+from MaxText import diloco
 
 
 class DataLoader:
@@ -48,6 +49,8 @@ class DataLoader:
         else:
           example_batch = next(self.data_iterator)
         # Reshard data from loaded sharding to performant activation sharding
+        if self.config.enable_diloco:
+          example_batch = diloco.reshape_first_axis_with_diloco(self.config.num_diloco_replicas, example_batch)
         self.last_batch = jax.lax.with_sharding_constraint(example_batch, self.input_data_shardings)
         self.check_example_batch()
       except Exception as e:  # pylint: disable=broad-except

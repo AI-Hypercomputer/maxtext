@@ -22,8 +22,19 @@ from functools import partial
 import os
 import socket
 import subprocess
-import time
+import collections
+from collections.abc import Sequence
 from typing import Any
+
+import numpy as np
+
+import jax
+import jax.numpy as jnp
+from jax.experimental import mesh_utils
+
+import flax
+
+import psutil
 
 from etils import epath
 import flax
@@ -481,6 +492,95 @@ def optimize_mesh_for_tpu_v6e(mesh, devices):
   return new_mesh
 
 
+def create_device_mesh(config, devices=None):
+  """Creates a device mesh with each slice in its own data parallel group. If there is only one slice, uses two replicas"""
+  if devices is None:
+    devices = jax.devices()
+  num_devices = len(devices)
+  num_slices = 1 if config.inference_benchmark_test else config.num_slices
+  num_devices_per_slice = num_devices // num_slices
+
+  multi_slice_env = num_slices > 1
+
+  dcn_parallelism = []
+  ici_parallelism = []
+
+  if config.enable_diloco:
+    dcn_parallelism.append(config.dcn_diloco_parallelism)
+    ici_parallelism.append(config.ici_diloco_parallelism)
+
+  dcn_parallelism.extend(
+      [
+          config.dcn_data_parallelism,
+          config.dcn_pipeline_parallelism,
+          config.dcn_fsdp_parallelism,
+          config.dcn_fsdp_transpose_parallelism,
+          config.dcn_sequence_parallelism,
+          config.dcn_tensor_parallelism,
+          config.dcn_expert_parallelism,
+          config.dcn_autoregressive_parallelism,
+      ]
+  )
+  ici_parallelism.extend(
+      [
+          config.ici_data_parallelism,
+          config.ici_pipeline_parallelism,
+          config.ici_fsdp_parallelism,
+          config.ici_fsdp_transpose_parallelism,
+          config.ici_sequence_parallelism,
+          config.ici_tensor_parallelism,
+          config.ici_expert_parallelism,
+          config.ici_autoregressive_parallelism,
+      ]
+  )
+
+  # Find possible unspecified parallelisms
+  ici_parallelism = fill_unspecified_mesh_axes(config.ici_parallelism.copy(), num_devices_per_slice, "ICI")
+
+  allow_split_physical_axes = config.allow_split_physical_axes if config.allow_split_physical_axes else False
+
+  if multi_slice_env:
+    dcn_parallelism = fill_unspecified_mesh_axes(config.dcn_parallelism.copy(), num_slices, "DCN")
+    if is_valid_custom_mesh(ici_parallelism, config.custom_mesh):
+      mesh = create_custom_device_mesh(ici_parallelism, dcn_parallelism, devices, config.custom_mesh)
+    else:
+      mesh = mesh_utils.create_hybrid_device_mesh(
+          ici_parallelism,
+          dcn_parallelism,
+          devices,
+          allow_split_physical_axes=allow_split_physical_axes,
+      )
+  else:
+    if allow_split_physical_axes:
+      if is_valid_custom_mesh(ici_parallelism, config.custom_mesh):
+        mesh = mesh_utils.create_device_mesh(
+            [16, 16],
+            devices,
+            contiguous_submeshes=False,
+            allow_split_physical_axes=False,
+        )
+        mesh = reshape_mesh_to_rings(mesh, config.custom_mesh)
+        mesh = np.reshape(mesh, ici_parallelism)
+      else:
+        mesh = mesh_utils.create_device_mesh(
+            ici_parallelism,
+            devices,
+            contiguous_submeshes=False,
+            allow_split_physical_axes=allow_split_physical_axes,
+        )
+    else:
+      mesh = mesh_utils.create_device_mesh(
+          ici_parallelism,
+          devices,
+      )
+      if config.optimize_mesh_for_tpu_v6e:
+        mesh = optimize_mesh_for_tpu_v6e(mesh, devices)
+
+  max_logging.log(f"Num_devices: {num_devices}, shape: {mesh.shape}")
+
+  return mesh
+
+
 def unbox_logicallypartioned(boxed_pytree):
   """Unboxes the flax.LogicallyPartitioned pieces
 
@@ -602,7 +702,7 @@ def print_pytree_shape(print_str, ptree):
   print(jax.tree_util.tree_map(lambda x: x.shape, ptree))
 
 
-def print_model_vars(print_str, model_vars):
+def int_model_vars(print_str, model_vars):
   for k in model_vars:
     print(f"{print_str} key{k}:")
     print(f"\t {model_vars[k]}")
@@ -726,7 +826,7 @@ def unpermute_from_match_maxtext_rope(arr, model_size):
   return jax.numpy.concatenate((evens, odds), axis=arr.ndim - 1)
 
 
-@partial(jax.jit, static_argnames=("cp_size", "seq_dim", "to_contiguous"))
+@functools.partial(jax.jit, static_argnames=("cp_size", "seq_dim", "to_contiguous"))
 def reorder_sequence(tensor, cp_size: int, seq_dim: int = 1, to_contiguous: bool = False):
   """Reorders the sequence of the tensor. For example, with cp_size=2,
   [0, 1, 2, 3, 4, 5, 6, 7] -> [0, 1, 6, 7, 2, 3, 4, 5]
@@ -790,7 +890,7 @@ def reorder_sequence(tensor, cp_size: int, seq_dim: int = 1, to_contiguous: bool
   return reordered.reshape(ori_tensor_shape)
 
 
-@partial(jax.jit, static_argnums=1)
+@functools.partial(jax.jit, static_argnums=1)
 def reorder_causal_load_balanced(batch, cp_size):
   """Reorders the example batch sequences"""
   return {

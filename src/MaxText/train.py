@@ -43,6 +43,7 @@ from cloud_tpu_diagnostics.configuration import diagnostic_configuration
 from cloud_tpu_diagnostics.configuration import stack_trace_configuration
 
 from MaxText import checkpointing
+from MaxText import diloco
 from MaxText import exceptions
 from MaxText import max_logging
 from MaxText import max_utils
@@ -371,9 +372,6 @@ def train_loop(config, recorder, state=None):
   params_shardings, state_mesh_shardings = maxtext_utils.maybe_update_params_sharding_with_opt(
       config, state_mesh_shardings
   )
-  params_shardings, state_mesh_shardings = maxtext_utils.maybe_update_params_sharding_with_opt(
-      config, state_mesh_shardings
-  )
 
   p_train_step, p_eval_step = train_utils.jit_train_and_eval_step(
       config, model, mesh, state, state_mesh_shardings, train_step, eval_step, eval_data_iterator, params_shardings
@@ -387,13 +385,54 @@ def train_loop(config, recorder, state=None):
     compiled_stats = compiled.memory_analysis()
     max_utils.print_compiled_memory_stats(compiled_stats)
 
+  if config.enable_diloco:
+    # init_diloco_state_partial = functools.partial(diloco.build_diloco_state, config, lambda: state)
+    train_step_partial = functools.partial(train_step, model, config, state_mesh_shardings)
+    with mesh:
+      state, outer_opt_state_sharding = diloco.build_diloco_state(config, lambda: state)
+
+    # create state_mesh_shardings for the DilocoState
+    def add_diloco_to_sharding(pytree):
+      """
+      Recursively traverses a PyTree and prepends 'diloco' to the PartitionSpec
+      of any NamedSharding object that doesn't have an empty PartitionSpec.
+      """
+
+      def map_fn(leaf):
+        if isinstance(leaf, jax.sharding.NamedSharding):
+          new_spec = jax.sharding.PartitionSpec("diloco", *leaf.spec)
+          return jax.sharding.NamedSharding(mesh=leaf.mesh, spec=new_spec)
+        return leaf
+
+      return jax.tree_util.tree_map(map_fn, pytree)
+
+    inner_state_shardings = add_diloco_to_sharding(state_mesh_shardings)
+    diloco_state_shardings = diloco.DiLoCoTrainState(
+        inner_state_shardings,
+        state_mesh_shardings.params,
+        outer_opt_state_sharding,
+        jax.sharding.NamedSharding(mesh=state_mesh_shardings.step.mesh, spec=jax.sharding.PartitionSpec()),
+    )
+
+    diloco_train_step = diloco.build_diloco_train_step(config, train_step_partial)
+    p_train_step, p_eval_step = train_utils.jit_train_and_eval_step(
+        config, model, mesh, state, diloco_state_shardings, diloco_train_step, eval_step, eval_data_iterator
+    )
+  else:
+    p_train_step, p_eval_step = train_utils.jit_train_and_eval_step(
+        config, model, mesh, state, state_mesh_shardings, train_step, eval_step, eval_data_iterator
+    )
+
   start_step = get_first_step(state)  # this is the start_step for training
   prof = profiler.Profiler(config, offset_step=start_step)
   data_loader = DataLoader(config, mesh, data_iterator, recorder)
   metric_logger = MetricLogger(config=config, learning_rate_schedule=learning_rate_schedule)
 
   # Write train config params, num model params, and XLA flags to tensorboard
-  metric_logger.write_setup_info_to_tensorboard(state.params)
+  if config.enable_diloco:
+    metric_logger.write_setup_info_to_tensorboard(state.outer_params)
+  else:
+    metric_logger.write_setup_info_to_tensorboard(state.params)
 
   try:
     last_step_completion = datetime.datetime.now()
@@ -414,7 +453,10 @@ def train_loop(config, recorder, state=None):
       last_step_completion = datetime.datetime.now()
 
       state_to_save = state if not config.use_dpo else _split_dpo_state(state)[0]
-      checkpointing.maybe_save_checkpoint(checkpoint_manager, state_to_save, config, data_iterator, step)
+      if config.enable_diloco:
+        checkpointing.maybe_save_checkpoint(checkpoint_manager, state_to_save.inner_state, config, data_iterator, step)
+      else:
+        checkpointing.maybe_save_checkpoint(checkpoint_manager, state_to_save, config, data_iterator, step)
 
       if config.dump_hlo and step == (config.dump_step if config.dump_step >= 0 else start_step):
         jax.block_until_ready(state)  # Ensure compilation has finished.
@@ -456,7 +498,10 @@ def train_loop(config, recorder, state=None):
 
     if config.save_checkpoint_on_completion:
       state_to_save = state if not config.use_dpo else _split_dpo_state(state)[0]
-      checkpointing.maybe_save_checkpoint(checkpoint_manager, state_to_save, config, data_iterator)
+      if config.enable_diloco:
+        checkpointing.maybe_save_checkpoint(checkpoint_manager, state_to_save.inner_state, config, data_iterator)
+      else:
+        checkpointing.maybe_save_checkpoint(checkpoint_manager, state_to_save, config, data_iterator)
   except exceptions.StopTraining as e:
     max_logging.log(f"Training stopped: {str(e)}")
   finally:

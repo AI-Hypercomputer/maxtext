@@ -50,7 +50,19 @@ OVERWRITE_WITH_GRADIENT = "_overwrite_with_gradient"
 
 def get_input_data_sharding(config, mesh):
   """Get the input data sharding for the model"""
-  return nn.logical_to_mesh_sharding(P(*config.input_data_sharding_logical_axes), mesh, config.logical_axis_rules)
+  data_sharding = nn.logical_to_mesh_sharding(
+      P(*config.input_data_sharding_logical_axes), mesh, config.logical_axis_rules
+  )
+  if config.enable_diloco:
+
+    def _transform_pspec(pspec):
+      # Pull the DiLoCo axis out into its own, to shard the first axis of the the arrays.
+      return P("diloco", *pspec)
+
+    data_sharding = jax.tree_util.tree_map(
+        lambda s: jax.sharding.NamedSharding(s.mesh, _transform_pspec(s.spec)), data_sharding
+    )
+  return data_sharding
 
 
 def get_functional_train_with_signature(
@@ -69,7 +81,6 @@ def get_functional_train_with_signature(
 def get_functional_eval_with_signature(eval_step, data_sharding, state_mesh_shardings, model, config):
   """Get the shardings (both state and data) for `eval_step`."""
   functional_eval = functools.partial(eval_step, model, config)
-  functional_eval.__name__ = "eval_step"
   in_shardings = (state_mesh_shardings, data_sharding, None)  # State, batch, rng
   out_shardings = None  # metrics
   static_argnums = ()  # We partial out the static argnums of model, config
