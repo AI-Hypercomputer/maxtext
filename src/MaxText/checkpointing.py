@@ -63,27 +63,21 @@ class MaxtextGrainCheckpointHandler(grain_checkpoint_handlers.CheckpointHandler)
   ):
     """Saves the given iterator to the checkpoint in `directory`."""
     item = item or args.item  # pytype:disable=attribute-error
-    
-    # process_index = args.process_index if hasattr(args, "process_index") and args.process_index is not None else process_index_default
-    # process_count = args.process_count if hasattr(args, "process_count") and args.process_count is not None else process_count_default
 
-    if isinstance(item, list):
-      # assert isinstance(process_index, list) and len(process_index) == len(item), "When saving a list of data iterators, process_index must be a list of the same length as data iterator."
-      for local_iterator, process_index, process_count in item:
-        if isinstance(local_iterator, dataset.DatasetIterator):
-          state = json.dumps(local_iterator.get_state(), indent=4)
-        else:
-          state = local_iterator.get_state().decode()
-        filename = directory / f"process_{process_index}-of-{process_count}.json"
-        filename.write_text(state)
-    else:
+    def save_single_process(item, process_index, process_count):
+      filename = directory / f"process_{process_index}-of-{process_count}.json"
       if isinstance(item, dataset.DatasetIterator):
         state = json.dumps(item.get_state(), indent=4)
       else:
         state = item.get_state().decode()
-      process_index, process_count = sharding.get_process_index_and_count()
-      filename = directory / f"process_{process_index}-of-{process_count}.json"
       filename.write_text(state)
+
+    if isinstance(item, list):
+      for local_iterator, process_index, process_count in item:
+        save_single_process(local_iterator, process_index, process_count)
+    else:
+      process_index, process_count = sharding.get_process_index_and_count()
+      save_single_process(item, process_index, process_count)
 
   def restore(
       self,
@@ -93,23 +87,10 @@ class MaxtextGrainCheckpointHandler(grain_checkpoint_handlers.CheckpointHandler)
   ) -> grain_checkpoint_handlers.IteratorType:
     """Restores the given iterator from the checkpoint in `directory`."""
     item = item or args.item
-    if isinstance(item, list):
-      for local_iterator, process_index, process_count in item:
-        filename = directory / f"process_{process_index}-of-{process_count}.json"
-        if not filename.exists():
-          raise ValueError(f"File {filename} does not exist.")
-        state = filename.read_text()
-        if isinstance(local_iterator, dataset.DatasetIterator):
-          state = json.loads(state)
-        else:
-          state = state.encode()
-        local_iterator.set_state(state)
-      return item
-    else:
-      process_index_default, process_count_default = sharding.get_process_index_and_count()
-      process_index = args.process_index if hasattr(args, "process_index") and args.process_index is not None else process_index_default
-      process_count = args.process_count if hasattr(args, "process_count") and args.process_count is not None else process_count_default
+    process_index = args.process_index if hasattr(args, "process_index") and args.process_index is not None else None
+    process_count = args.process_count if hasattr(args, "process_count") and args.process_count is not None else None
 
+    def restore_single_process(item, process_index, process_count):
       filename = directory / f"process_{process_index}-of-{process_count}.json"
       if not filename.exists():
         raise ValueError(f"File {filename} does not exist.")
@@ -121,19 +102,26 @@ class MaxtextGrainCheckpointHandler(grain_checkpoint_handlers.CheckpointHandler)
       item.set_state(state)
       return item
 
+    if isinstance(item, list):
+      restored_items = []
+      for data_iter, process_idx in zip(item, process_index):
+        restored_items.append(restore_single_process(data_iter, process_idx, process_count))
+      return restored_items
+    else:
+      if process_index is None or process_count is None:
+        process_index, process_count = sharding.get_process_index_and_count()
+      return restore_single_process(item, process_index, process_count)
 
 @ocp.args.register_with_handler(MaxtextGrainCheckpointHandler, for_save=True)
 @dataclasses.dataclass
 class MaxtextGrainCheckpointSave(ocp.args.CheckpointArgs):
   item: Any
-  process_index: Optional[Any]= None
-  process_count: Optional[int] = None
 
 @ocp.args.register_with_handler(MaxtextGrainCheckpointHandler, for_restore=True)
 @dataclasses.dataclass
 class MaxtextGrainCheckpointRestore(ocp.args.CheckpointArgs):
   item: Any
-  process_index: Optional[int] = None
+  process_index: Optional[int | list[int]] = None
   process_count: Optional[int] = None
 
 
@@ -463,20 +451,28 @@ def load_state_if_possible(
         case (checkpoint_manager, dataset_type, data_iterator) if dataset_type == "grain" and data_iterator and (
             checkpoint_manager.directory / str(step) / "iter"
         ).exists():
-          if isinstance(data_iterator, list):
-            # Restore items once
-            restored_state = checkpoint_manager.restore(step, args=Composite(items=checkpoint_args))
-            # Restore each iterator. The restore is done in-place on the iterator object.
-            process_count = jax.process_count() * len(data_iterator)
-            for i, data_iter in enumerate(data_iterator):
-              process_index = jax.process_index() + i * jax.process_count()
-              grain_iter_restore = MaxtextGrainCheckpointRestore(data_iter.local_iterator, process_index=process_index, process_count=process_count)
-              # The iterator is restored in-place, so we don't need the return value.
-              _ = checkpoint_manager.restore(step, args=Composite(iter=grain_iter_restore))
+          directory = checkpoint_manager.directory / str(step) / "iter"
+          process_count_jax = jax.process_count()
+          process_count_stored = len(list(directory.glob("process_*-of-*.json")))
+          if process_count_stored > process_count_jax:
+            assert isinstance(data_iterator, list), f"{process_count_stored} processes found in checkpoint directory {directory}, but {process_count_jax} jax processes in this run, please set grain_checkpoint_scaling_factor accordingly."
+            assert process_count_stored / process_count_jax == len(data_iterator), f"{process_count_stored} processes found in checkpoint directory {directory}, but plan to restore {len(data_iterator)=} * {process_count_jax=} processes."
+            #restored_state = checkpoint_manager.restore(step, args=Composite(items=checkpoint_args))
+            local_iterator_list = [x.local_iterator for x in data_iterator]
+            process_index_list = [jax.process_index() + i * process_count_jax for i in range(len(data_iterator))]
+            grain_iter_list = MaxtextGrainCheckpointRestore(local_iterator_list, process_index=process_index_list, process_count=process_count_stored)
+            restored_state = checkpoint_manager.restore(step, args=Composite(items=checkpoint_args, iter=grain_iter_list))
+            # for i, data_iter in enumerate(data_iterator):
+            #   process_index = jax.process_index() + i * process_count_jax
+            #   grain_iter = MaxtextGrainCheckpointRestore(data_iter.local_iterator, process_index=process_index, process_count=process_count_stored)
+            #   # Restore each iterator. The restore is done in-place on the iterator object.
+            #   restored_state = checkpoint_manager.restore(step, args=Composite(iter=grain_iter))
             return (restored_state, None)
-          else:
+          elif process_count_stored == process_count_jax:
             grain_iter = MaxtextGrainCheckpointRestore(data_iterator.local_iterator)
             return (checkpoint_manager.restore(step, args=Composite(items=checkpoint_args, iter=grain_iter)), None)
+          else:
+            raise ValueError(f"Error restoring Grain checkpoint: {process_count_stored} cannot be restored to {process_count_jax}.")
         # Case 3: Default/Fallback case.
         # This case acts as a wildcard ('_') and matches if none of the preceding cases were met.
         case _:
@@ -583,65 +579,69 @@ def maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator, step
   # AND it's not a step that would normally trigger a checkpoint save.
   force_ckpt_save = step is None and actual_step != -1 and (actual_step % config.checkpoint_period != 0)
 
-  if (
-      force_ckpt_save
-      or (actual_step % config.checkpoint_period == 0)
-      or (config.enable_emergency_checkpoint and actual_step % config.local_checkpoint_period == 0)
-  ):
-    blocking_until_ready_start = time.time()
-    max_logging.log(f"Waiting for step {actual_step} to finish before checkpoint...")
-    # We block here on the step finishing so that our checkpointing metrics
-    # measure only checkpointing time, not training time.
-    jax.block_until_ready(state)
-    max_logging.log(
-        f"Waited {time.time() - blocking_until_ready_start} seconds for step "
-        f"{actual_step} to finish before starting checkpointing."
-    )
-
-    # specify chunk_byte_size to force orbax to control maximum file size in checkpoint
-    chunk_byte_size = (
-        config.checkpoint_storage_target_data_file_size_bytes if config else DEFAULT_OCDBT_TARGET_DATA_FILE_SIZE
-    )
-
-    checkpoint_args = ocp.args.PyTreeSave(
-        item=state,
-        save_args=jax.tree.map(lambda _: ocp.SaveArgs(chunk_byte_size=chunk_byte_size), state),
-        ocdbt_target_data_file_size=chunk_byte_size,
-    )
-
-    save_args_composite = {"items": checkpoint_args}
-
-    if config and config.dataset_type == "grain":
-      if not isinstance(data_iterator, list):
-        data_iterator = [data_iterator]
-
-      grain_iters_to_save_items = []
-      process_count_total = jax.process_count() * len(data_iterator)
-      for i, data_iter in enumerate(data_iterator):
-        process_index = jax.process_index() + i * jax.process_count()
-        grain_iters_to_save_items.append(
-            (data_iter.local_iterator, process_index, process_count_total)
-        )
-      save_args_composite["iter"] = MaxtextGrainCheckpointSave(item=grain_iters_to_save_items)
-
-    try:
-      match (checkpoint_manager, config):
-        case (checkpoint_manager, _) if isinstance(
-            checkpoint_manager, (EmergencyCheckpointManager, EmergencyReplicatorCheckpointManager)
-        ):
-          replicator_error_handler(config)
-          checkpoint_manager.save(actual_step, args=Composite(state=checkpoint_args), force=force_ckpt_save)
-        case _:
-          checkpoint_manager.save(actual_step, args=Composite(**save_args_composite), force=force_ckpt_save)
+  try:
+    checkpoint_saved = save_checkpoint(checkpoint_manager, actual_step, state, config, data_iterator, force_ckpt_save)
+    if checkpoint_saved:
       print_save_message(actual_step, config.async_checkpointing)
-    except Exception as e:
-      raise exceptions.StopTraining(f"Checkpointing failed. {str(e)}") from e
-    finally:
-      # Wait for any pending checkpoint save to finish during preemption or final step save
-      if force_ckpt_save or checkpoint_manager.reached_preemption(actual_step):
-        checkpoint_manager.wait_until_finished()
+  except Exception as e:
+    raise exceptions.StopTraining(f"Checkpointing failed. {str(e)}") from e
+
+  # Wait for any pending checkpoint save to finish during preemption or final step save
+  if force_ckpt_save or checkpoint_manager.reached_preemption(actual_step):
+    checkpoint_manager.wait_until_finished()
 
   # Raise exception upon preemption
   if checkpoint_manager.reached_preemption(actual_step):
     raise exceptions.StopTraining("Job is preempted.")
+
+
+def save_checkpoint(checkpoint_manager, step, state, config=None, data_iterator=None, force=False):
+  """Wrapper for saving checkpoint."""
+  if config and config.enable_checkpointing:
+    if (
+        force
+        or (step % config.checkpoint_period == 0)
+        or (config.enable_emergency_checkpoint and step % config.local_checkpoint_period == 0)
+    ):
+      blocking_until_ready_start = time.time()
+      max_logging.log(f"Waiting for step {step} to finish before checkpoint...")
+      # We block here on the step finishing so that our checkpointing metrics
+      # measure only checkpointing time, not training time.
+      jax.block_until_ready(state)
+      max_logging.log(
+          f"Waited {time.time() - blocking_until_ready_start} seconds for step "
+          f"{step} to finish before starting checkpointing."
+      )
+
+  # specify chunk_byte_size to force orbax to control maximum file size in checkpoint
+  chunk_byte_size = (
+      config.checkpoint_storage_target_data_file_size_bytes if config else DEFAULT_OCDBT_TARGET_DATA_FILE_SIZE
+  )
+
+  checkpoint_args = ocp.args.PyTreeSave(
+      item=state,
+      save_args=jax.tree.map(lambda _: ocp.SaveArgs(chunk_byte_size=chunk_byte_size), state),
+      ocdbt_target_data_file_size=chunk_byte_size,
+  )
+  save_args_composite = {"items": checkpoint_args}
+  if config and config.dataset_type == "grain":
+    if not isinstance(data_iterator, list):
+      data_iterator = [data_iterator]
+    grain_iters_to_save = []
+    process_count_total = jax.process_count() * len(data_iterator)
+    for i, data_iter in enumerate(data_iterator):
+      process_index = jax.process_index() + i * jax.process_count()
+      grain_iters_to_save.append(
+          (data_iter.local_iterator, process_index, process_count_total)
+      )
+    save_args_composite["iter"] = MaxtextGrainCheckpointSave(item=grain_iters_to_save)
+
+  match (checkpoint_manager, config):
+    case (checkpoint_manager, _) if isinstance(
+        checkpoint_manager, (EmergencyCheckpointManager, EmergencyReplicatorCheckpointManager)
+    ):
+      replicator_error_handler(config)
+      return checkpoint_manager.save(step, args=Composite(state=checkpoint_args), force=force)
+    case _:
+      return checkpoint_manager.save(step, args=Composite(**save_args_composite), force=force)
 

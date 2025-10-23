@@ -261,9 +261,6 @@ def make_grain_train_iterator(
         train_ds = get_ds_fn(dataloading_host_index=dataloading_host_index, dataloading_host_count=dataloading_host_count)
         train_dataloader = preprocessing_fn(train_ds)
         train_dataloader_list.append(train_dataloader)
-      # return multihost_dataloading.MultiHostDataLoadIterator(
-      #     train_dataloader_list, global_mesh, config.generate_padding_batch_train
-      # )
       return [multihost_dataloading.MultiHostDataLoadIterator(x, global_mesh, config.generate_padding_batch_train) for x in train_dataloader_list]
 
 
