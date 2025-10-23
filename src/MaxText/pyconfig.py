@@ -720,6 +720,14 @@ class _HyperParameters:
     raw_keys["logical_axis_rules"] = _lists_to_tuples(raw_keys["logical_axis_rules"])
     raw_keys["data_sharding"] = _lists_to_tuples(raw_keys["data_sharding"])
 
+    if raw_keys["muon_consistent_rms"] in ["None", "none"]:
+      raw_keys["muon_consistent_rms"] = None
+    else:
+      try:
+        raw_keys["muon_consistent_rms"] = float(raw_keys["muon_consistent_rms"])
+      except ValueError as e:
+        raise ValueError(f"muon_consistent_rms should be None or float") from e
+
     if raw_keys["remat_policy"] == "custom":
       raw_keys = validate_and_assign_remat_tensors(raw_keys)
     validate_keys(raw_keys)

@@ -175,11 +175,15 @@ def scale_by_shape(
     else:
       resolved_weight_dim_nums = weight_dimension_numbers
 
+    print(consistent_rms, type(consistent_rms))
+
     if consistent_rms is not None:
+      print("consistent rms scaling")
       scaling_fn = functools.partial(
           _scale_update_for_consistent_rms, consistent_rms=consistent_rms
       )
     else:
+      print("width scaling")
       scaling_fn = _scale_update_for_width_transfer
 
     scaled_updates = jax.tree.map(
