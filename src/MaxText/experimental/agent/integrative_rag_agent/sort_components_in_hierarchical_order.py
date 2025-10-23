@@ -279,7 +279,7 @@ def load_status(file_path: str) -> Status:
 
 
 # --- Main Component Dependency Analysis ---
-def sort_and_search_dependency(base_path, file_path, module):
+def sort_and_search_dependency(base_path, file_path, module, enable_llm_filter: bool = True):
   """
   Analyzes component dependencies starting from an entry module and returns a
   topologically sorted list of all required components and their code.
@@ -363,18 +363,18 @@ def sort_and_search_dependency(base_path, file_path, module):
     analysis = copy.deepcopy(file_analysis_cache[comp_id])
     if comp_name in analysis["component_dependencies"]:
       if enable_llm_filter:
-              filtered_dependencies = filter_out_dependency(
-                  analysis["sorted_modules"][comp_name], analysis["component_dependencies"][comp_name]
-              )
-              logger.info("Waiting 30 seconds to respect free tier Gemini API rate limit (2 req/min)...")
-              time.sleep(30)
-              logger.info(
-                  "Filter dependencies from \n %s \nto %s", analysis["component_dependencies"][comp_name], filtered_dependencies
-              )
-              analysis["component_dependencies"][comp_name] = filtered_dependencies
-            else:
-              logger.info("LLM filter is disabled, skipping dependency filtering for %s.", comp_name)
-              pass
+        filtered_dependencies = filter_out_dependency(
+            analysis["sorted_modules"][comp_name], analysis["component_dependencies"][comp_name]
+        )
+        logger.info("Waiting 30 seconds to respect free tier Gemini API rate limit (2 req/min)...")
+        time.sleep(30)
+        logger.info(
+            "Filter dependencies from \n %s \nto %s", analysis["component_dependencies"][comp_name], filtered_dependencies
+        )
+        analysis["component_dependencies"][comp_name] = filtered_dependencies
+      else:
+        logger.info("LLM filter is disabled, skipping dependency filtering for %s.", comp_name)
+        pass
       if save_dependency_list:
         with open(dependency_list_file, "a", encoding="utf-8") as f:
           f.write(f"--- Dependency for {comp_name}\n")
@@ -482,9 +482,11 @@ def arg_parser():
       help="The name of the entry function or class to start the analysis from.",
   )
   parser.add_argument(
-      "--enable-llm-filter",
-      action="store_true", 
-      help="If set, enables the experimental LLM dependency filter. Default is disabled."
+      "--disable-llm-filter",
+      action="store_false",  
+      dest="enable_llm_filter",  
+      default=True,  
+      help="Disables the LLM dependency filter. Default is enabled."
   )
   args = parser.parse_args()
   return args
@@ -498,11 +500,18 @@ def main():
   entry_module = args.entry_module
 
   logger.info("Starting analysis from: %s in %s", entry_module, entry_file_path)
-  
-    if enable_llm_filter:
-    logger.warning("LLM dependency filter is ENABLED. This may remove valid dependencies.")
+  enable_llm_filter = args.enable_llm_filter
+  if enable_llm_filter:
+    logger.warning("LLM dependency filter is ENABLED by default.")
+    logger.warning(
+        "The filter is instructed to remove all 'extra' dependencies related to:\n"
+        "    * Caching or checkpointing\n"
+        "    * Inference strategies (like beam search)\n"
+        "    * Logging, metrics, or debugging\n"
+        "    * Any other 'non-essential' (but used) dependencies"
+    )
   else:
-    logger.info("LLM dependency filter is DISABLED. Using full dependency list.")
+    logger.info("LLM dependency filter has been DISABLED. Using full dependency list.")
   
   logger.info("-" * 60)
   sort_and_search_dependency(base_path, entry_file_path, entry_module, enable_llm_filter)
