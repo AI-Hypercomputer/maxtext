@@ -168,10 +168,7 @@ def create_model_input_for_lora(base_model):
       "decoder_positions": jnp.ones(
           (batch_size, seq_len), dtype=jnp.int32
       ),
-      "decoder_segment_ids": jnp.ones(
-          (batch_size, seq_len), dtype=jnp.int32
-      ),
-      "cache": None,
+      # "cache": None,
   }
 
 
