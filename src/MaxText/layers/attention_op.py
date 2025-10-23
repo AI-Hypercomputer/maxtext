@@ -28,6 +28,8 @@ from jax.experimental.pallas.ops.gpu import attention as gpu_pallas_attention
 from jax.experimental.pallas.ops.gpu import decode_attention as gpu_pallas_decode_attention
 from jax.experimental import pallas as pl
 from jax.experimental.shard_map import shard_map
+from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_kernel
+from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_mask
 from jax.sharding import Mesh
 import jax
 import jax.numpy as jnp
@@ -1080,9 +1082,6 @@ class AttentionOp(nnx.Module):
         f" got {query.shape[0]=}/{devices_in_data_fsdp=}"
     )
     
-    from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_kernel
-    from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_mask
-    
     # create_splash_attention kernel
     sa_config = splash_attention_kernel.SplashConfig(
         block_q=min(global_block_q, query.shape[2]),
@@ -1109,6 +1108,7 @@ class AttentionOp(nnx.Module):
               transcendentals=0,
               bytes_accessed=0,
           ) if self.config.cost_estimate_flops_bwd > 0 else None,
+        dq_reduction_steps=self.config.dq_reduction_steps if self.config.dq_reduction_steps > 0 else None
     )
 
     mask_shape = (query.shape[2], key.shape[2])  # (q_seq_len, kv_seq_len)
@@ -1138,9 +1138,8 @@ class AttentionOp(nnx.Module):
       mask &= ChunkedCausalMask(shape=(query.shape[2], key.shape[2]), chunk_size=self.chunk_attn_window_size)
 
     # Create mask - tokmax now just uses a single mask and assumes broadcast to all heads
-    single_head_mask = mask # tokamax now just uses a single mask and assumes broadcast to all heads?
-    #multi_head_mask = splash_attention_mask.MultiHeadMask(masks=(mask,) * query.shape[1])
-    # tokamax now just uses a single mask and assumes broadcast to all heads
+    single_head_mask = mask
+
     max_logit_value, max_val = None, self.config.use_max_logit_estimate
     if max_val > 0:
       use_max_logit_estimate = "const"
