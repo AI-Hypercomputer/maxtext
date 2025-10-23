@@ -638,6 +638,7 @@ mu_dtype: "" # data type to store "mu" of AdamW tracking the first moment. Inher
 # "nesterov", "ns_coeffs", "ns_steps", "weight_decay_mask", "adaptive" use default
 muon_beta: 0.95 # Decay rate for the exponentially weighted average of grads.
 muon_weight_decay: 0 # Strength of the weight decay regularization. This is multiplied with the learning rate.
+muon_consistent_rms: None
 
 
 # Stack trace parameters

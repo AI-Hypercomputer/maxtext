@@ -73,6 +73,7 @@ def get_optimizer(config, learning_rate_schedule, model=None):
         "beta": config.muon_beta,
         "weight_decay": config.muon_weight_decay,
         "muon_weight_dimension_numbers": muon_weight_dimension_numbers,
+        "consistent_rms": config.muon_consistent_rms,
         # AdamW-specific parameters
         "adam_b1": config.adam_b1,
         "adam_b2": config.adam_b2,
