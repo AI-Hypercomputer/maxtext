@@ -1,4 +1,4 @@
-# copy from https://github.com/google-deepmind/optax/blob/5bd909532d9814667c188ac09b675183118e76eb/optax/contrib/_muon.py
+# copy from https://github.com/shuningjin/optax/blob/b0a9a48833fb8ec5e217f1fc70659df7ec3eaf8a/optax/contrib/_muon.py
 
 # Copyright 2025 DeepMind Technologies Limited. All Rights Reserved.
 #
@@ -41,16 +41,7 @@ import optax.tree
 ReshapeFn = Callable[[jax.Array], jax.Array]
 
 
-def debug_sharding(array, prefix=""):
-  global_shape = array.shape
-  jax.debug.inspect_array_sharding(
-      array,
-      callback=lambda sharding_obj: print(
-          prefix + f"\tGlobal Shape: {global_shape}\n"
-          f"\tLocal Shape: {sharding_obj.shard_shape(global_shape)}\n"
-          f"\tSharding Object: {sharding_obj}\n"
-      ),
-  )
+_DEFAULT_NS_COEFFS = (3.4445, -4.7750, 2.0315)
 
 
 class MuonDimensionNumbers(NamedTuple):
@@ -127,14 +118,11 @@ def _compute_muon_reshape(x: jax.Array, dim_nums: MuonDimensionNumbers
   return reshape_fn, inverse_fn
 
 
-# def _shape_factor(x: jax.Array, dim_nums: MuonDimensionNumbers) -> float:
-#   reduction_axes, output_axes = _normalize_axes(x, dim_nums)
-#   return math.prod(x.shape[ax] for ax in output_axes) / math.prod(
-#       x.shape[ax] for ax in reduction_axes)
-
 def _shape_factor(x: jax.Array, dim_nums: MuonDimensionNumbers) -> float:
   reduction_axes, output_axes = _normalize_axes(x, dim_nums)
-  return max(math.prod(x.shape[ax] for ax in output_axes), math.prod(x.shape[ax] for ax in reduction_axes))
+  return math.prod(x.shape[ax] for ax in output_axes) / math.prod(
+      x.shape[ax] for ax in reduction_axes
+  )
 
 
 def _newton_schulz_iterator(x: jax.Array, coeffs: jax.Array) -> jax.Array:
@@ -224,7 +212,7 @@ def scale_by_muon(
     ns_coeffs: Union[
         tuple[float, float, float],
         tuple[tuple[float, float, float], ...],
-    ] = (3.4445, -4.7750, 2.0315),
+    ] = _DEFAULT_NS_COEFFS,
     ns_steps: int = 5,
     beta: float = 0.95,
     eps: float = 1e-8,
@@ -283,7 +271,6 @@ def scale_by_muon(
     )
 
   def update_fn(updates, state, params=None):
-    # debug_sharding(updates["params"]["decoder"]["dense_layers"]["mlp"]["wi_0"]["kernel"])
     del params
     # TODO(rdyro): extend to _masking._mask_callable
     if callable(weight_dimension_numbers):
@@ -318,17 +305,16 @@ def scale_by_muon(
       )
     factors = jax.tree.map(_shape_factor, updates, resolved_weight_dim_nums,
                            is_leaf=_is_weight_dim_nums)
-    # updates = jax.tree.map(
-    #     lambda x, factor: jnp.sqrt(jnp.maximum(1, factor)) * x,
-    #     updates, factors
-    # )
-    updates = jax.tree.map(lambda x, factor: jnp.sqrt(factor) * 0.2 * x, updates, factors)
+    updates = jax.tree.map(
+        lambda x, factor: jnp.sqrt(jnp.maximum(1, factor)) * x, updates, factors
+    )
     mu = optax.tree.cast(mu, mu_dtype)
     return updates, MuonState(
         count=count_inc,
         mu=mu,
         ns_coeffs=state.ns_coeffs,
     )
+
   return base.GradientTransformation(init_fn, update_fn)
 
 
@@ -337,7 +323,7 @@ def muon(
     ns_coeffs: Union[
         tuple[float, float, float],
         tuple[tuple[float, float, float], ...],
-    ] = (3.4445, -4.7750, 2.0315),
+    ] = _DEFAULT_NS_COEFFS,
     ns_steps: int = 5,
     beta: float = 0.95,
     eps: float = 1e-8,
