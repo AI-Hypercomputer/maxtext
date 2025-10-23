@@ -27,7 +27,7 @@ from jax.ad_checkpoint import checkpoint_name
 from jax.experimental.pallas.ops.gpu import attention as gpu_pallas_attention
 from jax.experimental.pallas.ops.gpu import decode_attention as gpu_pallas_decode_attention
 from jax.experimental import pallas as pl
-from jax.experimental.shard_map import shard_map
+
 from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_kernel
 from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_mask
 from jax.sharding import Mesh
