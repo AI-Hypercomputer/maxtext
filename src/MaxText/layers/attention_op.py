@@ -22,22 +22,27 @@ import math
 import numpy as np
 from packaging import version
 
+import jax
 from jax import lax
 from jax.ad_checkpoint import checkpoint_name
 from jax.experimental.pallas.ops.gpu import attention as gpu_pallas_attention
 from jax.experimental.pallas.ops.gpu import decode_attention as gpu_pallas_decode_attention
 from jax.experimental import pallas as pl
 
+if jax.__version__ < "0.8.0":
+  from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_kernel
+  from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask
+
 from jax.sharding import Mesh
-import jax
 import jax.numpy as jnp
 
 from flax import linen as nn
 from flax import nnx
 from flax.linen import partitioning
 
-from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_kernel
-from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_mask
+if jax.__version__ >= "0.8.0":
+  from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_kernel
+  from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_mask
 
 from MaxText import max_utils
 from MaxText.common_types import (
@@ -1053,12 +1058,12 @@ class AttentionOp(nnx.Module):
 
     if self.config.expert_shard_attention_option == EP_AS_CONTEXT:
       # todo: needs support for tokamax splash attention kernel
-      # axis_names_splash_kernel = nn.logical_to_mesh_axes(self.flash_axis_names_splash_kernel_ep)
+      axis_names_splash_kernel = nn.logical_to_mesh_axes(self.flash_axis_names_splash_kernel_ep)
       axis_names_q = nn.logical_to_mesh_axes(self.flash_axis_names_q_ep)
       axis_names_kv = nn.logical_to_mesh_axes(self.flash_axis_names_kv_ep)
     else:
       # todo: needs support for tokamax splash attention kernel
-      # axis_names_splash_kernel = nn.logical_to_mesh_axes(self.flash_axis_names_splash_kernel)
+      axis_names_splash_kernel = nn.logical_to_mesh_axes(self.flash_axis_names_splash_kernel)
       axis_names_q = nn.logical_to_mesh_axes(self.flash_axis_names_q)
       axis_names_kv = nn.logical_to_mesh_axes(self.flash_axis_names_kv)
 
@@ -1086,38 +1091,53 @@ class AttentionOp(nnx.Module):
     )
 
     # create_splash_attention kernel
-    sa_config = splash_attention_kernel.SplashConfig(
-        block_q=min(global_block_q, query.shape[2]),
-        block_kv=min(global_block_kv, key.shape[2]),
-        block_kv_compute=min(global_block_kv_compute, key.shape[2]),
-        block_q_dkv=min(global_block_q_dkv, query.shape[2]),
-        block_kv_dkv=min(global_block_kv_dkv, key.shape[2]),
-        block_kv_dkv_compute=min(global_block_kv_dkv_compute, query.shape[2]),
-        block_q_dq=None if global_use_fused_bwd_kernel else min(global_block_q_dq, query.shape[2]),
-        block_kv_dq=None if global_use_fused_bwd_kernel else min(global_block_kv_dq, query.shape[2]),
-        use_fused_bwd_kernel=global_use_fused_bwd_kernel,
-        q_layout=splash_attention_kernel.QKVLayout[global_q_layout],
-        k_layout=splash_attention_kernel.QKVLayout[global_k_layout],
-        v_layout=splash_attention_kernel.QKVLayout[global_v_layout],
-        attn_logits_soft_cap=attn_logits_soft_cap,
-        residual_checkpoint_name="context",
-        fwd_cost_estimate=pl.CostEstimate(
-            flops=self.config.cost_estimate_flops_fwd,
-            transcendentals=0,
-            bytes_accessed=0,
-        )
-        if self.config.cost_estimate_flops_fwd > 0
-        else None,
-        bwd_cost_estimate=pl.CostEstimate(
-            flops=self.config.cost_estimate_flops_bwd,
-            transcendentals=0,
-            bytes_accessed=0,
-        )
-        if self.config.cost_estimate_flops_bwd > 0
-        else None,
-        dq_reduction_steps=self.config.dq_reduction_steps if self.config.dq_reduction_steps > 0 else None,
-    )
-
+    if jax.__version__ >= "0.8.0":
+      sa_config = splash_attention_kernel.SplashConfig(
+          block_q=min(global_block_q, query.shape[2]),
+          block_kv=min(global_block_kv, key.shape[2]),
+          block_kv_compute=min(global_block_kv_compute, key.shape[2]),
+          block_q_dkv=min(global_block_q_dkv, query.shape[2]),
+          block_kv_dkv=min(global_block_kv_dkv, key.shape[2]),
+          block_kv_dkv_compute=min(global_block_kv_dkv_compute, query.shape[2]),
+          block_q_dq=None if global_use_fused_bwd_kernel else min(global_block_q_dq, query.shape[2]),
+          block_kv_dq=None if global_use_fused_bwd_kernel else min(global_block_kv_dq, query.shape[2]),
+          use_fused_bwd_kernel=global_use_fused_bwd_kernel,
+          q_layout=splash_attention_kernel.QKVLayout[global_q_layout],
+          k_layout=splash_attention_kernel.QKVLayout[global_k_layout],
+          v_layout=splash_attention_kernel.QKVLayout[global_v_layout],
+          attn_logits_soft_cap=attn_logits_soft_cap,
+          residual_checkpoint_name="context",
+          fwd_cost_estimate=pl.CostEstimate(
+              flops=self.config.cost_estimate_flops_fwd,
+              transcendentals=0,
+              bytes_accessed=0,
+          )
+          if self.config.cost_estimate_flops_fwd > 0
+          else None,
+          bwd_cost_estimate=pl.CostEstimate(
+              flops=self.config.cost_estimate_flops_bwd,
+              transcendentals=0,
+              bytes_accessed=0,
+          )
+          if self.config.cost_estimate_flops_bwd > 0
+          else None,
+          dq_reduction_steps=self.config.dq_reduction_steps if self.config.dq_reduction_steps > 0 else None,
+      )
+    else:
+      sa_config = splash_attention_kernel.BlockSizes(
+          block_q=min(global_block_q, query.shape[2]),
+          block_kv=min(global_block_kv, key.shape[2]),
+          block_kv_compute=min(global_block_kv_compute, key.shape[2]),
+          block_q_dkv=min(global_block_q_dkv, query.shape[2]),
+          block_kv_dkv=min(global_block_kv_dkv, key.shape[2]),
+          block_kv_dkv_compute=min(global_block_kv_dkv_compute, query.shape[2]),
+          block_q_dq=None if global_use_fused_bwd_kernel else min(global_block_q_dq, query.shape[2]),
+          block_kv_dq=None if global_use_fused_bwd_kernel else min(global_block_kv_dq, query.shape[2]),
+          use_fused_bwd_kernel=global_use_fused_bwd_kernel,
+          q_layout=splash_attention_kernel.QKVLayout[global_q_layout],
+          k_layout=splash_attention_kernel.QKVLayout[global_k_layout],
+          v_layout=splash_attention_kernel.QKVLayout[global_v_layout],
+      )
     mask_shape = (query.shape[2], key.shape[2])  # (q_seq_len, kv_seq_len)
     if self.attention_type == AttentionType.FULL:
       mask = splash_attention_mask.FullMask(mask_shape)
@@ -1144,41 +1164,72 @@ class AttentionOp(nnx.Module):
 
       mask &= ChunkedCausalMask(shape=(query.shape[2], key.shape[2]), chunk_size=self.chunk_attn_window_size)
 
-    # Create mask - tokmax now just uses a single mask and assumes broadcast to all heads
-    single_head_mask = mask
-
     max_logit_value, max_val = None, self.config.use_max_logit_estimate
-    if max_val > 0:
-      use_max_logit_estimate = "const"
-      if use_max_logit_estimate == "const":
-        sa_config = dataclasses.replace(sa_config, max_logit_const=max_val)
-      elif use_max_logit_estimate == "value_1d":
-        max_logit_value = max_val * jnp.ones((1,), dtype=jnp.bfloat16)
-      elif use_max_logit_estimate == "value_2d":
-        max_logit_value = max_val * jnp.ones((self.config.num_q_heads,), dtype=jnp.bfloat16)
+    if jax.__version__ >= "0.8.0":
+      # Create mask
+      single_head_mask = mask  # tokamax now just uses a single mask and assumes broadcast to all heads
+      if max_val > 0:
+        use_max_logit_estimate = "const"
+        if use_max_logit_estimate == "const":
+          sa_config = dataclasses.replace(sa_config, max_logit_const=max_val)
+        elif use_max_logit_estimate == "value_1d":
+          max_logit_value = max_val * jnp.ones((1,), dtype=jnp.bfloat16)
+        elif use_max_logit_estimate == "value_2d":
+          max_logit_value = max_val * jnp.ones((self.config.num_q_heads,), dtype=jnp.bfloat16)
 
-    # Create the splash attention kernel object separately, jit it for performance
-    @partial(
-        jax.jit,
-        static_argnames=[
-            "single_head_mask",
-            "shard_head_size",
-        ],
-    )
-    def wrap_splash_kernel(single_head_mask, shard_head_size=1):
-      splash_kernel = splash_attention_kernel.make_splash_mha(
-          mask=single_head_mask,
-          config=sa_config,
-          q_seq_shards=cp_size,  # axis for sequence sharding,
+      # Create the splash attention kernel object separately, jit it for performance
+      @partial(
+          jax.jit,
+          static_argnames=[
+              "single_head_mask",
+              "shard_head_size",
+          ],
       )
-      return splash_kernel
+      def wrap_splash_kernel(single_head_mask, shard_head_size=1):
+        splash_kernel = splash_attention_kernel.make_splash_mha(
+            mask=single_head_mask,
+            config=sa_config,
+            q_seq_shards=cp_size,  # axis for sequence sharding,
+        )
+        return splash_kernel
 
-    logical_axis_rules_head = np.array(
-        [self.mesh.shape[physical_axes] for physical_axes in dict(self.config.logical_axis_rules)[HEAD]]
-    )
-    shard_head_size = np.prod(logical_axis_rules_head)
-    splash_kernel = wrap_splash_kernel(single_head_mask, int(shard_head_size))
-    segment_axis_names_splash_kernel = nn.logical_to_mesh_axes((Q_LENGTH_NO_EXP,))
+      logical_axis_rules_head = np.array(
+          [self.mesh.shape[physical_axes] for physical_axes in dict(self.config.logical_axis_rules)[HEAD]]
+      )
+      shard_head_size = np.prod(logical_axis_rules_head)
+      splash_kernel = wrap_splash_kernel(single_head_mask, int(shard_head_size))
+      segment_axis_names_splash_kernel = nn.logical_to_mesh_axes((Q_LENGTH_NO_EXP,))
+    else:
+      # Create multi-head mask
+      multi_head_mask = splash_attention_mask.MultiHeadMask(masks=(mask,) * query.shape[1])
+
+      # Create the splash attention kernel object separately, jit it for performance
+      @partial(
+          jax.jit,
+          static_argnames=[
+              "multi_head_mask",
+              "shard_head_size",
+          ],
+      )
+      def wrap_splash_kernel(multi_head_mask, shard_head_size=1):
+        splash_kernel = splash_attention_kernel.make_splash_mha(
+            mask=multi_head_mask,
+            head_shards=shard_head_size,  # the size of the axis if sharding over heads
+            q_seq_shards=cp_size,  # axis for sequence sharding
+            block_sizes=sa_config,
+            attn_logits_soft_cap=attn_logits_soft_cap,
+            residual_checkpoint_name="context",
+        )
+        return splash_kernel
+
+      logical_axis_rules_head = np.array(
+          [self.mesh.shape[physical_axes] for physical_axes in dict(self.config.logical_axis_rules)[HEAD]]
+      )
+      shard_head_size = np.prod(logical_axis_rules_head)
+      splash_kernel = wrap_splash_kernel(multi_head_mask, int(shard_head_size))
+      named_sharding = jax.sharding.NamedSharding(self.mesh, axis_names_splash_kernel)
+      segment_axis_names_splash_kernel = splash_kernel.manual_sharding_spec(named_sharding)
+
     # segment_axis_names_splash_kernel = nn.logical_to_mesh_axes((HEAD, Q_LENGTH_NO_EXP))
 
     # Now call the function wrap_flash_attention which does the actual computation.
@@ -1243,12 +1294,17 @@ class AttentionOp(nnx.Module):
       if version.parse(jax.__version__) < version.parse("0.7.2.dev20250824"):
         attention_output = jax.vmap(splash_kernel)(query, key, value, decoder_segment_ids_tuple)
       else:
-        if max_logit_value is not None:
-          attention_output = jax.vmap(partial(splash_kernel, max_logit_value=max_logit_value))(
-              query, key, value, decoder_segment_ids_tuple
-          )
+        if jax.__version__ >= "0.8.0":
+          if max_logit_value is not None:
+            attention_output = jax.vmap(partial(splash_kernel, max_logit_value=max_logit_value))(
+                query, key, value, decoder_segment_ids_tuple
+            )
+          else:
+            attention_output = jax.vmap(splash_kernel)(query, key, value, decoder_segment_ids_tuple)
         else:
-          attention_output = jax.vmap(splash_kernel)(query, key, value, decoder_segment_ids_tuple)
+          attention_output = jax.vmap(splash_kernel, in_axes=(0, 0, 0, 0, None))(
+              query, key, value, decoder_segment_ids_tuple, sinks
+          )
       return attention_output
 
     x = wrap_flash_attention(
