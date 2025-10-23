@@ -21,7 +21,7 @@ by a subsequent training run using a different input pipeline (e.g., 'tfds').
 The tests confirm restoration by checking the starting step of the resumed runs.
 
 Note: Make sure to run
-  `bash setup_gcsfuse.sh DATASET_GCS_BUCKET=gs://maxtext-dataset MOUNT_PATH=/tmp/gcsfuse/`
+  `bash tools/setup/setup_gcsfuse.sh DATASET_GCS_BUCKET=gs://maxtext-dataset MOUNT_PATH=/tmp/gcsfuse/`
 before running tests locally.
 """
 

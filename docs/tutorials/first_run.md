@@ -37,7 +37,7 @@ multiple hosts but is a good way to learn about MaxText.
 ```sh
 python3 -m venv ~/venv-maxtext
 source ~/venv-maxtext/bin/activate
-bash setup.sh
+bash tools/setup/setup.sh
 pre-commit install
 ```
 4. After installation completes, run training on synthetic data with the following command:
@@ -69,7 +69,7 @@ You can use [demo_decoding.ipynb](https://github.com/AI-Hypercomputer/maxtext/bl
 
 
 ### Run MaxText on NVIDIA GPUs
-1. Use `bash docker_build_dependency_image.sh DEVICE=gpu` to build a container with the required dependencies.
+1. Use `bash dependencies/scripts/docker_build_dependency_image.sh DEVICE=gpu` to build a container with the required dependencies.
 2. After installation is complete, run training with the following command on synthetic data:
 ```sh
 python3 -m MaxText.train src/MaxText/configs/base.yml \

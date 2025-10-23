@@ -35,7 +35,7 @@ git clone https://github.com/AI-Hypercomputer/JetStream.git
 
 RUN cd maxtext/ && \
 git checkout ${MAXTEXT_VERSION} && \
-bash setup.sh
+bash ./tools/setup/setup.sh
 
 RUN cd /JetStream && \
 git checkout ${JETSTREAM_VERSION} && \
