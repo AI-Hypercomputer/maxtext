@@ -94,10 +94,10 @@ MaxText/experimental/agent/{Module_Name}
 
 ## Common debugging steps
 
-1. **If Gemini api is using free tier and run out of quota**  
-If Gemini api is using free tier and run out of quota, but you are not using a free tier api key, try refresh your api key:
+1. **If Gemini api is under free tier and run out of quota**  
+If Gemini api is under free tier and run out of quota, but you are not using a free tier account, try refresh your api key:
 
 ```
-unset GOOGLE_API_KEY```
+unset GOOGLE_API_KEY
 export GOOGLE_API_KEY="YOUR_API_KEY_HERE"
 ```
