@@ -40,13 +40,16 @@ from typing import Sequence
 from absl import app
 import os
 import jax
+import jax.numpy as jnp
 import pathwaysutils
+from flax import nnx
 
 from flax.linen import partitioning as nn_partitioning
 
 from orbax import checkpoint as ocp
 
 from tunix.sft import peft_trainer, profiler
+import qwix
 
 from MaxText import max_utils
 from MaxText import max_logging
@@ -136,6 +139,101 @@ def use_maxtext_loss_function(trainer, mt_config):
   return trainer
 
 
+def create_model_input_for_lora(base_model):
+  """Creates dummy model input for LoRA tracing.
+  
+  Creates the model input structure that qwix expects to trace through
+  the model's computation graph when applying LoRA adapters.
+  
+  The parameter names must exactly match the Transformer's __call__ signature.
+  
+  Args:
+    base_model: The base model to extract configuration from.
+    
+  Returns:
+    A dictionary with keys matching Transformer.__call__ parameters:
+    'decoder_input_tokens', 'decoder_positions', 'decoder_segment_ids', 'cache'.
+  """
+  # Get batch and sequence length from model config
+  batch_size, seq_len = max_utils.get_batch_seq_len_for_mode(
+      config=base_model.config,
+      model_mode=base_model.model_mode
+  )
+  
+  # Create dummy inputs matching Transformer.__call__ signature
+  return {
+      "decoder_input_tokens": jnp.ones(
+          (batch_size, seq_len), dtype=jnp.int32
+      ),
+      "decoder_positions": jnp.ones(
+          (batch_size, seq_len), dtype=jnp.int32
+      ),
+      "decoder_segment_ids": jnp.ones(
+          (batch_size, seq_len), dtype=jnp.int32
+      ),
+      "cache": None,
+  }
+
+
+def apply_lora_to_model(base_model, mesh, mt_config, quantize=False):
+  """Applies LoRA to the base model.
+
+  Args:
+    base_model: The base MaxText model to apply LoRA to.
+    mesh: The device mesh for sharding.
+    mt_config: MaxText config containing LoRA parameters.
+    quantize: Whether to use quantized LoRA (NF4).
+
+  Returns:
+    The model with LoRA applied and properly sharded.
+  """
+  # Extract LoRA parameters from config
+  rank = getattr(mt_config, "lora_rank", 8)
+  alpha = getattr(mt_config, "lora_alpha", 16)
+  
+  # Define which modules to apply LoRA to
+  module_path = ".*q_einsum|.*kv_einsum|.*gate_proj|.*down_proj|.*up_proj"
+  
+  if quantize:
+    lora_provider = qwix.LoraProvider(
+        module_path=module_path,
+        rank=rank,
+        alpha=alpha,
+        weight_qtype="nf4",
+        tile_size=256,
+    )
+  else:
+    lora_provider = qwix.LoraProvider(
+        module_path=module_path,
+        rank=rank,
+        alpha=alpha,
+    )
+
+  # Get model inputs from the model itself, just like Gemma's pattern:
+  # model_input = base_model.get_model_input()
+  # lora_model = qwix.apply_lora_to_model(base_model, lora_provider, **model_input)
+  #
+  # The get_model_input() method returns dummy inputs that match the model's expected signature.
+  # For NNX models, qwix needs to call the model to trace the computation graph.
+  model_input = create_model_input_for_lora(base_model)
+  
+  # Apply LoRA to the model using the inputs from create_model_input_for_lora()
+  lora_model = qwix.apply_lora_to_model(
+      base_model, 
+      lora_provider,
+      **model_input
+  )
+
+  # Apply sharding constraints
+  with mesh:
+    state = nnx.state(lora_model)
+    pspecs = nnx.get_partition_spec(state)
+    sharded_state = jax.lax.with_sharding_constraint(state, pspecs)
+    nnx.update(lora_model, sharded_state)
+
+  return lora_model
+
+
 def train(mt_config, goodput_recorder=None):
   """Runs the SFT training loop.
 
@@ -147,6 +245,15 @@ def train(mt_config, goodput_recorder=None):
 
   with maybe_record_goodput(goodput_recorder, GoodputEvent.TPU_INIT):
     model, mesh = model_creation_utils.create_nnx_model(mt_config)
+    
+    # Apply LoRA if enabled
+    use_lora = getattr(mt_config, "use_lora", False)
+    if use_lora:
+      max_logging.log("Applying LoRA to the model...")
+      quantize_lora = getattr(mt_config, "quantize_lora", False)
+      model = apply_lora_to_model(model, mesh, mt_config, quantize=quantize_lora)
+      max_logging.log("LoRA applied successfully")
+    
     learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(mt_config)
     optimizer = optimizers.get_optimizer(mt_config, learning_rate_schedule)
 

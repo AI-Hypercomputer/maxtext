@@ -27,3 +27,9 @@ train_split: 'train_sft'
 hf_eval_split: 'test_sft'
 train_data_columns: ['messages']
 eval_data_columns: ['messages']
+
+# PEFT LoRA training configs (for fine-tuning)
+use_lora: False                 # Enable LoRA for parameter-efficient fine-tuning
+lora_rank: 8                    # Rank of LoRA decomposition (r in LoRA paper)
+lora_alpha: 16                  # Scaling factor for LoRA (alpha in LoRA paper)
+quantize_lora: False            # Enable NF4 quantization for LoRA (QLoRA)
