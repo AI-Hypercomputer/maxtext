@@ -1052,13 +1052,13 @@ class AttentionOp(nnx.Module):
         segment_axis_names_kv = nn.logical_to_mesh_axes((BATCH, KV_LENGTH))
 
     if self.config.expert_shard_attention_option == EP_AS_CONTEXT:
-      #todo: needs support for tokamax splash attention kernel
-      #axis_names_splash_kernel = nn.logical_to_mesh_axes(self.flash_axis_names_splash_kernel_ep)
+      # todo: needs support for tokamax splash attention kernel
+      # axis_names_splash_kernel = nn.logical_to_mesh_axes(self.flash_axis_names_splash_kernel_ep)
       axis_names_q = nn.logical_to_mesh_axes(self.flash_axis_names_q_ep)
       axis_names_kv = nn.logical_to_mesh_axes(self.flash_axis_names_kv_ep)
     else:
-      #todo: needs support for tokamax splash attention kernel
-      #axis_names_splash_kernel = nn.logical_to_mesh_axes(self.flash_axis_names_splash_kernel)
+      # todo: needs support for tokamax splash attention kernel
+      # axis_names_splash_kernel = nn.logical_to_mesh_axes(self.flash_axis_names_splash_kernel)
       axis_names_q = nn.logical_to_mesh_axes(self.flash_axis_names_q)
       axis_names_kv = nn.logical_to_mesh_axes(self.flash_axis_names_kv)
 
@@ -1102,16 +1102,20 @@ class AttentionOp(nnx.Module):
         attn_logits_soft_cap=attn_logits_soft_cap,
         residual_checkpoint_name="context",
         fwd_cost_estimate=pl.CostEstimate(
-              flops=self.config.cost_estimate_flops_fwd,
-              transcendentals=0,
-              bytes_accessed=0,
-          ) if self.config.cost_estimate_flops_fwd > 0 else None,
+            flops=self.config.cost_estimate_flops_fwd,
+            transcendentals=0,
+            bytes_accessed=0,
+        )
+        if self.config.cost_estimate_flops_fwd > 0
+        else None,
         bwd_cost_estimate=pl.CostEstimate(
-              flops=self.config.cost_estimate_flops_bwd,
-              transcendentals=0,
-              bytes_accessed=0,
-          ) if self.config.cost_estimate_flops_bwd > 0 else None,
-        dq_reduction_steps=self.config.dq_reduction_steps if self.config.dq_reduction_steps > 0 else None
+            flops=self.config.cost_estimate_flops_bwd,
+            transcendentals=0,
+            bytes_accessed=0,
+        )
+        if self.config.cost_estimate_flops_bwd > 0
+        else None,
+        dq_reduction_steps=self.config.dq_reduction_steps if self.config.dq_reduction_steps > 0 else None,
     )
 
     mask_shape = (query.shape[2], key.shape[2])  # (q_seq_len, kv_seq_len)
@@ -1152,6 +1156,7 @@ class AttentionOp(nnx.Module):
         max_logit_value = max_val * jnp.ones((1,), dtype=jnp.bfloat16)
       elif use_max_logit_estimate == "value_2d":
         max_logit_value = max_val * jnp.ones((self.config.num_q_heads,), dtype=jnp.bfloat16)
+
     # Create the splash attention kernel object separately, jit it for performance
     @partial(
         jax.jit,
@@ -1174,7 +1179,7 @@ class AttentionOp(nnx.Module):
     shard_head_size = np.prod(logical_axis_rules_head)
     splash_kernel = wrap_splash_kernel(single_head_mask, int(shard_head_size))
     segment_axis_names_splash_kernel = nn.logical_to_mesh_axes((Q_LENGTH_NO_EXP,))
-    #segment_axis_names_splash_kernel = nn.logical_to_mesh_axes((HEAD, Q_LENGTH_NO_EXP))
+    # segment_axis_names_splash_kernel = nn.logical_to_mesh_axes((HEAD, Q_LENGTH_NO_EXP))
 
     # Now call the function wrap_flash_attention which does the actual computation.
     # The splash kernel is passed as a parameter to the function. Since we have the shard map
@@ -1239,7 +1244,9 @@ class AttentionOp(nnx.Module):
         attention_output = jax.vmap(splash_kernel)(query, key, value, decoder_segment_ids_tuple)
       else:
         if max_logit_value is not None:
-          attention_output = jax.vmap(partial(splash_kernel, max_logit_value=max_logit_value))(query, key, value, decoder_segment_ids_tuple)
+          attention_output = jax.vmap(partial(splash_kernel, max_logit_value=max_logit_value))(
+              query, key, value, decoder_segment_ids_tuple
+          )
         else:
           attention_output = jax.vmap(splash_kernel)(query, key, value, decoder_segment_ids_tuple)
       return attention_output
