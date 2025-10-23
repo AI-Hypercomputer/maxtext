@@ -366,8 +366,6 @@ def sort_and_search_dependency(base_path, file_path, module, enable_llm_filter: 
         filtered_dependencies = filter_out_dependency(
             analysis["sorted_modules"][comp_name], analysis["component_dependencies"][comp_name]
         )
-        logger.info("Waiting 30 seconds to respect free tier Gemini API rate limit (2 req/min)...")
-        time.sleep(30)
         logger.info(
             "Filter dependencies from \n %s \nto %s", analysis["component_dependencies"][comp_name], filtered_dependencies
         )
@@ -511,7 +509,7 @@ def main():
         "    * Any other 'non-essential' (but used) dependencies"
     )
   else:
-    logger.info("LLM dependency filter has been DISABLED. Using full dependency list.")
+    logger.warning("LLM dependency filter has been DISABLED. Using full dependency list.")
   
   logger.info("-" * 60)
   sort_and_search_dependency(base_path, entry_file_path, entry_module, enable_llm_filter)
