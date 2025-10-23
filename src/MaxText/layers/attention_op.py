@@ -28,8 +28,6 @@ from jax.experimental.pallas.ops.gpu import attention as gpu_pallas_attention
 from jax.experimental.pallas.ops.gpu import decode_attention as gpu_pallas_decode_attention
 from jax.experimental import pallas as pl
 
-from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_kernel
-from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_mask
 from jax.sharding import Mesh
 import jax
 import jax.numpy as jnp
@@ -37,6 +35,9 @@ import jax.numpy as jnp
 from flax import linen as nn
 from flax import nnx
 from flax.linen import partitioning
+
+from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_kernel
+from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_mask
 
 from MaxText import max_utils
 from MaxText.common_types import (
