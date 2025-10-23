@@ -1,53 +1,48 @@
 {
-    "1814ba1140d6537d0cc07c7387acad6bdc301333cb3ef6d4c32ae9008604f68e": [
+    "ff4646e4e134794fb7825c7ae8a49a98e321898c1726117385b99048c2d607db": [
         "transformers/cache_utils.py#Cache",
         "transformers/modeling_outputs.py#MoeCausalLMOutputWithPast",
         "transformers/modeling_outputs.py#MoeModelOutputWithPast",
-        "transformers/models/mixtral/modeling_mixtral.py#MixtralForCausalLM",
-        "transformers/models/mixtral/modeling_mixtral.py#load_balancing_loss_func",
-        "transformers/models/qwen3_moe/modular_qwen3_moe.py#Qwen3MoeModel"
+        "transformers/models/qwen3_moe/modeling_qwen3_moe.py#Qwen3MoeModel",
+        "transformers/models/qwen3_moe/modeling_qwen3_moe.py#Qwen3MoePreTrainedModel",
+        "transformers/models/qwen3_moe/modeling_qwen3_moe.py#load_balancing_loss_func"
     ],
     "711528e56794cb235db9c8b5c9704f25c7cf8f9046efcb94eaf08a4577b68447": [
         "transformers/cache_utils.py#CacheLayerMixin"
     ],
     "ff707e71f6c8a64c53704833086558ad77f9fb725713444b32277da7f4ee02c4": [
-        "transformers/utils.py#ModelOutput"
-    ],
-    "722c03c48f2fe0b600857fad4016cfa883b1eeb3f787951ea90182d7af00c615": [
         "transformers/cache_utils.py#Cache",
         "transformers/utils.py#ModelOutput"
     ],
-    "4bb43a145a865f59075381170ebfbc9c88df32500c449ff215e9aa5b7e71da0b": [
-        "transformers/modeling_outputs.py#MoeCausalLMOutputWithPast",
-        "transformers/modeling_outputs.py#MoeModelOutputWithPast",
-        "transformers/models/mixtral/modeling_mixtral.py#MixtralModel",
-        "transformers/models/mixtral/modeling_mixtral.py#MixtralPreTrainedModel",
-        "transformers/models/mixtral/modeling_mixtral.py#load_balancing_loss_func"
+    "722c03c48f2fe0b600857fad4016cfa883b1eeb3f787951ea90182d7af00c615": [
+        "transformers/utils.py#ModelOutput"
     ],
-    "ebf5020ca9ec3012e277b90aa6752170260cfa17c08f947c2020f7b08af30280": [
-        "transformers/models/mixtral/modeling_mixtral.py#MixtralModel"
-    ],
-    "684994f85f72e460671ecafc46010f405ec37793f5dfe4ac8590808df0bf7d8e": [
+    "1f1feace0e9f1fad04beab73baf70e0d2d6e1a28807ddede7e976d8f820d481c": [
         "transformers/masking_utils.py#create_causal_mask",
         "transformers/masking_utils.py#create_sliding_window_causal_mask",
         "transformers/modeling_outputs.py#MoeModelOutputWithPast",
-        "transformers/models/mixtral/configuration_mixtral.py#MixtralConfig",
-        "transformers/models/mixtral/modeling_mixtral.py#MixtralDecoderLayer",
-        "transformers/models/mixtral/modeling_mixtral.py#MixtralPreTrainedModel",
-        "transformers/models/mixtral/modeling_mixtral.py#MixtralRMSNorm",
-        "transformers/models/mixtral/modeling_mixtral.py#MixtralRotaryEmbedding"
+        "transformers/models/qwen3_moe/configuration_qwen3_moe.py#Qwen3MoeConfig",
+        "transformers/models/qwen3_moe/modeling_qwen3_moe.py#Qwen3MoeDecoderLayer",
+        "transformers/models/qwen3_moe/modeling_qwen3_moe.py#Qwen3MoePreTrainedModel",
+        "transformers/models/qwen3_moe/modeling_qwen3_moe.py#Qwen3MoeRMSNorm",
+        "transformers/models/qwen3_moe/modeling_qwen3_moe.py#Qwen3MoeRotaryEmbedding"
     ],
-    "fb537d5c6a9fc4c777602cc7d9971e7b6944e5523a2ebd550592bb9fae6438d4": [
+    "ee350285b28547bb46148c7b771468070e7bd485e94ab4ce3cdb52f3a23ef277": [
         "transformers/modeling_utils.py#PreTrainedModel",
-        "transformers/models/mixtral/configuration_mixtral.py#MixtralConfig",
-        "transformers/models/mixtral/modeling_mixtral.py#MixtralAttention",
-        "transformers/models/mixtral/modeling_mixtral.py#MixtralDecoderLayer"
+        "transformers/models/qwen3_moe/configuration_qwen3_moe.py#Qwen3MoeConfig",
+        "transformers/models/qwen3_moe/modeling_qwen3_moe.py#Qwen3MoeAttention",
+        "transformers/models/qwen3_moe/modeling_qwen3_moe.py#Qwen3MoeDecoderLayer"
     ],
     "9e994f8c9515bbe8b6df29762a635173e41d1a47e98ce152ae1a0521d7d0e308": [
         "transformers/cache_utils.py#Cache",
         "transformers/configuration_utils.py#PreTrainedConfig",
+        "transformers/masking_utils.py#_is_torch_greater_or_equal_than_2_6",
+        "transformers/masking_utils.py#_is_torch_xpu_available",
         "transformers/masking_utils.py#_preprocess_mask_arguments",
-        "transformers/masking_utils.py#causal_mask_function"
+        "transformers/masking_utils.py#and_masks",
+        "transformers/masking_utils.py#causal_mask_function",
+        "transformers/masking_utils.py#or_masks",
+        "transformers/masking_utils.py#packed_sequence_mask_function"
     ],
     "e7836982a09257f385eb877364feaafffa7bdf91db22273610069fe508f1eccb": [
         "transformers/cache_utils.py#Cache",
@@ -58,51 +53,53 @@
         "transformers/masking_utils.py#packed_sequence_mask_function",
         "transformers/masking_utils.py#sliding_window_causal_mask_function"
     ],
-    "41fa4b163196d01a49c81c40a352504bffb032c6d5294212c75a357bf4c369db": [
+    "daa8f86d8a2dbd136d3f8f343b96fbf741a7e49bcd3d69ceaf4aee84b3d859a9": [
         "transformers/configuration_utils.py#PreTrainedConfig",
         "transformers/modeling_rope_utils.py#RopeParameters",
         "transformers/modeling_rope_utils.py#rope_config_validation",
         "transformers/modeling_rope_utils.py#standardize_rope_params"
     ],
-    "6c7df0466afbabab2b5f793ead89fa7b3d56b1b4b8e8b08fd09ea1b967ea6f6c": [
-        "transformers/models/mixtral/configuration_mixtral.py#MixtralConfig",
-        "transformers/models/mixtral/modeling_mixtral.py#MixtralAttention",
-        "transformers/models/mixtral/modeling_mixtral.py#MixtralRMSNorm",
-        "transformers/models/mixtral/modeling_mixtral.py#MixtralSparseMoeBlock"
+    "4c79ed88d2d156662309d1fbcc3fdd138d327bbabb7da2a3c0b7ee5f1bf73254": [
+        "transformers/models/qwen3_moe/configuration_qwen3_moe.py#Qwen3MoeConfig",
+        "transformers/models/qwen3_moe/modeling_qwen3_moe.py#Qwen3MoeAttention",
+        "transformers/models/qwen3_moe/modeling_qwen3_moe.py#Qwen3MoeMLP",
+        "transformers/models/qwen3_moe/modeling_qwen3_moe.py#Qwen3MoeRMSNorm",
+        "transformers/models/qwen3_moe/modeling_qwen3_moe.py#Qwen3MoeSparseMoeBlock"
     ],
-    "52b234b697270ccf1566ffbdac9899019c21bf74bd204470f3db69adfeeb0e69": [],
-    "3b4a247f637afaf0a83b458a34a6c45992ac2502d5e502b6fc854f7047e30c2f": [
+    "a903eea6e4967f884f2a0669127b85f0c37a3a2ab7be28aa70fdb07f5c5f6aa6": [],
+    "e8886f50f4229276e98f1c5ba5dd206e0f375083852cc87665fa6709c11a51b1": [
         "transformers/modeling_rope_utils.py#ROPE_INIT_FUNCTIONS",
         "transformers/modeling_rope_utils.py#dynamic_rope_update",
-        "transformers/models/mixtral/configuration_mixtral.py#MixtralConfig"
+        "transformers/models/qwen3_moe/configuration_qwen3_moe.py#Qwen3MoeConfig"
     ],
     "68be4b4b9fb03fe8242d2126b957f70314305b7935044783449fb9c61b6d5a47": [
         "transformers/configuration_utils.py#PreTrainedConfig",
-        "transformers/integrations/tensor_parallel.py#ALL_PARALLEL_STYLES",
-        "transformers/integrations/tensor_parallel.py#ALL_PARALLEL_STYLES.keys",
-        "transformers/loss/loss_utils.py#LOSS_MAPPING",
         "transformers/modeling_flash_attention_utils.py#lazy_import_flash_attention",
         "transformers/modeling_utils.py#EmbeddingAccessMixin",
         "transformers/modeling_utils.py#ModuleUtilsMixin",
         "transformers/modeling_utils.py#_init_weights",
         "transformers/quantizers/quantizers_utils.py#get_module_from_name",
+        "transformers/utils.py#DUMMY_INPUTS",
         "transformers/utils.py#is_flash_attn_2_available",
         "transformers/utils.py#is_flash_attn_3_available",
         "transformers/utils.py#is_torch_flex_attn_available",
         "transformers/utils.py#is_torch_mlu_available",
-        "transformers/utils.py#is_torch_npu_available"
+        "transformers/utils.py#is_torch_npu_available",
+        "transformers/utils/import_utils.py#is_tracing"
     ],
-    "031f350f793d8fd5c2a4327823c41fc2fd9186438156c6e9862b61dcbd939cf5": [
-        "transformers/models/mixtral/configuration_mixtral.py#MixtralConfig",
-        "transformers/models/mixtral/modeling_mixtral.py#apply_rotary_pos_emb",
-        "transformers/models/mixtral/modeling_mixtral.py#eager_attention_forward"
+    "b3ed79699b8a418d71dea3433fbde8d9fc96d1ddc7fdf02e15bf89566e1bc6a3": [
+        "transformers/modeling_utils.py#ALL_ATTENTION_FUNCTIONS",
+        "transformers/models/qwen3_moe/configuration_qwen3_moe.py#Qwen3MoeConfig",
+        "transformers/models/qwen3_moe/modeling_qwen3_moe.py#Qwen3MoeRMSNorm",
+        "transformers/models/qwen3_moe/modeling_qwen3_moe.py#apply_rotary_pos_emb",
+        "transformers/models/qwen3_moe/modeling_qwen3_moe.py#eager_attention_forward"
     ],
     "de0b93b24757e28a3411ec68c59d09414759e89e7ebf57abca2cf650f10e3cb6": [
-        "transformers/configuration_utils.py#SpecificPreTrainedConfigType",
         "transformers/utils.py#is_torch_available"
     ],
+    "9ba6eb989b0a6f3c874f635a513dc93d286ce09413b12456b3885c788fa717f3": [],
+    "d52499e9c98092fc52392b5cbf4ecbc77d0b7b61214005ea850ff54390b85126": [],
     "7bb6f36b4146ece5b7370a28459c09fdcbd3d08be1d7efbc33ae491a7e81219e": [
-        "transformers/cache_utils.py#Cache",
         "transformers/configuration_utils.py#PreTrainedConfig",
         "transformers/masking_utils.py#find_packed_sequence_indices"
     ],
@@ -115,8 +112,12 @@
         "transformers/configuration_utils.py#PreTrainedConfig",
         "transformers/modeling_rope_utils.py#ROPE_VALIDATION_FUNCTIONS"
     ],
-    "f8e915db37f7d3785afcd22720303acc9f933afe3152c5682bcb657df0103c36": [
-        "transformers/models/mixtral/modeling_mixtral.py#MixtralExperts"
+    "8be99e66c21a37c16ff223e9190851541fbffa05a39617236a0c7a9ba847d206": [
+        "transformers/activations.py#ACT2FN"
+    ],
+    "b3ba966b069d4613c0d83af0f290bc8a26bc4af061fc0b44dd0abb0af326d33e": [
+        "transformers/models/qwen3_moe/configuration_qwen3_moe.py#Qwen3MoeConfig",
+        "transformers/models/qwen3_moe/modeling_qwen3_moe.py#Qwen3MoeExperts"
     ],
     "24dbce37738bf5937b3aaef2a6b2ef4fa452e4b83041938c4bb23cd418aaf460": [
         "transformers/modeling_rope_utils.py#_compute_dynamic_ntk_parameters",
@@ -128,17 +129,25 @@
     "b1a2855be96a0e18de0af6e2f949d38f395d9fa9924f29c9eb045ddb5c2b9594": [
         "transformers/modeling_rope_utils.py#ROPE_INIT_FUNCTIONS"
     ],
-    "120200d20e0468a5e4cc793c49dc761b1ac470158990e83af335df26f9859f57": [],
-    "39bfe0d4a07ff5fab381f476ed34a91c16c61fa8f2747f7ef0aa037b66152bb8": [],
+    "39bfe0d4a07ff5fab381f476ed34a91c16c61fa8f2747f7ef0aa037b66152bb8": [
+        "transformers/modeling_flash_attention_utils.py#_flash_fn",
+        "transformers/modeling_flash_attention_utils.py#_flash_varlen_fn",
+        "transformers/modeling_flash_attention_utils.py#_lazy_define_process_function",
+        "transformers/modeling_flash_attention_utils.py#_lazy_imports",
+        "transformers/modeling_flash_attention_utils.py#_pad_fn",
+        "transformers/modeling_flash_attention_utils.py#_process_flash_kwargs_fn",
+        "transformers/modeling_flash_attention_utils.py#_unpad_fn"
+    ],
     "15c89e47c0c69e869e414fd165c79684da1b4770300f61e89b8611b1e3e80af8": [
         "transformers/modeling_utils.py#get_parameter_device",
         "transformers/modeling_utils.py#get_parameter_dtype"
     ],
+    "4ed2d1fd58cc743f1de2fbdaa5132635fbcb8ae4033060452da5f40155bd5e2f": [],
     "1efedaad0f57211460d7f26f9cc14d2fcb93a1197a210d162fffc47a5a92e6d8": [
-        "transformers/models/mixtral/modeling_mixtral.py#rotate_half"
+        "transformers/models/qwen3_moe/modeling_qwen3_moe.py#rotate_half"
     ],
     "71dc1d7c5d039b12ba3cdaae1c7c036ac15a51da9fde728ff6641d320d3a610c": [
-        "transformers/models/mixtral/modeling_mixtral.py#repeat_kv"
+        "transformers/models/qwen3_moe/modeling_qwen3_moe.py#repeat_kv"
     ],
     "406bbd7be764bf8a05cba8887575eb47fab6cfbb43c583d75fe479167b1b76b0": [
         "transformers/modeling_rope_utils.py#_validate_default_rope_parameters",
@@ -148,9 +157,24 @@
         "transformers/modeling_rope_utils.py#_validate_longrope_parameters",
         "transformers/modeling_rope_utils.py#_validate_yarn_parameters"
     ],
-    "39f73dbba8dd3ed77d1aa2dfec77f72a38a3a914816e2e7318a9bbd282be1a1e": [
-        "transformers/models/mixtral/configuration_mixtral.py#MixtralConfig",
-        "transformers/models/mixtral/modeling_mixtral.py#MixtralMLP"
+    "8a1612a14b05a21857e80186daadbc1234467c0a03aecbcbec0958fff5b8e2f9": [
+        "transformers/activations.py#AccurateGELUActivation",
+        "transformers/activations.py#ClassInstantier",
+        "transformers/activations.py#FastGELUActivation",
+        "transformers/activations.py#GELUActivation",
+        "transformers/activations.py#GELUTanh",
+        "transformers/activations.py#LaplaceActivation",
+        "transformers/activations.py#LinearActivation",
+        "transformers/activations.py#MishActivation",
+        "transformers/activations.py#NewGELUActivation",
+        "transformers/activations.py#QuickGELUActivation",
+        "transformers/activations.py#ReLUSquaredActivation",
+        "transformers/activations.py#SiLUActivation",
+        "transformers/activations.py#XIELUActivation"
+    ],
+    "d5bb435c9cfa75797c018cd16bbb58fd63a944de790b4acd0fd728bb91fb5bea": [
+        "transformers/models/qwen3_moe/configuration_qwen3_moe.py#Qwen3MoeConfig",
+        "transformers/models/qwen3_moe/modeling_qwen3_moe.py#Qwen3MoeMLP"
     ],
     "871d51bbbf35e0cf65a8e9076f0f9de9e3e15fae12bfb5129e37745c544d66f0": [
         "transformers/configuration_utils.py#PreTrainedConfig",
@@ -172,21 +196,26 @@
         "transformers/configuration_utils.py#PreTrainedConfig",
         "transformers/modeling_rope_utils.py#standardize_rope_params"
     ],
+    "58f622c025f05d4e621cdfc2c2b1264610a21499f43bf7001018d800539e5d00": [
+        "transformers/modeling_flash_attention_utils.py#_hf_api_to_flash_mapping",
+        "transformers/modeling_flash_attention_utils.py#_process_flash_attention_kwargs"
+    ],
+    "49f900402d2ae098ecf8486ceaf1fcc21f2075f05b197d65821892e93d9e3a11": [
+        "transformers/modeling_flash_attention_utils.py#_pad_input",
+        "transformers/modeling_flash_attention_utils.py#_unpad_input"
+    ],
     "e1bb1bcd79219b138aed22338116c44096df3ffbc9dbbe0fe520ca263cb1d420": [],
     "84b947a2281d55344e76cb83125e22771a467773ffcfd8f718b5340c396a9d06": [
+        "transformers/configuration_utils.py#PreTrainedConfig",
         "transformers/modeling_rope_utils.py#_check_received_keys"
     ],
     "b9a9f2f0183364605c587557235436705dad4a443731e96f15af7fac42dd8b6b": [
-        "transformers/configuration_utils.py#PreTrainedConfig",
-        "transformers/modeling_rope_utils.py#_check_received_keys"
-    ],
-    "f5cb723df4bdadc68c629335461d85aedec4aa71b18aa4e612e34da5cfc861f7": [
-        "transformers/configuration_utils.py#PreTrainedConfig",
-        "transformers/modeling_rope_utils.py#_check_received_keys"
-    ],
-    "7b847b46bc7e2b12e51ae2c15e44242d67e4bf0aa01e685b962286773e3b5792": [
         "transformers/configuration_utils.py#PreTrainedConfig"
     ],
+    "f5cb723df4bdadc68c629335461d85aedec4aa71b18aa4e612e34da5cfc861f7": [
+        "transformers/configuration_utils.py#PreTrainedConfig"
+    ],
+    "7b847b46bc7e2b12e51ae2c15e44242d67e4bf0aa01e685b962286773e3b5792": [],
     "d00ddf5df965c9761828e244f73eaba8b192c2e059a8fc4d4e34e8c3180676e3": [
         "transformers/configuration_utils.py#PreTrainedConfig",
         "transformers/modeling_rope_utils.py#_check_received_keys"
@@ -194,31 +223,15 @@
     "21c15a4235b487656c941478471e28eda095eaa1bf69cf72e64288d2950a2bbd": [
         "transformers/configuration_utils.py#PreTrainedConfig"
     ],
-    "e7d147a7ae9e37d7ac287b17cd8d85d3a387e6ccd46585b005fa3af17fc93621": [
-        "transformers/activations.py#ACT2FN",
-        "transformers/models/mixtral/configuration_mixtral.py#MixtralConfig"
-    ],
-    "548f8d025bf3aae79b19ce5c0cbebccde82cb0302690e4403fba12e46dec6888": [],
-    "8a1612a14b05a21857e80186daadbc1234467c0a03aecbcbec0958fff5b8e2f9": [
-        "transformers/activations.py#AccurateGELUActivation",
-        "transformers/activations.py#ClassInstantier",
-        "transformers/activations.py#FastGELUActivation",
-        "transformers/activations.py#GELUActivation",
-        "transformers/activations.py#GELUTanh",
-        "transformers/activations.py#LaplaceActivation",
-        "transformers/activations.py#LinearActivation",
-        "transformers/activations.py#MishActivation",
-        "transformers/activations.py#NewGELUActivation",
-        "transformers/activations.py#QuickGELUActivation",
-        "transformers/activations.py#ReLUSquaredActivation",
-        "transformers/activations.py#SiLUActivation",
-        "transformers/activations.py#XIELUActivation"
-    ],
     "7a57f5f71dd65dd6e0cdeb9030180b3058ac54945d320e528334e40a9fc0ccae": [],
     "909aea47a894d9303ecfc4e381305233c1697764e1d835d6f512f1042959785d": [],
     "e12c6642107d6b83bc8ad43ed34191fc3e5bdb9d8d81aac49835a0574e482c1f": [],
     "6c4e3bebb011b04d904e71672cb944e782cb44c3f3f72423aaa2955babc1c2e5": [],
     "d1477a10096c0147efa7b683e2c72a3350fdaf65e1356eac8244d40901f5951e": [],
     "284a6b9145772c8a923ebebd55790173f06178b0283be82a129f0887e1ea25c1": [],
-    "f27a964a1a9987dcaa309accfcc68dacdd04f402ee181013efdeee521a8ef4ff": []
+    "f27a964a1a9987dcaa309accfcc68dacdd04f402ee181013efdeee521a8ef4ff": [],
+    "1cbaecc9ed3f328a5e4ff9e16b9a98b55b68f95197afae0ece2af4c8f282d592": [
+        "transformers/modeling_flash_attention_utils.py#_index_first_axis"
+    ],
+    "548f8d025bf3aae79b19ce5c0cbebccde82cb0302690e4403fba12e46dec6888": []
 }

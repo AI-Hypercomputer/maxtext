@@ -1,7 +1,16 @@
 [
     {
-        "comp_id": "transformers/models/mixtral/modeling_mixtral.py#load_balancing_loss_func",
-        "filepath": "transformers/models/mixtral/modeling_mixtral.py",
+        "comp_id": "transformers/modeling_outputs.py#MoeModelOutputWithPast",
+        "filepath": "transformers/modeling_outputs.py",
+        "comp_name": "MoeModelOutputWithPast",
+        "Dependencies": [
+            "transformers/utils.py#ModelOutput"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/models/qwen3_moe/modeling_qwen3_moe.py#load_balancing_loss_func",
+        "filepath": "transformers/models/qwen3_moe/modeling_qwen3_moe.py",
         "comp_name": "load_balancing_loss_func",
         "Dependencies": [],
         "JaxDependencies": {}
@@ -27,31 +36,29 @@
         "filepath": "transformers/modeling_outputs.py",
         "comp_name": "MoeCausalLMOutputWithPast",
         "Dependencies": [
-            "transformers/utils.py#ModelOutput"
-        ],
-        "JaxDependencies": {}
-    },
-    {
-        "comp_id": "transformers/modeling_outputs.py#MoeModelOutputWithPast",
-        "filepath": "transformers/modeling_outputs.py",
-        "comp_name": "MoeModelOutputWithPast",
-        "Dependencies": [
             "transformers/cache_utils.py#Cache",
             "transformers/utils.py#ModelOutput"
         ],
         "JaxDependencies": {}
     },
     {
-        "comp_id": "transformers/models/mixtral/modeling_mixtral.py#MixtralRMSNorm",
-        "filepath": "transformers/models/mixtral/modeling_mixtral.py",
-        "comp_name": "MixtralRMSNorm",
+        "comp_id": "transformers/models/qwen3_moe/modeling_qwen3_moe.py#Qwen3MoeRMSNorm",
+        "filepath": "transformers/models/qwen3_moe/modeling_qwen3_moe.py",
+        "comp_name": "Qwen3MoeRMSNorm",
         "Dependencies": [],
         "JaxDependencies": {}
     },
     {
-        "comp_id": "transformers/masking_utils.py#causal_mask_function",
+        "comp_id": "transformers/masking_utils.py#_is_torch_greater_or_equal_than_2_6",
         "filepath": "transformers/masking_utils.py",
-        "comp_name": "causal_mask_function",
+        "comp_name": "_is_torch_greater_or_equal_than_2_6",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/masking_utils.py#_is_torch_xpu_available",
+        "filepath": "transformers/masking_utils.py",
+        "comp_name": "_is_torch_xpu_available",
         "Dependencies": [],
         "JaxDependencies": {}
     },
@@ -59,6 +66,13 @@
         "comp_id": "transformers/masking_utils.py#and_masks",
         "filepath": "transformers/masking_utils.py",
         "comp_name": "and_masks",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/masking_utils.py#causal_mask_function",
+        "filepath": "transformers/masking_utils.py",
+        "comp_name": "causal_mask_function",
         "Dependencies": [],
         "JaxDependencies": {}
     },
@@ -91,20 +105,6 @@
         "JaxDependencies": {}
     },
     {
-        "comp_id": "transformers/loss/loss_utils.py#LOSS_MAPPING",
-        "filepath": "transformers/loss/loss_utils.py",
-        "comp_name": "LOSS_MAPPING",
-        "Dependencies": [],
-        "JaxDependencies": {}
-    },
-    {
-        "comp_id": "transformers/modeling_flash_attention_utils.py#lazy_import_flash_attention",
-        "filepath": "transformers/modeling_flash_attention_utils.py",
-        "comp_name": "lazy_import_flash_attention",
-        "Dependencies": [],
-        "JaxDependencies": {}
-    },
-    {
         "comp_id": "transformers/modeling_utils.py#EmbeddingAccessMixin",
         "filepath": "transformers/modeling_utils.py",
         "comp_name": "EmbeddingAccessMixin",
@@ -126,9 +126,16 @@
         "JaxDependencies": {}
     },
     {
-        "comp_id": "transformers/configuration_utils.py#SpecificPreTrainedConfigType",
-        "filepath": "transformers/configuration_utils.py",
-        "comp_name": "SpecificPreTrainedConfigType",
+        "comp_id": "transformers/utils.py#DUMMY_INPUTS",
+        "filepath": "transformers/utils.py",
+        "comp_name": "DUMMY_INPUTS",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#is_tracing",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "is_tracing",
         "Dependencies": [],
         "JaxDependencies": {}
     },
@@ -137,7 +144,6 @@
         "filepath": "transformers/configuration_utils.py",
         "comp_name": "PreTrainedConfig",
         "Dependencies": [
-            "transformers/configuration_utils.py#SpecificPreTrainedConfigType",
             "transformers/utils.py#is_torch_available"
         ],
         "JaxDependencies": {}
@@ -154,7 +160,6 @@
         "filepath": "transformers/masking_utils.py",
         "comp_name": "_preprocess_mask_arguments",
         "Dependencies": [
-            "transformers/cache_utils.py#Cache",
             "transformers/configuration_utils.py#PreTrainedConfig",
             "transformers/masking_utils.py#find_packed_sequence_indices"
         ],
@@ -167,8 +172,13 @@
         "Dependencies": [
             "transformers/cache_utils.py#Cache",
             "transformers/configuration_utils.py#PreTrainedConfig",
+            "transformers/masking_utils.py#_is_torch_greater_or_equal_than_2_6",
+            "transformers/masking_utils.py#_is_torch_xpu_available",
             "transformers/masking_utils.py#_preprocess_mask_arguments",
-            "transformers/masking_utils.py#causal_mask_function"
+            "transformers/masking_utils.py#and_masks",
+            "transformers/masking_utils.py#causal_mask_function",
+            "transformers/masking_utils.py#or_masks",
+            "transformers/masking_utils.py#packed_sequence_mask_function"
         ],
         "JaxDependencies": {}
     },
@@ -278,6 +288,41 @@
         "JaxDependencies": {}
     },
     {
+        "comp_id": "transformers/modeling_flash_attention_utils.py#_flash_fn",
+        "filepath": "transformers/modeling_flash_attention_utils.py",
+        "comp_name": "_flash_fn",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_flash_attention_utils.py#_flash_varlen_fn",
+        "filepath": "transformers/modeling_flash_attention_utils.py",
+        "comp_name": "_flash_varlen_fn",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_flash_attention_utils.py#_pad_fn",
+        "filepath": "transformers/modeling_flash_attention_utils.py",
+        "comp_name": "_pad_fn",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_flash_attention_utils.py#_process_flash_kwargs_fn",
+        "filepath": "transformers/modeling_flash_attention_utils.py",
+        "comp_name": "_process_flash_kwargs_fn",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_flash_attention_utils.py#_unpad_fn",
+        "filepath": "transformers/modeling_flash_attention_utils.py",
+        "comp_name": "_unpad_fn",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
         "comp_id": "transformers/modeling_utils.py#get_parameter_device",
         "filepath": "transformers/modeling_utils.py",
         "comp_name": "get_parameter_device",
@@ -302,90 +347,34 @@
         "JaxDependencies": {}
     },
     {
-        "comp_id": "transformers/modeling_utils.py#PreTrainedModel",
-        "filepath": "transformers/modeling_utils.py",
-        "comp_name": "PreTrainedModel",
-        "Dependencies": [
-            "transformers/configuration_utils.py#PreTrainedConfig",
-            "transformers/integrations/tensor_parallel.py#ALL_PARALLEL_STYLES",
-            "transformers/integrations/tensor_parallel.py#ALL_PARALLEL_STYLES.keys",
-            "transformers/loss/loss_utils.py#LOSS_MAPPING",
-            "transformers/modeling_flash_attention_utils.py#lazy_import_flash_attention",
-            "transformers/modeling_utils.py#EmbeddingAccessMixin",
-            "transformers/modeling_utils.py#ModuleUtilsMixin",
-            "transformers/modeling_utils.py#_init_weights",
-            "transformers/quantizers/quantizers_utils.py#get_module_from_name",
-            "transformers/utils.py#is_flash_attn_2_available",
-            "transformers/utils.py#is_flash_attn_3_available",
-            "transformers/utils.py#is_torch_flex_attn_available",
-            "transformers/utils.py#is_torch_mlu_available",
-            "transformers/utils.py#is_torch_npu_available"
-        ],
-        "JaxDependencies": {}
-    },
-    {
-        "comp_id": "transformers/models/mixtral/modeling_mixtral.py#rotate_half",
-        "filepath": "transformers/models/mixtral/modeling_mixtral.py",
+        "comp_id": "transformers/models/qwen3_moe/modeling_qwen3_moe.py#rotate_half",
+        "filepath": "transformers/models/qwen3_moe/modeling_qwen3_moe.py",
         "comp_name": "rotate_half",
         "Dependencies": [],
         "JaxDependencies": {}
     },
     {
-        "comp_id": "transformers/models/mixtral/modeling_mixtral.py#apply_rotary_pos_emb",
-        "filepath": "transformers/models/mixtral/modeling_mixtral.py",
+        "comp_id": "transformers/models/qwen3_moe/modeling_qwen3_moe.py#apply_rotary_pos_emb",
+        "filepath": "transformers/models/qwen3_moe/modeling_qwen3_moe.py",
         "comp_name": "apply_rotary_pos_emb",
         "Dependencies": [
-            "transformers/models/mixtral/modeling_mixtral.py#rotate_half"
+            "transformers/models/qwen3_moe/modeling_qwen3_moe.py#rotate_half"
         ],
         "JaxDependencies": {}
     },
     {
-        "comp_id": "transformers/models/mixtral/modeling_mixtral.py#repeat_kv",
-        "filepath": "transformers/models/mixtral/modeling_mixtral.py",
+        "comp_id": "transformers/models/qwen3_moe/modeling_qwen3_moe.py#repeat_kv",
+        "filepath": "transformers/models/qwen3_moe/modeling_qwen3_moe.py",
         "comp_name": "repeat_kv",
         "Dependencies": [],
         "JaxDependencies": {}
     },
     {
-        "comp_id": "transformers/models/mixtral/modeling_mixtral.py#eager_attention_forward",
-        "filepath": "transformers/models/mixtral/modeling_mixtral.py",
+        "comp_id": "transformers/models/qwen3_moe/modeling_qwen3_moe.py#eager_attention_forward",
+        "filepath": "transformers/models/qwen3_moe/modeling_qwen3_moe.py",
         "comp_name": "eager_attention_forward",
         "Dependencies": [
-            "transformers/models/mixtral/modeling_mixtral.py#repeat_kv"
-        ],
-        "JaxDependencies": {}
-    },
-    {
-        "comp_id": "transformers/modeling_rope_utils.py#_validate_llama3_parameters",
-        "filepath": "transformers/modeling_rope_utils.py",
-        "comp_name": "_validate_llama3_parameters",
-        "Dependencies": [
-            "transformers/configuration_utils.py#PreTrainedConfig"
-        ],
-        "JaxDependencies": {}
-    },
-    {
-        "comp_id": "transformers/modeling_rope_utils.py#_validate_yarn_parameters",
-        "filepath": "transformers/modeling_rope_utils.py",
-        "comp_name": "_validate_yarn_parameters",
-        "Dependencies": [
-            "transformers/configuration_utils.py#PreTrainedConfig"
-        ],
-        "JaxDependencies": {}
-    },
-    {
-        "comp_id": "transformers/modeling_rope_utils.py#_check_received_keys",
-        "filepath": "transformers/modeling_rope_utils.py",
-        "comp_name": "_check_received_keys",
-        "Dependencies": [],
-        "JaxDependencies": {}
-    },
-    {
-        "comp_id": "transformers/modeling_rope_utils.py#_validate_default_rope_parameters",
-        "filepath": "transformers/modeling_rope_utils.py",
-        "comp_name": "_validate_default_rope_parameters",
-        "Dependencies": [
-            "transformers/modeling_rope_utils.py#_check_received_keys"
+            "transformers/models/qwen3_moe/modeling_qwen3_moe.py#repeat_kv"
         ],
         "JaxDependencies": {}
     },
@@ -394,8 +383,7 @@
         "filepath": "transformers/modeling_rope_utils.py",
         "comp_name": "_validate_dynamic_scaling_rope_parameters",
         "Dependencies": [
-            "transformers/configuration_utils.py#PreTrainedConfig",
-            "transformers/modeling_rope_utils.py#_check_received_keys"
+            "transformers/configuration_utils.py#PreTrainedConfig"
         ],
         "JaxDependencies": {}
     },
@@ -404,76 +392,23 @@
         "filepath": "transformers/modeling_rope_utils.py",
         "comp_name": "_validate_linear_scaling_rope_parameters",
         "Dependencies": [
-            "transformers/configuration_utils.py#PreTrainedConfig",
-            "transformers/modeling_rope_utils.py#_check_received_keys"
+            "transformers/configuration_utils.py#PreTrainedConfig"
         ],
         "JaxDependencies": {}
     },
     {
-        "comp_id": "transformers/modeling_rope_utils.py#_validate_longrope_parameters",
+        "comp_id": "transformers/modeling_rope_utils.py#_validate_llama3_parameters",
         "filepath": "transformers/modeling_rope_utils.py",
-        "comp_name": "_validate_longrope_parameters",
-        "Dependencies": [
-            "transformers/configuration_utils.py#PreTrainedConfig",
-            "transformers/modeling_rope_utils.py#_check_received_keys"
-        ],
+        "comp_name": "_validate_llama3_parameters",
+        "Dependencies": [],
         "JaxDependencies": {}
     },
     {
-        "comp_id": "transformers/modeling_rope_utils.py#ROPE_VALIDATION_FUNCTIONS",
+        "comp_id": "transformers/modeling_rope_utils.py#_validate_yarn_parameters",
         "filepath": "transformers/modeling_rope_utils.py",
-        "comp_name": "ROPE_VALIDATION_FUNCTIONS",
+        "comp_name": "_validate_yarn_parameters",
         "Dependencies": [
-            "transformers/modeling_rope_utils.py#_validate_default_rope_parameters",
-            "transformers/modeling_rope_utils.py#_validate_dynamic_scaling_rope_parameters",
-            "transformers/modeling_rope_utils.py#_validate_linear_scaling_rope_parameters",
-            "transformers/modeling_rope_utils.py#_validate_llama3_parameters",
-            "transformers/modeling_rope_utils.py#_validate_longrope_parameters",
-            "transformers/modeling_rope_utils.py#_validate_yarn_parameters"
-        ],
-        "JaxDependencies": {}
-    },
-    {
-        "comp_id": "transformers/modeling_rope_utils.py#rope_config_validation",
-        "filepath": "transformers/modeling_rope_utils.py",
-        "comp_name": "rope_config_validation",
-        "Dependencies": [
-            "transformers/configuration_utils.py#PreTrainedConfig",
-            "transformers/modeling_rope_utils.py#ROPE_VALIDATION_FUNCTIONS"
-        ],
-        "JaxDependencies": {}
-    },
-    {
-        "comp_id": "transformers/models/mixtral/configuration_mixtral.py#MixtralConfig",
-        "filepath": "transformers/models/mixtral/configuration_mixtral.py",
-        "comp_name": "MixtralConfig",
-        "Dependencies": [
-            "transformers/configuration_utils.py#PreTrainedConfig",
-            "transformers/modeling_rope_utils.py#RopeParameters",
-            "transformers/modeling_rope_utils.py#rope_config_validation",
-            "transformers/modeling_rope_utils.py#standardize_rope_params"
-        ],
-        "JaxDependencies": {}
-    },
-    {
-        "comp_id": "transformers/models/mixtral/modeling_mixtral.py#MixtralRotaryEmbedding",
-        "filepath": "transformers/models/mixtral/modeling_mixtral.py",
-        "comp_name": "MixtralRotaryEmbedding",
-        "Dependencies": [
-            "transformers/modeling_rope_utils.py#ROPE_INIT_FUNCTIONS",
-            "transformers/modeling_rope_utils.py#dynamic_rope_update",
-            "transformers/models/mixtral/configuration_mixtral.py#MixtralConfig"
-        ],
-        "JaxDependencies": {}
-    },
-    {
-        "comp_id": "transformers/models/mixtral/modeling_mixtral.py#MixtralAttention",
-        "filepath": "transformers/models/mixtral/modeling_mixtral.py",
-        "comp_name": "MixtralAttention",
-        "Dependencies": [
-            "transformers/models/mixtral/configuration_mixtral.py#MixtralConfig",
-            "transformers/models/mixtral/modeling_mixtral.py#apply_rotary_pos_emb",
-            "transformers/models/mixtral/modeling_mixtral.py#eager_attention_forward"
+            "transformers/configuration_utils.py#PreTrainedConfig"
         ],
         "JaxDependencies": {}
     },
@@ -590,107 +525,266 @@
         "JaxDependencies": {}
     },
     {
-        "comp_id": "transformers/models/mixtral/modeling_mixtral.py#MixtralMLP",
-        "filepath": "transformers/models/mixtral/modeling_mixtral.py",
-        "comp_name": "MixtralMLP",
+        "comp_id": "transformers/models/qwen3_moe/modeling_qwen3_moe.py#Qwen3MoeMLP",
+        "filepath": "transformers/models/qwen3_moe/modeling_qwen3_moe.py",
+        "comp_name": "Qwen3MoeMLP",
         "Dependencies": [
-            "transformers/activations.py#ACT2FN",
-            "transformers/models/mixtral/configuration_mixtral.py#MixtralConfig"
+            "transformers/activations.py#ACT2FN"
         ],
         "JaxDependencies": {}
     },
     {
-        "comp_id": "transformers/models/mixtral/modeling_mixtral.py#MixtralExperts",
-        "filepath": "transformers/models/mixtral/modeling_mixtral.py",
-        "comp_name": "MixtralExperts",
+        "comp_id": "transformers/modeling_flash_attention_utils.py#_hf_api_to_flash_mapping",
+        "filepath": "transformers/modeling_flash_attention_utils.py",
+        "comp_name": "_hf_api_to_flash_mapping",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_flash_attention_utils.py#_process_flash_attention_kwargs",
+        "filepath": "transformers/modeling_flash_attention_utils.py",
+        "comp_name": "_process_flash_attention_kwargs",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_flash_attention_utils.py#_lazy_define_process_function",
+        "filepath": "transformers/modeling_flash_attention_utils.py",
+        "comp_name": "_lazy_define_process_function",
         "Dependencies": [
-            "transformers/models/mixtral/configuration_mixtral.py#MixtralConfig",
-            "transformers/models/mixtral/modeling_mixtral.py#MixtralMLP"
+            "transformers/modeling_flash_attention_utils.py#_hf_api_to_flash_mapping",
+            "transformers/modeling_flash_attention_utils.py#_process_flash_attention_kwargs"
         ],
         "JaxDependencies": {}
     },
     {
-        "comp_id": "transformers/models/mixtral/modeling_mixtral.py#MixtralSparseMoeBlock",
-        "filepath": "transformers/models/mixtral/modeling_mixtral.py",
-        "comp_name": "MixtralSparseMoeBlock",
+        "comp_id": "transformers/modeling_flash_attention_utils.py#_pad_input",
+        "filepath": "transformers/modeling_flash_attention_utils.py",
+        "comp_name": "_pad_input",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_rope_utils.py#_check_received_keys",
+        "filepath": "transformers/modeling_rope_utils.py",
+        "comp_name": "_check_received_keys",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_rope_utils.py#_validate_default_rope_parameters",
+        "filepath": "transformers/modeling_rope_utils.py",
+        "comp_name": "_validate_default_rope_parameters",
         "Dependencies": [
-            "transformers/models/mixtral/modeling_mixtral.py#MixtralExperts"
+            "transformers/configuration_utils.py#PreTrainedConfig",
+            "transformers/modeling_rope_utils.py#_check_received_keys"
         ],
         "JaxDependencies": {}
     },
     {
-        "comp_id": "transformers/models/mixtral/modeling_mixtral.py#MixtralDecoderLayer",
-        "filepath": "transformers/models/mixtral/modeling_mixtral.py",
-        "comp_name": "MixtralDecoderLayer",
+        "comp_id": "transformers/modeling_rope_utils.py#_validate_longrope_parameters",
+        "filepath": "transformers/modeling_rope_utils.py",
+        "comp_name": "_validate_longrope_parameters",
         "Dependencies": [
-            "transformers/models/mixtral/configuration_mixtral.py#MixtralConfig",
-            "transformers/models/mixtral/modeling_mixtral.py#MixtralAttention",
-            "transformers/models/mixtral/modeling_mixtral.py#MixtralRMSNorm",
-            "transformers/models/mixtral/modeling_mixtral.py#MixtralSparseMoeBlock"
+            "transformers/configuration_utils.py#PreTrainedConfig",
+            "transformers/modeling_rope_utils.py#_check_received_keys"
         ],
         "JaxDependencies": {}
     },
     {
-        "comp_id": "transformers/models/mixtral/modeling_mixtral.py#MixtralPreTrainedModel",
-        "filepath": "transformers/models/mixtral/modeling_mixtral.py",
-        "comp_name": "MixtralPreTrainedModel",
+        "comp_id": "transformers/modeling_rope_utils.py#ROPE_VALIDATION_FUNCTIONS",
+        "filepath": "transformers/modeling_rope_utils.py",
+        "comp_name": "ROPE_VALIDATION_FUNCTIONS",
+        "Dependencies": [
+            "transformers/modeling_rope_utils.py#_validate_default_rope_parameters",
+            "transformers/modeling_rope_utils.py#_validate_dynamic_scaling_rope_parameters",
+            "transformers/modeling_rope_utils.py#_validate_linear_scaling_rope_parameters",
+            "transformers/modeling_rope_utils.py#_validate_llama3_parameters",
+            "transformers/modeling_rope_utils.py#_validate_longrope_parameters",
+            "transformers/modeling_rope_utils.py#_validate_yarn_parameters"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_rope_utils.py#rope_config_validation",
+        "filepath": "transformers/modeling_rope_utils.py",
+        "comp_name": "rope_config_validation",
+        "Dependencies": [
+            "transformers/configuration_utils.py#PreTrainedConfig",
+            "transformers/modeling_rope_utils.py#ROPE_VALIDATION_FUNCTIONS"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/models/qwen3_moe/configuration_qwen3_moe.py#Qwen3MoeConfig",
+        "filepath": "transformers/models/qwen3_moe/configuration_qwen3_moe.py",
+        "comp_name": "Qwen3MoeConfig",
+        "Dependencies": [
+            "transformers/configuration_utils.py#PreTrainedConfig",
+            "transformers/modeling_rope_utils.py#RopeParameters",
+            "transformers/modeling_rope_utils.py#rope_config_validation",
+            "transformers/modeling_rope_utils.py#standardize_rope_params"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/models/qwen3_moe/modeling_qwen3_moe.py#Qwen3MoeExperts",
+        "filepath": "transformers/models/qwen3_moe/modeling_qwen3_moe.py",
+        "comp_name": "Qwen3MoeExperts",
+        "Dependencies": [
+            "transformers/models/qwen3_moe/configuration_qwen3_moe.py#Qwen3MoeConfig",
+            "transformers/models/qwen3_moe/modeling_qwen3_moe.py#Qwen3MoeMLP"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/models/qwen3_moe/modeling_qwen3_moe.py#Qwen3MoeSparseMoeBlock",
+        "filepath": "transformers/models/qwen3_moe/modeling_qwen3_moe.py",
+        "comp_name": "Qwen3MoeSparseMoeBlock",
+        "Dependencies": [
+            "transformers/models/qwen3_moe/configuration_qwen3_moe.py#Qwen3MoeConfig",
+            "transformers/models/qwen3_moe/modeling_qwen3_moe.py#Qwen3MoeExperts"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/models/qwen3_moe/modeling_qwen3_moe.py#Qwen3MoeRotaryEmbedding",
+        "filepath": "transformers/models/qwen3_moe/modeling_qwen3_moe.py",
+        "comp_name": "Qwen3MoeRotaryEmbedding",
+        "Dependencies": [
+            "transformers/modeling_rope_utils.py#ROPE_INIT_FUNCTIONS",
+            "transformers/modeling_rope_utils.py#dynamic_rope_update",
+            "transformers/models/qwen3_moe/configuration_qwen3_moe.py#Qwen3MoeConfig"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_flash_attention_utils.py#_index_first_axis",
+        "filepath": "transformers/modeling_flash_attention_utils.py",
+        "comp_name": "_index_first_axis",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_flash_attention_utils.py#_unpad_input",
+        "filepath": "transformers/modeling_flash_attention_utils.py",
+        "comp_name": "_unpad_input",
+        "Dependencies": [
+            "transformers/modeling_flash_attention_utils.py#_index_first_axis"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_flash_attention_utils.py#_lazy_imports",
+        "filepath": "transformers/modeling_flash_attention_utils.py",
+        "comp_name": "_lazy_imports",
+        "Dependencies": [
+            "transformers/modeling_flash_attention_utils.py#_pad_input",
+            "transformers/modeling_flash_attention_utils.py#_unpad_input"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_flash_attention_utils.py#lazy_import_flash_attention",
+        "filepath": "transformers/modeling_flash_attention_utils.py",
+        "comp_name": "lazy_import_flash_attention",
+        "Dependencies": [
+            "transformers/modeling_flash_attention_utils.py#_flash_fn",
+            "transformers/modeling_flash_attention_utils.py#_flash_varlen_fn",
+            "transformers/modeling_flash_attention_utils.py#_lazy_define_process_function",
+            "transformers/modeling_flash_attention_utils.py#_lazy_imports",
+            "transformers/modeling_flash_attention_utils.py#_pad_fn",
+            "transformers/modeling_flash_attention_utils.py#_process_flash_kwargs_fn",
+            "transformers/modeling_flash_attention_utils.py#_unpad_fn"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_utils.py#PreTrainedModel",
+        "filepath": "transformers/modeling_utils.py",
+        "comp_name": "PreTrainedModel",
+        "Dependencies": [
+            "transformers/configuration_utils.py#PreTrainedConfig",
+            "transformers/modeling_flash_attention_utils.py#lazy_import_flash_attention",
+            "transformers/modeling_utils.py#EmbeddingAccessMixin",
+            "transformers/modeling_utils.py#ModuleUtilsMixin",
+            "transformers/modeling_utils.py#_init_weights",
+            "transformers/quantizers/quantizers_utils.py#get_module_from_name",
+            "transformers/utils.py#DUMMY_INPUTS",
+            "transformers/utils.py#is_flash_attn_2_available",
+            "transformers/utils.py#is_flash_attn_3_available",
+            "transformers/utils.py#is_torch_flex_attn_available",
+            "transformers/utils.py#is_torch_mlu_available",
+            "transformers/utils.py#is_torch_npu_available",
+            "transformers/utils/import_utils.py#is_tracing"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/models/qwen3_moe/modeling_qwen3_moe.py#Qwen3MoeAttention",
+        "filepath": "transformers/models/qwen3_moe/modeling_qwen3_moe.py",
+        "comp_name": "Qwen3MoeAttention",
+        "Dependencies": [
+            "transformers/modeling_utils.py#ALL_ATTENTION_FUNCTIONS",
+            "transformers/models/qwen3_moe/configuration_qwen3_moe.py#Qwen3MoeConfig",
+            "transformers/models/qwen3_moe/modeling_qwen3_moe.py#Qwen3MoeRMSNorm",
+            "transformers/models/qwen3_moe/modeling_qwen3_moe.py#apply_rotary_pos_emb",
+            "transformers/models/qwen3_moe/modeling_qwen3_moe.py#eager_attention_forward"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/models/qwen3_moe/modeling_qwen3_moe.py#Qwen3MoeDecoderLayer",
+        "filepath": "transformers/models/qwen3_moe/modeling_qwen3_moe.py",
+        "comp_name": "Qwen3MoeDecoderLayer",
+        "Dependencies": [
+            "transformers/models/qwen3_moe/configuration_qwen3_moe.py#Qwen3MoeConfig",
+            "transformers/models/qwen3_moe/modeling_qwen3_moe.py#Qwen3MoeAttention",
+            "transformers/models/qwen3_moe/modeling_qwen3_moe.py#Qwen3MoeMLP",
+            "transformers/models/qwen3_moe/modeling_qwen3_moe.py#Qwen3MoeRMSNorm",
+            "transformers/models/qwen3_moe/modeling_qwen3_moe.py#Qwen3MoeSparseMoeBlock"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/models/qwen3_moe/modeling_qwen3_moe.py#Qwen3MoePreTrainedModel",
+        "filepath": "transformers/models/qwen3_moe/modeling_qwen3_moe.py",
+        "comp_name": "Qwen3MoePreTrainedModel",
         "Dependencies": [
             "transformers/modeling_utils.py#PreTrainedModel",
-            "transformers/models/mixtral/configuration_mixtral.py#MixtralConfig",
-            "transformers/models/mixtral/modeling_mixtral.py#MixtralAttention",
-            "transformers/models/mixtral/modeling_mixtral.py#MixtralDecoderLayer"
+            "transformers/models/qwen3_moe/configuration_qwen3_moe.py#Qwen3MoeConfig",
+            "transformers/models/qwen3_moe/modeling_qwen3_moe.py#Qwen3MoeAttention",
+            "transformers/models/qwen3_moe/modeling_qwen3_moe.py#Qwen3MoeDecoderLayer"
         ],
         "JaxDependencies": {}
     },
     {
-        "comp_id": "transformers/models/mixtral/modeling_mixtral.py#MixtralModel",
-        "filepath": "transformers/models/mixtral/modeling_mixtral.py",
-        "comp_name": "MixtralModel",
+        "comp_id": "transformers/models/qwen3_moe/modeling_qwen3_moe.py#Qwen3MoeModel",
+        "filepath": "transformers/models/qwen3_moe/modeling_qwen3_moe.py",
+        "comp_name": "Qwen3MoeModel",
         "Dependencies": [
             "transformers/masking_utils.py#create_causal_mask",
             "transformers/masking_utils.py#create_sliding_window_causal_mask",
             "transformers/modeling_outputs.py#MoeModelOutputWithPast",
-            "transformers/models/mixtral/configuration_mixtral.py#MixtralConfig",
-            "transformers/models/mixtral/modeling_mixtral.py#MixtralDecoderLayer",
-            "transformers/models/mixtral/modeling_mixtral.py#MixtralPreTrainedModel",
-            "transformers/models/mixtral/modeling_mixtral.py#MixtralRMSNorm",
-            "transformers/models/mixtral/modeling_mixtral.py#MixtralRotaryEmbedding"
+            "transformers/models/qwen3_moe/configuration_qwen3_moe.py#Qwen3MoeConfig",
+            "transformers/models/qwen3_moe/modeling_qwen3_moe.py#Qwen3MoeDecoderLayer",
+            "transformers/models/qwen3_moe/modeling_qwen3_moe.py#Qwen3MoePreTrainedModel",
+            "transformers/models/qwen3_moe/modeling_qwen3_moe.py#Qwen3MoeRMSNorm",
+            "transformers/models/qwen3_moe/modeling_qwen3_moe.py#Qwen3MoeRotaryEmbedding"
         ],
         "JaxDependencies": {}
     },
     {
-        "comp_id": "transformers/models/mixtral/modeling_mixtral.py#MixtralForCausalLM",
-        "filepath": "transformers/models/mixtral/modeling_mixtral.py",
-        "comp_name": "MixtralForCausalLM",
-        "Dependencies": [
-            "transformers/modeling_outputs.py#MoeCausalLMOutputWithPast",
-            "transformers/modeling_outputs.py#MoeModelOutputWithPast",
-            "transformers/models/mixtral/modeling_mixtral.py#MixtralModel",
-            "transformers/models/mixtral/modeling_mixtral.py#MixtralPreTrainedModel",
-            "transformers/models/mixtral/modeling_mixtral.py#load_balancing_loss_func"
-        ],
-        "JaxDependencies": {}
-    },
-    {
-        "comp_id": "transformers/models/qwen3_moe/modular_qwen3_moe.py#Qwen3MoeModel",
-        "filepath": "transformers/models/qwen3_moe/modular_qwen3_moe.py",
-        "comp_name": "Qwen3MoeModel",
-        "Dependencies": [
-            "transformers/models/mixtral/modeling_mixtral.py#MixtralModel"
-        ],
-        "JaxDependencies": {}
-    },
-    {
-        "comp_id": "transformers/models/qwen3_moe/modular_qwen3_moe.py#Qwen3MoeForCausalLM",
-        "filepath": "transformers/models/qwen3_moe/modular_qwen3_moe.py",
+        "comp_id": "transformers/models/qwen3_moe/modeling_qwen3_moe.py#Qwen3MoeForCausalLM",
+        "filepath": "transformers/models/qwen3_moe/modeling_qwen3_moe.py",
         "comp_name": "Qwen3MoeForCausalLM",
         "Dependencies": [
             "transformers/cache_utils.py#Cache",
             "transformers/modeling_outputs.py#MoeCausalLMOutputWithPast",
             "transformers/modeling_outputs.py#MoeModelOutputWithPast",
-            "transformers/models/mixtral/modeling_mixtral.py#MixtralForCausalLM",
-            "transformers/models/mixtral/modeling_mixtral.py#load_balancing_loss_func",
-            "transformers/models/qwen3_moe/modular_qwen3_moe.py#Qwen3MoeModel"
+            "transformers/models/qwen3_moe/modeling_qwen3_moe.py#Qwen3MoeModel",
+            "transformers/models/qwen3_moe/modeling_qwen3_moe.py#Qwen3MoePreTrainedModel",
+            "transformers/models/qwen3_moe/modeling_qwen3_moe.py#load_balancing_loss_func"
         ],
         "JaxDependencies": {}
     }
