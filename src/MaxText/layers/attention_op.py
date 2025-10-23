@@ -28,21 +28,21 @@ from jax.ad_checkpoint import checkpoint_name
 from jax.experimental.pallas.ops.gpu import attention as gpu_pallas_attention
 from jax.experimental.pallas.ops.gpu import decode_attention as gpu_pallas_decode_attention
 from jax.experimental import pallas as pl
+from jax.sharding import Mesh
+import jax.numpy as jnp
 
 if jax.__version__ < "0.8.0":
   from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_kernel
   from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask
+else:
+  from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_kernel
+  from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_mask
 
-from jax.sharding import Mesh
-import jax.numpy as jnp
 
 from flax import linen as nn
 from flax import nnx
 from flax.linen import partitioning
 
-if jax.__version__ >= "0.8.0":
-  from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_kernel
-  from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_mask
 
 from MaxText import max_utils
 from MaxText.common_types import (
