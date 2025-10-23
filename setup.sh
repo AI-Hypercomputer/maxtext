@@ -252,8 +252,6 @@ elif [[ $MODE == "nightly" ]]; then
         python3 -m uv pip install --pre -U jax -i https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/
         # Install jaxlib-nightly
         python3 -m uv pip install --pre -U jaxlib -i https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/
-
-        #python3 -m uv pip install --pre -U jaxlib==0.8.1.dev20251017 -i https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/
         if [[ -n "$LIBTPU_GCS_PATH" ]]; then
             # Install custom libtpu
             echo "Installing libtpu.so from $LIBTPU_GCS_PATH to $libtpu_path"
@@ -264,21 +262,7 @@ elif [[ $MODE == "nightly" ]]; then
         else
             # Install libtpu-nightly
             echo "Installing libtpu-nightly"
-            #python3 -m uv pip install -U --pre libtpu -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
-            python3 -m uv pip uninstall libtpu
-            #python3 -m uv pip install -U --pre libtpu -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
-            python3 -m uv pip install -U --pre libtpu -f https://storage.googleapis.com/libtpu-wheels/index.html
-            #python3 -m uv pip install -U --pre libtpu==0.0.25.dev20251021 -f https://storage.googleapis.com/libtpu-wheels/index.html
-
-            #python3 -m uv pip install -U --pre jax jaxlib -i https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/
-            # echo "Installing libtpu-night from v7x"
-            # python3 -m uv pip install -U crcmod
-            # DATE='dev20251017'
-            # libtpu="libtpu-0.0.25.${DATE}+tpu7x-cp314-cp314t-manylinux_2_31_x86_64.whl"
-            # echo $libtpu
-            # #gsutil -m cp gs://libtpu-tpu7x-releases/wheels/libtpu/${libtpu} .
-            # echo "done download libtpu-nighlty from gcs"
-            # python3 -m uv pip install -U --pre libtpu ./$libtpu
+            python3 -m uv pip install -U --pre libtpu -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
         fi
     fi
     echo "Installing nightly tensorboard plugin profile"

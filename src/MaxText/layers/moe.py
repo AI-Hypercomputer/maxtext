@@ -33,8 +33,6 @@ from MaxText import common_types as ctypes
 from MaxText import max_logging
 from MaxText import max_utils
 from MaxText.kernels import megablox as mblx
-from tokamax._src.ops.ragged_dot import api
-from tokamax._src.ops.ragged_dot import pallas_mosaic_tpu
 from MaxText.layers import attentions, linears, quantizations, nnx_wrappers
 from MaxText.layers.initializers import NdInitializer, nd_dense_init, default_bias_init, variable_to_logically_partitioned
 
