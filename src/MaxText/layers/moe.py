@@ -36,6 +36,9 @@ from MaxText.kernels import megablox as mblx
 from MaxText.layers import attentions, linears, quantizations, nnx_wrappers
 from MaxText.layers.initializers import NdInitializer, nd_dense_init, default_bias_init, variable_to_logically_partitioned
 
+if jax.__version__ >= "0.8.0":
+  from tokamax._src.ops.ragged_dot import api as tokamax_api
+
 set_xla_metadata = xla_metadata.set_xla_metadata
 
 
@@ -807,16 +810,26 @@ class RoutedMoE(nnx.Module):
           min(tiling[2], n),
       )
       if self.config.megablox:
-        output = mblx.gmm(
-            lhs=inputs,
-            rhs=kernel,
-            group_sizes=group_sizes,
-            preferred_element_type=self.dtype,
-            tiling=tiling,
-            lhs_quantize_dtype=lhs_quantize_dtype,
-            rhs_quantize_dtype=rhs_quantize_dtype,
-            use_qwix_quantization=self.config.use_qwix_quantization,
-        )
+        if self.config.use_tokamax_gmm:
+          output = tokamax_api.ragged_dot(  #  pylint: disable=possibly-used-before-assignment
+              lhs=inputs,
+              rhs=kernel,
+              group_sizes=group_sizes,
+              precision=jax.lax.Precision.DEFAULT,
+              preferred_element_type=self.dtype,
+              implementation="mosaic",
+          )
+        else:
+          output = mblx.gmm(
+              lhs=inputs,
+              rhs=kernel,
+              group_sizes=group_sizes,
+              preferred_element_type=self.dtype,
+              tiling=tiling,
+              lhs_quantize_dtype=lhs_quantize_dtype,
+              rhs_quantize_dtype=rhs_quantize_dtype,
+              use_qwix_quantization=self.config.use_qwix_quantization,
+          )
       else:
         rhs_inputs = kernel
         if isinstance(kernel, aqt.QTensor):

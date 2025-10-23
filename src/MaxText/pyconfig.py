@@ -290,6 +290,12 @@ def validate_quantization_methods(keys):
       raise ValueError(f"Invalid quantization method {keys['quantization']}. Valid options are {valid_quant_methods}")
 
 
+def validate_tokamax_usage(keys):
+  """Validate tokamax usage for gmm kernel"""
+  if keys["use_tokamax_gmm"] and keys["hardware"] != "tpu":
+    raise ValueError(f"Invalid tokamax's megablox kernel usage for hardware {keys['hardware']}. Only TPU is supported.")
+
+
 def validate_data_input(keys):
   """validate provided parameters for data input"""
   if not keys["hf_access_token"]:
@@ -737,6 +743,7 @@ class _HyperParameters:
     validate_data_input(raw_keys)
     validate_constant_bound(raw_keys)
     validate_quantization_methods(raw_keys)
+    validate_tokamax_usage(raw_keys)
 
     raw_keys["decoder_block"] = DecoderBlockType(raw_keys["decoder_block"])
 
