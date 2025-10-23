@@ -682,6 +682,7 @@ class Attention(nnx.Module):
           hidden_size=self.config.hidden_size_for_vit,
           num_attention_heads=self.config.num_attention_heads_for_vit,
           rope_theta=self.config.rope_theta_for_vit,
+          fprop_dtype=self.dtype,
           rngs=self.rngs,
       )
     elif self.config.model_name.startswith("llama3.1") or rope_type.startswith("llama3.1"):

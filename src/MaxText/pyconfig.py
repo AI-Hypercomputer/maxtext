@@ -255,6 +255,15 @@ def validate_keys(keys):
   if keys["decoder_block"] == "llama4":
     validate_llama4_config(keys)
 
+  if keys["decoder_block"] == "qwen3_next":
+    if keys["sparse_matmul"]:
+      raise ValueError(
+          "For Qwen3-Next, sparse_matmul must be False for now. The dense path has been verified against reference."
+      )
+
+  if keys["shard_optimizer_over_data"]:
+    validate_optimizer_sharding_over_data(keys)
+
 
 def validate_tokenizer(keys):
   assert keys[
@@ -279,6 +288,12 @@ def validate_quantization_methods(keys):
   if keys["use_qwix_quantization"]:
     if keys["quantization"] not in valid_quant_methods:
       raise ValueError(f"Invalid quantization method {keys['quantization']}. Valid options are {valid_quant_methods}")
+
+
+def validate_tokamax_usage(keys):
+  """Validate tokamax usage for gmm kernel"""
+  if keys["use_tokamax_gmm"] and keys["hardware"] != "tpu":
+    raise ValueError(f"Invalid tokamax's megablox kernel usage for hardware {keys['hardware']}. Only TPU is supported.")
 
 
 def validate_data_input(keys):
@@ -391,6 +406,7 @@ def validate_model_name(s: str) -> bool:
       "qwen3-235b-a22b",
       "qwen3-30b-a3b",
       "qwen3-480b-a35b",
+      "qwen3-next-80b-a3b",
       "gpt3-175b",
       "gpt3-22b",
       "gpt3-6b",
@@ -727,6 +743,7 @@ class _HyperParameters:
     validate_data_input(raw_keys)
     validate_constant_bound(raw_keys)
     validate_quantization_methods(raw_keys)
+    validate_tokamax_usage(raw_keys)
 
     raw_keys["decoder_block"] = DecoderBlockType(raw_keys["decoder_block"])
 
@@ -1110,6 +1127,15 @@ def validate_ragged_dot(raw_keys):
       jax.config.update(config_flag, True)
     except AttributeError:
       max_logging.log(f"JAX config {config_flag} not found, possibly due to old JAX version.")
+
+
+def validate_optimizer_sharding_over_data(raw_keys):
+  zero1_supported_opt_types = ("adamw", "adam_pax")
+  if raw_keys["opt_type"] not in zero1_supported_opt_types:
+    raise ValueError(
+        f"Optimizer type {raw_keys["opt_type"]} is not supported for optimizer sharding.\n"
+        f"Please use an optimizer from this list: {zero1_supported_opt_types}."
+    )
 
 
 def create_new_logical_axis_rules(old_logical_axis_rules, new_logical_axis_rules):

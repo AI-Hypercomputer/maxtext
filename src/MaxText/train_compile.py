@@ -139,6 +139,56 @@ def save_compiled(compiled, save_name):
     pickle.dump(serialized, f)
 
 
+def is_oom(argv: Sequence[str]) -> bool:
+  """Function returns a boolean indicating whether OOM happens"""
+  # Parse and validate configuration
+  config = pyconfig.initialize(argv)
+  validate_config(config)
+
+  # Create target mesh
+  topology_mesh = get_topology_mesh(config)
+
+  # Print system information after building the compile topology to avoid
+  # prematurely initializing the backend.
+  max_utils.print_system_information()
+
+  # Get shaped inputs
+  shaped_train_args, shaped_train_kwargs, state_mesh_shardings, model = get_shaped_inputs(topology_mesh, config)
+
+  # Get data sharding
+  data_sharding = maxtext_utils.get_input_data_sharding(config, topology_mesh)
+
+  # Get function to compile and shardings
+  func_to_compile, in_shard, out_shard, static_argnums, donate_argnums = (
+      maxtext_utils.get_functional_train_with_signature(
+          train.train_step, data_sharding, state_mesh_shardings, model, config
+      )
+  )
+
+  try:
+    _ = jit_and_compile(
+        func_to_compile,
+        shaped_train_args,
+        shaped_train_kwargs,
+        topology_mesh,
+        in_shard,
+        out_shard,
+        static_argnums,
+        donate_argnums,
+        nn_partitioning.axis_rules(config.logical_axis_rules),
+    )
+    return False
+  except Exception as e:
+    # return true if OOM error happens
+    # OOM error looks like
+    # jax.errors.JaxRuntimeError: RESOURCE_EXHAUSTED: Allocation ...
+    # jax.errors.JaxRuntimeError: INTERNAL: RET_CHECK failure ...
+    message = str(e).lower()
+    if "resource_exhausted" in message or "hbm" in message:
+      return True
+    raise e
+
+
 def main(argv: Sequence[str]) -> None:
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
   os.environ["LIBTPU_INIT_ARGS"] = (

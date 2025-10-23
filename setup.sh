@@ -137,32 +137,29 @@ if [[ $DEVICE == "tpu" ]]; then
     fi
 fi
 
-# Save the script folder path of maxtext
-run_name_folder_path=$(pwd)
-
-# Install dependencies from requirements.txt
-cd "$run_name_folder_path" && python3 -m uv pip install --upgrade pip
 if [[ "$MODE" == "nightly" ]]; then
     echo "Nightly mode: Installing requirements.txt, stripping commit pins from git+ repos."
-    cp requirements.txt requirements.txt.nightly-temp
+
     # Create a temp file, strip commit pins from git+ repos in requirements.txt
     # Remove/update this section based on the pinned github repo commit in requirements.txt
-    sed -i -E \
-      -e 's|^mlperf-logging @ https?://github.com/mlcommons/logging/archive/.*\.zip$|mlperf-logging@git+https://github.com/mlperf/logging.git|' \
+    sed -E \
       -e 's|^([^ ]*) @ https?://github.com/([^/]*\/[^/]*)/archive/.*\.zip$|\1@git+https://github.com/\2.git|' \
-      requirements.txt.nightly-temp
+      -e '/JetStream/d' \
+      -e '/mlperf-logging/d' \
+      requirements.txt > requirements.txt.nightly-temp
 
     echo "--- Installing modified nightly requirements: ---"
     cat requirements.txt.nightly-temp
     echo "-------------------------------------------------"
     
-    python3 -m uv pip install --no-cache-dir -U -r requirements.txt.nightly-temp
+    python3 -m uv pip install --no-cache-dir -U -r requirements.txt.nightly-temp \
+                                                -r "${MAXTEXT_REPO_ROOT?}"'/extra_deps_from_github.txt'
     rm requirements.txt.nightly-temp
 else
     # stable or stable_stack mode: Install with pinned commits
     echo "Installing tpu-requirements.txt with pinned commits."
     tpu_requirements_txt=
-    for candidate in 'generated_requirements' "${MAXTEXT_REPO_ROOT}"'/generated_requirements' "$PWD"; do
+    for candidate in 'generated_requirements' "${MAXTEXT_REPO_ROOT?}"'/generated_requirements' "$PWD"; do
       if [ -f "$candidate"'/tpu-requirements.txt' ]; then
         tpu_requirements_txt="$candidate"'/tpu-requirements.txt'
         break
@@ -174,7 +171,8 @@ else
       >&2 printf 'Could not find "tpu-requirements.txt", looked in: %s\n' "${searched%?}"
       exit 2
     else
-      python3 -m uv pip install --resolution=lowest -r "$tpu_requirements_txt"
+      python3 -m uv pip install --resolution=lowest -r "$tpu_requirements_txt" \
+                                                    -r "${MAXTEXT_REPO_ROOT?}"'/extra_deps_from_github.txt'
     fi
 fi
 

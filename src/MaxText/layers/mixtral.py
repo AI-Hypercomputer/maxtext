@@ -135,6 +135,8 @@ class MixtralDecoderLayer(nnx.Module):
       deterministic,
       model_mode,
       previous_chunk=None,
+      page_state=None,
+      slot=None,
   ):
 
     inputs = nn.with_logical_constraint(inputs, self.activation_axis_names)

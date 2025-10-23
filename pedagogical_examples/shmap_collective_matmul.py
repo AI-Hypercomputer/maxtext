@@ -29,7 +29,6 @@ import jax.numpy as jnp
 from jax.experimental.pjit import pjit
 from jax.sharding import PartitionSpec as P
 from jax.sharding import Mesh
-from jax.experimental.shard_map import shard_map
 
 MESH_DATA_AXIS = "dp"
 MESH_FSDP_AXIS = "fsdp"
@@ -103,14 +102,14 @@ jit_matmul = pjit(matmul, out_shardings=P(MESH_FSDP_AXIS, None, MESH_TENSOR_AXIS
 
 
 @partial(
-    shard_map,
+    jax.shard_map,
     mesh=global_mesh,
     in_specs=(
         P(MESH_FSDP_AXIS, MESH_TENSOR_AXIS, None),
         P(MESH_FSDP_AXIS, MESH_TENSOR_AXIS, None),
     ),
     out_specs=P(MESH_FSDP_AXIS, None, MESH_TENSOR_AXIS, None),
-    check_rep=False,
+    check_vma=False,
 )
 def collective_matmul(activations, weights):  # pylint: disable=redefined-outer-name
   """Collective matrix multiply"""
