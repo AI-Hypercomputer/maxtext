@@ -151,8 +151,7 @@ def create_model_input_for_lora(base_model):
     base_model: The base model to extract configuration from.
     
   Returns:
-    A dictionary with keys matching Transformer.__call__ parameters:
-    'decoder_input_tokens', 'decoder_positions', 'decoder_segment_ids', 'cache'.
+    A dictionary with keys matching Transformer.__call__ parameters.
   """
   # Get batch and sequence length from model config
   batch_size, seq_len = max_utils.get_batch_seq_len_for_mode(
@@ -161,15 +160,16 @@ def create_model_input_for_lora(base_model):
   )
   
   # Create dummy inputs matching Transformer.__call__ signature
-  return {
+  model_input = {
       "decoder_input_tokens": jnp.ones(
           (batch_size, seq_len), dtype=jnp.int32
       ),
       "decoder_positions": jnp.ones(
           (batch_size, seq_len), dtype=jnp.int32
       ),
-      # "cache": None,
   }
+  
+  return model_input
 
 
 def apply_lora_to_model(base_model, mesh, mt_config, quantize=False):
