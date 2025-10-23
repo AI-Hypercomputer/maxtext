@@ -52,6 +52,30 @@ def create_causal_mask_PT(q_seq_len: int, kv_seq_len: int, dtype=torch.float32):
     masked_fill_value = -torch.finfo(dtype).max / 2
     return torch.zeros(q_seq_len, kv_seq_len, dtype=dtype).masked_fill(mask, masked_fill_value)
 
+def eager_attention_forward(
+    module: nn.Module,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    attention_mask: Optional[torch.Tensor],
+    scaling: float,
+    dropout: float = 0.0,
+):
+    key_states = repeat_kv(key, module.num_key_value_groups)
+    value_states = repeat_kv(value, module.num_key_value_groups)
+
+    attn_weights = torch.matmul(query, key_states.transpose(2, 3)) # * scaling
+    if attention_mask is not None:
+        causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
+        attn_weights = attn_weights + causal_mask
+
+    attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query.dtype)
+    attn_weights = nn.functional.dropout(attn_weights, p=dropout, training=module.training)
+    attn_output = torch.matmul(attn_weights, value_states)
+    attn_output = attn_output.transpose(1, 2).contiguous()
+
+    return attn_output, attn_weights
+
 def rotate_half(x):
     """Rotates half the hidden dims of the input."""
     x1 = x[..., : x.shape[-1] // 2]
@@ -500,46 +524,37 @@ class Qwen3NextFullAttention_PT(nn.Module):
       past_key_values: Optional[tuple[torch.Tensor, torch.Tensor]] = None, # Simplified for test
       cache_position: Optional[torch.LongTensor] = None,
   ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
-  
-      bsz, q_len, _ = hidden_states.size()
+    
       input_shape = hidden_states.shape[:-1]
       hidden_shape = (*input_shape, -1, self.head_dim)
 
-      q_proj_out = self.q_proj(hidden_states)
-      query_states, gate = torch.chunk(q_proj_out, 2, dim=-1)
+      query_states, gate = torch.chunk(
+          self.q_proj(hidden_states).view(*input_shape, -1, self.head_dim * 2), 2, dim=-1
+      )
+      gate = gate.reshape(*input_shape, -1)
 
-      query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-      gate = gate.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-
-      key_states = self.k_proj(hidden_states).view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-      value_states = self.v_proj(hidden_states).view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-
-      query_states = self.q_norm(query_states)
-      key_states = self.k_norm(key_states)
+      query_states = self.q_norm(query_states.view(hidden_shape)).transpose(1, 2)
+      key_states = self.k_norm(self.k_proj(hidden_states).view(hidden_shape)).transpose(1, 2)
+      value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
 
       cos, sin = position_embeddings
       query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
       if past_key_values is not None:
-          key_states = torch.cat([past_key_values[0], key_states], dim=2)
-          value_states = torch.cat([past_key_values[1], value_states], dim=2)
+          # sin and cos are specific to RoPE models; cache_position needed for the static cache
+          cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
+          key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx, cache_kwargs)
 
-      key_states = repeat_kv(key_states, self.num_key_value_groups)
-      value_states = repeat_kv(value_states, self.num_key_value_groups)
-
-      attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) # * self.scaling
-
-      if attention_mask is not None:
-          attn_weights = attn_weights + attention_mask
-
-      attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
-      attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
-      attn_output = torch.matmul(attn_weights, value_states)
-
-      attn_output = attn_output.transpose(1, 2).contiguous()
-      attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
-
-      gate = gate.transpose(1, 2).reshape(bsz, q_len, self.hidden_size)
+      attn_output, attn_weights = eager_attention_forward(
+          self,
+          query_states,
+          key_states,
+          value_states,
+          attention_mask,
+          dropout=0.0 if not self.training else self.attention_dropout,
+          scaling=self.scaling,
+      )
+      attn_output = attn_output.reshape(*input_shape, -1).contiguous()
       attn_output = attn_output * torch.sigmoid(gate)
 
       attn_output = self.o_proj(attn_output)
@@ -1039,10 +1054,20 @@ class TestQwen3Next(unittest.TestCase):
 
       # 4. Weight Mapping
       pt_state_dict = pt_model.state_dict()
+
+      pt_q_proj_w = pt_state_dict['q_proj.weight'].T.numpy()
+      jax_q_proj_w = pt_q_proj_w.reshape(self.cfg.emb_dim, self.cfg.num_query_heads, self.cfg.head_dim * 2)
+
+      pt_k_proj_w = pt_state_dict['k_proj.weight'].T.numpy()
+      jax_k_proj_w = pt_k_proj_w.reshape(self.cfg.emb_dim, self.cfg.num_kv_heads, self.cfg.head_dim)
+
+      pt_v_proj_w = pt_state_dict['v_proj.weight'].T.numpy()
+      jax_v_proj_w = pt_v_proj_w.reshape(self.cfg.emb_dim, self.cfg.num_kv_heads, self.cfg.head_dim)
+      
       jax_params = {
-          "q_proj": {"kernel": nnx.Param(jnp.array(pt_state_dict['q_proj.weight'].T.numpy()))},
-          "k_proj": {"kernel": nnx.Param(jnp.array(pt_state_dict['k_proj.weight'].T.numpy()))},
-          "v_proj": {"kernel": nnx.Param(jnp.array(pt_state_dict['v_proj.weight'].T.numpy()))},
+          "q_proj": {"kernel": nnx.Param(jnp.array(jax_q_proj_w))},
+          "k_proj": {"kernel": nnx.Param(jnp.array(jax_k_proj_w))},
+          "v_proj": {"kernel": nnx.Param(jnp.array(jax_v_proj_w))},
           "o_proj": {"kernel": nnx.Param(jnp.array(pt_state_dict['o_proj.weight'].T.numpy()))},
           "q_norm": {"weight": nnx.Param(jnp.array(pt_state_dict['q_norm.weight'].numpy()))},
           "k_norm": {"weight": nnx.Param(jnp.array(pt_state_dict['k_norm.weight'].numpy()))},
@@ -1065,6 +1090,7 @@ class TestQwen3Next(unittest.TestCase):
 
       # Causal mask for PyTorch
       attention_mask_pt = create_causal_mask_PT(self.seq_len, self.seq_len)
+      attention_mask_pt = attention_mask_pt[None, None, :, :]
 
       # Segment IDs for JAX (for causal mask)
       decoder_segment_ids_jax = jnp.ones((self.batch_size, self.seq_len), dtype=jnp.int32)
@@ -1091,7 +1117,9 @@ class TestQwen3Next(unittest.TestCase):
       print(jax_output.shape)
 
       # 9. Compare
+      print(f"pt_model: {pt_output.shape}")
       pt_out_np = pt_output.detach().numpy()
+      print(f"pt_model 1: {pt_output.shape}")
       jax_out_np = np.asarray(jax_output)
       
       diff = np.abs(pt_out_np - jax_out_np)

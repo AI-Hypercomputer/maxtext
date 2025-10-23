@@ -561,10 +561,9 @@ class Qwen3NextFullAttention(nnx.Module):
     self.quant = quant
     cfg = self.config
     self.partial_rotary_factor = 0.25
-
-    # Get mode-specific batch size and sequence length for shape
-    batch_size, seq_len = max_utils.get_batch_seq_len_for_mode(cfg, model_mode)
-    inputs_shape = (batch_size, seq_len, cfg.emb_dim)
+    print(f"emb_dim: {cfg.emb_dim}")
+    print(f"num_q_head: {cfg.num_query_heads}")
+    print(f"head_dim: {cfg.head_dim}")
 
     # q_proj projection
     self.q_proj = linears.DenseGeneral(
@@ -574,7 +573,7 @@ class Qwen3NextFullAttention(nnx.Module):
       dtype=cfg.dtype,
       weight_dtype=cfg.weight_dtype,
       kernel_axes=("embed", "heads", "kv"),
-      quant=self.quant,
+      # quant=self.quant,
       matmul_precision=cfg.matmul_precision,
       rngs=rngs,
     )
@@ -678,28 +677,20 @@ class Qwen3NextFullAttention(nnx.Module):
     batch_size, seq_len, _ = inputs.shape
 
     # Project and split Query and Gate
-    # q_proj_out shape: (B, S, E * 2)
     q_proj_out = self.q_proj(inputs)
-    # query_states shape: (B, S, E), gate shape: (B, S, E)
     query_states, gate = jnp.split(q_proj_out, 2, axis=-1)
 
     # Project Key and Value
-    # key_states shape: (B, S, E)
     key_states = self.k_proj(inputs)
-    # value_states shape: (B, S, E)
     value_states = self.v_proj(inputs)
 
     # RESHAPE to (B, S, H_q, D) BEFORE norm
-    query_states = query_states.reshape(batch_size, seq_len, cfg.num_query_heads, cfg.head_dim)
-    # (B, S, H_q, D)
-    gate = gate.reshape(batch_size, seq_len, cfg.num_query_heads, cfg.head_dim)
-    # (B, S, H_kv, D)
-    key_states = key_states.reshape(batch_size, seq_len, cfg.num_kv_heads, cfg.head_dim)
-    # (B, S, H_kv, D)
-    value_states = value_states.reshape(batch_size, seq_len, cfg.num_kv_heads, cfg.head_dim)
+    # query_states = query_states.reshape(batch_size, seq_len, cfg.num_query_heads, cfg.head_dim)
+    # gate = gate.reshape(batch_size, seq_len, cfg.num_query_heads, cfg.head_dim)
+    # key_states = key_states.reshape(batch_size, seq_len, cfg.num_kv_heads, cfg.head_dim)
+    # value_states = value_states.reshape(batch_size, seq_len, cfg.num_kv_heads, cfg.head_dim)
 
     # Apply QK Normalization (per-head)
-    # shape doesnt change stays as (B, S, H_q, D)
     query_states = self.q_norm(query_states)
     key_states = self.k_norm(key_states)
 
@@ -713,17 +704,10 @@ class Qwen3NextFullAttention(nnx.Module):
       query_rot = self.rotary_embedding(query_rot, decoder_positions)
       key_rot = self.rotary_embedding(key_rot, decoder_positions)
 
-      # shape doesnt change stays as (B, S, H_q, D)
       query_states = jnp.concatenate([query_rot, query_pass], axis=-1)
       key_states = jnp.concatenate([key_rot, key_pass], axis=-1)
     
     # Compute Attention
-    # Transpose to (B, H, S, D) for attention op
-    # query_states = jnp.transpose(query_states, (0, 2, 1, 3))
-    # key_states = jnp.transpose(key_states, (0, 2, 1, 3))
-    # value_states = jnp.transpose(value_states, (0, 2, 1, 3))
-
-    # (B, S, H_q, D)
     attention_output = self.attention_op(
         query_states,
         key_states,
@@ -733,11 +717,9 @@ class Qwen3NextFullAttention(nnx.Module):
     )
 
     # Apply Gating
-    # gate shape: (B, S, H_q, D)
     attention_output = attention_output * nn.sigmoid(gate)
 
     # Output Projection
-    # attn_output shape after reshape: (B, S, E)
     attention_output = attention_output.reshape(batch_size, seq_len, cfg.emb_dim)
     attention_output = self.o_proj(attention_output)
 
