@@ -1081,7 +1081,7 @@ class AttentionOp(nnx.Module):
         " axis"
         f" got {query.shape[0]=}/{devices_in_data_fsdp=}"
     )
-    
+
     # create_splash_attention kernel
     sa_config = splash_attention_kernel.SplashConfig(
         block_q=min(global_block_q, query.shape[2]),
