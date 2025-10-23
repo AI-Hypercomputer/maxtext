@@ -1052,11 +1052,13 @@ class AttentionOp(nnx.Module):
         segment_axis_names_kv = nn.logical_to_mesh_axes((BATCH, KV_LENGTH))
 
     if self.config.expert_shard_attention_option == EP_AS_CONTEXT:
-      axis_names_splash_kernel = nn.logical_to_mesh_axes(self.flash_axis_names_splash_kernel_ep)
+      #todo: needs support for tokamax splash attention kernel
+      #axis_names_splash_kernel = nn.logical_to_mesh_axes(self.flash_axis_names_splash_kernel_ep)
       axis_names_q = nn.logical_to_mesh_axes(self.flash_axis_names_q_ep)
       axis_names_kv = nn.logical_to_mesh_axes(self.flash_axis_names_kv_ep)
     else:
-      axis_names_splash_kernel = nn.logical_to_mesh_axes(self.flash_axis_names_splash_kernel)
+      #todo: needs support for tokamax splash attention kernel
+      #axis_names_splash_kernel = nn.logical_to_mesh_axes(self.flash_axis_names_splash_kernel)
       axis_names_q = nn.logical_to_mesh_axes(self.flash_axis_names_q)
       axis_names_kv = nn.logical_to_mesh_axes(self.flash_axis_names_kv)
 
