@@ -33,11 +33,14 @@ import argparse
 import json
 import logging
 import os
+import ast
+import requests
+from typing import Tuple, Optional
 
 from MaxText.experimental.agent.integrative_rag_agent import system_setup
 from MaxText.experimental.agent.code_generation_agent.llm_agent import GeminiAgent
 from MaxText.experimental.agent.integrative_rag_agent.prompts_integrative_rag import CODE_CONVERSION, MODULE_NAMING_PROMPT, CODE_DESCRIPTION
-from MaxText.experimental.agent.orchestration_agent.split_python_file import get_modules_from_file
+from MaxText.experimental.agent.orchestration_agent.split_python_file import get_modules_from_file, get_modules_from_file_ast_fixed
 from MaxText.experimental.agent.orchestration_agent.utils import parse_python_code
 from MaxText.experimental.agent.code_evaluation_agent.utils import get_last_defined_module
 from MaxText.experimental.agent.integrative_rag_agent.utils import read_code_blocks
@@ -45,6 +48,7 @@ from MaxText.experimental.agent.integrative_rag_agent.config import maxtext_bloc
 from MaxText.experimental.agent.integrative_rag_agent.llm_rag_embedding_generation import get_code_description_with_gemini
 from MaxText.experimental.agent.integrative_rag_agent.config import files_order_file_format, maxtext_code_block, processed_module_file_format, new_module_file_format
 from MaxText.globals import MAXTEXT_PKG_DIR
+import pdb
 
 # --- Basic Configuration ---
 logging.basicConfig(
@@ -167,6 +171,60 @@ def find_appropriate_file_name(module_description):
   return file_name, existing_files
 
 
+# def get_modules_from_file_ast_fixed(file_url: str, module_name: str) -> Tuple[Optional[str], Optional[str]]:
+#     """
+#     A robust function to fetch a Python file from a URL, find a specific
+#     component, and return its source code along with the full file content.
+#     Uses Python's AST for reliable parsing of classes, functions, and type aliases.
+#     """
+#     logger.info("AST_FIX: Analyzing '%s' for module '%s'", file_url, module_name)
+    
+#     try:
+#         raw_url = file_url.replace("github.com", "raw.githubusercontent.com").replace("/blob/", "/")
+#         response = requests.get(raw_url)
+#         response.raise_for_status()
+#         full_file_code = response.text
+#     except requests.exceptions.RequestException as e:
+#         logger.error("AST_FIX: Failed to download %s. Error: %s", file_url, e)
+#         # Try as a package (__init__.py) as a fallback
+#         try:
+#             init_url = file_url.replace(".py", "/__init__.py")
+#             raw_init_url = init_url.replace("github.com", "raw.githubusercontent.com").replace("/blob/", "/")
+#             response = requests.get(raw_init_url)
+#             response.raise_for_status()
+#             full_file_code = response.text
+#         except requests.exceptions.RequestException:
+#              raise FileNotFoundError(f"Could not download {file_url} or its __init__.py")
+
+#     try:
+#         tree = ast.parse(full_file_code)
+#         target_node = None
+
+#         # Walk the tree to find the specific class, function, or assignment node
+#         for node in ast.walk(tree):
+#             node_name = ""
+#             if isinstance(node, (ast.ClassDef, ast.FunctionDef)) and node.name == module_name:
+#                 target_node = node
+#                 break
+#             elif isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name) and node.targets[0].id == module_name:
+#                 target_node = node
+#                 break
+#             elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.target.id == module_name:
+#                 target_node = node
+#                 break
+        
+#         if target_node:
+#             module_code = ast.get_source_segment(full_file_code, target_node)
+#             logger.info("AST_FIX: Successfully found and extracted module '%s'.", module_name)
+#             return module_code, full_file_code
+#         else:
+#             logger.error("AST_FIX: Unable to find module '%s' in file %s.", module_name, file_url)
+#             return None, full_file_code
+
+#     except SyntaxError as e:
+#         logger.error("AST_FIX: Syntax error parsing file %s: %s", file_url, e)
+#         return None, None
+      
 def convert_given_file(module, jax_modules) -> None | dict:
   """Convert a single Transformer component into a JAX module using the LLM.
 
@@ -186,7 +244,8 @@ def convert_given_file(module, jax_modules) -> None | dict:
       description, or None if generation did not produce a detectable module.
   """
   maxtext_blocks_code = read_code_blocks(maxtext_code_block, args.number_of_maxtext_blocks)
-  module_code, file_code = get_modules_from_file(destination_source_url + module["filepath"], module=module["comp_name"])
+  full_url = "/".join([destination_source_url.rstrip('/'), module["filepath"]])
+  module_code, file_code = get_modules_from_file_ast_fixed(full_url, module_name=module["comp_name"])
   prompt = CODE_CONVERSION
   if module_code is not None:
     prompt = prompt.replace("<CODE_BLOCK>", module_code)
@@ -194,14 +253,21 @@ def convert_given_file(module, jax_modules) -> None | dict:
   prompt = prompt.replace("<MAXTEXT_EXAMPLE_CODE>", maxtext_blocks_code)
   maxtext_dependency = json.dumps(module["JaxDependencies"]) if len(module["JaxDependencies"]) > 0 else ""
   prompt = prompt.replace("<MAXTEXT_MATCHED_DEPENDENCIES>", maxtext_dependency)
+  pdb.set_trace()
   llm_agent = GeminiAgent(system_instruction=CODE_CONVERSION)
   resp = llm_agent(prompt)
   module_code = parse_python_code(resp.text)
   file_name, _ = find_appropriate_file_name(module_code)
+  
   # Save the generated code to the appropriate file
-  dest_path = os.path.join(destination_directory, f"{file_name}.py")
-  os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-  with open(dest_path, "a", encoding="utf-8") as f:
+  ###--- Hardcode the jax directory name for now --- 
+  jax_dir = 'Qwen3ForCausalLM'
+  dest_path = os.path.join(jax_dir, f"{file_name}.py")
+  # dest_path = os.path.join(destination_directory, f"{file_name}.py")
+  # os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+  ####--- End of hardcode the jax directory name for now ---
+  
+  with open(dest_path, "a", encoding="utf-8") as f: 
     f.write(module_code)
   logger.info("Generated JAX code saved to: %s", dest_path)
   with open(dest_path, "rt", encoding="utf-8") as f:
@@ -224,8 +290,7 @@ def convert_all_modules():
   remaining component by calling `convert_given_file`. Results and progress
   are persisted to JSON files configured via `config`.
   """
-  with open(module_list_path, "rt", encoding="utf-8") as f:
-    modules_List = json.load(f)
+  with open(module_list_path, "rt", encoding="utf-8") as f: modules_List = json.load(f)
   jax_modules = get_exisiting_jax_modules()
   new_module_file = new_module_file_format.format(module_Name=args.module_name)
   processed_module_file = processed_module_file_format.format(module_Name=args.module_name)

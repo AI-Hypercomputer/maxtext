@@ -137,6 +137,7 @@ Rules:
     - If you do not understand the request, output the same Dependency List exactly as given.
 
 * Output only the final minimal list, one dependency per line, with no explanations.
+* If the final list is empty, output the single word 'NONE'.
 
 Codebase:
 <CODE_HERE>

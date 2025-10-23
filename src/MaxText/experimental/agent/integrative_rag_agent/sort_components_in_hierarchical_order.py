@@ -38,13 +38,15 @@ import hashlib
 import json
 import logging
 import os
+import pdb
+import time
 
 from MaxText.experimental.agent.integrative_rag_agent import system_setup
 from MaxText.experimental.agent.integrative_rag_agent.prompts_integrative_rag import Dependency_Filter_Prompt
 from MaxText.experimental.agent.code_generation_agent.llm_agent import GeminiAgent
 from MaxText.experimental.agent.integrative_rag_agent.llm_rag_embedding_generation import get_code_embedding
 from MaxText.experimental.agent.integrative_rag_agent.database_operations import make_embedding_index, search_embedding
-from MaxText.experimental.agent.orchestration_agent.split_python_file import get_modules_in_order as get_file_components
+from MaxText.experimental.agent.orchestration_agent.split_python_file import get_modules_in_order_fixed as get_file_components
 from MaxText.experimental.agent.integrative_rag_agent.config import (
     save_most_similar_block_for_debugging,
     similar_block_folder,
@@ -321,7 +323,6 @@ def sort_and_search_dependency(base_path, file_path, module):
     original_dependencies = {}
     jax_found_dependencies = defaultdict(dict)
     jax_dependencies_list = []
-
   while q:
     relative_file_path, comp_name = q.popleft()
     if "." in comp_name:
@@ -336,11 +337,10 @@ def sort_and_search_dependency(base_path, file_path, module):
       continue
     processed_count += 1
     logger.info("Processing (%d): %s  %s", processed_count, comp_id, sub_comp_name if sub_comp_name is not None else "")
-
+    
     if comp_id not in file_analysis_cache:
       logger.info("---> Analyzing file: %s", comp_id)
       try:
-        # Uses the function from split_python_file.py
         file_analysis_cache[comp_id] = get_file_components(
             file_url, module=comp_name, project_root=project_root, add_external_dependencies=True
         )
@@ -352,23 +352,29 @@ def sort_and_search_dependency(base_path, file_path, module):
           )
         except Exception as e:
           logger.error("Could not analyze file with subcompnenet %s. Error: %s", file_url, e)
-          continue  # Skip this file if it cannot be analyzed
+          continue  
       except Exception as e:
         logger.error("Could not analyze file %s. Error: %s", file_url, e)
-        continue  # Skip this file if it cannot be analyzed
+        continue  
     else:
       logger.info("%s. already in file_analysis_cache", comp_id)
 
     processed_comp_ids = list(map(lambda x: x["comp_id"], files_to_convert))
     analysis = copy.deepcopy(file_analysis_cache[comp_id])
     if comp_name in analysis["component_dependencies"]:
-      filtered_dependencies = filter_out_dependency(
-          analysis["sorted_modules"][comp_name], analysis["component_dependencies"][comp_name]
-      )
-      logger.info(
-          "Filter dependencies from \n %s \nto %s", analysis["component_dependencies"][comp_name], filtered_dependencies
-      )
-      analysis["component_dependencies"][comp_name] = filtered_dependencies
+      if enable_llm_filter:
+              filtered_dependencies = filter_out_dependency(
+                  analysis["sorted_modules"][comp_name], analysis["component_dependencies"][comp_name]
+              )
+              logger.info("Waiting 30 seconds to respect free tier Gemini API rate limit (2 req/min)...")
+              time.sleep(30)
+              logger.info(
+                  "Filter dependencies from \n %s \nto %s", analysis["component_dependencies"][comp_name], filtered_dependencies
+              )
+              analysis["component_dependencies"][comp_name] = filtered_dependencies
+            else:
+              logger.info("LLM filter is disabled, skipping dependency filtering for %s.", comp_name)
+              pass
       if save_dependency_list:
         with open(dependency_list_file, "a", encoding="utf-8") as f:
           f.write(f"--- Dependency for {comp_name}\n")
@@ -475,6 +481,11 @@ def arg_parser():
       default="LlamaForCausalLM",
       help="The name of the entry function or class to start the analysis from.",
   )
+  parser.add_argument(
+      "--enable-llm-filter",
+      action="store_true", 
+      help="If set, enables the experimental LLM dependency filter. Default is disabled."
+  )
   args = parser.parse_args()
   return args
 
@@ -487,8 +498,14 @@ def main():
   entry_module = args.entry_module
 
   logger.info("Starting analysis from: %s in %s", entry_module, entry_file_path)
+  
+    if enable_llm_filter:
+    logger.warning("LLM dependency filter is ENABLED. This may remove valid dependencies.")
+  else:
+    logger.info("LLM dependency filter is DISABLED. Using full dependency list.")
+  
   logger.info("-" * 60)
-  sort_and_search_dependency(base_path, entry_file_path, entry_module)
+  sort_and_search_dependency(base_path, entry_file_path, entry_module, enable_llm_filter)
 
 
 if __name__ == "__main__":

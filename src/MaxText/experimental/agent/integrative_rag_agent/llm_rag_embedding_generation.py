@@ -56,6 +56,8 @@ import time
 
 import numpy as np
 
+import pdb
+
 from MaxText.experimental.agent.code_evaluation_agent.utils import get_last_defined_module
 from MaxText.experimental.agent.code_generation_agent.llm_agent import GeminiAgent
 from MaxText.experimental.agent.integrative_rag_agent import system_setup
@@ -63,7 +65,7 @@ from MaxText.experimental.agent.integrative_rag_agent.config import maxtext_code
 from MaxText.experimental.agent.integrative_rag_agent.database_operations import save_document, load_all_documents
 from MaxText.experimental.agent.integrative_rag_agent.llm_rag_agent import EmbeddingAgent
 from MaxText.experimental.agent.integrative_rag_agent.prompts_integrative_rag import Description_Prompt, CODE_DESCRIPTION
-from MaxText.experimental.agent.orchestration_agent.split_python_file import get_modules_from_file
+from MaxText.experimental.agent.orchestration_agent.split_python_file import get_modules_from_file_robust
 
 
 # Create cache table if it doesn't exist
@@ -145,9 +147,11 @@ def get_code_embedding(file_path, project_root, comp_name, db_path="dataset/embe
       return module_code, json.loads(code_description), pickle.loads(embedding)
 
   # If not cached, compute and store
-  module_code, full_source_code = get_modules_from_file(
-      file_path, module=comp_name, project_root=project_root, add_external_dependencies=True
-  )
+  module_code, full_source_code = get_modules_from_file_robust(file_path, module=comp_name, add_external_dependencies=True)
+  
+  # module_code, full_source_code = get_modules_from_file(
+  #     file_path, module=comp_name, project_root=project_root, add_external_dependencies=True
+  # )
   if module_code is None:
     return None, None, None
   code_description = get_code_description_with_gemini(module_code, full_source_code)
@@ -273,6 +277,7 @@ def embedding_generation(skip_existing_records):
       continue
     print(f"Generating embeddings for: {doc['block_name']}")
     desc = json.dumps(doc["analysis"])
+    
     embeddings = embedding_agent(
         desc
     )  # Make embedding of description not code block as we want some similar code in different framework

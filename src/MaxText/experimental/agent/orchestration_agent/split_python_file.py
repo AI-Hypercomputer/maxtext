@@ -34,6 +34,13 @@ import logging
 import os.path
 from typing import TypedDict, cast
 
+import pdb
+import os
+import requests
+import tempfile
+
+from typing import Tuple, Optional, List, Dict, Any
+
 from MaxText.experimental.agent.orchestration_agent.utils import get_github_file_content, get_absolute_imports, check_github_file_exists
 
 logger = logging.getLogger("__name__")
@@ -51,89 +58,136 @@ if enable_cache:
 
 
 class ReferenceVisitor(ast.NodeVisitor):
-  """
-  Traverses an AST node to find all references to a known set of names.
-  This is used to detect dependencies between code blocks.
-  """
-
-  def __init__(self, defined_names, git_dependencies=None):
-    self.defined_names = defined_names
-    self.found_dependencies = set()
-    self.git_dependencies = git_dependencies or {}
-    self.git_aliases = set(self.git_dependencies.keys())
-    # Keep track of AST nodes that have already been processed as part of a larger dependency
-    self._handled_nodes = set()
-
-  def get_attribute_chain(self, node):
     """
-    Recursively builds the full attribute access chain (e.g., 'a.b.c')
-    starting from an ast.Attribute node.
-    Returns the base name and the attribute chain as a string.
+    Traverses an AST node to find all references to a known set of names,
+    including base classes and type hints.
     """
-    chain = []
-    curr = node
-    while isinstance(curr, ast.Attribute):
-      chain.append(curr.attr)
-      curr = curr.value
-    if isinstance(curr, ast.Name):
-      return curr.id, ".".join(reversed(chain))
-    return None, None  # The base of the attribute access is not a simple name
 
-  def visit_Attribute(self, node):
-    """visit ast.Attribute"""
-    # If this node has already been processed as part of a larger attribute chain, skip it.
-    if node in self._handled_nodes:
-      return
+    def __init__(self, defined_names, git_dependencies=None):
+        self.defined_names = defined_names
+        self.found_dependencies = set()
+        self.git_dependencies = git_dependencies or {}
+        self.git_aliases = set(self.git_dependencies.keys())
+        self._handled_nodes = set()
+        self._annotation_names = set()
 
-    base_name, attr_chain = self.get_attribute_chain(node)
-    if base_name and base_name in self.defined_names:
-      # The base of this attribute access (e.g., 'page_manager') is a known definition.
+    def _add_dependency(self, name):
+        """Helper to add a dependency if it's one we are tracking."""
+        if name in self.defined_names:
+            if name in self.git_aliases:
+                 self.found_dependencies.add(self.git_dependencies[name])
+            else:
+                 self.found_dependencies.add(name)
 
-      # Check if the base is an alias for a git dependency.
-      if base_name in self.git_aliases:
-        # It's an external dependency. We need to format it with the attribute path.
-        # Example: base_name='page_manager', attr_chain='PageState'
-        # self.git_dependencies['page_manager'] might be 'src/MaxText/inference/page_manager.py#page_manager'
-        path, obj = self.git_dependencies[base_name].split("#", 1)
+    def _extract_names_from_annotation(self, annotation_node):
+        """Recursively find all ast.Name nodes within a type annotation."""
+        if isinstance(annotation_node, ast.Name):
+            self._add_dependency(annotation_node.id)
+            self._annotation_names.add(annotation_node.id) 
+        elif isinstance(annotation_node, ast.Subscript):
+            self._extract_names_from_annotation(annotation_node.value)
+            if isinstance(annotation_node.slice, ast.Tuple):
+                for elt in annotation_node.slice.elts:
+                    self._extract_names_from_annotation(elt)
+            else:
+                 self._extract_names_from_annotation(annotation_node.slice)
+        elif isinstance(annotation_node, ast.Constant) or annotation_node is None:
+             pass 
+        elif isinstance(annotation_node, ast.Attribute):
+             base_name, _ = self.get_attribute_chain(annotation_node)
+             if base_name:
+                 self._add_dependency(base_name)
+                 self._annotation_names.add(base_name)
 
-        # As per the user request, we append the attribute access to the object name.
-        # e.g., 'page_manager' becomes 'page_manager.PageState'
-        new_obj = f"{obj}.{attr_chain}"
-        self.found_dependencies.add(f"{path}#{new_obj}")
-      else:
-        # It's an internal dependency (a class, function, etc. in the same file).
-        # The dependency is on the base object itself.
-        self.found_dependencies.add(base_name)
+    def visit_ClassDef(self, node):
+        """Visit Class Definitions to find base classes."""
+        for base in node.bases:
+            if isinstance(base, ast.Name):
+                self._add_dependency(base.id)
+            elif isinstance(base, ast.Attribute):
+                 base_name, _ = self.get_attribute_chain(base)
+                 if base_name:
+                      self._add_dependency(base_name)
 
-      # Mark this node and all its sub-nodes (the entire attribute chain) as handled
-      # to prevent visit_Name from creating a less specific, duplicate dependency.
-      curr = node
-      while isinstance(curr, ast.Attribute):
-        self._handled_nodes.add(curr)
-        curr = curr.value
-      if isinstance(curr, ast.Name):
-        self._handled_nodes.add(curr)
-    else:
-      # The base of the attribute is not a dependency we're tracking,
-      # so continue traversing down the tree.
-      self.generic_visit(node)
+        # CRITICAL: Continue visiting the *body* of the class
+        self.generic_visit(node)
+        
+    def visit_FunctionDef(self, node):
+        """Visit Function Definitions to find type hints in args and return."""
+        for arg in node.args.args:
+            if arg.annotation:
+                self._extract_names_from_annotation(arg.annotation)
+        for arg in node.args.posonlyargs:
+             if arg.annotation:
+                  self._extract_names_from_annotation(arg.annotation)
+        for arg in node.args.kwonlyargs:
+             if arg.annotation:
+                  self._extract_names_from_annotation(arg.annotation)
+        if node.args.vararg and node.args.vararg.annotation:
+             self._extract_names_from_annotation(node.args.vararg.annotation)
+        if node.args.kwarg and node.args.kwarg.annotation:
+             self._extract_names_from_annotation(node.args.kwarg.annotation)
 
-  def visit_Name(self, node):
-    """Record standalone name usages that match known definitions.
+        if node.returns:
+            self._extract_names_from_annotation(node.returns)
 
-    Skips names that were already accounted for as part of a larger
-    attribute chain in `visit_Attribute`. Adds matching names to
-    `self.found_dependencies`.
-    """
-    # If this node was already part of an attribute chain we handled, skip it.
-    if node in self._handled_nodes:
-      return
+        # CRITICAL: Continue visiting the *body* of the function
+        self.generic_visit(node)
+        
+    def visit_AnnAssign(self, node):
+        """Visit Annotated Assignments (typed variables)."""
+        if node.annotation:
+            self._extract_names_from_annotation(node.annotation)
+        
+        # CRITICAL: Continue visiting the value being assigned (if any)
+        if node.value:
+            self.visit(node.value)
 
-    # If the name is a standalone dependency we are tracking.
-    if node.id in self.defined_names:
-      # This handles direct usage of internal definitions or imported objects
-      # that are not used with further attribute access.
-      self.found_dependencies.add(node.id)
+    def get_attribute_chain(self, node):
+        chain = []
+        curr = node
+        while isinstance(curr, ast.Attribute):
+            chain.append(curr.attr)
+            curr = curr.value
+        if isinstance(curr, ast.Name):
+            return curr.id, ".".join(reversed(chain))
+        return None, None
+
+    def visit_Attribute(self, node):
+        if node in self._handled_nodes:
+            return
+
+        base_name, attr_chain = self.get_attribute_chain(node)
+        
+        if base_name and base_name in self.defined_names:
+            if base_name in self.git_aliases:
+                path, obj = self.git_dependencies[base_name].split("#", 1)
+                new_obj = f"{obj}.{attr_chain}" if attr_chain else obj 
+                self.found_dependencies.add(f"{path}#{new_obj}")
+            else:
+                 self.found_dependencies.add(base_name)
+
+            curr = node
+            while isinstance(curr, ast.Attribute):
+                self._handled_nodes.add(curr)
+                curr = curr.value
+            if isinstance(curr, ast.Name):
+                self._handled_nodes.add(curr)
+        else:
+            self.generic_visit(node)
+
+
+    def visit_Name(self, node):
+        if node in self._handled_nodes:
+            return
+        if node.id in self._annotation_names:
+             return
+
+        if node.id in self.defined_names:
+            if node.id in self.git_aliases:
+                 self.found_dependencies.add(self.git_dependencies[node.id])
+            else:
+                 self.found_dependencies.add(node.id)
 
 
 class DependencyAnalyzer:
@@ -143,55 +197,53 @@ class DependencyAnalyzer:
   into single modules for sequential processing.
   """
 
-  def __init__(self, file_path, project_root="transformers", add_external_dependencies=False):
-    self.file_path = file_path
-    self.source_code = self.get_source_code()
-    self.project_root = project_root
-    self.add_external_dependencies = add_external_dependencies
-    self.tree = ast.parse(self.source_code)
-    self.docstring = ast.get_docstring(self.tree)
-    self.imports = []
-    self.conditional_imports = []
-    self.definitions = {}
-    self.dependencies = defaultdict(set)
-    self.sorted_components = {}
-    self.git_dependencies = {}
-    # Adjacency list for graph algorithms
-    self.adj = defaultdict(list)
-    root_index = len(file_path.split(os.path.sep)) - 1 - file_path.split(os.path.sep)[::-1].index(project_root)
-    self.package_path = os.path.sep.join(file_path.split(os.path.sep)[root_index:])
-    self.split_python_cache_file = split_python_cache_file
+  def __init__(self, file_path, project_root="transformers", add_external_dependencies=False, original_path: Optional[str] = None):
+      self.file_path = file_path 
+      self.source_code = self.get_source_code() 
+      self.project_root = project_root
+      self.add_external_dependencies = add_external_dependencies
+
+      if not self.source_code:
+          raise SyntaxError(f"Source code is empty for file: {self.file_path}")
+
+      self.tree = ast.parse(self.source_code)
+      self.docstring = ast.get_docstring(self.tree)
+      self.imports = []
+      self.conditional_imports = []
+      self.definitions = {}
+      self.dependencies = defaultdict(set)
+      self.git_dependencies = {}
+      self.adj = defaultdict(list)
+      
+      path_for_logic = original_path if original_path is not None else self.file_path
+      
+      logical_path = path_for_logic.replace(os.path.sep, '/') 
+      
+      try:
+          path_parts = logical_path.split('/')
+          
+          root_index = len(path_parts) - 1 - path_parts[::-1].index(self.project_root)
+          self.package_path = "/".join(path_parts[root_index:])
+      except (IndexError, ValueError):
+
+          print(f"Warning: Could not find project_root '{self.project_root}' in path '{logical_path}'. Using fallback path.")
+          self.package_path = logical_path.split('/')[-1]
+
+      self.split_python_cache_file = split_python_cache_file
 
   def get_source_code(self):
-    """Return the source code for `self.file_path`.
+      """
+      Return the source code for `self.file_path`.
+      Assumes `self.file_path` is a valid, local file.
+      """
 
-    If the path is an HTTPS GitHub URL, fetches via `get_github_file_content`
-    and validates existence with `check_github_file_exists`. If the path is
-    a local file, reads from disk.
-
-    Returns:
-        str: The file contents.
-
-    Raises:
-        FileNotFoundError: When the remote file does not exist or a local
-            path is missing.
-        Exception: When a remote file exists but cannot be read.
-    """
-    source_code = ""
-    if self.file_path.startswith("https"):
-      flag, source_code = get_github_file_content(self.file_path)
-      if flag is False:
-        exists, _ = check_github_file_exists(self.file_path)
-        if exists:
-          print("not able to read seems have some issue in file", self.file_path, source_code)
-          raise Exception(source_code)
-        else:
-          print("Unable to read file: does not exist", self.file_path)
-          raise FileNotFoundError(self.file_path)
-    elif os.path.exists(self.file_path):
+      if not os.path.exists(self.file_path):
+          raise FileNotFoundError(f"DependencyAnalyzer: Local file does not exist: {self.file_path}")
+      
       with open(self.file_path, "rt", encoding="utf-8") as f:
-        source_code = f.read()
-    return source_code
+          source_code = f.read()
+      
+      return source_code
 
   def convert_package_to_path(self, path):
     """Convert an absolute import line to a mapping of names to file anchors.
@@ -210,77 +262,78 @@ class DependencyAnalyzer:
     path_form, path_imports = path.removeprefix("from ").replace(".", os.path.sep).split(" import ")
     import_dict = {}
     for pkg in path_imports.split(","):
-      # This part might need to be smarter to distinguish module imports from object imports
-      # For now, it assumes an object 'pkg' is in a file named 'path_form.py'
-      # or a module 'pkg' corresponds to 'path_form/pkg.py'
-      # The logic in get_absolute_imports should ideally resolve this ambiguity.
-      # A heuristic could be used here (e.g., checking casing) but we stick to the current logic.
-      # The user's example `from MaxText.inference import page_manager` creates a path
-      # `src/MaxText/inference.py#page_manager`, which is what the new visitor expects to correct.
       import_dict[pkg.strip()] = path_form + ".py#" + pkg.strip()
     return import_dict
 
   def analyze(self):
-    """
-    Performs a two-pass analysis of the source code to build a
-    dependency graph.
-    """
-    # --- Pass 1: Categorize all top-level nodes ---
-    for node in self.tree.body:
-      if isinstance(node, (ast.Import, ast.ImportFrom)):
-        self.imports.append(node)
-      elif isinstance(node, (ast.If, ast.Try)):
-        # Check for conditional imports at top-level
-        for sub_node in node.body:
-          if isinstance(sub_node, (ast.Import, ast.ImportFrom)):
-            self.conditional_imports.append((node, node))
-      elif isinstance(node, (ast.FunctionDef, ast.ClassDef)):
-        self.definitions[node.name] = node
-      elif isinstance(node, ast.Assign):
-        for target in node.targets:
-          if isinstance(target, ast.Name):
-            self.definitions[target.id] = node
+      """
+      Performs a two-pass analysis of the source code to build a
+      dependency graph.
+      """
+      # --- Pass 1: Categorize all top-level nodes ---
+      for node in self.tree.body:
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+          self.imports.append(node)
+        elif isinstance(node, (ast.If, ast.Try)):
+          for sub_node in node.body:
+            if isinstance(sub_node, (ast.Import, ast.ImportFrom)):
+              self.conditional_imports.append((node, node))
+        elif isinstance(node, (ast.FunctionDef, ast.ClassDef)):
+          self.definitions[node.name] = node
+        elif isinstance(node, ast.Assign):
+          for target in node.targets:
+            if isinstance(target, ast.Name):
+              self.definitions[target.id] = node
 
-    self.git_dependencies = {}
-    if self.add_external_dependencies:
-      for node in self.imports:
-        scode = ast.get_source_segment(self.source_code, node)
-        absimports = get_absolute_imports(scode, self.file_path, project_root=self.project_root)
-        if absimports is not None:
-          for absimport in absimports.split("\n"):
-            if absimport.startswith("from " + self.project_root):
-              self.git_dependencies.update(self.convert_package_to_path(absimport))
-
-      for node in self.conditional_imports:
-        for snode in node[1].body:
-          scode = ast.get_source_segment(self.source_code, snode)
+      self.git_dependencies = {}
+      if self.add_external_dependencies:
+        
+        for node in self.imports:
+          scode = ast.get_source_segment(self.source_code, node)
+          
+          if isinstance(node, ast.ImportFrom) and node.level > 0:
+              base_dir = os.path.dirname(self.package_path)
+              go_up_dirs = "../" * (node.level - 1)
+              module_file_part = node.module.replace('.', '/') if node.module else ""
+              if module_file_part:
+                  combined_path = os.path.join(base_dir, go_up_dirs, module_file_part + ".py")
+              else:
+                  combined_path = os.path.join(base_dir, go_up_dirs, "__init__.py")
+              new_file_path = os.path.normpath(combined_path)
+              for alias in node.names:
+                  imported_name = alias.name
+                  self.git_dependencies[imported_name] = f"{new_file_path}#{imported_name}"
+          
           absimports = get_absolute_imports(scode, self.file_path, project_root=self.project_root)
           if absimports is not None:
             for absimport in absimports.split("\n"):
               if absimport.startswith("from " + self.project_root):
                 self.git_dependencies.update(self.convert_package_to_path(absimport))
 
-    # --- Pass 2: Find dependencies and build graph ---
-    self.defined_names = set(self.definitions.keys()).union(set(self.git_dependencies.keys()))
+        for node in self.conditional_imports:
+          for snode in node[1].body:
+            scode = ast.get_source_segment(self.source_code, snode)
+            absimports = get_absolute_imports(scode, self.file_path, project_root=self.project_root)
+            if absimports is not None:
+              for absimport in absimports.split("\n"):
+                if absimport.startswith("from " + self.project_root):
+                  self.git_dependencies.update(self.convert_package_to_path(absimport))
 
-    for name, node in self.definitions.items():
-      # Pass git_dependencies to the visitor to resolve attribute access on modules.
-      visitor = ReferenceVisitor(self.defined_names, self.git_dependencies)
-      if isinstance(node, ast.Assign):
-        visitor.visit(node.value)
-        targets_in_assignment = {t.id for t in node.targets if isinstance(t, ast.Name)}
-        self.dependencies[name] = visitor.found_dependencies - targets_in_assignment
-      else:
-        visitor.visit(node)
-        self.dependencies[name] = visitor.found_dependencies - {name}
+      # --- Pass 2: Find dependencies and build graph ---
+      self.defined_names = set(self.definitions.keys()).union(set(self.git_dependencies.keys()))
 
-      # Build the adjacency list for the graph
-      for dep in self.dependencies[name]:
-        # The dependency 'dep' can be a simple name or a full path string.
-        # We only add simple names to the graph for cycle detection.
-        # The full path strings are handled later.
-        if dep in self.defined_names:
-          self.adj[dep].append(name)
+      for name, node in self.definitions.items():
+        visitor = ReferenceVisitor(self.defined_names, self.git_dependencies)
+        if isinstance(node, ast.Assign):
+          visitor.visit(node.value)
+          targets_in_assignment = {t.id for t in node.targets if isinstance(t, ast.Name)}
+          self.dependencies[name] = visitor.found_dependencies - targets_in_assignment
+        else:
+          visitor.visit(node)
+          self.dependencies[name] = visitor.found_dependencies - {name}
+        for dep in self.dependencies[name]:
+          if dep in self.defined_names:
+            self.adj[dep].append(name)
 
   def _find_sccs(self):
     """
@@ -332,21 +385,18 @@ class DependencyAnalyzer:
       - "conditional_imports": Text for import statements nested under
         top-level conditionals (e.g., if/try blocks).
     """
-    # Component 0 is always imports
     lines = self.source_code.splitlines()
     import_components = []
     conditional_import_components = []
     last_lineno = None
     extra_index = 1
 
-    # If module-level docstring exists, prepend it
     if self.docstring:
       import_components.append(f'"""{self.docstring}"""')
 
     for node in sorted(self.imports, key=lambda n: n.lineno):
       curr_lineno = node.lineno
 
-      # If there's a line gap from the previous node, collect the gap as extra
       if last_lineno is not None and curr_lineno > last_lineno + 1:
         gap_lines = lines[last_lineno : curr_lineno - 1]
         extra_text = "\n".join(gap_lines).strip()
@@ -355,17 +405,12 @@ class DependencyAnalyzer:
           self.sorted_components[key] = extra_text
           extra_index += 1
 
-      # Add current import node's source
       import_components.append(ast.get_source_segment(self.source_code, node))
       last_lineno = getattr(node, "end_lineno", node.lineno)
 
-    # Handle conditional imports
     for _, import_node in self.conditional_imports:
-      # Get the full if block source
-      # Only add the import statement(s) inside the conditional, not the full if block
       conditional_import_components.append(ast.get_source_segment(self.source_code, import_node))
 
-    # Final collected imports
     if import_components:
       self.sorted_components["imports"] = "\n".join(import_components)
     if conditional_import_components:
@@ -620,6 +665,7 @@ def get_modules_from_file(file_path, module, project_root="transformers", add_ex
   On failure, logs the error and returns `(None, None)` when the analyzer
   could not be created, otherwise `(None, full_source)`.
   """
+  print('+------ get modules from file ----------+')
   analyzer = None
   try:
     logger.info("--- Analyzing '%s' for %s ---\n", file_path, module)
@@ -633,19 +679,238 @@ def get_modules_from_file(file_path, module, project_root="transformers", add_ex
       return None, analyzer.source_code
 
 
-def get_modules_in_order(file_path, module=None, project_root="transformers", add_external_dependencies=True):
-  """Return the dependency-sorted structure for `file_path`.
+def get_modules_from_file_ast_fixed(file_url: str, module_name: str) -> Tuple[Optional[str], Optional[str]]:
+    """
+    A robust function to fetch a Python file from a URL, find a specific
+    component, and return its source code along with the full file content.
+    Uses Python's AST for reliable parsing of classes, functions, and type aliases.
+    """
+    logger.info("AST_FIX: Analyzing '%s' for module '%s'", file_url, module_name)
+    
+    try:
+        raw_url = file_url.replace("github.com", "raw.githubusercontent.com").replace("/blob/", "/")
+        response = requests.get(raw_url)
+        response.raise_for_status()
+        full_file_code = response.text
+    except requests.exceptions.RequestException as e:
+        logger.error("AST_FIX: Failed to download %s. Error: %s", file_url, e)
+        # Try as a package (__init__.py) as a fallback
+        try:
+            init_url = file_url.replace(".py", "/__init__.py")
+            raw_init_url = init_url.replace("github.com", "raw.githubusercontent.com").replace("/blob/", "/")
+            response = requests.get(raw_init_url)
+            response.raise_for_status()
+            full_file_code = response.text
+        except requests.exceptions.RequestException:
+             raise FileNotFoundError(f"Could not download {file_url} or its __init__.py")
 
+    try:
+        tree = ast.parse(full_file_code)
+        target_node = None
+
+        # Walk the tree to find the specific class, function, or assignment node
+        for node in ast.walk(tree):
+            node_name = ""
+            if isinstance(node, (ast.ClassDef, ast.FunctionDef)) and node.name == module_name:
+                target_node = node
+                break
+            elif isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name) and node.targets[0].id == module_name:
+                target_node = node
+                break
+            elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.target.id == module_name:
+                target_node = node
+                break
+        
+        if target_node:
+            module_code = ast.get_source_segment(full_file_code, target_node)
+            logger.info("AST_FIX: Successfully found and extracted module '%s'.", module_name)
+            return module_code, full_file_code
+        else:
+            logger.error("AST_FIX: Unable to find module '%s' in file %s.", module_name, file_url)
+            return None, full_file_code
+
+    except SyntaxError as e:
+        logger.error("AST_FIX: Syntax error parsing file %s: %s", file_url, e)
+        return None, None
+
+def _download_file_content(file_url: str) -> Tuple[Optional[str], str]:
+    """
+    Downloads content from a URL, handling GitHub raw URL conversion and init fallback.
+    
+    Returns:
+        Tuple[Optional[str], str]: (file_content, actual_url_downloaded)
+    """
+    try:
+        raw_url = file_url.replace("github.com", "raw.githubusercontent.com").replace("/blob/", "/")
+        response = requests.get(raw_url)
+        response.raise_for_status()
+        return response.text, file_url # Success, return original URL
+    except requests.exceptions.RequestException as e:
+        logger.info(f"Failed to download {file_url}. Trying __init__.py fallback. Error: {e}")
+        # Try as a package (__init__.py) as a fallback
+        try:
+            # --- THIS IS THE FIX ---
+            # Construct the __init__.py URL from the original file_url
+            if file_url.endswith(".py"):
+                init_url = file_url.replace(".py", "/__init__.py")
+            else:
+                init_url = file_url.rstrip('/') + "/__init__.py"
+            # --- END FIX ---
+                
+            raw_init_url = init_url.replace("github.com", "raw.githubusercontent.com").replace("/blob/", "/")
+            response = requests.get(raw_init_url)
+            response.raise_for_status()
+            logger.info(f"Successfully downloaded __init__.py from: {init_url}")
+            return response.text, init_url # SUCCESS, return the NEW __init__-based URL
+        except requests.exceptions.RequestException:
+             raise FileNotFoundError(f"Could not download {file_url} or its __init__.py")
+           
+def get_modules_from_file_robust(
+    file_path: str, 
+    module: str, 
+    project_root: str = "transformers", 
+    add_external_dependencies: bool = True
+) -> Tuple[Optional[str], Optional[str]]:
+  
+  # ... (logger info) ...
+  
+  analyzer = None
+  full_file_code: Optional[str] = None
+  temp_file_path: Optional[str] = None
+  
+  try:
+    # 1. Determine paths
+    if file_path.startswith(('http://', 'https://', 'github.com')):
+      
+      # --- THIS IS THE FIX ---
+      # It now returns (content, actual_url)
+      full_file_code, actual_url_downloaded = _download_file_content(file_path) 
+      # --- END FIX ---
+
+      with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.py') as tmp:
+        tmp.write(full_file_code)
+        temp_file_path = tmp.name
+      
+      analyzer_path = temp_file_path             
+      
+      # --- THIS IS THE FIX ---
+      # Pass the URL that was *actually downloaded* for the path logic
+      original_path_for_analyzer = actual_url_downloaded 
+      # --- END FIX ---
+      
+    elif os.path.exists(file_path):
+      # ... (local file logic is fine) ...
+      with open(file_path, "rt", encoding="utf-8") as f:
+        full_file_code = f.read()
+      analyzer_path = file_path
+      original_path_for_analyzer = file_path 
+    else:
+      raise FileNotFoundError(f"File not found locally and is not a URL: {file_path}")
+
+    # 3. Initialize the analyzer with the CORRECT paths
+    analyzer = DependencyAnalyzer(
+        analyzer_path, 
+        project_root, 
+        add_external_dependencies=add_external_dependencies,
+        original_path=original_path_for_analyzer # This is now the CORRECT path
+    )
+    
+    # ... (rest of the function) ...
+    
+    # 4. Get the specific module code.
+    module_code = analyzer.get_module_code(module)
+    
+    return module_code, full_file_code
+
+  except FileNotFoundError as e:
+    logger.error("ROBUST_FETCH: Unable to find or download %s. Error: %s", file_path, e)
+    return None, None
+  except Exception as e:
+    logger.info("ROBUST_FETCH: Module '%s' is not defined in %s (it is likely imported). Error: %s", module, file_path, e)
+    return None, full_file_code
+  finally:
+    # 5. Clean up the temporary file
+    if temp_file_path and os.path.exists(temp_file_path):
+      os.remove(temp_file_path)
+      
+# def get_modules_in_order(file_path, module=None, project_root="transformers", add_external_dependencies=True):
+#   """Return the dependency-sorted structure for `file_path`.
+
+#   If `module` is provided, returns a structure filtered to that component.
+#   """
+#   print('+------ get modules in order ----------+')
+#   logger.info("\n--- Analyzing '%s' and creating structured output for module %s ---\n", file_path, module)
+#   analyzer = DependencyAnalyzer(file_path, project_root, add_external_dependencies=add_external_dependencies)
+#   analyzer.get_sorted_structure()
+#   if module is None:
+#     return analyzer.sorted_structure
+#   return analyzer.get_structure_for_module(module=module)
+
+
+def get_modules_in_order_fixed(file_path: str, module: Optional[str] = None, project_root: str = "transformers", add_external_dependencies: bool = True) -> Optional[List[Dict[str, Any]]]:
+  """
+  Return the dependency-sorted structure for the file at `file_path`.
+  Robustly handles remote URLs by downloading content before analysis.
+  
   If `module` is provided, returns a structure filtered to that component.
   """
-  logger.info("\n--- Analyzing '%s' and creating structured output for module %s ---\n", file_path, module)
-  analyzer = DependencyAnalyzer(file_path, project_root, add_external_dependencies=add_external_dependencies)
-  analyzer.get_sorted_structure()
-  if module is None:
-    return analyzer.sorted_structure
-  return analyzer.get_structure_for_module(module=module)
+  logger.info("\n--- ROBUST get_modules_in_order: Analyzing '%s' for module %s ---\n", file_path, module)
+  
+  temp_file_path: Optional[str] = None
+  
+  try:
+    # 1. Determine paths
+    if file_path.startswith(('http://', 'https://', 'github.com')):
+      
+      # --- THIS IS THE FIX ---
+      # Get both the content AND the actual URL that was successfully downloaded
+      full_file_code, actual_url_downloaded = _download_file_content(file_path) 
+      # --- END FIX ---
+      
+      with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.py') as tmp:
+        tmp.write(full_file_code)
+        temp_file_path = tmp.name
+      
+      analyzer_path = temp_file_path
+      
+      # --- THIS IS THE FIX ---
+      # Use the *actual downloaded path* for the analyzer's logic
+      original_path_for_analyzer = actual_url_downloaded
+      # --- END FIX ---
 
+    elif os.path.exists(file_path):
+      # Local file logic (this is fine)
+      analyzer_path = file_path
+      original_path_for_analyzer = file_path
+    else:
+      raise FileNotFoundError(f"File not found locally and is not a URL: {file_path}")
+      
+    # 2. Proceed with analysis
+    analyzer = DependencyAnalyzer(
+        analyzer_path, 
+        project_root, 
+        add_external_dependencies=add_external_dependencies,
+        original_path=original_path_for_analyzer # This is now the CORRECT path
+    )
+    
+    analyzer.get_sorted_structure()
+    
+    # 3. Return the sorted structure
+    if module is None:
+      return analyzer.sorted_structure
+    return analyzer.get_structure_for_module(module=module)
 
+  except FileNotFoundError as e:
+    logger.error("ROBUST: Analysis failed because file could not be found or downloaded: %s", e)
+    return None
+  except Exception as e:
+    logger.error("ROBUST: An unexpected error occurred during dependency analysis for %s: %s", file_path, e)
+    return None
+  finally:
+    # 4. Clean up the temporary file
+    if temp_file_path and os.path.exists(temp_file_path):
+      os.remove(temp_file_path)
+      
 def parse_args():
   """
   Parses command-line arguments for file or folder processing.
@@ -693,7 +958,7 @@ def main():
   parser = parse_args()
   args = parser.parse_args()
   filepath = args.filepath
-  result = get_modules_in_order(filepath)
+  result = get_modules_in_order_fixed(filepath)
 
   save_results_in_file(result, filename=filepath.split(os.path.sep)[-1])
   print("--- Sorted Modules (Topological Order) ---")
