@@ -26,8 +26,7 @@ from jax import lax
 from jax.ad_checkpoint import checkpoint_name
 from jax.experimental.pallas.ops.gpu import attention as gpu_pallas_attention
 from jax.experimental.pallas.ops.gpu import decode_attention as gpu_pallas_decode_attention
-from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_kernel
-from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_mask
+from jax.experimental import pallas as pl
 from jax.experimental.shard_map import shard_map
 from jax.sharding import Mesh
 import jax
@@ -1080,7 +1079,10 @@ class AttentionOp(nnx.Module):
         " axis"
         f" got {query.shape[0]=}/{devices_in_data_fsdp=}"
     )
-
+    
+    from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_kernel
+    from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_mask
+    
     # create_splash_attention kernel
     sa_config = splash_attention_kernel.SplashConfig(
         block_q=min(global_block_q, query.shape[2]),
@@ -1097,6 +1099,16 @@ class AttentionOp(nnx.Module):
         v_layout=splash_attention_kernel.QKVLayout[global_v_layout],
         attn_logits_soft_cap=attn_logits_soft_cap,
         residual_checkpoint_name="context",
+        fwd_cost_estimate=pl.CostEstimate(
+              flops=self.config.cost_estimate_flops_fwd,
+              transcendentals=0,
+              bytes_accessed=0,
+          ) if self.config.cost_estimate_flops_fwd > 0 else None,
+        bwd_cost_estimate=pl.CostEstimate(
+              flops=self.config.cost_estimate_flops_bwd,
+              transcendentals=0,
+              bytes_accessed=0,
+          ) if self.config.cost_estimate_flops_bwd > 0 else None,
     )
 
     mask_shape = (query.shape[2], key.shape[2])  # (q_seq_len, kv_seq_len)
