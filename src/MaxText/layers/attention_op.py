@@ -1057,12 +1057,10 @@ class AttentionOp(nnx.Module):
         segment_axis_names_kv = nn.logical_to_mesh_axes((BATCH, KV_LENGTH))
 
     if self.config.expert_shard_attention_option == EP_AS_CONTEXT:
-      # todo: needs support for tokamax splash attention kernel
       axis_names_splash_kernel = nn.logical_to_mesh_axes(self.flash_axis_names_splash_kernel_ep)
       axis_names_q = nn.logical_to_mesh_axes(self.flash_axis_names_q_ep)
       axis_names_kv = nn.logical_to_mesh_axes(self.flash_axis_names_kv_ep)
     else:
-      # todo: needs support for tokamax splash attention kernel
       axis_names_splash_kernel = nn.logical_to_mesh_axes(self.flash_axis_names_splash_kernel)
       axis_names_q = nn.logical_to_mesh_axes(self.flash_axis_names_q)
       axis_names_kv = nn.logical_to_mesh_axes(self.flash_axis_names_kv)
@@ -1198,7 +1196,10 @@ class AttentionOp(nnx.Module):
       )
       shard_head_size = np.prod(logical_axis_rules_head)
       splash_kernel = wrap_splash_kernel(single_head_mask, int(shard_head_size))
-      segment_axis_names_splash_kernel = nn.logical_to_mesh_axes((Q_LENGTH_NO_EXP,))
+      if self.config.expert_shard_attention_option == EP_AS_CONTEXT:
+        segment_axis_names_splash_kernel = nn.logical_to_mesh_axes(self.flash_axis_names_splash_kernel_ep)
+      else:
+        segment_axis_names_splash_kernel = nn.logical_to_mesh_axes(self.flash_axis_names_splash_kernel)
     else:
       # Create multi-head mask
       multi_head_mask = splash_attention_mask.MultiHeadMask(masks=(mask,) * query.shape[1])
