@@ -33,7 +33,7 @@ from MaxText.layers.decoders import Decoder
 from MaxText.layers.embeddings import Embed, embed_as_linen
 from MaxText.layers.encoders import VisionEncoder
 from MaxText.layers.quantizations import AqtQuantization as Quant
-from MaxText.layers.multi_token_prediction import MultiTokenPredictionBlock
+from MaxText.layers.multi_token_prediction import MultiTokenPredictionBlock, multi_token_prediction_block_as_linen
 from MaxText.maxtext_utils import all_gather_over_fsdp
 
 # ------------------------------------------------------------------------------
@@ -92,8 +92,12 @@ class TransformerLinenPure(nn.Module):
       # For MTP, we use the DecoderLayer blueprint to ensure architectural consistency.
       # By convention, this is the last layer in the list.
       mtp_layer = layer_types[-1]
-      self.mtp_block = MultiTokenPredictionBlock(
-          config=self.config, mesh=self.mesh, name="mtp_block", transformer_layer_module=mtp_layer, decoder=self.decoder
+      self.mtp_block = multi_token_prediction_block_as_linen(
+          config=self.config,
+          mesh=self.mesh,
+          transformer_layer_module=mtp_layer,
+          decoder=self.decoder,
+          rngs=self.make_rng("mtp_block"),
       )
 
   def logits_from_hidden_states(self, hidden_states, deterministic, model_mode):
@@ -101,8 +105,7 @@ class TransformerLinenPure(nn.Module):
     Compute logits from hidden states (wrapping decoder._apply_output_head).
     This function is only used for vocabulary tiling.
     """
-    # pylint: disable=protected-access
-    logits = self.decoder._apply_output_head(
+    logits = self.decoder._apply_output_head(  # pylint: disable=protected-access
         shared_embedding=self.shared_embedding,
         y=hidden_states,
         deterministic=deterministic,
@@ -315,10 +318,13 @@ class Transformer(nnx.Module):
       # For MTP, we use the DecoderLayer blueprint to ensure architectural consistency.
       # By convention, this is the last layer in the list.
       mtp_layer = layer_types[-1]
-      mtp_block_linen = MultiTokenPredictionBlock(
-          config=self.config, mesh=self.mesh, name="mtp_block", transformer_layer_module=mtp_layer, decoder=self.decoder
+      self.mtp_block = MultiTokenPredictionBlock(
+          config=self.config,
+          mesh=self.mesh,
+          transformer_layer_module=mtp_layer,
+          decoder=self.decoder,
+          rngs=rngs,
       )
-      self.mtp_block = nnx_wrappers.ToNNX(mtp_block_linen, rngs=rngs)
 
       self.mtp_block.lazy_init(
           shared_embedding=self.token_embedder,
