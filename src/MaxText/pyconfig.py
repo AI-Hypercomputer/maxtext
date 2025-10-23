@@ -261,6 +261,9 @@ def validate_keys(keys):
           "For Qwen3-Next, sparse_matmul must be False for now. The dense path has been verified against reference."
       )
 
+  if keys["shard_optimizer_over_data"]:
+    validate_optimizer_sharding_over_data(keys)
+
 
 def validate_tokenizer(keys):
   assert keys[
@@ -1117,6 +1120,15 @@ def validate_ragged_dot(raw_keys):
       jax.config.update(config_flag, True)
     except AttributeError:
       max_logging.log(f"JAX config {config_flag} not found, possibly due to old JAX version.")
+
+
+def validate_optimizer_sharding_over_data(raw_keys):
+  zero1_supported_opt_types = ("adamw", "adam_pax")
+  if raw_keys["opt_type"] not in zero1_supported_opt_types:
+    raise ValueError(
+        f"Optimizer type {raw_keys["opt_type"]} is not supported for optimizer sharding.\n"
+        f"Please use an optimizer from this list: {zero1_supported_opt_types}."
+    )
 
 
 def create_new_logical_axis_rules(old_logical_axis_rules, new_logical_axis_rules):

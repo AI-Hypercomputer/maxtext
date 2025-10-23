@@ -466,6 +466,9 @@ ici_autoregressive_parallelism: 1
 ici_pipeline_parallelism: 1
 ici_expert_parallelism: 1
 
+# Enable ZeRO-1 optimizer sharding over data axis
+shard_optimizer_over_data: False
+
 # The number of TPU slices is automatically determined, you should not set this explicitly. For ahead of time compilation,
 # you should set compile_toplogy_num_slices, which will in turn set this value. For non-TPU environments this is set to 1.
 num_slices: -1
@@ -859,7 +862,6 @@ subslice_shape: ""
 
 # NNX
 enable_nnx: false
-shard_optimizer_over_data: False
 
 ################################## Qwen3-Next Specific Configs ##################################
 # Kernel size for the 1D convolution in the Gated Delta Net
