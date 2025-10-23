@@ -28,7 +28,12 @@ from jax.sharding import Mesh
 
 from MaxText import maxtext_utils
 from MaxText import pyconfig
-from MaxText.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_TRAIN, MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE
+from MaxText.common_types import (
+  DECODING_ACTIVE_SEQUENCE_INDICATOR,
+  MODEL_MODE_TRAIN,
+  MODEL_MODE_PREFILL,
+  MODEL_MODE_AUTOREGRESSIVE,
+)
 from MaxText.globals import MAXTEXT_PKG_DIR
 from MaxText.layers import models
 from MaxText.layers import quantizations
@@ -48,18 +53,18 @@ class TestModel(unittest.TestCase):
   def init_pyconfig(self, **kwargs):
     """Init pyconfig."""
     config = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
-        per_device_batch_size=1.0,
-        run_name="test",
-        enable_checkpointing=False,
-        base_num_decoder_layers=2,
-        attention="dot_product",
-        max_target_length=16,
-        base_emb_dim=256,
-        base_num_query_heads=2,
-        base_num_kv_heads=2,
-        max_prefill_predict_length=4,
-        **kwargs,
+      [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+      per_device_batch_size=1.0,
+      run_name="test",
+      enable_checkpointing=False,
+      base_num_decoder_layers=2,
+      attention="dot_product",
+      max_target_length=16,
+      base_emb_dim=256,
+      base_num_query_heads=2,
+      base_num_kv_heads=2,
+      max_prefill_predict_length=4,
+      **kwargs,
     )
     return config
 
@@ -70,7 +75,7 @@ class TestModel(unittest.TestCase):
 
     decoder_segment_ids = jax.numpy.zeros(s) + DECODING_ACTIVE_SEQUENCE_INDICATOR
     decoder_positions = jnp.stack(
-        [jnp.arange(self.cfg.max_target_length, dtype=jnp.int32) for _ in range(self.cfg.global_batch_size_to_train_on)]
+      [jnp.arange(self.cfg.max_target_length, dtype=jnp.int32) for _ in range(self.cfg.global_batch_size_to_train_on)]
     )
 
     return ids, decoder_segment_ids, decoder_positions
@@ -88,23 +93,23 @@ class TestModel(unittest.TestCase):
     ids, decoder_segment_ids, decoder_positions = self.get_data()
 
     transformer_vars = model.init(
-        {"params": self.rng, "aqt": self.rng, "dropout": self.rng},
+      {"params": self.rng, "aqt": self.rng, "dropout": self.rng},
+      ids,
+      decoder_positions,
+      decoder_segment_ids,
+      enable_dropout=False,
+    )
+
+    logits = jax.eval_shape(
+      lambda: model.apply(
+        transformer_vars,
         ids,
         decoder_positions,
         decoder_segment_ids,
         enable_dropout=False,
-    )
-
-    logits = jax.eval_shape(
-        lambda: model.apply(
-            transformer_vars,
-            ids,
-            decoder_positions,
-            decoder_segment_ids,
-            enable_dropout=False,
-            model_mode=MODEL_MODE_TRAIN,
-            rngs={"aqt": self.rng},
-        )
+        model_mode=MODEL_MODE_TRAIN,
+        rngs={"aqt": self.rng},
+      )
     )
 
     self.assertEqual(logits.dtype, expected_dtype)
@@ -131,46 +136,46 @@ class TestModel(unittest.TestCase):
     ids, decoder_segment_ids, decoder_positions = self.get_data()
 
     train_transformer_vars = train_model.init(
-        {"params": self.rng, "aqt": self.rng},
-        ids,
-        decoder_positions,
-        model_mode=MODEL_MODE_TRAIN,
-        decoder_segment_ids=decoder_segment_ids,
-        enable_dropout=False,
+      {"params": self.rng, "aqt": self.rng},
+      ids,
+      decoder_positions,
+      model_mode=MODEL_MODE_TRAIN,
+      decoder_segment_ids=decoder_segment_ids,
+      enable_dropout=False,
     )
 
     prefill_transformer_vars = prefill_model.init(
-        {"params": self.rng, "aqt": self.rng},
-        ids,
-        decoder_positions,
-        model_mode=MODEL_MODE_PREFILL,
-        decoder_segment_ids=decoder_segment_ids,
-        enable_dropout=False,
+      {"params": self.rng, "aqt": self.rng},
+      ids,
+      decoder_positions,
+      model_mode=MODEL_MODE_PREFILL,
+      decoder_segment_ids=decoder_segment_ids,
+      enable_dropout=False,
     )
 
     full_train_logits = train_model.apply(
-        train_transformer_vars,
-        ids,
-        decoder_positions,
-        model_mode=MODEL_MODE_TRAIN,
-        decoder_segment_ids=decoder_segment_ids,
-        enable_dropout=False,
-        rngs={"aqt": self.rng},
+      train_transformer_vars,
+      ids,
+      decoder_positions,
+      model_mode=MODEL_MODE_TRAIN,
+      decoder_segment_ids=decoder_segment_ids,
+      enable_dropout=False,
+      rngs={"aqt": self.rng},
     )
 
     partial_prefill_logits, partial_cache = prefill_model.apply(
-        prefill_transformer_vars,
-        ids[:, :PREFILL_RANGE],
-        decoder_positions[:, :PREFILL_RANGE],
-        model_mode=MODEL_MODE_PREFILL,
-        decoder_segment_ids=decoder_segment_ids[:, :PREFILL_RANGE],
-        enable_dropout=False,
-        rngs={"aqt": self.rng},
-        mutable=["cache"],
+      prefill_transformer_vars,
+      ids[:, :PREFILL_RANGE],
+      decoder_positions[:, :PREFILL_RANGE],
+      model_mode=MODEL_MODE_PREFILL,
+      decoder_segment_ids=decoder_segment_ids[:, :PREFILL_RANGE],
+      enable_dropout=False,
+      rngs={"aqt": self.rng},
+      mutable=["cache"],
     )
 
     np.testing.assert_allclose(
-        full_train_logits[:, :PREFILL_RANGE, :], partial_prefill_logits, rtol=1e-01, atol=1e-01, equal_nan=False
+      full_train_logits[:, :PREFILL_RANGE, :], partial_prefill_logits, rtol=1e-01, atol=1e-01, equal_nan=False
     )
 
     for idx in range(PREFILL_RANGE, self.cfg.max_target_length):
@@ -178,13 +183,13 @@ class TestModel(unittest.TestCase):
       decoder_positions_idx = decoder_positions[:, idx : idx + 1]
       prefill_transformer_vars.update(partial_cache)
       ar_logits, partial_cache = prefill_model.apply(
-          prefill_transformer_vars,
-          ids_idx,
-          decoder_positions_idx,
-          model_mode=MODEL_MODE_AUTOREGRESSIVE,
-          enable_dropout=False,
-          rngs={"aqt": self.rng},
-          mutable=["cache"],
+        prefill_transformer_vars,
+        ids_idx,
+        decoder_positions_idx,
+        model_mode=MODEL_MODE_AUTOREGRESSIVE,
+        enable_dropout=False,
+        rngs={"aqt": self.rng},
+        mutable=["cache"],
       )
 
       full_train_logits_idx = full_train_logits[:, idx : idx + 1, :]

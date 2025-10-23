@@ -15,6 +15,7 @@
 """
 A mapping agent, to generate param_mappings and hf_shape
 """
+
 import argparse
 import json
 import os
@@ -49,16 +50,16 @@ class MappingAgent(BaseAgent):
   def _load_prompt_templates(self):
     """Loads all necessary prompt templates."""
     templates = {
-        "param_mapping": load_prompt_template(f"{self.dir_path}/prompts/03_param_mapping.txt"),
-        "param_mapping_check": load_prompt_template(f"{self.dir_path}/prompts/03_param_mapping_check.txt"),
-        "shape_mapping": load_prompt_template(f"{self.dir_path}/prompts/05_shape_mapping.txt"),
-        "shape_mapping_check": load_prompt_template(f"{self.dir_path}/prompts/05_shape_mapping_check.txt"),
-        "pitfalls": load_prompt_template(f"{self.dir_path}/prompts/04_pitfalls.txt"),
+      "param_mapping": load_prompt_template(f"{self.dir_path}/prompts/03_param_mapping.txt"),
+      "param_mapping_check": load_prompt_template(f"{self.dir_path}/prompts/03_param_mapping_check.txt"),
+      "shape_mapping": load_prompt_template(f"{self.dir_path}/prompts/05_shape_mapping.txt"),
+      "shape_mapping_check": load_prompt_template(f"{self.dir_path}/prompts/05_shape_mapping_check.txt"),
+      "pitfalls": load_prompt_template(f"{self.dir_path}/prompts/04_pitfalls.txt"),
     }
     return templates
 
   def _generate_and_verify_code(
-      self, step_name, gen_prompt_key, check_prompt_key, gen_prompt_args, check_prompt_args_base, outputfile
+    self, step_name, gen_prompt_key, check_prompt_key, gen_prompt_args, check_prompt_args_base, outputfile
   ):
     """
     A generic loop to generate code and verify it with a validator prompt.
@@ -112,27 +113,27 @@ class MappingAgent(BaseAgent):
       return None
 
     gen_args = {
-        "target_model": self.target_model,
-        "analysis": self.analysis,
-        "maxtext_params_json": json.dumps(self.maxtext_params, indent=2),
-        "hf_params_json": json.dumps(self.hf_params, indent=2),
-        "pitfalls": self.prompt_templates["pitfalls"],
-        "request_options": {"timeout": 300},
+      "target_model": self.target_model,
+      "analysis": self.analysis,
+      "maxtext_params_json": json.dumps(self.maxtext_params, indent=2),
+      "hf_params_json": json.dumps(self.hf_params, indent=2),
+      "pitfalls": self.prompt_templates["pitfalls"],
+      "request_options": {"timeout": 300},
     }
 
     check_args = {
-        "maxtext_params_json": json.dumps(self.maxtext_params, indent=2),
-        "hf_params_json": json.dumps(self.hf_params, indent=2),
-        "analysis": self.analysis,
+      "maxtext_params_json": json.dumps(self.maxtext_params, indent=2),
+      "hf_params_json": json.dumps(self.hf_params, indent=2),
+      "analysis": self.analysis,
     }
 
     return self._generate_and_verify_code(
-        step_name="Parameter Mapping",
-        gen_prompt_key="param_mapping",
-        check_prompt_key="param_mapping_check",
-        gen_prompt_args=gen_args,
-        check_prompt_args_base=check_args,
-        outputfile="param_mapping.py",
+      step_name="Parameter Mapping",
+      gen_prompt_key="param_mapping",
+      check_prompt_key="param_mapping_check",
+      gen_prompt_args=gen_args,
+      check_prompt_args_base=check_args,
+      outputfile="param_mapping.py",
     )
 
   def generate_shape_mapping(self):
@@ -144,23 +145,23 @@ class MappingAgent(BaseAgent):
       return None
 
     gen_args = {
-        "target_model": self.target_model,
-        "hf_params_json": json.dumps(self.hf_params, indent=2),
-        "analysis": self.analysis,
-        "pitfalls": self.prompt_templates["pitfalls"],
+      "target_model": self.target_model,
+      "hf_params_json": json.dumps(self.hf_params, indent=2),
+      "analysis": self.analysis,
+      "pitfalls": self.prompt_templates["pitfalls"],
     }
 
     check_args = {
-        "hf_params_json": json.dumps(self.hf_params, indent=2),
+      "hf_params_json": json.dumps(self.hf_params, indent=2),
     }
 
     return self._generate_and_verify_code(
-        step_name="HF Shape",
-        gen_prompt_key="shape_mapping",
-        check_prompt_key="shape_mapping_check",
-        gen_prompt_args=gen_args,
-        check_prompt_args_base=check_args,
-        outputfile="hf_shape.py",
+      step_name="HF Shape",
+      gen_prompt_key="shape_mapping",
+      check_prompt_key="shape_mapping_check",
+      gen_prompt_args=gen_args,
+      check_prompt_args_base=check_args,
+      outputfile="hf_shape.py",
     )
 
 
@@ -169,7 +170,7 @@ if __name__ == "__main__":
   parser = argparse.ArgumentParser(description="A script to process model transformations.")
   parser.add_argument("--target_model", type=str, required=True, help='The name of the target model (e.g., "GEMMA3").')
   parser.add_argument(
-      "--dir_path", type=str, required=True, help='The file path to the context directory (e.g., "context/gemma3").'
+    "--dir_path", type=str, required=True, help='The file path to the context directory (e.g., "context/gemma3").'
   )
   parser.add_argument("--api_key", type=str, help="Optional API key for external services.")
   args = parser.parse_args()

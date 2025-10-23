@@ -20,7 +20,7 @@ This file contains the prompt templates used by the code debugging agent.
 
 # pylint: disable=line-too-long
 CodeDebugging = {
-    "SystemPrompt": """You are an expert machine learning engineer and automated testing specialist with deep knowledge of Python, NumPy, PyTorch, and JAX (including Flax, Flax.nnx, and Optax).
+  "SystemPrompt": """You are an expert machine learning engineer and automated testing specialist with deep knowledge of Python, NumPy, PyTorch, and JAX (including Flax, Flax.nnx, and Optax).
 
     You can:
     - Take the current JAX implementation and its test cases, debug issues, and return the fixed versions.
@@ -54,7 +54,7 @@ CodeDebugging = {
         - Output validity (no exceptions)
         - Output comparison (`np.allclose`) if both implementations exist.
     """,
-    "CODE": """#torch_path
+  "CODE": """#torch_path
     <module.path.to.pytorch_code>
     
     #jax_path
@@ -82,7 +82,7 @@ CodeDebugging = {
     '''
     <pytest_test_code>
     '''""",
-    "FollowUpPrompt": """You are continuing a debugging session. The previous code you generated is available in context.
+  "FollowUpPrompt": """You are continuing a debugging session. The previous code you generated is available in context.
 
     Your job is to:
     - Identify the cause of the error from the provided stack trace.

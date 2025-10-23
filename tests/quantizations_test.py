@@ -12,7 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-""" Tests for the quantizations """
+"""Tests for the quantizations"""
+
 import unittest
 import os.path
 import sys
@@ -62,11 +63,11 @@ class QuantTestModule(nn.Module):
 
 def _configure_quantization(quant_str="", quant_cfg_path="", mode_str="train", replicate_scale=False):
   config = pyconfig.initialize(
-      [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
-      enable_checkpointing=False,
-      quantization=quant_str,
-      quant_cfg_path=quant_cfg_path,
-      replicate_quant_scale=replicate_scale,
+    [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+    enable_checkpointing=False,
+    quantization=quant_str,
+    quant_cfg_path=quant_cfg_path,
+    replicate_quant_scale=replicate_scale,
   )
   quant = quantizations.configure_quantization(config, mode_str)
   return quant
@@ -127,8 +128,8 @@ class QuantizationTest(unittest.TestCase):
 
   def test_mixed_precision_config_int8w(self):
     quant = _configure_quantization(
-        quant_str="intmp",
-        quant_cfg_path=os.path.join(MAXTEXT_PKG_DIR, "configs", "quantization", "int8_weight_only.json"),
+      quant_str="intmp",
+      quant_cfg_path=os.path.join(MAXTEXT_PKG_DIR, "configs", "quantization", "int8_weight_only.json"),
     )
     self.assertTrue(isinstance(quant.quant_dg, dict) and len(quant.quant_dg) == 1)
     # pylint: disable=unsupported-membership-test
@@ -139,8 +140,8 @@ class QuantizationTest(unittest.TestCase):
 
   def test_mixed_precision_config_scale(self):
     quant = _configure_quantization(
-        quant_str="intmp",
-        quant_cfg_path=os.path.join(MAXTEXT_PKG_DIR, "configs", "quantization", "dense_llm_weight_only_scale.json"),
+      quant_str="intmp",
+      quant_cfg_path=os.path.join(MAXTEXT_PKG_DIR, "configs", "quantization", "dense_llm_weight_only_scale.json"),
     )
     self.assertTrue(isinstance(quant.quant_dg, dict) and len(quant.quant_dg) == 7)
     # pylint: disable=unsupported-membership-test
@@ -154,8 +155,8 @@ class QuantizationTest(unittest.TestCase):
 
   def test_mixed_precision_config_subchannel(self):
     quant = _configure_quantization(
-        quant_str="intmp",
-        quant_cfg_path=os.path.join(MAXTEXT_PKG_DIR, "configs", "quantization", "dense_llm_subchannel.json"),
+      quant_str="intmp",
+      quant_cfg_path=os.path.join(MAXTEXT_PKG_DIR, "configs", "quantization", "dense_llm_subchannel.json"),
     )
     self.assertTrue(isinstance(quant.quant_dg, dict) and len(quant.quant_dg) == 7)
     # pylint: disable=unsupported-membership-test
@@ -176,66 +177,58 @@ class QuantizationTest(unittest.TestCase):
 
   def test_remove_quantized_params(self):
     _params = {
-        "decoder": {
-            "decoder_norm": {"scale": 1.0},
-            "layers": {
-                "mlp": {"wi_0": {"kernel": 1.0}, "wi_1": {"kernel": 1.0}, "wo": {"kernel": 1.0}},
-                "self_attention": {
-                    "key": {"kernel": 1.0},
-                },
-            },
-            "logits_dense": {"kernel": 1.0},
+      "decoder": {
+        "decoder_norm": {"scale": 1.0},
+        "layers": {
+          "mlp": {"wi_0": {"kernel": 1.0}, "wi_1": {"kernel": 1.0}, "wo": {"kernel": 1.0}},
+          "self_attention": {
+            "key": {"kernel": 1.0},
+          },
         },
+        "logits_dense": {"kernel": 1.0},
+      },
     }
     _aqt_vars = {
-        "decoder": {
-            "layers": {
-                "mlp": {
-                    "wi_0": {
-                        "AqtDotGeneral_0": {
-                            "qrhs": {
-                                "frozen": aqt_tensor.QTensor(qvalue=[1.1, 1.0], scale=[1.0], scale_t=[1.0], bias=1.0)
-                            }
-                        }
-                    },
-                    "wi_1": {
-                        "AqtDotGeneral_0": {
-                            "qrhs": {
-                                "frozen": aqt_tensor.QTensor(qvalue=[1.1, 1.0], scale=[1.0], scale_t=[1.0], bias=1.0)
-                            }
-                        }
-                    },
-                    "wo": {
-                        "AqtDotGeneral_0": {
-                            "qrhs": {
-                                "frozen": aqt_tensor.QTensor(qvalue=[1.1, 1.0], scale=[1.0], scale_t=[1.0], bias=1.0)
-                            }
-                        }
-                    },
-                },
-                "self_attention": {
-                    "key": {
-                        "AqtDotGeneral_0": {
-                            "qrhs": {
-                                "frozen": aqt_tensor.QTensor(qvalue=[1.1, 1.0], scale=[1.0], scale_t=[1.0], bias=1.0)
-                            }
-                        }
-                    }
-                },
+      "decoder": {
+        "layers": {
+          "mlp": {
+            "wi_0": {
+              "AqtDotGeneral_0": {
+                "qrhs": {"frozen": aqt_tensor.QTensor(qvalue=[1.1, 1.0], scale=[1.0], scale_t=[1.0], bias=1.0)}
+              }
+            },
+            "wi_1": {
+              "AqtDotGeneral_0": {
+                "qrhs": {"frozen": aqt_tensor.QTensor(qvalue=[1.1, 1.0], scale=[1.0], scale_t=[1.0], bias=1.0)}
+              }
+            },
+            "wo": {
+              "AqtDotGeneral_0": {
+                "qrhs": {"frozen": aqt_tensor.QTensor(qvalue=[1.1, 1.0], scale=[1.0], scale_t=[1.0], bias=1.0)}
+              }
+            },
+          },
+          "self_attention": {
+            "key": {
+              "AqtDotGeneral_0": {
+                "qrhs": {"frozen": aqt_tensor.QTensor(qvalue=[1.1, 1.0], scale=[1.0], scale_t=[1.0], bias=1.0)}
+              }
             }
+          },
         }
+      }
     }
     _expected = {
-        "decoder": {
-            "decoder_norm": {"scale": 1.0},
-            "layers": {
-                "mlp": {"wi_0": {"kernel": {}}, "wi_1": {"kernel": {}}, "wo": {"kernel": {}}},
-                "self_attention": {
-                    "key": {"kernel": {}},
-                },
-            },
-            "logits_dense": {"kernel": 1.0},
-        }
+      "decoder": {
+        "decoder_norm": {"scale": 1.0},
+        "layers": {
+          "mlp": {"wi_0": {"kernel": {}}, "wi_1": {"kernel": {}}, "wo": {"kernel": {}}},
+          "self_attention": {
+            "key": {"kernel": {}},
+          },
+        },
+        "logits_dense": {"kernel": 1.0},
+      }
     }
     result = quantizations.remove_quantized_params(_params, _aqt_vars)
     self.assertEqual(_expected, result)
@@ -256,23 +249,23 @@ class QuantTest(unittest.TestCase):
   def init_pyconfig(self, **kwargs):
     """Initialize MaxText pyconfig."""
     init_kwargs = {
-        "run_name": "test",
-        "dataset_type": "synthetic",
-        "enable_checkpointing": False,
-        "enable_goodput_recording": False,
-        "steps": 1,
-        "per_device_batch_size": 1,
-        "use_qwix_quantization": True,
-        "skip_jax_distributed_system": True,
-        "base_emb_dim": 1024,
-        "base_num_query_heads": 8,
-        "base_num_kv_heads": 8,
-        "base_mlp_dim": 4096,
-        "base_num_decoder_layers": 12,
+      "run_name": "test",
+      "dataset_type": "synthetic",
+      "enable_checkpointing": False,
+      "enable_goodput_recording": False,
+      "steps": 1,
+      "per_device_batch_size": 1,
+      "use_qwix_quantization": True,
+      "skip_jax_distributed_system": True,
+      "base_emb_dim": 1024,
+      "base_num_query_heads": 8,
+      "base_num_kv_heads": 8,
+      "base_mlp_dim": 4096,
+      "base_num_decoder_layers": 12,
     } | kwargs
     config = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
-        **init_kwargs,
+      [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+      **init_kwargs,
     )
     return config
 
@@ -283,7 +276,7 @@ class QuantTest(unittest.TestCase):
 
     decoder_segment_ids = jax.numpy.zeros(s) + DECODING_ACTIVE_SEQUENCE_INDICATOR
     decoder_positions = jnp.stack(
-        [jnp.arange(self.cfg.max_target_length, dtype=jnp.int32) for _ in range(self.cfg.global_batch_size_to_train_on)]
+      [jnp.arange(self.cfg.max_target_length, dtype=jnp.int32) for _ in range(self.cfg.global_batch_size_to_train_on)]
     )
     return ids, decoder_segment_ids, decoder_positions
 
@@ -312,20 +305,20 @@ class QuantTest(unittest.TestCase):
 
     ids, decoder_segment_ids, decoder_positions = self.get_data()
     var = model.init(
-        {"params": self.rng, "aqt": self.rng, "dropout": self.rng},
-        ids,
-        decoder_positions,
-        decoder_segment_ids,
-        enable_dropout=False,
-        mutable=True,
+      {"params": self.rng, "aqt": self.rng, "dropout": self.rng},
+      ids,
+      decoder_positions,
+      decoder_segment_ids,
+      enable_dropout=False,
+      mutable=True,
     )
     quantized_vars = qt_model.init(
-        {"params": self.rng, "aqt": self.rng, "dropout": self.rng},
-        ids,
-        decoder_positions,
-        decoder_segment_ids,
-        enable_dropout=False,
-        mutable=True,
+      {"params": self.rng, "aqt": self.rng, "dropout": self.rng},
+      ids,
+      decoder_positions,
+      decoder_segment_ids,
+      enable_dropout=False,
+      mutable=True,
     )
 
     def loss_base(all_vars, inputs):
@@ -341,22 +334,22 @@ class QuantTest(unittest.TestCase):
     grads_quant = jax.grad(loss_quant)(quantized_vars, (ids, decoder_positions, decoder_segment_ids))
 
     logits, _ = model.apply(
-        var,
-        ids,
-        decoder_positions,
-        decoder_segment_ids,
-        enable_dropout=False,
-        rngs={"params": self.rng},
-        mutable=True,
+      var,
+      ids,
+      decoder_positions,
+      decoder_segment_ids,
+      enable_dropout=False,
+      rngs={"params": self.rng},
+      mutable=True,
     )
     quant_logits, _ = qt_model.apply(
-        quantized_vars,
-        ids,
-        decoder_positions,
-        decoder_segment_ids,
-        enable_dropout=False,
-        rngs={"params": self.rng},
-        mutable=True,
+      quantized_vars,
+      ids,
+      decoder_positions,
+      decoder_segment_ids,
+      enable_dropout=False,
+      rngs={"params": self.rng},
+      mutable=True,
     )
     print(f"relative error in logits: {jnp.abs(quant_logits - logits).mean() / jnp.abs(logits).mean()}")
     assert jnp.abs(quant_logits - logits).mean() / jnp.abs(logits).mean() < logits_tolerance
@@ -385,11 +378,11 @@ class QuantTest(unittest.TestCase):
 
 
 @pytest.mark.parametrize(
-    "group_sizes,k,n,tiling,dtype",
-    [
-        # m = sum(group_sizes) must be divisible by tm (first element of tiling)
-        ([3, 5], 6, 4, (1, 1, 1), jnp.int8),  # m = 8, tm = 8
-    ],
+  "group_sizes,k,n,tiling,dtype",
+  [
+    # m = sum(group_sizes) must be divisible by tm (first element of tiling)
+    ([3, 5], 6, 4, (1, 1, 1), jnp.int8),  # m = 8, tm = 8
+  ],
 )
 @pytest.mark.tpu_only
 def test_gmm_kernel(group_sizes, k, n, tiling, dtype):
@@ -410,23 +403,23 @@ def test_gmm_kernel(group_sizes, k, n, tiling, dtype):
 
   # ---- run the Pallas kernel ------------------------------------------------
   base_out = gmm(
-      lhs,
-      rhs,
-      group_sizes,
-      tiling=tiling,  # small tiles so the shapes above work
-      interpret=True,  # avoids device-specific compilation in CI
-      lhs_quantize_dtype=None,
-      rhs_quantize_dtype=None,
+    lhs,
+    rhs,
+    group_sizes,
+    tiling=tiling,  # small tiles so the shapes above work
+    interpret=True,  # avoids device-specific compilation in CI
+    lhs_quantize_dtype=None,
+    rhs_quantize_dtype=None,
   ).block_until_ready()
 
   quant_out = gmm(
-      lhs,
-      rhs,
-      group_sizes,
-      tiling=tiling,  # small tiles so the shapes above work
-      interpret=True,  # avoids device-specific compilation in CI
-      lhs_quantize_dtype=dtype,
-      rhs_quantize_dtype=dtype,
+    lhs,
+    rhs,
+    group_sizes,
+    tiling=tiling,  # small tiles so the shapes above work
+    interpret=True,  # avoids device-specific compilation in CI
+    lhs_quantize_dtype=dtype,
+    rhs_quantize_dtype=dtype,
   ).block_until_ready()
 
   assert jnp.abs(quant_out - base_out).mean() / jnp.abs(base_out).mean() < 2e-1
