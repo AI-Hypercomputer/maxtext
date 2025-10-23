@@ -57,8 +57,8 @@ class DataLoader:
         if self.config.reuse_example_batch and self.last_batch:
           example_batch = self.last_batch
         else:
-          self.update_data_iterator()
           example_batch = next(self.data_iterator)
+          self.update_data_iterator()
         # Reshard data from loaded sharding to performant activation sharding
         self.last_batch = jax.lax.with_sharding_constraint(example_batch, self.input_data_shardings)
         self.check_example_batch()

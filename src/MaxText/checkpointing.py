@@ -455,7 +455,7 @@ def load_state_if_possible(
           process_count_jax = jax.process_count()
           process_count_stored = len(list(directory.glob("process_*-of-*.json")))
           if process_count_stored > process_count_jax:
-            assert isinstance(data_iterator, list), f"{process_count_stored} processes found in checkpoint directory {directory}, but {process_count_jax} jax processes in this run, please set grain_checkpoint_scaling_factor accordingly."
+            assert isinstance(data_iterator, list), f"{process_count_stored} processes found in Grain checkpoint directory {directory}, but {process_count_jax} jax processes in this run, please set grain_checkpoint_scaling_factor accordingly."
             assert process_count_stored / process_count_jax == len(data_iterator), f"{process_count_stored} processes found in checkpoint directory {directory}, but plan to restore {len(data_iterator)=} * {process_count_jax=} processes."
             #restored_state = checkpoint_manager.restore(step, args=Composite(items=checkpoint_args))
             local_iterator_list = [x.local_iterator for x in data_iterator]
@@ -469,6 +469,7 @@ def load_state_if_possible(
             #   restored_state = checkpoint_manager.restore(step, args=Composite(iter=grain_iter))
             return (restored_state, None)
           elif process_count_stored == process_count_jax:
+            assert not isinstance(data_iterator, list), f"{process_count_stored} processes found in Grain checkpoint directory {directory}, equal to the number of jax process, please do not set grain_checkpoint_scaling_factor."
             grain_iter = MaxtextGrainCheckpointRestore(data_iterator.local_iterator)
             return (checkpoint_manager.restore(step, args=Composite(items=checkpoint_args, iter=grain_iter)), None)
           else:
