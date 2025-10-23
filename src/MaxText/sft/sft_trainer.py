@@ -222,11 +222,11 @@ def apply_lora_to_model(base_model, mesh, mt_config, quantize=False):
   )
 
   # Apply sharding constraints
-  with mesh:
-    state = nnx.state(lora_model)
-    pspecs = nnx.get_partition_spec(state)
-    sharded_state = jax.lax.with_sharding_constraint(state, pspecs)
-    nnx.update(lora_model, sharded_state)
+  # with mesh:
+  #   state = nnx.state(lora_model)
+  #   pspecs = nnx.get_partition_spec(state)
+  #   sharded_state = jax.lax.with_sharding_constraint(state, pspecs)
+  #   nnx.update(lora_model, sharded_state)
 
   return lora_model
 
