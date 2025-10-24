@@ -254,6 +254,18 @@ class Decoder(nn.Module):
     """Initialize decoder layer."""
     self.decoder_layer = self.get_decoder_layers()
     self.norm_layer = self.get_norm_layer(num_features=self.config.emb_dim)
+    if self.config.using_pipeline_parallelism:
+      remat_policy = self.get_remat_policy()
+
+      def create_pipeline_stage_module(rngs):
+        return self.get_pipeline_stage_module(self.decoder_layer, rngs)
+
+      self.pipeline_module = pipeline_nnx.PipelineToLinen(
+          config=self.config,
+          mesh=self.mesh,
+          layer_module=create_pipeline_stage_module,
+          remat_policy=remat_policy,
+      )
 
 
   def minimal_policy(self, with_context=False):
@@ -667,15 +679,6 @@ class Decoder(nn.Module):
         model_mode,
     )
     if cfg.using_pipeline_parallelism:
-      if not hasattr(self, 'pipeline_module'):
-        pipeline_stage_module = self.get_pipeline_stage_module(self.decoder_layer, self.make_rng('params'))
-        remat_policy = self.get_remat_policy()
-        self.pipeline_module = pipeline_nnx.PipelineToLinen(
-            config=self.config,
-            mesh=self.mesh,
-            layer_module=lambda rngs: pipeline_stage_module(rngs=rngs),
-            remat_policy=remat_policy,
-        )
       if cfg.pipeline_fsdp_ag_once:
         partition_spec = self.pipeline_module.get_weight_sharding(
             y, decoder_segment_ids, decoder_positions, deterministic, model_mode
