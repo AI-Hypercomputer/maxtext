@@ -33,6 +33,13 @@ from orbax.checkpoint._src.arrays import sharding as sharding_utils
 import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_checkpoint_manager
 import orbax.checkpoint.experimental.emergency.replicator_checkpoint_manager as emergency_replicator_checkpoint_manager
 # pylint: disable=too-many-positional-arguments
+import dataclasses
+import json
+from typing import Optional
+
+from grain._src.core import sharding
+from grain._src.python import checkpoint_handlers as grain_checkpoint_handlers
+from grain._src.python.dataset import dataset
 
 CheckpointManager = ocp.CheckpointManager
 CheckpointManagerOptions = ocp.CheckpointManagerOptions
@@ -42,6 +49,80 @@ EmergencyCheckpointManager = emergency_checkpoint_manager.CheckpointManager
 LocalCheckpointOptions = emergency_checkpoint_manager.LocalCheckpointOptions
 PersistentCheckpointOptions = emergency_checkpoint_manager.PersistentCheckpointOptions
 EmergencyReplicatorCheckpointManager = emergency_replicator_checkpoint_manager.ReplicatorCheckpointManager
+
+
+class MaxtextGrainCheckpointHandler(grain_checkpoint_handlers.CheckpointHandler):
+  """A CheckpointHandler that allows specifying process_index and process_count."""
+  def save(
+      self,
+      directory: epath.Path,
+      # `item` is for backwards compatibility with older Orbax API, see
+      # https://orbax.readthedocs.io/en/latest/api_refactor.html.
+      item: Optional[grain_checkpoint_handlers.IteratorType] = None,
+      args: Any = None,
+  ):
+    """Saves the given iterator to the checkpoint in `directory`."""
+    item = item or args.item  # pytype:disable=attribute-error
+
+    def save_single_process(item, process_index, process_count):
+      filename = directory / f"process_{process_index}-of-{process_count}.json"
+      if isinstance(item, dataset.DatasetIterator):
+        state = json.dumps(item.get_state(), indent=4)
+      else:
+        state = item.get_state().decode()
+      filename.write_text(state)
+
+    if isinstance(item, list):
+      for local_iterator, process_index, process_count in item:
+        save_single_process(local_iterator, process_index, process_count)
+    else:
+      process_index, process_count = sharding.get_process_index_and_count()
+      save_single_process(item, process_index, process_count)
+
+  def restore(
+      self,
+      directory: epath.Path,
+      item: Optional[grain_checkpoint_handlers.IteratorType] = None,
+      args: Any = None,
+  ) -> grain_checkpoint_handlers.IteratorType:
+    """Restores the given iterator from the checkpoint in `directory`."""
+    item = item or args.item
+    process_index = args.process_index if hasattr(args, "process_index") and args.process_index is not None else None
+    process_count = args.process_count if hasattr(args, "process_count") and args.process_count is not None else None
+
+    def restore_single_process(item, process_index, process_count):
+      filename = directory / f"process_{process_index}-of-{process_count}.json"
+      if not filename.exists():
+        raise ValueError(f"File {filename} does not exist.")
+      state = filename.read_text()
+      if isinstance(item, dataset.DatasetIterator):
+        state = json.loads(state)
+      else:
+        state = state.encode()
+      item.set_state(state)
+      return item
+
+    if isinstance(item, list):
+      restored_items = []
+      for data_iter, process_idx in zip(item, process_index):
+        restored_items.append(restore_single_process(data_iter, process_idx, process_count))
+      return restored_items
+    else:
+      if process_index is None or process_count is None:
+        process_index, process_count = sharding.get_process_index_and_count()
+      return restore_single_process(item, process_index, process_count)
+
+@ocp.args.register_with_handler(MaxtextGrainCheckpointHandler, for_save=True)
+@dataclasses.dataclass
+class MaxtextGrainCheckpointSave(ocp.args.CheckpointArgs):
+  item: Any
+
+@ocp.args.register_with_handler(MaxtextGrainCheckpointHandler, for_restore=True)
+@dataclasses.dataclass
+class MaxtextGrainCheckpointRestore(ocp.args.CheckpointArgs):
+  item: Any
+  process_index: Optional[int | list[int]] = None
+  process_count: Optional[int] = None
 
 
 def _load_full_state_from_path(
@@ -111,10 +192,14 @@ def create_orbax_checkpoint_manager(
 
   max_logging.log(f"Creating checkpoint manager with ocdbt={use_ocdbt} and zarr3={use_zarr3}")
 
+  # Base configuration for all dataset types
+  item_names = ("items",)
+  # we need to use ocdbt and zarr3 to control max file size in the checkpoint
+  item_handlers = {"items": PyTreeCheckpointHandler(use_ocdbt=use_ocdbt, use_zarr3=use_zarr3)}
+
   if dataset_type == "grain":
-    item_names = ("items", "iter")
-  else:
-    item_names = ("items",)
+    item_names += ("iter",)
+    item_handlers["iter"] = MaxtextGrainCheckpointHandler()
 
   # local storage checkpoint needs parent directory created
   p = epath.Path(checkpoint_dir)
@@ -366,8 +451,29 @@ def load_state_if_possible(
         case (checkpoint_manager, dataset_type, data_iterator) if dataset_type == "grain" and data_iterator and (
             checkpoint_manager.directory / str(step) / "iter"
         ).exists():
-          grain_iter = grain.PyGrainCheckpointRestore(data_iterator.local_iterator)
-          return (checkpoint_manager.restore(step, args=Composite(items=checkpoint_args, iter=grain_iter)), None)
+          directory = checkpoint_manager.directory / str(step) / "iter"
+          process_count_jax = jax.process_count()
+          process_count_stored = len(list(directory.glob("process_*-of-*.json")))
+          if process_count_stored > process_count_jax:
+            assert isinstance(data_iterator, list), f"{process_count_stored} processes found in Grain checkpoint directory {directory}, but {process_count_jax} jax processes in this run, please set grain_checkpoint_scaling_factor accordingly."
+            assert process_count_stored / process_count_jax == len(data_iterator), f"{process_count_stored} processes found in checkpoint directory {directory}, but plan to restore {len(data_iterator)=} * {process_count_jax=} processes."
+            #restored_state = checkpoint_manager.restore(step, args=Composite(items=checkpoint_args))
+            local_iterator_list = [x.local_iterator for x in data_iterator]
+            process_index_list = [jax.process_index() + i * process_count_jax for i in range(len(data_iterator))]
+            grain_iter_list = MaxtextGrainCheckpointRestore(local_iterator_list, process_index=process_index_list, process_count=process_count_stored)
+            restored_state = checkpoint_manager.restore(step, args=Composite(items=checkpoint_args, iter=grain_iter_list))
+            # for i, data_iter in enumerate(data_iterator):
+            #   process_index = jax.process_index() + i * process_count_jax
+            #   grain_iter = MaxtextGrainCheckpointRestore(data_iter.local_iterator, process_index=process_index, process_count=process_count_stored)
+            #   # Restore each iterator. The restore is done in-place on the iterator object.
+            #   restored_state = checkpoint_manager.restore(step, args=Composite(iter=grain_iter))
+            return (restored_state, None)
+          elif process_count_stored == process_count_jax:
+            assert not isinstance(data_iterator, list), f"{process_count_stored} processes found in Grain checkpoint directory {directory}, equal to the number of jax process, please do not set grain_checkpoint_scaling_factor."
+            grain_iter = MaxtextGrainCheckpointRestore(data_iterator.local_iterator)
+            return (checkpoint_manager.restore(step, args=Composite(items=checkpoint_args, iter=grain_iter)), None)
+          else:
+            raise ValueError(f"Error restoring Grain checkpoint: {process_count_stored} cannot be restored to {process_count_jax}.")
         # Case 3: Default/Fallback case.
         # This case acts as a wildcard ('_') and matches if none of the preceding cases were met.
         case _:
@@ -518,6 +624,18 @@ def save_checkpoint(checkpoint_manager, step, state, config=None, data_iterator=
       save_args=jax.tree.map(lambda _: ocp.SaveArgs(chunk_byte_size=chunk_byte_size), state),
       ocdbt_target_data_file_size=chunk_byte_size,
   )
+  save_args_composite = {"items": checkpoint_args}
+  if config and config.dataset_type == "grain":
+    if not isinstance(data_iterator, list):
+      data_iterator = [data_iterator]
+    grain_iters_to_save = []
+    process_count_total = jax.process_count() * len(data_iterator)
+    for i, data_iter in enumerate(data_iterator):
+      process_index = jax.process_index() + i * jax.process_count()
+      grain_iters_to_save.append(
+          (data_iter.local_iterator, process_index, process_count_total)
+      )
+    save_args_composite["iter"] = MaxtextGrainCheckpointSave(item=grain_iters_to_save)
 
   match (checkpoint_manager, config):
     case (checkpoint_manager, _) if isinstance(
@@ -525,8 +643,6 @@ def save_checkpoint(checkpoint_manager, step, state, config=None, data_iterator=
     ):
       replicator_error_handler(config)
       return checkpoint_manager.save(step, args=Composite(state=checkpoint_args), force=force)
-    case (_, config) if config and config.dataset_type == "grain":
-      grain_iter = grain.PyGrainCheckpointSave(data_iterator.local_iterator)
-      return checkpoint_manager.save(step, args=Composite(items=checkpoint_args, iter=grain_iter), force=force)
     case _:
-      return checkpoint_manager.save(step, args=Composite(items=checkpoint_args), force=force)
+      return checkpoint_manager.save(step, args=Composite(**save_args_composite), force=force)
+
