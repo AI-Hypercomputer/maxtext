@@ -17,8 +17,8 @@
 Unified GRPO Demo Script
 
 This script provides a unified CLI interface for running GRPO training demos
-across different model sizes and configurations. It consolidates the common
-logic from individual demo scripts and uses the grpo.yml config.
+across different model sizes and configurations. It uses the grpo_train function
+from grpo_demo_trainer.py which consolidates all the GRPO-specific logic.
 
 Usage Examples:
 
@@ -55,7 +55,6 @@ python3 src/MaxText/examples/grpo_demo.py \\
 import argparse
 import os
 import sys
-from typing import Optional
 
 # Add MaxText to path
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -64,7 +63,7 @@ sys.path.insert(0, maxtext_root)
 
 from MaxText import pyconfig
 from MaxText.globals import MAXTEXT_PKG_DIR
-from MaxText.experimental.rl import grpo_trainer
+from MaxText.experimental.rl.grpo_demo_trainer import grpo_train
 
 
 def create_parser():
@@ -254,7 +253,7 @@ def build_config_argv(args):
     base_config = os.path.join(MAXTEXT_PKG_DIR, "configs", "grpo.yml")
 
   # Build training config argv
-  train_config_argv = [
+  config_argv = [
       "",  # Placeholder for argv[0]
       base_config,
       f"model_name={args.model_name}",
@@ -278,37 +277,23 @@ def build_config_argv(args):
 
   # Add optional parameters
   if args.run_name:
-    train_config_argv.append(f"run_name={args.run_name}")
-
+    config_argv.append(f"run_name={args.run_name}")
+  
   if args.hf_access_token:
-    train_config_argv.append(f"hf_access_token={args.hf_access_token}")
+    config_argv.append(f"hf_access_token={args.hf_access_token}")
 
   if args.use_pathways:
-    train_config_argv.append("use_pathways_reshard=True")
-    train_config_argv.append(f"inference_devices_per_replica={args.inference_devices_per_replica}")
-    train_config_argv.append(f"inference_replicas={args.inference_replicas}")
+    config_argv.append("use_pathways_reshard=True")
+    config_argv.append(f"inference_devices_per_replica={args.inference_devices_per_replica}")
+    config_argv.append(f"inference_replicas={args.inference_replicas}")
 
   if args.ici_fsdp_parallelism > 0:
-    train_config_argv.append(f"ici_fsdp_parallelism={args.ici_fsdp_parallelism}")
+    config_argv.append(f"ici_fsdp_parallelism={args.ici_fsdp_parallelism}")
 
   if args.ici_tensor_parallelism > 0:
-    train_config_argv.append(f"ici_tensor_parallelism={args.ici_tensor_parallelism}")
+    config_argv.append(f"ici_tensor_parallelism={args.ici_tensor_parallelism}")
 
-  # Build inference config argv
-  # For GRPO, inference config is similar but with adjusted batch size
-  inference_config_argv = train_config_argv.copy()
-  # Replace base config with grpo_inference.yml
-  inference_config_argv[1] = os.path.join(MAXTEXT_PKG_DIR, "experimental", "rl", "grpo_inference.yml")
-
-  # Adjust batch size for inference (should include num_generations)
-  inference_batch_size = args.per_device_batch_size * args.num_generations
-  # Replace the per_device_batch_size entry
-  for i, arg in enumerate(inference_config_argv):
-    if arg.startswith("per_device_batch_size="):
-      inference_config_argv[i] = f"per_device_batch_size={inference_batch_size}"
-      break
-
-  return [train_config_argv, inference_config_argv]
+  return config_argv
 
 
 def main():
@@ -338,11 +323,11 @@ def main():
   # Build config arguments
   config_argv = build_config_argv(args)
 
-  # Convert to the format expected by grpo_trainer.main
-  sys.argv = ["grpo_demo.py"] + config_argv[0][1:] + config_argv[1][1:]
+  # Initialize configuration
+  config = pyconfig.initialize(config_argv)
 
-  # Run GRPO training
-  grpo_trainer.main(sys.argv)
+  # Run GRPO training using the unified trainer
+  grpo_train(config)
 
   print("=" * 80)
   print("GRPO Training Completed Successfully!")
