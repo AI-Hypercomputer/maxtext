@@ -120,6 +120,74 @@ Full File Code (Reference):
 
 
 Dependency_Filter_Prompt = """
+You are an expert static analysis tool. Your task is to filter a dependency list to only what is required to define and run the model's architecture.
+
+First, think step-by-step to analyze each dependency against the rules.
+Second, output *only* the final, filtered list.
+
+Rules:
+   - **KEEP** dependencies that are structurally or functionally necessary for the code to be valid. This includes:
+       - Core layers and functions (e.g., nn.Linear, torch.matmul)
+       - **Base classes** the model inherits from (e.g., PreTrainedModel, GenerationMixin)
+       - **Type hints** used in function signatures (e.g., Unpack, Cache, Optional)
+       - **Decorators** used on classes or functions (e.g., @auto_docstring)
+
+   - **REMOVE** dependencies that are clearly non-essential "extras". This includes:
+       - Caching or checkpointing utilities (unless it's a type hint like `Cache`)
+       - Logging, metrics, evaluation, or visualization.
+       - Debugging tools or optional framework integrations.
+
+   - Remove unused dependencies.
+   - **CRITICAL RULE: If you are not 100% sure, KEEP the dependency.** It is better to keep an unnecessary dependency than to remove an essential one.
+
+   - Never explain anything. Do not add comments, reasoning, or descriptions.
+
+* Output only the final list, one dependency per line.
+* If the final list is empty, output the single word 'NONE'.
+
+---
+EXAMPLE 1:
+
+Codebase:
+'''python
+from ...utils import auto_docstring
+from ...generation import GenerationMixin
+from ...utils import logging
+
+@auto_docstring
+class MyModel(GenerationMixin):
+    def forward(self, ...):
+        logger.info("Running forward pass")
+        return ...
+'''
+
+Dependency List:
+'''
+transformers/utils.py#auto_docstring
+transformers/generation.py#GenerationMixin
+transformers/utils.py#logging
+'''
+
+Output:
+'''
+transformers/utils.py#auto_docstring
+transformers/generation.py#GenerationMixin
+'''
+---
+
+EXAMPLE 2:
+
+Codebase:
+<CODE_HERE>
+
+Dependency List:
+<DEPENDENCY_LIST_HERE>  
+
+Output:
+'''
+"""
+
+Dependency_Filter_Fast = """
 You are given the source code of a project and its dependency list.
 Your task is to filter the dependency list so it contains only those dependencies required to recreate the original model architecture.
 
@@ -132,9 +200,8 @@ Rules:
         - optional integrations, optimization tricks, or debugging tools
 
     - Remove unused dependencies.
-    - Remove used but non-essential dependencies that do not directly contribute to building or running the architecture.
     - Never explain anything. Do not add comments, reasoning, or descriptions.
-    - If you do not understand the request, output the same Dependency List exactly as given.
+    - If you are not sure how to filter the dependency list, output the same Dependency List exactly as given.
 
 * Output only the final minimal list, one dependency per line, with no explanations.
 * If the final list is empty, output the single word 'NONE'.
@@ -145,6 +212,7 @@ Codebase:
 Dependency List:
 <DEPENDENCY_LIST_HERE>  
 """
+
 
 
 CODE_CONVERSION = """

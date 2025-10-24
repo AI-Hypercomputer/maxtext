@@ -1,0 +1,3755 @@
+[
+    {
+        "comp_id": "transformers/models/qwen3_moe/modeling_qwen3_moe.py#load_balancing_loss_func",
+        "filepath": "transformers/models/qwen3_moe/modeling_qwen3_moe.py",
+        "comp_name": "load_balancing_loss_func",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/cache_utils.py#CacheLayerMixin",
+        "filepath": "transformers/cache_utils.py",
+        "comp_name": "CacheLayerMixin",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/cache_utils.py#_is_torch_greater_or_equal_than_2_7",
+        "filepath": "transformers/cache_utils.py",
+        "comp_name": "_is_torch_greater_or_equal_than_2_7",
+        "Dependencies": [
+            "transformers/utils.py#is_torch_greater_or_equal"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/cache_utils.py#Cache",
+        "filepath": "transformers/cache_utils.py",
+        "comp_name": "Cache",
+        "Dependencies": [
+            "transformers/cache_utils.py#CacheLayerMixin",
+            "transformers/cache_utils.py#_is_torch_greater_or_equal_than_2_7"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_outputs.py#MoeCausalLMOutputWithPast",
+        "filepath": "transformers/modeling_outputs.py",
+        "comp_name": "MoeCausalLMOutputWithPast",
+        "Dependencies": [
+            "transformers/cache_utils.py#Cache",
+            "transformers/utils.py#ModelOutput"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_outputs.py#MoeModelOutputWithPast",
+        "filepath": "transformers/modeling_outputs.py",
+        "comp_name": "MoeModelOutputWithPast",
+        "Dependencies": [
+            "transformers/cache_utils.py#Cache",
+            "transformers/utils.py#ModelOutput"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/cache_utils.py#DynamicLayer",
+        "filepath": "transformers/cache_utils.py",
+        "comp_name": "DynamicLayer",
+        "Dependencies": [
+            "transformers/cache_utils.py#CacheLayerMixin"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/cache_utils.py#DynamicSlidingWindowLayer",
+        "filepath": "transformers/cache_utils.py",
+        "comp_name": "DynamicSlidingWindowLayer",
+        "Dependencies": [
+            "transformers/cache_utils.py#DynamicLayer"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/masking_utils.py#and_masks",
+        "filepath": "transformers/masking_utils.py",
+        "comp_name": "and_masks",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/masking_utils.py#causal_mask_function",
+        "filepath": "transformers/masking_utils.py",
+        "comp_name": "causal_mask_function",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/masking_utils.py#or_masks",
+        "filepath": "transformers/masking_utils.py",
+        "comp_name": "or_masks",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/masking_utils.py#packed_sequence_mask_function",
+        "filepath": "transformers/masking_utils.py",
+        "comp_name": "packed_sequence_mask_function",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_rope_utils.py#RopeParameters",
+        "filepath": "transformers/modeling_rope_utils.py",
+        "comp_name": "RopeParameters",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_rope_utils.py#standardize_rope_params",
+        "filepath": "transformers/modeling_rope_utils.py",
+        "comp_name": "standardize_rope_params",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/models/qwen3_moe/modeling_qwen3_moe.py#Qwen3MoeRMSNorm",
+        "filepath": "transformers/models/qwen3_moe/modeling_qwen3_moe.py",
+        "comp_name": "Qwen3MoeRMSNorm",
+        "Dependencies": [
+            "transformers/integrations.py#use_kernel_forward_from_hub"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/generic.py#_CAN_RECORD_REGISTRY",
+        "filepath": "transformers/utils/generic.py",
+        "comp_name": "_CAN_RECORD_REGISTRY",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/dynamic_module_utils.py#custom_object_save",
+        "filepath": "transformers/dynamic_module_utils.py",
+        "comp_name": "custom_object_save",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/integrations/accelerate.py#accelerate_disk_offload",
+        "filepath": "transformers/integrations/accelerate.py",
+        "comp_name": "accelerate_disk_offload",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/integrations/accelerate.py#expand_device_map",
+        "filepath": "transformers/integrations/accelerate.py",
+        "comp_name": "expand_device_map",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/integrations/hub_kernels.py#is_kernel",
+        "filepath": "transformers/integrations/hub_kernels.py",
+        "comp_name": "is_kernel",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/integrations/tensor_parallel.py#_get_parameter_tp_plan",
+        "filepath": "transformers/integrations/tensor_parallel.py",
+        "comp_name": "_get_parameter_tp_plan",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/integrations/tensor_parallel.py#initialize_tensor_parallelism",
+        "filepath": "transformers/integrations/tensor_parallel.py",
+        "comp_name": "initialize_tensor_parallelism",
+        "Dependencies": [
+            "transformers/utils.py#is_torch_greater_or_equal"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/integrations/tensor_parallel.py#repack_weights",
+        "filepath": "transformers/integrations/tensor_parallel.py",
+        "comp_name": "repack_weights",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/integrations/tensor_parallel.py#shard_and_distribute_module",
+        "filepath": "transformers/integrations/tensor_parallel.py",
+        "comp_name": "shard_and_distribute_module",
+        "Dependencies": [
+            "transformers/integrations/tensor_parallel.py#_get_parameter_tp_plan"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/integrations/tensor_parallel.py#verify_tp_plan",
+        "filepath": "transformers/integrations/tensor_parallel.py",
+        "comp_name": "verify_tp_plan",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_utils.py#EmbeddingAccessMixin",
+        "filepath": "transformers/modeling_utils.py",
+        "comp_name": "EmbeddingAccessMixin",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_utils.py#SpecificPreTrainedModelType",
+        "filepath": "transformers/modeling_utils.py",
+        "comp_name": "SpecificPreTrainedModelType",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_utils.py#VLMS",
+        "filepath": "transformers/modeling_utils.py",
+        "comp_name": "VLMS",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_utils.py#_add_variant",
+        "filepath": "transformers/modeling_utils.py",
+        "comp_name": "_add_variant",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_utils.py#_find_mismatched_keys",
+        "filepath": "transformers/modeling_utils.py",
+        "comp_name": "_find_mismatched_keys",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_utils.py#_get_tied_weight_keys",
+        "filepath": "transformers/modeling_utils.py",
+        "comp_name": "_get_tied_weight_keys",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_utils.py#_init_weights",
+        "filepath": "transformers/modeling_utils.py",
+        "comp_name": "_init_weights",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_utils.py#_is_ds_init_called",
+        "filepath": "transformers/modeling_utils.py",
+        "comp_name": "_is_ds_init_called",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_utils.py#_is_quantized",
+        "filepath": "transformers/modeling_utils.py",
+        "comp_name": "_is_quantized",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_utils.py#_torch_distributed_available",
+        "filepath": "transformers/modeling_utils.py",
+        "comp_name": "_torch_distributed_available",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_utils.py#is_accelerator_device",
+        "filepath": "transformers/modeling_utils.py",
+        "comp_name": "is_accelerator_device",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_utils.py#is_local_dist_rank_0",
+        "filepath": "transformers/modeling_utils.py",
+        "comp_name": "is_local_dist_rank_0",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_utils.py#restore_default_dtype",
+        "filepath": "transformers/modeling_utils.py",
+        "comp_name": "restore_default_dtype",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_utils.py#set_quantized_state",
+        "filepath": "transformers/modeling_utils.py",
+        "comp_name": "set_quantized_state",
+        "Dependencies": [
+            "transformers/modeling_utils.py#_is_quantized"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_utils.py#set_zero3_state",
+        "filepath": "transformers/modeling_utils.py",
+        "comp_name": "set_zero3_state",
+        "Dependencies": [
+            "transformers/modeling_utils.py#_is_ds_init_called"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_utils.py#unwrap_model",
+        "filepath": "transformers/modeling_utils.py",
+        "comp_name": "unwrap_model",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/quantizers/quantizers_utils.py#get_module_from_name",
+        "filepath": "transformers/quantizers/quantizers_utils.py",
+        "comp_name": "get_module_from_name",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils.py#DUMMY_INPUTS",
+        "filepath": "transformers/utils.py",
+        "comp_name": "DUMMY_INPUTS",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils.py#SAFE_WEIGHTS_INDEX_NAME",
+        "filepath": "transformers/utils.py",
+        "comp_name": "SAFE_WEIGHTS_INDEX_NAME",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils.py#SAFE_WEIGHTS_NAME",
+        "filepath": "transformers/utils.py",
+        "comp_name": "SAFE_WEIGHTS_NAME",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils.py#WEIGHTS_INDEX_NAME",
+        "filepath": "transformers/utils.py",
+        "comp_name": "WEIGHTS_INDEX_NAME",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils.py#WEIGHTS_NAME",
+        "filepath": "transformers/utils.py",
+        "comp_name": "WEIGHTS_NAME",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#ENV_VARS_TRUE_VALUES",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "ENV_VARS_TRUE_VALUES",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#is_huggingface_hub_greater_or_equal",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "is_huggingface_hub_greater_or_equal",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_flash_attention_utils.py#FlashAttentionKwargs",
+        "filepath": "transformers/modeling_flash_attention_utils.py",
+        "comp_name": "FlashAttentionKwargs",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/__init__.py#__version__",
+        "filepath": "transformers/__init__.py",
+        "comp_name": "__version__",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/configuration_utils.py#SpecificPreTrainedConfigType",
+        "filepath": "transformers/configuration_utils.py",
+        "comp_name": "SpecificPreTrainedConfigType",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils.py#CONFIG_NAME",
+        "filepath": "transformers/utils.py",
+        "comp_name": "CONFIG_NAME",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/generic.py#is_timm_config_dict",
+        "filepath": "transformers/utils/generic.py",
+        "comp_name": "is_timm_config_dict",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#is_torch_greater_or_equal",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "is_torch_greater_or_equal",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/masking_utils.py#_is_torch_greater_or_equal_than_2_6",
+        "filepath": "transformers/masking_utils.py",
+        "comp_name": "_is_torch_greater_or_equal_than_2_6",
+        "Dependencies": [
+            "transformers/utils/import_utils.py#is_torch_greater_or_equal"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/masking_utils.py#_is_torch_xpu_available",
+        "filepath": "transformers/masking_utils.py",
+        "comp_name": "_is_torch_xpu_available",
+        "Dependencies": [
+            "transformers/utils.py#is_torch_xpu_available"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/masking_utils.py#find_packed_sequence_indices",
+        "filepath": "transformers/masking_utils.py",
+        "comp_name": "find_packed_sequence_indices",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/masking_utils.py#sliding_window_overlay",
+        "filepath": "transformers/masking_utils.py",
+        "comp_name": "sliding_window_overlay",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/masking_utils.py#sliding_window_causal_mask_function",
+        "filepath": "transformers/masking_utils.py",
+        "comp_name": "sliding_window_causal_mask_function",
+        "Dependencies": [
+            "transformers/masking_utils.py#and_masks",
+            "transformers/masking_utils.py#causal_mask_function",
+            "transformers/masking_utils.py#sliding_window_overlay"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/integrations/accelerate.py#find_tied_parameters",
+        "filepath": "transformers/integrations/accelerate.py",
+        "comp_name": "find_tied_parameters",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/integrations/deepspeed.py#is_deepspeed_zero3_enabled",
+        "filepath": "transformers/integrations/deepspeed.py",
+        "comp_name": "is_deepspeed_zero3_enabled",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/integrations/accelerate.py#check_and_set_device_map",
+        "filepath": "transformers/integrations/accelerate.py",
+        "comp_name": "check_and_set_device_map",
+        "Dependencies": [
+            "transformers/integrations/deepspeed.py#is_deepspeed_zero3_enabled",
+            "transformers/utils.py#is_accelerate_available"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/integrations/accelerate.py#init_on_device",
+        "filepath": "transformers/integrations/accelerate.py",
+        "comp_name": "init_on_device",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/integrations/accelerate.py#init_empty_weights",
+        "filepath": "transformers/integrations/accelerate.py",
+        "comp_name": "init_empty_weights",
+        "Dependencies": [
+            "transformers/integrations/accelerate.py#init_on_device"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/hub.py#DownloadKwargs",
+        "filepath": "transformers/utils/hub.py",
+        "comp_name": "DownloadKwargs",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/integrations/peft.py#maybe_load_adapters",
+        "filepath": "transformers/integrations/peft.py",
+        "comp_name": "maybe_load_adapters",
+        "Dependencies": [
+            "transformers/utils/hub.py#DownloadKwargs"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/integrations/tensor_parallel.py#_torch_distributed_available",
+        "filepath": "transformers/integrations/tensor_parallel.py",
+        "comp_name": "_torch_distributed_available",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/integrations/tensor_parallel.py#add_tensor_parallel_hooks_to_module",
+        "filepath": "transformers/integrations/tensor_parallel.py",
+        "comp_name": "add_tensor_parallel_hooks_to_module",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/integrations/tensor_parallel.py#distribute_model",
+        "filepath": "transformers/integrations/tensor_parallel.py",
+        "comp_name": "distribute_model",
+        "Dependencies": [
+            "transformers/distributed.py#DistributedConfig.from_dict",
+            "transformers/integrations/tensor_parallel.py#_get_parameter_tp_plan",
+            "transformers/integrations/tensor_parallel.py#_torch_distributed_available",
+            "transformers/integrations/tensor_parallel.py#add_tensor_parallel_hooks_to_module",
+            "transformers/utils.py#is_torch_greater_or_equal"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/integrations/tensor_parallel.py#convert_local_tensor_to_dtensor",
+        "filepath": "transformers/integrations/tensor_parallel.py",
+        "comp_name": "convert_local_tensor_to_dtensor",
+        "Dependencies": [
+            "transformers/integrations/tensor_parallel.py#_get_parameter_tp_plan"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/integrations/tensor_parallel.py#replace_state_dict_local_with_dtensor",
+        "filepath": "transformers/integrations/tensor_parallel.py",
+        "comp_name": "replace_state_dict_local_with_dtensor",
+        "Dependencies": [
+            "transformers/integrations/tensor_parallel.py#convert_local_tensor_to_dtensor"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_flash_attention_utils.py#_flash_fn",
+        "filepath": "transformers/modeling_flash_attention_utils.py",
+        "comp_name": "_flash_fn",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_flash_attention_utils.py#_flash_varlen_fn",
+        "filepath": "transformers/modeling_flash_attention_utils.py",
+        "comp_name": "_flash_varlen_fn",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_flash_attention_utils.py#_pad_fn",
+        "filepath": "transformers/modeling_flash_attention_utils.py",
+        "comp_name": "_pad_fn",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_flash_attention_utils.py#_process_flash_kwargs_fn",
+        "filepath": "transformers/modeling_flash_attention_utils.py",
+        "comp_name": "_process_flash_kwargs_fn",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_flash_attention_utils.py#_unpad_fn",
+        "filepath": "transformers/modeling_flash_attention_utils.py",
+        "comp_name": "_unpad_fn",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_utils.py#get_parameter_device",
+        "filepath": "transformers/modeling_utils.py",
+        "comp_name": "get_parameter_device",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_utils.py#_end_ptr",
+        "filepath": "transformers/modeling_utils.py",
+        "comp_name": "_end_ptr",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_utils.py#_find_disjoint",
+        "filepath": "transformers/modeling_utils.py",
+        "comp_name": "_find_disjoint",
+        "Dependencies": [
+            "transformers/modeling_utils.py#_end_ptr"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_utils.py#_find_identical",
+        "filepath": "transformers/modeling_utils.py",
+        "comp_name": "_find_identical",
+        "Dependencies": [
+            "transformers/modeling_utils.py#_end_ptr"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_utils.py#_find_missing_and_unexpected_keys",
+        "filepath": "transformers/modeling_utils.py",
+        "comp_name": "_find_missing_and_unexpected_keys",
+        "Dependencies": [
+            "transformers/integrations/accelerate.py#find_tied_parameters",
+            "transformers/quantizers.py#HfQuantizer"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_utils.py#get_state_dict_dtype",
+        "filepath": "transformers/modeling_utils.py",
+        "comp_name": "get_state_dict_dtype",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/safetensors_conversion.py#auto_conversion",
+        "filepath": "transformers/safetensors_conversion.py",
+        "comp_name": "auto_conversion",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/hub.py#get_checkpoint_shard_files",
+        "filepath": "transformers/utils/hub.py",
+        "comp_name": "get_checkpoint_shard_files",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_utils.py#_get_resolved_checkpoint_files",
+        "filepath": "transformers/modeling_utils.py",
+        "comp_name": "_get_resolved_checkpoint_files",
+        "Dependencies": [
+            "transformers/modeling_utils.py#_add_variant",
+            "transformers/safetensors_conversion.py#auto_conversion",
+            "transformers/utils.py#SAFE_WEIGHTS_INDEX_NAME",
+            "transformers/utils.py#SAFE_WEIGHTS_NAME",
+            "transformers/utils.py#WEIGHTS_INDEX_NAME",
+            "transformers/utils.py#WEIGHTS_NAME",
+            "transformers/utils.py#cached_file",
+            "transformers/utils.py#download_url",
+            "transformers/utils.py#has_file",
+            "transformers/utils.py#is_offline_mode",
+            "transformers/utils.py#is_remote_url",
+            "transformers/utils/hub.py#DownloadKwargs",
+            "transformers/utils/hub.py#get_checkpoint_shard_files"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_utils.py#_infer_parameter_dtype",
+        "filepath": "transformers/modeling_utils.py",
+        "comp_name": "_infer_parameter_dtype",
+        "Dependencies": [
+            "transformers/quantizers.py#HfQuantizer",
+            "transformers/utils/quantization_config.py#QuantizationMethod.BITS_AND_BYTES",
+            "transformers/utils/quantization_config.py#QuantizationMethod.HQQ",
+            "transformers/utils/quantization_config.py#QuantizationMethod.MXFP4",
+            "transformers/utils/quantization_config.py#QuantizationMethod.QUARK"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_utils.py#_is_dtensor_available",
+        "filepath": "transformers/modeling_utils.py",
+        "comp_name": "_is_dtensor_available",
+        "Dependencies": [
+            "transformers/modeling_utils.py#_torch_distributed_available",
+            "transformers/utils.py#is_torch_greater_or_equal"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_utils.py#_load_parameter_into_model",
+        "filepath": "transformers/modeling_utils.py",
+        "comp_name": "_load_parameter_into_model",
+        "Dependencies": [
+            "transformers/quantizers/quantizers_utils.py#get_module_from_name"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_utils.py#XLA_DOWNCAST_BF16",
+        "filepath": "transformers/modeling_utils.py",
+        "comp_name": "XLA_DOWNCAST_BF16",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_utils.py#XLA_USE_BF16",
+        "filepath": "transformers/modeling_utils.py",
+        "comp_name": "XLA_USE_BF16",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_utils.py#get_parameter_dtype",
+        "filepath": "transformers/modeling_utils.py",
+        "comp_name": "get_parameter_dtype",
+        "Dependencies": [
+            "transformers/modeling_utils.py#XLA_DOWNCAST_BF16",
+            "transformers/modeling_utils.py#XLA_USE_BF16",
+            "transformers/utils.py#is_torch_xla_available",
+            "transformers/utils/import_utils.py#ENV_VARS_TRUE_VALUES"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_utils.py#_load_state_dict_into_meta_model",
+        "filepath": "transformers/modeling_utils.py",
+        "comp_name": "_load_state_dict_into_meta_model",
+        "Dependencies": [
+            "transformers/integrations/tensor_parallel.py#shard_and_distribute_module",
+            "transformers/modeling_utils.py#_infer_parameter_dtype",
+            "transformers/modeling_utils.py#_load_parameter_into_model",
+            "transformers/quantizers.py#HfQuantizer",
+            "transformers/quantizers/quantizers_utils.py#get_module_from_name"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_utils.py#str_to_torch_dtype",
+        "filepath": "transformers/modeling_utils.py",
+        "comp_name": "str_to_torch_dtype",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_utils.py#load_state_dict",
+        "filepath": "transformers/modeling_utils.py",
+        "comp_name": "load_state_dict",
+        "Dependencies": [
+            "transformers/modeling_utils.py#str_to_torch_dtype"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_utils.py#TORCH_INIT_FUNCTIONS",
+        "filepath": "transformers/modeling_utils.py",
+        "comp_name": "TORCH_INIT_FUNCTIONS",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_utils.py#no_init_weights",
+        "filepath": "transformers/modeling_utils.py",
+        "comp_name": "no_init_weights",
+        "Dependencies": [
+            "transformers/modeling_utils.py#TORCH_INIT_FUNCTIONS",
+            "transformers/modeling_utils.py#_init_weights"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/pytorch_utils.py#_torch_distributed_available",
+        "filepath": "transformers/pytorch_utils.py",
+        "comp_name": "_torch_distributed_available",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/pytorch_utils.py#id_tensor_storage",
+        "filepath": "transformers/pytorch_utils.py",
+        "comp_name": "id_tensor_storage",
+        "Dependencies": [
+            "transformers/pytorch_utils.py#_torch_distributed_available",
+            "transformers/utils.py#is_torch_greater_or_equal",
+            "transformers/utils.py#is_torch_xla_available"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/models/qwen3_moe/modeling_qwen3_moe.py#rotate_half",
+        "filepath": "transformers/models/qwen3_moe/modeling_qwen3_moe.py",
+        "comp_name": "rotate_half",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/models/qwen3_moe/modeling_qwen3_moe.py#apply_rotary_pos_emb",
+        "filepath": "transformers/models/qwen3_moe/modeling_qwen3_moe.py",
+        "comp_name": "apply_rotary_pos_emb",
+        "Dependencies": [
+            "transformers/models/qwen3_moe/modeling_qwen3_moe.py#rotate_half"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/models/qwen3_moe/modeling_qwen3_moe.py#repeat_kv",
+        "filepath": "transformers/models/qwen3_moe/modeling_qwen3_moe.py",
+        "comp_name": "repeat_kv",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/models/qwen3_moe/modeling_qwen3_moe.py#eager_attention_forward",
+        "filepath": "transformers/models/qwen3_moe/modeling_qwen3_moe.py",
+        "comp_name": "eager_attention_forward",
+        "Dependencies": [
+            "transformers/models/qwen3_moe/modeling_qwen3_moe.py#repeat_kv",
+            "transformers/processing_utils.py#Unpack",
+            "transformers/utils.py#TransformersKwargs"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/configuration_utils.py#get_configuration_file",
+        "filepath": "transformers/configuration_utils.py",
+        "comp_name": "get_configuration_file",
+        "Dependencies": [
+            "transformers/__init__.py#__version__",
+            "transformers/utils.py#CONFIG_NAME"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_gguf_pytorch_utils.py#read_field",
+        "filepath": "transformers/modeling_gguf_pytorch_utils.py",
+        "comp_name": "read_field",
+        "Dependencies": [
+            "transformers/integrations.py#_gguf_parse_value"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/integrations/accelerate.py#compute_module_sizes",
+        "filepath": "transformers/integrations/accelerate.py",
+        "comp_name": "compute_module_sizes",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/integrations/accelerate.py#get_balanced_memory",
+        "filepath": "transformers/integrations/accelerate.py",
+        "comp_name": "get_balanced_memory",
+        "Dependencies": [
+            "transformers/integrations/accelerate.py#compute_module_sizes"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/integrations/accelerate.py#_get_device_map",
+        "filepath": "transformers/integrations/accelerate.py",
+        "comp_name": "_get_device_map",
+        "Dependencies": [
+            "transformers/integrations/accelerate.py#find_tied_parameters",
+            "transformers/integrations/accelerate.py#get_balanced_memory",
+            "transformers/utils.py#is_torch_xpu_available"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/integrations/fsdp.py#is_fsdp_enabled",
+        "filepath": "transformers/integrations/fsdp.py",
+        "comp_name": "is_fsdp_enabled",
+        "Dependencies": [
+            "transformers/utils.py#is_torch_available",
+            "transformers/utils.py#strtobool"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/integrations/accelerate.py#accelerate_dispatch",
+        "filepath": "transformers/integrations/accelerate.py",
+        "comp_name": "accelerate_dispatch",
+        "Dependencies": [
+            "transformers/integrations/deepspeed.py#is_deepspeed_zero3_enabled",
+            "transformers/integrations/fsdp.py#is_fsdp_enabled",
+            "transformers/utils/quantization_config.py#QuantizationMethod.FBGEMM_FP8",
+            "transformers/utils/quantization_config.py#QuantizationMethod.HQQ"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/integrations/flash_attention.py#get_target_dtype",
+        "filepath": "transformers/integrations/flash_attention.py",
+        "comp_name": "get_target_dtype",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/loss/loss_d_fine.py#_set_aux_loss",
+        "filepath": "transformers/loss/loss_d_fine.py",
+        "comp_name": "_set_aux_loss",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/loss/loss_d_fine.py#_set_aux_loss2",
+        "filepath": "transformers/loss/loss_d_fine.py",
+        "comp_name": "_set_aux_loss2",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/loss/loss_for_object_detection.py#_set_aux_loss",
+        "filepath": "transformers/loss/loss_for_object_detection.py",
+        "comp_name": "_set_aux_loss",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/loss/loss_rt_detr.py#_set_aux_loss",
+        "filepath": "transformers/loss/loss_rt_detr.py",
+        "comp_name": "_set_aux_loss",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/loss/loss_utils.py#fixed_cross_entropy",
+        "filepath": "transformers/loss/loss_utils.py",
+        "comp_name": "fixed_cross_entropy",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/loss/loss_utils.py#ForCausalLMLoss",
+        "filepath": "transformers/loss/loss_utils.py",
+        "comp_name": "ForCausalLMLoss",
+        "Dependencies": [
+            "transformers/loss/loss_utils.py#fixed_cross_entropy"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/loss/loss_utils.py#ForMaskedLMLoss",
+        "filepath": "transformers/loss/loss_utils.py",
+        "comp_name": "ForMaskedLMLoss",
+        "Dependencies": [
+            "transformers/loss/loss_utils.py#fixed_cross_entropy"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/loss/loss_utils.py#ForQuestionAnsweringLoss",
+        "filepath": "transformers/loss/loss_utils.py",
+        "comp_name": "ForQuestionAnsweringLoss",
+        "Dependencies": [
+            "transformers/loss/loss_utils.py#fixed_cross_entropy"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/loss/loss_utils.py#ForSequenceClassificationLoss",
+        "filepath": "transformers/loss/loss_utils.py",
+        "comp_name": "ForSequenceClassificationLoss",
+        "Dependencies": [
+            "transformers/loss/loss_utils.py#fixed_cross_entropy"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/loss/loss_utils.py#ForTokenClassification",
+        "filepath": "transformers/loss/loss_utils.py",
+        "comp_name": "ForTokenClassification",
+        "Dependencies": [
+            "transformers/loss/loss_utils.py#fixed_cross_entropy"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_flash_attention_utils.py#_hf_api_to_flash_mapping",
+        "filepath": "transformers/modeling_flash_attention_utils.py",
+        "comp_name": "_hf_api_to_flash_mapping",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_flash_attention_utils.py#_process_flash_attention_kwargs",
+        "filepath": "transformers/modeling_flash_attention_utils.py",
+        "comp_name": "_process_flash_attention_kwargs",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_flash_attention_utils.py#_lazy_define_process_function",
+        "filepath": "transformers/modeling_flash_attention_utils.py",
+        "comp_name": "_lazy_define_process_function",
+        "Dependencies": [
+            "transformers/modeling_flash_attention_utils.py#_hf_api_to_flash_mapping",
+            "transformers/modeling_flash_attention_utils.py#_process_flash_attention_kwargs"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_flash_attention_utils.py#_pad_input",
+        "filepath": "transformers/modeling_flash_attention_utils.py",
+        "comp_name": "_pad_input",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_utils.py#ModuleUtilsMixin",
+        "filepath": "transformers/modeling_utils.py",
+        "comp_name": "ModuleUtilsMixin",
+        "Dependencies": [
+            "transformers/modeling_utils.py#get_parameter_device",
+            "transformers/modeling_utils.py#get_parameter_dtype"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_utils.py#load_shard_file",
+        "filepath": "transformers/modeling_utils.py",
+        "comp_name": "load_shard_file",
+        "Dependencies": [
+            "transformers/modeling_utils.py#_load_state_dict_into_meta_model",
+            "transformers/modeling_utils.py#load_state_dict"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_utils.py#load_shard_files_with_threadpool",
+        "filepath": "transformers/modeling_utils.py",
+        "comp_name": "load_shard_files_with_threadpool",
+        "Dependencies": [
+            "transformers/modeling_utils.py#load_shard_file"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#ACCELERATE_IMPORT_ERROR",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "ACCELERATE_IMPORT_ERROR",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#AV_IMPORT_ERROR",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "AV_IMPORT_ERROR",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#BS4_IMPORT_ERROR",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "BS4_IMPORT_ERROR",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#CCL_IMPORT_ERROR",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "CCL_IMPORT_ERROR",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#CV2_IMPORT_ERROR",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "CV2_IMPORT_ERROR",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#CYTHON_IMPORT_ERROR",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "CYTHON_IMPORT_ERROR",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#DATASETS_IMPORT_ERROR",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "DATASETS_IMPORT_ERROR",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#DECORD_IMPORT_ERROR",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "DECORD_IMPORT_ERROR",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#DETECTRON2_IMPORT_ERROR",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "DETECTRON2_IMPORT_ERROR",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#ESSENTIA_IMPORT_ERROR",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "ESSENTIA_IMPORT_ERROR",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#FAISS_IMPORT_ERROR",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "FAISS_IMPORT_ERROR",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#FASTAPI_IMPORT_ERROR",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "FASTAPI_IMPORT_ERROR",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#FTFY_IMPORT_ERROR",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "FTFY_IMPORT_ERROR",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#G2P_EN_IMPORT_ERROR",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "G2P_EN_IMPORT_ERROR",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#JINJA_IMPORT_ERROR",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "JINJA_IMPORT_ERROR",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#LEVENSHTEIN_IMPORT_ERROR",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "LEVENSHTEIN_IMPORT_ERROR",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#LIBROSA_IMPORT_ERROR",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "LIBROSA_IMPORT_ERROR",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#MISTRAL_COMMON_IMPORT_ERROR",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "MISTRAL_COMMON_IMPORT_ERROR",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#NATTEN_IMPORT_ERROR",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "NATTEN_IMPORT_ERROR",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#NLTK_IMPORT_ERROR",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "NLTK_IMPORT_ERROR",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#OPENAI_IMPORT_ERROR",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "OPENAI_IMPORT_ERROR",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#PANDAS_IMPORT_ERROR",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "PANDAS_IMPORT_ERROR",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#PEFT_IMPORT_ERROR",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "PEFT_IMPORT_ERROR",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#PHONEMIZER_IMPORT_ERROR",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "PHONEMIZER_IMPORT_ERROR",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#PRETTY_MIDI_IMPORT_ERROR",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "PRETTY_MIDI_IMPORT_ERROR",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#PROTOBUF_IMPORT_ERROR",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "PROTOBUF_IMPORT_ERROR",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#PYCTCDECODE_IMPORT_ERROR",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "PYCTCDECODE_IMPORT_ERROR",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#PYDANTIC_IMPORT_ERROR",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "PYDANTIC_IMPORT_ERROR",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#PYTESSERACT_IMPORT_ERROR",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "PYTESSERACT_IMPORT_ERROR",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#PYTORCH_IMPORT_ERROR",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "PYTORCH_IMPORT_ERROR",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#PYTORCH_QUANTIZATION_IMPORT_ERROR",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "PYTORCH_QUANTIZATION_IMPORT_ERROR",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#RICH_IMPORT_ERROR",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "RICH_IMPORT_ERROR",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#RJIEBA_IMPORT_ERROR",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "RJIEBA_IMPORT_ERROR",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#SACREMOSES_IMPORT_ERROR",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "SACREMOSES_IMPORT_ERROR",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#SCIPY_IMPORT_ERROR",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "SCIPY_IMPORT_ERROR",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#SENTENCEPIECE_IMPORT_ERROR",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "SENTENCEPIECE_IMPORT_ERROR",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#SKLEARN_IMPORT_ERROR",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "SKLEARN_IMPORT_ERROR",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#SPEECH_IMPORT_ERROR",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "SPEECH_IMPORT_ERROR",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#TIMM_IMPORT_ERROR",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "TIMM_IMPORT_ERROR",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#TOKENIZERS_IMPORT_ERROR",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "TOKENIZERS_IMPORT_ERROR",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#TORCHAUDIO_IMPORT_ERROR",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "TORCHAUDIO_IMPORT_ERROR",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#TORCHCODEC_IMPORT_ERROR",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "TORCHCODEC_IMPORT_ERROR",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#TORCHVISION_IMPORT_ERROR",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "TORCHVISION_IMPORT_ERROR",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#UROMAN_IMPORT_ERROR",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "UROMAN_IMPORT_ERROR",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#UVICORN_IMPORT_ERROR",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "UVICORN_IMPORT_ERROR",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#VISION_IMPORT_ERROR",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "VISION_IMPORT_ERROR",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#YT_DLP_IMPORT_ERROR",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "YT_DLP_IMPORT_ERROR",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#is_datasets_available",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "is_datasets_available",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#is_detectron2_available",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "is_detectron2_available",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#is_ftfy_available",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "is_ftfy_available",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#is_g2p_en_available",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "is_g2p_en_available",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#is_natten_available",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "is_natten_available",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#VersionComparison",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "VersionComparison",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#split_package_version",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "split_package_version",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_gguf_pytorch_utils.py#GGUF_TO_TRANSFORMERS_MAPPING",
+        "filepath": "transformers/modeling_gguf_pytorch_utils.py",
+        "comp_name": "GGUF_TO_TRANSFORMERS_MAPPING",
+        "Dependencies": [
+            "transformers/integrations.py#GGUF_CONFIG_MAPPING",
+            "transformers/integrations.py#GGUF_TOKENIZER_MAPPING"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_gguf_pytorch_utils.py#GGUFTensor",
+        "filepath": "transformers/modeling_gguf_pytorch_utils.py",
+        "comp_name": "GGUFTensor",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_gguf_pytorch_utils.py#TensorProcessor",
+        "filepath": "transformers/modeling_gguf_pytorch_utils.py",
+        "comp_name": "TensorProcessor",
+        "Dependencies": [
+            "transformers/modeling_gguf_pytorch_utils.py#GGUFTensor"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#GGUF_MIN_VERSION",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "GGUF_MIN_VERSION",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_rope_utils.py#_check_received_keys",
+        "filepath": "transformers/modeling_rope_utils.py",
+        "comp_name": "_check_received_keys",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_flash_attention_utils.py#_is_packed_sequence",
+        "filepath": "transformers/modeling_flash_attention_utils.py",
+        "comp_name": "_is_packed_sequence",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_flash_attention_utils.py#fa_peft_integration_check",
+        "filepath": "transformers/modeling_flash_attention_utils.py",
+        "comp_name": "fa_peft_integration_check",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/loss/loss_for_object_detection.py#sigmoid_focal_loss",
+        "filepath": "transformers/loss/loss_for_object_detection.py",
+        "comp_name": "sigmoid_focal_loss",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/loss/loss_for_object_detection.py#dice_loss",
+        "filepath": "transformers/loss/loss_for_object_detection.py",
+        "comp_name": "dice_loss",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/loss/loss_grounding_dino.py#sigmoid_focal_loss",
+        "filepath": "transformers/loss/loss_grounding_dino.py",
+        "comp_name": "sigmoid_focal_loss",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_flash_attention_utils.py#_index_first_axis",
+        "filepath": "transformers/modeling_flash_attention_utils.py",
+        "comp_name": "_index_first_axis",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_flash_attention_utils.py#_unpad_input",
+        "filepath": "transformers/modeling_flash_attention_utils.py",
+        "comp_name": "_unpad_input",
+        "Dependencies": [
+            "transformers/modeling_flash_attention_utils.py#_index_first_axis"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_flash_attention_utils.py#_lazy_imports",
+        "filepath": "transformers/modeling_flash_attention_utils.py",
+        "comp_name": "_lazy_imports",
+        "Dependencies": [
+            "transformers/modeling_flash_attention_utils.py#_pad_input",
+            "transformers/modeling_flash_attention_utils.py#_unpad_input",
+            "transformers/utils.py#is_flash_attn_2_available",
+            "transformers/utils.py#is_flash_attn_3_available",
+            "transformers/utils.py#is_torch_npu_available"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_flash_attention_utils.py#lazy_import_flash_attention",
+        "filepath": "transformers/modeling_flash_attention_utils.py",
+        "comp_name": "lazy_import_flash_attention",
+        "Dependencies": [
+            "transformers/modeling_flash_attention_utils.py#_flash_fn",
+            "transformers/modeling_flash_attention_utils.py#_flash_varlen_fn",
+            "transformers/modeling_flash_attention_utils.py#_lazy_define_process_function",
+            "transformers/modeling_flash_attention_utils.py#_lazy_imports",
+            "transformers/modeling_flash_attention_utils.py#_pad_fn",
+            "transformers/modeling_flash_attention_utils.py#_process_flash_kwargs_fn",
+            "transformers/modeling_flash_attention_utils.py#_unpad_fn"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/quantization_config.py#QuantizationMethod",
+        "filepath": "transformers/utils/quantization_config.py",
+        "comp_name": "QuantizationMethod",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/quantization_config.py#AWQLinearVersion",
+        "filepath": "transformers/utils/quantization_config.py",
+        "comp_name": "AWQLinearVersion",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/quantization_config.py#AwqBackendPackingMethod",
+        "filepath": "transformers/utils/quantization_config.py",
+        "comp_name": "AwqBackendPackingMethod",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/quantization_config.py#ExllamaVersion",
+        "filepath": "transformers/utils/quantization_config.py",
+        "comp_name": "ExllamaVersion",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/quantization_config.py#QuantizationConfigMixin",
+        "filepath": "transformers/utils/quantization_config.py",
+        "comp_name": "QuantizationConfigMixin",
+        "Dependencies": [
+            "transformers/utils/quantization_config.py#QuantizationMethod"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#ACCELERATE_MIN_VERSION",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "ACCELERATE_MIN_VERSION",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#PACKAGE_DISTRIBUTION_MAPPING",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "PACKAGE_DISTRIBUTION_MAPPING",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#_is_package_available",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "_is_package_available",
+        "Dependencies": [
+            "transformers/utils/import_utils.py#PACKAGE_DISTRIBUTION_MAPPING"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_gguf_pytorch_utils.py#GGUF_SUPPORTED_ARCHITECTURES",
+        "filepath": "transformers/modeling_gguf_pytorch_utils.py",
+        "comp_name": "GGUF_SUPPORTED_ARCHITECTURES",
+        "Dependencies": [
+            "transformers/modeling_gguf_pytorch_utils.py#GGUF_TO_TRANSFORMERS_MAPPING"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_gguf_pytorch_utils.py#BloomTensorProcessor",
+        "filepath": "transformers/modeling_gguf_pytorch_utils.py",
+        "comp_name": "BloomTensorProcessor",
+        "Dependencies": [
+            "transformers/modeling_gguf_pytorch_utils.py#GGUFTensor",
+            "transformers/modeling_gguf_pytorch_utils.py#TensorProcessor"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_gguf_pytorch_utils.py#GPT2TensorProcessor",
+        "filepath": "transformers/modeling_gguf_pytorch_utils.py",
+        "comp_name": "GPT2TensorProcessor",
+        "Dependencies": [
+            "transformers/modeling_gguf_pytorch_utils.py#GGUFTensor",
+            "transformers/modeling_gguf_pytorch_utils.py#TensorProcessor"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_gguf_pytorch_utils.py#Gemma2TensorProcessor",
+        "filepath": "transformers/modeling_gguf_pytorch_utils.py",
+        "comp_name": "Gemma2TensorProcessor",
+        "Dependencies": [
+            "transformers/modeling_gguf_pytorch_utils.py#GGUFTensor",
+            "transformers/modeling_gguf_pytorch_utils.py#TensorProcessor"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_gguf_pytorch_utils.py#Lfm2TensorProcessor",
+        "filepath": "transformers/modeling_gguf_pytorch_utils.py",
+        "comp_name": "Lfm2TensorProcessor",
+        "Dependencies": [
+            "transformers/modeling_gguf_pytorch_utils.py#GGUFTensor",
+            "transformers/modeling_gguf_pytorch_utils.py#TensorProcessor"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_gguf_pytorch_utils.py#LlamaTensorProcessor",
+        "filepath": "transformers/modeling_gguf_pytorch_utils.py",
+        "comp_name": "LlamaTensorProcessor",
+        "Dependencies": [
+            "transformers/modeling_gguf_pytorch_utils.py#GGUFTensor",
+            "transformers/modeling_gguf_pytorch_utils.py#TensorProcessor"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_gguf_pytorch_utils.py#MambaTensorProcessor",
+        "filepath": "transformers/modeling_gguf_pytorch_utils.py",
+        "comp_name": "MambaTensorProcessor",
+        "Dependencies": [
+            "transformers/modeling_gguf_pytorch_utils.py#GGUFTensor",
+            "transformers/modeling_gguf_pytorch_utils.py#TensorProcessor"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_gguf_pytorch_utils.py#NemotronTensorProcessor",
+        "filepath": "transformers/modeling_gguf_pytorch_utils.py",
+        "comp_name": "NemotronTensorProcessor",
+        "Dependencies": [
+            "transformers/modeling_gguf_pytorch_utils.py#GGUFTensor",
+            "transformers/modeling_gguf_pytorch_utils.py#TensorProcessor"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_gguf_pytorch_utils.py#Qwen2MoeTensorProcessor",
+        "filepath": "transformers/modeling_gguf_pytorch_utils.py",
+        "comp_name": "Qwen2MoeTensorProcessor",
+        "Dependencies": [
+            "transformers/modeling_gguf_pytorch_utils.py#GGUFTensor",
+            "transformers/modeling_gguf_pytorch_utils.py#TensorProcessor"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_gguf_pytorch_utils.py#T5TensorProcessor",
+        "filepath": "transformers/modeling_gguf_pytorch_utils.py",
+        "comp_name": "T5TensorProcessor",
+        "Dependencies": [
+            "transformers/modeling_gguf_pytorch_utils.py#GGUFTensor",
+            "transformers/modeling_gguf_pytorch_utils.py#TensorProcessor"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_gguf_pytorch_utils.py#TENSOR_PROCESSORS",
+        "filepath": "transformers/modeling_gguf_pytorch_utils.py",
+        "comp_name": "TENSOR_PROCESSORS",
+        "Dependencies": [
+            "transformers/modeling_gguf_pytorch_utils.py#BloomTensorProcessor",
+            "transformers/modeling_gguf_pytorch_utils.py#GPT2TensorProcessor",
+            "transformers/modeling_gguf_pytorch_utils.py#Gemma2TensorProcessor",
+            "transformers/modeling_gguf_pytorch_utils.py#Lfm2TensorProcessor",
+            "transformers/modeling_gguf_pytorch_utils.py#LlamaTensorProcessor",
+            "transformers/modeling_gguf_pytorch_utils.py#MambaTensorProcessor",
+            "transformers/modeling_gguf_pytorch_utils.py#NemotronTensorProcessor",
+            "transformers/modeling_gguf_pytorch_utils.py#Qwen2MoeTensorProcessor",
+            "transformers/modeling_gguf_pytorch_utils.py#T5TensorProcessor"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#is_gguf_available",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "is_gguf_available",
+        "Dependencies": [
+            "transformers/utils/import_utils.py#GGUF_MIN_VERSION",
+            "transformers/utils/import_utils.py#_is_package_available"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_flash_attention_utils.py#flash_attn_supports_top_left_mask",
+        "filepath": "transformers/modeling_flash_attention_utils.py",
+        "comp_name": "flash_attn_supports_top_left_mask",
+        "Dependencies": [
+            "transformers/utils.py#is_flash_attn_2_available",
+            "transformers/utils.py#is_flash_attn_3_available",
+            "transformers/utils.py#is_flash_attn_greater_or_equal_2_10"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/integrations/flash_attention.py#_use_top_left_mask",
+        "filepath": "transformers/integrations/flash_attention.py",
+        "comp_name": "_use_top_left_mask",
+        "Dependencies": [
+            "transformers/modeling_flash_attention_utils.py#flash_attn_supports_top_left_mask"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_flash_attention_utils.py#prepare_fa_kwargs_from_position_ids",
+        "filepath": "transformers/modeling_flash_attention_utils.py",
+        "comp_name": "prepare_fa_kwargs_from_position_ids",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_flash_attention_utils.py#_prepare_from_posids",
+        "filepath": "transformers/modeling_flash_attention_utils.py",
+        "comp_name": "_prepare_from_posids",
+        "Dependencies": [
+            "transformers/modeling_flash_attention_utils.py#prepare_fa_kwargs_from_position_ids"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_flash_attention_utils.py#_get_unpad_data",
+        "filepath": "transformers/modeling_flash_attention_utils.py",
+        "comp_name": "_get_unpad_data",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_flash_attention_utils.py#_upad_input",
+        "filepath": "transformers/modeling_flash_attention_utils.py",
+        "comp_name": "_upad_input",
+        "Dependencies": [
+            "transformers/modeling_flash_attention_utils.py#_get_unpad_data",
+            "transformers/modeling_flash_attention_utils.py#_index_first_axis"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_flash_attention_utils.py#_flash_attention_forward",
+        "filepath": "transformers/modeling_flash_attention_utils.py",
+        "comp_name": "_flash_attention_forward",
+        "Dependencies": [
+            "transformers/modeling_flash_attention_utils.py#_is_packed_sequence",
+            "transformers/modeling_flash_attention_utils.py#_prepare_from_posids",
+            "transformers/modeling_flash_attention_utils.py#_upad_input",
+            "transformers/modeling_flash_attention_utils.py#fa_peft_integration_check",
+            "transformers/modeling_flash_attention_utils.py#lazy_import_flash_attention"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/integrations/flash_attention.py#flash_attention_forward",
+        "filepath": "transformers/integrations/flash_attention.py",
+        "comp_name": "flash_attention_forward",
+        "Dependencies": [
+            "transformers/integrations/flash_attention.py#_use_top_left_mask",
+            "transformers/integrations/flash_attention.py#get_target_dtype",
+            "transformers/modeling_flash_attention_utils.py#_flash_attention_forward"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/integrations/hub_kernels.py#load_and_register_attn_kernel",
+        "filepath": "transformers/integrations/hub_kernels.py",
+        "comp_name": "load_and_register_attn_kernel",
+        "Dependencies": [
+            "transformers/integrations/flash_attention.py#flash_attention_forward",
+            "transformers/integrations/hub_kernels.py#is_kernel",
+            "transformers/modeling_flash_attention_utils.py#lazy_import_flash_attention"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/image_transforms.py#_center_to_corners_format_numpy",
+        "filepath": "transformers/image_transforms.py",
+        "comp_name": "_center_to_corners_format_numpy",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/image_transforms.py#_center_to_corners_format_torch",
+        "filepath": "transformers/image_transforms.py",
+        "comp_name": "_center_to_corners_format_torch",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/image_transforms.py#center_to_corners_format",
+        "filepath": "transformers/image_transforms.py",
+        "comp_name": "center_to_corners_format",
+        "Dependencies": [
+            "transformers/image_transforms.py#_center_to_corners_format_numpy",
+            "transformers/image_transforms.py#_center_to_corners_format_torch",
+            "transformers/utils.py#TensorType",
+            "transformers/utils.py#is_torch_tensor"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/loss/loss_for_object_detection.py#NestedTensor",
+        "filepath": "transformers/loss/loss_for_object_detection.py",
+        "comp_name": "NestedTensor",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/loss/loss_for_object_detection.py#_max_by_axis",
+        "filepath": "transformers/loss/loss_for_object_detection.py",
+        "comp_name": "_max_by_axis",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/loss/loss_for_object_detection.py#nested_tensor_from_tensor_list",
+        "filepath": "transformers/loss/loss_for_object_detection.py",
+        "comp_name": "nested_tensor_from_tensor_list",
+        "Dependencies": [
+            "transformers/loss/loss_for_object_detection.py#NestedTensor",
+            "transformers/loss/loss_for_object_detection.py#_max_by_axis"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/quantization_config.py#AqlmConfig",
+        "filepath": "transformers/utils/quantization_config.py",
+        "comp_name": "AqlmConfig",
+        "Dependencies": [
+            "transformers/utils/quantization_config.py#QuantizationConfigMixin",
+            "transformers/utils/quantization_config.py#QuantizationMethod"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/quantization_config.py#BitNetQuantConfig",
+        "filepath": "transformers/utils/quantization_config.py",
+        "comp_name": "BitNetQuantConfig",
+        "Dependencies": [
+            "transformers/utils/quantization_config.py#QuantizationConfigMixin",
+            "transformers/utils/quantization_config.py#QuantizationMethod"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/quantization_config.py#BitsAndBytesConfig",
+        "filepath": "transformers/utils/quantization_config.py",
+        "comp_name": "BitsAndBytesConfig",
+        "Dependencies": [
+            "transformers/utils/quantization_config.py#QuantizationConfigMixin",
+            "transformers/utils/quantization_config.py#QuantizationMethod"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/quantization_config.py#EetqConfig",
+        "filepath": "transformers/utils/quantization_config.py",
+        "comp_name": "EetqConfig",
+        "Dependencies": [
+            "transformers/utils/quantization_config.py#QuantizationConfigMixin",
+            "transformers/utils/quantization_config.py#QuantizationMethod"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/quantization_config.py#FPQuantConfig",
+        "filepath": "transformers/utils/quantization_config.py",
+        "comp_name": "FPQuantConfig",
+        "Dependencies": [
+            "transformers/utils/quantization_config.py#QuantizationConfigMixin",
+            "transformers/utils/quantization_config.py#QuantizationMethod"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/quantization_config.py#FineGrainedFP8Config",
+        "filepath": "transformers/utils/quantization_config.py",
+        "comp_name": "FineGrainedFP8Config",
+        "Dependencies": [
+            "transformers/utils/quantization_config.py#QuantizationConfigMixin",
+            "transformers/utils/quantization_config.py#QuantizationMethod"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/quantization_config.py#HiggsConfig",
+        "filepath": "transformers/utils/quantization_config.py",
+        "comp_name": "HiggsConfig",
+        "Dependencies": [
+            "transformers/utils/quantization_config.py#QuantizationConfigMixin",
+            "transformers/utils/quantization_config.py#QuantizationMethod"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/quantization_config.py#HqqConfig",
+        "filepath": "transformers/utils/quantization_config.py",
+        "comp_name": "HqqConfig",
+        "Dependencies": [
+            "transformers/utils.py#is_hqq_available",
+            "transformers/utils/quantization_config.py#QuantizationConfigMixin",
+            "transformers/utils/quantization_config.py#QuantizationMethod"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/quantization_config.py#QuantoConfig",
+        "filepath": "transformers/utils/quantization_config.py",
+        "comp_name": "QuantoConfig",
+        "Dependencies": [
+            "transformers/utils/quantization_config.py#QuantizationConfigMixin",
+            "transformers/utils/quantization_config.py#QuantizationMethod"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/quantization_config.py#QuarkConfig",
+        "filepath": "transformers/utils/quantization_config.py",
+        "comp_name": "QuarkConfig",
+        "Dependencies": [
+            "transformers/utils.py#is_quark_available",
+            "transformers/utils.py#is_torch_available",
+            "transformers/utils/quantization_config.py#QuantizationConfigMixin",
+            "transformers/utils/quantization_config.py#QuantizationMethod"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/quantization_config.py#SpQRConfig",
+        "filepath": "transformers/utils/quantization_config.py",
+        "comp_name": "SpQRConfig",
+        "Dependencies": [
+            "transformers/utils/quantization_config.py#QuantizationConfigMixin",
+            "transformers/utils/quantization_config.py#QuantizationMethod"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/quantization_config.py#TorchAoConfig",
+        "filepath": "transformers/utils/quantization_config.py",
+        "comp_name": "TorchAoConfig",
+        "Dependencies": [
+            "transformers/utils.py#is_torchao_available",
+            "transformers/utils/quantization_config.py#QuantizationConfigMixin",
+            "transformers/utils/quantization_config.py#QuantizationMethod"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/quantization_config.py#VptqLayerConfig",
+        "filepath": "transformers/utils/quantization_config.py",
+        "comp_name": "VptqLayerConfig",
+        "Dependencies": [
+            "transformers/utils/quantization_config.py#QuantizationConfigMixin"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/quantization_config.py#VptqConfig",
+        "filepath": "transformers/utils/quantization_config.py",
+        "comp_name": "VptqConfig",
+        "Dependencies": [
+            "transformers/utils/quantization_config.py#QuantizationConfigMixin",
+            "transformers/utils/quantization_config.py#QuantizationMethod",
+            "transformers/utils/quantization_config.py#VptqLayerConfig"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/quantizers/quantizer_quark.py#CHECKPOINT_KEYS",
+        "filepath": "transformers/quantizers/quantizer_quark.py",
+        "comp_name": "CHECKPOINT_KEYS",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/quantizers/quantizer_torchao.py#fuzzy_match_size",
+        "filepath": "transformers/quantizers/quantizer_torchao.py",
+        "comp_name": "fuzzy_match_size",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/quantization_config.py#AutoRoundConfig",
+        "filepath": "transformers/utils/quantization_config.py",
+        "comp_name": "AutoRoundConfig",
+        "Dependencies": [
+            "transformers/utils/quantization_config.py#QuantizationConfigMixin",
+            "transformers/utils/quantization_config.py#QuantizationMethod"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/quantization_config.py#AwqConfig",
+        "filepath": "transformers/utils/quantization_config.py",
+        "comp_name": "AwqConfig",
+        "Dependencies": [
+            "transformers/utils.py#is_auto_awq_available",
+            "transformers/utils/quantization_config.py#AWQLinearVersion",
+            "transformers/utils/quantization_config.py#AwqBackendPackingMethod",
+            "transformers/utils/quantization_config.py#ExllamaVersion",
+            "transformers/utils/quantization_config.py#QuantizationConfigMixin",
+            "transformers/utils/quantization_config.py#QuantizationMethod"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/quantization_config.py#CompressedTensorsConfig",
+        "filepath": "transformers/utils/quantization_config.py",
+        "comp_name": "CompressedTensorsConfig",
+        "Dependencies": [
+            "transformers/utils.py#is_compressed_tensors_available",
+            "transformers/utils/quantization_config.py#QuantizationConfigMixin",
+            "transformers/utils/quantization_config.py#QuantizationMethod"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/quantization_config.py#FbgemmFp8Config",
+        "filepath": "transformers/utils/quantization_config.py",
+        "comp_name": "FbgemmFp8Config",
+        "Dependencies": [
+            "transformers/utils/quantization_config.py#QuantizationConfigMixin",
+            "transformers/utils/quantization_config.py#QuantizationMethod"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#is_auto_gptq_available",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "is_auto_gptq_available",
+        "Dependencies": [
+            "transformers/utils/import_utils.py#_is_package_available"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/quantization_config.py#GPTQConfig",
+        "filepath": "transformers/utils/quantization_config.py",
+        "comp_name": "GPTQConfig",
+        "Dependencies": [
+            "transformers/utils.py#is_gptqmodel_available",
+            "transformers/utils/import_utils.py#is_auto_gptq_available",
+            "transformers/utils/quantization_config.py#ExllamaVersion",
+            "transformers/utils/quantization_config.py#QuantizationConfigMixin",
+            "transformers/utils/quantization_config.py#QuantizationMethod"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/quantization_config.py#Mxfp4Config",
+        "filepath": "transformers/utils/quantization_config.py",
+        "comp_name": "Mxfp4Config",
+        "Dependencies": [
+            "transformers/utils/quantization_config.py#QuantizationConfigMixin",
+            "transformers/utils/quantization_config.py#QuantizationMethod"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#is_accelerate_available",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "is_accelerate_available",
+        "Dependencies": [
+            "transformers/utils/import_utils.py#ACCELERATE_MIN_VERSION",
+            "transformers/utils/import_utils.py#_is_package_available"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#is_av_available",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "is_av_available",
+        "Dependencies": [
+            "transformers/utils/import_utils.py#_is_package_available"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#is_bs4_available",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "is_bs4_available",
+        "Dependencies": [
+            "transformers/utils/import_utils.py#_is_package_available"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#is_ccl_available",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "is_ccl_available",
+        "Dependencies": [
+            "transformers/utils/import_utils.py#_is_package_available"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#is_cv2_available",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "is_cv2_available",
+        "Dependencies": [
+            "transformers/utils/import_utils.py#_is_package_available"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#is_cython_available",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "is_cython_available",
+        "Dependencies": [
+            "transformers/utils/import_utils.py#_is_package_available"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#is_decord_available",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "is_decord_available",
+        "Dependencies": [
+            "transformers/utils/import_utils.py#_is_package_available"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#is_essentia_available",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "is_essentia_available",
+        "Dependencies": [
+            "transformers/utils/import_utils.py#_is_package_available"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#is_faiss_available",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "is_faiss_available",
+        "Dependencies": [
+            "transformers/utils/import_utils.py#_is_package_available"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#is_fastapi_available",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "is_fastapi_available",
+        "Dependencies": [
+            "transformers/utils/import_utils.py#_is_package_available"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#is_jinja_available",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "is_jinja_available",
+        "Dependencies": [
+            "transformers/utils/import_utils.py#_is_package_available"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#is_levenshtein_available",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "is_levenshtein_available",
+        "Dependencies": [
+            "transformers/utils/import_utils.py#_is_package_available"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#is_librosa_available",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "is_librosa_available",
+        "Dependencies": [
+            "transformers/utils/import_utils.py#_is_package_available"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#is_mistral_common_available",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "is_mistral_common_available",
+        "Dependencies": [
+            "transformers/utils/import_utils.py#_is_package_available"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#is_nltk_available",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "is_nltk_available",
+        "Dependencies": [
+            "transformers/utils/import_utils.py#_is_package_available"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#is_openai_available",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "is_openai_available",
+        "Dependencies": [
+            "transformers/utils/import_utils.py#_is_package_available"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#is_pandas_available",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "is_pandas_available",
+        "Dependencies": [
+            "transformers/utils/import_utils.py#_is_package_available"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#is_peft_available",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "is_peft_available",
+        "Dependencies": [
+            "transformers/utils/import_utils.py#_is_package_available"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#is_phonemizer_available",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "is_phonemizer_available",
+        "Dependencies": [
+            "transformers/utils/import_utils.py#_is_package_available"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#is_pretty_midi_available",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "is_pretty_midi_available",
+        "Dependencies": [
+            "transformers/utils/import_utils.py#_is_package_available"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#is_protobuf_available",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "is_protobuf_available",
+        "Dependencies": [
+            "transformers/utils/import_utils.py#_is_package_available"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#is_pyctcdecode_available",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "is_pyctcdecode_available",
+        "Dependencies": [
+            "transformers/utils/import_utils.py#_is_package_available"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#is_pydantic_available",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "is_pydantic_available",
+        "Dependencies": [
+            "transformers/utils/import_utils.py#_is_package_available"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#is_pytesseract_available",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "is_pytesseract_available",
+        "Dependencies": [
+            "transformers/utils/import_utils.py#_is_package_available"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#is_pytorch_quantization_available",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "is_pytorch_quantization_available",
+        "Dependencies": [
+            "transformers/utils/import_utils.py#_is_package_available"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#is_rich_available",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "is_rich_available",
+        "Dependencies": [
+            "transformers/utils/import_utils.py#_is_package_available"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#is_rjieba_available",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "is_rjieba_available",
+        "Dependencies": [
+            "transformers/utils/import_utils.py#_is_package_available"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#is_sacremoses_available",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "is_sacremoses_available",
+        "Dependencies": [
+            "transformers/utils/import_utils.py#_is_package_available"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#is_scipy_available",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "is_scipy_available",
+        "Dependencies": [
+            "transformers/utils/import_utils.py#_is_package_available"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#is_sentencepiece_available",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "is_sentencepiece_available",
+        "Dependencies": [
+            "transformers/utils/import_utils.py#_is_package_available"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#is_sklearn_available",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "is_sklearn_available",
+        "Dependencies": [
+            "transformers/utils/import_utils.py#_is_package_available"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#is_timm_available",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "is_timm_available",
+        "Dependencies": [
+            "transformers/utils/import_utils.py#_is_package_available"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#is_tokenizers_available",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "is_tokenizers_available",
+        "Dependencies": [
+            "transformers/utils/import_utils.py#_is_package_available"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#is_torch_available",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "is_torch_available",
+        "Dependencies": [
+            "transformers/utils/import_utils.py#_is_package_available"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#is_torchaudio_available",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "is_torchaudio_available",
+        "Dependencies": [
+            "transformers/utils/import_utils.py#_is_package_available"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#is_torchcodec_available",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "is_torchcodec_available",
+        "Dependencies": [
+            "transformers/utils/import_utils.py#_is_package_available"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#is_torchvision_available",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "is_torchvision_available",
+        "Dependencies": [
+            "transformers/utils/import_utils.py#_is_package_available"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#is_uroman_available",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "is_uroman_available",
+        "Dependencies": [
+            "transformers/utils/import_utils.py#_is_package_available"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#is_uvicorn_available",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "is_uvicorn_available",
+        "Dependencies": [
+            "transformers/utils/import_utils.py#_is_package_available"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#is_vision_available",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "is_vision_available",
+        "Dependencies": [
+            "transformers/utils/import_utils.py#_is_package_available"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#is_yt_dlp_available",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "is_yt_dlp_available",
+        "Dependencies": [
+            "transformers/utils/import_utils.py#_is_package_available"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_gguf_pytorch_utils.py#get_gguf_hf_weights_map",
+        "filepath": "transformers/modeling_gguf_pytorch_utils.py",
+        "comp_name": "get_gguf_hf_weights_map",
+        "Dependencies": [
+            "transformers/utils.py#is_torch_available",
+            "transformers/utils/import_utils.py#is_gguf_available"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_gguf_pytorch_utils.py#load_gguf_checkpoint",
+        "filepath": "transformers/modeling_gguf_pytorch_utils.py",
+        "comp_name": "load_gguf_checkpoint",
+        "Dependencies": [
+            "transformers/integrations.py#_gguf_parse_value",
+            "transformers/modeling_gguf_pytorch_utils.py#GGUF_SUPPORTED_ARCHITECTURES",
+            "transformers/modeling_gguf_pytorch_utils.py#GGUF_TO_TRANSFORMERS_MAPPING",
+            "transformers/modeling_gguf_pytorch_utils.py#TENSOR_PROCESSORS",
+            "transformers/modeling_gguf_pytorch_utils.py#TensorProcessor",
+            "transformers/modeling_gguf_pytorch_utils.py#get_gguf_hf_weights_map",
+            "transformers/modeling_gguf_pytorch_utils.py#read_field",
+            "transformers/utils.py#is_torch_available",
+            "transformers/utils/import_utils.py#is_gguf_available"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/configuration_utils.py#PreTrainedConfig",
+        "filepath": "transformers/configuration_utils.py",
+        "comp_name": "PreTrainedConfig",
+        "Dependencies": [
+            "transformers/__init__.py#__version__",
+            "transformers/configuration_utils.py#SpecificPreTrainedConfigType",
+            "transformers/configuration_utils.py#get_configuration_file",
+            "transformers/dynamic_module_utils.py#custom_object_save",
+            "transformers/modeling_gguf_pytorch_utils.py#load_gguf_checkpoint",
+            "transformers/utils.py#CONFIG_NAME",
+            "transformers/utils.py#PushToHubMixin",
+            "transformers/utils.py#cached_file",
+            "transformers/utils.py#download_url",
+            "transformers/utils.py#extract_commit_hash",
+            "transformers/utils.py#is_remote_url",
+            "transformers/utils.py#is_torch_available",
+            "transformers/utils/generic.py#is_timm_config_dict"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/cache_utils.py#DynamicCache",
+        "filepath": "transformers/cache_utils.py",
+        "comp_name": "DynamicCache",
+        "Dependencies": [
+            "transformers/cache_utils.py#Cache",
+            "transformers/cache_utils.py#DynamicLayer",
+            "transformers/cache_utils.py#DynamicSlidingWindowLayer",
+            "transformers/configuration_utils.py#PreTrainedConfig"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/masking_utils.py#_preprocess_mask_arguments",
+        "filepath": "transformers/masking_utils.py",
+        "comp_name": "_preprocess_mask_arguments",
+        "Dependencies": [
+            "transformers/cache_utils.py#Cache",
+            "transformers/configuration_utils.py#PreTrainedConfig",
+            "transformers/masking_utils.py#find_packed_sequence_indices"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/masking_utils.py#create_causal_mask",
+        "filepath": "transformers/masking_utils.py",
+        "comp_name": "create_causal_mask",
+        "Dependencies": [
+            "transformers/cache_utils.py#Cache",
+            "transformers/configuration_utils.py#PreTrainedConfig",
+            "transformers/masking_utils.py#_is_torch_greater_or_equal_than_2_6",
+            "transformers/masking_utils.py#_is_torch_xpu_available",
+            "transformers/masking_utils.py#_preprocess_mask_arguments",
+            "transformers/masking_utils.py#and_masks",
+            "transformers/masking_utils.py#causal_mask_function",
+            "transformers/masking_utils.py#or_masks",
+            "transformers/masking_utils.py#packed_sequence_mask_function"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/masking_utils.py#create_sliding_window_causal_mask",
+        "filepath": "transformers/masking_utils.py",
+        "comp_name": "create_sliding_window_causal_mask",
+        "Dependencies": [
+            "transformers/cache_utils.py#Cache",
+            "transformers/configuration_utils.py#PreTrainedConfig",
+            "transformers/masking_utils.py#_is_torch_greater_or_equal_than_2_6",
+            "transformers/masking_utils.py#_preprocess_mask_arguments",
+            "transformers/masking_utils.py#and_masks",
+            "transformers/masking_utils.py#or_masks",
+            "transformers/masking_utils.py#packed_sequence_mask_function",
+            "transformers/masking_utils.py#sliding_window_causal_mask_function"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_rope_utils.py#_validate_default_rope_parameters",
+        "filepath": "transformers/modeling_rope_utils.py",
+        "comp_name": "_validate_default_rope_parameters",
+        "Dependencies": [
+            "transformers/configuration_utils.py#PreTrainedConfig",
+            "transformers/modeling_rope_utils.py#_check_received_keys"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_rope_utils.py#_validate_dynamic_scaling_rope_parameters",
+        "filepath": "transformers/modeling_rope_utils.py",
+        "comp_name": "_validate_dynamic_scaling_rope_parameters",
+        "Dependencies": [
+            "transformers/configuration_utils.py#PreTrainedConfig",
+            "transformers/modeling_rope_utils.py#_check_received_keys"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_rope_utils.py#_validate_linear_scaling_rope_parameters",
+        "filepath": "transformers/modeling_rope_utils.py",
+        "comp_name": "_validate_linear_scaling_rope_parameters",
+        "Dependencies": [
+            "transformers/configuration_utils.py#PreTrainedConfig",
+            "transformers/modeling_rope_utils.py#_check_received_keys"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_rope_utils.py#_validate_llama3_parameters",
+        "filepath": "transformers/modeling_rope_utils.py",
+        "comp_name": "_validate_llama3_parameters",
+        "Dependencies": [
+            "transformers/configuration_utils.py#PreTrainedConfig",
+            "transformers/modeling_rope_utils.py#_check_received_keys"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_rope_utils.py#_validate_longrope_parameters",
+        "filepath": "transformers/modeling_rope_utils.py",
+        "comp_name": "_validate_longrope_parameters",
+        "Dependencies": [
+            "transformers/configuration_utils.py#PreTrainedConfig",
+            "transformers/modeling_rope_utils.py#_check_received_keys"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_rope_utils.py#_validate_yarn_parameters",
+        "filepath": "transformers/modeling_rope_utils.py",
+        "comp_name": "_validate_yarn_parameters",
+        "Dependencies": [
+            "transformers/configuration_utils.py#PreTrainedConfig",
+            "transformers/modeling_rope_utils.py#_check_received_keys"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_rope_utils.py#ROPE_VALIDATION_FUNCTIONS",
+        "filepath": "transformers/modeling_rope_utils.py",
+        "comp_name": "ROPE_VALIDATION_FUNCTIONS",
+        "Dependencies": [
+            "transformers/modeling_rope_utils.py#_validate_default_rope_parameters",
+            "transformers/modeling_rope_utils.py#_validate_dynamic_scaling_rope_parameters",
+            "transformers/modeling_rope_utils.py#_validate_linear_scaling_rope_parameters",
+            "transformers/modeling_rope_utils.py#_validate_llama3_parameters",
+            "transformers/modeling_rope_utils.py#_validate_longrope_parameters",
+            "transformers/modeling_rope_utils.py#_validate_yarn_parameters"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_rope_utils.py#rope_config_validation",
+        "filepath": "transformers/modeling_rope_utils.py",
+        "comp_name": "rope_config_validation",
+        "Dependencies": [
+            "transformers/configuration_utils.py#PreTrainedConfig",
+            "transformers/modeling_rope_utils.py#ROPE_VALIDATION_FUNCTIONS"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/models/qwen3_moe/configuration_qwen3_moe.py#Qwen3MoeConfig",
+        "filepath": "transformers/models/qwen3_moe/configuration_qwen3_moe.py",
+        "comp_name": "Qwen3MoeConfig",
+        "Dependencies": [
+            "transformers/configuration_utils.py#PreTrainedConfig",
+            "transformers/modeling_rope_utils.py#RopeParameters",
+            "transformers/modeling_rope_utils.py#rope_config_validation",
+            "transformers/modeling_rope_utils.py#standardize_rope_params"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_rope_utils.py#_compute_dynamic_ntk_parameters",
+        "filepath": "transformers/modeling_rope_utils.py",
+        "comp_name": "_compute_dynamic_ntk_parameters",
+        "Dependencies": [
+            "transformers/configuration_utils.py#PreTrainedConfig",
+            "transformers/modeling_rope_utils.py#standardize_rope_params"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_rope_utils.py#_compute_linear_scaling_rope_parameters",
+        "filepath": "transformers/modeling_rope_utils.py",
+        "comp_name": "_compute_linear_scaling_rope_parameters",
+        "Dependencies": [
+            "transformers/configuration_utils.py#PreTrainedConfig",
+            "transformers/modeling_rope_utils.py#standardize_rope_params"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_rope_utils.py#_compute_llama3_parameters",
+        "filepath": "transformers/modeling_rope_utils.py",
+        "comp_name": "_compute_llama3_parameters",
+        "Dependencies": [
+            "transformers/configuration_utils.py#PreTrainedConfig",
+            "transformers/modeling_rope_utils.py#standardize_rope_params"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_rope_utils.py#_compute_longrope_parameters",
+        "filepath": "transformers/modeling_rope_utils.py",
+        "comp_name": "_compute_longrope_parameters",
+        "Dependencies": [
+            "transformers/configuration_utils.py#PreTrainedConfig",
+            "transformers/modeling_rope_utils.py#standardize_rope_params"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_rope_utils.py#_compute_yarn_parameters",
+        "filepath": "transformers/modeling_rope_utils.py",
+        "comp_name": "_compute_yarn_parameters",
+        "Dependencies": [
+            "transformers/configuration_utils.py#PreTrainedConfig",
+            "transformers/modeling_rope_utils.py#standardize_rope_params"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_rope_utils.py#ROPE_INIT_FUNCTIONS",
+        "filepath": "transformers/modeling_rope_utils.py",
+        "comp_name": "ROPE_INIT_FUNCTIONS",
+        "Dependencies": [
+            "transformers/modeling_rope_utils.py#_compute_dynamic_ntk_parameters",
+            "transformers/modeling_rope_utils.py#_compute_linear_scaling_rope_parameters",
+            "transformers/modeling_rope_utils.py#_compute_llama3_parameters",
+            "transformers/modeling_rope_utils.py#_compute_longrope_parameters",
+            "transformers/modeling_rope_utils.py#_compute_yarn_parameters"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_rope_utils.py#dynamic_rope_update",
+        "filepath": "transformers/modeling_rope_utils.py",
+        "comp_name": "dynamic_rope_update",
+        "Dependencies": [
+            "transformers/modeling_rope_utils.py#ROPE_INIT_FUNCTIONS"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/models/qwen3_moe/modeling_qwen3_moe.py#Qwen3MoeRotaryEmbedding",
+        "filepath": "transformers/models/qwen3_moe/modeling_qwen3_moe.py",
+        "comp_name": "Qwen3MoeRotaryEmbedding",
+        "Dependencies": [
+            "transformers/modeling_rope_utils.py#ROPE_INIT_FUNCTIONS",
+            "transformers/modeling_rope_utils.py#dynamic_rope_update",
+            "transformers/models/qwen3_moe/configuration_qwen3_moe.py#Qwen3MoeConfig"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/loss/loss_d_fine.py#weighting_function",
+        "filepath": "transformers/loss/loss_d_fine.py",
+        "comp_name": "weighting_function",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/loss/loss_d_fine.py#translate_gt",
+        "filepath": "transformers/loss/loss_d_fine.py",
+        "comp_name": "translate_gt",
+        "Dependencies": [
+            "transformers/loss/loss_d_fine.py#weighting_function"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/loss/loss_d_fine.py#bbox2distance",
+        "filepath": "transformers/loss/loss_d_fine.py",
+        "comp_name": "bbox2distance",
+        "Dependencies": [
+            "transformers/loss/loss_d_fine.py#translate_gt"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/loss/loss_for_object_detection.py#_upcast",
+        "filepath": "transformers/loss/loss_for_object_detection.py",
+        "comp_name": "_upcast",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/loss/loss_for_object_detection.py#box_area",
+        "filepath": "transformers/loss/loss_for_object_detection.py",
+        "comp_name": "box_area",
+        "Dependencies": [
+            "transformers/loss/loss_for_object_detection.py#_upcast"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/loss/loss_for_object_detection.py#box_iou",
+        "filepath": "transformers/loss/loss_for_object_detection.py",
+        "comp_name": "box_iou",
+        "Dependencies": [
+            "transformers/loss/loss_for_object_detection.py#box_area"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/loss/loss_for_object_detection.py#generalized_box_iou",
+        "filepath": "transformers/loss/loss_for_object_detection.py",
+        "comp_name": "generalized_box_iou",
+        "Dependencies": [
+            "transformers/loss/loss_for_object_detection.py#box_iou"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/loss/loss_for_object_detection.py#HungarianMatcher",
+        "filepath": "transformers/loss/loss_for_object_detection.py",
+        "comp_name": "HungarianMatcher",
+        "Dependencies": [
+            "transformers/image_transforms.py#center_to_corners_format",
+            "transformers/loss/loss_for_object_detection.py#generalized_box_iou"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/loss/loss_for_object_detection.py#ImageLoss",
+        "filepath": "transformers/loss/loss_for_object_detection.py",
+        "comp_name": "ImageLoss",
+        "Dependencies": [
+            "transformers/image_transforms.py#center_to_corners_format",
+            "transformers/loss/loss_for_object_detection.py#dice_loss",
+            "transformers/loss/loss_for_object_detection.py#generalized_box_iou",
+            "transformers/loss/loss_for_object_detection.py#nested_tensor_from_tensor_list",
+            "transformers/loss/loss_for_object_detection.py#sigmoid_focal_loss"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/loss/loss_for_object_detection.py#ForObjectDetectionLoss",
+        "filepath": "transformers/loss/loss_for_object_detection.py",
+        "comp_name": "ForObjectDetectionLoss",
+        "Dependencies": [
+            "transformers/loss/loss_for_object_detection.py#HungarianMatcher",
+            "transformers/loss/loss_for_object_detection.py#ImageLoss",
+            "transformers/loss/loss_for_object_detection.py#_set_aux_loss"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/loss/loss_for_object_detection.py#ForSegmentationLoss",
+        "filepath": "transformers/loss/loss_for_object_detection.py",
+        "comp_name": "ForSegmentationLoss",
+        "Dependencies": [
+            "transformers/loss/loss_for_object_detection.py#HungarianMatcher",
+            "transformers/loss/loss_for_object_detection.py#ImageLoss",
+            "transformers/loss/loss_for_object_detection.py#_set_aux_loss"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/loss/loss_grounding_dino.py#GroundingDinoHungarianMatcher",
+        "filepath": "transformers/loss/loss_grounding_dino.py",
+        "comp_name": "GroundingDinoHungarianMatcher",
+        "Dependencies": [
+            "transformers/image_transforms.py#center_to_corners_format",
+            "transformers/loss/loss_for_object_detection.py#HungarianMatcher",
+            "transformers/loss/loss_for_object_detection.py#generalized_box_iou"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/loss/loss_grounding_dino.py#GroundingDinoImageLoss",
+        "filepath": "transformers/loss/loss_grounding_dino.py",
+        "comp_name": "GroundingDinoImageLoss",
+        "Dependencies": [
+            "transformers/loss/loss_for_object_detection.py#ImageLoss",
+            "transformers/loss/loss_grounding_dino.py#sigmoid_focal_loss"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/loss/loss_grounding_dino.py#GroundingDinoForObjectDetectionLoss",
+        "filepath": "transformers/loss/loss_grounding_dino.py",
+        "comp_name": "GroundingDinoForObjectDetectionLoss",
+        "Dependencies": [
+            "transformers/loss/loss_for_object_detection.py#_set_aux_loss",
+            "transformers/loss/loss_grounding_dino.py#GroundingDinoHungarianMatcher",
+            "transformers/loss/loss_grounding_dino.py#GroundingDinoImageLoss"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_utils.py#_get_dtype",
+        "filepath": "transformers/modeling_utils.py",
+        "comp_name": "_get_dtype",
+        "Dependencies": [
+            "transformers/configuration_utils.py#PreTrainedConfig",
+            "transformers/modeling_utils.py#get_state_dict_dtype",
+            "transformers/modeling_utils.py#load_state_dict"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/quantizers/auto.py#AUTO_QUANTIZATION_CONFIG_MAPPING",
+        "filepath": "transformers/quantizers/auto.py",
+        "comp_name": "AUTO_QUANTIZATION_CONFIG_MAPPING",
+        "Dependencies": [
+            "transformers/utils/quantization_config.py#AqlmConfig",
+            "transformers/utils/quantization_config.py#AutoRoundConfig",
+            "transformers/utils/quantization_config.py#AwqConfig",
+            "transformers/utils/quantization_config.py#BitNetQuantConfig",
+            "transformers/utils/quantization_config.py#BitsAndBytesConfig",
+            "transformers/utils/quantization_config.py#CompressedTensorsConfig",
+            "transformers/utils/quantization_config.py#EetqConfig",
+            "transformers/utils/quantization_config.py#FPQuantConfig",
+            "transformers/utils/quantization_config.py#FbgemmFp8Config",
+            "transformers/utils/quantization_config.py#FineGrainedFP8Config",
+            "transformers/utils/quantization_config.py#GPTQConfig",
+            "transformers/utils/quantization_config.py#HiggsConfig",
+            "transformers/utils/quantization_config.py#HqqConfig",
+            "transformers/utils/quantization_config.py#Mxfp4Config",
+            "transformers/utils/quantization_config.py#QuantoConfig",
+            "transformers/utils/quantization_config.py#QuarkConfig",
+            "transformers/utils/quantization_config.py#SpQRConfig",
+            "transformers/utils/quantization_config.py#TorchAoConfig",
+            "transformers/utils/quantization_config.py#VptqConfig"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/quantizers/base.py#_assign_original_dtype",
+        "filepath": "transformers/quantizers/base.py",
+        "comp_name": "_assign_original_dtype",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/quantizers/quantizer_torchao.py#_quantization_type",
+        "filepath": "transformers/quantizers/quantizer_torchao.py",
+        "comp_name": "_quantization_type",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/quantizers/quantizer_torchao.py#_linear_extra_repr",
+        "filepath": "transformers/quantizers/quantizer_torchao.py",
+        "comp_name": "_linear_extra_repr",
+        "Dependencies": [
+            "transformers/quantizers/quantizer_torchao.py#_quantization_type"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/quantizers/auto.py#AutoQuantizationConfig",
+        "filepath": "transformers/quantizers/auto.py",
+        "comp_name": "AutoQuantizationConfig",
+        "Dependencies": [
+            "transformers/models/auto/configuration_auto.py#AutoConfig.from_pretrained",
+            "transformers/quantizers/auto.py#AUTO_QUANTIZATION_CONFIG_MAPPING",
+            "transformers/utils/quantization_config.py#QuantizationMethod.BITS_AND_BYTES"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/models/qwen3_moe/modeling_qwen3_moe.py#Qwen3MoeAttention",
+        "filepath": "transformers/models/qwen3_moe/modeling_qwen3_moe.py",
+        "comp_name": "Qwen3MoeAttention",
+        "Dependencies": [
+            "transformers/cache_utils.py#Cache",
+            "transformers/modeling_flash_attention_utils.py#FlashAttentionKwargs",
+            "transformers/modeling_utils.py#ALL_ATTENTION_FUNCTIONS",
+            "transformers/models/qwen3_moe/configuration_qwen3_moe.py#Qwen3MoeConfig",
+            "transformers/models/qwen3_moe/modeling_qwen3_moe.py#Qwen3MoeRMSNorm",
+            "transformers/models/qwen3_moe/modeling_qwen3_moe.py#apply_rotary_pos_emb",
+            "transformers/models/qwen3_moe/modeling_qwen3_moe.py#eager_attention_forward",
+            "transformers/processing_utils.py#Unpack"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#is_speech_available",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "is_speech_available",
+        "Dependencies": [
+            "transformers/utils/import_utils.py#is_torchaudio_available"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#BACKENDS_MAPPING",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "BACKENDS_MAPPING",
+        "Dependencies": [
+            "transformers/utils/import_utils.py#ACCELERATE_IMPORT_ERROR",
+            "transformers/utils/import_utils.py#AV_IMPORT_ERROR",
+            "transformers/utils/import_utils.py#BS4_IMPORT_ERROR",
+            "transformers/utils/import_utils.py#CCL_IMPORT_ERROR",
+            "transformers/utils/import_utils.py#CV2_IMPORT_ERROR",
+            "transformers/utils/import_utils.py#CYTHON_IMPORT_ERROR",
+            "transformers/utils/import_utils.py#DATASETS_IMPORT_ERROR",
+            "transformers/utils/import_utils.py#DECORD_IMPORT_ERROR",
+            "transformers/utils/import_utils.py#DETECTRON2_IMPORT_ERROR",
+            "transformers/utils/import_utils.py#ESSENTIA_IMPORT_ERROR",
+            "transformers/utils/import_utils.py#FAISS_IMPORT_ERROR",
+            "transformers/utils/import_utils.py#FASTAPI_IMPORT_ERROR",
+            "transformers/utils/import_utils.py#FTFY_IMPORT_ERROR",
+            "transformers/utils/import_utils.py#G2P_EN_IMPORT_ERROR",
+            "transformers/utils/import_utils.py#JINJA_IMPORT_ERROR",
+            "transformers/utils/import_utils.py#LEVENSHTEIN_IMPORT_ERROR",
+            "transformers/utils/import_utils.py#LIBROSA_IMPORT_ERROR",
+            "transformers/utils/import_utils.py#MISTRAL_COMMON_IMPORT_ERROR",
+            "transformers/utils/import_utils.py#NATTEN_IMPORT_ERROR",
+            "transformers/utils/import_utils.py#NLTK_IMPORT_ERROR",
+            "transformers/utils/import_utils.py#OPENAI_IMPORT_ERROR",
+            "transformers/utils/import_utils.py#PANDAS_IMPORT_ERROR",
+            "transformers/utils/import_utils.py#PEFT_IMPORT_ERROR",
+            "transformers/utils/import_utils.py#PHONEMIZER_IMPORT_ERROR",
+            "transformers/utils/import_utils.py#PRETTY_MIDI_IMPORT_ERROR",
+            "transformers/utils/import_utils.py#PROTOBUF_IMPORT_ERROR",
+            "transformers/utils/import_utils.py#PYCTCDECODE_IMPORT_ERROR",
+            "transformers/utils/import_utils.py#PYDANTIC_IMPORT_ERROR",
+            "transformers/utils/import_utils.py#PYTESSERACT_IMPORT_ERROR",
+            "transformers/utils/import_utils.py#PYTORCH_IMPORT_ERROR",
+            "transformers/utils/import_utils.py#PYTORCH_QUANTIZATION_IMPORT_ERROR",
+            "transformers/utils/import_utils.py#RICH_IMPORT_ERROR",
+            "transformers/utils/import_utils.py#RJIEBA_IMPORT_ERROR",
+            "transformers/utils/import_utils.py#SACREMOSES_IMPORT_ERROR",
+            "transformers/utils/import_utils.py#SCIPY_IMPORT_ERROR",
+            "transformers/utils/import_utils.py#SENTENCEPIECE_IMPORT_ERROR",
+            "transformers/utils/import_utils.py#SKLEARN_IMPORT_ERROR",
+            "transformers/utils/import_utils.py#SPEECH_IMPORT_ERROR",
+            "transformers/utils/import_utils.py#TIMM_IMPORT_ERROR",
+            "transformers/utils/import_utils.py#TOKENIZERS_IMPORT_ERROR",
+            "transformers/utils/import_utils.py#TORCHAUDIO_IMPORT_ERROR",
+            "transformers/utils/import_utils.py#TORCHCODEC_IMPORT_ERROR",
+            "transformers/utils/import_utils.py#TORCHVISION_IMPORT_ERROR",
+            "transformers/utils/import_utils.py#UROMAN_IMPORT_ERROR",
+            "transformers/utils/import_utils.py#UVICORN_IMPORT_ERROR",
+            "transformers/utils/import_utils.py#VISION_IMPORT_ERROR",
+            "transformers/utils/import_utils.py#YT_DLP_IMPORT_ERROR",
+            "transformers/utils/import_utils.py#is_accelerate_available",
+            "transformers/utils/import_utils.py#is_av_available",
+            "transformers/utils/import_utils.py#is_bs4_available",
+            "transformers/utils/import_utils.py#is_ccl_available",
+            "transformers/utils/import_utils.py#is_cv2_available",
+            "transformers/utils/import_utils.py#is_cython_available",
+            "transformers/utils/import_utils.py#is_datasets_available",
+            "transformers/utils/import_utils.py#is_decord_available",
+            "transformers/utils/import_utils.py#is_detectron2_available",
+            "transformers/utils/import_utils.py#is_essentia_available",
+            "transformers/utils/import_utils.py#is_faiss_available",
+            "transformers/utils/import_utils.py#is_fastapi_available",
+            "transformers/utils/import_utils.py#is_ftfy_available",
+            "transformers/utils/import_utils.py#is_g2p_en_available",
+            "transformers/utils/import_utils.py#is_jinja_available",
+            "transformers/utils/import_utils.py#is_levenshtein_available",
+            "transformers/utils/import_utils.py#is_librosa_available",
+            "transformers/utils/import_utils.py#is_mistral_common_available",
+            "transformers/utils/import_utils.py#is_natten_available",
+            "transformers/utils/import_utils.py#is_nltk_available",
+            "transformers/utils/import_utils.py#is_openai_available",
+            "transformers/utils/import_utils.py#is_pandas_available",
+            "transformers/utils/import_utils.py#is_peft_available",
+            "transformers/utils/import_utils.py#is_phonemizer_available",
+            "transformers/utils/import_utils.py#is_pretty_midi_available",
+            "transformers/utils/import_utils.py#is_protobuf_available",
+            "transformers/utils/import_utils.py#is_pyctcdecode_available",
+            "transformers/utils/import_utils.py#is_pydantic_available",
+            "transformers/utils/import_utils.py#is_pytesseract_available",
+            "transformers/utils/import_utils.py#is_pytorch_quantization_available",
+            "transformers/utils/import_utils.py#is_rich_available",
+            "transformers/utils/import_utils.py#is_rjieba_available",
+            "transformers/utils/import_utils.py#is_sacremoses_available",
+            "transformers/utils/import_utils.py#is_scipy_available",
+            "transformers/utils/import_utils.py#is_sentencepiece_available",
+            "transformers/utils/import_utils.py#is_sklearn_available",
+            "transformers/utils/import_utils.py#is_speech_available",
+            "transformers/utils/import_utils.py#is_timm_available",
+            "transformers/utils/import_utils.py#is_tokenizers_available",
+            "transformers/utils/import_utils.py#is_torch_available",
+            "transformers/utils/import_utils.py#is_torchaudio_available",
+            "transformers/utils/import_utils.py#is_torchcodec_available",
+            "transformers/utils/import_utils.py#is_torchvision_available",
+            "transformers/utils/import_utils.py#is_uroman_available",
+            "transformers/utils/import_utils.py#is_uvicorn_available",
+            "transformers/utils/import_utils.py#is_vision_available",
+            "transformers/utils/import_utils.py#is_yt_dlp_available"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#Backend",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "Backend",
+        "Dependencies": [
+            "transformers/utils/import_utils.py#BACKENDS_MAPPING",
+            "transformers/utils/import_utils.py#VersionComparison",
+            "transformers/utils/import_utils.py#_is_package_available",
+            "transformers/utils/import_utils.py#split_package_version"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/import_utils.py#requires",
+        "filepath": "transformers/utils/import_utils.py",
+        "comp_name": "requires",
+        "Dependencies": [
+            "transformers/utils/import_utils.py#BACKENDS_MAPPING",
+            "transformers/utils/import_utils.py#Backend"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/generic.py#OutputRecorder",
+        "filepath": "transformers/utils/generic.py",
+        "comp_name": "OutputRecorder",
+        "Dependencies": [
+            "transformers/utils/import_utils.py#requires"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/utils/generic.py#check_model_inputs",
+        "filepath": "transformers/utils/generic.py",
+        "comp_name": "check_model_inputs",
+        "Dependencies": [
+            "transformers/utils/generic.py#OutputRecorder",
+            "transformers/utils/generic.py#_CAN_RECORD_REGISTRY"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/loss/loss_rt_detr.py#RTDetrHungarianMatcher",
+        "filepath": "transformers/loss/loss_rt_detr.py",
+        "comp_name": "RTDetrHungarianMatcher",
+        "Dependencies": [
+            "transformers/image_transforms.py#center_to_corners_format",
+            "transformers/loss/loss_for_object_detection.py#generalized_box_iou",
+            "transformers/utils.py#requires_backends"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/loss/loss_deformable_detr.py#DeformableDetrHungarianMatcher",
+        "filepath": "transformers/loss/loss_deformable_detr.py",
+        "comp_name": "DeformableDetrHungarianMatcher",
+        "Dependencies": [
+            "transformers/image_transforms.py#center_to_corners_format",
+            "transformers/loss/loss_for_object_detection.py#HungarianMatcher",
+            "transformers/loss/loss_for_object_detection.py#generalized_box_iou"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/loss/loss_deformable_detr.py#DeformableDetrImageLoss",
+        "filepath": "transformers/loss/loss_deformable_detr.py",
+        "comp_name": "DeformableDetrImageLoss",
+        "Dependencies": [
+            "transformers/loss/loss_for_object_detection.py#ImageLoss",
+            "transformers/loss/loss_for_object_detection.py#sigmoid_focal_loss"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/loss/loss_deformable_detr.py#DeformableDetrForObjectDetectionLoss",
+        "filepath": "transformers/loss/loss_deformable_detr.py",
+        "comp_name": "DeformableDetrForObjectDetectionLoss",
+        "Dependencies": [
+            "transformers/loss/loss_deformable_detr.py#DeformableDetrHungarianMatcher",
+            "transformers/loss/loss_deformable_detr.py#DeformableDetrImageLoss",
+            "transformers/loss/loss_for_object_detection.py#_set_aux_loss"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/loss/loss_deformable_detr.py#DeformableDetrForSegmentationLoss",
+        "filepath": "transformers/loss/loss_deformable_detr.py",
+        "comp_name": "DeformableDetrForSegmentationLoss",
+        "Dependencies": [
+            "transformers/loss/loss_deformable_detr.py#DeformableDetrImageLoss",
+            "transformers/loss/loss_for_object_detection.py#HungarianMatcher",
+            "transformers/loss/loss_for_object_detection.py#_set_aux_loss"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/loss/loss_rt_detr.py#RTDetrLoss",
+        "filepath": "transformers/loss/loss_rt_detr.py",
+        "comp_name": "RTDetrLoss",
+        "Dependencies": [
+            "transformers/image_transforms.py#center_to_corners_format",
+            "transformers/loss/loss_for_object_detection.py#box_iou",
+            "transformers/loss/loss_for_object_detection.py#dice_loss",
+            "transformers/loss/loss_for_object_detection.py#generalized_box_iou",
+            "transformers/loss/loss_for_object_detection.py#nested_tensor_from_tensor_list",
+            "transformers/loss/loss_for_object_detection.py#sigmoid_focal_loss",
+            "transformers/loss/loss_rt_detr.py#RTDetrHungarianMatcher"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/loss/loss_rt_detr.py#RTDetrForObjectDetectionLoss",
+        "filepath": "transformers/loss/loss_rt_detr.py",
+        "comp_name": "RTDetrForObjectDetectionLoss",
+        "Dependencies": [
+            "transformers/loss/loss_rt_detr.py#RTDetrLoss",
+            "transformers/loss/loss_rt_detr.py#_set_aux_loss"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/quantizers/base.py#SequentialLlama4TextExperts",
+        "filepath": "transformers/quantizers/base.py",
+        "comp_name": "SequentialLlama4TextExperts",
+        "Dependencies": [],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/quantizers/base.py#MODULES_TO_PATCH_FOR_QUANTIZATION",
+        "filepath": "transformers/quantizers/base.py",
+        "comp_name": "MODULES_TO_PATCH_FOR_QUANTIZATION",
+        "Dependencies": [
+            "transformers/quantizers/base.py#SequentialLlama4TextExperts",
+            "transformers/utils/quantization_config.py#QuantizationMethod.BITS_AND_BYTES",
+            "transformers/utils/quantization_config.py#QuantizationMethod.COMPRESSED_TENSORS"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/quantizers/base.py#HfQuantizer",
+        "filepath": "transformers/quantizers/base.py",
+        "comp_name": "HfQuantizer",
+        "Dependencies": [
+            "transformers/quantizers/base.py#MODULES_TO_PATCH_FOR_QUANTIZATION",
+            "transformers/quantizers/base.py#_assign_original_dtype",
+            "transformers/quantizers/quantizers_utils.py#get_module_from_name",
+            "transformers/utils/quantization_config.py#QuantizationConfigMixin"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/quantizers/quantizer_aqlm.py#AqlmHfQuantizer",
+        "filepath": "transformers/quantizers/quantizer_aqlm.py",
+        "comp_name": "AqlmHfQuantizer",
+        "Dependencies": [
+            "transformers/integrations.py#replace_with_aqlm_linear",
+            "transformers/quantizers/base.py#HfQuantizer",
+            "transformers/utils.py#is_accelerate_available",
+            "transformers/utils.py#is_aqlm_available",
+            "transformers/utils/quantization_config.py#QuantizationConfigMixin"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/quantizers/quantizer_auto_round.py#AutoRoundQuantizer",
+        "filepath": "transformers/quantizers/quantizer_auto_round.py",
+        "comp_name": "AutoRoundQuantizer",
+        "Dependencies": [
+            "transformers/quantizers/base.py#HfQuantizer",
+            "transformers/utils.py#is_auto_round_available",
+            "transformers/utils/quantization_config.py#QuantizationConfigMixin"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/quantizers/quantizer_awq.py#AwqQuantizer",
+        "filepath": "transformers/quantizers/quantizer_awq.py",
+        "comp_name": "AwqQuantizer",
+        "Dependencies": [
+            "transformers/quantizers/base.py#HfQuantizer",
+            "transformers/utils.py#is_accelerate_available",
+            "transformers/utils.py#is_auto_awq_available",
+            "transformers/utils/quantization_config.py#AWQLinearVersion.EXLLAMA",
+            "transformers/utils/quantization_config.py#AWQLinearVersion.GEMM",
+            "transformers/utils/quantization_config.py#AWQLinearVersion.IPEX"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/quantizers/quantizer_bitnet.py#BitNetHfQuantizer",
+        "filepath": "transformers/quantizers/quantizer_bitnet.py",
+        "comp_name": "BitNetHfQuantizer",
+        "Dependencies": [
+            "transformers/quantizers/base.py#HfQuantizer"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/quantizers/quantizer_bnb_4bit.py#Bnb4BitHfQuantizer",
+        "filepath": "transformers/quantizers/quantizer_bnb_4bit.py",
+        "comp_name": "Bnb4BitHfQuantizer",
+        "Dependencies": [
+            "transformers/quantizers/base.py#HfQuantizer",
+            "transformers/quantizers/quantizers_utils.py#get_module_from_name",
+            "transformers/utils.py#is_accelerate_available",
+            "transformers/utils.py#is_bitsandbytes_available",
+            "transformers/utils.py#is_torch_hpu_available",
+            "transformers/utils.py#is_torch_npu_available",
+            "transformers/utils.py#is_torch_xpu_available"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/quantizers/quantizer_bnb_8bit.py#Bnb8BitHfQuantizer",
+        "filepath": "transformers/quantizers/quantizer_bnb_8bit.py",
+        "comp_name": "Bnb8BitHfQuantizer",
+        "Dependencies": [
+            "transformers/quantizers/base.py#HfQuantizer",
+            "transformers/quantizers/quantizers_utils.py#get_module_from_name",
+            "transformers/utils.py#is_torch_xpu_available"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/quantizers/quantizer_compressed_tensors.py#CompressedTensorsHfQuantizer",
+        "filepath": "transformers/quantizers/quantizer_compressed_tensors.py",
+        "comp_name": "CompressedTensorsHfQuantizer",
+        "Dependencies": [
+            "transformers/quantizers/base.py#HfQuantizer",
+            "transformers/utils.py#is_compressed_tensors_available",
+            "transformers/utils.py#is_torch_available",
+            "transformers/utils/quantization_config.py#CompressedTensorsConfig"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/quantizers/quantizer_eetq.py#EetqHfQuantizer",
+        "filepath": "transformers/quantizers/quantizer_eetq.py",
+        "comp_name": "EetqHfQuantizer",
+        "Dependencies": [
+            "transformers/quantizers/base.py#HfQuantizer",
+            "transformers/quantizers/quantizers_utils.py#get_module_from_name",
+            "transformers/utils.py#is_accelerate_available",
+            "transformers/utils.py#is_eetq_available"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/quantizers/quantizer_fbgemm_fp8.py#FbgemmFp8HfQuantizer",
+        "filepath": "transformers/quantizers/quantizer_fbgemm_fp8.py",
+        "comp_name": "FbgemmFp8HfQuantizer",
+        "Dependencies": [
+            "transformers/quantizers/base.py#HfQuantizer",
+            "transformers/quantizers/quantizers_utils.py#get_module_from_name",
+            "transformers/utils.py#is_accelerate_available",
+            "transformers/utils.py#is_fbgemm_gpu_available",
+            "transformers/utils.py#is_torch_available"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/quantizers/quantizer_finegrained_fp8.py#FineGrainedFP8HfQuantizer",
+        "filepath": "transformers/quantizers/quantizer_finegrained_fp8.py",
+        "comp_name": "FineGrainedFP8HfQuantizer",
+        "Dependencies": [
+            "transformers/quantizers/base.py#HfQuantizer",
+            "transformers/quantizers/quantizers_utils.py#get_module_from_name",
+            "transformers/utils.py#is_accelerate_available",
+            "transformers/utils.py#is_torch_available",
+            "transformers/utils.py#is_torch_xpu_available"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/quantizers/quantizer_fp_quant.py#FPQuantHfQuantizer",
+        "filepath": "transformers/quantizers/quantizer_fp_quant.py",
+        "comp_name": "FPQuantHfQuantizer",
+        "Dependencies": [
+            "transformers/quantizers/base.py#HfQuantizer",
+            "transformers/quantizers/quantizers_utils.py#get_module_from_name",
+            "transformers/utils.py#is_fp_quant_available",
+            "transformers/utils.py#is_qutlass_available",
+            "transformers/utils/quantization_config.py#QuantizationConfigMixin"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/quantizers/quantizer_gptq.py#GptqHfQuantizer",
+        "filepath": "transformers/quantizers/quantizer_gptq.py",
+        "comp_name": "GptqHfQuantizer",
+        "Dependencies": [
+            "transformers/quantizers/base.py#HfQuantizer",
+            "transformers/utils.py#is_auto_gptq_available",
+            "transformers/utils.py#is_gptqmodel_available",
+            "transformers/utils.py#is_optimum_available",
+            "transformers/utils/quantization_config.py#GPTQConfig.from_dict",
+            "transformers/utils/quantization_config.py#QuantizationConfigMixin"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/quantizers/quantizer_higgs.py#HiggsHfQuantizer",
+        "filepath": "transformers/quantizers/quantizer_higgs.py",
+        "comp_name": "HiggsHfQuantizer",
+        "Dependencies": [
+            "transformers/quantizers/base.py#HfQuantizer",
+            "transformers/quantizers/quantizers_utils.py#get_module_from_name",
+            "transformers/utils.py#is_accelerate_available",
+            "transformers/utils.py#is_flute_available",
+            "transformers/utils.py#is_hadamard_available",
+            "transformers/utils/quantization_config.py#QuantizationConfigMixin"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/quantizers/quantizer_hqq.py#HqqHfQuantizer",
+        "filepath": "transformers/quantizers/quantizer_hqq.py",
+        "comp_name": "HqqHfQuantizer",
+        "Dependencies": [
+            "transformers/integrations.py#prepare_for_hqq_linear",
+            "transformers/quantizers/base.py#HfQuantizer",
+            "transformers/quantizers/quantizers_utils.py#get_module_from_name",
+            "transformers/utils.py#is_hqq_available"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/quantizers/quantizer_mxfp4.py#Mxfp4HfQuantizer",
+        "filepath": "transformers/quantizers/quantizer_mxfp4.py",
+        "comp_name": "Mxfp4HfQuantizer",
+        "Dependencies": [
+            "transformers/quantizers/base.py#HfQuantizer",
+            "transformers/quantizers/quantizers_utils.py#get_module_from_name",
+            "transformers/utils.py#is_accelerate_available",
+            "transformers/utils.py#is_kernels_available",
+            "transformers/utils.py#is_torch_available",
+            "transformers/utils.py#is_triton_available"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/quantizers/quantizer_quanto.py#QuantoHfQuantizer",
+        "filepath": "transformers/quantizers/quantizer_quanto.py",
+        "comp_name": "QuantoHfQuantizer",
+        "Dependencies": [
+            "transformers/quantizers/base.py#HfQuantizer",
+            "transformers/quantizers/quantizers_utils.py#get_module_from_name",
+            "transformers/utils.py#is_accelerate_available",
+            "transformers/utils.py#is_optimum_quanto_available",
+            "transformers/utils/quantization_config.py#QuantoConfig"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/quantizers/quantizer_quark.py#QuarkHfQuantizer",
+        "filepath": "transformers/quantizers/quantizer_quark.py",
+        "comp_name": "QuarkHfQuantizer",
+        "Dependencies": [
+            "transformers/quantizers/base.py#HfQuantizer",
+            "transformers/quantizers/quantizer_quark.py#CHECKPOINT_KEYS",
+            "transformers/utils.py#is_quark_available"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/quantizers/quantizer_spqr.py#SpQRHfQuantizer",
+        "filepath": "transformers/quantizers/quantizer_spqr.py",
+        "comp_name": "SpQRHfQuantizer",
+        "Dependencies": [
+            "transformers/integrations.py#replace_with_spqr_linear",
+            "transformers/quantizers/base.py#HfQuantizer",
+            "transformers/utils.py#is_accelerate_available",
+            "transformers/utils.py#is_spqr_available",
+            "transformers/utils/quantization_config.py#QuantizationConfigMixin"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/quantizers/quantizer_torchao.py#TorchAoHfQuantizer",
+        "filepath": "transformers/quantizers/quantizer_torchao.py",
+        "comp_name": "TorchAoHfQuantizer",
+        "Dependencies": [
+            "transformers/quantizers/base.py#HfQuantizer",
+            "transformers/quantizers/quantizer_torchao.py#_linear_extra_repr",
+            "transformers/quantizers/quantizer_torchao.py#fuzzy_match_size",
+            "transformers/quantizers/quantizers_utils.py#get_module_from_name",
+            "transformers/utils.py#is_torchao_available"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/quantizers/quantizer_vptq.py#VptqHfQuantizer",
+        "filepath": "transformers/quantizers/quantizer_vptq.py",
+        "comp_name": "VptqHfQuantizer",
+        "Dependencies": [
+            "transformers/quantizers/base.py#HfQuantizer",
+            "transformers/utils.py#is_accelerate_available",
+            "transformers/utils.py#is_vptq_available",
+            "transformers/utils/quantization_config.py#QuantizationConfigMixin"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/quantizers/auto.py#AUTO_QUANTIZER_MAPPING",
+        "filepath": "transformers/quantizers/auto.py",
+        "comp_name": "AUTO_QUANTIZER_MAPPING",
+        "Dependencies": [
+            "transformers/quantizers/quantizer_aqlm.py#AqlmHfQuantizer",
+            "transformers/quantizers/quantizer_auto_round.py#AutoRoundQuantizer",
+            "transformers/quantizers/quantizer_awq.py#AwqQuantizer",
+            "transformers/quantizers/quantizer_bitnet.py#BitNetHfQuantizer",
+            "transformers/quantizers/quantizer_bnb_4bit.py#Bnb4BitHfQuantizer",
+            "transformers/quantizers/quantizer_bnb_8bit.py#Bnb8BitHfQuantizer",
+            "transformers/quantizers/quantizer_compressed_tensors.py#CompressedTensorsHfQuantizer",
+            "transformers/quantizers/quantizer_eetq.py#EetqHfQuantizer",
+            "transformers/quantizers/quantizer_fbgemm_fp8.py#FbgemmFp8HfQuantizer",
+            "transformers/quantizers/quantizer_finegrained_fp8.py#FineGrainedFP8HfQuantizer",
+            "transformers/quantizers/quantizer_fp_quant.py#FPQuantHfQuantizer",
+            "transformers/quantizers/quantizer_gptq.py#GptqHfQuantizer",
+            "transformers/quantizers/quantizer_higgs.py#HiggsHfQuantizer",
+            "transformers/quantizers/quantizer_hqq.py#HqqHfQuantizer",
+            "transformers/quantizers/quantizer_mxfp4.py#Mxfp4HfQuantizer",
+            "transformers/quantizers/quantizer_quanto.py#QuantoHfQuantizer",
+            "transformers/quantizers/quantizer_quark.py#QuarkHfQuantizer",
+            "transformers/quantizers/quantizer_spqr.py#SpQRHfQuantizer",
+            "transformers/quantizers/quantizer_torchao.py#TorchAoHfQuantizer",
+            "transformers/quantizers/quantizer_vptq.py#VptqHfQuantizer"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/quantizers/auto.py#AutoHfQuantizer",
+        "filepath": "transformers/quantizers/auto.py",
+        "comp_name": "AutoHfQuantizer",
+        "Dependencies": [
+            "transformers/quantizers/auto.py#AUTO_QUANTIZATION_CONFIG_MAPPING",
+            "transformers/quantizers/auto.py#AUTO_QUANTIZER_MAPPING",
+            "transformers/quantizers/auto.py#AutoQuantizationConfig",
+            "transformers/utils/quantization_config.py#AutoRoundConfig",
+            "transformers/utils/quantization_config.py#AutoRoundConfig.from_dict",
+            "transformers/utils/quantization_config.py#AwqConfig",
+            "transformers/utils/quantization_config.py#CompressedTensorsConfig",
+            "transformers/utils/quantization_config.py#FbgemmFp8Config",
+            "transformers/utils/quantization_config.py#GPTQConfig",
+            "transformers/utils/quantization_config.py#Mxfp4Config",
+            "transformers/utils/quantization_config.py#QuantizationConfigMixin",
+            "transformers/utils/quantization_config.py#QuantizationMethod.BITS_AND_BYTES"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/quantizers/auto.py#get_hf_quantizer",
+        "filepath": "transformers/quantizers/auto.py",
+        "comp_name": "get_hf_quantizer",
+        "Dependencies": [
+            "transformers/quantizers/auto.py#AutoHfQuantizer"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/loss/loss_d_fine.py#DFineLoss",
+        "filepath": "transformers/loss/loss_d_fine.py",
+        "comp_name": "DFineLoss",
+        "Dependencies": [
+            "transformers/image_transforms.py#center_to_corners_format",
+            "transformers/loss/loss_d_fine.py#bbox2distance",
+            "transformers/loss/loss_for_object_detection.py#box_iou",
+            "transformers/loss/loss_rt_detr.py#RTDetrHungarianMatcher",
+            "transformers/loss/loss_rt_detr.py#RTDetrLoss"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/loss/loss_d_fine.py#DFineForObjectDetectionLoss",
+        "filepath": "transformers/loss/loss_d_fine.py",
+        "comp_name": "DFineForObjectDetectionLoss",
+        "Dependencies": [
+            "transformers/loss/loss_d_fine.py#DFineLoss",
+            "transformers/loss/loss_d_fine.py#_set_aux_loss",
+            "transformers/loss/loss_d_fine.py#_set_aux_loss2"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/loss/loss_utils.py#LOSS_MAPPING",
+        "filepath": "transformers/loss/loss_utils.py",
+        "comp_name": "LOSS_MAPPING",
+        "Dependencies": [
+            "transformers/loss/loss_d_fine.py#DFineForObjectDetectionLoss",
+            "transformers/loss/loss_deformable_detr.py#DeformableDetrForObjectDetectionLoss",
+            "transformers/loss/loss_deformable_detr.py#DeformableDetrForSegmentationLoss",
+            "transformers/loss/loss_for_object_detection.py#ForObjectDetectionLoss",
+            "transformers/loss/loss_for_object_detection.py#ForSegmentationLoss",
+            "transformers/loss/loss_grounding_dino.py#GroundingDinoForObjectDetectionLoss",
+            "transformers/loss/loss_rt_detr.py#RTDetrForObjectDetectionLoss",
+            "transformers/loss/loss_utils.py#ForCausalLMLoss",
+            "transformers/loss/loss_utils.py#ForMaskedLMLoss",
+            "transformers/loss/loss_utils.py#ForQuestionAnsweringLoss",
+            "transformers/loss/loss_utils.py#ForSequenceClassificationLoss",
+            "transformers/loss/loss_utils.py#ForTokenClassification"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/modeling_utils.py#PreTrainedModel",
+        "filepath": "transformers/modeling_utils.py",
+        "comp_name": "PreTrainedModel",
+        "Dependencies": [
+            "transformers/configuration_utils.py#PreTrainedConfig",
+            "transformers/distributed.py#DistributedConfig",
+            "transformers/dynamic_module_utils.py#custom_object_save",
+            "transformers/generation.py#CompileConfig",
+            "transformers/generation.py#GenerationConfig.from_model_config",
+            "transformers/integrations.py#PeftAdapterMixin",
+            "transformers/integrations.py#deepspeed_config",
+            "transformers/integrations.py#is_deepspeed_zero3_enabled",
+            "transformers/integrations.py#is_fsdp_enabled",
+            "transformers/integrations/accelerate.py#_get_device_map",
+            "transformers/integrations/accelerate.py#accelerate_disk_offload",
+            "transformers/integrations/accelerate.py#accelerate_dispatch",
+            "transformers/integrations/accelerate.py#check_and_set_device_map",
+            "transformers/integrations/accelerate.py#expand_device_map",
+            "transformers/integrations/accelerate.py#init_empty_weights",
+            "transformers/integrations/hub_kernels.py#is_kernel",
+            "transformers/integrations/hub_kernels.py#load_and_register_attn_kernel",
+            "transformers/integrations/peft.py#maybe_load_adapters",
+            "transformers/integrations/tensor_parallel.py#ALL_PARALLEL_STYLES",
+            "transformers/integrations/tensor_parallel.py#ALL_PARALLEL_STYLES.keys",
+            "transformers/integrations/tensor_parallel.py#_get_parameter_tp_plan",
+            "transformers/integrations/tensor_parallel.py#distribute_model",
+            "transformers/integrations/tensor_parallel.py#initialize_tensor_parallelism",
+            "transformers/integrations/tensor_parallel.py#repack_weights",
+            "transformers/integrations/tensor_parallel.py#replace_state_dict_local_with_dtensor",
+            "transformers/integrations/tensor_parallel.py#shard_and_distribute_module",
+            "transformers/integrations/tensor_parallel.py#verify_tp_plan",
+            "transformers/loss/loss_utils.py#LOSS_MAPPING",
+            "transformers/modeling_flash_attention_utils.py#lazy_import_flash_attention",
+            "transformers/modeling_utils.py#EmbeddingAccessMixin",
+            "transformers/modeling_utils.py#ModuleUtilsMixin",
+            "transformers/modeling_utils.py#SpecificPreTrainedModelType",
+            "transformers/modeling_utils.py#VLMS",
+            "transformers/modeling_utils.py#_add_variant",
+            "transformers/modeling_utils.py#_find_disjoint",
+            "transformers/modeling_utils.py#_find_identical",
+            "transformers/modeling_utils.py#_find_mismatched_keys",
+            "transformers/modeling_utils.py#_find_missing_and_unexpected_keys",
+            "transformers/modeling_utils.py#_get_dtype",
+            "transformers/modeling_utils.py#_get_resolved_checkpoint_files",
+            "transformers/modeling_utils.py#_get_tied_weight_keys",
+            "transformers/modeling_utils.py#_infer_parameter_dtype",
+            "transformers/modeling_utils.py#_init_weights",
+            "transformers/modeling_utils.py#_is_ds_init_called",
+            "transformers/modeling_utils.py#_is_dtensor_available",
+            "transformers/modeling_utils.py#_is_quantized",
+            "transformers/modeling_utils.py#_load_parameter_into_model",
+            "transformers/modeling_utils.py#_torch_distributed_available",
+            "transformers/modeling_utils.py#get_parameter_dtype",
+            "transformers/modeling_utils.py#is_accelerator_device",
+            "transformers/modeling_utils.py#is_local_dist_rank_0",
+            "transformers/modeling_utils.py#load_shard_file",
+            "transformers/modeling_utils.py#load_shard_files_with_threadpool",
+            "transformers/modeling_utils.py#load_state_dict",
+            "transformers/modeling_utils.py#no_init_weights",
+            "transformers/modeling_utils.py#restore_default_dtype",
+            "transformers/modeling_utils.py#set_quantized_state",
+            "transformers/modeling_utils.py#set_zero3_state",
+            "transformers/modeling_utils.py#unwrap_model",
+            "transformers/pytorch_utils.py#id_tensor_storage",
+            "transformers/quantizers.py#HfQuantizer",
+            "transformers/quantizers/auto.py#get_hf_quantizer",
+            "transformers/quantizers/quantizers_utils.py#get_module_from_name",
+            "transformers/utils.py#ADAPTER_SAFE_WEIGHTS_NAME",
+            "transformers/utils.py#ADAPTER_WEIGHTS_NAME",
+            "transformers/utils.py#ContextManagers",
+            "transformers/utils.py#DUMMY_INPUTS",
+            "transformers/utils.py#KernelConfig",
+            "transformers/utils.py#PushToHubMixin",
+            "transformers/utils.py#PushToHubMixin.push_to_hub",
+            "transformers/utils.py#SAFE_WEIGHTS_INDEX_NAME",
+            "transformers/utils.py#SAFE_WEIGHTS_NAME",
+            "transformers/utils.py#WEIGHTS_INDEX_NAME",
+            "transformers/utils.py#WEIGHTS_NAME",
+            "transformers/utils.py#is_accelerate_available",
+            "transformers/utils.py#is_flash_attn_2_available",
+            "transformers/utils.py#is_flash_attn_3_available",
+            "transformers/utils.py#is_kernels_available",
+            "transformers/utils.py#is_offline_mode",
+            "transformers/utils.py#is_torch_flex_attn_available",
+            "transformers/utils.py#is_torch_mlu_available",
+            "transformers/utils.py#is_torch_npu_available",
+            "transformers/utils/generic.py#OutputRecorder",
+            "transformers/utils/generic.py#_CAN_RECORD_REGISTRY",
+            "transformers/utils/import_utils.py#ENV_VARS_TRUE_VALUES",
+            "transformers/utils/import_utils.py#is_huggingface_hub_greater_or_equal",
+            "transformers/utils/quantization_config.py#QuantizationMethod.BITS_AND_BYTES",
+            "transformers/utils/quantization_config.py#QuantizationMethod.GPTQ",
+            "transformers/utils/quantization_config.py#QuantizationMethod.HQQ",
+            "transformers/utils/quantization_config.py#QuantizationMethod.QUARK"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/models/qwen3_moe/modeling_qwen3_moe.py#Qwen3MoePreTrainedModel",
+        "filepath": "transformers/models/qwen3_moe/modeling_qwen3_moe.py",
+        "comp_name": "Qwen3MoePreTrainedModel",
+        "Dependencies": [
+            "transformers/modeling_utils.py#PreTrainedModel",
+            "transformers/models/qwen3_moe/configuration_qwen3_moe.py#Qwen3MoeConfig",
+            "transformers/models/qwen3_moe/modeling_qwen3_moe.py#Qwen3MoeAttention",
+            "transformers/models/qwen3_moe/modeling_qwen3_moe.py#Qwen3MoeDecoderLayer",
+            "transformers/utils.py#auto_docstring",
+            "transformers/utils/generic.py#OutputRecorder"
+        ],
+        "JaxDependencies": {}
+    },
+    {
+        "comp_id": "transformers/models/qwen3_moe/modeling_qwen3_moe.py#Qwen3MoeModel",
+        "filepath": "transformers/models/qwen3_moe/modeling_qwen3_moe.py",
+        "comp_name": "Qwen3MoeModel",
+        "Dependencies": [
+            "transformers/cache_utils.py#Cache",
+            "transformers/cache_utils.py#DynamicCache",
+            "transformers/masking_utils.py#create_causal_mask",
+            "transformers/masking_utils.py#create_sliding_window_causal_mask",
+            "transformers/modeling_outputs.py#MoeModelOutputWithPast",
+            "transformers/models/qwen3_moe/configuration_qwen3_moe.py#Qwen3MoeConfig",
+            "transformers/models/qwen3_moe/modeling_qwen3_moe.py#Qwen3MoeDecoderLayer",
+            "transformers/models/qwen3_moe/modeling_qwen3_moe.py#Qwen3MoePreTrainedModel",
+            "transformers/models/qwen3_moe/modeling_qwen3_moe.py#Qwen3MoeRMSNorm",
+            "transformers/models/qwen3_moe/modeling_qwen3_moe.py#Qwen3MoeRotaryEmbedding",
+            "transformers/processing_utils.py#Unpack",
+            "transformers/utils.py#TransformersKwargs",
+            "transformers/utils.py#auto_docstring",
+            "transformers/utils/generic.py#check_model_inputs"
+        ],
+        "JaxDependencies": {
+            "transformers/models/qwen3_moe/modeling_qwen3_moe.py#Qwen3MoeDecoderLayer": [
+                [
+                    0.18296018242835999,
+                    "src/MaxText/layers/qwen3.py#Qwen3MoeDecoderLayer",
+                    "src/MaxText/layers/qwen3.py",
+                    "class Qwen3MoeDecoderLayer(AttentionWithNorm):\n  \"\"\"Qwen3 Transformer decoder layer (MoE).\"\"\"\n\n  def __init__(\n      self,\n      config: Config,\n      mesh: Mesh,\n      model_mode: str,\n      quant: None | Quant,\n      rngs: nnx.Rngs,\n  ):\n    super().__init__(config, mesh, model_mode, quant, rngs)\n    self.moe_block = RoutedMoE(\n        config=config,\n        num_experts=config.num_experts,\n        num_experts_per_tok=config.num_experts_per_tok,\n        mesh=mesh,\n        kernel_init=max_initializers.nd_dense_init(1.0, \"fan_in\", \"truncated_normal\"),\n        kernel_axes=(\"embed\", None),\n        intermediate_dim=config.moe_mlp_dim,  # same as config.mlp_dim\n        dtype=config.dtype,\n        weight_dtype=config.weight_dtype,\n        quant=quant,\n        rngs=rngs,\n    )\n\n  def __call__(\n      self,\n      inputs: jnp.ndarray,\n      decoder_segment_ids: None | jnp.ndarray,\n      decoder_positions: None | jnp.ndarray,\n      deterministic: bool,\n      model_mode: str,\n      previous_chunk=None,\n      page_state: None | page_manager.PageState = None,\n      slot: None | int = None,\n  ):\n    hidden_states, intermediate_inputs = self.apply_attention_with_norm(\n        inputs, decoder_segment_ids, decoder_positions, deterministic, model_mode\n    )\n\n    mlp_lnx, load_balance_loss = self.moe_block(hidden_states)\n    mlp_lnx = nn.with_logical_constraint(mlp_lnx, self.activation_axis_names)\n    if load_balance_loss is not None:\n      self.sow(\"intermediates\", \"moe_lb_loss\", load_balance_loss)\n\n    layer_output = intermediate_inputs + mlp_lnx\n    layer_output = nn.with_logical_constraint(layer_output, self.activation_axis_names)\n\n    if self.config.scan_layers:\n      return layer_output, None\n    else:\n      return layer_output"
+                ]
+            ]
+        }
+    },
+    {
+        "comp_id": "transformers/models/qwen3_moe/modeling_qwen3_moe.py#Qwen3MoeForCausalLM",
+        "filepath": "transformers/models/qwen3_moe/modeling_qwen3_moe.py",
+        "comp_name": "Qwen3MoeForCausalLM",
+        "Dependencies": [
+            "transformers/cache_utils.py#Cache",
+            "transformers/generation.py#GenerationMixin",
+            "transformers/modeling_outputs.py#MoeCausalLMOutputWithPast",
+            "transformers/modeling_outputs.py#MoeModelOutputWithPast",
+            "transformers/models/qwen3_moe/modeling_qwen3_moe.py#Qwen3MoeModel",
+            "transformers/models/qwen3_moe/modeling_qwen3_moe.py#Qwen3MoePreTrainedModel",
+            "transformers/models/qwen3_moe/modeling_qwen3_moe.py#load_balancing_loss_func",
+            "transformers/processing_utils.py#Unpack",
+            "transformers/utils.py#TransformersKwargs",
+            "transformers/utils.py#auto_docstring",
+            "transformers/utils.py#can_return_tuple"
+        ],
+        "JaxDependencies": {}
+    }
+]

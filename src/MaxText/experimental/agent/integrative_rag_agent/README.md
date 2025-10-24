@@ -48,7 +48,23 @@ This will create embedding_cache.db and maxtext_blocks.json under the dataset fo
 
 ```python llm_rag_embedding_generation.py```
 
-This will generate descriptions for all MaxText code blocks scraped in step 1 and create embeddings for them. The results will be saved in the sag_store.db database.
+This will generate descriptions for all MaxText code blocks scraped in step 1 and create embeddings for them. The results will be saved in the rag_store.db database.
+
+This step takes ~2 hours. To skip this and use the pre-generated files, copy the dataset folder from examples/dataset directly into the integrative_rag_agent/ folder.
+
+The final file structure should look like this:
+
+```
+integrative_rag_agent/
+├── dataset/
+│   ├── rag_store.db
+│   ├── maxtext_blocks.json
+│   └── maxtext_blocks_description.json
+├── llm_rag_embedding_generation.py
+└── ... (other agent files)
+```
+
+Once completed, this step and step1 need not be repeated every time you convert new code. You can reuse the blocks and descriptions generated in steps 1 and 2, unless Maxtext has a recent change that updates the blocks.
 
 3.**Get the file and class name for the model you want to convert**
 Copy the model ID from Hugging Face and run:
@@ -59,7 +75,7 @@ Copy the model ID from Hugging Face and run:
 
    ```python get_model_info.py --model-id Qwen/Qwen3-235B-A22B-Thinking-2507-FP8```
 
-   This will return the class name and file path from transformers. and these will be used in following step as filepath and  module_name. You need to use this information in step 4.
+   This will return the class name and file path from transformers. and these will be used in following step as filepath and module_name. You need to use this information in step 4.
 
 
 4.**Sort components in hierarchical order**
@@ -72,12 +88,33 @@ Example:
 
 This will generate a file Qwen3MoeForCausalLM_files_order.json in the results/ folder.
 The file contains the list of modules for Qwen3MoeForCausalLM along with their dependencies.
-By default, this use llm to filter out caching/checkpoints, debug code and etc. To disable llm filter (warning: this will take much longer) and reveal the entire dependency order, use the `--disable-llm-filter` flag
 
-Example:
+**Filter Modes:**
 
-```python sort_components_in_hierarchical_order.py --entry-file-path transformers/models/qwen3_moe/modeling_qwen3_moe.py --entry-module Qwen3MoeForCausalLM --disable-llm-filter```
+* **Standard (Default):** This script uses a `standard` LLM filter by default to speed up the process. It removes non-essential code (like logging and metrics) but correctly keeps structural code (like base classes and type hints).
 
+* **Aggressive:** To use a faster, more aggressive filter (which may incorrectly remove base classes or type hints), use the `--filter-mode aggressive` flag:
+
+```
+python sort_components_in_hierarchical_order.py ... --filter-mode aggressive
+```
+
+* **None:** To disable the llm dependency filter and process the entire dependency list (which can take 6+ hours and risks running out of memory), use the `--filter-mode none` flag:
+```
+python sort_components_in_hierarchical_order.py ... --filter-mode none
+```
+
+* **Note: Skip this step (Optional)**
+To skip this analysis and use the example output, copy the results folder from `examples/results` directly into the `integrative_rag_agent/` folder.
+
+The final file structure should look like this:
+```
+integrative_rag_agent/
+├── results/
+│   └── Qwen3MoeForCausalLM_files_order.json
+├── sort_components_in_hierarchical_order.py
+└── ... (other agent files)
+```
 
 5.**Run the code conversion**
 
@@ -94,7 +131,7 @@ MaxText/experimental/agent/{Module_Name}
 
 ## Common debugging steps
 
-1. **If Gemini api is under free tier and run out of quota**  
+1. **If Gemini api is using a free tier key and run out of quota**  
 If Gemini api is under free tier and run out of quota, but you are not using a free tier account, try refresh your api key:
 
 ```

@@ -42,7 +42,7 @@ import pdb
 import time
 
 from MaxText.experimental.agent.integrative_rag_agent import system_setup
-from MaxText.experimental.agent.integrative_rag_agent.prompts_integrative_rag import Dependency_Filter_Prompt
+from MaxText.experimental.agent.integrative_rag_agent.prompts_integrative_rag import Dependency_Filter_Prompt, Dependency_Filter_Fast
 from MaxText.experimental.agent.code_generation_agent.llm_agent import GeminiAgent
 from MaxText.experimental.agent.integrative_rag_agent.llm_rag_embedding_generation import get_code_embedding
 from MaxText.experimental.agent.integrative_rag_agent.database_operations import make_embedding_index, search_embedding
@@ -133,7 +133,7 @@ def search_similar_dependency(depend, base_path, project_root):
   return final_result, module_code
 
 
-def filter_out_dependency(code, dependency_list):
+def filter_out_dependency(code, dependency_list, prompt_template: str):
   """
   Filters a list of dependencies using an LLM agent.
 
@@ -161,7 +161,7 @@ def filter_out_dependency(code, dependency_list):
     if cache_key in cache:
       return cache[cache_key]
 
-  prompt = Dependency_Filter_Prompt.replace("<CODE_HERE>", code).replace(
+  prompt = prompt_template.replace("<CODE_HERE>", code).replace(
       "<DEPENDENCY_LIST_HERE> ", json.dumps(dependency_list)
   )
   llm_agent = GeminiAgent(system_instruction=Dependency_Filter_Prompt)
@@ -279,7 +279,7 @@ def load_status(file_path: str) -> Status:
 
 
 # --- Main Component Dependency Analysis ---
-def sort_and_search_dependency(base_path, file_path, module, enable_llm_filter: bool = True):
+def sort_and_search_dependency(base_path, file_path, module, filter_mode: str = "standard"):
   """
   Analyzes component dependencies starting from an entry module and returns a
   topologically sorted list of all required components and their code.
@@ -362,17 +362,31 @@ def sort_and_search_dependency(base_path, file_path, module, enable_llm_filter: 
     processed_comp_ids = list(map(lambda x: x["comp_id"], files_to_convert))
     analysis = copy.deepcopy(file_analysis_cache[comp_id])
     if comp_name in analysis["component_dependencies"]:
-      if enable_llm_filter:
+      original_deps = analysis["component_dependencies"][comp_name]
+      filtered_dependencies = original_deps
+      if filter_mode == "standard":
+        logger.info("Running 'standard' filter for %s...", comp_name)
         filtered_dependencies = filter_out_dependency(
-            analysis["sorted_modules"][comp_name], analysis["component_dependencies"][comp_name]
+            analysis["sorted_modules"][comp_name],
+            original_deps,
+            Dependency_Filter_Prompt
         )
-        logger.info(
-            "Filter dependencies from \n %s \nto %s", analysis["component_dependencies"][comp_name], filtered_dependencies
+      elif filter_mode == "aggressive":
+        logger.info("Running 'aggressive' filter for %s...", comp_name)
+        filtered_dependencies = filter_out_dependency(
+            analysis["sorted_modules"][comp_name],
+            original_deps,
+            Dependency_Filter_Fast
         )
-        analysis["component_dependencies"][comp_name] = filtered_dependencies
-      else:
+      else: # filter_mode == "none"
         logger.info("LLM filter is disabled, skipping dependency filtering for %s.", comp_name)
         pass
+      logger.info(
+          "Filter dependencies from \n %s \nto %s", 
+          original_deps, 
+          filtered_dependencies
+      )
+      analysis["component_dependencies"][comp_name] = filtered_dependencies
       if save_dependency_list:
         with open(dependency_list_file, "a", encoding="utf-8") as f:
           f.write(f"--- Dependency for {comp_name}\n")
@@ -480,11 +494,14 @@ def arg_parser():
       help="The name of the entry function or class to start the analysis from.",
   )
   parser.add_argument(
-      "--disable-llm-filter",
-      action="store_false",  
-      dest="enable_llm_filter",  
-      default=True,  
-      help="Disables the LLM dependency filter. Default is enabled."
+      "--filter-mode",
+      type=str,
+      default="standard",
+      choices=["aggressive", "standard", "none"],
+      help="Sets the dependency filter mode. "
+           "'standard' (default): Keeps base classes and type hints. "
+           "'aggressive': (Fast) Removes all non-core architecture. "
+           "'none': Disables the filter completely. This is super slow."
   )
   args = parser.parse_args()
   return args
@@ -498,21 +515,23 @@ def main():
   entry_module = args.entry_module
 
   logger.info("Starting analysis from: %s in %s", entry_module, entry_file_path)
-  enable_llm_filter = args.enable_llm_filter
-  if enable_llm_filter:
-    logger.warning("LLM dependency filter is ENABLED by default.")
+  filter_mode = args.filter_mode
+  if filter_mode == "standard":
+    logger.info("Using 'standard' dependency filter (default).")
+    logger.info("Filter will keep base classes and type hints, but remove extras (logging, cache, checkpoint, etc).")
+  elif filter_mode == "aggressive":
+    logger.warning("Using 'aggressive' (Fast) dependency filter.")
     logger.warning(
-        "The filter is instructed to remove all 'extra' dependencies related to:\n"
-        "    * Caching or checkpointing\n"
-        "    * Inference strategies (like beam search)\n"
-        "    * Logging, metrics, or debugging\n"
-        "    * Any other 'non-essential' (but used) dependencies"
+        "This mode aggressively removes all code not central to the core model architecture."
     )
-  else:
-    logger.warning("LLM dependency filter has been DISABLED. Using full dependency list.")
-  
+    logger.warning(
+        "CAUTION: This fast filter may remove structural necessities like base classes or type hints."
+    )
+  else: # filter_mode == "none"
+    logger.info("LLM dependency filter is DISABLED. Using full dependency list.")
+    
   logger.info("-" * 60)
-  sort_and_search_dependency(base_path, entry_file_path, entry_module, enable_llm_filter)
+  sort_and_search_dependency(base_path, entry_file_path, entry_module, filter_mode)
 
 
 if __name__ == "__main__":
