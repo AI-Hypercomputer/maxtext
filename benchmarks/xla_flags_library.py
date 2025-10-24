@@ -34,6 +34,38 @@ DENSE_VMEM_LIMIT_FLAG = f" --xla_tpu_scoped_vmem_limit_kib={_DENSE_VMEM_LIMIT}"
 MOE_VMEM_LIMIT_FLAG = f" --xla_tpu_scoped_vmem_limit_kib={_MOE_VMEM_LIMIT}"
 CUSTOM_VMEM_LIMIT_FLAG = "--xla_tpu_scoped_vmem_limit_kib={vmem_limit}".format
 
+GF_FLAGS = (
+  "--xla_tpu_dvfs_p_state=7"
+  " --xla_tpu_scoped_vmem_limit_kib=65536"
+  " --xla_tpu_bf16_emission_mode=NATIVE_EMISSION"
+  " --xla_tpu_enable_sparse_core_reduce_scatter_v2=true"
+  " --xla_tpu_enable_sparse_core_collective_offload_all_gather=true"
+  " --xla_tpu_enable_sparse_core_collective_offload_2d_all_gather=true"
+  " --xla_tpu_enable_all_gather_offload_tracing=true"
+  " --xla_tpu_use_tc_device_shape_on_sc=True"
+  " --xla_sc_disable_megacore_partitioning=True"
+  " --xla_tpu_enable_async_collective_fusion_fuse_all_gather=false"
+  " --xla_enable_async_all_gather=true"
+  " --xla_tpu_prefer_async_allgather_to_allreduce=true"
+  " --xla_tpu_enable_sparse_core_collective_offload_all_reduce=true"
+  " --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=true"
+  " --xla_tpu_enable_sparse_core_collective_offload_3d_all_gather=true"
+  " --xla_tpu_use_single_sparse_core_for_all_gather_offload=true"
+  " --xla_tpu_enable_concurrent_sparse_core_offloading=true"
+  " --xla_max_concurrent_async_all_gathers=2"
+  " --xla_max_concurrent_async_reduce_scatters=2"
+  " --xla_tpu_aggressive_opt_barrier_removal=true"
+  " --xla_tpu_enable_offloading_gather_to_sparsecore=true"
+  " --xla_tpu_sparse_core_all_gather_latency_multiplier=1"
+  " --xla_tpu_sparse_core_reduce_scatter_latency_multiplier=3"
+  " --xla_tpu_enable_sparse_core_collective_aggregator=true"
+  " --xla_tpu_enable_latency_hiding_layer_scheduler=true"
+  " --xla_tpu_scheduler_percent_shared_memory_limit=150"
+  " --xla_tpu_enable_layer_scheduler_for_dependent_collectives=true"
+  " --xla_tpu_enable_sparse_core_collective_offload_nd_reduce_scatter=true"
+  " --xla_tpu_pcie_bandwidth_multiplier=0.03"
+  " --xla_tpu_enable_multi_compute_overlap_in_layer_scheduler=true"
+)
 # Continuation Fusion (CF) for All Gather Collectives
 # Continuation Fusion is a form of parallelizing compute work with collectives.
 CF_FOR_ALL_GATHER = (
