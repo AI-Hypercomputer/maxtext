@@ -34,6 +34,7 @@ from MaxText.layers import attentions
 from MaxText.layers import initializers as max_initializers
 from MaxText.layers import linears
 from MaxText.layers import moe
+from MaxText.layers import embeddings
 from MaxText.layers import nnx_wrappers
 from MaxText.layers import quantizations
 from MaxText.layers.normalizations import RMSNorm, l2norm
@@ -627,18 +628,15 @@ class Qwen3NextFullAttention(nnx.Module):
       rngs=rngs,
     )
 
-    # Rotary Embedding
-    self.rotary_dim = int(cfg.head_dim * self.partial_rotary_factor)
-    if self.rotary_dim > 0:
-      self.rotary_embedding = attentions.RotaryEmbedding(
-        min_timescale=cfg.rope_min_timescale,
-        max_timescale=cfg.rope_max_timescale,
-        embedding_dims=self.rotary_dim,
-        fprop_dtype=cfg.dtype,
-        rngs=rngs,
-      )
-    else:
-      self.rotary_embedding = None
+    # Partial Rotary Embedding
+    self.rotary_embedding = embeddings.Qwen3NextRotaryEmbeddig(
+      min_timescale=cfg.rope_min_timescale,
+      max_timescale=cfg.rope_max_timescale,
+      embedding_dims=cfg.head_dim,
+      fprop_dtype=cfg.dtype,
+      partial_rotary_factor=self.partial_rotary_factor,
+      rngs=rngs,
+    )
 
     # Attention Operator
     self.attention_op = attentions.AttentionOp(
@@ -682,18 +680,21 @@ class Qwen3NextFullAttention(nnx.Module):
     key_states = self.k_norm(key_states)
 
     # Apply Rotary Embeddings
-    rotary_dim = int(cfg.head_dim * self.partial_rotary_factor)
+    query_states = self.rotary_embedding(query_states, decoder_positions)
+    key_states= self.rotary_embedding(key_states, decoder_positions)
+    # rotary_dim = int(cfg.head_dim * self.partial_rotary_factor)
 
-    if rotary_dim > 0:
-      query_rot, query_pass = jnp.split(query_states, [rotary_dim], axis=-1)
-      key_rot, key_pass = jnp.split(key_states, [rotary_dim], axis=-1)
+    # if rotary_dim > 0:
+    #   query_rot, query_pass = jnp.split(query_states, [rotary_dim], axis=-1)
+    #   key_rot, key_pass = jnp.split(key_states, [rotary_dim], axis=-1)
 
-      query_rot = self.rotary_embedding(query_rot, decoder_positions)
-      key_rot = self.rotary_embedding(key_rot, decoder_positions)
+    #   query_rot = self.rotary_embedding(query_rot, decoder_positions)
+    #   key_rot = self.rotary_embedding(key_rot, decoder_positions)
 
-      query_states = jnp.concatenate([query_rot, query_pass], axis=-1)
-      key_states = jnp.concatenate([key_rot, key_pass], axis=-1)
+    #   query_states = jnp.concatenate([query_rot, query_pass], axis=-1)
+    #   key_states = jnp.concatenate([key_rot, key_pass], axis=-1)
 
+    # Apply scaling before attention op
     scaling = jax.lax.rsqrt(jnp.array(cfg.head_dim, dtype=cfg.dtype))
     query_states = query_states * scaling
 

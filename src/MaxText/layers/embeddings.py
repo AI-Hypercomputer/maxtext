@@ -353,6 +353,69 @@ def llama_rotary_embedding_as_linen(
       name=name,
   )
 
+class Qwen3NextRotaryEmbeddig(RotaryEmbedding):
+  """Qwen3 Next variant of ROPE (partial ROPE)"""
+
+  def __init__(
+      self,
+      min_timescale: int,
+      max_timescale: int,
+      embedding_dims: int = 0,
+      cast_as_fprop_dtype: bool = True,
+      fprop_dtype: DType = jnp.bfloat16,
+      partial_rotary_factor: float = 0.25,
+      rngs: nnx.Rngs = None,
+  ):
+    """Initializes the Qwen3NextRotaryEmbedding module.
+
+    Args:
+      min_timescale: Start of the geometric index. Determines the periodicity of
+        the added signal.
+      max_timescale: End of the geometric index. Determines the frequency of the
+        added signal.
+      embedding_dims: Dimension of the embedding to be generated.
+      partial_rope_factor: Ratio of dimensions to apply ROPE to
+      rngs: rng keys passed in by nnx.bridge.to_linen.
+    """
+    self.head_dim = embedding_dims
+    self.partial_rotary_factor = partial_rotary_factor
+    self.rotary_dim = int(self.head_dim * self.partial_rotary_factor)
+
+    if self.rotary_dim % 2 != 0:
+      raise ValueError("Rotary dimension must be a multiple of 2.")
+    super().__init__(
+        min_timescale=min_timescale,
+        max_timescale=max_timescale,
+        embedding_dims=self.rotary_dim,
+        cast_as_fprop_dtype=cast_as_fprop_dtype,
+        fprop_dtype=fprop_dtype,
+        rngs=rngs,
+    )
+
+  def __call__(self, inputs: jax.Array, position: None | jax.Array = None) -> jax.Array:
+    """Applies LLaMA variant of rotary position embedding.
+
+    Args:
+      inputs: The input sequence on which to apply the Rotary position
+        embedding. It is assumed of shape [B, S, H, D].
+      position: Optional position array [B, S]. Only needed when the sequence
+        is packed.
+
+    Returns:
+      A jax.Array of shape [B, S, H, D - rotary_dim] with rotary position embeddings applied.
+    """
+    # ensure input is 4D
+    if len(inputs.shape) != 4:
+      raise ValueError("Input is assumed to be a rank 4 tensor of shape [B, S, N, H].")
+    if inputs.shape[3] != self.head_dim:
+      raise ValueError(f"Input hidden dim {inputs.shape[3]} does not match configured head dim {self.head_dim}")
+    
+    if self.rotary_dim > 0:
+      inputs_rot, inputs_pass = jnp.split(inputs, [self.rotary_dim], axis=-1)
+      inputs_rot = super().__call__(inputs_rot, position)
+      inputs = jnp.concatenate([inputs_rot, inputs_pass], axis=-1)
+
+    return inputs
 
 class LLaMARotaryEmbedding(RotaryEmbedding):
   """LLaMA variant of ROPE."""
