@@ -1,36 +1,19 @@
-# GRPO Demo - Unified Training Interface
+# GRPO Demo - Unified Interface
 
-This directory contains a unified interface for running GRPO (Group Relative Policy Optimization) training demos across different model sizes and configurations.
+This directory contains the unified GRPO (Group Relative Policy Optimization) demo interface that consolidates the common logic from individual demo scripts. The interface is **model-agnostic** and supports any model (Llama, Qwen, etc.).
 
-## Overview
+## Structure
 
-Previously, there were separate demo scripts for different model configurations:
-- `grpo_llama3_1_8b_demo.py` - Single host 8B model
-- `grpo_llama3_1_8b_demo_pw.py` - Pathways-based 8B model  
-- `grpo_llama3_1_70b_demo_pw.py` - Pathways-based 70B model
+- **`grpo_demo.py`** - Simple CLI interface for running GRPO training
+- **`grpo_demo_trainer.py`** - Core GRPO training logic (in `experimental/rl/`)
+- **`grpo.yml`** - Unified model-agnostic configuration file (in `configs/`)
 
-These have been consolidated into a single **unified CLI script** (`grpo_demo.py`) that works with the new **grpo.yml** configuration file.
+## Usage
 
-## New Structure
-
-### Configuration File
-`src/MaxText/configs/grpo.yml`
-- Contains common GRPO parameters
-- Can be overridden via CLI arguments
-- Consolidates dataset, training, and GRPO-specific settings
-
-### Unified CLI Script
-`src/MaxText/examples/grpo_demo.py`
-- Single entry point for all GRPO demos
-- Supports both single-host and multi-host (Pathways) setups
-- Provides intuitive CLI arguments
-- Automatically generates proper config for training and inference
-
-## Usage Examples
-
-### Llama3.1-8B (Single Host)
+### Llama Models
 
 ```bash
+# Llama3.1-8B (single host)
 python3 src/MaxText/examples/grpo_demo.py \
   --model_name=llama3.1-8b \
   --tokenizer_path=meta-llama/Llama-3.1-8B-Instruct \
@@ -38,189 +21,178 @@ python3 src/MaxText/examples/grpo_demo.py \
   --base_output_directory=/tmp/grpo_output \
   --hf_access_token=$HF_TOKEN \
   --steps=100
-```
 
-### Llama3.1-70B with Pathways (Multi-Host)
-
-```bash
+# Llama3.1-70B with Pathways
 python3 src/MaxText/examples/grpo_demo.py \
   --model_name=llama3.1-70b \
   --tokenizer_path=meta-llama/Llama-3.1-70B-Instruct \
   --load_parameters_path=gs://path/to/checkpoint \
   --base_output_directory=gs://path/to/output \
   --hf_access_token=$HF_TOKEN \
-  --use_pathways \
-  --inference_devices_per_replica=4 \
-  --inference_replicas=4 \
-  --ici_fsdp_parallelism=16 \
+  --use_pathways=true \
+  --steps=100
+```
+
+### Qwen Models
+
+```bash
+# Qwen2.5-7B (single host)
+python3 src/MaxText/examples/grpo_demo.py \
+  --model_name=qwen2.5-7b \
+  --tokenizer_path=Qwen/Qwen2.5-7B-Instruct \
+  --load_parameters_path=gs://path/to/checkpoint \
+  --base_output_directory=/tmp/grpo_output \
+  --hf_access_token=$HF_TOKEN \
+  --steps=100
+
+# Qwen2.5-72B with Pathways
+python3 src/MaxText/examples/grpo_demo.py \
+  --model_name=qwen2.5-72b \
+  --tokenizer_path=Qwen/Qwen2.5-72B-Instruct \
+  --load_parameters_path=gs://path/to/checkpoint \
+  --base_output_directory=gs://path/to/output \
+  --hf_access_token=$HF_TOKEN \
+  --use_pathways=true \
   --steps=100
 ```
 
 ### Custom Dataset
 
 ```bash
+# Any model with custom HuggingFace dataset
 python3 src/MaxText/examples/grpo_demo.py \
-  --model_name=llama3.1-8b \
-  --tokenizer_path=meta-llama/Llama-3.1-8B-Instruct \
+  --model_name=your-model \
+  --tokenizer_path=your/tokenizer \
   --load_parameters_path=gs://path/to/checkpoint \
   --base_output_directory=/tmp/grpo_output \
   --hf_access_token=$HF_TOKEN \
   --hf_path=custom/dataset \
-  --hf_data_split=train \
   --steps=100
 ```
 
-### With Custom GRPO Parameters
+## Key Features
+
+### GRPO-Specific Components
+
+The unified interface includes all essential GRPO components:
+
+1. **Reward Functions**:
+   - `match_format_exactly` - Rewards exact format matching
+   - `match_format_approximately` - Rewards partial format matching  
+   - `check_answer` - Rewards correct answers
+   - `check_numbers` - Rewards correct numerical answers
+
+2. **Model Loading**:
+   - Reference model (for KL divergence)
+   - Policy model (for training)
+   - Proper device allocation for multi-host setups
+
+3. **Dataset Processing**:
+   - GSM8K math reasoning dataset
+   - Special token formatting for reasoning tasks
+   - Batch processing for training and evaluation
+
+4. **Training Configuration**:
+   - GRPO-specific hyperparameters (beta, epsilon, num_generations)
+   - Optimizer setup with warmup and cosine decay
+   - Checkpointing and metrics logging
+
+### Device Allocation
+
+The system automatically handles device allocation:
+
+- **Single Host**: Uses all available devices
+- **Multi-Host**: Splits devices between training and inference
+- **Pathways**: Full multi-host support with proper mesh setup
+
+### Configuration
+
+The `grpo.yml` config file provides sensible defaults for:
+
+- GRPO hyperparameters
+- Training loop configuration
+- Dataset processing
+- Checkpointing settings
+- Performance optimizations
+
+## Migration from Individual Demos
+
+The old individual demo files (`grpo_llama3_1_8b_demo.py`, etc.) are now deprecated. To migrate:
+
+1. **Replace model-specific scripts** with the unified `grpo_demo.py`
+2. **Use CLI arguments** instead of hardcoded parameters
+3. **Leverage `grpo.yml`** for common configuration
+4. **Customize via CLI** for model-specific needs
+
+## Examples
+
+### Llama3.1-8B Training
 
 ```bash
 python3 src/MaxText/examples/grpo_demo.py \
   --model_name=llama3.1-8b \
   --tokenizer_path=meta-llama/Llama-3.1-8B-Instruct \
-  --load_parameters_path=gs://path/to/checkpoint \
+  --load_parameters_path=gs://maxtext-model-checkpoints/llama3.1-8b/2025-01-23-19-04/scanned/0/items \
   --base_output_directory=/tmp/grpo_output \
   --hf_access_token=$HF_TOKEN \
-  --num_generations=4 \
-  --grpo_beta=0.04 \
-  --grpo_epsilon=0.15 \
-  --learning_rate=5e-6 \
-  --steps=200
+  --steps=10
 ```
 
-## CLI Arguments
-
-### Required Arguments
-
-- `--model_name`: Model name (e.g., llama3.1-8b, llama3.1-70b)
-- `--tokenizer_path`: HuggingFace tokenizer path
-- `--load_parameters_path`: Path to model checkpoint (local or gs://)
-- `--base_output_directory`: Base output directory for logs and checkpoints
-
-### Dataset Arguments
-
-- `--hf_access_token`: HuggingFace access token (can use $HF_TOKEN env var)
-- `--hf_path`: HuggingFace dataset path (default: gsm8k)
-- `--hf_data_split`: Dataset split (default: main)
-- `--hf_data_files`: Dataset files (default: train)
-
-### Training Arguments
-
-- `--steps`: Number of training steps (default: 100)
-- `--per_device_batch_size`: Per device batch size (default: 1)
-- `--learning_rate`: Learning rate (default: 3e-6)
-- `--run_name`: Custom run name for the experiment
-
-### GRPO-Specific Arguments
-
-- `--num_generations`: Number of generations per prompt (default: 2)
-- `--grpo_beta`: KL divergence penalty coefficient (default: 0.08)
-- `--grpo_epsilon`: Clipping value for stable updates (default: 0.2)
-
-### Sequence Length Arguments
-
-- `--max_prefill_predict_length`: Maximum prompt length (default: 256)
-- `--max_target_length`: Maximum total sequence length (default: 768)
-
-### Multi-Host/Pathways Arguments
-
-- `--use_pathways`: Enable Pathways for multi-host training
-- `--inference_devices_per_replica`: Devices per inference replica (default: 4)
-- `--inference_replicas`: Number of inference replicas (default: 1)
-
-### Parallelism Arguments
-
-- `--ici_fsdp_parallelism`: FSDP parallelism (-1 for auto)
-- `--ici_tensor_parallelism`: Tensor parallelism (-1 for auto)
-
-### Other Arguments
-
-- `--profiler`: Profiler to use (default: xplane)
-- `--checkpoint_period`: Checkpoint saving period (default: 50)
-- `--config_file`: Optional custom config file (overrides grpo.yml)
-
-## Migration Guide
-
-### From Individual Demo Scripts
-
-**Old way:**
-```python
-# Editing grpo_llama3_1_8b_demo.py directly
-MODEL_NAME = "llama3.1-8b"
-TOKENIZER_PATH = "meta-llama/Llama-3.1-8B-Instruct"
-# ... many hardcoded parameters
-```
-
-**New way:**
-```bash
-python3 src/MaxText/examples/grpo_demo.py \
-  --model_name=llama3.1-8b \
-  --tokenizer_path=meta-llama/Llama-3.1-8B-Instruct \
-  # ... all parameters via CLI
-```
-
-### Benefits
-
-1. **Single Script**: One script for all model sizes and configurations
-2. **No Code Editing**: All parameters configurable via CLI
-3. **Better Defaults**: Common parameters in `grpo.yml`
-4. **Easier Testing**: Quickly test different configurations
-5. **CI/CD Friendly**: Easy to integrate into automated workflows
-
-## Configuration Files
-
-### grpo.yml
-Main configuration file with sensible defaults for GRPO demos. Override any parameter via CLI.
-
-Location: `src/MaxText/configs/grpo.yml`
-
-### grpo.yml and grpo_inference.yml
-Low-level configuration files used by the GRPO trainer. Generally, you don't need to modify these directly.
-
-Location: `src/MaxText/experimental/rl/`
-
-## Advanced Usage
-
-### Using a Custom Config File
-
-If you have a custom configuration:
+### Qwen2.5-7B Training
 
 ```bash
 python3 src/MaxText/examples/grpo_demo.py \
-  --config_file=/path/to/custom_config.yml \
-  --model_name=llama3.1-8b \
-  # ... other args
+  --model_name=qwen2.5-7b \
+  --tokenizer_path=Qwen/Qwen2.5-7B-Instruct \
+  --load_parameters_path=gs://path/to/qwen/checkpoint \
+  --base_output_directory=/tmp/grpo_output \
+  --hf_access_token=$HF_TOKEN \
+  --steps=100
 ```
 
-### Environment Variables
+### Large Models with Pathways
 
-You can set these environment variables:
-- `HF_TOKEN`: HuggingFace access token (alternative to `--hf_access_token`)
+```bash
+# Llama3.1-70B with Pathways
+python3 src/MaxText/examples/grpo_demo.py \
+  --model_name=llama3.1-70b \
+  --tokenizer_path=meta-llama/Llama-3.1-70B-Instruct \
+  --load_parameters_path=gs://path/to/70b/checkpoint \
+  --base_output_directory=gs://path/to/output \
+  --hf_access_token=$HF_TOKEN \
+  --use_pathways=true \
+  --inference_devices_per_replica=8 \
+  --inference_replicas=2 \
+  --steps=100
 
-## Troubleshooting
-
-### Common Issues
-
-1. **HF_TOKEN not set**: Make sure to either set the environment variable or pass `--hf_access_token`
-
-2. **Pathways configuration**: For multi-host setups, ensure:
-   - `--use_pathways` is set
-   - `--inference_devices_per_replica` and `--inference_replicas` are configured correctly
-   - The total number of devices is sufficient
-
-3. **Memory issues**: Try reducing:
-   - `--per_device_batch_size`
-   - `--max_target_length`
-   - `--num_generations`
+# Qwen2.5-72B with Pathways
+python3 src/MaxText/examples/grpo_demo.py \
+  --model_name=qwen2.5-72b \
+  --tokenizer_path=Qwen/Qwen2.5-72B-Instruct \
+  --load_parameters_path=gs://path/to/qwen72b/checkpoint \
+  --base_output_directory=gs://path/to/output \
+  --hf_access_token=$HF_TOKEN \
+  --use_pathways=true \
+  --inference_devices_per_replica=8 \
+  --inference_replicas=2 \
+  --steps=100
+```
 
 ## Contributing
 
-When adding new features or model support:
-1. Add sensible defaults to `grpo.yml`
-2. Add CLI arguments to `grpo_demo.py` if needed
-3. Update this README with examples
+When adding new features:
 
-## See Also
+1. **Add CLI arguments** to `grpo_demo.py`
+2. **Update `grpo.yml`** with new configuration options
+3. **Extend `grpo_demo_trainer.py`** with new logic
+4. **Update this README** with usage examples
 
-- [GRPO Paper](https://arxiv.org/abs/2402.03300)
-- [MaxText Documentation](../../../docs/)
-- [Tunix Library](https://github.com/google/tunix)
+## Dependencies
 
+The GRPO demo requires:
+
+- MaxText core dependencies
+- Tunix library for RL
+- vLLM for efficient inference
+- HuggingFace datasets and tokenizers
+- JAX/Flax for model training
