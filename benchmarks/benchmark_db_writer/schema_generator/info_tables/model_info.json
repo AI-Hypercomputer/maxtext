@@ -1,0 +1,58 @@
+[
+  {
+    "name": "model_id",
+    "mode": "REQUIRED",
+    "type": "STRING",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "name",
+    "mode": "REQUIRED",
+    "type": "STRING",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "variant",
+    "mode": "REQUIRED",
+    "type": "STRING",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "parameter_size_in_billions",
+    "mode": "REQUIRED",
+    "type": "NUMERIC",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "update_person_ldap",
+    "mode": "REQUIRED",
+    "type": "STRING",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "description",
+    "mode": "",
+    "type": "STRING",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "details",
+    "mode": "",
+    "type": "STRING",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "update_timestamp",
+    "mode": "",
+    "type": "TIMESTAMP",
+    "description": "",
+    "fields": []
+  }
+]

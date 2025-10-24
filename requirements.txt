@@ -3,6 +3,7 @@ aqtp
 array-record
 cloud-accelerator-diagnostics
 cloud-tpu-diagnostics
+dacite
 datasets
 flax
 gcsfs
@@ -10,6 +11,7 @@ google-api-python-client
 google-cloud-aiplatform
 google-cloud-monitoring
 grain[parquet]
+gspread
 huggingface_hub
 jax!=0.7.1
 jaxlib!=0.7.1

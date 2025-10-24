@@ -1,0 +1,93 @@
+[
+  {
+    "name": "run_id",
+    "mode": "REQUIRED",
+    "type": "STRING",
+    "description": "",
+    "fields": []
+  },
+  {
+      "name": "server_max_egress",
+      "mode": "NULLABLE",
+      "type": "FLOAT",
+      "description": "",
+      "fields": []
+  },
+  {
+      "name": "server_avg_egress",
+      "mode": "NULLABLE",
+      "type": "FLOAT",
+      "description": "",
+      "fields": []
+  },
+  {
+      "name": "server_max_ingress",
+      "mode": "NULLABLE",
+      "type": "FLOAT",
+      "description": "",
+      "fields": []
+  },
+  {
+      "name": "server_avg_ingress",
+      "mode": "NULLABLE",
+      "type": "FLOAT",
+      "description": "",
+      "fields": []
+  },
+  {
+      "name": "server_max_qps",
+      "mode": "NULLABLE",
+      "type": "FLOAT",
+      "description": "",
+      "fields": []
+  },
+  {
+      "name": "server_avg_qps",
+      "mode": "NULLABLE",
+      "type": "FLOAT",
+      "description": "",
+      "fields": []
+  },
+  {
+      "name": "client_max_egress",
+      "mode": "NULLABLE",
+      "type": "FLOAT",
+      "description": "",
+      "fields": []
+  },
+  {
+      "name": "client_avg_egress",
+      "mode": "NULLABLE",
+      "type": "FLOAT",
+      "description": "",
+      "fields": []
+  },
+  {
+      "name": "client_max_ingress",
+      "mode": "NULLABLE",
+      "type": "FLOAT",
+      "description": "",
+      "fields": []
+  },
+  {
+      "name": "client_avg_ingress",
+      "mode": "NULLABLE",
+      "type": "FLOAT",
+      "description": "",
+      "fields": []
+  },
+  {
+      "name": "client_max_qps",
+      "mode": "NULLABLE",
+      "type": "FLOAT",
+      "description": "",
+      "fields": []
+  },
+  {
+      "name": "client_avg_qps",
+      "mode": "NULLABLE",
+      "type": "FLOAT",
+      "description": "",
+      "fields": []
+  }
+]
