@@ -18,7 +18,7 @@ ARG MODE
 
 ENV MODE=$MODE
 
-RUN echo "Installing GRPO dependencies (vLLM, tpu-common, tunix) with MODE=${MODE}"
+RUN echo "Installing Post-Training dependencies (vLLM, tpu-common, tunix) with MODE=${MODE}"
 
 
 # Uninstall existing jax to avoid conflicts
@@ -52,7 +52,7 @@ RUN pip install --no-cache-dir --pre \
     --find-links https://storage.googleapis.com/jax-releases/libtpu_releases.html \
     tpu-commons==0.1.2
 
-RUN if [ "$MODE" = "grpo-experimental" ]; then \
+RUN if [ "$MODE" = "post-training-experimental" ]; then \
     pip uninstall -y jax jaxlib libtpu && \
     pip install --pre -U jax jaxlib -i https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/ && \
     pip install -U --pre libtpu -f https://storage.googleapis.com/jax-releases/libtpu_releases.html; \

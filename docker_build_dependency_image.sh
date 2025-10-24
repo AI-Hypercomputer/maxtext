@@ -27,7 +27,7 @@
 # works with any custom wheels.
 # bash docker_build_dependency_image.sh MODE=custom_wheels
 
-# bash docker_build_dependency_image.sh MODE=grpo
+# bash docker_build_dependency_image.sh MODE=post-training
 
 # Enable "exit immediately if any command fails" option
 set -e
@@ -68,17 +68,17 @@ if [[ -z ${MODE} ]]; then
   export MODE=stable
   echo "Default MODE=${MODE}"
   export CUSTOM_JAX=0
-  export INSTALL_GRPO=0
+  export INSTALL_POST_TRAINING=0
 elif [[ ${MODE} == "custom_wheels" ]] ; then
   export MODE=nightly
   export CUSTOM_JAX=1
-  export INSTALL_GRPO=0
-elif [[ ${MODE} == "grpo" || ${MODE} == "grpo-experimental" ]] ; then
-  export INSTALL_GRPO=1
+  export INSTALL_POST_TRAINING=0
+elif [[ ${MODE} == "post-training" || ${MODE} == "post-training-experimental" ]] ; then
+  export INSTALL_POST_TRAINING=1
   export CUSTOM_JAX=0
 else
   export CUSTOM_JAX=0
-  export INSTALL_GRPO=0
+  export INSTALL_POST_TRAINING=0
 fi
 
 if [[ -z ${DEVICE} ]]; then
@@ -124,8 +124,8 @@ if [[ -z ${LIBTPU_GCS_PATH+x} ]] ; then
     elif [[ ${MANTARAY} == "true" ]]; then
       echo "Building with benchmark-db"
       docker build --network host --build-arg MODE=${MODE} --build-arg JAX_VERSION=$JAX_VERSION --build-arg LIBTPU_GCS_PATH=$LIBTPU_GCS_PATH --build-arg DEVICE=$DEVICE -f ./maxtext_db_dependencies.Dockerfile -t ${LOCAL_IMAGE_NAME} .
-    elif [[ ${INSTALL_GRPO} -eq 1 && ${DEVICE} == "tpu" ]]; then
-      echo "Installing MaxText stable mode dependencies for GRPO"
+    elif [[ ${INSTALL_POST_TRAINING} -eq 1 && ${DEVICE} == "tpu" ]]; then
+      echo "Installing MaxText stable mode dependencies for Post-Training"
       docker build --network host --build-arg MODE=stable --build-arg JAX_VERSION=$JAX_VERSION --build-arg LIBTPU_GCS_PATH=$LIBTPU_GCS_PATH --build-arg DEVICE=$DEVICE -f ./maxtext_dependencies.Dockerfile -t ${LOCAL_IMAGE_NAME} .
     else
       docker build --network host --build-arg MODE=${MODE} --build-arg JAX_VERSION=$JAX_VERSION --build-arg LIBTPU_GCS_PATH=$LIBTPU_GCS_PATH --build-arg DEVICE=$DEVICE -f ./maxtext_dependencies.Dockerfile -t ${LOCAL_IMAGE_NAME} .
@@ -136,9 +136,9 @@ else
   docker build --network host --build-arg CUSTOM_LIBTPU=true -f ./maxtext_libtpu_path.Dockerfile -t ${LOCAL_IMAGE_NAME} .
 fi
 
-if [[ ${INSTALL_GRPO} -eq 1 ]] ; then
+if [[ ${INSTALL_POST_TRAINING} -eq 1 ]] ; then
   if [[ ${DEVICE} != "tpu" ]] ; then
-    echo "Error: MODE=grpo is only supported for DEVICE=tpu"
+    echo "Error: MODE=post-training is only supported for DEVICE=tpu"
     exit 1
   fi
 
@@ -158,7 +158,7 @@ if [[ ${INSTALL_GRPO} -eq 1 ]] ; then
     --network host \
     --build-arg BASEIMAGE=${LOCAL_IMAGE_NAME} \
     --build-arg MODE=${MODE} \
-    -f ./maxtext_grpo_dependencies.Dockerfile \
+    -f ./maxtext_post_training_dependencies.Dockerfile \
     -t ${LOCAL_IMAGE_NAME} .
 fi
 
