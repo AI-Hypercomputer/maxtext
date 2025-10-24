@@ -549,7 +549,7 @@ colocated_python_data_input: False  # experimental feature, under testing
 
 # Training loop
 steps: 150_001 # If set to -1 then will inherit value from learning_rate_schedule_steps
-log_period: 100 # Flushes Tensorboard
+log_period: 100 # The frequency of Tensorboard flush, gcs metrics writing, and managed profiler metrics updating.
 
 jax_distributed_initialization_timeout: 300 # This is the default timeout in https://github.com/jax-ml/jax/blob/main/jax/_src/distributed.py
 # Note there are two separate initializations - the jax coordination service (aka jax.distributed.initialize) and the backend (e.g. PjRT), the timeout above refers
@@ -594,6 +594,10 @@ profile_cleanly: True # If set to true, adds a block_until_ready on train state 
 profile_periodically_period: -1 # If set to a positive integer, profile every profile_periodically_period steps.
 # This is useful to debug scenarios where performance is changing.
 
+# Managed profiler settings, which only works when the profiler is "xplane"
+managed_profiler: False # Whether to enable the managed profiler
+# TODO (b/454720134): Decide if we need this configuration.
+managed_profiler_run_group: ""  # Used to group multiple runs. If not set, run_name will be used.
 
 # Dump HLO options
 dump_hlo: False

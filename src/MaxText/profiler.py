@@ -18,10 +18,15 @@ from ctypes import cdll
 import os
 import subprocess
 import shutil
+import simplejson as json
 
 import jax
 
+from google_cloud_mldiagnostics import machinelearning_run
+from google_cloud_mldiagnostics import xprof
+
 from MaxText import max_logging
+from MaxText.pyconfig import KEYS_NO_LOGGING
 
 
 class Profiler:
@@ -40,6 +45,37 @@ class Profiler:
     self.finished_initial_profile_step = self._set_last_profiler_step(config.profiler_steps, config.steps)
     if config.profiler != "" and self.start_initial_profile_step >= config.steps:
       raise ValueError("Profiling requested but initial profiling step set past training final step")
+
+    # Set up the managed profiler on the first device, or all devices, depending on the config.
+    proc_id = jax.process_index()
+    self.managed_profiler = config.managed_profiler if self.upload_all_profiler_results or proc_id == 0 else False
+    if self.managed_profiler:
+      self.prof = None
+
+      def should_log_key(key, value):
+        if key in KEYS_NO_LOGGING:
+          return False
+        try:
+          # Verify the value can be serialized to json. If not, we'll skip it.
+          json.dumps(value, allow_nan=False)
+        except TypeError:
+          return False
+        return True
+
+      config_dict = {
+          key: str(value)  # Work around of the Diagon bug (b/454722730): convert all values into string.
+          for key, value in config.get_keys().items()
+          if should_log_key(key, value)
+      }
+
+      # Create a run for the managed profiler, and upload the configuration.
+      self.ml_run = machinelearning_run(
+          # Use different names if on all devices.
+          name=f"{config.run_name}-{proc_id}" if self.upload_all_profiler_results else config.run_name,
+          run_group=config.managed_profiler_run_group or config.run_name,
+          configs=config_dict,
+          gcs_path=config.managed_profiler_dir,
+      )
 
   def maybe_activate_profiler(self, step, state):
     """Conditionally activates the profiler based on the current step.
@@ -68,7 +104,12 @@ class Profiler:
         return
       self.libcudart.cudaProfilerStart()
     elif self.mode == "xplane":
-      jax.profiler.start_trace(self.output_path)
+      if self.managed_profiler:
+        if self.prof is None:
+          self.prof = xprof()  # Starts xprof collector
+        self.prof.start()
+      else:
+        jax.profiler.start_trace(self.output_path)
 
   def maybe_deactivate_profiler(self, step, state):
     """Conditionally deactivates the profiler based on the current step.
@@ -98,7 +139,10 @@ class Profiler:
       else:
         max_logging.log("WARNING: gsutil is not installed or not found in the system's PATH. Skipping upload...")
     elif self.mode == "xplane":
-      jax.profiler.stop_trace()
+      if self.managed_profiler and self.prof is not None:
+        self.prof.stop()
+      else:
+        jax.profiler.stop_trace()
 
   def _set_first_profiler_step(self, skip_steps, start_step):
     return start_step + skip_steps
