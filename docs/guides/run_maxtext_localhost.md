@@ -45,7 +45,7 @@ Within the root directory of the cloned repo, install dependencies and the pre-c
 # Create a virtual environment and install dependencies
 python3.12 -m venv ~/venv-maxtext
 source ~/venv-maxtext/bin/activate
-bash setup.sh DEVICE={tpu|gpu}
+bash tools/setup/setup.sh DEVICE={tpu|gpu}
 ```
 
 #### Run a Test Training Job

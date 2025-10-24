@@ -81,17 +81,17 @@ cd maxtext
 
 ```bash
 export LOCAL_IMAGE_NAME=<docker_image_name>
-sudo bash docker_build_dependency_image.sh DEVICE=gpu 
+sudo bash dependencies/scripts/docker_build_dependency_image.sh DEVICE=gpu 
 docker tag maxtext_base_image $LOCAL_IMAGE_NAME
 docker push $LOCAL_IMAGE_NAME
 ```
 
-Note that when running `bash docker_build_dependency_image.sh DEVICE=gpu`, it
+Note that when running `bash dependencies/scripts/docker_build_dependency_image.sh DEVICE=gpu`, it
 uses `MODE=stable` by default. If you want to use other modes, you need to
 specify it explicitly:
 
-- using nightly mode: `bash docker_build_dependency_image.sh DEVICE=gpu MODE=nightly`
-- using pinned mode: `bash docker_build_dependency_image.sh DEVICE=gpu MODE=pinned`
+- using nightly mode: `bash dependencies/scripts/docker_build_dependency_image.sh DEVICE=gpu MODE=nightly`
+- using pinned mode: `bash dependencies/scripts/docker_build_dependency_image.sh DEVICE=gpu MODE=pinned`
 
 ## Test
 
