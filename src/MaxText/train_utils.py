@@ -76,9 +76,7 @@ def create_training_tools(config, model, mesh):
   return init_rng, checkpoint_manager, learning_rate_schedule, tx
 
 
-def jit_train_step(
-    config, model, state, state_mesh_shardings, data_sharding, train_step, params_shardings
-):
+def jit_train_step(config, model, state, state_mesh_shardings, data_sharding, train_step, params_shardings):
   """Returns a JIT-compiled train step function, which is loaded from a file if specified in the config."""
   (
       functional_train,
@@ -144,9 +142,7 @@ def jit_train_and_eval_step(
 ):
   """Returns a JIT-compiled train and eval step function."""
   data_sharding = maxtext_utils.get_input_data_sharding(config, mesh)
-  p_train_step = jit_train_step(
-      config, model, state, state_mesh_shardings, data_sharding, train_step, params_shardings
-  )
+  p_train_step = jit_train_step(config, model, state, state_mesh_shardings, data_sharding, train_step, params_shardings)
   p_eval_step = None
   if eval_data_iterator:
     p_eval_step = jit_eval_step(config, model, state_mesh_shardings, data_sharding, eval_step)

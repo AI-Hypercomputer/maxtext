@@ -36,10 +36,14 @@ We recommend installing MaxText inside a Python virtual environment.
 This is the easiest way to get started with the latest stable version.
 
 ```bash
-# 1. Install uv, a fast Python package installer
+# 1. Create virtual environment
+uv venv --python 3.12 --seed maxtext_venv
+source maxtext_venv/bin/activate
+
+# 2. Install uv, a fast Python package installer
 pip install uv
 
-# 2. Install MaxText and its dependencies
+# 3. Install MaxText and its dependencies
 uv pip install maxtext --resolution=lowest
 install_maxtext_github_deps
 ```
@@ -55,7 +59,11 @@ If you plan to contribute to MaxText or need the latest unreleased features, ins
 git clone https://github.com/AI-Hypercomputer/maxtext.git
 cd maxtext
 
-# 2. Install dependencies in editable mode
+# 2. Create virtual environment
+uv venv --python 3.12 --seed maxtext_venv
+source maxtext_venv/bin/activate
+
+# 3. Install dependencies in editable mode
 pip install uv
 # install the tpu package
 uv pip install -e .[tpu] --resolution=lowest

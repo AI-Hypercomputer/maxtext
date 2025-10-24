@@ -174,14 +174,19 @@ def make_tfds_train_iterator(
   assert (
       config.global_batch_size_to_load % global_mesh.size == 0
   ), "Batch size should be divisible by number of global devices."
+
+  get_datasets_kwargs = {
+      "dataset_name": config.dataset_name,
+      "dataset_path": config.dataset_path,
+      "data_split": config.train_split,
+      "shuffle_files": config.enable_data_shuffling,
+      "shuffle_seed": config.data_shuffle_seed,
+  }
   if not config.colocated_python_data_input:
     train_ds = get_datasets(
-        dataset_name=config.dataset_name,
-        data_split=config.train_split,
-        shuffle_files=config.enable_data_shuffling,
-        shuffle_seed=config.data_shuffle_seed,
         dataloading_host_index=process_indices_train.index(jax.process_index()),
         dataloading_host_count=len(process_indices_train),
+        **get_datasets_kwargs,
     )
     train_dataloader = preprocessing_pipeline(
         dataset=train_ds,
@@ -206,11 +211,7 @@ def make_tfds_train_iterator(
   else:
     get_ds_fn = functools.partial(
         get_datasets,
-        dataset_name=config.dataset_name,
-        dataset_path=config.dataset_path,
-        data_split=config.train_split,
-        shuffle_files=config.enable_data_shuffling,
-        shuffle_seed=config.data_shuffle_seed,
+        **get_datasets_kwargs,
     )
     preprocessing_fn = functools.partial(
         preprocessing_pipeline,

@@ -82,21 +82,32 @@ def reformat_response(example, column, model_name):
   return example
 
 
+def merge_image_columns(example, image_columns, max_num_images_per_example):
+  """Merge multiple image columns into a single list of images."""
+  images = []
+  for col in image_columns:
+    if isinstance(example[col], list):
+      images.extend(example[col])
+    else:
+      images.append(example[col])
+
+  example["images"] = images[:max_num_images_per_example] if max_num_images_per_example > 0 else images
+  return example
+
+
 def pre_process_image_sft(example, image_column, model_name):
   """pre-process image for multimodal SFT"""
 
   def _process_image_fn(image):
-    image = multimodal_utils.convert_to_RGB(image)
-    # TODO(aireenmei, hengtaoguo): add support for different image sizes
-    image = multimodal_utils.resize_image(image, model_name)
-    image = np.array(image)
+    if isinstance(image, list):
+      image = [np.array(multimodal_utils.convert_to_RGB(img)) for img in image]
+    else:
+      image = np.array(multimodal_utils.convert_to_RGB(image))
+
     image = multimodal_utils.pre_process_image(image, model_name)
     return image
 
-  if isinstance(example[image_column], list):
-    example[image_column] = [_process_image_fn(img) for img in example[image_column]]
-  else:
-    example[image_column] = _process_image_fn(example[image_column])
+  example[image_column] = _process_image_fn(example[image_column])
   return example
 
 
@@ -105,12 +116,6 @@ def prepare_text_for_image_fusion(example, column_name, model_name):
   example[column_name] = multimodal_utils.prepare_text_for_image_fusion(
       example[column_name], model_name, processor_output=example["images"]
   )
-  if isinstance(example["images"], list):
-    example["image_masks"] = [image.pixel_mask for image in example["images"]]
-    example["images"] = [image.pixel_values for image in example["images"]]
-  else:
-    example["image_masks"] = example["images"].pixel_mask
-    example["images"] = example["images"].pixel_values
   return example
 
 
@@ -257,7 +262,6 @@ class SFTPromptMaskingVision(grain.MapTransform):
         "inputs": np.asarray(inputs[: self.max_target_length], dtype=np.int32),
         "targets": np.asarray(targets[: self.max_target_length], dtype=np.int32),
         "images": element["images"],
-        "image_masks": element["image_masks"],
     }
 
 
@@ -425,20 +429,29 @@ class PadOrTrimToMaxLength(grain.MapTransform):
   """Pads or trims each input to the specified length.
   And optionally add true length for the input."""
 
-  def __init__(self, max_length, pad_id=0, model_name=None, add_true_length=False, max_num_images_per_example=-1):
+  def __init__(
+      self,
+      max_length: int,
+      pad_id: int = 0,
+      model_name: str | None = None,
+      add_true_length: bool = False,
+      max_num_images_per_example: int = -1,
+  ):
     self.max_length = max_length
     self.pad_id = pad_id
     self.model_name = model_name
     self.add_true_length = add_true_length
     self.max_num_images_per_example = max_num_images_per_example
 
-  def _pad_text(self, x, max_length, pad_id):
+  def _pad_text(self, x: np.ndarray, max_length: int, pad_id: int) -> np.ndarray:
     pad_amount = max(max_length - x.shape[0], 0)
     pad_amount = [(0, pad_amount)] + [(0, 0)] * (len(x.shape) - 1)
     return np.pad(x, pad_amount, constant_values=pad_id)[: self.max_length]
 
-  def _pad_image_or_mask(self, tensor: np.ndarray) -> np.ndarray:
-    """Pads an input tensor (image or mask) to a maximum number of items.
+  def _pad_image_and_mask(
+      self, preprocessed_image: multimodal_utils.PreprocessorOutput
+  ) -> multimodal_utils.PreprocessorOutput:
+    """Pads the input tensors (image and mask) of a PreprocessorOutput to a maximum number of items.
 
     This function unifies padding logic for image tensors (standard or tiled) and
     mask tensors. It determines the tensor type based on its dimensions and applies
@@ -450,7 +463,7 @@ class PadOrTrimToMaxLength(grain.MapTransform):
     items than this maximum, it is padded with zeros.
 
     Args:
-        tensor (np.ndarray): The input numpy array to pad.
+        preprocessed_image (multimodal_utils.PreprocessorOutput): The input numpy arrays to pad.
             - For masks, the expected shape is (num_masks, num_tiles).
             - For standard images, the shape is (num_images, H, W, C).
             - For tiled images, the shape is (num_images, num_tiles, H, W, C).
@@ -470,77 +483,158 @@ class PadOrTrimToMaxLength(grain.MapTransform):
       - The dummy images used for padding are based on the image shape for initialization
         of this model (ignoring batch size).
     """
-    if not isinstance(tensor, np.ndarray):
-      raise TypeError(f"Input must be a numpy array, but got {type(tensor)}")
+    if not isinstance(preprocessed_image, multimodal_utils.PreprocessorOutput):
+      raise TypeError(f"Input must be multimodal_utils.PreprocessorOutput, but got {type(preprocessed_image)}")
+
+    if preprocessed_image.pixel_values is None:
+      raise ValueError("Input preprocessed_image must have pixel_values to pad images.")
 
     # Determine the maximum number of images/masks allowed.
-    image_offsets = multimodal_utils.get_image_offsets(self.model_name, None)
+    image_offsets = multimodal_utils.get_image_offsets(self.model_name, preprocessed_image)
+    single_image_offset = image_offsets // preprocessed_image.pixel_values.shape[0]
+
     # Reserve space for at least one text token.
-    max_num_items = (self.max_length // image_offsets) - 1
+    max_num_items = (self.max_length - 1) // single_image_offset
     if self.max_num_images_per_example > 0:
       max_num_items = min(self.max_num_images_per_example, max_num_items)
 
-    # Validate tensor dimensions.
-    if tensor.ndim in (4, 5):  # Standard or Tiled Image
-      tensor_type = "images"
-    elif tensor.ndim == 2:  # Mask
-      tensor_type = "masks"
-    else:
-      raise ValueError(
-          "Input tensor must be 2D (mask), 4D (image), or 5D (tiled image), " f"but got {tensor.ndim} dimensions."
-      )
+    image_tensor = preprocessed_image.pixel_values
+    mask_tensor = preprocessed_image.pixel_mask
 
-    # Assert that the input tensor does not exceed the maximum size.
-    if tensor.shape[0] > max_num_items:
-      raise ValueError(f"Number of {tensor_type} ({tensor.shape[0]}) exceeds the maximum allowed ({max_num_items}).")
-
-    # Apply padding if the tensor is smaller than the maximum size.
-    if tensor.shape[0] < max_num_items:
-      pad_size = max_num_items - tensor.shape[0]
-      pad_shape_suffix = tensor.shape[1:]
-      pad_shape = (pad_size,) + pad_shape_suffix
-      pad_tensor = np.zeros(pad_shape, dtype=tensor.dtype)
-
-      if tensor.size > 0:
-        tensor = np.concatenate([tensor, pad_tensor], axis=0)
+    def _pad(tensor: np.ndarray) -> np.ndarray:
+      # Validate tensor dimensions.
+      if tensor.ndim in (4, 5):  # Standard or Tiled Image
+        tensor_type = "images"
+      elif tensor.ndim == 2:  # Mask
+        tensor_type = "masks"
       else:
-        # If the input tensor is empty, the result is just the padding.
-        tensor = pad_tensor
+        raise ValueError(
+            "Input tensor must be 2D (mask), 4D (image), or 5D (tiled image), " f"but got {tensor.ndim} dimensions."
+        )
 
-    return tensor
+      # Assert that the input tensor does not exceed the maximum size.
+      if tensor.shape[0] > max_num_items:
+        raise ValueError(f"Number of {tensor_type} ({tensor.shape[0]}) exceeds the maximum allowed ({max_num_items}).")
 
-  def map(self, element: dict[str, np.ndarray]):
+      # Apply padding if the tensor is smaller than the maximum size.
+      if tensor.shape[0] < max_num_items:
+        pad_size = max_num_items - tensor.shape[0]
+        pad_shape_suffix = tensor.shape[1:]
+        pad_shape = (pad_size,) + pad_shape_suffix
+        pad_tensor = np.zeros(pad_shape, dtype=tensor.dtype)
+
+        if tensor.size > 0:
+          tensor = np.concatenate([tensor, pad_tensor], axis=0)
+        else:
+          # If the input tensor is empty, the result is just the padding.
+          tensor = pad_tensor
+
+      return tensor
+
+    preprocessed_image.pixel_values = _pad(image_tensor)
+
+    if mask_tensor is not None:
+      preprocessed_image.pixel_mask = _pad(mask_tensor)
+
+    return preprocessed_image
+
+  def map(
+      self, element: dict[str, np.ndarray | multimodal_utils.PreprocessorOutput]
+  ) -> dict[str, np.ndarray | multimodal_utils.PreprocessorOutput]:
     """map to each element"""
     data_columns = list(element.keys())
     for data_column in data_columns:
       if data_column != "images":
-        element[f"{data_column}_segmentation"] = (element[data_column] != self.pad_id).astype(np.int32)
+        if isinstance(element[data_column], multimodal_utils.PreprocessorOutput):
+          raise TypeError("Only 'images' column can be of type PreprocessorOutput.")
+
+        element[f"{data_column}_segmentation"] = element[data_column] != self.pad_id
+        element[f"{data_column}_segmentation"] = element[f"{data_column}_segmentation"].astype(np.int32)
         element[f"{data_column}_position"] = np.arange(element[data_column].shape[0], dtype=np.int32)
         if self.add_true_length:
           element[f"{data_column}_true_length"] = np.array([element[data_column].shape[0]], dtype=np.int32)
 
     for key, _ in element.items():
       if key == "images":
-        if isinstance(element["images"], list) and self.model_name is None:
+        if self.model_name is None:
           raise ValueError("model_name must be provided when padding images")
-        elif isinstance(element["images"], list):
-          element["images"] = self._pad_image_or_mask(np.asarray(element["images"]))
-        elif element["images"].ndim == 3:
-          element["images"] = np.asarray(element["images"])[None, ...]
-        else:
-          # Do not add extra image dimension for image tiling case
-          element["images"] = np.asarray(element["images"])
 
-      elif key == "image_masks" and element["image_masks"] is not None:
-        if isinstance(element["image_masks"], list) and self.model_name is None:
-          raise ValueError("model_name must be provided when padding image masks")
-        elif isinstance(element["image_masks"], list):
-          element["image_masks"] = self._pad_image_or_mask(np.asarray(element["image_masks"]))
-        else:
-          element["image_masks"] = np.asarray(element["image_masks"])
+        element["images"] = self._pad_image_and_mask(element["images"])
 
       elif "true_length" not in key:
         element[key] = self._pad_text(element[key], self.max_length, self.pad_id)
+    return element
+
+
+@dataclasses.dataclass
+class ExtractImagesAndMasks(grain.MapTransform):
+  """Extracts images and masks from a PreprocessorOutput object.
+
+  This transform is used in multi-modal data pipelines to extract the image
+  tensors and their corresponding masks from a PreprocessorOutput object.
+  The extracted images and masks are then added to the data element under
+  the keys 'images' and 'image_masks', respectively.
+
+  If the 'images' key is not present in the input element, the transform
+  returns the element unchanged.
+  """
+
+  def map(self, element: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+    """Applies the extraction transformation to the 'images' field if present."""
+    preprocessed_image = element.get("images")
+    if preprocessed_image is None:
+      return element
+
+    if not isinstance(preprocessed_image, multimodal_utils.PreprocessorOutput):
+      raise TypeError(f"'images' must be of type PreprocessorOutput, but got {type(preprocessed_image)}")
+
+    output = element.copy()
+    output["images"] = preprocessed_image.pixel_values
+    if preprocessed_image.pixel_mask is not None:
+      output["image_masks"] = preprocessed_image.pixel_mask
+
+    return output
+
+
+@dataclasses.dataclass
+class FoldImagesIntoBatch(grain.MapTransform):
+  """Folds the 'image' dimension into the batch dimension.
+
+  This transform is used in multi-modal data pipelines where each data example
+  might have multiple associated images. For model processing, it's often
+  efficient to treat each image as a separate item in a larger batch.
+
+  This operation reshapes the 'images' tensor from a shape like
+  (B, N, T, H, W, C) to (B * N, T, H, W, C), where B is the batch size, N is
+  the number of images per example, and T is the number of image tiles.
+
+  The transformation is triggered only if the input 'images' tensor has more
+  dimensions than the expected batched image tensor.
+  """
+
+  model_name: str | None = None
+
+  def __post_init__(self):
+    """Initializes the target shape after the dataclass is created."""
+    self.target_shape = multimodal_utils.get_dummy_image_shape_for_init(self.model_name)
+
+  def map(self, element: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+    """Applies the folding transformation to the 'images' field if present."""
+    images = element.get("images")
+    if images is None:
+      return element
+
+    # If ndim is greater than the expected ndim for a batched image tensor,
+    # it implies an extra dimension (e.g., number of images per example)
+    # that needs to be folded into the batch dimension.
+    if images.ndim > len(self.target_shape):
+      # Compute the new shape by merging the batch and image count dimensions.
+      trailing_dims = self.target_shape[1:]
+
+      # Reshape merges the leading dimensions (B, N) into one (-1) and
+      # appends the correct trailing dimensions.
+      element["images"] = images.reshape(-1, *trailing_dims)
+
     return element
 
 
