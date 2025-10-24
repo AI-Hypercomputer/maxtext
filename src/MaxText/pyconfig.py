@@ -41,6 +41,9 @@ from MaxText.utils import gcs_utils
 
 _MAX_PREFIX = "M_"
 
+# Don't log the following keys.
+KEYS_NO_LOGGING = ("hf_access_token",)
+
 # YAML attribute to specify inheritance.
 _BASE_CONFIG_ATTR = "base_config"
 
@@ -656,7 +659,7 @@ class _HyperParameters:
 
     if raw_keys["log_config"]:
       for k in keys:
-        if k != "hf_access_token":
+        if k not in KEYS_NO_LOGGING:
           max_logging.log(f"Config param {k}: {raw_keys[k]}")
 
   @staticmethod
@@ -674,6 +677,8 @@ class _HyperParameters:
       raw_keys["tensorboard_dir"] = os.path.join(base_output_directory, run_name, "tensorboard", "")
       raw_keys["checkpoint_dir"] = os.path.join(base_output_directory, run_name, "checkpoints", "")
       raw_keys["metrics_dir"] = os.path.join(base_output_directory, run_name, "metrics", "")
+      # To work around SDK bug b/454725283, remove the trailing back slash from the managed_mldiagnostics_dir.
+      raw_keys["managed_mldiagnostics_dir"] = os.path.join(base_output_directory, run_name, "managed-mldiagnostics")
 
     if raw_keys["learning_rate_schedule_steps"] == -1:
       raw_keys["learning_rate_schedule_steps"] = raw_keys["steps"]
@@ -1160,7 +1165,7 @@ def validate_optimizer_sharding_over_data(raw_keys):
   zero1_supported_opt_types = ("adamw", "adam_pax")
   if raw_keys["opt_type"] not in zero1_supported_opt_types:
     raise ValueError(
-        f"Optimizer type {raw_keys["opt_type"]} is not supported for optimizer sharding.\n"
+        f"Optimizer type {raw_keys['opt_type']} is not supported for optimizer sharding.\n"
         f"Please use an optimizer from this list: {zero1_supported_opt_types}."
     )
 
