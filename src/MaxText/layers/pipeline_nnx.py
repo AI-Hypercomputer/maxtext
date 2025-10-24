@@ -15,7 +15,7 @@
 """ Pipeline layer wrapping a decoder layer(s). Supports circular pipelining """
 
 import functools
-from typing import Any
+from typing import Any, Type
 
 import numpy as np
 

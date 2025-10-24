@@ -254,15 +254,7 @@ class Decoder(nn.Module):
     """Initialize decoder layer."""
     self.decoder_layer = self.get_decoder_layers()
     self.norm_layer = self.get_norm_layer(num_features=self.config.emb_dim)
-    if self.config.using_pipeline_parallelism:
-      pipeline_stage_module = self.get_pipeline_stage_module(self.decoder_layer)
-      remat_policy = self.get_remat_policy()
-      self.pipeline_module = pipeline_nnx.PipelineToLinen(
-          config=self.config,
-          mesh=self.mesh,
-          layer_module=lambda: pipeline_stage_module,
-          remat_policy=remat_policy,
-      )
+
 
   def minimal_policy(self, with_context=False):
     """Helper for creating minimal checkpoint policies."""
@@ -492,7 +484,7 @@ class Decoder(nn.Module):
         config=cfg, mesh=mesh, name=metadata_axis_name, quant=self.quant, **kwargs
     )  # pytype: disable=wrong-keyword-args
 
-  def get_pipeline_stage_module(self, decoder_blocks):
+  def get_pipeline_stage_module(self, decoder_blocks, rngs):
     """get pipeline stage module"""
 
     def get_layer_to_pipeline(blocks, cfg):
@@ -507,7 +499,7 @@ class Decoder(nn.Module):
       policy = self.get_remat_policy()
       base_stage = self.set_remat_policy([base_stage], policy)[0]
     if cfg.num_layers_per_pipeline_stage == 1:
-      stage_module = base_stage(config=cfg, mesh=self.mesh, quant=self.quant, model_mode=self.model_mode)
+      stage_module = base_stage(config=cfg, mesh=self.mesh, quant=self.quant, model_mode=self.model_mode, rngs=rngs)
     elif cfg.scan_layers_per_stage:
       stage_module = self.scan_decoder_layers(
           cfg,
@@ -674,7 +666,16 @@ class Decoder(nn.Module):
         deterministic,
         model_mode,
     )
-    if cfg.using_pipeline_parallelism:
+            if cfg.using_pipeline_parallelism:
+              if not hasattr(self, 'pipeline_module'):
+                pipeline_stage_module = self.get_pipeline_stage_module(self.decoder_layer, self.make_rng('params'))
+                remat_policy = self.get_remat_policy()
+                self.pipeline_module = pipeline_nnx.PipelineToLinen(
+                    config=self.config,
+                    mesh=self.mesh,
+                    layer_module=lambda rngs: pipeline_stage_module(rngs=rngs),
+                    remat_policy=remat_policy,
+                )    if cfg.using_pipeline_parallelism:
       if cfg.pipeline_fsdp_ag_once:
         partition_spec = self.pipeline_module.get_weight_sharding(
             y, decoder_segment_ids, decoder_positions, deterministic, model_mode
