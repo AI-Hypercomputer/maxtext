@@ -38,6 +38,9 @@ _BASE_CONFIG_ATTR = "base_config"
 _MAX_PREFIX = "M_"
 _yaml_types_to_parser = {str: str, int: int, float: float, bool: str2bool}
 
+# Don't log the following keys.
+KEYS_NO_LOGGING = ("hf_access_token",)
+
 
 def yaml_key_to_env_key(s: str) -> str:
   return _MAX_PREFIX + s.upper()
@@ -281,7 +284,7 @@ def initialize(argv: list[str], **kwargs) -> HyperParameters:
 
   if config.log_config:
     for k, v in sorted(config.get_keys().items()):
-      if k != "hf_access_token":
+      if k not in KEYS_NO_LOGGING:
         logger.info("Config param %s: %s", k, v)
 
   return config
