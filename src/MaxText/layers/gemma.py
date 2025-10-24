@@ -102,6 +102,7 @@ class GemmaDecoderLayer(nnx.Module):
 
     self.mlp = MlpBlock(
         config=config,
+        mesh=self.mesh,
         in_features=config.emb_dim,
         intermediate_dim=config.mlp_dim,
         activations=config.mlp_activations,

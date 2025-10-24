@@ -22,7 +22,7 @@ import functools
 import jax
 import jax.numpy as jnp
 from jax.ad_checkpoint import checkpoint_name
-from jax.sharding import Mesh
+from jax.sharding import Mesh, NamedSharding
 
 from flax import linen as nn
 from flax import nnx
@@ -89,14 +89,23 @@ class DecoderLayer(nn.Module):
   ):
     cfg = self.config
     mesh = self.mesh
+    _maybe_shard = functools.partial(
+        maxtext_utils.maybe_shard_with_logical,
+        mesh=mesh,
+        shard_mode=cfg.shard_mode,
+    )
 
     if self.model_mode == MODEL_MODE_PREFILL:
-      logical_axis_names = ("activation_batch", "prefill_activation_length", "activation_mlp")
-    elif cfg.expert_shard_attention_option == EP_AS_CONTEXT and self.model_mode == MODEL_MODE_TRAIN:
-      logical_axis_names = ("activation_batch_no_exp", "activation_length", "activation_mlp")
+      logical_axis_names = ("activation_batch", "prefill_activation_length", "activation_embed")
+    elif self.config.expert_shard_attention_option == EP_AS_CONTEXT and self.model_mode == MODEL_MODE_TRAIN:
+      logical_axis_names = ("activation_batch_no_exp", "activation_length", "activation_embed")
     else:
-      logical_axis_names = ("activation_batch", "activation_length_no_exp", "activation_mlp")
-    inputs = nn.with_logical_constraint(inputs, logical_axis_names)
+      logical_axis_names = ("activation_batch", "activation_length_no_exp", "activation_embed")
+
+    if model_mode == MODEL_MODE_PREFILL:
+      inputs = _maybe_shard(inputs, logical_axis_names)
+    else:
+      inputs = _maybe_shard(inputs, logical_axis_names)
 
     inputs = checkpoint_name(inputs, "decoder_layer_input")
     # inputs: embedded inputs to the decoder with shape [batch, length, emb_dim]
@@ -109,9 +118,9 @@ class DecoderLayer(nn.Module):
         kernel_axes=("norm",),
     )(inputs)
     if model_mode == MODEL_MODE_PREFILL:
-      lnx = nn.with_logical_constraint(lnx, logical_axis_names)
+      lnx = _maybe_shard(lnx, logical_axis_names)
     else:
-      lnx = nn.with_logical_constraint(lnx, logical_axis_names)
+      lnx = _maybe_shard(lnx, logical_axis_names)
 
     attention_layer = attention_as_linen(
         config=self.config,
@@ -149,9 +158,9 @@ class DecoderLayer(nn.Module):
     )
 
     if model_mode == MODEL_MODE_PREFILL:
-      attention_lnx = nn.with_logical_constraint(attention_lnx, logical_axis_names)
+      attention_lnx = _maybe_shard(attention_lnx, logical_axis_names)
     else:
-      attention_lnx = nn.with_logical_constraint(attention_lnx, logical_axis_names)
+      attention_lnx = _maybe_shard(attention_lnx, logical_axis_names)
 
     # MLP block.
     mlp_lnx = linears.mlp_block(
@@ -165,11 +174,12 @@ class DecoderLayer(nn.Module):
         model_mode=model_mode,
         config=cfg,
         quant=self.quant,
+        mesh=self.mesh,
     )(lnx, deterministic=deterministic)
     if model_mode == MODEL_MODE_PREFILL:
-      mlp_lnx = nn.with_logical_constraint(mlp_lnx, logical_axis_names)
+      mlp_lnx = _maybe_shard(mlp_lnx, logical_axis_names)
     else:
-      mlp_lnx = nn.with_logical_constraint(mlp_lnx, logical_axis_names)
+      mlp_lnx = _maybe_shard(mlp_lnx, logical_axis_names)
 
     next_layer_addition = mlp_lnx + attention_lnx
 
@@ -179,12 +189,12 @@ class DecoderLayer(nn.Module):
 
     layer_output = next_layer_addition_dropped_out + inputs
     if model_mode == MODEL_MODE_PREFILL:
-      layer_output = nn.with_logical_constraint(
+      layer_output = _maybe_shard(
           layer_output,
           logical_axis_names,
       )
     else:
-      layer_output = nn.with_logical_constraint(
+      layer_output = _maybe_shard(
           layer_output,
           logical_axis_names,
       )
@@ -572,6 +582,7 @@ class Decoder(nn.Module):
           embedding_init=nn.initializers.normal(stddev=1.0),
           name="position_embedder",
           config=cfg,
+          mesh=self.mesh,
       )(decoder_positions, model_mode=model_mode)
     return y
 
@@ -580,15 +591,46 @@ class Decoder(nn.Module):
     """Applies final normalization and projects hidden states to logits."""
 
     cfg = self.config
+    if cfg.shard_mode == "explicit":
+      norm_out_sharding = NamedSharding(
+          self.mesh,
+          nn.logical_to_mesh_axes(
+              (
+                  "activation_batch",
+                  "activation_length_no_exp",
+                  "activation_embed",
+              )
+          ),
+      )
+    else:
+      norm_out_sharding = None
+
     y = self.get_norm_layer(num_features=y.shape[-1])(
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
+        out_sharding=norm_out_sharding,
         name="decoder_norm",
         epsilon=cfg.normalization_layer_epsilon,
         kernel_axes=("norm",),
         parameter_memory_host_offload=cfg.parameter_memory_host_offload,
     )(y)
     y = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(y, deterministic=deterministic)
+
+    if model_mode in (MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE):
+      out_sharding = NamedSharding(self.mesh, nn.logical_to_mesh_axes((None, None, "activation_vocab")))
+    elif cfg.num_vocab_tiling == 1:
+      out_sharding = NamedSharding(
+          self.mesh,
+          nn.logical_to_mesh_axes(
+              (
+                  "activation_embed_and_logits_batch",
+                  "activation_length_no_exp",
+                  "activation_vocab",
+              )
+          ),
+      )
+    else:
+      out_sharding = None
 
     # [batch, length, emb_dim] -> [batch, length, vocab_size]
     if cfg.logits_via_embedding:
@@ -618,15 +660,11 @@ class Decoder(nn.Module):
           name="logits_dense",
           matmul_precision=self.config.matmul_precision,
           parameter_memory_host_offload=cfg.parameter_memory_host_offload,
+          shard_mode=self.config.shard_mode,
+          out_sharding=out_sharding,
       )(
           y
       )  # We do not quantize the logits matmul.
-    if model_mode in (MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE):
-      logits = nn.with_logical_constraint(logits, (None, None, "activation_vocab"))
-    elif cfg.num_vocab_tiling == 1:
-      logits = nn.with_logical_constraint(
-          logits, ("activation_embed_and_logits_batch", "activation_length_no_exp", "activation_vocab")
-      )
 
     if self.config.cast_logits_to_fp32:
       logits = logits.astype(jnp.float32)

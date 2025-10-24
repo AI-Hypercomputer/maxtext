@@ -22,7 +22,7 @@ import jax
 from jax import lax
 import jax.numpy as jnp
 from jax.ad_checkpoint import checkpoint_name
-from jax.sharding import Mesh
+from jax.sharding import Mesh, NamedSharding
 
 from flax import linen as nn
 from flax import nnx
@@ -53,6 +53,7 @@ class Gpt3LayerNorm(nnx.Module):
       epsilon: float = 1e-6,
       dtype: Any = jnp.float32,
       weight_dtype: Any = jnp.float32,
+      out_sharding: NamedSharding | None = None,
       kernel_axes: tuple[None | str, ...] = (),
       scale_init: Initializer = nn.initializers.zeros,
       use_bias: bool = True,
@@ -64,6 +65,7 @@ class Gpt3LayerNorm(nnx.Module):
     self.epsilon = epsilon
     self.dtype = dtype
     self.weight_dtype = weight_dtype
+    self.out_sharding = out_sharding
     self.kernel_axes = kernel_axes
     self.scale_init = scale_init
     self.use_bias = use_bias
@@ -98,7 +100,12 @@ class Gpt3LayerNorm(nnx.Module):
       scale = jax.device_put(scale, max_utils.device_space())
 
     scale = jnp.asarray(scale, self.dtype)
-    output = normed_inputs * (scale + 1)
+    output = jnp.einsum(
+        "i...k,...k->i...k",
+        normed_inputs,
+        scale + 1,
+        out_sharding=self.out_sharding,
+    )
 
     if self.bias is not None:
       bias = self.bias.value
@@ -113,6 +120,7 @@ def gpt3_layer_norm(
     epsilon: float = 1e-6,
     dtype: Any = jnp.float32,
     weight_dtype: Any = jnp.float32,
+    out_sharding: NamedSharding | None = None,
     kernel_axes: tuple[None | str, ...] = (),
     scale_init: Initializer = nn.initializers.zeros,
     use_bias: bool = True,
@@ -141,6 +149,7 @@ def gpt3_layer_norm(
       epsilon=epsilon,
       dtype=dtype,
       weight_dtype=weight_dtype,
+      out_sharding=out_sharding,
       kernel_axes=kernel_axes,
       scale_init=scale_init,
       use_bias=use_bias,
@@ -397,6 +406,7 @@ class Gpt3DecoderLayer(nn.Module):
         use_pre_norm=True,
         config=cfg,
         quant=self.quant,
+        mesh=self.mesh,
     )(attention_lnx, deterministic=deterministic)
     mlp_lnx = nn.with_logical_constraint(mlp_lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
 
