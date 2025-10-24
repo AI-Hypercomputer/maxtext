@@ -561,9 +561,6 @@ class Qwen3NextFullAttention(nnx.Module):
     self.quant = quant
     cfg = self.config
     self.partial_rotary_factor = 0.25
-    print(f"emb_dim: {cfg.emb_dim}")
-    print(f"num_q_head: {cfg.num_query_heads}")
-    print(f"head_dim: {cfg.head_dim}")
 
     self.q_proj = linears.DenseGeneral(
       in_features_shape=cfg.emb_dim,
