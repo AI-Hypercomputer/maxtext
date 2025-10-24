@@ -92,8 +92,7 @@ args = arg_parser()
 destination_source_url = args.destination_source_url
 
 module_list_path = files_order_file_format.format(module_name=args.module_name)
-destination_relative_directory = os.path.join(MAXTEXT_PKG_DIR, "experimental", "agent", args.module_name, "")
-destination_directory = os.path.join(args.destination_base_directory, destination_relative_directory)
+destination_directory = os.path.join("generated_code", args.module_name)
 
 
 def get_exisiting_jax_modules():
@@ -253,19 +252,14 @@ def convert_given_file(module, jax_modules) -> None | dict:
   prompt = prompt.replace("<MAXTEXT_EXAMPLE_CODE>", maxtext_blocks_code)
   maxtext_dependency = json.dumps(module["JaxDependencies"]) if len(module["JaxDependencies"]) > 0 else ""
   prompt = prompt.replace("<MAXTEXT_MATCHED_DEPENDENCIES>", maxtext_dependency)
-  pdb.set_trace()
   llm_agent = GeminiAgent(system_instruction=CODE_CONVERSION)
   resp = llm_agent(prompt)
   module_code = parse_python_code(resp.text)
   file_name, _ = find_appropriate_file_name(module_code)
-  
-  # Save the generated code to the appropriate file
-  ###--- Hardcode the jax directory name for now --- 
+
   jax_dir = 'Qwen3ForCausalLM'
-  dest_path = os.path.join(jax_dir, f"{file_name}.py")
-  # dest_path = os.path.join(destination_directory, f"{file_name}.py")
-  # os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-  ####--- End of hardcode the jax directory name for now ---
+  dest_path = os.path.join(destination_directory, f"{file_name}.py")
+  os.makedirs(os.path.dirname(dest_path), exist_ok=True)
   
   with open(dest_path, "a", encoding="utf-8") as f: 
     f.write(module_code)
