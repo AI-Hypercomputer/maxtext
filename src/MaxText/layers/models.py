@@ -364,6 +364,8 @@ class Transformer(nnx.Module):
       page_state: page_manager.PageState | None = None,
       decoder_target_tokens: jax.Array | None = None,
       decoder_target_mask: jax.Array | None = None,
+      kv_caches: list[jax.Array] | None = None,
+      attention_metadata=None,
   ):
     """Applies the Zero-1 FSDP wrapped Transformer model.
 
@@ -383,7 +385,8 @@ class Transformer(nnx.Module):
       partition_spec: Partition specification for FSDP all-gather.
       decoder_target_tokens: Target tokens for the decoder (optional, used in MTP).
       decoder_target_mask: Target mask for the decoder (optional, used in MTP).
-      nnx_method: Method to call on the NNX module (optional).
+      kv_caches: Key-value caches for attention layers when serving using vLLM (optional).
+      attention_metadata: Attention metadata for the model serving using vLLM (optional).      
 
     Returns:
       Logits from the Transformer model.
@@ -404,7 +407,7 @@ class Transformer(nnx.Module):
       elif self.config.decoder_block == DecoderBlockType.LLAMA4:
         bidirectional_mask = decoder_input_tokens == multimodal_utils.LLAMA4_PATCH_TOKEN
 
-    logits, hidden_state = self.decoder(
+    logits, hidden_state, kv_caches = self.decoder(
         shared_embedding=self.token_embedder,
         decoder_input_tokens=decoder_input_tokens,
         decoder_positions=decoder_positions,
@@ -417,6 +420,8 @@ class Transformer(nnx.Module):
         bidirectional_mask=bidirectional_mask,
         image_embeddings=image_embeddings,
         image_masks=encoder_image_masks,
+        kv_caches=kv_caches,
+        attention_metadata=attention_metadata,
     )
 
     # Materialize hidden state when vocab tiling is enabled
@@ -455,6 +460,11 @@ class Transformer(nnx.Module):
           model_mode=model_mode,
       )
 
+    if self.config.attention == "vllm_rpa":
+      # In vLLM RPA attention, logits are computed outside the model using
+      # hidden states stored in self.hidden_states.
+      return logits, hidden_state, kv_caches
+    
     return logits
 
 

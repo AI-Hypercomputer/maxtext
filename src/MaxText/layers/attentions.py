@@ -70,6 +70,7 @@ from MaxText.layers.initializers import nd_dense_init, NdInitializer, variable_t
 from MaxText.layers.linears import DenseGeneral, canonicalize_tuple, normalize_axes
 from MaxText.layers.normalizations import RMSNorm
 from MaxText.layers.quantizations import AqtQuantization as Quant
+from tpu_inference.models.jax import attention as rpa_ops
 
 # pylint: disable=line-too-long, g-doc-args, g-doc-return-or-yield, bad-continuation, g-inconsistent-quotes
 # pytype: disable=attribute-error
@@ -809,6 +810,16 @@ class Attention(nnx.Module):
         previous_chunk=previous_chunk,
     )
     return [prefill_kv_cache, ar_kv_cache]
+  
+  def forward_serve_vllm(self, query, key, value, rpa_kv_cache, rpa_metadata):
+    kv_cache, output = rpa_ops.attention(
+        kv_cache=rpa_kv_cache, q=query, k=key, v=value,
+        attention_metadata=rpa_metadata, mesh=self.mesh,
+        head_dim_original=self.head_dim,
+        attention_chunk_size=self.config.chunk_attn_window_size,
+        q_scale=None, k_scale=None, v_scale=None,
+    )
+    return kv_cache, output
 
   def __call__(
       self,
@@ -823,6 +834,8 @@ class Attention(nnx.Module):
       slot: Optional[int] = None,
       page_state: Optional[page_manager.PageState] = None,
       bidirectional_mask: Any = None,
+      kv_cache: Optional[Array] = None,
+      attention_metadata: Optional[dict[str, Any]] = None,
   ):
     """Applies Attention on the input data.
 
@@ -850,6 +863,8 @@ class Attention(nnx.Module):
       slot: The batch slot index for paged attention.
       page_state: The current state of the paged attention manager.
       bidirectional_mask: A mask for bidirectional attention, used in multimodal models.
+      kv_cache: Optional KV cache input, used when invoking from vLLM.
+      attention_metadata: Optional mapping to store attention metadata, used when invoking from vLLM.
 
     Returns:
       output of shape `[batch, length, q_features]`.
@@ -934,6 +949,14 @@ class Attention(nnx.Module):
           query, key, value, decoder_segment_ids, model_mode, previous_chunk, slot=slot, page_state=page_state
       )
       out = unnormalized_out / (exp_sum + 1e-9) if exp_sum is not None else unnormalized_out
+
+    elif self.config.attention == "vllm_rpa" and model_mode != MODEL_MODE_TRAIN:
+      updated_kv, attn_out = self.forward_serve_vllm(
+        query, key, value, rpa_kv_cache=kv_cache, rpa_metadata=attention_metadata
+      )
+      out = attn_out
+      kv_cache = updated_kv
+    
     else:
       cached_values = [None, None]
       if model_mode != MODEL_MODE_TRAIN:
@@ -960,4 +983,5 @@ class Attention(nnx.Module):
       out = nn.with_logical_constraint(out, self.decode_out_axis_names)
     out = self.out_projection(out)
     out = checkpoint_name(out, "out_proj")
-    return out
+
+    return out, kv_cache

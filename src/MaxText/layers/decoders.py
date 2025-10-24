@@ -648,6 +648,8 @@ class Decoder(nn.Module):
       bidirectional_mask: None | Any = None,
       image_embeddings: None | jnp.ndarray = None,
       image_masks: None | jnp.ndarray = None,
+      kv_caches: list[jax.Array] | None = None,
+      attention_metadata=None,
   ):
     cfg = self.config
     mesh = self.mesh
@@ -801,7 +803,8 @@ class Decoder(nn.Module):
           # Iterate over the two layer groups (dense and MoE) and apply layer transformation
           for layer, num_layers, layer_prefix in zip(layers, num_layers_list, layer_prefixes):
             for index in range(num_layers):
-              y = layer(
+              kv_cache = kv_caches[index] if kv_caches is not None else None
+              y, kv_cache = layer(
                   config=cfg, mesh=mesh, name=f"{layer_prefix}_{index}", quant=self.quant, model_mode=self.model_mode
               )(
                   y,
@@ -812,7 +815,11 @@ class Decoder(nn.Module):
                   previous_chunk=previous_chunk,
                   page_state=page_state,
                   slot=slot,
+                  kv_cache=kv_cache,
+                  attention_metadata=attention_metadata,
               )
+              if kv_caches is not None:
+                kv_caches[lyr] = kv_cache
         else:
           for lyr in range(cfg.num_decoder_layers):
             RemattedBlockLayer = RemattedBlockLayers[0]
@@ -834,7 +841,8 @@ class Decoder(nn.Module):
             layer = RemattedBlockLayer(
                 config=cfg, mesh=mesh, name=f"layers_{lyr}", quant=self.quant, model_mode=self.model_mode, **layer_kwargs
             )
-            y = layer(
+            kv_cache = kv_caches[lyr] if kv_caches is not None else None
+            y, kv_cache = layer(
                 y,
                 decoder_segment_ids,
                 decoder_positions,
@@ -843,8 +851,12 @@ class Decoder(nn.Module):
                 previous_chunk=previous_chunk,
                 page_state=page_state,
                 slot=slot,
+                kv_cache=kv_cache,
+                attention_metadata=attention_metadata,
                 **layer_call_kwargs,
             )
+            if kv_caches is not None:
+              kv_caches[lyr] = kv_cache
 
     assert isinstance(y, jax.Array)
 
@@ -861,7 +873,7 @@ class Decoder(nn.Module):
 
     # The API of the Decoder is now a tuple, providing both the main output
     # and the raw hidden state needed for auxiliary tasks.
-    return logits, hidden_state
+    return logits, hidden_state, kv_caches
 
   def _apply_gemma3_scanned_blocks(
       self,
