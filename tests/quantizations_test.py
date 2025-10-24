@@ -34,7 +34,7 @@ from MaxText import pyconfig
 from MaxText.layers import quantizations
 from MaxText import maxtext_utils
 from MaxText import model_creation_utils
-from MaxText.kernels.megablox.gmm import gmm
+from MaxText.kernels.megablox import gmm
 from MaxText.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR
 
 _QUERY_REGEX = ".*/query"

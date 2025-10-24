@@ -28,7 +28,8 @@ from flax import linen as nn
 from flax import nnx
 from flax.linen.partitioning import ScanIn
 
-from MaxText.common_types import DecoderBlockType, Config, MODEL_MODE_TRAIN, MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE
+from MaxText.common_types import DecoderBlockType, Config, EP_AS_CONTEXT
+from MaxText.common_types import MODEL_MODE_TRAIN, MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE
 from MaxText import max_logging
 from MaxText import max_utils
 from MaxText.inference import page_manager
@@ -43,6 +44,7 @@ from MaxText.layers.embeddings import attend_on_embedding, embed_as_linen, posit
 from MaxText.layers.quantizations import AqtQuantization as Quant
 from MaxText.layers import (
     deepseek,
+    deepseek_batchsplit,
     gemma,
     gemma2,
     gemma3,
@@ -87,15 +89,14 @@ class DecoderLayer(nn.Module):
   ):
     cfg = self.config
     mesh = self.mesh
-    if model_mode == MODEL_MODE_PREFILL:
-      logical_axis_names = ("activation_batch", "prefill_activation_length", "activation_embed")
-    else:
-      logical_axis_names = ("activation_batch", "activation_length", "activation_embed")
 
-    if model_mode == MODEL_MODE_PREFILL:
-      inputs = nn.with_logical_constraint(inputs, logical_axis_names)
+    if self.model_mode == MODEL_MODE_PREFILL:
+      logical_axis_names = ("activation_batch", "prefill_activation_length", "activation_mlp")
+    elif cfg.expert_shard_attention_option == EP_AS_CONTEXT and self.model_mode == MODEL_MODE_TRAIN:
+      logical_axis_names = ("activation_batch_no_exp", "activation_length", "activation_mlp")
     else:
-      inputs = nn.with_logical_constraint(inputs, logical_axis_names)
+      logical_axis_names = ("activation_batch", "activation_length_no_exp", "activation_mlp")
+    inputs = nn.with_logical_constraint(inputs, logical_axis_names)
 
     inputs = checkpoint_name(inputs, "decoder_layer_input")
     # inputs: embedded inputs to the decoder with shape [batch, length, emb_dim]
@@ -286,6 +287,7 @@ class Decoder(nn.Module):
         # save all
         if cfg.remat_policy == "minimal_flash":
           max_logging.log("WARNING: 'minimal_flash' will be deprecated soon, please use 'minimal_with_context' instead.")
+          max_logging.log("WARNING: 'minimal_flash' will be deprecated soon, please use 'minimal_with_context' instead.")
         policy = self.minimal_policy(with_context=True)
       elif cfg.remat_policy == "minimal":
         # save all except context
@@ -377,31 +379,36 @@ class Decoder(nn.Module):
         return [llama2.LlamaDecoderLayerToLinen]
       case DecoderBlockType.MISTRAL:
         # TODO(ranran): update to Mistral with sliding window attention
-        return [mistral.MistralDecoderLayer]
+        return [mistral.MistralDecoderLayerToLinen]
       case DecoderBlockType.MIXTRAL:
-        return [mixtral.MixtralDecoderLayer]
+        return [mixtral.MixtralDecoderLayerToLinen]
       case DecoderBlockType.DEEPSEEK:
-        return [deepseek.DeepSeekDenseLayer, deepseek.DeepSeekMoELayer]
+        if self.config.use_batch_split_schedule:
+          return [deepseek_batchsplit.DeepSeekDenseLayer, deepseek_batchsplit.DeepSeekMoELayer]
+        else:
+          return [deepseek.DeepSeekDenseLayer, deepseek.DeepSeekMoELayer]
       case DecoderBlockType.GEMMA:
-        return [gemma.GemmaDecoderLayer]
+        return [gemma.GemmaDecoderLayerToLinen]
       case DecoderBlockType.GEMMA2:
-        return [gemma2.Gemma2DecoderLayer]
+        return [gemma2.Gemma2DecoderLayerToLinen]
       case DecoderBlockType.GEMMA3:
-        return [gemma3.Gemma3DecoderLayer]
+        return [gemma3.Gemma3DecoderLayerToLinen]
       case DecoderBlockType.GPT3:
         return [gpt3.Gpt3DecoderLayer]
       case DecoderBlockType.GPT_OSS:
         return [gpt_oss.GptOssScannableBlock] if self.config.scan_layers else [gpt_oss.GptOssDecoderLayer]
       case DecoderBlockType.QWEN3:
-        return [qwen3.Qwen3DecoderLayer]
+        return [qwen3.Qwen3DecoderLayerToLinen]
       case DecoderBlockType.QWEN3_MOE:
-        return [qwen3.Qwen3MoeDecoderLayer]
+        return [qwen3.Qwen3MoeDecoderLayerToLinen]
+      case DecoderBlockType.QWEN3_NEXT:
+        return [qwen3.Qwen3NextScannableBlockToLinen] if self.config.scan_layers else [qwen3.Qwen3NextDecoderLayerToLinen]
       case DecoderBlockType.SIMPLE:
-        return [simple_layer.SimpleDecoderLayer]
+        return [simple_layer.SimpleDecoderLayerToLinen]
       case DecoderBlockType.SIMPLE_MLP:
-        return [simple_layer.SimpleMlpDecoderLayer]
+        return [simple_layer.SimpleMlpDecoderLayerToLinen]
       case DecoderBlockType.LLAMA4:
-        return [llama4.Llama4ScannableBlock] if self.config.scan_layers else [llama4.Llama4DecoderLayer]
+        return [llama4.Llama4ScannableBlockToLinen] if self.config.scan_layers else [llama4.Llama4DecoderLayerToLinen]
       case _:
         # Default case to handle any unknown decoder block types.
         raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block.value=}")
@@ -427,7 +434,7 @@ class Decoder(nn.Module):
       # Apply remat policy to layer
       layer = nn.remat(
           block_layer,
-          prevent_cse=not self.config.scan_layers,
+          prevent_cse=maxtext_utils.should_prevent_cse_in_remat(self.config),
           policy=policy,
           static_argnums=(4, 5),  # Deterministic and model mode are static arguments.
       )
@@ -447,6 +454,7 @@ class Decoder(nn.Module):
         DecoderBlockType.GEMMA3,
         DecoderBlockType.QWEN3,
         DecoderBlockType.QWEN3_MOE,
+        DecoderBlockType.QWEN3_NEXT,
         DecoderBlockType.GPT_OSS,
         DecoderBlockType.SIMPLE,
         DecoderBlockType.SIMPLE_MLP,
@@ -480,7 +488,9 @@ class Decoder(nn.Module):
         length=length,
         metadata_params={nn.PARTITION_NAME: metadata_axis_name},
     )
-    return scan_fn(config=cfg, mesh=mesh, name=metadata_axis_name, quant=self.quant, **kwargs)
+    return scan_fn(
+        config=cfg, mesh=mesh, name=metadata_axis_name, quant=self.quant, **kwargs  # pytype: disable=wrong-keyword-args
+    )
 
   def get_pipeline_stage_module(self, decoder_blocks):
     """get pipeline stage module"""
@@ -528,6 +538,7 @@ class Decoder(nn.Module):
       model_mode,
       image_embeddings=None,
       bidirectional_mask=None,
+      image_masks=None,
   ):
     """Applies token and positional embeddings to the input tokens."""
     cfg = self.config
@@ -541,6 +552,7 @@ class Decoder(nn.Module):
             text_embeddings=y,
             vision_embeddings=image_embeddings,
             mask=bidirectional_mask,
+            image_masks=image_masks,
         )
       # TODO(hengtaoguo): Add support for other multimodal models such as Llama4, refactor if needed
       else:
@@ -635,6 +647,7 @@ class Decoder(nn.Module):
       page_state: None | page_manager.PageState = None,
       bidirectional_mask: None | Any = None,
       image_embeddings: None | jnp.ndarray = None,
+      image_masks: None | jnp.ndarray = None,
   ):
     cfg = self.config
     mesh = self.mesh
@@ -648,7 +661,8 @@ class Decoder(nn.Module):
         deterministic,
         model_mode,
         image_embeddings,
-        bidirectional_mask
+        bidirectional_mask,
+        image_masks,
     )
 
     policy = self.get_remat_policy()
@@ -764,7 +778,6 @@ class Decoder(nn.Module):
                 "nope_layer_interval": self.config.nope_layer_interval,
                 "interleave_moe_layer_step": self.config.interleave_moe_layer_step,
             }
-            broadcast_args += (bidirectional_mask,)
           y, _ = self.scan_decoder_layers(
               cfg,
               RemattedBlockLayer,
@@ -814,7 +827,8 @@ class Decoder(nn.Module):
                   "is_nope_layer": llama4.determine_is_nope_layer(lyr, self.config.nope_layer_interval),
                   "is_moe_layer": llama4.determine_is_moe_layer(lyr, self.config.interleave_moe_layer_step),
               }
-              layer_call_kwargs = {"bidirectional_mask": bidirectional_mask}
+            if cfg.decoder_block == DecoderBlockType.QWEN3_NEXT:
+              layer_kwargs = {"layer_idx": lyr}
             if cfg.decoder_block == DecoderBlockType.GPT_OSS:
               layer_kwargs = {"attention_type": gpt_oss.get_attention_type(layer_id=lyr)}
             layer = RemattedBlockLayer(
@@ -871,7 +885,7 @@ class Decoder(nn.Module):
     scan_length = cfg.num_decoder_layers // attention_pattern_length
 
     policy = self.get_remat_policy()
-    RemattedGemma3Block = self.set_remat_policy([gemma3.Gemma3ScannableBlock], policy)[0]
+    RemattedGemma3Block = self.set_remat_policy([gemma3.Gemma3ScannableBlockToLinen], policy)[0]
 
     layer_call_kwargs = {"bidirectional_mask": bidirectional_mask}
     layer_kwargs = {"num_of_layers": attention_pattern_length}
@@ -900,6 +914,7 @@ class Decoder(nn.Module):
     if num_remaining_layers > 0:
       # We name the remainder block with a 'remainder' suffix to avoid parameter name collisions
       rem_layer_kwargs = {"num_of_layers": num_remaining_layers}
+      # pytype: disable=wrong-keyword-args
       layer = RemattedGemma3Block(
           config=cfg, mesh=mesh, quant=self.quant, model_mode=self.model_mode, name="layers_remainder", **rem_layer_kwargs
       )

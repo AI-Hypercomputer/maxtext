@@ -71,4 +71,5 @@ python3 -m MaxText.decode src/MaxText/configs/base.yml scan_layers=false base_ou
 ## Supported MoE strategy
 * Dropless
   * General dense matmul implementation with flag `sparse_matmul=False capacity_factor=-1`.
-  * Support for `megablox` and `ragged_dot` is coming soon!
+  * [MegaBlocks](https://arxiv.org/abs/2211.15841) implementation with flag `sparse_matmul=True megablox=True`.
+  * [JAX ragged_dot](https://github.com/jax-ml/jax/blob/a8fb0e01f8d083fff337d3c26375bb1b77344a99/jax/_src/lax/lax.py#L2415) implementation with flag `sparse_matmul=True megablox=False`.

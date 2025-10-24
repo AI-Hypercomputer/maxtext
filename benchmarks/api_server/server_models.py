@@ -69,7 +69,7 @@ class CompletionRequest(SamplingParams):
   logprobs: Optional[int] = None
 
   @field_validator("logprobs")
-  def validate_logprobs(self, v):
+  def validate_logprobs(cls, v):
     if v is not None and v < 0:
       raise ValueError("logprobs must be a non-negative integer if provided.")
     return v

@@ -65,7 +65,7 @@ class SFTTrainingHooks(TrainingHooks):
 
     self.metric_logger.write_setup_info_to_tensorboard(params)
     if MetadataKey.PER_DEVICE_TFLOPS in self.metric_logger.metadata:
-      train_ctx._flops_measured = True
+      train_ctx._flops_measured = True  # pylint: disable=protected-access
 
     if self.config.dump_hlo:
       jax.block_until_ready(state)  # Ensure compilation has finished

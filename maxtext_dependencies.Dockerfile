@@ -41,7 +41,7 @@ WORKDIR /deps
 
 # Copy setup files and dependency files separately for better caching
 COPY setup.sh ./
-COPY requirements.txt requirements_with_jax_ai_image.txt ./
+COPY requirements.txt requirements_with_jax_ai_image.txt src/install_maxtext_extra_deps/extra_deps_from_github.txt generated_requirements ./
 
 # Install dependencies - these steps are cached unless the copied files change
 RUN echo "Running command: bash setup.sh MODE=$ENV_MODE JAX_VERSION=$ENV_JAX_VERSION LIBTPU_GCS_PATH=${ENV_LIBTPU_GCS_PATH} DEVICE=${ENV_DEVICE}"

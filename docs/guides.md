@@ -38,4 +38,6 @@ guides/checkpointing_solutions/gcs_checkpointing.md
 guides/checkpointing_solutions/emergency_checkpointing.md
 guides/checkpointing_solutions/multi_tier_checkpointing.md
 guides/jax_ai_libraries_chosen.md
+guides/xprof_user_guide.md
+guides/megascale_hang_playbook.md
 ```

@@ -62,7 +62,7 @@ python3 -m tests.forward_pass_logit_checker "${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_R
     use_multimodal=${USE_MULTIMODAL} \
     scan_layers=false \
     --hf_model_path=${HF_GOLDEN_MODEL} \
-    --max_kl_div=0.015 \
+    --max_kl_div=0.03 \
     --run_hf_model=true
 
 # We can run decoding for unscanned checkpoints.

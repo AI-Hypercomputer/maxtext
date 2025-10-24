@@ -86,6 +86,11 @@ def validate_attention_type(s: str) -> None:
     raise ValueError("Invalid attention type was passed. Valid options ", valid_attention_types)
 
 
+def validate_moba_attention(moba, attention) -> None:
+  if moba and attention in ("autoselected", "flash", "cudnn_flash_te", "cudnn_flash_jax", "paged"):
+    raise ValueError("MoBA is only supported dot_product attention")
+
+
 def validate_attention_window_params(
     attention_type: str,
     chunk_attn_window_size: int,
@@ -167,6 +172,7 @@ def validate_vocab_tiling(num_vocab_tiling: int, per_device_batch_size: int, max
 def validate_keys(keys):
   validate_attention_kernel(keys["attention"])
   validate_attention_type(keys["attention_type"])
+  validate_moba_attention(keys["moba"], keys["attention"])
   validate_attention_window_params(
       keys["attention_type"], keys.get("chunk_attn_window_size"), keys.get("sliding_window_size")
   )
@@ -249,6 +255,15 @@ def validate_keys(keys):
   if keys["decoder_block"] == "llama4":
     validate_llama4_config(keys)
 
+  if keys["decoder_block"] == "qwen3_next":
+    if keys["sparse_matmul"]:
+      raise ValueError(
+          "For Qwen3-Next, sparse_matmul must be False for now. The dense path has been verified against reference."
+      )
+
+  if keys["shard_optimizer_over_data"]:
+    validate_optimizer_sharding_over_data(keys)
+
 
 def validate_tokenizer(keys):
   assert keys[
@@ -273,6 +288,12 @@ def validate_quantization_methods(keys):
   if keys["use_qwix_quantization"]:
     if keys["quantization"] not in valid_quant_methods:
       raise ValueError(f"Invalid quantization method {keys['quantization']}. Valid options are {valid_quant_methods}")
+
+
+def validate_tokamax_usage(keys):
+  """Validate tokamax usage for gmm kernel"""
+  if keys["use_tokamax_gmm"] and keys["hardware"] != "tpu":
+    raise ValueError(f"Invalid tokamax's megablox kernel usage for hardware {keys['hardware']}. Only TPU is supported.")
 
 
 def validate_data_input(keys):
@@ -366,6 +387,7 @@ def validate_model_name(s: str) -> bool:
       "deepseek2-236b",
       "deepseek3-671b",
       "deepseek3-test",
+      "deepseek3-tiny",
       "kimi-k2-1t",
       "gemma-7b",
       "gemma-2b",
@@ -377,12 +399,14 @@ def validate_model_name(s: str) -> bool:
       "gemma3-27b",
       "qwen3-0.6b",
       "qwen3-4b",
+      "qwen3-4b-thinking-2507",
       "qwen3-8b",
       "qwen3-14b",
       "qwen3-32b",
       "qwen3-235b-a22b",
       "qwen3-30b-a3b",
       "qwen3-480b-a35b",
+      "qwen3-next-80b-a3b",
       "gpt3-175b",
       "gpt3-22b",
       "gpt3-6b",
@@ -670,6 +694,21 @@ class _HyperParameters:
         1,
     )
 
+    # Automatically disable shardy when gradient accumulation is enabled on GPU
+    # This incompatibility is specific to GPU hardware
+    if (
+        raw_keys["gradient_accumulation_steps"] > 1
+        and raw_keys["shardy"]
+        and raw_keys["hardware"] in ("gpu", "gpu_multiprocess")
+    ):
+      max_logging.log(
+          "WARNING: Automatically setting shardy=False because"
+          f" gradient_accumulation_steps={raw_keys['gradient_accumulation_steps']} > 1"
+          f" on hardware={raw_keys['hardware']}."
+          " Shardy is not compatible with gradient accumulation on GPU."
+      )
+      raw_keys["shardy"] = False
+
     if raw_keys["pagedattn_max_pages_per_group"] <= 0:
       raw_keys["pagedattn_max_pages_per_group"] = (
           raw_keys["max_target_length"] + raw_keys["pagedattn_tokens_per_page"] - 1
@@ -691,6 +730,7 @@ class _HyperParameters:
 
     # Type conversions
     raw_keys["dtype"] = jax.numpy.dtype(raw_keys["dtype"])
+    raw_keys["grad_dtype"] = jax.numpy.dtype(raw_keys["grad_dtype"])
     raw_keys["weight_dtype"] = jax.numpy.dtype(raw_keys["weight_dtype"])
     raw_keys["mu_dtype"] = set_mu_dtype(raw_keys)
     raw_keys["logical_axis_rules"] = _lists_to_tuples(raw_keys["logical_axis_rules"])
@@ -703,6 +743,7 @@ class _HyperParameters:
     validate_data_input(raw_keys)
     validate_constant_bound(raw_keys)
     validate_quantization_methods(raw_keys)
+    validate_tokamax_usage(raw_keys)
 
     raw_keys["decoder_block"] = DecoderBlockType(raw_keys["decoder_block"])
 
@@ -1086,6 +1127,15 @@ def validate_ragged_dot(raw_keys):
       jax.config.update(config_flag, True)
     except AttributeError:
       max_logging.log(f"JAX config {config_flag} not found, possibly due to old JAX version.")
+
+
+def validate_optimizer_sharding_over_data(raw_keys):
+  zero1_supported_opt_types = ("adamw", "adam_pax")
+  if raw_keys["opt_type"] not in zero1_supported_opt_types:
+    raise ValueError(
+        f"Optimizer type {raw_keys["opt_type"]} is not supported for optimizer sharding.\n"
+        f"Please use an optimizer from this list: {zero1_supported_opt_types}."
+    )
 
 
 def create_new_logical_axis_rules(old_logical_axis_rules, new_logical_axis_rules):

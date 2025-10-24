@@ -126,7 +126,6 @@ class LlamaDecoderLayer(nnx.Module):
     else:
       self.activation_axis_names = ("activation_batch", "activation_norm_length", "activation_embed")
 
-
   def __call__(
       self,
       inputs,

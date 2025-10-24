@@ -36,10 +36,14 @@ We recommend installing MaxText inside a Python virtual environment.
 This is the easiest way to get started with the latest stable version.
 
 ```bash
-# 1. Install uv, a fast Python package installer
+# 1. Create virtual environment
+uv venv --python 3.12 --seed maxtext_venv
+source maxtext_venv/bin/activate
+
+# 2. Install uv, a fast Python package installer
 pip install uv
 
-# 2. Install MaxText and its dependencies
+# 3. Install MaxText and its dependencies
 uv pip install maxtext --resolution=lowest
 install_maxtext_github_deps
 ```
@@ -55,9 +59,16 @@ If you plan to contribute to MaxText or need the latest unreleased features, ins
 git clone https://github.com/AI-Hypercomputer/maxtext.git
 cd maxtext
 
-# 2. Install dependencies in editable mode
+# 2. Create virtual environment
+uv venv --python 3.12 --seed maxtext_venv
+source maxtext_venv/bin/activate
+
+# 3. Install dependencies in editable mode
 pip install uv
-uv pip install -e . --resolution=lowest
+# install the tpu package
+uv pip install -e .[tpu] --resolution=lowest
+# or install the gpu package by running the following line
+# uv pip install -e .[cuda12] --resolution=lowest
 install_maxtext_github_deps
 ```
 
@@ -65,7 +76,9 @@ After installation, you can verify the package is available with `python3 -c "im
 
 ## 🔥 Latest news 🔥
 
+* \[September 26, 2025\] Vocabulary tiling ([PR](https://github.com/AI-Hypercomputer/maxtext/pull/2242)) is now supported in MaxText! Adjust config `num_vocab_tiling` to unlock more efficient memory usage.
 * \[September 24, 2025\] The GPT-OSS family of models (20B, 120B) is now supported.
+* \[September 15, 2025\] MaxText is now available as a [PyPI package](https://pypi.org/project/maxtext). Users can now [install maxtext through pip](https://github.com/AI-Hypercomputer/maxtext?tab=readme-ov-file#from-pypi-recommended).
 * \[September 5, 2025\] MaxText has moved to an `src` layout as part of [RESTRUCTURE.md](RESTRUCTURE.md). For existing environments, please run `pip install -e .` from MaxText root.
 * \[August 13, 2025\] The Qwen3 2507 MoE family of models is now supported: MoEs: 235B Thinking & 280B Coder as well as existing dense models: 0.6B, 4B, 8B, 14B, and 32B.  
 * \[July 27, 2025\] Updated TFLOPS/s calculation ([PR](https://github.com/AI-Hypercomputer/maxtext/pull/1988)) to account for causal attention, dividing the attention flops in half. Accounted for sliding window and chunked attention reduced attention flops in [PR](https://github.com/AI-Hypercomputer/maxtext/pull/2009) and [PR](https://github.com/AI-Hypercomputer/maxtext/pull/2030). Changes impact large sequence configs, as explained in this [doc](https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/guides/performance_metrics.md)  

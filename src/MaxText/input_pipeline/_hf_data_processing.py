@@ -47,6 +47,17 @@ def vision_sft_preprocessing_pipeline(
   if config.enable_data_shuffling:
     dataset = dataset.shuffle(seed=config.data_shuffle_seed)
 
+  # If multiple image columns are provided, merge them into a single 'images' column.
+  if isinstance(image_column, list):
+    dataset = dataset.map(
+        _input_pipeline_utils.merge_image_columns,
+        fn_kwargs={
+            "image_columns": image_column,
+            "max_num_images_per_example": config.max_num_images_per_example,
+        },
+        remove_columns=image_column,  # Drop the original image columns
+    )
+
   dataset = dataset.select_columns(text_columns + [image_column])
   if image_column != "images":
     dataset = dataset.rename_column(image_column, "images")
@@ -125,7 +136,9 @@ def vision_sft_preprocessing_pipeline(
           max_num_images_per_example=config.max_num_images_per_example,
       )
   )
+  operations.append(_input_pipeline_utils.ExtractImagesAndMasks())
   operations.append(grain.Batch(batch_size=batch_size, drop_remainder=True))
+  operations.append(_input_pipeline_utils.FoldImagesIntoBatch(model_name=config.model_name))
   operations.append(_input_pipeline_utils.ShiftData(ignored_ids=[pad_id], axis=1))
   dummy_index_sampler = grain.IndexSampler(
       num_records=len(dataset),

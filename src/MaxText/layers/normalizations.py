@@ -25,6 +25,7 @@ from MaxText import max_logging
 from MaxText import max_utils
 from MaxText.layers import nnx_wrappers
 from MaxText.layers.initializers import Initializer, variable_to_logically_partitioned
+from MaxText.common_types import Array
 
 
 class RMSNorm(nnx.Module):
@@ -93,3 +94,19 @@ def rms_norm(
       metadata_fn=variable_to_logically_partitioned,
   )
   return module
+
+
+def l2norm(x: Array, dim: int = -1, eps: float = 1e-6) -> Array:
+  """L2 normalization function. Normalizes a vector to have a length of 1.
+
+  Args:
+    x: Input array.
+    dim: The axis or axes along which to normalize. Defaults to the last axis.
+    eps: Small epsilon to prevent division by zero.
+
+  Returns:
+    L2 normalized array with the same shape as x.
+  """
+
+  inv_norm = jax.lax.rsqrt((x * x).sum(axis=dim, keepdims=True) + jnp.array(eps, dtype=x.dtype))
+  return x * inv_norm
