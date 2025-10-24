@@ -565,7 +565,6 @@ class Qwen3NextFullAttention(nnx.Module):
     print(f"num_q_head: {cfg.num_query_heads}")
     print(f"head_dim: {cfg.head_dim}")
 
-    # q_proj projection
     self.q_proj = linears.DenseGeneral(
       in_features_shape=cfg.emb_dim,
       out_features_shape=(cfg.num_query_heads, cfg.head_dim * 2),
@@ -573,12 +572,11 @@ class Qwen3NextFullAttention(nnx.Module):
       dtype=cfg.dtype,
       weight_dtype=cfg.weight_dtype,
       kernel_axes=("embed", "heads", "kv"),
-      # quant=self.quant,
+      quant=self.quant,
       matmul_precision=cfg.matmul_precision,
       rngs=rngs,
     )
 
-    # k_proj projection
     self.k_proj = linears.DenseGeneral(
       in_features_shape=cfg.emb_dim,
       out_features_shape=(cfg.num_kv_heads, cfg.head_dim),
@@ -591,7 +589,6 @@ class Qwen3NextFullAttention(nnx.Module):
       rngs=rngs,
     )
 
-    # v_proj projection
     self.v_proj = linears.DenseGeneral(
       in_features_shape=cfg.emb_dim,
       out_features_shape=(cfg.num_kv_heads, cfg.head_dim),
@@ -604,7 +601,6 @@ class Qwen3NextFullAttention(nnx.Module):
       rngs=rngs,
     )
 
-    # o_proj projection
     self.o_proj = linears.DenseGeneral(
       in_features_shape=cfg.emb_dim,
       out_features_shape=cfg.emb_dim,
@@ -617,7 +613,7 @@ class Qwen3NextFullAttention(nnx.Module):
       rngs=rngs,
     )
 
-    # QK Normalization using Qwen3NextRMSNorm
+    # QK Normalization
     self.q_norm = Qwen3NextRMSNorm(
       num_features=cfg.head_dim,
       eps=cfg.normalization_layer_epsilon,
@@ -684,12 +680,6 @@ class Qwen3NextFullAttention(nnx.Module):
     key_states = self.k_proj(inputs)
     value_states = self.v_proj(inputs)
 
-    # RESHAPE to (B, S, H_q, D) BEFORE norm
-    # query_states = query_states.reshape(batch_size, seq_len, cfg.num_query_heads, cfg.head_dim)
-    # gate = gate.reshape(batch_size, seq_len, cfg.num_query_heads, cfg.head_dim)
-    # key_states = key_states.reshape(batch_size, seq_len, cfg.num_kv_heads, cfg.head_dim)
-    # value_states = value_states.reshape(batch_size, seq_len, cfg.num_kv_heads, cfg.head_dim)
-
     # Apply QK Normalization (per-head)
     query_states = self.q_norm(query_states)
     key_states = self.k_norm(key_states)
@@ -706,7 +696,10 @@ class Qwen3NextFullAttention(nnx.Module):
 
       query_states = jnp.concatenate([query_rot, query_pass], axis=-1)
       key_states = jnp.concatenate([key_rot, key_pass], axis=-1)
-    
+
+    scaling = jax.lax.rsqrt(jnp.array(cfg.head_dim, dtype=cfg.dtype))
+    query_states = query_states * scaling
+
     # Compute Attention
     attention_output = self.attention_op(
         query_states,
