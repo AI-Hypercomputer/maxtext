@@ -128,6 +128,29 @@ Use the link for Jupyter Lab as a link for "Connect to a local runtime" in Colla
 ### GRPO Training
 
 - **`grpo_llama3_demo.ipynb`** → GRPO training on math dataset
+- **`grpo_demo.py`** → Unified CLI for GRPO training (any model)
+
+#### GRPO Usage
+
+```bash
+# Llama3.1-8B
+python3 src/MaxText/examples/grpo_demo.py \
+  --model_name=llama3.1-8b \
+  --tokenizer_path=meta-llama/Llama-3.1-8B-Instruct \
+  --load_parameters_path=gs://path/to/checkpoint \
+  --base_output_directory=/tmp/grpo_output \
+  --hf_access_token=$HF_TOKEN \
+  --steps=100
+
+# Qwen2.5-7B
+python3 src/MaxText/examples/grpo_demo.py \
+  --model_name=qwen2.5-7b \
+  --tokenizer_path=Qwen/Qwen2.5-7B-Instruct \
+  --load_parameters_path=gs://path/to/checkpoint \
+  --base_output_directory=/tmp/grpo_output \
+  --hf_access_token=$HF_TOKEN \
+  --steps=100
+```
 
 ## Common Pitfalls & Debugging
 

@@ -13,14 +13,14 @@
 # limitations under the License.
 
 """
-GRPO Demo Trainer
+GRPO Tunix Trainer
 
 This module provides a unified `grpo_train` function that consolidates the common
-GRPO training logic from the individual demo scripts. It handles model loading,
-reward function setup, dataset processing, and training orchestration.
+GRPO training logic. It handles model loading, reward function setup, dataset 
+processing, and training orchestration.
 
 Usage:
-  from MaxText.experimental.rl.grpo_demo_trainer import grpo_train
+  from MaxText.experimental.rl.grpo_tunix_trainer import grpo_train
   
   # Train with GRPO
   grpo_train(config, goodput_recorder=None)
