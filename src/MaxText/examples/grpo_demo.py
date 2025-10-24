@@ -14,11 +14,11 @@
 # limitations under the License.
 
 """
-Unified GRPO Demo Script
+Unified GRPO Script
 
-This script provides a unified CLI interface for running GRPO training demos
+This script provides a unified CLI interface for running GRPO training
 across different model sizes and configurations. It uses the grpo_train function
-from grpo_demo_trainer.py which consolidates all the GRPO-specific logic.
+from grpo_tunix_trainer.py which consolidates all the GRPO-specific logic.
 
 Usage Examples:
 
@@ -63,13 +63,13 @@ sys.path.insert(0, maxtext_root)
 
 from MaxText import pyconfig
 from MaxText.globals import MAXTEXT_PKG_DIR
-from MaxText.experimental.rl.grpo_demo_trainer import grpo_train
+from MaxText.experimental.rl.grpo_tunix_trainer import grpo_train
 
 
 def create_parser():
   """Create argument parser for GRPO demo."""
   parser = argparse.ArgumentParser(
-      description="Unified GRPO Demo Script",
+      description="Unified GRPO Script",
       formatter_class=argparse.RawDescriptionHelpFormatter,
       epilog=__doc__,
   )
@@ -307,7 +307,7 @@ def main():
     sys.exit(1)
 
   print("=" * 80)
-  print("GRPO Demo - Unified Training Script")
+  print("GRPO - Unified Training Script")
   print("=" * 80)
   print(f"Model: {args.model_name}")
   print(f"Tokenizer: {args.tokenizer_path}")
