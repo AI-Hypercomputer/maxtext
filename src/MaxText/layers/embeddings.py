@@ -353,7 +353,42 @@ def llama_rotary_embedding_as_linen(
       name=name,
   )
 
-class Qwen3NextRotaryEmbeddig(RotaryEmbedding):
+def qwen3_next_rotary_embedding_as_linen(
+    *,
+    min_timescale: int,
+    max_timescale: int,
+    embedding_dims: int = 0,
+    partial_rotary_factor: float = 0.25,
+    cast_as_fprop_dtype: bool = True,
+    fprop_dtype: DType = jnp.bfloat16,
+    name: str | None = None,
+):
+  """Initializes the Qwen3NextRotaryEmbedding module and returns it as a Linen module.
+
+  Args:
+    min_timescale: Start of the geometric index. Determines the periodicity of
+      the added signal.
+    max_timescale: End of the geometric index. Determines the frequency of the
+      added signal.
+    embedding_dims: Dimension of the embedding to be generated.
+    partial_rotary_factor: Ratio of dimensions to apply ROPE to.
+    cast_as_fprop_dtype: Whether to cast the output to the fprop dtype.
+    fprop_dtype: The dtype of the output.
+    name: Name of the Linen module.
+  """
+  return nnx_wrappers.to_linen(
+      Qwen3NextRotaryEmbedding,
+      min_timescale=min_timescale,
+      max_timescale=max_timescale,
+      embedding_dims=embedding_dims,
+      partial_rotary_factor=partial_rotary_factor,
+      cast_as_fprop_dtype=cast_as_fprop_dtype,
+      fprop_dtype=fprop_dtype,
+      metadata_fn=variable_to_logically_partitioned,
+      name=name,
+  )
+
+class Qwen3NextRotaryEmbedding(RotaryEmbedding):
   """Qwen3 Next variant of ROPE (partial ROPE)"""
 
   def __init__(

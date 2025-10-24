@@ -629,14 +629,20 @@ class Qwen3NextFullAttention(nnx.Module):
     )
 
     # Partial Rotary Embedding
-    self.rotary_embedding = embeddings.Qwen3NextRotaryEmbeddig(
-      min_timescale=cfg.rope_min_timescale,
-      max_timescale=cfg.rope_max_timescale,
-      embedding_dims=cfg.head_dim,
-      fprop_dtype=cfg.dtype,
-      partial_rotary_factor=self.partial_rotary_factor,
-      rngs=rngs,
-    )
+    self.rotary_dim = int(cfg.head_dim * self.partial_rotary_factor)
+
+    if self.rotary_dim > 0:
+      self.rotary_embedding = embeddings.Qwen3NextRotaryEmbedding(
+        min_timescale=cfg.rope_min_timescale,
+        max_timescale=cfg.rope_max_timescale,
+        embedding_dims=cfg.head_dim,
+        partial_rotary_factor=self.partial_rotary_factor,
+        cast_as_fprop_dtype=True,
+        fprop_dtype=cfg.dtype,
+        rngs=rngs,
+      )
+    else: 
+      self.rotary_embedding = None
 
     # Attention Operator
     self.attention_op = attentions.AttentionOp(
