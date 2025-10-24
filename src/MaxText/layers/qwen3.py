@@ -688,17 +688,6 @@ class Qwen3NextFullAttention(nnx.Module):
     # Apply Rotary Embeddings
     query_states = self.rotary_embedding(query_states, decoder_positions)
     key_states= self.rotary_embedding(key_states, decoder_positions)
-    # rotary_dim = int(cfg.head_dim * self.partial_rotary_factor)
-
-    # if rotary_dim > 0:
-    #   query_rot, query_pass = jnp.split(query_states, [rotary_dim], axis=-1)
-    #   key_rot, key_pass = jnp.split(key_states, [rotary_dim], axis=-1)
-
-    #   query_rot = self.rotary_embedding(query_rot, decoder_positions)
-    #   key_rot = self.rotary_embedding(key_rot, decoder_positions)
-
-    #   query_states = jnp.concatenate([query_rot, query_pass], axis=-1)
-    #   key_states = jnp.concatenate([key_rot, key_pass], axis=-1)
 
     # Apply scaling before attention op
     scaling = jax.lax.rsqrt(jnp.array(cfg.head_dim, dtype=cfg.dtype))
