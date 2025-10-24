@@ -666,16 +666,16 @@ class Decoder(nn.Module):
         deterministic,
         model_mode,
     )
-            if cfg.using_pipeline_parallelism:
-              if not hasattr(self, 'pipeline_module'):
-                pipeline_stage_module = self.get_pipeline_stage_module(self.decoder_layer, self.make_rng('params'))
-                remat_policy = self.get_remat_policy()
-                self.pipeline_module = pipeline_nnx.PipelineToLinen(
-                    config=self.config,
-                    mesh=self.mesh,
-                    layer_module=lambda rngs: pipeline_stage_module(rngs=rngs),
-                    remat_policy=remat_policy,
-                )    if cfg.using_pipeline_parallelism:
+    if cfg.using_pipeline_parallelism:
+      if not hasattr(self, 'pipeline_module'):
+        pipeline_stage_module = self.get_pipeline_stage_module(self.decoder_layer, self.make_rng('params'))
+        remat_policy = self.get_remat_policy()
+        self.pipeline_module = pipeline_nnx.PipelineToLinen(
+            config=self.config,
+            mesh=self.mesh,
+            layer_module=lambda rngs: pipeline_stage_module(rngs=rngs),
+            remat_policy=remat_policy,
+        )
       if cfg.pipeline_fsdp_ag_once:
         partition_spec = self.pipeline_module.get_weight_sharding(
             y, decoder_segment_ids, decoder_positions, deterministic, model_mode
