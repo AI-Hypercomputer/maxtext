@@ -93,8 +93,7 @@ def extract_hash_answer(text: str) -> str | None:
   return text.split("####")[1].strip()
 
 
-def get_gsm8k_dataset(data_dir: str, split: str = "train", batch_size: int = 1,
-                     num_batches: int = 4, seed: int = 42):
+def get_gsm8k_dataset(data_dir: str, split: str = "train", batch_size: int = 1, num_batches: int = 4, seed: int = 42):
   """Load and process GSM8K dataset for GRPO training."""
   if grain is None:
     raise ImportError("grain is required for dataset processing. Please install it.")
@@ -159,9 +158,9 @@ def setup_device_allocation(config, use_pathways: bool = False):
   devices = jax.devices()
 
   # Get device allocation parameters from config
-  trainer_devices_fraction = getattr(config, 'trainer_devices_fraction', 0.5)
-  sampler_devices_fraction = getattr(config, 'sampler_devices_fraction', 0.5)
-  chips_per_vm = getattr(config, 'chips_per_vm', 4)
+  trainer_devices_fraction = getattr(config, "trainer_devices_fraction", 0.5)
+  sampler_devices_fraction = getattr(config, "sampler_devices_fraction", 0.5)
+  chips_per_vm = getattr(config, "chips_per_vm", 4)
 
   num_vms = len(devices) // chips_per_vm
 
@@ -175,7 +174,7 @@ def setup_device_allocation(config, use_pathways: bool = False):
     num_trainer_devices = int(num_devices * trainer_devices_fraction)
     num_sampler_devices = int(num_devices * sampler_devices_fraction)
     trainer_devices = devices[:num_trainer_devices]
-    sampler_devices = devices[num_devices - num_sampler_devices:]
+    sampler_devices = devices[num_devices - num_sampler_devices :]
   else:
     # Not using Pathways OR single host - use all devices for both
     if use_pathways:
@@ -194,8 +193,7 @@ def match_format_exactly(prompts, completions, **kwargs):
   """Reward exact format matching."""
   scores = []
   match_format = re.compile(
-      rf"^[\s]{{0,}}" rf"{REASONING_START}.+?{REASONING_END}.*?"
-      rf"{SOLUTION_START}(.+?){SOLUTION_END}" rf"[\s]{{0,}}$",
+      rf"^[\s]{{0,}}" rf"{REASONING_START}.+?{REASONING_END}.*?" rf"{SOLUTION_START}(.+?){SOLUTION_END}" rf"[\s]{{0,}}$",
       flags=re.MULTILINE | re.DOTALL,
   )
 
@@ -223,8 +221,7 @@ def match_format_approximately(prompts, completions, **kwargs):
 def check_answer(prompts, completions, answer, **kwargs):
   """Reward correct answers."""
   match_format = re.compile(
-      rf"^[\s]{{0,}}" rf"{REASONING_START}.+?{REASONING_END}.*?"
-      rf"{SOLUTION_START}(.+?){SOLUTION_END}" rf"[\s]{{0,}}$",
+      rf"^[\s]{{0,}}" rf"{REASONING_START}.+?{REASONING_END}.*?" rf"{SOLUTION_START}(.+?){SOLUTION_END}" rf"[\s]{{0,}}$",
       flags=re.MULTILINE | re.DOTALL,
   )
 
@@ -288,7 +285,7 @@ def grpo_train(config):
   print("=" * 80)
 
   # Setup device allocation
-  use_pathways = getattr(config, 'use_pathways_reshard', False)
+  use_pathways = getattr(config, "use_pathways_reshard", False)
   trainer_devices, sampler_devices, num_vms = setup_device_allocation(config, use_pathways)
 
   print(f"Device allocation: {len(trainer_devices)} trainer, {len(sampler_devices)} sampler")
@@ -305,7 +302,7 @@ def grpo_train(config):
       train_data_dir,
       split="train",
       batch_size=config.per_device_batch_size,
-      num_batches=getattr(config, 'num_batches', 4)
+      num_batches=getattr(config, "num_batches", 4),
   )
 
   # Load test dataset for evaluation (currently not used in training loop)
@@ -313,7 +310,7 @@ def grpo_train(config):
       test_data_dir,
       split="test",
       batch_size=config.per_device_batch_size,
-      num_batches=getattr(config, 'num_test_batches', 5)
+      num_batches=getattr(config, "num_test_batches", 5),
   )
 
   # Load reference model
@@ -335,8 +332,8 @@ def grpo_train(config):
     rollout_mesh = policy_mesh
 
   # Setup optimizer
-  learning_rate = getattr(config, 'learning_rate', 3e-6)
-  max_steps = getattr(config, 'steps', 100)
+  learning_rate = getattr(config, "learning_rate", 3e-6)
+  max_steps = getattr(config, "steps", 100)
   warmup_steps = int(0.1 * max_steps)
 
   optimizer = optax.adamw(
@@ -353,7 +350,7 @@ def grpo_train(config):
   )
 
   # Add gradient clipping if specified
-  max_grad_norm = getattr(config, 'max_grad_norm', 0.1)
+  max_grad_norm = getattr(config, "max_grad_norm", 0.1)
   if max_grad_norm is not None:
     optimizer = optax.chain(
         optax.clip_by_global_norm(max_norm=max_grad_norm),
@@ -365,18 +362,14 @@ def grpo_train(config):
   os.makedirs(ckpt_dir, exist_ok=True)
 
   checkpointing_options = ocp.CheckpointManagerOptions(
-      save_interval_steps=getattr(config, 'checkpoint_period', 50),
-      max_to_keep=4
+      save_interval_steps=getattr(config, "checkpoint_period", 50), max_to_keep=4
   )
 
   # Setup metrics logging
   log_dir = f"{config.base_output_directory}/logs"
   os.makedirs(log_dir, exist_ok=True)
 
-  metrics_logging_options = metrics_logger.MetricsLoggerOptions(
-      log_dir=log_dir,
-      flush_every_n_steps=20
-  )
+  metrics_logging_options = metrics_logger.MetricsLoggerOptions(log_dir=log_dir, flush_every_n_steps=20)
 
   # Setup RL cluster config
   cluster_config = rl_cluster_lib.ClusterConfig(
@@ -389,7 +382,7 @@ def grpo_train(config):
       offload_to_cpu=False,
       training_config=rl_cluster_lib.RLTrainingConfig(
           actor_optimizer=optimizer,
-          eval_every_n_steps=getattr(config, 'eval_interval', 10),
+          eval_every_n_steps=getattr(config, "eval_interval", 10),
           max_steps=max_steps,
           metrics_logging_options=metrics_logging_options,
           profiler_options=None,
@@ -397,13 +390,14 @@ def grpo_train(config):
           checkpointing_options=checkpointing_options,
       ),
       rollout_config=base_rollout.RolloutConfig(
-          max_tokens_to_generate=getattr(config, 'max_target_length', 768),
-          max_prompt_length=getattr(config, 'max_prefill_predict_length', 256),
-          kv_cache_size=getattr(config, 'max_prefill_predict_length', 256) +
-                       getattr(config, 'max_target_length', 768) + 256,
-          temperature=getattr(config, 'decode_sampling_temperature', 0.9),
-          top_p=getattr(config, 'decode_sampling_top_p', 1.0),
-          top_k=getattr(config, 'decode_sampling_top_k', 50),
+          max_tokens_to_generate=getattr(config, "max_target_length", 768),
+          max_prompt_length=getattr(config, "max_prefill_predict_length", 256),
+          kv_cache_size=getattr(config, "max_prefill_predict_length", 256)
+          + getattr(config, "max_target_length", 768)
+          + 256,
+          temperature=getattr(config, "decode_sampling_temperature", 0.9),
+          top_p=getattr(config, "decode_sampling_top_p", 1.0),
+          top_k=getattr(config, "decode_sampling_top_k", 50),
       ),
       rollout_vllm_model_version="meta-llama/Meta-Llama-3.1-8B-Instruct",
       rollout_vllm_hbm_utilization=0.2,
@@ -412,10 +406,10 @@ def grpo_train(config):
 
   # Setup GRPO config
   grpo_config = GrpoConfig(
-      num_generations=getattr(config, 'num_generations', 2),
+      num_generations=getattr(config, "num_generations", 2),
       num_iterations=1,
-      beta=getattr(config, 'grpo_beta', 0.08),
-      epsilon=getattr(config, 'grpo_epsilon', 0.2),
+      beta=getattr(config, "grpo_beta", 0.08),
+      epsilon=getattr(config, "grpo_epsilon", 0.2),
   )
 
   # Create RL cluster

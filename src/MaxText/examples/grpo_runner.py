@@ -298,7 +298,7 @@ def build_config_argv(args):
   # Add optional parameters
   if args.run_name:
     config_argv.append(f"run_name={args.run_name}")
-  
+
   if args.hf_access_token:
     config_argv.append(f"hf_access_token={args.hf_access_token}")
 
