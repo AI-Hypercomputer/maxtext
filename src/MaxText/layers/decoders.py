@@ -257,13 +257,16 @@ class Decoder(nn.Module):
     if self.config.using_pipeline_parallelism:
       remat_policy = self.get_remat_policy()
 
-      def create_pipeline_stage_module(config, rngs):
-        return self.get_pipeline_stage_module(self.decoder_layer, rngs)
+      class PipelineStage(nnx.Module):
+        def __init__(self, config, rngs):
+          self.module = self.get_pipeline_stage_module(self.decoder_layer, rngs)
+        def __call__(self, *args, **kwargs):
+          return self.module(*args, **kwargs)
 
       self.pipeline_module = pipeline_nnx.PipelineToLinen(
           config=self.config,
           mesh=self.mesh,
-          layer_module=create_pipeline_stage_module,
+          layer_module=PipelineStage,
           remat_policy=remat_policy,
       )
 
