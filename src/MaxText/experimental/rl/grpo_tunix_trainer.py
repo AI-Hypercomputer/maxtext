@@ -16,19 +16,18 @@
 GRPO Tunix Trainer
 
 This module provides a unified `grpo_train` function that consolidates the common
-GRPO training logic. It handles model loading, reward function setup, dataset
+GRPO training logic. It handles model loading, reward function setup, dataset 
 processing, and training orchestration.
 
 Usage:
   from MaxText.experimental.rl.grpo_tunix_trainer import grpo_train
-
+  
   # Train with GRPO
   grpo_train(config, goodput_recorder=None)
 """
 
 import os
 import re
-from typing import Optional
 
 import jax
 from jax.sharding import Mesh
@@ -37,6 +36,17 @@ import optax
 from orbax import checkpoint as ocp
 import tensorflow_datasets as tfds
 from transformers import AutoTokenizer
+
+# Conditional imports for optional dependencies
+try:
+    import grain
+except ImportError:
+    grain = None
+
+try:
+    import pathwaysutils
+except ImportError:
+    pathwaysutils = None
 
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl.rollout import base_rollout
@@ -83,11 +93,12 @@ def extract_hash_answer(text: str) -> str | None:
   return text.split("####")[1].strip()
 
 
-def get_gsm8k_dataset(data_dir: str, split: str = "train", batch_size: int = 1,
+def get_gsm8k_dataset(data_dir: str, split: str = "train", batch_size: int = 1, 
                      num_batches: int = 4, seed: int = 42):
   """Load and process GSM8K dataset for GRPO training."""
-  import grain
-
+  if grain is None:
+    raise ImportError("grain is required for dataset processing. Please install it.")
+  
   # Download data
   if not os.path.exists(data_dir):
     os.makedirs(data_dir)
@@ -129,7 +140,7 @@ def get_gsm8k_dataset(data_dir: str, split: str = "train", batch_size: int = 1,
           }
       )
   )
-
+  
   return loaded_dataset.batch(batch_size)[:num_batches], tokenizer
 
 
@@ -146,19 +157,20 @@ def get_maxtext_model(config, devices=None):
 def setup_device_allocation(config, use_pathways: bool = False):
   """Setup device allocation for training and inference."""
   devices = jax.devices()
-
+  
   # Get device allocation parameters from config
   trainer_devices_fraction = getattr(config, 'trainer_devices_fraction', 0.5)
   sampler_devices_fraction = getattr(config, 'sampler_devices_fraction', 0.5)
   chips_per_vm = getattr(config, 'chips_per_vm', 4)
-
+  
   num_vms = len(devices) // chips_per_vm
-
+  
   if use_pathways and num_vms >= 2:
     # Multiple hosts with Pathways - split devices for trainer and sampler
-    import pathwaysutils
+    if pathwaysutils is None:
+      raise ImportError("pathwaysutils is required for Pathways support. Please install it.")
     pathwaysutils.initialize()
-
+    
     num_devices = len(devices)
     num_trainer_devices = int(num_devices * trainer_devices_fraction)
     num_sampler_devices = int(num_devices * sampler_devices_fraction)
@@ -167,12 +179,13 @@ def setup_device_allocation(config, use_pathways: bool = False):
   else:
     # Not using Pathways OR single host - use all devices for both
     if use_pathways:
-      import pathwaysutils
+      if pathwaysutils is None:
+        raise ImportError("pathwaysutils is required for Pathways support. Please install it.")
       pathwaysutils.initialize()
-
+    
     trainer_devices = devices
     sampler_devices = devices
-
+  
   return trainer_devices, sampler_devices, num_vms
 
 
@@ -181,11 +194,11 @@ def match_format_exactly(prompts, completions, **kwargs):
   """Reward exact format matching."""
   scores = []
   match_format = re.compile(
-      rf"^[\s]{{0,}}" rf"{REASONING_START}.+?{REASONING_END}.*?"
+      rf"^[\s]{{0,}}" rf"{REASONING_START}.+?{REASONING_END}.*?" 
       rf"{SOLUTION_START}(.+?){SOLUTION_END}" rf"[\s]{{0,}}$",
       flags=re.MULTILINE | re.DOTALL,
   )
-
+  
   for completion in completions:
     score = 0
     if match_format.search(completion) is not None:
@@ -210,20 +223,20 @@ def match_format_approximately(prompts, completions, **kwargs):
 def check_answer(prompts, completions, answer, **kwargs):
   """Reward correct answers."""
   match_format = re.compile(
-      rf"^[\s]{{0,}}" rf"{REASONING_START}.+?{REASONING_END}.*?"
+      rf"^[\s]{{0,}}" rf"{REASONING_START}.+?{REASONING_END}.*?" 
       rf"{SOLUTION_START}(.+?){SOLUTION_END}" rf"[\s]{{0,}}$",
       flags=re.MULTILINE | re.DOTALL,
   )
-
+  
   extracted_responses = [guess.group(1) if (guess := match_format.search(r)) is not None else None for r in completions]
-
+  
   scores = []
   for guess, true_answer in zip(extracted_responses, answer):
     score = 0
     if guess is None:
       scores.append(0)
       continue
-
+    
     if guess == true_answer:
       score += REWARD_EXACT_FORMAT_MATCH
     elif guess.strip() == true_answer.strip():
@@ -247,7 +260,7 @@ def check_numbers(prompts, completions, answer, **kwargs):
   """Reward correct numerical answers."""
   match_numbers = re.compile(rf"{SOLUTION_START}.*?([\d\.]{{1,}})", flags=re.MULTILINE | re.DOTALL)
   extracted_responses = [guess.group(1) if (guess := match_numbers.search(r)) is not None else None for r in completions]
-
+  
   scores = []
   for guess, true_answer in zip(extracted_responses, answer):
     if guess is None:
@@ -266,53 +279,53 @@ def check_numbers(prompts, completions, answer, **kwargs):
 def grpo_train(config):
   """
   Run GRPO training with the provided configuration.
-
+  
   Args:
     config: MaxText configuration object
   """
   print("=" * 80)
   print("Starting GRPO Training")
   print("=" * 80)
-
+  
   # Setup device allocation
   use_pathways = getattr(config, 'use_pathways_reshard', False)
   trainer_devices, sampler_devices, num_vms = setup_device_allocation(config, use_pathways)
-
+  
   print(f"Device allocation: {len(trainer_devices)} trainer, {len(sampler_devices)} sampler")
   print(f"Use Pathways: {use_pathways}")
-
+  
   # Setup data directories
   home = os.path.expanduser("~") + "/"
   train_data_dir = f"{home}/data/train"
   test_data_dir = f"{home}/data/test"
-
+  
   # Load datasets
   print("Loading GSM8K dataset...")
   train_dataset, tokenizer = get_gsm8k_dataset(
-      train_data_dir,
-      split="train",
+      train_data_dir, 
+      split="train", 
       batch_size=config.per_device_batch_size,
       num_batches=getattr(config, 'num_batches', 4)
   )
-
+  
   # Load test dataset for evaluation (currently not used in training loop)
   get_gsm8k_dataset(
-      test_data_dir,
-      split="test",
+      test_data_dir, 
+      split="test", 
       batch_size=config.per_device_batch_size,
       num_batches=getattr(config, 'num_test_batches', 5)
   )
-
+  
   # Load reference model
   print("Loading reference model...")
   reference_model, reference_mesh = get_maxtext_model(config, trainer_devices)
   reference_model.config = None
-
+  
   # Load policy model
   print("Loading policy model...")
   policy_model, policy_mesh = get_maxtext_model(config, trainer_devices)
   policy_model.config = None
-
+  
   # Setup meshes
   if num_vms >= 2 and not use_pathways:
     actor_mesh = policy_mesh
@@ -320,12 +333,12 @@ def grpo_train(config):
   else:
     actor_mesh = policy_mesh
     rollout_mesh = policy_mesh
-
+  
   # Setup optimizer
   learning_rate = getattr(config, 'learning_rate', 3e-6)
   max_steps = getattr(config, 'steps', 100)
   warmup_steps = int(0.1 * max_steps)
-
+  
   optimizer = optax.adamw(
       learning_rate=optax.schedules.warmup_cosine_decay_schedule(
           init_value=0.0,
@@ -338,7 +351,7 @@ def grpo_train(config):
       b2=0.99,
       weight_decay=0.1,
   )
-
+  
   # Add gradient clipping if specified
   max_grad_norm = getattr(config, 'max_grad_norm', 0.1)
   if max_grad_norm is not None:
@@ -346,25 +359,25 @@ def grpo_train(config):
         optax.clip_by_global_norm(max_norm=max_grad_norm),
         optimizer,
     )
-
+  
   # Setup checkpointing
   ckpt_dir = f"{config.base_output_directory}/checkpoints"
   os.makedirs(ckpt_dir, exist_ok=True)
-
+  
   checkpointing_options = ocp.CheckpointManagerOptions(
       save_interval_steps=getattr(config, 'checkpoint_period', 50),
       max_to_keep=4
   )
-
+  
   # Setup metrics logging
   log_dir = f"{config.base_output_directory}/logs"
   os.makedirs(log_dir, exist_ok=True)
-
+  
   metrics_logging_options = metrics_logger.MetricsLoggerOptions(
-      log_dir=log_dir,
+      log_dir=log_dir, 
       flush_every_n_steps=20
   )
-
+  
   # Setup RL cluster config
   cluster_config = rl_cluster_lib.ClusterConfig(
       role_to_mesh={
@@ -386,7 +399,7 @@ def grpo_train(config):
       rollout_config=base_rollout.RolloutConfig(
           max_tokens_to_generate=getattr(config, 'max_target_length', 768),
           max_prompt_length=getattr(config, 'max_prefill_predict_length', 256),
-          kv_cache_size=getattr(config, 'max_prefill_predict_length', 256) +
+          kv_cache_size=getattr(config, 'max_prefill_predict_length', 256) + 
                        getattr(config, 'max_target_length', 768) + 256,
           temperature=getattr(config, 'decode_sampling_temperature', 0.9),
           top_p=getattr(config, 'decode_sampling_top_p', 1.0),
@@ -396,7 +409,7 @@ def grpo_train(config):
       rollout_vllm_hbm_utilization=0.2,
       rollout_vllm_tpu_backend_type="jax",
   )
-
+  
   # Setup GRPO config
   grpo_config = GrpoConfig(
       num_generations=getattr(config, 'num_generations', 2),
@@ -404,7 +417,7 @@ def grpo_train(config):
       beta=getattr(config, 'grpo_beta', 0.08),
       epsilon=getattr(config, 'grpo_epsilon', 0.2),
   )
-
+  
   # Create RL cluster
   print("Creating RL cluster...")
   with nn_partitioning.axis_rules(config.logical_axis_rules):
@@ -414,7 +427,7 @@ def grpo_train(config):
         tokenizer=tokenizer,
         cluster_config=cluster_config,
     )
-
+  
   # Create GRPO trainer
   print("Setting up GRPO trainer...")
   grpo_trainer = GrpoLearner(
@@ -427,14 +440,14 @@ def grpo_train(config):
       ],
       grpo_config=grpo_config,
   )
-
+  
   # Start training
   print("Starting GRPO training...")
   with policy_mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
     grpo_trainer.train(train_dataset)
-
+  
   print("=" * 80)
   print("GRPO Training Completed Successfully!")
   print("=" * 80)
-
+  
   return grpo_trainer, rl_cluster
