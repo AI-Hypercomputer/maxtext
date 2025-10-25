@@ -18,6 +18,8 @@ Tests for GatedDeltaRule in Qwen3-Next against its PyTorch reference.
 import unittest
 import os
 from types import SimpleNamespace
+import math
+from typing import Optional, Tuple
 
 import torch
 from torch import nn
@@ -27,6 +29,8 @@ import jax.numpy as jnp
 import numpy as np
 from jax.sharding import Mesh
 from flax import nnx
+
+from collections.abc import Callable
 
 from MaxText import pyconfig
 from MaxText.layers import qwen3, normalizations
@@ -39,6 +43,61 @@ from MaxText.globals import MAXTEXT_PKG_DIR
 # https://github.com/huggingface/transformers/blob/a9731a725eb1d7b3b7e11f0ad35a819fa4ee8b20/src/transformers/models/qwen3_next/modeling_qwen3_next.py
 # Note: Some function/class names might be slightly adapted (e.g., _PT suffix) to avoid collisions.
 # ----------------------------------------------------------------------
+def create_causal_mask_PT(q_seq_len: int, kv_seq_len: int, dtype=torch.float32):
+    mask = torch.triu(torch.ones(q_seq_len, kv_seq_len, dtype=torch.bool), diagonal=1)
+    masked_fill_value = -torch.finfo(dtype).max / 2
+    return torch.zeros(q_seq_len, kv_seq_len, dtype=dtype).masked_fill(mask, masked_fill_value)
+
+def eager_attention_forward(
+    module: nn.Module,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    attention_mask: Optional[torch.Tensor],
+    scaling: float,
+    dropout: float = 0.0,
+):
+    key_states = repeat_kv(key, module.num_key_value_groups)
+    value_states = repeat_kv(value, module.num_key_value_groups)
+
+    attn_weights = torch.matmul(query, key_states.transpose(2, 3)) * scaling
+    if attention_mask is not None:
+        causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
+        attn_weights = attn_weights + causal_mask
+
+    attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query.dtype)
+    attn_weights = nn.functional.dropout(attn_weights, p=dropout, training=module.training)
+    attn_output = torch.matmul(attn_weights, value_states)
+    attn_output = attn_output.transpose(1, 2).contiguous()
+
+    return attn_output, attn_weights
+
+def rotate_half(x):
+    """Rotates half the hidden dims of the input."""
+    x1 = x[..., : x.shape[-1] // 2]
+    x2 = x[..., x.shape[-1] // 2 :]
+    return torch.cat((-x2, x1), dim=-1)
+
+def apply_rotary_pos_emb(q, k, cos, sin):
+    cos = cos.unsqueeze(1)
+    sin = sin.unsqueeze(1)
+    rotary_dim = cos.shape[-1]
+    q_rot, q_pass = q[..., :rotary_dim], q[..., rotary_dim:]
+    k_rot, k_pass = k[..., :rotary_dim], k[..., rotary_dim:]
+    q_embed = (q_rot * cos) + (rotate_half(q_rot) * sin)
+    k_embed = (k_rot * cos) + (rotate_half(k_rot) * sin)
+    q_embed = torch.cat([q_embed, q_pass], dim=-1)
+    k_embed = torch.cat([k_embed, k_pass], dim=-1)
+    return q_embed, k_embed
+
+
+def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
+    batch, num_key_value_heads, slen, head_dim = hidden_states.shape
+    if n_rep == 1:
+        return hidden_states
+    hidden_states = hidden_states[:, :, None, :, :].expand(batch, num_key_value_heads, n_rep, slen, head_dim)
+    return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
+
 def l2norm_torch(x: torch.FloatTensor, dim: int = -1, eps: float = 1e-6):
   """This function is intended to align with the l2norm implementation in the FLA library."""
   inv_norm = torch.rsqrt((x * x).sum(dim=dim, keepdim=True) + eps)
@@ -179,6 +238,37 @@ class Qwen3NextRMSNorm_PT(nn.Module):
     output = output * (1.0 + self.weight.float())
     return output.type_as(x)
 
+class Qwen3NextRotaryEmbedding_PT(nn.Module):
+  def __init__(self, config, device=None):
+      super().__init__()
+      self.dim = int(config.head_dim * config.partial_rotary_factor)
+      self.max_seq_len_cached = config.max_position_embeddings
+      self.base = config.rope_theta
+      inv_freq = 1.0 / (self.base ** (torch.arange(0, self.dim, 2).float().to(device) / self.dim))
+      self.register_buffer("inv_freq", inv_freq, persistent=False)
+      self._set_cos_sin_cache(seq_len=self.max_seq_len_cached, device=self.inv_freq.device,
+                              dtype=torch.get_default_dtype())
+
+  def _set_cos_sin_cache(self, seq_len, device, dtype):
+      self.max_seq_len_cached = seq_len
+      t = torch.arange(self.max_seq_len_cached, device=device, dtype=self.inv_freq.dtype)
+      freqs = torch.einsum("i,j->ij", t, self.inv_freq)
+      emb = torch.cat((freqs, freqs), dim=-1)
+      self.register_buffer("cos_cached", emb.cos().to(dtype), persistent=False)
+      self.register_buffer("sin_cached", emb.sin().to(dtype), persistent=False)
+
+  def forward(self, x, position_ids):
+      print(f"Type of position_ids in RotaryEmbedding: {type(position_ids)}")
+      if not isinstance(position_ids, torch.Tensor):
+          print(f"Value of position_ids: {position_ids}")
+          raise TypeError("position_ids should be a Tensor")
+      seq_len = position_ids.max() + 1
+      if seq_len > self.max_seq_len_cached:
+          self._set_cos_sin_cache(seq_len=seq_len, device=x.device, dtype=x.dtype)
+      return (
+          self.cos_cached[position_ids].to(dtype=x.dtype),
+          self.sin_cached[position_ids].to(dtype=x.dtype),
+      )
 
 class Qwen3NextMLP_PT(nn.Module):
   """
@@ -393,6 +483,77 @@ class Qwen3NextGatedDeltaNet_PT(nn.Module):
     output = self.out_proj(gated_output)
     return output
 
+class Qwen3NextFullAttention_PT(nn.Module):
+  def __init__(self, config, layer_idx=0): # layer_idx added for consistency if needed
+      super().__init__()
+      self.config = config
+      self.layer_idx = layer_idx
+      self.hidden_size = config.hidden_size
+      self.head_dim = getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)
+      self.num_heads = config.num_attention_heads
+      self.num_key_value_heads = config.num_key_value_heads
+      self.num_key_value_groups = config.num_attention_heads // config.num_key_value_heads
+      self.scaling = self.head_dim**-0.5
+      self.attention_dropout = config.attention_dropout
+
+      self.q_proj = nn.Linear(
+          config.hidden_size, config.num_attention_heads * self.head_dim * 2, bias=config.attention_bias
+      )
+      self.k_proj = nn.Linear(
+          config.hidden_size, config.num_key_value_heads * self.head_dim, bias=config.attention_bias
+      )
+      self.v_proj = nn.Linear(
+          config.hidden_size, config.num_key_value_heads * self.head_dim, bias=config.attention_bias
+      )
+      self.o_proj = nn.Linear(
+          config.num_attention_heads * self.head_dim, config.hidden_size, bias=config.attention_bias
+      )
+      self.q_norm = Qwen3NextRMSNorm_PT(self.head_dim, eps=config.rms_norm_eps)
+      self.k_norm = Qwen3NextRMSNorm_PT(self.head_dim, eps=config.rms_norm_eps)
+
+  def forward(
+      self,
+      hidden_states: torch.Tensor,
+      position_embeddings: Tuple[torch.Tensor, torch.Tensor],
+      attention_mask: Optional[torch.Tensor] = None,
+      past_key_values: Optional[tuple[torch.Tensor, torch.Tensor]] = None, # Simplified for test
+      cache_position: Optional[torch.LongTensor] = None,
+  ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+    
+      input_shape = hidden_states.shape[:-1]
+      hidden_shape = (*input_shape, -1, self.head_dim)
+
+      query_states, gate = torch.chunk(
+          self.q_proj(hidden_states).view(*input_shape, -1, self.head_dim * 2), 2, dim=-1
+      )
+      gate = gate.reshape(*input_shape, -1)
+
+      query_states = self.q_norm(query_states.view(hidden_shape)).transpose(1, 2)
+      key_states = self.k_norm(self.k_proj(hidden_states).view(hidden_shape)).transpose(1, 2)
+      value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+
+      cos, sin = position_embeddings
+      query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+
+      if past_key_values is not None:
+          # sin and cos are specific to RoPE models; cache_position needed for the static cache
+          cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
+          key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx, cache_kwargs)
+
+      attn_output, attn_weights = eager_attention_forward(
+          self,
+          query_states,
+          key_states,
+          value_states,
+          attention_mask,
+          dropout=0.0 if not self.training else self.attention_dropout,
+          scaling=self.scaling,
+      )
+      attn_output = attn_output.reshape(*input_shape, -1).contiguous()
+      attn_output = attn_output * torch.sigmoid(gate)
+
+      attn_output = self.o_proj(attn_output)
+      return attn_output, attn_weights
 
 # ----------------------------------------------------------------------
 # END: Copied PyTorch functions
@@ -416,6 +577,7 @@ class TestQwen3Next(unittest.TestCase):
             "weight_dtype=float32",
             "matmul_precision=highest",
             "decoder_block=qwen3_next",
+            "attention=dot_product",
             # Model dimensions
             "base_emb_dim=128",
             "base_num_query_heads=4",
@@ -429,7 +591,7 @@ class TestQwen3Next(unittest.TestCase):
             "gdn_conv_kernel_dim=4",
             "gdn_chunk_size=64",
             "use_qk_norm_in_gdn=True",  # Use renamed parameter
-            "normalization_layer_epsilon=1e-5",
+            "normalization_layer_epsilon=1e-6",
             # MoE Test Configs (with a small number of experts)
             "base_mlp_dim=256",
             "num_experts=8",
@@ -442,6 +604,11 @@ class TestQwen3Next(unittest.TestCase):
             # Force the test to use the 'dense_matmul' path in the MoE layer,
             # as the 'sparse_matmul' path was found to be numerically incorrect compared to the reference.
             "sparse_matmul=False",
+            # To be able to run on cpu machines
+            "skip_jax_distributed_system=True",
+            # For FullAttention Layer
+            "attention_bias=False",
+            "rope_max_timescale=10000.0",
         ]
     )
     # Update the SimpleNamespace config used by PT models too
@@ -847,6 +1014,131 @@ class TestQwen3Next(unittest.TestCase):
         err_msg="Qwen3NextGatedDeltaNet does not match PyTorch reference!",
     )
     print("test_gated_delta_net_full passed!")
+
+  def test_full_attention_jax_vs_pytorch(self):
+      """Compares JAX and PyTorch Full Attention implementations."""
+      print("Running test_full_attention_jax_vs_pytorch...")
+
+      # 1. Config for PyTorch
+      pt_config = SimpleNamespace(
+          hidden_size=self.cfg.emb_dim,
+          num_attention_heads=self.cfg.num_query_heads,
+          head_dim=self.cfg.head_dim,
+          num_key_value_heads=self.cfg.num_kv_heads,
+          attention_bias=False,
+          rms_norm_eps=1e-6,
+          rope_theta=10000.0,
+          max_position_embeddings=self.cfg.max_target_length,
+          attention_dropout=self.cfg.dropout_rate,
+          partial_rotary_factor=0.25,
+      )
+
+      # 2. Instantiate PyTorch model
+      rotary_emb_pt = Qwen3NextRotaryEmbedding_PT(pt_config)
+      pt_model = Qwen3NextFullAttention_PT(pt_config).eval()
+
+      # 3. Instantiate JAX model
+      jax_model = qwen3.Qwen3NextFullAttention(
+          config=self.cfg,
+          mesh=self.mesh,
+          model_mode="train",
+          layer_idx=0,
+          quant=None,
+          rngs=self.nnx_rngs
+      )
+
+      # 4. Weight Mapping
+      pt_state_dict = pt_model.state_dict()
+
+      pt_q_proj_w = pt_state_dict['q_proj.weight'].T.numpy()
+      jax_q_proj_w = pt_q_proj_w.reshape(self.cfg.emb_dim, self.cfg.num_query_heads, self.cfg.head_dim * 2)
+
+      pt_k_proj_w = pt_state_dict['k_proj.weight'].T.numpy()
+      jax_k_proj_w = pt_k_proj_w.reshape(self.cfg.emb_dim, self.cfg.num_kv_heads, self.cfg.head_dim)
+
+      pt_v_proj_w = pt_state_dict['v_proj.weight'].T.numpy()
+      jax_v_proj_w = pt_v_proj_w.reshape(self.cfg.emb_dim, self.cfg.num_kv_heads, self.cfg.head_dim)
+      
+      jax_params = {
+          "q_proj": {"kernel": nnx.Param(jnp.array(jax_q_proj_w))},
+          "k_proj": {"kernel": nnx.Param(jnp.array(jax_k_proj_w))},
+          "v_proj": {"kernel": nnx.Param(jnp.array(jax_v_proj_w))},
+          "o_proj": {"kernel": nnx.Param(jnp.array(pt_state_dict['o_proj.weight'].T.numpy()))},
+          "q_norm": {"weight": nnx.Param(jnp.array(pt_state_dict['q_norm.weight'].numpy()))},
+          "k_norm": {"weight": nnx.Param(jnp.array(pt_state_dict['k_norm.weight'].numpy()))},
+      }
+      if self.cfg.attention_bias:
+          jax_params["q_proj"]["bias"] = nnx.Param(jnp.array(pt_state_dict['q_proj.bias'].numpy()))
+          jax_params["k_proj"]["bias"] = nnx.Param(jnp.array(pt_state_dict['k_proj.bias'].numpy()))
+          jax_params["v_proj"]["bias"] = nnx.Param(jnp.array(pt_state_dict['v_proj.bias'].numpy()))
+          jax_params["o_proj"]["bias"] = nnx.Param(jnp.array(pt_state_dict['o_proj.bias'].numpy()))
+
+      nnx.update(jax_model, jax_params)
+
+      # 5. Prepare Inputs
+      hidden_states_np = np.random.randn(self.batch_size, self.seq_len, self.cfg.emb_dim).astype(np.float32)
+      hidden_states_pt = torch.from_numpy(hidden_states_np)
+      hidden_states_jax = jnp.array(hidden_states_np)
+
+      position_ids_pt = torch.arange(0, self.seq_len, dtype=torch.long).unsqueeze(0).repeat(self.batch_size, 1)
+      decoder_positions_jax = jnp.array(position_ids_pt.numpy())
+
+      # Causal mask for PyTorch
+      attention_mask_pt = create_causal_mask_PT(self.seq_len, self.seq_len)
+      attention_mask_pt = attention_mask_pt[None, None, :, :]
+
+      # Segment IDs for JAX (for causal mask)
+      decoder_segment_ids_jax = jnp.ones((self.batch_size, self.seq_len), dtype=jnp.int32)
+
+      # 6. Get PyTorch cos, sin
+      cos_pt, sin_pt = rotary_emb_pt(hidden_states_pt, position_ids_pt)
+      position_embeddings_pt = (cos_pt, sin_pt)
+
+      # 7. Run PyTorch Model
+      with torch.no_grad():
+          pt_output, pt_weights = pt_model(hidden_states_pt, position_embeddings_pt, attention_mask=attention_mask_pt)
+
+      # 8. Run JAX Model
+      @jax.jit
+      def run_jax(inputs, segment_ids, positions):
+          return jax_model(
+              inputs,
+              decoder_segment_ids=segment_ids,
+              decoder_positions=positions,
+              deterministic=True,
+              model_mode="train"
+          )
+      jax_output = run_jax(hidden_states_jax, decoder_segment_ids_jax, decoder_positions_jax)
+      print(jax_output.shape)
+
+      # 9. Compare
+      print(f"pt_model: {pt_output.shape}")
+      pt_out_np = pt_output.detach().numpy()
+      print(f"pt_model 1: {pt_output.shape}")
+      jax_out_np = np.asarray(jax_output)
+      
+      diff = np.abs(pt_out_np - jax_out_np)
+      max_abs_diff = np.max(diff)
+      mean_abs_diff = np.mean(diff)
+      rtol = 1e-6
+      atol = 1e-6
+      is_close = np.allclose(pt_out_np, jax_out_np, rtol=rtol, atol=atol)
+      num_elements = pt_out_np.size
+      mismatched_elements = np.sum(~np.isclose(pt_out_np, jax_out_np, rtol=rtol, atol=atol))
+      percent_mismatch = (mismatched_elements / num_elements) * 100
+
+      print(f"  Max Abs Diff: {max_abs_diff:.2e}, Mean Abs Diff: {mean_abs_diff:.2e}")
+      print(f"  Mismatched Elements: {mismatched_elements}/{num_elements} ({percent_mismatch:.2f}%)")
+      print(f"  Is Close (rtol={rtol}, atol={atol}): {is_close}")
+      self.assertEqual(pt_out_np.shape, jax_out_np.shape, f"Shape mismatch for jax and pytorch impls")
+      np.testing.assert_allclose(
+          pt_out_np,
+          jax_out_np,
+          rtol=1e-6,
+          atol=1e-6,
+          err_msg=f"Weight mismatch for jax/pytorch impls",
+      )
+      print("test_full_attention_jax_vs_pytorch passed!")
 
 
 if __name__ == "__main__":

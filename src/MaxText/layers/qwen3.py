@@ -34,6 +34,7 @@ from MaxText.layers import attentions
 from MaxText.layers import initializers as max_initializers
 from MaxText.layers import linears
 from MaxText.layers import moe
+from MaxText.layers import embeddings
 from MaxText.layers import nnx_wrappers
 from MaxText.layers import quantizations
 from MaxText.layers.normalizations import RMSNorm, l2norm
@@ -551,8 +552,6 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
 
 
 class Qwen3NextFullAttention(nnx.Module):
-  """Placeholder for Qwen3-Next full attention."""
-
   def __init__(
       self, config: Config, mesh: Mesh, model_mode: str, layer_idx: int, quant: None | Quant = None, *, rngs: nnx.Rngs
   ):
@@ -562,66 +561,154 @@ class Qwen3NextFullAttention(nnx.Module):
     self.layer_idx = layer_idx
     self.quant = quant
     cfg = self.config
+    self.partial_rotary_factor = 0.25
 
-    # TODO(rbierneni): Implement the actual Qwen3NextAttention logic.
-    # This is a placeholder. The actual Qwen3NextAttention in the PyTorch code has:
-    # 1.  q_proj projection: hidden_size -> num_attention_heads * head_dim * 2.
-    #     This output is chunked to get query_states and a 'gate'.
-    # 2.  Qwen3NextRMSNorm (self.q_norm and self.k_norm) is applied to query_states
-    #     and key_states *before* RoPE. These norms are on the head_dim.
-    # 3.  The final attention output is gated: attn_output = attn_output * torch.sigmoid(gate).
-    # 4.  k_proj and v_proj are standard Linear layers to num_key_value_heads * head_dim.
-    # 5.  RoPE is applied to the normed query and key.
-    # 6.  The o_proj maps from num_attention_heads * head_dim back to hidden_size.
+    self.q_proj = linears.DenseGeneral(
+      in_features_shape=cfg.emb_dim,
+      out_features_shape=(cfg.num_query_heads, cfg.head_dim * 2),
+      use_bias=cfg.attention_bias,
+      dtype=cfg.dtype,
+      weight_dtype=cfg.weight_dtype,
+      kernel_axes=("embed", "heads", "kv"),
+      quant=self.quant,
+      matmul_precision=cfg.matmul_precision,
+      rngs=rngs,
+    )
 
-    # Placeholder call to standard MaxText attention
-    # NOTE: This will NOT match the Qwen3Next behavior or weights.
+    self.k_proj = linears.DenseGeneral(
+      in_features_shape=cfg.emb_dim,
+      out_features_shape=(cfg.num_kv_heads, cfg.head_dim),
+      use_bias=cfg.attention_bias,
+      dtype=cfg.dtype,
+      weight_dtype=cfg.weight_dtype,
+      kernel_axes=("embed", "kv_heads", "kv_head_dim"),
+      quant=self.quant,
+      matmul_precision=cfg.matmul_precision,
+      rngs=rngs,
+    )
 
-    # Get mode-specific batch size and sequence length for shape
-    batch_size, seq_len = max_utils.get_batch_seq_len_for_mode(cfg, model_mode)
-    inputs_shape = (batch_size, seq_len, cfg.emb_dim)
+    self.v_proj = linears.DenseGeneral(
+      in_features_shape=cfg.emb_dim,
+      out_features_shape=(cfg.num_kv_heads, cfg.head_dim),
+      use_bias=cfg.attention_bias,
+      dtype=cfg.dtype,
+      weight_dtype=cfg.weight_dtype,
+      kernel_axes=("embed", "kv_heads", "kv_head_dim"),
+      quant=self.quant,
+      matmul_precision=cfg.matmul_precision,
+      rngs=rngs,
+    )
 
-    self.attention_layer = attentions.Attention(
-        config=cfg,
-        num_query_heads=cfg.num_query_heads,
-        num_kv_heads=cfg.num_kv_heads,
-        head_dim=cfg.head_dim,
-        max_target_length=cfg.max_target_length,
-        max_prefill_predict_length=cfg.max_prefill_predict_length,
-        attention_kernel=cfg.attention,
-        inputs_q_shape=inputs_shape,
-        inputs_kv_shape=inputs_shape,
-        mesh=self.mesh,
-        dtype=cfg.dtype,
-        weight_dtype=cfg.weight_dtype,
-        dropout_rate=cfg.dropout_rate,
-        name="self_attention",
-        quant=self.quant,
-        kv_quant=quantizations.configure_kv_quant(cfg),
-        use_qk_norm=False,
-        model_mode=model_mode,
+    self.o_proj = linears.DenseGeneral(
+      in_features_shape=cfg.emb_dim,
+      out_features_shape=cfg.emb_dim,
+      use_bias=cfg.attention_bias,
+      dtype=cfg.dtype,
+      weight_dtype=cfg.weight_dtype,
+      kernel_axes=("mlp", "embed"),
+      quant=self.quant,
+      matmul_precision=cfg.matmul_precision,
+      rngs=rngs,
+    )
+
+    # QK Normalization
+    self.q_norm = Qwen3NextRMSNorm(
+      num_features=cfg.head_dim,
+      eps=cfg.normalization_layer_epsilon,
+      dtype=cfg.dtype,
+      weight_dtype=cfg.weight_dtype,
+      rngs=rngs,
+    )
+
+    self.k_norm = Qwen3NextRMSNorm(
+      num_features=cfg.head_dim,
+      eps=cfg.normalization_layer_epsilon,
+      dtype=cfg.dtype,
+      weight_dtype=cfg.weight_dtype,
+      rngs=rngs,
+    )
+
+    # Partial Rotary Embedding
+    self.rotary_dim = int(cfg.head_dim * self.partial_rotary_factor)
+
+    if self.rotary_dim > 0:
+      self.rotary_embedding = embeddings.Qwen3NextRotaryEmbedding(
+        min_timescale=cfg.rope_min_timescale,
+        max_timescale=cfg.rope_max_timescale,
+        embedding_dims=cfg.head_dim,
+        partial_rotary_factor=self.partial_rotary_factor,
+        cast_as_fprop_dtype=True,
+        fprop_dtype=cfg.dtype,
         rngs=rngs,
+      )
+    else: 
+      self.rotary_embedding = None
+
+    # Attention Operator
+    self.attention_op = attentions.AttentionOp(
+      config=cfg,
+      mesh=self.mesh,
+      attention_kernel=cfg.attention,
+      max_target_length=cfg.max_target_length,
+      max_prefill_predict_length=cfg.max_prefill_predict_length,
+      float32_qk_product=cfg.float32_qk_product,
+      float32_logits=cfg.float32_logits,
+      quant=self.quant,
+      kv_quant=quantizations.configure_kv_quant(cfg),
+      num_query_heads=cfg.num_query_heads,
+      num_kv_heads=cfg.num_kv_heads,
+      dropout_rate=cfg.dropout_rate,
+      dtype=cfg.dtype,
+      rngs=rngs,
     )
 
   def __call__(
-      self,
-      inputs: jnp.ndarray,
-      decoder_segment_ids: None | jnp.ndarray,
-      decoder_positions: None | jnp.ndarray,
-      deterministic: bool,
-      model_mode: str,
-      # TODO(parambole): Add cache arguments
+        self,
+        inputs: jnp.ndarray,
+        decoder_segment_ids: None | jnp.ndarray,
+        decoder_positions: None | jnp.ndarray,
+        deterministic: bool,
+        model_mode: str,
   ):
+    cfg = self.config
+    batch_size, seq_len, _ = inputs.shape
 
-    # TODO(parambole): Add caching in/out
-    attention_output = self.attention_layer(
-        inputs,
-        inputs,
-        decoder_positions,
-        decoder_segment_ids=decoder_segment_ids,
-        deterministic=deterministic,
-        model_mode=model_mode,
+    # Project and split Query and Gate
+    q_proj_out = self.q_proj(inputs)
+    query_states, gate = jnp.split(q_proj_out, 2, axis=-1)
+
+    # Project Key and Value
+    key_states = self.k_proj(inputs)
+    value_states = self.v_proj(inputs)
+
+    # Apply QK Normalization (per-head)
+    query_states = self.q_norm(query_states)
+    key_states = self.k_norm(key_states)
+
+    # Apply Rotary Embeddings
+    query_states = self.rotary_embedding(query_states, decoder_positions)
+    key_states= self.rotary_embedding(key_states, decoder_positions)
+
+    # Apply scaling before attention op
+    scaling = jax.lax.rsqrt(jnp.array(cfg.head_dim, dtype=cfg.dtype))
+    query_states = query_states * scaling
+
+    # Compute Attention
+    attention_output = self.attention_op(
+        query_states,
+        key_states,
+        value_states,
+        decoder_segment_ids,
+        model_mode,
     )
+
+    # Apply Gating
+    attention_output = attention_output * nn.sigmoid(gate)
+
+    # Output Projection
+    attention_output = attention_output.reshape(batch_size, seq_len, cfg.emb_dim)
+    attention_output = self.o_proj(attention_output)
+
     return attention_output
 
 
