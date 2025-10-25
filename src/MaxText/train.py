@@ -51,7 +51,7 @@ from MaxText import train_utils
 from MaxText import profiler
 from MaxText import pyconfig
 from MaxText.layers.multi_token_prediction import calculate_mtp_acceptance_rate, calculate_mtp_loss
-from MaxText.data_loader import DataLoader
+from MaxText.data_loader import create_dataloader
 from MaxText.globals import EPS
 from MaxText.metric_logger import MetricLogger
 from MaxText.utils import gcs_utils
@@ -389,7 +389,7 @@ def train_loop(config, recorder, state=None):
 
   start_step = get_first_step(state)  # this is the start_step for training
   prof = profiler.Profiler(config, offset_step=start_step)
-  data_loader = DataLoader(config, mesh, data_iterator, recorder)
+  data_loader = create_dataloader(config, mesh, data_iterator, recorder)
   metric_logger = MetricLogger(config=config, learning_rate_schedule=learning_rate_schedule)
 
   # Write train config params, num model params, and XLA flags to tensorboard
@@ -402,6 +402,11 @@ def train_loop(config, recorder, state=None):
 
       with jax.profiler.StepTraceAnnotation("train", step_num=step):
         example_batch = data_loader.load_next_batch()
+        # Reshard data from loaded sharding to performant activation sharding
+        example_batch = jax.lax.with_sharding_constraint(
+            example_batch,
+            maxtext_utils.get_input_data_sharding(config, mesh),
+        )
         # pylint: disable=not-callable
         nextrng = jax.jit(jax.random.fold_in)(init_rng, step)
         with maybe_record_goodput(recorder, GoodputEvent.STEP, step):
