@@ -581,10 +581,13 @@ class RoutedMoE(nnx.Module):
       if self.config.decoder_block == ctypes.DecoderBlockType.LLAMA4:
         # For Llama4, combine using weights of 1 for selected experts
         reshaped_weights = jnp.ones_like(reshaped_weights)
+      if self.config.weight_sum_fp32:
+        reshaped_intermediate = reshaped_intermediate.astype(jnp.float32)
+        reshaped_weights = reshaped_weights.astype(jnp.float32)
       output = jnp.einsum(
           "BKE,BK -> BE",
-          reshaped_intermediate.astype(jnp.float32),
-          reshaped_weights.astype(jnp.float32),
+          reshaped_intermediate,
+          reshaped_weights,
           precision=matmul_precision,
       )
     return output.reshape(batch_size, sequence_length, -1).astype(self.dtype)
@@ -1685,11 +1688,14 @@ class RoutedMoE(nnx.Module):
       with jax.named_scope("w_sum"):
         if is_llama4_decoder_layer:
           weights = self.reshape_and_update_weights(jnp.ones_like(top_k_weights), top_k_indices)
+        if self.config.weight_sum_fp32:
+          intermediate_layer = intermediate_layer.astype(jnp.float32)
+          weights = weights.astype(jnp.float32)
         # cast to f32 for sum up in einsum op
         output = jnp.einsum(
             "BSEM,BSE -> BSM",
-            intermediate_layer.astype(jnp.float32),
-            weights.astype(jnp.float32),  # pylint: disable=undefined-variable,possibly-used-before-assignment
+            intermediate_layer,
+            weights,
             precision=matmul_precision,
         ).astype(self.dtype)
       return output, None
