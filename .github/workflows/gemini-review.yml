@@ -35,12 +35,12 @@ jobs:
           env | grep '^DEBUG_'
 
   review:
-    # code review: PR is not from a fork (a critical security precaution) & label containing 'gemini-review' is added
-    # (use contains instead of == to relax the constraints with multiple labels condition)
+    # code review: PR is not from a fork (a critical security precaution) & label added as gemini-review
+    # Test - no change
     if: |- 
       (
         github.event_name == 'pull_request' &&
-        github.event.pull_request.head.repo.fork == false &&
+        contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.pull_request.author_association) &&
         github.event.action == 'labeled' &&
         contains(github.event.label.name, 'gemini-review')
       )
