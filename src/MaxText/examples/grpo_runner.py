@@ -23,7 +23,7 @@ from grpo_tunix_trainer.py which consolidates all the GRPO-specific logic.
 Usage Examples:
 
 # Llama3.1-8B (single host)
-python3 src/MaxText/examples/grpo_demo.py \\
+python3 src/MaxText/examples/grpo_runner.py \\
   --model_name=llama3.1-8b \\
   --tokenizer_path=meta-llama/Llama-3.1-8B-Instruct \\
   --load_parameters_path=gs://path/to/checkpoint \\
@@ -32,7 +32,7 @@ python3 src/MaxText/examples/grpo_demo.py \\
   --steps=100
 
 # Llama3.1-70B with Pathways (multi-host)
-python3 src/MaxText/examples/grpo_demo.py \\
+python3 src/MaxText/examples/grpo_runner.py \\
   --model_name=llama3.1-70b \\
   --tokenizer_path=meta-llama/Llama-3.1-70B-Instruct \\
   --load_parameters_path=gs://path/to/checkpoint \\
@@ -42,7 +42,7 @@ python3 src/MaxText/examples/grpo_demo.py \\
   --steps=100
 
 # Custom dataset
-python3 src/MaxText/examples/grpo_demo.py \\
+python3 src/MaxText/examples/grpo_runner.py \\
   --model_name=llama3.1-8b \\
   --tokenizer_path=meta-llama/Llama-3.1-8B-Instruct \\
   --load_parameters_path=gs://path/to/checkpoint \\
