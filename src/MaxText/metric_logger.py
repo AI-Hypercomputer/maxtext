@@ -25,6 +25,8 @@ import numpy as np
 
 import jax
 
+from google_cloud_mldiagnostics import metrics as mlmetrics
+
 from MaxText import max_logging
 from MaxText import max_utils
 from MaxText import maxtext_utils
@@ -33,6 +35,19 @@ from MaxText.gcp_workload_monitor import GCPWorkloadMonitor
 from MaxText.globals import EPS
 
 from collections import defaultdict
+
+# Mapping MaxText metrics to Diagon managed profiler metrics
+_METRICS_TO_MANAGED = {
+    "learning/current_learning_rate": "learning_rate",
+    "learning/loss": "loss",
+    "learning/grad_norm": "gradient_norm",
+    "learning/total_weights": "total_weights",
+    "perf/step_time_seconds": "step_time",
+    "perf/per_device_tokens_per_sec": "throughput",
+    "perf/per_device_tflops_per_sec": "tflops",
+    # There are no mappings to the following Diagon metrics yet:
+    # "latency", "mfu"
+}
 
 
 def _prepare_metrics_for_json(metrics, step, run_name):
@@ -100,6 +115,9 @@ class MetricLogger:
 
       if self.config.gcs_metrics and jax.process_index() == 0:
         self.write_metrics_for_gcs(metrics, step, is_training)
+
+      if self.config.managed_profiler and (self.config.upload_all_profiler_results or jax.process_index() == 0):
+        self.write_metrics_to_managed_profiler(metrics, step)
 
   def log_metrics(self, metrics, step, is_training):
     """Logs metrics via max_logging."""
@@ -173,6 +191,18 @@ class MetricLogger:
       if full_log and jax.process_index() == 0:
         max_logging.log(f"To see full metrics 'tensorboard --logdir={self.config.tensorboard_dir}'")
         self.writer.flush()
+
+  def write_metrics_to_managed_profiler(self, metrics, step):
+    """Write metrics to managed profiler."""
+    if (step + 1) % self.config.log_period == 0 or step == self.config.steps - 1:
+      for metric_name in metrics.get("scalar", []):
+        value = metrics["scalar"][metric_name]
+        # For NumPy/JAX array objects (including single-element arrays), use .item()
+        # to extract the native Python scalar.
+        if hasattr(value, "item"):
+          value = value.item()
+        mapped_metric_name = _METRICS_TO_MANAGED.get(metric_name, metric_name)
+        mlmetrics.record(mapped_metric_name, value, step=int(step))
 
   def write_setup_info_to_tensorboard(self, params):
     """Writes setup information like train config params, num model params, and XLA flags to TensorBoard."""

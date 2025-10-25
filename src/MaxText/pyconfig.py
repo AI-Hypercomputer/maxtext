@@ -41,6 +41,9 @@ from MaxText.utils import gcs_utils
 
 _MAX_PREFIX = "M_"
 
+# Don't log the following keys.
+KEYS_NO_LOGGING = ("hf_access_token",)
+
 # YAML attribute to specify inheritance.
 _BASE_CONFIG_ATTR = "base_config"
 
@@ -131,6 +134,14 @@ def validate_periodic_profiler(profiler, profile_periodically_period, profiler_s
     )
 
 
+def validate_managed_profiler(profiler: str, enabled: bool) -> None:
+  # Validate managed profiler settings
+  if enabled and profiler != "xplane":
+    raise ValueError(
+        f"managed_profiler cannot be enabled if the profiler is not 'xplane'. The profiler value is '{profiler}'."
+    )
+
+
 def validate_model_call_mode(s: str) -> None:
   valid_model_call_modes = ("", "inference")
   if s not in valid_model_call_modes:  # currently supported attention
@@ -178,6 +189,7 @@ def validate_keys(keys):
   )
   validate_profiler_type(keys["profiler"])
   validate_periodic_profiler(keys["profiler"], keys["profile_periodically_period"], keys["profiler_steps"])
+  validate_managed_profiler(keys["profiler"], keys["managed_profiler"])
   validate_compute_axis_order(keys["compute_axis_order"])
   validate_kv_quant_axis(keys["kv_quant_axis"], keys["quantize_kvcache"])
   validate_model_call_mode(keys["model_call_mode"])
@@ -630,7 +642,7 @@ class _HyperParameters:
 
     if raw_keys["log_config"]:
       for k in keys:
-        if k != "hf_access_token":
+        if k not in KEYS_NO_LOGGING:
           max_logging.log(f"Config param {k}: {raw_keys[k]}")
 
   @staticmethod
@@ -648,6 +660,7 @@ class _HyperParameters:
       raw_keys["tensorboard_dir"] = os.path.join(base_output_directory, run_name, "tensorboard", "")
       raw_keys["checkpoint_dir"] = os.path.join(base_output_directory, run_name, "checkpoints", "")
       raw_keys["metrics_dir"] = os.path.join(base_output_directory, run_name, "metrics", "")
+      raw_keys["managed_profiler_dir"] = os.path.join(base_output_directory, run_name, "managed-profiler", "")
 
     if raw_keys["learning_rate_schedule_steps"] == -1:
       raw_keys["learning_rate_schedule_steps"] = raw_keys["steps"]
@@ -1133,7 +1146,7 @@ def validate_optimizer_sharding_over_data(raw_keys):
   zero1_supported_opt_types = ("adamw", "adam_pax")
   if raw_keys["opt_type"] not in zero1_supported_opt_types:
     raise ValueError(
-        f"Optimizer type {raw_keys["opt_type"]} is not supported for optimizer sharding.\n"
+        f"Optimizer type {raw_keys['opt_type']} is not supported for optimizer sharding.\n"
         f"Please use an optimizer from this list: {zero1_supported_opt_types}."
     )
 

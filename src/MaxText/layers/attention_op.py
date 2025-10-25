@@ -1100,7 +1100,7 @@ class AttentionOp(nnx.Module):
             block_kv_dkv_compute=min(global_block_kv_dkv_compute, query.shape[2]),
             block_q_dq=None if global_use_fused_bwd_kernel else min(global_block_q_dq, query.shape[2]),
             block_kv_dq=None if global_use_fused_bwd_kernel else min(global_block_kv_dq, query.shape[2]),
-            use_fused_bwd_kernel=True, # tokamax only supports fused bwd kernel
+            use_fused_bwd_kernel=True,  # tokamax only supports fused bwd kernel
             q_layout=splash_attention_kernel.QKVLayout[global_q_layout],
             k_layout=splash_attention_kernel.QKVLayout[global_k_layout],
             v_layout=splash_attention_kernel.QKVLayout[global_v_layout],
