@@ -127,7 +127,38 @@ Use the link for Jupyter Lab as a link for "Connect to a local runtime" in Colla
 
 ### GRPO Training
 
-- **`grpo_llama3_demo.ipynb`** → GRPO training on math dataset
+- **`grpo_llama3_1_8b_demo.ipynb`** → GRPO training on math dataset (Colab/notebook)
+- **`grpo_runner.py`** → Unified CLI for GRPO training (any model)
+
+#### GRPO Colab Usage
+
+For interactive GRPO training in Google Colab or Jupyter:
+
+1. **Open** `src/MaxText/examples/grpo_llama3_1_8b_demo.ipynb`
+2. **Enable TPU runtime** (Runtime → Change runtime type → TPU)
+3. **Run cells** to train Llama3.1-8B with GRPO on GSM8K dataset
+
+#### GRPO Python Script Usage
+
+```bash
+# Llama3.1-8B
+python3 src/MaxText/examples/grpo_runner.py \
+  --model_name=llama3.1-8b \
+  --tokenizer_path=meta-llama/Llama-3.1-8B-Instruct \
+  --load_parameters_path=gs://path/to/checkpoint \
+  --base_output_directory=/tmp/grpo_output \
+  --hf_access_token=$HF_TOKEN \
+  --steps=100
+
+# Qwen2.5-7B
+python3 src/MaxText/examples/grpo_runner.py \
+  --model_name=qwen2.5-7b \
+  --tokenizer_path=Qwen/Qwen2.5-7B-Instruct \
+  --load_parameters_path=gs://path/to/checkpoint \
+  --base_output_directory=/tmp/grpo_output \
+  --hf_access_token=$HF_TOKEN \
+  --steps=100
+```
 
 ## Common Pitfalls & Debugging
 
