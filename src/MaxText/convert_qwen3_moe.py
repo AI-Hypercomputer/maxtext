@@ -45,6 +45,15 @@ MODEL_PARAMS_DICT = {
         "head_dim": 128,
         "num_experts": 128,
         "moe_intermediate_size": 1536,
+    },
+    "qwen3-30b-a3b": {
+        "num_hidden_layers": 48,
+        "num_attention_heads": 32,
+        "num_key_value_heads": 4,
+        "hidden_size": 2048,
+        "head_dim": 128,
+        "num_experts": 128,
+        "moe_intermediate_size": 768,
     }
 }
 
