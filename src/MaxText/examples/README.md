@@ -128,7 +128,7 @@ Use the link for Jupyter Lab as a link for "Connect to a local runtime" in Colla
 ### GRPO Training
 
 - **`grpo_llama3_1_8b_demo.ipynb`** → GRPO training on math dataset (Colab/notebook)
-- **`grpo_demo.py`** → Unified CLI for GRPO training (any model)
+- **`grpo_runner.py`** → Unified CLI for GRPO training (any model)
 
 #### GRPO Colab Usage
 
@@ -142,7 +142,7 @@ For interactive GRPO training in Google Colab or Jupyter:
 
 ```bash
 # Llama3.1-8B
-python3 src/MaxText/examples/grpo_demo.py \
+python3 src/MaxText/examples/grpo_runner.py \
   --model_name=llama3.1-8b \
   --tokenizer_path=meta-llama/Llama-3.1-8B-Instruct \
   --load_parameters_path=gs://path/to/checkpoint \
@@ -151,7 +151,7 @@ python3 src/MaxText/examples/grpo_demo.py \
   --steps=100
 
 # Qwen2.5-7B
-python3 src/MaxText/examples/grpo_demo.py \
+python3 src/MaxText/examples/grpo_runner.py \
   --model_name=qwen2.5-7b \
   --tokenizer_path=Qwen/Qwen2.5-7B-Instruct \
   --load_parameters_path=gs://path/to/checkpoint \
