@@ -127,10 +127,18 @@ Use the link for Jupyter Lab as a link for "Connect to a local runtime" in Colla
 
 ### GRPO Training
 
-- **`grpo_llama3_demo.ipynb`** → GRPO training on math dataset
+- **`grpo_llama3_1_8b_demo.ipynb`** → GRPO training on math dataset (Colab/notebook)
 - **`grpo_demo.py`** → Unified CLI for GRPO training (any model)
 
-#### GRPO Usage
+#### GRPO Colab Usage
+
+For interactive GRPO training in Google Colab or Jupyter:
+
+1. **Open** `src/MaxText/examples/grpo_llama3_1_8b_demo.ipynb`
+2. **Enable TPU runtime** (Runtime → Change runtime type → TPU)
+3. **Run cells** to train Llama3.1-8B with GRPO on GSM8K dataset
+
+#### GRPO Python Script Usage
 
 ```bash
 # Llama3.1-8B

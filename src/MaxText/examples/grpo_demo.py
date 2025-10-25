@@ -221,6 +221,26 @@ def create_parser():
       help="Tensor parallelism (-1 for auto)",
   )
 
+  # Device Allocation Configuration
+  parser.add_argument(
+      "--trainer_devices_fraction",
+      type=float,
+      default=0.5,
+      help="Fraction of devices for training (0.0-1.0)",
+  )
+  parser.add_argument(
+      "--sampler_devices_fraction",
+      type=float,
+      default=0.5,
+      help="Fraction of devices for sampling (0.0-1.0)",
+  )
+  parser.add_argument(
+      "--chips_per_vm",
+      type=int,
+      default=4,
+      help="Number of chips per VM (hardware dependent)",
+  )
+
   # Other Configuration
   parser.add_argument(
       "--profiler",
@@ -292,6 +312,11 @@ def build_config_argv(args):
 
   if args.ici_tensor_parallelism > 0:
     config_argv.append(f"ici_tensor_parallelism={args.ici_tensor_parallelism}")
+
+  # Add device allocation parameters
+  config_argv.append(f"trainer_devices_fraction={args.trainer_devices_fraction}")
+  config_argv.append(f"sampler_devices_fraction={args.sampler_devices_fraction}")
+  config_argv.append(f"chips_per_vm={args.chips_per_vm}")
 
   return config_argv
 
