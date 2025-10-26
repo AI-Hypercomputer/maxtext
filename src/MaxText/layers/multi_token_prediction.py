@@ -20,16 +20,18 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
 
-from flax import linen as nn
+from flax import nnx
 
 from MaxText.common_types import Config, MODEL_MODE_TRAIN
-from MaxText.layers.linears import dense_general
-from MaxText.layers.normalizations import rms_norm
-from MaxText.layers.decoders import Decoder, DecoderLayer
+from MaxText.layers.linears import DenseGeneral
+from MaxText.layers.normalizations import RMSNorm
+from MaxText.layers.decoders import DecoderLayer
+from MaxText.layers import nnx_wrappers
 from MaxText import max_utils
 from MaxText import maxtext_utils
 
 from MaxText.globals import EPS
+from MaxText.layers.initializers import variable_to_logically_partitioned
 
 
 def roll_and_mask(x: jnp.ndarray, shift: int = -1) -> jnp.ndarray:
@@ -53,7 +55,7 @@ def roll_and_mask(x: jnp.ndarray, shift: int = -1) -> jnp.ndarray:
   return jnp.roll(x, shift, axis=1).at[:, shift:, ...].set(0)
 
 
-class MultiTokenPredictionLayer(nn.Module):
+class MultiTokenPredictionLayer(nnx.Module):
   """
   Implements Multi-Token Prediction (MTP) step:
       1. Normalization of previous hidden state and target token embedding.
@@ -70,16 +72,58 @@ class MultiTokenPredictionLayer(nn.Module):
       processed hidden state from its internal transformer block.
   """
 
-  config: Config
-  mesh: Mesh
-  layer_number: int
-  transformer_layer_module: Type[DecoderLayer] = DecoderLayer
+  def __init__(
+      self,
+      config: Config,
+      mesh: Mesh,
+      layer_number: int,
+      transformer_layer_module: Type[DecoderLayer],
+      *,
+      rngs: nnx.Rngs,
+  ):
+    self.config = config
+    self.mesh = mesh
+    self.layer_number = layer_number
+    self.transformer_layer_module = transformer_layer_module
+    self.rngs = rngs
+    k = layer_number
+    cfg = self.config
 
-  @nn.compact
+    self.embedding_norm = RMSNorm(
+        num_features=cfg.base_emb_dim,
+        epsilon=cfg.normalization_layer_epsilon,
+        dtype=cfg.dtype,
+        weight_dtype=cfg.weight_dtype,
+        kernel_axes=("norm",),
+        rngs=rngs,
+    )
+    self.hidden_state_norm = RMSNorm(
+        num_features=cfg.base_emb_dim,
+        epsilon=cfg.normalization_layer_epsilon,
+        dtype=cfg.dtype,
+        weight_dtype=cfg.weight_dtype,
+        kernel_axes=("norm",),
+        rngs=rngs,
+    )
+    self.projection_layer = DenseGeneral(
+        in_features_shape=2 * cfg.base_emb_dim,
+        out_features_shape=cfg.base_emb_dim,
+        dtype=cfg.dtype,
+        weight_dtype=cfg.weight_dtype,
+        use_bias=False,
+        kernel_axes=("concat_embed", "embed"),
+        rngs=rngs,
+    )
+    mtp_transformer_layer = transformer_layer_module(
+        config=cfg, mesh=mesh, model_mode=MODEL_MODE_TRAIN, name=f"mtp_{k}_transformer_layer"
+    )
+    self.transformer_layer = nnx_wrappers.ToNNX(mtp_transformer_layer, rngs=rngs)
+
   def __call__(
       self,
       prev_hidden_state: jnp.ndarray,
       target_token_embedding: jnp.ndarray,
+      *,
       position_ids: jnp.ndarray,
       decoder_segment_ids: None | jnp.ndarray,
       deterministic: bool,
@@ -107,31 +151,10 @@ class MultiTokenPredictionLayer(nn.Module):
         next_hidden_state: The hidden state produced by this MTP step's internal transformer.
                            Shape: [batch, seq_len, hidden_size]
     """
-    cfg = self.config
-    mesh = self.mesh
-    k = self.layer_number
-
     # --- 1. Normalize Hidden State and Embedding ---
-    embedding_norm_layer = rms_norm(
-        num_features=target_token_embedding.shape[-1],
-        dtype=cfg.dtype,
-        weight_dtype=cfg.weight_dtype,
-        name=f"mtp_{k}_embedding_norm",
-        epsilon=cfg.normalization_layer_epsilon,
-        kernel_axes=("norm",),
-    )
-    embedding_norm = embedding_norm_layer(target_token_embedding)
+    embedding_norm = self.embedding_norm(target_token_embedding)
 
-    hidden_state_norm_layer = rms_norm(
-        num_features=prev_hidden_state.shape[-1],
-        dtype=cfg.dtype,
-        weight_dtype=cfg.weight_dtype,
-        name=f"mtp_{k}_hidden_state_norm",
-        epsilon=cfg.normalization_layer_epsilon,
-        kernel_axes=("norm",),
-    )
-
-    hidden_state_norm = hidden_state_norm_layer(prev_hidden_state)
+    hidden_state_norm = self.hidden_state_norm(prev_hidden_state)
 
     # --- 2. Concatenate Normalized Representations ---
     # Shape: [B, S, 2*H]
@@ -139,22 +162,11 @@ class MultiTokenPredictionLayer(nn.Module):
 
     # --- 3. Project Concatenated Features ---
     # Projects from 2*H back down to H
-    projection_layer = dense_general(
-        inputs_shape=concatenated_features.shape,
-        out_features_shape=cfg.base_emb_dim,
-        dtype=cfg.dtype,
-        weight_dtype=cfg.weight_dtype,
-        use_bias=False,
-        kernel_axes=("concat_embed", "embed"),
-        name=f"mtp_{k}_projection",
-    )
     # Shape: [B, S, H]
-    projected_features = projection_layer(concatenated_features)
+    projected_features = self.projection_layer(concatenated_features)
 
     # --- 4. Pass through MTP Transformer Block ---
-    output = self.transformer_layer_module(
-        config=cfg, mesh=mesh, model_mode=model_mode, name=f"mtp_{k}_transformer_layer"
-    )(
+    output = self.transformer_layer(
         inputs=projected_features,
         decoder_segment_ids=decoder_segment_ids,
         decoder_positions=position_ids,
@@ -174,15 +186,32 @@ class MultiTokenPredictionLayer(nn.Module):
     return next_hidden_state
 
 
-class MultiTokenPredictionBlock(nn.Module):
+class MultiTokenPredictionBlock(nnx.Module):
   """Orchestrates the MTP process by running a sequence of MTP layers."""
 
-  config: Config
-  mesh: Mesh
-  transformer_layer_module: Type[DecoderLayer]
-  decoder: Decoder
+  def __init__(
+      self,
+      config: Config,
+      mesh: Mesh,
+      transformer_layer_module: Type[DecoderLayer],
+      decoder: nnx.Module,
+      rngs: nnx.Rngs,
+  ):
+    self.config = config
+    self.mesh = mesh
+    self.transformer_layer_module = transformer_layer_module
+    self.decoder = decoder
+    self.rngs = rngs if rngs is not None else nnx.Rngs(0)
+    for k in range(1, config.mtp_num_layers + 1):
+      layer = MultiTokenPredictionLayer(
+          config=config,
+          mesh=mesh,
+          layer_number=k,
+          transformer_layer_module=transformer_layer_module,
+          rngs=rngs,
+      )
+      setattr(self, f"mtp_layer_{k}", layer)
 
-  @nn.compact
   def __call__(
       self,
       shared_embedding,
@@ -190,6 +219,7 @@ class MultiTokenPredictionBlock(nn.Module):
       input_ids,
       target_ids,
       target_mask,
+      *,
       position_ids,
       decoder_segment_ids,
       model_mode,
@@ -216,25 +246,19 @@ class MultiTokenPredictionBlock(nn.Module):
 
       # Embed the k-th future input tokens using the shared embedding module
       target_token_embedding = self.decoder._apply_embedding(
-          shared_embedding, rolled_input_ids, rolled_position_id, deterministic, self.decoder.model_mode
+          shared_embedding, rolled_input_ids, rolled_position_id, deterministic, model_mode=self.decoder.model_mode
       )
 
       # Instantiate and apply the MTP layer for this step
-      mtp_layer = MultiTokenPredictionLayer(
-          config=cfg,
-          mesh=self.mesh,
-          layer_number=k,
-          name=f"mtp_layer_{k}",
-          transformer_layer_module=self.transformer_layer_module,
-      )
+      mtp_layer = getattr(self, f"mtp_layer_{k}")
 
       next_mtp_hidden_state = mtp_layer(
-          mtp_hidden_state,
-          target_token_embedding,
-          position_ids,
-          decoder_segment_ids,
-          deterministic,
-          self.decoder.model_mode,
+          prev_hidden_state=mtp_hidden_state,
+          target_token_embedding=target_token_embedding,
+          position_ids=position_ids,
+          decoder_segment_ids=decoder_segment_ids,
+          deterministic=deterministic,
+          model_mode=self.decoder.model_mode,
       )
 
       # Project to logits using the shared embedding transpose
@@ -246,20 +270,18 @@ class MultiTokenPredictionBlock(nn.Module):
       )
       mtp_xent_masked = mtp_xent * rolled_target_mask
 
-      # This logic doesn't run during model initialization to avoid unwated population of the mutable collections.
-      if not self.is_initializing():
-        # For evaluation, save the top prediction and a valid token mask.
-        # This is only active for the target layer during an eval run.
-        if cfg.mtp_eval_target_module == k and self.is_mutable_collection("mtp_acceptance"):
-          mtp_top_1_pred = jnp.argmax(mtp_logits, axis=-1)
-          self.sow("mtp_acceptance", "mtp_preds", mtp_top_1_pred)
-          self.sow("mtp_acceptance", "mtp_mask", rolled_target_mask)
+      # For evaluation, save the top prediction and a valid token mask.
+      # This is only active for the target layer during an eval run.
+      if cfg.mtp_eval_target_module == k:
+        mtp_top_1_pred = jnp.argmax(mtp_logits, axis=-1)
+        self.sow("mtp_acceptance", "mtp_preds", mtp_top_1_pred)
+        self.sow("mtp_acceptance", "mtp_mask", rolled_target_mask)
 
-        # For training, save the loss components for this MTP head.
-        # This is only active during a training run.
-        if self.is_mutable_collection("mtp_losses"):
-          self.sow("mtp_losses", "losses", jnp.sum(mtp_xent_masked))
-          self.sow("mtp_losses", "weights", jnp.sum(rolled_target_mask))
+      # For training, save the loss components for this MTP head.
+      # This is only active during a training run.
+      if model_mode == MODEL_MODE_TRAIN:
+        self.sow("mtp_losses", "losses", jnp.sum(mtp_xent_masked))
+        self.sow("mtp_losses", "weights", jnp.sum(rolled_target_mask))
 
       # The output of this layer is the input for the next, maintaining the causal chain.
       mtp_hidden_state = next_mtp_hidden_state
@@ -313,3 +335,37 @@ def calculate_mtp_acceptance_rate(intermediate_outputs, config):
 
   # Return acceptance rate as a percentage
   return (correct_predictions / (total_valid_tokens + EPS)) * 100
+
+
+def multi_token_prediction_block_as_linen(
+    *,
+    config: Config,
+    mesh: Mesh,
+    transformer_layer_module: Type[DecoderLayer],
+    decoder: nnx.Module,
+    rngs: nnx.Rngs,
+    name: str | None = None,
+) -> nnx.Module:
+  """Initializes MultiTokenPredictionBlock as a Linen module.
+
+  Args:
+    config: Configuration object containing model hyperparameters.
+    mesh: JAX Mesh for model parallelism.
+    transformer_layer_module: The Transformer Decoder Layer class to use.
+    decoder: The decoder module that provides embedding and output head.
+    rngs: Random number generators for initialization.
+    name: Optional name for the module.
+
+  Returns:
+    An instance of MultiTokenPredictionBlock wrapped as a Linen module.
+  """
+  return nnx.bridge.to_linen(
+      MultiTokenPredictionBlock,
+      config=config,
+      mesh=mesh,
+      transformer_layer_module=transformer_layer_module,
+      decoder=decoder,
+      rngs=rngs,
+      metadata_fn=variable_to_logically_partitioned,
+      name=name,
+  )
