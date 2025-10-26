@@ -73,6 +73,7 @@ def create_training_tools(config, model, mesh):
         logger,
         use_ocdbt,
         use_zarr3,
+        config.max_to_keep,
     )
 
   return init_rng, checkpoint_manager, learning_rate_schedule, tx
