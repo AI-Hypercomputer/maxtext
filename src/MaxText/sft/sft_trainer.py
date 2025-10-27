@@ -287,13 +287,22 @@ def train(mt_config, goodput_recorder=None):
     
     # Apply LoRA if enabled
     use_lora = getattr(mt_config, "use_lora", False)
-    max_logging.log(f"LoRA enabled: {use_lora}")
     if use_lora:
-      max_logging.log("Applying LoRA to the model...")
+      max_logging.log("="*80)
+      max_logging.log("MODEL STRUCTURE BEFORE LoRA APPLICATION")
+      max_logging.log("="*80)
+      nnx.display(model)
+      
+      max_logging.log("\nApplying LoRA to the model...")
       quantize_lora = getattr(mt_config, "quantize_lora", False)
       model = apply_lora_to_model(model, mesh, mt_config, quantize=quantize_lora)
       max_logging.log("LoRA applied successfully")
+      
+      max_logging.log("="*80)
+      max_logging.log("MODEL STRUCTURE AFTER LoRA APPLICATION")
+      max_logging.log("="*80)
       nnx.display(model)
+      max_logging.log("="*80)
     
     learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(mt_config)
     optimizer = optimizers.get_optimizer(mt_config, learning_rate_schedule)
@@ -303,7 +312,17 @@ def train(mt_config, goodput_recorder=None):
     data_hooks = hooks.SFTDataHooks(mt_config, mesh, goodput_recorder)
 
     lora_enabled = utils.is_lora_enabled(model)
-    max_logging.log(f"LoRA enabled: {lora_enabled}")
+    
+    # Log LoRA status prominently for easy visibility
+    max_logging.log("\n" + "="*80)
+    max_logging.log("🔍 LoRA TRAINING STATUS")
+    max_logging.log("="*80)
+    if lora_enabled:
+      max_logging.log("✅ LoRA IS ENABLED - Running LoRA fine-tuning")
+    else:
+      max_logging.log("❌ LoRA IS DISABLED - Running full-weight training")
+    max_logging.log("="*80 + "\n")
+    
     trainer = peft_trainer.PeftTrainer(model, optimizer, tunix_config)
     trainer.with_training_hooks(training_hooks)
     trainer.with_data_hooks(data_hooks)
