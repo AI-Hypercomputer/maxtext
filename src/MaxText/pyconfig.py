@@ -490,7 +490,7 @@ def set_muon_config(raw_keys):
     try:
       raw_keys["muon_consistent_rms"] = float(raw_keys["muon_consistent_rms"])
     except ValueError as e:
-      raise ValueError(f"muon_consistent_rms should be None or float") from e
+      raise ValueError("muon_consistent_rms should be None or float") from e
 
 
 class _HyperParameters:

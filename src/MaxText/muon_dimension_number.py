@@ -172,7 +172,6 @@ def test2():
     # init model
     argv = [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"), f"model_name={model_name}"]
     config = pyconfig.initialize(argv)
-    rng = jax.random.PRNGKey(0)
     devices_array = maxtext_utils.create_device_mesh(config)
     mesh = jax.sharding.Mesh(devices_array, config.mesh_axes)
     quant = quantizations.configure_quantization(config)
