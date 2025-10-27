@@ -622,7 +622,7 @@ gradient_clipping_threshold: 1.0
 # batch by accumulating the gradient over a set of steps.
 gradient_accumulation_steps: 1
 
-opt_type: "adamw"  # one of "adamw", "adam_pax" or "sgd"
+opt_type: "adamw"  # one of "adamw", "adam_pax", "sgd", or "muon"
 
 # AdamW optimizer parameters
 # We use AdamW following Llama2's training details, see https://arxiv.org/pdf/2307.09288.pdf section 2.2
@@ -634,6 +634,14 @@ adam_weight_decay: 0.1 # AdamW Weight decay
 mu_dtype: "" # data type to store "mu" of AdamW tracking the first moment. Inherits from  weight_dtype if unset.
 # Setting nu_dtype is not yet supported by optax, instead nu_dtype is always inherited from weights.
 # See b/399961932 for more.
+
+# Muon optimizer parameters
+# https://github.com/google-deepmind/optax/blob/main/optax/contrib/_muon.py
+# "mu_dtype", "adam_eps" are shared by AdamW
+# "nesterov", "ns_coeffs", "ns_steps", "weight_decay_mask", "adaptive" use default
+muon_beta: 0.95 # Decay rate for the exponentially weighted average of grads.
+muon_weight_decay: 0 # Strength of the weight decay regularization. This is multiplied with the learning rate.
+muon_consistent_rms: None # If None, apply width scaling to updates. If float, apply consistent rms scaling (recommend 0.2).
 
 # Stack trace parameters
 collect_stack_trace: False

@@ -88,7 +88,8 @@ def get_shaped_inputs(topology_mesh, config):
   model = Transformer(config, topology_mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
   # The learning_rate_schedule is baked into the compiled object.
   learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
-  tx = optimizers.get_optimizer(config, learning_rate_schedule)
+  # pass in model for muon
+  tx = optimizers.get_optimizer(config, learning_rate_schedule, model)
 
   # Shaped RNG keys
   _, example_rng = jax.random.split(jax.random.PRNGKey(0), 2)
