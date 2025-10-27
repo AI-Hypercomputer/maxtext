@@ -313,14 +313,15 @@ def train(mt_config, goodput_recorder=None):
 
     lora_enabled = utils.is_lora_enabled(model)
     
-    # Log LoRA status prominently for easy visibility
+    # Log LoRA training configuration
     max_logging.log("\n" + "="*80)
-    max_logging.log("🔍 LoRA TRAINING STATUS")
+    max_logging.log("TRAINING CONFIGURATION")
     max_logging.log("="*80)
+    max_logging.log(f"LoRA enabled: {lora_enabled}")
     if lora_enabled:
-      max_logging.log("✅ LoRA IS ENABLED - Running LoRA fine-tuning")
-    else:
-      max_logging.log("❌ LoRA IS DISABLED - Running full-weight training")
+      max_logging.log(f"LoRA rank: {mt_config.lora_rank}")
+      max_logging.log(f"LoRA alpha: {mt_config.lora_alpha}")
+      max_logging.log(f"Quantized LoRA: {mt_config.quantize_lora}")
     max_logging.log("="*80 + "\n")
     
     trainer = peft_trainer.PeftTrainer(model, optimizer, tunix_config)
