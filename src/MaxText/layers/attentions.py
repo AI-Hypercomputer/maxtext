@@ -70,7 +70,7 @@ from MaxText.layers.initializers import nd_dense_init, NdInitializer, variable_t
 from MaxText.layers.linears import DenseGeneral, canonicalize_tuple, normalize_axes
 from MaxText.layers.normalizations import RMSNorm
 from MaxText.layers.quantizations import AqtQuantization as Quant
-from tpu_inference.models.jax import attention as rpa_ops
+from tpu_inference.layers.jax import attention as rpa_ops
 
 # pylint: disable=line-too-long, g-doc-args, g-doc-return-or-yield, bad-continuation, g-inconsistent-quotes
 # pytype: disable=attribute-error

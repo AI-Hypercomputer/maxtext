@@ -1,2 +1,3 @@
 -r requirements.txt
 google-tunix
+vllm-tpu

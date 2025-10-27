@@ -1,4 +1,5 @@
 import jax
+import pathlib
 import os
 
 from flax import nnx
@@ -6,6 +7,7 @@ from jax.sharding import Mesh
 from MaxText import model_creation_utils
 from MaxText import pyconfig
 from MaxText.common_types import MODEL_MODE_AUTOREGRESSIVE
+from MaxText.globals import MAXTEXT_PKG_DIR
 from MaxText.utils import gcs_utils
 
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
@@ -20,8 +22,8 @@ def generate_maxtext_config(vllm_config: VllmConfig) -> pyconfig.HyperParameters
             return False
         return os.path.exists(path) or gcs_utils.gcs_path_exists(path)
 
-    if "maxtext_config" in vllm_config.additional_configs:
-        overrides = vllm_config.additional_configs["maxtext_config"]
+    if "maxtext_config" in vllm_config.additional_config:
+        overrides = vllm_config.additional_config["maxtext_config"]
     else:
         overrides = {}
         load_path = None
@@ -35,9 +37,12 @@ def generate_maxtext_config(vllm_config: VllmConfig) -> pyconfig.HyperParameters
         elif vllm_config.model.model:
             overrides["model_name"] = vllm_config.model.model
 
-    maxtext_config = pyconfig.initialize(**overrides)
-    return maxtext_config
+    # Add base config path to positional args
+    base_config_path = pathlib.Path(MAXTEXT_PKG_DIR) / "configs" / "base.yml"
+    argv_list = ["", str(base_config_path)]
 
+    maxtext_config = pyconfig.initialize(argv_list, **overrides)
+    return maxtext_config
 
 
 class MaxTextDecoderModel(nnx.Module):
@@ -95,6 +100,7 @@ class MaxTextForCausalLM(nnx.Module):
         self.rngs = nnx.Rngs(rng_key)
         self.mesh = mesh
         self.model = MaxTextDecoderModel(vllm_config, rng_key, mesh)
+        self.is_text_generation_model = True
 
     def __call__(self,
                kv_caches: list[jax.Array],
@@ -104,6 +110,12 @@ class MaxTextForCausalLM(nnx.Module):
         # Delegate to the decoder; decoder threads rpa_* into each Attention layer.
         kv_caches, hidden = self.model(kv_caches, input_ids, attention_metadata, **kwargs)
         return kv_caches, hidden
+
+    def forward(self, *args, **kwargs):
+        return self.__call__(*args, **kwargs)
+
+    def get_input_embeddings(self):
+        return None
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
         return self.model.compute_logits(hidden_states)
