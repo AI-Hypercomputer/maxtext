@@ -96,7 +96,7 @@ class Pipeline(nnx.Module):
     # 3. Create a vmapped factory function over stages
     vmap_over_stages = nnx.vmap(
         create_layer,
-        split_rngs={'params': True, 'dropout': True, 'jitter': True},
+        in_axes=0,
         out_axes=0,  # Stack all params/state on axis 0
         spmd_axis_name='stage',
     )
@@ -105,7 +105,7 @@ class Pipeline(nnx.Module):
     if self.config.num_pipeline_repeats > 1:
       vmap_over_repeats = nnx.vmap(
           vmap_over_stages, # Vmap the vmapped function
-          split_rngs={'params': True, 'dropout': True, 'jitter': True},
+          in_axes=0,
           out_axes=0, # Stack on a new axis 0
           spmd_axis_name='circular_repeats'
       )
