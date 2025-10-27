@@ -54,6 +54,7 @@ PRE_TRAINED_MODEL=llama3.1-8b
 PRE_TRAINED_MODEL_TOKENIZER=meta-llama/Llama-3.1-8B-Instruct
 
 # Set default LoRA parameters if not provided
+USE_LORA=${USE_LORA:-True}
 LORA_RANK=${LORA_RANK:-8}
 LORA_ALPHA=${LORA_ALPHA:-16}
 QUANTIZE_LORA=${QUANTIZE_LORA:-False}
@@ -79,7 +80,7 @@ python3 -m MaxText.sft.sft_trainer "${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD
     hf_access_token=$HF_TOKEN tokenizer_path=${PRE_TRAINED_MODEL_TOKENIZER} \
     per_device_batch_size=${PER_DEVICE_BATCH_SIZE} steps=${STEPS} \
     profiler=xplane max_target_length=1024 weight_dtype=bfloat16 \
-    use_lora=True lora_rank=${LORA_RANK} lora_alpha=${LORA_ALPHA} quantize_lora=${QUANTIZE_LORA}
+    use_lora=${USE_LORA} lora_rank=${LORA_RANK} lora_alpha=${LORA_ALPHA} quantize_lora=${QUANTIZE_LORA}
 
 # Get the latest fine-tuned model checkpoint
 CHECKPOINTS_PATH=${BASE_OUTPUT_DIRECTORY}/${PRE_TRAINED_MODEL}/${RUN_NAME}/checkpoints

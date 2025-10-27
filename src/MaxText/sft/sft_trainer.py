@@ -113,15 +113,34 @@ def get_tunix_config(mt_config):
 def gen_model_input_for_lora(x):
   """Transform training batch to model input format for LoRA training.
   
-  Converts Tunix training input to MaxText model input format.
-  This is necessary for LoRA training because the frozen base model
-  requires properly formatted inputs to work with the adapters.
+  Converts Tunix training input to MaxText model input format by mapping field names
+  and shapes to match the Transformer model's expected signature.
+  
+  This explicit transformation provides several benefits:
+  - Makes data transformation intentional and self-documenting
+  - Ensures field names (e.g., input_positions -> input_position) are correctly mapped
+  - Provides defensive handling for optional fields with hasattr() checks
+  - Prevents silent bugs if Tunix data format changes
+  
+  Without this function, training may still work because:
+  1. The loss_func wrapper re-structures data anyway (see use_maxtext_loss_function)
+  2. Tunix might handle positional/keyword argument conversion automatically
+  3. Data fields might happen to be compatible with the model signature
+  
+  However, using this function is the best practice because it makes the data
+  transformation explicit and reliable across different configurations.
   
   Args:
     x: Tunix TrainingInput containing input_tokens and other fields.
     
   Returns:
-    Dictionary with keys matching the model's __call__ signature.
+    Dictionary with keys matching the Transformer's __call__ signature:
+    - input_tokens: Token IDs
+    - input_position: Token positions
+    - input_segmentation: Segment IDs for different input parts
+    - target_tokens: Target token IDs for loss computation
+    - target_position: Target token positions
+    - target_segmentation: Target segment IDs
   """
   return {
       'input_tokens': x.input_tokens,
@@ -268,6 +287,7 @@ def train(mt_config, goodput_recorder=None):
     
     # Apply LoRA if enabled
     use_lora = getattr(mt_config, "use_lora", False)
+    print(f"LoRA enabled: {use_lora}")
     if use_lora:
       max_logging.log("Applying LoRA to the model...")
       quantize_lora = getattr(mt_config, "quantize_lora", False)
