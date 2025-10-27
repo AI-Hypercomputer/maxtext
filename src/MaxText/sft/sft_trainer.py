@@ -273,6 +273,124 @@ def apply_lora_to_model(base_model, mesh, mt_config, quantize=False):
   return lora_model
 
 
+def count_model_parameters(model):
+  """Counts parameters in a model by category.
+  
+  Args:
+    model: The NNX model to analyze.
+    
+  Returns:
+    A dictionary with parameter counts and statistics.
+  """
+  state = nnx.state(model)
+  
+  total_params = 0
+  trainable_params = 0
+  frozen_params = 0
+  lora_params = 0
+  param_details = {}
+  
+  # Count parameters by module
+  for name, value in state.flat_state().items():
+    if isinstance(value, jnp.ndarray):
+      param_count = value.size
+      total_params += param_count
+      
+      # Categorize parameters
+      if "lora" in name.lower():
+        lora_params += param_count
+        trainable_params += param_count
+        category = "LoRA"
+      else:
+        # Check if it's explicitly trainable
+        if "Param" in str(type(value)):
+          trainable_params += param_count
+          category = "Trainable"
+        else:
+          frozen_params += param_count
+          category = "Frozen"
+      
+      # Track by module
+      module_name = name.split("/")[0] if "/" in name else name
+      if module_name not in param_details:
+        param_details[module_name] = {"total": 0, "trainable": 0, "frozen": 0, "lora": 0}
+      param_details[module_name]["total"] += param_count
+      param_details[module_name][category.lower()] += param_count
+  
+  return {
+      "total": total_params,
+      "trainable": trainable_params,
+      "frozen": frozen_params,
+      "lora": lora_params,
+      "details": param_details,
+  }
+
+
+def log_model_comparison(base_model, lora_model, mt_config):
+  """Compares base model and LoRA model before training starts.
+  
+  This is the most meaningful comparison because it shows:
+  1. The structural changes LoRA introduces
+  2. How many parameters are frozen vs trainable
+  3. The actual LoRA adapter parameters added
+  4. Memory efficiency gains
+  
+  Args:
+    base_model: The original model (without LoRA).
+    lora_model: The model with LoRA applied (can be None if LoRA disabled).
+    mt_config: MaxText config.
+  """
+  max_logging.log("\n" + "="*80)
+  max_logging.log("MODEL STRUCTURE COMPARISON")
+  max_logging.log("="*80)
+  
+  base_stats = count_model_parameters(base_model)
+  
+  max_logging.log("\n[BASE MODEL] (Full-Weight Training)")
+  max_logging.log(f"  Total Parameters: {base_stats['total']:,}")
+  max_logging.log(f"  Trainable: {base_stats['trainable']:,} ({100*base_stats['trainable']/max(base_stats['total'], 1):.2f}%)")
+  max_logging.log(f"  Frozen: {base_stats['frozen']:,} ({100*base_stats['frozen']/max(base_stats['total'], 1):.2f}%)")
+  
+  if lora_model is not None:
+    lora_stats = count_model_parameters(lora_model)
+    
+    max_logging.log("\n[LORA MODEL] (LoRA Fine-tuning)")
+    max_logging.log(f"  Total Parameters: {lora_stats['total']:,}")
+    max_logging.log(f"  Trainable: {lora_stats['trainable']:,} ({100*lora_stats['trainable']/max(lora_stats['total'], 1):.2f}%)")
+    max_logging.log(f"  Frozen: {lora_stats['frozen']:,} ({100*lora_stats['frozen']/max(lora_stats['total'], 1):.2f}%)")
+    max_logging.log(f"  LoRA Adapters: {lora_stats['lora']:,}")
+    
+    # Calculate improvements
+    trainable_reduction = 100 * (1 - lora_stats['trainable'] / max(base_stats['trainable'], 1))
+    param_addition = lora_stats['total'] - base_stats['total']
+    
+    max_logging.log("\n[COMPARISON]")
+    max_logging.log(f"  Parameter Reduction: {trainable_reduction:.2f}%")
+    max_logging.log(f"  LoRA Overhead: +{param_addition:,} parameters")
+    max_logging.log(f"  Training Speed Benefit: ~{trainable_reduction:.0f}% faster (fewer params to update)")
+    max_logging.log(f"  Memory Savings: ~{trainable_reduction:.0f}% less gradient memory needed")
+    
+    max_logging.log("\n[CONFIGURATION]")
+    max_logging.log(f"  LoRA Rank: {mt_config.lora_rank}")
+    max_logging.log(f"  LoRA Alpha: {mt_config.lora_alpha}")
+    max_logging.log(f"  Quantized: {mt_config.quantize_lora}")
+    
+    max_logging.log("\n[TRAINING STRATEGY COMPARISON]")
+    max_logging.log("  Base Model (Full-Weight):")
+    max_logging.log(f"    - Train all {base_stats['trainable']:,} parameters")
+    max_logging.log(f"    - Higher memory footprint")
+    max_logging.log(f"    - Slower convergence (more params to optimize)")
+    max_logging.log(f"    - Better performance ceiling")
+    
+    max_logging.log("\n  LoRA Model (Adapter Fine-tuning):")
+    max_logging.log(f"    - Train only {lora_stats['trainable']:,} parameters (adapters)")
+    max_logging.log(f"    - Freeze {lora_stats['frozen']:,} base parameters")
+    max_logging.log(f"    - Lower memory footprint ({100-trainable_reduction:.1f}% less)")
+    max_logging.log(f"    - Faster convergence (fewer params to optimize)")
+  
+  max_logging.log("="*80 + "\n")
+
+
 def train(mt_config, goodput_recorder=None):
   """Runs the SFT training loop.
 
@@ -285,6 +403,10 @@ def train(mt_config, goodput_recorder=None):
   with maybe_record_goodput(goodput_recorder, GoodputEvent.TPU_INIT):
     model, mesh = model_creation_utils.create_nnx_model(mt_config)
     
+    # Keep a reference to the base model for comparison
+    base_model = model
+    lora_model = None
+    
     # Apply LoRA if enabled
     use_lora = getattr(mt_config, "use_lora", False)
     if use_lora:
@@ -296,6 +418,7 @@ def train(mt_config, goodput_recorder=None):
       max_logging.log("\nApplying LoRA to the model...")
       quantize_lora = getattr(mt_config, "quantize_lora", False)
       model = apply_lora_to_model(model, mesh, mt_config, quantize=quantize_lora)
+      lora_model = model
       max_logging.log("LoRA applied successfully")
       
       max_logging.log("="*80)
@@ -323,6 +446,9 @@ def train(mt_config, goodput_recorder=None):
       max_logging.log(f"LoRA alpha: {mt_config.lora_alpha}")
       max_logging.log(f"Quantized LoRA: {mt_config.quantize_lora}")
     max_logging.log("="*80 + "\n")
+    
+    # Compare base model vs LoRA model before training
+    log_model_comparison(base_model, lora_model, mt_config)
     
     trainer = peft_trainer.PeftTrainer(model, optimizer, tunix_config)
     trainer.with_training_hooks(training_hooks)
