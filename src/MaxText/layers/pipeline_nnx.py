@@ -109,7 +109,8 @@ class Pipeline(nnx.Module):
           out_axes=0, # Stack on a new axis 0
           spmd_axis_name='circular_repeats'
       )
-      
+      nnx.split_rngs(rngs, splits=self.num_stages)
+      breakpoint()
       # `self.layers` is now one module with stacked params [R, S, ...]
       self.layers = vmap_over_repeats(rngs) 
     else:
@@ -123,8 +124,6 @@ class Pipeline(nnx.Module):
     # in stacked arrays, e.g., self.layers.batch_stats.mean.value
     # has shape [num_repeats, num_stages, ...]
 
-  # --- (All helper methods from init_states to vmap_gather are identical) ---
-  
   def need_circ_storage(self):
     return (
         self.config.num_pipeline_repeats > 1
@@ -557,8 +556,7 @@ class Pipeline(nnx.Module):
 
     new_loop_state = self.get_new_loop_state(stages_output, loop_state)
     return new_loop_state
-    
-  # --- (get_pipeline_remat_policy is identical) ---
+
   
   def get_pipeline_remat_policy(self):
     if self.config.remat_policy == "custom":

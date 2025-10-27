@@ -33,6 +33,7 @@ from MaxText import pyconfig
 from MaxText.common_types import MODEL_MODE_TRAIN
 from MaxText.globals import MAXTEXT_PKG_DIR, MAXTEXT_ASSETS_ROOT
 from MaxText.layers import pipeline
+from MaxText.layers import pipeline_nnx
 from MaxText.layers import simple_layer
 from MaxText.train import main as train_main
 from MaxText.layers import deepseek
@@ -91,7 +92,7 @@ class PipelineParallelismTest(unittest.TestCase):
     deterministic = True
     # We use a simpler single matmul decoder layer for fast compilation in these tests.
     single_pipeline_stage = simple_layer.SimpleDecoderLayer(config=config, mesh=mesh, model_mode=model_mode)
-    my_pipeline = pipeline.Pipeline(config=config, layers=single_pipeline_stage, mesh=mesh)
+    my_pipeline = pipeline_nnx.Pipeline(config=config, layers=single_pipeline_stage, mesh=mesh)
     init_pipeline_params = my_pipeline.init(
         jax.random.PRNGKey(0), inputs, inputs_position, inputs_segmentation, deterministic, model_mode
     )
@@ -290,6 +291,7 @@ class PipelineParallelismTest(unittest.TestCase):
             "num_pipeline_microbatches=8",
             rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizer.llama2')}",
             "scan_layers_per_stage=False",  # We see better performance only scanning the pipeline iterations.
+            "log_config=False",
         ]
     )
 
