@@ -142,20 +142,24 @@ TRAIN_FRACTION = 1.0
 
 
 # ====== Input Checkpoint directory =====
-MODEL_CHECKPOINT_PATH = "gs://maxtext-model-checkpoints/llama3.1_70b_instruct/2025-10-15/pathways/scanned/0/items"
+MODEL_CHECKPOINT_PATH = "gs://mazumdera-test-bucket-europe-west4/llama3.1_70b_instruct/2025-10-15/pathways/scanned/0/items"
+# MODEL_CHECKPOINT_PATH = "gs://maxtext-model-checkpoints/llama3.1_70b_instruct/2025-10-15/pathways/scanned/0/items"
 
 # ====== Checkpoint directory =====
-LOG_DIR = f"{HOME}/content/tensorboard/grpo/logs_llama3/"
+LOG_DIR = f"gs://mazumdera-test-bucket-europe-west4/rl-tuning/grpo/anisha-{run_id}/tensorboard/grpo/logs_llama3/"
+# LOG_DIR = f"gs://mazumdera-test-bucket-us-central2/grpo/rl-tuning/grpo/anisha-{run_id}/tensorboard/grpo/logs_llama3/"
 if not os.path.exists(LOG_DIR):
-  os.makedirs(LOG_DIR)
+  epath.Path(LOG_DIR).mkdir(parents=True)
 
 # ===== Profiling =====
 PROFILE_DIR = f"gs://mazumdera-test-bucket-europe-west4/rl-tuning/grpo/anisha-{run_id}/profiles_llama3/"
+# PROFILE_DIR = f"gs://mazumdera-test-bucket-us-central2/grpo/rl-tuning/grpo/anisha-{run_id}/profiles_llama3/"
 if not epath.Path(PROFILE_DIR).exists():
   epath.Path(PROFILE_DIR).mkdir(parents=True)
 
 # ====== Checkpoint saving ======
 CKPT_DIR = f"gs://mazumdera-test-bucket-europe-west4/rl-tuning/grpo/anisha-{run_id}/ckpts_llama3/"
+# CKPT_DIR = f"gs://mazumdera-test-bucket-us-central2/grpo/rl-tuning/grpo/anisha-{run_id}/ckpts_llama3/"
 
 if not epath.Path(CKPT_DIR).exists():
   epath.Path(CKPT_DIR).mkdir(parents=True)
