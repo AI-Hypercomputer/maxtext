@@ -36,6 +36,12 @@ load_parameters_path: ""
 # LoRA adapter support configs
 lora_input_adapters_path: ""    # Input GCS path for a parent directory which has all the LoRA adapters (lora_id as subdir)
 
+# PEFT LoRA training configs (for fine-tuning)
+use_lora: False                 # Enable LoRA for parameter-efficient fine-tuning
+lora_rank: 8                    # Rank of LoRA decomposition (r in LoRA paper)
+lora_alpha: 16                  # Scaling factor for LoRA (alpha in LoRA paper)
+quantize_lora: False            # Enable NF4 quantization for LoRA (QLoRA)
+
 # Loads a full checkpoint including optimizer state and step count from a specific directory
 # e.g. gs://my-base-output-directory/my-previous-run-name/checkpoints/items/NUMBER or NUMBER/items
 load_full_state_path: ""
