@@ -287,7 +287,7 @@ def train(mt_config, goodput_recorder=None):
     
     # Apply LoRA if enabled
     use_lora = getattr(mt_config, "use_lora", False)
-    print(f"LoRA enabled: {use_lora}")
+    max_logging.log(f"LoRA enabled: {use_lora}")
     if use_lora:
       max_logging.log("Applying LoRA to the model...")
       quantize_lora = getattr(mt_config, "quantize_lora", False)
