@@ -386,7 +386,7 @@ class Decoder(nn.Module):
         if self.config.use_batch_split_schedule:
           return [deepseek_batchsplit.DeepSeekDenseLayer, deepseek_batchsplit.DeepSeekMoELayer]
         else:
-          return [deepseek.DeepSeekDenseLayer, deepseek.DeepSeekMoELayer]
+          return [deepseek.DeepSeekDenseLayerToLinen, deepseek.DeepSeekMoELayerToLinen]
       case DecoderBlockType.GEMMA:
         return [gemma.GemmaDecoderLayerToLinen]
       case DecoderBlockType.GEMMA2:
