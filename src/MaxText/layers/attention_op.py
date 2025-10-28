@@ -31,12 +31,11 @@ from jax.experimental import pallas as pl
 from jax.sharding import Mesh
 import jax.numpy as jnp
 
-if jax.__version__ < "0.8.0":
-  from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_kernel
-  from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask
-else:
-  from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_kernel
-  from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_mask
+from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_kernel
+from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask
+
+from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_kernel as tokamax_splash_kernel
+from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_mask as tokamax_splash_mask
 
 
 from flax import linen as nn
@@ -145,8 +144,8 @@ def validate_flash_attention_with_sinks_on_gpu(sinks: Array | None) -> None:
     raise ValueError("The flash attention with sinks is not supported on GPU yet.")
 
 
-# TODO(agagik): change splash_attention_mask._ComputableMask to be non protected
-class ChunkedCausalMask(splash_attention_mask._ComputableMask):  # pylint: disable=protected-access
+# TODO(agagik): change tokamax_splash_mask._ComputableMask to be non protected
+class ChunkedCausalMask(tokamax_splash_mask._ComputableMask):  # pylint: disable=protected-access
   """Lazy chunked causal mask.
 
   Attention is causal within each chunk (0, K), (K, 2K), (2K, 3K), ... tokens attend to each other but not across chunks.
@@ -1090,20 +1089,18 @@ class AttentionOp(nnx.Module):
 
     # create_splash_attention config
     def create_sa_config(config, query, key, attn_logits_soft_cap):
-      if jax.__version__ >= "0.8.0":
-        sa_config = splash_attention_kernel.SplashConfig(
+      if config.use_tokamax_splash:
+        sa_config = tokamax_splash_kernel.SplashConfig(
             block_q=min(global_block_q, query.shape[2]),
             block_kv=min(global_block_kv, key.shape[2]),
             block_kv_compute=min(global_block_kv_compute, key.shape[2]),
             block_q_dkv=min(global_block_q_dkv, query.shape[2]),
             block_kv_dkv=min(global_block_kv_dkv, key.shape[2]),
             block_kv_dkv_compute=min(global_block_kv_dkv_compute, query.shape[2]),
-            block_q_dq=None if global_use_fused_bwd_kernel else min(global_block_q_dq, query.shape[2]),
-            block_kv_dq=None if global_use_fused_bwd_kernel else min(global_block_kv_dq, query.shape[2]),
-            use_fused_bwd_kernel=True, # tokamax only supports fused bwd kernel
-            q_layout=splash_attention_kernel.QKVLayout[global_q_layout],
-            k_layout=splash_attention_kernel.QKVLayout[global_k_layout],
-            v_layout=splash_attention_kernel.QKVLayout[global_v_layout],
+            use_fused_bwd_kernel=True,  # tokamax only supports fused bwd kernel
+            q_layout=tokamax_splash_kernel.QKVLayout[global_q_layout],
+            k_layout=tokamax_splash_kernel.QKVLayout[global_k_layout],
+            v_layout=tokamax_splash_kernel.QKVLayout[global_v_layout],
             attn_logits_soft_cap=attn_logits_soft_cap,
             residual_checkpoint_name="context",
             fwd_cost_estimate=pl.CostEstimate(
@@ -1167,7 +1164,7 @@ class AttentionOp(nnx.Module):
       mask &= ChunkedCausalMask(shape=(query.shape[2], key.shape[2]), chunk_size=self.chunk_attn_window_size)
 
     max_logit_value = None
-    if jax.__version__ >= "0.8.0":
+    if self.config.use_tokamax_splash:
       # Create mask
       single_head_mask = mask  # tokamax now just uses a single mask and assumes broadcast to all heads
       if self.config.use_max_logit_estimate > 0:
@@ -1182,7 +1179,7 @@ class AttentionOp(nnx.Module):
           ],
       )
       def wrap_splash_kernel(single_head_mask, shard_head_size=1):
-        splash_kernel = splash_attention_kernel.make_splash_mha(
+        splash_kernel = tokamax_splash_kernel.make_splash_mha(
             mask=single_head_mask,
             config=sa_config,
             q_seq_shards=cp_size,  # axis for sequence sharding,
@@ -1291,7 +1288,7 @@ class AttentionOp(nnx.Module):
       if version.parse(jax.__version__) < version.parse("0.7.2.dev20250824"):
         attention_output = jax.vmap(splash_kernel)(query, key, value, decoder_segment_ids_tuple)
       else:
-        if jax.__version__ >= "0.8.0":
+        if self.config.use_tokamax_splash:
           if max_logit_value is not None:
             attention_output = jax.vmap(partial(splash_kernel, max_logit_value=max_logit_value))(
                 query, key, value, decoder_segment_ids_tuple
@@ -1778,7 +1775,7 @@ class AttentionOp(nnx.Module):
 
 
 # pylint: disable=protected-access
-class LoadBalancedCausalMask(splash_attention_mask._ComputableMask):
+class LoadBalancedCausalMask(tokamax_splash_mask._ComputableMask):
   """Lazy causal mask, prevents the model from attending to future tokens.
   Attributes:
     offset: Offset of q start wrt kv. A positive offset shifts the bottom
