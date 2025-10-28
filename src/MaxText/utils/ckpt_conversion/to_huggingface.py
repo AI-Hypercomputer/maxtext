@@ -145,7 +145,6 @@ def main(argv: Sequence[str]) -> None:
     raise ValueError(f"HF Tokenizer ID not found for model key: {model_key}")
   hf_token = config.hf_access_token
   hf_tokenizer_id = HF_IDS[model_key]
-  hf_tokenizer_id = "deepseek-ai/DeepSeek-V3"
   tokenizer = AutoTokenizer.from_pretrained(hf_tokenizer_id, token=hf_token)
 
   # For multi-modal case:

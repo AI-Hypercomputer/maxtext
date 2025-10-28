@@ -45,6 +45,8 @@ Example Usage:
 import os
 import sys
 from typing import Sequence, List, Dict, Any
+import time
+import argparse
 
 import numpy as np
 import jax
@@ -64,7 +66,6 @@ from MaxText.checkpointing import save_checkpoint
 from MaxText.utils.ckpt_conversion.utils.param_mapping import HOOK_FNS, PARAM_MAPPING
 from MaxText.utils.ckpt_conversion.utils.utils import apply_hook_fns, HF_IDS
 import jax.numpy as jnp
-import time
 
 jax.config.update("jax_platform_name", "cpu")
 
@@ -165,7 +166,7 @@ def get_abstract_param(model, config):
   return abstract_vars
 
 
-def main(argv: Sequence[str]) -> None:
+def main(argv: Sequence[str], local_argv: argparse.Namespace) -> None:
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"  # Suppress TensorFlow logging
 
@@ -185,7 +186,10 @@ def main(argv: Sequence[str]) -> None:
   if model_name_original not in HF_IDS:
     raise ValueError(f"Unsupported model name: {model_name_original}. Supported models are: {list(HF_IDS.keys())}")
 
-  model_id = HF_IDS[model_name_original]
+  if local_argv.hf_model_path:
+    model_id = local_argv.hf_model_path
+  else:
+    model_id = HF_IDS[model_name_original]
   max_utils.print_system_information()
   if not config.base_output_directory:
     output_directory = f"/tmp/{config.run_name}"
@@ -353,4 +357,9 @@ def main(argv: Sequence[str]) -> None:
 
 
 if __name__ == "__main__":
-  app.run(main)
+  parser = argparse.ArgumentParser()
+  parser.add_argument("--hf_model_path", type=str, required=False, default="")
+  local_args, _ = parser.parse_known_args()
+  # Remove local args for pyconfig
+  model_args = [s for s in sys.argv if not s.startswith("--hf_model_path")]
+  main(model_args, local_args)
