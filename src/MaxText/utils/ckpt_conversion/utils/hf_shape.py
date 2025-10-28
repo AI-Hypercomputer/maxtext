@@ -227,34 +227,27 @@ def DEEPSEEK_HF_WEIGHTS_TO_SHAPE(config):
   hidden_size = config["hidden_size"]
   num_hidden_layers = config["num_hidden_layers"]
   vocab_size = config["vocab_size"]
-
   # --- Attention-related Dimensions ---
   q_lora_rank = config["q_lora_rank"]
   kv_lora_rank = config["kv_lora_rank"]
-
   # Q projection dim (before LoRA)
   q_dim = config["num_attention_heads"] * config["qk_head_dim"]
-
   # K and V projection dim (before LoRA)
   # Based on the output, the K dim seems to be based on v_head_dim, not qk_head_dim
   k_dim_b = config["num_key_value_heads"] * config["v_head_dim"]
   v_dim_b = config["num_key_value_heads"] * config["v_head_dim"]
   kv_b_dim = k_dim_b + v_dim_b  # Combined K and V projection
-
   # Output projection dim (input)
   o_proj_in_dim = config["num_attention_heads"] * config["v_head_dim"]
-
   # This is an unusual shape specific to this architecture, derived from output:
   # kv_a_proj_with_mqa.weight is [576, 512]
   # 576 = kv_lora_rank (512) + q_lora_rank (64)
   kv_a_proj_out_dim = config["kv_lora_rank"] + config["q_lora_rank"]
-
   # --- MLP-related Dimensions ---
   intermediate_size = config["intermediate_size"]  # For dense layers
   moe_intermediate_size = config["moe_intermediate_size"]  # For expert layers
   n_routed_experts = config["n_routed_experts"]
   n_shared_experts = config.get("n_shared_experts", 0)
-
   # This key determines which layers are dense vs. MoE
   first_k_dense = config.get("first_k_dense_replace", 0)
 
@@ -296,7 +289,12 @@ def DEEPSEEK_HF_WEIGHTS_TO_SHAPE(config):
     else:
       # This is a MoE MLP layer
       # Add the router gate
-      layer_mapping.update({f"{layer_prefix}.mlp.gate.weight": [n_routed_experts, hidden_size]})
+      layer_mapping.update(
+          {
+              f"{layer_prefix}.mlp.gate.weight": [n_routed_experts, hidden_size],
+              f"{layer_prefix}.mlp.gate.e_score_correction_bias": [n_routed_experts],
+          }
+      )
 
       # Add routed experts
       for expert_j in range(n_routed_experts):

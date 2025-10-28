@@ -108,6 +108,7 @@ def process_leaf_param(
       return []  # Skip this parameter
 
   maxtext_param_key = "params-" + "-".join(key_parts)
+  print(maxtext_param_key)
 
   if not isinstance(leaf_value, (jax.Array, np.ndarray)):
     max_logging.log(f"Warning: Leaf value for {maxtext_param_key} is not an array. Type: {type(leaf_value)}. Skipping.")
@@ -120,6 +121,7 @@ def process_leaf_param(
   hf_target_paths = param_map_local[maxtext_param_key]
   if not isinstance(hf_target_paths, list):
     hf_target_paths = [hf_target_paths]
+  print(hf_target_paths)
 
   if not hf_target_paths:
     max_logging.log(f"Warning: No HF target paths found for MaxText key '{maxtext_param_key}'. Skipping.")
@@ -128,20 +130,35 @@ def process_leaf_param(
   current_hook_fns = hook_fn_map_local.get(maxtext_param_key)
   output_weights = []
 
+  def _process(hf_path, processed_slice, output_weights, current_hook_fns):
+    target_hf_shape = shape_map_local[hf_path]
+    if current_hook_fns:
+      # otherwise identity
+      processed_slice = apply_hook_fns(processed_slice, target_hf_shape, current_hook_fns)
+    numpy_slice = convert_jax_weight_to_numpy(processed_slice).squeeze()
+    assert len(target_hf_shape) == len(
+        numpy_slice.shape
+    ), f"shape mismatch {len(target_hf_shape)} and {len(numpy_slice.shape)}"
+    output_weights.append((hf_path, numpy_slice))
+
+  # TODO(shuningjin): it could be scan with one layer
+  # TODO(shuningjin): it could be scan with one layer with one expert
   if len(hf_target_paths) == 1:
+    print("unscan")
     hf_path = hf_target_paths[0]
     if hf_path not in shape_map_local:
       max_logging.log(
           f"Warning: HF path '{hf_path}' not found in shape_map for MaxText key '{maxtext_param_key}'. Skipping."
       )
       return []
-    target_hf_shape = shape_map_local[hf_path]
 
-    processed_weight = leaf_value
-    if current_hook_fns:
-      processed_weight = apply_hook_fns(processed_weight, target_hf_shape, current_hook_fns)
-    numpy_weight = convert_jax_weight_to_numpy(processed_weight)
-    output_weights.append((hf_path, numpy_weight))
+    # processed_weight = leaf_value
+    # target_hf_shape = shape_map_local[hf_path]
+    # if current_hook_fns:
+    #   processed_weight = apply_hook_fns(processed_weight, target_hf_shape, current_hook_fns)
+    # numpy_weight = convert_jax_weight_to_numpy(processed_weight)
+    # output_weights.append((hf_path, numpy_weight))
+    _process(hf_path, leaf_value, output_weights, current_hook_fns)
   else:  # Stacked MaxText weight
     # This now handles three cases:
     # 1. Scanned MoE layers (2D list of targets from a tensor stacked on expert and layer axes)
@@ -151,6 +168,7 @@ def process_leaf_param(
     is_scanned_moe_layer = isinstance(hf_target_paths[0], list)
 
     if is_scanned_moe_layer:
+      print("scan moe")
       # Case 1: Scanned MoE layer, e.g., from 'layers-moe_block-wi_0'.
       # The tensor is stacked on expert and layer axes. We slice experts first, then layers.
       # MaxText format is (experts, layers, ...), so expert axis is 0, layer axis is 1.
@@ -168,14 +186,14 @@ def process_leaf_param(
             continue
 
           # Slice the expert tensor along the layer axis to get the final individual weight.
-          layer_tensor_slice = jax.lax.index_in_dim(
-              expert_tensor_slice, layer_idx, axis=0, keepdims=False
-          )  # axis is 0 on the new sliced tensor
+          # axis is 0 on the new sliced tensor
+          layer_tensor_slice = jax.lax.index_in_dim(expert_tensor_slice, layer_idx, axis=0, keepdims=False)
 
-          target_hf_shape = shape_map_local[hf_path]
-          processed_slice = apply_hook_fns(layer_tensor_slice, target_hf_shape, current_hook_fns)
-          numpy_slice = convert_jax_weight_to_numpy(processed_slice)
-          output_weights.append((hf_path, numpy_slice))
+          # target_hf_shape = shape_map_local[hf_path]
+          # processed_slice = apply_hook_fns(layer_tensor_slice, target_hf_shape, current_hook_fns)
+          # numpy_slice = convert_jax_weight_to_numpy(processed_slice)
+          # output_weights.append((hf_path, numpy_slice))
+          _process(hf_path, layer_tensor_slice, output_weights, current_hook_fns)
     else:
       # Case 2 or 3: The source tensor is stacked on a single axis.
       # We determine if it's an unscanned MoE (expert axis) or standard scanned (layer axis).
@@ -184,10 +202,12 @@ def process_leaf_param(
       )
 
       if is_unscanned_moe:
+        print("unscan moe")
         # Case 2: Unscanned MoE layer, e.g., from 'layers_0-moe_block-wi_0'.
         # The tensor is stacked ONLY on the expert axis.
         axis_to_slice = 0  # Assuming expert is axis 0.
       else:
+        print("scan")
         # Case 3: Standard scanned layer.
         # The tensor is stacked ONLY on the layer axis.
         axis_to_slice = current_config.param_scan_axis
@@ -197,11 +217,13 @@ def process_leaf_param(
           max_logging.log(f"Warning: HF path '{hf_path}' not found. Skipping.")
           continue
 
-        target_hf_shape = shape_map_local[hf_path]
         weight_slice = jax.lax.index_in_dim(leaf_value, i, axis=axis_to_slice, keepdims=False)
-        processed_slice = apply_hook_fns(weight_slice, target_hf_shape, current_hook_fns)
-        numpy_slice = convert_jax_weight_to_numpy(processed_slice)
-        output_weights.append((hf_path, numpy_slice))
+
+        # target_hf_shape = shape_map_local[hf_path]
+        # processed_slice = apply_hook_fns(weight_slice, target_hf_shape, current_hook_fns)
+        # numpy_slice = convert_jax_weight_to_numpy(processed_slice)
+        # output_weights.append((hf_path, numpy_slice))
+        _process(hf_path, weight_slice, output_weights, current_hook_fns)
   return output_weights
 
 

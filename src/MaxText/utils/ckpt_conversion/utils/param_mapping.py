@@ -658,29 +658,22 @@ def QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING(config, scan_layers=False):
       # This follows the (experts, layers, ...) tensor layout.
       mapping.update(
           {
-              "params-decoder-layers-moe_block-gate-kernel": [
-                  f"model.layers.{i}.mlp.gate.weight" for i in range(n_layers)
-              ],
+              "params-decoder-layers-moe_block-gate-kernel": [f"model.layers.{i}.mlp.gate.weight" for i in range(n_layers)],
               "params-decoder-layers-moe_block-wi_0": [
-                  [f"model.layers.{l}.mlp.experts.{e}.gate_proj.weight" for l in range(n_layers)]
-                  for e in range(num_experts)
+                  [f"model.layers.{l}.mlp.experts.{e}.gate_proj.weight" for l in range(n_layers)] for e in range(num_experts)
               ],
               "params-decoder-layers-moe_block-wi_1": [
-                  [f"model.layers.{l}.mlp.experts.{e}.up_proj.weight" for l in range(n_layers)]
-                  for e in range(num_experts)
+                  [f"model.layers.{l}.mlp.experts.{e}.up_proj.weight" for l in range(n_layers)] for e in range(num_experts)
               ],
               "params-decoder-layers-moe_block-wo": [
-                  [f"model.layers.{l}.mlp.experts.{e}.down_proj.weight" for l in range(n_layers)]
-                  for e in range(num_experts)
+                  [f"model.layers.{l}.mlp.experts.{e}.down_proj.weight" for l in range(n_layers)] for e in range(num_experts)
               ],
           }
       )
     else:  # Dense MLP
       mapping.update(
           {
-              "params-decoder-layers-mlp-wi_0-kernel": [
-                  f"model.layers.{i}.mlp.gate_proj.weight" for i in range(n_layers)
-              ],
+              "params-decoder-layers-mlp-wi_0-kernel": [f"model.layers.{i}.mlp.gate_proj.weight" for i in range(n_layers)],
               "params-decoder-layers-mlp-wi_1-kernel": [f"model.layers.{i}.mlp.up_proj.weight" for i in range(n_layers)],
               "params-decoder-layers-mlp-wo-kernel": [f"model.layers.{i}.mlp.down_proj.weight" for i in range(n_layers)],
           }
@@ -833,6 +826,8 @@ def DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING(config, scan_layers=True):
       "params-decoder-logits_dense-kernel": "lm_head.weight",
   }
 
+  # TODO(shuningjin): add non-scan
+  assert scan_layers
   attention_keys = {
       "pre_self_attention_layer_norm-scale": "input_layernorm.weight",
       "post_self_attention_layer_norm-scale": "post_attention_layernorm.weight",
@@ -901,6 +896,8 @@ def DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, scan_layers=True, saving_to_hf=
       "params-decoder-logits_dense-kernel": reshape_kernel,
   }
 
+  # TODO(shuningjin): add non-scan
+  assert scan_layers
   # all keys that need the reshape hook
   params_need_reshape = {
       # Dense Layers
