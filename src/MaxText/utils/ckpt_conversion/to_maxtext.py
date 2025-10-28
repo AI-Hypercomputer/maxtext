@@ -64,6 +64,7 @@ from MaxText.checkpointing import save_checkpoint
 from MaxText.utils.ckpt_conversion.utils.param_mapping import HOOK_FNS, PARAM_MAPPING
 from MaxText.utils.ckpt_conversion.utils.utils import apply_hook_fns, HF_IDS
 import jax.numpy as jnp
+import time
 
 jax.config.update("jax_platform_name", "cpu")
 
@@ -150,6 +151,20 @@ def _build_single_axis_stacked_tensor(
   return np.stack(tensors_to_stack, axis=axis_to_stack)
 
 
+def get_abstract_param(model, config):
+  key = jax.random.PRNGKey(0)
+  # input_shape = (1, 1)  # (batch, length)
+  input_shape = (config.micro_batch_size_to_train_on, config.max_target_length)
+  abstract_vars = jax.eval_shape(
+      model.init,
+      {"params": key, "dropout": key, "aqt": key},
+      jnp.ones(input_shape, dtype=jnp.int32),
+      jnp.ones(input_shape, dtype=jnp.int32),
+      encoder_images=None,
+  )
+  return abstract_vars
+
+
 def main(argv: Sequence[str]) -> None:
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"  # Suppress TensorFlow logging
@@ -173,7 +188,7 @@ def main(argv: Sequence[str]) -> None:
   model_id = HF_IDS[model_name_original]
   max_utils.print_system_information()
   if not config.base_output_directory:
-    output_directory = f"tmp/{config.run_name}"
+    output_directory = f"/tmp/{config.run_name}"
   else:
     output_directory = config.base_output_directory
 
@@ -184,54 +199,63 @@ def main(argv: Sequence[str]) -> None:
   hf_token = config.hf_access_token
   # Load HuggingFace model, config, and state_dict
   max_logging.log(f"Loading HuggingFace model: {model_id}...")
+  start = time.time()
   hf_config_obj = AutoConfig.from_pretrained(model_id, token=hf_token)
   hf_model = AutoModelForCausalLM.from_pretrained(model_id, token=hf_token)
   hf_state_dict_numpy = hf_model.state_dict()
   for k, v in hf_state_dict_numpy.items():
     hf_state_dict_numpy[k] = v.numpy()
   del hf_model
-  max_logging.log("HuggingFace model loaded and converted to NumPy.")
+  max_logging.log(f"HuggingFace model loaded and converted to NumPy. {time.time() - start: .2f} second")
 
-  # # Initialize MaxText model, optimizer, and abstract state
-  # rng = jax.random.PRNGKey(config.init_weights_seed)
-  quant = quantizations.configure_quantization(config)
-  maxtext_model_flax = models.transformer_as_linen(config, mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
-  # learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
-  # tx = optimizers.get_optimizer(config, learning_rate_schedule)
+  max_logging.log(f"Create checkpoint manager...")
+  start = time.time()
+  checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
+      output_directory,
+      enable_checkpointing=True,
+      use_async=False,  # Synchronous saving for simplicity in conversion script
+      save_interval_steps=1,  # Save at step 0
+      use_ocdbt=config.checkpoint_storage_use_ocdbt,
+      use_zarr3=config.checkpoint_storage_use_zarr3,
+  )
+  max_logging.log(f"Finish creating checkpoint manager. {time.time() - start: .2f} second")
 
-  # checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
-  #     output_directory,
-  #     enable_checkpointing=True,
-  #     use_async=False,  # Synchronous saving for simplicity in conversion script
-  #     save_interval_steps=1,  # Save at step 0
-  #     use_ocdbt=config.checkpoint_storage_use_ocdbt,
-  #     use_zarr3=config.checkpoint_storage_use_zarr3,
-  # )
+  def init1():
+    # Initialize MaxText model, optimizer, and abstract state
+    max_logging.log(f"MaxText abstract model and state initializing...")
+    start = time.time()
 
-  # print("hi")
-  # abstract_state, _, _, _ = maxtext_utils.setup_training_state(
-  #     maxtext_model_flax, None, tx, config, rng, mesh, checkpoint_manager
-  # )
-  # print("x")
-  # abstract_params_tree = abstract_state.params["params"]
+    # Initialize MaxText model, optimizer, and abstract state
+    rng = jax.random.PRNGKey(config.init_weights_seed)
+    quant = quantizations.configure_quantization(config)
+    maxtext_model_flax = models.transformer_as_linen(config, mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
+    learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
+    tx = optimizers.get_optimizer(config, learning_rate_schedule)
 
-  def get_abstract_param(model, config):
-    key = jax.random.PRNGKey(0)
-    # input_shape = (1, 1)  # (batch, length)
-    input_shape = (config.micro_batch_size_to_train_on, config.max_target_length)
-    abstract_vars = jax.eval_shape(
-        model.init,
-        {"params": key, "dropout": key, "aqt": key},
-        jnp.ones(input_shape, dtype=jnp.int32),
-        jnp.ones(input_shape, dtype=jnp.int32),
-        encoder_images=None,
+    abstract_state, _, _, _ = maxtext_utils.setup_training_state(
+        maxtext_model_flax, None, tx, config, rng, mesh, checkpoint_manager
     )
-    return abstract_vars
+    abstract_params_tree = abstract_state.params["params"]
+    abstract_params_flat, abstract_params_treedef = jax.tree_util.tree_flatten_with_path(abstract_params_tree)
 
-  abstract_params_tree = get_abstract_param(maxtext_model_flax, config)
+    max_logging.log(f"Elapse. MaxText abstract model and state initialized. {time.time() - start: .2f} second")
+    return abstract_params_flat, abstract_params_treedef
 
-  abstract_params_flat, abstract_params_treedef = jax.tree_util.tree_flatten_with_path(abstract_params_tree)
-  max_logging.log("MaxText abstract model and state initialized.")
+  def init2():
+    max_logging.log(f"MaxText abstract model and state initializing...")
+    start = time.time()
+    quant = quantizations.configure_quantization(config)
+    maxtext_model_flax = models.transformer_as_linen(config, mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
+    abstract_params_tree = get_abstract_param(maxtext_model_flax, config)["params"]
+
+    abstract_params_flat, abstract_params_treedef = jax.tree_util.tree_flatten_with_path(
+        abstract_params_tree,  # is_leaf=lambda x: not isinstance(x, dict)
+    )
+    print(abstract_params_flat)
+    max_logging.log(f"Elapse. MaxText abstract model and state initialized. {time.time() - start: .2f} second")
+    return abstract_params_flat, abstract_params_treedef
+
+  abstract_params_flat, abstract_params_treedef = init1()
 
   # Get parameter mappings and hooks
   # example of param mapping (gemma2, maxtext:huggingface):
@@ -248,12 +272,14 @@ def main(argv: Sequence[str]) -> None:
 
   # Transform weights
   max_logging.log("Starting weight transformation...")
+  start = time.time()
   final_mt_weights = []
 
   for path_tuple, abstract_leaf_value in abstract_params_flat:
 
-    key_parts = [k.key for k in path_tuple[:-1]]
-    mt_param_key = "-".join(key_parts)
+    # key_parts = [k.key for k in path_tuple[:-1]]
+    key_parts = [k.key for k in path_tuple]
+    mt_param_key = "params-" + "-".join(key_parts)
     mt_target_shape_final = abstract_leaf_value.shape
     print(mt_param_key)
     print(mt_target_shape_final)
@@ -300,15 +326,19 @@ def main(argv: Sequence[str]) -> None:
     final_mt_weights.append(final_mt_tensor_numpy)
 
   del abstract_params_flat, hf_state_dict_numpy
-  max_logging.log("Weight transformation complete.")
+  max_logging.log(f"Elapse: Weight transformation complete. {time.time() - start: .2f} second")
 
   # Create final MaxText parameters tree
   jax_weights = jax.tree_util.tree_unflatten(abstract_params_treedef, final_mt_weights)
+  print(abstract_params_treedef)
   del final_mt_weights, abstract_params_treedef
 
   # Create TrainState for saving.
+  max_logging.log("Saving checkpoint...")
+  start = time.time()
   final_params_for_state = {"params": jax_weights}
   final_save_state = train_state.TrainState(step=0, apply_fn=None, params=final_params_for_state, tx=None, opt_state={})
+  # print(final_params_for_state)
   del final_params_for_state
 
   if checkpoint_manager is not None:
@@ -319,7 +349,7 @@ def main(argv: Sequence[str]) -> None:
       checkpoint_manager.wait_until_finished()
       sys.exit()
 
-  max_logging.log(f"Conversion complete. Checkpoint saved to {output_directory}")
+  max_logging.log(f"Elapse. Conversion complete. Checkpoint saved to {output_directory}. {time.time() - start: .2f} second")
 
 
 if __name__ == "__main__":

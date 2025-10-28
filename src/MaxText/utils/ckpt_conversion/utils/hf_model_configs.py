@@ -532,7 +532,7 @@ deepseek_dict = {
     "vocab_size": 129280,
 }
 
-deepseek_config = transformers.DeepseekV3Config(deepseek_dict)
+deepseek_config = transformers.DeepseekV3Config(**deepseek_dict)
 
 HF_MODEL_CONFIGS = {
     "gemma2-2b": gemma2_2b_config,

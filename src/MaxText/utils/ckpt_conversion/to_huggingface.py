@@ -70,6 +70,7 @@ from MaxText.utils.ckpt_conversion.utils.param_mapping import (
 from MaxText.utils.ckpt_conversion.utils.hf_shape import HF_SHAPE
 from MaxText.utils.ckpt_conversion.utils.hf_model_configs import HF_MODEL_CONFIGS
 from MaxText.utils.ckpt_conversion.utils.utils import (process_leaf_param, save_model_files, HF_IDS)
+import time
 
 
 jax.config.update("jax_platform_name", "cpu")
@@ -136,12 +137,15 @@ def main(argv: Sequence[str]) -> None:
   if model_key not in HF_IDS:
     raise ValueError(f"Unsupported model name: {config.model_name}. Supported models are: {list(HF_IDS.keys())}")
   hf_config_obj = HF_MODEL_CONFIGS[model_key]
+  print(model_key)
+  print(hf_config_obj)
 
   # 2. Load Tokenizer
   if model_key not in HF_IDS:
     raise ValueError(f"HF Tokenizer ID not found for model key: {model_key}")
   hf_token = config.hf_access_token
   hf_tokenizer_id = HF_IDS[model_key]
+  hf_tokenizer_id = "deepseek-ai/DeepSeek-V3"
   tokenizer = AutoTokenizer.from_pretrained(hf_tokenizer_id, token=hf_token)
 
   # For multi-modal case:
@@ -166,11 +170,14 @@ def main(argv: Sequence[str]) -> None:
 
   # traverse leavse to build: mt_param_key:mt_weights
   processed_params_list = []
+  start = time.time()
   for path_tuple_iter, leaf_value_iter in leaves_with_paths:
+    print(path_tuple_iter)
     processed_params_list.extend(
         process_leaf_param(path_tuple_iter, leaf_value_iter, param_map, shape_map, hook_fn_map, config)
     )
   transformed_hf_weights = dict(processed_params_list)
+  print(f"elapse: {time.time() - start} second")
 
   # 5. Save in HuggingFace Format
   if not transformed_hf_weights:
