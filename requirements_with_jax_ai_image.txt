@@ -3,7 +3,7 @@
 datasets @ https://github.com/huggingface/datasets/archive/6790e138c00b87a1ddc72184f89e7814cf784360.zip
 flax>=0.11.0
 google-api-python-client
-google-jetstream @ https://github.com/AI-Hypercomputer/JetStream/archive/daedc21c393f23449fb54ddc4f75fca34348ea9c.zip
+google-jetstream @ https://github.com/AI-Hypercomputer/JetStream/archive/29329e8e73820993f77cfc8efe34eb2a73f5de98.zip
 grain[parquet]>=0.2.12
 jaxtyping
 jsonlines
@@ -23,4 +23,5 @@ sentencepiece>=0.2.0
 tensorflow-datasets
 tensorflow-text>=2.17.0
 tiktoken
+tokamax>=0.0.4
 transformers

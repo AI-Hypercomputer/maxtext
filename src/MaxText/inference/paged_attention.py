@@ -21,7 +21,6 @@ import functools
 
 import jax
 import jax.numpy as jnp
-from jax.experimental.shard_map import shard_map
 from jax.experimental.pallas.ops.tpu.paged_attention import paged_attention_kernel
 from jax.sharding import PartitionSpec as P
 from jax.sharding import Mesh
@@ -327,7 +326,7 @@ class PagedAttentionOp(nnx.Module):
     q_pspec = nn.logical_to_mesh_axes((None, None, "paged_kv_heads", None))
 
     @functools.partial(
-        shard_map,
+        jax.shard_map,
         mesh=self.mesh,
         in_specs=(
             q_pspec,
@@ -338,7 +337,7 @@ class PagedAttentionOp(nnx.Module):
             None,
         ),
         out_specs=q_pspec,
-        check_rep=False,
+        check_vma=False,
     )
     def wrap_paged_attention(q, k_pages, v_pages, lengths, page_indices, pages_per_compute_block):
       q = jnp.squeeze(q, axis=1)

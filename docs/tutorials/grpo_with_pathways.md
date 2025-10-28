@@ -39,10 +39,10 @@ In addition to MaxText dependencies,
 We use the scheduler code from vLLM, and the model runner code from `tpu_commons`
 
 ```
-bash docker_build_dependency_image.sh MODE=grpo
+bash docker_build_dependency_image.sh MODE=post-training
 ```
 
-You can also use `bash docker_build_dependency_image.sh MODE=grpo-experimental` to try out new features via experimental dependencies such as improved pathwaysutils resharding API
+You can also use `bash docker_build_dependency_image.sh MODE=post-training-experimental` to try out new features via experimental dependencies such as improved pathwaysutils resharding API
 
 
 

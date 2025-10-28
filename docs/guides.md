@@ -31,4 +31,5 @@ guides/pallas_kernels_performance.md
 guides/understand_logs_and_metrics.md
 guides/xprof_user_guide.md
 guides/checkpointing_solutions.md
+guides/megascale_hang_playbook.md
 ```

@@ -18,7 +18,7 @@ run_name: ""
 
 model_name: "default" # override config settings to match a specific model. other than the override, nothing should use this!
 override_model_config: False # When set to true allows overriding model parameters via CLI for the purpose of debugging/testing.
-normalization_layer_epsilon: 1.e-05
+normalization_layer_epsilon: 1.e-05 # epsilon value for rmsnorm, layernorm.
 
 ################################## CHECKPOINTING ##################################
 # Checkpointing makes the following choices in the following order, starting with (1):
@@ -466,6 +466,9 @@ ici_autoregressive_parallelism: 1
 ici_pipeline_parallelism: 1
 ici_expert_parallelism: 1
 
+# Enable ZeRO-1 optimizer sharding over data axis
+shard_optimizer_over_data: False
+
 # The number of TPU slices is automatically determined, you should not set this explicitly. For ahead of time compilation,
 # you should set compile_toplogy_num_slices, which will in turn set this value. For non-TPU environments this is set to 1.
 num_slices: -1
@@ -780,7 +783,10 @@ sa_use_fused_bwd_kernel: False
 sa_q_layout: "HEAD_DIM_MINOR"
 sa_k_layout: "HEAD_DIM_MINOR"
 sa_v_layout: "HEAD_DIM_MINOR"
-
+use_max_logit_estimate: -1 # -1 means no estimate, any > 0 value will be used as max logit estimate
+cost_estimate_flops_fwd: -1 # -1 means using splash default cost estmiation, any >= 0 value will be used as cost estmiation for splash to overlap for communication (forward)
+cost_estimate_flops_bwd: -1 # -1 means using splash default cost estmiation, any >= 0 value will be used as cost estmiation for splash to overlap for communication (backward)
+dq_reduction_steps: 0 #the number of reduction steps. For now, only 3 or all the kv steps are supported.
 ### Determine if we want to use load balance for context parallelism
 context_parallel_load_balance: True
 
@@ -859,4 +865,22 @@ subslice_shape: ""
 
 # NNX
 enable_nnx: false
-shard_optimizer_over_data: False
+
+################################## Qwen3-Next Specific Configs ##################################
+# Kernel size for the 1D convolution in the Gated Delta Net
+gdn_conv_kernel_dim: 4
+# Head dimension for the key/query in the Gated Delta Net
+gdn_key_head_dim: 128
+# Head dimension for the value in the Gated Delta Net
+gdn_value_head_dim: 128
+# Number of key/query heads in the Gated Delta Net
+gdn_num_key_heads: 16
+# Number of value heads in the Gated Delta Net
+gdn_num_value_heads: 32
+# Chunk size for the parallel scan algorithm in the Gated Delta Net.
+gdn_chunk_size: 64
+# Whether to apply L2 normalization to query and key tensors inside the Gated Delta Rule kernel.
+use_qk_norm_in_gdn: True
+
+# Use tokamax library for gmm kernel implementation
+use_tokamax_gmm: false
