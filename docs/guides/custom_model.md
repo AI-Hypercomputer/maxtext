@@ -20,9 +20,9 @@
 
 This document provides a guide to optimize and customize your LLM model configurations for higher performance (i.e. MFU) on Cloud TPU. Note that this document focuses exclusively on performance tuning. The analysis of model quality and convergence behavior is outside of scope.
 
-## Step 1. Identify Initial Configs
+## Step 1. Identify initial configs
 
-To begin, identify your model's size, review open-source model configs, and establish the initial configurations for each block. You can use our [reference calculator (on Colab)](https://colab.research.google.com/github/AI-Hypercomputer/maxtext/blob/main/docs/guides/llm_calculator.ipynb) to estimate parameters and FLOPs for dense, Mixtral-like Mixture of Experts (MoE), and DeepSeek-like MoE models to help you estimate the parameter count and FLOPs.
+To begin, identify your model's size, review open-source model configs, and establish the initial configurations for each block. You can use our [reference calculator (on Colab)](https://colab.research.google.com/github/AI-Hypercomputer/maxtext/blob/main/docs/explanations/llm_calculator.ipynb) to estimate parameters and FLOPs for dense, Mixtral-like Mixture of Experts (MoE), and DeepSeek-like MoE models to help you estimate the parameter count and FLOPs.
 
 Based on resources like [Language Modeling from Scratch](https://github.com/stanford-cs336/spring2025-lectures/blob/e9cb2488fdb53ea37f0e38924ec3a1701925cef3/nonexecutable/2025%20Lecture%203%20-%20architecture.pdf), we observe common architectural ratios for dense models, as shown below:
 
@@ -35,7 +35,7 @@ For MoE models,
 *   sparsity (`num_experts / num_experts_per_tok`): 4-32
 *   `moe_mlp_dim / emb_dim`: 0.3-3
 
-## Step 2. Consider TPU Best Practices
+## Step 2. Consider TPU best practices
 
 ### Model configs
 
@@ -65,7 +65,7 @@ Use these general runtime configurations to improve your model's performance.
 * **Benchmark**. For consistent speed tests, set `reuse_example_batch=1` to repeatedly use the same data batch, isolating computation speed from data loading. Or use on-the-fly generated data by setting `dataset_type=synthetic`.
 
 (roofline-sharding)=
-## Step 3. Choose Efficient Sharding Strategies Using Roofline Analysis
+## Step 3. Choose efficient sharding strategies using Roofline Analysis
 
 To achieve good performance, it's often necessary to co-design the model's dimensions (like the MLP dimension) along with the sharding strategy. We have included examples for Trillium that demonstrate which sharding approaches work well for specific models. We recommend reading [](sharding) and Jax’s [scaling book](https://jax-ml.github.io/scaling-book/sharding/).
 
@@ -139,7 +139,7 @@ TP=4 corresponds to a custom Trillium mesh, an 8x8 ring of 2x2 subrings (the TP 
 
 To use TP=16, we need M > 80k (ideally larger, 100k+). We have used this in a custom dense model (900B, M=131k), which performs very well even at 1k per device tokens (scaling to 25k+ with a reasonable global batch).
 
-## Step 4. Analyze Experiments
+## Step 4. Analyze experiments
 
 With your configs, begin experimenting to evaluate the model's performance. We strongly recommend capturing a profile by following these [instructions](https://docs.jax.dev/en/latest/profiling.html#). If you are using MaxText, this can be done by simply setting `profiler=xplane` in your configuration.
 

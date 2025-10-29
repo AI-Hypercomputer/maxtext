@@ -14,7 +14,8 @@
  limitations under the License.
  -->
 
-# Performance Metrics
+(performance-metrics)=
+# Performance metrics
 
 ## MFU
 
@@ -57,11 +58,11 @@ $$
 
 Hence, MFU is the fraction of peak hardware performance actually utilized by the model, and can be expressed in different units — step time, throughput, or raw flops/s.
 
-### MaxText Calculating + Reporting
-In MaxText, we sum all of the matmuls performed in one step, see [calculate_tflops_per_device](https://github.com/AI-Hypercomputer/maxtext/blob/e969faabbb571285a51545530f34d8f0a9f237e9/MaxText/maxtext_utils.py#L297)
-and divide it by the measured (via python `time.time()`) step time. In each step we print the resulting Model Flops per second [`per_device_tflops_per_sec`](https://github.com/AI-Hypercomputer/maxtext/blob/e969faabbb571285a51545530f34d8f0a9f237e9/MaxText/metric_logger.py#L193-L194). One can calculate the MFU by dividing this number by the peak tflops of the hardware (e.g., $918e^{12}$ FLOPS/s for Trillium).
+### MaxText calculating + reporting
+In MaxText, we sum all of the matmuls performed in one step, see [calculate_tflops_per_device](https://github.com/AI-Hypercomputer/maxtext/blob/fafdeaa14183a8f5ca7b9f7b7542ce1655237574/src/MaxText/maxtext_utils.py#L454)
+and divide it by the measured (via python `time.time()`) step time. In each step we print the resulting Model Flops per second [`per_device_tflops_per_sec`](https://github.com/AI-Hypercomputer/maxtext/blob/fafdeaa14183a8f5ca7b9f7b7542ce1655237574/src/MaxText/metric_logger.py#L211-L213). One can calculate the MFU by dividing this number by the peak tflops of the hardware (e.g., $918e^{12}$ FLOPS/s for Trillium).
 
-### Causal Attention
+### Causal attention
 Due to causality only half of the (query, key) pairs need to be computed, those with query_idx >= key_idx. This accounts for the fact only prior tokens can be used to predict future ones. Prior to https://github.com/AI-Hypercomputer/maxtext/pull/1988 MaxText did not account for sparsity for theoretical flops, and used
 
 Attention Flops ~= 4 * sequence^2 * batch * heads * head_dim
@@ -98,6 +99,6 @@ $$\begin{align*}
 
 This shows any of step time, tokens/s or MFU can be used to determine how long training will take and are proportionally (or inversely proportionally) related. MFU is most useful to compare across different models/hardwares and while optimizing performance, whereas step time or tokens/second may be more useful when these are fixed.
 
-## Why not Hardware Flops?
+## Why not hardware flops?
 
-Hardware (e.g., XLA reported) FLOPs do not accurately reflect computation efficiency as they depend on the program / implementation, not just on the model and its inherent computations (higher hardware FLOPs does not necessarily mean less room for improvement). For example, they include remat and potentially auxiliary operations (such as reshaping for dropping moe [here](https://github.com/AI-Hypercomputer/maxtext/blob/4b6142950aff5d9ba42d830efc5ce4c4ac9d4135/MaxText/layers/moe.py#L1267)), which are an implementation detail and not part of the model. In addition, XLA reported FLOPs may not be accurate with pallas kernels. Hardware flops utilization is not (inversely) proportional to step time as opposed to MFU, since hardware flops can change with implementation details like remat policies.
+Hardware (e.g., XLA reported) FLOPs do not accurately reflect computation efficiency as they depend on the program / implementation, not just on the model and its inherent computations (higher hardware FLOPs does not necessarily mean less room for improvement). For example, they include remat and potentially auxilliary operations (such as reshaping for dropping moe [here](https://github.com/AI-Hypercomputer/maxtext/blob/fafdeaa14183a8f5ca7b9f7b7542ce1655237574/src/MaxText/layers/moe.py#L1544)), which are an implementation detail and not part of the model. In addition, XLA reported FLOPs may not be accurate with pallas kernels. Hardware flops utilization is not (inversely) proportional to step time as opposed to MFU, since hardware flops can change with implementation details like remat policies.

@@ -36,6 +36,7 @@ author = "MaxText developers"
 extensions = [
     "myst_nb",
     "sphinx_design",
+    "sphinx_copybutton",
 ]
 
 templates_path = ["_templates"]
@@ -59,7 +60,7 @@ myst_linkify_fuzzy_links = False
 
 # Remove specific documents from ToC
 exclude_patterns = [
-    "guides/run_maxtext_via_multihost_job.md",
-    "guides/run_maxtext_via_multihost_runner.md",
-    "guides/llm_calculator.ipynb",
+    "guides/run_maxtext/run_maxtext_via_multihost_job.md",
+    "guides/run_maxtext/run_maxtext_via_multihost_runner.md",
+    "explanations/llm_calculator.ipynb",
 ]
