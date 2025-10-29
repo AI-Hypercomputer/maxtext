@@ -182,6 +182,18 @@ def _build_single_axis_stacked_tensor(
   return np.stack(tensors_to_stack, axis=axis_to_stack)
 
 
+def _get_hf_model(model_id: str, token: str):
+  """Loads the HuggingFace model based on model_id."""
+  # Some models require special classes to import
+  if model_id in ["Qwen/Qwen3-Omni-30B-A3B-Instruct"]:
+    from transformers import Qwen3OmniMoeForConditionalGeneration  # pylint: disable=import-outside-toplevel
+
+    hf_model = Qwen3OmniMoeForConditionalGeneration.from_pretrained(model_id, token=token)
+  else:
+    hf_model = AutoModelForCausalLM.from_pretrained(model_id, token=token)
+  return hf_model
+
+
 def main(argv: Sequence[str]) -> None:
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"  # Suppress TensorFlow logging
@@ -217,7 +229,7 @@ def main(argv: Sequence[str]) -> None:
   # Load HuggingFace model, config, and state_dict
   max_logging.log(f"Loading HuggingFace model: {model_id}...")
   hf_config_obj = AutoConfig.from_pretrained(model_id, token=hf_token)
-  hf_model = AutoModelForCausalLM.from_pretrained(model_id, token=hf_token)
+  hf_model = _get_hf_model(model_id, token=hf_token)
   hf_state_dict_numpy = hf_model.state_dict()
   for k, v in hf_state_dict_numpy.items():
     hf_state_dict_numpy[k] = v.numpy()
