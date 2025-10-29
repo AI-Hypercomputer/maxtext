@@ -144,8 +144,8 @@ def validate_flash_attention_with_sinks_on_gpu(sinks: Array | None) -> None:
     raise ValueError("The flash attention with sinks is not supported on GPU yet.")
 
 
-# TODO(agagik): change tokamax_splash_mask._ComputableMask to be non protected
-class ChunkedCausalMask(tokamax_splash_mask._ComputableMask):  # pylint: disable=protected-access
+# TODO(agagik): change splash_attention_mask._ComputableMask to be non protected
+class ChunkedCausalMask(splash_attention_mask._ComputableMask):  # pylint: disable=protected-access
   """Lazy chunked causal mask.
 
   Attention is causal within each chunk (0, K), (K, 2K), (2K, 3K), ... tokens attend to each other but not across chunks.
@@ -1138,10 +1138,11 @@ class AttentionOp(nnx.Module):
 
     sa_config = create_sa_config(self.config, query, key, attn_logits_soft_cap)
     mask_shape = (query.shape[2], key.shape[2])  # (q_seq_len, kv_seq_len)
+    mask_module = tokamax_splash_mask if self.config.use_tokamax_splash else splash_attention_mask
     if self.attention_type == AttentionType.FULL:
-      mask = splash_attention_mask.FullMask(mask_shape)
+      mask = mask_module.FullMask(mask_shape)
     else:
-      mask = splash_attention_mask.CausalMask(shape=mask_shape)
+      mask = mask_module.CausalMask(shape=mask_shape)
 
     # Create LoadBalancedCausalMask if cp and load_balancing
     if cp_size > 1 and load_balanced_context_parallel:
@@ -1152,7 +1153,7 @@ class AttentionOp(nnx.Module):
     if self.attention_type == AttentionType.LOCAL_SLIDING:
       if self.sliding_window_size is None:
         raise ValueError("Sliding_window_size must be set if Local Sliding attention type")
-      mask &= splash_attention_mask.LocalMask(
+      mask &= mask_module.LocalMask(
           shape=(query.shape[2], key.shape[2]),
           window_size=(self.sliding_window_size, self.sliding_window_size),
           offset=0,
@@ -1775,7 +1776,7 @@ class AttentionOp(nnx.Module):
 
 
 # pylint: disable=protected-access
-class LoadBalancedCausalMask(tokamax_splash_mask._ComputableMask):
+class LoadBalancedCausalMask(splash_attention_mask._ComputableMask):
   """Lazy causal mask, prevents the model from attending to future tokens.
   Attributes:
     offset: Offset of q start wrt kv. A positive offset shifts the bottom
