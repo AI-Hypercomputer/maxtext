@@ -12,14 +12,109 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# GRPO Configuration
-# This config consolidates common parameters for GRPO training across different model sizes
+# RL Configuration
+# This config consolidates common parameters for RL training across different model sizes
 
 base_config: "base.yml"
 
-use_grpo: True
-train_data_columns: 'prompt'
+# ====== Hardware =====
+trainer_devices_fraction: 0.5
+sampler_devices_fraction: 0.5
+chips_per_vm: 4  # depends on hardware, for v5p this is 4
 
+# ====== Debug ======
+debug: True
+
+# ====== Reproducibility ======
+data_shuffle_seed: 42
+loss_algo: 'grpo' # grpo or gspo-token
+
+# ====== Checkpoint saving ======
+save_interval_steps: 500
+max_to_keep: 4
+
+# ====== GRPO ======
+# === Generation during GRPO training ===
+max_prompt_length: 256
+total_generation_steps: 768
+
+# The number of times the policy generates multiple responses for a given prompt
+# within a single training step. This corresponds to `G` in Algorithm 1 in the
+# paper. The "group" in GRPO comes from here.
+num_generations: 2
+
+# === other GRPO configs ===
+# The number of iterations per batch (𝜇 in GRPO algo 1).
+num_iterations: 1
+
+# The coefficient for the KL divergence penalty (𝛽) in the GRPO loss function.
+# Important to keep a high enough value for this, otherwise, the KL divergence
+# can increase unchecked.
+beta: 0.08
+# Epsilon value for clipping (𝜀 in GRPO loss in paper). Similar to PPO, for
+# stable updates.
+epsilon: 0.2
+
+# ====== Training ======
+
+batch_size: 1
+# Increase `batch_size` and `MAX_STEPS` for better results.
+# NUM_BATCHES = 3738
+NUM_BATCHES = 4  # 200
+# Keep `NUM_TEST_BATCHES` low so that evaluation runs quickly. It can be
+# increased to a max. of 330 (if batch size is 4).
+NUM_TEST_BATCHES = 5  # 200
+
+EVAL_EVERY_N_STEPS = 10  # this doesn't matter if `TRAIN_FRACTION = 1.0`.
+NUM_EPOCHS = 1  # can potentially train for more epochs
+
+
+# === AdamW, warmup, cosine scheduler ===
+LEARNING_RATE = 3e-6
+B1 = 0.9
+B2 = 0.99
+WEIGHT_DECAY = 0.1
+# == Cosine decay with warmup scheduler ==
+# Linearly increase learning rate from 0. to 5e-6 in the first 10% training
+# steps, and then gradually decrease the learning rate to 0 using cosine
+# scheduler.
+WARMUP_STEPS = int(0.1 * MAX_STEPS)
+# == Grad clipping ==
+# Grad clipping to prevent large gradients. Found this
+# important to keep KL divergence in check.
+MAX_GRAD_NORM = 0.1
+
+
+# ====== Inference ======
+# Important to keep a high-ish temperature for varied, diverse responses during
+# training.
+# greedy search
+temperature: 0.01
+top_p: 1.0
+top_k: 1
+    
+# # some randomness
+# "standard": {"temperature": 0.7, "top_k": 50, "top_p": 0.95},
+# # liberal
+# "liberal": {"temperature": 0.85, "top_k": 2000, "top_p": 1.0},
+
+TRAINER_DEVICES_FRACTION = 0.5
+SAMPLER_DEVICES_FRACTION = 0.5
+HBM_UTILIZATION_VLLM = 0.72
+SWAP_SPACE_VLLM_GB = 2
+
+
+# ====== Reward ======
+REWARD_EXACT_FORMAT_MATCH = 3.0
+REWARD_WHITE_SPACE_FORMAT_MATCH = 1.5
+REWARD_PARTIAL_FORMAT_MATCH = 0.5
+REWARD_RATIO_GUESS_TO_ANSWER_HIGH = 0.5
+REWARD_RATIO_GUESS_TO_ANSWER_LOW = 0.25
+PENALTY_INCORRECT_FORMAT = -0.5
+PENALTY_INCORRECT_ANSWER = -1.0
+
+
+# TODO: fix this
 # Dataset Configuration
 dataset_type: hf  # Huggingface input pipeline
 hf_path: 'gsm8k'
@@ -56,8 +151,6 @@ decode_sampling_top_k: 50
 # Training Loop Configuration  
 steps: 100
 per_device_batch_size: 1
-eval_interval: 10
-eval_steps: 5
 
 # Checkpoint Configuration
 enable_checkpointing: True

@@ -15,7 +15,7 @@
 # pylint: disable=bare-except, consider-using-generator
 """ 
 DEPRECATED: This file is deprecated and kept for reference only.
-Please use the new unified CLI interface: grpo_runner.py
+Please use the new unified CLI interface: rl_trainer.py
 
 See GRPO_README.md for migration guide and usage examples.
 
