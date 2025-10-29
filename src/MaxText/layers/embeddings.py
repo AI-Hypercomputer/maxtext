@@ -918,3 +918,429 @@ class LlamaVisionRotaryEmbedding(nnx.Module):
       output = output.astype(self.fprop_dtype)
 
     return output
+
+
+@dataclasses.dataclass(repr=False)
+class SinusoidsPositionEmbedding(nnx.Module):
+    """Sinusoidal position embeddings with precomputed table for efficient lookup."""
+
+    def __init__(
+        self,
+        length: int,
+        channels: int,
+        max_timescale: float = _MAX_WAVELENGTH,
+        *,
+        rngs: nnx.Rngs = None,
+    ):
+        """Precompute sinusoidal position embeddings for all positions."""
+        if channels % 2 != 0:
+            raise ValueError("SinusoidsPositionEmbedding needs even channels input")
+
+        self.length = length
+        self.channels = channels
+        self.max_timescale = max_timescale
+
+        log_timescale_increment = jnp.log(max_timescale) / (channels // 2 - 1)
+        inv_timescales = jnp.exp(
+            -log_timescale_increment * jnp.arange(channels // 2, dtype=jnp.float32)
+        )
+        scaled_time = (
+            jnp.arange(length, dtype=jnp.float32)[:, None] * inv_timescales[None, :]
+        )
+        positional_embedding = jnp.concatenate(
+            [jnp.sin(scaled_time), jnp.cos(scaled_time)], axis=1
+        )
+
+        self.positional_embedding = nnx.Variable(positional_embedding)
+
+    def __call__(self, seqlen: int) -> Array:
+        """Return positional embeddings for given sequence length.
+
+        Args:
+            seqlen: Sequence length to retrieve embeddings for (must be <= self.length)
+
+        Returns:
+            Positional embeddings of shape (seqlen, channels)
+        """
+        return jax.lax.dynamic_slice(
+            self.positional_embedding.value,
+            start_indices=(0, 0),
+            slice_sizes=(seqlen, self.channels),
+        )
+
+
+
+class Qwen3OmniMoeVisionRotaryEmbedding(nnx.Module):
+    """Rotary position embedding for Qwen3OmniMoe vision encoder.
+
+    Attributes:
+      head_dim: Dimension per attention head
+      spatial_merge_size: Spatial merge block size (e.g., 2 for 2x2 blocks)
+      rope_theta: Base theta for frequency computation (default 10000.0)
+      cast_as_fprop_dtype: Whether to cast to fprop dtype
+      fprop_dtype: Output dtype
+      rngs: RNG state passed in by nnx.bridge.to_linen, not used in this module
+
+    Returns:
+      Tuple of (cos_emb, sin_emb) each of shape [total_tokens, head_dim]
+      These are applied in attention layers as: q * cos + rotate_half(q) * sin
+    """
+
+    head_dim: int
+    spatial_merge_size: int
+    rope_theta: float = 10000.0
+    cast_as_fprop_dtype: bool = True
+    fprop_dtype: DType = jnp.bfloat16
+    rngs: nnx.Rngs = None
+
+    def _compute_freq_table(self, max_hw: int) -> Array:
+        """Precompute frequency table for positions up to max_hw.
+
+        Args:
+          max_hw: Maximum height or width dimension
+
+        Returns:
+          Array of shape [max_hw, head_dim//4] containing frequencies for each position
+        """
+
+        inv_freq = 1.0 / (
+            self.rope_theta
+            ** (
+                jnp.arange(0, self.head_dim // 2, 2, dtype=jnp.float32)
+                / (self.head_dim // 2)
+            )
+        )
+        # Compute for all positions [0, max_hw)
+        positions = jnp.arange(max_hw, dtype=jnp.float32)
+        freqs = jnp.outer(positions, inv_freq)  # [max_hw, head_dim//4]
+        return freqs
+
+    def _generate_position_ids_single(
+        self, num_frames: int, height: int, width: int
+    ) -> Array:
+        """Generate 2D position IDs for a single image or video.
+
+        Args:
+          num_frames: Number of temporal frames (1 for images, >1 for videos)
+          height: Height in patches
+          width: Width in patches
+
+        Returns:
+          Array of shape [num_frames * height * width, 2] with (row_id, col_id)
+        """
+        merge_size = self.spatial_merge_size
+        merged_h = height // merge_size
+        merged_w = width // merge_size
+
+        # Block indices
+        block_rows = jnp.arange(merged_h)  # [merged_h]
+        block_cols = jnp.arange(merged_w)  # [merged_w]
+
+        # Intra-block offsets
+        intra_row = jnp.arange(merge_size)  # [merge_size]
+        intra_col = jnp.arange(merge_size)  # [merge_size]
+
+        # Full resolution positions using broadcasting
+        # Shape: [merged_h, 1, merge_size, 1]
+        row_idx = (
+            block_rows[:, None, None, None] * merge_size
+            + intra_row[None, None, :, None]
+        )
+        # Shape: [1, merged_w, 1, merge_size]
+        col_idx = (
+            block_cols[None, :, None, None] * merge_size
+            + intra_col[None, None, None, :]
+        )
+
+        # Expand to full grid and flatten
+        row_idx = jnp.broadcast_to(
+            row_idx, (merged_h, merged_w, merge_size, merge_size)
+        ).reshape(-1)
+        col_idx = jnp.broadcast_to(
+            col_idx, (merged_h, merged_w, merge_size, merge_size)
+        ).reshape(-1)
+
+        coords = jnp.stack([row_idx, col_idx], axis=-1)  # [h*w, 2]
+
+        # Repeat for video frames
+        if num_frames > 1:
+            coords = jnp.tile(coords, (num_frames, 1))
+
+        return coords
+
+    def compute_cos_sin(self, grid_thw: Array) -> tuple[Array, Array]:
+        """Compute cos and sin embeddings for given grid configuration.
+
+        This method is exposed for testing and validation purposes.
+
+        Args:
+          grid_thw: Array of shape [num_images_or_videos, 3] with (temporal, height, width)
+
+        Returns:
+          Tuple of (cos_emb, sin_emb) each of shape [total_tokens, head_dim]
+          where total_tokens = sum(temporal * height * width) across all items.
+        """
+        max_hw = int(jnp.max(grid_thw[:, 1:]))
+        freq_table = self._compute_freq_table(max_hw)  # [max_hw, head_dim//4]
+
+        pos_ids_list = []
+        for i in range(grid_thw.shape[0]):
+            num_frames = int(grid_thw[i, 0])
+            height = int(grid_thw[i, 1])
+            width = int(grid_thw[i, 2])
+            coords = self._generate_position_ids_single(num_frames, height, width)
+            pos_ids_list.append(coords)
+
+        pos_ids = jnp.concatenate(pos_ids_list, axis=0)  # [total_tokens, 2]
+
+        row_freqs = freq_table[pos_ids[:, 0]]  # [total_tokens, head_dim//4]
+        col_freqs = freq_table[pos_ids[:, 1]]  # [total_tokens, head_dim//4]
+
+        # Concatenate row and column frequencies
+        embeddings = jnp.concatenate(
+            [row_freqs, col_freqs], axis=-1
+        )  # [total_tokens, head_dim//2]
+
+        # Double the embeddings to match head_dim
+        embeddings = jnp.concatenate(
+            [embeddings, embeddings], axis=-1
+        )  # [total_tokens, head_dim]
+
+        cos_emb = jnp.cos(embeddings)
+        sin_emb = jnp.sin(embeddings)
+
+        if self.cast_as_fprop_dtype:
+            cos_emb = cos_emb.astype(self.fprop_dtype)
+            sin_emb = sin_emb.astype(self.fprop_dtype)
+
+        return cos_emb, sin_emb
+
+    def _rotate_half(self, x: Array) -> Array:
+        """Rotates half the hidden dims of the input.
+
+        Args:
+          x: Input tensor of any shape with last dimension divisible by 2
+
+        Returns:
+          Rotated tensor where (x1, x2) -> (-x2, x1)
+        """
+        x1 = x[..., : x.shape[-1] // 2]
+        x2 = x[..., x.shape[-1] // 2 :]
+        return jnp.concatenate([-x2, x1], axis=-1)
+
+    def __call__(self, inputs: Array, grid_thw: Array) -> Array:
+        """Apply rotary position embeddings directly to inputs (Q or K tensors).
+
+        Args:
+          inputs: Input tensor of shape [B, S, N, H] (batch, sequence, heads, head_dim)
+                 where S = total_tokens = sum(temporal * height * width)
+          grid_thw: Array of shape [num_images_or_videos, 3] with (temporal, height, width)
+                   for each image or video in the batch. Height and width are in patch units.
+
+        Returns:
+          Rotated inputs with same shape [B, S, N, H]
+        """
+        # Compute cos/sin embeddings: [total_tokens, head_dim]
+        cos_emb, sin_emb = self.compute_cos_sin(grid_thw)
+
+        # Broadcast to match input shape (matches PyTorch's unsqueeze(-2) behavior)
+        # inputs: [B, S, N, H] where H=head_dim
+        # cos/sin: [S, H] -> [1, S, 1, H]
+        if len(inputs.shape) == 4:
+            cos_emb = cos_emb[None, :, None, :]  # [1, S, 1, H]
+            sin_emb = sin_emb[None, :, None, :]
+        elif len(inputs.shape) == 3:
+            # For [S, N, H] case
+            cos_emb = cos_emb[:, None, :]  # [S, 1, H]
+            sin_emb = sin_emb[:, None, :]
+
+        # Apply rotation: inputs * cos + rotate_half(inputs) * sin
+        # This matches PyTorch's: (q * cos) + (rotate_half(q) * sin)
+        rotated = inputs * cos_emb + self._rotate_half(inputs) * sin_emb
+
+        return rotated
+
+
+def qwen3omnimoe_vision_pos_embed_interpolate_as_linen(
+    *,
+    num_position_embeddings: int,
+    hidden_size: int,
+    spatial_merge_size: int,
+    dtype: DType = jnp.float32,
+    name: str | None = None,
+):
+    """Initializes Qwen3OmniMoe bilinear position embedding interpolation as Linen module.
+
+    This implements fast bilinear interpolation of learned 2D positional embeddings
+    for dynamic input sizes. The embeddings are learned on a fixed grid and interpolated
+    to match the actual image/video dimensions.
+
+    Args:
+      num_position_embeddings: Number of position embeddings in the fixed grid (e.g., 1024 for 32x32)
+      hidden_size: Hidden dimension size
+      spatial_merge_size: Size of spatial merging blocks
+      dtype: Data type for embeddings
+      name: Module name
+
+    Returns:
+      A Linen module that wraps the NNX Qwen3OmniMoeVisionPosEmbedInterpolate module.
+    """
+    return nnx_wrappers.to_linen(
+        Qwen3OmniMoeVisionPosEmbedInterpolate,
+        num_position_embeddings=num_position_embeddings,
+        hidden_size=hidden_size,
+        spatial_merge_size=spatial_merge_size,
+        dtype=dtype,
+        metadata_fn=variable_to_logically_partitioned,
+        name=name,
+    )
+
+
+
+@dataclasses.dataclass(repr=False)
+class Qwen3OmniMoeVisionPosEmbedInterpolate(nnx.Module):
+    """Bilinear interpolation of learned 2D positional embeddings for Qwen3OmniMoe vision.
+
+    This module maintains a fixed grid of learned positional embeddings and interpolates
+    them to match dynamic input dimensions using bilinear interpolation. This allows
+    the model to handle images/videos of varying sizes while using a fixed embedding table.
+    """
+
+    num_position_embeddings: int
+    hidden_size: int
+    spatial_merge_size: int
+    dtype: DType = jnp.float32
+
+    # Not used but passed in by nnx.bridge.to_linen
+    rngs: nnx.Rngs = None
+
+    def __post_init__(self):
+        """Initialize the learned position embedding table."""
+        if self.rngs is not None:
+            # Initialize with normal distribution scaled by hidden_size^(-0.5)
+            init_fn = nnx.initializers.normal(stddev=self.hidden_size**-0.5)
+            self.pos_embed = nnx.Param(
+                init_fn(
+                    self.rngs.params(),
+                    (self.num_position_embeddings, self.hidden_size),
+                    self.dtype,
+                ),
+                sharding=("embed", "embed"),
+            )
+        self.num_grid_per_side = int(jnp.sqrt(self.num_position_embeddings))
+
+    def _interpolate_single(self, t: int, h: int, w: int) -> tuple[Array, Array]:
+        """Compute bilinear interpolation indices and weights for a single image/video.
+
+        Args:
+          t: Number of temporal frames
+          h: Target height in patches
+          w: Target width in patches
+
+        Returns:
+          Tuple of (indices, weights) where:
+            - indices: [4, h*w] indices into pos_embed for 4 corners
+            - weights: [4, h*w] bilinear weights for 4 corners
+        """
+        N = self.num_grid_per_side
+
+        # Create interpolation coordinates
+        h_idxs = jnp.linspace(0, N - 1, h)
+        w_idxs = jnp.linspace(0, N - 1, w)
+
+        # Floor and ceiling indices
+        h_idxs_floor = jnp.floor(h_idxs).astype(jnp.int32)
+        w_idxs_floor = jnp.floor(w_idxs).astype(jnp.int32)
+        h_idxs_ceil = jnp.minimum(h_idxs_floor + 1, N - 1)
+        w_idxs_ceil = jnp.minimum(w_idxs_floor + 1, N - 1)
+
+        # Fractional parts for interpolation weights
+        dh = h_idxs - h_idxs_floor
+        dw = w_idxs - w_idxs_floor
+
+        # Compute flat indices for 2D grid
+        base_h = h_idxs_floor * N
+        base_h_ceil = h_idxs_ceil * N
+
+        # 4 corner indices: (floor_h, floor_w), (floor_h, ceil_w), (ceil_h, floor_w), (ceil_h, ceil_w)
+        indices = jnp.stack(
+            [
+                (base_h[:, None] + w_idxs_floor[None, :]).reshape(-1),
+                (base_h[:, None] + w_idxs_ceil[None, :]).reshape(-1),
+                (base_h_ceil[:, None] + w_idxs_floor[None, :]).reshape(-1),
+                (base_h_ceil[:, None] + w_idxs_ceil[None, :]).reshape(-1),
+            ],
+            axis=0,
+        )  # [4, h*w]
+
+        # Bilinear weights
+        weights = jnp.stack(
+            [
+                ((1 - dh)[:, None] * (1 - dw)[None, :]).reshape(-1),
+                ((1 - dh)[:, None] * dw[None, :]).reshape(-1),
+                (dh[:, None] * (1 - dw)[None, :]).reshape(-1),
+                (dh[:, None] * dw[None, :]).reshape(-1),
+            ],
+            axis=0,
+        )  # [4, h*w]
+
+        return indices, weights
+
+    def __call__(self, grid_thw: Array) -> Array:
+        """Interpolate positional embeddings for given grid configuration.
+
+        Args:
+          grid_thw: Array of shape [num_images_or_videos, 3] with (temporal, height, width)
+
+        Returns:
+          Interpolated positional embeddings of shape [total_tokens, hidden_size]
+          where total_tokens = sum(temporal * height * width) across all items.
+        """
+        # Process each image/video separately
+        all_embeddings = []
+
+        for i in range(grid_thw.shape[0]):
+            t = int(grid_thw[i, 0])
+            h = int(grid_thw[i, 1])
+            w = int(grid_thw[i, 2])
+
+            # Get interpolation indices and weights
+            indices, weights = self._interpolate_single(t, h, w)  # [4, h*w], [4, h*w]
+
+            # Lookup embeddings for all 4 corners
+            # pos_embed: [num_position_embeddings, hidden_size]
+            # indices: [4, h*w]
+            corner_embeds = self.pos_embed.value[indices]  # [4, h*w, hidden_size]
+
+            # Apply bilinear weights and sum
+            weighted_embeds = (
+                corner_embeds * weights[:, :, None]
+            )  # [4, h*w, hidden_size]
+            interpolated = jnp.sum(weighted_embeds, axis=0)  # [h*w, hidden_size]
+
+            # Repeat for temporal frames
+            if t > 1:
+                interpolated = jnp.tile(interpolated, (t, 1))  # [t*h*w, hidden_size]
+
+            # Apply spatial merge permutation
+            # Reshape to [t, h, w, hidden_size] then permute for block-based processing
+            merge_size = self.spatial_merge_size
+            merged_h = h // merge_size
+            merged_w = w // merge_size
+
+            # Reshape: [t*h*w, hidden_size] -> [t, h, w, hidden_size]
+            interpolated = interpolated.reshape(t, h, w, self.hidden_size)
+
+            # Permute for spatial merging: [t, merged_h, merge_size, merged_w, merge_size, hidden_size]
+            interpolated = interpolated.reshape(
+                t, merged_h, merge_size, merged_w, merge_size, self.hidden_size
+            )
+            # -> [t, merged_h, merged_w, merge_size, merge_size, hidden_size]
+            interpolated = jnp.transpose(interpolated, (0, 1, 3, 2, 4, 5))
+            # Flatten back to [t*merged_h*merged_w*merge_size*merge_size, hidden_size]
+            interpolated = interpolated.reshape(-1, self.hidden_size)
+
+            all_embeddings.append(interpolated)
+
+        # Concatenate all images/videos
+        return jnp.concatenate(all_embeddings, axis=0)
