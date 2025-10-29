@@ -45,7 +45,7 @@ jobs:
 
   tpu_image:
     needs: prelim
-    uses: ./.github/workflows/build_upload_internal.yml
+    uses: ./.github/workflows/build_upload_internal.yml@02443889
     with:
       device_type: tpu
       device_name: v4-8
@@ -55,7 +55,7 @@ jobs:
 
   gpu_image:
     needs: prelim
-    uses: ./.github/workflows/build_upload_internal.yml
+    uses: ./.github/workflows/build_upload_internal.yml@02443889
     with:
       device_type: gpu
       device_name: a100-40gb-4
@@ -69,7 +69,7 @@ jobs:
       fail-fast: false
       matrix:
         worker_group: [1, 2, 3, 4]
-    uses: ./.github/workflows/run_tests_internal.yml
+    uses: ./.github/workflows/run_tests_internal.yml@02443889
     with:
       device_type: cpu
       device_name: X64
@@ -84,7 +84,7 @@ jobs:
 
   tpu_unit_tests:
     needs: tpu_image
-    uses: ./.github/workflows/run_tests_internal.yml
+    uses: ./.github/workflows/run_tests_internal.yml@02443889
     with:
       device_type: tpu
       device_name: v4-8
@@ -97,7 +97,7 @@ jobs:
 
   tpu_integration_tests:
     needs: tpu_image
-    uses: ./.github/workflows/run_tests_internal.yml
+    uses: ./.github/workflows/run_tests_internal.yml@02443889
     with:
       device_type: tpu
       device_name: v4-8
@@ -110,7 +110,7 @@ jobs:
 
   gpu_unit_tests:
     needs: gpu_image
-    uses: ./.github/workflows/run_tests_internal.yml
+    uses: ./.github/workflows/run_tests_internal.yml@02443889
     with:
       device_type: gpu
       device_name: a100-40gb-4
@@ -124,7 +124,7 @@ jobs:
 
   gpu_integration_tests:
     needs: gpu_image
-    uses: ./.github/workflows/run_tests_internal.yml
+    uses: ./.github/workflows/run_tests_internal.yml@02443889
     with:
       device_type: gpu
       device_name: a100-40gb-4
