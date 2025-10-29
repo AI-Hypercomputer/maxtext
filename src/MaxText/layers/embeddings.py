@@ -20,13 +20,14 @@ import math
 import jax
 from jax import lax
 import jax.numpy as jnp
+from jax.sharding import Mesh, NamedSharding
 
 from flax import linen as nn
 from flax import nnx
 
 from MaxText import max_logging
 from MaxText import max_utils
-from MaxText.common_types import MODEL_MODE_PREFILL, MODEL_MODE_TRAIN, Array, Config, DType
+from MaxText.common_types import ShardMode, MODEL_MODE_PREFILL, MODEL_MODE_TRAIN, Array, Config, DType
 from MaxText.layers import nnx_wrappers
 from MaxText.layers.initializers import Initializer, default_embed_init, variable_to_logically_partitioned
 
@@ -46,6 +47,7 @@ def embed_as_linen(
     num_embeddings: int,
     num_features: int,
     config: Config,
+    mesh: Mesh,
     cast_input_dtype: None | DType = None,
     dtype: DType = jnp.float32,
     attend_dtype: None | DType = None,
@@ -76,6 +78,7 @@ def embed_as_linen(
       num_embeddings=num_embeddings,
       num_features=num_features,
       config=config,
+      mesh=mesh,
       cast_input_dtype=cast_input_dtype,
       dtype=dtype,
       attend_dtype=attend_dtype,
@@ -93,6 +96,7 @@ class Embed(nnx.Module):
       num_embeddings: int,
       num_features: int,
       config: Config,
+      mesh: Mesh,
       cast_input_dtype: None | DType = None,
       dtype: DType = jnp.float32,
       attend_dtype: None | DType = None,
@@ -117,6 +121,7 @@ class Embed(nnx.Module):
     self.num_embeddings = num_embeddings
     self.num_features = num_features
     self.config = config
+    self.mesh = mesh
     self.cast_input_dtype = cast_input_dtype
     self.dtype = dtype
     self.attend_dtype = attend_dtype
@@ -142,30 +147,36 @@ class Embed(nnx.Module):
     if not jnp.issubdtype(inputs.dtype, jnp.integer):
       raise ValueError("Input type must be an integer or unsigned integer.")
 
-    embedding = _maybe_move_embedding_to_device(self.embedding.value, self.config)
+    embedding = jnp.asarray(
+        _maybe_move_embedding_to_device(self.embedding.value, self.config),
+        self.dtype,
+    )
+
+    output_axis_names = (
+        ("activation_embed_and_logits_batch", "prefill_activation_length", "activation_embed")
+        if model_mode == MODEL_MODE_PREFILL
+        else ("activation_embed_and_logits_batch", "activation_length_no_exp", "activation_embed")
+    )
+    out_pspec = nn.logical_to_mesh_axes(output_axis_names)
+
+    out_sharding = NamedSharding(self.mesh, out_pspec) if self.config.shard_mode == ShardMode.EXPLICIT else None
 
     if cfg.use_iota_embed:
       iota = lax.iota(jnp.int32, self.num_embeddings)
       one_hot = jnp.array(inputs[..., jnp.newaxis] == iota, dtype=self.dtype)
-      output = jnp.dot(one_hot, jnp.asarray(embedding, self.dtype))
+      output = jnp.dot(one_hot, embedding, out_sharding=out_sharding)
     else:
-      output = jnp.asarray(embedding, self.dtype)[inputs]
+      output = embedding.at[inputs].get(out_sharding=out_sharding)
 
-    output_prefill_axis_names = ("activation_embed_and_logits_batch", "prefill_activation_length", "activation_embed")
-    output_default_axis_names = ("activation_embed_and_logits_batch", "activation_length_no_exp", "activation_embed")
-
-    if model_mode == MODEL_MODE_PREFILL:
-      output = nn.with_logical_constraint(output, output_prefill_axis_names)
-    else:
-      output = nn.with_logical_constraint(output, output_default_axis_names)
     return output
 
-  def attend(self, query: Array) -> Array:
+  def attend(self, query: Array, out_sharding: NamedSharding | None = None) -> Array:
     """Attend over the embedding using a query array.
 
     Args:
       query: array with last dimension equal the feature depth `num_features` of the
         embedding.
+      out_sharding: NamedSharding object indicating how the output gets sharded
 
     Returns:
       An array with final dim `num_embeddings` corresponding to the batched
@@ -175,10 +186,16 @@ class Embed(nnx.Module):
     """
     embedding = self.embedding.value
     attend_dtype = self.attend_dtype if self.attend_dtype is not None else self.dtype
-    return attend_on_embedding(query, embedding, attend_dtype, self.config)
+    return attend_on_embedding(query, embedding, attend_dtype, self.config, out_sharding)
 
 
-def attend_on_embedding(query: Array, embedding_table: Array, attend_dtype: DType, config: Config) -> Array:
+def attend_on_embedding(
+    query: Array,
+    embedding_table: Array,
+    attend_dtype: DType,
+    config: Config,
+    out_sharding: NamedSharding | None = None,
+) -> Array:
   """Attend over an embedding table using a query array.
 
   TODO: Remove this method when Embed bridge to Linen is no longer needed
@@ -188,13 +205,22 @@ def attend_on_embedding(query: Array, embedding_table: Array, attend_dtype: DTyp
     embedding_table: The embedding table to attend over.
     attend_dtype: The data type for the attention computation.
     config: The model configuration, used to check for parameter offloading.
+    out_sharding: NamedSharding object indicating the output sharding
 
   Returns:
     An array with a final dimension equal to `num_embeddings`, corresponding to the
     batched inner-product of the query vectors against each embedding.
   """
+  # out_sharding must be None under auto shard_mode
+  if config.shard_mode != ShardMode.EXPLICIT:
+    out_sharding = None
   embedding_table = _maybe_move_embedding_to_device(embedding_table, config)
-  return jnp.dot(query, jnp.asarray(embedding_table, jnp.bfloat16).T, preferred_element_type=attend_dtype)
+  return jnp.dot(
+      query,
+      jnp.asarray(embedding_table, jnp.bfloat16).T,
+      preferred_element_type=attend_dtype,
+      out_sharding=out_sharding,
+  )
 
 
 def rotary_embedding_as_linen(

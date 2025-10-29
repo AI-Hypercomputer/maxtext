@@ -28,7 +28,7 @@ from jax.ad_checkpoint import checkpoint_name
 from jax.experimental.pallas.ops.gpu import attention as gpu_pallas_attention
 from jax.experimental.pallas.ops.gpu import decode_attention as gpu_pallas_decode_attention
 from jax.experimental import pallas as pl
-from jax.sharding import Mesh
+from jax.sharding import Mesh, NamedSharding
 import jax.numpy as jnp
 
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_kernel
@@ -44,6 +44,7 @@ from flax.linen import partitioning
 
 
 from MaxText import max_utils
+from MaxText.maxtext_utils import maybe_shard_with_name
 from MaxText.common_types import (
     DEFAULT_MASK_VALUE,
     BATCH,
@@ -1302,12 +1303,26 @@ class AttentionOp(nnx.Module):
           )
       return attention_output
 
+    def _maybe_shard_with_pspec(inputs, pspec: jax.sharding.PartitionSpec | None):
+      # decoder_segment_ids can be None
+      if pspec is None:
+        return None
+      sharding = NamedSharding(self.mesh, pspec)
+      return maybe_shard_with_name(inputs, sharding, shard_mode=self.config.shard_mode)
+
+    query = _maybe_shard_with_pspec(query, axis_names_q)
+    key = _maybe_shard_with_pspec(key, axis_names_kv)
+    value = _maybe_shard_with_pspec(value, axis_names_kv)
+    decoder_segment_ids_q = _maybe_shard_with_pspec(decoder_segment_ids, segment_axis_names_q)
+    decoder_segment_ids_kv = _maybe_shard_with_pspec(decoder_segment_ids, segment_axis_names_kv)
+    sinks = _maybe_shard_with_pspec(sinks, sink_axis_names)
+
     x = wrap_flash_attention(
         query,
         key,
         value,
-        decoder_segment_ids,
-        decoder_segment_ids,
+        decoder_segment_ids_q,
+        decoder_segment_ids_kv,
         splash_kernel,
         cp_size,
         load_balanced_context_parallel,

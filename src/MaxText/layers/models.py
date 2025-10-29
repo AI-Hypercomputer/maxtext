@@ -82,6 +82,7 @@ class TransformerLinenPure(nn.Module):
         embedding_init=nn.initializers.normal(stddev=1.0),
         name="token_embedder",
         config=cfg,
+        mesh=self.mesh,
     )
     self.vision_encoder = VisionEncoder(config=cfg, mesh=mesh) if cfg.use_multimodal else None
     self.decoder = Decoder(config=cfg, mesh=mesh, quant=self.quant, model_mode=self.model_mode)
@@ -284,6 +285,7 @@ class Transformer(nnx.Module):
     cfg = self.config
     mesh = self.mesh
     self.token_embedder = Embed(
+        mesh=self.mesh,
         num_embeddings=cfg.vocab_size,
         num_features=cfg.emb_dim,
         dtype=cfg.dtype,

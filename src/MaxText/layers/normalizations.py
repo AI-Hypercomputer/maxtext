@@ -21,11 +21,12 @@ from flax import nnx
 from jax import lax
 import jax
 import jax.numpy as jnp
+from jax.sharding import NamedSharding
 from MaxText import max_logging
 from MaxText import max_utils
 from MaxText.layers import nnx_wrappers
 from MaxText.layers.initializers import Initializer, variable_to_logically_partitioned
-from MaxText.common_types import Array
+from MaxText.common_types import Array, ShardMode
 
 
 class RMSNorm(nnx.Module):
@@ -37,6 +38,7 @@ class RMSNorm(nnx.Module):
       epsilon: float = 1e-6,
       dtype: Any = jnp.float32,
       weight_dtype: Any = jnp.float32,
+      shard_mode: ShardMode = ShardMode.AUTO,
       kernel_axes: tuple[None | str, ...] = (),
       scale_init: Initializer = nn.initializers.ones,
       parameter_memory_host_offload: bool = False,
@@ -47,6 +49,7 @@ class RMSNorm(nnx.Module):
     self.epsilon = epsilon
     self.dtype = dtype
     self.weight_dtype = weight_dtype
+    self.shard_mode = shard_mode
     self.kernel_axes = kernel_axes
     self.scale_init = scale_init
     self.parameter_memory_host_offload = parameter_memory_host_offload
@@ -55,7 +58,7 @@ class RMSNorm(nnx.Module):
         sharding=kernel_axes,
     )
 
-  def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
+  def __call__(self, x: jnp.ndarray, out_sharding: NamedSharding | None = None) -> jnp.ndarray:
     """Applies layer normalization on the input."""
     x = jnp.asarray(x, jnp.float32)
     mean2 = jnp.mean(lax.square(x), axis=-1, keepdims=True)
@@ -65,9 +68,13 @@ class RMSNorm(nnx.Module):
     if self.parameter_memory_host_offload:
       max_logging.log("normalizations.py: Moving scale parameter to device")
       scale = jax.device_put(scale, max_utils.device_space())
+    # out_sharding must be None in auto shard mode
+    if self.shard_mode != ShardMode.EXPLICIT:
+      out_sharding = None
 
     scale = jnp.asarray(scale, self.dtype)
-    return y * scale
+    # broadcast 2nd input then element-wise mul
+    return jnp.einsum("i...k,...k->i...k", y, scale, out_sharding=out_sharding)
 
 
 def rms_norm(
@@ -75,6 +82,7 @@ def rms_norm(
     epsilon: float = 1e-6,
     dtype: Any = jnp.float32,
     weight_dtype: Any = jnp.float32,
+    shard_mode: ShardMode = ShardMode.AUTO,
     kernel_axes: tuple[None | str, ...] = (),
     scale_init: Initializer = nn.initializers.ones,
     name: None | str = None,
@@ -87,6 +95,7 @@ def rms_norm(
       epsilon=epsilon,
       dtype=dtype,
       weight_dtype=weight_dtype,
+      shard_mode=shard_mode,
       kernel_axes=kernel_axes,
       scale_init=scale_init,
       parameter_memory_host_offload=parameter_memory_host_offload,

@@ -18,7 +18,7 @@ import math
 from typing import Any, Optional, Tuple
 
 from jax.ad_checkpoint import checkpoint_name
-from jax.sharding import Mesh
+from jax.sharding import Mesh, NamedSharding
 import jax.numpy as jnp
 
 from flax import linen as nn
@@ -663,6 +663,7 @@ class MLA(Attention):
       inputs_kv: Array,
       inputs_positions: Array | None = None,
       decoder_segment_ids: Array | None = None,
+      out_sharding: NamedSharding | None = None,
       *,
       model_mode: str = MODEL_MODE_TRAIN,
       deterministic: bool = False,
