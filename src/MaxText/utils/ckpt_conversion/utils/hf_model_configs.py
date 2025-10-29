@@ -469,6 +469,22 @@ qwen3_coder_480b_a35b_config = transformers.Qwen3MoeConfig(
     vocab_size=151936,
 )
 
+qwen3_vl_4b_config = transformers.Qwen3VLConfig(
+    vocab_size=151936,
+    hidden_size=2560,
+    intermediate_size=9728,
+    num_hidden_layers=36,
+    num_attention_heads=32,
+    num_key_value_heads=8,
+    head_dim=128,
+    hidden_act="silu",
+    max_position_embeddings=40960,
+    rms_norm_eps=1.0e-6,
+    rope_theta=1000000.0,
+    tie_word_embeddings=True,
+    torch_dtype="bfloat16",
+)
+
 HF_MODEL_CONFIGS = {
     "gemma2-2b": gemma2_2b_config,
     "gemma2-9b": gemma2_9b_config,
@@ -489,4 +505,5 @@ HF_MODEL_CONFIGS = {
     "qwen3-30b-a3b": qwen3_30b_a3b_thinking_2507_config,
     "qwen3-235b-a22b": qwen3_235b_a22b_thinking_2507_config,
     "qwen3-480b-a35b": qwen3_coder_480b_a35b_config,
+    "qwen3-vl-4b": qwen3_vl_4b_config,
 }
