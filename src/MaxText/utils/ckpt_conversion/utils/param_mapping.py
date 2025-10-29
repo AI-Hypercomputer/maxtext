@@ -1125,7 +1125,7 @@ PARAM_MAPPING = {
     "qwen3-235b-a22b": QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING,
     "qwen3-coder-480b-a35b": QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING,
     "deepseek3-test": DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING,
-    "deepseek3-671b": DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "deepseek3-671b": DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING,
 }
 
 # {maxtext model name: {maxtext weight name: bi-directional transform}}
