@@ -7,7 +7,7 @@ This document provides a guide to use the multimodal functionalities in MaxText 
 - **Multimodal Decode**: Inference with text+images as input.
 - **Supervised Fine-Tuning (SFT)**: Apply SFT to the model using a visual-question-answering dataset.
 
-The following table provides a list of models and modalities we currently support:
+We also provide a [colab](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/examples/multimodal_gemma3_demo.ipynb) for multimodal features demonstration. The following table provides a list of models and modalities we currently support:
 | Models | Input Modalities | Output Modalities |
 | :---- | :---- | :---- |
 | - Gemma3-4B/12B/27B<br>- Llama4-Scout/Maverick | Text, images | Text |
@@ -113,22 +113,25 @@ Here, we use [ChartQA](https://huggingface.co/datasets/HuggingFaceM4/ChartQA) as
 
 
 ```shell
-python -m MaxText.sft_trainer MaxText/configs/sft-vision-chartqa.yml \
-    run_name=$idx \
+python -m MaxText.sft_trainer \
+    $MAXTEXT_REPO_ROOT/configs/sft-vision-chartqa.yml \
+    run_name="chartqa-sft" \
     model_name=gemma3-4b \
-    tokenizer_path="google/gemma-3-4b-pt" \
+    tokenizer_path="google/gemma-3-4b-it" \
+    hf_access_token=$HF_ACCESS_TOKEN \
+    load_parameters_path=$UNSCANNED_CKPT_PATH \
+    base_output_directory=$BASE_OUTPUT_DIRECTORY \
     per_device_batch_size=1 \
+    steps=$STEPS \
     max_prefill_predict_length=1024 \
     max_target_length=2048 \
-    steps=200 \
-    scan_layers=false \
-    async_checkpointing=False \
+    checkpoint_period=1000 \
+    scan_layers=False \
+    async_checkpointing=True \
+    enable_checkpointing=True \
     attention=dot_product \
-    dataset_type=hf hf_path=parquet hf_access_token=$HF_ACCESS_TOKEN \
-    hf_train_files=gs://aireenmei-multipod/dataset/hf/chartqa/train-* \
-    base_output_directory=$BASE_OUTPUT_DIRECTORY \
-    load_parameters_path=$UNSCANNED_CKPT_PATH \
-    dtype=bfloat16 weight_dtype=bfloat16 sharding_tolerance=0.05
+    max_num_images_per_example=1 \
+    dataset_type=hf profiler=xplane
 ```
 
 ## Other Recommendations
