@@ -31,6 +31,10 @@ on:
       pytest_marker:
         required: true
         type: string
+      pytest_addopts:
+        required: false
+        type: string
+        default: ''
       is_scheduled_run:
         required: true
         type: string
@@ -107,4 +111,4 @@ jobs:
           fi
           # TODO: Fix the skipped tests and remove the deselect flags
           [ "${{ inputs.total_workers }}" -gt 1 ] && .venv/bin/python3 -m pip install --quiet pytest-split && SPLIT_ARGS="--splits ${{ inputs.total_workers }} --group ${{ inputs.worker_group }}" || SPLIT_ARGS=""
-          .venv/bin/python3 -m pytest -v -m "${FINAL_PYTEST_MARKER}" --durations=0 --deselect "tests/aot_hlo_identical_test.py::AotHloIdenticalTest::test_default_hlo_match" --deselect "tests/tokenizer_test.py::TokenizerTest::test_detokenize" $SPLIT_ARGS
+          .venv/bin/python3 -m pytest ${{ inputs.pytest_addopts }} -v -m "${FINAL_PYTEST_MARKER}" --durations=0 --deselect "tests/aot_hlo_identical_test.py::AotHloIdenticalTest::test_default_hlo_match" --deselect "tests/tokenizer_test.py::TokenizerTest::test_detokenize" $SPLIT_ARGS
