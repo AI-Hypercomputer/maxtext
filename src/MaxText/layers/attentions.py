@@ -63,6 +63,7 @@ from MaxText.layers.attention_op import AttentionOp
 from MaxText.layers.embeddings import (
     LLaMARotaryEmbedding,
     LlamaVisionRotaryEmbedding,
+    Qwen3OmniMoeVisionRotaryEmbedding,
     RotaryEmbedding,
     YarnRotaryEmbedding,
 )
@@ -423,7 +424,8 @@ class Attention(nnx.Module):
         else None
     )
 
-    self.rotary_embedding = self.init_rotary_embedding()
+    # Only initialize rotary embedding if this is not a NoPE layer
+    self.rotary_embedding = None if self.is_nope_layer else self.init_rotary_embedding()
 
     self.attention_op = AttentionOp(
         config=self.config,
@@ -675,7 +677,19 @@ class Attention(nnx.Module):
 
     rope_type = self.config.rope_type.lower()
     rope_use_scale = self.config.rope_use_scale
-    if self.is_vision:
+
+    # Check for Qwen3OmniMoe vision models first (by model name)
+    if self.config.model_name.startswith("qwen3") and self.is_vision:
+      rotary_embedding = Qwen3OmniMoeVisionRotaryEmbedding(
+          head_dim=self.head_dim // 2,  # Qwen uses half head_dim for rotary
+          spatial_merge_size=getattr(self.config, 'spatial_merge_size', 2),
+          rope_theta=getattr(self.config, 'rope_theta', 10000.0),
+          cast_as_fprop_dtype=True,
+          fprop_dtype=self.dtype,
+          rngs=self.rngs,
+      )
+    elif self.is_vision:
+      # LlamaVision models
       rotary_embedding = LlamaVisionRotaryEmbedding(
           image_size=self.config.image_size_for_vit,
           patch_size=self.config.patch_size_for_vit,
@@ -730,18 +744,22 @@ class Attention(nnx.Module):
       )
     return rotary_embedding
 
-  def apply_rotary_embedding(self, inputs: Array, inputs_positions: Optional[Array | None] = None):
+  def apply_rotary_embedding(self, inputs: Array, inputs_positions: Optional[Array | None] = None, grid_thw: Optional[Array | None] = None):
     """Applies rotary embeddings, handling different model types.
 
     Args:
       inputs: The input tensor to apply rotary embeddings to.
-      inputs_positions: The positions of the inputs.
-      name: A name for the embedding layer.
+      inputs_positions: The positions of the inputs (for text models).
+      grid_thw: Grid (temporal, height, width) for vision models.
 
     Returns:
       The input tensor with rotary embeddings applied.
     """
-    return self.rotary_embedding(inputs, inputs_positions)
+    # For vision models that need grid_thw, pass it; otherwise use positions
+    if grid_thw is not None:
+      return self.rotary_embedding(inputs, grid_thw)
+    else:
+      return self.rotary_embedding(inputs, inputs_positions)
 
   def init_kv_caches(self, inputs_kv_shape: Tuple):
     """Initializes KVCache.
@@ -816,6 +834,7 @@ class Attention(nnx.Module):
       inputs_kv: Array,
       inputs_positions: Array | None = None,
       decoder_segment_ids: Array | None = None,
+      grid_thw: Array | None = None,
       *,
       model_mode: str = MODEL_MODE_TRAIN,
       deterministic: bool = False,
@@ -844,6 +863,7 @@ class Attention(nnx.Module):
       inputs_kv: Key/values of shape `[batch, kv_length, kv_features]`.
       inputs_positions: Input positions for rotary embeddings.
       decoder_segment_ids: Segment IDs for masking.
+      grid_thw: Grid (temporal, height, width) for vision models. Shape `[num_images, 3]`.
       model_mode: The operational mode ('train', 'prefill', 'autoregressive').
       deterministic: If True, disables dropout.
       previous_chunk: Information about previously processed chunks for chunked prefill.
@@ -886,8 +906,8 @@ class Attention(nnx.Module):
     use_qk_norm = self.use_qk_norm and use_rope
 
     if use_rope:
-      query = self.apply_rotary_embedding(query, inputs_positions=inputs_positions)
-      key = self.apply_rotary_embedding(key, inputs_positions=inputs_positions)
+      query = self.apply_rotary_embedding(query, inputs_positions=inputs_positions, grid_thw=grid_thw)
+      key = self.apply_rotary_embedding(key, inputs_positions=inputs_positions, grid_thw=grid_thw)
 
     if use_qk_norm and is_llama4_decoder_block:
       l2_norm = L2Norm(eps=self.config.normalization_layer_epsilon)
