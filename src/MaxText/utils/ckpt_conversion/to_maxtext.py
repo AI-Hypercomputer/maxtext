@@ -54,6 +54,11 @@ from absl import app
 from flax.training import train_state
 from transformers import AutoConfig, AutoModelForCausalLM
 
+import logging
+import ml_dtypes
+import pathlib
+import psutil
+
 from MaxText import checkpointing
 from MaxText import max_logging
 from MaxText import max_utils
@@ -68,12 +73,33 @@ from MaxText.utils.ckpt_conversion.utils.utils import apply_hook_fns, HF_IDS
 import jax.numpy as jnp
 import torch
 from tqdm import tqdm
+from safetensors import safe_open
+
 
 jax.config.update("jax_platform_name", "cpu")
 
-import ml_dtypes
+os.environ["JAX_PLATFORMS"] = "cpu"
+os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=16"
+
 
 CAST_DTYPE = ml_dtypes.bfloat16
+mem_info = psutil.Process()
+
+
+# Only skip the MTP weights that are shared with the main model.
+# The MTP block in MaxText will reuse the main embedding and output head.
+MTP_KEYS_TO_SKIP = [
+    "model.layers.61.embed_tokens.weight",
+    "model.layers.61.shared_head.norm.weight",
+    "model.layers.61.shared_head.head.weight",
+]
+
+
+def is_key_allowed(key, banned_keys) -> bool:
+  """
+  Checks if a key is NOT in a list of banned keys.
+  """
+  return key not in banned_keys
 
 
 def _build_multi_axis_stacked_tensor(
@@ -101,11 +127,12 @@ def _build_multi_axis_stacked_tensor(
     for hf_key_single in layer_keys_for_expert:
       if hf_key_single not in hf_state_dict:
         raise ValueError(f"HuggingFace key {hf_key_single} not found in state_dict.")
-      hf_tensor_numpy = hf_state_dict[hf_key_single]
+      hf_tensor_numpy = hf_state_dict[hf_key_single].to(torch.float16).numpy()
       # For this case, the hook function does not require the target_shape.
       processed_hf_tensor = apply_hook_fns(hf_tensor_numpy, None, hook_fns)
       layer_tensors_for_expert.append(processed_hf_tensor)
 
+    print("hi")
     # First, stack all layers for the current expert. This creates the 'layer' axis.
     stacked_expert_tensor = np.stack(layer_tensors_for_expert, axis=0)
     all_expert_tensors.append(stacked_expert_tensor)
@@ -150,7 +177,7 @@ def _build_single_axis_stacked_tensor(
   for hf_key_single in hf_source_keys:
     if hf_key_single not in hf_state_dict:
       raise ValueError(f"HuggingFace key {hf_key_single} not found in state_dict.")
-    hf_tensor_numpy = hf_state_dict[hf_key_single]
+    hf_tensor_numpy = hf_state_dict[hf_key_single].to(torch.float16).numpy()
     processed_hf_tensor = apply_hook_fns(hf_tensor_numpy, mt_slice_shape, hook_fns)
     tensors_to_stack.append(processed_hf_tensor)
 
@@ -173,30 +200,30 @@ def get_abstract_param(model, config):
 
 
 def main(argv: Sequence[str], local_argv: argparse.Namespace) -> None:
-  jax.config.update("jax_default_prng_impl", "unsafe_rbg")
-  os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"  # Suppress TensorFlow logging
+  # jax.config.update("jax_default_prng_impl", "unsafe_rbg")
+  # os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"  # Suppress TensorFlow logging
 
-  # Check if the user is using an Instruct version. If so, use the base model architecture
-  for i, arg in enumerate(argv):
-    if arg.startswith("model_name="):
-      model_name_arg = argv[i].split("=")[1]
-      model_name_original = model_name_arg
-      if "-Instruct" in model_name_arg:
-        max_logging.log("Warning: You want an Instruct version, so we are using the base model architecture instead.")
-        model_name_arg = model_name_arg.replace("-Instruct", "")
-        argv[i] = f"model_name={model_name_arg}"
-      break
+  # # Check if the user is using an Instruct version. If so, use the base model architecture
+  # for i, arg in enumerate(argv):
+  #   if arg.startswith("model_name="):
+  #     model_name_arg = argv[i].split("=")[1]
+  #     model_name_original = model_name_arg
+  #     if "-Instruct" in model_name_arg:
+  #       max_logging.log("Warning: You want an Instruct version, so we are using the base model architecture instead.")
+  #       model_name_arg = model_name_arg.replace("-Instruct", "")
+  #       argv[i] = f"model_name={model_name_arg}"
+  #     break
 
   config = pyconfig.initialize(argv)
-  # check the supported model ids
-  if model_name_original not in HF_IDS:
-    raise ValueError(f"Unsupported model name: {model_name_original}. Supported models are: {list(HF_IDS.keys())}")
+  # # check the supported model ids
+  # if model_name_original not in HF_IDS:
+  #   raise ValueError(f"Unsupported model name: {model_name_original}. Supported models are: {list(HF_IDS.keys())}")
 
   if local_argv.hf_model_path:
     # use local model
     model_id = local_argv.hf_model_path
-  else:
-    model_id = HF_IDS[model_name_original]
+  # else:
+  #   model_id = HF_IDS[model_name_original]
 
   max_utils.print_system_information()
   if not config.base_output_directory:
@@ -204,36 +231,38 @@ def main(argv: Sequence[str], local_argv: argparse.Namespace) -> None:
   else:
     output_directory = config.base_output_directory
 
-  # Setup JAX distributed system and mesh
+  # # Setup JAX distributed system and mesh
   devices_array = maxtext_utils.create_device_mesh(config)
   mesh = jax.sharding.Mesh(devices_array, config.mesh_axes)
 
   hf_token = config.hf_access_token
-  # Load HuggingFace model, config, and state_dict
-  max_logging.log(f"Loading HuggingFace model: {model_id}...")
-  start = time.time()
+  # # Load HuggingFace model, config, and state_dict
+  # max_logging.log(f"Loading HuggingFace model: {model_id}...")
+  # start = time.time()
   hf_config_obj = AutoConfig.from_pretrained(model_id, token=hf_token)
-  hf_model = AutoModelForCausalLM.from_pretrained(
-      model_id,
-      token=hf_token,
-      # low_cpu_mem_usage=True,
-      device_map="cpu",
-      dtype=torch.float16,
-      cache_dir="/home/shuningjin/deepseek3-671b/hf-671b-bf16-cache",
-  )
+  # hf_model = AutoModelForCausalLM.from_pretrained(
+  #     model_id,
+  #     token=hf_token,
+  #     # low_cpu_mem_usage=True,
+  #     device_map="cpu",
+  #     dtype=torch.float16,
+  #     cache_dir="/home/shuningjin/deepseek3-671b/hf-671b-bf16-cache",
+  # )
 
-  # local_files_only=True
-  # dtype=torch.bfloat16
+  # # local_files_only=True
+  # # dtype=torch.bfloat16
 
-  hf_state_dict_numpy = hf_model.state_dict()
-  for k, v in tqdm(hf_state_dict_numpy.items(), total=len(hf_state_dict_numpy)):
-    # print(v.dtype)
-    hf_state_dict_numpy[k] = v.numpy()
-    # hf_state_dict_numpy[k] = v.to(torch.float32).numpy().astype(CAST_DTYPE)
-    hf_state_dict_numpy[k] = v.to(torch.float16).numpy()
-    # print(hf_state_dict_numpy[k].dtype)
-  del hf_model
-  max_logging.log(f"HuggingFace model loaded and converted to NumPy. {time.time() - start: .2f} second")
+  # hf_state_dict_numpy = hf_model.state_dict()
+  # for k, v in tqdm(hf_state_dict_numpy.items(), total=len(hf_state_dict_numpy)):
+  #   # print(v.dtype)
+  #   hf_state_dict_numpy[k] = v.numpy()
+  #   # hf_state_dict_numpy[k] = v.to(torch.float32).numpy().astype(CAST_DTYPE)
+  #   hf_state_dict_numpy[k] = v.to(torch.float16).numpy()
+  #   # print(hf_state_dict_numpy[k].dtype)
+  # del hf_model
+  # max_logging.log(f"HuggingFace model loaded and converted to NumPy. {time.time() - start: .2f} second")
+
+  # logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
 
   max_logging.log(f"Create checkpoint manager...")
   start = time.time()
@@ -282,7 +311,29 @@ def main(argv: Sequence[str], local_argv: argparse.Namespace) -> None:
     max_logging.log(f"Elapse. MaxText abstract model and state initialized. {time.time() - start: .2f} second")
     return abstract_params_flat, abstract_params_treedef
 
+  print("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
   abstract_params_flat, abstract_params_treedef = init1()
+  print("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
+  sys.exit(1)
+
+  ckpt_paths = sorted(pathlib.Path(model_id).glob("[!.]*.safetensors"))
+  hf_state_dict_numpy = {}
+  max_logging.log(f"Loading {len(ckpt_paths)} checkpoint ...")
+  for i, ckpt_path in tqdm(enumerate(ckpt_paths), total=len(ckpt_paths)):
+    # max_logging.log(f"Loading checkpoint {i+1} of {len(ckpt_paths)} ...")
+    with safe_open(ckpt_path, framework="pt", device="cpu") as f:
+      for key in f.keys():
+        # parts = key.split(".")
+        # layer = int(parts[2]) if "layers" in key else 0
+        if key.endswith("_scale_inv"):
+          raise ValueError("fp8 checkpoint is not supported.")
+        if is_key_allowed(key, MTP_KEYS_TO_SKIP):
+          # mapped_key = hf_to_maxtext_mapping(
+          #     layer, num_experts, first_num_dense_layers, base_num_decoder_layers, has_mtp
+          # ).get(key)
+          hf_state_dict_numpy[key] = f.get_tensor(key)  # .to(torch.float16).numpy()
+
+  logging.info("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
 
   # Get parameter mappings and hooks
   # example of param mapping (gemma2, maxtext:huggingface):
@@ -302,7 +353,7 @@ def main(argv: Sequence[str], local_argv: argparse.Namespace) -> None:
   start = time.time()
   final_mt_weights = []
 
-  for path_tuple, abstract_leaf_value in abstract_params_flat:
+  for path_tuple, abstract_leaf_value in tqdm(abstract_params_flat, total=len(abstract_params_flat)):
 
     # key_parts = [k.key for k in path_tuple[:-1]]
     key_parts = [k.key for k in path_tuple]
@@ -327,7 +378,7 @@ def main(argv: Sequence[str], local_argv: argparse.Namespace) -> None:
       hf_key_single = hf_source_keys_or_key
       if hf_key_single not in hf_state_dict_numpy:
         raise ValueError(f"HuggingFace key {hf_key_single} not found in state_dict.")
-      hf_tensor_numpy = hf_state_dict_numpy[hf_key_single]
+      hf_tensor_numpy = hf_state_dict_numpy[hf_key_single].to(torch.float16).numpy()
       final_mt_tensor_numpy = apply_hook_fns(hf_tensor_numpy, mt_target_shape_final, hook_fn_list_or_fn)
     else:
       # It's a stacked parameter, so dispatch to a helper function.
