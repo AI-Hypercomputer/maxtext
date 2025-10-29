@@ -143,6 +143,11 @@ class TrainTests(unittest.TestCase):
     train_main(TrainTests.CONFIGS["base"])
 
   @pytest.mark.integration_test
+  @pytest.mark.tpu_only
+  def test_tpu_tokamax(self):
+    train_main(TrainTests.CONFIGS["base"] + ["use_tokamax_splash=true"])
+
+  @pytest.mark.integration_test
   @pytest.mark.gpu_only
   def test_gpu_base(self):
     train_main(TrainTests.CONFIGS["base"] + ["attention=dot_product"])
@@ -199,6 +204,7 @@ class TrainTests(unittest.TestCase):
 
   @pytest.mark.integration_test
   @pytest.mark.gpu_only
+  @pytest.mark.skip(reason="b/454386843. Issue when upgrading to jax=0.8.0")
   def test_gpu_dropout(self):
     train_main(TrainTests.CONFIGS["dropout"] + ["attention=dot_product"])
 

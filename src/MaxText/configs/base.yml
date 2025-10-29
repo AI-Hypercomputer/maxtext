@@ -884,3 +884,4 @@ use_qk_norm_in_gdn: True
 
 # Use tokamax library for gmm kernel implementation
 use_tokamax_gmm: false
+use_tokamax_splash: false
