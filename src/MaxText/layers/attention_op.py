@@ -35,7 +35,7 @@ from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_ke
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask
 
 from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_kernel as tokamax_splash_kernel
-from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_mask as tokamax_splash_mask
+# from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_mask as tokamax_splash_mask
 
 
 from flax import linen as nn
@@ -145,7 +145,7 @@ def validate_flash_attention_with_sinks_on_gpu(sinks: Array | None) -> None:
 
 
 # TODO(agagik): change tokamax_splash_mask._ComputableMask to be non protected
-class ChunkedCausalMask(tokamax_splash_mask._ComputableMask):  # pylint: disable=protected-access
+class ChunkedCausalMask(splash_attention_mask._ComputableMask):  # pylint: disable=protected-access
   """Lazy chunked causal mask.
 
   Attention is causal within each chunk (0, K), (K, 2K), (2K, 3K), ... tokens attend to each other but not across chunks.
@@ -1775,7 +1775,7 @@ class AttentionOp(nnx.Module):
 
 
 # pylint: disable=protected-access
-class LoadBalancedCausalMask(tokamax_splash_mask._ComputableMask):
+class LoadBalancedCausalMask(splash_attention_mask._ComputableMask):
   """Lazy causal mask, prevents the model from attending to future tokens.
   Attributes:
     offset: Offset of q start wrt kv. A positive offset shifts the bottom

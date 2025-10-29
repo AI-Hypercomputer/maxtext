@@ -144,6 +144,7 @@ class TrainTests(unittest.TestCase):
 
   @pytest.mark.integration_test
   @pytest.mark.tpu_only
+  @pytest.mark.skip("Temporarily disable tokamax splash, see b/455970812.")
   def test_tpu_tokamax(self):
     train_main(TrainTests.CONFIGS["base"] + ["use_tokamax_splash=true"])
 

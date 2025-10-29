@@ -576,7 +576,6 @@ class AttentionTest(parameterized.TestCase):
       },
   )
   # TODO (b/454764135.) : This tests fails with new tokamax kernel
-  @pytest.mark.skip(reason="Issue w/ tokamax kernel CP->EP sharding correctness. ")
   @pytest.mark.tpu_only
   def test_tpu_flash_attention_context_parallel(
       self, ici_context_parallelism, context_parallel_load_balance, ici_expert_parallelism, expert_shard_attention_option

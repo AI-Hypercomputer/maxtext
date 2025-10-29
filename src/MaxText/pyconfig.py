@@ -294,6 +294,9 @@ def validate_tokamax_usage(keys):
   """Validate tokamax usage for gmm kernel"""
   if keys["use_tokamax_gmm"] and keys["hardware"] != "tpu":
     raise ValueError(f"Invalid tokamax's megablox kernel usage for hardware {keys['hardware']}. Only TPU is supported.")
+  if keys["use_tokamax_splash"]:
+    # Disable tokamax splash until b/455970812 fixed
+    raise ValueError("Tokamax splash temporarily blocked due to MaxText testing error. Please follow b/455970812.")
 
 
 def validate_data_input(keys):
