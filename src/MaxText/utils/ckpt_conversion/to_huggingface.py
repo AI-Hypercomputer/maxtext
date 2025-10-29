@@ -73,8 +73,9 @@ from MaxText.utils.ckpt_conversion.utils.utils import (process_leaf_param, save_
 import time
 
 
-jax.config.update("jax_platform_name", "cpu")
-
+# jax.config.update("jax_platform_name", "cpu")
+os.environ["JAX_PLATFORMS"] = "cpu"
+os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=16"
 
 def _get_model_mappings(model_name: str, scan_layers: bool, config_dict: dict):
   """Retrieves parameter, shape, and hook function mappings for the model.

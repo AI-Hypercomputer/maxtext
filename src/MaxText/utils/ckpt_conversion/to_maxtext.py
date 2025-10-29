@@ -66,8 +66,14 @@ from MaxText.checkpointing import save_checkpoint
 from MaxText.utils.ckpt_conversion.utils.param_mapping import HOOK_FNS, PARAM_MAPPING
 from MaxText.utils.ckpt_conversion.utils.utils import apply_hook_fns, HF_IDS
 import jax.numpy as jnp
+import torch
+from tqdm import tqdm
 
 jax.config.update("jax_platform_name", "cpu")
+
+import ml_dtypes
+
+CAST_DTYPE = ml_dtypes.bfloat16
 
 
 def _build_multi_axis_stacked_tensor(
@@ -187,9 +193,11 @@ def main(argv: Sequence[str], local_argv: argparse.Namespace) -> None:
     raise ValueError(f"Unsupported model name: {model_name_original}. Supported models are: {list(HF_IDS.keys())}")
 
   if local_argv.hf_model_path:
+    # use local model
     model_id = local_argv.hf_model_path
   else:
     model_id = HF_IDS[model_name_original]
+
   max_utils.print_system_information()
   if not config.base_output_directory:
     output_directory = f"/tmp/{config.run_name}"
@@ -205,10 +213,25 @@ def main(argv: Sequence[str], local_argv: argparse.Namespace) -> None:
   max_logging.log(f"Loading HuggingFace model: {model_id}...")
   start = time.time()
   hf_config_obj = AutoConfig.from_pretrained(model_id, token=hf_token)
-  hf_model = AutoModelForCausalLM.from_pretrained(model_id, token=hf_token)
+  hf_model = AutoModelForCausalLM.from_pretrained(
+      model_id,
+      token=hf_token,
+      # low_cpu_mem_usage=True,
+      device_map="cpu",
+      dtype=torch.float16,
+      cache_dir="/home/shuningjin/deepseek3-671b/hf-671b-bf16-cache",
+  )
+
+  # local_files_only=True
+  # dtype=torch.bfloat16
+
   hf_state_dict_numpy = hf_model.state_dict()
-  for k, v in hf_state_dict_numpy.items():
+  for k, v in tqdm(hf_state_dict_numpy.items(), total=len(hf_state_dict_numpy)):
+    # print(v.dtype)
     hf_state_dict_numpy[k] = v.numpy()
+    # hf_state_dict_numpy[k] = v.to(torch.float32).numpy().astype(CAST_DTYPE)
+    hf_state_dict_numpy[k] = v.to(torch.float16).numpy()
+    # print(hf_state_dict_numpy[k].dtype)
   del hf_model
   max_logging.log(f"HuggingFace model loaded and converted to NumPy. {time.time() - start: .2f} second")
 
