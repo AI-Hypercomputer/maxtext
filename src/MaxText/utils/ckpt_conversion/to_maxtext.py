@@ -132,7 +132,6 @@ def _build_multi_axis_stacked_tensor(
       processed_hf_tensor = apply_hook_fns(hf_tensor_numpy, None, hook_fns)
       layer_tensors_for_expert.append(processed_hf_tensor)
 
-    print("hi")
     # First, stack all layers for the current expert. This creates the 'layer' axis.
     stacked_expert_tensor = np.stack(layer_tensors_for_expert, axis=0)
     all_expert_tensors.append(stacked_expert_tensor)
@@ -235,46 +234,9 @@ def main(argv: Sequence[str], local_argv: argparse.Namespace) -> None:
   devices_array = maxtext_utils.create_device_mesh(config)
   mesh = jax.sharding.Mesh(devices_array, config.mesh_axes)
 
-  hf_token = config.hf_access_token
   # # Load HuggingFace model, config, and state_dict
-  # max_logging.log(f"Loading HuggingFace model: {model_id}...")
-  # start = time.time()
+  hf_token = config.hf_access_token
   hf_config_obj = AutoConfig.from_pretrained(model_id, token=hf_token)
-  # hf_model = AutoModelForCausalLM.from_pretrained(
-  #     model_id,
-  #     token=hf_token,
-  #     # low_cpu_mem_usage=True,
-  #     device_map="cpu",
-  #     dtype=torch.float16,
-  #     cache_dir="/home/shuningjin/deepseek3-671b/hf-671b-bf16-cache",
-  # )
-
-  # # local_files_only=True
-  # # dtype=torch.bfloat16
-
-  # hf_state_dict_numpy = hf_model.state_dict()
-  # for k, v in tqdm(hf_state_dict_numpy.items(), total=len(hf_state_dict_numpy)):
-  #   # print(v.dtype)
-  #   hf_state_dict_numpy[k] = v.numpy()
-  #   # hf_state_dict_numpy[k] = v.to(torch.float32).numpy().astype(CAST_DTYPE)
-  #   hf_state_dict_numpy[k] = v.to(torch.float16).numpy()
-  #   # print(hf_state_dict_numpy[k].dtype)
-  # del hf_model
-  # max_logging.log(f"HuggingFace model loaded and converted to NumPy. {time.time() - start: .2f} second")
-
-  # logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
-
-  max_logging.log(f"Create checkpoint manager...")
-  start = time.time()
-  checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
-      output_directory,
-      enable_checkpointing=True,
-      use_async=False,  # Synchronous saving for simplicity in conversion script
-      save_interval_steps=1,  # Save at step 0
-      use_ocdbt=config.checkpoint_storage_use_ocdbt,
-      use_zarr3=config.checkpoint_storage_use_zarr3,
-  )
-  max_logging.log(f"Finish creating checkpoint manager. {time.time() - start: .2f} second")
 
   def init1():
     # Initialize MaxText model, optimizer, and abstract state
@@ -314,26 +276,67 @@ def main(argv: Sequence[str], local_argv: argparse.Namespace) -> None:
   print("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
   abstract_params_flat, abstract_params_treedef = init1()
   print("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
-  sys.exit(1)
+  # sys.exit(1)
 
-  ckpt_paths = sorted(pathlib.Path(model_id).glob("[!.]*.safetensors"))
-  hf_state_dict_numpy = {}
-  max_logging.log(f"Loading {len(ckpt_paths)} checkpoint ...")
-  for i, ckpt_path in tqdm(enumerate(ckpt_paths), total=len(ckpt_paths)):
-    # max_logging.log(f"Loading checkpoint {i+1} of {len(ckpt_paths)} ...")
-    with safe_open(ckpt_path, framework="pt", device="cpu") as f:
-      for key in f.keys():
-        # parts = key.split(".")
-        # layer = int(parts[2]) if "layers" in key else 0
-        if key.endswith("_scale_inv"):
-          raise ValueError("fp8 checkpoint is not supported.")
-        if is_key_allowed(key, MTP_KEYS_TO_SKIP):
-          # mapped_key = hf_to_maxtext_mapping(
-          #     layer, num_experts, first_num_dense_layers, base_num_decoder_layers, has_mtp
-          # ).get(key)
-          hf_state_dict_numpy[key] = f.get_tensor(key)  # .to(torch.float16).numpy()
+  def read_hf1():
+    max_logging.log(f"Loading HuggingFace model: {model_id}...")
+    start = time.time()
+    hf_model = AutoModelForCausalLM.from_pretrained(
+        model_id,
+        token=hf_token,
+        # low_cpu_mem_usage=True,
+        device_map="cpu",
+        dtype=torch.float16,
+        cache_dir="/home/shuningjin/deepseek3-671b/hf-671b-bf16-cache",
+    )
+    # local_files_only=True
+    # dtype=torch.bfloat16
+    hf_state_dict_numpy = hf_model.state_dict()
+    for k, v in tqdm(hf_state_dict_numpy.items(), total=len(hf_state_dict_numpy)):
+      # print(v.dtype)
+      hf_state_dict_numpy[k] = v.numpy()
+      # hf_state_dict_numpy[k] = v.to(torch.float32).numpy().astype(CAST_DTYPE)
+      hf_state_dict_numpy[k] = v.to(torch.float16).numpy()
+      # print(hf_state_dict_numpy[k].dtype)
+    del hf_model
+    max_logging.log(f"HuggingFace model loaded and converted to NumPy. {time.time() - start: .2f} second")
+    logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
+    return hf_state_dict_numpy
 
-  logging.info("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
+  max_logging.log(f"Create checkpoint manager...")
+  start = time.time()
+  checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
+      output_directory,
+      enable_checkpointing=True,
+      use_async=False,  # Synchronous saving for simplicity in conversion script
+      save_interval_steps=1,  # Save at step 0
+      use_ocdbt=config.checkpoint_storage_use_ocdbt,
+      use_zarr3=config.checkpoint_storage_use_zarr3,
+  )
+  max_logging.log(f"Finish creating checkpoint manager. {time.time() - start: .2f} second")
+
+  def read_hf2():
+    ckpt_paths = sorted(pathlib.Path(model_id).glob("[!.]*.safetensors"))
+    hf_state_dict_numpy = {}
+    max_logging.log(f"Loading {len(ckpt_paths)} checkpoint ...")
+    for i, ckpt_path in tqdm(enumerate(ckpt_paths), total=len(ckpt_paths)):
+      # max_logging.log(f"Loading checkpoint {i+1} of {len(ckpt_paths)} ...")
+      with safe_open(ckpt_path, framework="pt", device="cpu") as f:
+        for key in f.keys():
+          # parts = key.split(".")
+          # layer = int(parts[2]) if "layers" in key else 0
+          if key.endswith("_scale_inv"):
+            raise ValueError("fp8 checkpoint is not supported.")
+          if is_key_allowed(key, MTP_KEYS_TO_SKIP):
+            # mapped_key = hf_to_maxtext_mapping(
+            #     layer, num_experts, first_num_dense_layers, base_num_decoder_layers, has_mtp
+            # ).get(key)
+            hf_state_dict_numpy[key] = f.get_tensor(key)  # .to(torch.float16).numpy()
+
+    logging.info("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
+    return hf_state_dict_numpy
+
+  hf_state_dict_numpy = read_hf2()
 
   # Get parameter mappings and hooks
   # example of param mapping (gemma2, maxtext:huggingface):
