@@ -122,11 +122,14 @@ def main(argv: Sequence[str]) -> None:
   ), "This script expects parameters, not a full state. Use generate_param_only_checkpoint first if needed."
   max_utils.print_system_information()
 
+  print("loading weight ...")
+  start = time.time()
   engine = maxengine.MaxEngine(config)
   rng = jax.random.PRNGKey(1234)
   rng, rng_load_params = jax.random.split(rng)
   # load params from maxengine
   loaded_params_from_engine = engine.load_params(rng_load_params)
+  print(f"elapse: {time.time() - start} second")
 
   if not config.base_output_directory:
     output_directory = f"tmp/{config.run_name}"
@@ -169,8 +172,9 @@ def main(argv: Sequence[str]) -> None:
   leaves_with_paths = jax.tree_util.tree_leaves_with_path(actual_weights_dict)
 
   # traverse leavse to build: mt_param_key:mt_weights
-  processed_params_list = []
+  print("proccessing weight ...")
   start = time.time()
+  processed_params_list = []
   for path_tuple_iter, leaf_value_iter in leaves_with_paths:
     print(path_tuple_iter)
     processed_params_list.extend(
@@ -184,6 +188,8 @@ def main(argv: Sequence[str]) -> None:
     print("Error: No weights were transformed. Check mappings and parameter paths.")
     return
 
+  print("saving file ...")
+  start = time.time()
   save_model_files(
       weight_arrays=transformed_hf_weights,
       config=hf_config_obj,
@@ -192,6 +198,7 @@ def main(argv: Sequence[str]) -> None:
       output_dir=output_directory,
   )
   max_logging.log(f"✅ MaxText model successfully saved in HuggingFace format at {output_directory}")
+  print(f"elapse: {time.time() - start} second")
 
 
 if __name__ == "__main__":
