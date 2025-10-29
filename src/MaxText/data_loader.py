@@ -20,7 +20,7 @@ import jax.numpy as jnp
 from jax.experimental import checkify
 
 from MaxText import exceptions
-from MaxText import maxtext_utils
+from MaxText import sharding
 from MaxText.utils.goodput_utils import (
     GoodputEvent,
     maybe_record_goodput,
@@ -37,7 +37,7 @@ class DataLoader:
     self.goodput_recorder = goodput_recorder
     self.data_iterator = data_iterator
     self.last_batch = None
-    self.input_data_shardings = maxtext_utils.get_input_data_sharding(config, mesh)
+    self.input_data_shardings = sharding.get_input_data_sharding(config, mesh)
 
   def load_next_batch(self):
     """Loads the next batch. Can keep reusing the same batch for performance reasons."""
@@ -48,7 +48,7 @@ class DataLoader:
         else:
           example_batch = next(self.data_iterator)
         # Reshard data from loaded sharding to performant activation sharding
-        self.last_batch = maxtext_utils.maybe_shard_with_name(
+        self.last_batch = sharding.maybe_shard_with_name(
             example_batch,
             self.input_data_shardings,
             self.config.shard_mode,

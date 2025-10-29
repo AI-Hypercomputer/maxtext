@@ -38,6 +38,7 @@ from MaxText.layers import quantizations
 from MaxText.layers import pipeline
 from MaxText import maxtext_utils
 from MaxText import multimodal_utils
+from MaxText import sharding
 from MaxText.layers.attentions import attention_as_linen
 from MaxText.layers.normalizations import rms_norm
 from MaxText.layers.embeddings import attend_on_embedding, embed_as_linen, positional_embedding_as_linen
@@ -90,7 +91,7 @@ class DecoderLayer(nn.Module):
     cfg = self.config
     mesh = self.mesh
     _maybe_shard_with_logical = functools.partial(
-        maxtext_utils.maybe_shard_with_logical,
+        sharding.maybe_shard_with_logical,
         mesh=mesh,
         shard_mode=cfg.shard_mode,
     )
@@ -722,7 +723,7 @@ class Decoder(nn.Module):
         moe_layer = RemattedBlockLayers[1]
         num_moe_layers = cfg.num_decoder_layers - cfg.first_num_dense_layers
         num_moe_layers_outside_pp = num_moe_layers - self.config.pipeline_parallel_layers
-        logical_axis_rules_pp_as_dp = maxtext_utils.logical_axis_rules_pp_act_as_dp(self.config.logical_axis_rules)
+        logical_axis_rules_pp_as_dp = sharding.logical_axis_rules_pp_act_as_dp(self.config.logical_axis_rules)
         # We chose not to pipeline the dense layers, only sparse for SPMD.
         with self.mesh, nn.partitioning.axis_rules(logical_axis_rules_pp_as_dp):
           y, _ = self.scan_decoder_layers(
@@ -749,7 +750,7 @@ class Decoder(nn.Module):
         y = self.pipeline_module(y, *broadcast_args, partition_spec=partition_spec)
         remaining_layers = self.config.num_decoder_layers - self.config.pipeline_parallel_layers
         if remaining_layers > 0:
-          logical_axis_rules_pp_as_dp = maxtext_utils.logical_axis_rules_pp_act_as_dp(self.config.logical_axis_rules)
+          logical_axis_rules_pp_as_dp = sharding.logical_axis_rules_pp_act_as_dp(self.config.logical_axis_rules)
           with self.mesh, nn.partitioning.axis_rules(logical_axis_rules_pp_as_dp):
             y, _ = self.scan_decoder_layers(
                 cfg,

@@ -40,6 +40,7 @@ from MaxText import maxtext_utils
 from MaxText import optimizers
 from MaxText import max_utils
 from MaxText import pyconfig
+from MaxText import sharding
 from MaxText.common_types import MODEL_MODE_TRAIN
 from MaxText.layers import models
 from MaxText.layers import quantizations
@@ -156,7 +157,7 @@ def is_oom(argv: Sequence[str]) -> bool:
   shaped_train_args, shaped_train_kwargs, state_mesh_shardings, model = get_shaped_inputs(topology_mesh, config)
 
   # Get data sharding
-  data_sharding = maxtext_utils.get_input_data_sharding(config, topology_mesh)
+  data_sharding = sharding.get_input_data_sharding(config, topology_mesh)
 
   # Get function to compile and shardings
   func_to_compile, in_shard, out_shard, static_argnums, donate_argnums = (
@@ -211,7 +212,7 @@ def main(argv: Sequence[str]) -> None:
   shaped_train_args, shaped_train_kwargs, state_mesh_shardings, model = get_shaped_inputs(topology_mesh, config)
 
   # Get data sharding
-  data_sharding = maxtext_utils.get_input_data_sharding(config, topology_mesh)
+  data_sharding = sharding.get_input_data_sharding(config, topology_mesh)
 
   # Get function to compile and shardings
   func_to_compile, in_shard, out_shard, static_argnums, donate_argnums = (
