@@ -475,6 +475,7 @@ def LLAMA31_HF_WEIGHTS_TO_SHAPE(config):
   return mapping
 
 
+# {maxtext model name: {hf weight name: hf shape}}
 HF_SHAPE = {
     "gemma2-2b": GEMMA2_HF_WEIGHTS_TO_SHAPE,
     "gemma2-9b": GEMMA2_HF_WEIGHTS_TO_SHAPE,
@@ -495,4 +496,5 @@ HF_SHAPE = {
     "qwen3-235b-a22b": QWEN3_HF_WEIGHTS_TO_SHAPE,
     "qwen3-480b-a35b": QWEN3_HF_WEIGHTS_TO_SHAPE,
     "deepseek3-test": DEEPSEEK_HF_WEIGHTS_TO_SHAPE,
+    "deepseek3-671b": DEEPSEEK_HF_WEIGHTS_TO_SHAPE,
 }

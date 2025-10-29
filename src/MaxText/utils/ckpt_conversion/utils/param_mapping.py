@@ -807,10 +807,11 @@ def QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, scan_layers=False, saving_to_hf=Fa
   return mapping
 
 
-def DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING(config, scan_layers=True):
+def DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING(config, scan_layers=False):
   """Returns mapping from MaxText to HuggingFace Deepseek weight paths using f-strings."""
+  # TODO(shuningjin): add non-scan support
   if not scan_layers:
-    raise ValueError("This conversion only supports scanned MaxText models.")
+    raise NotImplementedError("This conversion only supports scanned MaxText models.")
   print(config)
 
   # Extract hf configuration parameters
@@ -825,9 +826,7 @@ def DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING(config, scan_layers=True):
       "params-decoder-decoder_norm-scale": "model.norm.weight",
       "params-decoder-logits_dense-kernel": "lm_head.weight",
   }
-
-  # TODO(shuningjin): add non-scan
-  assert scan_layers
+  # Attention keys are shared by both dense and MoE
   attention_keys = {
       "pre_self_attention_layer_norm-scale": "input_layernorm.weight",
       "post_self_attention_layer_norm-scale": "post_attention_layernorm.weight",
@@ -840,8 +839,7 @@ def DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING(config, scan_layers=True):
       "self_attention-wkv_b-kernel": "self_attn.kv_b_proj.weight",
       "self_attention-out-kernel": "self_attn.o_proj.weight",
   }
-
-  # Scanned Dense Layers
+  # Dense Layers
   dense_layer_keys = attention_keys | {
       "mlp-wi_0-kernel": "mlp.gate_proj.weight",
       "mlp-wi_1-kernel": "mlp.up_proj.weight",
@@ -852,7 +850,7 @@ def DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING(config, scan_layers=True):
         f"model.layers.{i}.{hf_key}" for i in range(first_num_dense_layers)
     ]
 
-  # Scanned MoE Layers
+  # MoE Layers
   moe_layer_keys = attention_keys | {
       "DeepSeekMoeBlock_0-shared_experts-wi_0-kernel": "mlp.shared_experts.gate_proj.weight",
       "DeepSeekMoeBlock_0-shared_experts-wi_1-kernel": "mlp.shared_experts.up_proj.weight",
@@ -880,8 +878,11 @@ def DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING(config, scan_layers=True):
   return mapping
 
 
-def DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, scan_layers=True, saving_to_hf=True):
+def DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, scan_layers=False, saving_to_hf=True):
   """Creates parameter transformation functions for Deepseek using f-strings."""
+  # TODO(shuningjin): add non-scan support
+  if not scan_layers:
+    raise NotImplementedError("This conversion only supports scanned MaxText models.")
 
   def reshape_kernel(input_tensor, target_shape):
     """Reshapes and transposes kernel weights between MaxText and HF."""
@@ -895,9 +896,6 @@ def DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, scan_layers=True, saving_to_hf=
   mapping = {
       "params-decoder-logits_dense-kernel": reshape_kernel,
   }
-
-  # TODO(shuningjin): add non-scan
-  assert scan_layers
   # all keys that need the reshape hook
   params_need_reshape = {
       # Dense Layers
@@ -1106,6 +1104,7 @@ def LLAMA31_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, scan_layers=False, saving_to_hf=
   return hook_fns
 
 
+# {maxtext model name: {maxtext weight name: hf weight name}}
 PARAM_MAPPING = {
     "gemma2-2b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gemma2-9b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
@@ -1126,8 +1125,10 @@ PARAM_MAPPING = {
     "qwen3-235b-a22b": QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING,
     "qwen3-coder-480b-a35b": QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING,
     "deepseek3-test": DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "deepseek3-671b": DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN,
 }
 
+# {maxtext model name: {maxtext weight name: bi-directional transform}}
 HOOK_FNS = {
     "gemma2-2b": GEMMA2_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "gemma2-9b": GEMMA2_MAXTEXT_TO_HF_PARAM_HOOK_FN,
@@ -1148,4 +1149,5 @@ HOOK_FNS = {
     "qwen3-235b-a22b": QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "qwen3-coder-480b-a35b": QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "deepseek3-test": DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "deepseek3-671b": DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN,
 }

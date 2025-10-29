@@ -470,7 +470,7 @@ qwen3_coder_480b_a35b_config = transformers.Qwen3MoeConfig(
 )
 
 
-deepseek_dict = {
+deepseek3_test_dict = {
     "architectures": ["DeepseekV3ForCausalLM"],
     "attention_bias": False,
     "attention_dropout": 0.0,
@@ -532,8 +532,13 @@ deepseek_dict = {
     "vocab_size": 129280,
 }
 
-deepseek_config = transformers.DeepseekV3Config(**deepseek_dict)
+deepseek3_test_config = transformers.DeepseekV3Config(**deepseek3_test_dict)
 
+# TODO(shuningjin)
+deepseek3_671b_dict = {}
+deepseek3_671b_config = transformers.DeepseekV3Config(**deepseek3_671b_dict)
+
+# {maxtext model name: hf model config}
 HF_MODEL_CONFIGS = {
     "gemma2-2b": gemma2_2b_config,
     "gemma2-9b": gemma2_9b_config,
@@ -554,5 +559,6 @@ HF_MODEL_CONFIGS = {
     "qwen3-30b-a3b": qwen3_30b_a3b_thinking_2507_config,
     "qwen3-235b-a22b": qwen3_235b_a22b_thinking_2507_config,
     "qwen3-480b-a35b": qwen3_coder_480b_a35b_config,
-    "deepseek3-test": deepseek_config,
+    "deepseek3-test": deepseek3_test_config,
+    "deepseek3-671b": deepseek3_671b_config,
 }
