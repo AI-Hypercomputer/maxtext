@@ -47,6 +47,7 @@ enable_checkpointing: True
 save_checkpoint_on_completion: True
 async_checkpointing: True
 checkpoint_period: 10_000
+max_num_checkpoints_to_keep: None
 # enables one replica to read the ckpt then broadcast to the rest
 enable_single_replica_ckpt_restoring: False
 

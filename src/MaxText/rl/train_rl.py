@@ -80,36 +80,6 @@ from MaxText import max_logging, max_utils, maxtext_utils, pyconfig
 from MaxText import model_creation_utils
 from MaxText.integration.tunix.tunix_adapter import TunixMaxTextAdapter
 
-# ====== Reward-specific constants ======
-REWARD_EXACT_FORMAT_MATCH = 3.0
-REWARD_WHITE_SPACE_FORMAT_MATCH = 1.5
-REWARD_PARTIAL_FORMAT_MATCH = 0.5
-REWARD_RATIO_GUESS_TO_ANSWER_HIGH = 0.5
-REWARD_RATIO_GUESS_TO_ANSWER_LOW = 0.25
-PENALTY_INCORRECT_FORMAT = -0.5
-PENALTY_INCORRECT_ANSWER = -1.0
-
-# ====== Special tokens for GSM8K reasoning ======
-REASONING_START = "<reasoning>"
-REASONING_END = "</reasoning>"
-SOLUTION_START = "<answer>"
-SOLUTION_END = "</answer>"
-
-# ====== System prompt and Templates ======
-
-SYSTEM_PROMPT = f"""You are given a problem. Think about the problem and \
-provide your reasoning. Place it between {REASONING_START} and \
-{REASONING_END}. Then, provide the final answer (i.e., just one numerical \
-value) between {SOLUTION_START} and {SOLUTION_END}."""
-
-TEMPLATE = """<start_of_turn>user
-{system_prompt}
-
-{question}<end_of_turn>
-<start_of_turn>model"""
-
-# ====== Debug flag for verbose logs ======
-DEBUG=False
 
 # ====== Reproducibility ======
 SEED = 42
@@ -117,8 +87,8 @@ SEED = 42
 # We use OpenAI's GSM8K dataset. GSM8K comprises grade school math word problems.
 
 
-def extract_hash_answer(text: str) -> str | None:
-  if DEBUG:
+def extract_hash_answer(text: str, debug: bool = False) -> str | None:
+  if debug:
     print(f"Extracting answer from: {text}")
   if "####" not in text:
     return None
@@ -160,7 +130,7 @@ def get_dataset(data_dir, split="train") -> grain.MapDataset:
               # passed to reward functions
               "question": x["question"].decode("utf-8"),
               # passed to reward functions
-              "answer": extract_hash_answer(x["answer"].decode("utf-8")),
+              "answer": extract_hash_answer(x["answer"].decode("utf-8"), debug=mt_config.debug),
           }
       )
   )
@@ -168,84 +138,108 @@ def get_dataset(data_dir, split="train") -> grain.MapDataset:
 
 
 def get_maxtext_model(config, devices=None):
-  """Load MaxText model with Tunix adapter."""
+  """
+  Load MaxText model with Tunix adapter.
+  # Note: pass the path to your scanned checkpoint for "load_parameters_path". To generate a scanned checkpoint, you can use the `scanned_checkpoint.py` script in MaxText.
+  # To create a scanned checkpoint, you can use /maxtext/MaxText/utils/ckpt_conversion/to_maxtext.py
+  """
   model, mesh = model_creation_utils.create_nnx_model(config, devices)
   with mesh:
     tunix_model = TunixMaxTextAdapter(base_model=model)
-    model_config = llama3_lib.ModelConfig.llama3_1_8b()
-    tunix_model.config = model_config
+    tunix_model.config = None
   return tunix_model, mesh
 
 
-def setup_device_allocation(config, use_pathways: bool = False):
+def setup_device_allocation(mt_config, use_pathways: bool = False):
   """Setup device allocation for training and inference."""
+
   devices = jax.devices()
-
-  # Get device allocation parameters from config
-  trainer_devices_fraction = getattr(config, "trainer_devices_fraction", 0.5)
-  sampler_devices_fraction = getattr(config, "sampler_devices_fraction", 0.5)
-  chips_per_vm = getattr(config, "chips_per_vm", 4)
-
-  num_vms = len(devices) // chips_per_vm
-
+  num_vms = len(devices) // mt_config.chips_per_vm
   trainer_devices = devices
   sampler_devices = devices
   if num_vms >= 2 and use_pathways:
-    # Multiple hosts with Pathways - split devices for trainer and sampler
+    # Multiple hosts with Pathways - potentially split devices for trainer and sampler
+    # based on trainer_devices_fraction and sampler_devices_fraction
     print(f"{num_vms} VMs detected, allocating trainer and sampler devices, and using Pathways.")
     num_devices = len(devices)
-    num_trainer_devices = int(num_devices * trainer_devices_fraction)
-    num_sampler_devices = int(num_devices * sampler_devices_fraction)
+    num_trainer_devices = int(num_devices * mt_config.trainer_devices_fraction)
+    num_sampler_devices = int(num_devices * mt_config.sampler_devices_fraction)
     trainer_devices = devices[:num_trainer_devices]
     sampler_devices = devices[num_devices - num_sampler_devices :]
-
-    print("Creating reference model and also meshes for reference and rollout")
-    llama3_1_70b, reference_mesh = get_maxtext_model(config_ref, trainer_devices)
-    devices_array = maxtext_utils.create_device_mesh(config_ref, sampler_devices)
-    rollout_mesh = Mesh(devices_array, config_ref.mesh_axes)
-    mesh = reference_mesh
+    if mt_config.trainer_devices_fraction!=1.0:
+      print(f"Using first {len(trainer_devices)} devices as Trainer devices")
+    if mt_config.sampler_devices_fraction != 1.0:
+      print(f"Using last {len(sampler_devices)} devices as Sampler devices")
   
   return trainer_devices, sampler_devices, num_vms
 
 
 # Reward Functions
-def match_format_exactly(prompts, completions, **kwargs):
+def match_format_exactly(prompts, completions, mt_config, **kwargs):
   """Reward exact format matching."""
   scores = []
   match_format = re.compile(
-      rf"^[\s]{{0,}}" rf"{REASONING_START}.+?{REASONING_END}.*?" rf"{SOLUTION_START}(.+?){SOLUTION_END}" rf"[\s]{{0,}}$",
+      (
+          r"^[\s]{0,}}"
+          rf"{mt_config.reasoning_start_token}.+?{mt_config.reasoning_end_token}.*?"
+          rf"{mt_config.solution_start_token}(.+?){mt_config.solution_end_token}"
+          r"[\s]{0,}$"
+      ),
       flags=re.MULTILINE | re.DOTALL,
   )
 
   for completion in completions:
     score = 0
     if match_format.search(completion) is not None:
-      score += REWARD_EXACT_FORMAT_MATCH
+      score += mt_config.reward_exact_format_match
     scores.append(score)
   return scores
 
 
-def match_format_approximately(prompts, completions, **kwargs):
+def match_format_approximately(prompts, completions, mt_config, **kwargs):
   """Reward approximate format matching."""
   scores = []
   for completion in completions:
     score = 0
-    score += REWARD_PARTIAL_FORMAT_MATCH if completion.count(REASONING_START) == 1 else PENALTY_INCORRECT_FORMAT
-    score += REWARD_PARTIAL_FORMAT_MATCH if completion.count(REASONING_END) == 1 else PENALTY_INCORRECT_FORMAT
-    score += REWARD_PARTIAL_FORMAT_MATCH if completion.count(SOLUTION_START) == 1 else PENALTY_INCORRECT_FORMAT
-    score += REWARD_PARTIAL_FORMAT_MATCH if completion.count(SOLUTION_END) == 1 else PENALTY_INCORRECT_FORMAT
+    score += (
+        mt_config.reward_partial_format_match
+        if completion.count(mt_config.reasoning_start_token) == 1
+        else mt_config.penalty_incorrect_format
+    )
+    score += (
+        mt_config.reward_partial_format_match
+        if completion.count(mt_config.reasoning_end_token) == 1
+        else mt_config.penalty_incorrect_format
+    )
+    score += (
+        mt_config.reward_partial_format_match
+        if completion.count(mt_config.solution_start_token) == 1
+        else mt_config.penalty_incorrect_format
+    )
+    score += (
+        mt_config.reward_partial_format_match
+        if completion.count(mt_config.solution_end_token) == 1
+        else mt_config.penalty_incorrect_format
+    )
     scores.append(score)
   return scores
 
 
-def check_answer(prompts, completions, answer, **kwargs):
+def check_answer(prompts, completions, answer, mt_config, **kwargs):
   """Reward correct answers."""
   match_format = re.compile(
-      rf"^[\s]{{0,}}" rf"{REASONING_START}.+?{REASONING_END}.*?" rf"{SOLUTION_START}(.+?){SOLUTION_END}" rf"[\s]{{0,}}$",
+      (
+          r"^[\s]{0,}}"
+          rf"{mt_config.reasoning_start_token}.+?{mt_config.reasoning_end_token}.*?"
+          rf"{mt_config.solution_start_token}(.+?){mt_config.solution_end_token}"
+          r"[\s]{0,}$"
+      ),
       flags=re.MULTILINE | re.DOTALL,
   )
 
-  extracted_responses = [guess.group(1) if (guess := match_format.search(r)) is not None else None for r in completions]
+  extracted_responses = [
+      guess.group(1) if (guess := match_format.search(r)) is not None else None for r in completions
+  ]
 
   scores = []
   for guess, true_answer in zip(extracted_responses, answer):
@@ -255,28 +249,33 @@ def check_answer(prompts, completions, answer, **kwargs):
       continue
 
     if guess == true_answer:
-      score += REWARD_EXACT_FORMAT_MATCH
+      score += mt_config.reward_exact_format_match
     elif guess.strip() == true_answer.strip():
-      score += REWARD_WHITE_SPACE_FORMAT_MATCH
+      score += mt_config.reward_white_space_format_match
     else:
       try:
         ratio = float(guess) / float(true_answer)
         if 0.9 <= ratio <= 1.1:
-          score += REWARD_RATIO_GUESS_TO_ANSWER_HIGH
+          score += mt_config.reward_ratio_guess_to_answer_high
         elif 0.8 <= ratio <= 1.2:
-          score += REWARD_RATIO_GUESS_TO_ANSWER_LOW
+          score += mt_config.reward_ratio_guess_to_answer_low
         else:
-          score += PENALTY_INCORRECT_ANSWER
+          score += mt_config.penalty_incorrect_answer
       except (ValueError, ZeroDivisionError):
-        score += PENALTY_INCORRECT_FORMAT
+        score += mt_config.penalty_incorrect_format
     scores.append(score)
   return scores
 
 
-def check_numbers(prompts, completions, answer, **kwargs):
+def check_numbers(prompts, completions, answer, mt_config, **kwargs):
   """Reward correct numerical answers."""
-  match_numbers = re.compile(rf"{SOLUTION_START}.*?([\d\.]{{1,}})", flags=re.MULTILINE | re.DOTALL)
-  extracted_responses = [guess.group(1) if (guess := match_numbers.search(r)) is not None else None for r in completions]
+  match_numbers = re.compile(
+      rf"{mt_config.solution_start_token}.*?([\d\.]{{1,}})", flags=re.MULTILINE | re.DOTALL
+  )
+  extracted_responses = [
+      guess.group(1) if (guess := match_numbers.search(r)) is not None else None
+      for r in completions
+  ]
 
   scores = []
   for guess, true_answer in zip(extracted_responses, answer):
@@ -300,22 +299,13 @@ def rl_train(mt_config):
   Args:
     mt_config: MaxText configuration object
   """
+  # ====== Debug flag for verbose logs ======
+  DEBUG = mt_config.debug
+
   print("Starting GRPO Training")
 
-
   # Number of training steps.
-  max_steps = int(mt_config.num_batches * mt_config.num_iterations * TRAIN_FRACTION * NUM_EPOCHS)
-  # Setup device allocation
-  if jax.extend.backend.get_backend().platform_version == "Pathways":
-    max_logging.log("Pathways backend detected. Disabling setting profile options.")
-    use_pathways = True
-  else:
-    use_pathways = False
-
-  trainer_devices, sampler_devices, num_vms = setup_device_allocation(mt_config, use_pathways)
-
-  print(f"Device allocation: {len(trainer_devices)} trainer, {len(sampler_devices)} sampler")
-  print(f"Use Pathways: {use_pathways}")
+  max_train_steps = int(mt_config.num_batches * mt_config.num_iterations * mt_config.train_fraction * mt_config.num_epochs)
 
   # ====== Data ======
   # Setup data directories
@@ -326,7 +316,7 @@ def rl_train(mt_config):
     os.makedirs(train_data_dir)
   if not os.path.exists(test_data_dir):
     os.makedirs(test_data_dir)
-  TRAIN_FRACTION = 1.0
+ 
 
   # Load datasets
   print("Loading GSM8K dataset...")
@@ -345,65 +335,91 @@ def rl_train(mt_config):
       num_batches=getattr(mt_config, "num_test_batches", 5),
   )
 
-  # Load reference model
-  print("Loading reference model...")
-  reference_model, reference_mesh = get_maxtext_model(mt_config, trainer_devices)
-  reference_model.config = None
-
-  # Load policy model
-  print("Loading policy model...")
-  policy_model, policy_mesh = get_maxtext_model(mt_config, trainer_devices)
-  policy_model.config = None
-
   
-  # Setup meshes
-  if num_vms >= 2 and not use_pathways:
-    actor_mesh = policy_mesh
-    rollout_mesh = Mesh(maxtext_utils.create_device_mesh(mt_config, sampler_devices), mt_config.mesh_axes)
+  # Setup device allocation
+  if jax.extend.backend.get_backend().platform_version == "Pathways":
+    max_logging.log("Pathways backend detected. Disabling setting profile options.")
+    use_pathways = True
   else:
-    actor_mesh = policy_mesh
-    rollout_mesh = policy_mesh
+    use_pathways = False
+  print(f"Use Pathways: {use_pathways}")
+  trainer_devices, sampler_devices, num_vms = setup_device_allocation(mt_config, use_pathways)
+
+  # Load reference model
+  print("Creating reference model and also meshes for reference and rollout")
+  reference_model, reference_mesh = get_ref_maxtext_model(mt_config, trainer_devices)
+  devices_array = maxtext_utils.create_device_mesh(mt_config, sampler_devices)
+  # if trainer_devices=sampler_devices, then rollout_mesh=reference_mesh
+  # else rollout_mesh uses sampler_devices
+  rollout_mesh = Mesh(devices_array, mt_config.mesh_axes)
+  if mt_config.debug:
+      print("Reference Model initialized successfully")
+      nnx.display(reference_model)
+      print(f"Reference mesh shape: {reference_mesh.shape}")
+
+      # Sanity check that weights are loaded correctly
+      _maxtext_state_flatten = nnx.state(llama3_1_70b).flat_state()
+      maxtext_state_flatten = {".".join(str(key) for key in keys): v for keys, v in _maxtext_state_flatten}
+      print(
+          f"maxtext_state_flatten[base.token_embedder.embedding].value={maxtext_state_flatten['base.token_embedder.embedding'].value}"
+      )
+
+  # TODO: @mazumdera: change this to use lora
+  # Load policy model
+  print("Creating policy model with same config as reference model on trainer mesh")
+  policy_model, policy_mesh = get_maxtext_model(mt_config, trainer_devices)
+  actor_mesh = policy_mesh
+
+  if mt_config.debug:
+      print("Policy Model initialized successfully")
+      nnx.display(policy_model)
+      print(f"Policy mesh shape: {policy_mesh.shape}")
 
   # Setup optimizer
-  learning_rate = getattr(mt_config, "learning_rate", 3e-6)
-  max_steps = getattr(mt_config, "steps", 100)
-  warmup_steps = int(0.1 * max_steps)
-
   optimizer = optax.adamw(
       learning_rate=optax.schedules.warmup_cosine_decay_schedule(
           init_value=0.0,
-          peak_value=learning_rate,
-          warmup_steps=warmup_steps,
-          decay_steps=max_steps,
-          end_value=0.0,
+          peak_value=mt_config.learning_rate,
+          # Linearly increase learning rate from 0. to learning_rate in the first 
+          # warmup_steps_fraction training steps, and then gradually decrease the 
+          # learning rate to 0 using cosine scheduler.
+          warmup_steps=int(mt_config.warmup_steps_fraction*mt_config.max_train_steps),
+          decay_steps=max_train_steps,
       ),
-      b1=0.9,
-      b2=0.99,
-      weight_decay=0.1,
+      b1=mt_config.adam_b1,
+      b2=mt_config.adam_b2,
+      weight_decay=mt_config.adam_weight_decay,
   )
 
+  # TODO: @mazumdera: try optimizer offloading with adamw
   # Add gradient clipping if specified
-  max_grad_norm = getattr(mt_config, "max_grad_norm", 0.1)
-  if max_grad_norm is not None:
+  # Grad clipping to prevent large gradients. We find this
+  # important to keep KL divergence in check.
+  if mt_config.gradient_clipping_threshold > 0:
     optimizer = optax.chain(
-        optax.clip_by_global_norm(max_norm=max_grad_norm),
+        optax.clip_by_global_norm(max_norm=mt_config.gradient_clipping_threshold),
         optimizer,
     )
 
   # Setup checkpointing
-  ckpt_dir = mt_config.base_output_directory
-
+  ckpt_dir = mt_config.checkpoint_dir
   checkpointing_options = ocp.CheckpointManagerOptions(
-      save_interval_steps=getattr(mt_config, "checkpoint_period", 50), max_to_keep=4
+      save_interval_steps=mt_config.checkpoint_period, mt_config.max_num_checkpoints_to_keep
   )
 
   # Setup metrics logging
-  log_dir = mt_config.base_output_directory
-  max_logging.log(f"Logging to {log_dir}")
-
+  log_dir=mt_config.tensorboard_dir
+  print(f"TensorBoard logs directory: {LOG_DIR}")
+  print(f"tensorboard --logdir {LOG_DIR} --port=8086")
   metrics_logging_options = metrics_logger.MetricsLoggerOptions(log_dir=log_dir, flush_every_n_steps=20)
 
-  # Setup RL cluster config
+  # Profiler configurations
+  # TODO: xfgu@: add profiling
+  profiler_options = None
+
+  # RL Cluster config
+  # Note that we use vLLM as the rollout engine.
+  # and we are using Tensor Parallelism for rollout
   cluster_config = rl_cluster_lib.ClusterConfig(
       role_to_mesh={
           rl_cluster_lib.Role.ACTOR: actor_mesh,
@@ -414,34 +430,38 @@ def rl_train(mt_config):
       offload_to_cpu=False,
       training_config=rl_cluster_lib.RLTrainingConfig(
           actor_optimizer=optimizer,
-          eval_every_n_steps=getattr(mt_config, "eval_interval", 10),
-          max_steps=max_steps,
+          eval_every_n_steps=mt_config.eval_interval,
+          max_steps=max_train_steps,
+          # metrics logging
           metrics_logging_options=metrics_logging_options,
-          profiler_options=None,
+          # profiling
+          profiler_options=profiler_options,
+          # checkpoint saving
           checkpoint_root_directory=ckpt_dir,
           checkpointing_options=checkpointing_options,
       ),
       rollout_config=base_rollout.RolloutConfig(
-          max_tokens_to_generate=getattr(mt_config, "max_target_length", 768),
-          max_prompt_length=getattr(mt_config, "max_prefill_predict_length", 256),
-          kv_cache_size=getattr(mt_config, "max_prefill_predict_length", 256)
-          + getattr(mt_config, "max_target_length", 768)
-          + 256,
-          temperature=getattr(mt_config, "decode_sampling_temperature", 0.9),
-          top_p=getattr(mt_config, "decode_sampling_top_p", 1.0),
-          top_k=getattr(mt_config, "decode_sampling_top_k", 50),
+          max_tokens_to_generate=mt_config.max_target_length,
+          max_prompt_length=mt_config.max_prefill_predict_length,
+          kv_cache_size=mt_config.max_prefill_predict_length
+          + mt_config.max_target_length
+          + mt_config.kv_cache_buffer,
+          temperature=mt_config.decode_sampling_temperature,
+          top_p=mt_config.decode_sampling_nucleus_p,
+          top_k=mt_config.decode_sampling_top_k,
       ),
-      rollout_vllm_model_version="meta-llama/Meta-Llama-3.1-8B-Instruct",
-      rollout_vllm_hbm_utilization=0.2,
+      rollout_vllm_model_version=mt_config.hf_model_name,
+      rollout_vllm_hbm_utilization=mt_config.hbm_utilization_vllm,
       rollout_vllm_tpu_backend_type="jax",
+      rollout_vllm_swap_space_size_gb=mt_config.swap_space_vllm_gb,
   )
 
   # Setup GRPO config
   grpo_config = GrpoConfig(
-      num_generations=getattr(mt_config, "num_generations", 2),
-      num_iterations=1,
-      beta=getattr(mt_config, "grpo_beta", 0.08),
-      epsilon=getattr(mt_config, "grpo_epsilon", 0.2),
+      num_generations=mt_config.num_generations,
+      num_iterations=mt_config.num_iterations,
+      beta=mt_config.grpo_beta,
+      epsilon=mt_config.grpo_epsilon,
       loss_algo=mt_config.loss_algo,
   )
 
@@ -460,10 +480,10 @@ def rl_train(mt_config):
   rl_trainer = GrpoLearner(
       rl_cluster=rl_cluster,
       reward_fns=[
-          match_format_exactly,
-          match_format_approximately,
-          check_answer,
-          check_numbers,
+          lambda **kwargs: match_format_exactly(mt_config=mt_config, **kwargs),
+          lambda **kwargs: match_format_approximately(mt_config=mt_config, **kwargs),
+          lambda **kwargs: check_answer(mt_config=mt_config, **kwargs),
+          lambda **kwargs: check_numbers(mt_config=mt_config, **kwargs),
       ],
       grpo_config=grpo_config,
   )
