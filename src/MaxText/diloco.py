@@ -68,6 +68,11 @@ def reshape_first_axis_with_diloco(num_diloco_replicas: int, pytree: PyTree) -> 
   """Reshapses the first dimension of each array int he PyTree to include a DiLoCo axis."""
 
   def extend_pspec(pspec: jax.sharding.PartitionSpec | Sequence[str | Sequence[str]] = ()) -> jax.sharding.PartitionSpec:
+<<<<<<< HEAD
+=======
+    if "diloco" == pspec[0][0]:
+      pspec = pspec[0][1:]
+>>>>>>> 868bb4e1 (diloco utils)
     return jax.sharding.PartitionSpec("diloco", pspec)
 
   def reshape_for_diloco(arr):
