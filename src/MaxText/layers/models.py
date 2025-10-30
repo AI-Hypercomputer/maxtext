@@ -84,6 +84,7 @@ class TransformerLinenPure(nn.Module):
         config=cfg,
     )
     self.vision_encoder = VisionEncoder(config=cfg, mesh=mesh) if cfg.use_multimodal else None
+    self.audio_encoder = AudioEncoder(config=cfg, mesh=mesh) if cfg.use_audio else None
     self.decoder = Decoder(config=cfg, mesh=mesh, quant=self.quant, model_mode=self.model_mode)
     # If MTP is enabled via config, set up the MTP block.
     if self.config.mtp_num_layers > 0:
