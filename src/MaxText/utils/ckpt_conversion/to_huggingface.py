@@ -116,11 +116,14 @@ def main(argv: Sequence[str]) -> None:
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
 
+  # Initialize maxtext config
   config = pyconfig.initialize(argv)
   assert (
       config.load_full_state_path == ""
   ), "This script expects parameters, not a full state. Use generate_param_only_checkpoint first if needed."
   max_utils.print_system_information()
+
+  # Load maxtext checkpoint
 
   print("loading weight ...")
   start = time.time()
