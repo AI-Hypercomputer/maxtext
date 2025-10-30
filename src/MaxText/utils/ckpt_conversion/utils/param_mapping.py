@@ -614,12 +614,15 @@ def QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING(config, scan_layers=False):
       names. For scanned or MoE layers, the value may be a list or a nested
       list of names.
   """
-  if config["model_type"] in ["qwen3_vl"]:
+  if config["model_type"] in ["qwen3_vl", "qwen3_vl_moe"]:
     # Get number of text layers from text_config for multimodal variants
     n_layers = config["text_config"]["num_hidden_layers"]
+  elif config["model_type"] in ["qwen3_omni_moe"]:
+    n_layers = config["thinker_config"]["text_config"]["num_hidden_layers"]
   else:
     n_layers = config["num_hidden_layers"]
-  num_experts = config.get("num_experts", 0)
+  # num_experts = config.get("num_experts", 0)
+  num_experts = 128
 
   mapping = {
       "params-token_embedder-embedding": "model.embed_tokens.weight",
@@ -731,12 +734,22 @@ def QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING(config, scan_layers=False):
             }
         )
   
-  if config["model_type"] in ["qwen3_vl"]:
+  if config["model_type"] in ["qwen3_vl", "qwen3_vl_moe"]:
     # For Qwen3 multimodal variants, insert "language_model" in the path for language model parameters
     updated_mapping = {}
     for key, value in mapping.items():
       if value.startswith("model.layers.") or value.startswith("model.embed_tokens.") or value.startswith("model.norm"):
         updated_mapping[key] = value.replace("model.", "model.language_model.")
+    mapping.update(updated_mapping)
+  elif config["model_type"] in ["qwen3_omni_moe"]:
+    # For Qwen3 Omni MoE variant, insert "language_model" in the path for language model parameters
+    updated_mapping = {}
+    for key, value in mapping.items():
+      if isinstance(value, list):
+        new_values = [f"thinker.{v}" for v in value]
+        updated_mapping[key] = new_values
+      else:
+        updated_mapping[key] = "thinker." + value
     mapping.update(updated_mapping)
   return mapping
 
@@ -760,12 +773,15 @@ def QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, scan_layers=False, saving_to_hf=Fa
     dict: A dictionary mapping MaxText parameter names to their corresponding
       transformation functions.
   """
-  if config["model_type"] in ["qwen3_vl"]:
+  if config["model_type"] in ["qwen3_vl", "qwen3_vl_moe"]:
     # Get number of text layers from text_config for multimodal variants
     n_layers = config["text_config"]["num_hidden_layers"]
+  elif config["model_type"] in ["qwen3_omni_moe"]:
+    n_layers = config["thinker_config"]["text_config"]["num_hidden_layers"]
   else:
     n_layers = config["num_hidden_layers"]
-  num_experts = config.get("num_experts", 0)
+  # num_experts = config.get("num_experts", 0)
+  num_experts = 128
 
   def pad_embedding_layer(input_tensor, target_shape):
     """Pads or truncates embedding layer to match target vocab size."""
@@ -1024,6 +1040,8 @@ PARAM_MAPPING = {
     "qwen3-235b-a22b": QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING,
     "qwen3-coder-480b-a35b": QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING,
     "qwen3-vl-4b": QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "qwen3-vl-30b-a3b": QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "qwen3-omni-30b-a3b": QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING,
 }
 
 HOOK_FNS = {
@@ -1046,4 +1064,6 @@ HOOK_FNS = {
     "qwen3-235b-a22b": QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "qwen3-coder-480b-a35b": QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "qwen3-vl-4b": QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "qwen3-vl-30b-a3b": QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "qwen3-omni-30b-a3b": QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
 }

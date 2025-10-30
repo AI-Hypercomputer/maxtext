@@ -151,6 +151,12 @@ def _get_hf_model(model_id: str, token: str):
   if model_id in ["Qwen/Qwen3-VL-4B-Instruct"]:
     from transformers import Qwen3VLForConditionalGeneration
     hf_model = Qwen3VLForConditionalGeneration.from_pretrained(model_id, token=token)
+  elif model_id in ["Qwen/Qwen3-VL-30B-A3B-Instruct"]:
+    from transformers import Qwen3VLMoeForConditionalGeneration
+    hf_model = Qwen3VLMoeForConditionalGeneration.from_pretrained(model_id, token=token)
+  elif model_id in ["Qwen/Qwen3-Omni-30B-A3B-Instruct"]:
+    from transformers import Qwen3OmniMoeForConditionalGeneration
+    hf_model = Qwen3OmniMoeForConditionalGeneration.from_pretrained(model_id, token=token)
   else:
     hf_model = AutoModelForCausalLM.from_pretrained(model_id, token=token)
   return hf_model
