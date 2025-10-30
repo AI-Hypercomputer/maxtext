@@ -681,9 +681,9 @@ class Attention(nnx.Module):
     # Check for Qwen3OmniMoe vision models first (by model name)
     if self.config.model_name.startswith("qwen3") and self.is_vision:
       rotary_embedding = Qwen3OmniMoeVisionRotaryEmbedding(
-          head_dim=self.head_dim // 2,  # Qwen uses half head_dim for rotary
-          spatial_merge_size=getattr(self.config, 'spatial_merge_size', 2),
-          rope_theta=getattr(self.config, 'rope_theta', 10000.0),
+          head_dim=self.head_dim,
+          spatial_merge_size=getattr(self.config, 'spatial_merge_size_for_vit', 2),
+          rope_theta=getattr(self.config, 'rope_theta_for_vit', 10000.0),
           cast_as_fprop_dtype=True,
           fprop_dtype=self.dtype,
           rngs=self.rngs,

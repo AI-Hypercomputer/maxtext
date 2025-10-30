@@ -970,6 +970,7 @@ class SinusoidsPositionEmbedding(nnx.Module):
 
 
 
+@dataclasses.dataclass(repr=False)
 class Qwen3OmniMoeVisionRotaryEmbedding(nnx.Module):
     """Rotary position embedding for Qwen3OmniMoe vision encoder.
 
