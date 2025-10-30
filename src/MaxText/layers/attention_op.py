@@ -20,7 +20,6 @@ from functools import partial
 import math
 
 import numpy as np
-from packaging import version
 
 import jax
 from jax import lax
@@ -1286,21 +1285,18 @@ class AttentionOp(nnx.Module):
           decoder_segment_ids_tuple = splash_attention_kernel.SegmentIds(decoder_segment_ids_q, decoder_segment_ids_kv)
       else:
         decoder_segment_ids_tuple = None
-      # TODO(ranran): remove if/else branch once b/441336842 is fixed
-      if version.parse(jax.__version__) < version.parse("0.7.2.dev20250824"):
-        attention_output = jax.vmap(splash_kernel)(query, key, value, decoder_segment_ids_tuple)
-      else:
-        if self.config.use_tokamax_splash:
-          if max_logit_value is not None:
-            attention_output = jax.vmap(partial(splash_kernel, max_logit_value=max_logit_value))(
-                query, key, value, decoder_segment_ids_tuple
-            )
-          else:
-            attention_output = jax.vmap(splash_kernel)(query, key, value, decoder_segment_ids_tuple)
-        else:
-          attention_output = jax.vmap(splash_kernel, in_axes=(0, 0, 0, 0, None))(
-              query, key, value, decoder_segment_ids_tuple, sinks
+
+      if self.config.use_tokamax_splash:
+        if max_logit_value is not None:
+          attention_output = jax.vmap(partial(splash_kernel, max_logit_value=max_logit_value))(
+              query, key, value, decoder_segment_ids_tuple
           )
+        else:
+          attention_output = jax.vmap(splash_kernel)(query, key, value, decoder_segment_ids_tuple)
+      else:
+        attention_output = jax.vmap(splash_kernel, in_axes=(0, 0, 0, 0, None))(
+            query, key, value, decoder_segment_ids_tuple, sinks
+        )
       return attention_output
 
     def _maybe_shard_with_pspec(inputs, pspec: jax.sharding.PartitionSpec | None):
