@@ -27,7 +27,7 @@ from flax import nnx
 from MaxText.inference import page_manager
 from MaxText.common_types import Config
 from MaxText import max_utils
-from MaxText.maxtext_utils import maybe_shard_with_logical
+from MaxText.sharding import maybe_shard_with_logical
 from MaxText.layers.linears import Dropout, MlpBlock
 from MaxText.layers import initializers
 from MaxText.layers import nnx_wrappers

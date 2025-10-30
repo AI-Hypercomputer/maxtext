@@ -21,8 +21,7 @@ from flax import linen as nn
 import jax
 import jax.numpy as jnp
 from MaxText import max_utils
-from MaxText import maxtext_utils
-from MaxText.maxtext_utils import maybe_shard_with_name
+from MaxText.sharding import maybe_shard_with_name, all_gather_over_fsdp
 from MaxText.common_types import ShardMode
 
 
@@ -90,7 +89,7 @@ def vocab_tiling_linen_loss(
   labels = _maybe_shard_with_name(labels, label_spec)
   segmentation = _maybe_shard_with_name(segmentation, label_spec)
   # TODO (chengnuojin) all gather only embedding table instead of all params after NNX module is enabled
-  gathered_params = maxtext_utils.all_gather_over_fsdp(params, param_spec, model.mesh, config.logical_axis_rules)
+  gathered_params = all_gather_over_fsdp(params, param_spec, model.mesh, config.logical_axis_rules)
 
   # Customized forward and backward maps for the embedding tiling
   @jax.custom_vjp

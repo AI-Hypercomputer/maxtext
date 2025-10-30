@@ -43,7 +43,7 @@ from flax.linen import partitioning
 
 
 from MaxText import max_utils
-from MaxText.maxtext_utils import maybe_shard_with_name
+from MaxText.sharding import maybe_shard_with_name
 from MaxText.common_types import (
     DEFAULT_MASK_VALUE,
     BATCH,

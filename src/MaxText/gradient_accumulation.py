@@ -19,7 +19,7 @@ import jax.numpy as jnp
 from jax.sharding import NamedSharding
 
 from MaxText.common_types import ShardMode
-from MaxText.maxtext_utils import maybe_shard_with_name
+from MaxText.sharding import maybe_shard_with_name
 
 
 def gradient_accumulation_loss_and_grad(

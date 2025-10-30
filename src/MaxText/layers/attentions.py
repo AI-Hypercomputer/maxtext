@@ -53,7 +53,7 @@ from MaxText.common_types import (
     EP_AS_CONTEXT,
     AttentionType,
 )
-from MaxText.maxtext_utils import maybe_shard_with_logical
+from MaxText.sharding import maybe_shard_with_logical
 from MaxText.inference import kvcache
 from MaxText.inference import page_manager
 from MaxText.inference import paged_attention

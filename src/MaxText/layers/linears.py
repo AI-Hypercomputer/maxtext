@@ -31,7 +31,7 @@ import flax.linen as nn
 
 from MaxText import max_logging
 from MaxText import max_utils
-from MaxText.maxtext_utils import maybe_shard_with_logical
+from MaxText.sharding import maybe_shard_with_logical
 from MaxText.common_types import DecoderBlockType, ShardMode, DType, Array, Config
 from MaxText.common_types import MODEL_MODE_TRAIN, MODEL_MODE_PREFILL, EP_AS_CONTEXT
 from MaxText.layers import nnx_wrappers, quantizations
