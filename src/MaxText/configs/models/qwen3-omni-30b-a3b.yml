@@ -38,3 +38,36 @@ rope_max_timescale: 10_000_000
 
 # General Model Settings
 enable_dropout: False
+
+# Vision Encoder Configuration (need to set use_images=true to enable)
+# Based on Qwen3-Omni vision encoder architecture
+hidden_size_for_vit: 1536
+intermediate_size_for_vit: 6144
+num_attention_heads_for_vit: 16
+num_hidden_layers_for_vit: 40
+num_channels_for_vit: 3
+patch_size_for_vit: 14
+temporal_patch_size_for_vit: 2
+spatial_merge_size_for_vit: 2
+out_hidden_size_for_vit: 2048
+num_position_embeddings_for_vit: 1024
+deepstack_visual_indexes_for_vit: []
+
+# Audio Encoder Configuration (need to set use_audio=true to enable)
+# Based on Qwen3-Omni audio encoder architecture
+d_model_for_audio: 1280
+encoder_layers_for_audio: 32
+encoder_attention_heads_for_audio: 20
+encoder_ffn_dim_for_audio: 5120
+max_source_positions_for_audio: 1500
+num_mel_bins_for_audio: 128
+downsample_hidden_size_for_audio: 512
+output_dim_for_audio: 2048
+attention_dropout_for_audio: 0.0
+n_window_for_audio: 50
+n_window_infer_for_audio: 400
+conv_chunksize_for_audio: 500
+num_conv_layers_for_audio: 3
+max_timescale_for_audio: 10000.0
+max_sample_len_for_audio: 10000
+

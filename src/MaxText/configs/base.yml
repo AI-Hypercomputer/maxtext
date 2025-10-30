@@ -876,6 +876,9 @@ n_window_infer_for_audio: 800
 conv_chunksize_for_audio: 500
 downsample_hidden_size_for_audio: 256
 output_dim_for_audio: 512
+num_conv_layers_for_audio: 3
+max_timescale_for_audio: 10000.0
+max_sample_len_for_audio: 10000
 
 # Subslice shape in the form of "x,y,z" when using pathways (single controller). 
 # Example: "8,8" to use a 8x8 subgrid (64 chips) of a full pod (16x16) of trillium.
