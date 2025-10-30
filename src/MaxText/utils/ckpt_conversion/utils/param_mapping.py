@@ -596,7 +596,7 @@ def GEMMA2_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, scan_layers=False, saving_to_hf=F
   return mapping
 
 
-def QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING(config, scan_layers=False):
+def QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING(config=None, scan_layers=False):
   """Returns mapping from MaxText to HuggingFace Qwen3 weight paths.
 
   This function generates a dictionary that maps parameter names from a MaxText
@@ -614,7 +614,9 @@ def QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING(config, scan_layers=False):
       names. For scanned or MoE layers, the value may be a list or a nested
       list of names.
   """
-  n_layers = config["num_hidden_layers"]
+  if not config:
+    config = {}
+  n_layers = config.get("num_hidden_layers", 2)
   num_experts = config.get("num_experts", 0)
 
   mapping = {
@@ -814,7 +816,20 @@ def QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, scan_layers=False, saving_to_hf=Fa
   return mapping
 
 
-def LLAMA31_MAXTEXT_TO_HF_PARAM_MAPPING(config, scan_layers=False):
+def QWEN3_NNX_TO_VLLM_PARAM_HOOK_FN():
+  """Creates parameter transformation functions for Qwen3.
+
+  This function provides a dictionary of transformation functions (hooks) for
+  converting Qwen3 model parameters between NNX and vLLM formats.
+
+  Returns:
+    dict: A dictionary mapping NNX parameter names to their corresponding
+      transformation functions.
+  """
+  return {}
+
+
+def LLAMA31_MAXTEXT_TO_HF_PARAM_MAPPING(config=None, scan_layers=False):
   """
   Returns a dictionary mapping from MaxText parameter names to
   HuggingFace LLaMA3.1 parameter names.
@@ -829,7 +844,9 @@ def LLAMA31_MAXTEXT_TO_HF_PARAM_MAPPING(config, scan_layers=False):
       dict: A mapping from MaxText parameter names to HF parameter names (str)
             or lists of names (if scan_layers=True).
   """
-  n_layers = config["num_hidden_layers"]
+  if not config:
+    config = {}
+  n_layers = config.get("num_hidden_layers", 2)
 
   mapping = {
       "params-token_embedder-embedding": "model.embed_tokens.weight",
@@ -988,6 +1005,60 @@ def LLAMA31_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, scan_layers=False, saving_to_hf=
   return hook_fns
 
 
+def LLAMA31_NNX_TO_VLLM_PARAM_HOOK_FN():
+  """Defines and returns hook functions for weight transformations.
+
+  These hooks are applied to specific weights during the conversion
+  from MaxText to a HuggingFace-compatible format. They handle
+  transformations like RoPE reordering and query scaling that are not
+  simple re-mappings.
+
+  Returns:
+    A dictionary where keys are MaxText parameter names and values are
+    the corresponding transformation functions.
+  """
+
+  def reorder_rope(arr):
+    """Reorders Rotary Position Embedding (RoPE) weights.
+
+    This function is necessary because MaxText and HuggingFace's vLLM
+    implementations may have different orderings for RoPE dimensions.
+    It splits the last dimension into even and odd indices and
+    concatenates them.
+
+    Args:
+      arr: The input weight array.
+
+    Returns:
+      The reordered weight array.
+    """
+    evens = arr[..., ::2]
+    odds = arr[..., 1::2]
+    return jax.numpy.concatenate((evens, odds), axis=arr.ndim - 1)
+
+  def transform_query_kernel(arr):
+    """Transforms the query kernel.
+
+    This involves scaling the kernel by the square root of the head
+    dimension and then applying RoPE reordering.
+
+    Args:
+      arr: The query kernel weight array.
+
+    Returns:
+      The transformed query kernel array.
+    """
+    head_dim = arr.shape[-1]
+    depth_scale = np.dtype("float32").type(np.sqrt(head_dim))
+    arr = arr * depth_scale
+    return reorder_rope(arr)
+
+  hook_fns = {
+      "base.decoder.layers.self_attention.query.kernel": transform_query_kernel,
+      "base.decoder.layers.self_attention.key.kernel": reorder_rope,
+  }
+  return hook_fns
+
 PARAM_MAPPING = {
     "gemma2-2b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gemma2-9b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
@@ -1028,4 +1099,19 @@ HOOK_FNS = {
     "qwen3-30b-a3b": QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "qwen3-235b-a22b": QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "qwen3-coder-480b-a35b": QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+}
+
+VLLM_HOOK_FNS = {
+    "qwen3-0.6b": QWEN3_NNX_TO_VLLM_PARAM_HOOK_FN,
+    "qwen3-4b": QWEN3_NNX_TO_VLLM_PARAM_HOOK_FN,
+    "qwen3-4b-thinking-2507": QWEN3_NNX_TO_VLLM_PARAM_HOOK_FN,
+    "qwen3-8b": QWEN3_NNX_TO_VLLM_PARAM_HOOK_FN,
+    "qwen3-14b": QWEN3_NNX_TO_VLLM_PARAM_HOOK_FN,
+    "qwen3-32b": QWEN3_NNX_TO_VLLM_PARAM_HOOK_FN,
+    "llama3.1-8b": LLAMA31_NNX_TO_VLLM_PARAM_HOOK_FN,
+    "llama3.1-70b": LLAMA31_NNX_TO_VLLM_PARAM_HOOK_FN,
+    "llama3.1-405b": LLAMA31_NNX_TO_VLLM_PARAM_HOOK_FN,
+    "qwen3-30b-a3b": QWEN3_NNX_TO_VLLM_PARAM_HOOK_FN,
+    "qwen3-235b-a22b": QWEN3_NNX_TO_VLLM_PARAM_HOOK_FN,
+    "qwen3-coder-480b-a35b": QWEN3_NNX_TO_VLLM_PARAM_HOOK_FN,
 }
