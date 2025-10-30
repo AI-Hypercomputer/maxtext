@@ -21,7 +21,7 @@ from transformers.models.qwen3_omni_moe.modeling_qwen3_omni_moe import (
 from transformers.models.qwen3_omni_moe.configuration_qwen3_omni_moe import (
     Qwen3OmniMoeVisionEncoderConfig,
 )
-from MaxText.layers.vision_encoders import (
+from MaxText.layers.qwen3 import (
     Qwen3OmniMoeVisionAttention as JaxQwen3OmniMoeVisionAttention,
     Qwen3OmniMoeVisionPatchMerger as JaxQwen3OmniMoeVisionPatchMerger,
     Qwen3OmniMoeVisionMLP as JaxQwen3OmniMoeVisionMLP,
@@ -607,12 +607,18 @@ class TestQwen3OmniMoeVisionEncoderEndToEnd(unittest.TestCase):
         torch_encoder = TorchQwen3OmniMoeVisionEncoder(torch_config)
         torch_encoder.eval()
 
-        # Create JAX encoder
-        from MaxText.layers.vision_encoders import Qwen3OmniMoeVisionEncoder as JaxQwen3OmniMoeVisionEncoder
+        # Create JAX encoder and projector
+        from MaxText.layers.qwen3 import (
+            Qwen3OmniMoeVisionEncoder as JaxQwen3OmniMoeVisionEncoder,
+            Qwen3OmniMoeVisionProjector as JaxQwen3OmniMoeVisionProjector
+        )
         jax_encoder = JaxQwen3OmniMoeVisionEncoder(config=self.config, mesh=self.mesh, rngs=nnx.Rngs(42))
+        jax_projector = JaxQwen3OmniMoeVisionProjector(config=self.config, rngs=nnx.Rngs(43))
 
         # Copy weights from PyTorch to JAX
         copy_vision_encoder_weights(torch_encoder, jax_encoder)
+        # Copy merger weights from PyTorch encoder.merger to JAX projector.merger
+        copy_patch_merger_weights(torch_encoder.merger, jax_projector.merger)
 
         # Create test input: single 8x8 image = 64 tokens after patch embed
         # Input before patch embed: (batch * temporal * patch_h * patch_w * channels)
@@ -628,9 +634,12 @@ class TestQwen3OmniMoeVisionEncoderEndToEnd(unittest.TestCase):
         grid_thw_jax = jnp.array(grid_thw)
         grid_thw_torch = torch.from_numpy(grid_thw)
 
-        # Forward pass
+        # Forward pass - PyTorch
         torch_output, torch_deep_feats = torch_encoder(torch_hidden_states, grid_thw_torch)
-        jax_output, jax_deep_feats = jax_encoder(jax_hidden_states, grid_thw_jax)
+
+        # Forward pass - JAX (encoder + projector)
+        jax_encoder_output, jax_deep_feats = jax_encoder(jax_hidden_states, grid_thw_jax)
+        jax_output = jax_projector(jax_encoder_output)
 
         # Compare final output
         assert_all_close_jax_torch(
@@ -675,12 +684,18 @@ class TestQwen3OmniMoeVisionEncoderEndToEnd(unittest.TestCase):
         torch_encoder = TorchQwen3OmniMoeVisionEncoder(torch_config)
         torch_encoder.eval()
 
-        # Create JAX encoder
-        from MaxText.layers.vision_encoders import Qwen3OmniMoeVisionEncoder as JaxQwen3OmniMoeVisionEncoder
+        # Create JAX encoder and projector
+        from MaxText.layers.qwen3 import (
+            Qwen3OmniMoeVisionEncoder as JaxQwen3OmniMoeVisionEncoder,
+            Qwen3OmniMoeVisionProjector as JaxQwen3OmniMoeVisionProjector
+        )
         jax_encoder = JaxQwen3OmniMoeVisionEncoder(config=self.config, mesh=self.mesh, rngs=nnx.Rngs(42))
+        jax_projector = JaxQwen3OmniMoeVisionProjector(config=self.config, rngs=nnx.Rngs(43))
 
         # Copy weights
         copy_vision_encoder_weights(torch_encoder, jax_encoder)
+        # Copy merger weights from PyTorch encoder.merger to JAX projector.merger
+        copy_patch_merger_weights(torch_encoder.merger, jax_projector.merger)
 
         # Create test input: 2 images of sizes 4x4 and 8x8
         patch_size = self.config.patch_size_for_vit
@@ -702,9 +717,12 @@ class TestQwen3OmniMoeVisionEncoderEndToEnd(unittest.TestCase):
         grid_thw_jax = jnp.array(grid_thw)
         grid_thw_torch = torch.from_numpy(grid_thw)
 
-        # Forward pass
+        # Forward pass - PyTorch
         torch_output, torch_deep_feats = torch_encoder(torch_hidden_states, grid_thw_torch)
-        jax_output, jax_deep_feats = jax_encoder(jax_hidden_states, grid_thw_jax)
+
+        # Forward pass - JAX (encoder + projector)
+        jax_encoder_output, jax_deep_feats = jax_encoder(jax_hidden_states, grid_thw_jax)
+        jax_output = jax_projector(jax_encoder_output)
 
         # Compare outputs
         assert_all_close_jax_torch(

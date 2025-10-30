@@ -30,22 +30,20 @@ from transformers.models.qwen3_omni_moe.modeling_qwen3_omni_moe import (
 from transformers.models.qwen3_omni_moe.configuration_qwen3_omni_moe import (
     Qwen3OmniMoeAudioEncoderConfig,
 )
-from MaxText.layers.audio_encoders import (
+from MaxText.layers.qwen3 import (
     AudioEncoderLayer,
     AudioEncoder,
     AudioModel,
+)
+from MaxText.utils.qwen_audio_utils import (
     audio_encoder_get_feat_extract_output_lengths,
     compute_chunk_lengths,
     prepare_audio_chunks,
-    generate_segment_ids,
 )
+from MaxText.layers.packing_utils import generate_segment_ids_from_counts
 from MaxText.layers.embeddings import SinusoidsPositionEmbedding
 from MaxText.layers.attentions import Attention
 from MaxText import common_types
-from MaxText.layers.audio_encoders import (
-    AudioModel,
-    audio_encoder_get_feat_extract_output_lengths,
-)
 from MaxText import pyconfig
 from jax.sharding import Mesh
 import math
@@ -55,9 +53,16 @@ base_config_path = os.path.join(os.path.dirname(__file__), "..", "configs", "bas
 jax_audio_config = pyconfig.initialize(
     ["", base_config_path],
     model_name="qwen3-omni-30b-a3b",
+    override_model_config=True,  # Allow overriding model params for testing
     attention="dot_product",
     attention_type="full",
     dropout_rate=0.0,
+    d_model_for_audio=256,
+    encoder_layers_for_audio=2,
+    encoder_attention_heads_for_audio=4,
+    encoder_ffn_dim_for_audio=512,
+    output_dim_for_audio=512,
+    downsample_hidden_size_for_audio=256,
 )
 
 torch_audio_encoder_config = Qwen3OmniMoeAudioEncoderConfig(
@@ -341,10 +346,11 @@ class TestPrepareAudioChunks(unittest.TestCase):
         input_features = jnp.ones((2, 128, 300), dtype=jnp.float32)
         feature_lens = jnp.array([300, 250])
         n_window = 50
+        num_conv_layers = 3
 
         chunk_lengths, chunk_num = compute_chunk_lengths(feature_lens, n_window)
         padded_feature, padded_mask_after_cnn = prepare_audio_chunks(
-            input_features, feature_lens, chunk_lengths, chunk_num, n_window
+            input_features, feature_lens, chunk_lengths, chunk_num, n_window, num_conv_layers
         )
 
         total_chunks = int(jnp.sum(chunk_num))
@@ -355,7 +361,7 @@ class TestPrepareAudioChunks(unittest.TestCase):
         self.assertEqual(padded_feature.shape[2], max_chunk_len)
 
         expected_len_after_cnn = audio_encoder_get_feat_extract_output_lengths(
-            chunk_lengths
+            chunk_lengths, n_window, num_conv_layers
         )
         max_len_after_cnn = int(jnp.max(expected_len_after_cnn))
         self.assertEqual(padded_mask_after_cnn.shape, (total_chunks, max_len_after_cnn))
@@ -364,10 +370,11 @@ class TestPrepareAudioChunks(unittest.TestCase):
         input_features = jnp.ones((1, 128, 100), dtype=jnp.float32)
         feature_lens = jnp.array([100])
         n_window = 50
+        num_conv_layers = 3
 
         chunk_lengths, chunk_num = compute_chunk_lengths(feature_lens, n_window)
         padded_feature, padded_mask_after_cnn = prepare_audio_chunks(
-            input_features, feature_lens, chunk_lengths, chunk_num, n_window
+            input_features, feature_lens, chunk_lengths, chunk_num, n_window, num_conv_layers
         )
 
         self.assertTrue(jnp.all(padded_mask_after_cnn.sum(axis=1) > 0))
@@ -489,7 +496,7 @@ class TestAudioModel(unittest.TestCase):
         padded_mask_after_cnn_jax = (
             jnp.arange(jax_output.shape[1])[None, :]
             < audio_encoder_get_feat_extract_output_lengths(
-                chunk_lengths_jax, self.config.n_window_for_audio
+                chunk_lengths_jax, self.config.n_window_for_audio, self.config.num_conv_layers_for_audio
             )[:, None]
         )
 
@@ -508,10 +515,12 @@ class TestAudioModel(unittest.TestCase):
 class TestHelperFunctions(unittest.TestCase):
     def test_audio_encoder_get_feat_extract_output_lengths_is_jittable(self):
         """Test that audio_encoder_get_feat_extract_output_lengths is JIT-compilable."""
+        n_window = 50
+        num_conv_layers = 3
 
         @jax.jit
         def jitted_fn(lengths):
-            return audio_encoder_get_feat_extract_output_lengths(lengths)
+            return audio_encoder_get_feat_extract_output_lengths(lengths, n_window, num_conv_layers)
 
         input_lengths = jnp.array([3000, 1500])
         # Should not raise any JIT compilation errors
@@ -523,11 +532,12 @@ class TestHelperFunctions(unittest.TestCase):
     def test_prepare_audio_chunks_is_jittable(self):
         """Test that prepare_audio_chunks is JIT-compilable."""
         n_window = 50
+        num_conv_layers = 3
 
         @jax.jit
         def jitted_fn(input_features, feature_lengths, chunk_lengths, chunk_num):
             return prepare_audio_chunks(
-                input_features, feature_lengths, chunk_lengths, chunk_num, n_window
+                input_features, feature_lengths, chunk_lengths, chunk_num, n_window, num_conv_layers
             )
 
         batch_size = 2

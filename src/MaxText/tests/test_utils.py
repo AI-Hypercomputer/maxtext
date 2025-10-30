@@ -279,8 +279,8 @@ def copy_audio_model(torch_model, maxtext_model, config):
     ):
         copy_maxtext_encoder_layer_weights(torch_layer, maxtext_layer)
 
-    copy_linear_weights(torch_model.proj1, maxtext_model.proj1)
-    copy_linear_weights(torch_model.proj2, maxtext_model.proj2)
+    copy_linear_weights(torch_model.proj1, maxtext_model.AudioProjector.proj1)
+    copy_linear_weights(torch_model.proj2, maxtext_model.AudioProjector.proj2)
 
 
 def copy_maxtext_encoder_weights(torch_encoder, maxtext_encoder):
@@ -357,8 +357,7 @@ def copy_vision_encoder_weights(torch_encoder, jax_encoder):
         copy_linear_weights(torch_block.mlp.linear_fc1, jax_block.mlp)
         copy_linear_weights(torch_block.mlp.linear_fc2, jax_block.mlp_out)
 
-    # Copy merger weights (final and deep mergers)
-    copy_patch_merger_weights(torch_encoder.merger, jax_encoder.final_merger)
+    # Copy merger weights (deep mergers only, final_merger is now in projector)
     for torch_merger, jax_merger in zip(torch_encoder.merger_list, jax_encoder.merger_list):
         copy_patch_merger_weights(torch_merger, jax_merger)
 
