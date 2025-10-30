@@ -16,10 +16,13 @@
 # pylint: disable=arguments-differ
 # pylint: disable=no-name-in-module
 
-from typing import cast
+from typing import cast, Optional, Tuple
+import dataclasses
+import math
 
 import jax
 import jax.nn
+from jax import lax
 from jax.ad_checkpoint import checkpoint_name
 from jax.sharding import Mesh
 import jax.numpy as jnp
@@ -29,7 +32,7 @@ from flax import nnx
 from flax.linen import initializers as linen_initializers
 
 from MaxText import max_utils
-from MaxText.common_types import Config, DType, Array
+from MaxText.common_types import Config, DType, Array, AttentionType, MODEL_MODE_TRAIN
 from MaxText.layers import attentions
 from MaxText.layers import initializers as max_initializers
 from MaxText.layers import linears
@@ -40,10 +43,12 @@ from MaxText.layers.normalizations import RMSNorm, l2norm
 from MaxText.layers.quantizations import AqtQuantization as Quant
 from MaxText.inference import page_manager
 from MaxText.layers.attentions import Attention
-from MaxText.layers.linears import MlpBlock
+from MaxText.layers.linears import MlpBlock, DenseGeneral
 from MaxText.layers.moe import RoutedMoE
-
-
+from MaxText.layers.embeddings import SinusoidsPositionEmbedding, Qwen3OmniMoeVisionPosEmbedInterpolate
+from MaxText.layers.initializers import nd_dense_init, NdInitializer, variable_to_logically_partitioned
+from MaxText.layers.packing_utils import generate_segment_ids_from_counts, compute_tokens_per_video
+from MaxText.utils.qwen_audio_utils import compute_chunk_lengths, prepare_audio_chunks
 # -----------------------------------------
 # Qwen3-Next Layer Implementations
 # -----------------------------------------
@@ -1132,6 +1137,894 @@ class Qwen3MoeDecoderLayer(AttentionWithNorm):
       return layer_output
 
 
+class AudioMLP(nnx.Module):
+    """MLP block for AudioEncoderLayer. """
+     
+    def __init__(self, config: Config, *, rngs: nnx.Rngs = None):
+        self.config = config
+        self.rngs = rngs
+        self.audio_encoder_layer_mlp_fc1 = linears.DenseGeneral(
+            in_features_shape=self.config.d_model_for_audio,
+            out_features_shape=self.config.encoder_ffn_dim_for_audio,
+            dtype=self.config.dtype_mm,
+            use_bias=True,
+            matmul_precision=self.config.matmul_precision,
+            rngs=self.rngs,
+        )
+        self.audio_encoder_layer_mlp_fc2 = linears.DenseGeneral(
+            in_features_shape=self.config.encoder_ffn_dim_for_audio,
+            out_features_shape=self.config.d_model_for_audio,
+            dtype=self.config.dtype_mm,
+            use_bias=True,
+            matmul_precision=self.config.matmul_precision,
+            rngs=self.rngs,
+        )
+
+    def __call__(self, hidden_states: Array) -> Array:
+        hidden_states = self.audio_encoder_layer_mlp_fc1(hidden_states)
+        hidden_states = nnx.gelu(hidden_states, approximate=False)
+        hidden_states = self.audio_encoder_layer_mlp_fc2(hidden_states)
+        return hidden_states
+
+
+class AudioEncoderLayer(nnx.Module):
+    """Transformer encoder layer for audio model."""
+
+    def __init__(self, config: Config, mesh: Mesh, *, rngs: nnx.Rngs = None):
+        self.config = config
+        self.mesh = mesh
+        self.rngs = rngs
+
+        self.hidden_states_shape = (
+            self.config.per_device_batch_size,
+            self.config.max_source_positions_for_audio,
+            self.config.d_model_for_audio,
+        )
+
+        self.input_layer_norm = nnx.LayerNorm(
+            num_features=self.config.d_model_for_audio,
+            epsilon=1e-5,
+            dtype=self.config.dtype_mm,
+            rngs=self.rngs,
+        )
+
+        self.self_attention_audio = Attention(
+            config=self.config,
+            num_query_heads=self.config.encoder_attention_heads_for_audio,
+            num_kv_heads=self.config.encoder_attention_heads_for_audio,
+            head_dim=self.config.d_model_for_audio // self.config.encoder_attention_heads_for_audio,
+            max_target_length=self.config.max_source_positions_for_audio,
+            attention_kernel="dot_product",
+            inputs_q_shape=self.hidden_states_shape,
+            inputs_kv_shape=self.hidden_states_shape,
+            float32_qk_product=self.config.float32_qk_product,
+            float32_logits=self.config.float32_logits,
+            dtype=self.config.dtype_mm,
+            weight_dtype=self.config.weight_dtype,
+            mesh=self.mesh,
+            dropout_rate=self.config.attention_dropout_for_audio,
+            name="self_attention_audio",
+            attention_type=AttentionType.FULL,
+            is_nope_layer=True,  # No rotary position embeddings for audio
+            use_bias_in_projections=True,
+            use_qk_norm=False,
+            query_pre_attn_scalar=1 / math.sqrt(self.config.d_model_for_audio // self.config.encoder_attention_heads_for_audio),
+            model_mode=MODEL_MODE_TRAIN,
+            rngs=self.rngs,
+        )
+
+        self.post_attention_layer_norm = nnx.LayerNorm(
+            num_features=self.config.d_model_for_audio,
+            epsilon=1e-5,
+            dtype=self.config.dtype_mm,
+            rngs=self.rngs,
+        )
+
+        self.AudioMLP = AudioMLP(config=self.config, rngs=self.rngs)
+
+    def __call__(
+        self,
+        hidden_states: Array,
+        decoder_segment_ids: Array | None = None,
+        deterministic: bool = False,
+    ):
+        residual = hidden_states
+        hidden_states = self.input_layer_norm(hidden_states)
+        hidden_states = self.self_attention_audio(
+            inputs_q=hidden_states,
+            inputs_kv=hidden_states,
+            decoder_segment_ids=decoder_segment_ids,
+            deterministic=deterministic,
+        )
+        hidden_states = residual + hidden_states
+        residual = hidden_states
+        hidden_states = self.post_attention_layer_norm(hidden_states)
+        hidden_states = self.AudioMLP(hidden_states)
+        hidden_states = residual + hidden_states
+        return hidden_states
+
+
+class AudioEncoder(nnx.Module):
+    """Transformer encoder consisting of multiple AudioEncoderLayer layers.
+
+    Attributes:
+        config: Config containing model parameters
+        mesh: Mesh, JAX device mesh (used for sharding)
+    """
+
+    def __init__(self, config: Config, mesh: Mesh, *, rngs: nnx.Rngs = None):
+        self.config = config
+        self.mesh = mesh
+        self.rngs = rngs
+
+        for lyr in range(self.config.encoder_layers_for_audio):
+            layer_name = f"layers_{lyr}"
+            layer = AudioEncoderLayer(
+                config=self.config,
+                mesh=self.mesh,
+                rngs=self.rngs,
+            )
+            setattr(self, layer_name, layer)
+
+    def __call__(
+        self,
+        hidden_states: Array,
+        decoder_segment_ids: Array | None = None,
+        deterministic: bool = False,
+    ):
+        for lyr in range(self.config.encoder_layers_for_audio):
+            layer_name = f"layers_{lyr}"
+            layer = getattr(self, layer_name)
+            hidden_states = layer(
+                hidden_states,
+                decoder_segment_ids=decoder_segment_ids,
+                deterministic=deterministic,
+            )
+        return hidden_states
+
+
+@dataclasses.dataclass(repr=False)
+class AudioProjector(nnx.Module):
+    """Projection layer that converts audio encoder output to model embedding space."""
+    config: Config
+    proj1: DenseGeneral
+    proj2: DenseGeneral
+
+    def __init__(self, config: Config, *, rngs: nnx.Rngs = None):
+        self.config = config
+        self.proj1 = DenseGeneral(
+            in_features_shape=config.d_model_for_audio,
+            out_features_shape=config.d_model_for_audio,
+            use_bias=True,
+            dtype=config.dtype_mm,
+            weight_dtype=config.weight_dtype,
+            kernel_init=nd_dense_init(1.0, "fan_in", "normal"),
+            rngs=rngs,
+        )
+
+        self.proj2 = DenseGeneral(
+            in_features_shape=config.d_model_for_audio,
+            out_features_shape=config.output_dim_for_audio,
+            use_bias=True,
+            dtype=config.dtype_mm,
+            weight_dtype=config.weight_dtype,
+            kernel_init=nd_dense_init(1.0, "fan_in", "normal"),
+            rngs=rngs,
+        )
+
+    def __call__(self, hidden_states: Array) -> Array:
+        """
+        Args:
+            hidden_states: Encoder output of shape (num_chunks, seq_len, d_model_for_audio)
+
+        Returns:
+            Projected output of shape (num_chunks, seq_len, output_dim_for_audio)
+        """
+        hidden_states = self.proj1(hidden_states)
+        hidden_states = jax.nn.gelu(hidden_states)
+        hidden_states = self.proj2(hidden_states)
+        return hidden_states
+
+
+class AudioModel(nnx.Module):
+    """Audio model for processing audio inputs.
+
+    This model processes audio features through convolutional layers followed
+    by transformer encoder layers.
+
+    Attributes:
+        config: Config containing model parameters
+        mesh: Mesh, JAX device mesh (used for sharding)
+    """
+
+    def __init__(self, config: Config, mesh: Mesh, *, rngs: nnx.Rngs = None):
+        self.config = config
+        self.mesh = mesh
+        self.rngs = rngs
+
+        self.positional_embedding = SinusoidsPositionEmbedding(
+            length=self.config.max_source_positions_for_audio,
+            channels=self.config.d_model_for_audio,
+            max_timescale=self.config.max_timescale_for_audio,
+        )
+
+        self.layernorm_pre = nnx.LayerNorm(
+            num_features=self.config.d_model_for_audio,
+            epsilon=1e-5,
+            dtype=self.config.dtype_mm,
+            rngs=self.rngs,
+        )
+
+        self.layernorm_post = nnx.LayerNorm(
+            num_features=self.config.d_model_for_audio,
+            epsilon=1e-5,
+            dtype=self.config.dtype_mm,
+            rngs=self.rngs,
+        )
+
+        self.conv2d1 = nnx.Conv(
+            in_features=1,
+            out_features=self.config.downsample_hidden_size_for_audio,
+            kernel_size=(3, 3),
+            strides=(2, 2),
+            padding=((1, 1), (1, 1)),
+            use_bias=True,
+            dtype=self.config.dtype_mm,
+            param_dtype=self.config.weight_dtype,
+            rngs=self.rngs,
+        )
+
+        self.conv2d2 = nnx.Conv(
+            in_features=self.config.downsample_hidden_size_for_audio,
+            out_features=self.config.downsample_hidden_size_for_audio,
+            kernel_size=(3, 3),
+            strides=(2, 2),
+            padding=((1, 1), (1, 1)),
+            use_bias=True,
+            dtype=self.config.dtype_mm,
+            param_dtype=self.config.weight_dtype,
+            rngs=self.rngs,
+        )
+
+        self.conv2d3 = nnx.Conv(
+            in_features=self.config.downsample_hidden_size_for_audio,
+            out_features=self.config.downsample_hidden_size_for_audio,
+            kernel_size=(3, 3),
+            strides=(2, 2),
+            padding=((1, 1), (1, 1)),
+            use_bias=True,
+            dtype=self.config.dtype_mm,
+            param_dtype=self.config.weight_dtype,
+            rngs=self.rngs,
+        )
+
+        conv_out_dim = self.config.downsample_hidden_size_for_audio * ((((self.config.num_mel_bins_for_audio + 1) // 2 + 1) // 2 + 1) // 2)
+        self.conv_out = DenseGeneral(
+            in_features_shape=conv_out_dim,
+            out_features_shape=self.config.d_model_for_audio,
+            use_bias=False,
+            dtype=self.config.dtype_mm,
+            weight_dtype=self.config.weight_dtype,
+            kernel_init=nd_dense_init(1.0, "fan_in", "normal"),
+            rngs=self.rngs,
+        )
+
+        self.AudioEncoder = AudioEncoder(config=self.config, mesh=self.mesh, rngs=self.rngs)
+        self.AudioProjector = AudioProjector(config=self.config, rngs=self.rngs)
+
+    def __call__(
+        self,
+        audio_features: Array,
+        audio_lengths: Array,
+        output_attentions: None | bool = None,
+        output_hidden_states: None | bool = None,
+        return_dict: None | bool = None,
+        deterministic: None | bool = False,
+    ) -> Array:
+        """Forward pass of the audio model.
+
+        Args:
+            audio_features: Input audio features of shape (batch_size, num_mel_bins, max_audio_length)
+            audio_lengths: Actual lengths of each audio sample in the batch, shape (batch_size,)
+            output_attentions: Whether to output attention weights (not currently used)
+            output_hidden_states: Whether to output hidden states (not currently used)
+            return_dict: Whether to return a dict (not currently used)
+            deterministic: Whether to use deterministic mode (disables dropout)
+
+        Returns:
+            Encoded audio features of shape (batch_size * num_chunks, seq_len_after_conv, output_dim)
+        """
+        chunk_lengths, chunk_num = compute_chunk_lengths(audio_lengths, self.config.n_window_for_audio)
+        padded_feature, padded_mask_after_cnn = prepare_audio_chunks(
+            audio_features, audio_lengths, chunk_lengths, chunk_num, self.config.n_window_for_audio, self.config.num_conv_layers_for_audio
+        )
+
+        # Generate segment IDs for packed chunks (shape: [total_chunks])
+        chunk_segment_ids = generate_segment_ids_from_counts(chunk_num)
+
+        num_chunks = padded_feature.shape[0]
+        padded_feature_with_channel = padded_feature[..., None]
+
+        num_batches = (num_chunks + self.config.conv_chunksize_for_audio - 1) // self.config.conv_chunksize_for_audio
+        padded_num_chunks = num_batches * self.config.conv_chunksize_for_audio
+
+        pad_amount = padded_num_chunks - num_chunks
+        if pad_amount > 0:
+            pad_shape = (pad_amount, self.config.num_mel_bins_for_audio, padded_feature.shape[2], 1)
+            padding = jnp.zeros(pad_shape, dtype=padded_feature_with_channel.dtype)
+            padded_feature_with_channel = jnp.concatenate([padded_feature_with_channel, padding], axis=0)
+
+        def process_conv_batch(carry, start_idx):
+            batch_slice = jax.lax.dynamic_slice(
+                padded_feature_with_channel,
+                start_indices=(start_idx, 0, 0, 0),
+                slice_sizes=(self.config.conv_chunksize_for_audio, self.config.num_mel_bins_for_audio, padded_feature.shape[2], 1)
+            )
+            x = self.conv2d1(batch_slice)
+            x = jax.nn.gelu(x)
+            x = self.conv2d2(x)
+            x = jax.nn.gelu(x)
+            x = self.conv2d3(x)
+            x = jax.nn.gelu(x)
+            return carry, x
+
+        start_indices = jnp.arange(num_batches) * self.config.conv_chunksize_for_audio
+        _, padded_embed = jax.lax.scan(process_conv_batch, None, start_indices)
+
+        padded_embed = padded_embed.reshape(-1, *padded_embed.shape[2:])
+        padded_embed = padded_embed[:num_chunks]
+
+        b, f, t, c = padded_embed.shape
+        padded_embed = padded_embed.transpose(0, 2, 1, 3)
+        padded_embed = padded_embed.reshape(b, t, f * c)
+        padded_embed = self.conv_out(padded_embed)
+
+        seq_len = padded_embed.shape[1]
+        pos_emb = self.positional_embedding(seq_len)
+        pos_emb = jnp.broadcast_to(pos_emb[None, :, :], (b, seq_len, self.config.d_model_for_audio))
+        hidden_states = padded_embed + pos_emb
+
+        # Expand segment IDs to match sequence length: [num_chunks] -> [num_chunks, seq_len]
+        # Each position in a chunk gets the same segment ID
+        decoder_segment_ids = jnp.broadcast_to(
+            chunk_segment_ids[:, None], (num_chunks, seq_len)
+        )
+
+        hidden_states = self.layernorm_pre(hidden_states)
+        hidden_states = self.AudioEncoder(
+            hidden_states,
+            decoder_segment_ids=decoder_segment_ids,
+            deterministic=deterministic,
+        )
+        hidden_states = self.layernorm_post(hidden_states)
+
+        # Apply mask before projection
+        hidden_states = jnp.where(padded_mask_after_cnn[:, :, None], hidden_states, 0.0)
+
+        # Apply projector
+        hidden_states = self.AudioProjector(hidden_states)
+
+        return hidden_states
+
+
+def audiomodel_as_linen(config: Config, mesh: Mesh):
+    """Convert AudioModel (full pipeline with convs + encoder) to Linen module."""
+    return nnx_wrappers.to_linen(
+        AudioModel,
+        config=config,
+        mesh=mesh,
+        name="AudioModel_0",
+        abstract_init=False,
+        metadata_fn=variable_to_logically_partitioned,
+    )
+
+
+def audioprojector_as_linen(config: Config, mesh: Mesh):
+    """Convert AudioProjector to Linen module."""
+    return nnx_wrappers.to_linen(
+        AudioProjector,
+        config=config,
+        name="AudioProjector_0",
+        abstract_init=False,
+        metadata_fn=variable_to_logically_partitioned,
+    )
+
+
+@dataclasses.dataclass(repr=False)
+class Qwen3OmniMoeVisionPatchMerger(nnx.Module):
+    config: Config
+    hidden_size: int
+    use_postshuffle_norm: bool
+    dtype: DType
+    weight_dtype: DType
+    kernel_init: NdInitializer
+    rngs: nnx.Rngs
+
+    ln_q: nnx.LayerNorm
+    mlp_0: DenseGeneral
+    mlp_2: DenseGeneral
+
+    def __init__(
+        self,
+        config: Config,
+        use_postshuffle_norm: bool = False,
+        dtype: DType = jnp.float32,
+        weight_dtype: DType = jnp.float32,
+        kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "normal"),
+        rngs: nnx.Rngs = None,
+    ):
+        self.config = config
+        self.use_postshuffle_norm = use_postshuffle_norm
+        self.dtype = dtype
+        self.weight_dtype = weight_dtype
+        self.kernel_init = kernel_init
+        self.rngs = rngs
+
+        # Calculate hidden_size after spatial merge
+        spatial_merge_size = config.spatial_merge_size_for_vit
+        base_hidden_size = config.hidden_size_for_vit
+        out_hidden_size = config.out_hidden_size_for_vit
+
+        self.hidden_size = base_hidden_size * (spatial_merge_size**2)
+
+        # LayerNorm before MLP
+        ln_features = self.hidden_size if use_postshuffle_norm else base_hidden_size
+        self.ln_q = nnx.LayerNorm(
+            num_features=ln_features,
+            epsilon=1e-6,
+            dtype=dtype,
+            rngs=rngs,
+        )
+
+        # MLP layers: Linear -> GELU -> Linear
+        self.mlp_0 = DenseGeneral(
+            in_features_shape=self.hidden_size,
+            out_features_shape=self.hidden_size,
+            use_bias=True,
+            dtype=dtype,
+            weight_dtype=weight_dtype,
+            kernel_init=kernel_init,
+            rngs=rngs,
+        )
+
+        self.mlp_2 = DenseGeneral(
+            in_features_shape=self.hidden_size,
+            out_features_shape=out_hidden_size,
+            use_bias=True,
+            dtype=dtype,
+            weight_dtype=weight_dtype,
+            kernel_init=kernel_init,
+            rngs=rngs,
+        )
+
+    def __call__(self, hidden: Array) -> Array:
+        """
+        Args:
+            hidden: Input tensor of shape (seq_len, hidden_size) - packed sequences
+
+        Returns:
+            Output tensor of shape (seq_len, out_hidden_size)
+        """
+        # Apply layer norm
+        if self.use_postshuffle_norm:
+            hidden = self.ln_q(hidden.reshape(-1, self.hidden_size))
+        else:
+            hidden = self.ln_q(hidden)
+
+        # Ensure correct shape for MLP
+        hidden = hidden.reshape(-1, self.hidden_size)
+
+        # MLP: Linear -> GELU -> Linear
+        hidden = self.mlp_0(hidden)
+        hidden = jax.nn.gelu(hidden)
+        hidden = self.mlp_2(hidden)
+
+        return hidden
+
+
+@dataclasses.dataclass(repr=False)
+class Qwen3OmniMoeVisionMLP(nnx.Module):
+    config: Config
+    hidden_size: int
+    intermediate_size: int
+    dtype: DType
+    weight_dtype: DType
+    kernel_init: NdInitializer
+    rngs: nnx.Rngs
+
+    linear_fc1: DenseGeneral
+    linear_fc2: DenseGeneral
+
+    def __init__(
+        self,
+        config: Config,
+        dtype: DType = jnp.float32,
+        weight_dtype: DType = jnp.float32,
+        kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "normal"),
+        rngs: nnx.Rngs = None,
+    ):
+        self.config = config
+        self.dtype = dtype
+        self.weight_dtype = weight_dtype
+        self.kernel_init = kernel_init
+        self.rngs = rngs
+
+        self.hidden_size = config.hidden_size_for_vit
+        self.intermediate_size = config.intermediate_size_for_vit
+
+        self.linear_fc1 = DenseGeneral(
+            in_features_shape=self.hidden_size,
+            out_features_shape=self.intermediate_size,
+            use_bias=True,
+            dtype=dtype,
+            weight_dtype=weight_dtype,
+            kernel_init=kernel_init,
+            rngs=rngs,
+        )
+
+        self.linear_fc2 = DenseGeneral(
+            in_features_shape=self.intermediate_size,
+            out_features_shape=self.hidden_size,
+            use_bias=True,
+            dtype=dtype,
+            weight_dtype=weight_dtype,
+            kernel_init=kernel_init,
+            rngs=rngs,
+        )
+
+    def __call__(self, hidden_state: Array) -> Array:
+        """
+        Args:
+            hidden_state: Input tensor of shape (..., hidden_size) - supports packed sequences
+
+        Returns:
+            Output tensor of shape (..., hidden_size)
+        """
+        hidden_state = self.linear_fc1(hidden_state)
+        hidden_state = jax.nn.gelu(hidden_state)
+        hidden_state = self.linear_fc2(hidden_state)
+        return hidden_state
+
+
+@dataclasses.dataclass(repr=False)
+class Qwen3OmniMoeVisionPatchEmbed(nnx.Module):
+    config: Config
+    patch_size: int
+    temporal_patch_size: int
+    in_channels: int
+    embed_dim: int
+    dtype: DType
+    weight_dtype: DType
+    rngs: nnx.Rngs
+
+    proj: nnx.Conv
+
+    def __init__(
+        self,
+        config: Config,
+        dtype: DType = jnp.float32,
+        weight_dtype: DType = jnp.float32,
+        rngs: nnx.Rngs = None,
+    ):
+        self.config = config
+        self.dtype = dtype
+        self.weight_dtype = weight_dtype
+        self.rngs = rngs
+
+        self.patch_size = config.patch_size_for_vit
+        self.temporal_patch_size = config.temporal_patch_size_for_vit
+        self.in_channels = config.num_channels_for_vit
+        self.embed_dim = config.hidden_size_for_vit
+
+        kernel_size = (self.temporal_patch_size, self.patch_size, self.patch_size)
+
+        self.proj = nnx.Conv(
+            in_features=self.in_channels,
+            out_features=self.embed_dim,
+            kernel_size=kernel_size,
+            strides=kernel_size,
+            use_bias=True,
+            dtype=dtype,
+            param_dtype=weight_dtype,
+            rngs=rngs,
+        )
+
+    def __call__(self, hidden_states: Array) -> Array:
+        """
+        Args:
+            hidden_states: Flattened input tensor that will be reshaped to
+                          (batch_size, temporal_patch_size, patch_size, patch_size, in_channels)
+
+        Returns:
+            Output tensor of shape (seq_len, embed_dim) - flattened packed sequences
+        """
+        # Get target dtype from projection weights
+        target_dtype = self.proj.kernel.value.dtype
+
+        # Compute batch size from total elements
+        batch_size = hidden_states.shape[0] // (
+            self.temporal_patch_size
+            * self.patch_size
+            * self.patch_size
+            * self.in_channels
+        )
+
+        # Reshape input: (batch, in_channels, temporal, height, width)
+        hidden_states = hidden_states.reshape(
+            batch_size,
+            self.in_channels,
+            self.temporal_patch_size,
+            self.patch_size,
+            self.patch_size,
+        )
+
+        # Transpose to JAX conv format: (batch, temporal, height, width, in_channels)
+        hidden_states = jnp.transpose(hidden_states, (0, 2, 3, 4, 1))
+        hidden_states = hidden_states.astype(target_dtype)
+
+        # Apply 3D conv
+        hidden_states = self.proj(hidden_states)
+
+        # Flatten to packed sequences: (seq_len, embed_dim)
+        hidden_states = hidden_states.reshape(-1, self.embed_dim)
+
+        return hidden_states
+
+
+@dataclasses.dataclass(repr=False)
+class Qwen3OmniMoeVisionAttention(nnx.Module):
+    config: Config
+    attn: Attention
+
+    def __init__(self, config: Config, *, mesh=None, rngs: nnx.Rngs = None):
+        self.config = config
+        head_dim = self.config.hidden_size_for_vit // self.config.num_attention_heads_for_vit
+        # Vision uses full SA, no kv cache
+        self.attn = Attention(
+            config=self.config,
+            num_query_heads=self.config.num_attention_heads_for_vit,
+            num_kv_heads=self.config.num_attention_heads_for_vit,
+            head_dim=head_dim,
+            max_target_length=self.config.num_position_embeddings_for_vit,
+            attention_kernel="dot_product",
+            inputs_q_shape=(1, 1, self.config.hidden_size_for_vit),
+            inputs_kv_shape=(1, 1, self.config.hidden_size_for_vit),
+            float32_qk_product=self.config.float32_qk_product,
+            float32_logits=self.config.float32_logits,
+            dtype=self.config.dtype_mm,
+            weight_dtype=self.config.weight_dtype,
+            mesh=mesh,
+            dropout_rate=0.0,
+            attention_type=AttentionType.FULL,
+            is_nope_layer=False,
+            use_bias_in_projections=True,
+            is_vision=True,
+            use_qk_norm=False,
+            query_pre_attn_scalar=1.0 / jnp.sqrt(head_dim),
+            model_mode="train",
+            rngs=rngs,
+        )
+
+    def __call__(
+        self,
+        hidden_states: Array,
+        grid_thw: Optional[Array] = None,
+        decoder_segment_ids: Optional[Array] = None,
+        deterministic: bool = True,
+    ) -> Array:
+        """
+        Args:
+            hidden_states: Input tensor of shape (seq_len, hidden_size) - packed sequences
+            grid_thw: Grid specification for rotary embeddings, shape (num_images, 3)
+            decoder_segment_ids: Segment IDs for packed sequences, shape (1, seq_len) or (seq_len,)
+            deterministic: Whether to use deterministic mode (disable dropout)
+
+        Returns:
+            Output tensor of shape (seq_len, hidden_size)
+        """
+        # Attention layer expects (batch, seq_len, hidden_size)
+        # We use batch=1 with packed sequences in the sequence dimension
+        hidden_states_batched = hidden_states[jnp.newaxis, :, :]
+
+        # Ensure segment IDs have batch dimension for attention layer
+        if decoder_segment_ids is not None and decoder_segment_ids.ndim == 1:
+            decoder_segment_ids = decoder_segment_ids[jnp.newaxis, :]
+
+        # Pass through attention
+        output = self.attn(
+            inputs_q=hidden_states_batched,
+            inputs_kv=hidden_states_batched,
+            grid_thw=grid_thw,
+            decoder_segment_ids=decoder_segment_ids,
+            deterministic=deterministic,
+        )
+
+        # Remove batch dimension: (1, seq_len, hidden_size) -> (seq_len, hidden_size)
+        return output[0]
+
+
+@dataclasses.dataclass(repr=False)
+class Qwen3OmniMoeVisionBlock(nnx.Module):
+    config: Config
+    ln1: nnx.LayerNorm
+    ln2: nnx.LayerNorm
+    attn: Qwen3OmniMoeVisionAttention
+    mlp: DenseGeneral
+    mlp_out: DenseGeneral
+
+    def __init__(self, config: Config, *, mesh=None, rngs: nnx.Rngs = None):
+        self.config = config
+        hs = self.config.hidden_size_for_vit
+        self.ln1 = nnx.LayerNorm(num_features=hs, epsilon=1e-6, rngs=rngs)
+        self.ln2 = nnx.LayerNorm(num_features=hs, epsilon=1e-6, rngs=rngs)
+        self.attn = Qwen3OmniMoeVisionAttention(config=config, mesh=mesh, rngs=rngs)
+        interm = self.config.intermediate_size_for_vit
+        self.mlp = DenseGeneral(
+            in_features_shape=hs, out_features_shape=interm, use_bias=True, rngs=rngs
+        )
+        self.mlp_out = DenseGeneral(
+            in_features_shape=interm, out_features_shape=hs, use_bias=True, rngs=rngs
+        )
+
+    def __call__(
+        self,
+        x: Array,
+        grid_thw: Optional[Array] = None,
+        decoder_segment_ids: Optional[Array] = None,
+    ) -> Array:
+        """
+        Args:
+            x: Input tensor of shape (seq_len, hidden_size) - packed sequences
+            grid_thw: Grid specification for rotary embeddings
+            decoder_segment_ids: Segment IDs for packed sequences
+
+        Returns:
+            Output tensor of shape (seq_len, hidden_size)
+        """
+        x = x + self.attn(
+            self.ln1(x), grid_thw=grid_thw, decoder_segment_ids=decoder_segment_ids
+        )
+        y = self.ln2(x)
+        y = self.mlp(y)
+        y = jax.nn.gelu(y)
+        y = self.mlp_out(y)
+        return x + y
+
+
+@dataclasses.dataclass(repr=False)
+class Qwen3OmniMoeVisionEncoder(nnx.Module):
+    config: Config
+    # modules
+    patch_embed: Qwen3OmniMoeVisionPatchEmbed
+    pos_embed_interpolate: Qwen3OmniMoeVisionPosEmbedInterpolate
+    blocks: nnx.List
+    # optional deep taps
+    merger_list: nnx.List
+
+    # constants
+    spatial_merge_size: int
+    deep_idx: Tuple[int, ...]
+
+    def __init__(self, config: Config, *, mesh=None, rngs: nnx.Rngs = None):
+        self.config = config
+        self.patch_embed = Qwen3OmniMoeVisionPatchEmbed(config=config, rngs=rngs)
+
+        num_pos = config.num_position_embeddings_for_vit
+        hs = config.hidden_size_for_vit
+        self.spatial_merge_size = config.spatial_merge_size_for_vit
+
+        # Initialize positional embedding interpolation module
+        self.pos_embed_interpolate = Qwen3OmniMoeVisionPosEmbedInterpolate(
+            num_position_embeddings=num_pos,
+            hidden_size=hs,
+            spatial_merge_size=self.spatial_merge_size,
+            rngs=rngs,
+        )
+
+        depth = config.num_hidden_layers_for_vit
+
+        self.blocks = nnx.List(
+            [Qwen3OmniMoeVisionBlock(config=config, mesh=mesh, rngs=rngs) for _ in range(depth)]
+        )
+
+        self.deep_idx = tuple(config.deepstack_visual_indexes_for_vit)
+        self.merger_list = nnx.List(
+            [
+                Qwen3OmniMoeVisionPatchMerger(
+                    config=config, use_postshuffle_norm=True, rngs=rngs
+                )
+                for _ in self.deep_idx
+            ]
+        )
+
+    def __call__(
+        self, hidden_states: Array, grid_thw: Array, deterministic: bool = True
+    ):
+        """
+        Args:
+            hidden_states: Flattened visual tokens BEFORE embedding - packed sequences
+            grid_thw: [N,3] with (T,H,W) per sample
+            deterministic: Whether to use deterministic mode
+
+        Returns:
+            Tuple of:
+            - encoder_output: shape (seq_len, hidden_size_for_vit) - packed sequences
+            - deep_features: List of intermediate features, each of shape (seq_len, out_hidden_size)
+        """
+        # Patch embedding: flat -> (seq_len, hidden_size)
+        x = self.patch_embed(hidden_states)
+
+        # Add positional embeddings: (seq_len, hidden_size)
+        pos = self.pos_embed_interpolate(grid_thw)
+        x = x + pos
+
+        # Generate segment IDs for packed vision sequences
+        # tokens = temporal * height * width
+        tokens_per_video = (grid_thw[:, 0] * grid_thw[:, 1] * grid_thw[:, 2]).astype(jnp.int32)
+        # Generate segment IDs: each token knows which image/video it belongs to
+        decoder_segment_ids = generate_segment_ids_from_counts(tokens_per_video)
+
+        # Process blocks and collect outputs for deep features
+        h_traj = []
+        for blk in self.blocks:
+            x = blk(x, grid_thw=grid_thw, decoder_segment_ids=decoder_segment_ids)
+            h_traj.append(x)
+
+        # Extract deep features at specified indices
+        deep_feats = [
+            self.merger_list[i](h_traj[idx])
+            for i, idx in enumerate(self.deep_idx)
+        ]
+
+        # Return encoder output (without final merger) and deep features
+        return x, deep_feats
+
+
+@dataclasses.dataclass(repr=False)
+class Qwen3OmniMoeVisionProjector(nnx.Module):
+    """Projection layer that converts vision encoder output to model embedding space."""
+    config: Config
+    merger: Qwen3OmniMoeVisionPatchMerger
+
+    def __init__(self, config: Config, *, rngs: nnx.Rngs = None):
+        self.config = config
+        self.merger = Qwen3OmniMoeVisionPatchMerger(
+            config=config, use_postshuffle_norm=False, rngs=rngs
+        )
+
+    def __call__(self, hidden_states: Array) -> Array:
+        """
+        Args:
+            hidden_states: Encoder output of shape (seq_len, hidden_size_for_vit)
+
+        Returns:
+            Projected output of shape (seq_len, out_hidden_size_for_vit)
+        """
+        return self.merger(hidden_states)
+
+
+def qwen3omni_visionencoder_as_linen(config: Config, mesh: Mesh) -> nn.Module:
+    """Convert Qwen3OmniMoeVisionEncoder to Linen module."""
+    return nnx_wrappers.to_linen(
+        Qwen3OmniMoeVisionEncoder,
+        config=config,
+        mesh=mesh,
+        name="Qwen3OmniMoeVisionEncoder_0",
+        abstract_init=False,
+        metadata_fn=variable_to_logically_partitioned,
+    )
+
+
+def qwen3omni_visionprojector_as_linen(config: Config, mesh: Mesh) -> nn.Module:
+    """Convert Qwen3OmniMoeVisionProjector to Linen module."""
+    return nnx_wrappers.to_linen(
+        Qwen3OmniMoeVisionProjector,
+        config=config,
+        name="Qwen3OmniMoeVisionProjector_0",
+        abstract_init=False,
+        metadata_fn=variable_to_logically_partitioned,
+    )
+
 Qwen3DecoderLayerToLinen = nnx_wrappers.to_linen_class(
     Qwen3DecoderLayer,
     base_metadata_fn=max_initializers.variable_to_logically_partitioned,
@@ -1149,5 +2042,67 @@ Qwen3NextDecoderLayerToLinen = nnx_wrappers.to_linen_class(
 
 Qwen3NextScannableBlockToLinen = nnx_wrappers.to_linen_class(
     Qwen3NextScannableBlock,
+    base_metadata_fn=max_initializers.variable_to_logically_partitioned,
+)
+
+# Vision encoder Linen wrappers
+Qwen3OmniMoeVisionPatchMergerToLinen = nnx_wrappers.to_linen_class(
+    Qwen3OmniMoeVisionPatchMerger,
+    base_metadata_fn=max_initializers.variable_to_logically_partitioned,
+)
+
+Qwen3OmniMoeVisionMLPToLinen = nnx_wrappers.to_linen_class(
+    Qwen3OmniMoeVisionMLP,
+    base_metadata_fn=max_initializers.variable_to_logically_partitioned,
+)
+
+Qwen3OmniMoeVisionPatchEmbedToLinen = nnx_wrappers.to_linen_class(
+    Qwen3OmniMoeVisionPatchEmbed,
+    base_metadata_fn=max_initializers.variable_to_logically_partitioned,
+)
+
+Qwen3OmniMoeVisionAttentionToLinen = nnx_wrappers.to_linen_class(
+    Qwen3OmniMoeVisionAttention,
+    base_metadata_fn=max_initializers.variable_to_logically_partitioned,
+)
+
+Qwen3OmniMoeVisionBlockToLinen = nnx_wrappers.to_linen_class(
+    Qwen3OmniMoeVisionBlock,
+    base_metadata_fn=max_initializers.variable_to_logically_partitioned,
+)
+
+Qwen3OmniMoeVisionEncoderToLinen = nnx_wrappers.to_linen_class(
+    Qwen3OmniMoeVisionEncoder,
+    base_metadata_fn=max_initializers.variable_to_logically_partitioned,
+)
+
+Qwen3OmniMoeVisionProjectorToLinen = nnx_wrappers.to_linen_class(
+    Qwen3OmniMoeVisionProjector,
+    base_metadata_fn=max_initializers.variable_to_logically_partitioned,
+)
+
+# Audio encoder Linen wrappers
+AudioMLPToLinen = nnx_wrappers.to_linen_class(
+    AudioMLP,
+    base_metadata_fn=max_initializers.variable_to_logically_partitioned,
+)
+
+AudioEncoderLayerToLinen = nnx_wrappers.to_linen_class(
+    AudioEncoderLayer,
+    base_metadata_fn=max_initializers.variable_to_logically_partitioned,
+)
+
+AudioEncoderToLinen = nnx_wrappers.to_linen_class(
+    AudioEncoder,
+    base_metadata_fn=max_initializers.variable_to_logically_partitioned,
+)
+
+AudioProjectorToLinen = nnx_wrappers.to_linen_class(
+    AudioProjector,
+    base_metadata_fn=max_initializers.variable_to_logically_partitioned,
+)
+
+AudioModelToLinen = nnx_wrappers.to_linen_class(
+    AudioModel,
     base_metadata_fn=max_initializers.variable_to_logically_partitioned,
 )
