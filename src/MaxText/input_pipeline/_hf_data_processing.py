@@ -27,7 +27,7 @@ import grain.python as grain
 import numpy as np
 
 from MaxText.input_pipeline import _input_pipeline_utils
-from MaxText import multihost_dataloading
+from MaxText import multihost_dataloading, maxtext_utils
 
 
 def vision_sft_preprocessing_pipeline(
@@ -39,6 +39,8 @@ def vision_sft_preprocessing_pipeline(
     text_columns,
     image_column,
     global_batch_size,
+    microbatch_size_to_run=None,
+    input_data_sharding=None    
 ):
   """pipeline for multimodal SFT with HF dataset"""
 
@@ -160,7 +162,7 @@ def vision_sft_preprocessing_pipeline(
       read_options=grain.ReadOptions(num_threads=1, prefetch_buffer_size=batch_size * 4),
   )
 
-  multihost_gen = multihost_dataloading.MultiHostDataLoadIterator(dataloader, global_mesh)
+  multihost_gen = multihost_dataloading.MultiHostDataLoadIterator(dataloader, global_mesh, microbatch_size_to_run=microbatch_size_to_run, input_data_sharding=input_data_sharding)
 
   # Return multi-host jax.Array prep iterator
   return multihost_gen
@@ -190,6 +192,8 @@ def preprocessing_pipeline(
     use_sft=None,
     sft_train_on_completion_only=True,
     grain_worker_count=1,  # only support 0 or 1
+    microbatch_size_to_run=None,
+    input_data_sharding=None
 ):
   """pipeline for preprocessing HF dataset"""
 
@@ -325,7 +329,7 @@ def preprocessing_pipeline(
       read_options=grain.ReadOptions(num_threads=num_threads, prefetch_buffer_size=128),
   )
 
-  multihost_gen = multihost_dataloading.MultiHostDataLoadIterator(dataloader, global_mesh, generate_padding_batch)
+  multihost_gen = multihost_dataloading.MultiHostDataLoadIterator(dataloader, global_mesh, generate_padding_batch, microbatch_size_to_run, input_data_sharding)
 
   # Return multi-host jax.Array prep iterator
   return multihost_gen
@@ -337,6 +341,8 @@ def make_hf_train_iterator(
     process_indices_train,
 ):
   """Load, preprocess dataset and return iterators"""
+  input_data_sharding = maxtext_utils.get_input_data_sharding(config, global_mesh)
+
   train_ds = datasets.load_dataset(
       config.hf_path,
       data_dir=config.hf_data_dir,
@@ -355,6 +361,8 @@ def make_hf_train_iterator(
         text_columns=config.train_data_columns,
         image_column=config.train_image_column,
         global_batch_size=config.global_batch_size_to_load,
+        microbatch_size_to_run=config.micro_batch_size_to_train_on,
+        input_data_sharding=input_data_sharding,
     )
   else:
     train_iter = preprocessing_pipeline(
@@ -377,6 +385,8 @@ def make_hf_train_iterator(
         use_dpo=config.use_dpo,
         use_sft=config.use_sft,
         sft_train_on_completion_only=config.sft_train_on_completion_only,
+        microbatch_size_to_run=config.micro_batch_size_to_train_on,
+        input_data_sharding=input_data_sharding,
     )
   return train_iter
 
@@ -387,6 +397,8 @@ def make_hf_eval_iterator(
     process_indices_eval,
 ):
   """Make Hugging Face evaluation iterator. Load and preprocess eval dataset: and return iterator."""
+  input_data_sharding = maxtext_utils.get_input_data_sharding(config, global_mesh)
+
   eval_ds = datasets.load_dataset(
       config.hf_path,
       data_dir=config.hf_data_dir,
@@ -405,6 +417,8 @@ def make_hf_eval_iterator(
         text_columns=config.eval_data_columns,
         image_column=config.eval_image_column,
         global_batch_size=config.global_batch_size_to_load_eval,
+        microbatch_size_to_run=config.micro_batch_size_to_eval_on,
+        input_data_sharding=input_data_sharding,
     )
   else:
     eval_iter = preprocessing_pipeline(
@@ -427,5 +441,7 @@ def make_hf_eval_iterator(
         use_dpo=config.use_dpo,
         use_sft=config.use_sft,
         sft_train_on_completion_only=config.sft_train_on_completion_only,
+        microbatch_size_to_run=config.micro_batch_size_to_eval_on,
+        input_data_sharding=input_data_sharding
     )
   return eval_iter
