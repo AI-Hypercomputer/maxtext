@@ -54,6 +54,8 @@ Usage:
     --steps=100
 """
 
+from pprint import pprint
+from typing import Sequence
 from absl import app
 import os
 import re
@@ -80,61 +82,11 @@ from MaxText import max_logging, max_utils, maxtext_utils, pyconfig
 from MaxText import model_creation_utils
 from MaxText.integration.tunix.tunix_adapter import TunixMaxTextAdapter
 
+from MaxText import rl_utils
 
-# ====== Reproducibility ======
-SEED = 42
 
 # We use OpenAI's GSM8K dataset. GSM8K comprises grade school math word problems.
 
-
-def extract_hash_answer(text: str, debug: bool = False) -> str | None:
-  if debug:
-    print(f"Extracting answer from: {text}")
-  if "####" not in text:
-    return None
-  return text.split("####")[1].strip()
-
-
-def get_dataset(data_dir, split="train") -> grain.MapDataset:
-  # Download data
-  if not os.path.exists(data_dir):
-    os.makedirs(data_dir)
-
-  data = tfds.data_source(
-      "gsm8k",
-      split=split,
-      data_dir=data_dir,
-      builder_kwargs={"file_format": tfds.core.FileFormat.ARRAY_RECORD},
-      download=True,
-  )
-
-  loaded_dataset = (
-      grain.MapDataset.source(data)
-      .shuffle(seed=SEED)
-      .map(
-          lambda x: {
-              # passed to model forward pass
-              "prompts": model_tokenizer.apply_chat_template(
-                  [
-                      {
-                          "role": "user",
-                          "content": TEMPLATE.format(
-                              system_prompt=SYSTEM_PROMPT,
-                              question=x["question"].decode("utf-8"),
-                          ),
-                      },
-                  ],
-                  tokenize=False,
-                  add_generation_prompt=True,
-              ),
-              # passed to reward functions
-              "question": x["question"].decode("utf-8"),
-              # passed to reward functions
-              "answer": extract_hash_answer(x["answer"].decode("utf-8"), debug=mt_config.debug),
-          }
-      )
-  )
-  return loaded_dataset
 
 
 def get_maxtext_model(config, devices=None):
@@ -173,124 +125,46 @@ def setup_device_allocation(mt_config, use_pathways: bool = False):
   
   return trainer_devices, sampler_devices, num_vms
 
+def get_dataset(model_tokenizer, mt_config, data_dir, split="train") -> grain.MapDataset:
+  # Download data
+  if not os.path.exists(data_dir):
+    os.makedirs(data_dir)
 
-# Reward Functions
-def match_format_exactly(prompts, completions, mt_config, **kwargs):
-  """Reward exact format matching."""
-  scores = []
-  match_format = re.compile(
-      (
-          r"^[\s]{0,}}"
-          rf"{mt_config.reasoning_start_token}.+?{mt_config.reasoning_end_token}.*?"
-          rf"{mt_config.solution_start_token}(.+?){mt_config.solution_end_token}"
-          r"[\s]{0,}$"
-      ),
-      flags=re.MULTILINE | re.DOTALL,
+  data = tfds.data_source(
+      "gsm8k",
+      split=split,
+      data_dir=data_dir,
+      builder_kwargs={"file_format": tfds.core.FileFormat.ARRAY_RECORD},
+      download=True,
   )
 
-  for completion in completions:
-    score = 0
-    if match_format.search(completion) is not None:
-      score += mt_config.reward_exact_format_match
-    scores.append(score)
-  return scores
-
-
-def match_format_approximately(prompts, completions, mt_config, **kwargs):
-  """Reward approximate format matching."""
-  scores = []
-  for completion in completions:
-    score = 0
-    score += (
-        mt_config.reward_partial_format_match
-        if completion.count(mt_config.reasoning_start_token) == 1
-        else mt_config.penalty_incorrect_format
-    )
-    score += (
-        mt_config.reward_partial_format_match
-        if completion.count(mt_config.reasoning_end_token) == 1
-        else mt_config.penalty_incorrect_format
-    )
-    score += (
-        mt_config.reward_partial_format_match
-        if completion.count(mt_config.solution_start_token) == 1
-        else mt_config.penalty_incorrect_format
-    )
-    score += (
-        mt_config.reward_partial_format_match
-        if completion.count(mt_config.solution_end_token) == 1
-        else mt_config.penalty_incorrect_format
-    )
-    scores.append(score)
-  return scores
-
-
-def check_answer(prompts, completions, answer, mt_config, **kwargs):
-  """Reward correct answers."""
-  match_format = re.compile(
-      (
-          r"^[\s]{0,}}"
-          rf"{mt_config.reasoning_start_token}.+?{mt_config.reasoning_end_token}.*?"
-          rf"{mt_config.solution_start_token}(.+?){mt_config.solution_end_token}"
-          r"[\s]{0,}$"
-      ),
-      flags=re.MULTILINE | re.DOTALL,
+  loaded_dataset = (
+      grain.MapDataset.source(data)
+      .shuffle(seed=mt_config.data_shuffle_seed)
+      .map(
+          lambda x: {
+              # passed to model forward pass
+              "prompts": model_tokenizer.apply_chat_template(
+                  [
+                      {
+                          "role": "user",
+                          "content": mt_config.template.format(
+                              system_prompt=mt_config.system_prompt,
+                              question=x["question"].decode("utf-8"),
+                          ),
+                      },
+                  ],
+                  tokenize=False,
+                  add_generation_prompt=True,
+              ),
+              # passed to reward functions
+              "question": x["question"].decode("utf-8"),
+              # passed to reward functions
+              "answer": rl_utils.extract_hash_answer(x["answer"].decode("utf-8")),
+          }
+      )
   )
-
-  extracted_responses = [
-      guess.group(1) if (guess := match_format.search(r)) is not None else None for r in completions
-  ]
-
-  scores = []
-  for guess, true_answer in zip(extracted_responses, answer):
-    score = 0
-    if guess is None:
-      scores.append(0)
-      continue
-
-    if guess == true_answer:
-      score += mt_config.reward_exact_format_match
-    elif guess.strip() == true_answer.strip():
-      score += mt_config.reward_white_space_format_match
-    else:
-      try:
-        ratio = float(guess) / float(true_answer)
-        if 0.9 <= ratio <= 1.1:
-          score += mt_config.reward_ratio_guess_to_answer_high
-        elif 0.8 <= ratio <= 1.2:
-          score += mt_config.reward_ratio_guess_to_answer_low
-        else:
-          score += mt_config.penalty_incorrect_answer
-      except (ValueError, ZeroDivisionError):
-        score += mt_config.penalty_incorrect_format
-    scores.append(score)
-  return scores
-
-
-def check_numbers(prompts, completions, answer, mt_config, **kwargs):
-  """Reward correct numerical answers."""
-  match_numbers = re.compile(
-      rf"{mt_config.solution_start_token}.*?([\d\.]{{1,}})", flags=re.MULTILINE | re.DOTALL
-  )
-  extracted_responses = [
-      guess.group(1) if (guess := match_numbers.search(r)) is not None else None
-      for r in completions
-  ]
-
-  scores = []
-  for guess, true_answer in zip(extracted_responses, answer):
-    if guess is None:
-      scores.append(0)
-      continue
-    try:
-      true_answer = float(true_answer.strip())
-      guess = float(guess.strip())
-      scores.append(1.5 if guess == true_answer else 0.0)
-    except (ValueError, TypeError):
-      scores.append(0)
-      continue
-  return scores
-
+  return loaded_dataset
 
 def rl_train(mt_config):
   """
@@ -317,23 +191,29 @@ def rl_train(mt_config):
   if not os.path.exists(test_data_dir):
     os.makedirs(test_data_dir)
  
+  # Create model tokenizer
+  model_tokenizer = AutoTokenizer.from_pretrained(mt_config.hf_model_name)
 
   # Load datasets
-  print("Loading GSM8K dataset...")
-  train_dataset, tokenizer = get_gsm8k_dataset(
-      train_data_dir,
-      split="train",
-      batch_size=mt_config.per_device_batch_size,
-      num_batches=getattr(mt_config, "num_batches", 4),
-  )
+  dataset = get_dataset(model_tokenizer, mt_config, train_data_dir, "train").batch(mt_config.batch_size)[:mt_config.num_batches]
 
-  # Load test dataset for evaluation (currently not used in training loop)
-  get_gsm8k_dataset(
-      test_data_dir,
-      split="test",
-      batch_size=mt_config.per_device_batch_size,
-      num_batches=getattr(mt_config, "num_test_batches", 5),
-  )
+  if mt_config.train_fraction == 1.0:
+    train_dataset = dataset.repeat(mt_config.num_epochs)
+    val_dataset = None
+  else:
+    train_dataset = dataset[: int(len(dataset) * mt_config.train_fraction)]
+    train_dataset = train_dataset.repeat(mt_config.num_epochs)
+
+    val_dataset = dataset[int(len(dataset) * mt_config.train_fraction) :].repeat(mt_config.num_epochs)
+
+  test_dataset = get_dataset(model_tokenizer, mt_config, test_data_dir, "test").batch(mt_config.batch_size)[:mt_config.num_test_batches]
+
+
+  # Let's see how one batch of the dataset looks like!
+  if mt_config.debug:
+    for ele in train_dataset[:1]:
+      pprint(ele)
+
 
   
   # Setup device allocation
@@ -347,7 +227,7 @@ def rl_train(mt_config):
 
   # Load reference model
   print("Creating reference model and also meshes for reference and rollout")
-  reference_model, reference_mesh = get_ref_maxtext_model(mt_config, trainer_devices)
+  reference_model, reference_mesh = get_maxtext_model(mt_config, trainer_devices)
   devices_array = maxtext_utils.create_device_mesh(mt_config, sampler_devices)
   # if trainer_devices=sampler_devices, then rollout_mesh=reference_mesh
   # else rollout_mesh uses sampler_devices
@@ -357,8 +237,8 @@ def rl_train(mt_config):
       nnx.display(reference_model)
       print(f"Reference mesh shape: {reference_mesh.shape}")
 
-      # Sanity check that weights are loaded correctly
-      _maxtext_state_flatten = nnx.state(llama3_1_70b).flat_state()
+      # Sanity check that weights are loaded correctly.
+      _maxtext_state_flatten = nnx.state(reference_model).flat_state()
       maxtext_state_flatten = {".".join(str(key) for key in keys): v for keys, v in _maxtext_state_flatten}
       print(
           f"maxtext_state_flatten[base.token_embedder.embedding].value={maxtext_state_flatten['base.token_embedder.embedding'].value}"
@@ -409,8 +289,8 @@ def rl_train(mt_config):
 
   # Setup metrics logging
   log_dir=mt_config.tensorboard_dir
-  print(f"TensorBoard logs directory: {LOG_DIR}")
-  print(f"tensorboard --logdir {LOG_DIR} --port=8086")
+  print(f"TensorBoard logs directory: {log_dir}")
+  print(f"tensorboard --logdir {log_dir} --port=8086")
   metrics_logging_options = metrics_logger.MetricsLoggerOptions(log_dir=log_dir, flush_every_n_steps=20)
 
   # Profiler configurations
@@ -471,7 +351,7 @@ def rl_train(mt_config):
     rl_cluster = rl_cluster_lib.RLCluster(
         actor=policy_model,
         reference=reference_model,
-        tokenizer=tokenizer,
+        tokenizer=model_tokenizer,
         cluster_config=cluster_config,
     )
 
@@ -479,14 +359,25 @@ def rl_train(mt_config):
   print("Setting up GRPO trainer...")
   rl_trainer = GrpoLearner(
       rl_cluster=rl_cluster,
-      reward_fns=[
-          lambda **kwargs: match_format_exactly(mt_config=mt_config, **kwargs),
-          lambda **kwargs: match_format_approximately(mt_config=mt_config, **kwargs),
-          lambda **kwargs: check_answer(mt_config=mt_config, **kwargs),
-          lambda **kwargs: check_numbers(mt_config=mt_config, **kwargs),
+      reward_fns=[ # type: ignore
+          lambda **kwargs: rl_utils.match_format_exactly(mt_config=mt_config, **kwargs),
+          lambda **kwargs: rl_utils.match_format_approximately(mt_config=mt_config, **kwargs),
+          lambda **kwargs: rl_utils.check_answer(mt_config=mt_config, **kwargs),
+          lambda **kwargs: rl_utils.check_numbers(mt_config=mt_config, **kwargs),
       ],
       grpo_config=grpo_config,
   )
+
+
+
+  if mt_config.debug:
+    # verify if vllm sampler works
+    output = rl_cluster.rollout.generate(
+        ["The capital of France is"],
+        rollout_config=base_rollout.RolloutConfig(max_tokens_to_generate=64, temperature=0.1),
+    )
+
+    print(f"Output: {output}")
 
   # Start training
   print("Starting GRPO training...")
@@ -497,13 +388,11 @@ def rl_train(mt_config):
   max_logging.log(f"Saving profiles to {profile_dir}")
 
   jax.profiler.start_trace(profile_dir)
-  with mesh, nn_partitioning.axis_rules(config_policy.logical_axis_rules):
-    rl_trainer.train(dataset)
+  with reference_mesh, nn_partitioning.axis_rules(mt_config.logical_axis_rules):
+    rl_trainer.train(train_dataset)
   jax.profiler.stop_trace()
 
-  print("=" * 80)
   print("GRPO Training Completed Successfully!")
-  print("=" * 80)
 
   return rl_trainer, rl_cluster
 
