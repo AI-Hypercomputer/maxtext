@@ -124,16 +124,15 @@ def main(argv: Sequence[str]) -> None:
   ), "This script expects parameters, not a full state. Use generate_param_only_checkpoint first if needed."
   max_utils.print_system_information()
 
-  # Load maxtext checkpoint
-
-  print("loading weight ...")
+  # Load Maxtext checkpoint
+  print("Loading Orbax checkpoint...")
   start = time.time()
   engine = maxengine.MaxEngine(config)
   rng = jax.random.PRNGKey(1234)
   rng, rng_load_params = jax.random.split(rng)
   # load params from maxengine
   loaded_params_from_engine = engine.load_params(rng_load_params)
-  print(f"elapse: {time.time() - start} second")
+  print(f"Elapse: {(time.time() - start) / 60:.2f} min")
 
   if not config.base_output_directory:
     output_directory = f"tmp/{config.run_name}"
@@ -176,7 +175,7 @@ def main(argv: Sequence[str]) -> None:
   leaves_with_paths = jax.tree_util.tree_leaves_with_path(actual_weights_dict)
 
   # traverse leavse to build: mt_param_key:mt_weights
-  print("proccessing weight ...")
+  print("Proccessing weight...")
   start = time.time()
   processed_params_list = []
   for path_tuple_iter, leaf_value_iter in tqdm(leaves_with_paths, total=len(leaves_with_paths)):
@@ -184,14 +183,14 @@ def main(argv: Sequence[str]) -> None:
     processed_params = process_leaf_param(path_tuple_iter, leaf_value_iter, param_map, shape_map, hook_fn_map, config)
     processed_params_list.extend(processed_params)
   transformed_hf_weights = dict(processed_params_list)
-  print(f"elapse: {time.time() - start} second")
+  print(f"Elapse: {(time.time() - start) / 60:.2f} min")
 
   # 5. Save in HuggingFace Format
   if not transformed_hf_weights:
     print("Error: No weights were transformed. Check mappings and parameter paths.")
     return
 
-  print("saving file ...")
+  print("Saving HuggingFace model...")
   start = time.time()
   save_model_files(
       weight_arrays=transformed_hf_weights,
@@ -201,8 +200,7 @@ def main(argv: Sequence[str]) -> None:
       output_dir=output_directory,
   )
   max_logging.log(f"✅ MaxText model successfully saved in HuggingFace format at {output_directory}")
-  print(f"elapse: {time.time() - start} second")
-
+  print(f"Elapse: {(time.time() - start) / 60:.2f} min")
 
 if __name__ == "__main__":
   app.run(main)

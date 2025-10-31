@@ -145,87 +145,74 @@ def process_leaf_param(
 
   # TODO(shuningjin): it could be scan with one layer
   # TODO(shuningjin): it could be scan with one layer with one expert
+  # Case 0: Unscan, or Scan with single layer
   if len(hf_target_paths) == 1:
-    print("unscan")
+    print("\tunscan or scan single layer")
     hf_path = hf_target_paths[0]
     if hf_path not in shape_map_local:
       max_logging.log(
           f"Warning: HF path '{hf_path}' not found in shape_map for MaxText key '{maxtext_param_key}'. Skipping."
       )
       return []
-
-    # processed_weight = leaf_value
-    # target_hf_shape = shape_map_local[hf_path]
-    # if current_hook_fns:
-    #   processed_weight = apply_hook_fns(processed_weight, target_hf_shape, current_hook_fns)
-    # numpy_weight = convert_jax_weight_to_numpy(processed_weight)
-    # output_weights.append((hf_path, numpy_weight))
     _process(hf_path, leaf_value, output_weights, current_hook_fns, shape_map_local)
-  else:  # Stacked MaxText weight
-    # This now handles three cases:
-    # 1. Scanned MoE layers (2D list of targets from a tensor stacked on expert and layer axes)
-    # 2. Unscanned MoE layers (1D list of targets from a tensor stacked only on the expert axis)
-    # 3. Standard scanned layers (1D list of targets from a tensor stacked only on the layer axis)
+    return output_weights
 
-    is_scanned_moe_layer = isinstance(hf_target_paths[0], list)
+  # Stacked MaxText weight
+  # This now handles three cases:
+  # 1. Scanned MoE layers (2D list of targets from a tensor stacked on expert and layer axes)
+  # 2. Unscanned MoE layers (1D list of targets from a tensor stacked only on the expert axis)
+  # 3. Standard scanned layers (1D list of targets from a tensor stacked only on the layer axis)
+  is_scanned_moe_layer = isinstance(hf_target_paths[0], list)
 
-    if is_scanned_moe_layer:
-      print("scan moe")
-      # Case 1: Scanned MoE layer, e.g., from 'layers-moe_block-wi_0'.
-      # The tensor is stacked on expert and layer axes. We slice experts first, then layers.
-      # MaxText format is (experts, layers, ...), so expert axis is 0, layer axis is 1.
-      expert_axis_to_slice = 0
+  if is_scanned_moe_layer:
+    print("\tscan moe")
+    # Case 1: Scanned MoE layer, e.g., from 'layers-moe_block-wi_0'.
+    # The tensor is stacked on expert and layer axes. We slice experts first, then layers.
+    # MaxText format is (experts, layers, ...), so expert axis is 0, layer axis is 1.
+    expert_axis_to_slice = 0
 
-      # Outer loop for experts
-      for expert_idx, expert_paths_for_layer in enumerate(hf_target_paths):
-        # Slice along the expert axis to get the tensor for the current expert across all layers.
-        expert_tensor_slice = jax.lax.index_in_dim(leaf_value, expert_idx, axis=expert_axis_to_slice, keepdims=False)
-
-        # Inner loop for layers
-        for layer_idx, hf_path in enumerate(expert_paths_for_layer):
-          if hf_path not in shape_map_local:
-            max_logging.log(f"Warning: HF path '{hf_path}' not found. Skipping.")
-            continue
-
-          # Slice the expert tensor along the layer axis to get the final individual weight.
-          # axis is 0 on the new sliced tensor
-          layer_tensor_slice = jax.lax.index_in_dim(expert_tensor_slice, layer_idx, axis=0, keepdims=False)
-
-          # target_hf_shape = shape_map_local[hf_path]
-          # processed_slice = apply_hook_fns(layer_tensor_slice, target_hf_shape, current_hook_fns)
-          # numpy_slice = convert_jax_weight_to_numpy(processed_slice)
-          # output_weights.append((hf_path, numpy_slice))
-          _process(hf_path, layer_tensor_slice, output_weights, current_hook_fns, shape_map_local)
-    else:
-      # Case 2 or 3: The source tensor is stacked on a single axis.
-      # We determine if it's an unscanned MoE (expert axis) or standard scanned (layer axis).
-      is_unscanned_moe = "moe_block" in maxtext_param_key and any(
-          f"_{i}-" in maxtext_param_key for i in range(current_config.base_num_decoder_layers)
-      )
-
-      if is_unscanned_moe:
-        print("unscan moe")
-        # Case 2: Unscanned MoE layer, e.g., from 'layers_0-moe_block-wi_0'.
-        # The tensor is stacked ONLY on the expert axis.
-        axis_to_slice = 0  # Assuming expert is axis 0.
-      else:
-        print("scan")
-        # Case 3: Standard scanned layer.
-        # The tensor is stacked ONLY on the layer axis.
-        axis_to_slice = current_config.param_scan_axis
-
-      for i, hf_path in enumerate(hf_target_paths):
+    # Outer loop for experts
+    for expert_idx, expert_paths_for_layer in enumerate(hf_target_paths):
+      # Slice along the expert axis to get the tensor for the current expert across all layers.
+      expert_tensor_slice = jax.lax.index_in_dim(leaf_value, expert_idx, axis=expert_axis_to_slice, keepdims=False)
+      # Inner loop for layers
+      for layer_idx, hf_path in enumerate(expert_paths_for_layer):
         if hf_path not in shape_map_local:
           max_logging.log(f"Warning: HF path '{hf_path}' not found. Skipping.")
           continue
 
-        weight_slice = jax.lax.index_in_dim(leaf_value, i, axis=axis_to_slice, keepdims=False)
+        # Slice the expert tensor along the layer axis to get the final individual weight.
+        # axis is 0 on the new sliced tensor
+        layer_tensor_slice = jax.lax.index_in_dim(expert_tensor_slice, layer_idx, axis=0, keepdims=False)
+        _process(hf_path, layer_tensor_slice, output_weights, current_hook_fns, shape_map_local)
 
-        # target_hf_shape = shape_map_local[hf_path]
-        # processed_slice = apply_hook_fns(weight_slice, target_hf_shape, current_hook_fns)
-        # numpy_slice = convert_jax_weight_to_numpy(processed_slice)
-        # output_weights.append((hf_path, numpy_slice))
-        _process(hf_path, weight_slice, output_weights, current_hook_fns, shape_map_local)
+    return output_weights
+
+  # Case 2 or 3: The source tensor is stacked on a single axis.
+  # We determine if it's an unscanned MoE (expert axis) or standard scanned (layer axis).
+  is_unscanned_moe = "moe_block" in maxtext_param_key and any(
+      f"_{i}-" in maxtext_param_key for i in range(current_config.base_num_decoder_layers)
+  )
+
+  if is_unscanned_moe:
+    print("\tunscan moe")
+    # Case 2: Unscanned MoE layer, e.g., from 'layers_0-moe_block-wi_0'.
+    # The tensor is stacked ONLY on the expert axis.
+    axis_to_slice = 0  # Assuming expert is axis 0.
+  else:
+    print("\tscan")
+    # Case 3: Standard scanned layer.
+    # The tensor is stacked ONLY on the layer axis.
+    axis_to_slice = current_config.param_scan_axis
+
+  for i, hf_path in enumerate(hf_target_paths):
+    if hf_path not in shape_map_local:
+      max_logging.log(f"Warning: HF path '{hf_path}' not found. Skipping.")
+      continue
+
+    weight_slice = jax.lax.index_in_dim(leaf_value, i, axis=axis_to_slice, keepdims=False)
+    _process(hf_path, weight_slice, output_weights, current_hook_fns, shape_map_local)
+
   return output_weights
 
 
