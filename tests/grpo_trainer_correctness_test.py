@@ -27,34 +27,32 @@ Usage:
 
 import os
 import subprocess
+import sys
 import unittest
-
 import pytest
-
 import jsonlines
-
 import numpy as np
 
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
-
 from flax import linen as nn
 
 import transformers
 
+import MaxText as mt
 from MaxText import maxengine
 from MaxText import maxtext_utils
 from MaxText import pyconfig
-import MaxText as mt
 from MaxText.common_types import MODEL_MODE_TRAIN
-from MaxText.experimental.rl.grpo_trainer import grpo_loss_fn, _merge_grpo_state
+from MaxText.experimental.rl.grpo_trainer import grpo_loss_fn, _merge_grpo_state, setup_train_loop
 from MaxText.experimental.rl.grpo_utils import compute_log_probs
 from MaxText.inference import offline_engine
 from MaxText.globals import MAXTEXT_PKG_DIR, MAXTEXT_ASSETS_ROOT, MAXTEXT_TEST_ASSETS_ROOT
 from MaxText.layers import models
 from MaxText.layers import quantizations
 from MaxText.inference.offline_engine import InputData
+from MaxText.experimental.rl import grpo_utils
 
 
 def get_golden_data(config):
@@ -228,6 +226,59 @@ class GrpoTrainerTest(unittest.TestCase):
 
     # Assert that the generated completions match the golden reference.
     self.assertEqual(results[0]["prompt_completions"].tolist(), golden_data["generated_completions"])
+
+
+class ReshardingTest(unittest.TestCase):
+  """Tests for the resharding functions in max_utils.py"""
+
+  def init_pyconfig(self, config_file, **kwargs):
+    """init pyconfig"""
+    init_kwargs = {
+        "per_device_batch_size": 1.0,
+        "run_name": "test",
+        "enable_checkpointing": False,
+        "dataset_type": "hf",
+        "hf_path": "trl-lib/tldr",
+        "tokenizer_type": "huggingface",
+        "tokenizer_path": "google/gemma-2-2b-it",
+        "attention": "dot_product",
+        "model_name": "gemma2-2b",
+    } | kwargs
+    config = pyconfig.initialize(
+        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "experimental", "rl", config_file)],
+        **init_kwargs,
+    )
+    return config
+
+  @pytest.mark.skip(reason="This test only runs on multihost cluster with pathways backend")
+  @pytest.mark.tpu_only
+  def test_pw_reshard_pytree(self):
+    """Test that reshard_pytree correctly reshards a PyTree."""
+    # Create a mesh of 16 devices, laid out as 16x1.
+    source_config = self.init_pyconfig(
+        "grpo.yml", ici_fsdp_parallelism=16, inference_replicas=4, inference_devices_per_replica=4
+    )
+
+    # Create a second mesh of 16 devices for inference
+    dst_config = self.init_pyconfig("grpo_inference.yml", ici_data_parallelism=4, ici_tensor_parallelism=4)
+
+    _, _, _, dest_sharding, *_, state = setup_train_loop(source_config, dst_config, None)
+    pytree = state.params
+
+    # Reshard the PyTree from the source to the destination sharding.
+    # Applying transfer guards to prevent implicit transfers through controller.
+    with (
+        jax.transfer_guard_device_to_host("disallow_explicit"),
+        jax.transfer_guard_host_to_device("disallow_explicit"),
+    ):
+      resharded_pytree = grpo_utils.reshard_pytree(pytree, dest_sharding.params)
+
+    # Check that the output has the correct sharding.
+    jax.tree_util.tree_map(
+        lambda x, y: self.assertEqual(x.sharding, y),
+        resharded_pytree,
+        dest_sharding.params,
+    )
 
 
 if __name__ == "__main__":

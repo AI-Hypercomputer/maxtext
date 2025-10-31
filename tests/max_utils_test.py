@@ -13,7 +13,11 @@
 # limitations under the License.
 
 """ Tests for the common Max Utils """
+import os
+import sys
 import unittest
+import time
+import pytest
 
 import jax
 from jax import numpy as jnp
@@ -24,6 +28,9 @@ from flax import linen as nn
 import optax
 
 from MaxText import max_utils
+from MaxText import pyconfig
+from MaxText.globals import MAXTEXT_PKG_DIR
+from MaxText.train_utils import setup_train_loop
 
 
 class MaxUtilsSummaryStats(unittest.TestCase):
@@ -97,6 +104,69 @@ class MaxUtilsCustomMesh(unittest.TestCase):
   def test_invalid_strategy(self):
     with self.assertRaises(ValueError):
       max_utils.is_valid_custom_mesh([1, 1, 1, 1, 1, 16, 16, 1], "invalid_strategy")
+
+
+class UnscanTest(unittest.TestCase):
+  """Test unscanning utility."""
+
+  def init_pyconfig(self, **kwargs):
+    """init pyconfig"""
+    init_kwargs = {
+        "per_device_batch_size": 1.0,
+        "run_name": "test",
+        "enable_checkpointing": False,
+        "dataset_type": "synthetic",
+        "model_name": "llama3.1-8b",
+    } | kwargs
+    config = pyconfig.initialize(
+        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        **init_kwargs,
+    )
+    return config
+
+  @pytest.mark.tpu_only
+  def test_unscan_train_state_params(self):
+    """Test unscan_train_state_params logic and performance with a real model."""
+    # Initialize a configuration for an 8B model.
+    config = self.init_pyconfig()
+
+    _, _, sharding, _, mesh, *_, state = setup_train_loop(config, None)
+
+    scan_axis = config.param_scan_axis
+    num_layers = config.base_num_decoder_layers
+
+    # Make a copy to unscan, leaving the original state intact.
+    params_to_unscan = jax.tree_util.tree_map(lambda x: x, state.params)
+    sharding_to_unscan = jax.tree_util.tree_map(lambda x: x, sharding.params)
+
+    # Time the unscan operation.
+    start_time = time.time()
+    max_utils.unscan_train_state_params(
+        params_to_unscan,
+        sharding_to_unscan,
+        mesh,
+        scan_axis,
+        [("layers", num_layers)],
+    )
+    jax.block_until_ready(params_to_unscan)
+    end_time = time.time()
+    print(f"\nUnscanning 8B model took: {end_time - start_time:.4f} seconds.\n")
+
+    # Assertions to verify correctness.
+    decoder_params = params_to_unscan["params"]["decoder"]
+    self.assertNotIn("layers", decoder_params)
+    self.assertIn("layers_0", decoder_params)
+    self.assertIn(f"layers_{num_layers-1}", decoder_params)
+
+    # Check shape of one of the unstacked tensors.
+    # The exact key might differ based on model implementation, adjust if needed.
+    unstacked_shape = decoder_params["layers_5"]["mlp"]["wi_0"]["kernel"].shape
+    expected_shape = (config.base_emb_dim, config.base_mlp_dim)
+    self.assertEqual(unstacked_shape, expected_shape)
+
+    # Check that the original state is unchanged.
+    self.assertIn("layers", state.params["params"]["decoder"])
+    self.assertNotIn("layers_0", state.params["params"]["decoder"])
 
 
 if __name__ == "__main__":

@@ -413,13 +413,19 @@ class Encoder1DBlock(nnx.Module):
     self.rngs = rngs
     self.seq_len = (self.config.image_size_for_vit // self.config.patch_size_for_vit) ** 2
 
-    self.LayerNorm_0 = nnx.LayerNorm(num_features=self.config.hidden_size_for_vit, rngs=self.rngs)
+    self.LayerNorm_0 = nnx.LayerNorm(
+        num_features=self.config.hidden_size_for_vit, epsilon=self.config.normalization_layer_epsilon, rngs=self.rngs
+    )
     self.MultiHeadDotProductAttention_0 = Attention(
         config=self.config,
         num_query_heads=self.config.num_attention_heads_for_vit,
         num_kv_heads=self.config.num_attention_heads_for_vit,
         head_dim=self.config.hidden_size_for_vit // self.config.num_attention_heads_for_vit,
         max_target_length=self.seq_len,
+        float32_qk_product=self.config.float32_qk_product,
+        float32_logits=self.config.float32_logits,
+        dtype=self.config.dtype_mm,
+        weight_dtype=self.config.weight_dtype,
         mesh=self.mesh,
         attention_kernel="dot_product",
         inputs_q_shape=(self.config.per_device_batch_size, self.seq_len, self.config.hidden_size_for_vit),
@@ -434,7 +440,9 @@ class Encoder1DBlock(nnx.Module):
         is_vision=True,
         rngs=self.rngs,
     )
-    self.LayerNorm_1 = nnx.LayerNorm(num_features=self.config.hidden_size_for_vit, rngs=self.rngs)
+    self.LayerNorm_1 = nnx.LayerNorm(
+        num_features=self.config.hidden_size_for_vit, epsilon=self.config.normalization_layer_epsilon, rngs=self.rngs
+    )
     self.MlpBlockViT_0 = MlpBlockViT(
         block_id=self.block_id,
         config=self.config,
@@ -479,7 +487,9 @@ class Encoder(nnx.Module):
           rngs=self.rngs,
       )
       setattr(self, layer_name, layer)
-    self.encoder_norm = nnx.LayerNorm(num_features=self.config.hidden_size_for_vit, rngs=self.rngs)
+    self.encoder_norm = nnx.LayerNorm(
+        num_features=self.config.hidden_size_for_vit, epsilon=self.config.normalization_layer_epsilon, rngs=self.rngs
+    )
 
   def __call__(self, x: jax.Array, deterministic: bool = True) -> jax.Array:
     # TODO(aireenmei, hengtaoguo): add if-scan branch to enable scan support for vision encoder

@@ -18,7 +18,7 @@ run_name: ""
 
 model_name: "default" # override config settings to match a specific model. other than the override, nothing should use this!
 override_model_config: False # When set to true allows overriding model parameters via CLI for the purpose of debugging/testing.
-normalization_layer_epsilon: 1.e-05
+normalization_layer_epsilon: 1.e-05 # epsilon value for rmsnorm, layernorm.
 
 ################################## CHECKPOINTING ##################################
 # Checkpointing makes the following choices in the following order, starting with (1):
@@ -378,7 +378,7 @@ logical_axis_rules: [
                       ['activation_kv_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
                       ['activation_kv_batch_no_exp', ['data', 'fsdp', 'fsdp_transpose']],
                       ['activation_kv_head_dim', ['tensor', 'tensor_transpose', 'tensor_sequence']],
-                      ['activation_vocab', ['tensor', 'tensor_transpose', 'sequence', 'tensor_sequence']],
+                      ['activation_vocab', ['tensor', 'tensor_transpose', 'tensor_sequence']],
                       ['activation_vocab', ['tensor', 'tensor_transpose']],
                       ['activation_vocab', 'tensor_sequence'],
                       ['activation_vocab', ['sequence','context']],
@@ -465,6 +465,9 @@ ici_tensor_sequence_parallelism: 1
 ici_autoregressive_parallelism: 1
 ici_pipeline_parallelism: 1
 ici_expert_parallelism: 1
+
+# Enable ZeRO-1 optimizer sharding over data axis
+shard_optimizer_over_data: False
 
 # The number of TPU slices is automatically determined, you should not set this explicitly. For ahead of time compilation,
 # you should set compile_toplogy_num_slices, which will in turn set this value. For non-TPU environments this is set to 1.
@@ -859,3 +862,22 @@ subslice_shape: ""
 
 # NNX
 enable_nnx: false
+
+################################## Qwen3-Next Specific Configs ##################################
+# Kernel size for the 1D convolution in the Gated Delta Net
+gdn_conv_kernel_dim: 4
+# Head dimension for the key/query in the Gated Delta Net
+gdn_key_head_dim: 128
+# Head dimension for the value in the Gated Delta Net
+gdn_value_head_dim: 128
+# Number of key/query heads in the Gated Delta Net
+gdn_num_key_heads: 16
+# Number of value heads in the Gated Delta Net
+gdn_num_value_heads: 32
+# Chunk size for the parallel scan algorithm in the Gated Delta Net.
+gdn_chunk_size: 64
+# Whether to apply L2 normalization to query and key tensors inside the Gated Delta Rule kernel.
+use_qk_norm_in_gdn: True
+
+# Use tokamax library for gmm kernel implementation
+use_tokamax_gmm: false

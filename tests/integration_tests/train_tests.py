@@ -347,6 +347,36 @@ class TrainTests(unittest.TestCase):
   def test_gpu_synthetic_model_ag_once(self):
     train_main(TrainTests.CONFIGS["synthetic"] + ["model_fsdp_ag_once=True"])
 
+  @pytest.mark.integration_test
+  @pytest.mark.gpu_only
+  def test_gpu_zero1_gradient_accumulation(self):
+    os.environ["NVTE_FUSED_ATTN"] = "1"  # Enable fused attention
+    zero1_ga = [  # tests Zero-1 optimizer sharding with gradient accumulation
+        None,
+        os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+        "base_output_directory=gs://runner-maxtext-logs",
+        "run_name=runner_test",
+        "dataset_path=gs://maxtext-dataset",
+        "steps=10",
+        "enable_checkpointing=False",
+        "enable_goodput_recording=False",
+        "dataset_type=synthetic",
+        "attention=cudnn_flash_te",
+        "remat_policy=minimal",
+        "scan_layers=False",
+        "max_target_length=8192",
+        "per_device_batch_size=2",
+        "ici_data_parallelism=-1",
+        "dcn_data_parallelism=1",
+        "ici_fsdp_parallelism=1",
+        "dcn_fsdp_parallelism=1",
+        "gradient_accumulation_steps=8",
+        "shard_optimizer_over_data=True",
+        "override_model_config=True",
+        rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizer.llama2')}",
+    ]
+    train_main(zero1_ga)
+
 
 if __name__ == "__main__":
   absltest.main()
