@@ -151,7 +151,7 @@ class TransformerLinenPure(nn.Module):
       elif self.config.decoder_block == DecoderBlockType.LLAMA4:
         bidirectional_mask = decoder_input_tokens == multimodal_utils.LLAMA4_PATCH_TOKEN
 
-    logits, hidden_state = self.decoder(
+    logits, hidden_state, kv_cache = self.decoder(
         shared_embedding=self.shared_embedding,
         decoder_input_tokens=decoder_input_tokens,
         decoder_positions=decoder_positions,

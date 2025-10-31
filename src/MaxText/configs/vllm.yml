@@ -1,0 +1,58 @@
+# Copyright 2023–2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+base_config: "base.yml"
+
+attention: "vllm_rpa"
+# NNX required for vLLM integration
+enable_nnx: True
+# Avoid re-initializing JAX distributed system when using vLLM
+skip_jax_distributed_system: True
+per_device_batch_size: 1
+scan_layers: False
+
+
+# -------------- Logical Axis Rules --------------
+mesh_axes: ['data', 'model']
+logical_axis_rules: [
+                      ['activation_batch', ['data']],
+                      ['activation_batch_no_exp', ['data']],
+                      ['activation_embed_and_logits_batch', ['data']],
+                      ['activation_embed_and_logits_batch_sequence', ['data']],
+                      ['activation_heads', ['model']],
+                      ['activation_kv_heads', ['model']],
+                      ['activation_embed', ['model']],
+                      ['activation_mlp', ['model']],
+                      ['activation_kv', ['model']],
+                      ['activation_prefill_kv_batch', ['data']],
+                      ['activation_kv_batch', ['data']],
+                      ['activation_kv_batch_no_exp', ['data']],
+                      ['activation_kv_head_dim', ['model']],
+                      ['activation_vocab', ['model']],
+                      ['activation_vocab', ['model']],
+                      ['decode_batch', ['data']],
+                      ['mlp', ['model']],
+                      ['mlp_no_fsdp', ['model']],
+                      ['vocab', ['model']],
+                      ['heads', ['model']],
+                      ['q_heads', ['model']],
+                      ['kv_heads', ['model']],
+                      ['norm', ['model']],
+                      ['cache_heads', ['model']],
+                      ['cache_heads', ['model']],
+                      ['paged_kv_heads', ['model']],
+                    ]
+# Axes used for DCN must be earlier in this list than ICI, see (b/339009148) for details
+data_sharding: [['data', 'model']]
+input_data_sharding_logical_axes: ['activation_embed_and_logits_batch']

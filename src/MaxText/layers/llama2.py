@@ -136,6 +136,8 @@ class LlamaDecoderLayer(nnx.Module):
       slot: None | int = None,
       page_state: None | page_manager.PageState = None,
       previous_chunk=None,
+      kv_cache=None,
+      attention_metadata=None
   ):
     cfg = self.config
 
@@ -146,7 +148,7 @@ class LlamaDecoderLayer(nnx.Module):
     lnx = nn.with_logical_constraint(lnx, self.activation_axis_names)
 
     # Self-attention block
-    attention_lnx = self.self_attention(
+    attention_lnx, kv_cache = self.self_attention(
         lnx,
         lnx,
         decoder_positions,
@@ -156,6 +158,8 @@ class LlamaDecoderLayer(nnx.Module):
         slot=slot,
         page_state=page_state,
         previous_chunk=previous_chunk,
+        kv_cache=kv_cache,
+        attention_metadata=attention_metadata,
     )
 
     attention_lnx = nn.with_logical_constraint(attention_lnx, self.activation_axis_names)
@@ -185,7 +189,7 @@ class LlamaDecoderLayer(nnx.Module):
     if cfg.scan_layers:
       return layer_output, None
     else:
-      return layer_output
+      return layer_output, kv_cache
 
 
 LlamaDecoderLayerToLinen = nnx_wrappers.to_linen_class(

@@ -46,6 +46,7 @@ def from_config(
 def from_config(
     config: pyconfig.HyperParameters,
     devices: Sequence[jax.Device] | None = None,
+    mesh: Mesh | None = None,
     *,
     model_mode: str = MODEL_MODE_TRAIN,
     rngs: nnx.Rngs,
@@ -56,6 +57,7 @@ def from_config(
 def from_config(
     config: pyconfig.HyperParameters,
     devices: Sequence[jax.Device] | None = None,
+    mesh: Mesh | None = None,
     *,
     model_mode: str = MODEL_MODE_TRAIN,
     rngs: nnx.Rngs | None = None,
@@ -76,7 +78,8 @@ def from_config(
       model = from_config(config)
   """
   devices_array = maxtext_utils.create_device_mesh(config, devices)
-  mesh = Mesh(devices_array, config.mesh_axes)
+  if mesh is None:
+    mesh = Mesh(devices_array, config.mesh_axes)
   model = create_model(config, mesh, model_mode=model_mode, rngs=rngs)
 
   # Return only the model
@@ -106,15 +109,17 @@ def create_model(config, mesh, model_mode: str = MODEL_MODE_TRAIN, rngs: nnx.Rng
   return model
 
 
-def create_nnx_model(config, mesh=None, devices=None, model_mode=None, rngs: jax.Array | None = None):
+def create_nnx_model(config, mesh=None, devices=None, model_mode=None, rng_key=None):
   """Creates a NNX model with sharded parameters, possibly loading from a checkpoint."""
 
-  def _create_model(rngs: nnx.Rngs | None = None):
-    if rngs is None:
-      rngs = jax.random.PRNGKey(config.init_weights_seed)
-    return from_config(config, devices, rngs=nnx.Rngs(params=rngs, dropout=1), model_mode=model_mode)
+  def _create_model(mesh: Mesh | None = None, model_mode: str | None = None, rng_key: jax.Array | None = None):
+    if rng_key is None:
+      rng_key = jax.random.PRNGKey(config.init_weights_seed)
+    rngs = nnx.Rngs(params=rng_key, dropout=1)
+    return from_config(config, devices, mesh, rngs=rngs, model_mode=model_mode)
 
-  abstract_model = nnx.eval_shape(_create_model)
+  create_model_fn = partial(_create_model, mesh=mesh, model_mode=model_mode, rng_key=rng_key)
+  abstract_model = nnx.eval_shape(create_model_fn)
   graphdef, abstract_state = nnx.split(abstract_model)
   specs = nnx.get_partition_spec(abstract_state)
 
@@ -131,7 +136,7 @@ def create_nnx_model(config, mesh=None, devices=None, model_mode=None, rngs: jax
   def create_sharded_state():
     # This will be JIT-compiled. JAX knows the output sharding and can
     # initialize the parameters directly on the target devices in a sharded way.
-    model = _create_model()
+    model = create_model_fn()
     return nnx.state(model)
 
   with mesh:

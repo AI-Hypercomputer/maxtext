@@ -844,6 +844,7 @@ class AttentionOp(nnx.Module):
         or (self.attention_kernel == "autoselected" and model_mode == MODEL_MODE_AUTOREGRESSIVE)
         or (self.attention_kernel == "autoselected" and length < 128)
         or (self.attention_kernel == "paged")
+        or (self.attention_kernel == "vllm_rpa")
     ):
       return self.apply_attention_dot(
           query,
