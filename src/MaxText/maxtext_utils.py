@@ -46,6 +46,43 @@ from MaxText.inference.page_manager import PageState
 OVERWRITE_WITH_GRADIENT = "_overwrite_with_gradient"
 
 
+def get_input_data_sharding(config, mesh):
+  max_logging.log(
+      "WARNING: Function maxtext_utils.get_input_data_sharding is deprecated. Please use sharding.get_input_data_sharding."
+  )
+  return sharding.get_input_data_sharding(config, mesh)
+
+
+def assert_params_sufficiently_sharded(params, mesh, tolerance):
+  max_logging.log(
+      "WARNING: Function maxtext_utils.assert_params_sufficiently_sharded is deprecated."
+      "Please use sharding.assert_params_sufficiently_sharded."
+  )
+  return sharding.assert_params_sufficiently_sharded(params, mesh, tolerance)
+
+
+def add_data_to_sharding(mesh, path, aval, shardings):
+  max_logging.log(
+      "WARNING: Function maxtext_utils.add_data_to_sharding is deprecated. Please use sharding.add_data_to_sharding."
+  )
+  return sharding.add_data_to_sharding(mesh, path, aval, shardings)
+
+
+def maybe_update_params_sharding_with_opt(config, state_mesh_shardings):
+  max_logging.log(
+      "WARNING: Function maxtext_utils.maybe_update_params_sharding_with_opt is deprecated."
+      "Please use sharding.maybe_update_params_sharding_with_opt."
+  )
+  return sharding.maybe_update_params_sharding_with_opt(config, state_mesh_shardings)
+
+
+def all_gather_over_fsdp(variables, sharding_info, mesh, logical_axis_rules):
+  max_logging.log(
+      "WARNING: Function maxtext_utils.all_gather_over_fsdp is deprecated. Please use sharding.all_gather_over_fsdp."
+  )
+  return sharding.all_gather_over_fsdp(variables, sharding_info, mesh, logical_axis_rules)
+
+
 def get_functional_train_with_signature(
     train_step, data_sharding, state_mesh_shardings, model, config, params_shardings=None
 ):
