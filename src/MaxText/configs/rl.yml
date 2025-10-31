@@ -22,9 +22,6 @@ trainer_devices_fraction: 0.5
 sampler_devices_fraction: 0.5
 chips_per_vm: 4  # depends on hardware, for v5p this is 4
 
-# ====== Debug ======
-debug: True
-
 # ====== Reproducibility ======
 data_shuffle_seed: 42
 
@@ -155,23 +152,9 @@ reasoning_end_token: '</reasoning>'
 solution_start_token: '<answer>'
 solution_end_token: '</answer>'
 
-# ====== System prompt and Templates ======
 
-system_prompt: |
-  You are given a problem. Think about the problem and provide your reasoning. Place it between {reasoning_start_token} and {reasoning_end_token}. Then, provide the final answer (i.e., just one numerical value) between {solution_start_token} and {solution_end_token}.
-
-template: |
-  <start_of_turn>user
-  {system_prompt}
-  
-  {question}<end_of_turn>
-  <start_of_turn>model
-
-
-# # TODO(@mazumdera
-): fix this
-# # Dataset Configuration
-# dataset_type: hf  # Huggingface input pipeline
-# hf_path: 'gsm8k'
-# hf_data_split: 'main'
-# hf_data_files: 'train'
+# # TODO(@mazumdera): fix this
+# Dataset Configuration
+dataset_name: 'gsm8k'
+train_split: 'train'
+eval_split: 'test'

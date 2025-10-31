@@ -21,6 +21,7 @@ uv pip install keyring keyrings.google-artifactregistry-auth
 
 uv pip install numba==0.61.2
 
+uv pip uninstall tunix
 uv pip install -e ../tunix --no-cache-dir
 
 

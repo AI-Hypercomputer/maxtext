@@ -49,7 +49,7 @@ from etils import epath
 from tunix.rl.rollout.base_rollout import RolloutConfig
 
 from MaxText.globals import MAXTEXT_ASSETS_ROOT
-from maxtext.src.MaxText import utils_rl
+from MaxText.rl import utils_rl
 
 # ## Evaluate
 # We evaluate it in two ways:

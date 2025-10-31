@@ -48,7 +48,6 @@ from etils import epath
 from tunix.rl.rollout.base_rollout import RolloutConfig
 
 from MaxText.globals import MAXTEXT_ASSETS_ROOT
-import pathwaysutils
 
 # Let's define a RegEx for checking whether the format matches.
 #
