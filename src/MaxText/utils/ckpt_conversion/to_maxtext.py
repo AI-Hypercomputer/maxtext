@@ -68,7 +68,7 @@ jax.config.update("jax_platform_name", "cpu")
 
 
 def _build_multi_axis_stacked_tensor(
-    hf_source_keys: List[List[str]], hf_state_dict: Dict[str, np.ndarray], hook_fns: Any
+  hf_source_keys: List[List[str]], hf_state_dict: Dict[str, np.ndarray], hook_fns: Any
 ) -> np.ndarray:
   """Builds a MaxText tensor by stacking HF weights along two axes (experts and layers).
 
@@ -106,7 +106,7 @@ def _build_multi_axis_stacked_tensor(
 
 
 def _build_single_axis_stacked_tensor(
-    hf_source_keys: List[str], hf_state_dict: Dict[str, np.ndarray], hook_fns: Any, target_shape: tuple, config
+  hf_source_keys: List[str], hf_state_dict: Dict[str, np.ndarray], hook_fns: Any, target_shape: tuple, config
 ) -> np.ndarray:
   """Builds a MaxText tensor by stacking HF weights along a single axis.
 
@@ -197,16 +197,16 @@ def main(argv: Sequence[str]) -> None:
   tx = optimizers.get_optimizer(config, learning_rate_schedule)
 
   checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
-      output_directory,
-      enable_checkpointing=True,
-      use_async=False,  # Synchronous saving for simplicity in conversion script
-      save_interval_steps=1,  # Save at step 0
-      use_ocdbt=config.checkpoint_storage_use_ocdbt,
-      use_zarr3=config.checkpoint_storage_use_zarr3,
+    output_directory,
+    enable_checkpointing=True,
+    use_async=False,  # Synchronous saving for simplicity in conversion script
+    save_interval_steps=1,  # Save at step 0
+    use_ocdbt=config.checkpoint_storage_use_ocdbt,
+    use_zarr3=config.checkpoint_storage_use_zarr3,
   )
 
   abstract_state, _, _, _ = maxtext_utils.setup_training_state(
-      maxtext_model_flax, None, tx, config, rng, mesh, checkpoint_manager
+    maxtext_model_flax, None, tx, config, rng, mesh, checkpoint_manager
   )
   abstract_params_tree = abstract_state.params["params"]
   abstract_params_flat, abstract_params_treedef = jax.tree_util.tree_flatten_with_path(abstract_params_tree)
@@ -255,19 +255,19 @@ def main(argv: Sequence[str]) -> None:
       if is_multi_axis_stacked:
         # Case 2: Multi-Axis Stacked (Scanned MoE)
         final_mt_tensor_numpy = _build_multi_axis_stacked_tensor(
-            hf_source_keys_or_key, hf_state_dict_numpy, hook_fn_list_or_fn
+          hf_source_keys_or_key, hf_state_dict_numpy, hook_fn_list_or_fn
         )
       else:
         # Case 3: Single-Axis Stacked (Standard Scanned or Unscanned MoE)
         final_mt_tensor_numpy = _build_single_axis_stacked_tensor(
-            hf_source_keys_or_key, hf_state_dict_numpy, hook_fn_list_or_fn, mt_target_shape_final, config
+          hf_source_keys_or_key, hf_state_dict_numpy, hook_fn_list_or_fn, mt_target_shape_final, config
         )
 
     if final_mt_tensor_numpy.shape != mt_target_shape_final:
       raise ValueError(
-          f"Shape mismatch for {mt_param_key}: "
-          f"Expected {mt_target_shape_final}, got {final_mt_tensor_numpy.shape} "
-          f"from HF key(s) {hf_source_keys_or_key} after hooks."
+        f"Shape mismatch for {mt_param_key}: "
+        f"Expected {mt_target_shape_final}, got {final_mt_tensor_numpy.shape} "
+        f"from HF key(s) {hf_source_keys_or_key} after hooks."
       )
     final_mt_weights.append(final_mt_tensor_numpy)
 

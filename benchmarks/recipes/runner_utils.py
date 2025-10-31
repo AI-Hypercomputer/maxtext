@@ -45,26 +45,26 @@ def generate_and_run_workloads(user_config, num_slices_list, num_steps, priority
     for model in model_list:
       # Run workloads on the below clusters
       for user_config.cluster_config in [
-          user_config.cluster_config,
+        user_config.cluster_config,
       ]:
         for num_slices in num_slices_list:
           # Create a WorkloadConfig object
           wl_config = mxr.WorkloadConfig(
-              model=model,
-              num_slices=num_slices,
-              device_type=user_config.cluster_config.device_type,
-              base_output_directory=(
-                  f"{user_config.base_output_directory}{framework}_{num_slices}_slice_"
-                  f"{user_config.device_type}_{model.model_name}/"
-              ),
-              max_restarts=user_config.max_restarts,
-              libtpu_type=None,
-              libtpu_nightly_version="",
-              base_docker_image=user_config.runner if framework == "mcjax" else None,
-              pathways_config=user_config.pathways_config if framework == "pathways" else None,
-              xpk_path=user_config.xpk_path,
-              num_steps=num_steps,
-              priority=priority,
+            model=model,
+            num_slices=num_slices,
+            device_type=user_config.cluster_config.device_type,
+            base_output_directory=(
+              f"{user_config.base_output_directory}{framework}_{num_slices}_slice_"
+              f"{user_config.device_type}_{model.model_name}/"
+            ),
+            max_restarts=user_config.max_restarts,
+            libtpu_type=None,
+            libtpu_nightly_version="",
+            base_docker_image=user_config.runner if framework == "mcjax" else None,
+            pathways_config=user_config.pathways_config if framework == "pathways" else None,
+            xpk_path=user_config.xpk_path,
+            num_steps=num_steps,
+            priority=priority,
           )
 
           # Generate XPK command

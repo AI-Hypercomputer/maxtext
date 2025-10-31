@@ -44,8 +44,8 @@ def example_step():
 
 
 jit_func = jax.jit(
-    example_step,
-    out_shardings=sharding,
+  example_step,
+  out_shardings=sharding,
 )
 
 # pylint: disable=not-callable

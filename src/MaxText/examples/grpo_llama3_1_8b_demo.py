@@ -13,11 +13,11 @@
 # limitations under the License.
 
 # pylint: disable=bare-except, consider-using-generator
-""" 
+"""
 This tutorial demonstrates training the Llama3.1 8B-IT model on
  the GSM8K math reasoning benchmark using Group Relative Policy Optimization (GRPO).
    GRPO can enhance your model's problem-solving skills on mathematical word problems,
-     coding problems, etc. """
+     coding problems, etc."""
 
 # This tutorial demonstrates training the Llama3.1 8B-IT model on the GSM8K math
 # reasoning benchmark using Group Relative Policy Optimization (GRPO). GRPO can
@@ -193,12 +193,12 @@ MAX_GRAD_NORM = 0.1
 
 # ====== Inference ======
 GENERATION_CONFIGS = {
-    # greedy search
-    "greedy": {"temperature": 1e-4, "top_k": 1, "top_p": 1.0},
-    # some randomness
-    "standard": {"temperature": 0.7, "top_k": 50, "top_p": 0.95},
-    # liberal
-    "liberal": {"temperature": 0.85, "top_k": 2000, "top_p": 1.0},
+  # greedy search
+  "greedy": {"temperature": 1e-4, "top_k": 1, "top_p": 1.0},
+  # some randomness
+  "standard": {"temperature": 0.7, "top_k": 50, "top_p": 0.95},
+  # liberal
+  "liberal": {"temperature": 0.85, "top_k": 2000, "top_p": 1.0},
 }
 
 # ====== Reward ======
@@ -222,7 +222,7 @@ def show_hbm_usage():
     stats = d.memory_stats()
     used = stats["bytes_in_use"]
     limit = stats["bytes_limit"]
-    print(f"Using {fmt_size(used)} / {fmt_size(limit)} ({used/limit:%}) on {d}")
+    print(f"Using {fmt_size(used)} / {fmt_size(limit)} ({used / limit:%}) on {d}")
 
 
 # ## Data preprocessing
@@ -288,38 +288,38 @@ def get_dataset(data_dir, split="train") -> grain.MapDataset:
     os.makedirs(data_dir)
 
   data = tfds.data_source(
-      "gsm8k",
-      split=split,
-      data_dir=data_dir,
-      builder_kwargs={"file_format": tfds.core.FileFormat.ARRAY_RECORD},
-      download=True,
+    "gsm8k",
+    split=split,
+    data_dir=data_dir,
+    builder_kwargs={"file_format": tfds.core.FileFormat.ARRAY_RECORD},
+    download=True,
   )
 
   loaded_dataset = (
-      grain.MapDataset.source(data)
-      .shuffle(seed=SEED)
-      .map(
-          lambda x: {
-              # passed to model forward pass
-              "prompts": model_tokenizer.apply_chat_template(
-                  [
-                      {
-                          "role": "user",
-                          "content": TEMPLATE.format(
-                              system_prompt=SYSTEM_PROMPT,
-                              question=x["question"].decode("utf-8"),
-                          ),
-                      },
-                  ],
-                  tokenize=False,
-                  add_generation_prompt=True,
+    grain.MapDataset.source(data)
+    .shuffle(seed=SEED)
+    .map(
+      lambda x: {
+        # passed to model forward pass
+        "prompts": model_tokenizer.apply_chat_template(
+          [
+            {
+              "role": "user",
+              "content": TEMPLATE.format(
+                system_prompt=SYSTEM_PROMPT,
+                question=x["question"].decode("utf-8"),
               ),
-              # passed to reward functions
-              "question": x["question"].decode("utf-8"),
-              # passed to reward functions
-              "answer": extract_hash_answer(x["answer"].decode("utf-8")),
-          }
-      )
+            },
+          ],
+          tokenize=False,
+          add_generation_prompt=True,
+        ),
+        # passed to reward functions
+        "question": x["question"].decode("utf-8"),
+        # passed to reward functions
+        "answer": extract_hash_answer(x["answer"].decode("utf-8")),
+      }
+    )
   )
   return loaded_dataset
 
@@ -384,7 +384,7 @@ def get_ref_maxtext_model(config):
   model, this_mesh = model_creation_utils.create_nnx_model(config)
   with this_mesh:
     tunix_model = TunixMaxTextAdapter(
-        base_model=model,
+      base_model=model,
     )
 
     this_model_config = llama3_lib.ModelConfig.llama3_1_8b()
@@ -399,30 +399,30 @@ model_config = llama3_lib.ModelConfig.llama3_1_8b()
 # Note: pass the path to your scanned checkpoint for "load_parameters_path".
 # To create a scanned checkpoint, you can use /maxtext/src/MaxText/utils/ckpt_conversion/to_maxtext.py
 config_ref = pyconfig.initialize(
-    [
-        "",
-        f"{HOME}/maxtext/src/MaxText/configs/base.yml",
-    ],
-    base_output_directory="dummy",  # This is not used in Tunix.
-    run_name="test-tunix-maxtext-llama3.1-8b",
-    tokenizer_type="tiktoken",
-    tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizer_llama3.tiktoken"),
-    load_parameters_path=MODEL_CHECKPOINT_PATH,
-    per_device_batch_size=1,
-    max_prefill_predict_length=4,
-    max_target_length=1024,
-    steps=10,
-    async_checkpointing="false",
-    model_name="llama3.1-8b",
-    checkpoint_period=5,
-    skip_jax_distributed_system="true",
-    weight_dtype="bfloat16",
-    attention="dot_product",
-    remat_policy="custom",
-    decoder_layer_input="offload",
-    query_proj="offload",
-    key_proj="offload",
-    value_proj="offload",
+  [
+    "",
+    f"{HOME}/maxtext/src/MaxText/configs/base.yml",
+  ],
+  base_output_directory="dummy",  # This is not used in Tunix.
+  run_name="test-tunix-maxtext-llama3.1-8b",
+  tokenizer_type="tiktoken",
+  tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizer_llama3.tiktoken"),
+  load_parameters_path=MODEL_CHECKPOINT_PATH,
+  per_device_batch_size=1,
+  max_prefill_predict_length=4,
+  max_target_length=1024,
+  steps=10,
+  async_checkpointing="false",
+  model_name="llama3.1-8b",
+  checkpoint_period=5,
+  skip_jax_distributed_system="true",
+  weight_dtype="bfloat16",
+  attention="dot_product",
+  remat_policy="custom",
+  decoder_layer_input="offload",
+  query_proj="offload",
+  key_proj="offload",
+  value_proj="offload",
 )
 
 llama3_1_8b, mesh = get_ref_maxtext_model(config_ref)
@@ -441,8 +441,8 @@ if DEBUG:
   _maxtext_state_flatten = nnx.state(llama3_1_8b).flat_state()
   maxtext_state_flatten = {".".join(str(key) for key in keys): v for keys, v in _maxtext_state_flatten}
   print(
-      f"maxtext_state_flatten[base.token_embedder.embedding].value="
-      f"{maxtext_state_flatten['base.token_embedder.embedding'].value}"
+    f"maxtext_state_flatten[base.token_embedder.embedding].value="
+    f"{maxtext_state_flatten['base.token_embedder.embedding'].value}"
   )
 
 
@@ -458,30 +458,30 @@ show_hbm_usage()
 # TODO: @mazumdera: change this to use lora
 
 config_policy = pyconfig.initialize(
-    [
-        "",
-        f"{HOME}/maxtext/src/MaxText/configs/base.yml",
-    ],
-    base_output_directory="dummy",  # This is not used in Tunix.
-    run_name="test-tunix-maxtext-llama3.1-8b",  # This is not used in Tunix.
-    tokenizer_type="tiktoken",
-    tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizer_llama3.tiktoken"),
-    load_parameters_path=MODEL_CHECKPOINT_PATH,
-    per_device_batch_size=1,
-    max_prefill_predict_length=4,
-    max_target_length=1024,
-    steps=10,
-    async_checkpointing="false",
-    model_name="llama3.1-8b",
-    checkpoint_period=5,
-    skip_jax_distributed_system="true",
-    weight_dtype="bfloat16",
-    attention="dot_product",
-    remat_policy="custom",
-    decoder_layer_input="offload",
-    query_proj="offload",
-    key_proj="offload",
-    value_proj="offload",
+  [
+    "",
+    f"{HOME}/maxtext/src/MaxText/configs/base.yml",
+  ],
+  base_output_directory="dummy",  # This is not used in Tunix.
+  run_name="test-tunix-maxtext-llama3.1-8b",  # This is not used in Tunix.
+  tokenizer_type="tiktoken",
+  tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizer_llama3.tiktoken"),
+  load_parameters_path=MODEL_CHECKPOINT_PATH,
+  per_device_batch_size=1,
+  max_prefill_predict_length=4,
+  max_target_length=1024,
+  steps=10,
+  async_checkpointing="false",
+  model_name="llama3.1-8b",
+  checkpoint_period=5,
+  skip_jax_distributed_system="true",
+  weight_dtype="bfloat16",
+  attention="dot_product",
+  remat_policy="custom",
+  decoder_layer_input="offload",
+  query_proj="offload",
+  key_proj="offload",
+  value_proj="offload",
 )
 llama3_1_8b_policy, mesh_policy = get_ref_maxtext_model(config_policy)
 
@@ -497,8 +497,8 @@ if DEBUG:
   _maxtext_state_flatten = nnx.state(llama3_1_8b_policy).flat_state()
   maxtext_state_flatten = {".".join(str(key) for key in keys): v for keys, v in _maxtext_state_flatten}
   print(
-      f"maxtext_state_flatten[base.token_embedder.embedding].value="
-      f"{maxtext_state_flatten['base.token_embedder.embedding'].value}"
+    f"maxtext_state_flatten[base.token_embedder.embedding].value="
+    f"{maxtext_state_flatten['base.token_embedder.embedding'].value}"
   )
 
 # See memory usage after loading the policy model:
@@ -525,12 +525,12 @@ show_hbm_usage()
 #
 
 match_format = re.compile(
-    rf"^[\s]{{0,}}" rf"{reasoning_start}.+?{reasoning_end}.*?" rf"{solution_start}(.+?){solution_end}" rf"[\s]{{0,}}$",
-    flags=re.MULTILINE | re.DOTALL,
+  rf"^[\s]{{0,}}" rf"{reasoning_start}.+?{reasoning_end}.*?" rf"{solution_start}(.+?){solution_end}" rf"[\s]{{0,}}$",
+  flags=re.MULTILINE | re.DOTALL,
 )
 
 match_format.search(
-    f"{reasoning_start}Let me" f" think!{reasoning_end}{solution_start}2{solution_end}",
+  f"{reasoning_start}Let me think!{reasoning_end}{solution_start}2{solution_end}",
 )
 
 
@@ -712,12 +712,12 @@ def check_numbers(prompts, completions, answer, **kargs):
 
 
 def generate_responses(
-    prompts,
-    rl_cluster,
-    num_passes=1,
-    temperature=0.7,
-    top_k=50,
-    top_p=0.95,
+  prompts,
+  rl_cluster,
+  num_passes=1,
+  temperature=0.7,
+  top_k=50,
+  top_p=0.95,
 ):
   """
   Generate responses for a batch of prompts across multiple passes.
@@ -737,18 +737,18 @@ def generate_responses(
 
   for p in range(num_passes):
     responses = rl_cluster.rollout.generate(
-        prompts,
-        rollout_config=RolloutConfig(
-            max_tokens_to_generate=TOTAL_GENERATION_STEPS,
-            temperature=temperature,
-            top_k=top_k,
-            top_p=top_p,
-        ),
+      prompts,
+      rollout_config=RolloutConfig(
+        max_tokens_to_generate=TOTAL_GENERATION_STEPS,
+        temperature=temperature,
+        top_k=top_k,
+        top_p=top_p,
+      ),
     )
     responses = responses.text
 
     if DEBUG:
-      print(f"Pass {p+1}/{num_passes}, responses: {responses}")
+      print(f"Pass {p + 1}/{num_passes}, responses: {responses}")
 
     for idx, response in enumerate(responses):
       multiple_call_responses[idx].append(response)
@@ -812,14 +812,14 @@ def score_responses(question, responses, answer):
 
 
 def evaluate(
-    dataset,
-    rl_cluster,
-    temperature=0.7,
-    top_k=50,
-    top_p=0.95,
-    num_passes=1,
-    corr_lst=False,
-    make_lst=False,
+  dataset,
+  rl_cluster,
+  temperature=0.7,
+  top_k=50,
+  top_p=0.95,
+  num_passes=1,
+  corr_lst=False,
+  make_lst=False,
 ):
   """
   Computes accuracy and percentage of outputs matching the format.
@@ -850,20 +850,20 @@ def evaluate(
 
     # Generate responses for all prompts in the batch
     multiple_call_responses = generate_responses(
-        prompts=prompts,
-        rl_cluster=rl_cluster,
-        num_passes=num_passes,
-        temperature=temperature,
-        top_k=top_k,
-        top_p=top_p,
+      prompts=prompts,
+      rl_cluster=rl_cluster,
+      num_passes=num_passes,
+      temperature=temperature,
+      top_k=top_k,
+      top_p=top_p,
     )
 
     # Score each question-answer pair
     for question, responses, answer in zip(questions, multiple_call_responses, answers):
       is_correct, is_partially_correct, has_correct_format = score_responses(
-          question=question,
-          responses=responses,
-          answer=answer,
+        question=question,
+        responses=responses,
+        answer=answer,
       )
 
       # Update counters
@@ -886,17 +886,16 @@ def evaluate(
       # Print progress every 10 items
       if total % 10 == 0:
         print(
-            f"===> {corr=}, {total=}, {corr / total * 100=}, "
-            f"{partially_corr / total * 100=}, {corr_format / total * 100=}"
+          f"===> {corr=}, {total=}, {corr / total * 100=}, {partially_corr / total * 100=}, {corr_format / total * 100=}"
         )
 
   # Prepare return values
   to_return = (
-      corr,
-      total,
-      corr / total * 100,
-      partially_corr / total * 100,
-      corr_format / total * 100,
+    corr,
+    total,
+    corr / total * 100,
+    partially_corr / total * 100,
+    corr_format / total * 100,
   )
 
   if make_lst:
@@ -921,92 +920,92 @@ def main():
 
   # Optimizer, learning rate scheduler, gradient clipping
   optimizer = optax.adamw(
-      learning_rate=optax.schedules.warmup_cosine_decay_schedule(
-          init_value=0.0,
-          peak_value=LEARNING_RATE,
-          warmup_steps=WARMUP_STEPS,
-          decay_steps=MAX_STEPS,
-          end_value=0.0,
-      ),
-      b1=B1,
-      b2=B2,
-      weight_decay=WEIGHT_DECAY,
+    learning_rate=optax.schedules.warmup_cosine_decay_schedule(
+      init_value=0.0,
+      peak_value=LEARNING_RATE,
+      warmup_steps=WARMUP_STEPS,
+      decay_steps=MAX_STEPS,
+      end_value=0.0,
+    ),
+    b1=B1,
+    b2=B2,
+    weight_decay=WEIGHT_DECAY,
   )
 
   if MAX_GRAD_NORM is not None:
     optimizer = optax.chain(
-        optax.clip_by_global_norm(max_norm=MAX_GRAD_NORM),
-        optimizer,
+      optax.clip_by_global_norm(max_norm=MAX_GRAD_NORM),
+      optimizer,
     )
 
   # RL Cluster config
   # Note that we use vLLM as the rollout engine.
   # and we are using Tensor Parallelism for rollout
   cluster_config = rl_cluster_lib.ClusterConfig(
-      role_to_mesh={
-          rl_cluster_lib.Role.ACTOR: mesh,
-          rl_cluster_lib.Role.REFERENCE: mesh,
-          rl_cluster_lib.Role.ROLLOUT: mesh,
-      },
-      rollout_engine="vllm",
-      offload_to_cpu=False,
-      training_config=rl_cluster_lib.RLTrainingConfig(
-          actor_optimizer=optimizer,
-          eval_every_n_steps=EVAL_EVERY_N_STEPS,
-          max_steps=MAX_STEPS,
-          gradient_accumulation_steps=1,
-          # metrics logging
-          metrics_logging_options=metrics_logging_options,
-          # checkpoint saving
-          checkpoint_root_directory=CKPT_DIR,
-          checkpointing_options=checkpointing_options,
-      ),
-      rollout_config=base_rollout.RolloutConfig(
-          max_tokens_to_generate=TOTAL_GENERATION_STEPS,
-          max_prompt_length=MAX_PROMPT_LENGTH,
-          kv_cache_size=MAX_PROMPT_LENGTH + TOTAL_GENERATION_STEPS + 256,
-          temperature=TEMPERATURE,
-          top_p=TOP_P,
-          top_k=TOP_K,
-      ),
-      rollout_vllm_model_version="meta-llama/Meta-Llama-3.1-8B-Instruct",
-      rollout_vllm_hbm_utilization=0.2,
-      rollout_vllm_tpu_backend_type="jax",
+    role_to_mesh={
+      rl_cluster_lib.Role.ACTOR: mesh,
+      rl_cluster_lib.Role.REFERENCE: mesh,
+      rl_cluster_lib.Role.ROLLOUT: mesh,
+    },
+    rollout_engine="vllm",
+    offload_to_cpu=False,
+    training_config=rl_cluster_lib.RLTrainingConfig(
+      actor_optimizer=optimizer,
+      eval_every_n_steps=EVAL_EVERY_N_STEPS,
+      max_steps=MAX_STEPS,
+      gradient_accumulation_steps=1,
+      # metrics logging
+      metrics_logging_options=metrics_logging_options,
+      # checkpoint saving
+      checkpoint_root_directory=CKPT_DIR,
+      checkpointing_options=checkpointing_options,
+    ),
+    rollout_config=base_rollout.RolloutConfig(
+      max_tokens_to_generate=TOTAL_GENERATION_STEPS,
+      max_prompt_length=MAX_PROMPT_LENGTH,
+      kv_cache_size=MAX_PROMPT_LENGTH + TOTAL_GENERATION_STEPS + 256,
+      temperature=TEMPERATURE,
+      top_p=TOP_P,
+      top_k=TOP_K,
+    ),
+    rollout_vllm_model_version="meta-llama/Meta-Llama-3.1-8B-Instruct",
+    rollout_vllm_hbm_utilization=0.2,
+    rollout_vllm_tpu_backend_type="jax",
   )
 
   grpo_config = GrpoConfig(
-      num_generations=NUM_GENERATIONS,
-      num_iterations=NUM_ITERATIONS,
-      beta=BETA,
-      epsilon=EPSILON,
+    num_generations=NUM_GENERATIONS,
+    num_iterations=NUM_ITERATIONS,
+    beta=BETA,
+    epsilon=EPSILON,
   )
 
   # RL cluster
 
   rl_cluster = rl_cluster_lib.RLCluster(
-      actor=llama3_1_8b_policy,
-      reference=llama3_1_8b,
-      tokenizer=model_tokenizer,
-      cluster_config=cluster_config,
+    actor=llama3_1_8b_policy,
+    reference=llama3_1_8b,
+    tokenizer=model_tokenizer,
+    cluster_config=cluster_config,
   )
 
   # GRPO Trainer
   grpo_trainer = GrpoLearner(
-      rl_cluster=rl_cluster,
-      reward_fns=[
-          match_format_exactly,
-          match_format_approximately,
-          check_answer,
-          check_numbers,
-      ],
-      grpo_config=grpo_config,
+    rl_cluster=rl_cluster,
+    reward_fns=[
+      match_format_exactly,
+      match_format_approximately,
+      check_answer,
+      check_numbers,
+    ],
+    grpo_config=grpo_config,
   )
 
   if DEBUG:
     # verify if vllm sampler works
     output = rl_cluster.rollout.generate(
-        ["The capital of France is"],
-        rollout_config=RolloutConfig(max_tokens_to_generate=64, temperature=0.1),
+      ["The capital of France is"],
+      rollout_config=RolloutConfig(max_tokens_to_generate=64, temperature=0.1),
     )
 
     print(f"Output: {output}")
@@ -1016,11 +1015,11 @@ def main():
 
   # pylint: disable=unbalanced-tuple-unpacking
   (corr, total, accuracy, partial_accuracy, format_accuracy) = evaluate(
-      test_dataset,
-      rl_cluster,
-      **GENERATION_CONFIGS["greedy"],
+    test_dataset,
+    rl_cluster,
+    **GENERATION_CONFIGS["greedy"],
   )
-  print(f"Pre GRPO Training: {corr=}, {total=}, {accuracy=}%, {partial_accuracy=}%," f" {format_accuracy=}%")
+  print(f"Pre GRPO Training: {corr=}, {total=}, {accuracy=}%, {partial_accuracy=}%, {format_accuracy=}%")
 
   # ## Start training
   #
@@ -1039,11 +1038,11 @@ def main():
 
   # pylint: disable=unbalanced-tuple-unpacking
   (corr, total, accuracy, partial_accuracy, format_accuracy) = evaluate(
-      test_dataset,
-      rl_cluster,
-      **GENERATION_CONFIGS["greedy"],
+    test_dataset,
+    rl_cluster,
+    **GENERATION_CONFIGS["greedy"],
   )
-  print(f"Post GRPO Training: {corr=}, {total=}, {accuracy=}%, {partial_accuracy=}%," f" {format_accuracy=}%")
+  print(f"Post GRPO Training: {corr=}, {total=}, {accuracy=}%, {partial_accuracy=}%, {format_accuracy=}%")
 
 
 if __name__ == "__main__":

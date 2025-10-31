@@ -59,7 +59,11 @@ import numpy as np
 from MaxText.experimental.agent.code_evaluation_agent.utils import get_last_defined_module
 from MaxText.experimental.agent.code_generation_agent.llm_agent import GeminiAgent
 from MaxText.experimental.agent.integrative_rag_agent import system_setup
-from MaxText.experimental.agent.integrative_rag_agent.config import maxtext_code_block, maxtext_block_description, enable_cache
+from MaxText.experimental.agent.integrative_rag_agent.config import (
+  maxtext_code_block,
+  maxtext_block_description,
+  enable_cache,
+)
 from MaxText.experimental.agent.integrative_rag_agent.database_operations import save_document, load_all_documents
 from MaxText.experimental.agent.integrative_rag_agent.llm_rag_agent import EmbeddingAgent
 from MaxText.experimental.agent.integrative_rag_agent.prompts_integrative_rag import Description_Prompt, CODE_DESCRIPTION
@@ -76,7 +80,7 @@ def _init_cache(db_path="embedding_cache.db"):
   conn = sqlite3.connect(db_path)
   cursor = conn.cursor()
   cursor.execute(
-      """
+    """
         CREATE TABLE IF NOT EXISTS cache (
             key TEXT PRIMARY KEY,
             module_code TEXT,
@@ -146,7 +150,7 @@ def get_code_embedding(file_path, project_root, comp_name, db_path="dataset/embe
 
   # If not cached, compute and store
   module_code, full_source_code = get_modules_from_file(
-      file_path, module=comp_name, project_root=project_root, add_external_dependencies=True
+    file_path, module=comp_name, project_root=project_root, add_external_dependencies=True
   )
   if module_code is None:
     return None, None, None
@@ -159,8 +163,8 @@ def get_code_embedding(file_path, project_root, comp_name, db_path="dataset/embe
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
     cursor.execute(
-        "INSERT INTO cache (key, module_code, code_description, embedding) VALUES (?, ?, ?, ?)",
-        (key, module_code, json.dumps(code_description), pickle.dumps(np.array(embedding).astype(np.float32))),
+      "INSERT INTO cache (key, module_code, code_description, embedding) VALUES (?, ?, ?, ?)",
+      (key, module_code, json.dumps(code_description), pickle.dumps(np.array(embedding).astype(np.float32))),
     )
     conn.commit()
     conn.close()
@@ -274,7 +278,7 @@ def embedding_generation(skip_existing_records):
     print(f"Generating embeddings for: {doc['block_name']}")
     desc = json.dumps(doc["analysis"])
     embeddings = embedding_agent(
-        desc
+      desc
     )  # Make embedding of description not code block as we want some similar code in different framework
     if embeddings:
       save_document(doc["block_name"], doc["code_block"], desc, doc["file_path"], np.array(embeddings))
@@ -288,9 +292,9 @@ if __name__ == "__main__":
   system_setup.setup_directories()
   parser = argparse.ArgumentParser(description="Generate code block descriptions and embeddings.")
   parser.add_argument(
-      "--override-existing-records",
-      action="store_true",
-      help="Override existing records for both description and embedding generation.",
+    "--override-existing-records",
+    action="store_true",
+    help="Override existing records for both description and embedding generation.",
   )
   args = parser.parse_args()
 

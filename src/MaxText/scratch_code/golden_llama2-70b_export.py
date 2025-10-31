@@ -25,8 +25,8 @@ model_id = "meta-llama/Llama-2-70b-hf"
 
 tokenizer = AutoTokenizer.from_pretrained(model_id)
 model = AutoModelForCausalLM.from_pretrained(
-    model_id,
-    torch_dtype=torch.float32,
+  model_id,
+  torch_dtype=torch.float32,
 )
 
 
@@ -51,9 +51,9 @@ for prompt_text in prompt_texts:
 
     # Prepare data to be saved
     data_to_save = {
-        "prompt": prompt_text,
-        "tokens": input_ids.tolist()[0],
-        "logits": logits.tolist()[0],  # Convert numpy array to list for JSON serialization
+      "prompt": prompt_text,
+      "tokens": input_ids.tolist()[0],
+      "logits": logits.tolist()[0],  # Convert numpy array to list for JSON serialization
     }
     all_data_to_save.append(data_to_save)
 
