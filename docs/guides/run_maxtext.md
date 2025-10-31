@@ -1,4 +1,4 @@
-# Running MaxText on different environments
+# Run MaxText on different environments
 
 ```{toctree}
 :maxdepth: 1
