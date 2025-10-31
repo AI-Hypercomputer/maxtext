@@ -1,21 +1,19 @@
 #!/bin/bash
 
-'
 # This script is designed for internal use within Google.
 # External users can update pre-trained model checkpoint GCS path (gs://) to your accessible locations.
 # Usage:
-  HF_TOKEN=<huggingface access token> \
-  MODEL=llama3.1-8b TOKENIZER=meta-llama/Llama-3.1-8B-Instruct \
-  NUM_SAMPLERS=2 DEVICES_PER_SAMPLER=8 \
-  TRAINING_PER_DEVICE_BATCH_SIZE=1 \
-  INFERENCE_PER_DEVICE_BATCH_SIZE=1 \
-  TRAINING_SUBSLICE=2,8 \
-  INFERENCE_SUBSLICE=2,8 \
-  MAX_PREFILL_LENGTH=128 \
-  MAX_TARGET_LENGTH=256 \
-  STEPS=20 \
-  bash end_to_end/tpu/test_grpo.sh
-'
+#  HF_TOKEN=<huggingface access token> \
+#  MODEL=llama3.1-8b TOKENIZER=meta-llama/Llama-3.1-8B-Instruct \
+#  NUM_SAMPLERS=2 DEVICES_PER_SAMPLER=8 \
+#  TRAINING_PER_DEVICE_BATCH_SIZE=1 \
+#  INFERENCE_PER_DEVICE_BATCH_SIZE=1 \
+#  TRAINING_SUBSLICE=2,8 \
+#  INFERENCE_SUBSLICE=2,8 \
+#  MAX_PREFILL_LENGTH=128 \
+#  MAX_TARGET_LENGTH=256 \
+#  STEPS=20 \
+#  bash end_to_end/tpu/test_grpo.sh
 
 set -xe
 

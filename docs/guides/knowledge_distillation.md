@@ -47,12 +47,13 @@ export RUN_NAME = <unique name for the run>
 
 #### b. Install dependencies
 
-```
+```sh
 git clone https://github.com/AI-Hypercomputer/maxtext.git
 python3 -m venv ~/venv-maxtext
 source ~/venv-maxtext/bin/activate
+python3 -m pip install uv
 cd maxtext
-uv pip install -r requirements.txt
+uv pip install -r dependencies/requirements/requirements.txt
 ```
 
 ### 1. Obtain and prepare the teacher model

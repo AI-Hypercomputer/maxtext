@@ -29,6 +29,17 @@
 
 # bash docker_build_dependency_image.sh MODE=post-training
 
+if [ "${BASH_SOURCE-}" ]; then
+  this_file="${BASH_SOURCE[0]}"
+elif [ "${ZSH_VERSION-}" ]; then
+  # shellcheck disable=SC2296
+  this_file="${(%):-%x}"
+else
+  this_file="${0}"
+fi
+
+MAXTEXT_REPO_ROOT="${MAXTEXT_REPO_ROOT:-$(CDPATH='' cd -- "$(dirname -- "${this_file}")"'/../..' && pwd)}"
+
 # Enable "exit immediately if any command fails" option
 set -e
 
@@ -101,7 +112,8 @@ build_ai_image() {
         --build-arg DEVICE="$DEVICE" \
         --network=host \
         -t ${LOCAL_IMAGE_NAME} \
-        -f ./maxtext_jax_ai_image.Dockerfile .
+        -f "$MAXTEXT_REPO_ROOT"'/dependencies/dockerfiles/maxtext_jax_ai_image.Dockerfile' \
+        .
 }
 
 if [[ -z ${LIBTPU_GCS_PATH+x} ]] ; then
@@ -116,24 +128,41 @@ if [[ -z ${LIBTPU_GCS_PATH+x} ]] ; then
       else
         export BASEIMAGE=ghcr.io/nvidia/jax:base
       fi
-      docker build --network host --build-arg MODE=${MODE} --build-arg JAX_VERSION=$JAX_VERSION --build-arg DEVICE=$DEVICE --build-arg BASEIMAGE=$BASEIMAGE -f ./maxtext_gpu_dependencies.Dockerfile -t ${LOCAL_IMAGE_NAME} .
+      docker build --network host --build-arg MODE=${MODE} --build-arg JAX_VERSION=$JAX_VERSION \
+                   --build-arg DEVICE=$DEVICE --build-arg BASEIMAGE=$BASEIMAGE \
+                   -f "$MAXTEXT_REPO_ROOT"'/dependencies/dockerfiles/maxtext_gpu_dependencies.Dockerfile' \
+                   -t ${LOCAL_IMAGE_NAME} .
     fi
   else
     if [[ ${MODE} == "stable_stack" || ${MODE} == "jax_ai_image" ]]; then
       build_ai_image
     elif [[ ${MANTARAY} == "true" ]]; then
       echo "Building with benchmark-db"
-      docker build --network host --build-arg MODE=${MODE} --build-arg JAX_VERSION=$JAX_VERSION --build-arg LIBTPU_GCS_PATH=$LIBTPU_GCS_PATH --build-arg DEVICE=$DEVICE -f ./maxtext_db_dependencies.Dockerfile -t ${LOCAL_IMAGE_NAME} .
+      docker build --network host --build-arg MODE=${MODE} --build-arg JAX_VERSION=$JAX_VERSION \
+                   --build-arg LIBTPU_GCS_PATH=$LIBTPU_GCS_PATH --build-arg DEVICE=$DEVICE \
+                   -f "$MAXTEXT_REPO_ROOT"'/dependencies/dockerfiles/maxtext_db_dependencies.Dockerfile' \
+                   -t ${LOCAL_IMAGE_NAME} .
     elif [[ ${INSTALL_POST_TRAINING} -eq 1 && ${DEVICE} == "tpu" ]]; then
-      echo "Installing MaxText stable mode dependencies for Post-Training"
-      docker build --network host --build-arg MODE=stable --build-arg JAX_VERSION=$JAX_VERSION --build-arg LIBTPU_GCS_PATH=$LIBTPU_GCS_PATH --build-arg DEVICE=$DEVICE -f ./maxtext_dependencies.Dockerfile -t ${LOCAL_IMAGE_NAME} .
+      echo "Installing MaxText stable mode dependencies for GRPO"
+      docker build --network host --build-arg MODE=stable --build-arg JAX_VERSION=$JAX_VERSION \
+                   --build-arg LIBTPU_GCS_PATH=$LIBTPU_GCS_PATH --build-arg DEVICE=$DEVICE \
+                   -f "$MAXTEXT_REPO_ROOT"'/dependencies/dockerfiles/maxtext_dependencies.Dockerfile' \
+                   -t ${LOCAL_IMAGE_NAME} .
     else
-      docker build --network host --build-arg MODE=${MODE} --build-arg JAX_VERSION=$JAX_VERSION --build-arg LIBTPU_GCS_PATH=$LIBTPU_GCS_PATH --build-arg DEVICE=$DEVICE -f ./maxtext_dependencies.Dockerfile -t ${LOCAL_IMAGE_NAME} .
+      docker build --network host --build-arg MODE=${MODE} --build-arg JAX_VERSION=$JAX_VERSION \
+                   --build-arg LIBTPU_GCS_PATH=$LIBTPU_GCS_PATH --build-arg DEVICE=$DEVICE \
+                   -f "$MAXTEXT_REPO_ROOT"'/dependencies/dockerfiles/maxtext_dependencies.Dockerfile' \
+                   -t ${LOCAL_IMAGE_NAME} .
     fi
   fi
 else
-  docker build --network host --build-arg MODE=${MODE} --build-arg JAX_VERSION=$JAX_VERSION --build-arg LIBTPU_GCS_PATH=$LIBTPU_GCS_PATH -f ./maxtext_dependencies.Dockerfile -t ${LOCAL_IMAGE_NAME} .
-  docker build --network host --build-arg CUSTOM_LIBTPU=true -f ./maxtext_libtpu_path.Dockerfile -t ${LOCAL_IMAGE_NAME} .
+  docker build --network host --build-arg MODE=${MODE} --build-arg JAX_VERSION=$JAX_VERSION \
+               --build-arg LIBTPU_GCS_PATH=$LIBTPU_GCS_PATH \
+               -f "$MAXTEXT_REPO_ROOT"'/dependencies/dockerfiles/maxtext_dependencies.Dockerfile' \
+               -t ${LOCAL_IMAGE_NAME} .
+  docker build --network host --build-arg CUSTOM_LIBTPU=true \
+               -f "$MAXTEXT_REPO_ROOT"'/dependencies/dockerfiles/maxtext_libtpu_path.Dockerfile' \
+               -t ${LOCAL_IMAGE_NAME} .
 fi
 
 if [[ ${INSTALL_POST_TRAINING} -eq 1 ]] ; then
@@ -158,13 +187,15 @@ if [[ ${INSTALL_POST_TRAINING} -eq 1 ]] ; then
     --network host \
     --build-arg BASEIMAGE=${LOCAL_IMAGE_NAME} \
     --build-arg MODE=${MODE} \
-    -f ./maxtext_post_training_dependencies.Dockerfile \
+    -f "$MAXTEXT_REPO_ROOT"'/dependencies/dockerfiles/maxtext_post_training_dependencies.Dockerfile' \
     -t ${LOCAL_IMAGE_NAME} .
 fi
 
 if [[ ${CUSTOM_JAX} -eq 1 ]] ; then
   echo "Installing custom jax and jaxlib"
-  docker build --network host -f ./maxtext_custom_wheels.Dockerfile -t ${LOCAL_IMAGE_NAME} .
+  docker build --network host \
+               -f "$MAXTEXT_REPO_ROOT"'/dependencies/dockerfiles/maxtext_custom_wheels.Dockerfile' \
+               -t ${LOCAL_IMAGE_NAME} .
 fi
 
 echo ""

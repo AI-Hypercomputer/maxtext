@@ -92,7 +92,7 @@ You need to run these steps once per project prior to any local development or c
 MaxText assumes these GCS buckets are created in the same project and that it has permissions to read and write from them:
 
 ```bash
-bash download_dataset.sh {GCS_PROJECT} {GCS_BUCKET_NAME}
+bash tools/data_generation/download_dataset.sh ${GCS_PROJECT?} ${GCS_BUCKET_NAME?}
 ```
 
 The above will download the c4 dataset to your GCS BUCKET.

@@ -28,11 +28,11 @@ In this tutorial we use a single host TPUVM such as `v6e-8/v5p-8`. Let's get sta
 ## Setup your virtual environment
 
 ### Create a Python3.12 venv if not already pre-existing and install MaxText dependencies
-```
-bash setup.sh
+```sh
+bash tools/setup/setup.sh
 ```
 
-### Activate your virtual environment (Skip if you have already done this for running `bash setup.sh` )
+### Activate your virtual environment (Skip if you have already done this for running `bash tools/setup/setup.sh` )
 ```
 # Replace with your virtual environment name if not using this default name
 venv_name="maxtext_venv"

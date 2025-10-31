@@ -28,7 +28,7 @@ cd maxtext
 
 ### 1.2. Build MaxText Docker image
 ```bash
-bash docker_build_dependency_image.sh MODE=jax_ai_image BASEIMAGE=us-docker.pkg.dev/cloud-tpu-images/jax-ai-image/tpu:latest
+bash dependencies/scripts/docker_build_dependency_image.sh MODE=jax_ai_image BASEIMAGE=us-docker.pkg.dev/cloud-tpu-images/jax-ai-image/tpu:latest
 ```
 This creates a local Docker image named `maxtext_base_image`.
 
@@ -36,7 +36,7 @@ This creates a local Docker image named `maxtext_base_image`.
 ```bash
 # Replace `$USER_runner` with your desired image name
 export DOCKER_IMAGE_NAME=${USER}_runner
-bash docker_upload_runner.sh CLOUD_IMAGE_NAME=$DOCKER_IMAGE_NAME
+bash dependencies/scripts/docker_upload_runner.sh CLOUD_IMAGE_NAME=$DOCKER_IMAGE_NAME
 ```
 The `docker_upload_runner.sh` script uploads your Docker image to Artifact Registry.
 
