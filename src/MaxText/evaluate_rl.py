@@ -18,6 +18,7 @@ import functools
 import os
 from pprint import pprint
 import re
+
 import sys
 
 from datetime import datetime
@@ -51,11 +52,6 @@ from MaxText.globals import MAXTEXT_ASSETS_ROOT
 from MaxText import rl_utils
 
 # ## Evaluate
-#
-#
-# Before we train the model, let's evaluate the model on the test set so we can
-# see the improvement post training.
-#
 # We evaluate it in two ways:
 #
 # **Quantitative**
@@ -76,13 +72,10 @@ from MaxText import rl_utils
 
 
 def generate_responses(
-    mt_config,
+    tmvp_config,
     prompts,
     rl_cluster,
     num_passes=1,
-    temperature=0.7,
-    top_k=50,
-    top_p=0.95,
 ):
   """
   Generate responses for a batch of prompts across multiple passes.
@@ -104,15 +97,15 @@ def generate_responses(
     responses = rl_cluster.rollout.generate(
         prompts,
         rollout_config=RolloutConfig(
-            max_tokens_to_generate=mt_config.max_target_length,
-            temperature=mt_config.eval_temperature,
-            top_k=mt_config.eval_top_k,
-            top_p=mt_config.eval_top_p,
+            max_tokens_to_generate=tmvp_config.max_target_length,
+            temperature=tmvp_config.eval_temperature,
+            top_k=tmvp_config.eval_top_k,
+            top_p=tmvp_config.eval_top_p,
         ),
     )
     responses = responses.text
 
-    if mt_config.debug:
+    if tmvp_config.debug:
       print(f"Pass {p+1}/{num_passes}, responses: {responses}")
 
     for idx, response in enumerate(responses):
@@ -121,7 +114,7 @@ def generate_responses(
   return multiple_call_responses
 
 
-def score_responses(mt_config, question, responses, answer):
+def score_responses(tmvp_config, question, responses, answer):
   """
   Score a set of responses for a single question.
 
@@ -133,10 +126,10 @@ def score_responses(mt_config, question, responses, answer):
   Returns:
       Tuple of (is_correct, is_partially_correct, has_correct_format)
   """
-  match_format = rl_utils.get_match_format_regex(mt_config)
-  match_numbers = rl_utils.get_match_numbers_regex(mt_config)
+  match_format = rl_utils.get_match_format_regex(tmvp_config)
+  match_numbers = rl_utils.get_match_numbers_regex(tmvp_config)
 
-  if DEBUG:
+  if tmvp_config.debug:
     print("========================================")
     print(f"Evaluation Question: {question}")
     print(f"Evaluation Answer: {answer}")
@@ -151,7 +144,7 @@ def score_responses(mt_config, question, responses, answer):
     # Extract numerical response
     extracted_response = guess.group(1) if (guess := match_numbers.search(response)) is not None else "-1000000"
 
-    if DEBUG:
+    if tmvp_config.debug:
       print(f"Evaluation extracted_response: {extracted_response}")
 
     # Check exact correctness
@@ -164,7 +157,7 @@ def score_responses(mt_config, question, responses, answer):
       if 0.9 <= ratio <= 1.1:
         is_partially_correct = True
     except Exception as e:
-      if DEBUG:
+      if tmvp_config.debug:
         print(f"Evaluation Exception: {e}")
         print("SKIPPED")
 
@@ -180,12 +173,9 @@ def score_responses(mt_config, question, responses, answer):
 
 
 def evaluate(
-    mt_config,
+    tmvp_config,
     dataset,
     rl_cluster,
-    temperature=0.7,
-    top_k=50,
-    top_p=0.95,
     num_passes=1,
     corr_lst=False,
     make_lst=False,
@@ -194,11 +184,9 @@ def evaluate(
   Computes accuracy and percentage of outputs matching the format.
 
   Args:
+      tmvp_config: Configuration object
       dataset: The evaluation dataset
-      rl_cluster: Model cluster for generation
-      temperature: Sampling temperature
-      top_k: Top-k sampling parameter
-      top_p: Top-p sampling parameter
+      rl_cluster: Model cluster for generation.
       num_passes: Number of generation passes
       corr_lst: If True, only include correct responses in the list
       make_lst: If True, return a list of (question, answer, responses)
@@ -219,19 +207,16 @@ def evaluate(
 
     # Generate responses for all prompts in the batch
     multiple_call_responses = generate_responses(
-        mt_config=mt_config,
+        tmvp_config=tmvp_config,
         prompts=prompts,
         rl_cluster=rl_cluster,
         num_passes=num_passes,
-        temperature=temperature,
-        top_k=top_k,
-        top_p=top_p,
     )
 
     # Score each question-answer pair
     for question, responses, answer in zip(questions, multiple_call_responses, answers):
       is_correct, is_partially_correct, has_correct_format = score_responses(
-          mt_config=mt_config,
+          tmvp_config=tmvp_config,
           question=question,
           responses=responses,
           answer=answer,

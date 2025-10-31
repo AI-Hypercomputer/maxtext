@@ -52,41 +52,41 @@ import pathwaysutils
 
 # Let's define a RegEx for checking whether the format matches.
 #
-def get_match_format_regex(mt_config):
+def get_match_format_regex(tmvp_config):
   """Returns a compiled regex to extract the answer from a completion."""
   match_format = re.compile(
       (
           r"^[\s]{0,}}"
-          rf"{mt_config.reasoning_start_token}.+?{mt_config.reasoning_end_token}.*?"
-          rf"{mt_config.solution_start_token}(.+?){mt_config.solution_end_token}"
+          rf"{tmvp_config.reasoning_start_token}.+?{tmvp_config.reasoning_end_token}.*?"
+          rf"{tmvp_config.solution_start_token}(.+?){tmvp_config.solution_end_token}"
           r"[\s]{0,}$"
       ),
       flags=re.MULTILINE | re.DOTALL,
   )
-  if mt_config.debug:
+  if tmvp_config.debug:
     match_format.search(
-    f"{mt_config.reasoning_start_token}Let me" f" think!{mt_config.reasoning_end_token}{mt_config.solution_start_token}2{mt_config.solution_end_token}",
+    f"{tmvp_config.reasoning_start_token}Let me" f" think!{tmvp_config.reasoning_end_token}{tmvp_config.solution_start_token}2{tmvp_config.solution_end_token}",
   )
   return match_format
 
 
-def match_format_exactly(prompts, completions, mt_config, **kargs):
+def match_format_exactly(prompts, completions, tmvp_config, **kargs):
   """
-  Give the model a reward of mt_config.reward_exact_format_match points if the format matches exactly.
+  Give the model a reward of tmvp_config.reward_exact_format_match points if the format matches exactly.
   """
   scores = []
-  match_format = get_match_format_regex(mt_config)
+  match_format = get_match_format_regex(tmvp_config)
   for completion in completions:
     score = 0
     response = completion
     # Match if format is seen exactly!
     if match_format.search(response) is not None:
-      score += mt_config.reward_exact_format_match
+      score += tmvp_config.reward_exact_format_match
     scores.append(score)
   return scores
 
 
-def match_format_approximately(prompts, completions, mt_config, **kargs):
+def match_format_approximately(prompts, completions, tmvp_config, **kargs):
   """
   We also reward the model if the format of the output matches partially.
   """
@@ -97,42 +97,40 @@ def match_format_approximately(prompts, completions, mt_config, **kargs):
     # Count how many keywords are seen - we penalize if too many!
     # If we see 1, then plus some points!
     score += (
-        mt_config.reward_partial_format_match
-        if completion.count(mt_config.reasoning_start_token) == 1
-        else mt_config.penalty_incorrect_format
+        tmvp_config.reward_partial_format_match
+        if completion.count(tmvp_config.reasoning_start_token) == 1
+        else tmvp_config.penalty_incorrect_format
     )
     score += (
-        mt_config.reward_partial_format_match
-        if completion.count(mt_config.reasoning_end_token) == 1
-        else mt_config.penalty_incorrect_format
+        tmvp_config.reward_partial_format_match
+        if completion.count(tmvp_config.reasoning_end_token) == 1
+        else tmvp_config.penalty_incorrect_format
     )
     score += (
-        mt_config.reward_partial_format_match
-        if completion.count(mt_config.solution_start_token) == 1
-        else mt_config.penalty_incorrect_format
+        tmvp_config.reward_partial_format_match
+        if completion.count(tmvp_config.solution_start_token) == 1
+        else tmvp_config.penalty_incorrect_format
     )
     score += (
-        mt_config.reward_partial_format_match
-        if completion.count(mt_config.solution_end_token) == 1
-        else mt_config.penalty_incorrect_format
+        tmvp_config.reward_partial_format_match
+        if completion.count(tmvp_config.solution_end_token) == 1
+        else tmvp_config.penalty_incorrect_format
     )
     scores.append(score)
   return scores
 
 
-def check_answer(prompts, completions, answer, mt_config, **kargs):
+def check_answer(prompts, completions, answer, tmvp_config, **kargs):
   """
   Reward the model if the answer is correct. A reward is also given if the answer
   does not match exactly, i.e., based on how close the answer is to the correct
   value.
   """
-  match_format = get_match_format_regex(mt_config)
+  match_format = get_match_format_regex(tmvp_config)
   extracted_responses = [
       guess.group(1) if (guess := match_format.search(c)) is not None else None
       for c in completions
   ]
-
-  extracted_responses = [guess.group(1) if (guess := match_format.search(c)) is not None else None for c in completions]
 
   scores = []
   for guess, true_answer in zip(extracted_responses, answer):
@@ -140,25 +138,25 @@ def check_answer(prompts, completions, answer, mt_config, **kargs):
     if guess is None:
       scores.append(0)
       continue
-    # Correct answer gets 3 points!
+    # Correct answer gets points!
     if guess == true_answer:
-      score += mt_config.reward_exact_format_match
+      score += tmvp_config.reward_exact_format_match
     # Match if spaces are seen
     elif guess.strip() == true_answer.strip():
-      score += mt_config.reward_white_space_format_match
+      score += tmvp_config.reward_white_space_format_match
     else:
       # We also reward it if the answer is close via ratios!
       # Ie if the answer is within some range, reward it!
       try:
         ratio = float(guess) / float(true_answer)
         if ratio >= 0.9 and ratio <= 1.1:
-          score += mt_config.reward_ratio_guess_to_answer_high
+          score += tmvp_config.reward_ratio_guess_to_answer_high
         elif ratio >= 0.8 and ratio <= 1.2:
-          score += mt_config.reward_ratio_guess_to_answer_low
+          score += tmvp_config.reward_ratio_guess_to_answer_low
         else:
-          score += mt_config.penalty_incorrect_answer  # Penalize wrong answers
+          score += tmvp_config.penalty_incorrect_answer  # Penalize wrong answers
       except:
-        score += mt_config.penalty_incorrect_format  # Penalize
+        score += tmvp_config.penalty_incorrect_format  # Penalize
     scores.append(score)
   return scores
 
@@ -166,29 +164,29 @@ def check_answer(prompts, completions, answer, mt_config, **kargs):
 # Sometimes, the text between `<answer>` and `</answer>` might not be one
 # number; it can be a sentence. So, we extract the number and compare the answer.
 
-def get_match_numbers_regex(mt_config):
+def get_match_numbers_regex(tmvp_config):
   """Returns a compiled regex to extract the answer from a completion."""
   match_numbers = re.compile(
-      rf"{mt_config.solution_start_token}.*?([\d\.]{{1,}})", flags=re.MULTILINE | re.DOTALL
+      rf"{tmvp_config.solution_start_token}.*?([\d\.]{{1,}})", flags=re.MULTILINE | re.DOTALL
   )
-  if mt_config.debug:
-    match_numbers.findall(f"{mt_config.solution_start_token}  0.34  {mt_config.solution_end_token}")
+  if tmvp_config.debug:
+    match_numbers.findall(f"{tmvp_config.solution_start_token}  0.34  {tmvp_config.solution_end_token}")
   return match_numbers
 
-def check_numbers(prompts, completions, answer, mt_config, **kargs):
+def check_numbers(prompts, completions, answer, tmvp_config, **kargs):
   """
   Reward the model if the answer is correct.
   """
   question = kargs["question"]
   
-  match_numbers = get_match_numbers_regex(mt_config)
+  match_numbers = get_match_numbers_regex(tmvp_config)
   extracted_responses = [
       guess.group(1) if (guess := match_numbers.search(c)) is not None else None
       for c in completions
   ]
 
   scores = []
-  if mt_config.debug:
+  if tmvp_config.debug:
     print("START ============================")
     print(f"Question: {question[0]}")
     print(f"Answer: {answer[0]}")
@@ -216,4 +214,3 @@ def extract_hash_answer(text: str, debug: bool = False) -> str | None:
   if "####" not in text:
     return None
   return text.split("####")[1].strip()
-

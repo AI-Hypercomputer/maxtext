@@ -61,15 +61,13 @@ loss_algo: 'grpo' # grpo or gspo-token
 # Model-Specific Overrides (examples)
 # For Llama3.1-8B:
 #   model_name: llama3.1-8b
-#   tokenizer_path: meta-llama/Llama-3.1-8B-Instruct
+#   HF tokenizer_path: meta-llama/Llama-3.1-8B-Instruct
 #
 # For Llama3.1-70B with Pathways:
 #   model_name: llama3.1-70b
-#   tokenizer_path: meta-llama/Llama-3.1-70B-Instruct
+#   HF tokenizer_path: meta-llama/Llama-3.1-70B-Instruct
 
-async_checkpointing: 'false'
-checkpoint_period: 5
-skip_jax_distributed_system: True
+# ====== MaxText configs ======
 weight_dtype: 'bfloat16'
 attention: 'dot_product'
 remat_policy: 'custom'
@@ -77,17 +75,16 @@ decoder_layer_input: 'offload'
 query_proj: 'offload'
 key_proj: 'offload'
 value_proj: 'offload'
-# for vLLM
-hf_model_name: 'meta-llama/Llama-3.1-70B-Instruct'
+
 
 # ====== Training ======
 batch_size: 1
 # Increase `batch_size` and `MAX_STEPS` for better results.
-# num_batches = 3738
-num_batches = 4  # 200
+# num_batches: 3738
+num_batches: 4  # 200
 # Keep `num_test_batches` low so that evaluation runs quickly. It can be
 # increased to a max. of 330 (if batch size is 4).
-num_test_batches = 5  # 200
+num_test_batches: 5  # 200
 train_fraction: 1.0
 
 eval_interval: 10  # this doesn't matter if `TRAIN_FRACTION = 1.0`.
@@ -96,6 +93,20 @@ num_epochs: 1  # can potentially train for more epochs
 
 gradient_clipping_threshold: 0.1
 
+# ====== Evaluation ======
+generation_configs:
+  greedy:
+    temperature: 0.01
+    top_k: 1
+    top_p: 1.0
+  standard:
+    temperature: 0.7
+    top_k: 50
+    top_p: 0.95
+  liberal:
+    temperature: 0.85
+    top_k: 2000
+    top_p: 1.0
 
 # greedy
 eval_temperature: 0.01
@@ -108,13 +119,9 @@ eval_top_p: 1.0
 
 
 # ====== Inference ======
-# Important to keep a high-ish temperature for varied, diverse responses during
-# training.
-decode_sampling_temperature: 0.9
-decode_sampling_top_k: 50
-decode_sampling_nucleus_p: 1.0
-
 # for vLLM
+hf_model_name: None
+
 # === Generation during GRPO training ===
 # max Lengths for prompt and completion
 max_prefill_predict_length: 256
@@ -123,13 +130,15 @@ kv_cache_buffer: 256
 hbm_utilization_vllm: 0.72
 swap_space_vllm_gb: 2
 # Generation Configuration During Training
+# Important to keep a high-ish temperature for varied, diverse responses during
+# training.
 decode_sampling_temperature: 0.9
-decode_sampling_top_p: 1.0
 decode_sampling_top_k: 50
+decode_sampling_nucleus_p: 1.0
 
 # ====== Checkpoint Configuration ======
 enable_checkpointing: True
-async_checkpointing: True
+async_checkpointing: False
 checkpoint_period: 50
 max_num_checkpoints_to_keep: 10
 
@@ -162,40 +171,9 @@ template: |
   <start_of_turn>model
 
 
-# TODO: fix this
-# Dataset Configuration
-dataset_type: hf  # Huggingface input pipeline
-hf_path: 'gsm8k'
-hf_data_split: 'main'
-hf_data_files: 'train'
-
-
-# Pathways Inference Configuration
-# For multi-host/multi-slice setups
-use_pathways_reshard: False
-inference_devices_per_replica: 4
-inference_replicas: 1
-
-# Tokenizer Settings
-add_bos: False
-add_eos: False
-return_log_prob: True
-
-# Performance and Memory
-weight_dtype: bfloat16
-dtype: bfloat16
-
-# Splash Attention Block Sizes
-# Tuned for GRPO workloads
-sa_block_q: 128
-sa_block_kv: 128
-sa_block_kv_compute: 128
-sa_block_q_dkv: 128
-sa_block_kv_dkv: 128
-sa_block_kv_dkv_compute: 128
-sa_block_q_dq: 128
-sa_block_kv_dq: 128
-sa_use_fused_bwd_kernel: False
-sa_q_layout: "HEAD_DIM_MINOR"
-sa_k_layout: "HEAD_DIM_MINOR"
-sa_v_layout: "HEAD_DIM_MINOR"
+# # TODO(@mazumdera): fix this
+# # Dataset Configuration
+# dataset_type: hf  # Huggingface input pipeline
+# hf_path: 'gsm8k'
+# hf_data_split: 'main'
+# hf_data_files: 'train'
