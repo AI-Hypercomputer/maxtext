@@ -250,6 +250,7 @@ def main(argv: Sequence[str], local_argv: argparse.Namespace) -> None:
     learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
     tx = optimizers.get_optimizer(config, learning_rate_schedule)
 
+    checkpoint_manager = None
     abstract_state, _, _, _ = maxtext_utils.setup_training_state(
         maxtext_model_flax, None, tx, config, rng, mesh, checkpoint_manager
     )
