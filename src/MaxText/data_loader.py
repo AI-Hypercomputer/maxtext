@@ -20,6 +20,7 @@ import jax.numpy as jnp
 from jax.experimental import checkify
 
 from MaxText import exceptions
+from MaxText import diloco
 from MaxText import max_logging
 from MaxText.utils.goodput_utils import (
     GoodputEvent,

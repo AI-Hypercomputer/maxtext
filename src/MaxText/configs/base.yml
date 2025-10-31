@@ -434,7 +434,7 @@ logical_axis_rules: [
                       ['diloco', 'diloco'],
                     ]
 # Axes used for DCN must be earlier in this list than ICI, see (b/339009148) for details
-data_sharding: [['diloco', 'data', 'stage', 'fsdp', 'fsdp_transpose', 'sequence', 'context', 'context_autoregressive', 'tensor', 'tensor_transpose', 'tensor_sequence', 'expert', 'autoregressive']]
+data_sharding: [['data', 'stage', 'fsdp', 'fsdp_transpose', 'sequence', 'context', 'context_autoregressive', 'tensor', 'tensor_transpose', 'tensor_sequence', 'expert', 'autoregressive']]
 input_data_sharding_logical_axes: ['activation_embed_and_logits_batch', 'activation_norm_length']
 
 # sharding tolerance: float between 0.0 and 1.0 representing the allowed percentage of non-sharded parameters.
@@ -644,6 +644,7 @@ data_shuffle_seed: 0
 init_weights_seed: 0
 
 # DiLoCo params.
+enable_diloco: False
 diloco_sync_period: 36
 diloco_outer_lr: 0.3
 diloco_outer_momentum: 0.9

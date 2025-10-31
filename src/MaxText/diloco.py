@@ -65,15 +65,13 @@ class DiLoCoTrainState(struct.PyTreeNode):
 
 
 def reshape_first_axis_with_diloco(num_diloco_replicas: int, pytree: PyTree) -> PyTree:
-  """Reshapses the first dimension of each array int he PyTree to include a DiLoCo axis."""
+  """Reshapes the first dimension of each array in the PyTree to include a DiLoCo axis."""
 
   def extend_pspec(pspec: jax.sharding.PartitionSpec | Sequence[str | Sequence[str]] = ()) -> jax.sharding.PartitionSpec:
-<<<<<<< HEAD
-=======
-    if "diloco" == pspec[0][0]:
-      pspec = pspec[0][1:]
->>>>>>> 868bb4e1 (diloco utils)
-    return jax.sharding.PartitionSpec("diloco", pspec)
+    if tuple(*pspec)[0] == "diloco":
+      # pull out diloco axis if already present
+      return jax.sharding.PartitionSpec("diloco", (*pspec[0][1:],), (*pspec[1:],))
+    return jax.sharding.PartitionSpec("diloco", *pspec)
 
   def reshape_for_diloco(arr):
     batch_dim, *example_shape = arr.shape
@@ -104,8 +102,12 @@ def build_diloco_state(
     # Outer state retains a single copy of the model parameters and optimizer state.
     outer_params = state.params
     outer_opt_state = outer_optimizer.init(outer_params)
-    return DiLoCoTrainState(
-        inner_state=inner_state, outer_params=outer_params, outer_opt_state=outer_opt_state, step=state.step
+    outer_opt_state_sharding = jax.tree_util.tree_map(lambda x: x.sharding, outer_opt_state)
+    return (
+        DiLoCoTrainState(
+            inner_state=inner_state, outer_params=outer_params, outer_opt_state=outer_opt_state, step=state.step
+        ),
+        outer_opt_state_sharding,
     )
 
   return init_diloco_state()

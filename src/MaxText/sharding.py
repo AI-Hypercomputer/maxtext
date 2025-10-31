@@ -33,14 +33,9 @@ def get_input_data_sharding(config, mesh):
   data_sharding = nn.logical_to_mesh_sharding(
       P(*config.input_data_sharding_logical_axes), mesh, config.logical_axis_rules
   )
-  if config.num_diloco_replicas > 1:
-
-    def _transform_pspec(pspec):
-      # Pull the DiLoCo axis out into its own, to shard the first axis of the the arrays.
-      return P("diloco", config.data_sharding[0][1:])
-
+  if config.enable_diloco:
     data_sharding = jax.tree_util.tree_map(
-        lambda s: jax.sharding.NamedSharding(s.mesh, _transform_pspec(s.spec)), data_sharding
+        lambda s: jax.sharding.NamedSharding(s.mesh, P("diloco", *s.spec)), data_sharding
     )
   return data_sharding
 
