@@ -89,6 +89,18 @@ def _get_local_directory(output_dir: str) -> str:
   return local_dir
 
 
+def _process(hf_path, processed_slice, output_weights, current_hook_fns, shape_map_local):
+  target_hf_shape = shape_map_local[hf_path]
+  if current_hook_fns:
+    # otherwise identity
+    processed_slice = apply_hook_fns(processed_slice, target_hf_shape, current_hook_fns)
+  numpy_slice = convert_jax_weight_to_numpy(processed_slice).squeeze()
+  assert len(target_hf_shape) == len(
+      numpy_slice.shape
+  ), f"shape mismatch {len(target_hf_shape)} and {len(numpy_slice.shape)}"
+  output_weights.append((hf_path, numpy_slice))
+
+
 def process_leaf_param(
     path_tuple: Any,
     leaf_value: jax.Array,
@@ -98,6 +110,7 @@ def process_leaf_param(
     current_config: Any,
 ) -> list[tuple[str, np.ndarray]]:
   """Processes a single leaf from the MaxText parameter tree."""
+
   # Construct maxtext_param_key from path_tuple
   key_parts = []
   for p_entry in path_tuple:
@@ -108,7 +121,7 @@ def process_leaf_param(
       return []  # Skip this parameter
 
   maxtext_param_key = "params-" + "-".join(key_parts)
-  print(maxtext_param_key)
+  print(f"mt param: {maxtext_param_key}")
 
   if not isinstance(leaf_value, (jax.Array, np.ndarray)):
     max_logging.log(f"Warning: Leaf value for {maxtext_param_key} is not an array. Type: {type(leaf_value)}. Skipping.")
@@ -121,7 +134,7 @@ def process_leaf_param(
   hf_target_paths = param_map_local[maxtext_param_key]
   if not isinstance(hf_target_paths, list):
     hf_target_paths = [hf_target_paths]
-  print(hf_target_paths)
+  print(f"\thf param: {hf_target_paths}")
 
   if not hf_target_paths:
     max_logging.log(f"Warning: No HF target paths found for MaxText key '{maxtext_param_key}'. Skipping.")
@@ -129,17 +142,6 @@ def process_leaf_param(
 
   current_hook_fns = hook_fn_map_local.get(maxtext_param_key)
   output_weights = []
-
-  def _process(hf_path, processed_slice, output_weights, current_hook_fns):
-    target_hf_shape = shape_map_local[hf_path]
-    if current_hook_fns:
-      # otherwise identity
-      processed_slice = apply_hook_fns(processed_slice, target_hf_shape, current_hook_fns)
-    numpy_slice = convert_jax_weight_to_numpy(processed_slice).squeeze()
-    assert len(target_hf_shape) == len(
-        numpy_slice.shape
-    ), f"shape mismatch {len(target_hf_shape)} and {len(numpy_slice.shape)}"
-    output_weights.append((hf_path, numpy_slice))
 
   # TODO(shuningjin): it could be scan with one layer
   # TODO(shuningjin): it could be scan with one layer with one expert
@@ -158,7 +160,7 @@ def process_leaf_param(
     #   processed_weight = apply_hook_fns(processed_weight, target_hf_shape, current_hook_fns)
     # numpy_weight = convert_jax_weight_to_numpy(processed_weight)
     # output_weights.append((hf_path, numpy_weight))
-    _process(hf_path, leaf_value, output_weights, current_hook_fns)
+    _process(hf_path, leaf_value, output_weights, current_hook_fns, shape_map_local)
   else:  # Stacked MaxText weight
     # This now handles three cases:
     # 1. Scanned MoE layers (2D list of targets from a tensor stacked on expert and layer axes)
@@ -193,7 +195,7 @@ def process_leaf_param(
           # processed_slice = apply_hook_fns(layer_tensor_slice, target_hf_shape, current_hook_fns)
           # numpy_slice = convert_jax_weight_to_numpy(processed_slice)
           # output_weights.append((hf_path, numpy_slice))
-          _process(hf_path, layer_tensor_slice, output_weights, current_hook_fns)
+          _process(hf_path, layer_tensor_slice, output_weights, current_hook_fns, shape_map_local)
     else:
       # Case 2 or 3: The source tensor is stacked on a single axis.
       # We determine if it's an unscanned MoE (expert axis) or standard scanned (layer axis).
@@ -223,7 +225,7 @@ def process_leaf_param(
         # processed_slice = apply_hook_fns(weight_slice, target_hf_shape, current_hook_fns)
         # numpy_slice = convert_jax_weight_to_numpy(processed_slice)
         # output_weights.append((hf_path, numpy_slice))
-        _process(hf_path, weight_slice, output_weights, current_hook_fns)
+        _process(hf_path, weight_slice, output_weights, current_hook_fns, shape_map_local)
   return output_weights
 
 

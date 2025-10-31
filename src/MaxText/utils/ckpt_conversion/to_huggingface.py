@@ -71,6 +71,7 @@ from MaxText.utils.ckpt_conversion.utils.hf_shape import HF_SHAPE
 from MaxText.utils.ckpt_conversion.utils.hf_model_configs import HF_MODEL_CONFIGS
 from MaxText.utils.ckpt_conversion.utils.utils import (process_leaf_param, save_model_files, HF_IDS)
 import time
+from tqdm import tqdm
 
 
 # jax.config.update("jax_platform_name", "cpu")
@@ -178,11 +179,10 @@ def main(argv: Sequence[str]) -> None:
   print("proccessing weight ...")
   start = time.time()
   processed_params_list = []
-  for path_tuple_iter, leaf_value_iter in leaves_with_paths:
-    print(path_tuple_iter)
-    processed_params_list.extend(
-        process_leaf_param(path_tuple_iter, leaf_value_iter, param_map, shape_map, hook_fn_map, config)
-    )
+  for path_tuple_iter, leaf_value_iter in tqdm(leaves_with_paths, total=len(leaves_with_paths)):
+    # print(path_tuple_iter)
+    processed_params = process_leaf_param(path_tuple_iter, leaf_value_iter, param_map, shape_map, hook_fn_map, config)
+    processed_params_list.extend(processed_params)
   transformed_hf_weights = dict(processed_params_list)
   print(f"elapse: {time.time() - start} second")
 

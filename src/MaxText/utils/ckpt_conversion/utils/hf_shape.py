@@ -217,11 +217,7 @@ def DEEPSEEK_HF_WEIGHTS_TO_SHAPE(config):
   To check this mapping, dump the huggingface model shapes:
   from transformers import AutoModelForCausalLM
   model_name = "deepseek-ai/DeepSeek-V3"
-
-  model = AutoModelForCausalLM.from_pretrained(
-    model_name,
-    torch_dtype="auto",
-  )
+  model = AutoModelForCausalLM.from_pretrained(model_name, dtype="auto")
   for name, val in model.named_parameters():
     print(name, val.shape)
 
@@ -251,9 +247,9 @@ def DEEPSEEK_HF_WEIGHTS_TO_SHAPE(config):
   # Output projection dim (input)
   o_proj_in_dim = config["num_attention_heads"] * config["v_head_dim"]
   # This is an unusual shape specific to this architecture, derived from output:
-  # kv_a_proj_with_mqa.weight is [576, 512]
-  # 576 = kv_lora_rank (512) + q_lora_rank (64)
-  kv_a_proj_out_dim = config["kv_lora_rank"] + config["q_lora_rank"]
+  # kv_a_proj_with_mqa.weight = kv_lora_rank (512) + qk_rope_head_dim (64)
+  kv_a_proj_out_dim = config["kv_lora_rank"] + config["qk_rope_head_dim"]
+
   # --- MLP-related Dimensions ---
   intermediate_size = config["intermediate_size"]  # For dense layers
   moe_intermediate_size = config["moe_intermediate_size"]  # For expert layers
@@ -340,11 +336,7 @@ def QWEN3_HF_WEIGHTS_TO_SHAPE(config):
   To check this mapping, dump the huggingface model shapes:
     from transformers import AutoModelForCausalLM
     model_name = "Qwen/Qwen3-0.6B"
-
-    model = AutoModelForCausalLM.from_pretrained(
-      model_name,
-      torch_dtype="auto",
-    )
+    model = AutoModelForCausalLM.from_pretrained(model_name, dtype="auto")
     for name, val in model.named_parameters():
       print(name, val.shape)
 
