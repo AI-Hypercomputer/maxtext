@@ -234,20 +234,33 @@ def DEEPSEEK_HF_WEIGHTS_TO_SHAPE(config):
   hidden_size = config["hidden_size"]
   num_hidden_layers = config["num_hidden_layers"]
   vocab_size = config["vocab_size"]
+  attention_bias = config.get("attention_bias", False)
+
   # --- Attention-related Dimensions ---
   q_lora_rank = config["q_lora_rank"]
   kv_lora_rank = config["kv_lora_rank"]
-  # Q projection dim (before LoRA)
-  q_dim = config["num_attention_heads"] * config["qk_head_dim"]
-  # K and V projection dim (before LoRA)
-  # Based on the output, the K dim seems to be based on v_head_dim, not qk_head_dim
-  k_dim_b = config["num_key_value_heads"] * config["v_head_dim"]
-  v_dim_b = config["num_key_value_heads"] * config["v_head_dim"]
-  kv_b_dim = k_dim_b + v_dim_b  # Combined K and V projection
+  num_attention_heads = config["num_attention_heads"]
+
+  # Q projection dim
+  q_dim = num_attention_heads * config["qk_head_dim"]
+
+  # KV_b_proj output dim. Based on DeepseekV3Attention:
+  # self.kv_b_proj = nn.Linear(
+  #   self.kv_lora_rank,
+  #   self.num_heads * (self.qk_nope_head_dim + self.v_head_dim),
+  #   ...
+  # )
+  kv_b_dim = num_attention_heads * (config["qk_nope_head_dim"] + config["v_head_dim"])
+
   # Output projection dim (input)
-  o_proj_in_dim = config["num_attention_heads"] * config["v_head_dim"]
-  # This is an unusual shape specific to this architecture, derived from output:
-  # kv_a_proj_with_mqa.weight = kv_lora_rank (512) + qk_rope_head_dim (64)
+  o_proj_in_dim = num_attention_heads * config["v_head_dim"]
+
+  # kv_a_proj_with_mqa output dim. Based on DeepseekV3Attention:
+  # self.kv_a_proj_with_mqa = nn.Linear(
+  #   config.hidden_size,
+  #   self.kv_lora_rank + self.qk_rope_head_dim,
+  #   ...
+  # )
   kv_a_proj_out_dim = config["kv_lora_rank"] + config["qk_rope_head_dim"]
 
   # --- MLP-related Dimensions ---
@@ -273,19 +286,52 @@ def DEEPSEEK_HF_WEIGHTS_TO_SHAPE(config):
     layer_mapping = {
         f"{layer_prefix}.input_layernorm.weight": [hidden_size],
         f"{layer_prefix}.post_attention_layernorm.weight": [hidden_size],
-        # Attention projections
-        f"{layer_prefix}.self_attn.q_a_proj.weight": [q_lora_rank, hidden_size],
-        f"{layer_prefix}.self_attn.q_a_layernorm.weight": [q_lora_rank],
-        f"{layer_prefix}.self_attn.q_b_proj.weight": [q_dim, q_lora_rank],
+        # --- Attention projections ---
         f"{layer_prefix}.self_attn.kv_a_proj_with_mqa.weight": [kv_a_proj_out_dim, hidden_size],
         f"{layer_prefix}.self_attn.kv_a_layernorm.weight": [kv_lora_rank],
         f"{layer_prefix}.self_attn.kv_b_proj.weight": [kv_b_dim, kv_lora_rank],
         f"{layer_prefix}.self_attn.o_proj.weight": [hidden_size, o_proj_in_dim],
     }
 
+    # --- Q-Projection (Conditional on LoRA) ---
+    # Based on DeepseekV3Attention:
+    # if self.q_lora_rank is None:
+    #   self.q_proj = nn.Linear(..., bias=False)
+    # else:
+    #   self.q_a_proj = nn.Linear(..., bias=config.attention_bias)
+    #   self.q_a_layernorm = ...
+    #   self.q_b_proj = nn.Linear(..., bias=False)
+    if q_lora_rank is None:
+      layer_mapping[f"{layer_prefix}.self_attn.q_proj.weight"] = [q_dim, hidden_size]
+    else:
+      layer_mapping.update(
+          {
+              f"{layer_prefix}.self_attn.q_a_proj.weight": [q_lora_rank, hidden_size],
+              f"{layer_prefix}.self_attn.q_a_layernorm.weight": [q_lora_rank],
+              f"{layer_prefix}.self_attn.q_b_proj.weight": [q_dim, q_lora_rank],
+          }
+      )
+
+    # --- Add conditional biases ---
+    # Based on DeepseekV3Attention init, bias is set by config.attention_bias
+    if attention_bias:
+      if q_lora_rank is not None:
+        layer_mapping[f"{layer_prefix}.self_attn.q_a_proj.bias"] = [q_lora_rank]
+      layer_mapping.update(
+          {
+              f"{layer_prefix}.self_attn.kv_a_proj_with_mqa.bias": [kv_a_proj_out_dim],
+              f"{layer_prefix}.self_attn.o_proj.bias": [hidden_size],
+          }
+      )
+
     # --- Add MLP weights (Dense vs. MoE) ---
+    # Based on DeepseekV3DecoderLayer:
+    # if layer_idx >= config.first_k_dense_replace:
+    #   self.mlp = DeepseekV3MoE(config)
+    # else:
+    #   self.mlp = DeepseekV3MLP(config)
     if layer_idx < first_k_dense:
-      # This is a DENSE MLP layer
+      # This is a DENSE MLP layer (DeepseekV3MLP)
       layer_mapping.update(
           {
               f"{layer_prefix}.mlp.gate_proj.weight": [intermediate_size, hidden_size],
@@ -294,16 +340,16 @@ def DEEPSEEK_HF_WEIGHTS_TO_SHAPE(config):
           }
       )
     else:
-      # This is a MoE MLP layer
-      # Add the router gate
+      # This is a MoE MLP layer (DeepseekV3MoE)
+      # Add the router gate (DeepseekV3TopkRouter)
+      # Note: e_score_correction_bias is a buffer, not a parameter.
       layer_mapping.update(
           {
               f"{layer_prefix}.mlp.gate.weight": [n_routed_experts, hidden_size],
-              f"{layer_prefix}.mlp.gate.e_score_correction_bias": [n_routed_experts],
           }
       )
 
-      # Add routed experts
+      # Add routed experts (DeepseekV3NaiveMoe)
       for expert_j in range(n_routed_experts):
         expert_prefix = f"{layer_prefix}.mlp.experts.{expert_j}"
         layer_mapping.update(
@@ -315,13 +361,17 @@ def DEEPSEEK_HF_WEIGHTS_TO_SHAPE(config):
         )
 
       # Add shared experts (if any)
+      # Based on DeepseekV3MoE:
+      # self.shared_experts = DeepseekV3MLP(
+      #   config=config, intermediate_size=config.moe_intermediate_size * config.n_shared_experts
+      # )
       if n_shared_experts > 0:
-        # Assuming shared experts have the same shape as routed experts
+        shared_intermediate_size = moe_intermediate_size * n_shared_experts
         layer_mapping.update(
             {
-                f"{layer_prefix}.mlp.shared_experts.gate_proj.weight": [moe_intermediate_size, hidden_size],
-                f"{layer_prefix}.mlp.shared_experts.up_proj.weight": [moe_intermediate_size, hidden_size],
-                f"{layer_prefix}.mlp.shared_experts.down_proj.weight": [hidden_size, moe_intermediate_size],
+                f"{layer_prefix}.mlp.shared_experts.gate_proj.weight": [shared_intermediate_size, hidden_size],
+                f"{layer_prefix}.mlp.shared_experts.up_proj.weight": [shared_intermediate_size, hidden_size],
+                f"{layer_prefix}.mlp.shared_experts.down_proj.weight": [hidden_size, shared_intermediate_size],
             }
         )
 
