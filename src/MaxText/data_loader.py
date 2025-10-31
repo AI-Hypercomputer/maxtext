@@ -19,7 +19,7 @@ import jax
 import jax.numpy as jnp
 from jax.experimental import checkify
 
-from MaxText import exceptions
+from MaxText import diloco, exceptions
 from MaxText import maxtext_utils
 from MaxText.utils.goodput_utils import (
     GoodputEvent,
@@ -47,6 +47,8 @@ class DataLoader:
           example_batch = self.last_batch
         else:
           example_batch = next(self.data_iterator)
+        if self.config.enable_diloco:
+          example_batch = diloco.reshape_first_axis_with_diloco(self.config.num_diloco_replicas, example_batch)
         # Reshard data from loaded sharding to performant activation sharding
         self.last_batch = maxtext_utils.maybe_shard_with_name(
             example_batch,
