@@ -178,7 +178,9 @@ def process_leaf_param(
       # Inner loop for layers
       for layer_idx, hf_path in enumerate(expert_paths_for_layer):
         if hf_path not in shape_map_local:
-          max_logging.log(f"Warning: HF path '{hf_path}' not found. Skipping.")
+          max_logging.log(
+              f"Warning: HF path '{hf_path}' not found in shape_map for MaxText key '{maxtext_param_key}'. Skipping."
+          )
           continue
 
         # Slice the expert tensor along the layer axis to get the final individual weight.
@@ -207,7 +209,9 @@ def process_leaf_param(
 
   for i, hf_path in enumerate(hf_target_paths):
     if hf_path not in shape_map_local:
-      max_logging.log(f"Warning: HF path '{hf_path}' not found. Skipping.")
+      max_logging.log(
+          f"Warning: HF path '{hf_path}' not found in shape_map for MaxText key '{maxtext_param_key}'. Skipping."
+      )
       continue
 
     weight_slice = jax.lax.index_in_dim(leaf_value, i, axis=axis_to_slice, keepdims=False)

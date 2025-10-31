@@ -342,10 +342,10 @@ def DEEPSEEK_HF_WEIGHTS_TO_SHAPE(config):
     else:
       # This is a MoE MLP layer (DeepseekV3MoE)
       # Add the router gate (DeepseekV3TopkRouter)
-      # Note: e_score_correction_bias is a buffer, not a parameter.
       layer_mapping.update(
           {
               f"{layer_prefix}.mlp.gate.weight": [n_routed_experts, hidden_size],
+              f"{layer_prefix}.mlp.gate.e_score_correction_bias": [n_routed_experts],
           }
       )
 
