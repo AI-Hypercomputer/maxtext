@@ -49,7 +49,7 @@ from etils import epath
 from tunix.rl.rollout.base_rollout import RolloutConfig
 
 from MaxText.globals import MAXTEXT_ASSETS_ROOT
-from MaxText import rl_utils
+from maxtext.src.MaxText import utils_rl
 
 # ## Evaluate
 # We evaluate it in two ways:
@@ -78,29 +78,28 @@ def generate_responses(
     num_passes=1,
 ):
   """
-  Generate responses for a batch of prompts across multiple passes.
+  Generate responses for a batch of prompts across potentially multiple passes.
 
   Args:
+      tmvp_config: Configuration object
       prompts: List of prompts to generate responses for
       rl_cluster: Model cluster for generation
       num_passes: Number of generation passes
-      temperature: Sampling temperature
-      top_k: Top-k sampling parameter
-      top_p: Top-p sampling parameter
 
   Returns:
       List of lists containing responses for each prompt across passes
   """
   multiple_call_responses = [[] for _ in range(len(prompts))]
 
+  eval_strategy = tmvp_config.generation_configs[tmvp_config.eval_sampling_strategy]
   for p in range(num_passes):
     responses = rl_cluster.rollout.generate(
         prompts,
         rollout_config=RolloutConfig(
             max_tokens_to_generate=tmvp_config.max_target_length,
-            temperature=tmvp_config.eval_temperature,
-            top_k=tmvp_config.eval_top_k,
-            top_p=tmvp_config.eval_top_p,
+            temperature=eval_strategy["eval_temperature"],
+            top_k=eval_strategy["eval_top_k"],
+            top_p=eval_strategy["eval_top_p"],
         ),
     )
     responses = responses.text
@@ -126,8 +125,8 @@ def score_responses(tmvp_config, question, responses, answer):
   Returns:
       Tuple of (is_correct, is_partially_correct, has_correct_format)
   """
-  match_format = rl_utils.get_match_format_regex(tmvp_config)
-  match_numbers = rl_utils.get_match_numbers_regex(tmvp_config)
+  match_format = utils_rl.get_match_format_regex(tmvp_config)
+  match_numbers = utils_rl.get_match_numbers_regex(tmvp_config)
 
   if tmvp_config.debug:
     print("========================================")

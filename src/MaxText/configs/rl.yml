@@ -28,10 +28,6 @@ debug: True
 # ====== Reproducibility ======
 data_shuffle_seed: 42
 
-# ====== Checkpoint saving ======
-save_interval_steps: 500
-max_to_keep: 4
-
 # ====== GRPO ======
 
 # The number of times the policy generates multiple responses for a given prompt
@@ -94,19 +90,20 @@ num_epochs: 1  # can potentially train for more epochs
 gradient_clipping_threshold: 0.1
 
 # ====== Evaluation ======
+eval_sampling_strategy: "greedy" # can be "greedy", "standard", or "liberal"
 generation_configs:
   greedy:
-    temperature: 0.01
-    top_k: 1
-    top_p: 1.0
+    eval_temperature: 0.01
+    eval_top_k: 1
+    eval_top_p: 1.0
   standard:
-    temperature: 0.7
-    top_k: 50
-    top_p: 0.95
+    eval_temperature: 0.7
+    eval_top_k: 50
+    eval_top_p: 0.95
   liberal:
-    temperature: 0.85
-    top_k: 2000
-    top_p: 1.0
+    eval_temperature: 0.85
+    eval_top_k: 2000
+    eval_top_p: 1.0
 
 # greedy
 eval_temperature: 0.01
@@ -171,7 +168,8 @@ template: |
   <start_of_turn>model
 
 
-# # TODO(@mazumdera): fix this
+# # TODO(@mazumdera
+): fix this
 # # Dataset Configuration
 # dataset_type: hf  # Huggingface input pipeline
 # hf_path: 'gsm8k'

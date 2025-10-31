@@ -40,7 +40,6 @@ Usage:
     --load_parameters_path=gs://path/to/checkpoint \\
     --base_output_directory=gs://path/to/output \\
     --hf_access_token=$HF_TOKEN \\
-    --use_pathways=true \\
     --steps=100
 
   # Custom dataset
@@ -57,6 +56,10 @@ Usage:
 from pprint import pprint
 from absl import app
 import os
+# The following import is added to address a circular import issue in vLLM.
+# By pre-importing PoolingRequestOutput, we ensure it's loaded before the
+# problematic import chain is triggered, resolving the ImportError.
+from vllm import PoolingRequestOutput
 import sys
 from typing import Sequence
 
@@ -72,6 +75,9 @@ from transformers import AutoTokenizer
 import grain
 
 import pathwaysutils
+
+# for vLLM we can skip JAX precompilation with this flag, it makes startup faster
+os.environ["SKIP_JAX_PRECOMPILE"] = "1"
 
 # add the parent directory (two levels up to say ~/HOME/maxtext) to sys.path if currenlt runnig from
 # ~/HOME/maxtext/MaxText/examples
@@ -94,7 +100,7 @@ from MaxText import max_logging, max_utils, maxtext_utils, pyconfig
 from MaxText import model_creation_utils
 from MaxText.integration.tunix.tunix_adapter import TunixMaxTextAdapter
 from MaxText.evaluate_rl import evaluate
-from MaxText import rl_utils
+from maxtext.src.MaxText import utils_rl
 
 
 # We use OpenAI's GSM8K dataset. GSM8K comprises grade school math word problems.
@@ -135,7 +141,7 @@ def setup_device_allocation(tmvp_config, use_pathways: bool = False):
     if tmvp_config.sampler_devices_fraction != 1.0:
       print(f"Using last {len(sampler_devices)} devices as Sampler devices")
   
-  return trainer_devices, sampler_devices, num_vms
+  return trainer_devices, sampler_devices
 
 def get_dataset(model_tokenizer, tmvp_config, data_dir, split="train") -> grain.MapDataset:
   # Download data
@@ -172,7 +178,7 @@ def get_dataset(model_tokenizer, tmvp_config, data_dir, split="train") -> grain.
               # passed to reward functions
               "question": x["question"].decode("utf-8"),
               # passed to reward functions
-              "answer": rl_utils.extract_hash_answer(x["answer"].decode("utf-8")),
+              "answer": utils_rl.extract_hash_answer(x["answer"].decode("utf-8")),
           }
       )
   )
@@ -235,7 +241,7 @@ def rl_train(tmvp_config):
   else:
     use_pathways = False
   print(f"Use Pathways: {use_pathways}")
-  trainer_devices, sampler_devices, num_vms = setup_device_allocation(tmvp_config, use_pathways)
+  trainer_devices, sampler_devices = setup_device_allocation(tmvp_config, use_pathways)
 
   # Load reference model
   print("Creating reference model and also meshes for reference and rollout")
@@ -302,8 +308,9 @@ def rl_train(tmvp_config):
   # Setup metrics logging
   log_dir=tmvp_config.tensorboard_dir
   print(f"TensorBoard logs directory: {log_dir}")
-  print(f"tensorboard --logdir {log_dir} --port=8086")
-  metrics_logging_options = metrics_logger.MetricsLoggerOptions(log_dir=log_dir, flush_every_n_steps=20)
+  # Metrics logger
+  metrics_logging_options = metrics_logger.MetricsLoggerOptions(log_dir=log_dir, flush_every_n_steps=tmvp_config.log_period)
+
 
   # Profiler configurations
   # TODO: xfgu@: add profiling
@@ -342,13 +349,17 @@ def rl_train(tmvp_config):
           top_p=tmvp_config.decode_sampling_nucleus_p,
           top_k=tmvp_config.decode_sampling_top_k,
       ),
+        # TODO: @mazumdera: move these to rollout_config when updating to use latest Tunix
       rollout_vllm_model_version=tmvp_config.hf_model_name,
       rollout_vllm_hbm_utilization=tmvp_config.hbm_utilization_vllm,
       rollout_vllm_tpu_backend_type="jax",
       rollout_vllm_swap_space_size_gb=tmvp_config.swap_space_vllm_gb,
   )
 
-  # Setup GRPO config
+  # The metrics logger is now managed by the GrpoLearner, so we don't need to
+  # register jax.monitoring listeners separately.
+  cluster_config.training_config.metrics_logging_options = metrics_logging_options
+
   grpo_config = GrpoConfig(
       num_generations=tmvp_config.num_generations,
       num_iterations=tmvp_config.num_iterations,
@@ -372,10 +383,10 @@ def rl_train(tmvp_config):
   rl_trainer = GrpoLearner(
       rl_cluster=rl_cluster,
       reward_fns=[ # type: ignore
-          lambda **kwargs: rl_utils.match_format_exactly(tmvp_config=tmvp_config, **kwargs),
-          lambda **kwargs: rl_utils.match_format_approximately(tmvp_config=tmvp_config, **kwargs),
-          lambda **kwargs: rl_utils.check_answer(tmvp_config=tmvp_config, **kwargs),
-          lambda **kwargs: rl_utils.check_numbers(tmvp_config=tmvp_config, **kwargs),
+          lambda **kwargs: utils_rl.match_format_exactly(tmvp_config=tmvp_config, **kwargs),
+          lambda **kwargs: utils_rl.match_format_approximately(tmvp_config=tmvp_config, **kwargs),
+          lambda **kwargs: utils_rl.check_answer(tmvp_config=tmvp_config, **kwargs),
+          lambda **kwargs: utils_rl.check_numbers(tmvp_config=tmvp_config, **kwargs),
       ],
       grpo_config=grpo_config,
   )
@@ -396,31 +407,29 @@ def rl_train(tmvp_config):
   # see the improvement post training.
   #
   (corr, total, accuracy, partial_accuracy, format_accuracy) = evaluate(
+    tmvp_config,
     test_dataset,
     rl_cluster=rl_cluster,
-    **tmvp_config.generation_configs["greedy"],
   )
   print(f"Pre GRPO Training: {corr=}, {total=}, {accuracy=}%, {partial_accuracy=}%," f" {format_accuracy=}%")
 
 
   # Start training
   
-  profile_dir = tmvp_config.tensorboard_dir
-  max_logging.log(f"Saving profiles to {profile_dir}")
   print("Starting GRPO training...")
 
-  # jax.profiler.start_trace(profile_dir)
   with reference_mesh, nn_partitioning.axis_rules(tmvp_config.logical_axis_rules):
     rl_trainer.train(train_dataset)
-  # jax.profiler.stop_trace()
+    if rl_trainer.metrics_logger and jax.process_index() == 0:
+      rl_trainer.metrics_logger.close()
 
   print("GRPO Training Completed Successfully!")
 
   # Let's evaluate our model!
   (corr, total, accuracy, partial_accuracy, format_accuracy) = evaluate(
+      tmvp_config,
       test_dataset,
       rl_cluster=rl_cluster,
-    **tmvp_config.generation_configs["greedy"],
   )
   print(f"Post GRPO Training: {corr=}, {total=}, {accuracy=}%, {partial_accuracy=}%," f" {format_accuracy=}%")
 
