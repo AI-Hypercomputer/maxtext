@@ -1,0 +1,47 @@
+[
+  {
+    "name": "storage_id",
+    "mode": "REQUIRED",
+    "type": "STRING",
+    "description": "",
+    "fields": [],
+    "defaultValueExpression": "GENERATE_UUID()"
+  },
+  {
+      "name": "storage_product",
+      "mode": "NULLABLE",
+      "type": "STRING",
+      "description": "",
+      "fields": []
+  },
+  {
+      "name": "config",
+      "mode": "NULLABLE",
+      "type": "JSON",
+      "description": "",
+      "fields": []
+  },
+  {
+      "name": "description",
+      "mode": "NULLABLE",
+      "type": "STRING",
+      "description": "",
+      "fields": []
+  },
+  {
+      "name": "update_person_ldap",
+      "mode": "NULLABLE",
+      "type": "STRING",
+      "description": "",
+      "fields": [],
+      "defaultValueExpression": "SESSION_USER()"
+  },
+  {
+      "name": "update_timestamp",
+      "mode": "NULLABLE",
+      "type": "TIMESTAMP",
+      "description": "",
+      "fields": [],
+      "defaultValueExpression": "CURRENT_TIMESTAMP()"
+  }
+]
