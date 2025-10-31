@@ -1,4 +1,5 @@
 # Copyright 2023–2025 Google LLC
+# Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -382,6 +383,21 @@ class QuantTest(unittest.TestCase):
   @pytest.mark.gpu_only
   def test_fp8_nanoo_quantization(self):
     self.quantization_config("fp8_nanoo", grad_tolerance=1.0)
+
+  @pytest.mark.skip(reason="No runner with GPU arch >= 89 is available")
+  @pytest.mark.gpu_only
+  def test_fp8_te_fp8_delayedscaling_quantization(self):
+    self.quantization_config("te_fp8_delayedscaling", grad_tolerance=1.0)
+
+  @pytest.mark.skip(reason="No runner with GPU arch >= 89 is available")
+  @pytest.mark.gpu_only
+  def test_fp8_te_fp8_currentscaling_quantization(self):
+    self.quantization_config("te_fp8_currentscaling", grad_tolerance=1.0)
+
+  @pytest.mark.skip(reason="No runner with GPU arch >= 100 is available")
+  @pytest.mark.gpu_only
+  def test_fp8_te_mxfp8_quantization(self):
+    self.quantization_config("te_mxfp8", grad_tolerance=1.0)
 
 
 @pytest.mark.parametrize(
