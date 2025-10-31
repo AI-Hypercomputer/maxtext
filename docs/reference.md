@@ -1,5 +1,5 @@
 <!--
- Copyright 2024 Google LLC
+ Copyright 2023–2025 Google LLC
 
  Licensed under the Apache License, Version 2.0 (the "License");
  you may not use this file except in compliance with the License.
@@ -19,11 +19,11 @@
 ```{toctree}
 :maxdepth: 1
 
-reference/config_base.md
-reference/terminology.md
-reference/supported_models_and_architectures.md
-reference/benchmark_and_performance.md
-reference/architecture_overview.md
-reference/jax_xla_and_pallas.md
-reference/tiering.md
+reference/config_base
+reference/terminology
+reference/supported_models_and_architectures
+reference/benchmark_and_performance
+reference/architecture_overview
+reference/jax_xla_and_pallas
+reference/tiering
 ```
