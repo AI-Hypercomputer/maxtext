@@ -19,6 +19,7 @@ import os.path
 
 from MaxText import pyconfig
 from MaxText.globals import MAXTEXT_PKG_DIR
+from MaxText.pyconfig_deprecated import resolve_config_path
 
 
 class PyconfigTest(unittest.TestCase):
@@ -128,6 +129,10 @@ class PyconfigTest(unittest.TestCase):
 
     self.assertEqual(config.base_emb_dim, 1024)
     self.assertEqual(config.base_mlp_dim, 24576)
+
+  def test_resolve_config_path(self):
+    self.assertEqual(resolve_config_path("foo"), os.path.join("src", "foo"))
+    self.assertEqual(resolve_config_path(__file__), __file__)
 
 
 if __name__ == "__main__":
