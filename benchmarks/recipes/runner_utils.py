@@ -34,6 +34,9 @@ def generate_and_run_workloads(user_config, num_slices_list, num_steps, priority
     num_slices_list: A list of the number of slices to be executed.
     num_steps: The number of steps for each workload.
   """
+  if user_config.bq_enable and (not user_config.bq_db_project or not user_config.bq_db_dataset):
+    logging.error("Validation FAILED: BQ is enabled, but project or dataset is missing.")
+    return 1
   xpk_workload_cmds = []
   xpk_workload_names = []
 
@@ -65,6 +68,9 @@ def generate_and_run_workloads(user_config, num_slices_list, num_steps, priority
               xpk_path=user_config.xpk_path,
               num_steps=num_steps,
               priority=priority,
+              generate_metrics_and_upload_to_big_query=user_config.bq_enable,
+              db_project=user_config.bq_db_project,
+              db_dataset=user_config.bq_db_dataset,
           )
 
           # Generate XPK command
