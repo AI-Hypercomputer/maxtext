@@ -148,7 +148,7 @@ def train(mt_config, goodput_recorder=None):
   with maybe_record_goodput(goodput_recorder, GoodputEvent.TPU_INIT):
     model, mesh = model_creation_utils.create_nnx_model(mt_config)
     learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(mt_config)
-    optimizer = optimizers.get_optimizer(mt_config, learning_rate_schedule)
+    optimizer = optimizers.get_optimizer(mt_config, learning_rate_schedule, model)
 
   with maybe_record_goodput(goodput_recorder, GoodputEvent.TRAINING_PREPARATION):
     training_hooks = hooks.SFTTrainingHooks(mt_config, mesh, learning_rate_schedule, goodput_recorder)

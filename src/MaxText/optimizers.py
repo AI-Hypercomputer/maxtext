@@ -17,11 +17,14 @@
 
 import jax
 import jax.numpy as jnp
+from flax.linen import partitioning as nn_partitioning
 
 import optax
+from optax.contrib import muon
+from MaxText.muon_dimension_number import get_abstract_param, get_transform_tree
 
 
-def get_optimizer(config, learning_rate_schedule):
+def get_optimizer(config, learning_rate_schedule, model=None):
   """Create optimizer."""
   if config.opt_type == "adamw":
     # Create AdamW Optimizer following Llama2's training details, see https://arxiv.org/pdf/2307.09288.pdf section 2.2
@@ -45,6 +48,31 @@ def get_optimizer(config, learning_rate_schedule):
     )
   elif config.opt_type == "sgd":
     return optax.sgd(learning_rate_schedule)
+  elif config.opt_type == "muon":
+    # extract muon dimension number from model structure
+    assert model is not None
+    with model.mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+      abstract_param = get_abstract_param(model, config)
+    print(abstract_param)
+    muon_weight_dimension_numbers = get_transform_tree(abstract_param)
+    print("dimension number:", muon_weight_dimension_numbers)
+    muon_kwargs = {
+        # Shared parameters: "nesterov" uses default
+        "learning_rate": learning_rate_schedule,
+        "eps": config.adam_eps,
+        "mu_dtype": config.mu_dtype,
+        # Muon-specific parameters: "ns_coeffs", "ns_steps", "weight_decay_mask", "adaptive" uses default
+        "beta": config.muon_beta,
+        "weight_decay": config.muon_weight_decay,
+        "muon_weight_dimension_numbers": muon_weight_dimension_numbers,
+        "consistent_rms": config.muon_consistent_rms,
+        # AdamW-specific parameters
+        "adam_b1": config.adam_b1,
+        "adam_b2": config.adam_b2,
+        "adam_eps_root": config.adam_eps_root,
+        "adam_weight_decay": config.adam_weight_decay,
+    }
+    return muon(**muon_kwargs)
   else:
     raise ValueError(f"{config.opt_type=} is not a supported.")
 
