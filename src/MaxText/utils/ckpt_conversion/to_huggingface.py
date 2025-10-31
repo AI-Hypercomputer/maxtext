@@ -125,7 +125,7 @@ def main(argv: Sequence[str]) -> None:
   max_utils.print_system_information()
 
   # Load Maxtext checkpoint
-  print("Loading Orbax checkpoint...")
+  print("\nLoading Orbax checkpoint...")
   start = time.time()
   engine = maxengine.MaxEngine(config)
   rng = jax.random.PRNGKey(1234)
@@ -144,8 +144,8 @@ def main(argv: Sequence[str]) -> None:
   if model_key not in HF_IDS:
     raise ValueError(f"Unsupported model name: {config.model_name}. Supported models are: {list(HF_IDS.keys())}")
   hf_config_obj = HF_MODEL_CONFIGS[model_key]
-  print(model_key)
-  print(hf_config_obj)
+  # print(model_key)
+  # print(f"hf config: {hf_config_obj}")
 
   # 2. Load Tokenizer
   if model_key not in HF_IDS:
@@ -175,7 +175,7 @@ def main(argv: Sequence[str]) -> None:
   leaves_with_paths = jax.tree_util.tree_leaves_with_path(actual_weights_dict)
 
   # traverse leavse to build: mt_param_key:mt_weights
-  print("Proccessing weight...")
+  print("\nProccessing weight...")
   start = time.time()
   processed_params_list = []
   for path_tuple_iter, leaf_value_iter in tqdm(leaves_with_paths, total=len(leaves_with_paths)):
@@ -190,7 +190,7 @@ def main(argv: Sequence[str]) -> None:
     print("Error: No weights were transformed. Check mappings and parameter paths.")
     return
 
-  print("Saving HuggingFace model...")
+  print("\nSaving HuggingFace model...")
   start = time.time()
   save_model_files(
       weight_arrays=transformed_hf_weights,
