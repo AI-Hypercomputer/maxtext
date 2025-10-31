@@ -1367,6 +1367,7 @@ class AttentionOp(nnx.Module):
       mask_type = "padding_causal"  # only padding_causal mask type can take a created mask
       dummy_attn_mask = jnp.zeros((1, 1, 1, self.max_target_length, self.max_target_length), dtype=jnp.uint8)
       attn_mask = self.generate_attention_mask(query, key, decoder_segment_ids, model_mode)
+      attn_mask = attn_mask.astype(jnp.uint8)  # TE requires uint8/boolean mask
 
     if attn_mask is not None:
       attn_mask = jnp.where((attn_mask >= DEFAULT_MASK_VALUE * 0.5), 0, 1).astype(jnp.uint8)
