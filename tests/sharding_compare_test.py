@@ -12,29 +12,30 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Compare expected sharding of models with actual sharding of models."""
+"""
+Compare expected sharding of models with actual sharding of models.
+
+For each valid test case (model, topology, slice) listed in `valid_test_cases.json`:
+- The expected sharding is loaded using `load_named_sharding_json`.
+- The current model’s sharding is then computed and compared against the expected one.
+"""
 
 import hashlib
-import json
 import os
-import pytest
-
 from MaxText.globals import MAXTEXT_PKG_DIR
 from MaxText.train_compile import get_shaped_inputs, get_topology_mesh, validate_config
+from MaxText.tests.sharding_dump import valid_test_cases, sharding_info_folder, named_shardings_to_json, load_named_sharding_json
 from MaxText import pyconfig
+import json
+import pytest
 
 from tests.sharding_dump import named_shardings_to_json, load_named_sharding_json, TEST_CASES
 
 
 def compute_checksum(d: dict) -> str:
   """Compute a checksum (SHA256) of a dictionary."""
-  # Serialize the dictionary into a JSON string (ensuring consistent ordering of keys)
   json_str = json.dumps(d, sort_keys=True)
-
-  # Compute the SHA256 checksum of the serialized string
-  checksum = hashlib.sha256(json_str.encode("utf-8")).hexdigest()
-
-  return checksum
+  return hashlib.sha256(json_str.encode("utf-8")).hexdigest()
 
 
 def compare_named_sharding_jsons(json1: dict, model1_name: str, json2: dict, model2_name: str) -> bool:
@@ -78,7 +79,8 @@ def compare_named_sharding_jsons(json1: dict, model1_name: str, json2: dict, mod
   return not only_in_1 and not only_in_2 and all(json1[k] == json2[k] for k in shared_keys)
 
 
-@pytest.mark.parametrize("model_name, topology, num_slice", TEST_CASES)
+@pytest.mark.cpu_only
+@pytest.mark.parametrize("model_name, topology, num_slice", valid_test_cases())
 def test_sharding_dump_for_model(model_name: str, topology: str, num_slice: str) -> None:
   """Test if the sharding of new model implementation is as expected."""
   params = [
@@ -89,23 +91,31 @@ def test_sharding_dump_for_model(model_name: str, topology: str, num_slice: str)
       f"model_name={model_name}",
   ]
 
-  json_path = f"sharding_info/" f"{model_name}/" f"{topology}/" f"slice_{num_slice}/named_shardings.json"
-  if not os.path.exists(json_path):
-    return
+  json_path = sharding_info_folder / model_name / topology / f"slice_{num_slice}" / "named_shardings.json"
+
+  expected_json_exists = json_path.exists()
+  assert expected_json_exists, f"Expected sharding JSON does not exist: {json_path}"
 
   config = pyconfig.initialize(params)
   validate_config(config)
 
-  topology_mesh = get_topology_mesh(config)
-  _, _, state_mesh_shardings, _ = get_shaped_inputs(topology_mesh, config)
+  try:
+    topology_mesh = get_topology_mesh(config)
+    _, _, state_mesh_shardings, _ = get_shaped_inputs(topology_mesh, config)
+  except Exception:  # pylint: disable=broad-except
+    state_mesh_shardings = {}
+
+  assert state_mesh_shardings != {}, "No sharding information was produced."
+
   actual_json = named_shardings_to_json(state_mesh_shardings)
   expected_json = load_named_sharding_json(json_path)
 
   actual_checksum = compute_checksum(actual_json)
-  expected_checksum2 = compute_checksum(expected_json)
-  result = actual_checksum == expected_checksum2
+  expected_checksum = compute_checksum(expected_json)
+
+  result = actual_checksum == expected_checksum
 
   if not result:
     compare_named_sharding_jsons(expected_json, f"expected_{model_name}", actual_json, f"actual_{model_name}")
 
-  assert result is True
+  assert result, "Sharding JSONs do not match."
