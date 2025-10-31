@@ -14,14 +14,13 @@
 
 """
 This module provides utility functions for Pathways-related benchmark recipes.
-
-It includes helpers for building lists of model configurations based on user
-selections and for generating `XpkClusterConfig` and `PathwaysConfig` objects.
 """
 
 import typing
 
 import maxtext_xpk_runner as mxr
+from google.cloud import storage
+from google.cloud.exceptions import NotFound
 
 
 def build_user_models(
@@ -108,3 +107,42 @@ def get_pathways_config(
       worker_flags=worker_flags,
   )
   return pathways_config
+
+def check_and_create_bucket(storage_client, bucket_name, region):
+  """
+  Checks if the GCS bucket exists.
+  Prints a message if it exists.
+  Attempts to create the bucket if it does not exist.
+  """
+  print(f"Checking GCS bucket: {bucket_name}...")
+  
+  try:
+    # Attempt to retrieve the bucket's metadata
+    bucket = storage_client.get_bucket(bucket_name)
+    
+    # If successful, the bucket exists
+    print(f"GCS bucket '{bucket_name}' already exists. No creation needed.")
+    return bucket
+
+  except NotFound:
+    # If NotFound error is raised, the bucket does not exist
+    print(f"GCS bucket '{bucket_name}' not found. Attempting to create...")
+    try:
+      # Create a new bucket
+      # Note: GCS bucket names must be globally unique!
+      # The location parameter is used to specify the geographical region (e.g., 'us-central1', 'asia-east1')
+      # If not specified, it uses the project's default location.
+      new_bucket = storage_client.create_bucket(
+          bucket_or_name=bucket_name,
+          location=region  # Use the provided region as location
+      )
+      print(f"Successfully created GCS bucket: '{new_bucket.name}' in region: {new_bucket.location}.")
+      return new_bucket
+    
+    except Exception as e:
+      # Catch other potential errors during creation (e.g., permission denied or name already taken)
+      print(f"Failed to create GCS bucket! Error message: {e}")
+  
+  except Exception as e:
+    # Catch other potential errors (e.g., authentication failure)
+    print(f"An error occurred while checking GCS bucket! Error message: {e}")
