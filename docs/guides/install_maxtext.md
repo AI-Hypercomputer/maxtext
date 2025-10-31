@@ -14,7 +14,7 @@
  limitations under the License.
  -->
 
-# Installing MaxText
+# Install MaxText
 
 This document discusses how to install MaxText. We recommend installing MaxText inside a Python virtual environment.
 

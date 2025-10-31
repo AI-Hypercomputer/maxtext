@@ -14,7 +14,7 @@
  limitations under the License.
  -->
 
-# How to update MaxText dependencies using seed-env
+# Update MaxText dependencies
 
 ## Introduction
 
