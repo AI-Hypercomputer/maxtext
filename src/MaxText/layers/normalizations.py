@@ -33,17 +33,17 @@ class RMSNorm(nnx.Module):
   """RMS normalization."""
 
   def __init__(
-      self,
-      num_features: int,
-      epsilon: float = 1e-6,
-      dtype: Any = jnp.float32,
-      weight_dtype: Any = jnp.float32,
-      shard_mode: ShardMode = ShardMode.AUTO,
-      kernel_axes: tuple[None | str, ...] = (),
-      scale_init: Initializer = nn.initializers.ones,
-      parameter_memory_host_offload: bool = False,
-      *,
-      rngs: nnx.Rngs,
+    self,
+    num_features: int,
+    epsilon: float = 1e-6,
+    dtype: Any = jnp.float32,
+    weight_dtype: Any = jnp.float32,
+    shard_mode: ShardMode = ShardMode.AUTO,
+    kernel_axes: tuple[None | str, ...] = (),
+    scale_init: Initializer = nn.initializers.ones,
+    parameter_memory_host_offload: bool = False,
+    *,
+    rngs: nnx.Rngs,
   ):
     self.num_features = num_features
     self.epsilon = epsilon
@@ -54,8 +54,8 @@ class RMSNorm(nnx.Module):
     self.scale_init = scale_init
     self.parameter_memory_host_offload = parameter_memory_host_offload
     self.scale = nnx.Param(
-        scale_init(rngs.params(), (num_features,), weight_dtype),
-        sharding=kernel_axes,
+      scale_init(rngs.params(), (num_features,), weight_dtype),
+      sharding=kernel_axes,
     )
 
   def __call__(self, x: jnp.ndarray, out_sharding: NamedSharding | None = None) -> jnp.ndarray:
@@ -78,29 +78,29 @@ class RMSNorm(nnx.Module):
 
 
 def rms_norm(
-    num_features: int,
-    epsilon: float = 1e-6,
-    dtype: Any = jnp.float32,
-    weight_dtype: Any = jnp.float32,
-    shard_mode: ShardMode = ShardMode.AUTO,
-    kernel_axes: tuple[None | str, ...] = (),
-    scale_init: Initializer = nn.initializers.ones,
-    name: None | str = None,
-    parameter_memory_host_offload: bool = False,
+  num_features: int,
+  epsilon: float = 1e-6,
+  dtype: Any = jnp.float32,
+  weight_dtype: Any = jnp.float32,
+  shard_mode: ShardMode = ShardMode.AUTO,
+  kernel_axes: tuple[None | str, ...] = (),
+  scale_init: Initializer = nn.initializers.ones,
+  name: None | str = None,
+  parameter_memory_host_offload: bool = False,
 ):
   """Creates a RMSNorm module."""
   module = nnx_wrappers.to_linen(
-      RMSNorm,
-      num_features=num_features,
-      epsilon=epsilon,
-      dtype=dtype,
-      weight_dtype=weight_dtype,
-      shard_mode=shard_mode,
-      kernel_axes=kernel_axes,
-      scale_init=scale_init,
-      parameter_memory_host_offload=parameter_memory_host_offload,
-      name=name,
-      metadata_fn=variable_to_logically_partitioned,
+    RMSNorm,
+    num_features=num_features,
+    epsilon=epsilon,
+    dtype=dtype,
+    weight_dtype=weight_dtype,
+    shard_mode=shard_mode,
+    kernel_axes=kernel_axes,
+    scale_init=scale_init,
+    parameter_memory_host_offload=parameter_memory_host_offload,
+    name=name,
+    metadata_fn=variable_to_logically_partitioned,
   )
   return module
 

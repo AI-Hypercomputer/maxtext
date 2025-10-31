@@ -63,24 +63,24 @@ def QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, scan_layers=False, saving_to_hf=Fa
       return input_tensor.T.reshape(target_shape)
 
   mapping = {
-      "params-token_embedder-embedding": pad_embedding_layer,
-      "params-decoder-logits_dense-kernel": reshape_kernel,
+    "params-token_embedder-embedding": pad_embedding_layer,
+    "params-decoder-logits_dense-kernel": reshape_kernel,
   }
 
   kernel_hooks = [
-      "self_attention-query-kernel",
-      "self_attention-key-kernel",
-      "self_attention-value-kernel",
-      "self_attention-out-kernel",
-      "mlp-wi_0-kernel",
-      "mlp-wi_1-kernel",
-      "mlp-wo-kernel",
+    "self_attention-query-kernel",
+    "self_attention-key-kernel",
+    "self_attention-value-kernel",
+    "self_attention-out-kernel",
+    "mlp-wi_0-kernel",
+    "mlp-wi_1-kernel",
+    "mlp-wo-kernel",
   ]
   moe_kernel_hooks = [
-      "moe_block-gate-kernel",
-      "moe_block-wi_0-kernel",
-      "moe_block-wi_1-kernel",
-      "moe_block-wo-kernel",
+    "moe_block-gate-kernel",
+    "moe_block-wi_0-kernel",
+    "moe_block-wi_1-kernel",
+    "moe_block-wo-kernel",
   ]
 
   if scan_layers:

@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-""" Train tokenizer
+"""Train tokenizer
 Example usage: python3 -m MaxText.train_tokenizer --dataset_path=gs://maxtext-dataset --dataset_name=c4/en:3.0.1
 """
 
@@ -64,14 +64,14 @@ def _dump_chars_to_textfile(dataset: tf.data.Dataset, maxchars: int = int(1e7), 
 
 
 def _train_sentencepiece(
-    dataset: tf.data.Dataset,
-    *,
-    vocab_size: int,
-    maxchars: int = int(1e7),
-    model_path: str,
-    model_type: str = "unigram",
-    character_coverage: float = 1.0,
-    data_keys=("text",),
+  dataset: tf.data.Dataset,
+  *,
+  vocab_size: int,
+  maxchars: int = int(1e7),
+  model_path: str,
+  model_type: str = "unigram",
+  character_coverage: float = 1.0,
+  data_keys=("text",),
 ):
   """Train SentencePiece tokenizer from subset of tf dataset.
   Args:
@@ -96,13 +96,13 @@ def _train_sentencepiece(
   with tempfile.NamedTemporaryFile(delete=False, prefix=os.path.join(temp_dir, "sp_tmp")) as model_fp:
     pass  # we just want a prefix'd tmp-filename
   argstr = " ".join(
-      [
-          f"--input={fname}",
-          f"--vocab_size={vocab_size}",
-          f"--character_coverage={character_coverage}",
-          f"--model_prefix={model_fp.name}",
-          f"--model_type={model_type}",
-      ]
+    [
+      f"--input={fname}",
+      f"--vocab_size={vocab_size}",
+      f"--character_coverage={character_coverage}",
+      f"--model_prefix={model_fp.name}",
+      f"--model_type={model_type}",
+    ]
   )
   SentencePieceTrainer.Train(argstr)
   if jax.process_index() == 0:
@@ -121,21 +121,21 @@ def _train_sentencepiece(
 
 
 def train_tokenizer(
-    dataset: tf.data.Dataset,
-    *,
-    vocab_path: str,
-    vocab_size: int,
-    max_corpus_chars: int,
-    data_keys: tuple[str] = ("text",),
+  dataset: tf.data.Dataset,
+  *,
+  vocab_path: str,
+  vocab_size: int,
+  max_corpus_chars: int,
+  data_keys: tuple[str] = ("text",),
 ):
   """tokenizer training function"""
   logging.info("SentencePiece vocab not found, building one from data.")
   vocab_path = _train_sentencepiece(
-      dataset,
-      vocab_size=vocab_size,
-      maxchars=max_corpus_chars,
-      model_path=vocab_path,
-      data_keys=data_keys,
+    dataset,
+    vocab_size=vocab_size,
+    maxchars=max_corpus_chars,
+    model_path=vocab_path,
+    data_keys=data_keys,
   )
   logging.info("Model saved at %s", vocab_path)
 
@@ -145,15 +145,15 @@ def main(argv):
   os.environ["TFDS_DATA_DIR"] = _DATASET_PATH.value
 
   read_config = tfds.ReadConfig(
-      shuffle_seed=0,
+    shuffle_seed=0,
   )
   train_ds_builder = tfds.builder(_DATASET_NAME.value)
   train_ds = train_ds_builder.as_dataset(split="train", read_config=read_config, shuffle_files=True)
   train_tokenizer(
-      train_ds,
-      vocab_path=os.path.join(_ASSETS_PATH.value, _VOCAB_MODEL_NAME.value),
-      vocab_size=_VOCAB_SIZE.value,
-      max_corpus_chars=_MAX_CORPUS_CHARS.value,
+    train_ds,
+    vocab_path=os.path.join(_ASSETS_PATH.value, _VOCAB_MODEL_NAME.value),
+    vocab_size=_VOCAB_SIZE.value,
+    max_corpus_chars=_MAX_CORPUS_CHARS.value,
   )
 
 

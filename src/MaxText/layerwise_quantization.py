@@ -63,10 +63,10 @@ class LayerwiseQuantization:
     self.config = config
 
     # TODO(ranlihao): Remove this assertion once the Layerwise quantization is supported for other decoder blocks.
-    assert (
-        config.decoder_block == common_types.DecoderBlockType.DEEPSEEK
-    ), f"Layerwise quantization is only supported for {common_types.DecoderBlockType.DEEPSEEK}\
+    assert config.decoder_block == common_types.DecoderBlockType.DEEPSEEK, (
+      f"Layerwise quantization is only supported for {common_types.DecoderBlockType.DEEPSEEK}\
       , but got {config.decoder_block}."
+    )
 
     # Mesh definition
     devices_array = maxtext_utils.create_device_mesh(config=config)
@@ -75,7 +75,7 @@ class LayerwiseQuantization:
     # Model and quantization config
     self.quant = quantizations.configure_quantization(config)
     model = models.transformer_as_linen(
-        config, mesh=self._mesh, quant=self.quant, model_mode=common_types.MODEL_MODE_TRAIN
+      config, mesh=self._mesh, quant=self.quant, model_mode=common_types.MODEL_MODE_TRAIN
     )
     rng = jax.random.PRNGKey(1234)
     self.unboxed_abstract_state, _, _ = maxtext_utils.get_abstract_state(model, None, self.config, rng, self._mesh, False)
@@ -94,8 +94,8 @@ class LayerwiseQuantization:
     self.quant.quant_mode = quantizations.get_quant_mode("convert")
 
     layers = [
-        deepseek.DeepSeekDenseLayer(config, mesh=self._mesh, quant=self.quant),
-        deepseek.DeepSeekMoELayer(config, mesh=self._mesh, quant=self.quant),
+      deepseek.DeepSeekDenseLayer(config, mesh=self._mesh, quant=self.quant),
+      deepseek.DeepSeekMoELayer(config, mesh=self._mesh, quant=self.quant),
     ]
     layer_prefixes = ["dense_layers", "moe_layers"]
     num_moe_layers = config.num_decoder_layers - config.first_num_dense_layers
@@ -103,14 +103,14 @@ class LayerwiseQuantization:
 
     def model_apply(_p, _rng, layer):
       return layer.apply(
-          _p | {"aqt": {}},
-          jnp.ones((1, self.config.max_prefill_predict_length, self.config.base_emb_dim), dtype=jnp.int32),
-          None,
-          jnp.zeros((1, self.config.max_prefill_predict_length), dtype=jnp.int32),
-          True,
-          model_mode=common_types.MODEL_MODE_PREFILL,
-          rngs={"params": _rng},
-          mutable=True,
+        _p | {"aqt": {}},
+        jnp.ones((1, self.config.max_prefill_predict_length, self.config.base_emb_dim), dtype=jnp.int32),
+        None,
+        jnp.zeros((1, self.config.max_prefill_predict_length), dtype=jnp.int32),
+        True,
+        model_mode=common_types.MODEL_MODE_PREFILL,
+        rngs={"params": _rng},
+        mutable=True,
       )
 
     for layer, num_layers, layer_prefix in zip(layers, num_layers_list, layer_prefixes):
@@ -126,7 +126,7 @@ class LayerwiseQuantization:
 
         quantized_params["aqt"]["decoder"][layer_name] = new_vars["aqt"]
         quantized_params["params"]["decoder"][layer_name] = quantizations.remove_quantized_params(
-            params["params"], new_vars["aqt"]
+          params["params"], new_vars["aqt"]
         )
 
     # Load and save the layers that should not be quantized.
@@ -145,11 +145,11 @@ class LayerwiseQuantization:
     config = self.config
     with nn_partitioning.axis_rules(config.logical_axis_rules):
       params = checkpointing.load_params_from_path(
-          config.load_parameters_path,
-          self._create_partial_abstract_params(self.unboxed_abstract_state.params, layer_name),
-          config.checkpoint_storage_concurrent_gb,
-          config.checkpoint_storage_use_ocdbt,
-          config.checkpoint_storage_use_zarr3,
+        config.load_parameters_path,
+        self._create_partial_abstract_params(self.unboxed_abstract_state.params, layer_name),
+        config.checkpoint_storage_concurrent_gb,
+        config.checkpoint_storage_use_ocdbt,
+        config.checkpoint_storage_use_zarr3,
       )
     return params
 
@@ -197,9 +197,9 @@ def main(argv: Sequence[str]) -> None:
 
 
 def validate_config(config):
-  assert (
-      config.load_full_state_path == ""
-  ), "Operation on full states not supported! Convert to parameter checkpoint first."
+  assert config.load_full_state_path == "", (
+    "Operation on full states not supported! Convert to parameter checkpoint first."
+  )
 
 
 if __name__ == "__main__":

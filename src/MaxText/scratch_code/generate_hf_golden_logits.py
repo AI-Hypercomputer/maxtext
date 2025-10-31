@@ -60,7 +60,7 @@ def upload_blob(bucket_name, source_file_name, destination_blob_name):
 
 
 def save_golden_logits(
-    model_id, output_path, prompt_texts, apply_chat_template, gcs_bucket, hf_model_path, image_paths, output_format
+  model_id, output_path, prompt_texts, apply_chat_template, gcs_bucket, hf_model_path, image_paths, output_format
 ):
   """save golden logits"""
   if hf_model_path is None:
@@ -78,9 +78,9 @@ def save_golden_logits(
   tokenizer = AutoTokenizer.from_pretrained(model_id)
   print(f"loading model from {hf_model_path}")
   model = model_class.from_pretrained(
-      hf_model_path,
-      torch_dtype=torch.float32,
-      trust_remote_code=True,
+    hf_model_path,
+    torch_dtype=torch.float32,
+    trust_remote_code=True,
   )
 
   all_data_to_save = []
@@ -149,44 +149,44 @@ def main(raw_args=None) -> None:
   parser.add_argument("--output-path", type=str, required=True, help="The path to save the generated golden logits.")
   parser.add_argument("--prompts", type=str, required=True, help="A semicolon-separated list of prompts.")
   parser.add_argument(
-      "--apply-chat-template",
-      action="store_true",
-      help="Apply chat template from the HF processor. Use for image+text input. Pass this flag to enable; omit to disable.",
+    "--apply-chat-template",
+    action="store_true",
+    help="Apply chat template from the HF processor. Use for image+text input. Pass this flag to enable; omit to disable.",
   )
   parser.add_argument(
-      "--gcs-bucket", type=str, required=False, default=None, help="A GCS bucket to store logits, without gs://."
+    "--gcs-bucket", type=str, required=False, default=None, help="A GCS bucket to store logits, without gs://."
   )
   parser.add_argument(
-      "--hf-model-path", type=str, required=False, default=None, help="local path to checkpoint if exists."
+    "--hf-model-path", type=str, required=False, default=None, help="local path to checkpoint if exists."
   )
   parser.add_argument(
-      "--image-paths", type=str, required=False, default=None, help="A semicolon-separated list of image_paths."
+    "--image-paths", type=str, required=False, default=None, help="A semicolon-separated list of image_paths."
   )
   parser.add_argument(
-      "--output-format",
-      type=str,
-      required=False,
-      default="json",
-      help="The output format for the golden logits. (json, pickle)",
+    "--output-format",
+    type=str,
+    required=False,
+    default="json",
+    help="The output format for the golden logits. (json, pickle)",
   )
   args = parser.parse_args(raw_args)
   prompts = args.prompts.split(";")
   image_paths = args.image_paths.split(";") if args.image_paths else []
   if image_paths:
-    assert len(image_paths) == len(
-        prompts
-    ), "when image paths are provided, image_paths and prompts must have the same length."
+    assert len(image_paths) == len(prompts), (
+      "when image paths are provided, image_paths and prompts must have the same length."
+    )
   if args.apply_chat_template:
     assert image_paths, "apply_chat_template is only used for image+text input, so image_paths must be provided."
   save_golden_logits(
-      args.model_id,
-      args.output_path,
-      prompts,
-      args.apply_chat_template,
-      args.gcs_bucket,
-      args.hf_model_path,
-      image_paths,
-      args.output_format,
+    args.model_id,
+    args.output_path,
+    prompts,
+    args.apply_chat_template,
+    args.gcs_bucket,
+    args.hf_model_path,
+    image_paths,
+    args.output_format,
   )
 
 

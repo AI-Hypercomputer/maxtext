@@ -36,6 +36,7 @@ python make_pytorch_file.py \
 
 Make sure to set the `output_dir` variable to your desired output directory.
 """
+
 import argparse
 import ast
 import os
@@ -191,7 +192,7 @@ def extract_python_independent_modules(filepath, base_path):
   # Separate global and local imports
   global_imports, removed_imports = remove_local_imports(analysis_result["sorted_modules"].get("imports", ""), filepath)
   conditional_imports, _ = remove_local_imports(
-      analysis_result["sorted_modules"].get("conditional_imports", ""), filepath
+    analysis_result["sorted_modules"].get("conditional_imports", ""), filepath
   )
 
   all_global_imports = global_imports + "\n" + conditional_imports
@@ -206,7 +207,7 @@ def extract_python_independent_modules(filepath, base_path):
     if dependencies:
       continue  # Not a standalone component
     other_local_components = [
-        codename for compname, codename in analysis_result["sorted_modules"].items() if compname != comp_name
+      codename for compname, codename in analysis_result["sorted_modules"].items() if compname != comp_name
     ]
     # Parse the component's code to check its type and dependencies
     comp_tree = ast.parse(code)
@@ -214,16 +215,16 @@ def extract_python_independent_modules(filepath, base_path):
     # Check if the component is a PyTorch-related class or function
     for node in comp_tree.body:
       _process_and_save_if_standalone_torch_module(
-          all_global_imports=all_global_imports,
-          analysis_result=analysis_result,
-          code=code,
-          comp_name=comp_name,
-          file_name=file_name,
-          node=node,
-          other_local_components=other_local_components,
-          removed_imports=removed_imports,
-          standalone_modules=standalone_modules,
-          tree=tree,
+        all_global_imports=all_global_imports,
+        analysis_result=analysis_result,
+        code=code,
+        comp_name=comp_name,
+        file_name=file_name,
+        node=node,
+        other_local_components=other_local_components,
+        removed_imports=removed_imports,
+        standalone_modules=standalone_modules,
+        tree=tree,
       )
 
   print("\n--- Standalone PyTorch Modules Extracted ---")
@@ -262,16 +263,16 @@ def _save_module_to_file(file_name, module_name, code, all_global_imports, analy
 
 
 def _process_and_save_if_standalone_torch_module(
-    all_global_imports,
-    analysis_result,
-    code,
-    comp_name,
-    file_name,
-    node,
-    other_local_components,
-    removed_imports,
-    standalone_modules,
-    tree,
+  all_global_imports,
+  analysis_result,
+  code,
+  comp_name,
+  file_name,
+  node,
+  other_local_components,
+  removed_imports,
+  standalone_modules,
+  tree,
 ):
   """Checks if a component is a standalone PyTorch module and saves it.
 
@@ -316,17 +317,17 @@ def _process_and_save_if_standalone_torch_module(
 if __name__ == "__main__":
   parser = argparse.ArgumentParser(description="Extract standalone PyTorch modules from a codebase.")
   parser.add_argument(
-      "--entry_file_path",
-      type=str,
-      default="transformers/models/llama4/modeling_llama4.py",
-      help="Relative path to the entry Python file.",
+    "--entry_file_path",
+    type=str,
+    default="transformers/models/llama4/modeling_llama4.py",
+    help="Relative path to the entry Python file.",
   )
   parser.add_argument("--base_path", type=str, default=BASE_PATH, help="Base directory containing the source files.")
   parser.add_argument(
-      "--exclude_conditional_imports",
-      action="store_true",
-      default=True,
-      help="Whether to exclude conditional imports when sorting dependencies.",
+    "--exclude_conditional_imports",
+    action="store_true",
+    default=True,
+    help="Whether to exclude conditional imports when sorting dependencies.",
   )
 
   args = parser.parse_args()

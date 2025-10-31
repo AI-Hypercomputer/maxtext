@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""  This file contains data classes and convergence setup logic to config convergence testing
+"""This file contains data classes and convergence setup logic to config convergence testing
 
 new_config = _setup_model_convergence_(
     model_config: MaxTextModel,    # Your existing, performance-tuned model configuration
@@ -22,6 +22,7 @@ new_config = _setup_model_convergence_(
     num_devices: int,                # The number of devices available for training
 )
 """
+
 import dataclasses
 import math
 
@@ -168,11 +169,11 @@ def setup_convergence_configs(model, params: ConvHParams, num_devices: int, glob
 
 
 def _setup_model_convergence_(
-    maxtext_model: MaxTextModel,
-    dataset: DatasetHParams,
-    convergence_configs: ConvHParams,
-    num_devices: int,
-    global_batch_size: int,
+  maxtext_model: MaxTextModel,
+  dataset: DatasetHParams,
+  convergence_configs: ConvHParams,
+  num_devices: int,
+  global_batch_size: int,
 ) -> MaxTextModel:
   """Sets up a MaxText model configuration for a convergence test.
 

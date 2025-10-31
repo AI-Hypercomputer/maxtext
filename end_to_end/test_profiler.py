@@ -13,6 +13,7 @@
 # limitations under the License.
 
 """Profiler tests for TPUs."""
+
 import glob
 import json
 import os
@@ -63,12 +64,12 @@ class ProfilerTest(unittest.TestCase):
       if "name" in event and event["name"] == "thread_name":
         thread_names.append((event["args"]["name"]))
     expected_threads = [
-        "Framework Name Scope",
-        "Framework Ops",
-        "XLA Modules",
-        "XLA Ops",
-        "XLA TraceMe",
-        "Steps",
+      "Framework Name Scope",
+      "Framework Ops",
+      "XLA Modules",
+      "XLA Ops",
+      "XLA TraceMe",
+      "Steps",
     ]
     # Ensure that thread_names contains at least all expected threads.
     self.assertEqual(set(expected_threads) - set(thread_names), set())

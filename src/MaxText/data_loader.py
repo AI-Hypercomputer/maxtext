@@ -22,8 +22,8 @@ from jax.experimental import checkify
 from MaxText import exceptions
 from MaxText import sharding
 from MaxText.utils.goodput_utils import (
-    GoodputEvent,
-    maybe_record_goodput,
+  GoodputEvent,
+  maybe_record_goodput,
 )
 
 
@@ -49,9 +49,9 @@ class DataLoader:
           example_batch = next(self.data_iterator)
         # Reshard data from loaded sharding to performant activation sharding
         self.last_batch = sharding.maybe_shard_with_name(
-            example_batch,
-            self.input_data_shardings,
-            self.config.shard_mode,
+          example_batch,
+          self.input_data_shardings,
+          self.config.shard_mode,
         )
         self.check_example_batch()
       except Exception as e:  # pylint: disable=broad-except

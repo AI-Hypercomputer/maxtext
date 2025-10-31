@@ -28,6 +28,7 @@ Example Invocation:
 
 python llm_rag_code_coversion.py --module-name "Qwen3ForCausalLM"
 """
+
 from pathlib import Path
 import argparse
 import json
@@ -36,21 +37,30 @@ import os
 
 from MaxText.experimental.agent.integrative_rag_agent import system_setup
 from MaxText.experimental.agent.code_generation_agent.llm_agent import GeminiAgent
-from MaxText.experimental.agent.integrative_rag_agent.prompts_integrative_rag import CODE_CONVERSION, MODULE_NAMING_PROMPT, CODE_DESCRIPTION
+from MaxText.experimental.agent.integrative_rag_agent.prompts_integrative_rag import (
+  CODE_CONVERSION,
+  MODULE_NAMING_PROMPT,
+  CODE_DESCRIPTION,
+)
 from MaxText.experimental.agent.orchestration_agent.split_python_file import get_modules_from_file
 from MaxText.experimental.agent.orchestration_agent.utils import parse_python_code
 from MaxText.experimental.agent.code_evaluation_agent.utils import get_last_defined_module
 from MaxText.experimental.agent.integrative_rag_agent.utils import read_code_blocks
 from MaxText.experimental.agent.integrative_rag_agent.config import maxtext_block_description
 from MaxText.experimental.agent.integrative_rag_agent.llm_rag_embedding_generation import get_code_description_with_gemini
-from MaxText.experimental.agent.integrative_rag_agent.config import files_order_file_format, maxtext_code_block, processed_module_file_format, new_module_file_format
+from MaxText.experimental.agent.integrative_rag_agent.config import (
+  files_order_file_format,
+  maxtext_code_block,
+  processed_module_file_format,
+  new_module_file_format,
+)
 from MaxText.globals import MAXTEXT_PKG_DIR
 
 # --- Basic Configuration ---
 logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s.%(funcName)s - %(levelname)s - %(message)s",
-    datefmt="%H:%M:%S",
+  level=logging.INFO,
+  format="%(asctime)s - %(name)s.%(funcName)s - %(levelname)s - %(message)s",
+  datefmt="%H:%M:%S",
 )
 logger = logging.getLogger(__name__)
 
@@ -69,16 +79,16 @@ def arg_parser():
   parser.add_argument("--number-of-maxtext-blocks", type=int, default=5, help="Number of maxtext blocks to process.")
   parser.add_argument("--module-name", type=str, default="Qwen3ForCausalLM", help="Name of the module to process.")
   parser.add_argument(
-      "--destination-base-directory",
-      type=str,
-      default="maxtext/",
-      help="Base directory for output files. Should point to the root of the MaxText repo.",
+    "--destination-base-directory",
+    type=str,
+    default="maxtext/",
+    help="Base directory for output files. Should point to the root of the MaxText repo.",
   )
   parser.add_argument(
-      "--destination-source-url",
-      type=str,
-      default="https://github.com/huggingface/transformers/blob/6ce8f0537537455806ab7bfd39b59ad37803ead9/src/",
-      help="Base directory for source files. Should point to the root of the Transformer repo repo.",
+    "--destination-source-url",
+    type=str,
+    default="https://github.com/huggingface/transformers/blob/6ce8f0537537455806ab7bfd39b59ad37803ead9/src/",
+    help="Base directory for source files. Should point to the root of the Transformer repo repo.",
   )
   return parser.parse_args()
 
@@ -122,7 +132,7 @@ def find_existing_agent_files():
           # Remove .py extension for display
           module_name = rel_path.replace(".py", "").replace(os.path.sep, "_")
           existing_files.append(
-              {"file_path": rel_path, "module_name": module_name, "full_path": os.path.join(root, file)}
+            {"file_path": rel_path, "module_name": module_name, "full_path": os.path.join(root, file)}
           )
 
   return existing_files
@@ -139,9 +149,9 @@ def generate_file_name_prompt(module_description, existing_files):
 
   # Use the prompt template from prompts_integrative_rag.py
   prompt = (
-      MODULE_NAMING_PROMPT.replace("{module_base_path}", destination_directory)
-      .replace("{existing_files_info}", existing_files_info)
-      .replace("{module_description}", module_description)
+    MODULE_NAMING_PROMPT.replace("{module_base_path}", destination_directory)
+    .replace("{existing_files_info}", existing_files_info)
+    .replace("{module_description}", module_description)
   )
 
   return prompt
@@ -210,7 +220,7 @@ def convert_given_file(module, jax_modules) -> None | dict:
   if last_module is None:
     return None
   packagename = (
-      dest_path.removeprefix(args.destination_base_directory).replace(os.path.sep, ".").replace(".py", ".") + last_module
+    dest_path.removeprefix(args.destination_base_directory).replace(os.path.sep, ".").replace(".py", ".") + last_module
   )
   logger.info("New Module Package Name %s", packagename)
   return {packagename: get_code_description_with_gemini(module_code, full_context, user_prompt=CODE_DESCRIPTION)}
