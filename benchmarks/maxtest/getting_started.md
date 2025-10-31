@@ -44,6 +44,21 @@ EXIT_CODE=0
 
 -   maxtest.sh will generate a YAML file in the directory that is passed to kubectl. This file can be modified and reused by running `kubectl apply -f maxtest.yaml`
 
+### Passing custom libtpu or XLA flags ###
+
+If we want to pass custom flags this is also possible by specifying
+`--libtpu_args`.
+
+
+#### Setting flags for SDC checking ####
+
+Useful checking for the existence of SDC on TPU hardware.
+
+```
+bash maxtest.sh --project $TPU_PROJECT --cluster $CLUSTER --region $REGION --nodepool $NODEPOOL_NAME --num_workers $NUM_WORKERS --libtpu_args '--xla_tpu_enable_sdc_checker'
+```
+
+
 ### Debugging common job errors ###
 
 If the job does not exit with `EXIT_CODE=0`, there is a failure among one of

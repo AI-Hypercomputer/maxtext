@@ -1,4 +1,4 @@
-#!/bin/bash
+#!bin/bash
 
 function usage() {
   echo "error: $1"
@@ -15,6 +15,7 @@ while [[ "$#" > 0 ]]; do case $1 in
   -r|--region)  GKE_REGION="$2";shift;shift;;
   --nodepool)   NODEPOOL="$2";shift;shift;;
   --num_workers)   NUM_WORKERS="$2";shift;shift;;
+  --libtpu_args)   LIBTPU_ARGS="$2";shift;shift;;
   *) usage "Unknown parameter passed: $1"; shift; shift;;
 esac; done
 
@@ -32,19 +33,20 @@ if [ -z "$TPU_ACCELERATOR" ]; then exit; fi;
 
 UUID=$(uuidgen)
 export JOB_NAME="${UUID:0:5}-maxtest"
-export DOCKER_IMAGE="gcr.io/cloud-tpu-images-public/tpu/healthscan"
+export DOCKER_IMAGE="us-docker.pkg.dev/cloud-tpu-images-public/tpu/healthscan:latest"
 export NODEPOOL
 export TPU_TOPOLOGY
 export TPU_ACCELERATOR
 export GKE_PROJECT
 export GKE_REGION
 export GKE_CLUSTER
+export LIBTPU_ARGS
 
 export MEMORY_PER_HOST="407Gi"
 export TPU_CHIPS_PER_HOST=4
 export COMPLETIONS=$NUM_WORKERS # Number of VMs in the nodepool (v6e -> 2 VMs for v6e-8, v5p -> 1 VM for a v5p-8)
 
-YAML_VARS='$JOB_NAME $DOCKER_IMAGE $NODEPOOL $TPU_TOPOLOGY $TPU_ACCELERATOR $COMPLETIONS $MEMORY_PER_HOST $TPU_CHIPS_PER_HOST $GKE_PROJECT $GKE_REGION $GKE_CLUSTER'
+YAML_VARS='$JOB_NAME $DOCKER_IMAGE $NODEPOOL $TPU_TOPOLOGY $TPU_ACCELERATOR $COMPLETIONS $MEMORY_PER_HOST $TPU_CHIPS_PER_HOST $GKE_PROJECT $GKE_REGION $GKE_CLUSTER $LIBTPU_ARGS'
 
 envsubst "${YAML_VARS}" < maxtest.yaml.template > maxtest.yaml
 
