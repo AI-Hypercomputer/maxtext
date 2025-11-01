@@ -848,6 +848,7 @@ def setup_initial_state(
         enable_orbax_v1=config.enable_orbax_v1,
         checkpoint_conversion_fn=config.checkpoint_conversion_fn,
         source_checkpoint_layout=config.source_checkpoint_layout,
+        expansion_factor_real_data=config.expansion_factor_real_data,
     )
 
     if restored:
@@ -860,8 +861,7 @@ def setup_initial_state(
       ):
         state = restored
       else:
-        if "iter" in restored and restored["iter"] is not None:
-          data_iterator.local_iterator = restored["iter"]
+        # The update of data_iterator state happens in place, no need to assign explicitly
         state = restored["items"]
     else:
       init_state_partial = functools.partial(init_initial_state, model, tx, config, is_training)

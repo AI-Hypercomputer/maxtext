@@ -497,7 +497,11 @@ add_eos: True
 
 # Dataset
 per_device_batch_size: 12.0
-expansion_factor_real_data: -1 # if -1 then all hosts will load real data, else total_hosts//expansion_factor_real_data will pull data from GCS.
+# When expansion_factor_real_data is set to > 1, total_hosts//expansion_factor_real_data will load data.
+# Each data-loading host will load per_device_batch_size * expansion_factor_real_data.
+# When set to between 0 and 1, it's for grain pipeline to use a smaller chip count to read checkpoint from a larger chip count job.
+# Details in https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/guides/data_input_grain.md#using-grain
+expansion_factor_real_data: -1.0 
 eval_per_device_batch_size: 0.0
 max_corpus_chars: 10_000_000
 train_data_columns: ['text'] # for DPO dataset containing "chosen" and "rejected"

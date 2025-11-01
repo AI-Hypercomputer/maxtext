@@ -31,9 +31,8 @@ import omegaconf
 from MaxText import accelerator_to_spec_map
 from MaxText import max_logging
 from MaxText import max_utils
-from MaxText.common_types import DecoderBlockType, ShardMode
 from MaxText.globals import MAXTEXT_ASSETS_ROOT, MAXTEXT_REPO_ROOT, MAXTEXT_PKG_DIR
-from MaxText.layers.attentions import AttentionType
+from MaxText.common_types import AttentionType, DecoderBlockType, ShardMode
 from MaxText.utils import gcs_utils
 
 
@@ -1237,12 +1236,12 @@ def calculate_global_batch_sizes(
   """Calculates target global batch size from target devices and per_device_batch"""
   if per_device_batch_size < 1.0:
     # For per_device_batch_size<1, we load the data as if per_device_batch_size=1
-    if expansion_factor_real_data != -1:
+    if expansion_factor_real_data > 1:
       micro_batch_size_to_load = num_devices * expansion_factor_real_data
     else:
       micro_batch_size_to_load = num_devices
   else:
-    if expansion_factor_real_data != -1:
+    if expansion_factor_real_data > 1:
       micro_batch_size_to_load = int(num_devices * per_device_batch_size * expansion_factor_real_data)
     else:
       micro_batch_size_to_load = int(num_devices * per_device_batch_size)

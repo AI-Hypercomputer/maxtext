@@ -459,6 +459,9 @@ def train_loop(config, recorder, state=None):
     if config.save_checkpoint_on_completion:
       state_to_save = state if not config.use_dpo else _split_dpo_state(state)[0]
       checkpointing.maybe_save_checkpoint(checkpoint_manager, state_to_save, config, data_iterator)
+    if checkpoint_manager is not None:
+      # in case the last checkpoint_period checkpoint is still in progress
+      checkpoint_manager.wait_until_finished()
   except exceptions.StopTraining as e:
     max_logging.log(f"Training stopped: {str(e)}")
   finally:
