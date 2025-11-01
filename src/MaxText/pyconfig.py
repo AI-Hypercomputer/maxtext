@@ -69,6 +69,7 @@ def validate_shard_mode(
     shard_mode: str,
     decoder_block: str,
     quantization: str,
+    use_qwix_quantization: bool,
 ) -> None:
   """Validates sharding settings, raising ValueError for incompatible combinations."""
   if shard_mode not in {"auto", "explicit"}:
@@ -78,7 +79,7 @@ def validate_shard_mode(
     max_logging.log("Warning: explicit shard mode is an experimental feature.")
 
     # Check for unsupported decoder blocks
-    supported_decoders = {"simple", "simple_mlp", "llama2"}
+    supported_decoders = {"simple", "simple_mlp", "llama2", "deepseek"}
     if decoder_block not in supported_decoders:
       raise ValueError(
           f"Decoder '{decoder_block}' is not supported with 'explicit' sharding. "
@@ -86,8 +87,8 @@ def validate_shard_mode(
       )
 
     # Check for unsupported quantization
-    if quantization:  # More Pythonic check for non-empty string
-      raise ValueError("Quantization is not supported with 'explicit' sharding.")
+    if quantization and not use_qwix_quantization:  # More Pythonic check for non-empty string
+      raise ValueError("AQT-based quantization is not supported with 'explicit' sharding.")
 
 
 def validate_kv_quant_axis(s: str, quantize_kvcache: bool) -> None:
@@ -227,7 +228,7 @@ def validate_keys(keys):
   validate_profiler_type(keys["profiler"])
   validate_periodic_profiler(keys["profiler"], keys["profile_periodically_period"], keys["profiler_steps"])
   validate_compute_axis_order(keys["compute_axis_order"])
-  validate_shard_mode(keys["shard_mode"], keys["decoder_block"], keys["quantization"])
+  validate_shard_mode(keys["shard_mode"], keys["decoder_block"], keys["quantization"], keys["use_qwix_quantization"])
   validate_kv_quant_axis(keys["kv_quant_axis"], keys["quantize_kvcache"])
   validate_model_call_mode(keys["model_call_mode"])
   validate_prefill_and_target_lengths(keys["max_prefill_predict_length"], keys["max_target_length"])

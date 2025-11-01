@@ -297,10 +297,12 @@ class MoeLoopBlock(nnx.Module):
     self.gate = moe.GateLogit(
         in_features_shape=self.inputs_shape[-1],
         out_features_shape=self.num_experts,
+        mesh=mesh,
         model_name=self.config.model_name,
         dtype=self.dtype,
         kernel_init=self.kernel_init,
         kernel_axes=self.kernel_axes,
+        shard_mode=config.shard_mode,
         rngs=rngs,
     )
     for k in range(self.num_experts):

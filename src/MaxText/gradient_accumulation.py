@@ -92,6 +92,7 @@ def gradient_accumulation_loss_and_grad(
   def accumulate_gradient(acc_grad_and_loss, data):
     ga_params = acc_grad_and_loss["ga_params"]
     (_, aux), cur_batch_gradient = grad_func(model, config, data, dropout_rng, ga_params, *extra_dpo_args, is_train=True)
+    cur_batch_gradient = jax.tree.map(_maybe_shard_with_name, cur_batch_gradient, grad_shardings)
     acc_grad_and_loss["loss"] += aux["total_loss"]
     acc_grad_and_loss["moe_lb_loss"] += aux["moe_lb_loss"]
     acc_grad_and_loss["mtp_loss"] += aux["mtp_loss"]
