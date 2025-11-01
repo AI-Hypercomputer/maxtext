@@ -194,7 +194,6 @@ def main(argv: Sequence[str]) -> None:
   # Load HuggingFace model, config, and state_dict
   max_logging.log(f"Loading HuggingFace model: {model_id}...")
   hf_config_obj = AutoConfig.from_pretrained(model_id, token=hf_token)
-  # hf_model = AutoModelForCausalLM.from_pretrained(model_id, token=hf_token)
   hf_model = _get_hf_model(model_id, token=hf_token)
   hf_state_dict_numpy = hf_model.state_dict()
   for k, v in hf_state_dict_numpy.items():
