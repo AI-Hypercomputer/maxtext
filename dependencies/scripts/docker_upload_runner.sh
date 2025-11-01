@@ -23,6 +23,17 @@
 # Example command:
 # bash docker_upload_runner.sh CLOUD_IMAGE_NAME=${USER}_runner
 
+if [ "${BASH_SOURCE-}" ]; then
+  this_file="${BASH_SOURCE[0]}"
+elif [ "${ZSH_VERSION-}" ]; then
+  # shellcheck disable=SC2296
+  this_file="${(%):-%x}"
+else
+  this_file="${0}"
+fi
+
+MAXTEXT_REPO_ROOT="${MAXTEXT_REPO_ROOT:-$(CDPATH='' cd -- "$(dirname -- "${this_file}")"'/../..' && pwd)}"
+
 set -e
 
 export LOCAL_IMAGE_NAME=maxtext_base_image
@@ -77,7 +88,9 @@ if ! docker image inspect "${LOCAL_IMAGE_NAME}" &> /dev/null; then
   exit 1
 fi
 
-docker build --build-arg BASEIMAGE=${LOCAL_IMAGE_NAME} -f ./maxtext_runner.Dockerfile -t ${LOCAL_IMAGE_NAME_RUNNER} .
+docker build --build-arg BASEIMAGE=${LOCAL_IMAGE_NAME} \
+             -f "$MAXTEXT_REPO_ROOT"'/dependencies/dockerfiles/maxtext_runner.Dockerfile' \
+             -t ${LOCAL_IMAGE_NAME_RUNNER} .
 
 docker tag ${LOCAL_IMAGE_NAME_RUNNER} gcr.io/$PROJECT/${CLOUD_IMAGE_NAME}:latest
 docker push gcr.io/$PROJECT/${CLOUD_IMAGE_NAME}:latest
