@@ -89,11 +89,11 @@ def get_datasets(
 
 
 def pretrain_preprocessing_pipeline(
-    dataset, 
-    config, 
-    data_columns, 
-    tokenize, 
-    grain_worker_count, 
+    dataset,
+    config,
+    data_columns,
+    tokenize,
+    grain_worker_count,
     grain_per_worker_buffer_size,
 ):
   """Use grain pipeline to pre-process the dataset and return iterators for pretrain"""
@@ -155,7 +155,7 @@ def pretrain_preprocessing_pipeline(
   )
   dataset = dataset.mp_prefetch(
       grain.MultiprocessingOptions(
-          num_workers=grain_worker_count, 
+          num_workers=grain_worker_count,
           per_worker_buffer_size=grain_per_worker_buffer_size,
       )
   )
@@ -163,11 +163,11 @@ def pretrain_preprocessing_pipeline(
 
 
 def dpo_preprocessing_pipeline(
-    dataset, 
-    config, 
-    data_columns, 
-    tokenize, 
-    grain_worker_count, 
+    dataset,
+    config,
+    data_columns,
+    tokenize,
+    grain_worker_count,
     grain_per_worker_buffer_size,
 ):
   """Use grain to pre-process the dataset and return iterators for dpo fine-tuning"""
@@ -202,7 +202,7 @@ def dpo_preprocessing_pipeline(
   dataset = dataset.batch(batch_size, batch_fn=batch_fn)
   dataset = dataset.mp_prefetch(
       grain.MultiprocessingOptions(
-          num_workers=grain_worker_count, 
+          num_workers=grain_worker_count,
           per_worker_buffer_size=grain_per_worker_buffer_size,
       )
   )
