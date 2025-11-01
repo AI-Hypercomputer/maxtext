@@ -114,8 +114,8 @@ if [[ $LIBTPU_GCS_PATH == NONE ]]; then
 fi
 
 if [[ -n $JAX_VERSION && ! ($MODE == "stable" || -z $MODE || ($MODE == "nightly" && $DEVICE == "gpu")) ]]; then
-     echo -e "\n\nError: You can only specify a JAX_VERSION with stable mode (plus nightly mode on GPU).\n\n"
-     exit 1
+    echo -e "\n\nError: You can only specify a JAX_VERSION with stable mode (plus nightly mode on GPU).\n\n"
+    exit 1
 fi
 
 if [[ $DEVICE == "tpu" ]]; then
@@ -138,7 +138,14 @@ if [[ $DEVICE == "tpu" ]]; then
 fi
 
 if [[ "$MODE" == "nightly" ]]; then
-    echo "Nightly mode: Installing requirements.txt, stripping commit pins from git+ repos."
+    if [ "$DEVICE" = "gpu" ]; then
+        dep_name='dependencies/requirements/generated_requirements/cuda12-requirements.txt'
+    else
+        dep_name='dependencies/requirements/generated_requirements/'"${DEVICE?}"'-requirements.txt'
+    fi
+    printf 'Nightly mode: Installing "%s", stripping commit pins from git+ repos.\n' "$dep_name"
+    nightly_txt="${dep_name##*/}"
+    nightly_txt="${nightly_txt%.txt}"'-nightly-temp.txt'
 
     # Create a temp file, strip commit pins from git+ repos in requirements.txt
     # Remove/update this section based on the pinned github repo commit in requirements.txt
@@ -146,40 +153,53 @@ if [[ "$MODE" == "nightly" ]]; then
       -e 's|^([^ ]*) @ https?://github.com/([^/]*\/[^/]*)/archive/.*\.zip$|\1@git+https://github.com/\2.git|' \
       -e '/JetStream/d' \
       -e '/mlperf-logging/d' \
-      requirements.txt > requirements.txt.nightly-temp
+      "$dep_name" > "$nightly_txt"
 
     echo "--- Installing modified nightly requirements: ---"
-    cat requirements.txt.nightly-temp
+    cat -- "$nightly_txt"
     echo "-------------------------------------------------"
     
-    python3 -m uv pip install --no-cache-dir -U -r requirements.txt.nightly-temp \
-                                                -r "${MAXTEXT_REPO_ROOT?}"'/extra_deps_from_github.txt'
-    rm requirements.txt.nightly-temp
+    python3 -m uv pip install --no-cache-dir -U -r "$nightly_txt" \
+                                                -r 'dependencies/requirements/extra_deps_from_github.txt'
+    rm -fv -- "$nightly_txt"
 else
     # stable or stable_stack mode: Install with pinned commits
-    echo "Installing tpu-requirements.txt with pinned commits."
-    tpu_requirements_txt=
-    for candidate in 'generated_requirements' "${MAXTEXT_REPO_ROOT?}"'/generated_requirements' "$PWD"; do
-      if [ -f "$candidate"'/tpu-requirements.txt' ]; then
-        tpu_requirements_txt="$candidate"'/tpu-requirements.txt'
+    if [ "$DEVICE" = "gpu" ]; then
+        dep_basename='cuda12-requirements.txt'
+    else
+        dep_basename="${DEVICE?}"'-requirements.txt'
+    fi
+
+    printf 'Installing "%s" with pinned commits.\n' "$dep_basename"
+    requirements_txt=
+    for candidate in 'dependencies/requirements/generated_requirements' 'dependencies/requirements' "${MAXTEXT_REPO_ROOT}"'/dependencies/requirements' "$PWD"; do
+      if [ -f "$candidate"'/'"$dep_basename" ]; then
+        requirements_txt="$candidate"'/'"$dep_basename"
         break
       else
         searched="$searched"':'
       fi
     done
-    if [ -z "${tpu_requirements_txt}" ]; then
-      >&2 printf 'Could not find "tpu-requirements.txt", looked in: %s\n' "${searched%?}"
+    if [ -z "${requirements_txt}" ]; then
+      >&2 printf 'Could not find "%s", looked in: %s\n' "$dep_basename" "${searched%?}"
       exit 2
     else
-      python3 -m uv pip install --resolution=lowest -r "$tpu_requirements_txt" \
-                                                    -r "${MAXTEXT_REPO_ROOT?}"'/extra_deps_from_github.txt'
+      python3 -m uv pip install --resolution=lowest -r "$requirements_txt" \
+                                                    -r 'dependencies/requirements/extra_deps_from_github.txt'
     fi
 fi
 
 # Install maxtext package
 if [ -f 'pyproject.toml' ]; then
-  python3 -m uv pip install -e .[tpu] --no-deps --resolution=lowest
-  install_maxtext_github_deps
+  case "$DEVICE" in
+      'gpu') python3 -m uv pip install -e .[cuda12] --no-deps --resolution=lowest ;;
+      'tpu') python3 -m uv pip install -e .[tpu] --no-deps --resolution=lowest ;;
+      *)
+          >&2 printf 'Unsupported device\n'
+          exit 6
+          ;;
+  esac
+  python3 -m uv pip install --resolution=lowest -r 'src/install_maxtext_extra_deps/extra_deps_from_github.txt'
 fi
 
 # Delete custom libtpu if it exists

@@ -85,7 +85,7 @@ jobs:
           source .venv/bin/activate
           maxtext_wheel=$(ls maxtext-*-py3-none-any.whl 2>/dev/null)
           uv pip install ${maxtext_wheel}[${MAXTEXT_PACKAGE_EXTRA}] --resolution=lowest
-          install_maxtext_github_deps
+          uv pip install -r src/install_maxtext_extra_deps/extra_deps_from_github.txt
           python3 --version
           python3 -m pip freeze
       - name: Copy test assets files
