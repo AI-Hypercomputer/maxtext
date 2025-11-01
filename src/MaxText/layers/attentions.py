@@ -901,8 +901,8 @@ class Attention(nnx.Module):
     use_qk_norm = self.use_qk_norm and use_rope
 
     if use_rope:
-      query = self.apply_rotary_embedding(query, inputs_positions=inputs_positions)
-      key = self.apply_rotary_embedding(key, inputs_positions=inputs_positions)
+      query = self.apply_rotary_embedding(query, inputs_positions=inputs_positions, out_sharding=query.sharding)
+      key = self.apply_rotary_embedding(key, inputs_positions=inputs_positions, out_sharding=query.sharding)
 
     if use_qk_norm and is_llama4_decoder_block:
       l2_norm = L2Norm(eps=self.config.normalization_layer_epsilon)

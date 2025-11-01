@@ -14,6 +14,7 @@
 
 """MLA Attention Layer."""
 
+from functools import partial
 import math
 from typing import Any, Optional, Tuple
 
@@ -60,6 +61,7 @@ from MaxText.layers.initializers import nd_dense_init, NdInitializer, variable_t
 from MaxText.layers.linears import DenseGeneral
 from MaxText.layers.normalizations import RMSNorm
 from MaxText.layers.quantizations import AqtQuantization as Quant
+from MaxText.sharding import maybe_shard_with_logical
 
 
 def mla_as_linen(
@@ -361,6 +363,11 @@ class MLA(Attention):
         rngs=rngs,
     )
 
+    self._maybe_shard_with_logical = partial(
+      maybe_shard_with_logical,
+      mesh=mesh,
+      shard_mode=config.shard_mode,
+    )
     # Module attribute names must match names previously passed to Linen for checkpointing
     self.MlaKVCache_0 = self.init_mla_kv_caches(inputs_kv_shape) if model_mode != MODEL_MODE_TRAIN else None
 
@@ -521,11 +528,11 @@ class MLA(Attention):
     query = jnp.concatenate([q_nope, q_pe], axis=-1) * self.softmax_scale
 
     if model_mode == MODEL_MODE_PREFILL:
-      query = nn.with_logical_constraint(query, self.prefill_query_axis_names)
+      query = self._maybe_shard_with_logical(query, self.prefill_query_axis_names)
     elif model_mode == MODEL_MODE_TRAIN and self.config.expert_shard_attention_option == EP_AS_CONTEXT:
-      query = nn.with_logical_constraint(query, self.ep_query_axis_names)
+      query = self._maybe_shard_with_logical(query, self.ep_query_axis_names)
     else:
-      query = nn.with_logical_constraint(query, self.query_axis_names)
+      query = self._maybe_shard_with_logical(query, self.query_axis_names)
     return query
 
   def mla_get_key_value(self, low_rank_main, key_rope, model_mode):
@@ -539,14 +546,14 @@ class MLA(Attention):
     key = jnp.concatenate([key_nope, key_rope], axis=-1)
 
     if model_mode == MODEL_MODE_PREFILL:
-      key = nn.with_logical_constraint(key, self.prefill_key_axis_names)
-      value = nn.with_logical_constraint(value, self.prefill_value_axis_names)
+      key = self._maybe_shard_with_logical(key, self.prefill_key_axis_names)
+      value = self._maybe_shard_with_logical(value, self.prefill_value_axis_names)
     elif model_mode == MODEL_MODE_TRAIN and self.config.expert_shard_attention_option == EP_AS_CONTEXT:
-      key = nn.with_logical_constraint(key, self.ep_key_axis_names)
-      value = nn.with_logical_constraint(value, self.ep_value_axis_names)
+      key = self._maybe_shard_with_logical(key, self.ep_key_axis_names)
+      value = self._maybe_shard_with_logical(value, self.ep_value_axis_names)
     else:
-      key = nn.with_logical_constraint(key, self.key_axis_names)
-      value = nn.with_logical_constraint(value, self.value_axis_names)
+      key = self._maybe_shard_with_logical(key, self.key_axis_names)
+      value = self._maybe_shard_with_logical(value, self.value_axis_names)
     return key, value
 
   def init_mla_kv_caches(self, inputs_kv_shape: Tuple):
@@ -691,14 +698,14 @@ class MLA(Attention):
       MLA-attended outputs.
     """
     if model_mode == MODEL_MODE_PREFILL:
-      inputs_q = nn.with_logical_constraint(inputs_q, self.prefill_input_axis_names)
-      inputs_kv = nn.with_logical_constraint(inputs_kv, self.prefill_input_axis_names)
+      inputs_q = self._maybe_shard_with_logical(inputs_q, self.prefill_input_axis_names)
+      inputs_kv = self._maybe_shard_with_logical(inputs_kv, self.prefill_input_axis_names)
     elif model_mode == MODEL_MODE_TRAIN and self.config.expert_shard_attention_option == EP_AS_CONTEXT:
-      inputs_q = nn.with_logical_constraint(inputs_q, self.ep_input_axis_names)
-      inputs_kv = nn.with_logical_constraint(inputs_kv, self.ep_input_axis_names)
+      inputs_q = self._maybe_shard_with_logical(inputs_q, self.ep_input_axis_names)
+      inputs_kv = self._maybe_shard_with_logical(inputs_kv, self.ep_input_axis_names)
     else:
-      inputs_q = nn.with_logical_constraint(inputs_q, self.input_axis_names)
-      inputs_kv = nn.with_logical_constraint(inputs_kv, self.input_axis_names)
+      inputs_q = self._maybe_shard_with_logical(inputs_q, self.input_axis_names)
+      inputs_kv = self._maybe_shard_with_logical(inputs_kv, self.input_axis_names)
 
     query = self.mla_query_projection(inputs_q, inputs_positions, model_mode)
     key, value, cached_values = self.mla_kv_projection(
@@ -719,10 +726,10 @@ class MLA(Attention):
       out = self.attention_op(query, key, value, decoder_segment_ids, model_mode, cached_values)
 
     if model_mode == MODEL_MODE_TRAIN and self.config.expert_shard_attention_option == EP_AS_CONTEXT:
-      out = nn.with_logical_constraint(out, self.ep_out_axis_names)
+      out = self._maybe_shard_with_logical(out, self.ep_out_axis_names)
     else:
-      out = nn.with_logical_constraint(out, self.out_axis_names)
+      out = self._maybe_shard_with_logical(out, self.out_axis_names)
 
-    out = self.out_projection(out)
+    out = self.out_projection(out, out_sharding=out_sharding)
     out = checkpoint_name(out, "out_proj")
     return out

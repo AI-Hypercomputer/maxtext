@@ -26,6 +26,7 @@ from flax import nnx
 import jax
 from jax import ad_checkpoint as adc
 from jax.experimental import xla_metadata
+from jax.sharding import NamedSharding
 import jax.numpy as jnp
 import numpy as np
 
@@ -1722,7 +1723,7 @@ class RoutedMoE(nnx.Module):
     wo_kernel = max_utils.unbox_logicallypartioned(wo_kernel)
     return w0_kernel, w1_kernel, wo_kernel
 
-  def __call__(self, inputs: jax.Array) -> tuple[jax.Array, Optional[jax.Array]]:
+  def __call__(self, inputs: jax.Array, out_sharding: NamedSharding | None=None) -> tuple[jax.Array, Optional[jax.Array]]:
     cfg = self.config
     inputs = inputs.astype(cfg.dtype)
     gate_logits, pre_bias_logits = self.gate(inputs)
@@ -1826,9 +1827,9 @@ class RoutedAndSharedMoE(nnx.Module):
   def routed_moe(self):
     return self.MoeBlock_0
 
-  def __call__(self, inputs: jax.Array) -> jax.Array:
-    routed_experts, _ = self.routed_moe(inputs)
-    shared_experts = self.shared_experts(inputs)
+  def __call__(self, inputs: jax.Array, out_sharding: NamedSharding | None=None) -> jax.Array:
+    routed_experts, _ = self.routed_moe(inputs, out_sharding=out_sharding)
+    shared_experts = self.shared_experts(inputs, out_sharding=out_sharding)
     return routed_experts + shared_experts
 
 
