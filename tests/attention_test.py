@@ -27,7 +27,7 @@ from absl.testing import parameterized
 
 import numpy as np
 
-from jax.sharding import Mesh, NamedSharding, AxisType
+from jax.sharding import Mesh, NamedSharding, AxisType, PartitionSpec as P
 import jax
 import jax.numpy as jnp
 
@@ -42,10 +42,12 @@ from MaxText.common_types import (
     MODEL_MODE_AUTOREGRESSIVE,
     MODEL_MODE_PREFILL,
     MODEL_MODE_TRAIN,
+    EP_AS_CONTEXT,
     AttentionType,
     ShardMode,
 )
 from MaxText.globals import MAXTEXT_PKG_DIR
+from MaxText.sharding import maybe_shard_with_name
 from MaxText.layers.attentions import Attention
 from MaxText.layers.attention_op import ChunkedCausalMask, _make_bidirectional_block_mask, _generate_chunk_attention_mask
 from MaxText.layers.attention_mla import MLA
@@ -547,6 +549,7 @@ class AttentionTest(parameterized.TestCase):
           "context_parallel_load_balance": False,
           "ici_expert_parallelism": 1,
           "expert_shard_attention_option": "fsdp",
+          "shard_mode": "auto",
       },
       {
           "testcase_name": "cp_with_load_balance",
@@ -554,6 +557,7 @@ class AttentionTest(parameterized.TestCase):
           "context_parallel_load_balance": True,
           "ici_expert_parallelism": 1,
           "expert_shard_attention_option": "fsdp",
+          "shard_mode": "auto",
       },
       {
           "testcase_name": "cp_ep_no_load_balance",
@@ -561,6 +565,7 @@ class AttentionTest(parameterized.TestCase):
           "context_parallel_load_balance": False,
           "ici_expert_parallelism": 2,
           "expert_shard_attention_option": "context",
+          "shard_mode": "auto",
       },
       {
           "testcase_name": "cp_ep_with_load_balance",
@@ -568,6 +573,7 @@ class AttentionTest(parameterized.TestCase):
           "context_parallel_load_balance": True,
           "ici_expert_parallelism": 2,
           "expert_shard_attention_option": "context",
+          "shard_mode": "auto",
       },
       {
           "testcase_name": "ep_no_load_balance",
@@ -575,6 +581,7 @@ class AttentionTest(parameterized.TestCase):
           "context_parallel_load_balance": False,
           "ici_expert_parallelism": 4,
           "expert_shard_attention_option": "context",
+          "shard_mode": "auto",
       },
       {
           "testcase_name": "ep_with_load_balance",
@@ -582,6 +589,55 @@ class AttentionTest(parameterized.TestCase):
           "context_parallel_load_balance": True,
           "ici_expert_parallelism": 4,
           "expert_shard_attention_option": "context",
+          "shard_mode": "auto",
+      },
+      {
+          "testcase_name": "cp_no_load_balance_explicit",
+          "ici_context_parallelism": 4,
+          "context_parallel_load_balance": False,
+          "ici_expert_parallelism": 1,
+          "expert_shard_attention_option": "fsdp",
+          "shard_mode": "explicit",
+      },
+      {
+          "testcase_name": "cp_with_load_balance_explicit",
+          "ici_context_parallelism": 4,
+          "context_parallel_load_balance": True,
+          "ici_expert_parallelism": 1,
+          "expert_shard_attention_option": "fsdp",
+          "shard_mode": "explicit",
+      },
+      {
+          "testcase_name": "cp_ep_no_load_balance_explicit",
+          "ici_context_parallelism": 2,
+          "context_parallel_load_balance": False,
+          "ici_expert_parallelism": 2,
+          "expert_shard_attention_option": "context",
+          "shard_mode": "explicit",
+      },
+      {
+          "testcase_name": "cp_ep_with_load_balance_explicit",
+          "ici_context_parallelism": 2,
+          "context_parallel_load_balance": True,
+          "ici_expert_parallelism": 2,
+          "expert_shard_attention_option": "context",
+          "shard_mode": "explicit",
+      },
+      {
+          "testcase_name": "ep_no_load_balance_explicit",
+          "ici_context_parallelism": 1,
+          "context_parallel_load_balance": False,
+          "ici_expert_parallelism": 4,
+          "expert_shard_attention_option": "context",
+          "shard_mode": "explicit",
+      },
+      {
+          "testcase_name": "ep_with_load_balance_explicit",
+          "ici_context_parallelism": 1,
+          "context_parallel_load_balance": True,
+          "ici_expert_parallelism": 4,
+          "expert_shard_attention_option": "context",
+          "shard_mode": "explicit",
       },
   )
   # TODO (b/454764135.) : This tests fails with new tokamax kernel
@@ -592,6 +648,7 @@ class AttentionTest(parameterized.TestCase):
       context_parallel_load_balance,
       ici_expert_parallelism,
       expert_shard_attention_option,
+      shard_mode,
   ):
     """Test equivalence between dot_product and flash attention + context/expert parallelism"""
     num_kv_heads = self.num_kv_heads
@@ -615,9 +672,11 @@ class AttentionTest(parameterized.TestCase):
         context_parallel_load_balance=context_parallel_load_balance,
         ici_expert_parallelism=ici_expert_parallelism,
         expert_shard_attention_option=expert_shard_attention_option,
+        shard_mode=shard_mode,
     )
     devices_array_cp = maxtext_utils.create_device_mesh(cfg_cp)
-    axis_names = [AxisType.Auto for _ in cfg_cp.mesh_axes]
+    axis_type = AxisType.Explicit if shard_mode == "explicit" else AxisType.Auto
+    axis_names = [axis_type for _ in cfg_cp.mesh_axes]
     mesh_cp = Mesh(devices_array_cp, cfg_cp.mesh_axes, axis_types=tuple(axis_names))
     attention_as_mha_flash_cp = Attention(
         config=cfg_cp,
@@ -1346,6 +1405,7 @@ class MLATest(parameterized.TestCase):
           "context_parallel_load_balance": False,
           "ici_expert_parallelism": 1,
           "expert_shard_attention_option": "fsdp",
+          "shard_mode": "auto",
       },
       {
           "testcase_name": "cp_with_load_balance",
@@ -1353,6 +1413,7 @@ class MLATest(parameterized.TestCase):
           "context_parallel_load_balance": True,
           "ici_expert_parallelism": 1,
           "expert_shard_attention_option": "fsdp",
+          "shard_mode": "auto",
       },
       {
           "testcase_name": "cp_ep_no_load_balance",
@@ -1360,6 +1421,7 @@ class MLATest(parameterized.TestCase):
           "context_parallel_load_balance": False,
           "ici_expert_parallelism": 2,
           "expert_shard_attention_option": "context",
+          "shard_mode": "auto",
       },
       {
           "testcase_name": "cp_ep_with_load_balance",
@@ -1367,6 +1429,7 @@ class MLATest(parameterized.TestCase):
           "context_parallel_load_balance": True,
           "ici_expert_parallelism": 2,
           "expert_shard_attention_option": "context",
+          "shard_mode": "auto",
       },
       {
           "testcase_name": "ep_no_load_balance",
@@ -1374,6 +1437,7 @@ class MLATest(parameterized.TestCase):
           "context_parallel_load_balance": False,
           "ici_expert_parallelism": 4,
           "expert_shard_attention_option": "context",
+          "shard_mode": "auto",
       },
       {
           "testcase_name": "ep_with_load_balance",
@@ -1381,6 +1445,55 @@ class MLATest(parameterized.TestCase):
           "context_parallel_load_balance": True,
           "ici_expert_parallelism": 4,
           "expert_shard_attention_option": "context",
+          "shard_mode": "auto",
+      },
+      {
+          "testcase_name": "cp_no_load_balance_explicit",
+          "ici_context_parallelism": 4,
+          "context_parallel_load_balance": False,
+          "ici_expert_parallelism": 1,
+          "expert_shard_attention_option": "fsdp",
+          "shard_mode": "explicit",
+      },
+      {
+          "testcase_name": "cp_with_load_balance_explicit",
+          "ici_context_parallelism": 4,
+          "context_parallel_load_balance": True,
+          "ici_expert_parallelism": 1,
+          "expert_shard_attention_option": "fsdp",
+          "shard_mode": "explicit",
+      },
+      {
+          "testcase_name": "cp_ep_no_load_balance_explicit",
+          "ici_context_parallelism": 2,
+          "context_parallel_load_balance": False,
+          "ici_expert_parallelism": 2,
+          "expert_shard_attention_option": "context",
+          "shard_mode": "explicit",
+      },
+      {
+          "testcase_name": "cp_ep_with_load_balance_explicit",
+          "ici_context_parallelism": 2,
+          "context_parallel_load_balance": True,
+          "ici_expert_parallelism": 2,
+          "expert_shard_attention_option": "context",
+          "shard_mode": "explicit",
+      },
+      {
+          "testcase_name": "ep_no_load_balance_explicit",
+          "ici_context_parallelism": 1,
+          "context_parallel_load_balance": False,
+          "ici_expert_parallelism": 4,
+          "expert_shard_attention_option": "context",
+          "shard_mode": "explicit",
+      },
+      {
+          "testcase_name": "ep_with_load_balance_explicit",
+          "ici_context_parallelism": 1,
+          "context_parallel_load_balance": True,
+          "ici_expert_parallelism": 4,
+          "expert_shard_attention_option": "context",
+          "shard_mode": "explicit",
       },
   )
   # TODO (b/454764135.) : This tests fails with new tokamax kernel
@@ -1391,6 +1504,7 @@ class MLATest(parameterized.TestCase):
       context_parallel_load_balance,
       ici_expert_parallelism,
       expert_shard_attention_option,
+      shard_mode,
   ):
     """Test equivalence between dot_product and flash attention + context/expert parallelism"""
 
@@ -1413,6 +1527,7 @@ class MLATest(parameterized.TestCase):
         "qk_nope_head_dim": 128,
         "qk_rope_head_dim": 64,
         "v_head_dim": 128,
+        "shard_mode": shard_mode,
     }
 
     cfg, mla = self.init_mla(config_arguments, rope_type="default")
@@ -1439,7 +1554,9 @@ class MLATest(parameterized.TestCase):
         expert_shard_attention_option=expert_shard_attention_option,
     )
     devices_array_cp = maxtext_utils.create_device_mesh(cfg_cp)
-    mesh_cp = Mesh(devices_array_cp, cfg_cp.mesh_axes)
+    axis_type = AxisType.Explicit if shard_mode == "explicit" else AxisType.Auto
+    axis_names = [axis_type for _ in cfg_cp.mesh_axes]
+    mesh_cp = Mesh(devices_array_cp, cfg_cp.mesh_axes, axis_types=tuple(axis_names))
     attention_as_mla_flash_cp = MLA(
         config=cfg_cp,
         num_query_heads=cfg_cp.num_query_heads,
@@ -1467,6 +1584,10 @@ class MLATest(parameterized.TestCase):
         cfg_cp, mesh_cp, attention_as_mla_flash_cp, lnx, decoder_segment_ids, decoder_positions
     )
 
+    # This removes all sharding information and makes them standard NumPy arrays.
+    mla_generic_output = jax.device_get(mla_generic_output)
+    mla_generic_flash_cp_output = jax.device_get(mla_generic_flash_cp_output)
+
     self.assertTrue(
         jax.numpy.allclose(mla_generic_output, mla_generic_flash_cp_output, rtol=1e-01, atol=1e-01, equal_nan=False),
         msg="MLA Logits from generic dot product and flash attention + context/expert parallelism are not close.\n"
@@ -1489,12 +1610,16 @@ def _forward_with_context_expert_parallelism(cfg_cp, mesh_cp, attention_cp, lnx,
     decoder_positions = reordered_batch["inputs_position"]
   # apply attention with sharding
   with mesh_cp, nn_partitioning.axis_rules(cfg_cp.logical_axis_rules):
+    if cfg_cp.expert_shard_attention_option == EP_AS_CONTEXT:
+      batch_axis = "activation_batch_no_exp"
+      length_axis = "activation_length"
+    else:
+      batch_axis = "activation_batch"
+      length_axis = "activation_length_no_exp"
     lnx_spec = nn_partitioning.logical_to_mesh_axes(
-        ("activation_batch_no_exp", "activation_length_no_exp", "activation_embed"), nn_partitioning.get_axis_rules()
+        (batch_axis, length_axis, "activation_embed"), nn_partitioning.get_axis_rules()
     )
-    pos_spec = nn_partitioning.logical_to_mesh_axes(
-        ("activation_batch_no_exp", "activation_length_no_exp"), nn_partitioning.get_axis_rules()
-    )
+    pos_spec = nn_partitioning.logical_to_mesh_axes((batch_axis, length_axis), nn_partitioning.get_axis_rules())
     lnx_sharding = NamedSharding(mesh_cp, lnx_spec)
     pos_sharding = NamedSharding(mesh_cp, pos_spec)
 
@@ -1510,8 +1635,10 @@ def _forward_with_context_expert_parallelism(cfg_cp, mesh_cp, attention_cp, lnx,
         deterministic=True,
         model_mode=MODEL_MODE_TRAIN,
     )
-    attention_cp_output = attention_cp_output[0] if isinstance(attention_cp_output, tuple) else attention_cp_output
-
+  attention_cp_output = attention_cp_output[0] if isinstance(attention_cp_output, tuple) else attention_cp_output
+  # All-gather before re-shuffle to avoid re-order sharding confusion
+  repeat_sharding = NamedSharding(mesh_cp, P())
+  attention_cp_output = maybe_shard_with_name(attention_cp_output, repeat_sharding, shard_mode=cfg_cp.shard_mode)
   # If load balanced cp, de-shuffle and gather along seq dim for output
   # Note training does not need post-shuffle. Since the target seq is also pre-shuffled, the loss remains correct
   if context_parallel_size > 1 and cfg_cp.context_parallel_load_balance:

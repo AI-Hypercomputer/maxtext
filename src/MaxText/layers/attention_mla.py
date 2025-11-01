@@ -14,6 +14,8 @@
 
 """MLA Attention Layer."""
 
+from functools import partial
+import dataclasses
 import math
 from typing import Any, Optional, Tuple
 
@@ -21,13 +23,12 @@ from jax.ad_checkpoint import checkpoint_name
 from jax.sharding import Mesh, NamedSharding
 import jax.numpy as jnp
 
-from flax import linen as nn
 from flax import nnx
+from flax import linen as nn
 
 from MaxText.common_types import (
     Array,
     AxisIdxes,
-    AxisNames,
     BATCH,
     BATCH_NO_EXP,
     Config,
@@ -38,17 +39,21 @@ from MaxText.common_types import (
     EMBED,
     EP_AS_CONTEXT,
     HEAD,
+    Q_LORA_UP_PROJ,
     KV_BATCH,
     KV_BATCH_NO_EXP,
     KV_HEAD,
     KV_HEAD_DIM,
+    KV_LORA_UP_PROJ,
     LENGTH,
     LENGTH_NO_EXP,
     MODEL_MODE_PREFILL,
     MODEL_MODE_TRAIN,
+    MODEL_MODE_AUTOREGRESSIVE,
     PREFILL_KV_BATCH,
     PREFILL_LENGTH,
     AttentionType,
+    ShardMode,
 )
 from MaxText.inference import kvcache
 from MaxText.inference import page_manager
@@ -60,6 +65,20 @@ from MaxText.layers.initializers import nd_dense_init, NdInitializer, variable_t
 from MaxText.layers.linears import DenseGeneral
 from MaxText.layers.normalizations import RMSNorm
 from MaxText.layers.quantizations import AqtQuantization as Quant
+from MaxText.sharding import maybe_shard_with_logical
+
+
+@dataclasses.dataclass(frozen=True)
+class AttentionMLALogicalNames:
+  """Holds the set of axis names for Attention MLA activations."""
+
+  query: tuple[str, ...]
+  key: tuple[str, ...]
+  value: tuple[str, ...]
+  inputs: tuple[str, ...]
+  out: tuple[str, ...]
+  wqa: tuple[str, ...]
+  wkva: tuple[str, ...]
 
 
 def mla_as_linen(
@@ -94,26 +113,6 @@ def mla_as_linen(
     temperature_tuning: bool = False,
     temperature_tuning_scale: float = 0.1,
     temperature_tuning_floor_scale: float = 8192.0,
-    # Shard the query activation as the same as the key and value.
-    # TODO: Find a better sharding axis name.
-    # TODO: Further break down the Training and Inference axes for the q, k, v.
-    prefill_query_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, KV_HEAD, KV_HEAD_DIM),
-    prefill_key_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, KV_HEAD, KV_HEAD_DIM),
-    prefill_value_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, KV_HEAD, KV_HEAD_DIM),
-    query_axis_names: AxisNames = (KV_BATCH, LENGTH_NO_EXP, KV_HEAD, KV_HEAD_DIM),
-    key_axis_names: AxisNames = (KV_BATCH, LENGTH_NO_EXP, KV_HEAD, KV_HEAD_DIM),
-    value_axis_names: AxisNames = (KV_BATCH, LENGTH_NO_EXP, KV_HEAD, KV_HEAD_DIM),
-    ep_query_axis_names: AxisNames = (KV_BATCH_NO_EXP, LENGTH, KV_HEAD, KV_HEAD_DIM),
-    ep_key_axis_names: AxisNames = (KV_BATCH_NO_EXP, LENGTH, KV_HEAD, KV_HEAD_DIM),
-    ep_value_axis_names: AxisNames = (KV_BATCH_NO_EXP, LENGTH, KV_HEAD, KV_HEAD_DIM),
-    input_axis_names: AxisNames = (BATCH, LENGTH_NO_EXP, EMBED),
-    ep_input_axis_names: AxisNames = (BATCH_NO_EXP, LENGTH, EMBED),
-    out_axis_names: AxisNames = (BATCH, LENGTH_NO_EXP, HEAD, D_KV),
-    ep_out_axis_names: AxisNames = (BATCH_NO_EXP, LENGTH, HEAD, D_KV),
-    prefill_input_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, EMBED),
-    decode_input_axis_names: AxisNames = (DECODE_BATCH, DECODE_LENGTH, EMBED),
-    prefill_out_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, HEAD, D_KV),
-    decode_out_axis_names: AxisNames = (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV),
     prefill_cache_axis_order: AxisIdxes = (1, 2, 0, 3),
     ar_cache_axis_order: AxisIdxes = (1, 2, 0, 3),
     compute_axis_order: AxisIdxes = (0, 1, 2, 3),
@@ -168,23 +167,6 @@ def mla_as_linen(
       temperature_tuning=temperature_tuning,
       temperature_tuning_scale=temperature_tuning_scale,
       temperature_tuning_floor_scale=temperature_tuning_floor_scale,
-      prefill_query_axis_names=prefill_query_axis_names,
-      prefill_key_axis_names=prefill_key_axis_names,
-      prefill_value_axis_names=prefill_value_axis_names,
-      query_axis_names=query_axis_names,
-      key_axis_names=key_axis_names,
-      value_axis_names=value_axis_names,
-      ep_query_axis_names=ep_query_axis_names,
-      ep_key_axis_names=ep_key_axis_names,
-      ep_value_axis_names=ep_value_axis_names,
-      input_axis_names=input_axis_names,
-      ep_input_axis_names=ep_input_axis_names,
-      out_axis_names=out_axis_names,
-      ep_out_axis_names=ep_out_axis_names,
-      prefill_input_axis_names=prefill_input_axis_names,
-      decode_input_axis_names=decode_input_axis_names,
-      prefill_out_axis_names=prefill_out_axis_names,
-      decode_out_axis_names=decode_out_axis_names,
       prefill_cache_axis_order=prefill_cache_axis_order,
       ar_cache_axis_order=ar_cache_axis_order,
       compute_axis_order=compute_axis_order,
@@ -242,26 +224,6 @@ class MLA(Attention):
       temperature_tuning: bool = False,
       temperature_tuning_scale: float = 0.1,
       temperature_tuning_floor_scale: float = 8192.0,
-      # Shard the query activation as the same as the key and value.
-      # TODO: Find a better sharding axis name.
-      # TODO: Further break down the Training and Inference axes for the q, k, v.
-      prefill_query_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, KV_HEAD, KV_HEAD_DIM),
-      prefill_key_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, KV_HEAD, KV_HEAD_DIM),
-      prefill_value_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, KV_HEAD, KV_HEAD_DIM),
-      query_axis_names: AxisNames = (KV_BATCH, LENGTH_NO_EXP, KV_HEAD, KV_HEAD_DIM),
-      key_axis_names: AxisNames = (KV_BATCH, LENGTH_NO_EXP, KV_HEAD, KV_HEAD_DIM),
-      value_axis_names: AxisNames = (KV_BATCH, LENGTH_NO_EXP, KV_HEAD, KV_HEAD_DIM),
-      ep_query_axis_names: AxisNames = (KV_BATCH_NO_EXP, LENGTH, KV_HEAD, KV_HEAD_DIM),
-      ep_key_axis_names: AxisNames = (KV_BATCH_NO_EXP, LENGTH, KV_HEAD, KV_HEAD_DIM),
-      ep_value_axis_names: AxisNames = (KV_BATCH_NO_EXP, LENGTH, KV_HEAD, KV_HEAD_DIM),
-      input_axis_names: AxisNames = (BATCH, LENGTH_NO_EXP, EMBED),
-      ep_input_axis_names: AxisNames = (BATCH_NO_EXP, LENGTH, EMBED),
-      out_axis_names: AxisNames = (BATCH, LENGTH_NO_EXP, HEAD, D_KV),
-      ep_out_axis_names: AxisNames = (BATCH_NO_EXP, LENGTH, HEAD, D_KV),
-      prefill_input_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, EMBED),
-      decode_input_axis_names: AxisNames = (DECODE_BATCH, DECODE_LENGTH, EMBED),
-      prefill_out_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, HEAD, D_KV),
-      decode_out_axis_names: AxisNames = (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV),
       prefill_cache_axis_order: AxisIdxes = (1, 2, 0, 3),
       ar_cache_axis_order: AxisIdxes = (1, 2, 0, 3),
       compute_axis_order: AxisIdxes = (0, 1, 2, 3),
@@ -333,23 +295,6 @@ class MLA(Attention):
         temperature_tuning=temperature_tuning,
         temperature_tuning_scale=temperature_tuning_scale,
         temperature_tuning_floor_scale=temperature_tuning_floor_scale,
-        prefill_query_axis_names=prefill_query_axis_names,
-        prefill_key_axis_names=prefill_key_axis_names,
-        prefill_value_axis_names=prefill_value_axis_names,
-        query_axis_names=query_axis_names,
-        key_axis_names=key_axis_names,
-        value_axis_names=value_axis_names,
-        ep_query_axis_names=ep_query_axis_names,
-        ep_key_axis_names=ep_key_axis_names,
-        ep_value_axis_names=ep_value_axis_names,
-        input_axis_names=input_axis_names,
-        ep_input_axis_names=ep_input_axis_names,
-        out_axis_names=out_axis_names,
-        ep_out_axis_names=ep_out_axis_names,
-        prefill_input_axis_names=prefill_input_axis_names,
-        decode_input_axis_names=decode_input_axis_names,
-        prefill_out_axis_names=prefill_out_axis_names,
-        decode_out_axis_names=decode_out_axis_names,
         prefill_cache_axis_order=prefill_cache_axis_order,
         ar_cache_axis_order=ar_cache_axis_order,
         compute_axis_order=compute_axis_order,
@@ -361,8 +306,76 @@ class MLA(Attention):
         rngs=rngs,
     )
 
+    self.setup_sharding(model_mode)
+
     # Module attribute names must match names previously passed to Linen for checkpointing
     self.MlaKVCache_0 = self.init_mla_kv_caches(inputs_kv_shape) if model_mode != MODEL_MODE_TRAIN else None
+
+  def _create_sharding(self, axis_names):
+    """Creates NamedSharding if shard_mode is EXPLICIT, otherwise None."""
+    if self.config.shard_mode == ShardMode.EXPLICIT:
+      return NamedSharding(self.mesh, nn.logical_to_mesh_axes(axis_names))
+    return None
+
+  def _get_logical_names(self, model_mode):
+    """Determines the correct set of axis names based on the model mode."""
+    if model_mode == MODEL_MODE_PREFILL:
+      return AttentionMLALogicalNames(
+          query=(PREFILL_KV_BATCH, PREFILL_LENGTH, KV_HEAD, KV_HEAD_DIM),
+          key=(PREFILL_KV_BATCH, PREFILL_LENGTH, KV_HEAD, KV_HEAD_DIM),
+          value=(PREFILL_KV_BATCH, PREFILL_LENGTH, KV_HEAD, KV_HEAD_DIM),
+          inputs=(PREFILL_KV_BATCH, PREFILL_LENGTH, EMBED),
+          out=(PREFILL_KV_BATCH, PREFILL_LENGTH, HEAD, D_KV),
+          wqa=(PREFILL_KV_BATCH, PREFILL_LENGTH, Q_LORA_UP_PROJ),
+          wkva=(PREFILL_KV_BATCH, PREFILL_LENGTH, KV_LORA_UP_PROJ),
+      )
+    elif model_mode == MODEL_MODE_AUTOREGRESSIVE:
+      return AttentionMLALogicalNames(
+          query=(DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV),
+          key=(DECODE_BATCH, DECODE_LENGTH, KV_HEAD, D_KV),
+          value=(DECODE_BATCH, DECODE_LENGTH, KV_HEAD, D_KV),
+          inputs=(DECODE_BATCH, DECODE_LENGTH, EMBED),
+          out=(DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV),
+          wqa=(DECODE_BATCH, DECODE_LENGTH, Q_LORA_UP_PROJ),
+          wkva=(DECODE_BATCH, DECODE_LENGTH, KV_LORA_UP_PROJ),
+      )
+    elif model_mode == MODEL_MODE_TRAIN and self.config.expert_shard_attention_option == EP_AS_CONTEXT:
+      return AttentionMLALogicalNames(
+          query=(KV_BATCH_NO_EXP, LENGTH, KV_HEAD, KV_HEAD_DIM),
+          key=(KV_BATCH_NO_EXP, LENGTH, KV_HEAD, KV_HEAD_DIM),
+          value=(KV_BATCH_NO_EXP, LENGTH, KV_HEAD, KV_HEAD_DIM),
+          inputs=(BATCH_NO_EXP, LENGTH, EMBED),
+          out=(BATCH_NO_EXP, LENGTH, HEAD, D_KV),
+          wqa=(KV_BATCH_NO_EXP, LENGTH, Q_LORA_UP_PROJ),
+          wkva=(KV_BATCH_NO_EXP, LENGTH, KV_LORA_UP_PROJ),
+      )
+    else:
+      return AttentionMLALogicalNames(
+          query=(KV_BATCH, LENGTH_NO_EXP, KV_HEAD, KV_HEAD_DIM),
+          key=(KV_BATCH, LENGTH_NO_EXP, KV_HEAD, KV_HEAD_DIM),
+          value=(KV_BATCH, LENGTH_NO_EXP, KV_HEAD, KV_HEAD_DIM),
+          inputs=(BATCH, LENGTH_NO_EXP, EMBED),
+          out=(BATCH, LENGTH_NO_EXP, HEAD, D_KV),
+          wqa=(KV_BATCH, LENGTH_NO_EXP, Q_LORA_UP_PROJ),
+          wkva=(KV_BATCH, LENGTH_NO_EXP, KV_LORA_UP_PROJ),
+      )
+
+  def setup_sharding(self, model_mode: int):
+    """Sets up the sharding attributes based on the model mode."""
+    self.logical_names = self._get_logical_names(model_mode)
+
+    # Create sharding objects using the helper method
+    self.inputs_sharding = self._create_sharding(self.logical_names.inputs)
+    self.query_sharding = self._create_sharding(self.logical_names.query)
+    self.wqa_out_sharding = self._create_sharding(self.logical_names.wqa)
+    self.wkvb_out_sharding = self._create_sharding(self.logical_names.key)  # Uses key axes
+    self.wkva_out_sharding = self._create_sharding(self.logical_names.wkva)
+
+    self._maybe_shard_with_logical = partial(
+        maybe_shard_with_logical,
+        mesh=self.mesh,
+        shard_mode=self.config.shard_mode,
+    )
 
   def _init_projections(self, inputs_q_shape: Tuple, inputs_kv_shape: Tuple) -> None:
     """Initializes the MLA-specific projections."""
@@ -389,6 +402,7 @@ class MLA(Attention):
           weight_dtype=self.weight_dtype,
           quant=self.quant,
           matmul_precision=self.config.matmul_precision,
+          shard_mode=self.config.shard_mode,
           rngs=self.rngs,
       )
     else:
@@ -403,6 +417,7 @@ class MLA(Attention):
           weight_dtype=self.weight_dtype,
           quant=self.quant,
           matmul_precision=self.config.matmul_precision,
+          shard_mode=self.config.shard_mode,
           rngs=self.rngs,
       )
       self.q_norm = RMSNorm(
@@ -423,6 +438,7 @@ class MLA(Attention):
           weight_dtype=self.weight_dtype,
           quant=self.quant,
           matmul_precision=self.config.matmul_precision,
+          shard_mode=self.config.shard_mode,
           rngs=self.rngs,
       )
 
@@ -437,6 +453,7 @@ class MLA(Attention):
         weight_dtype=self.weight_dtype,
         quant=self.quant,
         matmul_precision=self.config.matmul_precision,
+        shard_mode=self.config.shard_mode,
         rngs=self.rngs,
     )
     self.kv_norm = RMSNorm(
@@ -460,6 +477,7 @@ class MLA(Attention):
         weight_dtype=self.weight_dtype,
         quant=self.quant,
         matmul_precision=self.config.matmul_precision,
+        shard_mode=self.config.shard_mode,
         rngs=self.rngs,
     )
 
@@ -506,47 +524,37 @@ class MLA(Attention):
       self.softmax_scale = self.softmax_scale * mscale * mscale
 
     if self.q_lora_rank == 0:
-      q = self.query(inputs_q)
+      q = self.query(inputs_q, out_sharding=self.query_sharding)
     else:
       # LoRA path
-      low_rank_q = self.wq_a(inputs_q)  # [B, L, q_lora_rank]
+      low_rank_q = self.wq_a(inputs_q, out_sharding=self.wqa_out_sharding)  # [B, L, q_lora_rank]
       low_rank_q = self.q_norm(low_rank_q)  # RMSNorm on low rank
-      q = self.wq_b(low_rank_q)  # [B, L, n_heads * qk_head_dim]
+      q = self.wq_b(low_rank_q, out_sharding=self.query_sharding)  # [B, L, n_heads * qk_head_dim]
 
     # Split into non-positional and rotary parts.
     q_nope, q_pe = jnp.split(q, [self.qk_nope_head_dim], axis=-1)
     q_pe = self.apply_rotary_embedding(q_pe, inputs_positions=inputs_positions)
     # Query projection is scaled by self.softmax_scale to be consistent MaxText implementation.
     # DeepSeek v3 was doing it in attention score computation.
+    q_pe = self._maybe_shard_with_logical(q_pe, self.logical_names.query)
+    q_nope = self._maybe_shard_with_logical(q_nope, self.logical_names.query)
     query = jnp.concatenate([q_nope, q_pe], axis=-1) * self.softmax_scale
 
-    if model_mode == MODEL_MODE_PREFILL:
-      query = nn.with_logical_constraint(query, self.prefill_query_axis_names)
-    elif model_mode == MODEL_MODE_TRAIN and self.config.expert_shard_attention_option == EP_AS_CONTEXT:
-      query = nn.with_logical_constraint(query, self.ep_query_axis_names)
-    else:
-      query = nn.with_logical_constraint(query, self.query_axis_names)
+    query = self._maybe_shard_with_logical(query, self.logical_names.query)
     return query
 
   def mla_get_key_value(self, low_rank_main, key_rope, model_mode):
     """get (key,value) pair from mla"""
-    kv_out = self.wkv_b(low_rank_main)
-
+    kv_out = self.wkv_b(low_rank_main, out_sharding=self.wkvb_out_sharding)
     # Split kv_out into key_nope and value parts.
     key_nope, value = jnp.split(kv_out, [self.qk_nope_head_dim], axis=-1)
     key_rope = jnp.broadcast_to(key_rope, (key_nope.shape[0], key_nope.shape[1], self.num_query_heads, key_rope.shape[3]))
-
+    key_nope = self._maybe_shard_with_logical(key_nope, self.logical_names.key)
+    key_rope = self._maybe_shard_with_logical(key_rope, self.logical_names.key)
     key = jnp.concatenate([key_nope, key_rope], axis=-1)
 
-    if model_mode == MODEL_MODE_PREFILL:
-      key = nn.with_logical_constraint(key, self.prefill_key_axis_names)
-      value = nn.with_logical_constraint(value, self.prefill_value_axis_names)
-    elif model_mode == MODEL_MODE_TRAIN and self.config.expert_shard_attention_option == EP_AS_CONTEXT:
-      key = nn.with_logical_constraint(key, self.ep_key_axis_names)
-      value = nn.with_logical_constraint(value, self.ep_value_axis_names)
-    else:
-      key = nn.with_logical_constraint(key, self.key_axis_names)
-      value = nn.with_logical_constraint(value, self.value_axis_names)
+    key = self._maybe_shard_with_logical(key, self.logical_names.key)
+    value = self._maybe_shard_with_logical(value, self.logical_names.value)
     return key, value
 
   def init_mla_kv_caches(self, inputs_kv_shape: Tuple):
@@ -637,7 +645,8 @@ class MLA(Attention):
 
   def mla_kv_projection(self, inputs: Array, inputs_positions: Array, decoder_segment_ids, model_mode, previous_chunk):
     """MLA key/value projection with integrated rotary embedding."""
-    low_rank = self.wkv_a(inputs)
+
+    low_rank = self.wkv_a(inputs, out_sharding=self.wkva_out_sharding)
     low_rank_main, low_rank_rope = jnp.split(low_rank, [self.kv_lora_rank], axis=-1)
     low_rank_main = self.kv_norm(low_rank_main)
 
@@ -695,15 +704,8 @@ class MLA(Attention):
       A tensor of shape [batch, length, embed_dim] containing the
       MLA-attended outputs.
     """
-    if model_mode == MODEL_MODE_PREFILL:
-      inputs_q = nn.with_logical_constraint(inputs_q, self.prefill_input_axis_names)
-      inputs_kv = nn.with_logical_constraint(inputs_kv, self.prefill_input_axis_names)
-    elif model_mode == MODEL_MODE_TRAIN and self.config.expert_shard_attention_option == EP_AS_CONTEXT:
-      inputs_q = nn.with_logical_constraint(inputs_q, self.ep_input_axis_names)
-      inputs_kv = nn.with_logical_constraint(inputs_kv, self.ep_input_axis_names)
-    else:
-      inputs_q = nn.with_logical_constraint(inputs_q, self.input_axis_names)
-      inputs_kv = nn.with_logical_constraint(inputs_kv, self.input_axis_names)
+    inputs_q = self._maybe_shard_with_logical(inputs_q, self.logical_names.inputs)
+    inputs_kv = self._maybe_shard_with_logical(inputs_kv, self.logical_names.inputs)
 
     query = self.mla_query_projection(inputs_q, inputs_positions, model_mode)
     key, value, cached_values = self.mla_kv_projection(
@@ -723,11 +725,8 @@ class MLA(Attention):
     else:
       out = self.attention_op(query, key, value, decoder_segment_ids, model_mode, cached_values)
 
-    if model_mode == MODEL_MODE_TRAIN and self.config.expert_shard_attention_option == EP_AS_CONTEXT:
-      out = nn.with_logical_constraint(out, self.ep_out_axis_names)
-    else:
-      out = nn.with_logical_constraint(out, self.out_axis_names)
+    out = self._maybe_shard_with_logical(out, self.logical_names.out)
 
-    out = self.out_projection(out)
+    out = self.out_projection(out, out_sharding=out_sharding)
     out = checkpoint_name(out, "out_proj")
     return out, kv_cache

@@ -17,6 +17,7 @@
 # pylint: disable=no-name-in-module
 
 import functools
+import dataclasses
 import jax.numpy as jnp
 from jax.ad_checkpoint import checkpoint_name
 from jax.sharding import Mesh, NamedSharding
@@ -25,7 +26,7 @@ from flax import linen as nn
 from flax import nnx
 
 from MaxText.inference import page_manager
-from MaxText.common_types import Config
+from MaxText.common_types import Config, ShardMode
 from MaxText import max_utils
 from MaxText.sharding import maybe_shard_with_logical
 from MaxText.layers.linears import Dropout, MlpBlock
@@ -41,6 +42,15 @@ from MaxText.common_types import MODEL_MODE_PREFILL
 # -----------------------------------------
 # The Decoder Layer specific for Llama2
 # -----------------------------------------
+
+
+@dataclasses.dataclass(frozen=True)
+class LlamaLogicalNames:
+  """Holds the set of axis names for Llama activations."""
+
+  inputs: tuple[str, ...]
+  mlp: tuple[str, ...]
+  out: tuple[str, ...]
 
 
 class LlamaDecoderLayer(nnx.Module):
@@ -59,13 +69,9 @@ class LlamaDecoderLayer(nnx.Module):
     self.mesh = mesh
     self.quant = quant
 
-    if model_mode == MODEL_MODE_PREFILL:
-      self.activation_axis_names = ("activation_batch", "prefill_activation_norm_length", "activation_embed")
-    else:
-      self.activation_axis_names = ("activation_batch", "activation_norm_length", "activation_embed")
-
     batch_size, seq_len = max_utils.get_batch_seq_len_for_mode(config, model_mode)
     dummy_inputs_shape = (batch_size, seq_len, config.emb_dim)
+    self.setup_sharding(model_mode)
 
     self.pre_self_attention_layer_norm = RMSNorm(
         num_features=config.emb_dim,
@@ -131,10 +137,33 @@ class LlamaDecoderLayer(nnx.Module):
 
     self.dropout = Dropout(rate=config.dropout_rate, broadcast_dims=(-2,), rngs=rngs)
 
+  def _create_sharding(self, axis_names):
+    """Creates NamedSharding if shard_mode is EXPLICIT, otherwise None."""
+    if self.config.shard_mode == ShardMode.EXPLICIT:
+      return NamedSharding(self.mesh, nn.logical_to_mesh_axes(axis_names))
+    return None
+
+  def _get_logical_names(self, model_mode):
+    if model_mode == MODEL_MODE_PREFILL:
+      activation_axis_names = ("activation_batch", "prefill_activation_norm_length", "activation_embed")
+    else:
+      activation_axis_names = ("activation_batch", "activation_norm_length", "activation_embed")
+    mlp_axis_names = ("activation_batch", "activation_length", "activation_mlp")
+    return LlamaLogicalNames(
+        inputs=activation_axis_names,
+        mlp=mlp_axis_names,
+        out=activation_axis_names,
+    )
+
+  def setup_sharding(self, model_mode):
+    self.logical_names = self._get_logical_names(model_mode)
+    self.inputs_sharding = self._create_sharding(self.logical_names.inputs)
+    self.mlp_sharding = self._create_sharding(self.logical_names.mlp)
+    self.output_sharding = self._create_sharding(self.logical_names.out)
     self._maybe_shard_with_logical = functools.partial(
         maybe_shard_with_logical,
         mesh=self.mesh,
-        shard_mode=config.shard_mode,
+        shard_mode=self.config.shard_mode,
     )
 
   def __call__(
@@ -152,11 +181,10 @@ class LlamaDecoderLayer(nnx.Module):
   ):
     cfg = self.config
 
-    inputs = self._maybe_shard_with_logical(inputs, self.activation_axis_names)
+    inputs = self._maybe_shard_with_logical(inputs, self.logical_names.inputs)
     inputs = checkpoint_name(inputs, "decoder_layer_input")
-    lnx_sharding = NamedSharding(self.mesh, nn.logical_to_mesh_axes(self.activation_axis_names))
-    lnx = self.pre_self_attention_layer_norm(inputs, out_sharding=lnx_sharding)
-    lnx = self._maybe_shard_with_logical(lnx, self.activation_axis_names)
+    lnx = self.pre_self_attention_layer_norm(inputs, out_sharding=self.inputs_sharding)
+    lnx = self._maybe_shard_with_logical(lnx, self.logical_names.inputs)
 
     # Self-attention block
     attention_lnx, kv_cache = self.self_attention(
@@ -169,34 +197,30 @@ class LlamaDecoderLayer(nnx.Module):
         slot=slot,
         page_state=page_state,
         previous_chunk=previous_chunk,
-        out_sharding=lnx_sharding,
+        out_sharding=self.output_sharding,
         kv_cache=kv_cache,
         attention_metadata=attention_metadata,
     )
 
-    attention_lnx = self._maybe_shard_with_logical(attention_lnx, self.activation_axis_names)
+    attention_lnx = self._maybe_shard_with_logical(attention_lnx, self.logical_names.inputs)
     intermediate_inputs = inputs + attention_lnx
 
     # Fully Connected
-    hidden_states = self.post_self_attention_layer_norm(intermediate_inputs, out_sharding=lnx_sharding)
-    hidden_states = self._maybe_shard_with_logical(hidden_states, self.activation_axis_names)
+    hidden_states = self.post_self_attention_layer_norm(intermediate_inputs, out_sharding=self.output_sharding)
+    hidden_states = self._maybe_shard_with_logical(hidden_states, self.logical_names.out)
 
     # MLP block.
-    mlp_intermediate_sharding = NamedSharding(
-        self.mesh,
-        nn.logical_to_mesh_axes(("activation_batch", "activation_length_no_exp", "activation_mlp")),
-    )
     mlp_lnx = self.mlp(
         hidden_states,
         deterministic=deterministic,
-        intermediate_sharding=mlp_intermediate_sharding,
-        out_sharding=lnx_sharding,
+        intermediate_sharding=self.mlp_sharding,
+        out_sharding=self.output_sharding,
     )
-    mlp_lnx = self._maybe_shard_with_logical(mlp_lnx, self.activation_axis_names)
+    mlp_lnx = self._maybe_shard_with_logical(mlp_lnx, self.logical_names.out)
 
     layer_output = mlp_lnx + intermediate_inputs
     layer_output = self.dropout(layer_output, deterministic=deterministic)
-    layer_output = self._maybe_shard_with_logical(layer_output, self.activation_axis_names)
+    layer_output = self._maybe_shard_with_logical(layer_output, self.logical_names.out)
 
     if cfg.record_internal_nn_metrics:
       self.sow("intermediates", "activation_mean", jnp.mean(layer_output))

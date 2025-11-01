@@ -275,9 +275,11 @@ class RotaryEmbedding(nnx.Module):
       self,
       min_timescale: int,
       max_timescale: int,
+      mesh: Mesh,
       embedding_dims: int = 0,
       cast_as_fprop_dtype: bool = True,
       fprop_dtype: DType = jnp.bfloat16,
+      shard_mode: ShardMode = ShardMode.AUTO,
       # Not used in RotaryEmbedding but passed in by nnx.bridge.to_linen.
       # TODO: Remove when bridge no longer needed
       rope_linear_scaling_factor: float = 1.0,
@@ -297,9 +299,11 @@ class RotaryEmbedding(nnx.Module):
     """
     self.min_timescale = min_timescale
     self.max_timescale = max_timescale
+    self.mesh = mesh
     self.embedding_dims = embedding_dims
     self.cast_as_fprop_dtype = cast_as_fprop_dtype
     self.fprop_dtype = fprop_dtype
+    self.shard_mode = shard_mode
     self.rope_linear_scaling_factor = rope_linear_scaling_factor
 
     if self.embedding_dims % 2:
@@ -396,6 +400,7 @@ def qwen3_next_rotary_embedding_as_linen(
     *,
     min_timescale: int,
     max_timescale: int,
+    mesh: Mesh,
     embedding_dims: int = 0,
     partial_rotary_factor: float = 0.25,
     cast_as_fprop_dtype: bool = True,
@@ -419,6 +424,7 @@ def qwen3_next_rotary_embedding_as_linen(
       Qwen3NextRotaryEmbedding,
       min_timescale=min_timescale,
       max_timescale=max_timescale,
+      mesh=mesh,
       embedding_dims=embedding_dims,
       partial_rotary_factor=partial_rotary_factor,
       cast_as_fprop_dtype=cast_as_fprop_dtype,
@@ -435,6 +441,7 @@ class Qwen3NextRotaryEmbedding(RotaryEmbedding):
       self,
       min_timescale: int,
       max_timescale: int,
+      mesh: Mesh,
       embedding_dims: int = 0,
       cast_as_fprop_dtype: bool = True,
       fprop_dtype: DType = jnp.bfloat16,
@@ -459,6 +466,7 @@ class Qwen3NextRotaryEmbedding(RotaryEmbedding):
     super().__init__(
         min_timescale=min_timescale,
         max_timescale=max_timescale,
+        mesh=mesh,
         embedding_dims=self.rotary_dim,
         cast_as_fprop_dtype=cast_as_fprop_dtype,
         fprop_dtype=fprop_dtype,
@@ -490,10 +498,12 @@ class LLaMARotaryEmbedding(RotaryEmbedding):
       self,
       min_timescale: int,
       max_timescale: int,
+      mesh: Mesh,
       embedding_dims: int = 0,
       cast_as_fprop_dtype: bool = True,
       fprop_dtype: DType = jnp.bfloat16,
       use_scale: bool = True,
+      shard_mode: ShardMode = ShardMode.AUTO,
       # Not used in LLaMARotaryEmbedding but passed in by nnx.bridge.to_linen.
       # TODO: Remove when bridge no longer needed
       rngs: nnx.Rngs = None,
@@ -517,6 +527,8 @@ class LLaMARotaryEmbedding(RotaryEmbedding):
         embedding_dims=embedding_dims,
         cast_as_fprop_dtype=cast_as_fprop_dtype,
         fprop_dtype=fprop_dtype,
+        mesh=mesh,
+        shard_mode=shard_mode,
         rngs=rngs,
     )
 
@@ -625,6 +637,7 @@ class LLaMARotaryEmbedding(RotaryEmbedding):
 def yarn_rotary_embedding_as_linen(
     *,
     embedding_dims: int,
+    mesh: Mesh,
     max_position_embeddings: int = 4096 * 4,
     original_max_position_embeddings: int = 4096,
     beta_fast: float = 32,
@@ -637,6 +650,7 @@ def yarn_rotary_embedding_as_linen(
     interleave: bool = True,
     truncate: bool = True,
     attention_scaling: bool = False,
+    shard_mode: ShardMode = ShardMode.AUTO,
 ):
   """Initializes the YarnRotaryEmbedding module and returns it as a Linen module.
 
@@ -655,6 +669,7 @@ def yarn_rotary_embedding_as_linen(
   return nnx_wrappers.to_linen(
       YarnRotaryEmbedding,
       embedding_dims=embedding_dims,
+      mesh=mesh,
       max_position_embeddings=max_position_embeddings,
       original_max_position_embeddings=original_max_position_embeddings,
       beta_fast=beta_fast,
@@ -668,6 +683,7 @@ def yarn_rotary_embedding_as_linen(
       interleave=interleave,
       truncate=truncate,
       attention_scaling=attention_scaling,
+      shard_mode=shard_mode,
   )
 
 
@@ -697,6 +713,7 @@ class YarnRotaryEmbedding(nnx.Module):
   def __init__(
       self,
       embedding_dims: int,
+      mesh: Mesh,
       max_position_embeddings: int = 4096 * 4,
       original_max_position_embeddings: int = 4096,
       beta_fast: float = 32,
@@ -705,6 +722,7 @@ class YarnRotaryEmbedding(nnx.Module):
       rope_factor: float = 40,
       cast_as_fprop_dtype: bool = True,
       fprop_dtype: DType = jnp.bfloat16,
+      shard_mode: ShardMode = ShardMode.AUTO,
       interleave=True,
       truncate=True,
       attention_scaling=False,
@@ -724,6 +742,13 @@ class YarnRotaryEmbedding(nnx.Module):
     self.fprop_dtype = fprop_dtype
     self.interleave = interleave
     self.truncate = truncate
+    self.mesh = mesh
+    self.shard_mode = shard_mode
+    self.freqs_sharding = (
+        NamedSharding(mesh, nn.logical_to_mesh_axes(("activation_batch", "activation_length_no_exp", "q_heads")))
+        if shard_mode == ShardMode.EXPLICIT
+        else None
+    )
     self.attention_scaling = attention_scaling
 
     if self.embedding_dims % 2:
@@ -829,7 +854,8 @@ class YarnRotaryEmbedding(nnx.Module):
     # Lookup the precomputed frequencies using the position indices.
     # self.freqs_cis has shape [max_position_embeddings, half_dim] so we use jnp.take along axis 0.
     # After indexing, shape becomes [B, S, half_dim]; we then add an axis for the heads.
-    freqs = jnp.take(self.freqs_cis, position, axis=0)  # shape: [B, S, half_dim]
+    # freqs = jnp.take(self.freqs_cis, position, axis=0)  # shape: [B, S, half_dim]
+    freqs = self.freqs_cis.at[position].get(out_sharding=self.freqs_sharding)
     freqs = freqs[:, :, jnp.newaxis, :]  # shape: [B, S, 1, half_dim]
 
     if self.interleave:
@@ -846,7 +872,14 @@ class YarnRotaryEmbedding(nnx.Module):
 
     inputs_complex = first_half + 1j * second_half  # shape: [B, S, N, half_dim]
     # Apply the rotary transformation via complex multiplication.
-    rotated = inputs_complex * freqs  # shape: [B, S, N, half_dim]
+    rotated_sharding = (
+        NamedSharding(self.mesh, nn.logical_to_mesh_axes(("activation_batch", "activation_length_no_exp", None, None)))
+        if self.shard_mode == ShardMode.EXPLICIT
+        else None
+    )
+    rotated = jnp.einsum(
+        "ijkl, ijml->ijkl", inputs_complex, freqs, out_sharding=rotated_sharding
+    )  # shape: [B, S, N, half_dim]
     # Convert the complex result back to a real tensor.
     # Split the complex number into its real and imaginary parts.
     # [real1, real2, ..., img1, img2, ...]
