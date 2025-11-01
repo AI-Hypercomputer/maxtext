@@ -53,33 +53,41 @@ Usage:
     --steps=100
 """
 
-from pprint import pprint
-from absl import app
+import functools
 import os
-import vllm
-print("vLLM module location:", vllm.__file__)
-# Also check if there's a local 'vllm' directory that could be interfering
-print("Is there a local vllm directory?:", os.path.isdir("vllm"))
-# The following import is added to address a circular import issue in vLLM.
-# By pre-importing PoolingRequestOutput, we ensure it's loaded before the
-# problematic import chain is triggered, resolving the ImportError.
-from vllm import PoolingRequestOutput
-
+from pprint import pprint
+import re
 import sys
-from typing import Sequence
+
+from datetime import datetime
+from flax import nnx
+from flax.linen import partitioning as nn_partitioning
+import grain
+import humanize
+
 
 import jax
 from jax.sharding import Mesh
-from flax.linen import partitioning as nn_partitioning
-from flax import nnx
 import optax
 from orbax import checkpoint as ocp
 import tensorflow_datasets as tfds
+from tqdm.auto import tqdm
+from tunix.rl import rl_cluster as rl_cluster_lib
+from tunix.rl.rollout import base_rollout
+from tunix.rl.grpo.grpo_learner import GrpoConfig, GrpoLearner
+from tunix.sft import metrics_logger
+
+
 from transformers import AutoTokenizer
 
-import grain
+from flax import linen as nn
+import numpy as np
+from etils import epath
 
+from MaxText.globals import MAXTEXT_ASSETS_ROOT
 import pathwaysutils
+
+pathwaysutils.initialize()
 
 # for vLLM we can skip JAX precompilation with this flag, it makes startup faster
 os.environ["SKIP_JAX_PRECOMPILE"] = "1"
@@ -95,11 +103,6 @@ project_root = os.path.abspath(os.path.join(script_dir, "..", "..", ".."))
 
 # Add the project root to the Python path
 sys.path.insert(0, project_root)
-
-from tunix.rl import rl_cluster as rl_cluster_lib
-from tunix.rl.rollout import base_rollout
-from tunix.rl.grpo.grpo_learner import GrpoConfig, GrpoLearner
-from tunix.sft import metrics_logger
 
 from MaxText import max_logging, max_utils, maxtext_utils, pyconfig
 from MaxText import model_creation_utils
