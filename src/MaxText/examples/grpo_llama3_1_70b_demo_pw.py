@@ -14,6 +14,11 @@
 
 # pylint: disable=bare-except, consider-using-generator
 """ 
+DEPRECATED: This file is deprecated and kept for reference only.
+Please use the new unified CLI interface: rl_trainer.py
+
+See GRPO_README.md for migration guide and usage examples.
+
 This tutorial demonstrates training the Llama3.1 70B-IT model on
  the GSM8K math reasoning benchmark using Group Relative Policy Optimization (GRPO).
    GRPO can enhance your model's problem-solving skills on mathematical word problems,
@@ -34,7 +39,7 @@ This tutorial demonstrates training the Llama3.1 70B-IT model on
 # We use Tunix as the library for GRPO.
 # And we use vLLM as the library for efficient model inference and generation.
 #
-# In this tutorial we use a single host TPUVM such as `v6e-8/v5p-8`. Let's get started!
+# In this tutorial we use `v5p-256` or `v5p-128`. Let's get started!
 
 
 # ## Install necessary libraries
