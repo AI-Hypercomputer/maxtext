@@ -286,6 +286,9 @@ def validate_keys(keys):
       raise ValueError(
           "For Qwen3-Next, sparse_matmul must be False for now. The dense path has been verified against reference."
       )
+    rotary_dim = int(keys["head_dim"] * keys["partial_rotary_factor"])
+    if rotary_dim % 2 != 0:
+      raise ValueError(f"Calculated rotary dimension ({rotary_dim}) must be a multiple of 2.")
 
   if keys["shard_optimizer_over_data"]:
     validate_optimizer_sharding_over_data(keys)
