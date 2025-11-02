@@ -858,6 +858,37 @@ def positional_embedding_as_linen(*, embedding_dims: int, max_wavelength: int = 
   )
 
 
+def sinusoids_position_embedding_as_linen(
+    *,
+    length: int,
+    channels: int,
+    max_timescale: float = _MAX_WAVELENGTH,
+    cast_as_fprop_dtype: bool = True,
+    fprop_dtype: DType = jnp.bfloat16,
+    name: str | None = None,
+):
+  """Initializes the SinusoidsPositionEmbedding module and returns it as a Linen module.
+
+  Args:
+    length: Maximum sequence length.
+    channels: Number of embedding channels (must be even).
+    max_timescale: Maximum timescale for sinusoidal frequencies.
+    cast_as_fprop_dtype: Whether to cast the output to the fprop dtype.
+    fprop_dtype: The dtype of the output.
+    name: Name of the Linen module.
+  """
+  return nnx_wrappers.to_linen(
+      SinusoidsPositionEmbedding,
+      length=length,
+      channels=channels,
+      max_timescale=max_timescale,
+      cast_as_fprop_dtype=cast_as_fprop_dtype,
+      fprop_dtype=fprop_dtype,
+      metadata_fn=variable_to_logically_partitioned,
+      name=name,
+  )
+
+
 @dataclasses.dataclass(repr=False)
 class PositionalEmbedding(nnx.Module):
   """A layer that adds sinusoidal positional embeddings to the input.
@@ -1035,3 +1066,59 @@ class LlamaVisionRotaryEmbedding(nnx.Module):
       output = output.astype(self.fprop_dtype)
 
     return output
+
+
+@dataclasses.dataclass(repr=False)
+class SinusoidsPositionEmbedding(nnx.Module):
+    """Sinusoidal position embeddings with precomputed table for efficient lookup."""
+
+    def __init__(
+        self,
+        length: int,
+        channels: int,
+        max_timescale: float = _MAX_WAVELENGTH,
+        cast_as_fprop_dtype: bool = True,
+        fprop_dtype: DType = jnp.bfloat16,
+        *,
+        rngs: nnx.Rngs = None,
+    ):
+        """Precompute sinusoidal position embeddings for all positions."""
+        if channels % 2 != 0:
+            raise ValueError("SinusoidsPositionEmbedding needs even channels input")
+
+        self.length = length
+        self.channels = channels
+        self.max_timescale = max_timescale
+        self.cast_as_fprop_dtype = cast_as_fprop_dtype
+        self.fprop_dtype = fprop_dtype
+
+        log_timescale_increment = jnp.log(max_timescale) / (channels // 2 - 1)
+        inv_timescales = jnp.exp(
+            -log_timescale_increment * jnp.arange(channels // 2, dtype=jnp.float32)
+        )
+        scaled_time = (
+            jnp.arange(length, dtype=jnp.float32)[:, None] * inv_timescales[None, :]
+        )
+        positional_embedding = jnp.concatenate(
+            [jnp.sin(scaled_time), jnp.cos(scaled_time)], axis=1
+        )
+
+        self.positional_embedding = nnx.Variable(positional_embedding)
+
+    def __call__(self, seqlen: int) -> Array:
+        """Return positional embeddings for given sequence length.
+
+        Args:
+            seqlen: Sequence length to retrieve embeddings for (must be <= self.length)
+
+        Returns:
+            Positional embeddings of shape (seqlen, channels)
+        """
+        output = jax.lax.dynamic_slice(
+            self.positional_embedding.value,
+            start_indices=(0, 0),
+            slice_sizes=(seqlen, self.channels),
+        )
+        if self.cast_as_fprop_dtype:
+            output = output.astype(self.fprop_dtype)
+        return output

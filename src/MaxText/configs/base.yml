@@ -887,6 +887,33 @@ rope_theta_for_vit: 10000
 vision_output_dim_for_vit: 4096
 pixel_shuffle_ratio_for_vit: 0.5
 projector_dropout_for_vit: 0.0
+# Qwen3-OmniMoe vision encoder specific configs
+spatial_merge_size_for_vit: 2
+out_hidden_size_for_vit: 512
+hidden_act_for_vit: "gelu"
+temporal_patch_size_for_vit: 2
+num_position_embeddings_for_vit: 1024
+deepstack_visual_indexes_for_vit: []
+
+### Audio encoder configs (Qwen3-OmniMoe)
+d_model_for_audio: 256
+encoder_attention_heads_for_audio: 4
+encoder_ffn_dim_for_audio: 512
+encoder_layers_for_audio: 2
+attention_dropout_for_audio: 0.0
+activation_dropout_for_audio: 0.0
+activation_function_for_audio: "gelu"
+num_mel_bins_for_audio: 128
+max_source_positions_for_audio: 1500
+scale_embedding_for_audio: True
+n_window_for_audio: 50
+n_window_infer_for_audio: 800
+conv_chunksize_for_audio: 500
+downsample_hidden_size_for_audio: 256
+output_dim_for_audio: 512
+num_conv_layers_for_audio: 3
+max_timescale_for_audio: 10000.0
+max_sample_len_for_audio: 10000
 
 # Subslice shape in the form of "x,y,z" when using pathways (single controller). 
 # Example: "8,8" to use a 8x8 subgrid (64 chips) of a full pod (16x16) of trillium.
