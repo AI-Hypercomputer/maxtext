@@ -193,6 +193,21 @@ def validate_vocab_tiling(num_vocab_tiling: int, per_device_batch_size: int, max
     raise ValueError("We currently don't support vocab tiling on NNX module.")
 
 
+def validate_rampup_batch_size(batch_size_start, batch_size_end, batch_size_increment, global_rampup_samples):
+  assert batch_size_start > 0, f"per_device_batch_size_start should be positive, got {batch_size_start}."
+  assert batch_size_increment > 0, f"per_device_batch_size_increment should be positive, got {batch_size_increment}."
+  assert global_rampup_samples > 0, f"global_rampup_samples should be positive, got {global_rampup_samples}."
+  diff_batch_size = batch_size_end - batch_size_start
+  assert diff_batch_size > 0, (
+      "per_device_batch_size must be greater than per_device_batch_size_start. "
+      f"get batch size is {batch_size_end} and batch size start is {batch_size_start}."
+  )
+  assert diff_batch_size % batch_size_increment == 0, (
+      "Expect rampup batch size change divisible by batch size increment."
+      f"Got per_device_batch_size={batch_size_end} and per_device_batch_size_start={batch_size_start}."
+  )
+
+
 def validate_keys(keys):
   validate_attention_kernel(keys["attention"])
   validate_attention_type(keys["attention_type"])
@@ -211,6 +226,13 @@ def validate_keys(keys):
   validate_vocab_tiling(
       keys["num_vocab_tiling"], keys["per_device_batch_size"], keys["max_target_length"], keys["enable_nnx"]
   )
+  if keys["enable_rampup_batch_size"]:
+    validate_rampup_batch_size(
+        keys["per_device_batch_size_start"],
+        keys["per_device_batch_size"],
+        keys["per_device_batch_size_increment"],
+        keys["global_rampup_samples"],
+    )
 
   # TODO remove after b/435512699 resolved
   if keys["context_parallel_size"] > 1 and keys["context_parallel_load_balance"] and keys["attention_type"] == "chunk":
@@ -704,6 +726,43 @@ class _HyperParameters:
         get_num_target_devices(raw_keys),
         raw_keys["gradient_accumulation_steps"],
     )
+
+    # Initialize starting global batch size and global increments if rampup batch
+    # size is enabled
+    if raw_keys["enable_rampup_batch_size"]:
+      (
+          raw_keys["global_batch_size_to_load_start"],
+          raw_keys["global_batch_size_to_train_on_start"],
+          raw_keys["micro_batch_size_to_train_on_start"],
+      ) = calculate_global_batch_sizes(
+          raw_keys["per_device_batch_size_start"],
+          raw_keys["expansion_factor_real_data"],
+          get_num_target_devices(raw_keys),
+          raw_keys["gradient_accumulation_steps"],
+      )
+
+      (
+          raw_keys["global_batch_size_to_load_increment"],
+          raw_keys["global_batch_size_to_train_on_increment"],
+          raw_keys["micro_batch_size_to_train_on_increment"],
+      ) = calculate_global_batch_sizes(
+          raw_keys["per_device_batch_size_increment"],
+          raw_keys["expansion_factor_real_data"],
+          get_num_target_devices(raw_keys),
+          raw_keys["gradient_accumulation_steps"],
+      )
+
+      (
+          raw_keys["rampup_samples_per_increment_to_load"],
+          raw_keys["rampup_end_step"],
+      ) = calculate_rampup_samples_and_steps(
+          raw_keys["global_batch_size_to_load_start"],
+          raw_keys["global_batch_size_to_load"],
+          raw_keys["global_batch_size_to_load_increment"],
+          raw_keys["global_rampup_samples"],
+      )
+    else:
+      raw_keys["rampup_end_step"] = 0
 
     if raw_keys["eval_per_device_batch_size"] <= 0:
       raw_keys["eval_per_device_batch_size"] = raw_keys["per_device_batch_size"]
@@ -1250,6 +1309,27 @@ def calculate_global_batch_sizes(
   global_batch_size_to_load = int(micro_batch_size_to_load * gradient_accumulation_steps)
   global_batch_size_to_train_on = int(micro_batch_size_to_train_on * gradient_accumulation_steps)
   return global_batch_size_to_load, global_batch_size_to_train_on, micro_batch_size_to_train_on
+
+
+def calculate_rampup_samples_and_steps(
+    batch_size_start,
+    batch_size_end,
+    batch_size_increment,
+    global_rampup_samples,
+):
+  """Calculate num of samples for each increment and num of steps for batch rampup"""
+  diff_batch_size = batch_size_end - batch_size_start
+  num_increments = diff_batch_size // batch_size_increment
+  rampup_samples_per_increment = global_rampup_samples / num_increments
+  total_rampup_steps = 0
+  current_batch_size = batch_size_start
+
+  for _ in range(num_increments):
+    steps_for_this_stage = math.ceil(rampup_samples_per_increment / current_batch_size)
+    total_rampup_steps += steps_for_this_stage
+    current_batch_size += batch_size_increment
+
+  return rampup_samples_per_increment, total_rampup_steps
 
 
 def get_num_target_devices(raw_keys):

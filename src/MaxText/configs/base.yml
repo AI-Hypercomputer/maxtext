@@ -512,6 +512,18 @@ packing: True
 num_epoch: 1  # only grain and tfds pipeline supports num_epoch > 1
 generate_padding_batch_train: False
 generate_padding_batch_eval: False
+# Rampup batch size, similar to Megatron-LM, see
+# https://github.com/NVIDIA/Megatron-LM/blob/2a01637aa54ccdaf7ea9afc1f1b80f58c53d7f3c/megatron/core/num_microbatches_calculator.py#L233-L237
+# The ramp-up proceeds in stages from `per_device_batch_size_start` up to
+# the final `per_device_batch_size`. For a clean ramp-up, the total range
+# (`per_device_batch_size` - `per_device_batch_size_start`)
+# should be evenly divisible by batch size increment.
+enable_rampup_batch_size: False
+per_device_batch_size_start: 4.0
+per_device_batch_size_increment: 2.0
+# The target number of training samples to process during the ramp-up phase.
+# There is no strict rule for this value, it only needs to be positive.
+global_rampup_samples: 500
 
 # direct preference optimization (DPO)
 use_dpo: False
