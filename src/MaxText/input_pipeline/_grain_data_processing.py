@@ -122,6 +122,11 @@ def pretrain_preprocessing_pipeline(dataset, config, data_columns, tokenize, gra
     )
   # Pack and Batch examples.
   batch_size = config.global_batch_size_to_load // jax.process_count()
+  if config.expansion_factor_real_data > 1:
+    # global_batch_size_to_load has been expanded in pyconfig.py when expansion_factor_real_data > 1.
+    # But when using Grain, we want to keep the batch_size consistent with that in the checkpoint.
+    # We revert the batch_size expansion here, but load multiple batches per step in multihost_dataloading.py.
+    batch_size = batch_size // config.expansion_factor_real_data
   if config.packing:
     length_struct = {col: config.max_target_length for col in data_columns}
     dataset = grain.experimental.FirstFitPackIterDataset(
@@ -194,7 +199,7 @@ def make_grain_train_iterator(
   assert (
       config.global_batch_size_to_load % global_mesh.size == 0
   ), "Batch size should be divisible by number of global devices."
-  if not config.colocated_python_data_input:
+  if not config.colocated_python_data_input and not 0 < config.expansion_factor_real_data < 1:
     train_ds = get_datasets(
         config.grain_train_files,
         config.grain_file_type,
@@ -222,7 +227,10 @@ def make_grain_train_iterator(
           grain_worker_count=config.grain_worker_count,
       )
     return multihost_dataloading.MultiHostDataLoadIterator(
-        train_dataloader, global_mesh, config.generate_padding_batch_train
+        train_dataloader,
+        global_mesh,
+        config.generate_padding_batch_train,
+        expansion_loading_factor_for_grain=config.expansion_factor_real_data,
     )
   else:
     get_ds_fn = functools.partial(
@@ -250,8 +258,23 @@ def make_grain_train_iterator(
           tokenize=config.tokenize_train_data,
           grain_worker_count=config.grain_worker_count,
       )
-    global_shape = (config.global_batch_size_to_load, config.max_target_length)
-    return multihost_dataloading.RemoteIterator(get_ds_fn, preprocessing_fn, global_mesh, global_shape)
+    if config.colocated_python_data_input:
+      global_shape = (config.global_batch_size_to_load, config.max_target_length)
+      return multihost_dataloading.RemoteIterator(get_ds_fn, preprocessing_fn, global_mesh, global_shape)
+    else:
+      # config.expansion_factor_real_data is between 0 and 1
+      num_dataloader_to_restore = int(1 / config.expansion_factor_real_data)
+      train_dataloader_list = []
+      dataloading_host_count = len(process_indices) * num_dataloader_to_restore
+      for i in range(num_dataloader_to_restore):
+        dataloading_host_index = len(process_indices) * i + process_indices.index(jax.process_index())
+        train_ds = get_ds_fn(dataloading_host_index=dataloading_host_index, dataloading_host_count=dataloading_host_count)
+        train_dataloader = preprocessing_fn(train_ds)
+        train_dataloader_list.append(train_dataloader)
+      return [
+          multihost_dataloading.MultiHostDataLoadIterator(x, global_mesh, config.generate_padding_batch_train)
+          for x in train_dataloader_list
+      ]
 
 
 def make_grain_eval_iterator(

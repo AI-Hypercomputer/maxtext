@@ -878,8 +878,13 @@ def train_loop(config, config_inference, recorder, state=None):
         max_utils.print_mem_stats("After params initialized")
 
       metric_logger.buffer_and_write_train_metrics(metrics, step, step_time_delta)
-      state_to_save = _split_grpo_state(state)[0]
-      checkpointing.maybe_save_checkpoint(checkpoint_manager, state_to_save, config, data_iterator)
+
+      if config.save_checkpoint_on_completion:
+        state_to_save = _split_grpo_state(state)[0]
+        checkpointing.maybe_save_checkpoint(checkpoint_manager, state_to_save, config, data_iterator)
+      elif checkpoint_manager is not None:
+        # in case the last checkpoint_period checkpoint is still in progress
+        checkpoint_manager.wait_until_finished()
   except exceptions.StopTraining as e:
     max_logging.log(f"Training stopped: {str(e)}")
   finally:
