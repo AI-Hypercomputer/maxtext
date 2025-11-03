@@ -16,9 +16,9 @@ ENV MAXTEXT_REPO_ROOT=/deps
 WORKDIR /deps
 
 # Copy setup files and dependency files separately for better caching
-COPY setup.sh ./
-COPY requirements.txt requirements_with_jax_ai_image.txt requirements_with_jax_stable_stack_0_6_1_pipreqs.txt src/install_maxtext_extra_deps/extra_deps_from_github.txt generated_requirements ./
-
+COPY tools/setup /deps/tools/setup/
+COPY dependencies/requirements/ /deps/dependencies/requirements/
+COPY src/install_maxtext_extra_deps/extra_deps_from_github.txt /deps/dependencies/requirements/
 
 # For JAX AI tpu training images 0.4.37 AND 0.4.35
 # Orbax checkpoint installs the latest version of JAX,
@@ -42,9 +42,9 @@ RUN pip install google-cloud-monitoring
 # pipreqs --savepath requirements_with_jax_stable_stack_0_6_1_pipreqs.txt
 # Otherwise use general requirements_with_jax_ai_image.txt
 RUN if [ "$DEVICE" = "tpu" ] && [ "$JAX_STABLE_STACK_BASEIMAGE" = "us-docker.pkg.dev/cloud-tpu-images/jax-ai-image/tpu:jax0.6.1-rev1" ]; then \
-        python3 -m pip install -r /deps/requirements_with_jax_stable_stack_0_6_1_pipreqs.txt; \
+        python3 -m pip install -r /deps/dependencies/requirements/requirements_with_jax_stable_stack_0_6_1_pipreqs.txt; \
   else \
-        python3 -m pip install -r /deps/requirements_with_jax_ai_image.txt; \
+        python3 -m pip install -r /deps/dependencies/requirements/requirements_with_jax_ai_image.txt; \
   fi
 
 # Install google-tunix for TPU devices, skip for GPU
