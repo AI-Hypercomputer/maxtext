@@ -38,3 +38,43 @@ rope_max_timescale: 10_000_000
 
 # General Model Settings
 enable_dropout: False
+# Core Architectural Parameters
+decoder_block: "qwen3_moe"
+base_emb_dim: 2048
+base_mlp_dim: 768
+base_num_query_heads: 32
+base_num_kv_heads: 4
+base_num_decoder_layers: 48
+head_dim: 128
+mlp_activations: ["silu", "linear"]
+vocab_size: 152064
+normalization_layer_epsilon: 1.0e-6
+use_qk_norm: True
+
+# MoE Specific Parameters
+num_experts: 128
+num_experts_per_tok: 8
+base_moe_mlp_dim: 768
+norm_topk_prob: true
+
+# RoPE Settings
+rope_max_timescale: 1_000_000
+max_position_embeddings: 65536
+
+# General Model Settings
+enable_dropout: False
+
+# Vision Encoder Configuration
+# Based on https://github.com/huggingface/transformers/blob/main/src/transformers/models/qwen3_omni_moe/configuration_qwen3_omni_moe.py
+image_size_for_vit: 768
+hidden_size_for_vit: 1152
+intermediate_size_for_vit: 4304
+num_attention_heads_for_vit: 16
+num_hidden_layers_for_vit: 27
+num_channels_for_vit: 3
+patch_size_for_vit: 16
+temporal_patch_size_for_vit: 2
+spatial_merge_size_for_vit: 2
+out_hidden_size_for_vit: 2048
+num_position_embeddings_for_vit: 2304
+deepstack_visual_indexes_for_vit: [7, 16, 24]
