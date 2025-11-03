@@ -226,7 +226,7 @@ def apply_lora_to_model(base_model, mesh, mt_config, quantize=False):
   alpha = getattr(mt_config, "lora_alpha", 16)
 
   # Define which modules to apply LoRA to
-  module_path = ".*q_einsum|.*kv_einsum|.*gate_proj|.*down_proj|.*up_proj"
+  module_path = ".*q_proj|.*kv_proj|.*k_proj|.*v_proj|.*gate|.*up_proj|.*down_proj|.*wo|.*wq|.*wk|.*wv"
 
   if quantize:
     lora_provider = qwix.LoraProvider(
@@ -264,129 +264,44 @@ def apply_lora_to_model(base_model, mesh, mt_config, quantize=False):
   return lora_model
 
 
-def count_model_parameters(model):
-  """Counts parameters in a model by category.
-
-  Args:
-    model: The NNX model to analyze.
-
-  Returns:
-    A dictionary with parameter counts and statistics.
-  """
-  state = nnx.state(model)
-  flat_state = state.flat_state()
-
-  total_params = 0
-  trainable_params = 0
-  frozen_params = 0
-  lora_params = 0
-  param_details = {}
-
-  # Count parameters by iterating through flat state paths and values
-  for path, value in zip(flat_state.paths, flat_state.values):
-    if isinstance(value, jnp.ndarray):
-      param_count = value.size
-      total_params += param_count
-
-      # Convert path to string for checking
-      path_str = str(path).lower() if path else ""
-
-      # Categorize parameters
-      if "lora" in path_str:
-        lora_params += param_count
-        trainable_params += param_count
-        category = "LoRA"
-      else:
-        # In NNX, most params are trainable unless explicitly frozen
-        trainable_params += param_count
-        category = "Trainable"
-
-      # Track by module - extract first part of path
-      module_name = path_str.split("/")[0] if "/" in path_str else path_str
-      if not module_name:
-        module_name = "root"
-      if module_name not in param_details:
-        param_details[module_name] = {"total": 0, "trainable": 0, "frozen": 0, "lora": 0}
-      param_details[module_name]["total"] += param_count
-      if category == "LoRA":
-        param_details[module_name]["lora"] += param_count
-      else:
-        param_details[module_name]["trainable"] += param_count
-
-  return {
-      "total": total_params,
-      "trainable": trainable_params,
-      "frozen": frozen_params,
-      "lora": lora_params,
-      "details": param_details,
-  }
-
-
 def log_model_comparison(base_model, lora_model, mt_config):
-  """Compares base model and LoRA model before training starts.
-
-  This is the most meaningful comparison because it shows:
-  1. The structural changes LoRA introduces
-  2. How many parameters are frozen vs trainable
-  3. The actual LoRA adapter parameters added
-  4. Memory efficiency gains
+  """Verifies that LoRA parameters were successfully added to the model.
 
   Args:
     base_model: The original model (without LoRA).
     lora_model: The model with LoRA applied (can be None if LoRA disabled).
     mt_config: MaxText config.
   """
+  if lora_model is None:
+    return
+
   max_logging.log("\n" + "=" * 80)
-  max_logging.log("MODEL STRUCTURE COMPARISON")
+  max_logging.log("LoRA VERIFICATION")
   max_logging.log("=" * 80)
 
-  base_stats = count_model_parameters(base_model)
+  # Check if LoRA parameters exist
+  lora_state = nnx.state(lora_model)
+  lora_flat = lora_state.flat_state()
+  lora_module_count = 0
+  lora_modules = []
 
-  max_logging.log("\n[BASE MODEL] (Full-Weight Training)")
-  max_logging.log(f"  Total Parameters: {base_stats['total']:,}")
-  max_logging.log(
-      f"  Trainable: {base_stats['trainable']:,} ({100*base_stats['trainable']/max(base_stats['total'], 1):.2f}%)"
-  )
-  max_logging.log(f"  Frozen: {base_stats['frozen']:,} ({100*base_stats['frozen']/max(base_stats['total'], 1):.2f}%)")
+  for path in lora_flat.paths:
+    path_str = str(path) if path else ""
+    if "lora" in path_str.lower():
+      lora_module_count += 1
+      if len(lora_modules) < 10:  # Store first 10 examples
+        lora_modules.append(path_str)
 
-  if lora_model is not None:
-    lora_stats = count_model_parameters(lora_model)
-
-    max_logging.log("\n[LORA MODEL] (LoRA Fine-tuning)")
-    max_logging.log(f"  Total Parameters: {lora_stats['total']:,}")
-    max_logging.log(
-        f"  Trainable: {lora_stats['trainable']:,} ({100*lora_stats['trainable']/max(lora_stats['total'], 1):.2f}%)"
-    )
-    max_logging.log(f"  Frozen: {lora_stats['frozen']:,} ({100*lora_stats['frozen']/max(lora_stats['total'], 1):.2f}%)")
-    max_logging.log(f"  LoRA Adapters: {lora_stats['lora']:,}")
-
-    # Calculate improvements
-    trainable_reduction = 100 * (1 - lora_stats["trainable"] / max(base_stats["trainable"], 1))
-    param_addition = lora_stats["total"] - base_stats["total"]
-
-    max_logging.log("\n[COMPARISON]")
-    max_logging.log(f"  Parameter Reduction: {trainable_reduction:.2f}%")
-    max_logging.log(f"  LoRA Overhead: +{param_addition:,} parameters")
-    max_logging.log(f"  Training Speed Benefit: ~{trainable_reduction:.0f}% faster (fewer params to update)")
-    max_logging.log(f"  Memory Savings: ~{trainable_reduction:.0f}% less gradient memory needed")
-
-    max_logging.log("\n[CONFIGURATION]")
-    max_logging.log(f"  LoRA Rank: {mt_config.lora_rank}")
-    max_logging.log(f"  LoRA Alpha: {mt_config.lora_alpha}")
-    max_logging.log(f"  Quantized: {mt_config.quantize_lora}")
-
-    max_logging.log("\n[TRAINING STRATEGY COMPARISON]")
-    max_logging.log("  Base Model (Full-Weight):")
-    max_logging.log(f"    - Train all {base_stats['trainable']:,} parameters")
-    max_logging.log(f"    - Higher memory footprint")
-    max_logging.log(f"    - Slower convergence (more params to optimize)")
-    max_logging.log(f"    - Better performance ceiling")
-
-    max_logging.log("\n  LoRA Model (Adapter Fine-tuning):")
-    max_logging.log(f"    - Train only {lora_stats['trainable']:,} parameters (adapters)")
-    max_logging.log(f"    - Freeze {lora_stats['frozen']:,} base parameters")
-    max_logging.log(f"    - Lower memory footprint ({100-trainable_reduction:.1f}% less)")
-    max_logging.log(f"    - Faster convergence (fewer params to optimize)")
+  if lora_module_count > 0:
+    max_logging.log(f"SUCCESS: LoRA applied successfully!")
+    max_logging.log(f"Found {lora_module_count} LoRA parameters in the model")
+    max_logging.log("\nExample LoRA modules (first 10):")
+    for module in lora_modules:
+      max_logging.log(f"  - {module}")
+  else:
+    max_logging.log("ERROR: No LoRA parameters found in model!")
+    max_logging.log("LoRA application may have failed.")
+    max_logging.log("Check the module_path pattern in apply_lora_to_model()")
 
   max_logging.log("=" * 80 + "\n")
 
@@ -419,7 +334,6 @@ def train(mt_config, goodput_recorder=None):
       quantize_lora = getattr(mt_config, "quantize_lora", False)
       model = apply_lora_to_model(model, mesh, mt_config, quantize=quantize_lora)
       lora_model = model
-      max_logging.log("LoRA applied successfully")
 
       max_logging.log("=" * 80)
       max_logging.log("MODEL STRUCTURE AFTER LoRA APPLICATION")
