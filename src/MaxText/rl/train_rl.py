@@ -53,6 +53,7 @@ Usage:
     --steps=100
 """
 
+from typing import Any, Sequence
 import functools
 import os
 from pprint import pprint
@@ -60,12 +61,13 @@ import re
 import sys
 
 from datetime import datetime
+from absl import app
 from flax import nnx
 from flax.linen import partitioning as nn_partitioning
 import grain
 import humanize
 
-
+import vllm
 import jax
 from jax.sharding import Mesh
 import optax
@@ -245,43 +247,46 @@ def rl_train(tmvp_config):
 
   
   # Setup device allocation
-  if jax.extend.backend.get_backend().platform_version == "Pathways":
-    max_logging.log("Pathways backend detected. Disabling setting profile options.")
+  
+  if jax.extend.backend.get_backend().platform_version.strip() == "Pathways":
+    print("Pathways backend detected. Disabling setting profile options.")
     use_pathways = True
   else:
     use_pathways = False
-  max_logging.log(f"Use Pathways: {use_pathways}")
+  print(f"jax.extend.backend.get_backend().platform_version={jax.extend.backend.get_backend().platform_version}")
+  use_pathways = True
+  print(f"Use Pathways: {use_pathways}")
   trainer_devices, sampler_devices = setup_device_allocation(tmvp_config, use_pathways)
 
   # Load reference model
-  max_logging.log("Creating reference model and also meshes for reference and rollout")
+  print("Creating reference model and also meshes for reference and rollout")
   reference_model, reference_mesh = get_maxtext_model(tmvp_config, trainer_devices)
   devices_array = maxtext_utils.create_device_mesh(tmvp_config, sampler_devices)
   # if trainer_devices=sampler_devices, then rollout_mesh=reference_mesh
   # else rollout_mesh uses sampler_devices
   rollout_mesh = Mesh(devices_array, tmvp_config.mesh_axes)
   if tmvp_config.debug:
-      max_logging.log("Reference Model initialized successfully")
+      print("Reference Model initialized successfully")
       nnx.display(reference_model)
-      max_logging.log(f"Reference mesh shape: {reference_mesh.shape}")
+      print(f"Reference mesh shape: {reference_mesh.shape}")
 
       # Sanity check that weights are loaded correctly.
       _maxtext_state_flatten = nnx.state(reference_model).flat_state()
       maxtext_state_flatten = {".".join(str(key) for key in keys): v for keys, v in _maxtext_state_flatten}
-      max_logging.log(
+      print(
           f"maxtext_state_flatten[base.token_embedder.embedding].value={maxtext_state_flatten['base.token_embedder.embedding'].value}"
       )
 
   # TODO: @mazumdera: change this to use lora
   # Load policy model
-  max_logging.log("Creating policy model with same config as reference model on trainer mesh")
+  print("Creating policy model with same config as reference model on trainer mesh")
   policy_model, policy_mesh = get_maxtext_model(tmvp_config, trainer_devices)
   actor_mesh = policy_mesh
 
   if tmvp_config.debug:
-      max_logging.log("Policy Model initialized successfully")
+      print("Policy Model initialized successfully")
       nnx.display(policy_model)
-      max_logging.log(f"Policy mesh shape: {policy_mesh.shape}")
+      print(f"Policy mesh shape: {policy_mesh.shape}")
 
   # Setup optimizer
   optimizer = optax.adamw(
@@ -318,7 +323,7 @@ def rl_train(tmvp_config):
   # Setup metrics logging
   log_dir = os.path.join(tmvp_config.tensorboard_dir, f"worker_{jax.process_index()}")
 
-  max_logging.log(f"TensorBoard logs directory: {log_dir}")
+  print(f"TensorBoard logs directory: {log_dir}")
   # Metrics logger
   metrics_logging_options = metrics_logger.MetricsLoggerOptions(log_dir=log_dir, flush_every_n_steps=tmvp_config.log_period)
 
@@ -379,7 +384,7 @@ def rl_train(tmvp_config):
   )
 
   # Create RL cluster
-  max_logging.log("Creating RL cluster...")
+  print("Creating RL cluster...")
   with nn_partitioning.axis_rules(tmvp_config.logical_axis_rules):
     rl_cluster = rl_cluster_lib.RLCluster(
         actor=policy_model,
@@ -389,7 +394,7 @@ def rl_train(tmvp_config):
     )
 
   # Create GRPO trainer
-  max_logging.log("Setting up GRPO trainer...")
+  print("Setting up GRPO trainer...")
   rl_trainer = GrpoLearner(
       rl_cluster=rl_cluster,
       reward_fns=[ # type: ignore
@@ -410,7 +415,7 @@ def rl_train(tmvp_config):
         rollout_config=base_rollout.RolloutConfig(max_tokens_to_generate=64, temperature=0.1),
     )
 
-    max_logging.log(f"Output: {output}")
+    print(f"Output: {output}")
   #
   #
   # Before we train the model, let's evaluate the model on the test set so we can
@@ -421,17 +426,17 @@ def rl_train(tmvp_config):
     test_dataset,
     rl_cluster=rl_cluster,
   )
-  max_logging.log(f"Pre GRPO Training: {corr=}, {total=}, {accuracy=}%, {partial_accuracy=}%," f" {format_accuracy=}%")
+  print(f"Pre GRPO Training: {corr=}, {total=}, {accuracy=}%, {partial_accuracy=}%," f" {format_accuracy=}%")
 
 
   # Start training
   
-  max_logging.log("Starting GRPO training...")
+  print("Starting GRPO training...")
 
   with reference_mesh, nn_partitioning.axis_rules(tmvp_config.logical_axis_rules):
     rl_trainer.train(train_dataset)
 
-  max_logging.log("GRPO Training Completed Successfully!")
+  print("GRPO Training Completed Successfully!")
 
   # Let's evaluate our model!
   (corr, total, accuracy, partial_accuracy, format_accuracy) = evaluate(
@@ -439,7 +444,7 @@ def rl_train(tmvp_config):
       test_dataset,
       rl_cluster=rl_cluster,
   )
-  max_logging.log(f"Post GRPO Training: {corr=}, {total=}, {accuracy=}%, {partial_accuracy=}%," f" {format_accuracy=}%")
+  print(f"Post GRPO Training: {corr=}, {total=}, {accuracy=}%, {partial_accuracy=}%," f" {format_accuracy=}%")
 
 
 def main(argv: Sequence[str]) -> None:
