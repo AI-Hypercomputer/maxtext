@@ -112,27 +112,27 @@ def get_tunix_config(mt_config):
 
 def gen_model_input_for_lora(x):
   """Transform training batch to model input format for LoRA training.
-  
+
   Converts Tunix training input to MaxText model input format by mapping field names
   and shapes to match the Transformer model's expected signature.
-  
+
   This explicit transformation provides several benefits:
   - Makes data transformation intentional and self-documenting
   - Ensures field names (e.g., input_positions -> input_position) are correctly mapped
   - Provides defensive handling for optional fields with hasattr() checks
   - Prevents silent bugs if Tunix data format changes
-  
+
   Without this function, training may still work because:
   1. The loss_func wrapper re-structures data anyway (see use_maxtext_loss_function)
   2. Tunix might handle positional/keyword argument conversion automatically
   3. Data fields might happen to be compatible with the model signature
-  
+
   However, using this function is the best practice because it makes the data
   transformation explicit and reliable across different configurations.
-  
+
   Args:
     x: Tunix TrainingInput containing input_tokens and other fields.
-    
+
   Returns:
     Dictionary with keys matching the Transformer's __call__ signature:
     - input_tokens: Token IDs
@@ -143,12 +143,14 @@ def gen_model_input_for_lora(x):
     - target_segmentation: Target segment IDs
   """
   return {
-      'input_tokens': x.input_tokens,
-      'input_position': x.input_positions if hasattr(x, 'input_positions') else jnp.arange(x.input_tokens.shape[1])[None, :],
-      'input_segmentation': x.input_segmentation if hasattr(x, 'input_segmentation') else jnp.ones_like(x.input_tokens),
-      'target_tokens': x.target_tokens if hasattr(x, 'target_tokens') else x.input_tokens,
-      'target_position': x.target_positions if hasattr(x, 'target_positions') else jnp.arange(x.input_tokens.shape[1])[None, :],
-      'target_segmentation': x.target_segmentation if hasattr(x, 'target_segmentation') else jnp.ones_like(x.input_tokens),
+      "input_tokens": x.input_tokens,
+      "input_position": x.input_positions if hasattr(x, "input_positions") else jnp.arange(x.input_tokens.shape[1])[None, :],
+      "input_segmentation": x.input_segmentation if hasattr(x, "input_segmentation") else jnp.ones_like(x.input_tokens),
+      "target_tokens": x.target_tokens if hasattr(x, "target_tokens") else x.input_tokens,
+      "target_position": x.target_positions
+      if hasattr(x, "target_positions")
+      else jnp.arange(x.input_tokens.shape[1])[None, :],
+      "target_segmentation": x.target_segmentation if hasattr(x, "target_segmentation") else jnp.ones_like(x.input_tokens),
   }
 
 
@@ -183,34 +185,27 @@ def use_maxtext_loss_function(trainer, mt_config):
 
 def create_model_input_for_lora(base_model):
   """Creates dummy model input for LoRA tracing.
-  
+
   Creates the model input structure that qwix expects to trace through
   the model's computation graph when applying LoRA adapters.
-  
+
   The parameter names must exactly match the Transformer's __call__ signature.
-  
+
   Args:
     base_model: The base model to extract configuration from.
-    
+
   Returns:
     A dictionary with keys matching Transformer.__call__ parameters.
   """
   # Get batch and sequence length from model config
-  batch_size, seq_len = max_utils.get_batch_seq_len_for_mode(
-      config=base_model.config,
-      model_mode=base_model.model_mode
-  )
-  
+  batch_size, seq_len = max_utils.get_batch_seq_len_for_mode(config=base_model.config, model_mode=base_model.model_mode)
+
   # Create dummy inputs matching Transformer.__call__ signature
   model_input = {
-      "decoder_input_tokens": jnp.ones(
-          (batch_size, seq_len), dtype=jnp.int32
-      ),
-      "decoder_positions": jnp.ones(
-          (batch_size, seq_len), dtype=jnp.int32
-      ),
+      "decoder_input_tokens": jnp.ones((batch_size, seq_len), dtype=jnp.int32),
+      "decoder_positions": jnp.ones((batch_size, seq_len), dtype=jnp.int32),
   }
-  
+
   return model_input
 
 
@@ -229,10 +224,10 @@ def apply_lora_to_model(base_model, mesh, mt_config, quantize=False):
   # Extract LoRA parameters from config
   rank = getattr(mt_config, "lora_rank", 8)
   alpha = getattr(mt_config, "lora_alpha", 16)
-  
+
   # Define which modules to apply LoRA to
   module_path = ".*q_einsum|.*kv_einsum|.*gate_proj|.*down_proj|.*up_proj"
-  
+
   if quantize:
     lora_provider = qwix.LoraProvider(
         module_path=module_path,
@@ -255,13 +250,9 @@ def apply_lora_to_model(base_model, mesh, mt_config, quantize=False):
   # The get_model_input() method returns dummy inputs that match the model's expected signature.
   # For NNX models, qwix needs to call the model to trace the computation graph.
   model_input = create_model_input_for_lora(base_model)
-  
+
   # Apply LoRA to the model using the inputs from create_model_input_for_lora()
-  lora_model = qwix.apply_lora_to_model(
-      base_model, 
-      lora_provider,
-      **model_input
-  )
+  lora_model = qwix.apply_lora_to_model(base_model, lora_provider, **model_input)
 
   # Apply sharding constraints
   # with mesh:
@@ -275,48 +266,53 @@ def apply_lora_to_model(base_model, mesh, mt_config, quantize=False):
 
 def count_model_parameters(model):
   """Counts parameters in a model by category.
-  
+
   Args:
     model: The NNX model to analyze.
-    
+
   Returns:
     A dictionary with parameter counts and statistics.
   """
   state = nnx.state(model)
-  
+  flat_state = state.flat_state()
+
   total_params = 0
   trainable_params = 0
   frozen_params = 0
   lora_params = 0
   param_details = {}
-  
-  # Count parameters by module
-  for name, value in state.flat_state().items():
+
+  # Count parameters by iterating through flat state paths and values
+  for path, value in zip(flat_state.paths, flat_state.values):
     if isinstance(value, jnp.ndarray):
       param_count = value.size
       total_params += param_count
-      
+
+      # Convert path to string for checking
+      path_str = str(path).lower() if path else ""
+
       # Categorize parameters
-      if "lora" in name.lower():
+      if "lora" in path_str:
         lora_params += param_count
         trainable_params += param_count
         category = "LoRA"
       else:
-        # Check if it's explicitly trainable
-        if "Param" in str(type(value)):
-          trainable_params += param_count
-          category = "Trainable"
-        else:
-          frozen_params += param_count
-          category = "Frozen"
-      
-      # Track by module
-      module_name = name.split("/")[0] if "/" in name else name
+        # In NNX, most params are trainable unless explicitly frozen
+        trainable_params += param_count
+        category = "Trainable"
+
+      # Track by module - extract first part of path
+      module_name = path_str.split("/")[0] if "/" in path_str else path_str
+      if not module_name:
+        module_name = "root"
       if module_name not in param_details:
         param_details[module_name] = {"total": 0, "trainable": 0, "frozen": 0, "lora": 0}
       param_details[module_name]["total"] += param_count
-      param_details[module_name][category.lower()] += param_count
-  
+      if category == "LoRA":
+        param_details[module_name]["lora"] += param_count
+      else:
+        param_details[module_name]["trainable"] += param_count
+
   return {
       "total": total_params,
       "trainable": trainable_params,
@@ -328,67 +324,71 @@ def count_model_parameters(model):
 
 def log_model_comparison(base_model, lora_model, mt_config):
   """Compares base model and LoRA model before training starts.
-  
+
   This is the most meaningful comparison because it shows:
   1. The structural changes LoRA introduces
   2. How many parameters are frozen vs trainable
   3. The actual LoRA adapter parameters added
   4. Memory efficiency gains
-  
+
   Args:
     base_model: The original model (without LoRA).
     lora_model: The model with LoRA applied (can be None if LoRA disabled).
     mt_config: MaxText config.
   """
-  max_logging.log("\n" + "="*80)
+  max_logging.log("\n" + "=" * 80)
   max_logging.log("MODEL STRUCTURE COMPARISON")
-  max_logging.log("="*80)
-  
+  max_logging.log("=" * 80)
+
   base_stats = count_model_parameters(base_model)
-  
+
   max_logging.log("\n[BASE MODEL] (Full-Weight Training)")
   max_logging.log(f"  Total Parameters: {base_stats['total']:,}")
-  max_logging.log(f"  Trainable: {base_stats['trainable']:,} ({100*base_stats['trainable']/max(base_stats['total'], 1):.2f}%)")
+  max_logging.log(
+      f"  Trainable: {base_stats['trainable']:,} ({100*base_stats['trainable']/max(base_stats['total'], 1):.2f}%)"
+  )
   max_logging.log(f"  Frozen: {base_stats['frozen']:,} ({100*base_stats['frozen']/max(base_stats['total'], 1):.2f}%)")
-  
+
   if lora_model is not None:
     lora_stats = count_model_parameters(lora_model)
-    
+
     max_logging.log("\n[LORA MODEL] (LoRA Fine-tuning)")
     max_logging.log(f"  Total Parameters: {lora_stats['total']:,}")
-    max_logging.log(f"  Trainable: {lora_stats['trainable']:,} ({100*lora_stats['trainable']/max(lora_stats['total'], 1):.2f}%)")
+    max_logging.log(
+        f"  Trainable: {lora_stats['trainable']:,} ({100*lora_stats['trainable']/max(lora_stats['total'], 1):.2f}%)"
+    )
     max_logging.log(f"  Frozen: {lora_stats['frozen']:,} ({100*lora_stats['frozen']/max(lora_stats['total'], 1):.2f}%)")
     max_logging.log(f"  LoRA Adapters: {lora_stats['lora']:,}")
-    
+
     # Calculate improvements
-    trainable_reduction = 100 * (1 - lora_stats['trainable'] / max(base_stats['trainable'], 1))
-    param_addition = lora_stats['total'] - base_stats['total']
-    
+    trainable_reduction = 100 * (1 - lora_stats["trainable"] / max(base_stats["trainable"], 1))
+    param_addition = lora_stats["total"] - base_stats["total"]
+
     max_logging.log("\n[COMPARISON]")
     max_logging.log(f"  Parameter Reduction: {trainable_reduction:.2f}%")
     max_logging.log(f"  LoRA Overhead: +{param_addition:,} parameters")
     max_logging.log(f"  Training Speed Benefit: ~{trainable_reduction:.0f}% faster (fewer params to update)")
     max_logging.log(f"  Memory Savings: ~{trainable_reduction:.0f}% less gradient memory needed")
-    
+
     max_logging.log("\n[CONFIGURATION]")
     max_logging.log(f"  LoRA Rank: {mt_config.lora_rank}")
     max_logging.log(f"  LoRA Alpha: {mt_config.lora_alpha}")
     max_logging.log(f"  Quantized: {mt_config.quantize_lora}")
-    
+
     max_logging.log("\n[TRAINING STRATEGY COMPARISON]")
     max_logging.log("  Base Model (Full-Weight):")
     max_logging.log(f"    - Train all {base_stats['trainable']:,} parameters")
     max_logging.log(f"    - Higher memory footprint")
     max_logging.log(f"    - Slower convergence (more params to optimize)")
     max_logging.log(f"    - Better performance ceiling")
-    
+
     max_logging.log("\n  LoRA Model (Adapter Fine-tuning):")
     max_logging.log(f"    - Train only {lora_stats['trainable']:,} parameters (adapters)")
     max_logging.log(f"    - Freeze {lora_stats['frozen']:,} base parameters")
     max_logging.log(f"    - Lower memory footprint ({100-trainable_reduction:.1f}% less)")
     max_logging.log(f"    - Faster convergence (fewer params to optimize)")
-  
-  max_logging.log("="*80 + "\n")
+
+  max_logging.log("=" * 80 + "\n")
 
 
 def train(mt_config, goodput_recorder=None):
@@ -402,31 +402,31 @@ def train(mt_config, goodput_recorder=None):
 
   with maybe_record_goodput(goodput_recorder, GoodputEvent.TPU_INIT):
     model, mesh = model_creation_utils.create_nnx_model(mt_config)
-    
+
     # Keep a reference to the base model for comparison
     base_model = model
     lora_model = None
-    
+
     # Apply LoRA if enabled
     use_lora = getattr(mt_config, "use_lora", False)
     if use_lora:
-      max_logging.log("="*80)
+      max_logging.log("=" * 80)
       max_logging.log("MODEL STRUCTURE BEFORE LoRA APPLICATION")
-      max_logging.log("="*80)
+      max_logging.log("=" * 80)
       nnx.display(model)
-      
+
       max_logging.log("\nApplying LoRA to the model...")
       quantize_lora = getattr(mt_config, "quantize_lora", False)
       model = apply_lora_to_model(model, mesh, mt_config, quantize=quantize_lora)
       lora_model = model
       max_logging.log("LoRA applied successfully")
-      
-      max_logging.log("="*80)
+
+      max_logging.log("=" * 80)
       max_logging.log("MODEL STRUCTURE AFTER LoRA APPLICATION")
-      max_logging.log("="*80)
+      max_logging.log("=" * 80)
       nnx.display(model)
-      max_logging.log("="*80)
-    
+      max_logging.log("=" * 80)
+
     learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(mt_config)
     optimizer = optimizers.get_optimizer(mt_config, learning_rate_schedule)
 
@@ -435,29 +435,29 @@ def train(mt_config, goodput_recorder=None):
     data_hooks = hooks.SFTDataHooks(mt_config, mesh, goodput_recorder)
 
     lora_enabled = utils.is_lora_enabled(model)
-    
+
     # Log LoRA training configuration
-    max_logging.log("\n" + "="*80)
+    max_logging.log("\n" + "=" * 80)
     max_logging.log("TRAINING CONFIGURATION")
-    max_logging.log("="*80)
+    max_logging.log("=" * 80)
     max_logging.log(f"LoRA enabled: {lora_enabled}")
     if lora_enabled:
       max_logging.log(f"LoRA rank: {mt_config.lora_rank}")
       max_logging.log(f"LoRA alpha: {mt_config.lora_alpha}")
       max_logging.log(f"Quantized LoRA: {mt_config.quantize_lora}")
-    max_logging.log("="*80 + "\n")
-    
+    max_logging.log("=" * 80 + "\n")
+
     # Compare base model vs LoRA model before training
     log_model_comparison(base_model, lora_model, mt_config)
-    
+
     trainer = peft_trainer.PeftTrainer(model, optimizer, tunix_config)
     trainer.with_training_hooks(training_hooks)
     trainer.with_data_hooks(data_hooks)
-    
+
     # When LoRA is enabled, set up input transformation function
     if lora_enabled:
       trainer.with_gen_model_input_fn(gen_model_input_for_lora)
-    
+
     trainer = use_maxtext_loss_function(trainer, mt_config)
 
   with mesh, nn_partitioning.axis_rules(mt_config.logical_axis_rules):
@@ -476,9 +476,7 @@ def main(argv: Sequence[str]) -> None:
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
   if "xla_tpu_spmd_rng_bit_generator_unsafe" not in os.environ.get("LIBTPU_INIT_ARGS", ""):
-    os.environ["LIBTPU_INIT_ARGS"] = (
-        os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
-    )
+    os.environ["LIBTPU_INIT_ARGS"] = os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
 
   mt_config = pyconfig.initialize(argv)
   max_utils.print_system_information()
