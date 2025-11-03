@@ -34,7 +34,7 @@ base_moe_mlp_dim: 768
 norm_topk_prob: true
 
 # RoPE Settings
-rope_max_timescale: 10_000_000
+rope_max_timescale: 1_000_000
 
 # General Model Settings
 enable_dropout: False
