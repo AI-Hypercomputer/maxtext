@@ -2,9 +2,6 @@
 ARG BASEIMAGE=ghcr.io/nvidia/jax:base
 FROM $BASEIMAGE
 
-# Stopgaps measure to circumvent gpg key setup issue.
-RUN echo "deb [trusted=yes] https://developer.download.nvidia.com/devtools/repos/ubuntu2204/amd64/ /" > /etc/apt/sources.list.d/devtools-ubuntu2204-amd64.list
-
 # Install dependencies for adjusting network rto
 RUN apt-get update && apt-get install -y iproute2 ethtool lsof
 
