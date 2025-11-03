@@ -230,7 +230,7 @@ def apply_lora_to_model(base_model, mesh, mt_config, quantize=False):
   # - layers/self_attention/query, key, value, out
   # - layers/mlp/wi_0, wi_1, wo
   # - logits_dense
-  module_path = ".*/query$|.*/key$|.*/value$|.*/out$|.*/wi_0$|.*/wi_1$|.*/wo$|^logits_dense$"
+  module_path = ".*/query$|.*/key$|.*/value$|.*/wi_0$|.*/wi_1$|.*/wo$"
 
   if quantize:
     lora_provider = qwix.LoraProvider(
