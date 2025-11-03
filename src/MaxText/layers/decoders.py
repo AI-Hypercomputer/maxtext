@@ -819,7 +819,7 @@ class Decoder(nn.Module):
                   attention_metadata=attention_metadata,
               )
               if kv_caches is not None:
-                kv_caches[lyr] = kv_cache
+                kv_caches[index] = kv_cache
         else:
           for lyr in range(cfg.num_decoder_layers):
             RemattedBlockLayer = RemattedBlockLayers[0]

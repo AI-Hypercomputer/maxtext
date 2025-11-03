@@ -97,12 +97,12 @@ class MaxTextDecoderModel(nnx.Module):
         return kv_caches, hidden, aux_hidden_states
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
-        """Return logits[Q, vocab]."""
-        if not self.logits:
-            embeddings = self.model.token_embedder
-            return self.model.decoder._apply_output_head(embeddings, hidden_states, True, self.model_mode)
-        
-        return self.logits
+        """Return logits[Q, voc ab]."""
+        if self.logits is not None:
+            return self.logits
+
+        embeddings = self.model.token_embedder
+        return self.model.decoder._apply_output_head(embeddings, hidden_states, True, self.model_mode)
 
     def load_weights(self, rng_key: jax.Array) -> None:
         """Load params on the provided mesh using model-defined sharding."""

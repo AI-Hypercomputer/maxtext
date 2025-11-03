@@ -70,7 +70,7 @@ from MaxText.layers.initializers import nd_dense_init, NdInitializer, variable_t
 from MaxText.layers.linears import DenseGeneral, canonicalize_tuple, normalize_axes
 from MaxText.layers.normalizations import RMSNorm
 from MaxText.layers.quantizations import AqtQuantization as Quant
-from tpu_inference.layers.jax.attention_interface import attention as rpa_ops
+from tpu_inference.layers.jax.attention_interface import sharded_ragged_paged_attention as rpa_ops
 
 # pylint: disable=line-too-long, g-doc-args, g-doc-return-or-yield, bad-continuation, g-inconsistent-quotes
 # pytype: disable=attribute-error
@@ -815,15 +815,24 @@ class Attention(nnx.Module):
     query = query.reshape(-1, query.shape[2], query.shape[3])
     key = key.reshape(-1, key.shape[2], key.shape[3])
     value = value.reshape(-1, value.shape[2], value.shape[3])
+    
     attention_chunk_size = self.config.chunk_attn_window_size if self.config.chunk_attn_window_size > 0 else None
+    q_scale, k_scale, v_scale = None, None, None
 
-    kv_cache, output = rpa_ops(
-        kv_cache=rpa_kv_cache, q=query, k=key, v=value,
-        attention_metadata=rpa_metadata, mesh=self.mesh,
-        head_dim_original=self.head_dim,
-        attention_chunk_size=attention_chunk_size,
-        q_scale=None, k_scale=None, v_scale=None,
-    )
+    md = rpa_metadata
+
+    output, kv_cache = rpa_ops(
+        1.0, self.mesh, attention_chunk_size, q_scale, k_scale,
+        v_scale)(
+            query,
+            key,
+            value,
+            rpa_kv_cache,
+            md.seq_lens,
+            md.block_tables,
+            md.query_start_loc,
+            md.request_distribution,
+        )
     return kv_cache, output
 
   def __call__(
