@@ -225,8 +225,12 @@ def apply_lora_to_model(base_model, mesh, mt_config, quantize=False):
   rank = getattr(mt_config, "lora_rank", 8)
   alpha = getattr(mt_config, "lora_alpha", 16)
 
-  # Define which modules to apply LoRA to
-  module_path = ".*q_proj|.*kv_proj|.*k_proj|.*v_proj|.*gate|.*up_proj|.*down_proj|.*wo|.*wq|.*wk|.*wv"
+  # Define which modules to apply LoRA to - matching MaxText's actual module names
+  # Based on qwix logs, MaxText uses:
+  # - layers/self_attention/query, key, value, out
+  # - layers/mlp/wi_0, wi_1, wo
+  # - logits_dense
+  module_path = ".*/query$|.*/key$|.*/value$|.*/out$|.*/wi_0$|.*/wi_1$|.*/wo$|^logits_dense$"
 
   if quantize:
     lora_provider = qwix.LoraProvider(
