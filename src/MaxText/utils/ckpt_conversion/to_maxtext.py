@@ -48,9 +48,11 @@ from typing import Sequence, List, Dict, Any
 
 import numpy as np
 import jax
+import psutil
 from absl import app
 from flax.training import train_state
 from transformers import AutoConfig, AutoModelForCausalLM
+from tqdm import tqdm
 
 from MaxText import checkpointing
 from MaxText import max_logging
@@ -65,6 +67,39 @@ from MaxText.utils.ckpt_conversion.utils.param_mapping import HOOK_FNS, PARAM_MA
 from MaxText.utils.ckpt_conversion.utils.utils import apply_hook_fns, HF_IDS
 
 jax.config.update("jax_platform_name", "cpu")
+
+
+class MemoryMonitorTqdm(tqdm):
+  """Custom tqdm class that displays memory usage in the progress bar."""
+
+  def format_meter(
+      self,
+      n,
+      total,
+      elapsed,
+      postfix=None,
+      **extra_kwargs,
+  ):
+    """Override to add memory usage info to the postfix."""
+    # Get memory info
+    memory = psutil.virtual_memory()
+    used_gb = memory.used / (1024**3)
+    total_gb = memory.total / (1024**3)
+    memory_percent = memory.percent
+
+    # Create memory postfix
+    memory_info = f"RAM: {used_gb:.1f}/{total_gb:.1f}GB ({memory_percent:.1f}%)"
+
+    # Add memory info to postfix
+    if postfix:
+      if isinstance(postfix, dict):
+        postfix["memory"] = memory_info
+      else:
+        postfix = f"{postfix}, {memory_info}"
+    else:
+      postfix = memory_info
+
+    return super().format_meter(n=n, total=total, elapsed=elapsed, postfix=postfix, **extra_kwargs)
 
 
 def _build_multi_axis_stacked_tensor(
@@ -229,7 +264,9 @@ def main(argv: Sequence[str]) -> None:
   max_logging.log("Starting weight transformation...")
   final_mt_weights = []
 
-  for path_tuple, abstract_leaf_value in abstract_params_flat:
+  for path_tuple, abstract_leaf_value in MemoryMonitorTqdm(
+      abstract_params_flat, desc="Transforming weights", unit="param", leave=True, dynamic_ncols=True
+  ):
     key_parts = [k.key for k in path_tuple]
     mt_param_key = "params-" + "-".join(key_parts)
     mt_target_shape_final = abstract_leaf_value.shape
