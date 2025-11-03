@@ -134,7 +134,7 @@ def process_leaf_param(
   hf_target_paths = param_map_local[maxtext_param_key]
   if not isinstance(hf_target_paths, list):
     hf_target_paths = [hf_target_paths]
-  print(f"\thf param: {hf_target_paths}")
+  # print(f"\thf param: {hf_target_paths}")
 
   if not hf_target_paths:
     max_logging.log(f"Warning: No HF target paths found for MaxText key '{maxtext_param_key}'. Skipping.")

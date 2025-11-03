@@ -60,7 +60,16 @@ def upload_blob(bucket_name, source_file_name, destination_blob_name):
 
 
 def save_golden_logits(
-    model_id, output_path, prompt_texts, apply_chat_template, gcs_bucket, hf_model_path, image_paths, output_format
+    model_id,
+    output_path,
+    prompt_texts,
+    apply_chat_template,
+    gcs_bucket,
+    hf_model_path,
+    hf_load_dtype,
+    trust_remote_code,
+    image_paths,
+    output_format,
 ):
   """save golden logits"""
   if hf_model_path is None:
@@ -77,10 +86,21 @@ def save_golden_logits(
 
   tokenizer = AutoTokenizer.from_pretrained(model_id)
   print(f"loading model from {hf_model_path}")
+
+  if hf_load_dtype == "float32":
+    torch_dtype = torch.float32
+  elif hf_load_dtype == "bfloat16":
+    torch_dtype = torch.bfloat16
+  else:
+    raise ValueError
+
   model = model_class.from_pretrained(
       hf_model_path,
-      torch_dtype=torch.float32,
-      trust_remote_code=True,
+      # dtype=torch.float32,
+      # dtype=torch.bfloat16,
+      dtype=torch_dtype,
+      # trust_remote_code=False,
+      trust_remote_code=trust_remote_code,
   )
 
   all_data_to_save = []
@@ -110,7 +130,8 @@ def save_golden_logits(
     # 2. Run inference
     with torch.no_grad():
       outputs = model(**inputs)
-      logits = outputs.logits.cpu().numpy().astype("float32")
+      # logits = outputs.logits.cpu().numpy().astype("float32")
+      logits = outputs.logits.cpu().to(torch.float32).numpy()
 
     # 3. Populate final data dictionary with tensors from inputs and logits
     for key, value in inputs.items():
@@ -160,6 +181,22 @@ def main(raw_args=None) -> None:
       "--hf-model-path", type=str, required=False, default=None, help="local path to checkpoint if exists."
   )
   parser.add_argument(
+      "--hf-load-dtype",
+      type=str,
+      required=False,
+      choices=["float32", "bfloat16"],
+      default="float32",
+      help="model_class.from_pretrained: dtype",
+  )
+  # variable `args.trust_remote_code` is True by default, False only if with flag `--not-trust-remote-code`
+  parser.add_argument(
+      "--not-trust-remote-code",
+      dest="trust_remote_code",
+      action="store_false",
+      help="model_class.from_pretrained: trust_remote_code",
+  )
+
+  parser.add_argument(
       "--image-paths", type=str, required=False, default=None, help="A semicolon-separated list of image_paths."
   )
   parser.add_argument(
@@ -185,6 +222,8 @@ def main(raw_args=None) -> None:
       args.apply_chat_template,
       args.gcs_bucket,
       args.hf_model_path,
+      args.hf_load_dtype,
+      args.trust_remote_code,
       image_paths,
       args.output_format,
   )
