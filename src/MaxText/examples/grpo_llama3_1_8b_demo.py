@@ -151,13 +151,28 @@ def main(argv: Sequence[str]) -> None:
 
   print(f"[Config] Final arguments count: {len(merged_args)}")
   print(f"[Config] Config file: {config_file}")
-  print(f"[Config] Final merged_args format (first 5): {merged_args[:min(5, len(merged_args))]}")
   
   # Verify the format is correct for pyconfig.initialize
   # Expected: ["config_file", "key1=value1", "key2=value2", ...]
   assert merged_args[0] == config_file, "First argument must be config file"
   for arg in merged_args[1:]:
     assert "=" in arg, f"All config arguments must be in key=value format, got: {arg}"
+  
+  # Show the complete config that will be sent to pyconfig.initialize
+  print("\n" + "="*80)
+  print("COMPLETE CONFIG BEING PASSED TO pyconfig.initialize():")
+  print("="*80)
+  print(f"Config file: {merged_args[0]}")
+  print("\nConfig parameters:")
+  config_dict = {}
+  for arg in merged_args[1:]:
+    if "=" in arg:
+      key, value = arg.split("=", 1)
+      config_dict[key] = value
+      # Truncate long values for display
+      display_value = value if len(value) <= 100 else value[:100] + "..."
+      print(f"  {key}={display_value}")
+  print("="*80 + "\n")
   
   # Verify chat template file exists
   if not os.path.exists(chat_template_path):
@@ -167,6 +182,7 @@ def main(argv: Sequence[str]) -> None:
     )
 
   # Initialize configuration from merged arguments
+  print("[Config] Initializing configuration with pyconfig.initialize()...")
   tmvp_config = pyconfig.initialize(merged_args)
   
   # Verify critical config values are set correctly
