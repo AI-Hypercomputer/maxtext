@@ -44,6 +44,10 @@ class VisionEncoder(nn.Module):
       from MaxText.layers import llama4  # pylint: disable=import-outside-toplevel
 
       return [llama4.llama4visionmodel_as_linen, llama4.llama4multimodalprojector_as_linen]
+    elif self.config.model_name in ["qwen3-omni-30b-a3b"]:
+      from MaxText.layers import qwen3  # pylint: disable=import-outside-toplevel
+
+      return [qwen3.qwen3omni_visionencoder_as_linen, qwen3.qwen3omni_visionprojector_as_linen]
     else:
       raise ValueError(f"No VisionEncoder implemented for {self.config.model_name} yet")
 
@@ -53,6 +57,8 @@ class VisionEncoder(nn.Module):
     mesh = self.mesh
     # vision encoder output, frozen params in many cases
     embeddings = self.vision_encoder_layer[0](config=cfg, mesh=mesh)(input_images, deterministic=deterministic)
+    if cfg.model_name.startswith("qwen3-omni"):
+      embeddings = embeddings[0] # todo(eitanporat) add deepstack support
     if cfg.freeze_vision_encoder_params:
       embeddings = jax.lax.stop_gradient(embeddings)
 
