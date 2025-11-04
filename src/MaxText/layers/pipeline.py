@@ -28,7 +28,7 @@ from flax.core import meta
 from flax import linen as nn
 
 from MaxText.common_types import Config, MODEL_MODE_TRAIN, EP_AS_CONTEXT
-from MaxText.maxtext_utils import all_gather_over_fsdp
+from MaxText.sharding import all_gather_over_fsdp
 
 
 class Pipeline(nn.Module):

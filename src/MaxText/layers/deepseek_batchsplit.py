@@ -225,6 +225,7 @@ class DeepSeekDenseLayer(DeepSeekGenericLayer):
         name="mlp",
         config=self.config,
         quant=self.quant,
+        mesh=self.mesh,
     )
 
   def mlp(self, x, deterministic):

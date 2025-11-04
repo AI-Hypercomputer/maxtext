@@ -19,8 +19,8 @@ import os
 import jax
 from MaxText import checkpointing
 from MaxText import max_logging
-from MaxText import max_utils
 from MaxText import maxtext_utils
+from MaxText import sharding
 from MaxText import optimizers
 from MaxText.dpo_utils import _merge_dpo_state
 from MaxText.input_pipeline.input_pipeline_interface import create_data_iterator
@@ -141,7 +141,7 @@ def jit_train_and_eval_step(
     params_shardings=None,
 ):
   """Returns a JIT-compiled train and eval step function."""
-  data_sharding = maxtext_utils.get_input_data_sharding(config, mesh)
+  data_sharding = sharding.get_input_data_sharding(config, mesh)
   p_train_step = jit_train_step(config, model, state, state_mesh_shardings, data_sharding, train_step, params_shardings)
   p_eval_step = None
   if eval_data_iterator:
@@ -190,10 +190,10 @@ def setup_train_loop(config, recorder, devices=None):
     # Apply reordering wrapper to data iterators if context parallelism is enabled
     with mesh:
       if context_parallel_size > 1 and config.context_parallel_load_balance:
-        data_iterator = map(max_utils.get_reorder_callable(context_parallel_size), data_iterator)
+        data_iterator = map(maxtext_utils.get_reorder_callable(context_parallel_size, config.shard_mode), data_iterator)
         if eval_data_iterator:
           eval_data_iterator = map(
-              max_utils.get_reorder_callable(context_parallel_size),
+              maxtext_utils.get_reorder_callable(context_parallel_size, config.shard_mode),
               eval_data_iterator,
           )
 
@@ -204,7 +204,7 @@ def setup_train_loop(config, recorder, devices=None):
     # TODO(aireenmei, hengtaoguo): support sharding in vit for multimodal
     if not config.using_pipeline_parallelism and not config.use_multimodal:
       # The vocab tensor(s) of shape [vocab, embed] (and transpose) are not sharded by stage
-      maxtext_utils.assert_params_sufficiently_sharded(state.params, mesh, config.sharding_tolerance)
+      sharding.assert_params_sufficiently_sharded(state.params, mesh, config.sharding_tolerance)
 
     if config.use_dpo:
       abstract_state, _, _ = maxtext_utils.get_abstract_state(model, tx, config, init_rng, mesh, is_training=True)

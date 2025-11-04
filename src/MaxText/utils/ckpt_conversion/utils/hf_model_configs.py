@@ -528,6 +528,17 @@ deepseek3_671b_dict = {
 deepseek3_671b_config = transformers.DeepseekV3Config(**deepseek3_671b_dict)
 
 # {maxtext model name: hf model config}
+qwen3_omni_30b_a3b_config = transformers.Qwen3OmniMoeConfig(
+    # TODO(hengtaoguo): Pure-text Omni model, need to fill in visual/audio/code2wav parts
+    architectures=["Qwen3OmniMoeForConditionalGeneration"],
+    thinker_config={
+        "text_config": {
+            "num_hidden_layers": 48,
+            "num_experts": 128,
+        }
+    },
+)
+
 HF_MODEL_CONFIGS = {
     "gemma2-2b": gemma2_2b_config,
     "gemma2-9b": gemma2_9b_config,
@@ -549,4 +560,5 @@ HF_MODEL_CONFIGS = {
     "qwen3-235b-a22b": qwen3_235b_a22b_thinking_2507_config,
     "qwen3-480b-a35b": qwen3_coder_480b_a35b_config,
     "deepseek3-671b": deepseek3_671b_config,
+    "qwen3-omni-30b-a3b": qwen3_omni_30b_a3b_config,
 }

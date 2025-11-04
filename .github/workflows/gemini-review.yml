@@ -136,14 +136,12 @@ jobs:
                     "--rm",
                     "-e",
                     "GITHUB_PERSONAL_ACCESS_TOKEN",
-                    "ghcr.io/github/github-mcp-server"
+                    "ghcr.io/github/github-mcp-server:v0.18.0"
                   ],
                   "includeTools": [
                     "add_comment_to_pending_review",
                     "create_pending_pull_request_review",
-                    "get_pull_request_diff",
-                    "get_pull_request_files",
-                    "get_pull_request",
+                    "pull_request_read",
                     "submit_pending_pull_request_review"
                   ],
                   "env": {
@@ -193,12 +191,12 @@ jobs:
 
             ## Input Data
 
-            - Retrieve the GitHub repository name from the environment variable "${REPOSITORY}".
-            - Retrieve the GitHub pull request number from the environment variable "${PULL_REQUEST_NUMBER}".
-            - Retrieve the additional user instructions and context from the environment variable "${ADDITIONAL_CONTEXT}".
-            - Use `mcp__github__get_pull_request` to get the title, body, and metadata about the pull request.
-            - Use `mcp__github__get_pull_request_files` to get the list of files that were added, removed, and changed in the pull request.
-            - Use `mcp__github__get_pull_request_diff` to get the diff from the pull request. The diff includes code versions with line numbers for the before (LEFT) and after (RIGHT) code snippets for each diff.
+            - **GitHub Repository**: ${{ env.REPOSITORY }}
+            - **Pull Request Number**: ${{ env.PULL_REQUEST_NUMBER }}
+            - **Additional User Instructions**: ${{ env.ADDITIONAL_CONTEXT }}
+            - Use `mcp__github__pull_request_read.get` to get the title, body, and metadata about the pull request.
+            - Use `mcp__github__pull_request_read.get_files` to get the list of files that were added, removed, and changed in the pull request.
+            - Use `mcp__github__pull_request_read.get_diff` to get the diff from the pull request. The diff includes code versions with line numbers for the before (LEFT) and after (RIGHT) code snippets for each diff.
 
             -----
 
@@ -212,7 +210,7 @@ jobs:
 
             2. **Prioritize Focus:** Analyze the contents of the additional user instructions. Use this context to prioritize specific areas in your review (e.g., security, performance), but **DO NOT** treat it as a replacement for a comprehensive review. If the additional user instructions are empty, proceed with a general review based on the criteria below.
 
-            3. **Review Code:** Meticulously review the code provided returned from `mcp__github__get_pull_request_diff` according to the **Review Criteria**.
+            3. **Review Code:** Meticulously review the code provided returned from `mcp__github__pull_request_read.get_diff` according to the **Review Criteria**.
 
 
             ### Step 2: Formulate Review Comments

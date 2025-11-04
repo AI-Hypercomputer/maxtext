@@ -72,6 +72,7 @@ from MaxText import exceptions
 from MaxText import max_logging
 from MaxText import max_utils
 from MaxText import maxtext_utils
+from MaxText import sharding
 from MaxText import train_utils
 from MaxText import profiler
 from MaxText import pyconfig
@@ -566,7 +567,7 @@ def setup_train_loop(
   )[2]
   if not config.using_pipeline_parallelism:
     # The vocab tensor(s) of shape [vocab, embed] (and transpose) are not sharded by stage
-    maxtext_utils.assert_params_sufficiently_sharded(state.params, mesh, config.sharding_tolerance)
+    sharding.assert_params_sufficiently_sharded(state.params, mesh, config.sharding_tolerance)
 
   return (
       init_rng,
@@ -688,7 +689,7 @@ def train_loop(config, config_inference, recorder, state=None):
       config, model, mesh, state, state_mesh_shardings, train_step, eval_step, eval_data_iterator
   )
 
-  data_sharding = maxtext_utils.get_input_data_sharding(config, mesh)
+  data_sharding = sharding.get_input_data_sharding(config, mesh)
 
   inference_engine = offline_engine.OfflineEngine(
       config=config_inference,
@@ -877,8 +878,13 @@ def train_loop(config, config_inference, recorder, state=None):
         max_utils.print_mem_stats("After params initialized")
 
       metric_logger.buffer_and_write_train_metrics(metrics, step, step_time_delta)
-      state_to_save = _split_grpo_state(state)[0]
-      checkpointing.maybe_save_checkpoint(checkpoint_manager, state_to_save, config, data_iterator)
+
+      if config.save_checkpoint_on_completion:
+        state_to_save = _split_grpo_state(state)[0]
+        checkpointing.maybe_save_checkpoint(checkpoint_manager, state_to_save, config, data_iterator)
+      elif checkpoint_manager is not None:
+        # in case the last checkpoint_period checkpoint is still in progress
+        checkpoint_manager.wait_until_finished()
   except exceptions.StopTraining as e:
     max_logging.log(f"Training stopped: {str(e)}")
   finally:

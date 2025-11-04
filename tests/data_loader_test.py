@@ -24,7 +24,7 @@ from unittest.mock import MagicMock
 from jax.sharding import Mesh
 from jax.experimental import mesh_utils
 
-from MaxText.data_loader import DataLoader
+from MaxText.data_loader import DataLoader, RampUpDataLoader
 from MaxText import exceptions
 from MaxText import pyconfig
 from MaxText.globals import MAXTEXT_PKG_DIR
@@ -34,22 +34,34 @@ class DataLoaderTest(unittest.TestCase):
 
   def setUp(self):
     super().setUp()
-    self.config = self.get_test_config(reuse_example_batch=False)
-    self.config_reuse_example = self.get_test_config(reuse_example_batch=True)
+    self.config = self.get_test_config(reuse_example_batch=False, per_device_batch_size=1)
+    self.config_reuse_example = self.get_test_config(reuse_example_batch=True, per_device_batch_size=1)
+    self.config_rampup = self.get_test_config(
+        reuse_example_batch=False,
+        per_device_batch_size=4.0,  # This is the 'end' batch size
+        enable_rampup_batch_size=True,
+        per_device_batch_size_start=1.0,
+        per_device_batch_size_increment=1.0,
+        global_rampup_samples=60,
+    )
     self.mesh_shape_1d = (len(jax.devices()),)
     self.mesh = Mesh(mesh_utils.create_device_mesh(self.mesh_shape_1d), self.config.mesh_axes)
     self.mock_data_iterator = MagicMock()
 
-  def get_test_config(self, reuse_example_batch):
+  def get_test_config(self, reuse_example_batch, **kwargs):
+    """Generate config for tests"""
+    args = {
+        "run_name": "test",
+        "mesh_axes": ["data"],
+        "logical_axis_rules": [["batch", "data"]],
+        "data_sharding": ["data"],
+        "enable_checkpointing": False,
+        "reuse_example_batch": reuse_example_batch,
+    }
+    args.update(kwargs)
     return pyconfig.initialize(
         [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
-        per_device_batch_size=1,
-        run_name="test",
-        mesh_axes=["data"],
-        logical_axis_rules=[["batch", "data"]],
-        data_sharding=["data"],
-        enable_checkpointing=False,
-        reuse_example_batch=reuse_example_batch,
+        **args,
     )
 
   def test_load_next_batch_success(self):
@@ -116,6 +128,32 @@ class DataLoaderTest(unittest.TestCase):
     with self.assertRaises(exceptions.StopTraining) as e:
       _ = data_loader.load_next_batch()
     self.assertTrue(str(e.exception).startswith("You may have run out of training data."))
+
+  def test_rampup_data_loader(self):
+    """Tests that RampUpLoader correctly slices and increment."""
+    # Mock iterator returns a FULL batch (size 4)
+    full_batch_size = self.config_rampup.global_batch_size_to_load
+    full_shape = [full_batch_size, self.config_rampup.max_target_length]
+    full_batch = {"inputs": np.ones(full_shape, dtype=int)}
+    self.mock_data_iterator.__next__.return_value = full_batch
+
+    # Create the RampUpDataLoader
+    data_loader = RampUpDataLoader(self.config_rampup, self.mesh, self.mock_data_iterator, None)
+
+    # Expected batch sizes based on test config.
+    # The end global batch size is self.num_devices * per_device_batch_size
+    # The rampup should be: 5 steps of size 4, 3 steps of size 8, 2 steps of size 12, then size 16.
+    expected_batch_sizes = [4, 4, 4, 4, 4, 8, 8, 8, 12, 12, 16, 16]
+
+    for i, expected_size in enumerate(expected_batch_sizes):
+      batch = data_loader.load_next_batch()
+      expected_shape = (expected_size, self.config_rampup.max_target_length)
+      self.assertEqual(
+          batch["inputs"].shape,
+          expected_shape,
+          f"Mismatch at step {i+1}: expected {expected_shape}, got {batch['inputs'].shape}",
+      )
+      self.assertTrue((batch["inputs"] == 1).all())
 
 
 if __name__ == "__main__":

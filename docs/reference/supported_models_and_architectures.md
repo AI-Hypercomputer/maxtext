@@ -1,4 +1,4 @@
-# Supported Models & Architectures
+# Supported models & architectures
 
 > **Purpose**: This page provides detailed, reference-style information about model families supported in MaxText. This page is a technical dictionary for quick lookup, reproducibility, and customization.
 
@@ -17,7 +17,7 @@ MaxText is an open-source, high-performance LLM framework written in Python/JAX.
 * **Flexible Remat Policy**: Provides fine-grained control over memory-compute trade-offs. Users can select pre-defined policies (like 'full' or 'minimal') or set the policy to **'custom'**. 
 
 
-## Supported Model Families
+## Supported model families
 
 > _**Note on GPU Coverage**: Support and tested configurations for NVIDIA GPUs can vary by model family. Please see the specific model guides for details._
 
@@ -54,7 +54,7 @@ MaxText is an open-source, high-performance LLM framework written in Python/JAX.
 * **Variants**: 20B, 120B
 * **Notes**: Local–Global interleaved attention, GQA, attention sink; YaRN-style scaling; MoE.
 
-## Parallelism Building Blocks
+## Parallelism building blocks
 
 MaxText supports a wide range of parallelism strategies for scaling training and inference across TPUs and GPUs:
 
@@ -66,11 +66,11 @@ MaxText supports a wide range of parallelism strategies for scaling training and
 * **CP (Context Parallelism)**: Splits sequence tokens across devices, complementing tensor parallelism for long-context workloads.
 * **Hybrid Parallelism**: Allows for flexible combinations of FSDP, TP, EP, DP, PP, and CP to maximize hardware utilization based on model size and topology.
 
-## Performance Characteristics
+## Performance characteristics
 
 The following summarizes observed runtime efficiency and scaling behaviors of MaxText across different hardware and model types, based on published benchmarks and large-scale runs.
 
-* **High MFU**: MaxText targets high Model FLOPs Utilization across scales; exact numbers vary by model, hardware and config. See [**Performance Metrics → MFU**](https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/guides/performance_metrics.md) for the definition and how we calculate it.
+* **High MFU**: MaxText targets high Model FLOPs Utilization across scales; exact numbers vary by model, hardware and config. See [**Performance Metrics → MFU**](performance-metrics) for the definition and how we calculate it.
 * **Quantization**: MaxText supports quantization via both the AQT and Qwix libraries. Qwix is the recommended approach, providing a non-intrusive way to apply various quantization techniques, including Quantization-Aware Training (QAT) and Post-Training Quantization (PTQ).
  * **MoE**: The Mixture-of-Experts implementation features dropless routing with Megablox and `jax.lax.ragged_dot` kernels for enhanced performance.
 * **Multi-Token Prediction (MTP)**: This feature improves training efficiency on DeepSeek-style models by adding an auxiliary loss based on predicting multiple future tokens.
@@ -82,7 +82,7 @@ The following summarizes observed runtime efficiency and scaling behaviors of Ma
 * [MaxText Repo](https://github.com/AI-Hypercomputer/maxtext)
 
 * **Model Implementation Guides & Source Code:**
-    * **Llama**: [Guide](https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/tutorials/run_llama2.md) | [Llama2 and Llama3 Source](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/layers/llama2.py) | [Llama4 Source](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/layers/llama4.py)
+    * **Llama**: [Guide](https://github.com/AI-Hypercomputer/maxtext/blob/main/end_to_end/tpu/llama2/run_llama2.md) | [Llama2 and Llama3 Source](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/layers/llama2.py) | [Llama4 Source](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/layers/llama4.py)
     * **Gemma**: [Guide](https://github.com/AI-Hypercomputer/maxtext/blob/main/end_to_end/tpu/gemma/Run_Gemma.md) | [Gemma Source](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/layers/gemma.py) | [Gemma2 Source](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/layers/gemma2.py) | [Gemma3 Source](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/layers/gemma3.py)
     * **Mixtral**: [Guide](https://github.com/AI-Hypercomputer/maxtext/blob/main/end_to_end/tpu/mixtral/Run_Mixtral.md) | [Mixtral Source](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/layers/mixtral.py) | [Mistral Source](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/layers/mistral.py)
     * **DeepSeek**: [Guide](https://github.com/AI-Hypercomputer/maxtext/blob/main/end_to_end/tpu/deepseek/Run_DeepSeek.md) | [DeepSeek Source](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/layers/deepseek.py)
@@ -91,6 +91,6 @@ The following summarizes observed runtime efficiency and scaling behaviors of Ma
 
 
 * **Technical Explanations:**
-    * [Parallelism & Sharding](https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/explanations/sharding.md)
-    * [Quantization Documentation](https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/explanations/quantization.md)
-    * [AOT Compilation Instructions](https://github.com/AI-Hypercomputer/maxtext/blob/main/README.md#ahead-of-time-compilation-aot)
+    * [Parallelism & Sharding](../explanations/sharding.md)
+    * [Quantization Documentation](../explanations/quantization.md)
+    * [AOT Compilation Instructions](aot-compilation)

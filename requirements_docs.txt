@@ -1,6 +1,0 @@
-# Sphinx-related requirements.
-sphinx
-myst-nb
-myst-parser[linkify]
-sphinx-book-theme
-sphinx-design

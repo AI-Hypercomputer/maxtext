@@ -105,13 +105,22 @@ class MetricLogger:
     """Logs metrics via max_logging."""
     if is_training:
       loss = metrics["scalar"]["learning/loss"]
-      log_message = (
-          f"completed step: {step}, seconds: {metrics['scalar']['perf/step_time_seconds']:.3f}, "
-          f"TFLOP/s/device: {metrics['scalar']['perf/per_device_tflops_per_sec']:.3f}, "
-          f"Tokens/s/device: {metrics['scalar']['perf/per_device_tokens_per_sec']:.3f}, "
-          f"total_weights: {metrics['scalar']['learning/total_weights']}, "
-          f"loss: {loss:.3f}"
-      )
+      # Do not show flops and tokens during batch size rampup
+      if step >= self.config.rampup_end_step:
+        log_message = (
+            f"completed step: {step}, seconds: {metrics['scalar']['perf/step_time_seconds']:.3f}, "
+            f"TFLOP/s/device: {metrics['scalar']['perf/per_device_tflops_per_sec']:.3f}, "
+            f"Tokens/s/device: {metrics['scalar']['perf/per_device_tokens_per_sec']:.3f}, "
+            f"total_weights: {metrics['scalar']['learning/total_weights']}, "
+            f"loss: {loss:.3f}"
+        )
+      else:
+        log_message = (
+            "[Rampup Batch Size Phase]: "
+            f"completed step: {step}, seconds: {metrics['scalar']['perf/step_time_seconds']:.3f}, "
+            f"total_weights: {metrics['scalar']['learning/total_weights']}, "
+            f"loss: {loss:.3f}"
+        )
 
       if self.config.mtp_num_layers > 0:
         mtp_loss = metrics["scalar"].get("learning/mtp_loss", 0.0)
@@ -213,15 +222,16 @@ class MetricLogger:
   def record_train_metrics(self, metrics, step, step_time):
     """Records training metrics for the current step."""
     metrics["scalar"].update({"perf/step_time_seconds": step_time})
-    metrics["scalar"].update({"perf/per_device_tflops": self.metadata[MetadataKey.PER_DEVICE_TFLOPS]})
-    metrics["scalar"].update(
-        {"perf/per_device_tflops_per_sec": (self.metadata[MetadataKey.PER_DEVICE_TFLOPS] / step_time)}
-    )
-    metrics["scalar"].update({"perf/per_device_tokens": self.metadata[MetadataKey.PER_DEVICE_TOKENS]})
-    metrics["scalar"].update(
-        {"perf/per_device_tokens_per_sec": (self.metadata[MetadataKey.PER_DEVICE_TOKENS] / step_time)}
-    )
     metrics["scalar"].update({"learning/current_learning_rate": self.learning_rate_schedule(step)})
+    if step >= self.config.rampup_end_step:
+      metrics["scalar"].update({"perf/per_device_tflops": self.metadata[MetadataKey.PER_DEVICE_TFLOPS]})
+      metrics["scalar"].update(
+          {"perf/per_device_tflops_per_sec": (self.metadata[MetadataKey.PER_DEVICE_TFLOPS] / step_time)}
+      )
+      metrics["scalar"].update({"perf/per_device_tokens": self.metadata[MetadataKey.PER_DEVICE_TOKENS]})
+      metrics["scalar"].update(
+          {"perf/per_device_tokens_per_sec": (self.metadata[MetadataKey.PER_DEVICE_TOKENS] / step_time)}
+      )
     if self.performance_metric_queue:
       self.performance_metric_queue.put(step_time)
 

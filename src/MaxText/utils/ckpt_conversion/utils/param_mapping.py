@@ -880,7 +880,6 @@ def DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING(config, scan_layers=False):
         for e in range(num_experts)
     ]
 
-  return mapping
 
 
 def DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, scan_layers=False, saving_to_hf=True):
@@ -930,6 +929,79 @@ def DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, scan_layers=False, saving_to_hf
 
   for key in params_need_reshape:
     mapping[key] = reshape_kernel
+
+
+
+
+
+def QWEN3_OMNI_MOE_MAXTEXT_TO_HF_PARAM_MAPPING(config, scan_layers=False):
+  """Returns mapping from MaxText to HuggingFace Qwen3-Omni weight paths.
+
+  This function combines mappings from different modalities (text, vision, audio, etc.)
+  into a unified parameter mapping for the multi-modal Qwen3-Omni model.
+
+  Args:
+    config (dict): Model configuration dictionary containing modality-specific configs.
+    scan_layers (bool, optional): Whether the model uses scanned layers. Defaults to False.
+
+  Returns:
+    dict: Combined mapping from all modalities.
+  """
+  # Collect all modality mappings
+  mapping = {}
+
+  # Text mapping with "thinker." prefix, reusing QWEN3-MOE mapping function
+  num_experts_text = config["thinker_config"]["text_config"].get("num_experts", 0)
+  n_layers_text = config["thinker_config"]["text_config"]["num_hidden_layers"]
+  text_mapping = QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING(
+      config={"num_hidden_layers": n_layers_text, "num_experts": num_experts_text}, scan_layers=scan_layers
+  )
+
+  # Add "thinker." prefix to text mapping values
+  for key, value in text_mapping.items():
+    text_mapping[key] = [f"thinker.{v}" for v in value] if isinstance(value, list) else f"thinker.{value}"
+  mapping.update(text_mapping)
+
+  # TODO(hengtaoguo): Add vision, audio, and other modality mappings here similarly
+  # mapping.update(vision_mapping), mapping.update(audio_mapping), etc.
+
+  return mapping
+
+
+def QWEN3_OMNI_MOE_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, scan_layers=False, saving_to_hf=False):
+  """Creates parameter transformation functions for Qwen3-Omni.
+
+  This function provides a dictionary of transformation functions (hooks) for
+  converting Qwen3-Omni model parameters between MaxText and Hugging Face formats.
+  It handles embedding padding and kernel reshaping.
+
+  Args:
+    config (dict): Model configuration dictionary, including
+      'num_hidden_layers' and optionally 'num_experts'.
+    scan_layers (bool, optional): Whether the model uses scanned layers.
+      Defaults to False.
+    saving_to_hf (bool, optional): The direction of conversion. True for
+      MaxText to Hugging Face, False for the reverse. Defaults to False.
+
+  Returns:
+    dict: A dictionary mapping MaxText parameter names to their corresponding
+      transformation functions.
+  """
+  # Collect all modality hooks
+  mapping = {}
+
+  # Text hooks, reusing QWEN3-MOE hook function
+  num_experts_text = config["thinker_config"]["text_config"].get("num_experts", 0)
+  n_layers_text = config["thinker_config"]["text_config"]["num_hidden_layers"]
+  text_hooks = QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN(
+      config={"num_hidden_layers": n_layers_text, "num_experts": num_experts_text},
+      scan_layers=scan_layers,
+      saving_to_hf=saving_to_hf,
+  )
+  mapping.update(text_hooks)
+
+  # TODO(hengtaoguo): Add vision, audio, and other modality mappings here similarly
+  # mapping.update(vision_hooks), mapping.update(audio_hooks), etc.
 
   return mapping
 
@@ -1129,6 +1201,7 @@ PARAM_MAPPING = {
     "qwen3-235b-a22b": QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING,
     "qwen3-coder-480b-a35b": QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING,
     "deepseek3-671b": DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "qwen3-omni-30b-a3b": QWEN3_OMNI_MOE_MAXTEXT_TO_HF_PARAM_MAPPING,
 }
 
 # {maxtext model name: {maxtext weight name: bi-directional transform}}
@@ -1152,4 +1225,5 @@ HOOK_FNS = {
     "qwen3-235b-a22b": QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "qwen3-coder-480b-a35b": QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "deepseek3-671b": DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "qwen3-omni-30b-a3b": QWEN3_OMNI_MOE_MAXTEXT_TO_HF_PARAM_HOOK_FN,
 }

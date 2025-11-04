@@ -194,6 +194,7 @@ class DeepSeekDenseLayer(nn.Module):
         weight_dtype=cfg.weight_dtype,
         name="mlp",
         config=cfg,
+        mesh=self.mesh,
         quant=self.quant,
     )(hidden_states, deterministic=deterministic)
     mlp_lnx = nn.with_logical_constraint(mlp_lnx, logical_axis_names)

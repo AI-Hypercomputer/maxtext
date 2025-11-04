@@ -16,9 +16,10 @@
 # pylint: disable=arguments-differ
 # pylint: disable=no-name-in-module
 
+import functools
 import jax.numpy as jnp
 from jax.ad_checkpoint import checkpoint_name
-from jax.sharding import Mesh
+from jax.sharding import Mesh, NamedSharding
 
 from flax import linen as nn
 from flax import nnx
@@ -26,6 +27,7 @@ from flax import nnx
 from MaxText.inference import page_manager
 from MaxText.common_types import Config
 from MaxText import max_utils
+from MaxText.sharding import maybe_shard_with_logical
 from MaxText.layers.linears import Dropout, MlpBlock
 from MaxText.layers import initializers
 from MaxText.layers import nnx_wrappers
@@ -57,6 +59,11 @@ class LlamaDecoderLayer(nnx.Module):
     self.mesh = mesh
     self.quant = quant
 
+    if model_mode == MODEL_MODE_PREFILL:
+      self.activation_axis_names = ("activation_batch", "prefill_activation_norm_length", "activation_embed")
+    else:
+      self.activation_axis_names = ("activation_batch", "activation_norm_length", "activation_embed")
+
     batch_size, seq_len = max_utils.get_batch_seq_len_for_mode(config, model_mode)
     dummy_inputs_shape = (batch_size, seq_len, config.emb_dim)
 
@@ -64,6 +71,7 @@ class LlamaDecoderLayer(nnx.Module):
         num_features=config.emb_dim,
         dtype=config.dtype,
         weight_dtype=config.weight_dtype,
+        shard_mode=config.shard_mode,
         kernel_axes=("norm",),
         epsilon=config.normalization_layer_epsilon,
         rngs=rngs,
@@ -101,6 +109,7 @@ class LlamaDecoderLayer(nnx.Module):
         num_features=config.emb_dim,
         dtype=config.dtype,
         weight_dtype=config.weight_dtype,
+        shard_mode=config.shard_mode,
         kernel_axes=("norm",),
         epsilon=config.normalization_layer_epsilon,
         rngs=rngs,
@@ -114,6 +123,7 @@ class LlamaDecoderLayer(nnx.Module):
         dtype=config.dtype,
         weight_dtype=config.weight_dtype,
         config=config,
+        mesh=mesh,
         quant=self.quant,
         model_mode=model_mode,
         rngs=rngs,
@@ -121,10 +131,11 @@ class LlamaDecoderLayer(nnx.Module):
 
     self.dropout = Dropout(rate=config.dropout_rate, broadcast_dims=(-2,), rngs=rngs)
 
-    if model_mode == MODEL_MODE_PREFILL:
-      self.activation_axis_names = ("activation_batch", "prefill_activation_norm_length", "activation_embed")
-    else:
-      self.activation_axis_names = ("activation_batch", "activation_norm_length", "activation_embed")
+    self._maybe_shard_with_logical = functools.partial(
+        maybe_shard_with_logical,
+        mesh=self.mesh,
+        shard_mode=config.shard_mode,
+    )
 
   def __call__(
       self,
@@ -139,11 +150,11 @@ class LlamaDecoderLayer(nnx.Module):
   ):
     cfg = self.config
 
-    inputs = nn.with_logical_constraint(inputs, self.activation_axis_names)
+    inputs = self._maybe_shard_with_logical(inputs, self.activation_axis_names)
     inputs = checkpoint_name(inputs, "decoder_layer_input")
-    lnx = self.pre_self_attention_layer_norm(inputs)
-
-    lnx = nn.with_logical_constraint(lnx, self.activation_axis_names)
+    lnx_sharding = NamedSharding(self.mesh, nn.logical_to_mesh_axes(self.activation_axis_names))
+    lnx = self.pre_self_attention_layer_norm(inputs, out_sharding=lnx_sharding)
+    lnx = self._maybe_shard_with_logical(lnx, self.activation_axis_names)
 
     # Self-attention block
     attention_lnx = self.self_attention(
@@ -156,22 +167,32 @@ class LlamaDecoderLayer(nnx.Module):
         slot=slot,
         page_state=page_state,
         previous_chunk=previous_chunk,
+        out_sharding=lnx_sharding,
     )
 
-    attention_lnx = nn.with_logical_constraint(attention_lnx, self.activation_axis_names)
+    attention_lnx = self._maybe_shard_with_logical(attention_lnx, self.activation_axis_names)
     intermediate_inputs = inputs + attention_lnx
 
     # Fully Connected
-    hidden_states = self.post_self_attention_layer_norm(intermediate_inputs)
-    hidden_states = nn.with_logical_constraint(hidden_states, self.activation_axis_names)
+    hidden_states = self.post_self_attention_layer_norm(intermediate_inputs, out_sharding=lnx_sharding)
+    hidden_states = self._maybe_shard_with_logical(hidden_states, self.activation_axis_names)
 
     # MLP block.
-    mlp_lnx = self.mlp(hidden_states, deterministic=deterministic)
-    mlp_lnx = nn.with_logical_constraint(mlp_lnx, self.activation_axis_names)
+    mlp_intermediate_sharding = NamedSharding(
+        self.mesh,
+        nn.logical_to_mesh_axes(("activation_batch", "activation_length_no_exp", "activation_mlp")),
+    )
+    mlp_lnx = self.mlp(
+        hidden_states,
+        deterministic=deterministic,
+        intermediate_sharding=mlp_intermediate_sharding,
+        out_sharding=lnx_sharding,
+    )
+    mlp_lnx = self._maybe_shard_with_logical(mlp_lnx, self.activation_axis_names)
 
     layer_output = mlp_lnx + intermediate_inputs
     layer_output = self.dropout(layer_output, deterministic=deterministic)
-    layer_output = nn.with_logical_constraint(layer_output, self.activation_axis_names)
+    layer_output = self._maybe_shard_with_logical(layer_output, self.activation_axis_names)
 
     if cfg.record_internal_nn_metrics:
       self.sow("intermediates", "activation_mean", jnp.mean(layer_output))

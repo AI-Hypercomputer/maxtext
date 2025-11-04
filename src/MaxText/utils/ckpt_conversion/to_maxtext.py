@@ -48,9 +48,11 @@ from typing import Sequence, List, Dict, Any
 
 import numpy as np
 import jax
+import psutil
 from absl import app
 from flax.training import train_state
 from transformers import AutoConfig, AutoModelForCausalLM
+from tqdm import tqdm
 
 from MaxText import checkpointing
 from MaxText import max_logging
@@ -65,6 +67,39 @@ from MaxText.utils.ckpt_conversion.utils.param_mapping import HOOK_FNS, PARAM_MA
 from MaxText.utils.ckpt_conversion.utils.utils import apply_hook_fns, HF_IDS
 
 jax.config.update("jax_platform_name", "cpu")
+
+
+class MemoryMonitorTqdm(tqdm):
+  """Custom tqdm class that displays memory usage in the progress bar."""
+
+  def format_meter(
+      self,
+      n,
+      total,
+      elapsed,
+      postfix=None,
+      **extra_kwargs,
+  ):
+    """Override to add memory usage info to the postfix."""
+    # Get memory info
+    memory = psutil.virtual_memory()
+    used_gb = memory.used / (1024**3)
+    total_gb = memory.total / (1024**3)
+    memory_percent = memory.percent
+
+    # Create memory postfix
+    memory_info = f"RAM: {used_gb:.1f}/{total_gb:.1f}GB ({memory_percent:.1f}%)"
+
+    # Add memory info to postfix
+    if postfix:
+      if isinstance(postfix, dict):
+        postfix["memory"] = memory_info
+      else:
+        postfix = f"{postfix}, {memory_info}"
+    else:
+      postfix = memory_info
+
+    return super().format_meter(n=n, total=total, elapsed=elapsed, postfix=postfix, **extra_kwargs)
 
 
 def _build_multi_axis_stacked_tensor(
@@ -147,6 +182,18 @@ def _build_single_axis_stacked_tensor(
   return np.stack(tensors_to_stack, axis=axis_to_stack)
 
 
+def _get_hf_model(model_id: str, token: str):
+  """Loads the HuggingFace model based on model_id."""
+  # Some models require special classes to import
+  if model_id in ["Qwen/Qwen3-Omni-30B-A3B-Instruct"]:
+    from transformers import Qwen3OmniMoeForConditionalGeneration  # pylint: disable=import-outside-toplevel
+
+    hf_model = Qwen3OmniMoeForConditionalGeneration.from_pretrained(model_id, token=token)
+  else:
+    hf_model = AutoModelForCausalLM.from_pretrained(model_id, token=token)
+  return hf_model
+
+
 def main(argv: Sequence[str]) -> None:
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"  # Suppress TensorFlow logging
@@ -182,7 +229,7 @@ def main(argv: Sequence[str]) -> None:
   # Load HuggingFace model, config, and state_dict
   max_logging.log(f"Loading HuggingFace model: {model_id}...")
   hf_config_obj = AutoConfig.from_pretrained(model_id, token=hf_token)
-  hf_model = AutoModelForCausalLM.from_pretrained(model_id, token=hf_token)
+  hf_model = _get_hf_model(model_id, token=hf_token)
   hf_state_dict_numpy = hf_model.state_dict()
   for k, v in hf_state_dict_numpy.items():
     hf_state_dict_numpy[k] = v.numpy()
@@ -229,7 +276,9 @@ def main(argv: Sequence[str]) -> None:
   max_logging.log("Starting weight transformation...")
   final_mt_weights = []
 
-  for path_tuple, abstract_leaf_value in abstract_params_flat:
+  for path_tuple, abstract_leaf_value in MemoryMonitorTqdm(
+      abstract_params_flat, desc="Transforming weights", unit="param", leave=True, dynamic_ncols=True
+  ):
     key_parts = [k.key for k in path_tuple]
     mt_param_key = "params-" + "-".join(key_parts)
     mt_target_shape_final = abstract_leaf_value.shape

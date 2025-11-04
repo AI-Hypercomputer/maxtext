@@ -289,6 +289,9 @@ def _retrieve_jax_init_info(raw_keys):
 
 def get_num_slices(raw_keys):
   """Calculate num_slices based on number of devices."""
+  if raw_keys["num_slices"] != -1:
+    max_logging.log(f"Using num_slices={raw_keys['num_slices']} per user request.")
+    return raw_keys["num_slices"]
   if raw_keys["hardware"] == "cpu":
     max_logging.log(" Setting num_slices=1 for CPU hardware type")
     return 1
@@ -803,21 +806,6 @@ def reorder_causal_load_balanced(batch, cp_size):
       else value
       for key, value in batch.items()
   }
-
-
-def shard_reorder_causal_load_balanced(batch, cp_size):
-  """Shard the output of the reordered sequence."""
-  reordered = reorder_causal_load_balanced(batch, cp_size)
-  for _, v in batch.items():
-    if isinstance(v, jax.Array):
-      reordered = jax.lax.with_sharding_constraint(reordered, v.sharding)
-      break
-  return reordered
-
-
-def get_reorder_callable(cp_size):
-  """Creates a callable that can be used with map() to reorder batches."""
-  return functools.partial(shard_reorder_causal_load_balanced, cp_size=cp_size)
 
 
 @staticmethod

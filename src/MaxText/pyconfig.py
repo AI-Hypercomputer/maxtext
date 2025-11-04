@@ -31,9 +31,8 @@ import omegaconf
 from MaxText import accelerator_to_spec_map
 from MaxText import max_logging
 from MaxText import max_utils
-from MaxText.common_types import DecoderBlockType
 from MaxText.globals import MAXTEXT_ASSETS_ROOT, MAXTEXT_REPO_ROOT, MAXTEXT_PKG_DIR
-from MaxText.layers.attentions import AttentionType
+from MaxText.common_types import AttentionType, DecoderBlockType, ShardMode
 from MaxText.utils import gcs_utils
 
 
@@ -64,6 +63,31 @@ def validate_compute_axis_order(s: str) -> None:
   valid_compute_axis_order = ("0,1,2,3", "0,2,1,3")
   if s not in valid_compute_axis_order:  # currently supported compute_axis_order
     raise ValueError("Invalid compute_axis_order was passed. Valid options are ", valid_compute_axis_order)
+
+
+def validate_shard_mode(
+    shard_mode: str,
+    decoder_block: str,
+    quantization: str,
+) -> None:
+  """Validates sharding settings, raising ValueError for incompatible combinations."""
+  if shard_mode not in {"auto", "explicit"}:
+    raise ValueError(f"Invalid shard_mode '{shard_mode}'. Choose 'auto' or 'explicit'.")
+
+  if shard_mode == "explicit":
+    max_logging.log("Warning: explicit shard mode is an experimental feature.")
+
+    # Check for unsupported decoder blocks
+    supported_decoders = {"simple", "simple_mlp", "llama2"}
+    if decoder_block not in supported_decoders:
+      raise ValueError(
+          f"Decoder '{decoder_block}' is not supported with 'explicit' sharding. "
+          f"Supported options are: {list(supported_decoders)}."
+      )
+
+    # Check for unsupported quantization
+    if quantization:  # More Pythonic check for non-empty string
+      raise ValueError("Quantization is not supported with 'explicit' sharding.")
 
 
 def validate_kv_quant_axis(s: str, quantize_kvcache: bool) -> None:
@@ -169,6 +193,21 @@ def validate_vocab_tiling(num_vocab_tiling: int, per_device_batch_size: int, max
     raise ValueError("We currently don't support vocab tiling on NNX module.")
 
 
+def validate_rampup_batch_size(batch_size_start, batch_size_end, batch_size_increment, global_rampup_samples):
+  assert batch_size_start > 0, f"per_device_batch_size_start should be positive, got {batch_size_start}."
+  assert batch_size_increment > 0, f"per_device_batch_size_increment should be positive, got {batch_size_increment}."
+  assert global_rampup_samples > 0, f"global_rampup_samples should be positive, got {global_rampup_samples}."
+  diff_batch_size = batch_size_end - batch_size_start
+  assert diff_batch_size > 0, (
+      "per_device_batch_size must be greater than per_device_batch_size_start. "
+      f"get batch size is {batch_size_end} and batch size start is {batch_size_start}."
+  )
+  assert diff_batch_size % batch_size_increment == 0, (
+      "Expect rampup batch size change divisible by batch size increment."
+      f"Got per_device_batch_size={batch_size_end} and per_device_batch_size_start={batch_size_start}."
+  )
+
+
 def validate_keys(keys):
   validate_attention_kernel(keys["attention"])
   validate_attention_type(keys["attention_type"])
@@ -179,6 +218,7 @@ def validate_keys(keys):
   validate_profiler_type(keys["profiler"])
   validate_periodic_profiler(keys["profiler"], keys["profile_periodically_period"], keys["profiler_steps"])
   validate_compute_axis_order(keys["compute_axis_order"])
+  validate_shard_mode(keys["shard_mode"], keys["decoder_block"], keys["quantization"])
   validate_kv_quant_axis(keys["kv_quant_axis"], keys["quantize_kvcache"])
   validate_model_call_mode(keys["model_call_mode"])
   validate_prefill_and_target_lengths(keys["max_prefill_predict_length"], keys["max_target_length"])
@@ -186,6 +226,13 @@ def validate_keys(keys):
   validate_vocab_tiling(
       keys["num_vocab_tiling"], keys["per_device_batch_size"], keys["max_target_length"], keys["enable_nnx"]
   )
+  if keys["enable_rampup_batch_size"]:
+    validate_rampup_batch_size(
+        keys["per_device_batch_size_start"],
+        keys["per_device_batch_size"],
+        keys["per_device_batch_size_increment"],
+        keys["global_rampup_samples"],
+    )
 
   # TODO remove after b/435512699 resolved
   if keys["context_parallel_size"] > 1 and keys["context_parallel_load_balance"] and keys["attention_type"] == "chunk":
@@ -256,10 +303,10 @@ def validate_keys(keys):
     validate_llama4_config(keys)
 
   if keys["decoder_block"] == "qwen3_next":
-    if keys["sparse_matmul"]:
-      raise ValueError(
-          "For Qwen3-Next, sparse_matmul must be False for now. The dense path has been verified against reference."
-      )
+    validate_qwen3_next_config(keys)
+  else:
+    if keys["partial_rotary_factor"] is not None and keys["partial_rotary_factor"] != 1.0:
+      raise ValueError("`partial_rotary_factor` is only effective when `decoder_block` is set to 'qwen3_next'.")
 
   if keys["shard_optimizer_over_data"]:
     validate_optimizer_sharding_over_data(keys)
@@ -366,6 +413,23 @@ def validate_llama4_config(keys: dict):
     )
 
 
+def validate_qwen3_next_config(keys: dict):
+  """
+  Validates the following checks for Qwen3 Next:
+
+  Args:
+    keys: the raw config in dict form
+
+  """
+  if keys["sparse_matmul"]:
+    raise ValueError(
+        "For Qwen3-Next, sparse_matmul must be False for now. The dense path has been verified against reference."
+    )
+  rotary_dim = int(keys["head_dim"] * keys["partial_rotary_factor"])
+  if rotary_dim % 2 != 0:
+    raise ValueError(f"Calculated rotary dimension ({rotary_dim}) must be a multiple of 2.")
+
+
 def validate_model_name(s: str) -> bool:
   """Validate provided model name."""
   # currently supported models
@@ -407,6 +471,7 @@ def validate_model_name(s: str) -> bool:
       "qwen3-30b-a3b",
       "qwen3-480b-a35b",
       "qwen3-next-80b-a3b",
+      "qwen3-omni-30b-a3b",
       "gpt3-175b",
       "gpt3-22b",
       "gpt3-6b",
@@ -680,6 +745,43 @@ class _HyperParameters:
         raw_keys["gradient_accumulation_steps"],
     )
 
+    # Initialize starting global batch size and global increments if rampup batch
+    # size is enabled
+    if raw_keys["enable_rampup_batch_size"]:
+      (
+          raw_keys["global_batch_size_to_load_start"],
+          raw_keys["global_batch_size_to_train_on_start"],
+          raw_keys["micro_batch_size_to_train_on_start"],
+      ) = calculate_global_batch_sizes(
+          raw_keys["per_device_batch_size_start"],
+          raw_keys["expansion_factor_real_data"],
+          get_num_target_devices(raw_keys),
+          raw_keys["gradient_accumulation_steps"],
+      )
+
+      (
+          raw_keys["global_batch_size_to_load_increment"],
+          raw_keys["global_batch_size_to_train_on_increment"],
+          raw_keys["micro_batch_size_to_train_on_increment"],
+      ) = calculate_global_batch_sizes(
+          raw_keys["per_device_batch_size_increment"],
+          raw_keys["expansion_factor_real_data"],
+          get_num_target_devices(raw_keys),
+          raw_keys["gradient_accumulation_steps"],
+      )
+
+      (
+          raw_keys["rampup_samples_per_increment_to_load"],
+          raw_keys["rampup_end_step"],
+      ) = calculate_rampup_samples_and_steps(
+          raw_keys["global_batch_size_to_load_start"],
+          raw_keys["global_batch_size_to_load"],
+          raw_keys["global_batch_size_to_load_increment"],
+          raw_keys["global_rampup_samples"],
+      )
+    else:
+      raw_keys["rampup_end_step"] = 0
+
     if raw_keys["eval_per_device_batch_size"] <= 0:
       raw_keys["eval_per_device_batch_size"] = raw_keys["per_device_batch_size"]
 
@@ -746,6 +848,7 @@ class _HyperParameters:
     validate_tokamax_usage(raw_keys)
 
     raw_keys["decoder_block"] = DecoderBlockType(raw_keys["decoder_block"])
+    raw_keys["shard_mode"] = ShardMode(raw_keys["shard_mode"])
 
   @staticmethod
   def configure_gpt3_task(raw_keys):
@@ -1210,12 +1313,12 @@ def calculate_global_batch_sizes(
   """Calculates target global batch size from target devices and per_device_batch"""
   if per_device_batch_size < 1.0:
     # For per_device_batch_size<1, we load the data as if per_device_batch_size=1
-    if expansion_factor_real_data != -1:
+    if expansion_factor_real_data > 1:
       micro_batch_size_to_load = num_devices * expansion_factor_real_data
     else:
       micro_batch_size_to_load = num_devices
   else:
-    if expansion_factor_real_data != -1:
+    if expansion_factor_real_data > 1:
       micro_batch_size_to_load = int(num_devices * per_device_batch_size * expansion_factor_real_data)
     else:
       micro_batch_size_to_load = int(num_devices * per_device_batch_size)
@@ -1224,6 +1327,27 @@ def calculate_global_batch_sizes(
   global_batch_size_to_load = int(micro_batch_size_to_load * gradient_accumulation_steps)
   global_batch_size_to_train_on = int(micro_batch_size_to_train_on * gradient_accumulation_steps)
   return global_batch_size_to_load, global_batch_size_to_train_on, micro_batch_size_to_train_on
+
+
+def calculate_rampup_samples_and_steps(
+    batch_size_start,
+    batch_size_end,
+    batch_size_increment,
+    global_rampup_samples,
+):
+  """Calculate num of samples for each increment and num of steps for batch rampup"""
+  diff_batch_size = batch_size_end - batch_size_start
+  num_increments = diff_batch_size // batch_size_increment
+  rampup_samples_per_increment = global_rampup_samples / num_increments
+  total_rampup_steps = 0
+  current_batch_size = batch_size_start
+
+  for _ in range(num_increments):
+    steps_for_this_stage = math.ceil(rampup_samples_per_increment / current_batch_size)
+    total_rampup_steps += steps_for_this_stage
+    current_batch_size += batch_size_increment
+
+  return rampup_samples_per_increment, total_rampup_steps
 
 
 def get_num_target_devices(raw_keys):

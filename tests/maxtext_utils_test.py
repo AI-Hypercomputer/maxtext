@@ -34,13 +34,14 @@ import optax
 
 from MaxText import max_utils
 from MaxText import maxtext_utils
+from MaxText import sharding
 from MaxText import inference_utils
 from MaxText import pyconfig
 from MaxText.common_types import MODEL_MODE_TRAIN
 from MaxText.globals import MAXTEXT_PKG_DIR
 from MaxText.layers import models
 from MaxText.layers import quantizations
-from MaxText.maxtext_utils import assert_params_sufficiently_sharded, get_formatted_sharding_annotations
+from MaxText.sharding import assert_params_sufficiently_sharded, get_formatted_sharding_annotations
 
 Transformer = models.transformer_as_linen
 
@@ -241,7 +242,7 @@ class MaxUtilsPpAsDp(unittest.TestCase):
   def test_stage_added_before_data(self):
     input_rules = (("activation_batch", ("data", "fsdp")),)
     expected_transform = (("activation_batch", ("stage", "data", "fsdp")),)
-    transformed_rules = maxtext_utils.logical_axis_rules_pp_act_as_dp(input_rules)
+    transformed_rules = sharding.logical_axis_rules_pp_act_as_dp(input_rules)
     self.assertEqual(transformed_rules, expected_transform)
 
   def test_stage_removed(self):
@@ -252,7 +253,7 @@ class MaxUtilsPpAsDp(unittest.TestCase):
             (),
         ),
     )
-    transformed_rules = maxtext_utils.logical_axis_rules_pp_act_as_dp(input_rules)
+    transformed_rules = sharding.logical_axis_rules_pp_act_as_dp(input_rules)
     self.assertEqual(transformed_rules, expected_transform)
 
   def multiple_rules(self):
@@ -267,7 +268,7 @@ class MaxUtilsPpAsDp(unittest.TestCase):
         ("layers", ()),
         ("experts", "expert"),
     )
-    transformed_rules = maxtext_utils.logical_axis_rules_pp_act_as_dp(input_rules)
+    transformed_rules = sharding.logical_axis_rules_pp_act_as_dp(input_rules)
     self.assertEqual(transformed_rules, expected_transform)
 
 
