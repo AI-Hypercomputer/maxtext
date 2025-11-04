@@ -84,51 +84,74 @@ def main(argv: Sequence[str]) -> None:
     )
 
   # Hardcoded configuration for Llama3.1-8B
-  # These can be overridden via command line arguments
+  # These match the requirements in src/MaxText/configs/rl.yml
   config_file = os.path.join(script_dir, "..", "configs", "rl.yml")
-  default_args = [
-      config_file,
-      "model_name=llama3.1-8b",
-      "tokenizer_path=meta-llama/Llama-3.1-8B-Instruct",
-      "hf_model_name=meta-llama/Llama-3.1-8B-Instruct",
-      "chat_template_path=" + os.path.join(script_dir, "chat_templates", "gsm8k_rl.json"),
-  ]
+  chat_template_path = os.path.join(script_dir, "chat_templates", "gsm8k_rl.json")
+  
+  # Required hardcoded values for llama3.1-8b as specified in rl.yml
+  hardcoded_config = {
+      "model_name": "llama3.1-8b",  # Required: loads model dimensions from configs/models/llama3.1-8b.yml
+      "tokenizer_path": "meta-llama/Llama-3.1-8B-Instruct",  # Required: HF tokenizer path
+      "hf_model_name": "meta-llama/Llama-3.1-8B-Instruct",  # Required: for vLLM rollout (see rl.yml line 121)
+      "chat_template_path": chat_template_path,  # Required: for GSM8K template (used in train_rl.py line 170)
+  }
   
   # Process command line arguments: strip -- prefix and convert to key=value format
-  # Filter out empty strings and skip script name
+  # With allow_unknown_flags=True, absl passes unknown flags through
+  # argv[0] is script name, argv[1:] are the arguments
   cli_args = []
+  cli_dict = {}
   for arg in argv[1:]:
     if not arg:
       continue
-    # Strip -- prefix if present
+    # Strip -- prefix if present (convert --key=value to key=value)
     if arg.startswith("--"):
-      cli_args.append(arg[2:])  # Remove '--' prefix
+      arg_without_dash = arg[2:]
+      cli_args.append(arg_without_dash)
+      if "=" in arg_without_dash:
+        key, _ = arg_without_dash.split("=", 1)
+        cli_dict[key] = True
     else:
       cli_args.append(arg)
+      if "=" in arg:
+        key, _ = arg.split("=", 1)
+        cli_dict[key] = True
   
+  # Build merged arguments: config file first, then CLI args, then hardcoded defaults
   merged_args = [config_file] + cli_args
   
-  # Add defaults only if not already specified
-  default_dict = {}
-  for arg in default_args[1:]:  # Skip config file
-    if "=" in arg:
-      key, value = arg.split("=", 1)
-      default_dict[key] = value
-  
-  # Check if any defaults are missing from CLI args
-  cli_dict = {}
-  for arg in cli_args:
-    if "=" in arg:
-      key, _ = arg.split("=", 1)
-      cli_dict[key] = True
-  
-  # Add missing defaults
-  for key, value in default_dict.items():
+  # Add hardcoded defaults only if not specified in CLI
+  for key, value in hardcoded_config.items():
     if key not in cli_dict:
       merged_args.append(f"{key}={value}")
+      print(f"[Config] Using hardcoded {key}={value}")
+    else:
+      print(f"[Config] Using CLI override {key} (from command line)")
+
+  print(f"[Config] Final arguments count: {len(merged_args)}")
+  print(f"[Config] Config file: {config_file}")
+  
+  # Verify chat template file exists
+  if not os.path.exists(chat_template_path):
+    raise FileNotFoundError(
+        f"Chat template not found: {chat_template_path}\n"
+        f"Expected at: {chat_template_path}"
+    )
 
   # Initialize configuration from merged arguments
   tmvp_config = pyconfig.initialize(merged_args)
+  
+  # Verify critical config values are set correctly
+  assert tmvp_config.model_name == "llama3.1-8b", f"model_name mismatch: {tmvp_config.model_name}"
+  assert tmvp_config.hf_model_name == "meta-llama/Llama-3.1-8B-Instruct", f"hf_model_name mismatch: {tmvp_config.hf_model_name}"
+  assert tmvp_config.tokenizer_path == "meta-llama/Llama-3.1-8B-Instruct", f"tokenizer_path mismatch: {tmvp_config.tokenizer_path}"
+  assert os.path.exists(tmvp_config.chat_template_path), f"chat_template_path not found: {tmvp_config.chat_template_path}"
+  
+  print(f"[Config] Verified: model_name={tmvp_config.model_name}")
+  print(f"[Config] Verified: hf_model_name={tmvp_config.hf_model_name}")
+  print(f"[Config] Verified: tokenizer_path={tmvp_config.tokenizer_path}")
+  print(f"[Config] Verified: chat_template_path={tmvp_config.chat_template_path}")
+  
   max_utils.print_system_information()
 
   # Run RL training
@@ -136,4 +159,5 @@ def main(argv: Sequence[str]) -> None:
 
 
 if __name__ == "__main__":
-  app.run(main)
+  # Allow unknown flags since MaxText uses key=value format for config
+  app.run(main, allow_unknown_flags=True)
