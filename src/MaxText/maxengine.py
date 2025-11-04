@@ -328,7 +328,7 @@ class MaxEngine(engine_api.Engine):
     @jax.jit
     def model_apply(_p, _rng):
       image_shape = multimodal_utils.get_dummy_image_shape_for_init(
-          self.config.model_name, batch_size=self.config.micro_batch_size_to_train_on
+          config=self.config
       )
       return self.model.apply(
           _p | {"aqt": {}},
@@ -1539,7 +1539,7 @@ class MaxEngine(engine_api.Engine):
       )
       dummy_image = jnp.ones(
           multimodal_utils.get_dummy_image_shape_for_init(
-              self.config.model_name, batch_size=self.config.micro_batch_size_to_train_on
+              config=self.config
           ),
           dtype=jnp.int32,
       )
