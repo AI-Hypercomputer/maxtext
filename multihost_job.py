@@ -235,7 +235,9 @@ def install_ops_script_str(run_name, log_name):
     done
   fi
   sudo chmod 777 /etc/google-cloud-ops-agent/config.yaml
-  sudo echo \\"{create_ops_config_str(run_name, log_name)}\\" >> /etc/google-cloud-ops-agent/config.yaml
+  if ! grep -q '/{run_name}/{log_name}' /etc/google-cloud-ops-agent/config.yaml; then
+    sudo echo \\"{create_ops_config_str(run_name, log_name)}\\" >> /etc/google-cloud-ops-agent/config.yaml
+  fi
   sudo service google-cloud-ops-agent restart
 """
 
