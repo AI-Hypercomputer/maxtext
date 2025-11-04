@@ -258,7 +258,7 @@ def rl_train(tmvp_config):
   else:
     use_pathways = False
   print(f"jax.extend.backend.get_backend().platform_version={jax.extend.backend.get_backend().platform_version}")
-  use_pathways = True
+  use_pathways = False
   print(f"Use Pathways: {use_pathways}")
   trainer_devices, sampler_devices = setup_device_allocation(tmvp_config, use_pathways)
 
