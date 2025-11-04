@@ -54,7 +54,6 @@ In this tutorial we use a single host TPUVM such as `v6e-8/v5p-8`. Let's get sta
 
 import os
 import sys
-from absl import app
 from typing import Sequence
 
 import jax
@@ -97,7 +96,6 @@ def main(argv: Sequence[str]) -> None:
   }
   
   # Process command line arguments: strip -- prefix and convert to key=value format
-  # With allow_unknown_flags=True, absl passes unknown flags through
   # argv[0] is script name, argv[1:] are the arguments
   cli_args = []
   cli_dict = {}
@@ -159,5 +157,6 @@ def main(argv: Sequence[str]) -> None:
 
 
 if __name__ == "__main__":
-  # Allow unknown flags since MaxText uses key=value format for config
-  app.run(main, allow_unknown_flags=True)
+  # Use sys.argv directly to avoid absl flag parsing issues
+  # MaxText uses key=value format which absl doesn't recognize
+  main(sys.argv)
