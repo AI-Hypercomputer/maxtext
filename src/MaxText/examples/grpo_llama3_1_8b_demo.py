@@ -24,20 +24,20 @@ This script uses the unified `rl_train` function from MaxText.rl.train_rl.
 Usage:
   # Minimal usage (only required arguments):
   python3 src/MaxText/examples/grpo_llama3_1_8b_demo.py \\
-    load_parameters_path=/path/to/scanned/model/ckpt_load_dir/ \\
-    base_output_directory=/tmp/grpo_output \\
-    hf_access_token=$HF_TOKEN
+    --load_parameters_path=/path/to/scanned/model/ckpt_load_dir/ \\
+    --base_output_directory=/tmp/grpo_output \\
+    --hf_access_token=$HF_TOKEN
 
   # With optional overrides:
   python3 src/MaxText/examples/grpo_llama3_1_8b_demo.py \\
-    load_parameters_path=/path/to/scanned/model/ckpt_load_dir/ \\
-    base_output_directory=/tmp/grpo_output \\
-    hf_access_token=$HF_TOKEN \\
-    steps=100 \\
-    num_batches=10
+    --load_parameters_path=/path/to/scanned/model/ckpt_load_dir/ \\
+    --base_output_directory=/tmp/grpo_output \\
+    --hf_access_token=$HF_TOKEN \\
+    --steps=100 \\
+    --num_batches=10
 
   Note: model_name, tokenizer_path, and chat_template_path are hardcoded for llama3.1-8b
-        but can be overridden via command line if needed.
+        but can be overridden via command line if needed (e.g., --model_name=llama3.1-70b).
 
 GRPO is an RL algorithm designed to enhance the reasoning abilities of LLMs. It
 is a variant of Proximal Policy Optimization (PPO) that reduces memory usage by
@@ -94,9 +94,18 @@ def main(argv: Sequence[str]) -> None:
       "chat_template_path=" + os.path.join(script_dir, "chat_templates", "gsm8k_rl.json"),
   ]
   
-  # Merge command line arguments with defaults (command line takes precedence)
-  # Filter out empty strings and ensure config file is first
-  cli_args = [arg for arg in argv[1:] if arg]  # Skip script name
+  # Process command line arguments: strip -- prefix and convert to key=value format
+  # Filter out empty strings and skip script name
+  cli_args = []
+  for arg in argv[1:]:
+    if not arg:
+      continue
+    # Strip -- prefix if present
+    if arg.startswith("--"):
+      cli_args.append(arg[2:])  # Remove '--' prefix
+    else:
+      cli_args.append(arg)
+  
   merged_args = [config_file] + cli_args
   
   # Add defaults only if not already specified
