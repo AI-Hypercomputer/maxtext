@@ -106,15 +106,6 @@ generation_configs:
     eval_top_k: 2000
     eval_top_p: 1.0
 
-# greedy
-eval_temperature: 0.01
-eval_top_k: 1
-eval_top_p: 1.0
-# # some randomness
-# 'standard': {'eval_temperature': 0.7, 'eval_top_k': 50, 'eval_top_p': 0.95},
-# # liberal
-# # 'liberal': {'eval_temperature': 0.85, 'eval_top_k': 2000, 'eval_top_p': 1.0},
-
 
 # ====== Inference ======
 # for vLLM

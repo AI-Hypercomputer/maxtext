@@ -179,7 +179,12 @@ def get_dataset(model_tokenizer, tmvp_config, data_dir, split="train") -> grain.
                       {
                           "role": "user",
                           "content": template_config["TEMPLATE"].format(
-                              system_prompt=template_config["SYSTEM_PROMPT"],
+                              system_prompt=template_config["SYSTEM_PROMPT"].format(
+                                reasoning_start_token=tmvp_config.reasoning_start_token,
+                                reasoning_end_token=tmvp_config.reasoning_end_token,
+                                solution_start_token=tmvp_config.solution_start_token,
+                                solution_end_token=tmvp_config.solution_end_token,
+                              ),
                               question=x["question"].decode("utf-8"),
                           ),
                       },
@@ -243,7 +248,6 @@ def rl_train(tmvp_config):
   if tmvp_config.debug:
     for ele in train_dataset[:1]:
       pprint(ele)
-
 
   
   # Setup device allocation
@@ -321,7 +325,7 @@ def rl_train(tmvp_config):
   )
 
   # Setup metrics logging
-  log_dir = os.path.join(tmvp_config.tensorboard_dir, f"worker_{jax.process_index()}")
+  log_dir = os.path.join(tmvp_config.tensorboard_dir, f"worker_{jax.process_index()}_{datetime.now().strftime('%Y-%m-%d-%H-%M-%S')}")
 
   print(f"TensorBoard logs directory: {log_dir}")
   # Metrics logger

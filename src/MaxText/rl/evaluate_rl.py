@@ -90,13 +90,16 @@ def generate_responses(
       List of lists containing responses for each prompt across passes
   """
   multiple_call_responses = [[] for _ in range(len(prompts))]
-
   eval_strategy = tmvp_config.generation_configs[tmvp_config.eval_sampling_strategy]
+
   for p in range(num_passes):
     responses = rl_cluster.rollout.generate(
         prompts,
         rollout_config=RolloutConfig(
             max_tokens_to_generate=tmvp_config.max_target_length,
+            # temperature=eval_strategy.eval_temperature,
+            # top_k=eval_strategy.eval_top_k,
+            # top_p=eval_strategy.eval_top_p,
             temperature=eval_strategy["eval_temperature"],
             top_k=eval_strategy["eval_top_k"],
             top_p=eval_strategy["eval_top_p"],
