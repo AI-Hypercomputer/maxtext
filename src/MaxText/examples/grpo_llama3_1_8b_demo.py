@@ -22,15 +22,22 @@ coding problems, etc.
 This script uses the unified `rl_train` function from MaxText.rl.train_rl.
 
 Usage:
+  # Minimal usage (only required arguments):
   python3 src/MaxText/examples/grpo_llama3_1_8b_demo.py \\
-    --model_name=llama3.1-8b \\
-    --tokenizer_path=meta-llama/Llama-3.1-8B-Instruct \\
-    --load_parameters_path=/path/to/scanned/model/ckpt_load_dir/ \\
-    --base_output_directory=/tmp/grpo_output \\
-    --hf_access_token=$HF_TOKEN \\
-    --steps=100 \\
-    --config_path=src/MaxText/configs/rl.yml \\
-    --chat_template_path=src/MaxText/examples/chat_templates/gsm8k_rl.json
+    load_parameters_path=/path/to/scanned/model/ckpt_load_dir/ \\
+    base_output_directory=/tmp/grpo_output \\
+    hf_access_token=$HF_TOKEN
+
+  # With optional overrides:
+  python3 src/MaxText/examples/grpo_llama3_1_8b_demo.py \\
+    load_parameters_path=/path/to/scanned/model/ckpt_load_dir/ \\
+    base_output_directory=/tmp/grpo_output \\
+    hf_access_token=$HF_TOKEN \\
+    steps=100 \\
+    num_batches=10
+
+  Note: model_name, tokenizer_path, and chat_template_path are hardcoded for llama3.1-8b
+        but can be overridden via command line if needed.
 
 GRPO is an RL algorithm designed to enhance the reasoning abilities of LLMs. It
 is a variant of Proximal Policy Optimization (PPO) that reduces memory usage by
@@ -76,8 +83,43 @@ def main(argv: Sequence[str]) -> None:
         os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
     )
 
-  # Initialize configuration from command line arguments and config file
-  tmvp_config = pyconfig.initialize(argv)
+  # Hardcoded configuration for Llama3.1-8B
+  # These can be overridden via command line arguments
+  config_file = os.path.join(script_dir, "..", "configs", "rl.yml")
+  default_args = [
+      config_file,
+      "model_name=llama3.1-8b",
+      "tokenizer_path=meta-llama/Llama-3.1-8B-Instruct",
+      "hf_model_name=meta-llama/Llama-3.1-8B-Instruct",
+      "chat_template_path=" + os.path.join(script_dir, "chat_templates", "gsm8k_rl.json"),
+  ]
+  
+  # Merge command line arguments with defaults (command line takes precedence)
+  # Filter out empty strings and ensure config file is first
+  cli_args = [arg for arg in argv[1:] if arg]  # Skip script name
+  merged_args = [config_file] + cli_args
+  
+  # Add defaults only if not already specified
+  default_dict = {}
+  for arg in default_args[1:]:  # Skip config file
+    if "=" in arg:
+      key, value = arg.split("=", 1)
+      default_dict[key] = value
+  
+  # Check if any defaults are missing from CLI args
+  cli_dict = {}
+  for arg in cli_args:
+    if "=" in arg:
+      key, _ = arg.split("=", 1)
+      cli_dict[key] = True
+  
+  # Add missing defaults
+  for key, value in default_dict.items():
+    if key not in cli_dict:
+      merged_args.append(f"{key}={value}")
+
+  # Initialize configuration from merged arguments
+  tmvp_config = pyconfig.initialize(merged_args)
   max_utils.print_system_information()
 
   # Run RL training
