@@ -558,7 +558,7 @@ class Decoder(nn.Module):
 
     # Merge the image embeddings with the text embeddings for multimodal models
     if image_embeddings is not None and cfg.use_multimodal:
-      if cfg.model_name in ["gemma3-4b", "gemma3-12b", "gemma3-27b", "llama4-17b-16e", "llama4-17b-128e"]:
+      if cfg.model_name in ["gemma3-4b", "gemma3-12b", "gemma3-27b", "llama4-17b-16e", "llama4-17b-128e", "qwen3-omni-30b-a3b"]:
         y = multimodal_utils.merge_mm_embeddings(
             text_embeddings=y,
             vision_embeddings=image_embeddings,
