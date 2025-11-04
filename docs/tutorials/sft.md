@@ -26,8 +26,8 @@ In this tutorial we use a single host TPU VM such as `v6e-8/v5p-8`. Let's get st
 ## Setup virtual environment
 
 ### Create a Python3.12 virtual environment
-```
-bash setup.sh
+```sh
+bash tools/setup/setup.sh
 ```
 
 ### Activate virtual environment
@@ -39,7 +39,7 @@ source ~/$venv_name/bin/activate
 
 ### Install MaxText dependencies
 ```
-bash setup.sh
+bash tools/setup/setup.sh
 ```
 
 ## Run SFT
