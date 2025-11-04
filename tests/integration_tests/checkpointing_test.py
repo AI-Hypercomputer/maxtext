@@ -20,7 +20,7 @@ and then a subsequent training run can correctly restore and
 continue from that saved checkpoint.
 
 Note: Make sure to run
-  `bash setup_gcsfuse.sh DATASET_GCS_BUCKET=gs://maxtext-dataset MOUNT_PATH=/tmp/gcsfuse/`
+  `bash tools/setup/setup_gcsfuse.sh DATASET_GCS_BUCKET=gs://maxtext-dataset MOUNT_PATH=/tmp/gcsfuse/`
 before running tests locally.
 """
 

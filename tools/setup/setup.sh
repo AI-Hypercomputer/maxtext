@@ -160,7 +160,7 @@ if [[ "$MODE" == "nightly" ]]; then
     echo "-------------------------------------------------"
     
     python3 -m uv pip install --no-cache-dir -U -r "$nightly_txt" \
-                                                -r 'dependencies/requirements/extra_deps_from_github.txt'
+                                                -r 'src/install_maxtext_extra_deps/extra_deps_from_github.txt'
     rm -fv -- "$nightly_txt"
 else
     # stable or stable_stack mode: Install with pinned commits
@@ -185,7 +185,7 @@ else
       exit 2
     else
       python3 -m uv pip install --resolution=lowest -r "$requirements_txt" \
-                                                    -r 'dependencies/requirements/extra_deps_from_github.txt'
+                                                    -r 'src/install_maxtext_extra_deps/extra_deps_from_github.txt'
     fi
 fi
 

@@ -75,7 +75,7 @@ either be a TPUVM or not, but it cannot be one of the workers. If your runner ma
 4. **Install dependencies.**
     Install the dependencies of `train.py` on each worker using `multihost_runner.py`:
     ```
-    python3 multihost_runner.py --TPU_PREFIX=$TPU_PREFIX --COMMAND="bash setup.sh"
+    python3 multihost_runner.py --TPU_PREFIX=$TPU_PREFIX --COMMAND="bash tools/setup/setup.sh"
     ```
     If you are running the `multihost_runner.py` script from a TPUVM, you will need to set `--INTERNAL_IP=true`.
 
