@@ -102,11 +102,9 @@ def main(argv: Sequence[str]) -> None:
       "chat_template_path": chat_template_path,  # Required: for GSM8K template (used in train_rl.py line 170)
   }
   
-  # Process command line arguments: strip -- prefix and convert to key=value format
+  # Process command line arguments: parse key=value pairs into a dictionary
   # argv[0] is script name, argv[1:] are the arguments
-  # The shell already splits arguments, so paths with spaces should be quoted by user
-  cli_args = []
-  cli_dict = {}
+  cli_config = {}
   
   print(f"[Debug] Received {len(argv)} arguments: {argv[:min(5, len(argv))]}")
   
@@ -123,55 +121,51 @@ def main(argv: Sequence[str]) -> None:
             f"Invalid argument format: '{arg}'. Expected --key=value format.\n"
             f"Example: --load_parameters_path=gs://bucket/path"
         )
-      cli_args.append(arg_without_dash)
       # Split on first '=' only to handle paths with '=' characters
       key, value = arg_without_dash.split("=", 1)
-      cli_dict[key] = True
+      cli_config[key] = value
       print(f"[Debug] Parsed: {key}={value[:50]}..." if len(value) > 50 else f"[Debug] Parsed: {key}={value}")
     elif "=" in arg:
       # Already in key=value format without --
-      cli_args.append(arg)
       key, value = arg.split("=", 1)
-      cli_dict[key] = True
+      cli_config[key] = value
       print(f"[Debug] Parsed: {key}={value[:50]}..." if len(value) > 50 else f"[Debug] Parsed: {key}={value}")
     else:
       # Not a key=value argument - might be a positional argument
       print(f"[Warning] Ignoring non-key=value argument: '{arg}'")
   
-  # Build merged arguments: config file first, then CLI args, then hardcoded defaults
-  merged_args = [config_file] + cli_args
-  
-  # Add hardcoded defaults only if not specified in CLI
-  for key, value in hardcoded_config.items():
-    if key not in cli_dict:
-      merged_args.append(f"{key}={value}")
-      print(f"[Config] Using hardcoded {key}={value}")
-    else:
+  # Merge hardcoded defaults with CLI overrides (CLI takes precedence)
+  final_config = hardcoded_config.copy()
+  for key, value in cli_config.items():
+    if key in hardcoded_config:
       print(f"[Config] Using CLI override {key} (from command line)")
-
-  print(f"[Config] Final arguments count: {len(merged_args)}")
-  print(f"[Config] Config file: {config_file}")
+    else:
+      print(f"[Config] Using CLI parameter {key} (from command line)")
+    final_config[key] = value
   
-  # Verify the format is correct for pyconfig.initialize
-  # Expected: ["config_file", "key1=value1", "key2=value2", ...]
-  assert merged_args[0] == config_file, "First argument must be config file"
-  for arg in merged_args[1:]:
-    assert "=" in arg, f"All config arguments must be in key=value format, got: {arg}"
+  # Add any hardcoded values that weren't overridden
+  for key, value in hardcoded_config.items():
+    if key not in cli_config:
+      print(f"[Config] Using hardcoded {key}={value}")
+
+  print(f"[Config] Total config parameters: {len(final_config)}")
+  print(f"[Config] Config file: {config_file}")
   
   # Show the complete config that will be sent to pyconfig.initialize
   print("\n" + "="*80)
   print("COMPLETE CONFIG BEING PASSED TO pyconfig.initialize():")
   print("="*80)
-  print(f"Config file: {merged_args[0]}")
-  print("\nConfig parameters:")
-  config_dict = {}
-  for arg in merged_args[1:]:
-    if "=" in arg:
-      key, value = arg.split("=", 1)
-      config_dict[key] = value
-      # Truncate long values for display
-      display_value = value if len(value) <= 100 else value[:100] + "..."
-      print(f"  {key}={display_value}")
+  print(f"\npyconfig.initialize(")
+  print(f"    [")
+  print(f"        '',")
+  print(f"        '{config_file}',")
+  print(f"    ],")
+  print(f"    # Config parameters as keyword arguments:")
+  for key, value in sorted(final_config.items()):
+    # Truncate long values for display
+    display_value = value if len(str(value)) <= 80 else str(value)[:80] + "..."
+    print(f"    {key}={repr(display_value)},")
+  print(f")")
   print("="*80 + "\n")
   
   # Verify chat template file exists
@@ -181,9 +175,12 @@ def main(argv: Sequence[str]) -> None:
         f"Expected at: {chat_template_path}"
     )
 
-  # Initialize configuration from merged arguments
+  # Initialize configuration using keyword arguments (like grpo_llama3_1_8b_demo_pw.py)
   print("[Config] Initializing configuration with pyconfig.initialize()...")
-  tmvp_config = pyconfig.initialize(merged_args)
+  tmvp_config = pyconfig.initialize(
+      ["", config_file],
+      **final_config
+  )
   
   # Verify critical config values are set correctly
   assert tmvp_config.model_name == "llama3.1-8b", f"model_name mismatch: {tmvp_config.model_name}"
