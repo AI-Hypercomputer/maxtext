@@ -1219,7 +1219,7 @@ class Qwen3OmniMoeVisionPosEmbedInterpolate(nnx.Module):
           ),
           sharding=("embed", "embed"),
       )
-    self.num_grid_per_side = int(jnp.sqrt(self.num_position_embeddings))
+    self.num_grid_per_side = int(self.num_position_embeddings ** 0.5)
 
   def _interpolate_single(self, t: int, h: int, w: int) -> tuple[Array, Array]:
     """Compute bilinear interpolation indices and weights for a single image/video.
