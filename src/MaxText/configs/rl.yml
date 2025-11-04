@@ -71,6 +71,8 @@ value_proj: 'offload'
 checkpoint_storage_use_ocdbt: False # For Pathways
 checkpoint_storage_use_zarr3: False # For Pathways
 
+# ====== Debugging ======
+debug: True
 
 # ====== Training ======
 batch_size: 1
