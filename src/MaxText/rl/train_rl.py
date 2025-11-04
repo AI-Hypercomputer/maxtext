@@ -367,12 +367,12 @@ def rl_train(tmvp_config):
           + tmvp_config.kv_cache_buffer,
           temperature=tmvp_config.decode_sampling_temperature,
           top_p=tmvp_config.decode_sampling_nucleus_p,
-          top_k=tmvp_config.decode_sampling_top_k,      
-          rollout_vllm_model_version=tmvp_config.hf_model_name,
-          rollout_vllm_hbm_utilization=tmvp_config.hbm_utilization_vllm,
-          rollout_vllm_tpu_backend_type="jax",
-          rollout_vllm_swap_space_size_gb=tmvp_config.swap_space_vllm_gb,
+          top_k=tmvp_config.decode_sampling_top_k,
       ),
+      rollout_vllm_model_version=tmvp_config.hf_model_name,
+      rollout_vllm_hbm_utilization=tmvp_config.hbm_utilization_vllm,
+      rollout_vllm_tpu_backend_type="jax",
+      rollout_vllm_swap_space_size_gb=tmvp_config.swap_space_vllm_gb,
   )
 
   # The metrics logger is now managed by the GrpoLearner, so we don't need to
