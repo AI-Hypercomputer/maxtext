@@ -42,9 +42,9 @@ ENV MAXTEXT_REPO_ROOT=/deps
 WORKDIR /deps
 
 # Copy setup files and dependency files separately for better caching
-COPY tools/setup /deps/tools/setup/
-COPY dependencies/requirements/ /deps/dependencies/requirements/
-COPY src/install_maxtext_extra_deps/extra_deps_from_github.txt /deps/dependencies/requirements/
+COPY tools/setup tools/setup/
+COPY dependencies/requirements/ dependencies/requirements/
+COPY src/install_maxtext_extra_deps/extra_deps_from_github.txt src/install_maxtext_extra_deps/
 
 # Install dependencies - these steps are cached unless the copied files change
 RUN echo "Running command: bash setup.sh MODE=$ENV_MODE JAX_VERSION=$ENV_JAX_VERSION DEVICE=${ENV_DEVICE}"

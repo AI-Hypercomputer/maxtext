@@ -16,9 +16,9 @@ ENV MAXTEXT_REPO_ROOT=/deps
 WORKDIR /deps
 
 # Copy setup files and dependency files separately for better caching
-COPY tools/setup /deps/tools/setup/
-COPY dependencies/requirements/ /deps/dependencies/requirements/
-COPY src/install_maxtext_extra_deps/extra_deps_from_github.txt /deps/dependencies/requirements/
+COPY tools/setup tools/setup/
+COPY dependencies/requirements/ dependencies/requirements/
+COPY src/install_maxtext_extra_deps/extra_deps_from_github.txt src/install_maxtext_extra_deps/
 
 # For JAX AI tpu training images 0.4.37 AND 0.4.35
 # Orbax checkpoint installs the latest version of JAX,
