@@ -240,8 +240,8 @@ def main(argv: Sequence[str]) -> None:
   rng = jax.random.PRNGKey(config.init_weights_seed)
   quant = quantizations.configure_quantization(config)
   maxtext_model_flax = models.transformer_as_linen(config, mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
-  learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
-  tx = optimizers.get_optimizer(config, learning_rate_schedule)
+  # learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
+  # tx = optimizers.get_optimizer(config, learning_rate_schedule)
 
   checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
       output_directory,
@@ -251,9 +251,16 @@ def main(argv: Sequence[str]) -> None:
       use_ocdbt=config.checkpoint_storage_use_ocdbt,
       use_zarr3=config.checkpoint_storage_use_zarr3,
   )
-
-  abstract_state, _, _, _ = maxtext_utils.setup_training_state(
-      maxtext_model_flax, None, tx, config, rng, mesh, checkpoint_manager
+  
+  abstract_state, _, _, _ = maxtext_utils.setup_initial_state(
+      maxtext_model_flax,
+      None,
+      None,
+      config,
+      rng,
+      mesh,
+      checkpoint_manager,
+      is_training=False
   )
   abstract_params_tree = abstract_state.params["params"]
   abstract_params_flat, abstract_params_treedef = jax.tree_util.tree_flatten_with_path(abstract_params_tree)
