@@ -65,10 +65,11 @@ from MaxText.layers.embeddings import (
     LlamaVisionRotaryEmbedding,
     RotaryEmbedding,
     YarnRotaryEmbedding,
+    Qwen3NextRotaryEmbedding,
 )
 from MaxText.layers.initializers import nd_dense_init, NdInitializer, variable_to_logically_partitioned, default_bias_init
 from MaxText.layers.linears import DenseGeneral, canonicalize_tuple, normalize_axes
-from MaxText.layers.normalizations import RMSNorm
+from MaxText.layers.normalizations import RMSNorm, Qwen3NextRMSNorm
 from MaxText.layers.quantizations import AqtQuantization as Quant
 
 # pylint: disable=line-too-long, g-doc-args, g-doc-return-or-yield, bad-continuation, g-inconsistent-quotes
@@ -416,6 +417,8 @@ class Attention(nnx.Module):
     self.model_mode = model_mode
     self.rngs = rngs
 
+    self.is_qwen3_next = self.config.decoder_block == DecoderBlockType.QWEN3_NEXT
+
     # Module attribute names must match names previously passed to Linen for checkpointing
     self.KVCache_0 = (
         self.init_kv_caches(inputs_kv_shape=inputs_kv_shape)
@@ -478,6 +481,9 @@ class Attention(nnx.Module):
     else:
       self.sinks = None
 
+    self.query_norm = None
+    self.key_norm = None
+
     is_llama4_decoder_block = self.config.decoder_block == DecoderBlockType.LLAMA4
     if self.use_qk_norm and not is_llama4_decoder_block:
       self.query_norm = RMSNorm(
@@ -498,9 +504,21 @@ class Attention(nnx.Module):
           kernel_axes=("norm",),
           rngs=self.rngs,
       )
-    else:
-      self.query_norm = None
-      self.key_norm = None
+    elif self.is_qwen3_next:
+      self.query_norm = Qwen3NextRMSNorm(
+          num_features=self.config.head_dim,
+          eps=self.config.normalization_layer_epsilon,
+          dtype=self.config.dtype,
+          weight_dtype=self.config.weight_dtype,
+          rngs=self.rngs,
+      )
+      self.key_norm = Qwen3NextRMSNorm(
+          num_features=self.config.head_dim,
+          eps=self.config.normalization_layer_epsilon,
+          dtype=self.config.dtype,
+          weight_dtype=self.config.weight_dtype,
+          rngs=self.rngs,
+      )
 
     self._maybe_shard_with_logical = functools.partial(
         maybe_shard_with_logical,
@@ -538,9 +556,15 @@ class Attention(nnx.Module):
     kernel_axes = (
         (None, None, None) if self.config.ici_context_autoregressive_parallelism > 1 else ("embed", "q_heads", "kv")
     )
+    in_features = self.convert_dense_general_inputs_shape(inputs_q_shape)
+    out_features = (self.num_query_heads, self.head_dim)
+
+    if self.is_qwen3_next:
+      out_features = (self.num_query_heads, self.head_dim * 2)
+
     return DenseGeneral(
-        in_features_shape=self.convert_dense_general_inputs_shape(inputs_q_shape),
-        out_features_shape=(self.num_query_heads, self.head_dim),
+        in_features_shape=in_features,
+        out_features_shape=out_features,
         axis=-1,
         kernel_init=query_init,
         kernel_axes=kernel_axes,
@@ -642,13 +666,22 @@ class Attention(nnx.Module):
 
   def init_out_w(self, output_dim: int) -> nnx.Module:
     """out projection"""
+    in_features = (self.num_query_heads, self.head_dim)
+    out_features = output_dim
     out_kernel_axis = (
         (None, None, None) if self.config.ici_context_autoregressive_parallelism > 1 else ("heads", "kv", "embed")
     )
+    axis = (-2, -1)
+
+    if self.is_qwen3_next:
+      in_features = self.num_query_heads * self.head_dim
+      out_kernel_axis = ("mlp", "embed")
+      axis = (-1,)
+
     return DenseGeneral(
-        in_features_shape=(self.num_query_heads, self.head_dim),
-        out_features_shape=output_dim,
-        axis=(-2, -1),
+        in_features_shape=in_features,
+        out_features_shape=out_features,
+        axis=axis,
         kernel_init=self.kernel_init,
         kernel_axes=out_kernel_axis,  # trade speed with memory
         dtype=self.dtype,
@@ -718,6 +751,16 @@ class Attention(nnx.Module):
           interleave=self.config.rope_interleave,
           truncate=self.config.rope_truncate,
           attention_scaling=self.config.rope_attention_scaling,
+          rngs=self.rngs,
+      )
+    elif self.is_qwen3_next:
+      rotary_embedding = Qwen3NextRotaryEmbedding(
+          min_timescale=self.config.rope_min_timescale,
+          max_timescale=self.config.rope_max_timescale,
+          embedding_dims=self.config.head_dim,
+          partial_rotary_factor=self.config.partial_rotary_factor,
+          cast_as_fprop_dtype=True,
+          fprop_dtype=self.config.dtype,
           rngs=self.rngs,
       )
     else:
@@ -890,9 +933,17 @@ class Attention(nnx.Module):
       value_sharding = NamedSharding(self.mesh, nn.logical_to_mesh_axes(self.value_axis_names))
       value = self.kv_projection(inputs_kv, proj_name="value", out_sharding=value_sharding)
 
+    gate = None
+    if self.is_qwen3_next:
+      # Split query into query & gate.
+      query, gate = jnp.split(query, 2, axis=-1)
+      batch_size, seq_len, _, _ = gate.shape
+      gate = gate.reshape(batch_size, seq_len, self.config.num_query_heads * self.config.head_dim)
+
     is_llama4_decoder_block = self.config.decoder_block == DecoderBlockType.LLAMA4
     # NOTE: llama 4 does L2 normalization after RoPE
-    if self.use_qk_norm and not is_llama4_decoder_block:
+    # Apply Qwen3Next specific RMS Norm
+    if (self.use_qk_norm and not is_llama4_decoder_block) or self.is_qwen3_next:
       query = self.query_norm(query)
       key = self.key_norm(key)
 
@@ -964,7 +1015,9 @@ class Attention(nnx.Module):
           bidirectional_mask,
           self.sinks,
       )
-
+    if self.is_qwen3_next:
+      out = out.reshape(batch_size, seq_len, self.config.num_query_heads * self.config.head_dim)
+      out = out * jax.nn.sigmoid(gate)
     if model_mode == MODEL_MODE_PREFILL:
       out = self._maybe_shard_with_logical(out, self.prefill_out_axis_names)
     elif model_mode == MODEL_MODE_TRAIN and self.config.expert_shard_attention_option == EP_AS_CONTEXT:

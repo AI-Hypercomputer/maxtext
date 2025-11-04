@@ -905,6 +905,8 @@ gdn_num_value_heads: 32
 gdn_chunk_size: 64
 # Whether to apply L2 normalization to query and key tensors inside the Gated Delta Rule kernel.
 use_qk_norm_in_gdn: True
+# The ratio of dimension to apply ROPE on
+partial_rotary_factor: 1.0
 
 # Use tokamax library for gmm kernel implementation
 use_tokamax_gmm: false
