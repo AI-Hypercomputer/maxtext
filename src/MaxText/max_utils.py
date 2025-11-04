@@ -21,6 +21,7 @@ import functools
 from functools import partial
 import os
 import socket
+import logging
 import subprocess
 import time
 from typing import Any
@@ -289,17 +290,15 @@ def _retrieve_jax_init_info(raw_keys):
 
 def get_num_slices(raw_keys):
   """Calculate num_slices based on number of devices."""
+  logging.info("[xfgu] invoking get_num_slices")
   if raw_keys["hardware"] == "cpu":
     max_logging.log(" Setting num_slices=1 for CPU hardware type")
     return 1
   if int(raw_keys["compile_topology_num_slices"]) > 0:
     return raw_keys["compile_topology_num_slices"]
   else:
-    devices = jax.devices()
-    try:
-      return 1 + max(d.slice_index for d in devices)
-    except (ValueError, AttributeError):
-      return 1
+    logging.info(f"returning num_slices: {raw_keys['num_slices']}")
+    return raw_keys["num_slices"]
 
 
 def is_cpu_backend(raw_keys):

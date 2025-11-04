@@ -41,11 +41,13 @@ This tutorial demonstrates training the Llama3.1 70B-IT model on
 
 # ## Imports
 
+import collections
 import functools
 import os
 from pprint import pprint
 import re
 import sys
+import logging
 
 from datetime import datetime
 from flax import nnx
@@ -63,7 +65,7 @@ from tqdm.auto import tqdm
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl.rollout import base_rollout
 from tunix.rl.grpo.grpo_learner import GrpoConfig, GrpoLearner
-from tunix.sft import metrics_logger
+from tunix.sft import metrics_logger, profiler
 
 
 from transformers import AutoTokenizer
@@ -78,6 +80,31 @@ from MaxText.globals import MAXTEXT_ASSETS_ROOT
 import pathwaysutils
 
 pathwaysutils.initialize()
+
+# Configure logging to output to stderr, which is picked up by Logs Explorer.
+# Using force=True to override any existing logger configurations from dependencies.
+logging.basicConfig(
+    stream=sys.stderr,
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    force=True,
+)
+
+import traceback
+
+original_start_trace = jax.profiler.start_trace
+
+@functools.wraps(original_start_trace)
+def patched_start_trace(*args, **kwargs):
+  logging.info("jax.profiler.start_trace called!")
+  logging.info(f"args: {args}, kwargs: {kwargs}")
+  logging.info("Stacktrace:")
+  for line in "".join(traceback.format_stack()).split("\n"):
+    logging.info(line)
+  logging.info("running jax.profiler.start_trace")
+  return original_start_trace(*args, **kwargs)
+
+jax.profiler.start_trace = patched_start_trace
 
 # for vLLM we can skip JAX precompilation with this flag, it makes startup faster
 os.environ["SKIP_JAX_PRECOMPILE"] = "1"
@@ -107,7 +134,7 @@ print(f"JAX devices: {jax.devices()}")
 
 DEBUG = True  # set to True to run in debug mode, for more print statements
 
-run_id = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
+run_id = 'xfgu-' + datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
 
 HOME = os.path.expanduser("~") + "/"
 print(f"Home directory (from Python): {HOME}")
@@ -142,7 +169,8 @@ TRAIN_FRACTION = 1.0
 
 
 # ====== Input Checkpoint directory =====
-MODEL_CHECKPOINT_PATH = "/path/to/scanned/model/ckpt_load_dir/"
+MODEL_CHECKPOINT_PATH = "gs://mazumdera-test-bucket-europe-west4/llama3.1_70b_instruct/2025-10-15/pathways/scanned/0/items/"
+MODEL_CHECKPOINT_PATH = "gs://xfgu-tunix-checkpoints/llama3.1_70b_instruct/2025-10-15/pathways/scanned/0/items/"
 
 # ====== Checkpoint directory =====
 LOG_DIR = f"{HOME}/content/tensorboard/grpo/logs_llama3/"
@@ -150,12 +178,12 @@ if not os.path.exists(LOG_DIR):
   os.makedirs(LOG_DIR)
 
 # ===== Profiling =====
-PROFILE_DIR = f"/path/to/profile_dir/{run_id}/profiles_llama3/"
+PROFILE_DIR = f"gs://mazumdera-test-bucket-europe-west4/rl-tuning/grpo/{run_id}/profiles_llama3/"
 if not epath.Path(PROFILE_DIR).exists():
   epath.Path(PROFILE_DIR).mkdir(parents=True)
 
 # ====== Checkpoint saving ======
-CKPT_DIR = f"/path/to/ckpt_save_dir/{run_id}/ckpts_llama3/"
+CKPT_DIR = f"gs://mazumdera-test-bucket-europe-west4/rl-tuning/grpo/{run_id}/ckpts_llama3/"
 
 if not epath.Path(CKPT_DIR).exists():
   epath.Path(CKPT_DIR).mkdir(parents=True)
@@ -193,7 +221,7 @@ BETA = 0.08
 EPSILON = 0.2
 
 # ====== Training ======
-BATCH_SIZE = 1
+BATCH_SIZE = 4
 # Increase `NUM_BATCHES` and `MAX_STEPS` for better results.
 # NUM_BATCHES = 3738
 NUM_BATCHES = 4  # 200
@@ -234,8 +262,8 @@ GENERATION_CONFIGS = {
 }
 TRAINER_DEVICES_FRACTION = 0.5
 SAMPLER_DEVICES_FRACTION = 0.5
-HBM_UTILIZATION_VLLM = 0.72
-SWAP_SPACE_VLLM_GB = 2
+HBM_UTILIZATION_VLLM = 0.2
+SWAP_SPACE_VLLM_GB = 0.1
 
 
 # ====== Reward ======
@@ -387,40 +415,93 @@ def get_ref_maxtext_model(config, devices=None):
   return tunix_model, mesh
 
 
-# Load the reference model
-# Note: pass the path to your scanned checkpoint for "load_parameters_path". To generate a scanned checkpoint, you can use the `scanned_checkpoint.py` script in MaxText.
-# To create a scanned checkpoint, you can use /maxtext/MaxText/utils/ckpt_conversion/to_maxtext.py
-config_ref = pyconfig.initialize(
-    [
-        "",
-        BASE_YAML_PATH,
-    ],
-    base_output_directory="dummy",  # This is not used in Tunix.
-    run_name="test-tunix-maxtext-llama3.1-70b",
-    tokenizer_type="tiktoken",
-    tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizer_llama3.tiktoken"),
-    load_parameters_path=MODEL_CHECKPOINT_PATH,
-    per_device_batch_size=1,
-    max_prefill_predict_length=4,
-    max_target_length=1024,
-    steps=10,
-    async_checkpointing="false",
-    model_name="llama3.1-70b",
-    checkpoint_period=5,
-    skip_jax_distributed_system="true",
-    weight_dtype="bfloat16",
-    attention="dot_product",
-    remat_policy="custom",
-    decoder_layer_input="offload",
-    query_proj="offload",
-    key_proj="offload",
-    value_proj="offload",
-)
+def get_config_kwargs(**kwargs):
+  """Get default config kwargs and update with overrides."""
+  default = dict(
+      base_output_directory="dummy",  # This is not used in Tunix.
+      run_name="test-tunix-maxtext-llama3.1-70b",
+      tokenizer_type="tiktoken",
+      tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizer_llama3.tiktoken"),
+      load_parameters_path=MODEL_CHECKPOINT_PATH,
+      per_device_batch_size=1,
+      max_prefill_predict_length=4,
+      max_target_length=1024,
+      steps=10,
+      async_checkpointing="false",
+      model_name="llama3.1-70b",
+      checkpoint_period=5,
+      skip_jax_distributed_system="true",
+      weight_dtype="bfloat16",
+      attention="dot_product",
+      remat_policy="custom",
+      decoder_layer_input="offload",
+      query_proj="offload",
+      key_proj="offload",
+      value_proj="offload",
+  )
+  default.update(kwargs)
+  return default
+
 
 devices = jax.devices()
 num_vms = len(devices) // CHIPS_PER_VM
 
-if num_vms >= 2:
+if len(devices) == 768:  # 3 slices v6e-256 with 256 devices per slice
+  print(
+      "3 v6e-256 slices (256 chips each) detected, allocating 2 for trainer and"
+      " 1 for sampler."
+  )
+  chips_per_slice = 256
+  num_trainer_slices = 2
+  num_sampler_slices = 1
+  devices_by_slice = collections.defaultdict(list)
+  for d in devices:
+    devices_by_slice[d.slice_index].append(d)
+  slice_indices = sorted(devices_by_slice.keys())
+  trainer_devices = []
+  for i in range(num_trainer_slices):
+    trainer_devices.extend(devices_by_slice[slice_indices[i]])
+  sampler_devices = []
+  for i in range(num_trainer_slices, num_trainer_slices + num_sampler_slices):
+    sampler_devices.extend(devices_by_slice[slice_indices[i]])
+  sampler_devices = sampler_devices[:64]
+
+  print("Creating reference model and mesh for reference.")
+  trainer_config_kwargs = get_config_kwargs(
+      ici_data_parallelism=1,
+      ici_fsdp_parallelism=256,
+      ici_tensor_parallelism=1,
+      dcn_data_parallelism=2,
+      dcn_fsdp_parallelism=1,
+      dcn_tensor_parallelism=1,
+      num_slices=2,
+  )
+  print("[xfgu] trainer_config_kwargs.num_slices =", trainer_config_kwargs["num_slices"])
+  config_trainer = pyconfig.initialize(["", BASE_YAML_PATH], **trainer_config_kwargs)
+  print("[xfgu] config_trainer.num_slices:", config_trainer.num_slices)
+  llama3_1_70b, reference_mesh = get_ref_maxtext_model(
+      config_trainer, trainer_devices
+  )
+  print("Creating rollout mesh for sampler.")
+  sampler_config_kwargs = get_config_kwargs(
+      ici_data_parallelism=1,
+      ici_fsdp_parallelism=64,
+      ici_tensor_parallelism=1,
+      dcn_data_parallelism=1,
+      dcn_fsdp_parallelism=1,
+      dcn_tensor_parallelism=1,
+      num_slices=1,
+  )
+  config_sampler = pyconfig.initialize(["", BASE_YAML_PATH], **sampler_config_kwargs)
+  devices_array = maxtext_utils.create_device_mesh(
+      config_sampler, sampler_devices
+  )
+  rollout_mesh = Mesh(devices_array, config_sampler.mesh_axes)
+  mesh = reference_mesh
+  config_policy = config_trainer
+elif num_vms >= 2:
+  config = pyconfig.initialize(["", BASE_YAML_PATH], **get_config_kwargs())
+  config_policy = config
   print(f"{num_vms} VMs detected, allocating trainer and sampler devices")
   num_devices = len(devices)
   num_trainer_devices = int(num_devices * TRAINER_DEVICES_FRACTION)
@@ -429,12 +510,14 @@ if num_vms >= 2:
   sampler_devices = devices[num_devices - num_sampler_devices :]
 
   print("Creating reference model and also meshes for reference and rollout")
-  llama3_1_70b, reference_mesh = get_ref_maxtext_model(config_ref, trainer_devices)
-  devices_array = maxtext_utils.create_device_mesh(config_ref, sampler_devices)
-  rollout_mesh = Mesh(devices_array, config_ref.mesh_axes)
+  llama3_1_70b, reference_mesh = get_ref_maxtext_model(config, trainer_devices)
+  devices_array = maxtext_utils.create_device_mesh(config, sampler_devices)
+  rollout_mesh = Mesh(devices_array, config.mesh_axes)
   mesh = reference_mesh
 else:
-  llama3_1_70b, mesh = get_ref_maxtext_model(config_ref, devices)
+  config = pyconfig.initialize(["", BASE_YAML_PATH], **get_config_kwargs())
+  config_policy = config
+  llama3_1_70b, mesh = get_ref_maxtext_model(config, devices)
   actor_mesh = mesh
   reference_mesh = mesh
   rollout_mesh = mesh
@@ -463,40 +546,16 @@ if DEBUG:
 
 # TODO: @mazumdera: change this to use lora
 
-config_policy = pyconfig.initialize(
-    [
-        "",
-        BASE_YAML_PATH,
-    ],
-    base_output_directory="dummy",  # This is not used in Tunix.
-    run_name="test-tunix-maxtext-llama3.1-70b",  # This is not used in Tunix.
-    tokenizer_type="tiktoken",
-    tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizer_llama3.tiktoken"),
-    load_parameters_path=MODEL_CHECKPOINT_PATH,
-    per_device_batch_size=1,
-    max_prefill_predict_length=4,
-    max_target_length=1024,
-    steps=10,
-    async_checkpointing="false",
-    model_name="llama3.1-70b",
-    checkpoint_period=5,
-    skip_jax_distributed_system="true",
-    weight_dtype="bfloat16",
-    attention="dot_product",
-    remat_policy="custom",
-    decoder_layer_input="offload",
-    query_proj="offload",
-    key_proj="offload",
-    value_proj="offload",
-)
-
-if num_vms >= 2:
+if len(devices) == 768:
+  llama3_1_70b_policy, policy_mesh = get_ref_maxtext_model(config_trainer, trainer_devices)
+  actor_mesh = policy_mesh
+elif num_vms >= 2:
   # For the policy model, override the config to create a 4-device mesh.
   print("Creating policy model on trainer mesh")
-  llama3_1_70b_policy, policy_mesh = get_ref_maxtext_model(config_policy, trainer_devices)
+  llama3_1_70b_policy, policy_mesh = get_ref_maxtext_model(config, trainer_devices)
   actor_mesh = policy_mesh
 else:
-  llama3_1_70b_policy, policy_mesh = get_ref_maxtext_model(config_policy, devices)
+  llama3_1_70b_policy, policy_mesh = get_ref_maxtext_model(config, devices)
 
 llama3_1_70b_policy.config = None
 
@@ -887,6 +946,13 @@ checkpointing_options = ocp.CheckpointManagerOptions(save_interval_steps=SAVE_IN
 metrics_logging_options = metrics_logger.MetricsLoggerOptions(log_dir=LOG_DIR, flush_every_n_steps=20)
 
 # Profiler
+profiler_options = profiler.ProfilerOptions(
+    log_dir=PROFILE_DIR,
+    skip_first_n_steps=2,
+    profiler_steps=8,
+    set_profile_options=False,
+)
+
 profiler_options = None
 
 # Logs
@@ -932,13 +998,17 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         actor_optimizer=optimizer,
         eval_every_n_steps=EVAL_EVERY_N_STEPS,
         max_steps=MAX_STEPS,
+        # micro batching
+        # mini_batch_size=4,
+        # train_micro_batch_size=1,
+        # rollout_micro_batch_size=1,
         # metrics logging
         metrics_logging_options=metrics_logging_options,
         # profiling
         profiler_options=profiler_options,
         # checkpoint saving
-        checkpoint_root_directory=CKPT_DIR,
-        checkpointing_options=checkpointing_options,
+        # checkpoint_root_directory=CKPT_DIR,
+        # checkpointing_options=checkpointing_options,
     ),
     rollout_config=base_rollout.RolloutConfig(
         max_tokens_to_generate=TOTAL_GENERATION_STEPS,
@@ -1011,10 +1081,10 @@ print(f"Pre GRPO Training: {corr=}, {total=}, {accuracy=}%, {partial_accuracy=}%
 # ## Start training
 #
 
-jax.profiler.start_trace(PROFILE_DIR)
+# jax.profiler.start_trace(PROFILE_DIR)
 with mesh, nn_partitioning.axis_rules(config_policy.logical_axis_rules):
   grpo_trainer.train(dataset)
-jax.profiler.stop_trace()
+# jax.profiler.stop_trace()
 
 # ## Evaluate
 #
