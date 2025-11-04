@@ -23,27 +23,28 @@ This script uses the unified `rl_train` function from MaxText.rl.train_rl.
 
 Usage:
   # Minimal usage (only required arguments):
+  # Note: Arguments can use --key=value OR key=value format (both work)
   python3 src/MaxText/examples/grpo_llama3_1_8b_demo.py \\
-    --load_parameters_path=gs://bucket/path/to/checkpoint \\
-    --base_output_directory=/tmp/grpo_output \\
-    --hf_access_token=$HF_TOKEN
-
-  # With GCS paths (use quotes if path has spaces):
-  python3 src/MaxText/examples/grpo_llama3_1_8b_demo.py \\
-    --load_parameters_path="gs://bucket/path with spaces/checkpoint" \\
-    --base_output_directory=/tmp/grpo_output \\
-    --hf_access_token=$HF_TOKEN
+    load_parameters_path=gs://bucket/path/to/checkpoint \\
+    base_output_directory=/tmp/grpo_output \\
+    hf_access_token=$HF_TOKEN
 
   # With optional overrides:
   python3 src/MaxText/examples/grpo_llama3_1_8b_demo.py \\
+    load_parameters_path=gs://bucket/path/to/checkpoint \\
+    base_output_directory=/tmp/grpo_output \\
+    hf_access_token=$HF_TOKEN \\
+    steps=100 \\
+    num_batches=10
+
+  # Alternative format with -- prefix (also supported):
+  python3 src/MaxText/examples/grpo_llama3_1_8b_demo.py \\
     --load_parameters_path=gs://bucket/path/to/checkpoint \\
     --base_output_directory=/tmp/grpo_output \\
-    --hf_access_token=$HF_TOKEN \\
-    --steps=100 \\
-    --num_batches=10
+    --hf_access_token=$HF_TOKEN
 
   Note: model_name, tokenizer_path, and chat_template_path are hardcoded for llama3.1-8b
-        but can be overridden via command line if needed (e.g., --model_name=llama3.1-70b).
+        but can be overridden via command line if needed (e.g., model_name=llama3.1-70b).
 
 GRPO is an RL algorithm designed to enhance the reasoning abilities of LLMs. It
 is a variant of Proximal Policy Optimization (PPO) that reduces memory usage by
@@ -150,6 +151,13 @@ def main(argv: Sequence[str]) -> None:
 
   print(f"[Config] Final arguments count: {len(merged_args)}")
   print(f"[Config] Config file: {config_file}")
+  print(f"[Config] Final merged_args format (first 5): {merged_args[:min(5, len(merged_args))]}")
+  
+  # Verify the format is correct for pyconfig.initialize
+  # Expected: ["config_file", "key1=value1", "key2=value2", ...]
+  assert merged_args[0] == config_file, "First argument must be config file"
+  for arg in merged_args[1:]:
+    assert "=" in arg, f"All config arguments must be in key=value format, got: {arg}"
   
   # Verify chat template file exists
   if not os.path.exists(chat_template_path):
