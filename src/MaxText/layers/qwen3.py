@@ -1614,7 +1614,7 @@ class Qwen3OmniMoeVisionProjector(nnx.Module):
       merger: Patch merger for spatial reduction
   """
 
-  def __init__(self, config: Config, *, rngs: nnx.Rngs = None):
+  def __init__(self, config: Config, *, mesh=None, rngs: nnx.Rngs = None):
     """Initializes the Qwen3Omni vision projector.
 
     Args:
@@ -1643,6 +1643,17 @@ def qwen3omni_visionencoder_as_linen(config: Config, mesh: Mesh) -> nn.Module:
       config=config,
       mesh=mesh,
       name="Qwen3OmniMoeVisionEncoder_0",
+      abstract_init=False,
+      metadata_fn=variable_to_logically_partitioned,
+  )
+
+def qwen3omni_visionprojector_as_linen(config: Config, mesh: Mesh) -> nn.Module:
+  """Convert Qwen3OmniMoeVisionProjector to Linen module."""
+  return nnx_wrappers.to_linen(
+      Qwen3OmniMoeVisionProjector,
+      config=config,
+      mesh=mesh,
+      name="Qwen3OmniMoeVisionProjector_0",
       abstract_init=False,
       metadata_fn=variable_to_logically_partitioned,
   )
