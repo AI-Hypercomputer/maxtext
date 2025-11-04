@@ -4,6 +4,7 @@ array-record
 cloud-accelerator-diagnostics
 cloud-tpu-diagnostics
 datasets
+drjax>=0.1.4
 flax
 gcsfs
 google-api-python-client
