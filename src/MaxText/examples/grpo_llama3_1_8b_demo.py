@@ -24,13 +24,19 @@ This script uses the unified `rl_train` function from MaxText.rl.train_rl.
 Usage:
   # Minimal usage (only required arguments):
   python3 src/MaxText/examples/grpo_llama3_1_8b_demo.py \\
-    --load_parameters_path=/path/to/scanned/model/ckpt_load_dir/ \\
+    --load_parameters_path=gs://bucket/path/to/checkpoint \\
+    --base_output_directory=/tmp/grpo_output \\
+    --hf_access_token=$HF_TOKEN
+
+  # With GCS paths (use quotes if path has spaces):
+  python3 src/MaxText/examples/grpo_llama3_1_8b_demo.py \\
+    --load_parameters_path="gs://bucket/path with spaces/checkpoint" \\
     --base_output_directory=/tmp/grpo_output \\
     --hf_access_token=$HF_TOKEN
 
   # With optional overrides:
   python3 src/MaxText/examples/grpo_llama3_1_8b_demo.py \\
-    --load_parameters_path=/path/to/scanned/model/ckpt_load_dir/ \\
+    --load_parameters_path=gs://bucket/path/to/checkpoint \\
     --base_output_directory=/tmp/grpo_output \\
     --hf_access_token=$HF_TOKEN \\
     --steps=100 \\
@@ -97,23 +103,39 @@ def main(argv: Sequence[str]) -> None:
   
   # Process command line arguments: strip -- prefix and convert to key=value format
   # argv[0] is script name, argv[1:] are the arguments
+  # The shell already splits arguments, so paths with spaces should be quoted by user
   cli_args = []
   cli_dict = {}
+  
+  print(f"[Debug] Received {len(argv)} arguments: {argv[:min(5, len(argv))]}")
+  
   for arg in argv[1:]:
     if not arg:
       continue
+    
     # Strip -- prefix if present (convert --key=value to key=value)
     if arg.startswith("--"):
       arg_without_dash = arg[2:]
+      # Ensure it has '=' for key=value format
+      if "=" not in arg_without_dash:
+        raise ValueError(
+            f"Invalid argument format: '{arg}'. Expected --key=value format.\n"
+            f"Example: --load_parameters_path=gs://bucket/path"
+        )
       cli_args.append(arg_without_dash)
-      if "=" in arg_without_dash:
-        key, _ = arg_without_dash.split("=", 1)
-        cli_dict[key] = True
-    else:
+      # Split on first '=' only to handle paths with '=' characters
+      key, value = arg_without_dash.split("=", 1)
+      cli_dict[key] = True
+      print(f"[Debug] Parsed: {key}={value[:50]}..." if len(value) > 50 else f"[Debug] Parsed: {key}={value}")
+    elif "=" in arg:
+      # Already in key=value format without --
       cli_args.append(arg)
-      if "=" in arg:
-        key, _ = arg.split("=", 1)
-        cli_dict[key] = True
+      key, value = arg.split("=", 1)
+      cli_dict[key] = True
+      print(f"[Debug] Parsed: {key}={value[:50]}..." if len(value) > 50 else f"[Debug] Parsed: {key}={value}")
+    else:
+      # Not a key=value argument - might be a positional argument
+      print(f"[Warning] Ignoring non-key=value argument: '{arg}'")
   
   # Build merged arguments: config file first, then CLI args, then hardcoded defaults
   merged_args = [config_file] + cli_args
