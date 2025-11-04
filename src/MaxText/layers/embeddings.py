@@ -1216,8 +1216,7 @@ class Qwen3OmniMoeVisionPosEmbedInterpolate(nnx.Module):
               self.rngs.params(),
               (self.num_position_embeddings, self.hidden_size),
               self.dtype,
-          ),
-          sharding=("embed", "embed"),
+          )
       )
     self.num_grid_per_side = int(self.num_position_embeddings ** 0.5)
 
