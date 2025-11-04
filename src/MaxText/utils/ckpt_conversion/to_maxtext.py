@@ -44,7 +44,11 @@ Example Usage:
 
 import os
 import sys
-from typing import Sequence, List, Dict, Any
+import gc
+import tempfile
+import multiprocessing as mp
+from typing import Sequence, List, Dict, Any, Tuple
+from tqdm import tqdm
 
 import numpy as np
 import jax
@@ -55,6 +59,10 @@ import flax.linen as nn
 from flax.linen import partitioning as nn_partitioning
 from transformers import AutoConfig, AutoModelForCausalLM
 from tqdm import tqdm
+from transformers import AutoConfig
+import json
+from huggingface_hub import snapshot_download
+from safetensors import safe_open
 
 from MaxText import checkpointing
 from MaxText import max_logging
@@ -68,6 +76,83 @@ from MaxText.utils.ckpt_conversion.utils.param_mapping import HOOK_FNS, PARAM_MA
 from MaxText.utils.ckpt_conversion.utils.utils import apply_hook_fns, HF_IDS
 
 jax.config.update("jax_platform_name", "cpu")
+
+
+def transform_and_save_tensor(args: Tuple[int, str, Tuple, Any, str, Dict, str, str, Dict, bool]) -> str:
+  """
+  Worker function to transform a single tensor in a separate process.
+  This function receives all necessary data, performs the conversion,
+  saves the result to a temporary file, and returns the file path.
+  """
+  (
+      i,
+      mt_param_key,
+      mt_target_shape_final,
+      hf_source_keys_or_key,
+      model_path,
+      weight_map,
+      temp_dir,
+      model_name,
+      hf_config_dict,
+      scan_layers,
+  ) = args
+
+  # Recreate hook function map inside the worker to avoid pickling issues
+  hook_fn_map_mt = HOOK_FNS[model_name](hf_config_dict, scan_layers, saving_to_hf=False)
+  hook_fn_list_or_fn = hook_fn_map_mt.get(mt_param_key)
+
+  # Each process needs to open its own file handles
+  local_hf_safetensor_handles = {}
+
+  def get_hf_tensor_local(hf_key: str) -> np.ndarray:
+    if hf_key not in weight_map:
+      raise ValueError(f"HuggingFace key '{hf_key}' not found in the model's weight map.")
+    filename = weight_map[hf_key]
+    if filename not in local_hf_safetensor_handles:
+      local_hf_safetensor_handles[filename] = safe_open(os.path.join(model_path, filename), framework="pt", device="cpu")
+    return local_hf_safetensor_handles[filename].get_tensor(hf_key).float().numpy()
+
+  final_mt_tensor_numpy = None
+  temp_path = os.path.join(temp_dir, f"tensor_{i}.npy")
+
+  if not isinstance(hf_source_keys_or_key, list):
+    hf_key_single = hf_source_keys_or_key
+    hf_tensor_numpy = get_hf_tensor_local(hf_key_single)
+    final_mt_tensor_numpy = apply_hook_fns(hf_tensor_numpy, mt_target_shape_final, hook_fn_list_or_fn)
+    np.save(temp_path, final_mt_tensor_numpy)
+  else:
+    is_multi_axis_stacked = isinstance(hf_source_keys_or_key[0], list)
+    if is_multi_axis_stacked:
+      # Build the complex MoE tensor incrementally on disk
+      _build_multi_axis_stacked_tensor(
+          hf_source_keys_or_key, get_hf_tensor_local, hook_fn_list_or_fn, mt_target_shape_final, temp_path
+      )
+    else:
+      # This is the common case for large stacked tensors.
+      # We build it incrementally on disk and don't return a numpy array.
+      _build_single_axis_stacked_tensor(
+          hf_source_keys_or_key,
+          get_hf_tensor_local,
+          hook_fn_list_or_fn,
+          mt_target_shape_final,
+          pyconfig.Config(model_name=model_name, scan_layers=scan_layers),  # Pass a minimal config
+          temp_path,
+      )
+
+  if final_mt_tensor_numpy is not None:
+    if final_mt_tensor_numpy.shape != mt_target_shape_final:
+      raise ValueError(
+          f"Shape mismatch for {mt_param_key}: "
+          f"Expected {mt_target_shape_final}, got {final_mt_tensor_numpy.shape} "
+          f"from HF key(s) {hf_source_keys_or_key} after hooks."
+      )
+    del final_mt_tensor_numpy
+    gc.collect()
+
+  # The OS will close file handles when the process exits.
+  # No explicit close is needed for safetensor handles.
+
+  return temp_path
 
 
 class MemoryMonitorTqdm(tqdm):
@@ -102,87 +187,6 @@ class MemoryMonitorTqdm(tqdm):
 
     return super().format_meter(n=n, total=total, elapsed=elapsed, postfix=postfix, **extra_kwargs)
 
-
-def _build_multi_axis_stacked_tensor(
-    hf_source_keys: List[List[str]], hf_state_dict: Dict[str, np.ndarray], hook_fns: Any
-) -> np.ndarray:
-  """Builds a MaxText tensor by stacking HF weights along two axes (experts and layers).
-
-  This function handles the complex case for scanned MoE layers, producing a tensor
-  with the shape (num_experts, num_layers, ...).
-
-  Args:
-      hf_source_keys: A nested (2D) list of Hugging Face parameter names.
-                      Outer list iterates experts, inner list iterates layers.
-      hf_state_dict: The dictionary of loaded Hugging Face weights.
-      hook_fns: The hook function(s) to apply to each individual weight.
-
-  Returns:
-      The final, assembled NumPy array for the MaxText parameter.
-  """
-  all_expert_tensors = []
-  # Outer loop iterates through experts
-  for layer_keys_for_expert in hf_source_keys:
-    layer_tensors_for_expert = []
-    # Inner loop iterates through layers for the current expert
-    for hf_key_single in layer_keys_for_expert:
-      if hf_key_single not in hf_state_dict:
-        raise ValueError(f"HuggingFace key {hf_key_single} not found in state_dict.")
-      hf_tensor_numpy = hf_state_dict[hf_key_single]
-      # For this case, the hook function does not require the target_shape.
-      processed_hf_tensor = apply_hook_fns(hf_tensor_numpy, None, hook_fns)
-      layer_tensors_for_expert.append(processed_hf_tensor)
-
-    # First, stack all layers for the current expert. This creates the 'layer' axis.
-    stacked_expert_tensor = np.stack(layer_tensors_for_expert, axis=0)
-    all_expert_tensors.append(stacked_expert_tensor)
-
-  # Second, stack all the expert tensors. This creates the 'expert' axis.
-  return np.stack(all_expert_tensors, axis=0)
-
-
-def _build_single_axis_stacked_tensor(
-    hf_source_keys: List[str], hf_state_dict: Dict[str, np.ndarray], hook_fns: Any, target_shape: tuple, config
-) -> np.ndarray:
-  """Builds a MaxText tensor by stacking HF weights along a single axis.
-
-  This function handles both standard scanned layers (e.g., attention) and
-  unscanned MoE layers (which are stacked along the expert axis).
-
-  Args:
-      hf_source_keys: A 1D list of Hugging Face parameter names.
-      hf_state_dict: The dictionary of loaded Hugging Face weights.
-      hook_fns: The hook function(s) to apply to each individual weight.
-      target_shape: The final shape of the target MaxText tensor.
-      config: The MaxText pyconfig object.
-
-  Returns:
-      The final, assembled NumPy array for the MaxText parameter.
-  """
-  tensors_to_stack = []
-  # Heuristic to determine if we are stacking layers or experts.
-  # If the number of items to stack equals the number of layers, it's a standard
-  # scanned layer, and we use the configured param_scan_axis. Otherwise, it's
-  # an unscanned MoE layer, and we stack along the expert axis (0).
-  axis_to_stack = config.param_scan_axis if len(hf_source_keys) == config.base_num_decoder_layers else 0
-
-  # The hook function needs the shape of an individual slice, not the full stacked tensor.
-  # We calculate it by removing the stacking dimension from the final target shape.
-  mt_slice_shape_list = list(target_shape)
-  del mt_slice_shape_list[axis_to_stack]
-  mt_slice_shape = tuple(mt_slice_shape_list)
-
-  for hf_key_single in hf_source_keys:
-    if hf_key_single not in hf_state_dict:
-      raise ValueError(f"HuggingFace key {hf_key_single} not found in state_dict.")
-    hf_tensor_numpy = hf_state_dict[hf_key_single]
-    processed_hf_tensor = apply_hook_fns(hf_tensor_numpy, mt_slice_shape, hook_fns)
-    tensors_to_stack.append(processed_hf_tensor)
-
-  # Stack all processed tensors along the determined axis.
-  return np.stack(tensors_to_stack, axis=axis_to_stack)
-
-
 def _get_hf_model(model_id: str, token: str):
   """Loads the HuggingFace model based on model_id."""
   # Some models require special classes to import
@@ -194,8 +198,102 @@ def _get_hf_model(model_id: str, token: str):
     hf_model = AutoModelForCausalLM.from_pretrained(model_id, token=token)
   return hf_model
 
+def _build_multi_axis_stacked_tensor(
+    hf_source_keys: List[List[str]],
+    get_tensor_fn: callable,
+    hook_fns: Any,
+    target_shape: tuple,
+    temp_file_path: str,
+) -> None:
+  """Builds a MaxText tensor by stacking HF weights along two axes (experts and layers).
+
+  This function handles both standard scanned layers (e.g., attention) and
+  unscanned MoE layers (which are stacked along the expert axis).
+
+  Args:
+      hf_source_keys: A 1D list of Hugging Face parameter names.
+      hf_state_dict: The dictionary of loaded Hugging Face weights.
+      hook_fns: The hook function(s) to apply to each individual weight.
+      target_shape: The final shape of the target MaxText tensor.
+      temp_file_path: Path to a temporary file to store the intermediate tensor.
+  """
+  # Create a memory-mapped array on disk to hold the final tensor
+  final_memmapped_tensor = np.memmap(temp_file_path, dtype=np.float32, mode="w+", shape=target_shape)
+
+  # Outer loop iterates through experts
+  for expert_idx, layer_keys_for_expert in enumerate(hf_source_keys):
+    # Inner loop iterates through layers for the current expert
+    for layer_idx, hf_key_single in enumerate(layer_keys_for_expert):
+      hf_tensor_numpy = get_tensor_fn(hf_key_single)
+      # For this case, the hook function does not require the target_shape.
+      processed_hf_tensor = apply_hook_fns(hf_tensor_numpy, None, hook_fns)
+
+      # Write the processed tensor directly into its slice of the on-disk array
+      final_memmapped_tensor[expert_idx, layer_idx] = processed_hf_tensor
+
+  # Ensure all data is written to disk
+  final_memmapped_tensor.flush()
+  del final_memmapped_tensor
+  gc.collect()
+
+
+def _build_single_axis_stacked_tensor(
+    hf_source_keys: List[str],
+    get_tensor_fn: callable,
+    hook_fns: Any,
+    target_shape: tuple,
+    config,
+    temp_file_path: str,
+) -> None:
+  """Builds a MaxText tensor by stacking HF weights along a single axis.
+
+  This function handles both standard scanned layers (e.g., attention) and
+  unscanned MoE layers (which are stacked along the expert axis).
+
+  Args:
+      hf_source_keys: A 1D list of Hugging Face parameter names.
+      hf_state_dict: The dictionary of loaded Hugging Face weights.
+      hook_fns: The hook function(s) to apply to each individual weight.
+      target_shape: The final shape of the target MaxText tensor.
+      config: The MaxText pyconfig object.
+      temp_file_path: Path to a temporary file to store the intermediate tensor.
+  """
+  # Heuristic to determine if we are stacking layers or experts.
+  axis_to_stack = config.param_scan_axis if len(hf_source_keys) == config.base_num_decoder_layers else 0
+
+  # Create a memory-mapped array on disk to hold the final tensor
+  final_memmapped_tensor = np.memmap(temp_file_path, dtype=np.float32, mode="w+", shape=target_shape)
+
+  # Calculate the shape of an individual slice
+  mt_slice_shape_list = list(target_shape)
+  del mt_slice_shape_list[axis_to_stack]
+  mt_slice_shape = tuple(mt_slice_shape_list)
+
+  for i, hf_key_single in enumerate(hf_source_keys):
+    hf_tensor_numpy = get_tensor_fn(hf_key_single)
+    processed_hf_tensor = apply_hook_fns(hf_tensor_numpy, mt_slice_shape, hook_fns)
+    # Create a slice object to write to the correct index in the memmapped array
+    slice_obj = [slice(None)] * len(target_shape)
+    slice_obj[axis_to_stack] = i
+    final_memmapped_tensor[tuple(slice_obj)] = processed_hf_tensor
+
+  # Ensure the data is written to disk
+  final_memmapped_tensor.flush()
+  del final_memmapped_tensor
+  gc.collect()
+
+
+def print_ram_usage(stage=""):
+  """Helper function to print current RAM usage."""
+  memory = psutil.virtual_memory()
+  used_gb = memory.used / (1024**3)
+  total_gb = memory.total / (1024**3)
+  memory_percent = memory.percent
+  max_logging.log(f"[{stage}] RAM Usage: {used_gb:.2f}/{total_gb:.2f} GB ({memory_percent:.1f}%)")
+
 
 def main(argv: Sequence[str]) -> None:
+  print_ram_usage("Script Start")
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"  # Suppress TensorFlow logging
 
@@ -246,7 +344,7 @@ def main(argv: Sequence[str]) -> None:
       use_zarr3=config.checkpoint_storage_use_zarr3,
   )
 
-  max_logging.log("MaxText abstract model and state initializing...")
+  max_logging.log("MaxText abstract model and state initializing...") 
   quant = quantizations.configure_quantization(config)
   maxtext_model_flax = models.transformer_as_linen(config, mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
 
@@ -267,78 +365,90 @@ def main(argv: Sequence[str]) -> None:
 
   max_logging.log("MaxText abstract model and state initialized.")
 
-  # Get parameter mappings and hooks
-  # example of param mapping (gemma2, maxtext:huggingface):
-  # "params-decoder-layers_{maxtext_layer_idx}-pre_self_attention_norm_global-scale":
-  #   f"model.layers.{global_layer_idx}.input_layernorm.weight",
+  # Extract the metadata we need: the shapes and the tree structure
+  abstract_params_flat, abstract_params_treedef = jax.tree_util.tree_flatten_with_path(abstract_state.params["params"])
+  param_shapes = {"params-" + "-".join([k.key for k in p]): v.shape for p, v in abstract_params_flat}
 
-  model_key = config.model_name
-  param_map_mt_to_hf = PARAM_MAPPING[model_key](hf_config_obj.to_dict(), config.scan_layers)
-
-  # Example of Hook FN mapping, to perform reshape:
-  # f"params-decoder-layers_{maxtext_layer_idx}-self_attention_global-key-kernel": reshape_kernel,
-  hook_fn_map_mt = HOOK_FNS[model_key](hf_config_obj.to_dict(), config.scan_layers, saving_to_hf=False)
-  max_logging.log("Parameter mappings and hooks obtained.")
+  # Immediately delete the large JAX objects to free memory before the main loop
+  del abstract_state, maxtext_model_flax, tx, abstract_params_flat
+  gc.collect()
+  print_ram_usage("After JAX Metadata Extraction and Cleanup")
 
   # Transform weights
   max_logging.log("Starting weight transformation...")
-  final_mt_weights = []
+  print_ram_usage("Before Weight Transformation Loop")
+  temp_files = []
+  temp_dir = tempfile.mkdtemp()
 
-  for path_tuple, abstract_leaf_value in MemoryMonitorTqdm(
-      abstract_params_flat, desc="Transforming weights", unit="param", leave=True, dynamic_ncols=True
-  ):
-    key_parts = [k.key for k in path_tuple if hasattr(k, "key")]
-    mt_param_key = "params-" + "-".join(key_parts)
-    mt_target_shape_final = abstract_leaf_value.shape
-
+  # Prepare arguments for the worker processes
+  tasks = []
+  hf_config_dict = hf_config_obj.to_dict()
+  for i, mt_param_key in enumerate(param_shapes):
     hf_source_keys_or_key = param_map_mt_to_hf.get(mt_param_key)
     if hf_source_keys_or_key is None:
       raise ValueError(f"MaxText parameter {mt_param_key} not found in mapping.")
 
-    hook_fn_list_or_fn = hook_fn_map_mt.get(mt_param_key)
-    final_mt_tensor_numpy = None
-
-    if not isinstance(hf_source_keys_or_key, list):
-      # Case 1: Simple 1-to-1 mapping
-      hf_key_single = hf_source_keys_or_key
-      if hf_key_single not in hf_state_dict_numpy:
-        raise ValueError(f"HuggingFace key {hf_key_single} not found in state_dict.")
-      hf_tensor_numpy = hf_state_dict_numpy[hf_key_single]
-      final_mt_tensor_numpy = apply_hook_fns(hf_tensor_numpy, mt_target_shape_final, hook_fn_list_or_fn)
-    else:
-      # It's a stacked parameter, so dispatch to a helper function.
-      is_multi_axis_stacked = isinstance(hf_source_keys_or_key[0], list)
-
-      if is_multi_axis_stacked:
-        # Case 2: Multi-Axis Stacked (Scanned MoE)
-        final_mt_tensor_numpy = _build_multi_axis_stacked_tensor(
-            hf_source_keys_or_key, hf_state_dict_numpy, hook_fn_list_or_fn
+    tasks.append(
+        (
+            i,
+            mt_param_key,
+            param_shapes[mt_param_key],  # Pass the correct shape
+            hf_source_keys_or_key,
+            model_path,
+            weight_map,
+            temp_dir,
+            config.model_name,
+            hf_config_dict,
+            config.scan_layers,
         )
-      else:
-        # Case 3: Single-Axis Stacked (Standard Scanned or Unscanned MoE)
-        final_mt_tensor_numpy = _build_single_axis_stacked_tensor(
-            hf_source_keys_or_key, hf_state_dict_numpy, hook_fn_list_or_fn, mt_target_shape_final, config
-        )
+    )
 
-    if final_mt_tensor_numpy.shape != mt_target_shape_final:
-      raise ValueError(
-          f"Shape mismatch for {mt_param_key}: "
-          f"Expected {mt_target_shape_final}, got {final_mt_tensor_numpy.shape} "
-          f"from HF key(s) {hf_source_keys_or_key} after hooks."
-      )
-    final_mt_weights.append(final_mt_tensor_numpy)
+  # Use a process pool to transform tensors in parallel
+  try:
+    # Using 'spawn' start method for better cross-platform compatibility and safety
+    ctx = mp.get_context("spawn")
+    with ctx.Pool() as pool:
+      with MemoryMonitorTqdm(
+          total=len(tasks),
+          desc="Transforming weights",
+          unit="param",
+      ) as pbar:
+        for temp_path in pool.imap_unordered(transform_and_save_tensor, tasks):
+          temp_files.append(temp_path)
+          pbar.update(1)
 
-  del abstract_params_flat, hf_state_dict_numpy
-  max_logging.log("Weight transformation complete.")
+    # Ensure temp_files are sorted correctly by tensor index
+    temp_files.sort(key=lambda x: int(os.path.basename(x).split("_")[1].split(".")[0]))
+
+    print_ram_usage("After Weight Transformation Loop")
+    max_logging.log("All tensors converted and saved to temporary files.")
+    max_logging.log("Reloading tensors to build final checkpoint.")
+
+    final_mt_weights = []
+    for temp_path in temp_files:
+      final_mt_weights.append(np.load(temp_path, mmap_mode="r"))
+
+    print_ram_usage("After Reloading Tensors")
+
+  finally:
+    # Clean up all temporary files and the directory
+    for temp_path in temp_files:
+      if os.path.exists(temp_path):
+        os.remove(temp_path)
+    if os.path.exists(temp_dir):
+      os.rmdir(temp_dir)
 
   # Create final MaxText parameters tree
   jax_weights = jax.tree_util.tree_unflatten(abstract_params_treedef, final_mt_weights)
   del final_mt_weights, abstract_params_treedef
+  gc.collect()
+  print_ram_usage("After Creating JAX Tree")
 
   # Create TrainState for saving.
   final_params_for_state = {"params": jax_weights}
   final_save_state = train_state.TrainState(step=0, apply_fn=None, params=final_params_for_state, tx=None, opt_state={})
   del final_params_for_state
+  print_ram_usage("After Creating TrainState")
 
   if checkpoint_manager is not None:
     if save_checkpoint(checkpoint_manager, 0, final_save_state):
@@ -349,6 +459,7 @@ def main(argv: Sequence[str]) -> None:
       sys.exit()
 
   max_logging.log(f"Conversion complete. Checkpoint saved to {output_directory}")
+  print_ram_usage("Script End")
 
 
 if __name__ == "__main__":
