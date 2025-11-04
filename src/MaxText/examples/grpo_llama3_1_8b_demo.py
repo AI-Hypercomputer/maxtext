@@ -147,6 +147,19 @@ def main(argv: Sequence[str]) -> None:
   for key, value in hardcoded_config.items():
     if key not in cli_config:
       print(f"[Config] Using hardcoded {key}={value}")
+  
+  # Ensure base_output_directory and run_name are set (required for checkpoint_dir/tensorboard_dir)
+  # checkpoint_dir and tensorboard_dir are computed from base_output_directory and run_name in pyconfig
+  if "base_output_directory" not in final_config:
+    raise ValueError(
+        "base_output_directory must be provided via command line.\n"
+        "Example: --base_output_directory=/tmp/grpo_output"
+    )
+  if "run_name" not in final_config or not final_config.get("run_name"):
+    # If run_name is not provided, pyconfig will auto-generate one from model_name and timestamp
+    # But we can set a default here to ensure it's always set
+    final_config["run_name"] = f"{final_config.get('model_name', 'grpo')}-{os.path.basename(final_config['base_output_directory'])}"
+    print(f"[Config] Auto-generated run_name: {final_config['run_name']}")
 
   print(f"[Config] Total config parameters: {len(final_config)}")
   print(f"[Config] Config file: {config_file}")
