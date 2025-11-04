@@ -819,13 +819,11 @@ def DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING(config, scan_layers=False):
   # TODO(shuningjin): add non-scan support
   if not scan_layers:
     raise NotImplementedError("This conversion only supports scanned MaxText models.")
-  print(config)
 
-  # Extract hf configuration parameters
+  # Extract hf configuration parameters, without mtp
   num_main_layers = config["num_hidden_layers"]
   first_num_dense_layers = config["first_k_dense_replace"]
   num_experts = config.get("n_routed_experts", 0)
-  # has_mtp = config.get("has_mtp", False)
 
   # Mapping for non-layer-specific weights
   mapping = {
@@ -897,7 +895,6 @@ def DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, scan_layers=False, saving_to_hf
       flipped_target_shape = np.flip(np.array(target_shape))
       return input_tensor.reshape(flipped_target_shape).T
     else:
-      print(input_tensor.shape)
       return input_tensor.T.reshape(target_shape)
 
   mapping = {
