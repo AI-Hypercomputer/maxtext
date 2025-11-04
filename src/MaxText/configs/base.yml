@@ -471,7 +471,8 @@ ici_expert_parallelism: 1
 # Enable ZeRO-1 optimizer sharding over data axis
 shard_optimizer_over_data: False
 
-# The number of TPU slices is automatically determined, you should not set this explicitly. For ahead of time compilation,
+# Unless explicitly specified, the number of TPU slices is automatically determined. It should only be set for
+# disaggregated reinforcement learning workloads using multiple slices. For ahead of time compilation,
 # you should set compile_toplogy_num_slices, which will in turn set this value. For non-TPU environments this is set to 1.
 num_slices: -1
 
