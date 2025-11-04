@@ -74,7 +74,6 @@ import time
 from tqdm import tqdm
 
 
-# jax.config.update("jax_platform_name", "cpu")
 os.environ["JAX_PLATFORMS"] = "cpu"
 os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=16"
 
@@ -144,8 +143,6 @@ def main(argv: Sequence[str]) -> None:
   if model_key not in HF_IDS:
     raise ValueError(f"Unsupported model name: {config.model_name}. Supported models are: {list(HF_IDS.keys())}")
   hf_config_obj = HF_MODEL_CONFIGS[model_key]
-  # print(model_key)
-  # print(f"hf config: {hf_config_obj}")
 
   # 2. Load Tokenizer
   if model_key not in HF_IDS:
@@ -179,7 +176,6 @@ def main(argv: Sequence[str]) -> None:
   start = time.time()
   processed_params_list = []
   for path_tuple_iter, leaf_value_iter in tqdm(leaves_with_paths, total=len(leaves_with_paths)):
-    # print(path_tuple_iter)
     processed_params = process_leaf_param(path_tuple_iter, leaf_value_iter, param_map, shape_map, hook_fn_map, config)
     processed_params_list.extend(processed_params)
   transformed_hf_weights = dict(processed_params_list)

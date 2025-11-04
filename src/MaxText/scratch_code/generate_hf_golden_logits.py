@@ -96,10 +96,7 @@ def save_golden_logits(
 
   model = model_class.from_pretrained(
       hf_model_path,
-      # dtype=torch.float32,
-      # dtype=torch.bfloat16,
       dtype=torch_dtype,
-      # trust_remote_code=False,
       trust_remote_code=trust_remote_code,
   )
 
@@ -130,7 +127,6 @@ def save_golden_logits(
     # 2. Run inference
     with torch.no_grad():
       outputs = model(**inputs)
-      # logits = outputs.logits.cpu().numpy().astype("float32")
       logits = outputs.logits.cpu().to(torch.float32).numpy()
 
     # 3. Populate final data dictionary with tensors from inputs and logits
@@ -195,7 +191,6 @@ def main(raw_args=None) -> None:
       action="store_false",
       help="model_class.from_pretrained: trust_remote_code",
   )
-
   parser.add_argument(
       "--image-paths", type=str, required=False, default=None, help="A semicolon-separated list of image_paths."
   )

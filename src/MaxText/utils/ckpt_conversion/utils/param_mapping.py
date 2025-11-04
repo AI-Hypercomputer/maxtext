@@ -658,22 +658,29 @@ def QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING(config, scan_layers=False):
       # This follows the (experts, layers, ...) tensor layout.
       mapping.update(
           {
-              "params-decoder-layers-moe_block-gate-kernel": [f"model.layers.{i}.mlp.gate.weight" for i in range(n_layers)],
+              "params-decoder-layers-moe_block-gate-kernel": [
+                  f"model.layers.{i}.mlp.gate.weight" for i in range(n_layers)
+              ],
               "params-decoder-layers-moe_block-wi_0": [
-                  [f"model.layers.{l}.mlp.experts.{e}.gate_proj.weight" for l in range(n_layers)] for e in range(num_experts)
+                  [f"model.layers.{l}.mlp.experts.{e}.gate_proj.weight" for l in range(n_layers)]
+                  for e in range(num_experts)
               ],
               "params-decoder-layers-moe_block-wi_1": [
-                  [f"model.layers.{l}.mlp.experts.{e}.up_proj.weight" for l in range(n_layers)] for e in range(num_experts)
+                  [f"model.layers.{l}.mlp.experts.{e}.up_proj.weight" for l in range(n_layers)]
+                  for e in range(num_experts)
               ],
               "params-decoder-layers-moe_block-wo": [
-                  [f"model.layers.{l}.mlp.experts.{e}.down_proj.weight" for l in range(n_layers)] for e in range(num_experts)
+                  [f"model.layers.{l}.mlp.experts.{e}.down_proj.weight" for l in range(n_layers)]
+                  for e in range(num_experts)
               ],
           }
       )
     else:  # Dense MLP
       mapping.update(
           {
-              "params-decoder-layers-mlp-wi_0-kernel": [f"model.layers.{i}.mlp.gate_proj.weight" for i in range(n_layers)],
+              "params-decoder-layers-mlp-wi_0-kernel": [
+                  f"model.layers.{i}.mlp.gate_proj.weight" for i in range(n_layers)
+              ],
               "params-decoder-layers-mlp-wi_1-kernel": [f"model.layers.{i}.mlp.up_proj.weight" for i in range(n_layers)],
               "params-decoder-layers-mlp-wo-kernel": [f"model.layers.{i}.mlp.down_proj.weight" for i in range(n_layers)],
           }

@@ -72,7 +72,6 @@ HF_IDS = {
     "qwen3-30b-a3b": "Qwen/Qwen3-30B-A3B-Thinking-2507",
     "qwen3-235b-a22b": "Qwen/Qwen3-235B-A22B-Thinking-2507",
     "qwen3-480b-a35b": "Qwen/Qwen3-Coder-480B-A35B-Instruct",
-    "deepseek2-16b": "deepseek-ai/DeepSeek-V2-Lite",
     "deepseek3-671b": "deepseek-ai/DeepSeek-V3",
     "deepseek3-test": "deepseek-ai/DeepSeek-V3",
 }
@@ -110,7 +109,6 @@ def process_leaf_param(
     current_config: Any,
 ) -> list[tuple[str, np.ndarray]]:
   """Processes a single leaf from the MaxText parameter tree."""
-
   # Construct maxtext_param_key from path_tuple
   key_parts = []
   for p_entry in path_tuple:
@@ -134,7 +132,6 @@ def process_leaf_param(
   hf_target_paths = param_map_local[maxtext_param_key]
   if not isinstance(hf_target_paths, list):
     hf_target_paths = [hf_target_paths]
-  # print(f"\thf param: {hf_target_paths}")
 
   if not hf_target_paths:
     max_logging.log(f"Warning: No HF target paths found for MaxText key '{maxtext_param_key}'. Skipping.")
@@ -143,8 +140,6 @@ def process_leaf_param(
   current_hook_fns = hook_fn_map_local.get(maxtext_param_key)
   output_weights = []
 
-  # TODO(shuningjin): it could be scan with one layer
-  # TODO(shuningjin): it could be scan with one layer with one expert
   # Case 0: Unscan, or Scan with single layer
   if len(hf_target_paths) == 1:
     print("\tunscan or scan single layer")

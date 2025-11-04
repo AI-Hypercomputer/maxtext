@@ -244,23 +244,13 @@ def DEEPSEEK_HF_WEIGHTS_TO_SHAPE(config):
   # Q projection dim
   q_dim = num_attention_heads * config["qk_head_dim"]
 
-  # KV_b_proj output dim. Based on DeepseekV3Attention:
-  # self.kv_b_proj = nn.Linear(
-  #   self.kv_lora_rank,
-  #   self.num_heads * (self.qk_nope_head_dim + self.v_head_dim),
-  #   ...
-  # )
+  # KV_b_proj output dim. 
   kv_b_dim = num_attention_heads * (config["qk_nope_head_dim"] + config["v_head_dim"])
 
   # Output projection dim (input)
   o_proj_in_dim = num_attention_heads * config["v_head_dim"]
 
-  # kv_a_proj_with_mqa output dim. Based on DeepseekV3Attention:
-  # self.kv_a_proj_with_mqa = nn.Linear(
-  #   config.hidden_size,
-  #   self.kv_lora_rank + self.qk_rope_head_dim,
-  #   ...
-  # )
+  # kv_a_proj_with_mqa output dim.
   kv_a_proj_out_dim = config["kv_lora_rank"] + config["qk_rope_head_dim"]
 
   # --- MLP-related Dimensions ---
@@ -294,13 +284,6 @@ def DEEPSEEK_HF_WEIGHTS_TO_SHAPE(config):
     }
 
     # --- Q-Projection (Conditional on LoRA) ---
-    # Based on DeepseekV3Attention:
-    # if self.q_lora_rank is None:
-    #   self.q_proj = nn.Linear(..., bias=False)
-    # else:
-    #   self.q_a_proj = nn.Linear(..., bias=config.attention_bias)
-    #   self.q_a_layernorm = ...
-    #   self.q_b_proj = nn.Linear(..., bias=False)
     if q_lora_rank is None:
       layer_mapping[f"{layer_prefix}.self_attn.q_proj.weight"] = [q_dim, hidden_size]
     else:
@@ -313,7 +296,6 @@ def DEEPSEEK_HF_WEIGHTS_TO_SHAPE(config):
       )
 
     # --- Add conditional biases ---
-    # Based on DeepseekV3Attention init, bias is set by config.attention_bias
     if attention_bias:
       if q_lora_rank is not None:
         layer_mapping[f"{layer_prefix}.self_attn.q_a_proj.bias"] = [q_lora_rank]
@@ -325,11 +307,6 @@ def DEEPSEEK_HF_WEIGHTS_TO_SHAPE(config):
       )
 
     # --- Add MLP weights (Dense vs. MoE) ---
-    # Based on DeepseekV3DecoderLayer:
-    # if layer_idx >= config.first_k_dense_replace:
-    #   self.mlp = DeepseekV3MoE(config)
-    # else:
-    #   self.mlp = DeepseekV3MLP(config)
     if layer_idx < first_k_dense:
       # This is a DENSE MLP layer (DeepseekV3MLP)
       layer_mapping.update(
@@ -361,10 +338,6 @@ def DEEPSEEK_HF_WEIGHTS_TO_SHAPE(config):
         )
 
       # Add shared experts (if any)
-      # Based on DeepseekV3MoE:
-      # self.shared_experts = DeepseekV3MLP(
-      #   config=config, intermediate_size=config.moe_intermediate_size * config.n_shared_experts
-      # )
       if n_shared_experts > 0:
         shared_intermediate_size = moe_intermediate_size * n_shared_experts
         layer_mapping.update(
