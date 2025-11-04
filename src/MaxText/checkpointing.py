@@ -427,7 +427,9 @@ def _restore_grain_iterator(
   elif expansion_factor_real_data > 1 and process_count_stored == process_count_jax // expansion_factor_real_data:
     # Scaling up to a larger number of hosts.(e.g., 32 files -> 64 processes)
     # In this case, a subset of hosts restore the data iterator.
-    assert not isinstance(data_iterator, list), "when expansion_factor_real_data > 1, the data iterator should not be a list."
+    assert not isinstance(
+        data_iterator, list
+    ), "when expansion_factor_real_data > 1, the data iterator should not be a list."
     grain_restore_args = GrainCheckpointRestore(
         data_iterator.local_iterator, process_index=jax.process_index(), process_count=process_count_stored
     )

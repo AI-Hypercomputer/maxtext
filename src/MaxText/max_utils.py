@@ -289,6 +289,9 @@ def _retrieve_jax_init_info(raw_keys):
 
 def get_num_slices(raw_keys):
   """Calculate num_slices based on number of devices."""
+  if raw_keys["num_slices"] != -1:
+    max_logging.log(f"Using num_slices={raw_keys['num_slices']} per user request.")
+    return raw_keys["num_slices"]
   if raw_keys["hardware"] == "cpu":
     max_logging.log(" Setting num_slices=1 for CPU hardware type")
     return 1
