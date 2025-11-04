@@ -77,7 +77,7 @@ jobs:
           python3 -m pip install -e . --no-dependencies &&
           python3 -m pip uninstall -y libtpu &&
           # TODO(b/454659463): Enable test_default_hlo_match after volume mount is supported.
-          python3 -m pytest ${{ inputs.pytest_addopts }} -v -m "${FINAL_PYTEST_MARKER}" -k "not test_default_hlo_match" --durations=0
+          python3 -m pytest ${{ inputs.pytest_addopts }} -v -m "${FINAL_PYTEST_MARKER}" --durations=0
     
     services:
       resource_manager:
