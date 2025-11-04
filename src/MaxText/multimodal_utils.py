@@ -26,6 +26,8 @@ from PIL import Image
 import jax
 import jax.numpy as jnp
 
+from MaxText.common_types import Config
+
 NUM_IMAGE_CHANNELS = 3
 
 # TODO(hengtaoguo): Move following constants to a separate file
@@ -62,6 +64,7 @@ LLAMA4_TILE_X_SEPARATOR_TOKEN = 200084  # <|tile_x_separator|>
 LLAMA4_TILE_Y_SEPARATOR_TOKEN = 200085  # <|tile_y_separator|>
 LLAMA4_PIXEL_SHUFFLE_RATIO = 0.5  # TODO(hengtaoguo): We should reuse config.pixel_shuffle_ratio_for_vit
 
+QWEN3_OMNI_NUM_FRAMES = 4
 
 @dataclass
 class PreprocessorOutput:
@@ -530,9 +533,12 @@ def get_image_offsets(model_name, processor_output: PreprocessorOutput | None):
 
 
 def get_dummy_image_shape_for_init(
-    model_name, batch_size=1, num_image_per_sequence=1, num_tiles_per_image=LLAMA4_TILES_PAD_TO
+    model_name: None | str = None, num_image_per_sequence=1, num_tiles_per_image=LLAMA4_TILES_PAD_TO, config: None | Config = None,
 ):
   """Return the shape of the dummy image for specific model's initialization."""
+  batch_size = config.micro_batch_size_to_train_on if config else 1
+  model_name = config.model_name if config else model_name
+  
   image_shape = ()
   if model_name.startswith("gemma3"):
     image_shape = (
@@ -550,6 +556,15 @@ def get_dummy_image_shape_for_init(
         LLAMA4_TILE_SIZE,
         LLAMA4_TILE_SIZE,
     )
+  elif model_name.startswith("qwen3-omni"):
+    image_shape = (
+        batch_size,
+        NUM_IMAGE_CHANNELS,
+        QWEN3_OMNI_NUM_FRAMES * config.temporal_patch_size_for_vit,
+        config.image_size_for_vit,
+        config.image_size_for_vit,
+    )
+    
   return image_shape
 
 

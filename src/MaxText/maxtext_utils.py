@@ -135,7 +135,7 @@ def get_shaped_batch(config):
   shaped_batch["targets_segmentation"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
   if config.use_multimodal:
     image_shape = multimodal_utils.get_dummy_image_shape_for_init(
-        config.model_name, batch_size=config.micro_batch_size_to_train_on
+        config=config
     )
     shaped_batch["images"] = jax.ShapeDtypeStruct(image_shape, jnp.int32)
     shaped_batch["image_masks"] = jax.ShapeDtypeStruct(image_shape[:2], jnp.int32)
@@ -736,7 +736,7 @@ def init_initial_state(model, tx, config, is_training, key):
   """
   input_shape = (config.micro_batch_size_to_train_on, config.max_target_length)
   image_shape = multimodal_utils.get_dummy_image_shape_for_init(
-      config.model_name, batch_size=config.micro_batch_size_to_train_on
+    config=config
   )
   model_vars = model.init(
       {"params": key, "dropout": key, "aqt": key},
@@ -934,7 +934,7 @@ def get_prefill_kv_cache_annotations(model, config, rng, mesh, page_state: None 
         config.max_prefill_predict_length,
     )
     image_shape = multimodal_utils.get_dummy_image_shape_for_init(
-        config.model_name, batch_size=config.micro_batch_size_to_train_on
+        config=config
     )
 
     model_vars = model.init(
@@ -963,7 +963,7 @@ def get_kv_cache_annotations(model, config, rng, mesh, page_state: None | PageSt
   def init_kv_cache(model, config):
     input_shape = (config.micro_batch_size_to_train_on, 1)
     image_shape = multimodal_utils.get_dummy_image_shape_for_init(
-        config.model_name, batch_size=config.micro_batch_size_to_train_on
+        config=config
     )
 
     model_vars = model.init(

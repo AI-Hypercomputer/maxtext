@@ -1571,14 +1571,10 @@ class Qwen3OmniMoeVisionEncoder(nnx.Module):
         [Qwen3OmniMoeVisionPatchMerger(config=config, use_postshuffle_norm=True, rngs=rngs) for _ in self.deep_idx]
     )
 
-  def __call__(self, hidden_states: Array, num_frames: int, height: int, width: int, deterministic: bool = True):
+  def __call__(self, hidden_states: Array, deterministic: bool = True):
     """
     Args:
         hidden_states: Input visual tokens of shape (batch, in_channels, T*patch_size, H*patch_size, W*patch_size)
-                      OR flattened tensor
-        num_frames: Number of temporal frames (static)
-        height: Height in patches (static)
-        width: Width in patches (static)
         deterministic: Whether to use deterministic mode
 
     Returns:
@@ -1586,6 +1582,10 @@ class Qwen3OmniMoeVisionEncoder(nnx.Module):
         - encoder_output: shape (batch, T*H*W, hidden_size_for_vit)
         - deep_features: List of intermediate features, each of shape (batch, T*H*W, out_hidden_size)
     """
+    num_frames = hidden_states.shape[2] // self.config.temporal_patch_size_for_vit
+    height = hidden_states.shape[3] // self.config.patch_size_for_vit
+    width = hidden_states.shape[4] // self.config.patch_size_for_vit
+    
     x = self.patch_embed(hidden_states)
     pos = self.pos_embed_interpolate(num_frames, height, width)
 
