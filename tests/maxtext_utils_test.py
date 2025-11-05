@@ -25,10 +25,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from flax import linen as nn
-from flax.core.scope import FrozenVariableDict
-from flax.linen import Dense
-from flax.training import train_state
+from flax import nnx
+from flax.nnx import TrainState
 
 import optax
 
@@ -42,9 +40,6 @@ from MaxText.globals import MAXTEXT_PKG_DIR
 from MaxText.layers import models
 from MaxText.layers import quantizations
 from MaxText.sharding import assert_params_sufficiently_sharded, get_formatted_sharding_annotations
-
-Transformer = models.transformer_as_linen
-
 
 class TestGradientClipping(unittest.TestCase):
   """test class for gradient clipping"""
@@ -112,33 +107,70 @@ class MaxUtilsInitState(unittest.TestCase):
   """Tests initialization of training and decode states in maxtext_utils.py"""
 
   def setUp(self):
-    self.model = nn.Dense(features=5)
     self.key1, self.key2 = random.split(random.key(0))
-    self.input = random.normal(self.key1, (10,))  # Dummy input data
-    self.params = self.model.init(self.key2, self.input)
-    self.output = self.model.apply(self.params, self.input)
+    self.model = nnx.Linear(
+        in_features=10,
+        out_features=5,
+        rngs=nnx.Rngs(params=self.key1),
+    )
+    self.input = random.normal(
+        self.key2,
+        (10,),
+    )
+    self.output = self.model(self.input)
+
     self.tx = optax.adam(learning_rate=0.001)
+    self.graphdef, self.params, _ = nnx.split(self.model,nnx.Param, ...)
 
   def test_init_train_state(self):
-    state = train_state.TrainState(
-        step=0, apply_fn=self.model.apply, params=self.params, tx=None, opt_state={}  # type: ignore
-    )
-    self.assertEqual(state.tx, None)
+    state = TrainState(step=0, graphdef=self.graphdef, params=self.params, tx=None, opt_state={})  # type: ignore
+    
+    self.assertIsNone(state.tx)
     self.assertEqual(state.step, 0)
     self.assertEqual(state.opt_state, {})
-    self.assertEqual(state.apply_fn, self.model.apply)
+    self.assertIsInstance(state.graphdef, nnx.graph.GraphDef)
+
+    self.assertEqual(state.graphdef, self.graphdef)
+    merged_model = nnx.merge( state.graphdef, state.params)
+    self.assertIsInstance(
+        merged_model,
+        nnx.Linear,
+    )
+    self.assertEqual(
+        type(merged_model),
+        type(self.model),
+    )
     self.assertEqual(
         max_utils.calculate_num_params_from_pytree(state.params), max_utils.calculate_num_params_from_pytree(self.params)
     )
 
   def test_init_decode_state(self):
-    decode_state = maxtext_utils.init_decode_state(self.model.apply, self.params)
-    self.assertEqual(decode_state.apply_fn, self.model.apply)
-    apply_fn: Callable = decode_state.apply_fn
-    # pylint: disable=not-callable
-    output: Any | tuple[Any, FrozenVariableDict | dict[str, Any]] = apply_fn(self.params, self.input)
+    decode_state = maxtext_utils.init_decode_state(
+        self.graphdef,
+        self.params,
+    )
+
+    self.assertEqual(
+        decode_state.graphdef,
+        self.graphdef,
+    )
+
+    merged_model = nnx.merge(
+        decode_state.graphdef,
+        decode_state.params,
+    )
+    self.assertIsInstance(
+        merged_model,
+        nnx.Linear,
+    )
+    self.assertEqual(
+        type(merged_model),
+        type(self.model),
+    )
+    
+    output = merged_model(self.input)
     self.assertEqual(output.tolist(), self.output.tolist())
-    self.assertEqual(decode_state.tx, None)
+    self.assertIsNone(decode_state.tx)
     self.assertEqual(decode_state.opt_state, {})
     self.assertEqual(decode_state.step, 0)
     self.assertEqual(
@@ -147,28 +179,43 @@ class MaxUtilsInitState(unittest.TestCase):
     )
 
   def test_init_training_state(self):
-    state = maxtext_utils.init_training_state(self.model.apply, self.params, self.tx)
-    self.assertEqual(state.apply_fn, self.model.apply)
+    state = maxtext_utils.init_training_state(self.graphdef, self.params, self.tx)
+    
+    self.assertEqual(state.graphdef, self.graphdef)
+    merged_model = nnx.merge( state.graphdef, state.params)
+    self.assertIsInstance(
+        merged_model,
+        nnx.Linear,
+    )
+    self.assertEqual(
+        type(merged_model),
+        type(self.model),
+    )
+
     self.assertEqual(state.tx, self.tx)
     self.assertNotEqual(state.opt_state, {})
     self.assertEqual(
-        max_utils.calculate_num_params_from_pytree(state.params), max_utils.calculate_num_params_from_pytree(self.params)
+      max_utils.calculate_num_params_from_pytree(state.params), max_utils.calculate_num_params_from_pytree(self.params)
     )
 
+class SpecialVariables(nnx.Variable):
+  pass
 
-class ModelWithMultipleCollections(nn.Module):
+class NNXModelWithMultipleCollections(nnx.Module):
   """
-  A simple model that has variables in multiple collections - "params" and "special_variables"
+  A simple NNX model that has variables in multiple collections - "params" and "special_variables"
   """
 
-  dense: Dense = nn.Dense(4)
-
-  def setup(self):
-    self.kernel = self.variable("special_variables", "my_first_kernel", lambda: jnp.ones((4, 5)))
+  def __init__(self, rngs):
+    self.dense = nnx.Linear(4, 5, rngs=rngs)
+    # Create a custom variable type for special variables
+    self.my_first_kernel = SpecialVariables(
+      jnp.ones(( 5, 5))
+    )
 
   def __call__(self, x, y, encoder_images=None, nnx_method=None, model_mode=None):
     x = self.dense(x)
-    x = x @ self.kernel.value
+    x = x @ self.my_first_kernel.value
     return x
 
 
@@ -176,19 +223,45 @@ class MaxUtilsInitStateWithMultipleCollections(unittest.TestCase):
   """test class for multiple collection state in maxutils"""
 
   def setUp(self):
-    self.config = pyconfig.initialize(
-        [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")], enable_checkpointing=False
-    )
-    self.model = ModelWithMultipleCollections()
+    self.config = pyconfig.initialize([None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")], enable_checkpointing=False)
     self.key1, self.key2, self.key3 = random.split(random.key(0), num=3)
+
+    self.model = NNXModelWithMultipleCollections(rngs=nnx.Rngs(params=self.key1))
+    (
+        self.graphdef,
+        self.params,
+        self.special_variable,
+    ) = nnx.split(
+        self.model,
+        nnx.Param,
+        SpecialVariables,
+    )
+
     self.input = random.normal(self.key1, (self.config.global_batch_size_to_load, self.config.max_target_length))
-    self.params = self.model.init(self.key2, self.input, self.input)
+    # Get params by splitting the model
+    _, self.params, _ = nnx.split(self.model, nnx.Param, ...)
     self.tx = optax.adam(learning_rate=0.001)
 
   def _test_init_initial_state_driver(self, is_training):
     """test initiating of the initial state driver"""
     state_under_test = maxtext_utils.init_initial_state(self.model, self.tx, self.config, is_training, self.key3)
-    self.assertEqual(state_under_test.apply_fn, self.model.apply)
+    self.assertEqual(
+        state_under_test.graphdef,
+        self.graphdef,
+    )
+    merged_model = nnx.merge(
+        state_under_test.graphdef,
+        state_under_test.params,
+        self.special_variable,
+    )
+    self.assertIsInstance(
+        merged_model,
+        NNXModelWithMultipleCollections,
+    )
+    self.assertEqual(
+        type(merged_model),
+        type(self.model),
+    )
     if is_training:
       self.assertEqual(state_under_test.tx, self.tx)
       self.assertNotEqual(state_under_test.opt_state, {})
@@ -199,9 +272,22 @@ class MaxUtilsInitStateWithMultipleCollections(unittest.TestCase):
         max_utils.calculate_num_params_from_pytree(state_under_test.params),
         max_utils.calculate_num_params_from_pytree(self.params),
     )
-    self.assertEqual(len(self.params), len(state_under_test.params))
-    self.assertIn("special_variables", state_under_test.params)
-    self.assertIn("params", state_under_test.params)
+    self.assertEqual(
+        len(self.params),
+        len(state_under_test.params),
+    )
+    self.assertTrue(
+        hasattr(
+            merged_model,
+            "my_first_kernel",
+        ),
+        "merged model should have 'my_first_kernel' attribute",
+    )
+    self.assertIsInstance(
+        merged_model.my_first_kernel,
+        SpecialVariables,
+    )
+
 
   def test_initial_train_state(self):
     self._test_init_initial_state_driver(True)
@@ -220,12 +306,16 @@ class MaxUtilsInitTransformerState(unittest.TestCase):
     devices_array = maxtext_utils.create_device_mesh(self.config)
     self.mesh = Mesh(devices_array, self.config.mesh_axes)
     quant = quantizations.configure_quantization(self.config)
-    self.model = Transformer(self.config, mesh=self.mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
+    params_key, dropout_key = random.split(random.PRNGKey(0))
+    self.rngs = nnx.Rngs(params=params_key, dropout=dropout_key)
+    self.model = models.Transformer(
+        self.config, mesh=self.mesh, quant=quant, rngs=self.rngs, model_mode=MODEL_MODE_TRAIN
+    )
 
   def test_setup_decode_state(self):
     rng = random.PRNGKey(0)
     state, _ = maxtext_utils.setup_decode_state(self.model, self.config, rng, self.mesh, None)
-    self.assertEqual(state.tx, None)
+    self.assertIsNone(state.tx)
     self.assertEqual(state.opt_state, {})
 
   def test_setup_initial_state(self):
@@ -597,9 +687,7 @@ class TestSamplingFunctions(unittest.TestCase):
     rngs = jax.random.split(self.rng, 10)
 
     for r in rngs:
-      token = inference_utils.sample_topk_topp_weighted(
-          self.logits, topk=10, nucleus_topp=1.0, temperature=low_temp, rng=r
-      )
+      token = inference_utils.sample_topk_topp_weighted(self.logits, topk=10, nucleus_topp=1.0, temperature=low_temp, rng=r)
       self.assertEqual(token.item(), greedy_token_index)
 
   def test_invalid_args_raise_error(self):

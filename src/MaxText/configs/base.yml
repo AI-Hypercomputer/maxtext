@@ -933,9 +933,6 @@ deepstack_visual_indexes_for_vit: []
 # Example: "8,8" to use a 8x8 subgrid (64 chips) of a full pod (16x16) of trillium.
 subslice_shape: ""
 
-# NNX
-enable_nnx: false
-
 ################################## Qwen3-Next Specific Configs ##################################
 # Kernel size for the 1D convolution in the Gated Delta Net
 gdn_conv_kernel_dim: 4

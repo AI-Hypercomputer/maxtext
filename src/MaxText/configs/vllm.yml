@@ -14,8 +14,6 @@
 
 base_config: "base.yml"
 attention: "vllm_rpa"
-# NNX required for vLLM integration
-enable_nnx: True
 # Avoid re-initializing JAX distributed system when using vLLM
 skip_jax_distributed_system: True
 # Scanned layers are not supported with vLLM integration

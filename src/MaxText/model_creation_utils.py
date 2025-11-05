@@ -16,7 +16,7 @@
 """ Utils that are only interesting for creating a model in MaxText. """
 
 from collections.abc import Sequence
-from typing import overload
+from typing import Any
 
 from flax import nnx
 import flax.linen as nn
@@ -32,94 +32,55 @@ from functools import partial
 from etils import epath
 
 
-@overload
-def from_config(
-    config: pyconfig.HyperParameters,
-    devices: Sequence[jax.Device] | None = None,
-    mesh: Mesh | None = None,
-    *,
-    model_mode: str = MODEL_MODE_TRAIN,
-) -> nn.Module:
-  ...
+def _ensure_rngs(rngs: nnx.Rngs | None, config: pyconfig.HyperParameters, model_mode:str | None = None) -> nnx.Rngs:
+  if rngs is not None:
+    return rngs
+  if model_mode == MODEL_MODE_TRAIN:
+    return nnx.Rngs(params=jax.random.PRNGKey(config.init_weights_seed), dropout=1)
+  # disable dropout RNG for inference
+  return nnx.Rngs(params=jax.random.PRNGKey(config.init_weights_seed))
+
+def _create_mesh(config: pyconfig.HyperParameters, devices: Sequence[Any] | None) -> Mesh:
+  devices_array = maxtext_utils.create_device_mesh(config, devices)
+  if config.shard_mode == ShardMode.EXPLICIT:
+    axis_types = tuple([AxisType.Explicit] * len(config.mesh_axes))
+  else:
+    axis_types = tuple([AxisType.Auto] * len(config.mesh_axes))
+  return Mesh(devices_array, config.mesh_axes, axis_types=axis_types)
 
 
-@overload
-def from_config(
+def _instantiate_transformer(
     config: pyconfig.HyperParameters,
-    devices: Sequence[jax.Device] | None = None,
-    mesh: Mesh | None = None,
+    mesh: Mesh,
     *,
     model_mode: str = MODEL_MODE_TRAIN,
     rngs: nnx.Rngs,
-) -> models.Transformer:
-  ...
+) -> nnx.Module:
+  """Create an NNX Transformer (or ZeroOneTransformer) and apply quantization."""
 
+  quant = quantizations.configure_quantization(config)
+  if config.model_fsdp_ag_once:
+    model = models.ZeroOneTransformer(config, mesh, quant=quant, model_mode=model_mode, rngs=rngs)
+  else:
+    model = models.Transformer(config, mesh, quant=quant, model_mode=model_mode, rngs=rngs)
+  return quantizations.maybe_quantize_model(model, config)
 
 def from_config(
     config: pyconfig.HyperParameters,
-    devices: Sequence[jax.Device] | None = None,
+    devices: Sequence[Any] | None = None,
     mesh: Mesh | None = None,
     *,
     model_mode: str = MODEL_MODE_TRAIN,
     rngs: nnx.Rngs | None = None,
-) -> nn.Module | models.Transformer:
-  """Load a pretrained MaxText model from checkpoint.
-
-  This function loads a model from a checkpoint.
-
-  Args:
-      config: Config object.
-      devices: Sequence of devices to use for the model. If None, use all
-        available devices.
-
-  Returns:
-      Transformer: The loaded model instance (only the model)
-
-  Example:
-      model = from_config(config)
-  """
-  devices_array = maxtext_utils.create_device_mesh(config, devices)
-
+) -> nnx.Module | models.Transformer:
+  """Instantiate an NNX Transformer from config and optional devices."""
   if mesh is None:
-    if config.shard_mode == ShardMode.EXPLICIT:
-      axis_types = tuple([AxisType.Explicit] * len(config.mesh_axes))
-    else:
-      axis_types = tuple([AxisType.Auto] * len(config.mesh_axes))
-
-    mesh = Mesh(devices_array, config.mesh_axes, axis_types=axis_types)
-
-  model = create_model(config, mesh, model_mode=model_mode, rngs=rngs)
-
-  # Return only the model
-  return model
-
-
-def get_transformer_model(config, mesh, quant, model_mode: str = MODEL_MODE_TRAIN, rngs: nnx.Rngs | None = None):
-  """Returns the transformer model based on the configuration."""
-  if config.model_fsdp_ag_once:
-    if rngs is not None:
-      raise NotImplementedError
-    else:
-      return models.ZeroOneTransformer(config, mesh, quant=quant, model_mode=model_mode)
-  else:
-    if rngs is not None:
-      return models.Transformer(config, mesh, quant=quant, rngs=rngs, model_mode=model_mode)
-    else:
-      return models.transformer_as_linen(config, mesh, quant=quant, model_mode=model_mode)
-
-
-def create_model(config, mesh, model_mode: str = MODEL_MODE_TRAIN, rngs: nnx.Rngs | None = None):
-  """Instantiates and returns the model object, sharded across the mesh."""
-  # Model definition
-  quant = quantizations.configure_quantization(config)
-  model = get_transformer_model(config, mesh, quant, model_mode=model_mode, rngs=rngs)
-  model = quantizations.maybe_quantize_model(model, config)
-  return model
-
+    mesh = _create_mesh(config, devices)
+  model_rngs = _ensure_rngs(rngs, config, model_mode=model_mode)
+  return _instantiate_transformer(config, mesh, model_mode=model_mode, rngs=model_rngs)
 
 def create_nnx_model(config, mesh=None, devices=None, model_mode=MODEL_MODE_TRAIN, rng_key=None):
   """Creates a NNX model with sharded parameters, possibly loading from a checkpoint."""
-
   def _create_model(mesh: Mesh | None = None, model_mode: str = MODEL_MODE_TRAIN, rng_key: jax.Array | None = None):
     if rng_key is None:
       rng_key = jax.random.PRNGKey(config.init_weights_seed)

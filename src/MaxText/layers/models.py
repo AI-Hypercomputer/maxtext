@@ -31,7 +31,7 @@ from MaxText import multimodal_utils
 from MaxText import max_utils
 from MaxText.layers import nnx_wrappers
 from MaxText.layers.decoders import Decoder
-from MaxText.layers.embeddings import Embed, embed_as_linen
+from MaxText.layers.embeddings import Embed
 from MaxText.layers.encoders import VisionEncoder
 from MaxText.layers.quantizations import AqtQuantization as Quant
 from MaxText.layers.multi_token_prediction import MultiTokenPredictionBlock
@@ -42,193 +42,19 @@ from MaxText.sharding import all_gather_over_fsdp
 # ------------------------------------------------------------------------------
 
 
-class TransformerLinenPure(nn.Module):
-  """An autoregressive transformer model."""
-
-  # Make new attributes required, so that all Transformer dependencies (train, decode,
-  # compile, etc) will error instead of silently use defaults.
-  # pylint: disable=attribute-defined-outside-init
-  config: Config
-  mesh: Mesh
-  quant: Quant
-  # Possible model_mode values can be found in MaxText.common_types.
-  # We generally use MaxText.common_types.MODEL_MODE_TRAIN or
-  # MaxText.common_types.MODEL_MODE_PREFILL for initializations here.
-  # TODO: Make model_mode required after confirming no users are affected.
-  model_mode: str = MODEL_MODE_TRAIN  # May be different than the model_mode passed to __call__
-  # pylint: enable=attribute-defined-outside-init
-
-  def init(self, *args, model_mode: str = MODEL_MODE_TRAIN, **kwargs):
-    """Initializes the model."""
-    module = self.clone(model_mode=model_mode)
-    kwargs["model_mode"] = model_mode
-    return nn.Module.init(module, *args, **kwargs)
-
-  def apply(self, *args, model_mode: str = MODEL_MODE_TRAIN, **kwargs):
-    """Applies the model."""
-    module = self.clone(model_mode=model_mode)
-    kwargs["model_mode"] = model_mode
-    return nn.Module.apply(module, *args, **kwargs)
-
-  def setup(self):
-    """Initialize shared_embedding & decoder layers."""
-
-    cfg = self.config
-    mesh = self.mesh
-    self.shared_embedding = embed_as_linen(
-        num_embeddings=cfg.vocab_size,
-        num_features=cfg.emb_dim,
-        dtype=cfg.dtype,
-        attend_dtype=jnp.float32 if cfg.logits_dot_in_fp32 else cfg.dtype,  # for logit training stability
-        embedding_init=nn.initializers.normal(stddev=1.0),
-        name="token_embedder",
-        config=cfg,
-        mesh=self.mesh,
-    )
-    self.vision_encoder = VisionEncoder(config=cfg, mesh=mesh) if cfg.use_multimodal else None
-    self.decoder = Decoder(config=cfg, mesh=mesh, quant=self.quant, model_mode=self.model_mode)
-    # If MTP is enabled via config, set up the MTP block.
-    if self.config.mtp_num_layers > 0:
-      # Get the list of layer blueprints for the current model.
-      layer_types = self.decoder.get_decoder_layers()
-      # For MTP, we use the DecoderLayer blueprint to ensure architectural consistency.
-      # By convention, this is the last layer in the list.
-      mtp_layer = layer_types[-1]
-      self.mtp_block = MultiTokenPredictionBlock(
-          config=self.config, mesh=self.mesh, name="mtp_block", transformer_layer_module=mtp_layer, decoder=self.decoder
-      )
-
-  def logits_from_hidden_states(self, hidden_states, deterministic, model_mode):
-    """
-    Compute logits from hidden states (wrapping decoder.apply_output_head).
-    This function is only used for vocabulary tiling.
-    """
-    logits = self.decoder.apply_output_head(
-        shared_embedding=self.shared_embedding,
-        y=hidden_states,
-        deterministic=deterministic,
-        model_mode=model_mode,
-    )
-    return logits
-
-  def __call__(
-      self,
-      decoder_input_tokens: jnp.ndarray,
-      decoder_positions: jnp.ndarray,
-      decoder_segment_ids=None,
-      encoder_images: None | jnp.ndarray = None,
-      encoder_image_masks: None | jnp.ndarray = None,
-      enable_dropout=True,
-      model_mode=MODEL_MODE_TRAIN,
-      previous_chunk=None,
-      true_length: None | int = None,
-      slot: None | int = None,
-      page_state: None | page_manager.PageState = None,
-      decoder_target_tokens: None | jnp.ndarray = None,
-      decoder_target_mask: None | jnp.ndarray = None,
-      nnx_method=None,
-      kv_caches: list[jax.Array] | None = None,
-      attention_metadata: dict[str, Any] | None = None,
-  ):
-    """Applies Transformer decoder-branch on encoded-input and target.
-
-    Args:
-      true_length: (Optional) Prompt length before padding
-      slot: (Optional) An integer representing the decode batch index selected
-        for this request.
-    """
-
-    if decoder_segment_ids is not None and model_mode == MODEL_MODE_AUTOREGRESSIVE:
-      raise ValueError(
-          f"During autoregressive decoding we assume the tokens are in the active sequence"
-          f" which is always {DECODING_ACTIVE_SEQUENCE_INDICATOR}."
-      )
-
-    bidirectional_mask = None
-    image_embeddings = None
-    if self.config.use_multimodal and encoder_images is not None:
-      image_embeddings = self.vision_encoder(input_images=encoder_images, deterministic=not enable_dropout)
-
-      if self.config.decoder_block == DecoderBlockType.GEMMA3:
-        bidirectional_mask = decoder_input_tokens == multimodal_utils.GEMMA_TOKEN_PLACEHOLDER
-      elif self.config.decoder_block == DecoderBlockType.LLAMA4:
-        bidirectional_mask = decoder_input_tokens == multimodal_utils.LLAMA4_PATCH_TOKEN
-      elif self.config.decoder_block == DecoderBlockType.QWEN3_MOE:
-        bidirectional_mask = decoder_input_tokens == multimodal_utils.QWEN3_OMNI_IMAGE_TOKEN
-
-    logits, hidden_state, kv_caches = self.decoder(
-        shared_embedding=self.shared_embedding,
-        decoder_input_tokens=decoder_input_tokens,
-        decoder_positions=decoder_positions,
-        decoder_segment_ids=decoder_segment_ids,
-        deterministic=not enable_dropout,
-        model_mode=model_mode,
-        previous_chunk=previous_chunk,
-        slot=slot,
-        page_state=page_state,
-        bidirectional_mask=bidirectional_mask,
-        image_embeddings=image_embeddings,
-        image_masks=encoder_image_masks,
-        kv_caches=kv_caches,
-        attention_metadata=attention_metadata,
-    )
-
-    # If we are initializing the model AND MTP is enabled, we must create
-    # dummy target tensors. This allows Flax to trace the MTPBlock and create
-    # all its necessary parameters, without requiring the main training pipeline
-    # to be aware of this initialization detail.
-    if self.is_initializing() and self.config.mtp_num_layers > 0:
-      if decoder_target_tokens is None:
-        dummy_shape = decoder_input_tokens.shape
-        decoder_target_tokens = jnp.ones(dummy_shape, dtype=jnp.int32)
-        decoder_target_mask = jnp.ones(dummy_shape, dtype=jnp.int32)
-        decoder_segment_ids = jnp.ones(dummy_shape, dtype=jnp.int32)
-
-    # The Multi-Token Prediction (MTP) block functions as a "side-car" to the main
-    # model, active only during training. It computes an auxiliary loss based on
-    # predicting multiple future tokens, as described in the DeepSeek-V3 paper.
-    # To ensure architectural consistency, it uses two key components from the parent Transformer:
-    #   1. The same `DecoderLayer` blueprint for its internal transformer blocks.
-    #   2. The `shared_embedding` for both embedding future tokens and for its final
-    #      logit projection.
-    # Its only effect is to "sow" these losses; it does not alter the primary logits output.
-    if self.config.mtp_num_layers > 0:
-      self.mtp_block(
-          shared_embedding=self.shared_embedding,
-          main_hidden_state=hidden_state,
-          input_ids=decoder_input_tokens,
-          target_ids=decoder_target_tokens,
-          target_mask=decoder_target_mask,
-          position_ids=decoder_positions,
-          decoder_segment_ids=decoder_segment_ids,
-          deterministic=not enable_dropout,
-          model_mode=model_mode,
-      )
-
-    if self.config.attention == "vllm_rpa":
-      # In vLLM, logits are computed separately after updating the KV cache.
-      return logits, hidden_state, kv_caches
-
-    return logits
-
-
 def transformer_as_linen(
     config: Config,
     mesh: Mesh,
     quant: Quant,
+    rngs: nnx.Rngs | None = None,
     model_mode: str = MODEL_MODE_TRAIN,
     *,
     name: str | None = None,
-) -> nnx_wrappers.ToLinen | TransformerLinenPure:
+) -> nnx_wrappers.ToLinen:
   """Constructs a Transformer model as a Linen or NNX module.
 
-  This function returns an autoregressive Transformer model as either a Linen module
-  or an NNX-wrapped module, depending on the `config.enable_nnx` flag. The returned module
-  is suitable for training, evaluation, or decoding.
-
-  If `config.enable_nnx` is True, returns a `TransformerLinen` that wraps the NNX-style
-  Transformer for integration with NNX-specific APIs and workflows.
-  Otherwise, returns a pure Flax Linen implementation (`TransformerLinenPure`).
+  This function returns an autoregressive Transformer model as a NNX-wrapped module.
+  The returned module is suitable for training, evaluation, or decoding.
 
   Args:
     config (Config): The configuration object specifying model hyperparameters and options.
@@ -239,27 +65,27 @@ def transformer_as_linen(
     name (str, optional): Optional module name for Linen/NNX construction.
 
   Returns:
-    nnx_wrappers.ToLinen | TransformerLinenPure:
+    nnx_wrappers.ToLinen:
       A constructed Transformer model compatible with the specified framework (Linen or NNX).
   """
-  if config.enable_nnx:
-    return TransformerLinen(
-        Transformer,
-        args=(),
-        kwargs=nn.FrozenDict(
-            {
-                "mesh": mesh,
-                "config": config,
-                "quant": quant,
-                "model_mode": model_mode,
-            }
-        ),
-        metadata_fn=initializers.variable_to_logically_partitioned,
-        name=name,
-    )
-  else:
-    return TransformerLinenPure(config, mesh, quant, model_mode=model_mode, name=name)
-
+  rngs = rngs or nnx.Rngs(
+      params=jax.random.PRNGKey(config.init_weights_seed)
+  )
+  return TransformerLinen(
+      Transformer,
+      args=(),
+      kwargs=nn.FrozenDict(
+          {
+              "mesh": mesh,
+              "config": config,
+              "quant": quant,
+              "model_mode": model_mode,
+              "rngs": rngs,
+          }
+      ),
+      metadata_fn=initializers.variable_to_logically_partitioned,
+      name=name,
+  )
 
 class TransformerLinen(nnx_wrappers.ToLinen):
   """Transformer model as a linen module."""
@@ -300,7 +126,7 @@ class Transformer(nnx.Module):
         num_features=cfg.emb_dim,
         dtype=cfg.dtype,
         attend_dtype=jnp.float32 if cfg.logits_dot_in_fp32 else cfg.dtype,  # for logit training stability
-        embedding_init=nn.initializers.normal(stddev=1.0),
+        embedding_init=nnx.initializers.normal(stddev=1.0),
         config=cfg,
         rngs=rngs,
     )
@@ -501,8 +327,7 @@ class Transformer(nnx.Module):
 
     return logits
 
-
-class ZeroOneTransformer(nn.Module):
+class ZeroOneTransformer(nnx.Module):
   """
   A wrapper for the base Transformer model designed to implement the Zero-1
   FSDP optimization.
@@ -517,23 +342,23 @@ class ZeroOneTransformer(nn.Module):
   network communication, which can improve training speed if sufficient memory is
   available.
   """
-
-  config: Config
-  mesh: Mesh
-  quant: Quant
   # Possible model_mode values can be found in MaxText.common_types.
   # We generally use MaxText.common_types.MODEL_MODE_TRAIN or
   # MaxText.common_types.MODEL_MODE_PREFILL for initializations here.
   # TODO: Make model_mode required after confirming no users are affected.
-  model_mode: str = MODEL_MODE_TRAIN  # May be different than the model_mode passed to __call__
+  # May be different than the model_mode passed to __call__
+  def __init__(self, config: Config, mesh: Mesh, quant: Quant, *, rngs: nnx.Rngs, model_mode: str = MODEL_MODE_TRAIN):
+    """Initialize the Zero-1 FSDP Transformer wrapper."""
+    self.config = config
+    self.mesh = mesh
+    self.quant = quant
+    self.model_mode = model_mode
+    self.rngs = rngs
 
-  def setup(self):
-    """Sets up the underlying Transformer model.
+    batch_size, sequence_length = max_utils.get_batch_seq_len_for_mode(config=self.config, model_mode=self.model_mode)
+    self.shape = (batch_size, sequence_length, self.config.emb_dim)
 
-    This method initializes the `self.model` attribute by calling the
-    `transformer_as_linen` factory function.
-    """
-    self.model = transformer_as_linen(self.config, self.mesh, self.quant, self.model_mode)
+    self.model = Transformer(config=config, mesh=mesh, quant=quant, model_mode=model_mode, rngs=self.rngs)
 
   def __call__(
       self,
@@ -551,7 +376,6 @@ class ZeroOneTransformer(nn.Module):
       partition_spec=None,
       decoder_target_tokens: None | jnp.ndarray = None,
       decoder_target_mask: None | jnp.ndarray = None,
-      nnx_method: str | None = None,
   ):
     """Applies the Zero-1 FSDP wrapped Transformer model.
 
@@ -578,26 +402,16 @@ class ZeroOneTransformer(nn.Module):
     Returns:
       Logits from the Transformer model.
     """
-    if self.is_initializing():
-      return self.model(
-          decoder_input_tokens=decoder_input_tokens,
-          decoder_positions=decoder_positions,
-          decoder_segment_ids=decoder_segment_ids,
-          encoder_images=encoder_images,
-          encoder_image_masks=encoder_image_masks,
-          enable_dropout=enable_dropout,
-          model_mode=model_mode,
-          previous_chunk=previous_chunk,
-          true_length=true_length,
-          slot=slot,
-          page_state=page_state,
-      )
-    all_model_weights = all_gather_over_fsdp(
-        self.model.variables, partition_spec, mesh=self.mesh, logical_axis_rules=self.config.logical_axis_rules
-    )
 
-    return self.model.apply(
-        all_model_weights,
+    graphdef, state = nnx.split(self.model)
+    if partition_spec is None:
+      partition_spec = nnx.get_partition_spec(state)
+    gathered_state = all_gather_over_fsdp(
+        state, partition_spec, mesh=self.mesh, logical_axis_rules=self.config.logical_axis_rules
+    )
+    gathered_model = nnx.merge(graphdef, gathered_state)
+
+    return gathered_model(
         decoder_input_tokens=decoder_input_tokens,
         decoder_positions=decoder_positions,
         decoder_segment_ids=decoder_segment_ids,
@@ -609,8 +423,6 @@ class ZeroOneTransformer(nn.Module):
         true_length=true_length,
         slot=slot,
         page_state=page_state,
-        mutable=False,
         decoder_target_tokens=decoder_target_tokens,
         decoder_target_mask=decoder_target_mask,
-        nnx_method=nnx_method,
     )
