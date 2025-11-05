@@ -70,7 +70,7 @@ class MaxTextDecoderModel(nnx.Module):
     ) -> tuple[list[jax.Array], jax.Array]:
         """Return (updated_kv_caches, hidden[Q, d_model])."""
         if not isinstance(self.model, nnx.Module):
-            raise ValueError("Model must be an instance of nnx.Module. Call load_weights() first.")
+            raise ValueError("Model must be an instance of type nnx.Module.")
 
         if input_ids.ndim < 2:
             input_ids = jnp.expand_dims(input_ids, axis=0)

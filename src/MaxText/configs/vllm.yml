@@ -53,6 +53,5 @@ logical_axis_rules: [
                       ['cache_heads', ['model']],
                       ['paged_kv_heads', ['model']],
                     ]
-# Axes used for DCN must be earlier in this list than ICI, see (b/339009148) for details
 data_sharding: [['data', 'model']]
 input_data_sharding_logical_axes: ['activation_embed_and_logits_batch']
