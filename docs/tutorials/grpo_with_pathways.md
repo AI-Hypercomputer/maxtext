@@ -66,5 +66,5 @@ The overview of the demo script ~/maxtext/src/MaxText/examples/grpo_llama3_1_70b
 
 1. We load a policy model and a reference model. Both are copies of `Llama3.1-70b-Instruct`.
 2. Evaluate the policy model's performance on GSM8K math reasoning benchmark.
-3. Train the policy model using GRPO with potentially different meshes for trainer and rollout dependending on the parameters `TRAINER_DEVICES_FRACTION` and `SAMPLER_DEVICES_FRACTION`. If we set both of these to `1.0`, the entire (same) mesh will be used for both trainer and rollout. If we set say `TRAINER_DEVICES_FRACTION=0.5` and `SAMPLER_DEVICES_FRACTION=0.5`, the first half of the devices will be used for trainer and the second half will be used for rollout
+3. Train the policy model using GRPO with potentially different meshes for trainer and rollout depending on the parameters `TRAINER_DEVICES_FRACTION` and `SAMPLER_DEVICES_FRACTION`. If we set both of these to `1.0`, the entire (same) mesh will be used for both trainer and rollout. If we set say `TRAINER_DEVICES_FRACTION=0.5` and `SAMPLER_DEVICES_FRACTION=0.5`, the first half of the devices will be used for trainer and the second half will be used for rollout
 4. Evaluate the policy model's performance on GSM8K math reasoning benchmark after the post-training with GRPO.

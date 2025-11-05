@@ -82,7 +82,7 @@ pathwaysutils.initialize()
 # for vLLM we can skip JAX precompilation with this flag, it makes startup faster
 os.environ["SKIP_JAX_PRECOMPILE"] = "1"
 
-# add the parent directory (two levels up to say ~/HOME/maxtext) to sys.path if currenlt runnig from
+# add the parent directory (two levels up to say ~/HOME/maxtext) to sys.path if currenlt running from
 # ~/HOME/maxtext/MaxText/examples
 
 # Get the directory of the current script
