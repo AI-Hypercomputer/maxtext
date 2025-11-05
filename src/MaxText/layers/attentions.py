@@ -481,9 +481,6 @@ class Attention(nnx.Module):
     else:
       self.sinks = None
 
-    self.query_norm = None
-    self.key_norm = None
-
     is_llama4_decoder_block = self.config.decoder_block == DecoderBlockType.LLAMA4
     if self.use_qk_norm and not is_llama4_decoder_block:
       self.query_norm = RMSNorm(
@@ -519,6 +516,9 @@ class Attention(nnx.Module):
           weight_dtype=self.config.weight_dtype,
           rngs=self.rngs,
       )
+    else:
+      self.query_norm = None
+      self.key_norm = None
 
     self._maybe_shard_with_logical = functools.partial(
         maybe_shard_with_logical,
