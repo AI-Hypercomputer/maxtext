@@ -16,7 +16,7 @@
 
 Example cmd:
 
-python3 -m MaxText.convert_gpt_oss_ckpt --base-model-path <path/to/hf/ckpt> \
+python3 -m MaxText.utils.ckpt_scripts.convert_gpt_oss_ckpt --base-model-path <path/to/hf/ckpt> \
     --maxtext-model-path <GCS/path/to/save/new/maxtext/ckpt> --model-size gpt-oss-20b
 """
 
@@ -37,8 +37,8 @@ from tqdm import tqdm
 
 from MaxText import max_logging
 from MaxText.inference_utils import str2bool
-from MaxText.llama_or_mistral_ckpt import save_weights_to_checkpoint
-from MaxText.convert_gpt_oss_unscanned_ckpt import MODEL_PARAMS_DICT, _hf_to_maxtext_mapping, _pt_to_np
+from MaxText.utils.ckpt_scripts.llama_or_mistral_ckpt import save_weights_to_checkpoint
+from MaxText.utils.ckpt_scripts.convert_gpt_oss_unscanned_ckpt import MODEL_PARAMS_DICT, _hf_to_maxtext_mapping, _pt_to_np
 
 
 # NOTE: numpy doesn't have native support for bfloat16, so

@@ -37,10 +37,10 @@ if [ -z "${CKPT_DISK_LOCATION}" ]; then
 fi
 
 # 1.1 Convert checkpoint to `scanned` format, more suitable for training 
-JAX_PLATFORMS=cpu python3 -m MaxText.convert_gpt_oss_ckpt --base-model-path ${CKPT_DISK_LOCATION} --maxtext-model-path ${BASE_OUTPUT_PATH}/scanned --model-size ${MODEL_NAME}
+JAX_PLATFORMS=cpu python3 -m MaxText.utils.ckpt_scripts.convert_gpt_oss_ckpt --base-model-path ${CKPT_DISK_LOCATION} --maxtext-model-path ${BASE_OUTPUT_PATH}/scanned --model-size ${MODEL_NAME}
 
 # 1.2 Convert checkpoint to `unscanned` format, more suitable for decoding
-JAX_PLATFORMS=cpu python3 -m MaxText.convert_gpt_oss_unscanned_ckpt --base-model-path ${CKPT_DISK_LOCATION} --maxtext-model-path ${BASE_OUTPUT_PATH}/unscanned --model-size ${MODEL_NAME}
+JAX_PLATFORMS=cpu python3 -m MaxText.utils.ckpt_scripts.convert_gpt_oss_unscanned_ckpt --base-model-path ${CKPT_DISK_LOCATION} --maxtext-model-path ${BASE_OUTPUT_PATH}/unscanned --model-size ${MODEL_NAME}
 
 # Step 2: 
 # We define the checkpoint paths. This way it is easier to use these paths in the `train.py` and `decode.py` commands

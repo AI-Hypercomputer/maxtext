@@ -31,12 +31,12 @@ for the models with the `-Original` suffix ([example](https://huggingface.co/met
 Once you have downloaded the models, you can run the following command to generate an unscanned checkpoint (preferred for decoding):
 
 ```
-JAX_PLATFORMS=CPU python -m MaxText.llama4_ckpt_unscanned --base-model-path [PATH_TO_CHECKPOINT_DIR] --maxtext-model-path [DESIRED_MAXTEXT_CHECKPOINT_OUTPUT_DIR]  --model-size llama4-17b-16e [--huggingface-checkpoint]
+JAX_PLATFORMS=CPU python -m MaxText.utils.ckpt_scripts.llama4_ckpt_unscanned --base-model-path [PATH_TO_CHECKPOINT_DIR] --maxtext-model-path [DESIRED_MAXTEXT_CHECKPOINT_OUTPUT_DIR]  --model-size llama4-17b-16e [--huggingface-checkpoint]
 ```
 
 Or the following command to generate a scanned checkpoint (preferred for training):
 ```
-JAX_PLATFORMS=CPU python -m MaxText.llama_or_mistral_ckpt --base-model-path [PATH_TO_CHECKPOINT_DIR] --maxtext-model-path [DESIRED_MAXTEXT_CHECKPOINT_OUTPUT_DIR]  --model-size llama4-17b-16e
+JAX_PLATFORMS=CPU python -m MaxText.utils.ckpt_scripts.llama_or_mistral_ckpt --base-model-path [PATH_TO_CHECKPOINT_DIR] --maxtext-model-path [DESIRED_MAXTEXT_CHECKPOINT_OUTPUT_DIR]  --model-size llama4-17b-16e
 ```
 
 ## Pre-training
