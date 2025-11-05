@@ -54,6 +54,8 @@ Example Usage:
 import jax
 import os
 from typing import Sequence, Any
+import time
+from tqdm import tqdm
 
 from transformers import AutoTokenizer, AutoProcessor
 
@@ -72,7 +74,8 @@ from MaxText.utils.ckpt_conversion.utils.hf_model_configs import HF_MODEL_CONFIG
 from MaxText.utils.ckpt_conversion.utils.utils import (process_leaf_param, save_model_files, HF_IDS)
 
 
-jax.config.update("jax_platform_name", "cpu")
+os.environ["JAX_PLATFORMS"] = "cpu"
+os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=16"
 
 
 def _get_model_mappings(model_name: str, scan_layers: bool, config_dict: dict):
@@ -114,17 +117,22 @@ def main(argv: Sequence[str]) -> None:
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
 
+  # Initialize maxtext config
   config = pyconfig.initialize(argv)
   assert (
       config.load_full_state_path == ""
   ), "This script expects parameters, not a full state. Use generate_param_only_checkpoint first if needed."
   max_utils.print_system_information()
 
+  # Load Maxtext checkpoint
+  max_logging.log("\nLoading Orbax checkpoint...")
+  start = time.time()
   engine = maxengine.MaxEngine(config)
   rng = jax.random.PRNGKey(1234)
   rng, rng_load_params = jax.random.split(rng)
   # load params from maxengine
   loaded_params_from_engine = engine.load_params(rng_load_params)
+  max_logging.log(f"Elapse: {(time.time() - start) / 60:.2f} min")
 
   if not config.base_output_directory:
     output_directory = f"tmp/{config.run_name}"
@@ -165,18 +173,22 @@ def main(argv: Sequence[str]) -> None:
   leaves_with_paths = jax.tree_util.tree_leaves_with_path(actual_weights_dict)
 
   # traverse leavse to build: mt_param_key:mt_weights
+  max_logging.log("\nProccessing weight...")
+  start = time.time()
   processed_params_list = []
-  for path_tuple_iter, leaf_value_iter in leaves_with_paths:
-    processed_params_list.extend(
-        process_leaf_param(path_tuple_iter, leaf_value_iter, param_map, shape_map, hook_fn_map, config)
-    )
+  for path_tuple_iter, leaf_value_iter in tqdm(leaves_with_paths, total=len(leaves_with_paths)):
+    processed_params = process_leaf_param(path_tuple_iter, leaf_value_iter, param_map, shape_map, hook_fn_map, config)
+    processed_params_list.extend(processed_params)
   transformed_hf_weights = dict(processed_params_list)
+  max_logging.log(f"Elapse: {(time.time() - start) / 60:.2f} min")
 
   # 5. Save in HuggingFace Format
   if not transformed_hf_weights:
     print("Error: No weights were transformed. Check mappings and parameter paths.")
     return
 
+  max_logging.log("\nSaving HuggingFace model...")
+  start = time.time()
   save_model_files(
       weight_arrays=transformed_hf_weights,
       config=hf_config_obj,
@@ -185,6 +197,7 @@ def main(argv: Sequence[str]) -> None:
       output_dir=output_directory,
   )
   max_logging.log(f"✅ MaxText model successfully saved in HuggingFace format at {output_directory}")
+  max_logging.log(f"Elapse: {(time.time() - start) / 60:.2f} min")
 
 
 if __name__ == "__main__":

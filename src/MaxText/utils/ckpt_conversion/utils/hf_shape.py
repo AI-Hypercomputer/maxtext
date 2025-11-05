@@ -208,19 +208,154 @@ def GEMMA2_HF_WEIGHTS_TO_SHAPE(config):
   return mapping
 
 
+def DEEPSEEK_HF_WEIGHTS_TO_SHAPE(config):
+  """Returns mapping between HuggingFace DeepseekV3 weights path and their shape.
+
+  This mapping is derived by matching the provided config dictionary against
+  the model's parameter dump.
+
+  To check this mapping, dump the huggingface model shapes:
+  from transformers import AutoModelForCausalLM
+  model_name = "deepseek-ai/DeepSeek-V3"
+  model = AutoModelForCausalLM.from_pretrained(model_name, dtype="auto")
+  for name, val in model.named_parameters():
+    print(name, val.shape)
+
+  Args:
+      config (dict): Model configuration dictionary (from HF DeepseekV3Config.to_dict())
+                     Expected keys: https://huggingface.co/deepseek-ai/DeepSeek-V3/blob/main/config.json
+
+  Returns:
+      dict: A mapping where:
+          - Keys are HuggingFace model parameter paths
+          - Values are parameter shape as a list
+  """
+  # --- Extract Core Config Values ---
+  hidden_size = config["hidden_size"]
+  num_hidden_layers = config["num_hidden_layers"]
+  vocab_size = config["vocab_size"]
+  attention_bias = config.get("attention_bias", False)
+
+  # --- Attention-related Dimensions ---
+  q_lora_rank = config["q_lora_rank"]
+  kv_lora_rank = config["kv_lora_rank"]
+  num_attention_heads = config["num_attention_heads"]
+  # Q projection dim
+  q_dim = num_attention_heads * config["qk_head_dim"]
+  # KV_b_proj output dim.
+  kv_b_dim = num_attention_heads * (config["qk_nope_head_dim"] + config["v_head_dim"])
+  # Output projection dim (input)
+  o_proj_in_dim = num_attention_heads * config["v_head_dim"]
+  # kv_a_proj_with_mqa output dim.
+  kv_a_proj_out_dim = config["kv_lora_rank"] + config["qk_rope_head_dim"]
+
+  # --- MLP-related Dimensions ---
+  intermediate_size = config["intermediate_size"]  # For dense layers
+  moe_intermediate_size = config["moe_intermediate_size"]  # For expert layers
+  n_routed_experts = config["n_routed_experts"]
+  n_shared_experts = config.get("n_shared_experts", 0)
+  # This key determines which layers are dense vs. MoE
+  first_k_dense = config.get("first_k_dense_replace", 0)
+
+  # --- Initialize Mapping ---
+  mapping = {
+      "model.embed_tokens.weight": [vocab_size, hidden_size],
+      "model.norm.weight": [hidden_size],
+      "lm_head.weight": [vocab_size, hidden_size],
+  }
+
+  # --- Loop Over Layers ---
+  for layer_idx in range(num_hidden_layers):
+    layer_prefix = f"model.layers.{layer_idx}"
+
+    # Common layer components
+    layer_mapping = {
+        f"{layer_prefix}.input_layernorm.weight": [hidden_size],
+        f"{layer_prefix}.post_attention_layernorm.weight": [hidden_size],
+        # --- Attention projections ---
+        f"{layer_prefix}.self_attn.kv_a_proj_with_mqa.weight": [kv_a_proj_out_dim, hidden_size],
+        f"{layer_prefix}.self_attn.kv_a_layernorm.weight": [kv_lora_rank],
+        f"{layer_prefix}.self_attn.kv_b_proj.weight": [kv_b_dim, kv_lora_rank],
+        f"{layer_prefix}.self_attn.o_proj.weight": [hidden_size, o_proj_in_dim],
+    }
+
+    # --- Q-Projection (Conditional on LoRA) ---
+    if q_lora_rank is None:
+      layer_mapping[f"{layer_prefix}.self_attn.q_proj.weight"] = [q_dim, hidden_size]
+    else:
+      layer_mapping.update(
+          {
+              f"{layer_prefix}.self_attn.q_a_proj.weight": [q_lora_rank, hidden_size],
+              f"{layer_prefix}.self_attn.q_a_layernorm.weight": [q_lora_rank],
+              f"{layer_prefix}.self_attn.q_b_proj.weight": [q_dim, q_lora_rank],
+          }
+      )
+
+    # --- Add conditional biases ---
+    if attention_bias:
+      if q_lora_rank is not None:
+        layer_mapping[f"{layer_prefix}.self_attn.q_a_proj.bias"] = [q_lora_rank]
+      layer_mapping.update(
+          {
+              f"{layer_prefix}.self_attn.kv_a_proj_with_mqa.bias": [kv_a_proj_out_dim],
+              f"{layer_prefix}.self_attn.o_proj.bias": [hidden_size],
+          }
+      )
+
+    # --- Add MLP weights (Dense vs. MoE) ---
+    if layer_idx < first_k_dense:
+      # This is a DENSE MLP layer (DeepseekV3MLP)
+      layer_mapping.update(
+          {
+              f"{layer_prefix}.mlp.gate_proj.weight": [intermediate_size, hidden_size],
+              f"{layer_prefix}.mlp.up_proj.weight": [intermediate_size, hidden_size],
+              f"{layer_prefix}.mlp.down_proj.weight": [hidden_size, intermediate_size],
+          }
+      )
+    else:
+      # This is a MoE MLP layer (DeepseekV3MoE)
+      # Add the router gate (DeepseekV3TopkRouter)
+      layer_mapping.update(
+          {
+              f"{layer_prefix}.mlp.gate.weight": [n_routed_experts, hidden_size],
+              f"{layer_prefix}.mlp.gate.e_score_correction_bias": [n_routed_experts],
+          }
+      )
+
+      # Add routed experts (DeepseekV3NaiveMoe)
+      for expert_j in range(n_routed_experts):
+        expert_prefix = f"{layer_prefix}.mlp.experts.{expert_j}"
+        layer_mapping.update(
+            {
+                f"{expert_prefix}.gate_proj.weight": [moe_intermediate_size, hidden_size],
+                f"{expert_prefix}.up_proj.weight": [moe_intermediate_size, hidden_size],
+                f"{expert_prefix}.down_proj.weight": [hidden_size, moe_intermediate_size],
+            }
+        )
+
+      # Add shared experts (if any)
+      if n_shared_experts > 0:
+        shared_intermediate_size = moe_intermediate_size * n_shared_experts
+        layer_mapping.update(
+            {
+                f"{layer_prefix}.mlp.shared_experts.gate_proj.weight": [shared_intermediate_size, hidden_size],
+                f"{layer_prefix}.mlp.shared_experts.up_proj.weight": [shared_intermediate_size, hidden_size],
+                f"{layer_prefix}.mlp.shared_experts.down_proj.weight": [hidden_size, shared_intermediate_size],
+            }
+        )
+
+    mapping.update(layer_mapping)
+
+  return mapping
+
+
 def QWEN3_HF_WEIGHTS_TO_SHAPE(config):
   """Returns mapping between HuggingFace Qwen3 weights path and the HuggingFace weights shape.
 
   To check this mapping, dump the huggingface model shapes:
-    import torch
-    from transformers import AutoTokenizer, AutoModelForCausalLM
+    from transformers import AutoModelForCausalLM
     model_name = "Qwen/Qwen3-0.6B"
-
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    model = AutoModelForCausalLM.from_pretrained(
-      model_name,
-      torch_dtype="auto",
-    )
+    model = AutoModelForCausalLM.from_pretrained(model_name, dtype="auto")
     for name, val in model.named_parameters():
       print(name, val.shape)
 
@@ -362,6 +497,7 @@ def LLAMA31_HF_WEIGHTS_TO_SHAPE(config):
   return mapping
 
 
+# {maxtext model name: {hf weight name: hf shape}}
 HF_SHAPE = {
     "gemma2-2b": GEMMA2_HF_WEIGHTS_TO_SHAPE,
     "gemma2-9b": GEMMA2_HF_WEIGHTS_TO_SHAPE,
@@ -381,4 +517,5 @@ HF_SHAPE = {
     "qwen3-30b-a3b": QWEN3_HF_WEIGHTS_TO_SHAPE,
     "qwen3-235b-a22b": QWEN3_HF_WEIGHTS_TO_SHAPE,
     "qwen3-480b-a35b": QWEN3_HF_WEIGHTS_TO_SHAPE,
+    "deepseek3-671b": DEEPSEEK_HF_WEIGHTS_TO_SHAPE,
 }
