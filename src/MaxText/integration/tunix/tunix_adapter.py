@@ -21,12 +21,26 @@ It also handles weight mapping for compatibility with Hugging Face models.
 
 from __future__ import annotations
 
-from typing import Optional, Tuple, Any
+from typing import Any, Optional, Tuple
 
-from jax import Array
 from flax import nnx
+from jax import Array
 from MaxText.layers.models import Transformer
-from MaxText.integration.tunix.weight_mapping import VLLM_WEIGHT_MAPPING
+from tunix.model.llama3 import BACKEND_MAPPINGS as llama3_backend_mappings
+from tunix.model.qwen2 import BACKEND_MAPPINGS as qwen2_backend_mappings
+from tunix.model.qwen3 import BACKEND_MAPPINGS as qwen3_backend_mappings
+
+
+def _get_backend_mappings(model_name: str):
+  """Returns the backend mappings for the given model name."""
+  if model_name in qwen3_backend_mappings:
+    return qwen3_backend_mappings["vllm_jax"]
+  elif model_name in qwen2_backend_mappings:
+    return qwen2_backend_mappings["vllm_jax"]
+  elif model_name in llama3_backend_mappings:
+    return llama3_backend_mappings["vllm_jax"]
+  else:
+    raise ValueError(f'Unsupported model name: {model_name}')
 
 
 class TunixMaxTextAdapter(nnx.Module):
@@ -62,13 +76,18 @@ class TunixMaxTextAdapter(nnx.Module):
     return logits, None
 
   def to_hf_mappings(self):
-    return VLLM_WEIGHT_MAPPING[self.base.config.model_name].to_hf_mapping()
+
+    return _get_backend_mappings(self.base.config.model_name).to_hf_mappings()
 
   def to_hf_transpose_keys(self):
-    return VLLM_WEIGHT_MAPPING[self.base.config.model_name].to_hf_transpose_keys()
+    return _get_backend_mappings(
+        self.base.config.model_name
+    ).to_hf_transpose_keys()
 
   def to_hf_hook_fns(self):
-    return VLLM_WEIGHT_MAPPING[self.base.config.model_name].to_hf_hook_fns()
+    return _get_backend_mappings(self.base.config.model_name).to_hf_hook_fns()
 
   def lora_to_hf_mappings(self):
-    return VLLM_WEIGHT_MAPPING[self.base.config.model_name].lora_to_hf_mappings()
+    return _get_backend_mappings(
+        self.base.config.model_name
+    ).lora_to_hf_mappings()
