@@ -15,7 +15,7 @@
 """
 This script performs SFT training and evaluation workflow on OpenAI's GSM8K dataset.
 The primary goal is to demonstrate the end-to-end process of:
-1. Pre-SFT Evaluation: Calcuating baseline accuracy for the model before training.
+1. Pre-SFT Evaluation: Calculating baseline accuracy for the model before training.
 2. SFT Training: Fine-tune the model using MaxText & Tunix SFT trainer.
 3. Post-SFT Evaluation: Re-running the evaluation loop after training to measure the performance gain achieved by SFT.
 
