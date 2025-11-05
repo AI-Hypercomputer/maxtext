@@ -19,7 +19,7 @@ from typing import Any, Optional
 
 from absl import flags
 from etils import epath
-from flax.training import train_state
+from flax.nnx import TrainState
 import jax
 from MaxText import exceptions
 from MaxText import max_logging
@@ -456,7 +456,7 @@ def load_state_if_possible(
     load_parameters_from_path: str,
     load_full_state_from_path: str,
     checkpoint_storage_concurrent_gb: int,
-    abstract_unboxed_pre_state: train_state.TrainState,
+    abstract_unboxed_pre_state: TrainState,
     enable_single_replica_ckpt_restoring: bool | None = False,
     dataset_type: str | None = "tfds",
     step: int = -1,  # -1 means latest
@@ -694,9 +694,7 @@ def save_checkpoint(checkpoint_manager, step, state, config=None, data_iterator=
       )
 
   # specify chunk_byte_size to force orbax to control maximum file size in checkpoint
-  chunk_byte_size = (
-      config.checkpoint_storage_target_data_file_size_bytes if config else DEFAULT_OCDBT_TARGET_DATA_FILE_SIZE
-  )
+  chunk_byte_size = config.checkpoint_storage_target_data_file_size_bytes if config else DEFAULT_OCDBT_TARGET_DATA_FILE_SIZE
 
   checkpoint_args = ocp.args.PyTreeSave(
       item=state,

@@ -26,7 +26,7 @@ from jax import random, lax
 from jax.sharding import Mesh
 
 from flax import linen as nn
-
+from flax import nnx
 from aqt.jax.v2 import aqt_tensor
 
 from MaxText.globals import MAXTEXT_PKG_DIR
@@ -307,8 +307,14 @@ class QuantTest(unittest.TestCase):
   def quantization_config(self, quant, logits_tolerance=2e-1, grad_tolerance=5e-1):
     """Run forward pass and backward pass for quantized model and compare with base model."""
     cfg = self.init_pyconfig(quantization=quant)
-    model = model_creation_utils.create_model(self.cfg, self.mesh)
-    qt_model = model_creation_utils.create_model(cfg, self.mesh)
+
+    rngs = nnx.Rngs(
+      params=jax.random.PRNGKey(cfg.init_weights_seed), 
+      dropout=jax.random.PRNGKey(cfg.init_dropouts_seed)
+    )
+    
+    model = model_creation_utils.create_model(config=self.cfg, mesh=self.mesh, rngs=rngs)
+    qt_model = model_creation_utils.create_model(config=cfg, mesh=self.mesh, rngs=rngs)
 
     ids, decoder_segment_ids, decoder_positions = self.get_data()
     var = model.init(

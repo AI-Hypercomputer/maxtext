@@ -31,30 +31,6 @@ from orbax import checkpoint as ocp
 from functools import partial
 from etils import epath
 
-
-@overload
-def from_config(
-    config: pyconfig.HyperParameters,
-    devices: Sequence[jax.Device] | None = None,
-    mesh: Mesh | None = None,
-    *,
-    model_mode: str = MODEL_MODE_TRAIN,
-) -> nn.Module:
-  ...
-
-
-@overload
-def from_config(
-    config: pyconfig.HyperParameters,
-    devices: Sequence[jax.Device] | None = None,
-    mesh: Mesh | None = None,
-    *,
-    model_mode: str = MODEL_MODE_TRAIN,
-    rngs: nnx.Rngs,
-) -> models.Transformer:
-  ...
-
-
 def from_config(
     config: pyconfig.HyperParameters,
     devices: Sequence[jax.Device] | None = None,
@@ -62,7 +38,7 @@ def from_config(
     *,
     model_mode: str = MODEL_MODE_TRAIN,
     rngs: nnx.Rngs | None = None,
-) -> nn.Module | models.Transformer:
+) -> models.Transformer:
   """Load a pretrained MaxText model from checkpoint.
 
   This function loads a model from a checkpoint.
@@ -78,6 +54,10 @@ def from_config(
   Example:
       model = from_config(config)
   """
+  rngs = rngs or nnx.Rngs(
+      params=jax.random.PRNGKey(config.init_weights_seed),
+      dropout=jax.random.PRNGKey(config.init_dropouts_seed),
+  )
   devices_array = maxtext_utils.create_device_mesh(config, devices)
 
   if mesh is None:
@@ -94,18 +74,13 @@ def from_config(
   return model
 
 
-def get_transformer_model(config, mesh, quant, model_mode: str = MODEL_MODE_TRAIN, rngs: nnx.Rngs | None = None):
+def get_transformer_model(
+    config, mesh, quant, rngs: nnx.Rngs | None = None, model_mode: str = MODEL_MODE_TRAIN
+) -> nn.Module:
   """Returns the transformer model based on the configuration."""
-  if config.model_fsdp_ag_once:
-    if rngs is not None:
-      raise NotImplementedError
-    else:
-      return models.ZeroOneTransformer(config, mesh, quant=quant, model_mode=model_mode)
-  else:
-    if rngs is not None:
-      return models.Transformer(config, mesh, quant=quant, rngs=rngs, model_mode=model_mode)
-    else:
-      return models.transformer_as_linen(config, mesh, quant=quant, model_mode=model_mode)
+  if rngs is not None:
+    return models.ZeroOneTransformer(config, mesh, quant=quant, model_mode=model_mode, rngs=rngs)
+  return models.Transformer(config, mesh, quant=quant, model_mode=model_mode, rngs=rngs)
 
 
 def create_model(config, mesh, model_mode: str = MODEL_MODE_TRAIN, rngs: nnx.Rngs | None = None):
@@ -120,20 +95,7 @@ def create_model(config, mesh, model_mode: str = MODEL_MODE_TRAIN, rngs: nnx.Rng
 def create_nnx_model(config, mesh=None, devices=None, model_mode=MODEL_MODE_TRAIN, rng_key=None):
   """Creates a NNX model with sharded parameters, possibly loading from a checkpoint."""
 
-  def _create_model(mesh: Mesh | None = None, model_mode: str = MODEL_MODE_TRAIN, rng_key: jax.Array | None = None):
-    if rng_key is None:
-      rng_key = jax.random.PRNGKey(config.init_weights_seed)
-
-    if model_mode == MODEL_MODE_TRAIN:
-      rngs = nnx.Rngs(params=rng_key, dropout=1)
-    else:
-      rngs = nnx.Rngs(params=rng_key)  # disable dropout RNG for inference
-
-    return from_config(config, devices, mesh, rngs=rngs, model_mode=model_mode)
-
-  _create_model_partial = partial(_create_model, mesh=mesh, model_mode=model_mode, rng_key=rng_key)
-
-  abstract_model = nnx.eval_shape(_create_model_partial)
+  abstract_model = nnx.eval_shape(lambda: from_config(config, devices))
   graphdef, abstract_state = nnx.split(abstract_model)
   specs = nnx.get_partition_spec(abstract_state)
 
@@ -150,7 +112,7 @@ def create_nnx_model(config, mesh=None, devices=None, model_mode=MODEL_MODE_TRAI
   def create_sharded_state():
     # This will be JIT-compiled. JAX knows the output sharding and can
     # initialize the parameters directly on the target devices in a sharded way.
-    model = _create_model_partial()
+    model = from_config(config, devices)
     return nnx.state(model)
 
   with mesh:

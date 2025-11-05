@@ -907,6 +907,7 @@ class TrainingLoop(BaseModel):
   enable_data_shuffling: bool = Field(True, description="Enables shuffling of the training data.")
   data_shuffle_seed: int = Field(0, description="Seed for data shuffling.")
   init_weights_seed: int = Field(0, description="Seed for model weight initialization.")
+  init_dropouts_seed: int = Field(0, description="Seed for model dropout initialization.")
 
 
 class Optimizer(BaseModel):

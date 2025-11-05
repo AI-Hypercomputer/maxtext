@@ -676,6 +676,7 @@ enable_dropout: True
 enable_data_shuffling: True
 data_shuffle_seed: 0
 init_weights_seed: 0
+init_dropouts_seed: 0
 
 # You may disable clipping by setting gradient_clipping_threshold to zero.
 gradient_clipping_threshold: 1.0
