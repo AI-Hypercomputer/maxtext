@@ -53,13 +53,20 @@ bash docker_upload_runner.sh CLOUD_IMAGE_NAME=path/to/gcr.io
 
 ### Submit your jobs
 
-Please use a pathways enabled cluster, and you can submit the script `maxtext/src/MaxText/examples/grpo_llama3_1_70b_demo_pw.py` via XPK
+Please use a pathways enabled [XPK](https://github.com/AI-Hypercomputer/xpk) cluster, and you can submit the `train_rl.py` script via [XPK](https://github.com/AI-Hypercomputer/xpk)
 ```
 xpk workload create-pathways --workload $WORKLOAD \
 --docker-image path/to/gcr.io:latest --cluster $TPU_CLUSTER \
 --tpu-type=$TPU_TYPE --num-slices=1  --zone=$ZONE \
 --project=$PROJECT_ID --priority=high \
---command "HF_TOKEN=$HF_TOKEN TF_CPP_MIN_LOG_LEVEL=0 JAX_PLATFORMS=proxy JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 ENABLE_PATHWAYS_PERSISTENCE='1' python  src/MaxText/examples/grpo_llama3_1_70b_demo_pw.py"
+--command "HF_TOKEN=$HF_TOKEN TF_CPP_MIN_LOG_LEVEL=0 JAX_PLATFORMS=proxy JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 ENABLE_PATHWAYS_PERSISTENCE='1' # Llama3.1-70B-Instruct
+python3 -m src.MaxText.rl.train_rl src/MaxText/configs/rl.yml \
+  --model_name=llama3.1-70b \
+  --tokenizer_path=meta-llama/Llama-3.1-70B-Instruct \
+  --load_parameters_path=gs://path/to/checkpoint/0/items \
+  --run_name=$WORKLOAD \
+  --base_output_directory=$OUTPUT_PATH \
+  --hf_access_token=$HF_TOKEN"
 ```
 
 The overview of the demo script ~/maxtext/src/MaxText/examples/grpo_llama3_1_70b_demo_pw.py` is as follows:
