@@ -58,9 +58,17 @@ We use the scheduler code from vLLM, and the model runner code from `tpu_commons
 
 ## Run GRPO
 
-Finally, run the script
+Finally, run the command
 
-`python ~/maxtext/src/MaxText/examples/grpo_llama3_1_8b_demo.py`
+```
+python3 -m src.MaxText.rl.train_rl src/MaxText/configs/rl.yml \
+  --model_name=llama3.1-8b \
+  --tokenizer_path=meta-llama/Llama-3.1-8B-Instruct \
+  --load_parameters_path=gs://path/to/checkpoint/0/items \
+  --run_name=$WORKLOAD \
+  --base_output_directory=$OUTPUT_PATH \
+  --hf_access_token=$HF_TOKEN
+```
 
 The overview of the demo script is as follows:
 
