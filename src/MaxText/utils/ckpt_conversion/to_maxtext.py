@@ -51,6 +51,8 @@ import jax
 import psutil
 from absl import app
 from flax.training import train_state
+import flax.linen as nn
+from flax.linen import partitioning as nn_partitioning
 from transformers import AutoConfig, AutoModelForCausalLM
 from tqdm import tqdm
 
@@ -59,7 +61,6 @@ from MaxText import max_logging
 from MaxText import max_utils
 from MaxText import maxtext_utils
 from MaxText import pyconfig
-from MaxText import optimizers
 from MaxText.common_types import MODEL_MODE_TRAIN
 from MaxText.layers import models, quantizations
 from MaxText.checkpointing import save_checkpoint
@@ -236,13 +237,6 @@ def main(argv: Sequence[str]) -> None:
   del hf_model
   max_logging.log("HuggingFace model loaded and converted to NumPy.")
 
-  # Initialize MaxText model, optimizer, and abstract state
-  rng = jax.random.PRNGKey(config.init_weights_seed)
-  quant = quantizations.configure_quantization(config)
-  maxtext_model_flax = models.transformer_as_linen(config, mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
-  learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
-  tx = optimizers.get_optimizer(config, learning_rate_schedule)
-
   checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
       output_directory,
       enable_checkpointing=True,
@@ -252,11 +246,25 @@ def main(argv: Sequence[str]) -> None:
       use_zarr3=config.checkpoint_storage_use_zarr3,
   )
 
-  abstract_state, _, _, _ = maxtext_utils.setup_training_state(
-      maxtext_model_flax, None, tx, config, rng, mesh, checkpoint_manager
+  max_logging.log("MaxText abstract model and state initializing...")
+  quant = quantizations.configure_quantization(config)
+  maxtext_model_flax = models.transformer_as_linen(config, mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
+
+  # Get abstract model structure (name, shape) without materializing the weights to save memory
+  with maxtext_model_flax.mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+    abstract_params_tree = maxtext_utils.get_abstract_param(maxtext_model_flax, config)["params"]
+  # Get abstract_params_flat from abstract_params_tree
+  abstract_params_flat, _ = jax.tree_util.tree_flatten_with_path(abstract_params_tree)
+  # Get abstract_params_treedef from transformed abstract_params_tree
+  # Otherwise the param name has extra "value" after unflatten
+  abstract_params_tree = jax.tree.map(
+      lambda _: 0,
+      abstract_params_tree,
+      is_leaf=lambda x: isinstance(x, nn.LogicallyPartitioned),
   )
-  abstract_params_tree = abstract_state.params["params"]
-  abstract_params_flat, abstract_params_treedef = jax.tree_util.tree_flatten_with_path(abstract_params_tree)
+  abstract_params_treedef = jax.tree_util.tree_structure(abstract_params_tree)
+  del abstract_params_tree
+
   max_logging.log("MaxText abstract model and state initialized.")
 
   # Get parameter mappings and hooks
@@ -279,7 +287,7 @@ def main(argv: Sequence[str]) -> None:
   for path_tuple, abstract_leaf_value in MemoryMonitorTqdm(
       abstract_params_flat, desc="Transforming weights", unit="param", leave=True, dynamic_ncols=True
   ):
-    key_parts = [k.key for k in path_tuple]
+    key_parts = [k.key for k in path_tuple if hasattr(k, "key")]
     mt_param_key = "params-" + "-".join(key_parts)
     mt_target_shape_final = abstract_leaf_value.shape
 
