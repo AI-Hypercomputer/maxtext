@@ -26,7 +26,8 @@ from typing import Optional, Tuple, Any
 from jax import Array
 from flax import nnx
 from MaxText.layers.models import Transformer
-from MaxText.integration.tunix.weight_mapping import VLLM_WEIGHT_MAPPING
+from maxtext.src.maxtext.integration.tunix.utils import VllmWeightMapping
+from MaxText.utils.ckpt_conversion.utils.hf_model_configs import HF_MODEL_CONFIGS  # pylint: disable=ungrouped-imports
 
 
 class TunixMaxTextAdapter(nnx.Module):
@@ -35,9 +36,15 @@ class TunixMaxTextAdapter(nnx.Module):
   def __init__(
       self,
       base_model: Transformer,
+      use_standalone_mappings: bool = False,
   ):
     super().__init__()
     self.base = base_model
+    self._vllm_weight_mapping = VllmWeightMapping(
+        self.base.config.model_name,
+        HF_MODEL_CONFIGS[self.base.config.model_name].to_dict(),
+        use_standalone_mappings,
+    )
 
   # ------------------------------------------------------------------ #
   # Tunix call signature
@@ -62,13 +69,13 @@ class TunixMaxTextAdapter(nnx.Module):
     return logits, None
 
   def to_hf_mappings(self):
-    return VLLM_WEIGHT_MAPPING[self.base.config.model_name].to_hf_mapping()
+    return self._vllm_weight_mapping.to_hf_mapping()
 
   def to_hf_transpose_keys(self):
-    return VLLM_WEIGHT_MAPPING[self.base.config.model_name].to_hf_transpose_keys()
+    return self._vllm_weight_mapping.to_hf_transpose_keys()
 
   def to_hf_hook_fns(self):
-    return VLLM_WEIGHT_MAPPING[self.base.config.model_name].to_hf_hook_fns()
+    return self._vllm_weight_mapping.to_hf_hook_fns()
 
   def lora_to_hf_mappings(self):
-    return VLLM_WEIGHT_MAPPING[self.base.config.model_name].lora_to_hf_mappings()
+    return self._vllm_weight_mapping.lora_to_hf_mappings()

@@ -596,7 +596,7 @@ def GEMMA2_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, scan_layers=False, saving_to_hf=F
   return mapping
 
 
-def QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING(config, scan_layers=False):
+def QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING(config=None, scan_layers=False):
   """Returns mapping from MaxText to HuggingFace Qwen3 weight paths.
 
   This function generates a dictionary that maps parameter names from a MaxText
@@ -935,6 +935,11 @@ def DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, scan_layers=False, saving_to_hf
   return mapping
 
 
+def DEEPSEEK_NNX_TO_VLLM_PARAM_HOOK_FN():
+  """Creates parameter transformation functions for Deepseek."""
+  return {}
+
+
 def QWEN3_OMNI_MOE_MAXTEXT_TO_HF_PARAM_MAPPING(config, scan_layers=False):
   """Returns mapping from MaxText to HuggingFace Qwen3-Omni weight paths.
 
@@ -1005,6 +1010,19 @@ def QWEN3_OMNI_MOE_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, scan_layers=False, saving
   # mapping.update(vision_hooks), mapping.update(audio_hooks), etc.
 
   return mapping
+
+
+def QWEN3_NNX_TO_VLLM_PARAM_HOOK_FN(target_shape=None):
+  """Creates parameter transformation functions for Qwen3.
+
+  This function provides a dictionary of transformation functions (hooks) for
+  converting Qwen3 model parameters between NNX and vLLM formats.
+
+  Returns:
+    dict: A dictionary mapping NNX parameter names to their corresponding
+      transformation functions.
+  """
+  return {}
 
 
 def LLAMA31_MAXTEXT_TO_HF_PARAM_MAPPING(config, scan_layers=False):
@@ -1182,6 +1200,61 @@ def LLAMA31_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, scan_layers=False, saving_to_hf=
 
 
 # {maxtext model name: {maxtext weight name: hf weight name}}
+def LLAMA31_NNX_TO_VLLM_PARAM_HOOK_FN():
+  """Defines and returns hook functions for weight transformations.
+
+  These hooks are applied to specific weights during the conversion
+  from MaxText to a HuggingFace-compatible format. They handle
+  transformations like RoPE reordering and query scaling that are not
+  simple re-mappings.
+
+  Returns:
+    A dictionary where keys are MaxText parameter names and values are
+    the corresponding transformation functions.
+  """
+
+  def reorder_rope(arr):
+    """Reorders Rotary Position Embedding (RoPE) weights.
+
+    This function is necessary because MaxText and HuggingFace's vLLM
+    implementations may have different orderings for RoPE dimensions.
+    It splits the last dimension into even and odd indices and
+    concatenates them.
+
+    Args:
+      arr: The input weight array.
+
+    Returns:
+      The reordered weight array.
+    """
+    evens = arr[..., ::2]
+    odds = arr[..., 1::2]
+    return jax.numpy.concatenate((evens, odds), axis=arr.ndim - 1)
+
+  def transform_query_kernel(arr):
+    """Transforms the query kernel.
+
+    This involves scaling the kernel by the square root of the head
+    dimension and then applying RoPE reordering.
+
+    Args:
+      arr: The query kernel weight array.
+
+    Returns:
+      The transformed query kernel array.
+    """
+    head_dim = arr.shape[-1]
+    depth_scale = np.dtype("float32").type(np.sqrt(head_dim))
+    arr = arr * depth_scale
+    return reorder_rope(arr)
+
+  hook_fns = {
+      "base.decoder.layers.self_attention.query.kernel": transform_query_kernel,
+      "base.decoder.layers.self_attention.key.kernel": reorder_rope,
+  }
+  return hook_fns
+
+
 PARAM_MAPPING = {
     "gemma2-2b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gemma2-9b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
@@ -1227,4 +1300,10 @@ HOOK_FNS = {
     "qwen3-coder-480b-a35b": QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "deepseek3-671b": DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "qwen3-omni-30b-a3b": QWEN3_OMNI_MOE_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+}
+
+VLLM_HOOK_FNS = {
+    "qwen3": QWEN3_NNX_TO_VLLM_PARAM_HOOK_FN,
+    "llama3.1": LLAMA31_NNX_TO_VLLM_PARAM_HOOK_FN,
+    "deepseek3-671b": DEEPSEEK_NNX_TO_VLLM_PARAM_HOOK_FN,
 }
