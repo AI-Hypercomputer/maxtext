@@ -42,22 +42,32 @@ def get_checkpointing_command(run_date, hardware, steps, metrics_file, attention
       "base_num_decoder_layers=8",
       "head_dim=128",
   ]
-  return [
-      None,
-      os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
-      f"hardware={hardware}",
-      f"run_name=runner_{run_date}",
-      f"steps={steps}",
-      "max_target_length=128",
-      "per_device_batch_size=1",
-      f"metrics_file={metrics_file}",
-      "checkpoint_period=3",
-      "base_output_directory=gs://runner-maxtext-logs",
-      f"dataset_path={dataset_path}",
-      f"dataset_type={dataset_type}",
-      "async_checkpointing=False",
-      f"attention={attention_type}",
-  ] + model_params
+  pathways_command = []
+  if os.getenv("JAX_PLATFORMS") == "proxy":
+    pathways_command = [
+        "enable_single_controller=True",
+        "checkpoint_storage_use_zarr3=False",
+    ]
+  return (
+      [
+          None,
+          os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+          f"hardware={hardware}",
+          f"run_name=runner_{run_date}",
+          f"steps={steps}",
+          "max_target_length=128",
+          "per_device_batch_size=1",
+          f"metrics_file={metrics_file}",
+          "checkpoint_period=3",
+          "base_output_directory=gs://runner-maxtext-logs",
+          f"dataset_path={dataset_path}",
+          f"dataset_type={dataset_type}",
+          "async_checkpointing=False",
+          f"attention={attention_type}",
+      ]
+      + model_params
+      + pathways_command
+  )
 
 
 def check_loss(metrics_file, target):
