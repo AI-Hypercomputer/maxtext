@@ -44,6 +44,10 @@ class VisionEncoder(nn.Module):
       from MaxText.layers import llama4  # pylint: disable=import-outside-toplevel
 
       return [llama4.llama4visionmodel_as_linen, llama4.llama4multimodalprojector_as_linen]
+    elif self.config.model_name in ["qwen3-omni-30b-a3b"]:
+      from MaxText.layers import gemma3  # pylint: disable=import-outside-toplevel
+
+      return [gemma3.gemma3visionencoder_as_linen, gemma3.visionembedder_as_linen]
     else:
       raise ValueError(f"No VisionEncoder implemented for {self.config.model_name} yet")
 

@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from collections import defaultdict
 from itertools import groupby
 import os
+import math
 
 import numpy as np
 
@@ -62,6 +63,23 @@ LLAMA4_TILE_X_SEPARATOR_TOKEN = 200084  # <|tile_x_separator|>
 LLAMA4_TILE_Y_SEPARATOR_TOKEN = 200085  # <|tile_y_separator|>
 LLAMA4_PIXEL_SHUFFLE_RATIO = 0.5  # TODO(hengtaoguo): We should reuse config.pixel_shuffle_ratio_for_vit
 
+# Constants for Qwen3-Omni-specific processing
+
+
+@dataclass
+class MultimodalData:
+  """Holds the raw multimodal data for pre-processing.
+
+  Attributes:
+    images: A list of np.ndarray representing images.
+    videos: A list of np.ndarray representing videos.
+    audios: A list of np.ndarray representing audios.
+  """
+
+  images: None | list[np.ndarray] = None
+  videos: None | list[np.ndarray] = None
+  audios: None | list[np.ndarray] = None
+
 
 @dataclass
 class PreprocessorOutput:
@@ -83,6 +101,21 @@ class PreprocessorOutput:
   pixel_values: None | np.ndarray = None
   pixel_mask: None | np.ndarray = None
   aspect_ratios: None | np.ndarray = None
+  num_images: int = 0
+
+
+def preprocess_mm_data(config):
+  processor_output = PreprocessorOutput()
+
+  if config.image_path:
+    image_path = config.image_path.split(",")
+    images = [load_image_from_path(p) for p in image_path]
+    image_processor_output = pre_process_image(images, model_name=config.model_name)
+
+  if config.video_path:
+    print("Video processing is not yet implemented.")
+
+  return processor_output
 
 
 def convert_to_RGB(image):
@@ -365,6 +398,7 @@ def pre_process_gemma3_image(image: np.ndarray | list[np.ndarray]) -> Preprocess
   processor_output = PreprocessorOutput(
       pixel_values=np.stack(images_out, axis=0).astype(np.float32),  # (N, H, W, C)
   )
+  processor_output.num_images = len(image)
   return processor_output
 
 
@@ -445,10 +479,11 @@ def pre_process_llama4_image(image: np.ndarray | list[np.ndarray]) -> Preprocess
       pixel_mask=image_mask,
       aspect_ratios=aspect_ratios_array,
   )
+  processor_output.num_images = len(image)
   return processor_output
 
 
-def pre_process_image(image, model_name):
+def pre_process_image(image, model_name, config=None):
   """Pre-process image according to different model's requirements.
   Args:
     image: The np.array image [H, W, C] or images [N, H, W, C] to pre-process.
@@ -460,6 +495,8 @@ def pre_process_image(image, model_name):
     return pre_process_gemma3_image(image)
   elif model_name in ["llama4-17b-16e", "llama4-17b-128e"]:
     return pre_process_llama4_image(image)
+  elif model_name in ["qwen3-omni-30b-a3b"]:
+    return pre_process_qwen3_image(image)
   else:
     raise ValueError(f"Model {model_name} does not support multimodal inference.")
 
@@ -549,6 +586,14 @@ def get_dummy_image_shape_for_init(
         NUM_IMAGE_CHANNELS,
         LLAMA4_TILE_SIZE,
         LLAMA4_TILE_SIZE,
+    )
+  elif model_name.startswith("qwen3-omni"):
+    image_shape = (
+        batch_size,
+        num_image_per_sequence,
+        GEMMA_DEFAULT_IMAGE_SIZE,
+        GEMMA_DEFAULT_IMAGE_SIZE,
+        NUM_IMAGE_CHANNELS,
     )
   return image_shape
 
