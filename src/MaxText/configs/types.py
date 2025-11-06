@@ -1344,6 +1344,9 @@ class MultimodalGeneral(BaseModel):
       -1,
       description="Maximum number of images per example for training with image lists. -1 means no limit.",
   )
+  video_path: PathStr = Field("", description="Path to a video for decoding.")
+  audio_path: PathStr = Field("", description="Path to an audio file for decoding.")
+  use_audio_in_video: bool = Field(False, description="Extract and use audio from video files.")
 
 
 class VisionTower(BaseModel):
@@ -2074,6 +2077,7 @@ class MaxTextConfig(
           "gemma3-27b",
           "llama4-17b-16e",
           "llama4-17b-128e",
+          "qwen3-omni-30b-a3b",
       )
       if self.model_name not in valid_mm_models and self.model_name != "default":
         raise ValueError(f"Multimodal is only supported for {valid_mm_models}, not {self.model_name}")
