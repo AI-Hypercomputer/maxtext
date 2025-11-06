@@ -648,6 +648,7 @@ data_shuffle_seed: 0
 init_weights_seed: 0
 
 # DiLoCo params.
+enable_diloco: False
 diloco_sync_period: 36
 diloco_outer_lr: 0.3
 diloco_outer_momentum: 0.9
