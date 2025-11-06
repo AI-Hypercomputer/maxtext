@@ -132,6 +132,8 @@ class MistralDecoderLayer(nnx.Module):
       page_state: None | int = None,
       slot: None | int = None,
       previous_chunk=None,
+      kv_cache=None,
+      attention_metadata=None,
   ):
 
     cfg = self.config
@@ -141,7 +143,7 @@ class MistralDecoderLayer(nnx.Module):
     lnx = self.pre_self_attention_layer_norm(inputs)
     lnx = nn.with_logical_constraint(lnx, self.activation_axis_names)
 
-    attention_lnx = self.self_attention(
+    attention_lnx, kv_cache = self.self_attention(
         lnx,
         lnx,
         decoder_positions,
@@ -151,6 +153,8 @@ class MistralDecoderLayer(nnx.Module):
         slot=slot,
         page_state=page_state,
         previous_chunk=previous_chunk,
+        kv_cache=kv_cache,
+        attention_metadata=attention_metadata,
     )
 
     attention_lnx = nn.with_logical_constraint(attention_lnx, self.activation_axis_names)
@@ -180,7 +184,7 @@ class MistralDecoderLayer(nnx.Module):
     if cfg.scan_layers:
       return layer_output, None
     else:
-      return layer_output
+      return layer_output, kv_cache
 
 
 MistralDecoderLayerToLinen = nnx_wrappers.to_linen_class(

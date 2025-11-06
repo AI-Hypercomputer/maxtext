@@ -137,6 +137,8 @@ class MixtralDecoderLayer(nnx.Module):
       previous_chunk=None,
       page_state=None,
       slot=None,
+      kv_cache=None,
+      attention_metadata=None,
   ):
 
     inputs = nn.with_logical_constraint(inputs, self.activation_axis_names)
@@ -145,7 +147,7 @@ class MixtralDecoderLayer(nnx.Module):
     lnx = self.pre_self_attention_layer_norm(inputs)
     lnx = nn.with_logical_constraint(lnx, self.activation_axis_names)
 
-    attention_lnx = self.self_attention(
+    attention_lnx, kv_cache = self.self_attention(
         lnx,
         lnx,
         decoder_positions,
@@ -153,6 +155,8 @@ class MixtralDecoderLayer(nnx.Module):
         deterministic=deterministic,
         model_mode=model_mode,
         previous_chunk=previous_chunk,
+        kv_cache=kv_cache,
+        attention_metadata=attention_metadata,
     )
 
     attention_lnx = nn.with_logical_constraint(attention_lnx, self.activation_axis_names)
@@ -188,7 +192,7 @@ class MixtralDecoderLayer(nnx.Module):
     if self.config.scan_layers:
       return layer_output, None
     else:
-      return layer_output
+      return layer_output, kv_cache
 
 
 MixtralDecoderLayerToLinen = nnx_wrappers.to_linen_class(

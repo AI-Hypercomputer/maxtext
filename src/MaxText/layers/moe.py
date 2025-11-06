@@ -386,16 +386,16 @@ class RoutedMoE(nnx.Module):
       self.wo_bias = None
 
   def get_expert_parallelism_size(self):
-    return self.mesh.shape["expert"]
+    return self.mesh.shape.get("expert", 1)
 
   def get_tensor_parallelism_size(self):
-    return self.mesh.shape["tensor"]
+    return self.mesh.shape.get("tensor", 1)
 
   def get_tensor_transpose_parallelism_size(self):
-    return self.mesh.shape["tensor_transpose"]
+    return self.mesh.shape.get("tensor_transpose", 1)
 
   def get_context_autoregressive_parallelism_size(self):
-    return self.mesh.shape["context_autoregressive"]
+    return self.mesh.shape.get("context_autoregressive", 1)
 
   def get_topk(self, gate_logits, pre_bias_logits, rngs=None):
     """get topk."""
@@ -940,7 +940,11 @@ class RoutedMoE(nnx.Module):
     def wrapper(x, logits, pre_bias_logits, w0, w1, wo, w0_bias, w1_bias, wo_bias, rngs):
       batch_size, sequence_length, _ = x.shape
       expert_axis_name = "expert"
-      expert_shard_id = jax.lax.axis_index(expert_axis_name)
+      num_expert_parallelism = self.get_expert_parallelism_size()
+      if num_expert_parallelism > 1:
+        expert_shard_id = jax.lax.axis_index(expert_axis_name)
+      else:
+        expert_shard_id = 0
       num_expert_parallelism = self.get_expert_parallelism_size()
       if self.config.use_ring_of_experts:
         # The ring-of-experts strategy first duplicates the inputs to all
