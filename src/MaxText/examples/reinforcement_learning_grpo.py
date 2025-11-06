@@ -415,14 +415,13 @@ def get_dataset(data_dir, split="train") -> grain.MapDataset:
       .shuffle(seed=SEED)
       .map(
           lambda x: {
-              # passed to model forward pass
+              # Prompts are passed to model forward pass
               "prompts": TEMPLATE.format(
                   system_prompt=SYSTEM_PROMPT,
                   question=x["question"].decode("utf-8"),
               ),
-              # passed to reward functions
+              # Question and answer are passed to reward functions
               "question": x["question"].decode("utf-8"),
-              # passed to reward functions
               "answer": extract_hash_answer(x["answer"].decode("utf-8")),
           }
       )
@@ -487,9 +486,6 @@ show_hbm_usage()
 
 # ### Helper function to create MaxText models
 
-# TODO: @mazumdera: create a installation script for GRPO
-# ! uv pip install -r ../../maxtext/requirements.txt
-
 
 def get_ref_maxtext_model(config):
   """Creates and returns a TunixMaxTextAdapter model and mesh.
@@ -515,7 +511,7 @@ def get_ref_maxtext_model(config):
 
 model_config = llama3_lib.ModelConfig.llama3_1_8b()
 
-# Load the reference model
+# Configure and load the reference model
 # Note: pass the path to your scanned checkpoint for "load_parameters_path".
 # To create a scanned checkpoint, you can use /maxtext/src/MaxText/utils/ckpt_conversion/to_maxtext.py
 config_ref = pyconfig.initialize(
@@ -545,11 +541,11 @@ config_ref = pyconfig.initialize(
     value_proj="offload",
 )
 
-qwen3_8b, mesh = get_ref_maxtext_model(config_ref)
+llama3_8b, mesh = get_ref_maxtext_model(config_ref)
 
-qwen3_8b.config = model_config
+llama3_8b.config = model_config
 
-nnx.display(qwen3_8b)
+nnx.display(llama3_8b)
 
 
 if DEBUG:
@@ -558,7 +554,7 @@ if DEBUG:
   print(f"Model config: {model_config}")
 
   # Sanity check that weights are loaded correctly
-  _maxtext_state_flatten = nnx.state(qwen3_8b).flat_state()
+  _maxtext_state_flatten = nnx.state(llama3_8b).flat_state()
   maxtext_state_flatten = {".".join(str(key) for key in keys): v for keys, v in _maxtext_state_flatten}
   print(
       f"maxtext_state_flatten[base.token_embedder.embedding].value="
@@ -571,12 +567,7 @@ print("HBM usage after loading ref model:")
 show_hbm_usage()
 
 
-# Load the policy model
-# Note: pass the path to your scanned checkpoint for "load_parameters_path".
-# To create a scanned checkpoint, you can use /maxtext/src/MaxText/utils/ckpt_conversion/to_maxtext.py
-
-# TODO: @mazumdera: change this to use lora
-
+# Configure and load the policy model
 config_policy = pyconfig.initialize(
     [
         "",
@@ -603,18 +594,18 @@ config_policy = pyconfig.initialize(
     key_proj="offload",
     value_proj="offload",
 )
-qwen3_8b_policy, mesh_policy = get_ref_maxtext_model(config_policy)
+llama3_8b_policy, mesh_policy = get_ref_maxtext_model(config_policy)
 
-qwen3_8b_policy.config = model_config
+llama3_8b_policy.config = model_config
 
-nnx.display(qwen3_8b_policy)
+nnx.display(llama3_8b_policy)
 
 if DEBUG:
   print("Model initialized successfully")
   print(f"Model mesh shape: {mesh_policy.shape}")
 
   # Sanity check that weights are loaded correctly
-  _maxtext_state_flatten = nnx.state(qwen3_8b_policy).flat_state()
+  _maxtext_state_flatten = nnx.state(llama3_8b_policy).flat_state()
   maxtext_state_flatten = {".".join(str(key) for key in keys): v for keys, v in _maxtext_state_flatten}
   print(
       f"maxtext_state_flatten[base.token_embedder.embedding].value="
@@ -1161,8 +1152,8 @@ def main():
 
   # Create RL Cluster: combines models and configuration
   rl_cluster = rl_cluster_lib.RLCluster(
-      actor=qwen3_8b_policy,           # Policy model (trainable)
-      reference=qwen3_8b,              # Reference model (frozen)
+      actor=llama3_8b_policy,          # Policy model (trainable)
+      reference=llama3_8b,             # Reference model (frozen)
       tokenizer=model_tokenizer,       # Tokenizer for both models
       cluster_config=cluster_config,   # Cluster configuration
   )
@@ -1223,15 +1214,16 @@ def main():
   print("STARTING GRPO TRAINING")
   print("="*80 + "\n")
 
-  # Start JAX profiler to analyze performance
-  # jax.profiler.start_trace(PROFILE_DIR) # Enable this when training step is small. (also need to uncomment stop_trace below)
+  # Start JAX profiler for performance analysis
+  # Uncomment to enable profiling (note: generates large trace files for long training runs)
+  # jax.profiler.start_trace(PROFILE_DIR)
 
   # Run training with proper mesh and axis rules for distributed training
   with mesh, nn_partitioning.axis_rules(config_policy.logical_axis_rules):
     grpo_trainer.train(DATASET)
 
-  # Stop profiler
-  # jax.profiler.stop_trace() # Enable this when training step is small.
+  # Stop profiler (uncomment if profiling is enabled above)
+  # jax.profiler.stop_trace()
 
   print("\n" + "="*80)
   print("TRAINING COMPLETE")
