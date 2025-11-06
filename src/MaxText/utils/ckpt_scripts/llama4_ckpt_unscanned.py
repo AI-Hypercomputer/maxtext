@@ -21,7 +21,7 @@ Get LLaMA chkpt_vars from Meta
 
 Example cmd:
 To save a ckpt
-JAX_PLATFORMS=CPU python -m  MaxText.llama4_ckpt_unscanned --base-model-path [CHKPT_DIR] \
+JAX_PLATFORMS=CPU python -m  MaxText.utils.ckpt_scripts.llama4_ckpt_unscanned --base-model-path [CHKPT_DIR] \
  --maxtext-model-path [OUTPUT_CHKPT_DIR] --model-size llama4-17b-16e
 
 If using a PT checkpoint, the base model checkpoints should be in the format `{name}.{chkpt_idx}.pth`
@@ -55,7 +55,7 @@ from tqdm import tqdm
 
 from MaxText import max_logging
 from MaxText.inference_utils import str2bool
-from MaxText.llama_or_mistral_ckpt import save_weights_to_checkpoint, MODEL_PARAMS_DICT
+from MaxText.utils.ckpt_scripts.llama_or_mistral_ckpt import save_weights_to_checkpoint, MODEL_PARAMS_DICT
 
 SIMULATED_CPU_DEVICES_COUNT = 16
 

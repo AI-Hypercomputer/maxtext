@@ -22,7 +22,7 @@ python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 # Non-Googlers please remember to point these variables to GCS buckets that you own, this script uses internal buckets for testing.
 export CHKPT_BUCKET=gs://maxtext-gemma/flax
 export MODEL_BUCKET=gs://maxtext-gemma
-python3 -m MaxText.convert_gemma_chkpt --base_model_path ${CHKPT_BUCKET}/${MODEL_VARIATION} --maxtext_model_path ${MODEL_BUCKET}/${MODEL_VARIATION}/${idx} --model_size ${MODEL_VARIATION}
+python3 -m MaxText.utils.ckpt_scripts.convert_gemma_chkpt --base_model_path ${CHKPT_BUCKET}/${MODEL_VARIATION} --maxtext_model_path ${MODEL_BUCKET}/${MODEL_VARIATION}/${idx} --model_size ${MODEL_VARIATION}
 
 # Non-Googlers please remember to point `DATASET_PATH` to the GCS bucket where you have your training data
 export DATASET_PATH=gs://maxtext-dataset

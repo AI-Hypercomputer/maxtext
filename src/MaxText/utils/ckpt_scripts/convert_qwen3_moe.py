@@ -18,7 +18,7 @@ required for generating a MaxText checkpoint compatible with scanned model layer
 
 Example cmd:
 
-python3 -m MaxText.convert_qwen3_moe_ckpt --base_model_path <path/to/hf/ckpt> \
+python3 -m MaxText.utils.ckpt_scripts.convert_qwen3_moe --base_model_path <path/to/hf/ckpt> \
     --maxtext_model_path gs://<gcs_bucket>/<path/to/save/ckpt> --model_size qwen3-235b-a22b
 """
 

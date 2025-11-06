@@ -31,25 +31,25 @@ hf download [openai/gpt-oss-20b|openai/gpt-oss-120b] --local-dir <local_mxfp4_pa
 ```
 
 
-2. Please convert it from MXFP4 to BF16 using script [dequantize_mxfp4.py](../../../src/MaxText/scratch_code/dequantize_mxfp4.py) on gpu.
+2. Please convert it from MXFP4 to BF16 using script [dequantize_mxfp4.py](../../../src/MaxText/utils/ckpt_scripts/dequantize_mxfp4.py) on gpu.
 
 ```
-python3 dequantize_mxfp4.py --input-path=<local_mxfp4_path> --output-path=<local_bf16_path> --dtype-str=bf16
+python3 -m MaxText.utils.ckpt_scripts.dequantize_mxfp4 --input-path=<local_mxfp4_path> --output-path=<local_bf16_path> --dtype-str=bf16
 ```
 
 
 3. Once downloaded and converted to BF16:
-* run [convert_gpt_oss_ckpt.py](../../../src/MaxText/convert_gpt_oss_ckpt.py) to convert the checkpoint for MaxText compatibility in [Orbax](https://orbax.readthedocs.io/en/latest/guides/checkpoint/orbax_checkpoint_101.html) scanned format for training and fine-tuning. 
+* run [convert_gpt_oss_ckpt.py](../../../src/MaxText/utils/ckpt_scripts/convert_gpt_oss_ckpt.py) to convert the checkpoint for MaxText compatibility in [Orbax](https://orbax.readthedocs.io/en/latest/guides/checkpoint/orbax_checkpoint_101.html) scanned format for training and fine-tuning. 
 
 ```
-python3 -m MaxText.convert_gpt_oss_ckpt --base-model-path <local_bf16_path> \
+python3 -m MaxText.utils.ckpt_scripts.convert_gpt_oss_ckpt --base-model-path <local_bf16_path> \
     --maxtext-model-path <GCS/path/to/scanned/maxtext/ckpt> --model-size [gpt-oss-20b|gpt-oss-120b]
 ```
 
-* run [convert_gpt_oss_unscanned_ckpt.py](../../../src/MaxText/convert_gpt_oss_unscanned_ckpt.py) to convert the checkpoint to unscanned format in Orbax for decoding.
+* run [convert_gpt_oss_unscanned_ckpt.py](../../../src/MaxText/utils/ckpt_scripts/convert_gpt_oss_unscanned_ckpt.py) to convert the checkpoint to unscanned format in Orbax for decoding.
 
 ```
-python3 -m MaxText.convert_gpt_oss_unscanned_ckpt --base-model-path <local_bf16_path> \
+python3 -m MaxText.utils.ckpt_scripts.convert_gpt_oss_unscanned_ckpt --base-model-path <local_bf16_path> \
     --maxtext-model-path <GCS/path/to/unscanned/maxtext/ckpt> --model-size [gpt-oss-20b|gpt-oss-120b]
 ```
 

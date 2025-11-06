@@ -43,7 +43,7 @@ For the Llama4 model family, we are using a separate checkpoint conversion scrip
 ```shell
 export LOCAL_HF_MODEL_PATH=...  # Need to pre-download the safetensors from HuggingFace
 export MAXTEXT_CKPT_GCS_PATH=gs://...
-python -m MaxText.llama4_ckpt_unscanned \
+python -m MaxText.utils.ckpt_scripts.llama4_ckpt_unscanned \
     --model-size=llama4-17b-16e \
     --huggingface-checkpoint=True \
     --base-model-path=$LOCAL_HF_MODEL_PATH \
