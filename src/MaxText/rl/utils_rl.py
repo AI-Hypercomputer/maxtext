@@ -172,7 +172,7 @@ def check_numbers(prompts, completions, answer, tmvp_config, **kargs):
   return scores
 
 
-def extract_hash_answer(text: str, debug: bool = False) -> str | None:
+def extract_hash_answer(text: str) -> str | None:
   """Function to extract only the answer hash from the text."""
   if "####" not in text:
     return None

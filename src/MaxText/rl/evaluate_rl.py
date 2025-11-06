@@ -68,7 +68,7 @@ def generate_responses(
     responses = rl_cluster.rollout.generate(
         prompts,
         rollout_config=RolloutConfig(
-            max_tokens_to_generate=tmvp_config.max_target_length,
+            max_tokens_to_generate=tmvp_config.max_target_length - tmvp_config.max_prefill_predict_length,
             temperature=eval_strategy["eval_temperature"],
             top_k=eval_strategy["eval_top_k"],
             top_p=eval_strategy["eval_top_p"],
