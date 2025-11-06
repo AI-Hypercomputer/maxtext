@@ -580,6 +580,8 @@ class Decoder(nn.Module):
             image_masks=image_masks,
         )
       # TODO(hengtaoguo): Add support for other multimodal models such as Llama4, refactor if needed
+      elif cfg.model_name in ["qwen3-omni-30b-a3b"]:
+        pass
       else:
         raise ValueError(f"Unsupported model_name for multimodal: {cfg.model_name}")
 

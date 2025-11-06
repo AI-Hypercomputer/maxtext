@@ -90,9 +90,11 @@ class PreprocessorOutput:
   pixel_values: None | np.ndarray = None
   pixel_mask: None | np.ndarray = None
   aspect_ratios: None | np.ndarray = None
+  num_images: int = 0
 
 
 def convert_to_RGB(image):
+  """Convert image to RGB format."""
   if image.mode != "RGB":
     image = image.convert("RGB")
   return image
@@ -372,6 +374,7 @@ def pre_process_gemma3_image(image: np.ndarray | list[np.ndarray]) -> Preprocess
   processor_output = PreprocessorOutput(
       pixel_values=np.stack(images_out, axis=0).astype(np.float32),  # (N, H, W, C)
   )
+  processor_output.num_images = len(image)
   return processor_output
 
 
@@ -452,10 +455,11 @@ def pre_process_llama4_image(image: np.ndarray | list[np.ndarray]) -> Preprocess
       pixel_mask=image_mask,
       aspect_ratios=aspect_ratios_array,
   )
+  processor_output.num_images = len(image)
   return processor_output
 
 
-def pre_process_image(image, model_name):
+def pre_process_image(image, model_name, config=None):
   """Pre-process image according to different model's requirements.
   Args:
     image: The np.array image [H, W, C] or images [N, H, W, C] to pre-process.
