@@ -424,8 +424,7 @@ class Pipeline(nnx.Module):
     ) % self.microbatches_per_stage
     output = output[:, permutation]
     return output
-  
-  # --- (End of identical helpers) ---
+
 
   def get_current_repeat_from_stages(self, full_state: nnx.State, loop_iteration: int):
     """

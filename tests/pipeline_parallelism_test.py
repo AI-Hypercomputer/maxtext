@@ -376,6 +376,7 @@ class PipelineParallelismTest(unittest.TestCase):
             "num_pipeline_microbatches=8",
             rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizer.llama2')}",
             "scan_layers_per_stage=False",  # We see better performance only scanning the pipeline iterations.
+            "log_config=False",
         ]
     )
 
