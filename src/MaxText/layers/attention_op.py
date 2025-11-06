@@ -1339,36 +1339,49 @@ class AttentionOp(nnx.Module):
       model_mode: str = MODEL_MODE_TRAIN,
   ) -> Array:
     """CUDNN Flash Attention with Transformer Engine.
-    1. Stable API, supports GQA, SWA (only with causal masking)
-    2. Head_dim = 256 is also supported from TE-1.12 stable release with CUDNN 12.6
+    1. Stable API, supports MHA, GQA, SWA, Packing and Context Parallelism
+    2. Context Parallelism currently only supports causal masking and no packing
     """
     # These imports are only meant to work in a GPU build.
     # pylint: disable=import-outside-toplevel
     from transformer_engine.jax.flax.transformer import DotProductAttention  # pytype: disable=import-error
+    from transformer_engine.jax.attention import SequenceDescriptor  # pytype: disable=import-error
 
     _, _, _, head_dim = query.shape  # pylint: disable=unused-variable
 
     using_context_parallelism = self.mesh.shape["context"] > 1
 
-    if self.attention_type == AttentionType.LOCAL_SLIDING and using_context_parallelism:
-      raise AssertionError("Sliding window attention is not supported when context parallelism is enabled")
-
+    # Initialize default attention configuration
     sliding_window_size = None
+    mask_type = "padding_causal"
+    qkv_layout = "BSHD_BSHD_BSHD"  # Non-packed format: 'BS3HD', 'BSHD_BS2HD' or 'BSHD_BSHD_BSHD'
+    max_segments_per_seq = 1  # max number of segments per sequence; for non-packed its 1
 
-    if self.attention_type == AttentionType.LOCAL_SLIDING or not self.config.enable_padding_causal_mask:
+    # Handle local sliding window attention if configured
+    if self.attention_type == AttentionType.LOCAL_SLIDING:
       sliding_window_size = [self.sliding_window_size, 0]
 
-    if self.attention_type == AttentionType.LOCAL_SLIDING or using_context_parallelism:
-      mask_type = "causal"  # SWA and Context Parallelism only work with causal masking
+    # Handle packing configurations
+    if self.config.packing and self.config.dataset_type != "synthetic":
+      qkv_layout = "THD_THD_THD"  # Packed format: 'T3HD', 'THD_T2HD' or 'THD_THD_THD'
+      if decoder_segment_ids is None:
+        decoder_segment_ids = jnp.ones(shape=query.shape[:2], dtype=jnp.int32)
+      attn_mask = SequenceDescriptor.from_segment_ids_and_pos(segment_ids=decoder_segment_ids, segment_pos=None)
+      # Create dummy SequenceDescriptor for lazy_init
+      dummy_segment_ids = jnp.ones(shape=query.shape[:2], dtype=jnp.int32)
+      dummy_attn_mask = SequenceDescriptor.from_segment_ids_and_pos(segment_ids=dummy_segment_ids, segment_pos=None)
+      max_segments_per_seq = self.config.max_segments_per_seq
+    elif using_context_parallelism:
+      if self.attention_type == AttentionType.LOCAL_SLIDING:
+        raise AssertionError("Sliding window attention is not supported for context parallelism")
+      # Context parallelism without packing: only supports causal masking
       attn_mask = None
       dummy_attn_mask = None
+      mask_type = "causal"
     else:
-      # generate attn_mask
-      mask_type = "padding_causal"  # only padding_causal mask type can take a created mask
+      # Default case: no packing, no context parallelism
       dummy_attn_mask = jnp.zeros((1, 1, 1, self.max_target_length, self.max_target_length), dtype=jnp.uint8)
       attn_mask = self.generate_attention_mask(query, key, decoder_segment_ids, model_mode)
-
-    if attn_mask is not None:
       attn_mask = jnp.where((attn_mask >= DEFAULT_MASK_VALUE * 0.5), 0, 1).astype(jnp.uint8)
 
     dpa_layer = DotProductAttention(
@@ -1381,12 +1394,14 @@ class AttentionOp(nnx.Module):
         dropout_rng_name="aqt",
         dtype=self.dtype,
         float32_logits=self.float32_logits,
-        qkv_layout="BSHD_BSHD_BSHD",  # 'BS3HD', 'BSHD_BS2HD' or 'BSHD_BSHD_BSHD'
+        qkv_layout=qkv_layout,
         scale_factor=1.0,
         transpose_batch_sequence=False,
         window_size=sliding_window_size,
         context_parallel_causal_load_balanced=self.config.context_parallel_load_balance,
         context_parallel_axis="context",
+        context_parallel_strategy=self.config.context_parallel_strategy,
+        max_segments_per_seq=max_segments_per_seq,
     )
 
     dpa_layer = nnx_wrappers.ToNNX(dpa_layer, rngs=self.rngs)
@@ -1398,8 +1413,8 @@ class AttentionOp(nnx.Module):
         (1, self.max_target_length, self.num_kv_heads, self.config.head_dim), dtype=self.dtype
     )
 
-    dpa_layer.lazy_init(dummy_query_prefill, dummy_key_prefill, dummy_value_prefill, mask=dummy_attn_mask)
-    return dpa_layer(query, key, value, mask=attn_mask)
+    dpa_layer.lazy_init(dummy_query_prefill, dummy_key_prefill, dummy_value_prefill, sequence_descriptor=dummy_attn_mask)
+    return dpa_layer(query, key, value, sequence_descriptor=attn_mask)
 
   def cudnn_jax_flash_attention(
       self,

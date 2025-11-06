@@ -208,6 +208,15 @@ def validate_rampup_batch_size(batch_size_start, batch_size_end, batch_size_incr
   )
 
 
+def validate_context_parallel_strategy_ring(
+    context_parallel_size: int, context_parallel_strategy: str, hardware: str
+) -> None:
+  """Validates that ring context parallelism strategy is only used on GPU hardware."""
+  if context_parallel_size > 1 and context_parallel_strategy.lower() == "ring":
+    if "gpu" not in hardware:
+      raise ValueError("Ring context parallelism strategy (context_parallel_strategy='ring') is only supported on GPUs.")
+
+
 def validate_keys(keys):
   validate_attention_kernel(keys["attention"])
   validate_attention_type(keys["attention_type"])
@@ -237,6 +246,10 @@ def validate_keys(keys):
   # TODO remove after b/435512699 resolved
   if keys["context_parallel_size"] > 1 and keys["context_parallel_load_balance"] and keys["attention_type"] == "chunk":
     raise ValueError("Currently load-balanced context parallelism is not supported for chunk attention.")
+
+  validate_context_parallel_strategy_ring(
+      keys["context_parallel_size"], keys["context_parallel_strategy"], keys["hardware"]
+  )
 
   if keys["mtp_eval_target_module"] < 0:
     raise ValueError("mtp_eval_target_module cannot be negative. Set to 0 to disable evaluation.")
