@@ -588,7 +588,7 @@ class Decoder(nn.Module):
     return y
 
   @nn.compact
-  def _apply_output_head(self, shared_embedding: nn.Module | nnx.Module, y, deterministic, model_mode):
+  def apply_output_head(self, shared_embedding: nn.Module | nnx.Module, y, deterministic, model_mode):
     """Applies final normalization and projects hidden states to logits."""
 
     cfg = self.config
@@ -893,7 +893,7 @@ class Decoder(nn.Module):
       logits = None
       self.sow("intermediates", "hidden_states", hidden_state)
     else:
-      logits = self._apply_output_head(shared_embedding, hidden_state, deterministic, model_mode)
+      logits = self.apply_output_head(shared_embedding, hidden_state, deterministic, model_mode)
 
     # The API of the Decoder is now a tuple, providing both the main output
     # and the raw hidden state needed for auxiliary tasks.
