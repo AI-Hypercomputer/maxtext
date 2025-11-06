@@ -6,7 +6,7 @@
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#    https://www.apache.org/licenses/LICENSE-2.0
+# https://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -20,7 +20,7 @@
 # bash docker_build_dependency_image.sh MODE=nightly
 # bash docker_build_dependency_image.sh MODE=stable JAX_VERSION=0.4.13
 # Nightly build with JAX_VERSION for GPUs. Available versions listed at https://us-python.pkg.dev/ml-oss-artifacts-published/jax-public-nightly-artifacts-registry/simple/jax:
-# bash docker_build_dependency_image.sh DEVICE=gpu MODE=nightly JAX_VERSION=0.4.36.dev20241109 # Note: this sets both jax-nightly and jaxlib-nightly 
+# bash docker_build_dependency_image.sh DEVICE=gpu MODE=nightly JAX_VERSION=0.4.36.dev20241109 # Note: this sets both jax-nightly and jaxlib-nightly
 # MODE=custom_wheels is the same as nightly except that it reinstalls any
 # additional wheels that are present in the maxtext directory.
 # The main use case is to install custom jax or jaxlib wheels but it also
@@ -28,6 +28,7 @@
 # bash docker_build_dependency_image.sh MODE=custom_wheels
 
 # bash docker_build_dependency_image.sh MODE=post-training
+# bash docker_build_dependency_image.sh MODE=post-training POST_TRAINING_SOURCE=local
 
 if [ "${BASH_SOURCE-}" ]; then
   this_file="${BASH_SOURCE[0]}"
@@ -95,6 +96,12 @@ fi
 if [[ -z ${DEVICE} ]]; then
   export DEVICE=tpu
   echo "Default DEVICE=${DEVICE}"
+fi
+
+# New flag for post-training source
+if [[ -z ${POST_TRAINING_SOURCE} ]]; then
+ export POST_TRAINING_SOURCE=remote # Default to the original Dockerfile
+ echo "Default POST_TRAINING_SOURCE=${POST_TRAINING_SOURCE}"
 fi
 
 # Function to build with MODE=jax_ai_image
@@ -171,24 +178,34 @@ if [[ ${INSTALL_POST_TRAINING} -eq 1 ]] ; then
     exit 1
   fi
 
-  # # To install tpu_commons from a local path, we copy it into the build context, excluding __pycache__.
-  # # This assumes vllm, tunix, tpu_commons is a sibling directory to the current one (maxtext).
-  # rsync -a --exclude='__pycache__' ../tpu_commons .
-  # # To install vllm from a local path, we copy it into the build context, excluding __pycache__.
-  # # This assumes vllm is a sibling directory to the current one (maxtext).
-  # rsync -a --exclude='__pycache__' ../vllm .
+ DOCKERFILE_NAME=""
+  if [[ ${POST_TRAINING_SOURCE} == "local" ]] ; then
+    
+  # To install tpu-inference from a local path, we copy it into the build context, excluding __pycache__.
+  # This assumes vllm, tunix, tpu-inference is a sibling directory to the current one (maxtext).
+  rsync -a --exclude='__pycache__' ../tpu-inference .
+  # To install vllm from a local path, we copy it into the build context, excluding __pycache__.
+  # This assumes vllm is a sibling directory to the current one (maxtext).
+  rsync -a --exclude='__pycache__' ../vllm .
 
-  # rsync -a --exclude='__pycache__' ../tunix .
+  rsync -a --exclude='__pycache__' ../tunix .
 
-  # # The cleanup is set to run even if the build fails to remove the copied directory.
-  # trap "rm -rf ./tpu_commons ./vllm ./tunix" EXIT INT TERM
+  # The cleanup is set to run even if the build fails to remove the copied directory.
+  trap "rm -rf ./tpu-inference ./vllm ./tunix" EXIT INT TERM
 
-  docker build \
-    --network host \
-    --build-arg BASEIMAGE=${LOCAL_IMAGE_NAME} \
-    --build-arg MODE=${MODE} \
-    -f "$MAXTEXT_REPO_ROOT"'/dependencies/dockerfiles/maxtext_post_training_dependencies.Dockerfile' \
-    -t ${LOCAL_IMAGE_NAME} .
+  DOCKERFILE_NAME='maxtext_post_training_local_dependencies.Dockerfile'
+  echo "Using local post-training dependencies Dockerfile: $DOCKERFILE_NAME"
+ else
+  DOCKERFILE_NAME='maxtext_post_training_dependencies.Dockerfile'
+  echo "Using remote post-training dependencies Dockerfile: $DOCKERFILE_NAME"
+ fi
+
+ docker build \
+ --network host \
+ --build-arg BASEIMAGE=${LOCAL_IMAGE_NAME} \
+ --build-arg MODE=${MODE} \
+ -f "$MAXTEXT_REPO_ROOT"'/dependencies/dockerfiles/'"$DOCKERFILE_NAME" \
+ -t ${LOCAL_IMAGE_NAME} .
 fi
 
 if [[ ${CUSTOM_JAX} -eq 1 ]] ; then
