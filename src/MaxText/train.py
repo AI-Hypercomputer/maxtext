@@ -526,6 +526,7 @@ def run(config, recorder, diagnostic_config):
 
 
 def main(argv: Sequence[str]) -> None:
+  print(f"LOG: {argv = }\n")
   config, recorder, diagnostic_config = initialize(argv)
   run(config, recorder, diagnostic_config)
 
