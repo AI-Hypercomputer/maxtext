@@ -109,6 +109,42 @@ class TrainTests(unittest.TestCase):
           "enable_goodput_recording=False",
           rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizer.llama2')}",
       ],
+      "te_fp8_delayedscaling": [  # tests base config with te_fp8_delayedscaling
+          None,
+          os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+          "base_output_directory=gs://runner-maxtext-logs",
+          "run_name=runner_test",
+          "dataset_path=gs://maxtext-dataset",
+          "quantization=te_fp8_delayedscaling",
+          "steps=2",
+          "enable_checkpointing=False",
+          "enable_goodput_recording=False",
+          rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizer.llama2')}",
+      ],
+      "te_fp8_currentscaling": [  # tests base config with te_fp8_currentscaling
+          None,
+          os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+          "base_output_directory=gs://runner-maxtext-logs",
+          "run_name=runner_test",
+          "dataset_path=gs://maxtext-dataset",
+          "quantization=te_fp8_currentscaling",
+          "steps=2",
+          "enable_checkpointing=False",
+          "enable_goodput_recording=False",
+          rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizer.llama2')}",
+      ],
+      "te_mxfp8": [  # tests base config with te_mxfp8
+          None,
+          os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+          "base_output_directory=gs://runner-maxtext-logs",
+          "run_name=runner_test",
+          "dataset_path=gs://maxtext-dataset",
+          "quantization=te_mxfp8",
+          "steps=2",
+          "enable_checkpointing=False",
+          "enable_goodput_recording=False",
+          rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizer.llama2')}",
+      ],
       "dropout": [  # tests base config with dropout
           None,
           os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
@@ -197,6 +233,30 @@ class TrainTests(unittest.TestCase):
   @pytest.mark.gpu_only
   def test_gpu_nanoo_fp8(self):
     train_main(TrainTests.CONFIGS["nanoo_fp8"] + ["attention=dot_product"])
+
+  @pytest.mark.skip(reason="No runner with GPU arch >= 89 is available")
+  @pytest.mark.integration_test
+  @pytest.mark.gpu_only
+  def test_gpu_te_fp8_delayedscaling(self):
+    train_main(TrainTests.CONFIGS["te_fp8_delayedscaling"] + ["attention=dot_product"])
+
+  @pytest.mark.skip(reason="No runner with GPU arch >= 89 is available")
+  @pytest.mark.integration_test
+  @pytest.mark.gpu_only
+  def test_gpu_te_fp8_currentscaling(self):
+    train_main(TrainTests.CONFIGS["te_fp8_currentscaling"] + ["attention=dot_product"])
+
+  @pytest.mark.skip(reason="No runner with GPU arch >= 100 is available")
+  @pytest.mark.integration_test
+  @pytest.mark.gpu_only
+  def test_gpu_te_mxfp8(self):
+    train_main(TrainTests.CONFIGS["te_mxfp8"] + ["attention=dot_product"])
+
+  @pytest.mark.skip(reason="No runner with GPU arch >= 100 is available")
+  @pytest.mark.integration_test
+  @pytest.mark.gpu_only
+  def test_gpu_te_nvfp4(self):
+    train_main(TrainTests.CONFIGS["te_nvfp4"] + ["attention=dot_product"])
 
   @pytest.mark.integration_test
   @pytest.mark.tpu_only
