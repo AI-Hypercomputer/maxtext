@@ -94,6 +94,9 @@ class PlaceHolderDataIterator:
   def __next__(self):
     return next(self.data_generator)
 
+  def reset(self):
+    pass
+
   @staticmethod
   def get_place_holder_synthetic_data(config: pyconfig.HyperParameters):
     """fill negative value in synthetic data"""
