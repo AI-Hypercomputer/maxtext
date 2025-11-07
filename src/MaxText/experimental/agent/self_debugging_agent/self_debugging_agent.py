@@ -144,7 +144,7 @@ def generate_test_case(python_file, entry_module, python_code, jax_code, jax_fil
   with open(test_file_path, "wt", encoding="utf-8") as f:
     f.write("import os,sys\nsys.path.append(os.path.abspath('..'))\n")
     f.write(generated_code)
-  logger.info("Written at %s", test_file_path)
+  print(f"Written at {test_file_path}")
   return generated_code
 
 
@@ -209,8 +209,19 @@ def code_debugging(args, python_file, jax_file, test_file_path, last_output, cod
     jax_code, test_case_code = code_history[0]["jax_code"], code_history[0]["test_case_code"]
     entry_module = get_last_defined_module(python_code)
     passed, failed = 0, 0
+    
+    #logging
+    module_name = os.path.basename(python_file)
+    log_dir = os.path.join("logs", module_name)
+    os.makedirs(log_dir, exist_ok=True)
+    debug_log_file = os.path.join(log_dir, "debug_log.txt")
+
+    # Wipe log file clean at the start of a new debugging session
+    with open(debug_log_file, "w", encoding="utf-8") as f:
+        f.write(f"=== Debugging Session Started for {module_name} ===\n")
+        
     for try_count in range(args.code_debug_error_tries):
-      logger.info("Running Self Debugging for %d time for %s", try_count + 1, python_file)
+      print(f"Running Self Debugging for {try_count + 1} time for {python_file}")
       if try_count == 0:
         prompt = CodeDebugging["CODE"]
         python_code = (
@@ -235,6 +246,9 @@ def code_debugging(args, python_file, jax_file, test_file_path, last_output, cod
       else:
         prompt = CodeDebugging["FollowUpPrompt"].replace("<stack_trace>", last_output)
       memory_list.append({"role": "user", "parts": prompt})
+      with open(debug_log_file, "a", encoding="utf-8") as f:
+          f.write(f"\n\n{'='*20} ATTEMPT {try_count + 1} INPUT {'='*20}\n")
+          f.write(f"--- Stack Trace Fed to LLM ---\n{last_output}\n")
       resp = llm_debugging_agent(memory_list)
       memory_list.append({"role": "model", "parts": resp.text})
       json_code = parse_json_response(resp.text)
@@ -245,9 +259,13 @@ def code_debugging(args, python_file, jax_file, test_file_path, last_output, cod
       last_output, exit_code, _, passed, failed = save_and_run_test_case(
           jax_code, test_case_code, jax_file, test_file_path
       )
+      result_msg = f"Attempt {try_count + 1} Result: {passed} Passed, {failed} Failed"
+      print(f"  -> {result_msg}")
+      with open(debug_log_file, "a", encoding="utf-8") as f:
+           f.write(f"\n--- {result_msg} ---\n")
       code_history.append({"passed": passed, "failed": failed, "jax_code": jax_code, "test_case_code": test_case_code})
       if passed > 0 and failed == 0:
-        logger.info("Code Debugger able to solve the bugs in %s in %d Try ", args.jax_path, try_count)
+        print(f"Code Debugger able to solve the bugs in {args.jax_path} in {try_count} Try ")
         return exit_code, passed, failed, code_history
     return 1, passed, failed, code_history
   except Exception as e:
@@ -283,21 +301,21 @@ def make_code_and_debug(args, python_file, jax_file):
         dest_jax_path=args.jax_path,
         dest_testcase_path=args.testcase_path,
     ):
-      logger.info("Copied code for %s from Single run code", python_file.split(os.path.sep)[-1])
+      print(f"Copied code for {python_file.split(os.path.sep)[-1]} from Single run code")
     with open(python_file, "rt", encoding="utf-8") as f:
       python_code = f.read()
     entry_module = get_last_defined_module(python_code)
     test_file_path = os.path.join(args.testcase_path, python_file.split(os.path.sep)[-1])
     code_history = []
     for base_try in range(args.code_generation_tries):
-      logger.info("Processing %s", python_file)
+      print(f"Processing {python_file}")
       if base_try > 0 or not os.path.exists(jax_file):
         if base_try == 0:
-          logger.info("No jax file exists for %s so generating that", python_file.split(os.path.sep)[-1])
+          print(f"No jax file exists for {python_file.split(os.path.sep)[-1]} so generating that")
         for syntax_index in range(args.code_syntax_error_tries):
           jax_code, _ = convert_code_from_torch_to_jax(python_code, [])
           if jax_code == "<NOCHANGE>":
-            logger.info("No change in code Using original code")
+            print(f"No change in code Using original code")
             jax_code = python_code
             break
           if save_in_file_and_check_code_syntax(jax_code, jax_file)[0]:
@@ -320,15 +338,15 @@ def make_code_and_debug(args, python_file, jax_file):
           )
           continue
       else:
-        logger.info("Checking test case for existing code for %s", python_file.split(os.path.sep)[-1])
+        print(f"Found existing test case for {python_file.split(os.path.sep)[-1]}")
         with open(jax_file, "rt", encoding="utf-8") as f:
           jax_code = f.read()
       if base_try > 0 or not os.path.exists(test_file_path):
         test_case_code = generate_test_case(
-            python_file, entry_module, python_code, args.jax_code, jax_file, test_file_path
+            python_file, entry_module, python_code,jax_code, jax_file, test_file_path
         )
         if test_case_code == "NOTESTCASE":
-          logger.info("Test case is not possible")
+          print(f"Test case is not possible")
           return 1, 0
         if "<UNABLETOGENERATE>" in test_case_code:
           return 0, args.error_penalty
@@ -346,7 +364,7 @@ def make_code_and_debug(args, python_file, jax_file):
         if is_dependency_error:
           logger.error("There are some missing dependency please check %s", output)
         code_history.append(
-            {"passed": num_passed, "failed": num_failed, "jax_code": args.jax_code, "test_case_code": args.test_case_code}
+            {"passed": num_passed, "failed": num_failed, "jax_code": jax_code, "test_case_code": test_case_code}
         )
         exit_code, num_passed, num_failed, code_history = code_debugging(
             args, python_file, jax_file, test_file_path, output, code_history, base_try
@@ -355,7 +373,7 @@ def make_code_and_debug(args, python_file, jax_file):
           return num_passed, num_failed
     # no code with all test case passed find the best one
     if len(code_history) == 0:
-      logger.info("Code %s have some issue LLM not able to solve", args.jax_code)
+      print(f"Code {args.jax_code} have some issue LLM not able to solve")
       return 0, args.error_penalty
     best_code = max(
         code_history, key=lambda x: x["passed"] / (x["passed"] + x["failed"] if (x["passed"] + x["failed"]) > 0 else 0)
@@ -393,7 +411,7 @@ def run_self_debugging_code_generation(args):
     if num_passed == num_failed == 0:  # when the code cannot be executed
       # Penalty in case of issue in test case and not executed
       num_failed = args.error_penalty
-    logger.info("%s have %d cases passed and %d cases failed", python_file.split(os.path.sep)[-1], num_passed, num_failed)
+    print(f"{python_file.split(os.path.sep)[-1]} have {num_passed} cases passed and {num_failed} cases failed")
     total_passed += num_passed
     total_failed += num_failed
     if num_passed == 0:
@@ -402,10 +420,10 @@ def run_self_debugging_code_generation(args):
       all_passed += 1
     total_files += 1
 
-  logger.info("****** Results for Self Debugging ******")
-  logger.info("%d files have all module passed %d files have all module failed", all_passed, all_failed)
-  logger.info("Test case Accuracy %.2f%%", total_passed * 100 / (total_passed + total_failed))
-  logger.info("File Accuracy %.2f%%", all_passed * 100 / total_files)
+  print("\n***** Results for Self Debugging ******")
+  print(f"{all_passed} files have all module passed {all_failed} files have all module failed")
+  print(f"Test case Accuracy {total_passed * 100 / (total_passed + total_failed):.2f}%")
+  print(f"File Accuracy {all_passed * 100 / total_files:.2f}%")
 
 
 def main():
