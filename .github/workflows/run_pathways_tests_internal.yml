@@ -64,6 +64,7 @@ jobs:
         IFRT_PROXY_USE_INSECURE_GRPC_CREDENTIALS: true
         JAX_PLATFORMS: "proxy"
         JAX_BACKEND_TARGET: "grpc://localhost:29000"
+        JAX_COORDINATOR_ADDRESS: "localhost"
       options: ${{ inputs.container_resource_option }}
     steps:
       - uses: actions/checkout@v4
