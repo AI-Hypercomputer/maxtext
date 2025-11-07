@@ -85,6 +85,18 @@ def run_checkpointing(hardware, attention_type):
       "grain_worker_count=0",
       "grain_train_files=/tmp/gcsfuse/array-record/c4/en/3.0.1/c4-train.array_record*",
   ]
+
+  command = get_checkpointing_command(
+      run_date,
+      hardware=hardware,
+      steps=1,
+      metrics_file="saved_metrics.txt",
+      attention_type=attention_type,
+      dataset_type="grain",
+      dataset_path="/tmp/gcsfuse",
+  ) + grain_command
+  print(f"LOG: {command = }")
+
   train_main(
       get_checkpointing_command(
           run_date,
