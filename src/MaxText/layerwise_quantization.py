@@ -38,6 +38,7 @@ import jax
 import jax.numpy as jnp
 from absl import app
 
+from flax import nnx
 from flax.linen import partitioning as nn_partitioning
 
 
@@ -93,9 +94,31 @@ class LayerwiseQuantization:
 
     self.quant.quant_mode = quantizations.get_quant_mode("convert")
 
+    if rng is None:
+      rng = jax.random.PRNGKey(0)
+
+    dense_init_rng, moe_init_rng = jax.random.split(rng)
+    dense_params_rng, dense_dropout_rng = jax.random.split(dense_init_rng)
+    moe_params_rng, moe_dropout_rng = jax.random.split(moe_init_rng)
+
+    dense_layer_rngs = nnx.Rngs(params=dense_params_rng, dropout=dense_dropout_rng)
+    moe_layer_rngs = nnx.Rngs(params=moe_params_rng, dropout=moe_dropout_rng)
+
     layers = [
-        deepseek.DeepSeekDenseLayer(config, mesh=self._mesh, quant=self.quant),
-        deepseek.DeepSeekMoELayer(config, mesh=self._mesh, quant=self.quant),
+        deepseek.DeepSeekDenseLayer(
+            config,
+            model_mode=common_types.MODEL_MODE_TRAIN,
+            mesh=self._mesh,
+            rngs=dense_layer_rngs,
+            quant=self.quant,
+        ),
+        deepseek.DeepSeekMoELayer(
+            config,
+            model_mode=common_types.MODEL_MODE_TRAIN,
+            mesh=self._mesh,
+            rngs=moe_layer_rngs,
+            quant=self.quant,
+        ),
     ]
     layer_prefixes = ["dense_layers", "moe_layers"]
     num_moe_layers = config.num_decoder_layers - config.first_num_dense_layers
