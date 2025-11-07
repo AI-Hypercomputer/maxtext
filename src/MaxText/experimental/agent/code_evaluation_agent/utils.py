@@ -20,7 +20,6 @@ import os
 import pytest
 import re
 import sys
-import subprocess
 import traceback
 from contextlib import redirect_stdout, redirect_stderr
 
@@ -79,68 +78,86 @@ def get_last_defined_module(code_str):
     return f"Syntax error in code: {e}"
 
 
-def run_pytest_capture_output(test_file: str, code_folder: None | str = None) -> tuple[str, int, int, int]:
-  """
-  Runs a specified pytest test file as an ISOLATED SUBPROCESS and captures the output.
-  
-  Uses `sys.executable` to ensure it runs `pytest` with the
-  exact same Python interpreter (and virtual environment) as the main script.
+def run_pytest_capture_output(test_file: str, code_folder: None | str = None) -> tuple[str, int, bool, int, int]:
+  """Runs a specified pytest test file and captures the output.
+
+  This function temporarily changes the current working directory to the specified
+  `code_folder` to ensure tests can find the code they need to import, then
+  changes back upon completion. It uses `redirect_stdout` and `redirect_stderr`
+  to capture all print statements and error messages from the test run.
 
   Args:
-      test_file: The name of the pytest file to run (e.g., "test_attention_utils.py").
-      code_folder: The directory to run the test from.
+      test_file: The path to the pytest file to run.
+      code_folder: The directory to change into before running the tests.
 
   Returns:
       A tuple containing:
           - output (str): The complete stdout and stderr from the test run.
           - exit_code (int): The exit code of the pytest process (0 for success, non-zero otherwise).
+          - is_dependency_error (bool): True if a common dependency error was found in the output.
           - passed (int): The number of tests that passed.
           - failed (int): The number of tests that failed.
   """
-  run_directory = code_folder if code_folder is not None else "."
-  
+  current_path = os.path.abspath(".")
   try:
-    # Use sys.executable to run pytest as a module.
-    # This guarantees we use the correct virtual environment.
-    command = [sys.executable, "-m", "pytest", "-q", test_file]
+    if code_folder is not None:
+      os.chdir(code_folder)
+    buffer = io.StringIO()
+    if os.path.abspath("../") not in sys.path:
+      sys.path.append(os.path.abspath("../"))
+    with redirect_stdout(buffer), redirect_stderr(buffer):
+      exit_code = pytest.main(["-q", test_file])
 
-    result = subprocess.run(
-        command,
-        capture_output=True,
-        text=True,
-        cwd=run_directory
-    )
+    output = buffer.getvalue()
+    buffer.close()
 
-    output = result.stdout + result.stderr
-    exit_code = result.returncode
+    # Check for common dependency errors
+    dependency_error_keywords = [
+        "ModuleNotFoundError",
+        "ImportError",
+        "No module named",
+        "pkg_resources.DistributionNotFound",
+        "cannot import name",
+    ]
 
-    # Extract passed and failed counts
+    is_dependency_error = any(err in output for err in dependency_error_keywords)
+
+    # Extract passed and failed counts using regex
     passed, failed = 0, 0
-    
-    # Try to find the full summary line first
-    match = re.search(r"(\d+)\s+passed.*(\d+)\s+failed", output)
+    match = re.search(r"(\d+) passed.*?(\d+) failed", output)
     if match:
       passed = int(match.group(1))
       failed = int(match.group(2))
     else:
-      # If not, find them separately
-      match_passed = re.search(r"(\d+)\s+passed", output)
-      if match_passed:
-        passed = int(match_passed.group(1))
-        
-      match_failed = re.search(r"(\d+)\s+failed", output)
-      if match_failed:
-        failed = int(match_failed.group(1))
-    
-    # Handle "1 error" as 1 failure if no other "failed" count is found
-    if passed == 0 and failed == 0 and "error" in output:
-        match_error = re.search(r"(\d+)\s+error", output)
-        if match_error:
-            failed = int(match_error.group(1)) # Treat errors as failures
+      match = re.search(r"(\d+) passed", output)
+      if match:
+        passed = int(match.group(1))
+      match = re.search(r"(\d+) failed", output)
+      if match:
+        failed = int(match.group(1))
 
-    return output, exit_code, passed, failed
+    return output, exit_code, is_dependency_error, passed, failed
 
-  except Exception as e:
-    # Catch any unexpected errors (e.g., subprocess failed to even start)
-    print(f"CRITICAL ERROR in run_pytest_capture_output: {e}")
-    return str(e), -1, 0, 0
+  except FileNotFoundError as e:
+    print(f"\033[91m[ERROR] File not found:\033[0m {e.filename}", file=sys.stderr)
+    return "", 1, False, 0, 0
+
+  except IsADirectoryError as e:
+    print(f"\033[91m[ERROR] Expected a file but got a directory:\033[0m {e.filename}", file=sys.stderr)
+    return "", 1, False, 0, 0
+
+  except (NotADirectoryError, PermissionError) as e:
+    print(f"\033[91m[ERROR] OS error accessing path:\033[0m {e}", file=sys.stderr)
+    return "", 1, False, 0, 0
+
+  except (ValueError, TypeError, AttributeError) as e:
+    # Catches potential errors during output parsing or other logic.
+    error_message = "\033[91m[ERROR] An unexpected internal error occurred while processing test results:\033[0m\n"
+    error_message += f"{type(e).__name__}: {str(e)}\n"
+    error_message += "\n\033[93mTraceback:\033[0m\n"
+    error_message += "".join(traceback.format_exception(type(e), e, e.__traceback__))
+    print(error_message, file=sys.stderr)
+    return "", 1, False, 0, 0
+
+  finally:
+    os.chdir(current_path)

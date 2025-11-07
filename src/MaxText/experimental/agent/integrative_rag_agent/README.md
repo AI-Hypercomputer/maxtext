@@ -26,13 +26,20 @@
    ```
 
 2. **Configure Environment Variables**  
-   Create a `.env` file in the root directory with the required credentials:  
-   ```env
-   GOOGLE_API_KEY="YOUR_API_KEY_HERE"
-   Model="gemini-2.5-pro"
-   GITHUB_TOKEN="YOUR_GITHUB_TOKEN"
-   ```
+    Create a `.env` file in the current folder with the required credentials:  
+    ```env
+    GOOGLE_API_KEY="YOUR_API_KEY_HERE"
+    Model="gemini-2.5-pro"
+    GITHUB_TOKEN="YOUR_GITHUB_TOKEN"
+    ```
 
+    Alternatively, to speed up the process, try the gemini flash lite model 
+    without reasoning.
+    ```env
+    GOOGLE_API_KEY="YOUR_API_KEY_HERE"
+    Model="gemini-2.5-flash-lite"
+    GITHUB_TOKEN="YOUR_GITHUB_TOKEN"
+    ```
 ## Usage
 cd to the folder `maxtext/src/MaxText/experimental/agent/integrative_rag_agent`
 
@@ -50,7 +57,7 @@ This will create embedding_cache.db and maxtext_blocks.json under the dataset fo
 
 This will generate descriptions for all MaxText code blocks scraped in step 1 and create embeddings for them. The results will be saved in the rag_store.db database.
 
-This step takes ~2 hours. To skip this and use the pre-generated files, copy the dataset folder from examples/dataset directly into the integrative_rag_agent/ folder.
+This step takes ~2 hours with gemini-2.5-pro, takes ~15 minutes with gemini-2.5-flash-lite. To skip this and use the pre-generated files by gemini-2.5-pro, copy the dataset folder from examples/dataset directly into the integrative_rag_agent/ folder.
 
 The final file structure should look like this:
 
