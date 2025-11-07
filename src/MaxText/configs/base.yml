@@ -523,6 +523,11 @@ packing: True
 num_epoch: 1  # only grain and tfds pipeline supports num_epoch > 1
 generate_padding_batch_train: False
 generate_padding_batch_eval: False
+# Maximum number of segments that can be packed into a single sequence
+# This needs to be passed to TransformerEngine's DotProductAttention layer for packing
+# NOTE: This parameter is only relevant for GPU packed attention.
+# When using TPU, this parameter will be ignored.
+max_segments_per_seq: 32
 # Rampup batch size, similar to Megatron-LM, see
 # https://github.com/NVIDIA/Megatron-LM/blob/2a01637aa54ccdaf7ea9afc1f1b80f58c53d7f3c/megatron/core/num_microbatches_calculator.py#L233-L237
 # The ramp-up proceeds in stages from `per_device_batch_size_start` up to
@@ -818,6 +823,7 @@ cost_estimate_flops_bwd: -1 # -1 means using splash default cost estmiation, any
 dq_reduction_steps: 0 #the number of reduction steps. For now, only 3 or all the kv steps are supported.
 ### Determine if we want to use load balance for context parallelism
 context_parallel_load_balance: True
+context_parallel_strategy: "all_gather" # "all_gather" or "ring"
 
 ### Paged Attention ###
 # These settings take effect only when `attention=paged`.

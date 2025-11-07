@@ -180,11 +180,9 @@ def setup_train_loop(config, recorder, devices=None):
     # Check if context parallelism is being used with sequence packing
     if context_parallel_size > 1 and config.packing and config.dataset_type != "synthetic":
       raise ValueError(
-          "Context parallelism cannot be used with sequence packing except for"
-          " synthetic data where packing is not applied. Either disable"
-          " sequence packing (set packing=False) or disable context"
-          " parallelism. Context parallelism with packing support will be added"
-          " soon."
+          "Context parallelism cannot be used with sequence packing. "
+          "Disable sequence packing (set packing=False). "
+          "Context parallelism with packing support will be added soon."
       )
 
     # Apply reordering wrapper to data iterators if context parallelism is enabled
@@ -268,12 +266,8 @@ def validate_train_config(config):
         " use other quantization or set gradient_accumulation_steps to 1"
     )
 
-  # Check if GPU Flash Attention is being used with sequence packing
-  if config.attention == "cudnn_flash_te" and config.packing and config.dataset_type != "synthetic":
-    raise ValueError(
-        "cudnn_flash_te only supports BSHD format. The THD (seq packing)"
-        " support is going to be available in Transformer Engine 2.0 release."
-        " Please disable sequence packing (set packing=False) or use a"
-        " different attention mechanism. With synthetic data, the format is not"
-        " important as packing is not applied."
+  if config.packing and config.dataset_type == "synthetic":
+    max_logging.log(
+        "WARNING: Sequence packing is essentially ignored for synthetic data. "
+        "Please use a real dataset to use sequence packing."
     )
