@@ -96,7 +96,6 @@ def run_checkpointing(hardware, attention_type):
       dataset_path="/tmp/gcsfuse",
   ) + grain_command
   print(f"LOG: {command = }")
-  
 
   train_main(
       get_checkpointing_command(
