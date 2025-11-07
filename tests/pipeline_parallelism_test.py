@@ -69,13 +69,15 @@ class PipelineParallelismTest(unittest.TestCase):
     else:
       if issubclass(single_pipeline_stage_class, nnx_wrappers.ToLinen):
         rngs = nnx.Rngs(params=0)
-        single_pipeline_stage = single_pipeline_stage_class(
-            config=config, mesh=mesh, model_mode=model_mode, rngs=rngs
-        )
+        single_pipeline_stage = single_pipeline_stage_class(config=config, mesh=mesh, model_mode=model_mode, rngs=rngs)
       else:
-        single_pipeline_stage = single_pipeline_stage_class(
-            config=config, mesh=mesh, model_mode=model_mode
-        )
+        try:
+          single_pipeline_stage = single_pipeline_stage_class(config=config, mesh=mesh, model_mode=model_mode)
+        except TypeError as exc:
+          if "rngs" not in str(exc):
+            raise
+          rngs = nnx.Rngs(params=0)
+          single_pipeline_stage = single_pipeline_stage_class(config=config, mesh=mesh, model_mode=model_mode, rngs=rngs)
 
     def get_inputs(batch_size, sequence, features):
       """Get random inputs, and random dummy targets
@@ -237,6 +239,7 @@ class PipelineParallelismTest(unittest.TestCase):
         sparse_matmul=False,
         capacity_factor=1,
         decoder_block="deepseek",
+        attention_type="mla",
     )
     self.assert_pipeline_same_output_and_grad(config, single_pipeline_stage_class=deepseek.DeepSeekMoELayer)
 
