@@ -48,7 +48,7 @@ from jax.sharding import Mesh
 from transformers import LlamaForCausalLM, MistralForCausalLM, AutoModelForCausalLM, AutoConfig
 
 from MaxText import checkpointing
-from MaxText import llama_or_mistral_ckpt
+from MaxText.utils.ckpt_scripts import llama_or_mistral_ckpt
 from MaxText import max_logging
 from MaxText import maxtext_utils
 from MaxText import pyconfig

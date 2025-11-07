@@ -41,7 +41,7 @@ from safetensors import safe_open
 
 from MaxText import max_logging
 from MaxText.inference_utils import str2bool
-from MaxText import llama_or_mistral_ckpt
+from MaxText.utils.ckpt_scripts import llama_or_mistral_ckpt
 
 
 MODEL_PARAMS_DICT = {
