@@ -54,9 +54,7 @@ class DeepSeekGenericLayer(nnx.Module):
     self.quant = quant
     self.rngs = rngs
 
-    batch_size, sequence_length = max_utils.get_batch_seq_len_for_mode(
-        self.config, self.model_mode
-    )
+    batch_size, sequence_length = max_utils.get_batch_seq_len_for_mode(self.config, self.model_mode)
     self.dummy_inputs_shape = (batch_size, sequence_length, self.config.emb_dim)
 
     self.pre_self_attention_layer_norm = RMSNorm(
@@ -108,9 +106,7 @@ class DeepSeekGenericLayer(nnx.Module):
         rngs=rngs,
     )
 
-    self.dropout = Dropout(
-        rate=self.config.dropout_rate, broadcast_dims=(-2,), rngs=self.rngs
-    )
+    self.dropout = Dropout(rate=self.config.dropout_rate, broadcast_dims=(-2,), rngs=self.rngs)
 
   def __call__(
       self,
@@ -151,9 +147,7 @@ class DeepSeekGenericLayer(nnx.Module):
     return nn.with_logical_constraint(x, self.logical_axis_names)
 
   def dropout_op(self, x, deterministic):
-    return self.with_logical_constraint(
-        self.dropout(x, deterministic=deterministic)
-    )
+    return self.with_logical_constraint(self.dropout(x, deterministic=deterministic))
 
   def pre_attention_norm_op(self, x):
     return self.with_logical_constraint(self.pre_self_attention_layer_norm(x))
@@ -300,9 +294,7 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
     self.DeepSeekMoeBlock_0 = moe.RoutedAndSharedMoE(
         config=self.config,
         mesh=mesh,
-        kernel_init=initializers.nd_dense_init(
-            1.0, "fan_in", "truncated_normal"
-        ),
+        kernel_init=initializers.nd_dense_init(1.0, "fan_in", "truncated_normal"),
         kernel_axes=("embed", None),
         dtype=self.config.dtype,
         weight_dtype=self.config.weight_dtype,
