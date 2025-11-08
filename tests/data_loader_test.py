@@ -22,9 +22,10 @@ import jax
 
 from unittest.mock import MagicMock
 from jax.sharding import Mesh
-from jax.experimental import mesh_utils
 
 from MaxText.data_loader import DataLoader, RampUpDataLoader
+from MaxText.rampup_batch import RampupBatchManager
+from MaxText.maxtext_utils import create_device_mesh
 from MaxText import exceptions
 from MaxText import pyconfig
 from MaxText.globals import MAXTEXT_PKG_DIR
@@ -44,17 +45,13 @@ class DataLoaderTest(unittest.TestCase):
         per_device_batch_size_increment=1.0,
         global_rampup_samples=60,
     )
-    self.mesh_shape_1d = (len(jax.devices()),)
-    self.mesh = Mesh(mesh_utils.create_device_mesh(self.mesh_shape_1d), self.config.mesh_axes)
+    self.mesh = Mesh(create_device_mesh(self.config), self.config.mesh_axes)
     self.mock_data_iterator = MagicMock()
 
   def get_test_config(self, reuse_example_batch, **kwargs):
     """Generate config for tests"""
     args = {
         "run_name": "test",
-        "mesh_axes": ["data"],
-        "logical_axis_rules": [["batch", "data"]],
-        "data_sharding": ["data"],
         "enable_checkpointing": False,
         "reuse_example_batch": reuse_example_batch,
     }
@@ -132,21 +129,49 @@ class DataLoaderTest(unittest.TestCase):
   def test_rampup_data_loader(self):
     """Tests that RampUpLoader correctly slices and increment."""
     # Mock iterator returns a FULL batch (size 4)
-    full_batch_size = self.config_rampup.global_batch_size_to_load
+    full_batch_size = int(self.config_rampup.per_device_batch_size * self.config_rampup.num_target_devices)
     full_shape = [full_batch_size, self.config_rampup.max_target_length]
     full_batch = {"inputs": np.ones(full_shape, dtype=int)}
     self.mock_data_iterator.__next__.return_value = full_batch
 
     # Create the RampUpDataLoader
+    rampup_manager = RampupBatchManager(self.config_rampup, -1)
     data_loader = RampUpDataLoader(self.config_rampup, self.mesh, self.mock_data_iterator, None)
 
     # Expected batch sizes based on test config.
     # The end global batch size is self.num_devices * per_device_batch_size
     # The rampup should be: 5 steps of size 4, 3 steps of size 8, 2 steps of size 12, then size 16.
     expected_batch_sizes = [4, 4, 4, 4, 4, 8, 8, 8, 12, 12, 16, 16]
-
     for i, expected_size in enumerate(expected_batch_sizes):
-      batch = data_loader.load_next_batch()
+      batch = data_loader.load_next_batch(rampup_manager=rampup_manager)
+      expected_shape = (expected_size, self.config_rampup.max_target_length)
+      self.assertEqual(
+          batch["inputs"].shape,
+          expected_shape,
+          f"Mismatch at step {i+1}: expected {expected_shape}, got {batch['inputs'].shape}",
+      )
+      self.assertTrue((batch["inputs"] == 1).all())
+
+  def test_rampup_data_loader_from_checkpointing(self):
+    """Tests that RampUpLoader correctly slices and increment resumed from checkpointing."""
+    # Mock iterator returns a FULL batch (size 4)
+    full_batch_size = int(self.config_rampup.per_device_batch_size * self.config_rampup.num_target_devices)
+    full_shape = [full_batch_size, self.config_rampup.max_target_length]
+    full_batch = {"inputs": np.ones(full_shape, dtype=int)}
+    self.mock_data_iterator.__next__.return_value = full_batch
+    # We assume rampup batch size resuming from step 5
+    checkpoint_step = 5
+    rampup_manager = RampupBatchManager(self.config_rampup, checkpoint_step)
+
+    # Create the RampUpDataLoader
+    data_loader = RampUpDataLoader(self.config_rampup, self.mesh, self.mock_data_iterator, None)
+
+    # Expected batch sizes based on test config.
+    # The end global batch size is self.num_devices * per_device_batch_size
+    # The rampup should be: 3 steps of size 8, 2 steps of size 12, then size 16.
+    expected_batch_sizes = [8, 8, 8, 12, 12, 16, 16]
+    for i, expected_size in enumerate(expected_batch_sizes):
+      batch = data_loader.load_next_batch(rampup_manager=rampup_manager)
       expected_shape = (expected_size, self.config_rampup.max_target_length)
       self.assertEqual(
           batch["inputs"].shape,
