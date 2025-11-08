@@ -520,8 +520,6 @@ def _get_quant_config(config):
     return _get_aqt_fp8_quant_config(config)
   if config.quantization == "aqt_fp8_full":
     return _get_aqt_fp8_default_config(config)
-  if config.quantization.startswith("te_"):
-    return config.quantization
 
   raise ValueError(f"Invalid value configured for quantization {config.quantization}.")
 
@@ -557,8 +555,6 @@ def configure_quantization(config: Config, quant_mode_str: str = "train"):
       return Fp8Quantization()
     elif quant_cfg == "nanoo_fp8":
       return NANOOFp8Quantization()
-    elif isinstance(quant_cfg, str) and quant_cfg.startswith("te_"):
-      return TransformerEngineQuantization(config)
     quant_mode = get_quant_mode(quant_mode_str)
     replicate_scale = config.replicate_quant_scale if config.replicate_quant_scale else False
     return AqtQuantization(quant_dg=quant_cfg, quant_mode=quant_mode, replicate_scale=replicate_scale)
@@ -719,124 +715,3 @@ def maybe_quantize_model(model, config):
     if quantization_provider:
       model = qwix.quantize_model(model, quantization_provider)
   return model
-
-
-class TransformerEngineQuantization(Quantization):
-  """Class for TransformerEngine quantization recipes."""
-
-  def __init__(self, config):
-    """Initialize TransformerEngine quantization."""
-
-    self.quant_mode = "train"
-
-    if not config.quantization.startswith("te_"):
-      raise ValueError(f"Invalid TransformerEngine quantization config: {config.quantization}")
-
-    self._recipe = TransformerEngineQuantization._get_recipe(config.quantization)
-
-  def __hash__(self):
-    return hash((self.quant_mode, self._recipe))
-
-  def __eq__(self, other):
-    if not isinstance(other, TransformerEngineQuantization):
-      return False
-    return (self.quant_mode, self._recipe) == (other.quant_mode, other._recipe)
-
-  @staticmethod
-  def _get_recipe(recipe_name: str):
-    """Get the TransformerEngine recipe based on the name."""
-    from transformer_engine.common import recipe  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
-
-    RECIPES = {
-        "te_fp8_delayedscaling": recipe.DelayedScaling,
-        "te_fp8_currentscaling": recipe.Float8CurrentScaling,
-        "te_mxfp8": recipe.MXFP8BlockScaling,
-        "te_nvfp4": recipe.NVFP4BlockScaling,  # pytype: disable=module-attr
-    }
-    if recipe_name not in RECIPES:
-      raise ValueError(f"Invalid TransformerEngine recipe: {recipe_name}")
-    return RECIPES[recipe_name]()
-
-  def get_block_size(self):
-    """Get the block size for quantization for recipes that require blocks.
-
-    If there is no block requirement for the current recipe, returns 1.
-    """
-    from transformer_engine.common import recipe  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
-
-    if isinstance(self._recipe, recipe.MXFP8BlockScaling):
-      return 32
-    if isinstance(self._recipe, recipe.NVFP4BlockScaling):  # pytype: disable=module-attr
-      return 128  # TODO(set this to 16 when unfused RHT is supported)
-    return 1
-
-  def _wrap(self, f, name=None):
-    """Wraps the given function `f` to support TransformerEngine quantization.
-
-    This method does a couple things:
-
-
-    1. Wraps the given function in a context that specifies MaxText's physical mesh axes to
-    TransformerEngine. This ensures our collective operations in TransformerEngine are using
-    the correct axes.
-
-    2. Wraps the given function in a Flax linen module. This module does not store any Flax
-    parameters but can store Flax variables for quantizers if required by the recipe.
-
-    3. When the wrapper is called, it provides an additional argument to the given function `f`,
-    'generate_quantizer_set' as the first argument. 'generate_quantizer_set' is a function that
-    can be called to generate a TransformerEngine/JAX quantizer set object used in
-    TransformerEngine/JAX APIs. 'generate_quantizer_set' will generate quantizers based on the
-    recipe of this TransformerEngineQuantizer object.
-
-    Args:
-      f: The function to wrap. The first argument must be 'generate_quantizer_set'.
-      name: The name of this wrapped operation. If unspecified, will use `f.__name__`.
-
-    Returns:
-      A Flax linen module that wraps the given function.
-    """
-
-    import transformer_engine.jax as te  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
-
-    fp8_recipe = self._recipe
-
-    class TEWrapper(te.flax.module.TransformerEngineBase):
-      """Wrapper module for TransformerEngine quantization."""
-
-      def generate_quantizer_set(self, postfix: str = ""):
-        OVERWRITE_WITH_GRADIENT = "_overwrite_with_gradient"
-        return super().generate_quantizer_set(  # pytype: disable=wrong-keyword-args
-            postfix=postfix, variable_collection=OVERWRITE_WITH_GRADIENT, fp8_recipe=fp8_recipe
-        )
-
-      @nn.compact
-      def __call__(self, *args, **kwargs):
-        return f(self.generate_quantizer_set, *args, **kwargs)
-
-    TEWrapper.__name__ = f"TEWrapper_{name if name else f.__name__}"
-
-    return TEWrapper
-
-  def dot_general_cls(self, mesh_axes: Tuple[str, ...] = ()):
-    """Placeholder for dot_general implementation in subclasses."""
-    import transformer_engine.jax as te  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
-
-    def te_dot_general(generate_quantizer_set, x, kernel, dims, **kwargs):
-      contracting_dims, batch_dims = dims
-      assert batch_dims == ((), ()), "Batch dimensions must be empty for TransformerEngine dot."
-
-      quantizer_set = generate_quantizer_set()
-      return te.dense.dense(
-          x,
-          kernel,
-          contracting_dims=contracting_dims,
-          quantizer_set=quantizer_set,
-      )
-
-    return self._wrap(te_dot_general, "dot_general")
-
-  def einsum(self, dtype: DType = jnp.float32):
-    """Placeholder for einsum implementation in subclasses."""
-    # quant.einsum is only required for MoE or for inference with KVCache.
-    raise ValueError("Einsum is not yet supported for TransformerEngine quantization.")
