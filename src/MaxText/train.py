@@ -392,7 +392,7 @@ def train_loop(config, recorder, state=None):
 
   start_step = get_first_step(state)  # this is the start_step for training
   prof = profiler.Profiler(config, offset_step=start_step)
-  data_loader = create_dataloader(config, mesh, data_iterator, recorder)
+  data_loader = create_dataloader(config, data_iterator, recorder, checkpoint_manager.latest_step() if checkpoint_manager else -1)
   metric_logger = MetricLogger(config=config, learning_rate_schedule=learning_rate_schedule)
 
   # Write train config params, num model params, and XLA flags to tensorboard

@@ -758,6 +758,7 @@ class _HyperParameters:
 
     # This is the first command that initializes the backend - it calls
     # jax.devices()
+    raw_keys["num_target_devices"] = get_num_target_devices(raw_keys)
     (
         raw_keys["global_batch_size_to_load"],
         raw_keys["global_batch_size_to_train_on"],
@@ -765,7 +766,7 @@ class _HyperParameters:
     ) = calculate_global_batch_sizes(
         raw_keys["per_device_batch_size"],
         raw_keys["expansion_factor_real_data"],
-        get_num_target_devices(raw_keys),
+        raw_keys["num_target_devices"],
         raw_keys["gradient_accumulation_steps"],
     )
 
@@ -779,7 +780,7 @@ class _HyperParameters:
       ) = calculate_global_batch_sizes(
           raw_keys["per_device_batch_size_start"],
           raw_keys["expansion_factor_real_data"],
-          get_num_target_devices(raw_keys),
+          raw_keys["num_target_devices"],
           raw_keys["gradient_accumulation_steps"],
       )
 
@@ -790,7 +791,7 @@ class _HyperParameters:
       ) = calculate_global_batch_sizes(
           raw_keys["per_device_batch_size_increment"],
           raw_keys["expansion_factor_real_data"],
-          get_num_target_devices(raw_keys),
+          raw_keys["num_target_devices"],
           raw_keys["gradient_accumulation_steps"],
       )
 
