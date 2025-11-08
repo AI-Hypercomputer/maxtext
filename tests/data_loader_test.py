@@ -43,6 +43,7 @@ class DataLoaderTest(unittest.TestCase):
         per_device_batch_size_start=1.0,
         per_device_batch_size_increment=1.0,
         global_rampup_samples=60,
+        log_config=False,
     )
     self.mesh_shape_1d = (len(jax.devices()),)
     self.mesh = Mesh(mesh_utils.create_device_mesh(self.mesh_shape_1d), self.config.mesh_axes)
@@ -69,7 +70,7 @@ class DataLoaderTest(unittest.TestCase):
     expected_batch = {"inputs": np.zeros(expected_shape, dtype=int)}
     self.mock_data_iterator.__next__.return_value = expected_batch
 
-    data_loader = DataLoader(self.config, self.mesh, self.mock_data_iterator, None)
+    data_loader = DataLoader(self.config, self.mock_data_iterator, None)
     batch = data_loader.load_next_batch()
 
     self.assertEqual(batch["inputs"].shape, expected_batch["inputs"].shape)
@@ -83,7 +84,7 @@ class DataLoaderTest(unittest.TestCase):
     expected_batch = {"inputs": np.zeros(expected_shape, dtype=int)}
     self.mock_data_iterator.__next__.return_value = expected_batch
 
-    data_loader = DataLoader(self.config_reuse_example, self.mesh, self.mock_data_iterator, None)
+    data_loader = DataLoader(self.config_reuse_example, self.mock_data_iterator, None)
 
     batch_1 = data_loader.load_next_batch()
     self.assertEqual(batch_1["inputs"].shape, expected_batch["inputs"].shape)
@@ -105,7 +106,7 @@ class DataLoaderTest(unittest.TestCase):
     expected_batch_2 = {"inputs": np.ones(expected_shape, dtype=int)}
     self.mock_data_iterator.__next__.side_effect = [expected_batch_1, expected_batch_2]
 
-    data_loader = DataLoader(self.config, self.mesh, self.mock_data_iterator, None)
+    data_loader = DataLoader(self.config, self.mock_data_iterator, None)
 
     batch_1 = data_loader.load_next_batch()
     self.assertEqual(batch_1["inputs"].shape, expected_batch_1["inputs"].shape)
@@ -124,7 +125,7 @@ class DataLoaderTest(unittest.TestCase):
   def test_load_next_batch_throws_exception(self):
     self.mock_data_iterator.__next__.side_effect = StopIteration("generator raised StopIteration")
 
-    data_loader = DataLoader(self.config, self.mesh, self.mock_data_iterator, None)
+    data_loader = DataLoader(self.config, self.mock_data_iterator, None)
     with self.assertRaises(exceptions.StopTraining) as e:
       _ = data_loader.load_next_batch()
     self.assertTrue(str(e.exception).startswith("You may have run out of training data."))
@@ -132,19 +133,18 @@ class DataLoaderTest(unittest.TestCase):
   def test_rampup_data_loader(self):
     """Tests that RampUpLoader correctly slices and increment."""
     # Mock iterator returns a FULL batch (size 4)
-    full_batch_size = self.config_rampup.global_batch_size_to_load
+    full_batch_size = int(self.config_rampup.per_device_batch_size * self.config_rampup.num_target_devices)
     full_shape = [full_batch_size, self.config_rampup.max_target_length]
     full_batch = {"inputs": np.ones(full_shape, dtype=int)}
     self.mock_data_iterator.__next__.return_value = full_batch
 
     # Create the RampUpDataLoader
-    data_loader = RampUpDataLoader(self.config_rampup, self.mesh, self.mock_data_iterator, None)
+    data_loader = RampUpDataLoader(self.config_rampup, self.mock_data_iterator, None, latest_step=-1)
 
     # Expected batch sizes based on test config.
     # The end global batch size is self.num_devices * per_device_batch_size
     # The rampup should be: 5 steps of size 4, 3 steps of size 8, 2 steps of size 12, then size 16.
     expected_batch_sizes = [4, 4, 4, 4, 4, 8, 8, 8, 12, 12, 16, 16]
-
     for i, expected_size in enumerate(expected_batch_sizes):
       batch = data_loader.load_next_batch()
       expected_shape = (expected_size, self.config_rampup.max_target_length)
@@ -155,6 +155,32 @@ class DataLoaderTest(unittest.TestCase):
       )
       self.assertTrue((batch["inputs"] == 1).all())
 
+  def test_rampup_data_loader_from_checkpointing(self):
+    """Tests that RampUpLoader correctly slices and increment resumed from checkpointing."""
+    # Mock iterator returns a FULL batch (size 4)
+    full_batch_size = int(self.config_rampup.per_device_batch_size * self.config_rampup.num_target_devices)
+    full_shape = [full_batch_size, self.config_rampup.max_target_length]
+    full_batch = {"inputs": np.ones(full_shape, dtype=int)}
+    self.mock_data_iterator.__next__.return_value = full_batch
+    # We assume rampup batch size resuming from step 5
+    checkpoint_step = 5
+
+    # Create the RampUpDataLoader
+    data_loader = RampUpDataLoader(self.config_rampup, self.mock_data_iterator, None, latest_step=checkpoint_step)
+
+    # Expected batch sizes based on test config.
+    # The end global batch size is self.num_devices * per_device_batch_size
+    # The rampup should be: 3 steps of size 8, 2 steps of size 12, then size 16.
+    expected_batch_sizes = [8, 8, 8, 12, 12, 16, 16]
+    for i, expected_size in enumerate(expected_batch_sizes):
+      batch = data_loader.load_next_batch()
+      expected_shape = (expected_size, self.config_rampup.max_target_length)
+      self.assertEqual(
+          batch["inputs"].shape,
+          expected_shape,
+          f"Mismatch at step {i+1}: expected {expected_shape}, got {batch['inputs'].shape}",
+      )
+      self.assertTrue((batch["inputs"] == 1).all())
 
 if __name__ == "__main__":
   unittest.main()
