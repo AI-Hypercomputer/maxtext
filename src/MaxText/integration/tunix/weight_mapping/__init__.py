@@ -19,8 +19,8 @@ dispatcher to retrieve the correct weight mapping configuration for a given
 model name. This allows for easy extension to support new models.
 """
 
-from maxtext.src.maxtext.integration.tunix.weight_mapping.llama3 import LLAMA3_VLLM_MAPPING
-from maxtext.src.maxtext.integration.tunix.weight_mapping.qwen3 import QWEN3_VLLM_MAPPING
+from MaxText.integration.tunix.weight_mapping.llama3 import LLAMA3_VLLM_MAPPING
+from MaxText.integration.tunix.weight_mapping.qwen3 import QWEN3_VLLM_MAPPING
 
 
 class StandaloneVllmWeightMapping:

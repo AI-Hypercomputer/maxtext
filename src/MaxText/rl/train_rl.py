@@ -75,7 +75,10 @@ pathwaysutils.initialize()
 os.environ["SKIP_JAX_PRECOMPILE"] = "1"
 
 
-from MaxText import max_logging, max_utils, maxtext_utils, pyconfig
+from MaxText import max_logging
+from MaxText import max_utils
+from MaxText import maxtext_utils
+from MaxText import pyconfig
 from MaxText import model_creation_utils
 from MaxText.integration.tunix.tunix_adapter import TunixMaxTextAdapter
 from MaxText.rl.evaluate_rl import evaluate
