@@ -26,7 +26,7 @@ from MaxText.decode import main as decode_main
 from MaxText.generate_param_only_checkpoint import main as generate_param_only_ckpt_main
 from tests.integration_tests.checkpointing_test import get_checkpointing_command
 import pathwaysutils
-
+pathwaysutils.initialize()
 def get_model_params(quantization):
   return [
       f"quantization={quantization}",

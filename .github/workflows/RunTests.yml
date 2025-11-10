@@ -121,6 +121,19 @@ jobs:
       container_resource_option: "--privileged"
       is_scheduled_run: ${{ github.event_name == 'schedule' }}
 
+  tpu_pathways_integration_tests:
+    needs: tpu_image
+    uses: ./.github/workflows/run_pathways_tests_internal.yml
+    with:
+      device_type: tpu
+      device_name: v4-8
+      cloud_runner: linux-x86-ct4p-240-4tpu
+      pytest_marker: 'not cpu_only and not gpu_only and integration_test'
+      xla_python_client_mem_fraction: 0.75
+      tf_force_gpu_allow_growth: false
+      container_resource_option: "--privileged"
+      is_scheduled_run: ${{ github.event_name == 'schedule' }}
+
   # gpu_unit_tests:
   #   needs: gpu_image
   #   uses: ./.github/workflows/run_tests_internal.yml
@@ -152,7 +165,7 @@ jobs:
   clean_up:
     if: ${{ always() }}
     # needs: [cpu_unit_tests, gpu_unit_tests, gpu_integration_tests, tpu_unit_tests, tpu_integration_tests, tpu_pathways_unit_tests]
-    needs: [tpu_unit_tests, tpu_integration_tests, tpu_pathways_unit_tests]
+    needs: [tpu_unit_tests, tpu_integration_tests, tpu_pathways_unit_tests, tpu_pathways_integration_tests]
     name: "Clean up"
     runs-on: ["self-hosted"]
     permissions:
@@ -172,7 +185,7 @@ jobs:
   notify_failure:
     name: Notify failed build # creates an issue or modifies last open existing issue for failed build
     # needs: [cpu_unit_tests, gpu_unit_tests, gpu_integration_tests, tpu_unit_tests, tpu_integration_tests, tpu_pathways_unit_tests]
-    needs: [tpu_unit_tests, tpu_integration_tests, tpu_pathways_unit_tests]
+    needs: [tpu_unit_tests, tpu_integration_tests, tpu_pathways_unit_tests, tpu_pathways_integration_tests]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     permissions:
@@ -205,7 +218,7 @@ jobs:
       # This job runs only if all the preceding test jobs succeeded
       if: ${{ success() && github.event.pull_request == null && github.event_name != 'workflow_dispatch' }}
       # needs: [cpu_unit_tests, gpu_unit_tests, gpu_integration_tests, tpu_unit_tests, tpu_integration_tests, tpu_pathways_unit_tests]
-      needs: [tpu_unit_tests, tpu_integration_tests, tpu_pathways_unit_tests]
+      needs: [tpu_unit_tests, tpu_integration_tests, tpu_pathways_unit_tests, tpu_pathways_integration_tests]
       runs-on: ubuntu-latest
       permissions:
         issues: write

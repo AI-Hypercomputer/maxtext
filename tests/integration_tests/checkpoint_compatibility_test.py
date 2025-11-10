@@ -33,7 +33,7 @@ from MaxText.train import main as train_main
 from MaxText.globals import MAXTEXT_REPO_ROOT
 from tests.integration_tests.checkpointing_test import get_checkpointing_command
 import pathwaysutils
-
+pathwaysutils.initialize()
 def check_start_step(metrics_file, start_step_target):
   with open(metrics_file, "rt", encoding="utf8") as metrics:
     start_step = json.loads(metrics.readlines()[0])["step"]

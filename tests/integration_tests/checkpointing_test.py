@@ -32,7 +32,7 @@ import pytest
 from MaxText.globals import MAXTEXT_PKG_DIR
 from MaxText.train import main as train_main
 import pathwaysutils
-
+pathwaysutils.initialize()
 def get_checkpointing_command(run_date, hardware, steps, metrics_file, attention_type, dataset_type, dataset_path):
   model_params = [
       "base_emb_dim=384",
