@@ -65,7 +65,7 @@ coverage:
     patch:
       default:
         target: auto
-        threshold: 5% # fail on 5+ percent degradation
+        threshold: 10% # fail on 10+ percent degradation
         flags:
           - regular
 

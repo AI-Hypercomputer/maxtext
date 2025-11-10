@@ -21,7 +21,16 @@ from absl.testing import absltest
 
 from MaxText import pyconfig
 from MaxText.globals import MAXTEXT_PKG_DIR, MAXTEXT_ASSETS_ROOT
-from maxtext.inference.inference_microbenchmark import run_benchmarks
+from maxtext.common.gcloud_stub import is_decoupled
+
+pytestmark = [pytest.mark.external_serving]
+
+# Conditional import: only load when not in decoupled mode to avoid collection errors.
+# inference_microbenchmark depends on prefill_packing, which requires JetStream.
+if not is_decoupled():
+  from maxtext.inference.inference_microbenchmark import run_benchmarks
+else:
+  run_benchmarks = None  # Will never be called due to external_serving marker
 
 
 class Inference_Microbenchmark(unittest.TestCase):

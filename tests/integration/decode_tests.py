@@ -19,27 +19,30 @@ import os
 import unittest
 
 import pytest
-
 from absl.testing import absltest
 from contextlib import redirect_stdout
 
 from maxtext.decode import main as decode_main
 from MaxText.globals import MAXTEXT_PKG_DIR, MAXTEXT_ASSETS_ROOT
+from tests.utils.test_helpers import get_test_config_path, get_test_dataset_path, get_test_base_output_directory
 
-pytestmark = pytest.mark.integration_test
+pytestmark = [pytest.mark.tpu_only, pytest.mark.external_serving, pytest.mark.integration_test]
 
 
 class DecodeTests(unittest.TestCase):
   """Tests decode with various configs."""
 
+  _dataset_path = get_test_dataset_path()
+  _base_output_directory = get_test_base_output_directory()
+
   GEMMA_2B_CKPT_PATH = "gs://maxtext-gemma/2b/2025-11-04-04-33//0/items"
   CONFIGS = {
       "base": [  # tests decode
           None,
-          os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
-          "base_output_directory=gs://runner-maxtext-logs",
+          get_test_config_path(),
+          f"base_output_directory={_base_output_directory}",
           "run_name=runner_test",
-          "dataset_path=gs://maxtext-dataset",
+          f"dataset_path={_dataset_path}",
           "steps=2",
           "enable_checkpointing=False",
           "ici_tensor_parallelism=4",
@@ -49,10 +52,10 @@ class DecodeTests(unittest.TestCase):
       ],
       "int8": [  # tests decode with int8 quantization
           None,
-          os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
-          "base_output_directory=gs://runner-maxtext-logs",
+          get_test_config_path(),
+          f"base_output_directory={_base_output_directory}",
           "run_name=runner_test",
-          "dataset_path=gs://maxtext-dataset",
+          f"dataset_path={_dataset_path}",
           "steps=2",
           "enable_checkpointing=False",
           "ici_tensor_parallelism=4",
@@ -64,10 +67,10 @@ class DecodeTests(unittest.TestCase):
       ],
       "pdb_lt_1": [  # tests decode with per_device_batch_size < 1
           None,
-          os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
-          "base_output_directory=gs://runner-maxtext-logs",
+          get_test_config_path(),
+          f"base_output_directory={_base_output_directory}",
           "run_name=runner_test",
-          "dataset_path=gs://maxtext-dataset",
+          f"dataset_path={_dataset_path}",
           "steps=2",
           "enable_checkpointing=False",
           "ici_tensor_parallelism=4",

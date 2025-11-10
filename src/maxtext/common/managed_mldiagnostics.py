@@ -16,7 +16,9 @@
 import json
 from typing import Any
 
-import google_cloud_mldiagnostics as mldiag
+from maxtext.common.gcloud_stub import mldiagnostics_modules
+
+mldiag, _ = mldiagnostics_modules()
 
 from MaxText.pyconfig import KEYS_NO_LOGGING
 
