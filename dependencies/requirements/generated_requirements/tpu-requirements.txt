@@ -229,6 +229,7 @@ tomlkit>=0.13.3
 toolz>=1.1.0
 tqdm>=4.67.1
 transformers>=4.57.1
+transformer_engine==2.4.0
 treescope>=0.1.10
 triton>=3.5.0
 typeguard>=2.13.3
