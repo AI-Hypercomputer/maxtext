@@ -40,7 +40,6 @@ from absl import app
 
 from flax.linen import partitioning as nn_partitioning
 
-
 from MaxText import checkpointing
 from MaxText import max_utils
 from MaxText import maxtext_utils
@@ -93,9 +92,22 @@ class LayerwiseQuantization:
 
     self.quant.quant_mode = quantizations.get_quant_mode("convert")
 
+    model_mode = common_types.MODEL_MODE_PREFILL
+    _, rng_quant_params = jax.random.split(rng)
+
     layers = [
-        deepseek.DeepSeekDenseLayer(config, mesh=self._mesh, quant=self.quant),
-        deepseek.DeepSeekMoELayer(config, mesh=self._mesh, quant=self.quant),
+        deepseek.DeepSeekMoELayerPureLinen(
+            config=config,
+            mesh=self._mesh,
+            quant=self.quant,
+            model_mode=model_mode,
+        ),
+        deepseek.DeepSeekMoELayerPureLinen(
+            config=config,
+            mesh=self._mesh,
+            quant=self.quant,
+            model_mode=model_mode,
+        ),
     ]
     layer_prefixes = ["dense_layers", "moe_layers"]
     num_moe_layers = config.num_decoder_layers - config.first_num_dense_layers
@@ -108,7 +120,7 @@ class LayerwiseQuantization:
           None,
           jnp.zeros((1, self.config.max_prefill_predict_length), dtype=jnp.int32),
           True,
-          model_mode=common_types.MODEL_MODE_PREFILL,
+          model_mode=model_mode,
           rngs={"params": _rng},
           mutable=True,
       )
@@ -122,7 +134,7 @@ class LayerwiseQuantization:
 
         params["params"] = params["params"]["decoder"][layer_name]
 
-        _, new_vars = model_apply(params, rng, layer)
+        _, new_vars = model_apply(params, rng_quant_params, layer)
 
         quantized_params["aqt"]["decoder"][layer_name] = new_vars["aqt"]
         quantized_params["params"]["decoder"][layer_name] = quantizations.remove_quantized_params(
@@ -187,13 +199,12 @@ def main(argv: Sequence[str]) -> None:
 
   quantization = LayerwiseQuantization(config)
   rng = jax.random.PRNGKey(1234)
-  rng, rng_quant_params = jax.random.split(rng)
 
   # load_and_quantize will load a checkpoint and quantize if the following parameters are set:
   # quantization=$valid_quantization_type \
   # save_quantized_params_path=$gsbucket_path \
   # checkpoint_is_quantized=false (default)
-  quantization.load_and_quantize(rng_quant_params)
+  quantization.load_and_quantize(rng)
 
 
 def validate_config(config):
