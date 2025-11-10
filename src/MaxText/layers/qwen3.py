@@ -324,6 +324,10 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     conv_dim = self.key_dim * 2 + self.value_dim
     conv_kernel_size = cfg.gdn_conv_kernel_dim
 
+    if self.num_v_heads % self.num_k_heads != 0:
+        raise ValueError("num_v_heads must be divisible by num_k_heads")
+    self.v_heads_per_k_head = self.num_v_heads // self.num_k_heads
+
     # Submodule instantiations
     self.in_proj_qkvz = linears.DenseGeneral(
         in_features_shape=in_features,
@@ -380,26 +384,78 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     )
 
   def __call__(self, hidden_states: Array) -> Array:
+    # hidden_states: (B, S, E)
     cfg = self.config
+    batch, seq_len, _ = hidden_states.shape
 
     # =========================================================================
     # STEP A: Input Projections
     # =========================================================================
-    # hidden_states shape: (B, S, E)
-    # qkvz shape: (B, S, 2*key_dim + 2*value_dim)
+    # qkvz: (B, S, 2 * K_dim + 2 * V_dim)
     qkvz = self.in_proj_qkvz(hidden_states)
-    # ba shape: (B, S, 2*H_v)
+    # ba: (B, S, 2 * H_v)
     ba = self.in_proj_ba(hidden_states)
 
-    # q shape: (B, S, key_dim), k shape: (B, S, key_dim), v shape: (B, S, value_dim), z shape: (B, S, value_dim)
-    q, k, v, z = jnp.split(qkvz, [self.key_dim, 2 * self.key_dim, 2 * self.key_dim + self.value_dim], axis=-1)
-    # b shape: (B, S, H_v), a shape: (B, S, H_v)
-    b, a = jnp.split(ba, [self.num_v_heads], axis=-1)
+    # QKVZ Reshaping and Splitting
+    # Per-K_head group dim: 2 * D_k + 2 * D_v * V_per_K
+    new_shape_qkvz = (
+        batch,
+        seq_len,
+        self.num_k_heads, # H_k
+        2 * self.head_k_dim + 2 * self.head_v_dim * self.v_heads_per_k_head,
+    )
+    # mixed_qkvz: (B, S, H_k, 2*D_k + 2*D_v*V_per_K)
+    mixed_qkvz = qkvz.reshape(new_shape_qkvz)
+
+    split_indices_qkvz = [
+        self.head_k_dim,  # D_k
+        2 * self.head_k_dim, # 2 * D_k
+        2 * self.head_k_dim + (self.v_heads_per_k_head * self.head_v_dim), # 2 * D_k + V_per_K * D_v
+    ]
+    # query: (B, S, H_k, D_k)
+    # key: (B, S, H_k, D_k)
+    # value_raw: (B, S, H_k, V_per_K * D_v)
+    # z_raw: (B, S, H_k, V_per_K * D_v)
+    query, key, value_raw, z_raw = jnp.split(mixed_qkvz, split_indices_qkvz, axis=3)
+
+    # value: (B, S, H_v, D_v)
+    value = value_raw.reshape(batch, seq_len, self.num_v_heads, self.head_v_dim)
+    # z: (B, S, H_v, D_v)
+    z = z_raw.reshape(batch, seq_len, self.num_v_heads, self.head_v_dim)
+
+    # BA Reshaping and Splitting
+    new_shape_ba = (
+        batch,
+        seq_len,
+        self.num_k_heads, # H_k
+        2 * self.v_heads_per_k_head,
+    )
+    # mixed_ba: (B, S, H_k, 2 * V_per_K)
+    mixed_ba = ba.reshape(new_shape_ba)
+
+    split_indices_ba = [self.v_heads_per_k_head]
+    # b_raw: (B, S, H_k, V_per_K)
+    # a_raw: (B, S, H_k, V_per_K)
+    b_raw, a_raw = jnp.split(mixed_ba, split_indices_ba, axis=3)
+
+    # b: (B, S, H_v)
+    b = b_raw.reshape(batch, seq_len, self.num_v_heads)
+    # a: (B, S, H_v)
+    a = a_raw.reshape(batch, seq_len, self.num_v_heads)
+
+    # Flatten head dimensions for concatenation before conv
+    # q: (B, S, K_dim)
+    q = query.reshape(batch, seq_len, -1)
+    # k: (B, S, K_dim)
+    k = key.reshape(batch, seq_len, -1)
+    # v: (B, S, V_dim)
+    v = value.reshape(batch, seq_len, -1)
 
     # =========================================================================
     # STEP B: 1D Convolution
     # =========================================================================
-    # qkv shape: (B, S, conv_dim)
+    # conv_dim = 2 * K_dim + V_dim
+    # qkv: (B, S, 2 * K_dim + V_dim)
     qkv = jnp.concatenate([q, k, v], axis=-1)
 
     # TODO(parambole): Implement caching logic for conv_state and recurrent_state
