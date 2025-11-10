@@ -548,6 +548,7 @@ def transformer_engine_context():
 
 
 def main(argv: Sequence[str]) -> None:
+  print(f"LOG: {argv = }\n")
   with transformer_engine_context():
     config, recorder, diagnostic_config = initialize(argv)
     run(config, recorder, diagnostic_config)
