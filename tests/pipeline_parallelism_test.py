@@ -69,13 +69,9 @@ class PipelineParallelismTest(unittest.TestCase):
     else:
       if issubclass(single_pipeline_stage_class, nnx_wrappers.ToLinen):
         rngs = nnx.Rngs(params=0)
-        single_pipeline_stage = single_pipeline_stage_class(
-            config=config, mesh=mesh, model_mode=model_mode, rngs=rngs
-        )
+        single_pipeline_stage = single_pipeline_stage_class(config=config, mesh=mesh, model_mode=model_mode, rngs=rngs)
       else:
-        single_pipeline_stage = single_pipeline_stage_class(
-            config=config, mesh=mesh, model_mode=model_mode
-        )
+        single_pipeline_stage = single_pipeline_stage_class(config=config, mesh=mesh, model_mode=model_mode)
 
     def get_inputs(batch_size, sequence, features):
       """Get random inputs, and random dummy targets
@@ -238,7 +234,7 @@ class PipelineParallelismTest(unittest.TestCase):
         capacity_factor=1,
         decoder_block="deepseek",
     )
-    self.assert_pipeline_same_output_and_grad(config, single_pipeline_stage_class=deepseek.DeepSeekMoELayer)
+    self.assert_pipeline_same_output_and_grad(config, single_pipeline_stage_class=deepseek.DeepSeekMoELayerPureLinen)
 
   @pytest.mark.tpu_only
   def test_circular_ag_once(self):
