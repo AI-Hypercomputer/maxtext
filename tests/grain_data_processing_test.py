@@ -33,6 +33,8 @@ from MaxText.input_pipeline import input_pipeline_interface
 from MaxText.globals import MAXTEXT_PKG_DIR, MAXTEXT_ASSETS_ROOT, MAXTEXT_REPO_ROOT
 from maxtext.tests.test_utils import get_test_config_path
 
+MAXTEXT_ASSETS_ROOT = os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "assets")
+
 
 class GrainArrayRecordProcessingTest(unittest.TestCase):
 

@@ -43,6 +43,7 @@ class TokenDroppingTest(unittest.TestCase):
 
   def setUp(self):
     super().setUp()
+    extra_args = {"ici_fsdp_parallelism": jax.device_count()} if is_decoupled() else {}
     self.cfg = pyconfig.initialize(
         [None, get_test_config_path()],
         run_name="token_dropping_test",
@@ -54,6 +55,7 @@ class TokenDroppingTest(unittest.TestCase):
         max_target_length=80,
         per_device_batch_size=1,
         capacity_factor=2,
+        **extra_args,
     )
     self.rngs = nnx.Rngs(params=0)
     devices_array = maxtext_utils.create_device_mesh(self.cfg)
@@ -196,6 +198,7 @@ class MlpBlockTest(unittest.TestCase):
         use_bias=True,
     )
 
+  @pytest.mark.external_serving
   def test_init(self):
     x = jnp.array([1.0, 2.0]).reshape((1, 1, 2))  # TODO(bug): need reshape due to error
     self.model.init({"params": self.rng, "dropout": self.rng}, x)

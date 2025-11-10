@@ -44,6 +44,7 @@ from MaxText.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR
 
 _QUERY_REGEX = ".*/query"
 _VALUE_REGEX = ".*/value"
+MAXTEXT_PKG_DIR = os.path.join("src", MAXTEXT_PKG_DIR)
 
 
 class QuantTestModule(nnx.Module):

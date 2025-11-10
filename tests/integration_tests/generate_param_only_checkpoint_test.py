@@ -120,6 +120,7 @@ def test_param_ckpt_generation_with_autoselected_attention(quantization, capsys)
   assert expected_output in captured.out
 
 
+@pytest.mark.external_serving
 @pytest.mark.integration_test
 @pytest.mark.gpu_only
 @pytest.mark.parametrize("quantization", [(""), ("int8")])
