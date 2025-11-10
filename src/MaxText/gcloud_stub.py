@@ -1,4 +1,4 @@
-# Copyright 2023–2025 Google LLC
+# Copyright 2025 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -494,7 +494,7 @@ def vertex_tensorboard_components():
 
 __all__.append("vertex_tensorboard_components")
 
-# ---------------- TensorBoardX (moved stub) -----------------
+# ---------------- TensorBoardX -----------------
 
 try:
   if not is_decoupled():  # Only attempt real import when not decoupled
