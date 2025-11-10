@@ -19,6 +19,7 @@
 # See github.com/google/maxtext/issues/20 for more
 
 from typing import Any, Sequence
+import contextlib
 import datetime
 import functools
 import os
@@ -37,10 +38,14 @@ import jax.numpy as jnp
 from flax import linen as nn
 from flax.linen import partitioning as nn_partitioning
 
-from cloud_tpu_diagnostics import diagnostic
-from cloud_tpu_diagnostics.configuration import debug_configuration
-from cloud_tpu_diagnostics.configuration import diagnostic_configuration
-from cloud_tpu_diagnostics.configuration import stack_trace_configuration
+from MaxText.gcloud_stub import cloud_diagnostics as _cloud_diag, is_decoupled
+
+_diag_modules = _cloud_diag()
+diagnostic, debug_configuration, diagnostic_configuration, stack_trace_configuration = _diag_modules
+
+from MaxText.gcloud_stub import vertex_tensorboard_modules
+
+VertexTensorboardManager, _vertex_tb_is_stub = vertex_tensorboard_modules()
 
 from MaxText import exceptions
 from MaxText import max_logging
@@ -69,7 +74,6 @@ from maxtext.common.goodput import (
     maybe_record_goodput,
 )
 from maxtext.common.metric_logger import MetricLogger, record_activation_metrics
-from maxtext.common.vertex_tensorboard import VertexTensorboardManager
 
 
 def get_first_step(state):
@@ -554,9 +558,22 @@ def initialize(argv: Sequence[str]) -> tuple[pyconfig.HyperParameters, Any, Any]
 
 
 def run(config, recorder, diagnostic_config):
-  """Run the job given hyperparameters and utilities"""
+  """Run the job given hyperparameters and utilities.
+
+  In decoupled mode (DECOUPLE_GCLOUD=TRUE) cloud diagnostics may be stubbed; if so, skip wrapping.
+  """
+  # Use nullcontext when diagnostics are stubbed or in decoupled mode
+  diagnostics_context = (
+      contextlib.nullcontext()
+      if is_decoupled() or getattr(diagnostic, "__class__", None).__name__ == "_StubDiag"
+      else diagnostic.diagnose(diagnostic_config)
+  )
+
+  if is_decoupled() or getattr(diagnostic, "__class__", None).__name__ == "_StubDiag":
+    max_logging.log("[DECOUPLED NO-OP] skipping cloud diagnostics wrapper.")
+
   with (
-      diagnostic.diagnose(diagnostic_config),
+      diagnostics_context,
       maybe_record_goodput(recorder, GoodputEvent.JOB),
       max_utils.maybe_get_transformer_engine_context(config),
       maybe_monitor_goodput(config),

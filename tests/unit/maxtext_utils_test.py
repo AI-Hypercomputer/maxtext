@@ -14,8 +14,8 @@
 
 """ Tests for the common MaxText utilities """
 
-from typing import Any
 from collections.abc import Callable
+from typing import Any
 import os.path
 import unittest
 
@@ -38,10 +38,12 @@ from MaxText import sharding
 from MaxText import pyconfig
 from MaxText.common_types import MODEL_MODE_TRAIN
 from MaxText.globals import MAXTEXT_PKG_DIR
+from MaxText.gcloud_stub import is_decoupled
 from MaxText.layers import models
 from MaxText.layers import quantizations
 from MaxText.sharding import assert_params_sufficiently_sharded, get_formatted_sharding_annotations
 from maxtext.inference import inference_utils
+from tests.utils.test_utils import get_test_config_path
 
 Transformer = models.transformer_as_linen
 
@@ -223,9 +225,7 @@ class MaxUtilsInitStateWithMultipleCollections(unittest.TestCase):
   """test class for multiple collection state in maxutils"""
 
   def setUp(self):
-    self.config = pyconfig.initialize(
-        [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")], enable_checkpointing=False
-    )
+    self.config = pyconfig.initialize([None, get_test_config_path()], enable_checkpointing=False)
     self.model = ModelWithMultipleCollections(self.config.max_target_length, nnx.Rngs(0))
     self.key = random.key(0)
     self.tx = optax.adam(learning_rate=0.001)
@@ -275,9 +275,9 @@ class MaxUtilsInitTransformerState(unittest.TestCase):
   """Tests initialization of transformer states in max_utils.py"""
 
   def setUp(self):
-    self.config = pyconfig.initialize(
-        [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")], enable_checkpointing=False
-    )
+    # Conditionally set ici_fsdp_parallelism to match device count in decoupled mode
+    extra_args = {"ici_fsdp_parallelism": jax.device_count()} if is_decoupled() else {}
+    self.config = pyconfig.initialize([None, get_test_config_path()], enable_checkpointing=False, **extra_args)
     devices_array = maxtext_utils.create_device_mesh(self.config)
     self.mesh = Mesh(devices_array, self.config.mesh_axes)
     quant = quantizations.configure_quantization(self.config)

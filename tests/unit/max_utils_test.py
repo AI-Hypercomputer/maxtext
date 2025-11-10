@@ -13,7 +13,6 @@
 # limitations under the License.
 
 """ Tests for the common Max Utils """
-import os
 import sys
 import unittest
 import time
@@ -29,8 +28,8 @@ import optax
 
 from MaxText import max_utils
 from MaxText import pyconfig
-from MaxText.globals import MAXTEXT_PKG_DIR
 from MaxText.train_utils import setup_train_loop
+from tests.utils.test_utils import get_test_config_path
 
 
 class MaxUtilsSummaryStats(unittest.TestCase):
@@ -119,7 +118,7 @@ class UnscanTest(unittest.TestCase):
         "model_name": "llama3.1-8b",
     } | kwargs
     config = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [sys.argv[0], get_test_config_path()],
         **init_kwargs,
     )
     return config
