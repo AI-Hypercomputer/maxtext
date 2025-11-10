@@ -19,22 +19,24 @@ import os.path
 import sys
 import unittest
 
+import pytest
+
+import jax
+from jax.sharding import Mesh
+import jax.numpy as jnp
+
+from flax.core import meta
 from flax import linen as nn
 from flax import nnx
-from flax.core import meta
-import jax
-import jax.numpy as jnp
-from jax.sharding import Mesh
+
 from MaxText import maxtext_utils
 from MaxText import pyconfig
 from MaxText.common_types import MODEL_MODE_TRAIN
-from MaxText.globals import MAXTEXT_ASSETS_ROOT, MAXTEXT_PKG_DIR
-from MaxText.layers import deepseek
-from MaxText.layers import nnx_wrappers
+from MaxText.globals import MAXTEXT_PKG_DIR, MAXTEXT_ASSETS_ROOT
 from MaxText.layers import pipeline
 from MaxText.layers import simple_layer
 from MaxText.train import main as train_main
-import pytest
+from MaxText.layers import deepseek
 
 
 def assert_same_output_and_grad(f1, f2, *inputs):
@@ -67,15 +69,7 @@ class PipelineParallelismTest(unittest.TestCase):
           config=config, mesh=mesh, model_mode=model_mode, rngs=rngs
       )
     else:
-      if issubclass(single_pipeline_stage_class, nnx_wrappers.ToLinen):
-        rngs = nnx.Rngs(params=0)
-        single_pipeline_stage = single_pipeline_stage_class(
-            config=config, mesh=mesh, model_mode=model_mode, rngs=rngs
-        )
-      else:
-        single_pipeline_stage = single_pipeline_stage_class(
-            config=config, mesh=mesh, model_mode=model_mode
-        )
+      single_pipeline_stage = single_pipeline_stage_class(config=config, mesh=mesh, model_mode=model_mode)
 
     def get_inputs(batch_size, sequence, features):
       """Get random inputs, and random dummy targets
