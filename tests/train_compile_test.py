@@ -29,6 +29,7 @@ from MaxText.train_compile import main as train_compile_main
 from MaxText.globals import MAXTEXT_PKG_DIR
 from maxtext.tests.test_utils import get_test_config_path
 
+pytestmark = [pytest.mark.tpu_only]
 
 class TrainCompile(unittest.TestCase):
   """Tests for the Ahead of Time Compilation functionality, train_compile.py"""
