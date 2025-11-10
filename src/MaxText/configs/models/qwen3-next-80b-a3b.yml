@@ -44,7 +44,7 @@ gdn_num_value_heads: 32
 gdn_chunk_size: 64
 
 # RoPE Settings
-rope_max_timescale: 10000
+rope_max_timescale: 10000000
 partial_rotary_factor: 0.25
 
 # General Model Settings
