@@ -25,7 +25,7 @@ from MaxText.train import main as train_main
 from MaxText.decode import main as decode_main
 from MaxText.generate_param_only_checkpoint import main as generate_param_only_ckpt_main
 from tests.integration_tests.checkpointing_test import get_checkpointing_command
-
+import pathwaysutils
 
 def get_model_params(quantization):
   return [
@@ -41,6 +41,7 @@ def get_model_params(quantization):
 
 def run_e2e_test_flow(hardware, model_config, attention_type="autoselected", state_path=None):
   """Helper function to run training, generate parameter-only checkpoint, and decode."""
+  pathwaysutils.initialize()
   run_date = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
   test_config = [
       None,
@@ -88,6 +89,7 @@ def run_e2e_test_flow(hardware, model_config, attention_type="autoselected", sta
 @pytest.mark.parametrize("quantization", [(""), ("int8")])
 def test_param_ckpt_generation_with_autoselected_attention(quantization, capsys):
   """Tests the parameter-only checkpoint generation and decode flow on TPU with autoselected attention."""
+  pathwaysutils.initialize()
   model_config = get_model_params(quantization)
   run_e2e_test_flow(hardware="tpu", attention_type="autoselected", model_config=model_config)
   captured = capsys.readouterr()
@@ -113,6 +115,7 @@ def test_param_ckpt_generation_with_dot_product(quantization, capsys):
 @pytest.mark.scheduled_only
 def test_param_ckpt_generation_with_pre_generated_ckpt(capsys):
   """Tests the parameter-only checkpoint generation and decode flow with a pre-generated Gemma-2b model checkpoint."""
+  pathwaysutils.initialize()
   model_config = [
       "model_name=gemma-2b",
       f"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizer.gemma')}",

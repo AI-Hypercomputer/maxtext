@@ -32,7 +32,7 @@ import pytest
 from MaxText.train import main as train_main
 from MaxText.globals import MAXTEXT_REPO_ROOT
 from tests.integration_tests.checkpointing_test import get_checkpointing_command
-
+import pathwaysutils
 
 def check_start_step(metrics_file, start_step_target):
   with open(metrics_file, "rt", encoding="utf8") as metrics:
@@ -44,6 +44,7 @@ def check_start_step(metrics_file, start_step_target):
 def run_checkpoint_compatibility(hardware, attention_type):
   """Tests checkpoint compatibility."""
 
+  pathwaysutils.initialize()
   run_date = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
   grain_command = [
       "grain_worker_count=0",
@@ -83,6 +84,7 @@ def run_checkpoint_compatibility(hardware, attention_type):
 @pytest.mark.integration_test
 @pytest.mark.tpu_only
 def test_autoselected_attention():
+  pathwaysutils.initialize()
   run_checkpoint_compatibility("tpu", "autoselected")
 
 
