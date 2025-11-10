@@ -16,20 +16,32 @@
 
 import os
 import unittest
+import pytest
 from MaxText import pyconfig
 from MaxText.globals import MAXTEXT_PKG_DIR
+from MaxText.gcloud_stub import is_decoupled
+from maxtext.tests.test_utils import get_test_config_path
 from unittest import mock
 from MaxText.utils.goodput_utils import create_goodput_recorder, maybe_monitor_goodput, maybe_record_goodput, GoodputEvent
 
-
+pytestmark = [pytest.mark.external_training]
 class GoodputUtilsTest(unittest.TestCase):
   """Tests for Goodput monitoring and recording."""
 
   def setUp(self):
+    decoupled = is_decoupled()
+    if decoupled:
+      root = self._aot_logs_root  # set in setUp
+      base_output_directory = root
+    else:
+      root = os.path.join(tempfile.gettempdir(), "compile_test_xla_dump")
+      os.makedirs(root, exist_ok=True)
+      base_output_directory = "gs://runner-maxtext-logs"
+
     super().setUp()
     self.config = pyconfig.initialize(
-        [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
-        base_output_directory="gs://runner-maxtext-logs",
+        [None, get_test_config_path()],
+        f"base_output_directory={base_output_directory}",
         run_name="runner_test",
         enable_checkpointing=False,
         monitor_goodput=True,

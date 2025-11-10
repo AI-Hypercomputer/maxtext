@@ -33,8 +33,10 @@ from MaxText import pyconfig
 from MaxText import multimodal_utils
 from MaxText.layers import models
 from MaxText.globals import MAXTEXT_PKG_DIR, MAXTEXT_TEST_ASSETS_ROOT, MAXTEXT_ASSETS_ROOT
+from maxtext.tests.test_utils import get_test_config_path
 from MaxText import maxengine
 
+pytestmark = [pytest.mark.external_serving]  # uses pre-generated multimodal checkpoint
 
 # 4b with vit
 DEFAULT_LOAD_PARAMETERS_PATH = (
@@ -47,7 +49,7 @@ class VisionEncoderEmbeddingTest(unittest.TestCase):
   CONFIGS = {
       "gemma3-4b": [  # tests decode with multimodal gemma-4b
           None,
-          os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+          get_test_config_path(),
           "model_name=gemma3-4b",
           rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizer.gemma3')}",
           "use_multimodal=True",

@@ -23,6 +23,7 @@ from MaxText import pyconfig
 from MaxText.globals import MAXTEXT_PKG_DIR, MAXTEXT_ASSETS_ROOT
 from MaxText.inference_microbenchmark import run_benchmarks
 
+pytestmark = [pytest.mark.external_serving]
 
 class Inference_Microbenchmark(unittest.TestCase):
   """integration test for inference microbenchmark"""

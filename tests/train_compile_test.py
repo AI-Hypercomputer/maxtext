@@ -27,6 +27,7 @@ import pytest
 
 from MaxText.train_compile import main as train_compile_main
 from MaxText.globals import MAXTEXT_PKG_DIR
+from maxtext.tests.test_utils import get_test_config_path
 
 
 class TrainCompile(unittest.TestCase):
@@ -39,7 +40,7 @@ class TrainCompile(unittest.TestCase):
     train_compile_main(
         (
             "",
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+            get_test_config_path(),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v4-8",
             "compile_topology_num_slices=1",
@@ -56,7 +57,7 @@ class TrainCompile(unittest.TestCase):
     train_compile_main(
         (
             "",
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+            get_test_config_path(),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5e-16",
             "compile_topology_num_slices=1",
@@ -75,7 +76,7 @@ class TrainCompile(unittest.TestCase):
     train_compile_main(
         (
             "",
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+            get_test_config_path(),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5e-256",
             "compile_topology_num_slices=1",
@@ -97,7 +98,7 @@ class TrainCompile(unittest.TestCase):
     train_compile_main(
         (
             "",
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+            get_test_config_path(),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5p-256",
             "compile_topology_num_slices=1",
@@ -114,7 +115,7 @@ class TrainCompile(unittest.TestCase):
     train_compile_main(
         (
             "",
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+            get_test_config_path(),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5p-8",
             "compile_topology_num_slices=2",
@@ -133,7 +134,7 @@ class TrainCompile(unittest.TestCase):
     train_compile_main(
         (
             "",
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+            get_test_config_path(),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v6e-16",
             "compile_topology_num_slices=1",
@@ -150,7 +151,7 @@ class TrainCompile(unittest.TestCase):
     train_compile_main(
         (
             "",
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+            get_test_config_path(),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5e-256",
             "use_iota_embed=true",
@@ -169,7 +170,7 @@ class TrainCompile(unittest.TestCase):
     train_compile_main(
         (
             "",
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+            get_test_config_path(),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5e-256",
             "compile_topology_num_slices=1",
@@ -192,7 +193,7 @@ class TrainCompile(unittest.TestCase):
     train_compile_main(
         (
             "",
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+            get_test_config_path(),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5e-256",
             "compile_topology_num_slices=1",
@@ -215,7 +216,7 @@ class TrainCompile(unittest.TestCase):
     train_compile_main(
         (
             "",
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+            get_test_config_path(),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5e-256",
             "compile_topology_num_slices=1",
@@ -238,7 +239,7 @@ class TrainCompile(unittest.TestCase):
     train_compile_main(
         (
             "",
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+            get_test_config_path(),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5e-256",
             "compile_topology_num_slices=1",
@@ -261,7 +262,7 @@ class TrainCompile(unittest.TestCase):
     train_compile_main(
         (
             "",
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+            get_test_config_path(),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v6e-256",
             "use_iota_embed=true",
@@ -284,7 +285,7 @@ class TrainCompile(unittest.TestCase):
     train_compile_main(
         (
             "",
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+            get_test_config_path(),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v6e-256",
             "compile_topology_num_slices=1",
@@ -303,7 +304,7 @@ class TrainCompile(unittest.TestCase):
     train_compile_main(
         (
             "",
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+            get_test_config_path(),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v6e-256",
             "use_iota_embed=true",
@@ -328,7 +329,7 @@ class TrainCompile(unittest.TestCase):
     train_compile_main(
         (
             "",
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+            get_test_config_path(),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v6e-256",
             "use_iota_embed=true",
@@ -351,7 +352,7 @@ class TrainCompile(unittest.TestCase):
     train_compile_main(
         (
             "",
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+            get_test_config_path(),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5p-128",
             "use_iota_embed=true",
@@ -375,7 +376,7 @@ class TrainCompile(unittest.TestCase):
     train_compile_main(
         (
             "",
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+            get_test_config_path(),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v6e-256",
             "use_iota_embed=true",
@@ -397,7 +398,7 @@ class TrainCompile(unittest.TestCase):
     train_compile_main(
         (
             "",
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+            get_test_config_path(),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v6e-256",
             "use_iota_embed=true",
@@ -419,7 +420,7 @@ class TrainCompile(unittest.TestCase):
     train_compile_main(
         (
             "",
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+            get_test_config_path(),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v6e-256",
             "use_iota_embed=true",
@@ -442,7 +443,7 @@ class TrainCompile(unittest.TestCase):
     train_compile_main(
         (
             "",
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+            get_test_config_path(),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5p-128",
             "use_iota_embed=true",
@@ -465,7 +466,7 @@ class TrainCompile(unittest.TestCase):
     train_compile_main(
         (
             "",
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+            get_test_config_path(),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v6e-256",
             "use_iota_embed=true",
@@ -489,7 +490,7 @@ class TrainCompile(unittest.TestCase):
     train_compile_main(
         (
             "",
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+            get_test_config_path(),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5p-256",
             "use_iota_embed=true",
@@ -514,7 +515,7 @@ class TrainCompile(unittest.TestCase):
     train_compile_main(
         (
             "",
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+            get_test_config_path(),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5p-256",
             "use_iota_embed=true",
@@ -537,7 +538,7 @@ class TrainCompile(unittest.TestCase):
     train_compile_main(
         (
             "",
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+            get_test_config_path(),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5p-256",
             "use_iota_embed=true",
@@ -561,7 +562,7 @@ class TrainCompile(unittest.TestCase):
     train_compile_main(
         (
             "",
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+            get_test_config_path(),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5p-256",
             "use_iota_embed=true",
@@ -585,7 +586,7 @@ class TrainCompile(unittest.TestCase):
     train_compile_main(
         (
             "",
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+            get_test_config_path(),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v6e-256",
             "compile_topology_num_slices=8",
@@ -608,7 +609,7 @@ class TrainCompile(unittest.TestCase):
     train_compile_main(
         (
             "",
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+            get_test_config_path(),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v6e-256",
             "compile_topology_num_slices=8",
@@ -628,7 +629,7 @@ class TrainCompile(unittest.TestCase):
     train_compile_main(
         (
             "",
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+            get_test_config_path(),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5p-256",
             "compile_topology_num_slices=1",
@@ -649,7 +650,7 @@ class TrainCompile(unittest.TestCase):
     train_compile_main(
         (
             "",
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+            get_test_config_path(),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5p-64",
             "compile_topology_num_slices=1",
@@ -671,7 +672,7 @@ class TrainCompile(unittest.TestCase):
     train_compile_main(
         (
             "",
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+            get_test_config_path(),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5p-64",
             "compile_topology_num_slices=1",
@@ -693,7 +694,7 @@ class TrainCompile(unittest.TestCase):
     train_compile_main(
         (
             "",
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+            get_test_config_path(),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5p-256",
             "compile_topology_num_slices=1",
@@ -709,7 +710,7 @@ class TrainCompile(unittest.TestCase):
     train_compile_main(
         (
             "",
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+            get_test_config_path(),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5p-8",
             "compile_topology_num_slices=1",

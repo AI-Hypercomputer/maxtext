@@ -22,6 +22,7 @@ import jax
 import numpy as np
 import os
 import unittest
+import pytest
 from unittest.mock import MagicMock, patch
 from jax.sharding import Mesh
 
@@ -31,6 +32,9 @@ from MaxText.maxtext_utils import create_device_mesh
 from MaxText.globals import MAXTEXT_PKG_DIR
 from MaxText.sft import hooks
 
+# Requires sft.yml file referencing HF dataset path (`hf_path` in sft.yml) which isn't
+# available in decoupled mode.
+pytestmark = [pytest.mark.external_training]
 
 class SFTHooksTest(unittest.TestCase):
 

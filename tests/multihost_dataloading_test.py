@@ -31,22 +31,34 @@ import tensorflow as tf
 from MaxText import pyconfig
 from MaxText import multihost_dataloading
 from MaxText.globals import MAXTEXT_PKG_DIR
-
+from maxtext.tests.test_utils import get_test_config_path
+from MaxText.gcloud_stub import is_decoupled
 
 class MultihostDataloadingTest(unittest.TestCase):
 
   def setUp(self):
     super().setUp()
+    decoupled = is_decoupled()
+    base_output_directory = (
+        os.path.join(MAXTEXT_PKG_DIR, "..", "datasets", "gcloud_decoupled_test_logs")
+        if decoupled
+        else "gs://max-experiments/"
+    )
+    dataset_path = (
+        os.path.join(MAXTEXT_PKG_DIR, "..", "datasets", "c4_en_dataset_minimal")
+        if decoupled
+        else "gs://maxtext-dataset/"
+    )
     batch_size = 4
     config = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [sys.argv[0], get_test_config_path()],
         per_device_batch_size=1,
         run_name="test",
         mesh_axes=["data"],
         logical_axis_rules=[["batch", "data"]],
         data_sharding=["data"],
-        base_output_directory="gs://max-experiments/",
-        dataset_path="gs://maxtext-dataset/",
+        f"base_output_directory={base_output_directory}",
+        f"dataset_path={dataset_path}",
         enable_checkpointing=False,
     )
     global_data_shape = PartitionSpec(batch_size, config.max_target_length)

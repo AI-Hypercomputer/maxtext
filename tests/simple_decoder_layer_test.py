@@ -20,6 +20,7 @@ import pytest
 
 from MaxText.train import main as train_main
 from MaxText.globals import MAXTEXT_PKG_DIR, MAXTEXT_ASSETS_ROOT
+from maxtext.tests.test_utils import get_test_config_path
 
 
 class SimpleDecoderLayerTest(unittest.TestCase):
@@ -29,7 +30,7 @@ class SimpleDecoderLayerTest(unittest.TestCase):
     train_main(
         [
             None,
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+            get_test_config_path(),
             "base_output_directory=gs://runner-maxtext-logs",
             "run_name=runner_simple_decoder_layer_test",
             "dataset_path=gs://maxtext-dataset",
@@ -46,7 +47,7 @@ class SimpleDecoderLayerTest(unittest.TestCase):
     train_main(
         [
             None,
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+            get_test_config_path(),
             "base_output_directory=gs://runner-maxtext-logs",
             "run_name=runner_simple_decoder_layer_test",
             "dataset_path=gs://maxtext-dataset",

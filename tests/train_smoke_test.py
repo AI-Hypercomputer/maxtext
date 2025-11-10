@@ -30,7 +30,7 @@ class Train(unittest.TestCase):
     train_main(
         [
             None,
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+            get_test_config_path(),
             # pylint: disable=f-string-without-interpolation
             f"base_output_directory=gs://runner-maxtext-logs",
             "run_name=runner_test",
@@ -87,7 +87,7 @@ class Train(unittest.TestCase):
     train_main(
         [
             None,
-            os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+            get_test_config_path(),
             # pylint: disable=f-string-without-interpolation
             f"base_output_directory=gs://runner-maxtext-logs",
             "run_name=runner_test",

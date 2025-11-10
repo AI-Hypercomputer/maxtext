@@ -119,7 +119,7 @@ class UnscanTest(unittest.TestCase):
         "model_name": "llama3.1-8b",
     } | kwargs
     config = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [sys.argv[0], get_test_config_path()],
         **init_kwargs,
     )
     return config

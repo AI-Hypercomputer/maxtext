@@ -34,6 +34,7 @@ from jax.sharding import Mesh
 
 from MaxText import maxtext_utils, pyconfig
 from MaxText.globals import MAXTEXT_PKG_DIR
+from maxtext.tests.test_utils import get_test_config_path
 from MaxText.layers.attention_op import AttentionOp
 
 # pylint: disable=missing-function-docstring,protected-access
@@ -236,7 +237,7 @@ class MobaTest(unittest.TestCase):
   ):
     """Computes results from the JAX implementation."""
     config = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [sys.argv[0], get_test_config_path()],
         run_name="moba_test",
         enable_checkpointing=False,
         model_name="default",
@@ -379,7 +380,7 @@ class MobaTest(unittest.TestCase):
 
         # Get JAX mask
         jax_config = pyconfig.initialize(
-            [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+            [sys.argv[0], get_test_config_path()],
             run_name="moba_test_mask",
             enable_checkpointing=False,
             model_name="default",

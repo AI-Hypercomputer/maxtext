@@ -28,8 +28,10 @@ from datetime import datetime
 import json
 from math import isclose
 import os.path
+from MaxText.gcloud_stub import is_decoupled
 import pytest
 from MaxText.globals import MAXTEXT_PKG_DIR
+from maxtext.tests.test_utils import get_test_config_path
 from MaxText.train import main as train_main
 
 
@@ -48,6 +50,11 @@ def get_checkpointing_command(run_date, hardware, steps, metrics_file, attention
   Returns:
     A list of strings representing the command line arguments.
   """
+  base_output_directory = (
+      os.path.join(MAXTEXT_PKG_DIR, "..", "datasets", "gcloud_decoupled_test_logs")
+      if is_decoupled()
+      else "gs://runner-maxtext-logs"
+  )
   model_params = [
       "base_emb_dim=384",
       "base_num_query_heads=8",
@@ -65,7 +72,7 @@ def get_checkpointing_command(run_date, hardware, steps, metrics_file, attention
   return (
       [
           None,
-          os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+          get_test_config_path(),
           f"hardware={hardware}",
           f"run_name=runner_{run_date}",
           f"steps={steps}",
@@ -73,7 +80,7 @@ def get_checkpointing_command(run_date, hardware, steps, metrics_file, attention
           "per_device_batch_size=1",
           f"metrics_file={metrics_file}",
           "checkpoint_period=3",
-          "base_output_directory=gs://runner-maxtext-logs",
+          "base_output_directory={base_output_directory}",
           f"dataset_path={dataset_path}",
           f"dataset_type={dataset_type}",
           "async_checkpointing=False",

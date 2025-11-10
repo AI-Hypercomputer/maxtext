@@ -27,6 +27,7 @@ from jax.sharding import Mesh
 from jax.experimental import mesh_utils
 
 from MaxText.globals import MAXTEXT_PKG_DIR
+from maxtext.tests.test_utils import get_test_config_path
 from MaxText.common_types import MODEL_MODE_TRAIN, AttentionType
 from MaxText import pyconfig
 from MaxText import maxtext_utils
@@ -615,7 +616,7 @@ class Llama4VisionAttentionTest(unittest.TestCase):
   def setUp(self):
     super().setUp()
     self.cfg = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [sys.argv[0], get_test_config_path()],
         **self.config_arguments,
     )
     self.rng = jax.random.PRNGKey(0)
@@ -894,7 +895,7 @@ class Llama4VisionEncoderTest(unittest.TestCase):
   def setUp(self):
     super().setUp()
     self.cfg = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        [sys.argv[0], get_test_config_path()],
         **self.config_arguments,
     )
     self.rng = jax.random.PRNGKey(0)
