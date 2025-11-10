@@ -179,8 +179,8 @@ jobs:
           gcloud auth configure-docker us-docker.pkg.dev --quiet
     - name: Delete the tpu image
       run: gcloud container images delete "gcr.io/tpu-prod-env-multipod/maxtext_${{ github.run_id }}:tpu" --force-delete-tags --quiet
-    - name: Delete the gpu image
-      run: gcloud container images delete "gcr.io/tpu-prod-env-multipod/maxtext_${{ github.run_id }}:gpu" --force-delete-tags --quiet
+    # - name: Delete the gpu image
+    #   run: gcloud container images delete "gcr.io/tpu-prod-env-multipod/maxtext_${{ github.run_id }}:gpu" --force-delete-tags --quiet
 
   notify_failure:
     name: Notify failed build # creates an issue or modifies last open existing issue for failed build

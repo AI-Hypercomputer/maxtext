@@ -31,7 +31,6 @@ import os.path
 import pytest
 from MaxText.globals import MAXTEXT_PKG_DIR
 from MaxText.train import main as train_main
-import pathwaysutils
 
 
 def get_checkpointing_command(run_date, hardware, steps, metrics_file, attention_type, dataset_type, dataset_path):
@@ -58,6 +57,7 @@ def get_checkpointing_command(run_date, hardware, steps, metrics_file, attention
       f"dataset_type={dataset_type}",
       "async_checkpointing=False",
       f"attention={attention_type}",
+      "enable_single_controller=True",
   ] + model_params
 
 
@@ -81,7 +81,6 @@ def check_loss(metrics_file, target):
 
 def run_checkpointing(hardware, attention_type):
   """Tests grain checkpoint determinism."""
-  pathwaysutils.initialize()
   run_date = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
   grain_command = [
       "grain_worker_count=0",
@@ -131,7 +130,6 @@ def run_checkpointing(hardware, attention_type):
 @pytest.mark.integration_test
 @pytest.mark.tpu_only
 def test_autoselected_attention():
-  pathwaysutils.initialize()
   run_checkpointing("tpu", "autoselected")
 
 

@@ -681,6 +681,8 @@ class _HyperParameters:
     # We initialize the jax distributed system here because it must be done before device backend is initialized.
     if raw_keys["jax_debug_log_modules"]:
       jax.config.update("jax_debug_log_modules", raw_keys["jax_debug_log_modules"])
+    
+    print(f"LOG: {raw_keys = }\n")
     max_utils.maybe_initialize_jax_distributed_system(raw_keys)
 
     if raw_keys["jax_cache_dir"]:
