@@ -16,7 +16,7 @@
 
 import re
 
-import maxtext.src.maxtext.integration.tunix.weight_mapping as weight_mapping  # pylint: disable=consider-using-from-import
+import MaxText.integration.tunix.weight_mapping as weight_mapping  # pylint: disable=consider-using-from-import
 from MaxText.utils.ckpt_conversion.utils.param_mapping import PARAM_MAPPING
 from MaxText.utils.ckpt_conversion.utils.param_mapping import VLLM_HOOK_FNS
 

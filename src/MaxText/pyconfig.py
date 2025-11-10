@@ -1260,7 +1260,7 @@ def validate_optimizer_sharding_over_data(raw_keys):
   zero1_supported_opt_types = ("adamw", "adam_pax")
   if raw_keys["opt_type"] not in zero1_supported_opt_types:
     raise ValueError(
-        f"Optimizer type {raw_keys["opt_type"]} is not supported for optimizer sharding.\n"
+        f"Optimizer type {raw_keys['opt_type']} is not supported for optimizer sharding.\n"
         f"Please use an optimizer from this list: {zero1_supported_opt_types}."
     )
 
