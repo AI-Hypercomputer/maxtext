@@ -220,6 +220,10 @@ class PipelineParallelismTest(unittest.TestCase):
   @pytest.mark.tpu_only
   def test_circular_deepseek_megablox_same_output_and_grad(self):
     # 4 stages, 8 layers (2 repeats, 1 layer per stage), 8 microbatches
+    import jax
+    import jax.numpy as jnp
+    rngs = {'params': key}
+
     config = pyconfig.initialize(
         [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
         enable_checkpointing=False,
@@ -238,7 +242,7 @@ class PipelineParallelismTest(unittest.TestCase):
         capacity_factor=1,
         decoder_block="deepseek",
     )
-    self.assert_pipeline_same_output_and_grad(config, single_pipeline_stage_class=deepseek.DeepSeekMoELayer)
+    self.assert_pipeline_same_output_and_grad(config, single_pipeline_stage_class=deepseek.DeepSeekMoELayer, module_kwargs={'rngs': rngs})
 
   @pytest.mark.tpu_only
   def test_circular_ag_once(self):

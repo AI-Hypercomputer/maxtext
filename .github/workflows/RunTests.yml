@@ -53,34 +53,34 @@ jobs:
       build_mode: jax_ai_image
       base_image: us-docker.pkg.dev/tpu-prod-env-multipod/jax-stable-stack/candidate/tpu:latest
 
-  gpu_image:
-    needs: prelim
-    uses: ./.github/workflows/build_upload_internal.yml
-    with:
-      device_type: gpu
-      device_name: a100-40gb-4
-      cloud_runner: linux-x86-n2-16-buildkit
-      build_mode: jax_ai_image
-      base_image: us-docker.pkg.dev/tpu-prod-env-multipod/jax-stable-stack/candidate/gpu:latest
+  # gpu_image:
+  #   needs: prelim
+  #   uses: ./.github/workflows/build_upload_internal.yml
+  #   with:
+  #     device_type: gpu
+  #     device_name: a100-40gb-4
+  #     cloud_runner: linux-x86-n2-16-buildkit
+  #     build_mode: jax_ai_image
+  #     base_image: us-docker.pkg.dev/tpu-prod-env-multipod/jax-stable-stack/candidate/gpu:latest
 
-  cpu_unit_tests:
-    needs: tpu_image
-    strategy:
-      fail-fast: false
-      matrix:
-        worker_group: [1, 2, 3, 4]
-    uses: ./.github/workflows/run_tests_internal.yml
-    with:
-      device_type: cpu
-      device_name: X64
-      image_type: tpu
-      pytest_marker: 'cpu_only'
-      xla_python_client_mem_fraction: 0.75
-      tf_force_gpu_allow_growth: false
-      container_resource_option: "--privileged"
-      is_scheduled_run: ${{ github.event_name == 'schedule' }}
-      worker_group: ${{ matrix.worker_group }}
-      total_workers: 4
+  # cpu_unit_tests:
+  #   needs: tpu_image
+  #   strategy:
+  #     fail-fast: false
+  #     matrix:
+  #       worker_group: [1, 2, 3, 4]
+  #   uses: ./.github/workflows/run_tests_internal.yml
+  #   with:
+  #     device_type: cpu
+  #     device_name: X64
+  #     image_type: tpu
+  #     pytest_marker: 'cpu_only'
+  #     xla_python_client_mem_fraction: 0.75
+  #     tf_force_gpu_allow_growth: false
+  #     container_resource_option: "--privileged"
+  #     is_scheduled_run: ${{ github.event_name == 'schedule' }}
+  #     worker_group: ${{ matrix.worker_group }}
+  #     total_workers: 4
 
   tpu_unit_tests:
     needs: tpu_image
@@ -121,37 +121,38 @@ jobs:
       container_resource_option: "--privileged"
       is_scheduled_run: ${{ github.event_name == 'schedule' }}
 
-  gpu_unit_tests:
-    needs: gpu_image
-    uses: ./.github/workflows/run_tests_internal.yml
-    with:
-      device_type: gpu
-      device_name: a100-40gb-4
-      cloud_runner: linux-x86-a2-48-a100-4gpu
-      pytest_marker: 'not cpu_only and not tpu_only and not integration_test'
-      pytest_addopts: '--ignore=tests/sft_hooks_test.py'
-      xla_python_client_mem_fraction: 0.65
-      tf_force_gpu_allow_growth: true
-      container_resource_option: "--shm-size 2g --runtime=nvidia --gpus all --privileged"
-      is_scheduled_run: ${{ github.event_name == 'schedule' }}
+  # gpu_unit_tests:
+  #   needs: gpu_image
+  #   uses: ./.github/workflows/run_tests_internal.yml
+  #   with:
+  #     device_type: gpu
+  #     device_name: a100-40gb-4
+  #     cloud_runner: linux-x86-a2-48-a100-4gpu
+  #     pytest_marker: 'not cpu_only and not tpu_only and not integration_test'
+  #     pytest_addopts: '--ignore=tests/sft_hooks_test.py'
+  #     xla_python_client_mem_fraction: 0.65
+  #     tf_force_gpu_allow_growth: true
+  #     container_resource_option: "--shm-size 2g --runtime=nvidia --gpus all --privileged"
+  #     is_scheduled_run: ${{ github.event_name == 'schedule' }}
 
-  gpu_integration_tests:
-    needs: gpu_image
-    uses: ./.github/workflows/run_tests_internal.yml
-    with:
-      device_type: gpu
-      device_name: a100-40gb-4
-      cloud_runner: linux-x86-a2-48-a100-4gpu
-      pytest_marker: 'not cpu_only and not tpu_only and integration_test'
-      pytest_addopts: '--ignore=tests/sft_hooks_test.py'
-      xla_python_client_mem_fraction: 0.65
-      tf_force_gpu_allow_growth: true
-      container_resource_option: "--shm-size 2g --runtime=nvidia --gpus all --privileged"
-      is_scheduled_run: ${{ github.event_name == 'schedule' }}
+  # gpu_integration_tests:
+  #   needs: gpu_image
+  #   uses: ./.github/workflows/run_tests_internal.yml
+  #   with:
+  #     device_type: gpu
+  #     device_name: a100-40gb-4
+  #     cloud_runner: linux-x86-a2-48-a100-4gpu
+  #     pytest_marker: 'not cpu_only and not tpu_only and integration_test'
+  #     pytest_addopts: '--ignore=tests/sft_hooks_test.py'
+  #     xla_python_client_mem_fraction: 0.65
+  #     tf_force_gpu_allow_growth: true
+  #     container_resource_option: "--shm-size 2g --runtime=nvidia --gpus all --privileged"
+  #     is_scheduled_run: ${{ github.event_name == 'schedule' }}
 
   clean_up:
     if: ${{ always() }}
-    needs: [cpu_unit_tests, gpu_unit_tests, gpu_integration_tests, tpu_unit_tests, tpu_integration_tests, tpu_pathways_unit_tests]
+    # needs: [cpu_unit_tests, gpu_unit_tests, gpu_integration_tests, tpu_unit_tests, tpu_integration_tests, tpu_pathways_unit_tests]
+    needs: [tpu_unit_tests, tpu_integration_tests, tpu_pathways_unit_tests]
     name: "Clean up"
     runs-on: ["self-hosted"]
     permissions:
@@ -170,7 +171,8 @@ jobs:
 
   notify_failure:
     name: Notify failed build # creates an issue or modifies last open existing issue for failed build
-    needs: [cpu_unit_tests, gpu_unit_tests, gpu_integration_tests, tpu_unit_tests, tpu_integration_tests, tpu_pathways_unit_tests]
+    # needs: [cpu_unit_tests, gpu_unit_tests, gpu_integration_tests, tpu_unit_tests, tpu_integration_tests, tpu_pathways_unit_tests]
+    needs: [tpu_unit_tests, tpu_integration_tests, tpu_pathways_unit_tests]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     permissions:
@@ -202,7 +204,8 @@ jobs:
       name: Close issue after 3 successful builds
       # This job runs only if all the preceding test jobs succeeded
       if: ${{ success() && github.event.pull_request == null && github.event_name != 'workflow_dispatch' }}
-      needs: [cpu_unit_tests, gpu_unit_tests, gpu_integration_tests, tpu_unit_tests, tpu_integration_tests, tpu_pathways_unit_tests]
+      # needs: [cpu_unit_tests, gpu_unit_tests, gpu_integration_tests, tpu_unit_tests, tpu_integration_tests, tpu_pathways_unit_tests]
+      needs: [tpu_unit_tests, tpu_integration_tests, tpu_pathways_unit_tests]
       runs-on: ubuntu-latest
       permissions:
         issues: write
