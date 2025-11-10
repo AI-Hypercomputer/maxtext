@@ -139,24 +139,26 @@ For interactive GRPO training in Google Colab or Jupyter:
 
 #### GRPO Python Script Usage - local runs
 
+Note: pass overrides as `key=value` after the YAML path (do not use `--flags`).
+
 ```bash
 # Llama3.1-8B-Instruct
 python3 -m src.MaxText.rl.train_rl src/MaxText/configs/rl.yml \
-  --model_name=llama3.1-8b \
-  --tokenizer_path=meta-llama/Llama-3.1-8B-Instruct \
-  --load_parameters_path=gs://path/to/checkpoint/0/items \
-  --run_name=$WORKLOAD \
-  --base_output_directory=$OUTPUT_PATH \
-  --hf_access_token=$HF_TOKEN
+  model_name=llama3.1-8b \
+  tokenizer_path=meta-llama/Llama-3.1-8B-Instruct \
+  load_parameters_path=gs://path/to/checkpoint/0/items \
+  run_name=$WORKLOAD \
+  base_output_directory=$OUTPUT_PATH \
+  hf_access_token=$HF_TOKEN
 
 # Qwen2.5-7B
 python3 -m src.MaxText.rl.train_rl src/MaxText/configs/rl.yml \
-  --model_name=qwen2.5-7b \
-  --tokenizer_path=Qwen/Qwen2.5-7B-Instruct \
-  --load_parameters_path=gs://path/to/checkpoint \
-  --run_name=$WORKLOAD \
-  --base_output_directory=$OUTPUT_PATH \
-  --hf_access_token=$HF_TOKEN
+  model_name=qwen2.5-7b \
+  tokenizer_path=Qwen/Qwen2.5-7B-Instruct \
+  load_parameters_path=gs://path/to/checkpoint \
+  run_name=$WORKLOAD \
+  base_output_directory=$OUTPUT_PATH \
+  hf_access_token=$HF_TOKEN
 ```
 #### GRPO Python Script Usage - cluster runs
 
