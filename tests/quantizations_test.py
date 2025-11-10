@@ -34,6 +34,7 @@ from aqt.jax.v2.flax import aqt_flax
 
 from MaxText.globals import MAXTEXT_PKG_DIR
 from maxtext.tests.test_utils import get_test_config_path
+from MaxText.gcloud_stub import is_decoupled
 from MaxText import pyconfig
 from MaxText.layers import nnx_wrappers, quantizations
 from MaxText import maxtext_utils
@@ -299,6 +300,8 @@ class QuantTest(unittest.TestCase):
 
   def init_pyconfig(self, **kwargs):
     """Initialize MaxText pyconfig."""
+    # Conditionally set ici_fsdp_parallelism to match device count in decoupled mode
+    extra_args = {"ici_fsdp_parallelism": jax.device_count()} if is_decoupled() else {}
     init_kwargs = {
         "run_name": "test",
         "dataset_type": "synthetic",
@@ -313,7 +316,7 @@ class QuantTest(unittest.TestCase):
         "base_num_kv_heads": 8,
         "base_mlp_dim": 4096,
         "base_num_decoder_layers": 12,
-    } | kwargs
+    } | kwargs | extra_args
     config = pyconfig.initialize(
         [sys.argv[0], get_test_config_path()],
         **init_kwargs,

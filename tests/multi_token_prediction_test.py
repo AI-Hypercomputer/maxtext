@@ -27,6 +27,7 @@ from MaxText import maxtext_utils
 from MaxText.globals import MAXTEXT_PKG_DIR
 from MaxText.layers.decoders import DecoderLayer
 from maxtext.tests.test_utils import get_test_config_path
+from MaxText.gcloud_stub import is_decoupled
 from MaxText.layers import multi_token_prediction  # The class under test
 from MaxText.layers import embeddings
 from MaxText.common_types import MODEL_MODE_TRAIN
@@ -39,11 +40,14 @@ class MultiTokenPredictionLayerTest(unittest.TestCase):
 
   def setUp(self):
     super().setUp()
+    # Conditionally set ici_fsdp_parallelism to match device count in decoupled mode
+    extra_args = {"ici_fsdp_parallelism": jax.device_count()} if is_decoupled() else {}
     self.cfg = pyconfig.initialize(
         [None, get_test_config_path()],
         run_name="multi_token_prediction_layer_test",
         skip_jax_distributed_system=True,
         per_device_batch_size=8,
+        **extra_args,
     )
     self.rng = jax.random.PRNGKey(42)  # Base RNG for setup
     self.rngs = nnx.Rngs(params=self.rng, dropout=self.rng)
@@ -193,12 +197,15 @@ class MultiTokenPredictionBlockTest(unittest.TestCase):
 
   def setUp(self):
     super().setUp()
+    # Conditionally set ici_fsdp_parallelism to match device count in decoupled mode
+    extra_args = {"ici_fsdp_parallelism": jax.device_count()} if is_decoupled() else {}
     self.cfg = pyconfig.initialize(
         [None, get_test_config_path()],
         run_name="mtp_block_test",
         skip_jax_distributed_system=True,
         mtp_num_layers=2,
         base_emb_dim=16,
+        **extra_args,
     )
     self.nnx_rngs = nnx.Rngs(params=0)
     self.rng = jax.random.PRNGKey(43)

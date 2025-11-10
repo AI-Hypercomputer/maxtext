@@ -31,6 +31,7 @@ from MaxText import pyconfig
 from MaxText.common_types import Config, DType
 from MaxText.globals import MAXTEXT_PKG_DIR
 from maxtext.tests.test_utils import get_test_config_path
+from MaxText.gcloud_stub import is_decoupled
 from MaxText.layers import linears
 from MaxText.layers import moe
 from MaxText.layers.initializers import NdInitializer, nd_dense_init, variable_to_logically_partitioned
@@ -204,6 +205,8 @@ class DeepSeekRoutingTest(unittest.TestCase):
 
   def setUp(self):
     super().setUp()
+    # Conditionally set ici_fsdp_parallelism to match device count in decoupled mode
+    extra_args = {"ici_fsdp_parallelism": jax.device_count()} if is_decoupled() else {}
     self.cfg = pyconfig.initialize(
         [None, get_test_config_path()],
         run_name="deepseek_routing_test",
@@ -218,6 +221,7 @@ class DeepSeekRoutingTest(unittest.TestCase):
         num_experts=16,
         num_experts_per_tok=4,
         sparse_matmul=True,
+        **extra_args,
     )
     self.rngs = nnx.Rngs(params=0)
     devices_array = maxtext_utils.create_device_mesh(self.cfg)

@@ -31,6 +31,7 @@ from MaxText import pyconfig
 from MaxText.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_TRAIN, MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE
 from MaxText.globals import MAXTEXT_PKG_DIR
 from maxtext.tests.test_utils import get_test_config_path
+from MaxText.gcloud_stub import is_decoupled
 from MaxText.layers import models
 from MaxText.layers import quantizations
 
@@ -48,6 +49,8 @@ class TestModel(unittest.TestCase):
 
   def init_pyconfig(self, **kwargs):
     """Init pyconfig."""
+    # Conditionally set ici_fsdp_parallelism to match device count in decoupled mode
+    extra_args = {"ici_fsdp_parallelism": jax.device_count()} if is_decoupled() else {}
     config = pyconfig.initialize(
         [sys.argv[0], get_test_config_path()],
         per_device_batch_size=1.0,
@@ -61,6 +64,7 @@ class TestModel(unittest.TestCase):
         base_num_kv_heads=2,
         max_prefill_predict_length=4,
         **kwargs,
+        **extra_args,
     )
     return config
 

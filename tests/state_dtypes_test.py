@@ -28,6 +28,7 @@ from MaxText.layers import quantizations
 from MaxText import maxtext_utils
 from MaxText.globals import MAXTEXT_PKG_DIR
 from maxtext.tests.test_utils import get_test_config_path
+from MaxText.gcloud_stub import is_decoupled
 
 Transformer = models.transformer_as_linen
 
@@ -37,7 +38,10 @@ class StateDtypes(unittest.TestCase):
 
   def get_state(self, argv):
     """Gets model state including weights and optimizer state"""
-
+    # Conditionally set ici_fsdp_parallelism to match device count in decoupled mode
+    if is_decoupled():
+        argv = list(argv) + [f"ici_fsdp_parallelism={jax.device_count()}"]
+    
     # Setup necessary inputs to build a model state
     config = pyconfig.initialize(argv)
     quant = quantizations.configure_quantization(config)

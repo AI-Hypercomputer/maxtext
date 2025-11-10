@@ -40,6 +40,7 @@ from MaxText import pyconfig
 from MaxText.common_types import MODEL_MODE_TRAIN
 from MaxText.globals import MAXTEXT_PKG_DIR
 from maxtext.tests.test_utils import get_test_config_path
+from MaxText.gcloud_stub import is_decoupled
 from MaxText.layers import models
 from MaxText.layers import quantizations
 from MaxText.sharding import assert_params_sufficiently_sharded, get_formatted_sharding_annotations
@@ -237,8 +238,10 @@ class MaxUtilsInitTransformerState(unittest.TestCase):
   """Tests initialization of transformer states in max_utils.py"""
 
   def setUp(self):
+    # Conditionally set ici_fsdp_parallelism to match device count in decoupled mode
+    extra_args = {"ici_fsdp_parallelism": jax.device_count()} if is_decoupled() else {}
     self.config = pyconfig.initialize(
-        [None, get_test_config_path()], enable_checkpointing=False
+        [None, get_test_config_path()], enable_checkpointing=False, **extra_args
     )
     devices_array = maxtext_utils.create_device_mesh(self.config)
     self.mesh = Mesh(devices_array, self.config.mesh_axes)
