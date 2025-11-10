@@ -1,0 +1,183 @@
+name: Decoupled Offline Tests
+
+on:
+  pull_request:
+    branches:
+      - rocm-main
+    paths:
+      - 'maxtext/**'
+      - '.github/workflows/decouple_tests.yml'
+      - 'pyproject.toml'
+      - 'README.md'
+  push:
+    branches:
+      - rocm-main
+    paths:
+      - 'maxtext/**'
+      - '.github/workflows/decouple_tests.yml'
+  workflow_dispatch:
+
+jobs:
+  decoupled:
+    runs-on: ubuntu-latest
+    env:
+      DECOUPLE_GCLOUD: TRUE
+      LOCAL_GCLOUD_PROJECT: ci-decoupled
+      LOCAL_BASE: datasets
+      LOCAL_BASE_OUTPUT: datasets/gcloud_decoupled_test_logs
+      KEEPALIVE: sleep infinity
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Pull ROCm JAX base image
+        run: docker pull rocm/jax:rocm7.0.2-jax0.6.0-py3.12-ubu24
+
+      - name: Start container
+        run: |
+          set -euo pipefail
+          mkdir -p "${LOCAL_BASE_OUTPUT}"
+          DOCKER_IMAGE="rocm/jax:rocm7.0.2-jax0.6.0-py3.12-ubu24"
+          CONTAINER_NAME="decouple_maxtext_tests"
+          DEVICE_FLAGS="--device=/dev/kfd --device=/dev/dri --group-add video"
+          RUNTIME_FLAGS="--network=host --ipc=host --shm-size 16G --cap-add=SYS_PTRACE --security-opt seccomp=unconfined"
+          WORKDIR="/maxtext"
+          MOUNT="-v ${{ github.workspace }}:${WORKDIR}"
+          ENV_VARS="-e DECOUPLE_GCLOUD=${DECOUPLE_GCLOUD} -e LOCAL_GCLOUD_PROJECT=${LOCAL_GCLOUD_PROJECT} -e LOCAL_BASE_OUTPUT=${LOCAL_BASE_OUTPUT}"
+          docker rm -f ${CONTAINER_NAME} >/dev/null 2>&1 || true
+          docker run -d -it --name ${CONTAINER_NAME} -w ${WORKDIR} ${ENV_VARS} ${RUNTIME_FLAGS} ${DEVICE_FLAGS} ${MOUNT} ${DOCKER_IMAGE} bash -c "${KEEPALIVE}"
+          echo "Container ${CONTAINER_NAME} started with centralized env vars." >> "${LOCAL_BASE_OUTPUT}/ci.log"
+
+      - name: Install Requirements and Maxtext Package
+        run: |
+          set -euo pipefail
+          CONTAINER_NAME="decouple_maxtext_tests"
+          docker exec ${CONTAINER_NAME} bash -euo pipefail -c '
+            mkdir -p "${LOCAL_BASE_OUTPUT}"
+            apt-get update
+            apt-get install -y git vim python3.12-venv python3-pip python3-dev build-essential
+            python3 -m venv .venv || { echo "venv creation failed"; exit 10; }
+            . .venv/bin/activate
+            python -m ensurepip --upgrade || true
+            python -m pip install --upgrade pip
+            python -m pip install wheel setuptools cmake
+            python -m pip install -r requirements_decoupled_rocm_jax_0_6_0.txt --no-cache-dir || { echo "Requirements install failed"; exit 13; }
+            python -m pip install . --no-cache-dir || { echo "Package install failed"; exit 11; }
+            echo "Maxtext package installed." >> "${LOCAL_BASE_OUTPUT}/ci.log"
+            python -m pip install pytest pytest-html pytest-csv minio array-record || { echo "Test deps failed"; exit 12; }
+            python -m pip list >> "${LOCAL_BASE_OUTPUT}/pip_freeze.txt"
+            echo "Requirements installed." >> "${LOCAL_BASE_OUTPUT}/ci.log"
+          '
+
+      - name: Build and Install TE
+        run: |
+          set -euo pipefail
+          CONTAINER_NAME="decouple_maxtext_tests"
+          docker exec ${CONTAINER_NAME} bash -euo pipefail -c '
+            . .venv/bin/activate
+            if [ ! -e "TransformerEngine" ]; then
+              git clone https://github.com/ROCm/TransformerEngine.git
+            fi
+            cd TransformerEngine
+            git reset --hard ec21e1f35f5a36c1def9c89c4865eba3947f0665
+            git submodule update --init --recursive
+            export USE_ROCM=1
+            export HIP_PATH=/opt/rocm
+            export NVTE_FRAMEWORK=jax
+            export CMAKE_BUILD_PARALLEL_LEVEL=64
+            export PYTORCH_ROCM_ARCH=gfx942
+            export NVTE_ROCM_ARCH=gfx942
+            export NVTE_USE_ROCM=1
+            export NVTE_FUSED_ATTN_AOTRITON=0
+            export NVTE_BUILD_MAX_JOBS=180
+            export CU_NUM=304
+            if find dist -maxdepth 1 -name "*.whl" -print -quit | grep -q .; then
+              echo "TE wheels exist, skip building"
+            else
+              python setup.py bdist_wheel || { echo "TransformerEngine build failed"; exit 20; }
+            fi
+            python -m pip install dist/transformer_engine-*.whl --no-cache-dir || { echo "TE wheel install failed"; exit 21; }
+            cd ..
+            echo "TE built and installed." >> "${LOCAL_BASE_OUTPUT}/ci.log"
+          '
+
+      - name: Generate datasets
+        run: |
+          set -euo pipefail
+          CONTAINER_NAME="decouple_maxtext_tests"
+          docker exec ${CONTAINER_NAME} bash -euo pipefail -c '
+            . .venv/bin/activate
+            echo "Generating minimal ArrayRecord shards" >> "${LOCAL_BASE_OUTPUT}/ci.log"
+            python ${LOCAL_BASE}/get_minimal_c4_en_dataset.py --force || { echo "ArrayRecord generation failed"; exit 3; }
+            echo "Generating minimal parquet shards" >> "${LOCAL_BASE_OUTPUT}/ci.log"
+            python ${LOCAL_BASE}/get_minimal_hf_c4_parquet.py --force --train-rows 200 --val-rows 40
+            echo "Minimal dataset setup complete." >> "${LOCAL_BASE_OUTPUT}/ci.log"
+            echo "Generating minimal tfrecord shards." >> "${LOCAL_BASE_OUTPUT}/ci.log"
+            python ${LOCAL_BASE}/convert_arrayrecord_to_tfrecord.py --version-dir ${LOCAL_BASE}/c4_en_dataset_minimal/c4/en/3.0.1 --builder-name __local_c4_builder --force
+            echo "Minimal tfrecord shards generation complete." >> "${LOCAL_BASE_OUTPUT}/ci.log"
+            cp -r ${LOCAL_BASE}/c4_en_dataset_minimal/c4/en/3.0.1 ${LOCAL_BASE}/c4_en_dataset_minimal/c4/en/3.1.0
+            echo "Generating TFDS metadata." >> "${LOCAL_BASE_OUTPUT}/ci.log"
+            python ${LOCAL_BASE}/generate_tfds_metadata.py --root ${LOCAL_BASE}/c4_en_dataset_minimal --version 3.0.1 --source-version 3.0.1 --force
+            python ${LOCAL_BASE}/generate_tfds_metadata.py --root ${LOCAL_BASE}/c4_en_dataset_minimal --version 3.1.0 --source-version 3.0.1 --force
+            echo "Minimal dataset generation complete!" >> "${LOCAL_BASE_OUTPUT}/ci.log"
+          '
+
+      - name: Collect & run decoupled tests
+        run: |
+          set -euo pipefail
+          CONTAINER_NAME="decouple_maxtext_tests"
+          docker exec ${CONTAINER_NAME} bash -euo pipefail -c '
+            . .venv/bin/activate
+            echo "Collecting tests" >> "${LOCAL_BASE_OUTPUT}/ci.log"
+            pytest tests -m decoupled --collect-only -q | tee "${LOCAL_BASE_OUTPUT}/collect.txt"
+            TEST_COUNT="$(grep -v "^$" "${LOCAL_BASE_OUTPUT}/collect.txt" | wc -l)"
+            echo Collected:$TEST_COUNT >> "${LOCAL_BASE_OUTPUT}/ci.log"
+            if [ "$TEST_COUNT" -eq 0 ]; then echo "ERROR: No decoupled tests found" >> "${LOCAL_BASE_OUTPUT}/ci.log"; exit 2; fi
+            pytest -v tests -m decoupled -q --csv=decoupled-tests-report.csv --html=decoupled-tests-report.html --self-contained-html
+            mv decoupled-tests-report.csv decoupled-tests-report.html "${LOCAL_BASE_OUTPUT}/"
+            EXEC_COUNT="$(grep -E '^[^,]+,' "${LOCAL_BASE_OUTPUT}/decoupled-tests-report.csv" | wc -l)"
+            echo Executed:$EXEC_COUNT >> "${LOCAL_BASE_OUTPUT}/ci.log"
+            echo "### Decoupled Test Run Summary" >> $GITHUB_STEP_SUMMARY
+            echo Collected: $TEST_COUNT >> $GITHUB_STEP_SUMMARY
+            echo Executed: $EXEC_COUNT >> $GITHUB_STEP_SUMMARY
+            echo "Reports: CSV & HTML attached as artifacts." >> $GITHUB_STEP_SUMMARY
+          '
+
+          echo "Container ${CONTAINER_NAME} still alive." >> datasets/gcloud_decoupled_test_logs/ci.log
+          echo "Attach to container with: docker exec -it ${CONTAINER_NAME} bash" >> $GITHUB_STEP_SUMMARY
+          echo "Remove when done: docker rm -f ${CONTAINER_NAME}" >> $GITHUB_STEP_SUMMARY
+
+      - name: Snapshot container image Artifact
+        if: always()
+        run: |
+          set -euo pipefail
+          CONTAINER_NAME="decouple_maxtext_tests"
+          IMAGE_TAG="maxtext-decoupled-tests:latest"
+          IMAGE_FILE="maxtext-decoupled-tests-image.tar.gz"
+          if ! docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
+            echo "Container ${CONTAINER_NAME} not found; skipping snapshot." >> "${LOCAL_BASE_OUTPUT}/ci.log"
+            exit 0
+          fi
+          docker commit ${CONTAINER_NAME} ${IMAGE_TAG}
+          docker save ${IMAGE_TAG} | gzip -c > ${IMAGE_FILE}
+          ls -lh ${IMAGE_FILE} >> "${LOCAL_BASE_OUTPUT}/ci.log" || true
+          echo "Image snapshot saved as artifact candidate: ${IMAGE_FILE}" >> "${LOCAL_BASE_OUTPUT}/ci.log"
+
+      - name: Upload snapshot image
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: decoupled-docker-image
+          path: maxtext-decoupled-tests-image.tar.gz
+          if-no-files-found: warn
+
+      - name: Upload decoupled logs
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: decoupled-logs
+          path: datasets/gcloud_decoupled_test_logs
+          if-no-files-found: warn
+
+
+

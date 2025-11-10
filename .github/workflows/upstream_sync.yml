@@ -1,0 +1,51 @@
+name: Upstream Sync
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: '30 4 * * *'  # Daily 04:30 UTC
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch upstream
+        run: |
+          git remote add upstream https://github.com/google/maxtext.git 2>/dev/null || true
+          git fetch upstream main
+          git checkout main
+          git pull --ff-only origin main || true
+
+      - name: Merge upstream/main
+        id: merge_step
+        run: |
+          set -e
+          git merge --no-edit upstream/main || { echo "::error::Merge conflict - resolve manually"; git merge --abort || true; exit 1; }
+          if git diff --quiet origin/main..main; then echo "no_changes=true" >> $GITHUB_OUTPUT; else echo "no_changes=false" >> $GITHUB_OUTPUT; fi
+
+      - name: Push (if changed)
+        if: steps.merge_step.outputs.no_changes == 'false'
+        env:
+          PAT: ${{ secrets.UPSTREAM_SYNC_TOKEN }}
+        run: |
+          [ -z "$PAT" ] && echo "::error::Missing UPSTREAM_SYNC_TOKEN secret" && exit 1
+          git push https://x-access-token:$PAT@github.com/${{ github.repository }}.git main
+
+      - name: Result
+        run: |
+          if [ "${{ steps.merge_step.outputs.no_changes }}" = "true" ]; then echo "Up to date"; else echo "Synced upstream"; fi
