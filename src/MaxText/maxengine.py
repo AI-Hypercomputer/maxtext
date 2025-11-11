@@ -36,12 +36,10 @@ from flax import struct
 from flax.linen import partitioning as nn_partitioning
 import flax
 
-from jetstream.core import config_lib
-from jetstream.engine import engine_api
-from jetstream.engine import token_utils
-from jetstream.engine import tokenizer_api
-from jetstream.engine.tokenizer_pb2 import TokenizerParameters
-from jetstream.engine.tokenizer_pb2 import TokenizerType
+from MaxText.gcloud_stub import jetstream, is_decoupled
+config_lib, engine_api, token_utils, tokenizer_api, _token_params_ns = jetstream()
+TokenizerParameters = getattr(_token_params_ns, "TokenizerParameters", object)  # type: ignore[assignment]
+TokenizerType = getattr(_token_params_ns, "TokenizerType", object)  # type: ignore[assignment]
 
 from MaxText import inference_utils
 from MaxText import max_utils
@@ -98,14 +96,15 @@ class MaxEngineConfig:
     return self.keys
 
 
-class MaxEngine(engine_api.Engine):
+_BaseEngine = engine_api.Engine if (not is_decoupled() and hasattr(engine_api, "Engine")) else object
+class MaxEngine(_BaseEngine):
   """The computational core of the generative model server.
 
   Engine defines an API that models must adhere to as they plug into the
   JetStream efficient serving infrastructure.
   """
 
-  def __init__(self, config: Any, devices: config_lib.Devices | None = None):
+  def __init__(self, config: Any, devices: Any | None = None):
     self.config = config
 
     # Mesh definition
@@ -142,7 +141,7 @@ class MaxEngine(engine_api.Engine):
 
   def generate_aot(
       self, params: Params, decode_state: DecodeState, rng: PRNGKeyType | None = None
-  ) -> tuple[DecodeState, engine_api.ResultTokens]:
+  ):  # returns (new_decode_state, result_tokens)
     """Wrapper to generate for ahead of time compilation."""
 
     return self.generate(params=params, decode_state=decode_state, rng=rng)
@@ -392,7 +391,7 @@ class MaxEngine(engine_api.Engine):
       padded_tokens: jax.Array,
       true_length: int,
       rng: PRNGKeyType | None = None,
-  ) -> tuple[Prefix, engine_api.ResultTokens]:
+  ):  # returns (new_prefix, result_tokens)
     """Wrapper for prefill for ahead-of-time compilation."""
 
     return self.prefill(
@@ -423,7 +422,7 @@ class MaxEngine(engine_api.Engine):
       topk: int | None = None,
       nucleus_topp: float | None = None,
       temperature: float | None = None,
-  ) -> tuple[Prefix, engine_api.ResultTokens]:
+  ):  # returns (new_prefix, result_tokens)
     """Performs a JIT-compiled prefill operation on a sequence of tokens.
 
     This function processes an input sequence (prompt) through the model to compute
@@ -585,7 +584,7 @@ class MaxEngine(engine_api.Engine):
       topk: int | None = None,
       nucleus_topp: float | None = None,
       temperature: float | None = None,
-  ) -> tuple[Prefix, engine_api.ResultTokens]:
+  ):  # returns (new_prefix, result_tokens)
     """Public API for prefill that updates page state outside JIT."""
     # Update page state before JIT call
     if self.config.attention == "paged" and self.page_manager is not None and self.page_state is not None:
@@ -632,7 +631,7 @@ class MaxEngine(engine_api.Engine):
       topk: int | None = None,
       nucleus_topp: float | None = None,
       temperature: float | None = None,
-  ) -> tuple[Prefix, engine_api.ResultTokens]:
+  ):  # returns (new_prefix, result_tokens)
     """Wrapper for multi-sampling prefill for ahead-of-time compilation."""
     return self.prefill_multisampling(
         params=params,
@@ -661,7 +660,7 @@ class MaxEngine(engine_api.Engine):
       topk: int | None = None,
       nucleus_topp: float | None = None,
       temperature: float | None = None,
-  ) -> tuple[Prefix, engine_api.ResultTokens]:
+  ):  # returns (new_prefix, result_tokens)
     """Public API for prefill multisampling."""
 
     # Sample rng before JIT call
@@ -698,7 +697,7 @@ class MaxEngine(engine_api.Engine):
       topk: int | None = None,
       nucleus_topp: float | None = None,
       temperature: float | None = None,
-  ) -> tuple[Prefix, engine_api.ResultTokens]:
+  ) -> tuple[Prefix, Any]:
     """Computes a kv-cache for a new generate request.
 
     With multi-sampling, the engine will generate multiple first tokens in the
@@ -805,7 +804,7 @@ class MaxEngine(engine_api.Engine):
       topk: int | None = None,
       nucleus_topp: float | None = None,
       temperature: float | None = None,
-  ) -> tuple[Any, PackedPrefix, list[engine_api.ResultTokens]]:
+  ):  # returns (maybe_batch, packed_prefix, list_of_result_tokens)
     """Computes a kv-cache for a new packed generate request, which is a
     concatenation of several shorter prompts. Experimentation shows that
     longer prefill sequences gives approximately 15% boost in time per prefilled
@@ -922,7 +921,7 @@ class MaxEngine(engine_api.Engine):
       topk: int | None = None,
       nucleus_topp: float | None = None,
       temperature: float | None = None,
-  ) -> tuple[DecodeState, engine_api.ResultTokens]:
+  ):  # returns (decode_state, result_tokens)
     """Public API for generate that updates page state outside JIT."""
 
     # Update page state before JIT call
@@ -965,7 +964,7 @@ class MaxEngine(engine_api.Engine):
       topk: int | None = None,
       nucleus_topp: float | None = None,
       temperature: float | None = None,
-  ) -> tuple[DecodeState, engine_api.ResultTokens]:
+  ):  # returns (decode_state, result_tokens)
     """Performs a single, JIT-compiled autoregressive decoding step.
 
     This function takes the current decoding state, which includes the KV cache
@@ -1486,8 +1485,14 @@ class MaxEngine(engine_api.Engine):
         "token_logp": self.replicated_sharding,
     }
 
-  def get_tokenizer(self) -> TokenizerParameters:
-    """Return a protobuf of tokenizer info, callable from Py or C++."""
+  def get_tokenizer(self) -> Any:
+    """Return tokenizer parameters; requires JetStream when decoupled.
+
+    When DECOUPLE_GCLOUD is FALSE we provide a clear error instead of failing
+    cryptically on attribute access.
+    """
+    if is_decoupled():
+      raise RuntimeError("JetStream disabled by DECOUPLE_GCLOUD=TRUE; tokenizer unsupported.")
     try:
       tokenizer_type_val = TokenizerType.DESCRIPTOR.values_by_name[self.config.tokenizer_type].number
       return TokenizerParameters(
@@ -1500,8 +1505,10 @@ class MaxEngine(engine_api.Engine):
     except KeyError as _:
       raise KeyError(f"Unsupported tokenizer type: {self.config.tokenizer_type}") from None
 
-  def build_tokenizer(self, metadata: TokenizerParameters) -> tokenizer_api.Tokenizer:
+  def build_tokenizer(self, metadata: Any):  # return type depends on JetStream
     """Return a tokenizer"""
+    if is_decoupled():
+      raise RuntimeError("JetStream disabled by DECOUPLE_GCLOUD=TRUE; build_tokenizer unsupported.")
     if metadata.tokenizer_type == TokenizerType.tiktoken:
       return token_utils.TikToken(metadata)
     elif metadata.tokenizer_type == TokenizerType.sentencepiece:

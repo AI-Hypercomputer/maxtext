@@ -40,6 +40,15 @@ from MaxText.layers import simple_layer
 from MaxText.train import main as train_main
 from MaxText.layers import deepseek
 
+# Helper to fix pipeline parallelism in test_full_train_fp8 and test_full_train_nanoo_fp8
+def _adapt_parallelism(args, pipeline_stages=4):
+  dc = jax.device_count()
+  args.append(f"ici_pipeline_parallelism={pipeline_stages}")
+  if dc >= pipeline_stages:
+    data_par = dc // pipeline_stages
+    if data_par > 1:
+      args.append(f"ici_data_parallelism={data_par}")
+
 
 def assert_same_output_and_grad(f1, f2, *inputs):
   """check that the output and gradient are the same"""

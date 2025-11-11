@@ -18,24 +18,28 @@ from typing import Any, Type
 
 import jax
 
-from jetstream.core import config_lib
-from jetstream.engine import engine_api
+from MaxText.gcloud_stub import jetstream, is_decoupled
+config_lib, engine_api, _token_utils, _tokenizer_api, _token_params_ns = jetstream()
 
 from MaxText import maxengine
 
 
 # TODO: merge it with the above create_maxengine().
-def create_exp_maxengine(devices: config_lib.Devices, config: Any) -> engine_api.Engine:
+def create_exp_maxengine(devices: Any, config: Any):
+  if is_decoupled():
+    raise RuntimeError("JetStream disabled by DECOUPLE_GCLOUD=TRUE; experimental MaxEngine unsupported.")
   return maxengine.MaxEngine(config=config, devices=devices)
 
 
-def create_maxengine(devices: config_lib.Devices, config: Any) -> engine_api.Engine:
+def create_maxengine(devices: Any, config: Any) -> engine_api.Engine:
   del devices
   return maxengine.MaxEngine(config)
 
 
-def get_server_config(config_str: str, config: Any) -> Type[config_lib.ServerConfig]:
-  """Gets the Server Config Required by JetStream"""
+def get_server_config(config_str: str, config: Any):
+  """Gets the Server Config Required by JetStream (disabled when DECOUPLE_GCLOUD=TRUE)."""
+  if is_decoupled():
+    raise RuntimeError("JetStream disabled by DECOUPLE_GCLOUD=TRUE; server config unsupported.")
   match config_str:
     case "MaxtextInterleavedServer":
       server_config = config_lib.ServerConfig(

@@ -57,10 +57,8 @@ from flax.linen import partitioning as nn_partitioning
 from flax import struct
 from flax.nnx import TrainState
 
-from cloud_tpu_diagnostics import diagnostic
-from cloud_tpu_diagnostics.configuration import debug_configuration
-from cloud_tpu_diagnostics.configuration import diagnostic_configuration
-from cloud_tpu_diagnostics.configuration import stack_trace_configuration
+from MaxText.gcloud_stub import cloud_diagnostics as _cloud_diag, vertex_tensorboard_components, is_decoupled
+diagnostic, debug_configuration, diagnostic_configuration, stack_trace_configuration = _cloud_diag()
 
 import transformers
 
@@ -92,7 +90,7 @@ from MaxText.utils.goodput_utils import (
     maybe_monitor_goodput,
     maybe_record_goodput,
 )
-from MaxText.vertex_tensorboard import VertexTensorboardManager
+VertexTensorboardManager, _vertex_tb_is_stub = vertex_tensorboard_components()
 
 
 # pylint: disable=too-many-positional-arguments
@@ -944,7 +942,10 @@ def main(argv: Sequence[str]) -> None:
   os.environ["TFDS_DATA_DIR"] = config.dataset_path
   vertex_tensorboard_manager = VertexTensorboardManager()
   if config.use_vertex_tensorboard or os.environ.get("UPLOAD_DATA_TO_TENSORBOARD"):
-    vertex_tensorboard_manager.configure_vertex_tensorboard(config)
+    if _vertex_tb_is_stub:
+      max_logging.log("[DECOUPLED NO-OP] skipping Vertex Tensorboard configuration.")
+    else:
+      vertex_tensorboard_manager.configure_vertex_tensorboard(config)
 
   # Create the Goodput recorder
   recorder = create_goodput_recorder(config)
@@ -959,9 +960,14 @@ def main(argv: Sequence[str]) -> None:
   )
   diagnostic_config = diagnostic_configuration.DiagnosticConfig(debug_config)
 
-  with diagnostic.diagnose(diagnostic_config):
-    with maybe_record_goodput(recorder, GoodputEvent.JOB), maybe_monitor_goodput(config):
+  if is_decoupled() or getattr(diagnostic, "__class__", None).__name__ == "_StubDiag":
+    max_logging.log("[DECOUPLED NO-OP] skipping cloud diagnostics wrapper.")
+    with maybe_record_goodput(recorder, GoodputEvent.JOB):
       train_loop(config, config_inference, recorder)
+  else:
+    with diagnostic.diagnose(diagnostic_config):
+      with maybe_record_goodput(recorder, GoodputEvent.JOB):
+        train_loop(config, config_inference, recorder)
 
 
 if __name__ == "__main__":

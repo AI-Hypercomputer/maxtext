@@ -33,7 +33,7 @@ from MaxText.input_pipeline import input_pipeline_interface
 from MaxText.globals import MAXTEXT_PKG_DIR, MAXTEXT_ASSETS_ROOT, MAXTEXT_REPO_ROOT
 from maxtext.tests.test_utils import get_test_config_path
 
-MAXTEXT_ASSETS_ROOT = os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "assets")
+MAXTEXT_ASSETS_ROOT = os.path.join("src", "MaxText", "assets")
 
 
 class GrainArrayRecordProcessingTest(unittest.TestCase):
@@ -120,6 +120,7 @@ class GrainArrayRecordProcessingTest(unittest.TestCase):
         },
     )
 
+  @pytest.mark.external_serving #Skipped in decoupled mode due to rocBLAS scratch buffer TF issues on GPU
   def test_batch_determinism(self):
     batch1 = next(self.train_iter)
     train_iter = _grain_data_processing.make_grain_train_iterator(self.config, self.mesh, self.process_indices)

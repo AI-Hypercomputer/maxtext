@@ -19,9 +19,11 @@ import sys
 
 import pathwaysutils  # pylint: disable=unused-import
 
-from jetstream.core import server_lib, config_lib
+from MaxText.gcloud_stub import jetstream, is_decoupled
+server_lib, config_lib, _token_utils, _tokenizer_api, _token_params_ns = jetstream()
 
 import jax
+from typing import Any
 
 from MaxText import pyconfig
 from MaxText import maxengine_config
@@ -37,7 +39,7 @@ from MaxText import maxengine_config
 # )
 
 
-def _create_prefix_caching_config(config) -> config_lib.PrefixCachingConfig | None:
+def _create_prefix_caching_config(config):
   if not config.enable_prefix_caching:
     return None
 
@@ -51,13 +53,15 @@ def _create_prefix_caching_config(config) -> config_lib.PrefixCachingConfig | No
 
 
 def main(config):
+  if is_decoupled():
+    raise RuntimeError("JetStream disabled by DECOUPLE_GCLOUD=TRUE; server unavailable.")
   pathwaysutils.initialize()
 
   # No devices for local cpu test. A None for prefill and a None for generate.
   devices = server_lib.get_devices()
   server_config = maxengine_config.get_server_config(config.inference_server, config)
 
-  metrics_server_config: config_lib.MetricsServerConfig | None = None
+  metrics_server_config: Any | None = None
   if config.prometheus_port != 0:
     metrics_server_config = config_lib.MetricsServerConfig(port=config.prometheus_port)
 

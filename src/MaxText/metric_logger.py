@@ -32,7 +32,9 @@ from MaxText import max_utils
 from MaxText import maxtext_utils
 from MaxText.managed_mldiagnostics import ManagedMLDiagnostics
 from MaxText.utils import gcs_utils
-from MaxText.gcp_workload_monitor import GCPWorkloadMonitor
+from MaxText.gcloud_stub import is_decoupled, workload_monitor
+GCPWorkloadMonitor, _monitor_is_stub = workload_monitor()
+
 from MaxText.globals import EPS
 
 from collections import defaultdict
@@ -279,13 +281,15 @@ class MetricLogger:
   def get_performance_metric_queue(self, config):
     """Records heartbeat metrics and performance metrics to GCP."""
     performance_metric_queue = None
-    if config.report_heartbeat_metric_for_gcp_monitoring or config.report_performance_metric_for_gcp_monitoring:
+    if (config.report_heartbeat_metric_for_gcp_monitoring or config.report_performance_metric_for_gcp_monitoring) and not _monitor_is_stub:
       gcp_workload_monitor = GCPWorkloadMonitor(config.run_name)
       if config.report_heartbeat_metric_for_gcp_monitoring:
         gcp_workload_monitor.start_heartbeat_reporting_thread(config.heartbeat_reporting_interval_in_seconds)
       if config.report_performance_metric_for_gcp_monitoring:
         performance_metric_queue = queue.Queue()
         gcp_workload_monitor.start_performance_reporting_thread(performance_metric_queue)
+    elif (config.report_heartbeat_metric_for_gcp_monitoring or config.report_performance_metric_for_gcp_monitoring) and _monitor_is_stub:
+      max_logging.log("[DECOUPLED NO-OP] skipping GCP workload monitoring threads.")
     return performance_metric_queue
 
   def buffer_and_write_train_metrics(self, metrics, step, step_time_delta):
