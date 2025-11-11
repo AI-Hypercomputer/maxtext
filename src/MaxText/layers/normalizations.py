@@ -197,3 +197,8 @@ def l2norm(x: Array, dim: int = -1, eps: float = 1e-6) -> Array:
 
   inv_norm = jax.lax.rsqrt((x * x).sum(axis=dim, keepdims=True) + jnp.array(eps, dtype=x.dtype))
   return x * inv_norm
+
+Qwen3NextRMSNormLinen = nnx_wrappers.to_linen_class(
+    Qwen3NextRMSNorm,
+    base_metadata_fn=variable_to_logically_partitioned,
+)

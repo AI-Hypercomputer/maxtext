@@ -26,6 +26,7 @@ from jax.sharding import Mesh, NamedSharding
 
 from flax import linen as nn
 from flax import nnx
+from flax.linen import initializers as linen_initializers
 from flax.linen.partitioning import ScanIn
 
 from MaxText.common_types import DecoderBlockType, ShardMode, Config, EP_AS_CONTEXT
@@ -40,6 +41,7 @@ from MaxText import maxtext_utils
 from MaxText import multimodal_utils
 from MaxText import sharding
 from MaxText.layers.attentions import attention_as_linen
+from MaxText.layers import normalizations
 from MaxText.layers.normalizations import rms_norm
 from MaxText.layers.embeddings import attend_on_embedding, embed_as_linen, positional_embedding_as_linen
 from MaxText.layers.quantizations import AqtQuantization as Quant
@@ -58,6 +60,7 @@ from MaxText.layers import (
     qwen3,
     simple_layer,
 )
+from MaxText.layers import nnx_wrappers
 
 # ------------------------------------------------------------------------------
 # The network: Decoder Definitions
@@ -465,7 +468,6 @@ class Decoder(nn.Module):
         DecoderBlockType.GEMMA3,
         DecoderBlockType.QWEN3,
         DecoderBlockType.QWEN3_MOE,
-        DecoderBlockType.QWEN3_NEXT,
         DecoderBlockType.GPT_OSS,
         DecoderBlockType.SIMPLE,
         DecoderBlockType.SIMPLE_MLP,
@@ -474,6 +476,8 @@ class Decoder(nn.Module):
       return functools.partial(rms_norm, num_features=num_features, shard_mode=self.config.shard_mode)
     elif self.config.decoder_block == DecoderBlockType.GPT3:
       return functools.partial(gpt3.gpt3_layer_norm, num_features=num_features, reductions_in_fp32=False, use_bias=True)
+    elif self.config.decoder_block == DecoderBlockType.QWEN3_NEXT:
+      return functools.partial(normalizations.Qwen3NextRMSNormLinen, num_features=num_features, shard_mode=self.config.shard_mode)
     else:
       raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block.value=}")
 
