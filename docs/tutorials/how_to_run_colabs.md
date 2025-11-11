@@ -10,7 +10,7 @@ This guide provides comprehensive instructions for setting up Jupyter Lab on TPU
 - [Method 3: Colab + Local Jupyter Lab Hybrid](#method-3-colab--local-jupyter-lab-hybrid)
 - [Available Examples](#available-examples)
 - [Common Pitfalls & Debugging](#common-pitfalls--debugging)
-- [Support & Resources](#support--resources)
+- [Support & Resources](#support-and-resources)
 - [Contributing](#contributing)
 
 ## Prerequisites
@@ -48,7 +48,7 @@ Upload notebooks or mount your GitHub repo
 > **Note:** In Colab, the repo root will usually be `/content/maxtext`
 
 **Example:**
-```python
+```bash
 !git clone https://github.com/AI-Hypercomputer/maxtext.git
 %cd maxtext
 ```
@@ -122,8 +122,8 @@ Use the link for Jupyter Lab as a link for "Connect to a local runtime" in Colla
 
 ### Supervised Fine-Tuning (SFT)
 
-- **`sft_qwen3_demo.ipynb`** → Qwen3-0.6B with Hugging Face ultrachat_200k dataset
-- **`sft_llama3_demo.ipynb`** → Llama3.1-8B with Hugging Face ultrachat_200k dataset
+- **`sft_qwen3_demo.ipynb`** → Qwen3-0.6B SFT training and evaluation on [OpenAI's GSM8K dataset](https://huggingface.co/datasets/openai/gsm8k)
+- **`sft_llama3_demo.ipynb`** → Llama3.1-8B SFT training on [Hugging Face ultrachat_200k dataset](https://huggingface.co/datasets/HuggingFaceH4/ultrachat_200k)
 
 ### GRPO Training
 
