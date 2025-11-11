@@ -24,23 +24,27 @@ For large Hugginface checkpoints, you can use pre-downloaded checkpoints with --
 For multimodal models, use --image-paths argument to provide image path(s),\
   use --apply-chat-template=true if use HF chat template to format image+prompt.\
   When using chat template, the prompt should not contain image placeholders.
-  
+For multimodal logits, since the model is not suppose to generate image, the logits correspond to images \
+  tokens can be close to 0, using --output-format=pickle is recommended to preserve precision.
+
 More examples:
 python3 -m MaxText.scratch_code.generate_hf_golden_logits --model-id=meta-llama/Llama-4-Scout-17B-16E \
      --output-path=golden_Llama-4-Scout-17B-16E_vision.jsonl --prompts='Describe this image.' \
-     --apply-chat-template=true --gcs-bucket=<bucket> --hf-model-path=<hf_checkpoint_path> \
-     --image-paths=src/MaxText/test_assets/test_image.jpg
+     --apply-chat-template --gcs-bucket=<bucket> --hf-model-path=<hf_checkpoint_path> \
+     --image-paths=src/MaxText/test_assets/test_image.jpg --output-format=pickle
 
 python3 -m MaxText.scratch_code.generate_hf_golden_logits --model-id=google/gemma-3-4b-it \
      --output-path=golden_gemma-3-4b-it_vision.jsonl --prompts='<start_of_image>' \
-     --apply-chat-template=false --gcs-bucket=<bucket> --hf-model-path=<hf_checkpoint_path> \
+     --gcs-bucket=<bucket> --hf-model-path=<hf_checkpoint_path> \
      --image-paths=src/MaxText/test_assets/test_image.jpg
 """
 
 import torch
 import argparse
-from transformers import AutoTokenizer, AutoProcessor, AutoModelForCausalLM
+from transformers import AutoTokenizer, AutoProcessor
 import jsonlines
+import pickle
+import numpy as np
 from google.cloud import storage
 from PIL import Image
 
@@ -55,78 +59,101 @@ def upload_blob(bucket_name, source_file_name, destination_blob_name):
   blob.upload_from_filename(source_file_name)
 
 
-def save_golden_logits(model_id, output_path, prompt_texts, apply_chat_template, gcs_bucket, hf_model_path, image_paths):
+def save_golden_logits(
+    model_id,
+    output_path,
+    prompt_texts,
+    apply_chat_template,
+    gcs_bucket,
+    hf_model_path,
+    hf_load_dtype,
+    trust_remote_code,
+    image_paths,
+    output_format,
+):
   """save golden logits"""
   if hf_model_path is None:
     hf_model_path = model_id
+
+  if model_id.startswith("meta-llama/Llama-4"):
+    from transformers import Llama4ForConditionalGeneration  # pylint: disable=import-outside-toplevel
+
+    model_class = Llama4ForConditionalGeneration
+  else:
+    from transformers import AutoModelForCausalLM  # pylint: disable=import-outside-toplevel
+
+    model_class = AutoModelForCausalLM
+
   tokenizer = AutoTokenizer.from_pretrained(model_id)
-  model = AutoModelForCausalLM.from_pretrained(
+  print(f"loading model from {hf_model_path}")
+
+  if hf_load_dtype == "float32":
+    torch_dtype = torch.float32
+  elif hf_load_dtype == "bfloat16":
+    torch_dtype = torch.bfloat16
+  else:
+    raise ValueError
+
+  model = model_class.from_pretrained(
       hf_model_path,
-      torch_dtype=torch.float32,
-      trust_remote_code=True,
+      dtype=torch_dtype,
+      trust_remote_code=trust_remote_code,
   )
 
   all_data_to_save = []
   for i, prompt_text in enumerate(prompt_texts):
-    # Encode the prompt text
+    # 1. Prepare inputs for the model and base data for saving
+    data_to_save = {"prompt": prompt_text}
     if image_paths:
-      try:
-        image = Image.open(image_paths[i])
-      except Exception as e:
-        raise e
-      image = image.convert("RGB")
-      # TODO (aireenmei): remove this when Llama-4 supports dynamic image shapes.
+      image = Image.open(image_paths[i]).convert("RGB")
       if model_id.startswith("meta-llama/Llama-4"):
         image = image.resize((336, 336))
-      processor = AutoProcessor.from_pretrained(model_id, token=True)
+      processor = AutoProcessor.from_pretrained(model_id, token=True) if image_paths else None
       if apply_chat_template:
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image"},
-                    {"type": "text", "text": prompt_text},
-                ],
-            },
-        ]
+        messages = [{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": prompt_text}]}]
         formatted_prompt = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         inputs = processor(text=formatted_prompt, images=image, return_tensors="pt")
       else:
         formatted_prompt = prompt_text
         inputs = processor(text=formatted_prompt, images=image, return_tensors="pt", add_special_tokens=False)
-      with torch.no_grad():
-        outputs = model(**inputs)
-        logits = outputs.logits.cpu().numpy().astype("float32")
 
-      data_to_save = {
-          "prompt": prompt_text,
-          "formatted_prompt": formatted_prompt,
-          "tokens": inputs["input_ids"].tolist()[0],
-          "attention_mask": inputs["attention_mask"].tolist()[0],
-          "image_path": image_paths[i],
-          "pixel_values": inputs["pixel_values"].tolist()[0],
-          "logits": logits.tolist()[0],
-      }
+      inputs["pixel_values"] = inputs["pixel_values"].to(torch.float32)
+      print(f"{apply_chat_template=} {formatted_prompt=}")
+      data_to_save.update({"formatted_prompt": formatted_prompt, "image_path": image_paths[i]})
     else:
       input_ids = tokenizer.encode(prompt_text, return_tensors="pt")
-      # Get the logits for the prompt + completion
-      with torch.no_grad():
-        outputs = model(input_ids)
-        logits = outputs.logits.cpu().numpy().astype("float32")
+      inputs = {"input_ids": input_ids}
 
-      # Prepare data to be saved
-      data_to_save = {
-          "prompt": prompt_text,
-          "tokens": input_ids.tolist()[0],
-          "logits": logits.tolist()[0],  # Convert numpy array to list for JSON serialization
-      }
+    # 2. Run inference
+    with torch.no_grad():
+      outputs = model(**inputs)
+      logits = outputs.logits.cpu().to(torch.float32).numpy()
+
+    # 3. Populate final data dictionary with tensors from inputs and logits
+    for key, value in inputs.items():
+      new_key = "tokens" if key == "input_ids" else key
+      data_to_save[new_key] = value.cpu().numpy()[0]
+    data_to_save["logits"] = logits[0]
+
     print(f"Token length is {len(data_to_save['tokens'])} for prompt: {prompt_text}")
     print(f"raw ids: {data_to_save['tokens']}")
+
+    # 4. Convert numpy arrays to lists if format is json
+    if output_format == "json":
+      for key, value in data_to_save.items():
+        if isinstance(value, np.ndarray):
+          data_to_save[key] = value.tolist()
+
     all_data_to_save.append(data_to_save)
 
-  with jsonlines.open(output_path, "w") as f:
-    f.write_all(all_data_to_save)
-    print(f"File is stored locally at {output_path}.")
+  # 5. Save the collected data
+  if output_format == "json":
+    with jsonlines.open(output_path, "w") as f:
+      f.write_all(all_data_to_save)
+  elif output_format == "pickle":
+    with open(output_path, "wb") as f:
+      pickle.dump(all_data_to_save, f)
+  print(f"File is stored locally at {output_path}.")
 
   if gcs_bucket:
     upload_blob(gcs_bucket, output_path, f"golden-logits/{model_id}/{output_path}")
@@ -140,10 +167,8 @@ def main(raw_args=None) -> None:
   parser.add_argument("--prompts", type=str, required=True, help="A semicolon-separated list of prompts.")
   parser.add_argument(
       "--apply-chat-template",
-      type=bool,
-      required=False,
-      default=False,
-      help="Whether to apply chat template from the HF processor. Used for image+text input.",
+      action="store_true",
+      help="Apply chat template from the HF processor. Use for image+text input. Pass this flag to enable; omit to disable.",
   )
   parser.add_argument(
       "--gcs-bucket", type=str, required=False, default=None, help="A GCS bucket to store logits, without gs://."
@@ -152,7 +177,29 @@ def main(raw_args=None) -> None:
       "--hf-model-path", type=str, required=False, default=None, help="local path to checkpoint if exists."
   )
   parser.add_argument(
+      "--hf-load-dtype",
+      type=str,
+      required=False,
+      choices=["float32", "bfloat16"],
+      default="float32",
+      help="model_class.from_pretrained: dtype",
+  )
+  # variable `args.trust_remote_code` is True by default, False only if with flag `--not-trust-remote-code`
+  parser.add_argument(
+      "--not-trust-remote-code",
+      dest="trust_remote_code",
+      action="store_false",
+      help="model_class.from_pretrained: trust_remote_code",
+  )
+  parser.add_argument(
       "--image-paths", type=str, required=False, default=None, help="A semicolon-separated list of image_paths."
+  )
+  parser.add_argument(
+      "--output-format",
+      type=str,
+      required=False,
+      default="json",
+      help="The output format for the golden logits. (json, pickle)",
   )
   args = parser.parse_args(raw_args)
   prompts = args.prompts.split(";")
@@ -164,7 +211,16 @@ def main(raw_args=None) -> None:
   if args.apply_chat_template:
     assert image_paths, "apply_chat_template is only used for image+text input, so image_paths must be provided."
   save_golden_logits(
-      args.model_id, args.output_path, prompts, args.apply_chat_template, args.gcs_bucket, args.hf_model_path, image_paths
+      args.model_id,
+      args.output_path,
+      prompts,
+      args.apply_chat_template,
+      args.gcs_bucket,
+      args.hf_model_path,
+      args.hf_load_dtype,
+      args.trust_remote_code,
+      image_paths,
+      args.output_format,
   )
 
 

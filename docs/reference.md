@@ -19,9 +19,11 @@
 ```{toctree}
 :maxdepth: 1
 
-reference/terminology.md
-reference/supported_models_and_architectures.md
-reference/alternatives.md
+reference/config_base.md
 reference/benchmark_and_performance.md
+reference/jax_xla_and_pallas.md
 reference/architecture_overview.md
+reference/tiering.md
+reference/supported_models_and_architectures.md
+reference/terminology.md
 ```

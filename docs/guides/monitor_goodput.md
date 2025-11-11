@@ -54,24 +54,23 @@ project, then do the following:
 
 5. To learn more about Google Cloud Logging, visit this [page](https://cloud.google.com/logging/docs).
 
-### Access Scopes
+### Access scopes
 
- You will need both read and write access scopes for cloud logging on both the
- GPU or TPU and CPU node pools. Full cloud logging access is granted by the
- following access scope during node pool creation:
+You will need both read and write access scopes for cloud logging on both the
+GPU or TPU and CPU node pools. Full cloud logging access is granted by the
+following access scope during node pool creation:
 
-  - `https://www.googleapis.com/auth/cloud-platform`
+- `https://www.googleapis.com/auth/cloud-platform`
 
-   XPK adds this access scope to the GPU, TPU and CPU node pools, so XPK is the recommended method to create clusters and node-pools in you intend to run your workloads on GKE.
+XPK adds this access scope to the GPU, TPU and CPU node pools, so XPK is the recommended method to create clusters and node-pools in you intend to run your workloads on GKE.
 
-   Instructions on how to create clusters using XPK can be
-   found [here](https://github.com/AI-Hypercomputer/xpk/blob/main/README.md#cluster-create) and how to create workloads using XPK can be found
-   [here](https://github.com/AI-Hypercomputer/xpk/blob/main/README.md#workload-create).
+Instructions on how to create clusters using XPK can be
+found [here](https://github.com/AI-Hypercomputer/xpk/blob/main/README.md#cluster-create) and how to create workloads using XPK can be found
+[here](https://github.com/AI-Hypercomputer/xpk/blob/main/README.md#workload-create).
 
-   ```{note}
-   Access Scopes are immutable and workloads can only be migrated to new node pools with required access scopes. Access scopes on already created clusters cannot be updated.
-   ```
-
+```{note}
+Access Scopes are immutable and workloads can only be migrated to new node pools with required access scopes. Access scopes on already created clusters cannot be updated.
+```
 
 ### Monitoring
 
@@ -81,7 +80,7 @@ Ensure unique `run_name` for each new experiment or run
 
 Please use a unique workload name, unless you intend to monitor cumulative Goodput/Badput metrics of a previous workload along with your current workload
 
-#### How to Monitor Goodput and Badput
+#### How to monitor Goodput and Badput
 
 MaxText enables Goodput recording and monitoring by default with `enable_goodput_recording=True` and `monitor_goodput=True`. You can configure the goodput upload frequency by setting `goodput_upload_interval_seconds`.
 
@@ -90,7 +89,7 @@ python3 -m MaxText.train src/MaxText/configs/base.yml base_output_directory=$OUT
   dataset_path=$DATA_PATH run_name=goodput-test-run steps=200 goodput_upload_interval_seconds=30
 ```
 
-#### How to Monitor Step Time Deviation
+#### How to monitor step time deviation
 
 MaxText enables step time deviation monitoring by default with `monitor_step_time_deviation=True`. You can configure the upload frequency by setting `step_deviation_interval_seconds`.
 
@@ -112,7 +111,7 @@ python3 -m MaxText.train src/MaxText/configs/base.yml base_output_directory=$OUT
   run_name=goodput-test-run steps=200 goodput_upload_interval_seconds=30 enable_pathways_goodput=True
 ```
 
-#### How to enable Checkpoint Logging
+#### How to enable checkpoint logging
 
 Checkpoint logging is currently supported through Orbax. The Goodput library reads these logs to compute checkpointing badput.
 To enable checkpoint logging set the `enable_checkpoint_cloud_logger` MaxText flag to `True`.
@@ -126,7 +125,7 @@ If checkpointing is enabled, please enable the `enable_checkpoint_cloud_logger` 
 1. MaxText installs the required packages on setup: `tensorboard-plugin-profile`, `tensorflow` and `tensorboard`.
 2. Follow the Tensorboard URL on MaxText logs to view all metrics in one location.
 
-#### Visualize Goodput, Badput and Step Deviation on Google Cloud Monitoring
+#### Visualize Goodput, Badput and step deviation on Google Cloud Monitoring
 
 By default, performance data ([goodput](https://cloud.google.com/monitoring/api/metrics_gcp#:~:text=workload/goodput_time), [badput](https://cloud.google.com/monitoring/api/metrics_gcp#:~:text=workload/badput_time), and [step deviation](https://cloud.google.com/monitoring/api/metrics_gcp#:~:text=workload/performance)) is automatically sent to Google Cloud Monitoring, enabling visualization on dashboards.
 
@@ -173,7 +172,7 @@ python3 -m MaxText.train src/MaxText/configs/base.yml base_output_directory=$OUT
 Setting `monitor_goodput` to `False` will disable both tensorboard and GCM
 monitoring.
 
-### Monitoring Raw Metrics and Dashboards
+### Monitoring raw metrics and dashboards
 
 Goodput, Badput and Step Time Deviation metrics can be monitored using GCM Metrics Explorer:
 

@@ -15,7 +15,7 @@
  -->
 
 (full-finetuning)=
-# Full Finetuning LLama3-8B  Model
+# Example: Full finetuning LLama3-7B model
 
 MaxText can perform pre-training and full finetuning. To perform full fine
 tuning, you need to pass the checkpoint to the training script.
@@ -34,7 +34,7 @@ The high level steps involve:
 - Note: You may need to change the training parameters to fit the model to the
   TPU or GPU shape and to obtain an optimized performance.
 
-## MaxText Checkpoints
+## MaxText checkpoints
 
 MaxText checkpoints are in their own format. You can see the format in the script for llama conversion script.
 
@@ -43,7 +43,7 @@ The conversion scripts for LLama work with Meta’s original checkpoints and not
 E.g.
 
 ```bash
-python3 -m MaxText.llama_or_mistral_ckpt --base-model-path <path/to/meta/ckpt> \
+python3 -m MaxText.utils.ckpt_scripts.llama_or_mistral_ckpt --base-model-path <path/to/meta/ckpt> \
     --maxtext-model-path <GCS/path/to/save/new/maxtext/ckpt> --model-size llama2-7b
 ```
 
@@ -54,7 +54,7 @@ The conversion scripts do not use accelerators but need large host memory to per
 - For large size model (e.g. 70B model), this script requires large memory VM.
 - The script load and save weights in a single pass.
 
-### Sample Full Fine tuning Script
+### Sample full fine tuning script
 
 Below is a sample training script for LLama2-7b.
 
@@ -74,15 +74,15 @@ python3 -m MaxText.train \
 You can find some [end to end scripts here](https://github.com/AI-Hypercomputer/maxtext/tree/main/end_to_end/tpu).
 These scripts can provide a reference point for various scripts.
 
-### Maxtext Checkpoint to Hugging Face
+### MaxText checkpoint to Hugging Face
 
-Post finetuning or pre-training, maxtext also provides scripts to convert maxtext format weights back to [hugging face](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/llama_mistral_mixtral_orbax_to_hf.py).
+Post finetuning or pre-training, MaxText also provides scripts to convert MaxText format weights back to [Hugging Face](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/llama_mistral_mixtral_orbax_to_hf.py).
 
 #### Dataset
 
-Maxtext provides examples to work with [Common Crawl](https://commoncrawl.org/). The dataset is available in TFRecords format in a cloud bucket. Maxtext provides scripts to copy the dataset to a Google Cloud Storage Bucket.
+MaxText provides examples to work with [Common Crawl](https://commoncrawl.org/). The dataset is available in TFRecords format in a cloud bucket. MaxText provides scripts to copy the dataset to a Google Cloud Storage Bucket.
 
-##### Common Crawl (c4) Dataset Setup
+##### Common Crawl (c4) dataset setup
 
 You need to run these steps once per project prior to any local development or cluster experiments.
 
@@ -92,7 +92,7 @@ You need to run these steps once per project prior to any local development or c
 MaxText assumes these GCS buckets are created in the same project and that it has permissions to read and write from them:
 
 ```bash
-bash download_dataset.sh {GCS_PROJECT} {GCS_BUCKET_NAME}
+bash tools/data_generation/download_dataset.sh ${GCS_PROJECT?} ${GCS_BUCKET_NAME?}
 ```
 
 The above will download the c4 dataset to your GCS BUCKET.

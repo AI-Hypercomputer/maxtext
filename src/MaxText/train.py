@@ -19,6 +19,7 @@
 # See github.com/google/maxtext/issues/20 for more
 
 from typing import Any, Sequence
+from contextlib import contextmanager
 import datetime
 import functools
 import os
@@ -50,8 +51,10 @@ from MaxText import maxtext_utils
 from MaxText import train_utils
 from MaxText import profiler
 from MaxText import pyconfig
+from MaxText import sharding
 from MaxText.layers.multi_token_prediction import calculate_mtp_acceptance_rate, calculate_mtp_loss
-from MaxText.data_loader import DataLoader
+from MaxText.common_types import ShardMode
+from MaxText.data_loader import create_dataloader
 from MaxText.globals import EPS
 from MaxText.metric_logger import MetricLogger
 from MaxText.utils import gcs_utils
@@ -64,7 +67,8 @@ from MaxText.utils.goodput_utils import (
 from MaxText.vertex_tensorboard import VertexTensorboardManager
 # Placeholder: internal
 
-from MaxText.maxtext_utils import compute_loss_nnx, compute_loss_linen
+from MaxText.gradient_accumulation import gradient_accumulation_loss_and_grad
+from MaxText.vocabulary_tiling import vocab_tiling_linen_loss
 from MaxText.dpo_utils import _merge_dpo_state, _split_dpo_state, dpo_loss_fn
 from MaxText.train_utils import validate_train_config
 from MaxText.metric_logger import record_activation_metrics
@@ -124,7 +128,7 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
         data["inputs_position"],
         decoder_segment_ids=data["inputs_segmentation"],
         encoder_images=data["images"] if config.use_multimodal else None,
-        encoder_image_masks=data["image_masks"] if config.use_multimodal else None,
+        encoder_image_masks=data["image_masks"] if config.use_multimodal and "image_masks" in data else None,
         enable_dropout=config.enable_dropout if is_train else False,
         rngs={"dropout": rng1, "params": aqt_rng},
         mutable=mutable_collections,
@@ -132,7 +136,22 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
         decoder_target_mask=data["targets_segmentation"],
     )
 
-    total_loss = compute_loss_linen(intermediate_outputs, logits, data, config, model, params, is_train)
+    if config.num_vocab_tiling > 1:
+      hidden_state_key = ("intermediates", "decoder", "hidden_states")
+      hidden_states = maxtext_utils.get_nested_value(intermediate_outputs, hidden_state_key)[0]
+      total_loss = vocab_tiling_linen_loss(hidden_states, data, config, model, params, is_train)
+    else:
+      one_hot_targets = jax.nn.one_hot(data["targets"], config.vocab_size)
+      xent, _ = max_utils.cross_entropy_with_logits(logits, one_hot_targets)
+      xent = sharding.maybe_shard_with_logical(
+          xent,
+          ("activation_embed_and_logits_batch", "activation_length"),
+          model.mesh,
+          config.shard_mode,
+      )
+      # Mask out paddings at the end of each example.
+      xent = xent * (data["targets_segmentation"] != 0)
+      total_loss = jnp.sum(xent)
   else:
     # Flax NNX model
     logits = model(
@@ -140,13 +159,18 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
         decoder_positions=data["inputs_position"],
         decoder_segment_ids=data["inputs_segmentation"],
         encoder_images=data["images"] if config.use_multimodal else None,
-        encoder_image_masks=data["image_masks"] if config.use_multimodal else None,
+        encoder_image_masks=data["image_masks"] if config.use_multimodal and "image_masks" in data else None,
         enable_dropout=config.enable_dropout if is_train else False,
         decoder_target_tokens=data["targets"],
         decoder_target_mask=data["targets_segmentation"],
     )
     intermediate_outputs = {}
-    total_loss = compute_loss_nnx(intermediate_outputs, logits, data, config, model, params, is_train)
+    one_hot_targets = jax.nn.one_hot(data["targets"], config.vocab_size)
+    xent, _ = max_utils.cross_entropy_with_logits(logits, one_hot_targets)
+    xent = nn.with_logical_constraint(xent, ("activation_embed_and_logits_batch", "activation_length"))
+    # Mask out paddings at the end of each example.
+    xent = xent * (data["targets_segmentation"] != 0)
+    total_loss = jnp.sum(xent)
 
   total_weights = jnp.sum(data["targets_segmentation"] != 0)
   # If gradient accumulation is enabled, we don't need to divide total_loss
@@ -190,7 +214,7 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
   return loss, aux
 
 
-def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
+def train_step(model, config, state_mesh_shardings, params_shardings, state, data, dropout_rng):
   """
 
   Args:
@@ -212,42 +236,19 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
     extra_dpo_args = [reference_params]
     _loss_fn = dpo_loss_fn
 
+  params = state.params
+
   if config.gradient_accumulation_steps > 1:
-
-    def accumulate_gradient(acc_grad_and_loss, data):
-      grad_func = jax.value_and_grad(_loss_fn, argnums=4, has_aux=True)
-      (_, aux), cur_batch_gradient = grad_func(
-          model, config, data, dropout_rng, state.params, *extra_dpo_args, is_train=True
-      )
-      acc_grad_and_loss["loss"] += aux["total_loss"]
-      acc_grad_and_loss["moe_lb_loss"] += aux["moe_lb_loss"]
-      acc_grad_and_loss["mtp_loss"] += aux["mtp_loss"]
-      acc_grad_and_loss["grad"] = jax.tree_util.tree_map(
-          lambda x, y: x + y, cur_batch_gradient, acc_grad_and_loss["grad"]
-      )
-      acc_grad_and_loss["total_weights"] += aux["total_weights"]
-      return acc_grad_and_loss, aux
-
-    def reshape_to_microbatch_accumulations(batch_arr):
-      """Reshape global batch to microbatches, assuming batch axis is leading."""
-      microbatches = config.gradient_accumulation_steps
-      microbatch_shape = (microbatches, batch_arr.shape[0] // microbatches) + batch_arr.shape[1:]
-      return jnp.reshape(batch_arr, microbatch_shape)
-
-    data = jax.tree_util.tree_map(reshape_to_microbatch_accumulations, data)
-    init_grad = jax.tree_util.tree_map(jnp.zeros_like, state.params)
-    init_grad_and_loss = {"loss": 0.0, "grad": init_grad, "total_weights": 0, "moe_lb_loss": 0.0, "mtp_loss": 0.0}
-
-    grad_and_loss, aux = jax.lax.scan(
-        accumulate_gradient, init_grad_and_loss, data, length=config.gradient_accumulation_steps
+    loss, aux, raw_grads = gradient_accumulation_loss_and_grad(
+        _loss_fn,
+        config,
+        model,
+        params,
+        params_shardings,
+        data,
+        dropout_rng,
+        extra_dpo_args,
     )
-    loss = (
-        grad_and_loss["loss"] / grad_and_loss["total_weights"]
-        + grad_and_loss["moe_lb_loss"] / config.gradient_accumulation_steps
-        + grad_and_loss["mtp_loss"] / config.gradient_accumulation_steps
-    )
-    raw_grads = jax.tree_util.tree_map(lambda arr: arr / grad_and_loss["total_weights"], grad_and_loss["grad"])
-    aux = jax.tree.map(lambda x: jnp.sum(x, axis=0), aux)  # pytype: disable=module-attr
   else:
     if config.optimizer_memory_host_offload:
       if config.use_dpo:
@@ -255,8 +256,10 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
             reference_params, max_utils.with_memory_kind(reference_params_sharding, "device")
         )
         extra_dpo_args = [reference_params]
+    if config.shard_optimizer_over_data:
+      params = jax.tree.map(jax.lax.with_sharding_constraint, params, params_shardings)
     grad_func = jax.value_and_grad(_loss_fn, argnums=4, has_aux=True)
-    (loss, aux), raw_grads = grad_func(model, config, data, dropout_rng, state.params, *extra_dpo_args, is_train=True)
+    (loss, aux), raw_grads = grad_func(model, config, data, dropout_rng, params, *extra_dpo_args, is_train=True)
 
   raw_grads = jax.tree_util.tree_map(lambda x: x.astype(config.grad_dtype) if x.dtype == jnp.float32 else x, raw_grads)
   intermediate_outputs = aux["intermediate_outputs"]
@@ -373,19 +376,23 @@ def train_loop(config, recorder, state=None):
       state = _merge_dpo_state(state, reference_params)
     state_mesh_shardings = _merge_dpo_state(state_mesh_shardings, state_mesh_shardings.params["params"])
 
+  params_shardings, state_mesh_shardings = sharding.maybe_update_params_sharding_with_opt(config, state_mesh_shardings)
+
   p_train_step, p_eval_step = train_utils.jit_train_and_eval_step(
-      config, model, mesh, state, state_mesh_shardings, train_step, eval_step, eval_data_iterator
+      config, model, mesh, state, state_mesh_shardings, train_step, eval_step, eval_data_iterator, params_shardings
   )
 
   with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
     shaped_batch = maxtext_utils.get_shaped_batch(config)
+    if config.shard_optimizer_over_data:
+      state = sharding.maybe_shard_with_name(state, state_mesh_shardings, config.shard_mode)
     compiled = p_train_step.lower(state, shaped_batch, init_rng).compile()
     compiled_stats = compiled.memory_analysis()
     max_utils.print_compiled_memory_stats(compiled_stats)
 
   start_step = get_first_step(state)  # this is the start_step for training
   prof = profiler.Profiler(config, offset_step=start_step)
-  data_loader = DataLoader(config, mesh, data_iterator, recorder)
+  data_loader = create_dataloader(config, mesh, data_iterator, recorder)
   metric_logger = MetricLogger(config=config, learning_rate_schedule=learning_rate_schedule)
 
   # Write train config params, num model params, and XLA flags to tensorboard
@@ -398,10 +405,18 @@ def train_loop(config, recorder, state=None):
 
       with jax.profiler.StepTraceAnnotation("train", step_num=step):
         example_batch = data_loader.load_next_batch()
+        # Reshard data from loaded sharding to performant activation sharding
+        example_batch = sharding.maybe_shard_with_name(
+            example_batch,
+            sharding.get_input_data_sharding(config, mesh),
+            shard_mode=config.shard_mode,
+        )
         # pylint: disable=not-callable
         nextrng = jax.jit(jax.random.fold_in)(init_rng, step)
         with maybe_record_goodput(recorder, GoodputEvent.STEP, step):
           with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+            if config.shard_optimizer_over_data:
+              state = sharding.maybe_shard_with_name(state, state_mesh_shardings, config.shard_mode)
             state, metrics = p_train_step(state, example_batch, nextrng)
 
       step_time_delta = datetime.datetime.now() - last_step_completion
@@ -451,6 +466,9 @@ def train_loop(config, recorder, state=None):
     if config.save_checkpoint_on_completion:
       state_to_save = state if not config.use_dpo else _split_dpo_state(state)[0]
       checkpointing.maybe_save_checkpoint(checkpoint_manager, state_to_save, config, data_iterator)
+    if checkpoint_manager is not None:
+      # in case the last checkpoint_period checkpoint is still in progress
+      checkpoint_manager.wait_until_finished()
   except exceptions.StopTraining as e:
     max_logging.log(f"Training stopped: {str(e)}")
   finally:
@@ -474,9 +492,12 @@ def initialize(argv: Sequence[str]) -> tuple[pyconfig.HyperParameters, Any, Any]
   # TODO: mazumdera@ : ensure missing mandatory fields in base.yml are filled in in argv,
   # or fill in here
   config = pyconfig.initialize(argv)
-  jax.config.update("jax_use_shardy_partitioner", config.shardy)
   max_utils.print_system_information()
   validate_train_config(config)
+  jax.config.update("jax_use_shardy_partitioner", config.shardy)
+  # update explicit sharding-supported config
+  if config.shard_mode == ShardMode.EXPLICIT:
+    jax.config.update("jax_remove_size_one_mesh_axis_from_type", True)
   os.environ["TFDS_DATA_DIR"] = config.dataset_path or ""
   vertex_tensorboard_manager = VertexTensorboardManager()
   if config.use_vertex_tensorboard or os.environ.get("UPLOAD_DATA_TO_TENSORBOARD"):
@@ -505,9 +526,31 @@ def run(config, recorder, diagnostic_config):
       train_loop(config, recorder)
 
 
+@contextmanager
+def transformer_engine_context():
+  """If TransformerEngine is available, this context manager will provide
+  the library with MaxText-specific details needed for correcct operation."""
+  try:
+    from transformer_engine.jax.sharding import global_shard_guard, MeshResource  # pylint: disable=import-outside-toplevel
+    # Inform TransformerEngine of MaxText's physical mesh resources.
+    mesh_resource = MeshResource(  # pytype: disable=wrong-arg-types
+        dp_resource="data",
+        tp_resource="tensor",
+        # tpsp_resource = "tensor_sequence", #TODO(Phuong): add this back when upstreaming CGEMM
+        fsdp_resource="fsdp",
+        pp_resource=None,
+        cp_resource="context",
+    )
+    with global_shard_guard(mesh_resource):
+      yield
+  except (ImportError, AttributeError):
+    yield
+
+
 def main(argv: Sequence[str]) -> None:
-  config, recorder, diagnostic_config = initialize(argv)
-  run(config, recorder, diagnostic_config)
+  with transformer_engine_context():
+    config, recorder, diagnostic_config = initialize(argv)
+    run(config, recorder, diagnostic_config)
 
 
 if __name__ == "__main__":

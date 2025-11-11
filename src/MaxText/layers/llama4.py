@@ -77,6 +77,8 @@ class Llama4UnfoldConvolution(nnx.Module):
         window_strides=[self.config.patch_size_for_vit, self.config.patch_size_for_vit],
         padding="VALID",
         dimension_numbers=("NCHW", "HWIO", "NCHW"),
+        precision=lax.Precision(self.config.matmul_precision),
+        preferred_element_type=self.config.dtype_mm,
     )
 
     patches = patches.reshape(
@@ -413,6 +415,7 @@ class Llama4DecoderLayer(nnx.Module):
       )
     else:
       self.mlp = MlpBlock(
+          mesh=self.mesh,
           in_features=config.emb_dim,
           intermediate_dim=config.mlp_dim,
           activations=config.mlp_activations,
@@ -442,7 +445,6 @@ class Llama4DecoderLayer(nnx.Module):
       decoder_positions,
       deterministic,
       model_mode,
-      bidirectional_mask=None,
       slot: None | int = None,
       page_state: None | page_manager.PageState = None,
       previous_chunk=None,
@@ -467,7 +469,6 @@ class Llama4DecoderLayer(nnx.Module):
         slot=slot,
         page_state=page_state,
         previous_chunk=previous_chunk,
-        bidirectional_mask=bidirectional_mask,
     )
     attention_lnx = nn.with_logical_constraint(attention_lnx, self.activation_axis_names)
     intermediate_inputs = inputs + attention_lnx
@@ -561,7 +562,6 @@ class Llama4ScannableBlock(nnx.Module):
       decoder_positions,
       deterministic,
       model_mode,
-      bidirectional_mask=None,
       slot: None | int = None,
       page_state: None | page_manager.PageState = None,
       previous_chunk=None,
@@ -582,7 +582,6 @@ class Llama4ScannableBlock(nnx.Module):
           previous_chunk=previous_chunk,
           page_state=page_state,
           slot=slot,
-          bidirectional_mask=bidirectional_mask,
       )
       if cfg.scan_layers:
         y = y[0]
@@ -611,7 +610,9 @@ class Llama4VisionEncoderLayer(nnx.Module):
         self.config.hidden_size_for_vit,
     )
 
-    self.input_layer_norm = nnx.LayerNorm(num_features=self.config.hidden_size_for_vit, epsilon=1e-5, rngs=self.rngs)
+    self.input_layer_norm = nnx.LayerNorm(
+        num_features=self.config.hidden_size_for_vit, epsilon=self.config.normalization_layer_epsilon, rngs=self.rngs
+    )
     self.self_attention_vision = Attention(
         config=self.config,
         num_query_heads=self.config.num_attention_heads_for_vit,
@@ -623,6 +624,8 @@ class Llama4VisionEncoderLayer(nnx.Module):
         inputs_kv_shape=self.hidden_states_shape,
         float32_qk_product=self.config.float32_qk_product,
         float32_logits=self.config.float32_logits,
+        dtype=self.config.dtype_mm,
+        weight_dtype=self.config.weight_dtype,
         mesh=self.mesh,
         dropout_rate=0,
         name="self_attention_vision",
@@ -640,7 +643,7 @@ class Llama4VisionEncoderLayer(nnx.Module):
         rngs=self.rngs,
     )
     self.post_attention_layer_norm = nnx.LayerNorm(
-        num_features=self.config.hidden_size_for_vit, epsilon=1e-5, rngs=self.rngs
+        num_features=self.config.hidden_size_for_vit, epsilon=self.config.normalization_layer_epsilon, rngs=self.rngs
     )
     self.Llama4VisionMLP_0 = Llama4VisionMLP(config=self.config, rngs=self.rngs)
 
@@ -722,10 +725,16 @@ class Llama4VisionModel(nnx.Module):
         self.initializer(self.rngs.params(), (self.num_patches, self.config.hidden_size_for_vit), self.config.dtype_mm)
     )
     self.layernorm_pre = nnx.LayerNorm(
-        num_features=self.config.hidden_size_for_vit, dtype=self.config.dtype_mm, rngs=self.rngs
+        num_features=self.config.hidden_size_for_vit,
+        epsilon=self.config.normalization_layer_epsilon,
+        dtype=self.config.dtype_mm,
+        rngs=self.rngs,
     )
     self.layernorm_post = nnx.LayerNorm(
-        num_features=self.config.hidden_size_for_vit, dtype=self.config.dtype_mm, rngs=self.rngs
+        num_features=self.config.hidden_size_for_vit,
+        epsilon=self.config.normalization_layer_epsilon,
+        dtype=self.config.dtype_mm,
+        rngs=self.rngs,
     )
 
     self.Llama4UnfoldConvolution_0 = Llama4UnfoldConvolution(config=self.config, rngs=self.rngs)
@@ -762,7 +771,7 @@ class Llama4VisionModel(nnx.Module):
     class_embedding = jnp.broadcast_to(
         class_embedding_expanded, (hidden_states.shape[0], 1, self.config.hidden_size_for_vit)
     )
-    hidden_states = jnp.concatenate([class_embedding, hidden_states], axis=1)
+    hidden_states = jnp.concatenate([hidden_states, class_embedding], axis=1)
 
     # Add positional embedding
     hidden_states += self.positional_embedding_vlm

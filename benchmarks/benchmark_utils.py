@@ -22,6 +22,13 @@ It includes:
 import dataclasses
 import typing
 
+from enum import Enum
+
+
+class Framework(Enum):
+  PATHWAYS = "pathways"
+  MCJAX = "mcjax"
+
 
 def str2bool(v: str) -> bool:
   """Convert a string of truth to True or False.

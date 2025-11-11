@@ -15,16 +15,15 @@
 """Attentions Layers."""
 
 import dataclasses
+import functools
 from typing import Any, Iterable, Optional, Tuple, Union
 
 from jax.ad_checkpoint import checkpoint_name
-from jax.sharding import Mesh
+from jax.sharding import Mesh, NamedSharding
 import jax
 import jax.numpy as jnp
 
-
-from flax import linen as nn
-from flax import nnx
+from flax import nnx, linen as nn
 
 from MaxText.common_types import (
     DecoderBlockType,
@@ -54,6 +53,7 @@ from MaxText.common_types import (
     EP_AS_CONTEXT,
     AttentionType,
 )
+from MaxText.sharding import maybe_shard_with_logical
 from MaxText.inference import kvcache
 from MaxText.inference import page_manager
 from MaxText.inference import paged_attention
@@ -65,10 +65,11 @@ from MaxText.layers.embeddings import (
     LlamaVisionRotaryEmbedding,
     RotaryEmbedding,
     YarnRotaryEmbedding,
+    Qwen3NextRotaryEmbedding,
 )
 from MaxText.layers.initializers import nd_dense_init, NdInitializer, variable_to_logically_partitioned, default_bias_init
 from MaxText.layers.linears import DenseGeneral, canonicalize_tuple, normalize_axes
-from MaxText.layers.normalizations import RMSNorm
+from MaxText.layers.normalizations import RMSNorm, Qwen3NextRMSNorm
 from MaxText.layers.quantizations import AqtQuantization as Quant
 
 # pylint: disable=line-too-long, g-doc-args, g-doc-return-or-yield, bad-continuation, g-inconsistent-quotes
@@ -416,6 +417,8 @@ class Attention(nnx.Module):
     self.model_mode = model_mode
     self.rngs = rngs
 
+    self.is_qwen3_next = self.config.decoder_block == DecoderBlockType.QWEN3_NEXT
+
     # Module attribute names must match names previously passed to Linen for checkpointing
     self.KVCache_0 = (
         self.init_kv_caches(inputs_kv_shape=inputs_kv_shape)
@@ -484,6 +487,7 @@ class Attention(nnx.Module):
           num_features=self.head_dim,
           dtype=self.config.dtype,
           weight_dtype=self.config.weight_dtype,
+          shard_mode=self.config.shard_mode,
           epsilon=self.config.normalization_layer_epsilon,
           kernel_axes=("norm",),
           rngs=self.rngs,
@@ -492,13 +496,35 @@ class Attention(nnx.Module):
           num_features=self.head_dim,
           dtype=self.config.dtype,
           weight_dtype=self.config.weight_dtype,
+          shard_mode=self.config.shard_mode,
           epsilon=self.config.normalization_layer_epsilon,
           kernel_axes=("norm",),
+          rngs=self.rngs,
+      )
+    elif self.is_qwen3_next:
+      self.query_norm = Qwen3NextRMSNorm(
+          num_features=self.config.head_dim,
+          eps=self.config.normalization_layer_epsilon,
+          dtype=self.config.dtype,
+          weight_dtype=self.config.weight_dtype,
+          rngs=self.rngs,
+      )
+      self.key_norm = Qwen3NextRMSNorm(
+          num_features=self.config.head_dim,
+          eps=self.config.normalization_layer_epsilon,
+          dtype=self.config.dtype,
+          weight_dtype=self.config.weight_dtype,
           rngs=self.rngs,
       )
     else:
       self.query_norm = None
       self.key_norm = None
+
+    self._maybe_shard_with_logical = functools.partial(
+        maybe_shard_with_logical,
+        mesh=mesh,
+        shard_mode=config.shard_mode,
+    )
 
   def _init_projections(self, inputs_q_shape: Tuple, inputs_kv_shape: Tuple) -> None:
     """Initializes the query, key, value, and output projections."""
@@ -530,9 +556,15 @@ class Attention(nnx.Module):
     kernel_axes = (
         (None, None, None) if self.config.ici_context_autoregressive_parallelism > 1 else ("embed", "q_heads", "kv")
     )
+    in_features = self.convert_dense_general_inputs_shape(inputs_q_shape)
+    out_features = (self.num_query_heads, self.head_dim)
+
+    if self.is_qwen3_next:
+      out_features = (self.num_query_heads, self.head_dim * 2)
+
     return DenseGeneral(
-        in_features_shape=self.convert_dense_general_inputs_shape(inputs_q_shape),
-        out_features_shape=(self.num_query_heads, self.head_dim),
+        in_features_shape=in_features,
+        out_features_shape=out_features,
         axis=-1,
         kernel_init=query_init,
         kernel_axes=kernel_axes,
@@ -541,13 +573,14 @@ class Attention(nnx.Module):
         quant=self.quant,
         matmul_precision=self.config.matmul_precision,
         use_bias=self.use_bias_in_projections,
+        shard_mode=self.config.shard_mode,
         rngs=self.rngs,
     )
 
-  def query_projection(self, inputs_q: Array) -> Array:
+  def query_projection(self, inputs_q: Array, out_sharding: NamedSharding | None = None) -> Array:
     """Query projection."""
 
-    return self.query(inputs_q)
+    return self.query(inputs_q, out_sharding=out_sharding)
 
   def init_kv_w(self, inputs_kv_shape: Tuple) -> nnx.Module:
     """Initializes the key or value projection.
@@ -579,12 +612,13 @@ class Attention(nnx.Module):
         dtype=self.dtype,
         weight_dtype=self.weight_dtype,
         quant=self.quant,
+        shard_mode=self.config.shard_mode,
         matmul_precision=self.config.matmul_precision,
         use_bias=self.use_bias_in_projections,
         rngs=self.rngs,
     )
 
-  def kv_projection(self, inputs_kv: Array, proj_name: str) -> nnx.Module:
+  def kv_projection(self, inputs_kv: Array, proj_name: str, out_sharding: NamedSharding | None = None) -> nnx.Module:
     """Applies the key or value projection.
 
     Args:
@@ -600,9 +634,9 @@ class Attention(nnx.Module):
 
     """
     if proj_name == "key":
-      return self.key(inputs_kv)
+      return self.key(inputs_kv, out_sharding=out_sharding)
     elif proj_name == "value":
-      return self.value(inputs_kv)
+      return self.value(inputs_kv, out_sharding=out_sharding)
     else:
       raise ValueError(f"proj_name must be 'key' or 'value', but got {proj_name}")
 
@@ -616,42 +650,52 @@ class Attention(nnx.Module):
         dtype=self.dtype,
         weight_dtype=self.weight_dtype,
         quant=self.quant,
+        shard_mode=self.config.shard_mode,
         matmul_precision=self.config.matmul_precision,
         use_bias=self.use_bias_in_projections,
         rngs=self.rngs,
     )
 
-  def qkv_projection(self, inputs: Array, proj_name: str):
+  def qkv_projection(self, inputs: Array, proj_name: str, out_sharding: NamedSharding | None = None):
     """Fused QKV projection"""
 
-    qkv_proj = self.qkv_proj(inputs)
+    qkv_proj = self.qkv_proj(inputs, out_sharding)
     qkv_proj = checkpoint_name(qkv_proj, "qkv_proj")
     query, key, value = qkv_proj[:, :, 0, ...], qkv_proj[:, :, 1, ...], qkv_proj[:, :, 2, ...]
     return query, key, value
 
   def init_out_w(self, output_dim: int) -> nnx.Module:
     """out projection"""
+    in_features = (self.num_query_heads, self.head_dim)
+    out_features = output_dim
     out_kernel_axis = (
         (None, None, None) if self.config.ici_context_autoregressive_parallelism > 1 else ("heads", "kv", "embed")
     )
+    axis = (-2, -1)
+
+    if self.is_qwen3_next:
+      in_features = self.num_query_heads * self.head_dim
+      out_kernel_axis = ("mlp", "embed")
+      axis = (-1,)
+
     return DenseGeneral(
-        in_features_shape=(self.num_query_heads, self.head_dim),
-        out_features_shape=output_dim,
-        axis=(-2, -1),
+        in_features_shape=in_features,
+        out_features_shape=out_features,
+        axis=axis,
         kernel_init=self.kernel_init,
         kernel_axes=out_kernel_axis,  # trade speed with memory
         dtype=self.dtype,
         weight_dtype=self.weight_dtype,
         quant=self.quant,
+        shard_mode=self.config.shard_mode,
         matmul_precision=self.config.matmul_precision,
         use_bias=self.use_bias_in_projections,
         rngs=self.rngs,
     )
 
-  def out_projection(self, out: Array) -> Array:
+  def out_projection(self, out: Array, out_sharding: NamedSharding | None = None) -> Array:
     """out projection"""
-
-    return self.out(out)
+    return self.out(out, out_sharding=out_sharding)
 
   def convert_dense_general_inputs_shape(
       self,
@@ -682,6 +726,7 @@ class Attention(nnx.Module):
           hidden_size=self.config.hidden_size_for_vit,
           num_attention_heads=self.config.num_attention_heads_for_vit,
           rope_theta=self.config.rope_theta_for_vit,
+          fprop_dtype=self.dtype,
           rngs=self.rngs,
       )
     elif self.config.model_name.startswith("llama3.1") or rope_type.startswith("llama3.1"):
@@ -706,6 +751,16 @@ class Attention(nnx.Module):
           interleave=self.config.rope_interleave,
           truncate=self.config.rope_truncate,
           attention_scaling=self.config.rope_attention_scaling,
+          rngs=self.rngs,
+      )
+    elif self.is_qwen3_next:
+      rotary_embedding = Qwen3NextRotaryEmbedding(
+          min_timescale=self.config.rope_min_timescale,
+          max_timescale=self.config.rope_max_timescale,
+          embedding_dims=self.config.head_dim,
+          partial_rotary_factor=self.config.partial_rotary_factor,
+          cast_as_fprop_dtype=True,
+          fprop_dtype=self.config.dtype,
           rngs=self.rngs,
       )
     else:
@@ -815,6 +870,7 @@ class Attention(nnx.Module):
       inputs_kv: Array,
       inputs_positions: Array | None = None,
       decoder_segment_ids: Array | None = None,
+      out_sharding: NamedSharding | None = None,
       *,
       model_mode: str = MODEL_MODE_TRAIN,
       deterministic: bool = False,
@@ -854,29 +910,40 @@ class Attention(nnx.Module):
       output of shape `[batch, length, q_features]`.
     """
     if model_mode == MODEL_MODE_PREFILL:
-      inputs_q = nn.with_logical_constraint(inputs_q, self.prefill_input_axis_names)
-      inputs_kv = nn.with_logical_constraint(inputs_kv, self.prefill_input_axis_names)
+      inputs_q = self._maybe_shard_with_logical(inputs_q, self.prefill_input_axis_names)
+      inputs_kv = self._maybe_shard_with_logical(inputs_kv, self.prefill_input_axis_names)
     elif model_mode == MODEL_MODE_TRAIN and self.config.expert_shard_attention_option == EP_AS_CONTEXT:
-      inputs_q = nn.with_logical_constraint(inputs_q, self.ep_input_axis_names)
-      inputs_kv = nn.with_logical_constraint(inputs_kv, self.ep_input_axis_names)
+      inputs_q = self._maybe_shard_with_logical(inputs_q, self.ep_input_axis_names)
+      inputs_kv = self._maybe_shard_with_logical(inputs_kv, self.ep_input_axis_names)
     elif model_mode == MODEL_MODE_TRAIN:
-      inputs_q = nn.with_logical_constraint(inputs_q, self.input_axis_names)
-      inputs_kv = nn.with_logical_constraint(inputs_kv, self.input_axis_names)
+      inputs_q = self._maybe_shard_with_logical(inputs_q, self.input_axis_names)
+      inputs_kv = self._maybe_shard_with_logical(inputs_kv, self.input_axis_names)
     else:
-      inputs_q = nn.with_logical_constraint(inputs_q, self.decode_input_axis_names)
-      inputs_kv = nn.with_logical_constraint(inputs_kv, self.decode_input_axis_names)
+      inputs_q = self._maybe_shard_with_logical(inputs_q, self.decode_input_axis_names)
+      inputs_kv = self._maybe_shard_with_logical(inputs_kv, self.decode_input_axis_names)
 
     # apply projection.
     if self.config.fused_qkv:
       query, key, value = self.qkv_projection(inputs_q, proj_name="qkv_proj")
     else:
-      query = self.query_projection(inputs_q)
-      key = self.kv_projection(inputs_kv, proj_name="key")
-      value = self.kv_projection(inputs_kv, proj_name="value")
+      query_sharding = NamedSharding(self.mesh, nn.logical_to_mesh_axes(self.query_axis_names))
+      query = self.query_projection(inputs_q, out_sharding=query_sharding)
+      key_sharding = NamedSharding(self.mesh, nn.logical_to_mesh_axes(self.key_axis_names))
+      key = self.kv_projection(inputs_kv, proj_name="key", out_sharding=key_sharding)
+      value_sharding = NamedSharding(self.mesh, nn.logical_to_mesh_axes(self.value_axis_names))
+      value = self.kv_projection(inputs_kv, proj_name="value", out_sharding=value_sharding)
+
+    gate = None
+    if self.is_qwen3_next:
+      # Split query into query & gate.
+      query, gate = jnp.split(query, 2, axis=-1)
+      batch_size, seq_len, _, _ = gate.shape
+      gate = gate.reshape(batch_size, seq_len, self.config.num_query_heads * self.config.head_dim)
 
     is_llama4_decoder_block = self.config.decoder_block == DecoderBlockType.LLAMA4
     # NOTE: llama 4 does L2 normalization after RoPE
-    if self.use_qk_norm and not is_llama4_decoder_block:
+    # Apply Qwen3Next specific RMS Norm
+    if (self.use_qk_norm and not is_llama4_decoder_block) or self.is_qwen3_next:
       query = self.query_norm(query)
       key = self.key_norm(key)
 
@@ -906,21 +973,21 @@ class Attention(nnx.Module):
       query = (query * attn_scales[:, :, jnp.newaxis, jnp.newaxis]).astype(self.dtype)
 
     if model_mode == MODEL_MODE_PREFILL:
-      query = nn.with_logical_constraint(query, self.prefill_query_axis_names)
-      key = nn.with_logical_constraint(key, self.prefill_key_axis_names)
-      value = nn.with_logical_constraint(value, self.prefill_value_axis_names)
+      query = self._maybe_shard_with_logical(query, self.prefill_query_axis_names)
+      key = self._maybe_shard_with_logical(key, self.prefill_key_axis_names)
+      value = self._maybe_shard_with_logical(value, self.prefill_value_axis_names)
     elif model_mode == MODEL_MODE_AUTOREGRESSIVE:
-      query = nn.with_logical_constraint(query, (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV))
-      key = nn.with_logical_constraint(key, (DECODE_BATCH, DECODE_LENGTH, KV_HEAD, D_KV))
-      value = nn.with_logical_constraint(value, (DECODE_BATCH, DECODE_LENGTH, KV_HEAD, D_KV))
+      query = self._maybe_shard_with_logical(query, (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV))
+      key = self._maybe_shard_with_logical(key, (DECODE_BATCH, DECODE_LENGTH, KV_HEAD, D_KV))
+      value = self._maybe_shard_with_logical(value, (DECODE_BATCH, DECODE_LENGTH, KV_HEAD, D_KV))
     elif model_mode == MODEL_MODE_TRAIN and self.config.expert_shard_attention_option == EP_AS_CONTEXT:
-      query = nn.with_logical_constraint(query, self.ep_query_axis_names)
-      key = nn.with_logical_constraint(key, self.ep_key_axis_names)
-      value = nn.with_logical_constraint(value, self.ep_value_axis_names)
+      query = self._maybe_shard_with_logical(query, self.ep_query_axis_names)
+      key = self._maybe_shard_with_logical(key, self.ep_key_axis_names)
+      value = self._maybe_shard_with_logical(value, self.ep_value_axis_names)
     else:
-      query = nn.with_logical_constraint(query, self.query_axis_names)
-      key = nn.with_logical_constraint(key, self.key_axis_names)
-      value = nn.with_logical_constraint(value, self.value_axis_names)
+      query = self._maybe_shard_with_logical(query, self.query_axis_names)
+      key = self._maybe_shard_with_logical(key, self.key_axis_names)
+      value = self._maybe_shard_with_logical(value, self.value_axis_names)
 
     query = checkpoint_name(query, "query_proj")
     key = checkpoint_name(key, "key_proj")
@@ -948,15 +1015,17 @@ class Attention(nnx.Module):
           bidirectional_mask,
           self.sinks,
       )
-
+    if self.is_qwen3_next:
+      out = out.reshape(batch_size, seq_len, self.config.num_query_heads * self.config.head_dim)
+      out = out * jax.nn.sigmoid(gate)
     if model_mode == MODEL_MODE_PREFILL:
-      out = nn.with_logical_constraint(out, self.prefill_out_axis_names)
+      out = self._maybe_shard_with_logical(out, self.prefill_out_axis_names)
     elif model_mode == MODEL_MODE_TRAIN and self.config.expert_shard_attention_option == EP_AS_CONTEXT:
-      out = nn.with_logical_constraint(out, self.ep_out_axis_names)
+      out = self._maybe_shard_with_logical(out, self.ep_out_axis_names)
     elif model_mode == MODEL_MODE_TRAIN:
-      out = nn.with_logical_constraint(out, self.out_axis_names)
+      out = self._maybe_shard_with_logical(out, self.out_axis_names)
     else:
-      out = nn.with_logical_constraint(out, self.decode_out_axis_names)
-    out = self.out_projection(out)
+      out = self._maybe_shard_with_logical(out, self.decode_out_axis_names)
+    out = self.out_projection(out, out_sharding=out_sharding)
     out = checkpoint_name(out, "out_proj")
     return out

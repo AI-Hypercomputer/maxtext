@@ -33,6 +33,8 @@ entire training loop, including checkpointing and metric logging.
 """
 
 
+import pathwaysutils
+
 import datetime
 import time
 import os
@@ -70,6 +72,7 @@ from MaxText import exceptions
 from MaxText import max_logging
 from MaxText import max_utils
 from MaxText import maxtext_utils
+from MaxText import sharding
 from MaxText import train_utils
 from MaxText import profiler
 from MaxText import pyconfig
@@ -338,7 +341,7 @@ def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_
 # -----------------------------------------------------------------------------
 
 
-def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
+def train_step(model, config, state_mesh_shardings, params_shardings, state, data, dropout_rng):
   """Performs a single training step of the GRPO algorithm.
 
   This function computes the GRPO loss, calculates gradients, and updates the
@@ -349,6 +352,8 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
     model: The transformer model to be trained.
     config: The training configuration object.
     state_mesh_shardings: Pytree of sharding specifications for the training state.
+    params_shardings: Pytree of sharding specifications for the model parameters.
+                      This argument is not used and is kept to match the signature of other trainers.
     state: The current training state, including parameters and optimizer state.
     data: A batch of training data, including prompts and generated completions.
     dropout_rng: JAX PRNG key for dropout.
@@ -562,7 +567,7 @@ def setup_train_loop(
   )[2]
   if not config.using_pipeline_parallelism:
     # The vocab tensor(s) of shape [vocab, embed] (and transpose) are not sharded by stage
-    maxtext_utils.assert_params_sufficiently_sharded(state.params, mesh, config.sharding_tolerance)
+    sharding.assert_params_sufficiently_sharded(state.params, mesh, config.sharding_tolerance)
 
   return (
       init_rng,
@@ -586,8 +591,6 @@ def generate_completions(
     worker_tokenizer_model,
     worker_config_inference,
     worker_config_train,
-    worker_data_buffer,
-    worker_data_buffer_lock,
     worker_input_data_shardings,
     engine_lock,
 ):
@@ -604,8 +607,6 @@ def generate_completions(
     worker_tokenizer_model: The tokenizer model.
     worker_config_inference: The configuration for the inference process.
     worker_config_train: The main training configuration.
-    worker_data_buffer: A list acting as a shared buffer to store generated data.
-    worker_data_buffer_lock: A lock to ensure thread-safe access to the buffer.
     worker_input_data_shardings: Sharding specifications for the data.
     engine_lock: A lock to ensure thread-safe use of the inference engine.
   """
@@ -615,7 +616,7 @@ def generate_completions(
     thread_example_batch_trimmed = jax.tree_util.tree_map(
         lambda arr: arr[
             : int(
-                worker_config_inference.per_device_batch_size
+                (worker_config_inference.per_device_batch_size // worker_config_inference.num_generations)
                 * worker_config_train.inference_replicas
                 * worker_config_train.inference_devices_per_replica
             )
@@ -626,13 +627,7 @@ def generate_completions(
         worker_config_inference, worker_tokenizer_model, worker_inference_engine, thread_example_batch_trimmed
     )
     processed_batch = jax.device_put(processed_batch, worker_input_data_shardings)
-  with worker_data_buffer_lock:
-    if not worker_data_buffer:
-      worker_data_buffer.append(processed_batch)
-    else:
-      worker_data_buffer[0] = jax.tree_util.tree_map(
-          lambda a, b: np.concatenate([a, b], axis=0), worker_data_buffer[0], processed_batch
-      )
+  return processed_batch
 
 
 def train_loop(config, config_inference, recorder, state=None):
@@ -694,7 +689,7 @@ def train_loop(config, config_inference, recorder, state=None):
       config, model, mesh, state, state_mesh_shardings, train_step, eval_step, eval_data_iterator
   )
 
-  data_sharding = maxtext_utils.get_input_data_sharding(config, mesh)
+  data_sharding = sharding.get_input_data_sharding(config, mesh)
 
   inference_engine = offline_engine.OfflineEngine(
       config=config_inference,
@@ -705,6 +700,7 @@ def train_loop(config, config_inference, recorder, state=None):
 
   start_step = get_first_step(state)  # this is the start_step for training
   prof = profiler.Profiler(config, offset_step=start_step)
+  inference_prof = profiler.Profiler(config_inference, offset_step=start_step)
   data_loader = DataLoader(config_inference, inference_mesh, data_iterator, recorder)
   metric_logger = MetricLogger(config=config, learning_rate_schedule=learning_rate_schedule)
 
@@ -721,6 +717,7 @@ def train_loop(config, config_inference, recorder, state=None):
       worker_input_data_shardings,
       engine_lock,
       stop_event,
+      profiler_object,
   ):
     """The target function for the data generation worker thread.
 
@@ -738,21 +735,40 @@ def train_loop(config, config_inference, recorder, state=None):
       worker_input_data_shardings: Sharding specs for the generated data.
       engine_lock: A lock for thread-safe inference engine access.
       stop_event: A threading.Event to signal when the worker should stop.
+      profiling_event: a threading.Event to signal when to profile.
     """
+    worker_step = 0
+    is_profiling = False
     while not stop_event.is_set():
       try:
-        with jax.profiler.StepTraceAnnotation("inference"):
-          generate_completions(
+        if worker_step == profiler_object.start_initial_profile_step and not is_profiling:
+          profiler_object.activate()
+          is_profiling = True
+        elif worker_step == profiler_object.finished_initial_profile_step and is_profiling:
+          profiler_object.deactivate()
+          is_profiling = False
+        with jax.profiler.StepTraceAnnotation("inference", step_num=worker_step):
+          processed_batch = generate_completions(
               data_loader,
               worker_inference_engine,
               worker_tokenizer_model,
               worker_config_inference,
               worker_config_train,
-              worker_data_buffer,
-              worker_data_buffer_lock,
               worker_input_data_shardings,
               engine_lock,
           )
+          jax.block_until_ready(processed_batch)
+
+        with worker_data_buffer_lock:
+          if not worker_data_buffer:
+            worker_data_buffer.append(processed_batch)
+          else:
+            worker_data_buffer[0] = jax.tree_util.tree_map(
+                lambda a, b: np.concatenate([a, b], axis=0),
+                worker_data_buffer[0],
+                processed_batch,
+            )
+        worker_step += 1
       except StopIteration:
         max_logging.log("Data iterator exhausted in generation worker. Stopping.")
         break
@@ -763,19 +779,6 @@ def train_loop(config, config_inference, recorder, state=None):
 
   stop_event = threading.Event()
   inference_engine_lock = threading.Lock()
-
-  max_logging.log("Inference Rollout")
-  generate_completions(
-      data_loader,
-      inference_engine,
-      tokenizer_model,
-      config_inference,
-      config,
-      data_buffer,
-      data_buffer_lock,
-      data_sharding,
-      inference_engine_lock,
-  )
 
   required_batch_size = int(config.per_device_batch_size * config.num_generations * mesh.size)
   generation_thread = threading.Thread(
@@ -790,6 +793,7 @@ def train_loop(config, config_inference, recorder, state=None):
           data_sharding,  # Sharding for the data put into the buffer
           inference_engine_lock,
           stop_event,
+          inference_prof,  # profiler object
       ),
       daemon=True,  # So it exits when the main thread exits
   )
@@ -830,8 +834,10 @@ def train_loop(config, config_inference, recorder, state=None):
               {"params": state.params["params"]},
               {"params": state_mesh_shardings.params["params"]},
               mesh,
-              inference_state_mesh_shardings,
+              {"params": inference_state_mesh_shardings.params["params"]},
           )
+          with data_buffer_lock:
+            data_buffer.clear()
 
       step_time_delta = datetime.datetime.now() - last_step_completion
       last_step_completion = datetime.datetime.now()
@@ -872,8 +878,13 @@ def train_loop(config, config_inference, recorder, state=None):
         max_utils.print_mem_stats("After params initialized")
 
       metric_logger.buffer_and_write_train_metrics(metrics, step, step_time_delta)
-      state_to_save = _split_grpo_state(state)[0]
-      checkpointing.maybe_save_checkpoint(checkpoint_manager, state_to_save, config, data_iterator)
+
+      if config.save_checkpoint_on_completion:
+        state_to_save = _split_grpo_state(state)[0]
+        checkpointing.maybe_save_checkpoint(checkpoint_manager, state_to_save, config, data_iterator)
+      elif checkpoint_manager is not None:
+        # in case the last checkpoint_period checkpoint is still in progress
+        checkpoint_manager.wait_until_finished()
   except exceptions.StopTraining as e:
     max_logging.log(f"Training stopped: {str(e)}")
   finally:
@@ -895,6 +906,7 @@ def main(argv: Sequence[str]) -> None:
   training and inference, sets up system environment variables, and launches
   the `train_loop`.
   """
+  pathwaysutils.initialize()
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
   # TF allocates extraneous GPU memory when using TFDS data
   # this leads to CUDA OOMs. WAR for now is to hide GPUs from TF
@@ -923,6 +935,7 @@ def main(argv: Sequence[str]) -> None:
         f"with {jax.device_count()} devices"
     )
   config_inference = pyconfig.initialize(configs_argv[1])
+
   if config.per_device_batch_size < 1.0 or config_inference.per_device_batch_size < 1.0:
     raise ValueError("GRPO does not support setting per_device_batch_size < 1.0")
   jax.config.update("jax_use_shardy_partitioner", config.shardy)

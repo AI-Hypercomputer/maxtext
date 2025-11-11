@@ -50,6 +50,14 @@ on:
       cloud_runner:
         required: false
         type: string
+      worker_group:
+        required: false
+        type: number
+        default: 1
+      total_workers:
+        required: false
+        type: number
+        default: 1
 
 jobs:
   run:
@@ -62,7 +70,7 @@ jobs:
         TPU_SKIP_MDS_QUERY: ${{ inputs.image_type == 'tpu' && inputs.device_type != 'tpu' && '1' || '' }}
       options: ${{ inputs.container_resource_option }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Run Tests
         run: |
           if [ "${{ inputs.is_scheduled_run }}" = "true" ]; then
@@ -70,5 +78,7 @@ jobs:
           else
             FINAL_PYTEST_MARKER="${{ inputs.pytest_marker }} and not scheduled_only"
           fi
-          python3 -m pip install -e . --no-dependencies &&
-          LIBTPU_INIT_ARGS='--xla_tpu_scoped_vmem_limit_kib=65536' python3 -m pytest ${{ inputs.pytest_addopts }} -v -m "${FINAL_PYTEST_MARKER}" --durations=0
+          python3 -m pip install -e . --no-dependencies
+          [ "${{ inputs.total_workers }}" -gt 1 ] && python3 -m pip install --quiet pytest-split && SPLIT_ARGS="--splits ${{ inputs.total_workers }} --group ${{ inputs.worker_group }}" || SPLIT_ARGS=""
+          export LIBTPU_INIT_ARGS='--xla_tpu_scoped_vmem_limit_kib=65536'
+          python3 -m pytest ${{ inputs.pytest_addopts }} -v -m "${FINAL_PYTEST_MARKER}" --durations=0 $SPLIT_ARGS

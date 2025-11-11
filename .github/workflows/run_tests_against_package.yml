@@ -31,6 +31,10 @@ on:
       pytest_marker:
         required: true
         type: string
+      pytest_addopts:
+        required: false
+        type: string
+        default: ''
       is_scheduled_run:
         required: true
         type: string
@@ -46,6 +50,14 @@ on:
       cloud_runner:
         required: false
         type: string
+      worker_group:
+        required: false
+        type: number
+        default: 1
+      total_workers:
+        required: false
+        type: number
+        default: 1
 
 permissions:
   contents: read
@@ -73,7 +85,7 @@ jobs:
           source .venv/bin/activate
           maxtext_wheel=$(ls maxtext-*-py3-none-any.whl 2>/dev/null)
           uv pip install ${maxtext_wheel}[${MAXTEXT_PACKAGE_EXTRA}] --resolution=lowest
-          install_maxtext_github_deps
+          uv pip install -r src/install_maxtext_extra_deps/extra_deps_from_github.txt
           python3 --version
           python3 -m pip freeze
       - name: Copy test assets files
@@ -93,5 +105,10 @@ jobs:
           export MAXTEXT_ASSETS_ROOT=$(pwd)/src/MaxText/assets
           export MAXTEXT_TEST_ASSETS_ROOT=$(pwd)/src/MaxText/test_assets
           export MAXTEXT_PKG_DIR=$(pwd)/src/MaxText
+          # omit this libtpu init args for gpu tests
+          if [ "${{ inputs.device_type }}" != "cuda12" ]; then
+            export LIBTPU_INIT_ARGS='--xla_tpu_scoped_vmem_limit_kib=65536'
+          fi
           # TODO: Fix the skipped tests and remove the deselect flags
-          .venv/bin/python3 -m pytest -v -m "${FINAL_PYTEST_MARKER}" --durations=0 --deselect "tests/aot_hlo_identical_test.py::AotHloIdenticalTest::test_default_hlo_match" --deselect "tests/tokenizer_test.py::TokenizerTest::test_detokenize"
+          [ "${{ inputs.total_workers }}" -gt 1 ] && .venv/bin/python3 -m pip install --quiet pytest-split && SPLIT_ARGS="--splits ${{ inputs.total_workers }} --group ${{ inputs.worker_group }}" || SPLIT_ARGS=""
+          .venv/bin/python3 -m pytest ${{ inputs.pytest_addopts }} -v -m "${FINAL_PYTEST_MARKER}" --durations=0 --deselect "tests/aot_hlo_identical_test.py::AotHloIdenticalTest::test_default_hlo_match" --deselect "tests/tokenizer_test.py::TokenizerTest::test_detokenize" $SPLIT_ARGS

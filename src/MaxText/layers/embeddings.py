@@ -20,13 +20,14 @@ import math
 import jax
 from jax import lax
 import jax.numpy as jnp
+from jax.sharding import Mesh, NamedSharding
 
 from flax import linen as nn
 from flax import nnx
 
 from MaxText import max_logging
 from MaxText import max_utils
-from MaxText.common_types import MODEL_MODE_PREFILL, MODEL_MODE_TRAIN, Array, Config, DType
+from MaxText.common_types import ShardMode, MODEL_MODE_PREFILL, MODEL_MODE_TRAIN, Array, Config, DType
 from MaxText.layers import nnx_wrappers
 from MaxText.layers.initializers import Initializer, default_embed_init, variable_to_logically_partitioned
 
@@ -46,6 +47,7 @@ def embed_as_linen(
     num_embeddings: int,
     num_features: int,
     config: Config,
+    mesh: Mesh,
     cast_input_dtype: None | DType = None,
     dtype: DType = jnp.float32,
     attend_dtype: None | DType = None,
@@ -76,6 +78,7 @@ def embed_as_linen(
       num_embeddings=num_embeddings,
       num_features=num_features,
       config=config,
+      mesh=mesh,
       cast_input_dtype=cast_input_dtype,
       dtype=dtype,
       attend_dtype=attend_dtype,
@@ -93,6 +96,7 @@ class Embed(nnx.Module):
       num_embeddings: int,
       num_features: int,
       config: Config,
+      mesh: Mesh,
       cast_input_dtype: None | DType = None,
       dtype: DType = jnp.float32,
       attend_dtype: None | DType = None,
@@ -117,6 +121,7 @@ class Embed(nnx.Module):
     self.num_embeddings = num_embeddings
     self.num_features = num_features
     self.config = config
+    self.mesh = mesh
     self.cast_input_dtype = cast_input_dtype
     self.dtype = dtype
     self.attend_dtype = attend_dtype
@@ -142,30 +147,36 @@ class Embed(nnx.Module):
     if not jnp.issubdtype(inputs.dtype, jnp.integer):
       raise ValueError("Input type must be an integer or unsigned integer.")
 
-    embedding = _maybe_move_embedding_to_device(self.embedding.value, self.config)
+    embedding = jnp.asarray(
+        _maybe_move_embedding_to_device(self.embedding.value, self.config),
+        self.dtype,
+    )
+
+    output_axis_names = (
+        ("activation_embed_and_logits_batch", "prefill_activation_length", "activation_embed")
+        if model_mode == MODEL_MODE_PREFILL
+        else ("activation_embed_and_logits_batch", "activation_length_no_exp", "activation_embed")
+    )
+    out_pspec = nn.logical_to_mesh_axes(output_axis_names)
+
+    out_sharding = NamedSharding(self.mesh, out_pspec) if self.config.shard_mode == ShardMode.EXPLICIT else None
 
     if cfg.use_iota_embed:
       iota = lax.iota(jnp.int32, self.num_embeddings)
       one_hot = jnp.array(inputs[..., jnp.newaxis] == iota, dtype=self.dtype)
-      output = jnp.dot(one_hot, jnp.asarray(embedding, self.dtype))
+      output = jnp.dot(one_hot, embedding, out_sharding=out_sharding)
     else:
-      output = jnp.asarray(embedding, self.dtype)[inputs]
+      output = embedding.at[inputs].get(out_sharding=out_sharding)
 
-    output_prefill_axis_names = ("activation_embed_and_logits_batch", "prefill_activation_length", "activation_embed")
-    output_default_axis_names = ("activation_embed_and_logits_batch", "activation_length_no_exp", "activation_embed")
-
-    if model_mode == MODEL_MODE_PREFILL:
-      output = nn.with_logical_constraint(output, output_prefill_axis_names)
-    else:
-      output = nn.with_logical_constraint(output, output_default_axis_names)
     return output
 
-  def attend(self, query: Array) -> Array:
+  def attend(self, query: Array, out_sharding: NamedSharding | None = None) -> Array:
     """Attend over the embedding using a query array.
 
     Args:
       query: array with last dimension equal the feature depth `num_features` of the
         embedding.
+      out_sharding: NamedSharding object indicating how the output gets sharded
 
     Returns:
       An array with final dim `num_embeddings` corresponding to the batched
@@ -175,10 +186,16 @@ class Embed(nnx.Module):
     """
     embedding = self.embedding.value
     attend_dtype = self.attend_dtype if self.attend_dtype is not None else self.dtype
-    return attend_on_embedding(query, embedding, attend_dtype, self.config)
+    return attend_on_embedding(query, embedding, attend_dtype, self.config, out_sharding)
 
 
-def attend_on_embedding(query: Array, embedding_table: Array, attend_dtype: DType, config: Config) -> Array:
+def attend_on_embedding(
+    query: Array,
+    embedding_table: Array,
+    attend_dtype: DType,
+    config: Config,
+    out_sharding: NamedSharding | None = None,
+) -> Array:
   """Attend over an embedding table using a query array.
 
   TODO: Remove this method when Embed bridge to Linen is no longer needed
@@ -188,13 +205,22 @@ def attend_on_embedding(query: Array, embedding_table: Array, attend_dtype: DTyp
     embedding_table: The embedding table to attend over.
     attend_dtype: The data type for the attention computation.
     config: The model configuration, used to check for parameter offloading.
+    out_sharding: NamedSharding object indicating the output sharding
 
   Returns:
     An array with a final dimension equal to `num_embeddings`, corresponding to the
     batched inner-product of the query vectors against each embedding.
   """
+  # out_sharding must be None under auto shard_mode
+  if config.shard_mode != ShardMode.EXPLICIT:
+    out_sharding = None
   embedding_table = _maybe_move_embedding_to_device(embedding_table, config)
-  return jnp.dot(query, jnp.asarray(embedding_table, jnp.bfloat16).T, preferred_element_type=attend_dtype)
+  return jnp.dot(
+      query,
+      jnp.asarray(embedding_table, jnp.bfloat16).T,
+      preferred_element_type=attend_dtype,
+      out_sharding=out_sharding,
+  )
 
 
 def rotary_embedding_as_linen(
@@ -352,6 +378,97 @@ def llama_rotary_embedding_as_linen(
       metadata_fn=variable_to_logically_partitioned,
       name=name,
   )
+
+
+def qwen3_next_rotary_embedding_as_linen(
+    *,
+    min_timescale: int,
+    max_timescale: int,
+    embedding_dims: int = 0,
+    partial_rotary_factor: float = 0.25,
+    cast_as_fprop_dtype: bool = True,
+    fprop_dtype: DType = jnp.bfloat16,
+    name: str | None = None,
+):
+  """Initializes the Qwen3NextRotaryEmbedding module and returns it as a Linen module.
+
+  Args:
+    min_timescale: Start of the geometric index. Determines the periodicity of
+      the added signal.
+    max_timescale: End of the geometric index. Determines the frequency of the
+      added signal.
+    embedding_dims: Dimension of the embedding to be generated.
+    partial_rotary_factor: Ratio of dimensions to apply ROPE to.
+    cast_as_fprop_dtype: Whether to cast the output to the fprop dtype.
+    fprop_dtype: The dtype of the output.
+    name: Name of the Linen module.
+  """
+  return nnx_wrappers.to_linen(
+      Qwen3NextRotaryEmbedding,
+      min_timescale=min_timescale,
+      max_timescale=max_timescale,
+      embedding_dims=embedding_dims,
+      partial_rotary_factor=partial_rotary_factor,
+      cast_as_fprop_dtype=cast_as_fprop_dtype,
+      fprop_dtype=fprop_dtype,
+      metadata_fn=variable_to_logically_partitioned,
+      name=name,
+  )
+
+
+class Qwen3NextRotaryEmbedding(RotaryEmbedding):
+  """Qwen3 Next variant of ROPE (partial ROPE)"""
+
+  def __init__(
+      self,
+      min_timescale: int,
+      max_timescale: int,
+      embedding_dims: int = 0,
+      cast_as_fprop_dtype: bool = True,
+      fprop_dtype: DType = jnp.bfloat16,
+      partial_rotary_factor: float = 0.25,
+      rngs: nnx.Rngs = None,
+  ):
+    """Initializes the Qwen3NextRotaryEmbedding module.
+
+    Args:
+      min_timescale: Start of the geometric index. Determines the periodicity of
+        the added signal.
+      max_timescale: End of the geometric index. Determines the frequency of the
+        added signal.
+      embedding_dims: Dimension of the embedding to be generated.
+      partial_rotary_factor: Ratio of dimensions to apply ROPE to
+      rngs: rng keys passed in by nnx.bridge.to_linen.
+    """
+    self.head_dim = embedding_dims
+    self.partial_rotary_factor = partial_rotary_factor
+    self.rotary_dim = int(self.head_dim * self.partial_rotary_factor)
+
+    super().__init__(
+        min_timescale=min_timescale,
+        max_timescale=max_timescale,
+        embedding_dims=self.rotary_dim,
+        cast_as_fprop_dtype=cast_as_fprop_dtype,
+        fprop_dtype=fprop_dtype,
+        rngs=rngs,
+    )
+
+  def __call__(self, inputs: jax.Array, position: None | jax.Array = None) -> jax.Array:
+    """Applies LLaMA variant of rotary position embedding.
+
+    Args:
+      inputs: The input sequence on which to apply the Rotary position
+        embedding. It is assumed of shape [B, S, H, D].
+      position: Optional position array [B, S]. Only needed when the sequence
+        is packed.
+
+    Returns:
+      A jax.Array of shape [B, S, H, D - rotary_dim] with rotary position embeddings applied.
+    """
+    inputs_rot, inputs_pass = jnp.split(inputs, [self.rotary_dim], axis=-1)
+    inputs_rot = super().__call__(inputs_rot, position)
+    inputs = jnp.concatenate([inputs_rot, inputs_pass], axis=-1)
+    return inputs
 
 
 class LLaMARotaryEmbedding(RotaryEmbedding):

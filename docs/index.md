@@ -54,8 +54,12 @@ Our goal is to provide a variety of models (dimension “a”) and techniques (d
 
 Check out these getting started guides:
 
-* [SFT](https://github.com/AI-Hypercomputer/maxtext/blob/main/end_to_end/tpu/llama3.1/8b/run_sft.sh) (Supervised Fine Tuning)
-* [GRPO](https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/grpo.md) (Group Relative Policy Optimization)
+* Supervised Fine Tuning (SFT)
+  * [SFT on Single-Host TPUs](https://maxtext.readthedocs.io/en/latest/tutorials/sft.html)
+  * [SFT on Multi-Host TPUs](https://maxtext.readthedocs.io/en/latest/tutorials/sft_on_multi_host.html)
+* Group Relative Policy Optimization (GRPO)
+  * [GRPO on Single-Host TPUs](https://maxtext.readthedocs.io/en/latest/tutorials/grpo.html)
+  * [GRPO on Multi-Host TPUs](https://maxtext.readthedocs.io/en/latest/tutorials/grpo_with_pathways.html)
 
 ### Model library
 
@@ -96,9 +100,10 @@ Please join our [Discord Channel](https://discord.com/invite/2H9PhvTcDU) and if 
 :maxdepth: 2
 :hidden:
 
-tutorials.md
-guides.md
 explanations.md
+guides.md
 reference.md
+tutorials.md
 development.md
+release_notes.md
 ```

@@ -14,32 +14,32 @@
  limitations under the License.
  -->
 
-# Try GRPO!
+# Try GRPO
 
 This tutorial demonstrates step-by-step instructions for setting up the environment and then training the Llama3.1 8B-IT model on the GSM8K math reasoning benchmark using Group Relative Policy Optimization (GRPO). GRPO can enhance your model's problem-solving skills on mathematical word problems, coding problems, etc.
 
 GRPO is an RL algorithm designed to enhance the reasoning abilities of LLMs. It is a variant of Proximal Policy Optimization (PPO) that reduces memory usage by eliminating the need for a separate value function model. GRPO works by generating multiple responses for a given prompt, evaluating these responses using a reward model, and then calculating a relative advantage based on the group's performance to update the policy.
 
-We use Tunix as the library for GRPO. 
+We use Tunix as the library for GRPO.
 And we use vLLM as the library for efficient model inference and generation.
- 
+
 In this tutorial we use a single host TPUVM such as `v6e-8/v5p-8`. Let's get started!
 
 ## Setup your virtual environment
 
 ### Create a Python3.12 venv if not already pre-existing and install MaxText dependencies
-```
-bash setup.sh
+```sh
+bash tools/setup/setup.sh
 ```
 
-### Activate your virtual environment (Skip if you have already done this for running `bash setup.sh` )
+### Activate your virtual environment (Skip if you have already done this for running `bash tools/setup/setup.sh` )
 ```
 # Replace with your virtual environment name if not using this default name
 venv_name="maxtext_venv"
 source ~/$venv_name/bin/activate
 ```
 
-## vLLM and tpu-commons Installations
+## vLLM and tpu-commons installations
 
 Next, run the following bash script to get all the necessary installations inside the virtual environment.
 This will take few minutes. Follow along the installation logs and look out for any issues!
@@ -50,7 +50,7 @@ bash ~/maxtext/src/MaxText/examples/install_tunix_vllm_requirement.sh
 
 1. It installs `pip install keyring keyrings.google-artifactregistry-auth` which enables pip to authenticate with Google Artifact Registry automatically.
 2. Next, it installs `vLLM` for Jax and TPUs from the artifact registry `https://us-python.pkg.dev/cloud-tpu-images/maxtext-rl/simple/`
-3. Then, it installs `tpu-commons` from the same artifact registry. 
+3. Then, it installs `tpu-commons` from the same artifact registry.
 
 `tpu_commons` is the TPU backend for vLLM. You will need both libraries to run vLLM on tpus.
 We use the scheduler code from vLLM, and the model runner code from `tpu_commons`
@@ -58,9 +58,17 @@ We use the scheduler code from vLLM, and the model runner code from `tpu_commons
 
 ## Run GRPO
 
-Finally, run the script
+Finally, run the command
 
-`python ~/maxtext/src/MaxText/examples/grpo_llama3_1_8b_demo.py`
+```
+python3 -m src.MaxText.rl.train_rl src/MaxText/configs/rl.yml \
+  --model_name=llama3.1-8b \
+  --tokenizer_path=meta-llama/Llama-3.1-8B-Instruct \
+  --load_parameters_path=gs://path/to/checkpoint/0/items \
+  --run_name=$WORKLOAD \
+  --base_output_directory=$OUTPUT_PATH \
+  --hf_access_token=$HF_TOKEN
+```
 
 The overview of the demo script is as follows:
 

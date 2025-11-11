@@ -179,7 +179,9 @@ class MlpBlockTest(unittest.TestCase):
     )
     self.rng = jax.random.PRNGKey(42)
     quant = Fp8Quantization()
+    devices_array = maxtext_utils.create_device_mesh(self.config)
     self.model = linears.mlp_block(
+        mesh=Mesh(devices_array, self.config.mesh_axes),
         config=self.config,
         in_features=2,
         intermediate_dim=2,
@@ -193,7 +195,7 @@ class MlpBlockTest(unittest.TestCase):
     )
 
   def test_init(self):
-    x = jnp.array([1.0, 2.0])
+    x = jnp.array([1.0, 2.0]).reshape((1, 1, 2))  # TODO(bug): need reshape due to error
     self.model.init({"params": self.rng, "dropout": self.rng}, x)
 
 
@@ -273,6 +275,7 @@ class MoeLoopBlock(nnx.Module):
   def __init__(
       self,
       config: Config,
+      mesh: Mesh,
       inputs_shape: tuple[int, ...],
       num_experts: int,
       num_experts_per_tok: int,
@@ -283,6 +286,7 @@ class MoeLoopBlock(nnx.Module):
       dtype: DType = jnp.bfloat16,
   ):
     self.config = config
+    self.mesh = mesh
     self.inputs_shape = inputs_shape
     self.num_experts = num_experts
     self.num_experts_per_tok = num_experts_per_tok
@@ -302,6 +306,7 @@ class MoeLoopBlock(nnx.Module):
     for k in range(self.num_experts):
       expert_module = linears.MlpBlock(
           config=self.config,
+          mesh=self.mesh,
           in_features=self.inputs_shape[-1],
           intermediate_dim=self.config.mlp_dim,
           activations=["silu", "linear"],
@@ -317,13 +322,15 @@ class MoeLoopBlock(nnx.Module):
     weights, selected_experts = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
     weights = jax.nn.softmax(weights.astype(jnp.float32), axis=-1).astype(self.weight_dtype)
     mlp_lnx = jnp.zeros_like(inputs)
-    mlp_lnx = nn.with_logical_constraint(mlp_lnx, ("activation_batch", "activation_length", "activation_embed"))
+    mlp_lnx = nn.with_logical_constraint(mlp_lnx, ("activation_batch", "activation_length_no_exp", "activation_embed"))
 
     for k in range(self.num_experts):
       weights_exp = jnp.sum(jnp.multiply(selected_experts == k, weights), axis=-1)
       getattr(self, f"mlp_{k}")
       mlp_lnx_exp = getattr(self, f"mlp_{k}")(inputs, deterministic=deterministic)
-      mlp_lnx_exp = nn.with_logical_constraint(mlp_lnx_exp, ("activation_batch", "activation_length", "activation_embed"))
+      mlp_lnx_exp = nn.with_logical_constraint(
+          mlp_lnx_exp, ("activation_batch", "activation_length_no_exp", "activation_embed")
+      )
       mlp_lnx_exp = weights_exp[:, :, None] * mlp_lnx_exp
       mlp_lnx += mlp_lnx_exp
 
@@ -332,6 +339,7 @@ class MoeLoopBlock(nnx.Module):
 
 def get_moe_loop(
     config: Config,
+    mesh: Mesh,
     inputs_shape: tuple[int, ...],
     num_experts: int,
     num_experts_per_tok: int,
@@ -344,6 +352,7 @@ def get_moe_loop(
   module = nnx_wrappers.to_linen(
       MoeLoopBlock,
       config=config,
+      mesh=mesh,
       inputs_shape=inputs_shape,
       num_experts=num_experts,
       num_experts_per_tok=num_experts_per_tok,
@@ -359,10 +368,11 @@ def get_moe_loop(
 class RoutedMoeTest(unittest.TestCase):
   """Routed Mixture of Experts test."""
 
-  def get_expected_output(self, rng, hidden_states, cfg):
+  def get_expected_output(self, rng, hidden_states, cfg, mesh):
     """Retrieve expected output from Routed Mixture of Experts."""
     model = get_moe_loop(
         config=cfg,
+        mesh=mesh,
         inputs_shape=hidden_states.shape,
         num_experts=cfg.num_experts,
         num_experts_per_tok=cfg.num_experts_per_tok,
@@ -446,7 +456,7 @@ class RoutedMoeTest(unittest.TestCase):
 
     devices_array = maxtext_utils.create_device_mesh(cfg)
     mesh = Mesh(devices_array, cfg.mesh_axes)
-    variables, expected_output = self.get_expected_output(rng_model, hidden_states, cfg)
+    variables, expected_output = self.get_expected_output(rng_model, hidden_states, cfg, mesh)
     actual_output, _ = self.get_moe_output(variables, hidden_states, cfg, mesh)
     self.assertTrue(jax.numpy.allclose(expected_output, actual_output, rtol=1e-02, atol=1e-02, equal_nan=False))
 
@@ -474,7 +484,7 @@ class RoutedMoeTest(unittest.TestCase):
 
     devices_array = maxtext_utils.create_device_mesh(cfg)
     mesh = Mesh(devices_array, cfg.mesh_axes)
-    variables, expected_output = self.get_expected_output(rng_model, hidden_states, cfg)
+    variables, expected_output = self.get_expected_output(rng_model, hidden_states, cfg, mesh)
     actual_output, _ = self.get_moe_output(variables, hidden_states, cfg, mesh)
     self.assertTrue(jax.numpy.allclose(expected_output, actual_output, rtol=1e-02, atol=1e-02, equal_nan=False))
 
@@ -502,7 +512,7 @@ class RoutedMoeTest(unittest.TestCase):
 
     devices_array = maxtext_utils.create_device_mesh(cfg)
     mesh = Mesh(devices_array, cfg.mesh_axes)
-    variables, expected_output = self.get_expected_output(rng_model, hidden_states, cfg)
+    variables, expected_output = self.get_expected_output(rng_model, hidden_states, cfg, mesh)
     actual_output, _ = self.get_moe_output(variables, hidden_states, cfg, mesh)
     self.assertTrue(jax.numpy.allclose(expected_output, actual_output, rtol=1e-05, atol=1e-05, equal_nan=False))
 
@@ -516,7 +526,7 @@ class RoutedMoeTest(unittest.TestCase):
         dtype="bfloat16",
         megablox=True,
         sparse_matmul=True,
-        per_device_batch_size=1,
+        per_device_batch_size=4,  # TODO(b/450900273): sharding error if pdbs=1
         ici_expert_parallelism=4,
     )
 
@@ -532,7 +542,7 @@ class RoutedMoeTest(unittest.TestCase):
     devices_array = maxtext_utils.create_device_mesh(cfg)
     mesh = Mesh(devices_array, cfg.mesh_axes)
     with nn_partitioning.axis_rules(cfg.logical_axis_rules):
-      variables, expected_output = self.get_expected_output(rng_model, hidden_states, cfg)
+      variables, expected_output = self.get_expected_output(rng_model, hidden_states, cfg, mesh)
       actual_output, _ = self.get_moe_output(variables, hidden_states, cfg, mesh)
       self.assertTrue(jax.numpy.allclose(expected_output, actual_output, rtol=1e-02, atol=1e-02, equal_nan=False))
 
@@ -546,7 +556,7 @@ class RoutedMoeTest(unittest.TestCase):
         dtype="bfloat16",
         megablox=True,
         sparse_matmul=True,
-        per_device_batch_size=1,
+        per_device_batch_size=4,  # TODO(b/450900273): sharding error if pdbs=1
         ici_fsdp_parallelism=2,
         ici_fsdp_transpose_parallelism=2,
         moe_fsdp_use_two_stage_all_gather=True,
@@ -564,7 +574,7 @@ class RoutedMoeTest(unittest.TestCase):
     devices_array = maxtext_utils.create_device_mesh(cfg)
     mesh = Mesh(devices_array, cfg.mesh_axes)
     with nn_partitioning.axis_rules(cfg.logical_axis_rules):
-      variables, expected_output = self.get_expected_output(rng_model, hidden_states, cfg)
+      variables, expected_output = self.get_expected_output(rng_model, hidden_states, cfg, mesh)
       actual_output, _ = self.get_moe_output(variables, hidden_states, cfg, mesh)
       self.assertTrue(jax.numpy.allclose(expected_output, actual_output, rtol=1e-02, atol=1e-02, equal_nan=False))
 
@@ -608,7 +618,7 @@ class RoutedMoeTest(unittest.TestCase):
     devices_array = maxtext_utils.create_device_mesh(cfg)
     mesh = Mesh(devices_array, cfg.mesh_axes)
     with nn_partitioning.axis_rules(cfg.logical_axis_rules):
-      variables, _ = self.get_expected_output(rng_model, hidden_states, cfg)
+      variables, _ = self.get_expected_output(rng_model, hidden_states, cfg, mesh)
       tp_transpose_output, _ = self.get_moe_output(variables, hidden_states, cfg, mesh)
       tp_output, _ = self.get_moe_output(variables, hidden_states, cfg2, mesh)
       self.assertTrue(jax.numpy.allclose(tp_output, tp_transpose_output, rtol=1e-05, atol=1e-05, equal_nan=False))
@@ -639,7 +649,7 @@ class RoutedMoeTest(unittest.TestCase):
     devices_array = maxtext_utils.create_device_mesh(cfg)
     mesh = Mesh(devices_array, cfg.mesh_axes)
     with nn_partitioning.axis_rules(cfg.logical_axis_rules):
-      variables, expected_output = self.get_expected_output(rng_model, hidden_states, cfg)
+      variables, expected_output = self.get_expected_output(rng_model, hidden_states, cfg, mesh)
       actual_output, _ = self.get_moe_output(variables, hidden_states, cfg, mesh)
       self.assertTrue(jax.numpy.allclose(expected_output, actual_output, rtol=1e-02, atol=1e-02, equal_nan=False))
 

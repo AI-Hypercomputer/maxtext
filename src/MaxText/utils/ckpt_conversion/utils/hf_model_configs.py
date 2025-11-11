@@ -469,6 +469,76 @@ qwen3_coder_480b_a35b_config = transformers.Qwen3MoeConfig(
     vocab_size=151936,
 )
 
+deepseek3_671b_dict = {
+    "architectures": ["DeepseekV3ForCausalLM"],
+    "attention_bias": False,
+    "attention_dropout": 0.0,
+    "auto_map": {
+        "AutoConfig": "configuration_deepseek.DeepseekV3Config",
+        "AutoModel": "modeling_deepseek.DeepseekV3Model",
+        "AutoModelForCausalLM": "modeling_deepseek.DeepseekV3ForCausalLM",
+    },
+    "bos_token_id": 0,
+    "eos_token_id": 1,
+    "ep_size": 1,
+    "first_k_dense_replace": 3,
+    "hidden_act": "silu",
+    "hidden_size": 7168,
+    "initializer_range": 0.02,
+    "intermediate_size": 18432,
+    "kv_lora_rank": 512,
+    "max_position_embeddings": 163840,
+    "model_type": "deepseek_v3",
+    "moe_intermediate_size": 2048,
+    "moe_layer_freq": 1,
+    "n_group": 8,
+    "n_routed_experts": 256,
+    "n_shared_experts": 1,
+    "norm_topk_prob": True,
+    "num_attention_heads": 128,
+    "num_experts_per_tok": 8,
+    "num_hidden_layers": 61,
+    "num_key_value_heads": 128,
+    "num_nextn_predict_layers": 1,
+    "q_lora_rank": 1536,
+    "qk_nope_head_dim": 128,
+    "qk_rope_head_dim": 64,
+    "rms_norm_eps": 1e-06,
+    "rope_scaling": {
+        "beta_fast": 32,
+        "beta_slow": 1,
+        "factor": 40,
+        "mscale": 1.0,
+        "mscale_all_dim": 1.0,
+        "original_max_position_embeddings": 4096,
+        "type": "yarn",
+    },
+    "rope_theta": 10000,
+    "routed_scaling_factor": 2.5,
+    "scoring_func": "sigmoid",
+    "tie_word_embeddings": False,
+    "topk_group": 4,
+    "topk_method": "noaux_tc",
+    "torch_dtype": "bfloat16",
+    "transformers_version": "4.33.1",
+    "use_cache": True,
+    "v_head_dim": 128,
+    "vocab_size": 129280,
+}
+deepseek3_671b_config = transformers.DeepseekV3Config(**deepseek3_671b_dict)
+
+# {maxtext model name: hf model config}
+qwen3_omni_30b_a3b_config = transformers.Qwen3OmniMoeConfig(
+    # TODO(hengtaoguo): Pure-text Omni model, need to fill in visual/audio/code2wav parts
+    architectures=["Qwen3OmniMoeForConditionalGeneration"],
+    thinker_config={
+        "text_config": {
+            "num_hidden_layers": 48,
+            "num_experts": 128,
+        }
+    },
+)
+
 HF_MODEL_CONFIGS = {
     "gemma2-2b": gemma2_2b_config,
     "gemma2-9b": gemma2_9b_config,
@@ -478,6 +548,7 @@ HF_MODEL_CONFIGS = {
     "gemma3-27b": gemma3_27b_config,
     "qwen3-0.6b": qwen3_0_6b_config,
     "qwen3-4b": qwen3_4b_config,
+    "qwen3-4b-thinking-2507": qwen3_4b_config,
     "qwen3-8b": qwen3_8b_config,
     "qwen3-14b": qwen3_14b_config,
     "qwen3-32b": qwen3_32b_config,
@@ -488,4 +559,6 @@ HF_MODEL_CONFIGS = {
     "qwen3-30b-a3b": qwen3_30b_a3b_thinking_2507_config,
     "qwen3-235b-a22b": qwen3_235b_a22b_thinking_2507_config,
     "qwen3-480b-a35b": qwen3_coder_480b_a35b_config,
+    "deepseek3-671b": deepseek3_671b_config,
+    "qwen3-omni-30b-a3b": qwen3_omni_30b_a3b_config,
 }

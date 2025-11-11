@@ -1,14 +1,14 @@
-* @gobbleturk @khatwanimohit @bvandermoon @vipannalla @RissyRan @richjames0 @gagika @shralex @SurbhiJainUSC @hengtaoguo @A9isha @aireenmei @NuojCheng @jiangjy1982 @suexu1025
+* @gobbleturk @khatwanimohit @bvandermoon @vipannalla @RissyRan @richjames0 @gagika @shralex @SurbhiJainUSC @hengtaoguo @A9isha @aireenmei @NuojCheng @jiangjy1982 @suexu1025 @NicoGrande
 
 # Model bring-up
-src/MaxText/assets @parambole @shuningjin @RissyRan @suexu1025 @jiangjy1982 @gobbleturk @bvandermoon @gagika @shralex @richjames0
-src/MaxText/configs/models @parambole @shuningjin @RissyRan @suexu1025 @jiangjy1982 @gobbleturk @bvandermoon @gagika @shralex @richjames0
-src/MaxText/utils/ckpt_conversion @parambole @shuningjin @RissyRan @suexu1025 @jiangjy1982 @gobbleturk @bvandermoon @hengtaoguo @gagika @shralex @richjames0
-src/MaxText/layers @parambole @shuningjin @RissyRan @suexu1025 @jiangjy1982 @gobbleturk @bvandermoon @gagika @shralex @richjames0
+src/MaxText/assets @parambole @shuningjin @RissyRan @suexu1025 @jiangjy1982 @gobbleturk @bvandermoon @gagika @shralex @richjames0 @NicoGrande
+src/MaxText/configs/models @parambole @shuningjin @RissyRan @suexu1025 @jiangjy1982 @gobbleturk @bvandermoon @gagika @shralex @richjames0 @NicoGrande
+src/MaxText/utils/ckpt_conversion @parambole @shuningjin @RissyRan @suexu1025 @jiangjy1982 @gobbleturk @bvandermoon @hengtaoguo @gagika @shralex @richjames0 @NicoGrande
+src/MaxText/layers @parambole @shuningjin @RissyRan @suexu1025 @jiangjy1982 @gobbleturk @bvandermoon @gagika @shralex @richjames0 @NicoGrande
 
 # Features
-src/MaxText/experimental/rl @A9isha @khatwanimohit @xuefgu @gagika @richjames0 @shralex
-src/MaxText/input_pipeline @aireenmei @SurbhiJainUSC @richjames0 @shralex
+src/MaxText/experimental/rl @A9isha @khatwanimohit @xuefgu @gagika @richjames0 @shralex @NicoGrande
+src/MaxText/input_pipeline @aireenmei @SurbhiJainUSC @richjames0 @shralex @NicoGrande
 src/MaxText/kernels/megablox @RissyRan @michelle-yooh @gagika @richjames0 @shralex
 src/MaxText/kernels/ragged_attention.py @patemotter @vipannalla @richjames0 @shralex
 src/MaxText/layers/pipeline.py @gobbleturk @richjames0 @shralex

@@ -40,6 +40,7 @@ from typing import Sequence
 from absl import app
 import os
 import jax
+import pathwaysutils
 
 from flax.linen import partitioning as nn_partitioning
 
@@ -135,13 +136,8 @@ def use_maxtext_loss_function(trainer, mt_config):
   return trainer
 
 
-def train(mt_config, goodput_recorder=None):
-  """Runs the SFT training loop.
-
-  Args:
-    mt_config: MaxText config.
-    goodput_recorder: An optional GoodputRecorder to record performance metrics.
-  """
+def setup_trainer_state(mt_config, goodput_recorder=None):
+  """Set up prerequisites for training loop."""
   tunix_config = get_tunix_config(mt_config)
 
   with maybe_record_goodput(goodput_recorder, GoodputEvent.TPU_INIT):
@@ -158,9 +154,25 @@ def train(mt_config, goodput_recorder=None):
     trainer.with_data_hooks(data_hooks)
     trainer = use_maxtext_loss_function(trainer, mt_config)
 
-  with mesh, nn_partitioning.axis_rules(mt_config.logical_axis_rules):
-    trainer.train(data_hooks.train_data_iterator, data_hooks.eval_data_iterator)
+  return trainer, mesh
 
+
+def train_model(mt_config, trainer, mesh):
+  """Runs the SFT training loop in Tunix."""
+  with mesh, nn_partitioning.axis_rules(mt_config.logical_axis_rules):
+    trainer.train(trainer.data_hooks.train_data_iterator, trainer.data_hooks.eval_data_iterator)
+  return trainer
+
+
+def train(mt_config, goodput_recorder=None):
+  """Main method for SFT training.
+
+  Args:
+    mt_config: MaxText config.
+    goodput_recorder: An optional GoodputRecorder to record performance metrics.
+  """
+  trainer, mesh = setup_trainer_state(mt_config, goodput_recorder)
+  trainer = train_model(mt_config, trainer, mesh)
   return trainer, mesh
 
 
@@ -170,6 +182,7 @@ def main(argv: Sequence[str]) -> None:
   Args:
     argv: Command-line arguments.
   """
+  pathwaysutils.initialize()
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
   if "xla_tpu_spmd_rng_bit_generator_unsafe" not in os.environ.get("LIBTPU_INIT_ARGS", ""):

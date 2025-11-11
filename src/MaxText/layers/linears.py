@@ -23,6 +23,7 @@ import jax
 import jax.numpy as jnp
 
 from jax import lax
+from jax.sharding import NamedSharding, Mesh
 from jax.ad_checkpoint import checkpoint_name
 
 from flax import nnx
@@ -30,7 +31,9 @@ import flax.linen as nn
 
 from MaxText import max_logging
 from MaxText import max_utils
-from MaxText.common_types import MODEL_MODE_PREFILL, DecoderBlockType, DType, Array, Config
+from MaxText.sharding import maybe_shard_with_logical
+from MaxText.common_types import DecoderBlockType, ShardMode, DType, Array, Config
+from MaxText.common_types import MODEL_MODE_TRAIN, MODEL_MODE_PREFILL, EP_AS_CONTEXT
 from MaxText.layers import nnx_wrappers, quantizations
 from MaxText.layers import normalizations
 from MaxText.layers.initializers import NdInitializer, nd_dense_init, default_bias_init, variable_to_logically_partitioned
@@ -76,7 +79,14 @@ def _compute_dot_general(inputs, kernel, kernel_axes, axis, contract_ind, matmul
 
 
 def _compute_dot_general_nnx(
-    inputs, kernel, axis, contract_ind, matmul_precision, quant_dot_general: nnx_wrappers.ToNNX | None, initializing: bool
+    inputs,
+    kernel,
+    axis,
+    contract_ind,
+    matmul_precision,
+    quant_dot_general: nnx_wrappers.ToNNX | None,
+    initializing: bool,
+    out_sharding: NamedSharding | None = None,
 ):
   """Computes a dot_general operation that may be quantized."""
   dot_general = lax.dot_general
@@ -85,7 +95,10 @@ def _compute_dot_general_nnx(
     if initializing:
       quant_dot_general.lazy_init(inputs, kernel, ((axis, contract_ind), ((), ())), precision=None)
     return quant_dot_general(inputs, kernel, ((axis, contract_ind), ((), ())), precision=None, mutable=["aqt"])
-  return dot_general(inputs, kernel, ((axis, contract_ind), ((), ())), precision=matmul_precision)
+
+  return dot_general(
+      inputs, kernel, ((axis, contract_ind), ((), ())), precision=matmul_precision, out_sharding=out_sharding
+  )
 
 
 class DenseGeneral(nnx.Module):
@@ -102,6 +115,7 @@ class DenseGeneral(nnx.Module):
       kernel_axes: tuple[None | str, ...] = (),
       quant: None | Quant = None,
       use_bias: bool = False,
+      shard_mode: ShardMode = ShardMode.AUTO,
       matmul_precision: str = "default",
       parameter_memory_host_offload: bool = False,
       *,  # Following arguments are keyword-only
@@ -120,6 +134,7 @@ class DenseGeneral(nnx.Module):
       kernel_axes: logical axes for partitioning the kernel.
       quant: quantization config, defaults to None implying no quantization.
       use_bias: whether to add bias in linear transformation.
+      shard_mode: auto or explicit shard mode.
       matmul_precision: Precision for matrix multiplication.
       parameter_memory_host_offload: Determines whether to offload params to host
       rngs: RNG state for initialization in nnx.
@@ -133,6 +148,7 @@ class DenseGeneral(nnx.Module):
     self.kernel_axes = kernel_axes
     self.quant = quant
     self.use_bias = use_bias
+    self.shard_mode = shard_mode
     self.matmul_precision = matmul_precision
     self.parameter_memory_host_offload = parameter_memory_host_offload
 
@@ -169,7 +185,8 @@ class DenseGeneral(nnx.Module):
       quant_dot_general = nnx_wrappers.ToNNX(dot_general_linen, rngs=rngs)
       self._quant_dot_general_name = f"{type(dot_general_linen).__name__}_0"
       setattr(self, self._quant_dot_general_name, quant_dot_general)
-      dummy_inputs = jnp.zeros((1, *self.in_features_shape), dtype=self.dtype)
+      block_size = getattr(quant, "get_block_size", lambda: 1)()  # needed for TE MXFP8
+      dummy_inputs = jnp.zeros((block_size, *self.in_features_shape), dtype=self.dtype)
       self(dummy_inputs, _initializing=True)
     else:
       self._quant_dot_general_name = None
@@ -180,7 +197,7 @@ class DenseGeneral(nnx.Module):
       return None
     return getattr(self, self._quant_dot_general_name)
 
-  def __call__(self, inputs: Array, _initializing: bool = False) -> Array:
+  def __call__(self, inputs: Array, _initializing: bool = False, out_sharding: NamedSharding | None = None) -> Array:
     """Applies a linear transformation to the inputs along multiple dimensions.
 
     Args:
@@ -210,6 +227,10 @@ class DenseGeneral(nnx.Module):
         kernel = jax.device_put(kernel, max_utils.device_space())
       kernel = jnp.asarray(kernel, self.dtype)
 
+    # out_sharding should be None for auto mesh axis
+    if self.shard_mode != ShardMode.EXPLICIT:
+      out_sharding = None
+
     contract_ind = tuple(range(0, len(self.axis)))
     output = _compute_dot_general_nnx(
         inputs,
@@ -219,6 +240,7 @@ class DenseGeneral(nnx.Module):
         self.matmul_precision,
         self.quant_dot_general,
         _initializing,
+        out_sharding,
     )
 
     if self.bias is not None:
@@ -239,6 +261,7 @@ def dense_general(
     kernel_axes: tuple[None | str, ...] = (),
     quant: None | Quant = None,
     use_bias: bool = False,
+    shard_mode: ShardMode = ShardMode.AUTO,
     matmul_precision: str = "default",
     parameter_memory_host_offload: bool = False,
     name: None | str = None,
@@ -257,6 +280,7 @@ def dense_general(
     kernel_axes: logical axes for partitioning the kernel.
     quant: quantization config, defaults to None implying no quantization.
     use_bias: whether to add bias in linear transformation.
+    shard_mode: indicating the shard mode
     matmul_precision: Precision for matrix multiplication.
     parameter_memory_host_offload: Determines whether to offload params to host
     name: name passed to the ToLinen Module
@@ -280,6 +304,7 @@ def dense_general(
       kernel_axes=kernel_axes,
       quant=quant,
       use_bias=use_bias,
+      shard_mode=shard_mode,
       matmul_precision=matmul_precision,
       parameter_memory_host_offload=parameter_memory_host_offload,
       name=name,
@@ -318,6 +343,7 @@ class MlpBlock(nnx.Module):
   def __init__(
       self,
       config: Config,
+      mesh: Mesh,
       in_features: int,
       intermediate_dim: int = 2048,
       activations: Sequence[str | Callable[..., Any]] = ("relu",),
@@ -336,6 +362,7 @@ class MlpBlock(nnx.Module):
 
     Args:
       config: Config object containing model parameters.
+      mesh: Mesh object of device and physical axes information
       in_features: Number of input features.
       intermediate_dim: Shared dimension of hidden layers.
       activations: Type of activations for each layer.  Each element is either
@@ -348,8 +375,10 @@ class MlpBlock(nnx.Module):
       use_bias: whether to add bias in all feedforward layers.
       use_pre_norm: whether to add pre layer norm in mlp layers.
       quant: Optional quantization config, no quantization if None.
+      out_sharding: Named sharding of outputs
     """
     self.config = config
+    self.mesh = mesh
     self.in_features = in_features
     self.intermediate_dim = intermediate_dim
     self.activations = activations
@@ -373,6 +402,13 @@ class MlpBlock(nnx.Module):
     else:
       self.mlp_layer_norm = None
 
+    if self.model_mode == MODEL_MODE_PREFILL:
+      self.intermediate_logical = ("activation_batch", "prefill_activation_length", "activation_mlp")
+    elif config.expert_shard_attention_option == EP_AS_CONTEXT and self.model_mode == MODEL_MODE_TRAIN:
+      self.intermediate_logical = ("activation_batch_no_exp", "activation_length", "activation_mlp")
+    else:
+      self.intermediate_logical = ("activation_batch", "activation_length_no_exp", "activation_mlp")
+
     if config.fused_mlp:
       self.wi = DenseGeneral(
           in_features_shape=in_features,
@@ -383,6 +419,7 @@ class MlpBlock(nnx.Module):
           kernel_axes=("embed", "num_activations", "mlp"),
           quant=self.quant,
           use_bias=self.use_bias,
+          shard_mode=self.config.shard_mode,
           matmul_precision=self.config.matmul_precision,
           rngs=rngs,
       )
@@ -398,6 +435,7 @@ class MlpBlock(nnx.Module):
             kernel_axes=("embed", "mlp"),
             quant=self.quant,
             use_bias=self.use_bias,
+            shard_mode=self.config.shard_mode,
             matmul_precision=self.config.matmul_precision,
             rngs=rngs,
         )
@@ -412,8 +450,15 @@ class MlpBlock(nnx.Module):
         kernel_axes=("mlp", "embed"),
         quant=self.quant,
         use_bias=self.use_bias,
+        shard_mode=self.config.shard_mode,
         matmul_precision=self.config.matmul_precision,
         rngs=rngs,
+    )
+
+    self._maybe_shard_with_logical = functools.partial(
+        maybe_shard_with_logical,
+        mesh=mesh,
+        shard_mode=config.shard_mode,
     )
 
   def get_norm_layer(self, num_features: int):
@@ -440,7 +485,14 @@ class MlpBlock(nnx.Module):
     else:
       raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block.value=}")
 
-  def __call__(self, inputs, decode: bool = False, deterministic: bool = False):
+  def __call__(
+      self,
+      inputs,
+      decode: bool = False,
+      deterministic: bool = False,
+      intermediate_sharding: NamedSharding | None = None,
+      out_sharding: NamedSharding | None = None,
+  ):
     """Applies Transformer MlpBlock module."""
     cfg = self.config
 
@@ -451,7 +503,7 @@ class MlpBlock(nnx.Module):
     # e.g. ('relu',) or ('gelu', 'linear') for gated-gelu.
     activations = []
     if cfg.fused_mlp:
-      x = self.wi(inputs)
+      x = self.wi(inputs, out_sharding=intermediate_sharding)
       x = checkpoint_name(x, "mlpwi")
       for idx, act_fn in enumerate(self.activations):
         y = _convert_to_activation_function(act_fn)(x[:, :, idx, ...])
@@ -460,7 +512,7 @@ class MlpBlock(nnx.Module):
       for idx, act_fn in enumerate(self.activations):
         dense_name = "wi" if len(self.activations) == 1 else f"wi_{idx}"
         module = getattr(self, dense_name)
-        x = module(inputs)
+        x = module(inputs, out_sharding=intermediate_sharding)
         x = checkpoint_name(x, "mlp" + dense_name)
         if cfg.activations_in_float32:
           x = x.astype(jnp.float32)
@@ -471,11 +523,8 @@ class MlpBlock(nnx.Module):
     x = functools.reduce(operator.mul, activations).astype(self.dtype)
     # Apply dropout and final dense output projection.
     x = self.dropout(x, deterministic=deterministic)  # Broadcast along length.
-    if self.model_mode == MODEL_MODE_PREFILL:
-      x = nn.with_logical_constraint(x, ("activation_batch", "prefill_activation_length", "activation_mlp"))
-    else:
-      x = nn.with_logical_constraint(x, ("activation_batch", "activation_length", "activation_mlp"))
-    output = self.wo(x)
+    x = self._maybe_shard_with_logical(x, self.intermediate_logical)
+    output = self.wo(x, out_sharding=out_sharding)
 
     output = checkpoint_name(output, "mlpwo")
     return output
@@ -484,6 +533,7 @@ class MlpBlock(nnx.Module):
 def mlp_block(
     *,
     config: Config,
+    mesh: Mesh,
     in_features: int,
     intermediate_dim: int = 2048,
     activations: Sequence[str | Callable[..., Any]] = ("relu",),
@@ -501,6 +551,7 @@ def mlp_block(
   module = nnx_wrappers.to_linen(
       MlpBlock,
       config=config,
+      mesh=mesh,
       in_features=in_features,
       intermediate_dim=intermediate_dim,
       activations=activations,

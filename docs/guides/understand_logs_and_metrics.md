@@ -14,7 +14,7 @@
  limitations under the License.
 -->
 
-# Understand Logs and Metrics
+# Understand logs and metrics
 
 When you run a training job, MaxText produces detailed output logs. This guide shows you how to interpret these logs to understand your configuration and monitor performance.
 
@@ -27,7 +27,7 @@ model_name=deepseek2-16b \
 per_device_batch_size=24 max_target_length=2048 steps=10 dataset_type=synthetic enable_checkpointing=false
 ```
 
-## 1 Configuration information
+## 1. Configuration information
 
 The first section of the log details the configuration of your run. This is crucial for debugging, as it shows you exactly which parameters were used.
 
@@ -38,7 +38,7 @@ MaxText builds its configuration in layers.
   ```none
   Updating keys from env and command line: ['run_name', 'model_name', 'enable_checkpointing', 'base_output_directory', 'per_device_batch_size', 'dataset_type', 'steps', 'max_target_length']
   ```
-- It updates keys based on the **model-specific configuration** file. When you specify a model, like `deepseek2-16b`, MaxText reads the corresponding parameters from the [deepseek2-16b.yml](https://github.com/AI-Hypercomputer/maxtext/blob/ffb0d49adcc457e8cbe2872864b4034b21d43326/MaxText/configs/models/deepseek2-16b.yml) file.
+- It updates keys based on the **model-specific configuration** file. When you specify a model, like `deepseek2-16b`, MaxText reads the corresponding parameters from the [deepseek2-16b.yml](https://github.com/AI-Hypercomputer/maxtext/blob/fafdeaa14183a8f5ca7b9f7b7542ce1655237574/src/MaxText/configs/models/deepseek2-16b.yml) file.
 
   ```none
   Running Model: deepseek2-16b
@@ -118,7 +118,7 @@ save_config_to_gcs=True \
 enable_checkpointing=True
 ```
 
-## 2 Environment information
+## 2. Environment information
 
 Next, the log displays the software and hardware environment for your run. This is useful for verifying your setup and understanding how parallelism is being applied.
 
@@ -135,11 +135,11 @@ Num_devices: 4, shape (1, 1, 4, 1, 1, 1, 1, 1, 1, 1, 1, 1)
 - **Parallelism strategy**: The `shape` tuple `(1, 1, 4, 1, 1, 1, 1, 1, 1, 1, 1, 1)` shows how your devices are arranged for parallelism. Recall from Section 1, `Config param data_sharding: (('data', 'stage', 'fsdp', 'fsdp_transpose', 'sequence', 'context', 'context_autoregressive', 'tensor', 'tensor_transpose', 'tensor_sequence', 'expert', 'autoregressive'),)`. This confirms that all 4 devices are being used for Fully Sharded Data Parallelism (FSDP), which is the default behavior.
 
 
-## 3 Resource accounting
+## 3. Resource accounting
 
 Before executing training, the program analyzes the resource requirements for your training job, specifically memory and compute (FLOPs).
 
-### 3.1 Memory analysis
+### 3.1. Memory analysis
 
 We first perform a "dry run" compilation of a training step to [analyze its memory requirement](https://github.com/AI-Hypercomputer/maxtext/blob/28e5097ac467ed8b1d17676d68aa5acc50f9d60d/src/MaxText/train.py#L380-L382). This static analysis is performed by the XLA compiler. The log outputs [memory sizes](https://github.com/AI-Hypercomputer/maxtext/blob/28e5097ac467ed8b1d17676d68aa5acc50f9d60d/src/MaxText/max_utils.py#L672-L690):
 ```none
@@ -154,7 +154,7 @@ The most important number is `Total memory size: 100.4 GB`. This is the total Hi
 In addition, it shows temporary memory used on the host CPU. In this case, `Host temp size: 0.0 GB`, indicating that all the significant memory allocation happens on the accelerator device.
 
 
-### 3.2 Memory snapshot
+### 3.2. Memory snapshot
 
 The previous section is a forecast of memory usage for entire training step, based on static analysis of the compiled code from the XLA compiler. To see the actual memory usage, we now turn to a real-time snapshot from the JAX runtime, captured right after the training state is initialized.
 
@@ -171,7 +171,7 @@ Memstats: After params initialized:
 ```
 This log shows that each of the four TPUs has `95.74 GB` of available High Bandwidth Memory (HBM). The initial training state is evenly distributed across devices, with each using the same amount of `44.63 GB`.
 
-### 3.3 Model TFLOP per device
+### 3.3. Model TFLOP per device
 
 The **model FLOPs** are the floating point operations to perform model computation. For training, the computation includes a single forward and backward pass.
 - In MaxText, we estimate model FLOPs by summing operations in matrix multiplications (matmuls); see [calculate_tflops_training_per_device](https://github.com/AI-Hypercomputer/maxtext/blob/28e5097ac467ed8b1d17676d68aa5acc50f9d60d/src/MaxText/maxtext_utils.py#L480).
@@ -189,12 +189,11 @@ Per train step:
 
 In this example, given `model=deepseek2-16b`, `per_device_batch_size=24`, `max_target_length=2048`, and no gradient accumulation, we have $\text{model tflop per device} \approx 764.67$.
 - 94.54% of the TFLOPs are attributed to learnable weight and 5.46% are attributed to attention.
-- As you will see next, this number is important for calculating performace metrics, such as TFLOP/s/device and Model FLOPs Utilization (MFU).
+- As you will see next, this number is important for calculating performance metrics, such as TFLOP/s/device and Model FLOPs Utilization (MFU).
 
-You can find more information about model FLOPs and MFU in the [Performance Metrics](performance_metrics.md) topic.
+You can find more information about model FLOPs and MFU in the [Performance Metrics](performance-metrics) topic.
 
-
-## 4 Training metrics
+## 4. Training metrics
 
 Finally, we are getting to the training steps! In this section, we introduce performance metrics including TFLOP/s/device, MFU, and Tokens/s/device (throughput). We briefly cover learning metrics including loss and total weights.
 ```none
@@ -214,8 +213,7 @@ Before we dive deep here, recall a few numbers from previous sections:
 - $\text{max target length} = 2048$, $\text{per device batch size} = 24$
 - $\text{model tflop per device} \approx 764.67$ (rounded), $\text{number of devices} = 4$
 
-
-### 4.1 Performance metrics
+### 4.1. Performance metrics
 
 The performance metrics fluctuate at the beginning, and become stable towards the end. Therefore, we usually read them from the last step. Let's take a closer look at Step 9.
 ```none
@@ -233,7 +231,7 @@ $$\text{tflop/s/device} = \frac{\text{model tflop per device}}{\text{measured st
 - Further, we can calculate **Model FLOPs Utilization (MFU)** from this:
 
 $$\text{MFU} = \frac{\text{tflop/s/device}}{\text{peak hardware tflop/s}}$$
-  
+
   For TPU v5p, $\text{peak hardware tflop/s}=459$. Thus, $134.924 / 459 = 29.40$%. Note this is an example for explanation with small batch size and sequence length, so the MFU is not optimal.
 
 **Tokens per second per device (throughput)**
@@ -248,8 +246,7 @@ $$\text{number of tokens per device} = \text{per device batch size} \times \text
 
 - Here we have `Tokens/s/device: 8672.758`. Let's try to verify manually: $24 \times 2048 / 5.667 = 8673.372$. Not exactly the same but close, since the time is rounded in the log.
 
-
-### 4.2 Learning metrics
+### 4.2. Learning metrics
 
 **Loss**. The loss is the key indicator of learning progress, which should decrease over training steps. In this example, the loss is `12.038` at Step 0 and decreases to `10.374` at Step 9. Ideally, we want the loss to converge to a small value with sufficiently large training steps.
 
