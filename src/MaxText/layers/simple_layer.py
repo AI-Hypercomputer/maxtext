@@ -6,83 +6,60 @@
 #
 #    https://www.apache.org/licenses/LICENSE-2.0
 #
-# Unless required by applicable law or agreed to in writing, software
+# Unless required by by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-""" Simple decoder layers for testing and debugging purposes."""
+"""A simple decoder layer used for testing."""
 
-from jax import numpy as jnp
-from jax.sharding import Mesh
-
+import jax
+import jax.numpy as jnp
+from jax.sharding import Mesh, PartitionSpec
 from flax import linen as nn
-
-from MaxText.common_types import Config
-from MaxText.layers import quantizations
-
-# pytype: disable=attribute-error
+from flax import nnx
+import jax.numpy as jnp
+from MaxText.common_types import Config, MODEL_MODE_TRAIN
+from MaxText.layers import initializers
 
 
 class SimpleDecoderLayer(nn.Module):
-  """Decoder layer consisting of a single [embed, embed] weight matrix."""
+  """A simple decoder layer used for testing."""
 
   config: Config
   mesh: Mesh
-  model_mode: str
-  quant: None | quantizations.AqtQuantization = None
+  model_mode: str = MODEL_MODE_TRAIN
 
-  def setup(self):
-    self.weight_mat = self.param(
-        "weights",
-        nn.with_logical_partitioning(nn.initializers.lecun_normal(), ("embed", "mlp")),
-        (self.config.emb_dim, self.config.emb_dim),
+  @nn.compact
+  def __call__(self, inputs, inputs_position, inputs_segmentation, deterministic=False, model_mode=MODEL_MODE_TRAIN):
+    """Applies SimpleDecoderLayer module."""
+    del inputs_position, inputs_segmentation, deterministic, model_mode
+    wo = self.param(
+        "wo",
+        nn.with_logical_partitioning(nn.initializers.normal(0.02), ("mlp", "embed"), None),
+        (self.config.base_mlp_dim, self.config.base_emb_dim),
+    )
+    x = nn.dot_general(inputs, wo, (((inputs.ndim - 1),), ((wo.ndim - 1),)))
+    return x, None
+
+
+class SimpleDecoderLayerNnx(nnx.Module):
+  """An NNX version of a simple decoder layer used for testing."""
+
+  def __init__(self, config: Config, *, rngs: nnx.Rngs):
+    self.config = config
+    self.wo = nnx.Param(
+        jax.random.normal(rngs.params(), (self.config.base_emb_dim, self.config.base_emb_dim)) * 0.02,
+        sharding=PartitionSpec("mlp", "embed"),
     )
 
-  def __call__(
-      self, inputs: jnp.ndarray, positions, segmentation, deterministic, model_mode, previous_chunk=None, page_state=None
-  ):
-    if self.config.scan_layers:
-      return inputs @ self.weight_mat.astype(inputs.dtype), None
-    else:
-      return inputs @ self.weight_mat.astype(inputs.dtype)
-
-
-class SimpleMlpDecoderLayer(nn.Module):
-  """Decoder layer consisting of [embed,mlp] followed by an [mlp,embed] matmul."""
-
-  config: Config
-  mesh: Mesh
-  model_mode: str
-  quant: None | quantizations.AqtQuantization = None
-
-  def setup(self):
-    self.ff_1 = self.param(
-        "ff_1",
-        nn.with_logical_partitioning(nn.initializers.lecun_normal(), ("embed", "mlp")),
-        (self.config.emb_dim, self.config.mlp_dim),
+  def __call__(self, inputs, inputs_position, inputs_segmentation, deterministic=False, model_mode=MODEL_MODE_TRAIN):
+    """Applies SimpleDecoderLayer module."""
+    del inputs_position, inputs_segmentation, deterministic, model_mode
+    x = jax.lax.dot_general(
+        inputs,
+        self.wo.value,
+        (((inputs.ndim - 1,), (0,)), ((), ())),  # Contract last dim of input with first dim of weights
     )
-    self.ff_2 = self.param(
-        "ff_2",
-        nn.with_logical_partitioning(nn.initializers.lecun_normal(), ("mlp", "embed")),
-        (self.config.mlp_dim, self.config.emb_dim),
-    )
-
-  def __call__(
-      self,
-      inputs: jnp.ndarray,
-      positions,
-      segmentation,
-      deterministic,
-      model_mode,
-      previous_chunk=None,
-      page_state=None,
-      slot=0,
-  ):
-    intermediate = inputs @ self.ff_1.astype(inputs.dtype)
-    output = intermediate @ self.ff_2.astype(inputs.dtype)
-    if self.config.scan_layers:
-      return output, None
-    else:
-      return output
+    return x, None

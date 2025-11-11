@@ -258,9 +258,12 @@ class Decoder(nn.Module):
       remat_policy = self.get_remat_policy()
 
       decoder = self
+
       class PipelineStage(nnx.Module):
+
         def __init__(self, config, rngs):
           self.module = decoder.get_pipeline_stage_module(decoder.decoder_layer, rngs)
+
         def __call__(self, *args, **kwargs):
           return self.module(*args, **kwargs)
 
@@ -270,7 +273,6 @@ class Decoder(nn.Module):
           layer_module=PipelineStage,
           remat_policy=remat_policy,
       )
-
 
   def minimal_policy(self, with_context=False):
     """Helper for creating minimal checkpoint policies."""

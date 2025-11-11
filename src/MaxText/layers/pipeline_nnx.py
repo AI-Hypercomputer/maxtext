@@ -59,10 +59,11 @@ class Pipeline(nnx.Module):
       mesh:  The device mesh of the system.
       remat_policy: Remat policy to use for the loop iterations
   """
+
   def __init__(
       self,
       config: Config,
-      layer_module: Type[nnx.Module], # NNX: Pass the layer *type*
+      layer_module: Type[nnx.Module],
       mesh: Mesh,
       remat_policy: Any = None,
       *,
@@ -71,58 +72,96 @@ class Pipeline(nnx.Module):
     self.config = config
     self.mesh = mesh
     self.remat_policy = remat_policy
-    self.rngs = rngs
+    # self.rngs = rngs
 
     self.num_stages = self.config.ici_pipeline_parallelism * self.config.dcn_pipeline_parallelism
     self.forwarding_delay = 2 if self.config.pipeline_delay_activation_forwarding else 1
     self.pipeline_microbatch_size = self.config.micro_batch_size_to_train_on // self.config.num_pipeline_microbatches
-    microbatches_per_stage = self.config.num_pipeline_microbatches // self.num_stages
-    self.microbatches_per_stage = microbatches_per_stage
+    self.microbatches_per_stage = self.config.num_pipeline_microbatches // self.num_stages
     self.use_circ_storage = self.need_circ_storage()
 
     # --- NNX: Eagerly initialize the stacked layers ---
 
     # 1. Define a factory function to create one layer
-    #    (Assumes a standard (config, rngs) signature for your layer)
-    def create_layer(rngs: nnx.Rngs):
-      return layer_module(self.config, rngs=rngs)
+    def create_layer(rngs_pytree):
+      # --- ROBUST FIX + DEBUG ---
+      raw_rngs = {}
+      # If rngs_pytree is already an nnx.Rngs object, convert to dict first
+      rngs_dict = dict(rngs_pytree) if isinstance(rngs_pytree, nnx.Rngs) else rngs_pytree
 
-    # 2. Create the GraphDef for a *single* layer.
-    #    We need this to merge the sliced state back into a module.
-    self.single_layer_graphdef = nnx.graphdef(
-        create_layer(rngs=rngs.fork())
-    )
+      for name, val in rngs_dict.items():
+        # If it's an nnx.RngKey or similar wrapper, it holds the raw key in .value
+        if hasattr(val, "tag") and hasattr(val, "value"):
+          # It's an NNX wrapper (RngKey, RngStream, etc.)
+          raw_rngs[name] = val.value
+        else:
+          # It's likely already a raw JAX array
+          raw_rngs[name] = val
 
-    # 3. Create a vmapped factory function over stages
+      # print(f"DEBUG: create_layer raw_rngs types: {jax.tree.map(type, raw_rngs)}")
+      return layer_module(self.config, rngs=nnx.Rngs(**raw_rngs))
+      # --------------------------
+
+    # 2. Create the vmapped factory functions
     vmap_over_stages = nnx.vmap(
         create_layer,
         in_axes=0,
-        out_axes=0,  # Stack all params/state on axis 0
-        spmd_axis_name='stage',
+        out_axes=0,
+        spmd_axis_name="stage",
     )
-
-    # 4. Create the final factory, vmapped over repeats (if needed)
     if self.config.num_pipeline_repeats > 1:
       vmap_over_repeats = nnx.vmap(
-          vmap_over_stages, # Vmap the vmapped function
+          vmap_over_stages,
           in_axes=0,
-          out_axes=0, # Stack on a new axis 0
-          spmd_axis_name='circular_repeats'
+          out_axes=0,
+          spmd_axis_name="circular_repeats",
       )
-      nnx.split_rngs(rngs, splits=self.num_stages)
-      breakpoint()
-      # `self.layers` is now one module with stacked params [R, S, ...]
-      self.layers = vmap_over_repeats(rngs) 
+
+    # 3. Prepare the stacked RNGs Pytree
+    # Convert input rngs to a pure dict of raw JAX keys first to avoid NNX state issues.
+    rngs_pure_dict = {}
+    for name, stream in rngs.items():
+      # Handle both raw JAX keys and NNX streams/keys in the input
+      if hasattr(stream, "value"):
+        rngs_pure_dict[name] = stream.value
+      elif hasattr(stream, "key") and hasattr(stream.key, "value"):
+        rngs_pure_dict[name] = stream.key.value
+      else:
+        rngs_pure_dict[name] = stream
+
+    def stack_keys(key):
+      # Ensure it's a valid JAX key
+      if isinstance(key, int):
+        key = jax.random.PRNGKey(key)
+      elif (
+          hasattr(key, "dtype")
+          and hasattr(key, "ndim")
+          and key.ndim == 0
+          and not jax.dtypes.issubdtype(key.dtype, jax.dtypes.prng_key)
+      ):
+        key = jax.random.PRNGKey(key)
+
+      # Split using shape tuple to avoid dimension issues
+      if self.config.num_pipeline_repeats > 1:
+        return jax.random.split(key, (self.config.num_pipeline_repeats, self.num_stages))
+      else:
+        return jax.random.split(key, self.num_stages)
+
+    init_rngs_pytree = jax.tree.map(stack_keys, rngs_pure_dict)
+
+    # 4. Create the GraphDef for a *single* layer.
+    graphdef_rngs_pytree = jax.tree.map(
+        lambda x: x[0, 0] if self.config.num_pipeline_repeats > 1 else x[0], init_rngs_pytree
+    )
+
+    self.single_layer_graphdef = nnx.graphdef(create_layer(rngs_pytree=graphdef_rngs_pytree))
+
+    # 5. Create the stacked layers
+    if self.config.num_pipeline_repeats > 1:
+      self.layers = vmap_over_repeats(init_rngs_pytree)
     else:
-      # Just vmap over stages
-      # `self.layers` is one module with stacked params [S, ...]
-      # We add a dummy 'repeat' axis to make logic consistent
-      self.layers = vmap_over_stages(rngs)
-      self.layers = self.layers.add_axis(0, 'circular_repeats')
-      
-    # NNX: `self.layers` now holds all parameters and state (e.g., batch stats)
-    # in stacked arrays, e.g., self.layers.batch_stats.mean.value
-    # has shape [num_repeats, num_stages, ...]
+      self.layers = vmap_over_stages(init_rngs_pytree)
+      self.layers = self.layers.add_axis(0, "circular_repeats")
 
   def need_circ_storage(self):
     return (
@@ -419,51 +458,48 @@ class Pipeline(nnx.Module):
 
   def permute_output_micro_per_stage_dim(self, output):
     microbatch_0_idx = self.iterations_to_complete_first_microbatch() % self.microbatches_per_stage
-    permutation = (
-        np.arange(self.microbatches_per_stage) + microbatch_0_idx
-    ) % self.microbatches_per_stage
+    permutation = (np.arange(self.microbatches_per_stage) + microbatch_0_idx) % self.microbatches_per_stage
     output = output[:, permutation]
     return output
-
 
   def get_current_repeat_from_stages(self, full_state: nnx.State, loop_iteration: int):
     """
     Gathers the state for the current repeat for each stage.
-    
+
     Args:
       full_state: The complete state Pytree of self.layers, with arrays
                   shaped [num_repeats, num_stages, ...].
       loop_iteration: The current loop iteration number.
-      
+
     Returns:
       A state Pytree where arrays are shaped [num_stages, ...].
     """
     _, repeat_ids = self.get_microbatch_and_repeat_ids(loop_iteration)
 
     # This function operates on the Pytrees *inside* the nnx.State
-    def gather_pytree(pytree):
+    def gather_pytree(path, pytree):
+      del path
       return jax.tree.map(
           functools.partial(
-              self.vmap_parallel_gather, 
-              repeat_ids=repeat_ids, 
+              self.vmap_parallel_gather,
+              repeat_ids=repeat_ids,
               repeat_dim_in_weights=0,  # Axis 0 is num_repeats
-              stages_dim_in_weights=1   # Axis 1 is num_stages
+              stages_dim_in_weights=1,  # Axis 1 is num_stages
           ),
           pytree,
       )
-    
+
     # Apply the gather to all variable collections
     return full_state.map(gather_pytree)
 
-
   def run_one_iteration(
-      self, 
-      loop_state, 
-      positions, 
-      segment_ids, 
-      deterministic, 
+      self,
+      loop_state,
+      positions,
+      segment_ids,
+      deterministic,
       model_mode,
-      rngs: nnx.Rngs,
+      # rngs: nnx.Rngs,
   ):
     """
     Run one loop iteration.
@@ -493,21 +529,15 @@ class Pipeline(nnx.Module):
     # 3. Define the function to run on a *single* stage
     #    This function will be vmapped.
     def run_stage_vmap_fn(
-        stage_vars_slice, # Pytree for one stage [D1, D2, ...]
-        stage_input, 
-        stage_segment_id, 
+        stage_vars_slice,  # Pytree for one stage [D1, D2, ...]
+        stage_input,
+        stage_segment_id,
         stage_position,
-        rngs: nnx.Rngs,
     ):
       # Merge the single-stage variables with the single-layer GraphDef
-      layer_module = nnx.merge(
-          self.single_layer_graphdef, stage_vars_slice
-      )
+      layer_module = nnx.merge(self.single_layer_graphdef, stage_vars_slice)
       # Run the layer
-      output = layer_module(
-          stage_input, stage_segment_id, stage_position, 
-          deterministic, model_mode, rngs=rngs
-      )
+      output = layer_module(stage_input, stage_segment_id, stage_position, deterministic, model_mode)
       # Split to get the (potentially updated) state
       _, new_vars_slice = nnx.split(layer_module)
       return output, new_vars_slice
@@ -515,48 +545,41 @@ class Pipeline(nnx.Module):
     # 4. Vmap the stage function over all stages
     vmapped_run_stage = nnx.vmap(
         run_stage_vmap_fn,
-        in_axes=(0, 0, 0, 0), # Slice state, inputs, segments, positions on axis 0
+        in_axes=(0, 0, 0, 0),  # Map all inputs except rngs
         out_axes=0,
-        spmd_axis_name='stage',
-        split_rngs={'dropout': True, 'jitter': True},
+        spmd_axis_name="stage",
+        # split_rngs={'dropout': True, 'jitter': True},
     )
-    
+
     # Run the vmap
     stages_output, new_stage_vars_pytree = vmapped_run_stage(
         stage_vars_pytree,
         stages_inputs,
         stages_segment_ids,
         stages_positions,
-        rngs=rngs,
     )
     if self.config.scan_layers:
       stages_output = stages_output[0]
 
     # 5. Scatter the updated state (`new_stage_vars_pytree`) back into the
     #    full state (`state`). We only need to do this for mutable state.
-    def update_state(full_state: nnx.State, new_vars: nnx.State, repeat_ids):
+    def update_state(full_state_pytree, new_stage_state_pytree, repeat_ids):
       stage_ids = jnp.arange(self.num_stages)
-      
-      def scatter_batch_stats(full_array, update_slice):
-        # full_array[repeat_ids[i], stage_ids[i], ...] = update_slice[i, ...]
+
+      def scatter_leaf(full_array, update_slice):
+        # full_array: [repeats, stages, ...]
+        # update_slice: [stages, ...]
         return full_array.at[repeat_ids, stage_ids].set(update_slice)
-      
-      # Scatter new batch_stats back into the full state Pytree
-      updated_batch_stats = jax.tree.map(
-          scatter_batch_stats,
-          full_state.batch_stats, # Pytree of [R, S, ...]
-          new_vars.batch_stats    # Pytree of [S, ...]
-      )
-      return full_state.merge(nnx.State(batch_stats=updated_batch_stats))
+
+      # jax.tree.map will traverse whatever structure full_state has (State, dict, etc.)
+      return jax.tree.map(scatter_leaf, full_state_pytree, new_stage_state_pytree)
 
     new_full_state = update_state(state, new_stage_vars_pytree, repeat_ids)
-
-    self.layers.update(new_full_state)
+    nnx.update(self.layers, new_full_state)
 
     new_loop_state = self.get_new_loop_state(stages_output, loop_state)
     return new_loop_state
 
-  
   def get_pipeline_remat_policy(self):
     if self.config.remat_policy == "custom":
       return self.remat_policy
@@ -568,7 +591,6 @@ class Pipeline(nnx.Module):
       remat_policy = save_input_policy
     return remat_policy
 
-
   def __call__(
       self,
       inputs: jnp.ndarray,
@@ -578,7 +600,7 @@ class Pipeline(nnx.Module):
       model_mode=MODEL_MODE_TRAIN,
       partition_spec=None,  # This is no longer used for weights
   ) -> jnp.ndarray:
-    
+
     # Reshape inputs
     inputs = inputs.reshape(
         (
@@ -599,7 +621,7 @@ class Pipeline(nnx.Module):
       segment_ids = segment_ids.reshape(
           (self.config.num_pipeline_microbatches, self.pipeline_microbatch_size, self.config.max_target_length)
       )
-    
+
     loop_state = self.init_states(inputs)
 
     bubble_iterations = self.forwarding_delay * (self.num_stages - 1)
@@ -611,14 +633,13 @@ class Pipeline(nnx.Module):
 
     # This is the function nnx.scan will operate on.
     # Signature: (Module, Carry, X) -> (Module, (NewCarry, Y))
-    def run_iteration_scannable(scan_self, loop_state, xs, rngs: nnx.Rngs):
+    def run_iteration_scannable(merged_carry):
+      scan_self, loop_state = merged_carry
       # scan_self is the Pipeline module
       # loop_state is the Pytree carry
-      new_loop_state = scan_self.run_one_iteration(
-          loop_state, positions, segment_ids, deterministic, model_mode, rngs=rngs
-      )
+      new_loop_state = scan_self.run_one_iteration(loop_state, positions, segment_ids, deterministic, model_mode)
       # run_one_iteration mutates scan_self.layers in-place
-      return scan_self, (new_loop_state, None)
+      return (scan_self, new_loop_state), None
 
     if self.config.set_remat_policy_on_pipeline_iterations:
       run_iteration_rematted = nnx.remat(
@@ -629,7 +650,6 @@ class Pipeline(nnx.Module):
     else:
       run_iteration_rematted = run_iteration_scannable
 
-
     if self.config.scan_pipeline_iterations:
       # nnx.scan will automatically carry mutable state (BatchStat)
       # and broadcast immutable state (Param).
@@ -637,16 +657,14 @@ class Pipeline(nnx.Module):
           run_iteration_rematted,
           # We don't need to specify variable_carry or variable_broadcast
           # NNX defaults (BatchStat=carry, Param=broadcast) are correct.
-          split_rngs={"dropout": True, "jitter": True}, # Use MaxText keys
           length=total_iterations,
+          in_axes=nnx.Carry,
       )
       # Run the scan
-      final_module_state, (final_loop_carry, _) = run_all_iterations_scanned(
-          self, loop_state, None, rngs=self.rngs
-      )
-      
+      (updated_self, final_loop_carry), _ = run_all_iterations_scanned((self, loop_state))
+      _, new_state = nnx.split(updated_self)
       # Update self with the final state from the scan
-      self.update(final_module_state)
+      nnx.update(self, new_state)
       # Get the final loop state from the Pytree carry
       loop_state = final_loop_carry
 
@@ -654,39 +672,36 @@ class Pipeline(nnx.Module):
       # Standard Python loop
       # We need to split/merge to use jax.remat
       graphdef, state = nnx.split(self)
-      
+
       @functools.partial(
           jax.remat,
           prevent_cse=True,
           policy=self.get_pipeline_remat_policy(),
       )
       def jax_remat_body(state_pytree, loop_state_in, rngs: nnx.Rngs):
-          # Re-merge module
-          model = nnx.merge(graphdef, state_pytree)
-          # Run one iter (this mutates model.layers)
-          new_loop_state = model.run_one_iteration(
-              loop_state_in, 
-              positions, 
-              segment_ids, 
-              deterministic, 
-              model_mode,
-              rngs=rngs,
-          )
-          # Split module again to return new state
-          _, new_state_pytree = nnx.split(model)
-          return new_state_pytree, new_loop_state
-      
+        # Re-merge module
+        model = nnx.merge(graphdef, state_pytree)
+        # Run one iter (this mutates model.layers)
+        new_loop_state = model.run_one_iteration(
+            loop_state_in,
+            positions,
+            segment_ids,
+            deterministic,
+            model_mode,
+            rngs=rngs,
+        )
+        # Split module again to return new state
+        _, new_state_pytree = nnx.split(model)
+        return new_state_pytree, new_loop_state
+
       current_state_pytree = state
       rngs = self.rngs
       for _ in range(total_iterations):
-          rngs, iter_rngs = rngs.fork()
-          current_state_pytree, loop_state = jax_remat_body(
-              current_state_pytree, loop_state, iter_rngs
-          )
-      
+        rngs, iter_rngs = rngs.fork()
+        current_state_pytree, loop_state = jax_remat_body(current_state_pytree, loop_state, iter_rngs)
+
       # Update self with final state
       self.update(current_state_pytree)
-
 
     final_output = self.permute_output_micro_per_stage_dim(loop_state["state_io"])
 
@@ -696,6 +711,7 @@ class Pipeline(nnx.Module):
     )
 
     return final_output
+
 
 PipelineToLinen = nnx_wrappers.to_linen_class(
     Pipeline,
