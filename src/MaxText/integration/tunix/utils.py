@@ -16,11 +16,11 @@
 
 import re
 
-import maxtext.src.maxtext.integration.tunix.weight_mapping as weight_mapping  # pylint: disable=consider-using-from-import
+from MaxText.integration.tunix.weight_mapping import StandaloneVllmWeightMapping
 from MaxText.utils.ckpt_conversion.utils.param_mapping import PARAM_MAPPING
 from MaxText.utils.ckpt_conversion.utils.param_mapping import VLLM_HOOK_FNS
 
-STANDALONE_VLLM_WEIGHT_MAPPING = weight_mapping.StandaloneVllmWeightMapping()
+STANDALONE_VLLM_WEIGHT_MAPPING = StandaloneVllmWeightMapping()
 
 # This static map provides the architectural knowledge (sharding) that is
 # not present in the original HF mapping.
