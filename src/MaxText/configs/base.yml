@@ -890,6 +890,7 @@ out_hidden_size_for_vit: 512
 temporal_patch_size_for_vit: 2
 num_position_embeddings_for_vit: 1024
 deepstack_visual_indexes_for_vit: []
+deepstack_decoder_layer_indexes: []
 
 # Subslice shape in the form of "x,y,z" when using pathways (single controller). 
 # Example: "8,8" to use a 8x8 subgrid (64 chips) of a full pod (16x16) of trillium.

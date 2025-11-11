@@ -676,6 +676,24 @@ class Decoder(nn.Module):
 
     return logits
 
+  def _deepstack_process(self, hidden_states, visual_pos_masks, visual_embeds):
+    """Process deepstack visual embeddings by adding them to hidden states at visual token positions.
+
+    Args:
+      hidden_states: [batch, seq_len, hidden_dim] decoder hidden states
+      visual_pos_masks: [batch, seq_len] boolean mask indicating visual token positions
+      visual_embeds: [num_visual_tokens, hidden_dim] visual features from encoder layer
+
+    Returns:
+      Updated hidden_states with visual features added at visual positions
+    """
+    # JAX arrays are immutable, so we don't need .clone() like PyTorch
+    # Add visual features to positions marked by mask
+    # visual_embeds is already flattened [num_visual_tokens, hidden_dim]
+    # We need to add it to hidden_states[visual_pos_masks, :]
+    hidden_states = hidden_states.at[visual_pos_masks, :].add(visual_embeds)
+    return hidden_states
+
   @nn.compact
   def __call__(
       self,
@@ -691,6 +709,7 @@ class Decoder(nn.Module):
       bidirectional_mask: None | Any = None,
       image_embeddings: None | jnp.ndarray = None,
       image_masks: None | jnp.ndarray = None,
+      deepstack_visual_embeds: None | list[jnp.ndarray] = None,
   ):
     cfg = self.config
     mesh = self.mesh
@@ -888,6 +907,15 @@ class Decoder(nn.Module):
                 slot=slot,
                 **layer_call_kwargs,
             )
+
+            # Inject deepstack visual embeddings if configured for this layer
+            if deepstack_visual_embeds is not None and lyr < len(cfg.deepstack_decoder_layer_indexes):
+              deepstack_idx = cfg.deepstack_decoder_layer_indexes[lyr]
+              if deepstack_idx < len(deepstack_visual_embeds):
+                visual_embeds = deepstack_visual_embeds[deepstack_idx]
+                # Use image_masks to identify visual token positions
+                if image_masks is not None and visual_embeds is not None:
+                  y = self._deepstack_process(y, image_masks, visual_embeds)
 
     assert isinstance(y, jax.Array)
 
