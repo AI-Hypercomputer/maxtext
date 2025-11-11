@@ -26,21 +26,21 @@ Usage:
 
 # Llama3.1-8B-Instruct
 python3 -m src.MaxText.rl.train_rl src/MaxText/configs/rl.yml \
-  model_name=llama3.1-8b \
-  tokenizer_path=meta-llama/Llama-3.1-8B-Instruct \
-  load_parameters_path=gs://path/to/checkpoint/0/items \
-  run_name=$WORKLOAD \
-  base_output_directory=$OUTPUT_PATH \
-  hf_access_token=$HF_TOKEN
+  --model_name=llama3.1-8b \
+  --tokenizer_path=meta-llama/Llama-3.1-8B-Instruct \
+  --load_parameters_path=gs://path/to/checkpoint/0/items \
+  --run_name=$WORKLOAD \
+  --base_output_directory=$OUTPUT_PATH \
+  --hf_access_token=$HF_TOKEN
 
 # Llama3.1-70B-Instruct
 python3 -m src.MaxText.rl.train_rl src/MaxText/configs/rl.yml \
-  model_name=llama3.1-70b \
-  tokenizer_path=meta-llama/Llama-3.1-70B-Instruct \
-  load_parameters_path=gs://path/to/checkpoint/0/items \
-  run_name=$WORKLOAD \
-  base_output_directory=$OUTPUT_PATH \
-  hf_access_token=$HF_TOKEN
+  --model_name=llama3.1-70b \
+  --tokenizer_path=meta-llama/Llama-3.1-70B-Instruct \
+  --load_parameters_path=gs://path/to/checkpoint/0/items \
+  --run_name=$WORKLOAD \
+  --base_output_directory=$OUTPUT_PATH \
+  --hf_access_token=$HF_TOKEN
 
 """
 
