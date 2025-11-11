@@ -19,10 +19,6 @@ import pytest
 import unittest
 from absl.testing import absltest
 
-from MaxText import pyconfig
-from MaxText.globals import MAXTEXT_PKG_DIR, MAXTEXT_ASSETS_ROOT
-from MaxText.inference_microbenchmark import run_benchmarks
-
 pytestmark = [pytest.mark.external_serving]
 
 class Inference_Microbenchmark(unittest.TestCase):
@@ -31,6 +27,12 @@ class Inference_Microbenchmark(unittest.TestCase):
   @pytest.mark.integration_test
   @pytest.mark.tpu_only
   def test(self):
+    # Lazy imports to avoid import-time side effects when deselected
+    import jax
+    from MaxText import pyconfig
+    from MaxText.globals import MAXTEXT_PKG_DIR, MAXTEXT_ASSETS_ROOT
+    from MaxText.inference_microbenchmark import run_benchmarks
+
     jax.config.update("jax_default_prng_impl", "unsafe_rbg")
     config = pyconfig.initialize(
         [

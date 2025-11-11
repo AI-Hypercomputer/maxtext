@@ -17,6 +17,7 @@
 import unittest
 import os.path
 import numpy as np
+import pytest
 
 import jax
 
@@ -127,6 +128,7 @@ class DataLoaderTest(unittest.TestCase):
       _ = data_loader.load_next_batch()
     self.assertTrue(str(e.exception).startswith("You may have run out of training data."))
 
+  @pytest.mark.external_serving
   def test_rampup_data_loader(self):
     """Tests that RampUpLoader correctly slices and increment."""
     # Mock iterator returns a FULL batch (size 4)

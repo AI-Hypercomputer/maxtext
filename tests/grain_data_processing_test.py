@@ -46,7 +46,7 @@ class GrainArrayRecordProcessingTest(unittest.TestCase):
   def setUp(self):
     super().setUp()
     temp_dir = tempfile.gettempdir()
-        decoupled = is_decoupled()
+    decoupled = is_decoupled()
 
     if decoupled:
       grain_train_files = os.path.join(

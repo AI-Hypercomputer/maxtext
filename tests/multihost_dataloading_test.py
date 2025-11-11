@@ -51,15 +51,15 @@ class MultihostDataloadingTest(unittest.TestCase):
     )
     batch_size = 4
     config = pyconfig.initialize(
-        [sys.argv[0], get_test_config_path()],
-        per_device_batch_size=1,
-        run_name="test",
-        mesh_axes=["data"],
-        logical_axis_rules=[["batch", "data"]],
-        data_sharding=["data"],
-        f"base_output_directory={base_output_directory}",
-        f"dataset_path={dataset_path}",
-        enable_checkpointing=False,
+      [sys.argv[0], get_test_config_path()],
+      f"base_output_directory={base_output_directory}",
+      f"dataset_path={dataset_path}",
+      per_device_batch_size=1,
+      run_name="test",
+      mesh_axes=["data"],
+      logical_axis_rules=[["batch", "data"]],
+      data_sharding=["data"],
+      enable_checkpointing=False,
     )
     global_data_shape = PartitionSpec(batch_size, config.max_target_length)
     mesh_shape_1d = (len(jax.devices()),)
