@@ -61,7 +61,7 @@ import tensorflow_datasets as tfds
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl.rollout import base_rollout
 from tunix.rl.grpo.grpo_learner import GrpoConfig, GrpoLearner
-from tunix.sft import metrics_logger
+from tunix.sft import metrics_logger, profiler
 
 
 from transformers import AutoTokenizer
@@ -201,6 +201,8 @@ def rl_train(tmvp_config):
     os.makedirs(train_data_dir)
   if not os.path.exists(test_data_dir):
     os.makedirs(test_data_dir)
+  if not os.path.exists(tmvp_config.tensorboard_dir):
+    os.makedirs(tmvp_config.tensorboard_dir)
 
   # Create model tokenizer
   model_tokenizer = AutoTokenizer.from_pretrained(tmvp_config.tokenizer_path)
@@ -271,6 +273,9 @@ def rl_train(tmvp_config):
       save_interval_steps=tmvp_config.checkpoint_period, max_to_keep=tmvp_config.max_num_checkpoints_to_keep
   )
 
+  # Set up micro batching
+  micro_batch_size = None if tmvp_config.micro_batch_size == -1 else tmvp_config.micro_batch_size
+
   # Setup metrics logging
   max_logging.log(f"TensorBoard logs directory: {tmvp_config.tensorboard_dir}")
   # Metrics logger
@@ -278,9 +283,14 @@ def rl_train(tmvp_config):
       log_dir=tmvp_config.tensorboard_dir, flush_every_n_steps=tmvp_config.log_period
   )
 
-  # Profiler configurations
-  # TODO: xfgu@: add profiling
   profiler_options = None
+  if tmvp_config.profiler == "xplane":
+    profiler_options = profiler.ProfilerOptions(
+        log_dir=tmvp_config.tensorboard_dir,
+        skip_first_n_steps=tmvp_config.skip_first_n_steps_for_profiler,
+        profiler_steps=tmvp_config.profiler_steps,
+        set_profile_options=False,
+    )
 
   # RL Cluster config
   # Note that we use vLLM as the rollout engine.
@@ -297,11 +307,15 @@ def rl_train(tmvp_config):
           actor_optimizer=optimizer,
           eval_every_n_steps=tmvp_config.eval_interval,
           max_steps=max_train_steps,
-          # metrics logging
+          # Micro batching
+          mini_batch_size=tmvp_config.batch_size,
+          train_micro_batch_size=micro_batch_size,
+          rollout_micro_batch_size=micro_batch_size,
+          # Metrics logging
           metrics_logging_options=metrics_logging_options,
-          # profiling
+          # Profiling
           profiler_options=profiler_options,
-          # checkpoint saving
+          # Checkpoint saving
           checkpoint_root_directory=ckpt_dir,
           checkpointing_options=checkpointing_options,
       ),
