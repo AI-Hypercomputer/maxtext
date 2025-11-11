@@ -1833,8 +1833,18 @@ class RoutedAndSharedMoE(nnx.Module):
     return self.MoeBlock_0
 
   def __call__(self, inputs: jax.Array) -> jax.Array:
+    batch_logical_axes = (
+      "activation_batch_no_exp" if self.config.expert_shard_attention_option == ctypes.EP_AS_CONTEXT
+      else "activation_batch"
+    )
+    seq_logical_axes = (
+      "activation_length" if self.config.expert_shard_attention_option == ctypes.EP_AS_CONTEXT
+      else "activation_length_no_exp"
+    )
     routed_experts, _ = self.routed_moe(inputs)
+    routed_experts = nn.with_logical_constraint(routed_experts, (batch_logical_axes, seq_logical_axes, "activation_embed"))
     shared_experts = self.shared_experts(inputs)
+    shared_experts = nn.with_logical_constraint(shared_experts, (batch_logical_axes, seq_logical_axes, "activation_embed"))
     return routed_experts + shared_experts
 
 
