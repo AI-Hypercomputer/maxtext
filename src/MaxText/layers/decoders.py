@@ -477,7 +477,7 @@ class Decoder(nn.Module):
     elif self.config.decoder_block == DecoderBlockType.GPT3:
       return functools.partial(gpt3.gpt3_layer_norm, num_features=num_features, reductions_in_fp32=False, use_bias=True)
     elif self.config.decoder_block == DecoderBlockType.QWEN3_NEXT:
-      return functools.partial(normalizations.Qwen3NextRMSNormLinen, num_features=num_features, shard_mode=self.config.shard_mode)
+      return functools.partial(normalizations.Qwen3NextRMSNormLinen, num_features=num_features)
     else:
       raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block.value=}")
 
