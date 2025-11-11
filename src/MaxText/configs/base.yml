@@ -227,7 +227,7 @@ pipeline_delay_activation_forwarding: False # This delays the activation forward
 # and you must set the number of microbatches to at least 2 * num_stages (the minimum 2 * num_stages is set by default with this delay).
 
 model_fsdp_ag_once: False # This controls whether the Zero-1 optimization is active.
-# This is a memory/time tradeoff - True: This is Zero-1 Sharding. Use ZeroOneTransformer to gather weights once per gradient step. 
+# This is a memory/time tradeoff - True: This is Zero-1 Sharding. Use ZeroOneTransformer to gather weights once per gradient step.
 # False: This is Zero-3 Sharing. Use the standard Transformer, which gathers for each microbatch's fwd/bwd pass.
 pipeline_fsdp_ag_once: False # If set to true then all gather all of the weights over FSDP before the first pipeline iteration.
 # This is a memory/time tradeoff - we now have to store the FSDP gathered weights and gradients (typically in bf16), as opposed
@@ -277,7 +277,7 @@ param_scan_axis: 1
 # The attention_type parameter determines the variants of attention, e.g. global or local_sliding
 attention: 'autoselected' # Supported attention: autoselected, dot_product, flash, cudnn_flash_te
 attention_type: 'global' # Supported attention_type: global, local_sliding, chunk, mla
-attention_bias: False # If True, adds a learnable bias to the query, key, and value projections 
+attention_bias: False # If True, adds a learnable bias to the query, key, and value projections
 attention_sink: False
 sliding_window_size: 0
 chunk_attn_window_size: 0
@@ -388,17 +388,17 @@ logical_axis_rules: [
                       ['embed_no_exp', ['fsdp', 'sequence', 'tensor_transpose', 'context']],
                       ['embed_no_exp', ['fsdp', 'fsdp_transpose', 'sequence', 'context']],
                       ['embed_no_exp', ['fsdp', 'sequence', 'context']],
-                      ['embed_tensor_transpose', ['tensor_transpose']],           
+                      ['embed_tensor_transpose', ['tensor_transpose']],
                       ['q_lora', ['fsdp', 'fsdp_transpose', 'sequence', 'context', 'tensor_transpose', 'expert']],
                       ['q_lora', ['fsdp', 'sequence', 'context', 'tensor_transpose', 'expert']],
                       ['q_lora', ['fsdp', 'fsdp_transpose', 'sequence', 'context', 'expert']],
                       ['q_lora', ['fsdp', 'sequence', 'context', 'expert']],
-                      ["q_lora_up_proj",[]],
+                      # ["q_lora_up_proj",[]],
                       ['kv_lora', ['fsdp', 'fsdp_transpose', 'sequence', 'context', 'tensor_transpose', 'expert']],
                       ['kv_lora', ['fsdp', 'sequence', 'context', 'tensor_transpose', 'expert']],
                       ['kv_lora', ['fsdp', 'fsdp_transpose', 'sequence', 'context', 'expert']],
                       ['kv_lora', ['fsdp', 'sequence', 'context', 'expert']],
-                      ["kv_lora_up_proj",[]],
+                      # ["kv_lora_up_proj",[]],
                       ['norm', ['tensor', 'tensor_transpose']],
                       ['layers', 'stage'],
                       ['kv', []],
@@ -415,8 +415,8 @@ logical_axis_rules: [
                       ['num_pages', []],
                       ['tokens_per_page', []],
                       ['paged_kv_head_dim_size', []],
-                      ['dense_layers', []],
-                      ['moe_layers', []],
+                      # ['dense_layers', []],
+                      # ['moe_layers', []],
                     ]
 # Axes used for DCN must be earlier in this list than ICI, see (b/339009148) for details
 data_sharding: [['data', 'stage', 'fsdp', 'fsdp_transpose', 'sequence', 'context', 'context_autoregressive', 'tensor', 'tensor_transpose', 'tensor_sequence', 'expert', 'autoregressive']]
@@ -841,7 +841,7 @@ vision_output_dim_for_vit: 4096
 pixel_shuffle_ratio_for_vit: 0.5
 projector_dropout_for_vit: 0.0
 
-# Subslice shape in the form of "x,y,z" when using pathways (single controller). 
+# Subslice shape in the form of "x,y,z" when using pathways (single controller).
 # Example: "8,8" to use a 8x8 subgrid (64 chips) of a full pod (16x16) of trillium.
 subslice_shape: ""
 

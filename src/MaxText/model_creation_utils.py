@@ -115,7 +115,8 @@ def create_nnx_model(config):
 
   abstract_model = nnx.eval_shape(_create_model)
   graphdef, abstract_state = nnx.split(abstract_model)
-  specs = nnx.get_partition_spec(abstract_state)
+  with nn.logical_axis_rules(config.logical_axis_rules):
+    specs = nnx.get_partition_spec(abstract_state)
   mesh = abstract_model.mesh
 
   # JIT a function that creates the model state with proper sharding from the start.
