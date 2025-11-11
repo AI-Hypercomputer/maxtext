@@ -665,6 +665,10 @@ rope_interleave: True # RoPE with sin/cos interleaved vs concatenated
 rope_truncate: True # Floor lower bound and ceil upper bound for correction range
 rope_attention_scaling: False # Scale the rotary embedding output
 
+# MRoPE (Multi-dimensional RoPE) parameters for multimodal models
+use_mrope: False # Enable Multi-dimensional RoPE for Qwen3-Omni
+mrope_section: [24, 20, 20] # Dimensions for temporal, height, width in MRoPE
+
 # Ahead of time Compilation (aka AOT)
 # Only set these arguments if you are running train_compile or loading a compiled train step.
 compiled_trainstep_file: "" # Name of saved serialized compiled train_step, e.g. compiled_train_v5e-256.pickle
