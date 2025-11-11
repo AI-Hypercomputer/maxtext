@@ -37,8 +37,8 @@ normalization_layer_epsilon: 1.e-05 # epsilon value for rmsnorm, layernorm.
 load_parameters_path: ""
 
 # Allow loading a params-only checkpoint directory that does not have Orbax metadata.
-# Default False to keep strict behavior; enable via CLI with
-# allow_missing_checkpoint_metadata=true or the alias --no-metadata
+# Default False to keep strict behavior; enable explicitly via
+# the OmegaConf override: allow_missing_checkpoint_metadata=true
 allow_missing_checkpoint_metadata: False
 
 # LoRA adapter support configs
