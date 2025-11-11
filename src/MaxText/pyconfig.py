@@ -588,15 +588,7 @@ class _HyperParameters:
   def _update_from_env_and_command_line(self, raw_keys, raw_data_from_yaml, argv, **kwargs) -> list[str]:
     """Update model config from environment and command line using omegaconf.OmegaConf overrides."""
     # Use omegaconf.OmegaConf.from_cli to capture CLI arguments.
-    cli_args = list(argv[2:])
-    # Support a boolean alias flag: "--no-metadata" => allow_missing_checkpoint_metadata=True
-    # Keep behavior local and explicit; default remains False in base.yml.
-    if "--no-metadata" in cli_args:
-      cli_args = [arg for arg in cli_args if arg != "--no-metadata"]
-      # Inject the corresponding override understood by the config system.
-      cli_args.append("allow_missing_checkpoint_metadata=true")
-
-    cli_cfg = omegaconf.OmegaConf.from_cli(cli_args)
+    cli_cfg = omegaconf.OmegaConf.from_cli(argv[2:])
     # Also create a configuration from any extra keyword arguments.
     kwargs_cfg = omegaconf.OmegaConf.create(kwargs)
     # Merge command-line and keyword arguments.

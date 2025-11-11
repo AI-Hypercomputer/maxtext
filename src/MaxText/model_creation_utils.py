@@ -23,7 +23,6 @@ import flax.linen as nn
 import jax
 from jax.sharding import Mesh, AxisType
 from MaxText import maxtext_utils
-from MaxText import max_logging
 from MaxText import pyconfig
 from MaxText.layers import quantizations
 from MaxText.common_types import MODEL_MODE_TRAIN, ShardMode
@@ -162,73 +161,46 @@ def create_nnx_model(config, devices=None):
         # Get the structure of checkpoint in `config.load_parameters_path`
         metadata = ckptr.metadata(config.load_parameters_path)
 
-        # Safely access metadata tree (may be None for params-only dirs without metadata)
-        item_metadata_tree = getattr(getattr(metadata, "item_metadata", None), "tree", None)
-
-        # Decide restore strategy
-        def _restore_linen():
-          # structure of linen checkpoint: {'params': {'params': {...}}}
-          target = jax.tree.map(
+        is_nnx_checkpoint = True
+        if (
+            "params" in metadata.item_metadata.tree.keys()
+            and "params" in metadata.item_metadata.tree.get("params", {}).keys()
+        ):
+          # structure of linen checkpoint: {'params': {'params': {'decoder': ...}}}
+          is_nnx_checkpoint = False
+          target_for_restore = jax.tree.map(
               lambda v: v.value,
               sharded_state,
               is_leaf=lambda n: hasattr(n, "value"),
           )
-          items = {"params": {"params": target}}
-          args = {"params": {"params": ocp.checkpoint_utils.construct_restore_args(target)}}
-          restored_local = ckptr.restore(
-              epath.Path(config.load_parameters_path),
-              item=items,
-              transforms={},
-              restore_args=args,
-          )
-          return restored_local["params"]["params"]
 
-        def _restore_nnx():
-          # structure of nnx checkpoint: each variable saved as {'value': ...}
-          target = jax.tree.map(
+          item_to_restore = {"params": {"params": target_for_restore}}
+          restore_args = {"params": {"params": ocp.checkpoint_utils.construct_restore_args(target_for_restore)}}
+        else:
+          # structure of nnx checkpoint: {'decoder': {'value': ...}}
+          target_for_restore = jax.tree.map(
               lambda v: {"value": v.value},
               sharded_state,
               is_leaf=lambda n: isinstance(n, nnx.Variable),
           )
-          args = ocp.checkpoint_utils.construct_restore_args(target)
-          restored_local = ckptr.restore(
-              epath.Path(config.load_parameters_path),
-              item=target,
-              transforms={},
-              restore_args=args,
-          )
-          return jax.tree.map(
+          item_to_restore = target_for_restore
+          restore_args = ocp.checkpoint_utils.construct_restore_args(target_for_restore)
+
+        restored = ckptr.restore(
+            epath.Path(config.load_parameters_path),
+            item=item_to_restore,
+            transforms={},
+            restore_args=restore_args,
+        )
+
+        if is_nnx_checkpoint:
+          checkpoint = jax.tree.map(
               lambda v: v["value"],
-              restored_local,
+              restored,
               is_leaf=lambda x: isinstance(x, dict) and "value" in x and not isinstance(x.get("value"), dict),
           )
-
-        if item_metadata_tree is None:
-          # No metadata present.
-          if not getattr(config, "allow_missing_checkpoint_metadata", False):
-            raise ValueError(
-                "Checkpoint metadata not found at load_parameters_path. "
-                "Re-save the checkpoint with Orbax metadata or set allow_missing_checkpoint_metadata=true (alias: --no-metadata)."
-            )
-          max_logging.log(
-              "No checkpoint metadata found; attempting params-only restore without metadata (enabled by allow_missing_checkpoint_metadata)."
-          )
-          checkpoint = None
-          # Prefer linen-style first (common for converted weights), then fall back to NNX.
-          try:
-            checkpoint = _restore_linen()
-          except Exception:
-            checkpoint = _restore_nnx()
         else:
-          # Metadata present: determine structure based on keys.
-          is_linen = (
-              "params" in item_metadata_tree.keys()
-              and "params" in item_metadata_tree.get("params", {}).keys()
-          )
-          if is_linen:
-            checkpoint = _restore_linen()
-          else:
-            checkpoint = _restore_nnx()
+          checkpoint = restored["params"]["params"]
 
         if checkpoint:
           nnx.update(model, checkpoint)
