@@ -494,7 +494,7 @@ def vertex_tensorboard_components():
 
 __all__.append("vertex_tensorboard_components")
 
-# ---------------- TensorBoardX -----------------
+# ------------------------- TensorBoardX --------------------------
 
 try:
   if not is_decoupled():  # Only attempt real import when not decoupled

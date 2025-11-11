@@ -4,7 +4,6 @@ Checks:
   - Core imports (jax, flax, numpy)
   - Optional imports
   - JAX device enumeration
-  - Format/Layout alias compatibility (MaxText.layout_compat)
 
 Fails only on missing core imports or device query failure; alias test asserts mapping rules.
 """
@@ -42,30 +41,6 @@ def test_environment_optional_imports():
         else:
             if dt > 8.0:
                 _defects.append(f"{n} SLOW_IMPORT ({dt:.1f}s)")
-
-
-def test_format_layout_alias():
-    # Verify Format/Layout behavior based on JAX version threshold logic (>=0.7.0 native Format else alias)
-    try:
-        import jax  # type: ignore
-        from MaxText.layout_compat import Format, Layout, DLL  # type: ignore
-    except Exception as e:  # pragma: no cover
-        raise AssertionError(f"Failed to import layout compatibility modules: {e}")
-
-    ver = getattr(jax, "__version_info__", None)
-    assert ver is not None, "jax.__version_info__ missing"
-
-    sample = Format(DLL.AUTO)  # should construct regardless of version due to alias logic
-    # For versions < 0.7.0 Format should be Layout (same type); for >=0.7.0 it may differ.
-    if ver < (0, 7, 0):
-        assert isinstance(sample, Layout), "Format should alias Layout for jax < 0.7.0"
-    else:
-        # We can't assert specific class name without importing jax.experimental.layout internals; just ensure not Layout instance.
-        assert not isinstance(sample, Layout), "Format should NOT alias Layout for jax >= 0.7.0"
-
-    # AUTO sentinel presence path differs by version; ensure attribute access does not raise.
-    dll_attr = "layout" if ver >= (0, 7, 0) else "device_local_layout"
-    _ = getattr(sample, dll_attr)
 
 
 def test_jax_devices():

@@ -36,7 +36,7 @@ import numpy as np
 import orbax.checkpoint as ocp
 from orbax.checkpoint.experimental.emergency.multi_tier_checkpointing import initialization
 import psutil
-from tensorboardX import writer
+from MaxText.gcloud_stub import writer, _TENSORBOARDX_AVAILABLE  # centralized optional tensorboardX stub
 
 from MaxText import max_logging
 from MaxText.gcloud_stub import is_decoupled
@@ -141,7 +141,11 @@ def summarize_size_from_pytree(params):
 
 def initialize_summary_writer(tensorboard_dir, run_name):
   summary_writer_path = os.path.join(tensorboard_dir, run_name)
-  return writer.SummaryWriter(summary_writer_path) if jax.process_index() == 0 else None
+  if jax.process_index() != 0:
+    return None
+  if not _TENSORBOARDX_AVAILABLE:
+    max_logging.log("tensorboardX unavailable (decoupled or not installed); using no-op SummaryWriter.")
+  return writer.SummaryWriter(summary_writer_path)
 
 
 def close_summary_writer(summary_writer):

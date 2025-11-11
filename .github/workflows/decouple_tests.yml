@@ -96,7 +96,7 @@ jobs:
             else
               python setup.py bdist_wheel || { echo "TransformerEngine build failed"; exit 20; }
             fi
-            python -m pip install dist/transformer_engine-*.whl --no-cache-dir || { echo "TE wheel install failed"; exit 21; }
+            python -m pip install dist/transformer_engine-*.whl --no-cache-dir --force-reinstall || { echo "TE wheel install failed"; exit 21; }
             cd ..
             echo "TE built and installed." >> "${LOCAL_BASE_OUTPUT}/ci.log"
           '
