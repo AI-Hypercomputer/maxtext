@@ -56,7 +56,6 @@ class HfDataProcessingTest(unittest.TestCase):
       tokenizer_path="google-t5/t5-large",
       enable_checkpointing=False,
     )
-    self.config = config
     self.mesh_shape_1d = (len(jax.devices()),)
     self.mesh = Mesh(mesh_utils.create_device_mesh(self.mesh_shape_1d), self.config.mesh_axes)
     self.process_indices = input_pipeline_interface.get_process_loading_real_data(

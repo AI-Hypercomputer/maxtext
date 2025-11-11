@@ -297,9 +297,9 @@ class PipelineParallelismTest(unittest.TestCase):
         [
             None,
             get_test_config_path(),
-            f"base_output_directory={base_output_directory}",
+            f"base_output_directory={self.base_output_directory}",
             "run_name=runner_pipeline_parallelism_test",
-            f"dataset_path={dataset_path}",
+            f"dataset_path={self.dataset_path}",
             "base_emb_dim=28",
             "base_num_query_heads=4",
             "base_num_kv_heads=4",
@@ -347,9 +347,9 @@ class PipelineParallelismTest(unittest.TestCase):
         [
             None,
             get_test_config_path(),
-            f"base_output_directory={base_output_directory}",
+            f"base_output_directory={self.base_output_directory}",
             "run_name=runner_pipeline_parallelism_test",
-            f"dataset_path={dataset_path}",
+            f"dataset_path={self.dataset_path}",
             "base_emb_dim=28",
             "base_num_query_heads=4",
             "base_num_kv_heads=4",
@@ -379,9 +379,9 @@ class PipelineParallelismTest(unittest.TestCase):
         [
             None,
             get_test_config_path(),
-            f"base_output_directory={base_output_directory}",
+            f"base_output_directory={self.base_output_directory}",
             "run_name=runner_pipeline_parallelism_test",
-            f"dataset_path={dataset_path}",
+            f"dataset_path={self.dataset_path}",
             "base_emb_dim=28",
             "base_num_query_heads=4",
             "base_num_kv_heads=4",
@@ -409,65 +409,65 @@ class PipelineParallelismTest(unittest.TestCase):
   def test_full_train_fp8(self):
     # Run a full train.py call with fp8 quantization, which adds extra
     # variable collections that need to be handled
-    train_main(
-        [
-            None,
-            get_test_config_path(),
-            f"base_output_directory={base_output_directory}",
-            "run_name=runner_pipeline_parallelism_test",
-            f"dataset_path={dataset_path}",
-            "base_emb_dim=28",
-            "base_num_query_heads=4",
-            "base_num_kv_heads=4",
-            "base_mlp_dim=32",
-            "base_num_decoder_layers=4",
-            "head_dim=128",
-            "per_device_batch_size=2",
-            "max_target_length=1024",
-            "vocab_size=32",
-            "dataset_type=synthetic",
-            "steps=3",
-            "enable_checkpointing=False",
-            "enable_goodput_recording=False",
-            "ici_pipeline_parallelism=4",
-            rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizer.llama2')}",
-            "quantization=fp8",
-            "scan_layers_per_stage=False",
-            "attention=dot_product",
-        ]
-    )
+    args = [
+        None,
+        get_test_config_path(),
+        f"base_output_directory={self.base_output_directory}",
+        "run_name=runner_pipeline_parallelism_test",
+        f"dataset_path={self.dataset_path}",
+        "base_emb_dim=28",
+        "base_num_query_heads=4",
+        "base_num_kv_heads=4",
+        "base_mlp_dim=32",
+        "base_num_decoder_layers=4",
+        "head_dim=128",
+        "per_device_batch_size=2",
+        "max_target_length=1024",
+        "vocab_size=32",
+        "dataset_type=synthetic",
+        "steps=3",
+        "enable_checkpointing=False",
+        "enable_goodput_recording=False",
+        "ici_pipeline_parallelism=4",
+        rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizer.llama2')}",
+        "quantization=fp8",
+        "scan_layers_per_stage=False",
+        "attention=dot_product",
+    ]
+    _adapt_parallelism(args, pipeline_stages=4)
+    train_main(args)
 
   @pytest.mark.integration_test
   def test_full_train_nanoo_fp8(self):
     # Run a full train.py call with NANOO fp8 quantization, which adds extra
     # variable collections that need to be handled
-    train_main(
-        [
-            None,
-            get_test_config_path(),
-            f"base_output_directory={base_output_directory}",
-            "run_name=runner_pipeline_parallelism_test",
-            f"dataset_path={dataset_path}",
-            "base_emb_dim=28",
-            "base_num_query_heads=4",
-            "base_num_kv_heads=4",
-            "base_mlp_dim=32",
-            "base_num_decoder_layers=4",
-            "head_dim=128",
-            "per_device_batch_size=2",
-            "max_target_length=1024",
-            "vocab_size=32",
-            "dataset_type=synthetic",
-            "steps=3",
-            "enable_checkpointing=False",
-            "enable_goodput_recording=False",
-            "ici_pipeline_parallelism=4",
-            rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizer.llama2')}",
-            "quantization=nanoo_fp8",
-            "scan_layers_per_stage=False",
-            "attention=dot_product",
-        ]
-    )
+    args = [
+        None,
+        get_test_config_path(),
+        f"base_output_directory={self.base_output_directory}",
+        "run_name=runner_pipeline_parallelism_test",
+        f"dataset_path={self.dataset_path}",
+        "base_emb_dim=28",
+        "base_num_query_heads=4",
+        "base_num_kv_heads=4",
+        "base_mlp_dim=32",
+        "base_num_decoder_layers=4",
+        "head_dim=128",
+        "per_device_batch_size=2",
+        "max_target_length=1024",
+        "vocab_size=32",
+        "dataset_type=synthetic",
+        "steps=3",
+        "enable_checkpointing=False",
+        "enable_goodput_recording=False",
+        "ici_pipeline_parallelism=4",
+        rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizer.llama2')}",
+        "quantization=nanoo_fp8",
+        "scan_layers_per_stage=False",
+        "attention=dot_product",
+    ]
+    _adapt_parallelism(args, pipeline_stages=4)
+    train_main(args)
 
 
 if __name__ == "__main__":
