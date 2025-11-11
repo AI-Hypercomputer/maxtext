@@ -369,12 +369,27 @@ def train_loop(config, recorder, state=None):
       state,
   ) = train_utils.setup_train_loop(config, recorder)
 
-  if config.use_dpo:
-    if "reference_params" not in state.params:
-      reference_params = jax.tree.map(jnp.copy, state.params["params"])
-      state = _merge_dpo_state(state, reference_params)
-    state_mesh_shardings = _merge_dpo_state(state_mesh_shardings, state_mesh_shardings.params["params"])
 
+  print("Model Parameters and Shapes:")
+  def print_shape(path, leaf):
+    parts = []
+    for k in path:
+      if isinstance(k, jax.tree_util.DictKey):
+        parts.append(str(k.key))
+      elif isinstance(k, jax.tree_util.SeqKey):
+        parts.append(str(k.idx))
+      else:
+        parts.append(str(k)) # Fallback for other key types
+
+    path_str = '.'.join(parts)
+
+    if hasattr(leaf, 'shape'):
+      print(f"  {path_str}: {leaf.shape}")
+    else:
+      # Handle cases where a leaf in the params tree might not be an array
+      print(f"  {path_str}: (Not an array: {type(leaf)})")
+
+  jax.tree_util.tree_map_with_path(print_shape, state.params)
   params_shardings, state_mesh_shardings = sharding.maybe_update_params_sharding_with_opt(config, state_mesh_shardings)
 
   p_train_step, p_eval_step = train_utils.jit_train_and_eval_step(

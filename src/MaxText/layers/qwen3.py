@@ -43,6 +43,20 @@ from MaxText.layers.linears import MlpBlock
 from MaxText.layers.moe import RoutedMoE
 
 
+# Helper function to print tensor statistics using jax.debug.print
+def print_tensor_stats(tensor: Array, name: str):
+  if tensor is not None:
+    jax.debug.print(f"[MaxText] {name} - shape: {{shape}}, dtype: {{dtype}}, mean: {{mean}}, std: {{std}}, min: {{min}}, max: {{max}}",
+                    shape=tensor.shape,
+                    dtype=tensor.dtype,
+                    mean=jnp.mean(tensor),
+                    std=jnp.std(tensor),
+                    min=jnp.min(tensor),
+                    max=jnp.max(tensor),
+                    ordered=True)
+  else:
+    jax.debug.print(f"[MaxText] {name} is None", ordered=True)
+
 # -----------------------------------------
 # Qwen3-Next Layer Implementations
 # -----------------------------------------
@@ -387,14 +401,17 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     # hidden_states: (B, S, E)
     cfg = self.config
     batch, seq_len, _ = hidden_states.shape
+    print_tensor_stats(hidden_states, "GDN Input hidden_states")
 
     # =========================================================================
     # STEP A: Input Projections
     # =========================================================================
     # qkvz: (B, S, 2 * K_dim + 2 * V_dim)
     qkvz = self.in_proj_qkvz(hidden_states)
+    print_tensor_stats(qkvz, "GDN qkvz")
     # ba: (B, S, 2 * H_v)
     ba = self.in_proj_ba(hidden_states)
+    print_tensor_stats(ba, "GDN ba")
 
     # QKVZ Reshaping and Splitting
     # Per-K_head group dim: 2 * D_k + 2 * D_v * V_per_K
@@ -417,11 +434,17 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     # value_raw: (B, S, H_k, V_per_K * D_v)
     # z_raw: (B, S, H_k, V_per_K * D_v)
     query, key, value_raw, z_raw = jnp.split(mixed_qkvz, split_indices_qkvz, axis=3)
+    print_tensor_stats(query, "GDN query_raw")
+    print_tensor_stats(key, "GDN key_raw")
+    print_tensor_stats(value_raw, "GDN value_raw")
+    print_tensor_stats(z_raw, "GDN z_raw")
 
     # value: (B, S, H_v, D_v)
     value = value_raw.reshape(batch, seq_len, self.num_v_heads, self.head_v_dim)
     # z: (B, S, H_v, D_v)
     z = z_raw.reshape(batch, seq_len, self.num_v_heads, self.head_v_dim)
+    print_tensor_stats(value, "GDN value")
+    print_tensor_stats(z, "GDN z")
 
     # BA Reshaping and Splitting
     new_shape_ba = (
@@ -442,6 +465,8 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     b = b_raw.reshape(batch, seq_len, self.num_v_heads)
     # a: (B, S, H_v)
     a = a_raw.reshape(batch, seq_len, self.num_v_heads)
+    print_tensor_stats(b, "GDN b")
+    print_tensor_stats(a, "GDN a")
 
     # Flatten head dimensions for concatenation before conv
     # q: (B, S, K_dim)
@@ -457,12 +482,17 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     # conv_dim = 2 * K_dim + V_dim
     # qkv: (B, S, 2 * K_dim + V_dim)
     qkv = jnp.concatenate([q, k, v], axis=-1)
+    print_tensor_stats(qkv, "GDN qkv_cat")
 
     # TODO(parambole): Implement caching logic for conv_state and recurrent_state
 
     # Input to conv_layer should be (B, S, C)
     # qkv_conv shape: (B, S, conv_dim)
-    qkv_conv = jax.nn.silu(self.conv1d(qkv).astype(jnp.float32)).astype(cfg.dtype)
+    conv_out = self.conv1d(qkv)
+    print_tensor_stats(conv_out, "GDN conv1d_out")
+    qkv_conv = jax.nn.silu(conv_out.astype(jnp.float32)).astype(cfg.dtype)
+    print_tensor_stats(qkv_conv, "GDN qkv_conv (silu)")
+
     # q_conv shape: (B, S, key_dim), k_conv shape: (B, S, key_dim), v_conv shape: (B, S, value_dim)
     q_conv, k_conv, v_conv = jnp.split(qkv_conv, [self.key_dim, 2 * self.key_dim], axis=-1)
 
@@ -474,6 +504,9 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     key = k_conv.reshape(batch, seq_len, self.num_k_heads, self.head_k_dim)
     # value shape: (B, S, H_v, D_v)
     value = v_conv.reshape(batch, seq_len, self.num_v_heads, self.head_v_dim)
+    print_tensor_stats(query, "GDN query_conv")
+    print_tensor_stats(key, "GDN key_conv")
+    print_tensor_stats(value, "GDN value_conv")
 
     # =========================================================================
     # STEP C: Gated Delta Rule Recurrence
@@ -482,9 +515,11 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     dt_bias = self.dt_bias.value
     # beta shape: (B, S, H_v)
     beta = jax.nn.sigmoid(b)
+    print_tensor_stats(beta, "GDN beta_gate")
     # g shape: (B, S, H_v)
     g = -jnp.exp(A_log.astype(jnp.float32)) * jax.nn.softplus(a.astype(jnp.float32) + dt_bias.astype(jnp.float32))
     g = g.astype(cfg.dtype)
+    print_tensor_stats(g, "GDN g_gate")
 
     if self.num_v_heads > self.num_k_heads and self.num_v_heads % self.num_k_heads == 0:
       repeats = self.num_v_heads // self.num_k_heads
@@ -501,17 +536,18 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     core_attn_out, _ = jax_chunk_gated_delta_rule(
         query, key, value, g, beta, chunk_size=cfg.gdn_chunk_size, use_qk_norm_in_gdn=cfg.use_qk_norm_in_gdn
     )
+    print_tensor_stats(core_attn_out, "GDN core_attn_out")
 
     # =========================================================================
     # STEP D: Final Output Stage
     # =========================================================================
     # The normalization and gating is applied per-head on the value dimension.
-    # We first reshape the `z` tensor to match the multi-head structure of `core_attn_out`.
-    # z shape from (B, S, value_dim) -> (B, S, H_v, D_v)
-    z_reshaped = z.reshape(batch, seq_len, self.num_v_heads, self.head_v_dim)
+    # z is already shape (B, S, H_v, D_v)
+    z_reshaped = z
 
     # Apply the norm and gate. Output shape: (B, S, H_v, D_v)
     gated_output_reshaped = self.norm(core_attn_out, z_reshaped)
+    print_tensor_stats(gated_output_reshaped, "GDN gated_output_reshaped")
 
     # Reshape back to a single feature dimension for the final projection.
     # Shape from (B, S, H_v, D_v) -> (B, S, value_dim)
@@ -519,6 +555,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
 
     # Final output shape: (B, S, E)
     output = self.out_proj(gated_output)
+    print_tensor_stats(output, "GDN final output")
 
     return output
 
@@ -596,6 +633,7 @@ class Qwen3NextFullAttention(nnx.Module):
       deterministic: bool,
       model_mode: str,
   ):
+    print_tensor_stats(inputs, "FullAttn Input")
     attention_output = self.attention(
         inputs_q=inputs,
         inputs_kv=inputs,
@@ -604,6 +642,7 @@ class Qwen3NextFullAttention(nnx.Module):
         deterministic=deterministic,
         model_mode=model_mode,
     )
+    print_tensor_stats(attention_output, "FullAttn Output")
     return attention_output
 
 
@@ -680,17 +719,24 @@ class Qwen3NextSparseMoeBlock(nnx.Module):
         - The output array of the MoE block.
         - The load balancing loss from the routed experts, if applicable during training.
     """
+    print_tensor_stats(hidden_states, "MoE Input")
     # 1. Apply the routed experts block.
     routed_output, load_balance_loss = self.routed_experts(hidden_states)
+    print_tensor_stats(routed_output, "MoE Routed Output")
 
     # 2. Apply the shared expert.
     shared_expert_output = self.shared_expert(hidden_states, deterministic=deterministic)
+    print_tensor_stats(shared_expert_output, "MoE Shared Expert Output")
 
     # 3. Apply the gate for the shared expert.
     shared_gate_output = self.shared_expert_gate(hidden_states)
+    print_tensor_stats(shared_gate_output, "MoE Shared Gate Output")
+    shared_gate_sigmoid = jax.nn.sigmoid(shared_gate_output)
+    print_tensor_stats(shared_gate_sigmoid, "MoE Shared Gate Sigmoid")
 
     # 4. Combine the outputs.
-    final_output = routed_output + jax.nn.sigmoid(shared_gate_output) * shared_expert_output
+    final_output = routed_output + shared_gate_sigmoid * shared_expert_output
+    print_tensor_stats(final_output, "MoE Final Output")
 
     return final_output, load_balance_loss
 
@@ -759,6 +805,7 @@ class Qwen3NextScannableBlock(nnx.Module):
     # Loop over the number of sub-layers that make up one repeating pattern.
     for i in range(cfg.inhomogeneous_layer_cycle_interval):
       layer = getattr(self, f"layer_{i}")
+      # jax.debug.print(f"[MaxText] ScannableBlock - Running Layer {i}")
       x = layer(
           x,
           decoder_segment_ids,
@@ -817,6 +864,7 @@ class Qwen3NextDecoderLayer(nnx.Module):
 
     # Conditionally instantiate either the Linear Attention or Full Attention block.
     if is_full_attention_layer:
+      # jax.debug.print(f"[MaxText] Layer {self.layer_idx}: Using Qwen3NextFullAttention")
       self.attention = Qwen3NextFullAttention(
           config=cfg,
           mesh=self.mesh,
@@ -826,6 +874,7 @@ class Qwen3NextDecoderLayer(nnx.Module):
           rngs=rngs,
       )
     else:
+      # jax.debug.print(f"[MaxText] Layer {self.layer_idx}: Using Qwen3NextGatedDeltaNet")
       self.attention = Qwen3NextGatedDeltaNet(config=cfg, dtype=cfg.dtype, rngs=rngs)
 
     # Second LayerNorm, applied before the MoE block.
@@ -851,11 +900,14 @@ class Qwen3NextDecoderLayer(nnx.Module):
       page_state: None | page_manager.PageState = None,
       slot: None | int = None,
   ):
+    jax.debug.print(f"\n--- [MaxText] Decoder Layer {self.layer_idx} ---", ordered=True)
+    print_tensor_stats(inputs, "Decoder Input")
     residual = inputs
 
     # First LayerNorm, applied before the attention block.
     hidden_states = self.input_layernorm(inputs)
     hidden_states = nn.with_logical_constraint(hidden_states, self.activation_axis_names)
+    print_tensor_stats(hidden_states, "After Input Layernorm")
 
     # Conditionally apply either the Linear Attention or Full Attention block.
     if isinstance(self.attention, Qwen3NextFullAttention):
@@ -870,10 +922,12 @@ class Qwen3NextDecoderLayer(nnx.Module):
       attention_output = cast(Qwen3NextGatedDeltaNet, self.attention)(hidden_states)
     else:
       raise TypeError(f"Unexpected type for self.attention: {type(self.attention)}")
+    print_tensor_stats(attention_output, "Attention Output")
 
     # First residual connection after attention
     hidden_states = residual + attention_output
     hidden_states = nn.with_logical_constraint(hidden_states, self.activation_axis_names)
+    print_tensor_stats(hidden_states, "After First Residual")
 
     # Prepare for the MoE block by capturing the new residual
     residual = hidden_states
@@ -881,9 +935,11 @@ class Qwen3NextDecoderLayer(nnx.Module):
     # Second LayerNorm, applied before the MoE block.
     hidden_states = self.post_attention_layernorm(hidden_states)
     hidden_states = nn.with_logical_constraint(hidden_states, self.activation_axis_names)
+    print_tensor_stats(hidden_states, "After Post Attn Layernorm")
 
     # Instantiate and call our `Qwen3NextSparseMoeBlock`.
     mlp_output, load_balance_loss = self.mlp(hidden_states, deterministic=deterministic)
+    print_tensor_stats(mlp_output, "MLP/MoE Output")
 
     # We sow the load balancing loss so it can be collected and added to the total loss
     # during training.
@@ -896,6 +952,7 @@ class Qwen3NextDecoderLayer(nnx.Module):
         layer_output,
         self.activation_axis_names,
     )
+    print_tensor_stats(layer_output, "Decoder Layer Output")
 
     return layer_output
 
