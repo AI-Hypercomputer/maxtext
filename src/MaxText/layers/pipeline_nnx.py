@@ -153,8 +153,8 @@ class Pipeline(nnx.Module):
     temp_root_rng = jax.random.PRNGKey(42)
     # Create a basic rngs dict for the temp layer
     temp_rngs_dict = {k: jax.random.fold_in(temp_root_rng, i) for i, k in enumerate(rngs_pure_dict.keys())}
-    
-    temp_layer = layer_module(self.config, rngs=nnx.Rngs(**temp_rngs_dict))
+
+    temp_layer = layer_module(self.config)
 
     # Create dummy inputs for a SINGLE stage (not the full pipeline)
     dummy_single_shape = (self.pipeline_microbatch_size, self.config.max_target_length, self.config.emb_dim)
@@ -237,6 +237,7 @@ class Pipeline(nnx.Module):
         print("DEBUG: Full pipeline eager initialization complete.")
     except Exception as e:
         print(f"WARNING: Full pipeline eager init failed! Error: {e}")
+        raise e
 
   def need_circ_storage(self):
     return (
