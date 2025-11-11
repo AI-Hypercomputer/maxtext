@@ -231,7 +231,6 @@ class PipelineParallelismTest(unittest.TestCase):
         sparse_matmul=False,
         capacity_factor=1,
         decoder_block="deepseek",
-        attention_type="mla",
     )
     self.assert_pipeline_same_output_and_grad(config, single_pipeline_stage_class=deepseek.DeepSeekMoELayer)
 
