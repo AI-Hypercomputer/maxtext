@@ -161,7 +161,10 @@ class Pipeline(nnx.Module):
       self.layers = vmap_over_repeats(init_rngs_pytree)
     else:
       self.layers = vmap_over_stages(init_rngs_pytree)
-      self.layers = self.layers.add_axis(0, "circular_repeats")
+      graphdef, state = nnx.split(self.layers)
+      state_with_axis = jax.tree.map(lambda x: jnp.expand_dims(x, 0), state)
+      nnx.update(self.layers, state_with_axis)
+      # self.layers = self.layers.add_axis(0, "circular_repeats")
 
   def need_circ_storage(self):
     return (

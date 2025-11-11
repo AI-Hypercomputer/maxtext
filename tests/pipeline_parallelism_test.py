@@ -373,6 +373,7 @@ class PipelineParallelismTest(unittest.TestCase):
             "quantization=fp8",
             "scan_layers_per_stage=False",
             "attention=dot_product",
+            "log_config=False",
         ]
     )
 
