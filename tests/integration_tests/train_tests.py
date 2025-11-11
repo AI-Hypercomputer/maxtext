@@ -28,7 +28,7 @@ class TrainTests(unittest.TestCase):
   """Tests train.py with various configs"""
   decoupled = is_decoupled()
   dev_count = jax.device_count()
-  base_output_directory = (
+  _base_output_directory = (
     os.path.join(MAXTEXT_PKG_DIR, "..", "datasets", "gcloud_decoupled_test_logs")
     if decoupled
     else "gs://runner-maxtext-logs"
@@ -50,9 +50,9 @@ class TrainTests(unittest.TestCase):
       "base": [  # short test for train.py with TFDS c4
           None,
           get_test_config_path(),
-          f"base_output_directory={self.base_output_directory}",
+          f"base_output_directory={_base_output_directory}",
           "run_name=runner_test",
-          f"dataset_path={self.dataset_path}",
+          f"dataset_path={dataset_path}",
           "steps=2",
           "enable_checkpointing=False",
           "enable_goodput_recording=False",
@@ -61,9 +61,9 @@ class TrainTests(unittest.TestCase):
       "synthetic": [  # tests base config with synthetic dataset
           None,
           get_test_config_path(),
-          f"base_output_directory={self.base_output_directory}",
+          f"base_output_directory={_base_output_directory}",
           "run_name=runner_test",
-          f"dataset_path={self.dataset_path}",
+          f"dataset_path={dataset_path}",
           "steps=2",
           "enable_checkpointing=False",
           "enable_goodput_recording=False",
@@ -73,9 +73,9 @@ class TrainTests(unittest.TestCase):
       "pdb_lt_1": [  # tests base config with per_device_batch_size < 1
           None,
           get_test_config_path(),
-          f"base_output_directory={self.base_output_directory}",
+          f"base_output_directory={_base_output_directory}",
           "run_name=runner_test",
-          f"dataset_path={self.dataset_path}",
+          f"dataset_path={dataset_path}",
           "steps=2",
           "enable_checkpointing=False",
           "enable_goodput_recording=False",
@@ -86,9 +86,9 @@ class TrainTests(unittest.TestCase):
       "tp_transpose": [  # tests base config with ici_tensor_transpose_parallelism=4
           None,
           get_test_config_path(),
-          f"base_output_directory={self.base_output_directory}",
+          f"base_output_directory={_base_output_directory}",
           "run_name=runner_test",
-          f"dataset_path={self.dataset_path}",
+          f"dataset_path={dataset_path}",
           "steps=2",
           "ici_tensor_transpose_parallelism=4",
           "enable_goodput_recording=False",
@@ -97,9 +97,9 @@ class TrainTests(unittest.TestCase):
       "int8": [  # tests base config with int8
           None,
           get_test_config_path(),
-          f"base_output_directory={self.base_output_directory}",
+          f"base_output_directory={_base_output_directory}",
           "run_name=runner_test",
-          f"dataset_path={self.dataset_path}",
+          f"dataset_path={dataset_path}",
           "quantization=int8",
           "steps=2",
           "enable_checkpointing=False",
@@ -109,9 +109,9 @@ class TrainTests(unittest.TestCase):
       "fp8": [  # tests base config with fp8
           None,
           get_test_config_path(),
-          f"base_output_directory={self.base_output_directory}",
+          f"base_output_directory={_base_output_directory}",
           "run_name=runner_test",
-          f"dataset_path={self.dataset_path}",
+          f"dataset_path={dataset_path}",
           "quantization=fp8",
           "steps=2",
           "enable_checkpointing=False",
@@ -121,9 +121,9 @@ class TrainTests(unittest.TestCase):
       "nanoo_fp8": [  # tests base config with nanoo_fp8
           None,
           get_test_config_path(),
-          f"base_output_directory={self.base_output_directory}",
+          f"base_output_directory={_base_output_directory}",
           "run_name=runner_test",
-          f"dataset_path={self.dataset_path}",
+          f"dataset_path={dataset_path}",
           "quantization=nanoo_fp8",
           "steps=2",
           "enable_checkpointing=False",
@@ -133,9 +133,9 @@ class TrainTests(unittest.TestCase):
       "te_fp8_delayedscaling": [  # tests base config with te_fp8_delayedscaling
           None,
           get_test_config_path(),
-          f"base_output_directory={self.base_output_directory}",
+          f"base_output_directory={_base_output_directory}",
           "run_name=runner_test",
-          f"dataset_path={self.dataset_path}",
+          f"dataset_path={dataset_path}",
           "quantization=te_fp8_delayedscaling",
           "steps=2",
           "enable_checkpointing=False",
@@ -145,9 +145,9 @@ class TrainTests(unittest.TestCase):
       "te_fp8_currentscaling": [  # tests base config with te_fp8_currentscaling
           None,
           get_test_config_path(),
-          f"base_output_directory={self.base_output_directory}",
+          f"base_output_directory={_base_output_directory}",
           "run_name=runner_test",
-          f"dataset_path={self.dataset_path}",
+          f"dataset_path={dataset_path}",
           "quantization=te_fp8_currentscaling",
           "steps=2",
           "enable_checkpointing=False",
@@ -157,9 +157,9 @@ class TrainTests(unittest.TestCase):
       "te_mxfp8": [  # tests base config with te_mxfp8
           None,
           get_test_config_path(),
-          f"base_output_directory={self.base_output_directory}",
+          f"base_output_directory={_base_output_directory}",
           "run_name=runner_test",
-          f"dataset_path={self.dataset_path}",
+          f"dataset_path={dataset_path}",
           "quantization=te_mxfp8",
           "steps=2",
           "enable_checkpointing=False",
@@ -169,9 +169,9 @@ class TrainTests(unittest.TestCase):
       "dropout": [  # tests base config with dropout
           None,
           get_test_config_path(),
-          f"base_output_directory={self.base_output_directory}",
+          f"base_output_directory={_base_output_directory}",
           "run_name=runner_test",
-          f"dataset_path={self.dataset_path}",
+          f"dataset_path={dataset_path}",
           "steps=2",
           "enable_checkpointing=False",
           "enable_goodput_recording=False",
@@ -183,14 +183,14 @@ class TrainTests(unittest.TestCase):
       "hf_input_pipeline": [  # test for train.py with TFDS c4, using HF input pipeline
           None,
           get_test_config_path(),
-          f"base_output_directory={self.base_output_directory}",
+          f"base_output_directory={_base_output_directory}",
           "run_name=runner_test",
           "steps=2",
           "enable_checkpointing=False",
           "enable_goodput_recording=False",
           "dataset_type=hf",
           "hf_path=parquet",
-          f"hf_train_files={self.dataset_path}/hf/c4/c4-train-00000-of-01637.parquet",
+          f"hf_train_files={dataset_path}/hf/c4/c4-train-00000-of-01637.parquet",
           "tokenizer_path=google-t5/t5-large",
       ] + ([f"ici_fsdp_parallelism={dev_count}"] if decoupled else []),
   }
@@ -316,7 +316,7 @@ class TrainTests(unittest.TestCase):
     cudnn_flash_te = [  # tests base config on GPU with flash attention
         None,
         get_test_config_path(),
-        f"base_output_directory={self.base_output_directory}",
+        f"base_output_directory={self._base_output_directory}",
         "run_name=runner_test",
         f"dataset_path={self.dataset_path}",
         "steps=2",
@@ -335,7 +335,7 @@ class TrainTests(unittest.TestCase):
     context_parallel = [  # tests base config on GPU with All-Gather based context parallelism
         None,
         get_test_config_path(),
-        f"base_output_directory={self.base_output_directory}",
+        f"base_output_directory={self._base_output_directory}",
         "run_name=runner_test",
         f"dataset_path={self.dataset_path}",
         "steps=10",
@@ -363,7 +363,7 @@ class TrainTests(unittest.TestCase):
     tensor_parallel = [  # tests base config on GPU with Tensor Parallelism
         None,
         get_test_config_path(),
-        f"base_output_directory={self.base_output_directory}",
+        f"base_output_directory={self._base_output_directory}",
         "run_name=runner_test",
         f"dataset_path={self.dataset_path}",
         "steps=10",
@@ -389,7 +389,7 @@ class TrainTests(unittest.TestCase):
     optimizer_offload = [  # tests base config on GPU with optimizer state offload
         None,
         get_test_config_path(),
-        f"base_output_directory={self.base_output_directory}",
+        f"base_output_directory={self._base_output_directory}",
         "run_name=runner_test",
         f"dataset_path={self.dataset_path}",
         "steps=10",
@@ -409,7 +409,7 @@ class TrainTests(unittest.TestCase):
     parameter_offload = [  # tests base config on GPU with parameter offload
         None,
         get_test_config_path(),
-        f"base_output_directory={self.base_output_directory}",
+        f"base_output_directory={self._base_output_directory}",
         "run_name=runner_test",
         f"dataset_path={self.dataset_path}",
         "steps=10",
@@ -430,7 +430,7 @@ class TrainTests(unittest.TestCase):
     cudnn_flash_jax = [  # tests base config on GPU with flash attention
         None,
         get_test_config_path(),
-        f"base_output_directory={self.base_output_directory}",
+        f"base_output_directory={self._base_output_directory}",
         "run_name=runner_test",
         f"dataset_path={self.dataset_path}",
         "steps=2",
@@ -465,7 +465,7 @@ class TrainTests(unittest.TestCase):
     zero1_ga = [  # tests Zero-1 optimizer sharding with gradient accumulation
         None,
         get_test_config_path(),
-        f"base_output_directory={self.base_output_directory}",
+        f"base_output_directory={self._base_output_directory}",
         "run_name=runner_test",
         f"dataset_path={self.dataset_path}",
         "steps=10",
@@ -492,14 +492,19 @@ class TrainTests(unittest.TestCase):
   @pytest.mark.gpu_only
   def test_gpu_packed_attention(self):
     gpu_device = jax.devices("gpu")[0]
-    compute_capability = gpu_device.compute_capability
-    if float(compute_capability) < 9.0:
-      pytest.skip("Packed (THD) attention is only supported on sm90+!")
+    compute_capability = getattr(gpu_device, "compute_capability", None)
+    try:
+      if float(compute_capability) < 9.0:
+        pytest.skip("Packed (THD) attention is only supported on sm90+!")
+    except Exception:
+      # Non-numeric or unknown capability (e.g. ROCm 'gfx942') — skip the test.
+      print("checking if Packed THD attention is supported on ROCm...")
+      #pytest.skip("Packed (THD) attention is only supported on sm90+!")
     os.environ["NVTE_FUSED_ATTN"] = "1"  # Enable fused attention
     packed_attention = [  # tests base config on GPU with Packed (THD) attention
         None,
         get_test_config_path(),
-        f"base_output_directory={self.base_output_directory}",
+        f"base_output_directory={self._base_output_directory}",
         "run_name=runner_test",
         f"dataset_path={self.dataset_path}",
         "steps=10",
@@ -520,7 +525,7 @@ class TrainTests(unittest.TestCase):
     ring_attention = [  # tests base config on GPU with ring attention
         None,
         get_test_config_path(),
-        f"base_output_directory={self.base_output_directory}",
+        f"base_output_directory={self._base_output_directory}",
         "run_name=runner_test",
         f"dataset_path={self.dataset_path}",
         "steps=10",
@@ -540,3 +545,4 @@ class TrainTests(unittest.TestCase):
 
 if __name__ == "__main__":
   absltest.main()
+
