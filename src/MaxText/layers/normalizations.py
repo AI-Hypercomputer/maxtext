@@ -199,6 +199,8 @@ def l2norm(x: Array, dim: int = -1, eps: float = 1e-6) -> Array:
   return x * inv_norm
 
 Qwen3NextRMSNormLinen = nnx_wrappers.to_linen_class(
-    Qwen3NextRMSNorm,
+    RMSNorm,
     base_metadata_fn=variable_to_logically_partitioned,
+    scale_init=linen_initializers.zeros,
+    scale_offset=1.0,
 )
