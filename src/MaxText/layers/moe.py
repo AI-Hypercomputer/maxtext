@@ -33,6 +33,7 @@ from MaxText import common_types as ctypes
 from MaxText import max_logging
 from MaxText import max_utils
 from MaxText.kernels import megablox as mblx
+from MaxText.kernels import gather_scatter
 from MaxText.layers import attentions, linears, quantizations, nnx_wrappers
 from MaxText.layers.initializers import NdInitializer, nd_dense_init, default_bias_init, variable_to_logically_partitioned
 
@@ -529,22 +530,36 @@ class RoutedMoE(nnx.Module):
       # Squeeze router_scores to (batch_size * seq_len, num_experts_per_tok)
       inputs_2d = inputs_2d * router_scores.reshape(bsz_times_seq_len, -1)
 
-    flatten_selected_experts = jnp.ravel(selected_experts)
     if roll_to_expert_id is not None:
-      flatten_selected_experts = (flatten_selected_experts - roll_to_expert_id) % self.num_experts
-    sorted_selected_experts = jnp.argsort(flatten_selected_experts)
-    # sort inputs for number of selected experts
-    replicated_inputs_2d = jnp.repeat(inputs_2d, self.num_experts_per_tok, axis=0)
-    sorted_inputs = _sort_activations(replicated_inputs_2d, sorted_selected_experts, use_custom_sort_vjp).astype(
-        self.dtype
-    )
-    group_size = jnp.bincount(flatten_selected_experts, length=self.num_experts)
+      selected_experts = (selected_experts - roll_to_expert_id) % self.num_experts
+    if self.config.use_gather_scatter_permute:
+      selected_experts_2d = jnp.reshape(selected_experts, (inputs_2d.shape[0], -1))
+      sorted_inputs = gather_scatter.gather(inputs_2d, selected_experts_2d)
+
+      # Sort the weights so that we can apply the weight coefficients to
+      # processed inputs before unsorting them.
+      weights = _sort_activations(
+          jnp.ravel(weights)[:, None],
+          jnp.argsort(jnp.ravel(selected_experts)),
+          use_custom_sort_vjp,
+      )
+
+      # Communicate the indices used for sorting to `unpermute()`.
+      sorted_selected_experts = jnp.ravel(selected_experts_2d)
+    else:
+      flatten_selected_experts = jnp.ravel(selected_experts)
+      sorted_selected_experts = jnp.argsort(flatten_selected_experts)
+      replicated_inputs_2d = jnp.repeat(inputs_2d, self.num_experts_per_tok, axis=0)
+      sorted_inputs = _sort_activations(replicated_inputs_2d, sorted_selected_experts, use_custom_sort_vjp).astype(
+          self.dtype
+      )
+    group_size = jnp.bincount(jnp.ravel(selected_experts), length=self.num_experts)
     # Return the experts for each sorted input.
     expert_indices = jnp.arange(self.num_experts)
     sorted_experts = jnp.repeat(
         expert_indices,
         repeats=group_size,
-        total_repeat_length=flatten_selected_experts.shape[0],
+        total_repeat_length=selected_experts.size,
     )
     return (
         sorted_inputs,
@@ -564,31 +579,36 @@ class RoutedMoE(nnx.Module):
       use_custom_sort_vjp=True,
   ):
     """Unpermute tokens to original order and combine weights."""
-
-    unsort_intermediate = _sort_activations(
-        intermediate,
-        jnp.argsort(sorted_selected_experts),
-        use_custom_sort_vjp,
-    )
-    reshaped_weights = jnp.reshape(weights, (-1, self.num_experts_per_tok))
-    reshaped_intermediate = jnp.reshape(
-        unsort_intermediate,
-        (reshaped_weights.shape[0], self.num_experts_per_tok, -1),
-    )
-    with jax.named_scope("weight_sum"):
-      matmul_precision = jax.lax.Precision(self.config.matmul_precision)
-      if self.config.decoder_block == ctypes.DecoderBlockType.LLAMA4:
-        # For Llama4, combine using weights of 1 for selected experts
-        reshaped_weights = jnp.ones_like(reshaped_weights)
-      if self.config.float32_weight_sum:
+    if self.config.use_gather_scatter_permute:
+      output = gather_scatter.scatter_add(
+          weights * intermediate,
+          jnp.reshape(sorted_selected_experts, (-1, self.num_experts_per_tok)),
+      )
+    else:
+      unsort_intermediate = _sort_activations(
+          intermediate,
+          jnp.argsort(sorted_selected_experts),
+          use_custom_sort_vjp,
+      )
+      reshaped_weights = jnp.reshape(weights, (-1, self.num_experts_per_tok))
+      reshaped_intermediate = jnp.reshape(
+          unsort_intermediate,
+          (reshaped_weights.shape[0], self.num_experts_per_tok, -1),
+      )
+      with jax.named_scope("weight_sum"):
+        matmul_precision = jax.lax.Precision(self.config.matmul_precision)
+        if self.config.decoder_block == ctypes.DecoderBlockType.LLAMA4:
+          # For Llama4, combine using weights of 1 for selected experts
+          reshaped_weights = jnp.ones_like(reshaped_weights)
+        if self.config.float32_weight_sum:
         reshaped_intermediate = reshaped_intermediate.astype(jnp.float32)
         reshaped_weights = reshaped_weights.astype(jnp.float32)
       output = jnp.einsum(
-          "BKE,BK -> BE",
-          reshaped_intermediate,
-          reshaped_weights,
-          precision=matmul_precision,
-      )
+            "BKE,BK -> BE",
+            reshaped_intermediate,
+            reshaped_weights,
+            precision=matmul_precision,
+        )
     return output.reshape(batch_size, sequence_length, -1).astype(self.dtype)
 
   @staticmethod
