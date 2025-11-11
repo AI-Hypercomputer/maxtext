@@ -125,7 +125,8 @@ def vocab_tiling_linen_loss(
           method="logits_from_hidden_states",
       )
       chunk_logits = _maybe_shard_with_name(chunk_logits, chunked_logits_spec)
-      one_hot_label_chunk = jax.nn.one_hot(label_chunk, config.vocab_size)
+      print("update one_hot_label_chunk type 2")
+      one_hot_label_chunk = jax.nn.one_hot(label_chunk, config.vocab_size, dtype=chunk_logits.dtype)
       chunk_xent, _ = max_utils.cross_entropy_with_logits(chunk_logits, one_hot_label_chunk)
       masked_xent = jnp.sum(chunk_xent * (segmentation_chunk != 0))
       loss_accumulator += masked_xent
@@ -160,7 +161,8 @@ def vocab_tiling_linen_loss(
           method="logits_from_hidden_states",
       )
       chunk_logits = _maybe_shard_with_name(chunk_logits, chunked_logits_spec)
-      one_hot_label_chunk = jax.nn.one_hot(input_label_chunk, config.vocab_size)
+      print("update one_hot_label_chunk type 1")
+      one_hot_label_chunk = jax.nn.one_hot(input_label_chunk, config.vocab_size, dtype=chunk_logits.dtype)
       xent, _ = max_utils.cross_entropy_with_logits(chunk_logits, one_hot_label_chunk)
       return jnp.sum(xent * (input_segmentation_chunk != 0))
 
@@ -201,7 +203,13 @@ def vocab_tiling_linen_loss(
     # TODO (chengnuojin): we may want to convert grad_params to bf16 to save memory
     # grad_params = jax.tree_util.tree_map(lambda x, y: y.astype(x.dtype), gathered_params, grad_params)
     # Chain-rule to accumulate gradients
-    grad_params = jax.tree_util.tree_map(lambda g: g * loss_cotangent, grad_params)
+    print("updating grad type")
+    # grad_params = jax.tree_util.tree_map(lambda g: g * loss_cotangent, grad_params)
+    grad_params = jax.tree_util.tree_map(
+      lambda p, g: (g * loss_cotangent).astype(p.dtype),
+      gathered_params,
+      grad_params
+    )
     # Give back sharding constraint
     grad_reshaped_hidden_states = _reshape(grad_reshaped_hidden_states, (batch_size, seq_len, emb_dim), hidden_spec)
     return (
