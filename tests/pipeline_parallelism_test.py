@@ -168,28 +168,28 @@ class PipelineParallelismTest(unittest.TestCase):
     )
     self.assert_pipeline_same_output_and_grad(config)
 
-  # @pytest.mark.tpu_only
-  # def test_circular_deepseek_megablox_same_output_and_grad(self):
-  #   # 4 stages, 8 layers (2 repeats, 1 layer per stage), 8 microbatches
-  #   config = pyconfig.initialize(
-  #       [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
-  #       enable_checkpointing=False,
-  #       enable_goodput_recording=False,
-  #       run_name="circular_moe",
-  #       max_target_length=128,
-  #       base_emb_dim=28,
-  #       ici_pipeline_parallelism=4,
-  #       base_num_decoder_layers=8,
-  #       num_pipeline_microbatches=8,
-  #       per_device_batch_size=4,
-  #       num_experts=4,
-  #       num_experts_per_tok=2,
-  #       megablox=False,
-  #       sparse_matmul=False,
-  #       capacity_factor=1,
-  #       decoder_block="deepseek",
-  #   )
-  #   self.assert_pipeline_same_output_and_grad(config, single_pipeline_stage_class=deepseek.DeepSeekMoELayer)
+  @pytest.mark.tpu_only
+  def test_circular_deepseek_megablox_same_output_and_grad(self):
+    # 4 stages, 8 layers (2 repeats, 1 layer per stage), 8 microbatches
+    config = pyconfig.initialize(
+        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        enable_checkpointing=False,
+        enable_goodput_recording=False,
+        run_name="circular_moe",
+        max_target_length=128,
+        base_emb_dim=28,
+        ici_pipeline_parallelism=4,
+        base_num_decoder_layers=8,
+        num_pipeline_microbatches=8,
+        per_device_batch_size=4,
+        num_experts=4,
+        num_experts_per_tok=2,
+        megablox=False,
+        sparse_matmul=False,
+        capacity_factor=1,
+        decoder_block="deepseek",
+    )
+    self.assert_pipeline_same_output_and_grad(config, single_pipeline_stage_class=deepseek.DeepSeekMoELayer)
 
   @pytest.mark.tpu_only
   def test_circular_ag_once(self):

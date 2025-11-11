@@ -149,14 +149,52 @@ class Pipeline(nnx.Module):
 
     init_rngs_pytree = jax.tree.map(stack_keys, rngs_pure_dict)
 
-    # 4. Create the GraphDef for a *single* layer.
-    graphdef_rngs_pytree = jax.tree.map(
-        lambda x: x[0, 0] if self.config.num_pipeline_repeats > 1 else x[0], init_rngs_pytree
+    print("DEBUG: Pre-initializing single layer for GraphDef...")
+    temp_root_rng = jax.random.PRNGKey(42)
+    # Create a basic rngs dict for the temp layer
+    temp_rngs_dict = {k: jax.random.fold_in(temp_root_rng, i) for i, k in enumerate(rngs_pure_dict.keys())}
+    
+    temp_layer = layer_module(self.config, rngs=nnx.Rngs(**temp_rngs_dict))
+
+    # Create dummy inputs for a SINGLE stage (not the full pipeline)
+    dummy_single_shape = (self.pipeline_microbatch_size, self.config.max_target_length, self.config.emb_dim)
+    dummy_single_inputs = jnp.zeros(dummy_single_shape, dtype=jnp.float32)
+    dummy_single_pos = jnp.zeros((self.pipeline_microbatch_size, self.config.max_target_length), dtype=jnp.int32)
+    dummy_single_seg = jnp.zeros((self.pipeline_microbatch_size, self.config.max_target_length), dtype=jnp.int32)
+
+    try:
+        # Run GENUINELY once to trigger all side-effects (creating submodules/params)
+        temp_layer(
+            dummy_single_inputs,
+            dummy_single_seg,
+            dummy_single_pos,
+            deterministic=False,
+            model_mode=MODEL_MODE_TRAIN
+        )
+    except Exception as e:
+         print(f"WARNING: Single layer pre-init failed: {e}")
+
+    # CAPTURE the now-complete GraphDef. This will be used for all merges in run_one_iteration.
+    self.single_layer_graphdef, _ = nnx.split(temp_layer)
+    print("DEBUG: Single layer GraphDef captured successfully.")
+    del temp_layer # Clean up
+    # ------------------------------------------------------------
+
+    # --- 3. Create the real vmapped layers ---
+    def create_layer(rngs_pytree):
+      # We re-use the SAME GraphDef to ensure structural consistency across all stages
+      # This might require a slightly different pattern if NNX doesn't support merging into a fresh state easily here,
+      # but typically re-calling the constructor is safest for full initialization of distinct weights.
+      return layer_module(self.config, rngs=nnx.Rngs(**rngs_pytree))
+
+    vmap_over_stages = nnx.vmap(
+        create_layer, in_axes=0, out_axes=0, spmd_axis_name="stage"
     )
+    if self.config.num_pipeline_repeats > 1:
+      vmap_over_repeats = nnx.vmap(
+          vmap_over_stages, in_axes=0, out_axes=0, spmd_axis_name="circular_repeats"
+      )
 
-    self.single_layer_graphdef = nnx.graphdef(create_layer(rngs_pytree=graphdef_rngs_pytree))
-
-    # 5. Create the stacked layers
     if self.config.num_pipeline_repeats > 1:
       self.layers = vmap_over_repeats(init_rngs_pytree)
     else:
@@ -164,7 +202,41 @@ class Pipeline(nnx.Module):
       graphdef, state = nnx.split(self.layers)
       state_with_axis = jax.tree.map(lambda x: jnp.expand_dims(x, 0), state)
       nnx.update(self.layers, state_with_axis)
-      # self.layers = self.layers.add_axis(0, "circular_repeats")
+
+    # --- 4. FORCE EAGER INITIALIZATION OF FULL PIPELINE ---
+    # Even though we have the GraphDef, we must ensure the ACTUAL `self.layers` 
+    # has all its states (params) allocated before 'remat' sees them.
+    print("DEBUG: Starting eager initialization of full pipeline...")
+    total_microbatches = self.num_stages * self.microbatches_per_stage
+    dummy_input_shape = (
+        total_microbatches,
+        self.pipeline_microbatch_size,
+        self.config.max_target_length,
+        self.config.emb_dim
+    )
+    dummy_inputs = jnp.zeros(dummy_input_shape, dtype=jnp.float32)
+    dummy_pos = jnp.zeros(
+        (total_microbatches, self.pipeline_microbatch_size, self.config.max_target_length),
+        dtype=jnp.int32
+    )
+    dummy_seg = jnp.zeros(
+        (total_microbatches, self.pipeline_microbatch_size, self.config.max_target_length),
+        dtype=jnp.int32
+    )
+
+    dummy_loop_state = self.init_states(dummy_inputs)
+
+    try:
+        self.run_one_iteration(
+            dummy_loop_state,
+            dummy_pos,
+            dummy_seg,
+            deterministic=False,
+            model_mode=MODEL_MODE_TRAIN
+        )
+        print("DEBUG: Full pipeline eager initialization complete.")
+    except Exception as e:
+        print(f"WARNING: Full pipeline eager init failed! Error: {e}")
 
   def need_circ_storage(self):
     return (
