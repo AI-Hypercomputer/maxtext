@@ -521,36 +521,18 @@ def initialize(argv: Sequence[str]) -> tuple[pyconfig.HyperParameters, Any, Any]
 
 def run(config, recorder, diagnostic_config):
   """Run the job given hyperparameters and utilities"""
-  with diagnostic.diagnose(diagnostic_config):
-    with maybe_record_goodput(recorder, GoodputEvent.JOB):
-      train_loop(config, recorder)
+  with (
+    diagnostic.diagnose(diagnostic_config),
+    maybe_record_goodput(recorder, GoodputEvent.JOB),
+    max_utils.maybe_get_transformer_engine_context(config)
+  ):
+    train_loop(config, recorder)
 
-
-@contextmanager
-def transformer_engine_context():
-  """If TransformerEngine is available, this context manager will provide
-  the library with MaxText-specific details needed for correcct operation."""
-  try:
-    from transformer_engine.jax.sharding import global_shard_guard, MeshResource  # pylint: disable=import-outside-toplevel
-    # Inform TransformerEngine of MaxText's physical mesh resources.
-    mesh_resource = MeshResource(  # pytype: disable=wrong-arg-types
-        dp_resource="data",
-        tp_resource="tensor",
-        # tpsp_resource = "tensor_sequence", #TODO(Phuong): add this back when upstreaming CGEMM
-        fsdp_resource="fsdp",
-        pp_resource=None,
-        cp_resource="context",
-    )
-    with global_shard_guard(mesh_resource):
-      yield
-  except (ImportError, AttributeError):
-    yield
 
 
 def main(argv: Sequence[str]) -> None:
-  with transformer_engine_context():
-    config, recorder, diagnostic_config = initialize(argv)
-    run(config, recorder, diagnostic_config)
+  config, recorder, diagnostic_config = initialize(argv)
+  run(config, recorder, diagnostic_config)
 
 
 if __name__ == "__main__":
