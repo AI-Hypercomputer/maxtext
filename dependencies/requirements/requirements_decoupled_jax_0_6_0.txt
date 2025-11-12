@@ -42,9 +42,6 @@ tiktoken==0.9.0
 tqdm==4.67.1
 transformers==4.52.4
 urllib3==2.5.0
-https://github.com/ROCm/rocm-jax/releases/download/rocm-jax-v0.6.0/jaxlib-0.6.0-cp312-cp312-manylinux2014_x86_64.whl
 jax==0.6.0
-jax-rocm7-pjrt==0.6.0
-jax-rocm7-plugin==0.6.0
 
 
