@@ -369,10 +369,6 @@ class AttentionTest(unittest.TestCase):
 
     return lnx, decoder_segment_ids, decoder_positions
 
-  # @parameterized.named_parameters(
-  #     {"testcase_name": "RoPE_Yarn_Autoregression", "rope_type": "yarn"},
-  #     {"testcase_name": "Default_Autoregression", "rope_type": "default"},
-  # )
   @pytest.mark.tpu_only
   def test_cp_shard_with_load_balance(self):
     self.test_cp_shard_helper(load_balance=True)
