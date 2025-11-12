@@ -94,16 +94,8 @@ class LayerwiseQuantization:
     self.quant.quant_mode = quantizations.get_quant_mode("convert")
 
     layers = [
-        deepseek.DeepSeekDenseLayer(  # pylint: disable=no-value-for-parameter
-            config,
-            mesh=self._mesh,
-            quant=self.quant,
-        ),
-        deepseek.DeepSeekMoELayer(  # pylint: disable=no-value-for-parameter
-            config,
-            mesh=self._mesh,
-            quant=self.quant,
-        ),
+        deepseek.DeepSeekDenseLayer(config, mesh=self._mesh, quant=self.quant),
+        deepseek.DeepSeekMoELayer(config, mesh=self._mesh, quant=self.quant),
     ]
     layer_prefixes = ["dense_layers", "moe_layers"]
     num_moe_layers = config.num_decoder_layers - config.first_num_dense_layers
