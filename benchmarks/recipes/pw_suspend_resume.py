@@ -20,6 +20,7 @@ SIGTERM signal at a specific training step. This simulates a planned preemption
 event, allowing validation of the framework's ability to gracefully suspend,
 checkpoint, and later resume training.
 """
+
 import os
 import sys
 
@@ -34,8 +35,8 @@ from .runner_utils import generate_and_run_workloads
 user_configs.USER_CONFIG.max_restarts = 3
 DISRUPTION_METHOD = DisruptionMethod.SIGTERM
 DISRUPTIONS = {
-    # "time_seconds":[120,600],
-    "step": [3]
+  # "time_seconds":[120,600],
+  "step": [3]
 }
 
 
@@ -43,19 +44,19 @@ def main():
   """Main function to run the suspend/resume disruption test."""
   user_configs.USER_CONFIG.headless = False
   should_continue = helper.handle_cmd_args(
-      user_configs.USER_CONFIG.cluster_config, helper.DELETE, xpk_path=user_configs.USER_CONFIG.xpk_path
+    user_configs.USER_CONFIG.cluster_config, helper.DELETE, xpk_path=user_configs.USER_CONFIG.xpk_path
   )
 
   if not should_continue:
     return 0
 
   return_code = generate_and_run_workloads(
-      user_configs.USER_CONFIG,
-      user_configs.USER_CONFIG.num_slices_list,
-      user_configs.USER_CONFIG.benchmark_steps,
-      user_configs.USER_CONFIG.priority,
-      DISRUPTION_METHOD,
-      DISRUPTIONS,
+    user_configs.USER_CONFIG,
+    user_configs.USER_CONFIG.num_slices_list,
+    user_configs.USER_CONFIG.benchmark_steps,
+    user_configs.USER_CONFIG.priority,
+    DISRUPTION_METHOD,
+    DISRUPTIONS,
   )
 
   print("Suspend/Resume disruptions completed. Please check logs for results.")

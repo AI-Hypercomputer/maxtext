@@ -14,6 +14,7 @@
 
 # pylint: skip-file
 """Reads and asserts over target values"""
+
 from absl import app
 from typing import Sequence
 from math import isclose
@@ -62,8 +63,8 @@ def test_checkpointing(metrics_file, target, dataset_type):
   metrics_file_restored = "restored_" + metrics_file
 
   with (
-      open(metrics_file_saved, "rt", encoding="utf8") as saved,
-      open(metrics_file_restored, "rt", encoding="utf8") as restored,
+    open(metrics_file_saved, "rt", encoding="utf8") as saved,
+    open(metrics_file_restored, "rt", encoding="utf8") as restored,
   ):
     saved_loss = json.loads(saved.readlines()[-1])[target]
     restored_loss = json.loads(restored.readlines()[0])[target]
@@ -112,7 +113,6 @@ def test_start_step(metrics_file, start_step_target):
 
 
 def main(argv: Sequence[str]) -> None:
-
   _, test_scenario, *test_vars = argv
 
   if test_scenario == "metrics_average":

@@ -39,10 +39,10 @@ def matmul(mesh, mesh_dim, dtype=jax.numpy.bfloat16, batch=1024, enable_visual=F
 
   W1 = jax.numpy.ones((EMBED, MLP), dtype=dtype)
   weight_sharding = jax.sharding.NamedSharding(
-      mesh,
-      jax.sharding.PartitionSpec(
-          "model",
-      ),
+    mesh,
+    jax.sharding.PartitionSpec(
+      "model",
+    ),
   )
   W1_ = jax.device_put(W1, weight_sharding)
   if enable_visual:

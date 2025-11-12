@@ -22,8 +22,8 @@ from jax.experimental import checkify
 from MaxText import exceptions
 from MaxText import max_logging
 from MaxText.utils.goodput_utils import (
-    GoodputEvent,
-    maybe_record_goodput,
+  GoodputEvent,
+  maybe_record_goodput,
 )
 
 
@@ -121,8 +121,8 @@ class RampUpDataLoader(DataLoader):
     if is_time_to_increment:
       # Update current batch size and refresh accumulate samples
       max_logging.log(
-          f"Global batch size increments from {self.global_batch_size_current}"
-          f" to {self.global_batch_size_current + self.increment}"
+        f"Global batch size increments from {self.global_batch_size_current}"
+        f" to {self.global_batch_size_current + self.increment}"
       )
       self.global_batch_size_current += self.increment
       self.accum_samples = 0
@@ -142,16 +142,16 @@ class RampUpDataLoader(DataLoader):
       # self.global_batch_size_end is batch_buffer size
       def _slice_and_concat(old_data, new_data):
         sliced_old_data = jax.lax.dynamic_slice_in_dim(
-            old_data,
-            slice_start,
-            self.global_batch_size_end - slice_start,
-            axis=0,
+          old_data,
+          slice_start,
+          self.global_batch_size_end - slice_start,
+          axis=0,
         )
         sliced_new_data = jax.lax.dynamic_slice_in_dim(
-            new_data,
-            0,
-            slice_end - self.global_batch_size_end,
-            axis=0,
+          new_data,
+          0,
+          slice_end - self.global_batch_size_end,
+          axis=0,
         )
         return jax.lax.concatenate((sliced_old_data, sliced_new_data), dimension=0)
 
@@ -161,10 +161,10 @@ class RampUpDataLoader(DataLoader):
 
       def _slice(data):
         return jax.lax.dynamic_slice_in_dim(
-            data,
-            slice_start,
-            self.global_batch_size_current,
-            axis=0,
+          data,
+          slice_start,
+          self.global_batch_size_current,
+          axis=0,
         )
 
       self.buffer_start = slice_end

@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-""" Common LoRA utils needed to support LoRA adapters."""
+"""Common LoRA utils needed to support LoRA adapters."""
 
 import json
 
@@ -131,11 +131,11 @@ def load_adapter(config, base_abstract_state_params, adapter_config_path, adapte
 
     with nn_partitioning.axis_rules(config.logical_axis_rules):
       lora_params = checkpointing.load_params_from_path(
-          adapter_weights_path,
-          lora_state.params,
-          config.checkpoint_storage_concurrent_gb,
-          config.checkpoint_storage_use_ocdbt,
-          config.checkpoint_storage_use_zarr3,
+        adapter_weights_path,
+        lora_state.params,
+        config.checkpoint_storage_concurrent_gb,
+        config.checkpoint_storage_use_ocdbt,
+        config.checkpoint_storage_use_zarr3,
       )
 
   return lora_params, lora_config
@@ -178,16 +178,16 @@ def setup_initial_lora_state(model, data_iterator, tx, config, rng, mesh, checkp
 
     with nn_partitioning.axis_rules(config.logical_axis_rules):
       restored_lora, raw_lora_params = checkpointing.load_state_if_possible(
-          checkpoint_manager,
-          data_iterator,
-          lora_weights_path,
-          config.load_full_state_path,
-          config.checkpoint_storage_concurrent_gb,
-          lora_state,
-          config.enable_single_replica_ckpt_restoring,
-          config.dataset_type,
-          use_ocdbt=config.checkpoint_storage_use_ocdbt,
-          use_zarr3=config.checkpoint_storage_use_zarr3,
+        checkpoint_manager,
+        data_iterator,
+        lora_weights_path,
+        config.load_full_state_path,
+        config.checkpoint_storage_concurrent_gb,
+        lora_state,
+        config.enable_single_replica_ckpt_restoring,
+        config.dataset_type,
+        use_ocdbt=config.checkpoint_storage_use_ocdbt,
+        use_zarr3=config.checkpoint_storage_use_zarr3,
       )
 
       if restored_lora:
@@ -216,10 +216,10 @@ def get_lora_abstract_state(base_abstract_params, lora_config):
     inferred sharding information.
   """
   other_lora_format_to_jax_format = {
-      "q_proj": "self_attention.query",
-      "k_proj": "self_attention.key",
-      "v_proj": "self_attention.value",
-      "o_proj": "self_attention.out",
+    "q_proj": "self_attention.query",
+    "k_proj": "self_attention.key",
+    "v_proj": "self_attention.value",
+    "o_proj": "self_attention.out",
   }
 
   lora_target_modules = lora_config["target_modules"]
@@ -234,7 +234,7 @@ def get_lora_abstract_state(base_abstract_params, lora_config):
 
     if base_array_dimensions > 4:
       raise ValueError(
-          f"Encountered unexpected shape={base_array_shape} of array in base params. Array dimensions > 4 not supported."
+        f"Encountered unexpected shape={base_array_shape} of array in base params. Array dimensions > 4 not supported."
       )
 
     if lora_module in ["self_attention.query", "self_attention.key", "self_attention.value"]:
@@ -335,11 +335,19 @@ def get_lora_abstract_state(base_abstract_params, lora_config):
   add_lora_params(lora_abstract_params, "", base_abstract_params, lora_rank, lora_target_modules)
 
   unboxed_abstract_lora_state = train_state.TrainState(
-      step=0, apply_fn=None, params=lora_abstract_params, tx=None, opt_state={}  # type: ignore
+    step=0,
+    apply_fn=None,
+    params=lora_abstract_params,
+    tx=None,
+    opt_state={},  # type: ignore
   )
 
   lora_state_mesh_annotations = train_state.TrainState(
-      step=0, apply_fn=None, params=get_lora_annotations(lora_abstract_params), tx=None, opt_state={}  # type: ignore
+    step=0,
+    apply_fn=None,
+    params=get_lora_annotations(lora_abstract_params),
+    tx=None,
+    opt_state={},  # type: ignore
   )
 
   return unboxed_abstract_lora_state, lora_state_mesh_annotations

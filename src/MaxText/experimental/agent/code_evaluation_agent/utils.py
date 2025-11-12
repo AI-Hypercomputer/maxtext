@@ -113,11 +113,11 @@ def run_pytest_capture_output(test_file: str, code_folder: None | str = None) ->
 
     # Check for common dependency errors
     dependency_error_keywords = [
-        "ModuleNotFoundError",
-        "ImportError",
-        "No module named",
-        "pkg_resources.DistributionNotFound",
-        "cannot import name",
+      "ModuleNotFoundError",
+      "ImportError",
+      "No module named",
+      "pkg_resources.DistributionNotFound",
+      "cannot import name",
     ]
 
     is_dependency_error = any(err in output for err in dependency_error_keywords)

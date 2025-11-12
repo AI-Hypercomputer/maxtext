@@ -63,14 +63,14 @@ def checkpoint_loop(config, state=None):
   checkpoint_load_start = datetime.datetime.now()
   with nn_partitioning.axis_rules(config.logical_axis_rules):
     state, _ = checkpointing.load_state_if_possible(
-        checkpoint_manager,
-        None,
-        config.load_parameters_path,
-        config.load_full_state_path,
-        config.checkpoint_storage_concurrent_gb,
-        unboxed_abstract_state,
-        use_ocdbt=config.checkpoint_storage_use_ocdbt,
-        use_zarr3=config.checkpoint_storage_use_zarr3,
+      checkpoint_manager,
+      None,
+      config.load_parameters_path,
+      config.load_full_state_path,
+      config.checkpoint_storage_concurrent_gb,
+      unboxed_abstract_state,
+      use_ocdbt=config.checkpoint_storage_use_ocdbt,
+      use_zarr3=config.checkpoint_storage_use_zarr3,
     )
     if state:
       state = state["items"]
@@ -95,7 +95,7 @@ def checkpoint_loop(config, state=None):
         end_time = datetime.datetime.now()
         if jax.process_index() == 0:
           max_logging.log(
-              f"STANDALONE CHECKPOINTER : Checkpoint saved in {end_time - start_time} ,step {step}, on host 0"
+            f"STANDALONE CHECKPOINTER : Checkpoint saved in {end_time - start_time} ,step {step}, on host 0"
           )
 
   return state

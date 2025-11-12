@@ -39,27 +39,27 @@ from MaxText.common_types import MODEL_MODE_PREFILL
 
 
 def self_attention_with_norm(
-    inputs,
-    cfg,
-    mesh,
-    quant,
-    decoder_segment_ids,
-    decoder_positions,
-    deterministic,
-    model_mode,
-    previous_chunk=None,
-    page_state: None | page_manager.PageState = None,
-    slot: None | int = None,
+  inputs,
+  cfg,
+  mesh,
+  quant,
+  decoder_segment_ids,
+  decoder_positions,
+  deterministic,
+  model_mode,
+  previous_chunk=None,
+  page_state: None | page_manager.PageState = None,
+  slot: None | int = None,
 ):
   """self-attention with normalization"""
   # Normalization
   lnx_rms = rms_norm(
-      num_features=inputs.shape[-1],
-      dtype=cfg.dtype,
-      weight_dtype=cfg.weight_dtype,
-      name="pre_self_attention_layer_norm",
-      kernel_axes=("norm",),
-      epsilon=cfg.normalization_layer_epsilon,
+    num_features=inputs.shape[-1],
+    dtype=cfg.dtype,
+    weight_dtype=cfg.weight_dtype,
+    name="pre_self_attention_layer_norm",
+    kernel_axes=("norm",),
+    epsilon=cfg.normalization_layer_epsilon,
   )
   lnx = lnx_rms(inputs)
   if model_mode == MODEL_MODE_PREFILL:
@@ -70,45 +70,45 @@ def self_attention_with_norm(
   lnx = nn.with_logical_constraint(lnx, logical_axis_names)
 
   attention_layer = attention_mla.mla_as_linen(
-      config=cfg,
-      num_query_heads=cfg.num_query_heads,
-      num_kv_heads=cfg.num_kv_heads,
-      head_dim=cfg.head_dim,
-      max_target_length=cfg.max_target_length,
-      max_prefill_predict_length=cfg.max_prefill_predict_length,
-      attention_kernel=cfg.attention,
-      attention_type=cfg.attention_type,
-      inputs_q_shape=lnx.shape,
-      inputs_kv_shape=lnx.shape,
-      mesh=mesh,
-      dtype=cfg.dtype,
-      weight_dtype=cfg.weight_dtype,
-      dropout_rate=cfg.dropout_rate,
-      name="self_attention",
-      quant=quant,
-      kv_quant=quantizations.configure_kv_quant(cfg),
-      q_lora_rank=cfg.q_lora_rank,
-      kv_lora_rank=cfg.kv_lora_rank,
-      qk_nope_head_dim=cfg.qk_nope_head_dim,
-      qk_rope_head_dim=cfg.qk_rope_head_dim,
-      v_head_dim=cfg.v_head_dim,
-      max_position_embeddings=cfg.max_position_embeddings,
-      original_max_position_embeddings=cfg.original_max_position_embeddings,
-      mscale=cfg.mscale,
-      rope_factor=cfg.rope_factor,
-      model_mode=model_mode,
+    config=cfg,
+    num_query_heads=cfg.num_query_heads,
+    num_kv_heads=cfg.num_kv_heads,
+    head_dim=cfg.head_dim,
+    max_target_length=cfg.max_target_length,
+    max_prefill_predict_length=cfg.max_prefill_predict_length,
+    attention_kernel=cfg.attention,
+    attention_type=cfg.attention_type,
+    inputs_q_shape=lnx.shape,
+    inputs_kv_shape=lnx.shape,
+    mesh=mesh,
+    dtype=cfg.dtype,
+    weight_dtype=cfg.weight_dtype,
+    dropout_rate=cfg.dropout_rate,
+    name="self_attention",
+    quant=quant,
+    kv_quant=quantizations.configure_kv_quant(cfg),
+    q_lora_rank=cfg.q_lora_rank,
+    kv_lora_rank=cfg.kv_lora_rank,
+    qk_nope_head_dim=cfg.qk_nope_head_dim,
+    qk_rope_head_dim=cfg.qk_rope_head_dim,
+    v_head_dim=cfg.v_head_dim,
+    max_position_embeddings=cfg.max_position_embeddings,
+    original_max_position_embeddings=cfg.original_max_position_embeddings,
+    mscale=cfg.mscale,
+    rope_factor=cfg.rope_factor,
+    model_mode=model_mode,
   )
 
   attention_lnx = attention_layer(
-      lnx,
-      lnx,
-      decoder_positions,
-      decoder_segment_ids=decoder_segment_ids,
-      deterministic=deterministic,
-      model_mode=model_mode,
-      previous_chunk=previous_chunk,
-      page_state=page_state,
-      slot=slot,
+    lnx,
+    lnx,
+    decoder_positions,
+    decoder_segment_ids=decoder_segment_ids,
+    deterministic=deterministic,
+    model_mode=model_mode,
+    previous_chunk=previous_chunk,
+    page_state=page_state,
+    slot=slot,
   )
 
   attention_lnx = nn.with_logical_constraint(attention_lnx, logical_axis_names)
@@ -116,12 +116,12 @@ def self_attention_with_norm(
 
   # Normalization
   hidden_states = rms_norm(
-      num_features=intermediate_inputs.shape[-1],
-      dtype=cfg.dtype,
-      weight_dtype=cfg.weight_dtype,
-      name="post_self_attention_layer_norm",
-      kernel_axes=("norm",),
-      epsilon=cfg.normalization_layer_epsilon,
+    num_features=intermediate_inputs.shape[-1],
+    dtype=cfg.dtype,
+    weight_dtype=cfg.weight_dtype,
+    name="post_self_attention_layer_norm",
+    kernel_axes=("norm",),
+    epsilon=cfg.normalization_layer_epsilon,
   )(intermediate_inputs)
   hidden_states = nn.with_logical_constraint(hidden_states, logical_axis_names)
   return hidden_states, intermediate_inputs
@@ -133,9 +133,9 @@ def post_process(cfg, layer_output, sow):
     sow("intermediates", "activation_mean", jnp.mean(layer_output))
     sow("intermediates", "activation_stdev", jnp.std(layer_output))
     sow(
-        "intermediates",
-        "activation_fraction_zero",
-        jnp.sum(layer_output == 0) / jnp.size(layer_output),
+      "intermediates",
+      "activation_fraction_zero",
+      jnp.sum(layer_output == 0) / jnp.size(layer_output),
     )
 
   if cfg.scan_layers:
@@ -154,15 +154,15 @@ class DeepSeekDenseLayer(nn.Module):
 
   @nn.compact
   def __call__(
-      self,
-      inputs,
-      decoder_segment_ids,
-      decoder_positions,
-      deterministic,
-      model_mode,
-      previous_chunk=None,
-      page_state: None | page_manager.PageState = None,
-      slot: None | int = None,
+    self,
+    inputs,
+    decoder_segment_ids,
+    decoder_positions,
+    deterministic,
+    model_mode,
+    previous_chunk=None,
+    page_state: None | page_manager.PageState = None,
+    slot: None | int = None,
   ):
     cfg = self.config
     if model_mode == MODEL_MODE_PREFILL:
@@ -173,37 +173,37 @@ class DeepSeekDenseLayer(nn.Module):
     inputs = checkpoint_name(inputs, "decoder_layer_input")
 
     hidden_states, intermediate_inputs = self_attention_with_norm(
-        inputs,
-        cfg,
-        self.mesh,
-        self.quant,
-        decoder_segment_ids,
-        decoder_positions,
-        deterministic,
-        model_mode,
-        previous_chunk,
-        page_state,
-        slot,
+      inputs,
+      cfg,
+      self.mesh,
+      self.quant,
+      decoder_segment_ids,
+      decoder_positions,
+      deterministic,
+      model_mode,
+      previous_chunk,
+      page_state,
+      slot,
     )
     mlp_lnx = linears.mlp_block(
-        in_features=hidden_states.shape[-1],
-        intermediate_dim=cfg.mlp_dim,
-        activations=cfg.mlp_activations,
-        intermediate_dropout_rate=cfg.dropout_rate,
-        dtype=cfg.dtype,
-        weight_dtype=cfg.weight_dtype,
-        name="mlp",
-        config=cfg,
-        mesh=self.mesh,
-        quant=self.quant,
+      in_features=hidden_states.shape[-1],
+      intermediate_dim=cfg.mlp_dim,
+      activations=cfg.mlp_activations,
+      intermediate_dropout_rate=cfg.dropout_rate,
+      dtype=cfg.dtype,
+      weight_dtype=cfg.weight_dtype,
+      name="mlp",
+      config=cfg,
+      mesh=self.mesh,
+      quant=self.quant,
     )(hidden_states, deterministic=deterministic)
     mlp_lnx = nn.with_logical_constraint(mlp_lnx, logical_axis_names)
 
     layer_output = mlp_lnx + intermediate_inputs
     layer_output = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(layer_output, deterministic=deterministic)
     layer_output = nn.with_logical_constraint(
-        layer_output,
-        logical_axis_names,
+      layer_output,
+      logical_axis_names,
     )
     return post_process(cfg, layer_output, self.sow)
 
@@ -221,15 +221,15 @@ class DeepSeekMoELayer(nn.Module):
 
   @nn.compact
   def __call__(
-      self,
-      inputs,
-      decoder_segment_ids,
-      decoder_positions,
-      deterministic,
-      model_mode,
-      previous_chunk=None,
-      page_state: None | page_manager.PageState = None,
-      slot: None | int = None,
+    self,
+    inputs,
+    decoder_segment_ids,
+    decoder_positions,
+    deterministic,
+    model_mode,
+    previous_chunk=None,
+    page_state: None | page_manager.PageState = None,
+    slot: None | int = None,
   ):
     cfg = self.config
     if model_mode == MODEL_MODE_PREFILL:
@@ -240,38 +240,38 @@ class DeepSeekMoELayer(nn.Module):
     inputs = checkpoint_name(inputs, "decoder_layer_input")
 
     hidden_states, intermediate_inputs = self_attention_with_norm(
-        inputs,
-        self.config,
-        self.mesh,
-        self.quant,
-        decoder_segment_ids,
-        decoder_positions,
-        deterministic,
-        model_mode,
-        previous_chunk,
-        page_state,
-        slot,
+      inputs,
+      self.config,
+      self.mesh,
+      self.quant,
+      decoder_segment_ids,
+      decoder_positions,
+      deterministic,
+      model_mode,
+      previous_chunk,
+      page_state,
+      slot,
     )
 
     # NOTE: the naming mismatch here is to ensure reverse compatibility with existing checkpoints.
     # The `name` represents the weight name in JAX/checkpoints and so the class name
     # is just for readability.
     mlp_lnx = moe.get_routed_and_shared_moe(
-        name="DeepSeekMoeBlock_0",
-        config=cfg,
-        mesh=self.mesh,
-        kernel_init=initializers.nd_dense_init(1.0, "fan_in", "truncated_normal"),
-        kernel_axes=("embed", None),
-        dtype=cfg.dtype,
-        weight_dtype=cfg.weight_dtype,
-        quant=self.quant,
+      name="DeepSeekMoeBlock_0",
+      config=cfg,
+      mesh=self.mesh,
+      kernel_init=initializers.nd_dense_init(1.0, "fan_in", "truncated_normal"),
+      kernel_axes=("embed", None),
+      dtype=cfg.dtype,
+      weight_dtype=cfg.weight_dtype,
+      quant=self.quant,
     )(hidden_states)
     mlp_lnx = nn.with_logical_constraint(mlp_lnx, logical_axis_names)
 
     layer_output = mlp_lnx + intermediate_inputs
     layer_output = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(layer_output, deterministic=deterministic)
     layer_output = nn.with_logical_constraint(
-        layer_output,
-        logical_axis_names,
+      layer_output,
+      logical_axis_names,
     )
     return post_process(cfg, layer_output, self.sow)

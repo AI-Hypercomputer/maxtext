@@ -60,8 +60,8 @@ def map_qa_data_to_conversation(example, template_config):
         max_logging.log("PROMPT_TEMPLATE has no 'question' placeholder. No template will be applied to prompt.")
       else:
         prompt = {
-            "role": "user",
-            "content": template_config["PROMPT_TEMPLATE"].format(question=example["question"].strip()),
+          "role": "user",
+          "content": template_config["PROMPT_TEMPLATE"].format(question=example["question"].strip()),
         }
     else:
       max_logging.log("PROMPT_TEMPLATE is empty. No template will be applied to prompt.")
@@ -73,36 +73,34 @@ def map_qa_data_to_conversation(example, template_config):
         reasoning, answer = extract_reasoning_and_answer(example["answer"], template_config["REASONING_ANSWER_SEPARATOR"])
         if "reasoning" not in placeholders or "answer" not in placeholders:
           max_logging.log(
-              "COMPLETION_TEMPLATE is missing 'reasoning' or 'answer' placeholder."
-              " No template will be applied to completion."
-              " Remove REASONING_ANSWER_SEPARATOR from template or update COMPLETION_TEMPLATE."
+            "COMPLETION_TEMPLATE is missing 'reasoning' or 'answer' placeholder."
+            " No template will be applied to completion."
+            " Remove REASONING_ANSWER_SEPARATOR from template or update COMPLETION_TEMPLATE."
           )
         elif reasoning is None or answer is None:
           max_logging.log(
-              "REASONING_ANSWER_SEPARATOR is present in template but not found in answer."
-              " No template will be applied to completion."
-              " Update REASONING_ANSWER_SEPARATOR in the template."
+            "REASONING_ANSWER_SEPARATOR is present in template but not found in answer."
+            " No template will be applied to completion."
+            " Update REASONING_ANSWER_SEPARATOR in the template."
           )
         else:
           completion = {
-              "role": "assistant",
-              "content": template_config["COMPLETION_TEMPLATE"].format(
-                  reasoning=reasoning.strip(), answer=answer.strip()
-              ),
+            "role": "assistant",
+            "content": template_config["COMPLETION_TEMPLATE"].format(reasoning=reasoning.strip(), answer=answer.strip()),
           }
       else:
         max_logging.log(
-            "REASONING_ANSWER_SEPARATOR not found in chat template."
-            " Using only 'answer' placeholder for COMPLETION_TEMPLATE."
+          "REASONING_ANSWER_SEPARATOR not found in chat template."
+          " Using only 'answer' placeholder for COMPLETION_TEMPLATE."
         )
         if "answer" not in placeholders:
           max_logging.log(
-              "COMPLETION_TEMPLATE is missing 'answer' placeholder. No template will be applied to completion."
+            "COMPLETION_TEMPLATE is missing 'answer' placeholder. No template will be applied to completion."
           )
         else:
           completion = {
-              "role": "assistant",
-              "content": template_config["COMPLETION_TEMPLATE"].format(answer=example["answer"].strip()),
+            "role": "assistant",
+            "content": template_config["COMPLETION_TEMPLATE"].format(answer=example["answer"].strip()),
           }
     else:
       max_logging.log("COMPLETION_TEMPLATE is empty. No template will be applied to completion.")
@@ -112,9 +110,9 @@ def map_qa_data_to_conversation(example, template_config):
 
 
 def convert_to_conversational_format(
-    dataset,
-    data_columns,
-    chat_template_path,
+  dataset,
+  data_columns,
+  chat_template_path,
 ):
   """Converts instruction dataset to conversational format."""
   template_config = None
@@ -122,13 +120,13 @@ def convert_to_conversational_format(
     template_config = load_template_from_file(chat_template_path)
   if "question" in data_columns and "answer" in data_columns:
     dataset_features = datasets.Features(
-        {"messages": [{"content": datasets.Value(dtype="string"), "role": datasets.Value(dtype="string")}]}
+      {"messages": [{"content": datasets.Value(dtype="string"), "role": datasets.Value(dtype="string")}]}
     )
     dataset = dataset.map(
-        map_qa_data_to_conversation,
-        fn_kwargs={"template_config": template_config},
-        remove_columns=data_columns,
-        features=dataset_features,
+      map_qa_data_to_conversation,
+      fn_kwargs={"template_config": template_config},
+      remove_columns=data_columns,
+      features=dataset_features,
     )
     data_columns = ["messages"]
   return dataset, data_columns

@@ -38,17 +38,17 @@ from MaxText import train_utils
 from MaxText.data_loader import DataLoader
 from MaxText.metric_logger import MetricLogger
 from MaxText.train import (
-    eval_step,
-    get_first_step,
-    train_step,
+  eval_step,
+  get_first_step,
+  train_step,
 )
 from MaxText.train_utils import setup_train_loop, validate_train_config
 from MaxText.utils import gcs_utils
 from MaxText.utils.goodput_utils import (
-    GoodputEvent,
-    create_goodput_recorder,
-    maybe_monitor_goodput,
-    maybe_record_goodput,
+  GoodputEvent,
+  create_goodput_recorder,
+  maybe_monitor_goodput,
+  maybe_record_goodput,
 )
 
 
@@ -58,19 +58,19 @@ def train_loop(config, recorder, state=None):
     raise TypeError("Set use_sft to True to run Supervised Fine Tuning.")
 
   (
-      init_rng,
-      checkpoint_manager,
-      state_mesh_shardings,
-      model,
-      mesh,
-      learning_rate_schedule,
-      data_iterator,
-      eval_data_iterator,
-      state,
+    init_rng,
+    checkpoint_manager,
+    state_mesh_shardings,
+    model,
+    mesh,
+    learning_rate_schedule,
+    data_iterator,
+    eval_data_iterator,
+    state,
   ) = setup_train_loop(config, recorder)
 
   p_train_step, p_eval_step = train_utils.jit_train_and_eval_step(
-      config, model, mesh, state, state_mesh_shardings, train_step, eval_step, eval_data_iterator
+    config, model, mesh, state, state_mesh_shardings, train_step, eval_step, eval_data_iterator
   )
 
   with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
@@ -108,11 +108,11 @@ def train_loop(config, recorder, state=None):
       if config.dump_hlo and step == start_step:
         jax.block_until_ready(state)  # Ensure compilation has finished.
         gcs_utils.upload_dump(
-            config.dump_hlo_local_dir,
-            config.dump_hlo_gcs_dir,
-            module_name=config.dump_hlo_module_name,
-            delete_local_after=config.dump_hlo_delete_local_after,
-            all_host_upload=config.dump_hlo_upload_all,
+          config.dump_hlo_local_dir,
+          config.dump_hlo_gcs_dir,
+          module_name=config.dump_hlo_module_name,
+          delete_local_after=config.dump_hlo_delete_local_after,
+          all_host_upload=config.dump_hlo_upload_all,
         )
 
       if config.eval_interval > 0 and step > start_step and (step + 1) % config.eval_interval == 0:
@@ -160,7 +160,7 @@ def main(argv: Sequence[str]) -> None:
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
   if "xla_tpu_spmd_rng_bit_generator_unsafe" not in os.environ.get("LIBTPU_INIT_ARGS", ""):
     os.environ["LIBTPU_INIT_ARGS"] = (
-        os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
+      os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
     )
   config = pyconfig.initialize(argv)
   jax.config.update("jax_use_shardy_partitioner", config.shardy)
