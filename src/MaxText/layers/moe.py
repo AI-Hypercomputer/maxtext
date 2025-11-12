@@ -810,12 +810,6 @@ class RoutedMoE(nnx.Module):
           min(tiling[0], m),
           min(tiling[1], k),
           min(tiling[2], n),
-          min(tiling[3], m),
-          min(tiling[4], k),
-          min(tiling[5], n),
-          min(tiling[6], m),
-          min(tiling[7], k),
-          min(tiling[8], n),
       )
       if self.config.use_tokamax_gmm:
         output = tokamax_api.ragged_dot(
@@ -825,19 +819,6 @@ class RoutedMoE(nnx.Module):
             precision=jax.lax.Precision.DEFAULT,
             preferred_element_type=self.dtype,
             implementation="mosaic",
-        )
-      elif self.config.use_tokamax_gmm and self.config.quantization:
-        # call mblx gmm with tokamax quantization
-        output = mblx.gmm(
-          lhs=inputs,
-          rhs=kernel,
-          group_sizes=group_sizes,
-          preferred_element_type=self.dtype,
-          tiling=tiling,
-          lhs_quantize_dtype=lhs_quantize_dtype,
-          rhs_quantize_dtype=rhs_quantize_dtype,
-          use_qwix_quantization=self.config.use_qwix_quantization,
-          use_tokamax_backend=self.config.use_tokamax_gmm,
         )
       else:
         if self.config.megablox:
@@ -850,7 +831,6 @@ class RoutedMoE(nnx.Module):
               lhs_quantize_dtype=lhs_quantize_dtype,
               rhs_quantize_dtype=rhs_quantize_dtype,
               use_qwix_quantization=self.config.use_qwix_quantization,
-              use_tokamax_backend=self.config.use_tokamax_gmm,
           )
         else:
           rhs_inputs = kernel
@@ -1061,26 +1041,14 @@ class RoutedMoE(nnx.Module):
           expert_assignments=selected_experts,
       )
       wi_tile_size = (
-          self.config.tile_fwd_batch_seq,
-          self.config.tile_fwd_embed_dim,
-          self.config.tile_fwd_mlp_dim,
-          self.config.tile_dlhs_batch_seq,
-          self.config.tile_dlhs_embed_dim,
-          self.config.tile_dlhs_mlp_dim,
-          self.config.tile_drhs_batch_seq,
-          self.config.tile_drhs_embed_dim,
-          self.config.tile_drhs_mlp_dim,
+          self.config.tile_batch_seq,
+          self.config.tile_embed_dim,
+          self.config.tile_mlp_dim,
       )
       wo_tile_size = (
-          self.config.tile_fwd_batch_seq,
-          self.config.tile_fwd_mlp_dim,
-          self.config.tile_fwd_embed_dim,
-          self.config.tile_dlhs_batch_seq,
-          self.config.tile_dlhs_mlp_dim,
-          self.config.tile_dlhs_embed_dim,
-          self.config.tile_drhs_batch_seq,
-          self.config.tile_drhs_mlp_dim,
-          self.config.tile_drhs_embed_dim,
+          self.config.tile_batch_seq,
+          self.config.tile_mlp_dim,
+          self.config.tile_embed_dim,
       )
       layer_w0 = gmm_fn(x, w0, tiling=wi_tile_size)
       if self.get_tensor_transpose_parallelism_size() > 1:
