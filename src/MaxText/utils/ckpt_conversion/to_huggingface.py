@@ -66,12 +66,12 @@ from MaxText import maxengine
 from MaxText import pyconfig
 from MaxText import max_logging
 from MaxText.utils.ckpt_conversion.utils.param_mapping import (
-    HOOK_FNS,
-    PARAM_MAPPING,
+  HOOK_FNS,
+  PARAM_MAPPING,
 )
 from MaxText.utils.ckpt_conversion.utils.hf_shape import HF_SHAPE
 from MaxText.utils.ckpt_conversion.utils.hf_model_configs import HF_MODEL_CONFIGS
-from MaxText.utils.ckpt_conversion.utils.utils import (process_leaf_param, save_model_files, HF_IDS)
+from MaxText.utils.ckpt_conversion.utils.utils import process_leaf_param, save_model_files, HF_IDS
 
 
 os.environ["JAX_PLATFORMS"] = "cpu"
@@ -97,9 +97,9 @@ def _get_model_mappings(model_name: str, scan_layers: bool, config_dict: dict):
     raise ValueError(f"Mappings not found for model: {model_name}. Available PARAM_MAPPING keys: {PARAM_MAPPING.keys()}")
 
   return {
-      "param_mapping": PARAM_MAPPING[model_name](config_dict, scan_layers),
-      "shape_mapping": HF_SHAPE[model_name](config_dict),
-      "hook_fn_mapping": HOOK_FNS[model_name](config_dict, scan_layers, saving_to_hf=True),
+    "param_mapping": PARAM_MAPPING[model_name](config_dict, scan_layers),
+    "shape_mapping": HF_SHAPE[model_name](config_dict),
+    "hook_fn_mapping": HOOK_FNS[model_name](config_dict, scan_layers, saving_to_hf=True),
   }
 
 
@@ -119,9 +119,9 @@ def main(argv: Sequence[str]) -> None:
 
   # Initialize maxtext config
   config = pyconfig.initialize(argv)
-  assert (
-      config.load_full_state_path == ""
-  ), "This script expects parameters, not a full state. Use generate_param_only_checkpoint first if needed."
+  assert config.load_full_state_path == "", (
+    "This script expects parameters, not a full state. Use generate_param_only_checkpoint first if needed."
+  )
   max_utils.print_system_information()
 
   # Load Maxtext checkpoint
@@ -190,11 +190,11 @@ def main(argv: Sequence[str]) -> None:
   max_logging.log("\nSaving HuggingFace model...")
   start = time.time()
   save_model_files(
-      weight_arrays=transformed_hf_weights,
-      config=hf_config_obj,
-      tokenizer=tokenizer,
-      processor=processor,
-      output_dir=output_directory,
+    weight_arrays=transformed_hf_weights,
+    config=hf_config_obj,
+    tokenizer=tokenizer,
+    processor=processor,
+    output_dir=output_directory,
   )
   max_logging.log(f"✅ MaxText model successfully saved in HuggingFace format at {output_directory}")
   max_logging.log(f"Elapse: {(time.time() - start) / 60:.2f} min")

@@ -25,25 +25,24 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 
 
 def _create_workload_config(
-    framework: str, model, num_slices: int, user_config, num_steps: int, priority: str, **kwargs
+  framework: str, model, num_slices: int, user_config, num_steps: int, priority: str, **kwargs
 ) -> mxr.WorkloadConfig:
   """Creates a single, unified WorkloadConfig object."""
   config_args = {
-      "model": model,
-      "num_slices": num_slices,
-      "device_type": user_config.cluster_config.device_type,
-      "base_output_directory": (
-          f"{user_config.base_output_directory}{framework}_{num_slices}_slice_"
-          f"{user_config.device_type}_{model.model_name}/"
-      ),
-      "max_restarts": user_config.max_restarts,
-      "libtpu_type": None,
-      "libtpu_nightly_version": "",
-      "base_docker_image": (user_config.runner if Framework(framework) == Framework.MCJAX else None),
-      "pathways_config": (user_config.pathways_config if Framework(framework) == Framework.PATHWAYS else None),
-      "xpk_path": user_config.xpk_path,
-      "num_steps": num_steps,
-      "priority": priority,
+    "model": model,
+    "num_slices": num_slices,
+    "device_type": user_config.cluster_config.device_type,
+    "base_output_directory": (
+      f"{user_config.base_output_directory}{framework}_{num_slices}_slice_{user_config.device_type}_{model.model_name}/"
+    ),
+    "max_restarts": user_config.max_restarts,
+    "libtpu_type": None,
+    "libtpu_nightly_version": "",
+    "base_docker_image": (user_config.runner if Framework(framework) == Framework.MCJAX else None),
+    "pathways_config": (user_config.pathways_config if Framework(framework) == Framework.PATHWAYS else None),
+    "xpk_path": user_config.xpk_path,
+    "num_steps": num_steps,
+    "priority": priority,
   }
   # Add any extra arguments, like disruption_configs, if they exist
   config_args.update(kwargs)
@@ -51,12 +50,12 @@ def _create_workload_config(
 
 
 def _generate_workloads(
-    user_config,
-    num_slices_list: list,
-    num_steps: int,
-    priority: str,
-    disruption_method: str = "",
-    disruptions: dict = None,
+  user_config,
+  num_slices_list: list,
+  num_steps: int,
+  priority: str,
+  disruption_method: str = "",
+  disruptions: dict = None,
 ):
   """A unified generator that yields WorkloadConfig objects."""
   for framework, model_list in user_config.models.items():
@@ -71,25 +70,25 @@ def _generate_workloads(
     for model in model_list:
       for num_slices in num_slices_list:
         yield _create_workload_config(
-            framework, model, num_slices, user_config, num_steps, priority, **extra_config_kwargs
+          framework, model, num_slices, user_config, num_steps, priority, **extra_config_kwargs
         )
 
 
 def generate_and_run_workloads(
-    user_config, num_slices_list, num_steps, priority="medium", disruption_method="", disruptions=None
+  user_config, num_slices_list, num_steps, priority="medium", disruption_method="", disruptions=None
 ):
   """
   Generates and executes XPK workloads, with or without disruptions.
   """
   workload_configs = list(
-      _generate_workloads(
-          user_config,
-          num_slices_list,
-          num_steps,
-          priority,
-          disruption_method=disruption_method,
-          disruptions=disruptions,
-      )
+    _generate_workloads(
+      user_config,
+      num_slices_list,
+      num_steps,
+      priority,
+      disruption_method=disruption_method,
+      disruptions=disruptions,
+    )
   )
 
   if not workload_configs:
@@ -97,8 +96,8 @@ def generate_and_run_workloads(
     return 0
 
   disruption_manager = mxr.xpk_benchmark_runner(
-      cluster_config=user_config.cluster_config,
-      workload_configs=workload_configs,
+    cluster_config=user_config.cluster_config,
+    workload_configs=workload_configs,
   )
 
   if disruptions:

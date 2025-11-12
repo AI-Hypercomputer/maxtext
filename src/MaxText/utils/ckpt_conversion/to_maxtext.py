@@ -91,7 +91,7 @@ jax.config.update("jax_platform_name", "cpu")
 def print_ram_usage(stage=""):
   memory = psutil.virtual_memory()
   max_logging.log(
-      f"[{stage}] RAM Usage: {memory.used / (1024**3):.2f}/{memory.total / (1024**3):.2f} GB ({memory.percent:.1f}%)"
+    f"[{stage}] RAM Usage: {memory.used / (1024**3):.2f}/{memory.total / (1024**3):.2f} GB ({memory.percent:.1f}%)"
   )
 
 
@@ -99,12 +99,12 @@ class MemoryMonitorTqdm(tqdm):
   """Custom tqdm class that displays memory usage in the progress bar."""
 
   def format_meter(
-      self,
-      n,
-      total,
-      elapsed,
-      postfix=None,
-      **extra_kwargs,
+    self,
+    n,
+    total,
+    elapsed,
+    postfix=None,
+    **extra_kwargs,
   ):
     """Override to add memory usage info to the postfix."""
     # Get memory info
@@ -291,7 +291,7 @@ type_handlers.register_type_handler(LazyTensor, LazyTensorHandler())
 
 
 def _build_multi_axis_stacked_tensor(
-    hf_source_keys: List[List[str]], tensor_getter_fn: Callable[[str], np.ndarray], hook_fns: Any
+  hf_source_keys: List[List[str]], tensor_getter_fn: Callable[[str], np.ndarray], hook_fns: Any
 ) -> np.ndarray:
   """Builds a MaxText tensor by stacking HF weights along two axes (experts and layers).
 
@@ -321,11 +321,11 @@ def _build_multi_axis_stacked_tensor(
 
 
 def _build_single_axis_stacked_tensor(
-    hf_source_keys: List[str],
-    tensor_getter_fn: Callable[[str], np.ndarray],
-    hook_fns: Any,
-    target_shape: tuple,
-    config,
+  hf_source_keys: List[str],
+  tensor_getter_fn: Callable[[str], np.ndarray],
+  hook_fns: Any,
+  target_shape: tuple,
+  config,
 ) -> np.ndarray:
   """Builds a MaxText tensor by stacking HF weights along a single axis.
 
@@ -432,12 +432,12 @@ def main(args: Sequence[str], test_args: Sequence[str]) -> None:
     print_ram_usage("After full HF model load")
 
   checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
-      output_directory,
-      enable_checkpointing=True,
-      use_async=False,  # Synchronous saving for simplicity in conversion script
-      save_interval_steps=1,  # Save at step 0
-      use_ocdbt=config.checkpoint_storage_use_ocdbt,
-      use_zarr3=config.checkpoint_storage_use_zarr3,
+    output_directory,
+    enable_checkpointing=True,
+    use_async=False,  # Synchronous saving for simplicity in conversion script
+    save_interval_steps=1,  # Save at step 0
+    use_ocdbt=config.checkpoint_storage_use_ocdbt,
+    use_zarr3=config.checkpoint_storage_use_zarr3,
   )
 
   max_logging.log("Initializing MaxText abstract model...")
@@ -451,9 +451,9 @@ def main(args: Sequence[str], test_args: Sequence[str]) -> None:
   abstract_params_flat, _ = jax.tree_util.tree_flatten_with_path(abstract_params_tree)
   # Standardize abstract tree for later unflattening
   abstract_params_tree = jax.tree.map(
-      lambda _: 0,
-      abstract_params_tree,
-      is_leaf=lambda x: isinstance(x, nn.LogicallyPartitioned),
+    lambda _: 0,
+    abstract_params_tree,
+    is_leaf=lambda x: isinstance(x, nn.LogicallyPartitioned),
   )
   abstract_params_treedef = jax.tree_util.tree_structure(abstract_params_tree)
   del abstract_params_tree
@@ -489,7 +489,7 @@ def main(args: Sequence[str], test_args: Sequence[str]) -> None:
     tensor_getter = _eager_getter
 
   for path_tuple, abstract_leaf_value in MemoryMonitorTqdm(
-      abstract_params_flat, desc="Transforming weights", unit="param", leave=True, dynamic_ncols=True
+    abstract_params_flat, desc="Transforming weights", unit="param", leave=True, dynamic_ncols=True
   ):
     key_parts = [k.key for k in path_tuple if hasattr(k, "key")]
     mt_param_key = "params-" + "-".join(key_parts)
@@ -518,12 +518,12 @@ def main(args: Sequence[str], test_args: Sequence[str]) -> None:
       else:
         # Case 3: Single-Axis Stacked
         load_fn = partial(
-            _build_single_axis_stacked_tensor,
-            hf_source_keys_or_key,
-            tensor_getter,
-            hook_fn,
-            mt_target_shape_final,
-            config,
+          _build_single_axis_stacked_tensor,
+          hf_source_keys_or_key,
+          tensor_getter,
+          hook_fn,
+          mt_target_shape_final,
+          config,
         )
 
     # Execute based on mode
@@ -541,7 +541,7 @@ def main(args: Sequence[str], test_args: Sequence[str]) -> None:
       final_mt_tensor_numpy = load_fn()
       if final_mt_tensor_numpy.shape != mt_target_shape_final:
         raise ValueError(
-            f"Shape mismatch for {mt_param_key}: Expected {mt_target_shape_final}, got {final_mt_tensor_numpy.shape}"
+          f"Shape mismatch for {mt_param_key}: Expected {mt_target_shape_final}, got {final_mt_tensor_numpy.shape}"
         )
       final_mt_weights.append(final_mt_tensor_numpy)
 
@@ -583,11 +583,11 @@ if __name__ == "__main__":
 
   parser = argparse.ArgumentParser()
   parser.add_argument(
-      "--lazy_load_tensors",
-      type=str2bool,
-      required=False,
-      default=False,
-      help="Whether to use lazy loading of HF tensors.",
+    "--lazy_load_tensors",
+    type=str2bool,
+    required=False,
+    default=False,
+    help="Whether to use lazy loading of HF tensors.",
   )
   local_args, _ = parser.parse_known_args()
   model_args = sys.argv

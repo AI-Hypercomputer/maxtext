@@ -59,10 +59,10 @@ BENCHMARK_STEPS = 10_000_000
 def main():
   # V6e cluster config
   cluster_config = XpkClusterConfig(
-      cluster_name=CLUSTER,
-      project=PROJECT,
-      zone=ZONE,
-      device_type=DEVICE_TYPE,
+    cluster_name=CLUSTER,
+    project=PROJECT,
+    zone=ZONE,
+    device_type=DEVICE_TYPE,
   )
 
   # Handle command line arguments using args_helper
@@ -72,24 +72,24 @@ def main():
     return
 
   model_list = [
-      # model_configs.llama3_1_70b_8192_pw_lr_real_data,
-      # model_configs.llama3_1_8b_8192,
-      # model_configs.llama3_1_70b_8192_iter_synth_data_and_checkpointing,
-      # model_configs.llama3_1_70b_8192_iter_real_data_and_checkpointing_tfds,
-      model_configs.llama3_1_70b_8192_iter_synthetic,
+    # model_configs.llama3_1_70b_8192_pw_lr_real_data,
+    # model_configs.llama3_1_8b_8192,
+    # model_configs.llama3_1_70b_8192_iter_synth_data_and_checkpointing,
+    # model_configs.llama3_1_70b_8192_iter_real_data_and_checkpointing_tfds,
+    model_configs.llama3_1_70b_8192_iter_synthetic,
   ]
 
   pathways_config = mxr.PathwaysConfig(
-      server_image=SERVER_IMAGE,
-      proxy_server_image=PROXY_IMAGE,
-      runner_image=RUNNER,
-      # User can add additional flags here.
-      server_flags="--enable_metrics_collection=true",
-      proxy_flags="--enable_metrics_collection=true",
-      worker_flags="--enable_metrics_collection=true",
-      # server_flags="--enable_metrics_collection=false",
-      # proxy_flags="--enable_metrics_collection=false",
-      # worker_flags="--enable_metrics_collection=false",
+    server_image=SERVER_IMAGE,
+    proxy_server_image=PROXY_IMAGE,
+    runner_image=RUNNER,
+    # User can add additional flags here.
+    server_flags="--enable_metrics_collection=true",
+    proxy_flags="--enable_metrics_collection=true",
+    worker_flags="--enable_metrics_collection=true",
+    # server_flags="--enable_metrics_collection=false",
+    # proxy_flags="--enable_metrics_collection=false",
+    # worker_flags="--enable_metrics_collection=false",
   )
   num_slices_list = [2]
 
@@ -99,9 +99,8 @@ def main():
   for model in model_list:
     # Run workloads on the below clusters
     for cluster_config in [
-        cluster_config,
+      cluster_config,
     ]:
-
       # Make modifications to the model config here to add in any additional
       # flags or changes to the model config.
       model.tuning_params["use_vertex_tensorboard"] = True
@@ -112,18 +111,18 @@ def main():
       # Run workloads in the following slice configurations
       for num_slices in num_slices_list:
         wl_config = mxr.WorkloadConfig(
-            model=model,
-            num_slices=num_slices,
-            device_type=cluster_config.device_type,
-            base_output_directory=BASE_OUTPUT_DIRECTORY,
-            max_restarts=MAX_RESTARTS,
-            libtpu_type=None,
-            libtpu_nightly_version="",
-            base_docker_image=None,
-            pathways_config=pathways_config,
-            xpk_path=XPK_PATH,
-            num_steps=BENCHMARK_STEPS,
-            priority="medium",
+          model=model,
+          num_slices=num_slices,
+          device_type=cluster_config.device_type,
+          base_output_directory=BASE_OUTPUT_DIRECTORY,
+          max_restarts=MAX_RESTARTS,
+          libtpu_type=None,
+          libtpu_nightly_version="",
+          base_docker_image=None,
+          pathways_config=pathways_config,
+          xpk_path=XPK_PATH,
+          num_steps=BENCHMARK_STEPS,
+          priority="medium",
         )
         command, name = mxr.generate_xpk_workload_cmd(cluster_config=cluster_config, wl_config=wl_config)
 
@@ -135,7 +134,7 @@ def main():
 
   for xpk_workload_name, xpk_workload_cmd in zip(xpk_workload_names, xpk_workload_cmds):
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{timestamp}] Running workload: {xpk_workload_name} with command:" f" {xpk_workload_cmd}")
+    print(f"[{timestamp}] Running workload: {xpk_workload_name} with command: {xpk_workload_cmd}")
     return_code = mxr.run_command_with_updates(xpk_workload_cmd, xpk_workload_name)
     if return_code != 0:
       print(f"Unable to run xpk workload: {xpk_workload_name}")

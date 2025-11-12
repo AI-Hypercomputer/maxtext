@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-""" Checkpoint conversion utility functions. """
+"""Checkpoint conversion utility functions."""
 
 import contextlib
 import io
@@ -52,28 +52,28 @@ DEFAULT_MAX_SHARD_SIZE = 1024 * 1024 * 1024 * 3  # 3GB default
 
 # Mapping from MaxText model key to Hugging Face tokenizer identifiers
 HF_IDS = {
-    "gemma2-2b": "google/gemma-2-2b",
-    "gemma2-9b": "google/gemma-2-9b",
-    "gemma2-27b": "google/gemma-2-27b",
-    "gemma3-4b": "google/gemma-3-4b-it",  # hf multi-modal should also support the pure-text
-    "gemma3-12b": "google/gemma-3-12b-it",
-    "gemma3-27b": "google/gemma-3-27b-it",
-    "qwen3-0.6b": "Qwen/Qwen3-0.6B",
-    "qwen3-4b": "Qwen/Qwen3-4B",
-    "qwen3-4b-thinking-2507": "Qwen/Qwen3-4B-Thinking-2507",
-    "qwen3-8b": "Qwen/Qwen3-8B",
-    "qwen3-14b": "Qwen/Qwen3-14B",
-    "qwen3-32b": "Qwen/Qwen3-32B",
-    "llama3.1-8b": "meta-llama/Llama-3.1-8B",
-    "llama3.1-8b-Instruct": "meta-llama/Llama-3.1-8B-Instruct",
-    "llama3.1-70b-Instruct": "meta-llama/Llama-3.1-70B-Instruct",
-    "llama3.1-70b": "meta-llama/Llama-3.1-70B",
-    "llama3.1-405b": "meta-llama/Llama-3.1-405B",
-    "qwen3-30b-a3b": "Qwen/Qwen3-30B-A3B-Thinking-2507",
-    "qwen3-235b-a22b": "Qwen/Qwen3-235B-A22B-Thinking-2507",
-    "qwen3-480b-a35b": "Qwen/Qwen3-Coder-480B-A35B-Instruct",
-    "deepseek3-671b": "deepseek-ai/DeepSeek-V3",
-    "qwen3-omni-30b-a3b": "Qwen/Qwen3-Omni-30B-A3B-Instruct",
+  "gemma2-2b": "google/gemma-2-2b",
+  "gemma2-9b": "google/gemma-2-9b",
+  "gemma2-27b": "google/gemma-2-27b",
+  "gemma3-4b": "google/gemma-3-4b-it",  # hf multi-modal should also support the pure-text
+  "gemma3-12b": "google/gemma-3-12b-it",
+  "gemma3-27b": "google/gemma-3-27b-it",
+  "qwen3-0.6b": "Qwen/Qwen3-0.6B",
+  "qwen3-4b": "Qwen/Qwen3-4B",
+  "qwen3-4b-thinking-2507": "Qwen/Qwen3-4B-Thinking-2507",
+  "qwen3-8b": "Qwen/Qwen3-8B",
+  "qwen3-14b": "Qwen/Qwen3-14B",
+  "qwen3-32b": "Qwen/Qwen3-32B",
+  "llama3.1-8b": "meta-llama/Llama-3.1-8B",
+  "llama3.1-8b-Instruct": "meta-llama/Llama-3.1-8B-Instruct",
+  "llama3.1-70b-Instruct": "meta-llama/Llama-3.1-70B-Instruct",
+  "llama3.1-70b": "meta-llama/Llama-3.1-70B",
+  "llama3.1-405b": "meta-llama/Llama-3.1-405B",
+  "qwen3-30b-a3b": "Qwen/Qwen3-30B-A3B-Thinking-2507",
+  "qwen3-235b-a22b": "Qwen/Qwen3-235B-A22B-Thinking-2507",
+  "qwen3-480b-a35b": "Qwen/Qwen3-Coder-480B-A35B-Instruct",
+  "deepseek3-671b": "deepseek-ai/DeepSeek-V3",
+  "qwen3-omni-30b-a3b": "Qwen/Qwen3-Omni-30B-A3B-Instruct",
 }
 
 
@@ -95,19 +95,19 @@ def _process(hf_path, processed_slice, output_weights, current_hook_fns, shape_m
     # otherwise identity
     processed_slice = apply_hook_fns(processed_slice, target_hf_shape, current_hook_fns)
   numpy_slice = convert_jax_weight_to_numpy(processed_slice).squeeze()
-  assert len(target_hf_shape) == len(
-      numpy_slice.shape
-  ), f"shape mismatch {len(target_hf_shape)} and {len(numpy_slice.shape)}"
+  assert len(target_hf_shape) == len(numpy_slice.shape), (
+    f"shape mismatch {len(target_hf_shape)} and {len(numpy_slice.shape)}"
+  )
   output_weights.append((hf_path, numpy_slice))
 
 
 def process_leaf_param(
-    path_tuple: Any,
-    leaf_value: jax.Array,
-    param_map_local: dict[str, Any],
-    shape_map_local: dict[str, Any],
-    hook_fn_map_local: dict[str, Any],
-    current_config: Any,
+  path_tuple: Any,
+  leaf_value: jax.Array,
+  param_map_local: dict[str, Any],
+  shape_map_local: dict[str, Any],
+  hook_fn_map_local: dict[str, Any],
+  current_config: Any,
 ) -> list[tuple[str, np.ndarray]]:
   """Processes a single leaf from the MaxText parameter tree."""
   # Construct maxtext_param_key from path_tuple
@@ -147,7 +147,7 @@ def process_leaf_param(
     hf_path = hf_target_paths[0]
     if hf_path not in shape_map_local:
       max_logging.log(
-          f"Warning: HF path '{hf_path}' not found in shape_map for MaxText key '{maxtext_param_key}'. Skipping."
+        f"Warning: HF path '{hf_path}' not found in shape_map for MaxText key '{maxtext_param_key}'. Skipping."
       )
       return []
     _process(hf_path, leaf_value, output_weights, current_hook_fns, shape_map_local)
@@ -175,7 +175,7 @@ def process_leaf_param(
       for layer_idx, hf_path in enumerate(expert_paths_for_layer):
         if hf_path not in shape_map_local:
           max_logging.log(
-              f"Warning: HF path '{hf_path}' not found in shape_map for MaxText key '{maxtext_param_key}'. Skipping."
+            f"Warning: HF path '{hf_path}' not found in shape_map for MaxText key '{maxtext_param_key}'. Skipping."
           )
           continue
 
@@ -189,7 +189,7 @@ def process_leaf_param(
   # Case 2 or 3: The source tensor is stacked on a single axis.
   # We determine if it's an unscanned MoE (expert axis) or standard scanned (layer axis).
   is_unscanned_moe = "moe_block" in maxtext_param_key and any(
-      f"_{i}-" in maxtext_param_key for i in range(current_config.base_num_decoder_layers)
+    f"_{i}-" in maxtext_param_key for i in range(current_config.base_num_decoder_layers)
   )
 
   if is_unscanned_moe:
@@ -206,7 +206,7 @@ def process_leaf_param(
   for i, hf_path in enumerate(hf_target_paths):
     if hf_path not in shape_map_local:
       max_logging.log(
-          f"Warning: HF path '{hf_path}' not found in shape_map for MaxText key '{maxtext_param_key}'. Skipping."
+        f"Warning: HF path '{hf_path}' not found in shape_map for MaxText key '{maxtext_param_key}'. Skipping."
       )
       continue
 
@@ -251,20 +251,20 @@ def create_huggingface_hub_repo_if_not_exist(repo_id, repo_type):
   if not repo_exists(repo_id, repo_type=repo_type):
     api = HfApi()
     api.create_repo(
-        repo_id=repo_id,
-        repo_type=repo_type,
-        exist_ok=True,
-        private=True,
+      repo_id=repo_id,
+      repo_type=repo_type,
+      exist_ok=True,
+      private=True,
     )
     max_logging.log(f"\n Created new HuggingFace Hub {repo_type} repo: {repo_id}.")
 
 
 def save_config_file(
-    config,
-    local_path_to_save_to: str,
-    output_dir_final: str,
-    file_name: str,
-    remove_local_copy_after_upload: bool = False,
+  config,
+  local_path_to_save_to: str,
+  output_dir_final: str,
+  file_name: str,
+  remove_local_copy_after_upload: bool = False,
 ):
   """Saves the model configuration file(config.json)."""
   if jax.process_index() == 0:
@@ -277,10 +277,10 @@ def save_config_file(
       api = HfApi()
       with io.BytesIO(json_bytes) as f:
         api.upload_file(
-            path_or_fileobj=f,
-            path_in_repo=file_name,
-            repo_id=repo_id,
-            repo_type="model",
+          path_or_fileobj=f,
+          path_in_repo=file_name,
+          repo_id=repo_id,
+          repo_type="model",
         )
       max_logging.log(f"  Successfully uploaded {file_name} to HF repo: {repo_id}")
     else:
@@ -291,16 +291,16 @@ def save_config_file(
       # upload
       if output_dir_final.startswith("gs://"):
         upload_file_to_gcs(
-            actual_local_file_path,
-            os.path.join(output_dir_final, file_name),
-            remove_local_file_after_upload=remove_local_copy_after_upload,
+          actual_local_file_path,
+          os.path.join(output_dir_final, file_name),
+          remove_local_file_after_upload=remove_local_copy_after_upload,
         )
 
 
 def shard_checkpoint(
-    weights_dict: dict[str, Array],
-    max_shard_size: int = DEFAULT_MAX_SHARD_SIZE,
-    weights_name: str = "model.safetensors",
+  weights_dict: dict[str, Array],
+  max_shard_size: int = DEFAULT_MAX_SHARD_SIZE,
+  weights_name: str = "model.safetensors",
 ) -> tuple[dict[str, dict[str, Array]], None | dict]:
   """Shards a model checkpoint into smaller pieces based on size constraints.
 
@@ -351,16 +351,16 @@ def shard_checkpoint(
       weight_map[key] = shard_name
 
   return shard_dict, {
-      "metadata": {"total_size": total_size},
-      "weight_map": weight_map,
+    "metadata": {"total_size": total_size},
+    "weight_map": weight_map,
   }
 
 
 def save_safetensor_file(
-    state_dict,
-    local_dir_to_save_to: str,
-    output_dir_final: str,
-    file_name: str,
+  state_dict,
+  local_dir_to_save_to: str,
+  output_dir_final: str,
+  file_name: str,
 ):
   """Saves a single safetensor file, from memory to remote when uploading"""
   if jax.process_index() == 0:
@@ -379,10 +379,10 @@ def save_safetensor_file(
       api = HfApi()
       with io.BytesIO(serialized_content) as f:
         api.upload_file(
-            path_or_fileobj=f,
-            path_in_repo=file_name,
-            repo_id=repo_id,
-            repo_type="model",
+          path_or_fileobj=f,
+          path_in_repo=file_name,
+          repo_id=repo_id,
+          repo_type="model",
         )
       max_logging.log(f"  Successfully uploaded {file_name} to HF repo: {repo_id}")
     else:
@@ -393,11 +393,11 @@ def save_safetensor_file(
 
 
 def save_index_file(
-    index: dict,
-    local_dir_to_save_to: str,
-    output_dir_final: str,
-    file_name: str,
-    remove_local_copy_after_upload: bool = False,
+  index: dict,
+  local_dir_to_save_to: str,
+  output_dir_final: str,
+  file_name: str,
+  remove_local_copy_after_upload: bool = False,
 ):
   """Saves the model index json file (model.safetensors.index.json)."""
   if jax.process_index() == 0:
@@ -410,10 +410,10 @@ def save_index_file(
       api = HfApi()
       with io.BytesIO(json_bytes) as f:
         api.upload_file(
-            path_or_fileobj=f,
-            path_in_repo=file_name,
-            repo_id=repo_id,
-            repo_type="model",
+          path_or_fileobj=f,
+          path_in_repo=file_name,
+          repo_id=repo_id,
+          repo_type="model",
         )
       max_logging.log(f"   Successfully uploaded {file_name} to HF repo: {repo_id}")
     else:
@@ -422,20 +422,20 @@ def save_index_file(
       max_logging.log(f"   Saved {file_name} to {local_path}")
       if output_dir_final.startswith("gs://"):
         upload_file_to_gcs(
-            local_path,
-            os.path.join(output_dir_final, file_name),
-            remove_local_file_after_upload=remove_local_copy_after_upload,
+          local_path,
+          os.path.join(output_dir_final, file_name),
+          remove_local_file_after_upload=remove_local_copy_after_upload,
         )
         max_logging.log(f"   Successfully uploaded {file_name} to GCS: {output_dir_final}")
 
 
 def save_weight_files(
-    shards,
-    index,
-    local_dir_to_save_to: str,
-    output_dir_final: str,
-    parallel_threads=8,
-    remove_local_copy_after_upload: bool = False,
+  shards,
+  index,
+  local_dir_to_save_to: str,
+  output_dir_final: str,
+  parallel_threads=8,
+  remove_local_copy_after_upload: bool = False,
 ):
   """Saves weight files and index if needed.
 
@@ -450,21 +450,21 @@ def save_weight_files(
     with ThreadPoolExecutor(max_workers=parallel_threads) as executor:
       shard_items = list(shards.items())
       futures = [
-          executor.submit(
-              save_safetensor_file,
-              shard_dict,
-              local_dir_to_save_to,
-              output_dir_final,
-              shard_name,
-          )
-          for shard_name, shard_dict in shard_items
+        executor.submit(
+          save_safetensor_file,
+          shard_dict,
+          local_dir_to_save_to,
+          output_dir_final,
+          shard_name,
+        )
+        for shard_name, shard_dict in shard_items
       ]
       for future in futures:
         future.result()
 
     # Save index file
     save_index_file(
-        index, local_dir_to_save_to, output_dir_final, SAFE_TENSORS_INDEX_FILE, remove_local_copy_after_upload
+      index, local_dir_to_save_to, output_dir_final, SAFE_TENSORS_INDEX_FILE, remove_local_copy_after_upload
     )
 
 
@@ -488,12 +488,12 @@ def get_local_save_path_manager(output_dir: str):
 
 
 def save_model_files(
-    weight_arrays: dict,
-    config,  # HF config object
-    tokenizer: None | Any,  # transformers.PreTrainedTokenizerBase
-    processor,
-    output_dir: str,
-    parallel_threads=8,
+  weight_arrays: dict,
+  config,  # HF config object
+  tokenizer: None | Any,  # transformers.PreTrainedTokenizerBase
+  processor,
+  output_dir: str,
+  parallel_threads=8,
 ):
   """
   Saves model files (config and weights) to the specified directory.
@@ -531,9 +531,9 @@ def save_model_files(
             continue
           file_name = os.path.basename(local_file_path)
           upload_file_to_gcs(
-              local_file_path,
-              os.path.join(output_dir, file_name),
-              remove_local_file_after_upload=remove_local_copy,
+            local_file_path,
+            os.path.join(output_dir, file_name),
+            remove_local_file_after_upload=remove_local_copy,
           )
       elif output_dir.startswith("hf://") and repo_id:
         api = HfApi()
@@ -543,10 +543,10 @@ def save_model_files(
             continue
           file_name = os.path.basename(local_file_path)
           api.upload_file(
-              path_or_fileobj=local_file_path,
-              path_in_repo=file_name,
-              repo_id=repo_id,
-              repo_type="model",
+            path_or_fileobj=local_file_path,
+            path_in_repo=file_name,
+            repo_id=repo_id,
+            repo_type="model",
           )
           if remove_local_copy:
             os.remove(local_file_path)
@@ -648,13 +648,13 @@ def upload_folder_to_gcs(local_folder: str, gs_bucket_path: str, num_workers: in
 
   # Upload files in parallel
   results = transfer_manager.upload_many_from_filenames(
-      bucket,
-      files_in_local_folder,
-      source_directory=local_folder,
-      max_workers=num_workers,
-      blob_name_prefix=destination_dir,
-      timeout=600,
-      deadline=None,
+    bucket,
+    files_in_local_folder,
+    source_directory=local_folder,
+    max_workers=num_workers,
+    blob_name_prefix=destination_dir,
+    timeout=600,
+    deadline=None,
   )
 
   # Report results

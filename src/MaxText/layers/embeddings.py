@@ -43,16 +43,16 @@ def _maybe_move_embedding_to_device(embedding_table: Array, config: Config) -> A
 
 
 def embed_as_linen(
-    *,
-    num_embeddings: int,
-    num_features: int,
-    config: Config,
-    mesh: Mesh,
-    cast_input_dtype: None | DType = None,
-    dtype: DType = jnp.float32,
-    attend_dtype: None | DType = None,
-    embedding_init: Initializer = default_embed_init,
-    name: str | None = None,
+  *,
+  num_embeddings: int,
+  num_features: int,
+  config: Config,
+  mesh: Mesh,
+  cast_input_dtype: None | DType = None,
+  dtype: DType = jnp.float32,
+  attend_dtype: None | DType = None,
+  embedding_init: Initializer = default_embed_init,
+  name: str | None = None,
 ):
   """Initializes the Embed NNX module and returns it as a Linen module.
 
@@ -74,17 +74,17 @@ def embed_as_linen(
     A Linen module that wraps the NNX `Embed` module.
   """
   return nnx_wrappers.to_linen(
-      Embed,
-      num_embeddings=num_embeddings,
-      num_features=num_features,
-      config=config,
-      mesh=mesh,
-      cast_input_dtype=cast_input_dtype,
-      dtype=dtype,
-      attend_dtype=attend_dtype,
-      embedding_init=embedding_init,
-      metadata_fn=variable_to_logically_partitioned,
-      name=name,
+    Embed,
+    num_embeddings=num_embeddings,
+    num_features=num_features,
+    config=config,
+    mesh=mesh,
+    cast_input_dtype=cast_input_dtype,
+    dtype=dtype,
+    attend_dtype=attend_dtype,
+    embedding_init=embedding_init,
+    metadata_fn=variable_to_logically_partitioned,
+    name=name,
   )
 
 
@@ -92,19 +92,19 @@ class Embed(nnx.Module):
   """A parameterized function from integers [0, n) to d-dimensional vectors."""
 
   def __init__(
-      self,
-      num_embeddings: int,
-      num_features: int,
-      config: Config,
-      mesh: Mesh,
-      cast_input_dtype: None | DType = None,
-      dtype: DType = jnp.float32,
-      attend_dtype: None | DType = None,
-      embedding_init: Initializer = default_embed_init,
-      *,
-      # Not used in Embed but passed in by nnx.bridge.to_linen.
-      # TODO: Remove when bridge no longer needed
-      rngs: nnx.Rngs,
+    self,
+    num_embeddings: int,
+    num_features: int,
+    config: Config,
+    mesh: Mesh,
+    cast_input_dtype: None | DType = None,
+    dtype: DType = jnp.float32,
+    attend_dtype: None | DType = None,
+    embedding_init: Initializer = default_embed_init,
+    *,
+    # Not used in Embed but passed in by nnx.bridge.to_linen.
+    # TODO: Remove when bridge no longer needed
+    rngs: nnx.Rngs,
   ):
     """Initializes the Embed module.
 
@@ -127,8 +127,8 @@ class Embed(nnx.Module):
     self.attend_dtype = attend_dtype
 
     self.embedding = nnx.Param(
-        embedding_init(rngs.params(), (self.num_embeddings, self.num_features), self.config.weight_dtype),
-        sharding=("vocab", "embed"),
+      embedding_init(rngs.params(), (self.num_embeddings, self.num_features), self.config.weight_dtype),
+      sharding=("vocab", "embed"),
     )
 
   def __call__(self, inputs: Array, model_mode: str = MODEL_MODE_TRAIN) -> Array:
@@ -148,14 +148,14 @@ class Embed(nnx.Module):
       raise ValueError("Input type must be an integer or unsigned integer.")
 
     embedding = jnp.asarray(
-        _maybe_move_embedding_to_device(self.embedding.value, self.config),
-        self.dtype,
+      _maybe_move_embedding_to_device(self.embedding.value, self.config),
+      self.dtype,
     )
 
     output_axis_names = (
-        ("activation_embed_and_logits_batch", "prefill_activation_length", "activation_embed")
-        if model_mode == MODEL_MODE_PREFILL
-        else ("activation_embed_and_logits_batch", "activation_length_no_exp", "activation_embed")
+      ("activation_embed_and_logits_batch", "prefill_activation_length", "activation_embed")
+      if model_mode == MODEL_MODE_PREFILL
+      else ("activation_embed_and_logits_batch", "activation_length_no_exp", "activation_embed")
     )
     out_pspec = nn.logical_to_mesh_axes(output_axis_names)
 
@@ -190,11 +190,11 @@ class Embed(nnx.Module):
 
 
 def attend_on_embedding(
-    query: Array,
-    embedding_table: Array,
-    attend_dtype: DType,
-    config: Config,
-    out_sharding: NamedSharding | None = None,
+  query: Array,
+  embedding_table: Array,
+  attend_dtype: DType,
+  config: Config,
+  out_sharding: NamedSharding | None = None,
 ) -> Array:
   """Attend over an embedding table using a query array.
 
@@ -216,21 +216,21 @@ def attend_on_embedding(
     out_sharding = None
   embedding_table = _maybe_move_embedding_to_device(embedding_table, config)
   return jnp.dot(
-      query,
-      jnp.asarray(embedding_table, jnp.bfloat16).T,
-      preferred_element_type=attend_dtype,
-      out_sharding=out_sharding,
+    query,
+    jnp.asarray(embedding_table, jnp.bfloat16).T,
+    preferred_element_type=attend_dtype,
+    out_sharding=out_sharding,
   )
 
 
 def rotary_embedding_as_linen(
-    *,
-    min_timescale: int,
-    max_timescale: int,
-    embedding_dims: int = 0,
-    cast_as_fprop_dtype: bool = True,
-    fprop_dtype: DType = jnp.bfloat16,
-    name: str | None = None,
+  *,
+  min_timescale: int,
+  max_timescale: int,
+  embedding_dims: int = 0,
+  cast_as_fprop_dtype: bool = True,
+  fprop_dtype: DType = jnp.bfloat16,
+  name: str | None = None,
 ):
   """Initializes the RotaryEmbedding module and returns it as a Linen module.
 
@@ -245,14 +245,14 @@ def rotary_embedding_as_linen(
     name: Name of the Linen module.
   """
   return nnx_wrappers.to_linen(
-      RotaryEmbedding,
-      min_timescale=min_timescale,
-      max_timescale=max_timescale,
-      embedding_dims=embedding_dims,
-      cast_as_fprop_dtype=cast_as_fprop_dtype,
-      fprop_dtype=fprop_dtype,
-      metadata_fn=variable_to_logically_partitioned,
-      name=name,
+    RotaryEmbedding,
+    min_timescale=min_timescale,
+    max_timescale=max_timescale,
+    embedding_dims=embedding_dims,
+    cast_as_fprop_dtype=cast_as_fprop_dtype,
+    fprop_dtype=fprop_dtype,
+    metadata_fn=variable_to_logically_partitioned,
+    name=name,
   )
 
 
@@ -260,16 +260,16 @@ class RotaryEmbedding(nnx.Module):
   """Rotary Position Embedding."""
 
   def __init__(
-      self,
-      min_timescale: int,
-      max_timescale: int,
-      embedding_dims: int = 0,
-      cast_as_fprop_dtype: bool = True,
-      fprop_dtype: DType = jnp.bfloat16,
-      # Not used in RotaryEmbedding but passed in by nnx.bridge.to_linen.
-      # TODO: Remove when bridge no longer needed
-      rope_linear_scaling_factor: float = 1.0,
-      rngs: nnx.Rngs = None,
+    self,
+    min_timescale: int,
+    max_timescale: int,
+    embedding_dims: int = 0,
+    cast_as_fprop_dtype: bool = True,
+    fprop_dtype: DType = jnp.bfloat16,
+    # Not used in RotaryEmbedding but passed in by nnx.bridge.to_linen.
+    # TODO: Remove when bridge no longer needed
+    rope_linear_scaling_factor: float = 1.0,
+    rngs: nnx.Rngs = None,
   ):
     """Initializes the RotaryEmbedding module.
 
@@ -304,9 +304,9 @@ class RotaryEmbedding(nnx.Module):
     return timescale
 
   def __call__(
-      self,  # pytype: disable=signature-mismatch  # overriding-parameter-count-checks
-      inputs: jax.Array,
-      position: None | jax.Array = None,
+    self,  # pytype: disable=signature-mismatch  # overriding-parameter-count-checks
+    inputs: jax.Array,
+    position: None | jax.Array = None,
   ) -> jax.Array:
     """Generates a jax.Array of sinusoids with different frequencies.
 
@@ -324,10 +324,10 @@ class RotaryEmbedding(nnx.Module):
     """
     assert position is not None
     if len(inputs.shape) != 4:
-      raise ValueError("Input is assumed to be a rank 4 tensor of shape" "[batch, sequence, heads, dims].")
+      raise ValueError("Input is assumed to be a rank 4 tensor of shape[batch, sequence, heads, dims].")
     if self.embedding_dims != inputs.shape[3]:
       raise ValueError(
-          "The embedding dims of the rotary position embedding" "must match the hidden dimension of the inputs."
+        "The embedding dims of the rotary position embeddingmust match the hidden dimension of the inputs."
       )
 
     position = position[:, :, jnp.newaxis, jnp.newaxis]
@@ -345,14 +345,14 @@ class RotaryEmbedding(nnx.Module):
 
 
 def llama_rotary_embedding_as_linen(
-    *,
-    min_timescale: int,
-    max_timescale: int,
-    embedding_dims: int = 0,
-    cast_as_fprop_dtype: bool = True,
-    fprop_dtype: DType = jnp.bfloat16,
-    use_scale: bool = True,
-    name: str | None = None,
+  *,
+  min_timescale: int,
+  max_timescale: int,
+  embedding_dims: int = 0,
+  cast_as_fprop_dtype: bool = True,
+  fprop_dtype: DType = jnp.bfloat16,
+  use_scale: bool = True,
+  name: str | None = None,
 ):
   """Initializes the LLaMARotaryEmbedding module and returns it as a Linen module.
 
@@ -368,27 +368,27 @@ def llama_rotary_embedding_as_linen(
     name: Name of the Linen module.
   """
   return nnx_wrappers.to_linen(
-      LLaMARotaryEmbedding,
-      min_timescale=min_timescale,
-      max_timescale=max_timescale,
-      embedding_dims=embedding_dims,
-      cast_as_fprop_dtype=cast_as_fprop_dtype,
-      fprop_dtype=fprop_dtype,
-      use_scale=use_scale,
-      metadata_fn=variable_to_logically_partitioned,
-      name=name,
+    LLaMARotaryEmbedding,
+    min_timescale=min_timescale,
+    max_timescale=max_timescale,
+    embedding_dims=embedding_dims,
+    cast_as_fprop_dtype=cast_as_fprop_dtype,
+    fprop_dtype=fprop_dtype,
+    use_scale=use_scale,
+    metadata_fn=variable_to_logically_partitioned,
+    name=name,
   )
 
 
 def qwen3_next_rotary_embedding_as_linen(
-    *,
-    min_timescale: int,
-    max_timescale: int,
-    embedding_dims: int = 0,
-    partial_rotary_factor: float = 0.25,
-    cast_as_fprop_dtype: bool = True,
-    fprop_dtype: DType = jnp.bfloat16,
-    name: str | None = None,
+  *,
+  min_timescale: int,
+  max_timescale: int,
+  embedding_dims: int = 0,
+  partial_rotary_factor: float = 0.25,
+  cast_as_fprop_dtype: bool = True,
+  fprop_dtype: DType = jnp.bfloat16,
+  name: str | None = None,
 ):
   """Initializes the Qwen3NextRotaryEmbedding module and returns it as a Linen module.
 
@@ -404,15 +404,15 @@ def qwen3_next_rotary_embedding_as_linen(
     name: Name of the Linen module.
   """
   return nnx_wrappers.to_linen(
-      Qwen3NextRotaryEmbedding,
-      min_timescale=min_timescale,
-      max_timescale=max_timescale,
-      embedding_dims=embedding_dims,
-      partial_rotary_factor=partial_rotary_factor,
-      cast_as_fprop_dtype=cast_as_fprop_dtype,
-      fprop_dtype=fprop_dtype,
-      metadata_fn=variable_to_logically_partitioned,
-      name=name,
+    Qwen3NextRotaryEmbedding,
+    min_timescale=min_timescale,
+    max_timescale=max_timescale,
+    embedding_dims=embedding_dims,
+    partial_rotary_factor=partial_rotary_factor,
+    cast_as_fprop_dtype=cast_as_fprop_dtype,
+    fprop_dtype=fprop_dtype,
+    metadata_fn=variable_to_logically_partitioned,
+    name=name,
   )
 
 
@@ -420,14 +420,14 @@ class Qwen3NextRotaryEmbedding(RotaryEmbedding):
   """Qwen3 Next variant of ROPE (partial ROPE)"""
 
   def __init__(
-      self,
-      min_timescale: int,
-      max_timescale: int,
-      embedding_dims: int = 0,
-      cast_as_fprop_dtype: bool = True,
-      fprop_dtype: DType = jnp.bfloat16,
-      partial_rotary_factor: float = 0.25,
-      rngs: nnx.Rngs = None,
+    self,
+    min_timescale: int,
+    max_timescale: int,
+    embedding_dims: int = 0,
+    cast_as_fprop_dtype: bool = True,
+    fprop_dtype: DType = jnp.bfloat16,
+    partial_rotary_factor: float = 0.25,
+    rngs: nnx.Rngs = None,
   ):
     """Initializes the Qwen3NextRotaryEmbedding module.
 
@@ -445,12 +445,12 @@ class Qwen3NextRotaryEmbedding(RotaryEmbedding):
     self.rotary_dim = int(self.head_dim * self.partial_rotary_factor)
 
     super().__init__(
-        min_timescale=min_timescale,
-        max_timescale=max_timescale,
-        embedding_dims=self.rotary_dim,
-        cast_as_fprop_dtype=cast_as_fprop_dtype,
-        fprop_dtype=fprop_dtype,
-        rngs=rngs,
+      min_timescale=min_timescale,
+      max_timescale=max_timescale,
+      embedding_dims=self.rotary_dim,
+      cast_as_fprop_dtype=cast_as_fprop_dtype,
+      fprop_dtype=fprop_dtype,
+      rngs=rngs,
     )
 
   def __call__(self, inputs: jax.Array, position: None | jax.Array = None) -> jax.Array:
@@ -475,16 +475,16 @@ class LLaMARotaryEmbedding(RotaryEmbedding):
   """LLaMA variant of ROPE."""
 
   def __init__(
-      self,
-      min_timescale: int,
-      max_timescale: int,
-      embedding_dims: int = 0,
-      cast_as_fprop_dtype: bool = True,
-      fprop_dtype: DType = jnp.bfloat16,
-      use_scale: bool = True,
-      # Not used in LLaMARotaryEmbedding but passed in by nnx.bridge.to_linen.
-      # TODO: Remove when bridge no longer needed
-      rngs: nnx.Rngs = None,
+    self,
+    min_timescale: int,
+    max_timescale: int,
+    embedding_dims: int = 0,
+    cast_as_fprop_dtype: bool = True,
+    fprop_dtype: DType = jnp.bfloat16,
+    use_scale: bool = True,
+    # Not used in LLaMARotaryEmbedding but passed in by nnx.bridge.to_linen.
+    # TODO: Remove when bridge no longer needed
+    rngs: nnx.Rngs = None,
   ):
     """Initializes the LLaMARotaryEmbedding module.
 
@@ -500,12 +500,12 @@ class LLaMARotaryEmbedding(RotaryEmbedding):
       rngs: rng keys passed in by nnx.bridge.to_linen.
     """
     super().__init__(
-        min_timescale=min_timescale,
-        max_timescale=max_timescale,
-        embedding_dims=embedding_dims,
-        cast_as_fprop_dtype=cast_as_fprop_dtype,
-        fprop_dtype=fprop_dtype,
-        rngs=rngs,
+      min_timescale=min_timescale,
+      max_timescale=max_timescale,
+      embedding_dims=embedding_dims,
+      cast_as_fprop_dtype=cast_as_fprop_dtype,
+      fprop_dtype=fprop_dtype,
+      rngs=rngs,
     )
 
     # LLaMA3.1 ROPE scaling, see the original pytorch implementation:
@@ -571,19 +571,19 @@ class LLaMARotaryEmbedding(RotaryEmbedding):
       raise ValueError("Input is assumed to be a rank 4 tensor of shape [B, S, N, H].")
     if self.embedding_dims != inputs.shape[3]:
       raise ValueError(
-          "The embedding dims of the rotary position embedding must match the hidden dimension of the inputs."
+        "The embedding dims of the rotary position embedding must match the hidden dimension of the inputs."
       )
 
     # Shift the inputs left and right as per LLaMA's specific behavior
     inputs_shifted_left = jnp.concatenate([inputs[..., 1:], inputs[..., :1]], axis=-1)
     inputs_shifted_right = jnp.concatenate([inputs[..., -1:], inputs[..., :-1]], axis=-1)
     inputs_shifted = jax.lax.select(
-        jnp.tile(
-            jnp.mod(jnp.arange(self.embedding_dims, dtype=jnp.int32), 2),
-            inputs.shape[:-1] + (1,),
-        ),
-        inputs_shifted_right,
-        inputs_shifted_left,
+      jnp.tile(
+        jnp.mod(jnp.arange(self.embedding_dims, dtype=jnp.int32), 2),
+        inputs.shape[:-1] + (1,),
+      ),
+      inputs_shifted_right,
+      inputs_shifted_left,
     )
 
     # Determine positions if not provided
@@ -611,20 +611,20 @@ class LLaMARotaryEmbedding(RotaryEmbedding):
 
 
 def yarn_rotary_embedding_as_linen(
-    *,
-    embedding_dims: int,
-    max_position_embeddings: int = 4096 * 4,
-    original_max_position_embeddings: int = 4096,
-    beta_fast: float = 32,
-    beta_slow: float = 1,
-    rope_theta: float = 10000.0,
-    rope_factor: float = 40,
-    cast_as_fprop_dtype: bool = True,
-    fprop_dtype: DType = jnp.bfloat16,
-    name: str | None = None,
-    interleave: bool = True,
-    truncate: bool = True,
-    attention_scaling: bool = False,
+  *,
+  embedding_dims: int,
+  max_position_embeddings: int = 4096 * 4,
+  original_max_position_embeddings: int = 4096,
+  beta_fast: float = 32,
+  beta_slow: float = 1,
+  rope_theta: float = 10000.0,
+  rope_factor: float = 40,
+  cast_as_fprop_dtype: bool = True,
+  fprop_dtype: DType = jnp.bfloat16,
+  name: str | None = None,
+  interleave: bool = True,
+  truncate: bool = True,
+  attention_scaling: bool = False,
 ):
   """Initializes the YarnRotaryEmbedding module and returns it as a Linen module.
 
@@ -641,21 +641,21 @@ def yarn_rotary_embedding_as_linen(
     name: The name of the module.
   """
   return nnx_wrappers.to_linen(
-      YarnRotaryEmbedding,
-      embedding_dims=embedding_dims,
-      max_position_embeddings=max_position_embeddings,
-      original_max_position_embeddings=original_max_position_embeddings,
-      beta_fast=beta_fast,
-      beta_slow=beta_slow,
-      rope_theta=rope_theta,
-      rope_factor=rope_factor,
-      cast_as_fprop_dtype=cast_as_fprop_dtype,
-      fprop_dtype=fprop_dtype,
-      metadata_fn=variable_to_logically_partitioned,
-      name=name,
-      interleave=interleave,
-      truncate=truncate,
-      attention_scaling=attention_scaling,
+    YarnRotaryEmbedding,
+    embedding_dims=embedding_dims,
+    max_position_embeddings=max_position_embeddings,
+    original_max_position_embeddings=original_max_position_embeddings,
+    beta_fast=beta_fast,
+    beta_slow=beta_slow,
+    rope_theta=rope_theta,
+    rope_factor=rope_factor,
+    cast_as_fprop_dtype=cast_as_fprop_dtype,
+    fprop_dtype=fprop_dtype,
+    metadata_fn=variable_to_logically_partitioned,
+    name=name,
+    interleave=interleave,
+    truncate=truncate,
+    attention_scaling=attention_scaling,
   )
 
 
@@ -683,22 +683,22 @@ class YarnRotaryEmbedding(nnx.Module):
   """
 
   def __init__(
-      self,
-      embedding_dims: int,
-      max_position_embeddings: int = 4096 * 4,
-      original_max_position_embeddings: int = 4096,
-      beta_fast: float = 32,
-      beta_slow: float = 1,
-      rope_theta: float = 10000.0,
-      rope_factor: float = 40,
-      cast_as_fprop_dtype: bool = True,
-      fprop_dtype: DType = jnp.bfloat16,
-      interleave=True,
-      truncate=True,
-      attention_scaling=False,
-      # Not used in YarnRotaryEmbedding but passed in by nnx.bridge.to_linen.
-      # TODO: Remove when bridge no longer needed
-      rngs: nnx.Rngs = None,
+    self,
+    embedding_dims: int,
+    max_position_embeddings: int = 4096 * 4,
+    original_max_position_embeddings: int = 4096,
+    beta_fast: float = 32,
+    beta_slow: float = 1,
+    rope_theta: float = 10000.0,
+    rope_factor: float = 40,
+    cast_as_fprop_dtype: bool = True,
+    fprop_dtype: DType = jnp.bfloat16,
+    interleave=True,
+    truncate=True,
+    attention_scaling=False,
+    # Not used in YarnRotaryEmbedding but passed in by nnx.bridge.to_linen.
+    # TODO: Remove when bridge no longer needed
+    rngs: nnx.Rngs = None,
   ):
     """Initializes the YarnRotaryEmbedding module."""
     self.embedding_dims = embedding_dims
@@ -726,12 +726,12 @@ class YarnRotaryEmbedding(nnx.Module):
     freqs = 1.0 / (self.rope_theta ** (2.0 * jnp.arange(0, half_dim, dtype=jnp.float32) / self.embedding_dims))
 
     low, high = self._find_correction_range(
-        self.beta_fast,
-        self.beta_slow,
-        self.embedding_dims,
-        self.rope_theta,
-        self.original_max_position_embeddings,
-        self.truncate,
+      self.beta_fast,
+      self.beta_slow,
+      self.embedding_dims,
+      self.rope_theta,
+      self.original_max_position_embeddings,
+      self.truncate,
     )
     smooth = 1 - self._linear_ramp_factor(low, high, half_dim)
     # The corrected frequency is a weighted mix of the scaled and base values.
@@ -750,7 +750,7 @@ class YarnRotaryEmbedding(nnx.Module):
     return dim * math.log(max_position_embeddings / (num_rotations * 2 * math.pi)) / (2 * math.log(base))
 
   def _find_correction_range(
-      self, low_rot: float, high_rot: float, dim: int, base: float, max_position_embeddings: int, truncate: bool
+    self, low_rot: float, high_rot: float, dim: int, base: float, max_position_embeddings: int, truncate: bool
   ):
     """Computes the range of correction dimensions for rotary positional embeddings.
 
@@ -798,7 +798,7 @@ class YarnRotaryEmbedding(nnx.Module):
       raise ValueError("Input is assumed to be a rank 4 tensor of shape [batch, sequence, heads, dims].")
     if self.embedding_dims != inputs.shape[3]:
       raise ValueError(
-          "The embedding dims of the rotary position embedding must match the hidden dimension of the inputs."
+        "The embedding dims of the rotary position embedding must match the hidden dimension of the inputs."
       )
 
     # Determine positions if not provided
@@ -851,10 +851,10 @@ def positional_embedding_as_linen(*, embedding_dims: int, max_wavelength: int = 
     max_wavelength: The maximum wavelength for the sinusoidal positional embeddings.
   """
   return nnx_wrappers.to_linen(
-      PositionalEmbedding,
-      embedding_dims=embedding_dims,
-      max_wavelength=max_wavelength,
-      metadata_fn=variable_to_logically_partitioned,
+    PositionalEmbedding,
+    embedding_dims=embedding_dims,
+    max_wavelength=max_wavelength,
+    metadata_fn=variable_to_logically_partitioned,
   )
 
 
@@ -874,13 +874,13 @@ class PositionalEmbedding(nnx.Module):
   rngs: nnx.Rngs = None  # Not used in PositionalEmbedding but passed in by nnx.bridge.to_linen
 
   def __call__(
-      self,  # pytype: disable=signature-mismatch  # overriding-parameter-count-checks
-      input_embedding: jax.Array,
-      position: jax.Array,
+    self,  # pytype: disable=signature-mismatch  # overriding-parameter-count-checks
+    input_embedding: jax.Array,
+    position: jax.Array,
   ) -> jax.Array:
     num_timescales = self.embedding_dims // 2
     log_timescale_increment = jnp.log(float(self.max_wavelength)) / jnp.maximum(
-        jnp.asarray(num_timescales, dtype=jnp.float32) - 1, 1
+      jnp.asarray(num_timescales, dtype=jnp.float32) - 1, 1
     )
     inv_timescales = jnp.exp(jnp.arange(num_timescales, dtype=jnp.float32) * -log_timescale_increment)
     position = position[:, :, jnp.newaxis]
@@ -893,15 +893,15 @@ class PositionalEmbedding(nnx.Module):
 
 
 def llama_vision_rotary_embedding_as_linen(
-    *,
-    image_size: int,
-    patch_size: int,
-    hidden_size: int,
-    num_attention_heads: int,
-    rope_theta: float = 10000.0,
-    cast_as_fprop_dtype: bool = True,
-    fprop_dtype: DType = jnp.bfloat16,
-    name: str | None = None,
+  *,
+  image_size: int,
+  patch_size: int,
+  hidden_size: int,
+  num_attention_heads: int,
+  rope_theta: float = 10000.0,
+  cast_as_fprop_dtype: bool = True,
+  fprop_dtype: DType = jnp.bfloat16,
+  name: str | None = None,
 ):
   """Initializes the LlamaVisionRotaryEmbedding module and returns it as a Linen module.
 
@@ -916,16 +916,16 @@ def llama_vision_rotary_embedding_as_linen(
     name: The name of the Linen module.
   """
   return nnx_wrappers.to_linen(
-      LlamaVisionRotaryEmbedding,
-      image_size=image_size,
-      patch_size=patch_size,
-      hidden_size=hidden_size,
-      num_attention_heads=num_attention_heads,
-      rope_theta=rope_theta,
-      cast_as_fprop_dtype=cast_as_fprop_dtype,
-      fprop_dtype=fprop_dtype,
-      metadata_fn=variable_to_logically_partitioned,
-      name=name,
+    LlamaVisionRotaryEmbedding,
+    image_size=image_size,
+    patch_size=patch_size,
+    hidden_size=hidden_size,
+    num_attention_heads=num_attention_heads,
+    rope_theta=rope_theta,
+    cast_as_fprop_dtype=cast_as_fprop_dtype,
+    fprop_dtype=fprop_dtype,
+    metadata_fn=variable_to_logically_partitioned,
+    name=name,
   )
 
 
@@ -1007,7 +1007,7 @@ class LlamaVisionRotaryEmbedding(nnx.Module):
     """
     if len(inputs.shape) != 4:
       raise ValueError(
-          """Input is assumed to be a rank 4 tensor of shape [batch_size_times_tiles, num_patches_incl_cls, 
+        """Input is assumed to be a rank 4 tensor of shape [batch_size_times_tiles, num_patches_incl_cls, 
           num_heads, head_dim]."""
       )
 

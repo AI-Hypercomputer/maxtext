@@ -20,7 +20,7 @@ AUTOTUNE = tf.data.experimental.AUTOTUNE
 
 
 def pack_dataset(
-    dataset: tf.data.Dataset, key2length: int | dict[str, int], pad_id: int, keys: None | list[str] = None
+  dataset: tf.data.Dataset, key2length: int | dict[str, int], pad_id: int, keys: None | list[str] = None
 ) -> tf.data.Dataset:
   """Creates a 'packed' version of a dataset on-the-fly.
   Adapted from the mesh-tf implementation.
@@ -63,7 +63,7 @@ def pack_dataset(
   for k in keys:
     if k not in shapes:
       raise ValueError(
-          f"""Key {k} not found in dataset.  Available keys are
+        f"""Key {k} not found in dataset.  Available keys are
                         {shapes.keys()}"""
       )
     if not shapes[k].is_compatible_with(tf.TensorShape([None])):
@@ -94,7 +94,7 @@ def pack_dataset(
 
 
 def _pack_with_tf_ops(
-    dataset: tf.data.Dataset, keys: list[str], key2length: dict[str, int], pad_id: int
+  dataset: tf.data.Dataset, keys: list[str], key2length: dict[str, int], pad_id: int
 ) -> tf.data.Dataset:
   """Helper-function for packing a dataset which has already been batched.
   Helper for pack_dataset()  Uses tf.while_loop.
@@ -118,7 +118,7 @@ def _pack_with_tf_ops(
       # use pad_id to pad inputs/targets, use 0 to pad *_position
       pad_id_to_use = 0 if len(k.split("_")) > 1 else pad_id
       new_outputs[k] = outputs[k].write(
-          outputs[k].size(), tf.pad(partial[k], [[0, key2length[k] - tf.size(partial[k])]], constant_values=pad_id_to_use)
+        outputs[k].size(), tf.pad(partial[k], [[0, key2length[k] - tf.size(partial[k])]], constant_values=pad_id_to_use)
       )
     return new_partial, new_outputs
 
@@ -157,7 +157,7 @@ def _pack_with_tf_ops(
         one_example[k] = val
       for k in keys:
         can_append = tf.logical_and(
-            can_append, tf.less_equal(tf.size(partial[k]) + tf.size(one_example[k]), key2length[k])
+          can_append, tf.less_equal(tf.size(partial[k]) + tf.size(one_example[k]), key2length[k])
         )
 
       def false_fn():
@@ -178,21 +178,21 @@ def _pack_with_tf_ops(
 
     # For loop over all examples in the batch.
     i, partial, outputs = tf.while_loop(
-        cond=lambda *_: True,
-        body=body_fn,
-        loop_vars=(i, partial, outputs),
-        shape_invariants=(
-            tf.TensorShape([]),
-            {k: tf.TensorShape([None]) for k in keys_etc},
-            {k: tf.TensorShape(None) for k in keys_etc},
-        ),
-        maximum_iterations=dynamic_batch_size,
+      cond=lambda *_: True,
+      body=body_fn,
+      loop_vars=(i, partial, outputs),
+      shape_invariants=(
+        tf.TensorShape([]),
+        {k: tf.TensorShape([None]) for k in keys_etc},
+        {k: tf.TensorShape(None) for k in keys_etc},
+      ),
+      maximum_iterations=dynamic_batch_size,
     )
     _, outputs = write_packed_example(partial, outputs)
     packed = {k: outputs[k].stack() for k in keys_etc}
     for k in keys:
       packed[k + "_segmentation"] = tf.cumsum(tf.cast(tf.equal(packed[k + "_position"], 0), tf.int32), axis=1) * tf.cast(
-          tf.not_equal(packed[k], pad_id), tf.int32
+        tf.not_equal(packed[k], pad_id), tf.int32
       )
     return packed
 

@@ -117,8 +117,8 @@ ANSWER_START = "<answer>"
 ANSWER_END = "</answer>"
 # Regex to check the full format (reasoning + answer markers)
 MATCH_FORMAT = re.compile(
-    rf"^.*?" rf"{REASONING_START}.+?{REASONING_END}.*?" rf"{ANSWER_START}(.+?){ANSWER_END}" rf"[\s]{{0,}}$",
-    flags=re.MULTILINE | re.DOTALL,
+  rf"^.*?" rf"{REASONING_START}.+?{REASONING_END}.*?" rf"{ANSWER_START}(.+?){ANSWER_END}" rf"[\s]{{0,}}$",
+  flags=re.MULTILINE | re.DOTALL,
 )
 # Regex to extract the final numerical answer
 MATCH_ANSWER = re.compile(rf"{ANSWER_START}.*?([\d\.\,\$]{{1,}})", flags=re.MULTILINE | re.DOTALL)
@@ -128,45 +128,45 @@ CHAT_TEMPLATE_PATH = f"{globals.MAXTEXT_REPO_ROOT}/src/MaxText/examples/chat_tem
 def get_test_dataset(config, tokenizer):
   template_config = instruction_data_processing.load_template_from_file(CHAT_TEMPLATE_PATH)
   dataset = datasets.load_dataset(
-      DATASET_NAME,
-      data_dir=DATASET_DATA_DIR,
-      split=DATASET_TEST_SPLIT,
-      token=config.hf_access_token,
+    DATASET_NAME,
+    data_dir=DATASET_DATA_DIR,
+    split=DATASET_TEST_SPLIT,
+    token=config.hf_access_token,
   )
 
   return (
-      grain.MapDataset.source(dataset)
-      .shuffle(seed=SEED)
-      .map(
-          lambda x: {
-              "question": x["question"],
-              "prompt": tokenizer.apply_chat_template(
-                  [
-                      {
-                          "role": "user",
-                          "content": template_config["PROMPT_TEMPLATE"].format(question=x["question"].strip()),
-                      }
-                  ],
-                  tokenize=False,
-                  add_generation_prompt=True,
-              ),
-              "target_answer": instruction_data_processing.extract_reasoning_and_answer(
-                  x["answer"], template_config["REASONING_ANSWER_SEPARATOR"]
-              )[1],
-          }
-      )
+    grain.MapDataset.source(dataset)
+    .shuffle(seed=SEED)
+    .map(
+      lambda x: {
+        "question": x["question"],
+        "prompt": tokenizer.apply_chat_template(
+          [
+            {
+              "role": "user",
+              "content": template_config["PROMPT_TEMPLATE"].format(question=x["question"].strip()),
+            }
+          ],
+          tokenize=False,
+          add_generation_prompt=True,
+        ),
+        "target_answer": instruction_data_processing.extract_reasoning_and_answer(
+          x["answer"], template_config["REASONING_ANSWER_SEPARATOR"]
+        )[1],
+      }
+    )
   )
 
 
 def evaluate_model(dataset, vllm_rollout, debug=True):
   """Runs evaluation on the model using vLLM."""
   rollout_config = base_rollout.RolloutConfig(
-      max_tokens_to_generate=MAX_TOKENS_TO_GENERATE,
-      max_prompt_length=MAX_PROMPT_LENGTH,
-      temperature=EVALUATION_CONFIG["temperature"],
-      top_p=EVALUATION_CONFIG["top_p"],
-      top_k=EVALUATION_CONFIG["top_k"],
-      data_type="bfloat16",
+    max_tokens_to_generate=MAX_TOKENS_TO_GENERATE,
+    max_prompt_length=MAX_PROMPT_LENGTH,
+    temperature=EVALUATION_CONFIG["temperature"],
+    top_p=EVALUATION_CONFIG["top_p"],
+    top_k=EVALUATION_CONFIG["top_k"],
+    data_type="bfloat16",
   )
 
   total, total_correct, total_partially_correct, total_correct_format = 0, 0, 0, 0
@@ -179,11 +179,11 @@ def evaluate_model(dataset, vllm_rollout, debug=True):
         print("----------------------------------------")
         print(f"Model Generated Response: {batch_response.text[i]}")
         print("----------------------------------------")
-        print(f"Target Response: {batch["target_answer"][i]}")
+        print(f"Target Response: {batch['target_answer'][i]}")
         print("========================================")
 
       is_correct, is_partially_correct, has_correct_format = score_response(
-          target=batch["target_answer"][i], prediction=batch_response.text[i], debug=debug
+        target=batch["target_answer"][i], prediction=batch_response.text[i], debug=debug
       )
       if is_correct:
         total_correct += 1
@@ -194,9 +194,9 @@ def evaluate_model(dataset, vllm_rollout, debug=True):
       total += 1
 
   return {
-      "correct": (total_correct / total) * 100,
-      "partially_correct": (total_partially_correct / total) * 100,
-      "correct_format": (total_correct_format / total) * 100,
+    "correct": (total_correct / total) * 100,
+    "partially_correct": (total_partially_correct / total) * 100,
+    "correct_format": (total_correct_format / total) * 100,
   }
 
 
@@ -233,21 +233,21 @@ def score_response(target, prediction, debug=True):
 def create_vllm_rollout(config, model, mesh, tokenizer):
   tunix_model = TunixMaxTextAdapter(model)
   return VllmRollout(
-      model=tunix_model,
-      tokenizer=tokenizer,
-      cache_config_or_size=MAX_PROMPT_LENGTH + MAX_TOKENS_TO_GENERATE + 256,
-      mesh=mesh,
-      model_version=config.tokenizer_path,
-      hbm_utilization=0.2,
-      init_with_random_weights=True,
-      tpu_backend_type="jax",
+    model=tunix_model,
+    tokenizer=tokenizer,
+    cache_config_or_size=MAX_PROMPT_LENGTH + MAX_TOKENS_TO_GENERATE + 256,
+    mesh=mesh,
+    model_version=config.tokenizer_path,
+    hbm_utilization=0.2,
+    init_with_random_weights=True,
+    tpu_backend_type="jax",
   )
 
 
 def get_tokenizer(config):
   tokenizer = transformers.AutoTokenizer.from_pretrained(
-      config.tokenizer_path,
-      token=config.hf_access_token,
+    config.tokenizer_path,
+    token=config.hf_access_token,
   )
   return tokenizer
 
@@ -286,16 +286,16 @@ def main(argv: Sequence[str]) -> None:
   """
 
   common_argv_dict = {
-      "hf_path": DATASET_NAME,
-      "train_split": DATASET_TRAIN_SPLIT,
-      "hf_data_dir": DATASET_DATA_DIR,
-      "train_data_columns": DATASET_DATA_COLUMN,
-      "per_device_batch_size": 1,
-      "steps": TRAIN_STEPS,
-      "dtype": "bfloat16",
-      "weight_dtype": "bfloat16",
-      "learning_rate": 3e-6,
-      "chat_template_path": CHAT_TEMPLATE_PATH,
+    "hf_path": DATASET_NAME,
+    "train_split": DATASET_TRAIN_SPLIT,
+    "hf_data_dir": DATASET_DATA_DIR,
+    "train_data_columns": DATASET_DATA_COLUMN,
+    "per_device_batch_size": 1,
+    "steps": TRAIN_STEPS,
+    "dtype": "bfloat16",
+    "weight_dtype": "bfloat16",
+    "learning_rate": 3e-6,
+    "chat_template_path": CHAT_TEMPLATE_PATH,
   }
   for arg in argv:
     if arg.startswith("model_name="):

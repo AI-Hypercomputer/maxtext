@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-""" Tests for Llama. """
+"""Tests for Llama."""
 
 import unittest
 
@@ -43,10 +43,10 @@ def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0, dtype: jnp.
 
 
 def apply_rotary_emb(
-    xq: jnp.ndarray,
-    xk: jnp.ndarray,
-    freqs_cis: jnp.ndarray,
-    dtype: jnp.dtype = jnp.bfloat16,
+  xq: jnp.ndarray,
+  xk: jnp.ndarray,
+  freqs_cis: jnp.ndarray,
+  dtype: jnp.dtype = jnp.bfloat16,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
   """Apply the computed Rotary Positional Embedding."""
   reshape_xq = xq.astype(jnp.float32).reshape(*xq.shape[:-1], -1, 2)
@@ -127,13 +127,13 @@ class RoPETest(unittest.TestCase):
 
     # Test LLaMARotaryEmbedding with scaling
     llama_rope_scaled = embeddings.LLaMARotaryEmbedding(
-        min_timescale=1, max_timescale=10000, embedding_dims=dim_per_head, use_scale=True
+      min_timescale=1, max_timescale=10000, embedding_dims=dim_per_head, use_scale=True
     )
     query_proj_scaled = llama_rope_scaled(x_q, position)
 
     # Test LLaMARotaryEmbedding without scaling
     llama_rope_no_scale = embeddings.LLaMARotaryEmbedding(
-        min_timescale=1, max_timescale=10000, embedding_dims=dim_per_head, use_scale=False
+      min_timescale=1, max_timescale=10000, embedding_dims=dim_per_head, use_scale=False
     )
     query_proj_no_scale = llama_rope_no_scale(x_q, position)
 
@@ -150,7 +150,7 @@ class RoPETest(unittest.TestCase):
 
     # Use LLaMARotaryEmbedding
     llama_rope = embeddings.LLaMARotaryEmbedding(
-        min_timescale=min_timescale, max_timescale=max_timescale, embedding_dims=dim_per_head, use_scale=False
+      min_timescale=min_timescale, max_timescale=max_timescale, embedding_dims=dim_per_head, use_scale=False
     )
     query_proj = llama_rope(x_q, position)
 
@@ -158,9 +158,9 @@ class RoPETest(unittest.TestCase):
     inputs_shifted_left = jnp.concatenate([x_q[..., 1:], x_q[..., :1]], axis=-1)
     inputs_shifted_right = jnp.concatenate([x_q[..., -1:], x_q[..., :-1]], axis=-1)
     inputs_shifted = jax.lax.select(
-        jnp.tile(jnp.mod(jnp.arange(dim_per_head, dtype=jnp.int32), 2), x_q.shape[:-1] + (1,)),
-        inputs_shifted_right,
-        inputs_shifted_left,
+      jnp.tile(jnp.mod(jnp.arange(dim_per_head, dtype=jnp.int32), 2), x_q.shape[:-1] + (1,)),
+      inputs_shifted_right,
+      inputs_shifted_left,
     )
 
     position = position[:, :, jnp.newaxis, jnp.newaxis]

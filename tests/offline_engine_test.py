@@ -38,40 +38,39 @@ class OfflineEngineTest(unittest.TestCase):
   def init_pyconfig(self, **kwargs):
     """Initialize MaxText pyconfig."""
     init_kwargs = {
-        "run_name": "test",
-        # Parallelism
-        "per_device_batch_size": 1,
-        "ici_data_parallelism": 1,
-        "ici_fsdp_parallelism": 1,
-        "ici_tensor_parallelism": -1,  # Use TP
-        # Inference
-        "max_prefill_predict_length": 512,
-        "max_target_length": 512 + 10,
-        "return_log_prob": True,
-        "decode_sampling_strategy": "weighted",
-        # Model
-        "attention": "dot_product",
-        "base_emb_dim": 512,
-        "base_num_query_heads": 32,
-        "base_num_kv_heads": 32,
-        "base_num_decoder_layers": 2,
-        "scan_layers": False,
-        "skip_jax_distributed_system": True,
+      "run_name": "test",
+      # Parallelism
+      "per_device_batch_size": 1,
+      "ici_data_parallelism": 1,
+      "ici_fsdp_parallelism": 1,
+      "ici_tensor_parallelism": -1,  # Use TP
+      # Inference
+      "max_prefill_predict_length": 512,
+      "max_target_length": 512 + 10,
+      "return_log_prob": True,
+      "decode_sampling_strategy": "weighted",
+      # Model
+      "attention": "dot_product",
+      "base_emb_dim": 512,
+      "base_num_query_heads": 32,
+      "base_num_kv_heads": 32,
+      "base_num_decoder_layers": 2,
+      "scan_layers": False,
+      "skip_jax_distributed_system": True,
     } | kwargs
     config = pyconfig.initialize(
-        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
-        **init_kwargs,
+      [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+      **init_kwargs,
     )
     return config
 
   def test_mcjax_tp(self):
-
     config = self.cfg
     rng = jax.random.PRNGKey(0)
     inference_engine = OfflineEngine(config=config, params=None, enable_batch_prefill=False, rng=rng, eos_ids=[])
     input_lengths = list(range(10, 600, 100))
     input_data = [
-        InputData(id=f"input_{i}", tokens=np.arange(length), true_length=length) for i, length in enumerate(input_lengths)
+      InputData(id=f"input_{i}", tokens=np.arange(length), true_length=length) for i, length in enumerate(input_lengths)
     ]
 
     results = inference_engine.batch_inference(input_data)
