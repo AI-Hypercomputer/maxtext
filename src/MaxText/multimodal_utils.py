@@ -62,6 +62,13 @@ LLAMA4_TILE_X_SEPARATOR_TOKEN = 200084  # <|tile_x_separator|>
 LLAMA4_TILE_Y_SEPARATOR_TOKEN = 200085  # <|tile_y_separator|>
 LLAMA4_PIXEL_SHUFFLE_RATIO = 0.5  # TODO(hengtaoguo): We should reuse config.pixel_shuffle_ratio_for_vit
 
+# Qwen3OmniMoe-specific processing
+QWEN3_OMNI_IMAGE_TOKEN = 151655
+QWEN3_OMNI_VIDEO_TOKEN = 151656
+QWEN3_OMNI_AUDIO_TOKEN = 151675
+QWEN3_TEMPORAL_PATCH_SIZE = 2
+QWEN3_OMNI_IMAGE_SIZE = 768
+
 
 @dataclass
 class PreprocessorOutput:
@@ -550,7 +557,38 @@ def get_dummy_image_shape_for_init(
         LLAMA4_TILE_SIZE,
         LLAMA4_TILE_SIZE,
     )
+  elif model_name.startswith("qwen3-omni-30b-a3b"):
+    image_shape = (
+        batch_size,
+        NUM_IMAGE_CHANNELS,
+        QWEN3_TEMPORAL_PATCH_SIZE,
+        QWEN3_OMNI_IMAGE_SIZE,  # image_size_for_vit (height)
+        QWEN3_OMNI_IMAGE_SIZE,  # video_num_frames
+    )
   return image_shape
+
+
+def get_dummy_audio_shape_for_init(model_name, config, batch_size=1):
+  """Return the shape of the dummy audio for specific model's initialization.
+
+  Args:
+    model_name: Name of the model
+    config: Model configuration containing audio parameters
+    batch_size: Batch size for the dummy audio
+
+  Returns:
+    Tuple representing audio shape: (batch, num_mel_bins, audio_length)
+    Returns None if audio is not configured
+  """
+  audio_shape = None
+  if model_name.startswith("qwen3-omni-30b-a3b"):
+    # Audio shape: (batch, num_mel_bins, audio_length)
+    # audio_length must be divisible by n_window * 2
+    chunk_size = config.n_window_for_audio * 2
+    audio_length = chunk_size * 4  # 4 chunks
+    audio_shape = (batch_size, config.num_mel_bins_for_audio, audio_length)
+
+  return audio_shape
 
 
 def prepare_text_for_image_fusion(texts, model_name, processor_output=None):
