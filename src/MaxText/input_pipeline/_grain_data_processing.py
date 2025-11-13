@@ -17,13 +17,13 @@
 import glob
 from pathlib import Path
 import functools
-
 import ml_collections
 
 import jax
 
 import grain.python as grain
 
+from MaxText.utils import gcs_utils
 from MaxText.input_pipeline import _input_pipeline_utils
 from MaxText.input_pipeline import _grain_tokenizer
 from MaxText import multihost_dataloading
@@ -32,8 +32,14 @@ from MaxText import tokenizer
 
 
 def find_data_files(data_file_pattern):
-  data_files = glob.glob(str(Path(data_file_pattern).expanduser().resolve()))
-  assert len(data_files) > 0, f"No file found with pattern {data_file_pattern}."
+  """Find data files matching the pattern."""
+  if data_file_pattern.startswith("gs://"):
+    data_files = gcs_utils.gcs_glob_pattern(data_file_pattern)
+  else:
+    # Local files
+    data_files = glob.glob(str(Path(data_file_pattern).expanduser().resolve()))
+  if not data_files:
+    raise FileNotFoundError(f"No files found matching pattern: {data_file_pattern}")
   max_logging.log(f"Found {len(data_files)} files for train/eval with grain")
   return data_files
 
@@ -51,7 +57,7 @@ def get_datasets(
   """Load dataset from array_record files for using with grain"""
   if data_file_type == "arrayrecord":
     if ";" in data_file_pattern:
-      data_file_patterns, weights = zip(*[pattern.split(":") for pattern in data_file_pattern.split(";")])
+      data_file_patterns, weights = zip(*[pattern.split(",") for pattern in data_file_pattern.split(";")])
       assert len(data_file_patterns) == len(weights), "Number of data file patterns and weights must match"
       weights = [float(weight) for weight in weights]
       weights = [round(weight / sum(weights), 4) for weight in weights]

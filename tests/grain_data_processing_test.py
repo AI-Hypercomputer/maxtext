@@ -114,8 +114,8 @@ class GrainArrayRecordProcessingWithMultiSourceBlendingTest(GrainArrayRecordProc
     temp_dir = tempfile.gettempdir()
     # We use the same dataset for testing, but you can use different datasets by changing the file patterns.
     grain_train_files = [
-        f"{temp_dir}/gcsfuse/array-record/c4/en/3.0.1/c4-train.array_record*:0.3",
-        f"{temp_dir}/gcsfuse/array-record/c4/en/3.0.1/c4-train.array_record*:0.7",
+        f"{temp_dir}/gcsfuse/array-record/c4/en/3.0.1/c4-train.array_record*,0.3",
+        f"{temp_dir}/gcsfuse/array-record/c4/en/3.0.1/c4-train.array_record*,0.7",
     ]
     grain_train_files = ";".join(grain_train_files)
     self.config = pyconfig.initialize(
