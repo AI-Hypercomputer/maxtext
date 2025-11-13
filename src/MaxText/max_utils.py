@@ -991,20 +991,23 @@ def get_batch_seq_len_for_mode(config, model_mode):
 
   return batch_size, seq_len
 
+
 @contextmanager
 def maybe_get_transformer_engine_context(config):
-  """ Runs a transformer engine context engine manager for GPUs only. """
-  if config.hardware in ['gpu', 'gpu_multiprocess']:
+  """Runs a transformer engine context engine manager for GPUs only."""
+  if config.hardware in ["gpu", "gpu_multiprocess"]:
     with transformer_engine_context():
       yield
   else:
     with dummy_context_manager():
       yield
 
+
 @contextmanager
 def dummy_context_manager():
   """A context manager that does nothing."""
   yield
+
 
 @contextmanager
 def transformer_engine_context():

@@ -9,7 +9,7 @@ repos:
         args:
           - '-w'
           - '--skip="*.txt,pylintrc,.*,src/MaxText/assets/*"'
-          - '-L ND,nd,sems,TE,ROUGE,rouge,astroid,dout'
+          - '-L ND,nd,sems,TE,ROUGE,rouge,astroid,ags,dout'
           - '.'
         additional_dependencies:
           - tomli
