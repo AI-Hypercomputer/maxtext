@@ -16,6 +16,7 @@
 
 # pylint: disable=too-many-positional-arguments
 
+import dataclasses
 import functools
 from typing import Literal
 import jax
@@ -30,7 +31,7 @@ def gmm(
     rhs: jnp.ndarray,
     group_sizes: jnp.ndarray,
     preferred_element_type: jnp.dtype = jnp.float32,
-    tiling: tuple[int, int, int] = (128, 128, 128),
+    tiling: tuple[int, int, int, int, int, int, int, int, int] = (128, 128, 128, 128, 128, 128, 128, 128, 128),
     group_offset: jnp.ndarray | None = None,
     existing_out: jnp.ndarray | None = None,
     transpose_rhs: bool = False,
@@ -78,7 +79,7 @@ def _gmm_fwd(
     rhs: jnp.ndarray,
     group_sizes: jnp.ndarray,
     preferred_element_type: jnp.dtype = jnp.float32,
-    tiling: tuple[int, int, int] = (128, 128, 128),
+    tiling: tuple[int, int, int, int, int, int, int, int, int] = (128, 128, 128, 128, 128, 128, 128, 128, 128),
     group_offset: jnp.ndarray | None = None,
     existing_out: jnp.ndarray | None = None,
     transpose_rhs: bool = False,
@@ -120,7 +121,7 @@ def _gmm_fwd(
       rhs,
       group_sizes,
       preferred_element_type,
-      tiling,
+      tiling[:3],
       group_offset,
       existing_out,
       transpose_rhs=transpose_rhs,
@@ -133,7 +134,7 @@ def _gmm_bwd(
     lhs_dtype: jax.typing.DTypeLike,
     rhs_dtype: jax.typing.DTypeLike,
     preferred_element_type: jnp.dtype,
-    tiling: tuple[int, int, int],
+    tiling: tuple[int, int, int, int, int, int, int, int, int],
     transpose_rhs: bool,
     interpret: bool,
     quantization_rule: qwix.QtRule | None,
@@ -193,7 +194,7 @@ def _gmm_bwd(
       rhs,
       group_sizes,
       lhs_dtype,
-      tiling,
+      tiling[3:6],
       group_offset,
       transpose_rhs=not transpose_rhs,
       interpret=interpret,
@@ -203,7 +204,7 @@ def _gmm_bwd(
       drhs_dout,
       group_sizes,
       rhs_dtype,
-      tiling,
+      tiling[-3:],
       group_offset,
       num_actual_groups,
       interpret=interpret,
