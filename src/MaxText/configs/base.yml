@@ -569,8 +569,8 @@ hf_eval_files: ''
 hf_access_token: ''
 # for Grain input pipeline (dataset_type=grain)
 # Path to grain data files. Can be a single pattern or multiple patterns with weights.
-# For multiple patterns, use semicolon (;) to separate and colon (:) to specify weights.
-# Example: "path/to/data1.array_record*:0.3;path/to/data2.array_record*:0.7"
+# For multiple patterns, use semicolon (;) to separate and comma (,) to specify weights.
+# Example: "path/to/data1.array_record*,0.3;path/to/data2.array_record*,0.7"
 # Note: When using multiple files (separated by ';'), only ArrayRecord format is supported.
 # For more details, see https://github.com/google/maxtext/blob/main/getting_started/Data_Input_Pipeline.md#grain-input-pipeline
 grain_train_files: ''
