@@ -27,7 +27,7 @@ from MaxText import maxengine
 # TODO: merge it with the above create_maxengine().
 def create_exp_maxengine(devices: Any, config: Any):
   if is_decoupled():
-    raise RuntimeError("JetStream disabled by DECOUPLE_GCLOUD=TRUE; experimental MaxEngine unsupported.")
+    return maxengine.MaxEngine(config)
   return maxengine.MaxEngine(config=config, devices=devices)
 
 
@@ -37,9 +37,13 @@ def create_maxengine(devices: Any, config: Any) -> engine_api.Engine:
 
 
 def get_server_config(config_str: str, config: Any):
-  """Gets the Server Config Required by JetStream (disabled when DECOUPLE_GCLOUD=TRUE)."""
-  if is_decoupled():
-    raise RuntimeError("JetStream disabled by DECOUPLE_GCLOUD=TRUE; server config unsupported.")
+  """Gets the Server Config Required by JetStream."""
+  # If Jetstream is stub and decoupled, return a minimal stub server config and log the no-op.
+  config_lib_is_stub = getattr(config_lib, "_IS_STUB", False)
+  engine_api_is_stub = getattr(engine_api, "_IS_STUB", False)
+  if is_decoupled() and (config_lib_is_stub or engine_api_is_stub):
+    raise RuntimeError("[DECOUPLED NO-OP] jetstream.config_lib is stubbed; returning minimal server config.")
+  # Not decoupled and no Jetstream found -> allow the later code to raise.
   match config_str:
     case "MaxtextInterleavedServer":
       server_config = config_lib.ServerConfig(

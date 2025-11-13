@@ -1491,8 +1491,13 @@ class MaxEngine(_BaseEngine):
     When DECOUPLE_GCLOUD is FALSE we provide a clear error instead of failing
     cryptically on attribute access.
     """
-    if is_decoupled():
-      raise RuntimeError("JetStream disabled by DECOUPLE_GCLOUD=TRUE; tokenizer unsupported.")
+    token_params_is_stub = getattr(_token_params_ns, "_IS_STUB", False)
+    engine_api_is_stub = getattr(engine_api, "_IS_STUB", False)
+    if is_decoupled() and (token_params_is_stub or engine_api_is_stub):
+      raise RuntimeError(
+          "JetStream disabled by DECOUPLE_GCLOUD=TRUE or stubbed; get_tokenizer is unsupported. "
+          "Unset DECOUPLE_GCLOUD or install JetStream to enable tokenizer functionality."
+      )
     try:
       tokenizer_type_val = TokenizerType.DESCRIPTOR.values_by_name[self.config.tokenizer_type].number
       return TokenizerParameters(
@@ -1507,8 +1512,13 @@ class MaxEngine(_BaseEngine):
 
   def build_tokenizer(self, metadata: Any):  # return type depends on JetStream
     """Return a tokenizer"""
-    if is_decoupled():
-      raise RuntimeError("JetStream disabled by DECOUPLE_GCLOUD=TRUE; build_tokenizer unsupported.")
+    token_params_is_stub = getattr(_token_params_ns, "_IS_STUB", False)
+    engine_api_is_stub = getattr(engine_api, "_IS_STUB", False)
+    if is_decoupled() and (token_params_is_stub or engine_api_is_stub):
+      raise RuntimeError(
+          "JetStream disabled by DECOUPLE_GCLOUD=TRUE or stubbed; build_tokenizer is unsupported. "
+          "Unset DECOUPLE_GCLOUD or install JetStream to enable tokenizer functionality."
+      )
     if metadata.tokenizer_type == TokenizerType.tiktoken:
       return token_utils.TikToken(metadata)
     elif metadata.tokenizer_type == TokenizerType.sentencepiece:

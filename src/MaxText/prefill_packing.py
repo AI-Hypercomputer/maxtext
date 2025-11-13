@@ -22,10 +22,11 @@ import numpy as np
 
 from MaxText.gcloud_stub import jetstream, is_decoupled
 
-# Get JetStream namespaces via decouple
 config_lib, engine_api, token_utils, tokenizer_api, token_params_ns = jetstream()
 
-if is_decoupled():
+jetstream_is_stub = getattr(config_lib, "_IS_STUB", False) or getattr(engine_api, "_IS_STUB", False)
+
+if is_decoupled() and jetstream_is_stub:
   raise RuntimeError(
       "prefill_packing imported while DECOUPLE_GCLOUD=TRUE. This module depends on JetStream."
   )

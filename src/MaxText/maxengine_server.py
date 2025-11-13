@@ -17,10 +17,7 @@
 import os
 import sys
 
-import pathwaysutils  # pylint: disable=unused-import
-
-from MaxText.gcloud_stub import jetstream, is_decoupled
-server_lib, config_lib, _token_utils, _tokenizer_api, _token_params_ns = jetstream()
+from MaxText import gcloud_stub
 
 import jax
 from typing import Any
@@ -53,8 +50,23 @@ def _create_prefix_caching_config(config):
 
 
 def main(config):
-  if is_decoupled():
-    raise RuntimeError("JetStream disabled by DECOUPLE_GCLOUD=TRUE; server unavailable.")
+  # Obtain the jetstream helper modules (or stubs if appropriate).
+  config_lib, _engine_api, _token_utils, _tokenizer_api, _token_params_ns = gcloud_stub.jetstream()
+
+  # If running decoupled and gcloud_stub returned lightweight stubs, skip
+  # starting the real server. Use the explicit _IS_STUB marker when present.
+  config_lib_is_stub = getattr(config_lib, "_IS_STUB", False)
+  engine_api_is_stub = getattr(_engine_api, "_IS_STUB", False)
+  if gcloud_stub.is_decoupled() and (config_lib_is_stub or engine_api_is_stub):
+    raise RuntimeError(
+        "JetStream helper modules are stubbed or DECOUPLE_GCLOUD=TRUE; server cannot be started in decoupled mode. "
+        "Unset DECOUPLE_GCLOUD or install JetStream to run the server."
+    )
+
+  # Import the real server_lib now that it's known present.
+  from jetstream.core import server_lib  # type: ignore
+  import pathwaysutils  # pylint: disable=unused-import
+
   pathwaysutils.initialize()
 
   # No devices for local cpu test. A None for prefill and a None for generate.
