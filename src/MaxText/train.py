@@ -20,6 +20,7 @@
 
 from typing import Any, Sequence
 from contextlib import contextmanager
+from concurrent.futures import ThreadPoolExecutor
 import datetime
 import functools
 import os
@@ -397,71 +398,89 @@ def train_loop(config, recorder, state=None):
 
   # Write train config params, num model params, and XLA flags to tensorboard
   metric_logger.write_setup_info_to_tensorboard(state.params)
+  
+  # Pre-load and shard the very first batch before the loop starts
+  example_batch = data_loader.load_next_batch()
+  # Reshard data from loaded sharding to performant activation sharding
+  example_batch = sharding.maybe_shard_with_name(
+    example_batch,
+    sharding.get_input_data_sharding(config, mesh),
+    shard_mode=config.shard_mode,
+  )
 
   try:
-    last_step_completion = datetime.datetime.now()
-    for step in np.arange(start_step, config.steps):
-      prof.maybe_activate_profiler(step, state)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+      for step in np.arange(start_step, config.steps):
 
-      with jax.profiler.StepTraceAnnotation("train", step_num=step):
-        example_batch = data_loader.load_next_batch()
-        # Reshard data from loaded sharding to performant activation sharding
-        example_batch = sharding.maybe_shard_with_name(
-            example_batch,
+        prof.maybe_activate_profiler(step, state)
+        step_time_start = datetime.datetime.now()
+        next_batch_future = executor.submit(data_loader.load_next_batch)
+
+        with jax.profiler.StepTraceAnnotation("train", step_num=step):
+          # pylint: disable=not-callable
+          nextrng = jax.jit(jax.random.fold_in)(init_rng, step)
+          with maybe_record_goodput(recorder, GoodputEvent.STEP, step):
+            with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+              if config.shard_optimizer_over_data:
+                state = sharding.maybe_shard_with_name(state, state_mesh_shardings, config.shard_mode)
+              state, metrics = p_train_step(state, example_batch, nextrng)
+              jax.block_until_ready(state)
+
+        step_time_delta = datetime.datetime.now() - step_time_start
+
+        state_to_save = state if not config.use_dpo else _split_dpo_state(state)[0]
+        checkpointing.maybe_save_checkpoint(checkpoint_manager, state_to_save, config, data_iterator, step)
+
+        if config.dump_hlo and step == (config.dump_step if config.dump_step >= 0 else start_step):
+          jax.block_until_ready(state)  # Ensure compilation has finished.
+          gcs_utils.upload_dump(
+              config.dump_hlo_local_dir,
+              config.dump_hlo_gcs_dir,
+              module_name=config.dump_hlo_module_name,
+              delete_local_after=config.dump_hlo_delete_local_after,
+              all_host_upload=config.dump_hlo_upload_all,
+          )
+
+        if config.eval_interval > 0 and step > start_step and (step + 1) % config.eval_interval == 0:
+          assert eval_data_iterator
+          # Explicitly reset the eval iterator and counters before starting the eval loop
+          eval_data_iterator.reset()
+          metric_logger.reset_eval_metrics()
+
+          eval_step_count = 0
+          # pylint: disable=not-callable
+          for eval_batch in eval_data_iterator:
+            if config.eval_steps > 0 and eval_step_count >= config.eval_steps:
+              break
+            with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+              eval_metrics = p_eval_step(state, eval_batch, nextrng)
+            metric_logger.record_eval_metrics(step, metrics=eval_metrics)
+            max_logging.log(f"Completed eval step {eval_step_count}")
+            eval_step_count += 1
+          metric_logger.record_eval_metrics(step, eval_step_count=eval_step_count)
+          if metric_logger.cumulative_eval_metrics["scalar"]["eval/avg_loss"] <= config.target_eval_loss:
+            prof.deactivate()
+            raise exceptions.StopTraining(f"Target loss {config.target_eval_loss=} is achieved.")
+
+        # Track deactivate overhead and remove it from step time
+        prof.maybe_deactivate_profiler(step, state)
+
+        if step == start_step:
+          max_utils.print_mem_stats("After params initialized")
+
+        metric_logger.buffer_and_write_train_metrics(metrics, step, step_time_delta)
+        
+        try:
+          raw_next_batch = next_batch_future.result()
+          # Shard the data on the main thread to be safe with JAX contexts
+          example_batch = sharding.maybe_shard_with_name(
+            raw_next_batch,
             sharding.get_input_data_sharding(config, mesh),
             shard_mode=config.shard_mode,
-        )
-        # pylint: disable=not-callable
-        nextrng = jax.jit(jax.random.fold_in)(init_rng, step)
-        with maybe_record_goodput(recorder, GoodputEvent.STEP, step):
-          with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-            if config.shard_optimizer_over_data:
-              state = sharding.maybe_shard_with_name(state, state_mesh_shardings, config.shard_mode)
-            state, metrics = p_train_step(state, example_batch, nextrng)
-
-      step_time_delta = datetime.datetime.now() - last_step_completion
-      last_step_completion = datetime.datetime.now()
-
-      state_to_save = state if not config.use_dpo else _split_dpo_state(state)[0]
-      checkpointing.maybe_save_checkpoint(checkpoint_manager, state_to_save, config, data_iterator, step)
-
-      if config.dump_hlo and step == (config.dump_step if config.dump_step >= 0 else start_step):
-        jax.block_until_ready(state)  # Ensure compilation has finished.
-        gcs_utils.upload_dump(
-            config.dump_hlo_local_dir,
-            config.dump_hlo_gcs_dir,
-            module_name=config.dump_hlo_module_name,
-            delete_local_after=config.dump_hlo_delete_local_after,
-            all_host_upload=config.dump_hlo_upload_all,
-        )
-
-      if config.eval_interval > 0 and step > start_step and (step + 1) % config.eval_interval == 0:
-        assert eval_data_iterator
-        # Explicitly reset the eval iterator and counters before starting the eval loop
-        eval_data_iterator.reset()
-        metric_logger.reset_eval_metrics()
-
-        eval_step_count = 0
-        # pylint: disable=not-callable
-        for eval_batch in eval_data_iterator:
-          if config.eval_steps > 0 and eval_step_count >= config.eval_steps:
-            break
-          with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-            eval_metrics = p_eval_step(state, eval_batch, nextrng)
-          metric_logger.record_eval_metrics(step, metrics=eval_metrics)
-          max_logging.log(f"Completed eval step {eval_step_count}")
-          eval_step_count += 1
-        metric_logger.record_eval_metrics(step, eval_step_count=eval_step_count)
-        if metric_logger.cumulative_eval_metrics["scalar"]["eval/avg_loss"] <= config.target_eval_loss:
-          prof.deactivate()
-          raise exceptions.StopTraining(f"Target loss {config.target_eval_loss=} is achieved.")
-
-      prof.maybe_deactivate_profiler(step, state)
-
-      if step == start_step:
-        max_utils.print_mem_stats("After params initialized")
-
-      metric_logger.buffer_and_write_train_metrics(metrics, step, step_time_delta)
+          )
+        except StopIteration:
+          max_logging.log("Data iterator exhausted.")
+          break
 
     if config.save_checkpoint_on_completion:
       state_to_save = state if not config.use_dpo else _split_dpo_state(state)[0]
