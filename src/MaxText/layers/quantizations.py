@@ -672,7 +672,7 @@ def get_quantization_rule(config: Config):
           weight_calibration_method=config.quantization_calibration_method,
           act_calibration_method=config.quantization_calibration_method,
           bwd_calibration_method=config.quantization_calibration_method,
-          op_names=("dot_general", "gmm"),
+          op_names=("dot_general", "gmm", "ragged_dot"),
       )
     case "fp8_gpu":
       return qwix.QtRule(
