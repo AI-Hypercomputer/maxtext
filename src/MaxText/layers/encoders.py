@@ -44,6 +44,10 @@ class VisionEncoder(nn.Module):
       from MaxText.layers import llama4  # pylint: disable=import-outside-toplevel
 
       return [llama4.llama4visionmodel_as_linen, llama4.llama4multimodalprojector_as_linen]
+    elif self.config.model_name in ["qwen3-omni-30b-a3b"]:
+      from MaxText.layers import qwen3  # pylint: disable=import-outside-toplevel
+
+      return [qwen3.qwen3omni_visionencoder_as_linen, qwen3.qwen3omni_visionprojector_as_linen]
     else:
       raise ValueError(f"No VisionEncoder implemented for {self.config.model_name} yet")
 
@@ -52,11 +56,17 @@ class VisionEncoder(nn.Module):
     cfg = self.config
     mesh = self.mesh
     # vision encoder output, frozen params in many cases
-    embeddings = self.vision_encoder_layer[0](config=cfg, mesh=mesh)(input_images, deterministic=deterministic)
+    encoder_output = self.vision_encoder_layer[0](config=cfg, mesh=mesh)(input_images, deterministic=deterministic)
+    embeddings = encoder_output[0]
+    deep_feats = encoder_output[1] if len(encoder_output) > 1 else None
+
     if cfg.freeze_vision_encoder_params:
       embeddings = jax.lax.stop_gradient(embeddings)
+      if deep_feats is not None:
+        deep_feats = [jax.lax.stop_gradient(feat) for feat in deep_feats]
 
     if len(self.vision_encoder_layer) > 1:
       # vision embedder / projection layer, not frozen in most cases, trained / finetuned together with main model
       embeddings = self.vision_encoder_layer[1](config=cfg, mesh=mesh)(embeddings)
-    return embeddings
+
+    return embeddings, deep_feats

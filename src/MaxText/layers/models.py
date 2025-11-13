@@ -144,13 +144,16 @@ class TransformerLinenPure(nn.Module):
 
     bidirectional_mask = None
     image_embeddings = None
+    deepstack_visual_embeds = None
     if self.config.use_multimodal and encoder_images is not None:
-      image_embeddings = self.vision_encoder(input_images=encoder_images, deterministic=not enable_dropout)
+      image_embeddings, deepstack_visual_embeds = self.vision_encoder(input_images=encoder_images, deterministic=not enable_dropout)
 
       if self.config.decoder_block == DecoderBlockType.GEMMA3:
         bidirectional_mask = decoder_input_tokens == multimodal_utils.GEMMA_TOKEN_PLACEHOLDER
       elif self.config.decoder_block == DecoderBlockType.LLAMA4:
         bidirectional_mask = decoder_input_tokens == multimodal_utils.LLAMA4_PATCH_TOKEN
+      elif self.config.decoder_block == DecoderBlockType.QWEN3_MOE:
+        bidirectional_mask = decoder_input_tokens == multimodal_utils.QWEN3_OMNI_IMAGE_TOKEN
 
     logits, hidden_state = self.decoder(
         shared_embedding=self.shared_embedding,
@@ -165,6 +168,7 @@ class TransformerLinenPure(nn.Module):
         bidirectional_mask=bidirectional_mask,
         image_embeddings=image_embeddings,
         image_masks=encoder_image_masks,
+        deepstack_visual_embeds=deepstack_visual_embeds,
     )
 
     # If we are initializing the model AND MTP is enabled, we must create
@@ -398,13 +402,16 @@ class Transformer(nnx.Module):
 
     bidirectional_mask = None
     image_embeddings = None
+    deepstack_visual_embeds = None
     if self.config.use_multimodal and encoder_images is not None:
-      image_embeddings = self.vision_encoder(input_images=encoder_images, deterministic=not enable_dropout)
+      image_embeddings, deepstack_visual_embeds = self.vision_encoder(input_images=encoder_images, deterministic=not enable_dropout)
 
       if self.config.decoder_block == DecoderBlockType.GEMMA3:
         bidirectional_mask = decoder_input_tokens == multimodal_utils.GEMMA_TOKEN_PLACEHOLDER
       elif self.config.decoder_block == DecoderBlockType.LLAMA4:
         bidirectional_mask = decoder_input_tokens == multimodal_utils.LLAMA4_PATCH_TOKEN
+      elif self.config.decoder_block == DecoderBlockType.QWEN3_OMNI:
+        bidirectional_mask = decoder_input_tokens == multimodal_utils.QWEN3_OMNI_IMAGE_TOKEN
 
     logits, hidden_state = self.decoder(
         shared_embedding=self.token_embedder,
