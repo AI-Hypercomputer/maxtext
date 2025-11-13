@@ -253,7 +253,8 @@ class Decoder(nn.Module):
   def setup(self):
     """Initialize decoder layer."""
     self.decoder_layer = self.get_decoder_layers()
-    self.norm_layer = self.get_norm_layer(num_features=self.config.emb_dim)
+    rngs = nnx.Rngs(params=self.make_rng('params'))
+    self.norm_layer = self.get_norm_layer(num_features=self.config.emb_dim, rngs=rngs)
     if self.config.using_pipeline_parallelism:
       remat_policy = self.get_remat_policy()
 
@@ -452,7 +453,7 @@ class Decoder(nn.Module):
       RemattedBlockLayers.append(layer)
     return RemattedBlockLayers
 
-  def get_norm_layer(self, num_features: int):
+  def get_norm_layer(self, num_features: int, rngs: nnx.Rngs):
     """get normalization layer (return type inherits from nn.Module)"""
     if self.config.decoder_block in (
         DecoderBlockType.DEFAULT,
@@ -470,7 +471,7 @@ class Decoder(nn.Module):
         DecoderBlockType.SIMPLE_MLP,
         DecoderBlockType.LLAMA4,
     ):
-      return functools.partial(rms_norm, num_features=num_features)
+      return functools.partial(rms_norm, num_features=num_features, rngs=rngs)
     elif self.config.decoder_block == DecoderBlockType.GPT3:
       return functools.partial(gpt3.gpt3_layer_norm, num_features=num_features, reductions_in_fp32=False, use_bias=True)
     else:
@@ -590,7 +591,8 @@ class Decoder(nn.Module):
     """Applies final normalization and projects hidden states to logits."""
 
     cfg = self.config
-    y = self.get_norm_layer(num_features=y.shape[-1])(
+    rngs = nnx.Rngs(params=self.make_rng('params'))
+    y = self.get_norm_layer(num_features=y.shape[-1], rngs=rngs)(
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
         name="decoder_norm",

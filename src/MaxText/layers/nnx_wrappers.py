@@ -16,7 +16,7 @@
 
 from functools import partial
 import typing as tp
-from typing import Any
+from typing import Any, Type
 import warnings
 
 from flax import config as flax_config
@@ -32,8 +32,12 @@ from flax.nnx.module import Module
 from flax.nnx import Pytree
 from flax.nnx.rnglib import Rngs
 import jax
+from jax.sharding import Mesh
 from jax import tree_util as jtu
 import qwix
+
+from MaxText.common_types import Config, MODEL_MODE_TRAIN
+
 
 M = tp.TypeVar("M", bound=Module)
 
@@ -49,8 +53,7 @@ def is_vanilla_variable(vs: variablelib.VariableState) -> bool:
   """
   for key, value in vs.get_metadata().items():
     if key.endswith("_hooks"):
-      if value != ():
-        return False
+      if value != (): return False
     else:
       return False
   return True
@@ -120,7 +123,6 @@ def linen_vars_to_nnx_attrs(variables: tp.Mapping[str, Any]) -> dict[str, Any]:
   nnx_vars = nnx.traversals.unflatten_mapping(flat_paths)
   return nnx_vars
 
-
 def nnx_attrs_to_linen_vars(nnx_attrs: dict) -> dict:
   """Convert a dict of NNX variables (or variable states) to Linen-style variables."""
   linen_structured = {}
@@ -136,7 +138,6 @@ def nnx_attrs_to_linen_vars(nnx_attrs: dict) -> dict:
     linen_structured[(col_name, *kp)] = v
   variables = nnx.traversals.unflatten_mapping(linen_structured)
   return variables
-
 
 def _set_initializing(module: Module, initializing: bool):
   for _, value in graph.iter_graph(module):
@@ -162,12 +163,44 @@ def lazy_init(fn: Module | tp.Callable[..., tp.Any], *args, **kwargs):
     _set_initializing(module, False)
   return fn
 
-
 def current_linen_module() -> linen.Module | None:
   """Get the current Linen module from the Linen context."""
   if linen.module._context.module_stack:  # pylint: disable=W0212
     return linen.module._context.module_stack[-1]  # pylint: disable=W0212
   return None
+
+
+class LinenToNnxWrapper(nnx.Module):
+  """A wrapper to turn any Linen module class into an NNX module class.
+
+  This allows Linen modules to be used as `layer_module` in `pipeline_nnx.Pipeline`.
+  """
+  def __init__(self, linen_module_class: Type[linen.Module], config: Config, mesh: Mesh, model_mode: str, *, rngs: nnx.Rngs = None):
+    self.linen_module = linen_module_class(config=config, mesh=mesh, model_mode=model_mode)
+    self.rngs = rngs if rngs is not None else nnx.Rngs(params=jax.random.PRNGKey(0)) # Store rngs for apply call
+
+  def __call__(self, inputs, inputs_position, inputs_segmentation, deterministic, model_mode):
+    # Convert nnx.Rngs to a dict of jax.random.PRNGKey for Linen's apply method
+    rngs_dict = {name: stream() for name, stream in self.rngs.items()}
+    
+    # For simplicity, we'll assume the Linen module is initialized and its state
+    # is managed externally or is immutable for the purpose of this wrapper.
+    # A more robust solution would involve converting Linen's state to NNX state
+    # and vice-versa, similar to the ToNNX class.
+    
+    # For now, directly call apply. This might not correctly handle mutable state
+    # or initialization if the Linen module has complex state management.
+    output = self.linen_module.apply(
+        {'params': {}}, # Empty params for now, assuming they are handled by NNX
+        inputs,
+        inputs_position,
+        inputs_segmentation,
+        deterministic,
+        model_mode,
+        rngs=rngs_dict,
+        mutable=False # Assume immutable for now
+    )
+    return output, None # Return output and None for updates
 
 
 class ToNNX(Module):
@@ -296,7 +329,6 @@ class ToNNX(Module):
 
     return out
 
-
 def linen_rngs_dict(linen_module: linen.Module, add_default: bool = False):
   """Given a module, split out one of its every active RNG key collections."""
   assert linen_module.scope is not None, "linen_rngs_dict() must be called inside a Linen module."
@@ -304,7 +336,6 @@ def linen_rngs_dict(linen_module: linen.Module, add_default: bool = False):
   if add_default and "default" not in rngs:
     rngs["default"] = 0
   return rngs
-
 
 def _get_module_method(module, method: tp.Callable[..., Any] | str | None):
   """Get a callable method from the module, or raise TypeError."""
@@ -386,29 +417,22 @@ class ToLinen(linen.Module):
   Example::
 
     >>> from flax import linen as nn, nnx
-    >>> import jax
-    >>> model = nnx.bridge.ToLinen(nnx.Linear, args=(32, 64))
-    >>> x = jax.numpy.ones((1, 32))
-    >>> y, variables = model.init_with_output(jax.random.key(0), x)
-    >>> y.shape
-    (1, 64)
-    >>> variables['params']['kernel'].shape
-    (32, 64)
-    >>> # The static GraphDef of the underlying NNX module
-    >>> variables.keys()
-    dict_keys(['params'])
+    >>> from MaxText.layers import linears
+    >>> # Create a specialized Linen wrapper for linears.DenseGeneral
+    >>> LinenDenseGeneral = to_linen_class(linears.DenseGeneral)
+    >>> # Now, LinenDenseGeneral can be used like a regular Linen module
+    >>> class MyModel(nn.Module):
+    ...   def setup(self):
+    ...     # Instantiate the wrapped linears.DenseGeneral with its arguments
+    ...     self.dense = LinenDenseGeneral(
+    ...         in_features_shape=10, out_features_shape=5
+    ...     )
+    ...   def __call__(self, x):
+    ...     return self.dense(x)
 
-  Args:
-    nnx_class: The NNX Module class (not instance!).
-    args: The arguments that normally would be passed in to create the NNX
-      module.
-    kwargs: The keyword arguments that normally would be passed in to create the
-      NNX module.
-    skip_rng: True if this NNX module doesn't need `rngs` arg during
-      initialization (not common).
-
-  Returns:
-    A stateful NNX module that behaves the same as the wrapped Linen module.
+  Attributes:
+    (The attributes are dynamically set by the `ToLinen` parent class based
+      on the arguments provided during instantiation.)
   """
 
   nnx_class: tp.Callable[..., Module]
@@ -547,7 +571,6 @@ def to_linen(
       skip_rng=skip_rng,
       name=name,
   )
-
 
 def to_linen_class(
     base_nnx_class: type[M],

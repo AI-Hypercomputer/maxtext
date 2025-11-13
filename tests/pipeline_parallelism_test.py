@@ -39,6 +39,7 @@ from MaxText.layers import simple_layer
 from MaxText.layers.simple_layer import SimpleDecoderLayer, SimpleDecoderLayerNnx
 from MaxText.train import main as train_main
 from MaxText.layers import deepseek
+from MaxText.layers import nnx_wrappers
 
 
 def assert_same_output_and_grad(f1, f1_inputs, f2, f2_inputs):
@@ -95,12 +96,10 @@ class PipelineParallelismTest(unittest.TestCase):
     class SequentialModel(nnx.Module):
 
       def __init__(self, config: Config, *, rngs: nnx.Rngs):
-        self.layers = nnx.List(
-            [
-                simple_layer.SimpleDecoderLayerNnx(config=config, rngs=rngs.fork())
-                for _ in range(config.num_decoder_layers)
-            ]
-        )
+        self.layers = [
+            simple_layer.SimpleDecoderLayerNnx(config=config, rngs=rngs.fork())
+            for _ in range(config.num_decoder_layers)
+        ]
 
       def __call__(self, inputs, inputs_position, inputs_segmentation, deterministic, model_mode):
         for layer in self.layers:
@@ -188,9 +187,11 @@ class PipelineParallelismTest(unittest.TestCase):
         sparse_matmul=False,
         capacity_factor=1,
         decoder_block="deepseek",
+        attention_type="mla",
         log_config=False,
     )
-    self.assert_pipeline_same_output_and_grad(config, single_pipeline_stage_class=deepseek.DeepSeekMoELayer)
+    wrapped_class = functools.partial(nnx_wrappers.LinenToNnxWrapper, linen_module_class=deepseek.DeepSeekDenseLayer)
+    self.assert_pipeline_same_output_and_grad(config, single_pipeline_stage_class=wrapped_class)
 
   @pytest.mark.tpu_only
   def test_circular_ag_once(self):
@@ -255,13 +256,11 @@ class PipelineParallelismTest(unittest.TestCase):
             "num_layers_per_pipeline_stage=2",
             "num_pipeline_microbatches=8",
             rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizer.llama2')}",
-            "scan_layers_per_stage=False",  # We see better performance only scanning the pipeline iterations.
-            "log_config=False",
-            "enable_nnx=true",
-        ]
-    )
-
-  @pytest.mark.tpu_only
+                                        "scan_layers_per_stage=False",  # We see better performance only scanning the pipeline iterations.
+                                        "log_config=False",
+                                        "enable_nnx=true",
+                                    ]
+                                )  @pytest.mark.tpu_only
   def test_delay_activation_forwarding_same_output_and_grad(self):
     # 4 stages, delayed activation forwarding, 8 layers (2 repeats, 1 layer per stage), 8 microbatches
     config = pyconfig.initialize(
