@@ -173,7 +173,7 @@ def train(mt_config, goodput_recorder=None):
   """
   trainer, mesh = setup_trainer_state(mt_config, goodput_recorder)
   trainer = train_model(mt_config, trainer, mesh)
-  return trainer, mesh
+  return trainer, mesh # RAWR
 
 
 def main(argv: Sequence[str]) -> None:
