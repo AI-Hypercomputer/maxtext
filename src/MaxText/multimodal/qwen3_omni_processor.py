@@ -12,7 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import decord 
+"""Qwen3-Omni-specific preprocessing utilities for multimodal features. 
+
+Original implementation from HuggingFace: Qwen/Qwen3-Omni-30B-A3B-Instruct.
+"""
+
+import decord
 import jax
 import librosa
 import math
