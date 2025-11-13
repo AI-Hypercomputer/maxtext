@@ -19,7 +19,6 @@
 # See github.com/google/maxtext/issues/20 for more
 
 from typing import Any, Sequence
-from contextlib import contextmanager
 import datetime
 import functools
 import os
@@ -522,12 +521,11 @@ def initialize(argv: Sequence[str]) -> tuple[pyconfig.HyperParameters, Any, Any]
 def run(config, recorder, diagnostic_config):
   """Run the job given hyperparameters and utilities"""
   with (
-    diagnostic.diagnose(diagnostic_config),
-    maybe_record_goodput(recorder, GoodputEvent.JOB),
-    max_utils.maybe_get_transformer_engine_context(config)
+      diagnostic.diagnose(diagnostic_config),
+      maybe_record_goodput(recorder, GoodputEvent.JOB),
+      max_utils.maybe_get_transformer_engine_context(config),
   ):
     train_loop(config, recorder)
-
 
 
 def main(argv: Sequence[str]) -> None:
