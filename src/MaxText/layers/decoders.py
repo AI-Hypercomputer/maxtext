@@ -550,6 +550,8 @@ class Decoder(nn.Module):
       image_embeddings=None,
       bidirectional_mask=None,
       image_masks=None,
+      audio_embeddings=None,
+      audio_mask=None,
   ):
     """Applies token and positional embeddings to the input tokens."""
     cfg = self.config
@@ -558,7 +560,14 @@ class Decoder(nn.Module):
 
     # Merge the image embeddings with the text embeddings for multimodal models
     if image_embeddings is not None and cfg.use_multimodal:
-      if cfg.model_name in ["gemma3-4b", "gemma3-12b", "gemma3-27b", "llama4-17b-16e", "llama4-17b-128e"]:
+      if cfg.model_name in [
+          "gemma3-4b",
+          "gemma3-12b",
+          "gemma3-27b",
+          "llama4-17b-16e",
+          "llama4-17b-128e",
+          "qwen3-omni-30b-a3b",
+      ]:
         y = multimodal_utils.merge_mm_embeddings(
             text_embeddings=y,
             vision_embeddings=image_embeddings,
@@ -568,6 +577,16 @@ class Decoder(nn.Module):
       # TODO(hengtaoguo): Add support for other multimodal models such as Llama4, refactor if needed
       else:
         raise ValueError(f"Unsupported model_name for multimodal: {cfg.model_name}")
+
+    # Merge the audio embeddings with the text embeddings for qwen3-omni models
+    if audio_embeddings is not None and cfg.use_multimodal:
+      if cfg.model_name in ["qwen3-omni-30b-a3b"]:
+        y = multimodal_utils.merge_mm_embeddings(
+            text_embeddings=y,
+            vision_embeddings=audio_embeddings,
+            mask=audio_mask,
+            image_masks=None,
+        )
 
     y = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(y, deterministic=deterministic)
     y = y.astype(cfg.dtype)
@@ -684,6 +703,8 @@ class Decoder(nn.Module):
       bidirectional_mask: None | Any = None,
       image_embeddings: None | jnp.ndarray = None,
       image_masks: None | jnp.ndarray = None,
+      audio_embeddings: None | jnp.ndarray = None,
+      audio_mask: None | jnp.ndarray = None,
   ):
     cfg = self.config
     mesh = self.mesh
@@ -699,6 +720,8 @@ class Decoder(nn.Module):
         image_embeddings,
         bidirectional_mask,
         image_masks,
+        audio_embeddings,
+        audio_mask,
     )
 
     policy = self.get_remat_policy()
