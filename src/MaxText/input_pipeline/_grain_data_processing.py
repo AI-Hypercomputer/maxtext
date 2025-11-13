@@ -64,15 +64,22 @@ def get_datasets(
       dataset_list = [
           grain.MapDataset.source(grain.ArrayRecordDataSource(find_data_files(pattern))) for pattern in data_file_patterns
       ]
-      dataset = grain.MapDataset.mix(dataset_list, weights)
+      # create iterator per dataset with unique index
+      for ds in dataset_list:
+        if shuffle:
+          ds = ds.shuffle(seed=shuffle_seed)
+        ds = ds.repeat(num_epoch)
+        ds = ds[dataloading_host_index::dataloading_host_count]  # sharding
+        ds = ds.to_iter_dataset()
+      dataset = grain.IterDataset.mix(dataset_list, weights)
     else:
       data_files = find_data_files(data_file_pattern)
       dataset = grain.MapDataset.source(grain.ArrayRecordDataSource(data_files))
-    if shuffle:
-      dataset = dataset.shuffle(seed=shuffle_seed)
-    dataset = dataset.repeat(num_epoch)
-    dataset = dataset[dataloading_host_index::dataloading_host_count]  # sharding
-    dataset = dataset.to_iter_dataset()
+      if shuffle:
+        dataset = dataset.shuffle(seed=shuffle_seed)
+      dataset = dataset.repeat(num_epoch)
+      dataset = dataset[dataloading_host_index::dataloading_host_count]  # sharding
+      dataset = dataset.to_iter_dataset()
   elif data_file_type == "parquet":
     data_files = find_data_files(data_file_pattern)
     dataset = grain.MapDataset.source(data_files)
