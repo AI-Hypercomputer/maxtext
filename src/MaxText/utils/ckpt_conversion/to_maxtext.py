@@ -61,7 +61,7 @@ import json
 import threading
 from functools import partial
 from typing import Sequence, List, Any, Callable
-from benchmarks.benchmark_utils import str2bool
+from MaxText.inference_utils import str2bool
 import numpy as np
 import jax
 import psutil
