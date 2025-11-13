@@ -40,6 +40,44 @@ Check out our [Read The Docs site](https://maxtext.readthedocs.io/en/latest/) or
 
 MaxText provides a library of models and demonstrates how to perform pre-training or post-training with high performance and scale. MaxText leverages [JAX AI libraries](https://docs.jaxstack.ai/en/latest/getting_started.html) and presents a cohesive and comprehensive demonstration of training at scale by using [Flax](https://flax.readthedocs.io/en/latest/) (neural networks), [Tunix](https://github.com/google/tunix) (post-training), [Orbax](https://orbax.readthedocs.io/en/latest/) (checkpointing), [Optax](https://optax.readthedocs.io/en/latest/) (optimization), and [Grain](https://google-grain.readthedocs.io/en/latest/) (dataloading). In addition to pure text-based LLMs, we also support multi-modal training with Gemma 3 and Llama 4 VLMs.
 
+## Learn more
+
+::::{grid} 1 1 2 2
+:gutter: 2
+
+:::{grid-item-card}
+:link: full-finetuning
+:link-type: ref
+:class-card: sd-text-black sd-bg-light
+
+{material-regular}`settings;2em` Full finetuning and training with Llama3
+:::
+
+:::{grid-item-card}
+:link: first-run
+:link-type: ref
+:class-card: sd-text-black sd-bg-light
+
+{material-regular}`rocket_launch;2em` First run
+:::
+
+:::{grid-item-card}
+:link: reference/api
+:link-type: doc
+:class-card: sd-text-black sd-bg-light
+
+{material-regular}`api;2em` API Reference
+:::
+
+:::{grid-item-card}
+:link: tutorials/grpo
+:link-type: doc
+:class-card: sd-text-black sd-bg-light
+
+{material-regular}`model_training;2em` Train with GRPO
+:::
+::::
+
 ### Pre-training
 
 If you’re building models from scratch, MaxText can serve as a reference implementation for experimentation, ideation, and inspiration \- just fork and modify MaxText to train your model, whether it’s a small dense model like Llama 8B, or a large MoE like DeepSeek-V3. Experiment with configs and model design to build the most efficient model on TPU or GPU.
@@ -100,10 +138,10 @@ Please join our [Discord Channel](https://discord.com/invite/2H9PhvTcDU) and if 
 :maxdepth: 2
 :hidden:
 
-explanations.md
-guides.md
-reference.md
-tutorials.md
-development.md
-release_notes.md
+explanations
+guides
+reference
+tutorials
+development
+release_notes
 ```
