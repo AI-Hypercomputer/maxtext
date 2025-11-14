@@ -502,8 +502,7 @@ def initialize(argv: Sequence[str]) -> tuple[pyconfig.HyperParameters, Any, Any]
   if config.use_vertex_tensorboard or os.environ.get("UPLOAD_DATA_TO_TENSORBOARD"):
     vertex_tensorboard_manager.configure_vertex_tensorboard(config)
 
-  # Goodput configurations
-  maybe_monitor_goodput(config)
+  # Create the Goodput recorder
   recorder = create_goodput_recorder(config)
 
   # Stack traces configurations
@@ -524,6 +523,7 @@ def run(config, recorder, diagnostic_config):
       diagnostic.diagnose(diagnostic_config),
       maybe_record_goodput(recorder, GoodputEvent.JOB),
       max_utils.maybe_get_transformer_engine_context(config),
+      maybe_monitor_goodput(config),
   ):
     train_loop(config, recorder)
 
