@@ -466,11 +466,11 @@ def main(args: Sequence[str], test_args: Sequence[str]) -> None:
   #   f"model.layers.{global_layer_idx}.input_layernorm.weight",
 
   model_key = config.model_name
-  param_map_mt_to_hf = PARAM_MAPPING[model_key](hf_config_obj.to_dict(), config.scan_layers)
+  param_map_mt_to_hf = PARAM_MAPPING[model_key](hf_config_obj.to_dict(), config, config.scan_layers)
 
   # Example of Hook FN mapping, to perform reshape:
   # f"params-decoder-layers_{maxtext_layer_idx}-self_attention_global-key-kernel": reshape_kernel,
-  hook_fn_map_mt = HOOK_FNS[model_key](hf_config_obj.to_dict(), config.scan_layers, saving_to_hf=False)
+  hook_fn_map_mt = HOOK_FNS[model_key](hf_config_obj.to_dict(), config, config.scan_layers, saving_to_hf=False)
   max_logging.log("Parameter mappings and hooks obtained.")
 
   max_logging.log("Starting weight transformation...")
