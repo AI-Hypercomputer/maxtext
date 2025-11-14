@@ -758,6 +758,7 @@ class _HyperParameters:
 
     # This is the first command that initializes the backend - it calls
     # jax.devices()
+    raw_keys["num_target_devices"] = get_num_target_devices(raw_keys)
     (
         raw_keys["global_batch_size_to_load"],
         raw_keys["global_batch_size_to_train_on"],
@@ -765,7 +766,7 @@ class _HyperParameters:
     ) = calculate_global_batch_sizes(
         raw_keys["per_device_batch_size"],
         raw_keys["expansion_factor_real_data"],
-        get_num_target_devices(raw_keys),
+        raw_keys["num_target_devices"],
         raw_keys["gradient_accumulation_steps"],
     )
 
@@ -779,7 +780,7 @@ class _HyperParameters:
       ) = calculate_global_batch_sizes(
           raw_keys["per_device_batch_size_start"],
           raw_keys["expansion_factor_real_data"],
-          get_num_target_devices(raw_keys),
+          raw_keys["num_target_devices"],
           raw_keys["gradient_accumulation_steps"],
       )
 
@@ -790,7 +791,7 @@ class _HyperParameters:
       ) = calculate_global_batch_sizes(
           raw_keys["per_device_batch_size_increment"],
           raw_keys["expansion_factor_real_data"],
-          get_num_target_devices(raw_keys),
+          raw_keys["num_target_devices"],
           raw_keys["gradient_accumulation_steps"],
       )
 
@@ -1357,16 +1358,16 @@ def calculate_rampup_samples_and_steps(
     batch_size_start,
     batch_size_end,
     batch_size_increment,
-    global_rampup_samples,
+    rampup_samples,
 ):
   """Calculate num of samples for each increment and num of steps for batch rampup"""
   diff_batch_size = batch_size_end - batch_size_start
   num_increments = diff_batch_size // batch_size_increment
-  rampup_samples_per_increment = global_rampup_samples / num_increments
+  rampup_samples_per_increment = rampup_samples / num_increments
   total_rampup_steps = 0
   current_batch_size = batch_size_start
 
-  for _ in range(num_increments):
+  while current_batch_size < batch_size_end:
     steps_for_this_stage = math.ceil(rampup_samples_per_increment / current_batch_size)
     total_rampup_steps += steps_for_this_stage
     current_batch_size += batch_size_increment

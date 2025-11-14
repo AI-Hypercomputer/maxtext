@@ -147,7 +147,7 @@ def elastic_handler(
         max_logging.log(f"Deleting checkpoint from step {latest_step} since we are rewinding to step {step}.")
         checkpoint_manager.delete(latest_step)
 
-    data_loader = DataLoader(config, mesh, data_iterator, recorder)
+    data_loader = DataLoader(config, data_iterator, recorder)
     metric_logger = MetricLogger(config=config, learning_rate_schedule=learning_rate_schedule)
 
     # Write train config params, num model params, and XLA flags to tensorboard
@@ -203,7 +203,7 @@ def train_loop(config, elastic_manager, recorder, state=None):
       block=True,
   )
 
-  data_loader = DataLoader(config, mesh, data_iterator, recorder)
+  data_loader = DataLoader(config, data_iterator, recorder)
   metric_logger = MetricLogger(config=config, learning_rate_schedule=learning_rate_schedule)
 
   # Write train config params, num model params, and XLA flags to tensorboard

@@ -701,7 +701,7 @@ def train_loop(config, config_inference, recorder, state=None):
   start_step = get_first_step(state)  # this is the start_step for training
   prof = profiler.Profiler(config, offset_step=start_step)
   inference_prof = profiler.Profiler(config_inference, offset_step=start_step)
-  data_loader = DataLoader(config_inference, inference_mesh, data_iterator, recorder)
+  data_loader = DataLoader(config_inference, data_iterator, recorder)
   metric_logger = MetricLogger(config=config, learning_rate_schedule=learning_rate_schedule)
 
   # Write train config params, num model params, and XLA flags to tensorboard

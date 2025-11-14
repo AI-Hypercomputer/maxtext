@@ -169,7 +169,7 @@ class SFTDataHooks(DataHooks):
   def __init__(self, config, mesh, goodput_recorder):
     self.config = config
     self.train_data_iterator, self.eval_data_iterator = create_data_iterator(config, mesh)
-    self.train_data_loader = DataLoader(config, mesh, self.train_data_iterator, goodput_recorder=goodput_recorder)
+    self.train_data_loader = DataLoader(config, self.train_data_iterator, goodput_recorder=goodput_recorder)
     self.train_batch = None
     self.eval_batch = None
 

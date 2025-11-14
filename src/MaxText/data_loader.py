@@ -15,12 +15,14 @@
 # pytype: disable=unsupported-operands
 """Module to load data for training."""
 
+import math
+
 import jax
 import jax.numpy as jnp
 from jax.experimental import checkify
 
 from MaxText import exceptions
-from MaxText import max_logging
+from MaxText.calculator import RampupBatchCalculator
 from MaxText.utils.goodput_utils import (
     GoodputEvent,
     maybe_record_goodput,
@@ -32,7 +34,7 @@ class DataLoader:
   Loads preprocessed data for training.
   """
 
-  def __init__(self, config, mesh, data_iterator, goodput_recorder):
+  def __init__(self, config, data_iterator, goodput_recorder):
     self.config = config
     self.goodput_recorder = goodput_recorder
     if isinstance(data_iterator, list):
@@ -86,22 +88,13 @@ class RampUpDataLoader(DataLoader):
   is assumed to read this config value to determine the logical batch size.
   """
 
-  def __init__(self, config, mesh, data_iterator, goodput_recorder):
+  def __init__(self, config, data_iterator, goodput_recorder, latest_step):
     # Call parent constructor
-    super().__init__(config, mesh, data_iterator, goodput_recorder)
-
-    # Get ramp-up parameters from config, with safe defaults
-    self.global_batch_size_end = config.global_batch_size_to_load
-    self.global_batch_size_start = config.global_batch_size_to_load_start
-    self.increment = config.global_batch_size_to_load_increment
-    self.samples_per_increment = config.rampup_samples_per_increment_to_load
-
-    # Check if ramp-up is active
-    self.rampup_active = self.global_batch_size_start < self.global_batch_size_end
-
-    # State for tracking ramp-up
-    self.accum_samples = 0
-    self.global_batch_size_current = self.global_batch_size_start
+    super().__init__(config, data_iterator, goodput_recorder)
+    
+    # Initialize batch size calculator
+    self.calculator = RampupBatchCalculator(config, latest_step)
+    self.rampup_active = self.calculator.num_accum_samples < config.global_rampup_samples
     self.batch_buffer = None
     self.buffer_start = 0
 
@@ -114,29 +107,15 @@ class RampUpDataLoader(DataLoader):
     if not self.rampup_active:
       return super().load_next_batch()
 
-    # If in rampup phase, we use batch buffer to save data
-    # Check if it's time to increment the batch size
-    is_time_to_increment = self.accum_samples >= self.samples_per_increment
+    slice_start, slice_end = self.buffer_start, self.buffer_start + self.calculator.global_batch_size_current
 
-    if is_time_to_increment:
-      # Update current batch size and refresh accumulate samples
-      max_logging.log(
-          f"Global batch size increments from {self.global_batch_size_current}"
-          f" to {self.global_batch_size_current + self.increment}"
-      )
-      self.global_batch_size_current += self.increment
-      self.accum_samples = 0
-      self.rampup_active = self.global_batch_size_current < self.global_batch_size_end
-
-    self.accum_samples += self.global_batch_size_current
-    slice_start, slice_end = self.buffer_start, self.buffer_start + self.global_batch_size_current
-
-    # Load new batch if batch_buffer is None or slice overpast the buffer end
+    # Load new batch if batch_buffer is None
     if self.batch_buffer is None:
       self.batch_buffer = super().load_next_batch()
-      slice_start, slice_end = 0, self.global_batch_size_current
+      slice_start, slice_end = 0, self.calculator.global_batch_size_current
 
-    if slice_end > self.global_batch_size_end:
+    # If the slice end overpast batch end we collect new batch data
+    if slice_end > self.calculator.global_batch_size_end:
       old_buffer, self.batch_buffer = self.batch_buffer, super().load_next_batch()
 
       # self.global_batch_size_end is batch_buffer size
@@ -144,38 +123,39 @@ class RampUpDataLoader(DataLoader):
         sliced_old_data = jax.lax.dynamic_slice_in_dim(
             old_data,
             slice_start,
-            self.global_batch_size_end - slice_start,
+            self.calculator.global_batch_size_end - slice_start,
             axis=0,
         )
         sliced_new_data = jax.lax.dynamic_slice_in_dim(
             new_data,
             0,
-            slice_end - self.global_batch_size_end,
+            slice_end - self.calculator.global_batch_size_end,
             axis=0,
         )
         return jax.lax.concatenate((sliced_old_data, sliced_new_data), dimension=0)
 
-      self.buffer_start = slice_end - self.global_batch_size_end
-      return jax.tree.map(_slice_and_concat, old_buffer, self.batch_buffer)
+      self.buffer_start = slice_end - self.calculator.global_batch_size_end
+      output = jax.tree.map(_slice_and_concat, old_buffer, self.batch_buffer)
     else:
-
       def _slice(data):
         return jax.lax.dynamic_slice_in_dim(
             data,
             slice_start,
-            self.global_batch_size_current,
+            self.calculator.global_batch_size_current,
             axis=0,
         )
 
       self.buffer_start = slice_end
-      return jax.tree.map(_slice, self.batch_buffer)
+      output = jax.tree.map(_slice, self.batch_buffer)
+    self.rampup_active = self.calculator.update()
+    return output
 
 
-def create_dataloader(config, mesh, data_iterator, goodput_recorder):
+def create_dataloader(config, data_iterator, goodput_recorder, latest_step=-1):
   """
   Create the dataloader
   """
   if config.enable_rampup_batch_size:
-    return RampUpDataLoader(config, mesh, data_iterator, goodput_recorder)
+    return RampUpDataLoader(config, data_iterator, goodput_recorder, latest_step)
   else:
-    return DataLoader(config, mesh, data_iterator, goodput_recorder)
+    return DataLoader(config, data_iterator, goodput_recorder)
