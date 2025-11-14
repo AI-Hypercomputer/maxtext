@@ -78,15 +78,22 @@ def create_training_tools(config, model, mesh):
 
 def jit_train_step(config, model, state, state_mesh_shardings, data_sharding, train_step, params_shardings):
   """Returns a JIT-compiled train step function, which is loaded from a file if specified in the config."""
-  (
-      functional_train,
-      in_shardings,
-      out_shardings,
-      static_argnums,
-      donate_argnums,
-  ) = maxtext_utils.get_functional_train_with_signature(
-      train_step, data_sharding, state_mesh_shardings, model, config, params_shardings
-  )
+  if config.enable_diloco:
+    functional_train = train_step
+    in_shardings = (state_mesh_shardings, data_sharding, None)  # State, batch, rng
+    out_shardings = (state_mesh_shardings, None)  # State, metrics
+    static_argnums = ()  # We partial out the static argnums of model and config
+    donate_argnums = 0  # This is the index of the state - we allow the compiler to make use of this memory.
+  else:
+    (
+        functional_train,
+        in_shardings,
+        out_shardings,
+        static_argnums,
+        donate_argnums,
+    ) = maxtext_utils.get_functional_train_with_signature(
+        train_step, data_sharding, state_mesh_shardings, model, config, params_shardings
+    )
 
   # Define the compilation of functional_train, either by loading the compiled version or wrapping a new one in a jit
   if config.compiled_trainstep_file != "":

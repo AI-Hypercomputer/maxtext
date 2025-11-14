@@ -30,7 +30,14 @@ from MaxText.common_types import ShardMode
 
 def get_input_data_sharding(config, mesh):
   """Get the input data sharding for the model"""
-  return nn.logical_to_mesh_sharding(P(*config.input_data_sharding_logical_axes), mesh, config.logical_axis_rules)
+  data_sharding = nn.logical_to_mesh_sharding(
+      P(*config.input_data_sharding_logical_axes), mesh, config.logical_axis_rules
+  )
+  if config.enable_diloco:
+    data_sharding = jax.tree_util.tree_map(
+        lambda s: jax.sharding.NamedSharding(s.mesh, P("diloco", *s.spec)), data_sharding
+    )
+  return data_sharding
 
 
 def maybe_shard_with_name(inputs, named_sharding, shard_mode):
