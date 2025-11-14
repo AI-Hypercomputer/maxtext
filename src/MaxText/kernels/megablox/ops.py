@@ -22,7 +22,8 @@ from typing import Literal
 import jax
 import jax.numpy as jnp
 from MaxText.kernels.megablox import backend
-from tokamax._src.ops.ragged_dot import api as tokamax_api
+from tokamax._src.ops.ragged_dot import api as tokamax_api  # pylint: disable=unused-import
+from tokamax._src.ops.ragged_dot import pallas_mosaic_tpu_kernel as tokamax_backend
 import qwix
 import qwix.pallas as qpl
 
@@ -32,7 +33,7 @@ def gmm(
     rhs: jnp.ndarray,
     group_sizes: jnp.ndarray,
     preferred_element_type: jnp.dtype = jnp.float32,
-    tiling: tuple[int, int, int] = (128, 128, 128),
+    tiling: tuple[int, int, int, int, int, int, int, int, int] = (128, 128, 128, 128, 128, 128, 128, 128, 128),
     group_offset: jnp.ndarray | None = None,
     existing_out: jnp.ndarray | None = None,
     transpose_rhs: bool = False,
@@ -82,7 +83,7 @@ def _gmm_fwd(
     rhs: jnp.ndarray,
     group_sizes: jnp.ndarray,
     preferred_element_type: jnp.dtype = jnp.float32,
-    tiling: tuple[int, int, int] = (128, 128, 128),
+    tiling: tuple[int, int, int, int, int, int, int, int, int] = (128, 128, 128, 128, 128, 128, 128, 128, 128),
     group_offset: jnp.ndarray | None = None,
     existing_out: jnp.ndarray | None = None,
     transpose_rhs: bool = False,
@@ -100,7 +101,7 @@ def _gmm_fwd(
 ]:
   """Forward function for GMM VJP."""
   # fwd_counter = next(_counter)
-  print(f"Mohit {quantization_rule=}")
+  print(f"{quantization_rule=}")
   if quantization_rule:
     if quantization_rule.act_qtype:
       # with set_xla_metadata(MUST_FUSE=fwd_counter):
@@ -123,31 +124,41 @@ def _gmm_fwd(
           scale_dtype=jnp.float32,
       )
       # QAG is only supported for following conditions
-      print(f"Mohit before all gather {rhs.qvalue.shape=}")
-      if quantization_rule.weight_calibration_method.startswith("fixed") and isinstance(rhs, qpl.QArray):
-        rhs_qvalue = jax.lax.all_gather(rhs.qvalue, "fsdp", axis=0, tiled=True)
-        rhs = dataclasses.replace(rhs, qvalue=rhs_qvalue)
-        print(f"Mohit after all gather {rhs.qvalue.shape=}")
   if use_tokamax_backend:
+    print(f"before all gather {jax.typeof(rhs.qvalue)=}")
+    if quantization_rule.weight_calibration_method.startswith("fixed") and isinstance(rhs, qpl.QArray):
+      rhs_qvalue = jax.lax.all_gather(rhs.qvalue, "fsdp", axis=0, tiled=True)
+      rhs = dataclasses.replace(rhs, qvalue=rhs_qvalue)
+      print(f"after all gather {jax.typeof(rhs.qvalue)=}")
     # with set_xla_metadata(MUST_FUSE=fwd_counter):
-    print(f"Mohit {len((lhs.shape[0] // rhs.shape[0],) * rhs.shape[0])}")
-    (num_groups,) = group_sizes.shape
-    print(f"Mohit group_sizes {num_groups=}")
-    print("Mohit lhs", lhs.shape)
-    print("Mohit rhs", rhs.shape)
-    out = tokamax_api.ragged_dot_general(
+    print(f"{len((lhs.shape[0] // rhs.shape[0],) * rhs.shape[0])=}")
+    print(f"group_sizes {jax.typeof(group_sizes)=}")
+    print(f"lhs {jax.typeof(lhs.qvalue)=}")
+    print(f"rhs {jax.typeof(rhs.qvalue)=}")
+    # out = tokamax_api.ragged_dot_general(
+    #     lhs=lhs,
+    #     rhs=rhs,
+    #     group_sizes=group_sizes,
+    #     ragged_dot_dimension_numbers=jax.lax.RaggedDotDimensionNumbers(
+    #         dot_dimension_numbers=(([1], [1]), ([], [])),
+    #         lhs_ragged_dimensions=[0],
+    #         rhs_group_dimensions=[0],
+    #     ),
+    #     precision=jax.lax.Precision.DEFAULT,
+    #     preferred_element_type=preferred_element_type,
+    #     group_offset=group_offset,
+    #     implementation="mosaic",
+    # )
+    out = tokamax_backend.gmm(
         lhs=lhs,
         rhs=rhs,
         group_sizes=group_sizes,
-        ragged_dot_dimension_numbers=jax.lax.RaggedDotDimensionNumbers(
-            dot_dimension_numbers=(([1], [1]), ([], [])),
-            lhs_ragged_dimensions=[0],
-            rhs_group_dimensions=[0],
-        ),
         precision=jax.lax.Precision.DEFAULT,
-        preferred_element_type=preferred_element_type,
+        out_dtype=preferred_element_type,
+        tiling=tiling[:3],
         group_offset=group_offset,
-        implementation="mosaic",
+        transpose_rhs=transpose_rhs,
+        interpret=interpret,
     )
   else:
     out = backend.gmm(
@@ -155,7 +166,7 @@ def _gmm_fwd(
         rhs,
         group_sizes,
         preferred_element_type,
-        tiling,
+        tiling[:3],
         group_offset,
         existing_out,
         transpose_rhs=transpose_rhs,
@@ -168,7 +179,7 @@ def _gmm_bwd(
     lhs_dtype: jax.typing.DTypeLike,
     rhs_dtype: jax.typing.DTypeLike,
     preferred_element_type: jnp.dtype,
-    tiling: tuple[int, int, int],
+    tiling: tuple[int, int, int, int, int, int, int, int, int],
     transpose_rhs: bool,
     interpret: bool,
     quantization_rule: qwix.QtRule | None,
@@ -226,41 +237,67 @@ def _gmm_bwd(
     )
   if use_tokamax_backend:
     # with set_xla_metadata(MUST_FUSE=dlhs_counter):
-    dlhs = tokamax_api.ragged_dot_general(
+    # dlhs = tokamax_api.ragged_dot_general(
+    #     lhs=dlhs_dout,
+    #     rhs=rhs,
+    #     group_sizes=group_sizes,
+    #     ragged_dot_dimension_numbers=jax.lax.RaggedDotDimensionNumbers(
+    #         dot_dimension_numbers=(([1], [2]), ([], [])),
+    #         lhs_ragged_dimensions=[0],
+    #         rhs_group_dimensions=[0],
+    #     ),
+    #     precision=jax.lax.Precision.DEFAULT,
+    #     preferred_element_type=preferred_element_type,
+    #     group_offset=group_offset,
+    #     implementation="mosaic",
+    # )
+    # drhs = tokamax_api.ragged_dot_general(
+    #     lhs.swapaxes(0, 1),
+    #     drhs_dout,
+    #     group_sizes=group_sizes,
+    #     ragged_dot_dimension_numbers=jax.lax.RaggedDotDimensionNumbers(
+    #         dot_dimension_numbers=(([0], [0]), ([], [])),
+    #         lhs_ragged_dimensions=[0],
+    #         rhs_group_dimensions=[],
+    #     ),
+    #     precision=jax.lax.Precision.DEFAULT,
+    #     preferred_element_type=preferred_element_type,
+    #     group_offset=group_offset,
+    #     implementation="mosaic",
+    # )
+    dlhs = tokamax_backend.gmm(
         lhs=dlhs_dout,
         rhs=rhs,
         group_sizes=group_sizes,
-        ragged_dot_dimension_numbers=jax.lax.RaggedDotDimensionNumbers(
-            dot_dimension_numbers=(([1], [2]), ([], [])),
-            lhs_ragged_dimensions=[0],
-            rhs_group_dimensions=[0],
-        ),
         precision=jax.lax.Precision.DEFAULT,
-        preferred_element_type=preferred_element_type,
+        out_dtype=lhs_dtype,
+        tiling=tiling[3:6],
         group_offset=group_offset,
-        implementation="mosaic",
+        transpose_rhs=not transpose_rhs,
+        interpret=interpret,
     )
-    drhs = tokamax_api.ragged_dot_general(
-        lhs.swapaxes(0, 1),
-        drhs_dout,
+    drhs = tokamax_backend.tgmm(
+        lhs=lhs.swapaxes(0, 1),
+        rhs=drhs_dout,
         group_sizes=group_sizes,
-        ragged_dot_dimension_numbers=jax.lax.RaggedDotDimensionNumbers(
-            dot_dimension_numbers=(([0], [0]), ([], [])),
-            lhs_ragged_dimensions=[0],
-            rhs_group_dimensions=[],
-        ),
         precision=jax.lax.Precision.DEFAULT,
-        preferred_element_type=preferred_element_type,
+        out_dtype=rhs_dtype,
+        tiling=tiling[-3:],
         group_offset=group_offset,
-        implementation="mosaic",
+        num_actual_groups=num_actual_groups,
+        interpret=interpret,
     )
+    if quantization_rule and quantization_rule.bwd_qtype:
+      # if quantization_rule.weight_calibration_method.startswith("fixed") and isinstance(rhs, qpl.QArray):
+      print("am I doing psum_scatter")
+      drhs = jax.lax.psum_scatter(drhs, "fsdp", scatter_dimension=0, tiled=True)
   else:
     dlhs = backend.gmm(
         dlhs_dout,
         rhs,
         group_sizes,
         lhs_dtype,
-        tiling,
+        tiling[3:6],
         group_offset,
         transpose_rhs=not transpose_rhs,
         interpret=interpret,
@@ -270,14 +307,11 @@ def _gmm_bwd(
         drhs_dout,
         group_sizes,
         rhs_dtype,
-        tiling,
+        tiling[-3:],
         group_offset,
         num_actual_groups,
         interpret=interpret,
     )
-
-  if quantization_rule and quantization_rule.bwd_qtype:
-    drhs = jax.lax.psum_scatter(drhs, "fsdp", scatter_dimension=0, tiled=True)
 
   # NOTE: If the rhs transposition is fused into the forward pass we need to
   # return the transpose of the rhs gradient that we calculated above.

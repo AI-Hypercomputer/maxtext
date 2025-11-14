@@ -285,7 +285,7 @@ def rl_train(tmvp_config):
   # Setup metrics logging
   max_logging.log(f"Tensorboard logs directory: {tmvp_config.tensorboard_dir}")
   metrics_logging_options = metrics_logger.MetricsLoggerOptions(
-  log_dir=tmvp_config.tensorboard_dir, flush_every_n_steps=tmvp_config.log_period
+      log_dir=tmvp_config.tensorboard_dir, flush_every_n_steps=tmvp_config.log_period
   )
 
   profiler_options = None
@@ -335,7 +335,7 @@ def rl_train(tmvp_config):
           rollout_vllm_hbm_utilization=tmvp_config.hbm_utilization_vllm,
           rollout_vllm_tpu_backend_type="jax",
           rollout_vllm_swap_space_size_gb=tmvp_config.swap_space_vllm_gb,
-        ),
+      ),
   )
   grpo_config = GrpoConfig(
       num_generations=tmvp_config.num_generations,

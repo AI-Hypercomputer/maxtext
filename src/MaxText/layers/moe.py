@@ -784,7 +784,7 @@ class RoutedMoE(nnx.Module):
     """Perform sparse matrix multiplication of inputs and Experts."""
 
     def gmm(inputs, kernel, tiling, group_sizes, expert_assignments):
-      pad_length = self.config.tile_batch_seq
+      pad_length = self.config.tile_fwd_batch_seq
       hs_shape = inputs.shape
       # pad length is the 1st dimension of tiling size in gmm call
       if inputs.shape[0] != expert_assignments.shape[0]:
@@ -807,6 +807,12 @@ class RoutedMoE(nnx.Module):
           min(tiling[0], m),
           min(tiling[1], k),
           min(tiling[2], n),
+          min(tiling[3], m),
+          min(tiling[4], k),
+          min(tiling[5], n),
+          min(tiling[6], m),
+          min(tiling[7], k),
+          min(tiling[8], n),
       )
       if self.config.megablox:
         output = mblx.gmm(
@@ -1028,6 +1034,7 @@ class RoutedMoE(nnx.Module):
                 global_sorted_experts=selected_experts,
                 use_custom_sort_vjp=self.config.use_custom_sort_vjp,
             )
+            print(f"moe.py {group_sizes.shape=}")
 
       if self.config.mlp_bias:
         w0_bias, w1_bias, wo_bias = self.transform_bias(selected_experts, w0_bias, w1_bias, wo_bias)
@@ -1038,14 +1045,26 @@ class RoutedMoE(nnx.Module):
           expert_assignments=selected_experts,
       )
       wi_tile_size = (
-          self.config.tile_batch_seq,
-          self.config.tile_embed_dim,
-          self.config.tile_mlp_dim,
+          self.config.tile_fwd_batch_seq,
+          self.config.tile_fwd_embed_dim,
+          self.config.tile_fwd_mlp_dim,
+          self.config.tile_dlhs_batch_seq,
+          self.config.tile_dlhs_embed_dim,
+          self.config.tile_dlhs_mlp_dim,
+          self.config.tile_drhs_batch_seq,
+          self.config.tile_drhs_embed_dim,
+          self.config.tile_drhs_mlp_dim,
       )
       wo_tile_size = (
-          self.config.tile_batch_seq,
-          self.config.tile_mlp_dim,
-          self.config.tile_embed_dim,
+          self.config.tile_fwd_batch_seq,
+          self.config.tile_fwd_mlp_dim,
+          self.config.tile_fwd_embed_dim,
+          self.config.tile_dlhs_batch_seq,
+          self.config.tile_dlhs_mlp_dim,
+          self.config.tile_dlhs_embed_dim,
+          self.config.tile_drhs_batch_seq,
+          self.config.tile_drhs_mlp_dim,
+          self.config.tile_drhs_embed_dim,
       )
       layer_w0 = gmm_fn(x, w0, tiling=wi_tile_size)
       if self.get_tensor_transpose_parallelism_size() > 1:
