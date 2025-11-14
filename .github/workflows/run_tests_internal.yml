@@ -78,7 +78,13 @@ jobs:
           else
             FINAL_PYTEST_MARKER="${{ inputs.pytest_marker }} and not scheduled_only"
           fi
-          python3 -m pip install -e . --no-dependencies
-          [ "${{ inputs.total_workers }}" -gt 1 ] && python3 -m pip install --quiet pytest-split && SPLIT_ARGS="--splits ${{ inputs.total_workers }} --group ${{ inputs.worker_group }}" || SPLIT_ARGS=""
+          if ! command -v uv; then
+            python3 -m pip install -U pip
+            python3 -m pip install uv
+          fi
+          [ -d "$GITHUB_WORKSPACE"/venv ] || uv venv --python 3.12 "$GITHUB_WORKSPACE"/venv
+          . "$GITHUB_WORKSPACE"/venv/bin/activate
+          uv pip install --no-deps -e .
+          [ "${{ inputs.total_workers }}" -gt 1 ] && uv pip install --quiet pytest-split && SPLIT_ARGS="--splits ${{ inputs.total_workers }} --group ${{ inputs.worker_group }}" || SPLIT_ARGS=""
           export LIBTPU_INIT_ARGS='--xla_tpu_scoped_vmem_limit_kib=65536'
           python3 -m pytest ${{ inputs.pytest_addopts }} -v -m "${FINAL_PYTEST_MARKER}" --durations=0 $SPLIT_ARGS
