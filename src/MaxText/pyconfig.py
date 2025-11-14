@@ -78,7 +78,7 @@ def validate_shard_mode(
     max_logging.log("Warning: explicit shard mode is an experimental feature.")
 
     # Check for unsupported decoder blocks
-    supported_decoders = {"simple", "simple_mlp", "llama2"}
+    supported_decoders = {"simple", "simple_mlp", "llama2", "attention_only", "routed_only"}
     if decoder_block not in supported_decoders:
       raise ValueError(
           f"Decoder '{decoder_block}' is not supported with 'explicit' sharding. "

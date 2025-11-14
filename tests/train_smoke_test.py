@@ -35,7 +35,7 @@ class Train(unittest.TestCase):
             f"base_output_directory=gs://runner-maxtext-logs",
             "run_name=runner_test",
             r"dataset_path=gs://maxtext-dataset",
-            "base_emb_dim=8",
+            "base_emb_dim=512",
             "base_num_query_heads=4",
             "base_num_kv_heads=4",
             "base_mlp_dim=32",
@@ -50,6 +50,7 @@ class Train(unittest.TestCase):
             "enable_goodput_recording=False",
             "enable_checkpoint_cloud_logger=False",
             "monitor_goodput=False",
+            "shard_mode=explicit",
         ]
     )
 

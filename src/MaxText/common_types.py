@@ -92,6 +92,8 @@ class DecoderBlockType(enum.Enum):
   SIMPLE = "simple"
   SIMPLE_MLP = "simple_mlp"
   LLAMA4 = "llama4"
+  ATTENTION_ONLY = "attention_only"
+  ROUTED_ONLY = "routed_only"
 
 
 class AttentionType(enum.Enum):
