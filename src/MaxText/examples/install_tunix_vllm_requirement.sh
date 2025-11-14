@@ -19,7 +19,15 @@
 set -e
 set -x
 
+<<<<<<< HEAD
+<<<<<<< HEAD
 uv pip uninstall jax jaxlib libtpu
+=======
+yes | uv pip uninstall jax jaxlib libtpu
+>>>>>>> 08e2cdb19 (Add GSPO and small fixes)
+=======
+uv pip uninstall jax jaxlib libtpu
+>>>>>>> de8d3d1ce (Fix)
 
 uv pip install aiohttp==3.12.15
 

@@ -20,6 +20,14 @@ This tutorial demonstrates step-by-step instructions for setting up the environm
 
 GRPO is an RL algorithm designed to enhance the reasoning abilities of LLMs. It is a variant of Proximal Policy Optimization (PPO) that reduces memory usage by eliminating the need for a separate value function model. GRPO works by generating multiple responses for a given prompt, evaluating these responses using a reward model, and then calculating a relative advantage based on the group's performance to update the policy.
 
+GSPO support
+Some workloads prefer Group Sequence Policy Optimization (GSPO), which uses the same infrastructure but a different loss.  
+To switch from GRPO to GSPO, add the following override when invoking `train_rl.py` (or when building the `pyconfig` argv list):  
+```
+loss_algo=gspo-token
+```
+No other changes are required—the rest of this tutorial applies equally to GSPO runs.
+
 We use Tunix as the library for GRPO. 
 And we use vLLM as the library for efficient model inference and generation.
 
