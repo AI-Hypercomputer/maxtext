@@ -115,13 +115,13 @@ run_and_parse() {
   echo "===== Executing ${test}\t${dp}\t${tpsp}\t${fsdp} ====="
   eval "$cmd" 2>&1 | tee "$stdout"
   # Exclude the warning steps for warning up and last step for tracing
-  ths=$(grep 'Tokens/s/device:' "$stdout" | sed '1,'"${WARMUP_STEPS}"'d;$d' | awk -F'Tokens/s/device: ' '{print $2}' | awk -F',' '{print $1}')
+  std=$(grep 'Tokens/s/device:' "$stdout" | sed '1,'"${WARMUP_STEPS}"'d;$d' | awk -F'Tokens/s/device: ' '{print $2}' | awk -F',' '{print $1}')
 
-  if [ -z "$ths" ]; then
+  if [ -z "$std" ]; then
     mean="NA"
     stddev="NA"
   else
-    mean_stddev=$(echo "$ths" | python3 -c "import sys; import numpy as np
+    mean_stddev=$(echo "$std" | python3 -c "import sys; import numpy as np
 arr = [float(l.strip()) for l in sys.stdin if l.strip()]
 if arr:
   print(f'{np.mean(arr):.2f}\t{np.std(arr, ddof=1):.2f}')

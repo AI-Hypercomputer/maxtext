@@ -130,7 +130,9 @@ class VllmWeightMapping:
       return STANDALONE_VLLM_WEIGHT_MAPPING[self.model_name].to_hf_mapping()
 
     config = self.config
-    mapping = self.convert_hf_map_to_sharding_map(PARAM_MAPPING[self.model_name](config, scan_layers=True))
+    mapping = self.convert_hf_map_to_sharding_map(
+        PARAM_MAPPING[self.model_name](config, maxtext_config=None, scan_layers=True)
+    )
     return mapping
 
   def to_hf_transpose_keys(self):

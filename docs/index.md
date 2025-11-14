@@ -28,7 +28,7 @@ Check out our [Read The Docs site](https://maxtext.readthedocs.io/en/latest/) or
 
 ## 🔥 Latest news 🔥
 
-* [September 5, 2025] MaxText has moved to an `src` layout as part of [RESTRUCTURE.md]
+* [September 5, 2025] MaxText has moved to an `src` layout as part of [RESTRUCTURE.md](https://github.com/AI-Hypercomputer/maxtext/blob/main/RESTRUCTURE.md).
 * [August 13, 2025] The Qwen3 2507 MoE family of models is now supported: MoEs: 235B Thinking & 280B Coder as well as existing dense models: 0.6B, 4B, 8B, 14B, and 32B.
 * [July 27, 2025] Updated TFLOPS/s calculation ([PR](https://github.com/AI-Hypercomputer/maxtext/pull/1988)) to account for causal attention, dividing the attention flops in half. Accounted for sliding window and chunked attention reduced attention flops in [PR](https://github.com/AI-Hypercomputer/maxtext/pull/2009) and [PR](https://github.com/AI-Hypercomputer/maxtext/pull/2030). Changes impact large sequence configs, as explained in this [doc](https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/guides/performance_metrics.md)
 * [July 16, 2025] We will be restructuring the MaxText repository for improved organization and clarity. Please review the [proposed structure](https://github.com/AI-Hypercomputer/maxtext/blob/main/RESTRUCTURE.md) and provide feedback.

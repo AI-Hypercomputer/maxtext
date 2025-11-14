@@ -469,6 +469,8 @@ qwen3_coder_480b_a35b_config = transformers.Qwen3MoeConfig(
     vocab_size=151936,
 )
 
+# copy from https://huggingface.co/deepseek-ai/DeepSeek-V3/blob/main/config.json
+# remove fp8 quantization_config, since we are using bf16
 deepseek3_671b_dict = {
     "architectures": ["DeepseekV3ForCausalLM"],
     "attention_bias": False,
@@ -527,7 +529,157 @@ deepseek3_671b_dict = {
 }
 deepseek3_671b_config = transformers.DeepseekV3Config(**deepseek3_671b_dict)
 
-# {maxtext model name: hf model config}
+# copy from https://huggingface.co/openai/gpt-oss-20b/blob/main/config.json
+# remove mxfp4 quantization_config, since we are using bf16
+gpt_oss_20b_dict = {
+    "architectures": ["GptOssForCausalLM"],
+    "attention_bias": True,
+    "attention_dropout": 0.0,
+    "eos_token_id": 200002,
+    "experts_per_token": 4,
+    "head_dim": 64,
+    "hidden_act": "silu",
+    "hidden_size": 2880,
+    "initial_context_length": 4096,
+    "initializer_range": 0.02,
+    "intermediate_size": 2880,
+    "layer_types": [
+        "sliding_attention",
+        "full_attention",
+        "sliding_attention",
+        "full_attention",
+        "sliding_attention",
+        "full_attention",
+        "sliding_attention",
+        "full_attention",
+        "sliding_attention",
+        "full_attention",
+        "sliding_attention",
+        "full_attention",
+        "sliding_attention",
+        "full_attention",
+        "sliding_attention",
+        "full_attention",
+        "sliding_attention",
+        "full_attention",
+        "sliding_attention",
+        "full_attention",
+        "sliding_attention",
+        "full_attention",
+        "sliding_attention",
+        "full_attention",
+    ],
+    "max_position_embeddings": 131072,
+    "model_type": "gpt_oss",
+    "num_attention_heads": 64,
+    "num_experts_per_tok": 4,
+    "num_hidden_layers": 24,
+    "num_key_value_heads": 8,
+    "num_local_experts": 32,
+    "output_router_logits": False,
+    "pad_token_id": 199999,
+    "rms_norm_eps": 1e-05,
+    "rope_scaling": {
+        "beta_fast": 32.0,
+        "beta_slow": 1.0,
+        "factor": 32.0,
+        "original_max_position_embeddings": 4096,
+        "rope_type": "yarn",
+        "truncate": False,
+    },
+    "rope_theta": 150000,
+    "router_aux_loss_coef": 0.9,
+    "sliding_window": 128,
+    "swiglu_limit": 7.0,
+    "tie_word_embeddings": False,
+    "transformers_version": "4.55.0.dev0",
+    "use_cache": True,
+    "vocab_size": 201088,
+}
+gpt_oss_20b_config = transformers.GptOssConfig(**gpt_oss_20b_dict)
+
+# copy from https://huggingface.co/openai/gpt-oss-120b/blob/main/config.json
+# remove mxfp4 quantization_config, since we are using bf16
+gpt_oss_120b_dict = {
+    "architectures": ["GptOssForCausalLM"],
+    "attention_bias": True,
+    "attention_dropout": 0.0,
+    "eos_token_id": 200002,
+    "experts_per_token": 4,
+    "head_dim": 64,
+    "hidden_act": "silu",
+    "hidden_size": 2880,
+    "initial_context_length": 4096,
+    "initializer_range": 0.02,
+    "intermediate_size": 2880,
+    "layer_types": [
+        "sliding_attention",
+        "full_attention",
+        "sliding_attention",
+        "full_attention",
+        "sliding_attention",
+        "full_attention",
+        "sliding_attention",
+        "full_attention",
+        "sliding_attention",
+        "full_attention",
+        "sliding_attention",
+        "full_attention",
+        "sliding_attention",
+        "full_attention",
+        "sliding_attention",
+        "full_attention",
+        "sliding_attention",
+        "full_attention",
+        "sliding_attention",
+        "full_attention",
+        "sliding_attention",
+        "full_attention",
+        "sliding_attention",
+        "full_attention",
+        "sliding_attention",
+        "full_attention",
+        "sliding_attention",
+        "full_attention",
+        "sliding_attention",
+        "full_attention",
+        "sliding_attention",
+        "full_attention",
+        "sliding_attention",
+        "full_attention",
+        "sliding_attention",
+        "full_attention",
+    ],
+    "max_position_embeddings": 131072,
+    "model_type": "gpt_oss",
+    "num_attention_heads": 64,
+    "num_experts_per_tok": 4,
+    "num_hidden_layers": 36,
+    "num_key_value_heads": 8,
+    "num_local_experts": 128,
+    "output_router_logits": False,
+    "pad_token_id": 199999,
+    "rms_norm_eps": 1e-05,
+    "rope_scaling": {
+        "beta_fast": 32.0,
+        "beta_slow": 1.0,
+        "factor": 32.0,
+        "original_max_position_embeddings": 4096,
+        "rope_type": "yarn",
+        "truncate": False,
+    },
+    "rope_theta": 150000,
+    "router_aux_loss_coef": 0.9,
+    "sliding_window": 128,
+    "swiglu_limit": 7.0,
+    "tie_word_embeddings": False,
+    "transformers_version": "4.55.0.dev0",
+    "use_cache": True,
+    "vocab_size": 201088,
+}
+gpt_oss_120b_config = transformers.GptOssConfig(**gpt_oss_120b_dict)
+
+
 qwen3_omni_30b_a3b_config = transformers.Qwen3OmniMoeConfig(
     # TODO(hengtaoguo): Pure-text Omni model, need to fill in visual/audio/code2wav parts
     architectures=["Qwen3OmniMoeForConditionalGeneration"],
@@ -539,6 +691,7 @@ qwen3_omni_30b_a3b_config = transformers.Qwen3OmniMoeConfig(
     },
 )
 
+# {maxtext model name: hf model config}
 HF_MODEL_CONFIGS = {
     "gemma2-2b": gemma2_2b_config,
     "gemma2-9b": gemma2_9b_config,
@@ -560,5 +713,7 @@ HF_MODEL_CONFIGS = {
     "qwen3-235b-a22b": qwen3_235b_a22b_thinking_2507_config,
     "qwen3-480b-a35b": qwen3_coder_480b_a35b_config,
     "deepseek3-671b": deepseek3_671b_config,
+    "gpt-oss-20b": gpt_oss_20b_config,
+    "gpt-oss-120b": gpt_oss_120b_config,
     "qwen3-omni-30b-a3b": qwen3_omni_30b_a3b_config,
 }

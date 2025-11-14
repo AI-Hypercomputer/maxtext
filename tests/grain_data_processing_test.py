@@ -114,8 +114,8 @@ class GrainArrayRecordProcessingWithMultiSourceBlendingTest(GrainArrayRecordProc
     temp_dir = tempfile.gettempdir()
     # We use the same dataset for testing, but you can use different datasets by changing the file patterns.
     grain_train_files = [
-        f"{temp_dir}/gcsfuse/array-record/c4/en/3.0.1/c4-train.array_record*:0.3",
-        f"{temp_dir}/gcsfuse/array-record/c4/en/3.0.1/c4-train.array_record*:0.7",
+        f"{temp_dir}/gcsfuse/array-record/c4/en/3.0.1/c4-train.array_record*,0.3",
+        f"{temp_dir}/gcsfuse/array-record/c4/en/3.0.1/c4-train.array_record*,0.7",
     ]
     grain_train_files = ";".join(grain_train_files)
     self.config = pyconfig.initialize(
@@ -165,6 +165,7 @@ class GrainParquetProcessingTest(unittest.TestCase):
         grain_file_type="parquet",
         grain_train_files=os.path.join(temp_dir, "gcsfuse", "hf", "c4", "c4-train-00000-of-01637.parquet"),
         grain_worker_count=1,
+        grain_per_worker_buffer_size=1,
         tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizer"),
         enable_checkpointing=False,
     )

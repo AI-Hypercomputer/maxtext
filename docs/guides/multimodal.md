@@ -19,13 +19,13 @@ Multimodal Large Language Models (LLMs) extend traditional text-only models by i
 - **Modality-Specific Encoders**: Modality-specific encoders will transform the preprocessed data into high-dimensional representations (e.g., vision transformers for images).
 - **Projection and Merge**: Projection layers will map these modality-specific embeddings into the shared embedding space of the language model, usually aligned with the dimension of text embeddings. These projected embeddings are then merged with text token embeddings, allowing the unified model to process and reason over multiple modalities simultaneously within a single coherent framework.
 
-
-<img src="../_static/multimodal_overview.png" alt="Illustration of multimodal MaxText." width="60%">
+![Illustration of multimodal MaxText.](../_static/multimodal_overview.png)
 *Figure 1: Overview of multimodal dataflow in MaxText.*
+
 
 ## Checkpoint Conversion
 
-Recently we have onboarded a new centralized tool for bidirectional checkpoint conversion between MaxText and HuggingFace (README). This tool is used for the Gemma3 model family. Use this command to convert an unscanned checkpoint from HuggingFace to MaxText, and save it to `MAXTEXT_CKPT_GCS_PATH`:
+Recently we have onboarded a new centralized tool for bidirectional checkpoint conversion between MaxText and HuggingFace ([README](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/utils/ckpt_conversion/README.md)). This tool is used for the Gemma3 model family. Use this command to convert an unscanned checkpoint from HuggingFace to MaxText, and save it to `MAXTEXT_CKPT_GCS_PATH`:
 
 ```shell
 export HF_ACCESS_TOKEN=hf_...
@@ -38,7 +38,7 @@ python -m MaxText.utils.ckpt_conversion.to_maxtext MaxText/configs/base.yml \
     scan_layers=false
 ```
 
-For the Llama4 model family, we are using a separate checkpoint conversion script (of note,we will gradually migrate all checkpoint conversion scripts to the above consolidated tool soon):
+For the Llama4 model family, we are using a separate checkpoint conversion script (of note, we will gradually migrate all checkpoint conversion scripts to the above consolidated tool soon):
 
 ```shell
 export LOCAL_HF_MODEL_PATH=...  # Need to pre-download the safetensors from HuggingFace
@@ -107,7 +107,7 @@ For larger models such as Llama4-Scout/Maverick, we suggest to run the decoding 
 
 ## Supervised Fine-Tuning
 
-Supervised Fine-Tuning (SFT) of multimodal LLMs in MaxText focuses specifically on post-training optimization rather than pre-training from scratch, which is currently not supported. The SFT process typically involves training on Visual Question Answering (VQA) datasets where the model learns to generate accurate text responses based on both visual and textual inputs. During this fine-tuning phase, we recommend to freeze the pre-trained encoder layers (such as vision transformers) to preserve their learned visual representations, while the projection layers and LLM decoder components remain trainable. This selective training strategy allows the model to adapt the cross-modal alignment and text generation capabilities without disrupting the robust feature extraction abilities of the encoders, ultimately leading to improved performance on multimodal understanding and reasoning tasks while maintaining computational efficiency. This is achieved by setting `freeze_vision_encoder_params=True` in [sft-vision-chartqa.yml](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/configs/sft-vision-chartqa.yml).
+Supervised Fine-Tuning (SFT) of multimodal LLMs in MaxText focuses specifically on post-training; we don't yet support pre-training multimodal models from scratch. The SFT process typically involves training on Visual Question Answering (VQA) datasets where the model learns to generate accurate text responses based on both visual and textual inputs. During this fine-tuning phase, we recommend to freeze the pre-trained encoder layers (such as vision transformers) to preserve their learned visual representations, while the projection layers and LLM decoder components remain trainable. This selective training strategy allows the model to adapt the cross-modal alignment and text generation capabilities without disrupting the robust feature extraction abilities of the encoders, ultimately leading to improved performance on multimodal understanding and reasoning tasks while maintaining computational efficiency. This is achieved by setting `freeze_vision_encoder_params=True` in [sft-vision-chartqa.yml](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/configs/sft-vision-chartqa.yml).
 
 Here, we use [ChartQA](https://huggingface.co/datasets/HuggingFaceM4/ChartQA) as an example to demonstrate SFT functionality:
 
@@ -136,7 +136,13 @@ python -m MaxText.sft_trainer \
 
 ## Other Recommendations
 - **Setting appropriate prefill length**: To prevent truncation and ensure your full input (text + image) is processed, the prefill length should be set longer than the total combined length of your text tokens and image tokens. This combined length makes up the final sequence fed to the decoder. We recommend to estimate the combined sequence length from your full input and then add a buffer when setting your `max_prefill_predict_length` for decoding. Token estimation rules:
-    - For text tokens, a good estimate is $\text{Text Tokens} \approx 1.3 \times \text{Number of Words in Prompt}$.
-    - For Gemma3, each image is resized to 896*896 and contributes 256 tokens. $\text{Total Tokens} \approx \text{Text Tokens} + \text{Number of Images} * 256$.
-    - For Llama4 models, each image is dynamically tiled based on its size, with each resulting tile contributing 144 tokens. $\text{Total Tokens} \approx \text{Text Tokens} + \text{Number of Tiles of Image1} * 144 + ... + \text{Number of Tiles of ImageN} * 144$.
+    - For text tokens, a good estimate is:
+        
+        $\text{Text Tokens} \approx 1.3 \times \text{Number of Words in Prompt}$.
+    - For Gemma3, each image is resized to 896*896 and contributes 256 tokens: 
+        
+        $\text{Total Tokens} \approx \text{Text Tokens} + \text{Number of Images} * 256$.
+    - For Llama4 models, each image is dynamically tiled based on its size, with each resulting tile contributing 144 tokens:
+        
+        $\text{Total Tokens} \approx \text{Text Tokens} + 144 \times \sum_{i=1}^{N} \text{Number of Tiles of Image}_i$.
 
