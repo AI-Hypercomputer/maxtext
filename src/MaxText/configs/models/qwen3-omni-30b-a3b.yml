@@ -34,7 +34,25 @@ base_moe_mlp_dim: 768
 norm_topk_prob: true
 
 # RoPE Settings
-rope_max_timescale: 10_000_000
+rope_max_timescale: 1_000_000
+max_position_embeddings: 65536
 
 # General Model Settings
 enable_dropout: False
+
+# Vision Encoder Configuration
+# Based on https://github.com/huggingface/transformers/blob/main/src/transformers/models/qwen3_omni_moe/configuration_qwen3_omni_moe.py
+image_size_for_vit: 768
+hidden_size_for_vit: 1152
+intermediate_size_for_vit: 4304
+num_attention_heads_for_vit: 16
+num_hidden_layers_for_vit: 27
+num_channels_for_vit: 3
+patch_size_for_vit: 16
+temporal_patch_size_for_vit: 2
+spatial_merge_size_for_vit: 2
+out_hidden_size_for_vit: 2048
+num_position_embeddings_for_vit: 2304
+deepstack_visual_indexes_for_vit: [8, 16, 24]
+
+use_multimodal: true
