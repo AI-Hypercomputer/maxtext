@@ -63,7 +63,7 @@ def pytest_configure(config):
   for m in [
       "tpu_only: tests that require TPU hardware",
       "external_serving: JetStream / serving / decode server components",
-      "external_training: SFT / tunix / goodput integrations",
+      "external_training: goodput integrations",
       "decoupled: marked on tests that are not skipped due to GCE deps, when DECOUPLE_GCLOUD=TRUE",
   ]:
     config.addinivalue_line("markers", m)

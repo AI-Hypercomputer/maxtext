@@ -40,5 +40,4 @@ tqdm>=4.67.1
 transformers>=4.57.0
 urllib3>=2.5.0
 jax==0.7.1
-
-
+git+https://github.com/google/tunix.git

@@ -12,16 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Centralized decoupling helpers for JetStream / Tunix / cloud diagnostics / GCS.
+"""Centralized decoupling helpers.
 
-Set DECOUPLE_GCLOUD=TRUE in the environment to disable optional Google Cloud / JetStream / Tunix
+Set DECOUPLE_GCLOUD=TRUE in the environment to disable optional Google Cloud / JetStream / GCS / diagnostics
 integrations while still allowing local unit tests to import modules. This module provides:
 
 - is_decoupled(): returns True if decoupled flag set.
 - cloud_diagnostics(): tuple(diagnostic, debug_configuration, diagnostic_configuration, stack_trace_configuration)
   providing either real objects or lightweight stubs.
 - jetstream(): returns a namespace-like object exposing Engine, Devices, ResultTokens etc. or stubs.
-- tunix(): returns peft_trainer, DataHooks, TrainingHooks stubs or real imports if available and not decoupled.
 - gcs_storage(): returns google.cloud.storage module or stub namespace with Client/Blob/Bucket.
 - goodput_modules(): returns (goodput, monitoring, is_stub) for ml_goodput_measurement integration or stubs.
 - monitoring_modules(): returns (monitoring_v3, metric_pb2, monitored_resource_pb2, GoogleAPIError, is_stub)
@@ -161,37 +160,6 @@ def jetstream():
             return _jetstream_stubs()
         raise
 
-# ---------------- Tunix -----------------
-
-def _tunix_stubs():
-    class DataHooks:  # simple base type
-        def __init__(self, *a, **k):
-            pass
-    class TrainingHooks:  # simple base type
-        def __init__(self, *a, **k):
-            pass
-    class _StubPeftTrainer:
-        def __init__(self, *a, **k):
-            pass
-    peft_trainer = SimpleNamespace(PeftTrainer=_StubPeftTrainer)
-    hooks = SimpleNamespace(DataHooks=DataHooks, TrainingHooks=TrainingHooks)
-    return peft_trainer, hooks
-
-def tunix():
-    try:
-        if importlib.util.find_spec("tunix") is None:
-            if is_decoupled():
-                print("[DECOUPLED NO-OP] tunix: dependency missing; using stubs.")
-                return _tunix_stubs()
-            raise ModuleNotFoundError("tunix")
-        from tunix.sft import peft_trainer  # type: ignore
-        from tunix.sft import hooks as tunix_hooks  # type: ignore
-        return peft_trainer, tunix_hooks
-    except ModuleNotFoundError:
-        if is_decoupled():
-            print("[DECOUPLED NO-OP] tunix: dependency missing; using stubs.")
-            return _tunix_stubs()
-        raise
 
 # ---------------- GCS -----------------
 
@@ -274,7 +242,7 @@ def goodput_modules():
             return _goodput_stubs()
         raise
 
-__all__ = ["is_decoupled", "cloud_diagnostics", "jetstream", "tunix", "gcs_storage", "goodput_modules"]
+__all__ = ["is_decoupled", "cloud_diagnostics", "jetstream", "gcs_storage", "goodput_modules"]
 
 # ---------------- Cloud Monitoring (monitoring_v3 / metric_pb2) -----------------
 
