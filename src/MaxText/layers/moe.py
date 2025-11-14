@@ -808,7 +808,7 @@ class RoutedMoE(nnx.Module):
           min(tiling[1], k),
           min(tiling[2], n),
       )
-      if self.config.use_tokamax_gmm or self.config.megablox:
+      if self.config.megablox:
         output = mblx.gmm(
             lhs=inputs,
             rhs=kernel,
@@ -893,15 +893,24 @@ class RoutedMoE(nnx.Module):
 
     # w0, w1, wo needs to be un sharded on fsdp / fsdp_transpose axis, so use
     # mlp_no_fsdp axis
-    if self.config.fsdp_shard_on_exp:
-      # special sharding for dsv3 to remove overhead between gmm/AG
-      w0_pspec = nn.logical_to_mesh_axes(("embed_tensor_transpose", None, "mlp_no_fsdp"))
-      w1_pspec = nn.logical_to_mesh_axes(("embed_tensor_transpose", None, "mlp_no_fsdp"))
-      wo_pspec = nn.logical_to_mesh_axes(("embed_tensor_transpose", "mlp_no_fsdp", None))
+    if self.config.quantization:
+      if not self.config.fsdp_shard_on_exp:
+        raise ValueError("Quantization is only supported with fsdp_shard_on_exp=True.")
+      print(f"Mohit self.wi_kernel_axes: {self.wi_kernel_axes=}")
+      print(f"Mohit self.wo_kernel_axes: {self.wo_kernel_axes=}")
+      w0_pspec = nn.logical_to_mesh_axes(self.wi_kernel_axes)
+      w1_pspec = nn.logical_to_mesh_axes(self.wi_kernel_axes)
+      wo_pspec = nn.logical_to_mesh_axes(self.wo_kernel_axes)
     else:
-      w0_pspec = nn.logical_to_mesh_axes(("exp", "embed_tensor_transpose", "mlp_no_fsdp"))
-      w1_pspec = nn.logical_to_mesh_axes(("exp", "embed_tensor_transpose", "mlp_no_fsdp"))
-      wo_pspec = nn.logical_to_mesh_axes(("exp", "mlp_no_fsdp", "embed_tensor_transpose"))
+      if self.config.fsdp_shard_on_exp:
+        # special sharding for dsv3 to remove overhead between gmm/AG
+        w0_pspec = nn.logical_to_mesh_axes(("embed_tensor_transpose", None, "mlp_no_fsdp"))
+        w1_pspec = nn.logical_to_mesh_axes(("embed_tensor_transpose", None, "mlp_no_fsdp"))
+        wo_pspec = nn.logical_to_mesh_axes(("embed_tensor_transpose", "mlp_no_fsdp", None))
+      else:
+        w0_pspec = nn.logical_to_mesh_axes(("exp", "embed_tensor_transpose", "mlp_no_fsdp"))
+        w1_pspec = nn.logical_to_mesh_axes(("exp", "embed_tensor_transpose", "mlp_no_fsdp"))
+        wo_pspec = nn.logical_to_mesh_axes(("exp", "mlp_no_fsdp", "embed_tensor_transpose"))
     if isinstance(w0_kernel, aqt.QTensor):
       w0_pspec = aqt.partition_spec(w0_pspec, (1,), w0_kernel.dtype, use_bias=False)
     if isinstance(w1_kernel, aqt.QTensor):

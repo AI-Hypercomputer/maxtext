@@ -17,18 +17,14 @@
 # pylint: disable=too-many-positional-arguments
 
 import functools
-import itertools
 import dataclasses
 from typing import Literal
 import jax
 import jax.numpy as jnp
-from jax.experimental.xla_metadata import set_xla_metadata
 from MaxText.kernels.megablox import backend
-import tokamax
+from tokamax._src.ops.ragged_dot import api as tokamax_api
 import qwix
 import qwix.pallas as qpl
-
-_counter = itertools.count()
 
 
 def gmm(
@@ -64,7 +60,7 @@ def gmm(
       )
 
   gmm_fwd_bwd = lambda *args: _gmm_fwd(*args)[0]  # pylint: disable=C3001
-  gmm_fwd_bwd = jax.custom_vjp(gmm_fwd_bwd, nondiff_argnums=(3, 4, 7, 8, 9))
+  gmm_fwd_bwd = jax.custom_vjp(gmm_fwd_bwd, nondiff_argnums=(3, 4, 7, 8, 9, 10))
   gmm_fwd_bwd.defvjp(_gmm_fwd, functools.partial(_gmm_bwd, lhs.dtype, rhs.dtype))
   return gmm_fwd_bwd(
       lhs,
@@ -103,17 +99,18 @@ def _gmm_fwd(
     ],
 ]:
   """Forward function for GMM VJP."""
-  fwd_counter = next(_counter)
+  # fwd_counter = next(_counter)
+  print(f"Mohit {quantization_rule=}")
   if quantization_rule:
     if quantization_rule.act_qtype:
-      with set_xla_metadata(MUST_FUSE=fwd_counter):
-        lhs = qpl.quantize(
-            lhs,
-            quantization_rule.act_qtype,
-            channelwise_axes=[] if quantization_rule.disable_channelwise_axes else [0],
-            calibration_method=quantization_rule.act_calibration_method,
-            scale_dtype=jnp.float32,
-        )
+      # with set_xla_metadata(MUST_FUSE=fwd_counter):
+      lhs = qpl.quantize(
+          lhs,
+          quantization_rule.act_qtype,
+          channelwise_axes=[] if quantization_rule.disable_channelwise_axes else [0],
+          calibration_method=quantization_rule.act_calibration_method,
+          scale_dtype=jnp.float32,
+      )
     if quantization_rule.weight_qtype:
       rhs = qpl.quantize(
           rhs,
@@ -126,25 +123,32 @@ def _gmm_fwd(
           scale_dtype=jnp.float32,
       )
       # QAG is only supported for following conditions
+      print(f"Mohit before all gather {rhs.qvalue.shape=}")
       if quantization_rule.weight_calibration_method.startswith("fixed") and isinstance(rhs, qpl.QArray):
         rhs_qvalue = jax.lax.all_gather(rhs.qvalue, "fsdp", axis=0, tiled=True)
         rhs = dataclasses.replace(rhs, qvalue=rhs_qvalue)
+        print(f"Mohit after all gather {rhs.qvalue.shape=}")
   if use_tokamax_backend:
-    with set_xla_metadata(MUST_FUSE=fwd_counter):
-      out = tokamax.ragged_dot_general(
-          lhs=lhs,
-          rhs=rhs,
-          group_sizes=group_sizes,
-          ragged_dot_dimension_numbers=tokamax.RaggedDotDimensionNumbers(
-              dot_dimension_numbers=(([1], [1]), ([], [])),
-              lhs_ragged_dimensions=[0],
-              rhs_group_dimensions=[0],
-          ),
-          precision=jax.lax.Precision.DEFAULT,
-          preferred_element_type=preferred_element_type,
-          group_offset=group_offset,
-          implementation="mosaic",
-      )
+    # with set_xla_metadata(MUST_FUSE=fwd_counter):
+    print(f"Mohit {len((lhs.shape[0] // rhs.shape[0],) * rhs.shape[0])}")
+    (num_groups,) = group_sizes.shape
+    print(f"Mohit group_sizes {num_groups=}")
+    print("Mohit lhs", lhs.shape)
+    print("Mohit rhs", rhs.shape)
+    out = tokamax_api.ragged_dot_general(
+        lhs=lhs,
+        rhs=rhs,
+        group_sizes=group_sizes,
+        ragged_dot_dimension_numbers=jax.lax.RaggedDotDimensionNumbers(
+            dot_dimension_numbers=(([1], [1]), ([], [])),
+            lhs_ragged_dimensions=[0],
+            rhs_group_dimensions=[0],
+        ),
+        precision=jax.lax.Precision.DEFAULT,
+        preferred_element_type=preferred_element_type,
+        group_offset=group_offset,
+        implementation="mosaic",
+    )
   else:
     out = backend.gmm(
         lhs,
@@ -178,7 +182,6 @@ def _gmm_bwd(
     grad: jnp.ndarray,
 ) -> tuple[jnp.ndarray, jnp.ndarray, None, None, jnp.ndarray]:
   """Backward function for throughput GMM VJP."""
-  del preferred_element_type
   lhs, rhs, group_sizes, group_offset = residual
   num_actual_groups = rhs.shape[0]
 
@@ -192,8 +195,8 @@ def _gmm_bwd(
   #  - drhs_dout: the incoming gradient used to calculate drhs.
 
   # dlhs_dout and drhs_dout can be different when quantization is enabled.
-  dlhs_counter = next(_counter)
-  drhs_counter = next(_counter)
+  # dlhs_counter = next(_counter)
+  # drhs_counter = next(_counter)
   dlhs_dout = grad
   drhs_dout = grad
   if isinstance(rhs, qpl.QArray):  # qvalue: [g, k, n] scale: [1, 1, n]
@@ -207,39 +210,37 @@ def _gmm_bwd(
     lhs = lhs.qvalue
   if quantization_rule and quantization_rule.bwd_qtype:
     # Enable backward pass quantization
-    with set_xla_metadata(MUST_FUSE=dlhs_counter):
-      dlhs_dout = qpl.quantize(
-          dlhs_dout,
-          quantization_rule.bwd_qtype,
-          channelwise_axes=[] if quantization_rule.disable_channelwise_axes else [0],
-          calibration_method=quantization_rule.bwd_calibration_method,
-          scale_dtype=jnp.float32,
-      )
-    with set_xla_metadata(MUST_FUSE=drhs_counter):
-      drhs_dout = qpl.quantize(
-          drhs_dout,
-          quantization_rule.bwd_qtype,
-          channelwise_axes=[] if quantization_rule.disable_channelwise_axes else [1],
-          calibration_method=quantization_rule.bwd_calibration_method,
-          scale_dtype=jnp.float32,
-      )
+    dlhs_dout = qpl.quantize(
+        dlhs_dout,
+        quantization_rule.bwd_qtype,
+        channelwise_axes=[] if quantization_rule.disable_channelwise_axes else [0],
+        calibration_method=quantization_rule.bwd_calibration_method,
+        scale_dtype=jnp.float32,
+    )
+    drhs_dout = qpl.quantize(
+        drhs_dout,
+        quantization_rule.bwd_qtype,
+        channelwise_axes=[] if quantization_rule.disable_channelwise_axes else [1],
+        calibration_method=quantization_rule.bwd_calibration_method,
+        scale_dtype=jnp.float32,
+    )
   if use_tokamax_backend:
-    with set_xla_metadata(MUST_FUSE=dlhs_counter):
-      dlhs = tokamax.ragged_dot_general(
-          lhs=dlhs_dout,
-          rhs=rhs,
-          group_sizes=group_sizes,
-          ragged_dot_dimension_numbers=jax.lax.RaggedDotDimensionNumbers(
-              dot_dimension_numbers=(([1], [2]), ([], [])),
-              lhs_ragged_dimensions=[0],
-              rhs_group_dimensions=[0],
-          ),
-          precision=jax.lax.Precision.DEFAULT,
-          preferred_element_type=preferred_element_type,
-          group_offset=group_offset,
-          implementation="mosaic",
-      )
-    drhs = tokamax.ragged_dot_general(
+    # with set_xla_metadata(MUST_FUSE=dlhs_counter):
+    dlhs = tokamax_api.ragged_dot_general(
+        lhs=dlhs_dout,
+        rhs=rhs,
+        group_sizes=group_sizes,
+        ragged_dot_dimension_numbers=jax.lax.RaggedDotDimensionNumbers(
+            dot_dimension_numbers=(([1], [2]), ([], [])),
+            lhs_ragged_dimensions=[0],
+            rhs_group_dimensions=[0],
+        ),
+        precision=jax.lax.Precision.DEFAULT,
+        preferred_element_type=preferred_element_type,
+        group_offset=group_offset,
+        implementation="mosaic",
+    )
+    drhs = tokamax_api.ragged_dot_general(
         lhs.swapaxes(0, 1),
         drhs_dout,
         group_sizes=group_sizes,

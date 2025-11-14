@@ -217,11 +217,6 @@ def validate_context_parallel_strategy_ring(
       raise ValueError("Ring context parallelism strategy (context_parallel_strategy='ring') is only supported on GPUs.")
 
 
-def validate_ragged_dot_usage(megablox, use_tokamax_gmm):
-  if use_tokamax_gmm and megablox:
-    raise ValueError("Setting both megablox and use_tokamax_gmm for ragged dot implementation not allowed")
-
-
 def validate_keys(keys):
   validate_attention_kernel(keys["attention"])
   validate_attention_type(keys["attention_type"])
@@ -247,8 +242,6 @@ def validate_keys(keys):
         keys["per_device_batch_size_increment"],
         keys["global_rampup_samples"],
     )
-  if keys["megablox"] and keys["use_tokamax_gmm"]:
-    validate_ragged_dot_usage(keys["megablox"], keys["use_tokamax_gmm"])
 
   # TODO remove after b/435512699 resolved
   if keys["context_parallel_size"] > 1 and keys["context_parallel_load_balance"] and keys["attention_type"] == "chunk":
