@@ -102,6 +102,7 @@ def get_maxtext_model(config, devices=None):
   model, mesh = model_creation_utils.create_nnx_model(config, devices)
   with mesh:
     tunix_model = TunixMaxTextAdapter(base_model=model)
+    print(tunix_model)
     tunix_model.config = None
   return tunix_model, mesh
 
