@@ -46,7 +46,7 @@ from flax.linen import partitioning as nn_partitioning
 
 from orbax import checkpoint as ocp
 
-from tunix.sft import peft_trainer, profiler
+from tunix.sft import metrics_logger, peft_trainer, profiler
 
 from MaxText import max_utils
 from MaxText import max_logging
@@ -80,7 +80,7 @@ def get_tunix_config(mt_config):
   )
 
   # Metrics configurations
-  metrics_logging_options = peft_trainer.metrics_logger.MetricsLoggerOptions(log_dir=mt_config.tensorboard_dir)
+  metrics_logging_options = metrics_logger.MetricsLoggerOptions(log_dir=mt_config.tensorboard_dir)
 
   # Profiler configurations
   profiler_options = None
