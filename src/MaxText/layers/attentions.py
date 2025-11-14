@@ -52,6 +52,7 @@ from MaxText.common_types import (
     MODEL_MODE_PREFILL,
     EP_AS_CONTEXT,
     AttentionType,
+    ShardMode,
 )
 from MaxText.sharding import maybe_shard_with_logical
 from MaxText.inference import kvcache
@@ -74,6 +75,16 @@ from MaxText.layers.quantizations import AqtQuantization as Quant
 
 # pylint: disable=line-too-long, g-doc-args, g-doc-return-or-yield, bad-continuation, g-inconsistent-quotes
 # pytype: disable=attribute-error
+
+
+@dataclasses.dataclass(frozen=True)
+class AttentionLogicalAxisNames:
+    """Holds the set of sharding axis names for attention-related tensors."""
+    query: Tuple[str, ...]
+    key: Tuple[str, ...]
+    value: Tuple[str, ...]
+    inputs: Tuple[str, ...]
+    out: Tuple[str, ...]
 
 
 @dataclasses.dataclass(repr=False)
@@ -417,6 +428,8 @@ class Attention(nnx.Module):
     self.model_mode = model_mode
     self.rngs = rngs
 
+    self.setup_sharding(model_mode)
+
     self.is_qwen3_next = self.config.decoder_block == DecoderBlockType.QWEN3_NEXT
 
     # Module attribute names must match names previously passed to Linen for checkpointing
@@ -535,6 +548,64 @@ class Attention(nnx.Module):
       self.key = self.init_kv_w(inputs_kv_shape=inputs_kv_shape)
       self.value = self.init_kv_w(inputs_kv_shape=inputs_kv_shape)
     self.out = self.init_out_w(output_dim=inputs_q_shape[-1])
+
+  def _create_sharding(self, axis_names):
+    """Creates NamedSharding if shard_mode is EXPLICIT, otherwise None."""
+    if self.config.shard_mode == ShardMode.EXPLICIT:
+        return NamedSharding(self.mesh, nn.logical_to_mesh_axes(axis_names))
+    return None
+  
+  def _get_axis_names(self, model_mode):
+    if model_mode == MODEL_MODE_PREFILL:
+      return AttentionLogicalAxisNames(
+        query = self.prefill_query_axis_names,
+        key = self.prefill_key_axis_names,
+        value = self.prefill_value_axis_names,
+        inputs = self.prefill_input_axis_names,
+        out = self.prefill_out_axis_names,
+      )
+    elif model_mode == MODEL_MODE_AUTOREGRESSIVE:
+      return AttentionLogicalAxisNames(
+        query = (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV),
+        key = (DECODE_BATCH, DECODE_LENGTH, KV_HEAD, D_KV),
+        value = (DECODE_BATCH, DECODE_LENGTH, KV_HEAD, D_KV),
+        inputs = self.decode_input_axis_names,
+        out = self.decode_out_axis_names,
+      )
+    elif model_mode == MODEL_MODE_TRAIN and self.config.expert_shard_attention_option == EP_AS_CONTEXT:
+      return AttentionLogicalAxisNames(
+          query=self.ep_query_axis_names,
+          key=self.ep_key_axis_names,
+          value=self.ep_value_axis_names,
+          inputs=self.ep_input_axis_names,
+          out=self.ep_out_axis_names,
+        )
+    else:
+      return AttentionLogicalAxisNames(
+          query=self.query_axis_names,
+          key=self.key_axis_names,
+          value=self.value_axis_names,
+          inputs=self.input_axis_names,
+          out=self.out_axis_names,
+      )
+
+  def setup_sharding(self, model_mode):
+    """Sets up the sharding attributes based on the model mode."""
+    axis_names = self._get_axis_names(model_mode)
+
+    # Update instance attributes to reflect the chosen axis names for the current mode
+    self.query_axis_names = axis_names.query
+    self.key_axis_names = axis_names.key
+    self.value_axis_names = axis_names.value
+    self.input_axis_names = axis_names.inputs
+    self.out_axis_names = axis_names.out
+
+    # Create sharding objects using the helper method
+    self.inputs_sharding = self._create_sharding(axis_names.inputs)
+    self.query_sharding = self._create_sharding(axis_names.query)
+    self.key_sharding = self._create_sharding(axis_names.key)
+    self.value_sharding = self._create_sharding(axis_names.value)
+    self.out_sharding = self._create_sharding(axis_names.out)
 
   def init_query_w(self, inputs_q_shape: Tuple) -> nnx.Module:
     """Query projection initialization."""
@@ -733,14 +804,17 @@ class Attention(nnx.Module):
       rotary_embedding = LLaMARotaryEmbedding(
           min_timescale=self.config.rope_min_timescale,
           max_timescale=self.config.rope_max_timescale,
+          mesh=self.mesh,
           embedding_dims=rope_embedding_dims,
           fprop_dtype=self.dtype,
           use_scale=rope_use_scale,
+          shard_mode=self.config.shard_mode,
           rngs=self.rngs,
       )
     elif rope_type.startswith("yarn"):
       rotary_embedding = YarnRotaryEmbedding(
           max_position_embeddings=self.config.max_position_embeddings,
+          mesh=self.mesh,
           original_max_position_embeddings=self.config.original_max_position_embeddings,
           beta_fast=self.config.beta_fast,
           beta_slow=self.config.beta_slow,
@@ -751,12 +825,14 @@ class Attention(nnx.Module):
           interleave=self.config.rope_interleave,
           truncate=self.config.rope_truncate,
           attention_scaling=self.config.rope_attention_scaling,
+          shard_mode=self.config.shard_mode,
           rngs=self.rngs,
       )
     elif self.is_qwen3_next:
       rotary_embedding = Qwen3NextRotaryEmbedding(
           min_timescale=self.config.rope_min_timescale,
           max_timescale=self.config.rope_max_timescale,
+          mesh=self.mesh,
           embedding_dims=self.config.head_dim,
           partial_rotary_factor=self.config.partial_rotary_factor,
           cast_as_fprop_dtype=True,
@@ -776,10 +852,12 @@ class Attention(nnx.Module):
 
       rotary_embedding = RotaryEmbedding(
           min_timescale=self.config.rope_min_timescale,
+          mesh=self.mesh,
           max_timescale=max_timescale,
           embedding_dims=rope_embedding_dims,
           fprop_dtype=self.dtype,
           rope_linear_scaling_factor=rope_linear_scaling_factor,
+          shard_mode=self.config.shard_mode,
           rngs=self.rngs,
       )
     return rotary_embedding
@@ -909,28 +987,20 @@ class Attention(nnx.Module):
     Returns:
       output of shape `[batch, length, q_features]`.
     """
-    if model_mode == MODEL_MODE_PREFILL:
-      inputs_q = self._maybe_shard_with_logical(inputs_q, self.prefill_input_axis_names)
-      inputs_kv = self._maybe_shard_with_logical(inputs_kv, self.prefill_input_axis_names)
-    elif model_mode == MODEL_MODE_TRAIN and self.config.expert_shard_attention_option == EP_AS_CONTEXT:
-      inputs_q = self._maybe_shard_with_logical(inputs_q, self.ep_input_axis_names)
-      inputs_kv = self._maybe_shard_with_logical(inputs_kv, self.ep_input_axis_names)
-    elif model_mode == MODEL_MODE_TRAIN:
-      inputs_q = self._maybe_shard_with_logical(inputs_q, self.input_axis_names)
-      inputs_kv = self._maybe_shard_with_logical(inputs_kv, self.input_axis_names)
-    else:
-      inputs_q = self._maybe_shard_with_logical(inputs_q, self.decode_input_axis_names)
-      inputs_kv = self._maybe_shard_with_logical(inputs_kv, self.decode_input_axis_names)
+
+    inputs_q = self._maybe_shard_with_logical(inputs_q, self.input_axis_names)
+    inputs_kv = self._maybe_shard_with_logical(inputs_kv, self.input_axis_names)
+
+    query_sharding = NamedSharding(self.mesh, nn.logical_to_mesh_axes(self.query_axis_names))
+    key_sharding = NamedSharding(self.mesh, nn.logical_to_mesh_axes(self.key_axis_names))
+    value_sharding = NamedSharding(self.mesh, nn.logical_to_mesh_axes(self.value_axis_names))
 
     # apply projection.
     if self.config.fused_qkv:
       query, key, value = self.qkv_projection(inputs_q, proj_name="qkv_proj")
     else:
-      query_sharding = NamedSharding(self.mesh, nn.logical_to_mesh_axes(self.query_axis_names))
       query = self.query_projection(inputs_q, out_sharding=query_sharding)
-      key_sharding = NamedSharding(self.mesh, nn.logical_to_mesh_axes(self.key_axis_names))
       key = self.kv_projection(inputs_kv, proj_name="key", out_sharding=key_sharding)
-      value_sharding = NamedSharding(self.mesh, nn.logical_to_mesh_axes(self.value_axis_names))
       value = self.kv_projection(inputs_kv, proj_name="value", out_sharding=value_sharding)
 
     gate = None
@@ -972,22 +1042,9 @@ class Attention(nnx.Module):
       )
       query = (query * attn_scales[:, :, jnp.newaxis, jnp.newaxis]).astype(self.dtype)
 
-    if model_mode == MODEL_MODE_PREFILL:
-      query = self._maybe_shard_with_logical(query, self.prefill_query_axis_names)
-      key = self._maybe_shard_with_logical(key, self.prefill_key_axis_names)
-      value = self._maybe_shard_with_logical(value, self.prefill_value_axis_names)
-    elif model_mode == MODEL_MODE_AUTOREGRESSIVE:
-      query = self._maybe_shard_with_logical(query, (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV))
-      key = self._maybe_shard_with_logical(key, (DECODE_BATCH, DECODE_LENGTH, KV_HEAD, D_KV))
-      value = self._maybe_shard_with_logical(value, (DECODE_BATCH, DECODE_LENGTH, KV_HEAD, D_KV))
-    elif model_mode == MODEL_MODE_TRAIN and self.config.expert_shard_attention_option == EP_AS_CONTEXT:
-      query = self._maybe_shard_with_logical(query, self.ep_query_axis_names)
-      key = self._maybe_shard_with_logical(key, self.ep_key_axis_names)
-      value = self._maybe_shard_with_logical(value, self.ep_value_axis_names)
-    else:
-      query = self._maybe_shard_with_logical(query, self.query_axis_names)
-      key = self._maybe_shard_with_logical(key, self.key_axis_names)
-      value = self._maybe_shard_with_logical(value, self.value_axis_names)
+    query = self._maybe_shard_with_logical(query, self.query_axis_names)
+    key = self._maybe_shard_with_logical(key, self.key_axis_names)
+    value = self._maybe_shard_with_logical(value, self.value_axis_names)
 
     query = checkpoint_name(query, "query_proj")
     key = checkpoint_name(key, "key_proj")
@@ -1018,14 +1075,8 @@ class Attention(nnx.Module):
     if self.is_qwen3_next:
       out = out.reshape(batch_size, seq_len, self.config.num_query_heads * self.config.head_dim)
       out = out * jax.nn.sigmoid(gate)
-    if model_mode == MODEL_MODE_PREFILL:
-      out = self._maybe_shard_with_logical(out, self.prefill_out_axis_names)
-    elif model_mode == MODEL_MODE_TRAIN and self.config.expert_shard_attention_option == EP_AS_CONTEXT:
-      out = self._maybe_shard_with_logical(out, self.ep_out_axis_names)
-    elif model_mode == MODEL_MODE_TRAIN:
-      out = self._maybe_shard_with_logical(out, self.out_axis_names)
-    else:
-      out = self._maybe_shard_with_logical(out, self.decode_out_axis_names)
+
+    out = self._maybe_shard_with_logical(out, self.out_axis_names)
     out = self.out_projection(out, out_sharding=out_sharding)
     out = checkpoint_name(out, "out_proj")
     return out
