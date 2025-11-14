@@ -16,8 +16,23 @@
 """
 RL Evaluation Module.
 """
+import locale
+
 from tqdm.auto import tqdm
 from tunix.rl.rollout.base_rollout import RolloutConfig
+
+_LOCALE_NUMERIC_INITIALIZED = False
+
+
+def _ensure_locale_numeric():
+  global _LOCALE_NUMERIC_INITIALIZED  # pylint: disable=global-statement
+  if _LOCALE_NUMERIC_INITIALIZED:
+    return
+  try:
+    locale.setlocale(locale.LC_NUMERIC, "")
+    _LOCALE_NUMERIC_INITIALIZED = True
+  except locale.Error:
+    _LOCALE_NUMERIC_INITIALIZED = False
 
 from MaxText.rl import utils_rl
 from MaxText import max_logging
@@ -65,16 +80,35 @@ def generate_responses(
   eval_strategy = tmvp_config.generation_configs[tmvp_config.eval_sampling_strategy]
 
   for p in range(num_passes):
-    responses = rl_cluster.rollout.generate(
+    rollout_result = rl_cluster.rollout.generate(
         prompts,
         rollout_config=RolloutConfig(
             max_tokens_to_generate=tmvp_config.max_target_length - tmvp_config.max_prefill_predict_length,
+            max_prompt_length=tmvp_config.max_prefill_predict_length,
+            kv_cache_size=tmvp_config.max_target_length + tmvp_config.kv_cache_buffer,
             temperature=eval_strategy["eval_temperature"],
             top_k=eval_strategy["eval_top_k"],
             top_p=eval_strategy["eval_top_p"],
+            rollout_vllm_model_version=tmvp_config.tokenizer_path,
+            rollout_vllm_hbm_utilization=tmvp_config.hbm_utilization_vllm,
+            rollout_vllm_tpu_backend_type="jax",
+            rollout_vllm_swap_space_size_gb=tmvp_config.swap_space_vllm_gb,
         ),
     )
-    responses = responses.text
+
+    responses = getattr(rollout_result, "text", None)
+    if not responses:
+      if tmvp_config.debug["rl"]:
+        max_logging.log(
+            "Rollout returned no responses; filling with empty strings to keep evaluation stable."
+        )
+      responses = [""] * len(prompts)
+    elif len(responses) != len(prompts):
+      if tmvp_config.debug["rl"]:
+        max_logging.log(
+            "Rollout response count mismatches prompts; padding with empty strings to align."
+        )
+      responses = list(responses) + [""] * (len(prompts) - len(responses))
 
     if tmvp_config.debug["rl"]:
       max_logging.log(f"Pass {p+1}/{num_passes}, responses: {responses}")
@@ -83,6 +117,29 @@ def generate_responses(
       multiple_call_responses[idx].append(response)
 
   return multiple_call_responses
+
+
+def _to_float(value: str) -> float:
+  """Convert numeric strings honoring local formatting."""
+  sanitized = value.strip().replace("\u00A0", " ").replace("\u202F", " ")
+  _ensure_locale_numeric()
+  if _LOCALE_NUMERIC_INITIALIZED:
+    try:
+      return locale.atof(sanitized)
+    except (ValueError, locale.Error):
+      pass
+
+  normalized = sanitized.replace(" ", "")
+  if "," in normalized and "." in normalized:
+    if normalized.rfind(",") > normalized.rfind("."):
+      normalized = normalized.replace(".", "")
+      normalized = normalized.replace(",", ".")
+    else:
+      normalized = normalized.replace(",", "")
+  else:
+    normalized = normalized.replace(",", ".")
+
+  return float(normalized)
 
 
 def score_responses(tmvp_config, question, responses, answer):
@@ -112,6 +169,11 @@ def score_responses(tmvp_config, question, responses, answer):
   is_partially_correct = False
   has_correct_format = False
 
+  try:
+    answer_float = _to_float(answer)
+  except ValueError:
+    answer_float = None
+
   for response in responses:
     # Extract numerical response
     extracted_response = guess.group(1) if (guess := match_numbers.search(response)) is not None else "-1000000"
@@ -121,11 +183,14 @@ def score_responses(tmvp_config, question, responses, answer):
 
     # Check exact correctness
     try:
-      if float(extracted_response.strip()) == float(answer.strip()):
+      response_float = _to_float(extracted_response)
+      answer_value = answer_float if answer_float is not None else _to_float(answer)
+      answer_float = answer_value
+      if response_float == answer_value:
         is_correct = True
 
       # Check partial correctness (within 10%)
-      ratio = float(extracted_response.strip()) / float(answer.strip())
+      ratio = response_float / answer_value
       if 0.9 <= ratio <= 1.1:
         is_partially_correct = True
     except Exception as e:

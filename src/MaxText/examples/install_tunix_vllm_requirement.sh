@@ -19,7 +19,7 @@
 set -e
 set -x
 
-uv pip uninstall -y jax jaxlib libtpu
+yes | uv pip uninstall jax jaxlib libtpu
 
 uv pip install aiohttp==3.12.15
 
