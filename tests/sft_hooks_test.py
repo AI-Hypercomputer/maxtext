@@ -29,12 +29,10 @@ from jax.sharding import Mesh
 from MaxText import maxtext_utils
 from MaxText import pyconfig
 from MaxText.maxtext_utils import create_device_mesh
+from MaxText import gcloud_stub
 from MaxText.globals import MAXTEXT_PKG_DIR
 from MaxText.sft import hooks
 
-# Requires sft.yml file referencing HF dataset path (`hf_path` in sft.yml) which isn't
-# available in decoupled mode.
-pytestmark = [pytest.mark.external_training]
 
 class SFTHooksTest(unittest.TestCase):
 
@@ -47,7 +45,13 @@ class SFTHooksTest(unittest.TestCase):
         base_output_directory="test",
         skip_jax_distributed_system=True,
     )
-    self.mesh = Mesh(create_device_mesh(self.config), self.config.mesh_axes)
+    # Use a synthetic dataset for unit tests only when running in decoupled mode so
+    # tests remain self-contained and don't attempt remote access.
+    if gcloud_stub.is_decoupled():
+      self.config.dataset_type = "synthetic"
+
+    mesh_shape_1d = (len(jax.devices()),)
+    self.mesh = Mesh(mesh_utils.create_device_mesh(mesh_shape_1d), self.config.mesh_axes)
     learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(self.config)
 
     self.training_hooks = hooks.SFTTrainingHooks(self.config, self.mesh, learning_rate_schedule, goodput_recorder=None)

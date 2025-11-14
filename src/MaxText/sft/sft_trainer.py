@@ -45,10 +45,8 @@ import pathwaysutils
 from flax.linen import partitioning as nn_partitioning
 
 from orbax import checkpoint as ocp
-from MaxText.gcloud_stub import tunix as _tunix
 
-peft_trainer, _tunix_hooks = _tunix()
-profiler = getattr(peft_trainer, "profiler", None) or getattr(_tunix_hooks, "profiler", None) or type("_StubProfiler", (), {"__getattr__": lambda self, _n: (lambda *a, **k: None)})()
+from tunix.sft import peft_trainer, profiler
 
 from MaxText import max_utils
 from MaxText import max_logging
