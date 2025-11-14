@@ -879,7 +879,7 @@ use_max_logit_estimate: -1 # -1 means no estimate, any > 0 value will be used as
 cost_estimate_flops_fwd: -1 # -1 means using splash default cost estmiation, any >= 0 value will be used as cost estmiation for splash to overlap for communication (forward)
 cost_estimate_flops_bwd: -1 # -1 means using splash default cost estmiation, any >= 0 value will be used as cost estmiation for splash to overlap for communication (backward)
 dq_reduction_steps: 0 #the number of reduction steps. For now, only 3 or all the kv steps are supported.
-use_splash_scheduler: false # to use tokamax splash attention scheduler.
+use_splash_scheduler: False # to use tokamax splash attention scheduler.
 ### Determine if we want to use load balance for context parallelism
 context_parallel_load_balance: True
 context_parallel_strategy: "all_gather" # "all_gather" or "ring"
