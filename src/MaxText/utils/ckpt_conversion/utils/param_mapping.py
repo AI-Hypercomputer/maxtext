@@ -41,7 +41,7 @@ import jax
 import jax.numpy as jnp
 
 
-def GEMMA3_MAXTEXT_TO_HF_PARAM_MAPPING(config, scan_layers=False):
+def GEMMA3_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False):
   """Generates a parameter mapping from MaxText to Hugging Face for Gemma3.
 
   This function creates a dictionary that maps the parameter names from a
@@ -143,7 +143,7 @@ def GEMMA3_MAXTEXT_TO_HF_PARAM_MAPPING(config, scan_layers=False):
   return mapping
 
 
-def GEMMA3_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, scan_layers=False, saving_to_hf=False):
+def GEMMA3_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, saving_to_hf=False):
   """Hook functions for Gemma3 parameter conversion.
 
   This function provides a dictionary of transformation functions (hooks) for
@@ -298,7 +298,7 @@ def GEMMA3_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, scan_layers=False, saving_to_hf=F
   return hooks
 
 
-def GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING(config, scan_layers=False):
+def GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False):
   """Returns mapping between MaxText and HuggingFace Gemma2 weight paths.
 
   Args:
@@ -431,7 +431,7 @@ def GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING(config, scan_layers=False):
   return mapping
 
 
-def GEMMA2_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, scan_layers=False, saving_to_hf=False):
+def GEMMA2_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, saving_to_hf=False):
   """Creates parameter transformation functions for Gemma2 conversion.
 
   This function generates a mapping of transformation functions that handle the
@@ -596,7 +596,7 @@ def GEMMA2_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, scan_layers=False, saving_to_hf=F
   return mapping
 
 
-def QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING(config=None, scan_layers=False):
+def QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False):
   """Returns mapping from MaxText to HuggingFace Qwen3 weight paths.
 
   This function generates a dictionary that maps parameter names from a MaxText
@@ -729,7 +729,7 @@ def QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING(config=None, scan_layers=False):
   return mapping
 
 
-def QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, scan_layers=False, saving_to_hf=False):
+def QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, saving_to_hf=False):
   """Creates parameter transformation functions for Qwen3.
 
   This function provides a dictionary of transformation functions (hooks) for
@@ -814,7 +814,7 @@ def QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, scan_layers=False, saving_to_hf=Fa
   return mapping
 
 
-def DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING(config, scan_layers=False):
+def DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False):
   """Returns mapping from MaxText to HuggingFace Deepseek weight paths using f-strings."""
   # TODO(shuningjin): add unscan support, b/457820735
   if not scan_layers:
@@ -835,14 +835,16 @@ def DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING(config, scan_layers=False):
   attention_keys = {
       "pre_self_attention_layer_norm-scale": "input_layernorm.weight",
       "post_self_attention_layer_norm-scale": "post_attention_layernorm.weight",
-      "self_attention-query-kernel": "self_attn.q_proj.weight",
-      "self_attention-wq_a-kernel": "self_attn.q_a_proj.weight",
-      "self_attention-q_norm-scale": "self_attn.q_a_layernorm.weight",
-      "self_attention-wq_b-kernel": "self_attn.q_b_proj.weight",
       "self_attention-wkv_a-kernel": "self_attn.kv_a_proj_with_mqa.weight",
       "self_attention-kv_norm-scale": "self_attn.kv_a_layernorm.weight",
       "self_attention-wkv_b-kernel": "self_attn.kv_b_proj.weight",
       "self_attention-out-kernel": "self_attn.o_proj.weight",
+      # v3
+      "self_attention-wq_a-kernel": "self_attn.q_a_proj.weight",
+      "self_attention-q_norm-scale": "self_attn.q_a_layernorm.weight",
+      "self_attention-wq_b-kernel": "self_attn.q_b_proj.weight",
+      # v2
+      "self_attention-query-kernel": "self_attn.q_proj.weight",
   }
   # Dense Layers
   dense_layer_keys = attention_keys | {
@@ -861,6 +863,7 @@ def DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING(config, scan_layers=False):
       "DeepSeekMoeBlock_0-shared_experts-wi_1-kernel": "mlp.shared_experts.up_proj.weight",
       "DeepSeekMoeBlock_0-shared_experts-wo-kernel": "mlp.shared_experts.down_proj.weight",
       "DeepSeekMoeBlock_0-MoeBlock_0-gate-kernel": "mlp.gate.weight",
+      # v3
       "DeepSeekMoeBlock_0-MoeBlock_0-gate-bias": "mlp.gate.e_score_correction_bias",
   }
   for maxtext_key, hf_key in moe_layer_keys.items():
@@ -882,7 +885,7 @@ def DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING(config, scan_layers=False):
   return mapping
 
 
-def DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, scan_layers=False, saving_to_hf=False):
+def DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, saving_to_hf=False):
   """Creates parameter transformation functions for Deepseek using f-strings."""
   # TODO(shuningjin): support hf->orbax(scan), b/457820372
   if not saving_to_hf:
@@ -940,7 +943,171 @@ def DEEPSEEK_NNX_TO_VLLM_PARAM_HOOK_FN():
   return {}
 
 
-def QWEN3_OMNI_MOE_MAXTEXT_TO_HF_PARAM_MAPPING(config, scan_layers=False):
+def GPT_OSS_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False):
+  """Returns mapping from MaxText gpt-oss to Hugging Face weight paths.
+
+  Handles the inhomogeneous scan block structure (inhomogeneous_layer_cycle_interval)
+
+  Handles N-to-1 mapping from maxtext to huggingface
+  - (GptOssMlp-wi_0, GptOssMlp-wi_1): mlp.experts.gate_up_proj
+  - (GptOssMlp-wi_0_bias, GptOssMlp-wi_1_bias): mlp.experts.gate_up_proj_bias
+  """
+  # TODO(shuningjin): add unscan support, b/459541579
+  if not scan_layers:
+    raise NotImplementedError("Current gpt-oss mapping only supports scan_layers=True")
+
+  n_layers = config["num_hidden_layers"]  # hf config
+  layer_cycle_interval = maxtext_config.inhomogeneous_layer_cycle_interval
+
+  # Base mapping for non-layer parameters (targeting standard HF keys)
+  mapping = {
+      "params-token_embedder-embedding": "model.embed_tokens.weight",
+      "params-decoder-decoder_norm-scale": "model.norm.weight",
+      "params-decoder-logits_dense-kernel": "lm_head.weight",
+  }
+
+  for block_idx in range(layer_cycle_interval):
+    # Identify all original HF layer indices that collapse into this block
+    hf_indices = list(range(block_idx, n_layers, layer_cycle_interval))
+    prefix = f"params-decoder-layers-layers_{block_idx}"
+
+    # Layer Norms
+    mapping[f"{prefix}-pre_self_attention_layer_norm-scale"] = [
+        f"model.layers.{i}.input_layernorm.weight" for i in hf_indices
+    ]
+    mapping[f"{prefix}-post_self_attention_layer_norm-scale"] = [
+        f"model.layers.{i}.post_attention_layernorm.weight" for i in hf_indices
+    ]
+
+    # GptOssAttention
+    mapping.update(
+        {
+            f"{prefix}-GptOssAttention-query-kernel": [f"model.layers.{i}.self_attn.q_proj.weight" for i in hf_indices],
+            f"{prefix}-GptOssAttention-query-bias": [f"model.layers.{i}.self_attn.q_proj.bias" for i in hf_indices],
+            f"{prefix}-GptOssAttention-key-kernel": [f"model.layers.{i}.self_attn.k_proj.weight" for i in hf_indices],
+            f"{prefix}-GptOssAttention-key-bias": [f"model.layers.{i}.self_attn.k_proj.bias" for i in hf_indices],
+            f"{prefix}-GptOssAttention-value-kernel": [f"model.layers.{i}.self_attn.v_proj.weight" for i in hf_indices],
+            f"{prefix}-GptOssAttention-value-bias": [f"model.layers.{i}.self_attn.v_proj.bias" for i in hf_indices],
+            f"{prefix}-GptOssAttention-out-kernel": [f"model.layers.{i}.self_attn.o_proj.weight" for i in hf_indices],
+            f"{prefix}-GptOssAttention-out-bias": [f"model.layers.{i}.self_attn.o_proj.bias" for i in hf_indices],
+            f"{prefix}-GptOssAttention-sinks": [f"model.layers.{i}.self_attn.sinks" for i in hf_indices],
+        }
+    )
+
+    # GptOssMlp
+    # 1. Gate/Router
+    mapping.update(
+        {
+            f"{prefix}-GptOssMlp-gate-kernel": [f"model.layers.{i}.mlp.router.weight" for i in hf_indices],
+            f"{prefix}-GptOssMlp-gate-bias": [f"model.layers.{i}.mlp.router.bias" for i in hf_indices],
+        }
+    )
+
+    # 2. Experts (Down Projection)
+    mapping.update(
+        {
+            f"{prefix}-GptOssMlp-wo": [f"model.layers.{i}.mlp.experts.down_proj" for i in hf_indices],
+            f"{prefix}-GptOssMlp-wo_bias": [f"model.layers.{i}.mlp.experts.down_proj_bias" for i in hf_indices],
+        }
+    )
+
+    # 3. Experts (Gate/Up Fused Projection)
+    # N-to-1 mapping
+    mapping.update(
+        {
+            (f"{prefix}-GptOssMlp-wi_0", f"{prefix}-GptOssMlp-wi_1"): [
+                f"model.layers.{i}.mlp.experts.gate_up_proj" for i in hf_indices
+            ],
+            (f"{prefix}-GptOssMlp-wi_0_bias", f"{prefix}-GptOssMlp-wi_1_bias"): [
+                f"model.layers.{i}.mlp.experts.gate_up_proj_bias" for i in hf_indices
+            ],
+        }
+    )
+
+  return mapping
+
+
+def GPT_OSS_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, saving_to_hf=False):
+  """Transformation hooks for gpt-oss parameters.
+
+  Handles the inhomogeneous scan block structure (inhomogeneous_layer_cycle_interval)
+
+  Handles N-to-1 mapping from maxtext to huggingface
+  - (GptOssMlp-wi_0, GptOssMlp-wi_1): mlp.experts.gate_up_proj
+  - (GptOssMlp-wi_0_bias, GptOssMlp-wi_1_bias): mlp.experts.gate_up_proj_bias
+  """
+  # TODO(shuningjin): support hf->orbax(scan), b/459541579
+  if not saving_to_hf:
+    raise NotImplementedError("Currently gpt-oss only supports saving_to_hf=True.")
+  # TODO(shuningjin): add unscan support, b/459541579
+  if not scan_layers:
+    raise NotImplementedError("Currently gpt-oss only supports scan_layers=True.")
+
+  def transpose(input_tensor, target_shape=None):
+    if saving_to_hf:
+      return input_tensor.T
+    else:
+      return input_tensor.T
+
+  def reshape_kernel(input_tensor, target_shape):
+    """Reshapes and transposes kernel weights between MaxText and HF."""
+    if saving_to_hf:
+      flipped_target_shape = np.flip(np.array(target_shape))
+      return input_tensor.reshape(flipped_target_shape).T
+    else:
+      return input_tensor.T.reshape(target_shape)
+
+  def reshape_bias(input_tensor, target_shape=None):
+    """Reshapes biases between MaxText 2D (heads, dim) and HF 1D (hidden)."""
+    if saving_to_hf:
+      # MaxText [heads, head_dim] -> HF [hidden_dim] (flatten)
+      return input_tensor.reshape(target_shape)
+    else:
+      # HF [hidden_dim] -> MaxText [heads, head_dim]
+      return input_tensor.reshape(target_shape)
+
+  def interleave(input_tensor, target_shape=None):
+    """
+    N-to-1 mapping: maxtext (wi_0, wi_1) <-> hf (wi_0_1)
+    if saving_to_hf, input_tensor is a list of tensors
+    """
+    if saving_to_hf:
+      # (wi_0, wi_1) -> wi_0_1
+      wi_0, wi_1 = input_tensor
+      wi_0_1 = np.empty(target_shape, dtype=wi_0.dtype)
+      wi_0_1[..., ::2] = wi_0
+      wi_0_1[..., 1::2] = wi_1
+      return wi_0_1
+    else:
+      # wi_0_1 -> (wi_0, wi_1)
+      # TODO(shuningjin): support hf->orbax(scan), b/459541579
+      raise NotImplementedError
+
+  hooks = {
+      "params-decoder-logits_dense-kernel": transpose,
+  }
+
+  # Scan over blocks
+  layer_cycle_interval = maxtext_config.inhomogeneous_layer_cycle_interval
+  for block_idx in range(layer_cycle_interval):
+    prefix = f"params-decoder-layers-layers_{block_idx}"
+    # Attention Kernels & Biases
+    for key in ["query", "key", "value"]:
+      hooks[f"{prefix}-GptOssAttention-{key}-kernel"] = reshape_kernel
+      hooks[f"{prefix}-GptOssAttention-{key}-bias"] = reshape_bias
+
+    hooks[f"{prefix}-GptOssAttention-out-kernel"] = reshape_kernel
+
+    # MLP Kernels & Biases
+    hooks[f"{prefix}-GptOssMlp-gate-kernel"] = transpose
+    # Experts (Gate/Up Fused Projection), N-to-1 mapping
+    hooks[(f"{prefix}-GptOssMlp-wi_0", f"{prefix}-GptOssMlp-wi_1")] = interleave
+    hooks[(f"{prefix}-GptOssMlp-wi_0_bias", f"{prefix}-GptOssMlp-wi_1_bias")] = interleave
+
+  return hooks
+
+
+def QWEN3_OMNI_MOE_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False):
   """Returns mapping from MaxText to HuggingFace Qwen3-Omni weight paths.
 
   This function combines mappings from different modalities (text, vision, audio, etc.)
@@ -960,7 +1127,9 @@ def QWEN3_OMNI_MOE_MAXTEXT_TO_HF_PARAM_MAPPING(config, scan_layers=False):
   num_experts_text = config["thinker_config"]["text_config"].get("num_experts", 0)
   n_layers_text = config["thinker_config"]["text_config"]["num_hidden_layers"]
   text_mapping = QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING(
-      config={"num_hidden_layers": n_layers_text, "num_experts": num_experts_text}, scan_layers=scan_layers
+      config={"num_hidden_layers": n_layers_text, "num_experts": num_experts_text},
+      maxtext_config=maxtext_config,
+      scan_layers=scan_layers,
   )
 
   # Add "thinker." prefix to text mapping values
@@ -974,7 +1143,7 @@ def QWEN3_OMNI_MOE_MAXTEXT_TO_HF_PARAM_MAPPING(config, scan_layers=False):
   return mapping
 
 
-def QWEN3_OMNI_MOE_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, scan_layers=False, saving_to_hf=False):
+def QWEN3_OMNI_MOE_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, saving_to_hf=False):
   """Creates parameter transformation functions for Qwen3-Omni.
 
   This function provides a dictionary of transformation functions (hooks) for
@@ -1001,6 +1170,7 @@ def QWEN3_OMNI_MOE_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, scan_layers=False, saving
   n_layers_text = config["thinker_config"]["text_config"]["num_hidden_layers"]
   text_hooks = QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN(
       config={"num_hidden_layers": n_layers_text, "num_experts": num_experts_text},
+      maxtext_config=maxtext_config,
       scan_layers=scan_layers,
       saving_to_hf=saving_to_hf,
   )
@@ -1025,7 +1195,7 @@ def QWEN3_NNX_TO_VLLM_PARAM_HOOK_FN(target_shape=None):
   return {}
 
 
-def LLAMA31_MAXTEXT_TO_HF_PARAM_MAPPING(config, scan_layers=False):
+def LLAMA31_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False):
   """
   Returns a dictionary mapping from MaxText parameter names to
   HuggingFace LLaMA3.1 parameter names.
@@ -1103,7 +1273,7 @@ def LLAMA31_MAXTEXT_TO_HF_PARAM_MAPPING(config, scan_layers=False):
   return mapping
 
 
-def LLAMA31_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, scan_layers=False, saving_to_hf=False):
+def LLAMA31_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, saving_to_hf=False):
   """Creates parameter transformation functions for converting between MaxText and
   HuggingFace formats.
 
@@ -1199,7 +1369,6 @@ def LLAMA31_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, scan_layers=False, saving_to_hf=
   return hook_fns
 
 
-# {maxtext model name: {maxtext weight name: hf weight name}}
 def LLAMA31_NNX_TO_VLLM_PARAM_HOOK_FN():
   """Defines and returns hook functions for weight transformations.
 
@@ -1255,6 +1424,7 @@ def LLAMA31_NNX_TO_VLLM_PARAM_HOOK_FN():
   return hook_fns
 
 
+# {maxtext model name: {maxtext weight name: hf weight name}}
 PARAM_MAPPING = {
     "gemma2-2b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gemma2-9b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
@@ -1275,6 +1445,8 @@ PARAM_MAPPING = {
     "qwen3-235b-a22b": QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING,
     "qwen3-coder-480b-a35b": QWEN3_MAXTEXT_TO_HF_PARAM_MAPPING,
     "deepseek3-671b": DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "gpt-oss-20b": GPT_OSS_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "gpt-oss-120b": GPT_OSS_MAXTEXT_TO_HF_PARAM_MAPPING,
     "qwen3-omni-30b-a3b": QWEN3_OMNI_MOE_MAXTEXT_TO_HF_PARAM_MAPPING,
 }
 
@@ -1299,6 +1471,8 @@ HOOK_FNS = {
     "qwen3-235b-a22b": QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "qwen3-coder-480b-a35b": QWEN3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "deepseek3-671b": DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "gpt-oss-20b": GPT_OSS_TO_HF_PARAM_HOOK_FN,
+    "gpt-oss-120b": GPT_OSS_TO_HF_PARAM_HOOK_FN,
     "qwen3-omni-30b-a3b": QWEN3_OMNI_MOE_MAXTEXT_TO_HF_PARAM_HOOK_FN,
 }
 
