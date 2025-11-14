@@ -34,7 +34,6 @@ from MaxText.kernels import megablox as mblx
 from MaxText.layers import attentions, linears, nnx_wrappers, quantizations
 from MaxText.layers.initializers import NdInitializer, default_bias_init, nd_dense_init, variable_to_logically_partitioned
 import numpy as np
-import tokamax
 
 set_xla_metadata = xla_metadata.set_xla_metadata
 
@@ -809,50 +808,41 @@ class RoutedMoE(nnx.Module):
           min(tiling[1], k),
           min(tiling[2], n),
       )
-      if self.config.use_tokamax_gmm:
-        output = tokamax.ragged_dot(
+      if self.config.use_tokamax_gmm or self.config.megablox:
+        output = mblx.gmm(
             lhs=inputs,
             rhs=kernel,
             group_sizes=group_sizes,
-            precision=jax.lax.Precision.DEFAULT,
             preferred_element_type=self.dtype,
-            implementation="mosaic",
+            tiling=tiling,
+            lhs_quantize_dtype=lhs_quantize_dtype,
+            rhs_quantize_dtype=rhs_quantize_dtype,
+            use_qwix_quantization=self.config.use_qwix_quantization,
+            use_tokamax_backend=self.config.use_tokamax_gmm,
         )
       else:
-        if self.config.megablox:
-          output = mblx.gmm(
+        rhs_inputs = kernel
+        if isinstance(kernel, aqt.QTensor):
+          if kernel.bias or kernel.sparsity_mask or len(kernel.scale) > 1:
+            raise ValueError("Unsupported usecase for ragged_dot with quantized kernel.")
+          rhs_inputs = kernel.qvalue
+        with set_xla_metadata(ragged_dot_tiling=",".join([str(t) for t in tiling])):
+          output = jax.lax.ragged_dot(
               lhs=inputs,
-              rhs=kernel,
+              rhs=rhs_inputs,
               group_sizes=group_sizes,
               preferred_element_type=self.dtype,
-              tiling=tiling,
-              lhs_quantize_dtype=lhs_quantize_dtype,
-              rhs_quantize_dtype=rhs_quantize_dtype,
-              use_qwix_quantization=self.config.use_qwix_quantization,
           )
-        else:
-          rhs_inputs = kernel
-          if isinstance(kernel, aqt.QTensor):
-            if kernel.bias or kernel.sparsity_mask or len(kernel.scale) > 1:
-              raise ValueError("Unsupported usecase for ragged_dot with quantized kernel.")
-            rhs_inputs = kernel.qvalue
-          with set_xla_metadata(ragged_dot_tiling=",".join([str(t) for t in tiling])):
-            output = jax.lax.ragged_dot(
-                lhs=inputs,
-                rhs=rhs_inputs,
-                group_sizes=group_sizes,
-                preferred_element_type=self.dtype,
+        if isinstance(kernel, aqt.QTensor):
+          # Multiply outputs by the kernely scale
+          scales = jnp.take(kernel.scale[0].squeeze(), indices=expert_assignments, axis=0)
+          if padding_amount > 0:
+            scales = jax.lax.pad(
+                scales,
+                jnp.array(0.0, dtype=scales.dtype),
+                [(0, padding_amount, 0), (0, 0, 0)],
             )
-          if isinstance(kernel, aqt.QTensor):
-            # Multiply outputs by the kernely scale
-            scales = jnp.take(kernel.scale[0].squeeze(), indices=expert_assignments, axis=0)
-            if padding_amount > 0:
-              scales = jax.lax.pad(
-                  scales,
-                  jnp.array(0.0, dtype=scales.dtype),
-                  [(0, padding_amount, 0), (0, 0, 0)],
-              )
-            output *= scales
+          output *= scales
       if padding_amount > 0:
         output = output[: hs_shape[0]]
       return output

@@ -17,12 +17,18 @@
 # pylint: disable=too-many-positional-arguments
 
 import functools
+import itertools
+import dataclasses
 from typing import Literal
 import jax
 import jax.numpy as jnp
+from jax.experimental.xla_metadata import set_xla_metadata
 from MaxText.kernels.megablox import backend
+import tokamax
 import qwix
 import qwix.pallas as qpl
+
+_counter = itertools.count()
 
 
 def gmm(
@@ -38,6 +44,7 @@ def gmm(
     lhs_quantize_dtype: Literal[jnp.int4, jnp.int8] | None = None,
     rhs_quantize_dtype: Literal[jnp.int4, jnp.int8] | None = None,
     use_qwix_quantization: bool = False,
+    use_tokamax_backend: bool = False,
 ):
   """Grouped matrix multiplication operation."""
   quantization_rule = None
@@ -70,6 +77,7 @@ def gmm(
       transpose_rhs,
       interpret,
       quantization_rule,
+      use_tokamax_backend,
   )
 
 
@@ -84,6 +92,7 @@ def _gmm_fwd(
     transpose_rhs: bool = False,
     interpret: bool = False,
     quantization_rule: qwix.QtRule | None = None,
+    use_tokamax_backend: bool = False,
 ) -> tuple[
     jnp.ndarray,
     tuple[
@@ -94,15 +103,17 @@ def _gmm_fwd(
     ],
 ]:
   """Forward function for GMM VJP."""
+  fwd_counter = next(_counter)
   if quantization_rule:
     if quantization_rule.act_qtype:
-      lhs = qpl.quantize(
-          lhs,
-          quantization_rule.act_qtype,
-          channelwise_axes=[] if quantization_rule.disable_channelwise_axes else [0],
-          calibration_method=quantization_rule.act_calibration_method,
-          scale_dtype=jnp.float32,
-      )
+      with set_xla_metadata(MUST_FUSE=fwd_counter):
+        lhs = qpl.quantize(
+            lhs,
+            quantization_rule.act_qtype,
+            channelwise_axes=[] if quantization_rule.disable_channelwise_axes else [0],
+            calibration_method=quantization_rule.act_calibration_method,
+            scale_dtype=jnp.float32,
+        )
     if quantization_rule.weight_qtype:
       rhs = qpl.quantize(
           rhs,
@@ -114,18 +125,38 @@ def _gmm_fwd(
           calibration_method=quantization_rule.weight_calibration_method,
           scale_dtype=jnp.float32,
       )
-
-  out = backend.gmm(
-      lhs,
-      rhs,
-      group_sizes,
-      preferred_element_type,
-      tiling,
-      group_offset,
-      existing_out,
-      transpose_rhs=transpose_rhs,
-      interpret=interpret,
-  )
+      # QAG is only supported for following conditions
+      if quantization_rule.weight_calibration_method.startswith("fixed") and isinstance(rhs, qpl.QArray):
+        rhs_qvalue = jax.lax.all_gather(rhs.qvalue, "fsdp", axis=0, tiled=True)
+        rhs = dataclasses.replace(rhs, qvalue=rhs_qvalue)
+  if use_tokamax_backend:
+    with set_xla_metadata(MUST_FUSE=fwd_counter):
+      out = tokamax.ragged_dot_general(
+          lhs=lhs,
+          rhs=rhs,
+          group_sizes=group_sizes,
+          ragged_dot_dimension_numbers=tokamax.RaggedDotDimensionNumbers(
+              dot_dimension_numbers=(([1], [1]), ([], [])),
+              lhs_ragged_dimensions=[0],
+              rhs_group_dimensions=[0],
+          ),
+          precision=jax.lax.Precision.DEFAULT,
+          preferred_element_type=preferred_element_type,
+          group_offset=group_offset,
+          implementation="mosaic",
+      )
+  else:
+    out = backend.gmm(
+        lhs,
+        rhs,
+        group_sizes,
+        preferred_element_type,
+        tiling,
+        group_offset,
+        existing_out,
+        transpose_rhs=transpose_rhs,
+        interpret=interpret,
+    )
   return out, (lhs, rhs, group_sizes, group_offset)
 
 
@@ -137,6 +168,7 @@ def _gmm_bwd(
     transpose_rhs: bool,
     interpret: bool,
     quantization_rule: qwix.QtRule | None,
+    use_tokamax_backend: bool,
     residual: tuple[
         jnp.ndarray | qpl.QArray,
         jnp.ndarray | qpl.QArray,
@@ -160,6 +192,8 @@ def _gmm_bwd(
   #  - drhs_dout: the incoming gradient used to calculate drhs.
 
   # dlhs_dout and drhs_dout can be different when quantization is enabled.
+  dlhs_counter = next(_counter)
+  drhs_counter = next(_counter)
   dlhs_dout = grad
   drhs_dout = grad
   if isinstance(rhs, qpl.QArray):  # qvalue: [g, k, n] scale: [1, 1, n]
@@ -173,41 +207,76 @@ def _gmm_bwd(
     lhs = lhs.qvalue
   if quantization_rule and quantization_rule.bwd_qtype:
     # Enable backward pass quantization
-    dlhs_dout = qpl.quantize(
-        dlhs_dout,
-        quantization_rule.bwd_qtype,
-        channelwise_axes=[] if quantization_rule.disable_channelwise_axes else [0],
-        calibration_method=quantization_rule.bwd_calibration_method,
-        scale_dtype=jnp.float32,
-    )
-    drhs_dout = qpl.quantize(
+    with set_xla_metadata(MUST_FUSE=dlhs_counter):
+      dlhs_dout = qpl.quantize(
+          dlhs_dout,
+          quantization_rule.bwd_qtype,
+          channelwise_axes=[] if quantization_rule.disable_channelwise_axes else [0],
+          calibration_method=quantization_rule.bwd_calibration_method,
+          scale_dtype=jnp.float32,
+      )
+    with set_xla_metadata(MUST_FUSE=drhs_counter):
+      drhs_dout = qpl.quantize(
+          drhs_dout,
+          quantization_rule.bwd_qtype,
+          channelwise_axes=[] if quantization_rule.disable_channelwise_axes else [1],
+          calibration_method=quantization_rule.bwd_calibration_method,
+          scale_dtype=jnp.float32,
+      )
+  if use_tokamax_backend:
+    with set_xla_metadata(MUST_FUSE=dlhs_counter):
+      dlhs = tokamax.ragged_dot_general(
+          lhs=dlhs_dout,
+          rhs=rhs,
+          group_sizes=group_sizes,
+          ragged_dot_dimension_numbers=jax.lax.RaggedDotDimensionNumbers(
+              dot_dimension_numbers=(([1], [2]), ([], [])),
+              lhs_ragged_dimensions=[0],
+              rhs_group_dimensions=[0],
+          ),
+          precision=jax.lax.Precision.DEFAULT,
+          preferred_element_type=preferred_element_type,
+          group_offset=group_offset,
+          implementation="mosaic",
+      )
+    drhs = tokamax.ragged_dot_general(
+        lhs.swapaxes(0, 1),
         drhs_dout,
-        quantization_rule.bwd_qtype,
-        channelwise_axes=[] if quantization_rule.disable_channelwise_axes else [1],
-        calibration_method=quantization_rule.bwd_calibration_method,
-        scale_dtype=jnp.float32,
+        group_sizes=group_sizes,
+        ragged_dot_dimension_numbers=jax.lax.RaggedDotDimensionNumbers(
+            dot_dimension_numbers=(([0], [0]), ([], [])),
+            lhs_ragged_dimensions=[0],
+            rhs_group_dimensions=[],
+        ),
+        precision=jax.lax.Precision.DEFAULT,
+        preferred_element_type=preferred_element_type,
+        group_offset=group_offset,
+        implementation="mosaic",
+    )
+  else:
+    dlhs = backend.gmm(
+        dlhs_dout,
+        rhs,
+        group_sizes,
+        lhs_dtype,
+        tiling,
+        group_offset,
+        transpose_rhs=not transpose_rhs,
+        interpret=interpret,
+    )
+    drhs = backend.tgmm(
+        lhs.swapaxes(0, 1),
+        drhs_dout,
+        group_sizes,
+        rhs_dtype,
+        tiling,
+        group_offset,
+        num_actual_groups,
+        interpret=interpret,
     )
 
-  dlhs = backend.gmm(
-      dlhs_dout,
-      rhs,
-      group_sizes,
-      lhs_dtype,
-      tiling,
-      group_offset,
-      transpose_rhs=not transpose_rhs,
-      interpret=interpret,
-  )
-  drhs = backend.tgmm(
-      lhs.swapaxes(0, 1),
-      drhs_dout,
-      group_sizes,
-      rhs_dtype,
-      tiling,
-      group_offset,
-      num_actual_groups,
-      interpret=interpret,
-  )
+  if quantization_rule and quantization_rule.bwd_qtype:
+    drhs = jax.lax.psum_scatter(drhs, "fsdp", scatter_dimension=0, tiled=True)
 
   # NOTE: If the rhs transposition is fused into the forward pass we need to
   # return the transpose of the rhs gradient that we calculated above.
