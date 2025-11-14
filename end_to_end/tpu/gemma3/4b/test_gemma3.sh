@@ -14,7 +14,7 @@ export MODEL_VARIATION='4b'
 export MODEL_NAME=gemma3-${MODEL_VARIATION}
 
 # Installing torch for deps in forward_pass_logit_checker
-python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+uv pip install torch --index-url https://download.pytorch.org/whl/cpu
 
 # After downloading checkpoints, copy them to GCS bucket at $CHKPT_BUCKET \
 # Non-Googlers please remember to use separate GCS paths for uploading model weights from kaggle ($CHKPT_BUCKET) and MaxText compatible weights ($MODEL_BUCKET).

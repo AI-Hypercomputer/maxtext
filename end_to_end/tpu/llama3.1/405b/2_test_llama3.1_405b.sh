@@ -17,7 +17,7 @@
 set -ex
 
 # Installing torch for deps in forward_pass_logit_checker.py
-python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+uv pip install torch --index-url https://download.pytorch.org/whl/cpu
 
 export MODEL_VARIATION='llama3.1-405b'
 
