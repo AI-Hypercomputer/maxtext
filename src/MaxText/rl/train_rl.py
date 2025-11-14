@@ -285,7 +285,7 @@ def rl_train(tmvp_config):
   # Setup metrics logging
   max_logging.log(f"Tensorboard logs directory: {tmvp_config.tensorboard_dir}")
   metrics_logging_options = metrics_logger.MetricsLoggerOptions(
-  log_dir=tmvp_config.tensorboard_dir, flush_every_n_steps=tmvp_config.log_period
+      log_dir=tmvp_config.tensorboard_dir, flush_every_n_steps=tmvp_config.log_period
   )
 
   profiler_options = None
@@ -335,7 +335,7 @@ def rl_train(tmvp_config):
           rollout_vllm_hbm_utilization=tmvp_config.hbm_utilization_vllm,
           rollout_vllm_tpu_backend_type="jax",
           rollout_vllm_swap_space_size_gb=tmvp_config.swap_space_vllm_gb,
-        ),
+      ),
   )
   grpo_config = GrpoConfig(
       num_generations=tmvp_config.num_generations,
@@ -347,12 +347,29 @@ def rl_train(tmvp_config):
 
   # Create RL cluster
   max_logging.log("Creating RL cluster...")
+  rl_cluster_kwargs = {}
+  if tmvp_config.enable_tunix_perf_metrics:
+    try:
+      from tunix.perf import export as perf_export  # pylint: disable=import-outside-toplevel
+      from tunix.perf import metrics as perf_metrics  # pylint: disable=import-outside-toplevel
+
+      max_logging.log(
+          "enable_tunix_perf_metrics is True and tunix.perf modules are available, enabling Tunix-managed metrics."
+      )
+      perf_config = perf_metrics.PerfMetricsConfig()
+      perf_config.custom_export_fn = perf_export.PerfMetricsExport.create_metrics_export_fn(cluster_config)
+      rl_cluster_kwargs["perf_config"] = perf_config
+    except ImportError:
+      max_logging.log(
+          "enable_tunix_perf_metrics is True but tunix.perf modules are not available, skipping Tunix-managed metrics."
+      )
   with nn_partitioning.axis_rules(tmvp_config.logical_axis_rules):
     rl_cluster = rl_cluster_lib.RLCluster(
         actor=actor_model,
         reference=reference_model,
         tokenizer=model_tokenizer,
         cluster_config=cluster_config,
+        **rl_cluster_kwargs,
     )
 
   # Create GRPO trainer
