@@ -61,7 +61,6 @@ import json
 import threading
 from functools import partial
 from typing import Sequence, List, Any, Callable
-from MaxText.inference_utils import str2bool
 import numpy as np
 import jax
 import psutil
@@ -80,6 +79,7 @@ from MaxText import max_utils
 from MaxText import maxtext_utils
 from MaxText import pyconfig
 from MaxText.common_types import MODEL_MODE_TRAIN
+from MaxText.inference_utils import str2bool
 from MaxText.layers import models, quantizations
 from MaxText.checkpointing import save_checkpoint
 from MaxText.utils.ckpt_conversion.utils.param_mapping import HOOK_FNS, PARAM_MAPPING
