@@ -42,10 +42,8 @@ tiktoken>=0.12.0
 tqdm>=4.67.1
 transformers>=4.57.0
 urllib3>=2.5.0
-#https://github.com/ROCm/rocm-jax/releases/download/rocm-jax-v0.6.0/jaxlib-0.6.0-cp312-cp312-manylinux2014_x86_64.whl
 https://github.com/ROCm/rocm-jax/releases/download/rocm-jax-v0.7.1/jaxlib-0.7.1-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
 jax==0.7.1
 jax-rocm7-pjrt==0.7.1
 jax-rocm7-plugin==0.7.1
-
-
+git+https://github.com/google/tunix.git
