@@ -26,21 +26,21 @@ Usage:
 
 # Llama3.1-8B-Instruct
 python3 -m src.MaxText.rl.train_rl src/MaxText/configs/rl.yml \
-  --model_name=llama3.1-8b \
-  --tokenizer_path=meta-llama/Llama-3.1-8B-Instruct \
-  --load_parameters_path=gs://path/to/checkpoint/0/items \
-  --run_name=$WORKLOAD \
-  --base_output_directory=$OUTPUT_PATH \
-  --hf_access_token=$HF_TOKEN
+  model_name=llama3.1-8b \
+  tokenizer_path=meta-llama/Llama-3.1-8B-Instruct \
+  load_parameters_path=gs://path/to/checkpoint/0/items \
+  run_name=$WORKLOAD \
+  base_output_directory=$OUTPUT_PATH \
+  hf_access_token=$HF_TOKEN
 
 # Llama3.1-70B-Instruct
 python3 -m src.MaxText.rl.train_rl src/MaxText/configs/rl.yml \
-  --model_name=llama3.1-70b \
-  --tokenizer_path=meta-llama/Llama-3.1-70B-Instruct \
-  --load_parameters_path=gs://path/to/checkpoint/0/items \
-  --run_name=$WORKLOAD \
-  --base_output_directory=$OUTPUT_PATH \
-  --hf_access_token=$HF_TOKEN
+  model_name=llama3.1-70b \
+  tokenizer_path=meta-llama/Llama-3.1-70B-Instruct \
+  load_parameters_path=gs://path/to/checkpoint/0/items \
+  run_name=$WORKLOAD \
+  base_output_directory=$OUTPUT_PATH \
+  hf_access_token=$HF_TOKEN
 
 """
 
@@ -52,6 +52,7 @@ from absl import app
 from flax import nnx
 from flax.linen import partitioning as nn_partitioning
 import grain
+from etils import epath
 
 from vllm.outputs import PoolingRequestOutput  # pylint: disable=unused-import
 import jax
@@ -186,6 +187,12 @@ def rl_train(tmvp_config):
   """
 
   max_logging.log("Starting GRPO Training")
+  max_logging.log(f"Ensuring TensorBoard log directory exists: {tmvp_config.tensorboard_dir}")
+  if not epath.Path(tmvp_config.tensorboard_dir).exists():
+    epath.Path(tmvp_config.tensorboard_dir).mkdir(parents=True, exist_ok=True)
+
+  if not epath.Path(tmvp_config.checkpoint_dir).exists():
+    epath.Path(tmvp_config.checkpoint_dir).mkdir(parents=True)
 
   # Number of training steps.
   max_train_steps = int(
@@ -268,7 +275,6 @@ def rl_train(tmvp_config):
   optimizer = utils_rl.get_optimizer(tmvp_config, max_train_steps)
 
   # Setup checkpointing
-  ckpt_dir = tmvp_config.checkpoint_dir
   checkpointing_options = ocp.CheckpointManagerOptions(
       save_interval_steps=tmvp_config.checkpoint_period, max_to_keep=tmvp_config.max_num_checkpoints_to_keep
   )
@@ -277,8 +283,7 @@ def rl_train(tmvp_config):
   micro_batch_size = None if tmvp_config.micro_batch_size == -1 else tmvp_config.micro_batch_size
 
   # Setup metrics logging
-  max_logging.log(f"TensorBoard logs directory: {tmvp_config.tensorboard_dir}")
-  # Metrics logger
+  max_logging.log(f"Tensorboard logs directory: {tmvp_config.tensorboard_dir}")
   metrics_logging_options = metrics_logger.MetricsLoggerOptions(
       log_dir=tmvp_config.tensorboard_dir, flush_every_n_steps=tmvp_config.log_period
   )
@@ -316,7 +321,7 @@ def rl_train(tmvp_config):
           # Profiling
           profiler_options=profiler_options,
           # Checkpoint saving
-          checkpoint_root_directory=ckpt_dir,
+          checkpoint_root_directory=tmvp_config.checkpoint_dir,
           checkpointing_options=checkpointing_options,
       ),
       rollout_config=base_rollout.RolloutConfig(
@@ -342,12 +347,29 @@ def rl_train(tmvp_config):
 
   # Create RL cluster
   max_logging.log("Creating RL cluster...")
+  rl_cluster_kwargs = {}
+  if tmvp_config.enable_tunix_perf_metrics:
+    try:
+      from tunix.perf import export as perf_export  # pylint: disable=import-outside-toplevel
+      from tunix.perf import metrics as perf_metrics  # pylint: disable=import-outside-toplevel
+
+      max_logging.log(
+          "enable_tunix_perf_metrics is True and tunix.perf modules are available, enabling Tunix-managed metrics."
+      )
+      perf_config = perf_metrics.PerfMetricsConfig()
+      perf_config.custom_export_fn = perf_export.PerfMetricsExport.create_metrics_export_fn(cluster_config)
+      rl_cluster_kwargs["perf_config"] = perf_config
+    except ImportError:
+      max_logging.log(
+          "enable_tunix_perf_metrics is True but tunix.perf modules are not available, skipping Tunix-managed metrics."
+      )
   with nn_partitioning.axis_rules(tmvp_config.logical_axis_rules):
     rl_cluster = rl_cluster_lib.RLCluster(
         actor=actor_model,
         reference=reference_model,
         tokenizer=model_tokenizer,
         cluster_config=cluster_config,
+        **rl_cluster_kwargs,
     )
 
   # Create GRPO trainer

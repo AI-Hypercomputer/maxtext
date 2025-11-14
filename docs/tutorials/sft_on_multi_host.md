@@ -50,7 +50,7 @@ The `docker_upload_runner.sh` script uploads your Docker image to Artifact Regis
 Install XPK by following the instructions in the [official documentation](https://github.com/AI-Hypercomputer/xpk?tab=readme-ov-file#installation-via-pip).
 
 ## 3. Create GKE cluster
-If you don't already have a GKE cluster, create one by following the [XPK cluster creation guide](https://github.com/AI-Hypercomputer/xpk?tab=readme-ov-file#cluster-create).
+If you don't already have a GKE cluster, create one by following the [XPK cluster creation guide](https://github.com/AI-Hypercomputer/xpk?tab=readme-ov-file#cluster-create). Ensure the cluster is Pathways-compatible when running SFT with Pathways.
 
 ## 4. Environment configuration
 ```bash
@@ -89,6 +89,9 @@ If you already have a MaxText-compatible model checkpoint, simply set the follow
 ```bash
 export MODEL_CHECKPOINT_PATH=<gcs path for MaxText checkpoint> # e.g., gs://my-bucket/my-model-checkpoint/0/items
 ```
+**Note:** Make sure that `MODEL_CHECKPOINT_PATH` has the checkpoints created using the correct storage flags:
+* **For SFT with McJAX:** `checkpoint_storage_use_zarr3=True` and `checkpoint_storage_use_ocdbt=True`.
+* **For SFT with Pathways:** `checkpoint_storage_use_zarr3=False` and `checkpoint_storage_use_ocdbt=False`.
 
 ### Option 2: Converting a Hugging Face checkpoint
 If your model checkpoint is from Hugging Face, you need to run a conversion script to make it MaxText-compatible.
@@ -102,6 +105,9 @@ export MODEL_CHECKPOINT_PATH=${OUTPUT_PATH}/${WORKLOAD_NAME}/maxtext-checkpoint/
 2. **Run the Conversion Script:** Execute the following command that downloads the specified Hugging Face model and converts its weights into the MaxText format. The conversion script only supports official versions of models from Hugging Face. To see the specific models and versions currently supported for conversion, please refer to the `HF_IDS` dictionary in the MaxText utility file [here](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/utils/ckpt_conversion/utils/utils.py).
 
 ```bash
+USE_ZARR3=<Flag to use zarr3> # True to run SFT with McJAX, False to run SFT with Pathways
+USE_OCDBT=<Flag to use ocdbt> # True to run SFT with McJAX, False to run SFT with Pathways
+
 xpk workload create \
 --cluster=${CLUSTER_NAME} \
 --project=${PROJECT} \
@@ -110,7 +116,7 @@ xpk workload create \
 --workload=ckpt-${WORKLOAD_NAME} \
 --tpu-type=${TPU_TYPE} \
 --num-slices=${TPU_SLICE} \
---command "python3 -m MaxText.utils.ckpt_conversion.to_maxtext src/MaxText/configs/base.yml model_name=$MODEL_NAME hf_access_token=$HF_TOKEN base_output_directory=$OUTPUT_PATH/$WORKLOAD_NAME/maxtext-checkpoint scan_layers=True"
+--command "python3 -m MaxText.utils.ckpt_conversion.to_maxtext src/MaxText/configs/base.yml model_name=$MODEL_NAME hf_access_token=$HF_TOKEN base_output_directory=$OUTPUT_PATH/$WORKLOAD_NAME/maxtext-checkpoint scan_layers=True checkpoint_storage_use_zarr3=$USE_ZARR3 checkpoint_storage_use_ocdbt=$USE_OCDBT"
 ```
 
 ## 6. Submit workload on GKE cluster
@@ -131,4 +137,16 @@ xpk workload create \
 Once the fine-tuning is completed, you can access your model checkpoints at `$OUTPUT_PATH/$WORKLOAD_NAME/checkpoints`.
 
 ### 6.2. SFT with Pathways
-Pathways support is coming soon.
+```bash
+xpk workload create-pathways \
+--cluster=${CLUSTER_NAME} \
+--project=${PROJECT} \
+--zone=${ZONE} \
+--docker-image=${DOCKER_IMAGE} \
+--workload=${WORKLOAD_NAME} \
+--tpu-type=${TPU_TYPE} \
+--num-slices=${TPU_SLICE} \
+--command="JAX_PLATFORMS=proxy JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 ENABLE_PATHWAYS_PERSISTENCE=1 python3 -m MaxText.sft.sft_trainer src/MaxText/configs/sft.yml run_name=$WORKLOAD_NAME base_output_directory=$OUTPUT_PATH model_name=$MODEL_NAME load_parameters_path=$MODEL_CHECKPOINT_PATH hf_access_token=$HF_TOKEN tokenizer_path=$TOKENIZER_PATH per_device_batch_size=1 steps=$STEPS profiler=xplane checkpoint_storage_use_zarr3=False checkpoint_storage_use_ocdbt=False enable_single_controller=True"
+```
+
+Once the fine-tuning is completed, you can access your model checkpoints at `$OUTPUT_PATH/$WORKLOAD_NAME/checkpoints`.

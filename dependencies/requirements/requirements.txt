@@ -25,6 +25,7 @@ pathwaysutils
 pillow
 pre-commit
 protobuf
+pydantic
 pyink
 pylint
 pytest

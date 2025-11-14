@@ -46,7 +46,7 @@ from flax.linen import partitioning as nn_partitioning
 
 from orbax import checkpoint as ocp
 
-from tunix.sft import peft_trainer, profiler
+from tunix.sft import metrics_logger, peft_trainer, profiler
 
 from MaxText import max_utils
 from MaxText import max_logging
@@ -80,13 +80,14 @@ def get_tunix_config(mt_config):
   )
 
   # Metrics configurations
-  metrics_logging_options = peft_trainer.metrics_logger.MetricsLoggerOptions(log_dir=mt_config.tensorboard_dir)
+  metrics_logging_options = metrics_logger.MetricsLoggerOptions(log_dir=mt_config.tensorboard_dir)
 
   # Profiler configurations
   profiler_options = None
   if mt_config.profiler:
     set_profile_options = True
-    if jax.extend.backend.get_backend().platform_version == "Pathways":
+    platform_version = jax.extend.backend.get_backend().platform_version.strip()
+    if platform_version.startswith("Pathways"):
       max_logging.log("Pathways backend detected. Disabling setting profile options.")
       set_profile_options = False
     profiler_options = profiler.ProfilerOptions(
@@ -193,10 +194,9 @@ def main(argv: Sequence[str]) -> None:
   mt_config = pyconfig.initialize(argv)
   max_utils.print_system_information()
 
-  maybe_monitor_goodput(mt_config)
   goodput_recorder = create_goodput_recorder(mt_config)
 
-  with maybe_record_goodput(goodput_recorder, GoodputEvent.JOB):
+  with maybe_record_goodput(goodput_recorder, GoodputEvent.JOB), maybe_monitor_goodput(mt_config):
     train(mt_config, goodput_recorder)
 
 

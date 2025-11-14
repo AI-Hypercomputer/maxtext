@@ -19,11 +19,19 @@ import os.path
 
 from MaxText import pyconfig
 from MaxText.globals import MAXTEXT_PKG_DIR
-from MaxText.pyconfig import resolve_config_path
+from MaxText.pyconfig_deprecated import resolve_config_path
 
 
 class PyconfigTest(unittest.TestCase):
   """Tests for 'pyconfig.py'."""
+
+  def test_basic_override(self):
+    raw_keys = {"megablox": None, "foo": ["bar", "baz"]}
+    model_keys = {"foo": ["x", "y"]}
+
+    pyconfig.validate_and_update_keys(raw_keys, model_keys, config_name="config")
+
+    self.assertEqual(raw_keys, {"megablox": None, "foo": ["x", "y"]})
 
   def test_empty_string_parse_as_empty_string(self):
     config = pyconfig.initialize(
@@ -33,6 +41,44 @@ class PyconfigTest(unittest.TestCase):
     )
 
     self.assertTrue(config.quantization is None or config.quantization == "")
+
+  def test_logical_axis_override(self):
+    raw_keys = {
+        "megablox": None,
+        "foo": ["bar", "baz"],
+        "logical_axis_rules": [["activation", ["data", "fsdp"]], ["norm", "tensor"]],
+    }
+    model_keys = {"logical_axis_rules": [["activation", ["data", "fsdp_transpose"]], ["norm", "fsdp"]]}
+
+    pyconfig.validate_and_update_keys(raw_keys, model_keys, config_name="config")
+
+    self.assertEqual(
+        raw_keys,
+        {
+            "megablox": None,
+            "foo": ["bar", "baz"],
+            "logical_axis_rules": [("activation", ["data", "fsdp_transpose"]), ("norm", "fsdp")],
+        },
+    )
+
+  def test_logical_axis_partial_override(self):
+    raw_keys = {
+        "megablox": None,
+        "foo": ["bar", "baz"],
+        "logical_axis_rules": [["activation", ["data", "fsdp"]], ["norm", "tensor"]],
+    }
+    model_keys = {"logical_axis_rules": [["norm", "fsdp"]]}
+
+    pyconfig.validate_and_update_keys(raw_keys, model_keys, config_name="config")
+
+    self.assertEqual(
+        raw_keys,
+        {
+            "megablox": None,
+            "foo": ["bar", "baz"],
+            "logical_axis_rules": [("activation", ("data", "fsdp")), ("norm", "fsdp")],
+        },
+    )
 
   def test_multiple_unmodifiable_configs(self):
     config_train = pyconfig.initialize(
