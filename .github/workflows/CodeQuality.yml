@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-name: Linter
+name: CodeQuality
 
 on:
   pull_request:
@@ -28,29 +28,33 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  cpu:
-    name: "CPU tests"
+  qa:
+    name: "Static code-quality checkers"
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        os: [ubuntu-24.04]
-        python-version: ['3.12']
     steps:
     - uses: actions/checkout@v5
-    - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v5
+
+    - name: Install uv and set the Python version
+      uses: astral-sh/setup-uv@v7
       with:
-        python-version: ${{ matrix.python-version }}
-    - name: Install Dependencies
+        python-version: '3.12'
+        enable-cache: true
+
+    - name: Set venv
+      run: uv venv --python 3.12 "$GITHUB_WORKSPACE"/venv
+
+    - name: Install `pre-commit`
+      run: . "$GITHUB_WORKSPACE"/venv/bin/activate && uv pip install pre-commit
+
+    - name: Cache pre-commit environments
+      uses: actions/cache@v4
+      with:
+         path: ~/.cache/pre-commit
+         key: pre-commit-${{ hashFiles('.pre-commit-config.yaml') }}
+
+    - name: Run pre-commit checks on just the files that have changed
       run: |
-        python3 -m pip install --upgrade pip
-        python3 -m pip install pylint pyink pytype==2024.2.27
-    - name: Typecheck the code with pytype
-      run: |
-        pytype --jobs auto --disable 'import-error,late-directive,wrong-arg-types,module-attr,unsupported-operands' src/MaxText/ || true
-    - name: pylint
-      run: |
-         pylint --disable=R0401,R0917,W0201,W0613 --ignore-patterns='.pytype,.*pyi$' benchmarks end_to_end src tests
-    - name: pyink
-      run: |
-        pyink --pyink-indentation=2 --line-length=122 --check .
+        git fetch origin "$GITHUB_BASE_REF":"$GITHUB_BASE_REF"
+        git branch "$GITHUB_HEAD_REF"
+        . "$GITHUB_WORKSPACE"/venv/bin/activate
+        pre-commit run --from-ref "$GITHUB_BASE_REF" --to-ref "$GITHUB_HEAD_REF"

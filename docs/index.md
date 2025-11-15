@@ -28,7 +28,7 @@ Check out our [Read The Docs site](https://maxtext.readthedocs.io/en/latest/) or
 
 ## 🔥 Latest news 🔥
 
-* [September 5, 2025] MaxText has moved to an `src` layout as part of [RESTRUCTURE.md]
+* [September 5, 2025] MaxText has moved to an `src` layout as part of [RESTRUCTURE.md](https://github.com/AI-Hypercomputer/maxtext/blob/main/RESTRUCTURE.md).
 * [August 13, 2025] The Qwen3 2507 MoE family of models is now supported: MoEs: 235B Thinking & 280B Coder as well as existing dense models: 0.6B, 4B, 8B, 14B, and 32B.
 * [July 27, 2025] Updated TFLOPS/s calculation ([PR](https://github.com/AI-Hypercomputer/maxtext/pull/1988)) to account for causal attention, dividing the attention flops in half. Accounted for sliding window and chunked attention reduced attention flops in [PR](https://github.com/AI-Hypercomputer/maxtext/pull/2009) and [PR](https://github.com/AI-Hypercomputer/maxtext/pull/2030). Changes impact large sequence configs, as explained in this [doc](https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/guides/performance_metrics.md)
 * [July 16, 2025] We will be restructuring the MaxText repository for improved organization and clarity. Please review the [proposed structure](https://github.com/AI-Hypercomputer/maxtext/blob/main/RESTRUCTURE.md) and provide feedback.
@@ -54,8 +54,12 @@ Our goal is to provide a variety of models (dimension “a”) and techniques (d
 
 Check out these getting started guides:
 
-* [SFT](https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/tutorials/sft.md) (Supervised Fine Tuning)
-* [GRPO](https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/tutorials/grpo.md) (Group Relative Policy Optimization)
+* Supervised Fine Tuning (SFT)
+  * [SFT on Single-Host TPUs](https://maxtext.readthedocs.io/en/latest/tutorials/sft.html)
+  * [SFT on Multi-Host TPUs](https://maxtext.readthedocs.io/en/latest/tutorials/sft_on_multi_host.html)
+* Group Relative Policy Optimization (GRPO)
+  * [GRPO on Single-Host TPUs](https://maxtext.readthedocs.io/en/latest/tutorials/grpo.html)
+  * [GRPO on Multi-Host TPUs](https://maxtext.readthedocs.io/en/latest/tutorials/grpo_with_pathways.html)
 
 ### Model library
 
@@ -96,9 +100,10 @@ Please join our [Discord Channel](https://discord.com/invite/2H9PhvTcDU) and if 
 :maxdepth: 2
 :hidden:
 
-tutorials.md
-guides.md
 explanations.md
+guides.md
 reference.md
+tutorials.md
 development.md
+release_notes.md
 ```

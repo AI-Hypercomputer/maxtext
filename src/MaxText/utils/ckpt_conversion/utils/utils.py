@@ -72,6 +72,9 @@ HF_IDS = {
     "qwen3-30b-a3b": "Qwen/Qwen3-30B-A3B-Thinking-2507",
     "qwen3-235b-a22b": "Qwen/Qwen3-235B-A22B-Thinking-2507",
     "qwen3-480b-a35b": "Qwen/Qwen3-Coder-480B-A35B-Instruct",
+    "deepseek3-671b": "deepseek-ai/DeepSeek-V3",
+    "gpt-oss-20b": "openai/gpt-oss-20b",
+    "gpt-oss-120b": "openai/gpt-oss-120b",
     "qwen3-omni-30b-a3b": "Qwen/Qwen3-Omni-30B-A3B-Instruct",
 }
 
@@ -87,119 +90,137 @@ def _get_local_directory(output_dir: str) -> str:
   return local_dir
 
 
-def process_leaf_param(
-    path_tuple: Any,
-    leaf_value: jax.Array,
-    param_map_local: dict[str, Any],
-    shape_map_local: dict[str, Any],
-    hook_fn_map_local: dict[str, Any],
-    current_config: Any,
+def _process(hf_path, processed_slice, output_weights, current_hook_fns, hf_shape_map):
+  """Applies hooks, converts a JAX slice to NumPy, and appends it to the output list."""
+  if hf_path not in hf_shape_map:
+    raise ValueError(f"HF path '{hf_path}' not found in hf_shape_map.")
+  target_hf_shape = hf_shape_map[hf_path]
+  if current_hook_fns:
+    # otherwise identity
+    processed_slice = apply_hook_fns(processed_slice, target_hf_shape, current_hook_fns)
+  numpy_slice = convert_jax_weight_to_numpy(processed_slice).squeeze()
+  assert len(target_hf_shape) == len(
+      numpy_slice.shape
+  ), f"shape mismatch {len(target_hf_shape)} and {len(numpy_slice.shape)}"
+  output_weights.append((hf_path, numpy_slice))
+
+
+def process_maxtext_param(
+    maxtext_param_key: str | tuple[str, ...],
+    maxtext_param_weight: jax.Array | list[jax.Array],
+    param_map: dict[str, Any],
+    hook_fn_map: dict[str, Any],
+    hf_shape_map: dict[str, Any],
+    maxtext_config: Any,
 ) -> list[tuple[str, np.ndarray]]:
-  """Processes a single leaf from the MaxText parameter tree."""
-  # Construct maxtext_param_key from path_tuple
-  key_parts = []
-  for p_entry in path_tuple:
-    if isinstance(p_entry, jax.tree_util.DictKey):
-      key_parts.append(p_entry.key)
-    else:
-      max_logging.log(f"Warning: Path tuple {path_tuple} contains non-DictKey entry '{p_entry}'. Skipping this path.")
-      return []  # Skip this parameter
+  """Processes a single MaxText parameter (or a group of parameters) for conversion to Hugging Face format.
 
-  maxtext_param_key = "params-" + "-".join(key_parts)
+  This function is responsible for taking a MaxText parameter (which might be
+  a single tensor or a list of tensors for N-to-1 mappings) and transforming
+  it into one or more Hugging Face compatible parameters. It handles various
+  scenarios including:
+  - 1-to-1 mappings (single MaxText param to single HF param).
+  - N-to-1 mappings (multiple MaxText params combined into a single HF param).
+  - Stacked MaxText parameters (e.g., scanned layers or MoE experts) that need
+    to be unstacked into individual Hugging Face parameters.
 
-  if not isinstance(leaf_value, (jax.Array, np.ndarray)):
-    max_logging.log(f"Warning: Leaf value for {maxtext_param_key} is not an array. Type: {type(leaf_value)}. Skipping.")
-    return []
+  Args:
+    maxtext_param_key: The key (or tuple of keys for N-to-1 mappings) identifying
+      the MaxText parameter(s) being processed.
+    maxtext_param_weight: The actual weight(s) of the MaxText parameter(s).
+      This can be a single `jax.Array` or a list of `jax.Array` for N-to-1 mappings.
+    param_map: A dictionary mapping MaxText parameter keys to their corresponding
+      Hugging Face target path(s).
+    hook_fn_map: A dictionary mapping MaxText parameter keys to transformation
+      functions (hooks) that should be applied to the weights.
+    hf_shape_map: A dictionary mapping Hugging Face parameter paths to their
+      expected shapes.
+    maxtext_config: The MaxText configuration object, used to determine
+      details like `param_scan_axis` and `base_num_decoder_layers`.
 
-  if maxtext_param_key not in param_map_local:
-    max_logging.log(f"Warning: MaxText param key '{maxtext_param_key}' not found in param_map. Skipping.")
-    return []
+  Returns:
+    A list of tuples, where each tuple contains:
+    - hf_path (str): The Hugging Face parameter path.
+    - hf_weight (np.ndarray): The transformed Hugging Face compatible weight.
+  """
+  max_logging.log(f"maxtext param: {maxtext_param_key}")
 
-  hf_target_paths = param_map_local[maxtext_param_key]
-  if not isinstance(hf_target_paths, list):
-    hf_target_paths = [hf_target_paths]
-
+  if maxtext_param_key not in param_map:
+    raise ValueError(f"MaxText param key '{maxtext_param_key}' not found in param_map.")
+  hf_target_paths = param_map[maxtext_param_key]
   if not hf_target_paths:
-    max_logging.log(f"Warning: No HF target paths found for MaxText key '{maxtext_param_key}'. Skipping.")
-    return []
+    raise ValueError(f"No HF target paths found for MaxText key '{maxtext_param_key}'")
 
-  current_hook_fns = hook_fn_map_local.get(maxtext_param_key)
+  # If maxtext_param_key is not in hook_fn_map, current_hook_fns is None, indicating identity (no transformation)
+  current_hook_fns = hook_fn_map.get(maxtext_param_key)
+
+  # This list will store tuples of (hf_path, hf_weight)
   output_weights = []
 
-  if len(hf_target_paths) == 1:
-    hf_path = hf_target_paths[0]
-    if hf_path not in shape_map_local:
-      max_logging.log(
-          f"Warning: HF path '{hf_path}' not found in shape_map for MaxText key '{maxtext_param_key}'. Skipping."
+  # Case 1: Unscan
+  if not isinstance(hf_target_paths, list):
+    max_logging.log("\tunscan")
+    hf_path = hf_target_paths
+    _process(hf_path, maxtext_param_weight, output_weights, current_hook_fns, hf_shape_map)
+    return output_weights
+
+  # Stacked MaxText weight
+  # This now handles three cases:
+  # 2. Scanned MoE layers (2D list of targets from a tensor stacked on expert and layer axes)
+  # 3. Unscanned MoE layers (1D list of targets from a tensor stacked only on the expert axis)
+  # 4. Standard scanned layers (1D list of targets from a tensor stacked only on the layer axis)
+  is_scanned_moe_layer = isinstance(hf_target_paths[0], list)
+
+  if is_scanned_moe_layer:
+    max_logging.log("\tscan moe")
+    # Case 2: Scanned MoE layer, e.g., from 'layers-moe_block-wi_0'.
+    # The tensor is stacked on expert and layer axes. We slice experts first, then layers.
+    # MaxText format is (experts, layers, ...), so expert axis is 0, layer axis is 1.
+    expert_axis_to_slice = 0
+
+    # Outer loop for experts
+    for expert_idx, expert_paths_for_layer in enumerate(hf_target_paths):
+      # Slice along the expert axis to get the tensor for the current expert across all layers.
+      expert_tensor_slice = jax.lax.index_in_dim(
+          maxtext_param_weight, expert_idx, axis=expert_axis_to_slice, keepdims=False
       )
-      return []
-    target_hf_shape = shape_map_local[hf_path]
+      # Inner loop for layers
+      for layer_idx, hf_path in enumerate(expert_paths_for_layer):
+        # Slice the expert tensor along the layer axis to get the final individual weight.
+        # axis is 0 on the new sliced tensor
+        layer_tensor_slice = jax.lax.index_in_dim(expert_tensor_slice, layer_idx, axis=0, keepdims=False)
+        _process(hf_path, layer_tensor_slice, output_weights, current_hook_fns, hf_shape_map)
 
-    processed_weight = leaf_value
-    if current_hook_fns:
-      processed_weight = apply_hook_fns(processed_weight, target_hf_shape, current_hook_fns)
-    numpy_weight = convert_jax_weight_to_numpy(processed_weight)
-    output_weights.append((hf_path, numpy_weight))
-  else:  # Stacked MaxText weight
-    # This now handles three cases:
-    # 1. Scanned MoE layers (2D list of targets from a tensor stacked on expert and layer axes)
-    # 2. Unscanned MoE layers (1D list of targets from a tensor stacked only on the expert axis)
-    # 3. Standard scanned layers (1D list of targets from a tensor stacked only on the layer axis)
+    return output_weights
 
-    is_scanned_moe_layer = isinstance(hf_target_paths[0], list)
+  # Case 3 or 4: The source tensor is stacked on a single axis.
+  # We determine if it's an unscanned MoE (expert axis) or standard scanned (layer axis).
+  is_unscanned_moe = "moe_block" in maxtext_param_key and any(
+      f"_{i}-" in maxtext_param_key for i in range(maxtext_config.base_num_decoder_layers)
+  )
 
-    if is_scanned_moe_layer:
-      # Case 1: Scanned MoE layer, e.g., from 'layers-moe_block-wi_0'.
-      # The tensor is stacked on expert and layer axes. We slice experts first, then layers.
-      # MaxText format is (experts, layers, ...), so expert axis is 0, layer axis is 1.
-      expert_axis_to_slice = 0
+  if is_unscanned_moe:
+    max_logging.log("\tunscan moe")
+    # Case 3: Unscanned MoE layer, e.g., from 'layers_0-moe_block-wi_0'.
+    # The tensor is stacked ONLY on the expert axis. Assuming expert is axis 0.
+    axis_to_slice = 0
+  else:
+    max_logging.log("\tscan")
+    # Case 4: Standard scanned layer.
+    # The tensor is stacked ONLY on the layer axis.
+    axis_to_slice = maxtext_config.param_scan_axis
 
-      # Outer loop for experts
-      for expert_idx, expert_paths_for_layer in enumerate(hf_target_paths):
-        # Slice along the expert axis to get the tensor for the current expert across all layers.
-        expert_tensor_slice = jax.lax.index_in_dim(leaf_value, expert_idx, axis=expert_axis_to_slice, keepdims=False)
-
-        # Inner loop for layers
-        for layer_idx, hf_path in enumerate(expert_paths_for_layer):
-          if hf_path not in shape_map_local:
-            max_logging.log(f"Warning: HF path '{hf_path}' not found. Skipping.")
-            continue
-
-          # Slice the expert tensor along the layer axis to get the final individual weight.
-          layer_tensor_slice = jax.lax.index_in_dim(
-              expert_tensor_slice, layer_idx, axis=0, keepdims=False
-          )  # axis is 0 on the new sliced tensor
-
-          target_hf_shape = shape_map_local[hf_path]
-          processed_slice = apply_hook_fns(layer_tensor_slice, target_hf_shape, current_hook_fns)
-          numpy_slice = convert_jax_weight_to_numpy(processed_slice)
-          output_weights.append((hf_path, numpy_slice))
+  # Iterate through the slices of the MaxText weight along the determined stacking axis.
+  for i, hf_path in enumerate(hf_target_paths):
+    if isinstance(maxtext_param_weight, list):
+      # This handles N-to-1 mappings where `maxtext_param_weight` is a list of tensors.
+      # Each tensor in the list is sliced independently along the `axis_to_slice`.
+      weight_slice = [jax.lax.index_in_dim(x, i, axis=axis_to_slice, keepdims=False) for x in maxtext_param_weight]
     else:
-      # Case 2 or 3: The source tensor is stacked on a single axis.
-      # We determine if it's an unscanned MoE (expert axis) or standard scanned (layer axis).
-      is_unscanned_moe = "moe_block" in maxtext_param_key and any(
-          f"_{i}-" in maxtext_param_key for i in range(current_config.base_num_decoder_layers)
-      )
+      # For 1-to-1 mappings, slice the single MaxText tensor.
+      weight_slice = jax.lax.index_in_dim(maxtext_param_weight, i, axis=axis_to_slice, keepdims=False)
+    _process(hf_path, weight_slice, output_weights, current_hook_fns, hf_shape_map)
 
-      if is_unscanned_moe:
-        # Case 2: Unscanned MoE layer, e.g., from 'layers_0-moe_block-wi_0'.
-        # The tensor is stacked ONLY on the expert axis.
-        axis_to_slice = 0  # Assuming expert is axis 0.
-      else:
-        # Case 3: Standard scanned layer.
-        # The tensor is stacked ONLY on the layer axis.
-        axis_to_slice = current_config.param_scan_axis
-
-      for i, hf_path in enumerate(hf_target_paths):
-        if hf_path not in shape_map_local:
-          max_logging.log(f"Warning: HF path '{hf_path}' not found. Skipping.")
-          continue
-
-        target_hf_shape = shape_map_local[hf_path]
-        weight_slice = jax.lax.index_in_dim(leaf_value, i, axis=axis_to_slice, keepdims=False)
-        processed_slice = apply_hook_fns(weight_slice, target_hf_shape, current_hook_fns)
-        numpy_slice = convert_jax_weight_to_numpy(processed_slice)
-        output_weights.append((hf_path, numpy_slice))
   return output_weights
 
 
@@ -559,6 +580,7 @@ def upload_state_dict_to_gcs(state_dict: dict, gs_bucket_path: str):
       state_dict: A PyTorch model's state_dict.
       gs_bucket_path: GCS destination (e.g., "gs://my-bucket/models/model.pt").
   """
+  # TODO(shuningjin): max retries exceeded when uploading hf checkpoint for deepseek3-671b, b/457821616
   # Standardize bucket path format
   gs_bucket_path = gs_bucket_path.removeprefix("gs://")
   bucket_name, *blob_path_parts = gs_bucket_path.split("/")

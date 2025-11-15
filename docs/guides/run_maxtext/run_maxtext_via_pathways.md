@@ -36,14 +36,14 @@ Before you can run a MaxText workload, you must complete the following setup ste
     ```bash
     # Step 1: Build the Docker image for a TPU device
     # This image contains MaxText and its dependencies.
-    bash docker_build_dependency_image.sh DEVICE=tpu MODE=jax_ai_image BASEIMAGE=us-docker.pkg.dev/cloud-tpu-images/jax-ai-image/tpu:latest
+    bash dependencies/scripts/docker_build_dependency_image.sh DEVICE=tpu MODE=jax_ai_image BASEIMAGE=us-docker.pkg.dev/cloud-tpu-images/jax-ai-image/tpu:latest
 
     # Step 2: Configure Docker to authenticate with Google Cloud
     gcloud auth configure-docker
 
     # Step 3: Upload the image to your project's registry
     # Replace `$USER_runner` with your desired image name.
-    bash docker_upload_runner.sh CLOUD_IMAGE_NAME=$USER_runner
+    bash dependencies/scripts/docker_upload_runner.sh CLOUD_IMAGE_NAME=$USER_runner
     ```
 
 ## 2. Environment configuration

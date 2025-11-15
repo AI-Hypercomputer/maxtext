@@ -88,7 +88,7 @@ if ! docker image inspect "${LOCAL_IMAGE_NAME}" &> /dev/null; then
   exit 1
 fi
 
-docker build --build-arg BASEIMAGE=${LOCAL_IMAGE_NAME} \
+docker build --no-cache --build-arg BASEIMAGE=${LOCAL_IMAGE_NAME} \
              -f "$MAXTEXT_REPO_ROOT"'/dependencies/dockerfiles/maxtext_runner.Dockerfile' \
              -t ${LOCAL_IMAGE_NAME_RUNNER} .
 

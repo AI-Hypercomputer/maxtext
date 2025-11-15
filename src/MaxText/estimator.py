@@ -70,7 +70,7 @@ def tensor_score(tensor_name: str, config) -> tuple:
 
   The score is used to prioritize which tensors to offload/remat first. Tensors
   with a higher score are rematerialized later. The scoring is based on tensor
-  arithmatic intensity and memory size, with larger tensors getting lower scores
+  arithmetic intensity and memory size, with larger tensors getting lower scores
   (higher priority for remat).
 
   Args:
@@ -188,7 +188,7 @@ def largest_batch_size(base_argv, policy, min_pdb, max_pdb=64) -> int:
     print(f"No OOM at maximum batch size {max_pdb}.")
     return max_pdb
 
-  low, high, ans = min_pdb, max_pdb, min_pdb
+  low, high, result = min_pdb, max_pdb, min_pdb
   while low <= high:
     mid = (low + high) // 2
     if mid < min_pdb:
@@ -196,11 +196,11 @@ def largest_batch_size(base_argv, policy, min_pdb, max_pdb=64) -> int:
       continue
 
     if not is_oom(base_argv, policy, mid):
-      ans = mid
+      result = mid
       low = mid + 1
     else:
       high = mid - 1
-  return ans
+  return result
 
 
 def is_oom(base_argv, policy: dict, pdb: int) -> bool:

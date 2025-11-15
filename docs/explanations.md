@@ -19,11 +19,11 @@
 ```{toctree}
 :maxdepth: 1
 
-explanations/jax_ai_libraries_chosen.md
-explanations/alternatives.md
 explanations/checkpoints.md
+explanations/alternatives.md
+explanations/jax_ai_libraries_chosen.md
+explanations/performance_metrics.md
 explanations/quantization.md
 explanations/sharding.md
 explanations/tiling.md
-explanations/performance_metrics.md
 ```

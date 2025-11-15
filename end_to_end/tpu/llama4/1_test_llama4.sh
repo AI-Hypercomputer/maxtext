@@ -43,5 +43,5 @@ gcloud storage cp -r ${CHKPT_BUCKET} /tmp
 
 export LOCATION_OF_HF_CHKPT_ON_DISK=/tmp/hf-checkpoint
 
-JAX_PLATFORMS=cpu python3 -m MaxText.llama4_ckpt_unscanned --base-model-path ${LOCATION_OF_HF_CHKPT_ON_DISK} --maxtext-model-path ${MODEL_BUCKET}/${idx}/unscanned --model-size ${MODEL_VARIATION} --huggingface-checkpoint True
+JAX_PLATFORMS=cpu python3 -m MaxText.utils.ckpt_scripts.llama4_ckpt_unscanned --base-model-path ${LOCATION_OF_HF_CHKPT_ON_DISK} --maxtext-model-path ${MODEL_BUCKET}/${idx}/unscanned --model-size ${MODEL_VARIATION} --huggingface-checkpoint True
 echo "Wrote MaxText compatible unscanned checkpoint to ${MODEL_BUCKET}/${idx}/unscanned"

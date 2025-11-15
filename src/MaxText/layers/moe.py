@@ -21,22 +21,20 @@ import math
 from typing import Iterable, Optional, Tuple, Union
 
 from aqt.jax.v2 import aqt_tensor as aqt
-import flax.linen as nn
 from flax import nnx
+import flax.linen as nn
 import jax
 from jax import ad_checkpoint as adc
 from jax.experimental import xla_metadata
 import jax.numpy as jnp
-import numpy as np
-
 from MaxText import common_types as ctypes
 from MaxText import max_logging
 from MaxText import max_utils
 from MaxText.kernels import megablox as mblx
-from MaxText.layers import attentions, linears, quantizations, nnx_wrappers
-from MaxText.layers.initializers import NdInitializer, nd_dense_init, default_bias_init, variable_to_logically_partitioned
-
-from tokamax._src.ops.ragged_dot import api as tokamax_api
+from MaxText.layers import attentions, linears, nnx_wrappers, quantizations
+from MaxText.layers.initializers import NdInitializer, default_bias_init, nd_dense_init, variable_to_logically_partitioned
+import numpy as np
+import tokamax
 
 set_xla_metadata = xla_metadata.set_xla_metadata
 
@@ -812,7 +810,7 @@ class RoutedMoE(nnx.Module):
           min(tiling[2], n),
       )
       if self.config.use_tokamax_gmm:
-        output = tokamax_api.ragged_dot(
+        output = tokamax.ragged_dot(
             lhs=inputs,
             rhs=kernel,
             group_sizes=group_sizes,

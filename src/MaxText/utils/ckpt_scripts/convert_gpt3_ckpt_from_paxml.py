@@ -16,7 +16,7 @@
 """Convert weights from a paxml gpt3 model to a MaxText one.
 
 Test cmd for gpt3-52k:
-python3 -m MaxText.convert_gpt3_ckpt_from_paxml \
+python3 -m MaxText.utils.ckpt_scripts.convert_gpt3_ckpt_from_paxml \
   --paxml-ckpt-path=gs://maxtext-gpt3/ckpt_test/paxml/checkpoints/checkpoint_00000000/state \
   --maxtext-model-name=gpt3-52k \
   --run-name=$RUN_NAME \
@@ -27,7 +27,7 @@ True cmd for gpt3-175b:
 The script is memory demanding, requires at least 250 GiB in cpu and cumulative TPU memory of all devices should be
   above ~4.2 TiB (175 billion param * 4 byte/param * 3 (model var and 2 opt momentums) * 2 copies in converting)
 
-python3 -m MaxText.convert_gpt3_ckpt_from_paxml \
+python3 -m MaxText.utils.ckpt_scripts.convert_gpt3_ckpt_from_paxml \
   --paxml-ckpt-path=gs://mlperf-llm-public2/gpt3_spmd1x64x24_tpuv4-3072_v84_20221101/checkpoints/checkpoint_00004000 \
   --maxtext-model-name=gpt3-175b \
   --run-name=$RUN_NAME \

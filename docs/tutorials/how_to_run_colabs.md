@@ -10,7 +10,7 @@ This guide provides comprehensive instructions for setting up Jupyter Lab on TPU
 - [Method 3: Colab + Local Jupyter Lab Hybrid](#method-3-colab--local-jupyter-lab-hybrid)
 - [Available Examples](#available-examples)
 - [Common Pitfalls & Debugging](#common-pitfalls--debugging)
-- [Support & Resources](#support--resources)
+- [Support & Resources](#support-and-resources)
 - [Contributing](#contributing)
 
 ## Prerequisites
@@ -48,7 +48,7 @@ Upload notebooks or mount your GitHub repo
 > **Note:** In Colab, the repo root will usually be `/content/maxtext`
 
 **Example:**
-```python
+```bash
 !git clone https://github.com/AI-Hypercomputer/maxtext.git
 %cd maxtext
 ```
@@ -122,12 +122,46 @@ Use the link for Jupyter Lab as a link for "Connect to a local runtime" in Colla
 
 ### Supervised Fine-Tuning (SFT)
 
-- **`sft_qwen3_demo.ipynb`** → Qwen3-0.6B with Hugging Face ultrachat_200k dataset
-- **`sft_llama3_demo.ipynb`** → Llama3.1-8B with Hugging Face ultrachat_200k dataset
+- **`sft_qwen3_demo.ipynb`** → Qwen3-0.6B SFT training and evaluation on [OpenAI's GSM8K dataset](https://huggingface.co/datasets/openai/gsm8k)
+- **`sft_llama3_demo.ipynb`** → Llama3.1-8B SFT training on [Hugging Face ultrachat_200k dataset](https://huggingface.co/datasets/HuggingFaceH4/ultrachat_200k)
 
 ### GRPO Training
 
-- **`grpo_llama3_demo.ipynb`** → GRPO training on math dataset
+- **`grpo_llama3_1_8b_demo.ipynb`** → GRPO training on math dataset (Colab/notebook)
+
+#### GRPO Colab Usage
+
+For interactive GRPO training in Google Colab or Jupyter:
+
+1. **Open** `src/MaxText/examples/grpo_llama3_1_8b_demo.ipynb`
+2. **Enable TPU runtime** (Runtime → Change runtime type → TPU)
+3. **Run cells** to train Llama3.1-8B with GRPO on GSM8K dataset
+
+#### GRPO Python Script Usage - local runs
+
+```bash
+# Llama3.1-8B-Instruct
+python3 -m src.MaxText.rl.train_rl src/MaxText/configs/rl.yml \
+  --model_name=llama3.1-8b \
+  --tokenizer_path=meta-llama/Llama-3.1-8B-Instruct \
+  --load_parameters_path=gs://path/to/checkpoint/0/items \
+  --run_name=$WORKLOAD \
+  --base_output_directory=$OUTPUT_PATH \
+  --hf_access_token=$HF_TOKEN
+
+# Qwen2.5-7B
+python3 -m src.MaxText.rl.train_rl src/MaxText/configs/rl.yml \
+  --model_name=qwen2.5-7b \
+  --tokenizer_path=Qwen/Qwen2.5-7B-Instruct \
+  --load_parameters_path=gs://path/to/checkpoint \
+  --run_name=$WORKLOAD \
+  --base_output_directory=$OUTPUT_PATH \
+  --hf_access_token=$HF_TOKEN
+```
+#### GRPO Python Script Usage - cluster runs
+
+For running on clusters, please refer to `maxtext/docs/tutorials/grpo_with_pathways.md`
+
 
 ## Common Pitfalls & Debugging
 

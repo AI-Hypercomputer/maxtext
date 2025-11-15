@@ -520,9 +520,12 @@ def initialize(argv: Sequence[str]) -> tuple[pyconfig.HyperParameters, Any, Any]
 
 def run(config, recorder, diagnostic_config):
   """Run the job given hyperparameters and utilities"""
-  with diagnostic.diagnose(diagnostic_config):
-    with maybe_record_goodput(recorder, GoodputEvent.JOB):
-      train_loop(config, recorder)
+  with (
+      diagnostic.diagnose(diagnostic_config),
+      maybe_record_goodput(recorder, GoodputEvent.JOB),
+      max_utils.maybe_get_transformer_engine_context(config),
+  ):
+    train_loop(config, recorder)
 
 
 def main(argv: Sequence[str]) -> None:

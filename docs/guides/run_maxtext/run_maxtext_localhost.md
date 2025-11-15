@@ -43,7 +43,7 @@ Within the root directory of the cloned repo, create a virtual environment and i
 ```bash
 python3.12 -m venv ~/venv-maxtext
 source ~/venv-maxtext/bin/activate
-bash setup.sh DEVICE={tpu|gpu}
+bash tools/setup/setup.sh DEVICE={tpu|gpu}
 ```
 
 #### Run a Test Training Job

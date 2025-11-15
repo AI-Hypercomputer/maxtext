@@ -14,7 +14,7 @@
 
 """Provides a centralized access point for vLLM weight mappings.
 
-This module defines the `VLLM_WEIGHT_MAPPING` class, which acts as a
+This module defines the `StandaloneVllmWeightMapping` class, which acts as a
 dispatcher to retrieve the correct weight mapping configuration for a given
 model name. This allows for easy extension to support new models.
 """
@@ -23,7 +23,7 @@ from MaxText.integration.tunix.weight_mapping.llama3 import LLAMA3_VLLM_MAPPING
 from MaxText.integration.tunix.weight_mapping.qwen3 import QWEN3_VLLM_MAPPING
 
 
-class VLLM_WEIGHT_MAPPING:
+class StandaloneVllmWeightMapping:
   """Mapping MaxText model weights to vLLM's model weights."""
 
   def __getattr__(self, name):

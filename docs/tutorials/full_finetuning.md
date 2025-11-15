@@ -43,7 +43,7 @@ The conversion scripts for LLama work with Meta’s original checkpoints and not
 E.g.
 
 ```bash
-python3 -m MaxText.llama_or_mistral_ckpt --base-model-path <path/to/meta/ckpt> \
+python3 -m MaxText.utils.ckpt_scripts.llama_or_mistral_ckpt --base-model-path <path/to/meta/ckpt> \
     --maxtext-model-path <GCS/path/to/save/new/maxtext/ckpt> --model-size llama2-7b
 ```
 
@@ -92,7 +92,7 @@ You need to run these steps once per project prior to any local development or c
 MaxText assumes these GCS buckets are created in the same project and that it has permissions to read and write from them:
 
 ```bash
-bash download_dataset.sh {GCS_PROJECT} {GCS_BUCKET_NAME}
+bash tools/data_generation/download_dataset.sh ${GCS_PROJECT?} ${GCS_BUCKET_NAME?}
 ```
 
 The above will download the c4 dataset to your GCS BUCKET.
