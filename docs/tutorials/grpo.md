@@ -40,6 +40,51 @@ bash ~/maxtext/src/MaxText/examples/install_tunix_vllm_requirement.sh
 
 Primarily, it installs `vllm-tpu` which is [vllm](https://github.com/vllm-project/vllm) and [tpu-inference](https://github.com/vllm-project/tpu-inference) and thereby providing TPU inference for vLLM, with unified JAX and PyTorch support.
 
+## Setup the following environment variables before running GRPO
+
+Setup following environment variables before running GRPO
+
+```bash
+# -- Model configuration --
+export MODEL=<model name> # e.g., 'llama3.1-8b'
+export TOKENIZER=<tokenizer path> # e.g., 'meta-llama/Llama-3.1-8B-Instruct'
+export HF_TOKEN=<Hugging Face access token>
+
+# -- MaxText configuration --
+export BASE_OUTPUT_DIRECTORY=<output directory to store run logs> # e.g., gs://my-bucket/my-output-directory
+
+export RUN_NAME=<name for this run> # e.g., $(date +%Y-%m-%d-%H-%M-%S)
+export MAXTEXT_CKPT_PATH=${BASE_OUTPUT_DIRECTORY}/${RUN_NAME}/0/items
+export STEPS=<number of fine-tuning steps to run> # e.g., 1000
+export PER_DEVICE_BATCH_SIZE=<batch size per device> # e.g., 1
+```
+
+## Get your model checkpoint
+
+You can convert a Hugging Face checkpoint to MaxText format using the `src/MaxText/utils/ckpt_conversion/to_maxtext.py` script. This is useful if you have a pre-trained model from Hugging Face that you want to use with MaxText.
+
+First, ensure you have the necessary dependencies installed. Then, run the conversion script on a CPU machine. For large models, it is recommended to use the --lazy_load_tensor flag to reduce memory usage during conversion. This command will download the Hugging Face model and convert it to the MaxText format, saving it to the specified GCS bucket.
+
+```bash
+python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+python3 -m MaxText.utils.ckpt_conversion.to_maxtext src/MaxText/configs/base.yml \
+    model_name=${MODEL} \
+    hf_access_token=${HF_TOKEN} \
+    base_output_directory=${MAXTEXT_CKPT_PATH} \
+    scan_layers=True
+
+# Example of converting Llama3.1-70B using --lazy_load_tensor=true which uses around 86GB of RAM
+
+python3 -m MaxText.utils.ckpt_conversion.to_maxtext src/MaxText/configs/base.yml \
+    model_name=llama3.1-70b \
+    hf_access_token=${HF_TOKEN} \
+    base_output_directory=${MAXTEXT_CKPT_PATH} \
+    scan_layers=True \
+    --lazy_load_tensor=true
+```
+
+
 
 ## Run GRPO
 
@@ -47,12 +92,12 @@ Finally, run the command
 
 ```
 python3 -m src.MaxText.rl.train_rl src/MaxText/configs/rl.yml \
-  model_name=llama3.1-8b \
-  tokenizer_path=meta-llama/Llama-3.1-8B-Instruct \
-  load_parameters_path=gs://path/to/checkpoint/0/items \
-  run_name=$WORKLOAD \
-  base_output_directory=$OUTPUT_PATH \
-  hf_access_token=$HF_TOKEN
+  model_name=${MODEL} \
+  tokenizer_path=${TOKENIZER} \
+  load_parameters_path=${MAXTEXT_CKPT_PATH} \
+  run_name=${RUN_NAME} \
+  base_output_directory=${BASE_OUTPUT_DIRECTORY} \
+  hf_access_token=${HF_TOKEN}
 ```
 
 The overview of the what this run will do is as follows:

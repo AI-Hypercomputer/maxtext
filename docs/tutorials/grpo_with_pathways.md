@@ -29,6 +29,50 @@ Furthermore, we use Pathways for [orchestration](https://cloud.google.com/ai-hyp
 Follow instructions in [Install MaxText](https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/guides/install_maxtext.md), but 
 recommend creating the virtual environment outside the `maxtext` directory.
 
+
+## Setup the following environment variables before running GRPO
+
+Setup following environment variables before running GRPO
+
+```bash
+# -- Model configuration --
+export MODEL=<model name> # e.g., 'llama3.1-70b'
+export TOKENIZER=<tokenizer path> # e.g., 'meta-llama/Llama-3.1-70B-Instruct'
+export HF_TOKEN=<Hugging Face access token>
+
+# -- MaxText configuration --
+export BASE_OUTPUT_DIRECTORY=<output directory to store run logs> # e.g., gs://my-bucket/my-output-directory
+export RUN_NAME=<name for this run> # e.g., $(date +%Y-%m-%d-%H-%M-%S)
+export MAXTEXT_CKPT_PATH=${BASE_OUTPUT_DIRECTORY}/${RUN_NAME}/0/items
+export STEPS=<number of fine-tuning steps to run> # e.g., 1000
+export PER_DEVICE_BATCH_SIZE=<batch size per device> # e.g., 1
+
+# -- Workload configuration --
+export WORKLOAD=<workload name>
+export TPU_CLUSTER=<cluster name>
+export TPU_TYPE=<tpu type> # eg. v5p-128
+export PROJECT=<gcp project name>
+export ZONE=<zone name>
+```
+
+## Get your model checkpoint
+
+You can convert a Hugging Face checkpoint to MaxText format using the `src/MaxText/utils/ckpt_conversion/to_maxtext.py` script. This is useful if you have a pre-trained model from Hugging Face that you want to use with MaxText.
+
+First, ensure you have the necessary dependencies installed. Then, run the conversion script on a CPU machine. For large models, it is recommended to use the --lazy_load_tensor flag to reduce memory usage during conversion. This command will download the Hugging Face model and convert it to the MaxText format, saving it to the specified GCS bucket.
+
+```bash
+python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+# using --lazy_load_tensor=true here will reduce the memory usage. eg, Llama3.1-70B conversion takes around 86GB of RAM
+python3 -m MaxText.utils.ckpt_conversion.to_maxtext src/MaxText/configs/base.yml \
+    model_name=${MODEL} \
+    hf_access_token=${HF_TOKEN} \
+    base_output_directory=${MAXTEXT_CKPT_PATH} \
+    scan_layers=True
+    --lazy_load_tensor=true
+```
+
 ## Build and Upload MaxText Docker Image with Tunix, vLLM, tpu-inference dependencies
 
 ### Installing stable releases of tunix and vllm-tpu
@@ -45,7 +89,9 @@ You can also use `bash dependencies/scripts/docker_build_dependency_image.sh MOD
 ### Install from locally git cloned repo's
 
 You can also locally git clone [tunix](https://github.com/google/tunix), [tpu-inference](https://github.com/vllm-project/tpu-inference), [vllm](https://github.com/vllm-project/vllm.git) and then use the following command to build a docker image using them: 
-`bash dependencies/scripts/docker_build_dependency_image.sh MODE=post-training POST_TRAINING_SOURCE=local`
+```
+bash dependencies/scripts/docker_build_dependency_image.sh MODE=post-training POST_TRAINING_SOURCE=local
+```
 
 ### Upload the dependency docker image along with MaxText code
 ```
@@ -60,13 +106,13 @@ xpk workload create-pathways --workload $WORKLOAD \
 --docker-image path/to/gcr.io:latest --cluster $TPU_CLUSTER \
 --tpu-type=$TPU_TYPE --num-slices=1  --zone=$ZONE \
 --project=$PROJECT_ID --priority=high \
---command "HF_TOKEN=$HF_TOKEN TF_CPP_MIN_LOG_LEVEL=0 JAX_PLATFORMS=proxy JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 ENABLE_PATHWAYS_PERSISTENCE='1' # Llama3.1-70B-Instruct
+--command "HF_TOKEN=$HF_TOKEN TF_CPP_MIN_LOG_LEVEL=0 JAX_PLATFORMS=proxy JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 ENABLE_PATHWAYS_PERSISTENCE='1'
 python3 -m src.MaxText.rl.train_rl src/MaxText/configs/rl.yml \
-  model_name=llama3.1-70b \
-  tokenizer_path=meta-llama/Llama-3.1-70B-Instruct \
-  load_parameters_path=gs://path/to/checkpoint/0/items \
-  run_name=$WORKLOAD \
-  base_output_directory=$OUTPUT_PATH \
+  model_name=${MODEL} \
+  tokenizer_path=${TOKENIZER} \
+  load_parameters_path=${MAXTEXT_CKPT_PATH} \
+  run_name=${RUN_NAME} \
+  base_output_directory=${BASE_OUTPUT_DIRECTORY} \
   hf_access_token=$HF_TOKEN"
 ```
 
