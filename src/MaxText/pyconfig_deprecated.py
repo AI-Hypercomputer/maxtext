@@ -385,9 +385,17 @@ def validate_data_input(keys):
 
   elif keys["dataset_type"] == "grain":
     max_logging.log(
-        f"dataset_type set to grain, will use {keys['grain_train_files']=} as data files, and {keys['grain_worker_count']} workers"
+        f"dataset_type set to grain, will use {keys['grain_train_files']=} or {keys['grain_mixture_config_path']=} "
+        f"for data files, and {keys['grain_worker_count']} workers"
     )
-    assert keys["grain_train_files"] != "", "grain_train_files can't be empty when dataset_type=grain"
+    # For grain, either grain_train_files or grain_mixture_config_path must be set, but not both.
+    is_train_files_set = bool(keys["grain_train_files"])
+    is_mixture_config_set = bool(keys["grain_mixture_config_path"])
+
+    if is_train_files_set == is_mixture_config_set:
+      raise ValueError(
+          "For dataset_type 'grain', you must set exactly one of 'grain_train_files' or 'grain_mixture_config_path', but not both."
+      )
     if keys["eval_interval"] > 0:
       assert keys["grain_eval_files"], "Please specify grain_eval_files or set eval_interval to <=0."
     assert keys["tokenizer_type"] in (
