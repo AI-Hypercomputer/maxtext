@@ -757,12 +757,17 @@ def get_abstract_param(model, config):
   image_shape = multimodal_utils.get_dummy_image_shape_for_init(
       config.model_name, batch_size=config.micro_batch_size_to_train_on
   )
+  audio_shape = multimodal_utils.get_dummy_audio_shape_for_init(
+      config.model_name, config=config, batch_size=config.micro_batch_size_to_train_on
+  )
+
   abstract_vars = jax.eval_shape(
       model.init,
       {"params": key, "dropout": key, "aqt": key},
       jnp.ones(input_shape, dtype=jnp.int32),
       jnp.ones(input_shape, dtype=jnp.int32),
       encoder_images=np.ones(image_shape, dtype=jnp.int32) if config.use_multimodal else None,
+      encoder_audios=np.ones(audio_shape, dtype=jnp.float32) if audio_shape is not None else None,
   )
   return abstract_vars
 
