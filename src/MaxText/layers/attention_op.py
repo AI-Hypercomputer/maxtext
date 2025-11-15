@@ -1290,10 +1290,10 @@ class AttentionOp(nnx.Module):
       if self.config.use_tokamax_splash:
         if max_logit_value is not None:
           attention_output = jax.vmap(partial(splash_kernel, max_logit_value=max_logit_value))(
-              query, key, value, decoder_segment_ids_tuple
+              query, key, value, decoder_segment_ids_tuple, sinks
           )
         else:
-          attention_output = jax.vmap(splash_kernel)(query, key, value, decoder_segment_ids_tuple)
+          attention_output = jax.vmap(splash_kernel)(query, key, value, decoder_segment_ids_tuple, sinks)
       else:
         attention_output = jax.vmap(splash_kernel, in_axes=(0, 0, 0, 0, None))(
             query, key, value, decoder_segment_ids_tuple, sinks
