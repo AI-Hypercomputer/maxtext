@@ -34,7 +34,6 @@ from MaxText.kernels import megablox as mblx
 from MaxText.layers import attentions, linears, nnx_wrappers, quantizations
 from MaxText.layers.initializers import NdInitializer, default_bias_init, nd_dense_init, variable_to_logically_partitioned
 import numpy as np
-import tokamax
 
 set_xla_metadata = xla_metadata.set_xla_metadata
 
@@ -785,7 +784,7 @@ class RoutedMoE(nnx.Module):
     """Perform sparse matrix multiplication of inputs and Experts."""
 
     def gmm(inputs, kernel, tiling, group_sizes, expert_assignments):
-      pad_length = self.config.tile_batch_seq
+      pad_length = self.config.tile_fwd_batch_seq
       hs_shape = inputs.shape
       # pad length is the 1st dimension of tiling size in gmm call
       if inputs.shape[0] != expert_assignments.shape[0]:
@@ -808,51 +807,48 @@ class RoutedMoE(nnx.Module):
           min(tiling[0], m),
           min(tiling[1], k),
           min(tiling[2], n),
+          min(tiling[3], m),
+          min(tiling[4], k),
+          min(tiling[5], n),
+          min(tiling[6], m),
+          min(tiling[7], k),
+          min(tiling[8], n),
       )
-      if self.config.use_tokamax_gmm:
-        output = tokamax.ragged_dot(
+      if self.config.megablox:
+        output = mblx.gmm(
             lhs=inputs,
             rhs=kernel,
             group_sizes=group_sizes,
-            precision=jax.lax.Precision.DEFAULT,
             preferred_element_type=self.dtype,
-            implementation="mosaic",
+            tiling=tiling,
+            lhs_quantize_dtype=lhs_quantize_dtype,
+            rhs_quantize_dtype=rhs_quantize_dtype,
+            use_qwix_quantization=self.config.use_qwix_quantization,
+            use_tokamax_backend=self.config.use_tokamax_gmm,
         )
       else:
-        if self.config.megablox:
-          output = mblx.gmm(
+        rhs_inputs = kernel
+        if isinstance(kernel, aqt.QTensor):
+          if kernel.bias or kernel.sparsity_mask or len(kernel.scale) > 1:
+            raise ValueError("Unsupported usecase for ragged_dot with quantized kernel.")
+          rhs_inputs = kernel.qvalue
+        with set_xla_metadata(ragged_dot_tiling=",".join([str(t) for t in tiling])):
+          output = jax.lax.ragged_dot(
               lhs=inputs,
-              rhs=kernel,
+              rhs=rhs_inputs,
               group_sizes=group_sizes,
               preferred_element_type=self.dtype,
-              tiling=tiling,
-              lhs_quantize_dtype=lhs_quantize_dtype,
-              rhs_quantize_dtype=rhs_quantize_dtype,
-              use_qwix_quantization=self.config.use_qwix_quantization,
           )
-        else:
-          rhs_inputs = kernel
-          if isinstance(kernel, aqt.QTensor):
-            if kernel.bias or kernel.sparsity_mask or len(kernel.scale) > 1:
-              raise ValueError("Unsupported usecase for ragged_dot with quantized kernel.")
-            rhs_inputs = kernel.qvalue
-          with set_xla_metadata(ragged_dot_tiling=",".join([str(t) for t in tiling])):
-            output = jax.lax.ragged_dot(
-                lhs=inputs,
-                rhs=rhs_inputs,
-                group_sizes=group_sizes,
-                preferred_element_type=self.dtype,
+        if isinstance(kernel, aqt.QTensor):
+          # Multiply outputs by the kernely scale
+          scales = jnp.take(kernel.scale[0].squeeze(), indices=expert_assignments, axis=0)
+          if padding_amount > 0:
+            scales = jax.lax.pad(
+                scales,
+                jnp.array(0.0, dtype=scales.dtype),
+                [(0, padding_amount, 0), (0, 0, 0)],
             )
-          if isinstance(kernel, aqt.QTensor):
-            # Multiply outputs by the kernely scale
-            scales = jnp.take(kernel.scale[0].squeeze(), indices=expert_assignments, axis=0)
-            if padding_amount > 0:
-              scales = jax.lax.pad(
-                  scales,
-                  jnp.array(0.0, dtype=scales.dtype),
-                  [(0, padding_amount, 0), (0, 0, 0)],
-              )
-            output *= scales
+          output *= scales
       if padding_amount > 0:
         output = output[: hs_shape[0]]
       return output
@@ -903,15 +899,24 @@ class RoutedMoE(nnx.Module):
 
     # w0, w1, wo needs to be un sharded on fsdp / fsdp_transpose axis, so use
     # mlp_no_fsdp axis
-    if self.config.fsdp_shard_on_exp:
-      # special sharding for dsv3 to remove overhead between gmm/AG
-      w0_pspec = nn.logical_to_mesh_axes(("embed_tensor_transpose", None, "mlp_no_fsdp"))
-      w1_pspec = nn.logical_to_mesh_axes(("embed_tensor_transpose", None, "mlp_no_fsdp"))
-      wo_pspec = nn.logical_to_mesh_axes(("embed_tensor_transpose", "mlp_no_fsdp", None))
+    if self.config.quantization:
+      if not self.config.fsdp_shard_on_exp:
+        raise ValueError("Quantization is only supported with fsdp_shard_on_exp=True.")
+      print(f"Mohit self.wi_kernel_axes: {self.wi_kernel_axes=}")
+      print(f"Mohit self.wo_kernel_axes: {self.wo_kernel_axes=}")
+      w0_pspec = nn.logical_to_mesh_axes(self.wi_kernel_axes)
+      w1_pspec = nn.logical_to_mesh_axes(self.wi_kernel_axes)
+      wo_pspec = nn.logical_to_mesh_axes(self.wo_kernel_axes)
     else:
-      w0_pspec = nn.logical_to_mesh_axes(("exp", "embed_tensor_transpose", "mlp_no_fsdp"))
-      w1_pspec = nn.logical_to_mesh_axes(("exp", "embed_tensor_transpose", "mlp_no_fsdp"))
-      wo_pspec = nn.logical_to_mesh_axes(("exp", "mlp_no_fsdp", "embed_tensor_transpose"))
+      if self.config.fsdp_shard_on_exp:
+        # special sharding for dsv3 to remove overhead between gmm/AG
+        w0_pspec = nn.logical_to_mesh_axes(("embed_tensor_transpose", None, "mlp_no_fsdp"))
+        w1_pspec = nn.logical_to_mesh_axes(("embed_tensor_transpose", None, "mlp_no_fsdp"))
+        wo_pspec = nn.logical_to_mesh_axes(("embed_tensor_transpose", "mlp_no_fsdp", None))
+      else:
+        w0_pspec = nn.logical_to_mesh_axes(("exp", "embed_tensor_transpose", "mlp_no_fsdp"))
+        w1_pspec = nn.logical_to_mesh_axes(("exp", "embed_tensor_transpose", "mlp_no_fsdp"))
+        wo_pspec = nn.logical_to_mesh_axes(("exp", "mlp_no_fsdp", "embed_tensor_transpose"))
     if isinstance(w0_kernel, aqt.QTensor):
       w0_pspec = aqt.partition_spec(w0_pspec, (1,), w0_kernel.dtype, use_bias=False)
     if isinstance(w1_kernel, aqt.QTensor):
@@ -1029,6 +1034,7 @@ class RoutedMoE(nnx.Module):
                 global_sorted_experts=selected_experts,
                 use_custom_sort_vjp=self.config.use_custom_sort_vjp,
             )
+            print(f"moe.py {group_sizes.shape=}")
 
       if self.config.mlp_bias:
         w0_bias, w1_bias, wo_bias = self.transform_bias(selected_experts, w0_bias, w1_bias, wo_bias)
@@ -1039,14 +1045,26 @@ class RoutedMoE(nnx.Module):
           expert_assignments=selected_experts,
       )
       wi_tile_size = (
-          self.config.tile_batch_seq,
-          self.config.tile_embed_dim,
-          self.config.tile_mlp_dim,
+          self.config.tile_fwd_batch_seq,
+          self.config.tile_fwd_embed_dim,
+          self.config.tile_fwd_mlp_dim,
+          self.config.tile_dlhs_batch_seq,
+          self.config.tile_dlhs_embed_dim,
+          self.config.tile_dlhs_mlp_dim,
+          self.config.tile_drhs_batch_seq,
+          self.config.tile_drhs_embed_dim,
+          self.config.tile_drhs_mlp_dim,
       )
       wo_tile_size = (
-          self.config.tile_batch_seq,
-          self.config.tile_mlp_dim,
-          self.config.tile_embed_dim,
+          self.config.tile_fwd_batch_seq,
+          self.config.tile_fwd_mlp_dim,
+          self.config.tile_fwd_embed_dim,
+          self.config.tile_dlhs_batch_seq,
+          self.config.tile_dlhs_mlp_dim,
+          self.config.tile_dlhs_embed_dim,
+          self.config.tile_drhs_batch_seq,
+          self.config.tile_drhs_mlp_dim,
+          self.config.tile_drhs_embed_dim,
       )
       layer_w0 = gmm_fn(x, w0, tiling=wi_tile_size)
       if self.get_tensor_transpose_parallelism_size() > 1:

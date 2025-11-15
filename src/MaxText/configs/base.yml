@@ -178,9 +178,15 @@ use_random_routing: False # whether to use random routing for debug/test purpose
 use_custom_sort_vjp: True # whether to use a custom sort vjp for sparse matmul ops
 use_ring_of_experts: False # whether to use ring of experts for sparse matmul expert parallelism
 # Tunable tiling dimensions used for Megablox
-tile_batch_seq: 512
-tile_embed_dim: 1024
-tile_mlp_dim: 1024
+tile_fwd_batch_seq: 512
+tile_fwd_embed_dim: 1024
+tile_fwd_mlp_dim: 1024
+tile_dlhs_batch_seq: 512
+tile_dlhs_embed_dim: 1024
+tile_dlhs_mlp_dim: 1024
+tile_drhs_batch_seq: 512
+tile_drhs_embed_dim: 1024
+tile_drhs_mlp_dim: 1024
 norm_topk_prob: False # Boolean to enable the top-k probability normalization. Qwen3-specific normalization of router weights.
 
 # How the expert axis is used to shard attention weights and activations
