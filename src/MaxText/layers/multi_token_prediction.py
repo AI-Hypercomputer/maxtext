@@ -238,7 +238,7 @@ class MultiTokenPredictionBlock(nn.Module):
       )
 
       # Project to logits using the shared embedding transpose
-      mtp_logits = self.decoder._apply_output_head(shared_embedding, next_mtp_hidden_state, deterministic, model_mode)
+      mtp_logits = self.decoder.apply_output_head(shared_embedding, next_mtp_hidden_state, deterministic, model_mode)
 
       # Calculate cross-entropy loss for this specific layer's prediction
       mtp_xent, _ = max_utils.cross_entropy_with_logits(
