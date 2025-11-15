@@ -88,6 +88,21 @@ class GrainCheckpointHandler(PyGrainCheckpointHandler, ocp.CheckpointHandler):
     item = item or args.item
     process_index = getattr(args, "process_index", None)
     process_count = getattr(args, "process_count", None)
+    add_new_mixture = getattr(args, "add_new_mixture", False)
+
+    def _have_same_structure(v1, v2):
+      """Recursively checks if two nested structures of dicts and lists have the same shape."""
+      if type(v1) is not type(v2):
+        return False
+      if isinstance(v1, dict):
+        if sorted(v1.keys()) != sorted(v2.keys()):
+          return False
+        return all(_have_same_structure(v1[k], v2[k]) for k in v1)
+      if isinstance(v1, list):
+        if len(v1) != len(v2):
+          return False
+        return all(_have_same_structure(v1[i], v2[i]) for i in range(len(v1)))
+      return True
 
     def restore_single_process(item, process_index, process_count):
       filename = directory / f"process_{process_index}-of-{process_count}.json"
@@ -95,7 +110,33 @@ class GrainCheckpointHandler(PyGrainCheckpointHandler, ocp.CheckpointHandler):
         raise ValueError(f"File {filename} does not exist.")
       state = filename.read_text()
       if isinstance(item, grain.DatasetIterator):
-        state = json.loads(state)
+        old_checkpoint_state = json.loads(state)
+        if add_new_mixture:
+          new_iterator_state = item.get_state()
+          if _have_same_structure(new_iterator_state, old_checkpoint_state):
+            state = old_checkpoint_state
+          else:
+            grain_worker_count = getattr(args, "grain_worker_count", 0)
+            if grain_worker_count == 0:
+              if not _have_same_structure(
+                  new_iterator_state["parent"]["parents"][0],
+                  old_checkpoint_state["parent"],
+              ):
+                raise ValueError("Mismatch in tree structure for checkpoint surgery (no workers).")
+              new_iterator_state["parent"]["parents"][0] = old_checkpoint_state["parent"]
+            else:
+              new_worker_state = new_iterator_state["workers_state"]
+              old_worker_state = old_checkpoint_state["workers_state"]
+              for worker_index in range(grain_worker_count):
+                if not _have_same_structure(
+                    new_worker_state[str(worker_index)]["parent"]["parents"][0],
+                    old_worker_state[str(worker_index)]["parent"],
+                ):
+                  raise ValueError(f"Mismatch in tree structure for checkpoint surgery (worker {worker_index}).")
+                new_worker_state[str(worker_index)]["parent"]["parents"][0] = old_worker_state[str(worker_index)]["parent"]
+            state = new_iterator_state
+        else:
+          state = old_checkpoint_state
       else:
         state = state.encode()
       item.set_state(state)
@@ -124,6 +165,8 @@ class GrainCheckpointRestore(ocp.args.CheckpointArgs):
   item: Any
   process_index: Optional[int | list[int]] = None
   process_count: Optional[int] = None
+  add_new_mixture: Optional[bool] = False
+  grain_worker_count: Optional[int] = 0
 
 
 def _load_full_state_from_path(
@@ -357,7 +400,12 @@ def _replica_devices(device_array: np.ndarray, replica_axis_idx: int):
 
 
 def _prepare_scaled_down_grain_restore_args(
-    data_iterator: list, process_count_jax: int, process_count_stored: int, directory: epath.Path
+    data_iterator: list,
+    process_count_jax: int,
+    process_count_stored: int,
+    directory: epath.Path,
+    grain_mixture_config_path: str,
+    grain_worker_count: int,
 ) -> GrainCheckpointRestore:
   """
   Prepares the restore arguments for a scaled-up (list) data iterator.
@@ -386,7 +434,13 @@ def _prepare_scaled_down_grain_restore_args(
   # e.g., process 1 with scaling_factor=2 handles checkpoints from processes [1, 33]
   process_index_list = [jax.process_index() + i * process_count_jax for i in range(scaling_factor)]
 
-  return GrainCheckpointRestore(local_iterator_list, process_index=process_index_list, process_count=process_count_stored)
+  return GrainCheckpointRestore(
+      local_iterator_list,
+      process_index=process_index_list,
+      process_count=process_count_stored,
+      add_new_mixture=True if grain_mixture_config_path else False,
+      grain_worker_count=grain_worker_count,
+  )
 
 
 def _restore_grain_iterator(
@@ -395,6 +449,8 @@ def _restore_grain_iterator(
     data_iterator,
     checkpoint_args,
     expansion_factor_real_data: int,  # This must be defined in the outer scope
+    grain_mixture_config_path: str,
+    grain_worker_count: int,
 ) -> tuple[Any, None]:
   """
   Handles the complex logic for restoring a Grain data iterator checkpoint.
@@ -413,7 +469,12 @@ def _restore_grain_iterator(
     # Scaling down from a larger number of hosts. (e.g., 128 files -> 64 processes)
     # In this case, each host restores a list of data iterators.
     grain_restore_args = _prepare_scaled_down_grain_restore_args(
-        data_iterator, process_count_jax, process_count_stored, directory
+        data_iterator,
+        process_count_jax,
+        process_count_stored,
+        directory,
+        grain_mixture_config_path,
+        grain_worker_count,
     )
 
   elif process_count_stored == process_count_jax:
@@ -422,7 +483,11 @@ def _restore_grain_iterator(
         f"{process_count_stored} processes found in Grain checkpoint directory {directory}, matching the number of "
         "jax process, please do not set expansion_factor_real_data."
     )
-    grain_restore_args = GrainCheckpointRestore(data_iterator.local_iterator)
+    grain_restore_args = GrainCheckpointRestore(
+        data_iterator.local_iterator,
+        add_new_mixture=True if grain_mixture_config_path else False,
+        grain_worker_count=grain_worker_count,
+    )
 
   elif expansion_factor_real_data > 1 and process_count_stored == process_count_jax // expansion_factor_real_data:
     # Scaling up to a larger number of hosts.(e.g., 32 files -> 64 processes)
@@ -431,7 +496,11 @@ def _restore_grain_iterator(
         data_iterator, list
     ), "when expansion_factor_real_data > 1, the data iterator should not be a list."
     grain_restore_args = GrainCheckpointRestore(
-        data_iterator.local_iterator, process_index=jax.process_index(), process_count=process_count_stored
+        data_iterator.local_iterator,
+        process_index=jax.process_index(),
+        process_count=process_count_stored,
+        add_new_mixture=True if grain_mixture_config_path else False,
+        grain_worker_count=grain_worker_count,
     )
 
   else:
@@ -466,6 +535,8 @@ def load_state_if_possible(
     checkpoint_conversion_fn=None,
     source_checkpoint_layout="orbax",
     expansion_factor_real_data: int = -1,
+    grain_mixture_config_path: str = "",
+    grain_worker_count: int = 1,
 ):
   """Loads TrainState as possible from the inputs.
 
@@ -551,7 +622,13 @@ def load_state_if_possible(
             and (checkpoint_manager.directory / str(step) / "iter").exists()
         ):
           return _restore_grain_iterator(
-              checkpoint_manager, step, data_iterator, checkpoint_args, expansion_factor_real_data
+              checkpoint_manager,
+              step,
+              data_iterator,
+              checkpoint_args,
+              expansion_factor_real_data,
+              grain_mixture_config_path,
+              grain_worker_count,
           )
         # Case 3: Default/Fallback case.
         # This case acts as a wildcard ('_') and matches if none of the preceding cases were met.
