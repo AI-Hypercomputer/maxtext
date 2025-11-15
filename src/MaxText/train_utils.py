@@ -226,6 +226,8 @@ def setup_train_loop(config, recorder, devices=None):
             enable_orbax_v1=config.enable_orbax_v1,
             checkpoint_conversion_fn=config.checkpoint_conversion_fn,
             source_checkpoint_layout=config.source_checkpoint_layout,
+            grain_mixture_config_path=config.grain_mixture_config_path,
+            grain_worker_count=config.grain_worker_count,
         )
       except FileNotFoundError:
         step0_restored = None

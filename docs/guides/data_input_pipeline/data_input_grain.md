@@ -39,7 +39,7 @@ MOUNT_PATH=$MOUNT_PATH \
 # FILE_PATH is optional, when provided, the script runs "ls -R" for pre-filling the metadata cache
 # https://cloud.google.com/storage/docs/cloud-storage-fuse/performance#improve-first-time-reads
 ```
-3. Set `dataset_type=grain`, `grain_file_type={arrayrecord|parquet}`, `grain_train_files` to match the file pattern on the mounted local path.
+3. Set `dataset_type=grain`, `grain_file_type={arrayrecord|parquet}`, `grain_train_files` to match the file pattern on the mounted local path. For the same training workload, please keep per_device_batch_size and grain_worker_count consistent for the compatibility of Grain checkpoints.
 4. Tune `grain_worker_count` for performance. This parameter controls the number of child processes used by Grain (more details in [behind_the_scenes](https://google-grain.readthedocs.io/en/latest/behind_the_scenes.html), [grain_pool.py](https://github.com/google/grain/blob/main/grain/_src/python/grain_pool.py)). If you use a large number of workers, check your config for gcsfuse in [setup_gcsfuse.sh](https://github.com/google/maxtext/blob/main/tools/setup/setup_gcsfuse.sh) to avoid gcsfuse throttling.
 
 5. For multi-source blending, you can specify multiple data sources with their respective weights using semicolon (;) as a separator and a comma (,) for weights. The weights will be automatically normalized to sum to 1.0. For example:
@@ -76,3 +76,51 @@ In Grain checkpoints, each data-loading host has a corresponding JSON file. For 
 * **Scaling up**: For example, if you have a checkpoint from 64 data-loading hosts and want to resume training with 128. This is achieved by having a subset of the hosts load the real data, which is then sent to the other hosts. The flag `expansion_factor_real_data` (default is -1) controls this behavior. When set to a value greater than 1, the number of hosts loading real data is `total number of hosts // expansion_factor_real_data`. Each of these data-loading hosts will load `expansion_factor_real_data * per_host_batch_size_to_train`. For code integrity, the non-loading hosts use a `PlaceHolderDataIterator` to generate dummy data, which is later discarded. A user can optionally set `max_checkify=true` to enable additional checks that ensure dummy data is not used for training. In this example, you would set `expansion_factor_real_data=2` to scale from 64 to 128 hosts.
 * **Scaling down**: For example, if you have a checkpoint from 128 data-loading hosts and want to resume with 64. This is achieved by restoring multiple data iterators on each host. Set flag `expansion_factor_real_data` to have each host restore `1 / expansion_factor_real_data` data iterators. We then alternate between these iterators to produce batches. In this example, you would set `expansion_factor_real_data=0.5` to scale from 128 down to 64 hosts.
 * **Note**: In both scaling up and scaling down scenarios, the `per_device_batch_size` must remain consistent. This is because Grain records the number of iterations (batches) in the iterator's state, and changing the batch size will result in either skipping or duplicating data.
+
+9. Experimental: updating data mixtures during training (ArrayRecord Only)
+This feature allows you to introduce a new data mixture while resuming a training run. This is useful when new datasets become available mid-training. You can continue reading from your original dataset where you left off, while blending in the new data.
+
+* **Step 1**: start training with an initial mixture
+
+Begin your training run by defining your initial data sources and weights in `grain_train_files`.
+
+```
+# In your config or on the command line
+grain_train_files="<path_to_A1>,0.4;<path_to_A2>,0.6"
+```
+
+* **Step 2**: create a mixture configuration file
+
+When you are ready to introduce the new dataset, create a JSON configuration file (e.g., `grain_mixture.json`). This file defines both the original mixture and the new one, along with the desired weights for blending them.
+
+**Important:** The `old_dataset` section in this file must exactly match the sources and weights you used in `grain_train_files` for the initial run.
+
+```json
+{
+  "old_dataset": [
+    { "path": "<path_to_A1>", "weight": 0.4 },
+    { "path": "<path_to_A2>", "weight": 0.6 }
+  ],
+  "old_dataset_weight": 0.5,
+  "new_dataset": [
+    { "path": "<path_to_B1>", "weight": 0.8 },
+    { "path": "<path_to_B2>", "weight": 0.2 }
+  ],
+  "new_dataset_weight": 0.5
+}
+```
+
+* **Step 3**: resume training with the new mixture
+
+To resume the training run, update your configuration with two changes:
+1.  Point `grain_mixture_config_path` to the JSON file you just created.
+2.  **Clear the `grain_train_files` parameter.**
+
+```
+# In your config or on the command line for the resumed run
+run_name=<SAME_RUN_NAME_AS_BEFORE>
+grain_train_files=''
+grain_mixture_config_path="grain_mixture.json"
+```
+
+MaxText dataloader will now restore the state from the `old_dataset`, and the new batches are blended from both the old and new mixtures according to the weights specified.

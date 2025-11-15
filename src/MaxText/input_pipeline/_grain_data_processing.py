@@ -18,6 +18,7 @@ import glob
 from pathlib import Path
 import functools
 import ml_collections
+import json
 
 import jax
 
@@ -64,13 +65,12 @@ def get_datasets(
       dataset_list = [
           grain.MapDataset.source(grain.ArrayRecordDataSource(find_data_files(pattern))) for pattern in data_file_patterns
       ]
-      # create iterator per dataset with unique index
-      for ds in dataset_list:
+      for d in range(len(dataset_list)):
         if shuffle:
-          ds = ds.shuffle(seed=shuffle_seed)
-        ds = ds.repeat(num_epoch)
-        ds = ds[dataloading_host_index::dataloading_host_count]  # sharding
-        ds = ds.to_iter_dataset()
+          dataset_list[d] = dataset_list[d].shuffle(seed=shuffle_seed)
+        dataset_list[d] = dataset_list[d].repeat(num_epoch)
+        dataset_list[d] = dataset_list[d][dataloading_host_index::dataloading_host_count]  # sharding
+        dataset_list[d] = dataset_list[d].to_iter_dataset()
       dataset = grain.IterDataset.mix(dataset_list, weights)
     else:
       data_files = find_data_files(data_file_pattern)
@@ -235,16 +235,47 @@ def make_grain_train_iterator(
       config.global_batch_size_to_load % global_mesh.size == 0
   ), "Batch size should be divisible by number of global devices."
   if not config.colocated_python_data_input and not 0 < config.expansion_factor_real_data < 1:
-    train_ds = get_datasets(
-        config.grain_train_files,
-        config.grain_file_type,
-        shuffle=config.enable_data_shuffling,
-        shuffle_seed=config.data_shuffle_seed,
-        num_epoch=config.num_epoch,
-        dataloading_host_index=process_indices.index(jax.process_index()),
-        dataloading_host_count=len(process_indices),
-        grain_worker_count=config.grain_worker_count,
-    )
+    if config.grain_mixture_config_path:
+      with open(config.grain_mixture_config_path, "r", encoding="utf-8") as f:
+        mixture_config = json.load(f)
+      old_dataset_files = mixture_config["old_dataset"]
+      new_dataset_files = mixture_config["new_dataset"]
+      old_data_file_pattern = ";".join([f'{d["path"]},{d["weight"]}' for d in old_dataset_files])
+      new_data_file_pattern = ";".join([f'{d["path"]},{d["weight"]}' for d in new_dataset_files])
+      old_dataset = get_datasets(
+          data_file_pattern=old_data_file_pattern,
+          data_file_type=config.grain_file_type,
+          shuffle=config.enable_data_shuffling,
+          shuffle_seed=config.data_shuffle_seed,
+          num_epoch=config.num_epoch,
+          dataloading_host_index=process_indices.index(jax.process_index()),
+          dataloading_host_count=len(process_indices),
+          grain_worker_count=config.grain_worker_count,
+      )
+      new_dataset = get_datasets(
+          data_file_pattern=new_data_file_pattern,
+          data_file_type=config.grain_file_type,
+          shuffle=config.enable_data_shuffling,
+          shuffle_seed=config.data_shuffle_seed,
+          num_epoch=config.num_epoch,
+          dataloading_host_index=process_indices.index(jax.process_index()),
+          dataloading_host_count=len(process_indices),
+          grain_worker_count=config.grain_worker_count,
+      )
+      old_weight = mixture_config["old_dataset_weight"]
+      new_weight = mixture_config["new_dataset_weight"]
+      train_ds = grain.IterDataset.mix([old_dataset, new_dataset], weights=[old_weight, new_weight])
+    else:
+      train_ds = get_datasets(
+          config.grain_train_files,
+          config.grain_file_type,
+          shuffle=config.enable_data_shuffling,
+          shuffle_seed=config.data_shuffle_seed,
+          num_epoch=config.num_epoch,
+          dataloading_host_index=process_indices.index(jax.process_index()),
+          dataloading_host_count=len(process_indices),
+          grain_worker_count=config.grain_worker_count,
+      )
     if config.use_dpo:
       train_dataloader = dpo_preprocessing_pipeline(
           train_ds,
