@@ -445,10 +445,8 @@ def validate_qwen3_next_config(keys: dict):
     keys: the raw config in dict form
 
   """
-  if keys["sparse_matmul"]:
-    raise ValueError(
-        "For Qwen3-Next, sparse_matmul must be False for now. The dense path has been verified against reference."
-    )
+  if int(keys["gdn_num_value_heads"]) % int(keys["gdn_num_key_heads"]) != 0:
+    raise ValueError("gdn_num_value_heads must be divisible by gdn_num_key_heads")
   rotary_dim = int(keys["head_dim"] * keys["partial_rotary_factor"])
   if rotary_dim % 2 != 0:
     raise ValueError(f"Calculated rotary dimension ({rotary_dim}) must be a multiple of 2.")
