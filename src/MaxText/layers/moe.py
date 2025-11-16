@@ -934,7 +934,7 @@ class RoutedMoE(nnx.Module):
             wo_bias_pspec,
             None,
         ),
-        out_specs=(nn.logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", "activation_embed"))),
+        out_specs=(nn.logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", "activation_embed_tensor_transpose"))),
         check_vma=False,
     )
     def wrapper(x, logits, pre_bias_logits, w0, w1, wo, w0_bias, w1_bias, wo_bias, rngs):
@@ -1065,7 +1065,7 @@ class RoutedMoE(nnx.Module):
 
       intermediate_output = gmm_fn(intermediate_layer, wo, tiling=wo_tile_size)
       if self.get_tensor_parallelism_size() > 1:
-        intermediate_output = jax.lax.psum_scatter(intermediate_output, "tensor", scatter_dimension=1, tiled=True)
+        intermediate_output = jax.lax.psum(intermediate_output, "tensor")
       if self.config.mlp_bias:
         intermediate_output = intermediate_output + wo_bias
       intermediate_output = adc.checkpoint_name(intermediate_output, "mlpwo")
@@ -1151,7 +1151,6 @@ class RoutedMoE(nnx.Module):
             sequence_length=sequence_length,
             use_custom_sort_vjp=self.config.use_custom_sort_vjp,
         )
-
       return output, None
 
     if self.config.moe_fsdp_use_two_stage_all_gather:
@@ -1172,10 +1171,12 @@ class RoutedMoE(nnx.Module):
       w0_kernel = nn.with_logical_constraint(w0_kernel, ("exp", "embed_tensor_transpose", "mlp_no_fsdp"))
       w1_kernel = nn.with_logical_constraint(w1_kernel, ("exp", "embed_tensor_transpose", "mlp_no_fsdp"))
       wo_kernel = nn.with_logical_constraint(wo_kernel, ("exp", "mlp_no_fsdp", "embed_tensor_transpose"))
-
-    return wrapper(
+    
+    output, _ = wrapper(
         inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel, w0_bias, w1_bias, wo_bias, self.rngs
     )
+    output = nn.with_logical_constraint(output, (batch_logical_axis, "activation_norm_length", "activation_embed"))
+    return output, _
 
   def reshape_and_update_weights(self, weights, indices):
     """reshape and update weights."""
