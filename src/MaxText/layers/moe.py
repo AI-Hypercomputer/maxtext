@@ -1071,8 +1071,10 @@ class RoutedMoE(nnx.Module):
         print(f"x shape and dtype before TP AG {x=}")
         if self.config.tp_ag_in_fp8:
           x = qpl.quantize(x, qtype=jnp.float8_e4m3fn, scale_dtype=jnp.float32, calibration_method="absmax", channelwise_axes=[0])
-          breakpoint()
         x = jax.lax.all_gather(x, axis_name="tensor", axis=1, tiled=True)
+        if self.config.tp_ag_in_fp8:
+          x =qarray.dequantize(x)
+          x = x.astype(jnp.bfloat16)
         print(f"x shape and dtype after TP AG {x=}")
         
       gmm_fn = functools.partial(
