@@ -36,6 +36,11 @@ from MaxText.layers.initializers import NdInitializer, default_bias_init, nd_den
 import numpy as np
 import tokamax
 
+import jax
+from jax.experimental.shard_map import shard_map
+import jax.numpy as jnp
+from qwix import pallas as qpl
+from qwix._src.core import qarray
 set_xla_metadata = xla_metadata.set_xla_metadata
 
 
@@ -911,6 +916,7 @@ class RoutedMoE(nnx.Module):
     else:
       # matt keeps inputs sharded by TP (on embed), will explicitly AG inside shmap as needed.
       input_partition_pspec = nn.logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", "activation_embed"))
+      print(f"{input_partition_pspec=}")
       w0_bias_pspec = nn.logical_to_mesh_axes(("exp", "activation_mlp"))
       w1_bias_pspec = nn.logical_to_mesh_axes(("exp", "activation_mlp"))
       wo_bias_pspec = nn.logical_to_mesh_axes(("exp", "activation_embed"))
@@ -933,6 +939,7 @@ class RoutedMoE(nnx.Module):
       w0_pspec = nn.logical_to_mesh_axes(("exp", "embed_tensor_transpose", "mlp_no_fsdp"))
       w1_pspec = nn.logical_to_mesh_axes(("exp", "embed_tensor_transpose", "mlp_no_fsdp"))
       wo_pspec = nn.logical_to_mesh_axes(("exp", "mlp_no_fsdp", "embed_tensor_transpose"))
+      print(f"{w0_pspec=}")
     if isinstance(w0_kernel, aqt.QTensor):
       w0_pspec = aqt.partition_spec(w0_pspec, (1,), w0_kernel.dtype, use_bias=False)
     if isinstance(w1_kernel, aqt.QTensor):
@@ -1047,11 +1054,27 @@ class RoutedMoE(nnx.Module):
                 use_custom_sort_vjp=self.config.use_custom_sort_vjp,
             )
           print("x shape: ", x.shape, flush=True)
-          x = jax.lax.all_gather(x, axis_name="tensor", axis=1, tiled=True)
+          # AG over TP
+          # if self.get_tensor_parallelism_size() > 1:
+          #   print("hooray for TP!", flush=True)
+          #   if self.config.tp_ag_in_fp8:
+          #     x = qpl.quantize(x, qtype=jnp.float8_e4m3fn, scale_dtype=jnp.float32, calibration_method="absmax", channelwise_axes=[0])
+          #     breakpoint()
+          #   x = jax.lax.all_gather(x, axis_name="tensor", axis=1, tiled=True)
 
       if self.config.mlp_bias:
         w0_bias, w1_bias, wo_bias = self.transform_bias(selected_experts, w0_bias, w1_bias, wo_bias)
 
+      if self.get_tensor_parallelism_size() > 1:
+        # AG over TP
+        print("hooray for TP!", flush=True)
+        print(f"x shape and dtype before TP AG {x=}")
+        if self.config.tp_ag_in_fp8:
+          x = qpl.quantize(x, qtype=jnp.float8_e4m3fn, scale_dtype=jnp.float32, calibration_method="absmax", channelwise_axes=[0])
+          breakpoint()
+        x = jax.lax.all_gather(x, axis_name="tensor", axis=1, tiled=True)
+        print(f"x shape and dtype after TP AG {x=}")
+        
       gmm_fn = functools.partial(
           gmm,
           group_sizes=group_sizes,
