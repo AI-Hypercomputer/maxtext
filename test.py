@@ -3,12 +3,12 @@ import os
 os.environ["SKIP_JAX_PRECOMPILE"] = "1"
 os.environ["JAX_RANDOM_WEIGHTS"] = "False"
 os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
-os.environ["HF_TOKEN"] = ""
+#os.environ["HF_TOKEN"] = ""
 os.environ["TPU_MIN_LOG_LEVEL"] = "0"
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
 os.environ["TPU_STDERR_LOG_LEVEL"] = "0"
 os.environ["VLLM_MLA_DISABLE"] = "1"
-# os.environ["MODEL_IMPL_TYPE"] = "vllm"
+os.environ["MODEL_IMPL_TYPE"] = "vllm"
 
 
 """
@@ -48,4 +48,6 @@ golden_llm = LLM(
 
 
 print(golden_llm.llm_engine.model_executor.driver_worker.model_runner.state)
+
+print(golden_llm.generate("what is the capital of France?"))
 breakpoint()
