@@ -104,6 +104,31 @@ class GrainCheckpointHandler(PyGrainCheckpointHandler, ocp.CheckpointHandler):
         return all(_have_same_structure(v1[i], v2[i]) for i in range(len(v1)))
       return True
 
+    def _merge_iterator_states(new_iterator_state, old_checkpoint_state):
+      """Merges new iterator state with old checkpoint state for checkpoint surgery."""
+      if _have_same_structure(new_iterator_state, old_checkpoint_state):
+        return old_checkpoint_state
+
+      grain_worker_count = getattr(args, "grain_worker_count", 0)
+      if grain_worker_count == 0:
+        if not _have_same_structure(
+            new_iterator_state["parent"]["parents"][0],
+            old_checkpoint_state["parent"],
+        ):
+          raise ValueError("Mismatch in tree structure for checkpoint surgery (no workers).")
+        new_iterator_state["parent"]["parents"][0] = old_checkpoint_state["parent"]
+      else:
+        new_worker_state = new_iterator_state["workers_state"]
+        old_worker_state = old_checkpoint_state["workers_state"]
+        for worker_index in range(grain_worker_count):
+          if not _have_same_structure(
+              new_worker_state[str(worker_index)]["parent"]["parents"][0],
+              old_worker_state[str(worker_index)]["parent"],
+          ):
+            raise ValueError(f"Mismatch in tree structure for checkpoint surgery (worker {worker_index}).")
+          new_worker_state[str(worker_index)]["parent"]["parents"][0] = old_worker_state[str(worker_index)]["parent"]
+      return new_iterator_state
+
     def restore_single_process(item, process_index, process_count):
       filename = directory / f"process_{process_index}-of-{process_count}.json"
       if not filename.exists():
@@ -113,28 +138,7 @@ class GrainCheckpointHandler(PyGrainCheckpointHandler, ocp.CheckpointHandler):
         old_checkpoint_state = json.loads(state)
         if add_new_mixture:
           new_iterator_state = item.get_state()
-          if _have_same_structure(new_iterator_state, old_checkpoint_state):
-            state = old_checkpoint_state
-          else:
-            grain_worker_count = getattr(args, "grain_worker_count", 0)
-            if grain_worker_count == 0:
-              if not _have_same_structure(
-                  new_iterator_state["parent"]["parents"][0],
-                  old_checkpoint_state["parent"],
-              ):
-                raise ValueError("Mismatch in tree structure for checkpoint surgery (no workers).")
-              new_iterator_state["parent"]["parents"][0] = old_checkpoint_state["parent"]
-            else:
-              new_worker_state = new_iterator_state["workers_state"]
-              old_worker_state = old_checkpoint_state["workers_state"]
-              for worker_index in range(grain_worker_count):
-                if not _have_same_structure(
-                    new_worker_state[str(worker_index)]["parent"]["parents"][0],
-                    old_worker_state[str(worker_index)]["parent"],
-                ):
-                  raise ValueError(f"Mismatch in tree structure for checkpoint surgery (worker {worker_index}).")
-                new_worker_state[str(worker_index)]["parent"]["parents"][0] = old_worker_state[str(worker_index)]["parent"]
-            state = new_iterator_state
+          state = _merge_iterator_states(new_iterator_state, old_checkpoint_state)
         else:
           state = old_checkpoint_state
       else:
@@ -438,7 +442,7 @@ def _prepare_scaled_down_grain_restore_args(
       local_iterator_list,
       process_index=process_index_list,
       process_count=process_count_stored,
-      add_new_mixture=True if grain_mixture_config_path else False,
+      add_new_mixture=bool(grain_mixture_config_path),
       grain_worker_count=grain_worker_count,
   )
 
@@ -485,7 +489,7 @@ def _restore_grain_iterator(
     )
     grain_restore_args = GrainCheckpointRestore(
         data_iterator.local_iterator,
-        add_new_mixture=True if grain_mixture_config_path else False,
+        add_new_mixture=bool(grain_mixture_config_path),
         grain_worker_count=grain_worker_count,
     )
 
@@ -499,7 +503,7 @@ def _restore_grain_iterator(
         data_iterator.local_iterator,
         process_index=jax.process_index(),
         process_count=process_count_stored,
-        add_new_mixture=True if grain_mixture_config_path else False,
+        add_new_mixture=bool(grain_mixture_config_path),
         grain_worker_count=grain_worker_count,
     )
 

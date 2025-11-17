@@ -65,7 +65,7 @@ def get_datasets(
       dataset_list = [
           grain.MapDataset.source(grain.ArrayRecordDataSource(find_data_files(pattern))) for pattern in data_file_patterns
       ]
-      for d in range(len(dataset_list)):
+      for d, _ in enumerate(dataset_list):
         if shuffle:
           dataset_list[d] = dataset_list[d].shuffle(seed=shuffle_seed)
         dataset_list[d] = dataset_list[d].repeat(num_epoch)
