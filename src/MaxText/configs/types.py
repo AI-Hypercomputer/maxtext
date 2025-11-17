@@ -543,9 +543,15 @@ class MoEKernels(BaseModel):
 
   megablox: bool = Field(True, description="Whether to use Megablox kernels for MoE.")
   sparse_matmul: bool = Field(True, description="Whether to use sparse matmul kernels for MoE.")
-  tile_batch_seq: int = Field(512, description="Tunable tiling dimension for batch/sequence in Megablox.")
-  tile_embed_dim: int = Field(1024, description="Tunable tiling dimension for embedding in Megablox.")
-  tile_mlp_dim: int = Field(1024, description="Tunable tiling dimension for MLP in Megablox.")
+  tile_fwd_batch_seq: int = Field(512, description="Tunable tiling dimension for batch/sequence in Megablox.")
+  tile_fwd_embed_dim: int = Field(1024, description="Tunable tiling dimension for embedding in Megablox.")
+  tile_fwd_mlp_dim: int = Field(1024, description="Tunable tiling dimension for MLP in Megablox.")
+  tile_dlhs_batch_seq: int = Field(512, description="Tunable tiling dimension for batch/sequence in Megablox.")
+  tile_dlhs_embed_dim: int = Field(1024, description="Tunable tiling dimension for embedding in Megablox.")
+  tile_dlhs_mlp_dim: int = Field(1024, description="Tunable tiling dimension for MLP in Megablox.")
+  tile_drhs_batch_seq: int = Field(512, description="Tunable tiling dimension for batch/sequence in Megablox.")
+  tile_drhs_embed_dim: int = Field(1024, description="Tunable tiling dimension for embedding in Megablox.")
+  tile_drhs_mlp_dim: int = Field(1024, description="Tunable tiling dimension for MLP in Megablox.")
 
 
 class DeepSeekMoE(BaseModel):
@@ -1710,7 +1716,6 @@ class MaxTextConfig(
     if self.expert_shard_attention_option == "context":
       cp_size *= self.ici_expert_parallelism * self.dcn_expert_parallelism
     self.context_parallel_size = cp_size
-    self.tile_fwd_batch_seq = self.tile_batch_seq  # Legacy alias.
     if self.pipeline_parallel_layers == -1:
       if self.decoder_block == DecoderBlockType.DEEPSEEK:
         moe_layers = self.num_decoder_layers - self.first_num_dense_layers
