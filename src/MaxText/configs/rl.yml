@@ -21,6 +21,8 @@ base_config: "base.yml"
 trainer_devices_fraction: 0.5
 sampler_devices_fraction: 0.5
 chips_per_vm: 4  # depends on hardware, for v5p this is 4
+num_trainer_slices: -1
+num_samplers_slices: -1
 
 # ====== Reproducibility ======
 data_shuffle_seed: 42
