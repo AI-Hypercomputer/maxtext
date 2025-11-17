@@ -47,6 +47,22 @@ def resolve_config_path(param: str) -> str:
   return param if os.path.isfile(param) else os.path.join("src", param)
 
 
+def _merge_logical_axis_rules(base_rules, new_rules):
+  """Merges two lists of logical_axis_rules. Rules in new_rules override all rules
+  with the same name in base_rules."""
+  if not new_rules:
+    return base_rules
+
+  new_rule_keys = {rule[0] for rule in new_rules}
+
+  # Filter old rules to exclude any that will be replaced.
+  updated_rules = [rule for rule in base_rules if rule[0] not in new_rule_keys]
+
+  # Add all the new rules.
+  updated_rules.extend(new_rules)
+  return updated_rules
+
+
 def _load_config(config_name: str) -> omegaconf.DictConfig:
   """Loads a YAML file and its base_configs recursively using OmegaConf."""
   cfg = omegaconf.OmegaConf.load(config_name)
@@ -185,13 +201,38 @@ def initialize(argv: list[str], **kwargs) -> HyperParameters:
       logger.warning("Model config for '%s' not found at %s", model_name, model_config_path)
 
       # 4. Final merge (base, model, then overrides)
-  final_config = omegaconf.OmegaConf.merge(base_yml_config, model_cfg, overrides_cfg)
+  model_cfg_oc = omegaconf.OmegaConf.create(model_cfg)
+
+  # 4. Manually merge logical_axis_rules to avoid OmegaConf's list replacement behavior.
+  base_rules_oc = base_yml_config.get("logical_axis_rules", [])
+  model_rules_oc = model_cfg_oc.get("logical_axis_rules", [])
+  overrides_rules_oc = overrides_cfg.get("logical_axis_rules", [])
+
+  base_rules = omegaconf.OmegaConf.to_container(base_rules_oc, resolve=True) if base_rules_oc else []
+  model_rules = omegaconf.OmegaConf.to_container(model_rules_oc, resolve=True) if model_rules_oc else []
+  overrides_rules = omegaconf.OmegaConf.to_container(overrides_rules_oc, resolve=True) if overrides_rules_oc else []
+
+  merged_rules = _merge_logical_axis_rules(base_rules, model_rules)
+  merged_rules = _merge_logical_axis_rules(merged_rules, overrides_rules)
+
+  # Remove the rules from the original configs before the main merge
+  if "logical_axis_rules" in base_yml_config:
+    del base_yml_config["logical_axis_rules"]
+  if "logical_axis_rules" in model_cfg_oc:
+    del model_cfg_oc["logical_axis_rules"]
+  if "logical_axis_rules" in overrides_cfg:
+    del overrides_cfg["logical_axis_rules"]
+
+  # 5. Final merge for all other keys
+  final_config = omegaconf.OmegaConf.merge(base_yml_config, model_cfg_oc, overrides_cfg)
+  final_config["logical_axis_rules"] = merged_rules
+
   raw_keys_dict = omegaconf.OmegaConf.to_container(final_config, resolve=True)
 
-  # 5. Handle environment variable overrides
-  cli_keys = set(omegaconf.OmegaConf.to_container(cli_cfg, resolve=True).keys())
-  kwargs_keys = set(kwargs.keys())
-  for k in list(raw_keys_dict.keys()):
+  # 6. Handle environment variable overrides
+  cli_keys = frozenset(omegaconf.OmegaConf.to_container(cli_cfg, resolve=True).keys())
+  kwargs_keys = frozenset(kwargs.keys())
+  for k in tuple(raw_keys_dict.keys()):
     env_key = yaml_key_to_env_key(k)
     if env_key in os.environ:
       if k in cli_keys or k in kwargs_keys:
