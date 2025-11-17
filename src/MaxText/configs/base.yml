@@ -897,6 +897,13 @@ vision_output_dim_for_vit: 4096
 pixel_shuffle_ratio_for_vit: 0.5
 projector_dropout_for_vit: 0.0
 
+# Qwen3-OmniMoe vision encoder
+spatial_merge_size_for_vit: 2
+out_hidden_size_for_vit: 512
+temporal_patch_size_for_vit: 2
+num_position_embeddings_for_vit: 1024
+deepstack_visual_indexes_for_vit: []
+
 # Subslice shape in the form of "x,y,z" when using pathways (single controller). 
 # Example: "8,8" to use a 8x8 subgrid (64 chips) of a full pod (16x16) of trillium.
 subslice_shape: ""

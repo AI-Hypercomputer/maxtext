@@ -62,6 +62,13 @@ LLAMA4_TILE_X_SEPARATOR_TOKEN = 200084  # <|tile_x_separator|>
 LLAMA4_TILE_Y_SEPARATOR_TOKEN = 200085  # <|tile_y_separator|>
 LLAMA4_PIXEL_SHUFFLE_RATIO = 0.5  # TODO(hengtaoguo): We should reuse config.pixel_shuffle_ratio_for_vit
 
+# Qwen3OmniMoe-specific processing
+QWEN3_OMNI_IMAGE_TOKEN = 151655
+QWEN3_OMNI_VIDEO_TOKEN = 151656
+QWEN3_OMNI_AUDIO_TOKEN = 151675
+QWEN3_TEMPORAL_PATCH_SIZE = 2
+QWEN3_OMNI_IMAGE_SIZE = 768
+
 
 @dataclass
 class PreprocessorOutput:
@@ -549,6 +556,14 @@ def get_dummy_image_shape_for_init(
         NUM_IMAGE_CHANNELS,
         LLAMA4_TILE_SIZE,
         LLAMA4_TILE_SIZE,
+    )
+  elif model_name.startswith("qwen3-omni-30b-a3b"):
+    image_shape = (
+        batch_size,
+        NUM_IMAGE_CHANNELS,
+        QWEN3_TEMPORAL_PATCH_SIZE,
+        QWEN3_OMNI_IMAGE_SIZE,  # image_size_for_vit (height)
+        QWEN3_OMNI_IMAGE_SIZE,  # video_num_frames
     )
   return image_shape
 

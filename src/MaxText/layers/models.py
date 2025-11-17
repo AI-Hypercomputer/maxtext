@@ -151,6 +151,8 @@ class TransformerLinenPure(nn.Module):
         bidirectional_mask = decoder_input_tokens == multimodal_utils.GEMMA_TOKEN_PLACEHOLDER
       elif self.config.decoder_block == DecoderBlockType.LLAMA4:
         bidirectional_mask = decoder_input_tokens == multimodal_utils.LLAMA4_PATCH_TOKEN
+      elif self.config.decoder_block == DecoderBlockType.QWEN3_MOE:
+        bidirectional_mask = decoder_input_tokens == multimodal_utils.QWEN3_OMNI_IMAGE_TOKEN
 
     logits, hidden_state = self.decoder(
         shared_embedding=self.shared_embedding,
@@ -405,6 +407,8 @@ class Transformer(nnx.Module):
         bidirectional_mask = decoder_input_tokens == multimodal_utils.GEMMA_TOKEN_PLACEHOLDER
       elif self.config.decoder_block == DecoderBlockType.LLAMA4:
         bidirectional_mask = decoder_input_tokens == multimodal_utils.LLAMA4_PATCH_TOKEN
+      elif self.config.decoder_block == DecoderBlockType.QWEN3_MOE:
+        bidirectional_mask = decoder_input_tokens == multimodal_utils.QWEN3_OMNI_IMAGE_TOKEN
 
     logits, hidden_state = self.decoder(
         shared_embedding=self.token_embedder,
