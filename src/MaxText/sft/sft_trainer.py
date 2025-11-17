@@ -194,10 +194,9 @@ def main(argv: Sequence[str]) -> None:
   mt_config = pyconfig.initialize(argv)
   max_utils.print_system_information()
 
-  maybe_monitor_goodput(mt_config)
   goodput_recorder = create_goodput_recorder(mt_config)
 
-  with maybe_record_goodput(goodput_recorder, GoodputEvent.JOB):
+  with maybe_record_goodput(goodput_recorder, GoodputEvent.JOB), maybe_monitor_goodput(mt_config):
     train(mt_config, goodput_recorder)
 
 
