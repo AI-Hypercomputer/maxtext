@@ -341,9 +341,17 @@ class Quantization(BaseModel):
   kv_quant_dtype: Literal["int8", "int4"] = Field("int8", description="Data type for KV cache quantization.")
   quantization_local_shard_count: int = Field(-1, description="Shards the range finding operation for quantization.")
   use_qwix_quantization: bool = Field(False, description="Whether to use qwix for quantization.")
-  quantization_calibration_method: str = Field(
+  weight_quantization_calibration_method: str = Field(
       "absmax",
-      description="Quantization calibration method used for weights and activations.",
+      description="Quantization calibration method used for weights.",
+  )
+  act_quantization_calibration_method: str = Field(
+      "absmax",
+      description="Quantization calibration method used for activations.",
+  )
+  bwd_quantization_calibration_method: str = Field(
+      "absmax",
+      description="Quantization calibration method used for gradients.",
   )
 
 
@@ -547,9 +555,24 @@ class MoEKernels(BaseModel):
 
   megablox: bool = Field(True, description="Whether to use Megablox kernels for MoE.")
   sparse_matmul: bool = Field(True, description="Whether to use sparse matmul kernels for MoE.")
-  tile_batch_seq: int = Field(512, description="Tunable tiling dimension for batch/sequence in Megablox.")
-  tile_embed_dim: int = Field(1024, description="Tunable tiling dimension for embedding in Megablox.")
-  tile_mlp_dim: int = Field(1024, description="Tunable tiling dimension for MLP in Megablox.")
+  wi_tile_fwd_batch_seq: int = Field(512, description="forward pass tiling dimension for batch/sequence in GMM for wi.")
+  wi_tile_fwd_embed_dim: int = Field(1024, description="forward pass tiling dimension for embedding in GMM for wi.")
+  wi_tile_fwd_mlp_dim: int = Field(1024, description="forward pass tiling dimension for MLP in GMM for wi.")
+  wi_tile_dlhs_batch_seq: int = Field(512, description="bwd pass dlhs tiling dimension for batch/sequence in GMM for wi.")
+  wi_tile_dlhs_embed_dim: int = Field(1024, description="bwd pass dlhs tiling dimension for embedding in GMM for wi.")
+  wi_tile_dlhs_mlp_dim: int = Field(1024, description="bwd pass dlhs tiling dimension for MLP in GMM for wi.")
+  wi_tile_drhs_batch_seq: int = Field(512, description="bwd pass drhs tiling dimension for batch/sequence in GMM for wi.")
+  wi_tile_drhs_embed_dim: int = Field(1024, description="bwd pass drhs tiling dimension for embedding in GMM for wi.")
+  wi_tile_drhs_mlp_dim: int = Field(1024, description="bwd pass drhs tiling dimension for MLP in GMM for wi.")
+  wo_tile_fwd_batch_seq: int = Field(512, description="forward pass tiling dimension for batch/sequence in GMM for wo.")
+  wo_tile_fwd_embed_dim: int = Field(1024, description="forward pass tiling dimension for embedding in GMM for wo.")
+  wo_tile_fwd_mlp_dim: int = Field(1024, description="forward pass tiling dimension for MLP in GMM for wo.")
+  wo_tile_dlhs_batch_seq: int = Field(512, description="bwd pass dlhs tiling dimension for batch/sequence in GMM for wo.")
+  wo_tile_dlhs_embed_dim: int = Field(1024, description="bwd pass dlhs tiling dimension for embedding in GMM for wo.")
+  wo_tile_dlhs_mlp_dim: int = Field(1024, description="bwd pass dlhs tiling dimension for MLP in GMM for wo.")
+  wo_tile_drhs_batch_seq: int = Field(512, description="bwd pass drhs tiling dimension for batch/sequence in GMM for wo.")
+  wo_tile_drhs_embed_dim: int = Field(1024, description="bwd pass drhs tiling dimension for embedding in GMM for wo.")
+  wo_tile_drhs_mlp_dim: int = Field(1024, description="bwd pass drhs tiling dimension for MLP in GMM for wo.")
 
 
 class DeepSeekMoE(BaseModel):
@@ -1400,7 +1423,6 @@ class DerivedValues(BaseModel):
       None, description="Increment for global batch size during rampup."
   )
   rampup_samples_per_increment_to_load: None | float = Field(None, description="Samples per increment for rampup.")
-  tile_fwd_batch_seq: None | int = Field(None, description="Legacy alias for tile_batch_seq.")
 
 
 # ----------------------------------------------------------------------------
@@ -1721,7 +1743,6 @@ class MaxTextConfig(
     if self.expert_shard_attention_option == "context":
       cp_size *= self.ici_expert_parallelism * self.dcn_expert_parallelism
     self.context_parallel_size = cp_size
-    self.tile_fwd_batch_seq = self.tile_batch_seq  # Legacy alias.
     if self.pipeline_parallel_layers == -1:
       if self.decoder_block == DecoderBlockType.DEEPSEEK:
         moe_layers = self.num_decoder_layers - self.first_num_dense_layers

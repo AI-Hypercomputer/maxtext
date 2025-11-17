@@ -128,7 +128,9 @@ save_quantized_params_path: ""
 model_call_mode: ""
 use_qwix_quantization: False # Whether to use qwix for quantization. If set to True, the model will be quantized using qwix.
 # Quantization calibration method used for weights and activations. Supported methods can be found in https://github.com/google/qwix/blob/dc2a0770351c740e5ab3cce7c0efe9f7beacce9e/qwix/qconfig.py#L70-L80
-quantization_calibration_method: "absmax"
+weight_quantization_calibration_method: "absmax"
+act_quantization_calibration_method: "absmax"
+bwd_quantization_calibration_method: "absmax"
 # Shard the range finding operation for quantization. By default this is set to number of slices.
 quantization_local_shard_count: -1
 
@@ -177,10 +179,26 @@ load_balance_loss_weight: 0.01 # weight for the load balance loss
 use_random_routing: False # whether to use random routing for debug/test purpose
 use_custom_sort_vjp: True # whether to use a custom sort vjp for sparse matmul ops
 use_ring_of_experts: False # whether to use ring of experts for sparse matmul expert parallelism
-# Tunable tiling dimensions used for Megablox
-tile_batch_seq: 512
-tile_embed_dim: 1024
-tile_mlp_dim: 1024
+# Tunable tiling dimensions used for MLP GMM, includes Tokamax ragged_dot and Megablox
+wi_tile_fwd_batch_seq: 512
+wi_tile_fwd_embed_dim: 1024
+wi_tile_fwd_mlp_dim: 1024
+wi_tile_dlhs_batch_seq: 512
+wi_tile_dlhs_embed_dim: 1024
+wi_tile_dlhs_mlp_dim: 1024
+wi_tile_drhs_batch_seq: 512
+wi_tile_drhs_embed_dim: 1024
+wi_tile_drhs_mlp_dim: 1024
+
+wo_tile_fwd_batch_seq: 512
+wo_tile_fwd_embed_dim: 1024
+wo_tile_fwd_mlp_dim: 1024
+wo_tile_dlhs_batch_seq: 512
+wo_tile_dlhs_embed_dim: 1024
+wo_tile_dlhs_mlp_dim: 1024
+wo_tile_drhs_batch_seq: 512
+wo_tile_drhs_embed_dim: 1024
+wo_tile_drhs_mlp_dim: 1024
 norm_topk_prob: False # Boolean to enable the top-k probability normalization. Qwen3-specific normalization of router weights.
 
 # How the expert axis is used to shard attention weights and activations
