@@ -1,163 +1,144 @@
-# Copyright 2023–2025 Google LLC
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     https://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
-"""Defines the weight mapping from MaxText's GPT-OSS MoE model to a vLLM-compatible format."""
-
 from dataclasses import dataclass
-from typing import Dict, List, Tuple
+import jax.numpy as jnp
+from flax import nnx
+import re
 
 
 @dataclass
-class GPTOSS_VLLM_MAPPING:
-    """Mapping MaxText GPT-OSS MoE weights to vLLM's GPT-OSS MoE weights."""
+class GptOssMaxTextMapping:
+  """Mapping from MaxText GPT-OSS to VLLM JAX NNX."""
 
-    @staticmethod
-    def to_hf_hook_fns() -> Dict[str, callable]:
-        """Returns a dictionary of hook functions to be applied to MaxText weights.
+  @staticmethod
+  def to_hf_hook_fns():
+    return {}
 
-        Hooks are needed to combine Q/K/V kernels, combine MLP projections, 
-        and handle the MoE expert dimension.
-        """
-        # NOTE: Actual implementation of these functions would be in a separate utility module.
-        # For this mapping, we define the *need* for them.
-        return {
-            "combine_qkv_kernels": "model.layers.*.attn.qkv_proj.weight",
-            "combine_qkv_biases": "model.layers.*.attn.qkv_proj.bias",
-            "combine_mlp_w13_kernels": "model.layers.*.mlp.experts.w13_weight",
-            "combine_mlp_w13_biases": "model.layers.*.mlp.experts.w13_bias",
-        }
+  @staticmethod
+  def to_hf_transpose_keys():
+    return {}
 
-    @staticmethod
-    def to_hf_transpose_keys() -> Dict[str, Tuple[int, int]]:
-        """Returns a dictionary of keys for weights that need to be transposed."""
-        # MaxText often uses [in_dim, out_dim] while HuggingFace/PyTorch uses [out_dim, in_dim].
-        # In a distributed MaxText checkpoint, dimensions are often sharded (e.g., [sharded_dim, other_dim]).
-        # The common practice is to transpose all kernel weights.
-        return {
-            # Standard Kernels
-            "base.decoder.logits_dense.kernel": (0, 1),
-            # Attention Projections (MaxText's out.kernel needs transposition)
-            "base.decoder.layers.attention.out.kernel": (0, 1),
-            # MLP Down-Projection (wo.kernel)
-            "base.decoder.layers.mlp.wo.kernel": (2, 3),  # (Expert, Layer, Out, In) -> (Expert, Layer, In, Out)
-            # Embedding Layer (transpose usually required for the vocabulary dim)
-            "base.token_embedder.embedding": (0, 1),
-        }
+  @staticmethod
+  def to_hf_mapping(layer_cycle_interval: int = 2):
+    mapping = {
+        "base.token_embedder.embedding": ("embedder.input_embedding_table_VD", (("data", "model"), None)),
+        "base.decoder.decoder_norm.scale": ("final_norm.scale", (None,)),
+        "base.decoder.logits_dense.kernel": ("lm_head.input_embedding_table_DV", (None, ("data", "model"))),
+    }
 
-    @staticmethod
-    def to_hf_mapping() -> Dict[str, Tuple[str, Tuple[str | None, ...]]]:
-        """Mapping from MaxText model to HuggingFace vLLM model."""
-        return {
-            # --- Global Parameters ---
-            # Token Embeddings (vLLM splits embedding and final LM head) - Shard Vocab Dim
-            "params.params.token_embedder.embedding": (
-                "vllm_model.model.embedding.weight",
-                ("vocab", "model"),
-            ),
-            # Final Layer Norm (Decoder Norm) - No Sharding
-            "params.params.decoder.decoder_norm.scale": (
-                "vllm_model.model.norm.weight",
-                (None,),
-            ),
-            # LM Head (Logits Dense) - Shard Vocab Dim
-            "params.params.decoder.logits_dense.kernel": (
-                "vllm_model.lm_head.weight",
-                ("model", "vocab"),
-            ),
+    for block_idx in range(layer_cycle_interval):
+      src_block = f"base.decoder.layers.layers_{block_idx}"
+      mapping.update(
+          {
+              f"{src_block}.pre_self_attention_layer_norm.scale": ("layers.*.pre_attention_norm.scale", (None, "layer")),
+              f"{src_block}.post_self_attention_layer_norm.scale": ("layers.*.pre_mlp_norm.scale", (None, "layer")),
+              # Attention
+              f"{src_block}.GptOssAttention.query.kernel": ("layers.*.attn.kernel_q_DNH", (None, "layer", "model", None)),
+              f"{src_block}.GptOssAttention.key.kernel": ("layers.*.attn.kernel_k_DKH", (None, "layer", "model", None)),
+              f"{src_block}.GptOssAttention.value.kernel": ("layers.*.attn.kernel_v_DKH", (None, "layer", "model", None)),
+              f"{src_block}.GptOssAttention.out.kernel": (
+                  "layers.*.attn.kernel_o_proj_NHD",
+                  ("model", "layer", None, None),
+              ),
+              f"{src_block}.GptOssAttention.query.bias": ("layers.*.attn.bias_q_NH", (None, "layer", None)),
+              f"{src_block}.GptOssAttention.key.bias": ("layers.*.attn.bias_k_KH", (None, "layer", None)),
+              f"{src_block}.GptOssAttention.value.bias": ("layers.*.attn.bias_v_KH", (None, "layer", None)),
+              f"{src_block}.GptOssAttention.out.bias": ("layers.*.attn.bias_o_D", (None, "layer")),
+              f"{src_block}.GptOssAttention.sinks": ("layers.*.attn.sinks_N", (None, "layer")),
+              # MoE
+              f"{src_block}.GptOssMlp.gate.kernel": ("layers.*.custom_module.router.kernel_DE", (None, "layer", "model")),
+              f"{src_block}.GptOssMlp.gate.bias": ("layers.*.custom_module.router.bias_E", (None, "layer")),
+              # Target Unquantized Keys (Assuming you disabled quantization)
+              f"{src_block}.GptOssMlp.gate_up_proj.kernel": (
+                  "layers.*.custom_module.mlp1_weight_EDF2",
+                  ("expert", "layer", "model", None),
+              ),
+              f"{src_block}.GptOssMlp.gate_up_proj_bias": (
+                  "layers.*.custom_module.mlp1_bias_EF2",
+                  ("expert", "layer", None),
+              ),
+              f"{src_block}.GptOssMlp.wo.kernel": (
+                  "layers.*.custom_module.mlp2_weight_EFD",
+                  ("expert", "layer", "model", None),
+              ),
+              f"{src_block}.GptOssMlp.wo.bias": ("layers.*.custom_module.mlp2_bias_ED", ("expert", "layer", None)),
+          }
+      )
+    return mapping
 
-            # --- Layer-Specific Parameters (Scanned to Unscanned) ---
 
-            # --- Attention (Needs Hooks to Combine Q/K/V) ---
-            # The vLLM QKV weight/bias must be constructed by concatenating the MaxText Q, K, V kernels/biases.
-            # MaxText: layers.*.GptOssAttention.query.kernel, .key.kernel, .value.kernel
-            # vLLM: layers.*.attn.qkv_proj.weight
-            # NOTE: The resulting combined QKV tensor in vLLM is often: [qkv_dim, hidden_dim]
-            # MaxText weights have an extra "head" dimension, which implies a manual reshape/concatenate.
-            
-            # The mappings below mark the source components that are consumed by the hooks defined above.
-            # MaxText Q/K/V kernels (consumed by combine_qkv_kernels hook)
-            "params.params.decoder.layers.layers_*.GptOssAttention.query.kernel": None,
-            "params.params.decoder.layers.layers_*.GptOssAttention.key.kernel": None,
-            "params.params.decoder.layers.layers_*.GptOssAttention.value.kernel": None,
-            
-            # MaxText Q/K/V biases (consumed by combine_qkv_biases hook)
-            "params.params.decoder.layers.layers_*.GptOssAttention.query.bias": None,
-            "params.params.decoder.layers.layers_*.GptOssAttention.key.bias": None,
-            "params.params.decoder.layers.layers_*.GptOssAttention.value.bias": None,
-            
-            # Output Projection (MaxText's out.kernel/bias -> vLLM's o_proj.weight/bias)
-            "params.params.decoder.layers.layers_*.GptOssAttention.out.kernel": (
-                "vllm_model.model.layers.*.attn.o_proj.weight",
-                ("model", "heads", "head_dim", None), # Example sharding, confirm actual axis
-            ),
-            "params.params.decoder.layers.layers_*.GptOssAttention.out.bias": (
-                "vllm_model.model.layers.*.attn.o_proj.bias",
-                (None,),
-            ),
-            # Rotational Embedding Sinks (vLLM has this explicitly)
-            "params.params.decoder.layers.layers_*.GptOssAttention.sinks": (
-                "vllm_model.model.layers.*.attn.sinks",
-                (None,),
-            ),
+def preprocess_maxtext_nnx_state(maxtext_state: nnx.State) -> DictionaryState:
+  """
+  1. Flattens nnx.State using flat_state()
+  2. Merges MoE weights.
+  3. Wraps arrays in SimpleParam (Fixes 'ArrayImpl has no attribute value').
+  """
+  print("Preprocessing MaxText NNX State...")
 
-            # --- MLP (MoE) (Needs Hooks to Combine w1/w3) ---
-            # MaxText has gate, wi_0, wi_1 (w1, w3) - combined into vLLM's w13_weight/bias
-            # MaxText w1/w3 kernels (consumed by combine_mlp_w13_kernels hook)
-            "params.params.decoder.layers.layers_*.GptOssMlp.wi_0": None, # Should be combined to form w1
-            "params.params.decoder.layers.layers_*.GptOssMlp.wi_1": None, # Should be combined to form w3
-            # NOTE: MaxText might use GptOssMlp.gate.kernel for the *real* w1, and wi_0/wi_1 for up-projections, this is a common variance.
-            # Assuming MaxText's `gate.kernel` (Gate) and `wi_0` (Up) are combined for vLLM's `w13_weight`. A hook is required here.
-            "params.params.decoder.layers.layers_*.GptOssMlp.gate.kernel": None, # Source 1 for combined w13
-            "params.params.decoder.layers.layers_*.GptOssMlp.wi_0": None, # Source 2 for combined w13
-            
-            # MaxText w1/w3 biases (consumed by combine_mlp_w13_biases hook)
-            "params.params.decoder.layers.layers_*.GptOssMlp.gate.bias": None, # Source 1 for combined w13_bias
-            "params.params.decoder.layers.layers_*.GptOssMlp.wi_0_bias": None, # Source 2 for combined w13_bias
+  # Temporary dict to hold raw values
+  raw_values = {}
+  keys_to_merge = []
 
-            # MLP Down-Projection (wo.kernel/bias -> vLLM's w2_weight/bias)
-            "params.params.decoder.layers.layers_*.GptOssMlp.wo": (
-                "vllm_model.model.layers.*.mlp.experts.w2_weight",
-                ("expert", "layer", None, "model"), # Example sharding (Expert, Layer, Out, In)
-            ),
-            "params.params.decoder.layers.layers_*.GptOssMlp.wo_bias": (
-                "vllm_model.model.layers.*.mlp.experts.w2_bias",
-                ("expert", "layer", None), # Example sharding (Expert, Layer, Out)
-            ),
-            
-            # Router Weights
-            # MaxText doesn't show a clear router key, assuming a separate router module in MaxText
-            # VLLM uses `router.weight`
-            # For now, map MaxText's `GptOssMlp.gate.kernel` (if it's the router) or define a new source if needed.
-            # Assuming MaxText's `GptOssMlp.gate.kernel` is the router's input gate/weight.
-            "params.params.decoder.layers.layers_*.GptOssMlp.gate.kernel": (
-                "vllm_model.model.layers.*.mlp.router.weight",
-                ("expert", "model"),
-            ),
-            "params.params.decoder.layers.layers_*.GptOssMlp.gate.bias": (
-                "vllm_model.model.layers.*.mlp.router.bias",
-                ("expert",),
-            ),
+  # 1. Iterate using the correct flat_state() API
+  for path_tuple, param in maxtext_state.flat_state():
+    # Convert path tuple to dot-separated string key
+    key = ".".join(str(p) for p in path_tuple)
 
-            # --- Layer Norms ---
-            # Pre-Attention Layer Norm (input_layernorm)
-            "params.params.decoder.layers.layers_*.pre_self_attention_layer_norm.scale": (
-                "vllm_model.model.layers.*.input_layernorm.weight",
-                ("model", "layer"),
-            ),
-            # Post-Attention Layer Norm (post_attention_layernorm)
-            "params.params.decoder.layers.layers_*.post_self_attention_layer_norm.scale": (
-                "vllm_model.model.layers.*.post_attention_layernorm.weight",
-                ("model", "layer"),
-            ),
-        }
+    # Unwrap Param to get the raw array
+    value = param.value if hasattr(param, "value") else param
+
+    # Identify split MoE weights (Gate)
+    if re.search(r"\.GptOssMlp\.wi_0", key):
+      key_wi1 = key.replace("wi_0", "wi_1")
+      # We defer checking if wi_1 exists until the merge loop
+      keys_to_merge.append((key, key_wi1))
+
+    raw_values[key] = value
+
+  # 2. Merge MoE Weights (Interleave Gate & Up)
+  for key_wi0, key_wi1 in keys_to_merge:
+    # Only merge if both parts exist
+    if key_wi0 in raw_values and key_wi1 in raw_values:
+      val_0 = raw_values[key_wi0]  # Gate
+      val_1 = raw_values[key_wi1]  # Up
+
+      print(f"  Merging: {key_wi0} + {key_wi1}")
+
+      # Stack along last dim and interleave
+      # Shape: [..., Hidden, Intermed] -> [..., Hidden, Intermed * 2]
+      combined = jnp.stack((val_0, val_1), axis=-1)
+      new_shape = combined.shape[:-2] + (combined.shape[-2] * 2,)
+      merged_value = combined.reshape(new_shape)
+
+      # Create new key: ...gate_up_proj
+      new_key = key_wi0.replace("wi_0", "gate_up_proj")
+      raw_values[new_key] = merged_value
+
+      # Handle Bias merging if present
+      key_b0 = key_wi0.replace("kernel", "bias") if "kernel" in key_wi0 else key_wi0 + "_bias"
+      key_b1 = key_wi1.replace("kernel", "bias") if "kernel" in key_wi1 else key_wi1 + "_bias"
+
+      if key_b0 in raw_values and key_b1 in raw_values:
+        b0 = raw_values[key_b0]
+        b1 = raw_values[key_b1]
+        b_comb = jnp.stack((b0, b1), axis=-1)
+        b_new_shape = b_comb.shape[:-2] + (b_comb.shape[-2] * 2,)
+
+        # Determine new bias key name
+        if "kernel" in new_key:
+          new_bias_key = new_key.replace("kernel", "bias")
+        else:
+          new_bias_key = new_key.replace("gate_up_proj", "gate_up_proj_bias")
+
+        raw_values[new_bias_key] = b_comb.reshape(b_new_shape)
+
+        del raw_values[key_b0]
+        del raw_values[key_b1]
+
+      # Remove original split weights to clean up
+      del raw_values[key_wi0]
+      del raw_values[key_wi1]
+
+  # 3. Wrap every array in SimpleParam
+  wrapped_output = {k: SimpleParam(v) for k, v in raw_values.items()}
+
+  # Return the custom state object
+  return DictionaryState(wrapped_output)
