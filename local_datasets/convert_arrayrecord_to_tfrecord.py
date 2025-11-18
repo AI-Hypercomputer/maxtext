@@ -62,11 +62,7 @@ def parse_shard_numbers(fname: str) -> tuple[str, str]:
   Example: c4-train.array_record-00003-of-00008 -> ("00003", "00008").
   """
   base = os.path.basename(fname)
-<<<<<<< HEAD
   parts = base.split("-")
-=======
-  parts = base.split('-')
->>>>>>> ee382cb52 (renaming datasets to local_datasets to avoid confusion with HF datasets library)
   # last two parts are shard index and total, e.g. 00003, of, 00008
   shard_idx = parts[-3]
   total = parts[-1]
@@ -103,38 +99,17 @@ def convert_shard(arrayrecord_path: str, output_path: str, force: bool) -> None:
 
 def main() -> None:
   ap = argparse.ArgumentParser()
-<<<<<<< HEAD
   ap.add_argument("--version-dir", required=True, help="Directory like c4_en_dataset_minimal/c4/en/3.0.1")
   ap.add_argument("--builder-name", default="__local_c4_builder", help="Prefix used for TFRecord shard filenames.")
   ap.add_argument("--dry-run", action="store_true", help="Only list planned conversions.")
   ap.add_argument("--force", action="store_true", help="Overwrite existing TFRecord shards if present.")
-=======
-  ap.add_argument(
-      '--version-dir', required=True,
-      help='Directory like c4_en_dataset_minimal/c4/en/3.0.1'
-  )
-  ap.add_argument(
-      '--builder-name', default='__local_c4_builder',
-      help='Prefix used for TFRecord shard filenames.'
-  )
-  ap.add_argument(
-      '--dry-run', action='store_true', help='Only list planned conversions.'
-  )
-  ap.add_argument(
-      '--force', action='store_true', help='Overwrite existing TFRecord shards if present.'
-  )
->>>>>>> ee382cb52 (renaming datasets to local_datasets to avoid confusion with HF datasets library)
   args = ap.parse_args()
 
   if not os.path.isdir(args.version_dir):
     print(f"Version directory not found: {args.version_dir}")
     sys.exit(1)
 
-<<<<<<< HEAD
   for split in ["train", "validation"]:
-=======
-  for split in ['train', 'validation']:
->>>>>>> ee382cb52 (renaming datasets to local_datasets to avoid confusion with HF datasets library)
     shards = discover_shards(args.version_dir, split)
     if not shards:
       print(f"No ArrayRecord shards found for split '{split}' in {args.version_dir}")
@@ -152,11 +127,5 @@ def main() -> None:
   print("Done.")
 
 
-<<<<<<< HEAD
 if __name__ == "__main__":
   main()
-=======
-if __name__ == '__main__':
-  main()
-
->>>>>>> ee382cb52 (renaming datasets to local_datasets to avoid confusion with HF datasets library)

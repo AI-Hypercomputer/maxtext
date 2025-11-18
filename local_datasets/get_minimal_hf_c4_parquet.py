@@ -40,10 +40,7 @@ MINIO_SECURE = os.environ.get("MINIO_SECURE", "true").lower() == "true"
 BUCKET = os.environ.get("MINIO_C4_BUCKET", "datasets.dl")
 SCRIPT_DIR = Path(__file__).parent
 
-<<<<<<< HEAD
 
-=======
->>>>>>> ee382cb52 (renaming datasets to local_datasets to avoid confusion with HF datasets library)
 def download_object(client: Minio, obj, dest_path: Path) -> Path:
   """Download an object from MinIO to ``dest_path`` and return the path."""
   data = client.get_object(BUCKET, obj.object_name)
@@ -150,12 +147,7 @@ def main() -> None:
     print("Validation 00000-of shard not found; abort.")
     return
   print(
-<<<<<<< HEAD
       f"Using train object {train_obj.object_name} and validation object " f"{val_obj.object_name}.",
-=======
-    f"Using train object {train_obj.object_name} and validation object "
-    f"{val_obj.object_name}.",
->>>>>>> ee382cb52 (renaming datasets to local_datasets to avoid confusion with HF datasets library)
   )
 
   tmp_train = out_dir.parent / "_tmp_train"
