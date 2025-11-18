@@ -23,12 +23,12 @@ runner process.
 
 import benchmarks.recipes.args_helper as helper
 import maxtext_xpk_runner as mxr
-from recipes.user_configs import cluster_config, xpk_path, pathways_config, base_output_directory, headless_workload_name
+from recipes.user_configs import cluster_config, xpk_path, pathways_config, base_output_directory, headless_workload_name, delete, user
 
 
 def main() -> int:
   # Handle command line arguments using args_helper
-  should_continue = helper.handle_cmd_args(cluster_config, helper.DELETE, xpk_path=xpk_path)
+  should_continue = helper.handle_cmd_args(cluster_config, delete, user)
 
   if not should_continue:
     return 0

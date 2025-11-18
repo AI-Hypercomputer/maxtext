@@ -20,7 +20,6 @@ It primarily offers a standardized way to handle a `--delete` flag, which can
 be used to clean up existing XPK workloads before starting a new run.
 """
 
-import argparse
 import os
 
 from benchmarks.xpk_configs import XpkClusterConfig
@@ -66,41 +65,19 @@ def handle_delete_specific_workload(cluster_config: XpkClusterConfig, workload_n
   os.system(f"yes | {delete_command}")
 
 
-def handle_cmd_args(cluster_config: XpkClusterConfig, *actions: str, **kwargs) -> bool:
+def handle_cmd_args(cluster_config: XpkClusterConfig, is_delete: bool, user: str, **kwargs) -> bool:
   """Parses command-line arguments and executes the specified actions.
 
   Args:
       cluster_config: Contains Cluster configuration information that's helpful
         for running the actions.
-      *actions: Variable number of string arguments representing the actions to
-        be performed.
+      is_delete: A boolean indicating whether the delete action should be
+                 performed.
       **kwargs: Optional keyword arguments to be passed to action handlers.
-
-  Raises:
-    ValueError: If an unsupported action is provided or if unknown arguments are
-    passed.
   """
-
-  parser = argparse.ArgumentParser()
-
-  if DELETE in actions:
-    parser.add_argument(
-        "--delete",
-        action="store_true",
-        help="Delete workloads starting with the user's first five characters.",
-    )
-
-  known_args, unknown_args = parser.parse_known_args()
-
-  if unknown_args:
-    raise ValueError(f"Unrecognized arguments: {unknown_args}")
-
-  # Get user
-  user = os.environ["USER"]
-
   # Handle actions
   should_continue = True
-  if DELETE in actions and known_args.delete:
+  if is_delete:
     _handle_delete(cluster_config, user, **kwargs)
     should_continue = False
 

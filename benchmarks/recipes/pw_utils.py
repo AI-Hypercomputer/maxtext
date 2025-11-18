@@ -14,14 +14,17 @@
 
 """
 This module provides utility functions for Pathways-related benchmark recipes.
-
-It includes helpers for building lists of model configurations based on user
-selections and for generating `XpkClusterConfig` and `PathwaysConfig` objects.
 """
 
 import typing
 
 import maxtext_xpk_runner as mxr
+from google.api_core.exceptions import (
+    NotFound,
+    Conflict,
+    Forbidden,
+    PermissionDenied,
+)
 
 
 def build_user_models(
@@ -92,7 +95,14 @@ def get_cluster_config(cluster_name, project, zone, device_type):
 
 
 def get_pathways_config(
-    server_image, proxy_image, runner, colocated_python_image, headless, server_flags="", proxy_flags="", worker_flags=""
+    server_image,
+    proxy_image,
+    runner,
+    colocated_python_image,
+    headless,
+    server_flags="",
+    proxy_flags="",
+    worker_flags="",
 ):
   """
   Generates Pathways configuration objects from a UserConfig.
@@ -108,3 +118,38 @@ def get_pathways_config(
       worker_flags=worker_flags,
   )
   return pathways_config
+
+
+def check_and_create_bucket(storage_client, bucket_name, region):
+  """
+  Checks if the GCS bucket exists.
+  Prints a message if it exists.
+  Attempts to create the bucket if it does not exist.
+  """
+  print(f"Checking GCS bucket: {bucket_name}...")
+
+  try:
+    bucket = storage_client.get_bucket(bucket_name)
+
+    print(f"GCS bucket '{bucket_name}' already exists. No creation needed.")
+    return bucket
+
+  except NotFound:
+    print(f"GCS bucket '{bucket_name}' not found. Attempting to create...")
+    try:
+      new_bucket = storage_client.create_bucket(
+          bucket_or_name=bucket_name,
+          location=region,
+      )
+      print(f"Successfully created GCS bucket: '{new_bucket.name}' in region: {new_bucket.location}.")
+      return new_bucket
+
+    except (Conflict, Forbidden, PermissionDenied) as e:
+      error_type = e.__class__.__name__
+      print(f"Failed to create GCS bucket due to {error_type}! " f"Error message: {e}")
+      return None
+
+  except (Forbidden, PermissionDenied) as e:
+    error_type = e.__class__.__name__
+    print(f"Failed to access GCS bucket due to {error_type}! " f"Check your credentials. Error message: {e}")
+    return None
