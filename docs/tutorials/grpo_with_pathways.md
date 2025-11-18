@@ -54,7 +54,7 @@ bash docker_upload_runner.sh CLOUD_IMAGE_NAME=path/to/gcr.io
 
 ### Submit your jobs
 
-Please use a pathways enabled [XPK](https://github.com/AI-Hypercomputer/xpk) cluster, and you can submit the `train_rl.py` script via [XPK](https://github.com/AI-Hypercomputer/xpk)
+Please create a pathways ready GKE cluster as described [here](https://docs.cloud.google.com/ai-hypercomputer/docs/workloads/pathways-on-cloud/create-gke-cluster), and you can submit the `train_rl.py` script via [XPK](https://github.com/AI-Hypercomputer/xpk)
 ```
 xpk workload create-pathways --workload $WORKLOAD \
 --docker-image path/to/gcr.io:latest --cluster $TPU_CLUSTER \
