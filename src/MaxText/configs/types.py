@@ -1194,6 +1194,11 @@ class VisionTower(BaseModel):
   num_hidden_layers_for_vit: int = Field(34, description="Number of hidden layers in the Vision Transformer.")
   rope_theta_for_vit: int = Field(10000, description="RoPE theta value for the Vision Transformer.")
   vision_output_dim_for_vit: int = Field(4096, description="Final output dimension of the vision-to-language projection.")
+  spatial_merge_size_for_vit: int = Field(2, description="Spatial merge factor for vision patches.")
+  out_hidden_size_for_vit: int = Field(512, description="Output dimension of ViT.")
+  temporal_patch_size_for_vit: int = Field(2, description="Temporal patch size for video inputs.")
+  num_position_embeddings_for_vit: int = Field(1024, description="Number of position embeddings for ViT.")
+  deepstack_visual_indexes_for_vit: list[int] = Field([], description="Layer indices to extract deep visual features.")
 
 
 class VisionProjector(BaseModel):
