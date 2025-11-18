@@ -1261,6 +1261,14 @@ class RLHardware(BaseModel):
   use_pathways: bool = Field(True, description="Whether to use Pathways for multihost orchestration.")
   num_trainer_slices: int = Field(-1, description="Number of slices for the trainer.")
   num_samplers_slices: int = Field(-1, description="Number of slices for the samplers.")
+  rollout_data_parallelism: int = Field(
+      -1,
+      description="Total model replicas for rollout. It should only be specified when you would like to use more "
+      "than one model replica in rollout.",
+  )
+  rollout_tensor_parallelism: int = Field(
+      -1, description="Tensor parallelism per replica for rollout. If not specified, it will be auto-determined."
+  )
 
 
 class VLLM(BaseModel):
