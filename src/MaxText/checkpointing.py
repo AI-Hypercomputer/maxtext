@@ -540,7 +540,7 @@ def load_state_if_possible(
     source_checkpoint_layout="orbax",
     expansion_factor_real_data: int = -1,
     grain_mixture_config_path: str = "",
-    grain_worker_count: int = 1,
+    grain_worker_count: int = 0,
 ):
   """Loads TrainState as possible from the inputs.
 

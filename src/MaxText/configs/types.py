@@ -1934,8 +1934,10 @@ class MaxTextConfig(
     # Validate HuggingFace dataset configuration
     if self.dataset_type == "hf":
       logger.info(
-          f"dataset_type set to hf, will use hf_path={self.hf_path!r}, hf_data_dir={self.hf_data_dir!r} "
-          f"and hf_train_files={self.hf_train_files!r} to read data"
+          "dataset_type set to hf, will use hf_path=%r, hf_data_dir=%r and hf_train_files=%r to read data",
+          self.hf_path,
+          self.hf_data_dir,
+          self.hf_train_files,
       )
       if not self.hf_path:
         raise ValueError("hf_path can't be empty when dataset_type=hf")
@@ -1950,9 +1952,11 @@ class MaxTextConfig(
     # Validate grain dataset configuration
     if self.dataset_type == "grain":
       logger.info(
-          f"dataset_type set to grain, will use grain_train_files={self.grain_train_files!r} or "
-          f"grain_mixture_config_path={self.grain_mixture_config_path!r} for data files, "
-          f"and {self.grain_worker_count} workers"
+          "dataset_type set to grain, will use grain_train_files=%r or grain_mixture_config_path=%r "
+          "for data files, and %d workers",
+          self.grain_train_files,
+          self.grain_mixture_config_path,
+          self.grain_worker_count,
       )
       is_train_files_set = bool(self.grain_train_files)
       is_mixture_config_set = bool(self.grain_mixture_config_path)
@@ -1965,13 +1969,16 @@ class MaxTextConfig(
         raise ValueError("Please specify grain_eval_files or set eval_interval to <=0.")
       if self.tokenizer_type not in ("sentencepiece", "huggingface"):
         raise ValueError(
-            f"Grain pipeline only supports tokenizer_type: sentencepiece, huggingface, "
-            f"but got {self.tokenizer_type}"
+            f"Grain pipeline only supports tokenizer_type: sentencepiece, huggingface, " f"but got {self.tokenizer_type}"
         )
 
     # Validate TFDS dataset configuration
     if self.dataset_type == "tfds":
-      logger.info(f"dataset_type set to tfds, will use dataset_path={self.dataset_path!r} and dataset_name={self.dataset_name!r}")
+      logger.info(
+          "dataset_type set to tfds, will use dataset_path=%r and dataset_name=%r",
+          self.dataset_path,
+          self.dataset_name,
+      )
       if not self.dataset_name:
         raise ValueError("dataset_name can't be empty when dataset_type=tfds")
       if self.eval_interval > 0 and not self.eval_split:

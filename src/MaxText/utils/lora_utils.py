@@ -188,6 +188,8 @@ def setup_initial_lora_state(model, data_iterator, tx, config, rng, mesh, checkp
           config.dataset_type,
           use_ocdbt=config.checkpoint_storage_use_ocdbt,
           use_zarr3=config.checkpoint_storage_use_zarr3,
+          grain_mixture_config_path=config.grain_mixture_config_path,
+          grain_worker_count=config.grain_worker_count,
       )
 
       if restored_lora:

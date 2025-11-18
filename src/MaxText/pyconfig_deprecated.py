@@ -371,7 +371,6 @@ def validate_data_input(keys):
   This code path is deprecated and only kept for backward compatibility.
   """
   # All validation logic has been migrated to types.py
-  pass
 
 
 def validate_llama4_config(keys: dict):

@@ -80,9 +80,9 @@ In Grain checkpoints, each data-loading host has a corresponding JSON file. For 
 9. Experimental: updating data mixtures during training (ArrayRecord Only)
 This feature allows you to introduce a new data mixture while resuming a training run. This is useful when new datasets become available mid-training. You can continue reading from your original dataset where you left off, while blending in the new data.
 
-* **Step 1**: start training with an initial mixture
+* **Step 1**: start training with an initial mixture and save a checkpoint
 
-Begin your training run by defining your initial data sources and weights in `grain_train_files`.
+Begin your training run by defining your initial data sources and weights in `grain_train_files`. Make sure checkpoints are saved.
 
 ```
 # In your config or on the command line
@@ -110,7 +110,7 @@ When you are ready to introduce the new dataset, create a JSON configuration fil
 }
 ```
 
-* **Step 3**: resume training with the new mixture
+* **Step 3**: resume training with the new mixture from the initial checkpoint
 
 To resume the training run, update your configuration with two changes:
 1.  Point `grain_mixture_config_path` to the JSON file you just created.
