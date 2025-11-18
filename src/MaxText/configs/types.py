@@ -1223,6 +1223,8 @@ class RLHardware(BaseModel):
   sampler_devices_fraction: float = Field(0.5, description="Fraction of devices to use for the sampler.")
   chips_per_vm: int = Field(4, description="Number of accelerator chips per VM.")
   use_pathways: bool = Field(True, description="Whether to use Pathways for multihost orchestration.")
+  num_trainer_slices: int = Field(-1, description="Number of slices for the trainer.")
+  num_samplers_slices: int = Field(-1, description="Number of slices for the samplers.")
 
 
 class VLLM(BaseModel):
