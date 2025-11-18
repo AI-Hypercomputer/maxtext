@@ -825,6 +825,9 @@ class GrainDataset(BaseModel):
 
   grain_train_files: PathStr = Field("", description="Path to Grain training files.")
   grain_eval_files: PathStr = Field("", description="Path to Grain evaluation files.")
+  grain_mixture_config_path: PathStr = Field(
+      "", description="Path to a JSON file for advanced mixture config for grain input pipeline."
+  )
   grain_file_type: str = Field("arrayrecord", description="File type for Grain data.")
   grain_worker_count: int = Field(1, description="Number of workers for Grain data loading.")
   grain_per_worker_buffer_size: int = Field(
@@ -1927,8 +1930,53 @@ class MaxTextConfig(
       self.tokenizer_type = TokenizerType.TIKTOKEN
     if self.eval_interval > 0 >= self.eval_steps and self.generate_padding_batch_eval:
       raise ValueError("`eval_steps` must be > 0 when `generate_padding_batch_eval` is True.")
-    if self.dataset_type == "hf" and self.num_epoch != 1:
-      raise ValueError("HuggingFace pipeline only supports num_epoch=1.")
+
+    # Validate HuggingFace dataset configuration
+    if self.dataset_type == "hf":
+      logger.info(
+          f"dataset_type set to hf, will use hf_path={self.hf_path!r}, hf_data_dir={self.hf_data_dir!r} "
+          f"and hf_train_files={self.hf_train_files!r} to read data"
+      )
+      if not self.hf_path:
+        raise ValueError("hf_path can't be empty when dataset_type=hf")
+      # Set hf_eval_split to "train" when hf_eval_files is provided
+      if self.hf_eval_files:
+        self.hf_eval_split = "train"
+      if self.eval_interval > 0 and not self.hf_eval_split:
+        raise ValueError("Please specify hf_eval_split or set eval_interval to <=0.")
+      if self.num_epoch != 1:
+        raise ValueError("HuggingFace pipeline only supports num_epoch=1.")
+
+    # Validate grain dataset configuration
+    if self.dataset_type == "grain":
+      logger.info(
+          f"dataset_type set to grain, will use grain_train_files={self.grain_train_files!r} or "
+          f"grain_mixture_config_path={self.grain_mixture_config_path!r} for data files, "
+          f"and {self.grain_worker_count} workers"
+      )
+      is_train_files_set = bool(self.grain_train_files)
+      is_mixture_config_set = bool(self.grain_mixture_config_path)
+      if is_train_files_set == is_mixture_config_set:
+        raise ValueError(
+            "For dataset_type 'grain', you must set exactly one of 'grain_train_files' or "
+            "'grain_mixture_config_path', but not both."
+        )
+      if self.eval_interval > 0 and not self.grain_eval_files:
+        raise ValueError("Please specify grain_eval_files or set eval_interval to <=0.")
+      if self.tokenizer_type not in ("sentencepiece", "huggingface"):
+        raise ValueError(
+            f"Grain pipeline only supports tokenizer_type: sentencepiece, huggingface, "
+            f"but got {self.tokenizer_type}"
+        )
+
+    # Validate TFDS dataset configuration
+    if self.dataset_type == "tfds":
+      logger.info(f"dataset_type set to tfds, will use dataset_path={self.dataset_path!r} and dataset_name={self.dataset_name!r}")
+      if not self.dataset_name:
+        raise ValueError("dataset_name can't be empty when dataset_type=tfds")
+      if self.eval_interval > 0 and not self.eval_split:
+        raise ValueError("Please specify eval_split or set eval_interval to <=0.")
+
     if self.loss_algo == "grpo":
       self.use_grpo = True
     else:

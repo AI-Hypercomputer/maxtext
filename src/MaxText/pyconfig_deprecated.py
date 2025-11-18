@@ -365,61 +365,13 @@ def validate_tokamax_usage(keys):
 
 
 def validate_data_input(keys):
-  """validate provided parameters for data input"""
-  if not keys["hf_access_token"]:
-    keys["hf_access_token"] = None
-  if keys["dataset_type"] == "hf":
-    max_logging.log(
-        f"dataset_type set to hf, will use {keys['hf_path']=}, {keys['hf_data_dir']=} and {keys['hf_train_files']=} to read data"
-    )
-    assert keys["hf_path"] != "", "hf_path can't be empty when dataset_type=hf"
-    if not keys["hf_train_files"]:
-      keys["hf_train_files"] = None
-    if not keys["hf_eval_files"]:
-      keys["hf_eval_files"] = None
-    if keys["hf_eval_files"]:
-      keys["hf_eval_split"] = "train"
-    if keys["eval_interval"] > 0:
-      assert keys["hf_eval_split"], "Please specify hf_eval_split or set eval_interval to <=0."
-    assert keys["num_epoch"] == 1, f"hf pipeline only supports num_epoch=1, but num_epoch={keys['num_epoch']} is given."
+  """validate provided parameters for data input
 
-  elif keys["dataset_type"] == "grain":
-    max_logging.log(
-        f"dataset_type set to grain, will use {keys['grain_train_files']=} or {keys['grain_mixture_config_path']=} "
-        f"for data files, and {keys['grain_worker_count']} workers"
-    )
-    # For grain, either grain_train_files or grain_mixture_config_path must be set, but not both.
-    is_train_files_set = bool(keys["grain_train_files"])
-    is_mixture_config_set = bool(keys["grain_mixture_config_path"])
-
-    if is_train_files_set == is_mixture_config_set:
-      raise ValueError(
-          "For dataset_type 'grain', you must set exactly one of 'grain_train_files' or 'grain_mixture_config_path', but not both."
-      )
-    if keys["eval_interval"] > 0:
-      assert keys["grain_eval_files"], "Please specify grain_eval_files or set eval_interval to <=0."
-    assert keys["tokenizer_type"] in (
-        "sentencepiece",
-        "huggingface",
-    ), f"grain pipeline only supports tokenizer_type: sentencepiece, huggingface, but got {keys['tokenizer_type']}"
-  elif keys["dataset_type"] == "tfds":
-    max_logging.log(f"dataset_type set to tfds, will use {keys['dataset_path']=} and {keys['dataset_name']=}")
-    assert keys["dataset_name"] != "", "dataset_name can't be empty when dataset_type=tfds"
-    if keys["eval_interval"] > 0:
-      assert keys["eval_split"], "Please specify eval_split or set eval_interval to <=0."
-
-  if "tokenizer_llama3.tiktoken" in keys["tokenizer_path"]:
-    assert (
-        keys["tokenizer_type"] == "tiktoken"
-    ), "tokenizer_type must be tiktoken when using tokenizer=tokenizer_llama3.tiktoken"
-
-  if keys["sharding_tolerance"] > 1.0 or keys["sharding_tolerance"] < 0.0:
-    max_logging.log(
-        "WARNING: 'sharding_tolerance: allowed percentage of non-sharded parameters' should be between 0.0 and 1.0"
-    )
-
-  if keys["eval_interval"] > 0 and keys["generate_padding_batch_eval"]:
-    assert keys["eval_steps"] > 0, "eval_steps must be > 0 when generate_padding_batch_eval is True"
+  NOTE: This function has been fully migrated to types.py MaxTextConfig validator.
+  This code path is deprecated and only kept for backward compatibility.
+  """
+  # All validation logic has been migrated to types.py
+  pass
 
 
 def validate_llama4_config(keys: dict):
