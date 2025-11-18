@@ -71,10 +71,14 @@ value_proj: 'offload'
 checkpoint_storage_use_ocdbt: False # For Pathways
 checkpoint_storage_use_zarr3: False # For Pathways
 use_pathways: True
+log_period: 20
 
 # ====== Debugging ======
 debug:
   rl: True
+# If True, Tunix-managed metrics measurement will be enabled. The metrics will be
+# uploaded to tensorboard.
+enable_tunix_perf_metrics: False
 
 # ====== Training ======
 batch_size: 1

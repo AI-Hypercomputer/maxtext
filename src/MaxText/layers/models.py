@@ -99,11 +99,10 @@ class TransformerLinenPure(nn.Module):
 
   def logits_from_hidden_states(self, hidden_states, deterministic, model_mode):
     """
-    Compute logits from hidden states (wrapping decoder._apply_output_head).
+    Compute logits from hidden states (wrapping decoder.apply_output_head).
     This function is only used for vocabulary tiling.
     """
-    # pylint: disable=protected-access
-    logits = self.decoder._apply_output_head(
+    logits = self.decoder.apply_output_head(
         shared_embedding=self.shared_embedding,
         y=hidden_states,
         deterministic=deterministic,
@@ -151,6 +150,8 @@ class TransformerLinenPure(nn.Module):
         bidirectional_mask = decoder_input_tokens == multimodal_utils.GEMMA_TOKEN_PLACEHOLDER
       elif self.config.decoder_block == DecoderBlockType.LLAMA4:
         bidirectional_mask = decoder_input_tokens == multimodal_utils.LLAMA4_PATCH_TOKEN
+      elif self.config.decoder_block == DecoderBlockType.QWEN3_MOE:
+        bidirectional_mask = decoder_input_tokens == multimodal_utils.QWEN3_OMNI_IMAGE_TOKEN
 
     logits, hidden_state = self.decoder(
         shared_embedding=self.shared_embedding,
@@ -405,6 +406,8 @@ class Transformer(nnx.Module):
         bidirectional_mask = decoder_input_tokens == multimodal_utils.GEMMA_TOKEN_PLACEHOLDER
       elif self.config.decoder_block == DecoderBlockType.LLAMA4:
         bidirectional_mask = decoder_input_tokens == multimodal_utils.LLAMA4_PATCH_TOKEN
+      elif self.config.decoder_block == DecoderBlockType.QWEN3_MOE:
+        bidirectional_mask = decoder_input_tokens == multimodal_utils.QWEN3_OMNI_IMAGE_TOKEN
 
     logits, hidden_state = self.decoder(
         shared_embedding=self.token_embedder,

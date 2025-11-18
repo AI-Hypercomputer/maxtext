@@ -168,9 +168,8 @@ def main(argv: Sequence[str]) -> None:
   validate_train_config(config)
   os.environ["TFDS_DATA_DIR"] = config.dataset_path
 
-  maybe_monitor_goodput(config)
   recorder = create_goodput_recorder(config)
-  with maybe_record_goodput(recorder, GoodputEvent.JOB):
+  with maybe_record_goodput(recorder, GoodputEvent.JOB), maybe_monitor_goodput(config):
     train_loop(config, recorder)
 
 

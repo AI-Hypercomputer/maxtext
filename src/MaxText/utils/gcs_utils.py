@@ -145,6 +145,17 @@ def gcs_list_directories(directory_path):
   return directories
 
 
+def gcs_glob_pattern(pattern):
+  """
+  Globs GCS files and returns a list of full GCS paths.
+  """
+  storage_client = storage.Client()
+  bucket_name, glob_pattern = parse_gcs_bucket_and_prefix(pattern)
+  blobs = storage_client.list_blobs(bucket_name, match_glob=glob_pattern)
+  data_files = [f"gs://{bucket_name}/{blob.name}" for blob in blobs]
+  return data_files
+
+
 def read_json_from_gcs(file_path):
   """
   Read a json file from gcs bucket.

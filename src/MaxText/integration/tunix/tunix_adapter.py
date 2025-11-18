@@ -36,7 +36,7 @@ class TunixMaxTextAdapter(nnx.Module):
   def __init__(
       self,
       base_model: Transformer,
-      use_standalone_mappings: bool = False,
+      use_standalone_mappings: bool = True,
   ):
     super().__init__()
     self.base = base_model

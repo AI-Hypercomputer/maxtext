@@ -797,11 +797,11 @@ class TransformerEngineQuantization(Quantization):
       A Flax linen module that wraps the given function.
     """
 
-    import transformer_engine.jax as te  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
+    import transformer_engine.jax  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
 
     fp8_recipe = self._recipe
 
-    class TEWrapper(te.flax.module.TransformerEngineBase):
+    class TEWrapper(transformer_engine.jax.flax.module.TransformerEngineBase):
       """Wrapper module for TransformerEngine quantization."""
 
       def generate_quantizer_set(self, postfix: str = ""):
@@ -820,14 +820,14 @@ class TransformerEngineQuantization(Quantization):
 
   def dot_general_cls(self, mesh_axes: Tuple[str, ...] = ()):
     """Placeholder for dot_general implementation in subclasses."""
-    import transformer_engine.jax as te  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
+    import transformer_engine.jax  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
 
     def te_dot_general(generate_quantizer_set, x, kernel, dims, **kwargs):
       contracting_dims, batch_dims = dims
       assert batch_dims == ((), ()), "Batch dimensions must be empty for TransformerEngine dot."
 
       quantizer_set = generate_quantizer_set()
-      return te.dense.dense(
+      return transformer_engine.jax.dense.dense(
           x,
           kernel,
           contracting_dims=contracting_dims,

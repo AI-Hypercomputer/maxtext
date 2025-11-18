@@ -569,15 +569,17 @@ hf_eval_files: ''
 hf_access_token: ''
 # for Grain input pipeline (dataset_type=grain)
 # Path to grain data files. Can be a single pattern or multiple patterns with weights.
-# For multiple patterns, use semicolon (;) to separate and colon (:) to specify weights.
-# Example: "path/to/data1.array_record*:0.3;path/to/data2.array_record*:0.7"
+# For multiple patterns, use semicolon (;) to separate and comma (,) to specify weights.
+# Example: "path/to/data1.array_record*,0.3;path/to/data2.array_record*,0.7"
 # Note: When using multiple files (separated by ';'), only ArrayRecord format is supported.
-# For more details, see https://github.com/google/maxtext/blob/main/getting_started/Data_Input_Pipeline.md#grain-input-pipeline
+# For more details, see https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/guides/data_input_pipeline/data_input_grain.md
 grain_train_files: ''
 grain_eval_files: ''
 grain_file_type: 'arrayrecord' # arrayrecord or parquet
 grain_worker_count: 1
+grain_per_worker_buffer_size: 1
 grain_worker_count_eval: 1
+grain_per_worker_buffer_size_eval: 1
 # for using pathways
 colocated_python_data_input: False  # experimental feature, under testing
 
@@ -894,6 +896,13 @@ rope_theta_for_vit: 10000
 vision_output_dim_for_vit: 4096
 pixel_shuffle_ratio_for_vit: 0.5
 projector_dropout_for_vit: 0.0
+
+# Qwen3-OmniMoe vision encoder
+spatial_merge_size_for_vit: 2
+out_hidden_size_for_vit: 512
+temporal_patch_size_for_vit: 2
+num_position_embeddings_for_vit: 1024
+deepstack_visual_indexes_for_vit: []
 
 # Subslice shape in the form of "x,y,z" when using pathways (single controller). 
 # Example: "8,8" to use a 8x8 subgrid (64 chips) of a full pod (16x16) of trillium.

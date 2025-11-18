@@ -671,6 +671,7 @@ class MLA(Attention):
       slot: Optional[int] = None,
       page_state: Optional[page_manager.PageState] = None,
       bidirectional_mask: Optional[Any] = None,
+      rope_kwargs: dict | None = None,
   ) -> Array:
     """Forward pass for MLA, reusing `AttentionOp` for the actual attention.
 

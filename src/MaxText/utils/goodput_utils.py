@@ -34,13 +34,14 @@ class GoodputEvent(Enum):
   STEP = "step"
 
 
+@contextlib.contextmanager
 def maybe_monitor_goodput(config):
-  """Monitor goodput if `monitor_goodput=True`."""
-  if config.monitor_goodput and jax.process_index() == 0:
-    # Workload monitoring and Goodput monitoring both uses /workload/performance
-    # GCM metric to publish step_time and step_deviation metrics. For now, we
-    # will disable publishing step deviation metrics to GCM if workload
-    # monitoring is enabled. Will reconcile this in the future.
+  """Monitor cumulative goodput if enabled."""
+  if not config.monitor_goodput or jax.process_index() != 0:
+    yield
+    return
+  goodput_monitor = None
+  try:
     if config.report_performance_metric_for_gcp_monitoring:
       config.enable_gcp_step_deviation_metrics = False
 
@@ -62,10 +63,11 @@ def maybe_monitor_goodput(config):
     )
     goodput_monitor.start_goodput_uploader()
     max_logging.log("Started Goodput upload to Tensorboard & GCM in the background!")
-
-    if config.monitor_step_time_deviation:
-      goodput_monitor.start_step_deviation_uploader()
-      max_logging.log("Started step time deviation upload to Tensorboard & GCM in the background!")
+    yield
+  finally:
+    if goodput_monitor:
+      goodput_monitor.stop_goodput_uploader()
+      max_logging.log("Flushed final metrics and safe exited from Goodput monitoring.")
 
 
 @contextlib.contextmanager
@@ -75,9 +77,13 @@ def maybe_record_goodput(recorder, event_name, *args):
     start_event_name = f"record_{event_name.value}_start_time"
     record_goodput(recorder, start_event_name, *args)
     yield
-  finally:
+  except BaseException:  # pylint: disable=W0706
+    raise
+  else:
     end_event_name = f"record_{event_name.value}_end_time"
     record_goodput(recorder, end_event_name, *args)
+  finally:
+    pass
 
 
 def record_goodput(recorder, event_name, *args):

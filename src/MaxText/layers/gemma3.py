@@ -438,7 +438,6 @@ class Encoder1DBlock(nnx.Module):
         use_qk_norm=False,
         query_pre_attn_scalar=1 / (self.config.hidden_size_for_vit // self.config.num_attention_heads_for_vit) ** 0.5,
         model_mode="train",
-        is_vision=True,
         rngs=self.rngs,
     )
     self.LayerNorm_1 = nnx.LayerNorm(

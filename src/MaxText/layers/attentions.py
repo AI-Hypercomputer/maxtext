@@ -16,7 +16,7 @@
 
 import dataclasses
 import functools
-from typing import Any, Iterable, Optional, Tuple, Union
+from typing import Any, Iterable, Optional, Tuple, Union, cast
 
 from jax.ad_checkpoint import checkpoint_name
 from jax.sharding import Mesh, NamedSharding
@@ -63,6 +63,7 @@ from MaxText.layers.attention_op import AttentionOp
 from MaxText.layers.embeddings import (
     LLaMARotaryEmbedding,
     LlamaVisionRotaryEmbedding,
+    Qwen3OmniMoeVisionRotaryEmbedding,
     RotaryEmbedding,
     YarnRotaryEmbedding,
     Qwen3NextRotaryEmbedding,
@@ -720,15 +721,29 @@ class Attention(nnx.Module):
     rope_type = self.config.rope_type.lower()
     rope_use_scale = self.config.rope_use_scale
     if self.is_vision:
-      rotary_embedding = LlamaVisionRotaryEmbedding(
-          image_size=self.config.image_size_for_vit,
-          patch_size=self.config.patch_size_for_vit,
-          hidden_size=self.config.hidden_size_for_vit,
-          num_attention_heads=self.config.num_attention_heads_for_vit,
-          rope_theta=self.config.rope_theta_for_vit,
-          fprop_dtype=self.dtype,
-          rngs=self.rngs,
-      )
+      if self.config.model_name.startswith("qwen3-omni"):
+        rotary_embedding = Qwen3OmniMoeVisionRotaryEmbedding(
+            hidden_size=self.config.hidden_size_for_vit,
+            num_attention_heads=self.config.num_attention_heads_for_vit,
+            spatial_merge_size=self.config.spatial_merge_size_for_vit,
+            rope_theta=self.config.rope_theta_for_vit,
+            fprop_dtype=self.dtype,
+            rngs=self.rngs,
+        )
+      elif self.config.model_name.startswith("llama4"):
+        rotary_embedding = LlamaVisionRotaryEmbedding(
+            image_size=self.config.image_size_for_vit,
+            patch_size=self.config.patch_size_for_vit,
+            hidden_size=self.config.hidden_size_for_vit,
+            num_attention_heads=self.config.num_attention_heads_for_vit,
+            rope_theta=self.config.rope_theta_for_vit,
+            cast_as_fprop_dtype=True,
+            fprop_dtype=self.dtype,
+            rngs=self.rngs,
+        )
+      else:
+        raise ValueError(f"Unsupported model type for vision rotary embedding: {self.config.model_name}")
+
     elif self.config.model_name.startswith("llama3.1") or rope_type.startswith("llama3.1"):
       rotary_embedding = LLaMARotaryEmbedding(
           min_timescale=self.config.rope_min_timescale,
@@ -784,18 +799,28 @@ class Attention(nnx.Module):
       )
     return rotary_embedding
 
-  def apply_rotary_embedding(self, inputs: Array, inputs_positions: Optional[Array | None] = None):
+  def apply_rotary_embedding(
+      self, inputs: Array, inputs_positions: Optional[Array | None] = None, rope_kwargs: dict | None = None
+  ):
     """Applies rotary embeddings, handling different model types.
 
     Args:
       inputs: The input tensor to apply rotary embeddings to.
       inputs_positions: The positions of the inputs.
-      name: A name for the embedding layer.
+      rope_kwargs: A dictionary of keyword arguments for the rotary embedding.
 
     Returns:
       The input tensor with rotary embeddings applied.
     """
-    return self.rotary_embedding(inputs, inputs_positions)
+    if isinstance(self.rotary_embedding, Qwen3OmniMoeVisionRotaryEmbedding):
+      # For Qwen3OmniMoe vision, pass static dimensions from kwargs.
+      num_frames = rope_kwargs.get("num_frames")
+      height = rope_kwargs.get("height")
+      width = rope_kwargs.get("width")
+      # Type cast required: Omni rotary embedding uses different __call__ parameters than other embeddings.
+      return cast(Qwen3OmniMoeVisionRotaryEmbedding, self.rotary_embedding)(inputs, num_frames, height, width)
+    else:
+      return self.rotary_embedding(inputs, inputs_positions)
 
   def init_kv_caches(self, inputs_kv_shape: Tuple):
     """Initializes KVCache.
@@ -878,6 +903,7 @@ class Attention(nnx.Module):
       slot: Optional[int] = None,
       page_state: Optional[page_manager.PageState] = None,
       bidirectional_mask: Any = None,
+      rope_kwargs: dict | None = None,
   ):
     """Applies Attention on the input data.
 
@@ -952,8 +978,8 @@ class Attention(nnx.Module):
     use_qk_norm = self.use_qk_norm and use_rope
 
     if use_rope:
-      query = self.apply_rotary_embedding(query, inputs_positions=inputs_positions)
-      key = self.apply_rotary_embedding(key, inputs_positions=inputs_positions)
+      query = self.apply_rotary_embedding(query, inputs_positions=inputs_positions, rope_kwargs=rope_kwargs)
+      key = self.apply_rotary_embedding(key, inputs_positions=inputs_positions, rope_kwargs=rope_kwargs)
 
     if use_qk_norm and is_llama4_decoder_block:
       l2_norm = L2Norm(eps=self.config.normalization_layer_epsilon)
