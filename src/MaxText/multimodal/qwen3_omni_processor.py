@@ -478,7 +478,7 @@ def power_to_db(
       raise ValueError("db_range must be greater than zero")
     spectrogram_array = np.clip(spectrogram_array, a_min=spectrogram_array.max() - db_range, a_max=None)
 
-  return spectrogram
+  return spectrogram_array
 
 
 def spectrogram(
