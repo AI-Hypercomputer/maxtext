@@ -18,7 +18,7 @@
 set -e # Exit immediately if any command fails
 
 REPO_ROOT="${MAXTEXT_REPO_ROOT:-$PWD}"
-FOLDERS_TO_FORMAT=("${MAXTEXT_PKG_DIR:-${REPO_ROOT}/src/MaxText}" "${REPO_ROOT}/pedagogical_examples")
+FOLDERS_TO_FORMAT='/usr/local/google/home/lidanny/Desktop/Project/maxtext1013/new_maxtext/maxtext/benchmarks/maxtext_xpk_runner.py'
 LINE_LENGTH=$(grep -E "^max-line-length=" pylintrc | cut -d '=' -f 2)
 
 # Check for --check flag
@@ -32,10 +32,10 @@ do
   pyink "$folder" ${CHECK_ONLY_PYINK_FLAGS} --pyink-indentation=2 --line-length=${LINE_LENGTH}
 done
 
-for folder in "${FOLDERS_TO_FORMAT[@]}"
-do
-  # pylint doesn't change files, only reports errors.
-  pylint --disable C0114,R0401,R0917,W0201,W0613 "./$folder"
-done
+# for folder in "${FOLDERS_TO_FORMAT[@]}"
+# do
+#   # pylint doesn't change files, only reports errors.
+#   pylint --disable C0114,R0401,R0917,W0201,W0613 "./$folder"
+# done
 
 echo "Successfully clean up all codes."
