@@ -61,6 +61,10 @@ class MatmulPrecision(str, Enum):
   DEFAULT = "default"
   HIGH = "high"
   HIGHEST = "highest"
+  # same as default
+  BFLOAT16 = "bfloat16"
+  # same as highest
+  FLOAT32 = "float32"
 
 
 class QuantizationType(str, Enum):
