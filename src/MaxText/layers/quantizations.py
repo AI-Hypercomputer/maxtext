@@ -520,6 +520,8 @@ def _get_quant_config(config):
     return _get_aqt_fp8_quant_config(config)
   if config.quantization == "aqt_fp8_full":
     return _get_aqt_fp8_default_config(config)
+  if config.quantization == "fp8_full":
+    return _get_aqt_fp8_default_config(config)
   if config.quantization.startswith("te_"):
     return config.quantization
 
