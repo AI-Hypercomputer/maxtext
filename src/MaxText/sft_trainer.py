@@ -139,7 +139,11 @@ def train_loop(config, recorder, state=None):
 
       metric_logger.buffer_and_write_train_metrics(metrics, step, step_time_delta)
 
-    checkpointing.maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator)
+    if config.save_checkpoint_on_completion:
+      checkpointing.maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator)
+    elif checkpoint_manager is not None:
+      # in case the last checkpoint_period checkpoint is still in progress
+      checkpoint_manager.wait_until_finished()
   except exceptions.StopTraining as e:
     max_logging.log(f"Training stopped: {str(e)}")
   finally:
@@ -164,9 +168,8 @@ def main(argv: Sequence[str]) -> None:
   validate_train_config(config)
   os.environ["TFDS_DATA_DIR"] = config.dataset_path
 
-  maybe_monitor_goodput(config)
   recorder = create_goodput_recorder(config)
-  with maybe_record_goodput(recorder, GoodputEvent.JOB):
+  with maybe_record_goodput(recorder, GoodputEvent.JOB), maybe_monitor_goodput(config):
     train_loop(config, recorder)
 
 

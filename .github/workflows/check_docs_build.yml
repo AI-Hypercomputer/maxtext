@@ -24,7 +24,7 @@ jobs:
           cache: 'pip' # caching pip dependencies
 
       - name: Install dependencies
-        run: pip install -r requirements_docs.txt
+        run: pip install -r dependencies/requirements/requirements_docs.txt
 
       - name: Build documentation
         run: |

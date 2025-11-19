@@ -157,6 +157,7 @@ class Gemma3DecoderLayer(nnx.Module):
         config=config,
         quant=self.quant,
         model_mode=model_mode,
+        mesh=mesh,
         rngs=self.rngs,
     )
 
@@ -188,6 +189,8 @@ class Gemma3DecoderLayer(nnx.Module):
       page_state=None,
       slot=None,
       bidirectional_mask=None,
+      kv_cache=None,
+      attention_metadata=None,
   ):
     cfg = self.config
     inputs = nn.with_logical_constraint(inputs, self.activation_axis_names)
@@ -197,7 +200,7 @@ class Gemma3DecoderLayer(nnx.Module):
     lnx = nn.with_logical_constraint(lnx, self.activation_axis_names)
 
     # Self-attention block
-    attention_lnx = self.self_attention(
+    attention_lnx, kv_cache = self.self_attention(
         lnx,
         lnx,
         decoder_positions,
@@ -205,6 +208,8 @@ class Gemma3DecoderLayer(nnx.Module):
         deterministic=deterministic,
         model_mode=model_mode,
         bidirectional_mask=bidirectional_mask,
+        kv_cache=kv_cache,
+        attention_metadata=attention_metadata,
     )
     if cfg.use_post_attn_norm:
       attention_lnx = self.post_self_attention_norm(attention_lnx)
@@ -239,7 +244,7 @@ class Gemma3DecoderLayer(nnx.Module):
     if cfg.scan_layers:
       return layer_output, None
     else:
-      return layer_output
+      return layer_output, kv_cache
 
 
 Gemma3DecoderLayerToLinen = nnx_wrappers.to_linen_class(
@@ -437,7 +442,6 @@ class Encoder1DBlock(nnx.Module):
         use_qk_norm=False,
         query_pre_attn_scalar=1 / (self.config.hidden_size_for_vit // self.config.num_attention_heads_for_vit) ** 0.5,
         model_mode="train",
-        is_vision=True,
         rngs=self.rngs,
     )
     self.LayerNorm_1 = nnx.LayerNorm(

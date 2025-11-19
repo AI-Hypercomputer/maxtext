@@ -34,7 +34,7 @@ from tunix.sft.hooks import DataHooks, TrainingHooks
 from MaxText import exceptions
 from MaxText import max_logging
 from MaxText import max_utils
-from MaxText import maxtext_utils
+from MaxText import sharding
 from MaxText.data_loader import DataLoader
 from MaxText.input_pipeline.input_pipeline_interface import create_data_iterator
 from MaxText.metric_logger import MetricLogger, MetadataKey
@@ -61,7 +61,7 @@ class SFTTrainingHooks(TrainingHooks):
     params = state.filter(nnx.Param)
 
     if not self.config.using_pipeline_parallelism:
-      maxtext_utils.assert_params_sufficiently_sharded(params, self.mesh, self.config.sharding_tolerance)
+      sharding.assert_params_sufficiently_sharded(params, self.mesh, self.config.sharding_tolerance)
 
     self.metric_logger.write_setup_info_to_tensorboard(params)
     if MetadataKey.PER_DEVICE_TFLOPS in self.metric_logger.metadata:

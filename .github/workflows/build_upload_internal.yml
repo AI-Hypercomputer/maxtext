@@ -59,7 +59,7 @@ jobs:
         with:
           push: true
           context: .
-          file: ./maxtext_jax_ai_image.Dockerfile
+          file: ./dependencies/dockerfiles/maxtext_jax_ai_image.Dockerfile
           tags: gcr.io/tpu-prod-env-multipod/maxtext_${{ github.run_id }}:${{ inputs.device_type }}
           provenance: false
           build-args: |

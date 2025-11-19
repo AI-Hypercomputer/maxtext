@@ -26,8 +26,8 @@ classifiers = [
 dependencies = []
 
 [tool.hatch.metadata.hooks.requirements_txt.optional-dependencies]
-tpu = ["generated_requirements/tpu-requirements.txt"]
-cuda12 = ["generated_requirements/cuda12-requirements.txt"]
+tpu = ["dependencies/requirements/generated_requirements/tpu-requirements.txt"]
+cuda12 = ["dependencies/requirements/generated_requirements/cuda12-requirements.txt"]
 
 [project.urls]
 Repository = "https://github.com/AI-Hypercomputer/maxtext.git"
@@ -38,6 +38,9 @@ allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/MaxText", "src/install_maxtext_extra_deps"]
+
+[tool.hatch.build.targets.wheel.hooks.custom]
+path = "build_hooks.py"
 
 [project.scripts]
 install_maxtext_github_deps = "install_maxtext_extra_deps.install_github_deps:main"

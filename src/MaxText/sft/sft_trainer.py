@@ -46,7 +46,7 @@ from flax.linen import partitioning as nn_partitioning
 
 from orbax import checkpoint as ocp
 
-from tunix.sft import peft_trainer, profiler
+from tunix.sft import metrics_logger, peft_trainer, profiler
 
 from MaxText import max_utils
 from MaxText import max_logging
@@ -80,13 +80,14 @@ def get_tunix_config(mt_config):
   )
 
   # Metrics configurations
-  metrics_logging_options = peft_trainer.metrics_logger.MetricsLoggerOptions(log_dir=mt_config.tensorboard_dir)
+  metrics_logging_options = metrics_logger.MetricsLoggerOptions(log_dir=mt_config.tensorboard_dir)
 
   # Profiler configurations
   profiler_options = None
   if mt_config.profiler:
     set_profile_options = True
-    if jax.extend.backend.get_backend().platform_version == "Pathways":
+    platform_version = jax.extend.backend.get_backend().platform_version.strip()
+    if platform_version.startswith("Pathways"):
       max_logging.log("Pathways backend detected. Disabling setting profile options.")
       set_profile_options = False
     profiler_options = profiler.ProfilerOptions(
@@ -136,13 +137,8 @@ def use_maxtext_loss_function(trainer, mt_config):
   return trainer
 
 
-def train(mt_config, goodput_recorder=None):
-  """Runs the SFT training loop.
-
-  Args:
-    mt_config: MaxText config.
-    goodput_recorder: An optional GoodputRecorder to record performance metrics.
-  """
+def setup_trainer_state(mt_config, goodput_recorder=None):
+  """Set up prerequisites for training loop."""
   tunix_config = get_tunix_config(mt_config)
 
   with maybe_record_goodput(goodput_recorder, GoodputEvent.TPU_INIT):
@@ -159,9 +155,25 @@ def train(mt_config, goodput_recorder=None):
     trainer.with_data_hooks(data_hooks)
     trainer = use_maxtext_loss_function(trainer, mt_config)
 
-  with mesh, nn_partitioning.axis_rules(mt_config.logical_axis_rules):
-    trainer.train(data_hooks.train_data_iterator, data_hooks.eval_data_iterator)
+  return trainer, mesh
 
+
+def train_model(mt_config, trainer, mesh):
+  """Runs the SFT training loop in Tunix."""
+  with mesh, nn_partitioning.axis_rules(mt_config.logical_axis_rules):
+    trainer.train(trainer.data_hooks.train_data_iterator, trainer.data_hooks.eval_data_iterator)
+  return trainer
+
+
+def train(mt_config, goodput_recorder=None):
+  """Main method for SFT training.
+
+  Args:
+    mt_config: MaxText config.
+    goodput_recorder: An optional GoodputRecorder to record performance metrics.
+  """
+  trainer, mesh = setup_trainer_state(mt_config, goodput_recorder)
+  trainer = train_model(mt_config, trainer, mesh)
   return trainer, mesh
 
 
@@ -182,10 +194,9 @@ def main(argv: Sequence[str]) -> None:
   mt_config = pyconfig.initialize(argv)
   max_utils.print_system_information()
 
-  maybe_monitor_goodput(mt_config)
   goodput_recorder = create_goodput_recorder(mt_config)
 
-  with maybe_record_goodput(goodput_recorder, GoodputEvent.JOB):
+  with maybe_record_goodput(goodput_recorder, GoodputEvent.JOB), maybe_monitor_goodput(mt_config):
     train(mt_config, goodput_recorder)
 
 

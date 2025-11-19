@@ -58,6 +58,8 @@ class DeepSeekGenericLayer(nn.Module):
       previous_chunk=None,
       page_state: None | page_manager.PageState = None,
       slot: None | int = None,
+      kv_cache=None,
+      attention_metadata=None,
   ):
     x = self.with_logical_constraint(inputs)
     x = jax.ad_checkpoint.checkpoint_name(x, "decoder_layer_input")
@@ -74,7 +76,7 @@ class DeepSeekGenericLayer(nn.Module):
 
     x += self.mlp(self.post_attention_norm(x), deterministic)
     x = self.dropout(x, deterministic)
-    return self.post_process(x)
+    return self.post_process(x, kv_cache)
 
   def setup(self):
     self.pre_attention_norm_op = self.rms_norm_layer("pre_attention_layer_norm")
@@ -177,7 +179,7 @@ class DeepSeekGenericLayer(nn.Module):
             previous_chunk=previous_chunk,
             page_state=page_state,
             slot=slot,
-        )
+        )[0]
     )
 
   def mlp_layer(self):
@@ -194,7 +196,7 @@ class DeepSeekGenericLayer(nn.Module):
         self.dropout_op(x, deterministic=deterministic)
     )
 
-  def post_process(self, x):
+  def post_process(self, x, kv_cache=None):
     """Collect statistics about the output of the layer."""
     if self.config.record_internal_nn_metrics:
       self.sow("intermediates", "activation_mean", jnp.mean(x))
@@ -208,7 +210,7 @@ class DeepSeekGenericLayer(nn.Module):
     if self.config.scan_layers:
       return x, None
     else:
-      return x
+      return x, kv_cache
 
 
 class DeepSeekDenseLayer(DeepSeekGenericLayer):
@@ -225,6 +227,7 @@ class DeepSeekDenseLayer(DeepSeekGenericLayer):
         name="mlp",
         config=self.config,
         quant=self.quant,
+        mesh=self.mesh,
     )
 
   def mlp(self, x, deterministic):
@@ -244,6 +247,8 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
       previous_chunk=None,
       page_state: None | page_manager.PageState = None,
       slot: None | int = None,
+      kv_cache=None,
+      attention_metadata=None,
       split_factor: int = 2,
   ):
     x = self.with_logical_constraint(inputs)
@@ -288,7 +293,7 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
     x = _merge(x)
 
     x = self.dropout(x, deterministic)
-    return self.post_process(x)
+    return self.post_process(x, kv_cache)
 
   def init(self, *args, **kwargs):
     # Calls the parent init method for testing parity.

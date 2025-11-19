@@ -16,7 +16,7 @@
 # pylint: disable=arguments-differ
 # pylint: disable=no-name-in-module
 
-from typing import cast
+from typing import Any, cast
 
 import jax
 import jax.nn
@@ -26,21 +26,21 @@ import jax.numpy as jnp
 
 from flax import linen as nn
 from flax import nnx
-from flax.linen import initializers as linen_initializers
 
 from MaxText import max_utils
-from MaxText.common_types import Config, DType, Array
+from MaxText.common_types import AttentionType, Config, DType, Array, BATCH, LENGTH_NO_EXP, EMBED
 from MaxText.layers import attentions
 from MaxText.layers import initializers as max_initializers
 from MaxText.layers import linears
 from MaxText.layers import moe
 from MaxText.layers import nnx_wrappers
 from MaxText.layers import quantizations
-from MaxText.layers.normalizations import RMSNorm, l2norm
+from MaxText.layers.embeddings import Qwen3OmniMoeVisionPosEmbedInterpolate
+from MaxText.layers.normalizations import RMSNorm, l2norm, Qwen3NextRMSNorm, Qwen3NextRMSNormGated
 from MaxText.layers.quantizations import AqtQuantization as Quant
 from MaxText.inference import page_manager
 from MaxText.layers.attentions import Attention
-from MaxText.layers.linears import MlpBlock
+from MaxText.layers.linears import DenseGeneral, MlpBlock
 from MaxText.layers.moe import RoutedMoE
 
 
@@ -282,88 +282,6 @@ def jax_chunk_gated_delta_rule(
   return core_attn_out, final_state if output_final_state else None
 
 
-class Qwen3NextRMSNorm(nnx.Module):
-  """
-  Used for input and post attention layernorms
-  in Qwen3NextDecoderLayer.
-
-  This normalization layer is specific to Qwen3-Next. Key characteristics:
-  1.  The learnable scale parameter `weight` is initialized to ZEROS.
-  2.  The scale is applied as `(1.0 + self.weight)`, making the initial scale effectively 1.0.
-      This matches the PyTorch implementation of Qwen3NextRMSNorm.
-  3.  It is NOT a zero-centered normalization (as in the blog); it still uses the root mean square of the inputs.
-      The standard `MaxText.layers.normalizations.RMSNorm` also does not center the data.
-  4.  This differs from the standard MaxText `RMSNorm`
-      (MaxText.layers.normalizations.RMSNorm) which initializes its scale to ONES
-      and applies it multiplicatively (`y * scale`).
-  """
-
-  def __init__(self, num_features: int, eps: float, dtype: DType, weight_dtype: DType, *, rngs: nnx.Rngs):
-    self.num_features = num_features
-    self.eps = eps
-    self.dtype = dtype
-    self.weight_dtype = weight_dtype
-
-    self.weight = nnx.Param(linen_initializers.zeros(rngs.params(), (self.num_features,), self.weight_dtype))
-
-  def __call__(self, x: Array) -> Array:
-    """Applies RMSNorm to the input tensor."""
-    weight = self.weight.value
-    x_dtype = x.dtype
-    x = x.astype(jnp.float32)
-    variance = jnp.mean(jnp.square(x), axis=-1, keepdims=True)
-    x = x * jax.lax.rsqrt(variance + self.eps)
-    # Add 1.0 to the learnable weight
-    x = x * (1.0 + weight.astype(jnp.float32))
-    return x.astype(x_dtype)
-
-
-class Qwen3NextRMSNormGated(nnx.Module):
-  """
-  This applies RMS Normalization and then a gated activation function (SiLU).
-  This is used within the Qwen3NextGatedDeltaNet.
-
-  Attributes:
-    num_features: The number of features in the input.
-    eps: A small epsilon value to prevent division by zero in RMSNorm.
-    dtype: The datatype of the computation.
-    weight_dtype: The datatype of the weights.
-  """
-
-  def __init__(self, num_features: int, eps: float, dtype: DType, weight_dtype: DType, *, rngs: nnx.Rngs):
-    self.num_features = num_features
-    self.eps = eps
-    self.dtype = dtype
-    self.weight_dtype = weight_dtype
-
-    self.weight = nnx.Param(nnx.initializers.ones(rngs.params(), (self.num_features,), self.weight_dtype))
-
-  def __call__(self, hidden_states: Array, gate: Array) -> Array:
-    """
-    Applies RMSNorm and then a SiLU gate.
-
-    Args:
-      hidden_states: The input array to be normalized (o). Shape: (..., F)
-      gate: The gating array for the activation (z). Shape: (..., F)
-            where F is num_features.
-
-    Returns:
-      The normalized and gated output array. Shape: (..., F)
-    """
-    weight = self.weight.value
-
-    # RMS Normalization logic
-    hidden_states_f32 = hidden_states.astype(jnp.float32)
-    variance = jnp.mean(jnp.square(hidden_states_f32), axis=-1, keepdims=True)
-    normalized_states = hidden_states_f32 * jax.lax.rsqrt(variance + self.eps)
-    normalized_states = normalized_states * weight.astype(jnp.float32)
-
-    # Gated Activation using SiLU (Sigmoid-weighted Linear Unit)
-    gated_states = normalized_states * jax.nn.silu(gate.astype(jnp.float32))
-
-    return gated_states.astype(self.dtype)
-
-
 class Qwen3NextGatedDeltaNet(nnx.Module):
   """
   This module implements the full end-to-end logic of a Gated Delta Network layer.
@@ -551,7 +469,31 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
 
 
 class Qwen3NextFullAttention(nnx.Module):
-  """Placeholder for Qwen3-Next full attention."""
+  """Qwen3-Next Full Attention Layer.
+
+  This module implements the full self-attention mechanism as used in
+  Qwen3-Next models for layers that do not use the Gated Delta Network.
+  It wraps the main `attentions.Attention` class, which handles the core attention operation,
+  including the query, key, value, and output projections.
+
+  Qwen3 Next Attention differs from standard attention by the following features:
+    - Query and Gate splitting from a single q projection.
+    - Application of a sigmoid gate to the attention output.
+    - Usage of `Qwen3NextRMSNorm` for query and key normalization.
+    - Usage of `Qwen3NextRotaryEmbedding` for partial rotary position embeddings.
+      - Partial ROPE is applied to the first 25% of head dimensions
+
+  Attributes:
+    config: MaxText configuration object.
+    mesh: The device mesh for sharding.
+    model_mode: The operational mode (e.g., 'train', 'prefill').
+    layer_idx: The index of the current layer.
+    quant: Optional quantization configuration.
+    attention: An instance of `attentions.Attention` which contains the
+      learnable parameters for query, key, value, and output projections
+      (e.g., `attention.query`, `attention.key`, etc.), and performs
+      the attention calculation.
+  """
 
   def __init__(
       self, config: Config, mesh: Mesh, model_mode: str, layer_idx: int, quant: None | Quant = None, *, rngs: nnx.Rngs
@@ -563,25 +505,11 @@ class Qwen3NextFullAttention(nnx.Module):
     self.quant = quant
     cfg = self.config
 
-    # TODO(rbierneni): Implement the actual Qwen3NextAttention logic.
-    # This is a placeholder. The actual Qwen3NextAttention in the PyTorch code has:
-    # 1.  q_proj projection: hidden_size -> num_attention_heads * head_dim * 2.
-    #     This output is chunked to get query_states and a 'gate'.
-    # 2.  Qwen3NextRMSNorm (self.q_norm and self.k_norm) is applied to query_states
-    #     and key_states *before* RoPE. These norms are on the head_dim.
-    # 3.  The final attention output is gated: attn_output = attn_output * torch.sigmoid(gate).
-    # 4.  k_proj and v_proj are standard Linear layers to num_key_value_heads * head_dim.
-    # 5.  RoPE is applied to the normed query and key.
-    # 6.  The o_proj maps from num_attention_heads * head_dim back to hidden_size.
+    scaling_factor = self.config.head_dim**-0.5
 
-    # Placeholder call to standard MaxText attention
-    # NOTE: This will NOT match the Qwen3Next behavior or weights.
-
-    # Get mode-specific batch size and sequence length for shape
-    batch_size, seq_len = max_utils.get_batch_seq_len_for_mode(cfg, model_mode)
-    inputs_shape = (batch_size, seq_len, cfg.emb_dim)
-
-    self.attention_layer = attentions.Attention(
+    inputs_q_shape = (cfg.per_device_batch_size, cfg.max_target_length, cfg.emb_dim)
+    inputs_kv_shape = (cfg.per_device_batch_size, cfg.max_target_length, cfg.emb_dim)
+    self.attention = attentions.Attention(
         config=cfg,
         num_query_heads=cfg.num_query_heads,
         num_kv_heads=cfg.num_kv_heads,
@@ -589,8 +517,9 @@ class Qwen3NextFullAttention(nnx.Module):
         max_target_length=cfg.max_target_length,
         max_prefill_predict_length=cfg.max_prefill_predict_length,
         attention_kernel=cfg.attention,
-        inputs_q_shape=inputs_shape,
-        inputs_kv_shape=inputs_shape,
+        inputs_q_shape=inputs_q_shape,
+        inputs_kv_shape=inputs_kv_shape,
+        out_axis_names=(BATCH, LENGTH_NO_EXP, EMBED),
         mesh=self.mesh,
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
@@ -598,7 +527,8 @@ class Qwen3NextFullAttention(nnx.Module):
         name="self_attention",
         quant=self.quant,
         kv_quant=quantizations.configure_kv_quant(cfg),
-        use_qk_norm=False,
+        use_qk_norm=cfg.use_qk_norm,
+        query_pre_attn_scalar=scaling_factor,
         model_mode=model_mode,
         rngs=rngs,
     )
@@ -610,19 +540,20 @@ class Qwen3NextFullAttention(nnx.Module):
       decoder_positions: None | jnp.ndarray,
       deterministic: bool,
       model_mode: str,
-      # TODO(parambole): Add cache arguments
+      kv_cache: None | jnp.ndarray = None,
+      attention_metadata: None | dict[str, Any] = None,
   ):
-
-    # TODO(parambole): Add caching in/out
-    attention_output = self.attention_layer(
-        inputs,
-        inputs,
-        decoder_positions,
+    attention_output, kv_cache = self.attention(
+        inputs_q=inputs,
+        inputs_kv=inputs,
+        inputs_positions=decoder_positions,
         decoder_segment_ids=decoder_segment_ids,
         deterministic=deterministic,
         model_mode=model_mode,
+        kv_cache=kv_cache,
+        attention_metadata=attention_metadata,
     )
-    return attention_output
+    return attention_output, kv_cache
 
 
 class Qwen3NextSparseMoeBlock(nnx.Module):
@@ -662,6 +593,7 @@ class Qwen3NextSparseMoeBlock(nnx.Module):
     # 2. Instantiate and apply the shared expert.
     self.shared_expert = linears.MlpBlock(
         config=cfg,
+        mesh=mesh,
         in_features=cfg.emb_dim,
         intermediate_dim=cfg.moe_mlp_dim,
         activations=cfg.mlp_activations,
@@ -867,6 +799,8 @@ class Qwen3NextDecoderLayer(nnx.Module):
       previous_chunk=None,
       page_state: None | page_manager.PageState = None,
       slot: None | int = None,
+      kv_cache: None | jnp.ndarray = None,
+      attention_metadata: None | dict[str, Any] = None,
   ):
     residual = inputs
 
@@ -876,12 +810,14 @@ class Qwen3NextDecoderLayer(nnx.Module):
 
     # Conditionally apply either the Linear Attention or Full Attention block.
     if isinstance(self.attention, Qwen3NextFullAttention):
-      attention_output = cast(Qwen3NextFullAttention, self.attention)(
+      attention_output, kv_cache = cast(Qwen3NextFullAttention, self.attention)(
           hidden_states,
           decoder_segment_ids,
           decoder_positions,
           deterministic,
           model_mode,
+          kv_cache=kv_cache,
+          attention_metadata=attention_metadata,
       )
     elif isinstance(self.attention, Qwen3NextGatedDeltaNet):
       attention_output = cast(Qwen3NextGatedDeltaNet, self.attention)(hidden_states)
@@ -914,7 +850,7 @@ class Qwen3NextDecoderLayer(nnx.Module):
         self.activation_axis_names,
     )
 
-    return layer_output
+    return layer_output, kv_cache
 
 
 # -----------------------------------------
@@ -994,6 +930,8 @@ class AttentionWithNorm(nnx.Module):
       decoder_positions: None | jnp.ndarray,
       deterministic: bool,
       model_mode: str,
+      kv_cache: None | jnp.ndarray = None,
+      attention_metadata: None | dict[str, Any] = None,
   ):
     """Applies self-attention with pre and post-layer normalization."""
     inputs = nn.with_logical_constraint(inputs, self.activation_axis_names)
@@ -1002,13 +940,15 @@ class AttentionWithNorm(nnx.Module):
     lnx = self.pre_self_attention_layer_norm(inputs)
     lnx = nn.with_logical_constraint(lnx, self.activation_axis_names)
     # Self attention
-    attention_lnx = self.self_attention(
+    attention_lnx, kv_cache = self.self_attention(
         lnx,
         lnx,
         decoder_positions,
         decoder_segment_ids=decoder_segment_ids,
         deterministic=deterministic,
         model_mode=model_mode,
+        kv_cache=kv_cache,
+        attention_metadata=attention_metadata,
     )
     attention_lnx = nn.with_logical_constraint(attention_lnx, self.activation_axis_names)
     # Residual connection after attention
@@ -1016,7 +956,7 @@ class AttentionWithNorm(nnx.Module):
     # Post attention norm
     hidden_states = self.post_self_attention_layer_norm(intermediate_inputs)
     hidden_states = nn.with_logical_constraint(hidden_states, self.activation_axis_names)
-    return hidden_states, intermediate_inputs
+    return hidden_states, intermediate_inputs, kv_cache
 
 
 # -----------------------------------------
@@ -1042,6 +982,7 @@ class Qwen3DecoderLayer(AttentionWithNorm):
         dtype=config.dtype,
         weight_dtype=config.weight_dtype,
         config=config,
+        mesh=mesh,
         quant=quant,
         model_mode=model_mode,
         rngs=rngs,
@@ -1057,9 +998,17 @@ class Qwen3DecoderLayer(AttentionWithNorm):
       previous_chunk=None,
       page_state: None | page_manager.PageState = None,
       slot: None | int = None,
+      kv_cache: None | jnp.ndarray = None,
+      attention_metadata: None | dict[str, Any] = None,
   ):
-    hidden_states, intermediate_inputs = self.apply_attention_with_norm(
-        inputs, decoder_segment_ids, decoder_positions, deterministic, model_mode
+    hidden_states, intermediate_inputs, kv_cache = self.apply_attention_with_norm(
+        inputs,
+        decoder_segment_ids,
+        decoder_positions,
+        deterministic,
+        model_mode,
+        kv_cache=kv_cache,
+        attention_metadata=attention_metadata,
     )
 
     mlp_lnx = self.mlp(hidden_states, deterministic=deterministic)
@@ -1071,7 +1020,7 @@ class Qwen3DecoderLayer(AttentionWithNorm):
     if self.config.scan_layers:
       return layer_output, None
     else:
-      return layer_output
+      return layer_output, kv_cache
 
 
 # -----------------------------------------
@@ -1113,9 +1062,17 @@ class Qwen3MoeDecoderLayer(AttentionWithNorm):
       previous_chunk=None,
       page_state: None | page_manager.PageState = None,
       slot: None | int = None,
+      kv_cache: None | jnp.ndarray = None,
+      attention_metadata: None | dict[str, Any] = None,
   ):
-    hidden_states, intermediate_inputs = self.apply_attention_with_norm(
-        inputs, decoder_segment_ids, decoder_positions, deterministic, model_mode
+    hidden_states, intermediate_inputs, kv_cache = self.apply_attention_with_norm(
+        inputs,
+        decoder_segment_ids,
+        decoder_positions,
+        deterministic,
+        model_mode,
+        kv_cache=kv_cache,
+        attention_metadata=attention_metadata,
     )
 
     mlp_lnx, load_balance_loss = self.moe_block(hidden_states)
@@ -1129,8 +1086,596 @@ class Qwen3MoeDecoderLayer(AttentionWithNorm):
     if self.config.scan_layers:
       return layer_output, None
     else:
-      return layer_output
+      return layer_output, kv_cache
 
+
+class Qwen3OmniMoeVisionPatchMerger(nnx.Module):
+  """Vision patch merger that spatially merges patches using an MLP.
+
+  Attributes:
+      config: Config containing model parameters
+      hidden_size: Hidden dimension after spatial merging
+      use_postshuffle_norm: Whether to apply normalization after spatial shuffle
+      dtype: Data type for computation
+      weight_dtype: Data type for weights
+      kernel_init: Initializer for kernel weights
+      rngs: RNG state for initialization
+      ln_q: LayerNorm before MLP
+      mlp_0: First MLP layer
+      mlp_2: Second MLP layer
+  """
+
+  def __init__(
+      self,
+      config: Config,
+      use_postshuffle_norm: bool = False,
+      dtype: DType = jnp.float32,
+      weight_dtype: DType = jnp.float32,
+      kernel_init: max_initializers.NdInitializer = max_initializers.nd_dense_init(1.0, "fan_in", "normal"),
+      rngs: nnx.Rngs = None,
+  ):
+    """Initializes the Qwen3Omni vision patch merger.
+
+    Args:
+        config: Config containing model parameters
+        use_postshuffle_norm: Whether to apply normalization after spatial shuffle
+        dtype: Data type for computation
+        weight_dtype: Data type for weights
+        kernel_init: Initializer for kernel weights
+        rngs: RNG state for initialization
+    """
+    self.config = config
+    self.use_postshuffle_norm = use_postshuffle_norm
+    self.dtype = dtype
+    self.weight_dtype = weight_dtype
+    self.kernel_init = kernel_init
+    self.rngs = rngs
+
+    # Calculate hidden_size after spatial merge
+    spatial_merge_size = config.spatial_merge_size_for_vit
+    base_hidden_size = config.hidden_size_for_vit
+    out_hidden_size = config.out_hidden_size_for_vit
+
+    self.hidden_size = base_hidden_size * (spatial_merge_size**2)
+
+    # LayerNorm before MLP
+    ln_features = self.hidden_size if use_postshuffle_norm else base_hidden_size
+    self.ln_q = nnx.LayerNorm(
+        num_features=ln_features,
+        epsilon=config.normalization_layer_epsilon,
+        dtype=dtype,
+        rngs=rngs,
+    )
+
+    # MLP layers: Linear -> GELU -> Linear
+    self.mlp_0 = DenseGeneral(
+        in_features_shape=self.hidden_size,
+        out_features_shape=self.hidden_size,
+        use_bias=True,
+        dtype=dtype,
+        weight_dtype=weight_dtype,
+        kernel_init=kernel_init,
+        matmul_precision=config.matmul_precision,
+        rngs=rngs,
+    )
+
+    self.mlp_2 = DenseGeneral(
+        in_features_shape=self.hidden_size,
+        out_features_shape=out_hidden_size,
+        use_bias=True,
+        dtype=dtype,
+        weight_dtype=weight_dtype,
+        kernel_init=kernel_init,
+        matmul_precision=config.matmul_precision,
+        rngs=rngs,
+    )
+
+  def __call__(self, hidden: Array) -> Array:
+    """
+    Args:
+        hidden: Input tensor of shape (batch, seq_len, base_hidden_size) after spatial reordering
+
+    Returns:
+        Output tensor of shape (batch, seq_len//merge_size**2, out_hidden_size) - spatially merged
+    """
+    # Get dimensions
+    spatial_merge_size = self.config.spatial_merge_size_for_vit
+    base_hidden_size = self.config.hidden_size_for_vit
+    tokens_per_block = spatial_merge_size**2
+
+    batch_size = hidden.shape[0]
+    seq_len = hidden.shape[1]
+    num_blocks = seq_len // tokens_per_block
+
+    hidden = hidden.reshape(batch_size, num_blocks, tokens_per_block * base_hidden_size)
+
+    # Apply layer norm
+    if self.use_postshuffle_norm:
+      hidden = self.ln_q(hidden)
+    else:
+      hidden_unmerged = hidden.reshape(batch_size, seq_len, base_hidden_size)
+      hidden_unmerged = self.ln_q(hidden_unmerged)
+      hidden = hidden_unmerged.reshape(batch_size, num_blocks, tokens_per_block * base_hidden_size)
+
+    # MLP: Linear -> GELU -> Linear
+    hidden = self.mlp_0(hidden)
+    hidden = jax.nn.gelu(hidden)
+    hidden = self.mlp_2(hidden)
+
+    return hidden
+
+
+class Qwen3OmniMoeVisionMLP(nnx.Module):
+  """Vision MLP block with GELU activation.
+
+  Attributes:
+      config: Config containing model parameters
+      hidden_size: Hidden dimension size
+      intermediate_size: Intermediate dimension size
+      dtype: Data type for computation
+      weight_dtype: Data type for weights
+      kernel_init: Initializer for kernel weights
+      rngs: RNG state for initialization
+      linear_fc1: First linear layer
+      linear_fc2: Second linear layer
+  """
+
+  def __init__(
+      self,
+      config: Config,
+      dtype: DType = jnp.float32,
+      weight_dtype: DType = jnp.float32,
+      kernel_init: max_initializers.NdInitializer = max_initializers.nd_dense_init(1.0, "fan_in", "normal"),
+      rngs: nnx.Rngs = None,
+  ):
+    """Initializes the Qwen3Omni vision MLP.
+
+    Args:
+        config: Config containing model parameters
+        dtype: Data type for computation
+        weight_dtype: Data type for weights
+        kernel_init: Initializer for kernel weights
+        rngs: RNG state for initialization
+    """
+    self.config = config
+    self.dtype = dtype
+    self.weight_dtype = weight_dtype
+    self.kernel_init = kernel_init
+    self.rngs = rngs
+
+    self.hidden_size = config.hidden_size_for_vit
+    self.intermediate_size = config.intermediate_size_for_vit
+
+    self.linear_fc1 = DenseGeneral(
+        in_features_shape=self.hidden_size,
+        out_features_shape=self.intermediate_size,
+        use_bias=True,
+        dtype=dtype,
+        weight_dtype=weight_dtype,
+        kernel_init=kernel_init,
+        matmul_precision=config.matmul_precision,
+        rngs=rngs,
+    )
+
+    self.linear_fc2 = DenseGeneral(
+        in_features_shape=self.intermediate_size,
+        out_features_shape=self.hidden_size,
+        use_bias=True,
+        dtype=dtype,
+        weight_dtype=weight_dtype,
+        kernel_init=kernel_init,
+        matmul_precision=config.matmul_precision,
+        rngs=rngs,
+    )
+
+  def __call__(self, hidden_state: Array) -> Array:
+    """
+    Args:
+        hidden_state: Input tensor of shape (..., hidden_size) - supports packed sequences
+
+    Returns:
+        Output tensor of shape (..., hidden_size)
+    """
+    hidden_state = self.linear_fc1(hidden_state)
+    hidden_state = jax.nn.gelu(hidden_state)
+    hidden_state = self.linear_fc2(hidden_state)
+    return hidden_state
+
+
+class Qwen3OmniMoeVisionPatchEmbed(nnx.Module):
+  """3D convolution-based patch embedding for vision inputs.
+
+  Attributes:
+      config: Config containing model parameters
+      patch_size: Spatial patch size
+      temporal_patch_size: Temporal patch size
+      in_channels: Number of input channels
+      embed_dim: Embedding dimension
+      dtype: Data type for computation
+      weight_dtype: Data type for weights
+      rngs: RNG state for initialization
+      proj: Convolution projection layer
+  """
+
+  def __init__(
+      self,
+      config: Config,
+      dtype: DType = jnp.float32,
+      weight_dtype: DType = jnp.float32,
+      rngs: nnx.Rngs = None,
+  ):
+    """Initializes the Qwen3Omni vision patch embedding.
+
+    Args:
+        config: Config containing model parameters
+        dtype: Data type for computation
+        weight_dtype: Data type for weights
+        rngs: RNG state for initialization
+    """
+    self.config = config
+    self.dtype = dtype
+    self.weight_dtype = weight_dtype
+    self.rngs = rngs
+
+    self.patch_size = config.patch_size_for_vit
+    self.temporal_patch_size = config.temporal_patch_size_for_vit
+    self.in_channels = config.num_channels_for_vit
+    self.embed_dim = config.hidden_size_for_vit
+
+    kernel_size = (self.temporal_patch_size, self.patch_size, self.patch_size)
+
+    self.proj = nnx.Conv(
+        in_features=self.in_channels,
+        out_features=self.embed_dim,
+        kernel_size=kernel_size,
+        strides=kernel_size,
+        use_bias=True,
+        dtype=dtype,
+        param_dtype=weight_dtype,
+        rngs=rngs,
+    )
+
+  def __call__(self, hidden_states: Array) -> Array:
+    """
+    Args:
+        hidden_states: Input tensor of shape (batch, in_channels, temporal*patch_size, height*patch_size, width*patch_size)
+    Returns:
+        Output tensor of shape (batch, T*H*W, embed_dim) where T, H, W are the number of patches
+    """
+    hidden_states = jnp.transpose(hidden_states, (0, 2, 3, 4, 1))
+    hidden_states = self.proj(hidden_states)
+    batch_size = hidden_states.shape[0]
+    seq_len = hidden_states.shape[1] * hidden_states.shape[2] * hidden_states.shape[3]
+    hidden_states = hidden_states.reshape(batch_size, seq_len, self.embed_dim)
+    return hidden_states
+
+
+class Qwen3OmniMoeVisionAttention(nnx.Module):
+  """Vision attention layer wrapper.
+
+  Attributes:
+      config: Config containing model parameters
+      attn: Underlying attention module
+  """
+
+  def __init__(self, config: Config, *, mesh=None, rngs: nnx.Rngs = None):
+    """Initializes the Qwen3Omni vision attention layer.
+
+    Args:
+        config: Config containing model parameters
+        mesh: JAX device mesh for sharding
+        rngs: RNG state for initialization
+    """
+    self.config = config
+    head_dim = self.config.hidden_size_for_vit // self.config.num_attention_heads_for_vit
+    # Vision uses full SA, no kv cache
+    self.attn = Attention(
+        config=self.config,
+        num_query_heads=self.config.num_attention_heads_for_vit,
+        num_kv_heads=self.config.num_attention_heads_for_vit,
+        head_dim=head_dim,
+        max_target_length=self.config.num_position_embeddings_for_vit,
+        attention_kernel="dot_product",
+        inputs_q_shape=(1, 1, self.config.hidden_size_for_vit),
+        inputs_kv_shape=(1, 1, self.config.hidden_size_for_vit),
+        float32_qk_product=self.config.float32_qk_product,
+        float32_logits=self.config.float32_logits,
+        dtype=self.config.dtype_mm,
+        weight_dtype=self.config.weight_dtype,
+        mesh=mesh,
+        dropout_rate=0.0,
+        attention_type=AttentionType.FULL,
+        is_nope_layer=False,
+        use_bias_in_projections=True,
+        is_vision=True,
+        use_qk_norm=False,
+        query_pre_attn_scalar=head_dim ** (-0.5),
+        model_mode="train",
+        rngs=rngs,
+    )
+
+  def __call__(
+      self,
+      hidden_states: Array,
+      num_frames: int,
+      height: int,
+      width: int,
+      deterministic: bool = True,
+  ) -> Array:
+    """
+    Args:
+        hidden_states: Input tensor of shape (batch, T*H*W, hidden_size)
+        num_frames: Number of temporal frames (static)
+        height: Height in patches (static)
+        width: Width in patches (static)
+        deterministic: Whether to use deterministic mode (disable dropout)
+
+    Returns:
+        Output tensor of shape (batch, T*H*W, hidden_size)
+    """
+    # Pass through attention with static dimensions via rope_kwargs
+    rope_kwargs = {
+        "num_frames": num_frames,
+        "height": height,
+        "width": width,
+    }
+    output, _ = self.attn(
+        inputs_q=hidden_states,
+        inputs_kv=hidden_states,
+        deterministic=deterministic,
+        rope_kwargs=rope_kwargs,
+    )
+
+    return output
+
+
+class Qwen3OmniMoeVisionBlock(nnx.Module):
+  """Vision transformer block with attention and MLP.
+
+  Attributes:
+      config: Config containing model parameters
+      ln1: LayerNorm before attention
+      ln2: LayerNorm before MLP
+      attn: Attention module
+      mlp: First MLP layer
+      mlp_out: Second MLP layer
+  """
+
+  def __init__(self, config: Config, *, mesh=None, rngs: nnx.Rngs = None):
+    """Initializes the Qwen3Omni vision transformer block.
+
+    Args:
+        config: Config containing model parameters
+        mesh: JAX device mesh for sharding
+        rngs: RNG state for initialization
+    """
+    self.config = config
+    hs = self.config.hidden_size_for_vit
+    self.ln1 = nnx.LayerNorm(num_features=hs, epsilon=config.normalization_layer_epsilon, rngs=rngs)
+    self.ln2 = nnx.LayerNorm(num_features=hs, epsilon=config.normalization_layer_epsilon, rngs=rngs)
+    self.attn = Qwen3OmniMoeVisionAttention(config=config, mesh=mesh, rngs=rngs)
+    self.mlp = DenseGeneral(
+        in_features_shape=hs,
+        out_features_shape=self.config.intermediate_size_for_vit,
+        use_bias=True,
+        matmul_precision=config.matmul_precision,
+        rngs=rngs,
+    )
+    self.mlp_out = DenseGeneral(
+        in_features_shape=self.config.intermediate_size_for_vit,
+        out_features_shape=hs,
+        use_bias=True,
+        matmul_precision=config.matmul_precision,
+        rngs=rngs,
+    )
+
+  def __call__(
+      self,
+      x: Array,
+      num_frames: int,
+      height: int,
+      width: int,
+  ) -> Array:
+    """
+    Args:
+        x: Input tensor of shape (batch, T*H*W, hidden_size)
+        num_frames: Number of temporal frames (static)
+        height: Height in patches (static)i
+        width: Width in patches (static)
+
+    Returns:
+        Output tensor of shape (batch, T*H*W, hidden_size)
+    """
+    x = x + self.attn(self.ln1(x), num_frames=num_frames, height=height, width=width)
+    y = self.ln2(x)
+    y = self.mlp(y)
+    y = jax.nn.gelu(y)
+    y = self.mlp_out(y)
+    return x + y
+
+
+class Qwen3OmniMoeVisionEncoder(nnx.Module):
+  """Vision encoder with patch embedding, positional embedding, and transformer blocks.
+
+  Attributes:
+      config: Config containing model parameters
+      patch_embed: Patch embedding module
+      pos_embed_interpolate: Position embedding interpolation module
+      blocks: List of transformer blocks
+      merger_list: List of patch mergers for deep supervision
+      spatial_merge_size: Size of spatial merging
+      deep_idx: Indices of layers to extract deep features from
+  """
+
+  def __init__(self, config: Config, *, mesh=None, rngs: nnx.Rngs = None):
+    """Initializes the Qwen3Omni vision encoder.
+
+    Args:
+        config: Config containing model parameters
+        mesh: JAX device mesh for sharding
+        rngs: RNG state for initialization
+    """
+    self.config = config
+    self.patch_embed = Qwen3OmniMoeVisionPatchEmbed(config=config, rngs=rngs)
+
+    num_pos = config.num_position_embeddings_for_vit
+    hs = config.hidden_size_for_vit
+    self.spatial_merge_size = config.spatial_merge_size_for_vit
+
+    self.pos_embed_interpolate = Qwen3OmniMoeVisionPosEmbedInterpolate(
+        num_position_embeddings=num_pos,
+        hidden_size=hs,
+        spatial_merge_size=self.spatial_merge_size,
+        rngs=rngs,
+    )
+
+    self.depth = config.num_hidden_layers_for_vit
+
+    # Use setattr with string names instead of nnx.List to avoid Orbax integer key bug
+    for i in range(self.depth):
+      block_name = f"blocks_{i}"
+      block = Qwen3OmniMoeVisionBlock(config=config, mesh=mesh, rngs=rngs)
+      setattr(self, block_name, block)
+
+    self.deep_idx = tuple(config.deepstack_visual_indexes_for_vit)
+    # Use setattr with string names instead of nnx.List to avoid Orbax integer key bug
+    for i, _ in enumerate(self.deep_idx):
+      merger_name = f"merger_{i}"
+      merger = Qwen3OmniMoeVisionPatchMerger(config=config, use_postshuffle_norm=True, rngs=rngs)
+      setattr(self, merger_name, merger)
+
+  def __call__(
+      self,
+      hidden_states: Array,
+      deterministic: bool = True,
+  ):
+    """
+    Args:
+        hidden_states: Input visual tokens of shape (batch, in_channels, T*patch_size, H*patch_size, W*patch_size)
+        deterministic: Whether to use deterministic mode
+
+    Returns:
+        Tuple of:
+        - encoder_output: shape (batch, T*H*W, hidden_size_for_vit)
+        - deep_features: List of intermediate features, each of shape (batch, T*H*W, out_hidden_size)
+    """
+    _, _, num_frames, height, width = hidden_states.shape
+    num_frames = num_frames // self.config.temporal_patch_size_for_vit
+    height = height // self.config.patch_size_for_vit
+    width = width // self.config.patch_size_for_vit
+
+    x = self.patch_embed(hidden_states)
+    pos = self.pos_embed_interpolate(num_frames, height, width)
+
+    pos = pos[jnp.newaxis, :, :]
+    x = x + pos
+
+    h_traj = []
+    for i in range(self.depth):
+      block_name = f"blocks_{i}"
+      blk = getattr(self, block_name)
+      x = blk(x, num_frames=num_frames, height=height, width=width)
+      h_traj.append(x)
+
+    deep_feats = []
+    for i, idx in enumerate(self.deep_idx):
+      h = h_traj[idx]
+      merger_name = f"merger_{i}"
+      merger = getattr(self, merger_name)
+      deep_feat = merger(h)
+      deep_feats.append(deep_feat)
+
+    return x, deep_feats
+
+
+class Qwen3OmniMoeVisionProjector(nnx.Module):
+  """Projection layer that converts vision encoder output to model embedding space.
+
+  Attributes:
+      config: Config containing model parameters
+      merger: Patch merger for spatial reduction
+  """
+
+  def __init__(self, config: Config, *, rngs: nnx.Rngs = None):
+    """Initializes the Qwen3Omni vision projector.
+
+    Args:
+        config: Config containing model parameters
+        rngs: RNG state for initialization
+    """
+    self.config = config
+    self.merger = Qwen3OmniMoeVisionPatchMerger(config=config, use_postshuffle_norm=False, rngs=rngs)
+
+  def __call__(self, hidden_states: Array) -> Array:
+    """
+    Args:
+        hidden_states: Encoder output of shape (batch, T*H*W, hidden_size_for_vit)
+
+    Returns:
+        Projected output of shape (batch, T*H*W//merge_size**2, out_hidden_size_for_vit)
+    """
+    output = self.merger(hidden_states)
+    return output
+
+
+def qwen3omni_visionencoder_as_linen(config: Config, mesh: Mesh) -> nn.Module:
+  """Convert Qwen3OmniMoeVisionEncoder to Linen module."""
+  return nnx_wrappers.to_linen(
+      Qwen3OmniMoeVisionEncoder,
+      config=config,
+      mesh=mesh,
+      name="Qwen3OmniMoeVisionEncoder_0",
+      abstract_init=False,
+      metadata_fn=max_initializers.variable_to_logically_partitioned,
+  )
+
+
+def qwen3omni_visionprojector_as_linen(config: Config, mesh: Mesh) -> nn.Module:
+  """Convert Qwen3OmniMoeVisionProjector to Linen module."""
+  return nnx_wrappers.to_linen(
+      Qwen3OmniMoeVisionProjector,
+      config=config,
+      name="Qwen3OmniMoeVisionProjector_0",
+      abstract_init=False,
+      metadata_fn=max_initializers.variable_to_logically_partitioned,
+  )
+
+
+# Vision encoder Linen wrappers
+Qwen3OmniMoeVisionPatchMergerToLinen = nnx_wrappers.to_linen_class(
+    Qwen3OmniMoeVisionPatchMerger,
+    base_metadata_fn=max_initializers.variable_to_logically_partitioned,
+)
+
+Qwen3OmniMoeVisionMLPToLinen = nnx_wrappers.to_linen_class(
+    Qwen3OmniMoeVisionMLP,
+    base_metadata_fn=max_initializers.variable_to_logically_partitioned,
+)
+
+Qwen3OmniMoeVisionPatchEmbedToLinen = nnx_wrappers.to_linen_class(
+    Qwen3OmniMoeVisionPatchEmbed,
+    base_metadata_fn=max_initializers.variable_to_logically_partitioned,
+)
+
+Qwen3OmniMoeVisionAttentionToLinen = nnx_wrappers.to_linen_class(
+    Qwen3OmniMoeVisionAttention,
+    base_metadata_fn=max_initializers.variable_to_logically_partitioned,
+)
+
+Qwen3OmniMoeVisionBlockToLinen = nnx_wrappers.to_linen_class(
+    Qwen3OmniMoeVisionBlock,
+    base_metadata_fn=max_initializers.variable_to_logically_partitioned,
+)
+
+Qwen3OmniMoeVisionEncoderToLinen = nnx_wrappers.to_linen_class(
+    Qwen3OmniMoeVisionEncoder,
+    base_metadata_fn=max_initializers.variable_to_logically_partitioned,
+)
+
+Qwen3OmniMoeVisionProjectorToLinen = nnx_wrappers.to_linen_class(
+    Qwen3OmniMoeVisionProjector,
+    base_metadata_fn=max_initializers.variable_to_logically_partitioned,
+)
 
 Qwen3DecoderLayerToLinen = nnx_wrappers.to_linen_class(
     Qwen3DecoderLayer,

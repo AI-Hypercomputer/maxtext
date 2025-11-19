@@ -50,8 +50,10 @@ from MaxText import maxtext_utils
 from MaxText import train_utils
 from MaxText import profiler
 from MaxText import pyconfig
+from MaxText import sharding
 from MaxText.layers.multi_token_prediction import calculate_mtp_acceptance_rate, calculate_mtp_loss
-from MaxText.data_loader import DataLoader
+from MaxText.common_types import ShardMode
+from MaxText.data_loader import create_dataloader
 from MaxText.globals import EPS
 from MaxText.metric_logger import MetricLogger
 from MaxText.utils import gcs_utils
@@ -140,7 +142,12 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
     else:
       one_hot_targets = jax.nn.one_hot(data["targets"], config.vocab_size)
       xent, _ = max_utils.cross_entropy_with_logits(logits, one_hot_targets)
-      xent = nn.with_logical_constraint(xent, ("activation_embed_and_logits_batch", "activation_length"))
+      xent = sharding.maybe_shard_with_logical(
+          xent,
+          ("activation_embed_and_logits_batch", "activation_length"),
+          model.mesh,
+          config.shard_mode,
+      )
       # Mask out paddings at the end of each example.
       xent = xent * (data["targets_segmentation"] != 0)
       total_loss = jnp.sum(xent)
@@ -368,12 +375,7 @@ def train_loop(config, recorder, state=None):
       state = _merge_dpo_state(state, reference_params)
     state_mesh_shardings = _merge_dpo_state(state_mesh_shardings, state_mesh_shardings.params["params"])
 
-  params_shardings, state_mesh_shardings = maxtext_utils.maybe_update_params_sharding_with_opt(
-      config, state_mesh_shardings
-  )
-  params_shardings, state_mesh_shardings = maxtext_utils.maybe_update_params_sharding_with_opt(
-      config, state_mesh_shardings
-  )
+  params_shardings, state_mesh_shardings = sharding.maybe_update_params_sharding_with_opt(config, state_mesh_shardings)
 
   p_train_step, p_eval_step = train_utils.jit_train_and_eval_step(
       config, model, mesh, state, state_mesh_shardings, train_step, eval_step, eval_data_iterator, params_shardings
@@ -382,14 +384,14 @@ def train_loop(config, recorder, state=None):
   with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
     shaped_batch = maxtext_utils.get_shaped_batch(config)
     if config.shard_optimizer_over_data:
-      state = jax.lax.with_sharding_constraint(state, state_mesh_shardings)
+      state = sharding.maybe_shard_with_name(state, state_mesh_shardings, config.shard_mode)
     compiled = p_train_step.lower(state, shaped_batch, init_rng).compile()
     compiled_stats = compiled.memory_analysis()
     max_utils.print_compiled_memory_stats(compiled_stats)
 
   start_step = get_first_step(state)  # this is the start_step for training
   prof = profiler.Profiler(config, offset_step=start_step)
-  data_loader = DataLoader(config, mesh, data_iterator, recorder)
+  data_loader = create_dataloader(config, mesh, data_iterator, recorder)
   metric_logger = MetricLogger(config=config, learning_rate_schedule=learning_rate_schedule)
 
   # Write train config params, num model params, and XLA flags to tensorboard
@@ -402,12 +404,18 @@ def train_loop(config, recorder, state=None):
 
       with jax.profiler.StepTraceAnnotation("train", step_num=step):
         example_batch = data_loader.load_next_batch()
+        # Reshard data from loaded sharding to performant activation sharding
+        example_batch = sharding.maybe_shard_with_name(
+            example_batch,
+            sharding.get_input_data_sharding(config, mesh),
+            shard_mode=config.shard_mode,
+        )
         # pylint: disable=not-callable
         nextrng = jax.jit(jax.random.fold_in)(init_rng, step)
         with maybe_record_goodput(recorder, GoodputEvent.STEP, step):
           with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
             if config.shard_optimizer_over_data:
-              state = jax.lax.with_sharding_constraint(state, state_mesh_shardings)
+              state = sharding.maybe_shard_with_name(state, state_mesh_shardings, config.shard_mode)
             state, metrics = p_train_step(state, example_batch, nextrng)
 
       step_time_delta = datetime.datetime.now() - last_step_completion
@@ -457,6 +465,9 @@ def train_loop(config, recorder, state=None):
     if config.save_checkpoint_on_completion:
       state_to_save = state if not config.use_dpo else _split_dpo_state(state)[0]
       checkpointing.maybe_save_checkpoint(checkpoint_manager, state_to_save, config, data_iterator)
+    if checkpoint_manager is not None:
+      # in case the last checkpoint_period checkpoint is still in progress
+      checkpoint_manager.wait_until_finished()
   except exceptions.StopTraining as e:
     max_logging.log(f"Training stopped: {str(e)}")
   finally:
@@ -483,13 +494,15 @@ def initialize(argv: Sequence[str]) -> tuple[pyconfig.HyperParameters, Any, Any]
   max_utils.print_system_information()
   validate_train_config(config)
   jax.config.update("jax_use_shardy_partitioner", config.shardy)
+  # update explicit sharding-supported config
+  if config.shard_mode == ShardMode.EXPLICIT:
+    jax.config.update("jax_remove_size_one_mesh_axis_from_type", True)
   os.environ["TFDS_DATA_DIR"] = config.dataset_path or ""
   vertex_tensorboard_manager = VertexTensorboardManager()
   if config.use_vertex_tensorboard or os.environ.get("UPLOAD_DATA_TO_TENSORBOARD"):
     vertex_tensorboard_manager.configure_vertex_tensorboard(config)
 
-  # Goodput configurations
-  maybe_monitor_goodput(config)
+  # Create the Goodput recorder
   recorder = create_goodput_recorder(config)
 
   # Stack traces configurations
@@ -506,9 +519,13 @@ def initialize(argv: Sequence[str]) -> tuple[pyconfig.HyperParameters, Any, Any]
 
 def run(config, recorder, diagnostic_config):
   """Run the job given hyperparameters and utilities"""
-  with diagnostic.diagnose(diagnostic_config):
-    with maybe_record_goodput(recorder, GoodputEvent.JOB):
-      train_loop(config, recorder)
+  with (
+      diagnostic.diagnose(diagnostic_config),
+      maybe_record_goodput(recorder, GoodputEvent.JOB),
+      max_utils.maybe_get_transformer_engine_context(config),
+      maybe_monitor_goodput(config),
+  ):
+    train_loop(config, recorder)
 
 
 def main(argv: Sequence[str]) -> None:

@@ -21,23 +21,20 @@ import math
 from typing import Iterable, Optional, Tuple, Union
 
 from aqt.jax.v2 import aqt_tensor as aqt
-import flax.linen as nn
 from flax import nnx
+import flax.linen as nn
 import jax
 from jax import ad_checkpoint as adc
 from jax.experimental import xla_metadata
 import jax.numpy as jnp
-import numpy as np
-
 from MaxText import common_types as ctypes
 from MaxText import max_logging
 from MaxText import max_utils
 from MaxText.kernels import megablox as mblx
-from MaxText.layers import attentions, linears, quantizations, nnx_wrappers
-from MaxText.layers.initializers import NdInitializer, nd_dense_init, default_bias_init, variable_to_logically_partitioned
-
-if jax.__version__ >= "0.8.0":
-  from tokamax._src.ops.ragged_dot import api as tokamax_api
+from MaxText.layers import attentions, linears, nnx_wrappers, quantizations
+from MaxText.layers.initializers import NdInitializer, default_bias_init, nd_dense_init, variable_to_logically_partitioned
+import numpy as np
+import tokamax
 
 set_xla_metadata = xla_metadata.set_xla_metadata
 
@@ -389,16 +386,16 @@ class RoutedMoE(nnx.Module):
       self.wo_bias = None
 
   def get_expert_parallelism_size(self):
-    return self.mesh.shape["expert"]
+    return self.mesh.shape.get("expert", 1)
 
   def get_tensor_parallelism_size(self):
-    return self.mesh.shape["tensor"]
+    return self.mesh.shape.get("tensor", 1)
 
   def get_tensor_transpose_parallelism_size(self):
-    return self.mesh.shape["tensor_transpose"]
+    return self.mesh.shape.get("tensor_transpose", 1)
 
   def get_context_autoregressive_parallelism_size(self):
-    return self.mesh.shape["context_autoregressive"]
+    return self.mesh.shape.get("context_autoregressive", 1)
 
   def get_topk(self, gate_logits, pre_bias_logits, rngs=None):
     """get topk."""
@@ -581,10 +578,13 @@ class RoutedMoE(nnx.Module):
       if self.config.decoder_block == ctypes.DecoderBlockType.LLAMA4:
         # For Llama4, combine using weights of 1 for selected experts
         reshaped_weights = jnp.ones_like(reshaped_weights)
+      if self.config.float32_weight_sum:
+        reshaped_intermediate = reshaped_intermediate.astype(jnp.float32)
+        reshaped_weights = reshaped_weights.astype(jnp.float32)
       output = jnp.einsum(
           "BKE,BK -> BE",
-          reshaped_intermediate.astype(jnp.float32),
-          reshaped_weights.astype(jnp.float32),
+          reshaped_intermediate,
+          reshaped_weights,
           precision=matmul_precision,
       )
     return output.reshape(batch_size, sequence_length, -1).astype(self.dtype)
@@ -809,17 +809,17 @@ class RoutedMoE(nnx.Module):
           min(tiling[1], k),
           min(tiling[2], n),
       )
-      if self.config.megablox:
-        if self.config.use_tokamax_gmm:
-          output = tokamax_api.ragged_dot(  #  pylint: disable=possibly-used-before-assignment
-              lhs=inputs,
-              rhs=kernel,
-              group_sizes=group_sizes,
-              precision=jax.lax.Precision.DEFAULT,
-              preferred_element_type=self.dtype,
-              implementation="mosaic",
-          )
-        else:
+      if self.config.use_tokamax_gmm:
+        output = tokamax.ragged_dot(
+            lhs=inputs,
+            rhs=kernel,
+            group_sizes=group_sizes,
+            precision=jax.lax.Precision.DEFAULT,
+            preferred_element_type=self.dtype,
+            implementation="mosaic",
+        )
+      else:
+        if self.config.megablox:
           output = mblx.gmm(
               lhs=inputs,
               rhs=kernel,
@@ -830,29 +830,29 @@ class RoutedMoE(nnx.Module):
               rhs_quantize_dtype=rhs_quantize_dtype,
               use_qwix_quantization=self.config.use_qwix_quantization,
           )
-      else:
-        rhs_inputs = kernel
-        if isinstance(kernel, aqt.QTensor):
-          if kernel.bias or kernel.sparsity_mask or len(kernel.scale) > 1:
-            raise ValueError("Unsupported usecase for ragged_dot with quantized kernel.")
-          rhs_inputs = kernel.qvalue
-        with set_xla_metadata(ragged_dot_tiling=",".join([str(t) for t in tiling])):
-          output = jax.lax.ragged_dot(
-              lhs=inputs,
-              rhs=rhs_inputs,
-              group_sizes=group_sizes,
-              preferred_element_type=self.dtype,
-          )
-        if isinstance(kernel, aqt.QTensor):
-          # Multiply outputs by the kernely scale
-          scales = jnp.take(kernel.scale[0].squeeze(), indices=expert_assignments, axis=0)
-          if padding_amount > 0:
-            scales = jax.lax.pad(
-                scales,
-                jnp.array(0.0, dtype=scales.dtype),
-                [(0, padding_amount, 0), (0, 0, 0)],
+        else:
+          rhs_inputs = kernel
+          if isinstance(kernel, aqt.QTensor):
+            if kernel.bias or kernel.sparsity_mask or len(kernel.scale) > 1:
+              raise ValueError("Unsupported usecase for ragged_dot with quantized kernel.")
+            rhs_inputs = kernel.qvalue
+          with set_xla_metadata(ragged_dot_tiling=",".join([str(t) for t in tiling])):
+            output = jax.lax.ragged_dot(
+                lhs=inputs,
+                rhs=rhs_inputs,
+                group_sizes=group_sizes,
+                preferred_element_type=self.dtype,
             )
-          output *= scales
+          if isinstance(kernel, aqt.QTensor):
+            # Multiply outputs by the kernely scale
+            scales = jnp.take(kernel.scale[0].squeeze(), indices=expert_assignments, axis=0)
+            if padding_amount > 0:
+              scales = jax.lax.pad(
+                  scales,
+                  jnp.array(0.0, dtype=scales.dtype),
+                  [(0, padding_amount, 0), (0, 0, 0)],
+              )
+            output *= scales
       if padding_amount > 0:
         output = output[: hs_shape[0]]
       return output
@@ -940,7 +940,11 @@ class RoutedMoE(nnx.Module):
     def wrapper(x, logits, pre_bias_logits, w0, w1, wo, w0_bias, w1_bias, wo_bias, rngs):
       batch_size, sequence_length, _ = x.shape
       expert_axis_name = "expert"
-      expert_shard_id = jax.lax.axis_index(expert_axis_name)
+      num_expert_parallelism = self.get_expert_parallelism_size()
+      if num_expert_parallelism > 1:
+        expert_shard_id = jax.lax.axis_index(expert_axis_name)
+      else:
+        expert_shard_id = 0
       num_expert_parallelism = self.get_expert_parallelism_size()
       if self.config.use_ring_of_experts:
         # The ring-of-experts strategy first duplicates the inputs to all
@@ -1682,14 +1686,17 @@ class RoutedMoE(nnx.Module):
         if self.config.activations_in_float32:
           intermediate_layer = intermediate_layer.astype(jnp.float32)
         intermediate_layer = adc.checkpoint_name(intermediate_layer, "mlpwo")
-      with jax.named_scope("w_sum"):
+      with jax.named_scope("weight_sum"):
         if is_llama4_decoder_layer:
           weights = self.reshape_and_update_weights(jnp.ones_like(top_k_weights), top_k_indices)
+        if self.config.float32_weight_sum:
+          intermediate_layer = intermediate_layer.astype(jnp.float32)
+          weights = weights.astype(jnp.float32)
         # cast to f32 for sum up in einsum op
         output = jnp.einsum(
             "BSEM,BSE -> BSM",
-            intermediate_layer.astype(jnp.float32),
-            weights.astype(jnp.float32),  # pylint: disable=undefined-variable,possibly-used-before-assignment
+            intermediate_layer,
+            weights,
             precision=matmul_precision,
         ).astype(self.dtype)
       return output, None
@@ -1811,6 +1818,7 @@ class RoutedAndSharedMoE(nnx.Module):
         rngs=self.rngs,
     )
     self.shared_experts = linears.MlpBlock(
+        mesh=self.mesh,
         in_features=self.config.emb_dim,
         intermediate_dim=self.config.shared_experts * self.config.moe_mlp_dim,
         activations=self.config.mlp_activations,

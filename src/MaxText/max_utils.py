@@ -28,6 +28,7 @@ from typing import Any
 from etils import epath
 import flax
 import jax
+from contextlib import contextmanager
 from jax.experimental import mesh_utils
 from jax.sharding import PartitionSpec as P
 import jax.numpy as jnp
@@ -289,6 +290,9 @@ def _retrieve_jax_init_info(raw_keys):
 
 def get_num_slices(raw_keys):
   """Calculate num_slices based on number of devices."""
+  if raw_keys.get("num_slices", -1) != -1:
+    max_logging.log(f"Using num_slices={raw_keys['num_slices']} per user request.")
+    return raw_keys["num_slices"]
   if raw_keys["hardware"] == "cpu":
     max_logging.log(" Setting num_slices=1 for CPU hardware type")
     return 1
@@ -805,21 +809,6 @@ def reorder_causal_load_balanced(batch, cp_size):
   }
 
 
-def shard_reorder_causal_load_balanced(batch, cp_size):
-  """Shard the output of the reordered sequence."""
-  reordered = reorder_causal_load_balanced(batch, cp_size)
-  for _, v in batch.items():
-    if isinstance(v, jax.Array):
-      reordered = jax.lax.with_sharding_constraint(reordered, v.sharding)
-      break
-  return reordered
-
-
-def get_reorder_callable(cp_size):
-  """Creates a callable that can be used with map() to reorder batches."""
-  return functools.partial(shard_reorder_causal_load_balanced, cp_size=cp_size)
-
-
 @staticmethod
 def reorder_mask_load_balancing(tensor, cp_size: int, seq_dim: int):
   """
@@ -1001,3 +990,41 @@ def get_batch_seq_len_for_mode(config, model_mode):
     raise ValueError(f"Unknown model_mode: {model_mode}")
 
   return batch_size, seq_len
+
+
+@contextmanager
+def maybe_get_transformer_engine_context(config):
+  """Runs a transformer engine context engine manager for GPUs only."""
+  if config.hardware in ["gpu", "gpu_multiprocess"]:
+    with transformer_engine_context():
+      yield
+  else:
+    with dummy_context_manager():
+      yield
+
+
+@contextmanager
+def dummy_context_manager():
+  """A context manager that does nothing."""
+  yield
+
+
+@contextmanager
+def transformer_engine_context():
+  """If TransformerEngine is available, this context manager will provide
+  the library with MaxText-specific details needed for correcct operation."""
+  try:
+    from transformer_engine.jax.sharding import global_shard_guard, MeshResource  # pylint: disable=import-outside-toplevel
+    # Inform TransformerEngine of MaxText's physical mesh resources.
+    mesh_resource = MeshResource(  # pytype: disable=wrong-arg-types
+        dp_resource="data",
+        tp_resource="tensor",
+        # tpsp_resource = "tensor_sequence", #TODO(Phuong): add this back when upstreaming CGEMM
+        fsdp_resource="fsdp",
+        pp_resource=None,
+        cp_resource="context",
+    )
+    with global_shard_guard(mesh_resource):
+      yield
+  except (ImportError, AttributeError):
+    yield

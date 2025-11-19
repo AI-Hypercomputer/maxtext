@@ -26,7 +26,7 @@ python3 -m pip install torch
 gcloud storage cp -r gs://maxtext-external/mistral-7B-v0.1 /tmp
 
 # Convert it to MaxText(orbax) format - scanned ckpt
-JAX_PLATFORMS=cpu python3 -m MaxText.llama_or_mistral_ckpt --base-model-path=/tmp/mistral-7B-v0.1 --model-size=mistral-7b --maxtext-model-path=${BASE_OUTPUT_PATH}/${MODEL_VARIATION}/scanned_ckpt/
+JAX_PLATFORMS=cpu python3 -m MaxText.utils.ckpt_scripts.llama_or_mistral_ckpt --base-model-path=/tmp/mistral-7B-v0.1 --model-size=mistral-7b --maxtext-model-path=${BASE_OUTPUT_PATH}/${MODEL_VARIATION}/scanned_ckpt/
 echo "Wrote MaxText compatible scanned checkpoint to ${BASE_OUTPUT_PATH}/${MODEL_VARIATION}/scanned_ckpt"
 
 # `SCANNED_CHECKPOINT` refers to the checkpoint that used for both `train.py` and `decode.py`

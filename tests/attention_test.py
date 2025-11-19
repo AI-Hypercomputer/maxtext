@@ -19,6 +19,7 @@ import os.path
 import random
 import sys
 import unittest
+from unittest import mock
 
 import pytest
 
@@ -26,7 +27,7 @@ from absl.testing import parameterized
 
 import numpy as np
 
-from jax.sharding import Mesh, NamedSharding
+from jax.sharding import Mesh, NamedSharding, AxisType
 import jax
 import jax.numpy as jnp
 
@@ -36,7 +37,14 @@ from flax.linen import partitioning as nn_partitioning
 from MaxText import maxtext_utils
 from MaxText import max_utils
 from MaxText import pyconfig
-from MaxText.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_PREFILL, MODEL_MODE_TRAIN, AttentionType
+from MaxText.common_types import (
+    DECODING_ACTIVE_SEQUENCE_INDICATOR,
+    MODEL_MODE_AUTOREGRESSIVE,
+    MODEL_MODE_PREFILL,
+    MODEL_MODE_TRAIN,
+    AttentionType,
+    ShardMode,
+)
 from MaxText.globals import MAXTEXT_PKG_DIR
 from MaxText.layers.attentions import Attention
 from MaxText.layers.attention_op import ChunkedCausalMask, _make_bidirectional_block_mask, _generate_chunk_attention_mask
@@ -285,6 +293,7 @@ class AttentionTest(parameterized.TestCase):
   def setUp(self):
     """Initializes the configuration for each test"""
     super().setUp()
+    jax.config.update("jax_remove_size_one_mesh_axis_from_type", True)
     config = pyconfig.initialize(
         [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
         **self.config_arguments,
@@ -365,7 +374,7 @@ class AttentionTest(parameterized.TestCase):
     decode_total_length = self.cfg.max_target_length
     lnx, decoder_segment_ids, decoder_positions = self.get_structured_data(self.dtype)
 
-    mha_full = self._attention_as_mha_generic(
+    mha_full, _ = self._attention_as_mha_generic(
         lnx,
         lnx,
         decoder_segment_ids=decoder_segment_ids,
@@ -378,7 +387,7 @@ class AttentionTest(parameterized.TestCase):
     decoder_segment_ids_prefill = decoder_segment_ids[:, 0:prefill_length]
     decoder_positions_prefill = decoder_positions[:, 0:prefill_length]
 
-    mha_prefill = self._attention_as_mha_generic(
+    mha_prefill, _ = self._attention_as_mha_generic(
         lnx_prefill,
         lnx_prefill,
         decoder_segment_ids=decoder_segment_ids_prefill,
@@ -394,7 +403,7 @@ class AttentionTest(parameterized.TestCase):
     for idx in range(prefill_length, decode_total_length):
       lnx_idx = lnx[:, idx : idx + 1, :]
       decoder_positions_idx = decoder_positions[:, idx : idx + 1]
-      mha_idx = self._attention_as_mha_generic(
+      mha_idx, _ = self._attention_as_mha_generic(
           lnx_idx,
           lnx_idx,
           inputs_positions=decoder_positions_idx,
@@ -442,7 +451,7 @@ class AttentionTest(parameterized.TestCase):
         rngs=self.nnx_rng,
     )
 
-    mha_prefill = attention_as_mha_generic(
+    mha_prefill, _ = attention_as_mha_generic(
         lnx_prefill,
         lnx_prefill,
         decoder_segment_ids=decoder_segment_ids_prefill,
@@ -490,7 +499,7 @@ class AttentionTest(parameterized.TestCase):
 
     generic_state = nnx.state(attention_as_mha_generic)
 
-    mha_generic_output = attention_as_mha_generic(
+    mha_generic_output, _ = attention_as_mha_generic(
         lnx,
         lnx,
         decoder_segment_ids=decoder_segment_ids,
@@ -518,7 +527,7 @@ class AttentionTest(parameterized.TestCase):
     )
     nnx.update(attention_as_mha_flash, generic_state)
 
-    mha_generic_flash_output = attention_as_mha_flash(
+    mha_generic_flash_output, _ = attention_as_mha_flash(
         lnx,
         lnx,
         decoder_segment_ids=decoder_segment_ids,
@@ -575,15 +584,20 @@ class AttentionTest(parameterized.TestCase):
           "expert_shard_attention_option": "context",
       },
   )
+  # TODO (b/454764135.) : This tests fails with new tokamax kernel
   @pytest.mark.tpu_only
   def test_tpu_flash_attention_context_parallel(
-      self, ici_context_parallelism, context_parallel_load_balance, ici_expert_parallelism, expert_shard_attention_option
+      self,
+      ici_context_parallelism,
+      context_parallel_load_balance,
+      ici_expert_parallelism,
+      expert_shard_attention_option,
   ):
     """Test equivalence between dot_product and flash attention + context/expert parallelism"""
     num_kv_heads = self.num_kv_heads
     lnx, decoder_segment_ids, decoder_positions = self.get_data(self.dtype)
     # Dot product
-    mha_generic_output = self._attention_as_mha_generic(
+    mha_generic_output, _ = self._attention_as_mha_generic(
         lnx,
         lnx,
         decoder_segment_ids=decoder_segment_ids,
@@ -603,7 +617,8 @@ class AttentionTest(parameterized.TestCase):
         expert_shard_attention_option=expert_shard_attention_option,
     )
     devices_array_cp = maxtext_utils.create_device_mesh(cfg_cp)
-    mesh_cp = Mesh(devices_array_cp, cfg_cp.mesh_axes)
+    axis_names = [AxisType.Auto for _ in cfg_cp.mesh_axes]
+    mesh_cp = Mesh(devices_array_cp, cfg_cp.mesh_axes, axis_types=tuple(axis_names))
     attention_as_mha_flash_cp = Attention(
         config=cfg_cp,
         num_query_heads=cfg_cp.num_query_heads,
@@ -625,6 +640,10 @@ class AttentionTest(parameterized.TestCase):
     mha_generic_flash_cp_output = _forward_with_context_expert_parallelism(
         cfg_cp, mesh_cp, attention_as_mha_flash_cp, lnx, decoder_segment_ids, decoder_positions
     )
+
+    # This removes all sharding information and makes them standard NumPy arrays.
+    mha_generic_output = jax.device_get(mha_generic_output)
+    mha_generic_flash_cp_output = jax.device_get(mha_generic_flash_cp_output)
 
     self.assertTrue(
         jax.numpy.allclose(mha_generic_output, mha_generic_flash_cp_output, rtol=1e-01, atol=1e-01, equal_nan=False),
@@ -696,7 +715,7 @@ class AttentionTest(parameterized.TestCase):
         model_mode=MODEL_MODE_PREFILL,
         rngs=self.nnx_rng,
     )
-    attention_w_layout_full = attention_w_layout(
+    attention_w_layout_full, _ = attention_w_layout(
         lnx,
         lnx,
         decoder_segment_ids=decoder_segment_ids,
@@ -705,7 +724,7 @@ class AttentionTest(parameterized.TestCase):
         model_mode=MODEL_MODE_TRAIN,
     )
 
-    attention_w_layout_prefill = attention_w_layout(
+    attention_w_layout_prefill, _ = attention_w_layout(
         lnx_prefill,
         lnx_prefill,
         decoder_segment_ids=decoder_segment_ids_prefill,
@@ -721,7 +740,7 @@ class AttentionTest(parameterized.TestCase):
       lnx_idx = lnx[:, idx : idx + 1, :]
       decoder_positions_idx = decoder_positions[:, idx : idx + 1]
 
-      attention_w_layout_idx = attention_w_layout(
+      attention_w_layout_idx, _ = attention_w_layout(
           lnx_idx,
           lnx_idx,
           inputs_positions=decoder_positions_idx,
@@ -810,7 +829,7 @@ class AttentionTest(parameterized.TestCase):
     attention_wo_reshape_q_state = nnx.state(attention_wo_reshape_q)
     nnx.update(attention_w_reshape_q, attention_wo_reshape_q_state)
 
-    attention_wo_reshape_q_full = attention_wo_reshape_q(
+    attention_wo_reshape_q_full, _ = attention_wo_reshape_q(
         lnx,
         lnx,
         decoder_segment_ids=decoder_segment_ids,
@@ -819,7 +838,7 @@ class AttentionTest(parameterized.TestCase):
         model_mode=MODEL_MODE_TRAIN,
     )
 
-    attention_w_reshape_q_full = attention_w_reshape_q(
+    attention_w_reshape_q_full, _ = attention_w_reshape_q(
         lnx,
         lnx,
         decoder_segment_ids=decoder_segment_ids,
@@ -828,7 +847,7 @@ class AttentionTest(parameterized.TestCase):
         model_mode=MODEL_MODE_TRAIN,
     )
 
-    attention_wo_reshape_q_prefill = attention_wo_reshape_q(
+    attention_wo_reshape_q_prefill, _ = attention_wo_reshape_q(
         lnx_prefill,
         lnx_prefill,
         decoder_segment_ids=decoder_segment_ids_prefill,
@@ -842,7 +861,7 @@ class AttentionTest(parameterized.TestCase):
         )
     )
 
-    attention_w_reshape_q_prefill = attention_w_reshape_q(
+    attention_w_reshape_q_prefill, _ = attention_w_reshape_q(
         lnx_prefill,
         lnx_prefill,
         decoder_segment_ids=decoder_segment_ids_prefill,
@@ -869,7 +888,7 @@ class AttentionTest(parameterized.TestCase):
       lnx_idx = lnx[:, idx : idx + 1, :]
       decoder_positions_idx = decoder_positions[:, idx : idx + 1]
 
-      attention_wo_reshape_q_idx = attention_wo_reshape_q(
+      attention_wo_reshape_q_idx, _ = attention_wo_reshape_q(
           lnx_idx,
           lnx_idx,
           inputs_positions=decoder_positions_idx,
@@ -885,7 +904,7 @@ class AttentionTest(parameterized.TestCase):
           )
       )
 
-      attention_w_reshape_q_idx = attention_w_reshape_q(
+      attention_w_reshape_q_idx, _ = attention_w_reshape_q(
           lnx_idx,
           lnx_idx,
           inputs_positions=decoder_positions_idx,
@@ -956,7 +975,7 @@ class AttentionTest(parameterized.TestCase):
     sliding_attn_state = nnx.state(sliding_attn)
     nnx.update(global_attn, sliding_attn_state)
 
-    global_attn_output = global_attn(
+    global_attn_output, _ = global_attn(
         lnx,
         lnx,
         decoder_segment_ids=decoder_segment_ids,
@@ -965,7 +984,7 @@ class AttentionTest(parameterized.TestCase):
         model_mode=MODEL_MODE_TRAIN,
     )
 
-    sliding_window_output = sliding_attn(
+    sliding_window_output, _ = sliding_attn(
         lnx,
         lnx,
         decoder_segment_ids=decoder_segment_ids,
@@ -1004,7 +1023,7 @@ class AttentionTest(parameterized.TestCase):
 
     nnx.update(sliding_attn_full_window, sliding_attn_state)
 
-    sliding_window_output_full = sliding_attn_full_window(
+    sliding_window_output_full, _ = sliding_attn_full_window(
         lnx,
         lnx,
         decoder_segment_ids=decoder_segment_ids,
@@ -1025,6 +1044,83 @@ class AttentionTest(parameterized.TestCase):
             atol=1e-04,
         )
     )
+
+  @pytest.mark.skip(reason="Requires `vllm-tpu` package which is not yet a MaxText dependency.")
+  @pytest.mark.tpu_only
+  @mock.patch("tpu_inference.layers.jax.attention_interface.sharded_ragged_paged_attention", create=True)
+  def test_forward_serve_vllm(self, mock_sharded_ragged_paged_attention):
+    """Tests the forward_serve_vllm method with mocked RPA attention."""
+    # Setup config for vLLM RPA
+    vllm_config_arguments = self.config_arguments.copy()
+    vllm_config_arguments["attention"] = "vllm_rpa"
+    vllm_config_arguments["chunk_attn_window_size"] = 128
+    config = pyconfig.initialize(
+        [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
+        **vllm_config_arguments,
+    )
+
+    seq_len = self.max_target_length
+
+    # Create Attention instance
+    dummy_inputs_q = jnp.ones((self.global_batch_size, seq_len, self.embed_dim))
+    dummy_inputs_kv = jnp.ones((self.global_batch_size, seq_len, self.embed_dim))
+    attention_vllm = Attention(
+        config=config,
+        num_query_heads=self.num_query_heads,
+        num_kv_heads=self.num_kv_heads,
+        head_dim=self.head_dim,
+        max_target_length=self.max_target_length,
+        max_prefill_predict_length=self.max_prefill_predict_length,
+        inputs_q_shape=dummy_inputs_q.shape,
+        inputs_kv_shape=dummy_inputs_kv.shape,
+        mesh=self.mesh,
+        attention_kernel="dot_product",
+        dtype=self.dtype,
+        model_mode=MODEL_MODE_AUTOREGRESSIVE,
+        rngs=self.nnx_rng,
+    )
+
+    # Prepare inputs
+    lnx, decoder_segment_ids, decoder_positions = self.get_structured_data(self.dtype)
+    mock_kv_cache = [jnp.ones((1,))]
+
+    mock_attention_metadata = mock.Mock()
+    mock_attention_metadata.seq_lens = jnp.array([1] * self.global_batch_size)
+    mock_attention_metadata.block_tables = jnp.array([[0]] * self.global_batch_size)
+    mock_attention_metadata.query_start_loc = jnp.array(list(range(self.global_batch_size)))
+    mock_attention_metadata.request_distribution = jnp.array([self.global_batch_size])
+
+    # Mock the return value of sharded_ragged_paged_attention
+    total_tokens = self.global_batch_size * seq_len
+    mock_output_shape = (total_tokens, self.num_query_heads, self.head_dim)
+    mock_output = jnp.ones(mock_output_shape, dtype=self.dtype)
+    mock_updated_kv_cache = [jnp.zeros((1,))]
+
+    mock_callable = mock.Mock(return_value=(mock_output, mock_updated_kv_cache))
+    mock_sharded_ragged_paged_attention.return_value = mock_callable
+
+    # Call the attention layer
+    output, updated_kv_cache = attention_vllm(
+        lnx,
+        lnx,
+        decoder_segment_ids=decoder_segment_ids,
+        inputs_positions=decoder_positions,
+        deterministic=True,
+        model_mode=MODEL_MODE_AUTOREGRESSIVE,
+        kv_cache=mock_kv_cache,
+        attention_metadata=mock_attention_metadata,
+    )
+
+    # Assertions
+    mock_sharded_ragged_paged_attention.assert_called_once()
+    mock_callable.assert_called_once()
+    self.assertEqual(updated_kv_cache, mock_updated_kv_cache)
+
+    # The output of forward_serve_vllm is reshaped back to (batch, seq, ...)
+    reshaped_mock_output = mock_output.reshape(self.global_batch_size, seq_len, self.num_query_heads, self.head_dim)
+    expected_output = attention_vllm.out_projection(reshaped_mock_output)
+    self.assertTrue(jnp.allclose(output, expected_output))
+    self.assertEqual(output.shape, (self.global_batch_size, seq_len, self.embed_dim))
 
 
 class MLATest(parameterized.TestCase):
@@ -1048,6 +1144,7 @@ class MLATest(parameterized.TestCase):
   def setUp(self):
     """Initializes the configuration for each test"""
     super().setUp()
+    jax.config.update("jax_remove_size_one_mesh_axis_from_type", True)
     config = pyconfig.initialize(
         [sys.argv[0], os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")],
         **self.config_arguments,
@@ -1145,7 +1242,7 @@ class MLATest(parameterized.TestCase):
     decode_total_length = cfg.max_target_length
     lnx, decoder_segment_ids, decoder_positions = self.get_structured_data(cfg, cfg.dtype)
 
-    mla_full = mla(
+    mla_full, _ = mla(
         lnx,
         lnx,
         decoder_segment_ids=decoder_segment_ids,
@@ -1158,7 +1255,7 @@ class MLATest(parameterized.TestCase):
     decoder_segment_ids_prefill = decoder_segment_ids[:, 0:prefill_length]
     decoder_positions_prefill = decoder_positions[:, 0:prefill_length]
 
-    mla_prefill = mla(
+    mla_prefill, _ = mla(
         lnx_prefill,
         lnx_prefill,
         decoder_segment_ids=decoder_segment_ids_prefill,
@@ -1174,7 +1271,7 @@ class MLATest(parameterized.TestCase):
     for idx in range(prefill_length, decode_total_length):
       lnx_idx = lnx[:, idx : idx + 1, :]
       decoder_positions_idx = decoder_positions[:, idx : idx + 1]
-      mla_idx = mla(
+      mla_idx, _ = mla(
           lnx_idx,
           lnx_idx,
           inputs_positions=decoder_positions_idx,
@@ -1286,9 +1383,14 @@ class MLATest(parameterized.TestCase):
           "expert_shard_attention_option": "context",
       },
   )
+  # TODO (b/454764135.) : This tests fails with new tokamax kernel
   @pytest.mark.tpu_only
   def test_tpu_flash_attention_context_parallel(
-      self, ici_context_parallelism, context_parallel_load_balance, ici_expert_parallelism, expert_shard_attention_option
+      self,
+      ici_context_parallelism,
+      context_parallel_load_balance,
+      ici_expert_parallelism,
+      expert_shard_attention_option,
   ):
     """Test equivalence between dot_product and flash attention + context/expert parallelism"""
 
@@ -1316,7 +1418,7 @@ class MLATest(parameterized.TestCase):
     cfg, mla = self.init_mla(config_arguments, rope_type="default")
     lnx, decoder_segment_ids, decoder_positions = self.get_data(cfg, cfg.dtype)
     # Dot product
-    mla_generic_output = mla(
+    mla_generic_output, _ = mla(
         lnx,
         lnx,
         decoder_segment_ids=decoder_segment_ids,
@@ -1381,7 +1483,7 @@ def _forward_with_context_expert_parallelism(cfg_cp, mesh_cp, attention_cp, lnx,
   if context_parallel_size > 1 and cfg_cp.context_parallel_load_balance:
     batch = {"inputs": lnx, "inputs_segmentation": decoder_segment_ids, "inputs_position": decoder_positions}
     with mesh_cp:
-      reordered_batch = max_utils.get_reorder_callable(context_parallel_size)(batch)
+      reordered_batch = maxtext_utils.get_reorder_callable(context_parallel_size, ShardMode.AUTO)(batch)
     lnx = reordered_batch["inputs"]
     decoder_segment_ids = reordered_batch["inputs_segmentation"]
     decoder_positions = reordered_batch["inputs_position"]
@@ -1400,7 +1502,7 @@ def _forward_with_context_expert_parallelism(cfg_cp, mesh_cp, attention_cp, lnx,
     decoder_segment_ids = jax.device_put(decoder_segment_ids, pos_sharding)
     decoder_positions = jax.device_put(decoder_positions, pos_sharding)
 
-    attention_cp_output = attention_cp(
+    attention_cp_output, _ = attention_cp(
         lnx,
         lnx,
         decoder_segment_ids=decoder_segment_ids,
@@ -1408,6 +1510,8 @@ def _forward_with_context_expert_parallelism(cfg_cp, mesh_cp, attention_cp, lnx,
         deterministic=True,
         model_mode=MODEL_MODE_TRAIN,
     )
+    attention_cp_output = attention_cp_output[0] if isinstance(attention_cp_output, tuple) else attention_cp_output
+
   # If load balanced cp, de-shuffle and gather along seq dim for output
   # Note training does not need post-shuffle. Since the target seq is also pre-shuffled, the loss remains correct
   if context_parallel_size > 1 and cfg_cp.context_parallel_load_balance:

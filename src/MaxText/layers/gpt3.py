@@ -22,7 +22,7 @@ import jax
 from jax import lax
 import jax.numpy as jnp
 from jax.ad_checkpoint import checkpoint_name
-from jax.sharding import Mesh
+from jax.sharding import Mesh, NamedSharding
 
 from flax import linen as nn
 from flax import nnx
@@ -81,7 +81,7 @@ class Gpt3LayerNorm(nnx.Module):
     else:
       self.bias = None
 
-  def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
+  def __call__(self, x: jnp.ndarray, out_sharding: NamedSharding | None = None) -> jnp.ndarray:
     """Applies layer normalization on the input."""
     if self.reductions_in_fp32:
       x = jnp.asarray(x, jnp.float32)
@@ -98,7 +98,13 @@ class Gpt3LayerNorm(nnx.Module):
       scale = jax.device_put(scale, max_utils.device_space())
 
     scale = jnp.asarray(scale, self.dtype)
-    output = normed_inputs * (scale + 1)
+    # broadcast second inputs and element-wise mul
+    output = jnp.einsum(
+        "i...k,...k->i...k",
+        normed_inputs,
+        scale + 1,
+        out_sharding=out_sharding,
+    )
 
     if self.bias is not None:
       bias = self.bias.value
@@ -265,6 +271,8 @@ class Gpt3MultiHeadAttention(nn.Module):
       *,
       model_mode: str = MODEL_MODE_TRAIN,
       deterministic: bool = False,
+      kv_cache: Array | None = None,
+      attention_metadata: dict[str, Any] | None = None,
   ):
     inputs_q = nn.with_logical_constraint(inputs_q, self.input_axis_names)
     if self.fused_qkv:
@@ -306,7 +314,7 @@ class Gpt3MultiHeadAttention(nn.Module):
     # apply output projection,  output dim is set to the input dim.
     out = self.out_projection(inputs_q.shape[-1], out)
     out = checkpoint_name(out, "out_proj")
-    return out
+    return out, kv_cache
 
 
 # -----------------------------------------
@@ -333,6 +341,8 @@ class Gpt3DecoderLayer(nn.Module):
       previous_chunk=None,
       page_state=None,
       slot=None,
+      kv_cache=None,
+      attention_metadata=None,
   ):
     cfg = self.config
     mesh = self.mesh
@@ -375,8 +385,13 @@ class Gpt3DecoderLayer(nn.Module):
         kv_quant=quantizations.configure_kv_quant(cfg),
     )
 
-    attention_lnx = attention_layer(
-        lnx, decoder_segment_ids=decoder_segment_ids, model_mode=model_mode, deterministic=deterministic
+    attention_lnx, kv_cache = attention_layer(
+        lnx,
+        decoder_segment_ids=decoder_segment_ids,
+        model_mode=model_mode,
+        deterministic=deterministic,
+        kv_cache=kv_cache,
+        attention_metadata=attention_metadata,
     )
 
     attention_lnx = nn.with_logical_constraint(
@@ -397,6 +412,7 @@ class Gpt3DecoderLayer(nn.Module):
         use_pre_norm=True,
         config=cfg,
         quant=self.quant,
+        mesh=self.mesh,
     )(attention_lnx, deterministic=deterministic)
     mlp_lnx = nn.with_logical_constraint(mlp_lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
 
@@ -421,4 +437,4 @@ class Gpt3DecoderLayer(nn.Module):
     if cfg.scan_layers:
       return layer_output, None
     else:
-      return layer_output
+      return layer_output, kv_cache

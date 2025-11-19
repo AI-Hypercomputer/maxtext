@@ -29,12 +29,12 @@ This message will often provide the potential cause of a hang. Please provide Go
 
 ## Common Issues
 
-### 1. Inconsistent TPU Programs
+### 1. Fingerprint mismatch
 
-Occasionally, different programs can run on TPU workers within the same system. This can lead to errors. Search your logs for a message like the following:
+Occasionally, an HLO module can be compiled differently across TPU workers within the same system. This can lead to errors. Search your logs for a message like the following:
 
 ```
-Megascale detects a hang that is likely caused by inconsistent TPU programs. This can be caused by some workers running with different JIT functions or a bug in the XLA compiler. Please inspect the HLO dumps to confirm the root cause.
+Megascale detects a hang that is likely caused by inconsistent HLO module compilation across workers. This can be caused by some workers running with different JIT functions or a bug in the XLA compiler. Please inspect the HLO dumps to confirm the root cause.
 
 Example hosts that have different HLO fingerprints: ...
 

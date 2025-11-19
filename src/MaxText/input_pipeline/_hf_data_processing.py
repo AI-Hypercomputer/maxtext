@@ -27,6 +27,7 @@ import grain.python as grain
 import numpy as np
 
 from MaxText.input_pipeline import _input_pipeline_utils
+from MaxText.input_pipeline import instruction_data_processing
 from MaxText import multihost_dataloading
 
 
@@ -57,6 +58,7 @@ def vision_sft_preprocessing_pipeline(
         },
         remove_columns=image_column,  # Drop the original image columns
     )
+    image_column = "images"
 
   dataset = dataset.select_columns(text_columns + [image_column])
   if image_column != "images":
@@ -178,6 +180,7 @@ def preprocessing_pipeline(
     max_target_length,
     shuffle,
     data_shuffle_seed,
+    chat_template_path="",
     add_bos=True,
     add_eos=True,
     packing=True,
@@ -208,10 +211,16 @@ def preprocessing_pipeline(
   if use_sft:
     dataset = dataset.select_columns(data_column_names)
 
-    supported_columns = [["prompt", "completion"], ["messages"]]
+    supported_columns = [["prompt", "completion"], ["messages"], ["question", "answer"]]
     assert any(
         set(data_column_names) == set(supported) for supported in supported_columns
     ), f"Dataset column names mismatch. Expected columns to match one of {supported_columns}, but got {data_column_names}"
+
+    # convert instruction dataset to conversational format
+    dataset, data_column_names = instruction_data_processing.convert_to_conversational_format(
+        dataset=dataset, data_columns=data_column_names, chat_template_path=chat_template_path
+    )
+
     assert _input_pipeline_utils.is_conversational(
         dataset.features, data_column_names
     ), "Dataset is not in conversational format."
@@ -376,6 +385,7 @@ def make_hf_train_iterator(
         use_dpo=config.use_dpo,
         use_sft=config.use_sft,
         sft_train_on_completion_only=config.sft_train_on_completion_only,
+        chat_template_path=config.chat_template_path,
     )
   return train_iter
 
@@ -426,5 +436,6 @@ def make_hf_eval_iterator(
         use_dpo=config.use_dpo,
         use_sft=config.use_sft,
         sft_train_on_completion_only=config.sft_train_on_completion_only,
+        chat_template_path=config.chat_template_path,
     )
   return eval_iter

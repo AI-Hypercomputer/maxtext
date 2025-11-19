@@ -15,10 +15,10 @@
 """ Simple decoder layers for testing and debugging purposes."""
 
 from jax import numpy as jnp
-from jax.sharding import Mesh
+from jax.sharding import Mesh, NamedSharding
 
-from flax import nnx
-from MaxText.common_types import Config
+from flax import nnx, linen as nn
+from MaxText.common_types import Config, ShardMode
 from MaxText.layers import quantizations, nnx_wrappers
 from MaxText.layers.initializers import variable_to_logically_partitioned
 
@@ -51,12 +51,19 @@ class SimpleDecoderLayer(nnx.Module):
         init_fn(self.rngs.params(), (self.config.emb_dim, self.config.emb_dim)),
     )
 
+    activation_axis_names = ("activation_batch", "activation_norm_length", "activation_embed")
+    self.out_sharding = (
+        NamedSharding(self.mesh, nn.logical_to_mesh_axes(activation_axis_names))
+        if config.shard_mode == ShardMode.EXPLICIT
+        else None
+    )
+
   def __call__(
       self, inputs: jnp.ndarray, positions, segmentation, deterministic, model_mode, previous_chunk=None, page_state=None
   ):
     if self.config.scan_layers:
-      return inputs @ self.weights.astype(inputs.dtype), None
-    return inputs @ self.weights.astype(inputs.dtype)
+      return jnp.dot(inputs, self.weights.astype(inputs.dtype), out_sharding=self.out_sharding), None
+    return jnp.dot(inputs, self.weights.astype(inputs.dtype), out_sharding=self.out_sharding)
 
 
 SimpleDecoderLayerToLinen = nnx_wrappers.to_linen_class(
@@ -95,6 +102,17 @@ class SimpleMlpDecoderLayer(nnx.Module):
         init_ff2_fn(self.rngs.params(), (self.config.mlp_dim, self.config.emb_dim)),
     )
 
+    activation_axes_names = ("activation_batch", "activation_norm_length", "activation_embed")
+    self.activation_sharding = (
+        NamedSharding(mesh, nn.logical_to_mesh_axes(activation_axes_names))
+        if config.shard_mode == ShardMode.EXPLICIT
+        else None
+    )
+    mlp_axes_names = ("activation_batch", "activation_norm_length", "activation_mlp")
+    self.mlp_sharding = (
+        NamedSharding(mesh, nn.logical_to_mesh_axes(mlp_axes_names)) if config.shard_mode == ShardMode.EXPLICIT else None
+    )
+
   def __call__(
       self,
       inputs: jnp.ndarray,
@@ -106,8 +124,8 @@ class SimpleMlpDecoderLayer(nnx.Module):
       page_state=None,
       slot=0,
   ):
-    intermediate = inputs @ self.ff_1.astype(inputs.dtype)
-    output = intermediate @ self.ff_2.astype(inputs.dtype)
+    intermediate = jnp.dot(inputs, self.ff_1.astype(inputs.dtype), out_sharding=self.mlp_sharding)
+    output = jnp.dot(intermediate, self.ff_2.astype(inputs.dtype), out_sharding=self.activation_sharding)
     if self.config.scan_layers:
       return output, None
     return output

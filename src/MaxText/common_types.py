@@ -100,3 +100,8 @@ class AttentionType(enum.Enum):
   CHUNK = "chunk"
   MLA = "mla"
   FULL = "full"
+
+
+class ShardMode(enum.Enum):
+  AUTO = "auto"  # default
+  EXPLICIT = "explicit"

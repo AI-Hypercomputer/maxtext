@@ -1,0 +1,77 @@
+# Copyright 2023–2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+base_config: "base.yml"
+
+logical_axis_rules: [
+                      ['prefill_activation_length', ['data']],
+                      ['prefill_activation_norm_length', ['data']],
+                      ['activation_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
+                      ['activation_batch_no_exp', ['data', 'fsdp', 'fsdp_transpose']],
+                      ['activation_embed_and_logits_batch', ['data', 'stage', 'fsdp', 'fsdp_transpose', 'expert']],
+                      ['activation_heads', ['tensor', 'tensor_transpose', 'sequence','tensor_sequence']],
+                      ['activation_kv_heads', ['tensor', 'tensor_transpose', 'sequence','tensor_sequence']],
+                      ['activation_length', ['context_autoregressive', 'sequence']],
+                      ['activation_length', ['context_autoregressive']],
+                      ['activation_q_length', ['context_autoregressive']],
+                      ['activation_kv_length', ['context_autoregressive']],
+                      ['activation_norm_length', ['tensor_sequence', 'sequence']],
+                      ['activation_embed', ['tensor_transpose']],
+                      ['activation_mlp', ['tensor', 'tensor_transpose', 'tensor_sequence']],
+                      ['activation_kv', ['tensor', 'tensor_transpose', 'tensor_sequence']],
+                      ['activation_prefill_kv_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
+                      ['activation_kv_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert', 'context_autoregressive']],
+                      ['activation_kv_head_dim', ['tensor', 'tensor_transpose', 'tensor_sequence']],
+                      ['activation_vocab', ['tensor', 'tensor_transpose', 'sequence', 'tensor_sequence']],
+                      ['activation_vocab', ['tensor', 'tensor_transpose']],
+                      ['activation_vocab', 'tensor_sequence'],
+                      ['activation_vocab', ['sequence', 'context_autoregressive']],
+                      ['activation_stage', 'stage'],
+                      ['activation_exp', ['expert', 'context_autoregressive']],
+                      ['decode_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert', 'context_autoregressive']],
+                      ['decode_length', []],
+                      ['mlp', ['fsdp_transpose', 'tensor', 'tensor_sequence', 'autoregressive']],
+                      ['vocab', ['tensor', 'tensor_transpose', 'tensor_sequence', 'autoregressive','context_autoregressive']],
+                      ['heads', ['tensor', 'tensor_transpose', 'tensor_sequence', 'autoregressive']],
+                      ['q_heads', ['tensor', 'tensor_transpose', 'tensor_sequence', 'autoregressive']],
+                      ['kv_heads', ['tensor', 'tensor_transpose', 'tensor_sequence', 'autoregressive']],
+                      ['embed', ['fsdp', 'fsdp_transpose', 'sequence', 'tensor_transpose', 'expert']],
+                      ['embed', ['fsdp', 'sequence', 'tensor_transpose', 'expert']],
+                      ['embed', ['fsdp', 'fsdp_transpose', 'sequence', 'expert']],
+                      ['embed', ['fsdp', 'sequence', 'expert']],
+                      ['embed_no_exp', ['fsdp', 'fsdp_transpose', 'sequence', 'context_autoregressive', 'tensor_transpose']],
+                      ['embed_no_exp', ['fsdp', 'sequence', 'context_autoregressive', 'tensor_transpose']],
+                      ['embed_no_exp', ['fsdp', 'fsdp_transpose', 'sequence', 'context_autoregressive']],
+                      ['embed_no_exp', ['fsdp', 'sequence', 'context_autoregressive']],
+                      ['norm', ['tensor', 'tensor_transpose', 'tensor_sequence']],
+                      ['layers', 'stage'],
+                      ['kv', []],
+                      ['kv_head_dim', []],
+                      ['cache_batch_prefill', []],
+                      ['cache_batch', ['context_autoregressive']],
+                      ['cache_heads', ['autoregressive', 'tensor', 'tensor_transpose', 'tensor_sequence']],
+                      ['cache_heads', ['autoregressive', 'tensor', 'tensor_sequence']],
+                      ['cache_kv', []],
+                      ['cache_sequence', ['context_autoregressive']],
+                      ['cache_scale_sequence', ['context_autoregressive']],
+                      ['exp', ['expert', 'context_autoregressive']],
+                      ['paged_kv_heads', []],
+                      ['num_pages', ['tensor']],
+                      ['tokens_per_page', []],
+                      ['paged_kv_head_dim_size', []],
+                    ]
+# Axes used for DCN must be earlier in this list than ICI, see (b/339009148) for details
+data_sharding: [['data', 'stage', 'fsdp', 'fsdp_transpose', 'sequence', 'context_autoregressive', 'tensor', 'tensor_transpose', 'tensor_sequence', 'expert', 'autoregressive']]
+
+return_log_prob: True

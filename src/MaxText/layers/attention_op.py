@@ -11,32 +11,39 @@
 #  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
-
+#  pytype: disable=module-attr
 """Attentions Ops Layers."""
-
+import dataclasses
 import functools
 from typing import Any, Callable, Optional, Tuple
 from functools import partial
 import math
 
 import numpy as np
-from packaging import version
 
+import jax
 from jax import lax
 from jax.ad_checkpoint import checkpoint_name
 from jax.experimental.pallas.ops.gpu import attention as gpu_pallas_attention
 from jax.experimental.pallas.ops.gpu import decode_attention as gpu_pallas_decode_attention
+from jax.experimental import pallas as pl
+from jax.sharding import Mesh, NamedSharding
+import jax.numpy as jnp
+
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_kernel
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask
-from jax.sharding import Mesh
-import jax
-import jax.numpy as jnp
+
+from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_kernel as tokamax_splash_kernel
+from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_mask as tokamax_splash_mask
+
 
 from flax import linen as nn
 from flax import nnx
 from flax.linen import partitioning
 
+
 from MaxText import max_utils
+from MaxText.sharding import maybe_shard_with_name
 from MaxText.common_types import (
     DEFAULT_MASK_VALUE,
     BATCH,
@@ -466,6 +473,7 @@ class AttentionOp(nnx.Module):
     self.chunk_attn_window_size = chunk_attn_window_size
     self.use_ragged_attention = use_ragged_attention
     self.ragged_block_size = ragged_block_size
+    self.rngs = rngs
 
     def maybe_create_nnx(einsum, *args):
       if isinstance(einsum, nn.Module):
@@ -839,11 +847,14 @@ class AttentionOp(nnx.Module):
         raise NotImplementedError(target_hardware)
       return impl(query, key, value, lengths, self.ragged_block_size)
 
+    # 'vllm_rpa' uses the same dot-attention wrapper but routes to the vLLM
+    # ragged paged attention kernel in `Attention.__call__`.
     elif (
         self.attention_kernel == "dot_product"
         or (self.attention_kernel == "autoselected" and model_mode == MODEL_MODE_AUTOREGRESSIVE)
         or (self.attention_kernel == "autoselected" and length < 128)
         or (self.attention_kernel == "paged")
+        or (self.attention_kernel == "vllm_rpa")
     ):
       return self.apply_attention_dot(
           query,
@@ -1080,27 +1091,62 @@ class AttentionOp(nnx.Module):
         f" got {query.shape[0]=}/{devices_in_data_fsdp=}"
     )
 
-    # create_splash_attention kernel
-    block_sizes = splash_attention_kernel.BlockSizes(
-        block_q=min(global_block_q, query.shape[2]),
-        block_kv=min(global_block_kv, key.shape[2]),
-        block_kv_compute=min(global_block_kv_compute, key.shape[2]),
-        block_q_dkv=min(global_block_q_dkv, query.shape[2]),
-        block_kv_dkv=min(global_block_kv_dkv, key.shape[2]),
-        block_kv_dkv_compute=min(global_block_kv_dkv_compute, query.shape[2]),
-        block_q_dq=None if global_use_fused_bwd_kernel else min(global_block_q_dq, query.shape[2]),
-        block_kv_dq=None if global_use_fused_bwd_kernel else min(global_block_kv_dq, query.shape[2]),
-        use_fused_bwd_kernel=global_use_fused_bwd_kernel,
-        q_layout=splash_attention_kernel.QKVLayout[global_q_layout],
-        k_layout=splash_attention_kernel.QKVLayout[global_k_layout],
-        v_layout=splash_attention_kernel.QKVLayout[global_v_layout],
-    )
+    # create_splash_attention config
+    def create_sa_config(config, query, key, attn_logits_soft_cap):
+      if config.use_tokamax_splash:
+        sa_config = tokamax_splash_kernel.SplashConfig(
+            block_q=min(global_block_q, query.shape[2]),
+            block_kv=min(global_block_kv, key.shape[2]),
+            block_kv_compute=min(global_block_kv_compute, key.shape[2]),
+            block_q_dkv=min(global_block_q_dkv, query.shape[2]),
+            block_kv_dkv=min(global_block_kv_dkv, key.shape[2]),
+            block_kv_dkv_compute=min(global_block_kv_dkv_compute, query.shape[2]),
+            use_fused_bwd_kernel=True,  # tokamax only supports fused bwd kernel
+            q_layout=tokamax_splash_kernel.QKVLayout[global_q_layout],
+            k_layout=tokamax_splash_kernel.QKVLayout[global_k_layout],
+            v_layout=tokamax_splash_kernel.QKVLayout[global_v_layout],
+            attn_logits_soft_cap=attn_logits_soft_cap,
+            residual_checkpoint_name="context",
+            fwd_cost_estimate=pl.CostEstimate(
+                flops=config.cost_estimate_flops_fwd,
+                transcendentals=0,
+                bytes_accessed=0,
+            )
+            if config.cost_estimate_flops_fwd >= 0
+            else None,
+            bwd_cost_estimate=pl.CostEstimate(
+                flops=config.cost_estimate_flops_bwd,
+                transcendentals=0,
+                bytes_accessed=0,
+            )
+            if config.cost_estimate_flops_bwd >= 0
+            else None,
+            dq_reduction_steps=config.dq_reduction_steps if config.dq_reduction_steps > 0 else None,
+        )
+      else:
+        sa_config = splash_attention_kernel.BlockSizes(
+            block_q=min(global_block_q, query.shape[2]),
+            block_kv=min(global_block_kv, key.shape[2]),
+            block_kv_compute=min(global_block_kv_compute, key.shape[2]),
+            block_q_dkv=min(global_block_q_dkv, query.shape[2]),
+            block_kv_dkv=min(global_block_kv_dkv, key.shape[2]),
+            block_kv_dkv_compute=min(global_block_kv_dkv_compute, query.shape[2]),
+            block_q_dq=None if global_use_fused_bwd_kernel else min(global_block_q_dq, query.shape[2]),
+            block_kv_dq=None if global_use_fused_bwd_kernel else min(global_block_kv_dq, query.shape[2]),
+            use_fused_bwd_kernel=global_use_fused_bwd_kernel,
+            q_layout=splash_attention_kernel.QKVLayout[global_q_layout],
+            k_layout=splash_attention_kernel.QKVLayout[global_k_layout],
+            v_layout=splash_attention_kernel.QKVLayout[global_v_layout],
+        )
+      return sa_config
 
+    sa_config = create_sa_config(self.config, query, key, attn_logits_soft_cap)
     mask_shape = (query.shape[2], key.shape[2])  # (q_seq_len, kv_seq_len)
+    mask_module = tokamax_splash_mask if self.config.use_tokamax_splash else splash_attention_mask
     if self.attention_type == AttentionType.FULL:
-      mask = splash_attention_mask.FullMask(mask_shape)
+      mask = mask_module.FullMask(mask_shape)
     else:
-      mask = splash_attention_mask.CausalMask(shape=mask_shape)
+      mask = mask_module.CausalMask(shape=mask_shape)
 
     # Create LoadBalancedCausalMask if cp and load_balancing
     if cp_size > 1 and load_balanced_context_parallel:
@@ -1111,7 +1157,7 @@ class AttentionOp(nnx.Module):
     if self.attention_type == AttentionType.LOCAL_SLIDING:
       if self.sliding_window_size is None:
         raise ValueError("Sliding_window_size must be set if Local Sliding attention type")
-      mask &= splash_attention_mask.LocalMask(
+      mask &= mask_module.LocalMask(
           shape=(query.shape[2], key.shape[2]),
           window_size=(self.sliding_window_size, self.sliding_window_size),
           offset=0,
@@ -1122,35 +1168,68 @@ class AttentionOp(nnx.Module):
 
       mask &= ChunkedCausalMask(shape=(query.shape[2], key.shape[2]), chunk_size=self.chunk_attn_window_size)
 
-    # Create multi-head mask
-    multi_head_mask = splash_attention_mask.MultiHeadMask(masks=(mask,) * query.shape[1])
+    max_logit_value = None
+    if self.config.use_tokamax_splash:
+      # Create mask
+      single_head_mask = mask  # tokamax now just uses a single mask and assumes broadcast to all heads
+      if self.config.use_max_logit_estimate > 0:
+        sa_config = dataclasses.replace(sa_config, max_logit_const=self.config.use_max_logit_estimate)
 
-    # Create the splash attention kernel object separately, jit it for performance
-    @partial(
-        jax.jit,
-        static_argnames=[
-            "multi_head_mask",
-            "shard_head_size",
-        ],
-    )
-    def wrap_splash_kernel(multi_head_mask, shard_head_size=1):
-      splash_kernel = splash_attention_kernel.make_splash_mha(
-          mask=multi_head_mask,
-          head_shards=shard_head_size,  # the size of the axis if sharding over heads
-          q_seq_shards=cp_size,  # axis for sequence sharding
-          block_sizes=block_sizes,
-          attn_logits_soft_cap=attn_logits_soft_cap,
-          residual_checkpoint_name="context",
+      # Create the splash attention kernel object separately, jit it for performance
+      @partial(
+          jax.jit,
+          static_argnames=[
+              "single_head_mask",
+              "shard_head_size",
+          ],
       )
-      return splash_kernel
+      def wrap_splash_kernel(single_head_mask, shard_head_size=1):
+        splash_kernel = tokamax_splash_kernel.make_splash_mha(
+            mask=single_head_mask,
+            config=sa_config,
+            q_seq_shards=cp_size,  # axis for sequence sharding,
+        )
+        return splash_kernel
 
-    logical_axis_rules_head = np.array(
-        [self.mesh.shape[physical_axes] for physical_axes in dict(self.config.logical_axis_rules)[HEAD]]
-    )
-    shard_head_size = np.prod(logical_axis_rules_head)
-    splash_kernel = wrap_splash_kernel(multi_head_mask, int(shard_head_size))
-    named_sharding = jax.sharding.NamedSharding(self.mesh, axis_names_splash_kernel)
-    segment_axis_names_splash_kernel = splash_kernel.manual_sharding_spec(named_sharding)
+      logical_axis_rules_head = np.array(
+          [self.mesh.shape[physical_axes] for physical_axes in dict(self.config.logical_axis_rules)[HEAD]]
+      )
+      shard_head_size = np.prod(logical_axis_rules_head)
+      splash_kernel = wrap_splash_kernel(single_head_mask, int(shard_head_size))
+      if self.config.expert_shard_attention_option == EP_AS_CONTEXT:
+        segment_axis_names_splash_kernel = nn.logical_to_mesh_axes((Q_LENGTH,))
+      else:
+        segment_axis_names_splash_kernel = nn.logical_to_mesh_axes((Q_LENGTH_NO_EXP,))
+    else:
+      # Create multi-head mask
+      multi_head_mask = splash_attention_mask.MultiHeadMask(masks=(mask,) * query.shape[1])
+
+      # Create the splash attention kernel object separately, jit it for performance
+      @partial(
+          jax.jit,
+          static_argnames=[
+              "multi_head_mask",
+              "shard_head_size",
+          ],
+      )
+      def wrap_splash_kernel(multi_head_mask, shard_head_size=1):
+        splash_kernel = splash_attention_kernel.make_splash_mha(
+            mask=multi_head_mask,
+            head_shards=shard_head_size,  # the size of the axis if sharding over heads
+            q_seq_shards=cp_size,  # axis for sequence sharding
+            block_sizes=sa_config,
+            attn_logits_soft_cap=attn_logits_soft_cap,
+            residual_checkpoint_name="context",
+        )
+        return splash_kernel
+
+      logical_axis_rules_head = np.array(
+          [self.mesh.shape[physical_axes] for physical_axes in dict(self.config.logical_axis_rules)[HEAD]]
+      )
+      shard_head_size = np.prod(logical_axis_rules_head)
+      splash_kernel = wrap_splash_kernel(multi_head_mask, int(shard_head_size))
+      named_sharding = jax.sharding.NamedSharding(self.mesh, axis_names_splash_kernel)
+      segment_axis_names_splash_kernel = splash_kernel.manual_sharding_spec(named_sharding)
 
     # Now call the function wrap_flash_attention which does the actual computation.
     # The splash kernel is passed as a parameter to the function. Since we have the shard map
@@ -1210,21 +1289,40 @@ class AttentionOp(nnx.Module):
           decoder_segment_ids_tuple = splash_attention_kernel.SegmentIds(decoder_segment_ids_q, decoder_segment_ids_kv)
       else:
         decoder_segment_ids_tuple = None
-      # TODO(ranran): remove if/else branch once b/441336842 is fixed
-      if version.parse(jax.__version__) < version.parse("0.7.2.dev20250824"):
-        attention_output = jax.vmap(splash_kernel)(query, key, value, decoder_segment_ids_tuple)
+
+      if self.config.use_tokamax_splash:
+        if max_logit_value is not None:
+          attention_output = jax.vmap(partial(splash_kernel, max_logit_value=max_logit_value))(
+              query, key, value, decoder_segment_ids_tuple
+          )
+        else:
+          attention_output = jax.vmap(splash_kernel)(query, key, value, decoder_segment_ids_tuple)
       else:
         attention_output = jax.vmap(splash_kernel, in_axes=(0, 0, 0, 0, None))(
             query, key, value, decoder_segment_ids_tuple, sinks
         )
       return attention_output
 
+    def _maybe_shard_with_pspec(inputs, pspec: jax.sharding.PartitionSpec | None):
+      # decoder_segment_ids can be None
+      if pspec is None:
+        return None
+      sharding = NamedSharding(self.mesh, pspec)
+      return maybe_shard_with_name(inputs, sharding, shard_mode=self.config.shard_mode)
+
+    query = _maybe_shard_with_pspec(query, axis_names_q)
+    key = _maybe_shard_with_pspec(key, axis_names_kv)
+    value = _maybe_shard_with_pspec(value, axis_names_kv)
+    decoder_segment_ids_q = _maybe_shard_with_pspec(decoder_segment_ids, segment_axis_names_q)
+    decoder_segment_ids_kv = _maybe_shard_with_pspec(decoder_segment_ids, segment_axis_names_kv)
+    sinks = _maybe_shard_with_pspec(sinks, sink_axis_names)
+
     x = wrap_flash_attention(
         query,
         key,
         value,
-        decoder_segment_ids,
-        decoder_segment_ids,
+        decoder_segment_ids_q,
+        decoder_segment_ids_kv,
         splash_kernel,
         cp_size,
         load_balanced_context_parallel,
@@ -1244,32 +1342,50 @@ class AttentionOp(nnx.Module):
       model_mode: str = MODEL_MODE_TRAIN,
   ) -> Array:
     """CUDNN Flash Attention with Transformer Engine.
-    1. Stable API, supports GQA, SWA (only with causal masking)
-    2. Head_dim = 256 is also supported from TE-1.12 stable release with CUDNN 12.6
+    1. Stable API, supports MHA, GQA, SWA, Packing and Context Parallelism
+    2. Context Parallelism currently only supports causal masking and no packing
     """
     # These imports are only meant to work in a GPU build.
     # pylint: disable=import-outside-toplevel
     from transformer_engine.jax.flax.transformer import DotProductAttention  # pytype: disable=import-error
+    from transformer_engine.jax.attention import SequenceDescriptor  # pytype: disable=import-error
 
     _, _, _, head_dim = query.shape  # pylint: disable=unused-variable
 
     using_context_parallelism = self.mesh.shape["context"] > 1
 
-    if self.attention_type == AttentionType.LOCAL_SLIDING and using_context_parallelism:
-      raise AssertionError("Sliding window attention is not supported when context parallelism is enabled")
-
+    # Initialize default attention configuration
     sliding_window_size = None
+    mask_type = "padding_causal"
+    qkv_layout = "BSHD_BSHD_BSHD"  # Non-packed format: 'BS3HD', 'BSHD_BS2HD' or 'BSHD_BSHD_BSHD'
+    max_segments_per_seq = 1  # max number of segments per sequence; for non-packed its 1
 
-    if self.attention_type == AttentionType.LOCAL_SLIDING or not self.config.enable_padding_causal_mask:
+    # Handle local sliding window attention if configured
+    if self.attention_type == AttentionType.LOCAL_SLIDING:
       sliding_window_size = [self.sliding_window_size, 0]
 
-    if self.attention_type == AttentionType.LOCAL_SLIDING or using_context_parallelism:
-      mask_type = "causal"  # SWA and Context Parallelism only work with causal masking
+    # Handle packing configurations
+    if self.config.packing and self.config.dataset_type != "synthetic":
+      qkv_layout = "THD_THD_THD"  # Packed format: 'T3HD', 'THD_T2HD' or 'THD_THD_THD'
+      if decoder_segment_ids is None:
+        decoder_segment_ids = jnp.ones(shape=query.shape[:2], dtype=jnp.int32)
+      attn_mask = SequenceDescriptor.from_segment_ids_and_pos(segment_ids=decoder_segment_ids, segment_pos=None)
+      # Create dummy SequenceDescriptor for lazy_init
+      dummy_segment_ids = jnp.ones(shape=query.shape[:2], dtype=jnp.int32)
+      dummy_attn_mask = SequenceDescriptor.from_segment_ids_and_pos(segment_ids=dummy_segment_ids, segment_pos=None)
+      max_segments_per_seq = self.config.max_segments_per_seq
+    elif using_context_parallelism:
+      if self.attention_type == AttentionType.LOCAL_SLIDING:
+        raise AssertionError("Sliding window attention is not supported for context parallelism")
+      # Context parallelism without packing: only supports causal masking
       attn_mask = None
+      dummy_attn_mask = None
+      mask_type = "causal"
     else:
-      # generate attn_mask
-      mask_type = "padding_causal"  # only padding_causal mask type can take a created mask
+      # Default case: no packing, no context parallelism
+      dummy_attn_mask = jnp.zeros((1, 1, 1, self.max_target_length, self.max_target_length), dtype=jnp.uint8)
       attn_mask = self.generate_attention_mask(query, key, decoder_segment_ids, model_mode)
+      attn_mask = jnp.where((attn_mask >= DEFAULT_MASK_VALUE * 0.5), 0, 1).astype(jnp.uint8)
 
     dpa_layer = DotProductAttention(
         head_dim=head_dim,
@@ -1281,14 +1397,27 @@ class AttentionOp(nnx.Module):
         dropout_rng_name="aqt",
         dtype=self.dtype,
         float32_logits=self.float32_logits,
-        qkv_layout="BSHD_BSHD_BSHD",  # 'BS3HD', 'BSHD_BS2HD' or 'BSHD_BSHD_BSHD'
+        qkv_layout=qkv_layout,
         scale_factor=1.0,
         transpose_batch_sequence=False,
         window_size=sliding_window_size,
         context_parallel_causal_load_balanced=self.config.context_parallel_load_balance,
         context_parallel_axis="context",
+        context_parallel_strategy=self.config.context_parallel_strategy,
+        max_segments_per_seq=max_segments_per_seq,
     )
-    return dpa_layer(query, key, value, mask=attn_mask)
+
+    dpa_layer = nnx_wrappers.ToNNX(dpa_layer, rngs=self.rngs)
+    dummy_query_prefill = jnp.zeros(
+        (1, self.max_target_length, self.num_query_heads, self.config.head_dim), dtype=self.dtype
+    )
+    dummy_key_prefill = jnp.zeros((1, self.max_target_length, self.num_kv_heads, self.config.head_dim), dtype=self.dtype)
+    dummy_value_prefill = jnp.zeros(
+        (1, self.max_target_length, self.num_kv_heads, self.config.head_dim), dtype=self.dtype
+    )
+
+    dpa_layer.lazy_init(dummy_query_prefill, dummy_key_prefill, dummy_value_prefill, sequence_descriptor=dummy_attn_mask)
+    return dpa_layer(query, key, value, sequence_descriptor=attn_mask)
 
   def cudnn_jax_flash_attention(
       self,

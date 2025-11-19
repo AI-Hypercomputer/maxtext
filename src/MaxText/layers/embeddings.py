@@ -20,13 +20,14 @@ import math
 import jax
 from jax import lax
 import jax.numpy as jnp
+from jax.sharding import Mesh, NamedSharding
 
 from flax import linen as nn
 from flax import nnx
 
 from MaxText import max_logging
 from MaxText import max_utils
-from MaxText.common_types import MODEL_MODE_PREFILL, MODEL_MODE_TRAIN, Array, Config, DType
+from MaxText.common_types import ShardMode, MODEL_MODE_PREFILL, MODEL_MODE_TRAIN, Array, Config, DType
 from MaxText.layers import nnx_wrappers
 from MaxText.layers.initializers import Initializer, default_embed_init, variable_to_logically_partitioned
 
@@ -46,6 +47,7 @@ def embed_as_linen(
     num_embeddings: int,
     num_features: int,
     config: Config,
+    mesh: Mesh,
     cast_input_dtype: None | DType = None,
     dtype: DType = jnp.float32,
     attend_dtype: None | DType = None,
@@ -76,6 +78,7 @@ def embed_as_linen(
       num_embeddings=num_embeddings,
       num_features=num_features,
       config=config,
+      mesh=mesh,
       cast_input_dtype=cast_input_dtype,
       dtype=dtype,
       attend_dtype=attend_dtype,
@@ -93,6 +96,7 @@ class Embed(nnx.Module):
       num_embeddings: int,
       num_features: int,
       config: Config,
+      mesh: Mesh,
       cast_input_dtype: None | DType = None,
       dtype: DType = jnp.float32,
       attend_dtype: None | DType = None,
@@ -117,12 +121,17 @@ class Embed(nnx.Module):
     self.num_embeddings = num_embeddings
     self.num_features = num_features
     self.config = config
+    self.mesh = mesh
     self.cast_input_dtype = cast_input_dtype
     self.dtype = dtype
     self.attend_dtype = attend_dtype
 
     self.embedding = nnx.Param(
-        embedding_init(rngs.params(), (self.num_embeddings, self.num_features), self.config.weight_dtype),
+        embedding_init(
+            rngs.params(),
+            (self.num_embeddings, self.num_features),
+            self.config.weight_dtype,
+        ),
         sharding=("vocab", "embed"),
     )
 
@@ -142,30 +151,44 @@ class Embed(nnx.Module):
     if not jnp.issubdtype(inputs.dtype, jnp.integer):
       raise ValueError("Input type must be an integer or unsigned integer.")
 
-    embedding = _maybe_move_embedding_to_device(self.embedding.value, self.config)
+    embedding = jnp.asarray(
+        _maybe_move_embedding_to_device(self.embedding.value, self.config),
+        self.dtype,
+    )
+
+    output_axis_names = (
+        (
+            "activation_embed_and_logits_batch",
+            "prefill_activation_length",
+            "activation_embed",
+        )
+        if model_mode == MODEL_MODE_PREFILL
+        else (
+            "activation_embed_and_logits_batch",
+            "activation_length_no_exp",
+            "activation_embed",
+        )
+    )
+    out_pspec = nn.logical_to_mesh_axes(output_axis_names)
+
+    out_sharding = NamedSharding(self.mesh, out_pspec) if self.config.shard_mode == ShardMode.EXPLICIT else None
 
     if cfg.use_iota_embed:
       iota = lax.iota(jnp.int32, self.num_embeddings)
       one_hot = jnp.array(inputs[..., jnp.newaxis] == iota, dtype=self.dtype)
-      output = jnp.dot(one_hot, jnp.asarray(embedding, self.dtype))
+      output = jnp.dot(one_hot, embedding, out_sharding=out_sharding)
     else:
-      output = jnp.asarray(embedding, self.dtype)[inputs]
+      output = embedding.at[inputs].get(out_sharding=out_sharding)
 
-    output_prefill_axis_names = ("activation_embed_and_logits_batch", "prefill_activation_length", "activation_embed")
-    output_default_axis_names = ("activation_embed_and_logits_batch", "activation_length_no_exp", "activation_embed")
-
-    if model_mode == MODEL_MODE_PREFILL:
-      output = nn.with_logical_constraint(output, output_prefill_axis_names)
-    else:
-      output = nn.with_logical_constraint(output, output_default_axis_names)
     return output
 
-  def attend(self, query: Array) -> Array:
+  def attend(self, query: Array, out_sharding: NamedSharding | None = None) -> Array:
     """Attend over the embedding using a query array.
 
     Args:
       query: array with last dimension equal the feature depth `num_features` of the
         embedding.
+      out_sharding: NamedSharding object indicating how the output gets sharded
 
     Returns:
       An array with final dim `num_embeddings` corresponding to the batched
@@ -175,10 +198,16 @@ class Embed(nnx.Module):
     """
     embedding = self.embedding.value
     attend_dtype = self.attend_dtype if self.attend_dtype is not None else self.dtype
-    return attend_on_embedding(query, embedding, attend_dtype, self.config)
+    return attend_on_embedding(query, embedding, attend_dtype, self.config, out_sharding)
 
 
-def attend_on_embedding(query: Array, embedding_table: Array, attend_dtype: DType, config: Config) -> Array:
+def attend_on_embedding(
+    query: Array,
+    embedding_table: Array,
+    attend_dtype: DType,
+    config: Config,
+    out_sharding: NamedSharding | None = None,
+) -> Array:
   """Attend over an embedding table using a query array.
 
   TODO: Remove this method when Embed bridge to Linen is no longer needed
@@ -188,13 +217,22 @@ def attend_on_embedding(query: Array, embedding_table: Array, attend_dtype: DTyp
     embedding_table: The embedding table to attend over.
     attend_dtype: The data type for the attention computation.
     config: The model configuration, used to check for parameter offloading.
+    out_sharding: NamedSharding object indicating the output sharding
 
   Returns:
     An array with a final dimension equal to `num_embeddings`, corresponding to the
     batched inner-product of the query vectors against each embedding.
   """
+  # out_sharding must be None under auto shard_mode
+  if config.shard_mode != ShardMode.EXPLICIT:
+    out_sharding = None
   embedding_table = _maybe_move_embedding_to_device(embedding_table, config)
-  return jnp.dot(query, jnp.asarray(embedding_table, jnp.bfloat16).T, preferred_element_type=attend_dtype)
+  return jnp.dot(
+      query,
+      jnp.asarray(embedding_table, jnp.bfloat16).T,
+      preferred_element_type=attend_dtype,
+      out_sharding=out_sharding,
+  )
 
 
 def rotary_embedding_as_linen(
@@ -352,6 +390,97 @@ def llama_rotary_embedding_as_linen(
       metadata_fn=variable_to_logically_partitioned,
       name=name,
   )
+
+
+def qwen3_next_rotary_embedding_as_linen(
+    *,
+    min_timescale: int,
+    max_timescale: int,
+    embedding_dims: int = 0,
+    partial_rotary_factor: float = 0.25,
+    cast_as_fprop_dtype: bool = True,
+    fprop_dtype: DType = jnp.bfloat16,
+    name: str | None = None,
+):
+  """Initializes the Qwen3NextRotaryEmbedding module and returns it as a Linen module.
+
+  Args:
+    min_timescale: Start of the geometric index. Determines the periodicity of
+      the added signal.
+    max_timescale: End of the geometric index. Determines the frequency of the
+      added signal.
+    embedding_dims: Dimension of the embedding to be generated.
+    partial_rotary_factor: Ratio of dimensions to apply ROPE to.
+    cast_as_fprop_dtype: Whether to cast the output to the fprop dtype.
+    fprop_dtype: The dtype of the output.
+    name: Name of the Linen module.
+  """
+  return nnx_wrappers.to_linen(
+      Qwen3NextRotaryEmbedding,
+      min_timescale=min_timescale,
+      max_timescale=max_timescale,
+      embedding_dims=embedding_dims,
+      partial_rotary_factor=partial_rotary_factor,
+      cast_as_fprop_dtype=cast_as_fprop_dtype,
+      fprop_dtype=fprop_dtype,
+      metadata_fn=variable_to_logically_partitioned,
+      name=name,
+  )
+
+
+class Qwen3NextRotaryEmbedding(RotaryEmbedding):
+  """Qwen3 Next variant of ROPE (partial ROPE)"""
+
+  def __init__(
+      self,
+      min_timescale: int,
+      max_timescale: int,
+      embedding_dims: int = 0,
+      cast_as_fprop_dtype: bool = True,
+      fprop_dtype: DType = jnp.bfloat16,
+      partial_rotary_factor: float = 0.25,
+      rngs: nnx.Rngs = None,
+  ):
+    """Initializes the Qwen3NextRotaryEmbedding module.
+
+    Args:
+      min_timescale: Start of the geometric index. Determines the periodicity of
+        the added signal.
+      max_timescale: End of the geometric index. Determines the frequency of the
+        added signal.
+      embedding_dims: Dimension of the embedding to be generated.
+      partial_rotary_factor: Ratio of dimensions to apply ROPE to
+      rngs: rng keys passed in by nnx.bridge.to_linen.
+    """
+    self.head_dim = embedding_dims
+    self.partial_rotary_factor = partial_rotary_factor
+    self.rotary_dim = int(self.head_dim * self.partial_rotary_factor)
+
+    super().__init__(
+        min_timescale=min_timescale,
+        max_timescale=max_timescale,
+        embedding_dims=self.rotary_dim,
+        cast_as_fprop_dtype=cast_as_fprop_dtype,
+        fprop_dtype=fprop_dtype,
+        rngs=rngs,
+    )
+
+  def __call__(self, inputs: jax.Array, position: None | jax.Array = None) -> jax.Array:
+    """Applies LLaMA variant of rotary position embedding.
+
+    Args:
+      inputs: The input sequence on which to apply the Rotary position
+        embedding. It is assumed of shape [B, S, H, D].
+      position: Optional position array [B, S]. Only needed when the sequence
+        is packed.
+
+    Returns:
+      A jax.Array of shape [B, S, H, D - rotary_dim] with rotary position embeddings applied.
+    """
+    inputs_rot, inputs_pass = jnp.split(inputs, [self.rotary_dim], axis=-1)
+    inputs_rot = super().__call__(inputs_rot, position)
+    inputs = jnp.concatenate([inputs_rot, inputs_pass], axis=-1)
+    return inputs
 
 
 class LLaMARotaryEmbedding(RotaryEmbedding):
@@ -633,7 +762,13 @@ class YarnRotaryEmbedding(nnx.Module):
     return dim * math.log(max_position_embeddings / (num_rotations * 2 * math.pi)) / (2 * math.log(base))
 
   def _find_correction_range(
-      self, low_rot: float, high_rot: float, dim: int, base: float, max_position_embeddings: int, truncate: bool
+      self,
+      low_rot: float,
+      high_rot: float,
+      dim: int,
+      base: float,
+      max_position_embeddings: int,
+      truncate: bool,
   ):
     """Computes the range of correction dimensions for rotary positional embeddings.
 
@@ -918,3 +1053,381 @@ class LlamaVisionRotaryEmbedding(nnx.Module):
       output = output.astype(self.fprop_dtype)
 
     return output
+
+
+class Qwen3OmniMoeVisionRotaryEmbedding(nnx.Module):
+  """Rotary position embedding for Qwen3OmniMoe vision encoder.
+
+  Attributes:
+    hidden_size: Hidden dimension size
+    num_attention_heads: Number of attention heads
+    spatial_merge_size: Spatial merge block size (e.g., 2 for 2x2 blocks)
+    rope_theta: Base theta for frequency computation (default 10000.0)
+    cast_as_fprop_dtype: Whether to cast to fprop dtype
+    fprop_dtype: Output dtype
+    rngs: RNG state passed in by nnx.bridge.to_linen, not used in this module
+  """
+
+  def __init__(
+      self,
+      hidden_size: int,
+      num_attention_heads: int,
+      spatial_merge_size: int,
+      rope_theta: float = 10000.0,
+      cast_as_fprop_dtype: bool = True,
+      fprop_dtype: DType = jnp.bfloat16,
+      rngs: nnx.Rngs = None,
+  ):
+    """Initializes the Qwen3OmniMoe vision rotary embedding.
+
+    Args:
+      hidden_size: Hidden dimension size
+      num_attention_heads: Number of attention heads
+      spatial_merge_size: Spatial merge block size (e.g., 2 for 2x2 blocks)
+      rope_theta: Base theta for frequency computation (default 10000.0)
+      cast_as_fprop_dtype: Whether to cast to fprop dtype
+      fprop_dtype: Output dtype
+      rngs: RNG state passed in by nnx.bridge.to_linen, not used in this module
+    """
+    self.hidden_size = hidden_size
+    self.num_attention_heads = num_attention_heads
+    self.spatial_merge_size = spatial_merge_size
+    self.rope_theta = rope_theta
+    self.cast_as_fprop_dtype = cast_as_fprop_dtype
+    self.fprop_dtype = fprop_dtype
+    self.rngs = rngs
+    self.head_dim = self.hidden_size // self.num_attention_heads
+
+  def _compute_freq_table(self, max_hw: int) -> Array:
+    """Precompute frequency table for positions up to max_hw.
+
+    Args:
+      max_hw: Maximum height or width dimension
+
+    Returns:
+      Array of shape [max_hw, head_dim//4] containing frequencies for each position
+    """
+
+    inv_freq = 1.0 / (self.rope_theta ** (jnp.arange(0, self.head_dim // 2, 2, dtype=jnp.float32) / (self.head_dim // 2)))
+    # Compute for all positions [0, max_hw)
+    positions = jnp.arange(max_hw, dtype=jnp.float32)
+    freqs = jnp.outer(positions, inv_freq)  # [max_hw, head_dim//4]
+    return freqs
+
+  def _generate_position_ids_single(self, num_frames: int, height: int, width: int) -> Array:
+    """Generate 2D position IDs for a single image or video.
+
+    Args:
+      num_frames: Number of temporal frames (1 for images, >1 for videos)
+      height: Height in patches
+      width: Width in patches
+
+    Returns:
+      Array of shape [num_frames * height * width, 2] with (row_id, col_id)
+    """
+    merge_size = self.spatial_merge_size
+    merged_h = height // merge_size
+    merged_w = width // merge_size
+
+    # Block indices
+    block_rows = jnp.arange(merged_h)  # [merged_h]
+    block_cols = jnp.arange(merged_w)  # [merged_w]
+
+    # Intra-block offsets
+    intra_row = jnp.arange(merge_size)  # [merge_size]
+    intra_col = jnp.arange(merge_size)  # [merge_size]
+
+    # Full resolution positions using broadcasting
+    # Shape: [merged_h, 1, merge_size, 1]
+    row_idx = block_rows[:, None, None, None] * merge_size + intra_row[None, None, :, None]
+    # Shape: [1, merged_w, 1, merge_size]
+    col_idx = block_cols[None, :, None, None] * merge_size + intra_col[None, None, None, :]
+
+    # Expand to full grid and flatten
+    row_idx = jnp.broadcast_to(row_idx, (merged_h, merged_w, merge_size, merge_size)).reshape(-1)
+    col_idx = jnp.broadcast_to(col_idx, (merged_h, merged_w, merge_size, merge_size)).reshape(-1)
+
+    coords = jnp.stack([row_idx, col_idx], axis=-1)  # [h*w, 2]
+
+    # Repeat for video frames
+    if num_frames > 1:
+      coords = jnp.tile(coords, (num_frames, 1))
+
+    return coords
+
+  def compute_cos_sin(self, num_frames: int, height: int, width: int) -> tuple[Array, Array]:
+    """Compute cos and sin embeddings for given static grid dimensions.
+
+    Args:
+      num_frames: Number of temporal frames
+      height: Height in patches
+      width: Width in patches
+
+    Returns:
+      Tuple of (cos_emb, sin_emb) each of shape [num_frames * height * width, head_dim]
+    """
+    max_hw = max(height, width)
+    freq_table = self._compute_freq_table(max_hw)  # [max_hw, head_dim//4]
+    coords = self._generate_position_ids_single(num_frames, height, width)  # [T*H*W, 2]
+
+    row_freqs = freq_table[coords[:, 0]]  # [T*H*W, head_dim//4]
+    col_freqs = freq_table[coords[:, 1]]  # [T*H*W, head_dim//4]
+
+    # Concatenate row and column frequencies
+    embeddings = jnp.concatenate([row_freqs, col_freqs], axis=-1)  # [T*H*W, head_dim//2]
+
+    # Double the embeddings to match head_dim
+    embeddings = jnp.concatenate([embeddings, embeddings], axis=-1)  # [T*H*W, head_dim]
+
+    cos_emb = jnp.cos(embeddings)
+    sin_emb = jnp.sin(embeddings)
+
+    if self.cast_as_fprop_dtype:
+      cos_emb = cos_emb.astype(self.fprop_dtype)
+      sin_emb = sin_emb.astype(self.fprop_dtype)
+
+    return cos_emb, sin_emb
+
+  def _rotate_half(self, x: Array) -> Array:
+    """Rotates half the hidden dims of the input.
+
+    Args:
+      x: Input tensor of any shape with last dimension divisible by 2
+
+    Returns:
+      Rotated tensor where (x1, x2) -> (-x2, x1)
+    """
+    x1 = x[..., : x.shape[-1] // 2]
+    x2 = x[..., x.shape[-1] // 2 :]
+    return jnp.concatenate([-x2, x1], axis=-1)
+
+  def __call__(self, inputs: Array, num_frames: int, height: int, width: int) -> Array:
+    """Apply rotary position embeddings directly to inputs (Q or K tensors).
+
+    Args:
+      inputs: Input tensor of shape [B, T*H*W, N, head_dim] (batch, sequence, heads, head_dim)
+             where T=num_frames, H=height, W=width (all static)
+      num_frames: Number of temporal frames (static)
+      height: Height in patches (static)
+      width: Width in patches (static)
+
+    Returns:
+      Rotated inputs with same shape [B, T*H*W, N, head_dim]
+    """
+    cos_emb, sin_emb = self.compute_cos_sin(num_frames, height, width)
+
+    if len(inputs.shape) == 4:
+      cos_emb = cos_emb[None, :, None, :]  # [1, S, 1, H]
+      sin_emb = sin_emb[None, :, None, :]
+    elif len(inputs.shape) == 3:
+      # For [S, N, H] case
+      cos_emb = cos_emb[:, None, :]  # [S, 1, H]
+      sin_emb = sin_emb[:, None, :]
+
+    rotated = inputs * cos_emb + self._rotate_half(inputs) * sin_emb
+
+    return rotated
+
+
+def qwen3omnimoe_vision_pos_embed_interpolate_as_linen(
+    *,
+    num_position_embeddings: int,
+    hidden_size: int,
+    spatial_merge_size: int,
+    dtype: DType = jnp.float32,
+    cast_as_fprop_dtype: bool = True,
+    fprop_dtype: DType = jnp.bfloat16,
+    name: str | None = None,
+):
+  """Initializes Qwen3OmniMoe bilinear position embedding interpolation as Linen module.
+
+  This implements fast bilinear interpolation of learned 2D positional embeddings
+  for dynamic input sizes. The embeddings are learned on a fixed grid and interpolated
+  to match the actual image/video dimensions.
+
+  Args:
+    num_position_embeddings: Number of position embeddings in the fixed grid (e.g., 1024 for 32x32)
+    hidden_size: Hidden dimension size
+    spatial_merge_size: Size of spatial merging blocks
+    dtype: Data type for embeddings
+    cast_as_fprop_dtype: Whether to cast the output to the fprop dtype
+    fprop_dtype: The dtype of the output
+    name: Module name
+
+  Returns:
+    A Linen module that wraps the NNX Qwen3OmniMoeVisionPosEmbedInterpolate module.
+  """
+  return nnx_wrappers.to_linen(
+      Qwen3OmniMoeVisionPosEmbedInterpolate,
+      num_position_embeddings=num_position_embeddings,
+      hidden_size=hidden_size,
+      spatial_merge_size=spatial_merge_size,
+      dtype=dtype,
+      cast_as_fprop_dtype=cast_as_fprop_dtype,
+      fprop_dtype=fprop_dtype,
+      metadata_fn=variable_to_logically_partitioned,
+      name=name,
+  )
+
+
+class Qwen3OmniMoeVisionPosEmbedInterpolate(nnx.Module):
+  """Bilinear interpolation of learned 2D positional embeddings for Qwen3OmniMoe vision.
+
+  This module maintains a fixed grid of learned positional embeddings and interpolates
+  them to match dynamic input dimensions using bilinear interpolation. This allows
+  the model to handle images/videos of varying sizes while using a fixed embedding table.
+
+  Attributes:
+    num_position_embeddings: Number of position embeddings in the fixed grid
+    hidden_size: Hidden dimension size
+    spatial_merge_size: Spatial merge block size
+    dtype: Data type for embeddings
+    cast_as_fprop_dtype: Whether to cast to fprop dtype
+    fprop_dtype: Output dtype
+    rngs: RNG state passed in by nnx.bridge.to_linen
+  """
+
+  def __init__(
+      self,
+      num_position_embeddings: int,
+      hidden_size: int,
+      spatial_merge_size: int,
+      dtype: DType = jnp.float32,
+      cast_as_fprop_dtype: bool = True,
+      fprop_dtype: DType = jnp.bfloat16,
+      rngs: nnx.Rngs = None,
+  ):
+    """Initializes the Qwen3OmniMoe vision position embedding interpolation module.
+
+    Args:
+      num_position_embeddings: Number of position embeddings in the fixed grid
+      hidden_size: Hidden dimension size
+      spatial_merge_size: Spatial merge block size
+      dtype: Data type for embeddings
+      cast_as_fprop_dtype: Whether to cast to fprop dtype
+      fprop_dtype: Output dtype
+      rngs: RNG state passed in by nnx.bridge.to_linen
+    """
+    self.num_position_embeddings = num_position_embeddings
+    self.hidden_size = hidden_size
+    self.spatial_merge_size = spatial_merge_size
+    self.dtype = dtype
+    self.cast_as_fprop_dtype = cast_as_fprop_dtype
+    self.fprop_dtype = fprop_dtype
+    self.rngs = rngs
+
+    # Initialize the learned position embedding table
+    if self.rngs is not None:
+      # Initialize with normal distribution scaled by hidden_size^(-0.5)
+      init_fn = nnx.initializers.normal(stddev=self.hidden_size**-0.5)
+      self.pos_embed = nnx.Param(
+          init_fn(
+              self.rngs.params(),
+              (self.num_position_embeddings, self.hidden_size),
+              self.dtype,
+          ),
+      )
+    self.num_grid_per_side = int(self.num_position_embeddings**0.5)
+
+  def _interpolate_single(self, t: int, h: int, w: int) -> tuple[Array, Array]:
+    """Compute bilinear interpolation indices and weights for a single image/video.
+
+    Args:
+      t: Number of temporal frames
+      h: Target height in patches
+      w: Target width in patches
+
+    Returns:
+      Tuple of (indices, weights) where:
+        - indices: [4, h*w] indices into pos_embed for 4 corners
+        - weights: [4, h*w] bilinear weights for 4 corners
+    """
+    N = self.num_grid_per_side
+
+    # Create interpolation coordinates
+    h_idxs = jnp.linspace(0, N - 1, h)
+    w_idxs = jnp.linspace(0, N - 1, w)
+
+    # Floor and ceiling indices
+    h_idxs_floor = jnp.floor(h_idxs).astype(jnp.int32)
+    w_idxs_floor = jnp.floor(w_idxs).astype(jnp.int32)
+    h_idxs_ceil = jnp.minimum(h_idxs_floor + 1, N - 1)
+    w_idxs_ceil = jnp.minimum(w_idxs_floor + 1, N - 1)
+
+    # Fractional parts for interpolation weights
+    dh = h_idxs - h_idxs_floor
+    dw = w_idxs - w_idxs_floor
+
+    # Compute flat indices for 2D grid
+    base_h = h_idxs_floor * N
+    base_h_ceil = h_idxs_ceil * N
+
+    # 4 corner indices: (floor_h, floor_w), (floor_h, ceil_w), (ceil_h, floor_w), (ceil_h, ceil_w)
+    indices = jnp.stack(
+        [
+            (base_h[:, None] + w_idxs_floor[None, :]).reshape(-1),
+            (base_h[:, None] + w_idxs_ceil[None, :]).reshape(-1),
+            (base_h_ceil[:, None] + w_idxs_floor[None, :]).reshape(-1),
+            (base_h_ceil[:, None] + w_idxs_ceil[None, :]).reshape(-1),
+        ],
+        axis=0,
+    )  # [4, h*w]
+
+    # Bilinear weights
+    weights = jnp.stack(
+        [
+            ((1 - dh)[:, None] * (1 - dw)[None, :]).reshape(-1),
+            ((1 - dh)[:, None] * dw[None, :]).reshape(-1),
+            (dh[:, None] * (1 - dw)[None, :]).reshape(-1),
+            (dh[:, None] * dw[None, :]).reshape(-1),
+        ],
+        axis=0,
+    )  # [4, h*w]
+
+    return indices, weights
+
+  def __call__(self, num_frames: int, height: int, width: int) -> Array:
+    """Interpolate positional embeddings for given static grid dimensions.
+
+    Args:
+      num_frames: Number of temporal frames (static)
+      height: Height in patches (static)
+      width: Width in patches (static)
+
+    Returns:
+      Interpolated positional embeddings of shape [num_frames * height * width, hidden_size]
+    """
+    # Get interpolation indices and weights
+    indices, weights = self._interpolate_single(num_frames, height, width)  # [4, h*w], [4, h*w]
+
+    # Lookup embeddings for all 4 corners
+    corner_embeds = self.pos_embed.value[indices]  # [4, h*w, hidden_size]
+
+    # Apply bilinear weights and sum
+    weighted_embeds = corner_embeds * weights[:, :, None]  # [4, h*w, hidden_size]
+    interpolated = jnp.sum(weighted_embeds, axis=0)  # [h*w, hidden_size]
+
+    # Repeat for temporal frames
+    if num_frames > 1:
+      interpolated = jnp.tile(interpolated, (num_frames, 1))  # [t*h*w, hidden_size]
+
+    # Apply spatial merge permutation
+    # Reshape to [t, h, w, hidden_size] then permute for block-based processing
+    merge_size = self.spatial_merge_size
+    merged_h = height // merge_size
+    merged_w = width // merge_size
+
+    # Reshape: [t*h*w, hidden_size] -> [t, h, w, hidden_size]
+    interpolated = interpolated.reshape(num_frames, height, width, self.hidden_size)
+
+    # Permute for spatial merging: [t, merged_h, merge_size, merged_w, merge_size, hidden_size]
+    interpolated = interpolated.reshape(num_frames, merged_h, merge_size, merged_w, merge_size, self.hidden_size)
+    # -> [t, merged_h, merged_w, merge_size, merge_size, hidden_size]
+    interpolated = jnp.transpose(interpolated, (0, 1, 3, 2, 4, 5))
+    # Flatten back to [t*merged_h*merged_w*merge_size*merge_size, hidden_size]
+    interpolated = interpolated.reshape(-1, self.hidden_size)
+
+    if self.cast_as_fprop_dtype:
+      interpolated = interpolated.astype(self.fprop_dtype)
+
+    return interpolated

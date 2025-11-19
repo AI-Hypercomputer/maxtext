@@ -26,7 +26,7 @@ bash preflight.sh PLATFORM=GCE && numactl --membind 0 --cpunodebind=0 python3 -m
 ```
 
 For GKE,
-`numactl` should be built into your docker image from [maxtext_dependencies.Dockerfile](https://github.com/google/maxtext/blob/main/maxtext_dependencies.Dockerfile), so you can use it directly if you built the maxtext docker image. Here is an example
+`numactl` should be built into your docker image from [maxtext_dependencies.Dockerfile](https://github.com/google/maxtext/blob/main/dependencies/dockerfiles/maxtext_dependencies.Dockerfile), so you can use it directly if you built the maxtext docker image. Here is an example
 
 ```
 bash preflight.sh PLATFORM=GKE && numactl --membind 0 --cpunodebind=0 python3 -m MaxText.train src/MaxText/configs/base.yml run_name=$YOUR_JOB_NAME

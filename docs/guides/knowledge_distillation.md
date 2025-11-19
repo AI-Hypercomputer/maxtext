@@ -47,59 +47,60 @@ export RUN_NAME = <unique name for the run>
 
 #### b. Install dependencies
 
-```
+```sh
 git clone https://github.com/AI-Hypercomputer/maxtext.git
 python3 -m venv ~/venv-maxtext
 source ~/venv-maxtext/bin/activate
+python3 -m pip install uv
 cd maxtext
-uv pip install -r requirements.txt
+uv pip install -r dependencies/requirements/requirements.txt
 ```
 
-### 1. Obtain and Prepare the Teacher Model
+### 1. Obtain and prepare the teacher model
 
-#### a. Download Model from Hugging Face
+#### a. Download model from Hugging Face
 
 ```bash
 huggingface-cli login  # Provide your Hugging Face token
 huggingface-cli download deepseek-ai/DeepSeek-V2-Lite-Chat --repo-type model --local-dir ~/deepseek2-16b-chat
 ```
 
-#### b. Convert Checkpoint to MaxText Format
+#### b. Convert checkpoint to MaxText format
 MaxText requires checkpoints to be in a specific format. You'll need to convert the downloaded Hugging Face checkpoints to a MaxText-compatible checkpoint.
 
 ```bash
 # Get unscanned checkpoint for efficient decoding
 JAX_PLATFORMS=cpu \
-python3 -m MaxText.convert_deepseek_family_unscanned_ckpt \
+python3 -m MaxText.utils.ckpt_scripts.convert_deepseek_family_unscanned_ckpt \
   --base_model_path ~/deepseek2-16b-chat \
   --maxtext_model_path ${BASE_DIRECTORY}/deepseek2-16-chat/unscanned \
   --model_size deepseek2-16b
 ```
 
-### 2. Obtain and Prepare the Student Model
+### 2. Obtain and prepare the student model
 
-#### a. Download Model from Hugging Face
+#### a. Download model from Hugging Face
 
 ```bash
 huggingface-cli download meta-llama/Llama-2-7b-chat-hf --repo-type model --local-dir ~/llama2-7b-chat
 ```
 
-#### b. Convert Checkpoint to MaxText Format
+#### b. Convert checkpoint to MaxText format
 MaxText requires checkpoints to be in a specific format. You'll need to convert the downloaded Hugging Face checkpoints to a MaxText-compatible checkpoint.
 
 ```bash
 # Get scanned checkpoint for fine-tuning
 JAX_PLATFORMS=cpu \
-python3 -m MaxText.llama_or_mistral_ckpt \
+python3 -m MaxText.utils.ckpt_scripts.llama_or_mistral_ckpt \
   --base-model-path ~/llama2-7b-chat \
   --maxtext-model-path ${BASE_DIRECTORY}/llama2-7b-chat/scanned \
   --model-size llama2-7b
 ```
 
-### 3. Generate Dataset using the Teacher Model
+### 3. Generate dataset using the teacher model
 Once the teacher model's checkpoint is in the MaxText format, you can run inference to generate the dataset that will be used to fine-tune the student model.
 
-### 3.a. Run the JetStream Server
+### 3.a. Run the JetStream server
 
 Example command to run JetStream server on `v4-8`:
 
@@ -118,7 +119,7 @@ python3 -m MaxText.maxengine_server src/MaxText/configs/base.yml \
 Set `multi_sampling` to `True` to generate multiple independent completions per prompt.
 
 
-### 3.b. Generate Dataset using JetStream Server
+### 3.b. Generate dataset using JetStream server
 In a new tab in your terminal, run the following command to generate dataset from teacher model. Note that this is an example command to run on `v4-8`:
 
 ```bash
@@ -141,10 +142,10 @@ It's important to note that some prompts may be filtered out by pre-processing l
 
 Additionally, the generated dataset can be uploaded to either Hugging Face or Google Cloud Storage (GCS). To upload to Hugging Face, use the `upload-to-hf --hf-repo-id <hf_repo_name>` flags. To upload to GCS, use the `upload-to-gcs --gcs-bucket <gcs bucket name> --gcs-data-path <path in gcs bucket>` flags.
 
-### 4. Fine-tune the Student Model using Supervised Fine Tuning
+### 4. Fine-tune the student model using Supervised Fine Tuning (SFT)
 You can now fine-tune your smaller student model using supervised fine-tuning technique in MaxText.
 
-### 4.a. Fine-tune the Student Model using Dataset Generated in Step 3
+### 4.a. Fine-tune the student model using dataset generated in Step 3
 
 Example command to run fine-tuning on v4-8:
 
@@ -162,7 +163,7 @@ python3 -m MaxText.sft_trainer src/MaxText/configs/sft.yml \
   hf_access_token=$HF_TOKEN
 ```
 
-### 4.b. **[OPTIONAL]** Fine-tune the Student Model using the Original Dataset
+### 4.b. **[OPTIONAL]** Fine-tune the student model using the original dataset
 
 The checkpoint from the student model's fine-tuning (on the teacher-generated dataset) can be used for a subsequent fine-tuning stage. In this step, the student model is fine-tuned on the original dataset that was initially provided to the teacher model for generating the dataset.
 

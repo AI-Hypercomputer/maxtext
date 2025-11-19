@@ -430,13 +430,13 @@ def gmm(
         loaded_lhs = lhs[...]
         loaded_lhs = dataclasses.replace(loaded_lhs, qvalue=mask_k_rem_lhs(loaded_lhs.qvalue))
       else:
-        loaded_lhs = mask_k_rem_lhs(lhs[...])
+        loaded_lhs = mask_k_rem_lhs(lhs[...])  # pytype: disable=wrong-arg-types
 
       if isinstance(rhs, qpl.QArray):
         loaded_rhs = rhs[...]
         loaded_rhs = dataclasses.replace(loaded_rhs, qvalue=mask_k_rem_rhs(loaded_rhs.qvalue))
       else:
-        loaded_rhs = mask_k_rem_rhs(rhs[...])
+        loaded_rhs = mask_k_rem_rhs(rhs[...])  # pytype: disable=wrong-arg-types
 
       if transpose_rhs:
         dot_general_dims = (((1,), (1,)), ((), ()))
