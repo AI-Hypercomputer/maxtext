@@ -1,6 +1,7 @@
 import jax
 import jax.numpy as jnp
 from optax.contrib import MuonDimensionNumbers as mdn
+from MaxText.maxtext_utils import get_abstract_param
 
 # deepseek2-16b, scanned, q_lora_rank=0
 # NOTE: not compatible with deepseek2-236b (q_lora_rank: 1536)
@@ -140,19 +141,6 @@ def get_transform_tree(tree, path=()):
     return {k: get_transform_tree(v, path + (k,)) for k, v in tree.items()}
   else:
     return transform_logic(path)
-
-
-def get_abstract_param(model, config):
-  key = jax.random.PRNGKey(0)
-  input_shape = (config.micro_batch_size_to_train_on, config.max_target_length)
-  abstract_vars = jax.eval_shape(
-      model.init,
-      {"params": key, "dropout": key, "aqt": key},
-      jnp.ones(input_shape, dtype=jnp.int32),
-      jnp.ones(input_shape, dtype=jnp.int32),
-      encoder_images=None,
-  )
-  return abstract_vars
 
 
 def test1():

@@ -117,6 +117,7 @@ class OptimizerType(str, Enum):
   ADAMW = "adamw"
   ADAM_PAX = "adam_pax"
   SGD = "sgd"
+  MUON = "muon"
 
 
 class RopeType(str, Enum):
@@ -923,6 +924,18 @@ class AdamW(BaseModel):
   )
 
 
+class Muon(BaseModel):
+  """Configuration specific to the Muon optimizer."""
+
+  muon_beta: float = Field(0.95, description="Decay rate for the exponentially weighted average of grads.")
+  muon_weight_decay: float = Field(
+      0, description="Strength of the weight decay regularization. This is multiplied with the learning rate."
+  )
+  muon_consistent_rms: None | float = Field(
+      None, desciption="If None, apply width scaling to updates. If float, apply consistent rms scaling (recommend 0.2)."
+  )
+
+
 class PositionalEmbedding(BaseModel):
   """General configuration for positional embeddings."""
 
@@ -1466,6 +1479,7 @@ class MaxTextConfig(
     TrainingLoop,
     Optimizer,
     AdamW,
+    Muon,
     FineTuning,
     # Reinforcement Learning
     RLHardware,

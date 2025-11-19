@@ -92,6 +92,16 @@ def _lists_to_tuples(l: list | Any) -> tuple | Any:
   return tuple(_lists_to_tuples(x) for x in l) if isinstance(l, list) else l
 
 
+def set_muon_config(raw_keys):
+  if raw_keys["muon_consistent_rms"] in ["None", "none"]:
+    raw_keys["muon_consistent_rms"] = None
+  else:
+    try:
+      raw_keys["muon_consistent_rms"] = float(raw_keys["muon_consistent_rms"])
+    except ValueError as e:
+      raise ValueError("muon_consistent_rms should be None or float") from e
+
+
 def _prepare_for_pydantic(raw_keys: dict[str, Any]) -> dict[str, Any]:
   """Prepares the raw dictionary for Pydantic model instantiation."""
   pydantic_kwargs = {}
@@ -101,6 +111,8 @@ def _prepare_for_pydantic(raw_keys: dict[str, Any]) -> dict[str, Any]:
   # specify `tokenizer_type='huggingface'`, which they should.
   if raw_keys.get("dataset_type") == "hf" and "tokenizer_type" not in raw_keys:
     raw_keys["tokenizer_type"] = "huggingface"
+
+  set_muon_config(raw_keys)
 
   for key, value in raw_keys.items():
     if key not in valid_fields:

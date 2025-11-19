@@ -21,7 +21,8 @@ from flax.linen import partitioning as nn_partitioning
 
 import optax
 from optax.contrib import muon
-from MaxText.muon_dimension_number import get_abstract_param, get_transform_tree
+from MaxText.muon_dimension_number import get_transform_tree
+from MaxText.maxtext_utils import get_abstract_param
 
 
 def get_optimizer(config, learning_rate_schedule, model=None):
