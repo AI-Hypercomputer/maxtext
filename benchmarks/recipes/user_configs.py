@@ -55,8 +55,8 @@ class UserConfig:
   priority: str = "medium"
 
   # Images for env
-  server_image: str = "us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server"
-  proxy_image: str = "us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server"
+  server_image: str = "us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server"
+  proxy_image: str = "us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server"
   runner: str = "us-docker.pkg.dev/path/to/maxtext_runner"
   colocated_python_image: str = None
   worker_flags: str = ""
@@ -77,7 +77,9 @@ class UserConfig:
 
   # other configuration
   xpk_path: str = "~/xpk"
+  delete: bool = False
   max_restarts: int = 0
+  temp_key: str = None
 
   def __post_init__(self):
     """Automatically generate derived attributes after the object is created."""
