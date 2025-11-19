@@ -87,11 +87,11 @@ Copy the model ID from Hugging Face and run:
 
 4.**Sort components in hierarchical order**
 
-```python sort_components_in_hierarchical_order.py --entry-file-path <filepath> --entry-module <module_name>```
+```python sort_components_in_hierarchical_order.py --base-path <path to repo> --entry-file-path <filepath> --entry-module <module_name>```
 
 Example:
 
-```python sort_components_in_hierarchical_order.py --entry-file-path transformers/models/qwen3_moe/modeling_qwen3_moe.py --entry-module Qwen3MoeForCausalLM```
+```python sort_components_in_hierarchical_order.py --base-path https://github.com/huggingface/transformers/blob/main/src --entry-file-path transformers/models/qwen3_moe/modeling_qwen3_moe.py --entry-module Qwen3MoeForCausalLM```
 
 This will generate a file Qwen3MoeForCausalLM_files_order.json in the results/ folder.
 The file contains the list of modules for Qwen3MoeForCausalLM along with their dependencies.
