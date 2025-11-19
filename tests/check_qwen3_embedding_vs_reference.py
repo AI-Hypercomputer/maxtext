@@ -71,10 +71,6 @@ jax_vision_config = pyconfig.initialize(
     weight_dtype="float32",
     float32_logits=True,
     float32_qk_product=True,
-    use_multimodal=True,
-    image_path="/home/hengtaoguo_google_com/projects/maxtext/src/MaxText/test_assets/test_image.jpg",
-    video_path="/home/hengtaoguo_google_com/projects/test_video.mp4",
-    use_audio_in_video=True,
 )
 
 torch_vision_config = Qwen3OmniMoeVisionEncoderConfig(
