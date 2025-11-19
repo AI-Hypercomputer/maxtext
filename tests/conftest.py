@@ -42,7 +42,6 @@ except Exception:  # pragma: no cover  pylint: disable=broad-exception-caught
 GCP_MARKERS = {"external_serving", "external_training"}
 
 
-
 def pytest_collection_modifyitems(config, items):
   """Customize pytest collection behavior.
 
