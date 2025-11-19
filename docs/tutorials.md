@@ -35,15 +35,11 @@ See the <a href="https://www.kaggle.com/code/shivajidutta/maxtext-on-kaggle" tar
 
 You can also find other examples in the [MaxText repository](https://github.com/AI-Hypercomputer/maxtext/tree/main/pedagogical_examples).
 
+
+
 ```{toctree}
 :maxdepth: 1
 
-tutorials/first_run.md
-tutorials/pretraining.md
-tutorials/full_finetuning.md
-tutorials/how_to_run_colabs.md
-tutorials/grpo.md
-tutorials/sft.md
-tutorials/sft_on_multi_host.md
-tutorials/grpo_with_pathways.md
+tutorials/pre_training_index.md
+tutorials/post_training_index.md
 ```
