@@ -40,12 +40,12 @@ class MultihostDataloadingTest(unittest.TestCase):
     super().setUp()
     decoupled = is_decoupled()
     base_output_directory = (
-        os.path.join(MAXTEXT_PKG_DIR, "..", "datasets", "gcloud_decoupled_test_logs")
+        os.path.join(MAXTEXT_PKG_DIR, "..", "local_datasets", "gcloud_decoupled_test_logs")
         if decoupled
         else "gs://max-experiments/"
     )
     dataset_path = (
-        os.path.join(MAXTEXT_PKG_DIR, "..", "datasets", "c4_en_dataset_minimal")
+        os.path.join(MAXTEXT_PKG_DIR, "..", "local_datasets", "c4_en_dataset_minimal")
         if decoupled
         else "gs://maxtext-dataset/"
     )

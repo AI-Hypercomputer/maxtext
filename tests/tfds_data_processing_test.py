@@ -41,8 +41,8 @@ class TfdsDataProcessingTest(unittest.TestCase):
     decoupled = is_decoupled()
     if decoupled:
       local_dataset_name = "c4/en:3.1.0"
-      _dataset_path = os.path.join("datasets", "c4_en_dataset_minimal")
-      _base_output_directory = os.path.join("datasets", "gcloud_decoupled_test_logs")
+      _dataset_path = os.path.join("local_datasets", "c4_en_dataset_minimal")
+      _base_output_directory = os.path.join("local_datasets", "gcloud_decoupled_test_logs")
     else:
       local_dataset_name = None
       _dataset_path = "gs://maxtext-dataset"

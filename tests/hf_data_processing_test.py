@@ -35,7 +35,7 @@ class HfDataProcessingTest(unittest.TestCase):
   def setUp(self):
     super().setUp()
     decoupled = is_decoupled()
-    temp_local_logs = os.path.join("datasets", "gcloud_decoupled_test_logs")
+    temp_local_logs = os.path.join("local_datasets", "gcloud_decoupled_test_logs")
     base_output_directory = temp_local_logs if decoupled else "gs://max-experiments/"
     self.config = pyconfig.initialize(
       [sys.argv[0], get_test_config_path()],
@@ -50,7 +50,7 @@ class HfDataProcessingTest(unittest.TestCase):
       hf_data_dir="",
       hf_train_files=(
         os.path.join(
-          "datasets","c4_en_dataset_minimal","hf","c4","c4-train-00000-of-01637.parquet"
+          "local_datasets","c4_en_dataset_minimal","hf","c4","c4-train-00000-of-01637.parquet"
         ) if decoupled else "gs://maxtext-dataset/hf/c4/c4-train-00000-of-01637.parquet"
       ),
       tokenizer_path="google-t5/t5-large",

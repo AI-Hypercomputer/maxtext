@@ -42,12 +42,12 @@ class Standalone_DL_CKPT(unittest.TestCase):
     random_run_name = self._get_random_test_name("standalone_dataloader")
     decoupled = is_decoupled()
     base_output_directory = (
-        os.path.join(MAXTEXT_PKG_DIR, "..", "datasets", "gcloud_decoupled_test_logs")
+        os.path.join(MAXTEXT_PKG_DIR, "..", "local_datasets", "gcloud_decoupled_test_logs")
         if decoupled
         else "gs://runner-maxtext-logs"
     )
     dataset_path = (
-        os.path.join(MAXTEXT_PKG_DIR, "..", "datasets", "c4_en_dataset_minimal")
+        os.path.join(MAXTEXT_PKG_DIR, "..", "local_datasets", "c4_en_dataset_minimal")
         if decoupled
         else "gs://maxtext-dataset"
     )
@@ -70,12 +70,12 @@ class Standalone_DL_CKPT(unittest.TestCase):
   def test_standalone_checkpointer(self):
     decoupled = is_decoupled()
     base_output_directory = (
-        os.path.join(MAXTEXT_PKG_DIR, "..", "datasets", "gcloud_decoupled_test_logs")
+        os.path.join(MAXTEXT_PKG_DIR, "..", "local_datasets", "gcloud_decoupled_test_logs")
         if decoupled
         else "gs://runner-maxtext-logs"
     )
     dataset_path = (
-        os.path.join(MAXTEXT_PKG_DIR, "..", "datasets", "c4_en_dataset_minimal")
+        os.path.join(MAXTEXT_PKG_DIR, "..", "local_datasets", "c4_en_dataset_minimal")
         if decoupled
         else "gs://maxtext-dataset"
     )

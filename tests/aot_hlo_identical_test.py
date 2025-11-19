@@ -46,7 +46,7 @@ class AotHloIdenticalTest(unittest.TestCase):
       logs_root = os.path.join(
           MAXTEXT_PKG_DIR,
           "..",
-          "datasets",
+          "local_datasets",
           "gcloud_decoupled_test_logs",
           "aot_hlo_identical_test",
       )

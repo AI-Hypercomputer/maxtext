@@ -29,12 +29,12 @@ class TrainTests(unittest.TestCase):
   decoupled = is_decoupled()
   dev_count = jax.device_count()
   _base_output_directory = (
-    os.path.join(MAXTEXT_PKG_DIR, "..", "datasets", "gcloud_decoupled_test_logs")
+    os.path.join(MAXTEXT_PKG_DIR, "..", "local_datasets", "gcloud_decoupled_test_logs")
     if decoupled
     else "gs://runner-maxtext-logs"
   )
   dataset_path = (
-    os.path.join(MAXTEXT_PKG_DIR, "..", "datasets", "c4_en_dataset_minimal")
+    os.path.join(MAXTEXT_PKG_DIR, "..", "local_datasets", "c4_en_dataset_minimal")
     if decoupled
     else "gs://maxtext-dataset"
   )

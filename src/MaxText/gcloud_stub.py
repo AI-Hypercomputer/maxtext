@@ -150,14 +150,14 @@ def _jetstream_stubs():
 
   # Tokenizer placeholders (unused in decoupled tests due to runtime guard).
   class TokenizerParameters:  # pragma: no cover - placeholder
-    """Stub tokenizer parameters object."""
-
-    def __init__(self, *a, **k):  # pylint: disable=unused-argument
+    def __init__(self, *a, **k):
       pass
 
-  class TokenizerType:  # emulate enum descriptor access pattern
-    """Stub tokenizer type descriptor container."""
+  class _FakeDescriptorValues:
+    def __init__(self):
+      self.values_by_name = {}
 
+  class TokenizerType:  # emulate enum descriptor access pattern
     DESCRIPTOR = SimpleNamespace(values_by_name={})
 
   config_lib = SimpleNamespace()  # not used directly in decoupled tests
@@ -165,11 +165,16 @@ def _jetstream_stubs():
   token_utils = SimpleNamespace()  # build_tokenizer guarded in MaxEngine when decoupled
   tokenizer_api = SimpleNamespace()  # placeholder
   token_params_ns = SimpleNamespace(TokenizerParameters=TokenizerParameters, TokenizerType=TokenizerType)
+
+  # Mark these stub namespaces so callers can detect stubbed jetstream components.
+  setattr(config_lib, "_IS_STUB", True)
+  setattr(engine_api, "_IS_STUB", True)
+  setattr(token_utils, "_IS_STUB", True)
+  setattr(tokenizer_api, "_IS_STUB", True)
+  setattr(token_params_ns, "_IS_STUB", True)
   return config_lib, engine_api, token_utils, tokenizer_api, token_params_ns
 
-
 def jetstream():
-  """Return JetStream modules or stubs based on availability and decoupling."""
   needed = [
       "jetstream.core.config_lib",
       "jetstream.engine.engine_api",
@@ -184,18 +189,29 @@ def jetstream():
           print("[DECOUPLED NO-OP] jetstream: dependency missing; using stubs.")
           return _jetstream_stubs()
         raise ModuleNotFoundError(mod)
-
-    from jetstream.core import config_lib  # type: ignore  # pylint: disable=import-outside-toplevel
-    from jetstream.engine import engine_api, token_utils, tokenizer_api  # type: ignore  # pylint: disable=import-outside-toplevel
-    from jetstream.engine.tokenizer_pb2 import TokenizerParameters, TokenizerType  # type: ignore  # pylint: disable=import-outside-toplevel
-
-    return (
-        config_lib,
-        engine_api,
-        token_utils,
-        tokenizer_api,
-        SimpleNamespace(TokenizerParameters=TokenizerParameters, TokenizerType=TokenizerType),
-    )
+    from jetstream.core import config_lib  # type: ignore
+    from jetstream.engine import engine_api, token_utils, tokenizer_api  # type: ignore
+    from jetstream.engine.tokenizer_pb2 import TokenizerParameters, TokenizerType  # type: ignore
+    # Mark real modules as not stubs so consumers can detect the difference.
+    try:
+      setattr(config_lib, "_IS_STUB", False)
+    except Exception:
+      pass
+    try:
+      setattr(engine_api, "_IS_STUB", False)
+    except Exception:
+      pass
+    try:
+      setattr(token_utils, "_IS_STUB", False)
+    except Exception:
+      pass
+    try:
+      setattr(tokenizer_api, "_IS_STUB", False)
+    except Exception:
+      pass
+    token_params_ns = SimpleNamespace(TokenizerParameters=TokenizerParameters, TokenizerType=TokenizerType)
+    setattr(token_params_ns, "_IS_STUB", False)
+    return config_lib, engine_api, token_utils, tokenizer_api, token_params_ns
   except ModuleNotFoundError:
     if is_decoupled():
       print("[DECOUPLED NO-OP] jetstream: dependency missing; using stubs.")
