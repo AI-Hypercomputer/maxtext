@@ -1,9 +1,20 @@
+import unittest
+from absl.testing import parameterized
+import os
 import jax
-import jax.numpy as jnp
 from optax.contrib import MuonDimensionNumbers as mdn
-from optax.contrib import MuonDimensionNumbers
-from MaxText.maxtext_utils import get_abstract_param
-from typing import Any, Dict, Tuple, Optional, Union
+
+from MaxText.muon_utils import get_muon_weight_dimension_numbers
+from MaxText import pyconfig, maxtext_utils
+from MaxText.globals import MAXTEXT_PKG_DIR
+from MaxText.layers import models, quantizations
+
+Transformer = models.transformer_as_linen
+
+
+"""
+python3 -m pytest -v --pyargs tests.muon_test -rP -s
+"""
 
 # deepseek2-16b, scanned, q_lora_rank=0
 # NOTE: not compatible with deepseek2-236b (q_lora_rank: 1536)
@@ -134,7 +145,7 @@ _GEMMA3_LAYER = {
     },
 }
 
-GEMMA3 = {
+GEMMA3_DIMENSION_NUMBER = {
     "params": {
         "decoder": {
             "decoder_norm": {"scale": None},
@@ -172,120 +183,32 @@ LLAMA2_DIMENSION_NUMBER = {
 }
 
 
-# def transform_logic(path):
-#   """
-#   assume scan (i.e., dim 1 is layer num L), should work with unscan (without L)
-#   works for deepseek, llama2, gemma3
-#   """
-#   # moe: [0, L, -2, -1]
-#   if "MoeBlock_0" in path and ("wo" in path or "wi_0" in path or "wi_1" in path):
-#     return mdn((-2,), (-1,))
-#   # attention out proj: [0, L, -2, -1]
-#   elif "self_attention" in path and "out" in path:
-#     return mdn((0, -2), (-1,))
-#   # attention qkv proj: [0, L, -2, -1]
-#   elif "self_attention" in path and (
-#       "query" in path or "key" in path or "value" in path or "wq_b" in path or "wkv_b" in path
-#   ):
-#     return mdn((0,), (-2, -1))
-#   # do not apply muon: scalar, embedding, unembedding
-#   elif "scale" in path or "bias" in path or "embedding" in path or "logits_dense" in path:
-#     return None
-#   else:
-#     # all other: [0, L, -1]
-#     return mdn((0,), (-1,))
+class MuonDimensionTest(parameterized.TestCase):
 
-
-def is_path_contain_any(tuples, path):
-  return any(x in path for x in tuples)
-
-
-def transform_logic(path: Tuple[str, ...]) -> Optional[MuonDimensionNumbers]:
-  """
-  Determines Muon dimension numbers based on parameter path.
-
-  Strategy:
-  1. Filter out exclusions (Norms, Biases, Embeddings).
-  2. Handle MoE specific shapes.
-  3. Handle Attention specific shapes (QKV split vs Output proj).
-  4. Default to standard Dense layer shape.
-  """
-
-  # 1. Exclude parameters not suitable for Muon (scalar scales, biases, embeddings)
-  if is_path_contain_any(("scale", "bias", "embedding", "logits_dense"), path):
-    return None
-
-  # 2. Mixture of Experts (MoE)
-  # Detects DeepSeek MoE layers.
-  # Weights inside experts are usually treated with mass on dim -2.
-  if "MoeBlock_0" in path:
-    # Exclude 'gate' (which behaves like a dense layer)
-    if is_path_contain_any(("wi_0", "wi_1", "wo"), path):
-      return mdn((-2,), (-1,))
-
-  # 3. Self Attention
-  if "self_attention" in path:
-    # Output projection: combines heads, so dim structure is different
-    if "out" in path:
-      return mdn((0, -2), (-1,))
-
-    # Projection matrices (Query, Key, Value, etc.)
-    # Note: wkv_a/wq_a often act as compression/dense, wkv_b/wq_b expand to heads
-    if is_path_contain_any(("query", "key", "value", "wq_b", "wkv_b"), path):
-      return mdn((0,), (-2, -1))
-
-    # # 'a' matrices in DeepSeek (Low Rank adapters) behave like standard dense
-    # if any(x in leaf for x in ("wq_a", "wkv_a")):
-    #   return mdn((0,), (-1,))
-
-  # 4. Default Dense / Standard Weights
-  # Assume scanned [Layer, In, Out] -> Newton update on [In, Out] averaged over Layer
-  return mdn((0,), (-1,))
-
-
-def get_transform_tree(tree, path=()):
-  if isinstance(tree, dict):
-    return {k: get_transform_tree(v, path + (k,)) for k, v in tree.items()}
-  else:
-    return transform_logic(path)
-
-
-def test1():
-  assert get_transform_tree(DEEPSEEK2_DIMENSION_NUMBER) == DEEPSEEK2_DIMENSION_NUMBER
-  assert get_transform_tree(DEEPSEEK3_DIMENSION_NUMBER) == DEEPSEEK3_DIMENSION_NUMBER
-
-
-def test2():
-  from MaxText import pyconfig, maxtext_utils
-  from MaxText.globals import MAXTEXT_PKG_DIR
-  from MaxText.layers import models, quantizations
-  import os
-
-  Transformer = models.transformer_as_linen
-
-  def _test2(model_name):
-    # init model
-    argv = [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"), f"model_name={model_name}"]
+  @parameterized.named_parameters(
+      ("deepseek2_16b", "deepseek2-16b", DEEPSEEK2_DIMENSION_NUMBER),
+      ("deepseek3_test", "deepseek3-test", DEEPSEEK3_DIMENSION_NUMBER),
+      ("deepseek3_671b", "deepseek3-671b", DEEPSEEK3_DIMENSION_NUMBER),
+      ("llama2_7b", "llama2-7b", LLAMA2_DIMENSION_NUMBER),
+      ("gemma3_4b", "gemma3-4b", GEMMA3_DIMENSION_NUMBER),
+  )
+  def test_model_integration(self, model_name, expected_output):
+    """
+    Initializes the specified MaxText model and asserts that the calculated
+    Muon dimension numbers match the hardcoded reference.
+    """
+    # Setup config
+    argv = [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"), f"model_name={model_name}", "scan_layers=True"]
     config = pyconfig.initialize(argv)
+    # Setup model
     devices_array = maxtext_utils.create_device_mesh(config)
     mesh = jax.sharding.Mesh(devices_array, config.mesh_axes)
     quant = quantizations.configure_quantization(config)
     model = Transformer(config, mesh=mesh, quant=quant)
-    # quickly get param structure without materialization
-    abstract_param = get_abstract_param(model, config)
-    print(abstract_param)
-    # get muon dimension number
-    transform_tree = get_transform_tree(abstract_param)
-    return transform_tree
-
-  assert _test2("deepseek2-16b") == DEEPSEEK2_DIMENSION_NUMBER
-  assert _test2("deepseek3-test") == DEEPSEEK3_DIMENSION_NUMBER
-  assert _test2("deepseek3-671b") == DEEPSEEK3_DIMENSION_NUMBER
-  assert _test2("llama2-7b") == LLAMA2_DIMENSION_NUMBER
-  assert _test2("gemma3-4b") == GEMMA3
+    # Run test
+    actual_output = get_muon_weight_dimension_numbers(model, config)
+    self.assertEqual(actual_output, expected_output)
 
 
 if __name__ == "__main__":
-  # python -m MaxText.muon_dimension_number
-  test1()
-  test2()
+  unittest.main()

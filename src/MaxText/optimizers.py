@@ -17,12 +17,10 @@
 
 import jax
 import jax.numpy as jnp
-from flax.linen import partitioning as nn_partitioning
 
 import optax
 from optax.contrib import muon
-from MaxText.muon_dimension_number import get_transform_tree
-from MaxText.maxtext_utils import get_abstract_param
+from MaxText.muon_utils import get_muon_weight_dimension_numbers
 
 
 def get_optimizer(config, learning_rate_schedule, model=None):
@@ -51,12 +49,10 @@ def get_optimizer(config, learning_rate_schedule, model=None):
     return optax.sgd(learning_rate_schedule)
   elif config.opt_type == "muon":
     # extract muon dimension number from model structure
-    assert model is not None
-    with model.mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-      abstract_param = get_abstract_param(model, config)
-    print(abstract_param)
-    muon_weight_dimension_numbers = get_transform_tree(abstract_param)
-    print("dimension number:", muon_weight_dimension_numbers)
+    if model is not None:
+      muon_weight_dimension_numbers = get_muon_weight_dimension_numbers(model, config)
+    else:
+      raise ValueError("Please specify model to extract muon dimension number.")
     muon_kwargs = {
         # Shared parameters: "nesterov" uses default
         "learning_rate": learning_rate_schedule,
