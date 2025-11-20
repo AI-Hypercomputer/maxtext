@@ -150,6 +150,8 @@ def main(argv: Sequence[str]) -> None:
           padded_tokens=tokens,
           images=processor_outputs.pixel_values if config.use_multimodal else None,
           image_masks=processor_outputs.pixel_mask if config.use_multimodal and "llama4" in config.model_name else None,
+          audio_values=processor_outputs.audio_values if config.use_multimodal and config.use_audio else None,
+          audio_masks=processor_outputs.audio_mask if config.use_multimodal and config.use_audio else None,
           true_length=true_length,
           rng=rng_prefill,
           slot=i,

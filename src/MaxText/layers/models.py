@@ -32,7 +32,7 @@ from MaxText import max_utils
 from MaxText.layers import nnx_wrappers
 from MaxText.layers.decoders import Decoder
 from MaxText.layers.embeddings import Embed, embed_as_linen
-from MaxText.layers.encoders import VisionEncoder
+from MaxText.layers.encoders import VisionEncoder, AudioEncoder
 from MaxText.layers.quantizations import AqtQuantization as Quant
 from MaxText.layers.multi_token_prediction import MultiTokenPredictionBlock
 from MaxText.sharding import all_gather_over_fsdp
@@ -86,6 +86,7 @@ class TransformerLinenPure(nn.Module):
         mesh=self.mesh,
     )
     self.vision_encoder = VisionEncoder(config=cfg, mesh=mesh) if cfg.use_multimodal else None
+    self.audio_encoder = AudioEncoder(config=cfg, mesh=mesh) if cfg.use_audio else None
     self.decoder = Decoder(config=cfg, mesh=mesh, quant=self.quant, model_mode=self.model_mode)
     # If MTP is enabled via config, set up the MTP block.
     if self.config.mtp_num_layers > 0:
@@ -118,6 +119,7 @@ class TransformerLinenPure(nn.Module):
       decoder_segment_ids=None,
       encoder_images: None | jnp.ndarray = None,
       encoder_image_masks: None | jnp.ndarray = None,
+      encoder_audios: None | jnp.ndarray = None,
       enable_dropout=True,
       model_mode=MODEL_MODE_TRAIN,
       previous_chunk=None,
@@ -146,6 +148,8 @@ class TransformerLinenPure(nn.Module):
 
     bidirectional_mask = None
     image_embeddings = None
+    audio_embeddings = None
+
     if self.config.use_multimodal and encoder_images is not None:
       image_embeddings = self.vision_encoder(input_images=encoder_images, deterministic=not enable_dropout)
 
@@ -154,7 +158,18 @@ class TransformerLinenPure(nn.Module):
       elif self.config.decoder_block == DecoderBlockType.LLAMA4:
         bidirectional_mask = decoder_input_tokens == multimodal_utils.LLAMA4_PATCH_TOKEN
       elif self.config.decoder_block == DecoderBlockType.QWEN3_MOE:
-        bidirectional_mask = decoder_input_tokens == multimodal_utils.QWEN3_OMNI_IMAGE_TOKEN
+        # Create bidirectional_mask for vision/video token merging
+        bidirectional_mask = (decoder_input_tokens == multimodal_utils.QWEN3_OMNI_IMAGE_TOKEN) | (
+            decoder_input_tokens == multimodal_utils.QWEN3_OMNI_VIDEO_TOKEN
+        )
+        # Create image/video mask for deepstack visual embedding injection
+    if self.config.use_multimodal and encoder_audios is not None and self.audio_encoder is not None:
+      audio_embeddings = self.audio_encoder(input_audio=encoder_audios, deterministic=not enable_dropout)
+
+    # Create audio mask for placeholder tokens (qwen3-omni models)
+    audio_mask = None
+    if audio_embeddings is not None and self.config.decoder_block == DecoderBlockType.QWEN3_MOE:
+      audio_mask = decoder_input_tokens == multimodal_utils.QWEN3_OMNI_AUDIO_TOKEN
 
     logits, hidden_state, kv_caches = self.decoder(
         shared_embedding=self.shared_embedding,
@@ -169,6 +184,8 @@ class TransformerLinenPure(nn.Module):
         bidirectional_mask=bidirectional_mask,
         image_embeddings=image_embeddings,
         image_masks=encoder_image_masks,
+        audio_embeddings=audio_embeddings,
+        audio_mask=audio_mask,
         kv_caches=kv_caches,
         attention_metadata=attention_metadata,
     )
@@ -305,6 +322,7 @@ class Transformer(nnx.Module):
         rngs=rngs,
     )
     self.vision_encoder = VisionEncoder(config=cfg, mesh=mesh) if cfg.use_multimodal else None
+    self.audio_encoder = AudioEncoder(config=cfg, mesh=mesh) if cfg.use_audio else None
 
     decoder_linen = Decoder(config=cfg, mesh=mesh, quant=self.quant, model_mode=self.model_mode)
     self.decoder = nnx_wrappers.ToNNX(decoder_linen, rngs=rngs)
@@ -388,6 +406,7 @@ class Transformer(nnx.Module):
       cache=None,
       encoder_images: jax.Array | None = None,
       encoder_image_masks: jax.Array | None = None,
+      encoder_audios: jax.Array | None = None,
       enable_dropout=True,
       model_mode=MODEL_MODE_TRAIN,
       previous_chunk=None,
@@ -440,7 +459,18 @@ class Transformer(nnx.Module):
       elif self.config.decoder_block == DecoderBlockType.LLAMA4:
         bidirectional_mask = decoder_input_tokens == multimodal_utils.LLAMA4_PATCH_TOKEN
       elif self.config.decoder_block == DecoderBlockType.QWEN3_MOE:
-        bidirectional_mask = decoder_input_tokens == multimodal_utils.QWEN3_OMNI_IMAGE_TOKEN
+        bidirectional_mask = (decoder_input_tokens == multimodal_utils.QWEN3_OMNI_IMAGE_TOKEN) | (
+            decoder_input_tokens == multimodal_utils.QWEN3_OMNI_VIDEO_TOKEN
+        )
+
+    audio_embeddings = None
+    if self.config.use_multimodal and encoder_audios is not None and self.audio_encoder is not None:
+      audio_embeddings = self.audio_encoder(input_audio=encoder_audios, deterministic=not enable_dropout)
+
+    # Create audio mask for placeholder tokens (qwen3-omni models)
+    audio_mask = None
+    if audio_embeddings is not None and self.config.decoder_block == DecoderBlockType.QWEN3_MOE:
+      audio_mask = decoder_input_tokens == multimodal_utils.QWEN3_OMNI_AUDIO_TOKEN
 
     logits, hidden_state, kv_caches = self.decoder(
         shared_embedding=self.token_embedder,
@@ -455,6 +485,8 @@ class Transformer(nnx.Module):
         bidirectional_mask=bidirectional_mask,
         image_embeddings=image_embeddings,
         image_masks=encoder_image_masks,
+        audio_embeddings=audio_embeddings,
+        audio_mask=audio_mask,
         kv_caches=kv_caches,
         attention_metadata=attention_metadata,
     )
