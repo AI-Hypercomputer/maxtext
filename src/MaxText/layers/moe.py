@@ -114,9 +114,16 @@ def random_routing(rng_key, gate_logits, num_experts_per_tok):
                        representing the weights for the selected experts.
   """
   bs, seq_len, num_experts = gate_logits.shape
-  indices = jnp.arange(num_experts).repeat(bs * seq_len)
   selected_num = bs * seq_len * num_experts_per_tok
-  top_k_indices = jax.random.choice(rng_key, indices, shape=(selected_num,)).reshape(bs, seq_len, num_experts_per_tok)
+  # Directly generate random integers in the range [0, num_experts)
+  top_k_indices = jax.random.randint(
+      rng_key,
+      shape=(selected_num,),
+      minval=0,
+      maxval=num_experts,
+      dtype=jnp.int32,
+  )
+  top_k_indices = top_k_indices.reshape(bs, seq_len, num_experts_per_tok)
   top_k_weights = jnp.take_along_axis(gate_logits, top_k_indices, axis=-1)
   return top_k_weights, top_k_indices
 
