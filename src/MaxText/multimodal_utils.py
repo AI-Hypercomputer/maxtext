@@ -459,7 +459,7 @@ def pre_process_llama4_image(image: np.ndarray | list[np.ndarray]) -> Preprocess
   return processor_output
 
 
-def pre_process_image(image, model_name, config=None):
+def pre_process_image(image, model_name):
   """Pre-process image according to different model's requirements.
   Args:
     image: The np.array image [H, W, C] or images [N, H, W, C] to pre-process.

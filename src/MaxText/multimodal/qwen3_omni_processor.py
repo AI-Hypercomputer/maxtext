@@ -943,17 +943,11 @@ def window_function(
   return padded_window
 
 
-def _np_extract_fbank_features(waveform_batch: np.ndarray, device: str) -> np.ndarray:
+def _np_extract_fbank_features(waveform_batch: np.ndarray) -> np.ndarray:
   """
   Compute the log-mel spectrogram of the provided audio, gives similar results to Whisper's original torch
   implementation with 1e-5 tolerance.
   """
-  if device != "cpu":
-    raise ValueError(
-        f"Got device `{device}` for feature extraction, but feature extraction on CUDA accelerator "
-        "devices requires torch, which is not installed. Either set `device='cpu'`, or "
-        "install torch according to the official instructions: https://pytorch.org/get-started/locally/"
-    )
   log_spec_batch = []
   mel_filters = mel_filter_bank(
       num_frequency_bins=1 + 400 // 2,
@@ -999,7 +993,7 @@ def _load_audio(data_path: str) -> np.ndarray:
 def pre_process_audio_qwen3_omni(audio_array):
   """Preprocess audio for Qwen3-Omni model."""
   audio_features = np.expand_dims(audio_array, axis=0)  # Add batch dimension
-  audio_features = _np_extract_fbank_features(audio_features, device="cpu")
+  audio_features = _np_extract_fbank_features(audio_features)
   audio_features_mask = np.ones((audio_features.shape[0], audio_features.shape[2]), dtype=np.int32)
   return audio_features, audio_features_mask
 
