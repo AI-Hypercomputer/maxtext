@@ -241,9 +241,11 @@ if [[ "$MODE" == "stable" || ! -v MODE ]]; then
         if [[ -n "$JAX_VERSION" ]]; then
             echo "Installing stable jax, jaxlib ${JAX_VERSION}"
             python3 -m uv pip install -U "jax[cuda12]==${JAX_VERSION}"
+            python3 -m uv pip install -U "jax-cuda12-plugin==${JAX_VERSION}" "jax-cuda12-pjrt==${JAX_VERSION}"
         else
             echo "Installing stable jax, jaxlib, libtpu for NVIDIA gpu"
             python3 -m uv pip install "jax[cuda12]"
+            python3 -m uv pip install -U jax-cuda12-plugin jax-cuda12-pjrt
         fi
         export NVTE_FRAMEWORK=jax
         if [[ -n "$JAX_VERSION" && "$JAX_VERSION" != "0.7.0" ]]; then
