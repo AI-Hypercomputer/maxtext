@@ -41,7 +41,9 @@ install_maxtext_github_deps
 ```
 
 ## Setup environment variables
+
 Set the following environment variables before running SFT.
+
 ```sh
 # -- Model configuration --
 export PRE_TRAINED_MODEL=<model name> # e.g., 'llama3.1-8b'
