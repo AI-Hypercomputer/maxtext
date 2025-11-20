@@ -578,8 +578,15 @@ grain_eval_files: ''
 grain_file_type: 'arrayrecord' # arrayrecord or parquet
 grain_worker_count: 1
 grain_per_worker_buffer_size: 1
+# num_threads and prefetch_buffer_size are per-worker per-dataset. Used in ReadOptions (https://google-grain.readthedocs.io/en/latest/tutorials/data_loader_tutorial.html#per-worker-readoptions)
+# The default value matches that in the Grain package. If mixing multiple data sources, consider lowering these values to reduce memory usage.
+grain_num_threads: 16  
+grain_prefetch_buffer_size: 500
 grain_worker_count_eval: 1
 grain_per_worker_buffer_size_eval: 1
+grain_num_threads_eval: 16
+grain_prefetch_buffer_size_eval: 500
+grain_data_source_max_workers: 16  # Max workers for ThreadPoolExecutor when mixing multiple Grain data sources.
 # for using pathways
 colocated_python_data_input: False  # experimental feature, under testing
 
