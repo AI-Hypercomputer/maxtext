@@ -147,7 +147,6 @@ def prepare_text_for_image_fusion(example, column_name, model_name, spatial_merg
   )
   return example
 
-
 def combine_columns(example, columns, data_column):
   """Combine columns such as 'prompt' and 'completion' for sft training"""
   assert len(columns) > 1
@@ -756,7 +755,7 @@ class ComputeQwen3OmniPositions(grain.MapTransform):
         - {data_column}_segmentation: Attention mask (1=real, 0=padding)
         - image_grid_thw: Optional (num_images, 3) array
         - video_grid_thw: Optional (num_videos, 3) array
-        - audio_seqlens: Optional (num_audios,) array
+        - audio_lengths: Optional (num_audios,) array
         - second_per_grids: Optional (num_videos,) array
 
     Returns:
@@ -777,7 +776,7 @@ class ComputeQwen3OmniPositions(grain.MapTransform):
     # Extract multimodal metadata (if present)
     image_grid_thw = element.get("image_grid_thw")
     video_grid_thw = element.get("video_grid_thw")
-    audio_seqlens = element.get("audio_seqlens")
+    audio_lengths = element.get("audio_lengths")
     second_per_grids = element.get("second_per_grids")
 
     # Convert metadata to JAX arrays if present
@@ -785,8 +784,8 @@ class ComputeQwen3OmniPositions(grain.MapTransform):
       image_grid_thw = jnp.asarray(image_grid_thw)
     if video_grid_thw is not None:
       video_grid_thw = jnp.asarray(video_grid_thw)
-    if audio_seqlens is not None:
-      audio_seqlens = jnp.asarray(audio_seqlens)
+    if audio_lengths is not None:
+      audio_lengths = jnp.asarray(audio_lengths)
     if second_per_grids is not None:
       second_per_grids = jnp.asarray(second_per_grids)
 
@@ -797,7 +796,7 @@ class ComputeQwen3OmniPositions(grain.MapTransform):
         video_grid_thw=video_grid_thw,
         attention_mask=attention_mask,
         use_audio_in_video=self.use_audio_in_video,
-        audio_seqlens=audio_seqlens,
+        audio_lengths=audio_lengths,
         second_per_grids=second_per_grids,
         spatial_merge_size=self.spatial_merge_size,
         position_id_per_seconds=self.position_id_per_seconds,

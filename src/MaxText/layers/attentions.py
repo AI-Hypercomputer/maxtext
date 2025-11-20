@@ -65,7 +65,6 @@ from MaxText.layers.embeddings import (
     LlamaVisionRotaryEmbedding,
     Qwen3OmniMoeThinkerTextRotaryEmbedding,
     Qwen3OmniMoeVisionRotaryEmbedding,
-    Qwen3OmniMoeVisionRotaryEmbedding,
     RotaryEmbedding,
     YarnRotaryEmbedding,
     Qwen3NextRotaryEmbedding,
@@ -738,25 +737,38 @@ class Attention(nnx.Module):
 
     rope_type = self.config.rope_type.lower()
     rope_use_scale = self.config.rope_use_scale
+    if self.is_vision:
+      if self.config.model_name.startswith("qwen3-omni"):
+        rotary_embedding = Qwen3OmniMoeVisionRotaryEmbedding(
+            hidden_size=self.config.hidden_size_for_vit,
+            num_attention_heads=self.config.num_attention_heads_for_vit,
+            spatial_merge_size=self.config.spatial_merge_size_for_vit,
+            rope_theta=self.config.rope_theta_for_vit,
+            fprop_dtype=self.dtype,
+            rngs=self.rngs,
+        )
+      elif self.config.model_name.startswith("llama4"):
+        rotary_embedding = LlamaVisionRotaryEmbedding(
+            image_size=self.config.image_size_for_vit,
+            patch_size=self.config.patch_size_for_vit,
+            hidden_size=self.config.hidden_size_for_vit,
+            num_attention_heads=self.config.num_attention_heads_for_vit,
+            rope_theta=self.config.rope_theta_for_vit,
+            cast_as_fprop_dtype=True,
+            fprop_dtype=self.dtype,
+            rngs=self.rngs,
+        )
+      else:
+        raise ValueError(f"Unsupported model type for vision rotary embedding: {self.config.model_name}")
 
-    # Check for MRoPE first (for Qwen3-Omni multimodal models)
-    if self.use_mrope:
+    elif self.use_mrope:
       rotary_embedding = Qwen3OmniMoeThinkerTextRotaryEmbedding(
           min_timescale=self.config.rope_min_timescale,
           max_timescale=self.config.rope_max_timescale,
           embedding_dims=rope_embedding_dims,
+          cast_as_fprop_dtype=True,
           fprop_dtype=self.dtype,
           mrope_section=self.mrope_section,
-          rngs=self.rngs,
-      )
-    elif self.is_vision:
-      rotary_embbeding_class = self.get_vision_rotary_embedding_class()
-      rotary_embedding = rotary_embbeding_class(
-          hidden_size=self.config.hidden_size_for_vit,
-          num_attention_heads=self.config.num_attention_heads_for_vit,
-          spatial_merge_size=self.config.spatial_merge_size_for_vit,
-          rope_theta=self.config.rope_theta_for_vit,
-          fprop_dtype=self.dtype,
           rngs=self.rngs,
       )
 
