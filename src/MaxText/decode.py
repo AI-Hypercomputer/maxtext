@@ -99,15 +99,17 @@ def main(argv: Sequence[str]) -> None:
   text = config.prompt
   prefill_length = config.max_prefill_predict_length
   processor_outputs = multimodal_utils.PreprocessorOutput()
+
   if config.use_multimodal:
-    image_path = config.image_path.split(",")
-    images = [multimodal_utils.load_image_from_path(p) for p in image_path]
-    processor_outputs = multimodal_utils.pre_process_image(images, model_name=config.model_name)
+    processor_outputs = multimodal_utils.preprocess_mm_data(config)
     image_offsets = multimodal_utils.get_image_offsets(config.model_name, processor_output=processor_outputs)
 
     prefill_length -= image_offsets
     text = multimodal_utils.reformat_prompt(
-        text, image_placeholder=config.image_placeholder, model_name=config.model_name, num_images=len(images)
+        text,
+        image_placeholder=config.image_placeholder,
+        model_name=config.model_name,
+        num_images=processor_outputs.num_images,
     )
 
   metadata = engine.get_tokenizer()
