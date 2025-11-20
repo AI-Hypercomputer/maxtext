@@ -52,6 +52,12 @@ RUN if [ "$DEVICE" = "tpu" ]; then \
         python3 -m pip install 'google-tunix>=0.1.2'; \
   fi
 
+RUN if [ "$DEVICE" = "gpu" ]; then \
+        python3 -m pip install -U "jax[cuda12]==0.8.0"; \
+    fi
+
+ENV NVTE_CUDA_INCLUDE_DIR="/usr/local/cuda"
+
 # Now copy the remaining code (source files that may change frequently)
 COPY . .
 
