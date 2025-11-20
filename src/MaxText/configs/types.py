@@ -857,6 +857,15 @@ class GrainDataset(BaseModel):
   grain_per_worker_buffer_size_eval: int = Field(
       1, description="Buffer size for each worker for Grain data loading during evaluation."
   )
+  grain_num_threads: int = Field(16, description="Number of threads for Grain ReadOptions during training.")
+  grain_prefetch_buffer_size: int = Field(500, description="Prefetch buffer size for Grain ReadOptions during training.")
+  grain_num_threads_eval: int = Field(16, description="Number of threads for Grain ReadOptions during evaluation.")
+  grain_prefetch_buffer_size_eval: int = Field(
+      500, description="Prefetch buffer size for Grain ReadOptions during evaluation."
+  )
+  grain_data_source_max_workers: int = Field(
+      16, description="Max workers for ThreadPoolExecutor when mixing multiple Grain data sources."
+  )
 
 
 class FineTuning(BaseModel):
