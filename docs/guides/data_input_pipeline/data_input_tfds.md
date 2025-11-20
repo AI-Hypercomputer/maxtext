@@ -8,7 +8,7 @@ bash download_dataset.sh {GCS_PROJECT} {GCS_BUCKET_NAME}
 
 2. In [`src/MaxText/configs/base.yml`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/configs/base.yml) or through command line, set the following parameters:
 
-```
+```yaml
 dataset_type: tfds
 dataset_name: 'c4/en:3.0.1'
 # set eval_interval > 0 to use the specified eval dataset. Otherwise, only metrics on the train set will be calculated.
