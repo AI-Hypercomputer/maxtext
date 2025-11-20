@@ -59,11 +59,11 @@ DITHER = 0.0  # Amount of dithering to apply to audio signal.
 
 # Qwen3OmniMoe-specific processing
 QWEN3_OMNI_VISION_START_TOKEN = 151652  # <|vision_start|>
-QWEN3_OMNI_VISION_END_TOKEN = 151653  # <|vision_eos|>
+QWEN3_OMNI_VISION_END_TOKEN = 151653  # <|vision_end|>
 QWEN3_OMNI_IMAGE_TOKEN = 151655  # <|image_pad|>
 QWEN3_OMNI_VIDEO_TOKEN = 151656  # <|video_pad|>
 QWEN3_OMNI_AUDIO_START_TOKEN = 151669  # <|audio_start|>
-QWEN3_OMNI_AUDIO_END_TOKEN = 151648  # <|audio_eos|>
+QWEN3_OMNI_AUDIO_END_TOKEN = 151670  # <|audio_end|>
 QWEN3_OMNI_AUDIO_TOKEN = 151675  # <|audio_pad|>
 QWEN3_TEMPORAL_PATCH_SIZE = 2
 QWEN3_OMNI_IMAGE_SIZE = 768
@@ -90,6 +90,7 @@ class Qwen3OmniPreprocessorOutput(mm_utils.PreprocessorOutput):
   num_audios: int = 0
   audio_values: None | np.ndarray = None
   audio_mask: None | np.ndarray = None
+  audio_lengths: None | np.ndarray = None
 
 
 def smart_resize(
@@ -477,14 +478,14 @@ def preprocess_mm_data_qwen3_omni(config):
   """Placeholder for multimodal data preprocessing."""
   processor_outputs = Qwen3OmniPreprocessorOutput()
 
-  if config.image_path is not None:
+  if config.image_path:
     images = [mm_utils.load_image_from_path(p) for p in config.image_path.split(",")]
     pixel_values, pixel_grid_thw = pre_process_qwen3_image(images, config)
     processor_outputs.pixel_values = pixel_values
     processor_outputs.pixel_grid_thw = pixel_grid_thw
     processor_outputs.num_images = len(images)
 
-  if config.video_path is not None:
+  if config.video_path:
     video_array, _ = _read_video_decord(config.video_path)
     video_processed, video_grid_thw = preprocess_video(video_array, config)
     processor_outputs.video_values = video_processed
@@ -492,26 +493,21 @@ def preprocess_mm_data_qwen3_omni(config):
     processor_outputs.video_second_per_grid = np.asarray([config.temporal_patch_size_for_vit], dtype=np.float32)
     processor_outputs.num_videos = 1  # Only one video for now.
 
-  if config.video_path is not None and config.use_audio_in_video:
+  if config.video_path and config.use_audio_in_video:
     # TODO(hengtaoguo): add support for separate audio files. Now only extract audio from video files.
     mt_audio = mm_utils.load_audio(config.video_path, sample_rate=SAMPLE_RATE)
     mt_audio, mt_audio_mask = pre_process_audio_qwen3_omni(mt_audio)
     processor_outputs.audio_values = mt_audio
     processor_outputs.audio_mask = mt_audio_mask
+    # Compute audio_lengths from audio_mask
+    audio_mask_sum = np.sum(mt_audio_mask, axis=-1)
+    audio_lengths = _get_feat_extract_output_lengths(audio_mask_sum)
+    processor_outputs.audio_lengths = np.array(audio_lengths, dtype=np.int32)
 
   return processor_outputs
 
 
-def add_extra_tokens_for_qwen3_omni(
-    tokens: np.ndarray | list,
-    image_grid_thw: np.ndarray | None = None,
-    video_grid_thw: np.ndarray | None = None,
-    audio_lengths: np.ndarray | None = None,
-    spatial_merge_size: int = 2,
-    use_audio_in_video: bool = False,
-    second_per_grids: np.ndarray | None = None,
-    position_id_per_seconds: int = 25,
-):
+def add_extra_tokens_for_qwen3_omni(tokens, config, processor_output):
   """Add extra tokens for Qwen3-Omni multimodal sequences.
 
   Expands special tokens (<|image_pad|>, <|video_pad|>, <|audio_pad|>) into
@@ -532,6 +528,13 @@ def add_extra_tokens_for_qwen3_omni(
   Returns:
     Expanded token sequence with correct number of image/video/audio tokens.
   """
+  image_grid_thw = getattr(processor_output, "pixel_grid_thw", None)
+  video_grid_thw = getattr(processor_output, "video_grid_thw", None)
+  audio_lengths = getattr(processor_output, "audio_lengths", None)
+  second_per_grids = getattr(processor_output, "video_second_per_grid", None)
+  spatial_merge_size = config.spatial_merge_size_for_vit
+  position_id_per_seconds = config.position_id_per_seconds
+
   if not isinstance(tokens, np.ndarray):
     tokens = np.asarray(tokens)
 
@@ -561,7 +564,7 @@ def add_extra_tokens_for_qwen3_omni(
 
     # Handle audio-in-video: <|vision_start|><|video_pad|><|vision_end|>
     elif (
-        use_audio_in_video
+        config.use_audio_in_video
         and token == QWEN3_OMNI_VISION_START_TOKEN
         and i + 2 < len(token_list)
         and token_list[i + 1] == QWEN3_OMNI_VIDEO_TOKEN
@@ -1039,3 +1042,63 @@ def get_rope_index(
   mrope_position_deltas = np.array(mrope_position_deltas).reshape(batch_size, 1)
 
   return position_ids, mrope_position_deltas
+
+
+def reformat_prompt_qwen3_omni(
+    prompt, image_placeholder="<|image|>", num_images=0, video_placeholder="<|video|>", num_videos=0
+):
+  """Reformat the prompt for Qwen3-Omni model."""
+  # Qwen3-Omni vision format: <|vision_start|><|image_pad|><|vision_end|>
+  # Qwen3-Omni mm token order: image_pad, video_pad, audio_pad (standalone audios), then text tokens.
+  # use_audio_in_video mode: such audio tokens are interleaved within video tokens.
+  qwen3_image_placeholder = "<|vision_start|><|image_pad|><|vision_end|>"
+  qwen3_video_placeholder = "<|vision_start|><|video_pad|><|vision_end|>"
+
+  if video_placeholder in prompt:
+    prompt = prompt.replace(video_placeholder, qwen3_video_placeholder)
+  video_placeholder_count = prompt.count(qwen3_video_placeholder)
+  if video_placeholder_count < num_videos:
+    prompt = qwen3_video_placeholder * (num_videos - video_placeholder_count) + prompt
+
+  if image_placeholder in prompt:
+    prompt = prompt.replace(image_placeholder, qwen3_image_placeholder)
+  image_placeholder_count = prompt.count(qwen3_image_placeholder)
+  if image_placeholder_count < num_images:
+    prompt = qwen3_image_placeholder * (num_images - image_placeholder_count) + prompt
+
+  # Qwen chat template
+  formatted_prompt = f"<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n"
+  return formatted_prompt
+
+
+def get_mm_offsets_qwen3_omni(config, processor_output):
+  """Calculate the token offsets for multimodal tokens in Qwen3-Omni model."""
+  # Calculate token expansion for Qwen3-Omni multimodal inputs
+  if processor_output is None:
+    return 0
+
+  total_offset = 0
+  spatial_merge_size = config.spatial_merge_size_for_vit  # Default 2 for Qwen3-Omni
+  merge_length = spatial_merge_size**2
+
+  # Image tokens: <|image_pad|> expands to multiple image tokens
+  if processor_output.pixel_grid_thw is not None:
+    image_grid_thw = processor_output.pixel_grid_thw
+    for grid in image_grid_thw:
+      num_image_tokens = int((grid[0] * grid[1] * grid[2]) // merge_length)
+      total_offset += num_image_tokens - 1  # -1 for the original <|image_pad|> token
+
+  # Video tokens: <|video_pad|> expands to multiple video tokens
+  if processor_output.video_grid_thw is not None:
+    video_grid_thw = processor_output.video_grid_thw
+    for grid in video_grid_thw:
+      num_video_tokens = int((grid[0] * grid[1] * grid[2]) // merge_length)
+      total_offset += num_video_tokens - 1  # -1 for the original <|video_pad|> token
+
+  # Audio tokens: <|audio_pad|> expands based on audio_lengths
+  if processor_output.audio_lengths is not None:
+    audio_lengths = processor_output.audio_lengths
+    for audio_len in audio_lengths:
+      total_offset += int(audio_len) - 1  # -1 for the original <|audio_pad|> token
+
+  return total_offset

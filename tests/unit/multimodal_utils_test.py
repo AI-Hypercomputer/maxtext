@@ -13,9 +13,12 @@
 # limitations under the License.
 
 """ Tests for the common MaxText utilities """
+import os
 import unittest
 import numpy as np
 
+from MaxText import pyconfig
+from MaxText.globals import MAXTEXT_REPO_ROOT
 from maxtext.multimodal import processor as mm_processor
 from maxtext.multimodal import utils as mm_utils
 from maxtext.multimodal import processor_gemma3
@@ -195,8 +198,12 @@ class TestLlama4PostProcessing(unittest.TestCase):
         pixel_values=dummy_pixel_values,
         aspect_ratios=dummy_aspect_ratios,
     )
-
-    image_offsets = mm_processor.get_image_offsets(model_name=self.model_name, processor_output=processor_output)
+    base_config_path = os.path.join(MAXTEXT_REPO_ROOT, "src", "maxtext", "configs", "base.yml")
+    config = pyconfig.initialize(
+        ["", base_config_path],
+        model_name="llama4-17b-16e",
+    )
+    image_offsets = mm_processor.get_image_offsets(config=config, processor_output=processor_output)
     post_processed_tokens = processor_llama4.add_extra_tokens_for_images_llama4(dummy_tokens, processor_output)
     self.assertEqual(post_processed_tokens.shape[0], dummy_tokens.shape[0] + image_offsets)
 

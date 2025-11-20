@@ -1457,6 +1457,8 @@ class MultimodalGeneral(BaseModel):
   )
   video_path: PathStr = Field("", description="Path to a video for decoding.")
   audio_path: PathStr = Field("", description="Path to an audio file for decoding.")
+  video_placeholder: str = Field("<|video|>", description="Placeholder string for video in text prompts.")
+  audio_placeholder: str = Field("<|audio|>", description="Placeholder string for audio in text prompts.")
   use_audio_in_video: bool = Field(False, description="Extract and use audio from video files.")
   use_mrope: bool = Field(False, description="Enable Multi-dimensional RoPE for Qwen3-Omni models.")
   mrope_section: list[int] = Field([24, 20, 20], description="Dimensions for temporal, height, width in MRoPE.")

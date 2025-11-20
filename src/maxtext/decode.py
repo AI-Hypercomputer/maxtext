@@ -104,14 +104,16 @@ def main(argv: Sequence[str]) -> None:
   processor_outputs = mm_utils.PreprocessorOutput()
   if config.use_multimodal:
     processor_outputs = mm_processor.preprocess_mm_data(config)
-    image_offsets = mm_processor.get_image_offsets(config.model_name, processor_output=processor_outputs)
+    image_offsets = mm_processor.get_image_offsets(config=config, processor_output=processor_outputs)
 
     prefill_length -= image_offsets
     text = mm_processor.reformat_prompt(
         prompt=config.prompt,
         image_placeholder=config.image_placeholder,
+        video_placeholder=config.video_placeholder,
         model_name=config.model_name,
         num_images=processor_outputs.num_images,
+        num_videos=getattr(processor_outputs, 'num_videos', 0),
     )
 
   metadata = engine.get_tokenizer()
@@ -135,9 +137,7 @@ def main(argv: Sequence[str]) -> None:
   mrope_position_deltas = None
 
   if config.use_multimodal:
-    tokens = mm_processor.prepare_text_for_image_fusion(
-        tokens, model_name=config.model_name, processor_output=processor_outputs
-    )
+    tokens = mm_processor.prepare_text_for_image_fusion(tokens=tokens, config=config, processor_output=processor_outputs)
     true_length += image_offsets
 
     if config.use_mrope:
@@ -148,7 +148,7 @@ def main(argv: Sequence[str]) -> None:
           image_grid_thw=processor_outputs.pixel_grid_thw,  # pytype: disable=attribute-error
           video_grid_thw=processor_outputs.video_grid_thw,  # pytype: disable=attribute-error
           attention_mask=np.ones_like(tokens),
-          use_audio_in_video=config.use_audio and processor_outputs.num_videos > 0,  # pytype: disable=attribute-error
+          use_audio_in_video=config.use_audio and getattr(processor_outputs, 'num_videos', 0) > 0,
           audio_lengths=processor_outputs.audio_lengths,  # pytype: disable=attribute-error
           second_per_grids=processor_outputs.video_second_per_grid,  # pytype: disable=attribute-error
           spatial_merge_size=config.spatial_merge_size_for_vit,  # pytype: disable=attribute-error

@@ -63,21 +63,25 @@ def preprocess_image_for_training(image, model_name):
     raise ValueError(f"Model {model_name} not supported for image preprocessing.")
 
 
-def get_image_offsets(model_name, processor_output: mm_utils.PreprocessorOutput | None):
+def get_image_offsets(config, processor_output: mm_utils.PreprocessorOutput | None):
   """Get the increase in total token count after inserting image token placeholders"""
-  if model_name in ["gemma3-4b", "gemma3-12b", "gemma3-27b"]:
+  if config.model_name in ["gemma3-4b", "gemma3-12b", "gemma3-27b"]:
     from maxtext.multimodal.processor_gemma3 import get_image_offsets_gemma3  # pylint: disable=import-outside-toplevel
 
     return get_image_offsets_gemma3(processor_output)
-  elif model_name in ["llama4-17b-16e", "llama4-17b-128e"]:
+  elif config.model_name in ["llama4-17b-16e", "llama4-17b-128e"]:
     from maxtext.multimodal.processor_llama4 import get_image_offsets_llama4  # pylint: disable=import-outside-toplevel
 
     return get_image_offsets_llama4(processor_output)
+  elif config.model_name in ["qwen3-omni-30b-a3b"]:
+    from maxtext.multimodal.processor_qwen3_omni import get_mm_offsets_qwen3_omni  # pylint: disable=import-outside-toplevel
+
+    return get_mm_offsets_qwen3_omni(config, processor_output)
   else:
     return 0
 
 
-def reformat_prompt(prompt, image_placeholder, model_name, num_images):
+def reformat_prompt(prompt, image_placeholder, model_name, num_images, video_placeholder="<|video|>", num_videos=0):
   """Reformat prompt for different models."""
   if model_name in ["gemma3-4b", "gemma3-12b", "gemma3-27b"]:
     from maxtext.multimodal.processor_gemma3 import reformat_prompt_gemma3  # pylint: disable=import-outside-toplevel
@@ -87,6 +91,16 @@ def reformat_prompt(prompt, image_placeholder, model_name, num_images):
     from maxtext.multimodal.processor_llama4 import reformat_prompt_llama4  # pylint: disable=import-outside-toplevel
 
     return reformat_prompt_llama4(prompt, image_placeholder, num_images)
+  elif model_name in ["qwen3-omni-30b-a3b"]:
+    from maxtext.multimodal.processor_qwen3_omni import reformat_prompt_qwen3_omni  # pylint: disable=import-outside-toplevel
+
+    return reformat_prompt_qwen3_omni(
+        prompt=prompt,
+        image_placeholder=image_placeholder,
+        num_images=num_images,
+        video_placeholder=video_placeholder,
+        num_videos=num_videos,
+    )
   else:
     return prompt
 
@@ -99,22 +113,29 @@ def reformat_response(response, model_name):
   elif model_name in ["gemma3-4b", "gemma3-12b", "gemma3-27b"]:
     formatted_response = f"{response}<end_of_turn>"
     return formatted_response
+  elif model_name in ["qwen3-omni-30b-a3b"]:
+    formatted_response = f"{response}<|im_end|>"
+    return formatted_response
   else:
     return response
 
 
-def prepare_text_for_image_fusion(texts, model_name, processor_output=None):
+def prepare_text_for_image_fusion(tokens, config, processor_output=None):
   """Prepare text by adding extra tokens for image fusion based on the model."""
-  if model_name in ["gemma3-4b", "gemma3-12b", "gemma3-27b"]:
+  if config.model_name in ["gemma3-4b", "gemma3-12b", "gemma3-27b"]:
     from maxtext.multimodal.processor_gemma3 import add_extra_tokens_for_images_gemma3  # pylint: disable=import-outside-toplevel
 
-    return add_extra_tokens_for_images_gemma3(texts, max_num_images=processor_output.num_images)
-  elif model_name in ["llama4-17b-16e", "llama4-17b-128e"]:
+    return add_extra_tokens_for_images_gemma3(tokens, max_num_images=processor_output.num_images)
+  elif config.model_name in ["llama4-17b-16e", "llama4-17b-128e"]:
     from maxtext.multimodal.processor_llama4 import add_extra_tokens_for_images_llama4  # pylint: disable=import-outside-toplevel
 
-    return add_extra_tokens_for_images_llama4(texts, processor_output)
+    return add_extra_tokens_for_images_llama4(tokens, processor_output)
+  elif config.model_name in ["qwen3-omni-30b-a3b"]:
+    from maxtext.multimodal.processor_qwen3_omni import add_extra_tokens_for_qwen3_omni  # pylint: disable=import-outside-toplevel
+
+    return add_extra_tokens_for_qwen3_omni(tokens, config, processor_output)
   else:
-    raise ValueError(f"Model {model_name} does not support multimodal inference.")
+    raise ValueError(f"Model {config.model_name} does not support multimodal inference.")
 
 
 def get_dummy_image_shape_for_init(model_name, batch_size=1, num_image_per_sequence=1):
