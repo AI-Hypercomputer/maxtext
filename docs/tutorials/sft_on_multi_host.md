@@ -50,7 +50,7 @@ The `docker_upload_runner.sh` script uploads your Docker image to Artifact Regis
 Install XPK by following the instructions in the [official documentation](https://github.com/AI-Hypercomputer/xpk?tab=readme-ov-file#installation-via-pip).
 
 ## 3. Create GKE cluster
-If you don't already have a GKE cluster, create one by following the [XPK cluster creation guide](https://github.com/AI-Hypercomputer/xpk?tab=readme-ov-file#cluster-create). Ensure the cluster is Pathways-compatible when running SFT with Pathways.
+Use a pathways ready GKE cluster as described [here](https://docs.cloud.google.com/ai-hypercomputer/docs/workloads/pathways-on-cloud/create-gke-cluster)
 
 ## 4. Environment configuration
 ```bash
