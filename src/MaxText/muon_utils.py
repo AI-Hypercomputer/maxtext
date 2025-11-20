@@ -16,7 +16,7 @@ Transformer = models.transformer_as_linen
 
 
 """Example:
-python3 -m MaxText.muon_utils qwen3-4b
+python3 -m MaxText.muon_utils qwen3-4b True
 """
 
 def _is_path_contain_any(tuples, path):
@@ -101,9 +101,14 @@ def _print_structure_debug(abstract_param, muon_weight_dimension_numbers):
   print("\nIs this reasonable?")
 
 
-def get_model_mdn(model_name, verbose=False):
+def get_model_mdn(model_name, scan_layers=True, verbose=False):
   # Setup config
-  argv = [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"), f"model_name={model_name}", "scan_layers=True"]
+  argv = [
+      None,
+      os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+      f"model_name={model_name}",
+      f"scan_layers={scan_layers}",
+  ]
   config = pyconfig.initialize(argv)
   # Setup model
   devices_array = maxtext_utils.create_device_mesh(config)
@@ -116,4 +121,4 @@ def get_model_mdn(model_name, verbose=False):
 
 
 if __name__ == "__main__":
-  get_model_mdn(sys.argv[1], verbose=True)
+  get_model_mdn(sys.argv[1], sys.argv[2], verbose=True)

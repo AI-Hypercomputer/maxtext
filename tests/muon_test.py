@@ -8,8 +8,8 @@ from MaxText.muon_utils import get_model_mdn
 python3 -m pytest -v --pyargs tests.muon_test -rP -s
 """
 
-# deepseek2-16b, scanned, q_lora_rank=0
-# NOTE: not compatible with deepseek2-236b (q_lora_rank: 1536)
+# deepseek2: specific q_lora_rank=0
+# apply for deepseek2-16, but not deepseek2-236b (q_lora_rank=1536)
 _DEEPSEEK2_ATTENTION = {
     "self_attention": {
         "kv_norm": {"scale": None},
@@ -57,6 +57,7 @@ DEEPSEEK2_DIMENSION_NUMBER = {
 }
 
 
+# deepseek3
 _DEEPSEEK3_ATTENTION = {
     "self_attention": {
         "kv_norm": {"scale": None},
@@ -71,7 +72,6 @@ _DEEPSEEK3_ATTENTION = {
     "pre_self_attention_layer_norm": {"scale": None},
 }
 
-# deepseek3, scanned
 DEEPSEEK3_DIMENSION_NUMBER = {
     "params": {
         "decoder": {
@@ -106,7 +106,8 @@ DEEPSEEK3_DIMENSION_NUMBER = {
     }
 }
 
-
+# gemma3
+# specific: layer_remainder=5, only apply for gemma3-4b
 _GEMMA3_LAYER = {
     "mlp": {
         "wi_0": {"kernel": mdn(reduction_axis=(0,), output_axis=(-1,))},
@@ -139,6 +140,7 @@ GEMMA3_DIMENSION_NUMBER = {
 }
 
 
+# llama2 (also llama3)
 LLAMA2_DIMENSION_NUMBER = {
     "params": {
         "decoder": {
@@ -165,6 +167,8 @@ LLAMA2_DIMENSION_NUMBER = {
 }
 
 
+# qwen3, specific: logits_via_embedding=True
+# applicable: qwen3-0.6b, qwen3-4b, but not: qwen3-8b, qwen3-14b (logits_via_embedding=False)
 QWEN3_DIMENSION_NUMBER = {
     "params": {
         "decoder": {
@@ -202,14 +206,14 @@ class MuonDimensionTest(parameterized.TestCase):
       ("llama3.1-8b", "llama3.1-8b", LLAMA2_DIMENSION_NUMBER),
       ("llama3.3-70b", "llama3.3-70b", LLAMA2_DIMENSION_NUMBER),
       ("gemma3-4b", "gemma3-4b", GEMMA3_DIMENSION_NUMBER),
-      ("qwen3-4b", "qwen3-4b", QWEN3_DIMENSION_NUMBER),
+      ("qwen3-0.6b", "qwen3-0.6b", QWEN3_DIMENSION_NUMBER),
   )
   def test_model_integration(self, model_name, expected_output):
     """
     Initializes the specified MaxText model and asserts that the calculated
     Muon dimension numbers match the hardcoded reference.
     """
-    actual_output = get_model_mdn(model_name)
+    actual_output = get_model_mdn(model_name, scan_layers=True)
     self.assertEqual(actual_output, expected_output)
 
 
