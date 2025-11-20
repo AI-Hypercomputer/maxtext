@@ -502,16 +502,7 @@ def preprocess_mm_data_qwen3_omni(config):
   return processor_outputs
 
 
-def add_extra_tokens_for_qwen3_omni(
-    tokens: np.ndarray | list,
-    image_grid_thw: np.ndarray | None = None,
-    video_grid_thw: np.ndarray | None = None,
-    audio_lengths: np.ndarray | None = None,
-    spatial_merge_size: int = 2,
-    use_audio_in_video: bool = False,
-    second_per_grids: np.ndarray | None = None,
-    position_id_per_seconds: int = 25,
-):
+def add_extra_tokens_for_qwen3_omni(tokens, config, processor_output):
   """Add extra tokens for Qwen3-Omni multimodal sequences.
 
   Expands special tokens (<|image_pad|>, <|video_pad|>, <|audio_pad|>) into
@@ -532,6 +523,13 @@ def add_extra_tokens_for_qwen3_omni(
   Returns:
     Expanded token sequence with correct number of image/video/audio tokens.
   """
+  image_grid_thw = getattr(processor_output, "pixel_grid_thw", None)
+  video_grid_thw = getattr(processor_output, "video_grid_thw", None)
+  audio_lengths = getattr(processor_output, "audio_lengths", None)
+  second_per_grids = getattr(processor_output, "video_second_per_grid", None)
+  spatial_merge_size = config.spatial_merge_size_for_vit
+  position_id_per_seconds = config.position_id_per_seconds
+
   if not isinstance(tokens, np.ndarray):
     tokens = np.asarray(tokens)
 
@@ -561,7 +559,7 @@ def add_extra_tokens_for_qwen3_omni(
 
     # Handle audio-in-video: <|vision_start|><|video_pad|><|vision_end|>
     elif (
-        use_audio_in_video
+        config.use_audio_in_video
         and token == QWEN3_OMNI_VISION_START_TOKEN
         and i + 2 < len(token_list)
         and token_list[i + 1] == QWEN3_OMNI_VIDEO_TOKEN
@@ -1039,3 +1037,50 @@ def get_rope_index(
   mrope_position_deltas = np.array(mrope_position_deltas).reshape(batch_size, 1)
 
   return position_ids, mrope_position_deltas
+
+
+def reformat_prompt_qwen3_omni(prompt, image_placeholder, num_images):
+  """Reformat the prompt for Qwen3-Omni model."""
+  # Qwen3-Omni vision format: <|vision_start|><|image_pad|><|vision_end|>
+  qwen3_image_placeholder = "<|vision_start|><|image_pad|><|vision_end|>"
+  if image_placeholder in prompt:
+    prompt = prompt.replace(image_placeholder, qwen3_image_placeholder)
+  image_placeholder_count = prompt.count(qwen3_image_placeholder)
+  if image_placeholder_count < num_images:
+    prompt = qwen3_image_placeholder * (num_images - image_placeholder_count) + prompt
+  # Qwen chat template
+  formatted_prompt = f"<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n"
+  return formatted_prompt
+
+
+def get_mm_offsets_qwen3_omni(processor_output):
+  """Calculate the token offsets for multimodal tokens in Qwen3-Omni model."""
+  # Calculate token expansion for Qwen3-Omni multimodal inputs
+  if processor_output is None:
+    return 0
+
+  total_offset = 0
+  spatial_merge_size = 2  # Default for Qwen3-Omni
+  merge_length = spatial_merge_size**2
+
+  # Image tokens: <|image_pad|> expands to multiple image tokens
+  if processor_output.pixel_grid_thw is not None:
+    image_grid_thw = processor_output.pixel_grid_thw
+    for _i, grid in enumerate(image_grid_thw):
+      num_image_tokens = int((grid[0] * grid[1] * grid[2]) // merge_length)
+      total_offset += num_image_tokens - 1  # -1 for the original <|image_pad|> token
+
+  # Video tokens: <|video_pad|> expands to multiple video tokens
+  if processor_output.video_grid_thw is not None:
+    video_grid_thw = processor_output.video_grid_thw
+    for _i, grid in enumerate(video_grid_thw):
+      num_video_tokens = int((grid[0] * grid[1] * grid[2]) // merge_length)
+      total_offset += num_video_tokens - 1  # -1 for the original <|video_pad|> token
+
+  # Audio tokens: <|audio_pad|> expands based on audio_lengths
+  if processor_output.audio_lengths is not None:
+    audio_lengths = processor_output.audio_lengths
+    for audio_len in audio_lengths:
+      total_offset += int(audio_len) - 1  # -1 for the original <|audio_pad|> token
+
+  return total_offset

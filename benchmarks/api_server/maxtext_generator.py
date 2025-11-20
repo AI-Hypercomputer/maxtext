@@ -511,7 +511,7 @@ class MaxTextGenerator:
     tokens, true_length = self.tokenizer.encode(text, is_bos=not self.has_chat_template, prefill_lengths=[prefill_length])
     if self.config.use_multimodal and image_path:
       tokens = mm_processor.prepare_text_for_image_fusion(
-          tokens, model_name=self.config.model_name, processor_output=processor_output
+          tokens, config=self.config, processor_output=processor_output
       )
       true_length += mm_processor.get_image_offsets(self.config.model_name, processor_output=processor_output)
 

@@ -136,7 +136,7 @@ def main(argv: Sequence[str]) -> None:
 
   if config.use_multimodal:
     tokens = mm_processor.prepare_text_for_image_fusion(
-        tokens, model_name=config.model_name, processor_output=processor_outputs
+        tokens, config=config, processor_output=processor_outputs
     )
     true_length += image_offsets
 
