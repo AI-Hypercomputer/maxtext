@@ -24,27 +24,28 @@ We use Tunix as the library for GRPO.
 And we use vLLM as the library for efficient model inference and generation.
 
 Furthermore, we use Pathways for [orchestration](https://cloud.google.com/ai-hypercomputer/docs/workloads/pathways-on-cloud/pathways-intro). Using Pathways, you can also run GRPO in a disaggregated mode where the trainer and the samplers are running on separate mesh. Try out the following recipe `v5p-64`. You can submit jobs to a Pathways enabled GKE cluster.
+
+## Create virtual environment and Install MaxText dependencies
+Follow instructions in [Install MaxText](https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/guides/install_maxtext.md), but 
+recommend creating the virtual environment outside the `maxtext` directory.
+
+## Build and Upload MaxText Docker Image with Tunix, vLLM, tpu-inference dependencies
+
+### Installing stable releases of tunix and vllm-tpu
+Run the following bash script to create a docker image with all the dependencies of MaxText, Tunix, vLLM and tpu-inference installed.
+
+In addition to MaxText dependencies, primarily, it installs `vllm-tpu` which is [vllm](https://github.com/vllm-project/vllm) and [tpu-inference](https://github.com/vllm-project/tpu-inference) and thereby providing TPU inference for vLLM, with unified JAX and PyTorch support.
  
-## Build and Upload MaxText Docker Image with Tunix, vLLM, tpu-commons dependencies
-Run the following bash script to create a docker image with all the dependencies of MaxText, Tunix, vLLM and tpu-commons installed.
-
-In addition to MaxText dependencies, 
-
-1. It installs `pip install keyring keyrings.google-artifactregistry-auth` which enables pip to authenticate with Google Artifact Registry automatically.
-2. Next, it installs `vLLM` for Jax and TPUs from the artifact registry `https://us-python.pkg.dev/cloud-tpu-images/maxtext-rl/simple/`
-3. Then, it installs `tpu-commons` from the same artifact registry.
-
-
-`tpu_commons` is the TPU backend for vLLM. You will need both libraries to run vLLM on tpus.
-We use the scheduler code from vLLM, and the model runner code from `tpu_commons`
-
 ```
-bash docker_build_dependency_image.sh MODE=post-training
+bash dependencies/scripts/docker_build_dependency_image.sh MODE=post-training
 ```
 
-You can also use `bash docker_build_dependency_image.sh MODE=post-training-experimental` to try out new features via experimental dependencies such as improved pathwaysutils resharding API
+You can also use `bash dependencies/scripts/docker_build_dependency_image.sh MODE=post-training-experimental` to try out new features via experimental dependencies such as improved pathwaysutils resharding API
 
+### Install from locally git cloned repo's
 
+You can also locally git clone [tunix](https://github.com/google/tunix), [tpu-inference](https://github.com/vllm-project/tpu-inference), [vllm](https://github.com/vllm-project/vllm.git) and then use the following command to build a docker image using them: 
+`bash dependencies/scripts/docker_build_dependency_image.sh MODE=post-training POST_TRAINING_SOURCE=local`
 
 ### Upload the dependency docker image along with MaxText code
 ```
@@ -53,7 +54,7 @@ bash docker_upload_runner.sh CLOUD_IMAGE_NAME=path/to/gcr.io
 
 ### Submit your jobs
 
-Please use a pathways enabled [XPK](https://github.com/AI-Hypercomputer/xpk) cluster, and you can submit the `train_rl.py` script via [XPK](https://github.com/AI-Hypercomputer/xpk)
+Please create a pathways ready GKE cluster as described [here](https://docs.cloud.google.com/ai-hypercomputer/docs/workloads/pathways-on-cloud/create-gke-cluster), and you can submit the `train_rl.py` script via [XPK](https://github.com/AI-Hypercomputer/xpk)
 ```
 xpk workload create-pathways --workload $WORKLOAD \
 --docker-image path/to/gcr.io:latest --cluster $TPU_CLUSTER \
@@ -61,12 +62,12 @@ xpk workload create-pathways --workload $WORKLOAD \
 --project=$PROJECT_ID --priority=high \
 --command "HF_TOKEN=$HF_TOKEN TF_CPP_MIN_LOG_LEVEL=0 JAX_PLATFORMS=proxy JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 ENABLE_PATHWAYS_PERSISTENCE='1' # Llama3.1-70B-Instruct
 python3 -m src.MaxText.rl.train_rl src/MaxText/configs/rl.yml \
-  --model_name=llama3.1-70b \
-  --tokenizer_path=meta-llama/Llama-3.1-70B-Instruct \
-  --load_parameters_path=gs://path/to/checkpoint/0/items \
-  --run_name=$WORKLOAD \
-  --base_output_directory=$OUTPUT_PATH \
-  --hf_access_token=$HF_TOKEN"
+  model_name=llama3.1-70b \
+  tokenizer_path=meta-llama/Llama-3.1-70B-Instruct \
+  load_parameters_path=gs://path/to/checkpoint/0/items \
+  run_name=$WORKLOAD \
+  base_output_directory=$OUTPUT_PATH \
+  hf_access_token=$HF_TOKEN"
 ```
 
 The overview of the demo script ~/maxtext/src/MaxText/examples/grpo_llama3_1_70b_demo_pw.py` is as follows:

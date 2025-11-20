@@ -53,6 +53,10 @@ def run_e2e_test_flow(hardware, model_config, attention_type="autoselected", sta
       "per_device_batch_size=1",
   ] + model_config
 
+  pathways_command = []
+  if os.getenv("JAX_PLATFORMS") == "proxy":
+    pathways_command = ["enable_single_controller=True"]
+
   if state_path is None:
     # Run training to get a checkpoint
     train_main(
@@ -69,17 +73,25 @@ def run_e2e_test_flow(hardware, model_config, attention_type="autoselected", sta
     state_path = f"gs://runner-maxtext-logs/runner_{run_date}/checkpoints/0/items"
 
   # Generate parameter-only checkpoint
-  generate_param_only_ckpt_config = test_config + [
-      f"run_name=generate_param_{run_date}",
-      f"load_full_state_path={state_path}",
-  ]
+  generate_param_only_ckpt_config = (
+      test_config
+      + [
+          f"run_name=generate_param_{run_date}",
+          f"load_full_state_path={state_path}",
+      ]
+      + pathways_command
+  )
   generate_param_only_ckpt_main(generate_param_only_ckpt_config)
 
   # Run inference on parameter-only checkpoint
-  decode_config = test_config + [
-      f"run_name=decode_{run_date}",
-      f"load_parameters_path=gs://runner-maxtext-logs/generate_param_{run_date}/checkpoints/0/items",
-  ]
+  decode_config = (
+      test_config
+      + [
+          f"run_name=decode_{run_date}",
+          f"load_parameters_path=gs://runner-maxtext-logs/generate_param_{run_date}/checkpoints/0/items",
+      ]
+      + pathways_command
+  )
   decode_main(decode_config)
 
 

@@ -31,6 +31,16 @@ export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_SUSPEND=1
 export NEEDRESTART_MODE=l
 
+# Directory Validation Check
+echo "Checking current directory..."
+if [[ ! -d "dependencies" || ! -d "src" ]]; then
+    echo -e "\n\e[31mERROR: Critical directories not found!\e[0m"
+    echo "Please run this script from the root of the MaxText repository."
+    echo "Expected to find './dependencies' and './src' folders."
+    exit 1
+fi
+echo "Directory check passed."
+
 # Enable automatic restart of services without the need for prompting 
 if command -v sudo &> /dev/null && [ -f /etc/needrestart/needrestart.conf ]; then
     sudo sed -i "s/#\$nrconf{restart} = 'i';/\$nrconf{restart} = 'a';/" /etc/needrestart/needrestart.conf
@@ -60,14 +70,14 @@ if [[ '3.12' > "$PY_VERSION" ]]; then
             pip install uv
         fi
         # Ask for the venv name
-        read -rp "Please enter a name for your new virtual environment (default: maxtext_venv): " venv_name
+        read -rp "Please enter a name for your new virtual environment (default: venv-maxtext): " venv_name
         # Use a default name if the user provides no input
         if [ -z "$venv_name" ]; then
-            venv_name="$HOME"'/maxtext_venv'
+            venv_name="$HOME"'/venv-maxtext'
             echo "No name provided. Using default name: '$venv_name'"
         fi
         echo "Creating virtual environment '$venv_name' with Python 3.12..."
-        uv venv --python 3.12 "$venv_name" --seed
+        python3 -m uv venv --python 3.12 "$venv_name" --seed
         printf '%s\n' "$(realpath -- "$venv_name")" >> /tmp/venv_created
         echo -e "\n\e[32mVirtual environment '$venv_name' created successfully!\e[0m"
         echo "To activate it, run the following command:"
@@ -210,9 +220,6 @@ fi
 if [[ "$MODE" == "stable" || ! -v MODE ]]; then
 # Stable mode
     if [[ $DEVICE == "tpu" ]]; then
-        # TODO: Once tunix has support for GPUs, move it from here to requirements.txt
-        echo "Installing google-tunix for stable TPU environment"
-        python3 -m uv pip install 'google-tunix>=0.1.2'
         echo "Installing stable jax, jaxlib for tpu"
         if [[ -n "$JAX_VERSION" ]]; then
             echo "Installing stable jax, jaxlib, libtpu version ${JAX_VERSION}"
@@ -265,8 +272,6 @@ elif [[ $MODE == "nightly" ]]; then
     elif [[ $DEVICE == "tpu" ]]; then
         echo "Installing nightly tensorboard plugin profile"
         python3 -m uv pip install tbp-nightly --upgrade
-        # Installing tunix
-        python3 -m uv pip install 'git+https://github.com/google/tunix.git'
         echo "Installing jax-nightly, jaxlib-nightly"
         # Install jax-nightly
         python3 -m uv pip install --pre -U jax -i https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/

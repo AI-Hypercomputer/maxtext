@@ -20,6 +20,7 @@ from collections.abc import Callable
 import dataclasses
 import functools
 from typing import Any, Optional
+import json
 
 import jax
 from jax import lax
@@ -430,13 +431,13 @@ def gmm(
         loaded_lhs = lhs[...]
         loaded_lhs = dataclasses.replace(loaded_lhs, qvalue=mask_k_rem_lhs(loaded_lhs.qvalue))
       else:
-        loaded_lhs = mask_k_rem_lhs(lhs[...])
+        loaded_lhs = mask_k_rem_lhs(lhs[...])  # pytype: disable=wrong-arg-types
 
       if isinstance(rhs, qpl.QArray):
         loaded_rhs = rhs[...]
         loaded_rhs = dataclasses.replace(loaded_rhs, qvalue=mask_k_rem_rhs(loaded_rhs.qvalue))
       else:
-        loaded_rhs = mask_k_rem_rhs(rhs[...])
+        loaded_rhs = mask_k_rem_rhs(rhs[...])  # pytype: disable=wrong-arg-types
 
       if transpose_rhs:
         dot_general_dims = (((1,), (1,)), ((), ()))
@@ -514,6 +515,11 @@ def gmm(
   bytes_accessed = (lhs_bytes * tiles_n) + (rhs_bytes * max_active_tiles) + out_bytes
   flops = 2 * m * k * n
   cost_estimate = pl.CostEstimate(flops=flops, bytes_accessed=bytes_accessed, transcendentals=0)
+  metadata = {
+      "preferred_element_type": jnp.dtype(preferred_element_type).name,
+      "tiling": {"tile_m": tm, "tile_k": tk, "tile_n": tn},
+      "transpose_rhs": transpose_rhs,
+  }
   call_gmm = qpl.pallas_call(
       kernel,
       out_shape=jax.ShapeDtypeStruct((m, n), preferred_element_type),
@@ -532,6 +538,7 @@ def gmm(
       compiler_params=pltpu.CompilerParams(dimension_semantics=("parallel", "arbitrary", "arbitrary")),
       interpret=interpret,
       cost_estimate=cost_estimate,
+      metadata={"xprof_metadata": json.dumps(metadata)},
   )
 
   out = call_gmm(
@@ -761,6 +768,11 @@ def tgmm(
   flops = 2 * m * k * n
   cost_estimate = pl.CostEstimate(flops=flops, bytes_accessed=bytes_accessed, transcendentals=0)
   lhs = lhs.swapaxes(0, 1)
+  metadata = {
+      "tiling": {"tile_m": tm, "tile_k": tk, "tile_n": tn},
+      "prefer_element_type": jnp.dtype(preferred_element_type).name,
+      "num_actual_groups": num_actual_groups,
+  }
   call_gmm = qpl.pallas_call(
       kernel,
       out_shape=jax.ShapeDtypeStruct((num_actual_groups, k, n), preferred_element_type),
@@ -779,6 +791,7 @@ def tgmm(
       compiler_params=pltpu.CompilerParams(dimension_semantics=("parallel", "arbitrary", "arbitrary")),
       interpret=interpret,
       cost_estimate=cost_estimate,
+      metadata={"xprof_metadata": json.dumps(metadata)},
   )
 
   out = call_gmm(

@@ -21,6 +21,8 @@ base_config: "base.yml"
 trainer_devices_fraction: 0.5
 sampler_devices_fraction: 0.5
 chips_per_vm: 4  # depends on hardware, for v5p this is 4
+num_trainer_slices: -1
+num_samplers_slices: -1
 
 # ====== Reproducibility ======
 data_shuffle_seed: 42
@@ -71,16 +73,23 @@ value_proj: 'offload'
 checkpoint_storage_use_ocdbt: False # For Pathways
 checkpoint_storage_use_zarr3: False # For Pathways
 use_pathways: True
+log_period: 20
 
 # ====== Debugging ======
 debug:
   rl: True
+# If True, Tunix-managed metrics measurement will be enabled. The metrics will be
+# uploaded to tensorboard.
+enable_tunix_perf_metrics: False
 
 # ====== Training ======
 batch_size: 1
 # Increase `batch_size` and `MAX_STEPS` for better results.
 # num_batches: 3738
 num_batches: 4  # 200
+# A batch can be split into multiple micro batches for memory management
+# and/or async sampling and training.
+micro_batch_size: -1
 # Keep `num_test_batches` low so that evaluation runs quickly. It can be
 # increased to a max. of 330 (if batch size is 4).
 num_test_batches: 5  # 200

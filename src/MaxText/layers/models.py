@@ -19,6 +19,7 @@
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
+from typing import Any
 
 from flax import linen as nn
 from flax import nnx
@@ -99,11 +100,10 @@ class TransformerLinenPure(nn.Module):
 
   def logits_from_hidden_states(self, hidden_states, deterministic, model_mode):
     """
-    Compute logits from hidden states (wrapping decoder._apply_output_head).
+    Compute logits from hidden states (wrapping decoder.apply_output_head).
     This function is only used for vocabulary tiling.
     """
-    # pylint: disable=protected-access
-    logits = self.decoder._apply_output_head(
+    logits = self.decoder.apply_output_head(
         shared_embedding=self.shared_embedding,
         y=hidden_states,
         deterministic=deterministic,
@@ -127,6 +127,8 @@ class TransformerLinenPure(nn.Module):
       decoder_target_tokens: None | jnp.ndarray = None,
       decoder_target_mask: None | jnp.ndarray = None,
       nnx_method=None,
+      kv_caches: list[jax.Array] | None = None,
+      attention_metadata: dict[str, Any] | None = None,
   ):
     """Applies Transformer decoder-branch on encoded-input and target.
 
@@ -158,8 +160,10 @@ class TransformerLinenPure(nn.Module):
         bidirectional_mask = decoder_input_tokens == multimodal_utils.GEMMA_TOKEN_PLACEHOLDER
       elif self.config.decoder_block == DecoderBlockType.LLAMA4:
         bidirectional_mask = decoder_input_tokens == multimodal_utils.LLAMA4_PATCH_TOKEN
+      elif self.config.decoder_block == DecoderBlockType.QWEN3_MOE:
+        bidirectional_mask = decoder_input_tokens == multimodal_utils.QWEN3_OMNI_IMAGE_TOKEN
 
-    logits, hidden_state = self.decoder(
+    logits, hidden_state, kv_caches = self.decoder(
         shared_embedding=self.shared_embedding,
         decoder_input_tokens=decoder_input_tokens,
         decoder_positions=decoder_positions,
@@ -173,6 +177,8 @@ class TransformerLinenPure(nn.Module):
         image_embeddings=image_embeddings,
         image_masks=encoder_image_masks,
         deepstack_visual_embeds=deepstack_visual_embeds,
+        kv_caches=kv_caches,
+        attention_metadata=attention_metadata,
     )
 
     # If we are initializing the model AND MTP is enabled, we must create
@@ -206,6 +212,10 @@ class TransformerLinenPure(nn.Module):
           deterministic=not enable_dropout,
           model_mode=model_mode,
       )
+
+    if self.config.attention == "vllm_rpa":
+      # In vLLM, logits are computed separately after updating the KV cache.
+      return logits, hidden_state, kv_caches
 
     return logits
 
@@ -312,10 +322,30 @@ class Transformer(nnx.Module):
     dummy_decoder_input_tokens = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
     dummy_decoder_positions = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
 
+    if self.config.attention == "vllm_rpa":
+      try:
+        # pylint: disable=import-outside-toplevel
+        # pytype: disable=import-error
+        from tpu_inference.layers.common.attention_metadata import AttentionMetadata
+      except ImportError as e:
+        raise ImportError(
+            "vLLM RPA attention requires the vllm-tpu package. Please install it with `pip install vllm-tpu`."
+        ) from e
+      dummy_attention_metadata = AttentionMetadata(
+          input_positions=jnp.ones((batch_size * seq_len,), dtype=jnp.int32),
+          block_tables=jnp.ones((seq_len,), dtype=jnp.int32),
+          seq_lens=jnp.ones((1), dtype=jnp.int32),
+          query_start_loc=jnp.ones((2), dtype=jnp.int32),
+          request_distribution=jnp.ones((3), dtype=jnp.int32),
+      )
+    else:
+      dummy_attention_metadata = None
+
     self.decoder.lazy_init(
         shared_embedding=self.token_embedder,
         decoder_input_tokens=dummy_decoder_input_tokens,
         decoder_positions=dummy_decoder_positions,
+        attention_metadata=dummy_attention_metadata,
     )
 
     # If MTP is enabled via config, set up the MTP block.
@@ -374,6 +404,8 @@ class Transformer(nnx.Module):
       page_state: page_manager.PageState | None = None,
       decoder_target_tokens: jax.Array | None = None,
       decoder_target_mask: jax.Array | None = None,
+      kv_caches: list[jax.Array] | None = None,
+      attention_metadata: dict[str, Any] | None = None,
   ):
     """Applies the Zero-1 FSDP wrapped Transformer model.
 
@@ -394,9 +426,11 @@ class Transformer(nnx.Module):
       decoder_target_tokens: Target tokens for the decoder (optional, used in MTP).
       decoder_target_mask: Target mask for the decoder (optional, used in MTP).
       nnx_method: Method to call on the NNX module (optional).
+      kv_caches: List of KV caches for each attention layer, used when invoking from vLLM (optional).
+      attention_metadata: Mapping to store attention metadata, used when invoking from vLLM (optional).
 
     Returns:
-      Logits from the Transformer model.
+      Logits from the Transformer model. Logits, hidden_state, kv_caches if called by vLLM.
     """
     if decoder_segment_ids is not None and model_mode == MODEL_MODE_AUTOREGRESSIVE:
       raise ValueError(
@@ -419,8 +453,10 @@ class Transformer(nnx.Module):
         bidirectional_mask = decoder_input_tokens == multimodal_utils.GEMMA_TOKEN_PLACEHOLDER
       elif self.config.decoder_block == DecoderBlockType.LLAMA4:
         bidirectional_mask = decoder_input_tokens == multimodal_utils.LLAMA4_PATCH_TOKEN
+      elif self.config.decoder_block == DecoderBlockType.QWEN3_MOE:
+        bidirectional_mask = decoder_input_tokens == multimodal_utils.QWEN3_OMNI_IMAGE_TOKEN
 
-    logits, hidden_state = self.decoder(
+    logits, hidden_state, kv_caches = self.decoder(
         shared_embedding=self.token_embedder,
         decoder_input_tokens=decoder_input_tokens,
         decoder_positions=decoder_positions,
@@ -434,6 +470,8 @@ class Transformer(nnx.Module):
         image_embeddings=image_embeddings,
         image_masks=encoder_image_masks,
         deepstack_visual_embeds=deepstack_visual_embeds,
+        kv_caches=kv_caches,
+        attention_metadata=attention_metadata,
     )
 
     # Materialize hidden state when vocab tiling is enabled
@@ -471,6 +509,10 @@ class Transformer(nnx.Module):
           deterministic=not enable_dropout,
           model_mode=model_mode,
       )
+
+    if self.config.attention == "vllm_rpa":
+      # In vLLM, logits are computed separately after updating the KV cache.
+      return logits, hidden_state, kv_caches
 
     return logits
 

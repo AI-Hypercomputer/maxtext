@@ -17,10 +17,12 @@
 # pylint: disable=too-many-positional-arguments
 
 import functools
+import dataclasses
 from typing import Literal
 import jax
 import jax.numpy as jnp
 from MaxText.kernels.megablox import backend
+from tokamax._src.ops.ragged_dot import pallas_mosaic_tpu_kernel as tokamax_backend
 import qwix
 import qwix.pallas as qpl
 
@@ -30,7 +32,7 @@ def gmm(
     rhs: jnp.ndarray,
     group_sizes: jnp.ndarray,
     preferred_element_type: jnp.dtype = jnp.float32,
-    tiling: tuple[int, int, int] = (128, 128, 128),
+    tiling: tuple[int, int, int, int, int, int, int, int, int] = (128, 128, 128, 128, 128, 128, 128, 128, 128),
     group_offset: jnp.ndarray | None = None,
     existing_out: jnp.ndarray | None = None,
     transpose_rhs: bool = False,
@@ -38,6 +40,8 @@ def gmm(
     lhs_quantize_dtype: Literal[jnp.int4, jnp.int8] | None = None,
     rhs_quantize_dtype: Literal[jnp.int4, jnp.int8] | None = None,
     use_qwix_quantization: bool = False,
+    use_tokamax_backend: bool = False,
+    is_fsdp_shard_on_exp: bool = False,
 ):
   """Grouped matrix multiplication operation."""
   quantization_rule = None
@@ -57,7 +61,7 @@ def gmm(
       )
 
   gmm_fwd_bwd = lambda *args: _gmm_fwd(*args)[0]  # pylint: disable=C3001
-  gmm_fwd_bwd = jax.custom_vjp(gmm_fwd_bwd, nondiff_argnums=(3, 4, 7, 8, 9))
+  gmm_fwd_bwd = jax.custom_vjp(gmm_fwd_bwd, nondiff_argnums=(3, 4, 7, 8, 9, 10, 11))
   gmm_fwd_bwd.defvjp(_gmm_fwd, functools.partial(_gmm_bwd, lhs.dtype, rhs.dtype))
   return gmm_fwd_bwd(
       lhs,
@@ -70,6 +74,8 @@ def gmm(
       transpose_rhs,
       interpret,
       quantization_rule,
+      use_tokamax_backend,
+      is_fsdp_shard_on_exp,
   )
 
 
@@ -78,12 +84,14 @@ def _gmm_fwd(
     rhs: jnp.ndarray,
     group_sizes: jnp.ndarray,
     preferred_element_type: jnp.dtype = jnp.float32,
-    tiling: tuple[int, int, int] = (128, 128, 128),
+    tiling: tuple[int, int, int, int, int, int, int, int, int] = (128, 128, 128, 128, 128, 128, 128, 128, 128),
     group_offset: jnp.ndarray | None = None,
     existing_out: jnp.ndarray | None = None,
     transpose_rhs: bool = False,
     interpret: bool = False,
     quantization_rule: qwix.QtRule | None = None,
+    use_tokamax_backend: bool = False,
+    is_fsdp_shard_on_exp: bool = False,
 ) -> tuple[
     jnp.ndarray,
     tuple[
@@ -114,18 +122,39 @@ def _gmm_fwd(
           calibration_method=quantization_rule.weight_calibration_method,
           scale_dtype=jnp.float32,
       )
-
-  out = backend.gmm(
-      lhs,
-      rhs,
-      group_sizes,
-      preferred_element_type,
-      tiling,
-      group_offset,
-      existing_out,
-      transpose_rhs=transpose_rhs,
-      interpret=interpret,
-  )
+      # QAG is only supported for following conditions
+  if use_tokamax_backend:
+    if quantization_rule and quantization_rule.bwd_qtype:
+      if (
+          quantization_rule.weight_calibration_method.startswith("fixed")
+          and isinstance(rhs, qpl.QArray)
+          and is_fsdp_shard_on_exp
+      ):
+        rhs_qvalue = jax.lax.all_gather(rhs.qvalue, "fsdp", axis=0, tiled=True)
+        rhs = dataclasses.replace(rhs, qvalue=rhs_qvalue)
+    out = tokamax_backend.gmm(
+        lhs=lhs,
+        rhs=rhs,
+        group_sizes=group_sizes,
+        precision=jax.lax.Precision.DEFAULT,
+        out_dtype=preferred_element_type,
+        tiling=tiling[:3],
+        group_offset=group_offset,
+        transpose_rhs=transpose_rhs,
+        interpret=interpret,
+    )
+  else:
+    out = backend.gmm(
+        lhs,
+        rhs,
+        group_sizes,
+        preferred_element_type,
+        tiling[:3],
+        group_offset,
+        existing_out,
+        transpose_rhs=transpose_rhs,
+        interpret=interpret,
+    )
   return out, (lhs, rhs, group_sizes, group_offset)
 
 
@@ -133,10 +162,12 @@ def _gmm_bwd(
     lhs_dtype: jax.typing.DTypeLike,
     rhs_dtype: jax.typing.DTypeLike,
     preferred_element_type: jnp.dtype,
-    tiling: tuple[int, int, int],
+    tiling: tuple[int, int, int, int, int, int, int, int, int],
     transpose_rhs: bool,
     interpret: bool,
     quantization_rule: qwix.QtRule | None,
+    use_tokamax_backend: bool,
+    is_fsdp_shard_on_exp: bool,
     residual: tuple[
         jnp.ndarray | qpl.QArray,
         jnp.ndarray | qpl.QArray,
@@ -187,27 +218,52 @@ def _gmm_bwd(
         calibration_method=quantization_rule.bwd_calibration_method,
         scale_dtype=jnp.float32,
     )
-
-  dlhs = backend.gmm(
-      dlhs_dout,
-      rhs,
-      group_sizes,
-      lhs_dtype,
-      tiling,
-      group_offset,
-      transpose_rhs=not transpose_rhs,
-      interpret=interpret,
-  )
-  drhs = backend.tgmm(
-      lhs.swapaxes(0, 1),
-      drhs_dout,
-      group_sizes,
-      rhs_dtype,
-      tiling,
-      group_offset,
-      num_actual_groups,
-      interpret=interpret,
-  )
+  if use_tokamax_backend:
+    dlhs = tokamax_backend.gmm(
+        lhs=dlhs_dout,
+        rhs=rhs,
+        group_sizes=group_sizes,
+        precision=jax.lax.Precision.DEFAULT,
+        out_dtype=lhs_dtype,
+        tiling=tiling[3:6],
+        group_offset=group_offset,
+        transpose_rhs=not transpose_rhs,
+        interpret=interpret,
+    )
+    drhs = tokamax_backend.tgmm(
+        lhs=lhs.swapaxes(0, 1),
+        rhs=drhs_dout,
+        group_sizes=group_sizes,
+        precision=jax.lax.Precision.DEFAULT,
+        out_dtype=rhs_dtype,
+        tiling=tiling[-3:],
+        group_offset=group_offset,
+        num_actual_groups=num_actual_groups,
+        interpret=interpret,
+    )
+    if quantization_rule and quantization_rule.bwd_qtype and is_fsdp_shard_on_exp:
+      drhs = jax.lax.psum_scatter(drhs, "fsdp", scatter_dimension=0, tiled=True)
+  else:
+    dlhs = backend.gmm(
+        dlhs_dout,
+        rhs,
+        group_sizes,
+        lhs_dtype,
+        tiling[3:6],
+        group_offset,
+        transpose_rhs=not transpose_rhs,
+        interpret=interpret,
+    )
+    drhs = backend.tgmm(
+        lhs.swapaxes(0, 1),
+        drhs_dout,
+        group_sizes,
+        rhs_dtype,
+        tiling[-3:],
+        group_offset,
+        num_actual_groups,
+        interpret=interpret,
+    )
 
   # NOTE: If the rhs transposition is fused into the forward pass we need to
   # return the transpose of the rhs gradient that we calculated above.

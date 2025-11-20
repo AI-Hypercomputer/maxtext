@@ -18,7 +18,7 @@ required for generating a MaxText checkpoint compatible with scanned model layer
 
 Example cmd:
 
-python3 -m MaxText.convert_qwen3_moe_ckpt --base_model_path <path/to/hf/ckpt> \
+python3 -m MaxText.utils.ckpt_scripts.convert_qwen3_moe --base_model_path <path/to/hf/ckpt> \
     --maxtext_model_path gs://<gcs_bucket>/<path/to/save/ckpt> --model_size qwen3-235b-a22b
 """
 
@@ -32,8 +32,9 @@ import torch
 from safetensors import safe_open
 from tqdm import tqdm
 
-from MaxText import llama_or_mistral_ckpt, max_logging
+from MaxText import max_logging
 from MaxText.inference_utils import str2bool
+from MaxText.utils.ckpt_scripts import llama_or_mistral_ckpt
 
 # Static model parameters dictionary
 MODEL_PARAMS_DICT = {
@@ -45,7 +46,25 @@ MODEL_PARAMS_DICT = {
         "head_dim": 128,
         "num_experts": 128,
         "moe_intermediate_size": 1536,
-    }
+    },
+    "qwen3-30b-a3b": {
+        "num_hidden_layers": 48,
+        "num_attention_heads": 32,
+        "num_key_value_heads": 4,
+        "hidden_size": 2048,
+        "head_dim": 128,
+        "num_experts": 128,
+        "moe_intermediate_size": 768,
+    },
+    "qwen3-480b-a35b": {
+        "num_hidden_layers": 62,
+        "num_attention_heads": 96,
+        "num_key_value_heads": 8,
+        "hidden_size": 6144,
+        "head_dim": 128,
+        "num_experts": 160,
+        "moe_intermediate_size": 2560,
+    },
 }
 
 

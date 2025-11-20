@@ -384,8 +384,7 @@ def main(argv: Sequence[str]) -> None:
   if config.use_vertex_tensorboard or os.environ.get("UPLOAD_DATA_TO_TENSORBOARD"):
     vertex_tensorboard_manager.configure_vertex_tensorboard(config)
 
-  # Goodput configurations
-  maybe_monitor_goodput(config)
+  # Create the Goodput recorder
   recorder = create_goodput_recorder(config)
 
   # Stack traces configurations
@@ -399,7 +398,7 @@ def main(argv: Sequence[str]) -> None:
   diagnostic_config = diagnostic_configuration.DiagnosticConfig(debug_config)
 
   with diagnostic.diagnose(diagnostic_config):
-    with maybe_record_goodput(recorder, GoodputEvent.JOB):
+    with maybe_record_goodput(recorder, GoodputEvent.JOB), maybe_monitor_goodput(config):
       train_loop(config, elastic_manager, recorder)
 
 

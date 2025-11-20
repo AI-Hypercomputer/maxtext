@@ -21,22 +21,20 @@ import math
 from typing import Iterable, Optional, Tuple, Union
 
 from aqt.jax.v2 import aqt_tensor as aqt
-import flax.linen as nn
 from flax import nnx
+import flax.linen as nn
 import jax
 from jax import ad_checkpoint as adc
 from jax.experimental import xla_metadata
 import jax.numpy as jnp
-import numpy as np
-
 from MaxText import common_types as ctypes
 from MaxText import max_logging
 from MaxText import max_utils
 from MaxText.kernels import megablox as mblx
-from MaxText.layers import attentions, linears, quantizations, nnx_wrappers
-from MaxText.layers.initializers import NdInitializer, nd_dense_init, default_bias_init, variable_to_logically_partitioned
-
-from tokamax._src.ops.ragged_dot import api as tokamax_api
+from MaxText.layers import attentions, linears, nnx_wrappers, quantizations
+from MaxText.layers.initializers import NdInitializer, default_bias_init, nd_dense_init, variable_to_logically_partitioned
+import numpy as np
+import tokamax
 
 set_xla_metadata = xla_metadata.set_xla_metadata
 
@@ -116,9 +114,16 @@ def random_routing(rng_key, gate_logits, num_experts_per_tok):
                        representing the weights for the selected experts.
   """
   bs, seq_len, num_experts = gate_logits.shape
-  indices = jnp.arange(num_experts).repeat(bs * seq_len)
   selected_num = bs * seq_len * num_experts_per_tok
-  top_k_indices = jax.random.choice(rng_key, indices, shape=(selected_num,)).reshape(bs, seq_len, num_experts_per_tok)
+  # Directly generate random integers in the range [0, num_experts)
+  top_k_indices = jax.random.randint(
+      rng_key,
+      shape=(selected_num,),
+      minval=0,
+      maxval=num_experts,
+      dtype=jnp.int32,
+  )
+  top_k_indices = top_k_indices.reshape(bs, seq_len, num_experts_per_tok)
   top_k_weights = jnp.take_along_axis(gate_logits, top_k_indices, axis=-1)
   return top_k_weights, top_k_indices
 
@@ -388,16 +393,16 @@ class RoutedMoE(nnx.Module):
       self.wo_bias = None
 
   def get_expert_parallelism_size(self):
-    return self.mesh.shape["expert"]
+    return self.mesh.shape.get("expert", 1)
 
   def get_tensor_parallelism_size(self):
-    return self.mesh.shape["tensor"]
+    return self.mesh.shape.get("tensor", 1)
 
   def get_tensor_transpose_parallelism_size(self):
-    return self.mesh.shape["tensor_transpose"]
+    return self.mesh.shape.get("tensor_transpose", 1)
 
   def get_context_autoregressive_parallelism_size(self):
-    return self.mesh.shape["context_autoregressive"]
+    return self.mesh.shape.get("context_autoregressive", 1)
 
   def get_topk(self, gate_logits, pre_bias_logits, rngs=None):
     """get topk."""
@@ -787,7 +792,7 @@ class RoutedMoE(nnx.Module):
     """Perform sparse matrix multiplication of inputs and Experts."""
 
     def gmm(inputs, kernel, tiling, group_sizes, expert_assignments):
-      pad_length = self.config.tile_batch_seq
+      pad_length = self.config.wi_tile_fwd_batch_seq
       hs_shape = inputs.shape
       # pad length is the 1st dimension of tiling size in gmm call
       if inputs.shape[0] != expert_assignments.shape[0]:
@@ -806,20 +811,35 @@ class RoutedMoE(nnx.Module):
         lhs_quantize_dtype = quant_dg.fwd.dg_quantizer.lhs.numerics.get_dtype()
         rhs_quantize_dtype = quant_dg.fwd.dg_quantizer.rhs.numerics.get_dtype()
       m, k, n = inputs.shape[0], inputs.shape[1], kernel.shape[2]
-      tiling = (
-          min(tiling[0], m),
-          min(tiling[1], k),
-          min(tiling[2], n),
-      )
-      if self.config.use_tokamax_gmm:
-        output = tokamax_api.ragged_dot(
-            lhs=inputs,
-            rhs=kernel,
-            group_sizes=group_sizes,
-            precision=jax.lax.Precision.DEFAULT,
-            preferred_element_type=self.dtype,
-            implementation="mosaic",
+      if not self.config.megablox and not self.config.use_tokamax_gmm:
+        tiling = (
+            min(tiling[0], m),
+            min(tiling[1], k),
+            min(tiling[2], n),
         )
+      if self.config.use_tokamax_gmm:
+        if self.config.quantization:
+          output = mblx.gmm(
+              lhs=inputs,
+              rhs=kernel,
+              group_sizes=group_sizes,
+              preferred_element_type=self.dtype,
+              tiling=tiling,
+              lhs_quantize_dtype=lhs_quantize_dtype,
+              rhs_quantize_dtype=rhs_quantize_dtype,
+              use_qwix_quantization=self.config.use_qwix_quantization,
+              use_tokamax_backend=self.config.use_tokamax_gmm,
+              is_fsdp_shard_on_exp=self.config.fsdp_shard_on_exp,
+          )
+        else:
+          output = tokamax.ragged_dot(
+              lhs=inputs,
+              rhs=kernel,
+              group_sizes=group_sizes,
+              precision=jax.lax.Precision.DEFAULT,
+              preferred_element_type=self.dtype,
+              implementation="mosaic",
+          )
       else:
         if self.config.megablox:
           output = mblx.gmm(
@@ -831,6 +851,8 @@ class RoutedMoE(nnx.Module):
               lhs_quantize_dtype=lhs_quantize_dtype,
               rhs_quantize_dtype=rhs_quantize_dtype,
               use_qwix_quantization=self.config.use_qwix_quantization,
+              use_tokamax_backend=self.config.use_tokamax_gmm,
+              is_fsdp_shard_on_exp=self.config.fsdp_shard_on_exp,
           )
         else:
           rhs_inputs = kernel
@@ -906,10 +928,16 @@ class RoutedMoE(nnx.Module):
     # w0, w1, wo needs to be un sharded on fsdp / fsdp_transpose axis, so use
     # mlp_no_fsdp axis
     if self.config.fsdp_shard_on_exp:
-      # special sharding for dsv3 to remove overhead between gmm/AG
-      w0_pspec = nn.logical_to_mesh_axes(("embed_tensor_transpose", None, "mlp_no_fsdp"))
-      w1_pspec = nn.logical_to_mesh_axes(("embed_tensor_transpose", None, "mlp_no_fsdp"))
-      wo_pspec = nn.logical_to_mesh_axes(("embed_tensor_transpose", "mlp_no_fsdp", None))
+      if self.config.quantization:
+        # special sharding when quantization is enabled with fsdp_shard_on_exp
+        w0_pspec = nn.logical_to_mesh_axes(self.wi_kernel_axes)
+        w1_pspec = nn.logical_to_mesh_axes(self.wi_kernel_axes)
+        wo_pspec = nn.logical_to_mesh_axes(self.wo_kernel_axes)
+      else:
+        # special sharding for dsv3 to remove overhead between gmm/AG
+        w0_pspec = nn.logical_to_mesh_axes(("embed_tensor_transpose", None, "mlp_no_fsdp"))
+        w1_pspec = nn.logical_to_mesh_axes(("embed_tensor_transpose", None, "mlp_no_fsdp"))
+        wo_pspec = nn.logical_to_mesh_axes(("embed_tensor_transpose", "mlp_no_fsdp", None))
     else:
       w0_pspec = nn.logical_to_mesh_axes(("exp", "embed_tensor_transpose", "mlp_no_fsdp"))
       w1_pspec = nn.logical_to_mesh_axes(("exp", "embed_tensor_transpose", "mlp_no_fsdp"))
@@ -942,7 +970,11 @@ class RoutedMoE(nnx.Module):
     def wrapper(x, logits, pre_bias_logits, w0, w1, wo, w0_bias, w1_bias, wo_bias, rngs):
       batch_size, sequence_length, _ = x.shape
       expert_axis_name = "expert"
-      expert_shard_id = jax.lax.axis_index(expert_axis_name)
+      num_expert_parallelism = self.get_expert_parallelism_size()
+      if num_expert_parallelism > 1:
+        expert_shard_id = jax.lax.axis_index(expert_axis_name)
+      else:
+        expert_shard_id = 0
       num_expert_parallelism = self.get_expert_parallelism_size()
       if self.config.use_ring_of_experts:
         # The ring-of-experts strategy first duplicates the inputs to all
@@ -1041,14 +1073,26 @@ class RoutedMoE(nnx.Module):
           expert_assignments=selected_experts,
       )
       wi_tile_size = (
-          self.config.tile_batch_seq,
-          self.config.tile_embed_dim,
-          self.config.tile_mlp_dim,
+          self.config.wi_tile_fwd_batch_seq,
+          self.config.wi_tile_fwd_embed_dim,
+          self.config.wi_tile_fwd_mlp_dim,
+          self.config.wi_tile_dlhs_batch_seq,
+          self.config.wi_tile_dlhs_embed_dim,
+          self.config.wi_tile_dlhs_mlp_dim,
+          self.config.wi_tile_drhs_batch_seq,
+          self.config.wi_tile_drhs_embed_dim,
+          self.config.wi_tile_drhs_mlp_dim,
       )
       wo_tile_size = (
-          self.config.tile_batch_seq,
-          self.config.tile_mlp_dim,
-          self.config.tile_embed_dim,
+          self.config.wo_tile_fwd_batch_seq,
+          self.config.wo_tile_fwd_embed_dim,
+          self.config.wo_tile_fwd_mlp_dim,
+          self.config.wo_tile_dlhs_batch_seq,
+          self.config.wo_tile_dlhs_embed_dim,
+          self.config.wo_tile_dlhs_mlp_dim,
+          self.config.wo_tile_drhs_batch_seq,
+          self.config.wo_tile_drhs_embed_dim,
+          self.config.wo_tile_drhs_mlp_dim,
       )
       layer_w0 = gmm_fn(x, w0, tiling=wi_tile_size)
       if self.get_tensor_transpose_parallelism_size() > 1:

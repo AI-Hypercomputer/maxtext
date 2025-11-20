@@ -83,7 +83,7 @@ import transformers
 
 from flax import nnx
 
-from MaxText import globals
+from MaxText.globals import MAXTEXT_REPO_ROOT
 from MaxText import max_logging
 from MaxText import max_utils
 from MaxText import pyconfig
@@ -122,10 +122,21 @@ MATCH_FORMAT = re.compile(
 )
 # Regex to extract the final numerical answer
 MATCH_ANSWER = re.compile(rf"{ANSWER_START}.*?([\d\.\,\$]{{1,}})", flags=re.MULTILINE | re.DOTALL)
-CHAT_TEMPLATE_PATH = f"{globals.MAXTEXT_REPO_ROOT}/src/MaxText/examples/chat_templates/math_qa.json"
+CHAT_TEMPLATE_PATH = os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "examples", "chat_templates", "math_qa.json")
 
 
 def get_test_dataset(config, tokenizer):
+  """Loads and prepares the test dataset from Hugging Face.
+
+  Args:
+    config: The pyconfig object containing run configurations, including
+      `hf_access_token`.
+    tokenizer: The tokenizer for processing the text data.
+
+  Returns:
+    A grain.MapDataset instance for the test split, with prompts and target
+    answers.
+  """
   template_config = instruction_data_processing.load_template_from_file(CHAT_TEMPLATE_PATH)
   dataset = datasets.load_dataset(
       DATASET_NAME,
@@ -159,7 +170,17 @@ def get_test_dataset(config, tokenizer):
 
 
 def evaluate_model(dataset, vllm_rollout, debug=True):
-  """Runs evaluation on the model using vLLM."""
+  """Runs evaluation on the model using vLLM.
+
+  Args:
+    dataset: The dataset to evaluate on.
+    vllm_rollout: The vLLM rollout object for generating responses.
+    debug: If True, prints debug information for each sample.
+
+  Returns:
+    A dictionary containing evaluation scores: 'correct', 'partially_correct',
+    and 'correct_format' percentages.
+  """
   rollout_config = base_rollout.RolloutConfig(
       max_tokens_to_generate=MAX_TOKENS_TO_GENERATE,
       max_prompt_length=MAX_PROMPT_LENGTH,
@@ -201,12 +222,35 @@ def evaluate_model(dataset, vllm_rollout, debug=True):
 
 
 def safe_string_to_float(text):
+  """Cleans a string to make it safely convertible to a float.
+
+  Removes commas, spaces, and dollar signs.
+
+  Args:
+    text: The input string.
+
+  Returns:
+    The cleaned string.
+  """
   text = text.replace(",", "").replace(" ", "")  # converts "2,125" to "2125"
   text = text.replace("$", "")  # converts "$50" to "50"
   return text
 
 
 def score_response(target, prediction, debug=True):
+  """Scores the model's prediction against the target answer.
+
+  It checks for exact correctness, partial correctness (within 10%), and
+  whether the response follows the expected format.
+
+  Args:
+    target: The ground truth answer string.
+    prediction: The model's generated response string.
+    debug: If True, prints exceptions during scoring.
+
+  Returns:
+    A tuple of booleans: (is_correct, is_partially_correct, has_correct_format).
+  """
   is_correct, is_partially_correct, has_correct_format = False, False, False
   extracted_response = guess.group(1) if (guess := MATCH_ANSWER.search(prediction)) is not None else ""
   extracted_response = safe_string_to_float(extracted_response)
@@ -231,6 +275,17 @@ def score_response(target, prediction, debug=True):
 
 
 def create_vllm_rollout(config, model, mesh, tokenizer):
+  """Creates a vLLM rollout engine for text generation.
+
+  Args:
+    config: The pyconfig object containing run configurations.
+    model: The NNX model graph.
+    mesh: The JAX device mesh.
+    tokenizer: The tokenizer.
+
+  Returns:
+    A VllmRollout instance configured for the model and hardware.
+  """
   tunix_model = TunixMaxTextAdapter(model)
   return VllmRollout(
       model=tunix_model,
@@ -245,6 +300,14 @@ def create_vllm_rollout(config, model, mesh, tokenizer):
 
 
 def get_tokenizer(config):
+  """Initializes and returns the tokenizer.
+
+  Args:
+    config: The pyconfig object with `tokenizer_path` and `hf_access_token`.
+
+  Returns:
+    A Hugging Face tokenizer instance.
+  """
   tokenizer = transformers.AutoTokenizer.from_pretrained(
       config.tokenizer_path,
       token=config.hf_access_token,
@@ -253,6 +316,11 @@ def get_tokenizer(config):
 
 
 def train_and_evaluate(config):
+  """Orchestrates the pre-train evaluation, SFT, and post-train evaluation.
+
+  Args:
+    config: The pyconfig object containing all run configurations.
+  """
   tokenizer = get_tokenizer(config)
   test_dataset = get_test_dataset(config, tokenizer)
   test_dataset = test_dataset[:NUM_TEST_SAMPLES]
@@ -261,16 +329,16 @@ def train_and_evaluate(config):
   vllm_rollout = create_vllm_rollout(config, trainer.model, mesh, tokenizer)
 
   # 1. Pre-SFT Evaluation
-  max_logging.log(f"Running Pre-SFT evaluation...")
+  max_logging.log("Running Pre-SFT evaluation...")
   score = evaluate_model(test_dataset, vllm_rollout)
   print("Score for PRE-SFT EVALUATION: ", score)
 
   # 2. SFT Training
-  max_logging.log(f"Starting SFT training...")
+  max_logging.log("Starting SFT training...")
   trainer = sft_trainer.train_model(config, trainer, mesh)
 
   # 3. Post-SFT Evaluation
-  max_logging.log(f"Running Post-SFT evaluation...")
+  max_logging.log("Running Post-SFT evaluation...")
   tunix_model = TunixMaxTextAdapter(trainer.model)
   state = nnx.state(tunix_model)
   vllm_rollout.update_params(state)

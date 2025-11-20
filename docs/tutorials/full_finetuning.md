@@ -43,7 +43,7 @@ The conversion scripts for LLama work with Meta’s original checkpoints and not
 E.g.
 
 ```bash
-python3 -m MaxText.llama_or_mistral_ckpt --base-model-path <path/to/meta/ckpt> \
+python3 -m MaxText.utils.ckpt_scripts.llama_or_mistral_ckpt --base-model-path <path/to/meta/ckpt> \
     --maxtext-model-path <GCS/path/to/save/new/maxtext/ckpt> --model-size llama2-7b
 ```
 
