@@ -53,10 +53,21 @@ class VisionEncoder(nn.Module):
     mesh = self.mesh
     # vision encoder output, frozen params in many cases
     embeddings = self.vision_encoder_layer[0](config=cfg, mesh=mesh)(input_images, deterministic=deterministic)
+    deep_feats = None
+    if cfg.deepstack_visual_indexes_for_vit:
+      deep_feats = embeddings[1]
+      embeddings = embeddings[0]
+
     if cfg.freeze_vision_encoder_params:
       embeddings = jax.lax.stop_gradient(embeddings)
+      if deep_feats is not None:
+        deep_feats = [jax.lax.stop_gradient(feat) for feat in deep_feats]
 
     if len(self.vision_encoder_layer) > 1:
       # vision embedder / projection layer, not frozen in most cases, trained / finetuned together with main model
       embeddings = self.vision_encoder_layer[1](config=cfg, mesh=mesh)(embeddings)
-    return embeddings
+
+    if cfg.deepstack_visual_indexes_for_vit:
+      return embeddings, deep_feats
+    else:
+      return embeddings

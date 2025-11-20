@@ -669,6 +669,30 @@ class Decoder(nn.Module):
 
     return logits
 
+  def _deepstack_process(self, hidden_states, bidirectional_mask, visual_embeds):
+    """Process deepstack visual embeddings by adding them to hidden states at visual token positions.
+
+    Args:
+      hidden_states: [batch, seq_len, hidden_dim] decoder hidden states
+      bidirectional_mask: [batch, bidirectional_mask] boolean mask
+      visual_embeds: [batch, num_visual_tokens, hidden_dim] visual features from encoder layer
+
+    Returns:
+      Updated hidden_states with visual features added at visual positions
+    """
+    # Expand mask to [batch, seq_len, 1] for broadcasting
+    mask_expanded = bidirectional_mask[:, :, jnp.newaxis]
+    # Use cumsum to map each True position in mask to its index in visual_embeds
+    visual_token_idx = jnp.cumsum(bidirectional_mask, axis=1) - 1  # [batch, seq_len], 0-indexed
+
+    # Gather visual tokens: for each position, get the corresponding visual token
+    batch_idx = jnp.arange(hidden_states.shape[0])[:, jnp.newaxis]  # [batch, 1]
+    visual_embeds_scattered = visual_embeds[batch_idx, visual_token_idx, :]  # [batch, seq_len, hidden]
+
+    # Only add where mask is True: hidden_states += visual_embeds * mask
+    hidden_states = hidden_states + visual_embeds_scattered * mask_expanded
+    return hidden_states
+
   @nn.compact
   def __call__(
       self,
@@ -684,6 +708,9 @@ class Decoder(nn.Module):
       bidirectional_mask: None | Any = None,
       image_embeddings: None | jnp.ndarray = None,
       image_masks: None | jnp.ndarray = None,
+      kv_caches: list[jax.Array] | None = None,
+      attention_metadata=None,
+      deepstack_visual_embeds: None | list[jnp.ndarray] = None,
   ):
     cfg = self.config
     mesh = self.mesh
@@ -814,6 +841,14 @@ class Decoder(nn.Module):
                 "nope_layer_interval": self.config.nope_layer_interval,
                 "interleave_moe_layer_step": self.config.interleave_moe_layer_step,
             }
+          # Deepstack visual embedding injection is not supported with scan_layers=True
+          # Use scan_layers=False to enable deepstack
+          if deepstack_visual_embeds is not None and image_masks is not None:
+            raise NotImplementedError(
+                "Deepstack visual embedding injection requires scan_layers=False. "
+                "Set scan_layers=False in your config to use deepstack features."
+            )
+
           y, _ = self.scan_decoder_layers(
               cfg,
               RemattedBlockLayer,
@@ -881,6 +916,12 @@ class Decoder(nn.Module):
                 slot=slot,
                 **layer_call_kwargs,
             )
+
+            if deepstack_visual_embeds is not None and lyr < len(deepstack_visual_embeds):
+              visual_embeds = deepstack_visual_embeds[lyr]
+              # Use image_masks to identify visual token positions
+              if bidirectional_mask is not None and visual_embeds is not None:
+                y = self._deepstack_process(y, bidirectional_mask, visual_embeds)
 
     assert isinstance(y, jax.Array)
 
