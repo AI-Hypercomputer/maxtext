@@ -1947,6 +1947,15 @@ class MaxTextConfig(
       self.use_grpo = True
     else:
       self.use_grpo = False
+    if self.opt_type == "muon" and self.decoder_block not in [
+        DecoderBlockType.DEEPSEEK,
+        DecoderBlockType.QWEN3,
+        DecoderBlockType.GEMMA3,
+        DecoderBlockType.LLAMA2,
+    ]:
+      raise ValueError(
+          f"Muon dimension number haven't been tested for this model. Run this command first: `python3 -m MaxText.muon_utils {self.model_name} True`"
+      )
 
     # I. FINAL TYPE CONVERSIONS AND DERIVED LISTS
     # Create the ici_parallelism and dcn_parallelism lists for legacy compatibility.
