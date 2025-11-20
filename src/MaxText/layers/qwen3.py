@@ -910,6 +910,8 @@ class AttentionWithNorm(nnx.Module):
         use_qk_norm=config.use_qk_norm,
         query_pre_attn_scalar=query_pre_attn_scalar,
         model_mode=model_mode,
+        use_mrope=config.use_mrope,
+        mrope_section=config.mrope_section,
         rngs=rngs,
     )
 

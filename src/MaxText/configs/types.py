@@ -1203,6 +1203,9 @@ class MultimodalGeneral(BaseModel):
       -1,
       description="Maximum number of images per example for training with image lists. -1 means no limit.",
   )
+  use_mrope: bool = Field(False, description="Enable Multi-dimensional RoPE for Qwen3-Omni models.")
+  mrope_section: list[int] = Field([24, 20, 20], description="Dimensions for temporal, height, width in MRoPE.")
+  position_id_per_seconds: int = Field(25, description="Temporal granularity for MRoPE (tokens per second).")
 
 
 class VisionTower(BaseModel):
